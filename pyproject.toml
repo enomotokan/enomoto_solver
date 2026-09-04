@@ -1,0 +1,18 @@
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "enomoto-solver"
+version = "0.1.0"
+description = "Python problem-input interface with a Rust core (CSR storage, preprocessing, optimization algorithms)"
+requires-python = ">=3.9"
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+]
+
+[tool.maturin]
+module-name = "enomoto_solver._core"
+python-source = "python"
+features = ["pyo3/extension-module"]

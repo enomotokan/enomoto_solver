@@ -1,0 +1,14 @@
+[package]
+name = "enomoto_core"
+version = "0.1.0"
+edition = "2021"
+description = "ENOMOTO-Solver internal engine: CSR storage, preprocessing, optimization algorithms"
+
+[lib]
+name = "_core"
+crate-type = ["cdylib"]
+
+[dependencies]
+faer = { version = "0.20.2", default-features = false, features = ["std", "linalg", "cholesky"] }
+pyo3 = { version = "0.22", features = ["extension-module"] }
+rayon = "1.10"
