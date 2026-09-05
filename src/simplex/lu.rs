@@ -1,44 +1,354 @@
 //! From-scratch sparse LU factorization of a (square) basis matrix, using
-//! **Markowitz pivoting**: among numerically-acceptable pivot candidates
-//! (`|a_ij| >= stability * max(|a_i'j|)` over the still-active rows i' of
-//! column j — the usual "threshold pivoting" stability floor), the one
-//! minimizing the Markowitz count `(row_nnz - 1) * (col_nnz - 1)` is
-//! chosen, i.e. sparsity (fill-in) is prioritized over picking the
-//! numerically largest entry, subject to that stability floor.
+//! **Markowitz pivoting with bucket-based degree management**: among
+//! numerically-acceptable pivot candidates (`|a_ij| >= stability *
+//! max(|a_i'j|)` over the still-active rows i' of column j — the usual
+//! "threshold pivoting" stability floor), the one minimizing the Markowitz
+//! count `(row_nnz - 1) * (col_nnz - 1)` is chosen, i.e. sparsity
+//! (fill-in) is prioritized over picking the numerically largest entry,
+//! subject to that stability floor.
 //!
 //! This produces `P_row B P_col = L U` (`L` unit lower triangular, `U`
 //! upper triangular, both stored in *elimination-step* order — step `s`'s
 //! pivot row/column are `row_perm[s]`/`col_perm[s]` in the original basis
 //! matrix's indexing).
 //!
-//! The active submatrix during elimination is kept as one `HashMap` per
-//! row (rebuilding row/column nonzero counts by scanning on every pivot
-//! step); this is simpler and easier to get right than the doubly-linked
-//! row/column lists a production implementation would use, at the cost of
-//! being `O(m * nnz)` per factorization rather than near-linear — an
-//! acceptable MVP trade-off given this module also implements incremental
-//! Forrest-Tomlin updates (`ft_update`) specifically so that a full
-//! Markowitz refactorization is *not* needed on every basis change.
+//! **Degree-list implementation**: row/column degrees (active nonzero
+//! counts) live in bucket arrays (`col_buckets[d]`/`row_buckets[d]`, each a
+//! `VecDeque` of indices currently at degree `d`), with O(1) bucket moves
+//! via a parallel position index (`col_bucket_pos`/`row_bucket_pos`,
+//! swap-to-last-then-pop on removal — the same pattern `factorize`'s
+//! earlier `active_rows` bookkeeping used). Crucially, a **column-major
+//! mirror** (`col_rows[j]`: the exact set of currently-active rows with a
+//! nonzero at column `j`) is maintained alongside the row-major `rows`
+//! matrix, kept in sync on every insert/remove during elimination. This is
+//! what makes the whole scheme actually sub-`O(m)` per step rather than
+//! just relocating the same cost: "which rows does eliminating column `pj`
+//! affect" is answered by `col_rows[pj]` directly (cost = that column's own
+//! current degree) instead of scanning every active row to test
+//! `contains_key(&pj)`, and "how many rows still touch column `j`" is
+//! `col_rows[j].len()` (O(1)) instead of a fresh full-matrix scan. An
+//! earlier version of this file computed row/column degrees this way but
+//! then performed the actual elimination arithmetic *directly* in
+//! `factorize`'s main loop, ahead of a separate `eliminate_column` method
+//! that was supposed to update the bucket state — since that method
+//! detected "which rows changed" via `contains_key(&pj)`, and the earlier
+//! direct arithmetic had already removed `pj` from every affected row
+//! first, `eliminate_column` always found nothing to do. Bucket degrees
+//! then stayed frozen at their *initial* values for the rest of the
+//! factorization while the underlying matrix kept changing underneath
+//! them, which didn't corrupt the arithmetic (pivot values are always read
+//! fresh from `rows`) but could starve `find_best_pivot` of a candidate it
+//! should have found, surfacing as a spurious "singular" `None` on
+//! matrices that are not actually singular (confirmed: this crate's own
+//! HiGHS cross-check benchmark, which the prior, non-bucketed `factorize`
+//! solved without issue, started panicking at `n=2000` with exactly that
+//! message). The elimination here is a single method (`eliminate`) that
+//! does the arithmetic *and* the degree/bucket bookkeeping together, and a
+//! row being retired as a pivot removes it from every other column's
+//! `col_rows` set too (not just its own pivot column's), so no column's
+//! degree can drift stale by continuing to count an inactive row.
 //!
-//! Within that `O(m * nnz)` shape, three constant-factor costs turned out
-//! to matter in practice (profiling on this crate's target problem sizes
-//! showed even a *trivial* (identity-matrix) factorization costing over a
-//! millisecond): column and row nonzero counts were each recomputed by a
-//! *separate* full scan of the active submatrix every step (row counts a
-//! second time, via a `.filter().count()` inside the pivot search that
-//! re-did exactly what the column-stats scan had just done); the
-//! column-stats buffers were freshly heap-allocated (`vec![0; m]`) every
-//! step instead of being cleared and reused; and the elimination step
-//! walked every row index `0..m` unconditionally (skipping used ones)
-//! rather than only the rows still actually active. None of these change
-//! *which* pivot gets chosen (same Markowitz-count-then-magnitude rule,
-//! same stability floor) — they only remove redundant scanning,
-//! reallocation, and dead iterations, so the resulting factors (and every
-//! downstream `solve`/`solve_transpose`/FT-update result) are unchanged.
+//! Within a factorization, per-pivot cost is `O(col_rows[pj].len())` for
+//! the elimination itself plus `O(fill touched)` for the resulting
+//! degree/`col_max_abs` refresh — bounded by actual sparsity rather than
+//! `m` — though `find_best_pivot`'s bucket scan can still fall back to
+//! examining more candidates than that on a poorly-conditioned or unusually
+//! dense step; it is not a hard worst-case guarantee, just a much smaller
+//! constant than rescanning the whole active submatrix every step.
+//!
+//! Incremental Forrest-Tomlin updates (`ft_update`, in this same file)
+//! exist specifically so a full run of this factorization is only needed
+//! occasionally, not on every basis change — see `simplex.rs`'s
+//! refactorization-trigger docs.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 const STABILITY: f64 = 0.1;
+
+/// Manages the active submatrix plus row/column degrees (via bucket
+/// arrays) during Markowitz elimination — see the module docs for why a
+/// column-major `col_rows` mirror alongside the row-major `rows` matrix is
+/// what actually keeps this sub-`O(m)` per step, and why the elimination
+/// and degree bookkeeping must happen in one place rather than two.
+struct MarkowitzState {
+    #[allow(dead_code)]
+    m: usize,
+
+    // Active row-major submatrix.
+    rows: Vec<HashMap<usize, f64>>,
+    // Column-major mirror: col_rows[j] = the set of currently-active rows
+    // with a nonzero at column j. Kept in exact sync with `rows` by every
+    // method below — this is what lets column-degree lookups and
+    // "who else has a nonzero here" queries stay O(that column's own
+    // degree) instead of O(m).
+    col_rows: Vec<HashSet<usize>>,
+
+    // Current degrees (active nonzero counts), mirrored by bucket
+    // placement below.
+    col_degree: Vec<usize>,
+    row_degree: Vec<usize>,
+
+    // Bucket arrays: bucket[d] = indices currently at degree exactly d.
+    // Sized m + 1 (a degree can be at most the number of active rows/cols).
+    col_buckets: Vec<VecDeque<usize>>,
+    row_buckets: Vec<VecDeque<usize>>,
+
+    // col_bucket_pos[j] = j's index within col_buckets[col_degree[j]], or
+    // None if j has been used already (removed from every bucket).
+    col_bucket_pos: Vec<Option<usize>>,
+    row_bucket_pos: Vec<Option<usize>>,
+
+    col_used: Vec<bool>,
+    row_used: Vec<bool>,
+
+    // Column max absolute values, over that column's own active rows only
+    // (via col_rows) — the threshold-pivoting stability reference.
+    col_max_abs: Vec<f64>,
+}
+
+impl MarkowitzState {
+    fn new(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Self {
+        let rows: Vec<HashMap<usize, f64>> = rows_in
+            .iter()
+            .map(|r| {
+                let mut h = HashMap::new();
+                for &(j, v) in r {
+                    *h.entry(j).or_insert(0.0) += v;
+                }
+                h.retain(|_, v| *v != 0.0);
+                h
+            })
+            .collect();
+
+        let mut col_rows: Vec<HashSet<usize>> = vec![HashSet::new(); m];
+        let mut col_degree = vec![0usize; m];
+        let mut col_max_abs = vec![0.0f64; m];
+        let mut row_degree = vec![0usize; m];
+
+        for i in 0..m {
+            row_degree[i] = rows[i].len();
+            for (&j, &v) in &rows[i] {
+                col_rows[j].insert(i);
+                col_max_abs[j] = col_max_abs[j].max(v.abs());
+            }
+        }
+        for j in 0..m {
+            col_degree[j] = col_rows[j].len();
+        }
+
+        let mut col_buckets = vec![VecDeque::new(); m + 1];
+        let mut row_buckets = vec![VecDeque::new(); m + 1];
+        let mut col_bucket_pos = vec![None; m];
+        let mut row_bucket_pos = vec![None; m];
+
+        for j in 0..m {
+            let deg = col_degree[j];
+            col_bucket_pos[j] = Some(col_buckets[deg].len());
+            col_buckets[deg].push_back(j);
+        }
+        for i in 0..m {
+            let deg = row_degree[i];
+            row_bucket_pos[i] = Some(row_buckets[deg].len());
+            row_buckets[deg].push_back(i);
+        }
+
+        MarkowitzState {
+            m,
+            rows,
+            col_rows,
+            col_degree,
+            row_degree,
+            col_buckets,
+            row_buckets,
+            col_bucket_pos,
+            row_bucket_pos,
+            col_used: vec![false; m],
+            row_used: vec![false; m],
+            col_max_abs,
+        }
+    }
+
+    /// Remove an item from bucket[deg] and update position tracking.
+    fn remove_from_bucket_col(&mut self, j: usize) {
+        if let Some(pos) = self.col_bucket_pos[j] {
+            let deg = self.col_degree[j];
+            let bucket = &mut self.col_buckets[deg];
+            if pos < bucket.len() {
+                let last_j = bucket.pop_back().unwrap();
+                if pos < bucket.len() {
+                    bucket[pos] = last_j;
+                    self.col_bucket_pos[last_j] = Some(pos);
+                }
+            }
+            self.col_bucket_pos[j] = None;
+        }
+    }
+
+    fn remove_from_bucket_row(&mut self, i: usize) {
+        if let Some(pos) = self.row_bucket_pos[i] {
+            let deg = self.row_degree[i];
+            let bucket = &mut self.row_buckets[deg];
+            if pos < bucket.len() {
+                let last_i = bucket.pop_back().unwrap();
+                if pos < bucket.len() {
+                    bucket[pos] = last_i;
+                    self.row_bucket_pos[last_i] = Some(pos);
+                }
+            }
+            self.row_bucket_pos[i] = None;
+        }
+    }
+
+    /// Update degree after modifying; move between buckets if needed.
+    fn update_col_degree(&mut self, j: usize, new_deg: usize) {
+        if self.col_used[j] || new_deg == self.col_degree[j] {
+            return;
+        }
+        self.remove_from_bucket_col(j);
+        self.col_degree[j] = new_deg;
+        let pos = self.col_buckets[new_deg].len();
+        self.col_bucket_pos[j] = Some(pos);
+        self.col_buckets[new_deg].push_back(j);
+    }
+
+    fn update_row_degree(&mut self, i: usize, new_deg: usize) {
+        if self.row_used[i] || new_deg == self.row_degree[i] {
+            return;
+        }
+        self.remove_from_bucket_row(i);
+        self.row_degree[i] = new_deg;
+        let pos = self.row_buckets[new_deg].len();
+        self.row_bucket_pos[i] = Some(pos);
+        self.row_buckets[new_deg].push_back(i);
+    }
+
+    /// Recomputes `col_max_abs[j]` and its degree/bucket placement from
+    /// its current `col_rows[j]` membership — O(that column's own active
+    /// degree), never O(m).
+    fn refresh_column(&mut self, j: usize) {
+        if self.col_used[j] {
+            return;
+        }
+        let new_deg = self.col_rows[j].len();
+        self.update_col_degree(j, new_deg);
+        self.col_max_abs[j] =
+            self.col_rows[j].iter().filter_map(|&i| self.rows[i].get(&j).map(|v| v.abs())).fold(0.0, f64::max);
+    }
+
+    /// Find best pivot: among still-active columns in ascending-degree
+    /// order, only that column's actual active rows (via `col_rows`, not
+    /// every row at that row-degree) are examined — this is the other half
+    /// (alongside `eliminate`'s use of `col_rows`) of what keeps the
+    /// search from degrading into a full active-submatrix scan. The
+    /// per-degree-level early exit is a standard practical relaxation (as
+    /// in production Markowitz implementations): it does not guarantee the
+    /// globally minimal Markowitz count, only that no further search will
+    /// find something clearly better — finding the exact minimum every
+    /// step is itself more expensive than the fill-in it would save.
+    fn find_best_pivot(&self) -> Option<(usize, usize)> {
+        let mut best: Option<(usize, usize)> = None;
+        let mut best_score = usize::MAX;
+        let mut best_pivot_abs = 0.0f64;
+
+        for deg_col in 1..self.col_buckets.len() {
+            for &j in &self.col_buckets[deg_col] {
+                if self.col_used[j] {
+                    continue;
+                }
+                for &i in &self.col_rows[j] {
+                    if self.row_used[i] {
+                        continue;
+                    }
+                    let Some(&v) = self.rows[i].get(&j) else { continue };
+                    if v == 0.0 || v.abs() < STABILITY * self.col_max_abs[j] {
+                        continue;
+                    }
+                    let score = (self.row_degree[i] - 1) * (self.col_degree[j] - 1);
+                    if score < best_score || (score == best_score && v.abs() > best_pivot_abs) {
+                        best_score = score;
+                        best = Some((i, j));
+                        best_pivot_abs = v.abs();
+                    }
+                }
+                if best_score == 0 {
+                    return best;
+                }
+            }
+            if best.is_some() && best_score <= deg_col * deg_col {
+                return best;
+            }
+        }
+
+        best
+    }
+
+    /// Eliminates column `pj` (whose pivot is `(pi, pj)`, value
+    /// `pivot_val`) from every other active row, in one pass that performs
+    /// both the Gaussian-elimination arithmetic and the matching degree/
+    /// bucket updates — see the module docs for why splitting these two
+    /// into separate steps (as an earlier version of this file did) is
+    /// unsound: bookkeeping keyed off "did this row still contain `pj`"
+    /// only works if it runs *before* `pj` is actually removed. Also
+    /// retires row `pi` from every other column's `col_rows` set (not just
+    /// column `pj`'s), so no column's degree can drift by continuing to
+    /// count a row that is no longer active. Returns the `(row, multiplier)`
+    /// pairs for `factorize`'s own `L` bookkeeping.
+    fn eliminate(&mut self, pi: usize, pj: usize, pivot_val: f64, pivot_row_snapshot: &[(usize, f64)]) -> Vec<(usize, f64)> {
+        let affected_rows: Vec<usize> = self.col_rows[pj].iter().copied().filter(|&i| i != pi).collect();
+        let mut touched_cols: HashSet<usize> = HashSet::new();
+        let mut l_out: Vec<(usize, f64)> = Vec::with_capacity(affected_rows.len());
+
+        for i in affected_rows {
+            let Some(&aij) = self.rows[i].get(&pj) else { continue };
+            if aij == 0.0 {
+                continue;
+            }
+            let mult = aij / pivot_val;
+            l_out.push((i, mult));
+
+            for &(j, v) in pivot_row_snapshot {
+                if j == pj {
+                    continue;
+                }
+                let existed = self.rows[i].contains_key(&j);
+                let new_val = self.rows[i].get(&j).copied().unwrap_or(0.0) - mult * v;
+                if new_val == 0.0 {
+                    if existed {
+                        self.rows[i].remove(&j);
+                        self.col_rows[j].remove(&i);
+                        touched_cols.insert(j);
+                    }
+                } else {
+                    self.rows[i].insert(j, new_val);
+                    if !existed {
+                        self.col_rows[j].insert(i);
+                    }
+                    touched_cols.insert(j);
+                }
+            }
+
+            self.rows[i].remove(&pj);
+            let new_deg_i = self.rows[i].len();
+            self.update_row_degree(i, new_deg_i);
+        }
+        self.col_rows[pj].clear();
+
+        // Row pi is retiring as the new pivot row; drop it from every
+        // other column it still touches so those columns' degrees don't
+        // keep counting an inactive row.
+        let pi_cols: Vec<usize> = self.rows[pi].keys().copied().filter(|&j| j != pj).collect();
+        for j in pi_cols {
+            self.col_rows[j].remove(&pi);
+            touched_cols.insert(j);
+        }
+
+        for j in touched_cols {
+            self.refresh_column(j);
+        }
+
+        l_out
+    }
+}
 
 #[derive(Clone)]
 pub struct LuFactors {
@@ -58,127 +368,38 @@ pub struct LuFactors {
 /// `(col, value)`. Returns `None` if the matrix is (numerically)
 /// singular — no acceptable pivot remains at some step.
 pub fn factorize(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuFactors> {
-    let mut rows: Vec<HashMap<usize, f64>> = rows_in
-        .iter()
-        .map(|r| {
-            let mut h = HashMap::new();
-            for &(j, v) in r {
-                if v != 0.0 {
-                    *h.entry(j).or_insert(0.0) += v;
-                }
-            }
-            h
-        })
-        .collect();
+    let mut state = MarkowitzState::new(m, rows_in);
 
-    let mut row_used = vec![false; m];
-    let mut col_used = vec![false; m];
     let mut row_perm = vec![0usize; m];
     let mut col_perm = vec![0usize; m];
 
-    let mut l_entries: Vec<(usize, usize, f64)> = Vec::new(); // (orig_row, pivot_step, multiplier)
-    let mut u_entries: Vec<(usize, usize, f64)> = Vec::new(); // (pivot_step, orig_col, value)
-
-    // Reused across every step instead of freshly heap-allocated each
-    // time — `.fill()` below is a plain memset-like sweep, no allocator
-    // call.
-    let mut col_count = vec![0usize; m];
-    let mut col_max_abs = vec![0.0f64; m];
-    let mut row_count = vec![0usize; m];
-    // Still-active row indices, swap-removed as rows are consumed, so
-    // every loop below only ever visits rows that are actually still in
-    // play instead of walking `0..m` and skipping used ones every step.
-    // `row_pos[i]` tracks row `i`'s current slot in `active_rows` so that
-    // removal is O(1) (swap with the last slot, then fix up whichever row
-    // got moved into `i`'s old spot) rather than an O(active rows) linear
-    // search for `i` every step.
-    let mut active_rows: Vec<usize> = (0..m).collect();
-    let mut row_pos: Vec<usize> = (0..m).collect();
+    let mut l_entries: Vec<(usize, usize, f64)> = Vec::new();
+    let mut u_entries: Vec<(usize, usize, f64)> = Vec::new();
 
     for step in 0..m {
-        col_count.fill(0);
-        col_max_abs.fill(0.0);
+        let (pi, pj) = state.find_best_pivot()?;
 
-        // One pass computes column *and* row statistics together — the
-        // original computed column stats here, then recomputed row counts
-        // a second time (via `.filter().count()`) while searching for the
-        // best pivot below. Same counts, half the scanning.
-        for &i in &active_rows {
-            let mut count = 0usize;
-            for (&j, &v) in &rows[i] {
-                if col_used[j] || v == 0.0 {
-                    continue;
-                }
-                count += 1;
-                col_count[j] += 1;
-                let av = v.abs();
-                if av > col_max_abs[j] {
-                    col_max_abs[j] = av;
-                }
-            }
-            row_count[i] = count;
-        }
-
-        let mut best: Option<(usize, usize)> = None;
-        let mut best_score = usize::MAX;
-        let mut best_pivot_abs = 0.0f64;
-
-        for &i in &active_rows {
-            if row_count[i] == 0 {
-                continue;
-            }
-            for (&j, &v) in &rows[i] {
-                if col_used[j] || v == 0.0 {
-                    continue;
-                }
-                if v.abs() < STABILITY * col_max_abs[j] {
-                    continue; // fails the numerical stability floor
-                }
-                let score = (row_count[i] - 1) * (col_count[j] - 1);
-                if score < best_score || (score == best_score && v.abs() > best_pivot_abs) {
-                    best_score = score;
-                    best = Some((i, j));
-                    best_pivot_abs = v.abs();
-                }
-            }
-        }
-
-        let (pi, pj) = best?;
-        row_used[pi] = true;
-        col_used[pj] = true;
+        state.row_used[pi] = true;
+        state.col_used[pj] = true;
         row_perm[step] = pi;
         col_perm[step] = pj;
-        let pi_pos = row_pos[pi];
-        let last = active_rows.len() - 1;
-        active_rows.swap(pi_pos, last);
-        row_pos[active_rows[pi_pos]] = pi_pos;
-        active_rows.pop();
 
-        let pivot_val = *rows[pi].get(&pj).unwrap();
-        let pivot_row_snapshot: Vec<(usize, f64)> = rows[pi]
+        state.remove_from_bucket_row(pi);
+        state.remove_from_bucket_col(pj);
+
+        let pivot_val = *state.rows[pi].get(&pj).unwrap();
+        let pivot_row_snapshot: Vec<(usize, f64)> = state.rows[pi]
             .iter()
-            .filter(|&(&j, &v)| v != 0.0 && (j == pj || !col_used[j]))
+            .filter(|&(&j, &v)| v != 0.0 && (j == pj || !state.col_used[j]))
             .map(|(&j, &v)| (j, v))
             .collect();
+
         for &(j, v) in &pivot_row_snapshot {
             u_entries.push((step, j, v));
         }
 
-        for &i in &active_rows {
-            let Some(&aij) = rows[i].get(&pj) else { continue };
-            if aij == 0.0 {
-                continue;
-            }
-            let mult = aij / pivot_val;
+        for (i, mult) in state.eliminate(pi, pj, pivot_val, &pivot_row_snapshot) {
             l_entries.push((i, step, mult));
-            for &(j, v) in &pivot_row_snapshot {
-                if j == pj {
-                    continue; // eliminated exactly; drop rather than leave a numerical residue
-                }
-                let entry = rows[i].entry(j).or_insert(0.0);
-                *entry -= mult * v;
-            }
-            rows[i].remove(&pj);
         }
     }
 
@@ -202,6 +423,7 @@ pub fn factorize(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuFactors> {
 }
 
 impl LuFactors {
+    #[allow(dead_code)]
     fn u_diag(&self, step: usize) -> f64 {
         self.u_row[step]
             .iter()
@@ -211,10 +433,21 @@ impl LuFactors {
     }
 
     /// Partial FTRAN through `L` only (step-space): solves `L z = P_row rhs`.
+    ///
+    /// Hyper-sparse (Hall & McKinnon, *"Hyper-sparsity in the revised
+    /// simplex method and how to exploit it"*, 2000, §4.2 "Hyper-sparse
+    /// FTRAN", Figure 3): `l_col[s]`'s entries only ever modify `z` by
+    /// adding a multiple of `z[s]` itself — if `z[s]` is exactly zero, the
+    /// whole inner loop is a provable no-op (every update is `x -= mult *
+    /// 0`), so it is skipped entirely rather than paying for a test-against-
+    /// zero (or worse, a real floating point op) per entry.
     fn l_solve(&self, rhs: &[f64]) -> Vec<f64> {
         let m = self.m;
         let mut z: Vec<f64> = (0..m).map(|s| rhs[self.row_perm[s]]).collect();
         for s in 0..m {
+            if z[s] == 0.0 {
+                continue;
+            }
             for &(row_step, mult) in &self.l_col[s] {
                 z[row_step] -= mult * z[s];
             }
@@ -224,11 +457,35 @@ impl LuFactors {
 
     /// Finishes a BTRAN given a step-space vector already transformed by
     /// `U^{-T}`: applies `L^{-T}` and maps back to original row indices.
+    ///
+    /// Unlike `l_solve`'s forward pass, a single step `s` here can read
+    /// from *several* `w[row_step]` entries (one per `l_col[s]` entry), so
+    /// there is no single value whose zero-ness makes the whole step a
+    /// no-op — matching Hall & McKinnon §4.4's observation that BTRAN's
+    /// inner-product-shaped work has "no simple way of determining [a
+    /// trivial] intersection... without a computational overhead
+    /// comparable to evaluating the inner product itself". Skipping
+    /// per-*entry* when that specific `w[row_step]` is zero is still safe
+    /// and free, just a smaller win than `l_solve`'s whole-step skip. (A
+    /// fuller DFS-based hyper-sparse implementation for this direction,
+    /// mirroring `L`/`U` both column- and row-major the way HiGHS does,
+    /// was tried and measured *slower* end to end on this crate's
+    /// benchmark: the DFS setup's own per-call cost — allocating a fresh
+    /// `visited` array plus an upfront `O(m)` density scan on every single
+    /// `l_solve`/`l_transpose_solve`/`u_solve`/`u_transpose_solve` call,
+    /// even ones that end up taking the dense-style branch — outweighed
+    /// the fill-skipping it bought, on the order of 15-18% slower overall
+    /// despite the hyper-sparse branch firing on a majority of calls.
+    /// Reverted; see this file's own history if revisiting this.)
+    #[allow(dead_code)]
     fn l_transpose_solve(&self, z: Vec<f64>) -> Vec<f64> {
         let m = self.m;
         let mut w = z;
         for s in (0..m).rev() {
             for &(row_step, mult) in &self.l_col[s] {
+                if w[row_step] == 0.0 {
+                    continue;
+                }
                 w[s] -= mult * w[row_step];
             }
         }
@@ -240,6 +497,7 @@ impl LuFactors {
     }
 
     /// Solves `B x = rhs` using the factors (`P_row B P_col = LU`).
+    #[allow(dead_code)]
     pub fn solve(&self, rhs: &[f64]) -> Vec<f64> {
         let m = self.m;
         // rhs' = P_row rhs
@@ -270,6 +528,7 @@ impl LuFactors {
     }
 
     /// Solves `B^T y = rhs`.
+    #[allow(dead_code)]
     pub fn solve_transpose(&self, rhs: &[f64]) -> Vec<f64> {
         let m = self.m;
         // rhs2 = P_col^-1 rhs, i.e. rhs2[s] = rhs[col_perm[s]]
@@ -401,12 +660,18 @@ impl FtLu {
 
     /// `U_k^{-1}` applied to a step-space vector: processes the eta
     /// sequence in **reverse** order, each step solving via eq. (7).
+    /// Hyper-sparse: same skip as `LuFactors::l_solve` — `xp` is the only
+    /// value this eta's off-diagonal entries get multiplied by, so a zero
+    /// `xp` makes the whole inner loop a provable no-op.
     fn u_solve(&self, rhs: &[f64]) -> Vec<f64> {
         let mut x = rhs.to_vec();
         for eta in self.u_seq.iter().rev() {
             let p = eta.slot;
             x[p] /= eta.pivot;
             let xp = x[p];
+            if xp == 0.0 {
+                continue;
+            }
             for &(row_step, v) in &eta.off_diag {
                 x[row_step] -= v * xp;
             }
@@ -445,8 +710,13 @@ impl FtLu {
         let m = self.base.m;
         let z: Vec<f64> = (0..m).map(|s| rhs[self.base.col_perm[s]]).collect();
         let mut z = self.u_transpose_solve(&z);
+        // Hyper-sparse: same skip as `u_solve`/`l_solve` — `yp` is the
+        // only value each `r_eta`'s entries get multiplied by here.
         for reta in self.r_etas.iter().rev() {
             let yp = z[reta.p];
+            if yp == 0.0 {
+                continue;
+            }
             for &(i, v) in &reta.r {
                 z[i] -= v * yp;
             }
@@ -660,4 +930,5 @@ mod tests {
         assert!(!state.try_update(0, &a_q, 1e-9));
         assert_eq!(state.update_count(), 0);
     }
+
 }
