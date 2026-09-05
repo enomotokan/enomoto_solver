@@ -8,11 +8,13 @@
 //! machinery (see `spkkt.rs`) — `A`/`G` stay as `SparseRowMat` (CSR) end to
 //! end, no dense conversion.
 //!
-//! Preprocessing: the problem is Ruiz-equilibrated once up front
-//! (`scaling.rs`) before the interior-point loop starts, and the KKT
-//! matrix's AMD ordering + symbolic factorization are computed once and
-//! reused across every iteration's KKT solve (`spkkt.rs`) — only the
-//! (much cheaper) numeric factorization is redone each iteration.
+//! Preprocessing: the problem is put through the shared presolve pipeline
+//! (`crate::presolve` — Ruiz equilibration, redundant-equality removal,
+//! inequality propagation, the same one `simplex.rs` now uses too) once up
+//! front, before the interior-point loop starts; the KKT matrix's AMD
+//! ordering + symbolic factorization are computed once and reused across
+//! every iteration's KKT solve (`kkt.rs`) — only the (much cheaper)
+//! numeric factorization is redone each iteration.
 //!
 //! **Allocation**: every buffer the Newton loop touches (residuals,
 //! directions, trial iterates, the KKT right-hand-side/solution) lives in
@@ -23,18 +25,19 @@
 //!
 //! **Inactive**: `solver::solve_lp` calls `simplex::solve_lp_dual`
 //! directly and never reaches this module — see `lib.rs`'s module docs.
-//! Kept, with its `qp`/`scaling`/`redundancy`/`propagate`/`kkt`
-//! submodules, in case this path is wanted again.
+//! Kept, with its `qp`/`kkt` submodules, in case this path is wanted again
+//! (its `scaling`/`redundancy`/`propagate` passes now live in
+//! `crate::presolve`, shared with `simplex.rs`).
 
-pub mod propagate;
 pub mod qp;
-pub mod redundancy;
-pub mod scaling;
 pub mod kkt;
+
+use rayon::prelude::*;
 
 use self::kkt::{mat_t_vec, mat_t_vec_into, mat_vec, mat_vec_into, Csr, SparseKkt};
 use self::qp::QpStd;
-use crate::types::Status;
+use crate::presolve::{self, scaling};
+use crate::types::{ConstraintRow, Objective, Sense, Status, VariableData};
 
 const TAU: f64 = 0.995;
 const RHO_MIN: f64 = 1e-10;
@@ -58,32 +61,36 @@ pub struct IpmResult {
     pub x: Option<Vec<f64>>,
 }
 
+// Every elementwise/reduction helper below is embarrassingly parallel
+// (disjoint per-index reads/writes, or an associative reduction) and
+// touches no heap allocation of its own, so parallelizing them via rayon
+// doesn't conflict with the Newton loop's own no-allocation discipline
+// (module docs). For the problem sizes this crate targets these vectors
+// are short enough that rayon's dispatch overhead can outweigh the win —
+// real payoff shows up as `n`/`p`/`m` grow — but the operations are
+// correct and safe to parallelize at any size, unlike e.g. a triangular
+// solve's inherent step-to-step dependency.
+
 fn dot(a: &[f64], b: &[f64]) -> f64 {
-    a.iter().zip(b).map(|(x, y)| x * y).sum()
+    a.par_iter().zip(b.par_iter()).map(|(x, y)| x * y).sum()
 }
 
 fn norm_inf(v: &[f64]) -> f64 {
-    v.iter().fold(0.0_f64, |m, &x| m.max(x.abs()))
+    v.par_iter().map(|x| x.abs()).reduce(|| 0.0_f64, f64::max)
 }
 
 fn axpy(out: &mut [f64], a: f64, x: &[f64]) {
-    for (o, &xi) in out.iter_mut().zip(x) {
-        *o += a * xi;
-    }
+    out.par_iter_mut().zip(x.par_iter()).for_each(|(o, &xi)| *o += a * xi);
 }
 
 /// `out[i] = a[i] - b[i]`.
 fn write_sub(out: &mut [f64], a: &[f64], b: &[f64]) {
-    for i in 0..out.len() {
-        out[i] = a[i] - b[i];
-    }
+    out.par_iter_mut().zip(a.par_iter()).zip(b.par_iter()).for_each(|((o, &ai), &bi)| *o = ai - bi);
 }
 
 /// `out[i] = a[i] + alpha * d[i]`.
 fn write_add_scaled(out: &mut [f64], a: &[f64], alpha: f64, d: &[f64]) {
-    for i in 0..out.len() {
-        out[i] = a[i] + alpha * d[i];
-    }
+    out.par_iter_mut().zip(a.par_iter()).zip(d.par_iter()).for_each(|((o, &ai), &di)| *o = ai + alpha * di);
 }
 
 /// Farkas certificate of primal infeasibility: (y, z) with
@@ -248,31 +255,22 @@ pub fn solve(qp: &QpStd) -> IpmResult {
         return IpmResult { status: Status::Optimal, x: Some(vec![]) };
     }
 
-    // One-time Ruiz equilibration of the problem data (see scaling.rs).
-    // Everything below operates on the scaled problem; `x` is mapped back
-    // to original-variable space at every return site.
-    let sc = scaling::compute(n, &qp.a, &qp.g, &qp.c, 10);
-    let (a, g, b, h, c) = scaling::apply(&sc, &qp.a, &qp.g, &qp.b, &qp.h, &qp.c);
-
-    // Drop duplicate/linearly-dependent equality rows (see redundancy.rs):
-    // exact/scalar-multiple duplicates first (cheap hashing), then a
-    // rank-revealing column-pivoted QR for anything left over. Scaling runs
-    // first so every row is on a comparable numerical footing before the
-    // rank tolerance is applied.
-    let (a, b) = redundancy::reduce_equalities(&a, &b, n);
-    let p = a.nrows();
-
-    // Constraint propagation over the inequality rows (Achterberg et al.,
-    // "Presolve Reductions in Mixed Integer Programming", §3.1-3.2): tighten
-    // variable bounds via row activities, and drop rows that turn out to be
-    // always satisfied or catch outright infeasibility before ever running
-    // the interior-point loop. See propagate.rs.
-    let prop = propagate::propagate(n, &g, &h, PROPAGATION_PASSES);
-    if prop.infeasible {
+    // One-time shared presolve pass (`crate::presolve` — Ruiz scaling,
+    // redundant-equality removal, then inequality propagation; the same
+    // pipeline `simplex.rs` now runs too). Everything below operates on
+    // the scaled/reduced problem; `x` is mapped back to original-variable
+    // space at every return site via `scaling::unscale_x`.
+    let pre = presolve::run(n, &qp.a, &qp.b, &qp.g, &qp.h, &qp.c, 10, PROPAGATION_PASSES);
+    if pre.infeasible {
         return IpmResult { status: Status::Infeasible, x: None };
     }
-    let g = prop.g;
-    let h = prop.h;
+    let sc = pre.scaling;
+    let a = pre.a;
+    let b = pre.b;
+    let g = pre.g;
+    let h = pre.h;
+    let c = pre.c;
+    let p = a.nrows();
     let m = g.nrows();
 
     let a = &a;
@@ -545,4 +543,20 @@ pub fn solve(qp: &QpStd) -> IpmResult {
     } else {
         IpmResult { status: Status::Unbounded, x: None }
     }
+}
+
+/// Builds the QP standard form (`qp::build`) directly from the model's
+/// variables/objective/constraints and solves it — the interior-point
+/// counterpart of `simplex::solve_lp`/`solve_lp_dual`, letting
+/// `solver::solve_lp` dispatch to either engine on the exact same inputs
+/// (`types::RootSolver`). Kept alongside `solve` rather than only reachable
+/// through `simplex.rs`'s test helper now that `Model.solve`'s
+/// `root_solver` argument can select this path directly.
+pub fn solve_lp(variables: &[VariableData], objective: &Objective, constraints: &[ConstraintRow]) -> IpmResult {
+    let obj_coeffs_for_min: Vec<(usize, f64)> = match objective.sense {
+        Sense::Minimize => objective.expr.coeffs.iter().map(|(&j, &c)| (j, c)).collect(),
+        Sense::Maximize => objective.expr.coeffs.iter().map(|(&j, &c)| (j, -c)).collect(),
+    };
+    let built = qp::build(variables, &obj_coeffs_for_min, constraints);
+    solve(&built)
 }

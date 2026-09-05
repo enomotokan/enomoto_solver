@@ -1,23 +1,35 @@
-//! Top-level orchestration: dispatch an LP straight to the bounded-variable
-//! dual revised simplex (`simplex::solve_lp_dual`) and reconstruct the
-//! objective value. This replaces the original IP-PMM (PIQP-style
-//! interior point) path now that the from-scratch simplex engine (Stages
-//! 1-3: Markowitz/Forrest-Tomlin sparse LU, EXPAND anti-cycling, primal
-//! and dual steepest-edge pricing) is implemented and verified —
-//! `interior_point` (+ its submodules) remains in the crate, unused, in
-//! case that path is wanted again later.
+//! Top-level orchestration: dispatch an LP to whichever engine
+//! `root_solver` selects (`types::RootSolver` — `Model.solve`'s
+//! Python-facing `root_solver` argument) and reconstruct the objective
+//! value. `Simplex` (`simplex::solve_lp_dual`, the bounded-variable dual
+//! revised simplex) is the default, having replaced the original IP-PMM
+//! (PIQP-style interior point) path as the primary engine; `Interior`
+//! (`interior_point::solve_lp`) is kept fully reachable rather than
+//! deleted, both as a fallback and so the two independent implementations
+//! can be run against the same input and compared directly.
 
+use crate::interior_point;
 use crate::simplex;
-use crate::types::{ConstraintRow, Objective, SolveResult, Status, VariableData};
+use crate::types::{ConstraintRow, Objective, RootSolver, SolveResult, Status, VariableData};
 
 pub fn solve_lp(
     variables: &[VariableData],
     objective: &Objective,
     constraints: &[ConstraintRow],
+    root_solver: RootSolver,
 ) -> SolveResult {
-    let result = simplex::solve_lp_dual(variables, objective, constraints);
+    let (status, x) = match root_solver {
+        RootSolver::Simplex => {
+            let result = simplex::solve_lp_dual(variables, objective, constraints);
+            (result.status, result.x)
+        }
+        RootSolver::Interior => {
+            let result = interior_point::solve_lp(variables, objective, constraints);
+            (result.status, result.x)
+        }
+    };
 
-    match result.status {
+    match status {
         Status::Infeasible => SolveResult {
             status: Status::Infeasible,
             objective: None,
@@ -31,7 +43,7 @@ pub fn solve_lp(
             node_limit_hit: false,
         },
         Status::Optimal => {
-            let x = result.x.unwrap();
+            let x = x.unwrap();
             let obj_val = objective.expr.constant
                 + objective
                     .expr

@@ -46,62 +46,17 @@ use faer::sparse::linalg::cholesky::{factorize_symbolic_cholesky, LdltRegulariza
 use faer::sparse::{SparseColMat, SymbolicSparseColMat, ValuesOrder};
 use faer::{Conj, Parallelism, Side};
 
-pub type Csr = faer::sparse::SparseRowMat<usize, f64>;
+pub use crate::sparse::{mat_t_vec, mat_t_vec_into, mat_vec, mat_vec_into, Csr};
 
-pub fn csr_from_rows(rows: &[Vec<(usize, f64)>], n_cols: usize) -> Csr {
-    let mut triplets = Vec::new();
-    for (i, row) in rows.iter().enumerate() {
-        for &(j, v) in row {
-            if v != 0.0 {
-                triplets.push((i, j, v));
-            }
-        }
-    }
-    Csr::try_new_from_triplets(rows.len(), n_cols, &triplets).expect("valid CSR triplets")
-}
-
-/// Writes `mat * x` into `out` (length `mat.nrows()`). No allocation.
-pub fn mat_vec_into(mat: &Csr, x: &[f64], out: &mut [f64]) {
-    let r = mat.as_ref();
-    for i in 0..r.nrows() {
-        out[i] = r
-            .col_indices_of_row(i)
-            .zip(r.values_of_row(i))
-            .map(|(j, &v)| v * x[j])
-            .sum();
-    }
-}
-
-/// Writes `mat^T * y` into `out` (length `mat.ncols()`). No allocation.
-pub fn mat_t_vec_into(mat: &Csr, y: &[f64], out: &mut [f64]) {
-    for v in out.iter_mut() {
-        *v = 0.0;
-    }
-    let r = mat.as_ref();
-    for i in 0..r.nrows() {
-        let yi = y[i];
-        if yi == 0.0 {
-            continue;
-        }
-        for (j, &v) in r.col_indices_of_row(i).zip(r.values_of_row(i)) {
-            out[j] += v * yi;
-        }
-    }
-}
-
-/// Allocating wrapper around `mat_vec_into` — `mat * x` as a fresh `Vec`.
-pub fn mat_vec(mat: &Csr, x: &[f64]) -> Vec<f64> {
-    let mut out = vec![0.0; mat.nrows()];
-    mat_vec_into(mat, x, &mut out);
-    out
-}
-
-/// Allocating wrapper around `mat_t_vec_into` — `mat^T * y` as a fresh `Vec`.
-pub fn mat_t_vec(mat: &Csr, n_cols: usize, y: &[f64]) -> Vec<f64> {
-    let mut out = vec![0.0; n_cols];
-    mat_t_vec_into(mat, y, &mut out);
-    out
-}
+/// `0` hints faer to use `rayon::current_num_threads()` — the numeric
+/// Cholesky factorization and triangular solve below are the only
+/// genuinely expensive per-iteration steps in the IP-PMM loop, so this is
+/// where interior-point's own parallelism budget goes; every other
+/// per-iteration vector op (`sparse::mat_vec_into` etc.) is comparatively
+/// cheap. Used for both the `_req` scratch-sizing call and the matching
+/// real call below — they must agree, since the scratch size faer reports
+/// depends on the parallelism strategy.
+const PARALLELISM: Parallelism = Parallelism::Rayon(0);
 
 /// Everything computed once per `A`/`G` sparsity pattern and reused
 /// across every KKT solve for that pattern: the symbolic Cholesky
@@ -224,8 +179,12 @@ impl SparseKkt {
         .expect("symbolic factorization failed");
 
         let l_values = vec![0.0f64; chol_symbolic.len_values()];
+        // The scratch size `_req` reports depends on the parallelism
+        // strategy, so it must match whatever `solve_into` actually passes
+        // to `factorize_numeric_ldlt` below (`PARALLELISM`) — a mismatch
+        // here would under-size `numeric_buf` for the real call.
         let numeric_buf = GlobalPodBuffer::new(
-            chol_symbolic.factorize_numeric_ldlt_req::<f64>(false, Parallelism::None).unwrap(),
+            chol_symbolic.factorize_numeric_ldlt_req::<f64>(false, PARALLELISM).unwrap(),
         );
         let solve_buf = GlobalPodBuffer::new(chol_symbolic.solve_in_place_req::<f64>(1).unwrap());
 
@@ -278,7 +237,7 @@ impl SparseKkt {
             a_upper.as_ref(),
             Side::Upper,
             LdltRegularization::default(),
-            Parallelism::None,
+            PARALLELISM,
             PodStack::new(&mut setup.numeric_buf),
         );
 
@@ -286,7 +245,7 @@ impl SparseKkt {
         ldlt.solve_in_place_with_conj(
             Conj::No,
             from_column_major_slice_mut(out, setup.dim, 1),
-            Parallelism::None,
+            PARALLELISM,
             PodStack::new(&mut setup.solve_buf),
         );
     }

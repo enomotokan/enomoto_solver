@@ -86,10 +86,17 @@ class Model:
         self._core.add_constraint(g.nonzero_terms(), g.sense, g.rhs)
 
     # -- solve ------------------------------------------------------------
-    def solve(self, raise_on_failure: bool = True) -> Solution:
+    def solve(self, raise_on_failure: bool = True, root_solver: Optional[str] = None) -> Solution:
         """Runs preprocessing + the optimization algorithm in the Rust
-        core. On success, each Variable's ``.value`` becomes readable."""
-        result = self._core.solve()
+        core. On success, each Variable's ``.value`` becomes readable.
+
+        ``root_solver`` picks which LP engine every relaxation is solved
+        with: ``"simplex"`` (the default) or ``"interior"``. Both are full,
+        independent implementations sharing only the presolve pipeline, so
+        solving the same model with each is a genuine cross-check rather
+        than comparing an engine against itself.
+        """
+        result = self._core.solve(root_solver=root_solver)
         status = result["status"]
         self._solution_x = result["x"]
         self._solution = Solution(

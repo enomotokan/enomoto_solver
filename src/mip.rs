@@ -4,7 +4,7 @@
 //! problem sizes this MVP targets.
 
 use crate::solver::solve_lp;
-use crate::types::{ConstraintRow, Objective, Sense, SolveResult, Status, VarType, VariableData};
+use crate::types::{ConstraintRow, Objective, RootSolver, Sense, SolveResult, Status, VarType, VariableData};
 use std::collections::HashMap;
 
 /// How close to an integer a discrete variable's LP-relaxation value must
@@ -75,10 +75,11 @@ pub fn solve_mip(
     variables: &[VariableData],
     objective: &Objective,
     constraints: &[ConstraintRow],
+    root_solver: RootSolver,
 ) -> SolveResult {
     let has_discrete = variables.iter().any(|v| v.vtype != VarType::Continuous);
     if !has_discrete {
-        return solve_lp(variables, objective, constraints);
+        return solve_lp(variables, objective, constraints, root_solver);
     }
 
     let mut stack: Vec<Node> = vec![Node {
@@ -111,7 +112,7 @@ pub fn solve_mip(
             continue;
         }
 
-        let relax = solve_lp(&vars_eff, objective, constraints);
+        let relax = solve_lp(&vars_eff, objective, constraints, root_solver);
         if relax.status != Status::Optimal {
             continue;
         }
@@ -189,7 +190,7 @@ pub fn solve_mip(
         // reached an integer point, the MIP has no integer-feasible
         // solution even though its LP relaxation does.
         None => {
-            let root = solve_lp(variables, objective, constraints);
+            let root = solve_lp(variables, objective, constraints, root_solver);
             match root.status {
                 Status::Infeasible => root,
                 Status::Unbounded => root,

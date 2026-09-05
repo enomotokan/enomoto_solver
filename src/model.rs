@@ -13,7 +13,7 @@ use pyo3::types::PyDict;
 use std::collections::HashMap;
 
 use crate::mip::solve_mip;
-use crate::types::{ConstraintRow, LinearExpr, Objective, RowSense, Sense, Status, VarType, VariableData};
+use crate::types::{ConstraintRow, LinearExpr, Objective, RootSolver, RowSense, Sense, Status, VarType, VariableData};
 
 /// A model's accumulated state: every variable, the (single) objective
 /// once set, and every constraint added so far. Mutated in place by
@@ -114,12 +114,23 @@ impl PyModel {
     /// Python-side `Model.solve` wraps this dict into a `Solution`
     /// namedtuple and raises `InfeasibleError`/`UnboundedError` for the
     /// corresponding statuses.
-    fn solve<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+    ///
+    /// `root_solver` selects which LP engine every relaxation is solved
+    /// with (`types::RootSolver::parse`: `"simplex"`, the default, or
+    /// `"interior"`) — both are full independent implementations sharing
+    /// only the presolve pipeline, kept reachable side by side so results
+    /// can be cross-checked rather than one being deleted outright.
+    #[pyo3(signature = (root_solver=None))]
+    fn solve<'py>(&self, py: Python<'py>, root_solver: Option<&str>) -> PyResult<Bound<'py, PyDict>> {
         let objective = self.objective.clone().ok_or_else(|| {
             PyValueError::new_err("no objective set: call Model.set_objective(...) before solve()")
         })?;
+        let root_solver = match root_solver {
+            Some(s) => RootSolver::parse(s)?,
+            None => RootSolver::Simplex,
+        };
 
-        let result = solve_mip(&self.variables, &objective, &self.constraints);
+        let result = solve_mip(&self.variables, &objective, &self.constraints, root_solver);
 
         let dict = PyDict::new_bound(py);
         dict.set_item("status", result.status.as_str())?;

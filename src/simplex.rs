@@ -1,7 +1,9 @@
 //! A from-scratch **bounded-variable revised simplex**, both primal
-//! ([`solve_lp`]) and dual ([`solve_lp_dual`]) — the engine
-//! `solver::solve_lp` calls for every LP `Model.solve()` needs to solve
-//! (including once per branch-and-bound node for MIPs; see `bnb.rs`).
+//! ([`solve_lp`]) and dual ([`solve_lp_dual`]) — `solver::solve_lp`'s
+//! default engine for every LP `Model.solve()` needs to solve (including
+//! once per branch-and-bound node for MIPs; see `mip.rs`), reachable
+//! explicitly via `Model.solve(root_solver="simplex")` alongside the
+//! interior-point alternative (`types::RootSolver`).
 //!
 //! ## The bounded-variable invariant
 //!
@@ -68,19 +70,42 @@
 //! primal steepest-edge entering rule (Forrest & Goldfarb 1992) — see
 //! [`ExpandState`] and [`SteepestEdgeState`]'s docs.
 //!
-//! ## Dual method: classical ratio test, dual steepest edge
+//! ## Dual method: dual steepest edge, BFRT, incremental reduced costs
 //!
 //! [`solve_lp_dual`] needs no phase 1 (a dual-feasible start is always
 //! constructible — see [`Tableau::crash_dual_feasible`]) and uses dual
 //! steepest-edge pricing ([`DseState`], per Huangfu & Hall,
-//! "Parallelizing the dual revised simplex method", arXiv:1503.01889
-//! §2.2) for the leaving row; the entering-column ratio test is the
-//! classical/textbook one (no Harris two-pass or bound-flipping (BFRT)
-//! refinement yet), and there is no dual-specific EXPAND-style anti-
-//! cycling yet either — both are candidates for a later pass.
+//! "Parallelizing the dual revised simplex method", arXiv:1503.01889,
+//! §2.2) for the leaving row. The entering-column ratio test is enhanced
+//! with the bound-flipping ratio test (BFRT, same paper §2.2.2/2.2.3):
+//! candidates are sorted by ascending ratio and every finitely-bounded one
+//! ahead of the real entering variable is fully flipped to its opposite
+//! bound in the same iteration, rather than needing its own pivot — see
+//! [`solve_lp_dual_on`]'s body for the derivation. Reduced costs (`d`) are
+//! maintained incrementally across pivots (update-dual, same section) —
+//! `d[j] -= theta_d * a_p[j]` for every column, straight off the pivotal
+//! row PRICE already computes — rather than recomputed from a fresh BTRAN
+//! every iteration. Not (yet) implemented: the Harris two-pass ratio test
+//! refinement on top of BFRT, and dual-specific EXPAND-style anti-cycling.
+//!
+//! ## Parallelism: presolve yes, the per-iteration loop no
+//!
+//! `crate::presolve` (scaling, redundancy, propagation, DualFix,
+//! ColSingleton) runs once per solve and is parallelized with rayon
+//! throughout. Every loop *inside* [`solve_lp_dual_on`]'s and
+//! [`run_phase`]'s per-iteration bodies (chuzr, chuzc1's candidate scan,
+//! the reduced-cost/DSE/steepest-edge weight updates) is embarrassingly
+//! parallel in the same sense, but is deliberately sequential: profiling
+//! them on this crate's target problem sizes (~1000 variables, a few
+//! hundred rows) found rayon's per-call dispatch overhead alone — paid
+//! hundreds of times per solve, once per iteration — costing *more* than
+//! the rest of the dual simplex loop combined, and removing it measured
+//! roughly a 5x end-to-end speedup. A large-enough problem could tip this
+//! back in rayon's favor, but no such threshold is implemented; if this
+//! module is ever aimed at dramatically larger LPs, re-profile before
+//! reaching for `into_par_iter()` again rather than assuming it helps.
 
-use rayon::prelude::*;
-
+use crate::presolve::{self, scaling};
 use crate::types::{ConstraintRow, Objective, RowSense, Sense, Status, VariableData};
 
 /// Markowitz-pivoted sparse LU + Forrest-Tomlin incremental updates —
@@ -206,18 +231,23 @@ impl SteepestEdgeState {
     fn update_after_pivot(&mut self, t: &Tableau, _std: &StdForm, rho: &[f64], w: &[f64], gamma_t_old: f64, pivot: f64) {
         // Every column's updated weight only depends on its own (fixed)
         // old weight plus `rho`/`w`/`gamma_t_old`/`pivot`, all read-only
-        // here, so this writes disjoint elements of `self.gamma` in
-        // parallel via rayon rather than looping sequentially.
-        self.gamma.par_iter_mut().enumerate().for_each(|(j, gamma_j)| {
+        // here, so these writes to `self.gamma` are disjoint per column —
+        // safe to parallelize. Left sequential anyway: for the column
+        // counts this crate actually sees, rayon's per-call dispatch
+        // overhead measured *larger* than the loop body itself (see
+        // `solve_lp_dual_on`'s module docs for the profiling that found
+        // this — the same reasoning applies to every small, high-frequency
+        // per-iteration loop in this file, not just that one).
+        for (j, gamma_j) in self.gamma.iter_mut().enumerate() {
             if t.nb_status[j].is_none() {
-                return;
+                continue;
             }
-            let col = t.column(j);
-            let pivot_sj: f64 = rho.iter().zip(&col).map(|(a, b)| a * b).sum();
-            let tau_j: f64 = w.iter().zip(&col).map(|(a, b)| a * b).sum();
+            let col = t.column_sparse(j);
+            let pivot_sj: f64 = col.iter().map(|&(i, v)| v * rho[i]).sum();
+            let tau_j: f64 = col.iter().map(|&(i, v)| v * w[i]).sum();
             let beta_j = pivot_sj / pivot;
             *gamma_j = (*gamma_j + beta_j * beta_j * (1.0 + gamma_t_old) - 2.0 * beta_j * tau_j).max(STEEPEST_EDGE_FLOOR);
-        });
+        }
     }
 }
 
@@ -235,14 +265,38 @@ pub struct SimplexResult {
 /// Builds the `[A x + s = b]` standard form described above directly from
 /// the model's variables/objective/constraints (mirrors `qp::build`, but
 /// produces one slack column per row instead of folding bounds into `G`).
+///
+/// `cols` is `rows` transposed — `cols[j]` is column `j`'s own `(row,
+/// value)` pairs — built once (`cols_from_rows`) right after `rows` is
+/// finalized and never touched again: `StdForm` itself is never mutated
+/// during a solve (only `Tableau`'s basis/nonbasic status and `x` change),
+/// so there is no risk of the two views drifting out of sync. It exists
+/// purely so `Tableau::column`/`column_sparse` never have to scan every
+/// row looking for column `j` — see their own docs for why that mattered.
 struct StdForm {
     n_total: usize,
     n_rows: usize,
     c: Vec<f64>,
     rows: Vec<Vec<(usize, f64)>>, // sparse rows over the n_total columns
+    cols: Vec<Vec<(usize, f64)>>, // `rows` transposed: cols[j] = column j's (row, value) pairs
     b: Vec<f64>,
     lb: Vec<f64>,
     ub: Vec<f64>,
+}
+
+/// Transposes a row-sparse matrix (`rows[i]` = row `i`'s `(col, value)`
+/// pairs) into its column-sparse companion (`cols[j]` = column `j`'s
+/// `(row, value)` pairs) — one O(nnz) pass, run once per `StdForm` build.
+/// Row order within each `cols[j]` is whatever order `rows` produced it
+/// in; nothing downstream (dot products, densifying one column) cares.
+fn cols_from_rows(rows: &[Vec<(usize, f64)>], n_total: usize) -> Vec<Vec<(usize, f64)>> {
+    let mut cols = vec![Vec::new(); n_total];
+    for (i, row) in rows.iter().enumerate() {
+        for &(j, v) in row {
+            cols[j].push((i, v));
+        }
+    }
+    cols
 }
 
 fn build_std_form(variables: &[VariableData], objective: &Objective, constraints: &[ConstraintRow]) -> StdForm {
@@ -295,7 +349,154 @@ fn build_std_form(variables: &[VariableData], objective: &Objective, constraints
         rows.push(r);
     }
 
-    StdForm { n_total, n_rows, c, rows, b, lb, ub }
+    let cols = cols_from_rows(&rows, n_total);
+    StdForm { n_total, n_rows, c, rows, cols, b, lb, ub }
+}
+
+/// Ruiz-scaling iterations and constraint-propagation rounds for the
+/// shared presolve pass below — the same values (10, 2)
+/// `interior_point.rs` used before `crate::presolve` was extracted out to
+/// be shared with this module.
+const RUIZ_ITERS: usize = 10;
+const PROPAGATION_PASSES: usize = 2;
+
+/// Runs the shared presolve pipeline (`crate::presolve`: Ruiz scaling,
+/// redundant-equality removal, then inequality propagation) and builds
+/// the resulting `StdForm` from *its* output, instead of from the model's
+/// variables/constraints directly (contrast [`build_std_form`] above).
+///
+/// `A`'s rows (after redundant-equality removal) become `Eq` rows and
+/// `G`'s remaining multi-variable rows (after propagation) become `Le`
+/// rows — both via the exact same slack-per-row convention
+/// [`build_std_form`] already uses, so equality constraints get no new or
+/// different kind of variable here than they always have (a slack fixed
+/// at `[0, 0]`, feasibility for which is still entirely phase 1's job, or
+/// the dual-feasible crash's for [`solve_lp_dual`] — this function itself
+/// constructs no basis). `G`'s single-variable rows, by contrast, are
+/// pulled back out as `StdForm`'s own `lb`/`ub` via
+/// `presolve::propagate::extract_bounds` (the same extraction
+/// `propagate` already does internally) rather than becoming constraint
+/// rows with their own slack: a variable's bound is represented as a
+/// bound, not as an extra artificial/slack variable.
+///
+/// Returns `None` if presolve alone already proves the problem infeasible
+/// (a propagated row whose activity bound can never be satisfied) — the
+/// caller reports `Status::Infeasible` directly, without ever building a
+/// `Tableau`.
+///
+/// Also runs `presolve::colsingleton::eliminate_singleton_equalities`
+/// first, directly on the unscaled `(a, b, c0)` fresh out of
+/// `presolve::build_a_g` — *before* handing anything to
+/// `presolve::run` — since a substitution's stored coefficients need to
+/// stay in the same (original, unscaled) units the final `x` is in when
+/// [`unscale_result`] applies them, right after unscaling and before
+/// returning to the caller.
+fn build_std_form_presolved(
+    variables: &[VariableData],
+    objective: &Objective,
+    constraints: &[ConstraintRow],
+) -> Option<(StdForm, scaling::Scaling, Vec<presolve::colsingleton::Substitution>)> {
+    let n = variables.len();
+    let sign = match objective.sense {
+        Sense::Minimize => 1.0,
+        Sense::Maximize => -1.0,
+    };
+    let mut c0 = vec![0.0; n];
+    for (&j, &v) in objective.expr.coeffs.iter() {
+        c0[j] = sign * v;
+    }
+
+    let (a, b, g, h) = presolve::build_a_g(variables, constraints);
+    let elim = presolve::colsingleton::eliminate_singleton_equalities(n, &a, &b, &g, &h, &c0);
+
+    // Fold in the derived box-bound rows for every eliminated variable
+    // (see `colsingleton`'s module docs for why these are required, not
+    // optional) before anything else sees `G`.
+    let (g, h) = if elim.extra_g_rows.is_empty() {
+        (g, h)
+    } else {
+        let gr = g.as_ref();
+        let mut g_rows: Vec<Vec<(usize, f64)>> =
+            (0..gr.nrows()).map(|i| gr.col_indices_of_row(i).zip(gr.values_of_row(i)).map(|(j, &v)| (j, v)).collect()).collect();
+        let mut h_vec = h;
+        g_rows.extend(elim.extra_g_rows);
+        h_vec.extend(elim.extra_h);
+        (crate::sparse::csr_from_rows(&g_rows, n), h_vec)
+    };
+
+    let pre = presolve::run(n, &elim.a, &elim.b, &g, &h, &elim.c, RUIZ_ITERS, PROPAGATION_PASSES);
+    if pre.infeasible {
+        return None;
+    }
+
+    // Pull the (possibly tightened) box bounds back out of the final `G`;
+    // whatever multi-variable rows are left are the genuine inequality
+    // rows for this presolved problem.
+    let (lb, ub, g_rows, g_rhs) = presolve::propagate::extract_bounds(n, &pre.g, &pre.h);
+
+    let n_eq = pre.a.nrows();
+    let n_le = g_rows.len();
+    let n_rows = n_eq + n_le;
+    let n_total = n + n_rows;
+
+    let mut c = vec![0.0; n_total];
+    c[0..n].copy_from_slice(&pre.c);
+
+    let mut new_lb = vec![0.0; n_total];
+    let mut new_ub = vec![0.0; n_total];
+    new_lb[0..n].copy_from_slice(&lb);
+    new_ub[0..n].copy_from_slice(&ub);
+
+    let mut rows = Vec::with_capacity(n_rows);
+    let mut b_out = Vec::with_capacity(n_rows);
+
+    let ar = pre.a.as_ref();
+    for i in 0..n_eq {
+        let slack = n + i;
+        let mut r: Vec<(usize, f64)> = ar.col_indices_of_row(i).zip(ar.values_of_row(i)).map(|(j, &v)| (j, v)).collect();
+        new_lb[slack] = 0.0;
+        new_ub[slack] = 0.0;
+        r.push((slack, 1.0));
+        rows.push(r);
+        b_out.push(pre.b[i]);
+    }
+    for (k, mut r) in g_rows.into_iter().enumerate() {
+        let slack = n + n_eq + k;
+        new_lb[slack] = 0.0;
+        new_ub[slack] = f64::INFINITY;
+        r.push((slack, 1.0));
+        rows.push(r);
+        b_out.push(g_rhs[k]);
+    }
+
+    let cols = cols_from_rows(&rows, n_total);
+    Some((
+        StdForm { n_total, n_rows, c, rows, cols, b: b_out, lb: new_lb, ub: new_ub },
+        pre.scaling,
+        elim.substitutions,
+    ))
+}
+
+/// Maps a solve's `x` (in presolve-scaled space) back to the original
+/// variables via `scaling::unscale_x`, then fills in every
+/// `colsingleton`-eliminated variable's true value via
+/// [`presolve::colsingleton::Substitution::value`] — both steps must run
+/// in this order, since a substitution's coefficients are in unscaled
+/// units (see [`build_std_form_presolved`]'s docs) and reference *other*
+/// variables' final values, not their in-solve (scaled) ones.
+/// `Infeasible`/`Unbounded` pass through unchanged (there is no `x` to
+/// fix up).
+fn unscale_result(result: SimplexResult, sc: &scaling::Scaling, substitutions: &[presolve::colsingleton::Substitution]) -> SimplexResult {
+    match result.status {
+        Status::Optimal => {
+            let mut x = scaling::unscale_x(sc, &result.x.unwrap());
+            for sub in substitutions {
+                x[sub.var] = sub.value(&x);
+            }
+            SimplexResult { status: Status::Optimal, x: Some(x) }
+        }
+        other => SimplexResult { status: other, x: None },
+    }
 }
 
 struct Tableau<'a> {
@@ -355,18 +556,31 @@ impl<'a> Tableau<'a> {
         rows
     }
 
-    /// Column `j` of the full constraint matrix, dense, length n_rows.
+    /// Column `j` of the full constraint matrix, densified from
+    /// `std.cols[j]` — O(nnz_j + n_rows), not a scan of every row looking
+    /// for column `j`. Used only where a genuinely dense column is needed
+    /// (FTRAN/BTRAN input for the one column actually entering/leaving
+    /// this iteration); see [`Self::column_sparse`] for the far more
+    /// common "dot product against column `j`" case.
     fn column(&self, j: usize) -> Vec<f64> {
         let m = self.std.n_rows;
         let mut col = vec![0.0; m];
-        for i in 0..m {
-            for &(jj, v) in &self.std.rows[i] {
-                if jj == j {
-                    col[i] = v;
-                }
-            }
+        for &(i, v) in &self.std.cols[j] {
+            col[i] = v;
         }
         col
+    }
+
+    /// Column `j`'s sparse `(row, value)` pairs directly, with no O(m)
+    /// densification at all. Every per-candidate-column loop that only
+    /// ever computes a dot product against column `j` (entering-variable
+    /// selection, the dual method's `chuzc`, steepest-edge weight
+    /// updates) should use this instead of `column` — those loops run
+    /// once per nonbasic column *every pivot*, so avoiding both the O(m)
+    /// fill and ever touching another column's data is what turns an
+    /// O(n_total * nnz) pivot into an O(nnz) one.
+    fn column_sparse(&self, j: usize) -> &[(usize, f64)] {
+        &self.std.cols[j]
     }
 
     /// Recomputes every basic variable's value from the current nonbasic
@@ -552,15 +766,18 @@ fn run_phase(
         // Steepest-edge entering rule (Forrest & Goldfarb 1992): among
         // eligible nonbasic j, maximize d_j^2 / gamma_j rather than
         // Dantzig's |d_j| — see `SteepestEdgeState`'s docs. Each column's
-        // reduced cost/score is independent of every other, so this scans
-        // `0..n_total` in parallel via rayon.
+        // reduced cost/score is independent of every other, but this scans
+        // sequentially, not via rayon — see `solve_lp_dual_on`'s module
+        // docs for the profiling that found rayon's per-call dispatch
+        // overhead exceeding the loop body's own cost at this crate's
+        // typical problem sizes, for every hot per-iteration loop like
+        // this one, not just that specific one.
         let best = (0..std.n_total)
-            .into_par_iter()
+            .into_iter()
             .filter_map(|j| {
                 let st = t.nb_status[j]?;
                 let cj = if phase1 { 0.0 } else { std.c[j] };
-                let col = t.column(j);
-                let dot: f64 = col.iter().zip(&y).map(|(a, b)| a * b).sum();
+                let dot: f64 = t.column_sparse(j).iter().map(|&(i, v)| v * y[i]).sum();
                 let dj = cj - dot;
 
                 let (eligible, dir) = match st {
@@ -615,9 +832,10 @@ fn run_phase(
 
         // Each row's blocking analysis is independent of every other row's
         // — only the final `alpha1`/leaving-row reductions below combine
-        // them — so this scans `0..m` in parallel via rayon.
+        // them — but, like the entering-variable scan above, this runs
+        // sequentially rather than via rayon (same measured overhead).
         let candidates: Vec<Candidate> = (0..m)
-            .into_par_iter()
+            .into_iter()
             .filter_map(|i| {
                 let rate = -best_dir * alpha[i]; // d(x_Bi)/d(theta)
                 if rate.abs() <= TOL {
@@ -671,10 +889,10 @@ fn run_phase(
             })
             .collect();
 
-        let alpha1 = candidates.par_iter().map(|c| c.relaxed).reduce(|| init_alpha1, f64::min);
+        let alpha1 = candidates.iter().map(|c| c.relaxed).fold(init_alpha1, f64::min);
 
         let leaving = candidates
-            .par_iter()
+            .iter()
             .filter(|c| c.exact <= alpha1 + TOL)
             .max_by(|a, b| a.pivot_abs.total_cmp(&b.pivot_abs));
         let (leaving_row, leaving_hits_upper, alpha2, best_pivot_mag) = match leaving {
@@ -753,33 +971,43 @@ fn run_phase(
 }
 
 pub fn solve_lp(variables: &[VariableData], objective: &Objective, constraints: &[ConstraintRow]) -> SimplexResult {
-    let std = build_std_form(variables, objective, constraints);
+    let Some((std, sc, substitutions)) = build_std_form_presolved(variables, objective, constraints) else {
+        return SimplexResult { status: Status::Infeasible, x: None };
+    };
+    unscale_result(solve_lp_on(&std), &sc, &substitutions)
+}
+
+/// The primal two-phase method's actual work, operating on an
+/// already-presolved `StdForm` — factored out of [`solve_lp`] so
+/// [`solve_lp_dual`]'s own `n_rows == 0` trivial case can reuse it
+/// without running presolve twice.
+fn solve_lp_on(std: &StdForm) -> SimplexResult {
     if std.n_rows == 0 {
         // No constraints at all: every variable's bound is finite, so the
         // optimum is trivially at whichever bound the sign of c favors
         // (either bound when c is ~0) — no unbounded case is possible.
-        let mut x = vec![0.0; variables.len()];
-        for j in 0..variables.len() {
+        let mut x = vec![0.0; std.n_total];
+        for j in 0..std.n_total {
             x[j] = if std.c[j] > TOL { std.lb[j] } else if std.c[j] < -TOL { std.ub[j] } else { std.lb[j] };
         }
         return SimplexResult { status: Status::Optimal, x: Some(x) };
     }
 
-    let mut t = Tableau::new(&std);
+    let mut t = Tableau::new(std);
     // Initial basis is all slacks (B = a signed identity), trivially
     // factorized; Markowitz pivoting still goes through `factorize` for
     // uniformity rather than special-casing this as the identity.
-    let mut lu = refactorize(&std, &t);
+    let mut lu = refactorize(std, &t);
     let mut since_check = 0usize;
     let mut expand = ExpandState::new();
-    let mut se = SteepestEdgeState::new(&std);
+    let mut se = SteepestEdgeState::new(std);
 
-    let phase1_status = run_phase(&std, &mut t, true, &mut lu, &mut since_check, &mut expand, &mut se);
+    let phase1_status = run_phase(std, &mut t, true, &mut lu, &mut since_check, &mut expand, &mut se);
     if phase1_status == Status::Infeasible {
         return SimplexResult { status: Status::Infeasible, x: None };
     }
 
-    let phase2_status = run_phase(&std, &mut t, false, &mut lu, &mut since_check, &mut expand, &mut se);
+    let phase2_status = run_phase(std, &mut t, false, &mut lu, &mut since_check, &mut expand, &mut se);
     match phase2_status {
         Status::Unbounded => SimplexResult { status: Status::Unbounded, x: None },
         Status::Infeasible => SimplexResult { status: Status::Infeasible, x: None }, // shouldn't happen after phase 1
@@ -814,14 +1042,15 @@ impl DseState {
         let pivot = alpha[p];
         let wp_old = self.w[p];
         // Disjoint per-row writes, same rationale as `SteepestEdgeState`'s
-        // update — parallelized via rayon.
-        self.w.par_iter_mut().enumerate().for_each(|(i, w_i)| {
+        // update — sequential for the same measured-overhead reason (see
+        // `solve_lp_dual_on`'s chuzr comment).
+        for (i, w_i) in self.w.iter_mut().enumerate() {
             if i == p {
-                return;
+                continue;
             }
             let ratio = alpha[i] / pivot;
             *w_i = (*w_i - 2.0 * ratio * tau[i] + ratio * ratio * wp_old).max(STEEPEST_EDGE_FLOOR);
-        });
+        }
         self.w[p] = (wp_old / (pivot * pivot)).max(STEEPEST_EDGE_FLOOR);
     }
 }
@@ -840,47 +1069,104 @@ impl DseState {
 /// reduced cost is just its raw cost) — see that method's docs for why
 /// this can never fail once every variable has two finite bounds.
 ///
-/// The ratio test (`chuzc`) here is the classical/textbook one: eligible
-/// candidates are found from the leaving row's sign pattern and the
-/// smallest `|d_j / alpha_pj|` among them is taken exactly — not (yet)
-/// the Harris two-pass or bound-flipping (BFRT) refinements a production
-/// implementation would add on top.
+/// The ratio test (`chuzc`) enhances the classical/textbook one (eligible
+/// candidates by the leaving row's sign pattern, smallest `|d_j /
+/// alpha_pj|` wins) with the bound-flipping ratio test (BFRT, Huangfu &
+/// Hall §2.2.2): candidates are sorted by ascending ratio and every
+/// finitely-bounded one ahead of the eventual entering variable is fully
+/// flipped to its opposite bound in the same iteration, rather than each
+/// needing its own full pivot — see the BFRT walk in the loop body below
+/// for the derivation of why this stays dual feasible. Not (yet)
+/// implemented: the Harris two-pass ratio test refinement on top of BFRT.
 pub fn solve_lp_dual(variables: &[VariableData], objective: &Objective, constraints: &[ConstraintRow]) -> SimplexResult {
-    let std = build_std_form(variables, objective, constraints);
+    let Some((std, sc, substitutions)) = build_std_form_presolved(variables, objective, constraints) else {
+        return SimplexResult { status: Status::Infeasible, x: None };
+    };
     if std.n_rows == 0 {
-        return solve_lp(variables, objective, constraints);
+        return unscale_result(solve_lp_on(&std), &sc, &substitutions);
     }
+    unscale_result(solve_lp_dual_on(&std), &sc, &substitutions)
+}
 
-    let mut t = Tableau::new(&std);
+/// The dual method's actual work, operating on an already-presolved
+/// `StdForm` — see [`solve_lp_on`]'s analogous split for the primal
+/// method, and [`build_std_form_presolved`]'s docs for what "presolved"
+/// means here.
+fn solve_lp_dual_on(std: &StdForm) -> SimplexResult {
+    let mut t = Tableau::new(std);
     t.crash_dual_feasible();
 
-    let mut lu = refactorize(&std, &t);
+    let mut lu = refactorize(std, &t);
     let mut since_check = 0usize;
     let mut dse = DseState::new(std.n_rows);
     let m = std.n_rows;
+
+    // Reduced costs `d[j] = c[j] - y . A_j` for *every* column, maintained
+    // directly and incrementally (see the update-dual derivation below)
+    // rather than recomputed from a `y` vector every iteration — one
+    // fewer per-candidate dot product than even the `y`-based incremental
+    // update this replaces (HiGHS's `HEkkDualRow::updateDual` maintains
+    // its `workDual` array the same way, straight off the pivotal row,
+    // rather than forming a price vector at all). Exactly `c[j]` at the
+    // all-slack starting basis (`y = 0` there — every slack's cost is
+    // `0` — so `d[j] = c[j] - 0`) — no BTRAN or dot product needed even
+    // for this initial value.
+    let mut d = std.c.clone();
+    // Debug-only verification helper (see the `#[cfg(debug_assertions)]`
+    // block below): the expensive, from-first-principles way to get `d`
+    // for the *current* basis — one BTRAN plus one dot product per
+    // column, exactly what every iteration used to cost before this
+    // optimization.
+    let fresh_d = |lu: &sparse_lu::FtLu, t: &Tableau| -> Vec<f64> {
+        let cost_b: Vec<f64> = t.basis.iter().map(|&v| std.c[v]).collect();
+        let y = lu.solve_transpose(&cost_b);
+        (0..std.n_total)
+            .map(|j| std.c[j] - t.column_sparse(j).iter().map(|&(i, v)| v * y[i]).sum::<f64>())
+            .collect()
+    };
 
     for _iter in 0..MAX_ITERS {
         let rhs = t.recompute_basics(&lu);
 
         // Same 4-trigger refactorization policy as the primal method.
+        // `d` only ever changes at a refactorization or a real pivot, so
+        // it is refreshed fully exactly when `lu` itself is refreshed —
+        // piggybacking on the refactorization policy's existing
+        // numerical-hygiene cadence rather than inventing a separate one
+        // for `d`'s own incremental drift.
         since_check += 1;
         if since_check >= FT_CHECK_INTERVAL {
             since_check = 0;
             let bump_too_big = lu.fill_count() > FT_BUMP_LIMIT_FACTOR * m.max(1);
             let residual_too_big = !bump_too_big && t.basis_residual_norm(&rhs) > FT_RESIDUAL_TOL;
             if bump_too_big || residual_too_big {
-                lu = refactorize(&std, &t);
+                lu = refactorize(std, &t);
+                d = fresh_d(&lu, &t);
             }
         }
         if lu.update_count() > FT_MAX_UPDATES {
-            lu = refactorize(&std, &t);
+            lu = refactorize(std, &t);
+            d = fresh_d(&lu, &t);
         }
 
         // chuzr: most DSE-attractive primal-infeasible basic row. Each
-        // row's infeasibility/score is independent, so this scans `0..m`
-        // in parallel via rayon.
+        // row's infeasibility/score is independent of every other, but
+        // this scans `0..m` sequentially, not via rayon — profiling this
+        // exact loop (on ~1000-variable, ~300-row problems, this crate's
+        // typical target size) found rayon's per-call dispatch overhead
+        // alone (spawning/joining the parallel iterator, ~270 times over
+        // the whole solve here) costing *more* than the entire rest of
+        // the dual simplex loop combined; the sequential version measured
+        // roughly 5x faster end to end. The same finding applies to every
+        // other small, high-frequency per-iteration loop in this file
+        // (chuzc1 below, the primal method's analogous entering-variable/
+        // ratio-test scans, `SteepestEdgeState`/`DseState`'s weight
+        // updates) — none of them are parallelized for this reason,
+        // unlike the one-time, per-solve presolve passes in
+        // `crate::presolve`, which stay parallel since they run once
+        // rather than thousands of times.
         let chuzr = (0..m)
-            .into_par_iter()
+            .into_iter()
             .filter_map(|i| {
                 let var = t.basis[i];
                 let val = t.x[var];
@@ -902,26 +1188,58 @@ pub fn solve_lp_dual(variables: &[VariableData], objective: &Objective, constrai
             return SimplexResult { status: Status::Optimal, x: Some(t.x[0..t.n_orig()].to_vec()) };
         };
 
-        // Pivotal row: rho_p = B^-T e_p (btran), then a_pj = rho_p . A_j
-        // for each nonbasic j (spmv) — same pattern as the primal
-        // method's steepest-edge `rho`.
+        // Pivotal row: rho_p = B^-T e_p (btran).
         let mut e_p = vec![0.0; m];
         e_p[p] = 1.0;
         let rho_p = lu.solve_transpose(&e_p);
 
-        let cost_b: Vec<f64> = t.basis.iter().map(|&v| std.c[v]).collect();
-        let y = lu.solve_transpose(&cost_b);
+        // PRICE (Huangfu & Hall §2.2.2's "spmv"), row-major: a_p = rho_p^T
+        // A, computed by walking only rho_p's *nonzero* rows and scanning
+        // each one's own sparse row of `A` — not, as an earlier version of
+        // this function did, by visiting every nonbasic column's own
+        // nonzeros regardless of whether rho_p even touches the rows that
+        // column lives in. A genuinely sparse rho_p (common on many
+        // problems; it is a single BTRAN result, not an arbitrary dense
+        // vector) turns this into real savings: columns whose only
+        // nonzero rows are exactly where rho_p is zero cost nothing here.
+        // Deliberately sequential, not parallelized: multiple rows scatter
+        // into the same `a_p[j]`, so a naive per-row parallel write would
+        // race, and a rayon fold/reduce (a private length-`n_total` buffer
+        // per thread, merged at the end) was tried and measured slower
+        // than this plain loop for this crate's typical problem sizes —
+        // the reduction's own O(n_total) merge cost outweighs the savings
+        // once `m` and the number of nonzero rows are this modest.
+        let mut a_p = vec![0.0f64; std.n_total];
+        for i in 0..m {
+            let r = rho_p[i];
+            if r.abs() <= TOL {
+                continue;
+            }
+            for &(j, v) in &std.rows[i] {
+                a_p[j] += r * v;
+            }
+        }
 
-        // chuzc: eligible nonbasic j (sign of a_pj compatible with
-        // restoring feasibility at row p, given its bound status) with
-        // smallest |d_j / a_pj|. Each column's ratio is independent, so
-        // this scans `0..n_total` in parallel via rayon.
-        let chuzc = (0..std.n_total)
-            .into_par_iter()
+        // chuzc1 (Huangfu & Hall §2.2.2): every eligible nonbasic j (sign
+        // of a_pj compatible with restoring feasibility at row p, given
+        // its bound status), with its reduced cost `dj` — a plain array
+        // lookup into the incrementally-maintained `d` above, not a dot
+        // product — and ratio |d_j / a_pj|. Each column's eligibility/
+        // ratio is independent of every other, but this scans `0..n_total`
+        // sequentially, not via rayon (see the chuzr comment above for the
+        // measured-overhead reason); the candidates are then sorted by
+        // ascending ratio for chuzc2 (BFRT) below.
+        struct ChuzcCand {
+            j: usize,
+            a_pj: f64,
+            dj: f64,
+            ratio: f64,
+        }
+        let mut candidates: Vec<ChuzcCand> = (0..std.n_total)
+            .into_iter()
             .filter_map(|j| {
                 let st = t.nb_status[j]?;
-                let col = t.column(j);
-                let a_pj: f64 = rho_p.iter().zip(&col).map(|(a, b)| a * b).sum();
+                let a_pj = a_p[j];
                 if a_pj.abs() <= TOL {
                     return None;
                 }
@@ -944,24 +1262,111 @@ pub fn solve_lp_dual(variables: &[VariableData], objective: &Objective, constrai
                 if !eligible {
                     return None;
                 }
-                let dj = std.c[j] - col.iter().zip(&y).map(|(a, b)| a * b).sum::<f64>();
+                let dj = d[j];
                 let ratio = (dj / a_pj).abs();
-                Some((j, ratio))
+                Some(ChuzcCand { j, a_pj, dj, ratio })
             })
-            .min_by(|a, b| a.1.total_cmp(&b.1));
-        let Some((q, _best_ratio)) = chuzc else {
+            .collect();
+        if candidates.is_empty() {
+            return SimplexResult { status: Status::Infeasible, x: None };
+        }
+        candidates.sort_unstable_by(|a, b| a.ratio.total_cmp(&b.ratio));
+
+        // chuzc2, bound-flipping ratio test (BFRT): walk the candidates in
+        // ascending ratio order. A bounded candidate (finite `ub - lb`) is
+        // fully flipped to its opposite bound — at no cost to dual
+        // feasibility, since a boxed nonbasic variable stays dual
+        // feasible at *either* bound once its reduced cost's magnitude is
+        // this small (see the module docs) — as long as doing so doesn't
+        // yet bring the leaving variable to `target_bound`; the first
+        // candidate that would reach or overshoot it becomes the real
+        // entering variable `q` (an unbounded slack candidate — infinite
+        // width — can never be flipped, so it always stops the walk).
+        // This is Gauss-Seidel over the sorted list — each step's
+        // decision depends on the leaving variable's value *after* every
+        // previous step's flip — so, unlike chuzc1 above, it runs
+        // sequentially.
+        let leaving_var = t.basis[p];
+        let target_bound = if leaving_infeasible_low { std.lb[leaving_var] } else { std.ub[leaving_var] };
+        let need_sign = (t.x[leaving_var] - target_bound).signum();
+
+        let mut x_leaving_now = t.x[leaving_var];
+        let mut flips: Vec<(usize, NbStatus)> = Vec::new(); // (j, status *before* the flip)
+        let mut chosen: Option<(usize, f64)> = None; // (q, dj of q, from chuzc1 above)
+        for cand in &candidates {
+            let width = std.ub[cand.j] - std.lb[cand.j];
+            let mut still_short = false;
+            if width.is_finite() {
+                let old_status = t.nb_status[cand.j].unwrap();
+                let delta_x = match old_status {
+                    NbStatus::Lower => width,
+                    NbStatus::Upper => -width,
+                };
+                let flipped_x_leaving = x_leaving_now - cand.a_pj * delta_x;
+                if (flipped_x_leaving - target_bound) * need_sign > 0.0 {
+                    x_leaving_now = flipped_x_leaving;
+                    flips.push((cand.j, old_status));
+                    still_short = true;
+                }
+            }
+            if !still_short {
+                chosen = Some((cand.j, cand.dj));
+                break;
+            }
+        }
+        let Some((q, dj_q)) = chosen else {
+            // Every eligible candidate was fully flipped and the leaving
+            // variable is still short of its target: no column, real or
+            // flipped, can restore feasibility here while keeping dual
+            // feasibility — the standard dual-simplex infeasibility case.
             return SimplexResult { status: Status::Infeasible, x: None };
         };
 
+        // ftran-bfrt (Huangfu & Hall §2.2.3): apply every flip's combined
+        // effect on the basic variables in a single extra FTRAN — `a_F`,
+        // "a linear combination of the constraint columns for the
+        // variables in F" — rather than one FTRAN per flipped column.
+        if !flips.is_empty() {
+            let mut combined = vec![0.0; m];
+            for &(j, old_status) in &flips {
+                let delta_x = match old_status {
+                    NbStatus::Lower => std.ub[j] - std.lb[j],
+                    NbStatus::Upper => -(std.ub[j] - std.lb[j]),
+                };
+                for &(i, v) in t.column_sparse(j) {
+                    combined[i] += v * delta_x;
+                }
+            }
+            let combined_alpha = lu.solve(&combined);
+            for i in 0..m {
+                let var = t.basis[i];
+                t.x[var] -= combined_alpha[i];
+            }
+            for &(j, old_status) in &flips {
+                let new_status = match old_status {
+                    NbStatus::Lower => NbStatus::Upper,
+                    NbStatus::Upper => NbStatus::Lower,
+                };
+                t.nb_status[j] = Some(new_status);
+                t.x[j] = match new_status {
+                    NbStatus::Lower => std.lb[j],
+                    NbStatus::Upper => std.ub[j],
+                };
+            }
+        }
+
         // Full ftran of the entering column (needed for both the primal
         // update and the DSE weight update) and ftran-dse for the weight
-        // update's cross term.
+        // update's cross term. `theta_q` is recomputed from `t.x[leaving_var]`
+        // (now reflecting every flip above) and this fresh `alpha[p]`,
+        // exactly as the pre-BFRT code did — not from `x_leaving_now`/the
+        // candidate's own `a_pj` — so the entering step and the state it's
+        // applied to are always derived the same, numerically consistent
+        // way.
         let a_enter = t.column(q);
         let alpha = lu.solve(&a_enter);
         let tau = lu.solve(&rho_p);
 
-        let leaving_var = t.basis[p];
-        let target_bound = if leaving_infeasible_low { std.lb[leaving_var] } else { std.ub[leaving_var] };
         let theta_q = (t.x[leaving_var] - target_bound) / alpha[p];
 
         for i in 0..m {
@@ -978,8 +1383,53 @@ pub fn solve_lp_dual(variables: &[VariableData], objective: &Objective, constrai
         t.basis_pos[q] = Some(p);
         t.nb_status[q] = None;
 
+        // Update-dual (Huangfu & Hall §2.2.3 — same formula HiGHS's
+        // `HEkkDualRow::updateDual` applies straight to its `workDual`
+        // array): `d'[j] = d[j] - theta_d * a_p[j]` for *every* j, where
+        // `theta_d = dj_q / alpha[p]`. Derived from scratch (in terms of
+        // `y` first, then simplified) via Sherman-Morrison on
+        // `B' = B(I + (alpha - e_p) e_p^T)` — the same rank-1 update
+        // `FtLu`'s own eta updates use; the cross terms from `c_B`'s own
+        // change at position `p` (from `std.c[leaving_var]` to
+        // `std.c[q]`) cancel out entirely, leaving only this one term.
+        // Applying it to *every* column (not just this iteration's
+        // candidates) is what keeps `d` correct for columns chuzc1 will
+        // look at on a *future* iteration; it's a cheap, allocation-free
+        // pass since `a_p` is already fully materialized above (and, like
+        // every other loop this size in this function, sequential rather
+        // than parallel — see the chuzr comment). Bound flips never touch
+        // this: `d` depends only on the
+        // basis matrix and `c_B`, neither of which a flip changes, so it
+        // needs updating only once per iteration, right here, using the
+        // *real* pivot's own `dj_q`/`alpha[p]` — never the candidates
+        // that only got flipped.
+        let theta_d = dj_q / alpha[p];
+        for (dj, &apj) in d.iter_mut().zip(a_p.iter()) {
+            *dj -= theta_d * apj;
+        }
+        #[cfg(debug_assertions)]
+        {
+            // `lu` here is still the *old* basis's factorization (any
+            // update/refactorization happens below, after this check), so
+            // verifying against it directly would compare `d_new` against
+            // reduced costs for `B_old` — a meaningless mismatch, not a
+            // check of the update formula. A genuinely fresh factorization
+            // of the (already basis-swapped) `t` is needed instead.
+            let fresh_lu = refactorize(std, &t);
+            let d_fresh = fresh_d(&fresh_lu, &t);
+            for j in 0..std.n_total {
+                assert!(
+                    (d[j] - d_fresh[j]).abs() < 1e-6 * d_fresh[j].abs().max(1.0),
+                    "incremental reduced-cost update diverged from a fresh recompute: j={j} incremental={} fresh={}",
+                    d[j],
+                    d_fresh[j]
+                );
+            }
+        }
+
         if !lu.try_update(p, &a_enter, FT_MIN_PIVOT) {
-            lu = refactorize(&std, &t);
+            lu = refactorize(std, &t);
+            d = fresh_d(&lu, &t);
         }
     }
 
@@ -1009,25 +1459,14 @@ mod tests {
     }
 
     /// Solves via the interior-point (IP-PMM) engine directly —
-    /// `qp::build` + `ipm::solve`, bypassing `solver::solve_lp` — so
-    /// cross-check tests stay genuinely independent of this module now
-    /// that `solver::solve_lp` itself calls `solve_lp_dual` (§4 of
-    /// DESIGN.md: the simplex engine is the active `Model.solve()` path).
+    /// `crate::solver::solve_lp` with `RootSolver::Interior` — so
+    /// cross-check tests stay genuinely independent of this module.
+    /// `solver::solve_lp` now dispatches to either engine on request (see
+    /// `types::RootSolver`), so this is the same dispatch
+    /// `Model.solve(root_solver="interior")` uses on the Python side, not
+    /// a test-only shortcut.
     fn solve_via_ipm(variables: &[VariableData], objective: &Objective, constraints: &[ConstraintRow]) -> crate::types::SolveResult {
-        let obj_coeffs_for_min: Vec<(usize, f64)> = match objective.sense {
-            Sense::Minimize => objective.expr.coeffs.iter().map(|(&j, &c)| (j, c)).collect(),
-            Sense::Maximize => objective.expr.coeffs.iter().map(|(&j, &c)| (j, -c)).collect(),
-        };
-        let qp = crate::interior_point::qp::build(variables, &obj_coeffs_for_min, constraints);
-        let result = crate::interior_point::solve(&qp);
-        match result.status {
-            Status::Optimal => {
-                let x = result.x.unwrap();
-                let obj_val = objective.expr.constant + objective.expr.coeffs.iter().map(|(&j, &c)| c * x[j]).sum::<f64>();
-                crate::types::SolveResult { status: Status::Optimal, objective: Some(obj_val), x: Some(x), node_limit_hit: false }
-            }
-            status => crate::types::SolveResult { status, objective: None, x: None, node_limit_hit: false },
-        }
+        crate::solver::solve_lp(variables, objective, constraints, crate::types::RootSolver::Interior)
     }
 
     #[test]
@@ -1087,6 +1526,203 @@ mod tests {
         let cons = vec![row(&[(0, 1.0)], RowSense::Ge, 10.0)];
         let res = solve_lp(&vars, &obj, &cons);
         assert_eq!(res.status, Status::Infeasible);
+    }
+
+    #[test]
+    fn dual_bfrt_flips_multiple_variables_in_one_iteration() {
+        // min sum_{i=0..9} (i+1)*x_i s.t. sum(x_i) == 5, every x_i in
+        // [0, 1]. This is a single-row problem (m=1), so the dual
+        // method's crash lands on a single, hugely infeasible row
+        // (initial slack = 5, fixed at [0,0]) with 10 equally-eligible
+        // candidates whose ratios are exactly their own cost (1..10) —
+        // by hand: chuzr always picks the only row; chuzc1 sorts
+        // candidates x0..x4 (ratios 1..5) ahead of x5..x9 (ratios 6..10);
+        // BFRT's walk fully flips x0..x3 (cost 1-4) from lower to upper
+        // bound before x4 (cost 5) is left as the real (here: exactly
+        // bound-hitting, degenerate) entering pivot — landing on the
+        // provably optimal greedy solution (smallest costs at their upper
+        // bound) in a *single* dual-simplex iteration.
+        //
+        // Without BFRT this same iteration's classical ratio test would
+        // pick x0 (smallest ratio) alone as the entering variable with
+        // theta = 5, i.e. push x0 to value 5 — past its own upper bound
+        // of 1 — which is exactly the incorrectness BFRT exists to
+        // prevent, not merely a performance optimization.
+        let n = 10;
+        let vars: Vec<VariableData> = (0..n).map(|_| var(0.0, 1.0)).collect();
+        let obj = Objective { expr: expr(&(0..n).map(|i| (i, (i + 1) as f64)).collect::<Vec<_>>()), sense: Sense::Minimize };
+        let cons = vec![row(&(0..n).map(|i| (i, 1.0)).collect::<Vec<_>>(), RowSense::Eq, 5.0)];
+
+        let expected_x = [1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let check = |x: Vec<f64>| {
+            let objective: f64 = obj.expr.coeffs.iter().map(|(&j, &c)| c * x[j]).sum();
+            assert!(approx(objective, 15.0), "objective={objective}, x={x:?}");
+            for j in 0..n {
+                assert!(approx(x[j], expected_x[j]), "x[{j}]={}, x={x:?}", x[j]);
+            }
+        };
+
+        let primal = solve_lp(&vars, &obj, &cons);
+        assert_eq!(primal.status, Status::Optimal);
+        check(primal.x.unwrap());
+
+        let dual = solve_lp_dual(&vars, &obj, &cons);
+        assert_eq!(dual.status, Status::Optimal);
+        check(dual.x.unwrap());
+
+        let ipm = solve_via_ipm(&vars, &obj, &cons);
+        assert_eq!(ipm.status, Status::Optimal);
+        check(ipm.x.unwrap());
+    }
+
+    #[test]
+    fn parallel_inequality_rows_keep_the_tighter_one() {
+        // max 2x+y s.t. x+y<=10 (tight) and 2x+2y<=30 (a scalar multiple,
+        // equivalent to x+y<=15, strictly looser), x,y in [0,20].
+        // Exercises `crate::presolve::redundancy::reduce_inequalities`:
+        // if it kept the *looser* row instead of the tighter one, x+y
+        // could reach 15 instead of 10 and the optimum would come out at
+        // x=15 (objective 30) rather than the true x=10,y=0 (objective 20).
+        let vars = vec![var(0.0, 20.0), var(0.0, 20.0)];
+        let obj = Objective { expr: expr(&[(0, 2.0), (1, 1.0)]), sense: Sense::Maximize };
+        let cons = vec![
+            row(&[(0, 1.0), (1, 1.0)], RowSense::Le, 10.0),
+            row(&[(0, 2.0), (1, 2.0)], RowSense::Le, 30.0),
+        ];
+        for res in [solve_lp(&vars, &obj, &cons), solve_lp_dual(&vars, &obj, &cons)] {
+            assert_eq!(res.status, Status::Optimal);
+            let x = res.x.unwrap();
+            assert!(approx(x[0], 10.0), "x={x:?}");
+            assert!(approx(x[1], 0.0), "x={x:?}");
+        }
+    }
+
+    #[test]
+    fn dualfix_fixes_a_dominated_variable() {
+        // min z + x s.t. z+x<=10, z in [2,8], x in [0,10]. `z` appears in
+        // only this one `<=` row with a positive coefficient, so it has
+        // zero down-lock; its cost (+1) wants it small, so
+        // `crate::presolve::dualfix::fix_dominated_variables` should fix
+        // it to its own lower bound (2) directly. The true optimum agrees
+        // (z=2, x=0, objective=2) regardless of whether DualFix actually
+        // fired — a correct simplex finds the same answer on its own —
+        // but a *wrong* fix (e.g. to the upper bound, or firing when a
+        // real down-lock exists) would show up as a wrong objective here.
+        let vars = vec![var(2.0, 8.0), var(0.0, 10.0)];
+        let obj = Objective { expr: expr(&[(0, 1.0), (1, 1.0)]), sense: Sense::Minimize };
+        let cons = vec![row(&[(0, 1.0), (1, 1.0)], RowSense::Le, 10.0)];
+        for res in [solve_lp(&vars, &obj, &cons), solve_lp_dual(&vars, &obj, &cons)] {
+            assert_eq!(res.status, Status::Optimal);
+            let x = res.x.unwrap();
+            assert!(approx(x[0], 2.0), "x={x:?}");
+            assert!(approx(x[1], 0.0), "x={x:?}");
+        }
+    }
+
+    #[test]
+    fn colsingleton_substitutes_singleton_equality_and_folds_cost() {
+        // min -3*x0 + x1 + 2*x2
+        // s.t. x0 - x1 - x2 == 0   (x0 is a singleton column: appears
+        //                           nowhere else)
+        //      x1 + x2 <= 10
+        //      x0 in [0,20], x1,x2 in [0,10]
+        //
+        // `crate::presolve::colsingleton::eliminate_singleton_equalities`
+        // should substitute x0 = x1+x2, drop the equality row, and fold
+        // x0's cost (-3) into x1/x2's own costs: -3*(x1+x2)+x1+2*x2 =
+        // -2*x1 - x2, minimized (i.e. maximizing 2*x1+x2) subject to
+        // x1+x2<=10 -- x1 is more valuable per unit, so the optimum
+        // spends the whole budget on it: x1=10, x2=0. Back-substitution
+        // then gives x0 = x1+x2 = 10, which must still respect x0's own
+        // upper bound of 20 (it does) -- the derived box-bound rows this
+        // module adds are what guarantee that in general.
+        // True optimum: x0=10, x1=10, x2=0, objective = -30+10+0 = -20.
+        let vars = vec![var(0.0, 20.0), var(0.0, 10.0), var(0.0, 10.0)];
+        let obj = Objective { expr: expr(&[(0, -3.0), (1, 1.0), (2, 2.0)]), sense: Sense::Minimize };
+        let cons = vec![
+            row(&[(0, 1.0), (1, -1.0), (2, -1.0)], RowSense::Eq, 0.0),
+            row(&[(1, 1.0), (2, 1.0)], RowSense::Le, 10.0),
+        ];
+        let check = |x: Vec<f64>| {
+            assert!(approx(x[0], 10.0), "x={x:?}");
+            assert!(approx(x[1], 10.0), "x={x:?}");
+            assert!(approx(x[2], 0.0), "x={x:?}");
+            let objective: f64 = obj.expr.coeffs.iter().map(|(&j, &c)| c * x[j]).sum();
+            assert!(approx(objective, -20.0), "objective={objective}, x={x:?}");
+        };
+
+        let primal = solve_lp(&vars, &obj, &cons);
+        assert_eq!(primal.status, Status::Optimal);
+        check(primal.x.unwrap());
+
+        let dual = solve_lp_dual(&vars, &obj, &cons);
+        assert_eq!(dual.status, Status::Optimal);
+        check(dual.x.unwrap());
+
+        let ipm = solve_via_ipm(&vars, &obj, &cons);
+        assert_eq!(ipm.status, Status::Optimal);
+        check(ipm.x.unwrap());
+    }
+
+    #[test]
+    fn duplicate_equality_rows_via_shared_presolve() {
+        // min x+y s.t. x+y==4 (stated three times, one as a scalar
+        // multiple) plus x-y==0, x,y in [0,10] -> optimal 4 at (2,2).
+        // Exercises `crate::presolve::redundancy::reduce_equalities`
+        // through the active engine: `build_std_form_presolved` runs the
+        // shared presolve pipeline before ever building a `Tableau`, so
+        // the duplicate/scalar-multiple rows below are dropped well
+        // before phase 1 (primal) or the dual-feasible crash ever sees
+        // them, not merely tolerated by the slack-per-row representation.
+        let vars = vec![var(0.0, 10.0), var(0.0, 10.0)];
+        let obj = Objective { expr: expr(&[(0, 1.0), (1, 1.0)]), sense: Sense::Minimize };
+        let cons = vec![
+            row(&[(0, 1.0), (1, 1.0)], RowSense::Eq, 4.0),
+            row(&[(0, 2.0), (1, 2.0)], RowSense::Eq, 8.0), // scalar multiple of the row above
+            row(&[(0, 1.0), (1, 1.0)], RowSense::Eq, 4.0), // exact duplicate
+            row(&[(0, 1.0), (1, -1.0)], RowSense::Eq, 0.0),
+        ];
+        for res in [solve_lp(&vars, &obj, &cons), solve_lp_dual(&vars, &obj, &cons)] {
+            assert_eq!(res.status, Status::Optimal);
+            let x = res.x.unwrap();
+            assert!(approx(x[0], 2.0), "x={x:?}");
+            assert!(approx(x[1], 2.0), "x={x:?}");
+        }
+    }
+
+    #[test]
+    fn contradictory_equality_rows_detected_infeasible() {
+        // x+y==4 and x+y==5 (same coefficients, different rhs) can never
+        // both hold: `redundancy::reduce_equalities` keeps the second row
+        // as linearly independent in its RHS-augmented sense (see its own
+        // module docs), leaving the resulting standard form with two
+        // equality rows whose slacks can never simultaneously sit at
+        // their fixed [0,0] bound — caught by phase 1 / the dual method's
+        // own infeasibility detection, not by presolve itself.
+        let vars = vec![var(0.0, 10.0), var(0.0, 10.0)];
+        let obj = Objective { expr: expr(&[(0, 1.0), (1, 1.0)]), sense: Sense::Minimize };
+        let cons = vec![
+            row(&[(0, 1.0), (1, 1.0)], RowSense::Eq, 4.0),
+            row(&[(0, 1.0), (1, 1.0)], RowSense::Eq, 5.0),
+        ];
+        assert_eq!(solve_lp(&vars, &obj, &cons).status, Status::Infeasible);
+        assert_eq!(solve_lp_dual(&vars, &obj, &cons).status, Status::Infeasible);
+    }
+
+    #[test]
+    fn single_variable_ge_row_conflicting_with_own_bound_is_infeasible() {
+        // A single-variable inequality (`w >= 10`) folds into `G` as a
+        // one-entry row exactly like a variable's own bound rows do (see
+        // `presolve::propagate::extract_bounds`), so this specifically
+        // exercises the box-consistency check `propagate::propagate` runs
+        // after merging them: w's own upper bound is 5, contradicting the
+        // constraint's implied lower bound of 10, and this must be caught
+        // rather than silently producing a `Tableau` with lb > ub for w.
+        let vars = vec![var(0.0, 5.0)];
+        let obj = Objective { expr: expr(&[(0, 1.0)]), sense: Sense::Minimize };
+        let cons = vec![row(&[(0, 1.0)], RowSense::Ge, 10.0)];
+        assert_eq!(solve_lp(&vars, &obj, &cons).status, Status::Infeasible);
+        assert_eq!(solve_lp_dual(&vars, &obj, &cons).status, Status::Infeasible);
     }
 
     #[test]

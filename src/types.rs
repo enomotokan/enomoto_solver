@@ -92,6 +92,33 @@ impl RowSense {
     }
 }
 
+/// Which LP engine `solver::solve_lp` (and, through it, every
+/// `mip::solve_mip` node relaxation) dispatches to — `Model.solve`'s
+/// Python-facing `root_solver` argument, `"simplex"` by default. Both are
+/// full, independent implementations of the same LP semantics (see
+/// `simplex.rs`'s and `interior_point.rs`'s module docs), sharing only the
+/// presolve pipeline (`crate::presolve`); keeping both reachable, rather
+/// than deleting the interior-point path once `simplex` became the
+/// default, is what makes an apples-to-apples comparison between them
+/// possible on the exact same problem.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootSolver {
+    Simplex,
+    Interior,
+}
+
+impl RootSolver {
+    pub fn parse(s: &str) -> PyResult<Self> {
+        match s {
+            "simplex" => Ok(RootSolver::Simplex),
+            "interior" => Ok(RootSolver::Interior),
+            other => Err(PyValueError::new_err(format!(
+                "unknown root_solver '{other}' (expected 'simplex' or 'interior')"
+            ))),
+        }
+    }
+}
+
 /// One decision variable's type and bounds. `lb`/`ub` are required to be
 /// finite (validated at `model.rs::add_variable`, the only place this
 /// struct is constructed from user input) — every solver in this crate

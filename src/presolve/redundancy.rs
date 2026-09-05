@@ -1,5 +1,6 @@
 //! Removes redundant equality-constraint rows from `(A, b)`, run once (on
-//! the Ruiz-scaled problem) before the interior-point loop starts.
+//! the Ruiz-scaled problem) before either engine's main loop starts —
+//! shared by `interior_point.rs` and `simplex.rs` via `presolve::run`.
 //!
 //! Two passes:
 //!  1. **Direct duplicate detection**: a row that is an exact or
@@ -14,13 +15,26 @@
 //!     column permutation) is a linear combination of the others, so it is
 //!     dropped. `p` is expected to be small relative to `n` for realistic
 //!     LPs, so a dense factorization here is a cheap one-time cost.
+//!
+//! **Parallelization**: extracting each row's coefficients out of the CSR
+//! `A` (below) is independent per row, so it runs via rayon. Step 1
+//! (`dedupe_rows`) is a single sequential scan over a shared `HashSet` by
+//! design — which duplicate of an equal pair survives depends on scan
+//! order, so parallelizing it would make that choice (immaterial to
+//! correctness, since the kept row is an exact/scalar-multiple of the
+//! dropped one either way) nondeterministic between runs, which isn't
+//! worth trading for a speedup on what's already a cheap hash comparison.
+//! Step 2's dense QR is faer-internal and, per the module docs above,
+//! already a cheap one-time cost given `p` is expected to be small.
 
+use std::collections::HashMap;
 use std::collections::HashSet;
 
 use faer::linalg::solvers::ColPivQr;
 use faer::Mat;
+use rayon::prelude::*;
 
-use super::kkt::{csr_from_rows, Csr};
+use crate::sparse::{csr_from_rows, Csr};
 
 /// Returns a reduced `(A, b)` with duplicate/linearly-dependent equality
 /// rows removed.
@@ -32,6 +46,7 @@ pub fn reduce_equalities(a: &Csr, b: &[f64], n: usize) -> (Csr, Vec<f64>) {
 
     let ar = a.as_ref();
     let rows: Vec<(Vec<(usize, f64)>, f64)> = (0..p)
+        .into_par_iter()
         .map(|i| {
             let row: Vec<(usize, f64)> = ar
                 .col_indices_of_row(i)
@@ -130,4 +145,75 @@ fn drop_linearly_dependent(rows: &[(Vec<(usize, f64)>, f64)], n: usize) -> Vec<u
     }
 
     (0..p).filter(|&i| keep[i]).collect()
+}
+
+/// Removes duplicate / positive-scalar-multiple rows from `(G, h)` —
+/// PaPILO's "ParallelRows" (Achterberg et al. 2019, §4.4), the `<=`-sense
+/// analogue of [`reduce_equalities`]'s duplicate detection (step 1 only —
+/// there is no inequality analogue of step 2's rank-revealing QR: a
+/// *positive* combination of several `<=` rows can imply another one, but
+/// detecting that in general is Fourier-Motzkin elimination, well beyond
+/// a cheap presolve pass, so only pairwise duplicates are caught here).
+///
+/// Sign matters here in a way it doesn't for equalities: `a.x <= h` and
+/// `(-a).x <= h'` are *not* the same constraint (that would be
+/// `a.x >= -h'`), so a row is normalized by dividing by `|row[0].1]`
+/// (never flipping any sign) rather than by the signed first coefficient
+/// the way `dedupe_rows` does. When two rows normalize to the identical
+/// coefficient pattern, they bound the same linear combination from
+/// above and only the tighter (smaller normalized `h`) is kept.
+pub fn reduce_inequalities(g: &Csr, h: &[f64], n: usize) -> (Csr, Vec<f64>) {
+    let m = g.nrows();
+    if m == 0 {
+        return (csr_from_rows(&[], n), Vec::new());
+    }
+
+    let gr = g.as_ref();
+    let rows: Vec<(Vec<(usize, f64)>, f64)> = (0..m)
+        .into_par_iter()
+        .map(|i| {
+            let row: Vec<(usize, f64)> = gr.col_indices_of_row(i).zip(gr.values_of_row(i)).map(|(j, &v)| (j, v)).collect();
+            (row, h[i])
+        })
+        .collect();
+
+    // (normalized sig) -> (index into `rows` currently kept, its normalized h)
+    let mut best: HashMap<Vec<(usize, u64)>, (usize, f64)> = HashMap::new();
+    let mut keep = vec![true; m];
+    for (idx, (row, hv)) in rows.iter().enumerate() {
+        if row.is_empty() {
+            // `0 <= h`: either always true (drop) or a certificate of
+            // infeasibility (`propagate`'s activity check catches that) —
+            // neither is a "duplicate" in the sense this pass looks for.
+            continue;
+        }
+        let scale = row[0].1.abs();
+        let inv = 1.0 / scale;
+        let sig: Vec<(usize, u64)> = row.iter().map(|&(j, v)| (j, (v * inv).to_bits())).collect();
+        let normalized_h = hv * inv;
+        match best.get_mut(&sig) {
+            None => {
+                best.insert(sig, (idx, normalized_h));
+            }
+            Some((kept_idx, kept_h)) => {
+                if normalized_h < *kept_h {
+                    keep[*kept_idx] = false;
+                    *kept_idx = idx;
+                    *kept_h = normalized_h;
+                } else {
+                    keep[idx] = false;
+                }
+            }
+        }
+    }
+
+    let mut new_rows = Vec::new();
+    let mut new_h = Vec::new();
+    for (idx, (row, hv)) in rows.into_iter().enumerate() {
+        if keep[idx] {
+            new_rows.push(row);
+            new_h.push(hv);
+        }
+    }
+    (csr_from_rows(&new_rows, n), new_h)
 }
