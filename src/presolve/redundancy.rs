@@ -17,22 +17,25 @@
 //!     LPs, so a dense factorization here is a cheap one-time cost.
 //!
 //! **Parallelization**: extracting each row's coefficients out of the CSR
-//! `A` (below) is independent per row, so it runs via rayon. Step 1
-//! (`dedupe_rows`) is a single sequential scan over a shared `HashSet` by
-//! design — which duplicate of an equal pair survives depends on scan
-//! order, so parallelizing it would make that choice (immaterial to
-//! correctness, since the kept row is an exact/scalar-multiple of the
-//! dropped one either way) nondeterministic between runs, which isn't
-//! worth trading for a speedup on what's already a cheap hash comparison.
-//! Step 2's dense QR is faer-internal and, per the module docs above,
-//! already a cheap one-time cost given `p` is expected to be small.
+//! `A`/`G` (below) is independent per row, but runs sequentially rather
+//! than via rayon — profiling on this crate's target problem sizes found
+//! rayon's per-call dispatch overhead exceeding the cost of this simple
+//! scan (the same finding as `scaling.rs`'s and `simplex.rs`'s own
+//! per-iteration loops; see `simplex.rs`'s `solve_lp_dual_on` module
+//! docs). Step 1 (`dedupe_rows`) is a single sequential scan over a
+//! shared `HashSet` by design regardless — which duplicate of an equal
+//! pair survives depends on scan order, so parallelizing it would make
+//! that choice (immaterial to correctness, since the kept row is an
+//! exact/scalar-multiple of the dropped one either way) nondeterministic
+//! between runs. Step 2's dense QR is faer-internal and, per the module
+//! docs above, already a cheap one-time cost given `p` is expected to be
+//! small.
 
 use std::collections::HashMap;
 use std::collections::HashSet;
 
 use faer::linalg::solvers::ColPivQr;
 use faer::Mat;
-use rayon::prelude::*;
 
 use crate::sparse::{csr_from_rows, Csr};
 
@@ -46,7 +49,6 @@ pub fn reduce_equalities(a: &Csr, b: &[f64], n: usize) -> (Csr, Vec<f64>) {
 
     let ar = a.as_ref();
     let rows: Vec<(Vec<(usize, f64)>, f64)> = (0..p)
-        .into_par_iter()
         .map(|i| {
             let row: Vec<(usize, f64)> = ar
                 .col_indices_of_row(i)
@@ -170,7 +172,6 @@ pub fn reduce_inequalities(g: &Csr, h: &[f64], n: usize) -> (Csr, Vec<f64>) {
 
     let gr = g.as_ref();
     let rows: Vec<(Vec<(usize, f64)>, f64)> = (0..m)
-        .into_par_iter()
         .map(|i| {
             let row: Vec<(usize, f64)> = gr.col_indices_of_row(i).zip(gr.values_of_row(i)).map(|(j, &v)| (j, v)).collect();
             (row, h[i])

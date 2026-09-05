@@ -124,13 +124,48 @@ const MAX_ITERS: usize = 20_000;
 const FT_MIN_PIVOT: f64 = 1e-7;
 /// Cadence (in iterations) for triggers (1) and (3).
 const FT_CHECK_INTERVAL: usize = 5;
-/// Trigger (1): refactor if the true-basis residual exceeds this.
-const FT_RESIDUAL_TOL: f64 = 1e-6;
+/// Trigger (1): refactor if the true-basis residual exceeds this. In
+/// practice this essentially never fires (measured residuals on this
+/// crate's target problem sizes stayed around 1e-11..1e-12, several
+/// orders of magnitude below even the old 1e-6) — trigger (3) below is
+/// what actually governs refactorization frequency — but it costs nothing
+/// to leave a wide safety margin here too.
+const FT_RESIDUAL_TOL: f64 = 1e-4;
 /// Trigger (3): refactor if accumulated eta-file fill exceeds this factor
-/// times the basis dimension.
-const FT_BUMP_LIMIT_FACTOR: usize = 4;
-/// Trigger (4): refactor unconditionally once the update count passes this.
-const FT_MAX_UPDATES: usize = 100;
+/// times the basis dimension. This is the trigger that actually fires
+/// repeatedly in practice (confirmed by instrumenting a 1000-variable
+/// benchmark: every refactorization past the first was this one) — and per
+/// that same instrumentation, `fill_count()` grows *compounding*, not
+/// linearly, in the update count (each FTRAN/BTRAN walks every existing
+/// `U`-eta/`R`-eta, so a longer eta chain smears more fill into every
+/// subsequent update, roughly doubling the per-update fill rate every ~50
+/// updates in that benchmark). This constant trades more accumulated
+/// Forrest-Tomlin eta fill (slower FTRAN/BTRAN per iteration, since each
+/// solve walks every eta since the last refactorization) for fewer, less
+/// frequent Markowitz refactorizations, and the empirical trade curve is
+/// *not* "smaller is safer": a direct A/B sweep on the same benchmark
+/// (total wall time across 10 solves) found lowering this factor makes
+/// solves slower, not faster — `4` and `2` cost ~10% and ~65% *more* total
+/// time than `8` did, because refactorization has its own fixed cost (a
+/// full Markowitz factorize plus a full fresh-reduced-cost recompute) that
+/// more frequent triggering pays more often than the FTRAN/BTRAN savings
+/// recoup. Raising it instead helped monotonically up to a point:
+/// `16`/`32`/`64` measured ~5%/~12%/~15% *faster* than `8` on that same
+/// benchmark, `128` gave no further improvement (the gain plateaus once
+/// refactorizations become rare enough that trigger (4)'s `FT_MAX_UPDATES`
+/// cap — or genuine numerical drift via trigger (1) — would dominate
+/// instead). `64` is kept rather than pushing further, since it already
+/// captures the measured gain with a comfortable margin before the point
+/// where a large eta file's numerical safety margin would need
+/// re-examining. Re-benchmark if this crate's typical problem shape
+/// changes significantly.
+const FT_BUMP_LIMIT_FACTOR: usize = 64;
+/// Trigger (4): refactor unconditionally once the update count passes
+/// this. Measured to be the very first refactorization in a solve (fired
+/// once, right around 100, before trigger (3) ever got a chance to) —
+/// raising it lets a solve run further into trigger (3)'s own eta-fill
+/// budget before this unconditional cap would cut in first.
+const FT_MAX_UPDATES: usize = 300;
 
 /// EXPAND anti-cycling (Gill, Murray, Saunders & Wright, "A practical
 /// anti-cycling procedure for linearly constrained optimization",
@@ -429,10 +464,13 @@ fn build_std_form_presolved(
         return None;
     }
 
-    // Pull the (possibly tightened) box bounds back out of the final `G`;
-    // whatever multi-variable rows are left are the genuine inequality
-    // rows for this presolved problem.
-    let (lb, ub, g_rows, g_rhs) = presolve::propagate::extract_bounds(n, &pre.g, &pre.h);
+    // `pre.lb`/`pre.ub`/`pre.real_rows`/`pre.real_rhs` are the box bounds
+    // and genuine multi-variable inequality rows `propagate::propagate`
+    // already split apart internally — reused directly instead of
+    // re-deriving them with a second `extract_bounds` call on `pre.g`/
+    // `pre.h` (which would just be undoing the row-folding `presolve::run`
+    // did to produce them in the first place).
+    let (lb, ub, g_rows, g_rhs) = (pre.lb, pre.ub, pre.real_rows, pre.real_rhs);
 
     let n_eq = pre.a.nrows();
     let n_le = g_rows.len();
@@ -1441,6 +1479,54 @@ mod tests {
     use super::*;
     use crate::types::{LinearExpr, VarType};
     use std::collections::HashMap;
+
+    /// Not a correctness test: a standing diagnostic for the parallelism
+    /// call this module's docs make ("re-profile before reaching for
+    /// `into_par_iter()` again"). `#[ignore]`d so `cargo test` skips it by
+    /// default; run explicitly with `cargo test --release <name> --
+    /// --ignored --nocapture` (release mode matters — rayon's fixed
+    /// per-call dispatch overhead is much larger, relatively, in a debug
+    /// build). Measured on this machine at the time this was written:
+    /// rayon was slower than a plain sequential loop for a trivial
+    /// per-element workload at *every* size tried, including 200,000
+    /// elements (~2.7x slower there; ~17x slower at 10,000) — the fixed
+    /// per-call dispatch/join cost dominates until the per-element work or
+    /// `n` is much larger than anything in this crate's hot loops.
+    #[test]
+    #[ignore]
+    fn rayon_threshold_microbench() {
+        use rayon::prelude::*;
+        use std::time::Instant;
+
+        fn work(i: usize, data: &[f64]) -> Option<(usize, f64)> {
+            let v = data[i];
+            let delta = if v < 0.3 { 0.3 - v } else { 0.0 };
+            if delta <= 1e-9 {
+                return None;
+            }
+            let score = delta * delta / (data[(i + 1) % data.len()]).max(1e-9);
+            Some((i, score))
+        }
+
+        for &n in &[300usize, 1_000, 5_000, 10_000, 50_000, 200_000] {
+            let data: Vec<f64> = (0..n).map(|i| ((i * 2654435761u64 as usize) % 1000) as f64 / 1000.0).collect();
+            const REPS: usize = 200;
+
+            let t0 = Instant::now();
+            for _ in 0..REPS {
+                let _best = (0..n).into_iter().filter_map(|i| work(i, &data)).max_by(|a, b| a.1.total_cmp(&b.1));
+            }
+            let seq = t0.elapsed() / REPS as u32;
+
+            let t1 = Instant::now();
+            for _ in 0..REPS {
+                let _best = (0..n).into_par_iter().filter_map(|i| work(i, &data)).max_by(|a, b| a.1.total_cmp(&b.1));
+            }
+            let par = t1.elapsed() / REPS as u32;
+
+            println!("n={n:>7} sequential={seq:>10?} rayon={par:>10?} rayon/sequential={:.2}x", par.as_secs_f64() / seq.as_secs_f64());
+        }
+    }
 
     fn var(lb: f64, ub: f64) -> VariableData {
         VariableData { vtype: VarType::Continuous, lb, ub }

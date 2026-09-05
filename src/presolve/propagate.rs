@@ -25,27 +25,28 @@
 //! re-derives activities from whatever bounds were tightened so far — the
 //! paper itself only does one round per presolve pass to keep the process
 //! finite, see §3.2's `x1 - a*x2 = 0` example), and rebuilds `G`/`h` from
-//! the surviving rows plus fresh bound rows. `simplex.rs` calls
-//! [`extract_bounds`] again on the final, post-propagation `G`/`h` to pull
-//! the (possibly tightened) box bounds back out as `StdForm`'s explicit
-//! `lb`/`ub` — a variable's bound becomes a bound, not an extra
-//! constraint row with its own slack.
+//! the surviving rows plus fresh bound rows for `interior_point`'s sake
+//! (which wants bounds folded into `G` throughout). [`PropagateResult`]
+//! *also* carries the already-split `lb`/`ub`/`real_rows`/`real_rhs`
+//! directly, so `simplex.rs` (which wants bounds as `StdForm`'s own
+//! explicit `lb`/`ub`, not folded into a row with its own slack) can use
+//! those as-is instead of calling [`extract_bounds`] a second time on the
+//! just-rebuilt `g`/`h` to undo the very folding this function just did.
 //!
 //! **Parallelization**: [`extract_bounds`] is a scatter (any row can
-//! tighten any variable's bound) rather than a per-row-independent map,
-//! so — like `scaling::compute`'s column-norm accumulation — it uses
-//! rayon's fold/reduce: each thread folds its own rows into a private
-//! `lb`/`ub`/`rows`/`rhs` accumulator, and accumulators are merged with an
-//! elementwise min/max (for the bounds) or concatenation (for the row
-//! lists) at the end, so two rows tightening the same variable's bound
-//! never race. The main §3.1/§3.2 pass loop in [`propagate`] is
-//! deliberately left sequential: it is Gauss-Seidel by design (each row
+//! tighten any variable's bound), so a naive per-row-parallel write would
+//! race; a rayon fold/reduce would avoid the race (like
+//! `scaling::compute`'s column-norm accumulation once did) but, per
+//! profiling on this crate's target problem sizes, costs more in
+//! dispatch overhead than this scan itself — so it runs as a single
+//! sequential pass instead (see `simplex.rs`'s `solve_lp_dual_on` module
+//! docs for the same finding elsewhere). The main §3.1/§3.2 pass loop in
+//! [`propagate`] is sequential for an unrelated, non-negotiable reason
+//! regardless of problem size: it is Gauss-Seidel by design (each row
 //! reads whatever `lb`/`ub` the *previous* rows in the *same* pass already
 //! tightened), so parallelizing across rows would change which bounds are
 //! visible to which row and alter the pass's convergence behavior, not
 //! just its speed.
-
-use rayon::prelude::*;
 
 use crate::sparse::{csr_from_rows, Csr};
 
@@ -54,31 +55,18 @@ const EPS: f64 = 1e-9;
 pub struct PropagateResult {
     pub g: Csr,
     pub h: Vec<f64>,
+    /// The same bounds already folded into `g`/`h` as single-variable
+    /// rows, pulled back out — see the module docs for why this saves
+    /// callers like `simplex.rs` a redundant `extract_bounds` call.
+    pub lb: Vec<f64>,
+    pub ub: Vec<f64>,
+    /// The final surviving multi-variable rows, *not* re-folded with the
+    /// bound rows the way `g`/`h` are — i.e. `g`/`h` minus its
+    /// single-variable rows, equivalently `extract_bounds(n, &g, &h)`'s
+    /// 3rd/4th return values, computed once here instead of twice.
+    pub real_rows: Vec<Vec<(usize, f64)>>,
+    pub real_rhs: Vec<f64>,
     pub infeasible: bool,
-}
-
-/// One thread's share of `extract_bounds`'s work: a private `lb`/`ub` pair
-/// plus whatever multi-variable rows it happened to see, merged with its
-/// siblings in `merge_partial_bounds` once every row has been folded in.
-struct PartialBounds {
-    lb: Vec<f64>,
-    ub: Vec<f64>,
-    rows: Vec<Vec<(usize, f64)>>,
-    rhs: Vec<f64>,
-}
-
-fn empty_partial_bounds(n: usize) -> PartialBounds {
-    PartialBounds { lb: vec![f64::NEG_INFINITY; n], ub: vec![f64::INFINITY; n], rows: Vec::new(), rhs: Vec::new() }
-}
-
-fn merge_partial_bounds(mut a: PartialBounds, b: PartialBounds) -> PartialBounds {
-    for j in 0..a.lb.len() {
-        a.lb[j] = a.lb[j].max(b.lb[j]);
-        a.ub[j] = a.ub[j].min(b.ub[j]);
-    }
-    a.rows.extend(b.rows);
-    a.rhs.extend(b.rhs);
-    a
 }
 
 /// Splits `G x <= h` into its explicit single-variable bound rows
@@ -88,32 +76,30 @@ fn merge_partial_bounds(mut a: PartialBounds, b: PartialBounds) -> PartialBounds
 /// row shape (`row.len() == 1`), not by position — works on `G` before or
 /// after propagation, or on `G` built directly by `build_a_g`.
 pub fn extract_bounds(n: usize, g: &Csr, h: &[f64]) -> (Vec<f64>, Vec<f64>, Vec<Vec<(usize, f64)>>, Vec<f64>) {
+    let mut lb = vec![f64::NEG_INFINITY; n];
+    let mut ub = vec![f64::INFINITY; n];
+    let mut rows: Vec<Vec<(usize, f64)>> = Vec::new();
+    let mut rhs: Vec<f64> = Vec::new();
+
     let gr = g.as_ref();
-    let result = (0..gr.nrows())
-        .into_par_iter()
-        .fold(
-            || empty_partial_bounds(n),
-            |mut acc, i| {
-                let row: Vec<(usize, f64)> = gr.col_indices_of_row(i).zip(gr.values_of_row(i)).map(|(j, &v)| (j, v)).collect();
-                if row.len() == 1 {
-                    let (j, v) = row[0];
-                    let bound = h[i] / v;
-                    if v > 0.0 {
-                        if bound < acc.ub[j] {
-                            acc.ub[j] = bound;
-                        }
-                    } else if bound > acc.lb[j] {
-                        acc.lb[j] = bound;
-                    }
-                } else {
-                    acc.rows.push(row);
-                    acc.rhs.push(h[i]);
+    for i in 0..gr.nrows() {
+        let row: Vec<(usize, f64)> = gr.col_indices_of_row(i).zip(gr.values_of_row(i)).map(|(j, &v)| (j, v)).collect();
+        if row.len() == 1 {
+            let (j, v) = row[0];
+            let bound = h[i] / v;
+            if v > 0.0 {
+                if bound < ub[j] {
+                    ub[j] = bound;
                 }
-                acc
-            },
-        )
-        .reduce(|| empty_partial_bounds(n), merge_partial_bounds);
-    (result.lb, result.ub, result.rows, result.rhs)
+            } else if bound > lb[j] {
+                lb[j] = bound;
+            }
+        } else {
+            rows.push(row);
+            rhs.push(h[i]);
+        }
+    }
+    (lb, ub, rows, rhs)
 }
 
 /// A variable's own two folded-in bound rows can contradict each other —
@@ -128,14 +114,22 @@ pub fn extract_bounds(n: usize, g: &Csr, h: &[f64]) -> (Vec<f64>, Vec<f64>, Vec<
 /// "fix" an already-inconsistent variable to one of its two contradictory
 /// bounds, silently discarding the other and erasing the infeasibility.
 pub fn bounds_inconsistent(n: usize, lb: &[f64], ub: &[f64]) -> bool {
-    (0..n).into_par_iter().any(|j| lb[j] > ub[j] + EPS)
+    (0..n).any(|j| lb[j] > ub[j] + EPS)
 }
 
 pub fn propagate(n: usize, g: &Csr, h: &[f64], passes: usize) -> PropagateResult {
     let (mut lb, mut ub, mut rows, mut rhs) = extract_bounds(n, g, h);
 
     if bounds_inconsistent(n, &lb, &ub) {
-        return PropagateResult { g: csr_from_rows(&[], n), h: Vec::new(), infeasible: true };
+        return PropagateResult {
+            g: csr_from_rows(&[], n),
+            h: Vec::new(),
+            lb: Vec::new(),
+            ub: Vec::new(),
+            real_rows: Vec::new(),
+            real_rhs: Vec::new(),
+            infeasible: true,
+        };
     }
 
     let mut infeasible = false;
@@ -240,12 +234,16 @@ pub fn propagate(n: usize, g: &Csr, h: &[f64], passes: usize) -> PropagateResult
         return PropagateResult {
             g: csr_from_rows(&[], n),
             h: Vec::new(),
+            lb: Vec::new(),
+            ub: Vec::new(),
+            real_rows: Vec::new(),
+            real_rhs: Vec::new(),
             infeasible: true,
         };
     }
 
-    let (new_g, new_h) = rebuild_g(n, rows, rhs, &lb, &ub);
-    PropagateResult { g: new_g, h: new_h, infeasible: false }
+    let (new_g, new_h) = rebuild_g(n, rows.clone(), rhs.clone(), &lb, &ub);
+    PropagateResult { g: new_g, h: new_h, lb, ub, real_rows: rows, real_rhs: rhs, infeasible: false }
 }
 
 /// Rebuilds `G x <= h` from a set of "real" (multi-variable) rows plus a

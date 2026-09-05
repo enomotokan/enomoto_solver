@@ -19,6 +19,22 @@
 //! acceptable MVP trade-off given this module also implements incremental
 //! Forrest-Tomlin updates (`ft_update`) specifically so that a full
 //! Markowitz refactorization is *not* needed on every basis change.
+//!
+//! Within that `O(m * nnz)` shape, three constant-factor costs turned out
+//! to matter in practice (profiling on this crate's target problem sizes
+//! showed even a *trivial* (identity-matrix) factorization costing over a
+//! millisecond): column and row nonzero counts were each recomputed by a
+//! *separate* full scan of the active submatrix every step (row counts a
+//! second time, via a `.filter().count()` inside the pivot search that
+//! re-did exactly what the column-stats scan had just done); the
+//! column-stats buffers were freshly heap-allocated (`vec![0; m]`) every
+//! step instead of being cleared and reused; and the elimination step
+//! walked every row index `0..m` unconditionally (skipping used ones)
+//! rather than only the rows still actually active. None of these change
+//! *which* pivot gets chosen (same Markowitz-count-then-magnitude rule,
+//! same stability floor) — they only remove redundant scanning,
+//! reallocation, and dead iterations, so the resulting factors (and every
+//! downstream `solve`/`solve_transpose`/FT-update result) are unchanged.
 
 use std::collections::HashMap;
 
@@ -63,45 +79,62 @@ pub fn factorize(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuFactors> {
     let mut l_entries: Vec<(usize, usize, f64)> = Vec::new(); // (orig_row, pivot_step, multiplier)
     let mut u_entries: Vec<(usize, usize, f64)> = Vec::new(); // (pivot_step, orig_col, value)
 
+    // Reused across every step instead of freshly heap-allocated each
+    // time — `.fill()` below is a plain memset-like sweep, no allocator
+    // call.
+    let mut col_count = vec![0usize; m];
+    let mut col_max_abs = vec![0.0f64; m];
+    let mut row_count = vec![0usize; m];
+    // Still-active row indices, swap-removed as rows are consumed, so
+    // every loop below only ever visits rows that are actually still in
+    // play instead of walking `0..m` and skipping used ones every step.
+    // `row_pos[i]` tracks row `i`'s current slot in `active_rows` so that
+    // removal is O(1) (swap with the last slot, then fix up whichever row
+    // got moved into `i`'s old spot) rather than an O(active rows) linear
+    // search for `i` every step.
+    let mut active_rows: Vec<usize> = (0..m).collect();
+    let mut row_pos: Vec<usize> = (0..m).collect();
+
     for step in 0..m {
-        let mut col_count = vec![0usize; m];
-        let mut col_max_abs = vec![0.0f64; m];
-        for (i, row) in rows.iter().enumerate() {
-            if row_used[i] {
-                continue;
-            }
-            for (&j, &v) in row {
+        col_count.fill(0);
+        col_max_abs.fill(0.0);
+
+        // One pass computes column *and* row statistics together — the
+        // original computed column stats here, then recomputed row counts
+        // a second time (via `.filter().count()`) while searching for the
+        // best pivot below. Same counts, half the scanning.
+        for &i in &active_rows {
+            let mut count = 0usize;
+            for (&j, &v) in &rows[i] {
                 if col_used[j] || v == 0.0 {
                     continue;
                 }
+                count += 1;
                 col_count[j] += 1;
                 let av = v.abs();
                 if av > col_max_abs[j] {
                     col_max_abs[j] = av;
                 }
             }
+            row_count[i] = count;
         }
 
         let mut best: Option<(usize, usize)> = None;
         let mut best_score = usize::MAX;
         let mut best_pivot_abs = 0.0f64;
 
-        for (i, row) in rows.iter().enumerate() {
-            if row_used[i] {
+        for &i in &active_rows {
+            if row_count[i] == 0 {
                 continue;
             }
-            let row_count = row.iter().filter(|&(&j, &v)| !col_used[j] && v != 0.0).count();
-            if row_count == 0 {
-                continue;
-            }
-            for (&j, &v) in row {
+            for (&j, &v) in &rows[i] {
                 if col_used[j] || v == 0.0 {
                     continue;
                 }
                 if v.abs() < STABILITY * col_max_abs[j] {
                     continue; // fails the numerical stability floor
                 }
-                let score = (row_count - 1) * (col_count[j] - 1);
+                let score = (row_count[i] - 1) * (col_count[j] - 1);
                 if score < best_score || (score == best_score && v.abs() > best_pivot_abs) {
                     best_score = score;
                     best = Some((i, j));
@@ -115,6 +148,11 @@ pub fn factorize(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuFactors> {
         col_used[pj] = true;
         row_perm[step] = pi;
         col_perm[step] = pj;
+        let pi_pos = row_pos[pi];
+        let last = active_rows.len() - 1;
+        active_rows.swap(pi_pos, last);
+        row_pos[active_rows[pi_pos]] = pi_pos;
+        active_rows.pop();
 
         let pivot_val = *rows[pi].get(&pj).unwrap();
         let pivot_row_snapshot: Vec<(usize, f64)> = rows[pi]
@@ -126,10 +164,7 @@ pub fn factorize(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuFactors> {
             u_entries.push((step, j, v));
         }
 
-        for i in 0..m {
-            if row_used[i] || i == pi {
-                continue;
-            }
+        for &i in &active_rows {
             let Some(&aij) = rows[i].get(&pj) else { continue };
             if aij == 0.0 {
                 continue;

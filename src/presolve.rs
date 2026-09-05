@@ -38,17 +38,20 @@
 //! ever called — see that module's docs for why it needs to stay in
 //! original (pre-scaling) units.
 //!
-//! `simplex.rs` additionally calls [`propagate::extract_bounds`] on the
-//! *final* `G`/`h` this pipeline returns, to pull the (possibly tightened)
-//! box bounds back out as `StdForm`'s explicit `lb`/`ub` rather than
-//! leaving them as constraint rows with their own slack — a variable's
-//! bound is represented as a bound, in both engines, not as an extra
-//! artificial/slack variable. The genuinely remaining multi-variable rows
-//! become ordinary `Eq`/`Le` rows, handled by whatever feasibility
-//! mechanism each engine already has (interior-point's central-path
-//! Newton iteration; the simplex method's own phase 1 / dual-feasible
-//! crash) — this pipeline introduces no new variable of its own to either
-//! engine's standard form.
+//! `simplex.rs` builds `StdForm`'s explicit `lb`/`ub` (rather than leaving
+//! bounds as constraint rows with their own slack — a variable's bound is
+//! represented as a bound, in both engines, not as an extra artificial/
+//! slack variable) straight from [`PresolveResult`]'s own `lb`/`ub`/
+//! `real_rows`/`real_rhs` fields — the same split [`propagate::propagate`]
+//! already computed internally, exposed here instead of `simplex.rs`
+//! re-deriving it with its own [`propagate::extract_bounds`] call on the
+//! just-rebuilt `g`/`h`. The genuinely remaining multi-variable rows
+//! (`real_rows`/`real_rhs`) become ordinary `Eq`/`Le` rows, handled by
+//! whatever feasibility mechanism each engine already has (interior-
+//! point's central-path Newton iteration, which uses `g`/`h` instead since
+//! it wants bounds folded in; the simplex method's own phase 1 / dual-
+//! feasible crash) — this pipeline introduces no new variable of its own
+//! to either engine's standard form.
 
 pub mod colsingleton;
 pub mod dualfix;
@@ -112,12 +115,23 @@ pub fn build_a_g(variables: &[VariableData], constraints: &[ConstraintRow]) -> (
 /// and an `infeasible` flag `propagate` can raise directly (an activity
 /// bound proving a row can never be satisfied) without either engine
 /// having to run its own solve loop first.
+///
+/// `g`/`h` fold bounds back in as single-variable rows (what
+/// `interior_point` wants); `lb`/`ub`/`real_rows`/`real_rhs` are the same
+/// information already split apart (what `simplex.rs` wants) — both are
+/// `propagate::propagate`'s own final state, carried through here so
+/// callers needing the split form never have to re-derive it with a
+/// second `propagate::extract_bounds` call on `g`/`h`.
 pub struct PresolveResult {
     pub scaling: Scaling,
     pub a: Csr,
     pub b: Vec<f64>,
     pub g: Csr,
     pub h: Vec<f64>,
+    pub lb: Vec<f64>,
+    pub ub: Vec<f64>,
+    pub real_rows: Vec<Vec<(usize, f64)>>,
+    pub real_rhs: Vec<f64>,
     pub c: Vec<f64>,
     pub infeasible: bool,
 }
@@ -142,7 +156,19 @@ pub fn run(n: usize, a: &Csr, b: &[f64], g: &Csr, h: &[f64], c: &[f64], ruiz_ite
     // infeasibility that must be reported directly, not smoothed over by
     // "fixing" a variable to one of its two contradictory bounds.
     if propagate::bounds_inconsistent(n, &lb0, &ub0) {
-        return PresolveResult { scaling: sc, a, b, g: csr_from_rows(&[], n), h: Vec::new(), c, infeasible: true };
+        return PresolveResult {
+            scaling: sc,
+            a,
+            b,
+            g: csr_from_rows(&[], n),
+            h: Vec::new(),
+            lb: Vec::new(),
+            ub: Vec::new(),
+            real_rows: Vec::new(),
+            real_rhs: Vec::new(),
+            c,
+            infeasible: true,
+        };
     }
     let fixes = dualfix::fix_dominated_variables(n, &a, &real_rows, &c, &lb0, &ub0);
     let (g, h) = if fixes.is_empty() {
@@ -159,5 +185,17 @@ pub fn run(n: usize, a: &Csr, b: &[f64], g: &Csr, h: &[f64], c: &[f64], ruiz_ite
 
     let prop = propagate::propagate(n, &g, &h, prop_passes);
 
-    PresolveResult { scaling: sc, a, b, g: prop.g, h: prop.h, c, infeasible: prop.infeasible }
+    PresolveResult {
+        scaling: sc,
+        a,
+        b,
+        g: prop.g,
+        h: prop.h,
+        lb: prop.lb,
+        ub: prop.ub,
+        real_rows: prop.real_rows,
+        real_rhs: prop.real_rhs,
+        c,
+        infeasible: prop.infeasible,
+    }
 }
