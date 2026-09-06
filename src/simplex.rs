@@ -489,14 +489,24 @@ const PROPAGATION_PASSES: usize = 2;
 /// chains ever run all the way to the cap).
 const PRESOLVE_ROUNDS: usize = 10;
 /// Upper bound on how many times each outer `PRESOLVE_ROUNDS` pass itself
-/// cycles through row-singleton → doubleton → colsingleton before
-/// `propagate`/`dualfix` run again — see `presolve::run_extended`'s own
-/// docs for why this inner triplet can have more to find after its own
-/// first pass (e.g. colsingleton eliminating a variable turning a row
-/// doubleton had no reason to touch into a fresh row singleton), and for
-/// the fixpoint check that stops it short of this cap once a pass finds
-/// nothing left to do.
-const SINGLETON_DOUBLETON_INNER_ROUNDS: usize = 4;
+/// cycles through row-singleton <-> colsingleton before `propagate`/
+/// `dualfix` run again — see `presolve::run_extended`'s own docs for why
+/// this inner pair can have more to find after its own first pass (e.g.
+/// colsingleton eliminating a variable turning a row rowsingleton had no
+/// reason to touch into a fresh row singleton), for why `doubleton` isn't
+/// part of this inner repetition (measured net regression when it was),
+/// and for the fixpoint check that stops this loop short of its own cap
+/// once a pass finds nothing left to do.
+const ROWSINGLETON_COLSINGLETON_INNER_ROUNDS: usize = 1;
+/// Upper bound on how many *outer* `PRESOLVE_ROUNDS` passes run
+/// `doubleton` at all (once per such pass) — see
+/// `presolve::run_extended`'s own docs for the measurement that settled on
+/// `2`: running it every round cost more than it returned on several
+/// instances, capping it to only the first round improved the aggregate
+/// but made a couple of instances (`fffff800`, `tuff`) substantially
+/// worse, and extending the cap to the first two rounds recovered those
+/// while keeping most of the aggregate gain.
+const DOUBLETON_ROUNDS: usize = 2;
 
 /// Runs the shared presolve pipeline (`crate::presolve`: Ruiz scaling,
 /// redundant-equality removal, then inequality propagation) and builds
@@ -545,7 +555,7 @@ fn build_std_form_presolved(
 
     let (a, b, g, h) = presolve::build_a_g(variables, constraints);
 
-    let pre = presolve::run_extended(n, &a, &b, &g, &h, &c0, RUIZ_ITERS, PROPAGATION_PASSES, PRESOLVE_ROUNDS, SINGLETON_DOUBLETON_INNER_ROUNDS);
+    let pre = presolve::run_extended(n, &a, &b, &g, &h, &c0, RUIZ_ITERS, PROPAGATION_PASSES, PRESOLVE_ROUNDS, ROWSINGLETON_COLSINGLETON_INNER_ROUNDS, DOUBLETON_ROUNDS);
     if pre.infeasible {
         return None;
     }
