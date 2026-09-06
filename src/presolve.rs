@@ -24,9 +24,20 @@
 //!      and dropping/detecting redundant/infeasible rows) →
 //!      [`dualfix::fix_dominated_variables`] (fixes any variable whose
 //!      objective cost prefers a direction no real row resists, straight
-//!      off the coefficient matrix) → [`rowsingleton`] → [`doubleton`] →
-//!      [`colsingleton`], repeated for `rounds` passes since each one can
-//!      expose a reduction the previous one couldn't yet see.
+//!      off the coefficient matrix) → an *inner* fixpoint of
+//!      [`rowsingleton`] → [`doubleton`] → [`colsingleton`] (up to
+//!      `inner_rounds` times, without repaying `propagate`/`dualfix`'s own
+//!      cost — colsingleton eliminating a variable can turn a row
+//!      doubleton had no reason to touch into a fresh row singleton, so
+//!      this triplet alone can have more to find after its own first
+//!      pass), the whole thing repeated for up to `rounds` outer passes
+//!      since a bound `propagate` tightens can unlock a `dualfix`/
+//!      singleton/doubleton reduction the previous outer pass couldn't yet
+//!      see. Both loops stop early, before their own cap, once a pass
+//!      changes neither row count nor (for the outer loop) any bound — a
+//!      fixpoint: every stage here is a deterministic function of exactly
+//!      that state, so a pass that changes nothing leaves nothing for a
+//!      further pass to find either.
 //!
 //! [`run_extended`] packages exactly this sequence into the one call site
 //! both `simplex.rs` and `interior_point.rs` use, and returns every
@@ -178,17 +189,19 @@ fn extended_infeasible(sc: Scaling, a: Csr, b: Vec<f64>, c: Vec<f64>, n: usize) 
 }
 
 /// The shared pipeline both `simplex.rs` and `interior_point.rs` call
-/// directly: Ruiz scaling + redundant-row removal, then `rounds`
-/// repetitions of [`propagate::propagate`] (bound tightening) →
-/// [`dualfix`] → row-singleton fixing ([`rowsingleton`]) →
-/// doubleton-equality substitution ([`doubleton`]) → column-singleton
-/// substitution ([`colsingleton`]), each stage able to unlock more of the
-/// next: a bound propagate tightens can turn an infinite bound finite
-/// (letting `dualfix` fix a previously-ineligible variable), and either
-/// substitution pass can drop a row or zero out a variable's last
-/// remaining appearance (letting `dualfix`'s structural lock-counts or a
-/// later singleton/doubleton pass find something a single round never
-/// would).
+/// directly: Ruiz scaling + redundant-row removal, then up to `rounds`
+/// outer repetitions of [`propagate::propagate`] (bound tightening) →
+/// [`dualfix`] → up to `inner_rounds` *inner* repetitions of row-singleton
+/// fixing ([`rowsingleton`]) → doubleton-equality substitution
+/// ([`doubleton`]) → column-singleton substitution ([`colsingleton`]),
+/// each stage able to unlock more of the next: a bound propagate tightens
+/// can turn an infinite bound finite (letting `dualfix` fix a
+/// previously-ineligible variable), and either substitution pass can drop
+/// a row or zero out a variable's last remaining appearance (letting
+/// `dualfix`'s structural lock-counts, a later outer round, or — the
+/// inner loop's own reason to exist — the very next
+/// rowsingleton/doubleton/colsingleton pass in the *same* round find
+/// something the one before it never would).
 ///
 /// `colsingleton` used to be the one piece of this run *before* scaling
 /// (in original, unscaled units) as `simplex.rs`'s own separate pre-step;
@@ -208,6 +221,7 @@ pub fn run_extended(
     ruiz_iters: usize,
     prop_passes: usize,
     rounds: usize,
+    inner_rounds: usize,
 ) -> ExtendedPresolveResult {
     // One-off, env-var-gated wall-clock breakdown of this function's own
     // major steps — `ENOMOTO_PROF_PHASES`'s `solve_lp_dual` timer starts
@@ -245,6 +259,14 @@ pub fn run_extended(
 
     let mut substitutions: Vec<colsingleton::Substitution> = Vec::new();
 
+    // Fixpoint detection: a round that leaves `a`/`g`'s row counts and
+    // every bound unchanged found nothing a further round could act on
+    // either (every stage here is a deterministic, pure function of
+    // exactly this state), so it's safe to stop before `rounds` even on a
+    // round that runs the full stage sequence but accomplishes nothing —
+    // this is what turns `rounds` from "run exactly this many times" into
+    // "run at most this many times, fewer if convergence comes first".
+    let mut prev_signature: Option<(usize, usize, Vec<f64>, Vec<f64>)> = None;
     for _round in 0..rounds.max(1) {
         let prop = timed_step!("propagate", propagate::propagate(n, &g, &h, prop_passes));
         if prop.infeasible {
@@ -252,75 +274,105 @@ pub fn run_extended(
         }
         let mut lb = prop.lb;
         let mut ub = prop.ub;
+        let real_rows = prop.real_rows;
+        let real_rhs = prop.real_rhs;
 
-        let fixes = timed_step!("dualfix", dualfix::fix_dominated_variables(n, &a, &prop.real_rows, &c, &lb, &ub));
+        let fixes = timed_step!("dualfix", dualfix::fix_dominated_variables(n, &a, &real_rows, &c, &lb, &ub));
         for &(j, value) in &fixes {
             lb[j] = value;
             ub[j] = value;
         }
 
-        let rs = timed_step!("rowsingleton", rowsingleton::fix_singleton_equalities(n, &a, &b, &lb, &ub));
-        if rs.infeasible {
-            return extended_infeasible(sc, a, b, c, n);
-        }
-        for &(j, value) in &rs.fixes {
-            lb[j] = value;
-            ub[j] = value;
-        }
-        a = rs.a;
-        b = rs.b;
-
-        let (ng, nh) = propagate::rebuild_g(n, prop.real_rows, prop.real_rhs, &lb, &ub);
-        g = ng;
-        h = nh;
-
-        let dbl = timed_step!("doubleton", doubleton::eliminate_doubleton_equalities(n, &a, &b, &g, &h, &c));
-        a = dbl.a;
-        b = dbl.b;
-        g = dbl.g;
-        h = dbl.h;
-        c = dbl.c;
-        substitutions.extend(dbl.substitutions);
-
-        let cs = timed_step!("colsingleton", colsingleton::eliminate_singleton_equalities(n, &a, &b, &g, &h, &c));
-        a = cs.a;
-        b = cs.b;
-        c = cs.c;
-        if !cs.substitutions.is_empty() {
-            // Drop each eliminated variable's own (now-stale) box-bound
-            // rows from `g` before folding in `cs.extra_g_rows` — unlike
-            // `doubleton` (which never adds these rows back for an
-            // eliminated variable in the first place), `colsingleton`
-            // doesn't touch `g`'s existing rows at all, so its eliminated
-            // variable's original bound rows would otherwise survive
-            // untouched: a "phantom" column with zero cost and no `A`
-            // appearances, but *still* carrying its real finite bounds, is
-            // free to sit anywhere in that (possibly huge, post-Ruiz-
-            // scaling) range without affecting feasibility or the
-            // objective — harmless on its own, but exactly the kind of
-            // leftover structure that let a *later* round's `dualfix` (see
-            // its own module docs on this) or a subsequent chain step
-            // reason about this variable as if it still had independent
-            // degrees of freedom, instead of the single value its own
-            // substitution now fully determines.
-            let eliminated_this_pass: std::collections::BTreeSet<usize> = cs.substitutions.iter().map(|s| s.var).collect();
-            let gr = g.as_ref();
-            let mut g_rows: Vec<Vec<(usize, f64)>> = Vec::with_capacity(gr.nrows() + cs.extra_g_rows.len());
-            let mut h_vec: Vec<f64> = Vec::with_capacity(gr.nrows() + cs.extra_h.len());
-            for i in 0..gr.nrows() {
-                let row: Vec<(usize, f64)> = gr.col_indices_of_row(i).zip(gr.values_of_row(i)).map(|(j, &v)| (j, v)).collect();
-                if row.len() == 1 && eliminated_this_pass.contains(&row[0].0) {
-                    continue;
-                }
-                g_rows.push(row);
-                h_vec.push(h[i]);
+        // Inner fixpoint: rowsingleton -> doubleton -> colsingleton, up to
+        // `inner_rounds` times within this same outer round (before
+        // `propagate`/`dualfix` run again) — each of the three can expose
+        // a fresh singleton/doubleton structure for the *next* one in the
+        // same triplet to act on (e.g. colsingleton eliminating a variable
+        // can turn a row doubleton had no reason to touch into a row
+        // singleton), the same "later step unlocks an earlier one" logic
+        // the outer round loop already relies on, just at a finer grain
+        // and without repaying `propagate`'s own cost each time. Stops
+        // early on the same row-count fixpoint signature the outer loop
+        // uses (cheaper here: `lb`/`ub` aren't touched by doubleton/
+        // colsingleton, only by `rowsingleton`'s own `fixes`, already
+        // folded in before the signature is taken).
+        let mut inner_prev_signature: Option<(usize, usize)> = None;
+        for _inner in 0..inner_rounds.max(1) {
+            let rs = timed_step!("rowsingleton", rowsingleton::fix_singleton_equalities(n, &a, &b, &lb, &ub));
+            if rs.infeasible {
+                return extended_infeasible(sc, a, b, c, n);
             }
-            g_rows.extend(cs.extra_g_rows);
-            h_vec.extend(cs.extra_h);
-            g = csr_from_rows(&g_rows, n);
-            h = h_vec;
+            for &(j, value) in &rs.fixes {
+                lb[j] = value;
+                ub[j] = value;
+            }
+            a = rs.a;
+            b = rs.b;
+
+            let (ng, nh) = propagate::rebuild_g(n, real_rows.clone(), real_rhs.clone(), &lb, &ub);
+            g = ng;
+            h = nh;
+
+            let dbl = timed_step!("doubleton", doubleton::eliminate_doubleton_equalities(n, &a, &b, &g, &h, &c));
+            a = dbl.a;
+            b = dbl.b;
+            g = dbl.g;
+            h = dbl.h;
+            c = dbl.c;
+            substitutions.extend(dbl.substitutions);
+
+            let cs = timed_step!("colsingleton", colsingleton::eliminate_singleton_equalities(n, &a, &b, &g, &h, &c));
+            a = cs.a;
+            b = cs.b;
+            c = cs.c;
+            if !cs.substitutions.is_empty() {
+                // Drop each eliminated variable's own (now-stale) box-bound
+                // rows from `g` before folding in `cs.extra_g_rows` — unlike
+                // `doubleton` (which never adds these rows back for an
+                // eliminated variable in the first place), `colsingleton`
+                // doesn't touch `g`'s existing rows at all, so its eliminated
+                // variable's original bound rows would otherwise survive
+                // untouched: a "phantom" column with zero cost and no `A`
+                // appearances, but *still* carrying its real finite bounds, is
+                // free to sit anywhere in that (possibly huge, post-Ruiz-
+                // scaling) range without affecting feasibility or the
+                // objective — harmless on its own, but exactly the kind of
+                // leftover structure that let a *later* round's `dualfix` (see
+                // its own module docs on this) or a subsequent chain step
+                // reason about this variable as if it still had independent
+                // degrees of freedom, instead of the single value its own
+                // substitution now fully determines.
+                let eliminated_this_pass: std::collections::BTreeSet<usize> = cs.substitutions.iter().map(|s| s.var).collect();
+                let gr = g.as_ref();
+                let mut g_rows: Vec<Vec<(usize, f64)>> = Vec::with_capacity(gr.nrows() + cs.extra_g_rows.len());
+                let mut h_vec: Vec<f64> = Vec::with_capacity(gr.nrows() + cs.extra_h.len());
+                for i in 0..gr.nrows() {
+                    let row: Vec<(usize, f64)> = gr.col_indices_of_row(i).zip(gr.values_of_row(i)).map(|(j, &v)| (j, v)).collect();
+                    if row.len() == 1 && eliminated_this_pass.contains(&row[0].0) {
+                        continue;
+                    }
+                    g_rows.push(row);
+                    h_vec.push(h[i]);
+                }
+                g_rows.extend(cs.extra_g_rows);
+                h_vec.extend(cs.extra_h);
+                g = csr_from_rows(&g_rows, n);
+                h = h_vec;
+            }
+            substitutions.extend(cs.substitutions);
+
+            let inner_signature = (a.nrows(), g.nrows());
+            if inner_prev_signature == Some(inner_signature) {
+                break;
+            }
+            inner_prev_signature = Some(inner_signature);
         }
-        substitutions.extend(cs.substitutions);
+
+        let signature = (a.nrows(), g.nrows(), lb.clone(), ub.clone());
+        if prev_signature.as_ref() == Some(&signature) {
+            break;
+        }
+        prev_signature = Some(signature);
     }
 
     let prop = timed_step!("final propagate", propagate::propagate(n, &g, &h, prop_passes));

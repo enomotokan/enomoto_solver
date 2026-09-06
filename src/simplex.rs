@@ -477,16 +477,26 @@ fn build_std_form(variables: &[VariableData], objective: &Objective, constraints
 const RUIZ_ITERS: usize = 10;
 /// Constraint-propagation passes per presolve round (`propagate::propagate`'s
 /// own internal bound-tightening loop — see its module docs for the §3.2
-/// activity-bound derivation each pass repeats). Set to 1 (was 2) to cut
-/// presolve's own runtime for the HiGHS comparison benchmark; a second
-/// pass only re-derives activities from bounds the first pass already
-/// tightened, at the cost of a full extra scan of every row.
-const PROPAGATION_PASSES: usize = 1;
-/// Number of times `presolve::run_extended` cycles through propagate →
-/// dualfix → row-singleton → doubleton → colsingleton — see that
-/// function's own docs for why later rounds can unlock reductions an
-/// earlier round's static structure couldn't yet see.
-const PRESOLVE_ROUNDS: usize = 1;
+/// activity-bound derivation each pass repeats).
+const PROPAGATION_PASSES: usize = 2;
+/// Upper bound on how many times `presolve::run_extended` cycles through
+/// propagate → dualfix → row-singleton → doubleton → colsingleton — see
+/// that function's own docs for why later rounds can unlock reductions an
+/// earlier round's static structure couldn't yet see, and for the
+/// fixpoint check that stops it short of this cap once a round finds
+/// nothing left to do (so raising this constant costs nothing on a
+/// problem that stops converging early — only genuinely deep elimination
+/// chains ever run all the way to the cap).
+const PRESOLVE_ROUNDS: usize = 10;
+/// Upper bound on how many times each outer `PRESOLVE_ROUNDS` pass itself
+/// cycles through row-singleton → doubleton → colsingleton before
+/// `propagate`/`dualfix` run again — see `presolve::run_extended`'s own
+/// docs for why this inner triplet can have more to find after its own
+/// first pass (e.g. colsingleton eliminating a variable turning a row
+/// doubleton had no reason to touch into a fresh row singleton), and for
+/// the fixpoint check that stops it short of this cap once a pass finds
+/// nothing left to do.
+const SINGLETON_DOUBLETON_INNER_ROUNDS: usize = 4;
 
 /// Runs the shared presolve pipeline (`crate::presolve`: Ruiz scaling,
 /// redundant-equality removal, then inequality propagation) and builds
@@ -535,7 +545,7 @@ fn build_std_form_presolved(
 
     let (a, b, g, h) = presolve::build_a_g(variables, constraints);
 
-    let pre = presolve::run_extended(n, &a, &b, &g, &h, &c0, RUIZ_ITERS, PROPAGATION_PASSES, PRESOLVE_ROUNDS);
+    let pre = presolve::run_extended(n, &a, &b, &g, &h, &c0, RUIZ_ITERS, PROPAGATION_PASSES, PRESOLVE_ROUNDS, SINGLETON_DOUBLETON_INNER_ROUNDS);
     if pre.infeasible {
         return None;
     }

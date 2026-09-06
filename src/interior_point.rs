@@ -64,11 +64,19 @@ const STALL_ITERS: usize = 8;
 /// how Gurobi's presolve caps propagation passes per presolve round rather
 /// than iterating to convergence.
 const PROPAGATION_PASSES: usize = 2;
-/// Number of times `presolve::run_extended` cycles through propagate →
-/// dualfix → row-singleton → doubleton → colsingleton — mirrors
-/// `simplex.rs`'s own `PRESOLVE_ROUNDS`, now that this module shares the
-/// same extended pipeline (see `solve`'s own docs for why).
-const PRESOLVE_ROUNDS: usize = 1;
+/// Upper bound on how many times `presolve::run_extended` cycles through
+/// propagate → dualfix → row-singleton → doubleton → colsingleton —
+/// mirrors `simplex.rs`'s own `PRESOLVE_ROUNDS` (see that constant's own
+/// docs for why this is a cap, not a fixed count: `run_extended` itself
+/// stops early once a round converges).
+const PRESOLVE_ROUNDS: usize = 10;
+/// Upper bound on how many times each outer `PRESOLVE_ROUNDS` pass itself
+/// cycles through row-singleton → doubleton → colsingleton before
+/// `propagate`/`dualfix` run again — mirrors `simplex.rs`'s own
+/// `SINGLETON_DOUBLETON_INNER_ROUNDS` (see that constant's own docs for
+/// why this inner triplet can have more to find after its own first pass,
+/// and for the fixpoint check that stops it short of this cap).
+const SINGLETON_DOUBLETON_INNER_ROUNDS: usize = 4;
 
 pub struct IpmResult {
     pub status: Status,
@@ -295,7 +303,7 @@ pub fn solve(qp: &QpStd) -> IpmResult {
     // Everything below operates on the scaled/reduced problem; `x` is
     // mapped back to original-variable space at every return site via
     // `unscale_with_substitutions`.
-    let pre = presolve::run_extended(n, &qp.a, &qp.b, &qp.g, &qp.h, &qp.c, 10, PROPAGATION_PASSES, PRESOLVE_ROUNDS);
+    let pre = presolve::run_extended(n, &qp.a, &qp.b, &qp.g, &qp.h, &qp.c, 10, PROPAGATION_PASSES, PRESOLVE_ROUNDS, SINGLETON_DOUBLETON_INNER_ROUNDS);
     if pre.infeasible {
         return IpmResult { status: Status::Infeasible, x: None };
     }
