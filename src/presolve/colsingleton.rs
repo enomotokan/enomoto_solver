@@ -32,6 +32,9 @@ use crate::presolve::propagate;
 use crate::sparse::{csr_from_rows, Csr};
 
 const TOL: f64 = 1e-9;
+/// Minimum `|coeff| / max|row|` for a column singleton to be substituted
+/// out — see the guard in `eliminate_singleton_equalities`.
+const SUBSTITUTION_PIVOT_RATIO: f64 = 1e-2;
 
 /// `x[var] = (rhs - sum(terms[k].1 * x[terms[k].0])) / coeff`, using the
 /// *other* variables' already-solved values.
@@ -130,6 +133,19 @@ pub fn eliminate_singleton_equalities(n: usize, a: &Csr, b: &[f64], g: &Csr, h: 
         let row = &a_rows[i];
         let coeff = row.iter().find(|&&(k, _)| k == j).unwrap().1;
         if coeff.abs() < TOL {
+            continue;
+        }
+        // Markowitz-style pivot guard (PaPILO applies the same kind of
+        // relative threshold before any substitution): solving the row for
+        // `x_j` divides every other coefficient by `coeff`, so a `coeff`
+        // that is tiny *relative to its own row* amplifies whatever
+        // residual the reduced problem is later solved to (`~1e-7`) by
+        // `max|row| / |coeff|` when `x_j` is recovered — measured on Netlib
+        // `modszk1` as ~1e-6 violations of the eliminated rows and an
+        // objective slightly *below* the true optimum. Such a column is
+        // simply left in the problem.
+        let row_max = row.iter().map(|&(_, v)| v.abs()).fold(0.0f64, f64::max);
+        if coeff.abs() < SUBSTITUTION_PIVOT_RATIO * row_max {
             continue;
         }
         let terms: Vec<(usize, f64)> = row.iter().filter(|&&(k, _)| k != j).cloned().collect();

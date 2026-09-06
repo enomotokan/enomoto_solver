@@ -10,7 +10,7 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use crate::mip::solve_mip;
 use crate::types::{ConstraintRow, LinearExpr, Objective, RootSolver, RowSense, Sense, Status, VarType, VariableData};
@@ -28,11 +28,11 @@ pub struct PyModel {
 
 /// Converts the `Vec<(variable_index, coefficient)>` pairs PyO3 hands
 /// across the FFI boundary (Python's `Function.coeffs.items()`) into a
-/// `LinearExpr`'s `HashMap` form, summing duplicate indices (so e.g.
+/// `LinearExpr`'s `BTreeMap` form, summing duplicate indices (so e.g.
 /// `x + x` and `2*x` produce the same coefficient) and rejecting any
 /// index outside the model's registered variable range.
 fn to_linear_expr(coeffs: Vec<(usize, f64)>, constant: f64, n_vars: usize) -> PyResult<LinearExpr> {
-    let mut map: HashMap<usize, f64> = HashMap::with_capacity(coeffs.len());
+    let mut map: BTreeMap<usize, f64> = BTreeMap::new();
     for (j, v) in coeffs {
         if j >= n_vars {
             return Err(PyValueError::new_err(format!(

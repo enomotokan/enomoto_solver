@@ -56,6 +56,17 @@ pub use crate::sparse::{mat_t_vec, mat_t_vec_into, mat_vec, mat_vec_into, Csr};
 /// cheap. Used for both the `_req` scratch-sizing call and the matching
 /// real call below — they must agree, since the scratch size faer reports
 /// depends on the parallelism strategy.
+///
+/// (A run-to-run nondeterminism investigation on a highly degenerate
+/// Netlib instance briefly disabled `faer`'s `rayon` feature crate-wide —
+/// tracing the residual nondeterminism there to `faer`'s own internal
+/// rayon usage in `presolve::redundancy`'s `ColPivQr`, *not* this module —
+/// but reverted it: doing so also removed real, substantial parallelism
+/// `faer`'s dense linear algebra gets from `rayon` on plenty of *other*
+/// Netlib instances, measured as a ~20% aggregate slowdown across the
+/// benchmark set with individual problems up to 2x slower. The
+/// nondeterminism is diagnosed but deliberately left as-is: not worth that
+/// trade for determinism on one pathological instance.)
 const PARALLELISM: Parallelism = Parallelism::Rayon(0);
 
 /// Everything computed once per `A`/`G` sparsity pattern and reused

@@ -6,7 +6,7 @@
 
 use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// A decision variable's kind. There is no dedicated "binary" variant —
 /// `model.rs`'s Python-facing API represents a binary variable as an
@@ -136,10 +136,31 @@ pub struct VariableData {
 /// class's own `{index: coeff}` representation — built up by `Function`'s
 /// operator overloads on the Python side, then handed across the FFI
 /// boundary as a plain `Vec<(usize, f64)>` and reassembled into this
-/// `HashMap`-backed form in `model.rs::to_linear_expr`.
+/// `BTreeMap`-backed form in `model.rs::to_linear_expr`.
+///
+/// `BTreeMap`, not `HashMap`: `presolve::build_a_g`/`simplex.rs`'s
+/// `build_std_form` both materialize a row's final term order by iterating
+/// `coeffs` directly (`.coeffs.iter().collect()`) — with a `HashMap`,
+/// whose default `RandomState` reseeds every process, that order (though
+/// always the same *set* of terms) could differ between separate runs of
+/// the identical binary on the identical model. On most problems that
+/// never surfaces (nothing downstream cares which order a row's terms
+/// arrived in), but on a highly degenerate one — many exactly-tied
+/// Markowitz/ratio-test/normalization decisions, which is what
+/// "degenerate" means — a row's incoming term order can be the one thing
+/// deciding which of several equally-valid choices an algorithm makes,
+/// cascading into a completely different (though equally correct) pivot
+/// sequence and wall-clock time. Prime suspect for exactly this kind of
+/// symptom on Netlib `degen3` (bimodal wall-clock time, ~0.8s vs ~3.0-3.5s,
+/// across repeated runs of one binary) surviving even after every `rayon`
+/// parallel/sequential choice elsewhere in the crate was made a fixed,
+/// size-based decision (see `simplex.rs`'s `RAYON_SIZE_THRESHOLD`) ruled
+/// out thread-scheduling nondeterminism as the cause. `BTreeMap` iterates
+/// in a fixed (ascending-key) order regardless of process/seed, removing
+/// the discrepancy at its source rather than downstream at each consumer.
 #[derive(Debug, Clone)]
 pub struct LinearExpr {
-    pub coeffs: HashMap<usize, f64>,
+    pub coeffs: BTreeMap<usize, f64>,
     pub constant: f64,
 }
 

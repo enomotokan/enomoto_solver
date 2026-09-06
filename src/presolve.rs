@@ -1,8 +1,10 @@
 //! Shared presolve pipeline: **the same** scaling, redundant-equality
-//! removal and inequality-propagation passes feed both `simplex.rs`
-//! (active) and `interior_point.rs` (inactive) — there is exactly one
-//! implementation of each pass, run identically by both engines, not two
-//! parallel copies that could drift apart.
+//! removal, bound-propagation, and (row/column-singleton, doubleton,
+//! dual-fixing) elimination passes feed both `simplex.rs` and
+//! `interior_point.rs` — there is exactly one implementation of each pass,
+//! run identically by both engines through the single [`run_extended`]
+//! entry point, not two parallel copies (or two different pipelines) that
+//! could drift apart.
 //!
 //! ## Shape
 //!
@@ -17,46 +19,53 @@
 //!   2. [`redundancy::reduce_equalities`] + [`redundancy::reduce_inequalities`]:
 //!      drops duplicate/linearly-dependent rows from the scaled `(A, b)`,
 //!      and duplicate/dominated rows from the scaled `(G, h)`.
-//!   3. [`dualfix::fix_dominated_variables`]: fixes any variable whose
+//!   3. [`run_extended`]'s own round loop: [`propagate::propagate`]
+//!      (activity-bound constraint propagation, tightening variable bounds
+//!      and dropping/detecting redundant/infeasible rows) →
+//!      [`dualfix::fix_dominated_variables`] (fixes any variable whose
 //!      objective cost prefers a direction no real row resists, straight
-//!      off the coefficient matrix — no simplex iteration needed. Its
-//!      fixes are folded back into `G`/`h` via [`propagate::rebuild_g`]
-//!      before the next step, so propagation (below) can chain off newly
-//!      fixed bounds too.
-//!   4. [`propagate::propagate`], run `passes` times: activity-bound
-//!      constraint propagation over the scaled `(G, h)`, tightening
-//!      variable bounds and dropping/detecting redundant/infeasible rows.
+//!      off the coefficient matrix) → [`rowsingleton`] → [`doubleton`] →
+//!      [`colsingleton`], repeated for `rounds` passes since each one can
+//!      expose a reduction the previous one couldn't yet see.
 //!
-//! [`run`] packages exactly this sequence — steps 1, 2's equality half and
-//! 4 are the same ones `interior_point.rs` ran inline before this
-//! pipeline was extracted — so both callers get identical behavior from
-//! one call site each.
-//!
-//! [`colsingleton::eliminate_singleton_equalities`] is deliberately *not*
-//! part of this pipeline: it runs once, directly in `simplex.rs`, on the
-//! unscaled `(A, b, c)` straight out of [`build_a_g`], before `run` is
-//! ever called — see that module's docs for why it needs to stay in
-//! original (pre-scaling) units.
+//! [`run_extended`] packages exactly this sequence into the one call site
+//! both `simplex.rs` and `interior_point.rs` use, and returns every
+//! eliminated variable's [`colsingleton::Substitution`] for the caller to
+//! recover after solving (`simplex.rs`'s `unscale_result`,
+//! `interior_point.rs`'s `unscale_with_substitutions` — same reverse-order
+//! recovery, one implementation of the *technique*, two small call-site
+//! adapters). An earlier version of this pipeline kept a second,
+//! elimination-free entry point (`run`) that `interior_point.rs` used
+//! instead, back when it had no mechanism to recover an eliminated
+//! variable's value — removed once that mechanism was added, so every
+//! technique ported into this pipeline (present or future) now benefits
+//! both engines without a per-technique decision about which pipeline it
+//! belongs in.
 //!
 //! `simplex.rs` builds `StdForm`'s explicit `lb`/`ub` (rather than leaving
 //! bounds as constraint rows with their own slack — a variable's bound is
 //! represented as a bound, in both engines, not as an extra artificial/
-//! slack variable) straight from [`PresolveResult`]'s own `lb`/`ub`/
-//! `real_rows`/`real_rhs` fields — the same split [`propagate::propagate`]
+//! slack variable) straight from [`ExtendedPresolveResult`]'s own `lb`/
+//! `ub`/`real_rows`/`real_rhs` fields — the same split [`propagate::propagate`]
 //! already computed internally, exposed here instead of `simplex.rs`
 //! re-deriving it with its own [`propagate::extract_bounds`] call on the
-//! just-rebuilt `g`/`h`. The genuinely remaining multi-variable rows
-//! (`real_rows`/`real_rhs`) become ordinary `Eq`/`Le` rows, handled by
-//! whatever feasibility mechanism each engine already has (interior-
-//! point's central-path Newton iteration, which uses `g`/`h` instead since
-//! it wants bounds folded in; the simplex method's own phase 1 / dual-
-//! feasible crash) — this pipeline introduces no new variable of its own
-//! to either engine's standard form.
+//! just-rebuilt `g`/`h`. `interior_point.rs`, by contrast, wants bounds
+//! folded into `G` (its central-path Newton iteration has no separate
+//! bound-handling machinery), so it reads [`ExtendedPresolveResult`]'s
+//! `g`/`h` fields instead — both are the same [`propagate::propagate`]
+//! final state, just exposed in whichever shape each caller wants. The
+//! genuinely remaining multi-variable rows (`real_rows`/`real_rhs`) become
+//! ordinary `Eq`/`Le` rows, handled by whatever feasibility mechanism each
+//! engine already has (interior-point's central-path Newton iteration; the
+//! simplex method's own phase 1 / dual-feasible crash) — this pipeline
+//! introduces no new variable of its own to either engine's standard form.
 
 pub mod colsingleton;
+pub mod doubleton;
 pub mod dualfix;
 pub mod propagate;
 pub mod redundancy;
+pub mod rowsingleton;
 pub mod scaling;
 
 use crate::sparse::{csr_from_rows, Csr};
@@ -112,17 +121,31 @@ pub fn build_a_g(variables: &[VariableData], constraints: &[ConstraintRow]) -> (
 /// The result of running the full shared presolve pipeline once: the
 /// scaled-and-reduced problem data, the [`Scaling`] needed to map a
 /// solution back to the original variables (via [`scaling::unscale_x`]),
-/// and an `infeasible` flag `propagate` can raise directly (an activity
-/// bound proving a row can never be satisfied) without either engine
-/// having to run its own solve loop first.
+/// an `infeasible` flag `propagate` can raise directly (an activity bound
+/// proving a row can never be satisfied) without either engine having to
+/// run its own solve loop first, and every variable
+/// [`doubleton::eliminate_doubleton_equalities`]/
+/// [`colsingleton::eliminate_singleton_equalities`] substituted out along
+/// the way — the caller must recover each one's true value via
+/// [`colsingleton::Substitution::value`] *before* unscaling (these
+/// coefficients are in [`run_extended`]'s scaled space, unlike
+/// `colsingleton`'s old standalone, pre-scaling call site), and in
+/// **reverse** discovery order: a later round's substitution can
+/// reference a variable an *earlier* round already substituted out (that
+/// variable dropped to zero remaining appearances then, so a later round
+/// is the only one that could newly treat it as eliminable in turn),
+/// never the other way around, so resolving latest-first is what
+/// guarantees every `value()` call only ever reads already-known inputs.
 ///
 /// `g`/`h` fold bounds back in as single-variable rows (what
-/// `interior_point` wants); `lb`/`ub`/`real_rows`/`real_rhs` are the same
-/// information already split apart (what `simplex.rs` wants) — both are
-/// `propagate::propagate`'s own final state, carried through here so
-/// callers needing the split form never have to re-derive it with a
-/// second `propagate::extract_bounds` call on `g`/`h`.
-pub struct PresolveResult {
+/// `interior_point.rs` wants — including, for an eliminated variable, its
+/// pinned-to-a-point `[0,0]` box-bound row, since `run_extended` already
+/// applies that fix before deriving `g`/`h`); `lb`/`ub`/`real_rows`/
+/// `real_rhs` are the same information already split apart (what
+/// `simplex.rs` wants) — both are `propagate::propagate`'s own final
+/// state, carried through here so callers needing either form never have
+/// to re-derive it with a second `propagate::extract_bounds` call.
+pub struct ExtendedPresolveResult {
     pub scaling: Scaling,
     pub a: Csr,
     pub b: Vec<f64>,
@@ -134,68 +157,227 @@ pub struct PresolveResult {
     pub real_rhs: Vec<f64>,
     pub c: Vec<f64>,
     pub infeasible: bool,
+    pub substitutions: Vec<colsingleton::Substitution>,
 }
 
-/// Runs the shared pipeline described in the module docs: scale, drop
-/// redundant equality/inequality rows, fix any dominated variables
-/// outright, then propagate the result for `prop_passes` rounds.
-/// `ruiz_iters` and `prop_passes` are left as parameters (rather than
-/// shared constants) so each engine keeps its own tuning — both currently
-/// pass the same values (`10` and `2`) `interior_point.rs` used before
-/// this pipeline was extracted.
-pub fn run(n: usize, a: &Csr, b: &[f64], g: &Csr, h: &[f64], c: &[f64], ruiz_iters: usize, prop_passes: usize) -> PresolveResult {
-    let sc = scaling::compute(n, a, g, c, ruiz_iters);
-    let (a, g, b, h, c) = scaling::apply(&sc, a, g, b, h, c);
-
-    let (a, b) = redundancy::reduce_equalities(&a, &b, n);
-    let (g, h) = redundancy::reduce_inequalities(&g, &h, n);
-
-    let (lb0, ub0, real_rows, real_rhs) = propagate::extract_bounds(n, &g, &h);
-    // `dualfix` trusts `lb0`/`ub0` to already be self-consistent (see
-    // `bounds_inconsistent`'s own docs) — an inconsistency here is a real
-    // infeasibility that must be reported directly, not smoothed over by
-    // "fixing" a variable to one of its two contradictory bounds.
-    if propagate::bounds_inconsistent(n, &lb0, &ub0) {
-        return PresolveResult {
-            scaling: sc,
-            a,
-            b,
-            g: csr_from_rows(&[], n),
-            h: Vec::new(),
-            lb: Vec::new(),
-            ub: Vec::new(),
-            real_rows: Vec::new(),
-            real_rhs: Vec::new(),
-            c,
-            infeasible: true,
-        };
-    }
-    let fixes = dualfix::fix_dominated_variables(n, &a, &real_rows, &c, &lb0, &ub0);
-    let (g, h) = if fixes.is_empty() {
-        (g, h)
-    } else {
-        let mut lb0 = lb0;
-        let mut ub0 = ub0;
-        for &(j, value) in &fixes {
-            lb0[j] = value;
-            ub0[j] = value;
-        }
-        propagate::rebuild_g(n, real_rows, real_rhs, &lb0, &ub0)
-    };
-
-    let prop = propagate::propagate(n, &g, &h, prop_passes);
-
-    PresolveResult {
+fn extended_infeasible(sc: Scaling, a: Csr, b: Vec<f64>, c: Vec<f64>, n: usize) -> ExtendedPresolveResult {
+    ExtendedPresolveResult {
         scaling: sc,
         a,
         b,
-        g: prop.g,
-        h: prop.h,
-        lb: prop.lb,
-        ub: prop.ub,
+        g: csr_from_rows(&[], n),
+        h: Vec::new(),
+        lb: Vec::new(),
+        ub: Vec::new(),
+        real_rows: Vec::new(),
+        real_rhs: Vec::new(),
+        c,
+        infeasible: true,
+        substitutions: Vec::new(),
+    }
+}
+
+/// The shared pipeline both `simplex.rs` and `interior_point.rs` call
+/// directly: Ruiz scaling + redundant-row removal, then `rounds`
+/// repetitions of [`propagate::propagate`] (bound tightening) →
+/// [`dualfix`] → row-singleton fixing ([`rowsingleton`]) →
+/// doubleton-equality substitution ([`doubleton`]) → column-singleton
+/// substitution ([`colsingleton`]), each stage able to unlock more of the
+/// next: a bound propagate tightens can turn an infinite bound finite
+/// (letting `dualfix` fix a previously-ineligible variable), and either
+/// substitution pass can drop a row or zero out a variable's last
+/// remaining appearance (letting `dualfix`'s structural lock-counts or a
+/// later singleton/doubleton pass find something a single round never
+/// would).
+///
+/// `colsingleton` used to be the one piece of this run *before* scaling
+/// (in original, unscaled units) as `simplex.rs`'s own separate pre-step;
+/// folding it into this scaled pipeline instead means one consistent
+/// coordinate system for every reduction here, and lets its own
+/// `TOL`-based decisions benefit from scaling's numerical conditioning the
+/// same way `dualfix`/`propagate` already do (rather than running on the
+/// original problem's raw, possibly very large or very small, coefficient
+/// magnitudes).
+pub fn run_extended(
+    n: usize,
+    a: &Csr,
+    b: &[f64],
+    g: &Csr,
+    h: &[f64],
+    c: &[f64],
+    ruiz_iters: usize,
+    prop_passes: usize,
+    rounds: usize,
+) -> ExtendedPresolveResult {
+    // One-off, env-var-gated wall-clock breakdown of this function's own
+    // major steps — `ENOMOTO_PROF_PHASES`'s `solve_lp_dual` timer starts
+    // *after* this whole function returns, so it was blind to presolve's
+    // own cost entirely; on several Netlib instances (`ganges`, `stocfor2`,
+    // `sierra`) presolve turned out to be 75-92% of *total* solve time,
+    // not the simplex loop `ENOMOTO_PROF_PHASES` already covers. A plain
+    // local `Instant`/`eprintln!` here (not the atomics-based `timed!`
+    // machinery `simplex.rs` uses) is enough since this function runs
+    // once per solve, not once per pivot.
+    let profile = std::env::var("ENOMOTO_PROF_PRESOLVE").is_ok();
+    macro_rules! timed_step {
+        ($label:expr, $body:expr) => {{
+            if profile {
+                let __t0 = std::time::Instant::now();
+                let __r = $body;
+                eprintln!("  PROF_PRESOLVE {:20} {:8.3}ms", $label, __t0.elapsed().as_secs_f64() * 1e3);
+                __r
+            } else {
+                $body
+            }
+        }};
+    }
+    let __wall_t0 = std::time::Instant::now();
+
+    let sc = timed_step!("scaling::compute", scaling::compute(n, a, g, c, ruiz_iters));
+    let (mut a, mut g, mut b, mut h, mut c) = timed_step!("scaling::apply", scaling::apply(&sc, a, g, b, h, c));
+
+    let (na, nb) = timed_step!("reduce_equalities", redundancy::reduce_equalities(&a, &b, n));
+    a = na;
+    b = nb;
+    let (ng, nh) = timed_step!("reduce_inequalities", redundancy::reduce_inequalities(&g, &h, n));
+    g = ng;
+    h = nh;
+
+    let mut substitutions: Vec<colsingleton::Substitution> = Vec::new();
+
+    for _round in 0..rounds.max(1) {
+        let prop = timed_step!("propagate", propagate::propagate(n, &g, &h, prop_passes));
+        if prop.infeasible {
+            return extended_infeasible(sc, a, b, c, n);
+        }
+        let mut lb = prop.lb;
+        let mut ub = prop.ub;
+
+        let fixes = timed_step!("dualfix", dualfix::fix_dominated_variables(n, &a, &prop.real_rows, &c, &lb, &ub));
+        for &(j, value) in &fixes {
+            lb[j] = value;
+            ub[j] = value;
+        }
+
+        let rs = timed_step!("rowsingleton", rowsingleton::fix_singleton_equalities(n, &a, &b, &lb, &ub));
+        if rs.infeasible {
+            return extended_infeasible(sc, a, b, c, n);
+        }
+        for &(j, value) in &rs.fixes {
+            lb[j] = value;
+            ub[j] = value;
+        }
+        a = rs.a;
+        b = rs.b;
+
+        let (ng, nh) = propagate::rebuild_g(n, prop.real_rows, prop.real_rhs, &lb, &ub);
+        g = ng;
+        h = nh;
+
+        let dbl = timed_step!("doubleton", doubleton::eliminate_doubleton_equalities(n, &a, &b, &g, &h, &c));
+        a = dbl.a;
+        b = dbl.b;
+        g = dbl.g;
+        h = dbl.h;
+        c = dbl.c;
+        substitutions.extend(dbl.substitutions);
+
+        let cs = timed_step!("colsingleton", colsingleton::eliminate_singleton_equalities(n, &a, &b, &g, &h, &c));
+        a = cs.a;
+        b = cs.b;
+        c = cs.c;
+        if !cs.substitutions.is_empty() {
+            // Drop each eliminated variable's own (now-stale) box-bound
+            // rows from `g` before folding in `cs.extra_g_rows` — unlike
+            // `doubleton` (which never adds these rows back for an
+            // eliminated variable in the first place), `colsingleton`
+            // doesn't touch `g`'s existing rows at all, so its eliminated
+            // variable's original bound rows would otherwise survive
+            // untouched: a "phantom" column with zero cost and no `A`
+            // appearances, but *still* carrying its real finite bounds, is
+            // free to sit anywhere in that (possibly huge, post-Ruiz-
+            // scaling) range without affecting feasibility or the
+            // objective — harmless on its own, but exactly the kind of
+            // leftover structure that let a *later* round's `dualfix` (see
+            // its own module docs on this) or a subsequent chain step
+            // reason about this variable as if it still had independent
+            // degrees of freedom, instead of the single value its own
+            // substitution now fully determines.
+            let eliminated_this_pass: std::collections::BTreeSet<usize> = cs.substitutions.iter().map(|s| s.var).collect();
+            let gr = g.as_ref();
+            let mut g_rows: Vec<Vec<(usize, f64)>> = Vec::with_capacity(gr.nrows() + cs.extra_g_rows.len());
+            let mut h_vec: Vec<f64> = Vec::with_capacity(gr.nrows() + cs.extra_h.len());
+            for i in 0..gr.nrows() {
+                let row: Vec<(usize, f64)> = gr.col_indices_of_row(i).zip(gr.values_of_row(i)).map(|(j, &v)| (j, v)).collect();
+                if row.len() == 1 && eliminated_this_pass.contains(&row[0].0) {
+                    continue;
+                }
+                g_rows.push(row);
+                h_vec.push(h[i]);
+            }
+            g_rows.extend(cs.extra_g_rows);
+            h_vec.extend(cs.extra_h);
+            g = csr_from_rows(&g_rows, n);
+            h = h_vec;
+        }
+        substitutions.extend(cs.substitutions);
+    }
+
+    let prop = timed_step!("final propagate", propagate::propagate(n, &g, &h, prop_passes));
+    if profile {
+        eprintln!("PROF_PRESOLVE total {:.3}ms", __wall_t0.elapsed().as_secs_f64() * 1e3);
+    }
+    if prop.infeasible {
+        return ExtendedPresolveResult {
+            scaling: sc,
+            a,
+            b,
+            g: prop.g,
+            h: prop.h,
+            lb: prop.lb,
+            ub: prop.ub,
+            real_rows: prop.real_rows,
+            real_rhs: prop.real_rhs,
+            c,
+            infeasible: true,
+            substitutions,
+        };
+    }
+
+    // Every eliminated variable's true value is recovered later purely via
+    // `Substitution::value` (see this struct's own docs) — pinned to a
+    // single arbitrary finite point *here*, before `g`/`h` are derived,
+    // rather than left to each caller to notice and fix up on its own
+    // (`simplex.rs` used to do this itself, straight on `pre.lb`/`pre.ub`,
+    // after calling this function — still does, harmlessly redundantly,
+    // now that it's already done here). Without this, a caller that reads
+    // `g`/`h` directly (rather than `lb`/`ub`/`real_rows`/`real_rhs`, the
+    // split form `simplex.rs` prefers) would see an eliminated variable as
+    // a genuinely free, zero-cost, zero-appearance column — which is
+    // exactly the "phantom column with independent degrees of freedom"
+    // shape `colsingleton`'s own module docs warn a *later* presolve round
+    // could be confused by, and which would make an interior-point
+    // method's KKT system singular in that column outright.
+    let mut lb = prop.lb;
+    let mut ub = prop.ub;
+    for sub in &substitutions {
+        lb[sub.var] = 0.0;
+        ub[sub.var] = 0.0;
+    }
+    let (g, h) = propagate::rebuild_g(n, prop.real_rows.clone(), prop.real_rhs.clone(), &lb, &ub);
+
+    ExtendedPresolveResult {
+        scaling: sc,
+        a,
+        b,
+        g,
+        h,
+        lb,
+        ub,
         real_rows: prop.real_rows,
         real_rhs: prop.real_rhs,
         c,
-        infeasible: prop.infeasible,
+        infeasible: false,
+        substitutions,
     }
 }

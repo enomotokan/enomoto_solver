@@ -8,13 +8,19 @@
 //! machinery (see `spkkt.rs`) — `A`/`G` stay as `SparseRowMat` (CSR) end to
 //! end, no dense conversion.
 //!
-//! Preprocessing: the problem is put through the shared presolve pipeline
-//! (`crate::presolve` — Ruiz equilibration, redundant-equality removal,
-//! inequality propagation, the same one `simplex.rs` now uses too) once up
-//! front, before the interior-point loop starts; the KKT matrix's AMD
-//! ordering + symbolic factorization are computed once and reused across
-//! every iteration's KKT solve (`kkt.rs`) — only the (much cheaper)
-//! numeric factorization is redone each iteration.
+//! Preprocessing: the problem is put through the same shared, *extended*
+//! presolve pipeline (`presolve::run_extended` — Ruiz equilibration,
+//! redundant-equality removal, then rounds of propagate/dualfix/row-
+//! singleton/doubleton/colsingleton) `simplex.rs` uses, rather than the
+//! plainer elimination-free `presolve::run` this module used before —
+//! every technique ported into that shared pipeline (including ones that
+//! eliminate a variable's slot entirely) now benefits this engine too, not
+//! just the simplex one; see `unscale_with_substitutions`'s own docs for
+//! how an eliminated variable's true value is recovered afterward. This
+//! runs once up front, before the interior-point loop starts; the KKT
+//! matrix's AMD ordering + symbolic factorization are computed once and
+//! reused across every iteration's KKT solve (`kkt.rs`) — only the (much
+//! cheaper) numeric factorization is redone each iteration.
 //!
 //! **Allocation**: every buffer the Newton loop touches (residuals,
 //! directions, trial iterates, the KKT right-hand-side/solution) lives in
@@ -23,11 +29,14 @@
 //! `Vec` allocation. Only the (rare) Farkas-certificate checks and the
 //! final `Vec<f64>` handed back to the caller still allocate.
 //!
-//! **Inactive**: `solver::solve_lp` calls `simplex::solve_lp_dual`
-//! directly and never reaches this module — see `lib.rs`'s module docs.
-//! Kept, with its `qp`/`kkt` submodules, in case this path is wanted again
-//! (its `scaling`/`redundancy`/`propagate` passes now live in
-//! `crate::presolve`, shared with `simplex.rs`).
+//! **Reachable, not default**: `solver::solve_lp` dispatches here only when
+//! `Model.solve(root_solver="interior")` is requested explicitly — the
+//! default (`root_solver=None`/`"simplex"`) goes straight to
+//! `simplex::solve_lp_dual` instead (see `solver.rs`'s own docs). Kept
+//! fully reachable rather than deleted, both as a fallback and so the two
+//! independent implementations can be run against the same input and
+//! cross-checked directly (`simplex.rs`'s own
+//! `*_matches_independent_ipm_solver` tests do exactly this).
 
 pub mod qp;
 pub mod kkt;
@@ -55,6 +64,11 @@ const STALL_ITERS: usize = 8;
 /// how Gurobi's presolve caps propagation passes per presolve round rather
 /// than iterating to convergence.
 const PROPAGATION_PASSES: usize = 2;
+/// Number of times `presolve::run_extended` cycles through propagate →
+/// dualfix → row-singleton → doubleton → colsingleton — mirrors
+/// `simplex.rs`'s own `PRESOLVE_ROUNDS`, now that this module shares the
+/// same extended pipeline (see `solve`'s own docs for why).
+const PRESOLVE_ROUNDS: usize = 1;
 
 pub struct IpmResult {
     pub status: Status,
@@ -248,6 +262,24 @@ impl Workspace {
     }
 }
 
+/// Fills in every `doubleton`/`colsingleton`-eliminated variable's true
+/// value (in **reverse** discovery order — see
+/// `presolve::ExtendedPresolveResult`'s own docs for why) before the final
+/// `scaling::unscale_x` — the interior-point counterpart of `simplex.rs`'s
+/// `unscale_result`, needed now that `solve` below runs the same
+/// `presolve::run_extended` pipeline simplex.rs does instead of the
+/// elimination-free `presolve::run`. `x` is in **scaled** space at every
+/// call site (this module's Newton loop, like `simplex.rs`'s, never
+/// unscales mid-solve), which is exactly the space each `Substitution`'s
+/// own `terms`/`rhs`/`coeff` were recorded in.
+fn unscale_with_substitutions(x: &[f64], sc: &scaling::Scaling, substitutions: &[presolve::colsingleton::Substitution]) -> Vec<f64> {
+    let mut x = x.to_vec();
+    for sub in substitutions.iter().rev() {
+        x[sub.var] = sub.value(&x);
+    }
+    scaling::unscale_x(sc, &x)
+}
+
 pub fn solve(qp: &QpStd) -> IpmResult {
     let n = qp.n;
 
@@ -256,11 +288,14 @@ pub fn solve(qp: &QpStd) -> IpmResult {
     }
 
     // One-time shared presolve pass (`crate::presolve` — Ruiz scaling,
-    // redundant-equality removal, then inequality propagation; the same
-    // pipeline `simplex.rs` now runs too). Everything below operates on
-    // the scaled/reduced problem; `x` is mapped back to original-variable
-    // space at every return site via `scaling::unscale_x`.
-    let pre = presolve::run(n, &qp.a, &qp.b, &qp.g, &qp.h, &qp.c, 10, PROPAGATION_PASSES);
+    // redundant-equality removal, then the extended propagate/dualfix/
+    // row-singleton/doubleton/colsingleton pipeline `simplex.rs` already
+    // uses — see `unscale_with_substitutions`'s own docs for why this
+    // module now shares it too instead of the plainer `presolve::run`).
+    // Everything below operates on the scaled/reduced problem; `x` is
+    // mapped back to original-variable space at every return site via
+    // `unscale_with_substitutions`.
+    let pre = presolve::run_extended(n, &qp.a, &qp.b, &qp.g, &qp.h, &qp.c, 10, PROPAGATION_PASSES, PRESOLVE_ROUNDS);
     if pre.infeasible {
         return IpmResult { status: Status::Infeasible, x: None };
     }
@@ -270,6 +305,7 @@ pub fn solve(qp: &QpStd) -> IpmResult {
     let g = pre.g;
     let h = pre.h;
     let c = pre.c;
+    let substitutions = pre.substitutions;
     let p = a.nrows();
     let m = g.nrows();
 
@@ -311,7 +347,7 @@ pub fn solve(qp: &QpStd) -> IpmResult {
         if norm_inf(&dual_res) > 1e-4 {
             return IpmResult { status: Status::Unbounded, x: None };
         }
-        return IpmResult { status: Status::Optimal, x: Some(scaling::unscale_x(&sc, &xi)) };
+        return IpmResult { status: Status::Optimal, x: Some(unscale_with_substitutions(&xi, &sc, &substitutions)) };
     }
 
     let s_tilde0: Vec<f64> = nu_tilde0.iter().map(|v| -v).collect();
@@ -366,7 +402,7 @@ pub fn solve(qp: &QpStd) -> IpmResult {
         let bnd_g = EPS_ABS + EPS_REL * cx.abs().max(by.abs()).max(hz.abs());
 
         if pk <= bnd_p && dk <= bnd_d && gap <= bnd_g {
-            return IpmResult { status: Status::Optimal, x: Some(scaling::unscale_x(&sc, &x)) };
+            return IpmResult { status: Status::Optimal, x: Some(unscale_with_substitutions(&x, &sc, &substitutions)) };
         }
 
         let at_floor = rho <= RHO_MIN * 1.001 && delta <= DELTA_MIN * 1.001;

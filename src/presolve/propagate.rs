@@ -184,6 +184,33 @@ pub fn propagate(n: usize, g: &Csr, h: &[f64], passes: usize) -> PropagateResult
                 continue;
             }
 
+            // Forcing row (§3.1's sibling case to the redundant/infeasible
+            // checks just above, HiGHS's `HPresolve::rowPresolve` calls the
+            // same thing): if the row's own minimum achievable value
+            // already equals `b` (`true_inf` finite, `== b`), then
+            // `sum <= b` combined with `sum >= true_inf == b` leaves sum
+            // exactly one point, `b` — achievable only when every term
+            // sits at whichever bound produced that minimum (a positive
+            // coefficient at its lower bound, a negative one at its upper
+            // bound). That fixes every variable in the row outright, which
+            // in turn makes the row itself trivially satisfied — drop it,
+            // the same as the redundant case above, rather than running
+            // the (now moot) per-variable bound strengthening below on a
+            // row with no remaining freedom at all. `inf_unbounded.is_empty()`
+            // guarantees every bound this loop is about to read is finite
+            // (that emptiness is exactly what made `true_inf` a real
+            // number rather than `NEG_INFINITY` above).
+            if inf_unbounded.is_empty() && (finite_sum_inf - b).abs() <= EPS {
+                for &(j, v) in row {
+                    if v > 0.0 {
+                        ub[j] = lb[j];
+                    } else {
+                        lb[j] = ub[j];
+                    }
+                }
+                continue;
+            }
+
             // Bound strengthening (§3.2): for each x_k in the row, l_iS is
             // the row's minimal activity excluding x_k's own contribution.
             // Only computable (finite) when no *other* variable is the
@@ -263,4 +290,70 @@ pub fn rebuild_g(n: usize, mut rows: Vec<Vec<(usize, f64)>>, mut rhs: Vec<f64>, 
         }
     }
     (csr_from_rows(&rows, n), rhs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sparse::csr_from_rows;
+
+    #[test]
+    fn forcing_row_fixes_every_variable_to_its_minimum_bound() {
+        // x0 in [1,3], x1 in [2,4] (folded in as their own box-bound
+        // rows), plus the real row x0 + x1 <= 3. That row's own minimum
+        // achievable activity (1*lb[x0] + 1*lb[x1] = 1 + 2 = 3) already
+        // equals its RHS, so it's a forcing row: satisfying `<= 3` at all
+        // requires x0=1, x1=2 exactly (either one any larger would push
+        // the sum past 3 with no room for the other to compensate, since
+        // both coefficients are positive).
+        let g = csr_from_rows(
+            &[
+                vec![(0, 1.0)],
+                vec![(0, -1.0)],
+                vec![(1, 1.0)],
+                vec![(1, -1.0)],
+                vec![(0, 1.0), (1, 1.0)],
+            ],
+            2,
+        );
+        let h = vec![3.0, -1.0, 4.0, -2.0, 3.0];
+        let result = propagate(2, &g, &h, 1);
+        assert!(!result.infeasible);
+        assert!((result.lb[0] - 1.0).abs() < 1e-9, "lb={:?}", result.lb);
+        assert!((result.ub[0] - 1.0).abs() < 1e-9, "ub={:?}", result.ub);
+        assert!((result.lb[1] - 2.0).abs() < 1e-9, "lb={:?}", result.lb);
+        assert!((result.ub[1] - 2.0).abs() < 1e-9, "ub={:?}", result.ub);
+        // The forcing row itself, now trivially satisfied, is dropped
+        // from the surviving multi-variable rows.
+        assert!(result.real_rows.is_empty(), "real_rows={:?}", result.real_rows);
+    }
+
+    #[test]
+    fn forcing_row_with_mixed_signs_uses_the_matching_bound_per_term() {
+        // x0 in [0,10], x1 in [0,10], row x0 - x1 <= -4. Minimum activity:
+        // coefficient of x0 is positive -> use lb[x0]=0; coefficient of
+        // x1 is negative -> use ub[x1]=10. inf = 0 - 10 = -10 -- not equal
+        // to -4, so *this* row isn't forcing; instead pick bounds so the
+        // minimum lands exactly on the RHS: x0 in [2,10], x1 in [0,6],
+        // inf = 1*2 + (-1)*6 = -4 = b. Forces x0=2 (lb, positive coeff),
+        // x1=6 (ub, negative coeff).
+        let g = csr_from_rows(
+            &[
+                vec![(0, 1.0)],
+                vec![(0, -1.0)],
+                vec![(1, 1.0)],
+                vec![(1, -1.0)],
+                vec![(0, 1.0), (1, -1.0)],
+            ],
+            2,
+        );
+        let h = vec![10.0, -2.0, 6.0, 0.0, -4.0];
+        let result = propagate(2, &g, &h, 1);
+        assert!(!result.infeasible);
+        assert!((result.lb[0] - 2.0).abs() < 1e-9, "lb={:?}", result.lb);
+        assert!((result.ub[0] - 2.0).abs() < 1e-9, "ub={:?}", result.ub);
+        assert!((result.lb[1] - 6.0).abs() < 1e-9, "lb={:?}", result.lb);
+        assert!((result.ub[1] - 6.0).abs() < 1e-9, "ub={:?}", result.ub);
+        assert!(result.real_rows.is_empty(), "real_rows={:?}", result.real_rows);
+    }
 }
