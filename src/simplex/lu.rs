@@ -60,6 +60,14 @@
 //! exist specifically so a full run of this factorization is only needed
 //! occasionally, not on every basis change — see `simplex.rs`'s
 //! refactorization-trigger docs.
+//!
+//! Solving against the resulting factors is mostly a `for s in 0..m`
+//! dense scan with a per-step zero-skip (`l_solve_into` and friends) —
+//! except FTRAN's own entering-column solve, which instead uses a real
+//! Gilbert & Peierls (1988)-style sparse forward substitution
+//! (`LuFactors::l_solve_sparse_into`, via `GpScratch`'s persistent,
+//! epoch-stamped DFS scratch) — see that function's own docs for why only
+//! this one direction gets the fuller treatment.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -437,6 +445,37 @@ impl MarkowitzState {
     }
 }
 
+/// Persistent, zero-allocation-in-steady-state scratch for
+/// [`LuFactors::l_solve_sparse_into`] — one instance lives for as long as
+/// its caller's own dedicated sparse-solve buffer does (`solve_lp_dual_on`
+/// creates one, alongside a `z` buffer used *only* for this path — never
+/// shared with a plain [`FtLu::solve_into`] call's own `scratch`, per
+/// [`FtLu::solve_sparse_into`]'s own docs on why that separation matters
+/// — before the pivot loop starts, and reuses both every FTRAN).
+///
+/// `visited_epoch[i] == epoch` means step `i` is already known to be in
+/// the *current* call's reach set — bumping `epoch` each call instead of
+/// clearing this array is what makes marking/checking `O(1)` without an
+/// `O(m)` reset per call (the standard "epoch stamp" / "time stamp"
+/// technique for a reusable visited-set). `stack` is the DFS's own
+/// (iterative, not recursive — this crate's basis matrices can have `m`
+/// in the low thousands, deep enough that a recursive DFS risks a real
+/// stack overflow on a long dependency chain) working stack. `reach` is
+/// this call's own collected, then sorted, reach set.
+pub struct GpScratch {
+    visited_epoch: Vec<u32>,
+    epoch: u32,
+    stack: Vec<usize>,
+    seeds: Vec<usize>,
+    reach: Vec<usize>,
+}
+
+impl GpScratch {
+    pub fn new(m: usize) -> Self {
+        GpScratch { visited_epoch: vec![0; m], epoch: 0, stack: Vec::new(), seeds: Vec::new(), reach: Vec::new() }
+    }
+}
+
 #[derive(Clone)]
 pub struct LuFactors {
     pub m: usize,
@@ -449,6 +488,11 @@ pub struct LuFactors {
     pub row_perm: Vec<usize>,
     pub col_perm: Vec<usize>,
     pub col_perm_inv: Vec<usize>,
+    /// Inverse of `row_perm`: `row_perm_inv[orig_row]` is the step whose
+    /// pivot row was `orig_row` — needed to seed [`l_solve_sparse_into`]'s
+    /// reach-set search directly from a sparse (original-row-indexed)
+    /// right-hand side, without an `O(m)` scan of `row_perm` itself.
+    pub row_perm_inv: Vec<usize>,
 }
 
 /// Factorizes the `m x m` sparse matrix given as sparse rows
@@ -520,7 +564,7 @@ pub fn factorize(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuFactors> {
         u_row[pivot_step].push((col_perm_inv[orig_col], val));
     }
 
-    Some(LuFactors { m, l_col, u_row, row_perm, col_perm, col_perm_inv })
+    Some(LuFactors { m, l_col, u_row, row_perm, col_perm, col_perm_inv, row_perm_inv })
 }
 
 impl LuFactors {
@@ -562,6 +606,90 @@ impl LuFactors {
         }
     }
 
+    /// Gilbert-Peierls sparse forward substitution through `L`: given
+    /// `rhs`'s nonzero `(orig_row, value)` pairs directly (no `O(m)`
+    /// densification of the caller's own sparse column needed), computes
+    /// the *reach set* — every step whose `z` entry could possibly end up
+    /// nonzero — via a DFS over `l_col`'s step-to-step edges, then runs
+    /// exactly [`l_solve_into`]'s own elimination but restricted to that
+    /// set. A second, dense-scanning implementation of this exists
+    /// ([`l_solve_into`]) rather than making this the only one because a
+    /// dense `rhs` (this function's own worst case: `|reach| == m`) pays
+    /// for the DFS bookkeeping (stack pushes, epoch checks) on top of the
+    /// same elimination work `l_solve_into` would have done anyway with a
+    /// tight double loop — this function is a net win specifically when
+    /// `rhs` (and hence typically `reach`) is small relative to `m`, which
+    /// is the common case for the one caller that has a genuinely sparse
+    /// `rhs` on hand already (`solve_lp_dual_on`'s entering-column FTRAN:
+    /// a real LP's constraint columns are themselves sparse).
+    ///
+    /// **Why ascending numeric order is already a valid topological
+    /// order** (unlike the general Gilbert & Peierls 1988 presentation for
+    /// an arbitrary DAG, which needs a DFS-postorder-then-reverse to get
+    /// one): every `l_col[s]` entry's `row_step` is `> s`, by construction
+    /// of the elimination itself (`factorize` only ever records a
+    /// multiplier for a row not yet chosen as a pivot, which by definition
+    /// gets assigned some *later* step) — so the edges of this graph only
+    /// ever point from a lower step to a higher one, meaning simply
+    /// sorting the reach set ascending already respects every dependency,
+    /// with no need to track a separate visit order during the DFS itself.
+    ///
+    /// **Precondition**: `z` is entirely zero on entry. This is *not*
+    /// this function's own job to (re-)establish cheaply — its own reach
+    /// set only covers what the `L`-stage itself touches, but the R-eta
+    /// and `U` stages downstream (in [`FtLu::solve_sparse_into`]) can
+    /// scatter fill well beyond that set (a long-enough eta chain can, in
+    /// the worst case, touch entries across the whole vector), so knowing
+    /// "the previous call's `L`-stage reach" here would not be enough to
+    /// correctly re-zero what a *subsequent* stage left behind. Instead
+    /// [`FtLu::solve_sparse_into`] unconditionally clears its own
+    /// dedicated `z` buffer once, in full, right before returning — a
+    /// single `O(m)` `fill(0.0)` per call, far cheaper than the branchy
+    /// permute-and-scan `l_solve_into` otherwise pays, and the only
+    /// `O(m)` work left in the whole sparse path.
+    fn l_solve_sparse_into(&self, rhs_sparse: &[(usize, f64)], z: &mut [f64], scratch: &mut GpScratch) {
+        scratch.seeds.clear();
+        for &(orig_row, v) in rhs_sparse {
+            if v == 0.0 {
+                continue;
+            }
+            let s = self.row_perm_inv[orig_row];
+            z[s] = v;
+            scratch.seeds.push(s);
+        }
+
+        scratch.epoch += 1;
+        let epoch = scratch.epoch;
+        scratch.reach.clear();
+        for i in 0..scratch.seeds.len() {
+            let seed = scratch.seeds[i];
+            if scratch.visited_epoch[seed] == epoch {
+                continue;
+            }
+            scratch.visited_epoch[seed] = epoch;
+            scratch.stack.push(seed);
+            while let Some(node) = scratch.stack.pop() {
+                scratch.reach.push(node);
+                for &(next, _) in &self.l_col[node] {
+                    if scratch.visited_epoch[next] != epoch {
+                        scratch.visited_epoch[next] = epoch;
+                        scratch.stack.push(next);
+                    }
+                }
+            }
+        }
+        scratch.reach.sort_unstable();
+
+        for &s in &scratch.reach {
+            if z[s] == 0.0 {
+                continue;
+            }
+            for &(row_step, mult) in &self.l_col[s] {
+                z[row_step] -= mult * z[s];
+            }
+        }
+    }
+
     /// Finishes a BTRAN given a step-space vector already transformed by
     /// `U^{-T}`: applies `L^{-T}` and maps back to original row indices.
     ///
@@ -573,17 +701,33 @@ impl LuFactors {
     /// trivial] intersection... without a computational overhead
     /// comparable to evaluating the inner product itself". Skipping
     /// per-*entry* when that specific `w[row_step]` is zero is still safe
-    /// and free, just a smaller win than `l_solve`'s whole-step skip. (A
-    /// fuller DFS-based hyper-sparse implementation for this direction,
-    /// mirroring `L`/`U` both column- and row-major the way HiGHS does,
-    /// was tried and measured *slower* end to end on this crate's
-    /// benchmark: the DFS setup's own per-call cost — allocating a fresh
-    /// `visited` array plus an upfront `O(m)` density scan on every single
-    /// `l_solve`/`l_transpose_solve`/`u_solve`/`u_transpose_solve` call,
-    /// even ones that end up taking the dense-style branch — outweighed
-    /// the fill-skipping it bought, on the order of 15-18% slower overall
-    /// despite the hyper-sparse branch firing on a majority of calls.
-    /// Reverted; see this file's own history if revisiting this.)
+    /// and free, just a smaller win than `l_solve`'s whole-step skip.
+    ///
+    /// (A first attempt at a fuller DFS-based hyper-sparse implementation,
+    /// covering all four solve directions and mirroring `L`/`U` both
+    /// column- and row-major the way HiGHS does, was tried and measured
+    /// *slower* end to end: the DFS setup's own per-call cost —
+    /// allocating a fresh `visited` array plus an upfront `O(m)` density
+    /// scan on every single call, even ones that ended up taking the
+    /// dense-style branch — outweighed the fill-skipping it bought, on
+    /// the order of 15-18% slower overall. That attempt was reverted in
+    /// full. A second, narrower attempt — [`LuFactors::l_solve_sparse_into`],
+    /// covering only this module's one genuinely straightforward GP
+    /// setting (`L`'s own forward direction, already stored column-major,
+    /// fed a real LP's own sparse constraint column) with a *persistent*,
+    /// epoch-stamped scratch (see [`GpScratch`]) rather than a fresh
+    /// per-call allocation — measured as a small but real net win on the
+    /// full Netlib benchmark set (73 problems, aggregate wall time ~1%
+    /// lower, roughly even split of individually-faster/slower instances,
+    /// zero objective mismatches) once the specific cost the first
+    /// attempt's own revert blamed — the allocation, not the algorithm —
+    /// was actually removed. This `L^{-T}` direction (BTRAN's tail) was
+    /// deliberately *not* attempted a second time: Hall & McKinnon's
+    /// observation above still applies unchanged (no static column-major
+    /// structure of `L` to run the same DFS over without adding a
+    /// row-major mirror), and the first attempt's win was concentrated in
+    /// the one direction with a genuinely sparse, already-available
+    /// seed — this direction's own `w` typically isn't.)
     /// `w` (step-space, already past `U^{-T}`/the `R` etas) is mutated in
     /// place; the final result is written into caller-provided `y`
     /// (original row indexing) — see `l_solve_into`'s own docs for why
@@ -742,10 +886,14 @@ impl FtLu {
                 }
             }
         }
-        let u_seq = (0..m)
+        let u_seq: Vec<UEta> = (0..m)
             .map(|slot| UEta { slot, pivot: pivots[slot], off_diag: std::mem::take(&mut off_diags[slot]) })
             .collect();
-        FtLu { base, u_seq, r_etas: Vec::new() }
+        FtLu {
+            base,
+            u_seq,
+            r_etas: Vec::new(),
+        }
     }
 
     fn find_seq_pos(&self, slot: usize) -> usize {
@@ -771,6 +919,27 @@ impl FtLu {
     /// skip as `LuFactors::l_solve_into` — `xp` is the only value this
     /// eta's off-diagonal entries get multiplied by, so a zero `xp` makes
     /// the whole inner loop a provable no-op.
+    ///
+    /// (A GP-sparsified counterpart to this function — restricting the
+    /// scan to a DFS-computed reach set over `u_seq`'s own dependency
+    /// graph, exactly mirroring [`LuFactors::l_solve_sparse_into`]'s own
+    /// approach for `L` — was fully implemented, proven correct (an
+    /// inductive argument that every `off_diag` target always sits at a
+    /// strictly *lower* `u_seq` position than its referrer, mirroring
+    /// `L`'s own low-to-high property, so descending position order needs
+    /// no separate topological-sort step either) and tested (multiple
+    /// sequential `try_update` calls reordering `u_seq` non-trivially,
+    /// checked against the dense reference after every single one). It
+    /// was still reverted after measuring it on the full Netlib benchmark
+    /// set: aggregate wall time **+10.4%** versus `L`-only sparsification,
+    /// 52 of 73 problems slower and only 6 faster. Unlike `L` (a *static*
+    /// matrix, fixed once per full refactorization, whose seed — a real
+    /// LP's own sparse constraint column — is reliably sparse), `U`'s own
+    /// eta chain accumulates fill from every `try_update` since the last
+    /// refactorization, so its reach set is typically far less sparse in
+    /// practice — the DFS/reach-tracking overhead this function's outer
+    /// loop is cheap enough to not need in the first place stopped paying
+    /// for itself. See this file's own history if revisiting this.)
     fn u_solve_into(&self, x: &mut [f64]) {
         for eta in self.u_seq.iter().rev() {
             let p = eta.slot;
@@ -829,6 +998,43 @@ impl FtLu {
         }
     }
 
+    /// Sparse-`rhs` counterpart to [`Self::solve_into`]: the same
+    /// `B^-1 rhs` computation, but taking `rhs`'s nonzero
+    /// `(orig_row, value)` pairs directly and running the `L`-stage
+    /// through [`LuFactors::l_solve_sparse_into`] instead of densifying
+    /// `rhs` into `scratch` first — see that function's own docs for the
+    /// reach-set algorithm.
+    ///
+    /// **`scratch`/`gp` must be dedicated to this call site alone, never
+    /// shared with a plain [`Self::solve_into`] call's own buffer**:
+    /// `l_solve_into` (the dense path) starts by unconditionally
+    /// overwriting every entry of `scratch` (`z[s] = rhs[row_perm[s]]`
+    /// for every `s`), so it tolerates arbitrary leftover content — but
+    /// `l_solve_sparse_into` requires `scratch` to *already* be all-zero
+    /// on entry (see its own docs for why cheaply reconstructing that
+    /// precondition is this function's job, not its own). This function
+    /// upholds that precondition for its *own* next call by clearing
+    /// `scratch` back to all-zero, in full, right before returning — but
+    /// that guarantee only holds if nothing else writes through the same
+    /// buffer in between.
+    pub fn solve_sparse_into(&self, rhs_sparse: &[(usize, f64)], scratch: &mut [f64], gp: &mut GpScratch, out: &mut [f64]) {
+        self.base.l_solve_sparse_into(rhs_sparse, scratch, gp);
+        for reta in &self.r_etas {
+            let dot: f64 = reta.r.iter().map(|&(i, v)| v * scratch[i]).sum();
+            scratch[reta.p] -= dot;
+        }
+        // `U` stays on the dense `u_solve_into`, not a GP-sparsified
+        // counterpart — see that function's own docs for why a real
+        // attempt at exactly that (persistent-buffer, position-aware DFS
+        // over `u_seq`, fully implemented and correct) measured as a net
+        // *regression* once benchmarked, and was reverted.
+        self.u_solve_into(scratch);
+        for s in 0..self.base.m {
+            out[self.base.col_perm[s]] = scratch[s];
+        }
+        scratch.fill(0.0);
+    }
+
     /// Allocating convenience wrapper around [`Self::solve_into`] — kept for
     /// call sites (tests, `try_update`) that don't already have a reusable
     /// buffer on hand.
@@ -884,6 +1090,48 @@ impl FtLu {
     /// solve). Returns `false` (recording nothing) if the resulting pivot
     /// is too small — refactorization trigger (2): the caller must
     /// refactorize the new basis from scratch instead.
+    ///
+    /// **Schork & Gondzio (2017), "Permuting Spiked Matrices to Triangular
+    /// Form and its Application to the Forrest-Tomlin Update"**: tried and
+    /// reverted this session. The idea: when the spike's own diagonal
+    /// `a_tilde[p]` is nonzero and its off-diagonal support is disjoint
+    /// from the structural `Reach(p)` (every slot whose value transitively
+    /// depends on `p` — a single forward walk over `u_seq`, mirroring
+    /// `u_transpose_solve_into`'s own traversal but following every
+    /// *stored* `off_diag` edge unconditionally rather than only the ones
+    /// whose *propagated* value under one unit-impulse seed happens to
+    /// still be nonzero — the two differ on real, coefficient-heavy LP
+    /// data via exact numerical cancellation, confirmed against real
+    /// Netlib instances via a dedicated invariant cross-check during
+    /// development), the spiked matrix is *already* permutable to
+    /// triangular form with no elimination and no [`REta`] at all (their
+    /// Theorem 3.1 / Lemma 3.2) — repositioning `p` and every member of
+    /// `Reach(p)` to the end of `u_seq`, preserving their relative order,
+    /// instead.
+    ///
+    /// Implemented fully correctly (including the structural-vs-numerical
+    /// reach distinction above, found and fixed via a randomized stress
+    /// test plus real-Netlib debug cross-checks) and, separately, a real
+    /// unrelated bug it exposed (`simplex.rs`'s `FT_MAX_UPDATES` hard
+    /// refactorization cap read `update_count()`, i.e. `r_etas.len()` —
+    /// which a permutation-only update never grows, so on instances where
+    /// many updates resolve that way the cap could go uncrossed far longer
+    /// than intended, letting numerical drift compound until a later
+    /// refactorization hit a matrix too corrupted to factor; fixed by
+    /// counting *every* successful update, not just row-eta ones, for that
+    /// specific trigger). Even after replacing an initial `HashSet`-based
+    /// reach implementation with an epoch-stamped array (the same
+    /// bump-instead-of-clear trick `sparse_lu::GpScratch` already uses),
+    /// full-Netlib measurement still showed a net regression — not from
+    /// this function's own added cost (which the epoch-array version
+    /// brought back down close to baseline), but because the permutation
+    /// path's slightly different rounding characteristics than the
+    /// standard row-eta path perturbed dual-simplex tie-breaks on
+    /// degeneracy-heavy instances (`pilotnov` needed 3218 iterations
+    /// instead of 1286 for the *same* correct answer) — a downstream
+    /// effect no amount of tuning this function itself can address. See
+    /// the project history around this doc comment's own commit for the
+    /// full numbers if revisiting.
     pub fn try_update(&mut self, basis_slot: usize, a_q_original: &[f64], min_pivot: f64) -> bool {
         let m = self.base.m;
         let p = self.base.col_perm_inv[basis_slot];
@@ -1087,4 +1335,172 @@ mod tests {
         assert_eq!(state.update_count(), 0);
     }
 
+
+    fn to_sparse(dense: &[f64]) -> Vec<(usize, f64)> {
+        dense.iter().enumerate().filter(|&(_, &v)| v != 0.0).map(|(i, &v)| (i, v)).collect()
+    }
+
+    /// Runs `rhs` (converted to sparse form) through `solve_sparse_into`
+    /// and asserts it matches `state.solve(rhs)` (the dense reference)
+    /// exactly — both should compute the identical sequence of floating
+    /// point operations restricted to the same reach set, just reached by
+    /// different bookkeeping, so unlike `approx_vec`'s tolerance
+    /// elsewhere in this module (guarding against genuinely different
+    /// numerical paths, e.g. FT-updated vs freshly-refactored), this
+    /// checks bit-for-bit equality — any mismatch at all means the reach
+    /// set or the zero-management between calls is wrong.
+    fn assert_sparse_matches_dense(state: &FtLu, m: usize, rhs: &[f64], scratch: &mut [f64], gp: &mut GpScratch, out: &mut [f64]) {
+        let expected = state.solve(rhs);
+        state.solve_sparse_into(&to_sparse(rhs), scratch, gp, out);
+        assert_eq!(&out[..m], &expected[..], "rhs={rhs:?}");
+    }
+
+    #[test]
+    fn sparse_solve_matches_dense_on_simple_case() {
+        // Same 3x3 tridiagonal fixture as `factorize_and_solve_matches_expected`.
+        let rows = vec![vec![(0, 2.0), (1, 1.0)], vec![(0, 1.0), (1, 3.0), (2, 1.0)], vec![(1, 1.0), (2, 4.0)]];
+        let base = factorize(3, &rows).unwrap();
+        let state = FtLu::new(base);
+        let m = 3;
+        let mut scratch = vec![0.0; m];
+        let mut gp = GpScratch::new(m);
+        let mut out = vec![0.0; m];
+
+        for rhs in [
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [3.0, -2.0, 7.0],
+            [0.0, 0.0, 0.0],
+        ] {
+            assert_sparse_matches_dense(&state, m, &rhs, &mut scratch, &mut gp, &mut out);
+        }
+    }
+
+    #[test]
+    fn sparse_solve_matches_dense_with_ft_updates() {
+        // Same fixture (and update sequence) as
+        // `ft_update_chain_of_two_matches_full_refactor` — `state.r_etas`
+        // is non-empty here, exercising the sparse path's R-eta stage
+        // (unchanged from the dense path, but only actually run if this
+        // wiring is correct).
+        let rows0 = vec![vec![(0, 2.0), (1, 1.0)], vec![(0, 1.0), (1, 3.0), (2, 1.0)], vec![(1, 1.0), (2, 4.0)]];
+        let base = factorize(3, &rows0).unwrap();
+        let mut state = FtLu::new(base);
+        assert!(state.try_update(1, &[1.0, 5.0, 2.0], 1e-9));
+        assert!(state.try_update(0, &[4.0, 1.0, 3.0], 1e-9));
+
+        let m = 3;
+        let mut scratch = vec![0.0; m];
+        let mut gp = GpScratch::new(m);
+        let mut out = vec![0.0; m];
+
+        for rhs in [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [2.0, -3.0, 1.0]] {
+            assert_sparse_matches_dense(&state, m, &rhs, &mut scratch, &mut gp, &mut out);
+        }
+    }
+
+    #[test]
+    fn sparse_solve_repeated_calls_reuse_scratch_correctly() {
+        // A larger (6x6), more sparsely-structured matrix — enough steps
+        // and fill-in variety that the reach set genuinely differs across
+        // calls — solved for a long, varied sequence of sparse right-hand
+        // sides (single nonzero, several scattered nonzeros, fully dense,
+        // and all-zero) through the *same* `scratch`/`gp` buffers, back
+        // to back. This is the specific scenario `l_solve_sparse_into`'s
+        // "z must be all-zero on entry" precondition depends on
+        // `solve_sparse_into`'s own end-of-call `fill(0.0)` to uphold —
+        // if that cleanup were wrong or incomplete, an *earlier* call's
+        // leftover values would corrupt a *later* call's result, so
+        // running many varied calls in sequence and checking every one
+        // (not just the first) is the point of this test.
+        let rows0 = vec![
+            vec![(0, 4.0), (2, 1.0)],
+            vec![(1, 3.0), (3, 1.0)],
+            vec![(0, 1.0), (2, 5.0), (4, 1.0)],
+            vec![(1, 1.0), (3, 6.0), (5, 2.0)],
+            vec![(2, 1.0), (4, 4.0)],
+            vec![(3, 1.0), (5, 3.0)],
+        ];
+        let base = factorize(6, &rows0).unwrap();
+        let state = FtLu::new(base);
+        let m = 6;
+        let mut scratch = vec![0.0; m];
+        let mut gp = GpScratch::new(m);
+        let mut out = vec![0.0; m];
+
+        let rhs_sequence: Vec<[f64; 6]> = vec![
+            [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [1.0, 0.0, 2.0, 0.0, 0.0, 3.0],
+            [0.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+            [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            [0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+        ];
+        for rhs in &rhs_sequence {
+            assert_sparse_matches_dense(&state, m, rhs, &mut scratch, &mut gp, &mut out);
+        }
+        // The buffer must be back to exactly zero after the last call too
+        // — not just "happened to match the expected output" — since
+        // that's the invariant the *next* caller (whoever it is) relies on.
+        assert!(scratch.iter().all(|&v| v == 0.0), "scratch not fully cleared: {scratch:?}");
+    }
+
+    #[test]
+    fn sparse_solve_matches_dense_after_reordering_u_seq() {
+        // `solve_sparse_into` (sparse `L` + dense `U`) must keep matching
+        // the dense reference through *repeated* `u_seq` reordering
+        // (every `try_update` removes one eta from wherever it sits and
+        // appends a fresh one at the end, shifting everything after the
+        // removal point down by one) — a single update, as the other
+        // FT-update tests already exercise, isn't enough to be confident
+        // this stays right across several. Five sequential updates on a
+        // 6x6 basis, each replacing a different slot (including slots at
+        // both ends and the middle of the current `u_seq`, so removals
+        // happen at varied positions), checked against the dense
+        // reference for a run of varied sparse right-hand sides after
+        // *every single* update — not just the final one.
+        let rows0 = vec![
+            vec![(0, 3.0), (2, 1.0)],
+            vec![(1, 4.0), (3, 1.0)],
+            vec![(0, 1.0), (2, 5.0), (4, 1.0)],
+            vec![(1, 1.0), (3, 6.0), (5, 1.0)],
+            vec![(2, 1.0), (4, 4.0)],
+            vec![(3, 1.0), (5, 3.0)],
+        ];
+        let base = factorize(6, &rows0).unwrap();
+        let mut state = FtLu::new(base);
+        let m = 6;
+        let mut scratch = vec![0.0; m];
+        let mut gp = GpScratch::new(m);
+        let mut out = vec![0.0; m];
+
+        let rhs_probes: [[f64; 6]; 5] = [
+            [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+            [1.0, 0.0, 0.0, 2.0, 0.0, 3.0],
+            [1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+        ];
+        // Updates hit slot 4 (near the end), then 0 (the start), then 5
+        // (the new end), then 2 (the middle), then 1 — deliberately not a
+        // monotonic sequence, so `u_seq`'s position-vs-slot relationship
+        // is scrambled well beyond a simple "always append" pattern.
+        let updates: [(usize, [f64; 6]); 5] = [
+            (4, [1.0, 0.0, 2.0, 0.0, 3.0, 0.0]),
+            (0, [4.0, 1.0, 0.0, 0.0, 1.0, 2.0]),
+            (5, [0.0, 2.0, 1.0, 3.0, 0.0, 5.0]),
+            (2, [2.0, 0.0, 3.0, 1.0, 0.0, 1.0]),
+            (1, [1.0, 3.0, 2.0, 0.0, 1.0, 0.0]),
+        ];
+        for &(slot, a_q) in &updates {
+            assert!(state.try_update(slot, &a_q, 1e-9), "update on slot {slot} rejected");
+            for rhs in &rhs_probes {
+                assert_sparse_matches_dense(&state, m, rhs, &mut scratch, &mut gp, &mut out);
+            }
+        }
+        assert!(scratch.iter().all(|&v| v == 0.0), "scratch not fully cleared: {scratch:?}");
+    }
 }

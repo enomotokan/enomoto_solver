@@ -1595,6 +1595,13 @@ fn solve_lp_dual_on(std: &StdForm) -> SimplexResult {
     let mut tau_buf = vec![0.0; m];
     let mut combined_buf = vec![0.0; m];
     let mut combined_alpha_buf = vec![0.0; m];
+    // Dedicated to the entering column's FTRAN alone — never shared with
+    // `lu_scratch` — since `sparse_lu::FtLu::solve_sparse_into` requires
+    // its own `scratch` buffer to already be all-zero on entry (its own
+    // docs explain why), an invariant a plain `solve_into` call through
+    // `lu_scratch` would silently violate.
+    let mut sparse_lu_scratch = vec![0.0; m];
+    let mut gp_scratch = sparse_lu::GpScratch::new(m);
 
     for _iter in 0..MAX_ITERS {
         if profile_phases {
@@ -2106,8 +2113,22 @@ fn solve_lp_dual_on(std: &StdForm) -> SimplexResult {
             // candidate's own `a_pj` — so the entering step and the state it's
             // applied to are always derived the same, numerically consistent
             // way.
+            // `a_enter_buf` (dense) is still built and kept: `try_update`
+            // below needs the original column, not its FTRAN. The FTRAN
+            // itself goes through the Gilbert-Peierls sparse path instead
+            // of densifying-then-`solve_into`, since a real LP's own
+            // constraint columns are themselves sparse — see
+            // `sparse_lu::GpScratch`/`FtLu::solve_sparse_into`'s own docs.
             t.column_into(q, &mut a_enter_buf);
-            lu.solve_into(&a_enter_buf, &mut lu_scratch, &mut alpha_buf);
+            lu.solve_sparse_into(t.column_sparse(q), &mut sparse_lu_scratch, &mut gp_scratch, &mut alpha_buf);
+            #[cfg(debug_assertions)]
+            {
+                let dense_alpha = lu.solve(&a_enter_buf);
+                debug_assert_eq!(
+                    alpha_buf, dense_alpha,
+                    "sparse FTRAN (entering column {q}) diverged from the dense reference"
+                );
+            }
             lu.solve_into(rho_p, &mut lu_scratch, &mut tau_buf);
         });
         let a_enter = &a_enter_buf;

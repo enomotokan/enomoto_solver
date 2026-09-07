@@ -279,6 +279,15 @@ pub fn run_extended(
     let (na, nb) = timed_step!("reduce_equalities", redundancy::reduce_equalities(&a, &b, n));
     a = na;
     b = nb;
+    if profile && std::env::var("ENOMOTO_PROF_REDUNDANCY").is_ok() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let total = redundancy::PROF_TOTAL_STEPS.load(Relaxed);
+        let trivial = redundancy::PROF_TRIVIAL_STEPS.load(Relaxed);
+        eprintln!(
+            "  PROF_REDUNDANCY sparse_steps={total} trivial_steps={trivial} ({:.1}%)",
+            100.0 * trivial as f64 / total.max(1) as f64
+        );
+    }
     let (ng, nh) = timed_step!("reduce_inequalities", redundancy::reduce_inequalities(&g, &h, n));
     g = ng;
     h = nh;

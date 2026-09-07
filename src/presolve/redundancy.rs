@@ -10,14 +10,24 @@
 //!  2. **Rank-revealing elimination**, via *either* of two implementations
 //!     chosen per-call by [`reduce_equalities`] (see its own docs for the
 //!     dispatch rule): dense column-pivoted QR ([`drop_linearly_dependent`])
-//!     or sparse Gaussian elimination ([`drop_linearly_dependent_sparse`],
+//!     or sparse Gaussian elimination ([`drop_linearly_dependent_sparse_blocked`],
 //!     picking at each step the column carrying the most numerical weight
 //!     and, within it, the largest-magnitude row as pivot, mirroring dense
 //!     QR's own strategy). Both answer the identical question — a row
 //!     whose residual after eliminating every previously-kept row's pivot
 //!     is negligible relative to its own original norm is a linear
 //!     combination of the others — just via different arithmetic paths,
-//!     each cheap in the regime the other is expensive in.
+//!     each cheap in the regime the other is expensive in. The sparse path
+//!     is itself a thin wrapper ([`drop_linearly_dependent_sparse_blocked`])
+//!     around the core per-block algorithm ([`drop_linearly_dependent_sparse`]):
+//!     a connected-components pre-pass ([`connected_components`]) first
+//!     splits the system into independent sub-problems sharing no real
+//!     column — some real Netlib instances decompose into dozens of
+//!     near-identical-size blocks this way (one per vessel/route/period in
+//!     a multi-period scheduling LP) — which are then solved, and above a
+//!     total-size threshold dispatched via `rayon`, since (unlike a general
+//!     block-*triangular* form) blocks with disjoint columns have no
+//!     ordering dependency between them at all.
 //!
 //! **Parallelization**: extracting each row's coefficients out of the CSR
 //! `A`/`G` (below) is independent per row, but runs sequentially rather
@@ -37,11 +47,26 @@ use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use faer::linalg::solvers::ColPivQr;
 use faer::Mat;
 
 use crate::sparse::{csr_from_rows, Csr};
+
+/// Measurement counters answering "would a dedicated block-triangularization
+/// pre-pass (Dulmage-Mendelsohn / BTF, exposing structurally-forced 1x1
+/// pivots before elimination starts, the way `simplex::lu`'s own
+/// `PROF_TOTAL_STEPS`/`PROF_TRIVIAL_STEPS` counters investigated for the
+/// basis LU) help [`drop_linearly_dependent_sparse`] the same way it was
+/// found *not* to help there — see this module's own `ENOMOTO_PROF_REDUNDANCY`
+/// diagnostic (`presolve.rs`'s `reduce_equalities` call site) for the
+/// answer. A step is "trivial" under the identical definition
+/// `simplex::lu::MarkowitzState::find_best_pivot` uses: the winning
+/// `(row_degree - 1) * (col_degree - 1)` Markowitz score is `0`, i.e. a
+/// structurally forced pivot a BTF pre-pass would also have found for free.
+pub(crate) static PROF_TOTAL_STEPS: AtomicUsize = AtomicUsize::new(0);
+pub(crate) static PROF_TRIVIAL_STEPS: AtomicUsize = AtomicUsize::new(0);
 
 /// Above this fraction of nonzero coefficients (`nnz / (p * n)`, over the
 /// deduplicated equality rows), [`reduce_equalities`] uses
@@ -100,7 +125,7 @@ pub fn reduce_equalities(a: &Csr, b: &[f64], n: usize) -> (Csr, Vec<f64>) {
     let keep = if density > DENSE_DENSITY_THRESHOLD {
         drop_linearly_dependent(&deduped, n)
     } else {
-        drop_linearly_dependent_sparse(&deduped, n)
+        drop_linearly_dependent_sparse_blocked(&deduped, n)
     };
 
     let mut new_rows = Vec::with_capacity(keep.len());
@@ -423,6 +448,7 @@ fn drop_linearly_dependent_sparse(rows_in: &[(Vec<(usize, f64)>, f64)], n: usize
         // `best` once it passes the *global* `threshold` above — see this
         // function's own docs for why that, not local column-relative
         // magnitude, is what actually determines a correct rank here.
+        PROF_TOTAL_STEPS.fetch_add(1, Ordering::Relaxed);
         let mut best: Option<(usize, usize)> = None;
         let mut best_score = usize::MAX;
         let mut best_abs = 0.0f64;
@@ -447,6 +473,7 @@ fn drop_linearly_dependent_sparse(rows_in: &[(Vec<(usize, f64)>, f64)], n: usize
                     }
                 }
                 if best_score == 0 {
+                    PROF_TRIVIAL_STEPS.fetch_add(1, Ordering::Relaxed);
                     break 'search;
                 }
             }
@@ -569,6 +596,208 @@ fn drop_linearly_dependent_sparse(rows_in: &[(Vec<(usize, f64)>, f64)], n: usize
     }
 
     (0..p).filter(|&i| keep[i]).collect()
+}
+
+/// Partitions `rows` into connected components of the row&ndash;column
+/// bipartite graph (`p` row-nodes `0..p` plus `n` column-nodes `p..p+n`,
+/// via union-find; an edge is one row's nonzero entry), based on the
+/// rows' own *real* coefficient columns only — the augmented rhs column
+/// [`drop_linearly_dependent_sparse`] adds internally is deliberately
+/// **not** treated as a shared graph edge here, even though every row
+/// with a nonzero rhs does touch that same column index once augmented.
+/// See [`drop_linearly_dependent_sparse_blocked`]'s own docs for why that
+/// omission is still sound (in fact necessary, since including it would
+/// merge nearly every row in a typical LP into one component and defeat
+/// the whole decomposition).
+///
+/// Two rows in different components share **no** real column, so no
+/// linear combination of one component's rows can ever reproduce an
+/// entry that only appears in another — rank / redundancy detection over
+/// the whole system decomposes exactly into one independent sub-problem
+/// per component. Returned components are sorted by their smallest row
+/// index, each internally in ascending row order, for determinism
+/// (union-find's own root assignment is otherwise path- and
+/// union-order-dependent, which would otherwise make dispatch order, and
+/// therefore floating-point summation order inside each block, vary
+/// between runs).
+fn connected_components(rows: &[(Vec<(usize, f64)>, f64)], n: usize) -> Vec<Vec<usize>> {
+    let p = rows.len();
+    let mut parent: Vec<usize> = (0..p + n).collect();
+    fn find(parent: &mut [usize], mut x: usize) -> usize {
+        while parent[x] != x {
+            parent[x] = parent[parent[x]];
+            x = parent[x];
+        }
+        x
+    }
+    for (i, (row, _)) in rows.iter().enumerate() {
+        for &(j, _) in row {
+            let ri = find(&mut parent, i);
+            let rj = find(&mut parent, p + j);
+            if ri != rj {
+                parent[ri] = rj;
+            }
+        }
+    }
+    let mut groups: HashMap<usize, Vec<usize>> = HashMap::new();
+    for i in 0..p {
+        let root = find(&mut parent, i);
+        groups.entry(root).or_default().push(i);
+    }
+    let mut components: Vec<Vec<usize>> = groups.into_values().collect();
+    components.sort_by_key(|c| c[0]);
+    components
+}
+
+/// Below this total row count across a decomposition's non-trivial
+/// (size > 1) components, [`drop_linearly_dependent_sparse_blocked`] runs
+/// them sequentially rather than via `rayon` — see that function's own
+/// docs for why, unlike every *other* `rayon` call site in this crate
+/// (all gated by `RAYON_SIZE_THRESHOLD`-style raw *problem* size, per
+/// `simplex.rs`'s own docs on measured per-element dispatch overhead),
+/// the right threshold here is total row count *within the blocks
+/// actually being split*, since a component's own elimination is real,
+/// non-trivial work per row (unlike a cheap per-element scan) — a modest
+/// absolute row count here still comfortably pays for `rayon`'s task
+/// dispatch.
+const PARALLEL_DECOMPOSE_ROW_THRESHOLD: usize = 64;
+
+/// Below this many equality rows, [`drop_linearly_dependent_sparse_blocked`]
+/// skips [`connected_components`] entirely and calls
+/// [`drop_linearly_dependent_sparse`] directly, rather than always paying
+/// for the union-find pass (and, if it does find multiple components,
+/// the per-component `HashMap`-based column remapping and fresh
+/// `BTreeMap`/bucket/heap scaffolding for each one). Measured directly:
+/// every real Netlib win from decomposition (`ship12s` `p=1045`, `ship08s`
+/// `p=698`, `ship04l`/`ship04s` `p=354`, `sierra` `p=528`) has `p` well
+/// above this; every case that regressed when decomposition ran
+/// unconditionally (`sc105` `p=45`, `scorpion` `p=280`, `sc205` `p=91`,
+/// `capri` `p=142`, `standgub`/`standata` `p=160`, `recipe` `p=67`,
+/// `bore3d` `p=214`) sits below it — all by a comfortable margin, so `300`
+/// is not a tight cutoff. Every one of those regressions was itself only
+/// a fraction of a millisecond in absolute terms (these are already
+/// sub-10ms problems), but with nothing to gain there either — the
+/// decomposition's benefit scales with how much per-row elimination work
+/// it *avoids* doing across components, which is negligible when the
+/// whole problem is this small to begin with.
+const MIN_ROWS_FOR_BLOCK_DECOMPOSE: usize = 300;
+
+/// Wraps [`drop_linearly_dependent_sparse`] with a connected-components
+/// pre-pass (see [`connected_components`]): the equality system is first
+/// split into independent sub-problems (row groups sharing no real
+/// column), each solved by calling the same core algorithm on just that
+/// group's rows with columns remapped to a compact local index range
+/// (`0..local_n`) — without that remapping, every component's call would
+/// still pay for `aug_n`-sized scratch arrays (`col_rows`, `col_buckets`,
+/// `heap`/`col_bits`) proportional to the *whole* problem's `n`, defeating
+/// the point of splitting at all.
+///
+/// This is a genuine block-triangularization in the degenerate
+/// (block-*diagonal*) case: real Netlib multi-vessel/multi-period
+/// scheduling LPs (`ship12s`, `ship08s`, `ship04l`, `ship04s`, `sierra`)
+/// were measured (see the `reduce_equalities` bottleneck investigation
+/// this function grew out of) to decompose into dozens of components of
+/// *nearly identical size* (`ship12s`: 12 blocks of exactly 78 rows each,
+/// plus 109 size-1 singletons) — one instance per vessel/route/period,
+/// each with disjoint variable columns. A handful of other instances
+/// (`shell`, `scsd8`, `fit1p`, `ganges`, `wood1p`) stay a single
+/// connected component and fall straight back to the un-decomposed path
+/// below with no remapping overhead at all.
+///
+/// **Why decomposing is sound to parallelize, unlike a general
+/// block-*triangular* (not diagonal) form**: a true Dulmage-Mendelsohn/BTF
+/// decomposition's off-diagonal blocks couple later blocks to earlier
+/// ones (fill propagates forward), forcing sequential order across
+/// blocks — only work *inside* one block could ever be parallel. The
+/// connected-components case used here is the degenerate special case
+/// where that coupling is provably absent (disjoint column support), so
+/// every block is independent of every other regardless of order,
+/// making the *whole* decomposition (not just work inside one block)
+/// safe to run concurrently.
+///
+/// **The rhs-augmentation edge case**: [`drop_linearly_dependent_sparse`]
+/// augments each row with the equation's rhs as one extra shared column
+/// (index `n`), used to distinguish genuine redundancy from an
+/// inconsistency (Farkas infeasibility witness) — but [`connected_components`]
+/// deliberately does not treat that column as a graph edge, so two
+/// *originally* all-zero-coefficient rows with different nonzero rhs
+/// (`0 = 5`, `0 = 3`) land in separate singleton components here, whereas
+/// the un-decomposed algorithm's single shared rhs column would link them
+/// and drop one as "dependent" on the other. Both outcomes are correct —
+/// each such row is already its own infeasibility witness on its own, so
+/// dropping one loses no information the solver needs — this function is
+/// just more conservative (keeps a possibly-redundant-but-harmless extra
+/// row) in that one narrow, degenerate edge case. The same reasoning
+/// applies to a row that only reduces to a pure rhs residual *during*
+/// elimination (the general Farkas case): that reduction happens
+/// entirely from real columns within one component, so it is still
+/// caught correctly and entirely locally.
+fn drop_linearly_dependent_sparse_blocked(rows_in: &[(Vec<(usize, f64)>, f64)], n: usize) -> Vec<usize> {
+    if rows_in.len() < MIN_ROWS_FOR_BLOCK_DECOMPOSE {
+        return drop_linearly_dependent_sparse(rows_in, n);
+    }
+    let components = connected_components(rows_in, n);
+    if components.len() <= 1 {
+        return drop_linearly_dependent_sparse(rows_in, n);
+    }
+
+    let mut kept: Vec<usize> = Vec::new();
+    let mut nontrivial: Vec<Vec<usize>> = Vec::with_capacity(components.len());
+    for comp in components {
+        if comp.len() == 1 {
+            // A row with zero real-column edges to anything else cannot
+            // be a linear combination of any other row's real
+            // coefficients — the only way it could be "dependent" is by
+            // literally being the zero vector including its rhs, which
+            // `dedupe_rows` already drops as a trivial `0 = 0` row before
+            // this function ever sees it. Always kept, no elimination
+            // machinery needed at all.
+            kept.push(comp[0]);
+        } else {
+            nontrivial.push(comp);
+        }
+    }
+
+    // Longest-processing-time-first: the biggest components are hardest
+    // to load-balance, so dispatching them first gives `rayon`'s
+    // work-stealing scheduler the best chance of not stranding two large
+    // blocks on the same thread behind a run of smaller ones.
+    nontrivial.sort_by_key(|c| std::cmp::Reverse(c.len()));
+
+    let solve_component = |comp: &[usize]| -> Vec<usize> {
+        let mut col_map: HashMap<usize, usize> = HashMap::new();
+        let local_rows: Vec<(Vec<(usize, f64)>, f64)> = comp
+            .iter()
+            .map(|&i| {
+                let (row, rhs) = &rows_in[i];
+                let local_row = row
+                    .iter()
+                    .map(|&(j, v)| {
+                        let next_id = col_map.len();
+                        let lj = *col_map.entry(j).or_insert(next_id);
+                        (lj, v)
+                    })
+                    .collect();
+                (local_row, *rhs)
+            })
+            .collect();
+        let local_n = col_map.len();
+        drop_linearly_dependent_sparse(&local_rows, local_n)
+            .into_iter()
+            .map(|local_idx| comp[local_idx])
+            .collect::<Vec<usize>>()
+    };
+
+    let total_nontrivial_rows: usize = nontrivial.iter().map(|c| c.len()).sum();
+    if nontrivial.len() > 1 && total_nontrivial_rows >= PARALLEL_DECOMPOSE_ROW_THRESHOLD {
+        use rayon::prelude::*;
+        kept.extend(nontrivial.par_iter().flat_map(|c| solve_component(c)).collect::<Vec<usize>>());
+    } else {
+        kept.extend(nontrivial.iter().flat_map(|c| solve_component(c)));
+    }
+
+    kept.sort_unstable();
+    kept
 }
 
 #[cfg(test)]
@@ -719,6 +948,126 @@ mod tests {
 
         let keep = drop_linearly_dependent_sparse(&rows, n);
         assert_eq!(keep.len(), 4, "expected rank 4 out of 5 rows; keep={keep:?}");
+    }
+
+    /// Two disjoint-column blocks (rows `{0,1}` over columns `{0,1}`, rows
+    /// `{2,3}` over columns `{2,3}`) plus one truly isolated row (`{4}`,
+    /// column `{4}`) must land in exactly three components, each in
+    /// ascending row order, sorted by first row.
+    #[test]
+    fn connected_components_splits_disjoint_column_groups() {
+        let rows: Vec<(Vec<(usize, f64)>, f64)> = vec![
+            (vec![(0, 1.0), (1, 2.0)], 3.0),
+            (vec![(0, 2.0), (1, 1.0)], 4.0),
+            (vec![(2, 1.0), (3, 1.0)], 1.0),
+            (vec![(2, 1.0), (3, 2.0)], 2.0),
+            (vec![(4, 5.0)], 5.0),
+        ];
+        let comps = connected_components(&rows, 5);
+        assert_eq!(comps, vec![vec![0, 1], vec![2, 3], vec![4]], "comps={comps:?}");
+    }
+
+    /// A single connected chain (row `i` and `i+1` always share a column)
+    /// must stay one component regardless of how many rows are involved.
+    #[test]
+    fn connected_components_keeps_a_connected_chain_together() {
+        let rows: Vec<(Vec<(usize, f64)>, f64)> = vec![
+            (vec![(0, 1.0), (1, 1.0)], 1.0),
+            (vec![(1, 1.0), (2, 1.0)], 1.0),
+            (vec![(2, 1.0), (3, 1.0)], 1.0),
+        ];
+        let comps = connected_components(&rows, 4);
+        assert_eq!(comps.len(), 1, "comps={comps:?}");
+        assert_eq!(comps[0], vec![0, 1, 2], "comps={comps:?}");
+    }
+
+    /// The blocked wrapper must match the un-decomposed sparse algorithm's
+    /// rank count on a case that is all *one* component (no decomposition
+    /// possible) — exercises the `components.len() <= 1` direct-fallback
+    /// path specifically.
+    #[test]
+    fn drop_linearly_dependent_sparse_blocked_matches_unblocked_on_a_single_component() {
+        let rows: Vec<(Vec<(usize, f64)>, f64)> = vec![
+            (vec![(0, 1.0), (1, 2.0)], 5.0),
+            (vec![(1, 1.0), (2, 3.0)], 7.0),
+            (vec![(0, 2.0), (2, 1.0)], 4.0),
+        ];
+        let keep = drop_linearly_dependent_sparse_blocked(&rows, 3);
+        assert_eq!(keep, vec![0, 1, 2], "keep={keep:?}");
+    }
+
+    /// Two independent blocks, each internally rank-deficient by exactly
+    /// one row, stitched together in a single call — the redundant row in
+    /// block A must not affect block B's own (independent) redundant row
+    /// and vice versa, and the combined result must be exactly rank
+    /// `2 + 2 = 4` out of the 6 rows the two blocks contribute. Column
+    /// indices are chosen so the two blocks share *no* column at all,
+    /// forcing the connected-components pre-pass to actually split them
+    /// (verified via `connected_components` separately above). Padded
+    /// with 300 trivially-independent singleton rows (each its own
+    /// isolated column, always kept — see
+    /// [`drop_linearly_dependent_sparse_blocked`]'s own docs) purely to
+    /// clear [`MIN_ROWS_FOR_BLOCK_DECOMPOSE`] and actually exercise
+    /// [`connected_components`] rather than that size gate's direct
+    /// fallback — the singletons are otherwise inert and checked only in
+    /// aggregate.
+    #[test]
+    fn drop_linearly_dependent_sparse_blocked_handles_independent_blocks_separately() {
+        let mut rows: Vec<(Vec<(usize, f64)>, f64)> = vec![
+            // Block A: columns {0,1,2}, row 2 = row0 + row1 (x0+2x1+x2=7).
+            (vec![(0, 1.0), (1, 1.0)], 3.0),
+            (vec![(1, 1.0), (2, 1.0)], 4.0),
+            (vec![(0, 1.0), (1, 2.0), (2, 1.0)], 7.0),
+            // Block B: columns {3,4,5}, row 5 = 2*row3 - row4 (2x3+x4-x5=-1).
+            (vec![(3, 1.0), (4, 1.0)], 2.0),
+            (vec![(4, 1.0), (5, 1.0)], 5.0),
+            (vec![(3, 2.0), (4, 1.0), (5, -1.0)], -1.0),
+        ];
+        let filler_count = MIN_ROWS_FOR_BLOCK_DECOMPOSE;
+        for k in 0..filler_count {
+            rows.push((vec![(6 + k, 1.0)], 1.0));
+        }
+        let n = 6 + filler_count;
+        assert!(rows.len() >= MIN_ROWS_FOR_BLOCK_DECOMPOSE, "test must actually exercise connected_components");
+
+        let keep = drop_linearly_dependent_sparse_blocked(&rows, n);
+        assert_eq!(keep.len(), 4 + filler_count, "expected rank 2+2+{filler_count} singletons; keep={keep:?}");
+        let keep_a = keep.iter().filter(|&&i| i < 3).count();
+        let keep_b = keep.iter().filter(|&&i| (3..6).contains(&i)).count();
+        let keep_filler = keep.iter().filter(|&&i| i >= 6).count();
+        assert_eq!(keep_a, 2, "block A must independently reduce to rank 2; keep={keep:?}");
+        assert_eq!(keep_b, 2, "block B must independently reduce to rank 2; keep={keep:?}");
+        assert_eq!(keep_filler, filler_count, "every isolated singleton row must survive; keep={keep:?}");
+    }
+
+    /// Same as the previous test but with enough repeated blocks to push
+    /// `drop_linearly_dependent_sparse_blocked` past both
+    /// `MIN_ROWS_FOR_BLOCK_DECOMPOSE` (so it doesn't take the small-input
+    /// direct-fallback path at all) and `PARALLEL_DECOMPOSE_ROW_THRESHOLD`
+    /// (so it actually dispatches via `rayon` rather than iterating
+    /// sequentially) — every block is an independent copy of the same
+    /// rank-2 (out of 3 rows) pattern on disjoint columns, so the correct
+    /// answer is mechanically checkable (rank `2 * block_count`)
+    /// regardless of which thread processes which block.
+    #[test]
+    fn drop_linearly_dependent_sparse_blocked_matches_sequential_result_under_parallel_dispatch() {
+        let block_count = 120; // 120 * 3 = 360 rows, clears both thresholds above.
+        let mut rows: Vec<(Vec<(usize, f64)>, f64)> = Vec::new();
+        for b in 0..block_count {
+            let base = b * 3;
+            rows.push((vec![(base, 1.0), (base + 1, 1.0)], 3.0));
+            rows.push((vec![(base + 1, 1.0), (base + 2, 1.0)], 4.0));
+            rows.push((vec![(base, 1.0), (base + 1, 2.0), (base + 2, 1.0)], 7.0)); // = row0 + row1
+        }
+        let n = block_count * 3;
+        assert!(rows.len() >= MIN_ROWS_FOR_BLOCK_DECOMPOSE, "test must clear the small-input fallback gate");
+        assert!(rows.len() >= PARALLEL_DECOMPOSE_ROW_THRESHOLD, "test must actually exercise the parallel path");
+        let keep = drop_linearly_dependent_sparse_blocked(&rows, n);
+        assert_eq!(keep.len(), block_count * 2, "expected rank 2 per block; keep={keep:?}");
+        for b in 0..block_count {
+            let in_block = keep.iter().filter(|&&i| i / 3 == b).count();
+            assert_eq!(in_block, 2, "block {b} must independently reduce to rank 2; keep={keep:?}");
+        }
     }
 }
 
