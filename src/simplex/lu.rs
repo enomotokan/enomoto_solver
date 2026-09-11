@@ -498,6 +498,55 @@ pub struct LuFactors {
 /// Factorizes the `m x m` sparse matrix given as sparse rows
 /// `(col, value)`. Returns `None` if the matrix is (numerically)
 /// singular — no acceptable pivot remains at some step.
+///
+/// **A Dulmage-Mendelsohn block-triangularized variant of this function
+/// was implemented, thoroughly validated, and measured — then reverted**:
+/// rows were partitioned into strongly-connected blocks (via bipartite
+/// matching + Tarjan SCC, [`crate::graph::dulmage_mendelsohn_blocks_topological`],
+/// which remains implemented and tested for a possible future, more
+/// targeted revisit) in topological order, each factorized independently,
+/// then reassembled via the block-LU identity `U_ij = L_i^{-1} A_ij` for
+/// "spillover" entries outside a block's own matched columns (`L` itself
+/// stays exactly block-diagonal). Implementation correctness was
+/// confirmed via unit tests (including one that caught a real bug: an
+/// initial version copied spillover entries unchanged, which is only
+/// valid when the emitting block's own `L` is trivial/identity — true for
+/// singleton blocks, which is why singleton-only spillover tests passed
+/// by coincidence before the fix) and zero objective mismatches across
+/// the full 73-problem Netlib benchmark.
+///
+/// **But it measured as a net ~4% aggregate regression** in a controlled
+/// back-to-back A/B (same machine, same run, only the feature toggled):
+/// dramatic wins on a few instances with genuine block-angular structure
+/// (`fit1p` -44%, `wood1p` -17%, `scsd8` -10%, `sierra`/`sctap3`/`scrs8`
+/// a few percent) were outweighed by a broad ~10-25% tax on most other
+/// medium/large instances (`grow15` +25%, `bnl1` +18%, `modszk1` +17%,
+/// `perold` +16%, `25fv47` +16%, `stocfor2` +14%, `pilotnov` +13%,
+/// `ganges` +11%) — paying bipartite-matching-plus-SCC cost on *every*
+/// refactorization, whether or not it finds anything worth exploiting.
+/// Two cheap pre-gating heuristics were tried to avoid paying that cost
+/// on instances unlikely to benefit, and both failed: (1) whether
+/// `presolve::redundancy`'s own equality-row block decomposition found
+/// structure — `ganges` decomposes beautifully there (1053 blocks, a 1%
+/// bump) yet was still a net loss here, since the *basis* matrix (all
+/// rows, reshuffled by every pivot) doesn't share the *equality
+/// system*'s (static, presolve-time-only) structure; (2) the *basis*
+/// matrix's own bump size at the first real refactorization — `stocfor2`
+/// and `ganges` again showed excellent bump ratios (0.2-1.3%, as good as
+/// or better than the actual winners) yet remained net losses, showing
+/// the fixed decomposition cost itself, not just a poor decomposition
+/// outcome, was the problem. This mirrors HiGHS's own architecture:
+/// `HFactor::buildSimple()` peels off trivial (degree-1/logical) pivots
+/// via a cheap `O(nnz)` sweep with no bipartite matching at all, leaving
+/// full Markowitz elimination (`buildKernel()`) for only the remaining
+/// kernel — this file's own bucket-based `find_best_pivot` already gets
+/// that same cheap benefit for free (confirmed earlier via
+/// `PROF_TOTAL_STEPS`/`PROF_TRIVIAL_STEPS` showing 90-100% of pivots
+/// already resolve trivially), so the *additional*, much more expensive
+/// structure genuine Dulmage-Mendelsohn decomposition can find beyond
+/// that cheap peeling isn't reliably worth its own cost. Fully reverted;
+/// see the project history around this doc comment's own commit for the
+/// full numbers if revisiting.
 pub fn factorize(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuFactors> {
     let mut state = MarkowitzState::new(m, rows_in);
 
@@ -1503,4 +1552,5 @@ mod tests {
         }
         assert!(scratch.iter().all(|&v| v == 0.0), "scratch not fully cleared: {scratch:?}");
     }
+
 }

@@ -108,6 +108,8 @@
 use crate::presolve::{self, scaling};
 use crate::sparse::FixedRows;
 use crate::types::{ConstraintRow, Objective, RowSense, Sense, Status, VariableData};
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 
 /// Markowitz-pivoted sparse LU + Forrest-Tomlin incremental updates —
 /// see `lu`'s own module docs. Referred to below as `sparse_lu` (not the
@@ -185,6 +187,23 @@ const STALL_PROGRESS_EPS: f64 = 1e-9;
 const FT_MIN_PIVOT: f64 = 1e-7;
 /// Cadence (in iterations) for triggers (1) and (3).
 const FT_CHECK_INTERVAL: usize = 5;
+/// Trigger (1)'s own check (`compute_rhs` + `basis_residual_norm`, an
+/// `O(nnz(A))` scan plus a full basis-matrix multiply) runs only once
+/// every this many [`FT_CHECK_INTERVAL`]-cadence checks — i.e. every
+/// `FT_CHECK_INTERVAL * RESIDUAL_CHECK_MULTIPLIER` iterations — rather
+/// than every single one, per [`FT_RESIDUAL_TOL`]'s own docs: measured
+/// residuals on this crate's target problem sizes stay around
+/// `1e-11..1e-12`, seven to eight orders of magnitude below the `1e-4`
+/// trigger, so this check has enormous slack before genuine drift could
+/// ever approach it — checking it this much less often still catches real
+/// drift long before it matters, while no longer paying `compute_rhs`'s
+/// full-matrix cost on every one of trigger (3)'s own (cheap,
+/// `fill_count()`-only) checks. Trigger (3) itself is unaffected — its own
+/// `fill_count()` check (an `O(1)`-ish length sum, no matrix scan) still
+/// runs every `FT_CHECK_INTERVAL` iterations, and still supplies `rhs` for
+/// the resync whenever it actually fires, since `compute_rhs` is only
+/// skipped when *neither* trigger has a reason to run this round.
+const RESIDUAL_CHECK_MULTIPLIER: usize = 20;
 /// Trigger (1): refactor if the true-basis residual exceeds this. In
 /// practice this essentially never fires (measured residuals on this
 /// crate's target problem sizes stayed around 1e-11..1e-12, several
@@ -1251,11 +1270,361 @@ fn run_phase(
     Status::Optimal // iteration cap hit; best-effort
 }
 
+/// Above this many variables, a connected component found by
+/// [`connected_components_of_std_form`] is solved via a separate `rayon`
+/// task rather than in the main sequential loop, once *any* component in
+/// the batch clears this size — solving an entire LP (its own presolved
+/// simplex loop, potentially thousands of pivots) is substantial work,
+/// unlike this file's other, deliberately sequential per-*iteration*
+/// loops (`chuzr`, `chuzc1`, DSE weight updates — see
+/// `solve_lp_dual_on`'s own module docs for the profiling that found
+/// `rayon`'s per-call dispatch overhead exceeding *those* loop bodies at
+/// this crate's realistic problem sizes); at this much coarser
+/// "solve a whole sub-problem" granularity, that same dispatch cost is
+/// comfortably negligible in comparison. `200` is the size the user
+/// requesting this feature asked for directly, not independently tuned —
+/// see [`solve_std_form_decomposed`]'s own docs for why no Netlib
+/// instance in this crate's own benchmark set actually exercises the
+/// parallel path at all (every genuine split found there lands well
+/// under this threshold).
+const PARALLEL_COMPONENT_MIN_VARS: usize = 200;
+
+/// Partitions `std`'s structural variables (`0..n_orig`, `n_orig =
+/// n_total - n_rows`) into connected components: two variables are
+/// connected iff some row's own structural (non-slack) members include
+/// both of them. A row's own slack column (added once per row by
+/// [`build_std_form_presolved`]) is excluded from this graph — it is
+/// unique to that row and never shared with another row, so it can never
+/// itself be a bridge between two otherwise-unconnected variables.
+///
+/// **Why checking this once, against the fully presolved `std`, is
+/// enough — no separate pre-presolve check is needed**: every stage of
+/// `presolve::run_extended` only ever *removes* rows, tightens bounds, or
+/// substitutes a variable out in terms of others already appearing
+/// alongside it in the same row — none of that can introduce a new
+/// coupling between two variables that never shared a row to begin with.
+/// So whatever connectivity structure the *original* model had, the
+/// presolved `std` can only ever show the same structure or a *more*
+/// separated one (e.g. eliminating the one row that coupled two
+/// otherwise-independent halves of the model) — checking the final,
+/// most-reduced state this pipeline ever produces catches both "the
+/// original model was already separable" and "presolve's own reductions
+/// revealed separability the original model's own structure didn't show"
+/// in the same single pass.
+///
+/// Returns `None` when there is only one component — not worth the
+/// reassembly overhead of [`split_std_form`]/[`solve_std_form_decomposed`]
+/// over just solving `std` directly.
+///
+/// Alongside the components themselves, also returns `has_row[j]` for
+/// every structural variable `j` — whether it appears in at least one
+/// row — computed for free from the exact same scan this function's own
+/// union-find already makes. [`solve_std_form_decomposed`] uses it to
+/// decide, cheaply and *before* ever calling the real (allocation-heavy,
+/// per-component) [`split_std_form`], whether splitting is even worth
+/// attempting: a size-1 component with `has_row[j] == false` is a
+/// variable with no row at all (typically one `dualfix` already fixed),
+/// contributing nothing whether split off or left in place — see that
+/// function's own docs for why building and then discarding hundreds of
+/// such throwaway single-variable `StdForm`s (this crate's own first
+/// version of this optimization) was itself a measurable regression, not
+/// merely wasted-but-harmless effort.
+fn connected_components_of_std_form(std: &StdForm) -> Option<(Vec<Vec<usize>>, Vec<bool>)> {
+    let n_orig = std.n_total - std.n_rows;
+    let mut parent: Vec<usize> = (0..n_orig).collect();
+    let mut has_row = vec![false; n_orig];
+    fn find(parent: &mut [usize], x: usize) -> usize {
+        if parent[x] != x {
+            parent[x] = find(parent, parent[x]);
+        }
+        parent[x]
+    }
+    fn union(parent: &mut [usize], a: usize, b: usize) {
+        let (ra, rb) = (find(parent, a), find(parent, b));
+        if ra != rb {
+            parent[ra] = rb;
+        }
+    }
+
+    for i in 0..std.n_rows {
+        let mut first: Option<usize> = None;
+        for &(j, _) in std.rows.row(i) {
+            if j >= n_orig {
+                continue; // this row's own slack column
+            }
+            has_row[j] = true;
+            match first {
+                None => first = Some(j),
+                Some(f) => union(&mut parent, f, j),
+            }
+        }
+        // A row with *no* structural members at all (only its own slack)
+        // doesn't naturally belong to any variable-based component — but
+        // it can still be a genuine, load-bearing constraint: `doubleton`
+        // can rewrite a surviving row down to exactly this shape (every
+        // structural coefficient cancels to zero) while its right-hand
+        // side stays nonzero, deliberately kept rather than dropped as a
+        // Farkas infeasibility witness the *solver* is meant to catch
+        // (see `contradictory_equality_rows_detected_infeasible`'s own
+        // test and `doubleton`'s module docs) — not presolve, and
+        // certainly not this purely structural split. Silently omitting
+        // such a row from every component's own rebuilt `StdForm` (it
+        // can't touch any of them, since it touches no variable at all)
+        // would erase that witness entirely. Bailing out of splitting
+        // altogether whenever one exists is conservative — it forgoes a
+        // split this solve might otherwise have had — but keeps the
+        // *existing*, already-correct undecomposed path as the fallback,
+        // rather than trying to special-case a row this genuinely
+        // degenerate inside the split machinery itself.
+        if first.is_none() {
+            return None;
+        }
+    }
+
+    let mut groups: std::collections::BTreeMap<usize, Vec<usize>> = std::collections::BTreeMap::new();
+    for j in 0..n_orig {
+        let root = find(&mut parent, j);
+        groups.entry(root).or_default().push(j);
+    }
+    if groups.len() <= 1 {
+        return None;
+    }
+    Some((groups.into_values().collect(), has_row))
+}
+
+/// Builds a standalone `StdForm` per connected component found by
+/// [`connected_components_of_std_form`], in one combined `O(nnz)` pass —
+/// **not** one call per component each rescanning every row of `std`,
+/// which is `O(components * n_rows)` and was this feature's own first,
+/// measured-as-a-real-regression implementation (real Netlib instances
+/// routinely produce hundreds of components post-presolve — almost
+/// always one large remainder plus a great many singletons, per
+/// [`solve_std_form_decomposed`]'s own docs — making that quadratic-ish
+/// cost dominate the actual solve time it was meant to save). Each row of
+/// `std` is assigned to a component via any one of its own structural
+/// members (guaranteed to all share one component, by construction of
+/// the components themselves — a row can never straddle two). Variables
+/// are re-indexed to `0..component.len()` in each component's own order;
+/// each surviving row keeps its original slack's bounds but gets a fresh
+/// local slack column.
+fn split_std_form(std: &StdForm, components: &[Vec<usize>]) -> Vec<StdForm> {
+    let n_orig = std.n_total - std.n_rows;
+    let mut comp_id = vec![usize::MAX; n_orig];
+    let mut local_idx = vec![usize::MAX; n_orig];
+    for (cid, comp) in components.iter().enumerate() {
+        for (local_j, &orig_j) in comp.iter().enumerate() {
+            comp_id[orig_j] = cid;
+            local_idx[orig_j] = local_j;
+        }
+    }
+
+    let mut rows_acc: Vec<Vec<Vec<(usize, f64)>>> = vec![Vec::new(); components.len()];
+    let mut b_acc: Vec<Vec<f64>> = vec![Vec::new(); components.len()];
+    let mut lb_acc: Vec<Vec<f64>> = components.iter().map(|c| c.iter().map(|&j| std.lb[j]).collect()).collect();
+    let mut ub_acc: Vec<Vec<f64>> = components.iter().map(|c| c.iter().map(|&j| std.ub[j]).collect()).collect();
+    let mut c_acc: Vec<Vec<f64>> = components.iter().map(|c| c.iter().map(|&j| std.c[j]).collect()).collect();
+
+    for i in 0..std.n_rows {
+        let cid = std
+            .rows
+            .row(i)
+            .iter()
+            .find_map(|&(j, _)| if j < n_orig { Some(comp_id[j]) } else { None })
+            .expect("row with no structural members must have made connected_components_of_std_form bail out already");
+        let local_n = components[cid].len();
+        let slack_col = local_n + rows_acc[cid].len();
+        let mut row: Vec<(usize, f64)> = Vec::with_capacity(std.rows.row(i).len());
+        let (mut slack_lb, mut slack_ub) = (0.0, 0.0);
+        for &(j, v) in std.rows.row(i) {
+            if j < n_orig {
+                debug_assert_eq!(comp_id[j], cid, "row split across two components");
+                row.push((local_idx[j], v));
+            } else {
+                row.push((slack_col, v));
+                slack_lb = std.lb[j];
+                slack_ub = std.ub[j];
+            }
+        }
+        rows_acc[cid].push(row);
+        b_acc[cid].push(std.b[i]);
+        lb_acc[cid].push(slack_lb);
+        ub_acc[cid].push(slack_ub);
+        c_acc[cid].push(0.0);
+    }
+
+    let mut result = Vec::with_capacity(components.len());
+    for cid in 0..components.len() {
+        let local_n = components[cid].len();
+        let rows = std::mem::take(&mut rows_acc[cid]);
+        let n_rows = rows.len();
+        let n_total = local_n + n_rows;
+        let cols = cols_from_rows(&rows, n_total);
+        let rows = FixedRows::from_rows(&rows);
+        result.push(StdForm {
+            n_total,
+            n_rows,
+            c: std::mem::take(&mut c_acc[cid]),
+            rows,
+            cols,
+            b: std::mem::take(&mut b_acc[cid]),
+            lb: std::mem::take(&mut lb_acc[cid]),
+            ub: std::mem::take(&mut ub_acc[cid]),
+        });
+    }
+    result
+}
+
+/// Solves an already-presolved `StdForm`, transparently splitting into
+/// independent connected components first when
+/// [`connected_components_of_std_form`] finds more than one — each solved
+/// via the primal method ([`solve_lp_on`]) if `use_dual` is false, or the
+/// dual method ([`solve_lp_dual_on`]) if true and the component has any
+/// rows at all (mirrors [`solve_lp_dual`]'s own top-level `n_rows == 0`
+/// fallback to the primal method, now applied per component instead of
+/// only to `std` as a whole) — then recombined into one [`SimplexResult`]
+/// indexed by the *original* variable numbering. Falls straight through
+/// to a single, undecomposed solve when no split is found, so this adds
+/// only [`connected_components_of_std_form`]'s own `O(nnz)` union-find
+/// scan to the cost of a solve that turns out not to be separable.
+///
+/// **What this crate's own 73-problem Netlib benchmark set actually looks
+/// like, post-presolve, once this was measured rather than assumed**: an
+/// *earlier* feasibility check, run directly against the 88 cached Netlib
+/// MPS files' *original*, pre-presolve constraint graphs, found
+/// essentially no exploitable structure (19 files with more than one
+/// component, but every one just a single dominant component plus
+/// trivial size-1 fragments — the largest real second component anywhere
+/// was `standgub`'s 108). That check did *not* look at the graph *this*
+/// function actually sees — the fully presolved `std` — and that turned
+/// out to look completely different: post-presolve, most instances split
+/// into **hundreds** of components (`fit1p` 628, `sctap3` 624, `ganges`
+/// 530, `modszk1` 422, …), but the shape is the same as before at a finer
+/// grain — one large remaining component (`fit1p`'s is 1050 of its own
+/// 1677 variables) plus a great many singletons (variables presolve left
+/// with no remaining *real* row to couple them to anything else). No
+/// instance in this set ever has two or more components clearing the
+/// `real_components` bar below, let alone [`PARALLEL_COMPONENT_MIN_VARS`]
+/// — so on this crate's own benchmark set, this whole mechanism is
+/// permanently dormant by design (see below), active only for whichever
+/// future problem actually has genuine block-diagonal structure.
+///
+/// Two real regressions were measured and fixed while developing this,
+/// both instructive about what "dormant by design" has to mean in
+/// practice given how often real Netlib instances *do* find some kind of
+/// split (just never a useful one): (1) an initial version called
+/// [`split_std_form`]'s predecessor once per component, each call
+/// rescanning every row of `std` — quadratic-ish against instances with
+/// hundreds of components, and a real, measured aggregate slowdown;
+/// fixed by making it a single linear pass. (2) even after that fix, an
+/// initial version *always* built every component's own `StdForm` before
+/// checking whether any of it was worth using, so a "hundreds of
+/// singletons plus one remainder" instance (the common case here) still
+/// paid hundreds of small allocations for a split that was about to be
+/// thrown away — fixed by the cheap `has_row`-based `real_components`
+/// check below running *before* [`split_std_form`] is ever called.
+/// Neither fix changed *whether* a split happens, only its cost when it
+/// doesn't help — the real remaining risk, confirmed directly on Netlib
+/// `25fv47`, is that splitting off even a single genuinely-free variable
+/// still *compacts* every surviving variable's own global index (see
+/// [`split_std_form`]'s own docs), and on a highly degenerate instance
+/// that alone was enough to send chuzc/DSE tie-breaking down a completely
+/// different — still correct, but far longer — pivot sequence (3,092 to
+/// 11,468 iterations, a 3-4x wall-clock regression for the identical
+/// answer). That is why splitting requires *two or more* real components
+/// before it is attempted at all: it is the only condition under which
+/// this mechanism has anything to gain, and gating on it happens to also
+/// be exactly what keeps this crate's own benchmark set from ever paying
+/// that tie-break risk for zero benefit.
+fn solve_std_form_decomposed(std: &StdForm, use_dual: bool) -> SimplexResult {
+    if std.n_rows == 0 {
+        return solve_lp_on(std);
+    }
+    let Some((components, has_row)) = connected_components_of_std_form(std) else {
+        return if use_dual { solve_lp_dual_on(std) } else { solve_lp_on(std) };
+    };
+    let n_orig = std.n_total - std.n_rows;
+
+    // Only actually dispatch the split when at least two components have
+    // a real (row-bearing) sub-problem to solve — checked here via the
+    // *free* `has_row` flags (a component is "real" unless it is a
+    // size-1 variable with no row at all, typically one `dualfix` already
+    // fixed), deliberately *before* ever calling [`split_std_form`], not
+    // by building every component's `StdForm` and discarding the ones
+    // that turn out not to matter. Splitting off nothing but trivial
+    // singletons around one large remainder buys zero benefit — those
+    // variables were already effectively free, static, never-revisited
+    // nonbasic values in the *undecomposed* solve too — while
+    // `split_std_form` itself is not free: real Netlib instances
+    // routinely produce hundreds of components post-presolve (per this
+    // function's own docs), and building a throwaway `StdForm` (its own
+    // small `Vec`/`FixedRows` allocations) for every one of them, only to
+    // discard almost all of them, is a real, measured cost on top of the
+    // *other* real cost splitting risks: on a highly degenerate instance,
+    // changing *which* global index a variable ends up with (every
+    // surviving component's variables are compacted to a fresh
+    // `0..local_n` range) can change which candidate wins an exact tie in
+    // chuzc's Dantzig-style pricing or dual steepest-edge, sending the
+    // solve down a completely different — still correct, but potentially
+    // far longer — pivot sequence than the original numbering would have
+    // taken. Confirmed directly on Netlib `25fv47`: with only one real
+    // component and the rest trivial singletons, splitting anyway (an
+    // earlier version of this function did) took iteration count from
+    // 3,092 to 11,468 (`ENOMOTO_PROF_PHASES`) for the identical correct
+    // answer, a 3-4x wall-clock regression on a single, very ordinary
+    // Netlib instance — the same class of floating-point-path sensitivity
+    // this session's own `chuzr` tie-break fix, the Schork-Gondzio
+    // Forrest-Tomlin variant, and the fixed-width `chuzc1` exclusion all
+    // independently ran into on this same family of degenerate instances.
+    // Requiring *two* real components before paying either cost at all
+    // means both are only ever paid when there is an actual decomposition
+    // to gain from, never merely to shave off already-free variables.
+    let real_components = components.iter().filter(|c| c.len() > 1 || has_row[c[0]]).count();
+    if real_components <= 1 {
+        return if use_dual { solve_lp_dual_on(std) } else { solve_lp_on(std) };
+    }
+
+    let mut x = vec![0.0; n_orig];
+    let sub_std_forms = split_std_form(std, &components);
+
+    let solve_component = |(sub, component): (&StdForm, &Vec<usize>)| -> SimplexResult {
+        if sub.n_rows == 0 {
+            debug_assert_eq!(component.len(), 1);
+            let j = 0;
+            let val = if sub.c[j] > TOL { sub.lb[j] } else if sub.c[j] < -TOL { sub.ub[j] } else { sub.lb[j] };
+            return SimplexResult { status: Status::Optimal, x: Some(vec![val]) };
+        }
+        if use_dual { solve_lp_dual_on(sub) } else { solve_lp_on(sub) }
+    };
+
+    let use_parallel = components.iter().any(|c| c.len() >= PARALLEL_COMPONENT_MIN_VARS);
+    let pairs: Vec<(&StdForm, &Vec<usize>)> = sub_std_forms.iter().zip(components.iter()).collect();
+    let results: Vec<SimplexResult> = if use_parallel {
+        use rayon::prelude::*;
+        pairs.par_iter().map(|&p| solve_component(p)).collect()
+    } else {
+        pairs.iter().map(|&p| solve_component(p)).collect()
+    };
+
+    for (result, component) in results.iter().zip(components.iter()) {
+        match result.status {
+            Status::Infeasible => return SimplexResult { status: Status::Infeasible, x: None },
+            Status::Unbounded => return SimplexResult { status: Status::Unbounded, x: None },
+            Status::Optimal => {
+                let sub_x = result.x.as_ref().expect("Optimal result must carry x");
+                for (local_j, &orig_j) in component.iter().enumerate() {
+                    x[orig_j] = sub_x[local_j];
+                }
+            }
+        }
+    }
+    SimplexResult { status: Status::Optimal, x: Some(x) }
+}
+
 pub fn solve_lp(variables: &[VariableData], objective: &Objective, constraints: &[ConstraintRow]) -> SimplexResult {
     let Some((std, sc, substitutions)) = build_std_form_presolved(variables, objective, constraints) else {
         return SimplexResult { status: Status::Infeasible, x: None };
     };
-    unscale_result(solve_lp_on(&std), &sc, &substitutions)
+    unscale_result(solve_std_form_decomposed(&std, false), &sc, &substitutions)
 }
 
 /// The primal two-phase method's actual work, operating on an
@@ -1354,6 +1723,104 @@ impl DseState {
     }
 }
 
+/// Whether basic row `i` is primal-infeasible under `chuzr`'s own rule —
+/// `true` only if `chuzr_scan` (in [`solve_lp_dual_on`]) would return
+/// `Some` for this row. Factored out as a free function (rather than a
+/// closure, which would otherwise need to re-borrow `t`/`noise_feasible`
+/// at every one of [`InfeasibleRows`]'s several call sites scattered
+/// through the pivot loop) so [`InfeasibleRows`]'s incremental maintenance
+/// and its rebuild-from-scratch path share exactly one definition of
+/// "infeasible" — any future change to the tolerance/`noise_feasible`
+/// logic only needs to happen here to stay consistent everywhere.
+///
+/// Simplified from `chuzr_scan`'s own three-way `delta` computation: since
+/// both the branch condition and the final `delta <= PRIMAL_FEAS_TOL`
+/// check use the same `PRIMAL_FEAS_TOL`, taking the `val < lb - TOL`
+/// branch already guarantees `delta = lb - val > TOL` (and symmetrically
+/// for the upper-bound branch), so the extra check is redundant once
+/// `noise_feasible` has been accounted for.
+#[inline]
+fn row_infeasible(std: &StdForm, t: &Tableau, noise_feasible: &[bool], i: usize) -> bool {
+    let var = t.basis[i];
+    if noise_feasible[var] {
+        return false;
+    }
+    let val = t.x[var];
+    val < std.lb[var] - PRIMAL_FEAS_TOL || val > std.ub[var] + PRIMAL_FEAS_TOL
+}
+
+/// Hyper-sparse `chuzr`: the set of basic rows currently primal-infeasible,
+/// maintained incrementally pivot-to-pivot instead of rescanned in full
+/// every iteration.
+///
+/// The key fact making this exact, not an approximation: a feasible row's
+/// `chuzr` score is *strictly* `0` (`delta == 0` in `chuzr_scan`) no matter
+/// what its DSE weight is, so it can never win the row selection — only
+/// the infeasible rows are ever candidates. And the only pivot-loop writes
+/// that can change any row's feasibility are the ones that change its
+/// basic variable's value (`x_B`) or identity, both of which are already
+/// visited, row by row, by the O(m) loops that apply them (the BFRT
+/// combined-flip update, the main `alpha`-scaled primal step, and the
+/// post-swap identity change at the pivot row itself) — so folding a
+/// membership check into those *already-O(m)* loops costs nothing extra
+/// asymptotically, while it eliminates the separate full `0..m` scan
+/// `chuzr` used to need every single iteration to find this same set.
+/// This mirrors HiGHS's `HEkkDualRHS::workCount`/`workIndex` (incrementally
+/// updated off the FTRAN indices touched each pivot, full rebuild after
+/// every basis resync/refactorization).
+struct InfeasibleRows {
+    /// Row indices currently infeasible, in no particular order.
+    rows: Vec<usize>,
+    /// `pos[i] == Some(k)` iff `rows[k] == i` — the O(1) membership test
+    /// and removal index `rows.push`/`swap_remove` alone can't provide.
+    pos: Vec<Option<usize>>,
+}
+
+impl InfeasibleRows {
+    fn new(m: usize) -> Self {
+        InfeasibleRows { rows: Vec::new(), pos: vec![None; m] }
+    }
+
+    /// Sets row `i`'s membership to `infeasible`, doing nothing if it's
+    /// already in that state. `O(1)`: insertion appends; removal
+    /// swap-removes and patches the displaced row's `pos` entry.
+    fn set(&mut self, i: usize, infeasible: bool) {
+        match (infeasible, self.pos[i]) {
+            (true, None) => {
+                self.pos[i] = Some(self.rows.len());
+                self.rows.push(i);
+            }
+            (false, Some(idx)) => {
+                let last = self.rows.len() - 1;
+                self.rows.swap(idx, last);
+                self.rows.pop();
+                if idx < self.rows.len() {
+                    self.pos[self.rows[idx]] = Some(idx);
+                }
+                self.pos[i] = None;
+            }
+            _ => {}
+        }
+    }
+
+    /// Full `O(m)` rebuild against `pred` — needed only right after a
+    /// `resync_basics` (or the initial one, before the pivot loop starts),
+    /// since that's the only operation that can change many rows' `x_B`
+    /// values at once without this struct's own incremental `set` calls
+    /// seeing each change individually.
+    fn rebuild(&mut self, m: usize, mut pred: impl FnMut(usize) -> bool) {
+        self.rows.clear();
+        for i in 0..m {
+            if pred(i) {
+                self.pos[i] = Some(self.rows.len());
+                self.rows.push(i);
+            } else {
+                self.pos[i] = None;
+            }
+        }
+    }
+}
+
 /// Bounded-variable **dual** revised simplex, reusing the same basis
 /// representation (`sparse_lu::FtLu`, the Markowitz/FT/4-trigger machinery
 /// of Stage 2) and standard form (`StdForm`/`Tableau`) as the primal
@@ -1405,10 +1872,24 @@ mod prof_phases {
     /// how often and how expensive each refactorization was.
     pub(super) static REFACTOR_COUNT: AtomicUsize = AtomicUsize::new(0);
     pub(super) static ITERS: AtomicUsize = AtomicUsize::new(0);
+    /// Per-iteration *shape* of the chuzr/BFRT work, reported alongside
+    /// the phase timings above when `ENOMOTO_DEBUG_CHUZR` is also set:
+    /// how many basic rows are primal-infeasible (the only ones chuzr can
+    /// ever pick — everything else scores exactly zero regardless of its
+    /// DSE weight), how many entries of the entering column's FTRAN are
+    /// nonzero (the only rows whose `x_B` — hence infeasibility — can
+    /// change in that pivot), and how many BFRT candidates get sorted
+    /// versus how many the walk actually consumes. Measured on Netlib to
+    /// size the hyper-sparse chuzr / heap-based BFRT candidates — see
+    /// the project history around this comment's own commit.
+    pub(super) static INFEAS_ROWS: AtomicUsize = AtomicUsize::new(0);
+    pub(super) static ALPHA_NNZ: AtomicUsize = AtomicUsize::new(0);
+    pub(super) static BFRT_CANDS: AtomicUsize = AtomicUsize::new(0);
+    pub(super) static BFRT_WALK: AtomicUsize = AtomicUsize::new(0);
 
     pub(super) fn reset() {
         use std::sync::atomic::Ordering::Relaxed;
-        for c in [&BTRAN, &PRICE, &CHUZR, &CHUZC1, &BFRT, &FTRAN, &DSE_UPDATE, &DUAL_UPDATE, &FT_UPDATE, &REFACTOR, &REFACTOR_COUNT, &ITERS] {
+        for c in [&BTRAN, &PRICE, &CHUZR, &CHUZC1, &BFRT, &FTRAN, &DSE_UPDATE, &DUAL_UPDATE, &FT_UPDATE, &REFACTOR, &REFACTOR_COUNT, &ITERS, &INFEAS_ROWS, &ALPHA_NNZ, &BFRT_CANDS, &BFRT_WALK] {
             c.store(0, Relaxed);
         }
     }
@@ -1439,7 +1920,7 @@ pub fn solve_lp_dual(variables: &[VariableData], objective: &Objective, constrai
         prof_phases::reset();
     }
     let wall_t0 = std::time::Instant::now();
-    let result = if std.n_rows == 0 { solve_lp_on(&std) } else { solve_lp_dual_on(&std) };
+    let result = solve_std_form_decomposed(&std, true);
     let wall_ns = wall_t0.elapsed().as_nanos() as usize;
     if std::env::var("ENOMOTO_PROF_TRIANGULAR").is_ok() {
         use std::sync::atomic::Ordering::Relaxed;
@@ -1488,6 +1969,18 @@ pub fn solve_lp_dual(variables: &[VariableData], objective: &Objective, constrai
             "  refactor_count={refactor_count} avg_refactor={:.3}ms",
             prof_phases::REFACTOR.load(Relaxed) as f64 / 1e6 / refactor_count.max(1) as f64
         );
+        if std::env::var("ENOMOTO_DEBUG_CHUZR").is_ok() {
+            let m = std.n_rows.max(1);
+            eprintln!(
+                "  DEBUG_CHUZR m={m} avg_infeasible_rows/iter={:.1} ({:.1}% of m) avg_alpha_nnz/iter={:.1} ({:.1}% of m) avg_bfrt_cands/iter={:.1} avg_bfrt_walk/iter={:.1}",
+                prof_phases::INFEAS_ROWS.load(Relaxed) as f64 / iters as f64,
+                100.0 * prof_phases::INFEAS_ROWS.load(Relaxed) as f64 / iters as f64 / m as f64,
+                prof_phases::ALPHA_NNZ.load(Relaxed) as f64 / iters as f64,
+                100.0 * prof_phases::ALPHA_NNZ.load(Relaxed) as f64 / iters as f64 / m as f64,
+                prof_phases::BFRT_CANDS.load(Relaxed) as f64 / iters as f64,
+                prof_phases::BFRT_WALK.load(Relaxed) as f64 / iters as f64,
+            );
+        }
     }
     unscale_result(result, &sc, &substitutions)
 }
@@ -1501,6 +1994,10 @@ fn solve_lp_dual_on(std: &StdForm) -> SimplexResult {
     // why this keeps a normal, non-profiling solve from paying for any
     // `Instant::now()` calls at all.
     let profile_phases = std::env::var("ENOMOTO_PROF_PHASES").is_ok();
+    // Hoisted out of the loop like `profile_phases` itself — an
+    // `env::var` lookup per iteration would otherwise inflate the very
+    // wall-clock this diagnostic is meant to explain.
+    let debug_chuzr = profile_phases && std::env::var("ENOMOTO_DEBUG_CHUZR").is_ok();
     let mut t = Tableau::new(std);
     let active_cost = perturb_costs(std);
     t.crash_dual_feasible(&active_cost);
@@ -1525,6 +2022,13 @@ fn solve_lp_dual_on(std: &StdForm) -> SimplexResult {
     let init_rhs = t.compute_rhs();
     t.resync_basics(&lu, &init_rhs);
     let mut since_check = 0usize;
+    // Separate, coarser cadence for trigger (1)'s own `basis_residual_norm`
+    // check — see [`RESIDUAL_CHECK_MULTIPLIER`]'s own docs for why this is
+    // sound: that check has seven to eight orders of magnitude of slack
+    // before real drift could approach [`FT_RESIDUAL_TOL`], so it doesn't
+    // need `compute_rhs`'s full `O(nnz(A))` cost paid at the same cadence
+    // trigger (3)'s much cheaper `fill_count()` check runs at.
+    let mut since_residual_check = 0usize;
     let mut dse = DseState::new(std.n_rows);
     let m = std.n_rows;
 
@@ -1562,11 +2066,21 @@ fn solve_lp_dual_on(std: &StdForm) -> SimplexResult {
     // Basic variables whose (tiny, row-scale-relative) infeasibility
     // chuzc1 has already shown no column can move — see that branch.
     let mut noise_feasible = vec![false; std.n_total];
-    // Sequential-vs-rayon choice for `chuzr` below, decided once per solve
-    // from `m` against `RAYON_SIZE_THRESHOLD` — see that constant's own
-    // docs for why this crate settled on a size threshold rather than a
-    // live run-both-and-time race (the earlier approach here).
-    let use_parallel_chuzr = m > RAYON_SIZE_THRESHOLD;
+    // Hyper-sparse `chuzr`'s incrementally maintained infeasible-row set —
+    // see [`InfeasibleRows`]'s own docs. Built fresh here (an `O(m)` scan,
+    // paid once) since `t.x` was just made exact by the `resync_basics`
+    // call above; every resync inside the loop below rebuilds it the same
+    // way for the same reason, and every pivot in between updates it
+    // incrementally instead.
+    let mut infeasible_rows = InfeasibleRows::new(m);
+    infeasible_rows.rebuild(m, |i| row_infeasible(std, &t, &noise_feasible, i));
+    // Sequential-vs-rayon choice for `chuzr` below, decided fresh every
+    // iteration from `infeasible_rows.rows.len()` (not `m`, now that
+    // `chuzr` itself scans only that set) against `RAYON_SIZE_THRESHOLD` —
+    // see that constant's own docs for why this crate settled on a size
+    // threshold rather than a live run-both-and-time race, and never found
+    // `rayon` winning even at sizes this small set essentially never
+    // reaches in practice.
     // Debug-only verification helper (see the `#[cfg(debug_assertions)]`
     // block below): the expensive, from-first-principles way to get `d`
     // for the *current* basis — one BTRAN plus one dot product per
@@ -1593,13 +2107,31 @@ fn solve_lp_dual_on(std: &StdForm) -> SimplexResult {
     let mut a_enter_buf = vec![0.0; m];
     let mut alpha_buf = vec![0.0; m];
     let mut tau_buf = vec![0.0; m];
+    // `combined_buf`'s own nonzero indices are tracked the same
+    // touched-index way `a_p`/`touched_cols`/`touched` are above: BFRT's
+    // combined flip vector is a sum of a handful of flipped columns' own
+    // (genuinely sparse, real-LP) entries, so it is itself typically
+    // sparse — but a naive `combined_buf[i] += v * delta_x` can touch the
+    // same row `i` more than once across different flipped columns, so
+    // membership needs an explicit flag (not "is it exactly zero", for the
+    // same cancellation reason `touched` exists for `a_p`) to avoid
+    // recording one row twice, which `l_solve_sparse_into` would then
+    // treat as an overwrite rather than a sum.
     let mut combined_buf = vec![0.0; m];
+    let mut combined_touched: Vec<usize> = Vec::new();
+    let mut combined_touched_flag = vec![false; m];
     let mut combined_alpha_buf = vec![0.0; m];
     // Dedicated to the entering column's FTRAN alone — never shared with
     // `lu_scratch` — since `sparse_lu::FtLu::solve_sparse_into` requires
     // its own `scratch` buffer to already be all-zero on entry (its own
     // docs explain why), an invariant a plain `solve_into` call through
-    // `lu_scratch` would silently violate.
+    // `lu_scratch` would silently violate. The BFRT combined-flip solve
+    // (below) reuses these same two buffers rather than needing its own
+    // dedicated pair: within one iteration it always runs strictly before
+    // the entering column's own `solve_sparse_into` call, and every call
+    // leaves both buffers back at all-zero before returning (`solve_sparse_into`'s
+    // own documented postcondition), so the entering column's call always
+    // still finds them zeroed exactly as it requires.
     let mut sparse_lu_scratch = vec![0.0; m];
     let mut gp_scratch = sparse_lu::GpScratch::new(m);
 
@@ -1612,33 +2144,52 @@ fn solve_lp_dual_on(std: &StdForm) -> SimplexResult {
         // loop (the same values a from-scratch recompute would produce,
         // up to floating-point drift) — so, unlike an earlier version of
         // this function, there is no unconditional full recompute here.
-        // `compute_rhs`'s `O(nnz(A))` scan (previously paid every single
-        // iteration purely to *also* get this drift-check's `rhs`, even
-        // though the check itself only runs every `FT_CHECK_INTERVAL`
-        // iterations) is now paid at that same cadence instead — measured
-        // at 14-20% of total solve time before this change, on this
-        // crate's own Netlib benchmark. Deliberately computed *before*
-        // any resync below: `basis_residual_norm` must see the still-
+        // Trigger (3)'s `fill_count()` check is cheap (an `O(1)`-ish length
+        // sum) and still runs every `FT_CHECK_INTERVAL` iterations; trigger
+        // (1)'s own check additionally needs `compute_rhs` (`O(nnz(A))`)
+        // and `basis_residual_norm` (a full basis-matrix multiply), so it
+        // runs at the coarser `RESIDUAL_CHECK_MULTIPLIER`-scaled cadence
+        // instead (see that constant's own docs for why this is safe) —
+        // `rhs` itself is computed only when at least one of the two checks
+        // this round actually needs it (either because trigger (3) already
+        // fired, in which case it's needed for the resync below regardless,
+        // or because this round is also due for trigger (1)'s own check).
+        // Deliberately computed *before* any resync below when it is
+        // computed at all: `basis_residual_norm` must see the still-
         // incremental `x_B` to actually detect drift, not a value that
         // was just snapped back to agree with `rhs` by this same call.
         since_check += 1;
         if since_check >= FT_CHECK_INTERVAL {
             since_check = 0;
-            let rhs = t.compute_rhs();
             let bump_too_big = lu.fill_count() > FT_BUMP_LIMIT_FACTOR * m.max(1);
-            let residual_too_big = !bump_too_big && t.basis_residual_norm(&rhs) > FT_RESIDUAL_TOL;
-            if bump_too_big || residual_too_big {
-                timed!(profile_phases, prof_phases::REFACTOR, {
-                    if profile_phases {
-                        prof_phases::REFACTOR_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    }
-                    let Some(l) = try_refactorize(std, &t) else {
-                        return solve_lp_on(std);
-                    };
-                    lu = l;
-                    t.resync_basics(&lu, &rhs);
-                    d = fresh_d(&lu, &t, &active_cost);
-                });
+            since_residual_check += 1;
+            let due_for_residual_check = since_residual_check >= RESIDUAL_CHECK_MULTIPLIER;
+            if bump_too_big || due_for_residual_check {
+                let rhs = t.compute_rhs();
+                let residual_too_big = if due_for_residual_check {
+                    since_residual_check = 0;
+                    !bump_too_big && t.basis_residual_norm(&rhs) > FT_RESIDUAL_TOL
+                } else {
+                    false
+                };
+                if bump_too_big || residual_too_big {
+                    timed!(profile_phases, prof_phases::REFACTOR, {
+                        if profile_phases {
+                            prof_phases::REFACTOR_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        let Some(l) = try_refactorize(std, &t) else {
+                            return solve_lp_on(std);
+                        };
+                        lu = l;
+                        t.resync_basics(&lu, &rhs);
+                        d = fresh_d(&lu, &t, &active_cost);
+                        // `resync_basics` just rewrote `x_B` for every row
+                        // at once, outside `InfeasibleRows`'s own
+                        // incremental `set` calls — only a full rebuild
+                        // can catch up (see its own docs).
+                        infeasible_rows.rebuild(m, |i| row_infeasible(std, &t, &noise_feasible, i));
+                    });
+                }
             }
         }
         if lu.update_count() > FT_MAX_UPDATES {
@@ -1653,16 +2204,19 @@ fn solve_lp_dual_on(std: &StdForm) -> SimplexResult {
                 let rhs = t.compute_rhs();
                 t.resync_basics(&lu, &rhs);
                 d = fresh_d(&lu, &t, &active_cost);
+                infeasible_rows.rebuild(m, |i| row_infeasible(std, &t, &noise_feasible, i));
             });
         }
 
-        // chuzr: most DSE-attractive primal-infeasible basic row. Each
-        // row's infeasibility/score is independent of every other.
-        // `use_parallel_chuzr` (declared before this loop, from `m` vs
-        // `RAYON_SIZE_THRESHOLD`) picks sequential for every problem size
-        // this crate realistically sees — see that constant's own docs.
-        // The same reasoning (and the same threshold) applies to chuzc1
-        // below, which stays unconditionally sequential.
+        // chuzr: most DSE-attractive primal-infeasible basic row, scanned
+        // over `infeasible_rows.rows` alone (hyper-sparse chuzr — see
+        // [`InfeasibleRows`]'s own docs for why this is exact, not an
+        // approximation) rather than the full `0..m`. Each row's
+        // infeasibility/score is independent of every other.
+        // `chuzr_parallel` below picks sequential for every problem size
+        // this crate realistically sees — see `RAYON_SIZE_THRESHOLD`'s own
+        // docs. The same reasoning applies to chuzc1 below, which stays
+        // unconditionally sequential.
         let chuzr_scan = |i: usize| -> Option<(usize, f64, bool)> {
             let var = t.basis[i];
             let val = t.x[var];
@@ -1692,9 +2246,10 @@ fn solve_lp_dual_on(std: &StdForm) -> SimplexResult {
         // the DSE-attractive one — consistent tie-breaking on both the
         // leaving and entering side is what Bland's finite-termination
         // proof actually requires.
+        let chuzr_parallel = infeasible_rows.rows.len() > RAYON_SIZE_THRESHOLD;
         let chuzr = timed!(profile_phases, prof_phases::CHUZR, {
             if bland_mode {
-                (0..m).into_iter().filter_map(chuzr_scan).min_by_key(|&(i, _, _)| t.basis[i])
+                infeasible_rows.rows.iter().copied().filter_map(chuzr_scan).min_by_key(|&(i, _, _)| t.basis[i])
             } else {
                 // Tie-broken by row index (`a.0`/`b.0`), not just `score`
                 // (`a.1`): `max_by` alone only guarantees returning *a*
@@ -1721,14 +2276,30 @@ fn solve_lp_dual_on(std: &StdForm) -> SimplexResult {
                 // sequential-vs-parallel (and parallel-vs-parallel)
                 // discrepancy entirely.
                 let cmp = |a: &(usize, f64, bool), b: &(usize, f64, bool)| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0));
-                if use_parallel_chuzr {
+                if chuzr_parallel {
                     use rayon::prelude::*;
-                    (0..m).into_par_iter().filter_map(chuzr_scan).max_by(cmp)
+                    infeasible_rows.rows.par_iter().copied().filter_map(chuzr_scan).max_by(cmp)
                 } else {
-                    (0..m).into_iter().filter_map(chuzr_scan).max_by(cmp)
+                    infeasible_rows.rows.iter().copied().filter_map(chuzr_scan).max_by(cmp)
                 }
             }
         });
+        #[cfg(debug_assertions)]
+        {
+            // Verifies `InfeasibleRows`'s incremental maintenance against
+            // the expensive from-first-principles scan it replaced —
+            // exact equality of the *sets*, not just their sizes, since a
+            // bug that swaps one infeasible row for a different one at the
+            // same count would otherwise go unnoticed.
+            let mut fresh: Vec<usize> = (0..m).filter(|&i| row_infeasible(std, &t, &noise_feasible, i)).collect();
+            let mut maintained = infeasible_rows.rows.clone();
+            fresh.sort_unstable();
+            maintained.sort_unstable();
+            debug_assert_eq!(fresh, maintained, "InfeasibleRows drifted from a fresh full scan");
+        }
+        if debug_chuzr {
+            prof_phases::INFEAS_ROWS.fetch_add(infeasible_rows.rows.len(), std::sync::atomic::Ordering::Relaxed);
+        }
         let Some((p, _best_score, leaving_infeasible_low)) = chuzr else {
             // Primal feasible against the *perturbed* costs — dual
             // feasibility held throughout by this loop's own invariant,
@@ -1842,13 +2413,38 @@ fn solve_lp_dual_on(std: &StdForm) -> SimplexResult {
         // sequential rather than rayon regardless (see the chuzr comment
         // above for the measured-overhead reason); the candidates are then
         // sorted by ascending ratio for chuzc2 (BFRT) below.
+        #[derive(Clone, Copy)]
         struct ChuzcCand {
             j: usize,
             a_pj: f64,
             dj: f64,
             ratio: f64,
         }
-        let mut candidates: Vec<ChuzcCand> = timed!(
+        // Total order on `(ratio, j)` — `j` as the tiebreak (rather than
+        // leaving ties in whatever order a sort/heap happens to produce)
+        // is what makes `BinaryHeap<Reverse<ChuzcCand>>` below a well-defined
+        // substitute for `sort_unstable_by(|a,b| a.ratio.total_cmp(&b.ratio))`:
+        // a heap has no notion of "stable" input order to fall back on for
+        // ties the way a sort does, so without an explicit tiebreak the pop
+        // order on tied ratios would depend on push/sift order (touched_cols
+        // scan order), not on `j`.
+        impl PartialEq for ChuzcCand {
+            fn eq(&self, other: &Self) -> bool {
+                self.ratio == other.ratio && self.j == other.j
+            }
+        }
+        impl Eq for ChuzcCand {}
+        impl PartialOrd for ChuzcCand {
+            fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+                Some(self.cmp(other))
+            }
+        }
+        impl Ord for ChuzcCand {
+            fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+                self.ratio.total_cmp(&other.ratio).then_with(|| self.j.cmp(&other.j))
+            }
+        }
+        let candidates: Vec<ChuzcCand> = timed!(
             profile_phases,
             prof_phases::CHUZC1,
             touched_cols
@@ -1905,6 +2501,7 @@ fn solve_lp_dual_on(std: &StdForm) -> SimplexResult {
             let infeas = (std.lb[lv] - t.x[lv]).max(t.x[lv] - std.ub[lv]).max(0.0);
             if infeas <= PRIMAL_FEAS_TOL * std.b[p].abs().max(1.0) {
                 noise_feasible[lv] = true;
+                infeasible_rows.set(p, false);
                 for &j in &touched_cols {
                     a_p[j] = 0.0;
                     touched[j] = false;
@@ -1953,8 +2550,6 @@ fn solve_lp_dual_on(std: &StdForm) -> SimplexResult {
                 .unwrap_or_else(|| candidates.iter().min_by_key(|c| c.j).unwrap());
             (best.j, best.dj, Vec::new())
         } else {
-            candidates.sort_unstable_by(|a, b| a.ratio.total_cmp(&b.ratio));
-
             // chuzc2, bound-flipping ratio test (BFRT) with a Harris-style
             // stability pass (see `HARRIS_RATIO_TOL`'s own docs). Pass 1
             // walks the candidates in ascending ratio order — a bounded
@@ -1968,6 +2563,27 @@ fn solve_lp_dual_on(std: &StdForm) -> SimplexResult {
             // decision depends on the leaving variable's value *after*
             // every previous step's flip — so, unlike chuzc1 above, it
             // runs sequentially.
+            //
+            // Measured across a wide range of Netlib instances, `stop_idx`
+            // is almost always tiny relative to the candidate pool (e.g.
+            // `wood1p` sorts ~1530 candidates per iteration but only ever
+            // walks ~1.7 of them; `scsd8` 581 vs 1.4; `25fv47` 386 vs 1.5)
+            // — a full `sort_unstable_by` over the whole pool did `O(k log
+            // k)` work to answer a question pass 1 only needed the first
+            // `w << k` of. A min-heap (`BinaryHeap<Reverse<ChuzcCand>>`,
+            // `O(k)` to build) popped one element at a time reproduces
+            // exactly the same ascending-`(ratio, j)` order (see
+            // `ChuzcCand`'s `Ord` impl above) but does `O(w log k)` work
+            // instead: pass 1 stops popping the moment it finds `stop_idx`,
+            // and pass 2's backward Harris window search only ever needs
+            // indices `<= stop_idx` (see that pass's own comment for why),
+            // i.e. only candidates already popped into `sorted_prefix` —
+            // so both passes are unchanged in behavior, just fed a lazily
+            // materialized prefix instead of the fully sorted vec.
+            let n_candidates = candidates.len();
+            let mut heap: BinaryHeap<Reverse<ChuzcCand>> = candidates.into_iter().map(Reverse).collect();
+            let mut sorted_prefix: Vec<ChuzcCand> = Vec::with_capacity(4);
+
             let mut x_leaving_now = t.x[leaving_var];
             // "Reached the target" is judged relative to how far the
             // leaving variable had to travel this iteration: a flip of
@@ -1980,7 +2596,9 @@ fn solve_lp_dual_on(std: &StdForm) -> SimplexResult {
             // `PRIMAL_FEAS_TOL` (the `max(1.0)` floor).
             let reach_tol = PRIMAL_FEAS_TOL * (x_leaving_now - target_bound).abs().max(1.0);
             let mut stop_idx: Option<usize> = None;
-            for (idx, cand) in candidates.iter().enumerate() {
+            while let Some(Reverse(cand)) = heap.pop() {
+                let idx = sorted_prefix.len();
+                sorted_prefix.push(cand);
                 let width = std.ub[cand.j] - std.lb[cand.j];
                 if !width.is_finite() {
                     stop_idx = Some(idx);
@@ -2006,6 +2624,10 @@ fn solve_lp_dual_on(std: &StdForm) -> SimplexResult {
                     stop_idx = Some(idx);
                     break;
                 }
+            }
+            if profile_phases {
+                prof_phases::BFRT_CANDS.fetch_add(n_candidates, std::sync::atomic::Ordering::Relaxed);
+                prof_phases::BFRT_WALK.fetch_add(stop_idx.map(|s| s + 1).unwrap_or(sorted_prefix.len()), std::sync::atomic::Ordering::Relaxed);
             }
             let Some(stop_idx) = stop_idx else {
                 // Every eligible candidate was fully flipped and the
@@ -2047,14 +2669,14 @@ fn solve_lp_dual_on(std: &StdForm) -> SimplexResult {
             // step-by-step "still short" walk, so overshoot is accounted
             // for correctly there; backward-only search sidesteps needing
             // that machinery.
-            let min_ratio = candidates[stop_idx].ratio - HARRIS_RATIO_TOL;
+            let min_ratio = sorted_prefix[stop_idx].ratio - HARRIS_RATIO_TOL;
             let mut window_start = stop_idx;
-            while window_start > 0 && candidates[window_start - 1].ratio >= min_ratio {
+            while window_start > 0 && sorted_prefix[window_start - 1].ratio >= min_ratio {
                 window_start -= 1;
             }
             let mut best_idx = stop_idx;
-            let mut best_abs = candidates[stop_idx].a_pj.abs();
-            for (idx, cand) in candidates.iter().enumerate().take(stop_idx + 1).skip(window_start) {
+            let mut best_abs = sorted_prefix[stop_idx].a_pj.abs();
+            for (idx, cand) in sorted_prefix.iter().enumerate().take(stop_idx + 1).skip(window_start) {
                 let abs_a = cand.a_pj.abs();
                 if abs_a > best_abs {
                     best_abs = abs_a;
@@ -2062,10 +2684,10 @@ fn solve_lp_dual_on(std: &StdForm) -> SimplexResult {
                 }
             }
 
-            let q = candidates[best_idx].j;
-            let dj_q = candidates[best_idx].dj;
+            let q = sorted_prefix[best_idx].j;
+            let dj_q = sorted_prefix[best_idx].dj;
             let flips: Vec<(usize, NbStatus)> =
-                candidates[0..best_idx].iter().map(|cand| (cand.j, t.nb_status[cand.j].unwrap())).collect();
+                sorted_prefix[0..best_idx].iter().map(|cand| (cand.j, t.nb_status[cand.j].unwrap())).collect();
             (q, dj_q, flips)
         });
 
@@ -2075,23 +2697,55 @@ fn solve_lp_dual_on(std: &StdForm) -> SimplexResult {
         // variables in F" — rather than one FTRAN per flipped column.
         timed!(profile_phases, prof_phases::FTRAN, {
             if !flips.is_empty() {
-                for v in combined_buf.iter_mut() {
-                    *v = 0.0;
-                }
                 for &(j, old_status) in &flips {
                     let delta_x = match old_status {
                         NbStatus::Lower => std.ub[j] - std.lb[j],
                         NbStatus::Upper => -(std.ub[j] - std.lb[j]),
                     };
                     for &(i, v) in t.column_sparse(j) {
+                        if !combined_touched_flag[i] {
+                            combined_touched_flag[i] = true;
+                            combined_touched.push(i);
+                        }
                         combined_buf[i] += v * delta_x;
                     }
                 }
-                lu.solve_into(&combined_buf, &mut lu_scratch, &mut combined_alpha_buf);
-                for i in 0..m {
-                    let var = t.basis[i];
-                    t.x[var] -= combined_alpha_buf[i];
+                let combined_sparse: Vec<(usize, f64)> = combined_touched.iter().map(|&i| (i, combined_buf[i])).collect();
+                lu.solve_sparse_into(&combined_sparse, &mut sparse_lu_scratch, &mut gp_scratch, &mut combined_alpha_buf);
+                #[cfg(debug_assertions)]
+                {
+                    let dense_combined_alpha = lu.solve(&combined_buf);
+                    debug_assert_eq!(
+                        combined_alpha_buf, dense_combined_alpha,
+                        "sparse FTRAN (BFRT combined flip) diverged from the dense reference"
+                    );
                 }
+                for i in 0..m {
+                    let c = combined_alpha_buf[i];
+                    // Gated on `c != 0.0`, not unconditional: a zero entry
+                    // leaves `x_B` at row `i` untouched, so its
+                    // feasibility provably cannot have changed — checking
+                    // it anyway (`std.lb`/`std.ub` lookups, a comparison,
+                    // a possible `InfeasibleRows` mutation) would cost
+                    // real time on *every* row every iteration for a
+                    // saving that only ever applies to the ones actually
+                    // touched. Measured on Netlib `ganges`: doing this
+                    // unconditionally made `chuzr`'s own phase faster but
+                    // *increased* total wall time (the O(m) bookkeeping
+                    // cost here outweighed it) — gating on nonzero, so the
+                    // extra work scales with the FTRAN's own sparsity
+                    // instead of `m`, is what actually pays off.
+                    if c != 0.0 {
+                        let var = t.basis[i];
+                        t.x[var] -= c;
+                        infeasible_rows.set(i, row_infeasible(std, &t, &noise_feasible, i));
+                    }
+                }
+                for &i in &combined_touched {
+                    combined_buf[i] = 0.0;
+                    combined_touched_flag[i] = false;
+                }
+                combined_touched.clear();
                 for &(j, old_status) in &flips {
                     let new_status = match old_status {
                         NbStatus::Lower => NbStatus::Upper,
@@ -2121,6 +2775,9 @@ fn solve_lp_dual_on(std: &StdForm) -> SimplexResult {
             // `sparse_lu::GpScratch`/`FtLu::solve_sparse_into`'s own docs.
             t.column_into(q, &mut a_enter_buf);
             lu.solve_sparse_into(t.column_sparse(q), &mut sparse_lu_scratch, &mut gp_scratch, &mut alpha_buf);
+            if profile_phases {
+                prof_phases::ALPHA_NNZ.fetch_add(alpha_buf.iter().filter(|&&v| v != 0.0).count(), std::sync::atomic::Ordering::Relaxed);
+            }
             #[cfg(debug_assertions)]
             {
                 let dense_alpha = lu.solve(&a_enter_buf);
@@ -2154,8 +2811,21 @@ fn solve_lp_dual_on(std: &StdForm) -> SimplexResult {
         }
 
         for i in 0..m {
-            let var = t.basis[i];
-            t.x[var] -= alpha[i] * theta_q;
+            let a = alpha[i];
+            // Gated on `a != 0.0` — see the identical reasoning on the
+            // BFRT combined-flip loop above (a zero entry means `x_B` at
+            // row `i` doesn't move this pivot, so its feasibility can't
+            // have changed either). `alpha[p]` is the pivot element itself
+            // and so is always nonzero, so row `p` — `var` here is still
+            // `leaving_var`, pre-swap — always takes this branch; it lands
+            // exactly on `target_bound` by construction (feasible), and
+            // its entry gets overwritten again below once row `p`'s basic
+            // variable actually becomes `q`.
+            if a != 0.0 {
+                let var = t.basis[i];
+                t.x[var] -= a * theta_q;
+                infeasible_rows.set(i, row_infeasible(std, &t, &noise_feasible, i));
+            }
         }
         t.x[q] += theta_q;
 
@@ -2166,6 +2836,10 @@ fn solve_lp_dual_on(std: &StdForm) -> SimplexResult {
         t.basis[p] = q;
         t.basis_pos[q] = Some(p);
         t.nb_status[q] = None;
+        // Row `p`'s basic variable just changed identity (`leaving_var` ->
+        // `q`), so it needs one more membership check now that `t.basis[p]`
+        // reflects that.
+        infeasible_rows.set(p, row_infeasible(std, &t, &noise_feasible, p));
 
         // Update-dual (Huangfu & Hall §2.2.3 — same formula HiGHS's
         // `HEkkDualRow::updateDual` applies straight to its `workDual`
@@ -2245,6 +2919,7 @@ fn solve_lp_dual_on(std: &StdForm) -> SimplexResult {
                 let rhs = t.compute_rhs();
                 t.resync_basics(&lu, &rhs);
                 d = fresh_d(&lu, &t, &active_cost);
+                infeasible_rows.rebuild(m, |i| row_infeasible(std, &t, &noise_feasible, i));
             });
         }
     }
@@ -2706,6 +3381,80 @@ mod tests {
             let x = res.x.unwrap();
             assert!(approx(x[0], 2.0), "x={x:?}");
             assert!(approx(x[1], 2.0), "x={x:?}");
+        }
+    }
+
+    #[test]
+    fn disconnected_model_solves_via_connected_component_split() {
+        // Two genuinely independent blocks sharing no variable and no
+        // row: block A (vars 0,1) minimize 2*x0+x1 s.t. x0+x1>=4 -- to
+        // minimize, prefer the cheaper-per-unit x1, so x0*=0, x1*=4
+        // (unique: raising x0 while lowering x1 by the same amount costs
+        // strictly more). Block B (vars 2,3,4) minimize -3x2-2x3-x4 s.t.
+        // x2+x3+x4<=15 -- a fractional-knapsack shape, greedily filling
+        // the highest-coefficient variable first: x2*=10 (its own upper
+        // bound), leaving 5 of the row's budget for x3 (next-highest
+        // coefficient) at x3*=5, x4*=0. Combined optimum: x*=(0,4,10,5,0),
+        // objective = 4 + (-40) = -36, exercising
+        // `connected_components_of_std_form` finding exactly 2 components
+        // and `build_component_std_form`/`solve_std_form_decomposed`
+        // reassembling their independently-solved results correctly.
+        let vars = vec![var(0.0, 10.0), var(0.0, 10.0), var(0.0, 10.0), var(0.0, 10.0), var(0.0, 10.0)];
+        let obj = Objective {
+            expr: expr(&[(0, 2.0), (1, 1.0), (2, -3.0), (3, -2.0), (4, -1.0)]),
+            sense: Sense::Minimize,
+        };
+        let cons = vec![
+            row(&[(0, 1.0), (1, 1.0)], RowSense::Ge, 4.0),
+            row(&[(2, 1.0), (3, 1.0), (4, 1.0)], RowSense::Le, 15.0),
+        ];
+        for res in [solve_lp(&vars, &obj, &cons), solve_lp_dual(&vars, &obj, &cons)] {
+            assert_eq!(res.status, Status::Optimal);
+            let x = res.x.unwrap();
+            assert!(approx(x[0], 0.0), "x={x:?}");
+            assert!(approx(x[1], 4.0), "x={x:?}");
+            assert!(approx(x[2], 10.0), "x={x:?}");
+            assert!(approx(x[3], 5.0), "x={x:?}");
+            assert!(approx(x[4], 0.0), "x={x:?}");
+            let obj_val = 2.0 * x[0] + x[1] - 3.0 * x[2] - 2.0 * x[3] - x[4];
+            assert!(approx(obj_val, -36.0), "obj={obj_val}");
+        }
+    }
+
+    #[test]
+    fn disconnected_model_reports_infeasible_when_either_component_is() {
+        // Block A is trivially infeasible on its own (x0 confined to
+        // [0,1] but forced >= 5 by its own row); block B is perfectly
+        // feasible and independent. The combined model must still report
+        // Infeasible overall -- a feasible, unrelated component must never
+        // mask another component's genuine infeasibility.
+        let vars = vec![var(0.0, 1.0), var(0.0, 10.0)];
+        let obj = Objective { expr: expr(&[(0, 1.0), (1, 1.0)]), sense: Sense::Minimize };
+        let cons = vec![row(&[(0, 1.0)], RowSense::Ge, 5.0), row(&[(1, 1.0)], RowSense::Le, 10.0)];
+        for res in [solve_lp(&vars, &obj, &cons), solve_lp_dual(&vars, &obj, &cons)] {
+            assert_eq!(res.status, Status::Infeasible);
+        }
+    }
+
+    #[test]
+    fn many_independent_singleton_components_exercise_the_parallel_split_path() {
+        // 250 fully independent one-variable "blocks" (no shared row or
+        // variable between any two), clearing `PARALLEL_COMPONENT_MIN_VARS`
+        // (200) so `solve_std_form_decomposed` actually dispatches via
+        // `rayon` rather than iterating components sequentially. Each
+        // block i: minimize -x_i s.t. x_i <= (i % 7) + 1, x_i in [0, 20] --
+        // unique optimum x_i* = (i % 7) + 1.
+        const N: usize = 250;
+        let vars: Vec<VariableData> = (0..N).map(|_| var(0.0, 20.0)).collect();
+        let obj = Objective { expr: expr(&(0..N).map(|i| (i, -1.0)).collect::<Vec<_>>()), sense: Sense::Minimize };
+        let cons: Vec<ConstraintRow> = (0..N).map(|i| row(&[(i, 1.0)], RowSense::Le, ((i % 7) + 1) as f64)).collect();
+        for res in [solve_lp(&vars, &obj, &cons), solve_lp_dual(&vars, &obj, &cons)] {
+            assert_eq!(res.status, Status::Optimal);
+            let x = res.x.unwrap();
+            for i in 0..N {
+                let expected = ((i % 7) + 1) as f64;
+                assert!(approx(x[i], expected), "x[{i}]={} expected={expected}", x[i]);
+            }
         }
     }
 

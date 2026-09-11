@@ -27,6 +27,7 @@
 //! of the module tree entirely (not even `mod`-declared here), purely for
 //! historical reference.
 
+mod graph;
 mod interior_point;
 mod mip;
 mod model;

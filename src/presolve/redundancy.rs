@@ -20,14 +20,23 @@
 //!     each cheap in the regime the other is expensive in. The sparse path
 //!     is itself a thin wrapper ([`drop_linearly_dependent_sparse_blocked`])
 //!     around the core per-block algorithm ([`drop_linearly_dependent_sparse`]):
-//!     a connected-components pre-pass ([`connected_components`]) first
-//!     splits the system into independent sub-problems sharing no real
-//!     column — some real Netlib instances decompose into dozens of
+//!     a Dulmage-Mendelsohn-style block-triangularization pre-pass
+//!     ([`dulmage_mendelsohn_blocks`], via a maximum bipartite matching plus
+//!     Tarjan strongly-connected-components) first splits the system into
+//!     sub-problems — some real Netlib instances decompose into dozens of
 //!     near-identical-size blocks this way (one per vessel/route/period in
-//!     a multi-period scheduling LP) — which are then solved, and above a
-//!     total-size threshold dispatched via `rayon`, since (unlike a general
-//!     block-*triangular* form) blocks with disjoint columns have no
-//!     ordering dependency between them at all.
+//!     a multi-period scheduling LP), and instances that share no exploitable
+//!     structure by plain column-disjointness alone still often decompose
+//!     into hundreds of much smaller blocks once the matching's dependency
+//!     structure is taken into account — which are then solved, and above a
+//!     total-size threshold dispatched via `rayon`: unlike using this same
+//!     decomposition for LU factorization or solving, redundancy detection
+//!     only ever asks a *local* per-row question ("is this row exactly some
+//!     combination of these specific other rows?"), which holds
+//!     unconditionally once verified — so every block here is safe to check
+//!     independently and in any order, including concurrently, with no
+//!     triangular ordering dependency to respect (see
+//!     [`dulmage_mendelsohn_blocks`]'s own docs for the full argument).
 //!
 //! **Parallelization**: extracting each row's coefficients out of the CSR
 //! `A`/`G` (below) is independent per row, but runs sequentially rather
@@ -598,55 +607,50 @@ fn drop_linearly_dependent_sparse(rows_in: &[(Vec<(usize, f64)>, f64)], n: usize
     (0..p).filter(|&i| keep[i]).collect()
 }
 
-/// Partitions `rows` into connected components of the row&ndash;column
-/// bipartite graph (`p` row-nodes `0..p` plus `n` column-nodes `p..p+n`,
-/// via union-find; an edge is one row's nonzero entry), based on the
-/// rows' own *real* coefficient columns only — the augmented rhs column
-/// [`drop_linearly_dependent_sparse`] adds internally is deliberately
-/// **not** treated as a shared graph edge here, even though every row
-/// with a nonzero rhs does touch that same column index once augmented.
-/// See [`drop_linearly_dependent_sparse_blocked`]'s own docs for why that
-/// omission is still sound (in fact necessary, since including it would
-/// merge nearly every row in a typical LP into one component and defeat
-/// the whole decomposition).
+/// Partitions `rows` into blocks via a Dulmage-Mendelsohn-style
+/// decomposition — thin wrapper around the shared [`crate::graph`]
+/// implementation (maximum bipartite matching plus Tarjan
+/// strongly-connected-components; see that module's own docs for the
+/// algorithm), passing just each row's own nonzero-column pattern as
+/// adjacency. Strictly finer than a plain connected-components partition
+/// of the same bipartite graph would be — two rows sharing no column at
+/// all can never end up in the same SCC either, since the matching
+/// graph's edges are themselves derived from real nonzeros — so this
+/// never *loses* the block-diagonal structure a simpler decomposition
+/// would already find; real Netlib instances that show as a single
+/// connected component by raw column-sharing alone (`shell`, `scsd8`,
+/// `fit1p`, `ganges`) decompose into hundreds of much smaller SCCs this
+/// way instead (`shell`: 531 blocks from 534 rows; `ganges`: 998 from
+/// 1284), most of them singletons.
 ///
-/// Two rows in different components share **no** real column, so no
-/// linear combination of one component's rows can ever reproduce an
-/// entry that only appears in another — rank / redundancy detection over
-/// the whole system decomposes exactly into one independent sub-problem
-/// per component. Returned components are sorted by their smallest row
-/// index, each internally in ascending row order, for determinism
-/// (union-find's own root assignment is otherwise path- and
-/// union-order-dependent, which would otherwise make dispatch order, and
-/// therefore floating-point summation order inside each block, vary
-/// between runs).
-fn connected_components(rows: &[(Vec<(usize, f64)>, f64)], n: usize) -> Vec<Vec<usize>> {
-    let p = rows.len();
-    let mut parent: Vec<usize> = (0..p + n).collect();
-    fn find(parent: &mut [usize], mut x: usize) -> usize {
-        while parent[x] != x {
-            parent[x] = parent[parent[x]];
-            x = parent[x];
-        }
-        x
-    }
-    for (i, (row, _)) in rows.iter().enumerate() {
-        for &(j, _) in row {
-            let ri = find(&mut parent, i);
-            let rj = find(&mut parent, p + j);
-            if ri != rj {
-                parent[ri] = rj;
-            }
-        }
-    }
-    let mut groups: HashMap<usize, Vec<usize>> = HashMap::new();
-    for i in 0..p {
-        let root = find(&mut parent, i);
-        groups.entry(root).or_default().push(i);
-    }
-    let mut components: Vec<Vec<usize>> = groups.into_values().collect();
-    components.sort_by_key(|c| c[0]);
-    components
+/// **Why checking each block in isolation is sound here, unlike using
+/// this same decomposition for LU factorization/solving**: LU needs
+/// blocks processed in dependency order because it *propagates computed
+/// values* forward through the matrix (well, needs it for *solving* —
+/// see `crate::graph::dulmage_mendelsohn_blocks`'s own docs on why even
+/// LU *factorization* itself, as opposed to solving, turns out not to
+/// need that ordering after all, since off-diagonal spillover entries
+/// are carried through unchanged rather than requiring elimination).
+/// Redundancy detection asks a different, purely *local* question per
+/// row — "is row `R` exactly equal to some linear combination of these
+/// specific other rows?" — and that identity, once verified using the
+/// rows' full, untruncated content (not just their entries in the
+/// block's own columns), holds unconditionally regardless of what any
+/// other block contains. So every block found here can be checked
+/// independently, in any order, including concurrently — the same
+/// parallel dispatch [`drop_linearly_dependent_sparse_blocked`] applies
+/// unchanged. The only cost of this independence is *recall*, not
+/// soundness: a redundancy whose witnessing combination genuinely spans
+/// multiple blocks (possible here, unlike with disjoint-column
+/// components, since an earlier block's row can still have nonzeros
+/// reaching into a later block's own columns) goes undetected and that
+/// row is conservatively kept — never the reverse (an independent row is
+/// never wrongly dropped), so this trades a little reduction
+/// *aggressiveness* for a lot more exploitable structure, the same trade
+/// already accepted for the rhs-augmentation edge case below.
+fn dulmage_mendelsohn_blocks(rows: &[(Vec<(usize, f64)>, f64)], n: usize) -> Vec<Vec<usize>> {
+    let adj: Vec<Vec<usize>> = rows.iter().map(|(row, _)| row.iter().map(|&(j, _)| j).collect()).collect();
+    crate::graph::dulmage_mendelsohn_blocks(&adj, n)
 }
 
 /// Below this total row count across a decomposition's non-trivial
@@ -663,12 +667,16 @@ fn connected_components(rows: &[(Vec<(usize, f64)>, f64)], n: usize) -> Vec<Vec<
 const PARALLEL_DECOMPOSE_ROW_THRESHOLD: usize = 64;
 
 /// Below this many equality rows, [`drop_linearly_dependent_sparse_blocked`]
-/// skips [`connected_components`] entirely and calls
+/// skips [`dulmage_mendelsohn_blocks`] entirely and calls
 /// [`drop_linearly_dependent_sparse`] directly, rather than always paying
-/// for the union-find pass (and, if it does find multiple components,
-/// the per-component `HashMap`-based column remapping and fresh
-/// `BTreeMap`/bucket/heap scaffolding for each one). Measured directly:
-/// every real Netlib win from decomposition (`ship12s` `p=1045`, `ship08s`
+/// for the bipartite-matching-plus-SCC pass (and, if it does find multiple
+/// blocks, the per-block `HashMap`-based column remapping and fresh
+/// `BTreeMap`/bucket/heap scaffolding for each one). Measured directly (with
+/// the earlier, coarser connected-components version of this same
+/// decomposition, before it was replaced by the finer Dulmage-Mendelsohn
+/// one — the size/regression picture below is unaffected by that swap,
+/// since both pay similar decomposition overhead on tiny inputs): every
+/// real Netlib win from decomposition (`ship12s` `p=1045`, `ship08s`
 /// `p=698`, `ship04l`/`ship04s` `p=354`, `sierra` `p=528`) has `p` well
 /// above this; every case that regressed when decomposition ran
 /// unconditionally (`sc105` `p=45`, `scorpion` `p=280`, `sc205` `p=91`,
@@ -678,65 +686,79 @@ const PARALLEL_DECOMPOSE_ROW_THRESHOLD: usize = 64;
 /// a fraction of a millisecond in absolute terms (these are already
 /// sub-10ms problems), but with nothing to gain there either — the
 /// decomposition's benefit scales with how much per-row elimination work
-/// it *avoids* doing across components, which is negligible when the
-/// whole problem is this small to begin with.
+/// it *avoids* doing across blocks, which is negligible when the whole
+/// problem is this small to begin with.
 const MIN_ROWS_FOR_BLOCK_DECOMPOSE: usize = 300;
 
-/// Wraps [`drop_linearly_dependent_sparse`] with a connected-components
-/// pre-pass (see [`connected_components`]): the equality system is first
-/// split into independent sub-problems (row groups sharing no real
-/// column), each solved by calling the same core algorithm on just that
-/// group's rows with columns remapped to a compact local index range
-/// (`0..local_n`) — without that remapping, every component's call would
-/// still pay for `aug_n`-sized scratch arrays (`col_rows`, `col_buckets`,
-/// `heap`/`col_bits`) proportional to the *whole* problem's `n`, defeating
-/// the point of splitting at all.
+/// Wraps [`drop_linearly_dependent_sparse`] with a Dulmage-Mendelsohn-style
+/// block-triangularization pre-pass (see [`dulmage_mendelsohn_blocks`]):
+/// the equality system is first split into blocks via a maximum bipartite
+/// matching plus strongly-connected-components search, each solved by
+/// calling the same core algorithm on just that block's rows with columns
+/// remapped to a compact local index range (`0..local_n`) — without that
+/// remapping, every block's call would still pay for `aug_n`-sized scratch
+/// arrays (`col_rows`, `col_buckets`, `heap`/`col_bits`) proportional to
+/// the *whole* problem's `n`, defeating the point of splitting at all.
 ///
-/// This is a genuine block-triangularization in the degenerate
-/// (block-*diagonal*) case: real Netlib multi-vessel/multi-period
-/// scheduling LPs (`ship12s`, `ship08s`, `ship04l`, `ship04s`, `sierra`)
-/// were measured (see the `reduce_equalities` bottleneck investigation
-/// this function grew out of) to decompose into dozens of components of
-/// *nearly identical size* (`ship12s`: 12 blocks of exactly 78 rows each,
-/// plus 109 size-1 singletons) — one instance per vessel/route/period,
-/// each with disjoint variable columns. A handful of other instances
-/// (`shell`, `scsd8`, `fit1p`, `ganges`, `wood1p`) stay a single
-/// connected component and fall straight back to the un-decomposed path
-/// below with no remapping overhead at all.
+/// Real Netlib multi-vessel/multi-period scheduling LPs (`ship12s`,
+/// `ship08s`, `ship04l`, `ship04s`, `sierra`) decompose into dozens of
+/// blocks of *nearly identical size* this way (`ship12s`: 12 blocks of
+/// exactly 78 rows each, plus 109 size-1 singletons) — one instance per
+/// vessel/route/period. A first version of this decomposition used plain
+/// connected components (disjoint column support only) and stopped there,
+/// since it correctly found *those* instances but left several others
+/// (`shell`, `scsd8`, `fit1p`, `ganges`) showing as a single, fully-coupled
+/// component with nothing to split. Replacing it with the full
+/// Dulmage-Mendelsohn matching-plus-SCC decomposition finds much finer
+/// structure in exactly those remaining instances too (`shell`: 531 blocks
+/// from 534 rows; `ganges`: 998 from 1284; `fit1p`: 605 from 627) — the
+/// matching exploits a *directional* dependency structure (a block's rows
+/// can still reach into a later block's own columns) that pure
+/// column-disjointness can never see, since two rows sharing a column can
+/// still end up in different SCCs as long as the dependency isn't mutual.
+/// `wood1p` stays on the *dense* path entirely (density dispatch above)
+/// and is unaffected either way.
 ///
-/// **Why decomposing is sound to parallelize, unlike a general
-/// block-*triangular* (not diagonal) form**: a true Dulmage-Mendelsohn/BTF
-/// decomposition's off-diagonal blocks couple later blocks to earlier
-/// ones (fill propagates forward), forcing sequential order across
-/// blocks — only work *inside* one block could ever be parallel. The
-/// connected-components case used here is the degenerate special case
-/// where that coupling is provably absent (disjoint column support), so
-/// every block is independent of every other regardless of order,
-/// making the *whole* decomposition (not just work inside one block)
-/// safe to run concurrently.
+/// **Why every block found here is still sound to check independently,
+/// unlike using this same decomposition for LU factorization or
+/// solving**: LU needs strict block order because it propagates *computed
+/// values* forward — a later block's solve genuinely depends on an earlier
+/// block's result. Redundancy detection instead asks, per row, "is this
+/// row exactly equal to some linear combination of these specific other
+/// rows?" — an identity that, once verified using the rows' full,
+/// untruncated content, holds unconditionally regardless of what any other
+/// block contains. So unlike a general block-triangular form's usual
+/// sequential constraint, every block here can be checked in any order,
+/// including concurrently — the only cost is *recall*, not soundness: a
+/// redundancy whose witnessing combination genuinely spans multiple blocks
+/// (possible here, since an earlier block's row can still reach into a
+/// later block's columns — impossible with plain connected components,
+/// where blocks share no column at all) goes undetected and that row is
+/// conservatively kept, never the reverse. See
+/// [`dulmage_mendelsohn_blocks`]'s own docs for the full argument.
 ///
 /// **The rhs-augmentation edge case**: [`drop_linearly_dependent_sparse`]
 /// augments each row with the equation's rhs as one extra shared column
 /// (index `n`), used to distinguish genuine redundancy from an
-/// inconsistency (Farkas infeasibility witness) — but [`connected_components`]
-/// deliberately does not treat that column as a graph edge, so two
-/// *originally* all-zero-coefficient rows with different nonzero rhs
-/// (`0 = 5`, `0 = 3`) land in separate singleton components here, whereas
-/// the un-decomposed algorithm's single shared rhs column would link them
-/// and drop one as "dependent" on the other. Both outcomes are correct —
-/// each such row is already its own infeasibility witness on its own, so
-/// dropping one loses no information the solver needs — this function is
-/// just more conservative (keeps a possibly-redundant-but-harmless extra
-/// row) in that one narrow, degenerate edge case. The same reasoning
-/// applies to a row that only reduces to a pure rhs residual *during*
-/// elimination (the general Farkas case): that reduction happens
-/// entirely from real columns within one component, so it is still
-/// caught correctly and entirely locally.
+/// inconsistency (Farkas infeasibility witness) — but
+/// [`dulmage_mendelsohn_blocks`] deliberately does not treat that column as
+/// a graph edge, so two *originally* all-zero-coefficient rows with
+/// different nonzero rhs (`0 = 5`, `0 = 3`) land in separate singleton
+/// blocks here, whereas the un-decomposed algorithm's single shared rhs
+/// column would link them and drop one as "dependent" on the other. Both
+/// outcomes are correct — each such row is already its own infeasibility
+/// witness on its own, so dropping one loses no information the solver
+/// needs — this function is just more conservative (keeps a
+/// possibly-redundant-but-harmless extra row) in that one narrow,
+/// degenerate edge case. The same reasoning applies to a row that only
+/// reduces to a pure rhs residual *during* elimination (the general Farkas
+/// case): that reduction happens entirely from real columns within one
+/// block, so it is still caught correctly and entirely locally.
 fn drop_linearly_dependent_sparse_blocked(rows_in: &[(Vec<(usize, f64)>, f64)], n: usize) -> Vec<usize> {
     if rows_in.len() < MIN_ROWS_FOR_BLOCK_DECOMPOSE {
         return drop_linearly_dependent_sparse(rows_in, n);
     }
-    let components = connected_components(rows_in, n);
+    let components = dulmage_mendelsohn_blocks(rows_in, n);
     if components.len() <= 1 {
         return drop_linearly_dependent_sparse(rows_in, n);
     }
@@ -950,12 +972,15 @@ mod tests {
         assert_eq!(keep.len(), 4, "expected rank 4 out of 5 rows; keep={keep:?}");
     }
 
-    /// Two disjoint-column blocks (rows `{0,1}` over columns `{0,1}`, rows
-    /// `{2,3}` over columns `{2,3}`) plus one truly isolated row (`{4}`,
-    /// column `{4}`) must land in exactly three components, each in
-    /// ascending row order, sorted by first row.
+    /// Two mutually-referencing (genuine 2-cycle in the matching graph,
+    /// however the matching happens to pick columns) blocks — rows
+    /// `{0,1}` over columns `{0,1}`, rows `{2,3}` over columns `{2,3}` —
+    /// plus one truly isolated row (`{4}`, column `{4}`) must land in
+    /// exactly three blocks, each in ascending row order, sorted by first
+    /// row: a case where the finer Dulmage-Mendelsohn decomposition must
+    /// still agree with what plain column-disjointness alone would find.
     #[test]
-    fn connected_components_splits_disjoint_column_groups() {
+    fn dulmage_mendelsohn_blocks_splits_disjoint_cyclic_groups() {
         let rows: Vec<(Vec<(usize, f64)>, f64)> = vec![
             (vec![(0, 1.0), (1, 2.0)], 3.0),
             (vec![(0, 2.0), (1, 1.0)], 4.0),
@@ -963,22 +988,27 @@ mod tests {
             (vec![(2, 1.0), (3, 2.0)], 2.0),
             (vec![(4, 5.0)], 5.0),
         ];
-        let comps = connected_components(&rows, 5);
+        let comps = dulmage_mendelsohn_blocks(&rows, 5);
         assert_eq!(comps, vec![vec![0, 1], vec![2, 3], vec![4]], "comps={comps:?}");
     }
 
-    /// A single connected chain (row `i` and `i+1` always share a column)
-    /// must stay one component regardless of how many rows are involved.
+    /// A pure dependency *chain* (row `i` and `i+1` always share a column,
+    /// but never cyclically — row `i` never depends back on row `i+1`)
+    /// stays one connected component under plain column-sharing alone, but
+    /// has *no* genuine cycles in the matching graph, so the finer
+    /// Dulmage-Mendelsohn decomposition must split it into `n` singleton
+    /// blocks — exactly the structure real instances like `fit1p`/`ganges`
+    /// showed (hundreds of singleton SCCs) despite looking like one
+    /// fully-coupled component by column-sharing alone.
     #[test]
-    fn connected_components_keeps_a_connected_chain_together() {
+    fn dulmage_mendelsohn_blocks_splits_a_pure_chain_into_singletons() {
         let rows: Vec<(Vec<(usize, f64)>, f64)> = vec![
             (vec![(0, 1.0), (1, 1.0)], 1.0),
             (vec![(1, 1.0), (2, 1.0)], 1.0),
             (vec![(2, 1.0), (3, 1.0)], 1.0),
         ];
-        let comps = connected_components(&rows, 4);
-        assert_eq!(comps.len(), 1, "comps={comps:?}");
-        assert_eq!(comps[0], vec![0, 1, 2], "comps={comps:?}");
+        let comps = dulmage_mendelsohn_blocks(&rows, 4);
+        assert_eq!(comps, vec![vec![0], vec![1], vec![2]], "comps={comps:?}");
     }
 
     /// The blocked wrapper must match the un-decomposed sparse algorithm's
@@ -1000,15 +1030,18 @@ mod tests {
     /// one row, stitched together in a single call — the redundant row in
     /// block A must not affect block B's own (independent) redundant row
     /// and vice versa, and the combined result must be exactly rank
-    /// `2 + 2 = 4` out of the 6 rows the two blocks contribute. Column
-    /// indices are chosen so the two blocks share *no* column at all,
-    /// forcing the connected-components pre-pass to actually split them
-    /// (verified via `connected_components` separately above). Padded
-    /// with 300 trivially-independent singleton rows (each its own
+    /// `2 + 2 = 4` out of the 6 rows the two blocks contribute. Each
+    /// block's own 3 rows form a genuine cycle in the matching graph (row
+    /// 2 touches all of columns {0,1,2}, so whichever column the maximum
+    /// matching assigns it, tracing back through the other two rows'
+    /// matches closes a cycle), so [`dulmage_mendelsohn_blocks`] keeps
+    /// each block together as one SCC — and the two blocks share no
+    /// column at all, so they land in different SCCs from each other.
+    /// Padded with 300 trivially-independent singleton rows (each its own
     /// isolated column, always kept — see
     /// [`drop_linearly_dependent_sparse_blocked`]'s own docs) purely to
     /// clear [`MIN_ROWS_FOR_BLOCK_DECOMPOSE`] and actually exercise
-    /// [`connected_components`] rather than that size gate's direct
+    /// [`dulmage_mendelsohn_blocks`] rather than that size gate's direct
     /// fallback — the singletons are otherwise inert and checked only in
     /// aggregate.
     #[test]
@@ -1028,7 +1061,7 @@ mod tests {
             rows.push((vec![(6 + k, 1.0)], 1.0));
         }
         let n = 6 + filler_count;
-        assert!(rows.len() >= MIN_ROWS_FOR_BLOCK_DECOMPOSE, "test must actually exercise connected_components");
+        assert!(rows.len() >= MIN_ROWS_FOR_BLOCK_DECOMPOSE, "test must actually exercise dulmage_mendelsohn_blocks");
 
         let keep = drop_linearly_dependent_sparse_blocked(&rows, n);
         assert_eq!(keep.len(), 4 + filler_count, "expected rank 2+2+{filler_count} singletons; keep={keep:?}");

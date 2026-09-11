@@ -86,6 +86,7 @@ pub mod propagate;
 pub mod redundancy;
 pub mod rowsingleton;
 pub mod scaling;
+pub mod smallcoeff;
 
 use crate::sparse::{csr_from_rows, Csr};
 use crate::types::{ConstraintRow, RowSense, VariableData};
