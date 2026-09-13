@@ -1,0 +1,343 @@
+\documentclass[11pt,a4paper]{ltjsarticle}
+
+\usepackage{luatexja-fontspec}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage[margin=25mm]{geometry}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{longtable}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{fancyvrb}
+\usepackage{enumitem}
+
+\setmainjfont{Noto Serif JP}
+\setsansjfont{Noto Sans JP}
+\setmainfont{Latin Modern Roman}
+
+\hypersetup{colorlinks=true, linkcolor=blue!50!black, citecolor=blue!50!black, urlcolor=blue!50!black}
+
+\newtheorem{definition}{定義}
+\newtheorem{remark}{注記}
+
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\code}[1]{\texttt{#1}}
+\DefineVerbatimEnvironment{rustcode}{Verbatim}{fontsize=\small, frame=single, rulecolor=\color{gray!50}, xleftmargin=2mm, xrightmargin=2mm}
+
+\title{上下限制約付き双対単体法の実装まとめ}
+\author{ENOMOTO-Solver \quad \code{src/simplex.rs}}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+本稿は \code{ENOMOTO-Solver} の \code{src/simplex.rs} に実装されている，全変数が有限な上下限を持つ場合に特化した「有界変数双対単体法」（bounded-variable dual simplex, 関数 \code{solve\_lp\_dual}/\code{solve\_lp\_dual\_on}）について，内部で用いられているデータ構造とその数式的な意味を対応付けながら整理する。実装は Huangfu \& Hall (2015) の並列双対単体法（dual steepest edge, bound-flipping ratio test）を下敷きにしつつ，スパース Markowitz LU 分解と Forrest--Tomlin (1972) 型の増分更新，コスト摂動によるアンチサイクリング，Bland 規則へのフォールバックを組み合わせている。
+\end{abstract}
+
+\tableofcontents
+
+\section{標準形}
+
+モデルの構造変数は $x \in \R^n$，制約は $m$ 本で，実装上の重要な前提として\textbf{すべての構造変数が有限な上下限 $lb_j, ub_j \in \R$（$-\infty,\infty$ を許さない）を持つ}（\code{model.rs} の PyO3 境界で検証済み）。この前提により「自由変数」のケースを実装から完全に排除できる。
+
+各制約行にスラック変数 $s_i$ を導入し，常に等式標準形
+\[
+  A x + \sigma \odot s = b, \qquad lb \le \begin{pmatrix}x\\s\end{pmatrix} \le ub
+\]
+に帰着させる（$\sigma_i \in \{+1,-1\}$ は行の向きに依存する符号）。具体的には
+\[
+\begin{array}{lll}
+  \text{等式 } Ax = b & \Rightarrow & Ax + s = b,\ s \in [0,0] \\
+  \text{不等式 } Gx \le h & \Rightarrow & Gx + s = h,\ s \in [0,\infty) \\
+  \text{不等式 } Gx \ge h & \Rightarrow & Gx - s = h,\ s \in [0,\infty)
+\end{array}
+\]
+とする。列を $z = (x,s) \in \R^{n_{\mathrm{total}}}$（$n_{\mathrm{total}} = n + m$）とまとめ，行列 $M \in \R^{m \times n_{\mathrm{total}}}$ を $M = [A \mid \Sigma]$（$\Sigma$ は対角 $\pm1$）とすれば，全体は
+\[
+  \min_{z} \; c^\top z \quad \text{s.t.} \quad Mz = b,\quad lb \le z \le ub
+\]
+という一本の有界変数線形計画になる。すべての行が自分のスラックを基底変数として持てば $B = I$ となるため，これが初期基底として常に利用できる（後述の crash 手続きの前提）。
+
+\section{データ構造}
+
+\subsection{\code{StdForm}：標準形の疎行列表現}
+
+\begin{rustcode}
+struct StdForm {
+    n_total: usize,      // n + m
+    n_rows:  usize,      // m
+    c:   Vec<f64>,       // 目的関数係数 c in R^{n_total}
+    rows: FixedRows,     // M を行方向に格納した疎行列 (CSR 相当)
+    cols: FixedRows,     // M の転置 (CSC 相当)
+    b:   Vec<f64>,       // 右辺 b in R^m
+    lb:  Vec<f64>,       // 下限 lb in R^{n_total}
+    ub:  Vec<f64>,       // 上限 ub in R^{n_total}
+}
+\end{rustcode}
+
+数式との対応は次の通り。
+\[
+  c \leftrightarrow \code{c},\qquad
+  M \leftrightarrow \code{rows}/\code{cols},\qquad
+  b \leftrightarrow \code{b},\qquad
+  (lb,ub) \leftrightarrow \code{(lb, ub)}.
+\]
+
+\code{FixedRows} は「行ごとに可変長の \code{Vec} を確保する」構造をやめ，全エントリを 1 本のフラットな \code{entries: Vec<(usize,f64)>} に連結し，行 $i$ の担当区間を \code{offsets[i]..offsets[i+1]} で切り出す，一般的な CSR（Compressed Sparse Row）形式である：
+\[
+  M_{i,\cdot} = \{(j, v) : \code{entries}[k] = (j,v),\ k \in [\code{offsets}[i], \code{offsets}[i+1])\}.
+\]
+\code{cols} は \code{rows} を転置した CSC 相当のビューで，一度だけ構築し，以降 \code{StdForm} 自体は不変（solve 中に一切変更されない）。これにより「列 $j$ の非零成分を求める」操作（エントリング列の FTRAN 入力，価格付け）が行を全走査せずに $O(\mathrm{nnz}_j)$ で行える。
+
+\subsection{\code{Tableau}：基底とその時点の解}
+
+\begin{rustcode}
+struct Tableau<'a> {
+    std: &'a StdForm,
+    basis: Vec<usize>,             // basis[i] = 行 i で基底の変数番号
+    basis_pos: Vec<Option<usize>>, // 逆写像 basis_pos[var] = Some(i)
+    nb_status: Vec<Option<NbStatus>>, // 基底なら None
+    x: Vec<f64>,                   // 現在の全変数値 x in R^{n_total}
+}
+
+enum NbStatus { Lower, Upper }
+\end{rustcode}
+
+これは古典的な単体法の「基底 $B$／非基底 $N$」への分割
+\[
+  \{1,\dots,n_{\mathrm{total}}\} = \mathcal{B} \sqcup \mathcal{N}, \qquad
+  \mathcal{B} = \{\code{basis}[0],\dots,\code{basis}[m-1]\}
+\]
+をそのまま配列で持つ実装である。\code{basis\_pos} は $\mathcal{B}$ への所属判定と行番号引き当てを $O(1)$ にするための逆引き表であり，数学的には
+\[
+  \code{basis\_pos}[j] = \begin{cases} i & j = \code{basis}[i] \ (j \in \mathcal{B})\\ \bot & j \in \mathcal{N}\end{cases}
+\]
+に対応する。非基底変数の状態 \code{NbStatus} は，有界変数単体法特有の「非基底変数はどちらの限界に張り付いているか」
+\[
+  x_j = \begin{cases} lb_j & \code{nb\_status}[j] = \mathrm{Lower} \\ ub_j & \code{nb\_status}[j] = \mathrm{Upper}\end{cases} \qquad (j \in \mathcal{N})
+\]
+を表す。構造変数は必ず両側有限なので，\code{NbStatus} に「自由変数」の場合分けが存在しない（doc comment 通り，これは前節の有界性前提が可能にしている）。
+
+基底行列を $B = M_{\cdot,\mathcal{B}} \in \R^{m\times m}$，非基底部分を $N = M_{\cdot,\mathcal{N}}$ とすると，基底変数値は
+\[
+  x_{\mathcal B} = B^{-1}\bigl(b - N x_{\mathcal N}\bigr)
+\]
+で与えられる。実装では \code{compute\_rhs} が $rhs = b - N x_{\mathcal N}$（$\mathcal{O}(\mathrm{nnz}(M))$ の疎な内積の和）を計算し，\code{resync\_basics} が三角分解を用いてこの式を解いて $x_{\mathcal B}$ に書き戻す。通常の反復中は $x_{\mathcal B}$ をこの式で毎回引き直すのではなく，ピボット操作による差分更新（後述）で維持し，一定間隔または数値誤差検知時にのみ \code{recompute\_basics} で「真値」に同期する。
+
+\subsection{基底の三角分解：Markowitz LU + Forrest--Tomlin 更新}
+
+$B$ は素朴に稠密で保持せず，スパース Markowitz ピボット選択による LU 分解
+\[
+  P_r B P_c = LU
+\]
+（$L$: 単位下三角，$U$: 上三角，$P_r,P_c$: 行・列置換）を \code{lu::factorize} で一度構築し（\code{sparse\_lu::FtLu}），以後のピボットでは基底の 1 列だけが変わることを利用して Forrest \& Tomlin (1972) 型の階数 1 の増分更新（\code{FtLu::try\_update}）でこれを維持する。フルな再分解は次の 4 条件のいずれかで発火する。
+\begin{enumerate}[itemsep=1pt]
+  \item 定期チェック（\code{FT\_CHECK\_INTERVAL}$=5$反復ごと，さらに\code{RESIDUAL\_CHECK\_MULTIPLIER}$=20$倍粗く）で真の基底残差 $\lVert A_{\mathcal B} x_{\mathcal B} - rhs\rVert$ が \code{FT\_RESIDUAL\_TOL}$=10^{-4}$ を超える場合。
+  \item 更新後のピボット要素が \code{FT\_MIN\_PIVOT}$=10^{-7}$ 未満になった場合（即時）。
+  \item 蓄積された eta ファイルの fill が \code{FT\_BUMP\_LIMIT\_FACTOR}$\times m = 64m$ を超えた場合。
+  \item 更新回数が \code{FT\_MAX\_UPDATES}$=300$ を超えた場合（無条件）。
+\end{enumerate}
+再分解に失敗する（数値的特異）場合は，双対法をあきらめて主単体法 \code{solve\_lp\_on} にフォールバックする。
+
+\section{初期基底の構成：双対実行可能クラッシュ}
+
+双対単体法は「双対実行可能な初期基底」を必要とする。基底 $\mathcal B$ に対する単体乗数（双対変数）を
+\[
+  y^\top = c_{\mathcal B}^\top B^{-1}
+\]
+非基底 $j$ の被約費用（reduced cost）を
+\[
+  d_j = c_j - y^\top M_j
+\]
+と定義すると，双対実行可能性は
+\[
+  d_j \ge 0 \ (j: x_j = lb_j), \qquad d_j \le 0 \ (j: x_j = ub_j)
+\]
+である。初期基底として全スラックを採用すると $B = I$，$c_{\mathcal B} = 0$（スラックの費用は常に $0$）なので $y = 0$，したがって
+\[
+  d_j = c_j \qquad (\forall j).
+\]
+よって \code{crash\_dual\_feasible} は各構造変数 $j$ を
+\[
+  \code{nb\_status}[j] = \begin{cases}\mathrm{Lower} & c_j \ge -\varepsilon\\ \mathrm{Upper} & c_j < -\varepsilon\end{cases}
+  \qquad(\varepsilon = \code{TOL} = 10^{-9})
+\]
+に割り当てるだけで双対実行可能性が\emph{無条件に}成立する。これは両側とも有限な上下限を持つという前節の前提があって初めて常に成り立つ（$c \ge -\varepsilon$ か $c \le \varepsilon$ のどちらかは必ず成立する）。
+
+\subsection{コスト摂動によるアンチサイクリング}
+
+主単体法側の EXPAND 法（Gill--Murray--Saunders--Wright, 1989）に対応する退化対策として，双対法では反復開始前に一度だけコストベクトルを摂動する（\code{perturb\_costs}，HiGHS \code{HEkk::initialiseCost} と同じ設計）。
+\[
+  \code{base} = 5\times 10^{-7}\cdot \overline{c}, \qquad
+  \overline{c} = \begin{cases}\max_j|c_j|^{1/4} & \max_j|c_j| > 100\\ \max_j|c_j| & \text{それ以外}\end{cases}
+\]
+（さらに「箱型」制約を持つ列が全体の $1\%$ 未満なら $\overline c \leftarrow \min(\overline c, 1)$）。固定列（$lb_j=ub_j$）や自由列はそのまま，片側のみ有限な列は有限でない側から遠ざかる方向へ，両側有限な列は自分の費用の符号方向へ，列インデックスから決定的に導いた擬似乱数 $r_j \in [0,1)$ を使って
+\[
+  \Delta_j = (1+r_j)(|c_j|+1)\cdot\code{base}
+\]
+だけシフトする。摂動後のコスト $\tilde c$ に対して \code{crash\_dual\_feasible} を実行し，反復全体は $\tilde c$ に基づく被約費用 $d$ を保持する（真の目的関数 \code{std.c} は最適性の最終確認にのみ使う）。
+
+\section{メインループ}
+
+反復のたびに \code{Tableau} は基底 $\mathcal B$ を 1 列だけ入れ替える（$p$ 行目が退出し，列 $q$ が進入する）。各ステップの数式的定義を以下にまとめる。
+
+\subsection{退出行の選択（chuzr）と双対 steepest edge}
+
+基底変数 $x_{\code{basis}[i]}$ が許容誤差 \code{PRIMAL\_FEAS\_TOL}$=10^{-7}$ を超えて限界を破っている行の集合を，逐次更新される \code{InfeasibleRows}（差分保守，行が変化した時だけ $O(1)$ で更新）から取り出す。行 $i$ の逸脱量
+\[
+  \delta_i = \max(lb_{\code{basis}[i]} - x_{\code{basis}[i]},\; x_{\code{basis}[i]} - ub_{\code{basis}[i]},\; 0)
+\]
+に対し，双対 steepest edge 重み $w_i$（\code{DseState::w}，初期値 $w_i=1$，$B_0=I$ より $\lVert B_0^{-\top}e_i\rVert^2=1$）を用いてスコア
+\[
+  \mathrm{score}_i = \frac{\delta_i^2}{\max(w_i,\varepsilon_{\mathrm{floor}})}
+\]
+を最大化する行 $p$ を選ぶ（同点は行番号で決定的にタイブレーク）。重み $w_i$ は
+\[
+  w_i \approx \bigl\lVert B^{-\top} e_i \bigr\rVert_2^2
+\]
+の近似であり，通常の Dantzig 規則（$\delta_i$ の大きさだけを見る）より，実際に 1 単位動かしたときの目的関数改善に近い量を近似する。
+
+\subsection{BTRAN と PRICE}
+
+選ばれた行 $p$ に対し，
+\[
+  \rho_p = B^{-\top} e_p \qquad (\text{すなわち } B^\top \rho_p = e_p \text{ を解く; BTRAN})
+\]
+を計算し（\code{rho\_p\_buf}），単体表のピボット行
+\[
+  a_p^\top = \rho_p^\top M \in \R^{n_{\mathrm{total}}}, \qquad (a_p)_j = \sum_i \rho_p(i)\, M_{i,j}
+\]
+を \code{PRICE} で求める。$\rho_p$ の非零行だけを走査し，各行の疎な \code{std.rows.row(i)} を辿ることで，$\rho_p$ が疎であるほど高速になる（\code{a\_p}/\code{touched\_cols}/\code{touched} は「今回触れた列」だけを記録する差分バッファ）。
+
+\subsection{進入列候補の絞り込み（chuzc1）}
+
+退出変数が下限割れ（\code{leaving\_infeasible\_low}）か上限超過かに応じて，非基底列 $j$（$a_j := (a_p)_j \ne 0$）のうち，その列を動かすことで退出変数の実行可能性が回復し得る符号条件
+\[
+\text{下限割れ}:\quad
+\begin{cases}
+  j \in \mathcal N_{\mathrm{Lower}}: & a_j < -\varepsilon\\
+  j \in \mathcal N_{\mathrm{Upper}}: & a_j > \varepsilon
+\end{cases}
+\qquad
+\text{上限超過}:\quad
+\begin{cases}
+  j \in \mathcal N_{\mathrm{Lower}}: & a_j > \varepsilon\\
+  j \in \mathcal N_{\mathrm{Upper}}: & a_j < -\varepsilon
+\end{cases}
+\]
+を満たすものを候補とし，比
+\[
+  r_j = \left|\frac{d_j}{a_j}\right|
+\]
+を計算する（古典的な双対比検定の比）。候補が空なら，それが数値誤差の範囲内でない限り，その基底行の実行不能性が真の一次実行不可能性の証明となり \code{Status::Infeasible} を返す。
+
+\subsection{Bound-Flipping Ratio Test（BFRT）と Harris の 2 パス法}
+
+候補を比 $r_j$ の昇順（同点は列番号）で整列した列（実装では全ソートではなく二分ヒープ \code{BinaryHeap<Reverse<ChuzcCand>>} から必要な分だけ pop する）を順に見て，
+\[
+  \Delta x_j = \begin{cases} ub_j-lb_j & j\ \text{が Lower}\\ -(ub_j-lb_j) & j\ \text{が Upper}\end{cases}
+\]
+だけ完全に反対側の限界へ「反転」させたときの退出変数の仮想値
+\[
+  \hat x_p \leftarrow \hat x_p - a_j\, \Delta x_j
+\]
+を追跡し，目標値 $\code{target} \in \{lb_{\code{leaving}}, ub_{\code{leaving}}\}$ に到達（またはオーバーシュート）する直前まで反転を確定する（幅が無限大の候補，すなわちスラックの片側無限区間はそもそも反転不可）。到達点のインデックスを $\mathrm{stop}$ とする。
+
+数値安定性のため，$\mathrm{stop}$ で単純に確定するのではなく，比が
+\[
+  r_{\mathrm{stop}} - \code{HARRIS\_RATIO\_TOL} \ \le\ r_j \ \le\ r_{\mathrm{stop}}
+\]
+（\code{HARRIS\_RATIO\_TOL}$=10^{-7}$）の窓に入る候補（$j \le \mathrm{stop}$ の中から\emph{後ろ向きにのみ}探索）のうち $|a_j|$ が最大のものを真の進入列 $q$ として選び直す（Harris 1973 の 2 パス法に類似，HiGHS \code{chooseFinalLargeAlpha} を参考に，ただし過大な逸脱を避けるため前方には探索しない）。$\mathrm{stop}$ より手前の候補はすべて完全反転として確定させ，これらの反転効果は 1 回の追加 FTRAN
+\[
+  B\, \alpha_F = \sum_{j: \text{反転}} M_j\, \Delta x_j
+\]
+としてまとめて基底変数へ反映する（ftran-bfrt）。
+
+\subsection{FTRAN，主変数の更新，双対 steepest edge の更新}
+
+進入列 $q$ の方向ベクトル，および DSE の交差項を
+\[
+  \alpha = B^{-1} M_q, \qquad \tau = B^{-1}\rho_p
+\]
+として FTRAN で求める（\code{alpha\_buf}, \code{tau\_buf}）。主変数のステップ幅は，反転処理後の退出変数値 $x_{\code{leaving}}$ を用いて
+\[
+  \theta_q = \frac{x_{\code{leaving}} - \code{target}}{\alpha_p}
+\]
+で決まり，全基底変数を
+\[
+  x_{\code{basis}[i]} \leftarrow x_{\code{basis}[i]} - \alpha_i\,\theta_q \quad(\forall i), \qquad x_q \leftarrow x_q + \theta_q
+\]
+と更新する（$\alpha_p\theta_q = x_{\code{leaving}}-\code{target}$ より，行 $p$ はちょうど目標限界に一致する）。
+
+DSE 重みは Forrest--Goldfarb 型の階数 1 更新（この実装では双対版として再導出済み）
+\[
+  \rho_i := \frac{\alpha_i}{\alpha_p}\ (i\ne p),\qquad
+  w_i \leftarrow \max\!\bigl(w_i - 2\rho_i \tau_i + \rho_i^2 w_p,\ \varepsilon_{\mathrm{floor}}\bigr),\qquad
+  w_p \leftarrow \max\!\left(\frac{w_p}{\alpha_p^2},\ \varepsilon_{\mathrm{floor}}\right)
+\]
+で維持する（\code{DseState::update\_after\_pivot}）。
+
+\subsection{基底交換と被約費用の増分更新（update-dual）}
+
+基底配列を更新する：
+\[
+  \code{nb\_status}[\code{leaving}] \leftarrow \begin{cases}\mathrm{Lower}\\ \mathrm{Upper}\end{cases},\quad
+  \code{basis}[p] \leftarrow q,\quad \code{nb\_status}[q] \leftarrow \bot .
+\]
+被約費用は BTRAN をやり直さず，ピボット行 $a_p$ を使って全列を一括更新する（Sherman--Morrison による階数 1 更新から $c_{\mathcal B}$ の交差項が相殺して導かれる closed form）：
+\[
+  \theta_d = \frac{d_q}{\alpha_p}, \qquad d_j \leftarrow d_j - \theta_d\, (a_p)_j \quad (\forall j).
+\]
+これにより，次回以降の反復でも $d$ は「その時点の基底に対する真の被約費用」であり続け，BTRAN + 内積で再計算する必要がない。
+
+\subsection{基底分解の更新}
+
+最後に Forrest--Tomlin の階数 1 更新 \code{lu.try\_update(p, a\_enter, FT\_MIN\_PIVOT)} を試み，ピボットが小さすぎる（$<10^{-7}$）などの理由で失敗すれば，その場でフル再分解を行う。
+
+\section{終了条件}
+
+\begin{itemize}
+  \item \textbf{最適}：\code{chuzr} が実行不能行を一つも見つけられない，すなわち摂動後コスト $\tilde c$ について一次実行可能かつ双対実行可能。このとき，真のコスト \code{std.c} に対して被約費用を計算し直し（\code{fresh\_d}）,
+  \[
+    d_j \ge -\varepsilon\ (j\in\mathcal N_{\mathrm{Lower}}), \qquad d_j \le \varepsilon\ (j\in\mathcal N_{\mathrm{Upper}})
+  \]
+  が真に成り立てば \code{Status::Optimal}。摂動が真の双対非実行可能性を覆い隠していた場合（稀）は，現在の基底が一次実行可能であることを利用して主単体法フェーズ2に切り替えて仕上げる。
+  \item \textbf{一次実行不可能}：\code{chuzc1} が候補を一つも見つけられず，かつその行の逸脱が丸め誤差の範囲を超えている場合（行のスケールに応じた相対許容誤差で判定）。または BFRT の反転が全候補を使い切っても目標限界に届かない場合。
+  \item \textbf{反復上限}：\code{MAX\_ITERS}$=20{,}000$ に達した場合はベストエフォートの解を返す。
+\end{itemize}
+
+\subsection{Bland 規則によるフォールバック}
+
+$\theta_q\, d_q$（このピボットの目的関数への実際の寄与）が \code{STALL\_PROGRESS\_EPS}$=10^{-9}$ を \code{stall\_limit}$=\max(5m,500)$ 回連続で下回ると，コスト摂動と Harris 法だけでは退化サイクルを避けられなかったと判断し，以降は Bland (1977) の最小添字規則に切り替える（\code{bland\_mode}）：退出行はインデックス最小の実行不能な基底変数，進入列は数値的に許容できる中で最小インデックスの候補（全滅時のみ許容度を無視）。Bland 規則は理論的に有限収束が保証される唯一の規則であり，一度 ON になったら解が求まるまで戻らない。
+
+\section{データ構造のまとめ}
+
+\begin{longtable}{@{}p{0.28\linewidth}p{0.34\linewidth}p{0.32\linewidth}@{}}
+\toprule
+Rust 構造体／フィールド & 数式上の対象 & 備考 \\
+\midrule
+\endfirsthead
+\toprule
+Rust 構造体／フィールド & 数式上の対象 & 備考 \\
+\midrule
+\endhead
+\code{StdForm\{c, rows, cols, b, lb, ub\}} & $c,\ M,\ M^\top,\ b,\ lb,\ ub$ & CSR/CSC 相当の \code{FixedRows}，solve 中不変 \\
+\code{Tableau\{basis, basis\_pos, nb\_status, x\}} & $\mathcal B,\ \mathcal B^{-1}\text{写像},\ \mathcal N\text{の限界},\ z$ & 反復ごとに差分更新 \\
+\code{NbStatus::\{Lower,Upper\}} & 非基底変数の張り付き先 & 自由変数のケースなし \\
+\code{sparse\_lu::FtLu} & $B = P_r^{-1}LU P_c^{-1}$ ＋ eta 更新列 & Markowitz + Forrest--Tomlin \\
+\code{DseState::w} & $w_i \approx \lVert B^{-\top}e_i\rVert^2$ & 双対 steepest edge 重み \\
+\code{d: Vec<f64>} & $d_j = c_j - y^\top M_j$ & 毎反復 closed form で増分更新 \\
+\code{a\_p / touched\_cols} & $a_p^\top = \rho_p^\top M$ の疎表現 & PRICE の出力，差分クリア \\
+\code{InfeasibleRows\{rows,pos\}} & $\{i : x_{\code{basis}(i)}\text{ が実行不能}\}$ & 増分保守された集合 \\
+\code{ChuzcCand\{j,a\_pj,dj,ratio\}} & BFRT 候補 $(j, a_j, d_j, r_j)$ & 二分ヒープで昇順に取り出す \\
+\bottomrule
+\end{longtable}
+
+\section{まとめ}
+
+この実装は，教科書的な有界変数双対単体法（BTRAN → PRICE → chuzr → chuzc → FTRAN → 基底交換）を骨格としながら，(1) 全構造変数が有限上下限を持つという \code{ENOMOTO-Solver} 固有の前提を利用して双対実行可能な初期基底を無条件に構成できるようにし，(2) 被約費用と双対 steepest edge 重みを both closed-form の階数 1 更新で保守することで BTRAN の再計算を反復ごとに避け，(3) BFRT と Harris 型 2 パス法・コスト摂動・Bland 規則という 3 段構えの退化・数値安定性対策を備え，(4) 基底の実体は Markowitz ピボットによるスパース LU と Forrest--Tomlin 増分更新で保持する，という構成になっている。
+
+\end{document}

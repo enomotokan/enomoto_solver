@@ -32,6 +32,7 @@ pub type Csr = faer::sparse::SparseRowMat<usize, f64>;
 /// `simplex.rs`'s `StdForm` is frozen the moment presolve hands it off (see
 /// that struct's own docs), so there is no reason for its row/column
 /// storage to still pay for growable `Vec`s.
+#[derive(Clone)]
 pub struct FixedRows {
     offsets: Vec<usize>,
     entries: Vec<(usize, f64)>,

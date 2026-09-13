@@ -20,13 +20,21 @@
 //! row's other terms) must still satisfy `lb_j <= x_j <= ub_j`, and
 //! nothing else in the reduced problem enforces that once the row and the
 //! variable's own place in the objective are both gone. So every
-//! elimination here also emits two new `<=` rows on `r` alone — derived
-//! by solving `lb_j <= (rhs - r)/coeff <= ub_j` for `r` — that the caller
-//! must fold into `G`/`h`. Skipping this (the first version of this
-//! module did) silently drops the eliminated variable's bounds: e.g.
+//! elimination here also emits up to two new `<=` rows on `r` alone —
+//! derived by solving `lb_j <= (rhs - r)/coeff <= ub_j` for `r` — that the
+//! caller must fold into `G`/`h`. Skipping this (the first version of
+//! this module did) silently drops the eliminated variable's bounds: e.g.
 //! `x0 + x1 = 5` with only `x0` eliminated left `x1` completely
 //! unconstrained above, since removing the row was the *only* place
 //! `x1`'s upper reach had been limited.
+//!
+//! A genuinely infinite `lb_j`/`ub_j` — a real free (or one-sided) source
+//! variable, not a finite sentinel — makes the corresponding derived row
+//! vacuous (`r <= +inf` constrains nothing) rather than merely very wide,
+//! so it is omitted outright instead of emitted with an infinite `h`: the
+//! classic "free column singleton" case (both bounds infinite) then costs
+//! *zero* replacement rows, letting a chain of these cascade through a
+//! network-shaped equality system the same way HiGHS's own presolve does.
 
 use crate::presolve::propagate;
 use crate::sparse::{csr_from_rows, Csr};
@@ -162,17 +170,26 @@ pub fn eliminate_singleton_equalities(n: usize, a: &Csr, b: &[f64], g: &Csr, h: 
         // x_j's own box bounds, translated onto `r = sum(terms)`:
         // lb_j <= (rhs - r)/coeff <= ub_j  <=>  rhs-hi <= r <= rhs-lo,
         // where lo/hi = min/max(coeff*lb_j, coeff*ub_j) handles either
-        // sign of `coeff` uniformly. Both bounds are finite — every
-        // variable has two finite bounds by this crate's own invariant —
-        // so both derived rows are always emitted, never conditional.
+        // sign of `coeff` uniformly. A side of `[lb_j, ub_j]` that was
+        // genuinely infinite carries through this arithmetic to an
+        // infinite `lo`/`hi` (finite `coeff` times `+/-inf` is exactly
+        // `+/-inf`, correctly signed) — the corresponding row would then
+        // be `r <= +inf`, true unconditionally, so it is skipped rather
+        // than emitted with that infinite `h` (see the module docs' "free
+        // column singleton" case above for why this is exactly the
+        // reduction that matters).
         let a_lb = coeff * lb[j];
         let a_ub = coeff * ub[j];
         let lo = a_lb.min(a_ub);
         let hi = a_lb.max(a_ub);
-        extra_g_rows.push(terms.clone());
-        extra_h.push(rhs - lo);
-        extra_g_rows.push(terms.iter().map(|&(k, v)| (k, -v)).collect());
-        extra_h.push(hi - rhs);
+        if lo.is_finite() {
+            extra_g_rows.push(terms.clone());
+            extra_h.push(rhs - lo);
+        }
+        if hi.is_finite() {
+            extra_g_rows.push(terms.iter().map(|&(k, v)| (k, -v)).collect());
+            extra_h.push(hi - rhs);
+        }
 
         substitutions.push(Substitution { var: j, terms, rhs, coeff });
         eliminated_rows[i] = true;

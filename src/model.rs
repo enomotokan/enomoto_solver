@@ -3,9 +3,23 @@
 //! called directly by the Python-side `Model` class in
 //! `python/enomoto_solver/model.py`. This is also the crate's *only*
 //! input-validation boundary — every other module trusts the data it's
-//! given (e.g. `simplex.rs` assumes variable bounds are already finite,
-//! because `add_variable` below is the only place `VariableData` gets
-//! constructed from outside input).
+//! given (e.g. `add_variable` below is the only place `VariableData` gets
+//! constructed from outside input, so it alone is responsible for
+//! rejecting NaN and `lb > ub`).
+//!
+//! A variable's bounds *may* be genuine `+/-inf` — `simplex.rs`'s presolve
+//! pipeline (`colsingleton`/`doubleton` in particular) can eliminate a
+//! truly free variable's row entirely, at zero replacement-row cost,
+//! exactly the way HiGHS's own free-column-singleton substitution does;
+//! substituting a finite `BIG_M` sentinel here instead — the old
+//! invariant this module used to enforce — would hide that from presolve
+//! and force it to re-materialize the variable's (fake) box bound as real
+//! rows on every such elimination, capping how far a chain of them can
+//! cascade. Only `simplex.rs`'s own `Tableau` (the dual-feasible crash, in
+//! particular) still needs every *surviving* variable to have two finite
+//! bounds — `build_std_form_presolved` substitutes `BIG_M` for any
+//! genuine infinity presolve didn't eliminate, but only *after* presolve
+//! has had its chance, not before.
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -59,11 +73,17 @@ impl PyModel {
     /// returns its index. A binary variable is just an integer variable
     /// bounded to [0, 1] by the caller (there is no dedicated binary
     /// vtype — Continuous and Integer are the only two kinds).
+    ///
+    /// `lb`/`ub` may be `+/-inf` (a genuinely free or one-sided-unbounded
+    /// variable, e.g. straight from an MPS `FR`/`MI`/`PL` bound) — see
+    /// this module's own docs for why that is no longer rejected here.
+    /// `NaN` and `lb > ub` are the only bound values actually invalid at
+    /// this boundary.
     fn add_variable(&mut self, vtype: &str, lb: f64, ub: f64) -> PyResult<usize> {
         let vt = VarType::parse(vtype)?;
-        if !lb.is_finite() || !ub.is_finite() {
+        if lb.is_nan() || ub.is_nan() {
             return Err(PyValueError::new_err(format!(
-                "invalid bounds: lower bound {lb} and upper bound {ub} must both be finite real numbers (infinite bounds are not supported)"
+                "invalid bounds: lower bound {lb} and upper bound {ub} must not be NaN"
             )));
         }
         if lb > ub {

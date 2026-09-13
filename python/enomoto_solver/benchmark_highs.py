@@ -2,17 +2,14 @@
 on the Netlib LP benchmark set, restricted to problems with at most
 `--max-vars` (default 3000) columns.
 
-Why this script exists: `simplex.rs`'s presolve pipeline requires every
-*structural* variable to have two finite bounds (`model.rs::add_variable`
-rejects `+/-inf` outright), while Netlib problems routinely leave a
-variable's upper bound at MPS's implicit `+inf`. To make a same-problem
-comparison possible at all, every infinite bound here is substituted with
-a finite `BIG_M` (see `_load_lp`'s docstring) before handing the problem to
-this crate — HiGHS, by contrast, is always run on the *unmodified* model
-read straight from the `.mps` file. Objective values are compared as a
-sanity check, not proof of equivalence: a problem whose true optimum
-actually leans on the substituted bound would disagree, and is reported as
-such rather than silently accepted.
+`model.rs::add_variable` now accepts genuine `+/-inf` bounds directly (see
+its own docs) — this crate's presolve pipeline substitutes a finite
+`BIG_M` internally only for whatever survives presolve without being
+eliminated outright (`simplex.rs::build_std_form_presolved`), not before
+presolve ever runs. So every Netlib problem here is handed to this crate
+exactly as HiGHS itself reads it from the `.mps` file, MPS `+inf` bounds
+included — no bound substitution happens in this script at all anymore.
+Objective values are still compared as a sanity check.
 
 Usage:
     python -m enomoto_solver.benchmark_highs [--max-vars 3000] [--timeout 60]
@@ -50,12 +47,6 @@ EMPS_C_URL = "https://www.netlib.org/lp/data/emps.c"
 # bundles that need their own generator program, not `emps`. Excluded
 # outright rather than attempted and reported as failures every run.
 NON_MPS_ENTRIES = {"minos", "stocfor3", "truss", "ascii", "changes", "readme"}
-
-# Substituted for any `+/-inf` variable bound so this crate's finite-bounds
-# invariant (see module docstring) is satisfiable — large enough that a
-# genuinely bounded Netlib optimum should sit nowhere near it, small enough
-# to stay well inside `f64` arithmetic's comfortable range.
-BIG_M = 1e7
 
 
 def _fetch(url: str, dest: Path, timeout: int = 30) -> None:
@@ -110,10 +101,6 @@ def _ensure_mps(name: str, cache_dir: Path, emps: Path) -> Path | None:
     return mps_path
 
 
-def _finite(v: float, fallback: float) -> float:
-    return fallback if math.isinf(v) else v
-
-
 def _load_lp(mps_path: Path):
     """Reads `mps_path` via HiGHS and returns `(highs_instance, lp)` — the
     `highs_instance` is reused as-is for the HiGHS-side timing below, so
@@ -130,18 +117,19 @@ def _build_our_model(lp) -> tuple[_core.PyModel, int, int]:
     """Builds this crate's `PyModel` directly from HiGHS's parsed LP data
     (bypassing the Python `Variable`/`Constraint` DSL, which would add
     per-term Python-object overhead irrelevant to the solver's own
-    runtime) — every `+/-inf` bound replaced by `BIG_M` per this module's
-    docstring. Returns `(model, n_constraints, nnz)`."""
+    runtime) — bounds passed through exactly as HiGHS parsed them,
+    `+/-inf` included (`add_variable` accepts real infinities now; see its
+    own docs). Returns `(model, n_constraints, nnz)`."""
     m = _core.PyModel()
     n = lp.num_col_
 
     for j in range(n):
-        lb = _finite(lp.col_lower_[j], -BIG_M)
-        ub = _finite(lp.col_upper_[j], BIG_M)
+        lb = float(lp.col_lower_[j])
+        ub = float(lp.col_upper_[j])
         if lb > ub:
             lb, ub = ub, lb
         is_int = len(lp.integrality_) > j and int(lp.integrality_[j]) != 0
-        m.add_variable("integer" if is_int else "continuous", float(lb), float(ub))
+        m.add_variable("integer" if is_int else "continuous", lb, ub)
 
     obj_coeffs = [(j, float(c)) for j, c in enumerate(lp.col_cost_) if c != 0.0]
     sense = "maximize" if "kMaximize" in str(lp.sense_) else "minimize"

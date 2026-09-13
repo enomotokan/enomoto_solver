@@ -1,0 +1,311 @@
+\documentclass[11pt,a4paper]{ltjsarticle}
+
+\usepackage{luatexja-fontspec}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage[margin=25mm]{geometry}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{longtable}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{fancyvrb}
+\usepackage{enumitem}
+\usepackage{seqsplit}
+
+\setmainjfont{Noto Serif JP}
+\setsansjfont{Noto Sans JP}
+\setmainfont{Latin Modern Roman}
+
+\hypersetup{colorlinks=true, linkcolor=blue!50!black, citecolor=blue!50!black, urlcolor=blue!50!black}
+
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\code}[1]{\texttt{#1}}
+\DefineVerbatimEnvironment{cppcode}{Verbatim}{fontsize=\small, frame=single, rulecolor=\color{gray!50}, xleftmargin=2mm, xrightmargin=2mm}
+
+\title{HiGHS 双対単体法（\code{HEkkDual}）の実装まとめ}
+\author{HiGHS \code{ERGO-Code/HiGHS} \quad \code{highs/simplex/HEkkDual*.\{h,cpp\}}}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+本稿は，オープンソース線形計画ソルバ HiGHS（\url{https://github.com/ERGO-Code/HiGHS}）の双対単体法実装（クラス \code{HEkkDual}／\code{HEkkDualRow}／\code{HEkkDualRHS}，データ本体 \code{HEkk}）について，実際のソースコード（\code{highs/simplex/} 以下，2026年時点の \code{master} ブランチ）を読みながら，用いられているデータ構造と各手続きの数式的な意味を整理する。ENOMOTO-Solver 独自の有界変数専用双対単体法（別稿参照）と異なり，HiGHS は自由変数・両側範囲制約行（ranged row）・退化に対する複数の対策（コスト摂動，双対フェーズ1の人工上下限，Devex/DSE 切り替え，特異基底からのバックトラック）を備えた汎用実装であり，随所でその違いにも触れる。
+\end{abstract}
+
+\tableofcontents
+
+\section{全体アーキテクチャ}
+
+HiGHS の単体法は 1 つの巨大関数ではなく，役割ごとに分割された複数のクラスが \code{HEkk}（LP・基底・作業配列を保持する「データ本体」）への参照を共有する形で構成されている。
+
+\begin{itemize}
+  \item \code{HEkk}（\code{HEkk.h/.cpp}）：LP本体（\code{lp\_}），基底（\code{basis\_}），作業配列一式（\code{info\_}, 型 \code{HighsSimplexInfo}），DSE重み（\code{dual\_edge\_weight\_}），基底の invertible 表現（\code{simplex\_nla\_}，LU分解＋更新）を保持する。主／双対単体法の両方から共有される。
+  \item \code{HEkkDual}（\code{HEkkDual.h/.cpp}，本稿の主対象）：双対単体法のアルゴリズム本体。\code{solve}/\code{solvePhase1}/\code{solvePhase2}/\code{iterate} など。
+  \item \code{HEkkDualRow}（\code{HEkkDualRow.h/.cpp}）：ピボット行の格納，CHUZC（進入列選択）と bound-flipping ratio test（BFRT）。
+  \item \code{HEkkDualRHS}（\code{HEkkDualRHS.h/.cpp}）：CHUZR（退出行選択）と一次実行不能性リストの保守。
+\end{itemize}
+
+ENOMOTO-Solver の実装が 1 ファイル・1 関数（\code{solve\_lp\_dual\_on}）に手続き全体を書き下しているのに対し，HiGHS は「行の選択」「列の選択と比検定」「基底とその更新」を別クラスへ明確に分離し，さらに主単体法・並列版（SIP/PAMI）・MIP のノード再最適化など多くの呼び出し文脈を 1 つの \code{HEkk} 上で共有できるように設計されている。本稿はシリアル版（\code{kSimplexStrategyDualPlain}，\code{iterate()}）の経路に絞って追う。
+
+\section{標準形とデータ構造}
+
+\subsection{LP の内部表現：範囲制約行と論理変数}
+
+HiGHS の LP は
+\[
+  \min_x c^\top x \qquad \text{s.t.} \qquad rl \le Ax \le ru, \qquad cl \le x \le cu
+\]
+という\emph{範囲制約（ranged row）}を直接扱える形で保持される（$rl,ru,cl,cu$ はそれぞれ無限大を許す）。単体法内部では各行 $i$ に対して\emph{論理変数（logical variable）} $x_{n+i}$ を追加し，
+\[
+  A_{\mathrm{ext}} = [A \mid I], \qquad A_{\mathrm{ext}} z = 0, \qquad z = (x, s)
+\]
+という\emph{斉次}な等式標準形にする。行の可動域は論理変数側の上下限に符号反転して押し込まれる（\code{HEkk::initialiseLpRowBound}）：
+\[
+  lb_{n+i} = -ru_i, \qquad ub_{n+i} = -rl_i .
+\]
+これにより，等式行（$rl_i=ru_i$），$\le$ 行（$rl_i=-\infty$），$\ge$ 行（$ru_i=\infty$），範囲行，自由行（両方無限大）のすべてが\emph{場合分けなしに同じデータ構造}で表現される。ENOMOTO-Solver がモデル側で行の種別（\code{RowSense::Eq/Le/Ge}）ごとにスラック係数・上下限を作り分け，かつ範囲制約を持たないのと対照的である。
+
+さらに構造変数 $x_j$ 自身も両側無限大（自由変数）を許す。これにより非基底変数の状態は「下限に張り付き」「上限に張り付き」に加えて「自由（非基底のまま値 $0$）」の 3 通りになり，双対実行可能性の定義や比検定に特別な扱い（後述の Freelist）が必要になる。ENOMOTO-Solver は変数を必ず両側有限に制限することでこの場合分けを最初から消している。
+
+\subsection{基底：3 本の配列 \code{SimplexBasis}}
+
+\begin{cppcode}
+struct SimplexBasis {
+  std::vector<HighsInt> basicIndex_;   // 行 i の基底変数番号
+  std::vector<int8_t>   nonbasicFlag_; // 0: 基底, 1: 非基底
+  std::vector<int8_t>   nonbasicMove_; // 非基底変数の「動く向き」
+};
+\end{cppcode}
+\code{basicIndex\_} は ENOMOTO-Solver の \code{Tableau::basis} に対応する（$\code{basicIndex\_}[i] = \mathcal B$ の $i$ 番目の変数）。\code{nonbasicFlag\_} は \code{basis\_pos} の代わりに「基底か否か」だけを $O(1)$ で持つブール配列であり，行番号自体は持たない（非基底変数がどの行にいるかという情報自体が不要なため）。\code{nonbasicMove\_} は ENOMOTO-Solver の \code{NbStatus::\{Lower,Upper\}} に対応するが，値は
+\[
+  \code{nonbasicMove\_}[j] \in \{\underbrace{-1}_{\text{上限}},\ \underbrace{0}_{\text{固定/自由}},\ \underbrace{+1}_{\text{下限}}\}
+\]
+の 3 値であり，固定変数（$lb_j=ub_j$）と自由変数がどちらも $0$ に落ちる点，「非基底なら値がどちらの限界か」を符号だけで表す点が異なる。
+
+\subsection{作業配列 \code{HighsSimplexInfo}（\code{SimplexStruct.h}）}
+
+\begin{cppcode}
+struct HighsSimplexInfo {
+  std::vector<double> workCost_, workDual_, workShift_;
+  std::vector<double> workLower_, workUpper_, workRange_, workValue_;
+  std::vector<double> baseLower_, baseUpper_, baseValue_;
+  ...
+};
+\end{cppcode}
+数式との対応：
+\[
+  \code{workCost\_} \leftrightarrow c,\qquad
+  \code{workDual\_} \leftrightarrow d\ (\text{被約費用}),\qquad
+  \code{workLower\_/workUpper\_} \leftrightarrow lb, ub \ (\text{全変数，列インデックス}).
+\]
+\code{workShift\_} は退化対策としてコストへ加えられた一時的なシフト量（後述の \code{shiftCost}/\code{shiftBack}）で，\code{workDual\_} 自体には常に \emph{シフト後の} 値が入っている。\code{workValue\_} は非基底変数の現在値 $x_j\ (j\in\mathcal N)$ で，ENOMOTO-Solver の \code{Tableau::x}（非基底成分）に対応する。
+
+特徴的なのは \code{baseLower\_/baseUpper\_/baseValue\_} の存在である。これは \emph{行インデックス} で見た基底変数の上下限・値
+\[
+  \code{baseLower\_}[i] = lb_{\code{basicIndex\_}[i]}, \quad
+  \code{baseUpper\_}[i] = ub_{\code{basicIndex\_}[i]}, \quad
+  \code{baseValue\_}[i] = x_{\code{basicIndex\_}[i]}
+\]
+を \code{basicIndex\_} 経由の間引きなしにキャッシュしたもので，CHUZR が反復のたびに $m$ 回行うであろう間接参照を消している。ENOMOTO-Solver の \code{Tableau::x} は列インデックス（全変数共通）1本で持つのに対し，HiGHS は「列インデックスで見た配列」と「行インデックスで見た基底専用キャッシュ」を意図的に二重化している。
+
+\subsection{DSE 重みと \code{HEkkDualRow}/\code{HEkkDualRHS} の作業領域}
+
+\begin{itemize}
+  \item \code{HEkk::dual\_edge\_weight\_}：行インデックスの双対 steepest edge 重み $w_i \approx \lVert B^{-\top}e_i\rVert^2$（ENOMOTO-Solver \code{DseState::w} と同じ量）。Devex 使用時は \code{devex\_index\_} に切り替わる。
+  \item \code{HEkkDualRow::packIndex/packValue}：ピボット行を「構造変数側 \code{row\_ap}」と「論理変数側 \code{row\_ep}」の\emph{両方}をオフセットで連結して 1 本にまとめた疎表現（\code{chooseMakepack}）。ENOMOTO-Solver の \code{a\_p}/\code{touched\_cols} に相当するが，論理変数の列を「$\rho_p$ そのもの」として物理的に連結する点が異なる（HiGHS の論理変数の列は $e_i$ なので $\rho_p^\top e_i=\rho_{p,i}$，つまり \code{row\_ep} の値そのものになる）。
+  \item \code{HEkkDualRow::workData/workGroup}：BFRT 候補 $(j, |\alpha_j|)$ の配列と，退化候補をまとめる「グループ」境界インデックス（後述）。
+  \item \code{HEkkDualRow::freeList}：非基底の自由変数の集合（\code{std::set}）。CHUZCの間だけ \code{nonbasicMove\_} を一時的に符号確定させ（\code{createFreemove}），計算が終われば $0$ に戻す（\code{deleteFreemove}）。
+  \item \code{HEkkDualRHS::work\_infeasibility/workIndex/workMark/workCutoff}：CHUZR用のハイパースパース候補リストとその足切り値（後述）。
+\end{itemize}
+
+\section{フェーズ1／フェーズ2}
+
+\subsection{開始前の判定：\code{HEkkDual::solve}}
+
+\code{solve} はまず摂動なしの費用で \code{computeDual} を呼び，双対実行可能かどうかを見る。実行可能または「わずかな違反のみ」ならフェーズ2を強制する（\code{force\_phase2}）。これは ENOMOTO-Solver の \code{crash\_dual\_feasible} が\emph{常に無条件で}双対実行可能な初期基底を作れるのと対照的で，HiGHS は自由変数・すでに非基底な変数など任意の初期基底から出発しうるため，双対実行可能性が保証されない一般の場合に備えてフェーズ1が要る。
+
+\subsection{フェーズ1：人工上下限による「双対不能性の一次不能性への変換」}
+
+双対実行可能でない場合，\code{HEkk::initialiseBound(kDual, kSolvePhase1)} が非基底変数ごとに\emph{一時的な人工上下限}を設定する（実装は \code{HEkk.cpp}）：
+\[
+  (lb_j, ub_j) \leftarrow
+  \begin{cases}
+    (-1000,\ 1000) & lb_j=-\infty \text{ かつ } ub_j=\infty\ (\text{自由})\\
+    (-1,\ 0) & lb_j = -\infty\ (\text{上限のみ})\\
+    (0,\ 1) & ub_j = \infty\ (\text{下限のみ})\\
+    (0,\ 0) & \text{両側有限（箱型/固定）}
+  \end{cases}
+\]
+このもとで通常のフェーズ2と\emph{同じ}反復（\code{iterate()}）を回す。人工上下限は「その変数の現在の被約費用が双対実行可能な符号ならその境界での値が $0$，そうでなければ実行不能な向きへ $\pm 1$（自由変数は $\pm 1000$）」となるように選ばれているため，このフェーズ1の（一次）目的関数値
+\[
+  z_1 = \sum_{j\in\mathcal N} d_j\, x_j
+\]
+は「双対実行不能量の総和の符号反転」に一致する（\code{solvePhase1} 冒頭のコメント）。したがって $z_1=0$ に達すればフェーズ2へ，非零のまま最適化が止まれば真の双対不能性（\code{assessPhase1Optimality}）と判定する。
+
+ENOMOTO-Solver はこの種のフェーズ1を持たない：全変数が両側有限という前提のもとで \code{crash\_dual\_feasible} が常に無条件成功するため，最初から「本物の」上下限のまま双対実行可能な基底を構成でき，あとはコスト摂動だけで退化に備えれば十分だからである。HiGHS のフェーズ1は，むしろ\emph{主単体法のフェーズ1と双対な発想}（実行不能性を人工的な目的関数の最小化に変換する）を双対法側に適用したものと言える。
+
+\subsection{コスト摂動：\code{HEkk::initialiseCost}}
+
+退化対策として，フェーズ2（および必要ならフェーズ1）に入る前に費用ベクトルを摂動する。
+\[
+  \overline c = \begin{cases}\max_j|c_j|^{1/4} & \max_j|c_j|>100\\ \max_j|c_j| & \text{それ以外}\end{cases},
+  \qquad
+  \code{base} = \mu \cdot 5\times10^{-7}\cdot \overline c
+\]
+（$\mu=$\code{dual\_simplex\_cost\_perturbation\_multiplier}）。「箱型」列の割合が $1\%$ 未満なら $\overline c \leftarrow \min(\overline c, 1)$ とする点も含め，ENOMOTO-Solver の \code{perturb\_costs} とほぼ同じ設計（実装コメントにも HiGHS を参考にした旨が明記されている）。摂動量は列ごとに
+\[
+  \code{xpert}_j = (1+r_j)(|c_j|+1)\cdot\code{base}, \qquad r_j \in [0,1)\ (\text{擬似乱数})
+\]
+で，自由列・固定列は摂動なし，片側有限列はその有限でない側へ，両側有限列は自分の費用の符号方向へ加える。加えて論理変数（行）側にも極小な摂動 $\mu \cdot 10^{-12}$ を独立に与える点は ENOMOTO-Solver にはない追加要素である。
+
+\section{メインループ：\code{HEkkDual::iterate}}
+
+1 反復の呼び出し順序は次の通り（各メソッドは冒頭で \code{if (rebuild\_reason) return;} を持ち，途中で異常を検知すると即座に抜けて \code{rebuild()} に戻る設計）。
+\begin{align*}
+\code{chooseRow} \to \code{chooseColumn} \to \code{updateFtranBFRT} \to \code{updateFtran} \to \code{updateFtranDSE} \\
+{}\to \code{updateVerify} \to \code{updateDual} \to \code{updatePrimal} \to \code{updatePivots}
+\end{align*}
+
+\subsection{CHUZR：\code{chooseRow} と \code{HEkkDualRHS::chooseNormal}}
+
+一次実行不能な基底行の中から，DSE 重みで正規化した「見込み値（merit）」
+\[
+  \mathrm{merit}_i = \frac{\text{infeas}_i}{w_i}, \qquad \text{infeas}_i = \max(lb_{\code{basicIndex\_}[i]}-x_i,\ x_i-ub_{\code{basicIndex\_}[i]},\ 0)
+\]
+を最大化する行を選ぶ点は ENOMOTO-Solver の \code{chuzr} と同じ発想である。ただし実装には次の違いがある。
+
+\begin{itemize}
+  \item \textbf{ハイパースパース候補リストに足切り値を導入}：\code{createInfeasList} は，実行不能行数が多い場合，\code{nth\_element} で「上位 $k$ 件相当」の merit のしきい値 \code{workCutoff} を近似的に求め，それ未満の行を候補リストから除外する（完全なソートを避けた近似的な絞り込み）。以後 \code{updateInfeasList} は \code{work\_infeasibility}$_i$ $>$ \code{workCutoff}$\cdot w_i$ を満たす行だけをリストに追加する。
+  \item \textbf{走査開始点をランダム化}：\code{chooseNormal} は候補リストの中央から始めて 2 区間に分けて走査する（\code{randomStart} 起点，2 セクション）。これは「同点のとき常に先頭が勝つ」ことで生じる反復パターンの偏り（ENOMOTO-Solver では行番号を第二キーにした\emph{決定的}なタイブレークで対処）を，決定論を捨てて乱数で崩す設計である（ただし乱数列自体は再現可能なシード付き）。
+  \item \textbf{DSE 重みの事後検証と再選択}：選んだ行についていったん BTRAN で $\rho_p=B^{-\top}e_p$ を計算し，そこから「真の」重み $\lVert\rho_p\rVert^2$ を計算し直して，増分更新してきた重みと比較する（\code{acceptDualSteepestEdgeWeight}）。更新値が真の値の $\code{kAcceptDseWeightThreshold}$ 倍未満なら\emph{その行を棄却して再度 CHUZR からやり直す}。ENOMOTO-Solver は増分更新した重みを無条件に信頼する。
+\end{itemize}
+
+行 $p$ が確定すると，退出変数 $\code{variable\_out}=\code{basicIndex\_}[p]$，退出方向 $\code{move\_out}\in\{-1,+1\}$（下限割れなら $-1$，上限超過なら $+1$），及び $\code{delta\_primal} = x_{\code{variable\_out}} - \{lb\text{ or }ub\}$ が記録される。
+
+\subsection{PRICE と CHUZC：\code{chooseColumn} と \code{HEkkDualRow}}
+
+\paragraph{PRICE.} \code{ekk\_instance\_.tableauRowPrice} が行毎に格納された非基底の行列（\code{ar\_matrix\_}，構造変数の行持ち表現）を使って
+\[
+  a_p^\top = \rho_p^\top A
+\]
+を計算する（\code{row\_ap}）。ENOMOTO-Solver の PRICE（$\rho_p$ の非零行だけ走査）と同じ疎行列積だが，HiGHS は列持ち \code{cols} ではなく専用の行持ち疎行列 \code{ar\_matrix\_} を保守している。
+
+\paragraph{パッキングと自由変数の一時固定.} \code{dualRow.chooseMakepack} が \code{row\_ap}（構造変数）と \code{row\_ep}（論理変数，オフセット \code{num\_col\_}）を 1 本の疎配列 \code{(packIndex, packValue)} にまとめる。\code{createFreemove} は非基底の自由変数 $j\in\code{freeList}$ について，このピボット行に対する成分 $\alpha_j = a_p^\top A_j$ の符号から \code{nonbasicMove\_}$[j]$ を一時的に確定させ，自由変数の被約費用がこの反復で「実行不能」と誤判定されるのを防ぐ。ENOMOTO-Solver には自由変数が存在しないためこの仕組み自体が不要である。
+
+\paragraph{choosePossible（一次フィルタ）.} 退出方向 $\code{move\_out}$ と各候補の \code{nonbasicMove\_} から適格性を判定し（ENOMOTO-Solver の chuzc1 の符号条件と同じ考え方），粗い上界
+\[
+  \code{workTheta} = \min_j \frac{d_j\cdot\code{nonbasicMove\_}[j] + T_d}{|\alpha_j|}
+\]
+を一次候補全体から見積もる。
+
+\paragraph{chooseFinal（BFRT 本体）.} ENOMOTO-Solver が候補全体を \emph{比の昇順で完全にソート／ヒープ化}するのに対し，HiGHS は次の 3 段階で「全件ソートを避けた」比検定を行う。
+
+\begin{enumerate}
+  \item \textbf{大まかな足切り}：\code{selectTheta} を \code{workTheta} の 10 倍から始め，$10$ 倍ずつ拡大しながら，$\text{tight}_j := \code{nonbasicMove\_}[j]\cdot d_j \le \alpha_j\cdot\code{selectTheta}$ を満たす候補だけを残す。累積
+    \[
+      \code{totalChange} = \sum_{j\ \text{残存}} \code{workRange}_j\cdot\alpha_j
+    \]
+    が退出変数の必要移動量 $\code{totalDelta}=|\code{delta\_primal}|$ 以上になるか，候補を使い切ったら打ち切る。
+  \item \textbf{グループ化（\code{chooseFinalWorkGroupQuad}）}：残った候補を，$\code{selectTheta}$ を「まだ厳しくない候補の中で最も近い比」へ逐次更新しながら「同じ \code{selectTheta} 帯に入る」候補ごとにグループへ束ねる（\code{workGroup} が各グループの境界）。ENOMOTO-Solver の「昇順に 1 件ずつ確定しながら退出変数の目標値に達するまで歩く」処理と目的は同じだが，同点（退化）候補を 1 グループにまとめて扱う点が異なる。\code{totalChange} が \code{totalDelta} に達したグループが，退出変数をちょうど目標値まで運ぶのに必要な最後のグループ（\code{breakGroup}）である。
+  \item \textbf{大ピボット選択（\code{chooseFinalLargeAlpha}，long-step 比検定）}：\code{breakGroup} から\emph{番号の大きい方（比の大きい方）へ逆向きに}グループを走査し，各グループ内の最大ピボット $|\alpha|$ が
+    \[
+      |\alpha| > \code{finalCompare} := \min(0.1\cdot\max_j|\alpha_j|,\ 1)
+    \]
+    を満たす最初のグループを見つけたら，そのグループ内の最大ピボットの候補を真の進入列 $q$ として確定する。見つからなければ 1 つ手前のグループへ進む。これは ENOMOTO-Solver の「\code{stop\_idx} から\emph{後方}へ \code{HARRIS\_RATIO\_TOL} 幅の窓を探して最大ピボットを選ぶ」処理と数値的安定性の狙いは同じだが，固定の許容誤差幅ではなく「グループ単位・相対10\%」という基準を使う点が異なる。
+\end{enumerate}
+確定した $q=\code{workPivot}$，$\alpha_{\mathrm{row}}=\code{workAlpha}$，双対ステップ $\code{theta\_dual}=\code{workTheta}=d_q/\alpha_{\mathrm{row}}$ が \code{HEkkDual} 側に返される。\code{breakGroup} より手前の（=より小さい比の）候補群は全件フリップ対象として \code{workData} に積み直され（ステップ4，\code{workData}$_i = (\text{col}, \code{nonbasicMove\_}\cdot\code{workRange})$），これが後続の \code{updateFlip} で実際に反転される。
+
+\subsection{FTRAN 群：\code{updateFtranBFRT}／\code{updateFtran}／\code{updateFtranDSE}}
+
+\begin{align*}
+  \text{BFRT 合成列：} &\quad B\, \code{col\_BFRT} = \sum_{j:\text{flip}} A_j\cdot(\code{nonbasicMove\_}_j\cdot\code{workRange}_j)\\
+  &\qquad\qquad (\code{dualRow.updateFlip} + \code{ftran})\\
+  \text{進入列：} &\quad B\,\code{col\_aq} = A_q \qquad (\code{alpha\_col} = \code{col\_aq}[p])\\
+  \text{DSE交差項：} &\quad B\,\tau = \rho_p \qquad (\text{\code{updateFtranDSE}，DSE 使用時のみ})
+\end{align*}
+ENOMOTO-Solver の \code{combined\_alpha\_buf}／\code{alpha\_buf}／\code{tau\_buf} にそれぞれ対応する。HiGHS は \code{updateFtranBFRT} を「\code{dualRow.workCount==0} なら FTRAN 自体をスキップする」ようガードしており，フリップが 1 件も無い（非退化な）反復ではこのコストがゼロになる。
+
+\subsection{数値検証：\code{updateVerify}}
+
+進入列を列方向 FTRAN で求めたピボット $\code{alpha\_col}$ と，PRICE（行方向）で求めたピボット $\code{alpha\_row}$ を比較し，相対誤差が大きければ \code{rebuild\_reason = kRebuildReasonPossiblySingularBasis} を立てて即座に再分解へ回す。ENOMOTO-Solver には行・列2通りで同じピボットを求め相互検証するステップはなく（FTRAN一度きり），代わりに一定間隔ごとの残差ノルムチェック（トリガー1）で基底のドリフトを検知する。
+
+\subsection{双対値の更新：\code{updateDual}}
+
+\code{dualRow.updateDual(theta\_dual)} が，パックされたピボット行の\emph{全成分}に対して
+\[
+  d_j \leftarrow d_j - \code{theta\_dual}\cdot a_{p,j} \qquad (j \in \text{パック済み列})
+\]
+を適用する。これは ENOMOTO-Solver の update-dual と同一の閉形式である。\code{theta\_dual}$=0$（退出変数がすでに退化的にちょうど境界にある場合）のときは全列更新をスキップし，進入変数のみ \code{shiftCost} で一時的なコストシフトを与えて \code{workDual}$[q]=0$ を保つ（本質的に $d_q$ をシフトでゼロに固定する簡便策）。基底を出る変数については更新後に \code{shiftBack} で以前のシフトを取り除く。
+
+\subsection{主変数と DSE/Devex 重みの更新：\code{updatePrimal}}
+
+BFRT フリップ分（\code{col\_BFRT}）をまず \code{dualRHS.updatePrimal} で反映し，続いて主ステップ幅
+\[
+  \code{theta\_primal} = \frac{x_{\code{variable\_out}} - \{lb\text{ or }ub\}}{\code{alpha\_col}}
+\]
+で \code{col\_aq} 分を反映する（ENOMOTO-Solver の $\theta_q$ と同一の式）。DSE 使用時は
+\[
+  w_i \leftarrow w_i + \alpha_i\Bigl(\underbrace{\tfrac{w_p}{\alpha_p^2}}_{\text{新しい }w_q}\cdot\alpha_i \;+\; \underbrace{\left(-\tfrac{2}{\alpha_p}\right)}_{\code{Kai}}\cdot\tau_i\Bigr)
+  \;=\; w_i - 2\Bigl(\tfrac{\alpha_i}{\alpha_p}\Bigr)\tau_i + \Bigl(\tfrac{\alpha_i}{\alpha_p}\Bigr)^{2} w_p
+\]
+という更新（\code{HEkk::updateDualSteepestEdgeWeights}）を行う——最右辺の形は ENOMOTO-Solver の \code{DseState::update\_after\_pivot} の式と厳密に一致しており，両者が同じ Forrest–Goldfarb 型階数1更新公式に依拠していることを裏付ける。Devex 使用時は \code{updateDualDevexWeights} が同様の役割を近似的な重み（厳密な steepest edge ではなく参照集合ベースの近似）で行う。
+
+\subsection{基底交換：\code{updatePivots}}
+
+\code{ekk\_instance\_.updatePivots} が \code{nonbasicFlag\_}/\code{basicIndex\_}/\code{nonbasicMove\_} を書き換え，\code{updateFactor} が invertible 表現（HiGHS 自身の LU + eta 更新エンジン \code{HFactor}／\code{HSimplexNla}）を更新し，\code{updateMatrix} が次回 PRICE 用の行持ち非基底行列を更新する。\code{dualRow.deleteFreelist(variable\_in)} が進入変数を自由変数リストから除く。最後に \code{dualRHS.updatePivots} が退出行の新しい基底値とその一次実行不能性を書き込む。
+
+\section{Devex と DSE の切り替え，および安定化機構のまとめ}
+
+HiGHS は既定で DSE を使うが，反復が進んで重み誤差が蓄積した場合（\code{newDevexFramework}）や，コスト構造上 DSE が割に合わないと判断された場合には Devex 法へ切り替える機構（\code{interpretDualEdgeWeightStrategy}, \code{possiblyUseLiDualSteepestEdge}）を持つ。ENOMOTO-Solver は DSE 固定である。
+
+\begin{longtable}{@{}p{0.30\linewidth}p{0.33\linewidth}p{0.31\linewidth}@{}}
+\toprule
+退化・数値安定化の課題 & HiGHS (\code{HEkkDual}) & ENOMOTO-Solver (\code{simplex.rs}) \\
+\midrule
+\endfirsthead
+\toprule
+退化・数値安定化の課題 & HiGHS (\code{HEkkDual}) & ENOMOTO-Solver \\
+\midrule
+\endhead
+初期基底が双対不能なとき & 人工上下限によるフェーズ1（本物の一次単体法反復） & 発生しない（両側有限の前提で crash が常に成功） \\
+被約費用の退化（ties） & コスト摂動（列ごとの向き付き摂動） & 同種のコスト摂動（HiGHSを参考に実装） \\
+BFRT の数値安定性 & グループ化 + long-step large-alpha 選択 & 昇順ヒープ + 後方 Harris 窓探索 \\
+CHUZR の退化 & 走査開始点のランダム化 & 行番号によるタイブレーク（決定的） \\
+DSE 重みの誤差蓄積 & 事後検証つき再選択 + Devex へのフォールバック & 検証なし（単純増分更新のみ） \\
+ピボットの数値検証 & 行/列 2 通りの計算値を比較（\code{updateVerify}） & 残差ノルム/最小ピボット/eta蓄積の3トリガー \\
+基底特異への対処 & 直近の非特異基底へバックトラック & 主単体法へフォールバック \\
+最後の手段の反サイクリング & （フェーズ1の反復上限＋摂動） & Bland の最小添字規則 \\
+\bottomrule
+\end{longtable}
+
+\section{データ構造のまとめ}
+
+\begin{longtable}{@{}p{0.40\linewidth}p{0.32\linewidth}p{0.22\linewidth}@{}}
+\toprule
+クラス／フィールド & 数式上の対象 & 備考 \\
+\midrule
+\endfirsthead
+\toprule
+クラス／フィールド & 数式上の対象 & 備考 \\
+\midrule
+\endhead
+{\small\seqsplit{SimplexBasis\{basicIndex\_,nonbasicFlag\_,nonbasicMove\_\}}} & $\mathcal B$，所属フラグ，非基底の張り付き方向（自由/固定含む3値） & 3 配列に分割 \\
+{\small\seqsplit{HighsSimplexInfo::\{workCost\_,workDual\_,workShift\_\}}} & $c,\ d,\ \text{一時コストシフト}$ & \code{workDual\_} は常にシフト後 \\
+{\small\seqsplit{HighsSimplexInfo::\{workLower\_,workUpper\_,workValue\_\}}} & $lb, ub$（全変数），非基底値 $x_j$ & 列インデックス \\
+{\small\seqsplit{HighsSimplexInfo::\{baseLower\_,baseUpper\_,baseValue\_\}}} & 基底変数の $lb,ub,x$ & 行インデックスへの再キャッシュ \\
+\code{HEkk::dual\_edge\_weight\_} & $w_i \approx \lVert B^{-\top}e_i\rVert^2$ & Devex時は devex\_index\_ \\
+{\small\seqsplit{HEkkDualRow::\{packIndex,packValue\}}} & ピボット行 $a_p$（構造+論理変数を連結） & PRICE の出力 \\
+{\small\seqsplit{HEkkDualRow::\{workData,workGroup\}}} & BFRT 候補と退化グループ境界 & グループ化 BFRT \\
+\code{HEkkDualRow::freeList} & 非基底の自由変数集合 & CHUZC中のみ move 確定 \\
+{\small\seqsplit{HEkkDualRHS::\{work\_infeasibility,workIndex,workCutoff\}}} & 一次実行不能行の候補集合と足切り値 & ハイパースパース CHUZR \\
+\bottomrule
+\end{longtable}
+
+\section{まとめ}
+
+HiGHS の \code{HEkkDual} は，ENOMOTO-Solver と同じ「BTRAN → PRICE → CHUZR/CHUZC → FTRAN → 基底交換」という双対単体法の骨格を共有しつつ，(1) 論理変数を用いた斉次標準形により範囲制約・自由変数を場合分けなしに表現し，(2) 双対不能な初期基底からでも人工上下限によるフェーズ1で出発できるようにし，(3) BFRT をソートではなくグループ化と long-step large-alpha 選択で行うことで大規模問題での比検定コストを抑え，(4) DSE 重みの事後検証と Devex へのフォールバックで重み誤差の蓄積に備え，(5) 行・列2通りのピボット値比較と特異基底からのバックトラックで数値的健全性を担保する，という，より汎用かつ多層的な安定化を備えた実装になっている。ENOMOTO-Solver の実装は「全変数が両側有限」という強い前提を活かしてこれらの多くを単純化・省略した設計であり，両者を比較することで，どの安定化機構が「有界変数のみ」という前提のもとでは不要になるかが明確になる。
+
+\end{document}

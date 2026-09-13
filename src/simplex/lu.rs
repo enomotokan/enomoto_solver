@@ -481,9 +481,45 @@ pub struct LuFactors {
     pub m: usize,
     /// `l_col[s]`: `(row_step, multiplier)` pairs — the sub-diagonal
     /// entries of `L`'s column `s`.
+    ///
+    /// **Flattening this into a [`FixedRows`] (one flat `(index, value)`
+    /// buffer plus offsets — the same layout `simplex.rs`'s `StdForm` uses
+    /// for the frozen coefficient matrix, on the same reasoning: `L` never
+    /// changes once a refactorization builds it) was implemented and
+    /// measured, then reverted.** The theory was sound (`L` really is read
+    /// every FTRAN/BTRAN's `L`-stage for the rest of that basis's life and
+    /// never mutated again, so a per-row heap allocation plus pointer
+    /// indirection looked like pure waste), but a controlled A/B (same
+    /// build, only this field's representation toggled, 3 runs per problem)
+    /// showed a **consistent small regression**, not a win: `scsd8` +2.1%,
+    /// `25fv47` +1.8%, `stocfor2` +4.0%, `fit1p` +3.2%, with `degen3`/
+    /// `pilotnov` flat within run-to-run noise — zero problems improved.
+    /// Two likely reasons, neither of which the `Vec<Vec<...>>` form
+    /// suffers from: (1) `l_col[s]` in real Netlib bases is typically very
+    /// short (Markowitz elimination is specifically choosing pivots to keep
+    /// it that way), so the "many small allocations" cost this was meant to
+    /// remove was never that large to begin with, while accessing a
+    /// `FixedRows` row still costs *two* offset reads (`offsets[i]`,
+    /// `offsets[i+1]`) before the slice is even known, against `Vec<Vec>`'s
+    /// single pointer hop to an already-known `(ptr, len)` pair; (2) the
+    /// conversion itself doesn't avoid building the `m` small per-column
+    /// `Vec`s first (both `factorize` and `factorize_dense_faer` still
+    /// populate a `Vec<Vec<...>>` while walking `L`'s entries in whatever
+    /// order they're produced) — flattening just added one more `O(nnz)`
+    /// copy on top afterward, at construction time, without ever removing
+    /// the allocations it was trying to avoid. A version that builds the
+    /// flat buffer directly (computing offsets in one pass, filling
+    /// `entries` in a second, the way `FixedRows::from_transpose` already
+    /// does for a *transposed* build) might still be worth trying — this
+    /// attempt just never built that version — but plain
+    /// `Vec<Vec<(usize, f64)>>` is what's actually measured fastest so far.
     pub l_col: Vec<Vec<(usize, f64)>>,
     /// `u_row[s]`: `(col_step, value)` pairs, `col_step >= s` (including
     /// the diagonal at `col_step == s`) — the entries of `U`'s row `s`.
+    /// Unlike `l_col`, this is read exactly once per refactorization (by
+    /// `FtLu::new`, to seed `u_seq`) and never again, so it stays a plain
+    /// `Vec<Vec<...>>` — flattening it would cost the same construction
+    /// work for no repeated-read benefit.
     pub u_row: Vec<Vec<(usize, f64)>>,
     pub row_perm: Vec<usize>,
     pub col_perm: Vec<usize>,
@@ -547,7 +583,178 @@ pub struct LuFactors {
 /// that cheap peeling isn't reliably worth its own cost. Fully reverted;
 /// see the project history around this doc comment's own commit for the
 /// full numbers if revisiting.
+/// Input whose nonzero density exceeds this fraction of `m^2` skips
+/// Markowitz elimination entirely in favor of [`factorize_dense_faer`]'s
+/// dense partial-pivoting LU (via the `faer` crate). Markowitz's whole
+/// point is to *minimize fill-in*; a matrix already this dense has none
+/// left to save, so its bucket/degree bookkeeping (`col_rows`,
+/// `col_buckets`/`row_buckets`, the `BTreeMap`-per-row active submatrix)
+/// is pure overhead at that point — confirmed on a synthetic dense LP
+/// (Netlib has none dense enough to exercise this at all): `factorize`
+/// dominated wall time (95-98%, repeated every few dozen `try_update`
+/// calls since a dense basis's eta fill crosses `FT_BUMP_LIMIT_FACTOR *
+/// m` almost immediately) while this file's own FTRAN-side dense
+/// optimizations (`OffDiag::Dense`, `FtLu::should_use_dense_solve`)
+/// together accounted for under 1% of the same wall time — i.e. the eta
+/// chain was never the bottleneck for a dense basis, the cold
+/// factorization was. `0.25` is a first-pass threshold, not yet tuned
+/// against a real dense-problem benchmark (Netlib has none).
+const DENSE_INPUT_FRACTION: f64 = 0.25;
+
+fn is_dense_input(m: usize, rows_in: &[Vec<(usize, f64)>]) -> bool {
+    if m == 0 {
+        return false;
+    }
+    let nnz: usize = rows_in.iter().map(|r| r.len()).sum();
+    nnz as f64 > DENSE_INPUT_FRACTION * (m as f64) * (m as f64)
+}
+
+/// Dense partial-pivoting LU via `faer` (`PartialPivLu`, `PA = LU`, row
+/// pivoting only — so `col_perm` here is always the identity). Converts
+/// `faer`'s dense `Mat<f64>` factors into this module's existing
+/// `LuFactors` representation so every downstream consumer (`FtLu`,
+/// `l_solve_into`/`u_solve_into`, the Forrest-Tomlin update machinery) is
+/// completely unaware of which path produced its `LuFactors` — see
+/// [`DENSE_INPUT_FRACTION`]'s own docs for why this exists instead of
+/// running Markowitz on an already-dense matrix.
+fn factorize_dense_faer(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuFactors> {
+    let mut a = faer::Mat::<f64>::zeros(m, m);
+    for (i, row) in rows_in.iter().enumerate() {
+        for &(j, v) in row {
+            a[(i, j)] += v;
+        }
+    }
+
+    let lu = faer::linalg::solvers::PartialPivLu::new(a.as_ref());
+    let l = lu.compute_l();
+    let u = lu.compute_u();
+    let perm = lu.row_permutation();
+    let (fwd, _inv) = perm.arrays();
+    // `PA = LU`: row `step` of the permuted matrix `PA` is original row
+    // `fwd[step]` — exactly this module's own `row_perm[step]` meaning
+    // (`l_solve_into` permutes `rhs` the same way: `z[s] = rhs[row_perm[s]]`).
+    let row_perm: Vec<usize> = fwd.iter().map(|&idx| usize::from(idx)).collect();
+    let col_perm: Vec<usize> = (0..m).collect();
+
+    for step in 0..m {
+        if u[(step, step)] == 0.0 {
+            return None;
+        }
+    }
+
+    let mut row_perm_inv = vec![0usize; m];
+    let mut col_perm_inv = vec![0usize; m];
+    for step in 0..m {
+        row_perm_inv[row_perm[step]] = step;
+        col_perm_inv[col_perm[step]] = step;
+    }
+
+    let mut l_col_rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
+    for step in 0..m {
+        for row_step in (step + 1)..m {
+            let v = l[(row_step, step)];
+            if v != 0.0 {
+                l_col_rows[step].push((row_step, v));
+            }
+        }
+    }
+    let l_col = l_col_rows;
+    let mut u_row: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
+    for step in 0..m {
+        for col_step in step..m {
+            let v = u[(step, col_step)];
+            if v != 0.0 {
+                u_row[step].push((col_step, v));
+            }
+        }
+    }
+
+    Some(LuFactors { m, l_col, u_row, row_perm, col_perm, col_perm_inv, row_perm_inv })
+}
+
+/// Throwaway diagnostic (`ENOMOTO_DEBUG_BLOCK_SIZES`), not wired into any
+/// production path: measures what block-size distribution a Dulmage-Mendelsohn
+/// SCC decomposition of *this* refactorization's basis matrix would actually
+/// have, to check a specific hypothesis about the previously-reverted
+/// block-triangularized `factorize` (see this function's own doc comment) —
+/// namely, whether the blocks it would find are mostly tiny (say <=10 or
+/// <=50 rows), which would matter for a proposal to special-case small
+/// blocks with a dense/product-form solve instead of the general sparse
+/// Forrest-Tomlin machinery.
+fn debug_print_block_sizes(m: usize, rows_in: &[Vec<(usize, f64)>]) {
+    let adj: Vec<Vec<usize>> = rows_in.iter().map(|row| row.iter().map(|&(j, _)| j).collect()).collect();
+    let __t0 = std::time::Instant::now();
+    let decomp = crate::graph::dulmage_mendelsohn_blocks_topological(&adj, m);
+    let decomp_us = __t0.elapsed().as_micros();
+    match decomp {
+        None => eprintln!("BLOCK_SIZES m={m} no-perfect-matching decomp_us={decomp_us}"),
+        Some((blocks, _)) => {
+            let mut sizes: Vec<usize> = blocks.iter().map(|b| b.len()).collect();
+            sizes.sort_unstable();
+            let n_blocks = sizes.len();
+            let le10 = sizes.iter().filter(|&&s| s <= 10).count();
+            let le50 = sizes.iter().filter(|&&s| s <= 50).count();
+            let rows_le10: usize = sizes.iter().filter(|&&s| s <= 10).sum();
+            let rows_le50: usize = sizes.iter().filter(|&&s| s <= 50).sum();
+            let max = sizes.last().copied().unwrap_or(0);
+            eprintln!(
+                "BLOCK_SIZES m={m} n_blocks={n_blocks} max_block={max} blocks_le10={le10} blocks_le50={le50} rows_in_blocks_le10={rows_le10}({:.1}%) rows_in_blocks_le50={rows_le50}({:.1}%) decomp_us={decomp_us}",
+                100.0 * rows_le10 as f64 / m as f64,
+                100.0 * rows_le50 as f64 / m as f64,
+            );
+        }
+    }
+}
+
+/// **A second, "peel trivial pivots then Dulmage-Mendelsohn-decompose only
+/// the remaining kernel" variant of block triangularization was also
+/// implemented, tested, and measured — then reverted.** This directly
+/// followed up the first attempt documented below, on the hypothesis that
+/// peeling first (mirroring HiGHS's own `buildSimple()`/`buildKernel()`
+/// split) would fix that attempt's "pays matching+SCC cost on every
+/// refactorization regardless of payoff" problem by shrinking the kernel
+/// matching+SCC actually runs on. It did not: full 73-problem Netlib A/B
+/// showed a **net ~37% aggregate regression** — far worse than the first
+/// attempt's ~4%, and a regression on `fit1p` specifically (+80%), the
+/// exact instance this was meant to speed up. Root cause, confirmed by
+/// direct instrumentation: `fit1p`'s kernel (post-peel) is a single
+/// irreducible ~20-row SCC block every time, so the decomposition gate
+/// *always* rejects it and falls back to a from-scratch
+/// `factorize_flat_markowitz` call — meaning the (redundant) peel work is
+/// paid twice, for zero benefit, every refactorization. Worse, the
+/// underlying premise turned out wrong: `fit1p`'s real cost was never a
+/// large interleaved non-trivial block in the first place. `eliminate`'s
+/// cost is `O(col_rows[pj].len())` (the pivot *column*'s remaining active
+/// rows) times the pivot row's own snapshot size — a pivot with Markowitz
+/// score exactly `0` (row degree `1`, the "trivial" case `PROF_TRIVIAL_STEPS`
+/// counts) is only free when its *column*'s degree is also small; a
+/// degree-1 *row* whose sole entry sits in an otherwise-still-dense
+/// "hub" column is scored as trivial yet costs `O(hub column's current
+/// degree)` to eliminate (every other row sharing that column must be
+/// updated). `fit1p`'s basis apparently has exactly this shape — many
+/// row-degree-1 pivots landing on a handful of not-yet-thinned dense
+/// columns — which no SCC/block decomposition addresses, since those rows
+/// don't form a separable block with the hub column at all. Fully
+/// reverted (including the two dedicated unit tests that validated its
+/// spillover-reassembly correctness, which was never in question — the
+/// numerics were right, just not worth what they cost). See the project
+/// history around this comment's own commit for the full A/B numbers and
+/// the `ENOMOTO_DEBUG_BLOCK_TRIANGULAR` trace output that pinned down the
+/// root cause, if revisiting; `debug_print_block_sizes`
+/// (`ENOMOTO_DEBUG_BLOCK_SIZES`) and the `ENOMOTO_DEBUG_ELIMINATE_COST`
+/// timer below remain as live diagnostics either attempt's numbers came
+/// from.
 pub fn factorize(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuFactors> {
+    if std::env::var("ENOMOTO_DEBUG_BLOCK_SIZES").is_ok() {
+        debug_print_block_sizes(m, rows_in);
+    }
+    factorize_flat_markowitz(m, rows_in)
+}
+
+fn factorize_flat_markowitz(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuFactors> {
+    if is_dense_input(m, rows_in) {
+        return factorize_dense_faer(m, rows_in);
+    }
     let mut state = MarkowitzState::new(m, rows_in);
 
     let mut row_perm = vec![0usize; m];
@@ -555,6 +762,9 @@ pub fn factorize(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuFactors> {
 
     let mut l_entries: Vec<(usize, usize, f64)> = Vec::new();
     let mut u_entries: Vec<(usize, usize, f64)> = Vec::new();
+    let debug_eliminate_cost = std::env::var("ENOMOTO_DEBUG_ELIMINATE_COST").is_ok();
+    let mut eliminate_ns: u128 = 0;
+    let mut snapshot_ns: u128 = 0;
 
     for step in 0..m {
         // Prefer a non-dense pivot column whenever one exists at all,
@@ -582,19 +792,37 @@ pub fn factorize(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuFactors> {
         state.remove_from_bucket_col(pj);
 
         let pivot_val = *state.rows[pi].get(&pj).unwrap();
+        let __t_snap0 = if debug_eliminate_cost { Some(std::time::Instant::now()) } else { None };
         let pivot_row_snapshot: Vec<(usize, f64)> = state.rows[pi]
             .iter()
             .filter(|&(&j, &v)| v != 0.0 && (j == pj || !state.col_used[j]))
             .map(|(&j, &v)| (j, v))
             .collect();
+        if let Some(t0) = __t_snap0 {
+            snapshot_ns += t0.elapsed().as_nanos();
+        }
 
         for &(j, v) in &pivot_row_snapshot {
             u_entries.push((step, j, v));
         }
 
+        let __t_elim0 = if debug_eliminate_cost { Some(std::time::Instant::now()) } else { None };
         for (i, mult) in state.eliminate(pi, pj, pivot_val, &pivot_row_snapshot) {
             l_entries.push((i, step, mult));
         }
+        if let Some(t0) = __t_elim0 {
+            eliminate_ns += t0.elapsed().as_nanos();
+        }
+    }
+    if debug_eliminate_cost {
+        eprintln!(
+            "ELIMINATE_COST m={m} eliminate_ms={:.3} snapshot_ms={:.3} l_nnz={} u_nnz={} avg_row_fill={:.1}",
+            eliminate_ns as f64 / 1e6,
+            snapshot_ns as f64 / 1e6,
+            l_entries.len(),
+            u_entries.len(),
+            u_entries.len() as f64 / m as f64,
+        );
     }
 
     let mut row_perm_inv = vec![0usize; m];
@@ -604,10 +832,11 @@ pub fn factorize(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuFactors> {
         col_perm_inv[col_perm[step]] = step;
     }
 
-    let mut l_col: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
+    let mut l_col_rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
     for (orig_row, pivot_step, mult) in l_entries {
-        l_col[pivot_step].push((row_perm_inv[orig_row], mult));
+        l_col_rows[pivot_step].push((row_perm_inv[orig_row], mult));
     }
+    let l_col = l_col_rows;
     let mut u_row: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
     for (pivot_step, orig_col, val) in u_entries {
         u_row[pivot_step].push((col_perm_inv[orig_col], val));
@@ -901,18 +1130,104 @@ impl LuFactors {
 // own creation-ordered list and applied between `L` and `U` per
 // `B_k^{-1} = U_k^{-1} R_k^{-1} ... R_1^{-1} L^{-1}` (eq. 13).
 
+/// An eta's off-diagonal entries, chosen at construction time (see
+/// [`pack_off_diag`]) between a sparse `(row_step, value)` list and a dense
+/// length-`m` array (with the eta's own slot always left at `0.0`, so a
+/// dense loop over the whole array never needs to special-case it). The
+/// sparse form pays a per-entry tuple/indirection cost that is worth it
+/// only while the eta is genuinely sparse; once an eta's own fill exceeds
+/// [`DENSE_ETA_FRACTION`] of `m` (typical of a dense-coefficient LP, where
+/// `U`'s eta chain is already close to fully dense from the very first
+/// update), the dense form turns each consuming loop into a straight-line
+/// scan with no per-entry branch or index indirection, which vectorizes
+/// far better for the same total FLOP count. `nnz` is tracked separately
+/// (not re-derived from the dense array's length, which is always `m`)
+/// so [`FtLu::fill_count`]'s refactorization-trigger accounting keeps
+/// measuring true fill regardless of which representation is in use.
+#[derive(Clone)]
+enum OffDiag {
+    Sparse(Vec<(usize, f64)>),
+    Dense { data: Box<[f64]>, nnz: usize },
+}
+
+/// A column/row whose off-diagonal fill exceeds this fraction of `m` is
+/// stored densely (see [`OffDiag`]). Unlike [`DENSE_COL_FRACTION`] (tuned
+/// against real Netlib data, all of it sparse), this threshold has no
+/// dense-problem benchmark to tune against yet in this crate's own test
+/// set — `0.4` is a first-pass value, not a measured one; re-tune once a
+/// genuinely dense-coefficient LP is available to benchmark against.
+const DENSE_ETA_FRACTION: f64 = 0.4;
+
+fn pack_off_diag(m: usize, pairs: Vec<(usize, f64)>) -> OffDiag {
+    let nnz = pairs.len();
+    if nnz as f64 > DENSE_ETA_FRACTION * m as f64 {
+        let mut data = vec![0.0; m];
+        for (i, v) in pairs {
+            data[i] = v;
+        }
+        OffDiag::Dense { data: data.into_boxed_slice(), nnz }
+    } else {
+        OffDiag::Sparse(pairs)
+    }
+}
+
+impl OffDiag {
+    fn nnz(&self) -> usize {
+        match self {
+            OffDiag::Sparse(v) => v.len(),
+            OffDiag::Dense { nnz, .. } => *nnz,
+        }
+    }
+
+    /// Removes any entry at `row_step == p` — used when an eta at an
+    /// *earlier* `u_seq` position stops depending on a slot that just got
+    /// moved to the end (see `try_update`'s own docs). Keeps `nnz` correct
+    /// for the dense form too, rather than leaving it stale.
+    fn remove_row(&mut self, p: usize) {
+        match self {
+            OffDiag::Sparse(v) => v.retain(|&(row_step, _)| row_step != p),
+            OffDiag::Dense { data, nnz } => {
+                if data[p] != 0.0 {
+                    data[p] = 0.0;
+                    *nnz -= 1;
+                }
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 struct UEta {
     slot: usize,
     pivot: f64,
-    off_diag: Vec<(usize, f64)>, // (row_step, value), row_step != slot
+    off_diag: OffDiag, // (row_step, value) pairs, row_step != slot
 }
 
 #[derive(Clone)]
 struct REta {
     p: usize,
-    r: Vec<(usize, f64)>, // (row_step, value), row_step != p
+    r: OffDiag, // (row_step, value) pairs, row_step != p
 }
+
+/// A caller-provided FTRAN right-hand side whose own nonzero count exceeds
+/// this fraction of `m` is dense enough that the Gilbert-Peierls sparse
+/// path's DFS/epoch bookkeeping (see `LuFactors::l_solve_sparse_into`'s own
+/// docs) no longer pays for itself — its reach set is bounded below by the
+/// rhs's own nonzero count, so a dense rhs alone already guarantees a large
+/// reach regardless of how sparse `L` itself is. Exposed as
+/// [`FtLu::should_use_dense_solve`] rather than a flag fixed at
+/// construction time: an earlier version of this gate measured density
+/// once per refactorization from the *basis*'s own `L`/`U` fill and cached
+/// it — which reads as permanently sparse for the entire solve whenever
+/// the crash-start basis (the slack identity, always maximally sparse)
+/// never gets refactorized a second time, silently never firing even on a
+/// genuinely dense-coefficient LP whose real (post-pivoting) basis is
+/// dense throughout. Checking the actual rhs at each call site instead has
+/// no such staleness problem and costs nothing extra (the caller already
+/// has the sparse rhs's length on hand). Like `DENSE_ETA_FRACTION`, `0.4`
+/// is a first-pass threshold, not one tuned against a real dense-problem
+/// benchmark yet.
+const DENSE_RHS_FRACTION: f64 = 0.4;
 
 #[derive(Clone)]
 pub struct FtLu {
@@ -936,13 +1251,26 @@ impl FtLu {
             }
         }
         let u_seq: Vec<UEta> = (0..m)
-            .map(|slot| UEta { slot, pivot: pivots[slot], off_diag: std::mem::take(&mut off_diags[slot]) })
+            .map(|slot| UEta {
+                slot,
+                pivot: pivots[slot],
+                off_diag: pack_off_diag(m, std::mem::take(&mut off_diags[slot])),
+            })
             .collect();
         FtLu {
             base,
             u_seq,
             r_etas: Vec::new(),
         }
+    }
+
+    /// Whether an FTRAN right-hand side with `rhs_nnz` nonzero entries
+    /// (out of this basis's `m`) is dense enough that callers should skip
+    /// [`Self::solve_sparse_into`] in favor of the plain dense
+    /// [`Self::solve_into`] — see [`DENSE_RHS_FRACTION`]'s own docs.
+    pub fn should_use_dense_solve(&self, rhs_nnz: usize) -> bool {
+        let m = self.base.m;
+        m > 0 && rhs_nnz as f64 > DENSE_RHS_FRACTION * m as f64
     }
 
     fn find_seq_pos(&self, slot: usize) -> usize {
@@ -957,7 +1285,12 @@ impl FtLu {
     fn u_transpose_solve_into(&self, z: &mut [f64]) {
         for eta in &self.u_seq {
             let p = eta.slot;
-            let y: f64 = eta.off_diag.iter().map(|&(row_step, v)| v * z[row_step]).sum();
+            let y: f64 = match &eta.off_diag {
+                OffDiag::Sparse(v) => v.iter().map(|&(row_step, v)| v * z[row_step]).sum(),
+                // `data[p]` is always `0.0` (see `OffDiag`'s own docs), so
+                // this dot product already excludes `z[p]` on its own.
+                OffDiag::Dense { data, .. } => data.iter().zip(z.iter()).map(|(&v, &zi)| v * zi).sum(),
+            };
             z[p] = (z[p] - y) / eta.pivot;
         }
     }
@@ -997,8 +1330,19 @@ impl FtLu {
             if xp == 0.0 {
                 continue;
             }
-            for &(row_step, v) in &eta.off_diag {
-                x[row_step] -= v * xp;
+            match &eta.off_diag {
+                OffDiag::Sparse(v) => {
+                    for &(row_step, v) in v {
+                        x[row_step] -= v * xp;
+                    }
+                }
+                // `data[p] == 0.0` always, so this leaves `x[p]` (just
+                // divided above) untouched, same as the sparse form.
+                OffDiag::Dense { data, .. } => {
+                    for (xi, &v) in x.iter_mut().zip(data.iter()) {
+                        *xi -= v * xp;
+                    }
+                }
             }
         }
     }
@@ -1015,7 +1359,10 @@ impl FtLu {
     fn ftran_through_l_and_r_into(&self, rhs: &[f64], z: &mut [f64]) {
         self.base.l_solve_into(rhs, z);
         for reta in &self.r_etas {
-            let dot: f64 = reta.r.iter().map(|&(i, v)| v * z[i]).sum();
+            let dot: f64 = match &reta.r {
+                OffDiag::Sparse(v) => v.iter().map(|&(i, v)| v * z[i]).sum(),
+                OffDiag::Dense { data, .. } => data.iter().zip(z.iter()).map(|(&v, &zi)| v * zi).sum(),
+            };
             z[reta.p] -= dot;
         }
     }
@@ -1069,7 +1416,10 @@ impl FtLu {
     pub fn solve_sparse_into(&self, rhs_sparse: &[(usize, f64)], scratch: &mut [f64], gp: &mut GpScratch, out: &mut [f64]) {
         self.base.l_solve_sparse_into(rhs_sparse, scratch, gp);
         for reta in &self.r_etas {
-            let dot: f64 = reta.r.iter().map(|&(i, v)| v * scratch[i]).sum();
+            let dot: f64 = match &reta.r {
+                OffDiag::Sparse(v) => v.iter().map(|&(i, v)| v * scratch[i]).sum(),
+                OffDiag::Dense { data, .. } => data.iter().zip(scratch.iter()).map(|(&v, &zi)| v * zi).sum(),
+            };
             scratch[reta.p] -= dot;
         }
         // `U` stays on the dense `u_solve_into`, not a GP-sparsified
@@ -1112,8 +1462,17 @@ impl FtLu {
             if yp == 0.0 {
                 continue;
             }
-            for &(i, v) in &reta.r {
-                scratch[i] -= v * yp;
+            match &reta.r {
+                OffDiag::Sparse(v) => {
+                    for &(i, v) in v {
+                        scratch[i] -= v * yp;
+                    }
+                }
+                OffDiag::Dense { data, .. } => {
+                    for (si, &v) in scratch.iter_mut().zip(data.iter()) {
+                        *si -= v * yp;
+                    }
+                }
             }
         }
         self.base.l_transpose_solve_into(scratch, out);
@@ -1210,13 +1569,13 @@ impl FtLu {
 
         self.u_seq.remove(seq_pos);
         for eta in &mut self.u_seq {
-            eta.off_diag.retain(|&(row_step, _)| row_step != p);
+            eta.off_diag.remove_row(p);
         }
 
         let off_diag: Vec<(usize, f64)> =
             (0..m).filter(|&i| i != p && a_tilde[i] != 0.0).map(|i| (i, a_tilde[i])).collect();
-        self.u_seq.push(UEta { slot: p, pivot: new_pivot, off_diag });
-        self.r_etas.push(REta { p, r: r_vec });
+        self.u_seq.push(UEta { slot: p, pivot: new_pivot, off_diag: pack_off_diag(m, off_diag) });
+        self.r_etas.push(REta { p, r: pack_off_diag(m, r_vec) });
 
         true
     }
@@ -1230,8 +1589,22 @@ impl FtLu {
     /// refactorization trigger (3): as updates accumulate, the eta file
     /// grows (each `R` and each replaced `U` slot can carry up to `m-1`
     /// entries), which is exactly the cost this trigger exists to bound.
+    /// Reads true nonzero counts via [`OffDiag::nnz`], not storage length,
+    /// so switching an eta to the dense representation doesn't spuriously
+    /// inflate this and trip the trigger early.
     pub fn fill_count(&self) -> usize {
-        self.u_seq.iter().map(|e| e.off_diag.len()).sum::<usize>() + self.r_etas.iter().map(|e| e.r.len()).sum::<usize>()
+        self.u_seq.iter().map(|e| e.off_diag.nnz()).sum::<usize>() + self.r_etas.iter().map(|e| e.r.nnz()).sum::<usize>()
+    }
+
+    /// Debug/instrumentation only: off-diagonal nonzero count of the `U`
+    /// eta most recently appended by `try_update` (0 if no update has
+    /// happened yet) — the fill-in from a single update, as opposed to
+    /// `fill_count`'s running total. Used by `simplex.rs`'s
+    /// `ENOMOTO_DEBUG_ETA_DENSITY` diagnostic to measure how eta density
+    /// is distributed across a real solve, which is what motivated
+    /// `OffDiag`'s sparse/dense hybrid representation above.
+    pub fn last_update_off_diag_len(&self) -> usize {
+        self.u_seq.last().map(|e| e.off_diag.nnz()).unwrap_or(0)
     }
 }
 
@@ -1270,6 +1643,65 @@ mod tests {
         // Row 2 = 2 * row 0 in a 3x3 with cols {0,1} only used -> column 2 empty -> singular.
         let rows = vec![vec![(0, 1.0), (1, 2.0)], vec![(0, 3.0), (1, 1.0)], vec![(0, 2.0), (1, 4.0)]];
         assert!(factorize(3, &rows).is_none());
+    }
+
+    /// A dense diagonally-dominant matrix well past `DENSE_INPUT_FRACTION`
+    /// (100% fill), fed straight to `factorize_dense_faer` (not through
+    /// `factorize`'s dispatch, to test this path in isolation regardless
+    /// of where the threshold currently sits) and checked against a
+    /// hand-verified solve, the same style `factorize_and_solve_matches_expected`
+    /// uses for the Markowitz path — this is the ground truth that
+    /// actually matters (not "does it match Markowitz's own answer",
+    /// which would only prove the two agree with *each other*, not with
+    /// reality).
+    #[test]
+    fn factorize_dense_faer_matches_hand_verified_solve() {
+        let m = 8;
+        let entry = |i: usize, j: usize| -> f64 { if i == j { 50.0 } else { 1.0 + ((i * 3 + j * 7) % 11) as f64 * 0.4 } };
+        let rows: Vec<Vec<(usize, f64)>> = (0..m).map(|i| (0..m).map(|j| (j, entry(i, j))).collect()).collect();
+
+        let lu = factorize_dense_faer(m, &rows).expect("diagonally dominant must be nonsingular");
+        let x_true: Vec<f64> = (0..m).map(|i| 1.0 + i as f64 * 0.5).collect();
+        let rhs: Vec<f64> = (0..m).map(|i| (0..m).map(|j| entry(i, j) * x_true[j]).sum()).collect();
+        let x = lu.solve(&rhs);
+        assert!(approx_vec(&x, &x_true), "x={x:?} x_true={x_true:?}");
+
+        // B^T y = rhs2, same cross-check for the transpose solve path.
+        let y_true: Vec<f64> = (0..m).map(|i| 0.3 - i as f64 * 0.2).collect();
+        let rhs2: Vec<f64> = (0..m).map(|j| (0..m).map(|i| entry(i, j) * y_true[i]).sum()).collect();
+        let y = lu.solve_transpose(&rhs2);
+        assert!(approx_vec(&y, &y_true), "y={y:?} y_true={y_true:?}");
+    }
+
+    /// `factorize` itself (the public dispatcher) must route this input to
+    /// `factorize_dense_faer` — confirms `is_dense_input` actually fires
+    /// for a fully dense matrix at a size realistic for this crate's
+    /// target problems, not just in the tiny fixtures the Markowitz-path
+    /// tests use (which could accidentally clear a generous threshold too).
+    #[test]
+    fn factorize_dispatches_dense_input_to_faer() {
+        let m = 20;
+        let rows: Vec<Vec<(usize, f64)>> =
+            (0..m).map(|i| (0..m).map(|j| (j, if i == j { 30.0 } else { 1.0 })).collect()).collect();
+        assert!(is_dense_input(m, &rows), "fully dense {m}x{m} input must be flagged dense");
+        let lu = factorize(m, &rows).expect("nonsingular");
+        let x_true = vec![1.0; m];
+        let rhs: Vec<f64> = (0..m).map(|_| 30.0 + (m - 1) as f64).collect();
+        let x = lu.solve(&rhs);
+        assert!(approx_vec(&x, &x_true), "x={x:?}");
+    }
+
+    /// A dense but rank-deficient matrix (two identical rows) must still
+    /// be reported as singular through the `faer` path, exactly as the
+    /// Markowitz path already does for its own sparse singular fixture
+    /// (`factorize_detects_singular`, above).
+    #[test]
+    fn factorize_dense_faer_detects_singular() {
+        let m = 6;
+        let mut rows: Vec<Vec<(usize, f64)>> =
+            (0..m).map(|i| (0..m).map(|j| (j, 1.0 + ((i + j) % 4) as f64)).collect()).collect();
+        rows[3] = rows[1].clone(); // row 3 duplicates row 1 -> rank-deficient
+        assert!(factorize_dense_faer(m, &rows).is_none());
     }
 
     #[test]
@@ -1553,4 +1985,68 @@ mod tests {
         assert!(scratch.iter().all(|&v| v == 0.0), "scratch not fully cleared: {scratch:?}");
     }
 
+    #[test]
+    fn should_use_dense_solve_flags_dense_rhs_and_not_sparse() {
+        let m = 10;
+        let rows: Vec<Vec<(usize, f64)>> = (0..m).map(|i| vec![(i, 4.0)]).collect();
+        let lu = FtLu::new(factorize(m, &rows).expect("nonsingular"));
+        // A rhs with 5 of 10 entries nonzero exceeds DENSE_RHS_FRACTION (0.4).
+        assert!(lu.should_use_dense_solve(5), "5/10 nonzero rhs should be flagged dense");
+        assert!(!lu.should_use_dense_solve(2), "2/10 nonzero rhs should not be flagged dense");
+    }
+
+    /// A dense-coefficient basis (every column of `B` has all `m` entries,
+    /// well past `DENSE_ETA_FRACTION` after a couple of FT updates) run
+    /// through several `try_update` calls with equally dense entering
+    /// columns, then cross-checked against a completely independent full
+    /// refactorization of the final basis — the same style of ground truth
+    /// the sparse-fixture tests above use, just sized and shaped to
+    /// actually exercise `OffDiag::Dense` instead of `OffDiag::Sparse`.
+    #[test]
+    fn ft_update_matches_full_refactor_on_dense_basis() {
+        let m = 10;
+        let entry = |i: usize, j: usize| -> f64 { if i == j { 50.0 } else { 1.0 + ((i + 2 * j) % 5) as f64 * 0.3 } };
+        let rows0: Vec<Vec<(usize, f64)>> = (0..m).map(|i| (0..m).map(|j| (j, entry(i, j))).collect()).collect();
+        let base = factorize(m, &rows0).expect("nonsingular");
+        let mut state = FtLu::new(base);
+
+        // Dense entering columns (every entry nonzero), replacing a few
+        // different slots.
+        let entering = |k: usize, slot: usize| -> Vec<f64> {
+            (0..m).map(|i| if i == slot { 40.0 + k as f64 } else { 2.0 + ((i * 3 + k) % 7) as f64 }).collect()
+        };
+        let updates = [(3usize, 0usize), (7, 1), (0, 2)];
+        let mut cur_rows = rows0.clone();
+        for &(k, slot) in &updates {
+            let a_q = entering(k, slot);
+            assert!(state.try_update(slot, &a_q, 1e-9), "update on slot {slot} rejected");
+            for i in 0..m {
+                cur_rows[i].retain(|&(c, _)| c != slot);
+                if a_q[i] != 0.0 {
+                    cur_rows[i].push((slot, a_q[i]));
+                }
+            }
+        }
+
+        let full = factorize(m, &cur_rows).expect("updated dense basis must still be nonsingular");
+        let rhs: Vec<f64> = (0..m).map(|i| 1.0 + i as f64 * 0.5).collect();
+
+        let x_ft = state.solve(&rhs);
+        let x_full = full.solve(&rhs);
+        assert!(approx_vec(&x_ft, &x_full), "ft={x_ft:?} full={x_full:?}");
+
+        let y_ft = state.solve_transpose(&rhs);
+        let y_full = full.solve_transpose(&rhs);
+        assert!(approx_vec(&y_ft, &y_full), "ft={y_ft:?} full={y_full:?}");
+
+        // `solve_sparse_into` must still agree too, even though a dense
+        // rhs is routed around it at the `simplex.rs` call sites (see
+        // `should_use_dense_solve`'s own docs) — it remains public API and
+        // must stay correct regardless of caller choice.
+        let mut scratch = vec![0.0; m];
+        let mut gp = GpScratch::new(m);
+        let mut out = vec![0.0; m];
+        state.solve_sparse_into(&to_sparse(&rhs), &mut scratch, &mut gp, &mut out);
+        assert!(approx_vec(&out, &x_full), "sparse-rhs path ft={out:?} full={x_full:?}");
+    }
 }

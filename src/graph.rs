@@ -259,11 +259,15 @@ pub fn dulmage_mendelsohn_blocks_topological(adj: &[Vec<usize>], n_cols: usize) 
     if p != n_cols {
         return None;
     }
+    let debug = std::env::var("ENOMOTO_DEBUG_DM_SPLIT").is_ok();
+    let t0 = std::time::Instant::now();
     let match_row = max_bipartite_matching(adj, n_cols);
+    let matching_us = t0.elapsed().as_micros();
     if match_row.iter().any(|c| c.is_none()) {
         return None;
     }
     let match_row: Vec<usize> = match_row.into_iter().map(|c| c.unwrap()).collect();
+    let t1 = std::time::Instant::now();
     let match_col_owner: HashMap<usize, usize> = match_row.iter().enumerate().map(|(i, &c)| (c, i)).collect();
 
     let scc_adj: Vec<Vec<usize>> = adj
@@ -271,9 +275,15 @@ pub fn dulmage_mendelsohn_blocks_topological(adj: &[Vec<usize>], n_cols: usize) 
         .enumerate()
         .map(|(i, cols)| cols.iter().filter_map(|&j| match_col_owner.get(&j).copied()).filter(|&owner| owner != i).collect())
         .collect();
+    let remap_us = t1.elapsed().as_micros();
 
+    let t2 = std::time::Instant::now();
     let mut components = tarjan_scc(&scc_adj);
+    let tarjan_us = t2.elapsed().as_micros();
     components.reverse();
+    if debug {
+        eprintln!("DM_SPLIT p={p} matching_us={matching_us} remap_us={remap_us} tarjan_us={tarjan_us}");
+    }
     Some((components, match_row))
 }
 

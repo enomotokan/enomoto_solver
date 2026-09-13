@@ -35,17 +35,21 @@
 //!      was), the whole thing repeated for up to `rounds` outer passes
 //!      since a bound `propagate` tightens can unlock a `dualfix`/
 //!      singleton/doubleton reduction the previous outer pass couldn't yet
-//!      see. `doubleton` itself only runs during the first
-//!      `doubleton_rounds` outer passes (once per pass) — measured to
-//!      recover almost all of an eligible instance's doubleton
-//!      opportunities within the first couple of rounds, so spending its
-//!      own full-matrix scan on every one of up to `rounds` rounds
-//!      regardless of whether anything new remains was a net loss on
-//!      several instances. Both loops stop early, before their own cap,
-//!      once a pass changes neither row count nor (for the outer loop) any
-//!      bound — a fixpoint: every stage here is a deterministic function
-//!      of exactly that state, so a pass that changes nothing leaves
-//!      nothing for a further pass to find either.
+//!      see. Every stage here retries on *every* outer pass — a genuine
+//!      fixpoint loop over the whole reduction set (the same "keep
+//!      retrying each individual reduction until none of them find
+//!      anything" shape HiGHS's own presolve driver uses), not a loop with
+//!      one technique singled out for an early, hardcoded cutoff — except
+//!      `doubleton`, which is retried every pass only *until* one of its
+//!      own calls finds nothing, then latches off for the rest of this
+//!      run (see [`run_extended`]'s own docs, and `doubleton_active`'s,
+//!      for why a fixed round cap and an unconditional per-round retry
+//!      were each measured worse than this latch on the full Netlib set).
+//!      All of these stop early, before their own cap, once a pass changes
+//!      neither row count nor (for the outer loop) any bound — a fixpoint:
+//!      every stage here is a deterministic function of exactly that
+//!      state, so a pass that changes nothing leaves nothing for a further
+//!      pass to find either.
 //!
 //! [`run_extended`] packages exactly this sequence into the one call site
 //! both `simplex.rs` and `interior_point.rs` use, and returns every
@@ -81,24 +85,34 @@
 
 pub mod colsingleton;
 pub mod doubleton;
+pub mod dominatedcol;
 pub mod dualfix;
+pub mod dualpropagate;
+pub mod parallelrows;
 pub mod propagate;
 pub mod redundancy;
+pub mod rowdominance;
 pub mod rowsingleton;
 pub mod scaling;
 pub mod smallcoeff;
+pub mod sparsify;
+pub mod stuffing;
 
 use crate::sparse::{csr_from_rows, Csr};
 use crate::types::{ConstraintRow, RowSense, VariableData};
 use scaling::Scaling;
 
 /// Builds `A x = b`, `G x <= h` (bounds folded into `G` as single-variable
-/// rows — `ub` as `(j, 1.0)`/`h=ub`, `lb` as `(j, -1.0)`/`h=-lb`, always
-/// present since every variable has two finite bounds — see the
-/// bounded-variable invariant documented in `simplex.rs`'s module docs)
-/// directly from the model's variables/constraints. Shared by
-/// `interior_point::qp::build` (which adds its own `c` from
-/// `obj_coeffs_for_min`) and `simplex.rs`'s presolve entry point.
+/// rows — `ub` as `(j, 1.0)`/`h=ub`, `lb` as `(j, -1.0)`/`h=-lb` — emitted
+/// only for a *finite* bound: an infinite one is a genuine absence of a
+/// constraint, not a very large `h`, and `propagate::extract_bounds`
+/// already treats a variable with no such row as unbounded on that side
+/// by default, so there is nothing for an `h = +/-inf` row to add other
+/// than a value every downstream arithmetic pass (`redundancy`/`scaling`)
+/// would otherwise have to special-case) directly from the model's
+/// variables/constraints. Shared by `interior_point::qp::build` (which
+/// adds its own `c` from `obj_coeffs_for_min`) and `simplex.rs`'s presolve
+/// entry point.
 pub fn build_a_g(variables: &[VariableData], constraints: &[ConstraintRow]) -> (Csr, Vec<f64>, Csr, Vec<f64>) {
     let n = variables.len();
 
@@ -127,10 +141,14 @@ pub fn build_a_g(variables: &[VariableData], constraints: &[ConstraintRow]) -> (
     }
 
     for (j, v) in variables.iter().enumerate() {
-        g_rows.push(vec![(j, 1.0)]);
-        h.push(v.ub);
-        g_rows.push(vec![(j, -1.0)]);
-        h.push(-v.lb);
+        if v.ub.is_finite() {
+            g_rows.push(vec![(j, 1.0)]);
+            h.push(v.ub);
+        }
+        if v.lb.is_finite() {
+            g_rows.push(vec![(j, -1.0)]);
+            h.push(-v.lb);
+        }
     }
 
     let a = csr_from_rows(&a_rows, n);
@@ -201,8 +219,8 @@ fn extended_infeasible(sc: Scaling, a: Csr, b: Vec<f64>, c: Vec<f64>, n: usize) 
 /// directly: Ruiz scaling + redundant-row removal, then up to `rounds`
 /// outer repetitions of [`propagate::propagate`] (bound tightening) →
 /// [`dualfix`] → row-singleton fixing ([`rowsingleton`]) →
-/// doubleton-equality substitution ([`doubleton`], only during the first
-/// `doubleton_rounds` outer rounds, once per round) → up to `inner_rounds`
+/// doubleton-equality substitution ([`doubleton`], once per outer round,
+/// until it latches off — see `doubleton_active`) → up to `inner_rounds`
 /// *inner* repetitions of [`rowsingleton`] <-> column-singleton
 /// substitution ([`colsingleton`]) alone, each stage able to unlock more
 /// of the next: a bound propagate tightens can turn an infinite bound
@@ -211,23 +229,41 @@ fn extended_infeasible(sc: Scaling, a: Csr, b: Vec<f64>, c: Vec<f64>, n: usize) 
 /// remaining appearance (letting `dualfix`'s structural lock-counts, a
 /// later outer round, or — the inner loop's own reason to exist — the
 /// very next rowsingleton/colsingleton pass in the *same* round find
-/// something the one before it never would).
+/// something the one before it never would). The outer loop is a genuine
+/// fixpoint (see `prev_signature` below): it keeps re-running this whole
+/// stage sequence until one full round changes neither a row/column count
+/// nor any bound — the "retry every individual reduction until none of
+/// them find anything left" loop shape HiGHS's own `HPresolve::run` uses
+/// (`docs/` — see the HiGHS presolve summary) — except for `doubleton`
+/// itself, which additionally *latches off* the moment one of its own
+/// calls finds nothing (rather than being retried every remaining round
+/// regardless, the way `rowsingleton`/`colsingleton` are): see
+/// `doubleton_active`'s own docs for why.
 ///
-/// Both `doubleton`'s own scope and the inner loop's shape were narrowed
-/// from an initially broader design, each time based on a full-Netlib
-/// measurement, not a priori reasoning: repeating `doubleton` *inside*
-/// the inner loop (every pass, alongside rowsingleton/colsingleton) was a
-/// net regression (69 of 73 problems slower, +20.8% aggregate) — the
-/// interaction actually worth repeating cheaply is specifically
-/// rowsingleton<->colsingleton, not doubleton's. Running `doubleton` once
-/// per outer round for *every* round (this function's own original
-/// design) cost more than it returned on several instances once measured
-/// against capping it: restricting it to the first outer round only
-/// improved the aggregate (~1.1%) but made a couple of instances
-/// (`fffff800`, `tuff`) 2-4x slower; extending that cap to the first two
-/// outer rounds recovered those regressions while keeping most of the
-/// gain (~9.6% aggregate, 51 of 73 problems faster, only 22 slower) —
-/// `doubleton_rounds` is set to `2` at both call sites for this reason.
+/// This *reworks* an earlier, narrower version of this function that
+/// capped `doubleton` to a fixed first two outer rounds
+/// (`doubleton_rounds = 2`) after measuring that running it every round —
+/// this function's own original design — cost more than it returned on
+/// several Netlib instances relative to that fixed cap (~9.6% aggregate
+/// faster capped, 51 of 73 problems, at the time of that measurement). A
+/// full re-measurement of the *uncapped* (every round, unconditionally)
+/// version reproduced that regression on this codebase (+6.9% aggregate
+/// wall-clock over 73 Netlib problems, 38 slower / 32 faster, iteration
+/// counts essentially unchanged at -0.1% — see this crate's own benchmark
+/// CSVs), with the worst regressions landing on problems that presolve
+/// converges on quickly (`recipe` +332%, `israel` +315%, `cycle` +133%):
+/// exactly the case where a fixed number of *always*-paid full-matrix
+/// scans costs more than the reduction opportunities left to find. The
+/// latch here is the fix for that: it keeps `doubleton`'s own scan a true
+/// per-technique fixpoint (never capped at a fixed round count picked in
+/// advance, unlike the reverted design) while still stopping the moment
+/// it stops paying for itself (unlike the plain uncapped version), rather
+/// than either. Repeating `doubleton` *inside* the inner
+/// rowsingleton<->colsingleton loop (every inner pass, not just once per
+/// outer round) remains a separate, still-net-negative idea (69 of 73
+/// problems slower, +20.8% aggregate when tried) and is not what this
+/// does — `doubleton` still runs at most once per outer round, on that
+/// round's first inner pass.
 ///
 /// `colsingleton` used to be the one piece of this run *before* scaling
 /// (in original, unscaled units) as `simplex.rs`'s own separate pre-step;
@@ -248,7 +284,6 @@ pub fn run_extended(
     prop_passes: usize,
     rounds: usize,
     inner_rounds: usize,
-    doubleton_rounds: usize,
 ) -> ExtendedPresolveResult {
     // One-off, env-var-gated wall-clock breakdown of this function's own
     // major steps — `ENOMOTO_PROF_PHASES`'s `solve_lp_dual` timer starts
@@ -293,7 +328,45 @@ pub fn run_extended(
     g = ng;
     h = nh;
 
+    // `parallelrows::merge_parallel_rows` and `rowdominance::find_dominated_rows`
+    // (Andersen & Andersen 1995) were implemented, unit-tested, and wired in
+    // right here for a full-Netlib A/B measurement — then removed again,
+    // mirroring `dominatedcol`/`sparsify`'s own precedent (see either
+    // module's own docs): both fired on **zero** of the 73 in-scope Netlib
+    // instances (instrumented directly, not inferred from timing alone),
+    // so wiring them in was pure candidate-search tax for no reduction
+    // anywhere — aggregate `ours` time 3.85s unwired vs. 3.91s wired
+    // (+1.5%), 73/73 objective values unchanged either way. Left in the
+    // module tree, tested, for the reason each docstring gives (future
+    // problem shapes / a relaxed finite-bounds invariant), not deleted.
+
+    // Frozen once, before any round's `propagate` call ever runs — see
+    // `dualpropagate::find_implied_equalities`'s own docs for why it needs
+    // the model's *original* bounds specifically, not whatever `lb`/`ub`
+    // a later round's own activity-based tightening has since narrowed
+    // them to.
+    let (orig_lb, orig_ub, _, _) = propagate::extract_bounds(n, &g, &h);
+
     let mut substitutions: Vec<colsingleton::Substitution> = Vec::new();
+
+    // Latches off permanently the first time a round's `doubleton` call
+    // finds nothing: unlike `rowsingleton`/`colsingleton` (cheap enough to
+    // keep re-trying every round regardless), `doubleton`'s own full-matrix
+    // scan is exactly the cost the measurement in this function's own docs
+    // found *not* worth paying once it stops finding anything — this stops
+    // calling it the moment that happens, rather than either an arbitrary
+    // fixed round cap (the earlier, narrower `doubleton_rounds` design) or
+    // paying for the scan on every one of up to `rounds` rounds regardless
+    // of whether a later round's `propagate`/`dualfix`/`rowsingleton`/
+    // `colsingleton` reductions could in principle re-expose a new
+    // doubleton-equality row (measured to be rare enough in practice that
+    // this one-way latch is worth its own presolve-time savings).
+    let mut doubleton_active = true;
+
+    // Same one-way latch, same reason: `dualpropagate`'s own transpose-and-
+    // propagate call is a full-matrix pass, worth skipping once a round's
+    // call finds no new implied-equality row for it to promote.
+    let mut dualpropagate_active = true;
 
     // Fixpoint detection: a round that leaves `a`/`g`'s row counts and
     // every bound unchanged found nothing a further round could act on
@@ -303,7 +376,7 @@ pub fn run_extended(
     // this is what turns `rounds` from "run exactly this many times" into
     // "run at most this many times, fewer if convergence comes first".
     let mut prev_signature: Option<(usize, usize, Vec<f64>, Vec<f64>)> = None;
-    for round_idx in 0..rounds.max(1) {
+    for _round_idx in 0..rounds.max(1) {
         let prop = timed_step!("propagate", propagate::propagate(n, &g, &h, prop_passes));
         if prop.infeasible {
             return extended_infeasible(sc, a, b, c, n);
@@ -325,6 +398,64 @@ pub fn run_extended(
             ub[j] = value;
         }
 
+        // `stuffing::fix_singleton_columns` was implemented, unit-tested,
+        // and wired in right here for a full-Netlib A/B measurement — then
+        // removed again, joining `dominatedcol`/`sparsify`/`parallelrows`/
+        // `rowdominance` (see the block above and each module's own docs):
+        // it fired on **zero** of the 73 in-scope Netlib instances
+        // (instrumented directly), and its own timing was within this
+        // machine's measured ~20% run-to-run noise band either way (three
+        // repeats each, total `ours` time across 72 of the 73 problems:
+        // 3.40-4.25s unwired vs. 3.68-3.97s wired — `cycle` excluded from
+        // this comparison since it reports a wrong objective in *both*
+        // configurations, a pre-existing bug unrelated to this pass; see
+        // this crate's own benchmark notes). Exactly the shape the paper
+        // itself predicts (Gamrath et al. 2015, §6): on a generic MIPLIB-
+        // style test set stuffing fires on well under a quarter of
+        // instances and fixes under 1% of variables even then — the
+        // technique is aimed at supply-chain-shaped models with many
+        // flexible-slack singleton columns, a structure no Netlib LP here
+        // happens to have. Left in the module tree, tested, for the same
+        // reason as its neighbors: a future problem shape (or this crate
+        // someday handling true MIP columns, where the paper's own
+        // reported gains were largest) could still exercise it.
+
+        // Promote every inequality row `dualpropagate` proves tight in
+        // every optimal solution (see that module's own docs) into the
+        // equality system outright — `doubleton`/`colsingleton`/
+        // `rowsingleton` already know what to do with a true equality,
+        // so this needs no new substitution logic of its own, just a
+        // relabeling of which system a row lives in before those passes
+        // run below.
+        if dualpropagate_active {
+            let implied = timed_step!("dualpropagate", dualpropagate::find_implied_equalities(n, &a, &cur_real_rows, &c, &lb, &ub, &orig_lb, &orig_ub, prop_passes));
+            if implied.is_empty() {
+                dualpropagate_active = false;
+            } else {
+                let ar = a.as_ref();
+                let mut a_rows: Vec<Vec<(usize, f64)>> = (0..ar.nrows()).map(|i| ar.col_indices_of_row(i).zip(ar.values_of_row(i)).map(|(j, &v)| (j, v)).collect()).collect();
+                let mut new_b = b.clone();
+                let mut promoted = vec![false; cur_real_rows.len()];
+                for &gi in &implied {
+                    promoted[gi] = true;
+                    a_rows.push(cur_real_rows[gi].clone());
+                    new_b.push(cur_real_rhs[gi]);
+                }
+                a = csr_from_rows(&a_rows, n);
+                b = new_b;
+                let mut kept_rows = Vec::with_capacity(cur_real_rows.len() - implied.len());
+                let mut kept_rhs = Vec::with_capacity(cur_real_rhs.len() - implied.len());
+                for (i, (row, rhs)) in cur_real_rows.into_iter().zip(cur_real_rhs.into_iter()).enumerate() {
+                    if !promoted[i] {
+                        kept_rows.push(row);
+                        kept_rhs.push(rhs);
+                    }
+                }
+                cur_real_rows = kept_rows;
+                cur_real_rhs = kept_rhs;
+            }
+        }
+
         // Inner fixpoint: rowsingleton -> colsingleton, up to `inner_rounds`
         // times within this same outer round (before `propagate`/`dualfix`
         // run again) — colsingleton eliminating a variable can turn a row
@@ -337,23 +468,15 @@ pub fn run_extended(
         // colsingleton, only by `rowsingleton`'s own `fixes`, already
         // folded in before the signature is taken).
         //
-        // `doubleton` itself only runs during the first `doubleton_rounds`
-        // *outer* rounds (checked below as `round_idx < doubleton_rounds`),
-        // and even then only on the first inner pass — measured on the
-        // full Netlib set, both "every outer round" and "every inner pass"
-        // were worse than this: repeating it inside this inner loop
-        // (alongside rowsingleton/colsingleton every pass) was a net
-        // regression (73-problem aggregate +20.8%); running it in every
-        // outer round but only once per round (the original design) is
-        // this function's own baseline; capping it to the first outer
-        // round only improved the aggregate (~1.1%) but made a few
-        // instances (`fffff800`, `tuff`) substantially worse; extending
-        // that cap to the first *two* outer rounds recovered those
-        // regressions while keeping most of the gain (~9.6% aggregate,
-        // 51 of 73 problems faster, only 22 slower) — apparently enough
-        // rounds for whatever doubleton-eligible structure a typical
-        // instance has to be found, without paying for it on every one of
-        // up to 10 rounds regardless of whether anything new remains.
+        // `doubleton` runs on every outer round's first inner pass until it
+        // latches off (`doubleton_active`, see its own docs above) — no
+        // longer gated by a fixed round count (see this function's own
+        // docs for the earlier, narrower `doubleton_rounds`-capped version
+        // this reworks). Repeating it on every one of this inner loop's
+        // own passes (alongside rowsingleton/colsingleton) remains the
+        // separately-measured net regression described there and is still
+        // not done — only the *outer*-round gate was replaced with the
+        // latch.
         let mut inner_prev_signature: Option<(usize, usize)> = None;
         for _inner in 0..inner_rounds.max(1) {
             let rs = timed_step!("rowsingleton", rowsingleton::fix_singleton_equalities(n, &a, &b, &lb, &ub));
@@ -371,8 +494,11 @@ pub fn run_extended(
             g = ng;
             h = nh;
 
-            if round_idx < doubleton_rounds.max(1) && _inner == 0 {
+            if _inner == 0 && doubleton_active {
                 let dbl = timed_step!("doubleton", doubleton::eliminate_doubleton_equalities(n, &a, &b, &g, &h, &c));
+                if dbl.substitutions.is_empty() {
+                    doubleton_active = false;
+                }
                 a = dbl.a;
                 b = dbl.b;
                 g = dbl.g;

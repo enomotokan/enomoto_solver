@@ -133,6 +133,11 @@ pub fn eliminate_doubleton_equalities(n: usize, a: &Csr, b: &[f64], g: &Csr, h: 
     // pointing at `x1` after `x1` itself has zero real appearances left
     // anywhere else, silently dropping `x0`'s bound constraint from the
     // reduced problem instead of correctly chaining it onto `x2`.
+    // A genuinely infinite `lb`/`ub` (a real free or one-sided-unbounded
+    // source variable, not a finite sentinel) makes the corresponding
+    // side's derived row vacuous (`r <= +inf`) — omitted rather than
+    // emitted with an infinite `h`, same reasoning and arithmetic as
+    // `colsingleton`'s own identical derivation (see that module's docs).
     let mut extra_g_rows: Vec<Vec<(usize, f64)>> = Vec::new();
     let mut extra_h: Vec<f64> = Vec::new();
     for sub in &subs {
@@ -141,12 +146,16 @@ pub fn eliminate_doubleton_equalities(n: usize, a: &Csr, b: &[f64], g: &Csr, h: 
         let a_ub = sub.coeff * ub[sub.var];
         let lo = a_lb.min(a_ub);
         let hi = a_lb.max(a_ub);
-        let (row1, rhs1) = rewrite_row(&[(var_keep, coeff_keep)], sub.rhs - lo, &subs, &by_var);
-        extra_g_rows.push(row1);
-        extra_h.push(rhs1);
-        let (row2, rhs2) = rewrite_row(&[(var_keep, -coeff_keep)], hi - sub.rhs, &subs, &by_var);
-        extra_g_rows.push(row2);
-        extra_h.push(rhs2);
+        if lo.is_finite() {
+            let (row1, rhs1) = rewrite_row(&[(var_keep, coeff_keep)], sub.rhs - lo, &subs, &by_var);
+            extra_g_rows.push(row1);
+            extra_h.push(rhs1);
+        }
+        if hi.is_finite() {
+            let (row2, rhs2) = rewrite_row(&[(var_keep, -coeff_keep)], hi - sub.rhs, &subs, &by_var);
+            extra_g_rows.push(row2);
+            extra_h.push(rhs2);
+        }
     }
 
     // Rewrite every surviving row (A's non-doubleton rows, G's real rows)
