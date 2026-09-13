@@ -738,11 +738,32 @@ const BIG_M: f64 = 1e7;
 /// in *scaled* coordinates (colsingleton used to run once, pre-scaling,
 /// specifically to avoid this — see `unscale_result`'s own docs for how
 /// recovery order changes to match).
+/// [`build_std_form_presolved`]'s return value: the presolved, *compacted*
+/// [`StdForm`] (see that function's own docs for why every fixed — not just
+/// substituted — structural variable is now excluded from it entirely,
+/// rather than kept as an always-skipped `lb[j] == ub[j]` slot), plus
+/// everything a caller needs to expand a solve's output back into the
+/// original `variables.len()`-length `x`: `orig_of_free[nj]` is the
+/// original variable index that compacted structural column `nj` stands
+/// for, and `fixed_values` is every excluded variable's own `(original
+/// index, value)` pair — a plain constant for a `dualfix`/forcing-row
+/// fixed variable, and the doubleton/colsingleton sentinel `0.0` for one
+/// [`presolve::colsingleton::Substitution::value`] will overwrite right
+/// afterward. `orig_of_free.len() + fixed_values.len() == variables.len()`
+/// always.
+struct PresolvedForm {
+    std: StdForm,
+    scaling: scaling::Scaling,
+    substitutions: Vec<presolve::colsingleton::Substitution>,
+    orig_of_free: Vec<usize>,
+    fixed_values: Vec<(usize, f64)>,
+}
+
 fn build_std_form_presolved(
     variables: &[VariableData],
     objective: &Objective,
     constraints: &[ConstraintRow],
-) -> Option<(StdForm, scaling::Scaling, Vec<presolve::colsingleton::Substitution>)> {
+) -> Option<PresolvedForm> {
     let n = variables.len();
     let sign = match objective.sense {
         Sense::Minimize => 1.0,
@@ -827,48 +848,94 @@ fn build_std_form_presolved(
         }
     }
 
+    // Every structural variable with `lb[j] < ub[j]` gets a compacted slot
+    // `new_index[j] = Some(nj)`; every `lb[j] == ub[j]` one (doubleton/
+    // colsingleton substitution sentinel, or a `dualfix`/forcing-row real
+    // fixed value — pricing already can't tell, and doesn't need to, see
+    // `price_one`'s own `lb[j] == ub[j]` skip) is dropped from the solve's
+    // column space entirely rather than kept as a slot every column-
+    // oriented loop still has to check-and-skip and every row-oriented
+    // loop (the dual simplex's own PRICE step, expanding a touched row's
+    // full nonzero list) still has to read-and-discard on every pivot for
+    // the rest of the solve. Its contribution to any row it appears in is
+    // folded into that row's own right-hand side below instead — the same
+    // arithmetic `x_B = B^{-1}(b - N x_N)` already did with this column
+    // included in `N` at its bound, just performed once here instead of
+    // on every basis (re)computation for the life of the solve.
+    let mut new_index: Vec<Option<usize>> = vec![None; n];
+    let mut orig_of_free: Vec<usize> = Vec::new();
+    for j in 0..n {
+        if lb[j] != ub[j] {
+            new_index[j] = Some(orig_of_free.len());
+            orig_of_free.push(j);
+        }
+    }
+    let n_free = orig_of_free.len();
+    let fixed_values: Vec<(usize, f64)> = (0..n).filter(|&j| new_index[j].is_none()).map(|j| (j, lb[j])).collect();
+
     let n_eq = pre.a.nrows();
     let n_le = g_rows.len();
     let n_rows = n_eq + n_le;
-    let n_total = n + n_rows;
+    let n_total = n_free + n_rows;
 
     let mut c = vec![0.0; n_total];
-    c[0..n].copy_from_slice(&pre.c);
+    for (nj, &j) in orig_of_free.iter().enumerate() {
+        c[nj] = pre.c[j];
+    }
 
     let mut new_lb = vec![0.0; n_total];
     let mut new_ub = vec![0.0; n_total];
-    new_lb[0..n].copy_from_slice(&lb);
-    new_ub[0..n].copy_from_slice(&ub);
+    for (nj, &j) in orig_of_free.iter().enumerate() {
+        new_lb[nj] = lb[j];
+        new_ub[nj] = ub[j];
+    }
 
     let mut rows = Vec::with_capacity(n_rows);
     let mut b_out = Vec::with_capacity(n_rows);
 
     let ar = pre.a.as_ref();
     for i in 0..n_eq {
-        let slack = n + i;
-        let mut r: Vec<(usize, f64)> = ar.col_indices_of_row(i).zip(ar.values_of_row(i)).map(|(j, &v)| (j, v)).collect();
+        let slack = n_free + i;
+        let mut rhs_i = pre.b[i];
+        let mut r: Vec<(usize, f64)> = Vec::new();
+        for (j, &v) in ar.col_indices_of_row(i).zip(ar.values_of_row(i)) {
+            match new_index[j] {
+                Some(nj) => r.push((nj, v)),
+                None => rhs_i -= v * lb[j],
+            }
+        }
         new_lb[slack] = 0.0;
         new_ub[slack] = 0.0;
         r.push((slack, 1.0));
         rows.push(r);
-        b_out.push(pre.b[i]);
+        b_out.push(rhs_i);
     }
-    for (k, mut r) in g_rows.into_iter().enumerate() {
-        let slack = n + n_eq + k;
+    for (k, row) in g_rows.into_iter().enumerate() {
+        let slack = n_free + n_eq + k;
+        let mut rhs_k = g_rhs[k];
+        let mut r: Vec<(usize, f64)> = Vec::new();
+        for (j, v) in row {
+            match new_index[j] {
+                Some(nj) => r.push((nj, v)),
+                None => rhs_k -= v * lb[j],
+            }
+        }
         new_lb[slack] = 0.0;
         new_ub[slack] = f64::INFINITY;
         r.push((slack, 1.0));
         rows.push(r);
-        b_out.push(g_rhs[k]);
+        b_out.push(rhs_k);
     }
 
     let cols = cols_from_rows(&rows, n_total);
     let rows = FixedRows::from_rows(&rows);
-    Some((
-        StdForm { n_total, n_rows, c, rows, cols, b: b_out, lb: new_lb, ub: new_ub },
-        pre.scaling,
-        pre.substitutions,
-    ))
+    Some(PresolvedForm {
+        std: StdForm { n_total, n_rows, c, rows, cols, b: b_out, lb: new_lb, ub: new_ub },
+        scaling: pre.scaling,
+        substitutions: pre.substitutions,
+        orig_of_free,
+        fixed_values,
+    })
 }
 
 /// Fills in every `doubleton`/`colsingleton`-eliminated variable's true
@@ -884,10 +951,31 @@ fn build_std_form_presolved(
 /// at the end correctly converts the whole vector, substituted entries
 /// included. `Infeasible`/`Unbounded` pass through unchanged (there is no
 /// `x` to fix up).
-fn unscale_result(result: SimplexResult, sc: &scaling::Scaling, substitutions: &[presolve::colsingleton::Substitution]) -> SimplexResult {
+fn unscale_result(
+    result: SimplexResult,
+    sc: &scaling::Scaling,
+    substitutions: &[presolve::colsingleton::Substitution],
+    orig_of_free: &[usize],
+    fixed_values: &[(usize, f64)],
+) -> SimplexResult {
     match result.status {
         Status::Optimal => {
-            let mut x = result.x.unwrap();
+            let x_free = result.x.unwrap();
+            // Expand the compacted solve's output (one entry per surviving
+            // free structural column, see `PresolvedForm`'s own docs) back
+            // into the original `variables.len()`-length space *before* the
+            // substitution loop below: a substitution's own `terms` can
+            // reference a variable that `dualfix`/a forcing row fixed
+            // outright (not one this loop itself resolves), so every fixed
+            // value must already be in place at its original index by the
+            // time `sub.value(&x)` reads it.
+            let mut x = vec![0.0; orig_of_free.len() + fixed_values.len()];
+            for (nj, &j) in orig_of_free.iter().enumerate() {
+                x[j] = x_free[nj];
+            }
+            for &(j, v) in fixed_values {
+                x[j] = v;
+            }
             for sub in substitutions.iter().rev() {
                 x[sub.var] = sub.value(&x);
             }
@@ -1961,10 +2049,10 @@ fn solve_std_form_decomposed(std: &StdForm, use_dual: bool) -> SimplexResult {
 }
 
 pub fn solve_lp(variables: &[VariableData], objective: &Objective, constraints: &[ConstraintRow]) -> SimplexResult {
-    let Some((std, sc, substitutions)) = build_std_form_presolved(variables, objective, constraints) else {
+    let Some(pf) = build_std_form_presolved(variables, objective, constraints) else {
         return SimplexResult { status: Status::Infeasible, x: None };
     };
-    unscale_result(solve_std_form_decomposed(&std, false), &sc, &substitutions)
+    unscale_result(solve_std_form_decomposed(&pf.std, false), &pf.scaling, &pf.substitutions, &pf.orig_of_free, &pf.fixed_values)
 }
 
 /// The primal two-phase method's actual work, operating on an
@@ -2365,10 +2453,15 @@ macro_rules! timed {
 }
 
 pub fn solve_lp_dual(variables: &[VariableData], objective: &Objective, constraints: &[ConstraintRow]) -> SimplexResult {
-    let Some((std, sc, substitutions)) = build_std_form_presolved(variables, objective, constraints) else {
+    let Some(PresolvedForm { std, scaling: sc, substitutions, orig_of_free, fixed_values }) = build_std_form_presolved(variables, objective, constraints) else {
         return SimplexResult { status: Status::Infeasible, x: None };
     };
     if std::env::var("ENOMOTO_DEBUG_PRESOLVE_SIZE").is_ok() {
+        // `std.n_total - std.n_rows` is now the count of structural columns
+        // actually handed to the solver — every fixed (`lb[j] == ub[j]`)
+        // variable, substituted or not, is excluded from `std` entirely
+        // (see `PresolvedForm`'s own docs), so this is directly comparable
+        // to HiGHS's `getPresolvedLp` column count, not `variables.len()`.
         eprintln!(
             "PRESOLVE_SIZE n_vars_in={} n_rows_in={} n_vars_out={} n_rows_out={}",
             variables.len(),
@@ -2473,7 +2566,7 @@ pub fn solve_lp_dual(variables: &[VariableData], objective: &Objective, constrai
             );
         }
     }
-    unscale_result(result, &sc, &substitutions)
+    unscale_result(result, &sc, &substitutions, &orig_of_free, &fixed_values)
 }
 
 /// EXPERIMENTAL (measurement only, never exercised by production code):
