@@ -744,9 +744,76 @@ fn debug_print_block_sizes(m: usize, rows_in: &[Vec<(usize, f64)>]) {
 /// (`ENOMOTO_DEBUG_BLOCK_SIZES`) and the `ENOMOTO_DEBUG_ELIMINATE_COST`
 /// timer below remain as live diagnostics either attempt's numbers came
 /// from.
+/// `factorize`'s own gate for attempting [`factorize_bordered`] before
+/// falling back to plain [`factorize_flat_markowitz`] — see
+/// `factorize_bordered`'s own docs for the technique and why it exists.
+/// Both a fraction-of-`m` and an absolute cap: the dense Schur complement
+/// this produces is `k x k` (cheap via [`factorize_dense_faer`] regardless
+/// of `k`), but *building* it costs `O(k * (m - k))` dense dot products
+/// plus `k` sparse triangular solves through `L_SS` — cheap for `fit1p`-
+/// shaped instances (`k` in the tens), but letting `k` grow alongside `m`
+/// unchecked would eventually reintroduce the same "pay a chunk of `m`
+/// work every refactorization regardless of payoff" problem the earlier
+/// (reverted) Dulmage-Mendelsohn attempt ran into — see
+/// `factorize_flat_markowitz`'s own doc comment for that history.
+///
+/// Unlike that reverted attempt, this gate's own detection cost
+/// (`detect_border_columns`, one `O(nnz)` pass) is cheap enough to run
+/// unconditionally: a controlled full-73-problem Netlib A/B (this gate
+/// enabled vs. plain `factorize_flat_markowitz` always) showed no
+/// measurable regression on any instance once run-to-run subprocess
+/// scheduling noise was controlled for (repeated head-to-head timing,
+/// not two independently-scheduled full-batch runs — several apparent
+/// double-digit-percent "regressions" in the first batch-vs-batch
+/// comparison, e.g. `fffff800`/`scfxm1`/`ganges`, vanished under direct
+/// repeated comparison), while several instances beyond `fit1p` itself
+/// improved substantially (`scrs8` -58%, `ship04s` -57%, `shell` -52%,
+/// `maros` -41%, `fit1p` -26%, plus a handful more in the 20-45% range) —
+/// this is the same `k`-nonzero-columns detection [`DENSE_COL_FRACTION`]
+/// already made cheap for `MarkowitzState::initially_dense`'s own
+/// purposes, evidently common enough across Netlib-shaped LPs (not just
+/// the `fit1p`/`fit2p` "trend column" family) to be worth attempting by
+/// default rather than gating behind an opt-in flag. Both thresholds are
+/// still first-pass — this run didn't exercise `k` anywhere near either
+/// cap — and worth revisiting if a future instance shows they're too
+/// generous.
+const BORDER_MAX_FRACTION: f64 = 0.3;
+const BORDER_MAX_COUNT: usize = 200;
+
+/// Columns whose nonzero count exceeds [`DENSE_COL_FRACTION`] of `m` —
+/// the same "near-fully-dense trend/regression column" shape
+/// `MarkowitzState::initially_dense` already detects internally, exposed
+/// here as a free function so `factorize`'s routing decision (attempt
+/// [`factorize_bordered`] or not) can check it before paying for a
+/// `MarkowitzState` at all — this is the only extra cost non-bordered
+/// instances pay: one `O(nnz)` degree pass, measured (see
+/// `BORDER_MAX_FRACTION`'s own docs) to be cheap enough to run
+/// unconditionally rather than gated behind a flag.
+fn detect_border_columns(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Vec<usize> {
+    let mut col_degree = vec![0usize; m];
+    for row in rows_in {
+        for &(j, v) in row {
+            if v != 0.0 {
+                col_degree[j] += 1;
+            }
+        }
+    }
+    let threshold = DENSE_COL_FRACTION * m as f64;
+    (0..m).filter(|&j| col_degree[j] as f64 > threshold).collect()
+}
+
 pub fn factorize(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuFactors> {
     if std::env::var("ENOMOTO_DEBUG_BLOCK_SIZES").is_ok() {
         debug_print_block_sizes(m, rows_in);
+    }
+    if !is_dense_input(m, rows_in) {
+        let border = detect_border_columns(m, rows_in);
+        let k = border.len();
+        if k > 0 && k <= BORDER_MAX_COUNT && (k as f64) <= BORDER_MAX_FRACTION * m as f64 {
+            if let Some(lu) = factorize_bordered(m, rows_in, &border) {
+                return Some(lu);
+            }
+        }
     }
     factorize_flat_markowitz(m, rows_in)
 }
@@ -843,6 +910,252 @@ fn factorize_flat_markowitz(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<L
     }
 
     Some(LuFactors { m, l_col, u_row, row_perm, col_perm, col_perm_inv, row_perm_inv })
+}
+
+/// Bordered (Schur-complement) factorization: `border` columns — see
+/// [`detect_border_columns`] — are excluded from the ordinary sparse
+/// Markowitz phase entirely (never appear as pivot candidates, never
+/// receive scattered fill from it) and instead resolved via a single
+/// small dense `k x k` Schur complement at the end.
+///
+/// **Why this exists**: `fit1p`-shaped Netlib instances have ~20-25
+/// columns nonzero in essentially every row (see `DENSE_COL_FRACTION`'s
+/// own docs). The ordinary Markowitz path already defers pivoting *on*
+/// these columns as long as possible (`MarkowitzState::initially_dense`),
+/// but every ordinary elimination step whose pivot row still carries one
+/// of these columns' entries scatters them into every row `eliminate`
+/// touches anyway — measured (`ENOMOTO_DEBUG_ELIMINATE_COST`) as the
+/// actual cost driver behind `fit1p`'s refactorizations (average row fill
+/// climbing from `1.0` at the initial all-slack basis to `~10` a few
+/// refactorizations later, each one costing several milliseconds despite
+/// `m` only being in the hundreds). Excluding these columns from the
+/// sparse phase's own bookkeeping entirely (rather than merely
+/// deprioritizing them as pivot targets) removes that scatter cost
+/// outright; the algebra it defers is applied once, in bulk, via the
+/// classic bordered-block-diagonal LU identity:
+///
+/// ```text
+/// A = [ A_SS  A_SD ]    L = [ L_SS   0  ]    U = [ U_SS  U_SD ]
+///     [ A_DS  A_DD ]        [ L_DS  L_DD]        [  0    U_DD ]
+/// ```
+///
+/// where `S` is the non-border columns and whichever `m - k` rows the
+/// sparse phase ends up choosing as their pivots, and `D` is the `k`
+/// border columns plus the `k` rows the sparse phase never touches.
+/// `L_SS`/`U_SS` and `L_DS` (the sparse phase's own elimination
+/// multipliers for *every* affected row, border rows included — free,
+/// already computed as a side effect of the ordinary elimination) fall
+/// out of a single Markowitz run with `border`'s entries simply absent
+/// from the input. `U_SD = L_SS^{-1} A_SD` is computed via one sparse
+/// forward solve per border column (structurally identical to
+/// [`LuFactors::l_solve_into`], just against the in-progress `L_SS`
+/// rather than a finished `LuFactors`). The Schur complement `A_DD -
+/// L_DS U_SD` (`k x k`, dense) is then factored directly via
+/// [`factorize_dense_faer`] — reusing the exact same dense path already
+/// used for a globally-dense input, just at the `k`-sized scale this
+/// bordering was meant to shrink the problem down to.
+///
+/// Returns `None` (falling back to [`factorize_flat_markowitz`] is the
+/// caller's job, exactly as the dense-column-avoidance fallback in that
+/// function already does for its own `skip_dense` retry) if the sparse
+/// phase gets stuck before finding pivots for every non-border column —
+/// a border column genuinely required as a pivot before all `m - k`
+/// sparse columns are resolved — or if the final `k x k` Schur complement
+/// itself turns out numerically singular.
+fn factorize_bordered(m: usize, rows_in: &[Vec<(usize, f64)>], border: &[usize]) -> Option<LuFactors> {
+    let k = border.len();
+    if k == 0 || k >= m {
+        return None;
+    }
+    let n_sparse = m - k;
+
+    let mut is_border = vec![false; m];
+    for &j in border {
+        is_border[j] = true;
+    }
+
+    // Strip border columns from the input entirely before building the
+    // Markowitz state — this (not any change to `find_best_pivot` or
+    // `eliminate`) is what keeps the sparse phase from ever scattering
+    // into them: a column with zero remaining entries never appears in
+    // any `col_buckets` entry beyond bucket `0`, which `find_best_pivot`'s
+    // `for deg_col in 1..` loop never even visits.
+    let sparse_rows: Vec<Vec<(usize, f64)>> =
+        rows_in.iter().map(|row| row.iter().copied().filter(|&(j, v)| v != 0.0 && !is_border[j]).collect()).collect();
+
+    let mut state = MarkowitzState::new(m, &sparse_rows);
+
+    let mut row_perm = vec![usize::MAX; m];
+    let mut col_perm = vec![usize::MAX; m];
+    // (orig_row, pivot_step, mult) for every row `eliminate` ever touches
+    // during the sparse phase, border rows included — exactly `L_SS` and
+    // `L_DS` together, no separate bookkeeping needed for the latter.
+    let mut l_entries: Vec<(usize, usize, f64)> = Vec::new();
+    // (pivot_step, orig_col, value) — `U_SS`'s own entries; `U_SD` is
+    // appended to this same list further down.
+    let mut u_entries: Vec<(usize, usize, f64)> = Vec::new();
+
+    for step in 0..n_sparse {
+        let (pi, pj) = state.find_best_pivot(true).or_else(|| state.find_best_pivot(false))?;
+
+        state.row_used[pi] = true;
+        state.col_used[pj] = true;
+        row_perm[step] = pi;
+        col_perm[step] = pj;
+        state.remove_from_bucket_row(pi);
+        state.remove_from_bucket_col(pj);
+
+        let pivot_val = *state.rows[pi].get(&pj).unwrap();
+        let pivot_row_snapshot: Vec<(usize, f64)> = state.rows[pi]
+            .iter()
+            .filter(|&(&j, &v)| v != 0.0 && (j == pj || !state.col_used[j]))
+            .map(|(&j, &v)| (j, v))
+            .collect();
+        for &(j, v) in &pivot_row_snapshot {
+            u_entries.push((step, j, v));
+        }
+        for (i, mult) in state.eliminate(pi, pj, pivot_val, &pivot_row_snapshot) {
+            l_entries.push((i, step, mult));
+        }
+    }
+
+    let border_rows: Vec<usize> = (0..m).filter(|&i| !state.row_used[i]).collect();
+    assert_eq!(border_rows.len(), k, "sparse phase must leave exactly `k` rows unpivoted");
+
+    let mut row_perm_inv = vec![usize::MAX; m];
+    for step in 0..n_sparse {
+        row_perm_inv[row_perm[step]] = step;
+    }
+    let mut border_row_local = vec![usize::MAX; m];
+    for (local, &r) in border_rows.iter().enumerate() {
+        border_row_local[r] = local;
+    }
+
+    // `l_col_ss[s]`: `L_SS`'s own column `s` (row targets restricted to
+    // sparse-phase steps) — an intermediate used only by this function's
+    // own forward solves below, never exposed outside it.
+    let mut l_col_ss: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n_sparse];
+    // `l_ds[local]`: border row `local`'s accumulated multipliers against
+    // each sparse step — exactly `L_DS[local, :]`, already complete.
+    let mut l_ds: Vec<Vec<(usize, f64)>> = vec![Vec::new(); k];
+    for &(orig_row, step, mult) in &l_entries {
+        let ri = row_perm_inv[orig_row];
+        if ri != usize::MAX {
+            l_col_ss[step].push((ri, mult));
+        } else {
+            l_ds[border_row_local[orig_row]].push((step, mult));
+        }
+    }
+
+    let mut border_index = vec![usize::MAX; m];
+    for (idx, &j) in border.iter().enumerate() {
+        border_index[j] = idx;
+    }
+
+    // `border_col_rows[idx]`: every original `(row, value)` pair at
+    // border column `border[idx]`, gathered in one `O(nnz)` pass — reused
+    // below both for `A_SD` (this column's forward solve) and `A_DD`.
+    let mut border_col_rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); k];
+    for (i, row) in rows_in.iter().enumerate() {
+        for &(j, v) in row {
+            if v == 0.0 {
+                continue;
+            }
+            let idx = border_index[j];
+            if idx != usize::MAX {
+                border_col_rows[idx].push((i, v));
+            }
+        }
+    }
+
+    // A_DD (original values; the Schur complement below subtracts the
+    // `L_DS * U_SD` correction from this directly, rather than reading
+    // any partially-reduced state — this *is* the standard bordered-LU
+    // identity, not an approximation of it).
+    let mut schur = vec![vec![0.0f64; k]; k];
+    for (idx, rows_for_col) in border_col_rows.iter().enumerate() {
+        for &(orig_row, v) in rows_for_col {
+            let local_e = border_row_local[orig_row];
+            if local_e != usize::MAX {
+                schur[local_e][idx] += v;
+            }
+        }
+    }
+
+    for (idx, rows_for_col) in border_col_rows.iter().enumerate() {
+        let mut y = vec![0.0f64; n_sparse];
+        for &(orig_row, v) in rows_for_col {
+            let s = row_perm_inv[orig_row];
+            if s != usize::MAX {
+                y[s] += v;
+            }
+        }
+        // Forward solve `L_SS y = y` in place (unit lower triangular,
+        // step order) — structurally identical to `l_solve_into`.
+        for s in 0..n_sparse {
+            if y[s] == 0.0 {
+                continue;
+            }
+            for &(row_step, mult) in &l_col_ss[s] {
+                y[row_step] -= mult * y[s];
+            }
+        }
+        for (s, &val) in y.iter().enumerate() {
+            if val != 0.0 {
+                u_entries.push((s, border[idx], val));
+            }
+        }
+        for local_e in 0..k {
+            if l_ds[local_e].is_empty() {
+                continue;
+            }
+            let mut acc = 0.0;
+            for &(step, mult) in &l_ds[local_e] {
+                if y[step] != 0.0 {
+                    acc += mult * y[step];
+                }
+            }
+            schur[local_e][idx] -= acc;
+        }
+    }
+
+    let schur_rows: Vec<Vec<(usize, f64)>> = schur
+        .iter()
+        .map(|row| row.iter().enumerate().filter(|&(_, &v)| v != 0.0).map(|(j, &v)| (j, v)).collect())
+        .collect();
+    let border_lu = factorize_dense_faer(k, &schur_rows)?;
+
+    for s in 0..k {
+        debug_assert_eq!(border_lu.col_perm[s], s, "factorize_dense_faer's own col_perm is always identity");
+        row_perm[n_sparse + s] = border_rows[border_lu.row_perm[s]];
+        col_perm[n_sparse + s] = border[s];
+    }
+
+    let mut row_perm_inv_full = vec![0usize; m];
+    let mut col_perm_inv_full = vec![0usize; m];
+    for step in 0..m {
+        row_perm_inv_full[row_perm[step]] = step;
+        col_perm_inv_full[col_perm[step]] = step;
+    }
+
+    let mut l_col: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
+    for (orig_row, step, mult) in l_entries {
+        l_col[step].push((row_perm_inv_full[orig_row], mult));
+    }
+    let mut u_row: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
+    for (step, orig_col, val) in u_entries {
+        u_row[step].push((col_perm_inv_full[orig_col], val));
+    }
+    for s in 0..k {
+        for &(row_step, mult) in &border_lu.l_col[s] {
+            l_col[n_sparse + s].push((n_sparse + row_step, mult));
+        }
+        for &(col_step, val) in &border_lu.u_row[s] {
+            u_row[n_sparse + s].push((n_sparse + col_step, val));
+        }
+    }
+
+    Some(LuFactors { m, l_col, u_row, row_perm, col_perm, col_perm_inv: col_perm_inv_full, row_perm_inv: row_perm_inv_full })
 }
 
 impl LuFactors {
@@ -1702,6 +2015,102 @@ mod tests {
             (0..m).map(|i| (0..m).map(|j| (j, 1.0 + ((i + j) % 4) as f64)).collect()).collect();
         rows[3] = rows[1].clone(); // row 3 duplicates row 1 -> rank-deficient
         assert!(factorize_dense_faer(m, &rows).is_none());
+    }
+
+    /// `fit1p`-shaped fixture for [`factorize_bordered`]: `m - k` "local"
+    /// rows each with one sparse entry of their own plus every border
+    /// column, and `k` purely-border rows forming an invertible `k x k`
+    /// core — checked against `factorize_flat_markowitz`'s own answer for
+    /// the same matrix (both must solve `Bx = rhs` correctly, not just
+    /// agree with each other, so `rhs` is built from a known `x_true`
+    /// exactly as `factorize_and_solve_matches_expected` does).
+    #[test]
+    fn factorize_bordered_matches_flat_markowitz() {
+        let m = 10;
+        let border = [7usize, 8, 9];
+        let mut rows: Vec<Vec<(usize, f64)>> = Vec::new();
+        for i in 0..7 {
+            rows.push(vec![(i, 3.0 + i as f64), (7, 1.0), (8, 1.0 + 0.1 * i as f64), (9, 2.0 - 0.1 * i as f64)]);
+        }
+        rows.push(vec![(7, 4.0), (8, 1.0), (9, 0.0)]);
+        rows.push(vec![(7, 1.0), (8, 3.0), (9, 1.0)]);
+        rows.push(vec![(7, 0.0), (8, 1.0), (9, 5.0)]);
+        assert_eq!(rows.len(), m);
+
+        let lu_bordered = factorize_bordered(m, &rows, &border).expect("bordered factorization should succeed");
+        let lu_flat = factorize_flat_markowitz(m, &rows).expect("plain Markowitz should also succeed");
+
+        let x_true: Vec<f64> = (0..m).map(|i| 1.0 + i as f64 * 0.3).collect();
+        let entry = |row: &[(usize, f64)], j: usize| row.iter().find(|&&(c, _)| c == j).map(|&(_, v)| v).unwrap_or(0.0);
+        let rhs: Vec<f64> = rows.iter().map(|row| (0..m).map(|j| entry(row, j) * x_true[j]).sum()).collect();
+
+        let x_bordered = lu_bordered.solve(&rhs);
+        let x_flat = lu_flat.solve(&rhs);
+        assert!(approx_vec(&x_bordered, &x_true), "bordered x={x_bordered:?}");
+        assert!(approx_vec(&x_flat, &x_true), "flat x={x_flat:?}");
+    }
+
+    /// Larger version of the same fixture (30 rows, 6 border columns) to
+    /// catch indexing bugs a tiny fixture could miss (e.g. an off-by-one
+    /// in the `n_sparse`/border step-offset arithmetic).
+    #[test]
+    fn factorize_bordered_matches_flat_markowitz_larger() {
+        let m = 30;
+        let k = 6;
+        let border: Vec<usize> = (m - k..m).collect();
+        let mut rows: Vec<Vec<(usize, f64)>> = Vec::new();
+        for i in 0..(m - k) {
+            let mut row = vec![(i, 5.0 + i as f64)];
+            for (bi, &b) in border.iter().enumerate() {
+                row.push((b, 1.0 + 0.1 * ((i + bi) % 5) as f64));
+            }
+            rows.push(row);
+        }
+        // Diagonally dominant k x k border core -> nonsingular.
+        for bi in 0..k {
+            let mut row = Vec::new();
+            for (bj, &b2) in border.iter().enumerate() {
+                let v = if bi == bj { 10.0 } else { 1.0 + ((bi + bj) % 3) as f64 * 0.2 };
+                row.push((b2, v));
+            }
+            rows.push(row);
+        }
+        assert_eq!(rows.len(), m);
+
+        let lu_bordered = factorize_bordered(m, &rows, &border).expect("bordered factorization should succeed");
+        let lu_flat = factorize_flat_markowitz(m, &rows).expect("plain Markowitz should also succeed");
+
+        let x_true: Vec<f64> = (0..m).map(|i| 1.0 + i as f64 * 0.13).collect();
+        let entry = |row: &[(usize, f64)], j: usize| row.iter().find(|&&(c, _)| c == j).map(|&(_, v)| v).unwrap_or(0.0);
+        let rhs: Vec<f64> = rows.iter().map(|row| (0..m).map(|j| entry(row, j) * x_true[j]).sum()).collect();
+
+        let x_bordered = lu_bordered.solve(&rhs);
+        let x_flat = lu_flat.solve(&rhs);
+        assert!(approx_vec(&x_bordered, &x_true), "bordered x={x_bordered:?}");
+        assert!(approx_vec(&x_flat, &x_true), "flat x={x_flat:?}");
+    }
+
+    /// A border column that is genuinely required as a pivot before the
+    /// sparse phase can finish (the two sparse columns share a
+    /// proportional pattern in the only rows that touch them at all) must
+    /// make `factorize_bordered` bail out with `None` rather than produce
+    /// wrong factors — and per the rank argument in this file's own docs
+    /// (`rank(A) <= rank(A_sparse) + k`), a sparse phase that cannot find
+    /// `m - k` independent pivots means the *full* matrix is genuinely
+    /// singular too, which `factorize`'s own dispatch (falling back to
+    /// `factorize_flat_markowitz`) must also report as such.
+    #[test]
+    fn factorize_bordered_falls_back_to_none_on_stuck_sparse_phase() {
+        let m = 3;
+        let border = [2usize];
+        let rows = vec![
+            vec![(0, 1.0), (1, 2.0)],
+            vec![(0, 2.0), (1, 4.0), (2, 1.0)], // sparse part proportional to row 0
+            vec![(2, 5.0)],
+        ];
+        assert!(factorize_bordered(m, &rows, &border).is_none());
+        assert!(factorize_flat_markowitz(m, &rows).is_none(), "matrix is genuinely singular");
+        assert!(factorize(m, &rows).is_none());
     }
 
     #[test]
