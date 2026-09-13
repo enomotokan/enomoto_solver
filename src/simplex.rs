@@ -2476,6 +2476,144 @@ pub fn solve_lp_dual(variables: &[VariableData], objective: &Objective, constrai
     unscale_result(result, &sc, &substitutions)
 }
 
+/// EXPERIMENTAL (measurement only, never exercised by production code):
+/// drives the tie-triggered branch-and-merge measurement — "when chuzr's
+/// top score is tied (within a tolerance) among several rows, branch into
+/// each tied candidate, run a few more iterations down each path, and keep
+/// whichever branch is winning" — against [`solve_lp_dual_on`]'s real,
+/// already-tuned loop, without touching that loop's own control flow or
+/// its ~10 existing return sites.
+///
+/// A genuine live fork (clone every piece of the loop's mutable state —
+/// `Tableau`, `FtLu`, `EdgeWeights`, `InfeasibleRows`, every scratch
+/// buffer — at each tie, run each clone forward, keep the winner) would
+/// need `Clone` wired through all of that state purely to support a
+/// one-off measurement. This does the same experiment for free by
+/// re-running the deterministic solve from scratch instead: given a fixed
+/// map of already-decided tie choices (`In::forced`, iteration index to
+/// rank within that iteration's tied group), the solve is fully
+/// deterministic, so "fork at iteration `t`, follow candidate `c` for a
+/// few more iterations" is just "re-solve from scratch with `forced[t] =
+/// c` added, capped at iteration `t + window`" — cheap enough for the
+/// small/medium Netlib instances this is run against, and it reuses
+/// [`solve_lp_dual_on`]'s exact real logic rather than a separately
+/// maintained approximation of it.
+///
+/// `IN`/`OUT` are thread-locals rather than extra parameters on
+/// `solve_lp_dual_on` because every one of that function's ~10 return
+/// sites (initial/residual/ft-update singular-basis fallbacks, the
+/// optimal/infeasible returns, the DUAL->PRIMAL cleanup handoff, the
+/// MAX_ITERS-exhausted trailing value) would otherwise need touching for a
+/// mechanism only ever driven by the measurement harness in
+/// `solve_lp_dual_with_tie_experiment` below, never by `solve_lp_dual`
+/// itself — every real call path leaves `IN` at its default `None` and
+/// pays only one thread-local read plus an empty `HashMap` per solve.
+pub mod tie_experiment {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    #[derive(Clone, Default)]
+    pub struct In {
+        /// Already-decided tie choices: iteration index -> rank (0 =
+        /// current default tie-break) within that iteration's tied group.
+        pub forced: HashMap<usize, usize>,
+        /// Stop the solve early (reporting `Out::Capped`) once `_iter`
+        /// reaches this — the "run a few more iterations down this branch"
+        /// half of the experiment.
+        pub iter_cap: Option<usize>,
+        /// When chuzr hits a tied group at an iteration `forced` has no
+        /// entry for, stop immediately and report it (`Out::NewTie`)
+        /// instead of falling back to the default tie-break — the
+        /// "discover the next branch point" half of the experiment.
+        pub stop_at_new_tie: bool,
+        /// Relative-score tolerance defining "tied" (candidates scoring
+        /// within this fraction of chuzr's own best are considered part of
+        /// the same tied group) — the same threshold this measurement's
+        /// own earlier tie-frequency tally called "loose".
+        pub tie_tol: f64,
+        /// EXPERIMENTAL (measurement only): a *static* alternative
+        /// secondary tie-break, applied at every tie for the whole solve
+        /// (unlike `forced`, which is a one-off per-iteration override) —
+        /// probing whether some simple, always-on replacement for this
+        /// crate's current default ("highest row index among the tied top
+        /// score") does better in aggregate, at zero runtime branching
+        /// cost. `0` = prefer the *largest* raw (pre-weight) infeasibility
+        /// `delta` among the tied group, `1` = smallest `delta`, `2` =
+        /// smallest row index. `None` leaves the real default untouched.
+        pub static_rule: Option<u8>,
+    }
+
+    #[derive(Clone, Debug)]
+    pub enum Out {
+        Capped { iters: usize, obj: f64 },
+        NewTie { iter: usize, tied_rows: Vec<usize> },
+    }
+
+    thread_local! {
+        pub(super) static IN: RefCell<Option<In>> = const { RefCell::new(None) };
+        pub(super) static OUT: RefCell<Option<Out>> = const { RefCell::new(None) };
+        /// `_iter` as of the start of the most recently begun iteration —
+        /// stashed unconditionally (while `exp_active`) rather than only at
+        /// the handful of normal return sites, so a plain completed solve
+        /// (`Out` left `None`, i.e. neither `Capped` nor `NewTie` fired)
+        /// still reports how many iterations it actually took, without
+        /// needing every one of `solve_lp_dual_on`'s ~10 return sites to
+        /// know about this side channel individually.
+        pub(super) static LAST_ITER: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    pub fn set_input(input: In) {
+        IN.with(|i| *i.borrow_mut() = Some(input));
+        OUT.with(|o| *o.borrow_mut() = None);
+        LAST_ITER.with(|c| c.set(0));
+    }
+
+    pub fn take_output() -> Option<Out> {
+        OUT.with(|o| o.borrow_mut().take())
+    }
+
+    pub fn clear() {
+        IN.with(|i| *i.borrow_mut() = None);
+    }
+}
+
+/// EXPERIMENTAL (measurement only): every way `solve_lp_dual_with_tie_experiment`
+/// can come back — a real completed solve, or either of the two ways the
+/// experiment can cut a solve short (see `tie_experiment::In`'s own docs).
+pub enum TieExperimentRun {
+    Done { iters: usize, result: SimplexResult },
+    Capped { iters: usize, obj: f64 },
+    NewTie { iter: usize, tied_rows: Vec<usize> },
+}
+
+/// EXPERIMENTAL (measurement only): runs [`solve_lp_dual`] with the
+/// `tie_experiment` side channel armed — see that module's own docs.
+/// Always clears the channel again before returning (including if
+/// `solve_lp_dual` itself panics further down the call stack — this
+/// crate's own Netlib sweeps have hit real panics on a handful of
+/// instances, and leaving `IN` armed for whatever call reuses this thread
+/// next would silently corrupt an unrelated, non-experimental solve).
+pub fn solve_lp_dual_with_tie_experiment(
+    variables: &[VariableData],
+    objective: &Objective,
+    constraints: &[ConstraintRow],
+    input: tie_experiment::In,
+) -> TieExperimentRun {
+    tie_experiment::set_input(input);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| solve_lp_dual(variables, objective, constraints)));
+    let out = tie_experiment::take_output();
+    let last_iter = tie_experiment::LAST_ITER.with(|c| c.get());
+    tie_experiment::clear();
+    match result {
+        Ok(r) => match out {
+            Some(tie_experiment::Out::Capped { iters, obj }) => TieExperimentRun::Capped { iters, obj },
+            Some(tie_experiment::Out::NewTie { iter, tied_rows }) => TieExperimentRun::NewTie { iter, tied_rows },
+            None => TieExperimentRun::Done { iters: last_iter, result: r },
+        },
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
 /// The dual method's actual work, operating on an already-presolved
 /// `StdForm` — see [`solve_lp_on`]'s analogous split for the primal
 /// method, and [`build_std_form_presolved`]'s docs for what "presolved"
@@ -2504,6 +2642,21 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
     // per-iteration cost reason, just for this file's own convention of
     // reading every `ENOMOTO_DEBUG_*` flag once, up front.
     let debug_devex = std::env::var("ENOMOTO_DEBUG_DEVEX").is_ok();
+    // EXPERIMENTAL (measurement only, inert unless a caller has set
+    // `tie_experiment::IN` via `solve_lp_dual_with_tie_experiment` — every
+    // normal call path, including plain `solve_lp_dual`, leaves this `None`
+    // and pays only this one thread-local read plus a `HashMap::new()` per
+    // solve). Drives the tie-triggered branch-and-merge measurement: see
+    // the `tie_experiment` module's own docs for the mechanism and why it's
+    // a thread-local side channel rather than extra parameters threaded
+    // through this function's ~10 existing return sites.
+    let exp_in = tie_experiment::IN.with(|i| i.borrow().clone());
+    let exp_active = exp_in.is_some();
+    let exp_forced = exp_in.as_ref().map(|e| e.forced.clone()).unwrap_or_default();
+    let exp_iter_cap = exp_in.as_ref().and_then(|e| e.iter_cap);
+    let exp_stop_at_new_tie = exp_in.as_ref().map(|e| e.stop_at_new_tie).unwrap_or(false);
+    let exp_tie_tol = exp_in.as_ref().map(|e| e.tie_tol).unwrap_or(1e-2);
+    let exp_static_rule = exp_in.as_ref().and_then(|e| e.static_rule);
     let mut t = Tableau::new(std);
     let active_cost = perturb_costs(std);
     t.crash_dual_feasible(&active_cost);
@@ -2683,6 +2836,20 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
         if profile_phases {
             prof_phases::ITERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
+        // EXPERIMENTAL (measurement only, inert unless `exp_active` — see
+        // `tie_experiment`'s own docs): the "run a few more iterations down
+        // this branch, then compare" half of the tie-triggered
+        // branch-and-merge measurement.
+        if exp_active {
+            tie_experiment::LAST_ITER.with(|c| c.set(_iter));
+            if let Some(cap) = exp_iter_cap {
+                if _iter >= cap {
+                    let obj: f64 = active_cost.iter().zip(t.x.iter()).map(|(c, x)| c * x).sum();
+                    tie_experiment::OUT.with(|o| *o.borrow_mut() = Some(tie_experiment::Out::Capped { iters: _iter, obj }));
+                    return SimplexResult { status: Status::Infeasible, x: None }; // dummy sentinel: real result comes back via `tie_experiment::OUT`
+                }
+            }
+        }
         // `x_B` is otherwise maintained incrementally, every iteration,
         // by the primal-step/bound-flip updates near the bottom of this
         // loop (the same values a from-scratch recompute would produce,
@@ -2826,7 +2993,59 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
                 // sequential-vs-parallel (and parallel-vs-parallel)
                 // discrepancy entirely.
                 let cmp = |a: &(usize, f64, bool), b: &(usize, f64, bool)| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0));
-                if chuzr_parallel {
+                // EXPERIMENTAL (measurement only, inert unless `exp_active` —
+                // see `tie_experiment`'s own docs): the "branch into each
+                // tied candidate" half of the tie-triggered branch-and-merge
+                // measurement. Falls straight through to this crate's real
+                // default tie-break whenever there's no tie at all (`tied.len()
+                // <= 1`), so a non-tied pivot is completely unaffected even
+                // with the experiment armed.
+                if exp_active {
+                    let scored: Vec<(usize, f64, bool)> = if chuzr_parallel {
+                        use rayon::prelude::*;
+                        infeasible_rows.rows.par_iter().copied().filter_map(chuzr_scan).collect()
+                    } else {
+                        infeasible_rows.rows.iter().copied().filter_map(chuzr_scan).collect()
+                    };
+                    match scored.iter().cloned().max_by(cmp) {
+                        None => None,
+                        Some(best) => {
+                            let mut tied: Vec<(usize, f64, bool)> = scored.iter().cloned().filter(|c| c.1 >= best.1 * (1.0 - exp_tie_tol)).collect();
+                            if tied.len() > 1 {
+                                tied.sort_unstable_by(|a, b| cmp(b, a));
+                                // EXPERIMENTAL (measurement only): static alternative
+                                // tie-break — see `tie_experiment::In::static_rule`'s
+                                // own docs. Recomputes each tied row's raw (pre-weight)
+                                // infeasibility straight from `t`/`std` rather than
+                                // having `chuzr_scan` return it, since it's needed for
+                                // only the (rare) tied rows, not every candidate.
+                                if let Some(rule) = exp_static_rule {
+                                    let raw_delta = |i: usize| -> f64 {
+                                        let var = t.basis[i];
+                                        let val = t.x[var];
+                                        if val < std.lb[var] { std.lb[var] - val } else if val > std.ub[var] { val - std.ub[var] } else { 0.0 }
+                                    };
+                                    let pick = match rule {
+                                        0 => tied.iter().cloned().max_by(|a, b| raw_delta(a.0).total_cmp(&raw_delta(b.0))),
+                                        1 => tied.iter().cloned().min_by(|a, b| raw_delta(a.0).total_cmp(&raw_delta(b.0))),
+                                        _ => tied.iter().cloned().min_by_key(|c| c.0),
+                                    };
+                                    pick
+                                } else if let Some(&choice) = exp_forced.get(&_iter) {
+                                    Some(tied.get(choice).or_else(|| tied.first()).copied().unwrap())
+                                } else if exp_stop_at_new_tie {
+                                    let tied_rows: Vec<usize> = tied.iter().map(|c| c.0).collect();
+                                    tie_experiment::OUT.with(|o| *o.borrow_mut() = Some(tie_experiment::Out::NewTie { iter: _iter, tied_rows }));
+                                    return SimplexResult { status: Status::Infeasible, x: None }; // dummy sentinel: real result comes back via `tie_experiment::OUT`
+                                } else {
+                                    Some(best)
+                                }
+                            } else {
+                                Some(best)
+                            }
+                        }
+                    }
+                } else if chuzr_parallel {
                     use rayon::prelude::*;
                     infeasible_rows.rows.par_iter().copied().filter_map(chuzr_scan).max_by(cmp)
                 } else {

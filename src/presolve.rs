@@ -312,7 +312,14 @@ pub fn run_extended(
     let sc = timed_step!("scaling::compute", scaling::compute(n, a, g, c, ruiz_iters));
     let (mut a, mut g, mut b, mut h, mut c) = timed_step!("scaling::apply", scaling::apply(&sc, a, g, b, h, c));
 
-    let (na, nb) = timed_step!("reduce_equalities", redundancy::reduce_equalities(&a, &b, n));
+    // Raw bounds straight off the just-scaled `g`/`h` (no propagation yet —
+    // that only starts inside the round loop below), handed to
+    // `reduce_equalities` purely for its own block-decomposition pre-pass's
+    // small-coefficient edge filter (see that pre-pass's own docs on why an
+    // unpropagated, looser bound here is safe, just more conservative, than
+    // the fully-tightened `orig_lb`/`orig_ub` extracted again below).
+    let (pre_lb, pre_ub, _, _) = propagate::extract_bounds(n, &g, &h);
+    let (na, nb) = timed_step!("reduce_equalities", redundancy::reduce_equalities(&a, &b, n, &pre_lb, &pre_ub));
     a = na;
     b = nb;
     if profile && std::env::var("ENOMOTO_PROF_REDUNDANCY").is_ok() {

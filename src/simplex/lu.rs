@@ -747,38 +747,54 @@ fn debug_print_block_sizes(m: usize, rows_in: &[Vec<(usize, f64)>]) {
 /// `factorize`'s own gate for attempting [`factorize_bordered`] before
 /// falling back to plain [`factorize_flat_markowitz`] — see
 /// `factorize_bordered`'s own docs for the technique and why it exists.
-/// Both a fraction-of-`m` and an absolute cap: the dense Schur complement
-/// this produces is `k x k` (cheap via [`factorize_dense_faer`] regardless
-/// of `k`), but *building* it costs `O(k * (m - k))` dense dot products
-/// plus `k` sparse triangular solves through `L_SS` — cheap for `fit1p`-
-/// shaped instances (`k` in the tens), but letting `k` grow alongside `m`
-/// unchecked would eventually reintroduce the same "pay a chunk of `m`
-/// work every refactorization regardless of payoff" problem the earlier
-/// (reverted) Dulmage-Mendelsohn attempt ran into — see
-/// `factorize_flat_markowitz`'s own doc comment for that history.
 ///
-/// Unlike that reverted attempt, this gate's own detection cost
-/// (`detect_border_columns`, one `O(nnz)` pass) is cheap enough to run
-/// unconditionally: a controlled full-73-problem Netlib A/B (this gate
-/// enabled vs. plain `factorize_flat_markowitz` always) showed no
-/// measurable regression on any instance once run-to-run subprocess
-/// scheduling noise was controlled for (repeated head-to-head timing,
-/// not two independently-scheduled full-batch runs — several apparent
-/// double-digit-percent "regressions" in the first batch-vs-batch
-/// comparison, e.g. `fffff800`/`scfxm1`/`ganges`, vanished under direct
-/// repeated comparison), while several instances beyond `fit1p` itself
-/// improved substantially (`scrs8` -58%, `ship04s` -57%, `shell` -52%,
-/// `maros` -41%, `fit1p` -26%, plus a handful more in the 20-45% range) —
-/// this is the same `k`-nonzero-columns detection [`DENSE_COL_FRACTION`]
-/// already made cheap for `MarkowitzState::initially_dense`'s own
-/// purposes, evidently common enough across Netlib-shaped LPs (not just
-/// the `fit1p`/`fit2p` "trend column" family) to be worth attempting by
-/// default rather than gating behind an opt-in flag. Both thresholds are
-/// still first-pass — this run didn't exercise `k` anywhere near either
-/// cap — and worth revisiting if a future instance shows they're too
-/// generous.
-const BORDER_MAX_FRACTION: f64 = 0.3;
-const BORDER_MAX_COUNT: usize = 200;
+/// This gate's own detection cost (`detect_border_columns`, one `O(nnz)`
+/// pass) is cheap enough to run unconditionally: a controlled full-73-
+/// problem Netlib A/B (this gate enabled vs. plain
+/// `factorize_flat_markowitz` always) showed no measurable regression on
+/// any instance once run-to-run subprocess scheduling noise was
+/// controlled for (repeated head-to-head timing, not two independently-
+/// scheduled full-batch runs — several apparent double-digit-percent
+/// "regressions" in the first batch-vs-batch comparison, e.g.
+/// `fffff800`/`scfxm1`/`ganges`, vanished under direct repeated
+/// comparison), while several instances beyond `fit1p` itself improved
+/// substantially (`scrs8` -58%, `ship04s` -57%, `shell` -52%, `maros`
+/// -41%, `fit1p` -26%, plus a handful more in the 20-45% range) — this is
+/// the same `k`-nonzero-columns detection [`DENSE_COL_FRACTION`] already
+/// made cheap for `MarkowitzState::initially_dense`'s own purposes,
+/// evidently common enough across Netlib-shaped LPs (not just the
+/// `fit1p`/`fit2p` "trend column" family) to be worth attempting by
+/// default rather than gating behind an opt-in flag.
+///
+/// **`BORDER_MAX_FRACTION` (`k / m`) is the real, measured constraint —
+/// not an absolute `k` count.** A synthetic-`fit1p`-shaped sweep
+/// (`border_crossover_sweep*` in this module's own tests, `#[ignore]`d,
+/// rerun via `cargo test --release -- --ignored --nocapture border_`) at
+/// both `m=800` and `m=2000` found `factorize_bordered` beating
+/// whatever `factorize_flat_markowitz` would otherwise pick (plain
+/// Markowitz below `is_dense_input`'s own 25% gate, `factorize_dense_faer`
+/// above it — `factorize_bordered` beats *that* too, up to a point) by
+/// **30x-600x** for `k/m` up to `0.40`, crossing over to a wash somewhere
+/// around `k/m ~= 0.5` and a clear loss by `k/m = 0.6` — at *both* `m`
+/// values, i.e. this is a genuine fraction effect (the `k x k` Schur
+/// complement's own `O(k^3)` dense-factor cost, relative to the `(m-k)`-
+/// sized sparse part it's carved out of), not an absolute-`k` one: `m=800,
+/// k=400` and `m=2000, k=1000` (both `k/m=0.5`) landed at the same
+/// break-even point despite `k` itself differing by 2.5x. `0.4` sits with
+/// real margin below the measured crossover.
+///
+/// The *previous* version of this gate paired that fraction with a
+/// `BORDER_MAX_COUNT` of `200` on the mistaken assumption that unbounded
+/// `k` needed an absolute backstop the way the reverted Dulmage-Mendelsohn
+/// attempt did — the sweep above disproves that directly (`m=2000, k=800`,
+/// five times over `200`, still won by 603x). `BORDER_MAX_COUNT` here is
+/// now a purely defensive sanity bound, sized so its own `O(k^3)` dense
+/// factor stays well under this crate's stated basis-size envelope ("`m`
+/// in the low thousands", per `GpScratch`'s own docs) rather than
+/// something expected to actually bind — `BORDER_MAX_FRACTION` is doing
+/// the real work.
+const BORDER_MAX_FRACTION: f64 = 0.4;
+const BORDER_MAX_COUNT: usize = 3000;
 
 /// Columns whose nonzero count exceeds [`DENSE_COL_FRACTION`] of `m` —
 /// the same "near-fully-dense trend/regression column" shape
@@ -806,13 +822,23 @@ pub fn factorize(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuFactors> {
     if std::env::var("ENOMOTO_DEBUG_BLOCK_SIZES").is_ok() {
         debug_print_block_sizes(m, rows_in);
     }
-    if !is_dense_input(m, rows_in) {
-        let border = detect_border_columns(m, rows_in);
-        let k = border.len();
-        if k > 0 && k <= BORDER_MAX_COUNT && (k as f64) <= BORDER_MAX_FRACTION * m as f64 {
-            if let Some(lu) = factorize_bordered(m, rows_in, &border) {
-                return Some(lu);
-            }
+    // Tried *before* checking `is_dense_input`, deliberately: the measured
+    // crossover (see `BORDER_MAX_FRACTION`'s own docs) sits around
+    // `k/m ~= 0.5`, well past `is_dense_input`'s own 25%-of-`m^2` overall-
+    // density gate — a border-heavy input can easily cross that overall
+    // gate on the border columns' own density alone while `k/m` is still
+    // comfortably under `BORDER_MAX_FRACTION`, and in exactly that range
+    // `factorize_bordered` beats `factorize_dense_faer` too (not just
+    // plain Markowitz), so gating this attempt on `!is_dense_input` would
+    // give up a real win. `factorize_bordered` itself falls through to
+    // `None` (this function's own fallback to `factorize_flat_markowitz`,
+    // which still makes its own `is_dense_input` dispatch) if the sparse
+    // phase can't find `m - k` independent pivots.
+    let border = detect_border_columns(m, rows_in);
+    let k = border.len();
+    if k > 0 && k <= BORDER_MAX_COUNT && (k as f64) <= BORDER_MAX_FRACTION * m as f64 {
+        if let Some(lu) = factorize_bordered(m, rows_in, &border) {
+            return Some(lu);
         }
     }
     factorize_flat_markowitz(m, rows_in)
@@ -1507,6 +1533,19 @@ impl OffDiag {
             }
         }
     }
+
+    /// Materializes this eta's off-diagonal entries as owned `(row_step,
+    /// value)` pairs. Only called on a cold, small-`nnz` path (`try_update`
+    /// unregistering a slot's *old* content from `FtLu::row_owners` before
+    /// overwriting it) — unlike `remove_row`/the dot-product loops above,
+    /// this never runs once per row of `U`, so an intermediate `Vec` here
+    /// costs nothing that matters.
+    fn pairs(&self) -> Vec<(usize, f64)> {
+        match self {
+            OffDiag::Sparse(v) => v.clone(),
+            OffDiag::Dense { data, .. } => data.iter().enumerate().filter(|&(_, &v)| v != 0.0).map(|(i, &v)| (i, v)).collect(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -1545,7 +1584,30 @@ const DENSE_RHS_FRACTION: f64 = 0.4;
 #[derive(Clone)]
 pub struct FtLu {
     base: LuFactors,
+    /// `U`'s etas, physically stored in **creation order** — exactly as
+    /// before — so `u_transpose_solve_into`/`u_solve_into` (the hot,
+    /// once-*every*-iteration BTRAN/FTRAN paths, not just `try_update`)
+    /// keep a plain sequential scan with no pointer-chasing indirection.
     u_seq: Vec<UEta>,
+    /// `slot_pos[slot]` is `slot`'s current index into `u_seq` — kept in
+    /// sync by `try_update` over exactly the range its own
+    /// `Vec::remove`/`push` already touches (see `try_update`'s own docs),
+    /// so this costs nothing beyond what the reordering itself already
+    /// pays. Turns "find slot p's eta" from the O(m) linear scan
+    /// `find_seq_pos` used to do into an O(1) index.
+    slot_pos: Vec<usize>,
+    /// Reverse index: `row_owners[r]` lists every slot whose `off_diag`
+    /// currently holds a nonzero at row-step `r`. `try_update`'s
+    /// replace-column step (Tomlin 1974, eq. 12) must zero row `p` out of
+    /// every *other* eta that still references it; before this index
+    /// existed, that meant visiting all `m` etas in `U` and asking each
+    /// "do you have an entry at `p`" (almost all answering no, but each
+    /// still paying a full scan of its own off-diagonal list to say so).
+    /// This answers "who has an entry at `p`" directly (combined with
+    /// `slot_pos` above for O(1) access to each one), so only the
+    /// (typically small — a few percent of `m`, per `ENOMOTO_DEBUG_ETA_DENSITY`
+    /// measurements) handful that actually do ever get touched.
+    row_owners: Vec<Vec<usize>>,
     r_etas: Vec<REta>,
 }
 
@@ -1563,6 +1625,12 @@ impl FtLu {
                 }
             }
         }
+        let mut row_owners: Vec<Vec<usize>> = vec![Vec::new(); m];
+        for (slot, pairs) in off_diags.iter().enumerate() {
+            for &(row_step, _) in pairs {
+                row_owners[row_step].push(slot);
+            }
+        }
         let u_seq: Vec<UEta> = (0..m)
             .map(|slot| UEta {
                 slot,
@@ -1573,6 +1641,8 @@ impl FtLu {
         FtLu {
             base,
             u_seq,
+            slot_pos: (0..m).collect(),
+            row_owners,
             r_etas: Vec::new(),
         }
     }
@@ -1584,10 +1654,6 @@ impl FtLu {
     pub fn should_use_dense_solve(&self, rhs_nnz: usize) -> bool {
         let m = self.base.m;
         m > 0 && rhs_nnz as f64 > DENSE_RHS_FRACTION * m as f64
-    }
-
-    fn find_seq_pos(&self, slot: usize) -> usize {
-        self.u_seq.iter().position(|e| e.slot == slot).expect("slot must be present in the U sequence")
     }
 
     /// `U_k^{-T}` applied in place to a step-space vector: processes the
@@ -1868,7 +1934,7 @@ impl FtLu {
         e_tilde[p] = 1.0;
         self.u_transpose_solve_into(&mut e_tilde);
 
-        let seq_pos = self.find_seq_pos(p);
+        let seq_pos = self.slot_pos[p];
         let old_pivot = self.u_seq[seq_pos].pivot;
 
         let r_vec: Vec<(usize, f64)> =
@@ -1880,14 +1946,42 @@ impl FtLu {
             return false;
         }
 
-        self.u_seq.remove(seq_pos);
-        for eta in &mut self.u_seq {
-            eta.off_diag.remove_row(p);
+        // `Vec::remove` shifts every later element down by one position —
+        // update `slot_pos` for exactly that range (elements the memmove
+        // itself already touches, so this is no extra asymptotic cost)
+        // rather than the old `find_seq_pos`'s full O(m) re-scan.
+        let removed = self.u_seq.remove(seq_pos);
+        for pos in seq_pos..self.u_seq.len() {
+            self.slot_pos[self.u_seq[pos].slot] = pos;
+        }
+
+        // Unregister slot `p`'s *old* off-diagonal entries from
+        // `row_owners` before overwriting them below — otherwise a stale
+        // `p` would linger in some other row's owner list, pointing at
+        // content that no longer exists there.
+        for (row_step, _) in removed.off_diag.pairs() {
+            if let Some(idx) = self.row_owners[row_step].iter().position(|&s| s == p) {
+                self.row_owners[row_step].swap_remove(idx);
+            }
+        }
+
+        // Zero row `p` out of every eta that still references it (Tomlin
+        // 1974, eq. 12) — only the etas `row_owners[p]` actually lists,
+        // not every eta in `U` (see `row_owners`'s own docs), each found
+        // in O(1) via `slot_pos`.
+        for slot in std::mem::take(&mut self.row_owners[p]) {
+            let pos = self.slot_pos[slot];
+            self.u_seq[pos].off_diag.remove_row(p);
         }
 
         let off_diag: Vec<(usize, f64)> =
             (0..m).filter(|&i| i != p && a_tilde[i] != 0.0).map(|i| (i, a_tilde[i])).collect();
+        for &(row_step, _) in &off_diag {
+            self.row_owners[row_step].push(p);
+        }
         self.u_seq.push(UEta { slot: p, pivot: new_pivot, off_diag: pack_off_diag(m, off_diag) });
+        self.slot_pos[p] = self.u_seq.len() - 1;
+
         self.r_etas.push(REta { p, r: pack_off_diag(m, r_vec) });
 
         true
@@ -2111,6 +2205,185 @@ mod tests {
         assert!(factorize_bordered(m, &rows, &border).is_none());
         assert!(factorize_flat_markowitz(m, &rows).is_none(), "matrix is genuinely singular");
         assert!(factorize(m, &rows).is_none());
+    }
+
+    /// Builds an `fit1p`-shaped arrowhead matrix at a chosen `m` and
+    /// border fraction `k/m`: `m - k` "local" rows each with one local
+    /// sparse entry (own diagonal-ish column) plus every border column,
+    /// and `k` purely-border rows forming a diagonally dominant (hence
+    /// nonsingular) `k x k` core — the same shape
+    /// `factorize_bordered_matches_flat_markowitz_larger` uses, just
+    /// parameterized for the crossover sweep below.
+    fn arrowhead(m: usize, k: usize) -> (Vec<Vec<(usize, f64)>>, Vec<usize>) {
+        let border: Vec<usize> = (m - k..m).collect();
+        let mut rows: Vec<Vec<(usize, f64)>> = Vec::with_capacity(m);
+        for i in 0..(m - k) {
+            let mut row = vec![(i, 5.0 + i as f64)];
+            for (bi, &b) in border.iter().enumerate() {
+                row.push((b, 1.0 + 0.1 * ((i + bi) % 5) as f64));
+            }
+            rows.push(row);
+        }
+        for bi in 0..k {
+            let mut row = Vec::with_capacity(k);
+            for (bj, &b2) in border.iter().enumerate() {
+                let v = if bi == bj { 10.0 * k as f64 } else { 1.0 + ((bi + bj) % 3) as f64 * 0.2 };
+                row.push((b2, v));
+            }
+            rows.push(row);
+        }
+        (rows, border)
+    }
+
+    /// **Diagnostic, not a correctness test** (`#[ignore]`d — run
+    /// explicitly via `cargo test --release -- --ignored --nocapture
+    /// border_crossover`): sweeps the border fraction `k/m` at a fixed
+    /// `m` on the synthetic `arrowhead` shape above and times
+    /// `factorize_bordered` against `factorize_flat_markowitz`, to find
+    /// where [`BORDER_MAX_FRACTION`]'s `0.3` cap should actually sit —
+    /// that constant's own docs candidly note it was never tuned against
+    /// real data (Netlib's own `fit1p`/`fit2p` family only ever exercises
+    /// `k/m` in the few-percent range). Kept as a live diagnostic (like
+    /// `debug_print_block_sizes`) rather than deleted, since a future
+    /// problem shape or a revisit of the threshold can just rerun it.
+    #[test]
+    #[ignore]
+    fn border_crossover_sweep() {
+        let m = 800;
+        for &frac in &[0.02, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5] {
+            let k = ((m as f64) * frac).round() as usize;
+            if k == 0 || k >= m {
+                continue;
+            }
+            let (rows, border) = arrowhead(m, k);
+            let nnz: usize = rows.iter().map(|r| r.len()).sum();
+            let dense = is_dense_input(m, &rows);
+
+            let n_runs = 20;
+            let t0 = std::time::Instant::now();
+            for _ in 0..n_runs {
+                std::hint::black_box(factorize_bordered(m, &rows, &border).expect("nonsingular"));
+            }
+            let bordered_us = t0.elapsed().as_micros() as f64 / n_runs as f64;
+
+            let t0 = std::time::Instant::now();
+            for _ in 0..n_runs {
+                std::hint::black_box(factorize_flat_markowitz(m, &rows).expect("nonsingular"));
+            }
+            let flat_us = t0.elapsed().as_micros() as f64 / n_runs as f64;
+
+            println!(
+                "m={m} k={k} k/m={frac:.2} nnz_frac={:.3} is_dense_input={dense} bordered={bordered_us:.1}us flat={flat_us:.1}us speedup={:.2}x",
+                nnz as f64 / (m * m) as f64,
+                flat_us / bordered_us
+            );
+        }
+    }
+
+    /// Second half of the sweep: the arrowhead shape above makes border
+    /// columns *fully* dense (every local row touches every border
+    /// column), which means `nnz` grows with `k` fast enough to trip
+    /// [`is_dense_input`]'s own 25%-of-`m^2` gate on its own once `k/m`
+    /// crosses roughly that same 25% (a border column population of `k`
+    /// fully-dense columns alone already contributes `k/m` density) — so
+    /// the sweep above never actually exercises `factorize_bordered`
+    /// against a *genuinely sparse-overall* `flat_markowitz` at large
+    /// `k/m`; `factorize`'s own `is_dense_input` check would already have
+    /// routed those cases to `factorize_dense_faer` before `k/m` ever
+    /// became this function's own problem. This variant holds overall
+    /// density far below that gate by making border columns only
+    /// partially populated (`border_density`), to see whether `k/m` still
+    /// has a *genuine* independent crossover once that confound is
+    /// removed.
+    fn arrowhead_partial(m: usize, k: usize, border_density: f64) -> (Vec<Vec<(usize, f64)>>, Vec<usize>) {
+        let border: Vec<usize> = (m - k..m).collect();
+        let mut rows: Vec<Vec<(usize, f64)>> = Vec::with_capacity(m);
+        let step = (1.0 / border_density).round().max(1.0) as usize;
+        for i in 0..(m - k) {
+            let mut row = vec![(i, 5.0 + i as f64)];
+            for (bi, &b) in border.iter().enumerate() {
+                if (i + bi) % step == 0 {
+                    row.push((b, 1.0 + 0.1 * ((i + bi) % 5) as f64));
+                }
+            }
+            rows.push(row);
+        }
+        for bi in 0..k {
+            let mut row = Vec::with_capacity(k);
+            for (bj, &b2) in border.iter().enumerate() {
+                let v = if bi == bj { 10.0 * k as f64 } else { 1.0 + ((bi + bj) % 3) as f64 * 0.2 };
+                row.push((b2, v));
+            }
+            rows.push(row);
+        }
+        (rows, border)
+    }
+
+    /// Runs one `(m, k/m)` point of the partial-density sweep and prints
+    /// bordered-vs-`factorize_flat_markowitz` timing (the latter dispatches
+    /// to `factorize_dense_faer` itself once `is_dense_input` fires, so
+    /// this is really "bordered vs whatever `factorize` would otherwise
+    /// pick" once density crosses that gate).
+    fn run_border_crossover_point(m: usize, frac: f64, n_runs: usize) {
+        let k = ((m as f64) * frac).round() as usize;
+        if k == 0 || k >= m {
+            return;
+        }
+        let (rows, border) = arrowhead_partial(m, k, 0.3);
+        let nnz: usize = rows.iter().map(|r| r.len()).sum();
+        let dense = is_dense_input(m, &rows);
+
+        let t0 = std::time::Instant::now();
+        for _ in 0..n_runs {
+            std::hint::black_box(factorize_bordered(m, &rows, &border).expect("nonsingular"));
+        }
+        let bordered_us = t0.elapsed().as_micros() as f64 / n_runs as f64;
+
+        let t0 = std::time::Instant::now();
+        for _ in 0..n_runs {
+            std::hint::black_box(factorize_flat_markowitz(m, &rows).expect("nonsingular"));
+        }
+        let flat_us = t0.elapsed().as_micros() as f64 / n_runs as f64;
+
+        println!(
+            "m={m} k={k} k/m={frac:.2} nnz_frac={:.3} is_dense_input={dense} bordered={bordered_us:.1}us flat={flat_us:.1}us speedup={:.2}x",
+            nnz as f64 / (m * m) as f64,
+            flat_us / bordered_us
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn border_crossover_sweep_partial_density() {
+        for &frac in &[0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.6, 0.7] {
+            run_border_crossover_point(800, frac, 20);
+        }
+    }
+
+    /// Fine-grained pass around the `m=800` crossover found above
+    /// (bordered wins at `k/m=0.50`, loses at `0.60`) to pin it down more
+    /// precisely.
+    #[test]
+    #[ignore]
+    fn border_crossover_sweep_fine() {
+        for &frac in &[0.50, 0.52, 0.54, 0.56, 0.58, 0.60] {
+            run_border_crossover_point(800, frac, 20);
+        }
+    }
+
+    /// Same `k/m` points at a different `m` (`2000` instead of `800`), to
+    /// tell whether the crossover found above is a genuine *fraction*
+    /// (`k/m`) effect — in which case this should land at roughly the same
+    /// `k/m` — or actually an *absolute-`k`* effect (the `k x k` Schur
+    /// complement's own `O(k^3)` dense factorization cost), in which case
+    /// a larger `m` should cross over at a *smaller* `k/m` (same absolute
+    /// `k`).
+    #[test]
+    #[ignore]
+    fn border_crossover_sweep_scaling() {
+        for &frac in &[0.2, 0.3, 0.4, 0.5, 0.6] {
+            run_border_crossover_point(2000, frac, 5);
+        }
     }
 
     #[test]

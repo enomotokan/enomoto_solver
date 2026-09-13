@@ -80,6 +80,17 @@
 //! variable is already exactly fixed, since that specific case is what
 //! triggered both failures above and contributes nothing `dualfix`'s own
 //! fixing hasn't already captured — is worth trying later.
+//!
+//! **A third wiring, non-destructive this time, is live**: [`clean_row`]
+//! (not [`remove_small_coefficients`] — the model's `A`/`b` are never
+//! touched) feeds `redundancy::dulmage_mendelsohn_blocks`'s own
+//! block-decomposition pre-pass, deciding which structural edges a
+//! negligible coefficient should be left out of when building that
+//! pre-pass's graph. Both prior failures above trace to *mutating* a
+//! row/rhs a later stage then solved against; using the identical
+//! negligibility test only to drop a graph edge carries none of that risk
+//! — see `dulmage_mendelsohn_blocks`'s own docs for why dropping an edge
+//! there only costs decomposition recall, never soundness.
 
 use std::collections::BTreeMap;
 
@@ -113,7 +124,7 @@ const NOISE_THRESHOLD: f64 = 1e-10;
 /// Entries are visited in the row's own stored (ascending column index)
 /// order, matching the paper's own "starting from the first non-zero
 /// coefficient".
-fn clean_row(row: &[(usize, f64)], rhs: f64, lb: &[f64], ub: &[f64]) -> (Vec<(usize, f64)>, f64) {
+pub(crate) fn clean_row(row: &[(usize, f64)], rhs: f64, lb: &[f64], ub: &[f64]) -> (Vec<(usize, f64)>, f64) {
     let budget = CUMULATIVE_FRACTION * EPS;
     let mut new_row = Vec::with_capacity(row.len());
     let mut new_rhs = rhs;
