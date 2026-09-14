@@ -272,18 +272,18 @@ const DEVEX_STAGNATION_REL_TOL: f64 = 1e-9;
 
 /// Absolute pivot-magnitude threshold below which a single dual pivot
 /// counts as "ill-conditioned" and triggers `solve_lp_dual_on`'s
-/// restart-with-`force_dse` (see that function's own docs) — independent
-/// of, and (confirmed on Netlib's `cycle`/`forplan`) firing far sooner
-/// than, [`DEVEX_STAGNATION_WINDOW`]'s objective-progress check: a pivot
-/// with `|alpha[p]|` already this small is direct evidence that Devex's
-/// cheap, approximate weights just steered `chuzr` toward a
+/// in-place Devex->DSE switch (see that function's own docs) —
+/// independent of, and (confirmed on Netlib's `cycle`/`forplan`) firing
+/// far sooner than, [`DEVEX_STAGNATION_WINDOW`]'s objective-progress
+/// check: a pivot with `|alpha[p]|` already this small is direct evidence
+/// that Devex's cheap, approximate weights just steered `chuzr` toward a
 /// poorly-conditioned row — on both instances, the objective kept
 /// improving at an entirely ordinary rate right up until a single pivot
 /// this tiny forced a refactorization that then found the basis itself
 /// numerically singular, so the rolling-average trigger alone never saw
 /// anything worth escalating over. Chosen two orders of magnitude above
 /// [`FT_MIN_PIVOT`] itself (the point `try_update` would reject the pivot
-/// outright and force that refactorization) so the restart this triggers
+/// outright and force that refactorization) so the switch this triggers
 /// fires with real margin to spare, not only once a pivot is already
 /// unusable.
 const DEVEX_ILLCOND_PIVOT_TOL: f64 = 1e-5;
@@ -2127,6 +2127,34 @@ impl DseState {
         DseState { w: vec![1.0; m], use_parallel: m > RAYON_SIZE_THRESHOLD }
     }
 
+    /// Exact DSE weights for an **arbitrary** (already-factored) basis,
+    /// rather than [`Self::new`]'s all-slack-only `w[i] = 1`. Row `i` of
+    /// `B^-1` is `e_i^T B^-1`, obtained by one BTRAN (`B^T z = e_i`, i.e.
+    /// `lu.solve_transpose_into(&e_i, ..)`); its squared 2-norm is exactly
+    /// `w[i] = ||e_i^T B^-1||^2`. One BTRAN per row (`O(m)` BTRANs) - the
+    /// same *kind* of `O(m * nnz)` work [`fresh_d`] already does in one
+    /// call after every refactorization, and far cheaper than the full
+    /// cold restart it replaces on `forplan` (221 DSE + 245 Devex pivots).
+    /// Must be given the `lu` matching the basis the weights are wanted
+    /// for; the callers pass the factorization live at the point of the
+    /// Devex->DSE switch (see the two call sites below), so the weights
+    /// are exact for exactly that basis - no drift from an FT update the
+    /// switch has not yet applied.
+    fn from_basis(m: usize, lu: &sparse_lu::FtLu) -> Self {
+        let mut w = vec![1.0; m];
+        let mut e_i = vec![0.0; m];
+        let mut scratch = vec![0.0; m];
+        let mut z = vec![0.0; m];
+        for i in 0..m {
+            e_i[i] = 1.0;
+            lu.solve_transpose_into(&e_i, &mut scratch, &mut z);
+            e_i[i] = 0.0;
+            let norm_sq: f64 = z.iter().map(|&v| v * v).sum();
+            w[i] = norm_sq.max(STEEPEST_EDGE_FLOOR);
+        }
+        DseState { w, use_parallel: m > RAYON_SIZE_THRESHOLD }
+    }
+
     /// `p` = the pivot row (basis slot that left), `alpha` = `B^-1 a_q`
     /// (the entering column's FTRAN, against the basis as it stood
     /// *before* the pivot), `tau` = `B^-1 (B^-T e_p)` ("ftran-dse").
@@ -2711,14 +2739,14 @@ pub fn solve_lp_dual_with_tie_experiment(
 /// `StdForm` — see [`solve_lp_on`]'s analogous split for the primal
 /// method, and [`build_std_form_presolved`]'s docs for what "presolved"
 /// means here.
-/// `force_dse`: `true` only on the one-time restart this function issues
-/// itself (see the ill-conditioning trigger below) — every external call
-/// site always passes `false`. Skips the Devex warm-up entirely and prices
-/// every iteration with exact DSE from the start, at DSE's usual per-pivot
-/// cost (the extra `tau` FTRAN — see [`EdgeWeights`]'s own docs) but
-/// without ever risking the poorly-conditioned pivots Devex's cheap
-/// approximation can pick on a problem this function has already tried
-/// once and found triggers [`DEVEX_ILLCOND_PIVOT_TOL`].
+/// `force_dse`: `true` skips the Devex warm-up entirely and prices every
+/// iteration with exact DSE from the start, at DSE's usual per-pivot cost
+/// (the extra `tau` FTRAN — see [`EdgeWeights`]'s own docs). No call site
+/// passes `true` any more: the ill-conditioning trigger below now switches
+/// pricing *in place* instead of re-entering this function. The parameter
+/// survives only as the `ENOMOTO_FORCE_DSE` diagnostic override (see the
+/// `force_dse` binding below), which forces the DSE-from-the-start path
+/// for A/B measurement.
 fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
     // Checked once here (not per-iteration) — see `timed!`'s own docs for
     // why this keeps a normal, non-profiling solve from paying for any
@@ -3826,7 +3854,6 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
         });
         let a_enter = &a_enter_buf;
         let alpha = &alpha_buf;
-        let tau = &tau_buf;
 
         let theta_q = (t.x[leaving_var] - target_bound) / alpha[p];
 
@@ -3848,29 +3875,41 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
 
         // Ill-conditioning trigger (see [`DEVEX_ILLCOND_PIVOT_TOL`]'s own
         // docs): a single pivot this small, while still in Devex mode, is
-        // itself sufficient evidence that this whole problem — not just
-        // this one pivot — is a poor fit for Devex's cheap approximation
+        // itself sufficient evidence that this whole problem - not just
+        // this one pivot - is a poor fit for Devex's cheap approximation
         // (confirmed on Netlib `cycle`/`forplan`/`25fv47`: each hits this
-        // at most once, always fairly early). Rather than merely switching
-        // pricing for the *next* pivot and pressing on with everything
-        // this attempt has already committed under Devex (this function's
-        // own previous behavior — safe, but left `cycle`/`forplan` paying
-        // for hundreds to thousands of Devex-driven pivots before ever
-        // reaching the switch), this restarts the *entire* solve from
-        // scratch with `force_dse: true`: every local variable this
-        // function built (`t`, `lu`, `d`, `infeasible_rows`, ...) is simply
-        // dropped, so there is no partial state to reconcile — measured to
-        // both avoid the costly downstream recovery this trigger used to
-        // only delay (`cycle`: a 3819-iteration dual run before its
-        // primal-cleanup handoff; `forplan`: a full `solve_lp_on` cold
-        // restart) and finish faster outright (`forplan` needs only 221
-        // total DSE iterations, fewer than the 245 Devex iterations it
-        // used to burn just to *reach* this trigger).
+        // at most once, always fairly early).
+        //
+        // This used to `return solve_lp_dual_on(std, true)`, a full cold
+        // restart that threw away every local this function had built
+        // (`t`, `lu`, `d`, `infeasible_rows`, ...) and re-solved from the
+        // all-slack basis. That is now an **in-place switch**: the current
+        // basis and all incrementally-maintained state are kept, and only
+        // `weights` changes - to exact DSE weights for the *pre-pivot*
+        // basis ([`DseState::from_basis`]), so this very iteration's own
+        // weight-update step below (`dse.update_after_pivot`, which
+        // expects pre-pivot weights) correctly advances them to the
+        // post-pivot basis. The accumulated Devex work is therefore not
+        // discarded, and the restart's own re-solve cost (`forplan`: 221
+        // DSE + 245 Devex pivots thrown away) is not paid. Only the one
+        // pivot already fully computed this iteration (BFRT flips already
+        // applied to `t.x`, `q`/`alpha`/`theta_q` already formed) is
+        // committed under Devex - switching any earlier would have to
+        // undo committed flips, and `FT_MIN_PIVOT`-level pivots are
+        // rejected by `try_update` regardless, so accepting this one
+        // usable pivot and pricing every later one with DSE is the safe
+        // reading of "resume from here".
         if matches!(weights, EdgeWeights::Devex(_)) && alpha[p].abs() < DEVEX_ILLCOND_PIVOT_TOL {
             if debug_devex {
-                eprintln!("DEVEX->DSE restart-from-scratch at iter {_iter} (|alpha_p|={:.3e})", alpha[p].abs());
+                eprintln!("DEVEX->DSE in-place switch at iter {_iter} (|alpha_p|={:.3e})", alpha[p].abs());
             }
-            return solve_lp_dual_on(std, true);
+            let dse = DseState::from_basis(m, &lu);
+            // `tau` (ftran-dse) was skipped in the FTRAN block above
+            // because pricing was still Devex then, so solve it now for
+            // the DSE weight update below. `rho_p` and `lu` are both still
+            // for the pre-pivot basis - exactly what this update needs.
+            lu.solve_into(rho_p, &mut lu_scratch, &mut tau_buf);
+            weights = EdgeWeights::Dse(dse);
         }
 
         // Devex→DSE escalation (see [`DEVEX_STAGNATION_WINDOW`]'s own
@@ -3926,18 +3965,18 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
             // by the (possibly just-decided) `escalate_to_dse` flag instead
             // would read a stale `tau_buf` from a stale iteration.
             EdgeWeights::Devex(dv) => dv.update_after_pivot(p, alpha),
-            EdgeWeights::Dse(dse) => dse.update_after_pivot(p, alpha, tau),
+            EdgeWeights::Dse(dse) => dse.update_after_pivot(p, alpha, &tau_buf),
         });
         // Applied only now, after this pivot's own weight update above has
-        // run under the scheme that was actually live for it — takes
+        // run under the scheme that was actually live for it - takes
         // effect starting next iteration's FTRAN block (which decides
         // whether to pay for the `tau` solve from `weights`'s variant at
-        // that point).
-        if escalate_to_dse {
-            if debug_devex {
-                eprintln!("DEVEX->DSE escalation at iter {_iter}");
-            }
-            weights = EdgeWeights::Dse(DseState::new(m));
+        // that point). The actual `DseState` is built at the very end of
+        // this iteration, *after* the basis swap and `lu.try_update`
+        // below, so its weights are exact for the post-pivot basis (see
+        // [`DseState::from_basis`]); this branch only defers that.
+        if escalate_to_dse && debug_devex {
+            eprintln!("DEVEX->DSE escalation at iter {_iter}");
         }
 
         t.nb_status[leaving_var] = Some(if leaving_infeasible_low { NbStatus::Lower } else { NbStatus::Upper });
@@ -4050,6 +4089,16 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
                 d = fresh_d(&lu, &t, &active_cost);
                 infeasible_rows.rebuild(m, |i| row_infeasible(std, &t, &noise_feasible, i));
             });
+        }
+
+        // Devex->DSE stagnation escalation (see the `escalate_to_dse` flag
+        // above): `lu` now matches the post-pivot basis, so build the DSE
+        // weights exactly for *that* basis rather than the all-slack
+        // `DseState::new`'s `w[i] = 1` the old code used here - the cheap
+        // initialization silently reset every weight to its starting value
+        // even though the solve had already accumulated real progress.
+        if escalate_to_dse {
+            weights = EdgeWeights::Dse(DseState::from_basis(m, &lu));
         }
     }
 
