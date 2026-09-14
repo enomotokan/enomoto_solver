@@ -1045,10 +1045,12 @@ impl<'a> Tableau<'a> {
 
     /// Column `j` of the full constraint matrix, densified from
     /// `std.cols.row(j)` — O(nnz_j + n_rows), not a scan of every row
-    /// looking for column `j`. Used only where a genuinely dense column is
-    /// needed (FTRAN/BTRAN input for the one column actually
-    /// entering/leaving this iteration); see [`Self::column_sparse`] for
-    /// the far more common "dot product against column `j`" case.
+    /// looking for column `j`. Both real per-iteration call sites
+    /// (`run_phase`, `solve_lp_dual_on`) now go through the
+    /// non-allocating [`Self::column_into`] instead — this allocating
+    /// form only remains for tests that want a plain `Vec` without a
+    /// buffer to hand.
+    #[cfg(test)]
     fn column(&self, j: usize) -> Vec<f64> {
         let m = self.std.n_rows;
         let mut col = vec![0.0; m];
@@ -1343,6 +1345,34 @@ fn run_phase(
     // [`PrimalStallState`]'s own docs.
     let stall_limit = (5 * m).max(500);
 
+    // Per-iteration blocking-row candidate for the ratio test below —
+    // hoisted out of the loop body (it used to be defined inline, next to
+    // its only use) purely so `candidates_buf` below can name the type.
+    struct Candidate {
+        row: usize,
+        exact: f64,
+        relaxed: f64,
+        pivot_abs: f64,
+        hits_upper: bool,
+    }
+
+    // Per-iteration scratch/output buffers for every iteration's FTRAN/
+    // BTRAN calls and candidate list, declared once here rather than fresh
+    // inside the loop — mirrors `solve_lp_dual_on`'s own pre-loop buffer
+    // block (see that function's own docs): this primal loop used to
+    // allocate a fresh `cost`/`y`/`a_enter`/`alpha`/`e_r`/`rho`/`w` `Vec`
+    // (and a fresh `candidates` vec) on *every* iteration, i.e. several
+    // m-length heap allocations per pivot.
+    let mut cost_buf = vec![0.0; m];
+    let mut y_buf = vec![0.0; m];
+    let mut a_enter_buf = vec![0.0; m];
+    let mut alpha_buf = vec![0.0; m];
+    let mut scratch_buf = vec![0.0; m];
+    let mut e_r_buf = vec![0.0; m];
+    let mut rho_buf = vec![0.0; m];
+    let mut w_buf = vec![0.0; m];
+    let mut candidates_buf: Vec<Candidate> = Vec::with_capacity(m);
+
     for iter_idx in 0..MAX_ITERS {
         let rhs = t.recompute_basics(lu);
 
@@ -1392,30 +1422,32 @@ fn run_phase(
         // epsilon — this is what lets phase 1's "no infeasibilities left"
         // termination test below stay consistent with the same tolerance
         // the ratio test (below) uses to decide which bound is blocking.
-        let cost: Vec<f64> = if phase1 {
-            (0..m)
-                .map(|i| {
-                    let var = t.basis[i];
-                    let v = t.x[var];
-                    if v < std.lb[var] - expand.delta {
-                        -1.0
-                    } else if v > std.ub[var] + expand.delta {
-                        1.0
-                    } else {
-                        0.0
-                    }
-                })
-                .collect()
+        if phase1 {
+            for i in 0..m {
+                let var = t.basis[i];
+                let v = t.x[var];
+                cost_buf[i] = if v < std.lb[var] - expand.delta {
+                    -1.0
+                } else if v > std.ub[var] + expand.delta {
+                    1.0
+                } else {
+                    0.0
+                };
+            }
         } else {
-            t.basis.iter().map(|&var| std.c[var]).collect()
-        };
+            for i in 0..m {
+                cost_buf[i] = std.c[t.basis[i]];
+            }
+        }
+        let cost: &[f64] = &cost_buf;
 
         if phase1 && cost.iter().all(|&c| c == 0.0) {
             return Some(Status::Optimal); // phase-1 feasible
         }
 
         // y = B^-T cost_B ; reduced cost d_j = c_j - y . a_j
-        let y = lu.solve_transpose(&cost);
+        lu.solve_transpose_into(cost, &mut scratch_buf, &mut y_buf);
+        let y: &[f64] = &y_buf;
 
         // Steepest-edge entering rule (Forrest & Goldfarb 1992): among
         // eligible nonbasic j, maximize d_j^2 / gamma_j rather than
@@ -1492,8 +1524,10 @@ fn run_phase(
         };
 
         // alpha = B^-1 a_enter
-        let a_enter = t.column(enter);
-        let alpha = lu.solve(&a_enter);
+        t.column_into(enter, &mut a_enter_buf);
+        lu.solve_into(&a_enter_buf, &mut scratch_buf, &mut alpha_buf);
+        let a_enter: &[f64] = &a_enter_buf;
+        let alpha: &[f64] = &alpha_buf;
 
         // ---- two-pass Harris/EXPAND ratio test (Gill, Murray, Saunders &
         // Wright, "A practical anti-cycling procedure for linearly
@@ -1512,14 +1546,6 @@ fn run_phase(
         // degenerate pivot may leave the leaving variable slightly
         // outside its bound (by at most `expand.delta`), cleaned up later
         // by `expand_reset_nonbasics`.
-        struct Candidate {
-            row: usize,
-            exact: f64,
-            relaxed: f64,
-            pivot_abs: f64,
-            hits_upper: bool,
-        }
-
         let self_width = std.ub[enter] - std.lb[enter];
         let init_alpha1 = if self_width.is_finite() { self_width } else { f64::INFINITY };
 
@@ -1527,60 +1553,59 @@ fn run_phase(
         // — only the final `alpha1`/leaving-row reductions below combine
         // them — but, like the entering-variable scan above, this runs
         // sequentially rather than via rayon (same measured overhead).
-        let candidates: Vec<Candidate> = (0..m)
-            .into_iter()
-            .filter_map(|i| {
-                let rate = -best_dir * alpha[i]; // d(x_Bi)/d(theta)
-                if rate.abs() <= TOL {
-                    return None;
-                }
-                let var = t.basis[i];
-                let val = t.x[var];
-                let infeasible_low = phase1 && val < std.lb[var] - expand.delta;
-                let infeasible_high = phase1 && val > std.ub[var] + expand.delta;
+        candidates_buf.clear();
+        for i in 0..m {
+            let rate = -best_dir * alpha[i]; // d(x_Bi)/d(theta)
+            if rate.abs() <= TOL {
+                continue;
+            }
+            let var = t.basis[i];
+            let val = t.x[var];
+            let infeasible_low = phase1 && val < std.lb[var] - expand.delta;
+            let infeasible_high = phase1 && val > std.ub[var] + expand.delta;
 
-                // The blocking bound for this row depends on whether it is
-                // currently feasible, or (phase 1 only) which side it
-                // violates: an infeasible variable is only blocked by the
-                // bound it is heading *towards* — moving further into
-                // infeasibility is never itself blocked by this row (the
-                // Phase-1 bounds of §7.1: the violated side's bound is, in
-                // effect, infinite). A row *returning* to feasibility isn't
-                // at risk of a *new* infeasibility from this bound, so it
-                // gets no outward slack (`relaxed == exact`) — EXPAND's
-                // relaxation targets rows that could newly become infeasible,
-                // which the classical (non-Phase-1) presentation of the
-                // algorithm is the only case that arises.
-                let (bound, is_upper, active, returning_to_feasibility) = if rate < 0.0 {
-                    if infeasible_high {
-                        (std.ub[var], true, true, true)
-                    } else if infeasible_low {
-                        (std.lb[var], false, false, false)
-                    } else {
-                        (std.lb[var], false, true, false)
-                    }
+            // The blocking bound for this row depends on whether it is
+            // currently feasible, or (phase 1 only) which side it
+            // violates: an infeasible variable is only blocked by the
+            // bound it is heading *towards* — moving further into
+            // infeasibility is never itself blocked by this row (the
+            // Phase-1 bounds of §7.1: the violated side's bound is, in
+            // effect, infinite). A row *returning* to feasibility isn't
+            // at risk of a *new* infeasibility from this bound, so it
+            // gets no outward slack (`relaxed == exact`) — EXPAND's
+            // relaxation targets rows that could newly become infeasible,
+            // which the classical (non-Phase-1) presentation of the
+            // algorithm is the only case that arises.
+            let (bound, is_upper, active, returning_to_feasibility) = if rate < 0.0 {
+                if infeasible_high {
+                    (std.ub[var], true, true, true)
                 } else if infeasible_low {
-                    (std.lb[var], false, true, true)
-                } else if infeasible_high {
-                    (std.ub[var], true, false, false)
+                    (std.lb[var], false, false, false)
                 } else {
-                    (std.ub[var], true, true, false)
-                };
-
-                if !active || !bound.is_finite() {
-                    return None;
+                    (std.lb[var], false, true, false)
                 }
-                let exact = (bound - val) / rate;
-                let relaxed = if returning_to_feasibility {
-                    exact
-                } else {
-                    let relaxed_bound = if is_upper { bound + expand.delta } else { bound - expand.delta };
-                    (relaxed_bound - val) / rate
-                };
+            } else if infeasible_low {
+                (std.lb[var], false, true, true)
+            } else if infeasible_high {
+                (std.ub[var], true, false, false)
+            } else {
+                (std.ub[var], true, true, false)
+            };
 
-                Some(Candidate { row: i, exact, relaxed, pivot_abs: alpha[i].abs(), hits_upper: is_upper })
-            })
-            .collect();
+            if !active || !bound.is_finite() {
+                continue;
+            }
+            let exact = (bound - val) / rate;
+            let relaxed = if returning_to_feasibility {
+                exact
+            } else {
+                let relaxed_bound = if is_upper { bound + expand.delta } else { bound - expand.delta };
+                (relaxed_bound - val) / rate
+            };
+
+            candidates_buf.push(Candidate { row: i, exact, relaxed, pivot_abs: alpha[i].abs(), hits_upper: is_upper });
+        }
+        let candidates: &[Candidate] = &candidates_buf;
 
         let alpha1 = candidates.iter().map(|c| c.relaxed).fold(init_alpha1, f64::min);
 
@@ -1651,10 +1676,12 @@ fn run_phase(
                 // basis's LU — `rho` = row r of B^-1 (for beta_j) and `w`
                 // = B^-T alpha (for the cross term tau_j) — computed now,
                 // before the swap changes what `lu` represents.
-                let mut e_r = vec![0.0; m];
-                e_r[r] = 1.0;
-                let rho = lu.solve_transpose(&e_r);
-                let w = lu.solve_transpose(&alpha);
+                e_r_buf[r] = 1.0;
+                lu.solve_transpose_into(&e_r_buf, &mut scratch_buf, &mut rho_buf);
+                e_r_buf[r] = 0.0;
+                lu.solve_transpose_into(alpha, &mut scratch_buf, &mut w_buf);
+                let rho: &[f64] = &rho_buf;
+                let w: &[f64] = &w_buf;
                 let gamma_t_old = se.gamma[enter];
                 let pivot = alpha[r];
 
@@ -1676,13 +1703,13 @@ fn run_phase(
                 // Applies to every (now-)nonbasic column, which naturally
                 // includes the just-arrived leaving variable and excludes
                 // the just-entered one.
-                se.update_after_pivot(t, std, &rho, &w, gamma_t_old, pivot);
+                se.update_after_pivot(t, std, rho, w, gamma_t_old, pivot);
 
                 // Trigger (2): FtLu::try_update refactorizes in-place if
                 // the resulting pivot is too small to use safely. `None`
                 // here too — see the identical fallback earlier in this
                 // same loop, and this function's own docs.
-                if !lu.try_update(r, &a_enter, FT_MIN_PIVOT) {
+                if !lu.try_update(r, a_enter, FT_MIN_PIVOT) {
                     let Some(l) = try_refactorize(std, t) else {
                         if std::env::var("ENOMOTO_DEBUG_PHASES").is_ok() {
                             eprintln!("run_phase None@ft_update iter={iter_idx} phase1={phase1} pivot={pivot}");
