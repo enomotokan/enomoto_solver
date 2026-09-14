@@ -353,6 +353,73 @@ const FT_BUMP_LIMIT_FACTOR: usize = 64;
 /// budget before this unconditional cap would cut in first.
 const FT_MAX_UPDATES: usize = 300;
 
+/// Trigger (5), HiGHS `HEkkDualRow::updateVerify` equivalent: refactor if
+/// the pivot element this iteration is about to commit disagrees, by more
+/// than this relative amount, between its two independent sources — PRICE's
+/// row-direction value (`a_p[q]`, from `rho_p^T A`) and FTRAN's
+/// column-direction value (`alpha_buf[p]`, from `B^-1 A_q`). Both are exact
+/// in infinite precision; a real gap between them means the Forrest-Tomlin
+/// eta chain (`lu`) has already drifted enough to misrepresent `B^-1` by
+/// this iteration, *before* that error is baked into `x_B`/`d` by the
+/// primal/dual updates that would otherwise follow immediately.
+///
+/// This is deliberately a *different, earlier* signal than the existing
+/// triggers above: trigger (1) (`FT_RESIDUAL_TOL`) only re-checks
+/// `‖A_B x_B - rhs‖` every `FT_CHECK_INTERVAL * RESIDUAL_CHECK_MULTIPLIER`
+/// iterations, so a bad pivot can still be committed (and the resulting
+/// drift compounded by further updates) for up to that many iterations
+/// before it's caught; trigger (2) (`FT_MIN_PIVOT`) only rejects a pivot
+/// whose magnitude is small in an absolute sense, which says nothing about
+/// whether the *value itself* is still accurate. `updateVerify` instead
+/// checks every single pivot, immediately, using values both already
+/// computed as ordinary byproducts of this iteration's own BTRAN/PRICE and
+/// FTRAN (see `solve_lp_dual_on`'s main loop) — no extra BTRAN/FTRAN call
+/// is added to pay for it.
+///
+/// Chosen at `1e-7`, two orders of magnitude above the `~1e-9` (`TOL`)
+/// rounding-noise floor a healthy sparse dot-product/triangular-solve pair
+/// of this size actually exhibits on this crate's target problem sizes, and
+/// matching [`FT_MIN_PIVOT`]'s own order of magnitude (the point below
+/// which a pivot is rejected outright regardless of what triggered the
+/// check) rather than [`FT_RESIDUAL_TOL`]'s much looser `1e-4` (that
+/// constant bounds a *whole-basis* aggregate residual after many updates,
+/// not one freshly computed pivot pair — reusing it here would let real
+/// per-pivot drift accumulate for a long time before firing). Set too
+/// tight, this fires on ordinary floating-point noise and forces far more
+/// refactorizations than the drift it exists to catch would ever justify
+/// (each refactorization is a full Markowitz factorize plus a full fresh
+/// reduced-cost recompute — not cheap, see [`FT_BUMP_LIMIT_FACTOR`]'s own
+/// docs on that trade-off); set too loose, it never fires before trigger
+/// (1) would have caught the same drift anyway, making it dead code. `1e-7`
+/// is the recommended starting point from the port's own spec, not yet
+/// independently re-tuned against this crate's Netlib benchmark set beyond
+/// the sweep recorded in this feature's own commit message — re-measure
+/// with `ENOMOTO_PROF_UPDATE_VERIFY` (below) before moving it.
+const UPDATE_VERIFY_TOL: f64 = 1e-7;
+
+/// HiGHS `HEkkDualRow::updateVerify` equivalent: cross-checks this
+/// iteration's pivot element between PRICE's row-direction value
+/// (`alpha_row`, `a_p[q]`) and FTRAN's column-direction value (`alpha_col`,
+/// `alpha_buf[p]`) — see [`UPDATE_VERIFY_TOL`]'s own docs for why these two
+/// independently-computed scalars are expected to agree, and what a
+/// growing gap between them means. Both arguments must already be the
+/// *same* pivot's two values — the caller is responsible for reading them
+/// at the right point in the iteration (right after FTRAN produces
+/// `alpha_buf`, before anything derived from it is committed).
+///
+/// Returns `true` ("healthy — proceed with this pivot") or `false` ("this
+/// pivot can no longer be trusted here; refactorize before committing
+/// it"). Selection rules (`chuzr`/`chuzc`/BFRT/Harris/DSE/Devex) are never
+/// touched by this check — by the time it runs, `p`/`q`/`theta_q` are
+/// already fully decided; this only ever changes *whether a refactorization
+/// happens sooner*, never which pivot is chosen.
+#[inline]
+fn update_verify(alpha_row: f64, alpha_col: f64) -> bool {
+    let scale = alpha_row.abs().max(alpha_col.abs()).max(FT_MIN_PIVOT);
+    let rel = (alpha_row - alpha_col).abs() / scale;
+    rel <= UPDATE_VERIFY_TOL
+}
+
 /// EXPAND anti-cycling (Gill, Murray, Saunders & Wright, "A practical
 /// anti-cycling procedure for linearly constrained optimization",
 /// Mathematical Programming 45 (1989) 437-474). "Master" feasibility
@@ -2472,6 +2539,22 @@ mod prof_phases {
     /// condition this counts.
     pub(super) static HARRIS_SWAPS: AtomicUsize = AtomicUsize::new(0);
 
+    /// `updateVerify` diagnostics (`ENOMOTO_PROF_UPDATE_VERIFY` — see
+    /// [`UPDATE_VERIFY_TOL`]'s own docs for what this check does):
+    /// `UPDATE_VERIFY_CHECKS` counts every pivot the check actually ran
+    /// against (i.e. every completed FTRAN, whether or not it fired);
+    /// `UPDATE_VERIFY_TRIGGERS` counts only the ones that disagreed enough
+    /// to force an extra refactorization; `UPDATE_VERIFY_MAX_REL_PPM` and
+    /// `UPDATE_VERIFY_SUM_REL_PPM` accumulate the relative error
+    /// (`* 1_000_000`, parts-per-million, the same fixed-point trick
+    /// `ETA_DENSITY_SUM_PPM` below uses to avoid an atomic `f64`) only for
+    /// the pivots that actually triggered, so the mean-over-triggers is
+    /// `SUM_REL_PPM / TRIGGERS` and the worst-case is `MAX_REL_PPM` alone.
+    pub(super) static UPDATE_VERIFY_CHECKS: AtomicUsize = AtomicUsize::new(0);
+    pub(super) static UPDATE_VERIFY_TRIGGERS: AtomicUsize = AtomicUsize::new(0);
+    pub(super) static UPDATE_VERIFY_MAX_REL_PPM: AtomicUsize = AtomicUsize::new(0);
+    pub(super) static UPDATE_VERIFY_SUM_REL_PPM: AtomicUsize = AtomicUsize::new(0);
+
     /// Histogram of `FtLu::last_update_off_diag_len()` / `(m-1)` (the
     /// fraction of possible off-diagonal slots a single `try_update`-created
     /// eta actually fills), bucketed into 20 equal-width 5% bins, plus a
@@ -2484,7 +2567,7 @@ mod prof_phases {
 
     pub(super) fn reset() {
         use std::sync::atomic::Ordering::Relaxed;
-        for c in [&BTRAN, &PRICE, &CHUZR, &CHUZC1, &BFRT, &FTRAN, &DSE_UPDATE, &DUAL_UPDATE, &FT_UPDATE, &REFACTOR, &REFACTOR_COUNT, &DENSE_RHS_BYPASSES, &ITERS, &INFEAS_ROWS, &ALPHA_NNZ, &BFRT_CANDS, &BFRT_WALK, &HARRIS_SWAPS, &ETA_DENSITY_SAMPLES, &ETA_DENSITY_SUM_PPM] {
+        for c in [&BTRAN, &PRICE, &CHUZR, &CHUZC1, &BFRT, &FTRAN, &DSE_UPDATE, &DUAL_UPDATE, &FT_UPDATE, &REFACTOR, &REFACTOR_COUNT, &DENSE_RHS_BYPASSES, &ITERS, &INFEAS_ROWS, &ALPHA_NNZ, &BFRT_CANDS, &BFRT_WALK, &HARRIS_SWAPS, &UPDATE_VERIFY_CHECKS, &UPDATE_VERIFY_TRIGGERS, &UPDATE_VERIFY_MAX_REL_PPM, &UPDATE_VERIFY_SUM_REL_PPM, &ETA_DENSITY_SAMPLES, &ETA_DENSITY_SUM_PPM] {
             c.store(0, Relaxed);
         }
         *ETA_DENSITY_BINS.lock().unwrap() = [0; 20];
@@ -2527,7 +2610,8 @@ pub fn solve_lp_dual(variables: &[VariableData], objective: &Objective, constrai
     }
     let profile_phases = std::env::var("ENOMOTO_PROF_PHASES").is_ok();
     let debug_eta_density = std::env::var("ENOMOTO_DEBUG_ETA_DENSITY").is_ok();
-    if profile_phases || debug_eta_density {
+    let debug_update_verify = std::env::var("ENOMOTO_PROF_UPDATE_VERIFY").is_ok();
+    if profile_phases || debug_eta_density || debug_update_verify {
         prof_phases::reset();
     }
     let wall_t0 = std::time::Instant::now();
@@ -2598,6 +2682,17 @@ pub fn solve_lp_dual(variables: &[VariableData], objective: &Objective, constrai
                 100.0 * prof_phases::HARRIS_SWAPS.load(Relaxed) as f64 / iters as f64,
             );
         }
+    }
+    if debug_update_verify {
+        use std::sync::atomic::Ordering::Relaxed;
+        let checks = prof_phases::UPDATE_VERIFY_CHECKS.load(Relaxed);
+        let triggers = prof_phases::UPDATE_VERIFY_TRIGGERS.load(Relaxed);
+        let max_rel = prof_phases::UPDATE_VERIFY_MAX_REL_PPM.load(Relaxed) as f64 / 1e6;
+        let mean_rel_on_trigger = prof_phases::UPDATE_VERIFY_SUM_REL_PPM.load(Relaxed) as f64 / 1e6 / triggers.max(1) as f64;
+        eprintln!(
+            "PROF_UPDATE_VERIFY checks={checks} triggers={triggers} ({:.4}% of checks) max_rel_err={max_rel:.3e} mean_rel_err_on_trigger={mean_rel_on_trigger:.3e}",
+            100.0 * triggers as f64 / checks.max(1) as f64
+        );
     }
     if debug_eta_density {
         use std::sync::atomic::Ordering::Relaxed;
@@ -2784,6 +2879,20 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
     // wall-clock this diagnostic is meant to explain.
     let debug_chuzr = profile_phases && std::env::var("ENOMOTO_DEBUG_CHUZR").is_ok();
     let debug_eta_density = std::env::var("ENOMOTO_DEBUG_ETA_DENSITY").is_ok();
+    // Gates the `UPDATE_VERIFY_*` atomic counters below (see
+    // [`update_verify`]'s own docs) — hoisted for the same per-iteration
+    // `env::var`-cost reason as `debug_chuzr` above, since `update_verify`
+    // itself runs every single pivot, not just every `FT_CHECK_INTERVAL`.
+    let debug_update_verify = std::env::var("ENOMOTO_PROF_UPDATE_VERIFY").is_ok();
+    // Escape hatch for A/B measurement against the always-on default (see
+    // [`update_verify`]'s own docs and this feature's own commit message):
+    // the check normally runs unconditionally, like `FT_MIN_PIVOT`'s own
+    // `try_update` rejection — this does not change pivot *selection*, only
+    // how soon a numerically drifted pivot triggers a refactorization, so
+    // disabling it can only ever make a solve *more* exposed to stale
+    // eta-chain drift between trigger (1)'s own coarser checks, never
+    // change which pivot a healthy solve picks.
+    let update_verify_disabled = std::env::var("ENOMOTO_DISABLE_UPDATE_VERIFY").is_ok();
     // Reports the one-way Devex→DSE escalation (see [`DEVEX_STAGNATION_WINDOW`]'s
     // own docs) if/when it happens — at most once per solve, so unlike
     // `profile_phases`/`debug_chuzr` above this isn't hoisted for a
@@ -3741,6 +3850,15 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
         // effect on the basic variables in a single extra FTRAN — `a_F`,
         // "a linear combination of the constraint columns for the
         // variables in F" — rather than one FTRAN per flipped column.
+        //
+        // Set by `update_verify` below, once `alpha_buf` (this block's own
+        // output) is available — see that check's own docs. Declared here,
+        // ahead of the `timed!` block, purely so the FTRAN-DSE cross-term
+        // solve a few lines below it can skip itself on failure without
+        // restructuring this block into an early-return; both reads happen
+        // inside the same plain block `timed!` inlines, not a closure, so a
+        // `let mut` from this outer scope is visible either way.
+        let mut verify_failed = false;
         timed!(profile_phases, prof_phases::FTRAN, {
             if !flips.is_empty() {
                 for &(j, old_status) in &flips {
@@ -3866,19 +3984,102 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
                     "sparse FTRAN (entering column {q}) diverged from the dense reference"
                 );
             }
+
+            // updateVerify (HiGHS `HEkkDualRow::updateVerify` equivalent —
+            // see [`UPDATE_VERIFY_TOL`]/[`update_verify`]'s own docs):
+            // cross-checks this pivot's element between PRICE's
+            // row-direction value (`a_p[q]`, already sitting in `a_p` from
+            // the PRICE step above — chuzc2 selected `q` from exactly this
+            // array, so no recompute is needed) and FTRAN's own
+            // column-direction value (`alpha_buf[p]`, just computed above).
+            // Placed here — immediately after `alpha_buf` is final, before
+            // the FTRAN-DSE cross term below and before any primal/dual/
+            // pivot update reads `alpha_buf` — so a numerically drifted
+            // pivot is caught at the earliest possible point, before it
+            // corrupts anything downstream. Does not touch `p`/`q`/`theta_q`
+            // selection at all: by this point in the iteration they are
+            // already fully decided (chuzr picked `p`, chuzc2/BFRT picked
+            // `q`) — this only ever decides whether this iteration commits
+            // that pivot as-is, or discards it for a fresh refactorization.
+            if !update_verify_disabled {
+                let alpha_row = a_p[q];
+                let alpha_col = alpha_buf[p];
+                if debug_update_verify {
+                    prof_phases::UPDATE_VERIFY_CHECKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                if !update_verify(alpha_row, alpha_col) {
+                    verify_failed = true;
+                    if debug_update_verify {
+                        use std::sync::atomic::Ordering::Relaxed;
+                        let scale = alpha_row.abs().max(alpha_col.abs()).max(FT_MIN_PIVOT);
+                        let rel_ppm = ((alpha_row - alpha_col).abs() / scale * 1_000_000.0) as usize;
+                        prof_phases::UPDATE_VERIFY_TRIGGERS.fetch_add(1, Relaxed);
+                        prof_phases::UPDATE_VERIFY_SUM_REL_PPM.fetch_add(rel_ppm, Relaxed);
+                        prof_phases::UPDATE_VERIFY_MAX_REL_PPM.fetch_max(rel_ppm, Relaxed);
+                    }
+                }
+            }
+
             // The ftran-dse cross term (`tau`) is only ever read by
             // `DseState::update_after_pivot`, further down — skip the
             // solve entirely while pricing is still in cheap Devex mode
             // (see [`EdgeWeights`]'s own docs for why this is the whole
-            // point of starting there). `tau_buf` is left however a prior
-            // iteration's solve happened to leave it in that case, but
-            // that's fine: nothing reads it unless `weights` is `Dse`,
-            // which only happens on an iteration whose FTRAN block (this
-            // one) actually populated it fresh.
-            if matches!(weights, EdgeWeights::Dse(_)) {
+            // point of starting there), and also when `updateVerify` just
+            // failed above: this pivot is about to be discarded and
+            // refactorized around, so its DSE cross term would only be
+            // thrown away unread. `tau_buf` is left however a prior
+            // iteration's solve happened to leave it in either skip case,
+            // but that's fine: nothing reads it unless `weights` is `Dse`
+            // *and* this iteration's pivot actually commits, which only
+            // happens on an iteration whose FTRAN block (this one) both
+            // populated it fresh and passed `updateVerify`.
+            if !verify_failed && matches!(weights, EdgeWeights::Dse(_)) {
                 lu.solve_into(rho_p, &mut lu_scratch, &mut tau_buf);
             }
         });
+
+        // `updateVerify` failed above: this pivot's own basis
+        // factorization can no longer be trusted (see [`update_verify`]'s
+        // own docs), so discard it — without ever touching `t.basis`,
+        // `t.nb_status`, `x_B`, or `d` (none of the primal/dual/pivot
+        // updates below have run yet for this pivot; only the BFRT bound
+        // flips earlier this same iteration, if any, are committed, and
+        // those are independent, already-valid degenerate steps — see this
+        // block's own comment above `verify_failed`'s declaration) —
+        // refactorize in place and let the `for _iter` loop's next pass
+        // re-run `chuzr`/`chuzc2` fresh against the rebuilt factorization,
+        // exactly like every other mid-loop refactorization trigger in this
+        // function.
+        if verify_failed {
+            timed!(profile_phases, prof_phases::REFACTOR, {
+                if profile_phases {
+                    prof_phases::REFACTOR_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                let Some(l) = try_refactorize(std, &t) else {
+                    if debug_devex {
+                        eprintln!("FALLBACK@update_verify iter={_iter}");
+                    }
+                    return solve_lp_on(std);
+                };
+                lu = l;
+                let rhs = t.compute_rhs();
+                t.resync_basics(&lu, &rhs);
+                d = fresh_d(&lu, &t, &active_cost);
+                infeasible_rows.rebuild(m, |i| row_infeasible(std, &t, &noise_feasible, i));
+            });
+            // Same touched-entries-only reset the normal end-of-iteration
+            // path uses below — `a_p`/`touched`/`touched_cols` must go back
+            // to all-zero/empty before the next iteration's PRICE step,
+            // which only ever adds into them (see that loop's own docs),
+            // regardless of whether this iteration's own pivot committed.
+            for &j in &touched_cols {
+                a_p[j] = 0.0;
+                touched[j] = false;
+            }
+            touched_cols.clear();
+            continue;
+        }
+
         let a_enter = &a_enter_buf;
         let alpha = &alpha_buf;
 
