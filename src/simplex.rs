@@ -818,12 +818,21 @@ const BIG_M: f64 = 1e7;
 /// [`presolve::colsingleton::Substitution::value`] will overwrite right
 /// afterward. `orig_of_free.len() + fixed_values.len() == variables.len()`
 /// always.
+///
+/// `shift[nj]` is how far column `nj`'s *finite* bound was translated
+/// toward `0` (see the bound-shift step in [`build_std_form_presolved`]
+/// itself) — `std.lb[nj]`/`std.ub[nj]` are expressed in this shifted
+/// coordinate system, so recovering the true (still-scaled) value of
+/// column `nj` needs `x_free[nj] + shift[nj]`, done once in
+/// [`unscale_result`] before any substitution's own `value()` call reads
+/// it back out.
 struct PresolvedForm {
     std: StdForm,
     scaling: scaling::Scaling,
     substitutions: Vec<presolve::colsingleton::Substitution>,
     orig_of_free: Vec<usize>,
     fixed_values: Vec<(usize, f64)>,
+    shift: Vec<f64>,
 }
 
 fn build_std_form_presolved(
@@ -875,6 +884,46 @@ fn build_std_form_presolved(
         lb[sub.var] = 0.0;
         ub[sub.var] = 0.0;
     }
+
+    // Bound-shift: translate every surviving structural variable (every
+    // `j` with `lb[j] != ub[j]` at this point — a fixed/substituted one is
+    // never part of the solve at all, see `new_index` below) so its own
+    // *genuine* finite bound sits at exactly `0`, simplex-only (this
+    // function has no `interior_point.rs` caller — that engine keeps
+    // reading `pre.g`/`pre.h` straight off `run_extended`, unshifted) and
+    // done exactly once, right here, on the fully presolved/propagated
+    // `lb`/`ub` `run_extended` just returned — never re-run mid-presolve.
+    // A boxed variable (`lb`/`ub` both finite) shifts toward its lower
+    // bound; a one-sided variable shifts toward whichever bound is
+    // genuinely finite (its *only* finite bound is exactly the one the
+    // dual-feasible crash / bound-flip logic below will park it at
+    // nonbasic — it can never rest at the infinite side); a genuinely free
+    // variable (both infinite) gets no shift, since it has no finite bound
+    // to anchor to and the later [`BIG_M`] substitution already places it
+    // symmetrically around `0`. This is purely a change of coordinate
+    // origin per column (`x_j = x'_j + shift[j]`) — it changes neither the
+    // feasible region's shape nor the objective's linearity, only which
+    // point in it reads as `0`; every row referencing a shifted column
+    // gets its own rhs adjusted to match (see the two row-building loops
+    // below), and [`unscale_result`] adds `shift` back before any
+    // substitution reads a shifted column's true scaled value.
+    let mut shift = vec![0.0; n];
+    for j in 0..n {
+        if lb[j] == ub[j] {
+            continue;
+        }
+        let s = if lb[j].is_finite() {
+            lb[j]
+        } else if ub[j].is_finite() {
+            ub[j]
+        } else {
+            0.0
+        };
+        shift[j] = s;
+        lb[j] -= s;
+        ub[j] -= s;
+    }
+
     // Any variable presolve never fully eliminated may still carry a
     // *genuine* `+/-inf` bound now (`model.rs::add_variable` allows one —
     // see its own docs) — the same finite-bounds need just described
@@ -967,7 +1016,10 @@ fn build_std_form_presolved(
         let mut r: Vec<(usize, f64)> = Vec::new();
         for (j, &v) in ar.col_indices_of_row(i).zip(ar.values_of_row(i)) {
             match new_index[j] {
-                Some(nj) => r.push((nj, v)),
+                Some(nj) => {
+                    r.push((nj, v));
+                    rhs_i -= v * shift[j];
+                }
                 None => rhs_i -= v * lb[j],
             }
         }
@@ -983,7 +1035,10 @@ fn build_std_form_presolved(
         let mut r: Vec<(usize, f64)> = Vec::new();
         for (j, v) in row {
             match new_index[j] {
-                Some(nj) => r.push((nj, v)),
+                Some(nj) => {
+                    r.push((nj, v));
+                    rhs_k -= v * shift[j];
+                }
                 None => rhs_k -= v * lb[j],
             }
         }
@@ -996,12 +1051,14 @@ fn build_std_form_presolved(
 
     let cols = cols_from_rows(&rows, n_total);
     let rows = FixedRows::from_rows(&rows);
+    let shift_of_free: Vec<f64> = orig_of_free.iter().map(|&j| shift[j]).collect();
     Some(PresolvedForm {
         std: StdForm { n_total, n_rows, c, rows, cols, b: b_out, lb: new_lb, ub: new_ub },
         scaling: pre.scaling,
         substitutions: pre.substitutions,
         orig_of_free,
         fixed_values,
+        shift: shift_of_free,
     })
 }
 
@@ -1018,12 +1075,20 @@ fn build_std_form_presolved(
 /// at the end correctly converts the whole vector, substituted entries
 /// included. `Infeasible`/`Unbounded` pass through unchanged (there is no
 /// `x` to fix up).
+///
+/// `shift[nj]` is added back in the very same expansion step, before any
+/// substitution's own `value()` call runs: `x_free[nj]` is column `nj`'s
+/// value in [`build_std_form_presolved`]'s shifted coordinates, but a
+/// substitution's `terms`/`rhs`/`coeff` were computed in `run_extended`'s
+/// (unshifted) scaled space, so `sub.value(&x)` needs the true scaled
+/// value at every index it reads, shifted columns included.
 fn unscale_result(
     result: SimplexResult,
     sc: &scaling::Scaling,
     substitutions: &[presolve::colsingleton::Substitution],
     orig_of_free: &[usize],
     fixed_values: &[(usize, f64)],
+    shift: &[f64],
 ) -> SimplexResult {
     match result.status {
         Status::Optimal => {
@@ -1038,7 +1103,7 @@ fn unscale_result(
             // time `sub.value(&x)` reads it.
             let mut x = vec![0.0; orig_of_free.len() + fixed_values.len()];
             for (nj, &j) in orig_of_free.iter().enumerate() {
-                x[j] = x_free[nj];
+                x[j] = x_free[nj] + shift[nj];
             }
             for &(j, v) in fixed_values {
                 x[j] = v;
@@ -1162,22 +1227,41 @@ impl<'a> Tableau<'a> {
         rhs
     }
 
-    /// The `O(nnz(A))` scan half of `recompute_basics`: `rhs = b - N x_N`
-    /// from the current nonbasic assignment, without touching `x_B` or
-    /// doing the triangular solve. Split out so the dual method's own loop
-    /// (`solve_lp_dual_on`) can get this ground-truth `rhs` for its
+    /// `b - N x_N` from the current nonbasic assignment, without touching
+    /// `x_B` or doing the triangular solve. Split out so the dual method's
+    /// own loop (`solve_lp_dual_on`) can get this ground-truth `rhs` for its
     /// periodic drift *check* without that check itself silently masking
     /// the very drift it's supposed to detect by resyncing `x_B` first —
     /// see that loop's own docs for why `x_B` is otherwise maintained
     /// incrementally, not recomputed here every iteration.
+    ///
+    /// Column-major over nonbasic columns, skipping any with `x[j] == 0.0`
+    /// entirely (never touching that column's own nonzeros at all), rather
+    /// than the row-major `for i, for (j, v) in row(i), if nonbasic` scan
+    /// this replaces (which paid one `nb_status` check per matrix entry
+    /// regardless of `x[j]`, `O(nnz(A))` unconditionally). A nonbasic
+    /// column sitting at a bound of exactly `0` is common even without any
+    /// special handling (`0` is the default/most common variable lower
+    /// bound in LP models generally), and [`build_std_form_presolved`]'s
+    /// own bound-shift step (see its docs) widens that set further by
+    /// translating every other surviving column's *finite* bound to `0`
+    /// too — so this is worth the skip rather than an `O(nnz(A))` floor
+    /// this function can never beat regardless of how `x` is distributed.
     fn compute_rhs(&self) -> Vec<f64> {
-        let m = self.std.n_rows;
+        use std::sync::atomic::Ordering::Relaxed;
         let mut rhs = self.std.b.clone();
-        for i in 0..m {
-            for &(j, v) in self.std.rows.row(i) {
-                if self.nb_status[j].is_some() {
-                    rhs[i] -= v * self.x[j];
-                }
+        for j in 0..self.std.n_total {
+            if self.nb_status[j].is_none() {
+                continue;
+            }
+            prof_phases::COMPUTE_RHS_COLS_TOTAL.fetch_add(1, Relaxed);
+            let xj = self.x[j];
+            if xj == 0.0 {
+                prof_phases::COMPUTE_RHS_COLS_SKIPPED.fetch_add(1, Relaxed);
+                continue;
+            }
+            for &(i, v) in self.std.cols.row(j) {
+                rhs[i] -= v * xj;
             }
         }
         rhs
@@ -1356,6 +1440,26 @@ fn refactorize(std: &StdForm, t: &Tableau) -> sparse_lu::FtLu {
 fn try_refactorize(std: &StdForm, t: &Tableau) -> Option<sparse_lu::FtLu> {
     let rows = t.basis_rows_sparse();
     sparse_lu::factorize(std.n_rows, &rows).map(sparse_lu::FtLu::new)
+}
+
+/// `refactorize` for the *initial* all-slack basis specifically: `B` is a
+/// signed identity there (`Tableau::new` seats row `i`'s own slack at basis
+/// position `i`, coefficient `+/-1`), so its LU factorization is
+/// definitionally `L = I`, `U = B`, no permutation — no pivot search
+/// required. Falls back to the general `try_refactorize` if the basis
+/// somehow isn't exactly diagonal (it always is, right after
+/// `Tableau::new`, before `crash_dual_feasible` or any pivot has touched
+/// `basis`/`basis_pos`), so this can never mis-factorize even if that
+/// invariant is ever violated.
+fn try_initial_refactorize(std: &StdForm, t: &Tableau) -> Option<sparse_lu::FtLu> {
+    let rows = t.basis_rows_sparse();
+    sparse_lu::factorize_diagonal(std.n_rows, &rows)
+        .or_else(|| sparse_lu::factorize(std.n_rows, &rows))
+        .map(sparse_lu::FtLu::new)
+}
+
+fn initial_refactorize(std: &StdForm, t: &Tableau) -> sparse_lu::FtLu {
+    try_initial_refactorize(std, t).expect("initial all-slack basis must be nonsingular")
 }
 
 /// One phase of the bounded-variable primal simplex.
@@ -2146,7 +2250,7 @@ pub fn solve_lp(variables: &[VariableData], objective: &Objective, constraints: 
     let Some(pf) = build_std_form_presolved(variables, objective, constraints) else {
         return SimplexResult { status: Status::Infeasible, x: None };
     };
-    unscale_result(solve_std_form_decomposed(&pf.std, false), &pf.scaling, &pf.substitutions, &pf.orig_of_free, &pf.fixed_values)
+    unscale_result(solve_std_form_decomposed(&pf.std, false), &pf.scaling, &pf.substitutions, &pf.orig_of_free, &pf.fixed_values, &pf.shift)
 }
 
 /// The primal two-phase method's actual work, operating on an
@@ -2166,10 +2270,9 @@ fn solve_lp_on(std: &StdForm) -> SimplexResult {
     }
 
     let mut t = Tableau::new(std);
-    // Initial basis is all slacks (B = a signed identity), trivially
-    // factorized; Markowitz pivoting still goes through `factorize` for
-    // uniformity rather than special-casing this as the identity.
-    let mut lu = refactorize(std, &t);
+    // Initial basis is all slacks (B = a signed identity): built directly
+    // via `factorize_diagonal` rather than run through Markowitz pivoting.
+    let mut lu = initial_refactorize(std, &t);
     let mut since_check = 0usize;
     let mut expand = ExpandState::new();
     let mut se = SteepestEdgeState::new(std);
@@ -2515,6 +2618,13 @@ mod prof_phases {
     /// every real Netlib instance (measured: zero, on all 73 in-scope
     /// problems).
     pub(super) static DENSE_RHS_BYPASSES: AtomicUsize = AtomicUsize::new(0);
+    /// `compute_rhs`'s own nonbasic-column visits: `TOTAL` counts every
+    /// nonbasic column it considers, `SKIPPED` how many of those it never
+    /// touched a single nonzero of because `x[j] == 0.0` — see that
+    /// function's own docs for why a shifted/naturally-zero bound makes
+    /// this common rather than a rare edge case.
+    pub(super) static COMPUTE_RHS_COLS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub(super) static COMPUTE_RHS_COLS_SKIPPED: AtomicUsize = AtomicUsize::new(0);
     pub(super) static ITERS: AtomicUsize = AtomicUsize::new(0);
     /// Per-iteration *shape* of the chuzr/BFRT work, reported alongside
     /// the phase timings above when `ENOMOTO_DEBUG_CHUZR` is also set:
@@ -2567,7 +2677,7 @@ mod prof_phases {
 
     pub(super) fn reset() {
         use std::sync::atomic::Ordering::Relaxed;
-        for c in [&BTRAN, &PRICE, &CHUZR, &CHUZC1, &BFRT, &FTRAN, &DSE_UPDATE, &DUAL_UPDATE, &FT_UPDATE, &REFACTOR, &REFACTOR_COUNT, &DENSE_RHS_BYPASSES, &ITERS, &INFEAS_ROWS, &ALPHA_NNZ, &BFRT_CANDS, &BFRT_WALK, &HARRIS_SWAPS, &UPDATE_VERIFY_CHECKS, &UPDATE_VERIFY_TRIGGERS, &UPDATE_VERIFY_MAX_REL_PPM, &UPDATE_VERIFY_SUM_REL_PPM, &ETA_DENSITY_SAMPLES, &ETA_DENSITY_SUM_PPM] {
+        for c in [&BTRAN, &PRICE, &CHUZR, &CHUZC1, &BFRT, &FTRAN, &DSE_UPDATE, &DUAL_UPDATE, &FT_UPDATE, &REFACTOR, &REFACTOR_COUNT, &DENSE_RHS_BYPASSES, &COMPUTE_RHS_COLS_TOTAL, &COMPUTE_RHS_COLS_SKIPPED, &ITERS, &INFEAS_ROWS, &ALPHA_NNZ, &BFRT_CANDS, &BFRT_WALK, &HARRIS_SWAPS, &UPDATE_VERIFY_CHECKS, &UPDATE_VERIFY_TRIGGERS, &UPDATE_VERIFY_MAX_REL_PPM, &UPDATE_VERIFY_SUM_REL_PPM, &ETA_DENSITY_SAMPLES, &ETA_DENSITY_SUM_PPM] {
             c.store(0, Relaxed);
         }
         *ETA_DENSITY_BINS.lock().unwrap() = [0; 20];
@@ -2591,7 +2701,7 @@ macro_rules! timed {
 }
 
 pub fn solve_lp_dual(variables: &[VariableData], objective: &Objective, constraints: &[ConstraintRow]) -> SimplexResult {
-    let Some(PresolvedForm { std, scaling: sc, substitutions, orig_of_free, fixed_values }) = build_std_form_presolved(variables, objective, constraints) else {
+    let Some(PresolvedForm { std, scaling: sc, substitutions, orig_of_free, fixed_values, shift }) = build_std_form_presolved(variables, objective, constraints) else {
         return SimplexResult { status: Status::Infeasible, x: None };
     };
     if std::env::var("ENOMOTO_DEBUG_PRESOLVE_SIZE").is_ok() {
@@ -2665,6 +2775,12 @@ pub fn solve_lp_dual(variables: &[VariableData], objective: &Objective, constrai
             prof_phases::REFACTOR.load(Relaxed) as f64 / 1e6 / refactor_count.max(1) as f64,
             prof_phases::DENSE_RHS_BYPASSES.load(Relaxed)
         );
+        let compute_rhs_total = prof_phases::COMPUTE_RHS_COLS_TOTAL.load(Relaxed);
+        let compute_rhs_skipped = prof_phases::COMPUTE_RHS_COLS_SKIPPED.load(Relaxed);
+        eprintln!(
+            "  compute_rhs_cols total={compute_rhs_total} skipped={compute_rhs_skipped} ({:.1}%)",
+            100.0 * compute_rhs_skipped as f64 / compute_rhs_total.max(1) as f64
+        );
         if std::env::var("ENOMOTO_DEBUG_CHUZR").is_ok() {
             let m = std.n_rows.max(1);
             eprintln!(
@@ -2716,7 +2832,7 @@ pub fn solve_lp_dual(variables: &[VariableData], objective: &Objective, constrai
             );
         }
     }
-    unscale_result(result, &sc, &substitutions, &orig_of_free, &fixed_values)
+    unscale_result(result, &sc, &substitutions, &orig_of_free, &fixed_values, &shift)
 }
 
 /// EXPERIMENTAL (measurement only, never exercised by production code):
@@ -2920,11 +3036,14 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
 
     // Every refactorization in this function falls back to the primal
     // method on a numerically singular basis — see `try_refactorize`.
+    // `crash_dual_feasible` above only changes nonbasic statuses/values,
+    // not `basis`/`basis_pos`, so the basis here is still the initial
+    // all-slack signed identity — same fast path as `solve_lp_on`'s.
     let Some(mut lu) = timed!(profile_phases, prof_phases::REFACTOR, {
         if profile_phases {
             prof_phases::REFACTOR_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
-        try_refactorize(std, &t)
+        try_initial_refactorize(std, &t)
     }) else {
         if debug_devex {
             eprintln!("FALLBACK@initial");

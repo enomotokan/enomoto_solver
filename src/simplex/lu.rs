@@ -818,6 +818,36 @@ fn detect_border_columns(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Vec<usize> 
     (0..m).filter(|&j| col_degree[j] as f64 > threshold).collect()
 }
 
+/// Builds the LU factorization of a diagonal basis matrix directly — `L =
+/// I`, `U = B`, no row or column permutation — instead of running it
+/// through [`factorize`]'s general Markowitz elimination. This is exactly
+/// the shape of the initial all-slack basis (`B` a signed identity: each
+/// row has exactly one nonzero, `+/-1`, at that row's own column), so
+/// `simplex.rs`'s initial-basis call sites use this instead of paying for
+/// pivot selection, fill-in bookkeeping, and border/dense-input detection
+/// on a matrix that has nothing for any of that to do. Returns `None` if
+/// `rows_in` isn't exactly diagonal, so a caller can fall back to
+/// [`factorize`] rather than silently mis-factorizing.
+pub fn factorize_diagonal(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuFactors> {
+    let mut u_row = Vec::with_capacity(m);
+    for (i, row) in rows_in.iter().enumerate() {
+        match row.as_slice() {
+            [(j, v)] if *j == i && *v != 0.0 => u_row.push(vec![(i, *v)]),
+            _ => return None,
+        }
+    }
+    let identity: Vec<usize> = (0..m).collect();
+    Some(LuFactors {
+        m,
+        l_col: vec![Vec::new(); m],
+        u_row,
+        row_perm: identity.clone(),
+        col_perm: identity.clone(),
+        col_perm_inv: identity.clone(),
+        row_perm_inv: identity,
+    })
+}
+
 pub fn factorize(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuFactors> {
     if std::env::var("ENOMOTO_DEBUG_BLOCK_SIZES").is_ok() {
         debug_print_block_sizes(m, rows_in);
@@ -2043,6 +2073,65 @@ mod tests {
         ];
         let y = lu.solve_transpose(&rhs2);
         assert!(approx_vec(&y, &y_true), "y={y:?}");
+    }
+
+    /// Times `factorize_diagonal` against the general `factorize` on the
+    /// exact shape `factorize_diagonal` exists for (a signed-identity
+    /// initial basis), across the `m` range this crate's Netlib benchmark
+    /// actually exercises. `#[ignore]`d for the same reason as
+    /// `border_crossover_sweep` above: a live diagnostic, not a
+    /// pass/fail correctness check.
+    #[test]
+    #[ignore]
+    fn factorize_diagonal_vs_markowitz_sweep() {
+        for &m in &[50, 200, 500, 1000, 2000, 4000] {
+            let rows: Vec<Vec<(usize, f64)>> =
+                (0..m).map(|i| vec![(i, if i % 7 == 0 { -1.0 } else { 1.0 })]).collect();
+
+            let n_runs = 2000;
+            let t0 = std::time::Instant::now();
+            for _ in 0..n_runs {
+                std::hint::black_box(factorize_diagonal(m, &rows).expect("diagonal"));
+            }
+            let diag_ns = t0.elapsed().as_nanos() as f64 / n_runs as f64;
+
+            let t0 = std::time::Instant::now();
+            for _ in 0..n_runs {
+                std::hint::black_box(factorize(m, &rows).expect("diagonal, still nonsingular"));
+            }
+            let markowitz_ns = t0.elapsed().as_nanos() as f64 / n_runs as f64;
+
+            println!(
+                "m={m:5} factorize_diagonal={diag_ns:8.0}ns factorize(markowitz)={markowitz_ns:8.0}ns speedup={:.1}x",
+                markowitz_ns / diag_ns
+            );
+        }
+    }
+
+    #[test]
+    fn factorize_diagonal_matches_expected_solve() {
+        let rows = vec![vec![(0, 1.0)], vec![(1, -1.0)], vec![(2, 1.0)]];
+        let lu = factorize_diagonal(3, &rows).expect("diagonal input");
+        assert!(lu.l_col.iter().all(Vec::is_empty), "L must be identity: {:?}", lu.l_col);
+        assert_eq!(lu.row_perm, vec![0, 1, 2]);
+        assert_eq!(lu.col_perm, vec![0, 1, 2]);
+
+        let x_true = [3.0, -2.0, 5.0];
+        let rhs = [1.0 * x_true[0], -1.0 * x_true[1], 1.0 * x_true[2]];
+        let x = lu.solve(&rhs);
+        assert!(approx_vec(&x, &x_true), "x={x:?}");
+    }
+
+    #[test]
+    fn factorize_diagonal_rejects_off_diagonal_entries() {
+        let rows = vec![vec![(0, 1.0), (1, 2.0)], vec![(1, 1.0)]];
+        assert!(factorize_diagonal(2, &rows).is_none());
+
+        let rows_wrong_col = vec![vec![(1, 1.0)], vec![(0, 1.0)]];
+        assert!(factorize_diagonal(2, &rows_wrong_col).is_none());
+
+        let rows_zero = vec![vec![(0, 0.0)], vec![(1, 1.0)]];
+        assert!(factorize_diagonal(2, &rows_zero).is_none());
     }
 
     #[test]
