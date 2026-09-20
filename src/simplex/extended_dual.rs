@@ -443,7 +443,72 @@ const XB_CHECK_INTERVAL: usize = super::FT_CHECK_INTERVAL;
 /// constant's own docs give: this module's decisions are sensitive at
 /// `Affine1::cmp_lex`'s `1e-9` `REL_TOL`, so the drift check needs
 /// headroom below that, not `FT_RESIDUAL_TOL`'s much looser `1e-4`.
+///
+/// **History — four single-knob loosening attempts tried and reverted
+/// before landing on the per-solve escalation below:**
+///
+/// 1. Loosening [`XB_CHECK_INTERVAL`] (keeping the tolerance itself tight)
+///    broke `cycle`/`degen3` into false `Infeasible`.
+/// 2. Loosening this *absolute* bound itself (`1e-8` -> `1e-7`) fixed
+///    `maros` but regressed `fit1p` 5.8x on a full 73-problem sweep.
+/// 3. A *relative* bound scaled by `‖fresh_base‖`/`‖fresh_slope‖` alone
+///    (mirroring [`D_DRIFT_TOL`]'s own `scale_d` pattern for `d`), tried at
+///    two values three orders of magnitude apart, regressed the
+///    73-problem set either way (~+8-9%) while giving big wins on
+///    `d2q06c`/`greenbeb`/`pilot` — the `‖x_B(M)‖`-only floor (`1.0`) never
+///    actually engages on real Netlib instances (every instance measured
+///    sits far above it), so a single multiplier just applies uniformly to
+///    everyone.
+/// 4. A backward-error-style scale (`‖A_B‖_max * ‖x_B(M)‖ + ‖fresh_rhs‖`,
+///    the standard LAPACK relative-residual formula for `Ax=b`) measured
+///    real per-instance scales spanning `~43` (`wood1p`) to `~3.6e6`
+///    (`maros`) — but `fit1p` (scale `~859`, fragile to *any* loosening per
+///    attempt 2) sits *above* `wood1p` (scale `~43`, which needs loosening
+///    just to avoid becoming *stricter* than the old absolute bound). No
+///    single scale-derived multiplier can loosen `wood1p` without loosening
+///    `fit1p` by more than its own known-fragile margin — fragility and
+///    problem-scale don't correlate under any norm tried.
+///
+/// **This version** breaks that correlation requirement entirely: instead
+/// of predicting up front which problems need a looser bound from some
+/// static property, it escalates *within a single solve*, based only on
+/// how many times *this solve's own* drift check has already fired
+/// ([`XB_DRIFT_ESCALATION_STEP`]/[`XB_DRIFT_ESCALATION_FACTOR`]/
+/// [`XB_DRIFT_TOL_MAX`]'s own docs). A problem that drift-refactors 0-9
+/// times in its whole solve (measured: `fit1p` 5, `wood1p` 1, `cycle` 0-2,
+/// `degen3` 0, `pilotnov` 6 — every instance any prior attempt broke or
+/// nearly broke) never reaches the first escalation step, so it sees
+/// *zero* behavior change from the unmodified `1e-8` this constant always
+/// was. Only a solve that has already proven itself drift-heavy (`d2q06c`
+/// 546, `greenbeb` 236, `pilot` 88-190, `fit2p` 25, all measured at the
+/// flat `1e-8` baseline) earns a progressively looser bound — and since
+/// loosening it also slows the *rate* new drift triggers accumulate, this
+/// is a self-damping control loop, not an open-loop guess: a solve
+/// escalates only as fast as its own residual growth actually demands.
 const XB_DRIFT_TOL: f64 = 1e-8;
+/// Every this many drift-triggered refactorizations *within the same
+/// solve*, [`XB_DRIFT_TOL`]'s own effective bound multiplies by
+/// [`XB_DRIFT_ESCALATION_FACTOR`] (capped at [`XB_DRIFT_TOL_MAX`]) — see
+/// that constant's own docs for why this is a per-solve escalation rather
+/// than a static per-problem scale. `10` keeps every instance measured at
+/// single-digit drift-refactor counts (the ones prior attempts broke)
+/// entirely below the first step, while still letting a genuinely
+/// pathological solve (hundreds of triggers at the flat bound) climb
+/// through several steps before this cap's own `1e-4` ceiling.
+const XB_DRIFT_ESCALATION_STEP: usize = 10;
+/// Multiplier applied per [`XB_DRIFT_ESCALATION_STEP`] drift triggers.
+/// `10` mirrors the *single* absolute-loosening step attempt 2 (this
+/// constant's own docs) already measured in isolation (`1e-8` -> `1e-7`
+/// fixed `maros`, broke `fit1p`) — the escalation ladder repeats that same,
+/// already-characterized step size rather than inventing a new one, but
+/// only after `XB_DRIFT_ESCALATION_STEP` proves the *current* solve is
+/// actually the kind that benefits from it.
+const XB_DRIFT_ESCALATION_FACTOR: f64 = 10.0;
+/// Ceiling on the escalated [`XB_DRIFT_TOL`] — reuses `super::FT_RESIDUAL_TOL`'s
+/// already-proven-safe order of magnitude (the classical method's own
+/// absolute drift bound, `1e-4`) rather than letting escalation grow
+/// unbounded into territory no measurement has ever validated.
+const XB_DRIFT_TOL_MAX: f64 = super::FT_RESIDUAL_TOL;
 
 /// Trigger (4) for this module — `super::FT_MAX_UPDATES`'s own equivalent
 /// (an unconditional backstop against unbounded Forrest-Tomlin eta-chain
@@ -836,6 +901,7 @@ fn residual_norm(std: &StdForm, basis_pos: &[Option<usize>], x_b: &[f64], rhs: &
     }
     resid_sq.sqrt()
 }
+
 
 fn dense_column(std: &StdForm, j: usize) -> Vec<f64> {
     let mut col = vec![0.0; std.n_rows];
@@ -1585,28 +1651,17 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     let infeasible_plateau_limit = 4 * stall_limit;
     let mut infeasible_plateau_count = 0usize;
     let mut last_infeasible_len = infeasible_rows.rows.len();
-    // EXPERIMENTAL override of [`XB_DRIFT_TOL`], **confirmed not to help**
-    // (unset = exactly `XB_DRIFT_TOL`, zero behavior change) — kept wired up
-    // as a documented negative result, not removed. Motivated by Netlib
-    // `maros` triggering 36 drift-refactors in 1436 iterations (`refactor`
-    // alone 38.7% of its own wall time, `ENOMOTO_PROF_PHASES_EXT`'s own
-    // report): loosening to `1e-7` cuts `maros` to 6 drift-refactors and its
-    // own wall time by ~18% (167.7ms -> 136.8ms). But `XB_DRIFT_TOL` is an
-    // *absolute* residual bound, not scaled by this problem's own
-    // magnitude — the same `1e-7` reproduces the exact failure mode this
-    // constant's own docs already warn about for the check *interval*
-    // (loosen one drift-related knob, break a different fragile instance):
-    // a full 73-problem sweep at `1e-7` regressed `fit1p` from 0.44s to
-    // 2.57s (5.8x slower, no wrong answer — just far more iterations),
-    // plus smaller but real regressions on `degen3` (+0.36s), `25fv47`
-    // (+0.25s), `perold`, `cycle`. Total set time rose 7.75s -> 10.52s. The
-    // existing tight default is load-bearing elsewhere, not merely
-    // conservative — `maros`'s own refactor cost looks like a genuine
-    // per-instance numerical property (its `x_B(M)` residual grows fast
-    // relative to `1e-8`), not a tunable inefficiency a single global
-    // constant can fix without a scaled/relative tolerance (untried; a
-    // materially bigger change than this knob).
+    // Override for A/B testing [`XB_DRIFT_TOL`] itself (the escalation
+    // ladder's own starting point) — see that constant's own docs for the
+    // four prior single-knob attempts this per-solve escalation replaced.
     let xb_drift_tol: f64 = std::env::var("ENOMOTO_XB_DRIFT_TOL").ok().and_then(|s| s.parse::<f64>().ok()).unwrap_or(XB_DRIFT_TOL);
+    // Escalation state for [`XB_DRIFT_TOL`]'s own per-solve ladder — counts
+    // drift-triggered refactorizations *in this solve only* (reset to `0`
+    // for every call, unlike a module-level constant); see that constant's
+    // own docs for why counting this directly, rather than deriving a bound
+    // from any static per-problem property, is what finally separates
+    // "genuinely drift-heavy solve" from "fragile to any loosening at all".
+    let mut drift_trigger_count: usize = 0;
     // `super::update_verify`'s own env-var escape hatch, hoisted outside
     // the loop for the same reason `super::solve_lp_dual_on` hoists its
     // own copy: a single `bool` branch per pivot, not an `env::var` call.
@@ -2907,12 +2962,24 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 let (fresh_base, fresh_slope) = compute_rhs_affine(std, &cache, &nb_status)?;
                 let resid_base = residual_norm(std, &basis_pos, &x_b_base, &fresh_base);
                 let resid_slope = residual_norm(std, &basis_pos, &x_b_slope, &fresh_slope);
+                // Per-solve escalation ladder — see [`XB_DRIFT_TOL`]'s own
+                // docs. `drift_trigger_count` only ever grows within this
+                // one call to `solve_lp_dual_extended`, so a solve that
+                // hasn't yet proven itself drift-heavy always compares
+                // against the unmodified `xb_drift_tol` (step `0`).
+                let escalation_steps = (drift_trigger_count / XB_DRIFT_ESCALATION_STEP) as i32;
+                let effective_drift_tol = (xb_drift_tol * XB_DRIFT_ESCALATION_FACTOR.powi(escalation_steps)).min(XB_DRIFT_TOL_MAX);
                 if std::env::var("ENOMOTO_DEBUG_XB_DRIFT_EXT").is_ok() {
-                    eprintln!("DEBUG_XB_DRIFT: iter={_iter} resid_base={resid_base:.3e} resid_slope={resid_slope:.3e}");
+                    eprintln!(
+                        "DEBUG_XB_DRIFT: iter={_iter} resid_base={resid_base:.3e} resid_slope={resid_slope:.3e} drift_trigger_count={drift_trigger_count} effective_tol={effective_drift_tol:.3e}"
+                    );
                 }
-                need_refactor = resid_base > xb_drift_tol || resid_slope > xb_drift_tol;
-                if need_refactor && profile_phases {
-                    prof_phases::REFACTOR_CAUSE_DRIFT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                need_refactor = resid_base > effective_drift_tol || resid_slope > effective_drift_tol;
+                if need_refactor {
+                    drift_trigger_count += 1;
+                    if profile_phases {
+                        prof_phases::REFACTOR_CAUSE_DRIFT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
                 }
                 // `d`'s own independent drift check ([`D_DRIFT_TOL`]'s own
                 // docs — added after a real false `Infeasible` on Netlib

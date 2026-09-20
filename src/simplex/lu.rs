@@ -72,7 +72,32 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-const STABILITY: f64 = 0.1;
+/// Threshold-pivoting stability floor (see this module's own top docs): a
+/// pivot candidate must be at least this fraction of its column's live max
+/// magnitude to be eligible, regardless of Markowitz count. Raised from the
+/// textbook-default `0.1` after measuring that `0.1` lets `factorize()` pick
+/// pivots numerically weak enough to make the *resulting* `L`/`U` drift
+/// faster under `extended_dual`'s `XB_DRIFT_TOL` check (see that constant's
+/// own docs) — i.e. a chain of numerically-marginal Markowitz choices, not
+/// any single one bad enough to fail `FT_MIN_PIVOT` outright, was forcing
+/// extra mid-solve refactorizations well before `FT_BUMP_LIMIT_FACTOR`'s own
+/// eta-fill trigger would have. Netlib's `pilot` (the clearest case)
+/// dropped from 190 drift-triggered refactorizations to 88 at `0.25`
+/// (measured twice, deterministic — refactor counts don't vary run to run,
+/// only wall-clock does), for a ~51% wall-time cut on that instance alone;
+/// `greenbeb`/`fit2p` improved or held flat; `d2q06c` was unchanged within
+/// run-to-run noise (~5%, from system load, confirmed by re-running the
+/// unchanged `0.1` baseline twice). The standard 73-problem Netlib set
+/// (`enomoto_solver.benchmark_highs`, which skips these largest instances on
+/// `n_vars`) is flat within the same noise band either way — this constant
+/// only matters for problems that already refactorize dozens-to-hundreds of
+/// times. `0.5` was tried first and rejected: fill-in from the stricter
+/// floor made every iteration measurably more expensive (`d2q06c`,
+/// `greenbeb`, `fit2p` all ~4% slower net, more than offsetting their own
+/// small refactor-count drops), so `0.5` is *not* simply "more of the same
+/// good direction" — `0.25` is a measured sweet spot, not a floor to keep
+/// pushing from without re-benchmarking.
+const STABILITY: f64 = 0.25;
 /// A column whose *initial* (pre-elimination) degree exceeds this fraction
 /// of `m` is treated as "dense" by `find_best_pivot`'s dense-avoidance
 /// pass — see `MarkowitzState::initially_dense`'s own docs for why a
