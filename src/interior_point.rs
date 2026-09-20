@@ -308,6 +308,15 @@ pub fn solve(qp: &QpStd) -> IpmResult {
     if pre.infeasible {
         return IpmResult { status: Status::Infeasible, x: None };
     }
+    if pre.unbounded {
+        // `presolve::freevar::eliminate_free_variables` (run inside
+        // `run_extended`) found a free variable with no remaining
+        // appearance anywhere and a nonzero cost — the problem is
+        // unbounded regardless of which engine solves it (see that
+        // module's own docs for why this is decidable directly, with no
+        // further iteration needed).
+        return IpmResult { status: Status::Unbounded, x: None };
+    }
     let sc = pre.scaling;
     let a = pre.a;
     let b = pre.b;

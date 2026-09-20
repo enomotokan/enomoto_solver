@@ -2602,7 +2602,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
             super::EdgeWeights::Devex(dv) => dv.update_after_pivot(r, &alpha_full),
             super::EdgeWeights::Dse(dse) => {
                 lu.solve_into(&rho, &mut lu_scratch, &mut tau);
-                dse.update_after_pivot(r, &alpha_full, &tau);
+                dse.update_after_pivot(r, &alpha_full, &tau, &rho);
             }
         });
 

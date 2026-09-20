@@ -18,7 +18,14 @@
 //!      equilibration, run once on the original (unscaled) `A`/`G`/`c`.
 //!   2. [`redundancy::reduce_equalities`] + [`redundancy::reduce_inequalities`]:
 //!      drops duplicate/linearly-dependent rows from the scaled `(A, b)`,
-//!      and duplicate/dominated rows from the scaled `(G, h)`.
+//!      and duplicate/dominated rows from the scaled `(G, h)`. Both run once
+//!      here, before the round loop below — but [`redundancy::reduce_inequalities`]
+//!      (a cheap O(nnz) hash pass, unlike [`redundancy::reduce_equalities`]'s
+//!      expensive QR/Gaussian elimination) also runs again at the *end* of
+//!      every outer round, since `doubleton`/`colsingleton` rewrite `g`'s real
+//!      inequality rows during substitution and can turn two originally-
+//!      distinct rows into duplicates this pre-loop call could never have
+//!      seen (see that call site's own docs).
 //!   3. [`run_extended`]'s own round loop: [`propagate::propagate`]
 //!      (activity-bound constraint propagation, tightening variable bounds
 //!      and dropping/detecting redundant/infeasible rows) →
@@ -88,6 +95,7 @@ pub mod doubleton;
 pub mod dominatedcol;
 pub mod dualfix;
 pub mod dualpropagate;
+pub mod freevar;
 pub mod parallelrows;
 pub mod propagate;
 pub mod redundancy;
@@ -195,6 +203,16 @@ pub struct ExtendedPresolveResult {
     pub real_rhs: Vec<f64>,
     pub c: Vec<f64>,
     pub infeasible: bool,
+    /// `true` iff [`freevar::eliminate_free_variables`] found a free
+    /// variable that is genuinely unbounded — either no remaining
+    /// appearance anywhere (`A`'s rows or the real inequality rows) with a
+    /// nonzero objective coefficient, or exactly one inequality-row
+    /// appearance whose sign combination with that coefficient leaves it
+    /// unbounded on the objective-favored side (see that function's own
+    /// docs for both) — and `a`/`b`/`c`/`lb`/`ub`/etc. below must not be
+    /// trusted. Mutually exclusive with `infeasible` — presolve reports at
+    /// most one of the two.
+    pub unbounded: bool,
     pub substitutions: Vec<colsingleton::Substitution>,
 }
 
@@ -211,6 +229,25 @@ fn extended_infeasible(sc: Scaling, a: Csr, b: Vec<f64>, c: Vec<f64>, n: usize) 
         real_rhs: Vec::new(),
         c,
         infeasible: true,
+        unbounded: false,
+        substitutions: Vec::new(),
+    }
+}
+
+fn extended_unbounded(sc: Scaling, a: Csr, b: Vec<f64>, c: Vec<f64>, n: usize) -> ExtendedPresolveResult {
+    ExtendedPresolveResult {
+        scaling: sc,
+        a,
+        b,
+        g: csr_from_rows(&[], n),
+        h: Vec::new(),
+        lb: Vec::new(),
+        ub: Vec::new(),
+        real_rows: Vec::new(),
+        real_rhs: Vec::new(),
+        c,
+        infeasible: false,
+        unbounded: true,
         substitutions: Vec::new(),
     }
 }
@@ -604,6 +641,50 @@ pub fn run_extended(
             cur_real_rhs = refreshed_real_rhs;
         }
 
+        // Re-run the cheap hash-based duplicate-row pass on `(g, h)` every
+        // outer round, not just once before this loop starts (the original
+        // design, mirroring `reduce_equalities`'s own one-shot placement) —
+        // unlike that rank-revealing QR/Gaussian-elimination pass (expensive,
+        // and gated to run once for that reason, matching HiGHS's own
+        // `removeDependentEquations`), this one is a single O(nnz) hash scan,
+        // and `doubleton`/`colsingleton` above rewrite `g`'s real inequality
+        // rows during substitution (see either module's own `&g`/`&h` in its
+        // signature) — so two originally-distinct inequality rows can end up
+        // with the same coefficient pattern only *after* a shared variable is
+        // eliminated from both, a duplicate this function's pre-loop call (on
+        // the original, not-yet-substituted `g`) could never have seen. Run
+        // unconditionally rather than latched (contrast `doubleton_active`):
+        // cheap enough every round that gating it on a prior round finding
+        // nothing isn't worth the extra bookkeeping.
+        //
+        // Measured directly (an `ENOMOTO_DEBUG_DEDUP_ROUND`-style row-count
+        // counter, since removed, straight before/after this exact call) on
+        // the full 73-problem in-scope Netlib set, A/B against this same
+        // call sitting out here vs. only once before the round loop starts
+        // (its pre-existing placement): this mid-loop call *does* fire —
+        // on 44/73 instances, some substantially (`ganges` drops well over
+        // 300 rows across its own several firings within one solve,
+        // `sierra` over 150, `stocfor2`/`cycle` over 200 each) — unlike
+        // `parallelrows`/`rowdominance`/`dominatedcol`/`sparsify`/`stuffing`
+        // above and below, each of which fired on *zero* of these same 73.
+        // Most of that mid-loop churn nets out to the same *final*
+        // `g.nrows()` this function would have reached anyway (the same
+        // duplicate row would otherwise have been resolved some other way
+        // by a later `propagate`/`rowsingleton`/`colsingleton` pass instead)
+        // — pure wasted work in every one of those later passes' own
+        // per-round scans this call now heads off instead — except on two
+        // instances where it also survives to reduce the truly *final*
+        // post-presolve row count: `ganges` (948 -> 936, -1.3%) and
+        // `sierra` (1097 -> 1087, -0.9%). Aggregate wall time across all 73
+        // was a wash either way (10081.7ms without this call vs. 10091.2ms
+        // with it, well within run-to-run noise) — kept for the two
+        // instances' real size reduction and the wasted-work-avoided
+        // argument above, not for any aggregate speedup this measurement
+        // actually showed.
+        let (rg, rh) = timed_step!("reduce_inequalities(round)", redundancy::reduce_inequalities(&g, &h, n));
+        g = rg;
+        h = rh;
+
         let signature = (a.nrows(), g.nrows(), lb.clone(), ub.clone());
         if prev_signature.as_ref() == Some(&signature) {
             break;
@@ -628,6 +709,7 @@ pub fn run_extended(
             real_rhs: prop.real_rhs,
             c,
             infeasible: true,
+            unbounded: false,
             substitutions,
         };
     }
@@ -652,7 +734,53 @@ pub fn run_extended(
         lb[sub.var] = 0.0;
         ub[sub.var] = 0.0;
     }
-    let (g, h) = propagate::rebuild_g(n, prop.real_rows.clone(), prop.real_rhs.clone(), &lb, &ub);
+
+    // General free-variable elimination (paper §4.1): `rowsingleton`/
+    // `doubleton`/`colsingleton` above only ever caught a free variable
+    // appearing in exactly one or two `A` rows; this handles any remaining
+    // one (any number of appearances, including none at all) — see
+    // `freevar`'s own docs. Must run *after* the pinning loop just above,
+    // not before: an already-eliminated column's own box row is long gone
+    // by this point, so without pinning it to `[0,0]` first it would
+    // misread here as a genuinely fresh free variable.
+    let free = if std::env::var("ENOMOTO_DISABLE_FREEVAR").is_ok() {
+        freevar::FreeVarResult {
+            a: a.clone(),
+            b: b.clone(),
+            c: c.clone(),
+            substitutions: Vec::new(),
+            fixed: Vec::new(),
+            unbounded: false,
+            real_rows: prop.real_rows.clone(),
+            real_rhs: prop.real_rhs.clone(),
+        }
+    } else {
+        timed_step!("freevar", freevar::eliminate_free_variables(n, &a, &b, &c, &lb, &ub, &prop.real_rows, &prop.real_rhs))
+    };
+    if std::env::var("ENOMOTO_DEBUG_FREEVAR").is_ok() {
+        eprintln!("DEBUG_FREEVAR: eliminated={} fixed={} unbounded={}", free.substitutions.len(), free.fixed.len(), free.unbounded);
+    }
+    if free.unbounded {
+        return extended_unbounded(sc, free.a, free.b, free.c, n);
+    }
+    a = free.a;
+    b = free.b;
+    c = free.c;
+    for &(j, v) in &free.fixed {
+        lb[j] = v;
+        ub[j] = v;
+    }
+    substitutions.extend(free.substitutions);
+    // Re-pin: covers `freevar`'s own newly eliminated columns (the pass
+    // above only pinned what `rowsingleton`/`doubleton`/`colsingleton` had
+    // already found) before `rebuild_g` reads `lb`/`ub` below — same reason
+    // as the first pass, just for this pass's own new substitutions.
+    for sub in &substitutions {
+        lb[sub.var] = 0.0;
+        ub[sub.var] = 0.0;
+    }
+
+    let (g, h) = propagate::rebuild_g(n, free.real_rows.clone(), free.real_rhs.clone(), &lb, &ub);
 
     ExtendedPresolveResult {
         scaling: sc,
@@ -662,10 +790,11 @@ pub fn run_extended(
         h,
         lb,
         ub,
-        real_rows: prop.real_rows,
-        real_rhs: prop.real_rhs,
+        real_rows: free.real_rows,
+        real_rhs: free.real_rhs,
         c,
         infeasible: false,
+        unbounded: false,
         substitutions,
     }
 }

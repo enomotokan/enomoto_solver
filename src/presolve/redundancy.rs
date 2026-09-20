@@ -1,6 +1,13 @@
 //! Removes redundant equality-constraint rows from `(A, b)`, run once (on
 //! the Ruiz-scaled problem) before either engine's main loop starts —
 //! shared by `interior_point.rs` and `simplex.rs` via `presolve::run_extended`.
+//! [`reduce_inequalities`]'s own duplicate-row pass over `(G, h)` is the
+//! exception: cheap enough (a single hash scan, no linear algebra) that
+//! `run_extended`'s own round loop calls it again at the end of every outer
+//! round, not just once here — see that call site's own docs for why (in
+//! short: `doubleton`/`colsingleton` substitution can turn two originally-
+//! distinct inequality rows into duplicates only *after* this pre-loop call
+//! already ran).
 //!
 //! Two passes:
 //!  1. **Direct duplicate detection**: a row that is an exact or

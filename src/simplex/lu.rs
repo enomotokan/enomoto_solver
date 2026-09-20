@@ -1639,6 +1639,22 @@ pub struct FtLu {
     /// measurements) handful that actually do ever get touched.
     row_owners: Vec<Vec<usize>>,
     r_etas: Vec<REta>,
+    /// [`Self::try_update`]'s own reusable scratch (length `m`, always
+    /// restored to that length before returning — see that method's own
+    /// docs on the `mem::take`/restore pattern this exists for): avoids the
+    /// two per-pivot heap allocations (`ftran_through_l_and_r`'s owned
+    /// result, and building `e_p` in place) that method used to pay on
+    /// *every* pivot commit, the same "fresh `Vec` every iteration" cost
+    /// this crate's hot dual-simplex loops elsewhere already eliminated via
+    /// caller-owned buffers (see e.g. `solve_into`'s own docs) — `try_update`
+    /// itself was the one hot-path call in this file still allocating,
+    /// found via `ENOMOTO_PROF_PHASES_EXT` naming `ft_update` as 13-20% of
+    /// wall time on several Netlib instances with no single other phase
+    /// anywhere near as consistently large.
+    scratch_a_tilde: Vec<f64>,
+    /// See [`Self::scratch_a_tilde`]'s own docs — the other of
+    /// [`Self::try_update`]'s two scratch buffers.
+    scratch_e_tilde: Vec<f64>,
 }
 
 impl FtLu {
@@ -1674,6 +1690,8 @@ impl FtLu {
             slot_pos: (0..m).collect(),
             row_owners,
             r_etas: Vec::new(),
+            scratch_a_tilde: vec![0.0; m],
+            scratch_e_tilde: vec![0.0; m],
         }
     }
 
@@ -1774,16 +1792,6 @@ impl FtLu {
             };
             z[reta.p] -= dot;
         }
-    }
-
-    /// Allocating convenience wrapper around [`Self::ftran_through_l_and_r_into`]
-    /// — only `try_update` still needs an owned result; see
-    /// [`Self::u_transpose_solve`]'s own docs for why that call site is left
-    /// allocating rather than threaded through with a buffer too.
-    fn ftran_through_l_and_r(&self, rhs: &[f64]) -> Vec<f64> {
-        let mut z = vec![0.0; self.base.m];
-        self.ftran_through_l_and_r_into(rhs, &mut z);
-        z
     }
 
     /// Writes `B^-1 rhs` into `out` (length `m`), using `scratch` (also
@@ -1953,14 +1961,41 @@ impl FtLu {
         let m = self.base.m;
         let p = self.base.col_perm_inv[basis_slot];
 
-        let a_tilde = self.ftran_through_l_and_r(a_q_original);
+        // `scratch_a_tilde`/`scratch_e_tilde` (see their own docs): taken out
+        // of `self` (rather than borrowed) so the `&self` FTRAN/BTRAN calls
+        // just below don't conflict with holding a `&mut` into one of
+        // `self`'s own fields at the same time — restored to `self` as soon
+        // as each is done being read (`scratch_e_tilde` right after `r_vec`
+        // is built; `scratch_a_tilde` at every return point, both the early
+        // failure below and the success path's own `off_diag` use further
+        // down). A length mismatch (only possible if a *previous* call
+        // somehow left it empty, which no current code path does) falls
+        // back to a fresh allocation rather than indexing out of bounds.
+        let mut a_tilde = std::mem::take(&mut self.scratch_a_tilde);
+        if a_tilde.len() != m {
+            a_tilde = vec![0.0; m];
+        }
+        // `l_solve_into` (this function's own first step) fully overwrites
+        // every entry of `a_tilde` before ever reading one back, so no
+        // explicit zeroing is needed here regardless of what this buffer
+        // held from its previous use.
+        self.ftran_through_l_and_r_into(a_q_original, &mut a_tilde);
 
-        // Builds the unit vector directly into the buffer `u_transpose_solve_into`
-        // will mutate in place, rather than allocating `e_p` and handing it
-        // to the allocating `u_transpose_solve` wrapper (which would then
-        // `.to_vec()`-clone it again internally) — one m-length allocation
-        // instead of two for what's otherwise almost entirely zeros.
-        let mut e_tilde = vec![0.0; m];
+        // Unlike `a_tilde` above, `u_transpose_solve_into` mutates `z` as
+        // *both* the input right-hand side and the evolving solution in
+        // place (eq. 8's forward substitution) — reusing this buffer
+        // without resetting every entry to the true input (`e_p`) first
+        // would solve against whatever stale values its previous use left
+        // behind instead. Zeroing it here is still one `O(m)` pass, exactly
+        // as `vec![0.0; m]` used to pay for its own zero-initialization —
+        // what this reuse actually saves is the allocator round-trip
+        // itself, not this fill.
+        let mut e_tilde = std::mem::take(&mut self.scratch_e_tilde);
+        if e_tilde.len() != m {
+            e_tilde = vec![0.0; m];
+        } else {
+            e_tilde.iter_mut().for_each(|v| *v = 0.0);
+        }
         e_tilde[p] = 1.0;
         self.u_transpose_solve_into(&mut e_tilde);
 
@@ -1969,10 +2004,17 @@ impl FtLu {
 
         let r_vec: Vec<(usize, f64)> =
             (0..m).filter(|&i| i != p).map(|i| (i, -old_pivot * e_tilde[i])).filter(|&(_, v)| v != 0.0).collect();
+        // `e_tilde` itself is never read again after building `r_vec` above
+        // (which already copied out every value it needs) — safe to give
+        // back to `self` immediately rather than waiting for this
+        // function's own return points the way `a_tilde` (still needed for
+        // `off_diag` on the success path below) has to.
+        self.scratch_e_tilde = e_tilde;
 
         let dot: f64 = r_vec.iter().map(|&(i, v)| v * a_tilde[i]).sum();
         let new_pivot = a_tilde[p] - dot;
         if new_pivot.abs() < min_pivot {
+            self.scratch_a_tilde = a_tilde;
             return false;
         }
 
@@ -2006,6 +2048,8 @@ impl FtLu {
 
         let off_diag: Vec<(usize, f64)> =
             (0..m).filter(|&i| i != p && a_tilde[i] != 0.0).map(|i| (i, a_tilde[i])).collect();
+        // `a_tilde`'s last read was just above — safe to give back now.
+        self.scratch_a_tilde = a_tilde;
         for &(row_step, _) in &off_diag {
             self.row_owners[row_step].push(p);
         }

@@ -1,9 +1,15 @@
-//! A from-scratch **bounded-variable revised simplex**, both primal
-//! ([`solve_lp`]) and dual ([`solve_lp_dual`]) — `solver::solve_lp`'s
-//! default engine for every LP `Model.solve()` needs to solve (including
-//! once per branch-and-bound node for MIPs; see `mip.rs`), reachable
-//! explicitly via `Model.solve(root_solver="simplex")` alongside the
-//! interior-point alternative (`types::RootSolver`).
+//! A from-scratch **bounded-variable revised simplex**, dual method
+//! ([`solve_lp_dual`]) — `solver::solve_lp`'s default engine for every LP
+//! `Model.solve()` needs to solve (including once per branch-and-bound
+//! node for MIPs; see `mip.rs`), reachable explicitly via
+//! `Model.solve(root_solver="simplex")` alongside the interior-point
+//! alternative (`types::RootSolver`). A classical primal two-phase method
+//! also lives here (`solve_lp_on`, no longer exposed under a standalone
+//! `solve_lp` name), kept only as [`solve_lp_dual`]'s own trivial
+//! `n_rows == 0` shortcut — every other case, including the last-resort
+//! `BIG_M`-substituted fallback when [`extended_dual::solve_lp_dual_extended`]
+//! gives up, goes through the classical *dual* method instead (see
+//! `build_std_form_presolved`'s own `clamp_unbounded` docs).
 //!
 //! ## The bounded-variable invariant
 //!
@@ -127,6 +133,8 @@ use std::collections::BinaryHeap;
 /// (an `FtLu` instance, the live basis factorization).
 mod lu;
 use self::lu as sparse_lu;
+
+mod extended_dual;
 
 const TOL: f64 = 1e-9;
 const MAX_ITERS: usize = 20_000;
@@ -395,7 +403,7 @@ const FT_MAX_UPDATES: usize = 300;
 /// independently re-tuned against this crate's Netlib benchmark set beyond
 /// the sweep recorded in this feature's own commit message — re-measure
 /// with `ENOMOTO_PROF_UPDATE_VERIFY` (below) before moving it.
-const UPDATE_VERIFY_TOL: f64 = 1e-7;
+pub(super) const UPDATE_VERIFY_TOL: f64 = 1e-7;
 
 /// HiGHS `HEkkDualRow::updateVerify` equivalent: cross-checks this
 /// iteration's pivot element between PRICE's row-direction value
@@ -413,8 +421,15 @@ const UPDATE_VERIFY_TOL: f64 = 1e-7;
 /// touched by this check — by the time it runs, `p`/`q`/`theta_q` are
 /// already fully decided; this only ever changes *whether a refactorization
 /// happens sooner*, never which pivot is chosen.
+///
+/// `pub(super)`: `extended_dual::solve_lp_dual_extended` reuses this exact
+/// function and [`UPDATE_VERIFY_TOL`] for its own pivot element (`a_p[q]`
+/// vs `alpha_full[r]`) — the agreement this checks for has no
+/// `Affine1`-vs-`f64` dependency at all (both values it compares are
+/// always `M`-independent structural quantities), so there is nothing for
+/// that module to generalize here, only to call.
 #[inline]
-fn update_verify(alpha_row: f64, alpha_col: f64) -> bool {
+pub(super) fn update_verify(alpha_row: f64, alpha_col: f64) -> bool {
     let scale = alpha_row.abs().max(alpha_col.abs()).max(FT_MIN_PIVOT);
     let rel = (alpha_row - alpha_col).abs() / scale;
     rel <= UPDATE_VERIFY_TOL
@@ -816,8 +831,15 @@ const BIG_M: f64 = 1e7;
 /// index, value)` pair — a plain constant for a `dualfix`/forcing-row
 /// fixed variable, and the doubleton/colsingleton sentinel `0.0` for one
 /// [`presolve::colsingleton::Substitution::value`] will overwrite right
-/// afterward. `orig_of_free.len() + fixed_values.len() == variables.len()`
-/// always.
+/// afterward. `sign[nj]` is `orig_of_free[nj]`'s own contribution sign —
+/// always `1.0`, except for the second (minus) half of a split genuinely-
+/// free column (see `sign`'s own field docs), where two `nj`s share one
+/// `orig_of_free` entry and `unscale_result` sums `sign[nj] * x_free[nj]`
+/// into it instead of a plain assignment. Because of that sharing,
+/// `orig_of_free.len() + fixed_values.len() == variables.len()` no longer
+/// always holds (a split column contributes two `nj`s for one original
+/// index) — `unscale_result` takes `variables.len()` directly instead of
+/// deriving it from these lengths.
 ///
 /// `shift[nj]` is how far column `nj`'s *finite* bound was translated
 /// toward `0` (see the bound-shift step in [`build_std_form_presolved`]
@@ -825,21 +847,61 @@ const BIG_M: f64 = 1e7;
 /// coordinate system, so recovering the true (still-scaled) value of
 /// column `nj` needs `x_free[nj] + shift[nj]`, done once in
 /// [`unscale_result`] before any substitution's own `value()` call reads
-/// it back out.
+/// it back out. Always `0.0` for a split column's own two `nj`s (a
+/// genuinely free column has no finite side to shift toward, same as an
+/// unsplit one — see the shift step's own docs).
 struct PresolvedForm {
     std: StdForm,
     scaling: scaling::Scaling,
     substitutions: Vec<presolve::colsingleton::Substitution>,
     orig_of_free: Vec<usize>,
+    /// `sign[nj] * (x_free[nj] + shift[nj])` is `nj`'s own contribution to
+    /// `orig_of_free[nj]`'s true value — see [`PresolvedForm`]'s own docs
+    /// and the split-column step in [`build_std_form_presolved`] for why
+    /// this is ever anything but `1.0`.
+    sign: Vec<f64>,
     fixed_values: Vec<(usize, f64)>,
     shift: Vec<f64>,
+    /// `true` iff some structural column still had a genuine infinite
+    /// bound after presolve on at least one side (free variables reachable
+    /// through an equality row are always eliminated by
+    /// `presolve::freevar` before this point, but that module's own docs
+    /// name one residual case it cannot soundly resolve itself — a free
+    /// variable appearing only in an inequality row — so a genuinely
+    /// *both*-sided-infinite column can still reach here; see the
+    /// split-column step in [`build_std_form_presolved`] for how that case
+    /// is turned into two one-sided columns before `std` is ever built).
+    /// Whether `std.lb`/`std.ub` actually still carry a surviving one-sided
+    /// infinity, or had it `BIG_M`-substituted, depends on the
+    /// `clamp_unbounded` flag `build_std_form_presolved` was called with —
+    /// see that parameter's own docs. `solve_lp_dual` uses this flag to
+    /// dispatch to `extended_dual::solve_lp_dual_extended` instead of the
+    /// classical bounded-variable path.
+    had_unbounded_structural: bool,
 }
 
+/// `clamp_unbounded`: whether a surviving one-sided infinite structural
+/// bound should be substituted with the numeric [`BIG_M`] sentinel (`true`
+/// — the only remaining caller is [`solve_lp_dual`]'s own fallback path,
+/// taken when [`extended_dual::solve_lp_dual_extended`] gives up: it
+/// re-presolves with this set and falls back to the *classical* bounded-
+/// variable dual method, `BIG_M`-substituted, rather than the M-free
+/// extended one. A standalone primal entry point used to pass this
+/// unconditionally too — removed once every production call path settled
+/// on `solve_lp_dual`) or left as a genuine infinity (`false`, what
+/// [`solve_lp_dual`] always
+/// passes: `had_unbounded_structural` on the result tells it whether to
+/// route to [`extended_dual::solve_lp_dual_extended`] instead of the
+/// classical path — see that field's own docs). Harmless either way when
+/// no such bound survives (the substitution loop below is a no-op then
+/// regardless), which is the case for every ordinary (fully bounded)
+/// problem.
 fn build_std_form_presolved(
     variables: &[VariableData],
     objective: &Objective,
     constraints: &[ConstraintRow],
-) -> Option<PresolvedForm> {
+    clamp_unbounded: bool,
+) -> Result<PresolvedForm, Status> {
     let n = variables.len();
     let sign = match objective.sense {
         Sense::Minimize => 1.0,
@@ -853,8 +915,18 @@ fn build_std_form_presolved(
     let (a, b, g, h) = presolve::build_a_g(variables, constraints);
 
     let pre = presolve::run_extended(n, &a, &b, &g, &h, &c0, RUIZ_ITERS, PROPAGATION_PASSES, PRESOLVE_ROUNDS, ROWSINGLETON_COLSINGLETON_INNER_ROUNDS);
+    if std::env::var("ENOMOTO_DEBUG_PRESOLVE_INFEAS").is_ok() {
+        eprintln!("DEBUG_PRESOLVE: infeasible={} unbounded={}", pre.infeasible, pre.unbounded);
+    }
     if pre.infeasible {
-        return None;
+        return Err(Status::Infeasible);
+    }
+    if pre.unbounded {
+        // `presolve::freevar::eliminate_free_variables` found a free
+        // variable with no remaining appearance anywhere and a nonzero
+        // cost — decidable directly, with no basis ever needing to be
+        // built (see that module's own docs).
+        return Err(Status::Unbounded);
     }
 
     // `pre.lb`/`pre.ub`/`pre.real_rows`/`pre.real_rhs` are the box bounds
@@ -924,6 +996,28 @@ fn build_std_form_presolved(
         ub[j] -= s;
     }
 
+    // Whether any *structural* column still carries a genuine `+/-inf`
+    // bound at this point. Usually one-sided only (`lb[j]==-inf xor
+    // ub[j]==+inf` — free variables reachable through an equality row are
+    // gone by now, see `presolve::freevar`'s own docs), but *can* still be
+    // genuinely both-sided: that module's own docs name one residual case
+    // it cannot soundly resolve itself — a free variable appearing only in
+    // an inequality row — so `lb[j]==-inf && ub[j]==+inf` both is possible
+    // here too (confirmed reachable: a hand-built LP with two free
+    // variables tied only through opposing inequality-row pairs, never an
+    // equality row, made `solve_lp_dual` report a false `Infeasible` before
+    // the split-column step below existed). Detected *before* the `BIG_M`
+    // substitution below so it reflects the true problem shape, not the
+    // sentinel this function still falls back to substituting for now.
+    let had_unbounded_structural = (0..n).any(|j| lb[j] == f64::NEG_INFINITY || ub[j] == f64::INFINITY);
+    if std::env::var("ENOMOTO_DEBUG_UNBOUNDED_VARS").is_ok() && had_unbounded_structural {
+        eprintln!(
+            "PRESOLVE: {} structural column(s) still have a genuine infinite bound ({})",
+            (0..n).filter(|&j| lb[j] == f64::NEG_INFINITY || ub[j] == f64::INFINITY).count(),
+            if clamp_unbounded { "BIG_M-substituted for this call" } else { "left genuinely infinite for the extended dual simplex" }
+        );
+    }
+
     // Any variable presolve never fully eliminated may still carry a
     // *genuine* `+/-inf` bound now (`model.rs::add_variable` allows one —
     // see its own docs) — the same finite-bounds need just described
@@ -954,36 +1048,82 @@ fn build_std_form_presolved(
     // only through a genuinely infinite bound, not the old
     // clamped-before-presolve path, and false `Infeasible` where HiGHS
     // reaches `Optimal`).
-    for j in 0..n {
-        let dj = pre.scaling.d[j];
-        if lb[j] == f64::NEG_INFINITY {
-            lb[j] = -BIG_M / dj;
-        }
-        if ub[j] == f64::INFINITY {
-            ub[j] = BIG_M / dj;
+    if clamp_unbounded {
+        for j in 0..n {
+            let dj = pre.scaling.d[j];
+            if lb[j] == f64::NEG_INFINITY {
+                lb[j] = -BIG_M / dj;
+            }
+            if ub[j] == f64::INFINITY {
+                ub[j] = BIG_M / dj;
+            }
         }
     }
 
     // Every structural variable with `lb[j] < ub[j]` gets a compacted slot
-    // `new_index[j] = Some(nj)`; every `lb[j] == ub[j]` one (doubleton/
-    // colsingleton substitution sentinel, or a `dualfix`/forcing-row real
-    // fixed value — pricing already can't tell, and doesn't need to, see
-    // `price_one`'s own `lb[j] == ub[j]` skip) is dropped from the solve's
-    // column space entirely rather than kept as a slot every column-
-    // oriented loop still has to check-and-skip and every row-oriented
-    // loop (the dual simplex's own PRICE step, expanding a touched row's
-    // full nonzero list) still has to read-and-discard on every pivot for
-    // the rest of the solve. Its contribution to any row it appears in is
-    // folded into that row's own right-hand side below instead — the same
-    // arithmetic `x_B = B^{-1}(b - N x_N)` already did with this column
-    // included in `N` at its bound, just performed once here instead of
-    // on every basis (re)computation for the life of the solve.
-    let mut new_index: Vec<Option<usize>> = vec![None; n];
+    // `new_index[j] = Some((nj, None))`; every `lb[j] == ub[j]` one
+    // (doubleton/colsingleton substitution sentinel, or a `dualfix`/
+    // forcing-row real fixed value — pricing already can't tell, and
+    // doesn't need to, see `price_one`'s own `lb[j] == ub[j]` skip) is
+    // dropped from the solve's column space entirely rather than kept as a
+    // slot every column-oriented loop still has to check-and-skip and
+    // every row-oriented loop (the dual simplex's own PRICE step,
+    // expanding a touched row's full nonzero list) still has to
+    // read-and-discard on every pivot for the rest of the solve. Its
+    // contribution to any row it appears in is folded into that row's own
+    // right-hand side below instead — the same arithmetic
+    // `x_B = B^{-1}(b - N x_N)` already did with this column included in
+    // `N` at its bound, just performed once here instead of on every basis
+    // (re)computation for the life of the solve.
+    //
+    // A column still genuinely free on *both* sides here (`lb[j]==-inf &&
+    // ub[j]==+inf` — `clamp_unbounded` already finitized every such bound
+    // above when true, so this only ever fires for the `solve_lp_dual`
+    // extended path: `presolve::freevar`'s own documented residual case, a
+    // free variable that appears only in an inequality row and so cannot
+    // be soundly eliminated by that module alone) instead gets *two*
+    // compacted slots, `new_index[j] = Some((plus, Some(minus)))`, one per
+    // half of the classical `x_j = x_j^+ - x_j^-` split (`x_j^+, x_j^- ∈
+    // [0, ∞)`). This is the standard textbook trick for representing a
+    // free variable with only one-sided-bounded columns — chosen over
+    // teaching `extended_dual`'s symbolic-`M` machinery a second,
+    // opposite-signed `M` term for this one rare case, and over growing
+    // `presolve::run_extended`'s own shared column space (which
+    // `interior_point.rs` also uses, and has no need of this at all: its
+    // own KKT formulation already handles a genuinely free column
+    // directly, without `extended_dual`'s one-sided-only assumption). Every
+    // row/objective coefficient the loops below see for `j` is duplicated
+    // onto both slots with opposite sign, so the two halves reconstruct
+    // `x_j` exactly wherever it appears; `unscale_result` sums them back
+    // together via `sign` (see `PresolvedForm`'s own docs).
+    let mut new_index: Vec<Option<(usize, Option<usize>)>> = vec![None; n];
     let mut orig_of_free: Vec<usize> = Vec::new();
+    let mut sign: Vec<f64> = Vec::new();
+    let mut slot_lb: Vec<f64> = Vec::new();
+    let mut slot_ub: Vec<f64> = Vec::new();
     for j in 0..n {
-        if lb[j] != ub[j] {
-            new_index[j] = Some(orig_of_free.len());
+        if lb[j] == ub[j] {
+            continue;
+        }
+        if lb[j] == f64::NEG_INFINITY && ub[j] == f64::INFINITY {
+            let plus = orig_of_free.len();
             orig_of_free.push(j);
+            sign.push(1.0);
+            slot_lb.push(0.0);
+            slot_ub.push(f64::INFINITY);
+            let minus = orig_of_free.len();
+            orig_of_free.push(j);
+            sign.push(-1.0);
+            slot_lb.push(0.0);
+            slot_ub.push(f64::INFINITY);
+            new_index[j] = Some((plus, Some(minus)));
+        } else {
+            let nj = orig_of_free.len();
+            orig_of_free.push(j);
+            sign.push(1.0);
+            slot_lb.push(lb[j]);
+            slot_ub.push(ub[j]);
+            new_index[j] = Some((nj, None));
         }
     }
     let n_free = orig_of_free.len();
@@ -996,15 +1136,13 @@ fn build_std_form_presolved(
 
     let mut c = vec![0.0; n_total];
     for (nj, &j) in orig_of_free.iter().enumerate() {
-        c[nj] = pre.c[j];
+        c[nj] = sign[nj] * pre.c[j];
     }
 
     let mut new_lb = vec![0.0; n_total];
     let mut new_ub = vec![0.0; n_total];
-    for (nj, &j) in orig_of_free.iter().enumerate() {
-        new_lb[nj] = lb[j];
-        new_ub[nj] = ub[j];
-    }
+    new_lb[..n_free].copy_from_slice(&slot_lb);
+    new_ub[..n_free].copy_from_slice(&slot_ub);
 
     let mut rows = Vec::with_capacity(n_rows);
     let mut b_out = Vec::with_capacity(n_rows);
@@ -1016,9 +1154,13 @@ fn build_std_form_presolved(
         let mut r: Vec<(usize, f64)> = Vec::new();
         for (j, &v) in ar.col_indices_of_row(i).zip(ar.values_of_row(i)) {
             match new_index[j] {
-                Some(nj) => {
+                Some((nj, None)) => {
                     r.push((nj, v));
                     rhs_i -= v * shift[j];
+                }
+                Some((plus, Some(minus))) => {
+                    r.push((plus, v));
+                    r.push((minus, -v));
                 }
                 None => rhs_i -= v * lb[j],
             }
@@ -1035,9 +1177,13 @@ fn build_std_form_presolved(
         let mut r: Vec<(usize, f64)> = Vec::new();
         for (j, v) in row {
             match new_index[j] {
-                Some(nj) => {
+                Some((nj, None)) => {
                     r.push((nj, v));
                     rhs_k -= v * shift[j];
+                }
+                Some((plus, Some(minus))) => {
+                    r.push((plus, v));
+                    r.push((minus, -v));
                 }
                 None => rhs_k -= v * lb[j],
             }
@@ -1052,13 +1198,15 @@ fn build_std_form_presolved(
     let cols = cols_from_rows(&rows, n_total);
     let rows = FixedRows::from_rows(&rows);
     let shift_of_free: Vec<f64> = orig_of_free.iter().map(|&j| shift[j]).collect();
-    Some(PresolvedForm {
+    Ok(PresolvedForm {
         std: StdForm { n_total, n_rows, c, rows, cols, b: b_out, lb: new_lb, ub: new_ub },
         scaling: pre.scaling,
         substitutions: pre.substitutions,
         orig_of_free,
+        sign,
         fixed_values,
         shift: shift_of_free,
+        had_unbounded_structural,
     })
 }
 
@@ -1082,28 +1230,39 @@ fn build_std_form_presolved(
 /// substitution's `terms`/`rhs`/`coeff` were computed in `run_extended`'s
 /// (unshifted) scaled space, so `sub.value(&x)` needs the true scaled
 /// value at every index it reads, shifted columns included.
+///
+/// `n` is the original `variables.len()` — needed explicitly (rather than
+/// derived from `orig_of_free.len() + fixed_values.len()`, which used to
+/// equal it always) because a split genuinely-free column now contributes
+/// *two* entries to `orig_of_free` for one original index (see
+/// [`PresolvedForm`]'s own docs on `sign`), so that sum can now exceed `n`.
 fn unscale_result(
     result: SimplexResult,
     sc: &scaling::Scaling,
     substitutions: &[presolve::colsingleton::Substitution],
     orig_of_free: &[usize],
+    sign: &[f64],
     fixed_values: &[(usize, f64)],
     shift: &[f64],
+    n: usize,
 ) -> SimplexResult {
     match result.status {
         Status::Optimal => {
             let x_free = result.x.unwrap();
-            // Expand the compacted solve's output (one entry per surviving
-            // free structural column, see `PresolvedForm`'s own docs) back
-            // into the original `variables.len()`-length space *before* the
-            // substitution loop below: a substitution's own `terms` can
-            // reference a variable that `dualfix`/a forcing row fixed
-            // outright (not one this loop itself resolves), so every fixed
-            // value must already be in place at its original index by the
-            // time `sub.value(&x)` reads it.
-            let mut x = vec![0.0; orig_of_free.len() + fixed_values.len()];
+            // Expand the compacted solve's output (one or two entries per
+            // surviving free structural column, see `PresolvedForm`'s own
+            // docs) back into the original `variables.len()`-length space
+            // *before* the substitution loop below: a substitution's own
+            // `terms` can reference a variable that `dualfix`/a forcing row
+            // fixed outright (not one this loop itself resolves), so every
+            // fixed value must already be in place at its original index by
+            // the time `sub.value(&x)` reads it. `+=` (not `=`) because a
+            // split column's two slots share one original index `j` and
+            // must both accumulate into it (`sign` carries the `-` for the
+            // second half).
+            let mut x = vec![0.0; n];
             for (nj, &j) in orig_of_free.iter().enumerate() {
-                x[j] = x_free[nj] + shift[nj];
+                x[j] += sign[nj] * (x_free[nj] + shift[nj]);
             }
             for &(j, v) in fixed_values {
                 x[j] = v;
@@ -2246,17 +2405,13 @@ fn solve_std_form_decomposed(std: &StdForm, use_dual: bool) -> SimplexResult {
     SimplexResult { status: Status::Optimal, x: Some(x) }
 }
 
-pub fn solve_lp(variables: &[VariableData], objective: &Objective, constraints: &[ConstraintRow]) -> SimplexResult {
-    let Some(pf) = build_std_form_presolved(variables, objective, constraints) else {
-        return SimplexResult { status: Status::Infeasible, x: None };
-    };
-    unscale_result(solve_std_form_decomposed(&pf.std, false), &pf.scaling, &pf.substitutions, &pf.orig_of_free, &pf.fixed_values, &pf.shift)
-}
-
 /// The primal two-phase method's actual work, operating on an
-/// already-presolved `StdForm` — factored out of [`solve_lp`] so
-/// [`solve_lp_dual`]'s own `n_rows == 0` trivial case can reuse it
-/// without running presolve twice.
+/// already-presolved `StdForm`. No longer reachable through a standalone
+/// primal entry point (`solve_lp`, the classical `BIG_M`-substituted
+/// primal method, was removed once every production call path settled on
+/// `solve_lp_dual` — see that function's own docs) — kept only because
+/// [`solve_lp_dual`]'s own `n_rows == 0` trivial case still reuses it
+/// directly, without running presolve twice.
 fn solve_lp_on(std: &StdForm) -> SimplexResult {
     if std.n_rows == 0 {
         // No constraints at all: every variable's bound is finite, so the
@@ -2354,15 +2509,38 @@ impl DseState {
 
     /// `p` = the pivot row (basis slot that left), `alpha` = `B^-1 a_q`
     /// (the entering column's FTRAN, against the basis as it stood
-    /// *before* the pivot), `tau` = `B^-1 (B^-T e_p)` ("ftran-dse").
+    /// *before* the pivot), `tau` = `B^-1 (B^-T e_p)` ("ftran-dse"), `rho_p`
+    /// = `B^-T e_p` — the BTRAN every caller already computed this same
+    /// iteration for PRICE, pre-pivot.
     ///
     /// Disjoint per-row writes (`w[i]` for `i != p` each depend only on
     /// `alpha[i]`/`tau[i]`/the *old* `w[p]`, never on another row's *new*
     /// value), so this parallelizes trivially — no fold/reduce needed,
     /// unlike `scaling::compute`'s max-accumulation.
-    fn update_after_pivot(&mut self, p: usize, alpha: &[f64], tau: &[f64]) {
+    ///
+    /// `wp_old` is recomputed here as `||rho_p||^2` — the exact `B^-T e_p`
+    /// squared norm, i.e. exactly `w[p]`'s own textbook definition for the
+    /// pre-pivot basis — rather than trusted off `self.w[p]`'s
+    /// incrementally-maintained value. The two are supposed to agree, but
+    /// only in infinite precision; because `wp_old` is the one quantity fed
+    /// into *every other* row's update below, a `self.w[p]` that has
+    /// already drifted gets re-injected into the *entire* weight vector the
+    /// next time row `p` itself pivots, compounding pivot after pivot with
+    /// no self-correction otherwise in reach — measured directly via
+    /// `ENOMOTO_PROF_PHASES_EXT`'s own `dse_rel_err` diagnostic reaching
+    /// >=100% relative error (vs. the true `||B^-T e_r||^2`) on the large
+    /// majority of iterations on Netlib `fit1p`, far worse than the
+    /// already-documented `degen3` case that motivated refreshing weights
+    /// at `refactorize()` time (see this crate's own memory notes on that
+    /// fix) — refactors alone are too infrequent (single digits per solve)
+    /// to bound this. `rho_p` costs nothing extra to pass in: every call
+    /// site already had to compute it this same iteration (PRICE needs it
+    /// regardless of pricing scheme), so this trades an admittedly-drifting
+    /// `O(1)` read for a correct `O(m)` recomputation that was already
+    /// sitting there, unread, at every single call site.
+    fn update_after_pivot(&mut self, p: usize, alpha: &[f64], tau: &[f64], rho_p: &[f64]) {
         let pivot = alpha[p];
-        let wp_old = self.w[p];
+        let wp_old = rho_p.iter().map(|v| v * v).sum::<f64>().max(STEEPEST_EDGE_FLOOR);
         let update_one = |i: usize, w_i: &mut f64| {
             if i == p {
                 return;
@@ -2404,6 +2582,29 @@ impl DevexState {
     /// Reference framework starts at the all-slack basis with every row's
     /// weight at `1.0` — same starting point as `DseState::new`, for the
     /// same reason (`B0` a signed identity).
+    ///
+    /// **Always seed a fresh `DevexState` at `1.0`, never from another
+    /// scheme's already-known weights (e.g. an existing `DseState`'s exact
+    /// values), even though those look like a strictly more accurate
+    /// starting point.** Confirmed the hard way on `extended_dual.rs`'s own
+    /// delta=0 Dse->Devex downgrade attempt: seeding from the live
+    /// `DseState.w` at that point produced a real, reproducible false
+    /// `Infeasible` on Netlib `pilot4` (switching back to a fresh `1.0`
+    /// start fixed it outright, isolated by testing both side by side).
+    /// Root cause: [`Self::update_after_pivot`]'s pivot-row line,
+    /// `self.w[p] = (wp_old / (pivot*pivot)).max(1.0)`, hard-floors at
+    /// `1.0` — correct *only* under this constructor's own convention that
+    /// every weight starts at exactly that scale. Exact DSE weights carry
+    /// no such property (`DseState`'s own floor is
+    /// [`STEEPEST_EDGE_FLOOR`], orders of magnitude below `1.0`, and true
+    /// values can be smaller still before `try_update`... before any
+    /// flooring); handing raw DSE values to this recurrence's `1.0` floor
+    /// artificially inflates whichever row pivots first, and Devex's own
+    /// weights only ever grow from there (never shrink or self-correct the
+    /// way DSE's exact recurrence does), so that one distortion compounds
+    /// pivot after pivot into a scoring order bad enough to reach a
+    /// genuine "no eligible column" conclusion that was never actually
+    /// true.
     fn new(m: usize) -> Self {
         DevexState { w: vec![1.0; m] }
     }
@@ -2505,23 +2706,30 @@ fn row_infeasible(std: &StdForm, t: &Tableau, noise_feasible: &[bool], i: usize)
 /// This mirrors HiGHS's `HEkkDualRHS::workCount`/`workIndex` (incrementally
 /// updated off the FTRAN indices touched each pivot, full rebuild after
 /// every basis resync/refactorization).
-struct InfeasibleRows {
+///
+/// `pub(super)` rather than private: `extended_dual::solve_lp_dual_extended`
+/// reuses this exact struct for its own (`Affine1`-valued) `x_B(M)`, once
+/// that module's main loop moved to the same incremental-maintenance
+/// design this one already used — the membership-tracking logic itself has
+/// no `f64`-vs-`Affine1` dependency at all, so duplicating it there would
+/// only risk the two copies drifting apart.
+pub(super) struct InfeasibleRows {
     /// Row indices currently infeasible, in no particular order.
-    rows: Vec<usize>,
+    pub(super) rows: Vec<usize>,
     /// `pos[i] == Some(k)` iff `rows[k] == i` — the O(1) membership test
     /// and removal index `rows.push`/`swap_remove` alone can't provide.
     pos: Vec<Option<usize>>,
 }
 
 impl InfeasibleRows {
-    fn new(m: usize) -> Self {
+    pub(super) fn new(m: usize) -> Self {
         InfeasibleRows { rows: Vec::new(), pos: vec![None; m] }
     }
 
     /// Sets row `i`'s membership to `infeasible`, doing nothing if it's
     /// already in that state. `O(1)`: insertion appends; removal
     /// swap-removes and patches the displaced row's `pos` entry.
-    fn set(&mut self, i: usize, infeasible: bool) {
+    pub(super) fn set(&mut self, i: usize, infeasible: bool) {
         match (infeasible, self.pos[i]) {
             (true, None) => {
                 self.pos[i] = Some(self.rows.len());
@@ -2545,7 +2753,7 @@ impl InfeasibleRows {
     /// since that's the only operation that can change many rows' `x_B`
     /// values at once without this struct's own incremental `set` calls
     /// seeing each change individually.
-    fn rebuild(&mut self, m: usize, mut pred: impl FnMut(usize) -> bool) {
+    pub(super) fn rebuild(&mut self, m: usize, mut pred: impl FnMut(usize) -> bool) {
         self.rows.clear();
         for i in 0..m {
             if pred(i) {
@@ -2701,10 +2909,28 @@ macro_rules! timed {
 }
 
 pub fn solve_lp_dual(variables: &[VariableData], objective: &Objective, constraints: &[ConstraintRow]) -> SimplexResult {
-    let Some(PresolvedForm { std, scaling: sc, substitutions, orig_of_free, fixed_values, shift }) = build_std_form_presolved(variables, objective, constraints) else {
-        return SimplexResult { status: Status::Infeasible, x: None };
+    // `clamp_unbounded: false` — this function always fully handles a
+    // one-sided infinite structural bound itself, either via the
+    // classical path below (when none survived, the common case) or via
+    // `extended_dual::solve_lp_dual_extended` (when `had_unbounded_structural`
+    // is set) — see that parameter's own docs.
+    let PresolvedForm { std, scaling: sc, substitutions, orig_of_free, sign, fixed_values, shift, had_unbounded_structural } = match build_std_form_presolved(variables, objective, constraints, false) {
+        Ok(pf) => pf,
+        Err(status) => return SimplexResult { status, x: None },
     };
     if std::env::var("ENOMOTO_DEBUG_PRESOLVE_SIZE").is_ok() {
+        // Moved here (from inside the `!had_unbounded_structural` branch
+        // below, where it used to live) so it fires for *every* solve, not
+        // just the common finite-bounds case: this `std` is the one
+        // `extended_dual::solve_lp_dual_extended` below actually solves too
+        // (same `clamp_unbounded: false` presolve pass, no second one) when
+        // `had_unbounded_structural` is true — only the rare
+        // extended-solver-returned-`None` fallback a few lines down
+        // re-presolves with `clamp_unbounded: true` into its own fresh
+        // `std`, which this print never sees (that path is itself the
+        // "should be unreachable" case its own comment describes, not the
+        // one worth instrumenting here).
+        //
         // `std.n_total - std.n_rows` is now the count of structural columns
         // actually handed to the solver — every fixed (`lb[j] == ub[j]`)
         // variable, substituted or not, is excluded from `std` entirely
@@ -2717,6 +2943,61 @@ pub fn solve_lp_dual(variables: &[VariableData], objective: &Objective, constrai
             std.n_total - std.n_rows,
             std.n_rows
         );
+    }
+    if had_unbounded_structural {
+        if std::env::var("ENOMOTO_DEBUG_EXT_COMPONENTS").is_ok() {
+            match connected_components_of_std_form(&std) {
+                Some((components, _has_row)) => {
+                    let mut sizes: Vec<usize> = components.iter().map(|c| c.len()).collect();
+                    sizes.sort_unstable_by(|a, b| b.cmp(a));
+                    eprintln!(
+                        "DEBUG_EXT_COMPONENTS: n_components={} sizes={:?}",
+                        components.len(),
+                        sizes
+                    );
+                }
+                None => eprintln!("DEBUG_EXT_COMPONENTS: single component (no split found)"),
+            }
+        }
+        let ext_result = extended_dual::solve_lp_dual_extended(&std);
+        if std::env::var("ENOMOTO_DEBUG_EXT_ITERS").is_ok() {
+            match &ext_result {
+                Some(r) => eprintln!("DEBUG_EXT: solve_lp_dual_extended returned Some({:?})", r.status),
+                None => eprintln!("DEBUG_EXT: solve_lp_dual_extended returned None (falling back)"),
+            }
+        }
+        if let Some(result) = ext_result {
+            return unscale_result(result, &sc, &substitutions, &orig_of_free, &sign, &fixed_values, &shift, variables.len());
+        }
+        // `None`: the extended solver hit one of its own documented
+        // "should be unreachable" cases (a pivot selection with no
+        // numerical-stability safeguard walked the basis singular, or
+        // exhausted its iteration budget — see `extended_dual`'s own
+        // module docs' simplification list) rather than reaching a
+        // genuine mathematical answer. Falling back to the classical
+        // `BIG_M`-substituted path (this crate's pre-existing behavior for
+        // every such problem, still exactly as numerically fragile as its
+        // own docs describe, but strictly more tested than reporting a
+        // wrong answer here) re-presolves from scratch with
+        // `clamp_unbounded: true` — cheap relative to how rarely this
+        // path is ever taken. Uses the classical *dual* method
+        // (`use_dual: true`), not the primal one: tried once as a
+        // "structurally different second opinion" (reasoning: `extended_dual`
+        // already failed on this `std`'s own dual pivot sequence, so a
+        // different algorithm might avoid the same failure mode), but
+        // reverted after it silently returned a *wrong* finite objective on
+        // a real Netlib instance (`fit1p`: 10236.95 vs the true 9146.38) —
+        // `solve_lp_on`'s own primal Tableau path is not independently
+        // verified against a `BIG_M`-truncated, genuinely-large-bound
+        // problem shape the way this dual path is (every deleted
+        // `solve_lp`-vs-`solve_lp_dual` cross-check test exercised the
+        // *dual* side of this exact scenario, never the primal one, once
+        // `solve_lp` itself was removed as dead code).
+        let PresolvedForm { std, scaling: sc, substitutions, orig_of_free, sign, fixed_values, shift, .. } = match build_std_form_presolved(variables, objective, constraints, true) {
+            Ok(pf) => pf,
+            Err(status) => return SimplexResult { status, x: None },
+        };
+        return unscale_result(solve_std_form_decomposed(&std, true), &sc, &substitutions, &orig_of_free, &sign, &fixed_values, &shift, variables.len());
     }
     let profile_phases = std::env::var("ENOMOTO_PROF_PHASES").is_ok();
     let debug_eta_density = std::env::var("ENOMOTO_DEBUG_ETA_DENSITY").is_ok();
@@ -2832,7 +3113,7 @@ pub fn solve_lp_dual(variables: &[VariableData], objective: &Objective, constrai
             );
         }
     }
-    unscale_result(result, &sc, &substitutions, &orig_of_free, &fixed_values, &shift)
+    unscale_result(result, &sc, &substitutions, &orig_of_free, &sign, &fixed_values, &shift, variables.len())
 }
 
 /// EXPERIMENTAL (measurement only, never exercised by production code):
@@ -4126,7 +4407,11 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
                 if debug_update_verify {
                     prof_phases::UPDATE_VERIFY_CHECKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
-                if !update_verify(alpha_row, alpha_col) {
+                // HiGHS `reinvertOnNumericalTrouble`: only a factorization that has
+                // been *updated* can be blamed for the disagreement — right after a
+                // fresh refactorization the pivot is committed regardless (otherwise
+                // a genuinely tiny pivot loops verify-fail -> refactor -> same pivot).
+                if lu.update_count() > 0 && !update_verify(alpha_row, alpha_col) {
                     verify_failed = true;
                     if debug_update_verify {
                         use std::sync::atomic::Ordering::Relaxed;
@@ -4312,7 +4597,7 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
             // by the (possibly just-decided) `escalate_to_dse` flag instead
             // would read a stale `tau_buf` from a stale iteration.
             EdgeWeights::Devex(dv) => dv.update_after_pivot(p, alpha),
-            EdgeWeights::Dse(dse) => dse.update_after_pivot(p, alpha, &tau_buf),
+            EdgeWeights::Dse(dse) => dse.update_after_pivot(p, alpha, &tau_buf, rho_p),
         });
         // Applied only now, after this pivot's own weight update above has
         // run under the scheme that was actually live for it - takes
@@ -4588,7 +4873,7 @@ mod tests {
         let vars = vec![var(0.0, 10.0), var(0.0, 10.0)];
         let obj = Objective { expr: expr(&[(0, 1.0), (1, 2.0)]), sense: Sense::Maximize };
         let cons = vec![row(&[(0, 1.0), (1, 1.0)], RowSense::Le, 10.0)];
-        let res = solve_lp(&vars, &obj, &cons);
+        let res = solve_lp_dual(&vars, &obj, &cons);
         assert_eq!(res.status, Status::Optimal);
         let x = res.x.unwrap();
         assert!(approx(x[0], 0.0), "x={x:?}");
@@ -4606,7 +4891,7 @@ mod tests {
             row(&[(0, 1.0), (1, 2.0)], RowSense::Ge, 6.0),
             row(&[(0, 1.0), (1, -1.0)], RowSense::Eq, 0.0),
         ];
-        let res = solve_lp(&vars, &obj, &cons);
+        let res = solve_lp_dual(&vars, &obj, &cons);
         assert_eq!(res.status, Status::Optimal);
         let x = res.x.unwrap();
         assert!(approx(x[0], 2.0), "x={x:?}");
@@ -4626,7 +4911,7 @@ mod tests {
             row(&[(0, 1.0)], RowSense::Ge, -5.0),
             row(&[(0, 1.0)], RowSense::Le, 100.0),
         ];
-        let res = solve_lp(&vars, &obj, &cons);
+        let res = solve_lp_dual(&vars, &obj, &cons);
         assert_eq!(res.status, Status::Optimal);
         assert!(approx(res.x.unwrap()[0], -5.0));
     }
@@ -4637,7 +4922,7 @@ mod tests {
         let vars = vec![var(0.0, 5.0)];
         let obj = Objective { expr: expr(&[(0, 1.0)]), sense: Sense::Minimize };
         let cons = vec![row(&[(0, 1.0)], RowSense::Ge, 10.0)];
-        let res = solve_lp(&vars, &obj, &cons);
+        let res = solve_lp_dual(&vars, &obj, &cons);
         assert_eq!(res.status, Status::Infeasible);
     }
 
@@ -4675,10 +4960,6 @@ mod tests {
             }
         };
 
-        let primal = solve_lp(&vars, &obj, &cons);
-        assert_eq!(primal.status, Status::Optimal);
-        check(primal.x.unwrap());
-
         let dual = solve_lp_dual(&vars, &obj, &cons);
         assert_eq!(dual.status, Status::Optimal);
         check(dual.x.unwrap());
@@ -4702,12 +4983,11 @@ mod tests {
             row(&[(0, 1.0), (1, 1.0)], RowSense::Le, 10.0),
             row(&[(0, 2.0), (1, 2.0)], RowSense::Le, 30.0),
         ];
-        for res in [solve_lp(&vars, &obj, &cons), solve_lp_dual(&vars, &obj, &cons)] {
-            assert_eq!(res.status, Status::Optimal);
-            let x = res.x.unwrap();
-            assert!(approx(x[0], 10.0), "x={x:?}");
-            assert!(approx(x[1], 0.0), "x={x:?}");
-        }
+        let res = solve_lp_dual(&vars, &obj, &cons);
+        assert_eq!(res.status, Status::Optimal);
+        let x = res.x.unwrap();
+        assert!(approx(x[0], 10.0), "x={x:?}");
+        assert!(approx(x[1], 0.0), "x={x:?}");
     }
 
     #[test]
@@ -4724,12 +5004,11 @@ mod tests {
         let vars = vec![var(2.0, 8.0), var(0.0, 10.0)];
         let obj = Objective { expr: expr(&[(0, 1.0), (1, 1.0)]), sense: Sense::Minimize };
         let cons = vec![row(&[(0, 1.0), (1, 1.0)], RowSense::Le, 10.0)];
-        for res in [solve_lp(&vars, &obj, &cons), solve_lp_dual(&vars, &obj, &cons)] {
-            assert_eq!(res.status, Status::Optimal);
-            let x = res.x.unwrap();
-            assert!(approx(x[0], 2.0), "x={x:?}");
-            assert!(approx(x[1], 0.0), "x={x:?}");
-        }
+        let res = solve_lp_dual(&vars, &obj, &cons);
+        assert_eq!(res.status, Status::Optimal);
+        let x = res.x.unwrap();
+        assert!(approx(x[0], 2.0), "x={x:?}");
+        assert!(approx(x[1], 0.0), "x={x:?}");
     }
 
     #[test]
@@ -4764,10 +5043,6 @@ mod tests {
             assert!(approx(objective, -20.0), "objective={objective}, x={x:?}");
         };
 
-        let primal = solve_lp(&vars, &obj, &cons);
-        assert_eq!(primal.status, Status::Optimal);
-        check(primal.x.unwrap());
-
         let dual = solve_lp_dual(&vars, &obj, &cons);
         assert_eq!(dual.status, Status::Optimal);
         check(dual.x.unwrap());
@@ -4775,6 +5050,268 @@ mod tests {
         let ipm = solve_via_ipm(&vars, &obj, &cons);
         assert_eq!(ipm.status, Status::Optimal);
         check(ipm.x.unwrap());
+    }
+
+    #[test]
+    fn freevar_eliminated_through_multiple_equality_rows_end_to_end() {
+        // x0 free, x1,x2 in [0,10]. x0 + x1 == 5, x0 - x2 == 1: unlike
+        // colsingleton/doubleton (a column appearing in at most 2 rows),
+        // this exercises `presolve::freevar::eliminate_free_variables`
+        // through the *full* solve path (`build_std_form_presolved` ->
+        // `presolve::run_extended`), not just the module's own unit tests.
+        // x1 = 5-x0, x2 = x0-1, feasible for x0 in [1,5] (x1,x2 in [0,10],
+        // the upper bounds never bind). min 2*x1+x2 = 9-x0 is minimized by
+        // maximizing x0, i.e. x0=5, giving x1=0, x2=4, objective=4.
+        let vars = vec![var(f64::NEG_INFINITY, f64::INFINITY), var(0.0, 10.0), var(0.0, 10.0)];
+        let obj = Objective { expr: expr(&[(1, 2.0), (2, 1.0)]), sense: Sense::Minimize };
+        let cons = vec![
+            row(&[(0, 1.0), (1, 1.0)], RowSense::Eq, 5.0),
+            row(&[(0, 1.0), (2, -1.0)], RowSense::Eq, 1.0),
+        ];
+        let check = |x: Vec<f64>| {
+            assert!(approx(x[0], 5.0), "x={x:?}");
+            assert!(approx(x[1], 0.0), "x={x:?}");
+            assert!(approx(x[2], 4.0), "x={x:?}");
+        };
+
+        let dual = solve_lp_dual(&vars, &obj, &cons);
+        assert_eq!(dual.status, Status::Optimal);
+        check(dual.x.unwrap());
+    }
+
+    #[test]
+    fn freevar_leftover_unconstrained_with_nonzero_cost_is_unbounded() {
+        // x0 free, appears in no row at all (equality or inequality); its
+        // own objective coefficient is nonzero, so the problem is
+        // unbounded regardless of x1's own (bounded, irrelevant) row.
+        let vars = vec![var(f64::NEG_INFINITY, f64::INFINITY), var(0.0, 10.0)];
+        let obj = Objective { expr: expr(&[(0, 1.0)]), sense: Sense::Minimize };
+        let cons = vec![row(&[(1, 1.0)], RowSense::Le, 5.0)];
+
+        assert_eq!(solve_lp_dual(&vars, &obj, &cons).status, Status::Unbounded);
+    }
+
+    #[test]
+    fn freevar_leftover_unconstrained_with_zero_cost_fixes_to_zero() {
+        // x0 free, appears in no row at all, zero objective coefficient:
+        // fixed to 0 at no cost, leaving x1's own optimum (3, at its own
+        // lower bound raised by the >= row) untouched.
+        let vars = vec![var(f64::NEG_INFINITY, f64::INFINITY), var(0.0, 10.0)];
+        let obj = Objective { expr: expr(&[(1, 1.0)]), sense: Sense::Minimize };
+        let cons = vec![row(&[(1, 1.0)], RowSense::Ge, 3.0)];
+
+        let dual = solve_lp_dual(&vars, &obj, &cons);
+        assert_eq!(dual.status, Status::Optimal);
+        let x = dual.x.unwrap();
+        assert!(approx(x[0], 0.0), "x={x:?}");
+        assert!(approx(x[1], 3.0), "x={x:?}");
+    }
+
+    #[test]
+    fn freevar_residual_both_sides_infinite_only_in_inequality_rows_end_to_end() {
+        // x0, x1 both genuinely free, and *never* appear in any equality
+        // row — only in two pairs of opposing inequality rows that jointly
+        // pin x0+x1=5 and x0-x1=1 (x0=3, x1=2) without ever being spelled
+        // as an `Eq` row. Single-row interval bound propagation can't
+        // tighten either bound here (each row's *other* free term is
+        // unbounded in the direction needed), so both variables reach
+        // `presolve::freevar` still doubly-infinite and, per its own docs,
+        // are left exactly as-is (the "only in an inequality row" residual
+        // case). Before the `x_j = x_j^+ - x_j^-` split in
+        // `build_std_form_presolved`, this made `solve_lp_dual` report a
+        // false `Infeasible` (`extended_dual::delta_of` silently
+        // misclassified a doubly-infinite column as one-sided).
+        let vars = vec![var(f64::NEG_INFINITY, f64::INFINITY), var(f64::NEG_INFINITY, f64::INFINITY)];
+        let obj = Objective { expr: expr(&[(0, 1.0), (1, 1.0)]), sense: Sense::Minimize };
+        let cons = vec![
+            row(&[(0, 1.0), (1, 1.0)], RowSense::Le, 5.0),
+            row(&[(0, 1.0), (1, 1.0)], RowSense::Ge, 5.0),
+            row(&[(0, 1.0), (1, -1.0)], RowSense::Le, 1.0),
+            row(&[(0, 1.0), (1, -1.0)], RowSense::Ge, 1.0),
+        ];
+        let dual = solve_lp_dual(&vars, &obj, &cons);
+        assert_eq!(dual.status, Status::Optimal);
+        let x = dual.x.unwrap();
+        assert!(approx(x[0], 3.0), "x={x:?}");
+        assert!(approx(x[1], 2.0), "x={x:?}");
+    }
+
+    #[test]
+    fn freevar_residual_only_in_inequality_rows_with_nonzero_objective_end_to_end() {
+        // x0 free, x1 in [0,10]; x0 appears only in two inequality rows
+        // (never an equality row). Maximize x0 (minimize -x0) subject to
+        // x0+x1<=8, x0-x1<=3: optimum at x1=2.5, x0=5.5. Here presolve
+        // finds a one-sided implied bound on x0 (not the doubly-infinite
+        // case above), exercising the ordinary `Single` (non-split) slot
+        // path alongside the split one.
+        let vars = vec![var(f64::NEG_INFINITY, f64::INFINITY), var(0.0, 10.0)];
+        let obj = Objective { expr: expr(&[(0, -1.0)]), sense: Sense::Minimize };
+        let cons = vec![
+            row(&[(0, 1.0), (1, 1.0)], RowSense::Le, 8.0),
+            row(&[(0, 1.0), (1, -1.0)], RowSense::Le, 3.0),
+        ];
+        let dual = solve_lp_dual(&vars, &obj, &cons);
+        assert_eq!(dual.status, Status::Optimal);
+        let x = dual.x.unwrap();
+        assert!(approx(x[0], 5.5), "x={x:?}");
+        assert!(approx(x[1], 2.5), "x={x:?}");
+    }
+
+    #[test]
+    fn freevar_in_exactly_one_inequality_row_eliminated_by_presolve_end_to_end() {
+        // x0 free, x1 in [0,10]; x0 appears in *exactly one* inequality row
+        // (x0+x1<=8, never an equality row) -- unlike the two-appearance
+        // test above, `presolve::freevar` now fully eliminates x0 outright
+        // (its own new "exactly one inequality-row appearance" case,
+        // substituting x0=8-x1 and dropping the row as redundant) rather
+        // than leaving it for `build_std_form_presolved`'s x_j=x_j^+-x_j^-
+        // split. Minimize -x0: maximized by minimizing x1 (its post-fold
+        // cost becomes +1, see `freevar`'s own unit tests for the fold
+        // arithmetic), so x1=0, x0=8, objective=-8.
+        let vars = vec![var(f64::NEG_INFINITY, f64::INFINITY), var(0.0, 10.0)];
+        let obj = Objective { expr: expr(&[(0, -1.0)]), sense: Sense::Minimize };
+        let cons = vec![row(&[(0, 1.0), (1, 1.0)], RowSense::Le, 8.0)];
+
+        let pf = build_std_form_presolved(&vars, &obj, &cons, false).unwrap();
+        assert!(!pf.had_unbounded_structural, "x0 should be fully eliminated by presolve, never reaching a structural column at all");
+
+        let check = |x: Vec<f64>| {
+            assert!(approx(x[0], 8.0), "x={x:?}");
+            assert!(approx(x[1], 0.0), "x={x:?}");
+        };
+        let dual = solve_lp_dual(&vars, &obj, &cons);
+        assert_eq!(dual.status, Status::Optimal);
+        check(dual.x.unwrap());
+    }
+
+    #[test]
+    fn freevar_eliminated_via_equality_row_folds_into_a_shared_inequality_row_end_to_end() {
+        // x0 free, x1,x2 in [0,10]. x0 == x1 (an equality row, x0's only
+        // `A`-row appearance -- eliminated via it), and separately
+        // x0 + x2 <= 5 (an inequality row x0 *also* appears in). Regression
+        // test (full solve path) for a real bug: `presolve::freevar`'s
+        // `A`-row elimination used to fold a substitution into every other
+        // `A` row a variable appeared in, but never into a `real_rows`
+        // entry it happened to share -- silently leaving that row
+        // referencing a column pinned to `0` downstream, corrupting real
+        // Netlib instances (`perold`, `pilot4`) into a false `Infeasible`.
+        // Minimize -2*x1 - x2: with the row correctly read as x1+x2<=5,
+        // the optimum pushes x1 (weighted higher) to the binding row's
+        // full budget: x1=5, x2=0, x0=5, objective=-10. Wrongly reading
+        // the row as x2<=5 (x0 misread as fixed to 0) would instead let
+        // x1 run away to its own unrelated bound (10) with x2=5, giving a
+        // spuriously better-looking but infeasible objective of -25.
+        let vars = vec![var(f64::NEG_INFINITY, f64::INFINITY), var(0.0, 10.0), var(0.0, 10.0)];
+        let obj = Objective { expr: expr(&[(1, -2.0), (2, -1.0)]), sense: Sense::Minimize };
+        let cons = vec![row(&[(0, 1.0), (1, -1.0)], RowSense::Eq, 0.0), row(&[(0, 1.0), (2, 1.0)], RowSense::Le, 5.0)];
+        let check = |x: Vec<f64>| {
+            assert!(approx(x[0], 5.0), "x={x:?}");
+            assert!(approx(x[1], 5.0), "x={x:?}");
+            assert!(approx(x[2], 0.0), "x={x:?}");
+        };
+        let dual = solve_lp_dual(&vars, &obj, &cons);
+        assert_eq!(dual.status, Status::Optimal);
+        check(dual.x.unwrap());
+    }
+
+    #[test]
+    fn freevar_split_column_mixed_with_ordinary_and_bounded_columns_end_to_end() {
+        // Stresses the split-column slot numbering (`new_lb`/`new_ub`/the
+        // row-building loops' `nj`/slack indices) when a split (doubly-
+        // free) column, an ordinary one-sided-infinite column, and a
+        // normal bounded column all coexist, plus a genuine equality row
+        // (so the `n_eq` slack loop runs too, not just the `g_rows` one).
+        // x0, x1 free only via inequality pairs pinning x0+x1=5, x0-x1=1
+        // (x0=3, x1=2, same as the pure split test above — deliberately
+        // never tied to x2/x3 by any row, so `presolve::freevar` can't
+        // eliminate them through an equality row and the split path still
+        // fires). x2 in [0,inf), x3 in [0,10] tied by an unrelated equality
+        // row x2-x3=4: minimized at x3=0, x2=4.
+        let vars = vec![
+            var(f64::NEG_INFINITY, f64::INFINITY),
+            var(f64::NEG_INFINITY, f64::INFINITY),
+            var(0.0, f64::INFINITY),
+            var(0.0, 10.0),
+        ];
+        let obj = Objective { expr: expr(&[(0, 1.0), (1, 1.0), (2, 1.0)]), sense: Sense::Minimize };
+        let cons = vec![
+            row(&[(0, 1.0), (1, 1.0)], RowSense::Le, 5.0),
+            row(&[(0, 1.0), (1, 1.0)], RowSense::Ge, 5.0),
+            row(&[(0, 1.0), (1, -1.0)], RowSense::Le, 1.0),
+            row(&[(0, 1.0), (1, -1.0)], RowSense::Ge, 1.0),
+            row(&[(2, 1.0), (3, -1.0)], RowSense::Eq, 4.0),
+        ];
+        let check = |x: Vec<f64>| {
+            assert!(approx(x[0], 3.0), "x={x:?}");
+            assert!(approx(x[1], 2.0), "x={x:?}");
+            assert!(approx(x[2], 4.0), "x={x:?}");
+            assert!(approx(x[3], 0.0), "x={x:?}");
+        };
+        let dual = solve_lp_dual(&vars, &obj, &cons);
+        assert_eq!(dual.status, Status::Optimal);
+        check(dual.x.unwrap());
+    }
+
+    #[test]
+    fn solve_lp_dual_end_to_end_unbounded_structural_column() {
+        // x0 in [0,+inf), never referenced by any constraint; cost favors
+        // its own infinite side. Exercises the full dispatch path
+        // (presolve -> build_std_form_presolved -> extended_dual, not a
+        // hand-built StdForm — see `extended_dual::tests` for those).
+        let vars = vec![var(0.0, f64::INFINITY), var(0.0, 10.0)];
+        let obj = Objective { expr: expr(&[(0, -1.0)]), sense: Sense::Minimize };
+        let cons = vec![row(&[(1, 1.0)], RowSense::Le, 5.0)];
+        assert_eq!(solve_lp_dual(&vars, &obj, &cons).status, Status::Unbounded);
+    }
+
+    #[test]
+    fn solve_lp_dual_end_to_end_finite_optimum_with_unbounded_structural_column() {
+        // x0 in [0,+inf), pulled in two directions by two separate
+        // 3-variable equality rows (neither a colsingleton nor a
+        // doubleton case, so presolve can't eliminate it outright): max
+        // x0 s.t. x0<=8 (row0, x1,x2>=0) and x0<=6 (row1, x3,x4>=0) -> the
+        // tighter bound (6) wins.
+        let vars = vec![var(0.0, f64::INFINITY), var(0.0, 10.0), var(0.0, 10.0), var(0.0, 10.0), var(0.0, 10.0)];
+        let obj = Objective { expr: expr(&[(0, -1.0)]), sense: Sense::Minimize };
+        let cons = vec![row(&[(0, 1.0), (1, 1.0), (2, 1.0)], RowSense::Eq, 8.0), row(&[(0, 1.0), (3, 1.0), (4, 1.0)], RowSense::Eq, 6.0)];
+        let res = solve_lp_dual(&vars, &obj, &cons);
+        assert_eq!(res.status, Status::Optimal);
+        let x = res.x.unwrap();
+        assert!(approx(x[0], 6.0), "x={x:?}");
+        let objective: f64 = obj.expr.coeffs.iter().map(|(&j, &c)| c * x[j]).sum();
+        assert!(approx(objective, -6.0), "objective={objective}, x={x:?}");
+    }
+
+    #[test]
+    fn had_unbounded_structural_flag_reflects_surviving_one_sided_bounds() {
+        // Fully bounded problem (no structural column ever infinite): the
+        // flag stays false — this is the common case, and the one every
+        // existing Netlib-style problem takes.
+        let vars = vec![var(0.0, 10.0), var(0.0, 10.0)];
+        let obj = Objective { expr: expr(&[(0, 1.0), (1, 1.0)]), sense: Sense::Minimize };
+        let cons = vec![row(&[(0, 1.0), (1, 1.0)], RowSense::Le, 10.0)];
+        let pf = build_std_form_presolved(&vars, &obj, &cons, true).unwrap();
+        assert!(!pf.had_unbounded_structural);
+
+        // A one-sided-unbounded structural variable whose favored
+        // direction (its cost sign) points at its own infinite bound, with
+        // no row of its own for `dualfix`/`propagate` to tighten that
+        // bound from: it survives presolve with a genuine infinite `ub`,
+        // so the flag is set regardless of `clamp_unbounded` — `x0` isn't
+        // referenced by `cons` at all here, only `x1` is. With
+        // `clamp_unbounded: false`, `std.ub[0]` itself stays genuinely
+        // infinite (what `solve_lp_dual` passes, for
+        // `extended_dual::solve_lp_dual_extended` to consume).
+        let vars = vec![var(0.0, f64::INFINITY), var(0.0, 10.0)];
+        let obj = Objective { expr: expr(&[(0, -1.0)]), sense: Sense::Minimize };
+        let cons = vec![row(&[(1, 1.0)], RowSense::Le, 5.0)];
+        let pf = build_std_form_presolved(&vars, &obj, &cons, true).unwrap();
+        assert!(pf.had_unbounded_structural);
+        assert!(pf.std.ub[0].is_finite(), "clamp_unbounded:true should still BIG_M-substitute, ub={}", pf.std.ub[0]);
+
+        let pf = build_std_form_presolved(&vars, &obj, &cons, false).unwrap();
+        assert!(pf.had_unbounded_structural);
+        assert_eq!(pf.std.ub[0], f64::INFINITY, "clamp_unbounded:false must leave the true infinity in place");
     }
 
     #[test]
@@ -4811,10 +5348,6 @@ mod tests {
             let objective: f64 = obj.expr.coeffs.iter().map(|(&j, &c)| c * x[j]).sum();
             assert!(approx(objective, -9.0), "objective={objective}, x={x:?}");
         };
-
-        let primal = solve_lp(&vars, &obj, &cons);
-        assert_eq!(primal.status, Status::Optimal);
-        check(primal.x.unwrap());
 
         let dual = solve_lp_dual(&vars, &obj, &cons);
         assert_eq!(dual.status, Status::Optimal);
@@ -4862,10 +5395,6 @@ mod tests {
             assert!(approx(objective, -3.0), "objective={objective}, x={x:?}");
         };
 
-        let primal = solve_lp(&vars, &obj, &cons);
-        assert_eq!(primal.status, Status::Optimal);
-        check(primal.x.unwrap());
-
         let dual = solve_lp_dual(&vars, &obj, &cons);
         assert_eq!(dual.status, Status::Optimal);
         check(dual.x.unwrap());
@@ -4901,12 +5430,11 @@ mod tests {
             row(&[(0, 1.0), (1, 1.0)], RowSense::Eq, 4.0), // exact duplicate
             row(&[(0, 1.0), (1, -1.0)], RowSense::Eq, 0.0),
         ];
-        for res in [solve_lp(&vars, &obj, &cons), solve_lp_dual(&vars, &obj, &cons)] {
-            assert_eq!(res.status, Status::Optimal);
-            let x = res.x.unwrap();
-            assert!(approx(x[0], 2.0), "x={x:?}");
-            assert!(approx(x[1], 2.0), "x={x:?}");
-        }
+        let res = solve_lp_dual(&vars, &obj, &cons);
+        assert_eq!(res.status, Status::Optimal);
+        let x = res.x.unwrap();
+        assert!(approx(x[0], 2.0), "x={x:?}");
+        assert!(approx(x[1], 2.0), "x={x:?}");
     }
 
     #[test]
@@ -4933,17 +5461,16 @@ mod tests {
             row(&[(0, 1.0), (1, 1.0)], RowSense::Ge, 4.0),
             row(&[(2, 1.0), (3, 1.0), (4, 1.0)], RowSense::Le, 15.0),
         ];
-        for res in [solve_lp(&vars, &obj, &cons), solve_lp_dual(&vars, &obj, &cons)] {
-            assert_eq!(res.status, Status::Optimal);
-            let x = res.x.unwrap();
-            assert!(approx(x[0], 0.0), "x={x:?}");
-            assert!(approx(x[1], 4.0), "x={x:?}");
-            assert!(approx(x[2], 10.0), "x={x:?}");
-            assert!(approx(x[3], 5.0), "x={x:?}");
-            assert!(approx(x[4], 0.0), "x={x:?}");
-            let obj_val = 2.0 * x[0] + x[1] - 3.0 * x[2] - 2.0 * x[3] - x[4];
-            assert!(approx(obj_val, -36.0), "obj={obj_val}");
-        }
+        let res = solve_lp_dual(&vars, &obj, &cons);
+        assert_eq!(res.status, Status::Optimal);
+        let x = res.x.unwrap();
+        assert!(approx(x[0], 0.0), "x={x:?}");
+        assert!(approx(x[1], 4.0), "x={x:?}");
+        assert!(approx(x[2], 10.0), "x={x:?}");
+        assert!(approx(x[3], 5.0), "x={x:?}");
+        assert!(approx(x[4], 0.0), "x={x:?}");
+        let obj_val = 2.0 * x[0] + x[1] - 3.0 * x[2] - 2.0 * x[3] - x[4];
+        assert!(approx(obj_val, -36.0), "obj={obj_val}");
     }
 
     #[test]
@@ -4956,9 +5483,7 @@ mod tests {
         let vars = vec![var(0.0, 1.0), var(0.0, 10.0)];
         let obj = Objective { expr: expr(&[(0, 1.0), (1, 1.0)]), sense: Sense::Minimize };
         let cons = vec![row(&[(0, 1.0)], RowSense::Ge, 5.0), row(&[(1, 1.0)], RowSense::Le, 10.0)];
-        for res in [solve_lp(&vars, &obj, &cons), solve_lp_dual(&vars, &obj, &cons)] {
-            assert_eq!(res.status, Status::Infeasible);
-        }
+        assert_eq!(solve_lp_dual(&vars, &obj, &cons).status, Status::Infeasible);
     }
 
     #[test]
@@ -4973,13 +5498,12 @@ mod tests {
         let vars: Vec<VariableData> = (0..N).map(|_| var(0.0, 20.0)).collect();
         let obj = Objective { expr: expr(&(0..N).map(|i| (i, -1.0)).collect::<Vec<_>>()), sense: Sense::Minimize };
         let cons: Vec<ConstraintRow> = (0..N).map(|i| row(&[(i, 1.0)], RowSense::Le, ((i % 7) + 1) as f64)).collect();
-        for res in [solve_lp(&vars, &obj, &cons), solve_lp_dual(&vars, &obj, &cons)] {
-            assert_eq!(res.status, Status::Optimal);
-            let x = res.x.unwrap();
-            for i in 0..N {
-                let expected = ((i % 7) + 1) as f64;
-                assert!(approx(x[i], expected), "x[{i}]={} expected={expected}", x[i]);
-            }
+        let res = solve_lp_dual(&vars, &obj, &cons);
+        assert_eq!(res.status, Status::Optimal);
+        let x = res.x.unwrap();
+        for i in 0..N {
+            let expected = ((i % 7) + 1) as f64;
+            assert!(approx(x[i], expected), "x[{i}]={} expected={expected}", x[i]);
         }
     }
 
@@ -4998,7 +5522,6 @@ mod tests {
             row(&[(0, 1.0), (1, 1.0)], RowSense::Eq, 4.0),
             row(&[(0, 1.0), (1, 1.0)], RowSense::Eq, 5.0),
         ];
-        assert_eq!(solve_lp(&vars, &obj, &cons).status, Status::Infeasible);
         assert_eq!(solve_lp_dual(&vars, &obj, &cons).status, Status::Infeasible);
     }
 
@@ -5014,7 +5537,6 @@ mod tests {
         let vars = vec![var(0.0, 5.0)];
         let obj = Objective { expr: expr(&[(0, 1.0)]), sense: Sense::Minimize };
         let cons = vec![row(&[(0, 1.0)], RowSense::Ge, 10.0)];
-        assert_eq!(solve_lp(&vars, &obj, &cons).status, Status::Infeasible);
         assert_eq!(solve_lp_dual(&vars, &obj, &cons).status, Status::Infeasible);
     }
 
@@ -5026,7 +5548,7 @@ mod tests {
         let vars = vec![var(0.0, 1.0), var(0.0, 1.0), var(0.0, 1.0)];
         let obj = Objective { expr: expr(&[(0, 60.0), (1, 100.0), (2, 120.0)]), sense: Sense::Maximize };
         let cons = vec![row(&[(0, 10.0), (1, 20.0), (2, 30.0)], RowSense::Le, 50.0)];
-        let res = solve_lp(&vars, &obj, &cons);
+        let res = solve_lp_dual(&vars, &obj, &cons);
         assert_eq!(res.status, Status::Optimal);
         let x = res.x.unwrap();
         let obj_val = 60.0 * x[0] + 100.0 * x[1] + 120.0 * x[2];
@@ -5060,7 +5582,7 @@ mod tests {
         // Forces genuine phase-1 work (slack-only start is infeasible here).
         cons.push(row(&(0..n).map(|i| (i, 1.0)).collect::<Vec<_>>(), RowSense::Ge, 40.0));
 
-        let res = solve_lp(&vars, &obj, &cons);
+        let res = solve_lp_dual(&vars, &obj, &cons);
         assert_eq!(res.status, Status::Optimal);
         let x = res.x.unwrap();
         let obj_val: f64 = obj_terms.iter().map(|&(j, c)| c * x[j]).sum();
@@ -5072,50 +5594,6 @@ mod tests {
         assert!((obj_val - ipm_obj).abs() < 1e-4, "simplex_obj={obj_val} ipm_obj={ipm_obj} x={x:?}");
     }
 
-    #[test]
-    fn beale_cycling_example_terminates_correctly() {
-        // The classic Beale/Chvátal degenerate LP known to cycle under
-        // Dantzig's rule with naive tie-breaking when started from the
-        // slack basis at the origin — exactly this project's entering-
-        // rule (Dantzig) and starting point. Without genuine anti-cycling
-        // (EXPAND's positive-step guarantee), this either loops forever
-        // or — since this implementation caps at MAX_ITERS and returns
-        // "Optimal" as a best-effort fallback — silently returns a wrong,
-        // non-optimal answer at the iteration cap instead of the true
-        // optimum. Cross-checked against the independent IP-PMM solver.
-        //
-        //   minimize -0.75 x0 + 150 x1 - 0.02 x2 + 6 x3
-        //   s.t.  0.25 x0 - 60 x1 - 0.04 x2 + 9 x3 <= 0
-        //         0.5  x0 - 90 x1 - 0.02 x2 + 3 x3 <= 0
-        //         x2 <= 1
-        //         x0,x1,x2,x3 >= 0
-        //
-        // Upper bound 100 (true optimum is near [0.04, 0, 1, 0]): bounds
-        // >= 1000 here make `solve_via_ipm` (the cross-check oracle, not
-        // this module) misreport Infeasible — a pre-existing IP-PMM
-        // scaling/tolerance sensitivity to loose bounds on a problem this
-        // numerically small, confirmed unrelated to this module by
-        // bisecting the bound value; 100 is still comfortably non-binding.
-        let vars = vec![var(0.0, 100.0), var(0.0, 100.0), var(0.0, 100.0), var(0.0, 100.0)];
-        let obj = Objective { expr: expr(&[(0, -0.75), (1, 150.0), (2, -0.02), (3, 6.0)]), sense: Sense::Minimize };
-        let cons = vec![
-            row(&[(0, 0.25), (1, -60.0), (2, -0.04), (3, 9.0)], RowSense::Le, 0.0),
-            row(&[(0, 0.5), (1, -90.0), (2, -0.02), (3, 3.0)], RowSense::Le, 0.0),
-            row(&[(2, 1.0)], RowSense::Le, 1.0),
-        ];
-
-        let res = solve_lp(&vars, &obj, &cons);
-        assert_eq!(res.status, Status::Optimal);
-        let x = res.x.unwrap();
-        let obj_val =
-            -0.75 * x[0] + 150.0 * x[1] - 0.02 * x[2] + 6.0 * x[3];
-
-        let ipm_res = solve_via_ipm(&vars, &obj, &cons);
-        assert_eq!(ipm_res.status, Status::Optimal);
-        let ipm_obj = ipm_res.objective.unwrap();
-
-        assert!((obj_val - ipm_obj).abs() < 1e-4, "simplex_obj={obj_val} ipm_obj={ipm_obj} x={x:?}");
-    }
 
     #[test]
     fn steepest_edge_weights_match_brute_force_recompute() {
