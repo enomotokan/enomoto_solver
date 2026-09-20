@@ -1811,6 +1811,23 @@ impl FtLu {
         }
     }
 
+    /// Same as [`Self::solve_into`], but additionally captures the
+    /// post-`L`/`R`, pre-`U` intermediate (`(L R_1...R_{k-1})^-1 rhs`) into
+    /// `a_tilde_out` (length `m`) — exactly the `a_tilde` value
+    /// [`Self::try_update_precomputed`] needs when `rhs` is the entering
+    /// column being FTRAN'd this same iteration. See that method's own
+    /// docs for why this capture (a plain `copy_from_slice`) lets the
+    /// caller skip `try_update`'s own redundant re-derivation of the exact
+    /// same value entirely.
+    pub fn solve_into_capture(&self, rhs: &[f64], scratch: &mut [f64], out: &mut [f64], a_tilde_out: &mut [f64]) {
+        self.ftran_through_l_and_r_into(rhs, scratch);
+        a_tilde_out.copy_from_slice(scratch);
+        self.u_solve_into(scratch);
+        for s in 0..self.base.m {
+            out[self.base.col_perm[s]] = scratch[s];
+        }
+    }
+
     /// Sparse-`rhs` counterpart to [`Self::solve_into`]: the same
     /// `B^-1 rhs` computation, but taking `rhs`'s nonzero
     /// `(orig_row, value)` pairs directly and running the `L`-stage
@@ -1851,6 +1868,38 @@ impl FtLu {
         scratch.fill(0.0);
     }
 
+    /// Same as [`Self::solve_sparse_into`], but additionally captures the
+    /// post-`L`/`R`, pre-`U` intermediate into `a_tilde_out` (length `m`) —
+    /// see [`Self::solve_into_capture`]'s own docs, which this mirrors for
+    /// the sparse-`rhs` FTRAN path. The capture happens after the `R`-eta
+    /// loop (this stage's own last write to `scratch` before `u_solve_into`
+    /// takes over), so `a_tilde_out` ends up identical regardless of which
+    /// of the two FTRAN paths (`should_use_dense_solve`'s dense/sparse
+    /// dispatch) a given call took.
+    pub fn solve_sparse_into_capture(
+        &self,
+        rhs_sparse: &[(usize, f64)],
+        scratch: &mut [f64],
+        gp: &mut GpScratch,
+        out: &mut [f64],
+        a_tilde_out: &mut [f64],
+    ) {
+        self.base.l_solve_sparse_into(rhs_sparse, scratch, gp);
+        for reta in &self.r_etas {
+            let dot: f64 = match &reta.r {
+                OffDiag::Sparse(v) => v.iter().map(|&(i, v)| v * scratch[i]).sum(),
+                OffDiag::Dense { data, .. } => data.iter().zip(scratch.iter()).map(|(&v, &zi)| v * zi).sum(),
+            };
+            scratch[reta.p] -= dot;
+        }
+        a_tilde_out.copy_from_slice(scratch);
+        self.u_solve_into(scratch);
+        for s in 0..self.base.m {
+            out[self.base.col_perm[s]] = scratch[s];
+        }
+        scratch.fill(0.0);
+    }
+
     /// Allocating convenience wrapper around [`Self::solve_into`] — kept for
     /// call sites (tests, `try_update`) that don't already have a reusable
     /// buffer on hand.
@@ -1872,6 +1921,44 @@ impl FtLu {
             scratch[s] = rhs[self.base.col_perm[s]];
         }
         self.u_transpose_solve_into(scratch);
+        // Hyper-sparse: same skip as `u_solve_into`/`l_solve_into` — `yp`
+        // is the only value each `r_eta`'s entries get multiplied by here.
+        for reta in self.r_etas.iter().rev() {
+            let yp = scratch[reta.p];
+            if yp == 0.0 {
+                continue;
+            }
+            match &reta.r {
+                OffDiag::Sparse(v) => {
+                    for &(i, v) in v {
+                        scratch[i] -= v * yp;
+                    }
+                }
+                OffDiag::Dense { data, .. } => {
+                    for (si, &v) in scratch.iter_mut().zip(data.iter()) {
+                        *si -= v * yp;
+                    }
+                }
+            }
+        }
+        self.base.l_transpose_solve_into(scratch, out);
+    }
+
+    /// Same as [`Self::solve_transpose_into`], but additionally captures
+    /// the post-`U^-T`, pre-`R`-reverse intermediate into `e_tilde_out`
+    /// (length `m`) — exactly the `e_tilde` value
+    /// [`Self::try_update_precomputed`] needs when `rhs` is the unit
+    /// vector at the leaving row (original indexing) being BTRAN'd this
+    /// same iteration for `rho_p`. See that method's own docs for why this
+    /// capture lets the caller skip `try_update`'s own redundant
+    /// re-derivation of the exact same value.
+    pub fn solve_transpose_into_capture(&self, rhs: &[f64], scratch: &mut [f64], out: &mut [f64], e_tilde_out: &mut [f64]) {
+        let m = self.base.m;
+        for s in 0..m {
+            scratch[s] = rhs[self.base.col_perm[s]];
+        }
+        self.u_transpose_solve_into(scratch);
+        e_tilde_out.copy_from_slice(scratch);
         // Hyper-sparse: same skip as `u_solve_into`/`l_solve_into` — `yp`
         // is the only value each `r_eta`'s entries get multiplied by here.
         for reta in self.r_etas.iter().rev() {
@@ -1964,11 +2051,9 @@ impl FtLu {
         // `scratch_a_tilde`/`scratch_e_tilde` (see their own docs): taken out
         // of `self` (rather than borrowed) so the `&self` FTRAN/BTRAN calls
         // just below don't conflict with holding a `&mut` into one of
-        // `self`'s own fields at the same time — restored to `self` as soon
-        // as each is done being read (`scratch_e_tilde` right after `r_vec`
-        // is built; `scratch_a_tilde` at every return point, both the early
-        // failure below and the success path's own `off_diag` use further
-        // down). A length mismatch (only possible if a *previous* call
+        // `self`'s own fields at the same time — restored to `self` right
+        // after `commit_update` (which needs `&mut self`) is done reading
+        // them. A length mismatch (only possible if a *previous* call
         // somehow left it empty, which no current code path does) falls
         // back to a fresh allocation rather than indexing out of bounds.
         let mut a_tilde = std::mem::take(&mut self.scratch_a_tilde);
@@ -1999,22 +2084,73 @@ impl FtLu {
         e_tilde[p] = 1.0;
         self.u_transpose_solve_into(&mut e_tilde);
 
+        let result = self.commit_update(basis_slot, &a_tilde, &e_tilde, min_pivot);
+        self.scratch_a_tilde = a_tilde;
+        self.scratch_e_tilde = e_tilde;
+        result
+    }
+
+    /// Same update as [`Self::try_update`], but for a caller that has
+    /// *already computed* `a_tilde`/`e_tilde` this same iteration as an
+    /// intermediate of its own FTRAN/BTRAN calls, and can hand them over
+    /// directly instead of paying for [`Self::try_update`]'s own redundant
+    /// re-derivation of both.
+    ///
+    /// **Why this exists**: a typical dual-simplex iteration already runs
+    /// exactly the two solves `try_update` used to redo from scratch, for
+    /// its own unrelated purposes — `rho_p = B^-T e_p` (`solve_transpose_into`,
+    /// needed for PRICE) computes `U^-T e_p` as an internal step before
+    /// applying the `R`-etas and `L^-T`, and the entering column's own FTRAN
+    /// (`solve_into`/`solve_sparse_into`, needed for the primal update and
+    /// DSE) computes `(L R_1...R_{k-1})^-1 a_q` as an internal step before
+    /// applying `U^-1` — both are simply overwritten in place by the next
+    /// stage rather than kept. Since `p`/`a_q_original` are identical
+    /// between that earlier call and this update (same leaving row, same
+    /// entering column, same iteration, `self` unchanged in between), the
+    /// values are not merely *equivalent* to what `try_update` would
+    /// recompute — they are bit-for-bit identical, `ftran_through_l_and_r_into`/
+    /// `u_transpose_solve_into` being pure functions of `(self, input)` and
+    /// neither `self` nor the input changing between the two computations.
+    /// Capturing them (a plain `copy_from_slice`, via
+    /// [`Self::solve_into_capture`]/[`Self::solve_sparse_into_capture`]/
+    /// [`Self::solve_transpose_into_capture`]) is far cheaper than either of
+    /// the two full solves this replaces — a dense `O(m)` pass through `L`
+    /// plus every accumulated `R`-eta for `a_tilde`, and an `O(nnz(U))` scan
+    /// of the whole eta chain for `e_tilde`, both of which grow as updates
+    /// accumulate since the last refactorization.
+    ///
+    /// **Caller's responsibility**: `a_tilde`/`e_tilde` must come from a
+    /// capture made *this same iteration*, for this exact `basis_slot` and
+    /// the same `a_q_original` that is about to become basic — anything
+    /// else (a stale capture from a discarded/refactorized iteration, or a
+    /// mismatched `basis_slot`) silently corrupts the update with no way
+    /// for this function to detect it, since it has no independent way to
+    /// check what produced the slices it's handed.
+    pub fn try_update_precomputed(&mut self, basis_slot: usize, a_tilde: &[f64], e_tilde: &[f64], min_pivot: f64) -> bool {
+        self.commit_update(basis_slot, a_tilde, e_tilde, min_pivot)
+    }
+
+    /// Shared success/failure logic between [`Self::try_update`] (which
+    /// computes `a_tilde`/`e_tilde` itself) and [`Self::try_update_precomputed`]
+    /// (which takes them from the caller) — see the latter's own docs for
+    /// why both end up needing exactly this same tail. Pulled out into its
+    /// own `&mut self` method (rather than duplicated in both callers)
+    /// specifically so the intricate `row_owners`/`slot_pos`/`u_seq`
+    /// bookkeeping below — the part a copy-paste split would risk drifting
+    /// out of sync between two copies — exists in exactly one place.
+    fn commit_update(&mut self, basis_slot: usize, a_tilde: &[f64], e_tilde: &[f64], min_pivot: f64) -> bool {
+        let m = self.base.m;
+        let p = self.base.col_perm_inv[basis_slot];
+
         let seq_pos = self.slot_pos[p];
         let old_pivot = self.u_seq[seq_pos].pivot;
 
         let r_vec: Vec<(usize, f64)> =
             (0..m).filter(|&i| i != p).map(|i| (i, -old_pivot * e_tilde[i])).filter(|&(_, v)| v != 0.0).collect();
-        // `e_tilde` itself is never read again after building `r_vec` above
-        // (which already copied out every value it needs) — safe to give
-        // back to `self` immediately rather than waiting for this
-        // function's own return points the way `a_tilde` (still needed for
-        // `off_diag` on the success path below) has to.
-        self.scratch_e_tilde = e_tilde;
 
         let dot: f64 = r_vec.iter().map(|&(i, v)| v * a_tilde[i]).sum();
         let new_pivot = a_tilde[p] - dot;
         if new_pivot.abs() < min_pivot {
-            self.scratch_a_tilde = a_tilde;
             return false;
         }
 
@@ -2048,8 +2184,6 @@ impl FtLu {
 
         let off_diag: Vec<(usize, f64)> =
             (0..m).filter(|&i| i != p && a_tilde[i] != 0.0).map(|i| (i, a_tilde[i])).collect();
-        // `a_tilde`'s last read was just above — safe to give back now.
-        self.scratch_a_tilde = a_tilde;
         for &(row_step, _) in &off_diag {
             self.row_owners[row_step].push(p);
         }
@@ -2629,6 +2763,77 @@ mod tests {
         let a_q = [0.0, 1.0];
         assert!(!state.try_update(0, &a_q, 1e-9));
         assert_eq!(state.update_count(), 0);
+    }
+
+    /// Direct regression test for the whole premise behind
+    /// `try_update_precomputed`/`solve_into_capture`/`solve_sparse_into_capture`/
+    /// `solve_transpose_into_capture` (see their own docs): feeding
+    /// `try_update` a manually-recomputed `a_tilde`/`e_tilde` vs. feeding
+    /// `try_update_precomputed` the *captured* intermediate from an
+    /// otherwise-ordinary FTRAN/BTRAN call for the same `basis_slot`/
+    /// `a_q_original` must produce bit-identical results — not merely
+    /// close ones — since both are meant to compute exactly the same
+    /// values. Runs on a state that already has two prior updates applied
+    /// (non-trivial `u_seq`/`r_etas`), the realistic case, not just a
+    /// freshly-refactored one, and checks both the dense
+    /// (`solve_into_capture`) and sparse (`solve_sparse_into_capture`)
+    /// FTRAN capture paths independently.
+    #[test]
+    fn try_update_precomputed_matches_try_update() {
+        let rows0 = vec![vec![(0, 2.0), (1, 1.0)], vec![(0, 1.0), (1, 3.0), (2, 1.0)], vec![(1, 1.0), (2, 4.0)]];
+        let base = factorize(3, &rows0).unwrap();
+        let mut state = FtLu::new(base);
+        assert!(state.try_update(1, &[1.0, 5.0, 2.0], 1e-9));
+        assert!(state.try_update(0, &[4.0, 1.0, 3.0], 1e-9));
+
+        let m = 3;
+        let basis_slot = 2;
+        let a_q = [2.0, 1.0, 6.0];
+
+        // Reference: plain `try_update`, which recomputes `a_tilde`/`e_tilde`
+        // itself from scratch.
+        let mut state_ref = state.clone();
+        assert!(state_ref.try_update(basis_slot, &a_q, 1e-9));
+
+        // Dense-capture path: `solve_into_capture` (as `simplex.rs`'s
+        // dense-rhs bypass branch uses it) supplies `a_tilde`, and
+        // `solve_transpose_into_capture` (as its `rho_p` BTRAN uses it)
+        // supplies `e_tilde`.
+        let mut state_dense = state.clone();
+        let (mut scratch, mut out, mut a_tilde) = (vec![0.0; m], vec![0.0; m], vec![0.0; m]);
+        state_dense.solve_into_capture(&a_q, &mut scratch, &mut out, &mut a_tilde);
+        let mut e_p = vec![0.0; m];
+        e_p[basis_slot] = 1.0;
+        let (mut scratch2, mut out2, mut e_tilde) = (vec![0.0; m], vec![0.0; m], vec![0.0; m]);
+        state_dense.solve_transpose_into_capture(&e_p, &mut scratch2, &mut out2, &mut e_tilde);
+        assert!(state_dense.try_update_precomputed(basis_slot, &a_tilde, &e_tilde, 1e-9));
+
+        // Sparse-capture path: `solve_sparse_into_capture` (as
+        // `simplex.rs`'s sparse-rhs branch uses it) supplies `a_tilde`
+        // instead — must land on the exact same intermediate despite going
+        // through the Gilbert-Peierls reach-set machinery rather than a
+        // dense scan.
+        let mut state_sparse = state.clone();
+        let (mut sscratch, mut sout, mut sa_tilde) = (vec![0.0; m], vec![0.0; m], vec![0.0; m]);
+        let mut gp = GpScratch::new(m);
+        state_sparse.solve_sparse_into_capture(&to_sparse(&a_q), &mut sscratch, &mut gp, &mut sout, &mut sa_tilde);
+        let (mut sscratch2, mut sout2, mut se_tilde) = (vec![0.0; m], vec![0.0; m], vec![0.0; m]);
+        state_sparse.solve_transpose_into_capture(&e_p, &mut sscratch2, &mut sout2, &mut se_tilde);
+        assert!(state_sparse.try_update_precomputed(basis_slot, &sa_tilde, &se_tilde, 1e-9));
+
+        for rhs in [[3.0, -2.0, 7.0], [1.0, 0.0, -1.0], [0.5, 0.5, 0.5]] {
+            let x_ref = state_ref.solve(&rhs);
+            let x_dense = state_dense.solve(&rhs);
+            let x_sparse = state_sparse.solve(&rhs);
+            assert_eq!(x_ref, x_dense, "dense-capture diverged from try_update on solve: rhs={rhs:?}");
+            assert_eq!(x_ref, x_sparse, "sparse-capture diverged from try_update on solve: rhs={rhs:?}");
+
+            let y_ref = state_ref.solve_transpose(&rhs);
+            let y_dense = state_dense.solve_transpose(&rhs);
+            let y_sparse = state_sparse.solve_transpose(&rhs);
+            assert_eq!(y_ref, y_dense, "dense-capture diverged from try_update on solve_transpose: rhs={rhs:?}");
+            assert_eq!(y_ref, y_sparse, "sparse-capture diverged from try_update on solve_transpose: rhs={rhs:?}");
+        }
     }
 
 

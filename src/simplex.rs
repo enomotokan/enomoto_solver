@@ -3488,6 +3488,18 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
     // still finds them zeroed exactly as it requires.
     let mut sparse_lu_scratch = vec![0.0; m];
     let mut gp_scratch = sparse_lu::GpScratch::new(m);
+    // Dedicated capture buffers for `FtLu::try_update_precomputed` (see its
+    // own docs): `e_tilde_buf` is filled as a side effect of this
+    // iteration's `rho_p` BTRAN (below) and `a_tilde_buf` as a side effect
+    // of this same iteration's entering-column FTRAN (further down) —
+    // both intermediates `try_update` used to recompute from scratch.
+    // Deliberately separate from every other buffer above: nothing else
+    // may write through these between the two capture points and the
+    // `try_update_precomputed` call near the end of the loop, or a stale
+    // value would silently corrupt that update (see
+    // `try_update_precomputed`'s own docs on this exact hazard).
+    let mut a_tilde_buf = vec![0.0; m];
+    let mut e_tilde_buf = vec![0.0; m];
 
     for _iter in 0..MAX_ITERS {
         if profile_phases {
@@ -3780,9 +3792,21 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
             };
         };
 
-        // Pivotal row: rho_p = B^-T e_p (btran).
+        // Pivotal row: rho_p = B^-T e_p (btran). Captures `e_tilde_buf`
+        // (the post-U^-T, pre-R-reverse intermediate) as a side effect —
+        // this row `p` is exactly the `basis_slot` this iteration's own
+        // `try_update_precomputed` call (near the end of the loop) will
+        // use, provided the pivot actually commits (a `continue` on
+        // `verify_failed`/infeasibility below never reaches that call at
+        // all, so a stale capture is never fed to it) — see
+        // `try_update_precomputed`'s own docs for why this is bit-for-bit
+        // the value it would otherwise recompute from scratch.
         e_p[p] = 1.0;
-        timed!(profile_phases, prof_phases::BTRAN, lu.solve_transpose_into(&e_p, &mut lu_scratch, &mut rho_p_buf));
+        timed!(
+            profile_phases,
+            prof_phases::BTRAN,
+            lu.solve_transpose_into_capture(&e_p, &mut lu_scratch, &mut rho_p_buf, &mut e_tilde_buf)
+        );
         e_p[p] = 0.0;
         let rho_p = &rho_p_buf;
 
@@ -4353,25 +4377,34 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
             // candidate's own `a_pj` — so the entering step and the state it's
             // applied to are always derived the same, numerically consistent
             // way.
-            // `a_enter_buf` (dense) is still built and kept: `try_update`
-            // below needs the original column, not its FTRAN. The FTRAN
-            // itself goes through the Gilbert-Peierls sparse path instead
-            // of densifying-then-`solve_into`, since a real LP's own
-            // constraint columns are themselves sparse — see
+            // `a_enter_buf` (dense) is still built and kept: the dense-rhs
+            // bypass branch below needs it, and so does the
+            // `debug_assertions` cross-check against `lu.solve`. The FTRAN
+            // itself prefers the Gilbert-Peierls sparse path instead of
+            // densifying-then-`solve_into` when the entering column's own
+            // nonzero count is small, since a real LP's own constraint
+            // columns are themselves sparse — see
             // `sparse_lu::GpScratch`/`FtLu::solve_sparse_into`'s own docs.
+            // (`try_update` used to need this original column too, to
+            // re-derive `a_tilde` from scratch — no longer: this same
+            // FTRAN's own `a_tilde_buf` capture below now supplies it
+            // directly, see `try_update_precomputed`'s own docs.)
             t.column_into(q, &mut a_enter_buf);
             // Same bypass as the BFRT combined-flip solve above, keyed off
             // this entering column's own nonzero count — `a_enter_buf`
             // (dense) is already built for `try_update`'s own use below, so
-            // reusing it here costs nothing extra.
+            // reusing it here costs nothing extra. Both branches also
+            // capture `a_tilde_buf` (the post-L/R, pre-U intermediate) for
+            // this iteration's `try_update_precomputed` call, near the end
+            // of the loop — see that method's own docs.
             if lu.should_use_dense_solve(t.column_sparse(q).len()) {
                 if profile_phases {
                     prof_phases::DENSE_RHS_BYPASSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
-                lu.solve_into(&a_enter_buf, &mut sparse_lu_scratch, &mut alpha_buf);
+                lu.solve_into_capture(&a_enter_buf, &mut sparse_lu_scratch, &mut alpha_buf, &mut a_tilde_buf);
                 sparse_lu_scratch.fill(0.0); // restore solve_sparse_into's zero-on-entry precondition
             } else {
-                lu.solve_sparse_into(t.column_sparse(q), &mut sparse_lu_scratch, &mut gp_scratch, &mut alpha_buf);
+                lu.solve_sparse_into_capture(t.column_sparse(q), &mut sparse_lu_scratch, &mut gp_scratch, &mut alpha_buf, &mut a_tilde_buf);
             }
             if profile_phases {
                 prof_phases::ALPHA_NNZ.fetch_add(alpha_buf.iter().filter(|&&v| v != 0.0).count(), std::sync::atomic::Ordering::Relaxed);
@@ -4484,7 +4517,6 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
             continue;
         }
 
-        let a_enter = &a_enter_buf;
         let alpha = &alpha_buf;
 
         let theta_q = (t.x[leaving_var] - target_bound) / alpha[p];
@@ -4695,7 +4727,11 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
             }
         }
 
-        let update_ok = timed!(profile_phases, prof_phases::FT_UPDATE, lu.try_update(p, a_enter, FT_MIN_PIVOT));
+        let update_ok = timed!(
+            profile_phases,
+            prof_phases::FT_UPDATE,
+            lu.try_update_precomputed(p, &a_tilde_buf, &e_tilde_buf, FT_MIN_PIVOT)
+        );
         if update_ok && debug_eta_density {
             let denom = std.n_rows.saturating_sub(1).max(1);
             let frac = lu.last_update_off_diag_len() as f64 / denom as f64;

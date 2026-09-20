@@ -175,6 +175,19 @@ mod prof_phases {
     /// qualitatively worse PRICE/FTRAN disagreement than `VERIFY` screens
     /// for.
     pub(super) static REFACTOR_CAUSE_ILLCOND: AtomicUsize = AtomicUsize::new(0);
+    /// Trigger (4) (`super::extended_dual::ft_max_updates`) firing — see
+    /// that function's own docs. Expected to stay at `0` on every real
+    /// instance (it is sized as a rarely-firing safety net, not a routine
+    /// lever); nonzero here is itself the signal to re-tune
+    /// `FT_MAX_UPDATES_FACTOR`.
+    pub(super) static REFACTOR_CAUSE_MAX_UPDATES: AtomicUsize = AtomicUsize::new(0);
+    /// Peak `lu.update_count()` observed *at any point* during the solve
+    /// (via `fetch_max`, so this is the true peak across every
+    /// refactorization interval, not just the value at solve end) — a
+    /// calibration gauge for [`super::extended_dual::FT_MAX_UPDATES_FACTOR`]
+    /// itself, printed by `ENOMOTO_PROF_PHASES_EXT` but never consulted by
+    /// any control-flow decision.
+    pub(super) static MAX_UPDATE_STREAK: AtomicUsize = AtomicUsize::new(0);
     pub(super) static ITERS: AtomicUsize = AtomicUsize::new(0);
     /// Diagnostic only (`ENOMOTO_PROF_PHASES_EXT`'s own report): sum of
     /// `best_idx` (candidates flipped before the real pivot) across every
@@ -257,6 +270,8 @@ mod prof_phases {
             &REFACTOR_CAUSE_DRIFT,
             &REFACTOR_CAUSE_D_DRIFT,
             &REFACTOR_CAUSE_ILLCOND,
+            &REFACTOR_CAUSE_MAX_UPDATES,
+            &MAX_UPDATE_STREAK,
             &ITERS,
             &BFRT_FLIPS,
             &INFEASIBLE_POOL,
@@ -299,7 +314,7 @@ mod prof_phases {
         ];
         let accounted: usize = phases.iter().map(|&(_, ns)| ns).sum::<usize>() + REFACTOR.load(Relaxed);
         eprintln!(
-            "PROF_PHASES_EXT wall={:.3}ms iters={iters} ({:.1}us/iter) accounted={:.1}% of wall refactor_count={} (verify={} try_update={} bump={} drift={} d_drift={} illcond={})",
+            "PROF_PHASES_EXT wall={:.3}ms iters={iters} ({:.1}us/iter) accounted={:.1}% of wall refactor_count={} (verify={} try_update={} bump={} drift={} d_drift={} illcond={} max_updates={}) max_update_streak={}",
             wall_ns as f64 / 1e6,
             wall_ns as f64 / 1e3 / iters as f64,
             100.0 * accounted as f64 / wall_ns.max(1) as f64,
@@ -309,7 +324,9 @@ mod prof_phases {
             REFACTOR_CAUSE_BUMP.load(Relaxed),
             REFACTOR_CAUSE_DRIFT.load(Relaxed),
             REFACTOR_CAUSE_D_DRIFT.load(Relaxed),
-            REFACTOR_CAUSE_ILLCOND.load(Relaxed)
+            REFACTOR_CAUSE_ILLCOND.load(Relaxed),
+            REFACTOR_CAUSE_MAX_UPDATES.load(Relaxed),
+            MAX_UPDATE_STREAK.load(Relaxed)
         );
         eprintln!(
             "  avg_bfrt_flips/iter={:.3} avg_infeasible_pool/iter={:.1}",
@@ -427,6 +444,75 @@ const XB_CHECK_INTERVAL: usize = super::FT_CHECK_INTERVAL;
 /// `Affine1::cmp_lex`'s `1e-9` `REL_TOL`, so the drift check needs
 /// headroom below that, not `FT_RESIDUAL_TOL`'s much looser `1e-4`.
 const XB_DRIFT_TOL: f64 = 1e-8;
+
+/// Trigger (4) for this module — `super::FT_MAX_UPDATES`'s own equivalent
+/// (an unconditional backstop against unbounded Forrest-Tomlin eta-chain
+/// growth, independent of the fill-based trigger (3) above and the
+/// `XB_CHECK_INTERVAL`/`XB_DRIFT_TOL` drift check), which this module never
+/// had at all until now — `super::FT_MAX_UPDATES` itself is only ever read
+/// from `super::solve_lp_dual_on`/`run_phase` (`grep` confirms no reference
+/// here), so a pathological pivot sequence whose eta fill happens to stay
+/// under trigger (3)'s own `FT_BUMP_LIMIT_FACTOR * m` budget indefinitely
+/// (a very sparse basis, or one where each update's own fill stays small)
+/// could accumulate Forrest-Tomlin updates without any hard ceiling.
+///
+/// **Sized adaptively to `m`, not copied as `super::FT_MAX_UPDATES`'s flat
+/// `300`** — a flat value tuned against the classical method's own problem
+/// mix would be wrong here by construction: this module already runs
+/// noticeably longer streaks between refactorizations, on some instances
+/// well past `super::FT_MAX_UPDATES` itself, before this trigger existed at
+/// all. Confirmed by adding [`prof_phases::MAX_UPDATE_STREAK`] (a
+/// `fetch_max` gauge of `lu.update_count()`, paying nothing beyond one
+/// atomic op per pivot) and sweeping essentially every Netlib `.mps` file
+/// available locally — not just the 73-problem, <=3000-variable subset the
+/// rest of this crate's own benchmark methodology otherwise targets, since
+/// calibrating a hard safety ceiling specifically wants the *widest*
+/// available range of `m` and pivot-sequence shapes, including the larger
+/// instances that benchmark excludes. The worst observed ratio
+/// (`peak_streak / m`) was **not** the largest basis in the sweep — it was
+/// `nesm` (`m=662`, peak streak `1090`, ratio `1.647`) — ahead of `scsd6`
+/// (`1.395`), `scsd1` (`1.338`), `adlittle` (`1.732`, but `m=56` is small
+/// enough [`FT_MAX_UPDATES_FLOOR`]'s own floor absorbs it), and `stocfor2`
+/// (`m=2157`, peak streak `1665`, ratio `0.772` — the instance this
+/// constant's very first draft was calibrated against, before the fuller
+/// sweep found worse ratios elsewhere; kept in this history as a reminder
+/// that a handful of hand-picked instances is not a substitute for sweeping
+/// everything available). [`ft_max_updates`] scales with `m`
+/// ([`FT_MAX_UPDATES_FACTOR`] `* m`, floored at [`FT_MAX_UPDATES_FLOOR`] so
+/// a tiny basis still gets at least the classical method's own
+/// already-proven `300`) — at `nesm`'s own `m=662` this gives `1986`, a
+/// `1.82x` margin over its own observed peak, comfortably wider than the
+/// `1.21x` a smaller factor (`2.0`) left there. Every other instance in the
+/// sweep has a lower ratio than `nesm`'s, so this margin is the binding one
+/// crate-wide, not merely for one instance. Generous by design — this is
+/// meant to sit as a rarely-firing safety net (mirroring
+/// `super::FT_MAX_UPDATES`'s own documented role once tuned high enough —
+/// see that constant's own docs), not a routine performance lever the way
+/// trigger (3) is; `max_updates_fired=0` across every instance in the same
+/// sweep (see [`prof_phases::REFACTOR_CAUSE_MAX_UPDATES`]) confirms this
+/// trigger changes nothing about the current benchmark's own behavior —
+/// its only job is bounding the *next* pathological instance that shows up.
+///
+/// `3.0` carries real margin above the worst case actually measured, not an
+/// exhaustively swept optimum the way [`super::FT_BUMP_LIMIT_FACTOR`] was —
+/// re-tune (sweeping *at least* as wide a problem set as the survey above,
+/// not just the 73-problem subset) if
+/// [`prof_phases::REFACTOR_CAUSE_MAX_UPDATES`] is ever observed firing
+/// nonzero on a real instance, which would mean either the factor needs
+/// raising further or a genuinely pathological low-fill/long-streak
+/// instance has been found.
+const FT_MAX_UPDATES_FACTOR: f64 = 3.0;
+/// Floor for [`ft_max_updates`] — never weaker than the classical method's
+/// own already-proven-safe flat cap, regardless of how small `m` is.
+const FT_MAX_UPDATES_FLOOR: usize = super::FT_MAX_UPDATES;
+
+/// `m`-scaled trigger (4) threshold — see [`FT_MAX_UPDATES_FACTOR`]'s own
+/// docs for the reasoning and the measurement that ruled out reusing
+/// `super::FT_MAX_UPDATES`'s flat value directly.
+#[inline]
+fn ft_max_updates(m: usize) -> usize {
+    ((FT_MAX_UPDATES_FACTOR * m as f64) as usize).max(FT_MAX_UPDATES_FLOOR)
+}
 
 /// Independent drift check for the incrementally-maintained `d` (reduced
 /// costs), checked on the same [`XB_CHECK_INTERVAL`] cadence as
@@ -1370,6 +1456,17 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     let mut dense_q = vec![0.0f64; m];
     let mut alpha_full = vec![0.0f64; m];
     let mut tau = vec![0.0f64; m];
+    // Dedicated `try_update_precomputed` capture buffers — see
+    // `super::solve_lp_dual_on`'s own identical pair (`a_tilde_buf`/
+    // `e_tilde_buf`) for the full reasoning: `e_tilde_buf` is filled as a
+    // side effect of this iteration's `rho` BTRAN just below, `a_tilde_buf`
+    // as a side effect of this same iteration's entering-column FTRAN
+    // further down, both replacing what `try_update` used to recompute
+    // from scratch. Kept separate from every other buffer here for the
+    // same reason: nothing else may write through them between capture and
+    // the `try_update_precomputed` call.
+    let mut a_tilde_buf = vec![0.0f64; m];
+    let mut e_tilde_buf = vec![0.0f64; m];
     let mut candidates: Vec<Cand> = Vec::new();
 
     // Dedicated to `solve_sparse_into` alone, per that method's own
@@ -2010,10 +2107,15 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
 
         // (c): pivot row, BTRAN against `e_r` — `M`-independent (paper
         // \S4.5's opening observation), so `rho`/`a_p`/`d` below are all
-        // plain `f64`, exactly like the classical method's.
+        // plain `f64`, exactly like the classical method's. Captures
+        // `e_tilde_buf` (the post-U^-T, pre-R-reverse intermediate) as a
+        // side effect, for this iteration's own `try_update_precomputed`
+        // call further down — see `FtLu::try_update_precomputed`'s own
+        // docs for why this is bit-for-bit the value that call would
+        // otherwise recompute from scratch.
         timed!(profile_phases, prof_phases::BTRAN, {
             e_r[r] = 1.0;
-            lu.solve_transpose_into(&e_r, &mut lu_scratch, &mut rho);
+            lu.solve_transpose_into_capture(&e_r, &mut lu_scratch, &mut rho, &mut e_tilde_buf);
             e_r[r] = 0.0;
         });
         if profile_phases {
@@ -2366,10 +2468,12 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         // vs FTRAN — `e_r^T B^-1 A_q = (B^-T e_r)^T A_q`) — expected to
         // agree exactly in infinite precision, which is exactly what
         // `updateVerify` below checks rather than merely assumes.
-        // `dense_q` (the raw column) is still built unconditionally — kept
-        // for `try_update` further down, exactly like `super::solve_lp_dual_on`'s
-        // own `a_enter_buf` — but the FTRAN itself now takes the same
-        // dense-or-sparse fork that function's own entering-column solve
+        // `dense_q` (the raw column) is still built unconditionally: it is
+        // this FTRAN's own rhs, exactly like `super::solve_lp_dual_on`'s
+        // own `a_enter_buf` (`try_update_precomputed` further down no
+        // longer needs the raw column itself — see its own docs — only the
+        // `a_tilde_buf` this same FTRAN captures below). The FTRAN itself
+        // takes the same dense-or-sparse fork that function's own entering-column solve
         // does (`FtLu::should_use_dense_solve`, keyed off the column's own
         // nonzero count via `std.cols.row(q)`), instead of always
         // densifying through `solve_into`: a real LP's constraint columns
@@ -2378,15 +2482,18 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         // entering column as the one FTRAN in this loop still forced dense
         // was a straight port gap from the classical method, not a
         // deliberate simplification.
+        // Both branches also capture `a_tilde_buf` (the post-L/R, pre-U
+        // intermediate) for this iteration's `try_update_precomputed` call
+        // further down — see that method's own docs.
         timed!(profile_phases, prof_phases::FTRAN, {
             dense_q.fill(0.0);
             for &(i, v) in std.cols.row(q) {
                 dense_q[i] = v;
             }
             if lu.should_use_dense_solve(std.cols.row(q).len()) {
-                lu.solve_into(&dense_q, &mut lu_scratch, &mut alpha_full);
+                lu.solve_into_capture(&dense_q, &mut lu_scratch, &mut alpha_full, &mut a_tilde_buf);
             } else {
-                lu.solve_sparse_into(std.cols.row(q), &mut sparse_scratch, &mut gp_scratch, &mut alpha_full);
+                lu.solve_sparse_into_capture(std.cols.row(q), &mut sparse_scratch, &mut gp_scratch, &mut alpha_full, &mut a_tilde_buf);
             }
         });
 
@@ -2752,24 +2859,35 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         // drifted `x_b_slope` is at least as dangerous to correctness as a
         // drifted `x_b_base` — checking only one channel would leave the
         // module's single most decision-relevant quantity unguarded.
-        // `try_update` wants the entering column's *original* (dense)
-        // values, not its FTRAN — already sitting in `dense_q` from the
-        // entering-column FTRAN earlier this same iteration (nothing
-        // between there and here writes to it), so no need to rebuild it
-        // here a second time. An earlier version of this loop rebuilt it
-        // unconditionally right before `try_update`, duplicating an O(m)
-        // `fill(0.0)` every single pivot for no reason — found via
-        // `ENOMOTO_PROF_PHASES_EXT` bottleneck analysis: unlike
-        // `super::solve_lp_dual_on`'s own `a_enter_buf` (built once via
-        // `t.column_into`, reused for both its own FTRAN and its own
-        // `try_update` call), this rebuild sat outside any profiled phase
-        // entirely, so it never showed up as its own line item — only as
-        // part of the wall-vs-accounted gap in every `PROF_PHASES_EXT`
-        // report.
+        // `try_update_precomputed` wants `a_tilde_buf`/`e_tilde_buf` —
+        // already captured above as a side effect of this same iteration's
+        // own BTRAN (`rho`, for `e_tilde_buf`) and FTRAN (`alpha_full`, for
+        // `a_tilde_buf`); nothing between either capture point and here
+        // writes through them, so no re-derivation is needed — see
+        // `FtLu::try_update_precomputed`'s own docs (this used to be a
+        // plain `try_update(r, &dense_q, ...)`, which recomputed both from
+        // scratch every single pivot).
         since_check += 1;
-        let mut need_refactor = timed!(profile_phases, prof_phases::FT_UPDATE, !lu.try_update(r, &dense_q, super::FT_MIN_PIVOT));
+        let mut need_refactor = timed!(
+            profile_phases,
+            prof_phases::FT_UPDATE,
+            !lu.try_update_precomputed(r, &a_tilde_buf, &e_tilde_buf, super::FT_MIN_PIVOT)
+        );
         if need_refactor && profile_phases {
             prof_phases::REFACTOR_CAUSE_TRY_UPDATE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        // Trigger (4) ([`ft_max_updates`]'s own docs) — an unconditional,
+        // every-iteration check (like `super::FT_MAX_UPDATES`'s own site),
+        // not gated by `XB_CHECK_INTERVAL`: it is a single `usize`
+        // comparison, cheap enough to run every pivot regardless.
+        if profile_phases {
+            prof_phases::MAX_UPDATE_STREAK.fetch_max(lu.update_count(), std::sync::atomic::Ordering::Relaxed);
+        }
+        if !need_refactor && lu.update_count() > ft_max_updates(m) {
+            need_refactor = true;
+            if profile_phases {
+                prof_phases::REFACTOR_CAUSE_MAX_UPDATES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
         }
         if !need_refactor && since_check >= XB_CHECK_INTERVAL {
             since_check = 0;
@@ -3080,6 +3198,10 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
     let mut dense_q = vec![0.0f64; m];
     let mut alpha_full = vec![0.0f64; m];
     let mut candidates: Vec<Cand> = Vec::new();
+    // `try_update_precomputed` capture buffers — see the main phase's own
+    // identically-purposed pair's docs.
+    let mut a_tilde_buf = vec![0.0f64; m];
+    let mut e_tilde_buf = vec![0.0f64; m];
 
     // Dedicated to `solve_sparse_into` alone (see the main phase's own
     // identically-purposed buffers' docs — never shared with `lu_scratch`
@@ -3171,8 +3293,11 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
             return Some(SimplexResult { status: Status::Optimal, x: Some(x) });
         };
 
+        // Captures `e_tilde_buf` for this iteration's own
+        // `try_update_precomputed` call further down — see the main
+        // phase's own identical BTRAN capture docs.
         e_r[r] = 1.0;
-        lu.solve_transpose_into(&e_r, &mut lu_scratch, &mut rho);
+        lu.solve_transpose_into_capture(&e_r, &mut lu_scratch, &mut rho, &mut e_tilde_buf);
         e_r[r] = 0.0;
 
         // Row-major sparse PRICE (see the main phase's own docs for the
@@ -3347,22 +3472,20 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
         let dj_q = d[q];
         let alpha_q = a_p[q];
 
-        // `alpha_full = B^{-1}A_q` — needed both by this phase's own
-        // incremental `x_B` step below and by `try_update` further down
-        // (as `dense_q`, its own pre-FTRAN input) — computed once here,
-        // matching the main phase's own convention. Same dense-or-sparse
-        // fork as the main phase's own entering-column FTRAN (its own docs)
-        // — `dense_q` is still built unconditionally for `try_update`, but
-        // the FTRAN itself goes through `solve_sparse_into` when the
-        // column itself is sparse, instead of always densifying.
+        // `alpha_full = B^{-1}A_q` — needed by this phase's own incremental
+        // `x_B` step below — computed once here, matching the main phase's
+        // own convention. Same dense-or-sparse fork as the main phase's
+        // own entering-column FTRAN (its own docs); both branches also
+        // capture `a_tilde_buf` for this iteration's own
+        // `try_update_precomputed` call further down.
         dense_q.fill(0.0);
         for &(i, v) in std.cols.row(q) {
             dense_q[i] = v;
         }
         if lu.should_use_dense_solve(std.cols.row(q).len()) {
-            lu.solve_into(&dense_q, &mut lu_scratch, &mut alpha_full);
+            lu.solve_into_capture(&dense_q, &mut lu_scratch, &mut alpha_full, &mut a_tilde_buf);
         } else {
-            lu.solve_sparse_into(std.cols.row(q), &mut sparse_scratch, &mut gp_scratch, &mut alpha_full);
+            lu.solve_sparse_into_capture(std.cols.row(q), &mut sparse_scratch, &mut gp_scratch, &mut alpha_full, &mut a_tilde_buf);
         }
 
         // `updateVerify` (`super::update_verify`'s own docs): cross-checks
@@ -3441,9 +3564,16 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
         touched_cols.clear();
 
         // Forrest-Tomlin incremental update — same trigger scheme as the
-        // main phase's own (see its own docs).
+        // main phase's own (see its own docs), now via the same
+        // `try_update_precomputed` capture reuse (`a_tilde_buf`/
+        // `e_tilde_buf`, filled above by this iteration's own FTRAN/BTRAN).
         since_check += 1;
-        let mut need_refactor = !lu.try_update(r, &dense_q, super::FT_MIN_PIVOT);
+        let mut need_refactor = !lu.try_update_precomputed(r, &a_tilde_buf, &e_tilde_buf, super::FT_MIN_PIVOT);
+        // Trigger (4) ([`ft_max_updates`]'s own docs) — unconditional every
+        // iteration, same as the main phase's own identical check.
+        if !need_refactor && lu.update_count() > ft_max_updates(m) {
+            need_refactor = true;
+        }
         if !need_refactor && since_check >= super::FT_CHECK_INTERVAL {
             since_check = 0;
             let bump_too_big = lu.fill_count() > super::FT_BUMP_LIMIT_FACTOR * m.max(1);
