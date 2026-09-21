@@ -74,23 +74,24 @@
 //! everything `doubleton`/`colsingleton`/`rowsingleton` already know how
 //! to do with a true equality — no new substitution logic needed.
 //!
-//! **"Infinite" means *strictly implied*, not just literally `+/-inf`**:
-//! a column's bound only rules out one of `r_j`'s signs when `x_j` can
-//! *genuinely never* sit there — true not only for a literal `+/-inf`
-//! bound, but for any bound `propagate`'s own §3.2 activity tightening
-//! has since proven strictly *tighter* than (that original bound is then
-//! provably unreachable too, exactly HiGHS's own `isLowerStrictlyImplied`/
-//! `isUpperStrictlyImplied` distinction between a column's *explicit*
-//! bound and its separately-tracked *implied* one). This crate's
-//! `propagate`/`dualfix`/`colsingleton` overwrite `lb`/`ub` in place
-//! rather than keeping that distinction as a separate pair the way HiGHS
-//! does, but the same fact is recoverable without extra bookkeeping:
-//! since every tightening pass only ever narrows a bound, never widens
-//! it, `ub[j] < orig_ub[j]` (the model's own, never-tightened value,
-//! captured once as a frozen `orig_lb`/`orig_ub` pair before
-//! `run_extended`'s round loop starts) already *means* something besides
-//! `orig_ub[j]` proved tighter — so `orig_ub[j]` itself can never again be
-//! `x_j`'s actual value, the same as if it had been `+inf` all along.
+//! **"Infinite" means literally `+/-inf`, not merely tighter than the
+//! model's own bound.** An earlier version of this module also fired a
+//! column's t-row whenever `propagate`'s own activity tightening had
+//! proven a bound strictly inside the model's original one (mirroring
+//! HiGHS's `isLowerStrictlyImplied`/`isUpperStrictlyImplied`), on the
+//! theory that `x_j` could then never reach that original bound either.
+//! That theory silently assumed the row which justified the tightening
+//! was still part of the row set (`real_g_rows`/`a`) this function is
+//! handed — but `propagate` itself deletes a row as redundant right
+//! after using it to tighten a bound, so the assumption frequently
+//! doesn't hold, and the resulting t-row can be false in every optimal
+//! dual solution (found on Netlib `80bau3b`: it fixed 106 columns off a
+//! dual box with no actual optimal point, moving the objective by
+//! +1531). `orig_lb`/`orig_ub` (the model's own, never-tightened bounds,
+//! captured once before `run_extended`'s round loop starts) are kept as
+//! parameters for whichever future fix re-derives this reduction with
+//! the row/bound bookkeeping it actually needs, but this module no
+//! longer reads them.
 //! `lb[j] == ub[j]` (a column fixed outright — a genuine decision by
 //! `dualfix`/`colsingleton`/`doubleton`, not a mere activity-derived
 //! tightening) is excluded either way: a fixed column is a constant, not
@@ -163,20 +164,21 @@ pub struct DualReductions {
     pub fixed_columns: Vec<(usize, f64)>,
 }
 
-/// Propagates the dual feasibility system derived from `c`/`orig_lb`/
-/// `orig_ub` (see the module docs for why the *original*, not the current
-/// round's, bounds) and both `a` and `real_g_rows`'s own coefficients, and
-/// reads out both reductions the resulting propagated dual box proves —
-/// see [`DualReductions`] and the module docs' "Column fixing" section for
-/// the second half. `lb`/`ub` are the current round's bounds, consulted
-/// to recognize a column already fixed to a point (`lb[j] == ub[j]`),
-/// which contributes nothing to the propagated system and is never a
-/// candidate for (re-)fixing here regardless of what its original bounds
-/// were. `a`'s rows contribute their own (always-free-sign) duals to the
-/// propagated system but are never themselves candidates for row
-/// promotion — they are already part of the equality system the caller
-/// maintains, with nothing left to promote.
-pub fn run(n: usize, a: &Csr, real_g_rows: &[Vec<(usize, f64)>], c: &[f64], lb: &[f64], ub: &[f64], orig_lb: &[f64], orig_ub: &[f64], passes: usize) -> DualReductions {
+/// Propagates the dual feasibility system derived from `c` and both `a`
+/// and `real_g_rows`'s own coefficients, and reads out both reductions
+/// the resulting propagated dual box proves — see [`DualReductions`] and
+/// the module docs' "Column fixing" section for the second half. `lb`/
+/// `ub` are the current round's bounds, consulted to recognize a column
+/// already fixed to a point (`lb[j] == ub[j]`), which contributes nothing
+/// to the propagated system and is never a candidate for (re-)fixing
+/// here, and to test literal `+/-inf`. `a`'s rows contribute their own
+/// (always-free-sign) duals to the propagated system but are never
+/// themselves candidates for row promotion — they are already part of
+/// the equality system the caller maintains, with nothing left to
+/// promote. `orig_lb`/`orig_ub` are unused (see the module docs' "means
+/// literally `+/-inf`" note) and kept only so callers don't need to
+/// change; a future fix may need them again.
+pub fn run(n: usize, a: &Csr, real_g_rows: &[Vec<(usize, f64)>], c: &[f64], lb: &[f64], ub: &[f64], _orig_lb: &[f64], _orig_ub: &[f64], passes: usize) -> DualReductions {
     let ar = a.as_ref();
     let num_a = ar.nrows();
     let num_g = real_g_rows.len();
@@ -212,16 +214,29 @@ pub fn run(n: usize, a: &Csr, real_g_rows: &[Vec<(usize, f64)>], c: &[f64], lb: 
         if col_terms[j].is_empty() || lb[j] == ub[j] {
             continue;
         }
-        // `ub_j` unreachable (literally `+inf`, or `propagate` has since
-        // proven a strictly tighter bound than the model's own — see the
-        // module docs) => `r_j` can never be negative => `r_j >= 0`
-        // forced => `sum d_i*M_ij >= -c_j` => `-sum d_i*M_ij <= c_j`.
-        if ub[j] == f64::INFINITY || orig_ub[j] > ub[j] + TOL {
+        // `ub_j` unreachable (literally `+inf`) => `r_j` can never be
+        // negative => `r_j >= 0` forced => `sum d_i*M_ij >= -c_j` =>
+        // `-sum d_i*M_ij <= c_j`.
+        //
+        // Deliberately *not* also firing on `orig_ub[j] > ub[j] + TOL`
+        // (a bound `propagate` tightened below the model's own): that
+        // reasoning silently assumed the row that justified the
+        // tightening is still part of `real_g_rows`/`a` by the time this
+        // runs, but `propagate` itself drops a row as redundant right
+        // after using it to tighten a bound (`propagate.rs`'s own
+        // redundant-row elimination) — so the row whose dual this t-row
+        // would need is frequently already gone, making the t-row's
+        // implicit "no other constraint keeps `x_j` off `orig_ub[j]`"
+        // premise false in the *current* row set and unsound in general
+        // (confirmed on Netlib `80bau3b`: it fixed 106 columns off a
+        // dual box containing no actual optimal dual solution, moving
+        // the objective by +1531).
+        if ub[j] == f64::INFINITY {
             t_rows.push(col_terms[j].iter().map(|&(i, v)| (i, -v)).collect());
             t_h.push(c[j]);
         }
         // Symmetric case on the lower side.
-        if lb[j] == f64::NEG_INFINITY || orig_lb[j] < lb[j] - TOL {
+        if lb[j] == f64::NEG_INFINITY {
             t_rows.push(col_terms[j].clone());
             t_h.push(-c[j]);
         }
