@@ -69,6 +69,7 @@
 //! epoch-stamped DFS scratch) — see that function's own docs for why only
 //! this one direction gets the fuller treatment.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1688,6 +1689,19 @@ pub struct FtLu {
     /// See [`Self::scratch_a_tilde`]'s own docs — the other of
     /// [`Self::try_update`]'s two scratch buffers.
     scratch_e_tilde: Vec<f64>,
+    /// [`Self::u_transpose_solve_into`]'s own reusable epoch-stamped
+    /// "needed" scratch (see that method's own docs): `(stamps, epoch)`
+    /// where `stamps[s] == epoch` means step `s` is known to end up
+    /// nonzero this call. A `RefCell` rather than a `&mut` parameter
+    /// because `u_transpose_solve_into` and its callers
+    /// (`solve_transpose_into`/`solve_transpose_into_capture`) are called
+    /// through a shared `&FtLu` from many call sites across this crate;
+    /// threading a new scratch parameter through all of them for an
+    /// internal, call-local bookkeeping array would be a much larger,
+    /// more invasive change for the same result. Never borrowed
+    /// re-entrantly (this method doesn't call itself), so the `borrow_mut`
+    /// can't panic.
+    ut_needed: RefCell<(Vec<u32>, u32)>,
 }
 
 impl FtLu {
@@ -1725,6 +1739,7 @@ impl FtLu {
             r_etas: Vec::new(),
             scratch_a_tilde: vec![0.0; m],
             scratch_e_tilde: vec![0.0; m],
+            ut_needed: RefCell::new((vec![0; m], 0)),
         }
     }
 
@@ -1742,9 +1757,53 @@ impl FtLu {
     /// that eta's pivotal component via eq. (8). Mutates `z` directly
     /// (rather than allocating a fresh result) — see `LuFactors::l_solve_into`'s
     /// own docs for why this matters on `FtLu`'s hot path.
+    ///
+    /// Hyper-sparse via [`Self::row_owners`], unlike [`Self::u_solve_into`]
+    /// (see that method's own docs for why a GP-style DFS reach set was
+    /// tried there and reverted): `z`'s input here is always a single unit
+    /// vector's worth of nonzeros (BTRAN's callers only ever seed one
+    /// entry before permutation), and this loop already visits `u_seq` in
+    /// the one order (forward/creation order) in which every eta's
+    /// `off_diag` targets are guaranteed to sit at strictly earlier
+    /// positions (the same invariant `u_solve_into`'s reverse pass relies
+    /// on, mirrored) — so marking "which later etas can possibly end up
+    /// nonzero" is a single forward pass with no separate DFS/reach
+    /// pre-pass needed: whenever this loop finds `z[p] != 0.0`, every slot
+    /// listed in `row_owners[p]` (the etas whose `off_diag` reads row-step
+    /// `p`) is marked needed, and any eta never marked needed is skipped
+    /// outright. A skipped eta's `z[p]` is left at whatever `0 - 0 == 0`
+    /// (or `-0.0`) it already held — never read by any downstream code as
+    /// anything but "zero" (see `commit_update`'s `!= 0.0` filter, the
+    /// `r_etas`/PRICE/DSE consumers immediately below and downstream of
+    /// this call, all of which branch on zero-ness, not sign of zero), so
+    /// every nonzero result is bit-identical to the unconditional scan.
+    /// Measured (`analysis/greenbea_20260921_090812.md` §3-4): on
+    /// `greenbea`, only ~3% of `u_seq` ends up nonzero per call, cutting
+    /// this stage's wall time by more than half with the pivot sequence,
+    /// iteration count, refactorization count and objective value all
+    /// unchanged (bit-identical) across the full Netlib set.
     fn u_transpose_solve_into(&self, z: &mut [f64]) {
+        let mut needed = self.ut_needed.borrow_mut();
+        let (stamps, epoch) = &mut *needed;
+        *epoch = epoch.wrapping_add(1);
+        if *epoch == 0 {
+            // Wrapped after ~4 billion calls: every stale stamp is now
+            // indistinguishable from a real match at epoch 0, so clear
+            // them once and restart from epoch 1.
+            stamps.iter_mut().for_each(|s| *s = 0);
+            *epoch = 1;
+        }
+        let epoch = *epoch;
+        for (s, &zs) in z.iter().enumerate() {
+            if zs != 0.0 {
+                stamps[s] = epoch;
+            }
+        }
         for eta in &self.u_seq {
             let p = eta.slot;
+            if stamps[p] != epoch {
+                continue;
+            }
             let y: f64 = match &eta.off_diag {
                 OffDiag::Sparse(v) => v.iter().map(|&(row_step, v)| v * z[row_step]).sum(),
                 // `data[p]` is always `0.0` (see `OffDiag`'s own docs), so
@@ -1752,6 +1811,11 @@ impl FtLu {
                 OffDiag::Dense { data, .. } => data.iter().zip(z.iter()).map(|(&v, &zi)| v * zi).sum(),
             };
             z[p] = (z[p] - y) / eta.pivot;
+            if z[p] != 0.0 {
+                for &q in &self.row_owners[p] {
+                    stamps[q] = epoch;
+                }
+            }
         }
     }
 
