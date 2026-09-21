@@ -181,6 +181,12 @@ mod prof_phases {
     /// lever); nonzero here is itself the signal to re-tune
     /// `FT_MAX_UPDATES_FACTOR`.
     pub(super) static REFACTOR_CAUSE_MAX_UPDATES: AtomicUsize = AtomicUsize::new(0);
+    /// A would-be `Infeasible` conclusion refusing to be drawn from an
+    /// updated factorization (both `Status::Infeasible` sites' own docs):
+    /// the iteration is redone from a fresh one instead. Nonzero here
+    /// means this guard actually saved (or at least delayed) an
+    /// infeasibility report — on `greenbea` it fires exactly once.
+    pub(super) static REFACTOR_CAUSE_INFEAS_CHECK: AtomicUsize = AtomicUsize::new(0);
     /// Peak `lu.update_count()` observed *at any point* during the solve
     /// (via `fetch_max`, so this is the true peak across every
     /// refactorization interval, not just the value at solve end) — a
@@ -271,6 +277,7 @@ mod prof_phases {
             &REFACTOR_CAUSE_D_DRIFT,
             &REFACTOR_CAUSE_ILLCOND,
             &REFACTOR_CAUSE_MAX_UPDATES,
+            &REFACTOR_CAUSE_INFEAS_CHECK,
             &MAX_UPDATE_STREAK,
             &ITERS,
             &BFRT_FLIPS,
@@ -314,7 +321,7 @@ mod prof_phases {
         ];
         let accounted: usize = phases.iter().map(|&(_, ns)| ns).sum::<usize>() + REFACTOR.load(Relaxed);
         eprintln!(
-            "PROF_PHASES_EXT wall={:.3}ms iters={iters} ({:.1}us/iter) accounted={:.1}% of wall refactor_count={} (verify={} try_update={} bump={} drift={} d_drift={} illcond={} max_updates={}) max_update_streak={}",
+            "PROF_PHASES_EXT wall={:.3}ms iters={iters} ({:.1}us/iter) accounted={:.1}% of wall refactor_count={} (verify={} try_update={} bump={} drift={} d_drift={} illcond={} max_updates={} infeas_check={}) max_update_streak={}",
             wall_ns as f64 / 1e6,
             wall_ns as f64 / 1e3 / iters as f64,
             100.0 * accounted as f64 / wall_ns.max(1) as f64,
@@ -326,6 +333,7 @@ mod prof_phases {
             REFACTOR_CAUSE_D_DRIFT.load(Relaxed),
             REFACTOR_CAUSE_ILLCOND.load(Relaxed),
             REFACTOR_CAUSE_MAX_UPDATES.load(Relaxed),
+            REFACTOR_CAUSE_INFEAS_CHECK.load(Relaxed),
             MAX_UPDATE_STREAK.load(Relaxed)
         );
         eprintln!(
@@ -1648,9 +1656,20 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     // body, next to `stall_count`'s own increment) — a much larger
     // threshold than `stall_limit` deliberately, to stay clear of a
     // healthy-but-slow solve's own normal infeasible-count fluctuation.
-    let infeasible_plateau_limit = 4 * stall_limit;
+    // ... but capped so the trigger can actually fire inside this loop's
+    // own `MAX_ITERS` budget. `4 * stall_limit` alone is `20 * m`, which
+    // for any `m > 1000` exceeds `MAX_ITERS` outright — on those problems
+    // the plateau detector could never fire at all, however static the
+    // infeasible set got, and the solve just spent its whole budget
+    // before falling back (Netlib `greenbea`, `m = 2056`: limit 41,120
+    // against a 20,000-iteration budget, with the infeasible count sitting
+    // at a constant 302 for the last ~12,000 of them). A safety net sized
+    // above the budget it is meant to protect is not a safety net.
+    let infeasible_plateau_limit = (4 * stall_limit).min(MAX_ITERS / 4);
     let mut infeasible_plateau_count = 0usize;
-    let mut last_infeasible_len = infeasible_rows.rows.len();
+    // Smallest infeasible-row count seen so far, *not* the previous
+    // iteration's — see the plateau check's own docs in the loop body.
+    let mut best_infeasible_len = infeasible_rows.rows.len();
     // Override for A/B testing [`XB_DRIFT_TOL`] itself (the escalation
     // ladder's own starting point) — see that constant's own docs for the
     // four prior single-knob attempts this per-solve escalation replaced.
@@ -2303,6 +2322,46 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 infeasible_rows.set(r, false);
                 continue;
             }
+            // Never conclude infeasibility from an *updated* basis
+            // factorization. `Affine1::cmp_lex`'s own `base` comparison
+            // is absolute at `1e-9` (its `base_scale` floor of `1.0`),
+            // while this loop knowingly tolerates `x_B` drift up to
+            // `XB_DRIFT_TOL_MAX` (`1e-4`) between refactorizations — five
+            // orders of magnitude of slack in which accumulated
+            // Forrest-Tomlin error alone can make a perfectly feasible
+            // row look like a violated one. Measured on Netlib's
+            // `greenbea` (the instance this guard was written for): at
+            // `update_count = 47` the deviation read `base = 3.0e-7`
+            // against a flip capacity of exactly `0`, so the walk below
+            // ran out of candidates and reported `Infeasible`; refactorized
+            // at that same basis it reads exactly `-0.0` — i.e. the
+            // capacity covers it precisely and the iteration has a pivot.
+            // So: redo the iteration from a fresh factorization, and only
+            // report `Infeasible` when it still holds there (the same
+            // refactor-and-resync the `update_verify` discard path below
+            // performs). Terminating: `refactorize` leaves
+            // `update_count() == 0`, so a second visit with no committed
+            // pivot in between falls straight through to the report.
+            if lu.update_count() > 0 {
+                if profile_phases {
+                    prof_phases::REFACTOR_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    prof_phases::REFACTOR_CAUSE_INFEAS_CHECK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                timed!(profile_phases, prof_phases::REFACTOR, {
+                    lu = refactorize(std, &basis_pos)?;
+                    let (fresh_base, fresh_slope) = compute_rhs_affine(std, &cache, &nb_status)?;
+                    lu.solve_into(&fresh_base, &mut lu_scratch, &mut x_b_base);
+                    lu.solve_into(&fresh_slope, &mut lu_scratch, &mut x_b_slope);
+                    infeasible_rows.rebuild(m, |i| row_infeasible_affine(&cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i));
+                    fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fd_cb, &mut lu_scratch, &mut fd_y, &mut d);
+                    if dse_refresh_on_refactor {
+                        if let super::EdgeWeights::Dse(dse) = &mut weights {
+                            *dse = super::DseState::from_basis(m, &lu);
+                        }
+                    }
+                });
+                continue;
+            }
             // Genuine mathematical conclusion (Proposition 4.6, the
             // classical `Eligible = empty` case), not a numerical
             // artifact — reported directly, no fallback.
@@ -2368,6 +2427,31 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 touched[j] = false;
             }
             touched_cols.clear();
+            // Same guard as the `Eligible = empty` site above, for the
+            // same reason (see its own docs): an `Infeasible` conclusion
+            // drawn at `1e-9` from a factorization this loop lets drift to
+            // `1e-4` is not a conclusion. This is the site `greenbea`
+            // actually reached (`site=bfrt_exhausted`, iteration 4715).
+            if lu.update_count() > 0 {
+                if profile_phases {
+                    prof_phases::REFACTOR_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    prof_phases::REFACTOR_CAUSE_INFEAS_CHECK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                timed!(profile_phases, prof_phases::REFACTOR, {
+                    lu = refactorize(std, &basis_pos)?;
+                    let (fresh_base, fresh_slope) = compute_rhs_affine(std, &cache, &nb_status)?;
+                    lu.solve_into(&fresh_base, &mut lu_scratch, &mut x_b_base);
+                    lu.solve_into(&fresh_slope, &mut lu_scratch, &mut x_b_slope);
+                    infeasible_rows.rebuild(m, |i| row_infeasible_affine(&cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i));
+                    fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fd_cb, &mut lu_scratch, &mut fd_y, &mut d);
+                    if dse_refresh_on_refactor {
+                        if let super::EdgeWeights::Dse(dse) = &mut weights {
+                            *dse = super::DseState::from_basis(m, &lu);
+                        }
+                    }
+                });
+                continue;
+            }
             // Every eligible column fully flipped and still short:
             // Proposition 4.6(ii) — genuine, reported directly.
             if std::env::var("ENOMOTO_DEBUG_EXT_INFEASIBLE").is_ok() {
@@ -2833,15 +2917,27 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         // every-iteration stall trigger) never comes close to a static
         // infeasible count for anywhere near this many consecutive
         // iterations across its own ~2900-iteration main phase.
+        // Measured against the best (smallest) infeasible count seen so
+        // far, not against the previous iteration's: an exact-equality
+        // test is defeated by a stall that merely *oscillates*. Netlib
+        // `greenbea` does exactly that — past iteration ~8000 its count
+        // alternates between 248 and 249 (two variables trading places on
+        // a single row, `analysis/greenbea_20260921_021218.md` §4), which
+        // resets an equality-based counter every second iteration and let
+        // the solve burn its remaining ~12,000 iterations with
+        // `bland_mode` never latching. "No new best in
+        // `infeasible_plateau_limit` iterations" catches both that and the
+        // literally-static `pilot4` plateau this check was written for,
+        // and is still reset by any genuine progress.
         let infeasible_len = infeasible_rows.rows.len();
-        if infeasible_len == last_infeasible_len {
+        if infeasible_len < best_infeasible_len {
+            best_infeasible_len = infeasible_len;
+            infeasible_plateau_count = 0;
+        } else {
             infeasible_plateau_count += 1;
             if infeasible_plateau_count > infeasible_plateau_limit {
                 bland_mode = true;
             }
-        } else {
-            last_infeasible_len = infeasible_len;
-            infeasible_plateau_count = 0;
         }
 
         let leaving_var = basis[r];
