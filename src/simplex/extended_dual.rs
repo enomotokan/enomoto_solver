@@ -713,6 +713,38 @@ impl Affine1 {
     }
 }
 
+/// Whether the BFRT walk's accumulated flip capacity `cum` has caught up
+/// to (covers) the row deviation `w_r` — i.e. whether the walk should stop
+/// *here* rather than keep consuming candidates. Same lexicographic
+/// (slope, then base) comparison as [`Affine1::cmp_lex`], but the base
+/// channel's tolerance is scaled by this row's own basic-value magnitude
+/// (`x_b_base_r`), not `cmp_lex`'s bare `1e-9`-absolute floor (its
+/// `base_scale` floors at `1.0` regardless of the magnitudes the two
+/// `Affine1`s actually carry). That floor is fine for most rows, but this
+/// module's own Forrest-Tomlin drift check already tolerates `x_B` error
+/// up to `XB_DRIFT_TOL_MAX` (`1e-4`) between refactorizations — on a row
+/// whose basic value reaches `1e5..1e8` (large-magnitude Netlib instances,
+/// confirmed on `greenbea`: `analysis/greenbea_20260921_030127.md`), that
+/// ordinary refactorization noise (measured there at `3.0e-7`, five orders
+/// of magnitude above `1e-9`) reads as a genuine, unrecoverable shortfall
+/// and the walk runs off the end reporting a false `Infeasible` — even
+/// though a fresh factorization shows the same row's deviation is exactly
+/// covered. Mirrors `polish_with_true_bounds`'s own `reach_tol` (its own
+/// docs) and `super::PRIMAL_FEAS_TOL`'s stated purpose (a large-magnitude
+/// row's rounding floor scales with it; a fixed absolute bar is
+/// simultaneously too strict on large rows and too loose on tiny ones).
+#[inline]
+fn bfrt_reached(w_r: Affine1, cum: Affine1, x_b_base_r: f64) -> bool {
+    const REL_TOL: f64 = 1e-9;
+    let slope_scale = w_r.slope.abs().max(cum.slope.abs()).max(1.0);
+    let slope_diff = w_r.slope - cum.slope;
+    if slope_diff.abs() > REL_TOL * slope_scale {
+        return slope_diff <= 0.0;
+    }
+    let base_diff = w_r.base - cum.base;
+    base_diff <= super::PRIMAL_FEAS_TOL * w_r.base.abs().max(x_b_base_r.abs()).max(1.0)
+}
+
 /// `Δ_i(M)^2 / w_i` (paper \S4.5's steepest-edge/Devex generalization),
 /// as the coefficients of the resulting degree-2 polynomial in `M` —
 /// `w_i` itself never depends on `M` (`super::DseState`/`DevexState`'s own
@@ -2317,7 +2349,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
             // gives: a large-magnitude row's rounding floor scales with
             // it, so a fixed absolute bar is simultaneously too strict on
             // large rows and too loose on tiny ones.
-            if w_r.slope.abs() <= 1e-9 && w_r.base <= super::PRIMAL_FEAS_TOL * std.b[r].abs().max(1.0) {
+            if bfrt_reached(w_r, Affine1::ZERO, x_b_base[r]) {
                 noise_feasible[basis[r]] = true;
                 infeasible_rows.set(r, false);
                 continue;
@@ -2414,7 +2446,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                     break;
                 };
                 let new_cum = cum.add(width.scale(cand.hat_alpha.abs()));
-                if w_r.cmp_lex(&new_cum) != std::cmp::Ordering::Greater {
+                if bfrt_reached(w_r, new_cum, x_b_base[r]) {
                     k_star = Some(idx);
                     break;
                 }
@@ -3469,7 +3501,76 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
                 let obj: f64 = (0..n_total).map(|j| std.c[j] * x[j]).sum();
                 eprintln!("DEBUG_EXT: polish_iters={_iter} bland_mode={bland_mode} obj={obj}");
             }
-            return Some(SimplexResult { status: Status::Optimal, x: Some(x) });
+            // Primal feasible against this phase's own *perturbed* costs
+            // (`active_cost`, set at this function's entry) -- dual
+            // feasibility held throughout by the loop invariant above, so
+            // this point is optimal for the perturbed problem. Whether it
+            // is *also* optimal for the true problem depends on whether
+            // perturbation happened to mask a genuine dual infeasibility:
+            // ported from `super::solve_lp_dual_on`'s own identical check
+            // (that function's own docs) -- this phase never had it, and
+            // the gap is not hypothetical: measured directly on Netlib
+            // `greenbea`, the unperturbed check below fails and this
+            // phase's own perturbed-optimal point is off by 92808 in
+            // objective (0.13%) from the true optimum
+            // (`analysis/greenbea_20260921_030127.md`, mechanism (B)).
+            let mut true_d = vec![0.0f64; n_total];
+            {
+                let c_b: Vec<f64> = basis.iter().map(|&bv| std.c[bv]).collect();
+                let mut y = vec![0.0f64; m];
+                lu.solve_transpose_into(&c_b, &mut lu_scratch, &mut y);
+                for j in 0..n_total {
+                    let mut dj = std.c[j];
+                    for &(i, v) in std.cols.row(j) {
+                        dj -= v * y[i];
+                    }
+                    true_d[j] = dj;
+                }
+            }
+            let true_dual_feasible = (0..n_total).all(|j| match nb_status[j] {
+                None => true,
+                Some(NbStatus::Lower) => true_d[j] >= -TOL,
+                Some(NbStatus::Upper) => true_d[j] <= TOL,
+            });
+            if true_dual_feasible {
+                return Some(SimplexResult { status: Status::Optimal, x: Some(x) });
+            }
+            // Perturbation masked a genuine dual infeasibility: this basis
+            // is primal feasible (feasibility never depended on costs) but
+            // not dual feasible for the true costs. Finishing from here
+            // needs the primal method's own invariant (primal feasibility
+            // preserved, working toward dual feasibility) instead of this
+            // phase's dual one -- exactly `super::run_phase`'s phase 2,
+            // reused directly rather than reimplemented: every nonbasic
+            // column here already sits at a *finite* side (the cleanup
+            // lemma's own guarantee, `finish`'s docs above), the same
+            // situation every `<=`-row slack is already in in the
+            // classical path this was written for, so it needs no special
+            // handling for this module's own genuinely-infinite bounds.
+            // `expand`/`se` start fresh rather than mid-sequence
+            // (unrelated quantities to this phase's own dual state;
+            // `solve_lp_dual_on`'s own identical handoff confirms this only
+            // costs pricing quality, not correctness).
+            let mut t = super::Tableau { std, basis: basis.to_vec(), basis_pos: basis_pos.to_vec(), nb_status: nb_status.to_vec(), x };
+            let mut expand = super::ExpandState::new();
+            let mut se = super::SteepestEdgeState::new(std);
+            let mut stall = super::PrimalStallState::new();
+            if std::env::var("ENOMOTO_DEBUG_EXT_ITERS").is_ok() {
+                eprintln!("DEBUG_EXT: polish DUAL->PRIMAL cleanup handoff at polish_iter={_iter}");
+            }
+            // Unlike `solve_lp_dual_on`'s identical handoff, a singular
+            // basis here does *not* fall back to a from-scratch classical
+            // solve: `solve_lp_on`/`Tableau::new` assume every structural
+            // column has a finite bound (their own docs), which this
+            // module exists specifically to handle when false -- so `None`
+            // is propagated to this function's own caller instead, which
+            // already knows how to fall back (the existing `BIG_M`-clamped
+            // classical path in `solve_lp_dual`) without that assumption.
+            let status = super::run_phase(std, &mut t, false, &mut lu, &mut since_check, &mut expand, &mut se, &mut stall)?;
+            return Some(SimplexResult {
+                status: status.clone(),
+                x: if status == Status::Optimal { Some(t.x[0..t.n_orig()].to_vec()) } else { None },
+            });
         };
 
         // Captures `e_tilde_buf` for this iteration's own
