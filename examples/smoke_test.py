@@ -81,13 +81,12 @@ try:
 except InfeasibleError:
     print("Infeasible correctly detected")
 
-# 7) Infinite bounds are rejected
+# 7) Infinite bounds are accepted (model.rs::add_variable's own docs: no
+# longer rejected at the PyO3 boundary — only NaN and lb > ub are).
 M7 = Model()
-try:
-    Variable(float, 0, math.inf, model=M7)
-    raise AssertionError("expected ValueError")
-except ValueError:
-    print("Infinite bound correctly rejected")
+v7 = Variable(float, 0, math.inf, model=M7)
+assert v7.lb == 0 and v7.ub == math.inf
+print("Infinite upper bound correctly accepted")
 
 # 8) Type errors
 M8 = Model()

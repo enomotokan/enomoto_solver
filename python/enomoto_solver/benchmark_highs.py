@@ -14,12 +14,13 @@ Objective values are still compared as a sanity check.
 Usage:
     python -m enomoto_solver.benchmark_highs [--max-vars 3000] [--timeout 60]
 
-Netlib's own distribution uses a custom "compressed MPS" format (see
-`https://www.netlib.org/lp/data/`), decompressed here by fetching and
-compiling the reference `emps.c` decompressor once (requires a C compiler
-in `PATH`, e.g. `gcc`) — everything is cached under `--cache-dir` (default:
-`<repo>/.netlib_cache`, itself gitignored) so a re-run hits the network
-only for problems not already downloaded.
+Netlib's LP data is not committed to this repository (see
+docs/netlib-data.md) and this script never itself talks to netlib.org:
+run `python scripts/setup_netlib_data.py` once per environment first — it
+fetches Netlib's custom "compressed MPS" format and decompresses it via
+Netlib's own `emps.c` (compiled once, requires a C compiler in `PATH`, e.g.
+`gcc`) into `--cache-dir` (default: `<repo>/.netlib_cache`, gitignored).
+This script only ever reads that cache.
 """
 
 from __future__ import annotations
@@ -28,77 +29,31 @@ import argparse
 import csv
 import json
 import math
-import shutil
 import subprocess
 import sys
 import time
-import urllib.request
 from pathlib import Path
 
 import highspy
 
 from . import _core
 
-NETLIB_INDEX_URL = "https://www.netlib.org/lp/data/"
-EMPS_C_URL = "https://www.netlib.org/lp/data/emps.c"
 
-# Netlib "problems" that aren't plain compressed-MPS files: `minos` is a
-# plain-text readme, `stocfor3`/`truss` are Fortran-source-plus-data
-# bundles that need their own generator program, not `emps`. Excluded
-# outright rather than attempted and reported as failures every run.
-NON_MPS_ENTRIES = {"minos", "stocfor3", "truss", "ascii", "changes", "readme"}
+class NetlibCacheError(RuntimeError):
+    """Needed Netlib data isn't cached — run `scripts/setup_netlib_data.py`
+    (from a checkout of this repo) once per environment first."""
 
 
-def _fetch(url: str, dest: Path, timeout: int = 30) -> None:
-    with urllib.request.urlopen(url, timeout=timeout) as resp:
-        dest.write_bytes(resp.read())
-
-
-def _ensure_emps(cache_dir: Path) -> Path:
-    """Downloads and compiles the Netlib `emps` decompressor once, caching
-    the binary in `cache_dir`."""
-    exe = cache_dir / ("emps.exe" if sys.platform == "win32" else "emps")
-    if exe.exists():
-        return exe
-    cc = shutil.which("gcc") or shutil.which("cc")
-    if cc is None:
-        raise RuntimeError("no C compiler (gcc/cc) found in PATH — required once to build Netlib's `emps` decompressor")
-    src = cache_dir / "emps.c"
-    if not src.exists():
-        _fetch(EMPS_C_URL, src)
-    subprocess.run([cc, "-O2", "-o", str(exe), str(src)], check=True, capture_output=True)
-    return exe
-
-
-def _ensure_problem_list(cache_dir: Path) -> list[str]:
+def _cached_problem_list(cache_dir: Path) -> list[str]:
     list_path = cache_dir / "problems.txt"
-    if list_path.exists():
-        return [line.strip() for line in list_path.read_text().splitlines() if line.strip()]
-    index = cache_dir / "index.html"
-    _fetch(NETLIB_INDEX_URL, index)
-    import re
-
-    names = sorted(set(re.findall(r'<a href="([a-z0-9_]+)">', index.read_text(errors="replace"))))
-    names = [n for n in names if n not in NON_MPS_ENTRIES]
-    list_path.write_text("\n".join(names))
-    return names
+    if not list_path.exists():
+        raise NetlibCacheError(f"{list_path} not found — run `python scripts/setup_netlib_data.py` once to fetch it")
+    return [line.strip() for line in list_path.read_text().splitlines() if line.strip()]
 
 
-def _ensure_mps(name: str, cache_dir: Path, emps: Path) -> Path | None:
+def _cached_mps(name: str, cache_dir: Path) -> Path | None:
     mps_path = cache_dir / "mps" / f"{name}.mps"
-    if mps_path.exists() and mps_path.stat().st_size > 0:
-        return mps_path
-    raw_path = cache_dir / "raw" / name
-    raw_path.parent.mkdir(parents=True, exist_ok=True)
-    if not raw_path.exists():
-        _fetch(NETLIB_INDEX_URL + name, raw_path)
-    mps_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(mps_path, "wb") as out:
-        proc = subprocess.run([str(emps), str(raw_path)], stdout=out, stderr=subprocess.PIPE)
-    if proc.returncode != 0 or mps_path.stat().st_size == 0:
-        mps_path.unlink(missing_ok=True)
-        return None
-    return mps_path
+    return mps_path if mps_path.exists() and mps_path.stat().st_size > 0 else None
 
 
 def _load_lp(mps_path: Path):
@@ -213,8 +168,7 @@ def _run_worker(name: str, cache_dir: Path, timeout: float) -> None:
     """`--worker` entry point: solves exactly one problem in *this* process
     and prints a single JSON line to stdout. Invoked by `main()` as a
     subprocess (see its own docs for why) rather than called in-process."""
-    emps = _ensure_emps(cache_dir)
-    mps_path = _ensure_mps(name, cache_dir, emps)
+    mps_path = _cached_mps(name, cache_dir)
     if mps_path is None:
         print(json.dumps({"name": name, "error": "could not decompress"}))
         return
@@ -225,8 +179,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--max-vars", type=int, default=3000, help="skip problems with more columns than this")
     parser.add_argument("--timeout", type=float, default=60.0, help="per-problem wall-clock budget, seconds — enforced (SIGTERM/kill) via a per-problem subprocess")
-    parser.add_argument("--cache-dir", type=Path, default=Path(__file__).resolve().parents[2] / ".netlib_cache")
-    parser.add_argument("--out", type=Path, default=Path(__file__).resolve().parents[2] / "netlib_benchmark_results.csv")
+    # Relative to the current working directory, not `__file__`: once this
+    # package is installed from a wheel, `__file__` sits under site-packages
+    # with no reliable path back to a repo checkout (see this module's own
+    # docs). Both this and `scripts/setup_netlib_data.py`'s own default
+    # resolve to `<cwd>/.netlib_cache`, so running both from the repo root
+    # (the documented usage) still lines them up.
+    parser.add_argument("--cache-dir", type=Path, default=Path.cwd() / ".netlib_cache")
+    parser.add_argument("--out", type=Path, default=Path.cwd() / "netlib_benchmark_results.csv")
     parser.add_argument("--only", nargs="*", help="run only these problem names (default: all, size-filtered)")
     parser.add_argument("--worker", metavar="NAME", help=argparse.SUPPRESS)  # internal: single-problem subprocess mode
     args = parser.parse_args()
@@ -237,14 +197,17 @@ def main() -> None:
         _run_worker(args.worker, args.cache_dir, args.timeout)
         return
 
-    emps = _ensure_emps(args.cache_dir)
-    names = args.only if args.only else _ensure_problem_list(args.cache_dir)
+    try:
+        names = args.only if args.only else _cached_problem_list(args.cache_dir)
+    except NetlibCacheError as e:
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(1)
 
     rows = []
     for name in names:
-        mps_path = _ensure_mps(name, args.cache_dir, emps)
+        mps_path = _cached_mps(name, args.cache_dir)
         if mps_path is None:
-            print(f"{name:12s} SKIP (could not decompress)")
+            print(f"{name:12s} SKIP (not cached — run `python scripts/setup_netlib_data.py` to fetch it)")
             continue
 
         # Cheap pre-check so an oversized problem is never even handed to

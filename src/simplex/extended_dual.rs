@@ -181,6 +181,12 @@ mod prof_phases {
     /// lever); nonzero here is itself the signal to re-tune
     /// `FT_MAX_UPDATES_FACTOR`.
     pub(super) static REFACTOR_CAUSE_MAX_UPDATES: AtomicUsize = AtomicUsize::new(0);
+    /// A would-be `Infeasible` conclusion refusing to be drawn from an
+    /// updated factorization (both `Status::Infeasible` sites' own docs):
+    /// the iteration is redone from a fresh one instead. Nonzero here
+    /// means this guard actually saved (or at least delayed) an
+    /// infeasibility report — on `greenbea` it fires exactly once.
+    pub(super) static REFACTOR_CAUSE_INFEAS_CHECK: AtomicUsize = AtomicUsize::new(0);
     /// Peak `lu.update_count()` observed *at any point* during the solve
     /// (via `fetch_max`, so this is the true peak across every
     /// refactorization interval, not just the value at solve end) — a
@@ -271,6 +277,7 @@ mod prof_phases {
             &REFACTOR_CAUSE_D_DRIFT,
             &REFACTOR_CAUSE_ILLCOND,
             &REFACTOR_CAUSE_MAX_UPDATES,
+            &REFACTOR_CAUSE_INFEAS_CHECK,
             &MAX_UPDATE_STREAK,
             &ITERS,
             &BFRT_FLIPS,
@@ -314,7 +321,7 @@ mod prof_phases {
         ];
         let accounted: usize = phases.iter().map(|&(_, ns)| ns).sum::<usize>() + REFACTOR.load(Relaxed);
         eprintln!(
-            "PROF_PHASES_EXT wall={:.3}ms iters={iters} ({:.1}us/iter) accounted={:.1}% of wall refactor_count={} (verify={} try_update={} bump={} drift={} d_drift={} illcond={} max_updates={}) max_update_streak={}",
+            "PROF_PHASES_EXT wall={:.3}ms iters={iters} ({:.1}us/iter) accounted={:.1}% of wall refactor_count={} (verify={} try_update={} bump={} drift={} d_drift={} illcond={} max_updates={} infeas_check={}) max_update_streak={}",
             wall_ns as f64 / 1e6,
             wall_ns as f64 / 1e3 / iters as f64,
             100.0 * accounted as f64 / wall_ns.max(1) as f64,
@@ -326,6 +333,7 @@ mod prof_phases {
             REFACTOR_CAUSE_D_DRIFT.load(Relaxed),
             REFACTOR_CAUSE_ILLCOND.load(Relaxed),
             REFACTOR_CAUSE_MAX_UPDATES.load(Relaxed),
+            REFACTOR_CAUSE_INFEAS_CHECK.load(Relaxed),
             MAX_UPDATE_STREAK.load(Relaxed)
         );
         eprintln!(
@@ -703,6 +711,38 @@ impl Affine1 {
     fn scale(self, k: f64) -> Affine1 {
         Affine1::new(self.base * k, self.slope * k)
     }
+}
+
+/// Whether the BFRT walk's accumulated flip capacity `cum` has caught up
+/// to (covers) the row deviation `w_r` — i.e. whether the walk should stop
+/// *here* rather than keep consuming candidates. Same lexicographic
+/// (slope, then base) comparison as [`Affine1::cmp_lex`], but the base
+/// channel's tolerance is scaled by this row's own basic-value magnitude
+/// (`x_b_base_r`), not `cmp_lex`'s bare `1e-9`-absolute floor (its
+/// `base_scale` floors at `1.0` regardless of the magnitudes the two
+/// `Affine1`s actually carry). That floor is fine for most rows, but this
+/// module's own Forrest-Tomlin drift check already tolerates `x_B` error
+/// up to `XB_DRIFT_TOL_MAX` (`1e-4`) between refactorizations — on a row
+/// whose basic value reaches `1e5..1e8` (large-magnitude Netlib instances,
+/// confirmed on `greenbea`: `analysis/greenbea_20260921_030127.md`), that
+/// ordinary refactorization noise (measured there at `3.0e-7`, five orders
+/// of magnitude above `1e-9`) reads as a genuine, unrecoverable shortfall
+/// and the walk runs off the end reporting a false `Infeasible` — even
+/// though a fresh factorization shows the same row's deviation is exactly
+/// covered. Mirrors `polish_with_true_bounds`'s own `reach_tol` (its own
+/// docs) and `super::PRIMAL_FEAS_TOL`'s stated purpose (a large-magnitude
+/// row's rounding floor scales with it; a fixed absolute bar is
+/// simultaneously too strict on large rows and too loose on tiny ones).
+#[inline]
+fn bfrt_reached(w_r: Affine1, cum: Affine1, x_b_base_r: f64) -> bool {
+    const REL_TOL: f64 = 1e-9;
+    let slope_scale = w_r.slope.abs().max(cum.slope.abs()).max(1.0);
+    let slope_diff = w_r.slope - cum.slope;
+    if slope_diff.abs() > REL_TOL * slope_scale {
+        return slope_diff <= 0.0;
+    }
+    let base_diff = w_r.base - cum.base;
+    base_diff <= super::PRIMAL_FEAS_TOL * w_r.base.abs().max(x_b_base_r.abs()).max(1.0)
 }
 
 /// `Δ_i(M)^2 / w_i` (paper \S4.5's steepest-edge/Devex generalization),
@@ -1648,9 +1688,20 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     // body, next to `stall_count`'s own increment) — a much larger
     // threshold than `stall_limit` deliberately, to stay clear of a
     // healthy-but-slow solve's own normal infeasible-count fluctuation.
-    let infeasible_plateau_limit = 4 * stall_limit;
+    // ... but capped so the trigger can actually fire inside this loop's
+    // own `MAX_ITERS` budget. `4 * stall_limit` alone is `20 * m`, which
+    // for any `m > 1000` exceeds `MAX_ITERS` outright — on those problems
+    // the plateau detector could never fire at all, however static the
+    // infeasible set got, and the solve just spent its whole budget
+    // before falling back (Netlib `greenbea`, `m = 2056`: limit 41,120
+    // against a 20,000-iteration budget, with the infeasible count sitting
+    // at a constant 302 for the last ~12,000 of them). A safety net sized
+    // above the budget it is meant to protect is not a safety net.
+    let infeasible_plateau_limit = (4 * stall_limit).min(super::MAX_ITERS_FLOOR / 4);
     let mut infeasible_plateau_count = 0usize;
-    let mut last_infeasible_len = infeasible_rows.rows.len();
+    // Smallest infeasible-row count seen so far, *not* the previous
+    // iteration's — see the plateau check's own docs in the loop body.
+    let mut best_infeasible_len = infeasible_rows.rows.len();
     // Override for A/B testing [`XB_DRIFT_TOL`] itself (the escalation
     // ladder's own starting point) — see that constant's own docs for the
     // four prior single-knob attempts this per-solve escalation replaced.
@@ -1760,7 +1811,23 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     // weights an *already-DSE-weighted* loop maintains, at points where a
     // refactor is happening anyway, so it carries none of that placement's
     // extra per-pivot FTRAN cost.
-    let dse_refresh_on_refactor = std::env::var("ENOMOTO_DSE_REFRESH_ON_REFACTOR").map_or(true, |v| v != "0");
+    //
+    // **Re-evaluated and defaulted off**: the drift this refresh was
+    // compensating for came from `DseState::update_after_pivot`'s old
+    // `wp_old` self-amplification bug, fixed separately since the
+    // measurement above was taken (see that function's own `wp_old =
+    // ||rho_p||^2` docs). With that fixed, `degen3`'s `dse_rel_err`
+    // diagnostic now reports <1% relative error on 100% of iterations
+    // with no refresh at all — the >=100%-drifting case this refresh
+    // exists for no longer occurs, so on the current codebase it is pure
+    // cost: profiling `degen3` (`ENOMOTO_PROF_PHASES_EXT`) attributes 12%
+    // of wall time to `DseState::from_basis` at each refactor (1,412
+    // BTRANs/event on this problem), on an identical 2,163-iteration
+    // pivot path and objective with or without it. Full 77-problem Netlib
+    // sweep with the refresh off: -10.8% total wall time, no status or
+    // objective changes. `ENOMOTO_DSE_REFRESH_ON_REFACTOR=1` re-enables it
+    // for A/B comparison if a future drift regression reappears.
+    let dse_refresh_on_refactor = std::env::var("ENOMOTO_DSE_REFRESH_ON_REFACTOR").is_ok_and(|v| v != "0");
     let debug_delta0 = std::env::var("ENOMOTO_DEBUG_EXT_DELTA0").is_ok();
     let debug_ext_iters_verbose = std::env::var("ENOMOTO_DEBUG_EXT_TRACE").is_ok();
     let m_flagged_cols: Vec<usize> = (0..n_orig).filter(|&j| delta[j] != 0.0).collect();
@@ -1859,6 +1926,21 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     let n_m_flagged = m_flagged_cols.len().max(1);
     let mut resolved_m = vec![false; n_total];
     let mut remaining_m_side = m_flagged_cols.len();
+    // Companion best-so-far for the infeasible-row-count plateau check
+    // below: `remaining_m_side` only ever decreases (its one mutation
+    // site is a plain `-= 1`, never incremented), so on a healthy solve
+    // it is a strictly more reliable progress signal than
+    // `infeasible_rows.rows.len()` — which measures how large the
+    // (constantly churning) infeasible-row *set* is right now, not
+    // whether the M-side resolution actually driving the solve forward
+    // is stuck. Netlib `dfl001` (`analysis/dfl001_20260921_035239.md`)
+    // is a healthy solve the plateau check otherwise mistook for
+    // `pilot4`'s genuine stall: its infeasible-row count's own minimum
+    // goes unbeaten for 5,000+ consecutive iterations (the set keeps
+    // churning — 40% grow / 50% shrink — without ever posting a new
+    // low) while `remaining_m_side` falls steadily throughout (11045 ->
+    // 4762 over the same span), which is what this tracks.
+    let mut best_remaining_m_side = remaining_m_side;
     let mut iters_since_m_progress: usize = 0;
     let score2_stall_halflife: f64 = std::env::var("ENOMOTO_SCORE2_STALL_HALFLIFE")
         .ok()
@@ -2283,9 +2365,49 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
             // gives: a large-magnitude row's rounding floor scales with
             // it, so a fixed absolute bar is simultaneously too strict on
             // large rows and too loose on tiny ones.
-            if w_r.slope.abs() <= 1e-9 && w_r.base <= super::PRIMAL_FEAS_TOL * std.b[r].abs().max(1.0) {
+            if bfrt_reached(w_r, Affine1::ZERO, x_b_base[r]) {
                 noise_feasible[basis[r]] = true;
                 infeasible_rows.set(r, false);
+                continue;
+            }
+            // Never conclude infeasibility from an *updated* basis
+            // factorization. `Affine1::cmp_lex`'s own `base` comparison
+            // is absolute at `1e-9` (its `base_scale` floor of `1.0`),
+            // while this loop knowingly tolerates `x_B` drift up to
+            // `XB_DRIFT_TOL_MAX` (`1e-4`) between refactorizations — five
+            // orders of magnitude of slack in which accumulated
+            // Forrest-Tomlin error alone can make a perfectly feasible
+            // row look like a violated one. Measured on Netlib's
+            // `greenbea` (the instance this guard was written for): at
+            // `update_count = 47` the deviation read `base = 3.0e-7`
+            // against a flip capacity of exactly `0`, so the walk below
+            // ran out of candidates and reported `Infeasible`; refactorized
+            // at that same basis it reads exactly `-0.0` — i.e. the
+            // capacity covers it precisely and the iteration has a pivot.
+            // So: redo the iteration from a fresh factorization, and only
+            // report `Infeasible` when it still holds there (the same
+            // refactor-and-resync the `update_verify` discard path below
+            // performs). Terminating: `refactorize` leaves
+            // `update_count() == 0`, so a second visit with no committed
+            // pivot in between falls straight through to the report.
+            if lu.update_count() > 0 {
+                if profile_phases {
+                    prof_phases::REFACTOR_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    prof_phases::REFACTOR_CAUSE_INFEAS_CHECK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                timed!(profile_phases, prof_phases::REFACTOR, {
+                    lu = refactorize(std, &basis_pos)?;
+                    let (fresh_base, fresh_slope) = compute_rhs_affine(std, &cache, &nb_status)?;
+                    lu.solve_into(&fresh_base, &mut lu_scratch, &mut x_b_base);
+                    lu.solve_into(&fresh_slope, &mut lu_scratch, &mut x_b_slope);
+                    infeasible_rows.rebuild(m, |i| row_infeasible_affine(&cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i));
+                    fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fd_cb, &mut lu_scratch, &mut fd_y, &mut d);
+                    if dse_refresh_on_refactor {
+                        if let super::EdgeWeights::Dse(dse) = &mut weights {
+                            *dse = super::DseState::from_basis(m, &lu);
+                        }
+                    }
+                });
                 continue;
             }
             // Genuine mathematical conclusion (Proposition 4.6, the
@@ -2340,7 +2462,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                     break;
                 };
                 let new_cum = cum.add(width.scale(cand.hat_alpha.abs()));
-                if w_r.cmp_lex(&new_cum) != std::cmp::Ordering::Greater {
+                if bfrt_reached(w_r, new_cum, x_b_base[r]) {
                     k_star = Some(idx);
                     break;
                 }
@@ -2353,6 +2475,31 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 touched[j] = false;
             }
             touched_cols.clear();
+            // Same guard as the `Eligible = empty` site above, for the
+            // same reason (see its own docs): an `Infeasible` conclusion
+            // drawn at `1e-9` from a factorization this loop lets drift to
+            // `1e-4` is not a conclusion. This is the site `greenbea`
+            // actually reached (`site=bfrt_exhausted`, iteration 4715).
+            if lu.update_count() > 0 {
+                if profile_phases {
+                    prof_phases::REFACTOR_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    prof_phases::REFACTOR_CAUSE_INFEAS_CHECK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                timed!(profile_phases, prof_phases::REFACTOR, {
+                    lu = refactorize(std, &basis_pos)?;
+                    let (fresh_base, fresh_slope) = compute_rhs_affine(std, &cache, &nb_status)?;
+                    lu.solve_into(&fresh_base, &mut lu_scratch, &mut x_b_base);
+                    lu.solve_into(&fresh_slope, &mut lu_scratch, &mut x_b_slope);
+                    infeasible_rows.rebuild(m, |i| row_infeasible_affine(&cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i));
+                    fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fd_cb, &mut lu_scratch, &mut fd_y, &mut d);
+                    if dse_refresh_on_refactor {
+                        if let super::EdgeWeights::Dse(dse) = &mut weights {
+                            *dse = super::DseState::from_basis(m, &lu);
+                        }
+                    }
+                });
+                continue;
+            }
             // Every eligible column fully flipped and still short:
             // Proposition 4.6(ii) — genuine, reported directly.
             if std::env::var("ENOMOTO_DEBUG_EXT_INFEASIBLE").is_ok() {
@@ -2818,15 +2965,40 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         // every-iteration stall trigger) never comes close to a static
         // infeasible count for anywhere near this many consecutive
         // iterations across its own ~2900-iteration main phase.
+        // Measured against the best (smallest) infeasible count seen so
+        // far, not against the previous iteration's: an exact-equality
+        // test is defeated by a stall that merely *oscillates*. Netlib
+        // `greenbea` does exactly that — past iteration ~8000 its count
+        // alternates between 248 and 249 (two variables trading places on
+        // a single row, `analysis/greenbea_20260921_021218.md` §4), which
+        // resets an equality-based counter every second iteration and let
+        // the solve burn its remaining ~12,000 iterations with
+        // `bland_mode` never latching. "No new best in
+        // `infeasible_plateau_limit` iterations" catches both that and the
+        // literally-static `pilot4` plateau this check was written for,
+        // and is still reset by any genuine progress.
         let infeasible_len = infeasible_rows.rows.len();
-        if infeasible_len == last_infeasible_len {
+        let made_infeasible_progress = infeasible_len < best_infeasible_len;
+        if made_infeasible_progress {
+            best_infeasible_len = infeasible_len;
+        }
+        // `remaining_m_side` progress also counts (see its own
+        // `best_remaining_m_side` docs above) — a solve can keep steadily
+        // resolving M-side columns while the infeasible-row *count*'s
+        // minimum sits unbeaten simply because that set is churning
+        // (Netlib `dfl001`), and treating that as a stall latches
+        // `bland_mode` on a solve that was never stuck.
+        let made_m_side_progress = remaining_m_side < best_remaining_m_side;
+        if made_m_side_progress {
+            best_remaining_m_side = remaining_m_side;
+        }
+        if made_infeasible_progress || made_m_side_progress {
+            infeasible_plateau_count = 0;
+        } else {
             infeasible_plateau_count += 1;
             if infeasible_plateau_count > infeasible_plateau_limit {
                 bland_mode = true;
             }
-        } else {
-            last_infeasible_len = infeasible_len;
-            infeasible_plateau_count = 0;
         }
 
         let leaving_var = basis[r];
@@ -3044,14 +3216,14 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
 
     }
 
-    // `MAX_ITERS` exceeded without reaching Step III — `None` (fall back
+    // `max_iters` exceeded without reaching Step III — `None` (fall back
     // to the classical `BIG_M` path) rather than a false `Infeasible`.
     if profile_phases {
         prof_phases::report(wall_t0.elapsed().as_nanos() as usize);
     }
     if std::env::var("ENOMOTO_DEBUG_EXT_ITERS").is_ok() {
         eprintln!(
-            "DEBUG_EXT_BAILOUT: MAX_ITERS exhausted bland_mode={bland_mode} stall_count={stall_count} remaining_m_side={remaining_m_side} n_m_flagged={}",
+            "DEBUG_EXT_BAILOUT: max_iters={max_iters} exhausted bland_mode={bland_mode} stall_count={stall_count} remaining_m_side={remaining_m_side} n_m_flagged={}",
             m_flagged_cols.len()
         );
     }
@@ -3359,7 +3531,76 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
                 let obj: f64 = (0..n_total).map(|j| std.c[j] * x[j]).sum();
                 eprintln!("DEBUG_EXT: polish_iters={_iter} bland_mode={bland_mode} obj={obj}");
             }
-            return Some(SimplexResult { status: Status::Optimal, x: Some(x) });
+            // Primal feasible against this phase's own *perturbed* costs
+            // (`active_cost`, set at this function's entry) -- dual
+            // feasibility held throughout by the loop invariant above, so
+            // this point is optimal for the perturbed problem. Whether it
+            // is *also* optimal for the true problem depends on whether
+            // perturbation happened to mask a genuine dual infeasibility:
+            // ported from `super::solve_lp_dual_on`'s own identical check
+            // (that function's own docs) -- this phase never had it, and
+            // the gap is not hypothetical: measured directly on Netlib
+            // `greenbea`, the unperturbed check below fails and this
+            // phase's own perturbed-optimal point is off by 92808 in
+            // objective (0.13%) from the true optimum
+            // (`analysis/greenbea_20260921_030127.md`, mechanism (B)).
+            let mut true_d = vec![0.0f64; n_total];
+            {
+                let c_b: Vec<f64> = basis.iter().map(|&bv| std.c[bv]).collect();
+                let mut y = vec![0.0f64; m];
+                lu.solve_transpose_into(&c_b, &mut lu_scratch, &mut y);
+                for j in 0..n_total {
+                    let mut dj = std.c[j];
+                    for &(i, v) in std.cols.row(j) {
+                        dj -= v * y[i];
+                    }
+                    true_d[j] = dj;
+                }
+            }
+            let true_dual_feasible = (0..n_total).all(|j| match nb_status[j] {
+                None => true,
+                Some(NbStatus::Lower) => true_d[j] >= -TOL,
+                Some(NbStatus::Upper) => true_d[j] <= TOL,
+            });
+            if true_dual_feasible {
+                return Some(SimplexResult { status: Status::Optimal, x: Some(x) });
+            }
+            // Perturbation masked a genuine dual infeasibility: this basis
+            // is primal feasible (feasibility never depended on costs) but
+            // not dual feasible for the true costs. Finishing from here
+            // needs the primal method's own invariant (primal feasibility
+            // preserved, working toward dual feasibility) instead of this
+            // phase's dual one -- exactly `super::run_phase`'s phase 2,
+            // reused directly rather than reimplemented: every nonbasic
+            // column here already sits at a *finite* side (the cleanup
+            // lemma's own guarantee, `finish`'s docs above), the same
+            // situation every `<=`-row slack is already in in the
+            // classical path this was written for, so it needs no special
+            // handling for this module's own genuinely-infinite bounds.
+            // `expand`/`se` start fresh rather than mid-sequence
+            // (unrelated quantities to this phase's own dual state;
+            // `solve_lp_dual_on`'s own identical handoff confirms this only
+            // costs pricing quality, not correctness).
+            let mut t = super::Tableau { std, basis: basis.to_vec(), basis_pos: basis_pos.to_vec(), nb_status: nb_status.to_vec(), x };
+            let mut expand = super::ExpandState::new();
+            let mut se = super::SteepestEdgeState::new(std);
+            let mut stall = super::PrimalStallState::new();
+            if std::env::var("ENOMOTO_DEBUG_EXT_ITERS").is_ok() {
+                eprintln!("DEBUG_EXT: polish DUAL->PRIMAL cleanup handoff at polish_iter={_iter}");
+            }
+            // Unlike `solve_lp_dual_on`'s identical handoff, a singular
+            // basis here does *not* fall back to a from-scratch classical
+            // solve: `solve_lp_on`/`Tableau::new` assume every structural
+            // column has a finite bound (their own docs), which this
+            // module exists specifically to handle when false -- so `None`
+            // is propagated to this function's own caller instead, which
+            // already knows how to fall back (the existing `BIG_M`-clamped
+            // classical path in `solve_lp_dual`) without that assumption.
+            let status = super::run_phase(std, &mut t, false, &mut lu, &mut since_check, &mut expand, &mut se, &mut stall)?;
+            return Some(SimplexResult {
+                status: status.clone(),
+                x: if status == Status::Optimal { Some(t.x[0..t.n_orig()].to_vec()) } else { None },
+            });
         };
 
         // Captures `e_tilde_buf` for this iteration's own
