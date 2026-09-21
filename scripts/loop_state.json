@@ -1,5 +1,5 @@
 {
-  "loop_iteration_count": 5,
+  "loop_iteration_count": 7,
   "problems": {
     "degen3": {
       "consecutive_failures": 0,
@@ -9,10 +9,10 @@
     },
     "greenbea": {
       "consecutive_failures": 0,
-      "attempts": 4,
+      "attempts": 6,
       "last_result": "improved",
-      "last_attempt_at": "2026-09-21T08:07:56Z",
-      "note": "反復#5。runtime段(93問題中最悪、ours/highs比 11.4-11.6x)で再選定。起点はPR #6(反復#4のresidual_norm_affine統合、本反復の作業開始後に人間がmainへマージ済み)。fable-bottleneck-analystの再プロファイリング(analysis/greenbea_20260921_074737.md)で新たに2箇所を特定: (1) dドリフト検査が測る残差は、PRICEが対象外にする固定列(lb==ub、等式スラック1,549本)のd[j]未更新分がほぼ全てで真のドリフトは無視できる水準(固定列除外後の相対残差は最大1e-9未満)。残差計算で固定列を除外し、頻度もx_B(M)検査の20回に1回(RESIDUAL_CHECK_MULTIPLIER、古典経路simplex.rsと同cadence)に削減。93問題スイープでの発火は80bau3bの1回のみでそれも同じ偽陽性。(2) chuzc1の候補ソートは直後のBFRT走査が平均0.5件しか消費しないのに毎反復全候補をsort_byしていた。古典経路が既に使うBinaryHeap<Reverse<Cand>>による遅延プレフィックス方式を移植。いずれも全順序を変えない設計でピボット経路・目的関数値はビット一致(-72555248.12985753、反復#4と同一)。greenbea: 同一環境内の前後比較で3.45s→3.03s(約12%短縮、highs比~11.7x→~10.2x)。93問題全数でours_status/ours_objの変化なし。通しベンチマークでは環境ノイズにより小問題6件で見かけ上10%超の増減が出たが、run_ours.pyで直接5回反復計測してbefore/after実質差なし(サブプロセス起動オーバーヘッド由来)と確認。dfl001のbefore測定での60秒タイムアウトも同一コードの別測定(記録37秒、本反復ビルドで43秒、いずれも最適解)と整合する環境ノイズで、今回の変更とは無関係。コード修正はPR #7(未マージ、PR #6のコミットを含む)。分析: analysis/greenbea_20260921_074737.md。"
+      "last_attempt_at": "2026-09-21T09:52:21Z",
+      "note": "反復#7。runtime段(93問題中最悪、ours/highs比 ~9.7x)で再選定(6回目)。事実訂正: 反復#6のPR #9は「未マージ」と記録していたが実際はマージ済み(merged_at 2026-09-21T09:00:40Z、マージコミット418e62a)。作業開始時にgit fetch/pullでこれを検出し、418e62aを起点に取り直した。fable-bottleneck-analystのプロファイリング(analysis/greenbea_20260921_090812.md)で、FtLu::u_transpose_solve_into(BTRANのU^T段、lu.rs)が呼び出しごとにu_seqの全eta(greenbeaでは2,056本)を無条件走査しているが、処理後に非零になるetaは平均64本(3.1%)のみと判明。既存のrow_owners逆索引を使い、エポックスタンプ式の「必要」フラグを立てながら1パスで走査する変更(u_transpose_solve_into単独、FtLuにRefCellスクラッチ追加)を実装。入力seedの非零と処理済みetaのrow_owners連鎖でフラグが広がるため別途DFSは不要(u_solve_into側のDFS版が退行し撤回された経緯とは異なる)。訪問しないetaはゼロの符号のみが変わり下流は非零/ゼロ判定のみを見るため無害、ピボット選択・目的関数値を一切変えないpath-preservingな変更。greenbea: ours_time 2.94s→2.80s(このコンテナ内、同一環境4回平均、約4.9%短縮)、目的関数値ビット一致(-72555248.12985753)。93問題全数でours_status/ours_objの変化なし、エントリ数93確認済み(jq/python-c)。素の1回計測でafiro/capri/wood1pが>10%の時間差を示したがいずれもsub-20msの極小問題での測定ノイズと複数回再実行で確認(再現せず)、実退行ではない。greenbea含む25問題で2%超の改善。コード修正はPR #10(未マージ)。分析: analysis/greenbea_20260921_090812.md。フォローアップ(未対応、反復#6から継続): BIG_Mフォールバック(simplex.rs:2972-3000)がピボット順序や再分解タイミングに依存して誤ったinfeasible判定・誤った最適値を生みうるリスクは未解消。今回の修正はピボット順序・再分解タイミングを一切変えないためこのリスクを踏んでいないが、今後ピボット順序や再分解頻度に触れる変更(反復#7分析§6-3/6-4で挙がったfactorize定数削減やsynthetic clock型再分解など)の前に、BIG_Mクランプがアクティブな状態でoptimalを返さない安全策と、特異基底時にrefactorizeがpivotを取り消す対応を先に入れることを推奨する。"
     },
     "dfl001": {
       "consecutive_failures": 0,
