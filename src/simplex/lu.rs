@@ -175,6 +175,18 @@ struct MarkowitzState {
     // (via col_rows) — the threshold-pivoting stability reference.
     col_max_abs: Vec<f64>,
 
+    // `col_max_abs_dirty[j]`: `refresh_column` marked `col_max_abs[j]`
+    // stale (its `col_rows[j]` membership or values changed) but hasn't
+    // recomputed it yet — deferred to `ensure_col_max_abs`, called only
+    // once `find_best_pivot` is actually about to read it. Most columns
+    // `eliminate` dirties this way get dirtied again by a later
+    // elimination step before `find_best_pivot` ever visits them (a
+    // column's bucket position, which *is* updated eagerly by
+    // `update_col_degree`, is what determines when that happens), so
+    // eagerly recomputing every dirtied column's max here was mostly
+    // wasted work — up to 75% of it, measured on Netlib `greenbea`.
+    col_max_abs_dirty: Vec<bool>,
+
     /// `initially_dense[j]` iff column `j`'s degree *before any
     /// elimination* exceeded `DENSE_COL_FRACTION * m` — fixed at
     /// construction time and never updated, deliberately: a truly dense
@@ -259,6 +271,7 @@ impl MarkowitzState {
             col_used: vec![false; m],
             row_used: vec![false; m],
             col_max_abs,
+            col_max_abs_dirty: vec![false; m],
             initially_dense,
         }
     }
@@ -317,17 +330,32 @@ impl MarkowitzState {
         self.row_buckets[new_deg].push_back(i);
     }
 
-    /// Recomputes `col_max_abs[j]` and its degree/bucket placement from
-    /// its current `col_rows[j]` membership — O(that column's own active
-    /// degree), never O(m).
+    /// Updates `j`'s degree/bucket placement from its current
+    /// `col_rows[j]` membership — O(that column's own active degree),
+    /// never O(m) — and marks `col_max_abs[j]` stale rather than
+    /// recomputing it here; see [`Self::ensure_col_max_abs`] and
+    /// `col_max_abs_dirty`'s own docs for why.
     fn refresh_column(&mut self, j: usize) {
         if self.col_used[j] {
             return;
         }
         let new_deg = self.col_rows[j].len();
         self.update_col_degree(j, new_deg);
+        self.col_max_abs_dirty[j] = true;
+    }
+
+    /// Recomputes `col_max_abs[j]` from its current `col_rows[j]`
+    /// membership if `refresh_column` left it marked stale, otherwise a
+    /// no-op — called from `find_best_pivot` right before it reads
+    /// `col_max_abs[j]`, the one place that value's currency actually
+    /// matters.
+    fn ensure_col_max_abs(&mut self, j: usize) {
+        if !self.col_max_abs_dirty[j] {
+            return;
+        }
         self.col_max_abs[j] =
             self.col_rows[j].iter().filter_map(|&i| self.rows[i].get(&j).map(|v| v.abs())).fold(0.0, f64::max);
+        self.col_max_abs_dirty[j] = false;
     }
 
     /// Find best pivot: among still-active columns in ascending-degree
@@ -347,7 +375,7 @@ impl MarkowitzState {
     /// tries this first and only falls back to a second, unrestricted call
     /// if it finds nothing, so a truly-required dense pivot (or a genuinely
     /// singular matrix) is still handled correctly, just not preferred.
-    fn find_best_pivot(&self, skip_dense: bool) -> Option<(usize, usize)> {
+    fn find_best_pivot(&mut self, skip_dense: bool) -> Option<(usize, usize)> {
         let __prof_t0 = std::time::Instant::now();
         PROF_TOTAL_STEPS.fetch_add(1, Ordering::Relaxed);
         let mut best: Option<(usize, usize)> = None;
@@ -355,10 +383,20 @@ impl MarkowitzState {
         let mut best_pivot_abs = 0.0f64;
 
         for deg_col in 1..self.col_buckets.len() {
-            for &j in &self.col_buckets[deg_col] {
+            // Indexed rather than iterated by reference: nothing in this
+            // loop body mutates `col_buckets[deg_col]` itself (bucket
+            // membership only ever changes via `update_col_degree`/
+            // `remove_from_bucket_col`, called elsewhere, never from
+            // inside `find_best_pivot`), so its length and contents are
+            // fixed for this `deg_col`'s scan — indexing just avoids
+            // holding an immutable borrow of `self` across the
+            // `ensure_col_max_abs(j)` call below, which needs `&mut self`.
+            for idx in 0..self.col_buckets[deg_col].len() {
+                let j = self.col_buckets[deg_col][idx];
                 if self.col_used[j] || (skip_dense && self.initially_dense[j]) {
                     continue;
                 }
+                self.ensure_col_max_abs(j);
                 for &i in &self.col_rows[j] {
                     if self.row_used[i] {
                         continue;
