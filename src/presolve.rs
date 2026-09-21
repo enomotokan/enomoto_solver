@@ -521,22 +521,6 @@ pub fn run_extended(
         let mut cur_real_rows = prop.real_rows;
         let mut cur_real_rhs = prop.real_rhs;
 
-        // Equality-row counterpart of the `propagate` call above (see
-        // `propagate::propagate_equalities`'s own docs): only the first two
-        // outer rounds run it, matching the round count that already
-        // captured every forcing row and bound tightening in the 93-problem
-        // measurement (analysis/greenbea_20260921_230908.md §7.1) — later
-        // rounds found nothing further (no new forcing rows) but still paid
-        // for the full-matrix scan, and on `pilot87` running it through a
-        // third round pushed the extended dual simplex onto a rarer,
-        // singular-basis code path.
-        if _round_idx < 1 {
-            let eq = timed_step!("eqprop", propagate::propagate_equalities(&a, &b, &mut lb, &mut ub, prop_passes));
-            if eq.infeasible {
-                return extended_infeasible(sc, a, b, c, n);
-            }
-        }
-
         let fixes = timed_step!("dualfix", dualfix::fix_dominated_variables(n, &a, &cur_real_rows, &c, &lb, &ub));
         for &(j, value) in &fixes {
             lb[j] = value;
@@ -612,6 +596,36 @@ pub fn run_extended(
                     cur_real_rows = kept_rows;
                     cur_real_rhs = kept_rhs;
                 }
+            }
+        }
+
+        // Equality-row counterpart of the `propagate` call above (see
+        // `propagate::propagate_equalities`'s own docs): only the first
+        // outer round runs it, matching the round count that already
+        // captured every forcing row and bound tightening in the 93-problem
+        // measurement (analysis/greenbea_20260921_230908.md §7.1) — later
+        // rounds found nothing further (no new forcing rows) but still paid
+        // for the full-matrix scan, and on `pilot87` running it through a
+        // third round pushed the extended dual simplex onto a rarer,
+        // singular-basis code path.
+        //
+        // Deliberately run *after* `dualpropagate` just above, not right
+        // after `propagate` at the top of this round: `dualpropagate`'s own
+        // "literal `+inf`" trigger (see its own docs) is only sound while a
+        // column's bound really is unreachable, and this pass's whole job
+        // is to hand out genuine finite bounds from the equality system —
+        // running it first would quietly disarm `dualpropagate`'s reduction
+        // for every column it newly bounds, for the wrong reason (a bound
+        // that only just became reachable, not one `dualpropagate` itself
+        // used and lost). Ordering it last instead means every earlier
+        // pass in this round still sees exactly the same bounds it would
+        // without this pass existing at all, and only the bounds this pass
+        // itself produces are new this round for anything downstream
+        // (`foldfixed` right below, then next round's own `propagate`).
+        if _round_idx < 1 {
+            let eq = timed_step!("eqprop", propagate::propagate_equalities(&a, &b, &mut lb, &mut ub, prop_passes));
+            if eq.infeasible {
+                return extended_infeasible(sc, a, b, c, n);
             }
         }
 
