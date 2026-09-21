@@ -27,6 +27,15 @@ EMPS_C_URL = "https://www.netlib.org/lp/data/emps.c"
 # outright rather than attempted and reported as failures every run.
 NON_MPS_ENTRIES = {"minos", "stocfor3", "truss", "ascii", "changes", "readme"}
 
+# The rest of the index's non-problem entries are recognizable by suffix:
+# the decompressor's own sources (`emps.c`, `emps.f`), archives
+# (`emps.exe.gz`, `nams.ps.gz`), `mpc.src`, and superseded copies
+# (`stocfor3.old`). Matched by suffix rather than listed by name so a new
+# file of the same kind doesn't silently become a "problem" that fails to
+# decompress. Real problem names that merely look extension-like
+# (`pilot.ja`, `pilot.we`, `vtp.base`) are unaffected.
+NON_PROBLEM_SUFFIXES = (".c", ".f", ".gz", ".z", ".src", ".old", ".html", ".ps", ".pdf", ".txt")
+
 
 class NetlibCacheError(RuntimeError):
     """Needed Netlib data isn't cached and network access is disabled for
@@ -71,8 +80,17 @@ def ensure_problem_list(cache_dir: Path, *, network: bool) -> list[str]:
         raise NetlibCacheError(f"{list_path} not found — run `python scripts/setup_netlib_data.py` once to fetch it")
     index = cache_dir / "index.html"
     fetch(NETLIB_INDEX_URL, index)
-    names = sorted(set(re.findall(r'<a href="([a-z0-9_]+)">', index.read_text(errors="replace"))))
-    names = [n for n in names if n not in NON_MPS_ENTRIES]
+    # Problem names are not restricted to `[a-z0-9_]`: Netlib's own set
+    # includes `gfrd-pnc`, `maros-r7`, `pilot.ja`, `pilot.we` and
+    # `vtp.base`, so dots and hyphens have to be accepted here and the
+    # non-problem entries filtered out explicitly instead (links into
+    # subdirectories such as `kennington/` are skipped outright).
+    hrefs = sorted(set(re.findall(r'<a href="([^"]+)">', index.read_text(errors="replace"))))
+    names = [
+        n
+        for n in hrefs
+        if "/" not in n and not n.lower().endswith(NON_PROBLEM_SUFFIXES) and n not in NON_MPS_ENTRIES
+    ]
     list_path.write_text("\n".join(names))
     return names
 
