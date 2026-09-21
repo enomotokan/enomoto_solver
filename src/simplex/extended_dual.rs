@@ -666,6 +666,81 @@ fn snap_slopes(v: &mut [f64]) {
     }
 }
 
+/// Minimum `|alpha|` this module will actually commit a pivot on for an
+/// `M`-flagged BFRT candidate, once Harris pass 2's own window search
+/// (its call site's own docs) has already looked for a better-conditioned
+/// alternative and found none within the current ratio class. Reuses
+/// `super::FT_MIN_PIVOT` (`1e-7`) rather than inventing a fresh number:
+/// that is already this crate's one existing answer to "how small a pivot
+/// is too small to trust a Forrest-Tomlin update on" (`try_update`/
+/// `try_update_precomputed`'s own floor, `simplex.rs`), so reusing it here
+/// keeps this module's own notion of "too small a pivot" a single source
+/// of truth rather than a second, independently-tuned threshold. Two
+/// orders of magnitude above the bare candidate-inclusion floor
+/// (`super::TOL`, `1e-9`, `simplex.rs:139`) — comfortably below any of the
+/// genuinely small-but-legitimate pivots this module's own history has had
+/// to accommodate (Netlib `bnl1`'s persistent `~3.3e-3` pivot chief among
+/// them), and comfortably above the `~1e-8`-magnitude candidates
+/// `greenbea` iter 6650 needed 22 of just to nudge a noise-scale row slope
+/// across its own comparison tolerance.
+const BFRT_M_PIVOT_FLOOR: f64 = super::FT_MIN_PIVOT;
+
+/// Reference tolerance for [`dual_infeasible_cols`], [`solve_lp_dual_extended`]'s
+/// own dual-feasibility safety net at its two `Infeasible` call sites
+/// (their own docs). Matches `ENOMOTO_DEBUG_EXT_INFEASIBLE`'s own
+/// pre-existing `dual_violations` diagnostic printed at those same sites
+/// (`1e-6`), reused rather than duplicated so the two report the identical
+/// set of columns.
+const DUAL_FEAS_SAFETY_TOL: f64 = 1e-6;
+
+/// How many times the dual-feasibility safety net (below) will attempt a
+/// repair-and-retry before giving up and reporting `Infeasible` after all —
+/// see [`solve_lp_dual_extended`]'s own `dual_repair_attempts` docs for why
+/// this is bounded rather than unconditional.
+const DUAL_REPAIR_MAX_ATTEMPTS: usize = 8;
+
+/// Every non-fixed (`lb != ub`) nonbasic column whose current status
+/// contradicts its own reduced cost's sign (`Lower` with `d[j]` negative
+/// enough to want to increase, or `Upper` with `d[j]` positive enough to
+/// want to decrease) — i.e. every genuine dual-feasibility violation in the
+/// current `nb_status`/`d`. A fixed column (`lb[j] == ub[j]`) is excluded:
+/// it is nonbasic at a bound that is simultaneously its lower *and* upper
+/// bound, so `d[j]`'s sign carries no information about which "side" it is
+/// meant to be nonbasic at (both answers are the identical point) and can
+/// never be a real violation — the same exclusion this loop's own
+/// `ENOMOTO_DEBUG_EXT_DUAL_CHECK` diagnostic and
+/// `analysis/greenbea_20260921_205039.md`'s own instrumentation both use.
+///
+/// [`solve_lp_dual_extended`]'s own main loop is meant to hold every
+/// non-fixed nonbasic column dual-feasible at all times outside of a
+/// pivot's own in-flight BFRT-flip/commit sequence — a violation surviving
+/// to either of this function's two call sites (right before concluding
+/// `Infeasible`) is a signal the loop reached a corrupted intermediate
+/// state, not a legitimate input for Proposition 4.6's own reasoning
+/// (which assumes dual feasibility as a precondition). Confirmed as the
+/// actual root cause of a real false `Infeasible` on a Netlib instance
+/// (`analysis/greenbea_20260921_205039.md` §3.1's `cost` presolve variant,
+/// `site=eligible_empty`, 737 violated columns) before the BFRT-flip-
+/// rollback fix above existed — this check exists as a backstop against
+/// that same failure mode recurring by some other, not-yet-seen route.
+fn dual_infeasible_cols(std: &StdForm, nb_status: &[Option<NbStatus>], d: &[f64]) -> Vec<usize> {
+    let mut out = Vec::new();
+    for j in 0..std.n_total {
+        if std.lb[j] == std.ub[j] {
+            continue;
+        }
+        let Some(status) = nb_status[j] else { continue };
+        let bad = match status {
+            NbStatus::Lower => d[j] < -DUAL_FEAS_SAFETY_TOL,
+            NbStatus::Upper => d[j] > DUAL_FEAS_SAFETY_TOL,
+        };
+        if bad {
+            out.push(j);
+        }
+    }
+    out
+}
+
 /// `base + slope * M`, for a conceptual, never-numerically-substituted
 /// `M -> +infinity`. See this module's own docs for why comparisons never
 /// plug in a concrete `M`.
@@ -2193,6 +2268,16 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     let ban_discarded_candidates = true;
     let mut discard_row: Option<usize> = None;
     let mut discard_banned_cols: Vec<usize> = Vec::new();
+    // Defense-in-depth counter for the dual-feasibility safety net at this
+    // loop's own two `Infeasible` call sites (their own docs) — bounds how
+    // many times that net will attempt a repair-and-retry before giving up
+    // and reporting `Infeasible` after all, so a genuine, persistent
+    // corruption the repair cannot actually clear degrades to a correct
+    // report rather than an infinite loop. Expected to stay `0` for the
+    // entire solve now that the BFRT-flip-rollback fix above exists (this
+    // net is a backstop for exactly the corrupted state that fix
+    // eliminates, not a mechanism this loop is meant to lean on routinely).
+    let mut dual_repair_attempts: usize = 0;
     let mut prev_pool_len: Option<usize> = None;
     let max_iters = super::max_iters_for(m, n_total);
     for _iter in 0..max_iters {
@@ -2580,6 +2665,53 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 }
                 eprintln!("  total dual_feasibility_violations={dual_violations} (out of nonbasic columns)");
             }
+            // Dual-feasibility safety net (`dual_infeasible_cols`'s own
+            // docs) — always checked, not just under the debug env var
+            // above: a genuine Proposition 4.6 `Eligible = empty`
+            // conclusion requires dual feasibility as a precondition, so a
+            // violation surviving to here means this is a corrupted
+            // intermediate state, not a real infeasibility, regardless of
+            // whether anyone happens to be running with
+            // `ENOMOTO_DEBUG_EXT_INFEASIBLE` set.
+            let dual_bad = dual_infeasible_cols(std, &nb_status, &d);
+            if !dual_bad.is_empty() && dual_repair_attempts < DUAL_REPAIR_MAX_ATTEMPTS {
+                dual_repair_attempts += 1;
+                if cfg!(debug_assertions) || std::env::var("ENOMOTO_DEBUG_EXT_INFEASIBLE").is_ok() {
+                    eprintln!(
+                        "WARNING: solve_lp_dual_extended site=eligible_empty iter={_iter} found {} dual-infeasible nonbasic column(s) before concluding Infeasible (attempt {}/{}) — repairing instead of reporting a false Infeasible",
+                        dual_bad.len(), dual_repair_attempts, DUAL_REPAIR_MAX_ATTEMPTS
+                    );
+                }
+                for &j in &dual_bad {
+                    let cur = nb_status[j].unwrap();
+                    let (new_status, side_ok) = match cur {
+                        NbStatus::Lower => (NbStatus::Upper, cache.upper[j].is_some()),
+                        NbStatus::Upper => (NbStatus::Lower, cache.lower[j].is_some()),
+                    };
+                    if side_ok {
+                        nb_status[j] = Some(new_status);
+                    }
+                }
+                if profile_phases {
+                    prof_phases::REFACTOR_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    prof_phases::REFACTOR_CAUSE_INFEAS_CHECK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                timed!(profile_phases, prof_phases::REFACTOR, {
+                    lu = refactorize(std, &basis_pos)?;
+                    let (fresh_base, fresh_slope) = compute_rhs_affine(std, &cache, &nb_status)?;
+                    lu.solve_into(&fresh_base, &mut lu_scratch, &mut x_b_base);
+                    lu.solve_into(&fresh_slope, &mut lu_scratch, &mut x_b_slope);
+                    snap_slopes(&mut x_b_slope);
+                    infeasible_rows.rebuild(m, |i| row_infeasible_affine(&cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i));
+                    fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fd_cb, &mut lu_scratch, &mut fd_y, &mut d);
+                    if dse_refresh_on_refactor {
+                        if let super::EdgeWeights::Dse(dse) = &mut weights {
+                            *dse = super::DseState::from_basis(m, &lu);
+                        }
+                    }
+                });
+                continue;
+            }
             if profile_phases {
                 prof_phases::report(wall_t0.elapsed().as_nanos() as usize);
             }
@@ -2710,6 +2842,49 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                     basis[r], w_r.base, w_r.slope, n_candidates, cum.base, cum.slope
                 );
             }
+            // Same dual-feasibility safety net as the `eligible_empty`
+            // site above, for the identical reason (see
+            // `dual_infeasible_cols`'s own docs) — Proposition 4.6(ii)
+            // likewise assumes dual feasibility as a precondition.
+            let dual_bad = dual_infeasible_cols(std, &nb_status, &d);
+            if !dual_bad.is_empty() && dual_repair_attempts < DUAL_REPAIR_MAX_ATTEMPTS {
+                dual_repair_attempts += 1;
+                if cfg!(debug_assertions) || std::env::var("ENOMOTO_DEBUG_EXT_INFEASIBLE").is_ok() {
+                    eprintln!(
+                        "WARNING: solve_lp_dual_extended site=bfrt_exhausted iter={_iter} found {} dual-infeasible nonbasic column(s) before concluding Infeasible (attempt {}/{}) — repairing instead of reporting a false Infeasible",
+                        dual_bad.len(), dual_repair_attempts, DUAL_REPAIR_MAX_ATTEMPTS
+                    );
+                }
+                for &j in &dual_bad {
+                    let cur = nb_status[j].unwrap();
+                    let (new_status, side_ok) = match cur {
+                        NbStatus::Lower => (NbStatus::Upper, cache.upper[j].is_some()),
+                        NbStatus::Upper => (NbStatus::Lower, cache.lower[j].is_some()),
+                    };
+                    if side_ok {
+                        nb_status[j] = Some(new_status);
+                    }
+                }
+                if profile_phases {
+                    prof_phases::REFACTOR_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    prof_phases::REFACTOR_CAUSE_INFEAS_CHECK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                timed!(profile_phases, prof_phases::REFACTOR, {
+                    lu = refactorize(std, &basis_pos)?;
+                    let (fresh_base, fresh_slope) = compute_rhs_affine(std, &cache, &nb_status)?;
+                    lu.solve_into(&fresh_base, &mut lu_scratch, &mut x_b_base);
+                    lu.solve_into(&fresh_slope, &mut lu_scratch, &mut x_b_slope);
+                    snap_slopes(&mut x_b_slope);
+                    infeasible_rows.rebuild(m, |i| row_infeasible_affine(&cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i));
+                    fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fd_cb, &mut lu_scratch, &mut fd_y, &mut d);
+                    if dse_refresh_on_refactor {
+                        if let super::EdgeWeights::Dse(dse) = &mut weights {
+                            *dse = super::DseState::from_basis(m, &lu);
+                        }
+                    }
+                });
+                continue;
+            }
             if profile_phases {
                 prof_phases::report(wall_t0.elapsed().as_nanos() as usize);
             }
@@ -2736,13 +2911,13 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         // deliberately reuses the same flat, narrow window that one, not
         // either reverted alternative.
         let mut best_idx = k_star;
+        let mut best_abs = sorted[k_star].hat_alpha.abs();
         timed!(profile_phases, prof_phases::BFRT, {
             let min_ratio = sorted[k_star].ratio - super::HARRIS_RATIO_TOL;
             let mut window_start = k_star;
             while window_start > 0 && sorted[window_start - 1].ratio >= min_ratio {
                 window_start -= 1;
             }
-            let mut best_abs = sorted[k_star].hat_alpha.abs();
             for (idx, cand) in sorted.iter().enumerate().take(k_star + 1).skip(window_start) {
                 let abs_a = cand.hat_alpha.abs();
                 if abs_a > best_abs {
@@ -2768,6 +2943,74 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 }
             }
         });
+        // Tiny-`M`-width-pivot guard (`BFRT_M_PIVOT_FLOOR`'s own docs): the
+        // Harris window just searched holds every candidate within
+        // `HARRIS_RATIO_TOL` of `k_star`'s own ratio, and `best_idx`/
+        // `best_abs` is the *largest*-magnitude pivot available anywhere in
+        // it — so if that best-available pivot is still below the floor
+        // *and* it only entered the candidate pool via its `M`-flagged side
+        // (a plain finite-bounded candidate never needs this), every
+        // candidate in this window is an equally-untrustworthy sub-floor
+        // `M`-side pivot: there is no better choice to fall back to within
+        // this row's own current ratio class. Rather than pivot on it
+        // anyway (Netlib `greenbea` iter 6650: `alpha_q = -1.54e-8`, a
+        // `d_q/alpha_q` ratio of `~1e15`), treat this row's own stored
+        // `x_B(M)` slope as accumulated Forrest-Tomlin noise — exactly
+        // [`snap_slope`]'s own job, just not reached by its fixed
+        // `X_B_SLOPE_NOISE` floor here (confirmed on `greenbea`: the
+        // triggering row's own slope read `1.67e-7`, barely above
+        // `X_B_SLOPE_NOISE`'s `1e-7`) — and abandon this row's pivot
+        // attempt for the current iteration, letting chuzr re-select fresh.
+        // Snaps the *stored* `x_b_slope[r]` itself, not merely a local
+        // comparison value: a comparison-only tolerance bump was tried in a
+        // prior iteration of this same self-improvement loop and produced a
+        // new period-2 cycle (`snap_slope`'s own value is read from many
+        // places downstream of this point — `row_deviation`, `chuzr`'s own
+        // `Score2`, the next iteration's own `x_r` — a local-only tweak
+        // left all of those still seeing the untouched noise). No LU state
+        // changes here (no pivot was ever committed), so — unlike the
+        // discard branch below — this needs no refactorize, just the same
+        // `InfeasibleRows`/PRICE-buffer resync every other early-`continue`
+        // in this loop already performs.
+        //
+        // Gated on `w_r.slope != 0.0` (and bounded above by
+        // `XB_DRIFT_TOL_MAX`, `1e-4` — the same "acceptable Forrest-Tomlin
+        // drift" scale this module already trusts elsewhere) so this only
+        // ever fires on a row whose *own* deviation genuinely has a small
+        // nonzero slope component to begin with — snapping it to zero is
+        // then a real, bounded correction. Without the `w_r.slope != 0.0`
+        // guard this livelocked on Netlib `greenbea` row 833: that row's
+        // own `w_r` was already `(2.0e-7, 0.0)` — a pure, tiny *base*
+        // deviation with a genuinely single eligible entering candidate
+        // (`n_sorted == 1`), whose own `M`-flagged width just happens to
+        // have `alpha` below the floor. There `w_r.slope` was never
+        // nonzero, so there was nothing to "snap": the fix zeroed an
+        // already-zero slope, changed nothing, chuzr reselected the same
+        // row with the same single candidate, forever. That row's own tiny
+        // pivot is not this guard's problem to solve — it is a genuinely
+        // unavoidable choice with no alternative, not `M`-side noise, so
+        // this guard now leaves it alone and lets the ordinary pivot path
+        // take it.
+        if best_abs < BFRT_M_PIVOT_FLOOR
+            && matches!(cache.width[sorted[best_idx].j], Some(w) if w.slope != 0.0)
+            && w_r.slope != 0.0
+            && w_r.slope.abs() < XB_DRIFT_TOL_MAX
+        {
+            x_b_slope[r] = 0.0;
+            infeasible_rows.set(r, row_infeasible_affine(&cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, r));
+            if std::env::var("ENOMOTO_DEBUG_D_DRIFT_EXT").is_ok() {
+                eprintln!(
+                    "DEBUG_D_DRIFT: TINY_M_PIVOT_SNAP at iter={_iter} r={r} best_abs={best_abs} best_idx_j={} w_r_slope_before={}",
+                    sorted[best_idx].j, w_r.slope
+                );
+            }
+            for &j in &touched_cols {
+                a_p[j] = 0.0;
+                touched[j] = false;
+            }
+            touched_cols.clear();
+            continue;
+        }
 
         // BFRT combined-flip (`super::solve_lp_dual_on`'s own "apply every
         // flip's combined effect on the basic variables in a single extra
@@ -2916,11 +3159,28 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         // refactorize, fully resync `x_B(M)`/`InfeasibleRows` against the
         // rebuilt factorization, and let the next pass re-run chuzr/chuzc
         // fresh. The BFRT flips already committed to `nb_status` this same
-        // iteration (if any) are *not* rolled back — `super::solve_lp_dual_on`'s
-        // own reasoning applies unchanged: those are independent,
-        // already-valid degenerate steps, and the resync below recomputes
-        // `x_B(M)` fresh against the (already-flipped) `nb_status` anyway,
-        // so their effect is captured correctly regardless.
+        // iteration (if any) ARE rolled back, right below, before the
+        // refactorize — **not** the no-op the comment here used to claim.
+        // `super::solve_lp_dual_on`'s "independent, already-valid
+        // degenerate steps" reasoning only actually holds for a `ratio ==
+        // 0` candidate (flipping it costs nothing regardless of whether
+        // this iteration's own pivot ever lands); for a candidate flipped
+        // at a strictly positive ratio, the flip's own dual-feasibility
+        // repair is that *same* pivot's dual step — `theta_d` moving `d_j`
+        // back across zero for every earlier-ratio candidate already
+        // flipped. Discarding the pivot without rolling the flip back
+        // leaves that repair undone: the column sits at the flipped
+        // (`M`-side, for an `M`-flagged column) bound with its pre-flip
+        // sign of `d_j` still in force — a real dual-feasibility violation,
+        // not a degenerate no-op. Confirmed as the root cause of a real
+        // regression on Netlib `greenbea` (`analysis/greenbea_20260921_205039.md`
+        // §2): one discarded pivot left 22 flipped columns dual-infeasible
+        // by up to `2.45e7`, and the solve ran ~6,000 extra iterations
+        // recovering from that single corrupted step before this rollback
+        // existed. `x_B(M)` itself needs no separate patch for the
+        // rollback — the resync just below recomputes it fresh via
+        // `compute_rhs_affine(std, &cache, &nb_status)`, against the
+        // now-restored `nb_status`.
         //
         // The `lu.update_count() > 0` gate below (unchanged from the
         // classical method's own copy) exists because right after a
@@ -2936,6 +3196,18 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         // unconditionally re-checking it every iteration reproduced
         // `perold`'s exact old pathology on `bnl1` instead (22s vs `bnl1`'s
         // normal ~0.03s, confirmed via a full 73-problem sweep).
+        //
+        // Narrowed rather than removed for the `discard_row == Some(r)`
+        // case: when this iteration's row `r` is the same row a *previous*
+        // iteration's pivot was just discarded for (still pending — no
+        // pivot has committed for it since, `discard_row`'s own docs), the
+        // retry is re-verified even at `update_count() == 0`, since a
+        // just-refactorized retry choosing another tiny/ill-conditioned
+        // pivot on the very row that just misfired is exactly the failure
+        // mode this whole mechanism exists to catch — `bnl1`'s own
+        // persistent-pivot case never sets `discard_row` in the first place
+        // (its pivot is never discarded), so this narrowing cannot
+        // reproduce `perold`'s old every-iteration-verify pathology there.
         //
         // `pivot_grossly_inconsistent` below is a *second*, much looser
         // check that fires regardless of `update_count`, catching only the
@@ -2978,7 +3250,22 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
             let scale = alpha_q.abs().max(alpha_full[r].abs()).max(1e-300);
             (alpha_q - alpha_full[r]).abs() / scale > D_GROSS_MISMATCH_REL_TOL
         };
-        if pivot_grossly_inconsistent || (!update_verify_disabled && lu.update_count() > 0 && !super::update_verify(alpha_q, alpha_full[r])) {
+        let should_verify_pivot = !update_verify_disabled && (lu.update_count() > 0 || discard_row == Some(r));
+        if pivot_grossly_inconsistent || (should_verify_pivot && !super::update_verify(alpha_q, alpha_full[r])) {
+            // Undo this iteration's own BFRT flips before discarding the
+            // pivot they led up to (see this `if`'s own docs above for
+            // why this is required, not merely conservative). Must happen
+            // before anything below reads `nb_status` — in particular the
+            // `compute_rhs_affine` resync a few lines down, which is what
+            // makes this rollback complete without also having to patch
+            // `x_B(M)` by hand.
+            for cand in &sorted[..best_idx] {
+                let cur = nb_status[cand.j].unwrap();
+                nb_status[cand.j] = Some(match cur {
+                    NbStatus::Lower => NbStatus::Upper,
+                    NbStatus::Upper => NbStatus::Lower,
+                });
+            }
             if std::env::var("ENOMOTO_DEBUG_D_DRIFT_EXT").is_ok() {
                 eprintln!("DEBUG_D_DRIFT: VERIFY_FAIL at iter={_iter} q={q} r={r} alpha_q={alpha_q} alpha_full_r={}", alpha_full[r]);
             }
