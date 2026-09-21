@@ -1926,6 +1926,21 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     let n_m_flagged = m_flagged_cols.len().max(1);
     let mut resolved_m = vec![false; n_total];
     let mut remaining_m_side = m_flagged_cols.len();
+    // Companion best-so-far for the infeasible-row-count plateau check
+    // below: `remaining_m_side` only ever decreases (its one mutation
+    // site is a plain `-= 1`, never incremented), so on a healthy solve
+    // it is a strictly more reliable progress signal than
+    // `infeasible_rows.rows.len()` — which measures how large the
+    // (constantly churning) infeasible-row *set* is right now, not
+    // whether the M-side resolution actually driving the solve forward
+    // is stuck. Netlib `dfl001` (`analysis/dfl001_20260921_035239.md`)
+    // is a healthy solve the plateau check otherwise mistook for
+    // `pilot4`'s genuine stall: its infeasible-row count's own minimum
+    // goes unbeaten for 5,000+ consecutive iterations (the set keeps
+    // churning — 40% grow / 50% shrink — without ever posting a new
+    // low) while `remaining_m_side` falls steadily throughout (11045 ->
+    // 4762 over the same span), which is what this tracks.
+    let mut best_remaining_m_side = remaining_m_side;
     let mut iters_since_m_progress: usize = 0;
     let score2_stall_halflife: f64 = std::env::var("ENOMOTO_SCORE2_STALL_HALFLIFE")
         .ok()
@@ -2048,7 +2063,26 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     let mut discard_row: Option<usize> = None;
     let mut discard_banned_cols: Vec<usize> = Vec::new();
     let mut prev_pool_len: Option<usize> = None;
-    for _iter in 0..MAX_ITERS {
+    // `MAX_ITERS` alone (a flat 20,000, sized for the Netlib set's
+    // typical `n_total` of a few thousand) is too small for a handful of
+    // genuinely large problems: Netlib `dfl001` (`n_total` ~17,000 after
+    // this module's own presolve) needs 22,978 iterations to reach the
+    // same optimum HiGHS does (`analysis/dfl001_20260921_035239.md`,
+    // experiment B) — confirmed *not* a stall (§ that analysis's
+    // plateau-fix above already rules that out for this same problem),
+    // just a large problem needing iterations roughly proportional to
+    // its own size. Scaled by `n_total` and floored at `MAX_ITERS` so
+    // every problem at or below today's typical size keeps exactly
+    // today's budget (this only ever raises the bound); the `4x`
+    // multiplier leaves comfortable headroom above the 1.35x ratio
+    // `dfl001` itself needed. `infeasible_plateau_limit` above
+    // deliberately still derives from the flat `MAX_ITERS`, not this —
+    // it exists specifically to fire safely *within* a fixed, smaller
+    // budget (`greenbea`/`pilot4`, `m` in the low thousands), and
+    // widening it in step with `iter_limit` would just delay it on
+    // exactly those problems for no benefit.
+    let iter_limit = MAX_ITERS.max(4 * n_total);
+    for _iter in 0..iter_limit {
         iters_since_m_progress += 1;
         if debug_ext_iters_verbose && _iter % 2000 == 0 {
             eprintln!(
@@ -2962,8 +2996,21 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         // literally-static `pilot4` plateau this check was written for,
         // and is still reset by any genuine progress.
         let infeasible_len = infeasible_rows.rows.len();
-        if infeasible_len < best_infeasible_len {
+        let made_infeasible_progress = infeasible_len < best_infeasible_len;
+        if made_infeasible_progress {
             best_infeasible_len = infeasible_len;
+        }
+        // `remaining_m_side` progress also counts (see its own
+        // `best_remaining_m_side` docs above) — a solve can keep steadily
+        // resolving M-side columns while the infeasible-row *count*'s
+        // minimum sits unbeaten simply because that set is churning
+        // (Netlib `dfl001`), and treating that as a stall latches
+        // `bland_mode` on a solve that was never stuck.
+        let made_m_side_progress = remaining_m_side < best_remaining_m_side;
+        if made_m_side_progress {
+            best_remaining_m_side = remaining_m_side;
+        }
+        if made_infeasible_progress || made_m_side_progress {
             infeasible_plateau_count = 0;
         } else {
             infeasible_plateau_count += 1;
@@ -3187,14 +3234,14 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
 
     }
 
-    // `MAX_ITERS` exceeded without reaching Step III — `None` (fall back
+    // `iter_limit` exceeded without reaching Step III — `None` (fall back
     // to the classical `BIG_M` path) rather than a false `Infeasible`.
     if profile_phases {
         prof_phases::report(wall_t0.elapsed().as_nanos() as usize);
     }
     if std::env::var("ENOMOTO_DEBUG_EXT_ITERS").is_ok() {
         eprintln!(
-            "DEBUG_EXT_BAILOUT: MAX_ITERS exhausted bland_mode={bland_mode} stall_count={stall_count} remaining_m_side={remaining_m_side} n_m_flagged={}",
+            "DEBUG_EXT_BAILOUT: iter_limit={iter_limit} exhausted bland_mode={bland_mode} stall_count={stall_count} remaining_m_side={remaining_m_side} n_m_flagged={}",
             m_flagged_cols.len()
         );
     }

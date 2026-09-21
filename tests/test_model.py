@@ -49,14 +49,26 @@ def test_wide_but_finite_bounds():
     assert approx(sol.objective, -5.0)
 
 
-def test_infinite_bounds_raise():
+def test_infinite_bounds_accepted():
+    # `model.rs::add_variable`'s own docs: infinite lb/ub are a genuine
+    # free or one-sided-unbounded variable (e.g. straight from an MPS
+    # `FR`/`MI`/`PL` bound) and are no longer rejected here — only NaN and
+    # lb > ub are.
+    M = Model()
+    a = Variable(float, 0, math.inf)
+    b = Variable(float, -math.inf, 0)
+    c = Variable(float, -math.inf, math.inf)
+    assert (a.lb, a.ub) == (0, math.inf)
+    assert (b.lb, b.ub) == (-math.inf, 0)
+    assert (c.lb, c.ub) == (-math.inf, math.inf)
+
+
+def test_nan_or_inverted_bounds_still_raise():
     M = Model()
     with pytest.raises(ValueError):
-        Variable(float, 0, math.inf)
+        Variable(float, 0, math.nan)
     with pytest.raises(ValueError):
-        Variable(float, -math.inf, 0)
-    with pytest.raises(ValueError):
-        Variable(float, -math.inf, math.inf)
+        Variable(float, 10, 0)
 
 
 def test_binary_knapsack():
