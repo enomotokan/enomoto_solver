@@ -1760,7 +1760,23 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     // weights an *already-DSE-weighted* loop maintains, at points where a
     // refactor is happening anyway, so it carries none of that placement's
     // extra per-pivot FTRAN cost.
-    let dse_refresh_on_refactor = std::env::var("ENOMOTO_DSE_REFRESH_ON_REFACTOR").map_or(true, |v| v != "0");
+    //
+    // **Re-evaluated and defaulted off**: the drift this refresh was
+    // compensating for came from `DseState::update_after_pivot`'s old
+    // `wp_old` self-amplification bug, fixed separately since the
+    // measurement above was taken (see that function's own `wp_old =
+    // ||rho_p||^2` docs). With that fixed, `degen3`'s `dse_rel_err`
+    // diagnostic now reports <1% relative error on 100% of iterations
+    // with no refresh at all — the >=100%-drifting case this refresh
+    // exists for no longer occurs, so on the current codebase it is pure
+    // cost: profiling `degen3` (`ENOMOTO_PROF_PHASES_EXT`) attributes 12%
+    // of wall time to `DseState::from_basis` at each refactor (1,412
+    // BTRANs/event on this problem), on an identical 2,163-iteration
+    // pivot path and objective with or without it. Full 77-problem Netlib
+    // sweep with the refresh off: -10.8% total wall time, no status or
+    // objective changes. `ENOMOTO_DSE_REFRESH_ON_REFACTOR=1` re-enables it
+    // for A/B comparison if a future drift regression reappears.
+    let dse_refresh_on_refactor = std::env::var("ENOMOTO_DSE_REFRESH_ON_REFACTOR").is_ok_and(|v| v != "0");
     let debug_delta0 = std::env::var("ENOMOTO_DEBUG_EXT_DELTA0").is_ok();
     let debug_ext_iters_verbose = std::env::var("ENOMOTO_DEBUG_EXT_TRACE").is_ok();
     let m_flagged_cols: Vec<usize> = (0..n_orig).filter(|&j| delta[j] != 0.0).collect();
