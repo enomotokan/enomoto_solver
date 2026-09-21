@@ -1,5 +1,5 @@
 {
-  "loop_iteration_count": 6,
+  "loop_iteration_count": 7,
   "problems": {
     "degen3": {
       "consecutive_failures": 0,
@@ -9,10 +9,10 @@
     },
     "greenbea": {
       "consecutive_failures": 0,
-      "attempts": 5,
+      "attempts": 6,
       "last_result": "improved",
-      "last_attempt_at": "2026-09-21T08:52:04Z",
-      "note": "反復#6。runtime段(93問題中最悪、ours/highs比 ~10x)で再選定。作業開始時の起点はmain HEAD 05a2f2f(反復#4のresidual_norm_affine統合まで反映)だったが、作業中に反復#5の修正(PR #7、extended_dual.rsのdドリフト検査/chuzc1全候補ソートの削減)が人間によりmainへマージされた(8c57cbb)。そのためコード変更・ベンチマークともmain HEAD 8c57cbbを基準に取り直している。fable-bottleneck-analystのプロファイリング(analysis/greenbea_20260921_084155.md)で、find_best_pivot(lu.rs)のMarkowitzスコア計算がBTreeMap経由のrows[i].get(&j)を候補ごとに行っていたが、スコア自体はrow_degree/col_degreeのみから計算できるため、探索の枝刈り(score > best_scoreならlookup自体をskip)をscore計算より後に回すだけで同じ結果を得られると判明。ルックアップ回数1,100万→135万、factorize時間-32%、ピボット経路・目的関数値はビット一致(-72555248.12985753)。greenbea: 本コミット単体の寄与はmain HEAD 8c57cbb基準でours_time 2.42s→2.34s(3回平均、約3.5%短縮)。93問題全数でours_status/ours_objの変化・10%超の実行時間退行なし(8c57cbb起点で本コミット込み再計測して確認)。コード修正はPR #9(未マージ)。分析: analysis/greenbea_20260921_084155.md。フォローアップ(未対応): 同分析はBIG_Mフォールバック(simplex.rs:2972-3000)が、ピボット順序や再分解タイミングだけを変える実験(ロジック変更なし)で14構成中6件、誤ったinfeasible判定または誤った最適値(BIG_M=1e7によるクランプが真の最適値3.3e8を切り詰め)を生んだと報告している。現在のmain HEADは93問題全てで正答だが、これはピボット順序の巡り合わせによるものでアーキテクチャ上脆弱。今回の修正(PR #9)は探索順序・結果を一切変えないpath-preservingな変更なのでこのリスクは踏んでいないが、今後ピボット順序や再分解頻度に触れる変更をする前に、BIG_Mクランプがアクティブな状態でoptimalを返さないようにする安全策(simplex.rs:3000)と、特異基底時にrefactorizeが諦めるのではなくpivotを取り消す対応(extended_dual.rs:3264)を先に入れることを推奨する。"
+      "last_attempt_at": "2026-09-21T09:52:21Z",
+      "note": "反復#7。runtime段(93問題中最悪、ours/highs比 ~9.7x)で再選定(6回目)。事実訂正: 反復#6のPR #9は「未マージ」と記録していたが実際はマージ済み(merged_at 2026-09-21T09:00:40Z、マージコミット418e62a)。作業開始時にgit fetch/pullでこれを検出し、418e62aを起点に取り直した。fable-bottleneck-analystのプロファイリング(analysis/greenbea_20260921_090812.md)で、FtLu::u_transpose_solve_into(BTRANのU^T段、lu.rs)が呼び出しごとにu_seqの全eta(greenbeaでは2,056本)を無条件走査しているが、処理後に非零になるetaは平均64本(3.1%)のみと判明。既存のrow_owners逆索引を使い、エポックスタンプ式の「必要」フラグを立てながら1パスで走査する変更(u_transpose_solve_into単独、FtLuにRefCellスクラッチ追加)を実装。入力seedの非零と処理済みetaのrow_owners連鎖でフラグが広がるため別途DFSは不要(u_solve_into側のDFS版が退行し撤回された経緯とは異なる)。訪問しないetaはゼロの符号のみが変わり下流は非零/ゼロ判定のみを見るため無害、ピボット選択・目的関数値を一切変えないpath-preservingな変更。greenbea: ours_time 2.94s→2.80s(このコンテナ内、同一環境4回平均、約4.9%短縮)、目的関数値ビット一致(-72555248.12985753)。93問題全数でours_status/ours_objの変化なし、エントリ数93確認済み(jq/python-c)。素の1回計測でafiro/capri/wood1pが>10%の時間差を示したがいずれもsub-20msの極小問題での測定ノイズと複数回再実行で確認(再現せず)、実退行ではない。greenbea含む25問題で2%超の改善。コード修正はPR #10(未マージ)。分析: analysis/greenbea_20260921_090812.md。フォローアップ(未対応、反復#6から継続): BIG_Mフォールバック(simplex.rs:2972-3000)がピボット順序や再分解タイミングに依存して誤ったinfeasible判定・誤った最適値を生みうるリスクは未解消。今回の修正はピボット順序・再分解タイミングを一切変えないためこのリスクを踏んでいないが、今後ピボット順序や再分解頻度に触れる変更(反復#7分析§6-3/6-4で挙がったfactorize定数削減やsynthetic clock型再分解など)の前に、BIG_Mクランプがアクティブな状態でoptimalを返さない安全策と、特異基底時にrefactorizeがpivotを取り消す対応を先に入れることを推奨する。"
     },
     "dfl001": {
       "consecutive_failures": 0,
