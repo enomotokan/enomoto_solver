@@ -120,6 +120,8 @@
 //!    `simplex.rs::solve_lp_dual_on`'s own `bland_mode`).
 
 use super::{sparse_lu, InfeasibleRows, NbStatus, SimplexResult, StdForm, Status, MAX_ITERS, TOL};
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 
 /// Per-phase wall-clock counters for the `ENOMOTO_PROF_PHASES_EXT`
 /// diagnostic — this module's own counterpart to `simplex::prof_phases`
@@ -1356,10 +1358,34 @@ fn refine_zero_cost_placement(std: &StdForm, active_cost: &mut [f64], nb_status:
 }
 
 /// One candidate in the entering-column ratio test / BFRT walk.
+#[derive(Clone, Copy)]
 struct Cand {
     j: usize,
     hat_alpha: f64,
     ratio: f64,
+}
+
+// Ascending `(ratio, j)` order — the same order `candidates.sort_by(|a, b|
+// a.ratio.total_cmp(&b.ratio).then_with(|| a.j.cmp(&b.j)))` used to produce
+// directly, now backing a `BinaryHeap<Reverse<Cand>>` so the main loop's
+// chuzc1/BFRT walk (see its own comment) can pop this same order lazily
+// instead of sorting the whole candidate pool upfront. `j` breaks ties so
+// the pop order on a tied `ratio` doesn't depend on push/heapify order.
+impl PartialEq for Cand {
+    fn eq(&self, other: &Self) -> bool {
+        self.ratio == other.ratio && self.j == other.j
+    }
+}
+impl Eq for Cand {}
+impl PartialOrd for Cand {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for Cand {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.ratio.total_cmp(&other.ratio).then_with(|| self.j.cmp(&other.j))
+    }
 }
 
 /// Trial BTRAN + PRICE + (BFRT-free) ratio test for a candidate leaving row
@@ -1757,6 +1783,17 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     // from any static per-problem property, is what finally separates
     // "genuinely drift-heavy solve" from "fragile to any loosening at all".
     let mut drift_trigger_count: usize = 0;
+    // Separate, coarser cadence for the `d`-drift check below, mirroring
+    // `super::RESIDUAL_CHECK_MULTIPLIER`'s own rationale for the classical
+    // path's `since_residual_check`: this check's residual is dominated by
+    // fixed columns (`lb == ub`) that `d` is never updated for in the first
+    // place (PRICE skips them), so once those are excluded from the
+    // residual (see the loop below) genuine drift stays many orders of
+    // magnitude below `D_DRIFT_TOL` — measured on the full Netlib suite, it
+    // fires on only one problem, and even there it's the same fixed-column
+    // artifact, not real drift — so paying its `O(n_total)` BTRAN-based
+    // `fresh_d_into` every `XB_CHECK_INTERVAL` iterations buys nothing.
+    let mut since_d_drift_check: usize = 0;
     // `super::update_verify`'s own env-var escape hatch, hoisted outside
     // the loop for the same reason `super::solve_lp_dual_on` hoists its
     // own copy: a single `bool` branch per pivot, not an `env::var` call.
@@ -2502,35 +2539,80 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
             }
             return Some(SimplexResult { status: Status::Infeasible, x: None });
         }
-        timed!(profile_phases, prof_phases::CHUZC1, {
-            if bland_mode {
-                candidates.sort_by_key(|c| c.j);
-            } else {
-                candidates.sort_by(|a, b| a.ratio.total_cmp(&b.ratio).then_with(|| a.j.cmp(&b.j)));
-            }
-        });
-
+        // chuzc1 + BFRT pass 1, combined: `bland_mode` still needs the
+        // *whole* pool sorted by `j` (its walk has no early-exit shortcut
+        // to lean on), but the common case's walk almost always stops
+        // after just the first one or two candidates in ascending-`(ratio,
+        // j)` order (measured on Netlib `greenbea`: ~521 candidates/
+        // iteration built, but the walk below consumes ~0.5 on average) —
+        // a full `sort_by` pays `O(k log k)` to answer a question the walk
+        // only needed the first `w << k` of. A min-heap
+        // (`BinaryHeap<Reverse<Cand>>`, `O(k)` to build) popped one at a
+        // time reproduces the exact same ascending order (`Cand`'s `Ord`
+        // impl, same formula the old `sort_by` used) but costs `O(w log
+        // k)` instead — `crate::simplex`'s own `ChuzcCand`/`BinaryHeap`
+        // already does this for the classical path; this mirrors it here.
+        // `candidates.drain(..)` (not `.into_iter()`) so `candidates`
+        // itself keeps its allocation for the next iteration's PRICE scan
+        // to reuse, matching this function's own preallocate-once
+        // convention for its other per-iteration buffers.
+        let n_candidates = candidates.len();
+        let mut sorted_prefix: Vec<Cand> = Vec::new();
+        let mut k_star: Option<usize> = None;
         // BFRT (\S4.6), generalized: cumulative flip capacity is an
         // `Affine1` running sum, compared lexicographically against
         // `w_r`; a candidate with a genuinely infinite width (`None`)
         // always stops the walk immediately, exactly like the classical
-        // method's own guard (see [`width_affine`]'s own docs).
+        // method's own guard (see [`width_affine`]'s own docs). Declared
+        // here, outside the `bland_mode` branch below, so its final value
+        // is still readable in the `k_star == None` debug print past the
+        // branch.
         let mut cum = Affine1::ZERO;
-        let mut k_star: Option<usize> = None;
-        timed!(profile_phases, prof_phases::BFRT, {
-            for (idx, cand) in candidates.iter().enumerate() {
-                let Some(width) = cache.width[cand.j] else {
-                    k_star = Some(idx);
-                    break;
-                };
-                let new_cum = cum.add(width.scale(cand.hat_alpha.abs()));
-                if bfrt_reached(w_r, new_cum, x_b_base[r]) {
-                    k_star = Some(idx);
-                    break;
+        if bland_mode {
+            timed!(profile_phases, prof_phases::CHUZC1, {
+                candidates.sort_by_key(|c| c.j);
+            });
+            timed!(profile_phases, prof_phases::BFRT, {
+                for (idx, cand) in candidates.iter().enumerate() {
+                    let Some(width) = cache.width[cand.j] else {
+                        k_star = Some(idx);
+                        break;
+                    };
+                    let new_cum = cum.add(width.scale(cand.hat_alpha.abs()));
+                    if bfrt_reached(w_r, new_cum, x_b_base[r]) {
+                        k_star = Some(idx);
+                        break;
+                    }
+                    cum = new_cum;
                 }
-                cum = new_cum;
-            }
-        });
+            });
+        } else {
+            let mut heap: BinaryHeap<Reverse<Cand>> =
+                timed!(profile_phases, prof_phases::CHUZC1, { candidates.drain(..).map(Reverse).collect() });
+            timed!(profile_phases, prof_phases::BFRT, {
+                while let Some(Reverse(cand)) = heap.pop() {
+                    let idx = sorted_prefix.len();
+                    sorted_prefix.push(cand);
+                    let Some(width) = cache.width[cand.j] else {
+                        k_star = Some(idx);
+                        break;
+                    };
+                    let new_cum = cum.add(width.scale(cand.hat_alpha.abs()));
+                    if bfrt_reached(w_r, new_cum, x_b_base[r]) {
+                        k_star = Some(idx);
+                        break;
+                    }
+                    cum = new_cum;
+                }
+            });
+        }
+        // Unified view over "the sorted candidates, in the order chuzc1
+        // above produced them" for pass 2 and the flip application below —
+        // `bland_mode`'s own fully-sorted `candidates`, or the non-`bland`
+        // path's lazily-built `sorted_prefix` (only ever holds `[0,
+        // k_star]`, which is all pass 2 / the flip loop below ever index
+        // into).
+        let sorted: &[Cand] = if bland_mode { &candidates[..] } else { &sorted_prefix[..] };
         let Some(k_star) = k_star else {
             for &j in &touched_cols {
                 a_p[j] = 0.0;
@@ -2567,7 +2649,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
             if std::env::var("ENOMOTO_DEBUG_EXT_INFEASIBLE").is_ok() {
                 eprintln!(
                     "DEBUG_EXT_INFEASIBLE: site=bfrt_exhausted iter={_iter} r={r} basis_r={} d_dir={d_dir} w_r=({},{}) n_candidates={} cum=({},{}) remaining_m_side={remaining_m_side}",
-                    basis[r], w_r.base, w_r.slope, candidates.len(), cum.base, cum.slope
+                    basis[r], w_r.base, w_r.slope, n_candidates, cum.base, cum.slope
                 );
             }
             if profile_phases {
@@ -2597,13 +2679,13 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         // either reverted alternative.
         let mut best_idx = k_star;
         timed!(profile_phases, prof_phases::BFRT, {
-            let min_ratio = candidates[k_star].ratio - super::HARRIS_RATIO_TOL;
+            let min_ratio = sorted[k_star].ratio - super::HARRIS_RATIO_TOL;
             let mut window_start = k_star;
-            while window_start > 0 && candidates[window_start - 1].ratio >= min_ratio {
+            while window_start > 0 && sorted[window_start - 1].ratio >= min_ratio {
                 window_start -= 1;
             }
-            let mut best_abs = candidates[k_star].hat_alpha.abs();
-            for (idx, cand) in candidates.iter().enumerate().take(k_star + 1).skip(window_start) {
+            let mut best_abs = sorted[k_star].hat_alpha.abs();
+            for (idx, cand) in sorted.iter().enumerate().take(k_star + 1).skip(window_start) {
                 let abs_a = cand.hat_alpha.abs();
                 if abs_a > best_abs {
                     best_abs = abs_a;
@@ -2612,7 +2694,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
             }
             if profile_phases {
                 prof_phases::HARRIS_WINDOW_SIZE_SUM.fetch_add(k_star - window_start + 1, std::sync::atomic::Ordering::Relaxed);
-                let window_has_m_elsewhere = candidates[window_start..=k_star].iter().enumerate().any(|(off, cand)| {
+                let window_has_m_elsewhere = sorted[window_start..=k_star].iter().enumerate().any(|(off, cand)| {
                     let idx = window_start + off;
                     if idx == best_idx || delta[cand.j] == 0.0 {
                         return false;
@@ -2646,7 +2728,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
             prof_phases::BFRT_FLIPS.fetch_add(best_idx, std::sync::atomic::Ordering::Relaxed);
         }
         timed!(profile_phases, prof_phases::BFRT, {
-            for cand in &candidates[..best_idx] {
+            for cand in &sorted[..best_idx] {
                 let old = nb_status[cand.j].unwrap();
                 let width = cache.width[cand.j].unwrap();
                 let sigma = if old == NbStatus::Lower { 1.0 } else { -1.0 };
@@ -2693,7 +2775,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 combined_touched.clear();
             }
 
-            for cand in &candidates[..best_idx] {
+            for cand in &sorted[..best_idx] {
                 let old = nb_status[cand.j].unwrap();
                 let new = match old {
                     NbStatus::Lower => NbStatus::Upper,
@@ -2711,7 +2793,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 nb_status[cand.j] = Some(new);
             }
         });
-        let q = candidates[best_idx].j;
+        let q = sorted[best_idx].j;
         let dj_q = d[q];
         let alpha_q = a_p[q];
         if profile_phases && dj_q.abs() <= 1e-9 {
@@ -3232,12 +3314,23 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 // intent — no point paying for a second O(nnz) BTRAN-based
                 // recomputation when a refactor (which calls
                 // `fresh_d_into` on `d` directly, unconditionally) is
-                // about to happen anyway.
+                // about to happen anyway. Gated by [`since_d_drift_check`]'s
+                // own coarser cadence (see its declaration) — the residual
+                // below also excludes fixed columns (`lb == ub`), which
+                // PRICE never updates `d` for, so they'd otherwise swamp the
+                // genuine-drift signal with a constant, non-drift offset.
                 if !need_refactor {
+                    since_d_drift_check += 1;
+                }
+                if !need_refactor && since_d_drift_check >= super::RESIDUAL_CHECK_MULTIPLIER {
+                    since_d_drift_check = 0;
                     fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fd_cb, &mut lu_scratch, &mut fd_y, &mut fresh_d_buf);
                     let mut resid_sq = 0.0f64;
                     let mut scale_sq = 0.0f64;
                     for j in 0..std.n_total {
+                        if std.lb[j] == std.ub[j] {
+                            continue;
+                        }
                         let diff = d[j] - fresh_d_buf[j];
                         resid_sq += diff * diff;
                         scale_sq += fresh_d_buf[j] * fresh_d_buf[j];
