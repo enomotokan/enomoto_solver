@@ -1,5 +1,5 @@
 {
-  "loop_iteration_count": 2,
+  "loop_iteration_count": 3,
   "problems": {
     "degen3": {
       "consecutive_failures": 0,
@@ -13,6 +13,13 @@
       "last_result": "improved",
       "last_attempt_at": "2026-09-21T03:23:00Z",
       "note": "反復#1(no_improvement)の申し送り通り、BFRT許容誤差を行の大きさに応じてスケーリングする修正(再分解によるやり直しではない)+ 摂動除去チェック(solve_lp_dual_on 相当)を追加し解消。PR #3。副次的に bnl2/cycle/pilot87 の誤差段の問題も解消(相対誤差 ~1e-14〜1e-15)。他89問題・dfl001は変化なし。"
+    },
+    "dfl001": {
+      "consecutive_failures": 0,
+      "attempts": 1,
+      "last_result": "improved",
+      "last_attempt_at": "2026-09-21T04:29:00Z",
+      "note": "runtime tier(タイムアウト=無限に遅い扱い)で選定。原因: 実行不能行数プラトー検出器(extended_dual.rs)が、実行不能行の集合が絶えず入れ替わるため最小値が5,000反復更新されない健全な解法過程を停滞と誤判定してbland_modeに誤ラッチし、双対実行可能性の崩壊による再分解の嵐(主ループ時間の91.8%)を引き起こしていた。加えてMAX_ITERS=20,000がdfl001に必要な22,978反復に対して不足。修正: プラトー検出のリセット条件にremaining_m_side(M側未解決列数)の改善を追加、主ループのiter_limitをMAX_ITERS.max(4*n_total)に変更。dfl001: timeout(誤答/未達)→optimal 11266396.04667138(HiGHSと完全一致、約40秒、highs比5.31x)。他92問題は正答性・ステータス変化なし、同一環境比較で10%を超える実行時間退行なし。コード修正はPR #5(未マージ)。副次的にexamples/smoke_test.py・tests/test_model.pyの古いValueError期待(以前の更新でadd_variableが無限境界を受理するようになったのに未追随でpytest collectionが失敗していた)も修正。"
     }
   }
 }
