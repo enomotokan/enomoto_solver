@@ -1,5 +1,5 @@
 {
-  "loop_iteration_count": 5,
+  "loop_iteration_count": 6,
   "problems": {
     "degen3": {
       "consecutive_failures": 0,
@@ -8,10 +8,11 @@
       "last_attempt_at": "2026-09-21T00:38:00Z"
     },
     "greenbea": {
-      "consecutive_failures": 0,
-      "attempts": 11,
+      "consecutive_failures": 1,
+      "attempts": 12,
       "last_result": "no_improvement",
-      "last_attempt_at": "2026-09-21T21:34:12Z",
+      "last_attempt_at": "2026-09-21T22:25:49Z",
+      "note_iter14": "反復#14。runtime段で6回連続再選定。反復#13の申し送り(polish_with_true_boundsに同型のフリップ巻き戻しを追加すれば採用可能)を検証したが、前提が半分誤りと判明(analysis/greenbea_20260921_221648.md、fable-bottleneck-analystが計装で確認)。実際の誤答機序はフリップ非巻き戻しではなく、polishのchuzcが数値的丸め残差(-2^-29、FTRAN側は正確に0)を幅∞・ratio0の候補として受理し、verify破棄後の再試行を`update_count()==0`ゲートで無検証のまま確定させること。主ループが持つ『破棄した(q,r)の行単位禁止リスト』がpolishに無いのが根本原因。禁止リストの移植のみでgreenbeaは正答(HiGHSと全桁一致)、93問題全数でも正答性・頑健性は安全に確認された。しかし実行時間は改善せず(主ループ反復数27,653→27,440、-0.8%のみ、greenbea自身の時間はノイズ内で不変)、runtime段の改善基準(ours/highs比の有意な改善)を満たさないため5b。ソースコードの変更は一切行っていない(分析はworktree内のみ、リポジトリ本体は無変更)。詳細: report/greenbea_20260921_221648.md。次回への申し送り: 禁止リスト移植自体は正答性・頑健性向上として独立に価値があるが、現状このバグは0/93問題で発火せず(polishが回るのはdfl001とgreenbeaのみ)、runtime改善という選定基準には無関係。43-48倍差の主因(M側追跡の設計ギャップ、フリップ確定後のピボット破棄)は依然未解決。",
       "note_manual_reset": "loop_iteration_count(13→5)とconsecutive_failures(3→0)をリポジトリ所有者の明示的指示により手動リセット(2026-09-21、対話セッション内)。反復#13で真因は特定済み・修正の大部分も検証済み(analysis/greenbea_20260921_205039.md、不採用PR #13)であり、残る作業はpolish_with_true_bounds(src/simplex/extended_dual.rs、~4350行目)に同型のフリップ巻き戻し+粗ピボットガードを追加することのみ、との申し送りを踏まえての判断。次回選定でgreenbeaに再度取り組めるようにするためのリセットであり、実際に改善が確認されたわけではない。",
       "note_iter13": "反復#13。runtime段で5回連続再選定(ours/highs比43-48x、93問題中最悪)。反復#9-#12の『M側追跡の設計ギャップ』説を再検証した結果、より上流の単一事故が真因と判明(analysis/greenbea_20260921_205039.md、fable-bottleneck-analystが計装で確認): solve_lp_dual_extended(src/simplex/extended_dual.rs)でBFRTがフリップをnb_statusへ確定させた後にupdate_verifyが行われ、iter 6650でverify不一致によりピボットを破棄する際、確定済みフリップ22本が巻き戻されないまま残り、24列が即座に双対不能(違反合計2.37e8)になる。以後6,000反復を双対不能のまま走り反復数が11,270→27,654に膨張することを特定(presolveのparallelcolsを無効化して同じ事故を回避する対照実験で確認)。この分析に基づきsolve_lp_dual_extended内に4点の修正(破棄時のフリップ巻き戻し/直前破棄行への再verify/M幅極小ピボットのslopeスナップ/Infeasible判定前の双対不能チェック)を実装し検証(general-purpose subagent)。対象バグ自体は修正できた(ENOMOTO_DEBUG_EXT_DUAL_CHECKで違反ゼロを確認)、93問題中92問題は退行なし(cargo test 171件・pytest 20件も全通過)。しかしgreenbea自身が悪化: 修正後の軌跡が、同ファイル内の姉妹関数polish_with_true_bounds(~4350行目、今回のスコープ外)が持つ全く同型の『破棄時フリップ非巻き戻し』バグに特異基底を渡してしまい、BIG_Mフォールバック経由で誤答(目的値相対誤差1.24e-3、main比+2.93s)になった。対象問題自身が正答性・速度とも悪化するため未採用(5b)。実装は不採用PR #13(ブランチclaude/greenbea-20260921_205039)に監査用記録として残し、mainへはマージしていない。次回への申し送り: polish_with_true_boundsにも同じロールバック+粗ピボットガードをセットで実装すれば採用できる可能性が高い。詳細: report/greenbea_20260921_213412.md。consecutive_failuresが上限3に到達したため次回選定では除外される。",
       "note_iter12": "反復#12(今晩のセッション最終反復)。runtime段で4回連続再選定(ours/highs比43.46x)。反復#11の残る候補『w_r.slopeの雑音判定を比較時許容に移す』を9変種プロトタイプ・検証(analysis/greenbea_20260921_160000.md)。全変種がgreenbeaでmax_iters到達→BIG_Mフォールバック→誤答(相対誤差1.2e-3)になった。原因: 選ばれた行の|w_r.slope|が1e-7〜1で連続分布し雑音/信号の谷がないため、比較許容を広げると算術側(格納値ベース)と食い違い新種の2変数サイクル(周期2、79,685回同一状態再訪)を生む。格納値も揃える変種はドリフト再分解の嵐で同じく破綻。他92問題への影響はほぼ無風(93問題中91問題ビット同一、wood1pの反復数の揺れはtol=0同士でも起きるmain既存の非決定性で無関係)。3反復(#9,#11,#12)・計13変種にわたりM側追跡設計への部分介入を試みたが安全な部分修正では届かないと結論。次回選定時(あと1回で連続失敗上限3に到達)は双対フェーズ1相当への本格的な設計変更(docs/highs_dual_simplex.tex参照)が必要。副産物として、全13変種がBIG_Mフォールバックで誤った目的値をoptimalとして返すことを繰り返し実証し、simplex.rs:3042-3070の安全策未着手リスクを再確認した。ソース変更なし、5b。詳細: report/greenbea_20260921_161117.md。",
