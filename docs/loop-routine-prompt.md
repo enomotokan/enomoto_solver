@@ -77,9 +77,12 @@ scripts/benchmark_results.json と scripts/loop_state.json を状態の正本と
    存在する」ことであり、全問題が最適解に到達することではない。)
 
 5a. 改善が確認できた場合: claude/<問題名>-<日時> ブランチにコミットし、分析サマリ・
-    ベンチマーク差分を含むPRを作成し、loop_state.json の連続失敗カウントを0にリセットする。
-    「改善」の定義は選定された段に対応する(docs/loop-design.md ルール4):
-    correctness=誤判定/クラッシュの解消、accuracy=相対差が許容値以下、
+    ベンチマーク差分を含むPRを作成した上で、**そのPRを人間のレビュー待ちにせず
+    ループ自身が直ちに main へマージする**(docs/loop-design.md ルール2、
+    2026-09-21改定)。マージ後、マージ済みの main 上で計測した結果を
+    benchmark_results.json に反映し、loop_state.json の連続失敗カウントを0に
+    リセットする。「改善」の定義は選定された段に対応する(docs/loop-design.md
+    ルール4): correctness=誤判定/クラッシュの解消、accuracy=相対差が許容値以下、
     runtime=ours/highs比の有意な改善。いずれの場合も**他の92問題に退行がないこと**
     (状態が悪化した問題が無いこと)が前提条件である。
 
