@@ -137,7 +137,52 @@ use self::lu as sparse_lu;
 mod extended_dual;
 
 const TOL: f64 = 1e-9;
-const MAX_ITERS: usize = 20_000;
+
+/// Floor for [`max_iters_for`]'s size-scaled cap — the crate's own
+/// historical fixed value, kept as a lower bound so every small/medium
+/// instance that already solved within it (the whole Netlib 73-problem
+/// `--max-vars 3000` set, per `netlib_benchmark_workflow`) sees no
+/// behavior change at all.
+const MAX_ITERS_FLOOR: usize = 20_000;
+
+/// Absolute ceiling on [`max_iters_for`]'s output — a defensive backstop,
+/// not a value any known Netlib instance approaches (the largest, `dfl001`
+/// at `m=4554`/`n_total=9773` post-presolve, needs `MAX_ITERS_SCALE *
+/// (m+n_total) = 286,540`, far below this), so a pathological future
+/// instance can't turn an unbounded-looking cycle into a multi-hour hang.
+const MAX_ITERS_CEILING: usize = 2_000_000;
+
+/// Multiplier applied to `m + n_total` by [`max_iters_for`].
+const MAX_ITERS_SCALE: usize = 20;
+
+/// Size-scaled replacement for a flat iteration cap on every simplex main
+/// loop (classical primal/dual and the extended-dual module).
+///
+/// **Why a flat constant was wrong:** a fixed `20_000`-iteration budget is
+/// independent of problem size, so it silently starves large instances
+/// instead of scaling with the amount of work a correct solve of that size
+/// can legitimately need — confirmed directly on Netlib `dfl001`
+/// (`m=6071`/`n=12230`, presolved to `m=4554`/`n_total=9773`): the
+/// extended-dual loop needs 22,015 iterations to reach the exact HiGHS
+/// objective, ~10% over the old flat cap. Hitting that cap doesn't fail
+/// loudly — [`extended_dual::solve_lp_dual_extended`] returns `None` and
+/// the caller falls back to the classical `BIG_M`-substituted path, which
+/// is *also* numerically fragile (see `BIG_M`'s own docs /
+/// `[[bigm-fallback-invalid-reference]]`) and returned a **wrong**
+/// objective on `dfl001` (`11264657.2` vs HiGHS's `11266396.0`, ~1.5e-4
+/// relative error) rather than the correct answer the uncapped loop
+/// reaches directly. See the `dfl001-bottleneck-max-iters-cap` memory for
+/// the full measurement.
+///
+/// Bland's-rule anti-cycling (`bland_mode` in every main loop this feeds)
+/// already gives a textbook finite-termination guarantee independent of
+/// this cap — this function exists only to bound the *practical* wall
+/// time of a single solve, not to serve as the actual correctness
+/// safeguard, so generous headroom above any realistically-needed
+/// iteration count is the right tradeoff over a tight one.
+fn max_iters_for(m: usize, n_total: usize) -> usize {
+    (MAX_ITERS_SCALE * (m + n_total)).clamp(MAX_ITERS_FLOOR, MAX_ITERS_CEILING)
+}
 
 /// Primal feasibility tolerance for chuzr's basic-variable bound check —
 /// deliberately separate from (and looser than) `TOL`, which stays tight
@@ -854,6 +899,11 @@ struct PresolvedForm {
     std: StdForm,
     scaling: scaling::Scaling,
     substitutions: Vec<presolve::colsingleton::Substitution>,
+    /// See [`presolve::parallelcols::Substitution`]'s own docs — resolved
+    /// by [`unscale_result`] in a separate pass, strictly after
+    /// `substitutions` above (never interleaved; see that field's own
+    /// docs on `presolve::ExtendedPresolveResult` for why that's safe).
+    parallel_col_substitutions: Vec<presolve::parallelcols::Substitution>,
     orig_of_free: Vec<usize>,
     /// `sign[nj] * (x_free[nj] + shift[nj])` is `nj`'s own contribution to
     /// `orig_of_free[nj]`'s true value — see [`PresolvedForm`]'s own docs
@@ -1202,6 +1252,7 @@ fn build_std_form_presolved(
         std: StdForm { n_total, n_rows, c, rows, cols, b: b_out, lb: new_lb, ub: new_ub },
         scaling: pre.scaling,
         substitutions: pre.substitutions,
+        parallel_col_substitutions: pre.parallel_col_substitutions,
         orig_of_free,
         sign,
         fixed_values,
@@ -1240,6 +1291,7 @@ fn unscale_result(
     result: SimplexResult,
     sc: &scaling::Scaling,
     substitutions: &[presolve::colsingleton::Substitution],
+    parallel_col_substitutions: &[presolve::parallelcols::Substitution],
     orig_of_free: &[usize],
     sign: &[f64],
     fixed_values: &[(usize, f64)],
@@ -1269,6 +1321,17 @@ fn unscale_result(
             }
             for sub in substitutions.iter().rev() {
                 x[sub.var] = sub.value(&x);
+            }
+            // `presolve::parallelcols::Substitution` runs strictly *after*
+            // every ordinary substitution above, in its own reverse-
+            // discovery order — see that type's own docs, and
+            // `PresolvedForm::parallel_col_substitutions`'s, for why this
+            // ordering alone is sufficient (a column it eliminates has zero
+            // row appearances left the instant it's eliminated, so no
+            // later-round ordinary substitution's `terms` can ever
+            // reference it).
+            for sub in parallel_col_substitutions.iter().rev() {
+                sub.apply(&mut x);
             }
             let x = scaling::unscale_x(sc, &x);
             SimplexResult { status: Status::Optimal, x: Some(x) }
@@ -1703,7 +1766,8 @@ fn run_phase(
     let mut w_buf = vec![0.0; m];
     let mut candidates_buf: Vec<Candidate> = Vec::with_capacity(m);
 
-    for iter_idx in 0..MAX_ITERS {
+    let max_iters = max_iters_for(m, std.n_total);
+    for iter_idx in 0..max_iters {
         let rhs = t.recompute_basics(lu);
 
         // Triggers (1) and (3): periodic residual / eta-file-fill checks.
@@ -2494,15 +2558,31 @@ impl DseState {
     /// switch has not yet applied.
     fn from_basis(m: usize, lu: &sparse_lu::FtLu) -> Self {
         let mut w = vec![1.0; m];
-        let mut e_i = vec![0.0; m];
         let mut scratch = vec![0.0; m];
         let mut z = vec![0.0; m];
-        for i in 0..m {
-            e_i[i] = 1.0;
-            lu.solve_transpose_into(&e_i, &mut scratch, &mut z);
-            e_i[i] = 0.0;
-            let norm_sq: f64 = z.iter().map(|&v| v * v).sum();
-            w[i] = norm_sq.max(STEEPEST_EDGE_FLOOR);
+        // `FtLu::solve_transpose_unit_into` is only exact on a
+        // freshly-factorized `u_seq` (`update_count() == 0` — see its own
+        // docs) — most `from_basis` callers are exactly that (every
+        // refactor-time DSE refresh), but the Devex->DSE in-place switch
+        // (`simplex.rs`'s own two call sites) can land here mid-solve with
+        // updates already applied, so this falls back to the unmodified
+        // dense `solve_transpose_into` sweep in that case rather than
+        // ever risking silent wrong weights.
+        if lu.update_count() == 0 {
+            for i in 0..m {
+                lu.solve_transpose_unit_into(i, &mut scratch, &mut z);
+                let norm_sq: f64 = z.iter().map(|&v| v * v).sum();
+                w[i] = norm_sq.max(STEEPEST_EDGE_FLOOR);
+            }
+        } else {
+            let mut e_i = vec![0.0; m];
+            for i in 0..m {
+                e_i[i] = 1.0;
+                lu.solve_transpose_into(&e_i, &mut scratch, &mut z);
+                e_i[i] = 0.0;
+                let norm_sq: f64 = z.iter().map(|&v| v * v).sum();
+                w[i] = norm_sq.max(STEEPEST_EDGE_FLOOR);
+            }
         }
         DseState { w, use_parallel: m > RAYON_SIZE_THRESHOLD }
     }
@@ -2914,7 +2994,7 @@ pub fn solve_lp_dual(variables: &[VariableData], objective: &Objective, constrai
     // classical path below (when none survived, the common case) or via
     // `extended_dual::solve_lp_dual_extended` (when `had_unbounded_structural`
     // is set) — see that parameter's own docs.
-    let PresolvedForm { std, scaling: sc, substitutions, orig_of_free, sign, fixed_values, shift, had_unbounded_structural } = match build_std_form_presolved(variables, objective, constraints, false) {
+    let PresolvedForm { std, scaling: sc, substitutions, parallel_col_substitutions, orig_of_free, sign, fixed_values, shift, had_unbounded_structural } = match build_std_form_presolved(variables, objective, constraints, false) {
         Ok(pf) => pf,
         Err(status) => return SimplexResult { status, x: None },
     };
@@ -2967,7 +3047,7 @@ pub fn solve_lp_dual(variables: &[VariableData], objective: &Objective, constrai
             }
         }
         if let Some(result) = ext_result {
-            return unscale_result(result, &sc, &substitutions, &orig_of_free, &sign, &fixed_values, &shift, variables.len());
+            return unscale_result(result, &sc, &substitutions, &parallel_col_substitutions, &orig_of_free, &sign, &fixed_values, &shift, variables.len());
         }
         // `None`: the extended solver hit one of its own documented
         // "should be unreachable" cases (a pivot selection with no
@@ -2993,11 +3073,11 @@ pub fn solve_lp_dual(variables: &[VariableData], objective: &Objective, constrai
         // `solve_lp`-vs-`solve_lp_dual` cross-check test exercised the
         // *dual* side of this exact scenario, never the primal one, once
         // `solve_lp` itself was removed as dead code).
-        let PresolvedForm { std, scaling: sc, substitutions, orig_of_free, sign, fixed_values, shift, .. } = match build_std_form_presolved(variables, objective, constraints, true) {
+        let PresolvedForm { std, scaling: sc, substitutions, parallel_col_substitutions, orig_of_free, sign, fixed_values, shift, .. } = match build_std_form_presolved(variables, objective, constraints, true) {
             Ok(pf) => pf,
             Err(status) => return SimplexResult { status, x: None },
         };
-        return unscale_result(solve_std_form_decomposed(&std, true), &sc, &substitutions, &orig_of_free, &sign, &fixed_values, &shift, variables.len());
+        return unscale_result(solve_std_form_decomposed(&std, true), &sc, &substitutions, &parallel_col_substitutions, &orig_of_free, &sign, &fixed_values, &shift, variables.len());
     }
     let profile_phases = std::env::var("ENOMOTO_PROF_PHASES").is_ok();
     let debug_eta_density = std::env::var("ENOMOTO_DEBUG_ETA_DENSITY").is_ok();
@@ -3113,7 +3193,7 @@ pub fn solve_lp_dual(variables: &[VariableData], objective: &Objective, constrai
             );
         }
     }
-    unscale_result(result, &sc, &substitutions, &orig_of_free, &sign, &fixed_values, &shift, variables.len())
+    unscale_result(result, &sc, &substitutions, &parallel_col_substitutions, &orig_of_free, &sign, &fixed_values, &shift, variables.len())
 }
 
 /// EXPERIMENTAL (measurement only, never exercised by production code):
@@ -3501,7 +3581,8 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
     let mut a_tilde_buf = vec![0.0; m];
     let mut e_tilde_buf = vec![0.0; m];
 
-    for _iter in 0..MAX_ITERS {
+    let max_iters = max_iters_for(std.n_rows, std.n_total);
+    for _iter in 0..max_iters {
         if profile_phases {
             prof_phases::ITERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }

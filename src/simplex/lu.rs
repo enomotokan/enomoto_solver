@@ -1747,6 +1747,23 @@ impl FtLu {
         }
     }
 
+    /// [`Self::u_transpose_solve_into`], restricted to `u_seq[start..]` —
+    /// see [`FtLu::solve_transpose_unit_into`]'s own docs for why skipping
+    /// the `[0, start)` prefix is *exact*, not approximate, whenever `z`
+    /// is already known to be all-zero there on entry (true only for a
+    /// freshly-factorized `u_seq` where Vec position equals slot, per
+    /// that method's own precondition — never called on its own from
+    /// anywhere `try_update` may have reordered `u_seq`).
+    fn u_transpose_solve_from(&self, z: &mut [f64], start: usize) {
+        for eta in &self.u_seq[start..] {
+            let p = eta.slot;
+            let y: f64 = match &eta.off_diag {
+                OffDiag::Sparse(v) => v.iter().map(|&(row_step, v)| v * z[row_step]).sum(),
+                OffDiag::Dense { data, .. } => data.iter().zip(z.iter()).map(|(&v, &zi)| v * zi).sum(),
+            };
+            z[p] = (z[p] - y) / eta.pivot;
+        }
+    }
 
     /// `U_k^{-1}` applied in place: processes the eta sequence in
     /// **reverse** order, each step solving via eq. (7). Hyper-sparse: same
@@ -2016,6 +2033,74 @@ impl FtLu {
         let mut out = vec![0.0; m];
         self.solve_transpose_into(rhs, &mut scratch, &mut out);
         out
+    }
+
+    /// Sparse-seed BTRAN specialized for `rhs = e_i` (a single unit vector
+    /// at original row index `i`), built for [`super::DseState::from_basis`]'s
+    /// own `m` back-to-back unit-vector solves after every refactorization
+    /// — measured as 27% of `dfl001`'s total wall time before this method
+    /// existed (`dfl001-bottleneck-max-iters-cap` memory), because that
+    /// call site pays `solve_transpose_into`'s full `O(m)`-per-call cost
+    /// `m` times over, every refactorization.
+    ///
+    /// **Requires `self.update_count() == 0`** — checked by the caller
+    /// (`update_count()` is already the cheapest possible signal, so this
+    /// method itself only asserts it rather than re-deriving it). The
+    /// optimization below exploits a structural invariant of a *freshly
+    /// factorized* `u_seq` (`FtLu::new`'s own construction: `u_seq[slot]`'s
+    /// `off_diag` entries only ever reference `row_step < slot`, `U`'s own
+    /// upper-triangular structure — the same property [`Self::u_solve_into`]'s
+    /// own docs describe, mirrored for the transpose direction) that
+    /// `try_update` is free to break (its own Forrest-Tomlin bump-and-
+    /// replace algorithm reorders `u_seq` and can introduce entries
+    /// referencing a *later* row-step than before) — so this method is
+    /// only exact on a `u_seq` no `try_update` call has touched yet.
+    ///
+    /// **The optimization**: permuting `e_i` (`col_perm_inv[i]`) yields a
+    /// single nonzero at step `s0`; [`Self::u_transpose_solve_into`]'s own
+    /// forward recurrence can only ever produce a nonzero at slot `p` if
+    /// some earlier slot `< p` it depends on is already nonzero — with
+    /// nothing nonzero below `s0`, every slot `< s0` is therefore provably
+    /// still `0` after the sweep, without computing a single one of their
+    /// dot products. Starting the sweep at `s0` ([`Self::u_transpose_solve_from`])
+    /// instead of `0` is exact, not approximate, and needs no DFS/epoch
+    /// bookkeeping the way a full Gilbert-Peierls reach-set restriction
+    /// would (see [`LuFactors::l_solve_sparse_into`]'s own docs for that
+    /// technique, and `[[dfl001-bottleneck-max-iters-cap]]`/this crate's
+    /// own history for why a *fuller* sparsification of the shared
+    /// `u_transpose_solve_into` — applied to every per-iteration `rho_p`
+    /// BTRAN, not just `from_basis`'s refactor-time calls — was tried and
+    /// reverted as a net aggregate regression across the full Netlib set):
+    /// that measurement's DFS/epoch overhead was paid on tens of thousands
+    /// of per-iteration calls across many small problems where the skip
+    /// bought little; this plain prefix skip carries no such per-call
+    /// bookkeeping cost, and `from_basis`'s own access pattern (`m` calls,
+    /// but only at refactor time) concentrates exactly on the large/
+    /// refactor-heavy instances (`dfl001`, `pilot87`) a fuller
+    /// sparsification would have helped too, without the small-problem
+    /// dilution that sank the earlier attempt.
+    ///
+    /// `L^{-T}` (this BTRAN's tail, applied after the skip above via the
+    /// unmodified [`LuFactors::l_transpose_solve_into`]) is left exactly
+    /// as dense as it always was — see that method's own docs for why a
+    /// *second* attempt to sparsify it specifically was never worth
+    /// trying (its own input is typically no longer sparse by that point,
+    /// fill having already spread across `[s0, m)` during the `U^{-T}`
+    /// sweep above).
+    ///
+    /// **Precondition/postcondition** (mirrors [`Self::solve_sparse_into`]'s
+    /// own convention): `scratch` must be all-zero on entry, and is
+    /// restored to all-zero before returning — `L^{-T}`'s own reverse
+    /// sweep can scatter fill back into positions below `s0`, so (unlike
+    /// [`LuFactors::l_solve_sparse_into`]'s own narrower reach-set
+    /// cleanup) nothing cheaper than a full `O(m)` reset is safe here.
+    pub fn solve_transpose_unit_into(&self, i: usize, scratch: &mut [f64], out: &mut [f64]) {
+        debug_assert_eq!(self.r_etas.len(), 0, "solve_transpose_unit_into requires a fresh (update-free) factorization");
+        let s0 = self.base.col_perm_inv[i];
+        scratch[s0] = 1.0;
+        self.u_transpose_solve_from(scratch, s0);
+        self.base.l_transpose_solve_into(scratch, out);
+        scratch.fill(0.0);
     }
 
     /// Records a Forrest-Tomlin update replacing the column at basis slot
@@ -2861,6 +2946,66 @@ mod tests {
         }
     }
 
+
+    /// Deterministic xorshift-ish LCG, no external `rand` dependency
+    /// needed for a test fixture this small.
+    fn next_rand(state: &mut u64) -> f64 {
+        *state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        ((*state >> 33) as f64 / (1u64 << 31) as f64) - 1.0
+    }
+
+    /// A moderately-sized, genuinely off-diagonal sparse matrix (diagonal
+    /// dominance guarantees `factorize` never needs a singularity
+    /// fallback) — big enough that `factorize`'s own Markowitz pivoting
+    /// produces a non-identity `col_perm`/`row_perm` and real off-diagonal
+    /// `U`/`L` fill, unlike the crate's other, smaller hand-written
+    /// fixtures.
+    fn random_sparse_diag_dominant(m: usize, seed: u64) -> Vec<Vec<(usize, f64)>> {
+        let mut state = seed;
+        let mut rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
+        for i in 0..m {
+            let mut off_sum = 0.0f64;
+            let n_off = 3.min(m - 1);
+            let mut cols: Vec<usize> = Vec::with_capacity(n_off);
+            for _ in 0..n_off {
+                let j = ((next_rand(&mut state).abs() * m as f64) as usize).min(m - 1);
+                if j != i && !cols.contains(&j) {
+                    cols.push(j);
+                }
+            }
+            for &j in &cols {
+                let v = next_rand(&mut state) * 2.0;
+                off_sum += v.abs();
+                rows[i].push((j, v));
+            }
+            rows[i].push((i, off_sum + 5.0 + next_rand(&mut state).abs()));
+            rows[i].sort_unstable_by_key(|&(c, _)| c);
+        }
+        rows
+    }
+
+    #[test]
+    fn solve_transpose_unit_into_matches_dense_on_fresh_factorization() {
+        let m = 40;
+        for seed in [1u64, 2, 3, 4, 5] {
+            let rows = random_sparse_diag_dominant(m, seed);
+            let base = factorize(m, &rows).expect("diagonally dominant matrix must factorize");
+            let state = FtLu::new(base);
+            assert_eq!(state.update_count(), 0, "fresh factorization must have no updates");
+
+            let mut scratch = vec![0.0; m];
+            let mut out = vec![0.0; m];
+            for i in 0..m {
+                let mut e_i = vec![0.0; m];
+                e_i[i] = 1.0;
+                let expected = state.solve_transpose(&e_i);
+
+                state.solve_transpose_unit_into(i, &mut scratch, &mut out);
+                assert_eq!(out, expected, "seed={seed} i={i}: solve_transpose_unit_into diverged from dense solve_transpose");
+                assert!(scratch.iter().all(|&v| v == 0.0), "seed={seed} i={i}: scratch not restored to all-zero");
+            }
+        }
+    }
 
     fn to_sparse(dense: &[f64]) -> Vec<(usize, f64)> {
         dense.iter().enumerate().filter(|&(_, &v)| v != 0.0).map(|(i, &v)| (i, v)).collect()

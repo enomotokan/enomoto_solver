@@ -90,12 +90,15 @@
 //! simplex method's own phase 1 / dual-feasible crash) — this pipeline
 //! introduces no new variable of its own to either engine's standard form.
 
+pub mod aggregator;
 pub mod colsingleton;
 pub mod doubleton;
 pub mod dominatedcol;
 pub mod dualfix;
 pub mod dualpropagate;
+pub mod foldfixed;
 pub mod freevar;
+pub mod parallelcols;
 pub mod parallelrows;
 pub mod propagate;
 pub mod redundancy;
@@ -214,6 +217,22 @@ pub struct ExtendedPresolveResult {
     /// most one of the two.
     pub unbounded: bool,
     pub substitutions: Vec<colsingleton::Substitution>,
+    /// Every [`parallelcols::merge_parallel_columns`] fold across every
+    /// round — see that module's own docs for why this can't join
+    /// `substitutions` above (a different recovery shape, reading *and*
+    /// writing `kept`'s own slot rather than a one-way linear formula from
+    /// already-known inputs) and why it's still safe to resolve as a fully
+    /// separate pass, strictly *after* every ordinary `substitutions` entry
+    /// (in that same reverse-discovery order — see
+    /// [`parallelcols::Substitution::apply`]'s own docs on why that
+    /// ordering alone is enough, with no interleaving against the other
+    /// list ever required): a column this module eliminates has zero
+    /// remaining row appearances the instant it's eliminated (its entries
+    /// are dropped from `a`/`g` outright, not merely fixed), so no *later*
+    /// round's row-based substitution (`doubleton`/`colsingleton`/
+    /// `aggregator`) can ever reference it as a term — the two lists can
+    /// never need to interleave.
+    pub parallel_col_substitutions: Vec<parallelcols::Substitution>,
 }
 
 fn extended_infeasible(sc: Scaling, a: Csr, b: Vec<f64>, c: Vec<f64>, n: usize) -> ExtendedPresolveResult {
@@ -231,6 +250,7 @@ fn extended_infeasible(sc: Scaling, a: Csr, b: Vec<f64>, c: Vec<f64>, n: usize) 
         infeasible: true,
         unbounded: false,
         substitutions: Vec::new(),
+        parallel_col_substitutions: Vec::new(),
     }
 }
 
@@ -249,6 +269,7 @@ fn extended_unbounded(sc: Scaling, a: Csr, b: Vec<f64>, c: Vec<f64>, n: usize) -
         infeasible: false,
         unbounded: true,
         substitutions: Vec::new(),
+        parallel_col_substitutions: Vec::new(),
     }
 }
 
@@ -383,15 +404,32 @@ pub fn run_extended(
     // (+1.5%), 73/73 objective values unchanged either way. Left in the
     // module tree, tested, for the reason each docstring gives (future
     // problem shapes / a relaxed finite-bounds invariant), not deleted.
+    //
+    // Re-measured 2026-09-20 against the current pipeline (post single
+    // dual-path unification, freevar elimination, DSE refresh-on-refactor —
+    // all postdate the original measurement above): all six previously-
+    // shelved reductions (`parallelrows`, `rowdominance`, `dominatedcol`,
+    // `stuffing` here plus `sparsify` once per outer round right before
+    // `colsingleton` and `smallcoeff` once at the very end) wired in
+    // together, full 73-problem set, 73/73 still solved to optimality with
+    // matching objectives either way (the `smallcoeff`-wiring `perold`
+    // crash this module's docs warned of did *not* reproduce under the
+    // current pipeline) — but aggregate `ours` time still regressed, 4.248s
+    // unwired vs. 5.002s wired (+17.8%), concentrated on the same kind of
+    // degenerate/shape-sensitive instances this crate's history keeps
+    // finding for structural presolve changes: `cycle` +289%, `perold`
+    // +88%, `wood1p` +55%. 10 of 73 instances improved (best: `scfxm2`
+    // -23%), nowhere near enough to offset the losses. Conclusion
+    // unchanged: left unwired.
 
     // Frozen once, before any round's `propagate` call ever runs — see
-    // `dualpropagate::find_implied_equalities`'s own docs for why it needs
-    // the model's *original* bounds specifically, not whatever `lb`/`ub`
-    // a later round's own activity-based tightening has since narrowed
-    // them to.
+    // `dualpropagate::run`'s own docs for why it needs the model's
+    // *original* bounds specifically, not whatever `lb`/`ub` a later
+    // round's own activity-based tightening has since narrowed them to.
     let (orig_lb, orig_ub, _, _) = propagate::extract_bounds(n, &g, &h);
 
     let mut substitutions: Vec<colsingleton::Substitution> = Vec::new();
+    let mut parallel_col_substitutions: Vec<parallelcols::Substitution> = Vec::new();
 
     // Latches off permanently the first time a round's `doubleton` call
     // finds nothing: unlike `rowsingleton`/`colsingleton` (cheap enough to
@@ -409,8 +447,28 @@ pub fn run_extended(
 
     // Same one-way latch, same reason: `dualpropagate`'s own transpose-and-
     // propagate call is a full-matrix pass, worth skipping once a round's
-    // call finds no new implied-equality row for it to promote.
+    // call finds neither a new implied-equality row to promote nor a new
+    // column to fix (its two reductions — see `dualpropagate::run`'s docs).
     let mut dualpropagate_active = true;
+
+    // Same one-way latch, same reason again: `parallelcols`'s own
+    // signature-grouping scan is a full-matrix pass (see its own module
+    // docs' "Candidate search" section), worth skipping once it stops
+    // finding anything. *Not* a simple one-strike latch like
+    // `doubleton_active` above, though — a 2026-09-20 survey of every one
+    // of the 73 in-scope Netlib instances found `ganges`'s own first
+    // nonzero-elimination round is round *2*, its round 1 finding nothing
+    // at all (only `czprob`/`greenbea` find something on round 1 itself,
+    // then again later): a one-strike version of this latch turned off
+    // after `ganges`'s own empty round 1, before round 2 — the one that
+    // actually matters for it — ever ran, silently losing that instance's
+    // entire reduction (caught by re-running this exact survey after
+    // first writing this latch as one-strike). Requires *two consecutive*
+    // empty rounds before disengaging instead — `ganges` alone would still
+    // cost one avoidable extra call across its own 9 rounds, judged not
+    // worth a third latch state to also chase down.
+    let mut parallelcols_active = true;
+    let mut parallelcols_prev_empty = false;
 
     // Fixpoint detection: a round that leaves `a`/`g`'s row counts and
     // every bound unchanged found nothing a further round could act on
@@ -464,41 +522,87 @@ pub fn run_extended(
         // someday handling true MIP columns, where the paper's own
         // reported gains were largest) could still exercise it.
 
-        // Promote every inequality row `dualpropagate` proves tight in
-        // every optimal solution (see that module's own docs) into the
-        // equality system outright — `doubleton`/`colsingleton`/
-        // `rowsingleton` already know what to do with a true equality,
-        // so this needs no new substitution logic of its own, just a
-        // relabeling of which system a row lives in before those passes
-        // run below.
+        // Two reductions off one dual-feasibility propagation (see
+        // `dualpropagate`'s own docs for both): promote every inequality
+        // row it proves tight in every optimal solution into the equality
+        // system outright — `doubleton`/`colsingleton`/`rowsingleton`
+        // already know what to do with a true equality, so this needs no
+        // new substitution logic of its own, just a relabeling of which
+        // system a row lives in before those passes run below — and fix
+        // every column whose reduced cost the same propagated dual box
+        // proves one-signed everywhere (HiGHS's own "dominated column";
+        // see `dualpropagate`'s own "Column fixing" docs section), applied
+        // the same way `dualfix`'s own fixes are just above.
         if dualpropagate_active {
-            let implied = timed_step!("dualpropagate", dualpropagate::find_implied_equalities(n, &a, &cur_real_rows, &c, &lb, &ub, &orig_lb, &orig_ub, prop_passes));
-            if implied.is_empty() {
+            let dual_red = timed_step!("dualpropagate", dualpropagate::run(n, &a, &cur_real_rows, &c, &lb, &ub, &orig_lb, &orig_ub, prop_passes));
+            if dual_red.implied_equalities.is_empty() && dual_red.fixed_columns.is_empty() {
                 dualpropagate_active = false;
             } else {
-                let ar = a.as_ref();
-                let mut a_rows: Vec<Vec<(usize, f64)>> = (0..ar.nrows()).map(|i| ar.col_indices_of_row(i).zip(ar.values_of_row(i)).map(|(j, &v)| (j, v)).collect()).collect();
-                let mut new_b = b.clone();
-                let mut promoted = vec![false; cur_real_rows.len()];
-                for &gi in &implied {
-                    promoted[gi] = true;
-                    a_rows.push(cur_real_rows[gi].clone());
-                    new_b.push(cur_real_rhs[gi]);
+                if std::env::var("ENOMOTO_DEBUG_DUALPROPAGATE").is_ok() {
+                    eprintln!("DEBUG_DUALPROPAGATE: implied_equalities={} fixed_columns={}", dual_red.implied_equalities.len(), dual_red.fixed_columns.len());
                 }
-                a = csr_from_rows(&a_rows, n);
-                b = new_b;
-                let mut kept_rows = Vec::with_capacity(cur_real_rows.len() - implied.len());
-                let mut kept_rhs = Vec::with_capacity(cur_real_rhs.len() - implied.len());
-                for (i, (row, rhs)) in cur_real_rows.into_iter().zip(cur_real_rhs.into_iter()).enumerate() {
-                    if !promoted[i] {
-                        kept_rows.push(row);
-                        kept_rhs.push(rhs);
+                for &(j, value) in &dual_red.fixed_columns {
+                    lb[j] = value;
+                    ub[j] = value;
+                }
+                if !dual_red.implied_equalities.is_empty() {
+                    let implied = dual_red.implied_equalities;
+                    let ar = a.as_ref();
+                    let mut a_rows: Vec<Vec<(usize, f64)>> = (0..ar.nrows()).map(|i| ar.col_indices_of_row(i).zip(ar.values_of_row(i)).map(|(j, &v)| (j, v)).collect()).collect();
+                    let mut new_b = b.clone();
+                    let mut promoted = vec![false; cur_real_rows.len()];
+                    for &gi in &implied {
+                        promoted[gi] = true;
+                        a_rows.push(cur_real_rows[gi].clone());
+                        new_b.push(cur_real_rhs[gi]);
                     }
+                    a = csr_from_rows(&a_rows, n);
+                    b = new_b;
+                    let mut kept_rows = Vec::with_capacity(cur_real_rows.len() - implied.len());
+                    let mut kept_rhs = Vec::with_capacity(cur_real_rhs.len() - implied.len());
+                    for (i, (row, rhs)) in cur_real_rows.into_iter().zip(cur_real_rhs.into_iter()).enumerate() {
+                        if !promoted[i] {
+                            kept_rows.push(row);
+                            kept_rhs.push(rhs);
+                        }
+                    }
+                    cur_real_rows = kept_rows;
+                    cur_real_rhs = kept_rhs;
                 }
-                cur_real_rows = kept_rows;
-                cur_real_rhs = kept_rhs;
             }
         }
+
+        // Fold every column fixed so far (by `dualfix`/`dualpropagate` just
+        // above, by an earlier round's `rowsingleton`, or from the model's
+        // own input bounds) straight out of `A`'s equality rows and `G`'s
+        // real inequality rows — see `foldfixed`'s own docs for why this
+        // needs its own pass: fixing a bound alone leaves a row's *literal*
+        // term count unchanged, which would otherwise hide a row that just
+        // became a genuine `rowsingleton`/`doubleton` candidate (or short
+        // enough for `aggregator`'s implied-free gate) behind stale dead
+        // weight until some *later* round's `extract_bounds` call happened
+        // to notice. Run unconditionally every round rather than gated on
+        // "did anything get fixed this round" — same reasoning as
+        // `reduce_inequalities(round)`'s own unconditional placement
+        // further down: an O(nnz) scan cheap enough that the bookkeeping
+        // to skip it (correctly, across every source of a fix — including
+        // `rowsingleton`'s own, decided later in this same round's inner
+        // loop and easy to under-count here) isn't worth it.
+        let ar = a.as_ref();
+        let a_rows: Vec<Vec<(usize, f64)>> = (0..ar.nrows()).map(|i| ar.col_indices_of_row(i).zip(ar.values_of_row(i)).map(|(j, &v)| (j, v)).collect()).collect();
+        let fold_a = timed_step!("foldfixed(A)", foldfixed::fold_fixed_columns(&a_rows, &b, &lb, &ub, RowSense::Eq));
+        if fold_a.infeasible {
+            return extended_infeasible(sc, a, b, c, n);
+        }
+        a = csr_from_rows(&fold_a.rows, n);
+        b = fold_a.rhs;
+
+        let fold_g = timed_step!("foldfixed(G)", foldfixed::fold_fixed_columns(&cur_real_rows, &cur_real_rhs, &lb, &ub, RowSense::Le));
+        if fold_g.infeasible {
+            return extended_infeasible(sc, a, b, c, n);
+        }
+        cur_real_rows = fold_g.rows;
+        cur_real_rhs = fold_g.rhs;
 
         // Inner fixpoint: rowsingleton -> colsingleton, up to `inner_rounds`
         // times within this same outer round (before `propagate`/`dualfix`
@@ -534,7 +638,7 @@ pub fn run_extended(
             a = rs.a;
             b = rs.b;
 
-            let (ng, nh) = propagate::rebuild_g(n, cur_real_rows, cur_real_rhs, &lb, &ub);
+            let (ng, nh) = propagate::rebuild_g(n, cur_real_rows.clone(), cur_real_rhs.clone(), &lb, &ub);
             g = ng;
             h = nh;
 
@@ -641,6 +745,166 @@ pub fn run_extended(
             cur_real_rhs = refreshed_real_rhs;
         }
 
+        // Aggregator (HiGHS's own name; `HPresolve::aggregator`): eliminates
+        // every column a single one of `A`'s own equality rows already
+        // proves implied-free — its box bound already forced redundant by
+        // that row's own activity — reachable through >= 2 such rows, with
+        // no `colsingleton`-style bound-preservation row ever needed (see
+        // `aggregator`'s own module docs for the full history: a first
+        // version with no implied-free gate at all was a severe regression;
+        // a second, cross-row-aggregate version fixed that but produced a
+        // false `Unbounded` on `shell`, caught by this crate's own
+        // objective-mismatch check; this row-local version is the one
+        // that's actually correct and wired in). Placed right here,
+        // mirroring HiGHS's own placement in `HPresolve::presolve`
+        // (`HPresolve.cpp:5901-5917`: right after its fast singleton/
+        // doubleton loop converges, each outer main-loop iteration) — this
+        // crate's own outer round loop already re-enters
+        // `rowsingleton`/`doubleton`/`colsingleton`'s inner fixpoint on the
+        // next round whenever this call changes anything (via the
+        // `signature` fixpoint check below), giving the same "called
+        // repeatedly, cascading with the fast loop" behavior HiGHS's own
+        // `problemSizeReduction() > 0.05 -> continue` re-entry achieves,
+        // without needing a separate re-entry trigger of its own.
+        //
+        // Measured on the full 73-problem Netlib set (`ENOMOTO_DISABLE_AGGREGATOR`
+        // A/B, two runs each way): aggregate `ours` time is statistically
+        // indistinguishable from unwired (4.326-4.335s wired vs.
+        // 4.215-4.343s unwired — well inside this machine's own ~3% run-to-
+        // run spread), 73/73 objectives matching either way (`cycle`'s own
+        // pre-existing ~3e-4 mismatch unaffected). Individual instances
+        // move more than that noise band in both directions: `stocfor2`
+        // (this module's own motivating instance) -34% (0.191s -> 0.126s,
+        // iterations 1665 -> ~1550), `shell` -30%, `sc205`/`scrs8`/
+        // `scorpion` -21% to -29%; `maros` +59% (951 -> 889 iterations, but
+        // each one costlier — the same fill-in-vs-iteration-count tradeoff
+        // this crate's history keeps finding on specific instances),
+        // `recipe`/`finnis`/`capri`/`agg3`/`scagr25`/`scfxm3` +18-49% (all
+        // small in absolute time). Net: worth keeping wired in, unlike this
+        // module's own two earlier reverted attempts — genuine, reproducible
+        // wins on several instances against a wash everywhere else, not a
+        // one-sided regression.
+        let agg = if std::env::var("ENOMOTO_DISABLE_AGGREGATOR").is_ok() {
+            None
+        } else {
+            Some(timed_step!("aggregator", aggregator::eliminate_implied_free_columns(n, &a, &b, &c, &lb, &ub, &cur_real_rows, &cur_real_rhs)))
+        };
+        if let Some(agg) = agg {
+            if std::env::var("ENOMOTO_DEBUG_AGGREGATOR").is_ok() {
+                eprintln!("DEBUG_AGGREGATOR: eliminated={}", agg.substitutions.len());
+            }
+            if !agg.substitutions.is_empty() {
+                a = agg.a;
+                b = agg.b;
+                c = agg.c;
+                for sub in &agg.substitutions {
+                    lb[sub.var] = 0.0;
+                    ub[sub.var] = 0.0;
+                }
+                substitutions.extend(agg.substitutions);
+                cur_real_rows = agg.real_rows;
+                cur_real_rhs = agg.real_rhs;
+                // Rebuild `g`/`h` from the just-updated `real_rows`/`lb`/`ub`
+                // so the mid-round dedup call just below, and the next outer
+                // round's own `propagate` call, see this pass's own changes
+                // — same reason `doubleton`/`colsingleton` above must do
+                // this (via the inner loop's own `rebuild_g` call) before
+                // anything downstream reads `g`.
+                let (ng, nh) = propagate::rebuild_g(n, cur_real_rows.clone(), cur_real_rhs.clone(), &lb, &ub);
+                g = ng;
+                h = nh;
+            }
+        }
+
+        // ParallelColumns (see `parallelcols`'s own module docs): placed
+        // right after `aggregator`, mirroring HiGHS's own log grouping of
+        // "Aggregator" and "Parallel rows and columns" as adjacent passes
+        // within the same outer main-loop iteration. Latched off after two
+        // *consecutive* empty rounds (see `parallelcols_active`'s own docs
+        // for why one strike isn't enough here, unlike
+        // `doubleton_active`/`dualpropagate_active` above) — a 2026-09-20
+        // survey of every one of the 73 in-scope Netlib instances found
+        // only three (`ganges`, `czprob`, `greenbea`) with any nonzero-
+        // elimination round after the first, so this latch skips the
+        // (otherwise pure-overhead) repeat scan on most rounds of the
+        // other 70.
+        //
+        // **Measured on the full 73-problem Netlib set (2026-09-20,
+        // `ENOMOTO_ENABLE_PARALLELCOLS` A/B, before this latch existed):
+        // net regression, +8.6% aggregate `ours` time (4.372s -> 4.746s),
+        // concentrated on the same kind of degenerate/shape-sensitive
+        // instances this crate's history keeps finding for *every*
+        // structural presolve extension tried so far** (`aggregator`'s own
+        // two earlier reverted attempts, the 6-technique bundle,
+        // `parallelrows`/`dominatedcol`/`rowdominance`/`sparsify`/
+        // `stuffing` — see each module's own docs): `wood1p` +33% (0
+        // eliminations there, every round — pure candidate-search tax,
+        // exactly what this latch now heads off), `scfxm3` +28%, `perold`
+        // +22%, `maros` +23%, `pilotnov` +11%, `25fv47`/`degen3`/`stocfor2`
+        // +4-10%. A follow-up 2026-09-21 measurement (after this latch, and
+        // after the false-`Infeasible` fix below) found the same
+        // instances' iteration counts don't uniformly increase — on
+        // several (`nesm`/`scfxm3`/`ganges`) they actually *decrease* while
+        // wall time still rises, because `XB_DRIFT_REL_TOL`-triggered
+        // refactorizations increase 2-4x (see
+        // `parallelcols-regression-mechanism` memory) — a real but so far
+        // unaddressed cost, not a correctness concern.
+        //
+        // **Turned on by default anyway (2026-09-21)**, at the user's
+        // explicit direction, to make forward progress on the actual
+        // structural win (`standgub`'s 908 -> 830 columns, matching HiGHS's
+        // easier exact-cost-ratio subset of its own 396-column "Parallel
+        // rows and columns" reduction there) while leaving the refactor-
+        // frequency regression above as deliberately deferred future work
+        // — mirrors `aggregator`'s own `ENOMOTO_DISABLE_AGGREGATOR` opt-out
+        // precedent instead of staying opt-in.
+        //
+        // Before flipping the default, a separate correctness bug was
+        // found and fixed (see `parallelcols-greenbea-false-infeasible`
+        // memory, and the merge loop's own comment in `parallelcols.rs`):
+        // a merge with an opposite-signed leading coefficient could turn a
+        // `kept` column genuinely free (`lb=-inf` *and* `ub=+inf`), which
+        // `simplex.rs`'s own `x_j = x_j^+ - x_j^-` split handles
+        // correctly on its own, but whose two split halves are forced onto
+        // *exactly* the same rows with opposite coefficients — degenerate
+        // enough on a real Netlib instance (`greenbea`, 5405 columns) to
+        // exhaust `extended_dual`'s own `MAX_ITERS` budget, falling back to
+        // the classical `BIG_M` path (already known unreliable — see
+        // `bigm-fallback-invalid-reference` memory), which then reported a
+        // false `Infeasible`. Fixed by rejecting that specific fold
+        // outright rather than by touching anything downstream.
+        let pc = if parallelcols_active && std::env::var("ENOMOTO_DISABLE_PARALLELCOLS").is_err() {
+            Some(timed_step!("parallelcols", parallelcols::merge_parallel_columns(n, &a, &cur_real_rows, &c, &lb, &ub)))
+        } else {
+            None
+        };
+        if let Some(pc) = pc {
+            if std::env::var("ENOMOTO_DEBUG_PARALLELCOLS").is_ok() {
+                eprintln!("DEBUG_PARALLELCOLS: eliminated={}", pc.substitutions.len());
+            }
+            if pc.substitutions.is_empty() {
+                if parallelcols_prev_empty {
+                    parallelcols_active = false;
+                }
+                parallelcols_prev_empty = true;
+            } else {
+                parallelcols_prev_empty = false;
+                a = pc.a;
+                c = pc.c;
+                lb = pc.lb;
+                ub = pc.ub;
+                cur_real_rows = pc.real_rows;
+                parallel_col_substitutions.extend(pc.substitutions);
+                // Same reason as `aggregator`'s own rebuild just above: the
+                // mid-round dedup call and the next round's `propagate`
+                // must see this pass's own row/bound changes, not a stale
+                // `g`/`h`.
+                let (ng, nh) = propagate::rebuild_g(n, cur_real_rows.clone(), cur_real_rhs.clone(), &lb, &ub);
+                g = ng;
+                h = nh;
+            }
+        }
+
         // Re-run the cheap hash-based duplicate-row pass on `(g, h)` every
         // outer round, not just once before this loop starts (the original
         // design, mirroring `reduce_equalities`'s own one-shot placement) —
@@ -711,6 +975,7 @@ pub fn run_extended(
             infeasible: true,
             unbounded: false,
             substitutions,
+            parallel_col_substitutions,
         };
     }
 
@@ -796,5 +1061,6 @@ pub fn run_extended(
         infeasible: false,
         unbounded: false,
         substitutions,
+        parallel_col_substitutions,
     }
 }

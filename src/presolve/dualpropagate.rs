@@ -101,30 +101,88 @@
 //! every other pass in this pipeline): a row promoted to an implied
 //! equality this call is picked up by `doubleton`/`colsingleton` starting
 //! next round, not immediately re-examined within this same call.
+//!
+//! ## Column fixing (HiGHS's "dominated column", reached this module's way)
+//!
+//! The same propagated `[dlo_i, dhi_i]` box on every real row's dual `d_i`
+//! that [`run`] reads out for row promotion also bounds every column's own
+//! reduced cost `r_j = c_j + sum_i d_i * M_ij`, by plain interval
+//! arithmetic over `M_ij`'s already-collected `col_terms[j]` entries — not
+//! just the columns whose own infinite bound helped build the box in the
+//! first place, *any* column sharing a row with one of those. The same
+//! box-constrained-Lagrangian argument the module docs above use to derive
+//! `r_j`'s forced sign for an infinite-bound column (minimizing
+//! `c^T x + d^T(\text{row terms})` over a box `[lb,ub]` independently per
+//! coordinate: `r_j > 0` forces `x_j` down to `lb_j`, `r_j < 0` up to
+//! `ub_j`) applies unconditionally, since it only assumes `d` is *some*
+//! dual-optimal value — which the propagated box always contains, no
+//! matter which of its own bounds happen to be finite. So: if the box's
+//! own worst case still leaves `r_j` strictly one-signed (`rlo_j > 0` or
+//! `rhi_j < 0`, computed by interval arithmetic over the box), that sign
+//! holds at the *true* optimal `d` too, and the column can be fixed
+//! outright — reading out the same fixed point [`run`] already computed,
+//! no extra propagation pass. This is HiGHS's `HPresolve.cpp` "dominated
+//! column" reduction (`impliedDualRowBounds` feeding `isDominatedCol`),
+//! *not* Andersen & Andersen's column-vs-column comparison
+//! ([`super::dominatedcol`], a different, complementary technique reached
+//! from an entirely different angle) — this crate's own name collision is
+//! coincidental, not a claim the two modules do the same thing.
+//!
+//! This is exactly what closes the gap this crate's own presolve leaves on
+//! network-shaped models dense with equality-row column singletons (e.g.
+//! Netlib's `seba`: HiGHS reduces it to 2 rows / 8 columns, largely via
+//! this reduction's own long fix/substitute cascade — see this crate's
+//! project memory for the full investigation): such a column's cost-0,
+//! one-sided-bound "slack" is exactly the case
+//! [`find_implied_equalities`]'s own infinite-bound test already builds a
+//! dual-sign constraint from, but the *box* variable sharing that same
+//! equality row (finite on both sides, so invisible to that test's own
+//! column selection) is precisely the kind of column only this read-out
+//! can fix — `dualfix`'s simple lock-counting can't reach it either,
+//! since it explicitly disqualifies any column touching an equality row.
+//! Once fixed, the row shrinks by one variable, which is exactly the
+//! "row now short enough to be implied-free" condition `aggregator`
+//! needs to fire, cascading into everything downstream that already knows
+//! what to do with a fixed column or a shorter equality row (no new
+//! substitution logic needed here either).
 
 use crate::presolve::propagate;
 use crate::sparse::{csr_from_rows, Csr};
 
 const TOL: f64 = 1e-9;
 
-/// Returns the indices into `real_g_rows` of every row proven tight in
-/// every optimal solution (an *implied* equality) by propagating the
-/// dual feasibility system derived from `c`/`orig_lb`/`orig_ub` (see the
-/// module docs for why the *original*, not the current round's, bounds)
-/// and both `a` and `real_g_rows`'s own coefficients. `lb`/`ub` are the
-/// current round's bounds, consulted only to recognize a column already
-/// fixed to a point (`lb[j] == ub[j]`), which contributes nothing
-/// regardless of its original bounds. `a`'s rows contribute their own
-/// (always-free-sign) duals to the propagated system but are never
-/// themselves returned — they are already part of the equality system
-/// the caller maintains, with nothing left to promote.
-pub fn find_implied_equalities(n: usize, a: &Csr, real_g_rows: &[Vec<(usize, f64)>], c: &[f64], lb: &[f64], ub: &[f64], orig_lb: &[f64], orig_ub: &[f64], passes: usize) -> Vec<usize> {
+/// Bundles both reductions [`run`] reads out of one dual-feasibility
+/// propagation pass: `implied_equalities` (indices into `real_g_rows`
+/// proven tight in every optimum — see the module docs) and
+/// `fixed_columns` (`(column index, bound value)` pairs — always one of
+/// that column's own `lb[j]`/`ub[j]`, whichever side its reduced cost is
+/// proven pinned to; see the module docs' "Column fixing" section).
+#[derive(Default)]
+pub struct DualReductions {
+    pub implied_equalities: Vec<usize>,
+    pub fixed_columns: Vec<(usize, f64)>,
+}
+
+/// Propagates the dual feasibility system derived from `c`/`orig_lb`/
+/// `orig_ub` (see the module docs for why the *original*, not the current
+/// round's, bounds) and both `a` and `real_g_rows`'s own coefficients, and
+/// reads out both reductions the resulting propagated dual box proves —
+/// see [`DualReductions`] and the module docs' "Column fixing" section for
+/// the second half. `lb`/`ub` are the current round's bounds, consulted
+/// to recognize a column already fixed to a point (`lb[j] == ub[j]`),
+/// which contributes nothing to the propagated system and is never a
+/// candidate for (re-)fixing here regardless of what its original bounds
+/// were. `a`'s rows contribute their own (always-free-sign) duals to the
+/// propagated system but are never themselves candidates for row
+/// promotion — they are already part of the equality system the caller
+/// maintains, with nothing left to promote.
+pub fn run(n: usize, a: &Csr, real_g_rows: &[Vec<(usize, f64)>], c: &[f64], lb: &[f64], ub: &[f64], orig_lb: &[f64], orig_ub: &[f64], passes: usize) -> DualReductions {
     let ar = a.as_ref();
     let num_a = ar.nrows();
     let num_g = real_g_rows.len();
     let num_duals = num_a + num_g;
     if num_duals == 0 {
-        return Vec::new();
+        return DualReductions::default();
     }
 
     // Transpose: `col_terms[j]` collects every (dual-variable index, its
@@ -188,10 +246,63 @@ pub fn find_implied_equalities(n: usize, a: &Csr, real_g_rows: &[Vec<(usize, f64
         // whichever existing pass (`propagate` on the primal side, the
         // simplex/interior-point solve itself) is actually responsible
         // for that determination; this call simply finds nothing usable.
-        return Vec::new();
+        return DualReductions::default();
     }
 
-    (0..num_g).filter(|&gi| result.lb[num_a + gi] > TOL).collect()
+    let implied_equalities = (0..num_g).filter(|&gi| result.lb[num_a + gi] > TOL).collect();
+
+    // Column fixing (see the module docs' "Column fixing" section): for
+    // every column with at least one real-row appearance and not already
+    // fixed to a point, compute `r_j`'s range over the just-propagated
+    // dual box by plain interval arithmetic on `col_terms[j]` — reusing
+    // the same fixed point `implied_equalities` just read from, not a
+    // second propagation pass. `v > 0.0`'s branch pairs `dlo_i` with the
+    // range's low end and `dhi_i` with its high end (a positive
+    // coefficient preserves order); `v < 0.0` flips both pairings (matches
+    // interval multiplication by a negative scalar) — `col_terms` entries
+    // are never zero (filtered when built above), so no third case.
+    let mut fixed_columns = Vec::new();
+    for (j, terms) in col_terms.iter().enumerate() {
+        if terms.is_empty() || lb[j] == ub[j] {
+            continue;
+        }
+        let mut rlo = c[j];
+        let mut rhi = c[j];
+        for &(i, v) in terms {
+            let (dlo, dhi) = (result.lb[i], result.ub[i]);
+            let (tlo, thi) = if v > 0.0 { (v * dlo, v * dhi) } else { (v * dhi, v * dlo) };
+            rlo += tlo;
+            rhi += thi;
+        }
+        if rlo.is_nan() || rhi.is_nan() {
+            // Only reachable if the propagated box itself is degenerate in
+            // a way `result.infeasible` didn't already catch (e.g. an
+            // `inf - inf` cancellation across two terms) — treat as
+            // "nothing proven" rather than risk acting on a bogus sign.
+            continue;
+        }
+        // `r_j > 0` everywhere the box allows => forced to `lb_j` (needs
+        // `lb_j` finite: an infinite one can never be "fixed" to, and by
+        // the same argument this module's row-promotion half already
+        // relies on, a genuinely infinite `lb_j` would instead have
+        // contributed its *own* `r_j <= 0` constraint above, making
+        // `rlo > TOL` here self-contradictory in practice).
+        if rlo > TOL && lb[j] > f64::NEG_INFINITY {
+            fixed_columns.push((j, lb[j]));
+        } else if rhi < -TOL && ub[j] < f64::INFINITY {
+            fixed_columns.push((j, ub[j]));
+        }
+    }
+
+    DualReductions { implied_equalities, fixed_columns }
+}
+
+/// Thin wrapper over [`run`] for callers wanting only the row-promotion
+/// half (and this module's own tests, written before [`DualReductions`]
+/// existed) — see [`run`]'s own docs for the shared derivation and the
+/// module docs' "Column fixing" section for the other half.
+pub fn find_implied_equalities(n: usize, a: &Csr, real_g_rows: &[Vec<(usize, f64)>], c: &[f64], lb: &[f64], ub: &[f64], orig_lb: &[f64], orig_ub: &[f64], passes: usize) -> Vec<usize> {
+    run(n, a, real_g_rows, c, lb, ub, orig_lb, orig_ub, passes).implied_equalities
 }
 
 #[cfg(test)]

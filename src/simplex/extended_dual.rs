@@ -119,7 +119,7 @@
 //!    classical dual method's own Bland fallback (see
 //!    `simplex.rs::solve_lp_dual_on`'s own `bland_mode`).
 
-use super::{sparse_lu, InfeasibleRows, NbStatus, SimplexResult, StdForm, Status, MAX_ITERS, TOL};
+use super::{sparse_lu, InfeasibleRows, NbStatus, SimplexResult, StdForm, Status, TOL};
 
 /// Per-phase wall-clock counters for the `ENOMOTO_PROF_PHASES_EXT`
 /// diagnostic — this module's own counterpart to `simplex::prof_phases`
@@ -1981,7 +1981,8 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     let mut discard_row: Option<usize> = None;
     let mut discard_banned_cols: Vec<usize> = Vec::new();
     let mut prev_pool_len: Option<usize> = None;
-    for _iter in 0..MAX_ITERS {
+    let max_iters = super::max_iters_for(m, n_total);
+    for _iter in 0..max_iters {
         iters_since_m_progress += 1;
         if debug_ext_iters_verbose && _iter % 2000 == 0 {
             eprintln!(
@@ -3292,7 +3293,8 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
     let mut infeasible_rows = InfeasibleRows::new(m);
     infeasible_rows.rebuild(m, |i| row_infeasible_plain(std, basis, &x_b, &noise_feasible, i));
 
-    for _iter in 0..MAX_ITERS {
+    let max_iters = super::max_iters_for(m, n_total);
+    for _iter in 0..max_iters {
         // chuzr: plain largest-deviation Dantzig rule, exactly as this
         // function always used — *not* Devex/DSE-weighted. **Exact DSE
         // was tried here** (`DseState::from_basis` at entry, `mag^2/w[i]`
