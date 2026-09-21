@@ -52,24 +52,22 @@
 //!
 //! ## Preconditions this module relies on (established by earlier stages)
 //!
-//! - No structural column is genuinely *free* (`lb == -inf` **and**
-//!   `ub == +inf`) — `presolve::freevar::eliminate_free_variables` removes
-//!   every one reachable through `A`'s own rows before this module ever
-//!   runs, but that module's own docs name a residual case it cannot
+//! - A structural column *may* now be genuinely *free* (`lb == -inf` **and**
+//!   `ub == +inf`) — `presolve::freevar::eliminate_free_variables` still
+//!   removes every one reachable through `A`'s own rows before this module
+//!   ever runs, but that module's own docs name a residual case it cannot
 //!   soundly resolve itself (a free variable that only appears in an
-//!   inequality row); undecidable there, but *not* left for this module to
-//!   discover on its own — `simplex.rs::build_std_form_presolved` closes
-//!   the gap directly, splitting any column still doubly-infinite at that
-//!   point into `x_j = x_j^+ - x_j^-` (two `[0, inf)` columns) before ever
-//!   constructing the `StdForm` this module receives (confirmed necessary,
-//!   not just defensive: before that split existed, a hand-built LP with
-//!   two free variables tied only through opposing inequality-row pairs
-//!   made [`super::solve_lp_dual`] report a false `Infeasible` — this
-//!   module's own [`delta_of`] silently treated the doubly-infinite column
-//!   as one-sided, well before any of this module's own "should be
-//!   unreachable" guards ever ran). This precondition is what guarantees
-//!   every basic variable has *at least one* genuinely finite bound to
-//!   fall back on during cleanup.
+//!   inequality row); `simplex.rs::build_std_form_presolved` no longer
+//!   splits that residual case into `x_j = x_j^+ - x_j^-` before building
+//!   the `StdForm` this module receives — [`delta_of`]/[`hat_lower`]/
+//!   [`hat_upper`] track *both* sides of such a column independently (see
+//!   their own docs) instead. The one place this module still cannot
+//!   soundly handle a free column is the cleanup phase evicting *another*
+//!   genuinely free basic variable to make room for one (`finish`'s own
+//!   docs) — that specific, doubly-rare case bails out to `None` (the
+//!   classical `BIG_M` fallback) rather than risk an unproven termination
+//!   argument, exactly like this module's other "should be unreachable"
+//!   guards.
 //! - Every one-sided-unbounded structural column has already been shifted
 //!   (`simplex.rs::build_std_form_presolved`'s own shift step, unchanged
 //!   for this path) so its *finite* side sits at exactly `0` — this module
@@ -796,50 +794,81 @@ impl Score2 {
     }
 }
 
-/// Column `j`'s `delta_j` (paper's Lemma 4.1): `-1.0` if `lb[j] == -inf`
-/// (placing it at `Lower` means `x_j = -M`), `+1.0` if `ub[j] == +inf`
-/// (placing it at `Upper` means `x_j = +M`), `0.0` otherwise — always `0.0`
-/// for a slack column (see this module's own docs on why a slack is never
-/// M-flagged) and never *both* nonzero for a structural one (free
-/// variables are eliminated before this module runs).
+/// Which side(s) of structural column `j` are `M`-tracked (paper's Lemma
+/// 4.1, generalized to a genuinely free column tracking *both*): `Lower`
+/// if only `lb[j] == -inf` (placing it at `Lower` means `x_j = -M`),
+/// `Upper` if only `ub[j] == +inf` (`x_j = +M` there), `Both` if genuinely
+/// free (`lb[j] == -inf` **and** `ub[j] == +inf` — presolve's own
+/// documented residual case, a free variable reachable only through an
+/// inequality row; see this module's own top-of-file docs), `None`
+/// otherwise. Always `None` for a slack column (see this module's own docs
+/// on why a slack is never M-flagged) — [`delta_of`] itself doesn't special-
+/// case that; every call site building the full per-column `delta` array
+/// forces slack entries to [`MSide::None`] directly instead (`j >= n_orig`
+/// never reaches this function at all).
 ///
 /// REVERTED (2026-09-20) from the paper's revised §4.2 `S`-restricted form
-/// — every one-sided-unbounded column is flagged again, regardless of
-/// `cost`'s sign, matching this function's pre-`S`-restriction behavior
-/// bit-for-bit (`cost` is now unused; kept as a parameter so callers and
-/// [`ColCache::build`]'s own call site don't need to change back and
-/// forth). Reason: restricting to `S` is provably minimal and matches the
-/// paper, but empirically made the 73-problem Netlib total *worse*
-/// (7.9s -> 9.6s) — `width_affine` stops treating a non-`S` column as
-/// BFRT-flip-eligible once it's excluded, forcing a full pivot instead of
-/// a cheap flip for every such column, and several degenerate instances
-/// (`pilot4`, `fit1p`, `degen2`, `degen3`) needed measurably more of those
-/// real pivots as a result — see `[[extended-dual-s-restriction]]` memory
-/// for the full writeup. Restoring this exact `S`-restricted version later
-/// is a matter of reinstating the `cost[j] >= -TOL` gating removed here.
-fn delta_of(std: &StdForm, _cost: &[f64], j: usize) -> f64 {
-    if std.lb[j] == f64::NEG_INFINITY {
-        -1.0
-    } else if std.ub[j] == f64::INFINITY {
-        1.0
-    } else {
-        0.0
+/// — every one-sided-unbounded column is flagged again, regardless of cost
+/// sign, matching this function's pre-`S`-restriction behavior bit-for-bit.
+/// Reason: restricting to `S` is provably minimal and matches the paper,
+/// but empirically made the 73-problem Netlib total *worse* (7.9s -> 9.6s)
+/// — `width_affine` stops treating a non-`S` column as BFRT-flip-eligible
+/// once it's excluded, forcing a full pivot instead of a cheap flip for
+/// every such column, and several degenerate instances (`pilot4`, `fit1p`,
+/// `degen2`, `degen3`) needed measurably more of those real pivots as a
+/// result — see `[[extended-dual-s-restriction]]` memory for the full
+/// writeup. Restoring this exact `S`-restricted version later needs a
+/// `cost` parameter back (gating which of `Lower`/`Upper`/`Both` a column's
+/// own cost sign actually forces `crash` onto) — removed here since it was
+/// already fully unused in the un-restricted form this reverted to.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum MSide {
+    None,
+    Lower,
+    Upper,
+    Both,
+}
+
+impl MSide {
+    #[inline]
+    fn has_lower(self) -> bool {
+        matches!(self, MSide::Lower | MSide::Both)
+    }
+
+    #[inline]
+    fn has_upper(self) -> bool {
+        matches!(self, MSide::Upper | MSide::Both)
+    }
+
+    #[inline]
+    fn is_flagged(self) -> bool {
+        !matches!(self, MSide::None)
     }
 }
 
-/// The value nonbasic column `j` takes at `Lower` — `None` iff this is a
-/// *genuine* (non-`M`) infinity: `lb[j] == -inf` but `j` is not in `S`
-/// (`delta_j >= 0.0`, see [`delta_of`]'s own docs), so [`crash`] never
-/// places `j` at `Lower` and (Proposition `s-confinement`) no later pivot
-/// ever does either — mirrors [`hat_upper`] exactly, just the opposite
-/// bound. Currently dead for every structural column ([`delta_of`] no
-/// longer produces `delta_j >= 0.0` for one with `lb[j] == -inf`, since the
-/// `S`-restriction that made this `None` branch reachable was reverted —
-/// see that function's own docs); kept so restoring the restriction is a
-/// one-function change.
-fn hat_lower(std: &StdForm, delta_j: f64, j: usize) -> Option<Affine1> {
+fn delta_of(std: &StdForm, j: usize) -> MSide {
+    match (std.lb[j] == f64::NEG_INFINITY, std.ub[j] == f64::INFINITY) {
+        (true, true) => MSide::Both,
+        (true, false) => MSide::Lower,
+        (false, true) => MSide::Upper,
+        (false, false) => MSide::None,
+    }
+}
+
+/// The value nonbasic column `j` takes at `Lower` — total over every
+/// structural column (`j < n_orig`): `Some(Affine1::new(0.0, -1.0))`
+/// (`-M`) when `lb[j] == -inf` (regardless of whether `ub[j]` is *also*
+/// infinite — a genuinely free column tracks this side exactly like a
+/// one-sided one, [`hat_upper`] independently tracking its own upper side
+/// the same way), otherwise the plain finite bound. `None` only for a
+/// slack (`j >= n_orig`) whose own `lb` is somehow infinite — never
+/// actually reachable (every slack's `lb` is `0`, `simplex.rs`'s own slack
+/// construction), kept only so this function has the same total-except-
+/// slack-infinities shape as [`hat_upper`] rather than asserting a
+/// precondition it doesn't need to.
+fn hat_lower(std: &StdForm, n_orig: usize, j: usize) -> Option<Affine1> {
     if std.lb[j] == f64::NEG_INFINITY {
-        if delta_j < 0.0 {
+        if j < n_orig {
             Some(Affine1::new(0.0, -1.0))
         } else {
             None
@@ -849,19 +878,16 @@ fn hat_lower(std: &StdForm, delta_j: f64, j: usize) -> Option<Affine1> {
     }
 }
 
-/// The value nonbasic column `j` takes at `Upper` — `None` iff this is a
-/// *genuine* (non-`M`) infinity, only possible for a `<=`/`>=` row's own
-/// slack (`delta_j` is always `0.0` there — see [`delta_of`]'s own docs):
-/// this module treats that exactly like the classical bounded dual simplex
-/// already does, never placing a nonbasic column there and never flipping
-/// through it (see the BFRT walk in [`solve_lp_dual_extended`]). The
-/// `delta_j <= 0.0` branch below is currently dead for every *structural*
-/// column for the same reason [`hat_lower`]'s own `None` branch is (see its
-/// own docs) — `delta_of` no longer excludes any one-sided-unbounded
-/// structural column from `S`.
-fn hat_upper(std: &StdForm, delta_j: f64, j: usize) -> Option<Affine1> {
+/// The value nonbasic column `j` takes at `Upper` — mirrors [`hat_lower`]
+/// exactly, tracking `M` on this side whenever `ub[j] == +inf` **and** `j`
+/// is structural. `None` iff this is a *genuine* (non-`M`) infinity, only
+/// possible for a `<=`/`>=` row's own slack (`j >= n_orig`): this module
+/// treats that exactly like the classical bounded dual simplex already
+/// does, never placing a nonbasic column there and never flipping through
+/// it (see the BFRT walk in [`solve_lp_dual_extended`]).
+fn hat_upper(std: &StdForm, n_orig: usize, j: usize) -> Option<Affine1> {
     if std.ub[j] == f64::INFINITY {
-        if delta_j > 0.0 {
+        if j < n_orig {
             Some(Affine1::new(0.0, 1.0))
         } else {
             None
@@ -872,11 +898,12 @@ fn hat_upper(std: &StdForm, delta_j: f64, j: usize) -> Option<Affine1> {
 }
 
 /// `None` iff `j` is nonbasic at `status` with a genuinely infinite bound
-/// there — for `Upper`, only possible for a slack (see [`hat_upper`]'s own
-/// docs); for `Lower`, only possible for a structural `(J_L∪J_U)\S` column
-/// (see [`hat_lower`]'s own docs). Should never happen given this module's
-/// own invariants ([`crash`] and every later pivot only ever place a
-/// column at a side [`hat_lower`]/[`hat_upper`] resolves to `Some`), but a
+/// there — only possible for a slack (a `<=`/`>=` row's own, per
+/// [`hat_lower`]/[`hat_upper`]'s own docs: every structural column tracks
+/// both sides it needs, one-sided or genuinely free alike). Should never
+/// happen given this module's own invariants ([`crash`] and every later
+/// pivot only ever place a column at a side [`hat_lower`]/[`hat_upper`]
+/// resolves to `Some`), but a
 /// violation is a signal to give up cleanly (propagated via `?` up to
 /// [`solve_lp_dual_extended`]'s `None` return, which `solve_lp_dual` reads
 /// as "fall back to the classical path") rather than the outright process
@@ -1456,33 +1483,33 @@ fn trial_row_ratio(
 /// row leaves it one-sided), matching the classical method's own
 /// `!width.is_finite()` BFRT guard (`simplex.rs`'s own docs) exactly:
 /// such a column can never be flipped, only ever pivoted on directly.
-fn width_affine(std: &StdForm, delta: &[f64], n_orig: usize, j: usize) -> Option<Affine1> {
-    if j < n_orig && delta[j] != 0.0 {
-        // Post-shift, the finite side is exactly `0` for every M-flagged
-        // structural column (this module's own docs) — the paper's
-        // general `w_j + s_j*M` collapses to exactly `M` here.
-        return Some(Affine1::new(0.0, 1.0));
-    }
-    let w = std.ub[j] - std.lb[j];
-    if w.is_finite() {
-        Some(Affine1::new(w, 0.0))
-    } else {
-        None
+/// Computed directly from the already-cached [`hat_lower`]/[`hat_upper`]
+/// rather than re-deriving `lb`/`ub` itself — this is what makes a
+/// genuinely free column (both sides `M`-tracked) fall out correctly with
+/// no special-casing at all: `hat_upper - hat_lower` there is
+/// `(0 + 1*M) - (0 - 1*M) = 2*M` (`Affine1::new(0.0, 2.0)`), exactly the
+/// paper's general `w_j + s_j*M` with `s_j = 2` for a column `M`-tracked on
+/// *both* sides — versus a one-sided column's `s_j = 1` (one `M` term
+/// minus one exactly-`0` finite term, post-shift).
+fn width_affine(lower: Option<Affine1>, upper: Option<Affine1>) -> Option<Affine1> {
+    match (lower, upper) {
+        (Some(lo), Some(hi)) => Some(hi.sub(lo)),
+        _ => None,
     }
 }
 
 /// Per-column cache of [`hat_lower`]/[`hat_upper`]/[`width_affine`], built
 /// once before [`solve_lp_dual_extended`]'s main loop starts and read for
 /// the rest of that call (`finish`/`polish_with_true_bounds`'s own tail
-/// included). All three depend only on `delta[j]` and `std.lb[j]`/
-/// `std.ub[j]`, neither of which ever changes once this module's `delta` is
-/// built — critically, `nb_status[j]` (which *does* change every pivot)
-/// plays no part in any of the three, so nothing here ever needs
-/// invalidating mid-solve. Exists because [`row_deviation`] and the BFRT
-/// candidate walk both re-derive these same `Affine1`s (and re-index
-/// `std.lb`/`std.ub`) on every row/candidate they visit — real cost in the
-/// chuzr/chuzc hot paths at scale, for a value that was already fully
-/// determined before the loop even started.
+/// included). All three depend only on `std.lb[j]`/`std.ub[j]` and `n_orig`,
+/// none of which ever changes once this module's `std` is built —
+/// critically, `nb_status[j]` (which *does* change every pivot) plays no
+/// part in any of the three, so nothing here ever needs invalidating
+/// mid-solve. Exists because [`row_deviation`] and the BFRT candidate walk
+/// both re-derive these same `Affine1`s (and re-index `std.lb`/`std.ub`) on
+/// every row/candidate they visit — real cost in the chuzr/chuzc hot paths
+/// at scale, for a value that was already fully determined before the loop
+/// even started.
 struct ColCache {
     lower: Vec<Option<Affine1>>,
     upper: Vec<Option<Affine1>>,
@@ -1490,13 +1517,12 @@ struct ColCache {
 }
 
 impl ColCache {
-    fn build(std: &StdForm, delta: &[f64], n_orig: usize) -> Self {
+    fn build(std: &StdForm, n_orig: usize) -> Self {
         let n_total = std.n_total;
-        ColCache {
-            lower: (0..n_total).map(|j| hat_lower(std, delta[j], j)).collect(),
-            upper: (0..n_total).map(|j| hat_upper(std, delta[j], j)).collect(),
-            width: (0..n_total).map(|j| width_affine(std, delta, n_orig, j)).collect(),
-        }
+        let lower: Vec<Option<Affine1>> = (0..n_total).map(|j| hat_lower(std, n_orig, j)).collect();
+        let upper: Vec<Option<Affine1>> = (0..n_total).map(|j| hat_upper(std, n_orig, j)).collect();
+        let width: Vec<Option<Affine1>> = (0..n_total).map(|j| width_affine(lower[j], upper[j])).collect();
+        ColCache { lower, upper, width }
     }
 }
 
@@ -1530,10 +1556,10 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     }
 
     // `delta[j]` (see [`delta_of`]'s own docs — currently the reverted,
-    // un-`S`-restricted form: every one-sided-unbounded structural column
-    // is flagged, regardless of `active_cost`'s sign).
-    let delta: Vec<f64> = (0..n_total).map(|j| if j < n_orig { delta_of(std, &active_cost, j) } else { 0.0 }).collect();
-    let cache = ColCache::build(std, &delta, n_orig);
+    // un-`S`-restricted form: every one-sided-unbounded or genuinely free
+    // structural column is flagged, regardless of `active_cost`'s sign).
+    let delta: Vec<MSide> = (0..n_total).map(|j| if j < n_orig { delta_of(std, j) } else { MSide::None }).collect();
+    let cache = ColCache::build(std, n_orig);
 
     if m == 0 {
         // No constraints at all (mirrors `solve_lp_on`'s own `n_rows == 0`
@@ -1874,7 +1900,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     let dse_refresh_on_refactor = std::env::var("ENOMOTO_DSE_REFRESH_ON_REFACTOR").is_ok_and(|v| v != "0");
     let debug_delta0 = std::env::var("ENOMOTO_DEBUG_EXT_DELTA0").is_ok();
     let debug_ext_iters_verbose = std::env::var("ENOMOTO_DEBUG_EXT_TRACE").is_ok();
-    let m_flagged_cols: Vec<usize> = (0..n_orig).filter(|&j| delta[j] != 0.0).collect();
+    let m_flagged_cols: Vec<usize> = (0..n_orig).filter(|&j| delta[j].is_flagged()).collect();
     let mut delta0_iter: Option<usize> = None;
     if debug_ext_iters_verbose {
         let one_sided_total = (0..n_orig).filter(|&j| std.lb[j] == f64::NEG_INFINITY || std.ub[j] == f64::INFINITY).count();
@@ -2473,7 +2499,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                     if bad {
                         dual_violations += 1;
                         if dual_violations <= 5 {
-                            eprintln!("  DUAL_FEAS_VIOLATION: j={j} status={status:?} d[j]={dj} delta[j]={}", if j < n_orig { delta[j] } else { 0.0 });
+                            eprintln!("  DUAL_FEAS_VIOLATION: j={j} status={status:?} d[j]={dj} delta[j]={:?}", if j < n_orig { delta[j] } else { MSide::None });
                         }
                     }
                 }
@@ -2596,12 +2622,12 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 prof_phases::HARRIS_WINDOW_SIZE_SUM.fetch_add(k_star - window_start + 1, std::sync::atomic::Ordering::Relaxed);
                 let window_has_m_elsewhere = candidates[window_start..=k_star].iter().enumerate().any(|(off, cand)| {
                     let idx = window_start + off;
-                    if idx == best_idx || delta[cand.j] == 0.0 {
+                    if idx == best_idx || !delta[cand.j].is_flagged() {
                         return false;
                     }
                     match nb_status[cand.j] {
-                        Some(NbStatus::Lower) => delta[cand.j] < 0.0,
-                        Some(NbStatus::Upper) => delta[cand.j] > 0.0,
+                        Some(NbStatus::Lower) => delta[cand.j].has_lower(),
+                        Some(NbStatus::Upper) => delta[cand.j].has_upper(),
                         None => false,
                     }
                 });
@@ -2681,10 +2707,10 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                     NbStatus::Lower => NbStatus::Upper,
                     NbStatus::Upper => NbStatus::Lower,
                 };
-                if profile_phases && delta[cand.j] != 0.0 {
+                if profile_phases && delta[cand.j].is_flagged() {
                     let lands_on_m = match new {
-                        NbStatus::Lower => delta[cand.j] < 0.0,
-                        NbStatus::Upper => delta[cand.j] > 0.0,
+                        NbStatus::Lower => delta[cand.j].has_lower(),
+                        NbStatus::Upper => delta[cand.j].has_upper(),
                     };
                     if lands_on_m {
                         prof_phases::M_ENTER_VIA_FLIP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -2877,19 +2903,22 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         // specifically needs to *not* reset on a discarded, no-progress
         // iteration to do its job). A plain index into `delta` rather than
         // a lookup in `m_flagged_cols` since `q < n_orig` is guaranteed
-        // whenever `delta[q] != 0.0` (slack columns are never M-flagged,
-        // `delta_of`'s own docs).
-        if profile_phases && q < n_orig && delta[q] != 0.0 {
+        // whenever `delta[q].is_flagged()` (slack columns are never
+        // M-flagged, `delta_of`'s own docs). `q` becoming basic resolves a
+        // genuinely free (`MSide::Both`) column exactly like a one-sided
+        // one — it stops being nonbasic-at-either-M-side at all, regardless
+        // of which side it left from.
+        if profile_phases && q < n_orig && delta[q].is_flagged() {
             let q_was_m = match nb_status[q] {
-                Some(NbStatus::Lower) => delta[q] < 0.0,
-                Some(NbStatus::Upper) => delta[q] > 0.0,
+                Some(NbStatus::Lower) => delta[q].has_lower(),
+                Some(NbStatus::Upper) => delta[q].has_upper(),
                 None => false,
             };
             if q_was_m {
                 prof_phases::M_EXIT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         }
-        if q < n_orig && delta[q] != 0.0 && !resolved_m[q] {
+        if q < n_orig && delta[q].is_flagged() && !resolved_m[q] {
             resolved_m[q] = true;
             remaining_m_side -= 1;
             iters_since_m_progress = 0;
@@ -3294,7 +3323,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
 /// under the (now-irrelevant) `M` truncation and cleanup is a sequence of
 /// zero-objective-change pivots (Lemma 4.9), the result is primal feasible
 /// under the *true* bounds too.
-fn finish(std: &StdForm, basis: &mut [usize], basis_pos: &mut [Option<usize>], nb_status: &mut [Option<NbStatus>], delta: &[f64], cache: &ColCache, n_orig: usize, lu: sparse_lu::FtLu) -> Option<SimplexResult> {
+fn finish(std: &StdForm, basis: &mut [usize], basis_pos: &mut [Option<usize>], nb_status: &mut [Option<NbStatus>], delta: &[MSide], cache: &ColCache, n_orig: usize, lu: sparse_lu::FtLu) -> Option<SimplexResult> {
     // `lu` is the main loop's own last-iteration factorization (already
     // exact for the current basis — the main loop's own termination check
     // just used it), passed in rather than rebuilt here: this function
@@ -3339,10 +3368,10 @@ fn finish(std: &StdForm, basis: &mut [usize], basis_pos: &mut [Option<usize>], n
     let debug_ext = std::env::var("ENOMOTO_DEBUG_EXT_ITERS").is_ok();
     let mut cleanup_count = 0usize;
     loop {
-        let Some(j) = (0..n_orig).find(|&j| {
-            delta[j] != 0.0
-                && nb_status[j]
-                    == Some(if delta[j] < 0.0 { NbStatus::Lower } else { NbStatus::Upper })
+        let Some(j) = (0..n_orig).find(|&j| match nb_status[j] {
+            Some(NbStatus::Lower) => delta[j].has_lower(),
+            Some(NbStatus::Upper) => delta[j].has_upper(),
+            None => false,
         }) else {
             break;
         };
@@ -3359,25 +3388,49 @@ fn finish(std: &StdForm, basis: &mut [usize], basis_pos: &mut [Option<usize>], n
             // the basis at all (its own module docs, and the paper's own
             // remark after Lemma 4.9) — its value genuinely doesn't
             // matter, so it is parked directly at its true finite side.
-            nb_status[j] = Some(if std.lb[j].is_finite() { NbStatus::Lower } else { NbStatus::Upper });
+            // A genuinely free `j` reaching here (no finite side to park
+            // at all) is not something `presolve::freevar` should ever
+            // leave standing alone: every residual free variable it can't
+            // eliminate outright is documented to appear in at least one
+            // row (see this module's own top-of-file docs), so an
+            // orphaned one touching zero rows is "should be unreachable"
+            // — bail gracefully rather than park it at a side that's
+            // still symbolically `M`.
+            let Some(side) = (if std.lb[j].is_finite() {
+                Some(NbStatus::Lower)
+            } else if std.ub[j].is_finite() {
+                Some(NbStatus::Upper)
+            } else {
+                None
+            }) else {
+                return None;
+            };
+            nb_status[j] = Some(side);
             continue;
         };
         #[cfg(test)]
         CLEANUP_PIVOTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         cleanup_count += 1;
         let beta_r2 = basis[r2];
-        let true_status = if std.lb[beta_r2].is_finite() {
-            NbStatus::Lower
+        // The variable cleanup evicts to make room for `j` needs a real
+        // (non-`M`) nonbasic placement of its own — guaranteed to exist
+        // for a one-sided-unbounded column (its own finite side), but not
+        // for a genuinely free one (`MSide::Both`, both sides still
+        // symbolically `M`): this module's termination argument for the
+        // cleanup loop (each pivot strictly shrinks the M-flagged-nonbasic
+        // count) is established for the one-sided case, not for evicting
+        // *another* free variable — rather than risk an unproven
+        // termination argument or an unsound placement, bail to `None`
+        // (the classical `BIG_M` fallback) exactly like this module's
+        // other "should be unreachable" guards.
+        let Some(true_status) = (if std.lb[beta_r2].is_finite() {
+            Some(NbStatus::Lower)
+        } else if std.ub[beta_r2].is_finite() {
+            Some(NbStatus::Upper)
         } else {
-            assert!(
-                std.ub[beta_r2].is_finite(),
-                "cleanup lemma precondition violated: basic variable {beta_r2} has no genuinely finite bound \
-                 on either side — simplex.rs::build_std_form_presolved should have split every genuinely free \
-                 structural column (including presolve::freevar's own documented residual case, one that \
-                 survived free by appearing only in an inequality row) into x_j = x_j^+ - x_j^- before this \
-                 module ever ran (see this module's own docs)"
-            );
-            NbStatus::Upper
+            None
+        }) else {
+            return None;
         };
         nb_status[beta_r2] = Some(true_status);
         basis_pos[beta_r2] = None;
@@ -3986,6 +4039,54 @@ mod tests {
 
     fn approx(a: f64, b: f64) -> bool {
         (a - b).abs() < 1e-6
+    }
+
+    #[test]
+    fn genuinely_free_column_reaches_a_finite_optimum_via_one_equality_row() {
+        // x0 free (both bounds infinite — `simplex.rs` no longer splits
+        // this into x0+ - x0- before handing a `StdForm` to this module),
+        // x1 in [0,10]; x0 + x1 + s = 5, s in [0,0]. min -x0 (== max x0):
+        // x0 = 5 - x1 in [-5, 5], optimal x0 = 5 (x1 = 0). Exercises
+        // `hat_lower`/`hat_upper` both being `Some` (M-tracked) for the
+        // same column at once.
+        let std = std_form(&[vec![(0, 1.0), (1, 1.0), (2, 1.0)]], vec![5.0], vec![-1.0, 0.0, 0.0], vec![f64::NEG_INFINITY, 0.0, 0.0], vec![f64::INFINITY, 10.0, 0.0]);
+        let res = solve_lp_dual_extended(&std).expect("should reach a mathematical answer, not the None fallback sentinel");
+        assert_eq!(res.status, Status::Optimal);
+        let x = res.x.unwrap();
+        assert!(approx(x[0], 5.0), "x={x:?}");
+        assert!(approx(x[1], 0.0), "x={x:?}");
+    }
+
+    #[test]
+    fn two_free_columns_tied_only_through_opposing_inequality_rows_bails_out_gracefully() {
+        // The exact shape this module's own top-of-file docs name as
+        // `presolve::freevar`'s undecidable residual case: two free
+        // columns (x0, x1) that appear only in inequality rows, never an
+        // equality one, so nothing upstream can eliminate or bound either
+        // in isolation. x0 - x1 + s0 = 3 (s0 >= 0, i.e. x0 - x1 <= 3) and
+        // -x0 + x1 + s1 = 3 (s1 >= 0, i.e. x0 - x1 >= -3): min x0 - x1
+        // drives the difference to its lower bound, -3, but x0 and x1
+        // individually stay genuinely unbounded (only their *difference*
+        // is pinned) — the true optimal face is a whole line, not a single
+        // point, so *some* variable must end up nonbasic with no real bound
+        // to rest at. Traced by hand (and confirmed via temporary tracing
+        // during development): the main phase resolves one of the two
+        // directly, leaving the other still nonbasic at its own `M` side;
+        // cleanup's own `B^{-1}A_j` for that survivor is nonzero in exactly
+        // one row, and the variable *currently basic there* is the other
+        // free column — evicting it would need to pin it at an arbitrary
+        // real anchor this module has no representation for (`finish`'s own
+        // docs on why this specific case bails rather than guesses). This
+        // is not a rare corner this test is inventing: it is the *forced*
+        // outcome whenever two structural columns are free and coupled only
+        // to each other, with no third column anchoring either — so this
+        // asserts the graceful-`None` contract itself (falls back to the
+        // classical `BIG_M` path one level up, `simplex.rs`'s own
+        // `mutually_coupled_free_variables_falls_back_to_a_correct_answer`
+        // end-to-end test), not a wrong answer or a panic.
+        let rows = vec![vec![(0, 1.0), (1, -1.0), (2, 1.0)], vec![(0, -1.0), (1, 1.0), (3, 1.0)]];
+        let std = std_form(&rows, vec![3.0, 3.0], vec![1.0, -1.0, 0.0, 0.0], vec![f64::NEG_INFINITY, f64::NEG_INFINITY, 0.0, 0.0], vec![f64::INFINITY, f64::INFINITY, f64::INFINITY, f64::INFINITY]);
+        assert!(solve_lp_dual_extended(&std).is_none());
     }
 
     #[test]

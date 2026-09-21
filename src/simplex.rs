@@ -877,14 +877,10 @@ const BIG_M: f64 = 1e7;
 /// fixed variable, and the doubleton/colsingleton sentinel `0.0` for one
 /// [`presolve::colsingleton::Substitution::value`] will overwrite right
 /// afterward. `sign[nj]` is `orig_of_free[nj]`'s own contribution sign —
-/// always `1.0`, except for the second (minus) half of a split genuinely-
-/// free column (see `sign`'s own field docs), where two `nj`s share one
-/// `orig_of_free` entry and `unscale_result` sums `sign[nj] * x_free[nj]`
-/// into it instead of a plain assignment. Because of that sharing,
-/// `orig_of_free.len() + fixed_values.len() == variables.len()` no longer
-/// always holds (a split column contributes two `nj`s for one original
-/// index) — `unscale_result` takes `variables.len()` directly instead of
-/// deriving it from these lengths.
+/// always `1.0`, except `-1.0` for a column the shift step reflected (see
+/// `sign`'s own field docs) — `orig_of_free.len() + fixed_values.len() ==
+/// variables.len()` always holds (one compacted slot per surviving
+/// column).
 ///
 /// `shift[nj]` is how far column `nj`'s *finite* bound was translated
 /// toward `0` (see the bound-shift step in [`build_std_form_presolved`]
@@ -892,9 +888,8 @@ const BIG_M: f64 = 1e7;
 /// coordinate system, so recovering the true (still-scaled) value of
 /// column `nj` needs `x_free[nj] + shift[nj]`, done once in
 /// [`unscale_result`] before any substitution's own `value()` call reads
-/// it back out. Always `0.0` for a split column's own two `nj`s (a
-/// genuinely free column has no finite side to shift toward, same as an
-/// unsplit one — see the shift step's own docs).
+/// it back out. Always `0.0` for a genuinely free column (no finite side
+/// to shift toward at all — see the shift step's own docs).
 struct PresolvedForm {
     std: StdForm,
     scaling: scaling::Scaling,
@@ -906,14 +901,12 @@ struct PresolvedForm {
     parallel_col_substitutions: Vec<presolve::parallelcols::Substitution>,
     orig_of_free: Vec<usize>,
     /// `sign[nj] * (x_free[nj] + shift[nj])` is `nj`'s own contribution to
-    /// `orig_of_free[nj]`'s true value — see [`PresolvedForm`]'s own docs
-    /// and the split-column step in [`build_std_form_presolved`] for why
-    /// this is ever anything but `1.0`. Also `-1.0` for a single (unsplit)
-    /// slot the shift step reflected (a column unbounded only below — see
-    /// that step's own docs) — the row-building loops multiply each such
-    /// column's own coefficients by `sign[nj]` too, so this recovery
-    /// formula and the `std` the solver actually sees stay consistent with
-    /// each other.
+    /// `orig_of_free[nj]`'s true value — see [`PresolvedForm`]'s own docs.
+    /// `-1.0` for a slot the shift step reflected (a column unbounded only
+    /// below — see that step's own docs), `1.0` otherwise — the
+    /// row-building loops multiply each such column's own coefficients by
+    /// `sign[nj]` too, so this recovery formula and the `std` the solver
+    /// actually sees stay consistent with each other.
     sign: Vec<f64>,
     fixed_values: Vec<(usize, f64)>,
     shift: Vec<f64>,
@@ -923,9 +916,9 @@ struct PresolvedForm {
     /// `presolve::freevar` before this point, but that module's own docs
     /// name one residual case it cannot soundly resolve itself — a free
     /// variable appearing only in an inequality row — so a genuinely
-    /// *both*-sided-infinite column can still reach here; see the
-    /// split-column step in [`build_std_form_presolved`] for how that case
-    /// is turned into two one-sided columns before `std` is ever built).
+    /// *both*-sided-infinite column can still reach here, kept as a single
+    /// unsplit column: `extended_dual::hat_lower`/`hat_upper` track both
+    /// its sides directly, see that module's own docs).
     /// Whether `std.lb`/`std.ub` actually still carry a surviving one-sided
     /// infinity, or had it `BIG_M`-substituted, depends on the
     /// `clamp_unbounded` flag `build_std_form_presolved` was called with —
@@ -1086,10 +1079,12 @@ fn build_std_form_presolved(
     // an inequality row — so `lb[j]==-inf && ub[j]==+inf` both is possible
     // here too (confirmed reachable: a hand-built LP with two free
     // variables tied only through opposing inequality-row pairs, never an
-    // equality row, made `solve_lp_dual` report a false `Infeasible` before
-    // the split-column step below existed). Detected *before* the `BIG_M`
-    // substitution below so it reflects the true problem shape, not the
-    // sentinel this function still falls back to substituting for now.
+    // equality row — `extended_dual`'s own `finish` docs name this exact
+    // shape as the one case it still can't resolve internally, falling
+    // back to the classical `BIG_M` path below instead). Detected *before*
+    // the `BIG_M` substitution below so it reflects the true problem
+    // shape, not the sentinel this function still falls back to
+    // substituting for now.
     let had_unbounded_structural = (0..n).any(|j| lb[j] == f64::NEG_INFINITY || ub[j] == f64::INFINITY);
     if std::env::var("ENOMOTO_DEBUG_UNBOUNDED_VARS").is_ok() && had_unbounded_structural {
         eprintln!(
@@ -1162,22 +1157,18 @@ fn build_std_form_presolved(
     // above when true, so this only ever fires for the `solve_lp_dual`
     // extended path: `presolve::freevar`'s own documented residual case, a
     // free variable that appears only in an inequality row and so cannot
-    // be soundly eliminated by that module alone) instead gets *two*
-    // compacted slots, `new_index[j] = Some((plus, Some(minus)))`, one per
-    // half of the classical `x_j = x_j^+ - x_j^-` split (`x_j^+, x_j^- ∈
-    // [0, ∞)`). This is the standard textbook trick for representing a
-    // free variable with only one-sided-bounded columns — chosen over
-    // teaching `extended_dual`'s symbolic-`M` machinery a second,
-    // opposite-signed `M` term for this one rare case, and over growing
-    // `presolve::run_extended`'s own shared column space (which
-    // `interior_point.rs` also uses, and has no need of this at all: its
-    // own KKT formulation already handles a genuinely free column
-    // directly, without `extended_dual`'s one-sided-only assumption). Every
-    // row/objective coefficient the loops below see for `j` is duplicated
-    // onto both slots with opposite sign, so the two halves reconstruct
-    // `x_j` exactly wherever it appears; `unscale_result` sums them back
-    // together via `sign` (see `PresolvedForm`'s own docs).
-    let mut new_index: Vec<Option<(usize, Option<usize>)>> = vec![None; n];
+    // be soundly eliminated by that module alone) gets exactly the same
+    // single compacted slot as any other surviving column — no more
+    // `x_j = x_j^+ - x_j^-` split: `extended_dual::hat_lower`/`hat_upper`
+    // track a genuinely free column's *both* sides symbolically (`M` on
+    // each), so this module no longer needs to represent it with two
+    // one-sided-bounded halves (see that module's own docs for why, and
+    // its `finish`'s own docs for the one residual case — two free columns
+    // coupled *only* to each other, with no third anchoring either — it
+    // still can't resolve internally and falls back to the classical
+    // `BIG_M` path for, same as every other "should be unreachable" guard
+    // in that module).
+    let mut new_index: Vec<Option<usize>> = vec![None; n];
     let mut orig_of_free: Vec<usize> = Vec::new();
     let mut sign: Vec<f64> = Vec::new();
     let mut slot_lb: Vec<f64> = Vec::new();
@@ -1186,26 +1177,12 @@ fn build_std_form_presolved(
         if lb[j] == ub[j] {
             continue;
         }
-        if lb[j] == f64::NEG_INFINITY && ub[j] == f64::INFINITY {
-            let plus = orig_of_free.len();
-            orig_of_free.push(j);
-            sign.push(1.0);
-            slot_lb.push(0.0);
-            slot_ub.push(f64::INFINITY);
-            let minus = orig_of_free.len();
-            orig_of_free.push(j);
-            sign.push(-1.0);
-            slot_lb.push(0.0);
-            slot_ub.push(f64::INFINITY);
-            new_index[j] = Some((plus, Some(minus)));
-        } else {
-            let nj = orig_of_free.len();
-            orig_of_free.push(j);
-            sign.push(refl_sign[j]);
-            slot_lb.push(lb[j]);
-            slot_ub.push(ub[j]);
-            new_index[j] = Some((nj, None));
-        }
+        let nj = orig_of_free.len();
+        orig_of_free.push(j);
+        sign.push(refl_sign[j]);
+        slot_lb.push(lb[j]);
+        slot_ub.push(ub[j]);
+        new_index[j] = Some(nj);
     }
     let n_free = orig_of_free.len();
     let fixed_values: Vec<(usize, f64)> = (0..n).filter(|&j| new_index[j].is_none()).map(|j| (j, lb[j])).collect();
@@ -1235,13 +1212,9 @@ fn build_std_form_presolved(
         let mut r: Vec<(usize, f64)> = Vec::new();
         for (j, &v) in ar.col_indices_of_row(i).zip(ar.values_of_row(i)) {
             match new_index[j] {
-                Some((nj, None)) => {
+                Some(nj) => {
                     r.push((nj, v * sign[nj]));
                     rhs_i -= v * sign[nj] * shift[j];
-                }
-                Some((plus, Some(minus))) => {
-                    r.push((plus, v));
-                    r.push((minus, -v));
                 }
                 None => rhs_i -= v * lb[j],
             }
@@ -1258,13 +1231,9 @@ fn build_std_form_presolved(
         let mut r: Vec<(usize, f64)> = Vec::new();
         for (j, v) in row {
             match new_index[j] {
-                Some((nj, None)) => {
+                Some(nj) => {
                     r.push((nj, v * sign[nj]));
                     rhs_k -= v * sign[nj] * shift[j];
-                }
-                Some((plus, Some(minus))) => {
-                    r.push((plus, v));
-                    r.push((minus, -v));
                 }
                 None => rhs_k -= v * lb[j],
             }
@@ -1313,11 +1282,11 @@ fn build_std_form_presolved(
 /// (unshifted) scaled space, so `sub.value(&x)` needs the true scaled
 /// value at every index it reads, shifted columns included.
 ///
-/// `n` is the original `variables.len()` — needed explicitly (rather than
-/// derived from `orig_of_free.len() + fixed_values.len()`, which used to
-/// equal it always) because a split genuinely-free column now contributes
-/// *two* entries to `orig_of_free` for one original index (see
-/// [`PresolvedForm`]'s own docs on `sign`), so that sum can now exceed `n`.
+/// `n` is the original `variables.len()` — always equal to
+/// `orig_of_free.len() + fixed_values.len()` (every surviving column gets
+/// exactly one compacted slot, [`build_std_form_presolved`]'s own docs),
+/// but passed explicitly rather than derived from that sum so this
+/// function doesn't need to recompute it.
 fn unscale_result(
     result: SimplexResult,
     sc: &scaling::Scaling,
@@ -1332,20 +1301,17 @@ fn unscale_result(
     match result.status {
         Status::Optimal => {
             let x_free = result.x.unwrap();
-            // Expand the compacted solve's output (one or two entries per
-            // surviving free structural column, see `PresolvedForm`'s own
-            // docs) back into the original `variables.len()`-length space
-            // *before* the substitution loop below: a substitution's own
-            // `terms` can reference a variable that `dualfix`/a forcing row
-            // fixed outright (not one this loop itself resolves), so every
-            // fixed value must already be in place at its original index by
-            // the time `sub.value(&x)` reads it. `+=` (not `=`) because a
-            // split column's two slots share one original index `j` and
-            // must both accumulate into it (`sign` carries the `-` for the
-            // second half).
+            // Expand the compacted solve's output (one entry per surviving
+            // structural column, see `PresolvedForm`'s own docs) back into
+            // the original `variables.len()`-length space *before* the
+            // substitution loop below: a substitution's own `terms` can
+            // reference a variable that `dualfix`/a forcing row fixed
+            // outright (not one this loop itself resolves), so every fixed
+            // value must already be in place at its original index by the
+            // time `sub.value(&x)` reads it.
             let mut x = vec![0.0; n];
             for (nj, &j) in orig_of_free.iter().enumerate() {
-                x[j] += sign[nj] * (x_free[nj] + shift[nj]);
+                x[j] = sign[nj] * (x_free[nj] + shift[nj]);
             }
             for &(j, v) in fixed_values {
                 x[j] = v;
@@ -5265,10 +5231,13 @@ mod tests {
         // unbounded in the direction needed), so both variables reach
         // `presolve::freevar` still doubly-infinite and, per its own docs,
         // are left exactly as-is (the "only in an inequality row" residual
-        // case). Before the `x_j = x_j^+ - x_j^-` split in
-        // `build_std_form_presolved`, this made `solve_lp_dual` report a
-        // false `Infeasible` (`extended_dual::delta_of` silently
-        // misclassified a doubly-infinite column as one-sided).
+        // case) — handed to `extended_dual::solve_lp_dual_extended` as a
+        // single unsplit column, both its sides M-tracked directly (that
+        // module's own docs). Historically this made `solve_lp_dual`
+        // report a false `Infeasible` (`extended_dual::delta_of` silently
+        // misclassified a doubly-infinite column as one-sided); first fixed
+        // by splitting into `x_j = x_j^+ - x_j^-` before this module ever
+        // ran, since superseded by native (unsplit) support.
         let vars = vec![var(f64::NEG_INFINITY, f64::INFINITY), var(f64::NEG_INFINITY, f64::INFINITY)];
         let obj = Objective { expr: expr(&[(0, 1.0), (1, 1.0)]), sense: Sense::Minimize };
         let cons = vec![
@@ -5290,8 +5259,8 @@ mod tests {
         // (never an equality row). Maximize x0 (minimize -x0) subject to
         // x0+x1<=8, x0-x1<=3: optimum at x1=2.5, x0=5.5. Here presolve
         // finds a one-sided implied bound on x0 (not the doubly-infinite
-        // case above), exercising the ordinary `Single` (non-split) slot
-        // path alongside the split one.
+        // case above), exercising the ordinary one-sided-unbounded column
+        // path alongside the genuinely-free one.
         let vars = vec![var(f64::NEG_INFINITY, f64::INFINITY), var(0.0, 10.0)];
         let obj = Objective { expr: expr(&[(0, -1.0)]), sense: Sense::Minimize };
         let cons = vec![
@@ -5303,6 +5272,31 @@ mod tests {
         let x = dual.x.unwrap();
         assert!(approx(x[0], 5.5), "x={x:?}");
         assert!(approx(x[1], 2.5), "x={x:?}");
+    }
+
+    #[test]
+    fn mutually_coupled_free_variables_falls_back_to_a_correct_answer() {
+        // x0, x1 both genuinely free, coupled *only* to each other (never
+        // anchored by a third column or an equality row) — the true
+        // optimum is a whole line (x0 - x1 = -3), not a single point, so
+        // whichever of the two ends up nonbasic in `extended_dual`'s own
+        // `M`-phase has no real bound to rest at once cleanup tries to pin
+        // it down. `extended_dual::solve_lp_dual_extended` bails out to
+        // `None` for exactly this shape (that module's own `finish` docs,
+        // and its `extended_dual::tests::
+        // two_free_columns_tied_only_through_opposing_inequality_rows_bails_out_gracefully`
+        // unit test) — this end-to-end test checks the *public* contract
+        // that matters: `solve_lp_dual` falls back to the classical `BIG_M`
+        // path transparently and still reaches the true optimal objective,
+        // not a wrong answer or a panic.
+        let vars = vec![var(f64::NEG_INFINITY, f64::INFINITY), var(f64::NEG_INFINITY, f64::INFINITY)];
+        let obj = Objective { expr: expr(&[(0, 1.0), (1, -1.0)]), sense: Sense::Minimize };
+        let cons = vec![row(&[(0, 1.0), (1, -1.0)], RowSense::Le, 3.0), row(&[(0, -1.0), (1, 1.0)], RowSense::Le, 3.0)];
+        let dual = solve_lp_dual(&vars, &obj, &cons);
+        assert_eq!(dual.status, Status::Optimal);
+        let x = dual.x.unwrap();
+        assert!(x[0].is_finite() && x[1].is_finite(), "x={x:?}");
+        assert!(approx(x[0] - x[1], -3.0), "x={x:?}");
     }
 
     #[test]
@@ -5363,16 +5357,16 @@ mod tests {
     }
 
     #[test]
-    fn freevar_split_column_mixed_with_ordinary_and_bounded_columns_end_to_end() {
-        // Stresses the split-column slot numbering (`new_lb`/`new_ub`/the
-        // row-building loops' `nj`/slack indices) when a split (doubly-
-        // free) column, an ordinary one-sided-infinite column, and a
-        // normal bounded column all coexist, plus a genuine equality row
-        // (so the `n_eq` slack loop runs too, not just the `g_rows` one).
-        // x0, x1 free only via inequality pairs pinning x0+x1=5, x0-x1=1
-        // (x0=3, x1=2, same as the pure split test above — deliberately
-        // never tied to x2/x3 by any row, so `presolve::freevar` can't
-        // eliminate them through an equality row and the split path still
+    fn freevar_residual_mixed_with_ordinary_and_bounded_columns_end_to_end() {
+        // Stresses the compacted-slot numbering (`new_lb`/`new_ub`/the
+        // row-building loops' `nj`/slack indices) when a genuinely free
+        // column, an ordinary one-sided-infinite column, and a normal
+        // bounded column all coexist, plus a genuine equality row (so the
+        // `n_eq` slack loop runs too, not just the `g_rows` one). x0, x1
+        // free only via inequality pairs pinning x0+x1=5, x0-x1=1 (x0=3,
+        // x1=2, same as the pure residual test above — deliberately never
+        // tied to x2/x3 by any row, so `presolve::freevar` can't eliminate
+        // them through an equality row and this residual case still
         // fires). x2 in [0,inf), x3 in [0,10] tied by an unrelated equality
         // row x2-x3=4: minimized at x3=0, x2=4.
         let vars = vec![
