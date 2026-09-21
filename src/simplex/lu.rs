@@ -362,11 +362,19 @@ impl MarkowitzState {
                     if self.row_used[i] {
                         continue;
                     }
+                    // Markowitz score only needs row/col degree, both already
+                    // known without touching `rows[i]` — skip the BTreeMap
+                    // lookup below for candidates that can't possibly beat
+                    // `best_score` (this is the vast majority on a matrix
+                    // with heavy fill-in after many FT updates).
+                    let score = (self.row_degree[i] - 1) * (self.col_degree[j] - 1);
+                    if score > best_score {
+                        continue;
+                    }
                     let Some(&v) = self.rows[i].get(&j) else { continue };
                     if v == 0.0 || v.abs() < STABILITY * self.col_max_abs[j] {
                         continue;
                     }
-                    let score = (self.row_degree[i] - 1) * (self.col_degree[j] - 1);
                     if score < best_score || (score == best_score && v.abs() > best_pivot_abs) {
                         best_score = score;
                         best = Some((i, j));
