@@ -521,6 +521,22 @@ pub fn run_extended(
         let mut cur_real_rows = prop.real_rows;
         let mut cur_real_rhs = prop.real_rhs;
 
+        // Equality-row counterpart of the `propagate` call above (see
+        // `propagate::propagate_equalities`'s own docs): only the first two
+        // outer rounds run it, matching the round count that already
+        // captured every forcing row and bound tightening in the 93-problem
+        // measurement (analysis/greenbea_20260921_230908.md §7.1) — later
+        // rounds found nothing further (no new forcing rows) but still paid
+        // for the full-matrix scan, and on `pilot87` running it through a
+        // third round pushed the extended dual simplex onto a rarer,
+        // singular-basis code path.
+        if _round_idx < 1 {
+            let eq = timed_step!("eqprop", propagate::propagate_equalities(&a, &b, &mut lb, &mut ub, prop_passes));
+            if eq.infeasible {
+                return extended_infeasible(sc, a, b, c, n);
+            }
+        }
+
         let fixes = timed_step!("dualfix", dualfix::fix_dominated_variables(n, &a, &cur_real_rows, &c, &lb, &ub));
         for &(j, value) in &fixes {
             lb[j] = value;
