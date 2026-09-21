@@ -1,5 +1,5 @@
 {
-  "loop_iteration_count": 1,
+  "loop_iteration_count": 2,
   "problems": {
     "degen3": {
       "consecutive_failures": 0,
@@ -8,11 +8,11 @@
       "last_attempt_at": "2026-09-21T00:38:00Z"
     },
     "greenbea": {
-      "consecutive_failures": 1,
-      "attempts": 1,
-      "last_result": "no_improvement",
-      "last_attempt_at": "2026-09-21T03:10:00Z",
-      "note": "false infeasible の原因は特定。修正1+2で infeasible は解消するが BIG_M フォールバック由来の誤った optimal に変わるため改善と認めず(report/greenbea_20260921_023713.md)"
+      "consecutive_failures": 0,
+      "attempts": 2,
+      "last_result": "improved",
+      "last_attempt_at": "2026-09-21T03:23:00Z",
+      "note": "反復#1(no_improvement)の申し送り通り、BFRT許容誤差を行の大きさに応じてスケーリングする修正(再分解によるやり直しではない)+ 摂動除去チェック(solve_lp_dual_on 相当)を追加し解消。PR #3。副次的に bnl2/cycle/pilot87 の誤差段の問題も解消(相対誤差 ~1e-14〜1e-15)。他89問題・dfl001は変化なし。"
     }
   }
 }
