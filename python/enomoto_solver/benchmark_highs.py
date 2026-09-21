@@ -38,9 +38,22 @@ import highspy
 
 from . import _core
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 
-from netlib_fetch import NetlibCacheError, ensure_emps, ensure_mps, ensure_problem_list  # noqa: E402
+class NetlibCacheError(RuntimeError):
+    """Needed Netlib data isn't cached — run `scripts/setup_netlib_data.py`
+    (from a checkout of this repo) once per environment first."""
+
+
+def _cached_problem_list(cache_dir: Path) -> list[str]:
+    list_path = cache_dir / "problems.txt"
+    if not list_path.exists():
+        raise NetlibCacheError(f"{list_path} not found — run `python scripts/setup_netlib_data.py` once to fetch it")
+    return [line.strip() for line in list_path.read_text().splitlines() if line.strip()]
+
+
+def _cached_mps(name: str, cache_dir: Path) -> Path | None:
+    mps_path = cache_dir / "mps" / f"{name}.mps"
+    return mps_path if mps_path.exists() and mps_path.stat().st_size > 0 else None
 
 
 def _load_lp(mps_path: Path):
@@ -155,8 +168,7 @@ def _run_worker(name: str, cache_dir: Path, timeout: float) -> None:
     """`--worker` entry point: solves exactly one problem in *this* process
     and prints a single JSON line to stdout. Invoked by `main()` as a
     subprocess (see its own docs for why) rather than called in-process."""
-    emps = ensure_emps(cache_dir, network=False)
-    mps_path = ensure_mps(name, cache_dir, emps, network=False)
+    mps_path = _cached_mps(name, cache_dir)
     if mps_path is None:
         print(json.dumps({"name": name, "error": "could not decompress"}))
         return
@@ -167,8 +179,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--max-vars", type=int, default=3000, help="skip problems with more columns than this")
     parser.add_argument("--timeout", type=float, default=60.0, help="per-problem wall-clock budget, seconds — enforced (SIGTERM/kill) via a per-problem subprocess")
-    parser.add_argument("--cache-dir", type=Path, default=Path(__file__).resolve().parents[2] / ".netlib_cache")
-    parser.add_argument("--out", type=Path, default=Path(__file__).resolve().parents[2] / "netlib_benchmark_results.csv")
+    # Relative to the current working directory, not `__file__`: once this
+    # package is installed from a wheel, `__file__` sits under site-packages
+    # with no reliable path back to a repo checkout (see this module's own
+    # docs). Both this and `scripts/setup_netlib_data.py`'s own default
+    # resolve to `<cwd>/.netlib_cache`, so running both from the repo root
+    # (the documented usage) still lines them up.
+    parser.add_argument("--cache-dir", type=Path, default=Path.cwd() / ".netlib_cache")
+    parser.add_argument("--out", type=Path, default=Path.cwd() / "netlib_benchmark_results.csv")
     parser.add_argument("--only", nargs="*", help="run only these problem names (default: all, size-filtered)")
     parser.add_argument("--worker", metavar="NAME", help=argparse.SUPPRESS)  # internal: single-problem subprocess mode
     args = parser.parse_args()
@@ -180,15 +198,14 @@ def main() -> None:
         return
 
     try:
-        emps = ensure_emps(args.cache_dir, network=False)
-        names = args.only if args.only else ensure_problem_list(args.cache_dir, network=False)
+        names = args.only if args.only else _cached_problem_list(args.cache_dir)
     except NetlibCacheError as e:
         print(f"error: {e}", file=sys.stderr)
         sys.exit(1)
 
     rows = []
     for name in names:
-        mps_path = ensure_mps(name, args.cache_dir, emps, network=False)
+        mps_path = _cached_mps(name, args.cache_dir)
         if mps_path is None:
             print(f"{name:12s} SKIP (not cached — run `python scripts/setup_netlib_data.py` to fetch it)")
             continue
