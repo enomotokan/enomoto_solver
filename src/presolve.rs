@@ -216,23 +216,53 @@ pub struct ExtendedPresolveResult {
     /// trusted. Mutually exclusive with `infeasible` — presolve reports at
     /// most one of the two.
     pub unbounded: bool,
-    pub substitutions: Vec<colsingleton::Substitution>,
-    /// Every [`parallelcols::merge_parallel_columns`] fold across every
-    /// round — see that module's own docs for why this can't join
-    /// `substitutions` above (a different recovery shape, reading *and*
-    /// writing `kept`'s own slot rather than a one-way linear formula from
-    /// already-known inputs) and why it's still safe to resolve as a fully
-    /// separate pass, strictly *after* every ordinary `substitutions` entry
-    /// (in that same reverse-discovery order — see
-    /// [`parallelcols::Substitution::apply`]'s own docs on why that
-    /// ordering alone is enough, with no interleaving against the other
-    /// list ever required): a column this module eliminates has zero
-    /// remaining row appearances the instant it's eliminated (its entries
-    /// are dropped from `a`/`g` outright, not merely fixed), so no *later*
-    /// round's row-based substitution (`doubleton`/`colsingleton`/
-    /// `aggregator`) can ever reference it as a term — the two lists can
-    /// never need to interleave.
-    pub parallel_col_substitutions: Vec<parallelcols::Substitution>,
+    /// Every eliminating step from every technique in this pipeline
+    /// (`doubleton`/`colsingleton`/`aggregator`/`freevar`'s own ordinary
+    /// [`colsingleton::Substitution`]s, and every
+    /// [`parallelcols::merge_parallel_columns`] fold), in one single
+    /// chronological log — a caller recovers every original variable's true
+    /// value by walking this log in **reverse** (see each variant's own
+    /// `value`/`apply`) — the exact reverse of the order these steps ran in
+    /// presolve.
+    ///
+    /// **Must stay one interleaved log, not two separate per-kind lists
+    /// undone in two separate passes** (an earlier version of this struct
+    /// had exactly that: `substitutions: Vec<colsingleton::Substitution>`
+    /// plus a fully separate `parallel_col_substitutions`, undone as two
+    /// back-to-back loops). That earlier design's own reasoning — "a column
+    /// `parallelcols` eliminates has zero remaining row appearances the
+    /// instant it's eliminated, so no *later* round's row-based
+    /// substitution can ever reference it as a term" — is true but answers
+    /// the wrong direction: it rules out a later ordinary substitution
+    /// referencing an already-*eliminated* column, not an *earlier*
+    /// substitution referencing a column `parallelcols` merges away
+    /// *afterward*. `parallelcols` only ever removes one of a merged pair
+    /// (`eliminated`) — the other (`kept`) survives at the *same* index,
+    /// now holding a composite value, and any ordinary substitution
+    /// recorded *before* that merge whose `terms` reference `kept` is still
+    /// sitting in the (undone-first, in the old two-pass design) ordinary
+    /// list, so it read `kept`'s post-merge composite value instead of the
+    /// real pre-merge one. Confirmed as the exact mechanism behind a false
+    /// wrong-objective result on Netlib `greenbea` (see
+    /// `parallelcols-postsolve-order-bug` project memory): resolving one
+    /// chronological log in one reverse pass (`PostsolveStep` below) is the
+    /// fix — see [`PostsolveStep`]'s own docs.
+    pub postsolve_log: Vec<PostsolveStep>,
+}
+
+/// One step of [`ExtendedPresolveResult::postsolve_log`] — either kind of
+/// elimination this pipeline performs, kept in one shared chronological
+/// order specifically so postsolve can undo them in a single reverse pass
+/// (see that field's own docs for why two separate per-kind passes is
+/// unsound). The two variants' own recovery shapes stay genuinely
+/// different — `Sub`'s [`colsingleton::Substitution::value`] is a one-way
+/// linear formula from already-known inputs, `ParallelCol`'s
+/// [`parallelcols::Substitution::apply`] both reads and rewrites `kept`'s
+/// own slot — this enum only unifies the *order* they're resolved in, not
+/// how each one resolves.
+pub enum PostsolveStep {
+    Sub(colsingleton::Substitution),
+    ParallelCol(parallelcols::Substitution),
 }
 
 fn extended_infeasible(sc: Scaling, a: Csr, b: Vec<f64>, c: Vec<f64>, n: usize) -> ExtendedPresolveResult {
@@ -249,8 +279,7 @@ fn extended_infeasible(sc: Scaling, a: Csr, b: Vec<f64>, c: Vec<f64>, n: usize) 
         c,
         infeasible: true,
         unbounded: false,
-        substitutions: Vec::new(),
-        parallel_col_substitutions: Vec::new(),
+        postsolve_log: Vec::new(),
     }
 }
 
@@ -268,8 +297,7 @@ fn extended_unbounded(sc: Scaling, a: Csr, b: Vec<f64>, c: Vec<f64>, n: usize) -
         c,
         infeasible: false,
         unbounded: true,
-        substitutions: Vec::new(),
-        parallel_col_substitutions: Vec::new(),
+        postsolve_log: Vec::new(),
     }
 }
 
@@ -428,8 +456,7 @@ pub fn run_extended(
     // round's own activity-based tightening has since narrowed them to.
     let (orig_lb, orig_ub, _, _) = propagate::extract_bounds(n, &g, &h);
 
-    let mut substitutions: Vec<colsingleton::Substitution> = Vec::new();
-    let mut parallel_col_substitutions: Vec<parallelcols::Substitution> = Vec::new();
+    let mut postsolve_log: Vec<PostsolveStep> = Vec::new();
 
     // Latches off permanently the first time a round's `doubleton` call
     // finds nothing: unlike `rowsingleton`/`colsingleton` (cheap enough to
@@ -666,7 +693,7 @@ pub fn run_extended(
                     lb[sub.var] = 0.0;
                     ub[sub.var] = 0.0;
                 }
-                substitutions.extend(dbl.substitutions);
+                postsolve_log.extend(dbl.substitutions.into_iter().map(PostsolveStep::Sub));
             }
 
             let cs = timed_step!("colsingleton", colsingleton::eliminate_singleton_equalities(n, &a, &b, &g, &h, &c));
@@ -715,7 +742,7 @@ pub fn run_extended(
                 g = csr_from_rows(&g_rows, n);
                 h = h_vec;
             }
-            substitutions.extend(cs.substitutions);
+            postsolve_log.extend(cs.substitutions.into_iter().map(PostsolveStep::Sub));
 
             let inner_signature = (a.nrows(), g.nrows());
             if inner_prev_signature == Some(inner_signature) {
@@ -801,7 +828,7 @@ pub fn run_extended(
                     lb[sub.var] = 0.0;
                     ub[sub.var] = 0.0;
                 }
-                substitutions.extend(agg.substitutions);
+                postsolve_log.extend(agg.substitutions.into_iter().map(PostsolveStep::Sub));
                 cur_real_rows = agg.real_rows;
                 cur_real_rhs = agg.real_rhs;
                 // Rebuild `g`/`h` from the just-updated `real_rows`/`lb`/`ub`
@@ -894,7 +921,7 @@ pub fn run_extended(
                 lb = pc.lb;
                 ub = pc.ub;
                 cur_real_rows = pc.real_rows;
-                parallel_col_substitutions.extend(pc.substitutions);
+                postsolve_log.extend(pc.substitutions.into_iter().map(PostsolveStep::ParallelCol));
                 // Same reason as `aggregator`'s own rebuild just above: the
                 // mid-round dedup call and the next round's `propagate`
                 // must see this pass's own row/bound changes, not a stale
@@ -974,8 +1001,7 @@ pub fn run_extended(
             c,
             infeasible: true,
             unbounded: false,
-            substitutions,
-            parallel_col_substitutions,
+            postsolve_log,
         };
     }
 
@@ -995,9 +1021,11 @@ pub fn run_extended(
     // method's KKT system singular in that column outright.
     let mut lb = prop.lb;
     let mut ub = prop.ub;
-    for sub in &substitutions {
-        lb[sub.var] = 0.0;
-        ub[sub.var] = 0.0;
+    for step in &postsolve_log {
+        if let PostsolveStep::Sub(sub) = step {
+            lb[sub.var] = 0.0;
+            ub[sub.var] = 0.0;
+        }
     }
 
     // General free-variable elimination (paper §4.1): `rowsingleton`/
@@ -1035,14 +1063,16 @@ pub fn run_extended(
         lb[j] = v;
         ub[j] = v;
     }
-    substitutions.extend(free.substitutions);
+    postsolve_log.extend(free.substitutions.into_iter().map(PostsolveStep::Sub));
     // Re-pin: covers `freevar`'s own newly eliminated columns (the pass
     // above only pinned what `rowsingleton`/`doubleton`/`colsingleton` had
     // already found) before `rebuild_g` reads `lb`/`ub` below — same reason
     // as the first pass, just for this pass's own new substitutions.
-    for sub in &substitutions {
-        lb[sub.var] = 0.0;
-        ub[sub.var] = 0.0;
+    for step in &postsolve_log {
+        if let PostsolveStep::Sub(sub) = step {
+            lb[sub.var] = 0.0;
+            ub[sub.var] = 0.0;
+        }
     }
 
     let (g, h) = propagate::rebuild_g(n, free.real_rows.clone(), free.real_rhs.clone(), &lb, &ub);
@@ -1060,7 +1090,6 @@ pub fn run_extended(
         c,
         infeasible: false,
         unbounded: false,
-        substitutions,
-        parallel_col_substitutions,
+        postsolve_log,
     }
 }

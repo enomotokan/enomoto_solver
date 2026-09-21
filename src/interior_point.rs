@@ -281,21 +281,17 @@ impl Workspace {
 /// call site (this module's Newton loop, like `simplex.rs`'s, never
 /// unscales mid-solve), which is exactly the space each `Substitution`'s
 /// own `terms`/`rhs`/`coeff` were recorded in.
-fn unscale_with_substitutions(
-    x: &[f64],
-    sc: &scaling::Scaling,
-    substitutions: &[presolve::colsingleton::Substitution],
-    parallel_col_substitutions: &[presolve::parallelcols::Substitution],
-) -> Vec<f64> {
+fn unscale_with_substitutions(x: &[f64], sc: &scaling::Scaling, postsolve_log: &[presolve::PostsolveStep]) -> Vec<f64> {
     let mut x = x.to_vec();
-    for sub in substitutions.iter().rev() {
-        x[sub.var] = sub.value(&x);
-    }
-    // See `simplex.rs`'s own `unscale_result` for why this runs as a fully
-    // separate, strictly-later pass rather than interleaved with the loop
-    // above.
-    for sub in parallel_col_substitutions.iter().rev() {
-        sub.apply(&mut x);
+    // One reverse pass over the *shared* chronological log -- see
+    // `simplex.rs`'s own `unscale_result` and
+    // `presolve::ExtendedPresolveResult::postsolve_log`'s own docs for why
+    // this must not be two separate per-kind passes.
+    for step in postsolve_log.iter().rev() {
+        match step {
+            presolve::PostsolveStep::Sub(sub) => x[sub.var] = sub.value(&x),
+            presolve::PostsolveStep::ParallelCol(sub) => sub.apply(&mut x),
+        }
     }
     scaling::unscale_x(sc, &x)
 }
@@ -334,8 +330,7 @@ pub fn solve(qp: &QpStd) -> IpmResult {
     let g = pre.g;
     let h = pre.h;
     let c = pre.c;
-    let substitutions = pre.substitutions;
-    let parallel_col_substitutions = pre.parallel_col_substitutions;
+    let postsolve_log = pre.postsolve_log;
     let p = a.nrows();
     let m = g.nrows();
 
@@ -377,7 +372,7 @@ pub fn solve(qp: &QpStd) -> IpmResult {
         if norm_inf(&dual_res) > 1e-4 {
             return IpmResult { status: Status::Unbounded, x: None };
         }
-        return IpmResult { status: Status::Optimal, x: Some(unscale_with_substitutions(&xi, &sc, &substitutions, &parallel_col_substitutions)) };
+        return IpmResult { status: Status::Optimal, x: Some(unscale_with_substitutions(&xi, &sc, &postsolve_log)) };
     }
 
     let s_tilde0: Vec<f64> = nu_tilde0.iter().map(|v| -v).collect();
@@ -432,7 +427,7 @@ pub fn solve(qp: &QpStd) -> IpmResult {
         let bnd_g = EPS_ABS + EPS_REL * cx.abs().max(by.abs()).max(hz.abs());
 
         if pk <= bnd_p && dk <= bnd_d && gap <= bnd_g {
-            return IpmResult { status: Status::Optimal, x: Some(unscale_with_substitutions(&x, &sc, &substitutions, &parallel_col_substitutions)) };
+            return IpmResult { status: Status::Optimal, x: Some(unscale_with_substitutions(&x, &sc, &postsolve_log)) };
         }
 
         let at_floor = rho <= RHO_MIN * 1.001 && delta <= DELTA_MIN * 1.001;

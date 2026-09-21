@@ -644,6 +644,28 @@ pub(crate) static CLEANUP_PIVOTS: std::sync::atomic::AtomicUsize = std::sync::at
 #[cfg(test)]
 pub(crate) static COMBINED_FLIP_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+/// `x_B(M)`'s `M`-coefficients are exactly zero or of order one in exact
+/// arithmetic; anything this small is accumulated LU/update noise. Left in,
+/// `Affine1::cmp_lex`'s slope-first order lets it override a comfortably
+/// feasible `base` and drives two-variable cycles (Netlib `greenbea`).
+const X_B_SLOPE_NOISE: f64 = 1e-7;
+
+#[inline]
+fn snap_slope(v: f64) -> f64 {
+    if v.abs() < X_B_SLOPE_NOISE {
+        0.0
+    } else {
+        v
+    }
+}
+
+#[inline]
+fn snap_slopes(v: &mut [f64]) {
+    for x in v.iter_mut() {
+        *x = snap_slope(*x);
+    }
+}
+
 /// `base + slope * M`, for a conceptual, never-numerically-substituted
 /// `M -> +infinity`. See this module's own docs for why comparisons never
 /// plug in a concrete `M`.
@@ -1705,6 +1727,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     let (seed_base, seed_slope) = compute_rhs_affine(std, &cache, &nb_status)?;
     lu.solve_into(&seed_base, &mut lu_scratch, &mut x_b_base);
     lu.solve_into(&seed_slope, &mut lu_scratch, &mut x_b_slope);
+    snap_slopes(&mut x_b_slope);
 
     // `super::solve_lp_dual_on`'s own `noise_feasible`, ported: a row
     // whose own infeasibility, at the Eligible=empty juncture below, is
@@ -2065,6 +2088,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     let mut prev_r: Option<usize> = None;
     let mut prev_alpha_q: f64 = 0.0;
     let mut prev_dj_q: f64 = 0.0;
+    let mut prev_dbg: Option<(Vec<f64>, Vec<usize>, usize)> = None;
 
     // EXPERIMENTAL, **confirmed not to work** (`ENOMOTO_STUCK_ROW_BOOST_FACTOR`,
     // unset/`1.0` = no-op, zero behavior change either way): the idea —
@@ -2197,6 +2221,9 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
             let mut worst: Option<(usize, f64)> = None;
             for j in 0..std.n_total {
                 let Some(status) = nb_status[j] else { continue };
+                if std.lb[j] == std.ub[j] {
+                    continue;
+                }
                 let dj = d[j];
                 let viol = match status {
                     NbStatus::Lower => -dj,
@@ -2210,6 +2237,16 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 eprintln!(
                     "DEBUG_EXT_DUAL_CHECK: first dual-feasibility violation (>1.0) at iter={_iter} j={j} magnitude={viol} -- caused by PREVIOUS iter's pivot: prev_q={prev_q:?} prev_r={prev_r:?} prev_alpha_q={prev_alpha_q} prev_dj_q={prev_dj_q}"
                 );
+                if let Some((ap, flips, ncand)) = &prev_dbg {
+                    let flipped = flips.contains(&j);
+                    eprintln!(
+                        "  DBG j={j}: prev a_p[j]={} flipped_prev={flipped} n_flips={} n_cand={ncand} status={:?} d[j]={} delta={:?} lower={:?} upper={:?} is_slack={}",
+                        ap[j], flips.len(), nb_status[j], d[j], if j < n_orig { delta[j] } else { MSide::None }, cache.lower[j], cache.upper[j], j >= n_orig
+                    );
+                    let mut sumabs = 0.0f64;
+                    for (i, &v) in ap.iter().enumerate() { if v.abs() > 1e3 { sumabs += 1.0; let _ = i; } }
+                    eprintln!("  DBG prev row has {sumabs} entries with |a_p|>1e3");
+                }
                 dual_violation_reported = true;
             }
         }
@@ -2507,6 +2544,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                     let (fresh_base, fresh_slope) = compute_rhs_affine(std, &cache, &nb_status)?;
                     lu.solve_into(&fresh_base, &mut lu_scratch, &mut x_b_base);
                     lu.solve_into(&fresh_slope, &mut lu_scratch, &mut x_b_slope);
+                    snap_slopes(&mut x_b_slope);
                     infeasible_rows.rebuild(m, |i| row_infeasible_affine(&cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i));
                     fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fd_cb, &mut lu_scratch, &mut fd_y, &mut d);
                     if dse_refresh_on_refactor {
@@ -2578,7 +2616,18 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         let mut cum = Affine1::ZERO;
         if bland_mode {
             timed!(profile_phases, prof_phases::CHUZC1, {
-                candidates.sort_by_key(|c| c.j);
+                // Same ascending `(ratio, j)` order the non-`bland` heap
+                // path below produces (`Cand`'s own `Ord` impl) -- *not* a
+                // plain `j` sort. `j` still breaks ties deterministically
+                // (Bland's rule's actual anti-cycling guarantee), but the
+                // BFRT walk just below fundamentally requires ratio-
+                // ascending order to be a ratio test at all: sorting by `j`
+                // alone let it walk straight past cheap, well-conditioned
+                // candidates into whichever tiny/ill-conditioned pivot
+                // happened to sit at a small column index, confirmed as
+                // a contributing mechanism behind Netlib `greenbea`'s
+                // singular-basis failure once `bland_mode` latched.
+                candidates.sort();
             });
             timed!(profile_phases, prof_phases::BFRT, {
                 for (idx, cand) in candidates.iter().enumerate() {
@@ -2642,6 +2691,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                     let (fresh_base, fresh_slope) = compute_rhs_affine(std, &cache, &nb_status)?;
                     lu.solve_into(&fresh_base, &mut lu_scratch, &mut x_b_base);
                     lu.solve_into(&fresh_slope, &mut lu_scratch, &mut x_b_slope);
+                    snap_slopes(&mut x_b_slope);
                     infeasible_rows.rebuild(m, |i| row_infeasible_affine(&cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i));
                     fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fd_cb, &mut lu_scratch, &mut fd_y, &mut d);
                     if dse_refresh_on_refactor {
@@ -2771,7 +2821,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 for i in 0..m {
                     if combined_alpha_base[i] != 0.0 || combined_alpha_slope[i] != 0.0 {
                         x_b_base[i] -= combined_alpha_base[i];
-                        x_b_slope[i] -= combined_alpha_slope[i];
+                        x_b_slope[i] = snap_slope(x_b_slope[i] - combined_alpha_slope[i]);
                         infeasible_rows.set(i, row_infeasible_affine(&cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i));
                     }
                 }
@@ -2812,6 +2862,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
             prev_r = Some(r);
             prev_alpha_q = alpha_q;
             prev_dj_q = dj_q;
+            prev_dbg = Some((a_p.clone(), sorted[..best_idx].iter().map(|c| c.j).collect(), sorted.len()));
         }
 
         // `alpha_full = B^-1 A_q` (FTRAN of the entering column, against
@@ -2961,6 +3012,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 let (fresh_base, fresh_slope) = compute_rhs_affine(std, &cache, &nb_status)?;
                 lu.solve_into(&fresh_base, &mut lu_scratch, &mut x_b_base);
                 lu.solve_into(&fresh_slope, &mut lu_scratch, &mut x_b_slope);
+                snap_slopes(&mut x_b_slope);
                 infeasible_rows.rebuild(m, |i| row_infeasible_affine(&cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i));
                 fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fd_cb, &mut lu_scratch, &mut fd_y, &mut d);
                 if dse_refresh_on_refactor {
@@ -3047,12 +3099,12 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 let a = alpha_full[i];
                 if a != 0.0 {
                     x_b_base[i] -= a * theta_base;
-                    x_b_slope[i] -= a * theta_slope;
+                    x_b_slope[i] = snap_slope(x_b_slope[i] - a * theta_slope);
                     infeasible_rows.set(i, row_infeasible_affine(&cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i));
                 }
             }
             x_b_base[r] = nb_val_q.base + theta_base;
-            x_b_slope[r] = nb_val_q.slope + theta_slope;
+            x_b_slope[r] = snap_slope(nb_val_q.slope + theta_slope);
         });
 
         // This pivot's actual objective contribution — `theta_q(M) * dj_q`
@@ -3162,7 +3214,6 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         basis[r] = q;
         basis_pos[q] = Some(r);
         nb_status[q] = None;
-
         if debug_delta0 && delta0_iter.is_none() {
             let all_off_m_side = m_flagged_cols.iter().all(|&j| match nb_status[j] {
                 None => true,
@@ -3378,6 +3429,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 let (fresh_base, fresh_slope) = compute_rhs_affine(std, &cache, &nb_status)?;
                 lu.solve_into(&fresh_base, &mut lu_scratch, &mut x_b_base);
                 lu.solve_into(&fresh_slope, &mut lu_scratch, &mut x_b_slope);
+                snap_slopes(&mut x_b_slope);
                 infeasible_rows.rebuild(m, |i| row_infeasible_affine(&cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i));
                 fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fd_cb, &mut lu_scratch, &mut fd_y, &mut d);
                 if dse_refresh_on_refactor {
@@ -3867,11 +3919,14 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
             }
             return Some(SimplexResult { status: Status::Infeasible, x: None });
         }
-        if bland_mode {
-            candidates.sort_by_key(|c| c.j);
-        } else {
-            candidates.sort_by(|a, b| a.ratio.total_cmp(&b.ratio).then_with(|| a.j.cmp(&b.j)));
-        }
+        // Same order regardless of `bland_mode`: ascending `(ratio, j)`.
+        // `bland_mode` sorting by `j` alone (an earlier version of this
+        // branch) broke the ratio test the BFRT walk just below relies on
+        // -- see the main M-tracked loop's own identical fix above for the
+        // Netlib `greenbea` failure this caused there. `j` already breaks
+        // ties deterministically in the one order, which is all Bland's
+        // rule actually needs.
+        candidates.sort_by(|a, b| a.ratio.total_cmp(&b.ratio).then_with(|| a.j.cmp(&b.j)));
 
         // Relative tolerance, not `TOL` flat: `needed` (from an LU solve)
         // and `cum` (a sum of per-candidate capacities) reach the same

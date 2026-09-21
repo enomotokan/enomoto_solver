@@ -893,12 +893,12 @@ const BIG_M: f64 = 1e7;
 struct PresolvedForm {
     std: StdForm,
     scaling: scaling::Scaling,
-    substitutions: Vec<presolve::colsingleton::Substitution>,
-    /// See [`presolve::parallelcols::Substitution`]'s own docs — resolved
-    /// by [`unscale_result`] in a separate pass, strictly after
-    /// `substitutions` above (never interleaved; see that field's own
-    /// docs on `presolve::ExtendedPresolveResult` for why that's safe).
-    parallel_col_substitutions: Vec<presolve::parallelcols::Substitution>,
+    /// One shared chronological log of every eliminating presolve step —
+    /// see [`presolve::ExtendedPresolveResult::postsolve_log`]'s own docs
+    /// for why this must stay a single interleaved log (resolved by
+    /// [`unscale_result`] in one reverse pass) rather than two separate
+    /// per-kind lists.
+    postsolve_log: Vec<presolve::PostsolveStep>,
     orig_of_free: Vec<usize>,
     /// `sign[nj] * (x_free[nj] + shift[nj])` is `nj`'s own contribution to
     /// `orig_of_free[nj]`'s true value — see [`PresolvedForm`]'s own docs.
@@ -1000,9 +1000,11 @@ fn build_std_form_presolved(
     // to a single arbitrary finite point — `0` needs no justification
     // beyond "finite and never read" — before this variable's slot ever
     // reaches the solver.
-    for sub in &pre.substitutions {
-        lb[sub.var] = 0.0;
-        ub[sub.var] = 0.0;
+    for step in &pre.postsolve_log {
+        if let presolve::PostsolveStep::Sub(sub) = step {
+            lb[sub.var] = 0.0;
+            ub[sub.var] = 0.0;
+        }
     }
 
     // Bound-shift: translate every surviving structural variable (every
@@ -1251,8 +1253,7 @@ fn build_std_form_presolved(
     Ok(PresolvedForm {
         std: StdForm { n_total, n_rows, c, rows, cols, b: b_out, lb: new_lb, ub: new_ub },
         scaling: pre.scaling,
-        substitutions: pre.substitutions,
-        parallel_col_substitutions: pre.parallel_col_substitutions,
+        postsolve_log: pre.postsolve_log,
         orig_of_free,
         sign,
         fixed_values,
@@ -1290,8 +1291,7 @@ fn build_std_form_presolved(
 fn unscale_result(
     result: SimplexResult,
     sc: &scaling::Scaling,
-    substitutions: &[presolve::colsingleton::Substitution],
-    parallel_col_substitutions: &[presolve::parallelcols::Substitution],
+    postsolve_log: &[presolve::PostsolveStep],
     orig_of_free: &[usize],
     sign: &[f64],
     fixed_values: &[(usize, f64)],
@@ -1304,7 +1304,7 @@ fn unscale_result(
             // Expand the compacted solve's output (one entry per surviving
             // structural column, see `PresolvedForm`'s own docs) back into
             // the original `variables.len()`-length space *before* the
-            // substitution loop below: a substitution's own `terms` can
+            // postsolve loop below: a substitution's own `terms` can
             // reference a variable that `dualfix`/a forcing row fixed
             // outright (not one this loop itself resolves), so every fixed
             // value must already be in place at its original index by the
@@ -1316,19 +1316,18 @@ fn unscale_result(
             for &(j, v) in fixed_values {
                 x[j] = v;
             }
-            for sub in substitutions.iter().rev() {
-                x[sub.var] = sub.value(&x);
-            }
-            // `presolve::parallelcols::Substitution` runs strictly *after*
-            // every ordinary substitution above, in its own reverse-
-            // discovery order — see that type's own docs, and
-            // `PresolvedForm::parallel_col_substitutions`'s, for why this
-            // ordering alone is sufficient (a column it eliminates has zero
-            // row appearances left the instant it's eliminated, so no
-            // later-round ordinary substitution's `terms` can ever
-            // reference it).
-            for sub in parallel_col_substitutions.iter().rev() {
-                sub.apply(&mut x);
+            // One reverse pass over the *shared* chronological log — see
+            // `presolve::ExtendedPresolveResult::postsolve_log`'s own docs
+            // for why this must not be two separate per-kind passes: a
+            // `Sub` recorded before a later `ParallelCol` merge can
+            // reference the merge's own `kept` column, so that merge's own
+            // `apply` must already have run (restoring `kept`'s true
+            // pre-merge value) by the time this `Sub`'s `value()` reads it.
+            for step in postsolve_log.iter().rev() {
+                match step {
+                    presolve::PostsolveStep::Sub(sub) => x[sub.var] = sub.value(&x),
+                    presolve::PostsolveStep::ParallelCol(sub) => sub.apply(&mut x),
+                }
             }
             let x = scaling::unscale_x(sc, &x);
             SimplexResult { status: Status::Optimal, x: Some(x) }
@@ -2991,7 +2990,7 @@ pub fn solve_lp_dual(variables: &[VariableData], objective: &Objective, constrai
     // classical path below (when none survived, the common case) or via
     // `extended_dual::solve_lp_dual_extended` (when `had_unbounded_structural`
     // is set) — see that parameter's own docs.
-    let PresolvedForm { std, scaling: sc, substitutions, parallel_col_substitutions, orig_of_free, sign, fixed_values, shift, had_unbounded_structural } = match build_std_form_presolved(variables, objective, constraints, false) {
+    let PresolvedForm { std, scaling: sc, postsolve_log, orig_of_free, sign, fixed_values, shift, had_unbounded_structural } = match build_std_form_presolved(variables, objective, constraints, false) {
         Ok(pf) => pf,
         Err(status) => return SimplexResult { status, x: None },
     };
@@ -3044,7 +3043,7 @@ pub fn solve_lp_dual(variables: &[VariableData], objective: &Objective, constrai
             }
         }
         if let Some(result) = ext_result {
-            return unscale_result(result, &sc, &substitutions, &parallel_col_substitutions, &orig_of_free, &sign, &fixed_values, &shift, variables.len());
+            return unscale_result(result, &sc, &postsolve_log, &orig_of_free, &sign, &fixed_values, &shift, variables.len());
         }
         // `None`: the extended solver hit one of its own documented
         // "should be unreachable" cases (a pivot selection with no
@@ -3070,11 +3069,11 @@ pub fn solve_lp_dual(variables: &[VariableData], objective: &Objective, constrai
         // `solve_lp`-vs-`solve_lp_dual` cross-check test exercised the
         // *dual* side of this exact scenario, never the primal one, once
         // `solve_lp` itself was removed as dead code).
-        let PresolvedForm { std, scaling: sc, substitutions, parallel_col_substitutions, orig_of_free, sign, fixed_values, shift, .. } = match build_std_form_presolved(variables, objective, constraints, true) {
+        let PresolvedForm { std, scaling: sc, postsolve_log, orig_of_free, sign, fixed_values, shift, .. } = match build_std_form_presolved(variables, objective, constraints, true) {
             Ok(pf) => pf,
             Err(status) => return SimplexResult { status, x: None },
         };
-        return unscale_result(solve_std_form_decomposed(&std, true), &sc, &substitutions, &parallel_col_substitutions, &orig_of_free, &sign, &fixed_values, &shift, variables.len());
+        return unscale_result(solve_std_form_decomposed(&std, true), &sc, &postsolve_log, &orig_of_free, &sign, &fixed_values, &shift, variables.len());
     }
     let profile_phases = std::env::var("ENOMOTO_PROF_PHASES").is_ok();
     let debug_eta_density = std::env::var("ENOMOTO_DEBUG_ETA_DENSITY").is_ok();
@@ -3190,7 +3189,7 @@ pub fn solve_lp_dual(variables: &[VariableData], objective: &Objective, constrai
             );
         }
     }
-    unscale_result(result, &sc, &substitutions, &parallel_col_substitutions, &orig_of_free, &sign, &fixed_values, &shift, variables.len())
+    unscale_result(result, &sc, &postsolve_log, &orig_of_free, &sign, &fixed_values, &shift, variables.len())
 }
 
 /// EXPERIMENTAL (measurement only, never exercised by production code):
