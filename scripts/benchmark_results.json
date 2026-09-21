@@ -1,934 +1,1116 @@
 {
   "benchmark_config": {
-    "max_vars": 3000,
-    "source": "python -m enomoto_solver.benchmark_highs (default settings)",
+    "max_vars": null,
+    "source": "python -m enomoto_solver.benchmark_highs --max-vars 100000000 (all cached Netlib problems, no size filter)",
     "timeout_s": 60.0
   },
-  "generated_at": "2026-09-21T00:36:54Z",
+  "generated_at": "2026-09-21T02:07:45Z",
   "problems": {
     "25fv47": {
       "highs_obj": 5501.845888286757,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.1517095189999509,
+      "highs_time": 0.15121435600002542,
       "n_constraints": 821,
       "n_rows": 821,
       "n_vars": 1571,
       "nnz": 10400,
       "ours_obj": 5501.847670059618,
       "ours_status": "optimal",
-      "ours_time": 0.5116044940000393
+      "ours_time": 0.4721978079999758
+    },
+    "80bau3b": {
+      "highs_obj": 987224.1924090902,
+      "highs_status": "HighsModelStatus.kOptimal",
+      "highs_time": 0.11919553500001712,
+      "n_constraints": 2262,
+      "n_rows": 2262,
+      "n_vars": 9799,
+      "nnz": 21002,
+      "ours_obj": 987224.1924090912,
+      "ours_status": "optimal",
+      "ours_time": 0.7828526129999887
     },
     "adlittle": {
       "highs_obj": 225494.9631623803,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.0017124739999871963,
+      "highs_time": 0.0015213309999921876,
       "n_constraints": 56,
       "n_rows": 56,
       "n_vars": 97,
       "nnz": 383,
       "ours_obj": 225494.96316238097,
       "ours_status": "optimal",
-      "ours_time": 0.002371187999870017
+      "ours_time": 0.002224442999988696
     },
     "afiro": {
       "highs_obj": -464.75314285714285,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.0006890950000979501,
+      "highs_time": 0.0007473580000123548,
       "n_constraints": 27,
       "n_rows": 27,
       "n_vars": 32,
       "nnz": 83,
       "ours_obj": -464.7531428571431,
       "ours_status": "optimal",
-      "ours_time": 0.0009965599999759434
+      "ours_time": 0.0010058949999915967
     },
     "agg": {
       "highs_obj": -35991767.2865765,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.003714947000162283,
+      "highs_time": 0.0033645760000240443,
       "n_constraints": 488,
       "n_rows": 488,
       "n_vars": 163,
       "nnz": 2410,
       "ours_obj": -35991767.28657651,
       "ours_status": "optimal",
-      "ours_time": 0.006263779999926555
+      "ours_time": 0.006129453999960788
     },
     "agg2": {
       "highs_obj": -20239252.355977118,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.005226779999929931,
+      "highs_time": 0.0049153429999933,
       "n_constraints": 516,
       "n_rows": 516,
       "n_vars": 302,
       "nnz": 4284,
       "ours_obj": -20239252.355977118,
       "ours_status": "optimal",
-      "ours_time": 0.007003060000215555
+      "ours_time": 0.00671764699995947
     },
     "agg3": {
       "highs_obj": 10312115.935089216,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.005569326000113506,
+      "highs_time": 0.005274493999991137,
       "n_constraints": 516,
       "n_rows": 516,
       "n_vars": 302,
       "nnz": 4300,
       "ours_obj": 10312115.935089236,
       "ours_status": "optimal",
-      "ours_time": 0.0077352260000225215
+      "ours_time": 0.007981357999994998
     },
     "bandm": {
       "highs_obj": -158.62801845012078,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.00909320599998864,
+      "highs_time": 0.008841088999986368,
       "n_constraints": 305,
       "n_rows": 305,
       "n_vars": 472,
       "nnz": 2494,
       "ours_obj": -158.6280184501276,
       "ours_status": "optimal",
-      "ours_time": 0.01837823699997898
+      "ours_time": 0.018101080000008096
     },
     "beaconfd": {
       "highs_obj": 33592.4858072,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.002761045999932321,
+      "highs_time": 0.0025062969999680718,
       "n_constraints": 173,
       "n_rows": 173,
       "n_vars": 262,
       "nnz": 3375,
       "ours_obj": 33592.48580719977,
       "ours_status": "optimal",
-      "ours_time": 0.00545531999978266
+      "ours_time": 0.0052901740000379505
     },
     "blend": {
       "highs_obj": -30.812149845828237,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.00183563900009176,
+      "highs_time": 0.0019123879999938254,
       "n_constraints": 74,
       "n_rows": 74,
       "n_vars": 83,
       "nnz": 491,
       "ours_obj": -30.81214984582855,
       "ours_status": "optimal",
-      "ours_time": 0.002779775999897538
+      "ours_time": 0.0025744049999616436
     },
     "bnl1": {
       "highs_obj": 1977.6295615228878,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.025605375999930402,
+      "highs_time": 0.02472871499998064,
       "n_constraints": 643,
       "n_rows": 643,
       "n_vars": 1175,
       "nnz": 5121,
       "ours_obj": 1977.6295615228898,
       "ours_status": "optimal",
-      "ours_time": 0.08730994100005773
+      "ours_time": 0.07749183700002504
+    },
+    "bnl2": {
+      "highs_obj": 1811.2365403585482,
+      "highs_status": "HighsModelStatus.kOptimal",
+      "highs_time": 0.05096034799998961,
+      "n_constraints": 2324,
+      "n_rows": 2324,
+      "n_vars": 3489,
+      "nnz": 13999,
+      "ours_obj": 1811.265608657322,
+      "ours_status": "optimal",
+      "ours_time": 0.23778831799995714
     },
     "boeing1": {
       "highs_obj": -335.21356750712675,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.012903301000051215,
+      "highs_time": 0.01037805099997513,
       "n_constraints": 440,
       "n_rows": 351,
       "n_vars": 384,
       "nnz": 3485,
       "ours_obj": -335.2135675071267,
       "ours_status": "optimal",
-      "ours_time": 0.016053470000088055
+      "ours_time": 0.017266852000034305
     },
     "boeing2": {
       "highs_obj": -315.0187280152027,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.002814105000197742,
+      "highs_time": 0.0028010920000269834,
       "n_constraints": 185,
       "n_rows": 166,
       "n_vars": 143,
       "nnz": 1196,
       "ours_obj": -315.01872801520307,
       "ours_status": "optimal",
-      "ours_time": 0.0033111620000454423
+      "ours_time": 0.0032284149999668443
     },
     "bore3d": {
       "highs_obj": 1373.0803942084926,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.002555298000061157,
+      "highs_time": 0.00223632400002316,
       "n_constraints": 233,
       "n_rows": 233,
       "n_vars": 315,
       "nnz": 1429,
       "ours_obj": 1373.0803942084926,
       "ours_status": "optimal",
-      "ours_time": 0.004199896999807606
+      "ours_time": 0.0038637970000081623
     },
     "brandy": {
       "highs_obj": 1518.5098964881279,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.005222566999918854,
+      "highs_time": 0.004870117999985268,
       "n_constraints": 220,
       "n_rows": 220,
       "n_vars": 249,
       "nnz": 2148,
       "ours_obj": 1518.509896488132,
       "ours_status": "optimal",
-      "ours_time": 0.009110219999911351
+      "ours_time": 0.008251562999987527
     },
     "capri": {
       "highs_obj": 2690.0129137681593,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.003738307000048735,
+      "highs_time": 0.003573428000038348,
       "n_constraints": 271,
       "n_rows": 271,
       "n_vars": 353,
       "nnz": 1767,
       "ours_obj": 2690.0129137681624,
       "ours_status": "optimal",
-      "ours_time": 0.007915184000012232
+      "ours_time": 0.006928377999997792
     },
     "cycle": {
       "highs_obj": -5.226393024894102,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.24389241599988054,
+      "highs_time": 0.26356679000002714,
       "n_constraints": 1903,
       "n_rows": 1903,
       "n_vars": 2857,
       "nnz": 20720,
       "ours_obj": -5.224927905369733,
       "ours_status": "optimal",
-      "ours_time": 0.08246793900002558
+      "ours_time": 0.0778118420000169
+    },
+    "czprob": {
+      "highs_obj": 2185196.698856578,
+      "highs_status": "HighsModelStatus.kOptimal",
+      "highs_time": 0.025103535000027932,
+      "n_constraints": 929,
+      "n_rows": 929,
+      "n_vars": 3523,
+      "nnz": 10669,
+      "ours_obj": 2185196.6988565787,
+      "ours_status": "optimal",
+      "ours_time": 0.04751444900000479
+    },
+    "d2q06c": {
+      "highs_obj": 122784.2108141893,
+      "highs_status": "HighsModelStatus.kOptimal",
+      "highs_time": 0.7514092440000013,
+      "n_constraints": 2171,
+      "n_rows": 2171,
+      "n_vars": 5167,
+      "nnz": 32417,
+      "ours_obj": 122784.23483147731,
+      "ours_status": "optimal",
+      "ours_time": 2.8734775030000037
+    },
+    "d6cube": {
+      "highs_obj": 315.49166666666696,
+      "highs_status": "HighsModelStatus.kOptimal",
+      "highs_time": 0.11254146300001366,
+      "n_constraints": 415,
+      "n_rows": 415,
+      "n_vars": 6184,
+      "nnz": 37704,
+      "ours_obj": 315.4916666666812,
+      "ours_status": "optimal",
+      "ours_time": 0.18308909699999276
     },
     "degen2": {
       "highs_obj": -1435.178,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.013240112999937992,
+      "highs_time": 0.013491981000015585,
       "n_constraints": 444,
       "n_rows": 444,
       "n_vars": 534,
       "nnz": 3978,
       "ours_obj": -1435.1779999999976,
       "ours_status": "optimal",
-      "ours_time": 0.037065079000058176
+      "ours_time": 0.03610347400001501
     },
     "degen3": {
       "highs_obj": -987.2940000000007,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.1731161449999945,
+      "highs_time": 0.17433473600004845,
       "n_constraints": 1503,
       "n_rows": 1503,
       "n_vars": 1818,
       "nnz": 24646,
       "ours_obj": -987.2939999999996,
       "ours_status": "optimal",
-      "ours_time": 0.6888987949998864
+      "ours_time": 0.6917370259999984
+    },
+    "dfl001": {
+      "error": "timed out after 60.0s"
     },
     "e226": {
       "highs_obj": -11.638929066370537,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.007096207999893522,
+      "highs_time": 0.008110870999985309,
       "n_constraints": 223,
       "n_rows": 223,
       "n_vars": 282,
       "nnz": 2578,
       "ours_obj": -11.6389290663774,
       "ours_status": "optimal",
-      "ours_time": 0.012309877999996388
+      "ours_time": 0.01399828799998204
     },
     "etamacro": {
       "highs_obj": -755.7152333005275,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.008761145999869768,
+      "highs_time": 0.009177518999990752,
       "n_constraints": 400,
       "n_rows": 400,
       "n_vars": 688,
       "nnz": 2409,
       "ours_obj": -755.7152252512067,
       "ours_status": "optimal",
-      "ours_time": 0.02541085800021392
+      "ours_time": 0.02594957000002296
     },
     "fffff800": {
       "highs_obj": 555679.5648174963,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.009920569000087198,
+      "highs_time": 0.010482328999955826,
       "n_constraints": 524,
       "n_rows": 524,
       "n_vars": 854,
       "nnz": 6227,
       "ours_obj": 555679.5648174962,
       "ours_status": "optimal",
-      "ours_time": 0.05345545900013349
+      "ours_time": 0.05835022099995513
     },
     "finnis": {
       "highs_obj": 172791.06559561164,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.00507697700004428,
+      "highs_time": 0.0050481959999615356,
       "n_constraints": 497,
       "n_rows": 497,
       "n_vars": 614,
       "nnz": 2310,
       "ours_obj": 172791.06559561164,
       "ours_status": "optimal",
-      "ours_time": 0.011345865000066624
+      "ours_time": 0.011051996999981384
     },
     "fit1d": {
       "highs_obj": -9146.378092420928,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.009853689999999915,
+      "highs_time": 0.010202470000024277,
       "n_constraints": 24,
       "n_rows": 24,
       "n_vars": 1026,
       "nnz": 13404,
       "ours_obj": -9146.378092420888,
       "ours_status": "optimal",
-      "ours_time": 0.013212733000045773
+      "ours_time": 0.014639552000005551
     },
     "fit1p": {
       "highs_obj": 9146.378092420935,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.039285693000010724,
+      "highs_time": 0.03723404999999502,
       "n_constraints": 627,
       "n_rows": 627,
       "n_vars": 1677,
       "nnz": 9868,
       "ours_obj": 9146.378092423318,
       "ours_status": "optimal",
-      "ours_time": 0.09262075700007699
+      "ours_time": 0.08815102199997682
+    },
+    "fit2d": {
+      "highs_obj": -68464.2932938321,
+      "highs_status": "HighsModelStatus.kOptimal",
+      "highs_time": 0.14017017399999077,
+      "n_constraints": 25,
+      "n_rows": 25,
+      "n_vars": 10500,
+      "nnz": 129018,
+      "ours_obj": -68464.29329383213,
+      "ours_status": "optimal",
+      "ours_time": 0.21447887699997636
+    },
+    "fit2p": {
+      "highs_obj": 68464.29329383216,
+      "highs_status": "HighsModelStatus.kOptimal",
+      "highs_time": 0.9552598519999833,
+      "n_constraints": 3000,
+      "n_rows": 3000,
+      "n_vars": 13525,
+      "nnz": 50284,
+      "ours_obj": 68464.29329383212,
+      "ours_status": "optimal",
+      "ours_time": 4.625411003000011
     },
     "forplan": {
       "highs_obj": -664.2189612722054,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.00565751299996009,
+      "highs_time": 0.005546479000031468,
       "n_constraints": 162,
       "n_rows": 161,
       "n_vars": 421,
       "nnz": 4563,
       "ours_obj": -664.2189612722042,
       "ours_status": "optimal",
-      "ours_time": 0.014609166000127516
+      "ours_time": 0.014406156999996256
     },
     "ganges": {
       "highs_obj": -109585.73612927813,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.012616191999995863,
+      "highs_time": 0.014289869000037925,
       "n_constraints": 1309,
       "n_rows": 1309,
       "n_vars": 1681,
       "nnz": 6912,
       "ours_obj": -109585.73612927792,
       "ours_status": "optimal",
-      "ours_time": 0.05865116699987993
+      "ours_time": 0.062483406000012565
     },
     "gfrd-pnc": {
       "highs_obj": 6902235.999548812,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.006533777999948143,
+      "highs_time": 0.006411911999975928,
       "n_constraints": 616,
       "n_rows": 616,
       "n_vars": 1092,
       "nnz": 2377,
       "ours_obj": 6902235.999548818,
       "ours_status": "optimal",
-      "ours_time": 0.01998672699983217
+      "ours_time": 0.01816388999998253
+    },
+    "greenbea": {
+      "highs_obj": -72555248.12984587,
+      "highs_status": "HighsModelStatus.kOptimal",
+      "highs_time": 0.21954250500004946,
+      "n_constraints": 2392,
+      "n_rows": 2392,
+      "n_vars": 5405,
+      "nnz": 30877,
+      "ours_status": "infeasible",
+      "ours_time": 1.9154892160000259
+    },
+    "greenbeb": {
+      "highs_obj": -4302260.261206586,
+      "highs_status": "HighsModelStatus.kOptimal",
+      "highs_time": 0.368592982999985,
+      "n_constraints": 2392,
+      "n_rows": 2392,
+      "n_vars": 5405,
+      "nnz": 30877,
+      "ours_obj": -4302260.261206586,
+      "ours_status": "optimal",
+      "ours_time": 2.3732044489999566
     },
     "grow15": {
       "highs_obj": -106870941.29357533,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.03827875399997538,
+      "highs_time": 0.03782660899997836,
       "n_constraints": 300,
       "n_rows": 300,
       "n_vars": 645,
       "nnz": 5620,
       "ours_obj": -106870941.29357548,
       "ours_status": "optimal",
-      "ours_time": 0.06401116400002138
+      "ours_time": 0.06336475099999461
     },
     "grow22": {
       "highs_obj": -160834336.48256296,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.07833163400005105,
+      "highs_time": 0.08255894999996372,
       "n_constraints": 440,
       "n_rows": 440,
       "n_vars": 946,
       "nnz": 8252,
       "ours_obj": -160834336.48256293,
       "ours_status": "optimal",
-      "ours_time": 0.14370080699995924
+      "ours_time": 0.14234582300002785
     },
     "grow7": {
       "highs_obj": -47787811.8147115,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.010315406999779952,
+      "highs_time": 0.010671410999975706,
       "n_constraints": 140,
       "n_rows": 140,
       "n_vars": 301,
       "nnz": 2612,
       "ours_obj": -47787811.8147115,
       "ours_status": "optimal",
-      "ours_time": 0.0233608630001072
+      "ours_time": 0.022857384999952046
     },
     "israel": {
       "highs_obj": -896644.8218630459,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.003539799000009225,
+      "highs_time": 0.003808811999988393,
       "n_constraints": 174,
       "n_rows": 174,
       "n_vars": 142,
       "nnz": 2269,
       "ours_obj": -896644.8218630466,
       "ours_status": "optimal",
-      "ours_time": 0.004274957999996332
+      "ours_time": 0.004258933999949477
     },
     "kb2": {
       "highs_obj": -1749.9001299062056,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.0010019129999818688,
+      "highs_time": 0.0009862379999958648,
       "n_constraints": 43,
       "n_rows": 43,
       "n_vars": 41,
       "nnz": 286,
       "ours_obj": -1749.9001299062056,
       "ours_status": "optimal",
-      "ours_time": 0.001427062999937334
+      "ours_time": 0.007496753999987504
     },
     "lotfi": {
       "highs_obj": -25.264706061880002,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.002522261999956754,
+      "highs_time": 0.002963690999990831,
       "n_constraints": 153,
       "n_rows": 153,
       "n_vars": 308,
       "nnz": 1078,
       "ours_obj": -25.264706061879963,
       "ours_status": "optimal",
-      "ours_time": 0.005361837999998897
+      "ours_time": 0.010067955000010897
     },
     "maros": {
       "highs_obj": -58063.74370112589,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.04392693800014058,
+      "highs_time": 0.04361108799997737,
       "n_constraints": 846,
       "n_rows": 846,
       "n_vars": 1443,
       "nnz": 9614,
       "ours_obj": -58063.743701125895,
       "ours_status": "optimal",
-      "ours_time": 0.10668617299984362
+      "ours_time": 0.10900828100000126
+    },
+    "maros-r7": {
+      "highs_obj": 1497185.1664796423,
+      "highs_status": "HighsModelStatus.kOptimal",
+      "highs_time": 0.7516942230000154,
+      "n_constraints": 3136,
+      "n_rows": 3136,
+      "n_vars": 9408,
+      "nnz": 144848,
+      "ours_obj": 1497185.166479643,
+      "ours_status": "optimal",
+      "ours_time": 5.0907247549999965
     },
     "modszk1": {
       "highs_obj": 320.61972906434596,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.014291826000089713,
+      "highs_time": 0.013464994999992541,
       "n_constraints": 687,
       "n_rows": 687,
       "n_vars": 1620,
       "nnz": 3168,
       "ours_obj": 320.61972906434306,
       "ours_status": "optimal",
-      "ours_time": 0.050911769000094864
+      "ours_time": 0.05225435799997058
     },
     "nesm": {
       "highs_obj": 14076036.487562705,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.1480153859999973,
+      "highs_time": 0.14081369699999868,
       "n_constraints": 750,
       "n_rows": 662,
       "n_vars": 2923,
       "nnz": 13288,
       "ours_obj": 14076036.493964378,
       "ours_status": "optimal",
-      "ours_time": 0.24971705899997687
+      "ours_time": 0.24073537999998962
     },
     "perold": {
       "highs_obj": -9380.755278235187,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.05696588699993299,
+      "highs_time": 0.05490540900001406,
       "n_constraints": 625,
       "n_rows": 625,
       "n_vars": 1376,
       "nnz": 6018,
       "ours_obj": -9380.755278235023,
       "ours_status": "optimal",
-      "ours_time": 0.16754459399999178
+      "ours_time": 0.167234384999972
+    },
+    "pilot": {
+      "highs_obj": -557.4897292744025,
+      "highs_status": "HighsModelStatus.kOptimal",
+      "highs_time": 1.0465692199999808,
+      "n_constraints": 1441,
+      "n_rows": 1441,
+      "n_vars": 3652,
+      "nnz": 43167,
+      "ours_obj": -557.4897094648187,
+      "ours_status": "optimal",
+      "ours_time": 4.438553614999989
     },
     "pilot.ja": {
       "highs_obj": -6113.136465581338,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.07408412599988878,
+      "highs_time": 0.08280562499999178,
       "n_constraints": 940,
       "n_rows": 940,
       "n_vars": 1988,
       "nnz": 14698,
       "ours_obj": -6113.136463738977,
       "ours_status": "optimal",
-      "ours_time": 0.4398881440001787
+      "ours_time": 0.44208972700005233
     },
     "pilot.we": {
       "highs_obj": -2720107.5328449584,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.13740653900003963,
+      "highs_time": 0.13764324300001363,
       "n_constraints": 722,
       "n_rows": 722,
       "n_vars": 2789,
       "nnz": 9126,
       "ours_obj": -2720107.5328449574,
       "ours_status": "optimal",
-      "ours_time": 0.38732640599982915
+      "ours_time": 0.381656530999976
     },
     "pilot4": {
       "highs_obj": -2581.1392588838853,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.027751953000006324,
+      "highs_time": 0.027896270999974604,
       "n_constraints": 410,
       "n_rows": 410,
       "n_vars": 1000,
       "nnz": 5141,
       "ours_obj": -2581.13925888384,
       "ours_status": "optimal",
-      "ours_time": 0.06903666100015471
+      "ours_time": 0.07319267999997692
+    },
+    "pilot87": {
+      "highs_obj": 301.71034733310745,
+      "highs_status": "HighsModelStatus.kOptimal",
+      "highs_time": 3.76833826699999,
+      "n_constraints": 2030,
+      "n_rows": 2030,
+      "n_vars": 4883,
+      "nnz": 73152,
+      "ours_obj": 301.7198298520605,
+      "ours_status": "optimal",
+      "ours_time": 18.583983620000026
     },
     "pilotnov": {
       "highs_obj": -4497.2761882188715,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.14989357500007827,
+      "highs_time": 0.1627382279999665,
       "n_constraints": 975,
       "n_rows": 975,
       "n_vars": 2172,
       "nnz": 13057,
       "ours_obj": -4497.27618821887,
       "ours_status": "optimal",
-      "ours_time": 0.22418961599987597
+      "ours_time": 0.2210145870000133
     },
     "recipe": {
       "highs_obj": -266.61600000000027,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.0013543940001454757,
+      "highs_time": 0.0013993399999776557,
       "n_constraints": 91,
       "n_rows": 91,
       "n_vars": 180,
       "nnz": 663,
       "ours_obj": -266.61600000000027,
       "ours_status": "optimal",
-      "ours_time": 0.0020258750000721193
+      "ours_time": 0.001943466999989596
     },
     "sc105": {
       "highs_obj": -52.20206121170723,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.0012301140000090527,
+      "highs_time": 0.0012291099999970356,
       "n_constraints": 105,
       "n_rows": 105,
       "n_vars": 103,
       "nnz": 280,
       "ours_obj": -52.2020612117073,
       "ours_status": "optimal",
-      "ours_time": 0.0023913780000839324
+      "ours_time": 0.0022653980000200136
     },
     "sc205": {
       "highs_obj": -52.20206121170721,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.0022455929999978252,
+      "highs_time": 0.002135611000028348,
       "n_constraints": 205,
       "n_rows": 205,
       "n_vars": 203,
       "nnz": 551,
       "ours_obj": -52.20206121170726,
       "ours_status": "optimal",
-      "ours_time": 0.008382883000194852
+      "ours_time": 0.007668098000010559
     },
     "sc50a": {
       "highs_obj": -64.5750770585645,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.000875876000009157,
+      "highs_time": 0.0009023770000453624,
       "n_constraints": 50,
       "n_rows": 50,
       "n_vars": 48,
       "nnz": 130,
       "ours_obj": -64.5750770585645,
       "ours_status": "optimal",
-      "ours_time": 0.001697194000144009
+      "ours_time": 0.001344346999985646
     },
     "sc50b": {
       "highs_obj": -69.99999999999999,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.000798583999994662,
+      "highs_time": 0.0008700970000177222,
       "n_constraints": 50,
       "n_rows": 50,
       "n_vars": 48,
       "nnz": 118,
       "ours_obj": -69.99999999999996,
       "ours_status": "optimal",
-      "ours_time": 0.001369700999930501
+      "ours_time": 0.0013086870000051931
     },
     "scagr25": {
       "highs_obj": -14753433.060768528,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.006351575000053344,
+      "highs_time": 0.00710964199998898,
       "n_constraints": 471,
       "n_rows": 471,
       "n_vars": 500,
       "nnz": 1554,
       "ours_obj": -14753433.060768528,
       "ours_status": "optimal",
-      "ours_time": 0.013303377000056571
+      "ours_time": 0.0148743590000322
     },
     "scagr7": {
       "highs_obj": -2331389.824330984,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.0020336190000307397,
+      "highs_time": 0.0020016240000018115,
       "n_constraints": 129,
       "n_rows": 129,
       "n_vars": 140,
       "nnz": 420,
       "ours_obj": -2331389.8243309837,
       "ours_status": "optimal",
-      "ours_time": 0.002815565999981118
+      "ours_time": 0.002704214999994292
     },
     "scfxm1": {
       "highs_obj": 18416.759028348948,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.0076846299998578615,
+      "highs_time": 0.007659237999973811,
       "n_constraints": 330,
       "n_rows": 330,
       "n_vars": 457,
       "nnz": 2589,
       "ours_obj": 18416.75902834893,
       "ours_status": "optimal",
-      "ours_time": 0.019762105000154406
+      "ours_time": 0.019466840999996293
     },
     "scfxm2": {
       "highs_obj": 36660.261564998815,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.017913205000013477,
+      "highs_time": 0.016711857000018426,
       "n_constraints": 660,
       "n_rows": 660,
       "n_vars": 914,
       "nnz": 5183,
       "ours_obj": 36660.261564998815,
       "ours_status": "optimal",
-      "ours_time": 0.06105213000000731
+      "ours_time": 0.05840908400000444
     },
     "scfxm3": {
       "highs_obj": 54901.254549751444,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.02978113300014229,
+      "highs_time": 0.029783637999969415,
       "n_constraints": 990,
       "n_rows": 990,
       "n_vars": 1371,
       "nnz": 7777,
       "ours_obj": 54901.25454975145,
       "ours_status": "optimal",
-      "ours_time": 0.09852275399998689
+      "ours_time": 0.10365759300003674
     },
     "scorpion": {
       "highs_obj": 1878.1248227381068,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.00357816200016714,
+      "highs_time": 0.0029210960000227715,
       "n_constraints": 388,
       "n_rows": 388,
       "n_vars": 358,
       "nnz": 1426,
       "ours_obj": 1878.1248227381068,
       "ours_status": "optimal",
-      "ours_time": 0.006207747000189556
+      "ours_time": 0.005940758000008373
     },
     "scrs8": {
       "highs_obj": 904.296953800792,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.008529053000074782,
+      "highs_time": 0.008239811999999347,
       "n_constraints": 490,
       "n_rows": 490,
       "n_vars": 1169,
       "nnz": 3182,
       "ours_obj": 904.2969538007947,
       "ours_status": "optimal",
-      "ours_time": 0.03683321900007286
+      "ours_time": 0.03598800500003563
     },
     "scsd1": {
       "highs_obj": 8.666666674333364,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.0027403889998822706,
+      "highs_time": 0.0025112190000413648,
       "n_constraints": 77,
       "n_rows": 77,
       "n_vars": 760,
       "nnz": 2388,
       "ours_obj": 8.666666674333355,
       "ours_status": "optimal",
-      "ours_time": 0.007370921000074304
+      "ours_time": 0.007385086999988744
     },
     "scsd6": {
       "highs_obj": 50.5000000782623,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.0076716700000361016,
+      "highs_time": 0.007537404000004244,
       "n_constraints": 147,
       "n_rows": 147,
       "n_vars": 1350,
       "nnz": 4316,
       "ours_obj": 50.50000007826243,
       "ours_status": "optimal",
-      "ours_time": 0.018473135000022012
+      "ours_time": 0.01752176699994834
     },
     "scsd8": {
       "highs_obj": 904.9999999254643,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.03731435500003499,
+      "highs_time": 0.03761614800004054,
       "n_constraints": 397,
       "n_rows": 397,
       "n_vars": 2750,
       "nnz": 8584,
       "ours_obj": 904.9999999254645,
       "ours_status": "optimal",
-      "ours_time": 0.11966657899984057
+      "ours_time": 0.11893831499997987
     },
     "sctap1": {
       "highs_obj": 1412.25,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.005742754000038985,
+      "highs_time": 0.005222720999995545,
       "n_constraints": 300,
       "n_rows": 300,
       "n_vars": 480,
       "nnz": 1692,
       "ours_obj": 1412.2499999999993,
       "ours_status": "optimal",
-      "ours_time": 0.010625017000165826
+      "ours_time": 0.009990516000016214
     },
     "sctap2": {
       "highs_obj": 1724.807142857143,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.012346674999889728,
+      "highs_time": 0.011847283000008701,
       "n_constraints": 1090,
       "n_rows": 1090,
       "n_vars": 1880,
       "nnz": 6714,
       "ours_obj": 1724.8071428571413,
       "ours_status": "optimal",
-      "ours_time": 0.03075974699981998
+      "ours_time": 0.027665156000011848
     },
     "sctap3": {
       "highs_obj": 1424.0,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.016086349000033806,
+      "highs_time": 0.018348656000000574,
       "n_constraints": 1480,
       "n_rows": 1480,
       "n_vars": 2480,
       "nnz": 8874,
       "ours_obj": 1423.999999999999,
       "ours_status": "optimal",
-      "ours_time": 0.055660042999988946
+      "ours_time": 0.05565367200000537
     },
     "seba": {
       "highs_obj": 15711.599999999999,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.004030017000104635,
+      "highs_time": 0.004835096000022077,
       "n_constraints": 522,
       "n_rows": 515,
       "n_vars": 1028,
       "nnz": 4352,
       "ours_obj": 15711.600000000002,
       "ours_status": "optimal",
-      "ours_time": 0.009121613999923284
+      "ours_time": 0.010358435999989979
     },
     "share1b": {
       "highs_obj": -76589.31857918572,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.003075801000022693,
+      "highs_time": 0.002787959000045248,
       "n_constraints": 117,
       "n_rows": 117,
       "n_vars": 225,
       "nnz": 1151,
       "ours_obj": -76589.31857918574,
       "ours_status": "optimal",
-      "ours_time": 0.005026972000223395
+      "ours_time": 0.004905778000022565
     },
     "share2b": {
       "highs_obj": -415.73224074141945,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.0019704709998222825,
+      "highs_time": 0.0020394510000301125,
       "n_constraints": 96,
       "n_rows": 96,
       "n_vars": 79,
       "nnz": 694,
       "ours_obj": -415.7322407414157,
       "ours_status": "optimal",
-      "ours_time": 0.0022260810001171194
+      "ours_time": 0.0023911630000270634
     },
     "shell": {
       "highs_obj": 1208825346.0,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.01155416200003856,
+      "highs_time": 0.01194024400001581,
       "n_constraints": 536,
       "n_rows": 536,
       "n_vars": 1775,
       "nnz": 3556,
       "ours_obj": 1208825346.0,
       "ours_status": "optimal",
-      "ours_time": 0.027314099000022907
+      "ours_time": 0.027490026000009493
     },
     "ship04l": {
       "highs_obj": 1793324.5379703562,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.007294236000007004,
+      "highs_time": 0.00820979200000238,
       "n_constraints": 402,
       "n_rows": 402,
       "n_vars": 2118,
       "nnz": 6332,
       "ours_obj": 1793324.5379703564,
       "ours_status": "optimal",
-      "ours_time": 0.02423879399998441
+      "ours_time": 0.023057472000004964
     },
     "ship04s": {
       "highs_obj": 1798714.7004453917,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.005651925999927698,
+      "highs_time": 0.005988597999987633,
       "n_constraints": 402,
       "n_rows": 402,
       "n_vars": 1458,
       "nnz": 4352,
       "ours_obj": 1798714.7004453915,
       "ours_status": "optimal",
-      "ours_time": 0.013735774999986461
+      "ours_time": 0.015130858000020453
+    },
+    "ship08l": {
+      "highs_obj": 1909055.211389131,
+      "highs_status": "HighsModelStatus.kOptimal",
+      "highs_time": 0.016931267000018124,
+      "n_constraints": 778,
+      "n_rows": 778,
+      "n_vars": 4283,
+      "nnz": 12802,
+      "ours_obj": 1909055.2113891297,
+      "ours_status": "optimal",
+      "ours_time": 0.07176941099999112
     },
     "ship08s": {
       "highs_obj": 1920098.2105346182,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.009255386999939219,
+      "highs_time": 0.009379671999965922,
       "n_constraints": 778,
       "n_rows": 778,
       "n_vars": 2387,
       "nnz": 7114,
       "ours_obj": 1920098.2105346166,
       "ours_status": "optimal",
-      "ours_time": 0.027381740000009813
+      "ours_time": 0.026310448000003817
+    },
+    "ship12l": {
+      "highs_obj": 1470187.9193292663,
+      "highs_status": "HighsModelStatus.kOptimal",
+      "highs_time": 0.022789299000010033,
+      "n_constraints": 1151,
+      "n_rows": 1151,
+      "n_vars": 5427,
+      "nnz": 16170,
+      "ours_obj": 1470187.9193292642,
+      "ours_status": "optimal",
+      "ours_time": 0.10229180300001417
     },
     "ship12s": {
       "highs_obj": 1489236.1344061329,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.011103047999995397,
+      "highs_time": 0.01121768900003417,
       "n_constraints": 1151,
       "n_rows": 1151,
       "n_vars": 2763,
       "nnz": 8178,
       "ours_obj": 1489236.1344061336,
       "ours_status": "optimal",
-      "ours_time": 0.030095818000063446
+      "ours_time": 0.029600801000015053
     },
     "sierra": {
       "highs_obj": 15394362.183631929,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.013154406000012386,
+      "highs_time": 0.01394297000001643,
       "n_constraints": 1227,
       "n_rows": 1227,
       "n_vars": 2036,
       "nnz": 7302,
       "ours_obj": 15394362.183631927,
       "ours_status": "optimal",
-      "ours_time": 0.03115558800004692
+      "ours_time": 0.030333696000013788
     },
     "stair": {
       "highs_obj": -251.26695119296335,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.013969584000051327,
+      "highs_time": 0.013611112000035064,
       "n_constraints": 356,
       "n_rows": 356,
       "n_vars": 467,
       "nnz": 3856,
       "ours_obj": -251.26695119296312,
       "ours_status": "optimal",
-      "ours_time": 0.0284784209998179
+      "ours_time": 0.028544239000041216
     },
     "standata": {
       "highs_obj": 1257.6995,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.004201392999902964,
+      "highs_time": 0.004172884000013255,
       "n_constraints": 359,
       "n_rows": 359,
       "n_vars": 1075,
       "nnz": 3031,
       "ours_obj": 1257.6995000000002,
       "ours_status": "optimal",
-      "ours_time": 0.009108327999911126
+      "ours_time": 0.008916821000013897
     },
     "standgub": {
       "highs_obj": 1257.6995,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.004217222000079346,
+      "highs_time": 0.00394096399998034,
       "n_constraints": 361,
       "n_rows": 361,
       "n_vars": 1184,
       "nnz": 3139,
       "ours_obj": 1257.6995000000002,
       "ours_status": "optimal",
-      "ours_time": 0.009624596000094243
+      "ours_time": 0.00906220699999949
     },
     "standmps": {
       "highs_obj": 1406.0175,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.0049064390000239655,
+      "highs_time": 0.005008360000033463,
       "n_constraints": 467,
       "n_rows": 467,
       "n_vars": 1075,
       "nnz": 3679,
       "ours_obj": 1406.0175000000006,
       "ours_status": "optimal",
-      "ours_time": 0.01163507300020683
+      "ours_time": 0.011614748999988933
     },
     "stocfor1": {
       "highs_obj": -41131.97621943641,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.0015763910000714532,
+      "highs_time": 0.0015189050000117277,
       "n_constraints": 117,
       "n_rows": 117,
       "n_vars": 111,
       "nnz": 447,
       "ours_obj": -41131.97621943641,
       "ours_status": "optimal",
-      "ours_time": 0.0025357419999636477
+      "ours_time": 0.0022921130000099765
     },
     "stocfor2": {
       "highs_obj": -39024.408537882104,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.025323972000023787,
+      "highs_time": 0.025312576000033005,
       "n_constraints": 2157,
       "n_rows": 2157,
       "n_vars": 2031,
       "nnz": 8343,
       "ours_obj": -39024.40853788211,
       "ours_status": "optimal",
-      "ours_time": 0.20584400700022343
+      "ours_time": 0.19639255800001365
     },
     "tuff": {
       "highs_obj": 0.292147765093613,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.0076344689998677495,
+      "highs_time": 0.007033404000026167,
       "n_constraints": 333,
       "n_rows": 333,
       "n_vars": 587,
       "nnz": 4520,
       "ours_obj": 0.2921477650936128,
       "ours_status": "optimal",
-      "ours_time": 0.014074471999947491
+      "ours_time": 0.012978131000011217
     },
     "vtp.base": {
       "highs_obj": 129831.46246136137,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.0014233270001113851,
+      "highs_time": 0.0014614250000022366,
       "n_constraints": 198,
       "n_rows": 198,
       "n_vars": 203,
       "nnz": 908,
       "ours_obj": 129831.46246136083,
       "ours_status": "optimal",
-      "ours_time": 0.005272886000057042
+      "ours_time": 0.004901411999981065
     },
     "wood1p": {
       "highs_obj": 1.442902411573409,
       "highs_status": "HighsModelStatus.kOptimal",
-      "highs_time": 0.06861072000015156,
+      "highs_time": 0.0643856830000118,
       "n_constraints": 244,
       "n_rows": 244,
       "n_vars": 2594,
       "nnz": 70215,
-      "ours_obj": 1.4429024115766282,
+      "ours_obj": 1.4429024115725584,
       "ours_status": "optimal",
-      "ours_time": 0.1508155110000189
+      "ours_time": 0.26077410499999587
+    },
+    "woodw": {
+      "highs_obj": 1.3044763330842293,
+      "highs_status": "HighsModelStatus.kOptimal",
+      "highs_time": 0.06767482800000835,
+      "n_constraints": 1098,
+      "n_rows": 1098,
+      "n_vars": 8405,
+      "nnz": 37474,
+      "ours_obj": 1.30447633308423,
+      "ours_status": "optimal",
+      "ours_time": 0.4514544880000244
     }
   }
 }
