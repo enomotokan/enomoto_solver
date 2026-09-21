@@ -599,36 +599,6 @@ pub fn run_extended(
             }
         }
 
-        // Equality-row counterpart of the `propagate` call above (see
-        // `propagate::propagate_equalities`'s own docs): only the first
-        // outer round runs it, matching the round count that already
-        // captured every forcing row and bound tightening in the 93-problem
-        // measurement (analysis/greenbea_20260921_230908.md §7.1) — later
-        // rounds found nothing further (no new forcing rows) but still paid
-        // for the full-matrix scan, and on `pilot87` running it through a
-        // third round pushed the extended dual simplex onto a rarer,
-        // singular-basis code path.
-        //
-        // Deliberately run *after* `dualpropagate` just above, not right
-        // after `propagate` at the top of this round: `dualpropagate`'s own
-        // "literal `+inf`" trigger (see its own docs) is only sound while a
-        // column's bound really is unreachable, and this pass's whole job
-        // is to hand out genuine finite bounds from the equality system —
-        // running it first would quietly disarm `dualpropagate`'s reduction
-        // for every column it newly bounds, for the wrong reason (a bound
-        // that only just became reachable, not one `dualpropagate` itself
-        // used and lost). Ordering it last instead means every earlier
-        // pass in this round still sees exactly the same bounds it would
-        // without this pass existing at all, and only the bounds this pass
-        // itself produces are new this round for anything downstream
-        // (`foldfixed` right below, then next round's own `propagate`).
-        if _round_idx < 1 {
-            let eq = timed_step!("eqprop", propagate::propagate_equalities(&a, &b, &mut lb, &mut ub, prop_passes));
-            if eq.infeasible {
-                return extended_infeasible(sc, a, b, c, n);
-            }
-        }
-
         // Fold every column fixed so far (by `dualfix`/`dualpropagate` just
         // above, by an earlier round's `rowsingleton`, or from the model's
         // own input bounds) straight out of `A`'s equality rows and `G`'s
@@ -960,6 +930,48 @@ pub fn run_extended(
                 g = ng;
                 h = nh;
             }
+        }
+
+        // Equality-row counterpart of the `propagate` call at the top of
+        // this round (see `propagate::propagate_equalities`'s own docs):
+        // only the first outer round runs it, matching the round count that
+        // already captured every forcing row and bound tightening in the
+        // 93-problem measurement (analysis/greenbea_20260921_230908.md
+        // §7.1) — later rounds found nothing further (no new forcing rows)
+        // but still paid for the full-matrix scan, and on `pilot87` running
+        // it through a third round pushed the extended dual simplex onto a
+        // rarer, singular-basis code path.
+        //
+        // Deliberately run dead last in the round, after `dualpropagate`,
+        // `aggregator`, and `parallelcols` above rather than right after
+        // `propagate` at the top: all three of those only fire on a column
+        // that is *still* unbounded on the side they need (`dualpropagate`'s
+        // own "literal `+inf`" trigger; `aggregator`/`parallelcols`'s own
+        // "implied-free" gate, see either module's docs) — this pass's
+        // entire job is handing out a genuine finite bound to exactly such
+        // columns, so running it any earlier would quietly disarm whichever
+        // of those three passes would otherwise have eliminated the column
+        // outright (strictly better than this pass leaving it live-but-
+        // bounded). Confirmed directly on `stocfor2` (`aggregator`'s own
+        // motivating instance, see its docs above): running this pass first
+        // dropped `aggregator`'s round-0 elimination count from 181 to 74;
+        // running it last leaves `aggregator`/`parallelcols`/`dualpropagate`
+        // bit-for-bit as if this pass didn't exist, and only whatever
+        // column none of them could take stays behind for this pass to
+        // bound instead of leaving it at `+inf` for `extended_dual`'s own
+        // far more expensive "M-side" bookkeeping.
+        if _round_idx < 1 {
+            let eq = timed_step!("eqprop", propagate::propagate_equalities(&a, &b, &mut lb, &mut ub, prop_passes));
+            if eq.infeasible {
+                return extended_infeasible(sc, a, b, c, n);
+            }
+            // Same reason as `aggregator`/`parallelcols`'s own rebuild
+            // above: the mid-round dedup call right below and the next
+            // round's own `propagate` must see this pass's bound changes,
+            // not a stale `g`/`h`.
+            let (ng, nh) = propagate::rebuild_g(n, cur_real_rows.clone(), cur_real_rhs.clone(), &lb, &ub);
+            g = ng;
+            h = nh;
         }
 
         // Re-run the cheap hash-based duplicate-row pass on `(g, h)` every
