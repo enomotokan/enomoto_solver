@@ -1,5 +1,5 @@
 {
-  "loop_iteration_count": 3,
+  "loop_iteration_count": 4,
   "problems": {
     "degen3": {
       "consecutive_failures": 0,
@@ -9,10 +9,10 @@
     },
     "greenbea": {
       "consecutive_failures": 0,
-      "attempts": 2,
+      "attempts": 3,
       "last_result": "improved",
-      "last_attempt_at": "2026-09-21T03:23:00Z",
-      "note": "反復#1(no_improvement)の申し送り通り、BFRT許容誤差を行の大きさに応じてスケーリングする修正(再分解によるやり直しではない)+ 摂動除去チェック(solve_lp_dual_on 相当)を追加し解消。PR #3。副次的に bnl2/cycle/pilot87 の誤差段の問題も解消(相対誤差 ~1e-14〜1e-15)。他89問題・dfl001は変化なし。"
+      "last_attempt_at": "2026-09-21T07:13:07Z",
+      "note": "反復#4。正答性・誤差は既に解消済み(反復#2)なので、runtime段(ours/highs比が93問題中最悪の12.15x)で再選定。fable-bottleneck-analystの計測で原因は「1反復が重い」: x_B(M)ドリフトチェック(extended_dual.rs)が実行時間の19.1%を占め、その大半がresidual_normをbase/slopeチャネルごとに個別呼び出しすることによる無駄な全行スキャン(計2*nnz(A)=64,948、実際に必要なのは基底列のみのnnz(A_B)=7,195)に費やされていた。修正: residual_norm_affineを追加し、両チャネルを基底列に対する1回の走査で同時計算(呼び出し元はx_B(M)ドリフトチェックのみ、3913行目の単一チャネル版は変更なし)。greenbea: 3.10s→2.71s(ratio 12.15x→11.03x)、目的関数値・ピボット経路は完全一致。他92問題に正答性の劣化なし、10%を超える実行時間退行なし(境界付近の3件は測定ノイズと確認済み)。コード修正はPR #6(未マージ)。分析: analysis/greenbea_20260921_070407.md。"
     },
     "dfl001": {
       "consecutive_failures": 0,

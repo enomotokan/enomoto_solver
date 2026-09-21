@@ -942,6 +942,47 @@ fn residual_norm(std: &StdForm, basis_pos: &[Option<usize>], x_b: &[f64], rhs: &
     resid_sq.sqrt()
 }
 
+/// Combined two-channel version of [`residual_norm`], for the `x_B(M)`
+/// drift check's `Affine1` pair (`x_b_base`/`x_b_slope` against
+/// `rhs_base`/`rhs_slope`): iterates once over the *basic* columns
+/// (`basis[pos]`'s own `std.cols.row(j)`, `nnz(A_B)`-sized) instead of
+/// `residual_norm`'s own twice-over-every-row-of-`A`, `2*nnz(A)`-sized,
+/// scan. `nnz(A_B)` is a small fraction of `nnz(A)` on problems like
+/// Netlib `greenbea` (most of `A`'s columns are nonbasic at any one time).
+/// `scratch_base`/`scratch_slope` are `m`-length buffers owned by the
+/// caller (this module's own "sized once, before the loop, reused every
+/// iteration" convention — see the buffers declared alongside `x_b_base`
+/// in [`solve_lp_dual_extended`]) and are fully overwritten here before
+/// use, so their entering contents don't matter.
+fn residual_norm_affine(
+    std: &StdForm,
+    basis: &[usize],
+    x_b_base: &[f64],
+    x_b_slope: &[f64],
+    rhs_base: &[f64],
+    rhs_slope: &[f64],
+    scratch_base: &mut [f64],
+    scratch_slope: &mut [f64],
+) -> (f64, f64) {
+    scratch_base.iter_mut().for_each(|v| *v = 0.0);
+    scratch_slope.iter_mut().for_each(|v| *v = 0.0);
+    for (pos, &j) in basis.iter().enumerate() {
+        let (b, s) = (x_b_base[pos], x_b_slope[pos]);
+        for &(i, v) in std.cols.row(j) {
+            scratch_base[i] += v * b;
+            scratch_slope[i] += v * s;
+        }
+    }
+    let mut resid_base_sq = 0.0f64;
+    let mut resid_slope_sq = 0.0f64;
+    for i in 0..std.n_rows {
+        let rb = scratch_base[i] - rhs_base[i];
+        let rs = scratch_slope[i] - rhs_slope[i];
+        resid_base_sq += rb * rb;
+        resid_slope_sq += rs * rs;
+    }
+    (resid_base_sq.sqrt(), resid_slope_sq.sqrt())
+}
 
 fn dense_column(std: &StdForm, j: usize) -> Vec<f64> {
     let mut col = vec![0.0; std.n_rows];
@@ -1557,6 +1598,9 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     let mut x_b_base = vec![0.0f64; m];
     let mut x_b_slope = vec![0.0f64; m];
     let mut lu_scratch = vec![0.0f64; m];
+    // Scratch for [`residual_norm_affine`]'s own combined drift-check pass.
+    let mut resid_scratch_base = vec![0.0f64; m];
+    let mut resid_scratch_slope = vec![0.0f64; m];
     let mut e_r = vec![0.0f64; m];
     let mut rho = vec![0.0f64; m];
     let mut dense_q = vec![0.0f64; m];
@@ -3133,8 +3177,16 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 // own docs for why this module's `Affine1` slope channel
                 // needs a tighter leash.
                 let (fresh_base, fresh_slope) = compute_rhs_affine(std, &cache, &nb_status)?;
-                let resid_base = residual_norm(std, &basis_pos, &x_b_base, &fresh_base);
-                let resid_slope = residual_norm(std, &basis_pos, &x_b_slope, &fresh_slope);
+                let (resid_base, resid_slope) = residual_norm_affine(
+                    std,
+                    &basis,
+                    &x_b_base,
+                    &x_b_slope,
+                    &fresh_base,
+                    &fresh_slope,
+                    &mut resid_scratch_base,
+                    &mut resid_scratch_slope,
+                );
                 // Per-solve escalation ladder — see [`XB_DRIFT_TOL`]'s own
                 // docs. `drift_trigger_count` only ever grows within this
                 // one call to `solve_lp_dual_extended`, so a solve that
