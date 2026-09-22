@@ -427,16 +427,36 @@ impl HybridVec {
     }
 
     /// Drops any entry at `index`, keeping `nnz` honest in the dense form
-    /// rather than leaving it stale.
-    pub fn remove_index(&mut self, index: usize) {
+    /// rather than leaving it stale. Returns whether an entry was actually
+    /// there — which lets a caller maintaining its own running total of
+    /// fill across many of these adjust it without re-summing.
+    pub fn remove_index(&mut self, index: usize) -> bool {
         match self {
-            HybridVec::Sparse(v) => v.retain(|&(i, _)| i != index),
+            HybridVec::Sparse(v) => {
+                let before = v.len();
+                v.retain(|&(i, _)| i != index);
+                v.len() != before
+            }
             HybridVec::Dense { data, nnz } => {
                 if data[index] != 0.0 {
                     data[index] = 0.0;
                     *nnz -= 1;
+                    true
+                } else {
+                    false
                 }
             }
+        }
+    }
+
+    /// This vector's occupied indices, without materializing the values.
+    /// The dense arm still scans the whole array (it has no index list to
+    /// walk), but allocates nothing — which is the point at the one call
+    /// site that wants only the indices, once per Forrest-Tomlin update.
+    pub fn indices(&self) -> Box<dyn Iterator<Item = usize> + '_> {
+        match self {
+            HybridVec::Sparse(v) => Box::new(v.iter().map(|&(i, _)| i)),
+            HybridVec::Dense { data, .. } => Box::new(data.iter().enumerate().filter(|&(_, &v)| v != 0.0).map(|(i, _)| i)),
         }
     }
 
@@ -1128,6 +1148,12 @@ impl CscMat {
         CscMat { n_rows, n_cols, inner: Compressed { offsets, entries } }
     }
 
+    /// An all-zero `n_rows x n_cols` matrix — every column present and
+    /// empty.
+    pub fn empty(n_rows: usize, n_cols: usize) -> Self {
+        CscMat { n_rows, n_cols, inner: Compressed { offsets: vec![0; n_cols + 1], entries: Vec::new() } }
+    }
+
     /// Reads a faer [`Csr`] straight into column-major form.
     pub fn from_faer(mat: &Csr) -> Self {
         let r = mat.as_ref();
@@ -1811,11 +1837,12 @@ mod tests {
     fn hybrid_vec_remove_index_keeps_nnz_honest_in_both_arms() {
         for frac in [1.0f64, 0.0] {
             let mut v = HybridVec::pack(4, vec![(0, 1.0), (1, 2.0), (3, 4.0)], frac);
-            v.remove_index(1);
+            assert!(v.remove_index(1), "frac={frac}: removing a present index reports true");
             assert_eq!(v.nnz(), 2, "frac={frac}");
             assert_eq!(v.to_pairs(), vec![(0, 1.0), (3, 4.0)], "frac={frac}");
+            assert_eq!(v.indices().collect::<Vec<_>>(), vec![0, 3], "frac={frac}");
             // Removing an index that holds nothing must not decrement nnz.
-            v.remove_index(2);
+            assert!(!v.remove_index(2), "frac={frac}: removing an absent index reports false");
             assert_eq!(v.nnz(), 2, "frac={frac}");
         }
     }
@@ -1879,6 +1906,14 @@ mod tests {
         assert_eq!(built, CsrMat::from_rows(&sample_rows(), 4).to_csc());
         assert_eq!(built.n_rows(), 3);
         assert_eq!(built.n_cols(), 4);
+    }
+
+    #[test]
+    fn csc_empty_has_every_column_present_and_empty() {
+        let m = CscMat::empty(3, 4);
+        assert_eq!((m.n_rows(), m.n_cols(), m.nnz()), (3, 4, 0));
+        assert!((0..4).all(|j| m.col(j).is_empty()));
+        assert_eq!(m.mat_t_vec(&[1.0, 2.0, 3.0]), vec![0.0; 4]);
     }
 
     #[test]

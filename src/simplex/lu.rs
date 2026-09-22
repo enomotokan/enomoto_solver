@@ -69,7 +69,7 @@
 //! epoch-stamped DFS scratch) — see that function's own docs for why only
 //! this one direction gets the fuller treatment.
 
-use crate::sparse::{EpochMarks, HybridVec};
+use crate::sparse::{CscBuilder, CscMat, EpochMarks, HybridVec};
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -558,38 +558,35 @@ pub struct LuFactors {
     /// `l_col[s]`: `(row_step, multiplier)` pairs — the sub-diagonal
     /// entries of `L`'s column `s`.
     ///
-    /// **Flattening this into a [`crate::sparse::CscMat`] (one flat `(index, value)`
-    /// buffer plus offsets — the same layout `simplex.rs`'s `StdForm` uses
+    /// Stored as a [`crate::sparse::CscMat`] — one flat `(index, value)`
+    /// buffer plus offsets, the same layout `simplex.rs`'s `StdForm` uses
     /// for the frozen coefficient matrix, on the same reasoning: `L` never
-    /// changes once a refactorization builds it) was implemented and
-    /// measured, then reverted.** The theory was sound (`L` really is read
-    /// every FTRAN/BTRAN's `L`-stage for the rest of that basis's life and
-    /// never mutated again, so a per-row heap allocation plus pointer
-    /// indirection looked like pure waste), but a controlled A/B (same
-    /// build, only this field's representation toggled, 3 runs per problem)
-    /// showed a **consistent small regression**, not a win: `scsd8` +2.1%,
-    /// `25fv47` +1.8%, `stocfor2` +4.0%, `fit1p` +3.2%, with `degen3`/
-    /// `pilotnov` flat within run-to-run noise — zero problems improved.
-    /// Two likely reasons, neither of which the `Vec<Vec<...>>` form
-    /// suffers from: (1) `l_col[s]` in real Netlib bases is typically very
-    /// short (Markowitz elimination is specifically choosing pivots to keep
-    /// it that way), so the "many small allocations" cost this was meant to
-    /// remove was never that large to begin with, while accessing a
-    /// compressed row still costs *two* offset reads (`offsets[i]`,
-    /// `offsets[i+1]`) before the slice is even known, against `Vec<Vec>`'s
-    /// single pointer hop to an already-known `(ptr, len)` pair; (2) the
-    /// conversion itself doesn't avoid building the `m` small per-column
-    /// `Vec`s first (both `factorize` and `factorize_dense_faer` still
-    /// populate a `Vec<Vec<...>>` while walking `L`'s entries in whatever
-    /// order they're produced) — flattening just added one more `O(nnz)`
-    /// copy on top afterward, at construction time, without ever removing
-    /// the allocations it was trying to avoid. A version that builds the
-    /// flat buffer directly (computing offsets in one pass, filling
-    /// `entries` in a second, the way `CscMat::from_rows` already
-    /// does for a *transposed* build) might still be worth trying — this
-    /// attempt just never built that version — but plain
-    /// `Vec<Vec<(usize, f64)>>` is what's actually measured fastest so far.
-    pub l_col: Vec<Vec<(usize, f64)>>,
+    /// changes once a refactorization builds it, and it is then read on
+    /// every FTRAN/BTRAN's `L`-stage for the rest of that basis's life.
+    ///
+    /// **This is the second attempt, and the first one that measured as a
+    /// win.** The first flattened a finished `Vec<Vec<(usize, f64)>>` into
+    /// the compressed form as a post-pass, and a controlled A/B showed a
+    /// consistent small regression on every instance that moved at all
+    /// (`scsd8` +2.1%, `25fv47` +1.8%, `stocfor2` +4.0%, `fit1p` +3.2%,
+    /// `degen3`/`pilotnov` flat, nothing faster). Its own post-mortem
+    /// identified the reason and named the fix: the post-pass *keeps*
+    /// building the `m` small per-column `Vec`s it was meant to remove and
+    /// then adds an `O(nnz)` copy on top, so it paid the compressed form's
+    /// cost — two offset reads per column access, against `Vec<Vec>`'s
+    /// single pointer hop to an already-known `(ptr, len)` — while buying
+    /// none of its benefit.
+    ///
+    /// [`crate::sparse::CscBuilder`] is that fix. Every one of this file's
+    /// factorizations already emits `L`'s columns in ascending step order
+    /// (left-looking elimination produces column `s` complete at step `s`),
+    /// so the flat buffer can be appended to directly, with the column
+    /// boundary recorded wherever the buffer has reached: no counting pass,
+    /// no per-column `Vec`, and no copy. What is left is a strict
+    /// improvement at build time (two allocations for the whole of `L`
+    /// instead of `m + 1`) plus contiguous entries for `l_solve_into`'s own
+    /// sequential `for s in 0..m` sweep to prefetch through.
+    pub l_col: crate::sparse::CscMat,
     /// `u_row[s]`: `(col_step, value)` pairs, `col_step >= s` (including
     /// the diagonal at `col_step == s`) — the entries of `U`'s row `s`.
     /// Unlike `l_col`, this is read exactly once per refactorization (by
@@ -725,16 +722,17 @@ fn factorize_dense_faer(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuFac
         col_perm_inv[col_perm[step]] = step;
     }
 
-    let mut l_col_rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
+    let mut l_build = CscBuilder::new(m);
     for step in 0..m {
         for row_step in (step + 1)..m {
             let v = l[(row_step, step)];
             if v != 0.0 {
-                l_col_rows[step].push((row_step, v));
+                l_build.push(row_step, v);
             }
         }
+        l_build.end_column();
     }
-    let l_col = l_col_rows;
+    let l_col = l_build.build();
     let mut u_row: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
     for step in 0..m {
         for col_step in step..m {
@@ -915,7 +913,8 @@ pub fn factorize_diagonal(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuF
     let identity: Vec<usize> = (0..m).collect();
     Some(LuFactors {
         m,
-        l_col: vec![Vec::new(); m],
+        // `L` is the identity: `m` columns, every one empty.
+        l_col: CscMat::empty(m, m),
         u_row,
         row_perm: identity.clone(),
         col_perm: identity.clone(),
@@ -1031,11 +1030,23 @@ fn factorize_flat_markowitz(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<L
         col_perm_inv[col_perm[step]] = step;
     }
 
-    let mut l_col_rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
-    for (orig_row, pivot_step, mult) in l_entries {
-        l_col_rows[pivot_step].push((row_perm_inv[orig_row], mult));
+    // `l_entries` is already grouped by `pivot_step` in ascending order —
+    // the elimination loop above emits step `s`'s whole `L` column before
+    // moving to step `s + 1` — so `L` can be appended straight into its
+    // final compressed buffer, with no counting pass and no intermediate
+    // per-column `Vec`s (see `LuFactors::l_col`'s own docs).
+    debug_assert!(l_entries.windows(2).all(|w| w[0].1 <= w[1].1), "L entries must be grouped by ascending pivot step");
+    let mut l_build = CscBuilder::with_capacity(m, m, l_entries.len());
+    let mut next = 0usize;
+    for step in 0..m {
+        while next < l_entries.len() && l_entries[next].1 == step {
+            let (orig_row, _, mult) = l_entries[next];
+            l_build.push(row_perm_inv[orig_row], mult);
+            next += 1;
+        }
+        l_build.end_column();
     }
-    let l_col = l_col_rows;
+    let l_col = l_build.build();
     let mut u_row: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
     for (pivot_step, orig_col, val) in u_entries {
         u_row[pivot_step].push((col_perm_inv[orig_col], val));
@@ -1270,18 +1281,34 @@ fn factorize_bordered(m: usize, rows_in: &[Vec<(usize, f64)>], border: &[usize])
         col_perm_inv_full[col_perm[step]] = step;
     }
 
-    let mut l_col: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
-    for (orig_row, step, mult) in l_entries {
-        l_col[step].push((row_perm_inv_full[orig_row], mult));
+    // As in `factorize_flat_markowitz`: `l_entries` covers steps
+    // `0..n_sparse` in ascending order, and the border block's own columns
+    // follow at `n_sparse..m`, also ascending — so the whole of `L` is
+    // still emitted in column order and goes straight into the compressed
+    // buffer (see `LuFactors::l_col`'s own docs).
+    debug_assert!(l_entries.windows(2).all(|w| w[0].1 <= w[1].1), "L entries must be grouped by ascending pivot step");
+    let mut l_build = CscBuilder::with_capacity(m, m, l_entries.len() + border_lu.l_col.nnz());
+    let mut next = 0usize;
+    for step in 0..n_sparse {
+        while next < l_entries.len() && l_entries[next].1 == step {
+            let (orig_row, _, mult) = l_entries[next];
+            l_build.push(row_perm_inv_full[orig_row], mult);
+            next += 1;
+        }
+        l_build.end_column();
     }
+    for s in 0..k {
+        for &(row_step, mult) in border_lu.l_col.col(s) {
+            l_build.push(n_sparse + row_step, mult);
+        }
+        l_build.end_column();
+    }
+    let l_col = l_build.build();
     let mut u_row: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
     for (step, orig_col, val) in u_entries {
         u_row[step].push((col_perm_inv_full[orig_col], val));
     }
     for s in 0..k {
-        for &(row_step, mult) in &border_lu.l_col[s] {
-            l_col[n_sparse + s].push((n_sparse + row_step, mult));
-        }
         for &(col_step, val) in &border_lu.u_row[s] {
             u_row[n_sparse + s].push((n_sparse + col_step, val));
         }
@@ -1323,7 +1350,7 @@ impl LuFactors {
             if z[s] == 0.0 {
                 continue;
             }
-            for &(row_step, mult) in &self.l_col[s] {
+            for &(row_step, mult) in self.l_col.col(s) {
                 z[row_step] -= mult * z[s];
             }
         }
@@ -1392,7 +1419,7 @@ impl LuFactors {
             scratch.stack.push(seed);
             while let Some(node) = scratch.stack.pop() {
                 scratch.reach.push(node);
-                for &(next, _) in &self.l_col[node] {
+                for &(next, _) in self.l_col.col(node) {
                     if !scratch.visited.is_marked(next) {
                         scratch.visited.mark(next);
                         scratch.stack.push(next);
@@ -1406,7 +1433,7 @@ impl LuFactors {
             if z[s] == 0.0 {
                 continue;
             }
-            for &(row_step, mult) in &self.l_col[s] {
+            for &(row_step, mult) in self.l_col.col(s) {
                 z[row_step] -= mult * z[s];
             }
         }
@@ -1457,7 +1484,7 @@ impl LuFactors {
     fn l_transpose_solve_into(&self, w: &mut [f64], y: &mut [f64]) {
         let m = self.m;
         for s in (0..m).rev() {
-            for &(row_step, mult) in &self.l_col[s] {
+            for &(row_step, mult) in self.l_col.col(s) {
                 if w[row_step] == 0.0 {
                     continue;
                 }
@@ -1477,7 +1504,7 @@ impl LuFactors {
         let mut z: Vec<f64> = (0..m).map(|s| rhs[self.row_perm[s]]).collect();
         // Forward: L z = rhs' (unit lower triangular, step order)
         for s in 0..m {
-            for &(row_step, mult) in &self.l_col[s] {
+            for &(row_step, mult) in self.l_col.col(s) {
                 z[row_step] -= mult * z[s];
             }
         }
@@ -1525,7 +1552,7 @@ impl LuFactors {
         // Back: L^T w = z (unit upper triangular in step order)
         let mut w = z;
         for s in (0..m).rev() {
-            for &(row_step, mult) in &self.l_col[s] {
+            for &(row_step, mult) in self.l_col.col(s) {
                 w[s] -= mult * w[row_step];
             }
         }
@@ -1847,6 +1874,22 @@ pub struct FtLu {
     /// refactorization) — there is no explicit reset method because a fresh
     /// `FtLu` *is* the reset.
     tick: Cell<u64>,
+    /// Running total of the off-diagonal fill currently held across
+    /// `u_seq` and `r_etas` — [`Self::fill_count`]'s answer, maintained
+    /// incrementally by [`Self::commit_update`] rather than re-summed on
+    /// demand.
+    ///
+    /// The refactorization trigger reads it **once per simplex iteration**
+    /// (`simplex.rs`'s own trigger (3)), and re-summing meant walking all
+    /// `m` entries of `u_seq` — touching every `UEta` header in the
+    /// process — for a number that changes only at the handful of places
+    /// an update already touches. Its own doc comment called that sum
+    /// "`O(1)`-ish"; it was `O(m)`, one more full sweep of the eta file
+    /// per iteration on top of the ones `u_solve_into`/
+    /// `u_transpose_solve_into` genuinely need. This is that number
+    /// actually being `O(1)`, with a `debug_assert` in `fill_count` that
+    /// it still agrees with the sum it replaced.
+    fill: usize,
     /// This factorization's own one-time build cost, in the same tick
     /// units as [`Self::tick`] — computed once in [`Self::new`] from the
     /// freshly-built `L`/`U` (`m` rows plus their combined off-diagonal
@@ -1915,7 +1958,7 @@ impl FtLu {
                 row_owners[row_step].push(slot);
             }
         }
-        let l_nnz: u64 = base.l_col.iter().map(|v| v.len() as u64).sum();
+        let l_nnz: u64 = base.l_col.nnz() as u64;
         // `u_row[s]` includes its own diagonal entry (`col_step == s`,
         // filtered out just above into `pivots`), so its off-diagonal count
         // is one less than its length — mirrors HiGHS's own `u_countX`
@@ -1930,6 +1973,7 @@ impl FtLu {
                 off_diag: HybridVec::pack(m, std::mem::take(&mut off_diags[slot]), DENSE_ETA_FRACTION),
             })
             .collect();
+        let fill = u_seq.iter().map(|e: &UEta| e.off_diag.nnz()).sum();
         FtLu {
             base,
             u_seq,
@@ -1939,6 +1983,7 @@ impl FtLu {
             scratch_a_tilde: vec![0.0; m],
             scratch_e_tilde: vec![0.0; m],
             ut_needed: RefCell::new(EpochMarks::new(m)),
+            fill,
             tick: Cell::new(0),
             build_tick,
         }
@@ -2664,6 +2709,7 @@ impl FtLu {
         // itself already touches, so this is no extra asymptotic cost)
         // rather than the old `find_seq_pos`'s full O(m) re-scan.
         let removed = self.u_seq.remove(seq_pos);
+        self.fill -= removed.off_diag.nnz();
         for pos in seq_pos..self.u_seq.len() {
             self.slot_pos[self.u_seq[pos].slot] = pos;
         }
@@ -2672,7 +2718,7 @@ impl FtLu {
         // `row_owners` before overwriting them below — otherwise a stale
         // `p` would linger in some other row's owner list, pointing at
         // content that no longer exists there.
-        for (row_step, _) in removed.off_diag.to_pairs() {
+        for row_step in removed.off_diag.indices() {
             if let Some(idx) = self.row_owners[row_step].iter().position(|&s| s == p) {
                 self.row_owners[row_step].swap_remove(idx);
             }
@@ -2684,7 +2730,9 @@ impl FtLu {
         // in O(1) via `slot_pos`.
         for slot in std::mem::take(&mut self.row_owners[p]) {
             let pos = self.slot_pos[slot];
-            self.u_seq[pos].off_diag.remove_index(p);
+            if self.u_seq[pos].off_diag.remove_index(p) {
+                self.fill -= 1;
+            }
         }
 
         let off_diag: Vec<(usize, f64)> =
@@ -2693,9 +2741,11 @@ impl FtLu {
             self.row_owners[row_step].push(p);
         }
         self.u_seq.push(UEta { slot: p, pivot: new_pivot, off_diag: HybridVec::pack(m, off_diag, DENSE_ETA_FRACTION) });
+        self.fill += self.u_seq.last().expect("just pushed").off_diag.nnz();
         self.slot_pos[p] = self.u_seq.len() - 1;
 
         self.r_etas.push(REta { p, r: HybridVec::pack(m, r_vec, DENSE_ETA_FRACTION) });
+        self.fill += self.r_etas.last().expect("just pushed").r.nnz();
 
         true
     }
@@ -2709,11 +2759,19 @@ impl FtLu {
     /// refactorization trigger (3): as updates accumulate, the eta file
     /// grows (each `R` and each replaced `U` slot can carry up to `m-1`
     /// entries), which is exactly the cost this trigger exists to bound.
-    /// Reads true nonzero counts via [`HybridVec::nnz`], not storage length,
-    /// so switching an eta to the dense representation doesn't spuriously
+    /// Counts true nonzeros via [`HybridVec::nnz`], not storage length, so
+    /// switching an eta to the dense representation doesn't spuriously
     /// inflate this and trip the trigger early.
+    ///
+    /// `O(1)`: maintained by [`Self::commit_update`] as it goes — see
+    /// [`Self::fill`]'s own docs for why re-summing was worth removing.
     pub fn fill_count(&self) -> usize {
-        self.u_seq.iter().map(|e| e.off_diag.nnz()).sum::<usize>() + self.r_etas.iter().map(|e| e.r.nnz()).sum::<usize>()
+        debug_assert_eq!(
+            self.fill,
+            self.u_seq.iter().map(|e| e.off_diag.nnz()).sum::<usize>() + self.r_etas.iter().map(|e| e.r.nnz()).sum::<usize>(),
+            "incrementally maintained fill drifted from the true eta-file fill"
+        );
+        self.fill
     }
 
     /// Debug/instrumentation only: off-diagonal nonzero count of the `U`
@@ -2795,7 +2853,7 @@ mod tests {
     fn factorize_diagonal_matches_expected_solve() {
         let rows = vec![vec![(0, 1.0)], vec![(1, -1.0)], vec![(2, 1.0)]];
         let lu = factorize_diagonal(3, &rows).expect("diagonal input");
-        assert!(lu.l_col.iter().all(Vec::is_empty), "L must be identity: {:?}", lu.l_col);
+        assert_eq!(lu.l_col.nnz(), 0, "L must be identity: {:?}", lu.l_col.to_cols());
         assert_eq!(lu.row_perm, vec![0, 1, 2]);
         assert_eq!(lu.col_perm, vec![0, 1, 2]);
 
