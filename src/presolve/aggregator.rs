@@ -129,8 +129,7 @@
 //! already vacuous.
 
 use crate::presolve::colsingleton::Substitution;
-use crate::sparse::{csr_from_rows, Csr};
-
+use crate::sparse::{Csr, csr_from_rows, csr_rows};
 const TOL: f64 = 1e-9;
 /// Mirrors `colsingleton`/`freevar`'s own pivot guard exactly (same value,
 /// same purpose — see either module's own docs on `SUBSTITUTION_PIVOT_RATIO`).
@@ -302,8 +301,7 @@ fn fillin_cost(pivot_terms: &[(usize, f64)], targets: &[&Vec<(usize, f64)>]) -> 
 /// call from a snapshot; see the module docs for why repetition is the
 /// caller's own job, not this function's.
 pub fn eliminate_implied_free_columns(n: usize, a: &Csr, b: &[f64], c: &[f64], lb: &[f64], ub: &[f64], real_rows: &[Vec<(usize, f64)>], real_rhs: &[f64]) -> AggregatorResult {
-    let ar = a.as_ref();
-    let mut a_rows: Vec<Vec<(usize, f64)>> = (0..ar.nrows()).map(|i| ar.col_indices_of_row(i).zip(ar.values_of_row(i)).map(|(j, &v)| (j, v)).collect()).collect();
+    let mut a_rows: Vec<Vec<(usize, f64)>> = csr_rows(a);
     let mut b: Vec<f64> = b.to_vec();
     let mut c: Vec<f64> = c.to_vec();
     let mut real_rows: Vec<Vec<(usize, f64)>> = real_rows.to_vec();
@@ -530,8 +528,7 @@ pub fn eliminate_implied_free_columns(n: usize, a: &Csr, b: &[f64], c: &[f64], l
 /// elimination — a distinction that only exists once more than one row can
 /// jointly justify a single column.
 pub fn eliminate_implied_free_columns_xrow(n: usize, a: &Csr, b: &[f64], c: &[f64], lb: &[f64], ub: &[f64], real_rows: &[Vec<(usize, f64)>], real_rhs: &[f64]) -> AggregatorResult {
-    let ar = a.as_ref();
-    let mut a_rows: Vec<Vec<(usize, f64)>> = (0..ar.nrows()).map(|i| ar.col_indices_of_row(i).zip(ar.values_of_row(i)).map(|(j, &v)| (j, v)).collect()).collect();
+    let mut a_rows: Vec<Vec<(usize, f64)>> = csr_rows(a);
     let mut b: Vec<f64> = b.to_vec();
     let mut c: Vec<f64> = c.to_vec();
     let mut real_rows: Vec<Vec<(usize, f64)>> = real_rows.to_vec();

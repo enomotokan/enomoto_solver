@@ -22,8 +22,7 @@
 //! way down), it is fixed to its lower bound; symmetrically for an
 //! up-lock count of `0` and cost `<= 0`.
 
-use crate::sparse::Csr;
-
+use crate::sparse::{Csr, csr_row_iter};
 const TOL: f64 = 1e-9;
 
 /// Returns `(j, value)` for every variable that can be fixed outright.
@@ -44,7 +43,7 @@ pub fn fix_dominated_variables(
 
     let ar = a.as_ref();
     for i in 0..ar.nrows() {
-        for (j, &v) in ar.col_indices_of_row(i).zip(ar.values_of_row(i)) {
+        for (j, v) in csr_row_iter(a, i) {
             if v != 0.0 {
                 in_equality[j] = true;
             }

@@ -554,7 +554,7 @@ pub struct LuFactors {
     /// `l_col[s]`: `(row_step, multiplier)` pairs — the sub-diagonal
     /// entries of `L`'s column `s`.
     ///
-    /// **Flattening this into a [`FixedRows`] (one flat `(index, value)`
+    /// **Flattening this into a [`crate::sparse::CscMat`] (one flat `(index, value)`
     /// buffer plus offsets — the same layout `simplex.rs`'s `StdForm` uses
     /// for the frozen coefficient matrix, on the same reasoning: `L` never
     /// changes once a refactorization builds it) was implemented and
@@ -571,7 +571,7 @@ pub struct LuFactors {
     /// short (Markowitz elimination is specifically choosing pivots to keep
     /// it that way), so the "many small allocations" cost this was meant to
     /// remove was never that large to begin with, while accessing a
-    /// `FixedRows` row still costs *two* offset reads (`offsets[i]`,
+    /// compressed row still costs *two* offset reads (`offsets[i]`,
     /// `offsets[i+1]`) before the slice is even known, against `Vec<Vec>`'s
     /// single pointer hop to an already-known `(ptr, len)` pair; (2) the
     /// conversion itself doesn't avoid building the `m` small per-column
@@ -581,7 +581,7 @@ pub struct LuFactors {
     /// copy on top afterward, at construction time, without ever removing
     /// the allocations it was trying to avoid. A version that builds the
     /// flat buffer directly (computing offsets in one pass, filling
-    /// `entries` in a second, the way `FixedRows::from_transpose` already
+    /// `entries` in a second, the way `CscMat::from_rows` already
     /// does for a *transposed* build) might still be worth trying — this
     /// attempt just never built that version — but plain
     /// `Vec<Vec<(usize, f64)>>` is what's actually measured fastest so far.

@@ -87,8 +87,7 @@
 //! note a truly free variable is supposed to be exempt from.
 
 use crate::presolve::colsingleton::Substitution;
-use crate::sparse::{csr_from_rows, Csr};
-
+use crate::sparse::{Csr, csr_from_rows, csr_rows};
 const TOL: f64 = 1e-9;
 
 /// Minimum `|coeff| / max|row|` for either pass below to actually
@@ -179,8 +178,7 @@ pub fn eliminate_free_variables(n: usize, a: &Csr, b: &[f64], c: &[f64], lb: &[f
         };
     }
 
-    let ar = a.as_ref();
-    let mut a_rows: Vec<Vec<(usize, f64)>> = (0..ar.nrows()).map(|i| ar.col_indices_of_row(i).zip(ar.values_of_row(i)).map(|(j, &v)| (j, v)).collect()).collect();
+    let mut a_rows: Vec<Vec<(usize, f64)>> = csr_rows(a);
     let mut b: Vec<f64> = b.to_vec();
     let mut c: Vec<f64> = c.to_vec();
     let mut eliminated = vec![false; n];

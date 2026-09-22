@@ -110,8 +110,7 @@
 //! group has members to fully collapse it — far more than `run_extended`'s
 //! own round cap ever runs.
 
-use crate::sparse::Csr;
-
+use crate::sparse::{Csr, csr_rows};
 const TOL: f64 = 1e-9;
 
 /// Recovers both `x[var]` and `x[kept]`'s own true values from `x[kept]`'s
@@ -170,7 +169,7 @@ pub struct ParallelColsResult {
 pub fn merge_parallel_columns(n: usize, a: &Csr, real_rows: &[Vec<(usize, f64)>], c: &[f64], lb: &[f64], ub: &[f64]) -> ParallelColsResult {
     let ar = a.as_ref();
     let n_a_rows = ar.nrows();
-    let a_rows: Vec<Vec<(usize, f64)>> = (0..n_a_rows).map(|i| ar.col_indices_of_row(i).zip(ar.values_of_row(i)).map(|(j, &v)| (j, v)).collect()).collect();
+    let a_rows: Vec<Vec<(usize, f64)>> = csr_rows(a);
 
     // One combined row-id space, local to this call: `a`'s own rows first,
     // `real_rows`'s multi-variable ones after — meaningless outside this
@@ -317,6 +316,7 @@ pub fn merge_parallel_columns(n: usize, a: &Csr, real_rows: &[Vec<(usize, f64)>]
 mod tests {
     use super::*;
     use crate::sparse::csr_from_rows;
+    use crate::sparse::csr_row_vec;
 
     #[test]
     fn merges_two_identical_columns_with_equal_cost() {
@@ -339,7 +339,7 @@ mod tests {
         assert_eq!(r.ub[1], 0.0);
         assert_eq!(r.c[1], 0.0);
         // Column 1 dropped from the row.
-        let row0: Vec<(usize, f64)> = r.a.as_ref().col_indices_of_row(0).zip(r.a.as_ref().values_of_row(0)).map(|(j, &v)| (j, v)).collect();
+        let row0 = csr_row_vec(&r.a, 0);
         assert!(!row0.iter().any(|&(j, _)| j == 1));
     }
 

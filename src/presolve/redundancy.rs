@@ -69,8 +69,7 @@ use faer::linalg::solvers::ColPivQr;
 use faer::Mat;
 
 use crate::presolve::smallcoeff;
-use crate::sparse::{csr_from_rows, Csr};
-
+use crate::sparse::{Csr, csr_from_rows, csr_row_vec};
 /// Measurement counters answering "would a dedicated block-triangularization
 /// pre-pass (Dulmage-Mendelsohn / BTF, exposing structurally-forced 1x1
 /// pivots before elimination starts, the way `simplex::lu`'s own
@@ -136,14 +135,9 @@ pub fn reduce_equalities(a: &Csr, b: &[f64], n: usize, lb: &[f64], ub: &[f64]) -
         return (csr_from_rows(&[], n), Vec::new());
     }
 
-    let ar = a.as_ref();
     let rows: Vec<(Vec<(usize, f64)>, f64)> = (0..p)
         .map(|i| {
-            let row: Vec<(usize, f64)> = ar
-                .col_indices_of_row(i)
-                .zip(ar.values_of_row(i))
-                .map(|(j, &v)| (j, v))
-                .collect();
+            let row: Vec<(usize, f64)> = csr_row_vec(a, i);
             (row, b[i])
         })
         .collect();
@@ -1192,10 +1186,9 @@ pub fn reduce_inequalities(g: &Csr, h: &[f64], n: usize) -> (Csr, Vec<f64>) {
         return (csr_from_rows(&[], n), Vec::new());
     }
 
-    let gr = g.as_ref();
     let rows: Vec<(Vec<(usize, f64)>, f64)> = (0..m)
         .map(|i| {
-            let row: Vec<(usize, f64)> = gr.col_indices_of_row(i).zip(gr.values_of_row(i)).map(|(j, &v)| (j, v)).collect();
+            let row: Vec<(usize, f64)> = csr_row_vec(g, i);
             (row, h[i])
         })
         .collect();

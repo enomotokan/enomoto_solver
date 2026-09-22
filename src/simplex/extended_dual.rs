@@ -1144,7 +1144,7 @@ fn residual_norm(std: &StdForm, basis_pos: &[Option<usize>], x_b: &[f64], rhs: &
 /// Combined two-channel version of [`residual_norm`], for the `x_B(M)`
 /// drift check's `Affine1` pair (`x_b_base`/`x_b_slope` against
 /// `rhs_base`/`rhs_slope`): iterates once over the *basic* columns
-/// (`basis[pos]`'s own `std.cols.row(j)`, `nnz(A_B)`-sized) instead of
+/// (`basis[pos]`'s own `std.cols.col(j)`, `nnz(A_B)`-sized) instead of
 /// `residual_norm`'s own twice-over-every-row-of-`A`, `2*nnz(A)`-sized,
 /// scan. `nnz(A_B)` is a small fraction of `nnz(A)` on problems like
 /// Netlib `greenbea` (most of `A`'s columns are nonbasic at any one time).
@@ -1167,7 +1167,7 @@ fn residual_norm_affine(
     scratch_slope.iter_mut().for_each(|v| *v = 0.0);
     for (pos, &j) in basis.iter().enumerate() {
         let (b, s) = (x_b_base[pos], x_b_slope[pos]);
-        for &(i, v) in std.cols.row(j) {
+        for &(i, v) in std.cols.col(j) {
             scratch_base[i] += v * b;
             scratch_slope[i] += v * s;
         }
@@ -1185,7 +1185,7 @@ fn residual_norm_affine(
 
 fn dense_column(std: &StdForm, j: usize) -> Vec<f64> {
     let mut col = vec![0.0; std.n_rows];
-    for &(i, v) in std.cols.row(j) {
+    for &(i, v) in std.cols.col(j) {
         col[i] = v;
     }
     col
@@ -1212,7 +1212,7 @@ fn compute_rhs_affine(std: &StdForm, cache: &ColCache, nb_status: &[Option<NbSta
         if val.base == 0.0 && val.slope == 0.0 {
             continue;
         }
-        for &(i, v) in std.cols.row(j) {
+        for &(i, v) in std.cols.col(j) {
             rhs_base[i] -= v * val.base;
             rhs_slope[i] -= v * val.slope;
         }
@@ -1346,7 +1346,7 @@ fn compute_rhs_plain(std: &StdForm, nb_status: &[Option<NbStatus>]) -> Vec<f64> 
         if val == 0.0 {
             continue;
         }
-        for &(i, v) in std.cols.row(j) {
+        for &(i, v) in std.cols.col(j) {
             rhs[i] -= v * val;
         }
     }
@@ -1383,7 +1383,7 @@ fn fresh_d_into(std: &StdForm, lu: &sparse_lu::FtLu, basis: &[usize], basis_pos:
             continue;
         }
         let mut dj = active_cost[j];
-        for &(i, v) in std.cols.row(j) {
+        for &(i, v) in std.cols.col(j) {
             dj -= v * y_buf[i];
         }
         d[j] = dj;
@@ -1485,7 +1485,7 @@ fn refine_zero_cost_placement(std: &StdForm, active_cost: &mut [f64], nb_status:
             None => continue,
         };
         if x != 0.0 {
-            for &(i, a) in std.cols.row(j) {
+            for &(i, a) in std.cols.col(j) {
                 residual[i] -= a * x;
             }
         }
@@ -1510,7 +1510,7 @@ fn refine_zero_cost_placement(std: &StdForm, active_cost: &mut [f64], nb_status:
         for &j in &flexible {
             let lo = std.lb[j];
             if lo != 0.0 {
-                for &(i, a) in std.cols.row(j) {
+                for &(i, a) in std.cols.col(j) {
                     baseline[i] -= a * lo;
                 }
             }
@@ -1524,7 +1524,7 @@ fn refine_zero_cost_placement(std: &StdForm, active_cost: &mut [f64], nb_status:
     for j in flexible {
         let lo = std.lb[j];
         let hi = std.ub[j];
-        let col = std.cols.row(j);
+        let col = std.cols.col(j);
         let mut viol_lo = 0.0f64;
         let mut viol_hi = 0.0f64;
         for &(i, a) in col {
@@ -2955,7 +2955,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 let width = cache.width[cand.j].unwrap();
                 let sigma = if old == NbStatus::Lower { 1.0 } else { -1.0 };
                 let delta_x = width.scale(sigma);
-                for &(i, v) in std.cols.row(cand.j) {
+                for &(i, v) in std.cols.col(cand.j) {
                     if !combined_touched_flag[i] {
                         combined_touched_flag[i] = true;
                         combined_touched.push(i);
@@ -3063,7 +3063,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         // `a_tilde_buf` this same FTRAN captures below). The FTRAN itself
         // takes the same dense-or-sparse fork that function's own entering-column solve
         // does (`FtLu::should_use_dense_solve`, keyed off the column's own
-        // nonzero count via `std.cols.row(q)`), instead of always
+        // nonzero count via `std.cols.col(q)`), instead of always
         // densifying through `solve_into`: a real LP's constraint columns
         // are themselves sparse, and this loop already makes the identical
         // choice for the BFRT combined-flip solve just above — leaving the
@@ -3075,17 +3075,17 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         // further down — see that method's own docs.
         timed!(profile_phases, prof_phases::FTRAN, {
             dense_q.fill(0.0);
-            for &(i, v) in std.cols.row(q) {
+            for &(i, v) in std.cols.col(q) {
                 dense_q[i] = v;
             }
-            if profile_phases && density_col_aq.predicts_dense() && !lu.should_use_dense_solve(std.cols.row(q).len()) {
+            if profile_phases && density_col_aq.predicts_dense() && !lu.should_use_dense_solve(std.cols.col(q).len()) {
                 prof_phases::DENSITY_GATE_FTRANS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
-            if lu.should_use_dense_solve_tracked(std.cols.row(q).len(), &density_col_aq) {
+            if lu.should_use_dense_solve_tracked(std.cols.col(q).len(), &density_col_aq) {
                 let result_nnz = lu.solve_into_capture(&dense_q, &mut lu_scratch, &mut alpha_full, &mut a_tilde_buf);
                 density_col_aq.record(result_nnz, m);
             } else {
-                let result_nnz = lu.solve_sparse_into_capture(std.cols.row(q), &mut sparse_scratch, &mut gp_scratch, &mut alpha_full, &mut a_tilde_buf);
+                let result_nnz = lu.solve_sparse_into_capture(std.cols.col(q), &mut sparse_scratch, &mut gp_scratch, &mut alpha_full, &mut a_tilde_buf);
                 density_col_aq.record(result_nnz, m);
             }
             if profile_phases {
@@ -3727,7 +3727,7 @@ fn finish(std: &StdForm, basis: &mut [usize], basis_pos: &mut [Option<usize>], n
         // place in this module a hyper-sparse solve has a natural
         // application without also committing to full incremental `x_B`
         // maintenance (see this module's own docs).
-        lu.solve_sparse_into(std.cols.row(j), &mut lu_scratch, &mut gp_scratch, &mut alpha_col);
+        lu.solve_sparse_into(std.cols.col(j), &mut lu_scratch, &mut gp_scratch, &mut alpha_col);
         let Some(r2) = (0..std.n_rows).find(|&i| alpha_col[i].abs() > TOL) else {
             // `B^{-1}A_j` is identically zero: `j` never needs to enter
             // the basis at all (its own module docs, and the paper's own
@@ -3878,7 +3878,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
         lu.solve_transpose_into(&c_b, &mut lu_scratch, &mut y);
         for j in 0..n_total {
             let mut dj = active_cost[j];
-            for &(i, v) in std.cols.row(j) {
+            for &(i, v) in std.cols.col(j) {
                 dj -= v * y[i];
             }
             d[j] = dj;
@@ -4027,7 +4027,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
                 lu.solve_transpose_into(&c_b, &mut lu_scratch, &mut y);
                 for j in 0..n_total {
                     let mut dj = std.c[j];
-                    for &(i, v) in std.cols.row(j) {
+                    for &(i, v) in std.cols.col(j) {
                         dj -= v * y[i];
                     }
                     true_d[j] = dj;
@@ -4218,7 +4218,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
             let width = width_plain(std, cand.j);
             let sigma = if old == NbStatus::Lower { 1.0 } else { -1.0 };
             let delta_x = width * sigma;
-            for &(i, v) in std.cols.row(cand.j) {
+            for &(i, v) in std.cols.col(cand.j) {
                 if !combined_touched_flag[i] {
                     combined_touched_flag[i] = true;
                     combined_touched.push(i);
@@ -4270,14 +4270,14 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
         // capture `a_tilde_buf` for this iteration's own
         // `try_update_precomputed` call further down.
         dense_q.fill(0.0);
-        for &(i, v) in std.cols.row(q) {
+        for &(i, v) in std.cols.col(q) {
             dense_q[i] = v;
         }
-        if lu.should_use_dense_solve_tracked(std.cols.row(q).len(), &density_col_aq) {
+        if lu.should_use_dense_solve_tracked(std.cols.col(q).len(), &density_col_aq) {
             let result_nnz = lu.solve_into_capture(&dense_q, &mut lu_scratch, &mut alpha_full, &mut a_tilde_buf);
             density_col_aq.record(result_nnz, m);
         } else {
-            let result_nnz = lu.solve_sparse_into_capture(std.cols.row(q), &mut sparse_scratch, &mut gp_scratch, &mut alpha_full, &mut a_tilde_buf);
+            let result_nnz = lu.solve_sparse_into_capture(std.cols.col(q), &mut sparse_scratch, &mut gp_scratch, &mut alpha_full, &mut a_tilde_buf);
             density_col_aq.record(result_nnz, m);
         }
 
@@ -4410,7 +4410,7 @@ fn dot(a: &[f64], b: &[f64]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::cols_from_rows;
+    use crate::sparse::{CscMat, CsrMat};
     use std::sync::atomic::Ordering::Relaxed;
 
     /// Builds a `StdForm` directly from a dense list of sparse rows (each
@@ -4425,8 +4425,8 @@ mod tests {
         let n_rows = rows.len();
         assert_eq!(c.len(), n_total);
         assert_eq!(ub.len(), n_total);
-        let cols = cols_from_rows(rows, n_total);
-        StdForm { n_total, n_rows, c, rows: crate::sparse::FixedRows::from_rows(rows), cols, b, lb, ub }
+        let cols = CscMat::from_rows(rows, n_total);
+        StdForm { n_total, n_rows, c, rows: CsrMat::from_rows(rows, n_total), cols, b, lb, ub }
     }
 
     fn approx(a: f64, b: f64) -> bool {

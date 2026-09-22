@@ -148,8 +148,7 @@
 //! substitution logic needed here either).
 
 use crate::presolve::propagate;
-use crate::sparse::{csr_from_rows, Csr};
-
+use crate::sparse::{Csr, csr_from_rows, csr_row_iter};
 const TOL: f64 = 1e-9;
 
 /// Bundles both reductions [`run`] reads out of one dual-feasibility
@@ -192,7 +191,7 @@ pub fn run(n: usize, a: &Csr, real_g_rows: &[Vec<(usize, f64)>], c: &[f64], lb: 
     // and `real_g_rows`'s numbered `num_a..num_a+num_g` right after them.
     let mut col_terms: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
     for i in 0..num_a {
-        for (j, &v) in ar.col_indices_of_row(i).zip(ar.values_of_row(i)) {
+        for (j, v) in csr_row_iter(a, i) {
             if v != 0.0 {
                 col_terms[j].push((i, v));
             }

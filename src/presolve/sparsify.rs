@@ -93,7 +93,7 @@
 //! commit for the full numbers if revisiting.
 
 use crate::presolve::propagate;
-use crate::sparse::{csr_from_rows, Csr};
+use crate::sparse::{Csr, csr_from_rows, csr_rows_pruned};
 use std::collections::BTreeMap;
 
 const TOL: f64 = 1e-9;
@@ -116,10 +116,7 @@ enum Src {
 }
 
 pub fn sparsify(n: usize, a: &Csr, b: &[f64], g: &Csr, h: &[f64]) -> SparsifyResult {
-    let ar = a.as_ref();
-    let mut a_rows: Vec<Vec<(usize, f64)>> = (0..ar.nrows())
-        .map(|i| ar.col_indices_of_row(i).zip(ar.values_of_row(i)).map(|(j, &v)| (j, v)).filter(|&(_, v)| v != 0.0).collect())
-        .collect();
+    let mut a_rows: Vec<Vec<(usize, f64)>> = csr_rows_pruned(a);
     let mut b: Vec<f64> = b.to_vec();
 
     let (lb, ub, mut real_g_rows, mut real_g_rhs) = propagate::extract_bounds(n, g, h);
@@ -239,6 +236,7 @@ pub fn sparsify(n: usize, a: &Csr, b: &[f64], g: &Csr, h: &[f64]) -> SparsifyRes
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sparse::csr_row_vec;
 
     #[test]
     fn sparsifies_a_superset_inequality_row_with_zero_fill_in() {
@@ -288,8 +286,7 @@ mod tests {
         let result = sparsify(3, &a, &b, &g, &h);
         assert_eq!(result.n_rows_changed, 1);
 
-        let ar = result.a.as_ref();
-        let row1: Vec<(usize, f64)> = ar.col_indices_of_row(1).zip(ar.values_of_row(1)).map(|(j, &v)| (j, v)).collect();
+        let row1 = csr_row_vec(&result.a, 1);
         assert_eq!(row1, vec![(2, 3.0)]);
         assert!((result.b[1] - 10.0).abs() < 1e-9);
     }
@@ -353,12 +350,11 @@ mod tests {
         let result = sparsify(4, &a, &b, &g, &h);
         assert_eq!(result.n_rows_changed, 1);
 
-        let ar = result.a.as_ref();
-        let row0: Vec<(usize, f64)> = ar.col_indices_of_row(0).zip(ar.values_of_row(0)).map(|(j, &v)| (j, v)).collect();
+        let row0 = csr_row_vec(&result.a, 0);
         assert_eq!(row0, vec![(0, 1.0), (1, 1.0)], "eq0 must survive this call completely unchanged");
         assert!((result.b[0] - 3.0).abs() < 1e-9);
 
-        let row1: Vec<(usize, f64)> = ar.col_indices_of_row(1).zip(ar.values_of_row(1)).map(|(j, &v)| (j, v)).collect();
+        let row1 = csr_row_vec(&result.a, 1);
         assert_eq!(row1, vec![(2, 1.0), (3, 1.0)]);
         assert!((result.b[1] - 7.0).abs() < 1e-9);
     }

@@ -121,7 +121,7 @@
 //! reaching for `into_par_iter()` again rather than assuming it helps.
 
 use crate::presolve::{self, scaling};
-use crate::sparse::FixedRows;
+use crate::sparse::{CscMat, CsrMat, csr_row_iter};
 use crate::types::{ConstraintRow, Objective, RowSense, Sense, Status, VariableData};
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -650,7 +650,7 @@ impl SteepestEdgeState {
         let mut gamma = vec![1.0; std.n_total];
         let n_orig = std.n_total - std.n_rows;
         for j in 0..n_orig {
-            let norm_sq: f64 = std.cols.row(j).iter().map(|&(_, v)| v * v).sum();
+            let norm_sq: f64 = std.cols.col(j).iter().map(|&(_, v)| v * v).sum();
             gamma[j] = norm_sq.max(STEEPEST_EDGE_FLOOR);
         }
         SteepestEdgeState { gamma }
@@ -705,39 +705,33 @@ pub struct SimplexResult {
 /// the model's variables/objective/constraints (mirrors `qp::build`, but
 /// produces one slack column per row instead of folding bounds into `G`).
 ///
-/// `cols` is `rows` transposed — `cols.row(j)` is column `j`'s own `(row,
-/// value)` pairs — built once (`cols_from_rows`) right after `rows` is
+/// `cols` is `rows` transposed — `cols.col(j)` is column `j`'s own `(row,
+/// value)` pairs — built once ([`CscMat::from_rows`], a single O(nnz)
+/// counting sort straight into the flat layout) right after `rows` is
 /// finalized and never touched again: `StdForm` itself is never mutated
 /// during a solve (only `Tableau`'s basis/nonbasic status and `x` change),
 /// so there is no risk of the two views drifting out of sync. It exists
 /// purely so `Tableau::column`/`column_sparse` never have to scan every
 /// row looking for column `j` — see their own docs for why that mattered.
 ///
-/// Both `rows` and `cols` are [`FixedRows`] — a single flat `(index,
-/// value)` buffer plus offsets — rather than `Vec<Vec<(usize, f64)>>`: once
-/// presolve hands off the final matrix here, it is read every pivot for
-/// the rest of the solve and never mutated again, so there is no reason to
-/// keep paying for one separate heap allocation per row/column the way a
-/// still-being-rewritten presolve pass does.
+/// The pair are this crate's own [`CsrMat`]/[`CscMat`] — one flat `(index,
+/// value)` buffer plus offsets each, per `crate::sparse`'s own docs —
+/// rather than `Vec<Vec<(usize, f64)>>`: once presolve hands off the final
+/// matrix here, it is read every pivot for the rest of the solve and never
+/// mutated again, so there is no reason to keep paying for one separate
+/// heap allocation per row/column the way a still-being-rewritten presolve
+/// pass does. Row order within each `cols.col(j)` is ascending; nothing
+/// downstream (dot products, densifying one column) depends on it either
+/// way.
 struct StdForm {
     n_total: usize,
     n_rows: usize,
     c: Vec<f64>,
-    rows: FixedRows, // sparse rows over the n_total columns
-    cols: FixedRows, // `rows` transposed: cols.row(j) = column j's (row, value) pairs
+    rows: CsrMat, // sparse rows over the n_total columns
+    cols: CscMat, // `rows` transposed: cols.col(j) = column j's (row, value) pairs
     b: Vec<f64>,
     lb: Vec<f64>,
     ub: Vec<f64>,
-}
-
-/// Transposes a row-sparse matrix (`rows[i]` = row `i`'s `(col, value)`
-/// pairs) into its column-sparse companion (`cols.row(j)` = column `j`'s
-/// `(row, value)` pairs) — one O(nnz) counting-sort pass directly into the
-/// flat layout, run once per `StdForm` build. Row order within each
-/// `cols.row(j)` is whatever order `rows` produced it in; nothing
-/// downstream (dot products, densifying one column) cares.
-fn cols_from_rows(rows: &[Vec<(usize, f64)>], n_total: usize) -> FixedRows {
-    FixedRows::from_transpose(rows, n_total)
 }
 
 fn build_std_form(variables: &[VariableData], objective: &Objective, constraints: &[ConstraintRow]) -> StdForm {
@@ -790,8 +784,8 @@ fn build_std_form(variables: &[VariableData], objective: &Objective, constraints
         rows.push(r);
     }
 
-    let cols = cols_from_rows(&rows, n_total);
-    let rows = FixedRows::from_rows(&rows);
+    let cols = CscMat::from_rows(&rows, n_total);
+    let rows = CsrMat::from_rows(&rows, n_total);
     StdForm { n_total, n_rows, c, rows, cols, b, lb, ub }
 }
 
@@ -1207,12 +1201,11 @@ fn build_std_form_presolved(
     let mut rows = Vec::with_capacity(n_rows);
     let mut b_out = Vec::with_capacity(n_rows);
 
-    let ar = pre.a.as_ref();
     for i in 0..n_eq {
         let slack = n_free + i;
         let mut rhs_i = pre.b[i];
         let mut r: Vec<(usize, f64)> = Vec::new();
-        for (j, &v) in ar.col_indices_of_row(i).zip(ar.values_of_row(i)) {
+        for (j, v) in csr_row_iter(&pre.a, i) {
             match new_index[j] {
                 Some(nj) => {
                     r.push((nj, v * sign[nj]));
@@ -1247,8 +1240,8 @@ fn build_std_form_presolved(
         b_out.push(rhs_k);
     }
 
-    let cols = cols_from_rows(&rows, n_total);
-    let rows = FixedRows::from_rows(&rows);
+    let cols = CscMat::from_rows(&rows, n_total);
+    let rows = CsrMat::from_rows(&rows, n_total);
     let shift_of_free: Vec<f64> = orig_of_free.iter().map(|&j| shift[j]).collect();
     Ok(PresolvedForm {
         std: StdForm { n_total, n_rows, c, rows, cols, b: b_out, lb: new_lb, ub: new_ub },
@@ -1394,7 +1387,7 @@ impl<'a> Tableau<'a> {
     }
 
     /// Column `j` of the full constraint matrix, densified from
-    /// `std.cols.row(j)` — O(nnz_j + n_rows), not a scan of every row
+    /// `std.cols.col(j)` — O(nnz_j + n_rows), not a scan of every row
     /// looking for column `j`. Both real per-iteration call sites
     /// (`run_phase`, `solve_lp_dual_on`) now go through the
     /// non-allocating [`Self::column_into`] instead — this allocating
@@ -1418,7 +1411,7 @@ impl<'a> Tableau<'a> {
         for v in out.iter_mut() {
             *v = 0.0;
         }
-        for &(i, v) in self.std.cols.row(j) {
+        for &(i, v) in self.std.cols.col(j) {
             out[i] = v;
         }
     }
@@ -1432,7 +1425,7 @@ impl<'a> Tableau<'a> {
     /// fill and ever touching another column's data is what turns an
     /// O(n_total * nnz) pivot into an O(nnz) one.
     fn column_sparse(&self, j: usize) -> &[(usize, f64)] {
-        self.std.cols.row(j)
+        self.std.cols.col(j)
     }
 
     /// Recomputes every basic variable's value from the current nonbasic
@@ -1478,7 +1471,7 @@ impl<'a> Tableau<'a> {
                 prof_phases::COMPUTE_RHS_COLS_SKIPPED.fetch_add(1, Relaxed);
                 continue;
             }
-            for &(i, v) in self.std.cols.row(j) {
+            for &(i, v) in self.std.cols.col(j) {
                 rhs[i] -= v * xj;
             }
         }
@@ -2303,8 +2296,8 @@ fn split_std_form(std: &StdForm, components: &[Vec<usize>]) -> Vec<StdForm> {
         let rows = std::mem::take(&mut rows_acc[cid]);
         let n_rows = rows.len();
         let n_total = local_n + n_rows;
-        let cols = cols_from_rows(&rows, n_total);
-        let rows = FixedRows::from_rows(&rows);
+        let cols = CscMat::from_rows(&rows, n_total);
+        let rows = CsrMat::from_rows(&rows, n_total);
         result.push(StdForm {
             n_total,
             n_rows,
@@ -2402,7 +2395,7 @@ fn solve_std_form_decomposed(std: &StdForm, use_dual: bool) -> SimplexResult {
     // `split_std_form` itself is not free: real Netlib instances
     // routinely produce hundreds of components post-presolve (per this
     // function's own docs), and building a throwaway `StdForm` (its own
-    // small `Vec`/`FixedRows` allocations) for every one of them, only to
+    // small `Vec`/`CsrMat`/`CscMat` allocations) for every one of them, only
     // discard almost all of them, is a real, measured cost on top of the
     // *other* real cost splitting risks: on a highly degenerate instance,
     // changing *which* global index a variable ends up with (every

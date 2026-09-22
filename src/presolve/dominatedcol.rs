@@ -97,7 +97,7 @@
 //! here for its correct, tested core logic — e.g. if this crate's
 //! finite-bounds invariant is ever relaxed — rather than deleted outright.
 
-use crate::sparse::Csr;
+use crate::sparse::{Csr, csr_row_iter};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 const TOL: f64 = 1e-9;
@@ -108,7 +108,7 @@ pub fn fix_dominated_columns(n: usize, a: &Csr, real_g_rows: &[Vec<(usize, f64)>
     let mut in_equality = vec![false; n];
     let ar = a.as_ref();
     for i in 0..ar.nrows() {
-        for (j, &v) in ar.col_indices_of_row(i).zip(ar.values_of_row(i)) {
+        for (j, v) in csr_row_iter(a, i) {
             if v != 0.0 {
                 in_equality[j] = true;
             }

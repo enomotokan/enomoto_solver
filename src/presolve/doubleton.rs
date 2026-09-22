@@ -24,7 +24,7 @@
 
 use crate::presolve::colsingleton::Substitution;
 use crate::presolve::propagate;
-use crate::sparse::{csr_from_rows, Csr};
+use crate::sparse::{Csr, csr_from_rows, csr_rows_pruned};
 use std::collections::BTreeMap;
 
 const TOL: f64 = 1e-9;
@@ -75,9 +75,7 @@ fn rewrite_row(row: &[(usize, f64)], rhs: f64, subs: &[Substitution], by_var: &B
 /// doubleton rows never both try to eliminate it), not re-checked after
 /// rewriting (mirrors `colsingleton`'s own single-pass scope).
 pub fn eliminate_doubleton_equalities(n: usize, a: &Csr, b: &[f64], g: &Csr, h: &[f64], c: &[f64]) -> DoubletonResult {
-    let ar = a.as_ref();
-    let a_rows: Vec<Vec<(usize, f64)>> =
-        (0..ar.nrows()).map(|i| ar.col_indices_of_row(i).zip(ar.values_of_row(i)).map(|(j, &v)| (j, v)).filter(|&(_, v)| v != 0.0).collect()).collect();
+    let a_rows: Vec<Vec<(usize, f64)>> = csr_rows_pruned(a);
 
     let (lb, ub, real_g_rows, real_g_rhs) = propagate::extract_bounds(n, g, h);
 
@@ -223,6 +221,7 @@ pub fn eliminate_doubleton_equalities(n: usize, a: &Csr, b: &[f64], g: &Csr, h: 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sparse::csr_row_vec;
 
     #[test]
     fn eliminates_larger_coefficient_variable_and_rewrites_other_rows() {
@@ -255,8 +254,7 @@ mod tests {
 
         // The doubleton row itself is gone; the other A row survives, rewritten.
         assert_eq!(result.a.nrows(), 1);
-        let ar = result.a.as_ref();
-        let row0: Vec<(usize, f64)> = ar.col_indices_of_row(0).zip(ar.values_of_row(0)).map(|(j, &v)| (j, v)).collect();
+        let row0 = csr_row_vec(&result.a, 0);
         assert!(row0.iter().any(|&(j, v)| j == 1 && (v - (-0.5)).abs() < 1e-9));
         assert!(row0.iter().any(|&(j, v)| j == 2 && (v - 1.0).abs() < 1e-9));
         assert!(!row0.iter().any(|&(j, _)| j == 0));

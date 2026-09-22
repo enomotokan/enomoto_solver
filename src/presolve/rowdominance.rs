@@ -97,8 +97,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashSet;
 
-use crate::sparse::Csr;
-
+use crate::sparse::{Csr, csr_row_iter};
 const TOL: f64 = 1e-9;
 
 /// Returns the row indices (into `g`) that are dominated and safe to drop
@@ -110,7 +109,7 @@ pub fn find_dominated_rows(n: usize, a: &Csr, g: &Csr, h: &[f64], lb: &[f64]) ->
     let ar = a.as_ref();
     let mut in_equality = vec![false; n];
     for i in 0..ar.nrows() {
-        for (j, &v) in ar.col_indices_of_row(i).zip(ar.values_of_row(i)) {
+        for (j, v) in csr_row_iter(a, i) {
             if v != 0.0 {
                 in_equality[j] = true;
             }
@@ -126,7 +125,7 @@ pub fn find_dominated_rows(n: usize, a: &Csr, g: &Csr, h: &[f64], lb: &[f64]) ->
     // `parallelrows`/`dominatedcol` both make the same exclusion.
     let rows: Vec<BTreeMap<usize, f64>> = (0..m)
         .map(|i| {
-            let raw: Vec<(usize, f64)> = gr.col_indices_of_row(i).zip(gr.values_of_row(i)).map(|(j, &v)| (j, v)).filter(|&(_, v)| v != 0.0).collect();
+            let raw: Vec<(usize, f64)> = csr_row_iter(g, i).filter(|&(_, v)| v != 0.0).collect();
             let mut row = BTreeMap::new();
             if raw.len() >= 2 {
                 for (j, v) in raw {

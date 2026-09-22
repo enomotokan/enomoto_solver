@@ -31,8 +31,7 @@
 //! race was pure overhead for a decision with a fixed, always-the-same
 //! answer at every problem size this crate has ever actually measured.
 
-use crate::sparse::{csr_from_rows, Csr};
-
+use crate::sparse::{Csr, csr_from_rows, csr_row_iter};
 /// Above this many combined `A`/`G` rows, prefer `rayon`'s parallel
 /// reduce for `compute`'s column-norm fold over a plain sequential scan —
 /// same constant and rationale as `simplex.rs`'s `RAYON_SIZE_THRESHOLD`
@@ -161,7 +160,7 @@ pub fn compute(n: usize, a: &Csr, g: &Csr, c: &[f64], iters: usize) -> Scaling {
         for (i, e) in e_a.iter_mut().enumerate() {
             let old_e = *e;
             let mut row_norm = 0.0f64;
-            for (j, &v) in ar.col_indices_of_row(i).zip(ar.values_of_row(i)) {
+            for (j, v) in csr_row_iter(a, i) {
                 row_norm = row_norm.max((v * d[j] * old_e).abs());
             }
             if row_norm > 1e-12 {
@@ -171,7 +170,7 @@ pub fn compute(n: usize, a: &Csr, g: &Csr, c: &[f64], iters: usize) -> Scaling {
         for (i, e) in e_g.iter_mut().enumerate() {
             let old_e = *e;
             let mut row_norm = 0.0f64;
-            for (j, &v) in gr.col_indices_of_row(i).zip(gr.values_of_row(i)) {
+            for (j, v) in csr_row_iter(g, i) {
                 row_norm = row_norm.max((v * d[j] * old_e).abs());
             }
             if row_norm > 1e-12 {
@@ -187,27 +186,13 @@ pub fn apply(scaling: &Scaling, a: &Csr, g: &Csr, b: &[f64], h: &[f64], c: &[f64
     let n = scaling.d.len();
     let p = a.nrows();
     let m = g.nrows();
-    let ar = a.as_ref();
-    let gr = g.as_ref();
 
     // Each row's rescaled entries are independent of every other row —
     // sequential nonetheless, per this module's own parallelization note.
-    let a_rows: Vec<Vec<(usize, f64)>> = (0..p)
-        .map(|i| {
-            ar.col_indices_of_row(i)
-                .zip(ar.values_of_row(i))
-                .map(|(j, &v)| (j, v * scaling.e_a[i] * scaling.d[j]))
-                .collect()
-        })
-        .collect();
-    let g_rows: Vec<Vec<(usize, f64)>> = (0..m)
-        .map(|i| {
-            gr.col_indices_of_row(i)
-                .zip(gr.values_of_row(i))
-                .map(|(j, &v)| (j, v * scaling.e_g[i] * scaling.d[j]))
-                .collect()
-        })
-        .collect();
+    let a_rows: Vec<Vec<(usize, f64)>> =
+        (0..p).map(|i| csr_row_iter(a, i).map(|(j, v)| (j, v * scaling.e_a[i] * scaling.d[j])).collect()).collect();
+    let g_rows: Vec<Vec<(usize, f64)>> =
+        (0..m).map(|i| csr_row_iter(g, i).map(|(j, v)| (j, v * scaling.e_g[i] * scaling.d[j])).collect()).collect();
 
     let a_scaled = csr_from_rows(&a_rows, n);
     let g_scaled = csr_from_rows(&g_rows, n);
