@@ -416,6 +416,49 @@ fn drop_linearly_dependent_sparse(rows_in: &[(Vec<(usize, f64)>, f64)], n: usize
     for j in 0..aug_n {
         refresh_col(&col_rows, &rows, &mut heap, &mut col_bits, j);
     }
+    // Incremental column maxima. Rescanning a column in full
+    // (`refresh_col`: one `BTreeMap` lookup per entry) for every column the
+    // pivot row touches, on every step, was almost all of this function's
+    // time on matrices whose pivot rows fill in (`maros-r7`: 3.27s of
+    // 3.32s). Within one step a column's entries only change through the
+    // pivot row leaving it and through the elimination's writes, and `max`
+    // has no rounding, so the new maximum is exactly
+    // `max(old max, new values written)` *unless* an entry that held the
+    // old maximum shrank or disappeared — only then is a full rescan
+    // needed. `col_max_stale[j]` records that case, `col_new_max[j]` the
+    // largest magnitude written this step; both are reset when column `j`
+    // is settled at the end of the step. The resulting `heap` contents are
+    // identical to rescanning every touched column.
+    let mut col_max_stale = vec![false; aug_n];
+    let mut col_new_max = vec![0.0f64; aug_n];
+    let cur_max = |col_bits: &[Option<u64>], j: usize| -> f64 { col_bits[j].map_or(0.0, f64::from_bits) };
+    fn settle_col(
+        col_rows: &[BTreeSet<usize>],
+        rows: &[BTreeMap<usize, f64>],
+        heap: &mut BTreeSet<(u64, usize)>,
+        col_bits: &mut [Option<u64>],
+        col_max_stale: &mut [bool],
+        col_new_max: &mut [f64],
+        j: usize,
+    ) {
+        if col_max_stale[j] {
+            refresh_col(col_rows, rows, heap, col_bits, j);
+        } else if col_new_max[j] > col_bits[j].map_or(0.0, f64::from_bits) {
+            if let Some(old) = col_bits[j].take() {
+                heap.remove(&(old, j));
+            }
+            let bits = col_new_max[j].to_bits();
+            heap.insert((bits, j));
+            col_bits[j] = Some(bits);
+        }
+        col_max_stale[j] = false;
+        col_new_max[j] = 0.0;
+        #[cfg(debug_assertions)]
+        {
+            let full = col_rows[j].iter().filter_map(|&i| rows[i].get(&j).map(|v| v.abs())).fold(0.0f64, f64::max);
+            debug_assert_eq!(col_bits[j].map_or(0.0, f64::from_bits), full, "incremental max of column {j} disagrees with a rescan");
+        }
+    }
 
     // Column bucket arrays for the ascending-Markowitz-degree scan — see
     // `simplex::lu::MarkowitzState::find_best_pivot`'s own docs for why
@@ -533,6 +576,11 @@ fn drop_linearly_dependent_sparse(rows_in: &[(Vec<(usize, f64)>, f64)], n: usize
         // (`wood1p`: doing it unconditionally here as well as after
         // elimination roughly doubled `reduce_equalities`' time).
         let pi_cols: Vec<usize> = rows[pi].keys().copied().filter(|&j| j != pj).collect();
+        for (&j, &v) in rows[pi].iter() {
+            if j != pj && v.abs() == cur_max(&col_bits, j) {
+                col_max_stale[j] = true;
+            }
+        }
         for &j in &pi_cols {
             col_rows[j].remove(&pi);
             let new_deg = col_rows[j].len();
@@ -553,7 +601,7 @@ fn drop_linearly_dependent_sparse(rows_in: &[(Vec<(usize, f64)>, f64)], n: usize
             // pivot elsewhere via an inflated `gmax` on a later step.
             for &j in &pi_cols {
                 if !col_used[j] {
-                    refresh_col(&col_rows, &rows, &mut heap, &mut col_bits, j);
+                    settle_col(&col_rows, &rows, &mut heap, &mut col_bits, &mut col_max_stale, &mut col_new_max, j);
                 }
             }
             continue;
@@ -578,7 +626,12 @@ fn drop_linearly_dependent_sparse(rows_in: &[(Vec<(usize, f64)>, f64)], n: usize
                 use std::collections::btree_map::Entry;
                 match rows[i].entry(j) {
                     Entry::Occupied(mut e) => {
-                        let new_val = *e.get() - mult * v;
+                        let old_val = *e.get();
+                        let new_val = old_val - mult * v;
+                        if new_val.abs() < old_val.abs() && old_val.abs() == cur_max(&col_bits, j) {
+                            col_max_stale[j] = true;
+                        }
+                        col_new_max[j] = col_new_max[j].max(new_val.abs());
                         if new_val == 0.0 {
                             e.remove();
                             col_rows[j].remove(&i);
@@ -591,6 +644,7 @@ fn drop_linearly_dependent_sparse(rows_in: &[(Vec<(usize, f64)>, f64)], n: usize
                     }
                     Entry::Vacant(e) => {
                         let new_val = -mult * v;
+                        col_new_max[j] = col_new_max[j].max(new_val.abs());
                         if new_val != 0.0 {
                             e.insert(new_val);
                             col_rows[j].insert(i);
@@ -614,7 +668,7 @@ fn drop_linearly_dependent_sparse(rows_in: &[(Vec<(usize, f64)>, f64)], n: usize
             if j == pj || col_used[j] {
                 continue;
             }
-            refresh_col(&col_rows, &rows, &mut heap, &mut col_bits, j);
+            settle_col(&col_rows, &rows, &mut heap, &mut col_bits, &mut col_max_stale, &mut col_new_max, j);
         }
     }
 
