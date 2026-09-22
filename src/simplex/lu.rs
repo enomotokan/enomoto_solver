@@ -133,9 +133,34 @@ const DENSE_COL_FRACTION: f64 = 0.5;
 /// `skip_dense` fallback and its genuine-singularity detection are
 /// unchanged. What it does change is *which* acceptable pivot is returned:
 /// the Markowitz count can be worse than the unbounded scan's, so this
-/// trades (bounded) extra fill-in for a bounded search. Both sides of that
-/// trade are measured in `analysis/pivot_search_limit_20260922_143000.md`.
-const PIVOT_SEARCH_LIMIT: usize = 8;
+/// trades (bounded) extra fill-in for a bounded search.
+///
+/// **`256`, not HiGHS's `8` — measured, see
+/// `analysis/pivot_search_limit_20260922_143000.md`.** `8` was tried first
+/// and rejected: it is not "more of the same good direction", it is a
+/// different intervention. At `8` the bound fires on ordinary steps and
+/// changes the chosen pivot on **64 of the 93** Netlib problems; each such
+/// change perturbs the factorization's last digits, which moves the dual
+/// ratio test's tie-breaks, which moves the iteration count by an amount
+/// whose *sign is effectively arbitrary per problem* (`greenbeb` +18%
+/// iterations, `25fv47` −11%). Reproduced over two independent 93-problem
+/// runs, `8` left three problems past +10% (`greenbeb` +21/+22%, `pilot`
+/// +15/+18%, `grow22` +13/+13%) even though it cut the search everywhere,
+/// and a sweep showed no smaller constant escapes the lottery: `16` made
+/// `pilot87` **2.9x slower**, `64` still perturbed 26 problems.
+///
+/// `256` is chosen so the bound is a worst-case guard and nothing else. It
+/// fires on 7 of 93 problems, and only one of those (`dfl001`, the single
+/// instance where the unbounded scan is genuinely expensive: 2.96s of a
+/// 22.0s solve, averaging 261 candidate columns per elimination step)
+/// changes materially — its scan drops to 1.54s. The other 86 problems are
+/// bit-identical to the unbounded scan, iteration count and
+/// refactorization count included, so the change cannot regress them at
+/// all. Two independent 93-problem runs: −2.1% and −0.8% in total, no
+/// problem past ±10% in either. `512` was also measured (−3.2%/−, perturbs
+/// only 2 problems) but put `wood1p` at +10.6%, so it fails the same rule
+/// `8` does.
+const PIVOT_SEARCH_LIMIT: usize = 256;
 
 /// [`PIVOT_SEARCH_LIMIT`], overridable via `ENOMOTO_PIVOT_SEARCH_LIMIT` —
 /// `0` restores the unbounded scan, which is how the A/B behind the
