@@ -37,8 +37,7 @@
 //! network-shaped equality system the same way HiGHS's own presolve does.
 
 use crate::presolve::propagate;
-use crate::sparse::{csr_from_rows, Csr};
-
+use crate::sparse::{Csr, csr_from_rows, csr_rows};
 const TOL: f64 = 1e-9;
 /// Minimum `|coeff| / max|row|` for a column singleton to be substituted
 /// out — see the guard in `eliminate_singleton_equalities`.
@@ -87,10 +86,7 @@ pub struct EliminationResult {
 /// occurrence isn't caught here (a later call, given this pass's own
 /// output, would catch it).
 pub fn eliminate_singleton_equalities(n: usize, a: &Csr, b: &[f64], g: &Csr, h: &[f64], c: &[f64]) -> EliminationResult {
-    let ar = a.as_ref();
-    let a_rows: Vec<Vec<(usize, f64)>> = (0..ar.nrows())
-        .map(|i| ar.col_indices_of_row(i).zip(ar.values_of_row(i)).map(|(j, &v)| (j, v)).collect())
-        .collect();
+    let a_rows: Vec<Vec<(usize, f64)>> = csr_rows(a);
 
     // `lb`/`ub` for the box-bound part; `real_g_rows` for the "does this
     // column appear anywhere in G besides its own bound rows" part — both

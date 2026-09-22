@@ -87,8 +87,7 @@
 //! note a truly free variable is supposed to be exempt from.
 
 use crate::presolve::colsingleton::Substitution;
-use crate::sparse::{csr_from_rows, Csr};
-
+use crate::sparse::{Csr, SparseAccum, axpy_row, csr_from_rows, csr_rows};
 const TOL: f64 = 1e-9;
 
 /// Minimum `|coeff| / max|row|` for either pass below to actually
@@ -137,23 +136,6 @@ pub struct FreeVarResult {
     pub real_rhs: Vec<f64>,
 }
 
-/// `row - factor * pivot`, dropping `drop_col` outright (rather than
-/// trusting floating-point cancellation to zero it exactly) and any other
-/// entry that lands within `TOL` of zero — a `BTreeMap` merge keeps the
-/// result's column order deterministic, matching this crate's established
-/// preference for `BTreeMap` over `HashMap` wherever iteration order can
-/// feed back into a later tie-break (see `types.rs::LinearExpr`'s own
-/// docs).
-fn axpy_row(row: &[(usize, f64)], pivot: &[(usize, f64)], factor: f64, drop_col: usize) -> Vec<(usize, f64)> {
-    let mut map: std::collections::BTreeMap<usize, f64> = row.iter().copied().collect();
-    for &(k, v) in pivot {
-        *map.entry(k).or_insert(0.0) -= factor * v;
-    }
-    map.remove(&drop_col);
-    map.retain(|_, v| v.abs() > TOL);
-    map.into_iter().collect()
-}
-
 fn appears_in(real_rows: &[Vec<(usize, f64)>], j: usize) -> bool {
     real_rows.iter().any(|row| row.iter().any(|&(k, v)| k == j && v != 0.0))
 }
@@ -179,8 +161,11 @@ pub fn eliminate_free_variables(n: usize, a: &Csr, b: &[f64], c: &[f64], lb: &[f
         };
     }
 
-    let ar = a.as_ref();
-    let mut a_rows: Vec<Vec<(usize, f64)>> = (0..ar.nrows()).map(|i| ar.col_indices_of_row(i).zip(ar.values_of_row(i)).map(|(j, &v)| (j, v)).collect()).collect();
+    let mut a_rows: Vec<Vec<(usize, f64)>> = csr_rows(a);
+    // One sparse accumulator for every row fold this pass performs —
+    // see `crate::sparse::SparseAccum`'s own docs for why the merge is
+    // not a per-row `BTreeMap`.
+    let mut accum = SparseAccum::new(n);
     let mut b: Vec<f64> = b.to_vec();
     let mut c: Vec<f64> = c.to_vec();
     let mut eliminated = vec![false; n];
@@ -257,7 +242,7 @@ pub fn eliminate_free_variables(n: usize, a: &Csr, b: &[f64], c: &[f64], lb: &[f
             }
             let a_i2j = a_rows[i2].iter().find(|&&(k, _)| k == j).unwrap().1;
             let factor = a_i2j / coeff;
-            a_rows[i2] = axpy_row(&a_rows[i2], &pivot_row, factor, j);
+            a_rows[i2] = axpy_row(&mut accum, &a_rows[i2], &pivot_row, factor, j, TOL);
             b[i2] -= factor * rhs_i;
         }
 
@@ -272,7 +257,7 @@ pub fn eliminate_free_variables(n: usize, a: &Csr, b: &[f64], c: &[f64], lb: &[f
                 continue;
             };
             let factor = a_i2j / coeff;
-            real_rows[i2] = axpy_row(&real_rows[i2], &pivot_row, factor, j);
+            real_rows[i2] = axpy_row(&mut accum, &real_rows[i2], &pivot_row, factor, j, TOL);
             real_rhs[i2] -= factor * rhs_i;
         }
 

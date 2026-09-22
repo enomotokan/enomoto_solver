@@ -109,7 +109,7 @@ pub mod smallcoeff;
 pub mod sparsify;
 pub mod stuffing;
 
-use crate::sparse::{csr_from_rows, Csr};
+use crate::sparse::{Csr, csr_from_rows, csr_row_vec, csr_rows};
 use crate::types::{ConstraintRow, RowSense, VariableData};
 use scaling::Scaling;
 
@@ -605,8 +605,7 @@ pub fn run_extended(
                 }
                 if !dual_red.implied_equalities.is_empty() {
                     let implied = dual_red.implied_equalities;
-                    let ar = a.as_ref();
-                    let mut a_rows: Vec<Vec<(usize, f64)>> = (0..ar.nrows()).map(|i| ar.col_indices_of_row(i).zip(ar.values_of_row(i)).map(|(j, &v)| (j, v)).collect()).collect();
+                    let mut a_rows: Vec<Vec<(usize, f64)>> = csr_rows(&a);
                     let mut new_b = b.clone();
                     let mut promoted = vec![false; cur_real_rows.len()];
                     for &gi in &implied {
@@ -646,8 +645,7 @@ pub fn run_extended(
         // to skip it (correctly, across every source of a fix — including
         // `rowsingleton`'s own, decided later in this same round's inner
         // loop and easy to under-count here) isn't worth it.
-        let ar = a.as_ref();
-        let a_rows: Vec<Vec<(usize, f64)>> = (0..ar.nrows()).map(|i| ar.col_indices_of_row(i).zip(ar.values_of_row(i)).map(|(j, &v)| (j, v)).collect()).collect();
+        let a_rows: Vec<Vec<(usize, f64)>> = csr_rows(&a);
         let fold_a = timed_step!("foldfixed(A)", foldfixed::fold_fixed_columns(&a_rows, &b, &lb, &ub, RowSense::Eq));
         if fold_a.infeasible {
             return extended_infeasible(sc, a, b, c, n);
@@ -761,7 +759,7 @@ pub fn run_extended(
                 let mut g_rows: Vec<Vec<(usize, f64)>> = Vec::with_capacity(gr.nrows() + cs.extra_g_rows.len());
                 let mut h_vec: Vec<f64> = Vec::with_capacity(gr.nrows() + cs.extra_h.len());
                 for i in 0..gr.nrows() {
-                    let row: Vec<(usize, f64)> = gr.col_indices_of_row(i).zip(gr.values_of_row(i)).map(|(j, &v)| (j, v)).collect();
+                    let row: Vec<(usize, f64)> = csr_row_vec(&g, i);
                     if row.len() == 1 && eliminated_this_pass.contains(&row[0].0) {
                         continue;
                     }

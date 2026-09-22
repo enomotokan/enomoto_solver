@@ -69,6 +69,7 @@
 //! epoch-stamped DFS scratch) — see that function's own docs for why only
 //! this one direction gets the fuller treatment.
 
+use crate::sparse::{CscBuilder, CscMat, EpochMarks, HybridVec};
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -525,18 +526,21 @@ impl MarkowitzState {
 /// [`FtLu::solve_sparse_into`]'s own docs on why that separation matters
 /// — before the pivot loop starts, and reuses both every FTRAN).
 ///
-/// `visited_epoch[i] == epoch` means step `i` is already known to be in
-/// the *current* call's reach set — bumping `epoch` each call instead of
-/// clearing this array is what makes marking/checking `O(1)` without an
-/// `O(m)` reset per call (the standard "epoch stamp" / "time stamp"
-/// technique for a reusable visited-set). `stack` is the DFS's own
+/// `visited` marks the steps already known to be in the *current* call's
+/// reach set, via [`EpochMarks`] — bumping an epoch each call instead of
+/// clearing an array is what makes marking/checking `O(1)` without an
+/// `O(m)` reset per call. (It was a hand-rolled `Vec<u32>` plus a bare
+/// `epoch += 1` until that trick was consolidated into `crate::sparse`;
+/// the bare increment had no wraparound guard, so after 2^32 calls a stale
+/// stamp would have read as a live mark and silently truncated a reach set
+/// — i.e. produced a wrong FTRAN. [`EpochMarks::begin`] handles it.)
+/// `stack` is the DFS's own
 /// (iterative, not recursive — this crate's basis matrices can have `m`
 /// in the low thousands, deep enough that a recursive DFS risks a real
 /// stack overflow on a long dependency chain) working stack. `reach` is
 /// this call's own collected, then sorted, reach set.
 pub struct GpScratch {
-    visited_epoch: Vec<u32>,
-    epoch: u32,
+    visited: EpochMarks,
     stack: Vec<usize>,
     seeds: Vec<usize>,
     reach: Vec<usize>,
@@ -544,7 +548,7 @@ pub struct GpScratch {
 
 impl GpScratch {
     pub fn new(m: usize) -> Self {
-        GpScratch { visited_epoch: vec![0; m], epoch: 0, stack: Vec::new(), seeds: Vec::new(), reach: Vec::new() }
+        GpScratch { visited: EpochMarks::new(m), stack: Vec::new(), seeds: Vec::new(), reach: Vec::new() }
     }
 }
 
@@ -554,38 +558,35 @@ pub struct LuFactors {
     /// `l_col[s]`: `(row_step, multiplier)` pairs — the sub-diagonal
     /// entries of `L`'s column `s`.
     ///
-    /// **Flattening this into a [`FixedRows`] (one flat `(index, value)`
-    /// buffer plus offsets — the same layout `simplex.rs`'s `StdForm` uses
+    /// Stored as a [`crate::sparse::CscMat`] — one flat `(index, value)`
+    /// buffer plus offsets, the same layout `simplex.rs`'s `StdForm` uses
     /// for the frozen coefficient matrix, on the same reasoning: `L` never
-    /// changes once a refactorization builds it) was implemented and
-    /// measured, then reverted.** The theory was sound (`L` really is read
-    /// every FTRAN/BTRAN's `L`-stage for the rest of that basis's life and
-    /// never mutated again, so a per-row heap allocation plus pointer
-    /// indirection looked like pure waste), but a controlled A/B (same
-    /// build, only this field's representation toggled, 3 runs per problem)
-    /// showed a **consistent small regression**, not a win: `scsd8` +2.1%,
-    /// `25fv47` +1.8%, `stocfor2` +4.0%, `fit1p` +3.2%, with `degen3`/
-    /// `pilotnov` flat within run-to-run noise — zero problems improved.
-    /// Two likely reasons, neither of which the `Vec<Vec<...>>` form
-    /// suffers from: (1) `l_col[s]` in real Netlib bases is typically very
-    /// short (Markowitz elimination is specifically choosing pivots to keep
-    /// it that way), so the "many small allocations" cost this was meant to
-    /// remove was never that large to begin with, while accessing a
-    /// `FixedRows` row still costs *two* offset reads (`offsets[i]`,
-    /// `offsets[i+1]`) before the slice is even known, against `Vec<Vec>`'s
-    /// single pointer hop to an already-known `(ptr, len)` pair; (2) the
-    /// conversion itself doesn't avoid building the `m` small per-column
-    /// `Vec`s first (both `factorize` and `factorize_dense_faer` still
-    /// populate a `Vec<Vec<...>>` while walking `L`'s entries in whatever
-    /// order they're produced) — flattening just added one more `O(nnz)`
-    /// copy on top afterward, at construction time, without ever removing
-    /// the allocations it was trying to avoid. A version that builds the
-    /// flat buffer directly (computing offsets in one pass, filling
-    /// `entries` in a second, the way `FixedRows::from_transpose` already
-    /// does for a *transposed* build) might still be worth trying — this
-    /// attempt just never built that version — but plain
-    /// `Vec<Vec<(usize, f64)>>` is what's actually measured fastest so far.
-    pub l_col: Vec<Vec<(usize, f64)>>,
+    /// changes once a refactorization builds it, and it is then read on
+    /// every FTRAN/BTRAN's `L`-stage for the rest of that basis's life.
+    ///
+    /// **This is the second attempt, and the first one that measured as a
+    /// win.** The first flattened a finished `Vec<Vec<(usize, f64)>>` into
+    /// the compressed form as a post-pass, and a controlled A/B showed a
+    /// consistent small regression on every instance that moved at all
+    /// (`scsd8` +2.1%, `25fv47` +1.8%, `stocfor2` +4.0%, `fit1p` +3.2%,
+    /// `degen3`/`pilotnov` flat, nothing faster). Its own post-mortem
+    /// identified the reason and named the fix: the post-pass *keeps*
+    /// building the `m` small per-column `Vec`s it was meant to remove and
+    /// then adds an `O(nnz)` copy on top, so it paid the compressed form's
+    /// cost — two offset reads per column access, against `Vec<Vec>`'s
+    /// single pointer hop to an already-known `(ptr, len)` — while buying
+    /// none of its benefit.
+    ///
+    /// [`crate::sparse::CscBuilder`] is that fix. Every one of this file's
+    /// factorizations already emits `L`'s columns in ascending step order
+    /// (left-looking elimination produces column `s` complete at step `s`),
+    /// so the flat buffer can be appended to directly, with the column
+    /// boundary recorded wherever the buffer has reached: no counting pass,
+    /// no per-column `Vec`, and no copy. What is left is a strict
+    /// improvement at build time (two allocations for the whole of `L`
+    /// instead of `m + 1`) plus contiguous entries for `l_solve_into`'s own
+    /// sequential `for s in 0..m` sweep to prefetch through.
+    pub l_col: crate::sparse::CscMat,
     /// `u_row[s]`: `(col_step, value)` pairs, `col_step >= s` (including
     /// the diagonal at `col_step == s`) — the entries of `U`'s row `s`.
     /// Unlike `l_col`, this is read exactly once per refactorization (by
@@ -666,7 +667,7 @@ pub struct LuFactors {
 /// dominated wall time (95-98%, repeated every few dozen `try_update`
 /// calls since a dense basis's eta fill crosses `FT_BUMP_LIMIT_FACTOR *
 /// m` almost immediately) while this file's own FTRAN-side dense
-/// optimizations (`OffDiag::Dense`, `FtLu::should_use_dense_solve`)
+/// optimizations (`HybridVec`'s dense arm, `FtLu::should_use_dense_solve`)
 /// together accounted for under 1% of the same wall time — i.e. the eta
 /// chain was never the bottleneck for a dense basis, the cold
 /// factorization was. `0.25` is a first-pass threshold, not yet tuned
@@ -721,16 +722,17 @@ fn factorize_dense_faer(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuFac
         col_perm_inv[col_perm[step]] = step;
     }
 
-    let mut l_col_rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
+    let mut l_build = CscBuilder::new(m);
     for step in 0..m {
         for row_step in (step + 1)..m {
             let v = l[(row_step, step)];
             if v != 0.0 {
-                l_col_rows[step].push((row_step, v));
+                l_build.push(row_step, v);
             }
         }
+        l_build.end_column();
     }
-    let l_col = l_col_rows;
+    let l_col = l_build.build();
     let mut u_row: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
     for step in 0..m {
         for col_step in step..m {
@@ -911,7 +913,8 @@ pub fn factorize_diagonal(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuF
     let identity: Vec<usize> = (0..m).collect();
     Some(LuFactors {
         m,
-        l_col: vec![Vec::new(); m],
+        // `L` is the identity: `m` columns, every one empty.
+        l_col: CscMat::empty(m, m),
         u_row,
         row_perm: identity.clone(),
         col_perm: identity.clone(),
@@ -1027,11 +1030,23 @@ fn factorize_flat_markowitz(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<L
         col_perm_inv[col_perm[step]] = step;
     }
 
-    let mut l_col_rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
-    for (orig_row, pivot_step, mult) in l_entries {
-        l_col_rows[pivot_step].push((row_perm_inv[orig_row], mult));
+    // `l_entries` is already grouped by `pivot_step` in ascending order —
+    // the elimination loop above emits step `s`'s whole `L` column before
+    // moving to step `s + 1` — so `L` can be appended straight into its
+    // final compressed buffer, with no counting pass and no intermediate
+    // per-column `Vec`s (see `LuFactors::l_col`'s own docs).
+    debug_assert!(l_entries.windows(2).all(|w| w[0].1 <= w[1].1), "L entries must be grouped by ascending pivot step");
+    let mut l_build = CscBuilder::with_capacity(m, m, l_entries.len());
+    let mut next = 0usize;
+    for step in 0..m {
+        while next < l_entries.len() && l_entries[next].1 == step {
+            let (orig_row, _, mult) = l_entries[next];
+            l_build.push(row_perm_inv[orig_row], mult);
+            next += 1;
+        }
+        l_build.end_column();
     }
-    let l_col = l_col_rows;
+    let l_col = l_build.build();
     let mut u_row: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
     for (pivot_step, orig_col, val) in u_entries {
         u_row[pivot_step].push((col_perm_inv[orig_col], val));
@@ -1266,18 +1281,34 @@ fn factorize_bordered(m: usize, rows_in: &[Vec<(usize, f64)>], border: &[usize])
         col_perm_inv_full[col_perm[step]] = step;
     }
 
-    let mut l_col: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
-    for (orig_row, step, mult) in l_entries {
-        l_col[step].push((row_perm_inv_full[orig_row], mult));
+    // As in `factorize_flat_markowitz`: `l_entries` covers steps
+    // `0..n_sparse` in ascending order, and the border block's own columns
+    // follow at `n_sparse..m`, also ascending — so the whole of `L` is
+    // still emitted in column order and goes straight into the compressed
+    // buffer (see `LuFactors::l_col`'s own docs).
+    debug_assert!(l_entries.windows(2).all(|w| w[0].1 <= w[1].1), "L entries must be grouped by ascending pivot step");
+    let mut l_build = CscBuilder::with_capacity(m, m, l_entries.len() + border_lu.l_col.nnz());
+    let mut next = 0usize;
+    for step in 0..n_sparse {
+        while next < l_entries.len() && l_entries[next].1 == step {
+            let (orig_row, _, mult) = l_entries[next];
+            l_build.push(row_perm_inv_full[orig_row], mult);
+            next += 1;
+        }
+        l_build.end_column();
     }
+    for s in 0..k {
+        for &(row_step, mult) in border_lu.l_col.col(s) {
+            l_build.push(n_sparse + row_step, mult);
+        }
+        l_build.end_column();
+    }
+    let l_col = l_build.build();
     let mut u_row: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
     for (step, orig_col, val) in u_entries {
         u_row[step].push((col_perm_inv_full[orig_col], val));
     }
     for s in 0..k {
-        for &(row_step, mult) in &border_lu.l_col[s] {
-            l_col[n_sparse + s].push((n_sparse + row_step, mult));
-        }
         for &(col_step, val) in &border_lu.u_row[s] {
             u_row[n_sparse + s].push((n_sparse + col_step, val));
         }
@@ -1319,7 +1350,7 @@ impl LuFactors {
             if z[s] == 0.0 {
                 continue;
             }
-            for &(row_step, mult) in &self.l_col[s] {
+            for &(row_step, mult) in self.l_col.col(s) {
                 z[row_step] -= mult * z[s];
             }
         }
@@ -1377,21 +1408,20 @@ impl LuFactors {
             scratch.seeds.push(s);
         }
 
-        scratch.epoch += 1;
-        let epoch = scratch.epoch;
+        scratch.visited.begin();
         scratch.reach.clear();
         for i in 0..scratch.seeds.len() {
             let seed = scratch.seeds[i];
-            if scratch.visited_epoch[seed] == epoch {
+            if scratch.visited.is_marked(seed) {
                 continue;
             }
-            scratch.visited_epoch[seed] = epoch;
+            scratch.visited.mark(seed);
             scratch.stack.push(seed);
             while let Some(node) = scratch.stack.pop() {
                 scratch.reach.push(node);
-                for &(next, _) in &self.l_col[node] {
-                    if scratch.visited_epoch[next] != epoch {
-                        scratch.visited_epoch[next] = epoch;
+                for &(next, _) in self.l_col.col(node) {
+                    if !scratch.visited.is_marked(next) {
+                        scratch.visited.mark(next);
                         scratch.stack.push(next);
                     }
                 }
@@ -1403,7 +1433,7 @@ impl LuFactors {
             if z[s] == 0.0 {
                 continue;
             }
-            for &(row_step, mult) in &self.l_col[s] {
+            for &(row_step, mult) in self.l_col.col(s) {
                 z[row_step] -= mult * z[s];
             }
         }
@@ -1454,7 +1484,7 @@ impl LuFactors {
     fn l_transpose_solve_into(&self, w: &mut [f64], y: &mut [f64]) {
         let m = self.m;
         for s in (0..m).rev() {
-            for &(row_step, mult) in &self.l_col[s] {
+            for &(row_step, mult) in self.l_col.col(s) {
                 if w[row_step] == 0.0 {
                     continue;
                 }
@@ -1474,7 +1504,7 @@ impl LuFactors {
         let mut z: Vec<f64> = (0..m).map(|s| rhs[self.row_perm[s]]).collect();
         // Forward: L z = rhs' (unit lower triangular, step order)
         for s in 0..m {
-            for &(row_step, mult) in &self.l_col[s] {
+            for &(row_step, mult) in self.l_col.col(s) {
                 z[row_step] -= mult * z[s];
             }
         }
@@ -1522,7 +1552,7 @@ impl LuFactors {
         // Back: L^T w = z (unit upper triangular in step order)
         let mut w = z;
         for s in (0..m).rev() {
-            for &(row_step, mult) in &self.l_col[s] {
+            for &(row_step, mult) in self.l_col.col(s) {
                 w[s] -= mult * w[row_step];
             }
         }
@@ -1571,96 +1601,36 @@ impl LuFactors {
 // own creation-ordered list and applied between `L` and `U` per
 // `B_k^{-1} = U_k^{-1} R_k^{-1} ... R_1^{-1} L^{-1}` (eq. 13).
 
-/// An eta's off-diagonal entries, chosen at construction time (see
-/// [`pack_off_diag`]) between a sparse `(row_step, value)` list and a dense
-/// length-`m` array (with the eta's own slot always left at `0.0`, so a
-/// dense loop over the whole array never needs to special-case it). The
-/// sparse form pays a per-entry tuple/indirection cost that is worth it
-/// only while the eta is genuinely sparse; once an eta's own fill exceeds
-/// [`DENSE_ETA_FRACTION`] of `m` (typical of a dense-coefficient LP, where
-/// `U`'s eta chain is already close to fully dense from the very first
-/// update), the dense form turns each consuming loop into a straight-line
-/// scan with no per-entry branch or index indirection, which vectorizes
-/// far better for the same total FLOP count. `nnz` is tracked separately
-/// (not re-derived from the dense array's length, which is always `m`)
-/// so [`FtLu::fill_count`]'s refactorization-trigger accounting keeps
-/// measuring true fill regardless of which representation is in use.
-#[derive(Clone)]
-enum OffDiag {
-    Sparse(Vec<(usize, f64)>),
-    Dense { data: Box<[f64]>, nnz: usize },
-}
+// An eta's off-diagonal entries are a [`HybridVec`]: a sparse `(row_step,
+// value)` list while the eta is genuinely sparse, a dense length-`m` array
+// once its fill exceeds [`DENSE_ETA_FRACTION`] of `m` (typical of a
+// dense-coefficient LP, where `U`'s eta chain is already close to fully
+// dense from the very first update). See that type's own docs for the
+// trade-off, for the skipped-slot convention that lets the dense form's
+// loops run over the whole array unconditionally, and for why its two
+// consuming operations (`dot_dense`, `axpy_into_dense`) live there rather
+// than being re-written as a two-armed `match` at each of this file's
+// eight FTRAN/BTRAN call sites.
 
 /// A column/row whose off-diagonal fill exceeds this fraction of `m` is
-/// stored densely (see [`OffDiag`]). Unlike [`DENSE_COL_FRACTION`] (tuned
+/// stored densely (see [`HybridVec`]). Unlike [`DENSE_COL_FRACTION`] (tuned
 /// against real Netlib data, all of it sparse), this threshold has no
 /// dense-problem benchmark to tune against yet in this crate's own test
 /// set — `0.4` is a first-pass value, not a measured one; re-tune once a
 /// genuinely dense-coefficient LP is available to benchmark against.
 const DENSE_ETA_FRACTION: f64 = 0.4;
 
-fn pack_off_diag(m: usize, pairs: Vec<(usize, f64)>) -> OffDiag {
-    let nnz = pairs.len();
-    if nnz as f64 > DENSE_ETA_FRACTION * m as f64 {
-        let mut data = vec![0.0; m];
-        for (i, v) in pairs {
-            data[i] = v;
-        }
-        OffDiag::Dense { data: data.into_boxed_slice(), nnz }
-    } else {
-        OffDiag::Sparse(pairs)
-    }
-}
-
-impl OffDiag {
-    fn nnz(&self) -> usize {
-        match self {
-            OffDiag::Sparse(v) => v.len(),
-            OffDiag::Dense { nnz, .. } => *nnz,
-        }
-    }
-
-    /// Removes any entry at `row_step == p` — used when an eta at an
-    /// *earlier* `u_seq` position stops depending on a slot that just got
-    /// moved to the end (see `try_update`'s own docs). Keeps `nnz` correct
-    /// for the dense form too, rather than leaving it stale.
-    fn remove_row(&mut self, p: usize) {
-        match self {
-            OffDiag::Sparse(v) => v.retain(|&(row_step, _)| row_step != p),
-            OffDiag::Dense { data, nnz } => {
-                if data[p] != 0.0 {
-                    data[p] = 0.0;
-                    *nnz -= 1;
-                }
-            }
-        }
-    }
-
-    /// Materializes this eta's off-diagonal entries as owned `(row_step,
-    /// value)` pairs. Only called on a cold, small-`nnz` path (`try_update`
-    /// unregistering a slot's *old* content from `FtLu::row_owners` before
-    /// overwriting it) — unlike `remove_row`/the dot-product loops above,
-    /// this never runs once per row of `U`, so an intermediate `Vec` here
-    /// costs nothing that matters.
-    fn pairs(&self) -> Vec<(usize, f64)> {
-        match self {
-            OffDiag::Sparse(v) => v.clone(),
-            OffDiag::Dense { data, .. } => data.iter().enumerate().filter(|&(_, &v)| v != 0.0).map(|(i, &v)| (i, v)).collect(),
-        }
-    }
-}
-
 #[derive(Clone)]
 struct UEta {
     slot: usize,
     pivot: f64,
-    off_diag: OffDiag, // (row_step, value) pairs, row_step != slot
+    off_diag: HybridVec, // (row_step, value) pairs, row_step != slot
 }
 
 #[derive(Clone)]
 struct REta {
     p: usize,
-    r: OffDiag, // (row_step, value) pairs, row_step != p
+    r: HybridVec, // (row_step, value) pairs, row_step != p
 }
 
 /// A caller-provided FTRAN right-hand side whose own nonzero count exceeds
@@ -1871,10 +1841,10 @@ pub struct FtLu {
     /// See [`Self::scratch_a_tilde`]'s own docs — the other of
     /// [`Self::try_update`]'s two scratch buffers.
     scratch_e_tilde: Vec<f64>,
-    /// [`Self::u_transpose_solve_into`]'s own reusable epoch-stamped
-    /// "needed" scratch (see that method's own docs): `(stamps, epoch)`
-    /// where `stamps[s] == epoch` means step `s` is known to end up
-    /// nonzero this call. A `RefCell` rather than a `&mut` parameter
+    /// [`Self::u_transpose_solve_into`]'s own reusable [`EpochMarks`]
+    /// "needed" set (see that method's own docs): a marked step `s` is one
+    /// known to end up nonzero this call. A `RefCell` rather than a `&mut`
+    /// parameter
     /// because `u_transpose_solve_into` and its callers
     /// (`solve_transpose_into`/`solve_transpose_into_capture`) are called
     /// through a shared `&FtLu` from many call sites across this crate;
@@ -1883,7 +1853,7 @@ pub struct FtLu {
     /// more invasive change for the same result. Never borrowed
     /// re-entrantly (this method doesn't call itself), so the `borrow_mut`
     /// can't panic.
-    ut_needed: RefCell<(Vec<u32>, u32)>,
+    ut_needed: RefCell<EpochMarks>,
     /// Deterministic operation-count accumulator for the `CLOCK`
     /// refactorization trigger (`ENOMOTO_SYNTH_CLOCK_FACTOR`'s own docs at
     /// its call sites in `extended_dual.rs`) — this crate's counterpart to
@@ -1904,6 +1874,22 @@ pub struct FtLu {
     /// refactorization) — there is no explicit reset method because a fresh
     /// `FtLu` *is* the reset.
     tick: Cell<u64>,
+    /// Running total of the off-diagonal fill currently held across
+    /// `u_seq` and `r_etas` — [`Self::fill_count`]'s answer, maintained
+    /// incrementally by [`Self::commit_update`] rather than re-summed on
+    /// demand.
+    ///
+    /// The refactorization trigger reads it **once per simplex iteration**
+    /// (`simplex.rs`'s own trigger (3)), and re-summing meant walking all
+    /// `m` entries of `u_seq` — touching every `UEta` header in the
+    /// process — for a number that changes only at the handful of places
+    /// an update already touches. Its own doc comment called that sum
+    /// "`O(1)`-ish"; it was `O(m)`, one more full sweep of the eta file
+    /// per iteration on top of the ones `u_solve_into`/
+    /// `u_transpose_solve_into` genuinely need. This is that number
+    /// actually being `O(1)`, with a `debug_assert` in `fill_count` that
+    /// it still agrees with the sum it replaced.
+    fill: usize,
     /// This factorization's own one-time build cost, in the same tick
     /// units as [`Self::tick`] — computed once in [`Self::new`] from the
     /// freshly-built `L`/`U` (`m` rows plus their combined off-diagonal
@@ -1972,7 +1958,7 @@ impl FtLu {
                 row_owners[row_step].push(slot);
             }
         }
-        let l_nnz: u64 = base.l_col.iter().map(|v| v.len() as u64).sum();
+        let l_nnz: u64 = base.l_col.nnz() as u64;
         // `u_row[s]` includes its own diagonal entry (`col_step == s`,
         // filtered out just above into `pivots`), so its off-diagonal count
         // is one less than its length — mirrors HiGHS's own `u_countX`
@@ -1984,9 +1970,10 @@ impl FtLu {
             .map(|slot| UEta {
                 slot,
                 pivot: pivots[slot],
-                off_diag: pack_off_diag(m, std::mem::take(&mut off_diags[slot])),
+                off_diag: HybridVec::pack(m, std::mem::take(&mut off_diags[slot]), DENSE_ETA_FRACTION),
             })
             .collect();
+        let fill = u_seq.iter().map(|e: &UEta| e.off_diag.nnz()).sum();
         FtLu {
             base,
             u_seq,
@@ -1995,7 +1982,8 @@ impl FtLu {
             r_etas: Vec::new(),
             scratch_a_tilde: vec![0.0; m],
             scratch_e_tilde: vec![0.0; m],
-            ut_needed: RefCell::new((vec![0; m], 0)),
+            ut_needed: RefCell::new(EpochMarks::new(m)),
+            fill,
             tick: Cell::new(0),
             build_tick,
         }
@@ -2078,44 +2066,68 @@ impl FtLu {
     /// unchanged (bit-identical) across the full Netlib set.
     fn u_transpose_solve_into(&self, z: &mut [f64]) {
         let mut needed = self.ut_needed.borrow_mut();
-        let (stamps, epoch) = &mut *needed;
-        *epoch = epoch.wrapping_add(1);
-        if *epoch == 0 {
-            // Wrapped after ~4 billion calls: every stale stamp is now
-            // indistinguishable from a real match at epoch 0, so clear
-            // them once and restart from epoch 1.
-            stamps.iter_mut().for_each(|s| *s = 0);
-            *epoch = 1;
-        }
-        let epoch = *epoch;
+        needed.begin();
         for (s, &zs) in z.iter().enumerate() {
             if zs != 0.0 {
-                stamps[s] = epoch;
+                needed.mark(s);
             }
         }
-        // CLOCK-trigger accounting (`Self::tick`'s own docs): the `stamps`
-        // scan plus the unconditional `for eta in &self.u_seq` walk below
+        self.u_transpose_sweep(z, &mut needed);
+    }
+
+    /// [`Self::u_transpose_solve_into`] for the case the caller already
+    /// knows `z`'s entire support: a single nonzero at step `seed`.
+    ///
+    /// This is the BTRAN whose right-hand side is a unit vector `e_i` —
+    /// the pivotal-row `rho_p`, the steepest-edge weight update's own
+    /// `rho`, and `DseState::from_basis`'s `m` reference solves are all
+    /// that shape. Seeding the "needed" set from `seed` directly is
+    /// *exact*, not approximate: [`Self::u_transpose_solve_into`]'s own
+    /// seeding loop marks precisely the steps where `z` is nonzero, and
+    /// for a permuted unit vector that set is exactly `{seed}`. What it
+    /// saves is that `O(m)` scan — and, at the call site, the `O(m)`
+    /// permutation *gather* (`z[s] = rhs[col_perm[s]]`, a random-access
+    /// read per step) that materialized the unit vector in the first
+    /// place, which [`Self::seed_unit_rhs`] replaces with a flat `fill` and
+    /// one store.
+    fn u_transpose_solve_seeded(&self, z: &mut [f64], seed: usize) {
+        let mut needed = self.ut_needed.borrow_mut();
+        needed.begin();
+        needed.mark(seed);
+        self.u_transpose_sweep(z, &mut needed);
+    }
+
+    /// The `U^{-T}` sweep itself, shared by both seedings above.
+    fn u_transpose_sweep(&self, z: &mut [f64], needed: &mut EpochMarks) {
+        // CLOCK-trigger accounting (`Self::tick`'s own docs): the
+        // mark-seeding scan plus the unconditional `for eta in &self.u_seq` walk below
         // (the `continue` only skips the dot product, not the loop
         // iteration itself) are both `O(m)` on every single call regardless
         // of how sparse `z` is — mirrors HiGHS's own `buildSynthticTick`
         // fixed `num_row`-scaled term for the analogous `btranU` stage.
+        //
+        // Charged identically on the seeded path, which skips the scan but
+        // still walks all of `u_seq`: the flat `m` term models that walk,
+        // and the tick drives the deterministic `CLOCK` refactorization
+        // trigger, so making the two paths disagree here would change
+        // *which iterations refactorize* — i.e. silently move the solve
+        // onto a different trajectory — in exchange for modelling a
+        // constant factor within the same `O(m)`.
         self.add_tick(self.base.m as u64);
         for eta in &self.u_seq {
             let p = eta.slot;
-            if stamps[p] != epoch {
+            if !needed.is_marked(p) {
                 continue;
             }
-            let y: f64 = match &eta.off_diag {
-                OffDiag::Sparse(v) => v.iter().map(|&(row_step, v)| v * z[row_step]).sum(),
-                // `data[p]` is always `0.0` (see `OffDiag`'s own docs), so
-                // this dot product already excludes `z[p]` on its own.
-                OffDiag::Dense { data, .. } => data.iter().zip(z.iter()).map(|(&v, &zi)| v * zi).sum(),
-            };
+            // `HybridVec`'s dense arm zips the whole array; `data[p]` is
+            // always `0.0` (that type's skipped-index convention), so this
+            // dot product already excludes `z[p]` on its own.
+            let y = eta.off_diag.dot_dense(z);
             self.add_tick(eta.off_diag.nnz() as u64);
             z[p] = (z[p] - y) / eta.pivot;
             if z[p] != 0.0 {
                 for &q in &self.row_owners[p] {
-                    stamps[q] = epoch;
+                    needed.mark(q);
                 }
             }
         }
@@ -2131,10 +2143,7 @@ impl FtLu {
     fn u_transpose_solve_from(&self, z: &mut [f64], start: usize) {
         for eta in &self.u_seq[start..] {
             let p = eta.slot;
-            let y: f64 = match &eta.off_diag {
-                OffDiag::Sparse(v) => v.iter().map(|&(row_step, v)| v * z[row_step]).sum(),
-                OffDiag::Dense { data, .. } => data.iter().zip(z.iter()).map(|(&v, &zi)| v * zi).sum(),
-            };
+            let y = eta.off_diag.dot_dense(z);
             z[p] = (z[p] - y) / eta.pivot;
         }
     }
@@ -2181,20 +2190,10 @@ impl FtLu {
                 continue;
             }
             self.add_tick(eta.off_diag.nnz() as u64);
-            match &eta.off_diag {
-                OffDiag::Sparse(v) => {
-                    for &(row_step, v) in v {
-                        x[row_step] -= v * xp;
-                    }
-                }
-                // `data[p] == 0.0` always, so this leaves `x[p]` (just
-                // divided above) untouched, same as the sparse form.
-                OffDiag::Dense { data, .. } => {
-                    for (xi, &v) in x.iter_mut().zip(data.iter()) {
-                        *xi -= v * xp;
-                    }
-                }
-            }
+            // `data[p] == 0.0` always (`HybridVec`'s skipped-index
+            // convention), so the dense arm leaves `x[p]` — just divided
+            // above — untouched, same as the sparse one.
+            eta.off_diag.axpy_into_dense(-xp, x);
         }
     }
 
@@ -2215,10 +2214,7 @@ impl FtLu {
         // separately in `solve_sparse_into`/`_capture`).
         self.add_tick(self.base.m as u64);
         for reta in &self.r_etas {
-            let dot: f64 = match &reta.r {
-                OffDiag::Sparse(v) => v.iter().map(|&(i, v)| v * z[i]).sum(),
-                OffDiag::Dense { data, .. } => data.iter().zip(z.iter()).map(|(&v, &zi)| v * zi).sum(),
-            };
+            let dot = reta.r.dot_dense(z);
             // Unconditional (every `r_eta` is visited regardless of `z`'s
             // sparsity — the very "gather-type, no zero-skip" cost this
             // trigger's own analysis (§2.1/§2.2) identified as the eta-chain
@@ -2310,10 +2306,7 @@ impl FtLu {
         // this GP-sparse path's own real cost is its reach-set size.
         self.add_tick(gp.reach.len() as u64);
         for reta in &self.r_etas {
-            let dot: f64 = match &reta.r {
-                OffDiag::Sparse(v) => v.iter().map(|&(i, v)| v * scratch[i]).sum(),
-                OffDiag::Dense { data, .. } => data.iter().zip(scratch.iter()).map(|(&v, &zi)| v * zi).sum(),
-            };
+            let dot = reta.r.dot_dense(scratch);
             self.add_tick(reta.r.nnz() as u64);
             scratch[reta.p] -= dot;
         }
@@ -2347,10 +2340,7 @@ impl FtLu {
         self.base.l_solve_sparse_into(rhs_sparse, scratch, gp);
         self.add_tick(gp.reach.len() as u64);
         for reta in &self.r_etas {
-            let dot: f64 = match &reta.r {
-                OffDiag::Sparse(v) => v.iter().map(|&(i, v)| v * scratch[i]).sum(),
-                OffDiag::Dense { data, .. } => data.iter().zip(scratch.iter()).map(|(&v, &zi)| v * zi).sum(),
-            };
+            let dot = reta.r.dot_dense(scratch);
             self.add_tick(reta.r.nnz() as u64);
             scratch[reta.p] -= dot;
         }
@@ -2377,11 +2367,37 @@ impl FtLu {
     /// own docs for why this matters (this is `solve_lp_dual_on`'s
     /// once-per-pivot BTRAN for `rho_p`).
     pub fn solve_transpose_into(&self, rhs: &[f64], scratch: &mut [f64], out: &mut [f64]) {
-        let m = self.base.m;
-        for s in 0..m {
+        self.permute_transpose_rhs(rhs, scratch);
+        self.u_transpose_solve_into(scratch);
+        self.btran_tail(scratch, out);
+    }
+
+    /// `P_col^{-1} rhs` into `scratch` — an `O(m)` gather through the
+    /// column permutation, every BTRAN's first step.
+    #[inline]
+    fn permute_transpose_rhs(&self, rhs: &[f64], scratch: &mut [f64]) {
+        for s in 0..self.base.m {
             scratch[s] = rhs[self.base.col_perm[s]];
         }
-        self.u_transpose_solve_into(scratch);
+    }
+
+    /// [`Self::permute_transpose_rhs`] for `rhs = e_i`, returning the one
+    /// step it lands on. `P_col^{-1} e_i` is the unit vector at step
+    /// `col_perm_inv[i]`, so the gather collapses to a flat `fill` plus a
+    /// single store — no random-access read per step, and the caller never
+    /// has to own (or keep re-zeroing) a length-`m` `e_i` buffer of its own.
+    #[inline]
+    fn seed_unit_rhs(&self, i: usize, scratch: &mut [f64]) -> usize {
+        scratch.fill(0.0);
+        let s0 = self.base.col_perm_inv[i];
+        scratch[s0] = 1.0;
+        s0
+    }
+
+    /// Everything a BTRAN does after `U^{-T}`: the `R` etas in reverse,
+    /// then `L^{-T}` back into original row indexing.
+    #[inline]
+    fn btran_tail(&self, scratch: &mut [f64], out: &mut [f64]) {
         // Hyper-sparse: same skip as `u_solve_into`/`l_solve_into` — `yp`
         // is the only value each `r_eta`'s entries get multiplied by here.
         for reta in self.r_etas.iter().rev() {
@@ -2390,24 +2406,37 @@ impl FtLu {
                 continue;
             }
             self.add_tick(reta.r.nnz() as u64);
-            match &reta.r {
-                OffDiag::Sparse(v) => {
-                    for &(i, v) in v {
-                        scratch[i] -= v * yp;
-                    }
-                }
-                OffDiag::Dense { data, .. } => {
-                    for (si, &v) in scratch.iter_mut().zip(data.iter()) {
-                        *si -= v * yp;
-                    }
-                }
-            }
+            reta.r.axpy_into_dense(-yp, scratch);
         }
         // CLOCK-trigger accounting (`Self::tick`'s own docs): `l_transpose_solve_into`
         // is a dense `O(m)` reverse scan regardless of fill (see that
         // method's own docs for why sparsifying it wasn't worth trying).
-        self.add_tick(m as u64);
+        self.add_tick(self.base.m as u64);
         self.base.l_transpose_solve_into(scratch, out);
+    }
+
+    /// [`Self::solve_transpose_into`] for `rhs = e_i`, the shape every
+    /// pivotal-row BTRAN in this crate actually has — see
+    /// [`Self::u_transpose_solve_seeded`] for what the specialization
+    /// saves and why it is exact. Unlike
+    /// [`Self::solve_transpose_unit_into`] this makes no assumption about
+    /// `u_seq`'s ordering, so it is valid with Forrest-Tomlin updates
+    /// applied; unlike [`Self::solve_transpose_into`] it needs no `e_i`
+    /// buffer from the caller. `scratch` is fully overwritten on entry, so
+    /// it carries no precondition (same as `solve_transpose_into`).
+    pub fn solve_transpose_unit(&self, i: usize, scratch: &mut [f64], out: &mut [f64]) {
+        let s0 = self.seed_unit_rhs(i, scratch);
+        self.u_transpose_solve_seeded(scratch, s0);
+        self.btran_tail(scratch, out);
+    }
+
+    /// [`Self::solve_transpose_unit`] plus [`Self::solve_transpose_into_capture`]'s
+    /// own `e_tilde` capture.
+    pub fn solve_transpose_unit_capture(&self, i: usize, scratch: &mut [f64], out: &mut [f64], e_tilde_out: &mut [f64]) {
+        let s0 = self.seed_unit_rhs(i, scratch);
+        self.u_transpose_solve_seeded(scratch, s0);
+        e_tilde_out.copy_from_slice(scratch);
+        self.btran_tail(scratch, out);
     }
 
     /// Same as [`Self::solve_transpose_into`], but additionally captures
@@ -2418,36 +2447,21 @@ impl FtLu {
     /// same iteration for `rho_p`. See that method's own docs for why this
     /// capture lets the caller skip `try_update`'s own redundant
     /// re-derivation of the exact same value.
+    ///
+    /// **No production call site left**: every `e_tilde`-capturing BTRAN in
+    /// this crate has a unit-vector right-hand side and goes through
+    /// [`Self::solve_transpose_unit_capture`] instead. Kept, rather than
+    /// deleted, because it is the general-`rhs` reference that
+    /// specialization is *checked against* — `solve_transpose_unit_is_bit_identical_to_the_dense_unit_rhs_path`
+    /// asserts the two agree entry for entry, and on the synthetic tick,
+    /// both on a fresh factorization and after Forrest-Tomlin updates have
+    /// reordered `u_seq`. Deleting it would delete the proof.
+    #[allow(dead_code)]
     pub fn solve_transpose_into_capture(&self, rhs: &[f64], scratch: &mut [f64], out: &mut [f64], e_tilde_out: &mut [f64]) {
-        let m = self.base.m;
-        for s in 0..m {
-            scratch[s] = rhs[self.base.col_perm[s]];
-        }
+        self.permute_transpose_rhs(rhs, scratch);
         self.u_transpose_solve_into(scratch);
         e_tilde_out.copy_from_slice(scratch);
-        // Hyper-sparse: same skip as `u_solve_into`/`l_solve_into` — `yp`
-        // is the only value each `r_eta`'s entries get multiplied by here.
-        for reta in self.r_etas.iter().rev() {
-            let yp = scratch[reta.p];
-            if yp == 0.0 {
-                continue;
-            }
-            self.add_tick(reta.r.nnz() as u64);
-            match &reta.r {
-                OffDiag::Sparse(v) => {
-                    for &(i, v) in v {
-                        scratch[i] -= v * yp;
-                    }
-                }
-                OffDiag::Dense { data, .. } => {
-                    for (si, &v) in scratch.iter_mut().zip(data.iter()) {
-                        *si -= v * yp;
-                    }
-                }
-            }
-        }
-        self.add_tick(m as u64);
-        self.base.l_transpose_solve_into(scratch, out);
+        self.btran_tail(scratch, out);
     }
 
     /// Allocating convenience wrapper around [`Self::solve_transpose_into`]
@@ -2695,6 +2709,7 @@ impl FtLu {
         // itself already touches, so this is no extra asymptotic cost)
         // rather than the old `find_seq_pos`'s full O(m) re-scan.
         let removed = self.u_seq.remove(seq_pos);
+        self.fill -= removed.off_diag.nnz();
         for pos in seq_pos..self.u_seq.len() {
             self.slot_pos[self.u_seq[pos].slot] = pos;
         }
@@ -2703,7 +2718,7 @@ impl FtLu {
         // `row_owners` before overwriting them below — otherwise a stale
         // `p` would linger in some other row's owner list, pointing at
         // content that no longer exists there.
-        for (row_step, _) in removed.off_diag.pairs() {
+        for row_step in removed.off_diag.indices() {
             if let Some(idx) = self.row_owners[row_step].iter().position(|&s| s == p) {
                 self.row_owners[row_step].swap_remove(idx);
             }
@@ -2715,7 +2730,9 @@ impl FtLu {
         // in O(1) via `slot_pos`.
         for slot in std::mem::take(&mut self.row_owners[p]) {
             let pos = self.slot_pos[slot];
-            self.u_seq[pos].off_diag.remove_row(p);
+            if self.u_seq[pos].off_diag.remove_index(p) {
+                self.fill -= 1;
+            }
         }
 
         let off_diag: Vec<(usize, f64)> =
@@ -2723,10 +2740,12 @@ impl FtLu {
         for &(row_step, _) in &off_diag {
             self.row_owners[row_step].push(p);
         }
-        self.u_seq.push(UEta { slot: p, pivot: new_pivot, off_diag: pack_off_diag(m, off_diag) });
+        self.u_seq.push(UEta { slot: p, pivot: new_pivot, off_diag: HybridVec::pack(m, off_diag, DENSE_ETA_FRACTION) });
+        self.fill += self.u_seq.last().expect("just pushed").off_diag.nnz();
         self.slot_pos[p] = self.u_seq.len() - 1;
 
-        self.r_etas.push(REta { p, r: pack_off_diag(m, r_vec) });
+        self.r_etas.push(REta { p, r: HybridVec::pack(m, r_vec, DENSE_ETA_FRACTION) });
+        self.fill += self.r_etas.last().expect("just pushed").r.nnz();
 
         true
     }
@@ -2740,11 +2759,19 @@ impl FtLu {
     /// refactorization trigger (3): as updates accumulate, the eta file
     /// grows (each `R` and each replaced `U` slot can carry up to `m-1`
     /// entries), which is exactly the cost this trigger exists to bound.
-    /// Reads true nonzero counts via [`OffDiag::nnz`], not storage length,
-    /// so switching an eta to the dense representation doesn't spuriously
+    /// Counts true nonzeros via [`HybridVec::nnz`], not storage length, so
+    /// switching an eta to the dense representation doesn't spuriously
     /// inflate this and trip the trigger early.
+    ///
+    /// `O(1)`: maintained by [`Self::commit_update`] as it goes — see
+    /// [`Self::fill`]'s own docs for why re-summing was worth removing.
     pub fn fill_count(&self) -> usize {
-        self.u_seq.iter().map(|e| e.off_diag.nnz()).sum::<usize>() + self.r_etas.iter().map(|e| e.r.nnz()).sum::<usize>()
+        debug_assert_eq!(
+            self.fill,
+            self.u_seq.iter().map(|e| e.off_diag.nnz()).sum::<usize>() + self.r_etas.iter().map(|e| e.r.nnz()).sum::<usize>(),
+            "incrementally maintained fill drifted from the true eta-file fill"
+        );
+        self.fill
     }
 
     /// Debug/instrumentation only: off-diagonal nonzero count of the `U`
@@ -2753,7 +2780,7 @@ impl FtLu {
     /// `fill_count`'s running total. Used by `simplex.rs`'s
     /// `ENOMOTO_DEBUG_ETA_DENSITY` diagnostic to measure how eta density
     /// is distributed across a real solve, which is what motivated
-    /// `OffDiag`'s sparse/dense hybrid representation above.
+    /// `HybridVec`'s sparse/dense hybrid representation.
     pub fn last_update_off_diag_len(&self) -> usize {
         self.u_seq.last().map(|e| e.off_diag.nnz()).unwrap_or(0)
     }
@@ -2826,7 +2853,7 @@ mod tests {
     fn factorize_diagonal_matches_expected_solve() {
         let rows = vec![vec![(0, 1.0)], vec![(1, -1.0)], vec![(2, 1.0)]];
         let lu = factorize_diagonal(3, &rows).expect("diagonal input");
-        assert!(lu.l_col.iter().all(Vec::is_empty), "L must be identity: {:?}", lu.l_col);
+        assert_eq!(lu.l_col.nnz(), 0, "L must be identity: {:?}", lu.l_col.to_cols());
         assert_eq!(lu.row_perm, vec![0, 1, 2]);
         assert_eq!(lu.col_perm, vec![0, 1, 2]);
 
@@ -3433,6 +3460,59 @@ mod tests {
         }
     }
 
+    #[test]
+    fn solve_transpose_unit_is_bit_identical_to_the_dense_unit_rhs_path() {
+        let m = 40;
+        for seed in [1u64, 2, 3, 4, 5] {
+            let rows = random_sparse_diag_dominant(m, seed);
+            let base = factorize(m, &rows).expect("diagonally dominant matrix must factorize");
+            let mut state = FtLu::new(base);
+
+            // Once fresh, and again after Forrest-Tomlin updates have
+            // reordered `u_seq` — the case `solve_transpose_unit_into`'s
+            // own prefix-skip is *not* valid for, and the whole reason
+            // this seeded variant exists alongside it.
+            for round in 0..3 {
+                let (mut scratch, mut out, mut e_tilde) = (vec![0.0; m], vec![0.0; m], vec![0.0; m]);
+                let (mut rscratch, mut rout, mut re_tilde) = (vec![0.0; m], vec![0.0; m], vec![0.0; m]);
+                for i in 0..m {
+                    let mut e_i = vec![0.0; m];
+                    e_i[i] = 1.0;
+                    state.solve_transpose_into_capture(&e_i, &mut rscratch, &mut rout, &mut re_tilde);
+
+                    state.solve_transpose_unit_capture(i, &mut scratch, &mut out, &mut e_tilde);
+                    assert_eq!(out, rout, "seed={seed} round={round} i={i}: unit BTRAN diverged from the dense-rhs one");
+                    assert_eq!(e_tilde, re_tilde, "seed={seed} round={round} i={i}: captured e_tilde diverged");
+
+                    // The non-capturing form must agree with both.
+                    let mut out2 = vec![0.0; m];
+                    state.solve_transpose_unit(i, &mut scratch, &mut out2);
+                    assert_eq!(out2, rout, "seed={seed} round={round} i={i}: solve_transpose_unit diverged");
+                }
+                // The tick is what drives the deterministic CLOCK
+                // refactorization trigger, so the two paths must charge
+                // identically or the solve would take a different
+                // trajectory (see `u_transpose_sweep`'s own note).
+                let before = state.synth_tick();
+                let mut s1 = vec![0.0; m];
+                let mut o1 = vec![0.0; m];
+                let mut e1 = vec![0.0; m];
+                state.solve_transpose_unit_capture(0, &mut s1, &mut o1, &mut e1);
+                let unit_cost = state.synth_tick() - before;
+                let before = state.synth_tick();
+                let mut e_0 = vec![0.0; m];
+                e_0[0] = 1.0;
+                state.solve_transpose_into_capture(&e_0, &mut s1, &mut o1, &mut e1);
+                assert_eq!(state.synth_tick() - before, unit_cost, "seed={seed} round={round}: unit and dense BTRAN must charge the same tick");
+
+                let a_q: Vec<f64> = (0..m).map(|k| if k % 7 == round { 1.0 + k as f64 } else { 0.0 }).collect();
+                if !state.try_update(round, &a_q, 1e-9) {
+                    break;
+                }
+            }
+        }
+    }
+
     fn to_sparse(dense: &[f64]) -> Vec<(usize, f64)> {
         dense.iter().enumerate().filter(|&(_, &v)| v != 0.0).map(|(i, &v)| (i, v)).collect()
     }
@@ -3680,7 +3760,7 @@ mod tests {
     /// columns, then cross-checked against a completely independent full
     /// refactorization of the final basis — the same style of ground truth
     /// the sparse-fixture tests above use, just sized and shaped to
-    /// actually exercise `OffDiag::Dense` instead of `OffDiag::Sparse`.
+    /// actually exercise `HybridVec`'s dense arm instead of its sparse one.
     #[test]
     fn ft_update_matches_full_refactor_on_dense_basis() {
         let m = 10;

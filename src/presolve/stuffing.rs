@@ -123,8 +123,7 @@
 //! signs, in exchange for each case's own result never depending on which
 //! order the two are evaluated in.
 
-use crate::sparse::Csr;
-
+use crate::sparse::{Csr, csr_row_iter};
 const TOL: f64 = 1e-9;
 
 /// One continuous singleton column being decided for a single row, already
@@ -201,7 +200,7 @@ pub fn fix_singleton_columns(n: usize, a: &Csr, real_g_rows: &[Vec<(usize, f64)>
     let mut in_equality = vec![false; n];
     let ar = a.as_ref();
     for i in 0..ar.nrows() {
-        for (j, &v) in ar.col_indices_of_row(i).zip(ar.values_of_row(i)) {
+        for (j, v) in csr_row_iter(a, i) {
             if v != 0.0 {
                 in_equality[j] = true;
             }
