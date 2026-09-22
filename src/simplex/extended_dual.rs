@@ -1408,9 +1408,12 @@ fn row_deviation(cache: &ColCache, basis: &[usize], x_b_base: &[f64], x_b_slope:
 /// `InfeasibleRows::set`/`rebuild` call sites).
 ///
 /// Evaluated as the same two `cmp_lex` tests against zero, short-circuited,
-/// without building either side's deviation or choosing between them:
-/// called for every row the `x_B` updates touch.
+/// without building either side's deviation or choosing between them.
+/// The main loop now maintains `infeasible_rows` through
+/// [`cache_row_deviation`] instead (it needs the deviation itself); this
+/// remains as the independent predicate its debug-build cross-check uses.
 #[inline]
+#[cfg_attr(not(debug_assertions), allow(dead_code))]
 fn row_infeasible_affine(cache: &ColCache, basis: &[usize], x_b_base: &[f64], x_b_slope: &[f64], noise_feasible: &[bool], i: usize) -> bool {
     let bv = basis[i];
     if noise_feasible[bv] {
@@ -1446,6 +1449,28 @@ fn row_infeasible_affine(cache: &ColCache, basis: &[usize], x_b_base: &[f64], x_
 /// not a bare `PRIMAL_FEAS_TOL`, matching this function's own long-standing
 /// convention (a flat tolerance is simultaneously too strict on large-
 /// magnitude rows and too loose on tiny ones — `PRIMAL_FEAS_TOL`'s own docs).
+/// [`row_infeasible_affine`] that also stores the deviation it found into
+/// `row_dev[i]` (for `chuzr` to read back, see `row_dev`'s own docs in
+/// the main loop). Returns whether the row is infeasible.
+#[inline]
+fn cache_row_deviation(
+    row_dev: &mut [(i32, Affine1)],
+    cache: &ColCache,
+    basis: &[usize],
+    x_b_base: &[f64],
+    x_b_slope: &[f64],
+    noise_feasible: &[bool],
+    i: usize,
+) -> bool {
+    match row_deviation(cache, basis, x_b_base, x_b_slope, noise_feasible, i) {
+        Some(dev) => {
+            row_dev[i] = dev;
+            true
+        }
+        None => false,
+    }
+}
+
 fn row_deviation_plain(std: &StdForm, basis: &[usize], x_b: &[f64], noise_feasible: &[bool], i: usize) -> Option<(i32, f64)> {
     let bv = basis[i];
     if noise_feasible[bv] {
@@ -2095,7 +2120,16 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     // method's own optimization, reused verbatim (see that struct's own
     // docs on why it has no `f64`-vs-`Affine1` dependency to generalize).
     let mut infeasible_rows = InfeasibleRows::new(m);
-    infeasible_rows.rebuild(m, |i| row_infeasible_affine(&cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i));
+    // `row_deviation(i)` for every row currently in `infeasible_rows`,
+    // stored by the same calls that maintain that set
+    // ([`cache_row_deviation`]) — every write to `x_B`, `basis` or
+    // `noise_feasible` is already followed by one of them — so `chuzr`
+    // reads each candidate's deviation instead of recomputing it for the
+    // whole infeasible pool every iteration (HiGHS keeps the same
+    // per-row infeasibility array for its own CHUZR). Entries for rows
+    // outside the set are stale and never read.
+    let mut row_dev: Vec<(i32, Affine1)> = vec![(0, Affine1::ZERO); m];
+    infeasible_rows.rebuild(m, |i| cache_row_deviation(&mut row_dev, &cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i));
     fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fd_cb, &mut lu_scratch, &mut fd_y, &mut d);
 
     // Leaving-row weighting (paper \S4.5): starts in cheap `Devex` mode and
@@ -2653,7 +2687,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         let mut best: Option<(usize, i32, Affine1, Score2)> = None;
         timed!(profile_phases, prof_phases::CHUZR, {
             for &i in &infeasible_rows.rows {
-                let Some((d_dir, dev)) = row_deviation(&cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i) else { continue };
+                let (d_dir, dev) = row_dev[i];
                 // `dev` itself (returned in `best` below, used for this
                 // row's actual target/theta arithmetic if chosen) stays
                 // the true, unscaled value — only the `Score2` fed to
@@ -2694,6 +2728,13 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
             fresh.sort_unstable();
             maintained.sort_unstable();
             debug_assert_eq!(fresh, maintained, "InfeasibleRows drifted from a fresh scan at iter {_iter}");
+            for &i in &infeasible_rows.rows {
+                let fresh_dev = row_deviation(&cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i).expect("row in the infeasible set is feasible");
+                debug_assert!(
+                    fresh_dev.0 == row_dev[i].0 && fresh_dev.1.base == row_dev[i].1.base && fresh_dev.1.slope == row_dev[i].1.slope,
+                    "cached row_dev[{i}] is stale at iter {_iter}"
+                );
+            }
         }
         let mut best = best.map(|(i, d_dir, dev, _)| (i, d_dir, dev));
 
@@ -2705,7 +2746,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
             timed!(profile_phases, prof_phases::CHUZR, {
                 gi_candidates.clear();
                 for &i in &infeasible_rows.rows {
-                    let Some((d_dir_i, dev_i)) = row_deviation(&cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i) else { continue };
+                    let (d_dir_i, dev_i) = row_dev[i];
                     let score = Score2::new(dev_i, weights.weight(i));
                     gi_candidates.push((i, d_dir_i, dev_i, score));
                 }
@@ -2919,7 +2960,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                     lu.solve_into(&fresh_base, &mut lu_scratch, &mut x_b_base);
                     lu.solve_into(&fresh_slope, &mut lu_scratch, &mut x_b_slope);
                     snap_slopes(&mut x_b_slope);
-                    infeasible_rows.rebuild(m, |i| row_infeasible_affine(&cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i));
+                    infeasible_rows.rebuild(m, |i| cache_row_deviation(&mut row_dev, &cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i));
                     fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fd_cb, &mut lu_scratch, &mut fd_y, &mut d);
                     if dse_refresh_on_refactor {
                         if let super::EdgeWeights::Dse(dse) = &mut weights {
@@ -3070,7 +3111,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                     lu.solve_into(&fresh_base, &mut lu_scratch, &mut x_b_base);
                     lu.solve_into(&fresh_slope, &mut lu_scratch, &mut x_b_slope);
                     snap_slopes(&mut x_b_slope);
-                    infeasible_rows.rebuild(m, |i| row_infeasible_affine(&cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i));
+                    infeasible_rows.rebuild(m, |i| cache_row_deviation(&mut row_dev, &cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i));
                     fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fd_cb, &mut lu_scratch, &mut fd_y, &mut d);
                     if dse_refresh_on_refactor {
                         if let super::EdgeWeights::Dse(dse) = &mut weights {
@@ -3247,7 +3288,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                     if combined_alpha_base[i] != 0.0 || combined_alpha_slope[i] != 0.0 {
                         x_b_base[i] -= combined_alpha_base[i];
                         x_b_slope[i] = snap_slope(x_b_slope[i] - combined_alpha_slope[i]);
-                        infeasible_rows.set(i, row_infeasible_affine(&cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i));
+                        infeasible_rows.set(i, cache_row_deviation(&mut row_dev, &cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i));
                     }
                 }
                 for &i in &combined_touched {
@@ -3457,7 +3498,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 lu.solve_into(&fresh_base, &mut lu_scratch, &mut x_b_base);
                 lu.solve_into(&fresh_slope, &mut lu_scratch, &mut x_b_slope);
                 snap_slopes(&mut x_b_slope);
-                infeasible_rows.rebuild(m, |i| row_infeasible_affine(&cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i));
+                infeasible_rows.rebuild(m, |i| cache_row_deviation(&mut row_dev, &cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i));
                 fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fd_cb, &mut lu_scratch, &mut fd_y, &mut d);
                 if dse_refresh_on_refactor {
                     if let super::EdgeWeights::Dse(dse) = &mut weights {
@@ -3546,7 +3587,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                     alpha_nz.push(i);
                     x_b_base[i] -= a * theta_base;
                     x_b_slope[i] = snap_slope(x_b_slope[i] - a * theta_slope);
-                    infeasible_rows.set(i, row_infeasible_affine(&cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i));
+                    infeasible_rows.set(i, cache_row_deviation(&mut row_dev, &cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i));
                 }
             }
             x_b_base[r] = nb_val_q.base + theta_base;
@@ -3699,7 +3740,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         // it, superseding whatever the `alpha`-loop above computed for
         // index `r` against the stale identity (`super::solve_lp_dual_on`'s
         // own post-swap `infeasible_rows.set` call, same reason).
-        infeasible_rows.set(r, row_infeasible_affine(&cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, r));
+        infeasible_rows.set(r, cache_row_deviation(&mut row_dev, &cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, r));
 
         // Incremental dual update (Huangfu & Hall §2.2.3,
         // `super::solve_lp_dual_on`'s own derivation via Sherman-Morrison
@@ -3904,7 +3945,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 lu.solve_into(&fresh_base, &mut lu_scratch, &mut x_b_base);
                 lu.solve_into(&fresh_slope, &mut lu_scratch, &mut x_b_slope);
                 snap_slopes(&mut x_b_slope);
-                infeasible_rows.rebuild(m, |i| row_infeasible_affine(&cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i));
+                infeasible_rows.rebuild(m, |i| cache_row_deviation(&mut row_dev, &cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i));
                 fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fd_cb, &mut lu_scratch, &mut fd_y, &mut d);
                 if dse_refresh_on_refactor {
                     if let super::EdgeWeights::Dse(dse) = &mut weights {
