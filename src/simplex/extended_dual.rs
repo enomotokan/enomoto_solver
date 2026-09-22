@@ -2232,13 +2232,14 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         }
         (start, col, val)
     };
-    // EXPERIMENTAL, **path-changing** (`ENOMOTO_PRICE_NONBASIC_ONLY=1`,
-    // default off): HiGHS's own row-wise PRICE matrix is *partitioned*
-    // (`HighsSparseMatrix::createRowwisePartitioned`/`update`, `p_end_`):
+    // **Path-changing, default on** (`ENOMOTO_PRICE_NONBASIC_ONLY=0`
+    // restores the old every-non-fixed-column PRICE; NETLIB93 A/B against
+    // that: -5.3% total, no problem >10% slower): HiGHS's own row-wise
+    // PRICE matrix is *partitioned* (`HighsSparseMatrix::createRowwisePartitioned`/`update`, `p_end_`):
     // each row's nonbasic entries sit in `[start, p_end)`, its basic ones
     // after, swapped across the boundary on every basis change, so PRICE
-    // never visits a basic column at all. This loop's own PRICE instead
-    // includes basic columns deliberately (see PRICE's own comment below:
+    // never visits a basic column at all. This loop's PRICE used to
+    // include basic columns deliberately (see PRICE's own comment below:
     // the leaving column needs its `d` update) — measured at 35-58% of all
     // PRICE entries on the heavy Netlib instances (`dfl001` 41%, `pilot87`
     // 39%, `maros-r7` 58%). With the partition, the leaving column's `d` is
@@ -2249,7 +2250,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     // used to feed into `d`, so the pivot path can drift.
     // `price_nb_end[i]` is row `i`'s partition boundary; with the flag off
     // it is simply the row end (every non-fixed column priced, as before).
-    let price_nonbasic_only = std::env::var("ENOMOTO_PRICE_NONBASIC_ONLY").is_ok_and(|v| v != "0");
+    let price_nonbasic_only = std::env::var("ENOMOTO_PRICE_NONBASIC_ONLY").map_or(true, |v| v != "0");
     let mut price_nb_end: Vec<usize> = price_start[1..].to_vec();
     if price_nonbasic_only {
         let mut tmp: Vec<(u32, f64)> = Vec::new();
