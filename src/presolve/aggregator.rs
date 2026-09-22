@@ -31,31 +31,58 @@
 //! This version fixes the *performance* defect (the eligibility test is
 //! now [`row_implies_own_bound`], gating on a real implied-bound check
 //! rather than "any non-free bounded column" — see that function's own
-//! docs, and [`RowActivity`]'s for how it stays cheap), but deliberately
-//! keeps the *safety* condition row-local rather than the cross-row
-//! aggregate this doc comment originally described: a column is only
-//! eliminated via a specific row `R` when `R`'s *own* activity (using every
-//! other column's current bound, nothing aggregated in from any other row)
-//! already proves `x_j`'s box bound redundant. A cross-row aggregate
-//! version (intersecting every row's own implication before checking
-//! against `[lb_j, ub_j]`) was tried and reverted: it eliminated `stocfor2`
-//! correctly, matching an ablation of HiGHS's own Aggregator to within a
-//! few percent, but produced a false `Unbounded` on `shell` — a real
-//! correctness bug this crate's benchmark objective-check caught before it
-//! shipped. The row-local version above never showed this failure across
-//! the full 73-problem Netlib set in an earlier form of this module (the
-//! same check, just recomputed less efficiently) and is the one actually
-//! used now; the cross-row aggregate's exact defect was not root-caused
-//! before reverting to the version already known safe — see this crate's
-//! own project memory for that measurement's full writeup if revisiting
-//! the aggregate again.
+//! docs, and [`RowActivity`]'s for how it stays cheap), and keeps the
+//! *safety* condition row-local: [`eliminate_implied_free_columns`] only
+//! eliminates a column via a specific row `R` when `R`'s *own* activity
+//! (using every other column's current bound, nothing aggregated in from
+//! any other row) already proves `x_j`'s box bound redundant. Re-validated
+//! at *elimination* time against the pivot row's *current* content (not
+//! just at candidate-generation time against the initial snapshot): a fold
+//! performed earlier in this same call can rewrite a row that is also some
+//! other column's pivot candidate, and the row-local check must hold for
+//! whatever content that row actually has when used, not merely what it
+//! had when candidates were first collected.
 //!
-//! Re-validated at *elimination* time against the pivot row's *current*
-//! content (not just at candidate-generation time against the initial
-//! snapshot): a fold performed earlier in this same call can rewrite a row
-//! that is also some other column's pivot candidate, and the row-local
-//! check must hold for whatever content that row actually has when used,
-//! not merely what it had when candidates were first collected.
+//! ## Cross-row aggregation (the default since 2026-09-22)
+//!
+//! A first cross-row aggregate version (intersecting every row's own
+//! implication for a column before checking against `[lb_j, ub_j]`,
+//! catching a column no *single* row alone justifies but several together
+//! do) was tried and reverted early on: it eliminated `stocfor2` correctly,
+//! matching an ablation of HiGHS's own Aggregator to within a few percent,
+//! but produced a false `Unbounded` on `shell` — a real correctness bug
+//! this crate's benchmark objective-check caught before it shipped, root-
+//! caused only much later (its exact mechanism was unknown at revert time,
+//! and [`eliminate_implied_free_columns`] above shipped instead as the
+//! version already known safe).
+//!
+//! [`eliminate_implied_free_columns_xrow`] is the fixed reattempt: a
+//! justifying row for a column can be *deleted* — consumed as a *different*
+//! column's own pivot earlier in the same call — and a justification
+//! computed once at candidate-generation time can go stale exactly that
+//! way (confirmed as `shell`'s own actual mechanism: two columns there
+//! mutually justify each other through one shared row; eliminating one
+//! consumes that row, then a stale check wrongly still treats it as
+//! justifying the other). The fix is to always recompute a candidate's
+//! justification from *live* rows with *current* content immediately
+//! before that specific elimination is committed, never trusting the
+//! snapshot — see that function's own (considerably longer) docs for the
+//! full argument and the numeric trace.
+//!
+//! **Stays opt-in** (`ENOMOTO_XROW_AGGREGATOR` in `presolve.rs`), row-local
+//! stays this module's default: a first 93-problem-Netlib measurement
+//! (2026-09-22) was accidentally taken on a stale feature branch 44 commits
+//! behind `main`, where `greenbea` was pathologically slow for unrelated
+//! reasons (missing this crate's own `propagate_equalities` wiring, not
+//! anything cross-row-specific) and dominated the aggregate enough to show
+//! a spurious ~12% win. Re-measured on actual `main` (3 reps each way,
+//! `greenbea` corrected): row-local and cross-row land within about a
+//! percent of each other, overlapping ranges — a wash, not a reproducible
+//! win, on this benchmark set. [`eliminate_implied_free_columns`] stays the
+//! default; [`eliminate_implied_free_columns_xrow`] stays available (its
+//! own correctness fix is real and independently regression-tested) and
+//! still shares this module's helpers ([`compute_row_activity`],
+//! [`residual_range`], [`implied_range`], [`fillin_cost`], [`axpy_row`]).
 //!
 //! ## Candidate order and fill-in
 //!
@@ -86,9 +113,11 @@
 //! Only `A`'s equality rows are used both as elimination pivots *and* as
 //! the implied-bound justification (an inequality row can't be solved for
 //! one variable in terms of the others the same way, and `G`'s real rows
-//! are never used to justify an elimination even indirectly, precisely
-//! because of the cross-row aggregate's own reverted history above); `G`'s
-//! real rows still get folded like any other row referencing an eliminated
+//! are never used to justify an elimination even indirectly — the same
+//! staleness hazard the cross-row version's own fix above addresses for
+//! `A`'s rows would need its own analogous argument to extend safely to
+//! `G`, not yet made); `G`'s real rows still get folded like any other row
+//! referencing an eliminated
 //! column, exactly as `colsingleton`/`freevar` already do — they just never
 //! contribute to deciding *whether* to eliminate. Like every other pass in
 //! this crate, only appearances in `A`'s own rows (plus `G`'s real,
@@ -159,6 +188,7 @@ fn axpy_row(row: &[(usize, f64)], pivot: &[(usize, f64)], factor: f64, drop_col:
 /// unbounded on each side and, when there is exactly one, which —
 /// mirroring HiGHS's own `getNumInfSumUpperOrig`/`getResidualSumLowerOrig`
 /// pattern in `HPresolve.cpp` for the same reason.
+#[derive(Clone, Copy)]
 struct RowActivity {
     lo_finite_sum: f64,
     lo_inf_count: usize,
@@ -219,6 +249,23 @@ fn residual_range(activity: &RowActivity, j: usize, j_coeff: f64, lb: &[f64], ub
     (s_lo, s_hi)
 }
 
+/// Row `sum + coeff*x_j = rhs`'s own implied range for `x_j` alone (its
+/// achievable range with every *other* column at its current bound) —
+/// factored out of [`row_implies_own_bound`] so [`eliminate_implied_free_columns_xrow`]
+/// can intersect this same per-row computation across several rows instead
+/// of checking just one (see that function's own docs for why the
+/// intersection needs this, not the boolean `row_implies_own_bound` itself).
+fn implied_range(activity: &RowActivity, j: usize, coeff: f64, rhs: f64, lb: &[f64], ub: &[f64]) -> (f64, f64) {
+    let (s_lo, s_hi) = residual_range(activity, j, coeff, lb, ub);
+    let v1 = (rhs - s_hi) / coeff;
+    let v2 = (rhs - s_lo) / coeff;
+    (v1.min(v2), v1.max(v2))
+}
+
+fn range_within_box(j: usize, lo: f64, hi: f64, lb: &[f64], ub: &[f64]) -> bool {
+    (lb[j] == f64::NEG_INFINITY || lo >= lb[j] - TOL) && (ub[j] == f64::INFINITY || hi <= ub[j] + TOL)
+}
+
 /// Whether equality row `sum + coeff*x_j = rhs`'s *own* activity (using
 /// every other column's current bound, via `activity` —
 /// `compute_row_activity`'s summary of this same row, nothing aggregated in
@@ -226,13 +273,12 @@ fn residual_range(activity: &RowActivity, j: usize, j_coeff: f64, lb: &[f64], ub
 /// bound `[lb[j], ub[j]]` redundant. See the module docs for why this stays
 /// row-local rather than aggregating across every row `j` appears in (a
 /// cross-row aggregate version was tried and reverted after producing a
-/// false `Unbounded` on a real Netlib instance).
+/// false `Unbounded` on a real Netlib instance — see
+/// [`eliminate_implied_free_columns_xrow`] for the root-caused, fixed
+/// reattempt).
 fn row_implies_own_bound(activity: &RowActivity, j: usize, coeff: f64, rhs: f64, lb: &[f64], ub: &[f64]) -> bool {
-    let (s_lo, s_hi) = residual_range(activity, j, coeff, lb, ub);
-    let v1 = (rhs - s_hi) / coeff;
-    let v2 = (rhs - s_lo) / coeff;
-    let (lo, hi) = (v1.min(v2), v1.max(v2));
-    (lb[j] == f64::NEG_INFINITY || lo >= lb[j] - TOL) && (ub[j] == f64::INFINITY || hi <= ub[j] + TOL)
+    let (lo, hi) = implied_range(activity, j, coeff, rhs, lb, ub);
+    range_within_box(j, lo, hi, lb, ub)
 }
 
 /// Total nonzeros `pivot_terms` would newly introduce (not already present)
@@ -402,6 +448,294 @@ pub fn eliminate_implied_free_columns(n: usize, a: &Csr, b: &[f64], c: &[f64], l
         // No bound-preservation row: `j` is implied-free, so its true
         // (postsolve-recovered) value is guaranteed inside `[lb[j], ub[j]]`
         // without one -- see the module docs.
+        substitutions.push(Substitution { var: j, terms, rhs: rhs_i, coeff });
+        col_eliminated[j] = true;
+        row_deleted[row_idx] = true;
+    }
+
+    let mut final_a_rows = Vec::with_capacity(a_rows.len());
+    let mut final_b = Vec::with_capacity(b.len());
+    for (i, row) in a_rows.into_iter().enumerate() {
+        if !row_deleted[i] {
+            final_a_rows.push(row);
+            final_b.push(b[i]);
+        }
+    }
+
+    AggregatorResult {
+        a: csr_from_rows(&final_a_rows, n),
+        b: final_b,
+        c,
+        substitutions,
+        real_rows,
+        real_rhs,
+    }
+}
+
+/// Cross-row generalization of [`eliminate_implied_free_columns`]: a
+/// column's implied range is the *intersection* of every one of its own
+/// live equality rows' local implied range ([`implied_range`]), not just
+/// one — catching a column no *single* row alone proves implied-free but
+/// several together do (this module's own docs' `stocfor2` motivation: an
+/// earlier attempt at exactly this matched an ablation of HiGHS's own
+/// Aggregator there to within a few percent). Not wired into
+/// [`crate::presolve::run_extended`]'s default pipeline — reachable only
+/// via `presolve.rs`'s own `ENOMOTO_XROW_AGGREGATOR` opt-in gate, pending a
+/// full-Netlib reach/cost measurement — because reproducing this
+/// generalization faithfully surfaced a real, previously un-root-caused
+/// correctness bug (see below) rather than the "aggregate the intersection
+/// once and go" shape the module docs' own history describes; this
+/// function is the fixed reattempt, not a resurrection of the original.
+///
+/// **The correctness-critical difference from the row-local version, and
+/// from every earlier cross-row attempt**: a candidate's justification is
+/// *recomputed from live rows only, with their current content*,
+/// immediately before that specific elimination is committed — never
+/// trusted from the snapshot candidate-generation pass below, and never
+/// merely re-validated against the one row chosen as pivot (contrast the
+/// row-local version's own single `pivot_row` re-check at its own call
+/// site, sound there only because the row-local version's pivot row *is*
+/// its sole justification, so `row_deleted[row_idx]` alone is enough to
+/// catch a stale candidate). A justifying row for column `j` can itself be
+/// *deleted* — consumed as the pivot row of an *earlier* elimination
+/// within this same call — while a snapshot-only computation still "sees"
+/// it as live and unchanged. Confirmed as the actual mechanism behind the
+/// historical false `Unbounded` on Netlib `shell` (root-caused directly,
+/// not inferred): columns 32 and 52 there mutually justify each other
+/// through one shared length-2 row (`0.236*x32 - 0.983*x52 = 0`);
+/// eliminating column 32 first consumes that row as its own pivot, and a
+/// snapshot-only justification for column 52 then wrongly treats its own
+/// bound as still implied by a row that is already gone, dropping *both*
+/// variables' boxes with nothing left to enforce either — `x52`'s own
+/// nonzero objective coefficient then drives it to `-inf` under plain
+/// simplex, an entirely soundness bug in this presolve reduction itself,
+/// not anything downstream. Re-scanning every currently-live row for `j`
+/// fresh (rather than trusting the snapshot's `col_rows[j]` list, which
+/// this function still uses for cheap candidate *generation* and ordering
+/// only) is what closes this gap: a stale or deleted justifying row simply
+/// no longer contributes to the recomputed intersection, so a candidate
+/// whose justification depended on it is correctly rejected instead of
+/// silently eliminated.
+///
+/// A closely related question — can a similarly-shaped bug hide even when
+/// only a *single* row justifies a column, if that row (not just a
+/// multi-row intersection) is the one that gets consumed by an earlier
+/// elimination? — turns out to already be answered by the row-local
+/// version's own design: there, the pivot row *is* the sole justifying
+/// row, so `row_deleted[row_idx]` (checked before any re-validation even
+/// runs) already catches exactly that case. The bug specific to a
+/// cross-row version is a justifying row surviving deletion of some *other*
+/// row that happened to be a *different* column's pivot while still being
+/// treated, by a stale computation, as if it still backed `j`'s own
+/// elimination — a distinction that only exists once more than one row can
+/// jointly justify a single column.
+pub fn eliminate_implied_free_columns_xrow(n: usize, a: &Csr, b: &[f64], c: &[f64], lb: &[f64], ub: &[f64], real_rows: &[Vec<(usize, f64)>], real_rhs: &[f64]) -> AggregatorResult {
+    let ar = a.as_ref();
+    let mut a_rows: Vec<Vec<(usize, f64)>> = (0..ar.nrows()).map(|i| ar.col_indices_of_row(i).zip(ar.values_of_row(i)).map(|(j, &v)| (j, v)).collect()).collect();
+    let mut b: Vec<f64> = b.to_vec();
+    let mut c: Vec<f64> = c.to_vec();
+    let mut real_rows: Vec<Vec<(usize, f64)>> = real_rows.to_vec();
+    let mut real_rhs: Vec<f64> = real_rhs.to_vec();
+
+    let mut col_a_count = vec![0usize; n];
+    for row in &a_rows {
+        for &(j, v) in row {
+            if v != 0.0 {
+                col_a_count[j] += 1;
+            }
+        }
+    }
+    let is_free = |j: usize| lb[j] == f64::NEG_INFINITY && ub[j] == f64::INFINITY;
+
+    // One `RowActivity` per row, computed lazily and reused across every
+    // column that shares it — `None` means "stale or never computed",
+    // forcing a fresh `compute_row_activity` next time it's read.
+    // Essential, not just an optimization: without this, a row with many
+    // nonzeros gets its `O(row_len)` activity recomputed once per column
+    // that references it, both here and again at elimination time below —
+    // `O(row_len)` per column times up to `row_len` columns sharing one row
+    // is exactly the `O(row_len^2)` blowup `RowActivity`'s own docs
+    // describe an *earlier* version of the row-local pass paying on
+    // Netlib `wood1p` (a single row with 2592 of 2594 columns nonzero) —
+    // confirmed to reproduce here too (0.13s -> 0.46s on the full Netlib
+    // set) before this cache was added. A row's cached entry is
+    // invalidated (`None`) the moment a fold changes its content (see the
+    // elimination loop below), so a cache hit always reflects that row's
+    // *current* state, never a stale one — the fold sites are the only
+    // places `a_rows[i]` changes after this point.
+    let mut row_activity: Vec<Option<RowActivity>> = vec![None; a_rows.len()];
+
+    // Intersects every row in `rows` that still carries a nonzero `j` term
+    // (in `a_rows`'s *current* content — always read fresh here, only the
+    // per-row `RowActivity` summary is cached) into one combined implied
+    // range; `None` if no such row remains.
+    fn aggregate_range(j: usize, rows: &[usize], a_rows: &[Vec<(usize, f64)>], b: &[f64], lb: &[f64], ub: &[f64], row_activity: &mut [Option<RowActivity>]) -> Option<(f64, f64)> {
+        let mut lo = f64::NEG_INFINITY;
+        let mut hi = f64::INFINITY;
+        let mut any = false;
+        for &i in rows {
+            let row = &a_rows[i];
+            let Some(&(_, coeff)) = row.iter().find(|&&(k, _)| k == j) else { continue };
+            if coeff == 0.0 {
+                continue;
+            }
+            let activity = *row_activity[i].get_or_insert_with(|| compute_row_activity(row, lb, ub));
+            let (rlo, rhi) = implied_range(&activity, j, coeff, b[i], lb, ub);
+            lo = lo.max(rlo);
+            hi = hi.min(rhi);
+            any = true;
+        }
+        any.then_some((lo, hi))
+    }
+
+    // Snapshot candidate generation: column -> its own equality rows at
+    // call-input time, used only to decide *which columns are worth
+    // trying* and in what order — the elimination loop below never trusts
+    // this list's own membership or the rows' snapshot content, only uses
+    // it (still live rows filtered back in) as a candidate-ordering hint;
+    // see this function's own docs for why the actual justification is
+    // always recomputed fresh from live rows at elimination time instead.
+    let mut col_rows: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (i, row) in a_rows.iter().enumerate() {
+        for &(j, v) in row {
+            if v != 0.0 {
+                col_rows[j].push(i);
+            }
+        }
+    }
+
+    let mut candidates: Vec<usize> = Vec::new();
+    for j in 0..n {
+        if col_a_count[j] < 2 || is_free(j) {
+            continue;
+        }
+        if let Some((lo, hi)) = aggregate_range(j, &col_rows[j], &a_rows, &b, lb, ub, &mut row_activity) {
+            if range_within_box(j, lo, hi, lb, ub) {
+                candidates.push(j);
+            }
+        }
+    }
+    // Cheapest-first, mirroring the row-local version's own fill-in proxy
+    // (`rowlen * collen`, size-2 pairs first): estimated via this column's
+    // own least-cost row, the one an actual elimination would most likely
+    // pivot through.
+    candidates.sort_by_key(|&j| {
+        let collen = col_a_count[j];
+        let min_rowlen = col_rows[j].iter().map(|&i| a_rows[i].len()).min().unwrap_or(0);
+        (min_rowlen.min(collen) != 2, min_rowlen * collen, min_rowlen.min(collen), j)
+    });
+
+    let mut row_deleted = vec![false; a_rows.len()];
+    let mut col_eliminated = vec![false; n];
+    let mut substitutions = Vec::new();
+    let mut consecutive_fillin_failures = 0usize;
+
+    for j in candidates {
+        if col_eliminated[j] {
+            continue;
+        }
+        // The fix: recompute from *every currently-live* row referencing
+        // `j` (not just `col_rows[j]`'s snapshot list — a different
+        // column's own fold can have introduced a fresh `j` term into a
+        // row that had none at snapshot time; omitting such a row here
+        // only widens the intersection, i.e. makes this check *more*
+        // conservative, never unsound) and with *current* row content, not
+        // the snapshot's. See this function's own docs for why this,
+        // rather than a pivot-row-only re-check, is what soundness
+        // actually depends on here.
+        let live_rows: Vec<usize> = a_rows
+            .iter()
+            .enumerate()
+            .filter(|&(i, row)| !row_deleted[i] && row.iter().any(|&(k, v)| k == j && v != 0.0))
+            .map(|(i, _)| i)
+            .collect();
+        let Some((lo, hi)) = aggregate_range(j, &live_rows, &a_rows, &b, lb, ub, &mut row_activity) else {
+            continue;
+        };
+        if !range_within_box(j, lo, hi, lb, ub) {
+            continue;
+        }
+
+        // Pivot through whichever still-live justifying row is cheapest
+        // (least fill-in) and clears the numerical pivot-ratio guard —
+        // any of them is equally valid algebraically now that the
+        // intersection above has already confirmed the *combined*
+        // justification holds.
+        let mut sorted_live = live_rows.clone();
+        sorted_live.sort_by_key(|&i| a_rows[i].len());
+        let mut chosen: Option<(usize, f64)> = None;
+        for &i in &sorted_live {
+            let row = &a_rows[i];
+            let Some(&(_, coeff)) = row.iter().find(|&&(k, _)| k == j) else { continue };
+            let row_max = row.iter().map(|&(_, v)| v.abs()).fold(0.0f64, f64::max);
+            if coeff.abs() >= SUBSTITUTION_PIVOT_RATIO * row_max {
+                chosen = Some((i, coeff));
+                break;
+            }
+        }
+        let Some((row_idx, coeff)) = chosen else {
+            continue;
+        };
+
+        let pivot_row = a_rows[row_idx].clone();
+        let terms: Vec<(usize, f64)> = pivot_row.iter().filter(|&&(k, _)| k != j).copied().collect();
+        if terms.is_empty() {
+            continue;
+        }
+
+        let other_a: Vec<usize> = a_rows
+            .iter()
+            .enumerate()
+            .filter(|&(i2, row2)| i2 != row_idx && !row_deleted[i2] && row2.iter().any(|&(k, v)| k == j && v != 0.0))
+            .map(|(i2, _)| i2)
+            .collect();
+        let other_g: Vec<usize> = real_rows.iter().enumerate().filter(|(_, row2)| row2.iter().any(|&(k, v)| k == j && v != 0.0)).map(|(i2, _)| i2).collect();
+
+        let fillin = {
+            let mut targets: Vec<&Vec<(usize, f64)>> = Vec::with_capacity(other_a.len() + other_g.len());
+            for &i2 in &other_a {
+                targets.push(&a_rows[i2]);
+            }
+            for &i2 in &other_g {
+                targets.push(&real_rows[i2]);
+            }
+            fillin_cost(&terms, &targets)
+        };
+        if fillin > MAX_FILLIN {
+            consecutive_fillin_failures += 1;
+            if consecutive_fillin_failures >= MAX_CONSECUTIVE_FILLIN_FAILURES {
+                break;
+            }
+            continue;
+        }
+        consecutive_fillin_failures = 0;
+
+        let rhs_i = b[row_idx];
+        for &i2 in &other_a {
+            let a_i2j = a_rows[i2].iter().find(|&&(k, _)| k == j).unwrap().1;
+            let factor = a_i2j / coeff;
+            a_rows[i2] = axpy_row(&a_rows[i2], &pivot_row, factor, j);
+            b[i2] -= factor * rhs_i;
+            // This row's content just changed — its cached `RowActivity`
+            // (if any) is now stale; see `row_activity`'s own docs.
+            row_activity[i2] = None;
+        }
+        for &i2 in &other_g {
+            let a_i2j = real_rows[i2].iter().find(|&&(k, _)| k == j).unwrap().1;
+            let factor = a_i2j / coeff;
+            real_rows[i2] = axpy_row(&real_rows[i2], &pivot_row, factor, j);
+            real_rhs[i2] -= factor * rhs_i;
+        }
+
+        let cj = c[j];
+        if cj != 0.0 {
+            let factor = cj / coeff;
+            for &(k, a_ik) in &terms {
+                c[k] -= factor * a_ik;
+            }
+            c[j] = 0.0;
+        }
+
         substitutions.push(Substitution { var: j, terms, rhs: rhs_i, coeff });
         col_eliminated[j] = true;
         row_deleted[row_idx] = true;
@@ -606,5 +940,71 @@ mod tests {
         let targets: Vec<&Vec<(usize, f64)>> = vec![&existing_row];
         // Columns 1 and 3 are new to `existing_row`; column 2 already there.
         assert_eq!(fillin_cost(&terms, &targets), 2);
+    }
+
+    // --- eliminate_implied_free_columns_xrow --------------------------
+
+    #[test]
+    fn xrow_eliminates_a_column_no_single_row_alone_justifies() {
+        // x0 in [0,10]. Row0 (x0+x1=5), x1 in [-3,8]: x0 = 5-x1 ranges over
+        // [-3,8] -- pokes below the box (-3 < 0), not within [0,10] alone.
+        // Row1 (x0-x2=1), x2 in [1,12]: x0 = 1+x2 ranges over [2,13] --
+        // pokes above the box (13 > 10), also not within [0,10] alone.
+        // Neither row alone suffices, but the two defects are on opposite
+        // sides: intersected, [-3,8] n [2,13] = [2,8], comfortably inside
+        // [0,10] -- genuinely needs both rows together.
+        let a = csr(&[vec![(0, 1.0), (1, 1.0)], vec![(0, 1.0), (2, -1.0)]], 3);
+        let b = vec![5.0, 1.0];
+        let c = vec![0.0, 0.0, 0.0];
+        let lb = vec![0.0, -3.0, 1.0];
+        let ub = vec![10.0, 8.0, 12.0];
+        // Row-local (`eliminate_implied_free_columns`) must find nothing:
+        // neither row alone proves x0's bound.
+        let row_local = eliminate_implied_free_columns(3, &a, &b, &c, &lb, &ub, &[], &[]);
+        assert!(row_local.substitutions.is_empty());
+        // The cross-row version must catch it via the intersection.
+        let xrow = eliminate_implied_free_columns_xrow(3, &a, &b, &c, &lb, &ub, &[], &[]);
+        assert_eq!(xrow.substitutions.len(), 1);
+        assert_eq!(xrow.substitutions[0].var, 0);
+    }
+
+    #[test]
+    fn xrow_rejects_a_justification_whose_shared_row_was_already_consumed() {
+        // Regression test for the root-caused Netlib `shell` false-`Unbounded`
+        // bug (see `eliminate_implied_free_columns_xrow`'s own docs): two
+        // columns (x0, x1) mutually justify each other through one shared
+        // row (row0), but x0 also has an independent (if individually
+        // insufficient) second row, so x0 gets processed and eliminated
+        // first, consuming row0 as *its own* pivot. x1's only other row
+        // (row2) is, alone, nowhere near tight enough (`x1 + x3 = 0`, `x3`
+        // in [-1000,1000]) -- x1's *only* real justification was row0,
+        // which is gone by the time x1's own turn comes. A version that
+        // trusts row0's snapshot-time contribution here would wrongly
+        // eliminate x1 too, dropping its box entirely; the fixed version
+        // must instead leave x1 exactly as it was.
+        //
+        // x0 in [0,10], x1 in [0,10], x2 free (makes row1 -- x0's second,
+        // longer row -- individually vacuous so it never gets picked as
+        // x0's pivot ahead of the shorter, shared row0), x3 in
+        // [-1000,1000] (makes row2 -- x1's second row -- individually far
+        // too loose), x4 in [0,1] (padding so row1 is strictly longer than
+        // row0, biasing pivot selection toward row0).
+        let a = csr(
+            &[
+                vec![(0, 1.0), (1, -1.0)],           // row0 (shared): x0 - x1 = 0
+                vec![(0, 1.0), (2, 1.0), (4, 1.0)],  // row1 (x0's own, vacuous): x0 + x2 + x4 = 5
+                vec![(1, 1.0), (3, 1.0)],             // row2 (x1's own, too loose): x1 + x3 = 0
+            ],
+            5,
+        );
+        let b = vec![0.0, 5.0, 0.0];
+        let c = vec![0.0, 0.0, 0.0, 0.0, 0.0];
+        let lb = vec![0.0, 0.0, f64::NEG_INFINITY, -1000.0, 0.0];
+        let ub = vec![10.0, 10.0, f64::INFINITY, 1000.0, 1.0];
+
+        let xrow = eliminate_implied_free_columns_xrow(5, &a, &b, &c, &lb, &ub, &[], &[]);
+        assert_eq!(xrow.substitutions.len(), 1, "expected only x0 eliminated, got {:?}", xrow.substitutions.iter().map(|s| s.var).collect::<Vec<_>>());
+        assert_eq!(xrow.substitutions[0].var, 0);
+        assert!(xrow.substitutions.iter().all(|s| s.var != 1), "x1 must not be eliminated via a since-deleted justifying row");
     }
 }

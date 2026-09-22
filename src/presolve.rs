@@ -696,7 +696,7 @@ pub fn run_extended(
             a = rs.a;
             b = rs.b;
 
-            let (ng, nh) = propagate::rebuild_g(n, cur_real_rows.clone(), cur_real_rhs.clone(), &lb, &ub);
+            let (ng, nh) = timed_step!("rebuild_g(inner)", propagate::rebuild_g(n, cur_real_rows.clone(), cur_real_rhs.clone(), &lb, &ub));
             g = ng;
             h = nh;
 
@@ -794,7 +794,7 @@ pub fn run_extended(
             // from `extract_bounds` as a *bound*, not a row — folded into
             // `lb`/`ub` here (tighter of the two) rather than discarded,
             // since dropping it would silently lose a real constraint.
-            let (refreshed_lb, refreshed_ub, refreshed_real_rows, refreshed_real_rhs) = propagate::extract_bounds(n, &g, &h);
+            let (refreshed_lb, refreshed_ub, refreshed_real_rows, refreshed_real_rhs) = timed_step!("extract_bounds(inner)", propagate::extract_bounds(n, &g, &h));
             for j in 0..n {
                 lb[j] = lb[j].max(refreshed_lb[j]);
                 ub[j] = ub[j].min(refreshed_ub[j]);
@@ -842,8 +842,37 @@ pub fn run_extended(
         // module's own two earlier reverted attempts — genuine, reproducible
         // wins on several instances against a wash everywhere else, not a
         // one-sided regression.
+        // `aggregator`'s cross-row generalization
+        // (`eliminate_implied_free_columns_xrow`, see that function's own
+        // docs) fixes the correctness bug that sank an *earlier* cross-row
+        // attempt (a false `Unbounded` on `shell`, root-caused: a
+        // candidate's justification is now recomputed from live rows with
+        // current content immediately before elimination, never trusted
+        // from the snapshot candidate-generation pass — see that
+        // function's own docs for the exact mechanism and the numeric
+        // trace on `shell`), and is available here via `ENOMOTO_XROW_AGGREGATOR`.
+        //
+        // **Stays opt-in, row-local stays default** — a first measurement
+        // (2026-09-22) was accidentally taken on a stale feature branch 44
+        // commits behind `main` (missing this file's own `eqprop`
+        // wiring above and other propagate/dualpropagate strengthening),
+        // where `greenbea` alone was pathologically slow (3,569 structural
+        // columns left genuinely unbounded post-presolve, ~9-11s) and
+        // dominated the 93-problem aggregate enough to show cross-row as a
+        // reproducible ~12% win. Re-measured on actual `main` (3 reps each,
+        // `greenbea` correctly down to 367 unbounded columns / ~0.6s there):
+        // row-local 54.69s/53.49s/52.02s (mean ~53.4s) vs. cross-row
+        // 56.65s/50.25s/55.99s (mean ~54.3s) — the two configs' ranges
+        // overlap and the means are within a percent of each other, i.e. a
+        // wash, not the clean win the stale-branch measurement showed. 0/93
+        // objective mismatches in every rep either way. Kept opt-in rather
+        // than flipping the default a second time on inconclusive numbers —
+        // see `presolve-fxhash-and-rebuildg-measured` and the follow-up
+        // memory on this specific mismeasurement for the full writeup.
         let agg = if std::env::var("ENOMOTO_DISABLE_AGGREGATOR").is_ok() {
             None
+        } else if std::env::var("ENOMOTO_XROW_AGGREGATOR").is_ok() {
+            Some(timed_step!("aggregator", aggregator::eliminate_implied_free_columns_xrow(n, &a, &b, &c, &lb, &ub, &cur_real_rows, &cur_real_rhs)))
         } else {
             Some(timed_step!("aggregator", aggregator::eliminate_implied_free_columns(n, &a, &b, &c, &lb, &ub, &cur_real_rows, &cur_real_rhs)))
         };
@@ -868,7 +897,7 @@ pub fn run_extended(
                 // — same reason `doubleton`/`colsingleton` above must do
                 // this (via the inner loop's own `rebuild_g` call) before
                 // anything downstream reads `g`.
-                let (ng, nh) = propagate::rebuild_g(n, cur_real_rows.clone(), cur_real_rhs.clone(), &lb, &ub);
+                let (ng, nh) = timed_step!("rebuild_g(agg)", propagate::rebuild_g(n, cur_real_rows.clone(), cur_real_rhs.clone(), &lb, &ub));
                 g = ng;
                 h = nh;
             }
@@ -957,7 +986,7 @@ pub fn run_extended(
                 // mid-round dedup call and the next round's `propagate`
                 // must see this pass's own row/bound changes, not a stale
                 // `g`/`h`.
-                let (ng, nh) = propagate::rebuild_g(n, cur_real_rows.clone(), cur_real_rhs.clone(), &lb, &ub);
+                let (ng, nh) = timed_step!("rebuild_g(pc)", propagate::rebuild_g(n, cur_real_rows.clone(), cur_real_rhs.clone(), &lb, &ub));
                 g = ng;
                 h = nh;
             }
