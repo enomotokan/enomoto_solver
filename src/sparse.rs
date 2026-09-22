@@ -1518,6 +1518,36 @@ pub fn csr_from_rows(rows: &[Vec<(usize, f64)>], n_cols: usize) -> Csr {
     Csr::try_new_from_triplets(rows.len(), n_cols, &triplets).expect("valid CSR triplets")
 }
 
+/// `csr_from_rows(&kept rows of mat, n_cols)` — the rows of `mat` with
+/// `keep[i]`, in order — copied straight out of `mat`'s arrays when every
+/// kept row is already in [`csr_from_rows`]' canonical layout (strictly
+/// ascending columns, no stored zeros), without an owned `Vec` per row.
+/// Falls back to exactly that expression otherwise.
+pub fn csr_select_rows(mat: &Csr, keep: &[bool], n_cols: usize) -> Csr {
+    let r = mat.as_ref();
+    let mut row_ptr = vec![0usize];
+    let mut col_ind = Vec::with_capacity(r.compute_nnz());
+    let mut values = Vec::with_capacity(r.compute_nnz());
+    for i in 0..r.nrows() {
+        if !keep[i] {
+            continue;
+        }
+        let mut last: Option<usize> = None;
+        for (j, &v) in r.col_indices_of_row(i).zip(r.values_of_row(i)) {
+            if v == 0.0 || j >= n_cols || last.is_some_and(|l| j <= l) {
+                let rows: Vec<Vec<(usize, f64)>> = (0..r.nrows()).filter(|&i| keep[i]).map(|i| csr_row_vec(mat, i)).collect();
+                return csr_from_rows(&rows, n_cols);
+            }
+            last = Some(j);
+            col_ind.push(j);
+            values.push(v);
+        }
+        row_ptr.push(col_ind.len());
+    }
+    let n_kept = row_ptr.len() - 1;
+    Csr::new(faer::sparse::SymbolicSparseRowMat::new_checked(n_kept, n_cols, row_ptr, None, col_ind), values)
+}
+
 /// [`csr_from_rows`] over `rows` followed by one single-entry row per
 /// `singletons` element — the same matrix as pushing each singleton as its
 /// own `vec![(j, v)]` onto `rows` first, without allocating those `Vec`s.
@@ -1639,6 +1669,23 @@ pub fn mat_t_vec(mat: &Csr, n_cols: usize, y: &[f64]) -> Vec<f64> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn csr_select_rows_matches_csr_from_rows_of_kept_rows() {
+        let rows = vec![vec![(0, 1.0), (3, 2.0)], vec![(1, -1.0)], vec![], vec![(0, 4.0), (2, 0.5), (3, -1.0)]];
+        let mat = csr_from_rows(&rows, 4);
+        for keep in [vec![true, true, true, true], vec![false, true, false, true], vec![false; 4]] {
+            let fast = csr_select_rows(&mat, &keep, 4);
+            let kept: Vec<Vec<(usize, f64)>> = rows.iter().zip(&keep).filter(|(_, &k)| k).map(|(r, _)| r.clone()).collect();
+            let reference = csr_from_rows(&kept, 4);
+            assert_eq!(fast.nrows(), reference.nrows());
+            for i in 0..kept.len() {
+                let a: Vec<(usize, u64)> = csr_row_iter(&fast, i).map(|(j, v)| (j, v.to_bits())).collect();
+                let b: Vec<(usize, u64)> = csr_row_iter(&reference, i).map(|(j, v)| (j, v.to_bits())).collect();
+                assert_eq!(a, b, "row {i}");
+            }
+        }
+    }
+
     #[test]
     fn csr_from_rows_then_singletons_matches_pushed_rows() {
         let rows = vec![vec![(0, 1.0), (3, 2.0)], vec![(1, -1.0), (2, 0.5)]];

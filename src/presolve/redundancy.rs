@@ -1303,13 +1303,6 @@ pub fn reduce_inequalities(g: &Csr, h: &[f64], n: usize) -> (Csr, Vec<f64>) {
         }
     }
 
-    let mut new_rows = Vec::new();
-    let mut new_h = Vec::new();
-    for idx in 0..m {
-        if keep[idx] {
-            new_rows.push(csr_row_vec(g, idx));
-            new_h.push(h[idx]);
-        }
-    }
-    (csr_from_rows(&new_rows, n), new_h)
+    let new_h: Vec<f64> = (0..m).filter(|&idx| keep[idx]).map(|idx| h[idx]).collect();
+    (crate::sparse::csr_select_rows(g, &keep, n), new_h)
 }
