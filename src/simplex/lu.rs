@@ -3770,6 +3770,27 @@ impl FtLu {
         nnz
     }
 
+    /// Adds exactly the synthetic-clock ticks ([`Self::synth_tick`]) that
+    /// [`Self::solve_into`] (`sparse == false`) or [`Self::solve_sparse_into`]
+    /// (`sparse == true`) would add for an identically-zero right-hand
+    /// side, without performing the solve — whose result is known to be
+    /// all-zero anyway. Lets a caller skip a provably-zero FTRAN (e.g. the
+    /// extended dual's BFRT slope channel when no flipped column's width
+    /// carries an `M` term) while keeping the CLOCK refactorization trigger
+    /// — and therefore the whole pivot path — bit-for-bit unchanged.
+    /// For a zero rhs: the dense `L` stage costs a flat `m`, the sparse
+    /// one's reach set is empty (`0`); every `R` eta is visited
+    /// unconditionally; the `U` stage pays its flat `m` and no eta survives
+    /// the zero skip.
+    pub fn add_zero_rhs_solve_ticks(&self, sparse: bool) {
+        let m = self.base.m as u64;
+        self.add_tick(if sparse { 0 } else { m });
+        for reta in &self.r_etas {
+            self.add_tick(reta.r.nnz() as u64);
+        }
+        self.add_tick(m);
+    }
+
     /// Same as [`Self::solve_sparse_into`], but additionally captures the
     /// post-`L`/`R`, pre-`U` intermediate into `a_tilde_out` (length `m`) —
     /// see [`Self::solve_into_capture`]'s own docs, which this mirrors for

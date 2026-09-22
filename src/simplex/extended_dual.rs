@@ -988,6 +988,25 @@ impl Affine1 {
         }
     }
 
+    /// Exactly `self.cmp_lex(&Affine1::ZERO) == Ordering::Greater`, with
+    /// the tolerance arithmetic folded for the `other == 0` case (hot:
+    /// every primal-feasibility re-check calls this twice). Against zero
+    /// `cmp_lex`'s slope test is `|s| > 1e-9 * max(|s|, 1)`, which is
+    /// `|s| > 1e-9` for `|s| < 1` (the scale is exactly `1.0`), always true
+    /// for finite `|s| >= 1` (`1e-9 * |s| < |s|` in floating point), and
+    /// false for `|s| = inf` (`inf > inf`) or NaN — i.e. `1e-9 < |s| < inf`;
+    /// the base test folds the same way, and `Greater` additionally needs
+    /// the deciding component to be positive.
+    #[inline]
+    fn gt_zero(&self) -> bool {
+        const REL_TOL: f64 = 1e-9;
+        let sa = self.slope.abs();
+        if sa > REL_TOL && sa < f64::INFINITY {
+            return self.slope > 0.0;
+        }
+        self.base > REL_TOL && self.base < f64::INFINITY
+    }
+
     #[inline]
     fn add(self, other: Affine1) -> Affine1 {
         Affine1::new(self.base + other.base, self.slope + other.slope)
@@ -1054,6 +1073,16 @@ impl Score2 {
     #[inline]
     fn new(dev: Affine1, w: f64) -> Self {
         let w = w.max(super::STEEPEST_EDGE_FLOOR);
+        if dev.slope == 0.0 {
+            // `M`-free deviation (every row once delta=0 is reached): skip
+            // two of the three divisions. `c2` is `+0.0` either way
+            // (`0*0/w`); `c1` would be `±0.0` depending on `base`'s sign,
+            // but [`Score2::cmp_lex`] only ever looks at `|a - b|` and the
+            // sign of a nonzero `a - b`, neither of which a zero operand's
+            // sign can change — so every comparison is bit-for-bit the one
+            // the full formula would produce.
+            return Score2 { c2: 0.0, c1: 0.0, c0: dev.base * dev.base / w };
+        }
         Score2 { c2: dev.slope * dev.slope / w, c1: 2.0 * dev.slope * dev.base / w, c0: dev.base * dev.base / w }
     }
 
@@ -1314,6 +1343,15 @@ fn residual_norm_affine(
     scratch_slope.iter_mut().for_each(|v| *v = 0.0);
     for (pos, &j) in basis.iter().enumerate() {
         let (b, s) = (x_b_base[pos], x_b_slope[pos]);
+        if s == 0.0 {
+            // Same exact-no-op argument as `compute_rhs_affine`'s own
+            // slope skip: `+0.0`-seeded sums never become `-0.0`, so adding
+            // `v * 0.0 = ±0.0` changes nothing.
+            for &(i, v) in std.cols.col(j) {
+                scratch_base[i] += v * b;
+            }
+            continue;
+        }
         for &(i, v) in std.cols.col(j) {
             scratch_base[i] += v * b;
             scratch_slope[i] += v * s;
@@ -1349,6 +1387,18 @@ fn compute_rhs_affine(std: &StdForm, cache: &ColCache, nb_status: &[Option<NbSta
         let Some(status) = nb_status[j] else { continue };
         let val = nb_value_affine(cache, status, j)?;
         if val.base == 0.0 && val.slope == 0.0 {
+            continue;
+        }
+        if val.slope == 0.0 {
+            // Finite-side column (the vast majority): its slope-channel
+            // contribution is `v * 0.0 = ±0.0`, and subtracting a signed
+            // zero from an `rhs_slope` entry is an exact no-op — every entry
+            // starts at `+0.0` and round-to-nearest subtraction never
+            // produces `-0.0` from a `+0.0`-seeded running difference — so
+            // skipping it is bit-for-bit identical.
+            for &(i, v) in std.cols.col(j) {
+                rhs_base[i] -= v * val.base;
+            }
             continue;
         }
         for &(i, v) in std.cols.col(j) {
@@ -1389,22 +1439,31 @@ fn row_deviation(cache: &ColCache, basis: &[usize], x_b_base: &[f64], x_b_slope:
     // the same as that classical method's own `chuzr_scan` does — rather
     // than re-selected (and re-failing chuzc1) every subsequent
     // iteration.
-    if noise_feasible[bv] {
+    deviation_core(noise_feasible[bv], cache.lower[bv], cache.upper[bv], x_b_base[i], x_b_slope[i])
+}
+
+/// [`row_deviation`]'s own arithmetic, given the basic variable's
+/// `noise_feasible` flag and cached bounds directly — shared with
+/// [`RowBounds::deviation`] (which reads them from row-indexed arrays
+/// instead of through `basis[i]`) so both are one implementation.
+#[inline(always)]
+fn deviation_core(noise: bool, lower: Option<Affine1>, upper: Option<Affine1>, x_base: f64, x_slope: f64) -> Option<(i32, Affine1)> {
+    if noise {
         return None;
     }
-    let x_bi = Affine1::new(x_b_base[i], x_b_slope[i]);
-    // `cache.lower[bv]` is `None` iff `bv`'s lower bound is a genuine
+    let x_bi = Affine1::new(x_base, x_slope);
+    // `lower` is `None` iff the basic variable's lower bound is a genuine
     // (non-`M`) infinity (a structural `(J_L∪J_U)\S` column at its true
     // `-inf` side — [`hat_lower`]'s own docs) — never violated by any
-    // finite `x_bi`, mirroring `cache.upper[bv]`'s own `and_then` just
-    // below exactly.
-    let dev_minus = cache.lower[bv].and_then(|hat_l| {
+    // finite `x_bi`, mirroring `upper`'s own `and_then` just below
+    // exactly.
+    let dev_minus = lower.and_then(|hat_l| {
         let v_minus = hat_l.sub(x_bi);
-        (v_minus.cmp_lex(&Affine1::ZERO) == std::cmp::Ordering::Greater).then_some(v_minus)
+        v_minus.gt_zero().then_some(v_minus)
     });
-    let dev_plus = cache.upper[bv].and_then(|hat_u| {
+    let dev_plus = upper.and_then(|hat_u| {
         let v_plus = x_bi.sub(hat_u);
-        (v_plus.cmp_lex(&Affine1::ZERO) == std::cmp::Ordering::Greater).then_some(v_plus)
+        v_plus.gt_zero().then_some(v_plus)
     });
     match (dev_minus, dev_plus) {
         (Some(vm), Some(vp)) => Some(if vm.cmp_lex(&vp) == std::cmp::Ordering::Greater { (1i32, vm) } else { (-1i32, vp) }),
@@ -1421,8 +1480,108 @@ fn row_deviation(cache: &ColCache, basis: &[usize], x_b_base: &[f64], x_b_slope:
 /// object across every call site — see [`solve_lp_dual_extended`]'s own
 /// `InfeasibleRows::set`/`rebuild` call sites).
 #[inline]
+#[cfg_attr(not(debug_assertions), allow(dead_code))]
 fn row_infeasible_affine(cache: &ColCache, basis: &[usize], x_b_base: &[f64], x_b_slope: &[f64], noise_feasible: &[bool], i: usize) -> bool {
     row_deviation(cache, basis, x_b_base, x_b_slope, noise_feasible, i).is_some()
+}
+
+/// [`row_deviation`]'s own result for every row currently in
+/// [`InfeasibleRows`], cached at the moment that row's membership was last
+/// (re)decided — the extended counterpart of HiGHS's `work_infeasibility`
+/// array (`HEkkDualRHS::updatePrimal`/`updateInfeasList`), which CHUZR
+/// reads instead of re-deriving each row's primal infeasibility from
+/// `baseValue`/`baseLower`/`baseUpper` on every scan. Every input
+/// `row_deviation` reads (`x_b_base[i]`, `x_b_slope[i]`, `basis[i]`,
+/// `noise_feasible[basis[i]]`) only ever changes at a site that already
+/// re-decides row `i`'s membership (this loop's own `InfeasibleRows::set`/
+/// `rebuild` call sites, all of which now go through [`refresh_row`]/
+/// [`rebuild_rows`]), so for every row in the pool the cached value is
+/// bit-for-bit what a fresh `row_deviation` call would return. Entries for
+/// rows *not* in the pool are stale and never read.
+struct RowDevCache {
+    dir: Vec<i32>,
+    dev: Vec<Affine1>,
+}
+
+impl RowDevCache {
+    fn new(m: usize) -> Self {
+        RowDevCache { dir: vec![0; m], dev: vec![Affine1::ZERO; m] }
+    }
+}
+
+/// The current basic variable's cached bounds ([`ColCache`]) and
+/// `noise_feasible` flag, indexed by basis *row* rather than by variable —
+/// HiGHS's own `baseLower`/`baseUpper` arrays (`HEkk::info_`), kept for the
+/// same reason: every primal-feasibility re-check after an `x_B` update
+/// ([`refresh_row`]) walks rows in ascending order, and reading bounds
+/// through `basis[i]` turned each of those into three random accesses into
+/// `n_total`-sized arrays (`cache.lower`/`cache.upper`/`noise_feasible`)
+/// instead of sequential ones. Must be updated at every `basis[i]` write
+/// ([`RowBounds::assign`]) and every `noise_feasible` write for a basic
+/// variable ([`RowBounds::mark_noise`]); [`RowBounds::deviation`] is then
+/// bit-for-bit [`row_deviation`] (checked under `debug_assertions`).
+struct RowBounds {
+    lower: Vec<Option<Affine1>>,
+    upper: Vec<Option<Affine1>>,
+    noise: Vec<bool>,
+}
+
+impl RowBounds {
+    fn new(cache: &ColCache, basis: &[usize], noise_feasible: &[bool]) -> Self {
+        RowBounds {
+            lower: basis.iter().map(|&j| cache.lower[j]).collect(),
+            upper: basis.iter().map(|&j| cache.upper[j]).collect(),
+            noise: basis.iter().map(|&j| noise_feasible[j]).collect(),
+        }
+    }
+
+    /// Row `i` is now occupied by variable `j`.
+    #[inline]
+    fn assign(&mut self, i: usize, j: usize, cache: &ColCache, noise_feasible: &[bool]) {
+        self.lower[i] = cache.lower[j];
+        self.upper[i] = cache.upper[j];
+        self.noise[i] = noise_feasible[j];
+    }
+
+    /// Row `i`'s current basic variable was just marked `noise_feasible`.
+    #[inline]
+    fn mark_noise(&mut self, i: usize) {
+        self.noise[i] = true;
+    }
+
+    #[inline]
+    fn deviation(&self, x_b_base: &[f64], x_b_slope: &[f64], i: usize) -> Option<(i32, Affine1)> {
+        deviation_core(self.noise[i], self.lower[i], self.upper[i], x_b_base[i], x_b_slope[i])
+    }
+}
+
+/// Re-decides row `i`'s [`InfeasibleRows`] membership exactly like
+/// `infeasible_rows.set(i, row_infeasible_affine(..))` did, additionally
+/// caching the deviation itself in `dc` ([`RowDevCache`]'s own docs).
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn refresh_row(rows: &mut InfeasibleRows, dc: &mut RowDevCache, rb: &RowBounds, x_b_base: &[f64], x_b_slope: &[f64], i: usize) {
+    match rb.deviation(x_b_base, x_b_slope, i) {
+        Some((dir, dev)) => {
+            dc.dir[i] = dir;
+            dc.dev[i] = dev;
+            rows.set(i, true);
+        }
+        None => rows.set(i, false),
+    }
+}
+
+/// [`refresh_row`]'s full-rebuild counterpart (`InfeasibleRows::rebuild`).
+#[allow(clippy::too_many_arguments)]
+fn rebuild_rows(rows: &mut InfeasibleRows, dc: &mut RowDevCache, m: usize, rb: &RowBounds, x_b_base: &[f64], x_b_slope: &[f64]) {
+    rows.rebuild(m, |i| match rb.deviation(x_b_base, x_b_slope, i) {
+        Some((dir, dev)) => {
+            dc.dir[i] = dir;
+            dc.dev[i] = dev;
+            true
+        }
+        None => false,
+    });
 }
 
 /// Plain-`f64` counterpart of [`row_deviation`]/[`compute_rhs_affine`]/
@@ -1982,6 +2141,10 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     let mut a_tilde_buf = vec![0.0f64; m];
     let mut e_tilde_buf = vec![0.0f64; m];
     let mut candidates: Vec<Cand> = Vec::new();
+    // The BFRT walk's popped-in-order prefix (see its use below), hoisted
+    // out of the loop like every other per-iteration buffer here so it
+    // keeps its allocation instead of growing a fresh `Vec` every pivot.
+    let mut sorted_prefix: Vec<Cand> = Vec::new();
 
     // Dedicated to `solve_sparse_into` alone, per that method's own
     // documented precondition (`FtLu::solve_sparse_into`'s own docs) —
@@ -2057,7 +2220,9 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     // method's own optimization, reused verbatim (see that struct's own
     // docs on why it has no `f64`-vs-`Affine1` dependency to generalize).
     let mut infeasible_rows = InfeasibleRows::new(m);
-    infeasible_rows.rebuild(m, |i| row_infeasible_affine(&cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i));
+    let mut row_dev = RowDevCache::new(m);
+    let mut row_bounds = RowBounds::new(&cache, &basis, &noise_feasible);
+    rebuild_rows(&mut infeasible_rows, &mut row_dev, m, &row_bounds, &x_b_base, &x_b_slope);
     fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fd_cb, &mut lu_scratch, &mut fd_y, &mut d);
 
     // Leaving-row weighting (paper \S4.5): starts in cheap `Devex` mode and
@@ -2179,6 +2344,10 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     // the loop for the same reason `super::solve_lp_dual_on` hoists its
     // own copy: a single `bool` branch per pivot, not an `env::var` call.
     let update_verify_disabled = std::env::var("ENOMOTO_DISABLE_UPDATE_VERIFY").is_ok();
+    // Hoisted for the same reason: `ENOMOTO_DEBUG_D_DRIFT_EXT` used to be
+    // looked up with `std::env::var` (environment lock + linear scan +
+    // `String` allocation) on *every* pivot just to guard a debug print.
+    let debug_d_drift_ext = std::env::var("ENOMOTO_DEBUG_D_DRIFT_EXT").is_ok();
     // `ENOMOTO_PROF_PHASES_EXT` — this module's own counterpart to
     // `simplex::solve_lp_dual`'s `ENOMOTO_PROF_PHASES` (see [`prof_phases`]'s
     // own docs). Hoisted here for the same reason: a single `bool` branch
@@ -2608,7 +2777,11 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         let mut best: Option<(usize, i32, Affine1, Score2)> = None;
         timed!(profile_phases, prof_phases::CHUZR, {
             for &i in &infeasible_rows.rows {
-                let Some((d_dir, dev)) = row_deviation(&cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i) else { continue };
+                // Cached at this row's last membership decision
+                // ([`RowDevCache`]'s own docs) — bit-for-bit the value a
+                // fresh `row_deviation` call would return here, without
+                // re-reading `basis`/`noise_feasible`/`cache` at `basis[i]`.
+                let (d_dir, dev) = (row_dev.dir[i], row_dev.dev[i]);
                 // `dev` itself (returned in `best` below, used for this
                 // row's actual target/theta arithmetic if chosen) stays
                 // the true, unscaled value — only the `Score2` fed to
@@ -2649,6 +2822,14 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
             fresh.sort_unstable();
             maintained.sort_unstable();
             debug_assert_eq!(fresh, maintained, "InfeasibleRows drifted from a fresh scan at iter {_iter}");
+            for &i in &infeasible_rows.rows {
+                let (fd, fv) = row_deviation(&cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i).expect("pool row must be infeasible");
+                let cv = row_dev.dev[i];
+                debug_assert!(
+                    fd == row_dev.dir[i] && fv.base.to_bits() == cv.base.to_bits() && fv.slope.to_bits() == cv.slope.to_bits(),
+                    "RowDevCache drifted from a fresh row_deviation at iter {_iter}, row {i}"
+                );
+            }
         }
         let mut best = best.map(|(i, d_dir, dev, _)| (i, d_dir, dev));
 
@@ -2660,7 +2841,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
             timed!(profile_phases, prof_phases::CHUZR, {
                 gi_candidates.clear();
                 for &i in &infeasible_rows.rows {
-                    let Some((d_dir_i, dev_i)) = row_deviation(&cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i) else { continue };
+                    let (d_dir_i, dev_i) = (row_dev.dir[i], row_dev.dev[i]);
                     let score = Score2::new(dev_i, weights.weight(i));
                     gi_candidates.push((i, d_dir_i, dev_i, score));
                 }
@@ -2839,6 +3020,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
             // large rows and too loose on tiny ones.
             if bfrt_reached(w_r, Affine1::ZERO, x_b_base[r]) {
                 noise_feasible[basis[r]] = true;
+                row_bounds.mark_noise(r);
                 infeasible_rows.set(r, false);
                 continue;
             }
@@ -2873,7 +3055,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                     lu.solve_into(&fresh_base, &mut lu_scratch, &mut x_b_base);
                     lu.solve_into(&fresh_slope, &mut lu_scratch, &mut x_b_slope);
                     snap_slopes(&mut x_b_slope);
-                    infeasible_rows.rebuild(m, |i| row_infeasible_affine(&cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i));
+                    rebuild_rows(&mut infeasible_rows, &mut row_dev, m, &row_bounds, &x_b_base, &x_b_slope);
                     fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fd_cb, &mut lu_scratch, &mut fd_y, &mut d);
                     if dse_refresh_on_refactor {
                         if let super::EdgeWeights::Dse(dse) = &mut weights {
@@ -2931,7 +3113,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         // to reuse, matching this function's own preallocate-once
         // convention for its other per-iteration buffers.
         let n_candidates = candidates.len();
-        let mut sorted_prefix: Vec<Cand> = Vec::new();
+        sorted_prefix.clear();
         let mut k_star: Option<usize> = None;
         // BFRT (\S4.6), generalized: cumulative flip capacity is an
         // `Affine1` running sum, compared lexicographically against
@@ -3020,7 +3202,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                     lu.solve_into(&fresh_base, &mut lu_scratch, &mut x_b_base);
                     lu.solve_into(&fresh_slope, &mut lu_scratch, &mut x_b_slope);
                     snap_slopes(&mut x_b_slope);
-                    infeasible_rows.rebuild(m, |i| row_infeasible_affine(&cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i));
+                    rebuild_rows(&mut infeasible_rows, &mut row_dev, m, &row_bounds, &x_b_base, &x_b_slope);
                     fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fd_cb, &mut lu_scratch, &mut fd_y, &mut d);
                     if dse_refresh_on_refactor {
                         if let super::EdgeWeights::Dse(dse) = &mut weights {
@@ -3114,18 +3296,40 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
             prof_phases::BFRT_FLIPS.fetch_add(best_idx, std::sync::atomic::Ordering::Relaxed);
         }
         timed!(profile_phases, prof_phases::BFRT, {
+            // Whether any flipped column's width carries an `M` term
+            // (`width.slope != 0`, i.e. an `M`-flagged column flipping onto
+            // or off its `M` side — `ENOMOTO_PROF_PHASES_EXT`'s own
+            // `m_enter_via_flip` counts how rare that is). When none does,
+            // every `combined_slope` entry is an exact (signed) zero, so the
+            // slope channel's FTRAN is provably all-zero and is skipped
+            // below — only its synthetic-clock ticks and its (zero) density
+            // sample are replayed, so the CLOCK refactorization trigger and
+            // the dense/sparse FTRAN dispatch (and with them the whole pivot
+            // path) stay bit-for-bit unchanged.
+            let mut slope_nonzero = false;
             for cand in &sorted[..best_idx] {
                 let old = nb_status[cand.j].unwrap();
                 let width = cache.width[cand.j].unwrap();
                 let sigma = if old == NbStatus::Lower { 1.0 } else { -1.0 };
                 let delta_x = width.scale(sigma);
-                for &(i, v) in std.cols.col(cand.j) {
-                    if !combined_touched_flag[i] {
-                        combined_touched_flag[i] = true;
-                        combined_touched.push(i);
+                if delta_x.slope != 0.0 {
+                    slope_nonzero = true;
+                    for &(i, v) in std.cols.col(cand.j) {
+                        if !combined_touched_flag[i] {
+                            combined_touched_flag[i] = true;
+                            combined_touched.push(i);
+                        }
+                        combined_base[i] += v * delta_x.base;
+                        combined_slope[i] += v * delta_x.slope;
                     }
-                    combined_base[i] += v * delta_x.base;
-                    combined_slope[i] += v * delta_x.slope;
+                } else {
+                    for &(i, v) in std.cols.col(cand.j) {
+                        if !combined_touched_flag[i] {
+                            combined_touched_flag[i] = true;
+                            combined_touched.push(i);
+                        }
+                        combined_base[i] += v * delta_x.base;
+                    }
                 }
             }
             if !combined_touched.is_empty() {
@@ -3141,7 +3345,12 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 }
                 if lu.should_use_dense_solve_tracked(combined_touched.len(), &density_bfrt) {
                     let base_nnz = lu.solve_into(&combined_base, &mut lu_scratch, &mut combined_alpha_base);
-                    let slope_nnz = lu.solve_into(&combined_slope, &mut lu_scratch, &mut combined_alpha_slope);
+                    let slope_nnz = if slope_nonzero {
+                        lu.solve_into(&combined_slope, &mut lu_scratch, &mut combined_alpha_slope)
+                    } else {
+                        lu.add_zero_rhs_solve_ticks(false);
+                        0
+                    };
                     density_bfrt.record(base_nnz, m);
                     density_bfrt.record(slope_nnz, m);
                     if profile_phases {
@@ -3151,9 +3360,14 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                     sparse_base_buf.clear();
                     sparse_slope_buf.clear();
                     sparse_base_buf.extend(combined_touched.iter().map(|&i| (i, combined_base[i])));
-                    sparse_slope_buf.extend(combined_touched.iter().map(|&i| (i, combined_slope[i])));
                     let base_nnz = lu.solve_sparse_into(&sparse_base_buf, &mut sparse_scratch, &mut gp_scratch, &mut combined_alpha_base);
-                    let slope_nnz = lu.solve_sparse_into(&sparse_slope_buf, &mut sparse_scratch, &mut gp_scratch, &mut combined_alpha_slope);
+                    let slope_nnz = if slope_nonzero {
+                        sparse_slope_buf.extend(combined_touched.iter().map(|&i| (i, combined_slope[i])));
+                        lu.solve_sparse_into(&sparse_slope_buf, &mut sparse_scratch, &mut gp_scratch, &mut combined_alpha_slope)
+                    } else {
+                        lu.add_zero_rhs_solve_ticks(true);
+                        0
+                    };
                     density_bfrt.record(base_nnz, m);
                     density_bfrt.record(slope_nnz, m);
                     if profile_phases {
@@ -3164,17 +3378,34 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 // can produce nonzeros outside the input's own sparsity
                 // pattern (`super::solve_lp_dual_on`'s own combined-flip
                 // update does the same, for the same reason).
-                for i in 0..m {
-                    if combined_alpha_base[i] != 0.0 || combined_alpha_slope[i] != 0.0 {
-                        x_b_base[i] -= combined_alpha_base[i];
-                        x_b_slope[i] = snap_slope(x_b_slope[i] - combined_alpha_slope[i]);
-                        infeasible_rows.set(i, row_infeasible_affine(&cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i));
+                if slope_nonzero {
+                    for i in 0..m {
+                        if combined_alpha_base[i] != 0.0 || combined_alpha_slope[i] != 0.0 {
+                            x_b_base[i] -= combined_alpha_base[i];
+                            x_b_slope[i] = snap_slope(x_b_slope[i] - combined_alpha_slope[i]);
+                            refresh_row(&mut infeasible_rows, &mut row_dev, &row_bounds, &x_b_base, &x_b_slope, i);
+                        }
                     }
-                }
-                for &i in &combined_touched {
-                    combined_base[i] = 0.0;
-                    combined_slope[i] = 0.0;
-                    combined_touched_flag[i] = false;
+                    for &i in &combined_touched {
+                        combined_base[i] = 0.0;
+                        combined_slope[i] = 0.0;
+                        combined_touched_flag[i] = false;
+                    }
+                } else {
+                    // Slope channel skipped (see `slope_nonzero`): its
+                    // would-be result is all `±0.0`, which neither the
+                    // `!= 0.0` test nor `snap_slope(x - ±0.0) == x` (every
+                    // `x_b_slope` entry is already snapped) can observe.
+                    for i in 0..m {
+                        if combined_alpha_base[i] != 0.0 {
+                            x_b_base[i] -= combined_alpha_base[i];
+                            refresh_row(&mut infeasible_rows, &mut row_dev, &row_bounds, &x_b_base, &x_b_slope, i);
+                        }
+                    }
+                    for &i in &combined_touched {
+                        combined_base[i] = 0.0;
+                        combined_touched_flag[i] = false;
+                    }
                 }
                 combined_touched.clear();
             }
@@ -3372,7 +3603,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 lu.solve_into(&fresh_base, &mut lu_scratch, &mut x_b_base);
                 lu.solve_into(&fresh_slope, &mut lu_scratch, &mut x_b_slope);
                 snap_slopes(&mut x_b_slope);
-                infeasible_rows.rebuild(m, |i| row_infeasible_affine(&cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i));
+                rebuild_rows(&mut infeasible_rows, &mut row_dev, m, &row_bounds, &x_b_base, &x_b_slope);
                 fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fd_cb, &mut lu_scratch, &mut fd_y, &mut d);
                 if dse_refresh_on_refactor {
                     if let super::EdgeWeights::Dse(dse) = &mut weights {
@@ -3454,12 +3685,28 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         let theta_base = (x_r.base - target.base) / alpha_q;
         let theta_slope = (x_r.slope - target.slope) / alpha_q;
         timed!(profile_phases, prof_phases::XB_UPDATE, {
-            for i in 0..m {
-                let a = alpha_full[i];
-                if a != 0.0 {
-                    x_b_base[i] -= a * theta_base;
-                    x_b_slope[i] = snap_slope(x_b_slope[i] - a * theta_slope);
-                    infeasible_rows.set(i, row_infeasible_affine(&cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i));
+            if theta_slope == 0.0 {
+                // `M`-free step (every iteration once delta=0 is reached,
+                // and most before it): the slope channel's update is an
+                // exact no-op — every `x_b_slope` entry is already
+                // `snap_slope`-normalized (never `-0.0`, never below
+                // `X_B_SLOPE_NOISE` in magnitude), so `x - a*(±0.0)` is `x`
+                // bit-for-bit and `snap_slope(x) == x` — so it is skipped.
+                for i in 0..m {
+                    let a = alpha_full[i];
+                    if a != 0.0 {
+                        x_b_base[i] -= a * theta_base;
+                        refresh_row(&mut infeasible_rows, &mut row_dev, &row_bounds, &x_b_base, &x_b_slope, i);
+                    }
+                }
+            } else {
+                for i in 0..m {
+                    let a = alpha_full[i];
+                    if a != 0.0 {
+                        x_b_base[i] -= a * theta_base;
+                        x_b_slope[i] = snap_slope(x_b_slope[i] - a * theta_slope);
+                        refresh_row(&mut infeasible_rows, &mut row_dev, &row_bounds, &x_b_base, &x_b_slope, i);
+                    }
                 }
             }
             x_b_base[r] = nb_val_q.base + theta_base;
@@ -3573,6 +3820,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         basis[r] = q;
         basis_pos[q] = Some(r);
         nb_status[q] = None;
+        row_bounds.assign(r, q, &cache, &noise_feasible);
         if debug_delta0 && delta0_iter.is_none() {
             let all_off_m_side = m_flagged_cols.iter().all(|&j| match nb_status[j] {
                 None => true,
@@ -3602,7 +3850,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         // it, superseding whatever the `alpha`-loop above computed for
         // index `r` against the stale identity (`super::solve_lp_dual_on`'s
         // own post-swap `infeasible_rows.set` call, same reason).
-        infeasible_rows.set(r, row_infeasible_affine(&cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, r));
+        refresh_row(&mut infeasible_rows, &mut row_dev, &row_bounds, &x_b_base, &x_b_slope, r);
 
         // Incremental dual update (Huangfu & Hall §2.2.3,
         // `super::solve_lp_dual_on`'s own derivation via Sherman-Morrison
@@ -3613,17 +3861,16 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         // so this runs once per iteration regardless of how many columns
         // just got flipped.
         let theta_d = dj_q / alpha_q;
-        if std::env::var("ENOMOTO_DEBUG_D_DRIFT_EXT").is_ok() && theta_d.abs() > 1e3 {
+        if debug_d_drift_ext && theta_d.abs() > 1e3 {
             eprintln!(
                 "DEBUG_D_DRIFT: LARGE theta_d at iter={_iter}: q={q} dj_q={dj_q} alpha_q={alpha_q} theta_d={theta_d} touched_cols={} r={r}",
                 touched_cols.len()
             );
         }
         timed!(profile_phases, prof_phases::DUAL_UPDATE, {
+            // One pass (update + clear) instead of two over `touched_cols`.
             for &j in &touched_cols {
                 d[j] -= theta_d * a_p[j];
-            }
-            for &j in &touched_cols {
                 a_p[j] = 0.0;
                 touched[j] = false;
             }
@@ -3807,7 +4054,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 lu.solve_into(&fresh_base, &mut lu_scratch, &mut x_b_base);
                 lu.solve_into(&fresh_slope, &mut lu_scratch, &mut x_b_slope);
                 snap_slopes(&mut x_b_slope);
-                infeasible_rows.rebuild(m, |i| row_infeasible_affine(&cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i));
+                rebuild_rows(&mut infeasible_rows, &mut row_dev, m, &row_bounds, &x_b_base, &x_b_slope);
                 fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fd_cb, &mut lu_scratch, &mut fd_y, &mut d);
                 if dse_refresh_on_refactor {
                     if let super::EdgeWeights::Dse(dse) = &mut weights {
