@@ -2660,8 +2660,20 @@ impl DseState {
             use rayon::prelude::*;
             self.w.par_iter_mut().enumerate().for_each(|(i, w_i)| update_one(i, w_i));
         } else {
-            for (i, w_i) in self.w.iter_mut().enumerate() {
-                update_one(i, w_i);
+            // Branch-free over every row, `p` included: `w[p]` is
+            // overwritten unconditionally just below, so computing (and
+            // discarding) it here is exact, and dropping the `i == p` test
+            // lets this plain zip compile to packed SIMD — the very same
+            // per-element IEEE operations in the same order, so every
+            // other `w[i]` is bit-identical to the scalar closure above.
+            // (Skipping `alpha[i] == 0.0` rows instead — exact too — was
+            // measured *slower* at the ~50% `alpha` densities of `dfl001`
+            // /`pilot87`: the unpredictable branch costs more than the
+            // division it saves.)
+            let m = self.w.len();
+            for ((w_i, &a_i), &t_i) in self.w.iter_mut().zip(&alpha[..m]).zip(&tau[..m]) {
+                let ratio = a_i / pivot;
+                *w_i = (*w_i - 2.0 * ratio * t_i + ratio * ratio * wp_old).max(STEEPEST_EDGE_FLOOR);
             }
         }
         self.w[p] = (wp_old / (pivot * pivot)).max(STEEPEST_EDGE_FLOOR);

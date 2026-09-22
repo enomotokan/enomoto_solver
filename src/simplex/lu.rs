@@ -2827,6 +2827,44 @@ impl LuFactors {
     /// FTRAN, so a fresh `Vec` here would mean a fresh heap allocation on
     /// every single pivot's FTRAN/BTRAN, several times over (see
     /// `FtLu::solve_into`'s own docs).
+    /// [`Self::l_solve_into`] for two right-hand sides in one pass over
+    /// `L` — see [`FtLu::solve_into_pair_capture`]. Each vector sees exactly
+    /// the operations, in exactly the order, a separate `l_solve_into` call
+    /// would apply to it (a column is skipped for one vector iff that
+    /// vector's own `z[s]` is zero), so both results are bit-identical to
+    /// two separate calls; only the traversal of `l_col` is shared.
+    fn l_solve_into_pair(&self, rhs_a: &[f64], rhs_b: &[f64], za: &mut [f64], zb: &mut [f64]) {
+        let m = self.m;
+        for s in 0..m {
+            let r = self.row_perm[s];
+            za[s] = rhs_a[r];
+            zb[s] = rhs_b[r];
+        }
+        for s in 0..m {
+            let xa = za[s];
+            let xb = zb[s];
+            match (xa != 0.0, xb != 0.0) {
+                (false, false) => {}
+                (true, true) => {
+                    for &(row_step, mult) in self.l_col.col(s) {
+                        za[row_step] -= mult * xa;
+                        zb[row_step] -= mult * xb;
+                    }
+                }
+                (true, false) => {
+                    for &(row_step, mult) in self.l_col.col(s) {
+                        za[row_step] -= mult * xa;
+                    }
+                }
+                (false, true) => {
+                    for &(row_step, mult) in self.l_col.col(s) {
+                        zb[row_step] -= mult * xb;
+                    }
+                }
+            }
+        }
+    }
+
     fn l_solve_into(&self, rhs: &[f64], z: &mut [f64]) {
         let m = self.m;
         for s in 0..m {
@@ -3960,6 +3998,121 @@ impl FtLu {
         a_tilde_out.copy_from_slice(scratch);
         self.u_solve_into(scratch);
         self.permute_out(scratch, out)
+    }
+
+    /// Two dense FTRANs against the same factorization in one traversal:
+    /// `out_a = B^-1 rhs_a` exactly as [`Self::solve_into_capture`] computes
+    /// it (including the `a_tilde` capture), and `out_b = B^-1 rhs_b` exactly
+    /// as [`Self::solve_into`] does — the entering column's FTRAN and the
+    /// DSE `tau = B^-1 rho_p` FTRAN of the same iteration, which HiGHS runs
+    /// as two separate (optionally concurrent) solves
+    /// (`HEkkDual::updateFtranDSE`). Every stage (`L`, the `R` etas, `U`)
+    /// walks its factor data once and applies it to both vectors, each
+    /// vector receiving precisely its own single-solve operation sequence
+    /// (same zero skips, same accumulation order), so both results — and
+    /// the returned nonzero counts — are bit-identical to the two separate
+    /// calls. The synthetic tick is charged exactly as the two separate
+    /// calls would charge it too, so the `CLOCK` refactorization trigger
+    /// fires on exactly the same iterations. What is saved is the second
+    /// pass over `L`/`R`/`U`'s own storage (memory traffic and loop
+    /// overhead), which on the larger Netlib instances no longer fits in
+    /// cache between the two solves.
+    ///
+    /// Only the `u_zero_skip` form of the `U` stage is fused; with
+    /// `ENOMOTO_FTRAN_U_ZERO_SKIP=0` this falls back to the two separate
+    /// calls.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_into_pair_capture(
+        &self,
+        rhs_a: &[f64],
+        rhs_b: &[f64],
+        scratch_a: &mut [f64],
+        scratch_b: &mut [f64],
+        out_a: &mut [f64],
+        out_b: &mut [f64],
+        a_tilde_out: &mut [f64],
+    ) -> (usize, usize) {
+        if !self.u_zero_skip {
+            let na = self.solve_into_capture(rhs_a, scratch_a, out_a, a_tilde_out);
+            let nb = self.solve_into(rhs_b, scratch_b, out_b);
+            return (na, nb);
+        }
+        let m = self.base.m as u64;
+        // `L` stage (+ `ftran_through_l_and_r_into`'s own flat `m` tick,
+        // once per vector).
+        self.base.l_solve_into_pair(rhs_a, rhs_b, scratch_a, scratch_b);
+        self.add_tick(2 * m);
+        let (na, nb) = self.pair_r_u_permute(scratch_a, scratch_b, out_a, out_b, a_tilde_out);
+        (na, nb)
+    }
+
+    /// [`Self::solve_into_pair_capture`] with the entering column given
+    /// sparse — [`Self::solve_sparse_into_capture`]'s own Gilbert-Peierls
+    /// `L` stage for `rhs_a` (same `scratch_a`/`gp` precondition and
+    /// postcondition as that method), the plain dense `L` stage for
+    /// `rhs_b`, then the same fused `R`/`U`/permutation tail. Bit-identical
+    /// to `solve_sparse_into_capture(rhs_a, ..)` plus `solve_into(rhs_b, ..)`,
+    /// ticks included.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_sparse_into_pair_capture(
+        &self,
+        rhs_a: &[(usize, f64)],
+        rhs_b: &[f64],
+        scratch_a: &mut [f64],
+        gp: &mut GpScratch,
+        scratch_b: &mut [f64],
+        out_a: &mut [f64],
+        out_b: &mut [f64],
+        a_tilde_out: &mut [f64],
+    ) -> (usize, usize) {
+        if !self.u_zero_skip {
+            let na = self.solve_sparse_into_capture(rhs_a, scratch_a, gp, out_a, a_tilde_out);
+            let nb = self.solve_into(rhs_b, scratch_b, out_b);
+            return (na, nb);
+        }
+        self.base.l_solve_sparse_into(rhs_a, scratch_a, gp);
+        self.add_tick(gp.reach.len() as u64);
+        self.base.l_solve_into(rhs_b, scratch_b);
+        self.add_tick(self.base.m as u64);
+        let (na, nb) = self.pair_r_u_permute(scratch_a, scratch_b, out_a, out_b, a_tilde_out);
+        scratch_a.fill(0.0);
+        (na, nb)
+    }
+
+    /// The shared post-`L` tail of the two pair solves above: `R` etas,
+    /// `a_tilde` capture (vector `a` only), `U` (`u_zero_skip` form), and
+    /// the output permutation, each applied per vector exactly as the
+    /// single-vector paths apply it.
+    fn pair_r_u_permute(&self, scratch_a: &mut [f64], scratch_b: &mut [f64], out_a: &mut [f64], out_b: &mut [f64], a_tilde_out: &mut [f64]) -> (usize, usize) {
+        let m = self.base.m as u64;
+        for reta in &self.r_etas {
+            let dot_a = reta.r.dot_dense(scratch_a);
+            let dot_b = reta.r.dot_dense(scratch_b);
+            self.add_tick(2 * reta.r.nnz() as u64);
+            scratch_a[reta.p] -= dot_a;
+            scratch_b[reta.p] -= dot_b;
+        }
+        a_tilde_out.copy_from_slice(scratch_a);
+        // `U` stage: `u_solve_into`'s `u_zero_skip` loop, per vector.
+        self.add_tick(2 * m);
+        for eta in self.u_seq.iter().rev() {
+            let p = eta.slot;
+            if scratch_a[p] != 0.0 {
+                scratch_a[p] /= eta.pivot;
+                let xp = scratch_a[p];
+                self.add_tick(eta.off_diag.nnz() as u64);
+                eta.off_diag.axpy_into_dense(-xp, scratch_a);
+            }
+            if scratch_b[p] != 0.0 {
+                scratch_b[p] /= eta.pivot;
+                let xp = scratch_b[p];
+                self.add_tick(eta.off_diag.nnz() as u64);
+                eta.off_diag.axpy_into_dense(-xp, scratch_b);
+            }
+        }
+        let na = self.permute_out(scratch_a, out_a);
+        let nb = self.permute_out(scratch_b, out_b);
+        (na, nb)
     }
 
     /// The last stage every FTRAN path shares: map the finished
@@ -5626,6 +5779,69 @@ mod tests {
                 assert_eq!(state.synth_tick() - before, unit_cost, "seed={seed} round={round}: unit and dense BTRAN must charge the same tick");
 
                 let a_q: Vec<f64> = (0..m).map(|k| if k % 7 == round { 1.0 + k as f64 } else { 0.0 }).collect();
+                if !state.try_update(round, &a_q, 1e-9) {
+                    break;
+                }
+            }
+        }
+    }
+
+    /// `solve_into_pair_capture`/`solve_sparse_into_pair_capture` must be
+    /// bit-identical to the separate single-vector solves they fuse — both
+    /// results, the `a_tilde` capture, the returned nonzero counts, and the
+    /// synthetic tick (which drives the CLOCK refactorization trigger) —
+    /// on a fresh factorization and after Forrest-Tomlin updates.
+    #[test]
+    fn pair_ftran_is_bit_identical_to_two_separate_solves() {
+        let m = 40;
+        for seed in [1u64, 2, 3, 4, 5] {
+            let rows = random_sparse_diag_dominant(m, seed);
+            let base = factorize(m, &rows).expect("diagonally dominant matrix must factorize");
+            let mut state = FtLu::new(base);
+            for round in 0..4 {
+                for variant in 0..3usize {
+                    // `a`: a sparse column-like rhs; `b`: a dense-ish one
+                    // (the DSE `rho_p` shape), varied per variant.
+                    let a: Vec<f64> = (0..m).map(|k| if (k + variant) % 9 == round { 0.5 + k as f64 } else { 0.0 }).collect();
+                    let b: Vec<f64> = (0..m).map(|k| if (k * 3 + variant) % (2 + variant) == 0 { 1.0 / (1.0 + k as f64) } else { 0.0 }).collect();
+
+                    let (mut sa, mut sb) = (vec![0.0; m], vec![0.0; m]);
+                    let (mut oa, mut ob, mut ta) = (vec![0.0; m], vec![0.0; m], vec![0.0; m]);
+                    let t0 = state.synth_tick();
+                    let na = state.solve_into_capture(&a, &mut sa, &mut oa, &mut ta);
+                    let nb = state.solve_into(&b, &mut sb, &mut ob);
+                    let sep_cost = state.synth_tick() - t0;
+
+                    let (mut pa, mut pb) = (vec![0.0; m], vec![0.0; m]);
+                    let (mut qa, mut qb, mut qt) = (vec![0.0; m], vec![0.0; m], vec![0.0; m]);
+                    let t0 = state.synth_tick();
+                    let (pna, pnb) = state.solve_into_pair_capture(&a, &b, &mut pa, &mut pb, &mut qa, &mut qb, &mut qt);
+                    assert_eq!(state.synth_tick() - t0, sep_cost, "seed={seed} round={round} v={variant}: dense pair tick");
+                    assert_eq!((pna, pnb), (na, nb));
+                    assert_eq!(qa, oa, "seed={seed} round={round} v={variant}: dense pair a");
+                    assert_eq!(qb, ob, "seed={seed} round={round} v={variant}: dense pair b");
+                    assert_eq!(qt, ta, "seed={seed} round={round} v={variant}: dense pair a_tilde");
+
+                    // Sparse-`a` form, against `solve_sparse_into_capture` + `solve_into`.
+                    let a_sp = to_sparse(&a);
+                    let mut gp = GpScratch::new(m);
+                    let mut zs = vec![0.0; m];
+                    let (mut ra, mut rt) = (vec![0.0; m], vec![0.0; m]);
+                    let t0 = state.synth_tick();
+                    let rna = state.solve_sparse_into_capture(&a_sp, &mut zs, &mut gp, &mut ra, &mut rt);
+                    let rnb = state.solve_into(&b, &mut sb, &mut ob);
+                    let sep_cost = state.synth_tick() - t0;
+                    let (mut xa, mut xb, mut xt) = (vec![0.0; m], vec![0.0; m], vec![0.0; m]);
+                    let t0 = state.synth_tick();
+                    let (xna, xnb) = state.solve_sparse_into_pair_capture(&a_sp, &b, &mut zs, &mut gp, &mut pb, &mut xa, &mut xb, &mut xt);
+                    assert_eq!(state.synth_tick() - t0, sep_cost, "seed={seed} round={round} v={variant}: sparse pair tick");
+                    assert_eq!((xna, xnb), (rna, rnb));
+                    assert_eq!(xa, ra, "seed={seed} round={round} v={variant}: sparse pair a");
+                    assert_eq!(xb, ob, "seed={seed} round={round} v={variant}: sparse pair b");
+                    assert_eq!(xt, rt, "seed={seed} round={round} v={variant}: sparse pair a_tilde");
+                    assert!(zs.iter().all(|&v| v == 0.0), "sparse pair must leave its scratch all-zero");
+                }
+                let a_q: Vec<f64> = (0..m).map(|k| if k % 5 == round { 1.0 + k as f64 } else { 0.0 }).collect();
                 if !state.try_update(round, &a_q, 1e-9) {
                     break;
                 }

@@ -286,6 +286,25 @@ mod prof_phases {
     pub(super) static DSE_ERR_LT_10PCT: AtomicUsize = AtomicUsize::new(0);
     pub(super) static DSE_ERR_LT_100PCT: AtomicUsize = AtomicUsize::new(0);
     pub(super) static DSE_ERR_GE_100PCT: AtomicUsize = AtomicUsize::new(0);
+    /// Per-iteration work-volume counters for the price/chuzc1/DSE
+    /// phases (summed over iterations; the report divides by `ITERS`),
+    /// only gathered under `ENOMOTO_PROF_PHASES_EXT_WORK=1`:
+    /// `rho_p` nonzeros, PRICE's inner-loop entries visited, PRICE's
+    /// touched-column count (and how many of those were nonbasic),
+    /// chuzc1 candidates, and the nonzero counts of `alpha_q` and of the
+    /// DSE `tau` FTRAN, plus the wall time of that `tau` FTRAN alone
+    /// (a sub-part of `DSE_UPDATE`).
+    pub(super) static STAT_RHO_NNZ: AtomicUsize = AtomicUsize::new(0);
+    pub(super) static STAT_PRICE_ENTRIES: AtomicUsize = AtomicUsize::new(0);
+    pub(super) static STAT_TOUCHED: AtomicUsize = AtomicUsize::new(0);
+    pub(super) static STAT_TOUCHED_NONBASIC: AtomicUsize = AtomicUsize::new(0);
+    pub(super) static STAT_CANDS: AtomicUsize = AtomicUsize::new(0);
+    pub(super) static STAT_ALPHA_NNZ: AtomicUsize = AtomicUsize::new(0);
+    pub(super) static STAT_TAU_NNZ: AtomicUsize = AtomicUsize::new(0);
+    pub(super) static DSE_FTRAN: AtomicUsize = AtomicUsize::new(0);
+    pub(super) static CHUZC1_HEAP: AtomicUsize = AtomicUsize::new(0);
+    pub(super) static STAT_M: AtomicUsize = AtomicUsize::new(0);
+    pub(super) static STAT_PRICE_ENTRIES_NB: AtomicUsize = AtomicUsize::new(0);
 
     pub(super) fn reset() {
         use std::sync::atomic::Ordering::Relaxed;
@@ -328,6 +347,17 @@ mod prof_phases {
             &DSE_ERR_LT_10PCT,
             &DSE_ERR_LT_100PCT,
             &DSE_ERR_GE_100PCT,
+            &STAT_RHO_NNZ,
+            &STAT_PRICE_ENTRIES,
+            &STAT_TOUCHED,
+            &STAT_TOUCHED_NONBASIC,
+            &STAT_CANDS,
+            &STAT_ALPHA_NNZ,
+            &STAT_TAU_NNZ,
+            &DSE_FTRAN,
+            &CHUZC1_HEAP,
+            &STAT_M,
+            &STAT_PRICE_ENTRIES_NB,
             &DENSITY_GATE_FTRANS,
             &DENSITY_COL_AQ_PPT,
             &DENSITY_BFRT_PPT,
@@ -373,6 +403,25 @@ mod prof_phases {
             REFACTOR_CAUSE_CLOCK.load(Relaxed),
             MAX_UPDATE_STREAK.load(Relaxed)
         );
+        eprintln!(
+            "  dse_ftran(unfused)={:.1}us/iter chuzc1_heap={:.1}us/iter",
+            DSE_FTRAN.load(Relaxed) as f64 / 1e3 / iters as f64,
+            CHUZC1_HEAP.load(Relaxed) as f64 / 1e3 / iters as f64
+        );
+        if STAT_M.load(Relaxed) != 0 && STAT_RHO_NNZ.load(Relaxed) != 0 {
+            eprintln!(
+                "  work/iter (m={}): rho_nnz={:.1} price_entries={:.1} (nonbasic {:.1}) touched={:.1} touched_nonbasic={:.1} cands={:.1} alpha_nnz={:.1} tau_nnz={:.1}",
+                STAT_M.load(Relaxed),
+                STAT_RHO_NNZ.load(Relaxed) as f64 / iters as f64,
+                STAT_PRICE_ENTRIES.load(Relaxed) as f64 / iters as f64,
+                STAT_PRICE_ENTRIES_NB.load(Relaxed) as f64 / iters as f64,
+                STAT_TOUCHED.load(Relaxed) as f64 / iters as f64,
+                STAT_TOUCHED_NONBASIC.load(Relaxed) as f64 / iters as f64,
+                STAT_CANDS.load(Relaxed) as f64 / iters as f64,
+                STAT_ALPHA_NNZ.load(Relaxed) as f64 / iters as f64,
+                STAT_TAU_NNZ.load(Relaxed) as f64 / iters as f64
+            );
+        }
         eprintln!(
             "  avg_bfrt_flips/iter={:.3} avg_infeasible_pool/iter={:.1}",
             BFRT_FLIPS.load(Relaxed) as f64 / iters as f64,
@@ -2051,6 +2100,9 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     // structural column is flagged, regardless of `active_cost`'s sign).
     let delta: Vec<MSide> = (0..n_total).map(|j| if j < n_orig { delta_of(std, j) } else { MSide::None }).collect();
     let cache = ColCache::build(std, n_orig);
+    // `cache.width[j].is_none()`, one byte per column — chuzc1's stopper
+    // test reads it for every candidate.
+    let width_inf: Vec<bool> = cache.width.iter().map(|w| w.is_none()).collect();
 
     if m == 0 {
         // No constraints at all (mirrors `solve_lp_on`'s own `n_rows == 0`
@@ -2129,6 +2181,13 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     let mut dense_q = vec![0.0f64; m];
     let mut alpha_full = vec![0.0f64; m];
     let mut tau = vec![0.0f64; m];
+    // Scratch for the DSE `tau` half of the fused entering-column/`tau`
+    // FTRAN ([`sparse_lu::FtLu::solve_into_pair_capture`]); `lu_scratch`
+    // serves the entering-column half, as it does for the plain dense solve.
+    let mut tau_scratch = vec![0.0f64; m];
+    // `ENOMOTO_FUSED_DSE_FTRAN=0` restores the two separate solves (A/B
+    // only — the fused form is bit-identical, see its own docs).
+    let fused_dse_ftran = std::env::var("ENOMOTO_FUSED_DSE_FTRAN").map_or(true, |v| v != "0");
     // Dedicated `try_update_precomputed` capture buffers — see
     // `super::solve_lp_dual_on`'s own identical pair (`a_tilde_buf`/
     // `e_tilde_buf`) for the full reasoning: `e_tilde_buf` is filled as a
@@ -2141,10 +2200,72 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     let mut a_tilde_buf = vec![0.0f64; m];
     let mut e_tilde_buf = vec![0.0f64; m];
     let mut candidates: Vec<Cand> = Vec::new();
-    // The BFRT walk's popped-in-order prefix (see its use below), hoisted
-    // out of the loop like every other per-iteration buffer here so it
-    // keeps its allocation instead of growing a fresh `Vec` every pivot.
+    // chuzc1's heap storage and the non-`bland` walk's popped prefix,
+    // kept across iterations (this loop's preallocate-once convention)
+    // instead of a fresh `BinaryHeap`/`Vec` allocation every pivot.
+    let mut heap_buf: Vec<Reverse<Cand>> = Vec::new();
+    // chuzc1's branch-free write-then-keep buffer (see that step's docs).
+    let mut cand_scratch: Vec<Cand> = Vec::new();
     let mut sorted_prefix: Vec<Cand> = Vec::new();
+
+    // PRICE's own row-major copy of `A`, built once: `std.rows` minus
+    // every fixed column (`lb == ub`, which PRICE skips anyway), in
+    // struct-of-arrays form with `u32` column indices. Each row keeps
+    // `std.rows.row(i)`'s own column order, so the accumulation into
+    // `a_p` (and hence every `a_p[j]` bit) is unchanged — what it saves is
+    // the two random `std.lb[j]`/`std.ub[j]` loads and the branch per
+    // visited entry, plus 4 bytes of index per entry (12 vs 16 bytes).
+    let (price_start, mut price_col, mut price_val) = {
+        let mut start: Vec<usize> = Vec::with_capacity(m + 1);
+        let mut col: Vec<u32> = Vec::with_capacity(std.rows.nnz());
+        let mut val: Vec<f64> = Vec::with_capacity(std.rows.nnz());
+        start.push(0);
+        for i in 0..m {
+            for &(j, v) in std.rows.row(i) {
+                if std.lb[j] == std.ub[j] {
+                    continue;
+                }
+                col.push(u32::try_from(j).ok()?);
+                val.push(v);
+            }
+            start.push(col.len());
+        }
+        (start, col, val)
+    };
+    // EXPERIMENTAL, **path-changing** (`ENOMOTO_PRICE_NONBASIC_ONLY=1`,
+    // default off): HiGHS's own row-wise PRICE matrix is *partitioned*
+    // (`HighsSparseMatrix::createRowwisePartitioned`/`update`, `p_end_`):
+    // each row's nonbasic entries sit in `[start, p_end)`, its basic ones
+    // after, swapped across the boundary on every basis change, so PRICE
+    // never visits a basic column at all. This loop's own PRICE instead
+    // includes basic columns deliberately (see PRICE's own comment below:
+    // the leaving column needs its `d` update) — measured at 35-58% of all
+    // PRICE entries on the heavy Netlib instances (`dfl001` 41%, `pilot87`
+    // 39%, `maros-r7` 58%). With the partition, the leaving column's `d` is
+    // instead set directly the way HiGHS's `HEkkDual::updateDual` does
+    // (`workDual[variable_in] = 0; workDual[variable_out] = -theta_dual`),
+    // exact in infinite precision but no longer bit-identical: basic
+    // columns stop accumulating the rounding noise their `a_p ~ 0` entries
+    // used to feed into `d`, so the pivot path can drift.
+    // `price_nb_end[i]` is row `i`'s partition boundary; with the flag off
+    // it is simply the row end (every non-fixed column priced, as before).
+    let price_nonbasic_only = std::env::var("ENOMOTO_PRICE_NONBASIC_ONLY").is_ok_and(|v| v != "0");
+    let mut price_nb_end: Vec<usize> = price_start[1..].to_vec();
+    if price_nonbasic_only {
+        let mut tmp: Vec<(u32, f64)> = Vec::new();
+        for i in 0..m {
+            let (lo, hi) = (price_start[i], price_start[i + 1]);
+            tmp.clear();
+            tmp.extend(price_col[lo..hi].iter().zip(&price_val[lo..hi]).filter(|(&j, _)| nb_status[j as usize].is_some()).map(|(&j, &v)| (j, v)));
+            let n_nb = tmp.len();
+            tmp.extend(price_col[lo..hi].iter().zip(&price_val[lo..hi]).filter(|(&j, _)| nb_status[j as usize].is_none()).map(|(&j, &v)| (j, v)));
+            for (k, &(j, v)) in tmp.iter().enumerate() {
+                price_col[lo + k] = j;
+                price_val[lo + k] = v;
+            }
+            price_nb_end[i] = lo + n_nb;
+        }
+    }
 
     // Dedicated to `solve_sparse_into` alone, per that method's own
     // documented precondition (`FtLu::solve_sparse_into`'s own docs) —
@@ -2357,7 +2478,14 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     let profile_phases = std::env::var("ENOMOTO_PROF_PHASES_EXT").is_ok();
     if profile_phases {
         prof_phases::reset();
+        prof_phases::STAT_M.store(m, std::sync::atomic::Ordering::Relaxed);
     }
+    // `ENOMOTO_PROF_PHASES_EXT_WORK=1` (on top of `ENOMOTO_PROF_PHASES_EXT`)
+    // adds the `work/iter` volume counters (`rho_p`/`alpha`/`tau` nonzeros,
+    // PRICE entries, touched columns, chuzc1 candidates). Separate because
+    // gathering them costs `O(m + PRICE entries)` per iteration outside
+    // every phase timer — enough to distort the report's own wall total.
+    let profile_work = profile_phases && std::env::var("ENOMOTO_PROF_PHASES_EXT_WORK").is_ok_and(|v| v != "0");
     // Diagnostic only (`ENOMOTO_DEBUG_EXT_DELTA0`): the paper's own
     // remark (\S4.5's absorbing-boundary result, `prop:no-return`) says
     // that once every M-flagged structural column is off its `M` side —
@@ -2956,10 +3084,9 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 if rv.abs() <= TOL {
                     continue;
                 }
-                for &(j, v) in std.rows.row(i) {
-                    if std.lb[j] == std.ub[j] {
-                        continue;
-                    }
+                let (lo, hi) = (price_start[i], price_nb_end[i]);
+                for (&j, &v) in price_col[lo..hi].iter().zip(&price_val[lo..hi]) {
+                    let j = j as usize;
                     if !touched[j] {
                         touched[j] = true;
                         touched_cols.push(j);
@@ -2968,33 +3095,89 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 }
             }
         });
+        if profile_work {
+            use std::sync::atomic::Ordering::Relaxed;
+            let mut rho_nnz = 0usize;
+            let mut entries = 0usize;
+            let mut entries_nb = 0usize;
+            for i in 0..m {
+                if rho[i].abs() > TOL {
+                    rho_nnz += 1;
+                    entries += price_start[i + 1] - price_start[i];
+                    entries_nb += price_col[price_start[i]..price_start[i + 1]].iter().filter(|&&j| nb_status[j as usize].is_some()).count();
+                }
+            }
+            prof_phases::STAT_RHO_NNZ.fetch_add(rho_nnz, Relaxed);
+            prof_phases::STAT_PRICE_ENTRIES.fetch_add(entries, Relaxed);
+            prof_phases::STAT_PRICE_ENTRIES_NB.fetch_add(entries_nb, Relaxed);
+            prof_phases::STAT_TOUCHED.fetch_add(touched_cols.len(), Relaxed);
+            prof_phases::STAT_TOUCHED_NONBASIC.fetch_add(touched_cols.iter().filter(|&&j| nb_status[j].is_some()).count(), Relaxed);
+        }
 
         timed!(profile_phases, prof_phases::CHUZC1, {
             candidates.clear();
+            let ban_active = ban_discarded_candidates && discard_row == Some(r);
+            // Branch-free candidate filter: every touched column is
+            // written into the next slot and the slot is kept (`k +=
+            // keep`) only when it passes the same three tests the old
+            // `continue`-based loop applied (nonbasic, `|alpha_j| > TOL`
+            // in its original negated-`<=` form so a NaN is treated
+            // identically, and the ratio-test sign condition). Those tests
+            // are close to coin flips per column (a third of touched
+            // columns are basic, about half fail the sign test), so the
+            // branchy form paid a misprediction on most columns; the
+            // arithmetic done for a rejected column is discarded. Kept
+            // candidates carry exactly the `hat_alpha`/`ratio` the old loop
+            // computed, in the same `touched_cols` order.
+            // `cand_scratch` only ever grows (never cleared), so this is a
+            // no-op after the first few iterations instead of an `O(k)`
+            // fill every pivot.
+            if cand_scratch.len() < touched_cols.len() {
+                cand_scratch.resize(touched_cols.len(), Cand { j: 0, hat_alpha: 0.0, ratio: 0.0 });
+            }
+            let d_dir_f = d_dir as f64;
+            let mut k = 0usize;
             for &j in &touched_cols {
-                if ban_discarded_candidates && discard_row == Some(r) && discard_banned_cols.contains(&j) {
-                    continue;
-                }
-                let Some(status) = nb_status[j] else { continue };
-                let alpha_j = a_p[j];
-                if alpha_j.abs() <= TOL {
-                    continue;
-                }
-                let sigma = match status {
-                    NbStatus::Lower => 1.0,
-                    NbStatus::Upper => -1.0,
+                let (is_nb, sigma) = match nb_status[j] {
+                    Some(NbStatus::Lower) => (true, 1.0),
+                    Some(NbStatus::Upper) => (true, -1.0),
+                    None => (false, 0.0),
                 };
+                let alpha_j = a_p[j];
                 let hat_alpha = sigma * alpha_j;
-                if (d_dir as f64) * hat_alpha >= 0.0 {
-                    continue;
-                }
                 // `d[j]` here is the *incrementally maintained* reduced cost
                 // (see this function's own docs) — no per-candidate BTRAN
                 // dot-product needed, unlike this function's first version.
                 let hat_c = (sigma * d[j]).max(0.0);
-                candidates.push(Cand { j, hat_alpha, ratio: hat_c / hat_alpha.abs() });
+                cand_scratch[k] = Cand { j, hat_alpha, ratio: hat_c / hat_alpha.abs() };
+                let keep = is_nb & !(alpha_j.abs() <= TOL) & !(d_dir_f * hat_alpha >= 0.0);
+                k += keep as usize;
             }
+            let kept = &cand_scratch[..k];
+            // Smallest (in `Cand`'s own `(ratio, j)` order) candidate whose
+            // width is a genuine infinity (`cache.width[j] == None`, a
+            // one-sided row's slack): the BFRT walk below stops
+            // unconditionally on reaching such a candidate (both the heap
+            // and the `bland_mode` walk visit in this same order), and pass
+            // 2 / the flip loop only ever index `[0, k_star]`, so no
+            // candidate ordered after it can influence anything. Dropping
+            // those leaves the chosen `q`, the flip set and every
+            // floating-point value exactly as before, while shrinking the
+            // pool the heap has to be built from — typically from ~1000
+            // candidates to a few dozen on the heavy Netlib instances.
+            // (HiGHS's `HEkkDualRow::choosePossible` prunes its own
+            // candidate pack by a ratio bound for the same reason.)
+            let mut stopper: Option<Cand> = None;
+            for c in kept {
+                if width_inf[c.j] && stopper.map_or(true, |s| *c < s) && !(ban_active && discard_banned_cols.contains(&c.j)) {
+                    stopper = Some(*c);
+                }
+            }
+            candidates.extend(kept.iter().filter(|c| stopper.map_or(true, |s| **c <= s) && !(ban_active && discard_banned_cols.contains(&c.j))));
         });
+        if profile_work {
+            prof_phases::STAT_CANDS.fetch_add(candidates.len(), std::sync::atomic::Ordering::Relaxed);
+        }
         if candidates.is_empty() {
             for &j in &touched_cols {
                 a_p[j] = 0.0;
@@ -3154,8 +3337,15 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 }
             });
         } else {
-            let mut heap: BinaryHeap<Reverse<Cand>> =
-                timed!(profile_phases, prof_phases::CHUZC1, { candidates.drain(..).map(Reverse).collect() });
+            let heap_t0 = profile_phases.then(std::time::Instant::now);
+            let mut heap: BinaryHeap<Reverse<Cand>> = timed!(profile_phases, prof_phases::CHUZC1, {
+                heap_buf.clear();
+                heap_buf.extend(candidates.drain(..).map(Reverse));
+                BinaryHeap::from(std::mem::take(&mut heap_buf))
+            });
+            if let Some(t0) = heap_t0 {
+                prof_phases::CHUZC1_HEAP.fetch_add(t0.elapsed().as_nanos() as usize, std::sync::atomic::Ordering::Relaxed);
+            }
             timed!(profile_phases, prof_phases::BFRT, {
                 while let Some(Reverse(cand)) = heap.pop() {
                     let idx = sorted_prefix.len();
@@ -3172,6 +3362,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                     cum = new_cum;
                 }
             });
+            heap_buf = heap.into_vec();
         }
         // Unified view over "the sorted candidates, in the order chuzc1
         // above produced them" for pass 2 and the flip application below —
@@ -3451,7 +3642,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         // vs FTRAN — `e_r^T B^-1 A_q = (B^-T e_r)^T A_q`) — expected to
         // agree exactly in infinite precision, which is exactly what
         // `updateVerify` below checks rather than merely assumes.
-        // `dense_q` (the raw column) is still built unconditionally: it is
+        // `dense_q` (the raw column) is built on the dense branch only: it is
         // this FTRAN's own rhs, exactly like `super::solve_lp_dual_on`'s
         // own `a_enter_buf` (`try_update_precomputed` further down no
         // longer needs the raw column itself — see its own docs — only the
@@ -3468,19 +3659,52 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         // Both branches also capture `a_tilde_buf` (the post-L/R, pre-U
         // intermediate) for this iteration's `try_update_precomputed` call
         // further down — see that method's own docs.
+        let mut tau_ready = false;
         timed!(profile_phases, prof_phases::FTRAN, {
-            dense_q.fill(0.0);
-            for &(i, v) in std.cols.col(q) {
-                dense_q[i] = v;
-            }
             if profile_phases && density_col_aq.predicts_dense() && !lu.should_use_dense_solve(std.cols.col(q).len()) {
                 prof_phases::DENSITY_GATE_FTRANS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
             if lu.should_use_dense_solve_tracked(std.cols.col(q).len(), &density_col_aq) {
-                let result_nnz = lu.solve_into_capture(&dense_q, &mut lu_scratch, &mut alpha_full, &mut a_tilde_buf);
+                // `dense_q` is kept all-zero between iterations and only
+                // densified on this branch (the sparse branch never reads
+                // it): scatter in, solve, scatter the same pattern back to
+                // zero — `O(nnz(a_q))` instead of an `O(m)` `fill` every
+                // pivot regardless of which branch runs.
+                for &(i, v) in std.cols.col(q) {
+                    dense_q[i] = v;
+                }
+                let result_nnz = if fused_dse_ftran && matches!(weights, super::EdgeWeights::Dse(_)) {
+                    // DSE's own `tau = B^-1 rho_p` FTRAN (formerly run
+                    // separately inside the weight update below, against
+                    // this same pre-pivot `lu` and the same `rho`) fused
+                    // into this one — see `solve_into_pair_capture`'s docs.
+                    let (a_nnz, _) = lu.solve_into_pair_capture(&dense_q, &rho, &mut lu_scratch, &mut tau_scratch, &mut alpha_full, &mut tau, &mut a_tilde_buf);
+                    tau_ready = true;
+                    a_nnz
+                } else {
+                    lu.solve_into_capture(&dense_q, &mut lu_scratch, &mut alpha_full, &mut a_tilde_buf)
+                };
+                for &(i, _) in std.cols.col(q) {
+                    dense_q[i] = 0.0;
+                }
                 density_col_aq.record(result_nnz, m);
             } else {
-                let result_nnz = lu.solve_sparse_into_capture(std.cols.col(q), &mut sparse_scratch, &mut gp_scratch, &mut alpha_full, &mut a_tilde_buf);
+                let result_nnz = if fused_dse_ftran && matches!(weights, super::EdgeWeights::Dse(_)) {
+                    let (a_nnz, _) = lu.solve_sparse_into_pair_capture(
+                        std.cols.col(q),
+                        &rho,
+                        &mut sparse_scratch,
+                        &mut gp_scratch,
+                        &mut tau_scratch,
+                        &mut alpha_full,
+                        &mut tau,
+                        &mut a_tilde_buf,
+                    );
+                    tau_ready = true;
+                    a_nnz
+                } else {
+                    lu.solve_sparse_into_capture(std.cols.col(q), &mut sparse_scratch, &mut gp_scratch, &mut alpha_full, &mut a_tilde_buf)
+                };
                 density_col_aq.record(result_nnz, m);
             }
             if profile_phases {
@@ -3724,10 +3948,17 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         timed!(profile_phases, prof_phases::DSE_UPDATE, match &mut weights {
             super::EdgeWeights::Devex(dv) => dv.update_after_pivot(r, &alpha_full),
             super::EdgeWeights::Dse(dse) => {
-                lu.solve_into(&rho, &mut lu_scratch, &mut tau);
+                if !tau_ready {
+                    timed!(profile_phases, prof_phases::DSE_FTRAN, lu.solve_into(&rho, &mut lu_scratch, &mut tau));
+                }
                 dse.update_after_pivot(r, &alpha_full, &tau, &rho);
             }
         });
+        if profile_work {
+            use std::sync::atomic::Ordering::Relaxed;
+            prof_phases::STAT_TAU_NNZ.fetch_add(tau.iter().filter(|v| **v != 0.0).count(), Relaxed);
+            prof_phases::STAT_ALPHA_NNZ.fetch_add(alpha_full.iter().filter(|v| **v != 0.0).count(), Relaxed);
+        }
 
         // Stall detection (`super::solve_lp_dual_on`'s own convention, its
         // own docs): only a pivot whose objective contribution is itself
@@ -3821,6 +4052,33 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         basis_pos[q] = Some(r);
         nb_status[q] = None;
         row_bounds.assign(r, q, &cache, &noise_feasible);
+        if price_nonbasic_only {
+            // `HighsSparseMatrix::update`'s own swap scheme: `q` (always
+            // non-fixed — PRICE only ever offers those) moves from each of
+            // its rows' nonbasic part to the basic part, the leaving
+            // column (if non-fixed; a fixed one was never in this matrix)
+            // the other way. Within-row order is irrelevant to `a_p`'s
+            // values: each `a_p[j]` still accumulates over rows `i` in
+            // ascending order, one entry per row.
+            for &(i, _) in std.cols.col(q) {
+                let lo = price_start[i];
+                let last = price_nb_end[i] - 1;
+                let pos = lo + price_col[lo..=last].iter().position(|&c| c as usize == q).expect("entering column missing from its row's nonbasic PRICE partition");
+                price_col.swap(pos, last);
+                price_val.swap(pos, last);
+                price_nb_end[i] = last;
+            }
+            if std.lb[leaving_var] != std.ub[leaving_var] {
+                for &(i, _) in std.cols.col(leaving_var) {
+                    let first = price_nb_end[i];
+                    let hi = price_start[i + 1];
+                    let pos = first + price_col[first..hi].iter().position(|&c| c as usize == leaving_var).expect("leaving column missing from its row's basic PRICE partition");
+                    price_col.swap(pos, first);
+                    price_val.swap(pos, first);
+                    price_nb_end[i] = first + 1;
+                }
+            }
+        }
         if debug_delta0 && delta0_iter.is_none() {
             let all_off_m_side = m_flagged_cols.iter().all(|&j| match nb_status[j] {
                 None => true,
@@ -3875,6 +4133,12 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 touched[j] = false;
             }
             touched_cols.clear();
+            if price_nonbasic_only {
+                // HiGHS `HEkkDual::updateDual`'s own closing assignments —
+                // see `price_nonbasic_only`'s own docs.
+                d[q] = 0.0;
+                d[leaving_var] = -theta_d;
+            }
         });
 
         // Forrest-Tomlin incremental update instead of a fresh
