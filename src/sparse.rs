@@ -355,6 +355,224 @@ pub fn scatter_dense(sparse: &[(usize, f64)], out: &mut [f64]) {
 }
 
 // ===========================================================================
+// Hybrid sparse/dense vectors
+// ===========================================================================
+
+/// A vector held **either** as an `(index, value)` list **or** as a full
+/// dense array, the representation picked once at construction from its own
+/// fill — [`HybridVec::pack`].
+///
+/// # Why a second vector type
+///
+/// [`SparseVec`] is the right shape for data that is sparse and stays
+/// sparse. The vectors `simplex::lu`'s Forrest-Tomlin eta file is made of
+/// are not that: an eta starts sparse and fills in as updates accumulate,
+/// and on a dense-coefficient LP `U`'s chain is close to fully dense from
+/// the very first update. Past some fill the `(index, value)` form loses:
+/// the same total FLOP count costs a per-entry tuple load and an indexed
+/// indirection, where a straight-line scan over a dense array vectorizes.
+/// So the eta file wants *both* forms behind one interface — which is what
+/// this is.
+///
+/// Each consumer of an eta is one of exactly two loops, a dot product
+/// against a dense vector ([`Self::dot_dense`]) or an axpy into one
+/// ([`Self::axpy_into_dense`]), and before this type existed each of those
+/// was written out per call site as a two-armed `match` on the
+/// representation — eight copies across FTRAN, BTRAN and both capture
+/// variants, every one of which had to be edited in lockstep to change
+/// anything. They are these two methods now.
+///
+/// # The skipped index
+///
+/// An eta's own pivot slot is excluded from its off-diagonal vector. The
+/// sparse form does that by simply not storing it; the **dense form stores
+/// a `0.0` there**, so that both loops can run over the whole array with no
+/// per-entry test for "is this the slot itself". [`Self::pack`] upholds
+/// that automatically (the dense buffer starts all-zero and only the given
+/// pairs are written), and [`Self::remove_index`] preserves it.
+///
+/// `nnz` is tracked explicitly rather than re-derived from the dense
+/// array's length — which is always the full length and says nothing about
+/// fill — so `simplex::lu`'s refactorization triggers keep measuring true
+/// fill regardless of which representation an eta happens to be in.
+#[derive(Clone, Debug)]
+pub enum HybridVec {
+    Sparse(Vec<(usize, f64)>),
+    Dense { data: Box<[f64]>, nnz: usize },
+}
+
+impl HybridVec {
+    /// Wraps `pairs` (indices `< len`, none of them repeated), switching to
+    /// the dense form once `pairs.len()` exceeds `dense_fraction * len`.
+    pub fn pack(len: usize, pairs: Vec<(usize, f64)>, dense_fraction: f64) -> Self {
+        let nnz = pairs.len();
+        if nnz as f64 > dense_fraction * len as f64 {
+            let mut data = vec![0.0; len];
+            for (i, v) in pairs {
+                data[i] = v;
+            }
+            HybridVec::Dense { data: data.into_boxed_slice(), nnz }
+        } else {
+            HybridVec::Sparse(pairs)
+        }
+    }
+
+    /// True stored-nonzero count, in either representation.
+    #[inline]
+    pub fn nnz(&self) -> usize {
+        match self {
+            HybridVec::Sparse(v) => v.len(),
+            HybridVec::Dense { nnz, .. } => *nnz,
+        }
+    }
+
+    /// Drops any entry at `index`, keeping `nnz` honest in the dense form
+    /// rather than leaving it stale.
+    pub fn remove_index(&mut self, index: usize) {
+        match self {
+            HybridVec::Sparse(v) => v.retain(|&(i, _)| i != index),
+            HybridVec::Dense { data, nnz } => {
+                if data[index] != 0.0 {
+                    data[index] = 0.0;
+                    *nnz -= 1;
+                }
+            }
+        }
+    }
+
+    /// Materializes the stored entries as owned `(index, value)` pairs.
+    /// The dense arm is `O(len)`, so this is for cold paths only — not the
+    /// per-iteration loops, which are the two methods below.
+    pub fn to_pairs(&self) -> Vec<(usize, f64)> {
+        match self {
+            HybridVec::Sparse(v) => v.clone(),
+            HybridVec::Dense { data, .. } => data.iter().enumerate().filter(|&(_, &v)| v != 0.0).map(|(i, &v)| (i, v)).collect(),
+        }
+    }
+
+    /// `self . dense`. The dense arm zips the whole array, which is
+    /// correct precisely because of the skipped-index convention above:
+    /// the stored `0.0` contributes nothing.
+    #[inline]
+    pub fn dot_dense(&self, dense: &[f64]) -> f64 {
+        match self {
+            HybridVec::Sparse(v) => v.iter().map(|&(i, v)| v * dense[i]).sum(),
+            HybridVec::Dense { data, .. } => data.iter().zip(dense.iter()).map(|(&v, &d)| v * d).sum(),
+        }
+    }
+
+    /// `dense += alpha * self`, over this vector's support (the dense arm
+    /// over the whole array — again a no-op at the skipped index).
+    #[inline]
+    pub fn axpy_into_dense(&self, alpha: f64, dense: &mut [f64]) {
+        match self {
+            HybridVec::Sparse(v) => {
+                for &(i, v) in v {
+                    dense[i] += alpha * v;
+                }
+            }
+            HybridVec::Dense { data, .. } => {
+                for (d, &v) in dense.iter_mut().zip(data.iter()) {
+                    *d += alpha * v;
+                }
+            }
+        }
+    }
+}
+
+// ===========================================================================
+// Epoch-stamped marks
+// ===========================================================================
+
+/// A reusable "was this index touched during the current pass" set, cleared
+/// in `O(1)` by bumping a counter instead of rewriting the array.
+///
+/// The standard epoch-stamp (time-stamp) trick, and the reason it is worth
+/// a named type here is that this crate had grown **three** independent
+/// copies of it — [`SparseAccum`]'s own occupancy map,
+/// `simplex::lu::GpScratch`'s Gilbert-Peierls visited set, and
+/// `simplex::lu::FtLu`'s `U^T`-solve "needed" set — differing in exactly
+/// the way three hand-rolled copies of one idea differ: only one of the
+/// three handled counter wraparound, and the other two were silently
+/// wrong (a stale stamp from 2^32 passes ago reading as a live mark) if a
+/// solve ever ran long enough to wrap. [`Self::begin`] handles it once,
+/// for all of them.
+///
+/// `u32` stamps rather than `u64`: these arrays are length `m` and are
+/// indexed in the innermost loop of every FTRAN/BTRAN, so halving their
+/// cache footprint matters more than never needing the wraparound branch
+/// (which costs one predictable compare per *pass*, not per index).
+#[derive(Clone)]
+pub struct EpochMarks {
+    stamps: Vec<u32>,
+    epoch: u32,
+}
+
+impl EpochMarks {
+    /// Marks over index space `0..n`, all clear.
+    ///
+    /// `epoch` starts at 1, not 0: `stamps` is zero-initialized, so at
+    /// epoch 0 every index would read as already marked before the first
+    /// [`Self::begin`] ever ran.
+    pub fn new(n: usize) -> Self {
+        EpochMarks { stamps: vec![0; n], epoch: 1 }
+    }
+
+    /// The index space size.
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.stamps.len()
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.stamps.is_empty()
+    }
+
+    /// Clears every mark and starts a new pass. `O(1)` except on the one
+    /// pass in 2^32 that wraps the counter, which pays a single `O(n)`
+    /// reset — without it, stamps left by the pass 2^32 ago would read as
+    /// marks belonging to this one.
+    #[inline]
+    pub fn begin(&mut self) {
+        self.epoch = self.epoch.wrapping_add(1);
+        if self.epoch == 0 {
+            self.stamps.iter_mut().for_each(|s| *s = 0);
+            self.epoch = 1;
+        }
+    }
+
+    #[inline]
+    pub fn mark(&mut self, i: usize) {
+        self.stamps[i] = self.epoch;
+    }
+
+    #[inline]
+    pub fn is_marked(&self, i: usize) -> bool {
+        self.stamps[i] == self.epoch
+    }
+
+    /// Test-only: drives the epoch counter to an arbitrary value, so the
+    /// wraparound branch in [`Self::begin`] can be exercised without
+    /// actually running 2^32 passes.
+    #[cfg(test)]
+    pub fn force_epoch_for_test(&mut self, epoch: u32) {
+        self.epoch = epoch;
+    }
+
+    /// Clears index `i`'s mark for the rest of this pass. Used by
+    /// [`SparseAccum::remove`], the one consumer that needs to take a mark
+    /// back rather than only ever setting it.
+    #[inline]
+    pub fn unmark(&mut self, i: usize) {
+        // Any value that is not the live epoch reads as unmarked; the
+        // previous epoch is the one such value guaranteed not to collide
+        // with a future one before the next `begin`.
+        self.stamps[i] = self.epoch.wrapping_sub(1);
+    }
+}
+
+// ===========================================================================
 // Sparse accumulator (SPA)
 // ===========================================================================
 
@@ -392,8 +610,7 @@ pub fn scatter_dense(sparse: &[(usize, f64)], out: &mut [f64]) {
 /// equivalent.
 pub struct SparseAccum {
     values: Vec<f64>,
-    stamp: Vec<u64>,
-    epoch: u64,
+    marks: EpochMarks,
     pattern: Vec<usize>,
 }
 
@@ -401,10 +618,7 @@ impl SparseAccum {
     /// An accumulator over index space `0..n`. One `O(n)` allocation,
     /// meant to be hoisted out of whatever loop does the merging.
     pub fn new(n: usize) -> Self {
-        // `epoch` starts at 1, not 0: `stamp` is zero-initialized, so at
-        // epoch 0 every index would read as already-live with value `0.0`
-        // and an `add` would silently skip registering it in `pattern`.
-        SparseAccum { values: vec![0.0; n], stamp: vec![0; n], epoch: 1, pattern: Vec::new() }
+        SparseAccum { values: vec![0.0; n], marks: EpochMarks::new(n), pattern: Vec::new() }
     }
 
     /// The index-space size this accumulator was built for.
@@ -417,13 +631,13 @@ impl SparseAccum {
     /// every stale entry at once, so no buffer is cleared here.
     #[inline]
     pub fn reset(&mut self) {
-        self.epoch += 1;
+        self.marks.begin();
         self.pattern.clear();
     }
 
     #[inline]
     fn live(&self, i: usize) -> bool {
-        self.stamp[i] == self.epoch
+        self.marks.is_marked(i)
     }
 
     /// `self[i] += v`, registering `i` in the pattern on first touch.
@@ -433,7 +647,7 @@ impl SparseAccum {
         if self.live(i) {
             self.values[i] += v;
         } else {
-            self.stamp[i] = self.epoch;
+            self.marks.mark(i);
             self.values[i] = v;
             self.pattern.push(i);
         }
@@ -447,7 +661,7 @@ impl SparseAccum {
     pub fn set(&mut self, i: usize, v: f64) {
         debug_assert!(i < self.values.len(), "sparse index out of range");
         if !self.live(i) {
-            self.stamp[i] = self.epoch;
+            self.marks.mark(i);
             self.pattern.push(i);
         }
         self.values[i] = v;
@@ -479,7 +693,7 @@ impl SparseAccum {
     #[inline]
     pub fn remove(&mut self, i: usize) {
         if self.live(i) {
-            self.stamp[i] = self.epoch.wrapping_sub(1);
+            self.marks.unmark(i);
             self.values[i] = 0.0;
         }
     }
@@ -508,7 +722,7 @@ impl SparseAccum {
         self.pattern.sort_unstable();
         let mut out: Vec<(usize, f64)> = Vec::with_capacity(self.pattern.len());
         for &i in &self.pattern {
-            if self.stamp[i] != self.epoch {
+            if !self.marks.is_marked(i) {
                 continue; // dropped via `remove`
             }
             if out.last().map(|&(k, _)| k) == Some(i) {
@@ -1483,6 +1697,104 @@ mod tests {
         assert_eq!(buf, vec![0.0, 2.0, 0.0, -4.0, 0.0]);
         sparse_axpy_dense(0.5, &entries, &mut buf);
         assert_eq!(buf, vec![0.0, 3.0, 0.0, -6.0, 0.0]);
+    }
+
+    #[test]
+    fn hybrid_vec_picks_its_representation_from_fill() {
+        let sparse = HybridVec::pack(10, vec![(1, 2.0), (7, -1.0)], 0.4);
+        assert!(matches!(sparse, HybridVec::Sparse(_)));
+        let dense = HybridVec::pack(4, vec![(0, 1.0), (1, 2.0), (3, 4.0)], 0.4);
+        assert!(matches!(dense, HybridVec::Dense { .. }));
+        // The skipped index (2 here) is a stored `0.0` in the dense arm.
+        match &dense {
+            HybridVec::Dense { data, nnz } => {
+                assert_eq!(&data[..], &[1.0, 2.0, 0.0, 4.0]);
+                assert_eq!(*nnz, 3);
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn hybrid_vec_both_representations_agree_on_dot_and_axpy() {
+        let pairs = vec![(0usize, 1.0f64), (1, 2.0), (3, 4.0)];
+        // Same content, forced into each representation by the threshold.
+        let as_sparse = HybridVec::pack(4, pairs.clone(), 1.0);
+        let as_dense = HybridVec::pack(4, pairs, 0.0);
+        assert!(matches!(as_sparse, HybridVec::Sparse(_)));
+        assert!(matches!(as_dense, HybridVec::Dense { .. }));
+
+        let x = [10.0, 100.0, 1000.0, 10000.0];
+        assert!(approx(as_sparse.dot_dense(&x), 1.0 * 10.0 + 2.0 * 100.0 + 4.0 * 10000.0));
+        assert!(approx(as_dense.dot_dense(&x), as_sparse.dot_dense(&x)));
+
+        let mut ds = vec![1.0; 4];
+        let mut dd = vec![1.0; 4];
+        as_sparse.axpy_into_dense(-2.0, &mut ds);
+        as_dense.axpy_into_dense(-2.0, &mut dd);
+        assert_eq!(ds, vec![-1.0, -3.0, 1.0, -7.0]);
+        assert_eq!(ds, dd, "the skipped index must be untouched in both arms");
+
+        assert_eq!(as_sparse.nnz(), 3);
+        assert_eq!(as_dense.nnz(), 3);
+        assert_eq!(as_sparse.to_pairs(), as_dense.to_pairs());
+    }
+
+    #[test]
+    fn hybrid_vec_remove_index_keeps_nnz_honest_in_both_arms() {
+        for frac in [1.0f64, 0.0] {
+            let mut v = HybridVec::pack(4, vec![(0, 1.0), (1, 2.0), (3, 4.0)], frac);
+            v.remove_index(1);
+            assert_eq!(v.nnz(), 2, "frac={frac}");
+            assert_eq!(v.to_pairs(), vec![(0, 1.0), (3, 4.0)], "frac={frac}");
+            // Removing an index that holds nothing must not decrement nnz.
+            v.remove_index(2);
+            assert_eq!(v.nnz(), 2, "frac={frac}");
+        }
+    }
+
+    #[test]
+    fn epoch_marks_begin_clears_every_previous_mark() {
+        let mut m = EpochMarks::new(4);
+        assert_eq!(m.len(), 4);
+        assert!(!m.is_marked(0), "nothing may read as marked before the first begin");
+
+        m.begin();
+        m.mark(1);
+        m.mark(3);
+        assert!(m.is_marked(1) && m.is_marked(3));
+        assert!(!m.is_marked(0) && !m.is_marked(2));
+
+        m.begin();
+        assert!(!m.is_marked(1) && !m.is_marked(3), "a new pass starts clear");
+    }
+
+    #[test]
+    fn epoch_marks_unmark_takes_one_mark_back_for_this_pass_only() {
+        let mut m = EpochMarks::new(3);
+        m.begin();
+        m.mark(0);
+        m.mark(2);
+        m.unmark(0);
+        assert!(!m.is_marked(0));
+        assert!(m.is_marked(2));
+        m.mark(0);
+        assert!(m.is_marked(0), "an unmarked index is markable again");
+        m.begin();
+        assert!(!m.is_marked(0) && !m.is_marked(2));
+    }
+
+    #[test]
+    fn epoch_marks_survive_counter_wraparound() {
+        let mut m = EpochMarks::new(2);
+        // Drive the counter to the value whose next `begin` wraps to 0.
+        m.force_epoch_for_test(u32::MAX);
+        m.mark(0);
+        assert!(m.is_marked(0));
+        m.begin(); // wraps: must reset the stamps rather than keep 0 live
+        assert!(!m.is_marked(0), "a stamp from the pre-wrap pass must not read as live");
+        m.mark(1);
+        assert!(m.is_marked(1) && !m.is_marked(0));
     }
 
     #[test]
