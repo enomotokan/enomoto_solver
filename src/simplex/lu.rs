@@ -3778,6 +3778,40 @@ impl FtLu {
     /// takes over), so `a_tilde_out` ends up identical regardless of which
     /// of the two FTRAN paths (`should_use_dense_solve`'s dense/sparse
     /// dispatch) a given call took.
+    /// [`Self::solve_sparse_into`], but charging the synthetic clock exactly
+    /// what [`Self::solve_into`] on the same right-hand side would have
+    /// charged (a flat `m` for the `L` stage instead of the reach-set size).
+    ///
+    /// For call sites that used to go through the dense path
+    /// unconditionally (the DSE `tau = B^-1 rho_p` solve): the result is
+    /// bit-for-bit what the dense path returns — both visit the same
+    /// nonzero steps of `L` in the same ascending order, the dense one just
+    /// also skips over the zero ones — so the only thing that could change
+    /// the pivot sequence is the CLOCK refactorization trigger reading a
+    /// smaller tick. Keeping the charge identical keeps every
+    /// refactorization at the same iteration, i.e. the change is pure cost.
+    pub fn solve_sparse_into_dense_tick(&self, rhs_sparse: &[(usize, f64)], scratch: &mut [f64], gp: &mut GpScratch, out: &mut [f64]) -> usize {
+        let nnz = self.solve_sparse_into(rhs_sparse, scratch, gp, out);
+        self.add_tick((self.base.m as u64).saturating_sub(gp.reach.len() as u64));
+        nnz
+    }
+
+    /// Charges the synthetic clock what [`Self::solve_into`]
+    /// (`dense_l == true`) or [`Self::solve_sparse_into`] (`false`) would
+    /// charge on an **all-zero** right-hand side, without doing the solve
+    /// (whose result is known to be zero). Lets a caller skip a provably
+    /// zero FTRAN while keeping the CLOCK trigger's schedule unchanged.
+    pub fn charge_zero_rhs_solve(&self, dense_l: bool) {
+        let m = self.base.m as u64;
+        if dense_l {
+            self.add_tick(m);
+        }
+        for reta in &self.r_etas {
+            self.add_tick(reta.r.nnz() as u64);
+        }
+        self.add_tick(m);
+    }
+
     pub fn solve_sparse_into_capture(
         &self,
         rhs_sparse: &[(usize, f64)],
