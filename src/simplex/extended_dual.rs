@@ -2083,6 +2083,11 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     let mut dense_q = vec![0.0f64; m];
     let mut alpha_full = vec![0.0f64; m];
     let mut tau = vec![0.0f64; m];
+    // `tau`'s own FTRAN scratch, for when it rides along with the entering
+    // column's (`FtLu::solve2_into_capture`); `tau_ready` records that it
+    // did this iteration.
+    let mut tau_scratch = vec![0.0f64; m];
+    let mut tau_ready;
     // Dedicated `try_update_precomputed` capture buffers — see
     // `super::solve_lp_dual_on`'s own identical pair (`a_tilde_buf`/
     // `e_tilde_buf`) for the full reasoning: `e_tilde_buf` is filled as a
@@ -3385,6 +3390,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         // Both branches also capture `a_tilde_buf` (the post-L/R, pre-U
         // intermediate) for this iteration's `try_update_precomputed` call
         // further down — see that method's own docs.
+        tau_ready = false;
         timed!(profile_phases, prof_phases::FTRAN, {
             if profile_phases && density_col_aq.predicts_dense() && !lu.should_use_dense_solve(std.cols.col(q).len()) {
                 prof_phases::DENSITY_GATE_FTRANS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -3397,7 +3403,15 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 for &(i, v) in std.cols.col(q) {
                     dense_q[i] = v;
                 }
-                let result_nnz = lu.solve_into_capture(&dense_q, &mut lu_scratch, &mut alpha_full, &mut a_tilde_buf);
+                // The DSE `tau = B^-1 rho` FTRAN (same pre-pivot `lu`, and
+                // `rho` is final since the BTRAN above) shares this one's
+                // traversal of the factors — see `solve2_into_capture`.
+                let result_nnz = if matches!(weights, super::EdgeWeights::Dse(_)) {
+                    tau_ready = true;
+                    lu.solve2_into_capture(&dense_q, &mut lu_scratch, &mut alpha_full, &mut a_tilde_buf, &rho, &mut tau_scratch, &mut tau)
+                } else {
+                    lu.solve_into_capture(&dense_q, &mut lu_scratch, &mut alpha_full, &mut a_tilde_buf)
+                };
                 for &(i, _) in std.cols.col(q) {
                     dense_q[i] = 0.0;
                 }
@@ -3645,7 +3659,9 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         timed!(profile_phases, prof_phases::DSE_UPDATE, match &mut weights {
             super::EdgeWeights::Devex(dv) => dv.update_after_pivot(r, &alpha_full),
             super::EdgeWeights::Dse(dse) => {
-                lu.solve_into(&rho, &mut lu_scratch, &mut tau);
+                if !tau_ready {
+                    lu.solve_into(&rho, &mut lu_scratch, &mut tau);
+                }
                 dse.update_after_pivot(r, &alpha_full, &tau, &rho);
             }
         });

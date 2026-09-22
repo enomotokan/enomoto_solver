@@ -2600,6 +2600,35 @@ impl LuFactors {
         }
     }
 
+    /// [`Self::l_solve_into`] on two right-hand sides in one pass over `L`:
+    /// each step's column is read once for both, while each vector sees
+    /// exactly the operations — in exactly the order — its own call would.
+    fn l_solve2_into(&self, rhs1: &[f64], z1: &mut [f64], rhs2: &[f64], z2: &mut [f64]) {
+        let m = self.m;
+        for s in 0..m {
+            let src = self.row_perm[s];
+            z1[s] = rhs1[src];
+            z2[s] = rhs2[src];
+        }
+        for s in 0..m {
+            let (a, b) = (z1[s], z2[s]);
+            if a == 0.0 && b == 0.0 {
+                continue;
+            }
+            let col = self.l_col.col(s);
+            if a != 0.0 {
+                for &(row_step, mult) in col {
+                    z1[row_step] -= mult * a;
+                }
+            }
+            if b != 0.0 {
+                for &(row_step, mult) in col {
+                    z2[row_step] -= mult * b;
+                }
+            }
+        }
+    }
+
     /// Gilbert-Peierls sparse forward substitution through `L`: given
     /// `rhs`'s nonzero `(orig_row, value)` pairs directly (no `O(m)`
     /// densification of the caller's own sparse column needed), computes
@@ -3753,6 +3782,90 @@ impl FtLu {
         a_tilde_out.copy_from_slice(scratch);
         self.u_solve_into(scratch);
         self.permute_out(scratch, out)
+    }
+
+    /// [`Self::solve_into_capture`] on `rhs1` fused with a plain
+    /// [`Self::solve_into`] on `rhs2`: one traversal of `L`, the `R` etas and
+    /// `U` serves both, so each factor entry is fetched once instead of
+    /// twice, while each vector's own arithmetic — every operation, in
+    /// order — is exactly what its separate call does, so both results are
+    /// bit-for-bit the separate calls' results. Charges the same CLOCK ticks
+    /// as the two separate calls together. Returns `out1`'s nonzero count.
+    /// Used for the entering column's FTRAN and the DSE `tau` FTRAN, which
+    /// run against the same pre-pivot factorization every iteration.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve2_into_capture(
+        &self,
+        rhs1: &[f64],
+        scratch1: &mut [f64],
+        out1: &mut [f64],
+        a_tilde_out: &mut [f64],
+        rhs2: &[f64],
+        scratch2: &mut [f64],
+        out2: &mut [f64],
+    ) -> usize {
+        let m = self.base.m as u64;
+        self.base.l_solve2_into(rhs1, scratch1, rhs2, scratch2);
+        self.add_tick(m);
+        self.add_tick(m);
+        for reta in &self.r_etas {
+            let dot1 = reta.r.dot_dense(scratch1);
+            scratch1[reta.p] -= dot1;
+            let dot2 = reta.r.dot_dense(scratch2);
+            scratch2[reta.p] -= dot2;
+            self.add_tick(2 * reta.r.nnz() as u64);
+        }
+        a_tilde_out.copy_from_slice(scratch1);
+        self.u_solve2_into(scratch1, scratch2);
+        self.permute_out(scratch2, out2);
+        self.permute_out(scratch1, out1)
+    }
+
+    /// [`Self::u_solve_into`] on two vectors in one pass over `U` — see
+    /// [`Self::solve2_into_capture`].
+    fn u_solve2_into(&self, x1: &mut [f64], x2: &mut [f64]) {
+        self.add_tick(self.base.m as u64);
+        self.add_tick(self.base.m as u64);
+        if !self.u_zero_skip {
+            for eta in self.u_seq.iter().rev() {
+                let p = eta.slot;
+                for x in [&mut *x1, &mut *x2] {
+                    x[p] /= eta.pivot;
+                    let xp = x[p];
+                    if xp == 0.0 {
+                        continue;
+                    }
+                    self.add_tick(eta.off_diag.nnz() as u64);
+                    eta.off_diag.axpy_into_dense(-xp, x);
+                }
+            }
+            for eta in &self.singles {
+                x1[eta.slot] /= eta.pivot;
+                x2[eta.slot] /= eta.pivot;
+            }
+            return;
+        }
+        for eta in self.u_seq.iter().rev() {
+            let p = eta.slot;
+            for x in [&mut *x1, &mut *x2] {
+                if x[p] == 0.0 {
+                    continue;
+                }
+                x[p] /= eta.pivot;
+                let xp = x[p];
+                self.add_tick(eta.off_diag.nnz() as u64);
+                eta.off_diag.axpy_into_dense(-xp, x);
+            }
+        }
+        for eta in &self.singles {
+            let p = eta.slot;
+            if x1[p] != 0.0 {
+                x1[p] /= eta.pivot;
+            }
+            if x2[p] != 0.0 {
+                x2[p] /= eta.pivot;
+            }
+        }
     }
 
     /// The last stage every FTRAN path shares: map the finished
