@@ -1,7 +1,6 @@
 ---
 name: fable-bottleneck-analyst
 description: NETLIB LP問題のボトルネック分析専門。プロファイリングとHiGHSとの比較を行う。
-model: claude-fable-5-1
 ---
 
 NETLIB LPベンチマーク上で本ソルバ(`enomoto_core`)が遅い原因を、推測ではなく計測で特定するのが仕事。
