@@ -1809,7 +1809,23 @@ struct PriceRows {
     start: Vec<usize>,
     col: Vec<u32>,
     val: Vec<f64>,
+    /// Running average of the touched fraction `touched_cols.len() /
+    /// n_total` (HiGHS's `row_ap_density`), deciding [`Self::price`]'s
+    /// bookkeeping mode — see [`PRICE_DENSE_TOUCHED`].
+    touched_density: std::cell::Cell<f64>,
 }
+
+/// Expected touched fraction above which [`PriceRows::price`] stops
+/// maintaining `touched_cols` entry by entry (a test-and-push per nonzero)
+/// and instead just sets every touched flag, then collects the flagged
+/// columns with one pass over them — HiGHS's "PRICE with switch"
+/// (`HighsSparseMatrix::priceByRowWithSwitch`, `kHyperPriceDensity =
+/// 0.1`). `a_p` gets the same terms in the same order either way, and the
+/// touched *set* is the same; only `touched_cols`' order (ascending
+/// instead of first-touch) differs, which nothing downstream depends on
+/// (candidates go through totally ordered heaps/sorts, the dual update is
+/// per column).
+const PRICE_DENSE_TOUCHED: f64 = 0.1;
 
 impl PriceRows {
     fn build(std: &StdForm) -> Self {
@@ -1828,13 +1844,36 @@ impl PriceRows {
             }
             start.push(col.len());
         }
-        PriceRows { start, col, val }
+        PriceRows { start, col, val, touched_density: std::cell::Cell::new(0.0) }
     }
 
     /// Row-major sparse PRICE: accumulates `rho^T A` into `a_p` over the
     /// rows with `|rho_i| > TOL`, recording each newly touched column.
     #[inline]
     fn price(&self, rho: &[f64], a_p: &mut [f64], touched: &mut [bool], touched_cols: &mut Vec<usize>) {
+        let n = a_p.len();
+        if self.touched_density.get() > PRICE_DENSE_TOUCHED {
+            for (i, &rv) in rho.iter().enumerate() {
+                if rv.abs() <= TOL {
+                    continue;
+                }
+                let (lo, hi) = (self.start[i], self.start[i + 1]);
+                for (&j, &v) in self.col[lo..hi].iter().zip(&self.val[lo..hi]) {
+                    let j = j as usize;
+                    touched[j] = true;
+                    a_p[j] += rv * v;
+                }
+            }
+            touched_cols.extend((0..n).filter(|&j| touched[j]));
+        } else {
+            self.price_sparse(rho, a_p, touched, touched_cols);
+        }
+        let frac = touched_cols.len() as f64 / n.max(1) as f64;
+        self.touched_density.set(0.95 * self.touched_density.get() + 0.05 * frac);
+    }
+
+    #[inline]
+    fn price_sparse(&self, rho: &[f64], a_p: &mut [f64], touched: &mut [bool], touched_cols: &mut Vec<usize>) {
         for (i, &rv) in rho.iter().enumerate() {
             if rv.abs() <= TOL {
                 continue;
