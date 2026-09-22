@@ -18,15 +18,21 @@
 //! via a parallel position index (`col_bucket_pos`/`row_bucket_pos`,
 //! swap-to-last-then-pop on removal — the same pattern `factorize`'s
 //! earlier `active_rows` bookkeeping used). Crucially, a **column-major
-//! mirror** (`col_rows[j]`: the exact set of currently-active rows with a
-//! nonzero at column `j`) is maintained alongside the row-major `rows`
-//! matrix, kept in sync on every insert/remove during elimination. This is
-//! what makes the whole scheme actually sub-`O(m)` per step rather than
-//! just relocating the same cost: "which rows does eliminating column `pj`
-//! affect" is answered by `col_rows[pj]` directly (cost = that column's own
-//! current degree) instead of scanning every active row to test
-//! `contains_key(&pj)`, and "how many rows still touch column `j`" is
-//! `col_rows[j].len()` (O(1)) instead of a fresh full-matrix scan. An
+//! mirror** (the exact set of currently-active rows with a nonzero at
+//! column `j`) is maintained alongside the row-major active submatrix,
+//! kept in sync on every insert/remove during elimination. This is what
+//! makes the whole scheme actually sub-`O(m)` per step rather than just
+//! relocating the same cost: "which rows does eliminating column `pj`
+//! affect" is answered by that column's own live-row list directly (cost =
+//! that column's own current degree) instead of scanning every active row
+//! to test whether it still holds `pj`, and "how many rows still touch
+//! column `j`" is that list's length (O(1)) instead of a fresh
+//! full-matrix scan. Both the submatrix and its mirror are **flat arrays**
+//! ([`KernelMatrix`], HiGHS's own `HFactor` `mc_*`/`mr_*` layout), not
+//! `BTreeMap`/`BTreeSet` containers — see that struct's own docs, and
+//! [`MarkowitzState::eliminate`]'s, for why the inner elimination loop is
+//! a sorted merge over contiguous runs rather than one keyed tree descent
+//! per element touched. An
 //! earlier version of this file computed row/column degrees this way but
 //! then performed the actual elimination arithmetic *directly* in
 //! `factorize`'s main loop, ahead of a separate `eliminate_column` method
@@ -45,10 +51,10 @@
 //! message). The elimination here is a single method (`eliminate`) that
 //! does the arithmetic *and* the degree/bucket bookkeeping together, and a
 //! row being retired as a pivot removes it from every other column's
-//! `col_rows` set too (not just its own pivot column's), so no column's
+//! live-row list too (not just its own pivot column's), so no column's
 //! degree can drift stale by continuing to count an inactive row.
 //!
-//! Within a factorization, per-pivot cost is `O(col_rows[pj].len())` for
+//! Within a factorization, per-pivot cost is `O(pivot column's degree)` for
 //! the elimination itself plus `O(fill touched)` for the resulting
 //! degree/`col_max_abs` refresh — bounded by actual sparsity rather than
 //! `m` — though `find_best_pivot`'s bucket scan can still fall back to
@@ -71,7 +77,7 @@
 
 use crate::sparse::FixedRows;
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Threshold-pivoting stability floor (see this module's own top docs): a
@@ -142,23 +148,327 @@ pub(crate) static PROF_DENSE_FALLBACK_STEPS: AtomicUsize = AtomicUsize::new(0);
 pub(crate) static PROF_BTRAN_L_SCATTER: AtomicUsize = AtomicUsize::new(0);
 pub(crate) static PROF_BTRAN_L_GATHER: AtomicUsize = AtomicUsize::new(0);
 
+/// Rows shorter than this are searched for a column linearly rather than
+/// by binary search ([`KernelMatrix::row_get`]). Markowitz elimination is
+/// specifically choosing pivots to keep the active rows short, so the
+/// linear branch is the common one: a run this size fits in one or two
+/// cache lines and scans branch-predictably, where `binary_search` pays a
+/// mispredict per level for the same work.
+const KERNEL_LINEAR_SCAN_MAX: usize = 16;
+
+/// Flat, HiGHS-`HFactor`-style storage for the active submatrix that
+/// Markowitz elimination works on — the replacement for the
+/// `Vec<BTreeMap<usize, f64>>` (rows) + `Vec<BTreeSet<usize>>` (column
+/// mirror) pair [`MarkowitzState`] used to hold directly, and the item
+/// `docs/lu_comparison_enomoto_vs_highs.md` §3.1 flagged as the largest
+/// remaining structural gap against HiGHS's own kernel (`mc_*`/`mr_*`
+/// flat arrays with in-place insert/delete, against tree nodes scattered
+/// across the heap and an `O(log d)` traversal per element touched).
+///
+/// Layout, mirroring HiGHS's `mc_start`/`mc_space`/`mc_count` +
+/// `mr_start`/`mr_space`/`mr_count` pattern with the two axes swapped —
+/// this crate's elimination is row-oriented (it scatters the pivot *row*
+/// into every affected row), where HiGHS's is column-oriented, so the
+/// *values* live row-major here and the index-only mirror is the column
+/// one:
+///
+/// - `row_ent[row_start[i] .. row_start[i] + row_len[i]]` is row `i`'s
+///   live `(column, value)` run, **sorted ascending by column**.
+///   `row_cap[i]` is how much room that run has in place before it must
+///   be relocated to the end of `row_ent`.
+/// - `col_ent[col_start[j] .. col_start[j] + col_len[j]]` is column `j`'s
+///   live row list — indices only (`u32`: two rows per cache line's worth
+///   of what `usize` would cost, and the ascending-degree bucket scan in
+///   [`MarkowitzState::find_best_pivot`] reads these runs end to end),
+///   **sorted ascending by row**. The row side is the single source of
+///   truth for values; this mirror only answers "which rows are live in
+///   column `j`", exactly as `col_rows` did.
+///
+/// Both runs are kept *sorted*, rather than taking HiGHS's cheaper
+/// swap-with-last unordered sets. That is a deliberate extra cost — a
+/// `copy_within` over a contiguous, usually single-digit-length run,
+/// still far cheaper than the tree traversal it replaces — and it buys
+/// exact behavioural equivalence with the ordered containers it replaces:
+/// [`MarkowitzState::find_best_pivot`] resolves Markowitz-score *and*
+/// pivot-magnitude ties by first-encountered, `eliminate` emits its `L`
+/// multipliers and refreshes touched columns in iteration order, and LP
+/// basis matrices are full of exactly-tied `±1` coefficients. An
+/// unordered mirror would therefore silently select different pivots on
+/// real Netlib instances, changing the factorization, the iteration
+/// counts, and hence what a before/after benchmark of *this* change is
+/// actually measuring.
+struct KernelMatrix {
+    row_ent: Vec<(usize, f64)>,
+    row_start: Vec<usize>,
+    row_len: Vec<usize>,
+    row_cap: Vec<usize>,
+    col_ent: Vec<u32>,
+    col_start: Vec<usize>,
+    col_len: Vec<usize>,
+    col_cap: Vec<usize>,
+}
+
+impl KernelMatrix {
+    fn new(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Self {
+        assert!(m <= u32::MAX as usize, "kernel row index must fit in u32");
+        assert_eq!(rows_in.len(), m, "kernel input must be square");
+        let total: usize = rows_in.iter().map(|r| r.len()).sum();
+        let mut row_ent: Vec<(usize, f64)> = Vec::with_capacity(total + total / 2 + 4 * m);
+        let mut row_start = Vec::with_capacity(m);
+        let mut row_len = Vec::with_capacity(m);
+        let mut row_cap = Vec::with_capacity(m);
+        let mut buf: Vec<(usize, f64)> = Vec::new();
+
+        for row in rows_in.iter() {
+            buf.clear();
+            buf.extend_from_slice(row);
+            // Stable sort by column, then accumulate each duplicate run in
+            // input order and drop exact zeros — bit-for-bit what the
+            // `*entry(j).or_insert(0.0) += v` + `retain(|_, v| *v != 0.0)`
+            // construction this replaces produced, summation order of
+            // repeated coordinates included.
+            buf.sort_by_key(|&(j, _)| j);
+            let start = row_ent.len();
+            let mut k = 0;
+            while k < buf.len() {
+                let j = buf[k].0;
+                let mut acc = 0.0f64;
+                while k < buf.len() && buf[k].0 == j {
+                    acc += buf[k].1;
+                    k += 1;
+                }
+                if acc != 0.0 {
+                    row_ent.push((j, acc));
+                }
+            }
+            let len = row_ent.len() - start;
+            let cap = len + len / 2 + 4;
+            row_ent.resize(start + cap, (0, 0.0));
+            row_start.push(start);
+            row_len.push(len);
+            row_cap.push(cap);
+        }
+
+        // Column mirror by counting sort. Filling it with `i` ascending is
+        // what makes every column's run sorted without a sort.
+        let mut col_len = vec![0usize; m];
+        for i in 0..m {
+            let (s, l) = (row_start[i], row_len[i]);
+            for k in s..s + l {
+                col_len[row_ent[k].0] += 1;
+            }
+        }
+        let mut col_start = vec![0usize; m];
+        let mut col_cap = vec![0usize; m];
+        let mut pos = 0usize;
+        for j in 0..m {
+            let c = col_len[j];
+            let cap = c + c / 2 + 4;
+            col_start[j] = pos;
+            col_cap[j] = cap;
+            pos += cap;
+        }
+        let mut col_ent = vec![0u32; pos];
+        let mut fill = vec![0usize; m];
+        for i in 0..m {
+            let (s, l) = (row_start[i], row_len[i]);
+            for k in s..s + l {
+                let j = row_ent[k].0;
+                col_ent[col_start[j] + fill[j]] = i as u32;
+                fill[j] += 1;
+            }
+        }
+
+        KernelMatrix { row_ent, row_start, row_len, row_cap, col_ent, col_start, col_len, col_cap }
+    }
+
+    #[inline]
+    fn row(&self, i: usize) -> &[(usize, f64)] {
+        let s = self.row_start[i];
+        &self.row_ent[s..s + self.row_len[i]]
+    }
+
+    #[inline]
+    fn col(&self, j: usize) -> &[u32] {
+        let s = self.col_start[j];
+        &self.col_ent[s..s + self.col_len[j]]
+    }
+
+    /// The value at `(i, j)`, or `None` if that coordinate is not live —
+    /// the direct stand-in for `rows[i].get(&j)`.
+    #[inline]
+    fn row_get(&self, i: usize, j: usize) -> Option<f64> {
+        let row = self.row(i);
+        if row.len() <= KERNEL_LINEAR_SCAN_MAX {
+            for &(c, v) in row {
+                if c == j {
+                    return Some(v);
+                }
+                if c > j {
+                    return None;
+                }
+            }
+            None
+        } else {
+            match row.binary_search_by(|e| e.0.cmp(&j)) {
+                Ok(p) => Some(row[p].1),
+                Err(_) => None,
+            }
+        }
+    }
+
+    /// Relocates row `i`'s run to the end of `row_ent` if it cannot hold
+    /// `need` entries in place, doubling its capacity (so a row that
+    /// keeps taking fill-in relocates `O(log)` times, not once per
+    /// insertion). The vacated run is left as dead space rather than
+    /// compacted: total dead space is bounded by the live total, and a
+    /// factorization is a short-lived, single-pass affair.
+    fn ensure_row_cap(&mut self, i: usize, need: usize) {
+        if need <= self.row_cap[i] {
+            return;
+        }
+        let new_cap = need.max(self.row_cap[i] * 2).max(4);
+        let (old_start, len) = (self.row_start[i], self.row_len[i]);
+        let start = self.row_ent.len();
+        self.row_ent.resize(start + new_cap, (0, 0.0));
+        self.row_ent.copy_within(old_start..old_start + len, start);
+        self.row_start[i] = start;
+        self.row_cap[i] = new_cap;
+    }
+
+    /// Overwrites row `i` with `ents` (which must already be sorted
+    /// ascending by column) — `eliminate` rebuilds a whole affected row
+    /// in one merge pass rather than poking at it entry by entry, so this
+    /// bulk form is the only row mutation the kernel needs.
+    fn set_row(&mut self, i: usize, ents: &[(usize, f64)]) {
+        self.ensure_row_cap(i, ents.len());
+        let s = self.row_start[i];
+        self.row_ent[s..s + ents.len()].copy_from_slice(ents);
+        self.row_len[i] = ents.len();
+    }
+
+    fn ensure_col_cap(&mut self, j: usize, need: usize) {
+        if need <= self.col_cap[j] {
+            return;
+        }
+        let new_cap = need.max(self.col_cap[j] * 2).max(4);
+        let (old_start, len) = (self.col_start[j], self.col_len[j]);
+        let start = self.col_ent.len();
+        self.col_ent.resize(start + new_cap, 0);
+        self.col_ent.copy_within(old_start..old_start + len, start);
+        self.col_start[j] = start;
+        self.col_cap[j] = new_cap;
+    }
+
+    /// Adds row `i` to column `j`'s live list, keeping it sorted.
+    /// `eliminate` walks its affected rows in ascending order, so the
+    /// insertion point is typically at or near the run's tail and the
+    /// shift is short.
+    fn col_insert(&mut self, j: usize, i: usize) {
+        let len = self.col_len[j];
+        let pos = {
+            let s = self.col_start[j];
+            self.col_ent[s..s + len].partition_point(|&r| (r as usize) < i)
+        };
+        self.ensure_col_cap(j, len + 1);
+        let s = self.col_start[j];
+        self.col_ent.copy_within(s + pos..s + len, s + pos + 1);
+        self.col_ent[s + pos] = i as u32;
+        self.col_len[j] = len + 1;
+    }
+
+    /// Removes row `i` from column `j`'s live list; a no-op when it isn't
+    /// there, matching `BTreeSet::remove`'s own tolerance (callers rely on
+    /// it: a column already retired by `col_clear` still gets removal
+    /// calls for the pivot row).
+    fn col_remove(&mut self, j: usize, i: usize) {
+        let (s, len) = (self.col_start[j], self.col_len[j]);
+        let run = &self.col_ent[s..s + len];
+        let pos = run.partition_point(|&r| (r as usize) < i);
+        if pos >= len || self.col_ent[s + pos] as usize != i {
+            return;
+        }
+        self.col_ent.copy_within(s + pos + 1..s + len, s + pos);
+        self.col_len[j] = len - 1;
+    }
+
+    #[inline]
+    fn col_clear(&mut self, j: usize) {
+        self.col_len[j] = 0;
+    }
+}
+
+/// Per-elimination-step scratch, owned by [`MarkowitzState`] and lent out
+/// via `mem::take` for the duration of [`MarkowitzState::eliminate`], so
+/// that a factorization's `m` elimination steps reuse one set of buffers
+/// instead of allocating a fresh `Vec`/`BTreeSet` per step.
+#[derive(Default)]
+struct ElimScratch {
+    /// Rows of the pivot column that still need eliminating (a copy: the
+    /// column's own live list is mutated while they are processed).
+    affected: Vec<usize>,
+    /// The merge output for the affected row currently being rewritten.
+    merged: Vec<(usize, f64)>,
+    /// Columns gaining / losing the current affected row, applied to the
+    /// column mirror once the merge has released its borrow on the row.
+    col_add: Vec<usize>,
+    col_del: Vec<usize>,
+    /// `L`'s multipliers for this step, in affected-row order.
+    l_out: Vec<(usize, f64)>,
+    /// Columns of the retiring pivot row, to drop it from.
+    pi_cols: Vec<usize>,
+    /// Columns whose degree or values this step changed, deduplicated via
+    /// `mark`/`epoch` stamping (an `O(1)` membership test against the
+    /// `BTreeSet<usize>` this replaces) and sorted before use — see
+    /// `eliminate`'s own note on why the *order* matters.
+    touched: Vec<usize>,
+    mark: Vec<u32>,
+    epoch: u32,
+}
+
+impl ElimScratch {
+    fn new(m: usize) -> Self {
+        ElimScratch { mark: vec![0; m], epoch: 0, ..Default::default() }
+    }
+
+    /// Starts a step: advances the stamp epoch, clearing the stamps
+    /// outright on the one call in ~4 billion that wraps back to `0`
+    /// (where a never-stamped entry's own `0` would read as "already
+    /// touched"). Same technique, and same wrap-around caveat, as
+    /// [`GpScratch::bump_epoch`].
+    fn begin(&mut self) {
+        self.epoch = self.epoch.wrapping_add(1);
+        if self.epoch == 0 {
+            self.mark.iter_mut().for_each(|e| *e = 0);
+            self.epoch = 1;
+        }
+        self.touched.clear();
+        self.l_out.clear();
+    }
+
+    #[inline]
+    fn touch(&mut self, j: usize) {
+        if self.mark[j] != self.epoch {
+            self.mark[j] = self.epoch;
+            self.touched.push(j);
+        }
+    }
+}
+
 /// Manages the active submatrix plus row/column degrees (via bucket
-/// arrays) during Markowitz elimination — see the module docs for why a
-/// column-major `col_rows` mirror alongside the row-major `rows` matrix is
-/// what actually keeps this sub-`O(m)` per step, and why the elimination
-/// and degree bookkeeping must happen in one place rather than two.
+/// arrays) during Markowitz elimination — see [`KernelMatrix`] for the
+/// flat row-major-values + column-major-indices storage itself, and the
+/// module docs for why a column-major mirror alongside the row-major
+/// matrix is what actually keeps this sub-`O(m)` per step, and why the
+/// elimination and degree bookkeeping must happen in one place rather
+/// than two.
 struct MarkowitzState {
     #[allow(dead_code)]
     m: usize,
 
-    // Active row-major submatrix.
-    rows: Vec<BTreeMap<usize, f64>>,
-    // Column-major mirror: col_rows[j] = the set of currently-active rows
-    // with a nonzero at column j. Kept in exact sync with `rows` by every
-    // method below — this is what lets column-degree lookups and
-    // "who else has a nonzero here" queries stay O(that column's own
-    // degree) instead of O(m).
-    col_rows: Vec<BTreeSet<usize>>,
+    /// Active submatrix: row-major values plus the column-major row-index
+    /// mirror, both flat (see [`KernelMatrix`]).
+    mat: KernelMatrix,
 
     // Current degrees (active nonzero counts), mirrored by bucket
     // placement below.
@@ -179,11 +489,12 @@ struct MarkowitzState {
     row_used: Vec<bool>,
 
     // Column max absolute values, over that column's own active rows only
-    // (via col_rows) — the threshold-pivoting stability reference.
+    // (via the column mirror) — the threshold-pivoting stability
+    // reference.
     col_max_abs: Vec<f64>,
 
     // `col_max_abs_dirty[j]`: `refresh_column` marked `col_max_abs[j]`
-    // stale (its `col_rows[j]` membership or values changed) but hasn't
+    // stale (its column-mirror membership or values changed) but hasn't
     // recomputed it yet — deferred to `ensure_col_max_abs`, called only
     // once `find_best_pivot` is actually about to read it. Most columns
     // `eliminate` dirties this way get dirtied again by a later
@@ -199,7 +510,7 @@ struct MarkowitzState {
     /// construction time and never updated, deliberately: a truly dense
     /// column's *current* degree keeps shrinking as unrelated rows get
     /// eliminated as pivots for *other*, sparser columns (each such row
-    /// leaving the basis removes it from every column's `col_rows`,
+    /// leaving the basis removes it from every column's live list,
     /// including this one's) — dropping into a low bucket only because
     /// its rows happened to get cannibalized elsewhere, not because it
     /// stopped being structurally dense. Thresholding on the live,
@@ -209,42 +520,30 @@ struct MarkowitzState {
     /// catch. See `find_best_pivot`'s own docs for what this avoids: a
     /// pivot on a column with `d` remaining active rows scatters the
     /// entire pivot row's pattern into all `d` of them in one step
-    /// (`eliminate`'s `affected_rows`), so pivoting on a column that is
+    /// (`eliminate`'s `affected` list), so pivoting on a column that is
     /// dense *by original structure* — even at a reduced current degree —
     /// is still the single most expensive kind of step Markowitz pivoting
     /// can take.
     initially_dense: Vec<bool>,
+
+    /// Reused per-step buffers; see [`ElimScratch`].
+    scratch: ElimScratch,
 }
 
 impl MarkowitzState {
     fn new(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Self {
-        let rows: Vec<BTreeMap<usize, f64>> = rows_in
-            .iter()
-            .map(|r| {
-                let mut h = BTreeMap::new();
-                for &(j, v) in r {
-                    *h.entry(j).or_insert(0.0) += v;
-                }
-                h.retain(|_, v| *v != 0.0);
-                h
-            })
-            .collect();
+        let mat = KernelMatrix::new(m, rows_in);
 
-        let mut col_rows: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); m];
-        let mut col_degree = vec![0usize; m];
         let mut col_max_abs = vec![0.0f64; m];
         let mut row_degree = vec![0usize; m];
-
         for i in 0..m {
-            row_degree[i] = rows[i].len();
-            for (&j, &v) in &rows[i] {
-                col_rows[j].insert(i);
+            let row = mat.row(i);
+            row_degree[i] = row.len();
+            for &(j, v) in row {
                 col_max_abs[j] = col_max_abs[j].max(v.abs());
             }
         }
-        for j in 0..m {
-            col_degree[j] = col_rows[j].len();
-        }
+        let col_degree: Vec<usize> = (0..m).map(|j| mat.col(j).len()).collect();
 
         let mut col_buckets = vec![VecDeque::new(); m + 1];
         let mut row_buckets = vec![VecDeque::new(); m + 1];
@@ -267,8 +566,7 @@ impl MarkowitzState {
 
         MarkowitzState {
             m,
-            rows,
-            col_rows,
+            mat,
             col_degree,
             row_degree,
             col_buckets,
@@ -280,7 +578,30 @@ impl MarkowitzState {
             col_max_abs,
             col_max_abs_dirty: vec![false; m],
             initially_dense,
+            scratch: ElimScratch::new(m),
         }
+    }
+
+    /// Row `i`'s live `(column, value)` entries, sorted ascending by
+    /// column — the stand-in for iterating `rows[i]`, with the same order.
+    #[inline]
+    fn row(&self, i: usize) -> &[(usize, f64)] {
+        self.mat.row(i)
+    }
+
+    /// The value at `(i, j)`, or `None` — the stand-in for
+    /// `rows[i].get(&j)`.
+    #[inline]
+    fn value_at(&self, i: usize, j: usize) -> Option<f64> {
+        self.mat.row_get(i, j)
+    }
+
+    /// The `(row, multiplier)` pairs the last [`Self::eliminate`] call
+    /// produced for `L`. Held in scratch rather than returned by value so
+    /// that a factorization's `m` steps share one buffer.
+    #[inline]
+    fn l_out(&self) -> &[(usize, f64)] {
+        &self.scratch.l_out
     }
 
     /// Remove an item from bucket[deg] and update position tracking.
@@ -338,7 +659,7 @@ impl MarkowitzState {
     }
 
     /// Updates `j`'s degree/bucket placement from its current
-    /// `col_rows[j]` membership — O(that column's own active degree),
+    /// column-mirror membership — O(that column's own active degree),
     /// never O(m) — and marks `col_max_abs[j]` stale rather than
     /// recomputing it here; see [`Self::ensure_col_max_abs`] and
     /// `col_max_abs_dirty`'s own docs for why.
@@ -346,12 +667,12 @@ impl MarkowitzState {
         if self.col_used[j] {
             return;
         }
-        let new_deg = self.col_rows[j].len();
+        let new_deg = self.mat.col(j).len();
         self.update_col_degree(j, new_deg);
         self.col_max_abs_dirty[j] = true;
     }
 
-    /// Recomputes `col_max_abs[j]` from its current `col_rows[j]`
+    /// Recomputes `col_max_abs[j]` from its current column-mirror
     /// membership if `refresh_column` left it marked stale, otherwise a
     /// no-op — called from `find_best_pivot` right before it reads
     /// `col_max_abs[j]`, the one place that value's currency actually
@@ -360,21 +681,27 @@ impl MarkowitzState {
         if !self.col_max_abs_dirty[j] {
             return;
         }
-        self.col_max_abs[j] =
-            self.col_rows[j].iter().filter_map(|&i| self.rows[i].get(&j).map(|v| v.abs())).fold(0.0, f64::max);
+        let mut mx = 0.0f64;
+        for &r in self.mat.col(j) {
+            if let Some(v) = self.mat.row_get(r as usize, j) {
+                mx = f64::max(mx, v.abs());
+            }
+        }
+        self.col_max_abs[j] = mx;
         self.col_max_abs_dirty[j] = false;
     }
 
     /// Find best pivot: among still-active columns in ascending-degree
-    /// order, only that column's actual active rows (via `col_rows`, not
-    /// every row at that row-degree) are examined — this is the other half
-    /// (alongside `eliminate`'s use of `col_rows`) of what keeps the
-    /// search from degrading into a full active-submatrix scan. The
-    /// per-degree-level early exit is a standard practical relaxation (as
-    /// in production Markowitz implementations): it does not guarantee the
-    /// globally minimal Markowitz count, only that no further search will
-    /// find something clearly better — finding the exact minimum every
-    /// step is itself more expensive than the fill-in it would save.
+    /// order, only that column's actual active rows (via the column
+    /// mirror, not every row at that row-degree) are examined — this is
+    /// the other half (alongside `eliminate`'s use of the same mirror) of
+    /// what keeps the search from degrading into a full active-submatrix
+    /// scan. The per-degree-level early exit is a standard practical
+    /// relaxation (as in production Markowitz implementations): it does
+    /// not guarantee the globally minimal Markowitz count, only that no
+    /// further search will find something clearly better — finding the
+    /// exact minimum every step is itself more expensive than the fill-in
+    /// it would save.
     ///
     /// `skip_dense`: when true, every `initially_dense` column is skipped
     /// outright, regardless of its current (possibly much lower, per that
@@ -404,21 +731,24 @@ impl MarkowitzState {
                     continue;
                 }
                 self.ensure_col_max_abs(j);
-                for &i in &self.col_rows[j] {
+                let col_max_abs = self.col_max_abs[j];
+                let col_deg = self.col_degree[j];
+                for &r in self.mat.col(j) {
+                    let i = r as usize;
                     if self.row_used[i] {
                         continue;
                     }
                     // Markowitz score only needs row/col degree, both already
-                    // known without touching `rows[i]` — skip the BTreeMap
-                    // lookup below for candidates that can't possibly beat
-                    // `best_score` (this is the vast majority on a matrix
-                    // with heavy fill-in after many FT updates).
-                    let score = (self.row_degree[i] - 1) * (self.col_degree[j] - 1);
+                    // known without touching the row's own run — skip the
+                    // value lookup below for candidates that can't possibly
+                    // beat `best_score` (this is the vast majority on a
+                    // matrix with heavy fill-in after many FT updates).
+                    let score = (self.row_degree[i] - 1) * (col_deg - 1);
                     if score > best_score {
                         continue;
                     }
-                    let Some(&v) = self.rows[i].get(&j) else { continue };
-                    if v == 0.0 || v.abs() < STABILITY * self.col_max_abs[j] {
+                    let Some(v) = self.mat.row_get(i, j) else { continue };
+                    if v == 0.0 || v.abs() < STABILITY * col_max_abs {
                         continue;
                     }
                     if score < best_score || (score == best_score && v.abs() > best_pivot_abs) {
@@ -450,77 +780,138 @@ impl MarkowitzState {
     /// into separate steps (as an earlier version of this file did) is
     /// unsound: bookkeeping keyed off "did this row still contain `pj`"
     /// only works if it runs *before* `pj` is actually removed. Also
-    /// retires row `pi` from every other column's `col_rows` set (not just
+    /// retires row `pi` from every other column's live list (not just
     /// column `pj`'s), so no column's degree can drift by continuing to
-    /// count a row that is no longer active. Returns the `(row, multiplier)`
-    /// pairs for `factorize`'s own `L` bookkeeping.
-    fn eliminate(&mut self, pi: usize, pj: usize, pivot_val: f64, pivot_row_snapshot: &[(usize, f64)]) -> Vec<(usize, f64)> {
-        let affected_rows: Vec<usize> = self.col_rows[pj].iter().copied().filter(|&i| i != pi).collect();
-        let mut touched_cols: BTreeSet<usize> = BTreeSet::new();
-        let mut l_out: Vec<(usize, f64)> = Vec::with_capacity(affected_rows.len());
+    /// count a row that is no longer active. The resulting `(row,
+    /// multiplier)` pairs for `factorize`'s own `L` bookkeeping are left
+    /// in [`Self::l_out`].
+    ///
+    /// Each affected row is rewritten by a **single sorted merge** of its
+    /// own run against `pivot_row_snapshot` (both ascending by column),
+    /// rather than by one keyed lookup per pivot-row entry: with the
+    /// `BTreeMap` rows this replaced, this inner loop — the hottest in
+    /// the whole factorization, run once per `(affected row, pivot-row
+    /// entry)` pair, every elimination step — cost `O(d_p log d_i)` tree
+    /// descents into scattered heap nodes; the merge costs `O(d_i + d_p)`
+    /// over two contiguous, sequentially-read runs and one sequentially-
+    /// written one. That is `docs/lu_comparison_enomoto_vs_highs.md`
+    /// §3.1's point (HiGHS's `mc_*`/`mr_*` flat arrays against this
+    /// crate's tree nodes) applied to the one loop where it matters most.
+    fn eliminate(&mut self, pi: usize, pj: usize, pivot_val: f64, pivot_row_snapshot: &[(usize, f64)]) {
+        let mut sc = std::mem::take(&mut self.scratch);
+        sc.begin();
 
-        for i in affected_rows {
-            let Some(&aij) = self.rows[i].get(&pj) else { continue };
+        sc.affected.clear();
+        sc.affected.extend(self.mat.col(pj).iter().map(|&r| r as usize).filter(|&i| i != pi));
+
+        for ai in 0..sc.affected.len() {
+            let i = sc.affected[ai];
+            let Some(aij) = self.mat.row_get(i, pj) else { continue };
             if aij == 0.0 {
                 continue;
             }
             let mult = aij / pivot_val;
-            l_out.push((i, mult));
+            sc.l_out.push((i, mult));
 
-            for &(j, v) in pivot_row_snapshot {
-                if j == pj {
-                    continue;
-                }
-                // A single `entry()` descent instead of the
-                // `contains_key`+`get`+(`insert`|`remove`) sequence this
-                // used to be — each of those is its own O(log d) BTreeMap
-                // traversal to the *same* node, and this loop body is the
-                // single hottest piece of the whole factorization (run
-                // once per `(affected row, pivot-row entry)` pair, every
-                // elimination step).
-                use std::collections::btree_map::Entry;
-                match self.rows[i].entry(j) {
-                    Entry::Occupied(mut e) => {
-                        let new_val = *e.get() - mult * v;
-                        if new_val == 0.0 {
-                            e.remove();
-                            self.col_rows[j].remove(&i);
+            sc.merged.clear();
+            sc.col_add.clear();
+            sc.col_del.clear();
+            {
+                let row = self.mat.row(i);
+                let (mut a, mut b) = (0usize, 0usize);
+                while a < row.len() && b < pivot_row_snapshot.len() {
+                    let (ja, va) = row[a];
+                    let (jb, vb) = pivot_row_snapshot[b];
+                    if ja < jb {
+                        // Only in this row — including every column
+                        // already used as a pivot, which the snapshot
+                        // filters out and which must survive untouched.
+                        sc.merged.push((ja, va));
+                        a += 1;
+                    } else if jb < ja {
+                        // Fill-in.
+                        if jb != pj {
+                            let new_val = -mult * vb;
+                            if new_val != 0.0 {
+                                sc.merged.push((jb, new_val));
+                                sc.col_add.push(jb);
+                                sc.touch(jb);
+                            }
+                        }
+                        b += 1;
+                    } else {
+                        if ja == pj {
+                            // The pivot column's own entry leaves this
+                            // row; its mirror is retired wholesale by the
+                            // `col_clear(pj)` below, so no `col_del` and
+                            // no `touch` here — exactly what the
+                            // `rows[i].remove(&pj)` this replaces did.
                         } else {
-                            *e.get_mut() = new_val;
+                            let new_val = va - mult * vb;
+                            if new_val == 0.0 {
+                                sc.col_del.push(ja);
+                            } else {
+                                sc.merged.push((ja, new_val));
+                            }
+                            sc.touch(ja);
                         }
-                        touched_cols.insert(j);
+                        a += 1;
+                        b += 1;
                     }
-                    Entry::Vacant(e) => {
-                        let new_val = -mult * v;
+                }
+                while a < row.len() {
+                    sc.merged.push(row[a]);
+                    a += 1;
+                }
+                while b < pivot_row_snapshot.len() {
+                    let (jb, vb) = pivot_row_snapshot[b];
+                    if jb != pj {
+                        let new_val = -mult * vb;
                         if new_val != 0.0 {
-                            e.insert(new_val);
-                            self.col_rows[j].insert(i);
-                            touched_cols.insert(j);
+                            sc.merged.push((jb, new_val));
+                            sc.col_add.push(jb);
+                            sc.touch(jb);
                         }
                     }
+                    b += 1;
                 }
             }
 
-            self.rows[i].remove(&pj);
-            let new_deg_i = self.rows[i].len();
+            self.mat.set_row(i, &sc.merged);
+            for k in 0..sc.col_del.len() {
+                self.mat.col_remove(sc.col_del[k], i);
+            }
+            for k in 0..sc.col_add.len() {
+                self.mat.col_insert(sc.col_add[k], i);
+            }
+            let new_deg_i = sc.merged.len();
             self.update_row_degree(i, new_deg_i);
         }
-        self.col_rows[pj].clear();
+        self.mat.col_clear(pj);
 
         // Row pi is retiring as the new pivot row; drop it from every
         // other column it still touches so those columns' degrees don't
         // keep counting an inactive row.
-        let pi_cols: Vec<usize> = self.rows[pi].keys().copied().filter(|&j| j != pj).collect();
-        for j in pi_cols {
-            self.col_rows[j].remove(&pi);
-            touched_cols.insert(j);
+        sc.pi_cols.clear();
+        sc.pi_cols.extend(self.mat.row(pi).iter().map(|&(j, _)| j).filter(|&j| j != pj));
+        for k in 0..sc.pi_cols.len() {
+            let j = sc.pi_cols[k];
+            self.mat.col_remove(j, pi);
+            sc.touch(j);
         }
 
-        for j in touched_cols {
-            self.refresh_column(j);
+        // Sorted, not merely deduplicated: `refresh_column` appends to a
+        // degree bucket, and `find_best_pivot` scans those buckets in
+        // stored order and breaks exact ties by first-encountered, so the
+        // refresh order is observable in which pivot gets chosen. The
+        // `BTreeSet` this replaced delivered ascending order; sorting the
+        // stamped `Vec` reproduces it for strictly less work.
+        sc.touched.sort_unstable();
+        for k in 0..sc.touched.len() {
+            self.refresh_column(sc.touched[k]);
         }
 
-        l_out
+        self.scratch = sc;
     }
 }
 
@@ -719,9 +1110,9 @@ pub struct LuFactors {
 /// Markowitz elimination entirely in favor of [`factorize_dense_faer`]'s
 /// dense partial-pivoting LU (via the `faer` crate). Markowitz's whole
 /// point is to *minimize fill-in*; a matrix already this dense has none
-/// left to save, so its bucket/degree bookkeeping (`col_rows`,
-/// `col_buckets`/`row_buckets`, the `BTreeMap`-per-row active submatrix)
-/// is pure overhead at that point — confirmed on a synthetic dense LP
+/// left to save, so its bucket/degree bookkeeping ([`KernelMatrix`]'s own
+/// row/column runs plus `col_buckets`/`row_buckets`) is pure overhead at
+/// that point — confirmed on a synthetic dense LP
 /// (Netlib has none dense enough to exercise this at all): `factorize`
 /// dominated wall time (95-98%, repeated every few dozen `try_update`
 /// calls since a dense basis's eta fill crosses `FT_BUMP_LIMIT_FACTOR *
@@ -1050,12 +1441,13 @@ fn factorize_flat_markowitz(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<L
         state.remove_from_bucket_row(pi);
         state.remove_from_bucket_col(pj);
 
-        let pivot_val = *state.rows[pi].get(&pj).unwrap();
+        let pivot_val = state.value_at(pi, pj).unwrap();
         let __t_snap0 = if debug_eliminate_cost { Some(std::time::Instant::now()) } else { None };
-        let pivot_row_snapshot: Vec<(usize, f64)> = state.rows[pi]
+        let pivot_row_snapshot: Vec<(usize, f64)> = state
+            .row(pi)
             .iter()
-            .filter(|&(&j, &v)| v != 0.0 && (j == pj || !state.col_used[j]))
-            .map(|(&j, &v)| (j, v))
+            .copied()
+            .filter(|&(j, v)| v != 0.0 && (j == pj || !state.col_used[j]))
             .collect();
         if let Some(t0) = __t_snap0 {
             snapshot_ns += t0.elapsed().as_nanos();
@@ -1066,7 +1458,8 @@ fn factorize_flat_markowitz(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<L
         }
 
         let __t_elim0 = if debug_eliminate_cost { Some(std::time::Instant::now()) } else { None };
-        for (i, mult) in state.eliminate(pi, pj, pivot_val, &pivot_row_snapshot) {
+        state.eliminate(pi, pj, pivot_val, &pivot_row_snapshot);
+        for &(i, mult) in state.l_out() {
             l_entries.push((i, step, mult));
         }
         if let Some(t0) = __t_elim0 {
@@ -1198,16 +1591,18 @@ fn factorize_bordered(m: usize, rows_in: &[Vec<(usize, f64)>], border: &[usize])
         state.remove_from_bucket_row(pi);
         state.remove_from_bucket_col(pj);
 
-        let pivot_val = *state.rows[pi].get(&pj).unwrap();
-        let pivot_row_snapshot: Vec<(usize, f64)> = state.rows[pi]
+        let pivot_val = state.value_at(pi, pj).unwrap();
+        let pivot_row_snapshot: Vec<(usize, f64)> = state
+            .row(pi)
             .iter()
-            .filter(|&(&j, &v)| v != 0.0 && (j == pj || !state.col_used[j]))
-            .map(|(&j, &v)| (j, v))
+            .copied()
+            .filter(|&(j, v)| v != 0.0 && (j == pj || !state.col_used[j]))
             .collect();
         for &(j, v) in &pivot_row_snapshot {
             u_entries.push((step, j, v));
         }
-        for (i, mult) in state.eliminate(pi, pj, pivot_val, &pivot_row_snapshot) {
+        state.eliminate(pi, pj, pivot_val, &pivot_row_snapshot);
+        for &(i, mult) in state.l_out() {
             l_entries.push((i, step, mult));
         }
     }
@@ -2108,9 +2503,12 @@ const TICK_BUILD_M_COEF: u64 = 80;
 /// Per-nonzero-of-`(L+U)` coefficient for [`FtLu::build_tick`] — HiGHS's own
 /// `buildSynthticTick` uses `60` for `(l_nnz + u_off) * 60`. Kept at HiGHS's
 /// own value for the same reason as [`TICK_BUILD_M_COEF`]: this crate's
-/// Markowitz `factorize` (`BTreeMap`/`BTreeSet`-based, §4/§5 of this
-/// trigger's own analysis) is 3-25x more expensive *per nonzero* than
-/// HiGHS's `HFactor::buildKernel`, but that gap is exactly what makes a
+/// Markowitz `factorize` (§4/§5 of this trigger's own analysis, measured
+/// when the kernel still used `BTreeMap`/`BTreeSet` storage rather than
+/// today's [`KernelMatrix`]) is 3-25x more expensive *per nonzero* than
+/// HiGHS's `HFactor::buildKernel` — the flattening narrowed that gap but
+/// did not close it, and it is the gap's *existence*, not its exact size,
+/// that makes a
 /// *higher* [`SYNTH_CLOCK_FACTOR`] (not a higher `TICK_BUILD_*_COEF`) the
 /// right lever: raising these two coefficients would inflate `build_tick`
 /// but leave the *solve*-side tick (driven by [`TICK_SOLVE_NNZ_COEF`]) at
@@ -2121,8 +2519,7 @@ const TICK_BUILD_LU_COEF: u64 = 60;
 /// (`R`-eta nonzeros touched, `U`/`U^T`-eta nonzeros touched, `L`-stage
 /// reach-set size) — kept at `1` (i.e. `tick` is a plain nonzero count,
 /// unscaled) so [`SYNTH_CLOCK_FACTOR`] alone carries the crate-specific
-/// per-nonzero cost ratio between this crate's `BTreeMap`-based solves and
-/// HiGHS's own flat-array ones; splitting that ratio across two constants
+/// per-nonzero cost ratio between this crate's own solves and HiGHS's; splitting that ratio across two constants
 /// (this one and the factor) would make calibration harder to reason about
 /// with no accuracy benefit, since both only ever appear multiplied
 /// together in the trigger's own comparison.
