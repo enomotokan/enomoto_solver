@@ -61,13 +61,13 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use faer::linalg::solvers::ColPivQr;
 use faer::Mat;
 
+use crate::hash::{FxHashMap, FxHashSet};
 use crate::presolve::smallcoeff;
 use crate::sparse::{Csr, csr_from_rows, csr_row_vec};
 /// Measurement counters answering "would a dedicated block-triangularization
@@ -167,7 +167,7 @@ pub fn reduce_equalities(a: &Csr, b: &[f64], n: usize, lb: &[f64], ub: &[f64]) -
 /// `0 = 0` row; a nonzero RHS on an empty row is kept so the Farkas
 /// infeasibility certificate downstream still sees (and reports) it.
 fn dedupe_rows(rows: Vec<(Vec<(usize, f64)>, f64)>) -> Vec<(Vec<(usize, f64)>, f64)> {
-    let mut seen: HashSet<Vec<(usize, u64)>> = HashSet::new();
+    let mut seen: FxHashSet<Vec<(usize, u64)>> = FxHashSet::default();
     let mut kept = Vec::with_capacity(rows.len());
     for (row, rhs) in rows {
         if row.is_empty() {
@@ -1248,7 +1248,7 @@ pub fn reduce_inequalities(g: &Csr, h: &[f64], n: usize) -> (Csr, Vec<f64>) {
         .collect();
 
     // (normalized sig) -> (index into `rows` currently kept, its normalized h)
-    let mut best: HashMap<Vec<(usize, u64)>, (usize, f64)> = HashMap::new();
+    let mut best: FxHashMap<Vec<(usize, u64)>, (usize, f64)> = FxHashMap::default();
     let mut keep = vec![true; m];
     for (idx, (row, hv)) in rows.iter().enumerate() {
         if row.is_empty() {

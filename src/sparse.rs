@@ -1454,6 +1454,39 @@ pub type Csr = faer::sparse::SparseRowMat<usize, f64>;
 /// value)` list), dropping exact-zero entries. `n_cols` is the matrix's
 /// column count; the row count is `rows.len()`.
 pub fn csr_from_rows(rows: &[Vec<(usize, f64)>], n_cols: usize) -> Csr {
+    // Fast path: rows already column-ascending without duplicates — what
+    // every presolve pass hands in almost always — are exactly what the
+    // triplet constructor below produces after its sort, so they can be
+    // laid out directly in `O(nnz)` instead of paying that sort (and the
+    // triplet buffer) on every rebuild. Anything else (unsorted or
+    // duplicated columns, which the triplet path sorts and sums) takes the
+    // general path unchanged.
+    let sorted = rows.iter().all(|row| {
+        let mut prev: Option<usize> = None;
+        row.iter().filter(|&&(_, v)| v != 0.0).all(|&(j, _)| {
+            let ok = j < n_cols && prev.map_or(true, |p| j > p);
+            prev = Some(j);
+            ok
+        })
+    });
+    if sorted {
+        let nnz: usize = rows.iter().map(|row| row.iter().filter(|&&(_, v)| v != 0.0).count()).sum();
+        let mut row_ptr = Vec::with_capacity(rows.len() + 1);
+        let mut col_ind = Vec::with_capacity(nnz);
+        let mut values = Vec::with_capacity(nnz);
+        row_ptr.push(0usize);
+        for row in rows {
+            for &(j, v) in row {
+                if v != 0.0 {
+                    col_ind.push(j);
+                    values.push(v);
+                }
+            }
+            row_ptr.push(col_ind.len());
+        }
+        let symbolic = faer::sparse::SymbolicSparseRowMat::new_checked(rows.len(), n_cols, row_ptr, None, col_ind);
+        return Csr::new(symbolic, values);
+    }
     let mut triplets = Vec::new();
     for (i, row) in rows.iter().enumerate() {
         for &(j, v) in row {

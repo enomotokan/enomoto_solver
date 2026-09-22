@@ -201,7 +201,9 @@ pub fn merge_parallel_columns(n: usize, a: &Csr, real_rows: &[Vec<(usize, f64)>]
         }
     });
 
-    let mut groups: std::collections::HashMap<Vec<(usize, u64)>, Vec<usize>> = std::collections::HashMap::new();
+    // Iterated only after sorting by first member, so the hasher cannot
+    // affect the result (see `crate::hash`).
+    let mut groups: crate::hash::FxHashMap<Vec<(usize, u64)>, Vec<usize>> = crate::hash::FxHashMap::default();
     for j in 0..n {
         let col = columns.col(j);
         // `lb[j]` must be finite (the fixed anchor `Substitution::apply`
