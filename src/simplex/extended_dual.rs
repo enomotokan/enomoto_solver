@@ -1860,6 +1860,92 @@ fn width_affine(lower: Option<Affine1>, upper: Option<Affine1>) -> Option<Affine
     }
 }
 
+/// PRICE's own row-major copy of the constraint matrix, split per row into
+/// a **nonbasic** prefix and a **basic** suffix — HiGHS's `HMatrix`
+/// `ar_N_start`-style partition (`HMatrix::update` swaps the entering and
+/// leaving columns' entries across the split on every basis change).
+///
+/// PRICE (`a_p = rho_p^T A_N`) only needs nonbasic columns: a basic
+/// column's tableau entry is never a ratio-test candidate. Walking the whole
+/// row, as this loop used to, spends about `m / n_total` of PRICE (and of the
+/// `touched_cols` walks that follow it: CHUZC, the dual update and the
+/// reset) on columns that are filtered out again right away. Fixed columns
+/// (`lb == ub`) are dropped entirely up front, which also removes the
+/// per-entry `std.lb[j] == std.ub[j]` test PRICE used to make.
+///
+/// Swapping entries changes the order *within* a row, which changes only the
+/// order in which PRICE first touches columns; each `a_p[j]` still sums its
+/// terms over rows in ascending `i`, so its value is unchanged, and the
+/// ratio test's candidate order is a total order on `(ratio, j)` (see
+/// [`Cand`]) that does not depend on it.
+struct PriceMatrix {
+    start: Vec<usize>,
+    /// End of row `i`'s nonbasic segment `start[i]..nb_end[i]`; the basic
+    /// segment runs to `start[i + 1]`.
+    nb_end: Vec<usize>,
+    index: Vec<u32>,
+    value: Vec<f64>,
+}
+
+impl PriceMatrix {
+    fn new(std: &StdForm, basis_pos: &[Option<usize>]) -> Self {
+        let m = std.n_rows;
+        let mut start = Vec::with_capacity(m + 1);
+        let mut nb_end = Vec::with_capacity(m);
+        let mut index = Vec::new();
+        let mut value = Vec::new();
+        start.push(0);
+        for i in 0..m {
+            let row = std.rows.row(i);
+            for basic in [false, true] {
+                for &(j, v) in row {
+                    if std.lb[j] != std.ub[j] && basis_pos[j].is_some() == basic {
+                        index.push(j as u32);
+                        value.push(v);
+                    }
+                }
+                if !basic {
+                    nb_end.push(index.len());
+                }
+            }
+            start.push(index.len());
+        }
+        PriceMatrix { start, nb_end, index, value }
+    }
+
+    /// Row `i`'s nonbasic entries.
+    #[inline]
+    fn nonbasic_row(&self, i: usize) -> (&[u32], &[f64]) {
+        let (a, b) = (self.start[i], self.nb_end[i]);
+        (&self.index[a..b], &self.value[a..b])
+    }
+
+    /// Moves column `j` (rows `col`) from the nonbasic to the basic segment.
+    fn make_basic(&mut self, j: usize, col: &[(usize, f64)]) {
+        for &(i, _) in col {
+            let (a, e) = (self.start[i], self.nb_end[i]);
+            if let Some(k) = self.index[a..e].iter().position(|&x| x as usize == j) {
+                let last = e - 1;
+                self.index.swap(a + k, last);
+                self.value.swap(a + k, last);
+                self.nb_end[i] = last;
+            }
+        }
+    }
+
+    /// Moves column `j` (rows `col`) from the basic to the nonbasic segment.
+    fn make_nonbasic(&mut self, j: usize, col: &[(usize, f64)]) {
+        for &(i, _) in col {
+            let (e, b) = (self.nb_end[i], self.start[i + 1]);
+            if let Some(k) = self.index[e..b].iter().position(|&x| x as usize == j) {
+                self.index.swap(e + k, e);
+                self.value.swap(e + k, e);
+                self.nb_end[i] = e + 1;
+            }
+        }
+    }
+}
+
 /// Per-column cache of [`hat_lower`]/[`hat_upper`]/[`width_affine`], built
 /// once before [`solve_lp_dual_extended`]'s main loop starts and read for
 /// the rest of that call (`finish`/`polish_with_true_bounds`'s own tail
@@ -2028,17 +2114,8 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     // Result-density history for the DSE `tau` FTRAN (same role as
     // `density_col_aq`/`density_bfrt` below).
     let mut density_tau = sparse_lu::FtranDensity::new();
-    // PRICE's own copy of `std.rows` with fixed columns (`lb == ub`)
-    // dropped once up front, instead of testing `std.lb[j] == std.ub[j]`
-    // (two random loads) for every nonzero of every row PRICE visits,
-    // every iteration. Row order and within-row entry order are kept, so
-    // `a_p`'s accumulation order — and every value PRICE produces — is
-    // unchanged.
-    let price_rows = {
-        let rows: Vec<Vec<(usize, f64)>> =
-            (0..m).map(|i| std.rows.row(i).iter().copied().filter(|&(j, _)| std.lb[j] != std.ub[j]).collect()).collect();
-        crate::sparse::CsrMat::from_rows(&rows, n_total)
-    };
+    // PRICE's partitioned row matrix ([`PriceMatrix`]'s own docs).
+    let mut price_mat = PriceMatrix::new(std, &basis_pos);
     // Reused right-hand-side buffers for the periodic `x_B(M)` drift check.
     let mut drift_rhs_base = vec![0.0f64; m];
     let mut drift_rhs_slope = vec![0.0f64; m];
@@ -2865,7 +2942,9 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 if rv.abs() <= TOL {
                     continue;
                 }
-                for &(j, v) in price_rows.row(i) {
+                let (row_idx, row_val) = price_mat.nonbasic_row(i);
+                for (&j, &v) in row_idx.iter().zip(row_val) {
+                    let j = j as usize;
                     if !touched[j] {
                         touched[j] = true;
                         touched_cols.push(j);
@@ -3710,6 +3789,8 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         basis_pos[leaving_var] = None;
         basis[r] = q;
         basis_pos[q] = Some(r);
+        price_mat.make_basic(q, std.cols.col(q));
+        price_mat.make_nonbasic(leaving_var, std.cols.col(leaving_var));
         nb_status[q] = None;
         if debug_delta0 && delta0_iter.is_none() {
             let all_off_m_side = m_flagged_cols.iter().all(|&j| match nb_status[j] {
@@ -3760,6 +3841,21 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         timed!(profile_phases, prof_phases::DUAL_UPDATE, {
             for &j in &touched_cols {
                 d[j] -= theta_d * a_p[j];
+            }
+            // The leaving column was basic during PRICE, so it is not in
+            // `touched_cols`; its tableau entry is recomputed here with
+            // PRICE's own filter and summation order (rows ascending,
+            // `|rho_i| > TOL`), i.e. the value PRICE's full-row walk used
+            // to produce for it.
+            if std.lb[leaving_var] != std.ub[leaving_var] {
+                let mut a_leaving = 0.0f64;
+                for &(i, v) in std.cols.col(leaving_var) {
+                    let rv = rho[i];
+                    if rv.abs() > TOL {
+                        a_leaving += rv * v;
+                    }
+                }
+                d[leaving_var] -= theta_d * a_leaving;
             }
             for &j in &touched_cols {
                 a_p[j] = 0.0;
