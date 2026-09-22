@@ -1703,6 +1703,12 @@ fn try_refactorize(std: &StdForm, t: &Tableau, prev: Option<&sparse_lu::FtLu>) -
 /// `basis`/`basis_pos`), so this can never mis-factorize even if that
 /// invariant is ever violated.
 fn try_initial_refactorize(std: &StdForm, t: &Tableau) -> Option<sparse_lu::FtLu> {
+    // Start-of-solve point for this module's own solves (the basis here is
+    // still the untouched all-slack one), and so where the LU pivot
+    // threshold's per-solve escalation ladder is rewound — see
+    // `sparse_lu::pivot_threshold`'s own docs for why a thread must not
+    // inherit the previous solve's escalated floor.
+    sparse_lu::reset_pivot_threshold();
     let rows = t.basis_rows_sparse();
     sparse_lu::factorize_diagonal(std.n_rows, &rows)
         .or_else(|| sparse_lu::factorize(std.n_rows, &rows))
