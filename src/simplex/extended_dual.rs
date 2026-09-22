@@ -385,13 +385,6 @@ mod prof_phases {
         );
         {
             use super::super::sparse_lu as lu;
-            let taken = lu::PROF_HYPER_U_TAKEN.load(Relaxed);
-            eprintln!(
-                "  hyper_u taken={taken} declined(seeds={} dense={}) avg_reach_frac={:.3}",
-                lu::PROF_HYPER_U_DECLINED_SEEDS.load(Relaxed),
-                lu::PROF_HYPER_U_DECLINED_DENSE.load(Relaxed),
-                lu::PROF_HYPER_U_REACH_SUM.load(Relaxed) as f64 / lu::PROF_HYPER_U_M_SUM.load(Relaxed).max(1) as f64,
-            );
             eprintln!(
                 "  btran_l scatter={} gather={}",
                 lu::PROF_BTRAN_L_SCATTER.load(Relaxed),

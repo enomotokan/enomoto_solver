@@ -136,25 +136,6 @@ pub(crate) static PROF_BUCKET_SCAN_NS: AtomicUsize = AtomicUsize::new(0);
 /// at `0` and the heuristic is a no-op for that problem).
 pub(crate) static PROF_DENSE_FALLBACK_STEPS: AtomicUsize = AtomicUsize::new(0);
 
-/// `ENOMOTO_PROF_PHASES_EXT` diagnostics for the reach-restricted `U`
-/// solve ([`FtLu::u_solve_hyper_into`]) — the §2.6 counterpart to
-/// `extended_dual`'s own `density_gate_ftrans`, and the first number to
-/// look at when a problem's wall time moves under that change: all-zero
-/// `PROF_HYPER_U_TAKEN` means the hyper path never ran there, so any
-/// timing difference on that problem is noise.
-///
-/// Sparse-path FTRANs whose `U` stage ran reach-restricted.
-pub(crate) static PROF_HYPER_U_TAKEN: AtomicUsize = AtomicUsize::new(0);
-/// ...declined because the seed set was already denser than
-/// [`HYPER_U_SEED_FRACTION`].
-pub(crate) static PROF_HYPER_U_DECLINED_SEEDS: AtomicUsize = AtomicUsize::new(0);
-/// ...declined mid-DFS on hitting an [`OffDiag::Dense`] eta.
-pub(crate) static PROF_HYPER_U_DECLINED_DENSE: AtomicUsize = AtomicUsize::new(0);
-/// Summed reach-set size over the `PROF_HYPER_U_TAKEN` calls, against
-/// [`PROF_HYPER_U_M_SUM`]'s summed `m` over the same calls — the ratio is
-/// what fraction of `u_seq` the hyper path actually walks.
-pub(crate) static PROF_HYPER_U_REACH_SUM: AtomicUsize = AtomicUsize::new(0);
-pub(crate) static PROF_HYPER_U_M_SUM: AtomicUsize = AtomicUsize::new(0);
 /// BTRANs whose `L^{-T}` stage took the row-major scatter form, against
 /// those that fell back to the column-major gather form — see
 /// [`BTRAN_L_SCATTER_FRACTION`].
@@ -566,16 +547,6 @@ pub struct GpScratch {
     stack: Vec<usize>,
     seeds: Vec<usize>,
     reach: Vec<usize>,
-    /// [`FtLu::u_solve_hyper_into`]'s own seed list — the `U`-stage
-    /// counterpart to [`Self::seeds`], holding *positions* into `u_seq`
-    /// rather than elimination steps. Separate from `seeds` (rather than
-    /// reusing it) because the `L`-stage's own [`Self::reach`] is still
-    /// live at that point: it *is* where most of these seeds come from.
-    u_seeds: Vec<usize>,
-    /// [`FtLu::u_solve_hyper_into`]'s own collected reach set, in `u_seq`
-    /// positions — separate from [`Self::reach`] for the same reason
-    /// [`Self::u_seeds`] is.
-    u_reach: Vec<usize>,
 }
 
 impl GpScratch {
@@ -586,8 +557,6 @@ impl GpScratch {
             stack: Vec::new(),
             seeds: Vec::new(),
             reach: Vec::new(),
-            u_seeds: Vec::new(),
-            u_reach: Vec::new(),
         }
     }
 
@@ -596,10 +565,9 @@ impl GpScratch {
     /// `0` (where every never-stamped entry's own initial `0` would
     /// otherwise read as "already visited this call"). Mirrors
     /// [`FtLu::u_transpose_solve_into`]'s own epoch handling, and exists
-    /// as a method rather than a bare `+= 1` at each call site now that
-    /// two different traversals ([`LuFactors::l_solve_sparse_into`] and
-    /// [`FtLu::u_solve_hyper_into`]) share one scratch and therefore
-    /// advance it twice per solve.
+    /// as a method rather than a bare `+= 1` at each call site: the
+    /// wrap-around case is easy to forget and impossible to reproduce on
+    /// demand, so it lives in one place.
     #[inline]
     fn bump_epoch(&mut self) -> u32 {
         self.epoch = self.epoch.wrapping_add(1);
@@ -1923,35 +1891,13 @@ fn btran_l_scatter_gate() -> f64 {
     std::env::var("ENOMOTO_BTRAN_L_SCATTER").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(BTRAN_L_SCATTER_FRACTION)
 }
 
-/// Seed-density ceiling for [`FtLu::u_solve_hyper_into`]: the `U` stage of
-/// a sparse-path FTRAN takes the reach-restricted solve only when the set
-/// of positions that could still be nonzero on entry is under this
-/// fraction of `m`.
-///
-/// This is the gate `docs/lu_comparison_enomoto_vs_highs.md` §2.6 says
-/// HiGHS has and this crate did not: HiGHS's `ftranU` runs `solveHyper`
-/// only when `expected_density <= kHyperFtranU` (`0.10`), and takes an
-/// ordinary scan otherwise. The one previous attempt at a Gilbert-Peierls
-/// `u_solve_into` here (see that method's own docs) had **no such gate** —
-/// it ran the DFS unconditionally, on every FTRAN of every problem — and
-/// measured +10.4% aggregate. The DFS's own cost is proportional to the
-/// reach it walks, so a reach that ends up near-`m` pays full freight for
-/// a scan the plain loop does with no bookkeeping at all; gating on the
-/// seed count (known *before* the DFS, unlike the reach) is what keeps
-/// that case on the cheap path.
-///
-/// `0.10` mirrors HiGHS's own `kHyperFtranU` rather than being tuned
-/// separately — see this change's own analysis note for the A/B behind
-/// leaving it there.
-const HYPER_U_SEED_FRACTION: f64 = 0.10;
-
-/// [`HYPER_U_SEED_FRACTION`], overridable via `ENOMOTO_FTRAN_U_HYPER` —
-/// any value `<= 0.0` disables the reach-restricted `U` solve outright
-/// (restoring the unconditional `u_seq` scan), which is how the A/B behind
-/// the constant's own value is produced. Read once per [`FtLu::new`],
-/// never per solve, for the same reason [`expected_dense_gate`] is.
-fn hyper_u_seed_gate() -> f64 {
-    std::env::var("ENOMOTO_FTRAN_U_HYPER").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(HYPER_U_SEED_FRACTION)
+/// Whether [`FtLu::u_solve_into`] tests a slot for zero *before* dividing
+/// it by its eta's pivot rather than after — see that method's own docs.
+/// `ENOMOTO_FTRAN_U_ZERO_SKIP=0` restores the unconditional divide, which
+/// is how the A/B behind the default is produced. Read once per
+/// [`FtLu::new`], never per solve.
+fn u_zero_skip_enabled() -> bool {
+    std::env::var("ENOMOTO_FTRAN_U_ZERO_SKIP").map(|v| v != "0").unwrap_or(true)
 }
 
 /// Running average of one FTRAN *call site*'s own **result** density,
@@ -2141,9 +2087,9 @@ pub struct FtLu {
     /// Lives on [`FtLu`] rather than [`LuFactors`] so the factor struct
     /// stays pure data.
     btran_l_scatter: f64,
-    /// [`hyper_u_seed_gate`]'s value, captured once per refactorization —
-    /// see [`Self::u_solve_hyper_into`].
-    hyper_u_gate: f64,
+    /// [`u_zero_skip_enabled`]'s value, captured once per refactorization —
+    /// see [`Self::u_solve_into`].
+    u_zero_skip: bool,
 }
 
 /// Per-row-of-`U`-and-`L` coefficient for [`FtLu::build_tick`]'s `m`-only
@@ -2229,7 +2175,7 @@ impl FtLu {
             tick: Cell::new(0),
             build_tick,
             btran_l_scatter: btran_l_scatter_gate(),
-            hyper_u_gate: hyper_u_seed_gate(),
+            u_zero_skip: u_zero_skip_enabled(),
         }
     }
 
@@ -2430,11 +2376,10 @@ impl FtLu {
         // part this function's own docs describe, so its cost is added
         // only for etas whose `xp` actually survives the skip.
         self.add_tick(self.base.m as u64);
-        if self.hyper_u_gate <= 0.0 {
-            // `ENOMOTO_FTRAN_U_HYPER=0`: the pre-§2.6 loop exactly, so that
-            // arm of the A/B is this crate's own previous behaviour and not
-            // "previous behaviour plus one unrelated improvement". See
-            // [`Self::u_solve_hyper_into`] for what the flag otherwise buys.
+        if !self.u_zero_skip {
+            // `ENOMOTO_FTRAN_U_ZERO_SKIP=0`: the pre-§2.6 loop exactly, so
+            // that arm of the A/B is this crate's own previous behaviour
+            // and not "previous behaviour plus one unrelated change".
             for eta in self.u_seq.iter().rev() {
                 let p = eta.slot;
                 x[p] /= eta.pivot;
@@ -2493,142 +2438,6 @@ impl FtLu {
                 }
             }
         }
-    }
-
-    /// [`Self::u_solve_into`] restricted to the *reach set* of the
-    /// positions `x` can still be nonzero at on entry — the `U`-stage
-    /// counterpart to [`LuFactors::l_solve_sparse_into`], and the fourth
-    /// and last of HiGHS's own hyper-sparse solve directions
-    /// (`docs/lu_comparison_enomoto_vs_highs.md` §2.6) this crate was
-    /// missing. Returns `false` without touching `x` if the hyper-sparse
-    /// path declines the call, in which case the caller must run the plain
-    /// [`Self::u_solve_into`] scan instead.
-    ///
-    /// **Seeds.** Only the sparse FTRAN path can call this, because only
-    /// it knows `x`'s support without an `O(m)` scan to find it: the
-    /// `L`-stage's own Gilbert-Peierls reach (`gp.reach`) bounds it, and
-    /// the `R`-eta loop then adds at most one position per eta (`reta.p`,
-    /// the only entry each one writes). Those two lists together are a
-    /// superset of `x`'s nonzeros, which this filters down to the actually
-    /// nonzero ones — the whole point of the exercise being to never scan
-    /// all of `x` just to find out where it isn't.
-    ///
-    /// **Why descending `u_seq` position is a valid topological order** —
-    /// the same argument [`LuFactors::l_solve_sparse_into`] makes for
-    /// ascending step order, mirrored: every eta's `off_diag` targets sit
-    /// at strictly *lower* `u_seq` positions than the eta itself, an
-    /// invariant `FtLu::new` establishes (`U` upper-triangular, `u_seq`
-    /// in slot order) and [`Self::commit_update`] maintains (the replaced
-    /// slot is re-`push`ed at the very end, and row `p` is first deleted
-    /// from every eta that referenced it, so no edge ever points forward).
-    /// [`Self::u_solve_into`]'s own plain reverse scan depends on exactly
-    /// the same invariant to be correct at all, so this adds no new
-    /// assumption — just the DFS that lets the scan skip what it cannot
-    /// reach.
-    ///
-    /// **Declines** (returns `false`) in two cases, both cheap to detect
-    /// before any work is done to `x`:
-    /// 1. The seed set is already denser than [`HYPER_U_SEED_FRACTION`] of
-    ///    `m` — see that constant's own docs for why an ungated version of
-    ///    exactly this function measured +10.4% the last time it was tried.
-    /// 2. The DFS reaches an eta stored in [`OffDiag::Dense`] form, whose
-    ///    "edges" would cost a full `O(m)` scan of its dense array to
-    ///    enumerate — at which point the traversal alone already costs more
-    ///    than the scan it is trying to avoid. The DFS is read-only, so
-    ///    bailing out mid-walk leaves `x` untouched and the fallback exact.
-    fn u_solve_hyper_into(&self, x: &mut [f64], gp: &mut GpScratch) -> bool {
-        let m = self.base.m;
-        if self.hyper_u_gate <= 0.0 || m == 0 {
-            return false;
-        }
-        let limit = (self.hyper_u_gate * m as f64) as usize;
-
-        gp.u_seeds.clear();
-        for &step in &gp.reach {
-            if x[step] != 0.0 {
-                gp.u_seeds.push(self.slot_pos[step]);
-            }
-        }
-        for reta in &self.r_etas {
-            if x[reta.p] != 0.0 {
-                gp.u_seeds.push(self.slot_pos[reta.p]);
-            }
-        }
-        if gp.u_seeds.len() > limit {
-            PROF_HYPER_U_DECLINED_SEEDS.fetch_add(1, Ordering::Relaxed);
-            return false;
-        }
-
-        let epoch = gp.bump_epoch();
-        gp.u_reach.clear();
-        for i in 0..gp.u_seeds.len() {
-            let seed = gp.u_seeds[i];
-            if gp.visited_epoch[seed] == epoch {
-                continue;
-            }
-            gp.visited_epoch[seed] = epoch;
-            gp.stack.push(seed);
-            while let Some(pos) = gp.stack.pop() {
-                gp.u_reach.push(pos);
-                let targets = match &self.u_seq[pos].off_diag {
-                    OffDiag::Sparse(v) => v,
-                    // Case 2 above: abandon the whole attempt rather than
-                    // pay `O(m)` to enumerate one node's edges.
-                    OffDiag::Dense { .. } => {
-                        gp.stack.clear();
-                        PROF_HYPER_U_DECLINED_DENSE.fetch_add(1, Ordering::Relaxed);
-                        return false;
-                    }
-                };
-                for &(row_step, _) in targets {
-                    let next = self.slot_pos[row_step];
-                    debug_assert!(next < pos, "u_seq off_diag edge must point to a strictly lower position");
-                    if gp.visited_epoch[next] != epoch {
-                        gp.visited_epoch[next] = epoch;
-                        gp.stack.push(next);
-                    }
-                }
-            }
-        }
-        gp.u_reach.sort_unstable();
-        PROF_HYPER_U_TAKEN.fetch_add(1, Ordering::Relaxed);
-        PROF_HYPER_U_REACH_SUM.fetch_add(gp.u_reach.len(), Ordering::Relaxed);
-        PROF_HYPER_U_M_SUM.fetch_add(m, Ordering::Relaxed);
-
-        // CLOCK-trigger accounting (`Self::tick`'s own docs): unlike
-        // `u_solve_into`'s flat `m` (its loop visits every eta regardless),
-        // this path's own fixed cost is the reach it walks — counted once
-        // here for the DFS and once per eta below for the elimination, the
-        // same two-term shape `solve_sparse_into` already uses for the
-        // `L` stage.
-        self.add_tick(gp.u_reach.len() as u64);
-        for &pos in gp.u_reach.iter().rev() {
-            let eta = &self.u_seq[pos];
-            let p = eta.slot;
-            if x[p] == 0.0 {
-                continue;
-            }
-            x[p] /= eta.pivot;
-            let xp = x[p];
-            self.add_tick(eta.off_diag.nnz() as u64);
-            match &eta.off_diag {
-                OffDiag::Sparse(v) => {
-                    for &(row_step, v) in v {
-                        x[row_step] -= v * xp;
-                    }
-                }
-                // Unreachable: the DFS above already declined on any dense
-                // eta in the reach. Kept as the plain scan rather than an
-                // `unreachable!()` so a future change to that gate cannot
-                // turn a correctness question into a panic.
-                OffDiag::Dense { data, .. } => {
-                    for (xi, &v) in x.iter_mut().zip(data.iter()) {
-                        *xi -= v * xp;
-                    }
-                }
-            }
-        }
-        true
     }
 
     /// `R_k^{-1} ... R_1^{-1} L^{-1}` applied to a vector in original row
@@ -2750,15 +2559,12 @@ impl FtLu {
             self.add_tick(reta.r.nnz() as u64);
             scratch[reta.p] -= dot;
         }
-        // `U` goes through the reach-restricted solve when this call's own
-        // seed set is sparse enough to be worth a DFS, and the plain scan
-        // otherwise — see [`Self::u_solve_hyper_into`]'s own docs, and
-        // [`HYPER_U_SEED_FRACTION`]'s for why the gate (absent from the
-        // earlier, reverted attempt at the same sparsification) is the
-        // part that matters.
-        if !self.u_solve_hyper_into(scratch, gp) {
-            self.u_solve_into(scratch);
-        }
+        // `U` stays on the plain `u_solve_into` scan — see that function's
+        // own docs for the *two* separate attempts at a reach-restricted
+        // counterpart (one ungated, one gated exactly the way HiGHS gates
+        // its own `ftranU`) that were both implemented, proven correct,
+        // measured over the full Netlib set, and reverted as regressions.
+        self.u_solve_into(scratch);
         let nnz = self.permute_out(scratch, out);
         scratch.fill(0.0);
         nnz
@@ -2791,9 +2597,7 @@ impl FtLu {
             scratch[reta.p] -= dot;
         }
         a_tilde_out.copy_from_slice(scratch);
-        if !self.u_solve_hyper_into(scratch, gp) {
-            self.u_solve_into(scratch);
-        }
+        self.u_solve_into(scratch);
         let nnz = self.permute_out(scratch, out);
         scratch.fill(0.0);
         nnz
