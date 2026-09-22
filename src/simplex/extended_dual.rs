@@ -430,6 +430,17 @@ mod prof_phases {
                 lu::PROF_SEARCH_CANDIDATES.load(Relaxed) as f64 / steps.max(1) as f64,
                 lu::PROF_BUCKET_SCAN_NS.load(Relaxed) as f64 / 1e6,
             );
+            // §2.4: the work an incremental `colFixMax` could have removed
+            // (see `PROF_COLMAX_RESCAN_ENTRIES`'s own docs), plus whether
+            // this solve's pivot threshold left its starting value — a
+            // flat benchmark on the escalation is uninterpretable without
+            // the latter.
+            eprintln!(
+                "  col_max_abs rescan_entries={} pivot_threshold={} (escalations={})",
+                lu::PROF_COLMAX_RESCAN_ENTRIES.load(Relaxed),
+                lu::pivot_threshold(),
+                lu::PROF_PIVOT_ESCALATIONS.load(Relaxed),
+            );
         }
         eprintln!(
             "  m_exit(q_was_m)={} harris_window_m_miss={} m_enter_via_flip={}",
@@ -607,6 +618,44 @@ const XB_DRIFT_ESCALATION_FACTOR: f64 = 10.0;
 /// absolute drift bound, `1e-4`) rather than letting escalation grow
 /// unbounded into territory no measurement has ever validated.
 const XB_DRIFT_TOL_MAX: f64 = super::FT_RESIDUAL_TOL;
+
+/// How many *numerically-caused* refactorizations this solve has to take
+/// before its LU pivot threshold is escalated one step
+/// (`sparse_lu::escalate_pivot_threshold`,
+/// `docs/lu_comparison_enomoto_vs_highs.md` §2.4) — **`0`, i.e. the
+/// escalation is off by default**, because it was measured and lost.
+///
+/// HiGHS raises `info_.factor_pivot_threshold` on a numerical failure and
+/// this crate can too, but on NETLIB93 tightening the floor costs far more
+/// in fill-in than it saves in refactorizations: at `10` (the value
+/// [`XB_DRIFT_ESCALATION_STEP`]'s own ladder uses, and the one measured)
+/// the 93-problem total went **+7.4%**, with `pilot87` +29.2% (6.50s ->
+/// 8.40s, reproducible across all three runs), `brandy` +67% and
+/// `gfrd-pnc` +12.3% — three problems past the 10%-regression bar on their
+/// own. The escalation fired on 7 of the 10 heaviest problems, because the
+/// `x_B(M)` drift trigger alone reaches 10 on most of them (`pilot` 21,
+/// `dfl001` 24), so it is the *ordinary* heavy solve that gets the `0.5`
+/// floor `sparse_lu::STABILITY`'s own docs already measured as ~4% worse.
+/// Raising this constant until only pathological solves qualify makes it
+/// fire nowhere on NETLIB93 at all, which is not a measurable improvement
+/// either — hence off, rather than retuned.
+///
+/// The mechanism is kept (and reachable via
+/// `ENOMOTO_PIVOT_ESCALATION_STEP`, alongside `ENOMOTO_PIVOT_THRESHOLD`
+/// for the floor itself) so that a future attempt — a smaller step than
+/// `sparse_lu::PIVOT_THRESHOLD_FACTOR`'s doubling, or a trouble signal
+/// narrower than the four below — can be A/B'd without re-plumbing it.
+///
+/// "Numerically caused" means the four triggers that fire because the
+/// factorization stopped agreeing with the basis it stands for — a
+/// rejected Forrest-Tomlin update, `x_B(M)` drift, `d` drift, and a pivot
+/// grossly inconsistent with PRICE. It deliberately excludes the
+/// *cost*-based triggers (eta-bump fill, `ft_max_updates`, the
+/// deterministic CLOCK): those fire on schedule even on a perfectly
+/// conditioned problem, so counting them would escalate `dfl001`'s
+/// hundreds of routine refactorizations into fill-in it has no numerical
+/// reason to pay for.
+const PIVOT_ESCALATION_STEP: usize = 0;
 
 /// Trigger (4) for this module — `super::FT_MAX_UPDATES`'s own equivalent
 /// (an unconditional backstop against unbounded Forrest-Tomlin eta-chain
@@ -1852,6 +1901,13 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         refine_zero_cost_placement(std, &mut active_cost, &mut nb_status, n_orig);
     }
 
+    // This solve's own pivot-threshold ladder starts from the default
+    // (`sparse_lu::STABILITY`, or `ENOMOTO_PIVOT_THRESHOLD`): the
+    // escalation below is per-solve state living in a thread-local, so a
+    // thread that has just finished a numerically nasty solve must not
+    // hand its raised floor — and the extra fill-in that buys — to this
+    // one. See `sparse_lu::pivot_threshold`'s own docs.
+    sparse_lu::reset_pivot_threshold();
     let mut lu = refactorize(std, &basis_pos, None)?;
     let mut since_check = 0usize;
 
@@ -2058,6 +2114,32 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     // from any static per-problem property, is what finally separates
     // "genuinely drift-heavy solve" from "fragile to any loosening at all".
     let mut drift_trigger_count: usize = 0;
+    // §2.4's own per-solve ladder, counted separately from
+    // `drift_trigger_count` because it answers a different question: that
+    // one counts only the `x_B(M)` residual trigger (whose *tolerance* it
+    // loosens), this one counts every numerically-caused refactorization
+    // (see [`PIVOT_ESCALATION_STEP`]) and tightens the *factorization*
+    // instead. `0` disables the escalation entirely, which is how the A/B
+    // behind it is produced without a rebuild.
+    let pivot_escalation_step: usize = std::env::var("ENOMOTO_PIVOT_ESCALATION_STEP")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(PIVOT_ESCALATION_STEP);
+    let mut numeric_trouble_count: usize = 0;
+    /// Records one numerically-caused refactorization and escalates the
+    /// LU pivot threshold every [`PIVOT_ESCALATION_STEP`] of them. A macro
+    /// rather than a closure: the four call sites are spread through a
+    /// loop body that already holds `&mut` borrows of half this function's
+    /// locals, and a closure capturing `numeric_trouble_count` mutably
+    /// would conflict with them.
+    macro_rules! note_numeric_trouble {
+        () => {{
+            numeric_trouble_count += 1;
+            if pivot_escalation_step != 0 && numeric_trouble_count % pivot_escalation_step == 0 {
+                sparse_lu::escalate_pivot_threshold();
+            }
+        }};
+    }
     // Separate, coarser cadence for the `d`-drift check below, mirroring
     // `super::RESIDUAL_CHECK_MULTIPLIER`'s own rationale for the classical
     // path's `since_residual_check`: this check's residual is dominated by
@@ -3247,6 +3329,11 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                     discard_banned_cols.push(q);
                 }
             }
+            // The PRICE-vs-FTRAN disagreement this branch caught is a
+            // numerical failure of the factorization in exactly §2.4's
+            // sense, whether it was gross (`ILLCOND`) or merely past
+            // `update_verify`'s tolerance (`VERIFY`).
+            note_numeric_trouble!();
             if profile_phases {
                 prof_phases::REFACTOR_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if pivot_grossly_inconsistent {
@@ -3555,8 +3642,14 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
             prof_phases::FT_UPDATE,
             !lu.try_update_precomputed(r, &a_tilde_buf, &e_tilde_buf, super::FT_MIN_PIVOT)
         );
-        if need_refactor && profile_phases {
-            prof_phases::REFACTOR_CAUSE_TRY_UPDATE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if need_refactor {
+            // Trigger (2), the Forrest-Tomlin update rejecting its own
+            // pivot — the most direct evidence there is that the current
+            // factorization is too loose (§2.4).
+            note_numeric_trouble!();
+            if profile_phases {
+                prof_phases::REFACTOR_CAUSE_TRY_UPDATE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
         }
         // Trigger (4) ([`ft_max_updates`]'s own docs) — an unconditional,
         // every-iteration check (like `super::FT_MAX_UPDATES`'s own site),
@@ -3622,6 +3715,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 need_refactor = resid_base > effective_drift_tol || resid_slope > effective_drift_tol;
                 if need_refactor {
                     drift_trigger_count += 1;
+                    note_numeric_trouble!();
                     if profile_phases {
                         prof_phases::REFACTOR_CAUSE_DRIFT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
@@ -3662,6 +3756,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                     }
                     if resid_d > D_DRIFT_TOL * scale_d {
                         need_refactor = true;
+                        note_numeric_trouble!();
                         if profile_phases {
                             prof_phases::REFACTOR_CAUSE_D_DRIFT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         }
