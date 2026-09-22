@@ -1396,6 +1396,7 @@ fn row_deviation(cache: &ColCache, basis: &[usize], x_b_base: &[f64], x_b_slope:
 /// some larger state struct: none of the arguments' owners are the same
 /// object across every call site — see [`solve_lp_dual_extended`]'s own
 /// `InfeasibleRows::set`/`rebuild` call sites).
+#[cfg(debug_assertions)]
 #[inline]
 fn row_infeasible_affine(cache: &ColCache, basis: &[usize], x_b_base: &[f64], x_b_slope: &[f64], noise_feasible: &[bool], i: usize) -> bool {
     row_deviation(cache, basis, x_b_base, x_b_slope, noise_feasible, i).is_some()

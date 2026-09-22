@@ -262,7 +262,7 @@ const DENSE_COL_FRACTION: f64 = 0.5;
 /// was. That is the search-explosion case this bound closes: on an
 /// ill-conditioned or fill-heavy step, the low-degree buckets hold
 /// hundreds of columns whose rows all get walked (and whose
-/// `ensure_col_max_abs` recomputes all get paid) to improve on a pivot
+/// stale column-max rescans all get paid) to improve on a pivot
 /// that was already acceptable.
 ///
 /// Like HiGHS's, the bound is only honoured once a pivot *has* been found
@@ -361,7 +361,7 @@ pub(crate) static PROF_SEARCH_CANDIDATES: AtomicUsize = AtomicUsize::new(0);
 /// threshold — without this, a flat benchmark on the §2.4 escalation
 /// can't be told apart from one where the ladder never fired at all.
 pub(crate) static PROF_PIVOT_ESCALATIONS: AtomicUsize = AtomicUsize::new(0);
-/// Entries `ensure_col_max_abs` walked to un-stale the columns
+/// Entries `find_best_pivot`'s lazy rescan walked to un-stale the columns
 /// `find_best_pivot` actually read — the total work an incremental
 /// `colFixMax` (`docs/lu_comparison_enomoto_vs_highs.md` §2.4) could have
 /// removed, and the reason removing it lost: since §2.5's
@@ -742,8 +742,7 @@ struct MarkowitzState {
     // `col_max_abs_dirty[j]`: `col_max_abs[j]` is stale — some entry of
     // column `j` shrank or left, so the stored value is an upper bound
     // rather than the true max. Recomputing is deferred to
-    // `ensure_col_max_abs`, called only once `find_best_pivot` is actually
-    // about to read it. Most columns `eliminate` dirties this way get
+    // `find_best_pivot`, and only once it is actually about to read it. Most columns `eliminate` dirties this way get
     // dirtied again by a later elimination step before `find_best_pivot`
     // ever visits them (a column's bucket position, which *is* updated
     // eagerly by `update_col_degree`, is what determines when that
@@ -951,7 +950,7 @@ impl MarkowitzState {
     /// never O(m).
     ///
     /// Marks `col_max_abs[j]` stale rather than recomputing it here; see
-    /// [`Self::ensure_col_max_abs`] and `col_max_abs_dirty`'s own docs for
+    /// `find_best_pivot`'s lazy rescan and `col_max_abs_dirty`'s own docs for
     /// why, including why the incremental alternative
     /// (`docs/lu_comparison_enomoto_vs_highs.md` §2.4's `colFixMax`) was
     /// measured and rejected.
@@ -964,25 +963,14 @@ impl MarkowitzState {
         self.col_max_abs_dirty[j] = true;
     }
 
-    /// Recomputes `col_max_abs[j]` from its current column-mirror
-    /// membership if it is marked stale, otherwise a no-op — called from
-    /// `find_best_pivot` right before it reads `col_max_abs[j]`, the one
-    /// place that value's currency actually matters.
-    fn ensure_col_max_abs(&mut self, j: usize) {
-        if !self.col_max_abs_dirty[j] {
-            return;
-        }
-        self.col_max_abs[j] = self.col_max_abs_rescan(j);
-        self.col_max_abs_dirty[j] = false;
-    }
-
     /// `max |a_ij|` over column `j`'s live entries, read straight off the
-    /// column mirror.
-    fn col_max_abs_rescan(&mut self, j: usize) -> f64 {
-        let col = self.mat.col(j);
-        self.prof_colmax_rescan_entries += col.len();
+    /// column mirror — `find_best_pivot`'s lazy un-staling of a dirty
+    /// `col_max_abs[j]`, taken only once that column has a candidate entry
+    /// that actually needs the stability threshold. Through `&self` so it
+    /// can run while the search holds a borrow of column `j`.
+    fn col_max_abs_scan(&self, j: usize) -> f64 {
         let mut mx = 0.0f64;
-        for &r in col {
+        for &r in self.mat.col(j) {
             if let Some(v) = self.mat.row_get(r as usize, j) {
                 mx = f64::max(mx, v.abs());
             }
@@ -1031,21 +1019,26 @@ impl MarkowitzState {
             // membership only ever changes via `update_col_degree`/
             // `remove_from_bucket_col`, called elsewhere, never from
             // inside `find_best_pivot`), so its length and contents are
-            // fixed for this `deg_col`'s scan — indexing just avoids
-            // holding an immutable borrow of `self` across the
-            // `ensure_col_max_abs(j)` call below, which needs `&mut self`.
+            // fixed for this `deg_col`'s scan.
             for idx in 0..self.col_buckets[deg_col].len() {
                 let j = self.col_buckets[deg_col][idx];
                 if self.col_used[j] || (skip_dense && self.initially_dense[j]) {
                     continue;
                 }
-                self.ensure_col_max_abs(j);
                 // HiGHS's `mc_min_pivot[j] = max_value * pivot_threshold`
-                // (§2.4): the product is a per-*column* quantity, so it is
-                // hoisted out of the row loop below rather than recomputed
-                // per candidate entry. Same product, same rounding, same
-                // comparisons.
-                let min_pivot = self.threshold * self.col_max_abs[j];
+                // (§2.4), a per-*column* quantity — computed lazily, on the
+                // first entry that survives the Markowitz-score filter
+                // below, rather than before the column's scan: a stale
+                // `col_max_abs[j]` costs a full column rescan, and on a
+                // column none of whose entries can beat `best_score` it is
+                // never read at all (the common case once a good pivot is
+                // in hand — `pilot87` rescanned 14.2M entries per solve
+                // up front). The rescan reads only the (unchanging, during
+                // this search) matrix, so the value — and every
+                // comparison against it — is exactly the eager one.
+                let col_dirty = self.col_max_abs_dirty[j];
+                let mut min_pivot: Option<f64> = None;
+                let mut rescanned: Option<f64> = None;
                 let col_deg = self.col_degree[j];
                 searched += 1;
                 for &r in self.mat.col(j) {
@@ -1063,7 +1056,18 @@ impl MarkowitzState {
                         continue;
                     }
                     let Some(v) = self.mat.row_get(i, j) else { continue };
-                    if v == 0.0 || v.abs() < min_pivot {
+                    if v == 0.0 {
+                        continue;
+                    }
+                    let mp = *min_pivot.get_or_insert_with(|| {
+                        let mx = if col_dirty {
+                            *rescanned.insert(self.col_max_abs_scan(j))
+                        } else {
+                            self.col_max_abs[j]
+                        };
+                        self.threshold * mx
+                    });
+                    if v.abs() < mp {
                         continue;
                     }
                     if score < best_score || (score == best_score && v.abs() > best_pivot_abs) {
@@ -1071,6 +1075,11 @@ impl MarkowitzState {
                         best = Some((i, j));
                         best_pivot_abs = v.abs();
                     }
+                }
+                if let Some(mx) = rescanned {
+                    self.prof_colmax_rescan_entries += self.mat.col(j).len();
+                    self.col_max_abs[j] = mx;
+                    self.col_max_abs_dirty[j] = false;
                 }
                 if best_score == 0 {
                     PROF_TRIVIAL_STEPS.fetch_add(1, Ordering::Relaxed);
@@ -3166,6 +3175,25 @@ pub struct FtLu {
     /// once-*every*-iteration BTRAN/FTRAN paths, not just `try_update`)
     /// keep a plain sequential scan with no pointer-chasing indirection.
     u_seq: Vec<UEta>,
+    /// The **singleton** `U` etas (empty `off_diag`: a bare diagonal pivot)
+    /// of the factorization as built, held apart from `u_seq` — 42-99% of
+    /// all `m` etas right after a refactorization on the heavy Netlib
+    /// problems. A singleton's own division reads and writes only its own
+    /// slot, and by `u_seq`'s triangular order every eta that writes into
+    /// that slot (FTRAN) or reads it (BTRAN) sits *later* in the sequence,
+    /// so its division can run after the whole `u_seq` pass in
+    /// [`Self::u_solve_into`] and before it in the `U^T` sweeps without
+    /// changing a single result bit — while the sequential loops skip
+    /// visiting them at all. Order within `singles` is irrelevant (the
+    /// divisions are independent); `commit_update` pulls a replaced one
+    /// out with `swap_remove`. `u_seq` never feeds an eta back in here:
+    /// an eta that loses its last off-diagonal entry later just stays in
+    /// `u_seq`, exact either way.
+    singles: Vec<UEta>,
+    /// `singles_pos[slot]` is `slot`'s index into `singles`, `usize::MAX`
+    /// when `slot` lives in `u_seq` instead (and vice versa for
+    /// `slot_pos`).
+    singles_pos: Vec<usize>,
     /// `slot_pos[slot]` is `slot`'s current index into `u_seq` — kept in
     /// sync by `try_update` over exactly the range its own
     /// `Vec::remove`/`push` already touches (see `try_update`'s own docs),
@@ -3357,18 +3385,31 @@ impl FtLu {
         // every stored entry, matching what `factorize_reusing_order`
         // counts as it goes.
         let fill_baseline = (l_nnz + u_off) as usize + m;
-        let u_seq: Vec<UEta> = (0..m)
-            .map(|slot| UEta {
+        let mut u_seq: Vec<UEta> = Vec::with_capacity(m);
+        let mut singles: Vec<UEta> = Vec::new();
+        let mut slot_pos = vec![usize::MAX; m];
+        let mut singles_pos = vec![usize::MAX; m];
+        for slot in 0..m {
+            let eta = UEta {
                 slot,
                 pivot: pivots[slot],
                 off_diag: HybridVec::pack(m, std::mem::take(&mut off_diags[slot]), DENSE_ETA_FRACTION),
-            })
-            .collect();
+            };
+            if eta.off_diag.nnz() == 0 {
+                singles_pos[slot] = singles.len();
+                singles.push(eta);
+            } else {
+                slot_pos[slot] = u_seq.len();
+                u_seq.push(eta);
+            }
+        }
         let fill = u_seq.iter().map(|e: &UEta| e.off_diag.nnz()).sum();
         FtLu {
             base,
             u_seq,
-            slot_pos: (0..m).collect(),
+            singles,
+            singles_pos,
+            slot_pos,
             row_owners,
             r_etas: Vec::new(),
             scratch_a_tilde: vec![0.0; m],
@@ -3554,6 +3595,22 @@ impl FtLu {
         // onto a different trajectory — in exchange for modelling a
         // constant factor within the same `O(m)`.
         self.add_tick(self.base.m as u64);
+        // Singletons first (see `singles`' own docs): nothing feeds a
+        // singleton's slot, so it is `needed` only if seeded, and its
+        // value is final before any `u_seq` eta reads it.
+        for eta in &self.singles {
+            let p = eta.slot;
+            if !needed.is_marked(p) {
+                continue;
+            }
+            let y = eta.off_diag.dot_dense(z);
+            z[p] = (z[p] - y) / eta.pivot;
+            if z[p] != 0.0 {
+                for &q in &self.row_owners[p] {
+                    needed.mark(q);
+                }
+            }
+        }
         for eta in &self.u_seq {
             let p = eta.slot;
             if !needed.is_marked(p) {
@@ -3636,6 +3693,9 @@ impl FtLu {
                 self.add_tick(eta.off_diag.nnz() as u64);
                 eta.off_diag.axpy_into_dense(-xp, x);
             }
+            for eta in &self.singles {
+                x[eta.slot] /= eta.pivot;
+            }
             return;
         }
         for eta in self.u_seq.iter().rev() {
@@ -3662,6 +3722,14 @@ impl FtLu {
             // convention), so the dense arm leaves `x[p]` — just divided
             // above — untouched, same as the sparse one.
             eta.off_diag.axpy_into_dense(-xp, x);
+        }
+        // Singletons last (see `singles`' own docs): every write into their
+        // slots has happened by now. Same zero-skip as the loop above.
+        for eta in &self.singles {
+            let p = eta.slot;
+            if x[p] != 0.0 {
+                x[p] /= eta.pivot;
+            }
         }
     }
 
@@ -4006,7 +4074,19 @@ impl FtLu {
         debug_assert_eq!(self.r_etas.len(), 0, "solve_transpose_unit_into requires a fresh (update-free) factorization");
         let s0 = self.base.col_perm_inv[i];
         scratch[s0] = 1.0;
-        self.u_transpose_solve_from(scratch, s0);
+        // On a fresh factorization `u_seq` holds the non-singleton slots in
+        // ascending slot order, so the `[0, s0)` prefix is `u_seq`'s
+        // prefix of slots below `s0`; the singletons at or after `s0` get
+        // the same `(z - 0) / pivot` the unsplit sweep gave them, first.
+        for eta in &self.singles {
+            let p = eta.slot;
+            if p >= s0 {
+                let y = eta.off_diag.dot_dense(scratch);
+                scratch[p] = (scratch[p] - y) / eta.pivot;
+            }
+        }
+        let start = self.u_seq.partition_point(|e| e.slot < s0);
+        self.u_transpose_solve_from(scratch, start);
         self.l_transpose_solve_into(scratch, out);
         scratch.fill(0.0);
     }
@@ -4162,8 +4242,8 @@ impl FtLu {
         debug_assert_eq!(e_tilde.len(), m, "e_tilde must be the full dense row");
         let p = self.base.col_perm_inv[basis_slot];
 
-        let seq_pos = self.slot_pos[p];
-        let old_pivot = self.u_seq[seq_pos].pivot;
+        let single_idx = self.singles_pos[p];
+        let old_pivot = if single_idx != usize::MAX { self.singles[single_idx].pivot } else { self.u_seq[self.slot_pos[p]].pivot };
 
         // The `R` eta is built straight out of `e_tilde` — same entries,
         // same order, same sparse/dense choice as the `collect()`-then-
@@ -4185,11 +4265,24 @@ impl FtLu {
         // update `slot_pos` for exactly that range (elements the memmove
         // itself already touches, so this is no extra asymptotic cost)
         // rather than the old `find_seq_pos`'s full O(m) re-scan.
-        let removed = self.u_seq.remove(seq_pos);
+        let removed = if single_idx != usize::MAX {
+            // A singleton leaves `singles` instead (order there is free);
+            // `u_seq` is untouched until the push below.
+            let removed = self.singles.swap_remove(single_idx);
+            if let Some(moved) = self.singles.get(single_idx) {
+                self.singles_pos[moved.slot] = single_idx;
+            }
+            self.singles_pos[p] = usize::MAX;
+            removed
+        } else {
+            let seq_pos = self.slot_pos[p];
+            let removed = self.u_seq.remove(seq_pos);
+            for pos in seq_pos..self.u_seq.len() {
+                self.slot_pos[self.u_seq[pos].slot] = pos;
+            }
+            removed
+        };
         self.fill -= removed.off_diag.nnz();
-        for pos in seq_pos..self.u_seq.len() {
-            self.slot_pos[self.u_seq[pos].slot] = pos;
-        }
 
         // Unregister slot `p`'s *old* off-diagonal entries from
         // `row_owners` before overwriting them below — otherwise a stale
