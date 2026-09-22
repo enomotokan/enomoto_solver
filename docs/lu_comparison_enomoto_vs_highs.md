@@ -24,7 +24,7 @@ ENOMOTO 側で高速化に参考になりそうな点をまとめる。
 | 密行列dispatch | `is_dense_input()` → `faer::PartialPivLu` | なし (常にMarkowitzカーネル) |
 | 更新 | Forrest-Tomlin (U-eta列 + R-eta行) | Forrest-Tomlin (`updateFT`) — **構造が違う** |
 | 求解 (FTRAN/BTRAN) | FTRAN-L は GP疎求解、**BTRAN-L は転置行major + 密度ゲート付き scatter (§2.6 で実装)**、U は密スキャン | **L/U 両方向で hyper-sparse + sparse の切替** |
-| 再分解 | 毎回ゼロから Markowitz | **`refactor_info_` に前回ピボット列を記憶し `rebuild()` で再利用** |
+| 再分解 | 前回の**列順**を再利用 (`factorize_reusing`、行は選び直し) + フル Markowitz フォールバック (§2.2 で実装) | `refactor_info_` に前回ピボット順を記憶し `rebuild()` で再利用 (**ホットスタート時のみ**、§2.2) |
 
 ---
 
@@ -57,20 +57,42 @@ ENOMOTO も `find_best_pivot` のバケットスキャンで「スコア0」を�
 
 HiGHS は分解成功時に `refactor_info_` へ
 `pivot_row / pivot_var / pivot_type` を保存する (`buildKernel` 内で push)。
-次回の同一基底分解時、`HFactor::build()` はまず `rebuild()` を試み、
+`HFactor::build()` はまず `rebuild()` を試み、
 **記憶したピボット順で `ftranL` を回すだけで L/U を再構築**する。
 `buildSimple`+`buildKernel` のピボット探索全体をスキップできる。
 
-ENOMOTO は毎回ゼロから Markowitz 探索。反復中に基底がほぼ同じ (数本入れ替え)
-であることを考えると、HiGHS 方式は「探索コスト」を大幅に削れる。
+> **訂正 (2026-09-22)**: この節はもともと「反復中に基底がほぼ同じなのだから
+> HiGHS 方式は探索コストを大幅に削れる」と書いていたが、**HiGHS が
+> `rebuild()` を使うのは反復中の再分解ではない**。`refactor_info_.use` を
+> 立てるのは `HEkk::setNlaRefactorInfo()` だけで、これはホットスタート
+> (保存した基底へ戻って解き直す)経路である。反復中の再分解
+> (`HSimplexNla::invert()`)は `refactor_info_.clear()` 済みの状態で
+> `buildSimple`+`buildKernel` を通る。`rebuild()` が相対安定性判定を持たず
+> 絶対値 `pivot_tolerance` だけを見て、外れたら即 rank deficiency を返すのも
+> 「同じ基底を分解し直すだけだから外れないはず」という前提による
+> (`assert(abs_pivot >= pivot_tolerance);`)。
 
-> 注意: HiGHS は列順 (pivot順) の再利用が**数値的安定性の観点**でリスクにもなる
-> ため、`rebuild()` が pivot tolerance を下回ったら rank deficiency を返して
-> フル `buildSimple`+`buildKernel` にフォールバックする。この安全弁ごと移植
-> する必要がある。
+**実装済み (2026-09-22、`analysis/pivot_order_reuse_20260922_120602.md`)**:
+上記のとおり (行, 列) 両方の順をそのまま再生する HiGHS 形の移植は、
+基底が変わっている以上ほぼ必ず棄却される(NETLIB 実測で採択率 0〜4%、
+棄却理由のほぼ全部が「記録した行に成分がない」)。FT 更新は基底スロットの
+列を差し替えるが、入基底列が「出た列のピボット行」に非ゼロを持つ理由は
+ないからである。
 
-**参考度: 高** — ENOMOTO の分解は「衝突に強い BTreeMap 走査」が高コストなので、
-探索スキップの効果は大きいと思われる。
+そこで `sparse_lu::factorize_reusing` は **列順だけを再利用**し、行は
+毎ステップ選び直す(記録した行が安定性床を通ればそれを使い、だめなら
+「床を通る候補のうち未到達列に残る非ゼロ数が最小」= 列固定下の Markowitz
+カウントの残り半分で選ぶ)。分解本体は左向き (Gilbert-Peierls 形) で、
+探索も能動部分行列 (`MarkowitzState` の `BTreeMap`/`BTreeSet`) も持たない。
+安全弁は 3 つ (特異 / fill 上限 1.25 倍 / border 列基底の除外) で、いずれも
+フル Markowitz へのフォールバックに落ちる。棄却は連続しやすいので指数
+バックオフ付き。
+
+結果: 再分解フェーズ自体が 25〜40% 減り、NETLIB93 全問題の同一プロセス
+A/B で合計 **-2.55%**(46.42s → 45.24s)、目的関数値 93/93 一致、
+**10% 以上の退行ゼロ**。fill 上限を緩めると採択率は上がるが総和では負ける
+(2.0 倍で +2.7%)ことも計測済み — fill は 1 回限りのコストではなく、その
+分解が生きている間の全 FTRAN/BTRAN が払い続けるため。
 
 ### 2.3 カーネル分解の両方向一体型データ構造
 
@@ -231,10 +253,32 @@ HiGHS方式の方が求解自身が「今どこが非ゼロか」を持つので
 `solveHyper` の list 構築が自然。
 
 ENOMOTO は既に `solve_sparse_into(rhs_sparse)` で疎rhsを受ける形に
-しているので、本質は同じ。だが**BTRAN側 (`solve_transpose_into`) には
-疎入力版がない**。
+しているので、本質は同じ。
 
-**参考度: 中**。
+~~だが**BTRAN側 (`solve_transpose_into`) には疎入力版がない**。~~
+**(解消済み)** `FtLu::solve_transpose_unit` / `solve_transpose_unit_capture`
+を追加した。このクレートのBTRANの右辺はほぼ全てが単位ベクトル `e_i` で
+(ピボット行 `rho_p`、DSE重み更新の `rho`、`DseState::from_basis` の m 本の
+参照解、拡張法の `trial_row_ratio` と polish 側)、残る密な右辺は
+`y = B^-T c_B` と `w = B^-T alpha` だけ。単位ベクトルに限れば非ゼロは
+1個なので、
+
+- 冒頭の置換 gather `scratch[s] = rhs[col_perm[s]]` (ステップごとの
+  ランダムアクセス読み) → `fill(0.0)` + 1ストア
+- `u_transpose_solve_into` 冒頭の「z の非ゼロを needed 集合に播く」O(m)
+  走査 → そのステップ (`col_perm_inv[i]`) を直接 mark
+
+と、O(m) のパス2本が消える。`solveHyper` 相当の一般の疎入力BTRAN
+(reach集合のDFS) ではなく、右辺の形が分かっている場合の特殊化である点が
+HiGHS とは異なるが、実際に出現する右辺はこちらでほぼ尽きている。
+
+なお既存の `solve_transpose_unit_into` とは別物。あちらは更新前の `u_seq`
+の順序に依存する接頭辞スキップなので `update_count() == 0` を要求する
+(`from_basis` 専用)。新しい方は `needed` 集合の仕組みをそのまま使うので
+Forrest-Tomlin 更新後も有効。
+
+**参考度: 中** (単位ベクトル以外の疎rhs BTRANは依然未実装だが、
+該当する呼び出しが `y`/`w` の2つしかなく、どちらも密)。
 
 ### 2.9 `updateFT` — U列eta + UR転置の二重構造
 
@@ -256,9 +300,11 @@ O(1) で見つける設計で、これは HiGHS の `ur_*` と同目的 (似た�
 
 **参考度: 中** — 構造は違うが目的は同じ。ENOMOTOの方が既に工夫済み。
 
-### 2.10 etaの格納形式 (Sparse/Dense) と `pack_off_diag`
+### 2.10 etaの格納形式 (Sparse/Dense) と `HybridVec::pack`
 
-ENOMOTO は `OffDiag::Sparse | Dense` を `DENSE_ETA_FRACTION=0.4` で切替。
+ENOMOTO は `HybridVec::Sparse | Dense` を `DENSE_ETA_FRACTION=0.4` で切替
+(旧 `OffDiag` / `pack_off_diag`。疎/密ハイブリッドのベクトル表現として
+`crate::sparse` に移した)。
 HiGHS は常に `(index, value)` の疎形式 (`u_index/u_value`)。
 つまり ENOMOTO は HiGHS を既に超えている (密eta最適化) 部分がある。
 ここは逆に **ENOMOTO の方が進んでいる**。
@@ -275,9 +321,16 @@ HiGHS は `mc_index/mc_value` の**連続配列**上で、`colInsert`/`colDelete
 末尾swapのみ。キャッシュミスが桁違いに少ない。
 
 ENOMOTO のコメントには「`l_col` を `FixedRows` にフラット化したら
-**回帰した**」という記録があるが、これは L 因子 (求解時) の話であり、
+**回帰した**」という記録があったが、これは L 因子 (求解時) の話であり、
 **分解中のアクティブ部分行列**をフラット化した記録ではない。
 HiGHSのカーネル部分行列のフラット化は別の話。
+
+なお L 因子側のほうは、その後「後付けコピーではなく分解中に直接フラットに
+構築する」版 (`CscBuilder`) で取り直したところ全93問 -1.58% の勝ちになった
+(§4-5、`analysis/sparse_consolidation_lu_20260922_095906.md`)。ただし内訳は
+重い10問 -1.77% / 軽い83問 +0.44% で、**小問題側では圧縮形のアクセスコストが
+残る**。この非対称性は、動的なカーネル部分行列を置き換える際にも効いてくる
+はず。
 
 **参考度: 高** — ただし最大のリファクタリング。ENOMOTO 自身
 「BTreeMap ベースは測定で最速」としているため、単純置換は
@@ -300,9 +353,12 @@ O(1) 移動。**機能的には等価**。キャッシュ的には Deque の方�
 
 ENOMOTO の高速化に効きそうな順:
 
-1. **`refactor_info_` 相当のピボット順再利用 (`rebuild()`)** — §2.2
-   - 反復中は基底がほぼ同じ。探索をスキップできる効果は大きい。
-   - ただし pivot tolerance を下回る時のフォールバック必須。
+1. ~~**`refactor_info_` 相当のピボット順再利用 (`rebuild()`)** — §2.2~~
+   **実装済み (2026-09-22)**。ただし HiGHS と同じものではない: HiGHS の
+   `rebuild()` はホットスタート (同じ基底) 専用で、(行, 列) 両方の順を
+   再生する移植は採択率 0〜4% だった。**列順だけ**を再利用し行は選び直す
+   `factorize_reusing` を採用。NETLIB93 合計 -2.55% / -4.31% (独立2回)、
+   10% 超の退行なし (`analysis/pivot_order_reuse_20260922_120602.md`)。
 
 2. **`buildSimple()` 相当の単位列・シングルトン一括剥離** — §2.1
    - Markowitz カーネル (BTreeMap/BTreeSet 構築) の起動自体を避けられる。
@@ -316,17 +372,35 @@ ENOMOTO の高速化に効きそうな順:
    NETLIB93 合計 -0.05% / -1.70% (独立2回)、10% 超の退行なし。
    同時に試した U 側の到達集合限定 FTRAN は +3.6% で不採用 (§2.6)。
 
-5. **カーネル部分行列のフラット配列化** — §3.1
-   - 理論的にはキャッシュ効率最大。ただし ENOMOTO 自身
-     `FixedRows` 実験で回帰を経験しており、慎重に。
-   - 「分解中の部分行列を直接フラットに構築」する版なら勝つ余地。
+5. ~~**カーネル部分行列のフラット配列化** — §3.1~~ → **`L` については実施、
+   採用** (`analysis/sparse_consolidation_lu_20260922_095906.md` §2.4)
+   - 予想どおり「分解中に直接フラットに構築」する版なら勝った。`CscBuilder`
+     で `LuFactors::l_col` を `crate::sparse::CscMat` に。このファイルの4つの
+     分解はいずれも L の列を**昇順に**吐くので、計数パスすら要らず追記だけで
+     済む。L 全体のアロケーションが m+1 個から2個になる。
+   - 全93問3回ずつで **-1.58%**。ただし内訳は **重い10問 -1.77% / 軽い83問
+     +0.44%** で、無条件の勝ちではない。軽い問題では `l_col[s]` が短く、
+     圧縮形の「列アクセスごとに offsets を2回読む」コストが相対的に重い —
+     初回の `FixedRows` 実験が回帰した理由のうち、後付けコピーをやめても
+     消えない部分がここに残っている。
+   - **カーネル部分行列 (`MarkowitzState` の `Vec<BTreeMap>`/`Vec<BTreeSet>`)
+     自体は未着手**。分解中に insert/remove を繰り返す動的な疎行なので、
+     `CscBuilder` のような「昇順に吐くだけ」の構築では置き換えられない。
+     §3.1/§3.2 の本題はこちら。
 
 6. **ピボット安定性床の動的調整・`colFixMax` のインクリメンタル化** — §2.4
    - 悪条件問題での探索爆発・再分解を減らす。
 
+7. **`FtLu::fill_count` の O(1) 化** — (HiGHS 比較外、このクレート固有)
+   - 再分解トリガー(3)が毎反復読むのに `u_seq` 全体 (長さ m) を舐め直して
+     いた。更新側で加減するだけで済む。
+   - 全93問3回ずつで **-0.25%**、内訳は **軽い83問 -1.86% / 重い10問 -0.10%**
+     と、上の 5 とちょうど相補的 (毎反復の固定費が支配的な小問題で効く)。
+   - **実施、採用**。
+
 逆に ENOMOTO が**既に HiGHS より進んでいる**点:
 
-- eta の Sparse/Dense 切替 (`pack_off_diag`, `DENSE_ETA_FRACTION`)
+- eta の Sparse/Dense 切替 (`HybridVec::pack`, `DENSE_ETA_FRACTION`)
 - 密入力の `faer` 全委譲 (`is_dense_input`)
 - ボーダー列検出による Schur 補分解 (`factorize_bordered`)
 - 4段の再分解トリガ (residual / pivot / eta-fill / max-updates) +

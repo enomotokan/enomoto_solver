@@ -93,8 +93,7 @@
 //! commit for the full numbers if revisiting.
 
 use crate::presolve::propagate;
-use crate::sparse::{csr_from_rows, Csr};
-use std::collections::BTreeMap;
+use crate::sparse::{Csr, SparseAccum, csr_from_rows, csr_rows_pruned};
 
 const TOL: f64 = 1e-9;
 
@@ -116,10 +115,7 @@ enum Src {
 }
 
 pub fn sparsify(n: usize, a: &Csr, b: &[f64], g: &Csr, h: &[f64]) -> SparsifyResult {
-    let ar = a.as_ref();
-    let mut a_rows: Vec<Vec<(usize, f64)>> = (0..ar.nrows())
-        .map(|i| ar.col_indices_of_row(i).zip(ar.values_of_row(i)).map(|(j, &v)| (j, v)).filter(|&(_, v)| v != 0.0).collect())
-        .collect();
+    let mut a_rows: Vec<Vec<(usize, f64)>> = csr_rows_pruned(a);
     let mut b: Vec<f64> = b.to_vec();
 
     let (lb, ub, mut real_g_rows, mut real_g_rhs) = propagate::extract_bounds(n, g, h);
@@ -142,6 +138,10 @@ pub fn sparsify(n: usize, a: &Csr, b: &[f64], g: &Csr, h: &[f64]) -> SparsifyRes
 
     let mut changed_a = vec![false; a_rows.len()];
     let mut changed_g = vec![false; real_g_rows.len()];
+    // One sparse accumulator for every target-row rewrite below — see
+    // `crate::sparse::SparseAccum`'s own docs for why the merge is not a
+    // per-target `BTreeMap`.
+    let mut accum = SparseAccum::new(n);
     let mut n_rows_changed = 0usize;
 
     for eq_idx in 0..a_rows.len() {
@@ -165,7 +165,6 @@ pub fn sparsify(n: usize, a: &Csr, b: &[f64], g: &Csr, h: &[f64]) -> SparsifyRes
         if elim_coeff.abs() < TOL {
             continue;
         }
-        let eq_map: BTreeMap<usize, f64> = eq_row.iter().copied().collect();
         let eq_rhs = b[eq_idx];
 
         for &(src, idx) in &col_to_rows[anchor] {
@@ -188,18 +187,21 @@ pub fn sparsify(n: usize, a: &Csr, b: &[f64], g: &Csr, h: &[f64]) -> SparsifyRes
                 // ahead of the O(|eq_row|) subset scan below.
                 continue;
             }
-            let mut new_row: BTreeMap<usize, f64> = target_row.iter().copied().collect();
-            if !eq_map.keys().all(|k| new_row.contains_key(k)) {
+            // Load the target into the shared accumulator, then test the
+            // subset condition against *it* (`contains` is an O(1) epoch
+            // check) rather than against a freshly built per-target map —
+            // see `crate::sparse::SparseAccum`'s own docs.
+            accum.load(target_row);
+            if !eq_row.iter().all(|&(k, _)| accum.contains(k)) {
                 continue;
             }
-            let target_elim_coeff = *new_row.get(&elim_var).expect("elim_var already verified to be in target's support");
+            debug_assert!(accum.contains(elim_var), "elim_var is in eq_row's support, which the subset check just verified the target covers");
+            let target_elim_coeff = accum.get(elim_var);
             let scale = target_elim_coeff / elim_coeff;
             if scale == 0.0 {
                 continue;
             }
-            for (&j, &v) in &eq_map {
-                *new_row.entry(j).or_insert(0.0) -= scale * v;
-            }
+            accum.axpy(-scale, &eq_row);
             // Only `elim_var` is *proven* to cancel exactly (`scale` was
             // chosen specifically to zero it) — any other entry's
             // subtraction result, however small, is the mathematically
@@ -209,13 +211,12 @@ pub fn sparsify(n: usize, a: &Csr, b: &[f64], g: &Csr, h: &[f64]) -> SparsifyRes
             // at) zero by sheer coincidence without being a true
             // cancellation, and silently discarding it would corrupt the
             // row.
-            new_row.remove(&elim_var);
-            new_row.retain(|_, v| *v != 0.0);
+            accum.remove(elim_var);
             let new_rhs = match src {
                 Src::A => b[idx] - scale * eq_rhs,
                 Src::G => real_g_rhs[idx] - scale * eq_rhs,
             };
-            let new_row_vec: Vec<(usize, f64)> = new_row.into_iter().collect();
+            let new_row_vec: Vec<(usize, f64)> = accum.take_sorted(0.0);
             match src {
                 Src::A => {
                     a_rows[idx] = new_row_vec;
@@ -239,6 +240,7 @@ pub fn sparsify(n: usize, a: &Csr, b: &[f64], g: &Csr, h: &[f64]) -> SparsifyRes
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sparse::csr_row_vec;
 
     #[test]
     fn sparsifies_a_superset_inequality_row_with_zero_fill_in() {
@@ -288,8 +290,7 @@ mod tests {
         let result = sparsify(3, &a, &b, &g, &h);
         assert_eq!(result.n_rows_changed, 1);
 
-        let ar = result.a.as_ref();
-        let row1: Vec<(usize, f64)> = ar.col_indices_of_row(1).zip(ar.values_of_row(1)).map(|(j, &v)| (j, v)).collect();
+        let row1 = csr_row_vec(&result.a, 1);
         assert_eq!(row1, vec![(2, 3.0)]);
         assert!((result.b[1] - 10.0).abs() < 1e-9);
     }
@@ -353,12 +354,11 @@ mod tests {
         let result = sparsify(4, &a, &b, &g, &h);
         assert_eq!(result.n_rows_changed, 1);
 
-        let ar = result.a.as_ref();
-        let row0: Vec<(usize, f64)> = ar.col_indices_of_row(0).zip(ar.values_of_row(0)).map(|(j, &v)| (j, v)).collect();
+        let row0 = csr_row_vec(&result.a, 0);
         assert_eq!(row0, vec![(0, 1.0), (1, 1.0)], "eq0 must survive this call completely unchanged");
         assert!((result.b[0] - 3.0).abs() < 1e-9);
 
-        let row1: Vec<(usize, f64)> = ar.col_indices_of_row(1).zip(ar.values_of_row(1)).map(|(j, &v)| (j, v)).collect();
+        let row1 = csr_row_vec(&result.a, 1);
         assert_eq!(row1, vec![(2, 1.0), (3, 1.0)]);
         assert!((result.b[1] - 7.0).abs() < 1e-9);
     }

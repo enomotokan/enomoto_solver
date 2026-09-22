@@ -48,8 +48,7 @@
 //! visible to which row and alter the pass's convergence behavior, not
 //! just its speed.
 
-use crate::sparse::{csr_from_rows, Csr};
-
+use crate::sparse::{Csr, csr_from_rows, csr_row_iter, csr_row_vec};
 const EPS: f64 = 1e-9;
 
 pub struct PropagateResult {
@@ -83,7 +82,7 @@ pub fn extract_bounds(n: usize, g: &Csr, h: &[f64]) -> (Vec<f64>, Vec<f64>, Vec<
 
     let gr = g.as_ref();
     for i in 0..gr.nrows() {
-        let row: Vec<(usize, f64)> = gr.col_indices_of_row(i).zip(gr.values_of_row(i)).map(|(j, &v)| (j, v)).collect();
+        let row: Vec<(usize, f64)> = csr_row_vec(g, i);
         if row.len() == 1 {
             let (j, v) = row[0];
             let bound = h[i] / v;
@@ -405,7 +404,7 @@ pub fn propagate_equalities(a: &Csr, b: &[f64], lb: &mut [f64], ub: &mut [f64], 
             let mut inf_unbounded: Vec<usize> = Vec::new();
             let mut sup_unbounded: Vec<usize> = Vec::new();
             let mut live = 0usize;
-            for (j, &v) in ar.col_indices_of_row(i).zip(ar.values_of_row(i)) {
+            for (j, v) in csr_row_iter(a, i) {
                 if v == 0.0 {
                     continue;
                 }
@@ -452,7 +451,7 @@ pub fn propagate_equalities(a: &Csr, b: &[f64], lb: &mut [f64], ub: &mut [f64], 
                     forcing_seen[i] = true;
                     res.forcing_rows += 1;
                 }
-                for (j, &v) in ar.col_indices_of_row(i).zip(ar.values_of_row(i)) {
+                for (j, v) in csr_row_iter(a, i) {
                     if v == 0.0 {
                         continue;
                     }
@@ -474,7 +473,7 @@ pub fn propagate_equalities(a: &Csr, b: &[f64], lb: &mut [f64], ub: &mut [f64], 
                     forcing_seen[i] = true;
                     res.forcing_rows += 1;
                 }
-                for (j, &v) in ar.col_indices_of_row(i).zip(ar.values_of_row(i)) {
+                for (j, v) in csr_row_iter(a, i) {
                     if v == 0.0 {
                         continue;
                     }
@@ -490,7 +489,7 @@ pub fn propagate_equalities(a: &Csr, b: &[f64], lb: &mut [f64], ub: &mut [f64], 
                 }
                 continue;
             }
-            for (k, &aik) in ar.col_indices_of_row(i).zip(ar.values_of_row(i)) {
+            for (k, aik) in csr_row_iter(a, i) {
                 if aik == 0.0 || lb[k] == ub[k] {
                     continue;
                 }

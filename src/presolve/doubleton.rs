@@ -24,7 +24,7 @@
 
 use crate::presolve::colsingleton::Substitution;
 use crate::presolve::propagate;
-use crate::sparse::{csr_from_rows, Csr};
+use crate::sparse::{Csr, SparseAccum, csr_from_rows, csr_rows_pruned};
 use std::collections::BTreeMap;
 
 const TOL: f64 = 1e-9;
@@ -51,8 +51,13 @@ pub struct DoubletonResult {
 /// a row using an already-claimed variable as *either* of its two terms
 /// (see the pass below) rules out a cycle, so this always terminates. See
 /// the module docs for the substitution algebra itself.
-fn rewrite_row(row: &[(usize, f64)], rhs: f64, subs: &[Substitution], by_var: &BTreeMap<usize, usize>) -> (Vec<(usize, f64)>, f64) {
-    let mut merged: BTreeMap<usize, f64> = BTreeMap::new();
+fn rewrite_row(accum: &mut SparseAccum, row: &[(usize, f64)], rhs: f64, subs: &[Substitution], by_var: &BTreeMap<usize, usize>) -> (Vec<(usize, f64)>, f64) {
+    // The surviving terms land in the caller's shared sparse accumulator
+    // rather than a `BTreeMap` built per rewritten row — see
+    // `crate::sparse::SparseAccum`'s own docs. `take_sorted` emits in
+    // ascending column order, so the rewritten row's own ordering (which
+    // feeds later tie-breaks) is unchanged.
+    accum.reset();
     let mut new_rhs = rhs;
     let mut queue: Vec<(usize, f64)> = row.to_vec();
     while let Some((j, v)) = queue.pop() {
@@ -63,10 +68,10 @@ fn rewrite_row(row: &[(usize, f64)], rhs: f64, subs: &[Substitution], by_var: &B
                 queue.push((k, -v * term_v / sub.coeff));
             }
         } else {
-            *merged.entry(j).or_insert(0.0) += v;
+            accum.add(j, v);
         }
     }
-    (merged.into_iter().filter(|&(_, v)| v.abs() > TOL).collect(), new_rhs)
+    (accum.take_sorted(TOL), new_rhs)
 }
 
 /// One non-cascading pass: candidate doubleton rows and which variable
@@ -75,9 +80,9 @@ fn rewrite_row(row: &[(usize, f64)], rhs: f64, subs: &[Substitution], by_var: &B
 /// doubleton rows never both try to eliminate it), not re-checked after
 /// rewriting (mirrors `colsingleton`'s own single-pass scope).
 pub fn eliminate_doubleton_equalities(n: usize, a: &Csr, b: &[f64], g: &Csr, h: &[f64], c: &[f64]) -> DoubletonResult {
-    let ar = a.as_ref();
-    let a_rows: Vec<Vec<(usize, f64)>> =
-        (0..ar.nrows()).map(|i| ar.col_indices_of_row(i).zip(ar.values_of_row(i)).map(|(j, &v)| (j, v)).filter(|&(_, v)| v != 0.0).collect()).collect();
+    let a_rows: Vec<Vec<(usize, f64)>> = csr_rows_pruned(a);
+    // One sparse accumulator for every `rewrite_row` call below.
+    let mut accum = SparseAccum::new(n);
 
     let (lb, ub, real_g_rows, real_g_rhs) = propagate::extract_bounds(n, g, h);
 
@@ -147,12 +152,12 @@ pub fn eliminate_doubleton_equalities(n: usize, a: &Csr, b: &[f64], g: &Csr, h: 
         let lo = a_lb.min(a_ub);
         let hi = a_lb.max(a_ub);
         if lo.is_finite() {
-            let (row1, rhs1) = rewrite_row(&[(var_keep, coeff_keep)], sub.rhs - lo, &subs, &by_var);
+            let (row1, rhs1) = rewrite_row(&mut accum, &[(var_keep, coeff_keep)], sub.rhs - lo, &subs, &by_var);
             extra_g_rows.push(row1);
             extra_h.push(rhs1);
         }
         if hi.is_finite() {
-            let (row2, rhs2) = rewrite_row(&[(var_keep, -coeff_keep)], hi - sub.rhs, &subs, &by_var);
+            let (row2, rhs2) = rewrite_row(&mut accum, &[(var_keep, -coeff_keep)], hi - sub.rhs, &subs, &by_var);
             extra_g_rows.push(row2);
             extra_h.push(rhs2);
         }
@@ -166,7 +171,7 @@ pub fn eliminate_doubleton_equalities(n: usize, a: &Csr, b: &[f64], g: &Csr, h: 
         if eliminated_a_row[i] {
             continue;
         }
-        let (new_row, new_rhs) = rewrite_row(&row, b[i], &subs, &by_var);
+        let (new_row, new_rhs) = rewrite_row(&mut accum, &row, b[i], &subs, &by_var);
         new_a_rows.push(new_row);
         new_b.push(new_rhs);
     }
@@ -174,7 +179,7 @@ pub fn eliminate_doubleton_equalities(n: usize, a: &Csr, b: &[f64], g: &Csr, h: 
     let mut new_g_rows = Vec::with_capacity(real_g_rows.len() + extra_g_rows.len());
     let mut new_h = Vec::with_capacity(real_g_rhs.len() + extra_h.len());
     for (row, rhs) in real_g_rows.into_iter().zip(real_g_rhs) {
-        let (new_row, new_rhs) = rewrite_row(&row, rhs, &subs, &by_var);
+        let (new_row, new_rhs) = rewrite_row(&mut accum, &row, rhs, &subs, &by_var);
         new_g_rows.push(new_row);
         new_h.push(new_rhs);
     }
@@ -223,6 +228,7 @@ pub fn eliminate_doubleton_equalities(n: usize, a: &Csr, b: &[f64], g: &Csr, h: 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sparse::csr_row_vec;
 
     #[test]
     fn eliminates_larger_coefficient_variable_and_rewrites_other_rows() {
@@ -255,8 +261,7 @@ mod tests {
 
         // The doubleton row itself is gone; the other A row survives, rewritten.
         assert_eq!(result.a.nrows(), 1);
-        let ar = result.a.as_ref();
-        let row0: Vec<(usize, f64)> = ar.col_indices_of_row(0).zip(ar.values_of_row(0)).map(|(j, &v)| (j, v)).collect();
+        let row0 = csr_row_vec(&result.a, 0);
         assert!(row0.iter().any(|&(j, v)| j == 1 && (v - (-0.5)).abs() < 1e-9));
         assert!(row0.iter().any(|&(j, v)| j == 2 && (v - 1.0).abs() < 1e-9));
         assert!(!row0.iter().any(|&(j, _)| j == 0));

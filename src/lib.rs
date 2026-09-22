@@ -2,8 +2,14 @@
 //!
 //!   - `types`, `model`, `solver` — shared types, the PyO3 API entry
 //!     point, and top-level LP dispatch (thin orchestration, kept flat).
-//!   - `sparse` — the shared `Csr` alias and its mat-vec helpers, used by
-//!     both `interior_point::kkt` and `presolve`.
+//!   - `sparse` — the crate's one home for sparse storage: the `CsrMat`/
+//!     `CscMat` compressed pair and the conversions between them, the
+//!     `SparseVec` sparse vector and the `SparseAccum` accumulator its
+//!     row merges run on, the sparse x dense arithmetic built on all of
+//!     them, and the `Csr` alias (faer's own row-major type) plus the
+//!     helpers that bridge to it. Used by `simplex`, `presolve` and
+//!     `interior_point::kkt` alike — no other module re-derives a
+//!     transpose, a `(index, value)` merge, or a mat-vec for itself.
 //!   - `presolve` (+ `presolve::{scaling,redundancy,propagate}`) — the
 //!     **shared** presolve pipeline (Ruiz scaling, redundant-equality
 //!     removal, inequality propagation) run identically by both `simplex`

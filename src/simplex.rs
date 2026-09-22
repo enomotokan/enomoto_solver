@@ -121,7 +121,7 @@
 //! reaching for `into_par_iter()` again rather than assuming it helps.
 
 use crate::presolve::{self, scaling};
-use crate::sparse::FixedRows;
+use crate::sparse::{CscMat, CsrMat, csr_row_iter, sparse_axpy_dense, sparse_dot_dense};
 use crate::types::{ConstraintRow, Objective, RowSense, Sense, Status, VariableData};
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -650,7 +650,7 @@ impl SteepestEdgeState {
         let mut gamma = vec![1.0; std.n_total];
         let n_orig = std.n_total - std.n_rows;
         for j in 0..n_orig {
-            let norm_sq: f64 = std.cols.row(j).iter().map(|&(_, v)| v * v).sum();
+            let norm_sq: f64 = std.cols.col(j).iter().map(|&(_, v)| v * v).sum();
             gamma[j] = norm_sq.max(STEEPEST_EDGE_FLOOR);
         }
         SteepestEdgeState { gamma }
@@ -705,39 +705,55 @@ pub struct SimplexResult {
 /// the model's variables/objective/constraints (mirrors `qp::build`, but
 /// produces one slack column per row instead of folding bounds into `G`).
 ///
-/// `cols` is `rows` transposed — `cols.row(j)` is column `j`'s own `(row,
-/// value)` pairs — built once (`cols_from_rows`) right after `rows` is
+/// `cols` is `rows` transposed — `cols.col(j)` is column `j`'s own `(row,
+/// value)` pairs — built once ([`CscMat::from_rows`], a single O(nnz)
+/// counting sort straight into the flat layout) right after `rows` is
 /// finalized and never touched again: `StdForm` itself is never mutated
 /// during a solve (only `Tableau`'s basis/nonbasic status and `x` change),
 /// so there is no risk of the two views drifting out of sync. It exists
 /// purely so `Tableau::column`/`column_sparse` never have to scan every
 /// row looking for column `j` — see their own docs for why that mattered.
 ///
-/// Both `rows` and `cols` are [`FixedRows`] — a single flat `(index,
-/// value)` buffer plus offsets — rather than `Vec<Vec<(usize, f64)>>`: once
-/// presolve hands off the final matrix here, it is read every pivot for
-/// the rest of the solve and never mutated again, so there is no reason to
-/// keep paying for one separate heap allocation per row/column the way a
-/// still-being-rewritten presolve pass does.
+/// The pair are this crate's own [`CsrMat`]/[`CscMat`] — one flat `(index,
+/// value)` buffer plus offsets each, per `crate::sparse`'s own docs —
+/// rather than `Vec<Vec<(usize, f64)>>`: once presolve hands off the final
+/// matrix here, it is read every pivot for the rest of the solve and never
+/// mutated again, so there is no reason to keep paying for one separate
+/// heap allocation per row/column the way a still-being-rewritten presolve
+/// pass does. Row order within each `cols.col(j)` is ascending; nothing
+/// downstream (dot products, densifying one column) depends on it either
+/// way.
 struct StdForm {
     n_total: usize,
     n_rows: usize,
     c: Vec<f64>,
-    rows: FixedRows, // sparse rows over the n_total columns
-    cols: FixedRows, // `rows` transposed: cols.row(j) = column j's (row, value) pairs
+    rows: CsrMat, // sparse rows over the n_total columns
+    cols: CscMat, // `rows` transposed: cols.col(j) = column j's (row, value) pairs
     b: Vec<f64>,
     lb: Vec<f64>,
     ub: Vec<f64>,
 }
 
-/// Transposes a row-sparse matrix (`rows[i]` = row `i`'s `(col, value)`
-/// pairs) into its column-sparse companion (`cols.row(j)` = column `j`'s
-/// `(row, value)` pairs) — one O(nnz) counting-sort pass directly into the
-/// flat layout, run once per `StdForm` build. Row order within each
-/// `cols.row(j)` is whatever order `rows` produced it in; nothing
-/// downstream (dot products, densifying one column) cares.
-fn cols_from_rows(rows: &[Vec<(usize, f64)>], n_total: usize) -> FixedRows {
-    FixedRows::from_transpose(rows, n_total)
+/// Freezes `rows` into the [`CsrMat`]/[`CscMat`] pair a [`StdForm`] holds,
+/// in one place for all three construction sites.
+///
+/// The `debug_assert` is load-bearing documentation, not a paranoia check:
+/// every walk that reaches the basis *through the column view* (
+/// [`Tableau::basis_rows_sparse`], [`Tableau::basis_residual_norm`],
+/// `extended_dual::refactorize`, `extended_dual::residual_norm`) visits
+/// columns in ascending index and therefore reproduces each row's entry
+/// order — and so the LU's own pivot-order tie-breaks, and each residual's
+/// summation order — bit for bit, *provided* the rows were column-ascending
+/// to begin with. All three builders do produce that (a presolved row's
+/// structural terms come out of an ascending faer CSR row through a
+/// monotone re-index, and its slack is appended last with the largest
+/// index of all); this asserts it rather than leaving it to be rediscovered.
+fn freeze_std_matrices(rows: &[Vec<(usize, f64)>], n_total: usize) -> (CsrMat, CscMat) {
+    debug_assert!(
+        rows.iter().all(|r| r.windows(2).all(|w| w[0].0 < w[1].0)),
+        "StdForm rows must be strictly column-ascending"
+    );
+    (CsrMat::from_rows(rows, n_total), CscMat::from_rows(rows, n_total))
 }
 
 fn build_std_form(variables: &[VariableData], objective: &Objective, constraints: &[ConstraintRow]) -> StdForm {
@@ -790,8 +806,7 @@ fn build_std_form(variables: &[VariableData], objective: &Objective, constraints
         rows.push(r);
     }
 
-    let cols = cols_from_rows(&rows, n_total);
-    let rows = FixedRows::from_rows(&rows);
+    let (rows, cols) = freeze_std_matrices(&rows, n_total);
     StdForm { n_total, n_rows, c, rows, cols, b, lb, ub }
 }
 
@@ -1207,12 +1222,11 @@ fn build_std_form_presolved(
     let mut rows = Vec::with_capacity(n_rows);
     let mut b_out = Vec::with_capacity(n_rows);
 
-    let ar = pre.a.as_ref();
     for i in 0..n_eq {
         let slack = n_free + i;
         let mut rhs_i = pre.b[i];
         let mut r: Vec<(usize, f64)> = Vec::new();
-        for (j, &v) in ar.col_indices_of_row(i).zip(ar.values_of_row(i)) {
+        for (j, v) in csr_row_iter(&pre.a, i) {
             match new_index[j] {
                 Some(nj) => {
                     r.push((nj, v * sign[nj]));
@@ -1247,8 +1261,7 @@ fn build_std_form_presolved(
         b_out.push(rhs_k);
     }
 
-    let cols = cols_from_rows(&rows, n_total);
-    let rows = FixedRows::from_rows(&rows);
+    let (rows, cols) = freeze_std_matrices(&rows, n_total);
     let shift_of_free: Vec<f64> = orig_of_free.iter().map(|&j| shift[j]).collect();
     Ok(PresolvedForm {
         std: StdForm { n_total, n_rows, c, rows, cols, b: b_out, lb: new_lb, ub: new_ub },
@@ -1383,9 +1396,17 @@ impl<'a> Tableau<'a> {
     fn basis_rows_sparse(&self) -> Vec<Vec<(usize, f64)>> {
         let m = self.std.n_rows;
         let mut rows = vec![Vec::new(); m];
-        for i in 0..m {
-            for &(j, v) in self.std.rows.row(i) {
-                if let Some(col) = self.basis_pos[j] {
+        // Column-driven, via `std.cols`: this touches only `nnz(A_B)` —
+        // the basis's own entries — where the row-driven form it replaced
+        // scanned all `nnz(A)` and discarded every nonbasic entry it read.
+        // On a real instance most columns are nonbasic at any one time, so
+        // that discarded work was the bulk of it. Ascending `j` keeps each
+        // `rows[i]` in exactly the order the row-driven scan produced (see
+        // `freeze_std_matrices`), so the LU factorization this feeds is
+        // bit-for-bit the same one.
+        for j in 0..self.std.n_total {
+            if let Some(col) = self.basis_pos[j] {
+                for &(i, v) in self.std.cols.col(j) {
                     rows[i].push((col, v));
                 }
             }
@@ -1394,7 +1415,7 @@ impl<'a> Tableau<'a> {
     }
 
     /// Column `j` of the full constraint matrix, densified from
-    /// `std.cols.row(j)` — O(nnz_j + n_rows), not a scan of every row
+    /// `std.cols.col(j)` — O(nnz_j + n_rows), not a scan of every row
     /// looking for column `j`. Both real per-iteration call sites
     /// (`run_phase`, `solve_lp_dual_on`) now go through the
     /// non-allocating [`Self::column_into`] instead — this allocating
@@ -1418,7 +1439,7 @@ impl<'a> Tableau<'a> {
         for v in out.iter_mut() {
             *v = 0.0;
         }
-        for &(i, v) in self.std.cols.row(j) {
+        for &(i, v) in self.std.cols.col(j) {
             out[i] = v;
         }
     }
@@ -1432,7 +1453,7 @@ impl<'a> Tableau<'a> {
     /// fill and ever touching another column's data is what turns an
     /// O(n_total * nnz) pivot into an O(nnz) one.
     fn column_sparse(&self, j: usize) -> &[(usize, f64)] {
-        self.std.cols.row(j)
+        self.std.cols.col(j)
     }
 
     /// Recomputes every basic variable's value from the current nonbasic
@@ -1478,7 +1499,7 @@ impl<'a> Tableau<'a> {
                 prof_phases::COMPUTE_RHS_COLS_SKIPPED.fetch_add(1, Relaxed);
                 continue;
             }
-            for &(i, v) in self.std.cols.row(j) {
+            for &(i, v) in self.std.cols.col(j) {
                 rhs[i] -= v * xj;
             }
         }
@@ -1502,15 +1523,20 @@ impl<'a> Tableau<'a> {
     /// (1)'s numerical-drift check on the incrementally-updated LU.
     fn basis_residual_norm(&self, rhs: &[f64]) -> f64 {
         let m = self.std.n_rows;
+        // `A_B x_B` accumulated one *basic column* at a time (see
+        // `basis_rows_sparse`'s own note): `nnz(A_B)` work plus one `O(m)`
+        // buffer, rather than a full `nnz(A)` scan that reads every
+        // nonbasic entry only to skip it.
+        let mut val = vec![0.0; m];
+        for j in 0..self.std.n_total {
+            if self.nb_status[j].is_some() {
+                continue;
+            }
+            sparse_axpy_dense(self.x[j], self.std.cols.col(j), &mut val);
+        }
         let mut resid_sq = 0.0;
         for i in 0..m {
-            let mut val = 0.0;
-            for &(j, v) in self.std.rows.row(i) {
-                if self.nb_status[j].is_none() {
-                    val += v * self.x[j];
-                }
-            }
-            let r = val - rhs[i];
+            let r = val[i] - rhs[i];
             resid_sq += r * r;
         }
         resid_sq.sqrt()
@@ -1643,8 +1669,8 @@ fn perturb_costs(std: &StdForm) -> Vec<f64> {
     pc
 }
 
-fn refactorize(std: &StdForm, t: &Tableau) -> sparse_lu::FtLu {
-    try_refactorize(std, t).expect("simplex basis matrix must be nonsingular")
+fn refactorize(std: &StdForm, t: &Tableau, prev: Option<&sparse_lu::FtLu>) -> sparse_lu::FtLu {
+    try_refactorize(std, t, prev).expect("simplex basis matrix must be nonsingular")
 }
 
 /// `refactorize` without the panic: `None` when `factorize` finds the
@@ -1655,9 +1681,16 @@ fn refactorize(std: &StdForm, t: &Tableau) -> sparse_lu::FtLu {
 /// — the dual loop treats that as "this trajectory is numerically spent"
 /// and hands the problem to the primal method (whose different pivot
 /// sequence sidesteps it), rather than crashing the whole solve.
-fn try_refactorize(std: &StdForm, t: &Tableau) -> Option<sparse_lu::FtLu> {
+///
+/// `prev` is the factorization being replaced, when the caller has one on
+/// hand: its pivot order is reused rather than searched for again — see
+/// [`sparse_lu::factorize_reusing`] for what that does, and for the
+/// threshold-pivoting and fill checks that make passing it safe (a reuse
+/// failing either check falls back to the full Markowitz search by
+/// itself, so `prev` never changes which factorizations are accepted).
+fn try_refactorize(std: &StdForm, t: &Tableau, prev: Option<&sparse_lu::FtLu>) -> Option<sparse_lu::FtLu> {
     let rows = t.basis_rows_sparse();
-    sparse_lu::factorize(std.n_rows, &rows).map(sparse_lu::FtLu::new)
+    sparse_lu::factorize_reusing(std.n_rows, &rows, prev)
 }
 
 /// `refactorize` for the *initial* all-slack basis specifically: `B` is a
@@ -1757,7 +1790,6 @@ fn run_phase(
     let mut a_enter_buf = vec![0.0; m];
     let mut alpha_buf = vec![0.0; m];
     let mut scratch_buf = vec![0.0; m];
-    let mut e_r_buf = vec![0.0; m];
     let mut rho_buf = vec![0.0; m];
     let mut w_buf = vec![0.0; m];
     let mut candidates_buf: Vec<Candidate> = Vec::with_capacity(m);
@@ -1775,7 +1807,7 @@ fn run_phase(
             if bump_too_big || residual_too_big {
                 // `None` here, not a panic — see this function's own docs
                 // for what that signals to the caller.
-                let Some(l) = try_refactorize(std, t) else {
+                let Some(l) = try_refactorize(std, t, Some(&*lu)) else {
                     if std::env::var("ENOMOTO_DEBUG_PHASES").is_ok() {
                         eprintln!("run_phase None@residual iter={iter_idx} phase1={phase1} bump={bump_too_big} residual={residual_too_big}");
                     }
@@ -1786,7 +1818,7 @@ fn run_phase(
         }
         // Trigger (4): unconditional cap on accumulated updates.
         if lu.update_count() > FT_MAX_UPDATES {
-            let Some(l) = try_refactorize(std, t) else {
+            let Some(l) = try_refactorize(std, t, Some(&*lu)) else {
                 if std::env::var("ENOMOTO_DEBUG_PHASES").is_ok() {
                     eprintln!("run_phase None@ft_max_updates iter={iter_idx} phase1={phase1}");
                 }
@@ -1870,7 +1902,7 @@ fn run_phase(
                 return None;
             }
             let cj = if phase1 { 0.0 } else { std.c[j] };
-            let dot: f64 = t.column_sparse(j).iter().map(|&(i, v)| v * y[i]).sum();
+            let dot = sparse_dot_dense(t.column_sparse(j), y);
             let dj = cj - dot;
 
             let (eligible, dir) = match st {
@@ -2066,9 +2098,7 @@ fn run_phase(
                 // basis's LU — `rho` = row r of B^-1 (for beta_j) and `w`
                 // = B^-T alpha (for the cross term tau_j) — computed now,
                 // before the swap changes what `lu` represents.
-                e_r_buf[r] = 1.0;
-                lu.solve_transpose_into(&e_r_buf, &mut scratch_buf, &mut rho_buf);
-                e_r_buf[r] = 0.0;
+                lu.solve_transpose_unit(r, &mut scratch_buf, &mut rho_buf);
                 lu.solve_transpose_into(alpha, &mut scratch_buf, &mut w_buf);
                 let rho: &[f64] = &rho_buf;
                 let w: &[f64] = &w_buf;
@@ -2100,7 +2130,7 @@ fn run_phase(
                 // here too — see the identical fallback earlier in this
                 // same loop, and this function's own docs.
                 if !lu.try_update(r, a_enter, FT_MIN_PIVOT) {
-                    let Some(l) = try_refactorize(std, t) else {
+                    let Some(l) = try_refactorize(std, t, Some(&*lu)) else {
                         if std::env::var("ENOMOTO_DEBUG_PHASES").is_ok() {
                             eprintln!("run_phase None@ft_update iter={iter_idx} phase1={phase1} pivot={pivot}");
                         }
@@ -2303,8 +2333,7 @@ fn split_std_form(std: &StdForm, components: &[Vec<usize>]) -> Vec<StdForm> {
         let rows = std::mem::take(&mut rows_acc[cid]);
         let n_rows = rows.len();
         let n_total = local_n + n_rows;
-        let cols = cols_from_rows(&rows, n_total);
-        let rows = FixedRows::from_rows(&rows);
+        let (rows, cols) = freeze_std_matrices(&rows, n_total);
         result.push(StdForm {
             n_total,
             n_rows,
@@ -2402,7 +2431,7 @@ fn solve_std_form_decomposed(std: &StdForm, use_dual: bool) -> SimplexResult {
     // `split_std_form` itself is not free: real Netlib instances
     // routinely produce hundreds of components post-presolve (per this
     // function's own docs), and building a throwaway `StdForm` (its own
-    // small `Vec`/`FixedRows` allocations) for every one of them, only to
+    // small `Vec`/`CsrMat`/`CscMat` allocations) for every one of them, only
     // discard almost all of them, is a real, measured cost on top of the
     // *other* real cost splitting risks: on a highly degenerate instance,
     // changing *which* global index a variable ends up with (every
@@ -2571,11 +2600,8 @@ impl DseState {
                 w[i] = norm_sq.max(STEEPEST_EDGE_FLOOR);
             }
         } else {
-            let mut e_i = vec![0.0; m];
             for i in 0..m {
-                e_i[i] = 1.0;
-                lu.solve_transpose_into(&e_i, &mut scratch, &mut z);
-                e_i[i] = 0.0;
+                lu.solve_transpose_unit(i, &mut scratch, &mut z);
                 let norm_sq: f64 = z.iter().map(|&v| v * v).sum();
                 w[i] = norm_sq.max(STEEPEST_EDGE_FLOOR);
             }
@@ -3538,7 +3564,7 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
         let cost_b: Vec<f64> = t.basis.iter().map(|&v| cost[v]).collect();
         let y = lu.solve_transpose(&cost_b);
         (0..std.n_total)
-            .map(|j| cost[j] - t.column_sparse(j).iter().map(|&(i, v)| v * y[i]).sum::<f64>())
+            .map(|j| cost[j] - sparse_dot_dense(t.column_sparse(j), &y))
             .collect()
     };
 
@@ -3550,7 +3576,6 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
     // column's `alpha`, the DSE cross-term `tau`, and — when BFRT flips
     // are pending — one more for `combined`).
     let mut lu_scratch = vec![0.0; m];
-    let mut e_p = vec![0.0; m];
     let mut rho_p_buf = vec![0.0; m];
     let mut a_enter_buf = vec![0.0; m];
     let mut alpha_buf = vec![0.0; m];
@@ -3668,7 +3693,7 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
                         if profile_phases {
                             prof_phases::REFACTOR_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         }
-                        let Some(l) = try_refactorize(std, &t) else {
+                        let Some(l) = try_refactorize(std, &t, Some(&lu)) else {
                             if debug_devex {
                                 eprintln!("FALLBACK@residual iter={_iter}");
                             }
@@ -3691,7 +3716,7 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
                 if profile_phases {
                     prof_phases::REFACTOR_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
-                let Some(l) = try_refactorize(std, &t) else {
+                let Some(l) = try_refactorize(std, &t, Some(&lu)) else {
                     if debug_devex {
                         eprintln!("FALLBACK@ft_max_updates iter={_iter}");
                     }
@@ -3912,13 +3937,11 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
         // all, so a stale capture is never fed to it) — see
         // `try_update_precomputed`'s own docs for why this is bit-for-bit
         // the value it would otherwise recompute from scratch.
-        e_p[p] = 1.0;
         timed!(
             profile_phases,
             prof_phases::BTRAN,
-            lu.solve_transpose_into_capture(&e_p, &mut lu_scratch, &mut rho_p_buf, &mut e_tilde_buf)
+            lu.solve_transpose_unit_capture(p, &mut lu_scratch, &mut rho_p_buf, &mut e_tilde_buf)
         );
-        e_p[p] = 0.0;
         let rho_p = &rho_p_buf;
 
         // PRICE (Huangfu & Hall §2.2.2's "spmv"), row-major: a_p = rho_p^T
@@ -4612,7 +4635,7 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
                 if profile_phases {
                     prof_phases::REFACTOR_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
-                let Some(l) = try_refactorize(std, &t) else {
+                let Some(l) = try_refactorize(std, &t, Some(&lu)) else {
                     if debug_devex {
                         eprintln!("FALLBACK@update_verify iter={_iter}");
                     }
@@ -4816,7 +4839,7 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
             // reduced costs for `B_old` — a meaningless mismatch, not a
             // check of the update formula. A genuinely fresh factorization
             // of the (already basis-swapped) `t` is needed instead.
-            let fresh_lu = refactorize(std, &t);
+            let fresh_lu = refactorize(std, &t, None);
             let d_fresh = fresh_d(&fresh_lu, &t, &active_cost);
             for j in 0..std.n_total {
                 // Fixed columns are deliberately excluded from PRICE's
@@ -4865,7 +4888,7 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
                 if profile_phases {
                     prof_phases::REFACTOR_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
-                let Some(l) = try_refactorize(std, &t) else {
+                let Some(l) = try_refactorize(std, &t, Some(&lu)) else {
                     if debug_devex {
                         eprintln!("FALLBACK@ft_update iter={_iter}");
                     }
@@ -5828,7 +5851,7 @@ mod tests {
         ];
         let std = build_std_form(&vars, &obj, &cons);
         let mut t = Tableau::new(&std);
-        let lu = refactorize(&std, &t);
+        let lu = refactorize(&std, &t, None);
         t.recompute_basics(&lu);
         let mut se = SteepestEdgeState::new(&std);
 
@@ -5858,7 +5881,7 @@ mod tests {
 
         // Brute force: factorize the new basis fresh and directly compute
         // ||B_new^-1 A_j||^2 for every nonbasic j.
-        let fresh_lu = refactorize(&std, &t);
+        let fresh_lu = refactorize(&std, &t, None);
         for j in 0..std.n_total {
             if t.nb_status[j].is_none() {
                 continue;
