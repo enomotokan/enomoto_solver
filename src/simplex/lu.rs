@@ -2027,12 +2027,47 @@ impl FtLu {
                 needed.mark(s);
             }
         }
+        self.u_transpose_sweep(z, &mut needed);
+    }
+
+    /// [`Self::u_transpose_solve_into`] for the case the caller already
+    /// knows `z`'s entire support: a single nonzero at step `seed`.
+    ///
+    /// This is the BTRAN whose right-hand side is a unit vector `e_i` —
+    /// the pivotal-row `rho_p`, the steepest-edge weight update's own
+    /// `rho`, and `DseState::from_basis`'s `m` reference solves are all
+    /// that shape. Seeding the "needed" set from `seed` directly is
+    /// *exact*, not approximate: [`Self::u_transpose_solve_into`]'s own
+    /// seeding loop marks precisely the steps where `z` is nonzero, and
+    /// for a permuted unit vector that set is exactly `{seed}`. What it
+    /// saves is that `O(m)` scan — and, at the call site, the `O(m)`
+    /// permutation *gather* (`z[s] = rhs[col_perm[s]]`, a random-access
+    /// read per step) that materialized the unit vector in the first
+    /// place, which [`Self::seed_unit_rhs`] replaces with a flat `fill` and
+    /// one store.
+    fn u_transpose_solve_seeded(&self, z: &mut [f64], seed: usize) {
+        let mut needed = self.ut_needed.borrow_mut();
+        needed.begin();
+        needed.mark(seed);
+        self.u_transpose_sweep(z, &mut needed);
+    }
+
+    /// The `U^{-T}` sweep itself, shared by both seedings above.
+    fn u_transpose_sweep(&self, z: &mut [f64], needed: &mut EpochMarks) {
         // CLOCK-trigger accounting (`Self::tick`'s own docs): the
         // mark-seeding scan plus the unconditional `for eta in &self.u_seq` walk below
         // (the `continue` only skips the dot product, not the loop
         // iteration itself) are both `O(m)` on every single call regardless
         // of how sparse `z` is — mirrors HiGHS's own `buildSynthticTick`
         // fixed `num_row`-scaled term for the analogous `btranU` stage.
+        //
+        // Charged identically on the seeded path, which skips the scan but
+        // still walks all of `u_seq`: the flat `m` term models that walk,
+        // and the tick drives the deterministic `CLOCK` refactorization
+        // trigger, so making the two paths disagree here would change
+        // *which iterations refactorize* — i.e. silently move the solve
+        // onto a different trajectory — in exchange for modelling a
+        // constant factor within the same `O(m)`.
         self.add_tick(self.base.m as u64);
         for eta in &self.u_seq {
             let p = eta.slot;
@@ -2287,11 +2322,37 @@ impl FtLu {
     /// own docs for why this matters (this is `solve_lp_dual_on`'s
     /// once-per-pivot BTRAN for `rho_p`).
     pub fn solve_transpose_into(&self, rhs: &[f64], scratch: &mut [f64], out: &mut [f64]) {
-        let m = self.base.m;
-        for s in 0..m {
+        self.permute_transpose_rhs(rhs, scratch);
+        self.u_transpose_solve_into(scratch);
+        self.btran_tail(scratch, out);
+    }
+
+    /// `P_col^{-1} rhs` into `scratch` — an `O(m)` gather through the
+    /// column permutation, every BTRAN's first step.
+    #[inline]
+    fn permute_transpose_rhs(&self, rhs: &[f64], scratch: &mut [f64]) {
+        for s in 0..self.base.m {
             scratch[s] = rhs[self.base.col_perm[s]];
         }
-        self.u_transpose_solve_into(scratch);
+    }
+
+    /// [`Self::permute_transpose_rhs`] for `rhs = e_i`, returning the one
+    /// step it lands on. `P_col^{-1} e_i` is the unit vector at step
+    /// `col_perm_inv[i]`, so the gather collapses to a flat `fill` plus a
+    /// single store — no random-access read per step, and the caller never
+    /// has to own (or keep re-zeroing) a length-`m` `e_i` buffer of its own.
+    #[inline]
+    fn seed_unit_rhs(&self, i: usize, scratch: &mut [f64]) -> usize {
+        scratch.fill(0.0);
+        let s0 = self.base.col_perm_inv[i];
+        scratch[s0] = 1.0;
+        s0
+    }
+
+    /// Everything a BTRAN does after `U^{-T}`: the `R` etas in reverse,
+    /// then `L^{-T}` back into original row indexing.
+    #[inline]
+    fn btran_tail(&self, scratch: &mut [f64], out: &mut [f64]) {
         // Hyper-sparse: same skip as `u_solve_into`/`l_solve_into` — `yp`
         // is the only value each `r_eta`'s entries get multiplied by here.
         for reta in self.r_etas.iter().rev() {
@@ -2305,8 +2366,32 @@ impl FtLu {
         // CLOCK-trigger accounting (`Self::tick`'s own docs): `l_transpose_solve_into`
         // is a dense `O(m)` reverse scan regardless of fill (see that
         // method's own docs for why sparsifying it wasn't worth trying).
-        self.add_tick(m as u64);
+        self.add_tick(self.base.m as u64);
         self.base.l_transpose_solve_into(scratch, out);
+    }
+
+    /// [`Self::solve_transpose_into`] for `rhs = e_i`, the shape every
+    /// pivotal-row BTRAN in this crate actually has — see
+    /// [`Self::u_transpose_solve_seeded`] for what the specialization
+    /// saves and why it is exact. Unlike
+    /// [`Self::solve_transpose_unit_into`] this makes no assumption about
+    /// `u_seq`'s ordering, so it is valid with Forrest-Tomlin updates
+    /// applied; unlike [`Self::solve_transpose_into`] it needs no `e_i`
+    /// buffer from the caller. `scratch` is fully overwritten on entry, so
+    /// it carries no precondition (same as `solve_transpose_into`).
+    pub fn solve_transpose_unit(&self, i: usize, scratch: &mut [f64], out: &mut [f64]) {
+        let s0 = self.seed_unit_rhs(i, scratch);
+        self.u_transpose_solve_seeded(scratch, s0);
+        self.btran_tail(scratch, out);
+    }
+
+    /// [`Self::solve_transpose_unit`] plus [`Self::solve_transpose_into_capture`]'s
+    /// own `e_tilde` capture.
+    pub fn solve_transpose_unit_capture(&self, i: usize, scratch: &mut [f64], out: &mut [f64], e_tilde_out: &mut [f64]) {
+        let s0 = self.seed_unit_rhs(i, scratch);
+        self.u_transpose_solve_seeded(scratch, s0);
+        e_tilde_out.copy_from_slice(scratch);
+        self.btran_tail(scratch, out);
     }
 
     /// Same as [`Self::solve_transpose_into`], but additionally captures
@@ -2317,25 +2402,21 @@ impl FtLu {
     /// same iteration for `rho_p`. See that method's own docs for why this
     /// capture lets the caller skip `try_update`'s own redundant
     /// re-derivation of the exact same value.
+    ///
+    /// **No production call site left**: every `e_tilde`-capturing BTRAN in
+    /// this crate has a unit-vector right-hand side and goes through
+    /// [`Self::solve_transpose_unit_capture`] instead. Kept, rather than
+    /// deleted, because it is the general-`rhs` reference that
+    /// specialization is *checked against* — `solve_transpose_unit_is_bit_identical_to_the_dense_unit_rhs_path`
+    /// asserts the two agree entry for entry, and on the synthetic tick,
+    /// both on a fresh factorization and after Forrest-Tomlin updates have
+    /// reordered `u_seq`. Deleting it would delete the proof.
+    #[allow(dead_code)]
     pub fn solve_transpose_into_capture(&self, rhs: &[f64], scratch: &mut [f64], out: &mut [f64], e_tilde_out: &mut [f64]) {
-        let m = self.base.m;
-        for s in 0..m {
-            scratch[s] = rhs[self.base.col_perm[s]];
-        }
+        self.permute_transpose_rhs(rhs, scratch);
         self.u_transpose_solve_into(scratch);
         e_tilde_out.copy_from_slice(scratch);
-        // Hyper-sparse: same skip as `u_solve_into`/`l_solve_into` — `yp`
-        // is the only value each `r_eta`'s entries get multiplied by here.
-        for reta in self.r_etas.iter().rev() {
-            let yp = scratch[reta.p];
-            if yp == 0.0 {
-                continue;
-            }
-            self.add_tick(reta.r.nnz() as u64);
-            reta.r.axpy_into_dense(-yp, scratch);
-        }
-        self.add_tick(m as u64);
-        self.base.l_transpose_solve_into(scratch, out);
+        self.btran_tail(scratch, out);
     }
 
     /// Allocating convenience wrapper around [`Self::solve_transpose_into`]
@@ -3317,6 +3398,59 @@ mod tests {
                 state.solve_transpose_unit_into(i, &mut scratch, &mut out);
                 assert_eq!(out, expected, "seed={seed} i={i}: solve_transpose_unit_into diverged from dense solve_transpose");
                 assert!(scratch.iter().all(|&v| v == 0.0), "seed={seed} i={i}: scratch not restored to all-zero");
+            }
+        }
+    }
+
+    #[test]
+    fn solve_transpose_unit_is_bit_identical_to_the_dense_unit_rhs_path() {
+        let m = 40;
+        for seed in [1u64, 2, 3, 4, 5] {
+            let rows = random_sparse_diag_dominant(m, seed);
+            let base = factorize(m, &rows).expect("diagonally dominant matrix must factorize");
+            let mut state = FtLu::new(base);
+
+            // Once fresh, and again after Forrest-Tomlin updates have
+            // reordered `u_seq` — the case `solve_transpose_unit_into`'s
+            // own prefix-skip is *not* valid for, and the whole reason
+            // this seeded variant exists alongside it.
+            for round in 0..3 {
+                let (mut scratch, mut out, mut e_tilde) = (vec![0.0; m], vec![0.0; m], vec![0.0; m]);
+                let (mut rscratch, mut rout, mut re_tilde) = (vec![0.0; m], vec![0.0; m], vec![0.0; m]);
+                for i in 0..m {
+                    let mut e_i = vec![0.0; m];
+                    e_i[i] = 1.0;
+                    state.solve_transpose_into_capture(&e_i, &mut rscratch, &mut rout, &mut re_tilde);
+
+                    state.solve_transpose_unit_capture(i, &mut scratch, &mut out, &mut e_tilde);
+                    assert_eq!(out, rout, "seed={seed} round={round} i={i}: unit BTRAN diverged from the dense-rhs one");
+                    assert_eq!(e_tilde, re_tilde, "seed={seed} round={round} i={i}: captured e_tilde diverged");
+
+                    // The non-capturing form must agree with both.
+                    let mut out2 = vec![0.0; m];
+                    state.solve_transpose_unit(i, &mut scratch, &mut out2);
+                    assert_eq!(out2, rout, "seed={seed} round={round} i={i}: solve_transpose_unit diverged");
+                }
+                // The tick is what drives the deterministic CLOCK
+                // refactorization trigger, so the two paths must charge
+                // identically or the solve would take a different
+                // trajectory (see `u_transpose_sweep`'s own note).
+                let before = state.synth_tick();
+                let mut s1 = vec![0.0; m];
+                let mut o1 = vec![0.0; m];
+                let mut e1 = vec![0.0; m];
+                state.solve_transpose_unit_capture(0, &mut s1, &mut o1, &mut e1);
+                let unit_cost = state.synth_tick() - before;
+                let before = state.synth_tick();
+                let mut e_0 = vec![0.0; m];
+                e_0[0] = 1.0;
+                state.solve_transpose_into_capture(&e_0, &mut s1, &mut o1, &mut e1);
+                assert_eq!(state.synth_tick() - before, unit_cost, "seed={seed} round={round}: unit and dense BTRAN must charge the same tick");
+
+                let a_q: Vec<f64> = (0..m).map(|k| if k % 7 == round { 1.0 + k as f64 } else { 0.0 }).collect();
+                if !state.try_update(round, &a_q, 1e-9) {
+                    break;
+                }
             }
         }
     }

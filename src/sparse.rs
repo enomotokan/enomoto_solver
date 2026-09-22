@@ -1259,6 +1259,73 @@ impl CscMat {
     }
 }
 
+/// Builds a [`CscMat`] by emitting its columns **in ascending order**, one
+/// at a time, appending straight into the final flat buffer.
+///
+/// [`CscMat::from_rows`] and [`CscMat::from_entry_stream`] both need two
+/// passes because they are handed the matrix in the *wrong* orientation
+/// (row-major) and have to count each column's size before they can place
+/// anything. A producer that already emits column `0`'s entries, then
+/// column `1`'s, and so on — which is what a left-looking LU factorization
+/// does, one elimination step at a time — needs neither pass: the entry it
+/// is holding belongs at the end of the buffer, and the column boundary is
+/// wherever the buffer happens to have reached. That is this builder.
+///
+/// ```text
+///     let mut b = CscBuilder::new(n_rows);
+///     for j in 0..n_cols {
+///         for (i, v) in column_j_entries() { b.push(i, v); }
+///         b.end_column();
+///     }
+///     let mat = b.build();
+/// ```
+pub struct CscBuilder {
+    n_rows: usize,
+    offsets: Vec<usize>,
+    entries: Vec<(usize, f64)>,
+}
+
+impl CscBuilder {
+    /// A builder for a matrix with `n_rows` rows and no columns yet.
+    pub fn new(n_rows: usize) -> Self {
+        CscBuilder { n_rows, offsets: vec![0], entries: Vec::new() }
+    }
+
+    /// As [`Self::new`], with room for `n_cols` columns and `nnz` entries
+    /// reserved up front.
+    pub fn with_capacity(n_rows: usize, n_cols: usize, nnz: usize) -> Self {
+        let mut offsets = Vec::with_capacity(n_cols + 1);
+        offsets.push(0);
+        CscBuilder { n_rows, offsets, entries: Vec::with_capacity(nnz) }
+    }
+
+    /// Appends one entry to the column currently being built.
+    #[inline]
+    pub fn push(&mut self, row: usize, value: f64) {
+        debug_assert!(row < self.n_rows, "row index out of range");
+        self.entries.push((row, value));
+    }
+
+    /// Closes the current column and opens the next one. Must be called
+    /// once per column, including for columns with no entries at all.
+    #[inline]
+    pub fn end_column(&mut self) {
+        self.offsets.push(self.entries.len());
+    }
+
+    /// How many columns have been closed so far.
+    #[inline]
+    pub fn columns_built(&self) -> usize {
+        self.offsets.len() - 1
+    }
+
+    /// Finishes the matrix. Its column count is however many columns were
+    /// closed.
+    pub fn build(self) -> CscMat {
+        CscMat { n_rows: self.n_rows, n_cols: self.offsets.len() - 1, inner: Compressed { offsets: self.offsets, entries: self.entries } }
+    }
+}
+
 // ===========================================================================
 // faer interop
 // ===========================================================================
@@ -1795,6 +1862,38 @@ mod tests {
         assert!(!m.is_marked(0), "a stamp from the pre-wrap pass must not read as live");
         m.mark(1);
         assert!(m.is_marked(1) && !m.is_marked(0));
+    }
+
+    #[test]
+    fn csc_builder_matches_a_two_pass_build_of_the_same_matrix() {
+        let cols: Vec<Vec<(usize, f64)>> = vec![vec![(0, 1.0), (2, 4.0)], vec![(1, 3.0)], vec![(0, 2.0)], vec![(2, 5.0)]];
+        let mut b = CscBuilder::with_capacity(3, 4, 5);
+        for col in &cols {
+            for &(i, v) in col {
+                b.push(i, v);
+            }
+            b.end_column();
+        }
+        assert_eq!(b.columns_built(), 4);
+        let built = b.build();
+        assert_eq!(built, CsrMat::from_rows(&sample_rows(), 4).to_csc());
+        assert_eq!(built.n_rows(), 3);
+        assert_eq!(built.n_cols(), 4);
+    }
+
+    #[test]
+    fn csc_builder_keeps_empty_columns() {
+        let mut b = CscBuilder::new(2);
+        b.end_column(); // column 0: empty
+        b.push(1, 7.0);
+        b.end_column(); // column 1
+        b.end_column(); // column 2: empty
+        let m = b.build();
+        assert_eq!(m.n_cols(), 3);
+        assert!(m.col(0).is_empty());
+        assert_eq!(m.col(1), &[(1, 7.0)]);
+        assert!(m.col(2).is_empty());
+        assert_eq!(m.nnz(), 1);
     }
 
     #[test]

@@ -1604,7 +1604,7 @@ impl Ord for Cand {
 /// returning) and always uses the *full* BFRT walk, so no result computed
 /// here is ever reused for the actual pivot.
 ///
-/// `e_vec`/`rho`/`a_p`/`touched`/`touched_cols` are the caller's own
+/// `lu_scratch`/`rho`/`a_p`/`touched`/`touched_cols` are the caller's own
 /// reusable scratch buffers (the same ones the main loop's real PRICE step
 /// uses) — guaranteed all-zero/empty on entry and restored to that state
 /// before this function returns, so interleaving trial calls for several
@@ -1617,7 +1617,6 @@ fn trial_row_ratio(
     nb_status: &[Option<NbStatus>],
     d: &[f64],
     d_dir: i32,
-    e_vec: &mut [f64],
     lu_scratch: &mut [f64],
     rho: &mut [f64],
     a_p: &mut [f64],
@@ -1625,9 +1624,7 @@ fn trial_row_ratio(
     touched_cols: &mut Vec<usize>,
     row: usize,
 ) -> Option<f64> {
-    e_vec[row] = 1.0;
-    lu.solve_transpose_into(e_vec, lu_scratch, rho);
-    e_vec[row] = 0.0;
+    lu.solve_transpose_unit(row, lu_scratch, rho);
 
     for i in 0..std.n_rows {
         let rv = rho[i];
@@ -1826,7 +1823,6 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     // Scratch for [`residual_norm_affine`]'s own combined drift-check pass.
     let mut resid_scratch_base = vec![0.0f64; m];
     let mut resid_scratch_slope = vec![0.0f64; m];
-    let mut e_r = vec![0.0f64; m];
     let mut rho = vec![0.0f64; m];
     let mut dense_q = vec![0.0f64; m];
     let mut alpha_full = vec![0.0f64; m];
@@ -2505,7 +2501,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 let mut best_gain: Option<Affine1> = None;
                 let mut best_gi: Option<(usize, i32, Affine1)> = None;
                 for &(i, d_dir_i, dev_i, _) in &gi_candidates {
-                    let Some(ratio) = trial_row_ratio(std, &lu, &nb_status, &d, d_dir_i, &mut e_r, &mut lu_scratch, &mut rho, &mut a_p, &mut touched, &mut touched_cols, i) else {
+                    let Some(ratio) = trial_row_ratio(std, &lu, &nb_status, &d, d_dir_i, &mut lu_scratch, &mut rho, &mut a_p, &mut touched, &mut touched_cols, i) else {
                         continue;
                     };
                     let gain = dev_i.scale(ratio);
@@ -2562,11 +2558,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         // call further down — see `FtLu::try_update_precomputed`'s own
         // docs for why this is bit-for-bit the value that call would
         // otherwise recompute from scratch.
-        timed!(profile_phases, prof_phases::BTRAN, {
-            e_r[r] = 1.0;
-            lu.solve_transpose_into_capture(&e_r, &mut lu_scratch, &mut rho, &mut e_tilde_buf);
-            e_r[r] = 0.0;
-        });
+        timed!(profile_phases, prof_phases::BTRAN, lu.solve_transpose_unit_capture(r, &mut lu_scratch, &mut rho, &mut e_tilde_buf));
         if profile_phases {
             let exact_w = dot(&rho, &rho);
             let maintained_w = weights.weight(r);
@@ -3900,7 +3892,6 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
     let mut touched = vec![false; n_total];
     let mut touched_cols: Vec<usize> = Vec::new();
     let mut x_b = vec![0.0f64; m];
-    let mut e_r = vec![0.0f64; m];
     let mut rho = vec![0.0f64; m];
     let mut dense_q = vec![0.0f64; m];
     let mut alpha_full = vec![0.0f64; m];
@@ -4090,9 +4081,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
         // Captures `e_tilde_buf` for this iteration's own
         // `try_update_precomputed` call further down — see the main
         // phase's own identical BTRAN capture docs.
-        e_r[r] = 1.0;
-        lu.solve_transpose_into_capture(&e_r, &mut lu_scratch, &mut rho, &mut e_tilde_buf);
-        e_r[r] = 0.0;
+        lu.solve_transpose_unit_capture(r, &mut lu_scratch, &mut rho, &mut e_tilde_buf);
 
         // Row-major sparse PRICE (see the main phase's own docs for the
         // full derivation, including why *basic* columns are deliberately

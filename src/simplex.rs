@@ -1783,7 +1783,6 @@ fn run_phase(
     let mut a_enter_buf = vec![0.0; m];
     let mut alpha_buf = vec![0.0; m];
     let mut scratch_buf = vec![0.0; m];
-    let mut e_r_buf = vec![0.0; m];
     let mut rho_buf = vec![0.0; m];
     let mut w_buf = vec![0.0; m];
     let mut candidates_buf: Vec<Candidate> = Vec::with_capacity(m);
@@ -2092,9 +2091,7 @@ fn run_phase(
                 // basis's LU — `rho` = row r of B^-1 (for beta_j) and `w`
                 // = B^-T alpha (for the cross term tau_j) — computed now,
                 // before the swap changes what `lu` represents.
-                e_r_buf[r] = 1.0;
-                lu.solve_transpose_into(&e_r_buf, &mut scratch_buf, &mut rho_buf);
-                e_r_buf[r] = 0.0;
+                lu.solve_transpose_unit(r, &mut scratch_buf, &mut rho_buf);
                 lu.solve_transpose_into(alpha, &mut scratch_buf, &mut w_buf);
                 let rho: &[f64] = &rho_buf;
                 let w: &[f64] = &w_buf;
@@ -2596,11 +2593,8 @@ impl DseState {
                 w[i] = norm_sq.max(STEEPEST_EDGE_FLOOR);
             }
         } else {
-            let mut e_i = vec![0.0; m];
             for i in 0..m {
-                e_i[i] = 1.0;
-                lu.solve_transpose_into(&e_i, &mut scratch, &mut z);
-                e_i[i] = 0.0;
+                lu.solve_transpose_unit(i, &mut scratch, &mut z);
                 let norm_sq: f64 = z.iter().map(|&v| v * v).sum();
                 w[i] = norm_sq.max(STEEPEST_EDGE_FLOOR);
             }
@@ -3575,7 +3569,6 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
     // column's `alpha`, the DSE cross-term `tau`, and — when BFRT flips
     // are pending — one more for `combined`).
     let mut lu_scratch = vec![0.0; m];
-    let mut e_p = vec![0.0; m];
     let mut rho_p_buf = vec![0.0; m];
     let mut a_enter_buf = vec![0.0; m];
     let mut alpha_buf = vec![0.0; m];
@@ -3937,13 +3930,11 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
         // all, so a stale capture is never fed to it) — see
         // `try_update_precomputed`'s own docs for why this is bit-for-bit
         // the value it would otherwise recompute from scratch.
-        e_p[p] = 1.0;
         timed!(
             profile_phases,
             prof_phases::BTRAN,
-            lu.solve_transpose_into_capture(&e_p, &mut lu_scratch, &mut rho_p_buf, &mut e_tilde_buf)
+            lu.solve_transpose_unit_capture(p, &mut lu_scratch, &mut rho_p_buf, &mut e_tilde_buf)
         );
-        e_p[p] = 0.0;
         let rho_p = &rho_p_buf;
 
         // PRICE (Huangfu & Hall §2.2.2's "spmv"), row-major: a_p = rho_p^T
