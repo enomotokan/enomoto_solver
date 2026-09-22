@@ -774,7 +774,7 @@ fn factorize_dense_faer(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuFac
         }
     }
 
-    let l_row = l_col.to_csr();
+    let l_row = build_l_row(&l_col, m);
     Some(LuFactors { m, l_col, l_row, u_row, row_perm, col_perm, col_perm_inv, row_perm_inv })
 }
 
@@ -943,11 +943,13 @@ pub fn factorize_diagonal(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuF
         }
     }
     let identity: Vec<usize> = (0..m).collect();
+    // `L` is the identity: `m` columns, every one empty.
+    let l_col = CscMat::empty(m, m);
+    let l_row = build_l_row(&l_col, m);
     Some(LuFactors {
         m,
-        // `L` is the identity: `m` columns, every one empty.
-        l_col: CscMat::empty(m, m),
-        l_row: CscMat::empty(m, m).to_csr(),
+        l_col,
+        l_row,
         u_row,
         row_perm: identity.clone(),
         col_perm: identity.clone(),
@@ -1552,7 +1554,7 @@ fn factorize_flat_markowitz(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<L
         u_row[pivot_step].push((col_perm_inv[orig_col], val));
     }
 
-    let l_row = l_col.to_csr();
+    let l_row = build_l_row(&l_col, m);
     Some(LuFactors { m, l_col, l_row, u_row, row_perm, col_perm, col_perm_inv, row_perm_inv })
 }
 
@@ -1815,7 +1817,7 @@ fn factorize_bordered(m: usize, rows_in: &[Vec<(usize, f64)>], border: &[usize])
         }
     }
 
-    let l_row = l_col.to_csr();
+    let l_row = build_l_row(&l_col, m);
     Some(LuFactors { m, l_col, l_row, u_row, row_perm, col_perm, col_perm_inv: col_perm_inv_full, row_perm_inv: row_perm_inv_full })
 }
 
@@ -2288,6 +2290,29 @@ fn expected_dense_gate() -> f64 {
 /// pass answers the question exactly, for a fraction of the `nnz(L)`
 /// random accesses the stage itself is about to do either way.
 const BTRAN_L_SCATTER_FRACTION: f64 = 0.10;
+
+/// Builds [`LuFactors::l_row`] — or, when the scatter form is disabled
+/// outright (`ENOMOTO_BTRAN_L_SCATTER=0`), an empty stand-in with the same
+/// `m` outer slots and no entries.
+///
+/// The empty case exists so that arm of the A/B is *genuinely* this crate's
+/// pre-§2.6 behaviour, construction cost included. Building `l_row` and
+/// then never reading it would leave the transpose's own `O(nnz(L))` build
+/// — paid at **every** refactorization, `dfl001` alone refactorizes ~100
+/// times — inside both arms, hiding exactly the cost that has to be
+/// weighed against the scatter form's own win. Measuring a change against
+/// a baseline that already pays for it is how a feature gets adopted on a
+/// number that was never real.
+///
+/// An all-empty `CscMat` transposes into a `CsrMat` with `m + 1` zero
+/// offsets and no entries, so `row(i)` stays valid (and empty) for every
+/// `i` rather than needing a separate `Option` on the hot path.
+fn build_l_row(l_col: &CscMat, m: usize) -> CsrMat {
+    if btran_l_scatter_gate() <= 0.0 {
+        return CscMat::empty(m, m).to_csr();
+    }
+    l_col.to_csr()
+}
 
 /// [`BTRAN_L_SCATTER_FRACTION`], overridable via `ENOMOTO_BTRAN_L_SCATTER`
 /// — `0` disables the scatter form outright (restoring the pre-`l_row`
