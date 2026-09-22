@@ -80,6 +80,7 @@ use std::cell::{Cell, RefCell};
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::OnceLock;
 
 /// Threshold-pivoting stability floor (see this module's own top docs): a
 /// pivot candidate must be at least this fraction of its column's live max
@@ -106,7 +107,136 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// small refactor-count drops), so `0.5` is *not* simply "more of the same
 /// good direction" — `0.25` is a measured sweet spot, not a floor to keep
 /// pushing from without re-benchmarking.
+/// Since `docs/lu_comparison_enomoto_vs_highs.md` §2.4 this is the
+/// *starting* value of a per-solve threshold that a simplex loop may
+/// escalate ([`pivot_threshold`]) — but that escalation is off by default
+/// (`extended_dual::PIVOT_ESCALATION_STEP`, which records what enabling it
+/// measured), so this remains the floor every solve actually runs at, and
+/// everything measured above still describes the default build.
 const STABILITY: f64 = 0.25;
+
+/// Ceiling on the escalated pivot threshold ([`escalate_pivot_threshold`])
+/// — HiGHS's own `kMaxPivotThreshold`. [`STABILITY`]'s docs record that a
+/// *static* `0.5` costs ~4% on `d2q06c`/`greenbeb`/`fit2p` through extra
+/// fill-in, which is exactly why this value is reachable only after the
+/// escalation ladder below has evidence that *this* solve is paying more
+/// for instability than it would for fill.
+const PIVOT_THRESHOLD_MAX: f64 = 0.5;
+
+/// Floor for an operator-supplied `ENOMOTO_PIVOT_THRESHOLD` — HiGHS's own
+/// `kMinPivotThreshold`. Nothing escalates *downwards*, so this only ever
+/// clamps the env override.
+const PIVOT_THRESHOLD_MIN: f64 = 8e-4;
+
+/// Multiplier applied per [`escalate_pivot_threshold`] step. HiGHS uses
+/// `kPivotThresholdChangeFactor = 5.0` from a `0.1` default; from this
+/// crate's `0.25` a factor of `2.0` lands exactly on
+/// [`PIVOT_THRESHOLD_MAX`] in one step, so the ladder here is
+/// `0.25 -> 0.5`, and a second escalation is a no-op.
+const PIVOT_THRESHOLD_FACTOR: f64 = 2.0;
+
+thread_local! {
+    /// The pivot threshold in force for *this thread's* current solve —
+    /// `None` until first read, then [`pivot_threshold_base`].
+    ///
+    /// Thread-local rather than a field threaded through `factorize`'s
+    /// half-dozen entry points (and their callers in `simplex.rs`,
+    /// `extended_dual.rs`, `mip.rs`) because it is a *solve*-scoped
+    /// setting in exactly the way HiGHS's own
+    /// `info_.factor_pivot_threshold` is: one value, read once per
+    /// factorization, written only by the simplex loop that owns the
+    /// solve. Thread-local (not a `static`) keeps concurrent solves —
+    /// `mip.rs` runs LP relaxations on rayon workers — from escalating
+    /// each other's thresholds, which a shared global would do while also
+    /// making both solves' pivot sequences depend on the interleaving.
+    /// Every solve entry point calls [`reset_pivot_threshold`] before its
+    /// first factorization, so a thread that ran a troublesome solve does
+    /// not hand the escalated value to the next solve scheduled onto it.
+    static PIVOT_THRESHOLD: Cell<Option<f64>> = const { Cell::new(None) };
+}
+
+/// The value [`reset_pivot_threshold`] restores: [`STABILITY`], or
+/// `ENOMOTO_PIVOT_THRESHOLD` when set (clamped to
+/// `[PIVOT_THRESHOLD_MIN, PIVOT_THRESHOLD_MAX]`), which is how the A/B
+/// behind the constant's own value is produced without a rebuild. Read
+/// from the environment once per process, not once per solve: a solve that
+/// re-read it would pay a `std::env::var` lookup inside the very loop this
+/// section is trying to speed up.
+fn pivot_threshold_base() -> f64 {
+    static BASE: OnceLock<f64> = OnceLock::new();
+    *BASE.get_or_init(|| {
+        std::env::var("ENOMOTO_PIVOT_THRESHOLD")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .map(|v| v.clamp(PIVOT_THRESHOLD_MIN, PIVOT_THRESHOLD_MAX))
+            .unwrap_or(STABILITY)
+    })
+}
+
+/// The threshold-pivoting floor in force right now: a candidate pivot must
+/// be at least this fraction of the largest magnitude left in its column
+/// of the active submatrix. Read **once per factorization**
+/// (`MarkowitzState::new`, `factorize_reusing_order`), never per
+/// elimination step — a factorization that read it per step could see it
+/// change underneath itself only if the simplex loop ran concurrently with
+/// its own factorization, but reading it once also keeps the whole
+/// factorization's pivot sequence a function of one scalar, which is what
+/// makes a given solve reproducible.
+pub fn pivot_threshold() -> f64 {
+    PIVOT_THRESHOLD.with(|c| match c.get() {
+        Some(v) => v,
+        None => {
+            let base = pivot_threshold_base();
+            c.set(Some(base));
+            base
+        }
+    })
+}
+
+/// Restores [`pivot_threshold_base`] — called by every solve entry point
+/// before its first factorization, since the escalation below is
+/// deliberately monotone *within* a solve and must not leak across solves
+/// (see [`PIVOT_THRESHOLD`]'s own docs).
+pub fn reset_pivot_threshold() {
+    PIVOT_THRESHOLD.with(|c| c.set(Some(pivot_threshold_base())));
+}
+
+/// Raises the threshold one [`PIVOT_THRESHOLD_FACTOR`] step, capped at
+/// [`PIVOT_THRESHOLD_MAX`]; returns whether it actually moved.
+///
+/// This is `docs/lu_comparison_enomoto_vs_highs.md` §2.4's "loosen/tighten
+/// the stability floor when the problem is ill-conditioned", in HiGHS's
+/// own direction: a solve that keeps *failing* numerically (Forrest-Tomlin
+/// updates rejected, `x_B(M)`/`d` drifting away from the true basis,
+/// pivots grossly inconsistent with the factorization) is one whose
+/// factorizations are too permissive, so the floor goes **up**, buying
+/// stability with fill-in. Lowering it on trouble would be the wrong sign:
+/// it is exactly the marginal pivots a lower floor admits that produce the
+/// eta chains these triggers are catching.
+///
+/// Monotone within a solve, like HiGHS's `info_.factor_pivot_threshold`:
+/// nothing lowers it again short of [`reset_pivot_threshold`]. A ratchet
+/// that also relaxed would make "how many troublesome iterations ago" part
+/// of the pivot sequence, and the extra state buys nothing measurable —
+/// the ladder is one step wide.
+///
+/// **Nothing calls this by default.** Wiring it to the numerical-failure
+/// triggers cost +7.4% over NETLIB93; see
+/// `extended_dual::PIVOT_ESCALATION_STEP` and
+/// `analysis/pivot_threshold_colfixmax_20260922_154500.md` for the
+/// measurement, and `ENOMOTO_PIVOT_ESCALATION_STEP` to re-enable it.
+pub fn escalate_pivot_threshold() -> bool {
+    let cur = pivot_threshold();
+    let next = (cur * PIVOT_THRESHOLD_FACTOR).min(PIVOT_THRESHOLD_MAX);
+    if next > cur {
+        PIVOT_THRESHOLD.with(|c| c.set(Some(next)));
+        PROF_PIVOT_ESCALATIONS.fetch_add(1, Ordering::Relaxed);
+        true
+    } else {
+        false
+    }
+}
+
 /// A column whose *initial* (pre-elimination) degree exceeds this fraction
 /// of `m` is treated as "dense" by `find_best_pivot`'s dense-avoidance
 /// pass — see `MarkowitzState::initially_dense`'s own docs for why a
@@ -201,6 +331,22 @@ pub(crate) static PROF_SEARCH_LIMIT_STEPS: AtomicUsize = AtomicUsize::new(0);
 /// [`PROF_TOTAL_STEPS`] it gives the average scan width per step, which is
 /// what the bound is supposed to move.
 pub(crate) static PROF_SEARCH_CANDIDATES: AtomicUsize = AtomicUsize::new(0);
+
+/// How many times [`escalate_pivot_threshold`] actually moved the
+/// threshold — without this, a flat benchmark on the §2.4 escalation
+/// can't be told apart from one where the ladder never fired at all.
+pub(crate) static PROF_PIVOT_ESCALATIONS: AtomicUsize = AtomicUsize::new(0);
+/// Entries `ensure_col_max_abs` walked to un-stale the columns
+/// `find_best_pivot` actually read — the total work an incremental
+/// `colFixMax` (`docs/lu_comparison_enomoto_vs_highs.md` §2.4) could have
+/// removed, and the reason removing it lost: since §2.5's
+/// [`PIVOT_SEARCH_LIMIT`] bounds a single search to 8 candidate columns,
+/// this is already a small fraction of the per-entry bookkeeping such a
+/// scheme costs in `eliminate` (measured in
+/// `analysis/pivot_threshold_colfixmax_20260922_154500.md` §2). Counted
+/// per rescan, not per touched column, so it stays off the elimination
+/// loop's own path.
+pub(crate) static PROF_COLMAX_RESCAN_ENTRIES: AtomicUsize = AtomicUsize::new(0);
 
 /// BTRANs whose `L^{-T}` stage took the row-major scatter form, against
 /// those that fell back to the column-major gather form — see
@@ -568,16 +714,30 @@ struct MarkowitzState {
     // reference.
     col_max_abs: Vec<f64>,
 
-    // `col_max_abs_dirty[j]`: `refresh_column` marked `col_max_abs[j]`
-    // stale (its column-mirror membership or values changed) but hasn't
-    // recomputed it yet — deferred to `ensure_col_max_abs`, called only
-    // once `find_best_pivot` is actually about to read it. Most columns
-    // `eliminate` dirties this way get dirtied again by a later
-    // elimination step before `find_best_pivot` ever visits them (a
-    // column's bucket position, which *is* updated eagerly by
-    // `update_col_degree`, is what determines when that happens), so
-    // eagerly recomputing every dirtied column's max here was mostly
-    // wasted work — up to 75% of it, measured on Netlib `greenbea`.
+    // `col_max_abs_dirty[j]`: `col_max_abs[j]` is stale — some entry of
+    // column `j` shrank or left, so the stored value is an upper bound
+    // rather than the true max. Recomputing is deferred to
+    // `ensure_col_max_abs`, called only once `find_best_pivot` is actually
+    // about to read it. Most columns `eliminate` dirties this way get
+    // dirtied again by a later elimination step before `find_best_pivot`
+    // ever visits them (a column's bucket position, which *is* updated
+    // eagerly by `update_col_degree`, is what determines when that
+    // happens), so eagerly recomputing every dirtied column's max was
+    // mostly wasted work — up to 75% of it, measured on Netlib `greenbea`.
+    //
+    // Marking, rather than maintaining, is also what
+    // `docs/lu_comparison_enomoto_vs_highs.md` §2.4's incremental
+    // `colFixMax` was measured against and beat. That variant kept
+    // `col_max_abs[j]` exact through `eliminate` — raise it on a fill-in
+    // or a growing value, mark stale only when the entry that *was* the
+    // max shrank or left — which dropped the stale fraction to 0.1-6% of
+    // touched columns and left every pivot choice bit-identical. It still
+    // lost, by 2.8% over NETLIB93: since §2.5's [`PIVOT_SEARCH_LIMIT`]
+    // bounds one search to 8 candidate columns, the rescans it removed
+    // were already small (`pilot87`: 1.9M entries) against the per-entry
+    // bookkeeping it added in the merge loop below (61.5M updates, each a
+    // scattered read-modify-write into an `m`-sized array). See
+    // `analysis/pivot_threshold_colfixmax_20260922_154500.md` §2.
     col_max_abs_dirty: Vec<bool>,
 
     /// `initially_dense[j]` iff column `j`'s degree *before any
@@ -608,6 +768,26 @@ struct MarkowitzState {
     /// `find_best_pivot` call — `0` means "unbounded", the pre-§2.5
     /// behaviour.
     search_limit: usize,
+
+    /// [`pivot_threshold`]'s value, resolved once per factorization here —
+    /// see that function's own docs for why this factorization's whole
+    /// pivot sequence is deliberately a function of one scalar captured at
+    /// its start, rather than of a value the simplex loop could raise
+    /// part-way through.
+    threshold: f64,
+
+    /// Plain (non-atomic) accumulator for [`PROF_COLMAX_RESCAN_ENTRIES`],
+    /// flushed once in [`Drop`] — an `AtomicUsize::fetch_add` per rescan
+    /// would be a locked read-modify-write on the factorization's own
+    /// path, and would make two threads factorizing at once contend on
+    /// one cache line.
+    prof_colmax_rescan_entries: usize,
+}
+
+impl Drop for MarkowitzState {
+    fn drop(&mut self) {
+        PROF_COLMAX_RESCAN_ENTRIES.fetch_add(self.prof_colmax_rescan_entries, Ordering::Relaxed);
+    }
 }
 
 impl MarkowitzState {
@@ -660,6 +840,8 @@ impl MarkowitzState {
             initially_dense,
             scratch: ElimScratch::new(m),
             search_limit: pivot_search_limit(),
+            threshold: pivot_threshold(),
+            prof_colmax_rescan_entries: 0,
         }
     }
 
@@ -741,9 +923,13 @@ impl MarkowitzState {
 
     /// Updates `j`'s degree/bucket placement from its current
     /// column-mirror membership — O(that column's own active degree),
-    /// never O(m) — and marks `col_max_abs[j]` stale rather than
-    /// recomputing it here; see [`Self::ensure_col_max_abs`] and
-    /// `col_max_abs_dirty`'s own docs for why.
+    /// never O(m).
+    ///
+    /// Marks `col_max_abs[j]` stale rather than recomputing it here; see
+    /// [`Self::ensure_col_max_abs`] and `col_max_abs_dirty`'s own docs for
+    /// why, including why the incremental alternative
+    /// (`docs/lu_comparison_enomoto_vs_highs.md` §2.4's `colFixMax`) was
+    /// measured and rejected.
     fn refresh_column(&mut self, j: usize) {
         if self.col_used[j] {
             return;
@@ -754,22 +940,29 @@ impl MarkowitzState {
     }
 
     /// Recomputes `col_max_abs[j]` from its current column-mirror
-    /// membership if `refresh_column` left it marked stale, otherwise a
-    /// no-op — called from `find_best_pivot` right before it reads
-    /// `col_max_abs[j]`, the one place that value's currency actually
-    /// matters.
+    /// membership if it is marked stale, otherwise a no-op — called from
+    /// `find_best_pivot` right before it reads `col_max_abs[j]`, the one
+    /// place that value's currency actually matters.
     fn ensure_col_max_abs(&mut self, j: usize) {
         if !self.col_max_abs_dirty[j] {
             return;
         }
+        self.col_max_abs[j] = self.col_max_abs_rescan(j);
+        self.col_max_abs_dirty[j] = false;
+    }
+
+    /// `max |a_ij|` over column `j`'s live entries, read straight off the
+    /// column mirror.
+    fn col_max_abs_rescan(&mut self, j: usize) -> f64 {
+        let col = self.mat.col(j);
+        self.prof_colmax_rescan_entries += col.len();
         let mut mx = 0.0f64;
-        for &r in self.mat.col(j) {
+        for &r in col {
             if let Some(v) = self.mat.row_get(r as usize, j) {
                 mx = f64::max(mx, v.abs());
             }
         }
-        self.col_max_abs[j] = mx;
-        self.col_max_abs_dirty[j] = false;
+        mx
     }
 
     /// Find best pivot: among still-active columns in ascending-degree
@@ -822,7 +1015,12 @@ impl MarkowitzState {
                     continue;
                 }
                 self.ensure_col_max_abs(j);
-                let col_max_abs = self.col_max_abs[j];
+                // HiGHS's `mc_min_pivot[j] = max_value * pivot_threshold`
+                // (§2.4): the product is a per-*column* quantity, so it is
+                // hoisted out of the row loop below rather than recomputed
+                // per candidate entry. Same product, same rounding, same
+                // comparisons.
+                let min_pivot = self.threshold * self.col_max_abs[j];
                 let col_deg = self.col_degree[j];
                 searched += 1;
                 for &r in self.mat.col(j) {
@@ -840,7 +1038,7 @@ impl MarkowitzState {
                         continue;
                     }
                     let Some(v) = self.mat.row_get(i, j) else { continue };
-                    if v == 0.0 || v.abs() < STABILITY * col_max_abs {
+                    if v == 0.0 || v.abs() < min_pivot {
                         continue;
                     }
                     if score < best_score || (score == best_score && v.abs() > best_pivot_abs) {
@@ -1698,6 +1896,13 @@ fn factorize_reusing_order(
             seen[j] = true;
         }
     }
+    // Read once for the whole factorization, exactly as
+    // `MarkowitzState::new` does — this path reuses the previous
+    // factorization's *column* order but still picks each pivot row under
+    // the same threshold test, so an escalated threshold has to reach it
+    // too (a rebuild that kept the old, looser floor would quietly undo
+    // the escalation for as long as the pivot order keeps being reusable).
+    let threshold = pivot_threshold();
 
     // Column-major copy of the (row-major) input: one `O(nnz)` counting
     // sort into flat arrays, the same shape `CscMat::from_rows` builds,
@@ -1811,7 +2016,8 @@ fn factorize_reusing_order(
         }
 
         // Pivot choice: the recorded row if it is still free and passes
-        // the same threshold test `find_best_pivot` applies (`STABILITY`
+        // the same threshold test `find_best_pivot` applies
+        // ([`pivot_threshold`]
         // times the largest magnitude left in this column of the
         // *remaining* submatrix — which is what `work` now holds over the
         // rows that have no step yet); otherwise that largest entry
@@ -1832,19 +2038,19 @@ fn factorize_reusing_order(
             return None;
         }
         let hint = pivot_row_hint[s];
-        let pi = if hint < m && row_step[hint] == usize::MAX && work[hint].abs() >= STABILITY * best_abs {
+        let pi = if hint < m && row_step[hint] == usize::MAX && work[hint].abs() >= threshold * best_abs {
             hint
         } else {
             // The recorded row is gone (a basis column the Forrest-Tomlin
             // updates replaced leaves its old pivot row numerically empty
             // here — see this function's own docs): re-pick among the rows
-            // that clear the same `STABILITY` floor `find_best_pivot`
+            // that clear the same [`pivot_threshold`] floor `find_best_pivot`
             // applies, taking the one with the fewest entries left in
             // columns this order has yet to reach, ties going to the
             // larger pivot. That is the surviving half of a Markowitz
             // count once the column is fixed.
             PROF_REBUILD_ROW_REPICKS.fetch_add(1, Ordering::Relaxed);
-            let floor = STABILITY * best_abs;
+            let floor = threshold * best_abs;
             let mut pick = best_r;
             let mut pick_deg = u32::MAX;
             let mut pick_abs = 0.0f64;
@@ -3908,15 +4114,24 @@ impl FtLu {
     /// out of sync between two copies — exists in exactly one place.
     fn commit_update(&mut self, basis_slot: usize, a_tilde: &[f64], e_tilde: &[f64], min_pivot: f64) -> bool {
         let m = self.base.m;
+        debug_assert_eq!(a_tilde.len(), m, "a_tilde must be the full dense column");
+        debug_assert_eq!(e_tilde.len(), m, "e_tilde must be the full dense row");
         let p = self.base.col_perm_inv[basis_slot];
 
         let seq_pos = self.slot_pos[p];
         let old_pivot = self.u_seq[seq_pos].pivot;
 
-        let r_vec: Vec<(usize, f64)> =
-            (0..m).filter(|&i| i != p).map(|i| (i, -old_pivot * e_tilde[i])).filter(|&(_, v)| v != 0.0).collect();
-
-        let dot: f64 = r_vec.iter().map(|&(i, v)| v * a_tilde[i]).sum();
+        // The `R` eta is built straight out of `e_tilde` — same entries,
+        // same order, same sparse/dense choice as the `collect()`-then-
+        // `HybridVec::pack` this replaces, minus that intermediate `Vec`
+        // (see [`HybridVec::pack_scaled_dense`]'s own docs). It is built
+        // *before* the pivot test because `dot` is exactly this eta
+        // against `a_tilde`, so the test can read it off the eta rather
+        // than needing a separate pass of its own; the previous code
+        // likewise materialized the whole thing before testing, so a
+        // rejected update is no more expensive than it already was.
+        let r_eta = HybridVec::pack_scaled_dense(e_tilde, p, -old_pivot, DENSE_ETA_FRACTION);
+        let dot = r_eta.dot_dense(a_tilde);
         let new_pivot = a_tilde[p] - dot;
         if new_pivot.abs() < min_pivot {
             return false;
@@ -3936,11 +4151,11 @@ impl FtLu {
         // `row_owners` before overwriting them below — otherwise a stale
         // `p` would linger in some other row's owner list, pointing at
         // content that no longer exists there.
-        for row_step in removed.off_diag.indices() {
+        removed.off_diag.for_each_index(|row_step| {
             if let Some(idx) = self.row_owners[row_step].iter().position(|&s| s == p) {
                 self.row_owners[row_step].swap_remove(idx);
             }
-        }
+        });
 
         // Zero row `p` out of every eta that still references it (Tomlin
         // 1974, eq. 12) — only the etas `row_owners[p]` actually lists,
@@ -3953,17 +4168,17 @@ impl FtLu {
             }
         }
 
-        let off_diag: Vec<(usize, f64)> =
-            (0..m).filter(|&i| i != p && a_tilde[i] != 0.0).map(|i| (i, a_tilde[i])).collect();
-        for &(row_step, _) in &off_diag {
-            self.row_owners[row_step].push(p);
-        }
-        self.u_seq.push(UEta { slot: p, pivot: new_pivot, off_diag: HybridVec::pack(m, off_diag, DENSE_ETA_FRACTION) });
-        self.fill += self.u_seq.last().expect("just pushed").off_diag.nnz();
+        // Same replacement column as before, built directly from
+        // `a_tilde` (scale `1.0`, so the dense arm is a plain copy) rather
+        // than through a throwaway pair list.
+        let off_diag = HybridVec::pack_scaled_dense(a_tilde, p, 1.0, DENSE_ETA_FRACTION);
+        off_diag.for_each_index(|row_step| self.row_owners[row_step].push(p));
+        self.fill += off_diag.nnz();
+        self.u_seq.push(UEta { slot: p, pivot: new_pivot, off_diag });
         self.slot_pos[p] = self.u_seq.len() - 1;
 
-        self.r_etas.push(REta { p, r: HybridVec::pack(m, r_vec, DENSE_ETA_FRACTION) });
-        self.fill += self.r_etas.last().expect("just pushed").r.nnz();
+        self.fill += r_eta.nnz();
+        self.r_etas.push(REta { p, r: r_eta });
 
         true
     }
