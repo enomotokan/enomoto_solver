@@ -801,7 +801,7 @@ fn factorize_dense_faer(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuFac
         }
     }
 
-    let l_row = FixedRows::from_transpose(&l_col, m);
+    let l_row = build_l_row(&l_col, m);
     Some(LuFactors { m, l_col, l_row, u_row, row_perm, col_perm, col_perm_inv, row_perm_inv })
 }
 
@@ -971,7 +971,7 @@ pub fn factorize_diagonal(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuF
     }
     let identity: Vec<usize> = (0..m).collect();
     let l_col = vec![Vec::new(); m];
-    let l_row = FixedRows::from_transpose(&l_col, m);
+    let l_row = build_l_row(&l_col, m);
     Some(LuFactors {
         m,
         l_col,
@@ -1101,7 +1101,7 @@ fn factorize_flat_markowitz(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<L
         u_row[pivot_step].push((col_perm_inv[orig_col], val));
     }
 
-    let l_row = FixedRows::from_transpose(&l_col, m);
+    let l_row = build_l_row(&l_col, m);
     Some(LuFactors { m, l_col, l_row, u_row, row_perm, col_perm, col_perm_inv, row_perm_inv })
 }
 
@@ -1348,7 +1348,7 @@ fn factorize_bordered(m: usize, rows_in: &[Vec<(usize, f64)>], border: &[usize])
         }
     }
 
-    let l_row = FixedRows::from_transpose(&l_col, m);
+    let l_row = build_l_row(&l_col, m);
     Some(LuFactors { m, l_col, l_row, u_row, row_perm, col_perm, col_perm_inv: col_perm_inv_full, row_perm_inv: row_perm_inv_full })
 }
 
@@ -1887,6 +1887,29 @@ const BTRAN_L_SCATTER_FRACTION: f64 = 0.10;
 /// gather-only BTRAN, which is how the A/B behind the constant's own value
 /// is produced), `1` forces it unconditionally. Read once per
 /// refactorization, never per solve, same as [`expected_dense_gate`].
+/// Builds [`LuFactors::l_row`] — or, when the scatter form is disabled
+/// outright (`ENOMOTO_BTRAN_L_SCATTER=0`), an empty stand-in with the same
+/// `m` outer slots and no entries.
+///
+/// The empty case exists so that arm of the A/B is *genuinely* this crate's
+/// pre-§2.6 behaviour, construction cost included. Building `l_row` and
+/// then never reading it would leave the transpose's own `O(nnz(L))` build
+/// — paid at **every** refactorization, `dfl001` alone refactorizes ~100
+/// times — inside both arms, hiding exactly the cost that has to be
+/// weighed against the scatter form's own win. Measuring a change against
+/// a baseline that already pays for it is how a feature gets adopted on a
+/// number that was never real.
+///
+/// `from_transpose(&[], m)` yields `m + 1` zero offsets and no entries, so
+/// `row(i)` stays valid (and empty) for every `i` rather than needing a
+/// separate `Option` on the hot path.
+fn build_l_row(l_col: &[Vec<(usize, f64)>], m: usize) -> FixedRows {
+    if btran_l_scatter_gate() <= 0.0 {
+        return FixedRows::from_transpose(&[], m);
+    }
+    FixedRows::from_transpose(l_col, m)
+}
+
 fn btran_l_scatter_gate() -> f64 {
     std::env::var("ENOMOTO_BTRAN_L_SCATTER").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(BTRAN_L_SCATTER_FRACTION)
 }
