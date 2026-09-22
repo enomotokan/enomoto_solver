@@ -107,12 +107,12 @@ use std::sync::OnceLock;
 /// small refactor-count drops), so `0.5` is *not* simply "more of the same
 /// good direction" — `0.25` is a measured sweet spot, not a floor to keep
 /// pushing from without re-benchmarking.
-/// (Since `docs/lu_comparison_enomoto_vs_highs.md` §2.4 this is only the
-/// *starting* value of a per-solve, escalating threshold — see
-/// [`pivot_threshold`]. Everything measured above was measured with the
-/// threshold pinned there for the whole solve, which is still what every
-/// well-conditioned solve gets: the escalation only ever fires after a
-/// solve has proven itself numerically troublesome.)
+/// Since `docs/lu_comparison_enomoto_vs_highs.md` §2.4 this is the
+/// *starting* value of a per-solve threshold that a simplex loop may
+/// escalate ([`pivot_threshold`]) — but that escalation is off by default
+/// (`extended_dual::PIVOT_ESCALATION_STEP`, which records what enabling it
+/// measured), so this remains the floor every solve actually runs at, and
+/// everything measured above still describes the default build.
 const STABILITY: f64 = 0.25;
 
 /// Ceiling on the escalated pivot threshold ([`escalate_pivot_threshold`])
@@ -219,6 +219,12 @@ pub fn reset_pivot_threshold() {
 /// that also relaxed would make "how many troublesome iterations ago" part
 /// of the pivot sequence, and the extra state buys nothing measurable —
 /// the ladder is one step wide.
+///
+/// **Nothing calls this by default.** Wiring it to the numerical-failure
+/// triggers cost +7.4% over NETLIB93; see
+/// `extended_dual::PIVOT_ESCALATION_STEP` and
+/// `analysis/pivot_threshold_colfixmax_20260922_154500.md` for the
+/// measurement, and `ENOMOTO_PIVOT_ESCALATION_STEP` to re-enable it.
 pub fn escalate_pivot_threshold() -> bool {
     let cur = pivot_threshold();
     let next = (cur * PIVOT_THRESHOLD_FACTOR).min(PIVOT_THRESHOLD_MAX);
@@ -330,16 +336,16 @@ pub(crate) static PROF_SEARCH_CANDIDATES: AtomicUsize = AtomicUsize::new(0);
 /// threshold — without this, a flat benchmark on the §2.4 escalation
 /// can't be told apart from one where the ladder never fired at all.
 pub(crate) static PROF_PIVOT_ESCALATIONS: AtomicUsize = AtomicUsize::new(0);
-/// Columns `eliminate` touched whose `col_max_abs` had to be marked stale
-/// (the touch could only have *lowered* the column's largest magnitude),
-/// against [`PROF_COLMAX_TOUCHES`], every touch. The ratio is what §2.4's
-/// incremental `colFixMax` moves: before it, the two were equal by
-/// construction, since every touch marked the column stale.
-pub(crate) static PROF_COLMAX_DIRTIED: AtomicUsize = AtomicUsize::new(0);
-pub(crate) static PROF_COLMAX_TOUCHES: AtomicUsize = AtomicUsize::new(0);
-/// Entries walked by `ensure_col_max_abs`'s full-column recomputes — the
-/// work the incremental update actually removes (a dirtied column that
-/// `find_best_pivot` never visits costs nothing either way).
+/// Entries `ensure_col_max_abs` walked to un-stale the columns
+/// `find_best_pivot` actually read — the total work an incremental
+/// `colFixMax` (`docs/lu_comparison_enomoto_vs_highs.md` §2.4) could have
+/// removed, and the reason removing it lost: since §2.5's
+/// [`PIVOT_SEARCH_LIMIT`] bounds a single search to 8 candidate columns,
+/// this is already a small fraction of the per-entry bookkeeping such a
+/// scheme costs in `eliminate` (measured in
+/// `analysis/pivot_threshold_colfixmax_20260922_154500.md` §2). Counted
+/// per rescan, not per touched column, so it stays off the elimination
+/// loop's own path.
 pub(crate) static PROF_COLMAX_RESCAN_ENTRIES: AtomicUsize = AtomicUsize::new(0);
 
 /// BTRANs whose `L^{-T}` stage took the row-major scatter form, against
@@ -630,9 +636,8 @@ struct ElimScratch {
     col_del: Vec<usize>,
     /// `L`'s multipliers for this step, in affected-row order.
     l_out: Vec<(usize, f64)>,
-    /// Columns of the retiring pivot row, to drop it from, each with the
-    /// magnitude that row contributed to it (a loss, once dropped).
-    pi_cols: Vec<(usize, f64)>,
+    /// Columns of the retiring pivot row, to drop it from.
+    pi_cols: Vec<usize>,
     /// Columns whose degree or values this step changed, deduplicated via
     /// `mark`/`epoch` stamping (an `O(1)` membership test against the
     /// `BTreeSet<usize>` this replaces) and sorted before use — see
@@ -720,19 +725,19 @@ struct MarkowitzState {
     // happens), so eagerly recomputing every dirtied column's max was
     // mostly wasted work — up to 75% of it, measured on Netlib `greenbea`.
     //
-    // **Invariant**: `!col_max_abs_dirty[j]` implies `col_max_abs[j]` is
-    // exactly `max |a_ij|` over column `j`'s live entries — the same value
-    // a full rescan would produce, bit for bit (`max` over a set of `f64`s
-    // is exact and order-independent), which is why the incremental
-    // maintenance in `note_col_gain`/`note_col_loss` cannot change any
-    // pivot choice. Every mutation of a live entry goes through one of
-    // those two, and a mutation that can only *raise* the max (fill-in, a
-    // value growing in magnitude) keeps the invariant without any rescan
-    // at all — `docs/lu_comparison_enomoto_vs_highs.md` §2.4's
-    // `colFixMax`, which HiGHS likewise only pays when the max is the
-    // thing that moved. That is the majority of touches: elimination
-    // scatters the pivot row into rows that mostly did not carry those
-    // columns before.
+    // Marking, rather than maintaining, is also what
+    // `docs/lu_comparison_enomoto_vs_highs.md` §2.4's incremental
+    // `colFixMax` was measured against and beat. That variant kept
+    // `col_max_abs[j]` exact through `eliminate` — raise it on a fill-in
+    // or a growing value, mark stale only when the entry that *was* the
+    // max shrank or left — which dropped the stale fraction to 0.1-6% of
+    // touched columns and left every pivot choice bit-identical. It still
+    // lost, by 2.8% over NETLIB93: since §2.5's [`PIVOT_SEARCH_LIMIT`]
+    // bounds one search to 8 candidate columns, the rescans it removed
+    // were already small (`pilot87`: 1.9M entries) against the per-entry
+    // bookkeeping it added in the merge loop below (61.5M updates, each a
+    // scattered read-modify-write into an `m`-sized array). See
+    // `analysis/pivot_threshold_colfixmax_20260922_154500.md` §2.
     col_max_abs_dirty: Vec<bool>,
 
     /// `initially_dense[j]` iff column `j`'s degree *before any
@@ -771,30 +776,16 @@ struct MarkowitzState {
     /// part-way through.
     threshold: f64,
 
-    /// `ENOMOTO_VERIFY_COL_MAX`: makes `ensure_col_max_abs` rescan even
-    /// clean columns and assert the incremental value matches, i.e. checks
-    /// the `col_max_abs_dirty` invariant directly instead of trusting that
-    /// every mutation site calls the right helper. Off by default (it
-    /// reinstates exactly the cost §2.4 removes); the test suite is run
-    /// under it whenever `eliminate` changes.
-    verify_col_max: bool,
-
-    /// Plain (non-atomic) accumulators for the three `PROF_COLMAX_*`
-    /// counters, flushed to them once in [`Drop`]. `note_col_gain` runs
-    /// once per *entry* the elimination writes — 20M times on `dfl001` —
-    /// so an `AtomicUsize::fetch_add` there is not free bookkeeping but a
-    /// locked read-modify-write in the hottest loop this file has, which
-    /// is the very loop §2.4 is trying to speed up (and which would also
-    /// make two threads factorizing at once contend on one cache line).
-    prof_colmax_touches: usize,
-    prof_colmax_dirtied: usize,
+    /// Plain (non-atomic) accumulator for [`PROF_COLMAX_RESCAN_ENTRIES`],
+    /// flushed once in [`Drop`] — an `AtomicUsize::fetch_add` per rescan
+    /// would be a locked read-modify-write on the factorization's own
+    /// path, and would make two threads factorizing at once contend on
+    /// one cache line.
     prof_colmax_rescan_entries: usize,
 }
 
 impl Drop for MarkowitzState {
     fn drop(&mut self) {
-        PROF_COLMAX_TOUCHES.fetch_add(self.prof_colmax_touches, Ordering::Relaxed);
-        PROF_COLMAX_DIRTIED.fetch_add(self.prof_colmax_dirtied, Ordering::Relaxed);
         PROF_COLMAX_RESCAN_ENTRIES.fetch_add(self.prof_colmax_rescan_entries, Ordering::Relaxed);
     }
 }
@@ -850,9 +841,6 @@ impl MarkowitzState {
             scratch: ElimScratch::new(m),
             search_limit: pivot_search_limit(),
             threshold: pivot_threshold(),
-            verify_col_max: std::env::var("ENOMOTO_VERIFY_COL_MAX").is_ok(),
-            prof_colmax_touches: 0,
-            prof_colmax_dirtied: 0,
             prof_colmax_rescan_entries: 0,
         }
     }
@@ -937,57 +925,18 @@ impl MarkowitzState {
     /// column-mirror membership — O(that column's own active degree),
     /// never O(m).
     ///
-    /// `col_max_abs[j]` is **not** touched here: since §2.4 each mutation
-    /// site in `eliminate` reports what it did to the column's magnitudes
-    /// through [`Self::note_col_gain`]/[`Self::note_col_loss`] instead, so
-    /// that only the touches that can actually lower the max cost a
-    /// rescan. See `col_max_abs_dirty`'s own docs for the invariant those
-    /// two maintain.
+    /// Marks `col_max_abs[j]` stale rather than recomputing it here; see
+    /// [`Self::ensure_col_max_abs`] and `col_max_abs_dirty`'s own docs for
+    /// why, including why the incremental alternative
+    /// (`docs/lu_comparison_enomoto_vs_highs.md` §2.4's `colFixMax`) was
+    /// measured and rejected.
     fn refresh_column(&mut self, j: usize) {
         if self.col_used[j] {
             return;
         }
         let new_deg = self.mat.col(j).len();
         self.update_col_degree(j, new_deg);
-    }
-
-    /// Column `j` gained an entry of magnitude `v_abs` (fill-in), or one
-    /// of its entries grew to that magnitude: the max can only rise, so
-    /// raise it in place — no rescan, and the
-    /// `!col_max_abs_dirty[j] => exact` invariant is preserved. On an
-    /// already-stale column the stored value is about to be recomputed
-    /// from scratch anyway, so raising it there is harmless.
-    #[inline]
-    fn note_col_gain(&mut self, j: usize, v_abs: f64) {
-        if self.col_used[j] {
-            return;
-        }
-        self.prof_colmax_touches += 1;
-        if v_abs > self.col_max_abs[j] {
-            self.col_max_abs[j] = v_abs;
-        }
-    }
-
-    /// Column `j` lost an entry of magnitude `old_abs` (removed, zeroed,
-    /// or replaced by a strictly smaller one): only if that entry *was* a
-    /// largest one does the max move, and then only downwards, which needs
-    /// the full rescan [`Self::ensure_col_max_abs`] defers.
-    ///
-    /// `old_abs >= col_max_abs[j]` is the test, not `==`: on a stale
-    /// column the stored value may already be anything, and `>=` also
-    /// (conservatively) re-dirties a column holding two entries tied at
-    /// the max when one of them shrinks — correct, just one rescan that a
-    /// multiplicity count could have avoided.
-    #[inline]
-    fn note_col_loss(&mut self, j: usize, old_abs: f64) {
-        if self.col_used[j] {
-            return;
-        }
-        self.prof_colmax_touches += 1;
-        if old_abs >= self.col_max_abs[j] && !self.col_max_abs_dirty[j] {
-            self.col_max_abs_dirty[j] = true;
-            self.prof_colmax_dirtied += 1;
-        }
+        self.col_max_abs_dirty[j] = true;
     }
 
     /// Recomputes `col_max_abs[j]` from its current column-mirror
@@ -996,13 +945,6 @@ impl MarkowitzState {
     /// place that value's currency actually matters.
     fn ensure_col_max_abs(&mut self, j: usize) {
         if !self.col_max_abs_dirty[j] {
-            if self.verify_col_max {
-                let mx = self.col_max_abs_rescan(j);
-                assert_eq!(
-                    mx, self.col_max_abs[j],
-                    "col_max_abs[{j}] incremental value disagrees with a full rescan"
-                );
-            }
             return;
         }
         self.col_max_abs[j] = self.col_max_abs_rescan(j);
@@ -1163,48 +1105,6 @@ impl MarkowitzState {
         let mut sc = std::mem::take(&mut self.scratch);
         sc.begin();
 
-        // [`Self::note_col_gain`]/[`Self::note_col_loss`] inlined for the
-        // merge loop below, which runs once per *entry* written — 20M
-        // times on Netlib `dfl001`. They can't be called there as methods:
-        // the merge holds `&self.mat` (the row being rewritten) across its
-        // whole body, and a `&mut self` method call would conflict with
-        // it, where touching the disjoint `col_max_abs`/`col_max_abs_dirty`
-        // fields directly does not. Buffering the changes into a scratch
-        // `Vec` and replaying them after the borrow ends — the obvious
-        // alternative — costs a 16-byte push per entry in exactly the loop
-        // this section exists to make cheaper.
-        //
-        // Neither macro tests `col_used[j]`, unlike the methods: every `j`
-        // they are called with comes from `pivot_row_snapshot`, which
-        // already filtered out every used column but `pj` (handled
-        // separately in the merge).
-        //
-        // Applied in merge order rather than gains-before-losses; the
-        // invariant in `col_max_abs_dirty`'s docs holds under any order,
-        // since a loss only skips dirtying when the stored value is
-        // strictly larger than what was lost — and the stored value is
-        // then either the untouched old max or a gain from this same
-        // step, both live.
-        macro_rules! col_gain {
-            ($j:expr, $abs:expr) => {{
-                let j = $j;
-                self.prof_colmax_touches += 1;
-                if $abs > self.col_max_abs[j] {
-                    self.col_max_abs[j] = $abs;
-                }
-            }};
-        }
-        macro_rules! col_loss {
-            ($j:expr, $abs:expr) => {{
-                let j = $j;
-                self.prof_colmax_touches += 1;
-                if $abs >= self.col_max_abs[j] && !self.col_max_abs_dirty[j] {
-                    self.col_max_abs_dirty[j] = true;
-                    self.prof_colmax_dirtied += 1;
-                }
-            }};
-        }
-
         sc.affected.clear();
         sc.affected.extend(self.mat.col(pj).iter().map(|&r| r as usize).filter(|&i| i != pi));
 
@@ -1239,7 +1139,6 @@ impl MarkowitzState {
                             if new_val != 0.0 {
                                 sc.merged.push((jb, new_val));
                                 sc.col_add.push(jb);
-                                col_gain!(jb, new_val.abs());
                                 sc.touch(jb);
                             }
                         }
@@ -1255,18 +1154,8 @@ impl MarkowitzState {
                             let new_val = va - mult * vb;
                             if new_val == 0.0 {
                                 sc.col_del.push(ja);
-                                col_loss!(ja, va.abs());
                             } else {
                                 sc.merged.push((ja, new_val));
-                                // Exactly one of the two: a value that
-                                // grew can only raise the column's max, a
-                                // value that shrank can only lower it (and
-                                // only if it *was* the max).
-                                if new_val.abs() >= va.abs() {
-                                    col_gain!(ja, new_val.abs());
-                                } else {
-                                    col_loss!(ja, va.abs());
-                                }
                             }
                             sc.touch(ja);
                         }
@@ -1285,7 +1174,6 @@ impl MarkowitzState {
                         if new_val != 0.0 {
                             sc.merged.push((jb, new_val));
                             sc.col_add.push(jb);
-                            col_gain!(jb, new_val.abs());
                             sc.touch(jb);
                         }
                     }
@@ -1309,11 +1197,10 @@ impl MarkowitzState {
         // other column it still touches so those columns' degrees don't
         // keep counting an inactive row.
         sc.pi_cols.clear();
-        sc.pi_cols.extend(self.mat.row(pi).iter().filter(|&&(j, _)| j != pj).map(|&(j, v)| (j, v.abs())));
+        sc.pi_cols.extend(self.mat.row(pi).iter().map(|&(j, _)| j).filter(|&j| j != pj));
         for k in 0..sc.pi_cols.len() {
-            let (j, v_abs) = sc.pi_cols[k];
+            let j = sc.pi_cols[k];
             self.mat.col_remove(j, pi);
-            self.note_col_loss(j, v_abs);
             sc.touch(j);
         }
 

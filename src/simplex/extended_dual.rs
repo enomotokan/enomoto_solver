@@ -430,15 +430,13 @@ mod prof_phases {
                 lu::PROF_SEARCH_CANDIDATES.load(Relaxed) as f64 / steps.max(1) as f64,
                 lu::PROF_BUCKET_SCAN_NS.load(Relaxed) as f64 / 1e6,
             );
-            // §2.4: how often the incremental `colFixMax` actually avoided
-            // a rescan, and whether this solve's pivot threshold ever left
-            // its starting value — a flat benchmark on either half is
-            // uninterpretable without both.
-            let colmax_touches = lu::PROF_COLMAX_TOUCHES.load(Relaxed);
+            // §2.4: the work an incremental `colFixMax` could have removed
+            // (see `PROF_COLMAX_RESCAN_ENTRIES`'s own docs), plus whether
+            // this solve's pivot threshold left its starting value — a
+            // flat benchmark on the escalation is uninterpretable without
+            // the latter.
             eprintln!(
-                "  col_max_abs touches={colmax_touches} dirtied={} ({:.1}%) rescan_entries={} pivot_threshold={} (escalations={})",
-                lu::PROF_COLMAX_DIRTIED.load(Relaxed),
-                100.0 * lu::PROF_COLMAX_DIRTIED.load(Relaxed) as f64 / colmax_touches.max(1) as f64,
+                "  col_max_abs rescan_entries={} pivot_threshold={} (escalations={})",
                 lu::PROF_COLMAX_RESCAN_ENTRIES.load(Relaxed),
                 lu::pivot_threshold(),
                 lu::PROF_PIVOT_ESCALATIONS.load(Relaxed),
@@ -624,14 +622,29 @@ const XB_DRIFT_TOL_MAX: f64 = super::FT_RESIDUAL_TOL;
 /// How many *numerically-caused* refactorizations this solve has to take
 /// before its LU pivot threshold is escalated one step
 /// (`sparse_lu::escalate_pivot_threshold`,
-/// `docs/lu_comparison_enomoto_vs_highs.md` §2.4) — HiGHS raises
-/// `info_.factor_pivot_threshold` on the first numerical failure; this
-/// waits for `10` of them, for exactly the reason
-/// [`XB_DRIFT_ESCALATION_STEP`] (same value, same shape of ladder) waits:
-/// a solve that refactorizes for numerical reasons a handful of times is
-/// not the pathology being targeted, and `sparse_lu::STABILITY`'s own docs
-/// record that the escalated `0.5` costs ~4% in fill-in on problems that
-/// don't need it.
+/// `docs/lu_comparison_enomoto_vs_highs.md` §2.4) — **`0`, i.e. the
+/// escalation is off by default**, because it was measured and lost.
+///
+/// HiGHS raises `info_.factor_pivot_threshold` on a numerical failure and
+/// this crate can too, but on NETLIB93 tightening the floor costs far more
+/// in fill-in than it saves in refactorizations: at `10` (the value
+/// [`XB_DRIFT_ESCALATION_STEP`]'s own ladder uses, and the one measured)
+/// the 93-problem total went **+7.4%**, with `pilot87` +29.2% (6.50s ->
+/// 8.40s, reproducible across all three runs), `brandy` +67% and
+/// `gfrd-pnc` +12.3% — three problems past the 10%-regression bar on their
+/// own. The escalation fired on 7 of the 10 heaviest problems, because the
+/// `x_B(M)` drift trigger alone reaches 10 on most of them (`pilot` 21,
+/// `dfl001` 24), so it is the *ordinary* heavy solve that gets the `0.5`
+/// floor `sparse_lu::STABILITY`'s own docs already measured as ~4% worse.
+/// Raising this constant until only pathological solves qualify makes it
+/// fire nowhere on NETLIB93 at all, which is not a measurable improvement
+/// either — hence off, rather than retuned.
+///
+/// The mechanism is kept (and reachable via
+/// `ENOMOTO_PIVOT_ESCALATION_STEP`, alongside `ENOMOTO_PIVOT_THRESHOLD`
+/// for the floor itself) so that a future attempt — a smaller step than
+/// `sparse_lu::PIVOT_THRESHOLD_FACTOR`'s doubling, or a trouble signal
+/// narrower than the four below — can be A/B'd without re-plumbing it.
 ///
 /// "Numerically caused" means the four triggers that fire because the
 /// factorization stopped agreeing with the basis it stands for — a
@@ -642,7 +655,7 @@ const XB_DRIFT_TOL_MAX: f64 = super::FT_RESIDUAL_TOL;
 /// conditioned problem, so counting them would escalate `dfl001`'s
 /// hundreds of routine refactorizations into fill-in it has no numerical
 /// reason to pay for.
-const PIVOT_ESCALATION_STEP: usize = 10;
+const PIVOT_ESCALATION_STEP: usize = 0;
 
 /// Trigger (4) for this module — `super::FT_MAX_UPDATES`'s own equivalent
 /// (an unconditional backstop against unbounded Forrest-Tomlin eta-chain
