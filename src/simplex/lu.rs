@@ -69,7 +69,7 @@
 //! epoch-stamped DFS scratch) — see that function's own docs for why only
 //! this one direction gets the fuller treatment.
 
-use crate::sparse::{CscBuilder, CscMat, EpochMarks, HybridVec};
+use crate::sparse::{CscBuilder, CscMat, CsrMat, EpochMarks, HybridVec};
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -135,6 +135,12 @@ pub(crate) static PROF_BUCKET_SCAN_NS: AtomicUsize = AtomicUsize::new(0);
 /// simply never coming up as a candidate at all, in which case this stays
 /// at `0` and the heuristic is a no-op for that problem).
 pub(crate) static PROF_DENSE_FALLBACK_STEPS: AtomicUsize = AtomicUsize::new(0);
+
+/// BTRANs whose `L^{-T}` stage took the row-major scatter form, against
+/// those that fell back to the column-major gather form — see
+/// [`BTRAN_L_SCATTER_FRACTION`].
+pub(crate) static PROF_BTRAN_L_SCATTER: AtomicUsize = AtomicUsize::new(0);
+pub(crate) static PROF_BTRAN_L_GATHER: AtomicUsize = AtomicUsize::new(0);
 
 /// Manages the active submatrix plus row/column degrees (via bucket
 /// arrays) during Markowitz elimination — see the module docs for why a
@@ -594,6 +600,30 @@ pub struct LuFactors {
     /// `Vec<Vec<...>>` — flattening it would cost the same construction
     /// work for no repeated-read benefit.
     pub u_row: Vec<Vec<(usize, f64)>>,
+    /// Row-major mirror of [`Self::l_col`] in the same step space:
+    /// `l_row.row(r)` lists `(s, multiplier)` for every entry `(r,
+    /// multiplier)` of `l_col[s]` — i.e. the nonzeros of `L`'s *row* `r`,
+    /// all of which sit at `s < r`. This is HiGHS's own `lr_start/
+    /// lr_index/lr_value` (`HFactor.h`, built by `buildFinish()` right
+    /// beside the column-major `l_start/l_index/l_value`), and it exists
+    /// for exactly the reason HiGHS builds it: `L^{-T}` (BTRAN's tail) is
+    /// a *gather* when read through the column-major `l_col` — step `s`
+    /// reads one `w[row_step]` per `l_col[s]` entry, so no single value's
+    /// zero-ness makes the step skippable (Hall & McKinnon 2000 §4.4's own
+    /// observation, which `l_transpose_solve_into`'s pre-`l_row` form was
+    /// stuck with) — but the very same triangular solve becomes a
+    /// *scatter* when read through this mirror: step `s` multiplies the
+    /// single value `w[s]` into every `l_row.row(s)` entry, so `w[s] ==
+    /// 0.0` makes the whole step a provable no-op, exactly the skip
+    /// `l_solve_into`/`u_solve_into` already have in the forward
+    /// direction. See [`LuFactors::l_transpose_solve_into`]'s own docs for
+    /// the measurement.
+    ///
+    /// Flat ([`CsrMat`]: two allocations, offsets + entries), like
+    /// `l_col` itself — built directly from it by [`CscMat::to_csr`]'s
+    /// counting sort (one pass to size each row's slice, one to fill it),
+    /// with no intermediate `Vec<Vec<...>>` on either side.
+    pub l_row: CsrMat,
     pub row_perm: Vec<usize>,
     pub col_perm: Vec<usize>,
     pub col_perm_inv: Vec<usize>,
@@ -743,7 +773,8 @@ fn factorize_dense_faer(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuFac
         }
     }
 
-    Some(LuFactors { m, l_col, u_row, row_perm, col_perm, col_perm_inv, row_perm_inv })
+    let l_row = l_col.to_csr();
+    Some(LuFactors { m, l_col, l_row, u_row, row_perm, col_perm, col_perm_inv, row_perm_inv })
 }
 
 /// Throwaway diagnostic (`ENOMOTO_DEBUG_BLOCK_SIZES`), not wired into any
@@ -915,6 +946,7 @@ pub fn factorize_diagonal(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuF
         m,
         // `L` is the identity: `m` columns, every one empty.
         l_col: CscMat::empty(m, m),
+        l_row: CscMat::empty(m, m).to_csr(),
         u_row,
         row_perm: identity.clone(),
         col_perm: identity.clone(),
@@ -1052,7 +1084,8 @@ fn factorize_flat_markowitz(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<L
         u_row[pivot_step].push((col_perm_inv[orig_col], val));
     }
 
-    Some(LuFactors { m, l_col, u_row, row_perm, col_perm, col_perm_inv, row_perm_inv })
+    let l_row = l_col.to_csr();
+    Some(LuFactors { m, l_col, l_row, u_row, row_perm, col_perm, col_perm_inv, row_perm_inv })
 }
 
 /// Bordered (Schur-complement) factorization: `border` columns — see
@@ -1314,7 +1347,8 @@ fn factorize_bordered(m: usize, rows_in: &[Vec<(usize, f64)>], border: &[usize])
         }
     }
 
-    Some(LuFactors { m, l_col, u_row, row_perm, col_perm, col_perm_inv: col_perm_inv_full, row_perm_inv: row_perm_inv_full })
+    let l_row = l_col.to_csr();
+    Some(LuFactors { m, l_col, l_row, u_row, row_perm, col_perm, col_perm_inv: col_perm_inv_full, row_perm_inv: row_perm_inv_full })
 }
 
 impl LuFactors {
@@ -1481,7 +1515,13 @@ impl LuFactors {
     /// place; the final result is written into caller-provided `y`
     /// (original row indexing) — see `l_solve_into`'s own docs for why
     /// this avoids allocating on `FtLu`'s hot path.
-    fn l_transpose_solve_into(&self, w: &mut [f64], y: &mut [f64]) {
+    ///
+    /// **This is the pre-[`LuFactors::l_row`] gather form, kept only as the
+    /// `ENOMOTO_BTRAN_L_SCATTER=0` A/B arm** (and as the reference the
+    /// scatter form's own unit tests check against) — see
+    /// [`Self::l_transpose_solve_scatter_into`], which is what every
+    /// production BTRAN actually calls.
+    fn l_transpose_solve_gather_into(&self, w: &mut [f64], y: &mut [f64]) {
         let m = self.m;
         for s in (0..m).rev() {
             for &(row_step, mult) in self.l_col.col(s) {
@@ -1489,6 +1529,55 @@ impl LuFactors {
                     continue;
                 }
                 w[s] -= mult * w[row_step];
+            }
+        }
+        for s in 0..m {
+            y[self.row_perm[s]] = w[s];
+        }
+    }
+
+    /// [`Self::l_transpose_solve_gather_into`]'s own triangular solve, read
+    /// through the row-major mirror [`LuFactors::l_row`] instead of the
+    /// column-major `l_col` — turning BTRAN's `L^{-T}` stage from a gather
+    /// into a scatter, which is what makes it hyper-sparse.
+    ///
+    /// The two loops compute the same `L^T w' = w` back substitution over
+    /// the same nonzeros, only associating the updates differently: the
+    /// gather form accumulates *into* `w[s]` one `l_col[s]` entry at a
+    /// time (so `w[s]`'s own value is only known once every one of them
+    /// has been read, and no prefix of them can be skipped as a group),
+    /// while this form propagates *out of* `w[s]` into every `l_row.row(s)`
+    /// entry at once. Because `w[s]` is the single multiplicand of that
+    /// whole inner loop, `w[s] == 0.0` makes the entire step a provable
+    /// no-op — the same whole-step skip [`Self::l_solve_into`] and
+    /// [`FtLu::u_solve_into`] already exploit in the forward direction,
+    /// and the one Hall & McKinnon (2000) §4.4 explains the gather form
+    /// *cannot* have ("no simple way of determining [a trivial]
+    /// intersection... without a computational overhead comparable to
+    /// evaluating the inner product itself"). HiGHS reaches the same skip
+    /// the same way, via its own row-major `lr_*` copy of `L` in `btranL`.
+    ///
+    /// `docs/lu_comparison_enomoto_vs_highs.md` §2.6 names this as the one
+    /// of HiGHS's four hyper-sparse solve directions this crate had never
+    /// attempted (the *reason* being precisely that no row-major `L`
+    /// existed to attempt it with — this method adds it).
+    ///
+    /// Not bit-identical to the gather form: the same set of products is
+    /// summed into each `w[s]` in the opposite order (descending source
+    /// step here, `l_col[s]`'s own stored order there), so results can
+    /// differ in the last ulp and, through the dual ratio test's
+    /// tie-breaks, shift iteration counts either way on degeneracy-heavy
+    /// instances. That is measured, not assumed — see this change's own
+    /// analysis note for the per-problem numbers.
+    fn l_transpose_solve_scatter_into(&self, w: &mut [f64], y: &mut [f64]) {
+        let m = self.m;
+        for s in (0..m).rev() {
+            let ws = w[s];
+            if ws == 0.0 {
+                continue;
+            }
+            for &(k, mult) in self.l_row.row(s) {
+                w[k] -= mult * ws;
             }
         }
         for s in 0..m {
@@ -1702,6 +1791,54 @@ fn expected_dense_gate() -> f64 {
         .unwrap_or(EXPECTED_DENSE_FRACTION)
 }
 
+/// Density ceiling for BTRAN's row-major scatter form
+/// ([`LuFactors::l_transpose_solve_scatter_into`]): the `L^{-T}` stage
+/// takes it only when under this fraction of the incoming `w` is nonzero,
+/// and falls back to the column-major gather form
+/// ([`LuFactors::l_transpose_solve_gather_into`]) otherwise.
+///
+/// **A gate is needed here, not just a faster kernel.** The two forms
+/// touch exactly the same `L` entries; what differs is the access shape.
+/// Gather reads `w[row_step]` at random and accumulates into one place
+/// (`w[s]`, which the compiler keeps in a register across the whole inner
+/// loop); scatter reads one place (`w[s]`) and does a random
+/// read-modify-write per entry. On a sparse `w` the scatter's whole-step
+/// skip wins outright — most steps do no work at all — but on a dense `w`
+/// nothing is skipped and the scatter is left paying random *stores*
+/// where the gather paid random *loads*, which is strictly worse. Measured
+/// exactly that way on the first ungated A/B of this change: `dfl001`
+/// (whose BTRAN `w` is dense by the time `U^{-T}` and the `R` etas are
+/// done with it) +6.5%, against wins on the sparse-`w` instances. HiGHS
+/// gates all four of its own solve directions for the same reason
+/// (`HFactor::btranL`'s own `sparse_solve` test, `kHyperBtranL`).
+///
+/// The test is an exact nonzero count of `w`, not a running-average
+/// prediction: unlike an FTRAN's input (whose density is only knowable
+/// from history — see [`FtranDensity`]'s own docs), `w` is right there in
+/// a buffer that every path over it already scans at least once more
+/// (the permutation into `y`), so one early-exiting `O(m)` sequential
+/// pass answers the question exactly, for a fraction of the `nnz(L)`
+/// random accesses the stage itself is about to do either way.
+const BTRAN_L_SCATTER_FRACTION: f64 = 0.10;
+
+/// [`BTRAN_L_SCATTER_FRACTION`], overridable via `ENOMOTO_BTRAN_L_SCATTER`
+/// — `0` disables the scatter form outright (restoring the pre-`l_row`
+/// gather-only BTRAN, which is how the A/B behind the constant's own value
+/// is produced), `1` forces it unconditionally. Read once per
+/// refactorization, never per solve, same as [`expected_dense_gate`].
+fn btran_l_scatter_gate() -> f64 {
+    std::env::var("ENOMOTO_BTRAN_L_SCATTER").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(BTRAN_L_SCATTER_FRACTION)
+}
+
+/// Whether [`FtLu::u_solve_into`] tests a slot for zero *before* dividing
+/// it by its eta's pivot rather than after — see that method's own docs.
+/// `ENOMOTO_FTRAN_U_ZERO_SKIP=0` restores the unconditional divide, which
+/// is how the A/B behind the default is produced. Read once per
+/// [`FtLu::new`], never per solve.
+fn u_zero_skip_enabled() -> bool {
+    std::env::var("ENOMOTO_FTRAN_U_ZERO_SKIP").map(|v| v != "0").unwrap_or(true)
+}
+
 /// Running average of one FTRAN *call site*'s own **result** density,
 /// feeding [`FtLu::should_use_dense_solve_tracked`]'s dense/sparse
 /// dispatch alongside the right-hand side's own nonzero count.
@@ -1900,6 +2037,14 @@ pub struct FtLu {
     /// see [`TICK_BUILD_M_COEF`]/[`TICK_BUILD_LU_COEF`]'s own docs for
     /// where the two coefficients come from.
     build_tick: u64,
+    /// [`btran_l_scatter_gate`]'s value, captured once per refactorization
+    /// rather than re-read per call — see [`BTRAN_L_SCATTER_FRACTION`].
+    /// Lives on [`FtLu`] rather than [`LuFactors`] so the factor struct
+    /// stays pure data.
+    btran_l_scatter: f64,
+    /// [`u_zero_skip_enabled`]'s value, captured once per refactorization —
+    /// see [`Self::u_solve_into`].
+    u_zero_skip: bool,
 }
 
 /// Per-row-of-`U`-and-`L` coefficient for [`FtLu::build_tick`]'s `m`-only
@@ -1986,6 +2131,33 @@ impl FtLu {
             fill,
             tick: Cell::new(0),
             build_tick,
+            btran_l_scatter: btran_l_scatter_gate(),
+            u_zero_skip: u_zero_skip_enabled(),
+        }
+    }
+
+    /// BTRAN's `L^{-T}` stage: counts `w`'s nonzeros (bailing out of the
+    /// count as soon as it is clearly over the line) and runs the
+    /// row-major scatter form on a sparse `w`, the column-major gather
+    /// form otherwise — see [`BTRAN_L_SCATTER_FRACTION`] for why both
+    /// forms have to stay.
+    fn l_transpose_solve_into(&self, w: &mut [f64], y: &mut [f64]) {
+        let limit = (self.btran_l_scatter * self.base.m as f64) as usize;
+        let mut nnz = 0usize;
+        let mut sparse = true;
+        for &v in w.iter() {
+            nnz += (v != 0.0) as usize;
+            if nnz > limit {
+                sparse = false;
+                break;
+            }
+        }
+        if sparse {
+            PROF_BTRAN_L_SCATTER.fetch_add(1, Ordering::Relaxed);
+            self.base.l_transpose_solve_scatter_into(w, y);
+        } else {
+            PROF_BTRAN_L_GATHER.fetch_add(1, Ordering::Relaxed);
+            self.base.l_transpose_solve_gather_into(w, y);
         }
     }
 
@@ -2182,13 +2354,41 @@ impl FtLu {
         // part this function's own docs describe, so its cost is added
         // only for etas whose `xp` actually survives the skip.
         self.add_tick(self.base.m as u64);
+        if !self.u_zero_skip {
+            // `ENOMOTO_FTRAN_U_ZERO_SKIP=0`: the pre-§2.6 loop exactly, so
+            // that arm of the A/B is this crate's own previous behaviour
+            // and not "previous behaviour plus one unrelated change".
+            for eta in self.u_seq.iter().rev() {
+                let p = eta.slot;
+                x[p] /= eta.pivot;
+                let xp = x[p];
+                if xp == 0.0 {
+                    continue;
+                }
+                self.add_tick(eta.off_diag.nnz() as u64);
+                eta.off_diag.axpy_into_dense(-xp, x);
+            }
+            return;
+        }
         for eta in self.u_seq.iter().rev() {
             let p = eta.slot;
-            x[p] /= eta.pivot;
-            let xp = x[p];
-            if xp == 0.0 {
+            // Test *before* dividing, not after: `0.0 / pivot` is `±0.0`,
+            // so an already-zero slot's division is a no-op that still
+            // costs a division and — worse on a hyper-sparse right-hand
+            // side — a store back into a random position of `x`, dirtying
+            // a cache line per zero slot for nothing. The skipped store
+            // can leave `+0.0` where the unconditional one would have
+            // written `-0.0` (when `pivot < 0`), which is exactly the
+            // difference `u_transpose_solve_into`'s own hyper-sparse skip
+            // already accepts, on the same grounds: every consumer of this
+            // result branches on zero-ness (`permute_out`'s own `!= 0.0`
+            // count, `commit_update`'s filter, the PRICE/DSE consumers),
+            // never on the sign of a zero.
+            if x[p] == 0.0 {
                 continue;
             }
+            x[p] /= eta.pivot;
+            let xp = x[p];
             self.add_tick(eta.off_diag.nnz() as u64);
             // `data[p] == 0.0` always (`HybridVec`'s skipped-index
             // convention), so the dense arm leaves `x[p]` — just divided
@@ -2310,11 +2510,11 @@ impl FtLu {
             self.add_tick(reta.r.nnz() as u64);
             scratch[reta.p] -= dot;
         }
-        // `U` stays on the dense `u_solve_into`, not a GP-sparsified
-        // counterpart — see that function's own docs for why a real
-        // attempt at exactly that (persistent-buffer, position-aware DFS
-        // over `u_seq`, fully implemented and correct) measured as a net
-        // *regression* once benchmarked, and was reverted.
+        // `U` stays on the plain `u_solve_into` scan — see that function's
+        // own docs for the *two* separate attempts at a reach-restricted
+        // counterpart (one ungated, one gated exactly the way HiGHS gates
+        // its own `ftranU`) that were both implemented, proven correct,
+        // measured over the full Netlib set, and reverted as regressions.
         self.u_solve_into(scratch);
         let nnz = self.permute_out(scratch, out);
         scratch.fill(0.0);
@@ -2412,7 +2612,7 @@ impl FtLu {
         // is a dense `O(m)` reverse scan regardless of fill (see that
         // method's own docs for why sparsifying it wasn't worth trying).
         self.add_tick(self.base.m as u64);
-        self.base.l_transpose_solve_into(scratch, out);
+        self.l_transpose_solve_into(scratch, out);
     }
 
     /// [`Self::solve_transpose_into`] for `rhs = e_i`, the shape every
@@ -2539,7 +2739,7 @@ impl FtLu {
         let s0 = self.base.col_perm_inv[i];
         scratch[s0] = 1.0;
         self.u_transpose_solve_from(scratch, s0);
-        self.base.l_transpose_solve_into(scratch, out);
+        self.l_transpose_solve_into(scratch, out);
         scratch.fill(0.0);
     }
 
@@ -3435,6 +3635,115 @@ mod tests {
             rows[i].sort_unstable_by_key(|&(c, _)| c);
         }
         rows
+    }
+
+    /// `l_row` really is `l_col`'s transpose: every stored entry of one
+    /// appears exactly once, with the same value, at the mirrored index of
+    /// the other. Checked on a factorization with genuine fill (a plain
+    /// diagonal basis would pass vacuously with both structures empty).
+    #[test]
+    fn l_row_is_the_exact_transpose_of_l_col() {
+        for m in [3usize, 12, 40] {
+            for seed in [1u64, 7, 99] {
+                let rows = random_sparse_diag_dominant(m, seed);
+                let lu = factorize(m, &rows).expect("nonsingular");
+                let mut from_col: Vec<(usize, usize, u64)> = Vec::new();
+                for s in 0..m {
+                    for &(row_step, mult) in lu.l_col.col(s) {
+                        assert!(row_step > s, "L must be strictly lower triangular in step space");
+                        from_col.push((s, row_step, mult.to_bits()));
+                    }
+                }
+                let mut from_row: Vec<(usize, usize, u64)> = Vec::new();
+                for r in 0..m {
+                    for &(s, mult) in lu.l_row.row(r) {
+                        assert!(s < r, "l_row.row(r) must only hold entries at s < r");
+                        from_row.push((s, r, mult.to_bits()));
+                    }
+                }
+                from_col.sort_unstable();
+                from_row.sort_unstable();
+                assert_eq!(from_col, from_row, "l_row is not l_col's transpose (m={m}, seed={seed})");
+            }
+        }
+    }
+
+    /// The scatter form of `L^{-T}` (via `l_row`) and the original gather
+    /// form (via `l_col`) solve the same system. Not bit-identical by
+    /// construction (the same products are summed in the opposite order —
+    /// see `l_transpose_solve_scatter_into`'s own docs), so this checks
+    /// agreement to a tight relative tolerance rather than exact equality,
+    /// on right-hand sides ranging from a single nonzero (the hyper-sparse
+    /// case the scatter form exists for) to fully dense.
+    #[test]
+    fn l_transpose_scatter_matches_gather() {
+        for m in [3usize, 12, 40] {
+            for seed in [1u64, 7, 99] {
+                let rows = random_sparse_diag_dominant(m, seed);
+                let lu = factorize(m, &rows).expect("nonsingular");
+                let mut rng = seed ^ 0xabcd;
+                let mut rhss: Vec<Vec<f64>> = vec![(0..m).map(|_| next_rand(&mut rng)).collect()];
+                for unit in [0usize, m / 2, m - 1] {
+                    let mut e = vec![0.0; m];
+                    e[unit] = 1.0;
+                    rhss.push(e);
+                }
+                for rhs in rhss {
+                    let (mut wg, mut yg) = (rhs.clone(), vec![0.0; m]);
+                    lu.l_transpose_solve_gather_into(&mut wg, &mut yg);
+                    let (mut ws, mut ys) = (rhs.clone(), vec![0.0; m]);
+                    lu.l_transpose_solve_scatter_into(&mut ws, &mut ys);
+                    for i in 0..m {
+                        let scale = yg[i].abs().max(1.0);
+                        assert!(
+                            (yg[i] - ys[i]).abs() <= 1e-12 * scale,
+                            "scatter/gather mismatch at {i}: {} vs {} (m={m}, seed={seed})",
+                            yg[i],
+                            ys[i]
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// End-to-end: a full `B^-T rhs` BTRAN agrees between the two arms of
+    /// the `ENOMOTO_BTRAN_L_SCATTER` dispatch, *after* Forrest-Tomlin
+    /// updates have put `R`-etas in front of the `L^{-T}` stage (the state
+    /// every per-iteration BTRAN actually runs in, and the one where a
+    /// wrong transpose would show up as a wrong `rho_p` rather than a
+    /// merely differently-rounded one).
+    #[test]
+    fn btran_agrees_between_scatter_and_gather_after_ft_updates() {
+        let m = 40;
+        for seed in [3u64, 11] {
+            let rows = random_sparse_diag_dominant(m, seed);
+            let mut scatter = FtLu::new(factorize(m, &rows).expect("nonsingular"));
+            scatter.btran_l_scatter = 1.0;
+            let mut gather = FtLu::new(factorize(m, &rows).expect("nonsingular"));
+            gather.btran_l_scatter = 0.0;
+            let mut rng = seed ^ 0x5eed;
+            for slot in [2usize, 9, 25] {
+                let a_q: Vec<f64> = (0..m).map(|i| if i % 3 == 0 { next_rand(&mut rng) } else { 0.0 } + if i == slot { 4.0 } else { 0.0 }).collect();
+                assert!(scatter.try_update(slot, &a_q, 1e-9));
+                assert!(gather.try_update(slot, &a_q, 1e-9));
+            }
+            for probe in [0usize, 7, 39] {
+                let mut rhs = vec![0.0; m];
+                rhs[probe] = 1.0;
+                let ys = scatter.solve_transpose(&rhs);
+                let yg = gather.solve_transpose(&rhs);
+                for i in 0..m {
+                    let scale = yg[i].abs().max(1.0);
+                    assert!(
+                        (yg[i] - ys[i]).abs() <= 1e-9 * scale,
+                        "BTRAN mismatch at {i}: {} vs {} (seed={seed}, probe={probe})",
+                        yg[i],
+                        ys[i]
+                    );
+                }
+            }
+        }
     }
 
     #[test]
