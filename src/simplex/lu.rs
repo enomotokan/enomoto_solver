@@ -13,9 +13,10 @@
 //! matrix's indexing).
 //!
 //! **Degree-list implementation**: row/column degrees (active nonzero
-//! counts) live in bucket arrays (`col_buckets[d]`/`row_buckets[d]`, each a
-//! `VecDeque` of indices currently at degree `d`), with O(1) bucket moves
-//! via a parallel position index (`col_bucket_pos`/`row_bucket_pos`,
+//! counts) live in `col_degree`/`row_degree`, and columns additionally in
+//! bucket arrays (`col_buckets[d]`, each a `VecDeque` of the columns
+//! currently at degree `d`), with O(1) bucket moves via a parallel position
+//! index (`col_bucket_pos`,
 //! swap-to-last-then-pop on removal — the same pattern `factorize`'s
 //! earlier `active_rows` bookkeeping used). Crucially, a **column-major
 //! mirror** (the exact set of currently-active rows with a nonzero at
@@ -723,13 +724,14 @@ struct MarkowitzState {
 
     // Bucket arrays: bucket[d] = indices currently at degree exactly d.
     // Sized m + 1 (a degree can be at most the number of active rows/cols).
+    // Columns only: `find_best_pivot` walks columns by degree and reads a
+    // row's degree straight off `row_degree`, so a row-side bucket
+    // structure (kept here earlier, but never read) is not maintained.
     col_buckets: Vec<VecDeque<usize>>,
-    row_buckets: Vec<VecDeque<usize>>,
 
     // col_bucket_pos[j] = j's index within col_buckets[col_degree[j]], or
     // None if j has been used already (removed from every bucket).
     col_bucket_pos: Vec<Option<usize>>,
-    row_bucket_pos: Vec<Option<usize>>,
 
     col_used: Vec<bool>,
     row_used: Vec<bool>,
@@ -830,19 +832,12 @@ impl MarkowitzState {
         let col_degree: Vec<usize> = (0..m).map(|j| mat.col(j).len()).collect();
 
         let mut col_buckets = vec![VecDeque::new(); m + 1];
-        let mut row_buckets = vec![VecDeque::new(); m + 1];
         let mut col_bucket_pos = vec![None; m];
-        let mut row_bucket_pos = vec![None; m];
 
         for j in 0..m {
             let deg = col_degree[j];
             col_bucket_pos[j] = Some(col_buckets[deg].len());
             col_buckets[deg].push_back(j);
-        }
-        for i in 0..m {
-            let deg = row_degree[i];
-            row_bucket_pos[i] = Some(row_buckets[deg].len());
-            row_buckets[deg].push_back(i);
         }
 
         let dense_threshold = DENSE_COL_FRACTION * m as f64;
@@ -854,9 +849,7 @@ impl MarkowitzState {
             col_degree,
             row_degree,
             col_buckets,
-            row_buckets,
             col_bucket_pos,
-            row_bucket_pos,
             col_used: vec![false; m],
             row_used: vec![false; m],
             col_max_abs,
@@ -907,21 +900,6 @@ impl MarkowitzState {
         }
     }
 
-    fn remove_from_bucket_row(&mut self, i: usize) {
-        if let Some(pos) = self.row_bucket_pos[i] {
-            let deg = self.row_degree[i];
-            let bucket = &mut self.row_buckets[deg];
-            if pos < bucket.len() {
-                let last_i = bucket.pop_back().unwrap();
-                if pos < bucket.len() {
-                    bucket[pos] = last_i;
-                    self.row_bucket_pos[last_i] = Some(pos);
-                }
-            }
-            self.row_bucket_pos[i] = None;
-        }
-    }
-
     /// Update degree after modifying; move between buckets if needed.
     fn update_col_degree(&mut self, j: usize, new_deg: usize) {
         if self.col_used[j] || new_deg == self.col_degree[j] {
@@ -935,14 +913,9 @@ impl MarkowitzState {
     }
 
     fn update_row_degree(&mut self, i: usize, new_deg: usize) {
-        if self.row_used[i] || new_deg == self.row_degree[i] {
-            return;
+        if !self.row_used[i] {
+            self.row_degree[i] = new_deg;
         }
-        self.remove_from_bucket_row(i);
-        self.row_degree[i] = new_deg;
-        let pos = self.row_buckets[new_deg].len();
-        self.row_bucket_pos[i] = Some(pos);
-        self.row_buckets[new_deg].push_back(i);
     }
 
     /// Updates `j`'s degree/bucket placement from its current
@@ -2224,7 +2197,6 @@ fn factorize_flat_markowitz(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<L
         row_perm[step] = pi;
         col_perm[step] = pj;
 
-        state.remove_from_bucket_row(pi);
         state.remove_from_bucket_col(pj);
 
         let pivot_val = state.value_at(pi, pj).unwrap();
@@ -2386,7 +2358,6 @@ fn factorize_bordered(m: usize, rows_in: &[Vec<(usize, f64)>], border: &[usize])
         state.col_used[pj] = true;
         row_perm[step] = pi;
         col_perm[step] = pj;
-        state.remove_from_bucket_row(pi);
         state.remove_from_bucket_col(pj);
 
         let pivot_val = state.value_at(pi, pj).unwrap();
