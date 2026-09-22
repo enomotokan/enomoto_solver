@@ -120,6 +120,7 @@
 use super::{sparse_lu, InfeasibleRows, NbStatus, SimplexResult, StdForm, Status, TOL};
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
+use std::sync::OnceLock;
 
 /// Per-phase wall-clock counters for the `ENOMOTO_PROF_PHASES_EXT`
 /// diagnostic — this module's own counterpart to `simplex::prof_phases`
@@ -187,6 +188,20 @@ mod prof_phases {
     /// means this guard actually saved (or at least delayed) an
     /// infeasibility report — on `greenbea` it fires exactly once.
     pub(super) static REFACTOR_CAUSE_INFEAS_CHECK: AtomicUsize = AtomicUsize::new(0);
+    /// Trigger (5) ([`super::extended_dual::SYNTH_CLOCK_FACTOR`]'s own
+    /// docs) firing — the deterministic operation-count ("synthetic tick")
+    /// cost-based trigger, this module's counterpart to HiGHS's own
+    /// `kRebuildReasonSyntheticClockSaysInvert`
+    /// (`analysis/ft_refactor_trigger_20260922_040850.md` §5/§6). Distinct
+    /// from `MAX_UPDATES` above (a fixed `update_count` cap regardless of
+    /// how cheap or expensive each individual update's own solves were):
+    /// this one refactorizes once the *measured* solve-side work done
+    /// against the current factorization is estimated to already cost as
+    /// much as re-factorizing it outright would, the actual gap this
+    /// trigger's own analysis found between this crate's eta-chain length
+    /// (300-2,700 updates before refactorizing) and HiGHS's own
+    /// cost-triggered interval (50-140 updates).
+    pub(super) static REFACTOR_CAUSE_CLOCK: AtomicUsize = AtomicUsize::new(0);
     /// Peak `lu.update_count()` observed *at any point* during the solve
     /// (via `fetch_max`, so this is the true peak across every
     /// refactorization interval, not just the value at solve end) — a
@@ -278,6 +293,7 @@ mod prof_phases {
             &REFACTOR_CAUSE_ILLCOND,
             &REFACTOR_CAUSE_MAX_UPDATES,
             &REFACTOR_CAUSE_INFEAS_CHECK,
+            &REFACTOR_CAUSE_CLOCK,
             &MAX_UPDATE_STREAK,
             &ITERS,
             &BFRT_FLIPS,
@@ -321,7 +337,7 @@ mod prof_phases {
         ];
         let accounted: usize = phases.iter().map(|&(_, ns)| ns).sum::<usize>() + REFACTOR.load(Relaxed);
         eprintln!(
-            "PROF_PHASES_EXT wall={:.3}ms iters={iters} ({:.1}us/iter) accounted={:.1}% of wall refactor_count={} (verify={} try_update={} bump={} drift={} d_drift={} illcond={} max_updates={} infeas_check={}) max_update_streak={}",
+            "PROF_PHASES_EXT wall={:.3}ms iters={iters} ({:.1}us/iter) accounted={:.1}% of wall refactor_count={} (verify={} try_update={} bump={} drift={} d_drift={} illcond={} max_updates={} infeas_check={} clock={}) max_update_streak={}",
             wall_ns as f64 / 1e6,
             wall_ns as f64 / 1e3 / iters as f64,
             100.0 * accounted as f64 / wall_ns.max(1) as f64,
@@ -334,6 +350,7 @@ mod prof_phases {
             REFACTOR_CAUSE_ILLCOND.load(Relaxed),
             REFACTOR_CAUSE_MAX_UPDATES.load(Relaxed),
             REFACTOR_CAUSE_INFEAS_CHECK.load(Relaxed),
+            REFACTOR_CAUSE_CLOCK.load(Relaxed),
             MAX_UPDATE_STREAK.load(Relaxed)
         );
         eprintln!(
@@ -585,6 +602,112 @@ const FT_MAX_UPDATES_FLOOR: usize = super::FT_MAX_UPDATES;
 #[inline]
 fn ft_max_updates(m: usize) -> usize {
     ((FT_MAX_UPDATES_FACTOR * m as f64) as usize).max(FT_MAX_UPDATES_FLOOR)
+}
+
+/// Trigger (5): the deterministic, cost-based refactorization trigger
+/// (`analysis/ft_refactor_trigger_20260922_040850.md` §5/§6) — this
+/// module's replacement for that analysis's wall-clock
+/// `ENOMOTO_SYNTH_CLOCK` prototype, using [`sparse_lu::FtLu::synth_tick`]'s
+/// deterministic operation-count accumulator instead of `Instant::now()` so
+/// the same solve always refactorizes at the same iterations (the
+/// analysis's own §6 explicitly calls out replacing the wall-clock stand-in
+/// with exactly this kind of counter before shipping it, precisely to avoid
+/// making refactorization timing — and hence the whole pivot sequence —
+/// depend on machine load/scheduling noise).
+///
+/// Mirrors HiGHS's own `HEkk::updateFactor` (`HEkk.cpp:3075-3090`,
+/// `total_synthetic_tick_ >= build_synthetic_tick_ && update_count >= 50`):
+/// once `update_count` reaches [`SYNTH_CLOCK_MIN_UPDATES`] *and* the
+/// accumulated solve-side tick since the last refactorization reaches
+/// `SYNTH_CLOCK_FACTOR * lu.build_tick()`, this basis is deemed to have
+/// already "paid for" a fresh factorization in the FTRAN/BTRAN work spent
+/// solving against the current (eta-chain-lengthened) one — see this
+/// trigger's own analysis file, §2.3 in particular, for why that FTRAN/BTRAN
+/// unit cost keeps climbing with chain length (the `R`-eta stage's own
+/// gather structure can't skip zeros, so a longer chain means literally
+/// more nonzero-multiply-adds every single solve).
+///
+/// **`SYNTH_CLOCK_FACTOR` calibration**: the wall-clock prototype
+/// (`ENOMOTO_SYNTH_CLOCK`) found 2-4x optimal in *wall-clock* units, but a
+/// tick built from [`sparse_lu::TICK_BUILD_M_COEF`]/[`sparse_lu::TICK_BUILD_LU_COEF`]
+/// left at HiGHS's own values is **not** the same unit as wall-clock
+/// seconds, so that factor doesn't carry over — re-swept from scratch here,
+/// in tick units, over the same 24-problem set the analysis itself used
+/// (`analysis/ft_refactor_trigger_20260922_040850.md` §5's own table).
+///
+/// A coarse sweep (`ENOMOTO_SYNTH_CLOCK_FACTOR` in `{1, 1.5, 2, 3, 4, 6, 8,
+/// 12, 16, 20, 24, 32, 48, 64, 100}`, one full 24-problem pass per value)
+/// found the aggregate 24-problem total *non-monotonic* — individual
+/// instances (`pilot87` worst, occasionally `dfl001`) are sensitive to
+/// exactly where a refactorization lands (a changed pivot sequence can
+/// resync onto a longer or shorter path than before; §5's own note that
+/// "反復数の変化は...丸めが変わるため" already flags this), so a single
+/// aggregate-total-minimizing value can hide a large regression on one
+/// instance a small improvement on many others outweighs in the sum. `12`,
+/// for instance, is a genuine cliff (`pilot87` alone balloons from ~10s to
+/// ~70s at that exact value, not measurement noise — confirmed
+/// reproducible bit-for-bit given [`Self::tick`]'s own determinism) that a
+/// coarser or finer grid could easily have stepped over in either
+/// direction. `16` was chosen instead by the same per-problem regression
+/// budget this trigger's own verification uses (no instance may regress
+/// >10%): every one of the 24 problems is flat-to-improved at `16` except
+/// `pilot87` (+7-9%, confirmed stable — not a cliff — at `10`/`14`/`16`/
+/// `18`/`20` alike) and `dfl001` (-1.6%, i.e. not a regression at all) —
+/// the two instances with by far the largest absolute runtime, so keeping
+/// *both* comfortably inside the regression budget outweighed chasing a
+/// marginally lower 24-problem aggregate at `20` (which flips that
+/// trade-off: `dfl001` +5.1%, `pilot87` ~flat) or higher. The target
+/// instances this trigger exists for (`stocfor2` -39%, `bnl2` -27%,
+/// `80bau3b` -31%, `greenbea` -23%, `degen3` -24%, `d2q06c` -17%) are all
+/// comfortably at or beyond the wall-clock prototype's own §5 numbers at
+/// this value. See this crate's commit history around this trigger's
+/// introduction for the full sweep's raw numbers if re-calibrating.
+const SYNTH_CLOCK_FACTOR: f64 = 16.0;
+
+/// [`SYNTH_CLOCK_FACTOR`], overridable via `ENOMOTO_SYNTH_CLOCK_FACTOR` —
+/// a calibration knob only (parsed once, cached), matching this file's
+/// existing convention of env-var-gated tunables for values that need
+/// re-sweeping against a benchmark set (e.g. the analysis's own
+/// `ENOMOTO_SYNTH_CLOCK` wall-clock prototype this trigger replaces). The
+/// *shipped* behavior is [`SYNTH_CLOCK_FACTOR`]'s own hardcoded, calibrated
+/// value; this override exists so a future re-calibration sweep (a basis
+/// composition shift large enough to move the crate's own per-nonzero cost
+/// ratios — see [`sparse_lu::TICK_BUILD_LU_COEF`]'s own docs) doesn't need a
+/// rebuild per candidate value.
+fn synth_clock_factor() -> f64 {
+    static FACTOR: OnceLock<f64> = OnceLock::new();
+    *FACTOR.get_or_init(|| {
+        std::env::var("ENOMOTO_SYNTH_CLOCK_FACTOR")
+            .ok()
+            .and_then(|s| s.parse::<f64>().ok())
+            .filter(|f| f.is_finite() && *f > 0.0)
+            .unwrap_or(SYNTH_CLOCK_FACTOR)
+    })
+}
+/// Same role as HiGHS's own `kSyntheticTickReinversionMinUpdateCount`
+/// (`50`, `HEkk.h`) — a floor below which this trigger never fires
+/// regardless of `synth_tick`, so a basis that has barely been updated at
+/// all (where a stray large tick from a single unusually dense solve could
+/// otherwise fire this trigger prematurely) always gets at least this many
+/// Forrest-Tomlin updates first. Kept at HiGHS's own value: nothing in this
+/// crate's own cost structure (unlike [`SYNTH_CLOCK_FACTOR`], which *does*
+/// need re-deriving — see that constant's own docs) gives a reason to move
+/// off HiGHS's number here, since this floor's only job is ruling out a
+/// noisy false-positive on the *first few* updates, independent of either
+/// side's own per-update cost.
+const SYNTH_CLOCK_MIN_UPDATES: usize = 50;
+
+/// Trigger (5) itself — see [`SYNTH_CLOCK_FACTOR`]'s own docs. Checked
+/// unconditionally (like trigger (4)'s own `ft_max_updates` check, a single
+/// integer comparison plus two `Cell` reads, cheap enough to run every
+/// pivot) by both `solve_lp_dual_extended`'s main loop and
+/// `polish_with_true_bounds`, so it is shared here rather than duplicated —
+/// unlike the drift/bump checks (trigger (2)/(3)), which read module-local
+/// state (`x_b_base`/`x_b_slope`, only the main loop's own `Affine1`
+/// variables exist) that has no polish-phase equivalent to share against.
+#[inline]
+fn synth_clock_should_refactor(lu: &sparse_lu::FtLu) -> bool {
+    lu.update_count() >= SYNTH_CLOCK_MIN_UPDATES && (lu.synth_tick() as f64) >= synth_clock_factor() * (lu.build_tick().max(1) as f64)
 }
 
 /// Independent drift check for the incrementally-maintained `d` (reduced
@@ -3323,6 +3446,16 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 prof_phases::REFACTOR_CAUSE_MAX_UPDATES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         }
+        // Trigger (5) ([`synth_clock_should_refactor`]'s own docs) — same
+        // unconditional, every-iteration placement as trigger (4) just
+        // above (two `Cell` reads plus a comparison, not worth gating
+        // behind `XB_CHECK_INTERVAL`).
+        if !need_refactor && synth_clock_should_refactor(&lu) {
+            need_refactor = true;
+            if profile_phases {
+                prof_phases::REFACTOR_CAUSE_CLOCK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
         if !need_refactor && since_check >= XB_CHECK_INTERVAL {
             since_check = 0;
             let bump_too_big = lu.fill_count() > super::FT_BUMP_LIMIT_FACTOR * m.max(1);
@@ -3656,6 +3789,15 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
     let mut since_check = 0usize;
     let mut since_residual_check = 0usize;
     let mut lu_scratch = vec![0.0f64; m];
+    // `PROF_PHASES_EXT` diagnostic (this function's own counterpart to the
+    // main loop's `prof_phases` module, see [`synth_clock_should_refactor`]'s
+    // own docs for why this trigger is shared code): unlike the main loop,
+    // this phase has no other profiling instrumentation, so this trigger's
+    // own fire count is tracked in a plain local rather than threading a
+    // new module-level atomic through a function that otherwise has none.
+    let profile_phases_polish = std::env::var("ENOMOTO_PROF_PHASES_EXT").is_ok();
+    let mut polish_clock_refactors = 0usize;
+    let mut polish_refactors = 0usize;
 
     // Unlike the main phase (which always starts from the trivial
     // all-slack basis, `y = 0` for free), this phase inherits whatever
@@ -4137,6 +4279,14 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
         if !need_refactor && lu.update_count() > ft_max_updates(m) {
             need_refactor = true;
         }
+        // Trigger (5) — same shared check as the main phase's own (see
+        // [`synth_clock_should_refactor`]'s own docs).
+        if !need_refactor && synth_clock_should_refactor(&lu) {
+            need_refactor = true;
+            if profile_phases_polish {
+                polish_clock_refactors += 1;
+            }
+        }
         if !need_refactor && since_check >= super::FT_CHECK_INTERVAL {
             since_check = 0;
             let bump_too_big = lu.fill_count() > super::FT_BUMP_LIMIT_FACTOR * m.max(1);
@@ -4150,10 +4300,16 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
             }
         }
         if need_refactor {
+            if profile_phases_polish {
+                polish_refactors += 1;
+            }
             lu = refactorize(std, basis_pos)?;
             lu.solve_into(&compute_rhs_plain(std, nb_status), &mut lu_scratch, &mut x_b);
             infeasible_rows.rebuild(m, |i| row_infeasible_plain(std, basis, &x_b, &noise_feasible, i));
         }
+    }
+    if profile_phases_polish {
+        eprintln!("PROF_PHASES_EXT_POLISH refactor_count={polish_refactors} (clock={polish_clock_refactors})");
     }
 
     None

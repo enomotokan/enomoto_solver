@@ -69,7 +69,7 @@
 //! epoch-stamped DFS scratch) — see that function's own docs for why only
 //! this one direction gets the fuller treatment.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1740,7 +1740,73 @@ pub struct FtLu {
     /// re-entrantly (this method doesn't call itself), so the `borrow_mut`
     /// can't panic.
     ut_needed: RefCell<(Vec<u32>, u32)>,
+    /// Deterministic operation-count accumulator for the `CLOCK`
+    /// refactorization trigger (`ENOMOTO_SYNTH_CLOCK_FACTOR`'s own docs at
+    /// its call sites in `extended_dual.rs`) — this crate's counterpart to
+    /// HiGHS's `total_synthetic_tick_` (`HFactor.cpp`/`HEkk.cpp`). Unlike
+    /// the wall-clock prototype this replaces
+    /// (`analysis/ft_refactor_trigger_20260922_040850.md` §5/§6), every
+    /// increment here is a plain nonzero-count add driven only by the
+    /// (already-deterministic) eta chain and right-hand-side content, never
+    /// by `Instant::now()` — so two solves of the same problem always
+    /// accumulate the exact same tick sequence and therefore refactorize at
+    /// the exact same iterations, keeping the whole solve bit-reproducible.
+    /// A `Cell` (not a plain field) because every solve stage that adds to
+    /// it (`ftran_through_l_and_r_into`, `solve_sparse_into[_capture]`,
+    /// `u_solve_into`, `u_transpose_solve_into`, `solve_transpose_into[_capture]`)
+    /// takes `&self`, matching this file's existing `ut_needed`
+    /// interior-mutability convention just above. Reset implicitly to `0`
+    /// every time a new `FtLu` is built (`Self::new`, i.e. every
+    /// refactorization) — there is no explicit reset method because a fresh
+    /// `FtLu` *is* the reset.
+    tick: Cell<u64>,
+    /// This factorization's own one-time build cost, in the same tick
+    /// units as [`Self::tick`] — computed once in [`Self::new`] from the
+    /// freshly-built `L`/`U` (`m` rows plus their combined off-diagonal
+    /// nonzero count), never recomputed afterward. The `CLOCK` trigger
+    /// refactorizes once `tick` reaches `FACTOR * build_tick`, i.e. once
+    /// the *solving* work done against this factorization is estimated to
+    /// cost as much as `FACTOR` fresh refactorizations of it would have —
+    /// see [`TICK_BUILD_M_COEF`]/[`TICK_BUILD_LU_COEF`]'s own docs for
+    /// where the two coefficients come from.
+    build_tick: u64,
 }
+
+/// Per-row-of-`U`-and-`L` coefficient for [`FtLu::build_tick`]'s `m`-only
+/// term — HiGHS's own `buildSynthticTick` (`HFactor.cpp`) uses `80` for the
+/// analogous term (`num_row * 80`); kept unchanged here rather than
+/// re-derived, since this crate's `refactorize` pays the same *kind* of
+/// fixed per-row bookkeeping (permutation arrays, `u_seq`/`row_owners`
+/// construction in [`FtLu::new`]) HiGHS's own `buildFinish` does, just at a
+/// different (higher, per `docs/lu_comparison_enomoto_vs_highs.md` §3.1 and
+/// this trigger's own analysis §4) constant of proportionality that the
+/// *other* coefficient ([`TICK_BUILD_LU_COEF`]) already carries — see
+/// [`SYNTH_CLOCK_FACTOR`]'s own docs for why the *ratio* between the two
+/// build-tick terms and the *solve*-side tick units is what calibration
+/// actually tunes, not this constant in isolation.
+const TICK_BUILD_M_COEF: u64 = 80;
+/// Per-nonzero-of-`(L+U)` coefficient for [`FtLu::build_tick`] — HiGHS's own
+/// `buildSynthticTick` uses `60` for `(l_nnz + u_off) * 60`. Kept at HiGHS's
+/// own value for the same reason as [`TICK_BUILD_M_COEF`]: this crate's
+/// Markowitz `factorize` (`BTreeMap`/`BTreeSet`-based, §4/§5 of this
+/// trigger's own analysis) is 3-25x more expensive *per nonzero* than
+/// HiGHS's `HFactor::buildKernel`, but that gap is exactly what makes a
+/// *higher* [`SYNTH_CLOCK_FACTOR`] (not a higher `TICK_BUILD_*_COEF`) the
+/// right lever: raising these two coefficients would inflate `build_tick`
+/// but leave the *solve*-side tick (driven by [`TICK_SOLVE_NNZ_COEF`]) at
+/// the same scale, which double-counts the same "our factorization is
+/// slower" fact the factor calibration already absorbs once.
+const TICK_BUILD_LU_COEF: u64 = 60;
+/// Per-nonzero coefficient applied to every solve-stage tick increment
+/// (`R`-eta nonzeros touched, `U`/`U^T`-eta nonzeros touched, `L`-stage
+/// reach-set size) — kept at `1` (i.e. `tick` is a plain nonzero count,
+/// unscaled) so [`SYNTH_CLOCK_FACTOR`] alone carries the crate-specific
+/// per-nonzero cost ratio between this crate's `BTreeMap`-based solves and
+/// HiGHS's own flat-array ones; splitting that ratio across two constants
+/// (this one and the factor) would make calibration harder to reason about
+/// with no accuracy benefit, since both only ever appear multiplied
+/// together in the trigger's own comparison.
+const TICK_SOLVE_NNZ_COEF: u64 = 1;
 
 impl FtLu {
     pub fn new(base: LuFactors) -> Self {
@@ -1762,6 +1828,14 @@ impl FtLu {
                 row_owners[row_step].push(slot);
             }
         }
+        let l_nnz: u64 = base.l_col.iter().map(|v| v.len() as u64).sum();
+        // `u_row[s]` includes its own diagonal entry (`col_step == s`,
+        // filtered out just above into `pivots`), so its off-diagonal count
+        // is one less than its length — mirrors HiGHS's own `u_countX`
+        // (`HFactor.cpp`'s `buildFinish`), which likewise counts only
+        // off-diagonal `U` nonzeros.
+        let u_off: u64 = base.u_row.iter().map(|v| v.len().saturating_sub(1) as u64).sum();
+        let build_tick = TICK_BUILD_M_COEF * m as u64 + TICK_BUILD_LU_COEF * (l_nnz + u_off);
         let u_seq: Vec<UEta> = (0..m)
             .map(|slot| UEta {
                 slot,
@@ -1778,7 +1852,28 @@ impl FtLu {
             scratch_a_tilde: vec![0.0; m],
             scratch_e_tilde: vec![0.0; m],
             ut_needed: RefCell::new((vec![0; m], 0)),
+            tick: Cell::new(0),
+            build_tick,
         }
+    }
+
+    /// Current value of the deterministic operation-count accumulator (see
+    /// [`Self::tick`]'s own docs) — read by the `CLOCK` refactorization
+    /// trigger in `extended_dual.rs`, never consulted by anything in this
+    /// file itself.
+    pub fn synth_tick(&self) -> u64 {
+        self.tick.get()
+    }
+
+    /// This factorization's own build cost, in the same units as
+    /// [`Self::synth_tick`] — see [`Self::build_tick`]'s own docs.
+    pub fn build_tick(&self) -> u64 {
+        self.build_tick
+    }
+
+    #[inline]
+    fn add_tick(&self, n: u64) {
+        self.tick.set(self.tick.get() + TICK_SOLVE_NNZ_COEF * n);
     }
 
     /// Whether an FTRAN right-hand side with `rhs_nnz` nonzero entries
@@ -1837,6 +1932,13 @@ impl FtLu {
                 stamps[s] = epoch;
             }
         }
+        // CLOCK-trigger accounting (`Self::tick`'s own docs): the `stamps`
+        // scan plus the unconditional `for eta in &self.u_seq` walk below
+        // (the `continue` only skips the dot product, not the loop
+        // iteration itself) are both `O(m)` on every single call regardless
+        // of how sparse `z` is — mirrors HiGHS's own `buildSynthticTick`
+        // fixed `num_row`-scaled term for the analogous `btranU` stage.
+        self.add_tick(self.base.m as u64);
         for eta in &self.u_seq {
             let p = eta.slot;
             if stamps[p] != epoch {
@@ -1848,6 +1950,7 @@ impl FtLu {
                 // this dot product already excludes `z[p]` on its own.
                 OffDiag::Dense { data, .. } => data.iter().zip(z.iter()).map(|(&v, &zi)| v * zi).sum(),
             };
+            self.add_tick(eta.off_diag.nnz() as u64);
             z[p] = (z[p] - y) / eta.pivot;
             if z[p] != 0.0 {
                 for &q in &self.row_owners[p] {
@@ -1902,6 +2005,13 @@ impl FtLu {
     /// loop is cheap enough to not need in the first place stopped paying
     /// for itself. See this file's own history if revisiting this.)
     fn u_solve_into(&self, x: &mut [f64]) {
+        // CLOCK-trigger accounting (`Self::tick`'s own docs): every eta
+        // pays the `O(1)` division unconditionally (the `for` loop itself
+        // always visits all of `u_seq`, one per basis row), so that part is
+        // a flat `m`; the off-diagonal update below is the hyper-sparse
+        // part this function's own docs describe, so its cost is added
+        // only for etas whose `xp` actually survives the skip.
+        self.add_tick(self.base.m as u64);
         for eta in self.u_seq.iter().rev() {
             let p = eta.slot;
             x[p] /= eta.pivot;
@@ -1909,6 +2019,7 @@ impl FtLu {
             if xp == 0.0 {
                 continue;
             }
+            self.add_tick(eta.off_diag.nnz() as u64);
             match &eta.off_diag {
                 OffDiag::Sparse(v) => {
                     for &(row_step, v) in v {
@@ -1937,11 +2048,22 @@ impl FtLu {
     /// `k > 1`.
     fn ftran_through_l_and_r_into(&self, rhs: &[f64], z: &mut [f64]) {
         self.base.l_solve_into(rhs, z);
+        // CLOCK-trigger accounting (`Self::tick`'s own docs): `l_solve_into`
+        // is a dense `O(m)` scan of `z` regardless of fill (this is the
+        // dense FTRAN path — the sparse `L`-stage reach set is accounted
+        // separately in `solve_sparse_into`/`_capture`).
+        self.add_tick(self.base.m as u64);
         for reta in &self.r_etas {
             let dot: f64 = match &reta.r {
                 OffDiag::Sparse(v) => v.iter().map(|&(i, v)| v * z[i]).sum(),
                 OffDiag::Dense { data, .. } => data.iter().zip(z.iter()).map(|(&v, &zi)| v * zi).sum(),
             };
+            // Unconditional (every `r_eta` is visited regardless of `z`'s
+            // sparsity — the very "gather-type, no zero-skip" cost this
+            // trigger's own analysis (§2.1/§2.2) identified as the eta-chain
+            // bottleneck), so this term alone is what makes `tick` grow
+            // with chain length the way FTRAN's own measured wall time does.
+            self.add_tick(reta.r.nnz() as u64);
             z[reta.p] -= dot;
         }
     }
@@ -2001,11 +2123,16 @@ impl FtLu {
     /// buffer in between.
     pub fn solve_sparse_into(&self, rhs_sparse: &[(usize, f64)], scratch: &mut [f64], gp: &mut GpScratch, out: &mut [f64]) {
         self.base.l_solve_sparse_into(rhs_sparse, scratch, gp);
+        // CLOCK-trigger accounting (`Self::tick`'s own docs): unlike the
+        // dense `L`-stage in `ftran_through_l_and_r_into` (a flat `m`),
+        // this GP-sparse path's own real cost is its reach-set size.
+        self.add_tick(gp.reach.len() as u64);
         for reta in &self.r_etas {
             let dot: f64 = match &reta.r {
                 OffDiag::Sparse(v) => v.iter().map(|&(i, v)| v * scratch[i]).sum(),
                 OffDiag::Dense { data, .. } => data.iter().zip(scratch.iter()).map(|(&v, &zi)| v * zi).sum(),
             };
+            self.add_tick(reta.r.nnz() as u64);
             scratch[reta.p] -= dot;
         }
         // `U` stays on the dense `u_solve_into`, not a GP-sparsified
@@ -2037,11 +2164,13 @@ impl FtLu {
         a_tilde_out: &mut [f64],
     ) {
         self.base.l_solve_sparse_into(rhs_sparse, scratch, gp);
+        self.add_tick(gp.reach.len() as u64);
         for reta in &self.r_etas {
             let dot: f64 = match &reta.r {
                 OffDiag::Sparse(v) => v.iter().map(|&(i, v)| v * scratch[i]).sum(),
                 OffDiag::Dense { data, .. } => data.iter().zip(scratch.iter()).map(|(&v, &zi)| v * zi).sum(),
             };
+            self.add_tick(reta.r.nnz() as u64);
             scratch[reta.p] -= dot;
         }
         a_tilde_out.copy_from_slice(scratch);
@@ -2080,6 +2209,7 @@ impl FtLu {
             if yp == 0.0 {
                 continue;
             }
+            self.add_tick(reta.r.nnz() as u64);
             match &reta.r {
                 OffDiag::Sparse(v) => {
                     for &(i, v) in v {
@@ -2093,6 +2223,10 @@ impl FtLu {
                 }
             }
         }
+        // CLOCK-trigger accounting (`Self::tick`'s own docs): `l_transpose_solve_into`
+        // is a dense `O(m)` reverse scan regardless of fill (see that
+        // method's own docs for why sparsifying it wasn't worth trying).
+        self.add_tick(m as u64);
         self.base.l_transpose_solve_into(scratch, out);
     }
 
@@ -2118,6 +2252,7 @@ impl FtLu {
             if yp == 0.0 {
                 continue;
             }
+            self.add_tick(reta.r.nnz() as u64);
             match &reta.r {
                 OffDiag::Sparse(v) => {
                     for &(i, v) in v {
@@ -2131,6 +2266,7 @@ impl FtLu {
                 }
             }
         }
+        self.add_tick(m as u64);
         self.base.l_transpose_solve_into(scratch, out);
     }
 
