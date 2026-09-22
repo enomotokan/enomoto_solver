@@ -200,10 +200,32 @@ HiGHS方式の方が求解自身が「今どこが非ゼロか」を持つので
 `solveHyper` の list 構築が自然。
 
 ENOMOTO は既に `solve_sparse_into(rhs_sparse)` で疎rhsを受ける形に
-しているので、本質は同じ。だが**BTRAN側 (`solve_transpose_into`) には
-疎入力版がない**。
+しているので、本質は同じ。
 
-**参考度: 中**。
+~~だが**BTRAN側 (`solve_transpose_into`) には疎入力版がない**。~~
+**(解消済み)** `FtLu::solve_transpose_unit` / `solve_transpose_unit_capture`
+を追加した。このクレートのBTRANの右辺はほぼ全てが単位ベクトル `e_i` で
+(ピボット行 `rho_p`、DSE重み更新の `rho`、`DseState::from_basis` の m 本の
+参照解、拡張法の `trial_row_ratio` と polish 側)、残る密な右辺は
+`y = B^-T c_B` と `w = B^-T alpha` だけ。単位ベクトルに限れば非ゼロは
+1個なので、
+
+- 冒頭の置換 gather `scratch[s] = rhs[col_perm[s]]` (ステップごとの
+  ランダムアクセス読み) → `fill(0.0)` + 1ストア
+- `u_transpose_solve_into` 冒頭の「z の非ゼロを needed 集合に播く」O(m)
+  走査 → そのステップ (`col_perm_inv[i]`) を直接 mark
+
+と、O(m) のパス2本が消える。`solveHyper` 相当の一般の疎入力BTRAN
+(reach集合のDFS) ではなく、右辺の形が分かっている場合の特殊化である点が
+HiGHS とは異なるが、実際に出現する右辺はこちらでほぼ尽きている。
+
+なお既存の `solve_transpose_unit_into` とは別物。あちらは更新前の `u_seq`
+の順序に依存する接頭辞スキップなので `update_count() == 0` を要求する
+(`from_basis` 専用)。新しい方は `needed` 集合の仕組みをそのまま使うので
+Forrest-Tomlin 更新後も有効。
+
+**参考度: 中** (単位ベクトル以外の疎rhs BTRANは依然未実装だが、
+該当する呼び出しが `y`/`w` の2つしかなく、どちらも密)。
 
 ### 2.9 `updateFT` — U列eta + UR転置の二重構造
 
@@ -225,9 +247,11 @@ O(1) で見つける設計で、これは HiGHS の `ur_*` と同目的 (似た�
 
 **参考度: 中** — 構造は違うが目的は同じ。ENOMOTOの方が既に工夫済み。
 
-### 2.10 etaの格納形式 (Sparse/Dense) と `pack_off_diag`
+### 2.10 etaの格納形式 (Sparse/Dense) と `HybridVec::pack`
 
-ENOMOTO は `OffDiag::Sparse | Dense` を `DENSE_ETA_FRACTION=0.4` で切替。
+ENOMOTO は `HybridVec::Sparse | Dense` を `DENSE_ETA_FRACTION=0.4` で切替
+(旧 `OffDiag` / `pack_off_diag`。疎/密ハイブリッドのベクトル表現として
+`crate::sparse` に移した)。
 HiGHS は常に `(index, value)` の疎形式 (`u_index/u_value`)。
 つまり ENOMOTO は HiGHS を既に超えている (密eta最適化) 部分がある。
 ここは逆に **ENOMOTO の方が進んでいる**。
@@ -244,9 +268,16 @@ HiGHS は `mc_index/mc_value` の**連続配列**上で、`colInsert`/`colDelete
 末尾swapのみ。キャッシュミスが桁違いに少ない。
 
 ENOMOTO のコメントには「`l_col` を `FixedRows` にフラット化したら
-**回帰した**」という記録があるが、これは L 因子 (求解時) の話であり、
+**回帰した**」という記録があったが、これは L 因子 (求解時) の話であり、
 **分解中のアクティブ部分行列**をフラット化した記録ではない。
 HiGHSのカーネル部分行列のフラット化は別の話。
+
+なお L 因子側のほうは、その後「後付けコピーではなく分解中に直接フラットに
+構築する」版 (`CscBuilder`) で取り直したところ全93問 -1.58% の勝ちになった
+(§4-5、`analysis/sparse_consolidation_lu_20260922_095906.md`)。ただし内訳は
+重い10問 -1.77% / 軽い83問 +0.44% で、**小問題側では圧縮形のアクセスコストが
+残る**。この非対称性は、動的なカーネル部分行列を置き換える際にも効いてくる
+はず。
 
 **参考度: 高** — ただし最大のリファクタリング。ENOMOTO 自身
 「BTreeMap ベースは測定で最速」としているため、単純置換は
@@ -283,18 +314,39 @@ ENOMOTO の高速化に効きそうな順:
 4. **BTRAN の `L^-T` を転置列major + hyper-sparse 化** — §2.6, §2.7
    - ENOMOTO が「試みなかった」唯一の方向。HiGHS は `lr_*` を持つ。
    - `expected_density` の移動平均による事前切替も同時に追加候補。
+   - **未着手のまま**。なお §2.8 で入れた単位ベクトル右辺の特殊化
+     (`solve_transpose_unit`) は `U^-T` 段とその前の置換までで、`L^-T` 段は
+     依然として密。
 
-5. **カーネル部分行列のフラット配列化** — §3.1
-   - 理論的にはキャッシュ効率最大。ただし ENOMOTO 自身
-     `FixedRows` 実験で回帰を経験しており、慎重に。
-   - 「分解中の部分行列を直接フラットに構築」する版なら勝つ余地。
+5. ~~**カーネル部分行列のフラット配列化** — §3.1~~ → **`L` については実施、
+   採用** (`analysis/sparse_consolidation_lu_20260922_095906.md` §2.4)
+   - 予想どおり「分解中に直接フラットに構築」する版なら勝った。`CscBuilder`
+     で `LuFactors::l_col` を `crate::sparse::CscMat` に。このファイルの4つの
+     分解はいずれも L の列を**昇順に**吐くので、計数パスすら要らず追記だけで
+     済む。L 全体のアロケーションが m+1 個から2個になる。
+   - 全93問3回ずつで **-1.58%**。ただし内訳は **重い10問 -1.77% / 軽い83問
+     +0.44%** で、無条件の勝ちではない。軽い問題では `l_col[s]` が短く、
+     圧縮形の「列アクセスごとに offsets を2回読む」コストが相対的に重い —
+     初回の `FixedRows` 実験が回帰した理由のうち、後付けコピーをやめても
+     消えない部分がここに残っている。
+   - **カーネル部分行列 (`MarkowitzState` の `Vec<BTreeMap>`/`Vec<BTreeSet>`)
+     自体は未着手**。分解中に insert/remove を繰り返す動的な疎行なので、
+     `CscBuilder` のような「昇順に吐くだけ」の構築では置き換えられない。
+     §3.1/§3.2 の本題はこちら。
 
 6. **ピボット安定性床の動的調整・`colFixMax` のインクリメンタル化** — §2.4
    - 悪条件問題での探索爆発・再分解を減らす。
 
+7. **`FtLu::fill_count` の O(1) 化** — (HiGHS 比較外、このクレート固有)
+   - 再分解トリガー(3)が毎反復読むのに `u_seq` 全体 (長さ m) を舐め直して
+     いた。更新側で加減するだけで済む。
+   - 全93問3回ずつで **-0.25%**、内訳は **軽い83問 -1.86% / 重い10問 -0.10%**
+     と、上の 5 とちょうど相補的 (毎反復の固定費が支配的な小問題で効く)。
+   - **実施、採用**。
+
 逆に ENOMOTO が**既に HiGHS より進んでいる**点:
 
-- eta の Sparse/Dense 切替 (`pack_off_diag`, `DENSE_ETA_FRACTION`)
+- eta の Sparse/Dense 切替 (`HybridVec::pack`, `DENSE_ETA_FRACTION`)
 - 密入力の `faer` 全委譲 (`is_dense_input`)
 - ボーダー列検出による Schur 補分解 (`factorize_bordered`)
 - 4段の再分解トリガ (residual / pivot / eta-fill / max-updates) +
