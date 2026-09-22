@@ -3108,10 +3108,15 @@ pub fn solve_lp_dual(variables: &[VariableData], objective: &Objective, constrai
         let trivial = sparse_lu::PROF_TRIVIAL_STEPS.load(Relaxed);
         let ns = sparse_lu::PROF_BUCKET_SCAN_NS.load(Relaxed);
         let dense_fallback = sparse_lu::PROF_DENSE_FALLBACK_STEPS.load(Relaxed);
+        let search_limit_steps = sparse_lu::PROF_SEARCH_LIMIT_STEPS.load(Relaxed);
+        let candidates = sparse_lu::PROF_SEARCH_CANDIDATES.load(Relaxed);
         eprintln!(
-            "PROF_TRIANGULAR total_steps={total} trivial_steps={trivial} ({:.1}%) total_scan_time={:.3}ms dense_fallback_steps={dense_fallback}",
+            "PROF_TRIANGULAR total_steps={total} trivial_steps={trivial} ({:.1}%) total_scan_time={:.3}ms dense_fallback_steps={dense_fallback} \
+             search_limit_steps={search_limit_steps} ({:.1}%) candidates={candidates} (avg {:.2}/step)",
             100.0 * trivial as f64 / total.max(1) as f64,
-            ns as f64 / 1e6
+            ns as f64 / 1e6,
+            100.0 * search_limit_steps as f64 / total.max(1) as f64,
+            candidates as f64 / total.max(1) as f64
         );
     }
     if profile_phases {

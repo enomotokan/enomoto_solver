@@ -390,6 +390,21 @@ mod prof_phases {
                 lu::PROF_BTRAN_L_SCATTER.load(Relaxed),
                 lu::PROF_BTRAN_L_GATHER.load(Relaxed),
             );
+            // Markowitz pivot search, from this module's side: `simplex.rs`'s
+            // own `ENOMOTO_PROF_TRIANGULAR` block only ever runs on the
+            // classical fallback path, which this solver returns before
+            // reaching — so without these lines the pivot-search counters
+            // are unreadable for every problem the extended solver actually
+            // handles (i.e. all of them).
+            let steps = lu::PROF_TOTAL_STEPS.load(Relaxed);
+            eprintln!(
+                "  pivot_search steps={steps} search_limit_hits={} ({:.1}%) candidates={} (avg {:.2}/step) scan={:.3}ms",
+                lu::PROF_SEARCH_LIMIT_STEPS.load(Relaxed),
+                100.0 * lu::PROF_SEARCH_LIMIT_STEPS.load(Relaxed) as f64 / steps.max(1) as f64,
+                lu::PROF_SEARCH_CANDIDATES.load(Relaxed),
+                lu::PROF_SEARCH_CANDIDATES.load(Relaxed) as f64 / steps.max(1) as f64,
+                lu::PROF_BUCKET_SCAN_NS.load(Relaxed) as f64 / 1e6,
+            );
         }
         eprintln!(
             "  m_exit(q_was_m)={} harris_window_m_miss={} m_enter_via_flip={}",

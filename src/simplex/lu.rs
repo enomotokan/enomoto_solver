@@ -112,6 +112,45 @@ const STABILITY: f64 = 0.25;
 /// risk.
 const DENSE_COL_FRACTION: f64 = 0.5;
 
+/// How many candidate columns a single `find_best_pivot` call may examine
+/// before it settles for the best pivot it has already found — HiGHS's
+/// `searchLimit = min(nwork, 8)` in `HFactor::buildKernel`
+/// (`docs/lu_comparison_enomoto_vs_highs.md` §2.5), adapted to this file's
+/// bucket scan.
+///
+/// The existing per-degree-level early exit (`best_score <= deg_col *
+/// deg_col`, the analogue of HiGHS's `merit_limit`) only ever fires at a
+/// *level* boundary, so a single heavily-populated bucket is scanned to
+/// its end no matter how good the pivot found in its first few columns
+/// was. That is the search-explosion case this bound closes: on an
+/// ill-conditioned or fill-heavy step, the low-degree buckets hold
+/// hundreds of columns whose rows all get walked (and whose
+/// `ensure_col_max_abs` recomputes all get paid) to improve on a pivot
+/// that was already acceptable.
+///
+/// Like HiGHS's, the bound is only honoured once a pivot *has* been found
+/// — `find_best_pivot` never returns `None` because of it, so `factorize`'s
+/// `skip_dense` fallback and its genuine-singularity detection are
+/// unchanged. What it does change is *which* acceptable pivot is returned:
+/// the Markowitz count can be worse than the unbounded scan's, so this
+/// trades (bounded) extra fill-in for a bounded search. Both sides of that
+/// trade are measured in `analysis/pivot_search_limit_20260922_143000.md`.
+const PIVOT_SEARCH_LIMIT: usize = 8;
+
+/// [`PIVOT_SEARCH_LIMIT`], overridable via `ENOMOTO_PIVOT_SEARCH_LIMIT` —
+/// `0` restores the unbounded scan, which is how the A/B behind the
+/// constant's own value is produced. Read once per `MarkowitzState::new`
+/// (i.e. once per factorization), never per elimination step: the read is
+/// `find_best_pivot`'s own caller-side cost otherwise, paid `m` times per
+/// factorization, and an `std::env::var` lookup there would show up in the
+/// very measurement this gate exists to make.
+fn pivot_search_limit() -> usize {
+    std::env::var("ENOMOTO_PIVOT_SEARCH_LIMIT")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(PIVOT_SEARCH_LIMIT)
+}
+
 // Measurement counters for the "should `factorize` triangularize `A_B`
 // into a trivial part plus a smaller Markowitz bump before factoring, the
 // way production codes like HiGHS do" question, read back by
@@ -124,7 +163,16 @@ const DENSE_COL_FRACTION: f64 = 0.5;
 // solve time in every case — the pivot *search* was never the bottleneck
 // a dedicated triangularization pre-pass would speed up, so one was not
 // added. Kept as a live diagnostic (not deleted) in case a future problem
-// shape changes that picture.
+// shape changes that picture — and it did: the "under 0.2%" figure above
+// holds only for the four small instances it was measured on. Re-measured
+// across the whole set for [`PIVOT_SEARCH_LIMIT`], `dfl001` spent 2.96s of
+// its 22.0s solve (13%) inside `find_best_pivot`, at an average scan width
+// of 261 candidate columns per elimination step — the search *was* a real
+// cost there, just not on problems small enough for the original sample.
+// A triangularization pre-pass still isn't what that calls for (the bound
+// in `PIVOT_SEARCH_LIMIT` addresses it directly, taking the same problem's
+// scan to 0.22s), but the 0.2% claim should not be quoted as if it covered
+// the large instances.
 pub(crate) static PROF_TOTAL_STEPS: AtomicUsize = AtomicUsize::new(0);
 pub(crate) static PROF_TRIVIAL_STEPS: AtomicUsize = AtomicUsize::new(0);
 pub(crate) static PROF_BUCKET_SCAN_NS: AtomicUsize = AtomicUsize::new(0);
@@ -135,6 +183,17 @@ pub(crate) static PROF_BUCKET_SCAN_NS: AtomicUsize = AtomicUsize::new(0);
 /// simply never coming up as a candidate at all, in which case this stays
 /// at `0` and the heuristic is a no-op for that problem).
 pub(crate) static PROF_DENSE_FALLBACK_STEPS: AtomicUsize = AtomicUsize::new(0);
+/// How many `find_best_pivot` calls actually returned early because of
+/// [`PIVOT_SEARCH_LIMIT`] (as opposed to the score-0 exit, the
+/// per-degree-level `merit_limit` exit, or a full scan) — the direct
+/// measurement of how often the bound is exercised at all, without which
+/// a flat benchmark result can't be told apart from a no-op.
+pub(crate) static PROF_SEARCH_LIMIT_STEPS: AtomicUsize = AtomicUsize::new(0);
+/// Total candidate columns examined across all `find_best_pivot` calls —
+/// the quantity [`PIVOT_SEARCH_LIMIT`] bounds per call. Read against
+/// [`PROF_TOTAL_STEPS`] it gives the average scan width per step, which is
+/// what the bound is supposed to move.
+pub(crate) static PROF_SEARCH_CANDIDATES: AtomicUsize = AtomicUsize::new(0);
 
 /// BTRANs whose `L^{-T}` stage took the row-major scatter form, against
 /// those that fell back to the column-major gather form — see
@@ -214,6 +273,11 @@ struct MarkowitzState {
     /// is still the single most expensive kind of step Markowitz pivoting
     /// can take.
     initially_dense: Vec<bool>,
+
+    /// [`pivot_search_limit`]'s value, resolved once here rather than per
+    /// `find_best_pivot` call — `0` means "unbounded", the pre-§2.5
+    /// behaviour.
+    search_limit: usize,
 }
 
 impl MarkowitzState {
@@ -280,6 +344,7 @@ impl MarkowitzState {
             col_max_abs,
             col_max_abs_dirty: vec![false; m],
             initially_dense,
+            search_limit: pivot_search_limit(),
         }
     }
 
@@ -382,12 +447,22 @@ impl MarkowitzState {
     /// tries this first and only falls back to a second, unrestricted call
     /// if it finds nothing, so a truly-required dense pivot (or a genuinely
     /// singular matrix) is still handled correctly, just not preferred.
+    ///
+    /// The scan is additionally bounded by [`PIVOT_SEARCH_LIMIT`] candidate
+    /// columns, which — unlike the per-degree-level exit above — can fire
+    /// part-way *through* a bucket, and so is what actually bounds a single
+    /// call's cost when one degree level holds hundreds of columns. It is
+    /// honoured only once a pivot has been found, so it never turns a
+    /// `Some` into a `None`.
     fn find_best_pivot(&mut self, skip_dense: bool) -> Option<(usize, usize)> {
         let __prof_t0 = std::time::Instant::now();
         PROF_TOTAL_STEPS.fetch_add(1, Ordering::Relaxed);
         let mut best: Option<(usize, usize)> = None;
         let mut best_score = usize::MAX;
         let mut best_pivot_abs = 0.0f64;
+        // Candidate columns examined so far by *this* call — the quantity
+        // `search_limit` bounds (HiGHS's `searchCount`).
+        let mut searched = 0usize;
 
         for deg_col in 1..self.col_buckets.len() {
             // Indexed rather than iterated by reference: nothing in this
@@ -404,6 +479,7 @@ impl MarkowitzState {
                     continue;
                 }
                 self.ensure_col_max_abs(j);
+                searched += 1;
                 for &i in &self.col_rows[j] {
                     if self.row_used[i] {
                         continue;
@@ -429,16 +505,30 @@ impl MarkowitzState {
                 }
                 if best_score == 0 {
                     PROF_TRIVIAL_STEPS.fetch_add(1, Ordering::Relaxed);
+                    PROF_SEARCH_CANDIDATES.fetch_add(searched, Ordering::Relaxed);
+                    PROF_BUCKET_SCAN_NS.fetch_add(__prof_t0.elapsed().as_nanos() as usize, Ordering::Relaxed);
+                    return best;
+                }
+                // Checked after this column's own scan (never before it),
+                // so the limit bounds how many columns are examined rather
+                // than cutting one short mid-way: the `best` a truncated
+                // column produced would otherwise depend on `col_rows`'
+                // iteration order in a way the unbounded scan's doesn't.
+                if self.search_limit != 0 && searched >= self.search_limit && best.is_some() {
+                    PROF_SEARCH_LIMIT_STEPS.fetch_add(1, Ordering::Relaxed);
+                    PROF_SEARCH_CANDIDATES.fetch_add(searched, Ordering::Relaxed);
                     PROF_BUCKET_SCAN_NS.fetch_add(__prof_t0.elapsed().as_nanos() as usize, Ordering::Relaxed);
                     return best;
                 }
             }
             if best.is_some() && best_score <= deg_col * deg_col {
+                PROF_SEARCH_CANDIDATES.fetch_add(searched, Ordering::Relaxed);
                 PROF_BUCKET_SCAN_NS.fetch_add(__prof_t0.elapsed().as_nanos() as usize, Ordering::Relaxed);
                 return best;
             }
         }
 
+        PROF_SEARCH_CANDIDATES.fetch_add(searched, Ordering::Relaxed);
         PROF_BUCKET_SCAN_NS.fetch_add(__prof_t0.elapsed().as_nanos() as usize, Ordering::Relaxed);
         best
     }
