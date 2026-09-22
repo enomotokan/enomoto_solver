@@ -315,8 +315,9 @@ HiGHS は常に `(index, value)` の疎形式 (`u_index/u_value`)。
 
 ### 3.1 flat `Vec` + インデックス vs `BTreeMap`/`BTreeSet`
 
-ENOMOTO の `eliminate` は1要素ごとに `BTreeMap::entry` の木走査 +
-`BTreeSet::remove/insert` を行う。要素はポインタ経由でヒープ上に散在。
+~~ENOMOTO の `eliminate` は1要素ごとに `BTreeMap::entry` の木走査 +
+`BTreeSet::remove/insert` を行う。要素はポインタ経由でヒープ上に散在。~~
+(§3.1 実装済み、下記)
 HiGHS は `mc_index/mc_value` の**連続配列**上で、`colInsert`/`colDelete` は
 末尾swapのみ。キャッシュミスが桁違いに少ない。
 
@@ -335,6 +336,42 @@ HiGHSのカーネル部分行列のフラット化は別の話。
 **参考度: 高** — ただし最大のリファクタリング。ENOMOTO 自身
 「BTreeMap ベースは測定で最速」としているため、単純置換は
 前述の `FixedRows` 回帰と同様に負ける可能性も。要注意。
+
+**実装済み・採用 (2026-09-22、`analysis/kernel_flat_matrix_20260922_143000.md`)**:
+`lu.rs` の `KernelMatrix` が `MarkowitzState` の
+`Vec<BTreeMap<usize,f64>>`(行)+ `Vec<BTreeSet<usize>>`(列ミラー)を
+置き換えた。レイアウトは HiGHS の `mc_start/mc_space/mc_count` +
+`mr_start/mr_space/mr_count` と同型だが**軸が逆**で、このクレートの
+elimination は行志向 (ピボット*行*を影響行に撒く) なので値が行major、
+索引だけのミラーが列側 (`u32`) になる。
+
+HiGHS の末尾swap無順序集合とは違い**両方の run を昇順に保つ**。これは
+意図的な追加コストで (単桁長の連続 run に対する `copy_within`、それでも
+置き換えた木走査より遥かに安い)、順序つき容器との**挙動の完全一致**を買う:
+`find_best_pivot` は Markowitz スコア同点もピボット絶対値同点も
+first-encountered で解決し、LP の基底行列は ±1 の完全同点だらけなので、
+ミラーの順序を崩すと選ぶピボットが変わり、分解も反復数も変わってしまう
+= before/after が何を計測しているのか分からなくなる。
+
+同じ理由で `eliminate` は要素ごとの挿抜ではなく、影響行を
+**自身の run とピボット行スナップショットのソート済みマージ1回**で
+丸ごと書き直す (`set_row`)。「動的な部分行列は insert/remove を繰り返すので
+単純置換では負ける」という上記の警告が外れたのはこの形のおかげで、
+`BTreeMap` を素朴に `Vec` へ置き換えただけなら警告どおりだった可能性が高い。
+
+計測 (NETLIB93 全93問、base = `a4e29bf`/`7289525` だけを revert したツリー、
+searchLimit=8 は両アームに入れたまま、base→after 交互3周の中央値):
+合計 **-11.39%** (42.11s → 37.32s)、重い10問 -12.25% / 軽い83問 -1.78%、
+**10% 以上の退行ゼロ**。反復数・再分解回数・`pivot_search` の候補数まで
+両アーム完全一致 (経路保存) なので、差はそのままデータ構造のコスト差である。
+効果は `refactor` フェーズに集中 (pilot87: wall の 48% → 17%、4.9s → 0.95s、
+これだけで全体差 -4.2s のほぼ全部)。`find_best_pivot` のバケット走査も
+同じ候補数のまま pilot87 -69% / dfl001 -38% になった (候補ごとの
+`rows[i].get(&j)` が木降下から `KernelMatrix::row_get` になったため)。
+
+`L` のフラット化で残った「軽い問題では圧縮形のアクセスコストが残る」という
+非対称性は、**カーネル側では出なかった**。軽い問題は再分解回数が 0〜3 回
+(`kb2` は 0 回) で、そもそもこのコードを踏まないため。
 
 ### 3.2 リンクリストによる次数昇順走査
 
@@ -363,17 +400,25 @@ ENOMOTO の高速化に効きそうな順:
 2. **`buildSimple()` 相当の単位列・シングルトン一括剥離** — §2.1
    - Markowitz カーネル (BTreeMap/BTreeSet 構築) の起動自体を避けられる。
 
-3. **`find_best_pivot` に候補数の明示的 searchLimit (≈8)** — §2.5
-   - 既に degree基準早期終了はあるが、最悪ケース対策として上限を追加。
-   - 実装が軽くリスクが小さい。
+3. ~~**`find_best_pivot` に候補数の明示的 searchLimit (≈8)** — §2.5~~
+   **実装済み** (`2840f7b`、`PIVOT_SEARCH_LIMIT = 8`、
+   `ENOMOTO_PIVOT_SEARCH_LIMIT` で上書き可)。既に degree基準早期終了は
+   あったが、最悪ケース対策として上限を追加したもの。
+   - **注意: この項目単独の NETLIB93 A/B 記録は残っていない。**
+     `lu.rs` の `PIVOT_SEARCH_LIMIT` の docs が参照する
+     `analysis/pivot_search_limit_20260922_143000.md` はリポジトリに存在せず、
+     `6c8edce` の再計測は §3.1 とのマージ後の状態を測ったもので before が無い。
+     §3.1 の A/B (`analysis/kernel_flat_matrix_20260922_143000.md`) は両アームに
+     searchLimit=8 を入れたまま行っているので、そちらでも検証されていない。
 
 4. ~~**BTRAN の `L^-T` を転置列major + hyper-sparse 化** — §2.6, §2.7~~
    **実装済み (2026-09-22)**。`l_row` + 密度ゲート付き scatter。
    NETLIB93 合計 -0.05% / -1.70% (独立2回)、10% 超の退行なし。
    同時に試した U 側の到達集合限定 FTRAN は +3.6% で不採用 (§2.6)。
 
-5. ~~**カーネル部分行列のフラット配列化** — §3.1~~ → **`L` については実施、
-   採用** (`analysis/sparse_consolidation_lu_20260922_095906.md` §2.4)
+5. ~~**カーネル部分行列のフラット配列化** — §3.1~~ → **`L`・カーネル部分行列
+   とも実施、採用** (`analysis/sparse_consolidation_lu_20260922_095906.md` §2.4、
+   `analysis/kernel_flat_matrix_20260922_143000.md`)
    - 予想どおり「分解中に直接フラットに構築」する版なら勝った。`CscBuilder`
      で `LuFactors::l_col` を `crate::sparse::CscMat` に。このファイルの4つの
      分解はいずれも L の列を**昇順に**吐くので、計数パスすら要らず追記だけで
@@ -383,10 +428,19 @@ ENOMOTO の高速化に効きそうな順:
      圧縮形の「列アクセスごとに offsets を2回読む」コストが相対的に重い —
      初回の `FixedRows` 実験が回帰した理由のうち、後付けコピーをやめても
      消えない部分がここに残っている。
-   - **カーネル部分行列 (`MarkowitzState` の `Vec<BTreeMap>`/`Vec<BTreeSet>`)
-     自体は未着手**。分解中に insert/remove を繰り返す動的な疎行なので、
-     `CscBuilder` のような「昇順に吐くだけ」の構築では置き換えられない。
-     §3.1/§3.2 の本題はこちら。
+   - ~~**カーネル部分行列 (`MarkowitzState` の `Vec<BTreeMap>`/`Vec<BTreeSet>`)
+     自体は未着手**~~ → **実施、採用** (2026-09-22、
+     `analysis/kernel_flat_matrix_20260922_143000.md`)。`KernelMatrix`
+     (行major の値 + 列major の索引ミラー、どちらも昇順維持の可変長 run)。
+     「分解中に insert/remove を繰り返すから `CscBuilder` 形では置き換え
+     られない」という当初の読みは、**挿抜の粒度を変える**ことで回避した:
+     `eliminate` が影響行を1要素ずつ触るのをやめ、行まるごとのソート済み
+     マージ + `set_row` 一括書き戻しにしたので、行側は「昇順に吐くだけ」に
+     なる。列ミラーだけが真に動的だが、こちらは索引 (`u32`) のみで
+     `partition_point` + `copy_within` で済む。
+     全93問 base→after 交互3周の中央値で **-11.39%**、重い10問 -12.25% /
+     軽い83問 -1.78%、**10% 以上の退行ゼロ**、反復数・目的関数値は
+     両アーム完全一致。`L` のときのような小問題側の負け (+0.44%) は出ない。
 
 6. **ピボット安定性床の動的調整・`colFixMax` のインクリメンタル化** — §2.4
    - 悪条件問題での探索爆発・再分解を減らす。
