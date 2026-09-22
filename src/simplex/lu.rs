@@ -71,7 +71,8 @@
 
 use crate::sparse::{CscBuilder, CscMat, CsrMat, EpochMarks, HybridVec};
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Threshold-pivoting stability floor (see this module's own top docs): a
@@ -952,6 +953,473 @@ pub fn factorize_diagonal(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuF
         col_perm: identity.clone(),
         col_perm_inv: identity.clone(),
         row_perm_inv: identity,
+    })
+}
+
+// ---------------------------------------------------------------------
+// Pivot-order reuse ("rebuild", HiGHS `HFactorRefactor.cpp`)
+// ---------------------------------------------------------------------
+
+/// How many times [`factorize_reusing_order`] was attempted, how many of
+/// those attempts produced a usable factorization, and how much wall time
+/// the attempts (accepted *and* rejected) cost. Read back by the
+/// `ENOMOTO_PROF_PHASES_EXT` diagnostic: a rejected attempt is pure
+/// overhead paid on top of the full Markowitz factorization that follows,
+/// so the accepted/attempted ratio is what decides whether the reuse pays
+/// for itself.
+pub(crate) static PROF_REBUILD_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
+pub(crate) static PROF_REBUILD_ACCEPTED: AtomicUsize = AtomicUsize::new(0);
+pub(crate) static PROF_REBUILD_NS: AtomicUsize = AtomicUsize::new(0);
+/// Why rejected attempts were rejected: the remaining submatrix had no
+/// numerically usable entry left in the column being processed (a
+/// genuinely singular or numerically spent basis), or the factors grew
+/// past [`REBUILD_FILL_LIMIT`].
+pub(crate) static PROF_REBUILD_FAIL_SINGULAR: AtomicUsize = AtomicUsize::new(0);
+pub(crate) static PROF_REBUILD_FAIL_FILL: AtomicUsize = AtomicUsize::new(0);
+/// Steps whose recorded pivot *row* was unusable and had to be re-chosen
+/// (see [`factorize_reusing_order`]'s own docs) — bounded below by the
+/// number of basis columns the Forrest-Tomlin updates replaced since the
+/// order was recorded, and the reason the row order cannot simply be
+/// replayed the way the column order can.
+pub(crate) static PROF_REBUILD_ROW_REPICKS: AtomicUsize = AtomicUsize::new(0);
+/// Refactorizations the backoff in [`factorize_reusing`] decided not to
+/// even attempt a reuse for, after a rejection.
+pub(crate) static PROF_REBUILD_BACKOFF_SKIPS: AtomicUsize = AtomicUsize::new(0);
+
+/// A reuse is abandoned (falling back to a full Markowitz `factorize`)
+/// once the factors it is producing exceed this multiple of the nonzero
+/// count of the last *full* factorization's own `L`+`U`.
+///
+/// **`1.25` is measured, not guessed.** Fill a reuse produces is not a
+/// one-off cost — it is paid again by every FTRAN/BTRAN for the whole life
+/// of the resulting factorization — and a generous limit is a net *loss*
+/// even though it accepts more reuses: over a 25-problem in-process A/B
+/// (`analysis/` note for this change, §3) the aggregate against the
+/// feature disabled ran `2.0` +2.7%, `1.1` +0.4%, `1.25` -1.5%, with the
+/// `2.0` arm's worst case `greenbeb` +30%. Too *tight* loses the other
+/// way: `1.0`/`1.05` reject nearly every attempt (the basis genuinely
+/// densifies between refactorizations), so the backoff below stops even
+/// trying and the feature turns into pure overhead.
+///
+/// The reused order was chosen by Markowitz against a *previous* basis;
+/// the current one differs from it by however many Forrest-Tomlin updates
+/// happened since, so the same order can be numerically fine yet produce
+/// far more fill than a fresh Markowitz run would. Fill produced here is
+/// not a one-off cost: it is paid again by every FTRAN/BTRAN for the whole
+/// life of the resulting factorization, which is exactly the trade this
+/// guard exists to cap. The baseline deliberately tracks the last *full*
+/// factorization rather than the immediately-preceding one (see
+/// [`FtLu::fill_baseline`]), so a long chain of reuses cannot ratchet the
+/// limit upward one small increment at a time; a basis whose fill
+/// genuinely grew simply fails this guard once, gets a fresh Markowitz
+/// factorization, and the new baseline is that one's own.
+const REBUILD_FILL_LIMIT: f64 = 1.25;
+
+/// [`REBUILD_FILL_LIMIT`], overridable at run time via
+/// `ENOMOTO_REUSE_FILL_LIMIT` (a bare float) so the one number can be
+/// re-tuned against the Netlib set without a rebuild — and, more to the
+/// point, flipped *within one process* for an A/B (see
+/// [`reuse_pivot_order_enabled`]'s own docs on why cross-process timing
+/// comparisons are not usable here). Read once per refactorization.
+fn reuse_fill_limit() -> f64 {
+    std::env::var("ENOMOTO_REUSE_FILL_LIMIT").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(REBUILD_FILL_LIMIT)
+}
+
+/// Accepted reuses' own fill against the fresh Markowitz factorizations'
+/// (`L`+`U` nonzeros, summed, with the count of each) — the diagnostic
+/// behind "is a reused order producing factors every later FTRAN/BTRAN
+/// then pays for".
+pub(crate) static PROF_REBUILD_ACCEPTED_NNZ: AtomicUsize = AtomicUsize::new(0);
+pub(crate) static PROF_FULL_NNZ: AtomicUsize = AtomicUsize::new(0);
+pub(crate) static PROF_FULL_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Absolute floor on a pivot's magnitude: below this the column has
+/// nothing usable left in the remaining submatrix at all, and the whole
+/// attempt is abandoned rather than dividing by (almost) zero. Far below
+/// `simplex.rs`'s own `FT_MIN_PIVOT` deliberately — this is a "there is no
+/// pivot here" test, not a quality test, which the [`STABILITY`] check
+/// next to it already is.
+const REBUILD_MIN_PIVOT: f64 = 1e-12;
+
+/// Whether pivot-order reuse is enabled (default: yes), toggled by
+/// `ENOMOTO_REUSE_PIVOT_ORDER=0`. Exists so an A/B of this feature can
+/// flip it *within one process* — per
+/// `analysis/ftran_density_gate_20260922_062832.md` §4.1, this box's
+/// per-problem run-to-run spread across separate processes reaches 4x,
+/// far wider than the effect being measured. Read once per
+/// refactorization (a handful of times per solve), never per iteration.
+fn reuse_pivot_order_enabled() -> bool {
+    !matches!(std::env::var("ENOMOTO_REUSE_PIVOT_ORDER").as_deref(), Ok("0") | Ok("false"))
+}
+
+/// Refactorizes `rows_in` **reusing `prev`'s pivot order** when possible,
+/// falling back to a full Markowitz [`factorize`] otherwise.
+///
+/// This is this crate's counterpart to HiGHS's `HFactor::build()` trying
+/// `rebuild()` (`util/HFactorRefactor.cpp`) before `buildSimple()` +
+/// `buildKernel()`, named as gap §2.2 in
+/// `docs/lu_comparison_enomoto_vs_highs.md`: a mid-solve refactorization
+/// factorizes a basis that differs from the last factorized one only by
+/// the columns the Forrest-Tomlin updates since then replaced, so the
+/// order Markowitz chose last time is usually still a good order — and
+/// *applying a known order* costs only the elimination's own arithmetic,
+/// with none of the search, degree bookkeeping, or active-submatrix
+/// maintenance (`MarkowitzState`'s `BTreeMap`/`BTreeSet` churn) that
+/// choosing one costs.
+pub fn factorize_reusing(m: usize, rows_in: &[Vec<(usize, f64)>], prev: Option<&FtLu>) -> Option<FtLu> {
+    let Some(prev) = prev else {
+        return factorize(m, rows_in).map(FtLu::new);
+    };
+    // A dense input goes to `factorize_dense_faer` (via `factorize`)
+    // regardless of any pivot order, and the bordered path wants its own
+    // ordering — reuse targets the ordinary sparse Markowitz case, which
+    // is every mid-solve refactorization on a real Netlib basis.
+    let eligible = reuse_pivot_order_enabled() && m > 0 && !is_dense_input(m, rows_in) && !wants_bordered(m, rows_in);
+    if eligible && prev.reuse_skips_left == 0 {
+        let t0 = std::time::Instant::now();
+        PROF_REBUILD_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
+        let max_nnz = (reuse_fill_limit() * prev.fill_baseline as f64) as usize + m;
+        let rebuilt = factorize_reusing_order(m, rows_in, &prev.base.col_perm, &prev.base.row_perm, max_nnz);
+        PROF_REBUILD_NS.fetch_add(t0.elapsed().as_nanos() as usize, Ordering::Relaxed);
+        if let Some(lu) = rebuilt {
+            PROF_REBUILD_ACCEPTED.fetch_add(1, Ordering::Relaxed);
+            let mut ft = FtLu::new(lu);
+            PROF_REBUILD_ACCEPTED_NNZ.fetch_add(ft.fill_baseline, Ordering::Relaxed);
+            // Keep the *full* factorization's baseline (see
+            // `REBUILD_FILL_LIMIT`'s own docs): a chain of reuses must not
+            // ratchet the fill limit up step by step.
+            ft.fill_baseline = prev.fill_baseline;
+            return Some(ft);
+        }
+    }
+    // Either the reuse was rejected, or it is being skipped under the
+    // backoff below. Both land on the full Markowitz factorization, whose
+    // own fill becomes the new baseline (`FtLu::new` sets it).
+    let mut ft = FtLu::new(factorize(m, rows_in)?);
+    PROF_FULL_NNZ.fetch_add(ft.fill_baseline, Ordering::Relaxed);
+    PROF_FULL_COUNT.fetch_add(1, Ordering::Relaxed);
+    if eligible {
+        if prev.reuse_skips_left > 0 {
+            ft.reuse_fail_streak = prev.reuse_fail_streak;
+            ft.reuse_skips_left = prev.reuse_skips_left - 1;
+        } else {
+            // A rejected attempt is wasted work on top of the full
+            // factorization that follows it, and rejections cluster: the
+            // basis that produced one (too much fill under the recorded
+            // column order, or a numerically spent order) is usually still
+            // producing them a few refactorizations later. So back off
+            // exponentially — 2, 4, 8, ... refactorizations left alone,
+            // capped at `REUSE_MAX_BACKOFF` — and reset to zero on the first
+            // acceptance, which is what keeps a problem where reuse *does*
+            // work paying nothing for this.
+            ft.reuse_fail_streak = prev.reuse_fail_streak.saturating_add(1);
+            ft.reuse_skips_left = (1u32 << ft.reuse_fail_streak.min(REUSE_BACKOFF_SHIFT_CAP)).min(REUSE_MAX_BACKOFF);
+            PROF_REBUILD_BACKOFF_SKIPS.fetch_add(ft.reuse_skips_left as usize, Ordering::Relaxed);
+        }
+    }
+    Some(ft)
+}
+
+/// Whether [`factorize`] would route this input through
+/// [`factorize_bordered`] — exactly that function's own gate, factored out
+/// so [`factorize_reusing`] can decline to touch such a basis.
+///
+/// Reuse must not take a `fit1p`/`fit2p`-shaped basis: the bordered path's
+/// whole point is to keep ~20-25 near-dense "trend" columns *out* of the
+/// sparse elimination entirely (see [`factorize_bordered`]'s own docs), and
+/// a plain left-looking pass over the order it produced scatters exactly
+/// those columns back through every step — measured as `fit2p` +6.4% at a
+/// 1.1 fill limit and +16.3% at 1.25, against roughly flat everywhere else,
+/// which is what sent this gate in.
+fn wants_bordered(m: usize, rows_in: &[Vec<(usize, f64)>]) -> bool {
+    let k = detect_border_columns(m, rows_in).len();
+    k > 0 && k <= BORDER_MAX_COUNT && (k as f64) <= BORDER_MAX_FRACTION * m as f64
+}
+
+/// Caps on [`factorize_reusing`]'s own exponential backoff after a
+/// rejected reuse: the streak's shift is capped first (so the shift itself
+/// can never overflow), then the resulting skip count.
+const REUSE_BACKOFF_SHIFT_CAP: u32 = 5;
+const REUSE_MAX_BACKOFF: u32 = 16;
+
+/// Factorizes `rows_in` with the **column order given** rather than
+/// searched for: step `s` eliminates column `pivot_col[s]`, pivoting on
+/// row `pivot_row_hint[s]` when that row is still numerically acceptable
+/// and on the largest remaining entry in the column otherwise.
+///
+/// Left-looking (Gilbert-Peierls shape, the same one HiGHS's `rebuild()`
+/// has): column `pivot_col[s]` is loaded, pushed through the part of `L`
+/// built so far, and then split by the pivot assignment itself — entries
+/// in rows already pivotal become `U`'s column `s`, the entry at the pivot
+/// row becomes the diagonal, and entries in rows not yet pivotal become
+/// `L`'s column `s`. Nothing here searches for *sparsity*, and nothing
+/// maintains an active submatrix; per-step cost is the elimination
+/// arithmetic plus the reach-set heap, both bounded by the factors' own
+/// nonzero count.
+///
+/// **Why only the column order is replayed, not the row order.** HiGHS's
+/// own `rebuild()` replays both (`refactor_info_.pivot_row` /
+/// `pivot_var`) and gives up — rank deficiency, full rebuild — the moment
+/// a recorded pivot row's entry is too small. That is affordable *there*
+/// because HiGHS only ever sets `refactor_info_.use` for a hot start
+/// (`HEkk::setNlaRefactorInfo`), i.e. when re-factorizing the very basis
+/// the order was recorded from, where the recorded rows trivially still
+/// work. Replaying both orders across a *changed* basis was implemented
+/// here first and measured: it is rejected essentially always (Netlib
+/// `25fv47` 0/26 attempts, `degen3` 0/7, `pilot` 0/30, `fit2p` 0/32,
+/// `greenbea` 1/28), and the rejections are overwhelmingly "the recorded
+/// pivot row is numerically *empty*" (`fail zero`, not `fail stability`) —
+/// which is exactly what a replaced basis column looks like: the entering
+/// column has no reason whatsoever to be nonzero at the row that was
+/// pivotal for the column that left. The column order is what Markowitz's
+/// fill-minimization actually encodes; the row assignment is a numerical
+/// choice, and re-making it per step (partial pivoting: take the largest
+/// remaining entry) costs one pass over the column that has already been
+/// computed.
+///
+/// Returns `None` — caller falls back to [`factorize`] — if the order is
+/// not a valid permutation, if some step's column has nothing left above
+/// [`REBUILD_MIN_PIVOT`] in the remaining submatrix (a singular or
+/// numerically spent basis), or if the factors exceed `max_nnz` nonzeros.
+fn factorize_reusing_order(
+    m: usize,
+    rows_in: &[Vec<(usize, f64)>],
+    pivot_col: &[usize],
+    pivot_row_hint: &[usize],
+    max_nnz: usize,
+) -> Option<LuFactors> {
+    if m == 0 || pivot_col.len() != m || pivot_row_hint.len() != m || rows_in.len() != m {
+        return None;
+    }
+    {
+        let mut seen = vec![false; m];
+        for &j in pivot_col {
+            if j >= m || seen[j] {
+                return None;
+            }
+            seen[j] = true;
+        }
+    }
+
+    // Column-major copy of the (row-major) input: one `O(nnz)` counting
+    // sort into flat arrays, the same shape `CscMat::from_rows` builds,
+    // kept local because this one is indexed by *basis slot* and thrown
+    // away when the factorization is done.
+    let mut col_start = vec![0usize; m + 1];
+    for row in rows_in.iter() {
+        for &(j, _) in row {
+            if j >= m {
+                return None;
+            }
+            col_start[j + 1] += 1;
+        }
+    }
+    for j in 0..m {
+        col_start[j + 1] += col_start[j];
+    }
+    let mut col_row = vec![0usize; col_start[m]];
+    let mut col_val = vec![0.0f64; col_start[m]];
+    {
+        let mut cursor = col_start.clone();
+        for (i, row) in rows_in.iter().enumerate() {
+            for &(j, v) in row {
+                col_row[cursor[j]] = i;
+                col_val[cursor[j]] = v;
+                cursor[j] += 1;
+            }
+        }
+    }
+
+    let mut work = vec![0.0f64; m];
+    let mut touched: Vec<usize> = Vec::new();
+    let mut in_touched = vec![false; m];
+    let mut heap: BinaryHeap<Reverse<usize>> = BinaryHeap::new();
+    let mut queued = vec![false; m];
+
+    // `L`'s columns as one flat buffer in *original row* indexing while
+    // the rebuild runs (a row's own step is only known once it is chosen
+    // as a pivot, which for `L`'s entries is always later than the step
+    // writing them), converted to step indexing in one pass at the end.
+    let mut l_entries: Vec<(usize, f64)> = Vec::new();
+    let mut l_offsets: Vec<usize> = Vec::with_capacity(m + 1);
+    l_offsets.push(0);
+    let mut u_row: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
+    let mut lu_nnz = 0usize;
+
+    // `row_step[r]`: the step row `r` was chosen as a pivot at, or
+    // `usize::MAX` while it is still in the remaining submatrix. Becomes
+    // `LuFactors::row_perm_inv` once every row has one.
+    let mut row_step = vec![usize::MAX; m];
+    let mut row_perm = vec![0usize; m];
+
+    // `row_remaining[r]`: how many of row `r`'s own entries still sit in
+    // columns this order has not reached yet — the row-degree half of a
+    // Markowitz count, over the *input* matrix rather than the (never
+    // materialized here) eliminated one. Maintained in `O(nnz)` total by
+    // decrementing a column's rows as that column is consumed, and used
+    // only to break the tie among numerically acceptable rows when the
+    // recorded one is unusable: with the column order fixed, the row
+    // choice is all that is left to keep fill down, and taking the
+    // absolutely largest entry (plain partial pivoting) ignores sparsity
+    // entirely.
+    let mut row_remaining: Vec<u32> = rows_in.iter().map(|row| row.len() as u32).collect();
+
+    for s in 0..m {
+        let pj = pivot_col[s];
+        for p in col_start[pj]..col_start[pj + 1] {
+            row_remaining[col_row[p]] = row_remaining[col_row[p]].saturating_sub(1);
+        }
+
+        for p in col_start[pj]..col_start[pj + 1] {
+            let r = col_row[p];
+            work[r] += col_val[p];
+            if !in_touched[r] {
+                in_touched[r] = true;
+                touched.push(r);
+            }
+            let t = row_step[r];
+            if t != usize::MAX && !queued[t] {
+                queued[t] = true;
+                heap.push(Reverse(t));
+            }
+        }
+
+        // Forward solve `L y = A[:, pj]` against the `s` columns of `L`
+        // built so far. Steps come out of the heap in ascending order, and
+        // column `t` of `L` only ever writes rows that were *not* pivotal
+        // at step `t` (so their own step, if any, is `> t`), which makes
+        // ascending step order a valid topological order — the same
+        // property `l_solve_sparse_into` relies on, reached here with a
+        // heap rather than a DFS because the graph is still being built.
+        while let Some(Reverse(t)) = heap.pop() {
+            queued[t] = false;
+            let y = work[row_perm[t]];
+            if y == 0.0 {
+                continue;
+            }
+            for idx in l_offsets[t]..l_offsets[t + 1] {
+                let (r, mult) = l_entries[idx];
+                if !in_touched[r] {
+                    in_touched[r] = true;
+                    touched.push(r);
+                }
+                work[r] -= mult * y;
+                let t2 = row_step[r];
+                if t2 != usize::MAX && !queued[t2] {
+                    queued[t2] = true;
+                    heap.push(Reverse(t2));
+                }
+            }
+        }
+
+        // Pivot choice: the recorded row if it is still free and passes
+        // the same threshold test `find_best_pivot` applies (`STABILITY`
+        // times the largest magnitude left in this column of the
+        // *remaining* submatrix — which is what `work` now holds over the
+        // rows that have no step yet); otherwise that largest entry
+        // itself, i.e. plain partial pivoting.
+        let mut best_r = usize::MAX;
+        let mut best_abs = 0.0f64;
+        for &r in &touched {
+            if row_step[r] == usize::MAX {
+                let a = work[r].abs();
+                if a > best_abs {
+                    best_abs = a;
+                    best_r = r;
+                }
+            }
+        }
+        if best_abs < REBUILD_MIN_PIVOT {
+            PROF_REBUILD_FAIL_SINGULAR.fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
+        let hint = pivot_row_hint[s];
+        let pi = if hint < m && row_step[hint] == usize::MAX && work[hint].abs() >= STABILITY * best_abs {
+            hint
+        } else {
+            // The recorded row is gone (a basis column the Forrest-Tomlin
+            // updates replaced leaves its old pivot row numerically empty
+            // here — see this function's own docs): re-pick among the rows
+            // that clear the same `STABILITY` floor `find_best_pivot`
+            // applies, taking the one with the fewest entries left in
+            // columns this order has yet to reach, ties going to the
+            // larger pivot. That is the surviving half of a Markowitz
+            // count once the column is fixed.
+            PROF_REBUILD_ROW_REPICKS.fetch_add(1, Ordering::Relaxed);
+            let floor = STABILITY * best_abs;
+            let mut pick = best_r;
+            let mut pick_deg = u32::MAX;
+            let mut pick_abs = 0.0f64;
+            for &r in &touched {
+                if row_step[r] != usize::MAX {
+                    continue;
+                }
+                let a = work[r].abs();
+                if a < floor {
+                    continue;
+                }
+                let deg = row_remaining[r];
+                if deg < pick_deg || (deg == pick_deg && a > pick_abs) {
+                    pick_deg = deg;
+                    pick_abs = a;
+                    pick = r;
+                }
+            }
+            pick
+        };
+        let pivot = work[pi];
+        row_step[pi] = s;
+        row_perm[s] = pi;
+
+        for &r in &touched {
+            let v = work[r];
+            work[r] = 0.0;
+            in_touched[r] = false;
+            if v == 0.0 {
+                continue;
+            }
+            let t = row_step[r];
+            if t == usize::MAX {
+                l_entries.push((r, v / pivot));
+            } else {
+                // `t <= s` here: `r` is either pivotal from an earlier
+                // step or the pivot just chosen for this one.
+                u_row[t].push((s, v));
+            }
+            lu_nnz += 1;
+        }
+        touched.clear();
+        l_offsets.push(l_entries.len());
+        if lu_nnz > max_nnz {
+            PROF_REBUILD_FAIL_FILL.fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
+    }
+
+    let mut col_perm_inv = vec![0usize; m];
+    for (s, &j) in pivot_col.iter().enumerate() {
+        col_perm_inv[j] = s;
+    }
+    let mut l_build = CscBuilder::with_capacity(m, m, l_entries.len());
+    for s in 0..m {
+        for idx in l_offsets[s]..l_offsets[s + 1] {
+            let (r, mult) = l_entries[idx];
+            l_build.push(row_step[r], mult);
+        }
+        l_build.end_column();
+    }
+    let l_col = l_build.build();
+    let l_row = l_col.to_csr();
+
+    Some(LuFactors {
+        m,
+        l_col,
+        l_row,
+        u_row,
+        row_perm,
+        col_perm: pivot_col.to_vec(),
+        col_perm_inv,
+        row_perm_inv: row_step,
     })
 }
 
@@ -2027,6 +2495,22 @@ pub struct FtLu {
     /// actually being `O(1)`, with a `debug_assert` in `fill_count` that
     /// it still agrees with the sum it replaced.
     fill: usize,
+    /// Nonzero count of the last *full* (Markowitz) factorization's
+    /// `L`+`U` — the baseline [`factorize_reusing`] caps a reused order's
+    /// own fill against (see [`REBUILD_FILL_LIMIT`]). Set in [`Self::new`]
+    /// to this factorization's own count, then overwritten back to the
+    /// predecessor's by `factorize_reusing` whenever the factorization it
+    /// just built came from a reuse rather than a fresh Markowitz run, so
+    /// a chain of reuses is always measured against the last order
+    /// actually chosen by Markowitz.
+    fill_baseline: usize,
+    /// Consecutive rejected pivot-order reuses leading up to this
+    /// factorization, and how many refactorizations are still to be left
+    /// alone before the next attempt — see [`factorize_reusing`]'s own
+    /// backoff docs. Carried across refactorizations the same way
+    /// [`Self::fill_baseline`] is.
+    reuse_fail_streak: u32,
+    reuse_skips_left: u32,
     /// This factorization's own one-time build cost, in the same tick
     /// units as [`Self::tick`] — computed once in [`Self::new`] from the
     /// freshly-built `L`/`U` (`m` rows plus their combined off-diagonal
@@ -2111,6 +2595,10 @@ impl FtLu {
         // off-diagonal `U` nonzeros.
         let u_off: u64 = base.u_row.iter().map(|v| v.len().saturating_sub(1) as u64).sum();
         let build_tick = TICK_BUILD_M_COEF * m as u64 + TICK_BUILD_LU_COEF * (l_nnz + u_off);
+        // `u_off` above excludes `U`'s diagonals; the fill baseline counts
+        // every stored entry, matching what `factorize_reusing_order`
+        // counts as it goes.
+        let fill_baseline = (l_nnz + u_off) as usize + m;
         let u_seq: Vec<UEta> = (0..m)
             .map(|slot| UEta {
                 slot,
@@ -2131,6 +2619,9 @@ impl FtLu {
             fill,
             tick: Cell::new(0),
             build_tick,
+            fill_baseline,
+            reuse_fail_streak: 0,
+            reuse_skips_left: 0,
             btran_l_scatter: btran_l_scatter_gate(),
             u_zero_skip: u_zero_skip_enabled(),
         }
@@ -3742,6 +4233,186 @@ mod tests {
                         ys[i]
                     );
                 }
+            }
+        }
+    }
+
+    /// Residual `‖A x - b‖_inf` against the sparse rows `A` — what a
+    /// factorization is actually *for*, and therefore a stronger check on
+    /// a reused order than comparing its `L`/`U` against a Markowitz
+    /// run's (the two legitimately differ: same matrix, two valid orders).
+    fn residual_inf(rows: &[Vec<(usize, f64)>], x: &[f64], b: &[f64]) -> f64 {
+        rows.iter()
+            .enumerate()
+            .map(|(i, row)| (row.iter().map(|&(j, v)| v * x[j]).sum::<f64>() - b[i]).abs())
+            .fold(0.0, f64::max)
+    }
+
+    /// Replaces `n` columns of `rows` with fresh content whose nonzeros
+    /// sit in *different rows* than the column they replace — what a
+    /// Forrest-Tomlin update does to a basis, and specifically the case
+    /// that makes replaying the recorded *row* order impossible (see
+    /// `factorize_reusing_order`'s own docs).
+    fn replace_columns(rows: &mut [Vec<(usize, f64)>], n: usize, seed: u64) {
+        let m = rows.len();
+        let mut state = seed;
+        for k in 0..n {
+            let j = (k * 7 + 3) % m;
+            for row in rows.iter_mut() {
+                row.retain(|&(c, _)| c != j);
+            }
+            let i0 = (k * 11 + 5) % m;
+            rows[i0].push((j, 6.0 + next_rand(&mut state).abs()));
+            let i1 = (k * 13 + 1) % m;
+            if i1 != i0 {
+                rows[i1].push((j, next_rand(&mut state)));
+            }
+        }
+    }
+
+    #[test]
+    fn reused_order_solves_a_basis_whose_columns_were_replaced() {
+        for seed in [1u64, 7, 99] {
+            let m = 60;
+            let rows = random_sparse_diag_dominant(m, seed);
+            let first = factorize(m, &rows).expect("well-conditioned matrix factorizes");
+
+            let mut rows2 = rows.clone();
+            replace_columns(&mut rows2, 5, seed);
+
+            let reused = factorize_reusing_order(m, &rows2, &first.col_perm, &first.row_perm, usize::MAX)
+                .expect("row re-picking keeps the recorded column order usable");
+
+            let b: Vec<f64> = (0..m).map(|i| 1.0 + (i % 5) as f64).collect();
+            let x = reused.solve(&b);
+            assert!(residual_inf(&rows2, &x, &b) < 1e-9, "seed {seed}: reused order solves the updated matrix");
+
+            // And `B^T y = b` through the same factors, since the transpose
+            // path reads `l_col`/`u_row` in the other direction (a wrong
+            // permutation would pass one and fail the other).
+            let y = reused.solve_transpose(&b);
+            let mut rows_t: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
+            for (i, row) in rows2.iter().enumerate() {
+                for &(j, v) in row {
+                    rows_t[j].push((i, v));
+                }
+            }
+            assert!(residual_inf(&rows_t, &y, &b) < 1e-9, "seed {seed}: reused order solves the transpose");
+
+            // `l_row` must stay `l_col`'s exact transpose on this path too
+            // (BTRAN's scatter form reads it).
+            let mut from_col: Vec<(usize, usize, u64)> = Vec::new();
+            for s in 0..m {
+                for &(row_step, mult) in reused.l_col.col(s) {
+                    assert!(row_step > s, "L must be strictly lower triangular in step space");
+                    from_col.push((s, row_step, mult.to_bits()));
+                }
+            }
+            let mut from_row: Vec<(usize, usize, u64)> = Vec::new();
+            for r in 0..m {
+                for &(s, mult) in reused.l_row.row(r) {
+                    from_row.push((s, r, mult.to_bits()));
+                }
+            }
+            from_col.sort_unstable();
+            from_row.sort_unstable();
+            assert_eq!(from_col, from_row, "seed {seed}: l_row is not l_col's transpose");
+        }
+    }
+
+    #[test]
+    fn reused_order_reproduces_a_fresh_factorization_of_the_same_matrix() {
+        let m = 50;
+        let rows = random_sparse_diag_dominant(m, 2024);
+        let first = factorize(m, &rows).expect("factorizes");
+        let again = factorize_reusing_order(m, &rows, &first.col_perm, &first.row_perm, usize::MAX)
+            .expect("its own order is trivially acceptable for the same matrix");
+
+        // Same matrix, same order, so the factors themselves must match —
+        // not merely solve alike.
+        assert_eq!(again.row_perm, first.row_perm);
+        assert_eq!(again.col_perm, first.col_perm);
+        for s in 0..m {
+            let mut a: Vec<(usize, f64)> = first.l_col.col(s).to_vec();
+            let mut b: Vec<(usize, f64)> = again.l_col.col(s).iter().copied().filter(|&(_, v)| v != 0.0).collect();
+            a.sort_unstable_by_key(|&(r, _)| r);
+            b.sort_unstable_by_key(|&(r, _)| r);
+            assert_eq!(a.len(), b.len(), "L column {s} nonzero count");
+            for (&(ra, va), &(rb, vb)) in a.iter().zip(b.iter()) {
+                assert_eq!(ra, rb);
+                assert!((va - vb).abs() < 1e-12, "L[{ra}][{s}]: {va} vs {vb}");
+            }
+        }
+    }
+
+    #[test]
+    fn reused_order_rejects_a_singular_matrix() {
+        let identity_order: Vec<usize> = vec![0, 1];
+        let singular = vec![vec![(0usize, 1.0f64), (1usize, 1.0f64)], vec![(0usize, 1.0f64), (1usize, 1.0f64)]];
+        assert!(
+            factorize_reusing_order(2, &singular, &identity_order, &identity_order, usize::MAX).is_none(),
+            "a column with nothing left in the remaining submatrix must reject the order"
+        );
+    }
+
+    #[test]
+    fn reused_order_repicks_the_row_when_the_recorded_one_is_numerically_weak() {
+        // Recorded order says step 0 pivots on row 0 of column 0, but in
+        // *this* matrix that entry is numerically nothing against the same
+        // column's other entry: the row must be re-picked (to row 1),
+        // rather than the whole order rejected.
+        let order: Vec<usize> = vec![0, 1];
+        let weak = vec![vec![(0usize, 1e-14f64), (1usize, 1.0f64)], vec![(0usize, 1.0f64), (1usize, 1.0f64)]];
+        let lu = factorize_reusing_order(2, &weak, &order, &order, usize::MAX)
+            .expect("a weak recorded row is re-picked, not a rejection");
+        assert_eq!(lu.row_perm[0], 1, "step 0 must pivot on the numerically sound row");
+        let b = vec![1.0, 2.0];
+        let x = lu.solve(&b);
+        assert!(residual_inf(&weak, &x, &b) < 1e-9, "re-picked pivot still solves: {x:?}");
+    }
+
+    #[test]
+    fn reused_order_respects_the_fill_limit() {
+        let m = 40;
+        let rows = random_sparse_diag_dominant(m, 31337);
+        let first = factorize(m, &rows).expect("factorizes");
+        // `max_nnz` below even the diagonal alone: no factorization of
+        // anything can fit, so the guard must fire rather than return
+        // factors that exceed it.
+        assert!(factorize_reusing_order(m, &rows, &first.col_perm, &first.row_perm, 1).is_none());
+    }
+
+    #[test]
+    fn factorize_reusing_matches_a_from_scratch_factorization_through_column_replacements() {
+        // End-to-end: build a factorization, replace basis columns the way
+        // the simplex loop does, refactorize with reuse, and check the
+        // result against a from-scratch factorization of the same matrix.
+        let m = 45;
+        let mut rows = random_sparse_diag_dominant(m, 555);
+        let mut lu = FtLu::new(factorize(m, &rows).expect("factorizes"));
+        let b: Vec<f64> = (0..m).map(|i| 0.5 + (i % 7) as f64).collect();
+
+        for round in 0..4 {
+            replace_columns(&mut rows, 3, 900 + round);
+            lu = factorize_reusing(m, &rows, Some(&lu)).expect("refactorizes");
+
+            let mut scratch = vec![0.0; m];
+            let mut out = vec![0.0; m];
+            lu.solve_into(&b, &mut scratch, &mut out);
+            assert!(residual_inf(&rows, &out, &b) < 1e-9, "round {round}: FTRAN residual");
+
+            let fresh = FtLu::new(factorize(m, &rows).expect("factorizes"));
+            let mut fresh_out = vec![0.0; m];
+            fresh.solve_into(&b, &mut scratch, &mut fresh_out);
+            for i in 0..m {
+                assert!((out[i] - fresh_out[i]).abs() < 1e-9, "round {round}, row {i}: reuse vs fresh");
+            }
+
+            // BTRAN too, through both of `l_transpose_solve_into`'s arms.
+            let ours = lu.solve_transpose(&b);
+            let theirs = fresh.solve_transpose(&b);
+            for i in 0..m {
+                assert!((ours[i] - theirs[i]).abs() < 1e-9, "round {round}, row {i}: BTRAN reuse vs fresh");
             }
         }
     }

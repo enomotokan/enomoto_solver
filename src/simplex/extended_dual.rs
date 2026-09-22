@@ -378,6 +378,30 @@ mod prof_phases {
             BFRT_FLIPS.load(Relaxed) as f64 / iters as f64,
             INFEASIBLE_POOL.load(Relaxed) as f64 / iters as f64
         );
+        {
+            // Pivot-order reuse (`sparse_lu::factorize_reusing`, HiGHS
+            // `HFactor::rebuild()`'s counterpart): how often the previous
+            // order was tried, how often it was usable, how much wall time
+            // the attempts (accepted *and* rejected) cost, and how many
+            // steps had to re-pick their pivot row because the recorded
+            // one was numerically empty (a basis column the Forrest-Tomlin
+            // updates replaced since).
+            use crate::simplex::sparse_lu;
+            let attempts = sparse_lu::PROF_REBUILD_ATTEMPTS.load(Relaxed);
+            let accepted = sparse_lu::PROF_REBUILD_ACCEPTED.load(Relaxed);
+            eprintln!(
+                "  pivot_order_reuse: attempts={attempts} accepted={accepted} ({:.1}%) attempt_time={:.3}ms row_repicks={} fail(singular={} fill={}) backoff_skips={} nnz_reuse_avg={:.0} nnz_full_avg={:.0}",
+                100.0 * accepted as f64 / attempts.max(1) as f64,
+                sparse_lu::PROF_REBUILD_NS.load(Relaxed) as f64 / 1e6,
+                sparse_lu::PROF_REBUILD_ROW_REPICKS.load(Relaxed),
+                sparse_lu::PROF_REBUILD_FAIL_SINGULAR.load(Relaxed),
+                sparse_lu::PROF_REBUILD_FAIL_FILL.load(Relaxed),
+                sparse_lu::PROF_REBUILD_BACKOFF_SKIPS.load(Relaxed),
+                sparse_lu::PROF_REBUILD_ACCEPTED_NNZ.load(Relaxed) as f64 / accepted.max(1) as f64,
+                sparse_lu::PROF_FULL_NNZ.load(Relaxed) as f64
+                    / sparse_lu::PROF_FULL_COUNT.load(Relaxed).max(1) as f64,
+            );
+        }
         eprintln!(
             "  density_gate_ftrans={} final_expected_density col_aq={:.3} bfrt={:.3}",
             DENSITY_GATE_FTRANS.load(Relaxed),
@@ -1107,7 +1131,21 @@ fn nb_value_affine(cache: &ColCache, status: NbStatus, j: usize) -> Option<Affin
 /// `B^{-1}` freshly factorized from the current `basis_pos` — no
 /// incremental (Forrest-Tomlin) update, by design; see this module's own
 /// docs, simplification (2).
-fn refactorize(std: &StdForm, basis_pos: &[Option<usize>]) -> Option<sparse_lu::FtLu> {
+///
+/// `prev` is the factorization being replaced, when there is one: its
+/// pivot order is reused (`sparse_lu::factorize_reusing`, this crate's
+/// counterpart to HiGHS's `HFactor::rebuild()`) rather than searched for
+/// again, since the basis it factorized differs from the current one only
+/// by the columns the Forrest-Tomlin updates since then replaced. The
+/// reuse re-checks threshold pivoting and fill at every step and falls
+/// back to the full Markowitz search by itself when either fails, so
+/// passing `prev` never changes *whether* a usable factorization results,
+/// only how much work finding it costs.
+fn refactorize(
+    std: &StdForm,
+    basis_pos: &[Option<usize>],
+    prev: Option<&sparse_lu::FtLu>,
+) -> Option<sparse_lu::FtLu> {
     let m = std.n_rows;
     let mut rows = vec![Vec::new(); m];
     // Column-driven, via `std.cols` — `nnz(A_B)` work instead of the
@@ -1122,7 +1160,9 @@ fn refactorize(std: &StdForm, basis_pos: &[Option<usize>]) -> Option<sparse_lu::
             }
         }
     }
-    let r = sparse_lu::factorize_diagonal(m, &rows).or_else(|| sparse_lu::factorize(m, &rows)).map(sparse_lu::FtLu::new);
+    let r = sparse_lu::factorize_diagonal(m, &rows)
+        .map(sparse_lu::FtLu::new)
+        .or_else(|| sparse_lu::factorize_reusing(m, &rows, prev));
     if r.is_none() && std::env::var("ENOMOTO_DEBUG_EXT_ITERS").is_ok() {
         eprintln!("DEBUG_EXT_BAILOUT: refactorize returned None (singular basis)");
     }
@@ -1797,7 +1837,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         refine_zero_cost_placement(std, &mut active_cost, &mut nb_status, n_orig);
     }
 
-    let mut lu = refactorize(std, &basis_pos)?;
+    let mut lu = refactorize(std, &basis_pos, None)?;
     let mut since_check = 0usize;
 
     // Reduced costs (`d`), maintained incrementally (Huangfu & Hall
@@ -2707,7 +2747,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                     prof_phases::REFACTOR_CAUSE_INFEAS_CHECK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
                 timed!(profile_phases, prof_phases::REFACTOR, {
-                    lu = refactorize(std, &basis_pos)?;
+                    lu = refactorize(std, &basis_pos, Some(&lu))?;
                     let (fresh_base, fresh_slope) = compute_rhs_affine(std, &cache, &nb_status)?;
                     lu.solve_into(&fresh_base, &mut lu_scratch, &mut x_b_base);
                     lu.solve_into(&fresh_slope, &mut lu_scratch, &mut x_b_slope);
@@ -2854,7 +2894,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                     prof_phases::REFACTOR_CAUSE_INFEAS_CHECK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
                 timed!(profile_phases, prof_phases::REFACTOR, {
-                    lu = refactorize(std, &basis_pos)?;
+                    lu = refactorize(std, &basis_pos, Some(&lu))?;
                     let (fresh_base, fresh_slope) = compute_rhs_affine(std, &cache, &nb_status)?;
                     lu.solve_into(&fresh_base, &mut lu_scratch, &mut x_b_base);
                     lu.solve_into(&fresh_slope, &mut lu_scratch, &mut x_b_slope);
@@ -3201,7 +3241,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 }
             }
             timed!(profile_phases, prof_phases::REFACTOR, {
-                lu = refactorize(std, &basis_pos)?;
+                lu = refactorize(std, &basis_pos, Some(&lu))?;
                 let (fresh_base, fresh_slope) = compute_rhs_affine(std, &cache, &nb_status)?;
                 lu.solve_into(&fresh_base, &mut lu_scratch, &mut x_b_base);
                 lu.solve_into(&fresh_slope, &mut lu_scratch, &mut x_b_slope);
@@ -3619,7 +3659,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 prof_phases::REFACTOR_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
             timed!(profile_phases, prof_phases::REFACTOR, {
-                lu = refactorize(std, &basis_pos)?;
+                lu = refactorize(std, &basis_pos, Some(&lu))?;
                 // Full resync, not just the basis refactorization: whatever
                 // drift this trigger just caught (or, on the `try_update`-
                 // rejected path, without even needing to have measured any)
@@ -3796,7 +3836,7 @@ fn finish(std: &StdForm, basis: &mut [usize], basis_pos: &mut [Option<usize>], n
         let rejected = !lu.try_update(r2, &dense_j, super::FT_MIN_PIVOT);
         if rejected || since_check >= super::FT_CHECK_INTERVAL {
             since_check = 0;
-            lu = refactorize(std, basis_pos)?;
+            lu = refactorize(std, basis_pos, Some(&lu))?;
         }
     }
 
@@ -4292,7 +4332,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
         // (`alpha_full[r]`) before anything derived from `alpha_full` is
         // committed — same placement as the main phase's own.
         if !update_verify_disabled && lu.update_count() > 0 && !super::update_verify(alpha_q, alpha_full[r]) {
-            lu = refactorize(std, basis_pos)?;
+            lu = refactorize(std, basis_pos, Some(&lu))?;
             lu.solve_into(&compute_rhs_plain(std, nb_status), &mut lu_scratch, &mut x_b);
             infeasible_rows.rebuild(m, |i| row_infeasible_plain(std, basis, &x_b, &noise_feasible, i));
             for &j in &touched_cols {
@@ -4396,7 +4436,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
             if profile_phases_polish {
                 polish_refactors += 1;
             }
-            lu = refactorize(std, basis_pos)?;
+            lu = refactorize(std, basis_pos, Some(&lu))?;
             lu.solve_into(&compute_rhs_plain(std, nb_status), &mut lu_scratch, &mut x_b);
             infeasible_rows.rebuild(m, |i| row_infeasible_plain(std, basis, &x_b, &noise_feasible, i));
         }

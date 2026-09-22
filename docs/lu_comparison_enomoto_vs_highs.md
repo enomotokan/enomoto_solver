@@ -24,7 +24,7 @@ ENOMOTO 側で高速化に参考になりそうな点をまとめる。
 | 密行列dispatch | `is_dense_input()` → `faer::PartialPivLu` | なし (常にMarkowitzカーネル) |
 | 更新 | Forrest-Tomlin (U-eta列 + R-eta行) | Forrest-Tomlin (`updateFT`) — **構造が違う** |
 | 求解 (FTRAN/BTRAN) | L のみ GP疎求解、U は密スキャン | **L/U 両方向で hyper-sparse + sparse の切替** |
-| 再分解 | 毎回ゼロから Markowitz | **`refactor_info_` に前回ピボット列を記憶し `rebuild()` で再利用** |
+| 再分解 | 前回の**列順**を再利用 (`factorize_reusing`、行は選び直し) + フル Markowitz フォールバック | `refactor_info_` に前回ピボット順を記憶し `rebuild()` で再利用 (**ホットスタート時のみ**、§2.2) |
 
 ---
 
@@ -57,20 +57,42 @@ ENOMOTO も `find_best_pivot` のバケットスキャンで「スコア0」を�
 
 HiGHS は分解成功時に `refactor_info_` へ
 `pivot_row / pivot_var / pivot_type` を保存する (`buildKernel` 内で push)。
-次回の同一基底分解時、`HFactor::build()` はまず `rebuild()` を試み、
+`HFactor::build()` はまず `rebuild()` を試み、
 **記憶したピボット順で `ftranL` を回すだけで L/U を再構築**する。
 `buildSimple`+`buildKernel` のピボット探索全体をスキップできる。
 
-ENOMOTO は毎回ゼロから Markowitz 探索。反復中に基底がほぼ同じ (数本入れ替え)
-であることを考えると、HiGHS 方式は「探索コスト」を大幅に削れる。
+> **訂正 (2026-09-22)**: この節はもともと「反復中に基底がほぼ同じなのだから
+> HiGHS 方式は探索コストを大幅に削れる」と書いていたが、**HiGHS が
+> `rebuild()` を使うのは反復中の再分解ではない**。`refactor_info_.use` を
+> 立てるのは `HEkk::setNlaRefactorInfo()` だけで、これはホットスタート
+> (保存した基底へ戻って解き直す)経路である。反復中の再分解
+> (`HSimplexNla::invert()`)は `refactor_info_.clear()` 済みの状態で
+> `buildSimple`+`buildKernel` を通る。`rebuild()` が相対安定性判定を持たず
+> 絶対値 `pivot_tolerance` だけを見て、外れたら即 rank deficiency を返すのも
+> 「同じ基底を分解し直すだけだから外れないはず」という前提による
+> (`assert(abs_pivot >= pivot_tolerance);`)。
 
-> 注意: HiGHS は列順 (pivot順) の再利用が**数値的安定性の観点**でリスクにもなる
-> ため、`rebuild()` が pivot tolerance を下回ったら rank deficiency を返して
-> フル `buildSimple`+`buildKernel` にフォールバックする。この安全弁ごと移植
-> する必要がある。
+**実装済み (2026-09-22、`analysis/pivot_order_reuse_20260922_120602.md`)**:
+上記のとおり (行, 列) 両方の順をそのまま再生する HiGHS 形の移植は、
+基底が変わっている以上ほぼ必ず棄却される(NETLIB 実測で採択率 0〜4%、
+棄却理由のほぼ全部が「記録した行に成分がない」)。FT 更新は基底スロットの
+列を差し替えるが、入基底列が「出た列のピボット行」に非ゼロを持つ理由は
+ないからである。
 
-**参考度: 高** — ENOMOTO の分解は「衝突に強い BTreeMap 走査」が高コストなので、
-探索スキップの効果は大きいと思われる。
+そこで `sparse_lu::factorize_reusing` は **列順だけを再利用**し、行は
+毎ステップ選び直す(記録した行が安定性床を通ればそれを使い、だめなら
+「床を通る候補のうち未到達列に残る非ゼロ数が最小」= 列固定下の Markowitz
+カウントの残り半分で選ぶ)。分解本体は左向き (Gilbert-Peierls 形) で、
+探索も能動部分行列 (`MarkowitzState` の `BTreeMap`/`BTreeSet`) も持たない。
+安全弁は 3 つ (特異 / fill 上限 1.25 倍 / border 列基底の除外) で、いずれも
+フル Markowitz へのフォールバックに落ちる。棄却は連続しやすいので指数
+バックオフ付き。
+
+結果: 再分解フェーズ自体が 25〜40% 減り、NETLIB93 全問題の同一プロセス
+A/B で合計 **-2.55%**(46.42s → 45.24s)、目的関数値 93/93 一致、
+**10% 以上の退行ゼロ**。fill 上限を緩めると採択率は上がるが総和では負ける
+(2.0 倍で +2.7%)ことも計測済み — fill は 1 回限りのコストではなく、その
+分解が生きている間の全 FTRAN/BTRAN が払い続けるため。
 
 ### 2.3 カーネル分解の両方向一体型データ構造
 

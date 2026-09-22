@@ -1669,8 +1669,8 @@ fn perturb_costs(std: &StdForm) -> Vec<f64> {
     pc
 }
 
-fn refactorize(std: &StdForm, t: &Tableau) -> sparse_lu::FtLu {
-    try_refactorize(std, t).expect("simplex basis matrix must be nonsingular")
+fn refactorize(std: &StdForm, t: &Tableau, prev: Option<&sparse_lu::FtLu>) -> sparse_lu::FtLu {
+    try_refactorize(std, t, prev).expect("simplex basis matrix must be nonsingular")
 }
 
 /// `refactorize` without the panic: `None` when `factorize` finds the
@@ -1681,9 +1681,16 @@ fn refactorize(std: &StdForm, t: &Tableau) -> sparse_lu::FtLu {
 /// — the dual loop treats that as "this trajectory is numerically spent"
 /// and hands the problem to the primal method (whose different pivot
 /// sequence sidesteps it), rather than crashing the whole solve.
-fn try_refactorize(std: &StdForm, t: &Tableau) -> Option<sparse_lu::FtLu> {
+///
+/// `prev` is the factorization being replaced, when the caller has one on
+/// hand: its pivot order is reused rather than searched for again — see
+/// [`sparse_lu::factorize_reusing`] for what that does, and for the
+/// threshold-pivoting and fill checks that make passing it safe (a reuse
+/// failing either check falls back to the full Markowitz search by
+/// itself, so `prev` never changes which factorizations are accepted).
+fn try_refactorize(std: &StdForm, t: &Tableau, prev: Option<&sparse_lu::FtLu>) -> Option<sparse_lu::FtLu> {
     let rows = t.basis_rows_sparse();
-    sparse_lu::factorize(std.n_rows, &rows).map(sparse_lu::FtLu::new)
+    sparse_lu::factorize_reusing(std.n_rows, &rows, prev)
 }
 
 /// `refactorize` for the *initial* all-slack basis specifically: `B` is a
@@ -1800,7 +1807,7 @@ fn run_phase(
             if bump_too_big || residual_too_big {
                 // `None` here, not a panic — see this function's own docs
                 // for what that signals to the caller.
-                let Some(l) = try_refactorize(std, t) else {
+                let Some(l) = try_refactorize(std, t, Some(&*lu)) else {
                     if std::env::var("ENOMOTO_DEBUG_PHASES").is_ok() {
                         eprintln!("run_phase None@residual iter={iter_idx} phase1={phase1} bump={bump_too_big} residual={residual_too_big}");
                     }
@@ -1811,7 +1818,7 @@ fn run_phase(
         }
         // Trigger (4): unconditional cap on accumulated updates.
         if lu.update_count() > FT_MAX_UPDATES {
-            let Some(l) = try_refactorize(std, t) else {
+            let Some(l) = try_refactorize(std, t, Some(&*lu)) else {
                 if std::env::var("ENOMOTO_DEBUG_PHASES").is_ok() {
                     eprintln!("run_phase None@ft_max_updates iter={iter_idx} phase1={phase1}");
                 }
@@ -2123,7 +2130,7 @@ fn run_phase(
                 // here too — see the identical fallback earlier in this
                 // same loop, and this function's own docs.
                 if !lu.try_update(r, a_enter, FT_MIN_PIVOT) {
-                    let Some(l) = try_refactorize(std, t) else {
+                    let Some(l) = try_refactorize(std, t, Some(&*lu)) else {
                         if std::env::var("ENOMOTO_DEBUG_PHASES").is_ok() {
                             eprintln!("run_phase None@ft_update iter={iter_idx} phase1={phase1} pivot={pivot}");
                         }
@@ -3686,7 +3693,7 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
                         if profile_phases {
                             prof_phases::REFACTOR_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         }
-                        let Some(l) = try_refactorize(std, &t) else {
+                        let Some(l) = try_refactorize(std, &t, Some(&lu)) else {
                             if debug_devex {
                                 eprintln!("FALLBACK@residual iter={_iter}");
                             }
@@ -3709,7 +3716,7 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
                 if profile_phases {
                     prof_phases::REFACTOR_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
-                let Some(l) = try_refactorize(std, &t) else {
+                let Some(l) = try_refactorize(std, &t, Some(&lu)) else {
                     if debug_devex {
                         eprintln!("FALLBACK@ft_max_updates iter={_iter}");
                     }
@@ -4628,7 +4635,7 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
                 if profile_phases {
                     prof_phases::REFACTOR_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
-                let Some(l) = try_refactorize(std, &t) else {
+                let Some(l) = try_refactorize(std, &t, Some(&lu)) else {
                     if debug_devex {
                         eprintln!("FALLBACK@update_verify iter={_iter}");
                     }
@@ -4832,7 +4839,7 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
             // reduced costs for `B_old` — a meaningless mismatch, not a
             // check of the update formula. A genuinely fresh factorization
             // of the (already basis-swapped) `t` is needed instead.
-            let fresh_lu = refactorize(std, &t);
+            let fresh_lu = refactorize(std, &t, None);
             let d_fresh = fresh_d(&fresh_lu, &t, &active_cost);
             for j in 0..std.n_total {
                 // Fixed columns are deliberately excluded from PRICE's
@@ -4881,7 +4888,7 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
                 if profile_phases {
                     prof_phases::REFACTOR_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
-                let Some(l) = try_refactorize(std, &t) else {
+                let Some(l) = try_refactorize(std, &t, Some(&lu)) else {
                     if debug_devex {
                         eprintln!("FALLBACK@ft_update iter={_iter}");
                     }
@@ -5844,7 +5851,7 @@ mod tests {
         ];
         let std = build_std_form(&vars, &obj, &cons);
         let mut t = Tableau::new(&std);
-        let lu = refactorize(&std, &t);
+        let lu = refactorize(&std, &t, None);
         t.recompute_basics(&lu);
         let mut se = SteepestEdgeState::new(&std);
 
@@ -5874,7 +5881,7 @@ mod tests {
 
         // Brute force: factorize the new basis fresh and directly compute
         // ||B_new^-1 A_j||^2 for every nonbasic j.
-        let fresh_lu = refactorize(&std, &t);
+        let fresh_lu = refactorize(&std, &t, None);
         for j in 0..std.n_total {
             if t.nb_status[j].is_none() {
                 continue;
