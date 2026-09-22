@@ -3020,7 +3020,7 @@ pub fn solve_lp_dual(variables: &[VariableData], objective: &Objective, constrai
             std.n_rows
         );
     }
-    if had_unbounded_structural {
+    if had_unbounded_structural || std::env::var("ENOMOTO_FORCE_EXTENDED").is_ok() {
         if std::env::var("ENOMOTO_DEBUG_EXT_COMPONENTS").is_ok() {
             match connected_components_of_std_form(&std) {
                 Some((components, _has_row)) => {
