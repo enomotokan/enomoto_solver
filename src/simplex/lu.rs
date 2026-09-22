@@ -3908,15 +3908,24 @@ impl FtLu {
     /// out of sync between two copies — exists in exactly one place.
     fn commit_update(&mut self, basis_slot: usize, a_tilde: &[f64], e_tilde: &[f64], min_pivot: f64) -> bool {
         let m = self.base.m;
+        debug_assert_eq!(a_tilde.len(), m, "a_tilde must be the full dense column");
+        debug_assert_eq!(e_tilde.len(), m, "e_tilde must be the full dense row");
         let p = self.base.col_perm_inv[basis_slot];
 
         let seq_pos = self.slot_pos[p];
         let old_pivot = self.u_seq[seq_pos].pivot;
 
-        let r_vec: Vec<(usize, f64)> =
-            (0..m).filter(|&i| i != p).map(|i| (i, -old_pivot * e_tilde[i])).filter(|&(_, v)| v != 0.0).collect();
-
-        let dot: f64 = r_vec.iter().map(|&(i, v)| v * a_tilde[i]).sum();
+        // The `R` eta is built straight out of `e_tilde` — same entries,
+        // same order, same sparse/dense choice as the `collect()`-then-
+        // `HybridVec::pack` this replaces, minus that intermediate `Vec`
+        // (see [`HybridVec::pack_scaled_dense`]'s own docs). It is built
+        // *before* the pivot test because `dot` is exactly this eta
+        // against `a_tilde`, so the test can read it off the eta rather
+        // than needing a separate pass of its own; the previous code
+        // likewise materialized the whole thing before testing, so a
+        // rejected update is no more expensive than it already was.
+        let r_eta = HybridVec::pack_scaled_dense(e_tilde, p, -old_pivot, DENSE_ETA_FRACTION);
+        let dot = r_eta.dot_dense(a_tilde);
         let new_pivot = a_tilde[p] - dot;
         if new_pivot.abs() < min_pivot {
             return false;
@@ -3936,11 +3945,11 @@ impl FtLu {
         // `row_owners` before overwriting them below — otherwise a stale
         // `p` would linger in some other row's owner list, pointing at
         // content that no longer exists there.
-        for row_step in removed.off_diag.indices() {
+        removed.off_diag.for_each_index(|row_step| {
             if let Some(idx) = self.row_owners[row_step].iter().position(|&s| s == p) {
                 self.row_owners[row_step].swap_remove(idx);
             }
-        }
+        });
 
         // Zero row `p` out of every eta that still references it (Tomlin
         // 1974, eq. 12) — only the etas `row_owners[p]` actually lists,
@@ -3953,17 +3962,17 @@ impl FtLu {
             }
         }
 
-        let off_diag: Vec<(usize, f64)> =
-            (0..m).filter(|&i| i != p && a_tilde[i] != 0.0).map(|i| (i, a_tilde[i])).collect();
-        for &(row_step, _) in &off_diag {
-            self.row_owners[row_step].push(p);
-        }
-        self.u_seq.push(UEta { slot: p, pivot: new_pivot, off_diag: HybridVec::pack(m, off_diag, DENSE_ETA_FRACTION) });
-        self.fill += self.u_seq.last().expect("just pushed").off_diag.nnz();
+        // Same replacement column as before, built directly from
+        // `a_tilde` (scale `1.0`, so the dense arm is a plain copy) rather
+        // than through a throwaway pair list.
+        let off_diag = HybridVec::pack_scaled_dense(a_tilde, p, 1.0, DENSE_ETA_FRACTION);
+        off_diag.for_each_index(|row_step| self.row_owners[row_step].push(p));
+        self.fill += off_diag.nnz();
+        self.u_seq.push(UEta { slot: p, pivot: new_pivot, off_diag });
         self.slot_pos[p] = self.u_seq.len() - 1;
 
-        self.r_etas.push(REta { p, r: HybridVec::pack(m, r_vec, DENSE_ETA_FRACTION) });
-        self.fill += self.r_etas.last().expect("just pushed").r.nnz();
+        self.fill += r_eta.nnz();
+        self.r_etas.push(REta { p, r: r_eta });
 
         true
     }

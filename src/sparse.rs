@@ -417,6 +417,73 @@ impl HybridVec {
         }
     }
 
+    /// Builds exactly the vector [`Self::pack`] would from the pair list
+    /// `{ (i, scale * src[i]) : i != skip, scale * src[i] != 0.0 }`,
+    /// **without ever materializing that list**.
+    ///
+    /// Both of the vectors `simplex::lu`'s Forrest-Tomlin update creates on
+    /// every pivot commit are of precisely this shape, each read straight
+    /// out of a dense buffer the caller already has: the replacement
+    /// column's off-diagonal part (`src = a_tilde`, `scale = 1.0`) and the
+    /// new `R` eta (`src = e_tilde`, `scale = -old_pivot`). Both used to be
+    /// `collect()`ed into a temporary `Vec<(usize, f64)>` only to be handed
+    /// straight to [`Self::pack`], which then either kept that `Vec` (sparse
+    /// arm) or scattered it into a freshly allocated dense array and dropped
+    /// it (dense arm) — two throwaway heap allocations per update on a path
+    /// `ENOMOTO_PROF_PHASES_EXT` measures at 13-20% of wall time, the last
+    /// ones left there after `try_update`'s own two scratch buffers
+    /// (see [`crate::simplex::lu::FtLu`]'s `scratch_a_tilde`) removed the rest.
+    ///
+    /// Going through the dense source directly removes both: the sparse arm
+    /// allocates once at the exact final length (where `collect()` pays for
+    /// geometric regrowth, a filtered iterator being able to report only an
+    /// upper bound), and the dense arm allocates only the array it returns,
+    /// filling it by copying `src` through rather than by scattering pairs
+    /// into it.
+    ///
+    /// `nnz` is counted in a separate first pass because the
+    /// sparse-or-dense decision needs it *before* either arm can start;
+    /// that pass is a straight-line scan of a contiguous `f64` array with
+    /// `skip` corrected for afterwards instead of tested for inside the
+    /// loop, which is why reading `src` twice still costs less than the one
+    /// predicated `collect()` it replaces.
+    ///
+    /// Panics if `skip >= src.len()`, exactly as [`Self::pack`] does on an
+    /// out-of-range index.
+    pub fn pack_scaled_dense(src: &[f64], skip: usize, scale: f64, dense_fraction: f64) -> Self {
+        let len = src.len();
+        let mut nnz = 0usize;
+        for &x in src {
+            nnz += usize::from(scale * x != 0.0);
+        }
+        // `skip` is excluded from the vector, so undo its contribution
+        // rather than branching on it `len` times above. It was counted
+        // if and only if this same test holds, so this cannot underflow.
+        nnz -= usize::from(scale * src[skip] != 0.0);
+
+        if nnz as f64 > dense_fraction * len as f64 {
+            let mut data = src.to_vec();
+            if scale != 1.0 {
+                for d in data.iter_mut() {
+                    *d *= scale;
+                }
+            }
+            // Upholds "the skipped index" convention documented above:
+            // the dense form stores a literal `0.0` at its own pivot slot.
+            data[skip] = 0.0;
+            HybridVec::Dense { data: data.into_boxed_slice(), nnz }
+        } else {
+            let mut pairs = Vec::with_capacity(nnz);
+            for (i, &x) in src.iter().enumerate() {
+                let v = scale * x;
+                if i != skip && v != 0.0 {
+                    pairs.push((i, v));
+                }
+            }
+            HybridVec::Sparse(pairs)
+        }
+    }
+
     /// True stored-nonzero count, in either representation.
     #[inline]
     pub fn nnz(&self) -> usize {
@@ -449,14 +516,35 @@ impl HybridVec {
         }
     }
 
-    /// This vector's occupied indices, without materializing the values.
+    /// Calls `f` once with each of this vector's occupied indices, without
+    /// materializing the values.
+    ///
+    /// Takes a closure rather than returning an iterator because its one
+    /// caller — `simplex::lu`'s Forrest-Tomlin update, once per pivot
+    /// commit — has to walk both representations and there is no single
+    /// concrete iterator type spanning them. The `Box<dyn Iterator>` this
+    /// replaces bought that with a heap allocation per update plus a
+    /// virtual call per index, on a path that runs every simplex
+    /// iteration; a generic closure monomorphizes into each arm instead,
+    /// so both loops inline and nothing is allocated.
+    ///
     /// The dense arm still scans the whole array (it has no index list to
-    /// walk), but allocates nothing — which is the point at the one call
-    /// site that wants only the indices, once per Forrest-Tomlin update.
-    pub fn indices(&self) -> Box<dyn Iterator<Item = usize> + '_> {
+    /// walk), exactly as before.
+    #[inline]
+    pub fn for_each_index(&self, mut f: impl FnMut(usize)) {
         match self {
-            HybridVec::Sparse(v) => Box::new(v.iter().map(|&(i, _)| i)),
-            HybridVec::Dense { data, .. } => Box::new(data.iter().enumerate().filter(|&(_, &v)| v != 0.0).map(|(i, _)| i)),
+            HybridVec::Sparse(v) => {
+                for &(i, _) in v {
+                    f(i);
+                }
+            }
+            HybridVec::Dense { data, .. } => {
+                for (i, &x) in data.iter().enumerate() {
+                    if x != 0.0 {
+                        f(i);
+                    }
+                }
+            }
         }
     }
 
@@ -1833,6 +1921,46 @@ mod tests {
         assert_eq!(as_sparse.to_pairs(), as_dense.to_pairs());
     }
 
+    /// `pack_scaled_dense` exists only as an allocation-free shortcut for
+    /// what `simplex::lu`'s Forrest-Tomlin update used to spell out as a
+    /// filtered `collect()` handed to `pack` — so what it must guarantee is
+    /// not some property of its own but *equality with that original
+    /// spelling*, in both representations and including the two filters
+    /// (the skipped pivot slot, and products that come out exactly zero).
+    #[test]
+    fn pack_scaled_dense_matches_collect_then_pack() {
+        // `src[2]` is the skipped slot; `src[5]` is a value that is nonzero
+        // itself but whose scaled product underflows to zero, which the
+        // original's post-multiply `v != 0.0` filter dropped and this must
+        // drop too (otherwise `nnz`, and with it every refactorization
+        // trigger reading `fill_count`, silently drifts).
+        let src = [1.5, 0.0, 7.0, -2.0, 0.0, 1e-320, 4.0, 0.0];
+        for &scale in &[1.0f64, -3.0, 1e-8] {
+            for &frac in &[1.0f64, 0.0, 0.4] {
+                let pairs: Vec<(usize, f64)> = (0..src.len())
+                    .filter(|&i| i != 2)
+                    .map(|i| (i, scale * src[i]))
+                    .filter(|&(_, v)| v != 0.0)
+                    .collect();
+                let expected = HybridVec::pack(src.len(), pairs, frac);
+                let got = HybridVec::pack_scaled_dense(&src, 2, scale, frac);
+                assert_eq!(
+                    std::mem::discriminant(&expected),
+                    std::mem::discriminant(&got),
+                    "scale={scale} frac={frac}: same representation chosen"
+                );
+                assert_eq!(got.nnz(), expected.nnz(), "scale={scale} frac={frac}");
+                assert_eq!(got.to_pairs(), expected.to_pairs(), "scale={scale} frac={frac}");
+                // The dense arm must keep storing a literal zero at the
+                // skipped slot, which is what lets `dot_dense`/
+                // `axpy_into_dense` run over the whole array untested.
+                if let HybridVec::Dense { data, .. } = &got {
+                    assert_eq!(data[2], 0.0, "scale={scale} frac={frac}");
+                }
+            }
+        }
+    }
+
     #[test]
     fn hybrid_vec_remove_index_keeps_nnz_honest_in_both_arms() {
         for frac in [1.0f64, 0.0] {
@@ -1840,7 +1968,9 @@ mod tests {
             assert!(v.remove_index(1), "frac={frac}: removing a present index reports true");
             assert_eq!(v.nnz(), 2, "frac={frac}");
             assert_eq!(v.to_pairs(), vec![(0, 1.0), (3, 4.0)], "frac={frac}");
-            assert_eq!(v.indices().collect::<Vec<_>>(), vec![0, 3], "frac={frac}");
+            let mut seen = Vec::new();
+            v.for_each_index(|i| seen.push(i));
+            assert_eq!(seen, vec![0, 3], "frac={frac}");
             // Removing an index that holds nothing must not decrement nnz.
             assert!(!v.remove_index(2), "frac={frac}: removing an absent index reports false");
             assert_eq!(v.nnz(), 2, "frac={frac}");
