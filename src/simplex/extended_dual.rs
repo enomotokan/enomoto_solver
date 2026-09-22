@@ -1211,7 +1211,17 @@ fn refactorize(
     prev: Option<&sparse_lu::FtLu>,
 ) -> Option<sparse_lu::FtLu> {
     let m = std.n_rows;
-    let mut rows = vec![Vec::new(); m];
+    // Row lengths counted first so each row `Vec` is allocated once at its
+    // final size.
+    let mut row_len = vec![0usize; m];
+    for j in 0..std.n_total {
+        if basis_pos[j].is_some() {
+            for &(i, _) in std.cols.col(j) {
+                row_len[i] += 1;
+            }
+        }
+    }
+    let mut rows: Vec<Vec<(usize, f64)>> = row_len.iter().map(|&c| Vec::with_capacity(c)).collect();
     // Column-driven, via `std.cols` — `nnz(A_B)` work instead of the
     // `nnz(A)` scan this replaced, which read every nonbasic entry only to
     // drop it. Visiting `j` in ascending order reproduces each row's entry
@@ -1290,9 +1300,17 @@ fn residual_norm_affine(
     scratch_slope.iter_mut().for_each(|v| *v = 0.0);
     for (pos, &j) in basis.iter().enumerate() {
         let (b, s) = (x_b_base[pos], x_b_slope[pos]);
-        for &(i, v) in std.cols.col(j) {
-            scratch_base[i] += v * b;
-            scratch_slope[i] += v * s;
+        if s == 0.0 {
+            // Zero slope term: only the sign of a zero could differ, and
+            // the residual below squares it.
+            for &(i, v) in std.cols.col(j) {
+                scratch_base[i] += v * b;
+            }
+        } else {
+            for &(i, v) in std.cols.col(j) {
+                scratch_base[i] += v * b;
+                scratch_slope[i] += v * s;
+            }
         }
     }
     let mut resid_base_sq = 0.0f64;
@@ -1327,9 +1345,19 @@ fn compute_rhs_affine(std: &StdForm, cache: &ColCache, nb_status: &[Option<NbSta
         if val.base == 0.0 && val.slope == 0.0 {
             continue;
         }
-        for &(i, v) in std.cols.col(j) {
-            rhs_base[i] -= v * val.base;
-            rhs_slope[i] -= v * val.slope;
+        if val.slope == 0.0 {
+            // `rhs_slope[i] - v * 0.0` is `rhs_slope[i]` up to the sign of
+            // a zero, which no consumer can see: the drift check squares
+            // it, and a resync's `solve_into` skips zeros of either sign
+            // and `snap_slopes` its result to `+0.0`.
+            for &(i, v) in std.cols.col(j) {
+                rhs_base[i] -= v * val.base;
+            }
+        } else {
+            for &(i, v) in std.cols.col(j) {
+                rhs_base[i] -= v * val.base;
+                rhs_slope[i] -= v * val.slope;
+            }
         }
     }
     Some((rhs_base, rhs_slope))

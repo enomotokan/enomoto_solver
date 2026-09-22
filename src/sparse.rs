@@ -1473,6 +1473,40 @@ pub type Csr = faer::sparse::SparseRowMat<usize, f64>;
 /// value)` list), dropping exact-zero entries. `n_cols` is the matrix's
 /// column count; the row count is `rows.len()`.
 pub fn csr_from_rows(rows: &[Vec<(usize, f64)>], n_cols: usize) -> Csr {
+    // Fast path: every row already strictly ascending by column (after
+    // dropping zeros) — what every presolve pass hands back in practice —
+    // is already in the exact sorted, duplicate-free layout the triplet
+    // route below would produce, so its `O(nnz log nnz)` argsort (a
+    // measurable slice of each presolve round on e.g. `25fv47`) is
+    // skipped and the arrays are written directly. Anything else (an
+    // out-of-order or repeated column, whose duplicates the triplet route
+    // sums) falls through to that route unchanged.
+    let nnz_upper: usize = rows.iter().map(|r| r.len()).sum();
+    let mut row_ptr = Vec::with_capacity(rows.len() + 1);
+    let mut col_ind = Vec::with_capacity(nnz_upper);
+    let mut values = Vec::with_capacity(nnz_upper);
+    row_ptr.push(0usize);
+    let mut in_order = true;
+    'rows: for row in rows {
+        let mut last: Option<usize> = None;
+        for &(j, v) in row {
+            if v == 0.0 {
+                continue;
+            }
+            if j >= n_cols || last.is_some_and(|l| j <= l) {
+                in_order = false;
+                break 'rows;
+            }
+            last = Some(j);
+            col_ind.push(j);
+            values.push(v);
+        }
+        row_ptr.push(col_ind.len());
+    }
+    if in_order {
+        let symbolic = faer::sparse::SymbolicSparseRowMat::new_checked(rows.len(), n_cols, row_ptr, None, col_ind);
+        return Csr::new(symbolic, values);
+    }
     let mut triplets = Vec::new();
     for (i, row) in rows.iter().enumerate() {
         for &(j, v) in row {
@@ -1482,6 +1516,32 @@ pub fn csr_from_rows(rows: &[Vec<(usize, f64)>], n_cols: usize) -> Csr {
         }
     }
     Csr::try_new_from_triplets(rows.len(), n_cols, &triplets).expect("valid CSR triplets")
+}
+
+/// [`csr_from_rows`] over `rows` followed by one single-entry row per
+/// `singletons` element — the same matrix as pushing each singleton as its
+/// own `vec![(j, v)]` onto `rows` first, without allocating those `Vec`s.
+pub fn csr_from_rows_then_singletons(rows: &[Vec<(usize, f64)>], singletons: &[(usize, f64)], n_cols: usize) -> Csr {
+    let base = csr_from_rows(rows, n_cols);
+    if singletons.is_empty() {
+        return base;
+    }
+    let (symbolic, values) = base.into_parts();
+    let (nrows, ncols, mut row_ptr, row_nnz, mut col_ind) = symbolic.into_parts();
+    debug_assert!(row_nnz.is_none());
+    let mut values: Vec<f64> = values;
+    let mut end = *row_ptr.last().unwrap();
+    for &(j, v) in singletons {
+        if v != 0.0 {
+            assert!(j < ncols, "valid CSR triplets");
+            col_ind.push(j);
+            values.push(v);
+            end += 1;
+        }
+        row_ptr.push(end);
+    }
+    let symbolic = faer::sparse::SymbolicSparseRowMat::new_checked(nrows + singletons.len(), ncols, row_ptr, None, col_ind);
+    Csr::new(symbolic, values)
 }
 
 /// Row `i` of a faer [`Csr`] as an iterator of `(column, value)` pairs.
@@ -1579,6 +1639,54 @@ pub fn mat_t_vec(mat: &Csr, n_cols: usize, y: &[f64]) -> Vec<f64> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn csr_from_rows_then_singletons_matches_pushed_rows() {
+        let rows = vec![vec![(0, 1.0), (3, 2.0)], vec![(1, -1.0), (2, 0.5)]];
+        let singles = vec![(2, 1.0), (2, -1.0), (0, 1.0)];
+        let fast = csr_from_rows_then_singletons(&rows, &singles, 4);
+        let mut pushed = rows.clone();
+        for &(j, v) in &singles {
+            pushed.push(vec![(j, v)]);
+        }
+        let reference = csr_from_rows(&pushed, 4);
+        assert_eq!(fast.nrows(), reference.nrows());
+        for i in 0..pushed.len() {
+            let a: Vec<(usize, u64)> = csr_row_iter(&fast, i).map(|(j, v)| (j, v.to_bits())).collect();
+            let b: Vec<(usize, u64)> = csr_row_iter(&reference, i).map(|(j, v)| (j, v.to_bits())).collect();
+            assert_eq!(a, b, "row {i}");
+        }
+    }
+
+    #[test]
+    fn csr_from_rows_fast_path_matches_triplet_route() {
+        // In-order rows take the direct path; an out-of-order row and a
+        // duplicate column force the triplet route. Both must give the
+        // same matrix as building from triplets directly.
+        let cases: Vec<Vec<Vec<(usize, f64)>>> = vec![
+            vec![vec![(0, 1.0), (2, -3.0), (4, 0.0), (5, 2.5)], vec![], vec![(1, 7.0)], vec![(0, -0.0), (3, 1e-300)]],
+            vec![vec![(2, 1.0), (0, 2.0)], vec![(1, 1.0)]],
+            vec![vec![(1, 1.0), (1, 2.0), (3, 4.0)]],
+        ];
+        for rows in cases {
+            let fast = csr_from_rows(&rows, 6);
+            let mut triplets = Vec::new();
+            for (i, row) in rows.iter().enumerate() {
+                for &(j, v) in row {
+                    if v != 0.0 {
+                        triplets.push((i, j, v));
+                    }
+                }
+            }
+            let reference = Csr::try_new_from_triplets(rows.len(), 6, &triplets).unwrap();
+            assert_eq!(fast.nrows(), reference.nrows());
+            for i in 0..rows.len() {
+                let a: Vec<(usize, u64)> = csr_row_iter(&fast, i).map(|(j, v)| (j, v.to_bits())).collect();
+                let b: Vec<(usize, u64)> = csr_row_iter(&reference, i).map(|(j, v)| (j, v.to_bits())).collect();
+                assert_eq!(a, b, "row {i}");
+            }
+        }
+    }
+
     use super::*;
 
     fn approx(a: f64, b: f64) -> bool {

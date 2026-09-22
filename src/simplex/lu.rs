@@ -3342,7 +3342,21 @@ const TICK_SOLVE_NNZ_COEF: u64 = 1;
 impl FtLu {
     pub fn new(base: LuFactors) -> Self {
         let m = base.m;
-        let mut off_diags: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
+        // Exact per-slot/per-row counts first so every inner `Vec` below is
+        // allocated once at its final size (this runs on every
+        // refactorization; growing ~2m small `Vec`s push by push was a
+        // visible share of the allocator's time).
+        let mut off_count = vec![0usize; m];
+        let mut owner_count = vec![0usize; m];
+        for row_step in 0..m {
+            for &(col_step, _) in &base.u_row[row_step] {
+                if col_step != row_step {
+                    off_count[col_step] += 1;
+                    owner_count[row_step] += 1;
+                }
+            }
+        }
+        let mut off_diags: Vec<Vec<(usize, f64)>> = off_count.iter().map(|&c| Vec::with_capacity(c)).collect();
         let mut pivots = vec![0.0; m];
         for row_step in 0..m {
             for &(col_step, v) in &base.u_row[row_step] {
@@ -3353,7 +3367,7 @@ impl FtLu {
                 }
             }
         }
-        let mut row_owners: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
+        let mut row_owners: Vec<Vec<(usize, f64)>> = owner_count.iter().map(|&c| Vec::with_capacity(c)).collect();
         for (slot, pairs) in off_diags.iter().enumerate() {
             for &(row_step, v) in pairs {
                 row_owners[row_step].push((slot, v));

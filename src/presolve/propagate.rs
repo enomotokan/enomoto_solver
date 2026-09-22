@@ -82,9 +82,10 @@ pub fn extract_bounds(n: usize, g: &Csr, h: &[f64]) -> (Vec<f64>, Vec<f64>, Vec<
 
     let gr = g.as_ref();
     for i in 0..gr.nrows() {
-        let row: Vec<(usize, f64)> = csr_row_vec(g, i);
-        if row.len() == 1 {
-            let (j, v) = row[0];
+        // Singleton rows are read in place — only the rows actually kept
+        // get an owned `Vec`.
+        if gr.col_indices_of_row(i).len() == 1 {
+            let (j, v) = (gr.col_indices_of_row(i).next().unwrap(), gr.values_of_row(i)[0]);
             let bound = h[i] / v;
             if v > 0.0 {
                 if bound < ub[j] {
@@ -94,7 +95,7 @@ pub fn extract_bounds(n: usize, g: &Csr, h: &[f64]) -> (Vec<f64>, Vec<f64>, Vec<
                 lb[j] = bound;
             }
         } else {
-            rows.push(row);
+            rows.push(csr_row_vec(g, i));
             rhs.push(h[i]);
         }
     }
@@ -277,18 +278,23 @@ pub fn propagate(n: usize, g: &Csr, h: &[f64], passes: usize) -> PropagateResult
 /// bound — the inverse of [`extract_bounds`]. Shared by [`propagate`]'s
 /// own ending and by `dualfix`, which also needs to fold freshly-fixed
 /// bounds back into `G` the same way.
-pub fn rebuild_g(n: usize, mut rows: Vec<Vec<(usize, f64)>>, mut rhs: Vec<f64>, lb: &[f64], ub: &[f64]) -> (Csr, Vec<f64>) {
+pub fn rebuild_g(n: usize, rows: Vec<Vec<(usize, f64)>>, mut rhs: Vec<f64>, lb: &[f64], ub: &[f64]) -> (Csr, Vec<f64>) {
+    // The bound rows are appended straight into the CSR arrays (after
+    // `rows`, in the same `ub`-then-`lb` order per column) instead of as one
+    // single-entry `Vec` each; `csr_from_rows_then_bounds` is exactly
+    // `csr_from_rows` over `rows` followed by those rows.
+    let mut bound_rows: Vec<(usize, f64)> = Vec::new();
     for j in 0..n {
         if ub[j].is_finite() {
-            rows.push(vec![(j, 1.0)]);
+            bound_rows.push((j, 1.0));
             rhs.push(ub[j]);
         }
         if lb[j].is_finite() {
-            rows.push(vec![(j, -1.0)]);
+            bound_rows.push((j, -1.0));
             rhs.push(-lb[j]);
         }
     }
-    (csr_from_rows(&rows, n), rhs)
+    (crate::sparse::csr_from_rows_then_singletons(&rows, &bound_rows, n), rhs)
 }
 
 #[cfg(test)]
