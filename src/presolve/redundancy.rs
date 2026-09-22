@@ -1252,32 +1252,46 @@ pub fn reduce_inequalities(g: &Csr, h: &[f64], n: usize) -> (Csr, Vec<f64>) {
         return (csr_from_rows(&[], n), Vec::new());
     }
 
-    let rows: Vec<(Vec<(usize, f64)>, f64)> = (0..m)
-        .map(|i| {
-            let row: Vec<(usize, f64)> = csr_row_vec(g, i);
-            (row, h[i])
-        })
-        .collect();
-
-    // (normalized sig) -> (index into `rows` currently kept, its normalized h)
-    let mut best: HashMap<Vec<(usize, u64)>, (usize, f64)> = HashMap::new();
-    let mut keep = vec![true; m];
-    for (idx, (row, hv)) in rows.iter().enumerate() {
-        if row.is_empty() {
-            // `0 <= h`: either always true (drop) or a certificate of
-            // infeasibility (`propagate`'s activity check catches that) —
-            // neither is a "duplicate" in the sense this pass looks for.
-            continue;
+    // Grouping key: each row's `(column, (v / |first coefficient|).to_bits())`
+    // sequence, as before — but hashed in place off the CSR (a cheap
+    // multiplicative mix instead of SipHash over a freshly allocated
+    // `Vec<(usize, u64)>` per row, which was about half of `pilot`'s whole
+    // presolve), with an exact entry-by-entry comparison against the
+    // group's first row on every hash hit. Same groups, same scan order,
+    // same keep decisions as the owned-key `HashMap` it replaces.
+    let gr = g.as_ref();
+    let inv_scale = |i: usize| -> Option<f64> { gr.values_of_row(i).first().map(|v| 1.0 / v.abs()) };
+    let row_hash = |i: usize, inv: f64| -> u64 {
+        let mut hsh: u64 = gr.col_indices_of_row(i).len() as u64;
+        for (j, &v) in gr.col_indices_of_row(i).zip(gr.values_of_row(i)) {
+            hsh = (hsh.rotate_left(5) ^ j as u64).wrapping_mul(0x517c_c1b7_2722_0a95);
+            hsh = (hsh.rotate_left(5) ^ (v * inv).to_bits()).wrapping_mul(0x517c_c1b7_2722_0a95);
         }
-        let scale = row[0].1.abs();
-        let inv = 1.0 / scale;
-        let sig: Vec<(usize, u64)> = row.iter().map(|&(j, v)| (j, (v * inv).to_bits())).collect();
-        let normalized_h = hv * inv;
-        match best.get_mut(&sig) {
+        hsh
+    };
+    let same_sig = |a: usize, inv_a: f64, b: usize, inv_b: f64| -> bool {
+        let (ca, cb) = (gr.col_indices_of_row(a), gr.col_indices_of_row(b));
+        ca.len() == cb.len()
+            && ca.zip(cb).all(|(x, y)| x == y)
+            && gr.values_of_row(a).iter().zip(gr.values_of_row(b)).all(|(&va, &vb)| (va * inv_a).to_bits() == (vb * inv_b).to_bits())
+    };
+
+    // hash -> indices into `groups`; each group is `(representative row,
+    // its inv scale, currently kept row, kept row's normalized h)`.
+    let mut by_hash: HashMap<u64, Vec<usize>> = HashMap::with_capacity(m);
+    let mut groups: Vec<(usize, f64, usize, f64)> = Vec::with_capacity(m);
+    let mut keep = vec![true; m];
+    for idx in 0..m {
+        let Some(inv) = inv_scale(idx) else { continue };
+        let normalized_h = h[idx] * inv;
+        let slot = by_hash.entry(row_hash(idx, inv)).or_default();
+        match slot.iter().copied().find(|&gi| same_sig(groups[gi].0, groups[gi].1, idx, inv)) {
             None => {
-                best.insert(sig, (idx, normalized_h));
+                slot.push(groups.len());
+                groups.push((idx, inv, idx, normalized_h));
             }
-            Some((kept_idx, kept_h)) => {
+            Some(gi) => {
+                let (_, _, kept_idx, kept_h) = &mut groups[gi];
                 if normalized_h < *kept_h {
                     keep[*kept_idx] = false;
                     *kept_idx = idx;
@@ -1291,10 +1305,10 @@ pub fn reduce_inequalities(g: &Csr, h: &[f64], n: usize) -> (Csr, Vec<f64>) {
 
     let mut new_rows = Vec::new();
     let mut new_h = Vec::new();
-    for (idx, (row, hv)) in rows.into_iter().enumerate() {
+    for idx in 0..m {
         if keep[idx] {
-            new_rows.push(row);
-            new_h.push(hv);
+            new_rows.push(csr_row_vec(g, idx));
+            new_h.push(h[idx]);
         }
     }
     (csr_from_rows(&new_rows, n), new_h)
