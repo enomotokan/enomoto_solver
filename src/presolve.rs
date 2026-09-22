@@ -521,6 +521,37 @@ pub fn run_extended(
         let mut cur_real_rows = prop.real_rows;
         let mut cur_real_rhs = prop.real_rhs;
 
+        // Equality-row counterpart of the `propagate` call above (see
+        // `propagate::propagate_equalities`'s own docs). Run for the first
+        // two outer rounds — the round count that already captured every
+        // forcing row and bound tightening in the 93-problem measurement
+        // (analysis/greenbea_20260921_230908.md §7.1); later rounds found
+        // nothing further but still paid for the full-matrix scan.
+        //
+        // Tried running this pass *after* `dualpropagate`/`aggregator`/
+        // `parallelcols` instead, so it would only bound whatever column
+        // none of those three could already eliminate outright (they each
+        // need a column still unbounded on their own side — see every
+        // module's own docs). That ordering did preserve more of
+        // `aggregator`'s reach on `stocfor2` (its own motivating instance),
+        // but cost most of `greenbea`'s win (M-tracked columns 3,569 -> ~2k
+        // instead of ~300, since several outer rounds' worth of `aggregator`
+        // substitutions consume equality rows this pass would otherwise
+        // have used) and, measured on the full 93-problem set, a *worse*
+        // aggregate `ours` time than running here (52.1s vs 50.9s) despite
+        // "fixing" `stocfor2` partway — `pilot87`/`d2q06c` regressed instead
+        // under that ordering. Running here, before `dualfix`, remains the
+        // best aggregate result found; `stocfor2`'s own regression (~+90%,
+        // absolute ~0.13s) is this trade-off's known remaining cost — see
+        // this function's own module docs and the loop's analysis file for
+        // the full comparison table.
+        if _round_idx < 2 {
+            let eq = timed_step!("eqprop", propagate::propagate_equalities(&a, &b, &mut lb, &mut ub, prop_passes));
+            if eq.infeasible {
+                return extended_infeasible(sc, a, b, c, n);
+            }
+        }
+
         let fixes = timed_step!("dualfix", dualfix::fix_dominated_variables(n, &a, &cur_real_rows, &c, &lb, &ub));
         for &(j, value) in &fixes {
             lb[j] = value;

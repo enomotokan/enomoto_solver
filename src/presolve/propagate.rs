@@ -357,3 +357,252 @@ mod tests {
         assert!(result.real_rows.is_empty(), "real_rows={:?}", result.real_rows);
     }
 }
+
+/// Activity-based propagation over the *equality* system `A x = b`, which
+/// [`propagate`] above never sees (it is handed only the inequality system
+/// `G x <= h`). Mirrors this module's own §3.1/§3.2 reductions, applied to
+/// an equality row's two implied inequalities `A_i x <= b_i` and
+/// `A_i x >= b_i` instead of one: forcing-row detection on *both* sides
+/// (activity can only reach `b_i` with every term pinned at one bound) and
+/// bound strengthening from whichever side is finite. Only `lb`/`ub` are
+/// mutated; the rows themselves are left for `foldfixed` (fixed terms) and
+/// the round loop's own rowsingleton/doubleton/colsingleton passes to
+/// shrink.
+///
+/// Without this, a column that appears only in equality rows and has no
+/// finite bound anywhere else reaches `extended_dual`'s dual simplex
+/// unbounded on that side, which forces its far more expensive "M-side"
+/// bookkeeping for every such column. On `greenbea` (92% equality rows)
+/// that was 3,569 columns and an 11x blow-up in iteration count; running
+/// this pass drops it to a few hundred columns and brings the iteration
+/// count within 2-3x of HiGHS's own presolved problem. See
+/// `analysis/greenbea_20260921_230908.md` for the full measurement.
+pub struct EqPropagateResult {
+    pub infeasible: bool,
+    pub forcing_rows: usize,
+    pub fixed_cols: usize,
+    pub tightened: usize,
+}
+
+pub fn propagate_equalities(a: &Csr, b: &[f64], lb: &mut [f64], ub: &mut [f64], passes: usize) -> EqPropagateResult {
+    let ar = a.as_ref();
+    // A finite bound is only replaced when the change exceeds `EPS`; an
+    // infinite bound is always replaced by a finite one.
+    let improves = |old: f64, new: f64| -> bool {
+        if !old.is_finite() {
+            return true;
+        }
+        (old - new).abs() > EPS
+    };
+    let mut res = EqPropagateResult { infeasible: false, forcing_rows: 0, fixed_cols: 0, tightened: 0 };
+    let mut forcing_seen = vec![false; ar.nrows()];
+    for _pass in 0..passes {
+        let mut changed = 0usize;
+        for i in 0..ar.nrows() {
+            let bi = b[i];
+            let mut finite_sum_inf = 0.0f64;
+            let mut finite_sum_sup = 0.0f64;
+            let mut inf_unbounded: Vec<usize> = Vec::new();
+            let mut sup_unbounded: Vec<usize> = Vec::new();
+            let mut live = 0usize;
+            for (j, &v) in ar.col_indices_of_row(i).zip(ar.values_of_row(i)) {
+                if v == 0.0 {
+                    continue;
+                }
+                if lb[j] < ub[j] {
+                    live += 1;
+                }
+                if v > 0.0 {
+                    if lb[j].is_finite() {
+                        finite_sum_inf += v * lb[j];
+                    } else {
+                        inf_unbounded.push(j);
+                    }
+                    if ub[j].is_finite() {
+                        finite_sum_sup += v * ub[j];
+                    } else {
+                        sup_unbounded.push(j);
+                    }
+                } else {
+                    if ub[j].is_finite() {
+                        finite_sum_inf += v * ub[j];
+                    } else {
+                        inf_unbounded.push(j);
+                    }
+                    if lb[j].is_finite() {
+                        finite_sum_sup += v * lb[j];
+                    } else {
+                        sup_unbounded.push(j);
+                    }
+                }
+            }
+            if live == 0 {
+                continue;
+            }
+            let true_inf = if inf_unbounded.is_empty() { finite_sum_inf } else { f64::NEG_INFINITY };
+            let true_sup = if sup_unbounded.is_empty() { finite_sum_sup } else { f64::INFINITY };
+            if true_inf > bi + EPS || true_sup < bi - EPS {
+                res.infeasible = true;
+                return res;
+            }
+            // Forcing on the lower side: activity can only reach `b` with
+            // every term at its inf-bound.
+            if inf_unbounded.is_empty() && (finite_sum_inf - bi).abs() <= EPS {
+                if !forcing_seen[i] {
+                    forcing_seen[i] = true;
+                    res.forcing_rows += 1;
+                }
+                for (j, &v) in ar.col_indices_of_row(i).zip(ar.values_of_row(i)) {
+                    if v == 0.0 {
+                        continue;
+                    }
+                    if lb[j] < ub[j] {
+                        res.fixed_cols += 1;
+                        changed += 1;
+                    }
+                    if v > 0.0 {
+                        ub[j] = lb[j];
+                    } else {
+                        lb[j] = ub[j];
+                    }
+                }
+                continue;
+            }
+            // Forcing on the upper side: symmetric, at every term's sup-bound.
+            if sup_unbounded.is_empty() && (finite_sum_sup - bi).abs() <= EPS {
+                if !forcing_seen[i] {
+                    forcing_seen[i] = true;
+                    res.forcing_rows += 1;
+                }
+                for (j, &v) in ar.col_indices_of_row(i).zip(ar.values_of_row(i)) {
+                    if v == 0.0 {
+                        continue;
+                    }
+                    if lb[j] < ub[j] {
+                        res.fixed_cols += 1;
+                        changed += 1;
+                    }
+                    if v > 0.0 {
+                        lb[j] = ub[j];
+                    } else {
+                        ub[j] = lb[j];
+                    }
+                }
+                continue;
+            }
+            for (k, &aik) in ar.col_indices_of_row(i).zip(ar.values_of_row(i)) {
+                if aik == 0.0 || lb[k] == ub[k] {
+                    continue;
+                }
+                // `A_i x <= b`: bound from the row's min activity excluding k.
+                let l_s = if inf_unbounded.is_empty() {
+                    let contrib = if aik > 0.0 { aik * lb[k] } else { aik * ub[k] };
+                    Some(finite_sum_inf - contrib)
+                } else if inf_unbounded.len() == 1 && inf_unbounded[0] == k {
+                    Some(finite_sum_inf)
+                } else {
+                    None
+                };
+                if let Some(l_s) = l_s {
+                    let candidate = (bi - l_s) / aik;
+                    if aik > 0.0 {
+                        if candidate < ub[k] - EPS && improves(ub[k], candidate) {
+                            ub[k] = candidate;
+                            changed += 1;
+                            res.tightened += 1;
+                        }
+                    } else if candidate > lb[k] + EPS && improves(lb[k], candidate) {
+                        lb[k] = candidate;
+                        changed += 1;
+                        res.tightened += 1;
+                    }
+                }
+                // `A_i x >= b`: bound from the row's max activity excluding k.
+                let u_s = if sup_unbounded.is_empty() {
+                    let contrib = if aik > 0.0 { aik * ub[k] } else { aik * lb[k] };
+                    Some(finite_sum_sup - contrib)
+                } else if sup_unbounded.len() == 1 && sup_unbounded[0] == k {
+                    Some(finite_sum_sup)
+                } else {
+                    None
+                };
+                if let Some(u_s) = u_s {
+                    let candidate = (bi - u_s) / aik;
+                    if aik > 0.0 {
+                        if candidate > lb[k] + EPS && improves(lb[k], candidate) {
+                            lb[k] = candidate;
+                            changed += 1;
+                            res.tightened += 1;
+                        }
+                    } else if candidate < ub[k] - EPS && improves(ub[k], candidate) {
+                        ub[k] = candidate;
+                        changed += 1;
+                        res.tightened += 1;
+                    }
+                }
+                if lb[k] > ub[k] + EPS {
+                    res.infeasible = true;
+                    return res;
+                }
+                if lb[k] > ub[k] {
+                    // Within EPS: snap to a single point.
+                    lb[k] = ub[k];
+                }
+            }
+        }
+        if changed == 0 {
+            break;
+        }
+    }
+    res
+}
+
+#[cfg(test)]
+mod eqprop_tests {
+    use super::*;
+
+    #[test]
+    fn forcing_row_fixes_every_term_at_its_matching_bound() {
+        // x0 in [0,10], x1 in [0,10], row x0 - x1 = -4. Minimum activity
+        // with x0 at lb=0, x1 at ub=10 is -10 (not -4, not forcing on the
+        // lower side); maximum activity with x0 at ub=10, x1 at lb=0 is 10
+        // (not -4 either). Pick bounds so the minimum lands exactly on the
+        // RHS instead: x0 in [2,10], x1 in [0,6], inf = 1*2 + (-1)*6 = -4 = b.
+        let a = csr_from_rows(&[vec![(0, 1.0), (1, -1.0)]], 2);
+        let b = vec![-4.0];
+        let mut lb = vec![2.0, 0.0];
+        let mut ub = vec![10.0, 6.0];
+        let res = propagate_equalities(&a, &b, &mut lb, &mut ub, 1);
+        assert!(!res.infeasible);
+        assert_eq!(res.forcing_rows, 1);
+        assert_eq!(res.fixed_cols, 2);
+        assert!((lb[0] - 2.0).abs() < 1e-9 && (ub[0] - 2.0).abs() < 1e-9, "x0={:?}/{:?}", lb[0], ub[0]);
+        assert!((lb[1] - 6.0).abs() < 1e-9 && (ub[1] - 6.0).abs() < 1e-9, "x1={:?}/{:?}", lb[1], ub[1]);
+    }
+
+    #[test]
+    fn free_column_gets_a_finite_bound_from_an_equality_row() {
+        // x0 free, x1 in [0,5], row x0 + x1 = 3. x0's only bound comes from
+        // this equality: x0 = 3 - x1 in [3-5, 3-0] = [-2, 3].
+        let a = csr_from_rows(&[vec![(0, 1.0), (1, 1.0)]], 2);
+        let b = vec![3.0];
+        let mut lb = vec![f64::NEG_INFINITY, 0.0];
+        let mut ub = vec![f64::INFINITY, 5.0];
+        let res = propagate_equalities(&a, &b, &mut lb, &mut ub, 2);
+        assert!(!res.infeasible);
+        assert!(res.tightened >= 2, "tightened={}", res.tightened);
+        assert!((lb[0] - (-2.0)).abs() < 1e-9, "lb[0]={}", lb[0]);
+        assert!((ub[0] - 3.0).abs() < 1e-9, "ub[0]={}", ub[0]);
+    }
+
+    #[test]
+    fn contradictory_equality_row_is_infeasible() {
+        // x0 in [0,1], x1 in [0,1], row x0 + x1 = 5: max activity is 2 < 5.
+        let a = csr_from_rows(&[vec![(0, 1.0), (1, 1.0)]], 2);
+        let b = vec![5.0];
+        let mut lb = vec![0.0, 0.0];
+        let mut ub = vec![1.0, 1.0];
+        let res = propagate_equalities(&a, &b, &mut lb, &mut ub, 1);
+        assert!(res.infeasible);
+    }
+}
