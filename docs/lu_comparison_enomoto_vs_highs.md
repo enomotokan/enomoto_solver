@@ -23,7 +23,7 @@ ENOMOTO 側で高速化に参考になりそうな点をまとめる。
 | 前処理 | なし (バケットの早期終了のみ) | **`buildSimple()` で単位列・行列シングルトン・列シングルトンを O(nnz) で剥離** |
 | 密行列dispatch | `is_dense_input()` → `faer::PartialPivLu` | なし (常にMarkowitzカーネル) |
 | 更新 | Forrest-Tomlin (U-eta列 + R-eta行) | Forrest-Tomlin (`updateFT`) — **構造が違う** |
-| 求解 (FTRAN/BTRAN) | L のみ GP疎求解、U は密スキャン | **L/U 両方向で hyper-sparse + sparse の切替** |
+| 求解 (FTRAN/BTRAN) | FTRAN-L は GP疎求解、**BTRAN-L は転置行major + 密度ゲート付き scatter (§2.6 で実装)**、U は密スキャン | **L/U 両方向で hyper-sparse + sparse の切替** |
 | 再分解 | 毎回ゼロから Markowitz | **`refactor_info_` に前回ピボット列を記憶し `rebuild()` で再利用** |
 
 ---
@@ -163,6 +163,37 @@ ENOMOTO のコメントは「BTRANの L^-T は列major構造がないので試�
 
 **参考度: 中〜高** (BTRAN側の `lr_*` 相当)。
 
+**実装済み (2026-09-22、`analysis/btran_l_transpose_20260922_113000.md`)**:
+`LuFactors::l_row` が `L` の行major ミラー (HiGHS の `lr_start/lr_index/lr_value`
+相当) を持ち、`l_transpose_solve_scatter_into` が BTRAN の `L^-T` を
+gather から scatter に変える。`w[s]` が内側ループ唯一の乗数になるので
+`w[s] == 0.0` で段まるごとスキップでき、FTRAN 側が既に持っていた零スキップが
+BTRAN 側にも入る。格納はフラット (`FixedRows::from_transpose` の計数ソートで
+直接構築するので、`l_col` のフラット化が回帰した「小さい `Vec` を作ってから
+余計にコピーする」要因を踏まない)。
+
+**密度ゲート `BTRAN_L_SCATTER_FRACTION = 0.10` が本体**。両形式は同じ `L` の
+要素に触れ、違うのはアクセスの形だけ (gather = ランダムロード + レジスタ集約、
+scatter = ランダムリードモディファイライト)。`w` が密だと 1 段も飛ばせず
+scatter は純損になる。ゲート無しの全93問題 A/B が合計 **+3.0%**、10% 超の
+退行 2 問題、一方で 25fv47 -17.7% / stocfor2 -17.6% という**同じ変更が
+±17% の両方を出す**結果を示した。閾値 0.50 は 0.10 より明確に劣る
+(+2.0%、10% 超の退行 9 問題) ので、密度 0.1〜0.5 の帯域はすでに scatter が
+負ける領域。HiGHS の定数をそのまま採らず測って決めた。
+
+結果: 正しい基準 (`l_row` の構築コストを base 側に入れない) での93問題合計は
+独立2回で **-0.05%** と **-1.70%**。2回とも10%を超える問題は無し
+(10% 超の顔ぶれが実行ごとに完全に入れ替わる)。一貫して動く問題は
+25fv47 +9% / pilot +5〜7% / pilot87 -7% で、いずれも**反復数の変化**で説明がつく
+(scatter の加算順序が最終桁を変え、双対比率テストのタイブレークがずれる)。
+
+**U の GP疎求解は2度目の不採用**: HiGHS と同じ `kHyperFtranU = 0.10` 相当の
+ゲートを付けた版を実装・計測したが、ゲート付き BTRAN 比 **+3.6%**、10% 超の
+退行 7 問題。`u_seq` の走査量は実測で 78〜96% 削れていた (`avg_reach_frac`
+0.043〜0.217) にもかかわらず遅い。**削っていたのは元々安い部分**で、DFS の
+スタック操作・ソート・epoch 判定の合計が素直な逐次走査に勝てない。
+ゲート無しの過去の試行 (+10.4%) と同じ結論にゲート付きでも到達した。
+
 ### 2.7 FTRAN結果の `expected_density` 移動平均による事前切替
 
 HiGHS は `buildKernel` 内で FTRAN 結果の密度を移動平均
@@ -280,9 +311,10 @@ ENOMOTO の高速化に効きそうな順:
    - 既に degree基準早期終了はあるが、最悪ケース対策として上限を追加。
    - 実装が軽くリスクが小さい。
 
-4. **BTRAN の `L^-T` を転置列major + hyper-sparse 化** — §2.6, §2.7
-   - ENOMOTO が「試みなかった」唯一の方向。HiGHS は `lr_*` を持つ。
-   - `expected_density` の移動平均による事前切替も同時に追加候補。
+4. ~~**BTRAN の `L^-T` を転置列major + hyper-sparse 化** — §2.6, §2.7~~
+   **実装済み (2026-09-22)**。`l_row` + 密度ゲート付き scatter。
+   NETLIB93 合計 -0.05% / -1.70% (独立2回)、10% 超の退行なし。
+   同時に試した U 側の到達集合限定 FTRAN は +3.6% で不採用 (§2.6)。
 
 5. **カーネル部分行列のフラット配列化** — §3.1
    - 理論的にはキャッシュ効率最大。ただし ENOMOTO 自身
