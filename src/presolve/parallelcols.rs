@@ -110,7 +110,7 @@
 //! group has members to fully collapse it — far more than `run_extended`'s
 //! own round cap ever runs.
 
-use crate::sparse::{Csr, csr_rows};
+use crate::sparse::{Csr, CscMat, csr_rows};
 const TOL: f64 = 1e-9;
 
 /// Recovers both `x[var]` and `x[kept]`'s own true values from `x[kept]`'s
@@ -175,25 +175,35 @@ pub fn merge_parallel_columns(n: usize, a: &Csr, real_rows: &[Vec<(usize, f64)>]
     // `real_rows`'s multi-variable ones after — meaningless outside this
     // function, but stable within it, which is all the signature grouping
     // below needs.
-    let mut columns: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
-    for (i, row) in a_rows.iter().enumerate() {
-        for &(j, v) in row {
-            if v != 0.0 {
-                columns[j].push((i, v));
+    //
+    // Streamed straight into the compressed column form rather than `n`
+    // growable per-column `Vec`s — see `CscMat::from_entry_stream`'s own
+    // docs; the two row blocks never have to be concatenated first. Both
+    // blocks are emitted in row order and `a`'s ids all precede
+    // `real_rows`'s, so each column comes out already ascending by row id
+    // — which is what the signature scan below needs, and what the
+    // per-column `sort_unstable_by_key` it used to run was (redundantly)
+    // producing.
+    let columns = CscMat::from_entry_stream(n_a_rows + real_rows.len(), n, |emit| {
+        for (i, row) in a_rows.iter().enumerate() {
+            for &(j, v) in row {
+                if v != 0.0 {
+                    emit(i, j, v);
+                }
             }
         }
-    }
-    for (gi, row) in real_rows.iter().enumerate() {
-        let row_id = n_a_rows + gi;
-        for &(j, v) in row {
-            if v != 0.0 {
-                columns[j].push((row_id, v));
+        for (gi, row) in real_rows.iter().enumerate() {
+            for &(j, v) in row {
+                if v != 0.0 {
+                    emit(n_a_rows + gi, j, v);
+                }
             }
         }
-    }
+    });
 
     let mut groups: std::collections::HashMap<Vec<(usize, u64)>, Vec<usize>> = std::collections::HashMap::new();
-    for (j, col) in columns.iter_mut().enumerate() {
+    for j in 0..n {
+        let col = columns.col(j);
         // `lb[j]` must be finite (the fixed anchor `Substitution::apply`
         // clamps around — see the module docs' "Scope" section); `ub[j]`
         // may be finite or `+inf` (a one-sided-unbounded column, e.g. the
@@ -202,7 +212,6 @@ pub fn merge_parallel_columns(n: usize, a: &Csr, real_rows: &[Vec<(usize, f64)>]
         if col.is_empty() || !lb[j].is_finite() || (ub[j] - lb[j]).abs() < TOL {
             continue;
         }
-        col.sort_unstable_by_key(|&(row_id, _)| row_id);
         let inv = 1.0 / col[0].1;
         let sig: Vec<(usize, u64)> = col.iter().map(|&(row_id, v)| (row_id, (v * inv).to_bits())).collect();
         groups.entry(sig).or_default().push(j);
@@ -228,7 +237,7 @@ pub fn merge_parallel_columns(n: usize, a: &Csr, real_rows: &[Vec<(usize, f64)>]
         if used[kept] {
             continue;
         }
-        let kept_lead = columns[kept][0].1;
+        let kept_lead = columns.col(kept)[0].1;
         let mut cur_lb = new_lb[kept];
         let mut cur_ub = new_ub[kept];
         let mut any_merged = false;
@@ -236,7 +245,7 @@ pub fn merge_parallel_columns(n: usize, a: &Csr, real_rows: &[Vec<(usize, f64)>]
             if used[var] {
                 continue;
             }
-            let var_lead = columns[var][0].1;
+            let var_lead = columns.col(var)[0].1;
             let s = var_lead / kept_lead;
             let predicted_c_var = s * new_c[kept];
             let tol = TOL * (1.0 + new_c[var].abs().max(predicted_c_var.abs()));

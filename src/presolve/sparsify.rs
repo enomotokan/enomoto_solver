@@ -93,8 +93,7 @@
 //! commit for the full numbers if revisiting.
 
 use crate::presolve::propagate;
-use crate::sparse::{Csr, csr_from_rows, csr_rows_pruned};
-use std::collections::BTreeMap;
+use crate::sparse::{Csr, SparseAccum, csr_from_rows, csr_rows_pruned};
 
 const TOL: f64 = 1e-9;
 
@@ -139,6 +138,10 @@ pub fn sparsify(n: usize, a: &Csr, b: &[f64], g: &Csr, h: &[f64]) -> SparsifyRes
 
     let mut changed_a = vec![false; a_rows.len()];
     let mut changed_g = vec![false; real_g_rows.len()];
+    // One sparse accumulator for every target-row rewrite below — see
+    // `crate::sparse::SparseAccum`'s own docs for why the merge is not a
+    // per-target `BTreeMap`.
+    let mut accum = SparseAccum::new(n);
     let mut n_rows_changed = 0usize;
 
     for eq_idx in 0..a_rows.len() {
@@ -162,7 +165,6 @@ pub fn sparsify(n: usize, a: &Csr, b: &[f64], g: &Csr, h: &[f64]) -> SparsifyRes
         if elim_coeff.abs() < TOL {
             continue;
         }
-        let eq_map: BTreeMap<usize, f64> = eq_row.iter().copied().collect();
         let eq_rhs = b[eq_idx];
 
         for &(src, idx) in &col_to_rows[anchor] {
@@ -185,18 +187,21 @@ pub fn sparsify(n: usize, a: &Csr, b: &[f64], g: &Csr, h: &[f64]) -> SparsifyRes
                 // ahead of the O(|eq_row|) subset scan below.
                 continue;
             }
-            let mut new_row: BTreeMap<usize, f64> = target_row.iter().copied().collect();
-            if !eq_map.keys().all(|k| new_row.contains_key(k)) {
+            // Load the target into the shared accumulator, then test the
+            // subset condition against *it* (`contains` is an O(1) epoch
+            // check) rather than against a freshly built per-target map —
+            // see `crate::sparse::SparseAccum`'s own docs.
+            accum.load(target_row);
+            if !eq_row.iter().all(|&(k, _)| accum.contains(k)) {
                 continue;
             }
-            let target_elim_coeff = *new_row.get(&elim_var).expect("elim_var already verified to be in target's support");
+            debug_assert!(accum.contains(elim_var), "elim_var is in eq_row's support, which the subset check just verified the target covers");
+            let target_elim_coeff = accum.get(elim_var);
             let scale = target_elim_coeff / elim_coeff;
             if scale == 0.0 {
                 continue;
             }
-            for (&j, &v) in &eq_map {
-                *new_row.entry(j).or_insert(0.0) -= scale * v;
-            }
+            accum.axpy(-scale, &eq_row);
             // Only `elim_var` is *proven* to cancel exactly (`scale` was
             // chosen specifically to zero it) — any other entry's
             // subtraction result, however small, is the mathematically
@@ -206,13 +211,12 @@ pub fn sparsify(n: usize, a: &Csr, b: &[f64], g: &Csr, h: &[f64]) -> SparsifyRes
             // at) zero by sheer coincidence without being a true
             // cancellation, and silently discarding it would corrupt the
             // row.
-            new_row.remove(&elim_var);
-            new_row.retain(|_, v| *v != 0.0);
+            accum.remove(elim_var);
             let new_rhs = match src {
                 Src::A => b[idx] - scale * eq_rhs,
                 Src::G => real_g_rhs[idx] - scale * eq_rhs,
             };
-            let new_row_vec: Vec<(usize, f64)> = new_row.into_iter().collect();
+            let new_row_vec: Vec<(usize, f64)> = accum.take_sorted(0.0);
             match src {
                 Src::A => {
                     a_rows[idx] = new_row_vec;

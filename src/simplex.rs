@@ -121,7 +121,7 @@
 //! reaching for `into_par_iter()` again rather than assuming it helps.
 
 use crate::presolve::{self, scaling};
-use crate::sparse::{CscMat, CsrMat, csr_row_iter};
+use crate::sparse::{CscMat, CsrMat, csr_row_iter, sparse_axpy_dense, sparse_dot_dense};
 use crate::types::{ConstraintRow, Objective, RowSense, Sense, Status, VariableData};
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -734,6 +734,28 @@ struct StdForm {
     ub: Vec<f64>,
 }
 
+/// Freezes `rows` into the [`CsrMat`]/[`CscMat`] pair a [`StdForm`] holds,
+/// in one place for all three construction sites.
+///
+/// The `debug_assert` is load-bearing documentation, not a paranoia check:
+/// every walk that reaches the basis *through the column view* (
+/// [`Tableau::basis_rows_sparse`], [`Tableau::basis_residual_norm`],
+/// `extended_dual::refactorize`, `extended_dual::residual_norm`) visits
+/// columns in ascending index and therefore reproduces each row's entry
+/// order — and so the LU's own pivot-order tie-breaks, and each residual's
+/// summation order — bit for bit, *provided* the rows were column-ascending
+/// to begin with. All three builders do produce that (a presolved row's
+/// structural terms come out of an ascending faer CSR row through a
+/// monotone re-index, and its slack is appended last with the largest
+/// index of all); this asserts it rather than leaving it to be rediscovered.
+fn freeze_std_matrices(rows: &[Vec<(usize, f64)>], n_total: usize) -> (CsrMat, CscMat) {
+    debug_assert!(
+        rows.iter().all(|r| r.windows(2).all(|w| w[0].0 < w[1].0)),
+        "StdForm rows must be strictly column-ascending"
+    );
+    (CsrMat::from_rows(rows, n_total), CscMat::from_rows(rows, n_total))
+}
+
 fn build_std_form(variables: &[VariableData], objective: &Objective, constraints: &[ConstraintRow]) -> StdForm {
     let n = variables.len();
     let n_rows = constraints.len();
@@ -784,8 +806,7 @@ fn build_std_form(variables: &[VariableData], objective: &Objective, constraints
         rows.push(r);
     }
 
-    let cols = CscMat::from_rows(&rows, n_total);
-    let rows = CsrMat::from_rows(&rows, n_total);
+    let (rows, cols) = freeze_std_matrices(&rows, n_total);
     StdForm { n_total, n_rows, c, rows, cols, b, lb, ub }
 }
 
@@ -1240,8 +1261,7 @@ fn build_std_form_presolved(
         b_out.push(rhs_k);
     }
 
-    let cols = CscMat::from_rows(&rows, n_total);
-    let rows = CsrMat::from_rows(&rows, n_total);
+    let (rows, cols) = freeze_std_matrices(&rows, n_total);
     let shift_of_free: Vec<f64> = orig_of_free.iter().map(|&j| shift[j]).collect();
     Ok(PresolvedForm {
         std: StdForm { n_total, n_rows, c, rows, cols, b: b_out, lb: new_lb, ub: new_ub },
@@ -1376,9 +1396,17 @@ impl<'a> Tableau<'a> {
     fn basis_rows_sparse(&self) -> Vec<Vec<(usize, f64)>> {
         let m = self.std.n_rows;
         let mut rows = vec![Vec::new(); m];
-        for i in 0..m {
-            for &(j, v) in self.std.rows.row(i) {
-                if let Some(col) = self.basis_pos[j] {
+        // Column-driven, via `std.cols`: this touches only `nnz(A_B)` —
+        // the basis's own entries — where the row-driven form it replaced
+        // scanned all `nnz(A)` and discarded every nonbasic entry it read.
+        // On a real instance most columns are nonbasic at any one time, so
+        // that discarded work was the bulk of it. Ascending `j` keeps each
+        // `rows[i]` in exactly the order the row-driven scan produced (see
+        // `freeze_std_matrices`), so the LU factorization this feeds is
+        // bit-for-bit the same one.
+        for j in 0..self.std.n_total {
+            if let Some(col) = self.basis_pos[j] {
+                for &(i, v) in self.std.cols.col(j) {
                     rows[i].push((col, v));
                 }
             }
@@ -1495,15 +1523,20 @@ impl<'a> Tableau<'a> {
     /// (1)'s numerical-drift check on the incrementally-updated LU.
     fn basis_residual_norm(&self, rhs: &[f64]) -> f64 {
         let m = self.std.n_rows;
+        // `A_B x_B` accumulated one *basic column* at a time (see
+        // `basis_rows_sparse`'s own note): `nnz(A_B)` work plus one `O(m)`
+        // buffer, rather than a full `nnz(A)` scan that reads every
+        // nonbasic entry only to skip it.
+        let mut val = vec![0.0; m];
+        for j in 0..self.std.n_total {
+            if self.nb_status[j].is_some() {
+                continue;
+            }
+            sparse_axpy_dense(self.x[j], self.std.cols.col(j), &mut val);
+        }
         let mut resid_sq = 0.0;
         for i in 0..m {
-            let mut val = 0.0;
-            for &(j, v) in self.std.rows.row(i) {
-                if self.nb_status[j].is_none() {
-                    val += v * self.x[j];
-                }
-            }
-            let r = val - rhs[i];
+            let r = val[i] - rhs[i];
             resid_sq += r * r;
         }
         resid_sq.sqrt()
@@ -1863,7 +1896,7 @@ fn run_phase(
                 return None;
             }
             let cj = if phase1 { 0.0 } else { std.c[j] };
-            let dot: f64 = t.column_sparse(j).iter().map(|&(i, v)| v * y[i]).sum();
+            let dot = sparse_dot_dense(t.column_sparse(j), y);
             let dj = cj - dot;
 
             let (eligible, dir) = match st {
@@ -2296,8 +2329,7 @@ fn split_std_form(std: &StdForm, components: &[Vec<usize>]) -> Vec<StdForm> {
         let rows = std::mem::take(&mut rows_acc[cid]);
         let n_rows = rows.len();
         let n_total = local_n + n_rows;
-        let cols = CscMat::from_rows(&rows, n_total);
-        let rows = CsrMat::from_rows(&rows, n_total);
+        let (rows, cols) = freeze_std_matrices(&rows, n_total);
         result.push(StdForm {
             n_total,
             n_rows,
@@ -3531,7 +3563,7 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
         let cost_b: Vec<f64> = t.basis.iter().map(|&v| cost[v]).collect();
         let y = lu.solve_transpose(&cost_b);
         (0..std.n_total)
-            .map(|j| cost[j] - t.column_sparse(j).iter().map(|&(i, v)| v * y[i]).sum::<f64>())
+            .map(|j| cost[j] - sparse_dot_dense(t.column_sparse(j), &y))
             .collect()
     };
 

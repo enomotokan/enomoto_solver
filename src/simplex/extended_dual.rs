@@ -118,6 +118,7 @@
 //!    `simplex.rs::solve_lp_dual_on`'s own `bland_mode`).
 
 use super::{sparse_lu, InfeasibleRows, NbStatus, SimplexResult, StdForm, Status, TOL};
+use crate::sparse::sparse_axpy_dense;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::sync::OnceLock;
@@ -1101,9 +1102,14 @@ fn nb_value_affine(cache: &ColCache, status: NbStatus, j: usize) -> Option<Affin
 fn refactorize(std: &StdForm, basis_pos: &[Option<usize>]) -> Option<sparse_lu::FtLu> {
     let m = std.n_rows;
     let mut rows = vec![Vec::new(); m];
-    for i in 0..m {
-        for &(j, v) in std.rows.row(i) {
-            if let Some(col) = basis_pos[j] {
+    // Column-driven, via `std.cols` — `nnz(A_B)` work instead of the
+    // `nnz(A)` scan this replaced, which read every nonbasic entry only to
+    // drop it. Visiting `j` in ascending order reproduces each row's entry
+    // order exactly (see `super::freeze_std_matrices`), so the
+    // factorization below — Markowitz tie-breaks included — is unchanged.
+    for j in 0..std.n_total {
+        if let Some(col) = basis_pos[j] {
+            for &(i, v) in std.cols.col(j) {
                 rows[i].push((col, v));
             }
         }
@@ -1127,15 +1133,20 @@ fn refactorize(std: &StdForm, basis_pos: &[Option<usize>]) -> Option<sparse_lu::
 /// cause of non-termination on Netlib `agg`/`25fv47` once this module
 /// stopped refactorizing every iteration.
 fn residual_norm(std: &StdForm, basis_pos: &[Option<usize>], x_b: &[f64], rhs: &[f64]) -> f64 {
+    // `A_B x_B` accumulated one *basic column* at a time, the same
+    // `nnz(A_B)`-sized walk [`residual_norm_affine`] below already used —
+    // this plain-`f64` form was the one still paying for a full `nnz(A)`
+    // scan. One `O(m)` buffer; ascending `j` keeps each row's summation
+    // order (and so its rounding) identical to the row-driven form.
+    let mut val = vec![0.0; std.n_rows];
+    for j in 0..std.n_total {
+        if let Some(pos) = basis_pos[j] {
+            sparse_axpy_dense(x_b[pos], std.cols.col(j), &mut val);
+        }
+    }
     let mut resid_sq = 0.0f64;
     for i in 0..std.n_rows {
-        let mut val = 0.0;
-        for &(j, v) in std.rows.row(i) {
-            if let Some(pos) = basis_pos[j] {
-                val += v * x_b[pos];
-            }
-        }
-        let r = val - rhs[i];
+        let r = val[i] - rhs[i];
         resid_sq += r * r;
     }
     resid_sq.sqrt()
@@ -1181,14 +1192,6 @@ fn residual_norm_affine(
         resid_slope_sq += rs * rs;
     }
     (resid_base_sq.sqrt(), resid_slope_sq.sqrt())
-}
-
-fn dense_column(std: &StdForm, j: usize) -> Vec<f64> {
-    let mut col = vec![0.0; std.n_rows];
-    for &(i, v) in std.cols.col(j) {
-        col[i] = v;
-    }
-    col
 }
 
 /// `B x_B(M) = base + slope*M`'s own right-hand side (Lemma 4.1's `b - N
@@ -3710,6 +3713,11 @@ fn finish(std: &StdForm, basis: &mut [usize], basis_pos: &mut [Option<usize>], n
     let mut lu_scratch = vec![0.0f64; std.n_rows];
     let mut gp_scratch = sparse_lu::GpScratch::new(std.n_rows);
     let mut alpha_col = vec![0.0f64; std.n_rows];
+    // The entering column, densified for `try_update`'s own dense-`rhs`
+    // FTRAN. Hoisted out of the loop and refilled by
+    // `CscMat::col_into_dense` each pivot, rather than a fresh `Vec` per
+    // cleanup pivot.
+    let mut dense_j = vec![0.0f64; std.n_rows];
     let debug_ext = std::env::var("ENOMOTO_DEBUG_EXT_ITERS").is_ok();
     let mut cleanup_count = 0usize;
     loop {
@@ -3783,7 +3791,7 @@ fn finish(std: &StdForm, basis: &mut [usize], basis_pos: &mut [Option<usize>], n
         basis_pos[j] = Some(r2);
         nb_status[j] = None;
 
-        let dense_j = dense_column(std, j);
+        std.cols.col_into_dense(j, &mut dense_j);
         since_check += 1;
         let rejected = !lu.try_update(r2, &dense_j, super::FT_MIN_PIVOT);
         if rejected || since_check >= super::FT_CHECK_INTERVAL {

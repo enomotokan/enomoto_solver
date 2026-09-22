@@ -74,6 +74,16 @@
 //! way round, so *its* transpose product is the parallel one and its
 //! forward product the scatter; see [`CscMat::mat_t_vec_into`].)
 
+// This module is the crate's sparse-storage toolbox, so it deliberately
+// carries the *complete* set of operations for each representation — both
+// orientations of every product, the conversions in both directions, the
+// whole sparse-vector algebra — rather than only the subset today's call
+// sites happen to reach. `dead_code` is allowed here, and only here: an
+// unused item in this file is API surface waiting for its caller, not the
+// rot the lint normally catches, and every one of them is exercised by the
+// unit tests at the bottom of the file.
+#![allow(dead_code)]
+
 use rayon::prelude::*;
 
 // ===========================================================================
@@ -865,6 +875,45 @@ impl CscMat {
         CscMat { n_rows: rows.len(), n_cols, inner: Compressed::from_groups_transposed(rows, n_cols) }
     }
 
+    /// Builds the column-major form from an arbitrary **entry stream**:
+    /// `emit` is called twice — once to size each column's slice, once to
+    /// fill it — handing the caller a `push(row, col, value)` sink both
+    /// times.
+    ///
+    /// This exists for the passes whose matrix is not one contiguous
+    /// `Vec<Vec<_>>` to begin with: `presolve`'s dual reductions and
+    /// parallel-column detection both need the column view of `A`'s rows
+    /// *concatenated with* a separate list of inequality rows, under one
+    /// combined row numbering. Written directly, that is `vec![Vec::new();
+    /// n_cols]` plus a `push` per entry — one heap allocation per column,
+    /// each then grown by reallocation — for a structure that is read-only
+    /// the moment it is finished. Streamed through here it is the usual two
+    /// allocations and one counting sort, with no intermediate
+    /// concatenation of the blocks either.
+    ///
+    /// `emit` must produce **exactly the same entries in the same order**
+    /// on both calls (it is a pure enumeration of the matrix, so this is
+    /// the natural way to write it); a caller that filters entries must
+    /// apply the same filter both times. Each column's entries come out in
+    /// emission order, so emitting row by row yields row-ascending columns.
+    pub fn from_entry_stream<F>(n_rows: usize, n_cols: usize, mut emit: F) -> Self
+    where
+        F: FnMut(&mut dyn FnMut(usize, usize, f64)),
+    {
+        let mut offsets = vec![0usize; n_cols + 1];
+        emit(&mut |_i, j, _v| offsets[j + 1] += 1);
+        for k in 0..n_cols {
+            offsets[k + 1] += offsets[k];
+        }
+        let mut entries = vec![(0usize, 0.0f64); offsets[n_cols]];
+        let mut cursor = offsets.clone();
+        emit(&mut |i, j, v| {
+            entries[cursor[j]] = (i, v);
+            cursor[j] += 1;
+        });
+        CscMat { n_rows, n_cols, inner: Compressed { offsets, entries } }
+    }
+
     /// Reads a faer [`Csr`] straight into column-major form.
     pub fn from_faer(mat: &Csr) -> Self {
         let r = mat.as_ref();
@@ -1334,12 +1383,106 @@ mod tests {
     }
 
     #[test]
+    fn from_entry_stream_matches_a_concatenated_two_block_build() {
+        let block_a = sample_rows();
+        let block_g = vec![vec![(1usize, 7.0f64), (3usize, 0.0f64)], vec![(0usize, 8.0f64)]];
+        // Entries with an exact zero are filtered out by the stream, so
+        // the reference build filters them too.
+        let mut concat: Vec<Vec<(usize, f64)>> = block_a.clone();
+        concat.extend(block_g.iter().map(|r| r.iter().copied().filter(|&(_, v)| v != 0.0).collect()));
+        let expected = CscMat::from_rows(&concat, 4);
+
+        let got = CscMat::from_entry_stream(concat.len(), 4, |emit| {
+            for (i, row) in block_a.iter().enumerate() {
+                for &(j, v) in row {
+                    emit(i, j, v);
+                }
+            }
+            for (gi, row) in block_g.iter().enumerate() {
+                for &(j, v) in row {
+                    if v != 0.0 {
+                        emit(block_a.len() + gi, j, v);
+                    }
+                }
+            }
+        });
+        assert_eq!(got, expected);
+        assert_eq!(got.col(1), &[(1, 3.0), (3, 7.0)]);
+    }
+
+    #[test]
     fn csc_col_dense_matches_the_dense_column() {
         let csc = CsrMat::from_rows(&sample_rows(), 4).to_csc();
         assert_eq!(csc.col_dense(0), vec![1.0, 0.0, 4.0]);
         let mut buf = vec![9.9; 3];
         csc.col_into_dense(3, &mut buf);
         assert_eq!(buf, vec![0.0, 0.0, 5.0]);
+    }
+
+    #[test]
+    fn sparse_vec_mutators_cover_the_incremental_build_path() {
+        let mut v = SparseVec::with_capacity(6, 3);
+        assert!(v.is_empty());
+        assert_eq!(v.len(), 6);
+        v.push(4, -2.0);
+        v.push(1, 3.0);
+        v.push(5, 1e-14);
+        assert_eq!(v.nnz(), 3);
+
+        v.prune(1e-12);
+        v.sort();
+        assert_eq!(v.entries(), &[(1, 3.0), (4, -2.0)]);
+        assert!(approx(v.norm2(), 13.0f64.sqrt()));
+        assert_eq!(v.iter().collect::<Vec<_>>(), vec![(1, 3.0), (4, -2.0)]);
+
+        v.scale(2.0);
+        let mut acc = vec![1.0; 6];
+        v.scatter_add_into(0.5, &mut acc);
+        assert_eq!(acc, vec![1.0, 1.0 + 3.0, 1.0, 1.0, 1.0 - 2.0, 1.0]);
+
+        v.entries_mut()[0].1 = 0.0;
+        v.prune(0.0);
+        assert_eq!(v.into_entries(), vec![(4, -4.0)]);
+
+        let mut z = SparseVec::zeros(3);
+        z.push(0, 1.0);
+        z.clear();
+        assert!(z.is_empty());
+    }
+
+    #[test]
+    fn owned_row_and_column_views_carry_the_right_logical_length() {
+        let csr = CsrMat::from_rows(&sample_rows(), 4);
+        let csc = csr.to_csc();
+        let row = csr.row_vec(2);
+        assert_eq!(row.len(), 4);
+        assert_eq!(row.entries(), &[(0, 4.0), (3, 5.0)]);
+        let col = csc.col_vec(0);
+        assert_eq!(col.len(), 3);
+        assert_eq!(col.entries(), &[(0, 1.0), (2, 4.0)]);
+        assert_eq!(csc.to_cols(), vec![vec![(0, 1.0), (2, 4.0)], vec![(1, 3.0)], vec![(0, 2.0)], vec![(2, 5.0)]]);
+        assert_eq!(csr.nnz(), 5);
+        assert_eq!(csc.nnz(), 5);
+    }
+
+    #[test]
+    fn accumulator_take_sorted_vec_reports_the_index_space_as_its_length() {
+        let mut accum = SparseAccum::new(7);
+        assert_eq!(accum.capacity(), 7);
+        accum.load(&[(6, 1.0), (2, 2.0)]);
+        let v = accum.take_sorted_vec(0.0);
+        assert_eq!(v.len(), 7);
+        assert_eq!(v.entries(), &[(2, 2.0), (6, 1.0)]);
+    }
+
+    #[test]
+    fn scatter_dense_and_axpy_helpers_match_their_sparse_vec_forms() {
+        let entries = [(1usize, 2.0f64), (3usize, -4.0f64)];
+        let mut buf = vec![9.9; 5];
+        scatter_dense(&entries, &mut buf);
+        assert_eq!(buf, vec![0.0, 2.0, 0.0, -4.0, 0.0]);
+        sparse_axpy_dense(0.5, &entries, &mut buf);
+        assert_eq!(buf, vec![0.0, 3.0, 0.0, -6.0, 0.0]);
     }
 
     #[test]

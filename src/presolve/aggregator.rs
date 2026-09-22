@@ -82,7 +82,8 @@
 //! default; [`eliminate_implied_free_columns_xrow`] stays available (its
 //! own correctness fix is real and independently regression-tested) and
 //! still shares this module's helpers ([`compute_row_activity`],
-//! [`residual_range`], [`implied_range`], [`fillin_cost`], [`axpy_row`]).
+//! [`residual_range`], [`implied_range`], [`fillin_cost`],
+//! [`crate::sparse::axpy_row`]).
 //!
 //! ## Candidate order and fill-in
 //!
@@ -129,7 +130,7 @@
 //! already vacuous.
 
 use crate::presolve::colsingleton::Substitution;
-use crate::sparse::{Csr, csr_from_rows, csr_rows};
+use crate::sparse::{Csr, SparseAccum, axpy_row, csr_from_rows, csr_rows};
 const TOL: f64 = 1e-9;
 /// Mirrors `colsingleton`/`freevar`'s own pivot guard exactly (same value,
 /// same purpose — see either module's own docs on `SUBSTITUTION_PIVOT_RATIO`).
@@ -157,19 +158,6 @@ pub struct AggregatorResult {
     /// fields of these names).
     pub real_rows: Vec<Vec<(usize, f64)>>,
     pub real_rhs: Vec<f64>,
-}
-
-/// `row - factor * pivot`, dropping `drop_col` outright and any entry that
-/// lands within `TOL` of zero — identical to `freevar::axpy_row` (see its
-/// own docs on the `BTreeMap` merge and why it exists).
-fn axpy_row(row: &[(usize, f64)], pivot: &[(usize, f64)], factor: f64, drop_col: usize) -> Vec<(usize, f64)> {
-    let mut map: std::collections::BTreeMap<usize, f64> = row.iter().copied().collect();
-    for &(k, v) in pivot {
-        *map.entry(k).or_insert(0.0) -= factor * v;
-    }
-    map.remove(&drop_col);
-    map.retain(|_, v| v.abs() > TOL);
-    map.into_iter().collect()
 }
 
 /// One row's activity, summarized so that any single column's *residual*
@@ -302,6 +290,10 @@ fn fillin_cost(pivot_terms: &[(usize, f64)], targets: &[&Vec<(usize, f64)>]) -> 
 /// caller's own job, not this function's.
 pub fn eliminate_implied_free_columns(n: usize, a: &Csr, b: &[f64], c: &[f64], lb: &[f64], ub: &[f64], real_rows: &[Vec<(usize, f64)>], real_rhs: &[f64]) -> AggregatorResult {
     let mut a_rows: Vec<Vec<(usize, f64)>> = csr_rows(a);
+    // One sparse accumulator for every row fold this pass performs —
+    // see `crate::sparse::SparseAccum`'s own docs for why the merge is
+    // not a per-row `BTreeMap`.
+    let mut accum = SparseAccum::new(n);
     let mut b: Vec<f64> = b.to_vec();
     let mut c: Vec<f64> = c.to_vec();
     let mut real_rows: Vec<Vec<(usize, f64)>> = real_rows.to_vec();
@@ -424,13 +416,13 @@ pub fn eliminate_implied_free_columns(n: usize, a: &Csr, b: &[f64], c: &[f64], l
         for &i2 in &other_a {
             let a_i2j = a_rows[i2].iter().find(|&&(k, _)| k == j).unwrap().1;
             let factor = a_i2j / coeff;
-            a_rows[i2] = axpy_row(&a_rows[i2], &pivot_row, factor, j);
+            a_rows[i2] = axpy_row(&mut accum, &a_rows[i2], &pivot_row, factor, j, TOL);
             b[i2] -= factor * rhs_i;
         }
         for &i2 in &other_g {
             let a_i2j = real_rows[i2].iter().find(|&&(k, _)| k == j).unwrap().1;
             let factor = a_i2j / coeff;
-            real_rows[i2] = axpy_row(&real_rows[i2], &pivot_row, factor, j);
+            real_rows[i2] = axpy_row(&mut accum, &real_rows[i2], &pivot_row, factor, j, TOL);
             real_rhs[i2] -= factor * rhs_i;
         }
 
@@ -529,6 +521,10 @@ pub fn eliminate_implied_free_columns(n: usize, a: &Csr, b: &[f64], c: &[f64], l
 /// jointly justify a single column.
 pub fn eliminate_implied_free_columns_xrow(n: usize, a: &Csr, b: &[f64], c: &[f64], lb: &[f64], ub: &[f64], real_rows: &[Vec<(usize, f64)>], real_rhs: &[f64]) -> AggregatorResult {
     let mut a_rows: Vec<Vec<(usize, f64)>> = csr_rows(a);
+    // One sparse accumulator for every row fold this pass performs —
+    // see `crate::sparse::SparseAccum`'s own docs for why the merge is
+    // not a per-row `BTreeMap`.
+    let mut accum = SparseAccum::new(n);
     let mut b: Vec<f64> = b.to_vec();
     let mut c: Vec<f64> = c.to_vec();
     let mut real_rows: Vec<Vec<(usize, f64)>> = real_rows.to_vec();
@@ -711,7 +707,7 @@ pub fn eliminate_implied_free_columns_xrow(n: usize, a: &Csr, b: &[f64], c: &[f6
         for &i2 in &other_a {
             let a_i2j = a_rows[i2].iter().find(|&&(k, _)| k == j).unwrap().1;
             let factor = a_i2j / coeff;
-            a_rows[i2] = axpy_row(&a_rows[i2], &pivot_row, factor, j);
+            a_rows[i2] = axpy_row(&mut accum, &a_rows[i2], &pivot_row, factor, j, TOL);
             b[i2] -= factor * rhs_i;
             // This row's content just changed — its cached `RowActivity`
             // (if any) is now stale; see `row_activity`'s own docs.
@@ -720,7 +716,7 @@ pub fn eliminate_implied_free_columns_xrow(n: usize, a: &Csr, b: &[f64], c: &[f6
         for &i2 in &other_g {
             let a_i2j = real_rows[i2].iter().find(|&&(k, _)| k == j).unwrap().1;
             let factor = a_i2j / coeff;
-            real_rows[i2] = axpy_row(&real_rows[i2], &pivot_row, factor, j);
+            real_rows[i2] = axpy_row(&mut accum, &real_rows[i2], &pivot_row, factor, j, TOL);
             real_rhs[i2] -= factor * rhs_i;
         }
 
