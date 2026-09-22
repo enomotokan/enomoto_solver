@@ -25,7 +25,6 @@
 use crate::presolve::colsingleton::Substitution;
 use crate::presolve::propagate;
 use crate::sparse::{Csr, SparseAccum, csr_from_rows, csr_rows_pruned};
-use std::collections::BTreeMap;
 
 const TOL: f64 = 1e-9;
 
@@ -51,7 +50,15 @@ pub struct DoubletonResult {
 /// a row using an already-claimed variable as *either* of its two terms
 /// (see the pass below) rules out a cycle, so this always terminates. See
 /// the module docs for the substitution algebra itself.
-fn rewrite_row(accum: &mut SparseAccum, row: &[(usize, f64)], rhs: f64, subs: &[Substitution], by_var: &BTreeMap<usize, usize>) -> (Vec<(usize, f64)>, f64) {
+fn rewrite_row(accum: &mut SparseAccum, row: &[(usize, f64)], rhs: f64, subs: &[Substitution], by_var: &[Option<usize>]) -> (Vec<(usize, f64)>, f64) {
+    // Fast path, bit-identical to the general one below: a row with
+    // strictly increasing columns (so no duplicate to merge) that touches
+    // no substituted variable comes out of the accumulator as itself,
+    // minus entries at or below `TOL` — each `accum.add` is the first
+    // write to its slot, so the stored value is `v` exactly.
+    if row.windows(2).all(|w| w[0].0 < w[1].0) && row.iter().all(|&(j, _)| by_var[j].is_none()) {
+        return (row.iter().copied().filter(|&(_, v)| v.abs() > TOL).collect(), rhs);
+    }
     // The surviving terms land in the caller's shared sparse accumulator
     // rather than a `BTreeMap` built per rewritten row — see
     // `crate::sparse::SparseAccum`'s own docs. `take_sorted` emits in
@@ -61,7 +68,7 @@ fn rewrite_row(accum: &mut SparseAccum, row: &[(usize, f64)], rhs: f64, subs: &[
     let mut new_rhs = rhs;
     let mut queue: Vec<(usize, f64)> = row.to_vec();
     while let Some((j, v)) = queue.pop() {
-        if let Some(&idx) = by_var.get(&j) {
+        if let Some(idx) = by_var[j] {
             let sub = &subs[idx];
             new_rhs -= v * sub.rhs / sub.coeff;
             for &(k, term_v) in &sub.terms {
@@ -102,7 +109,7 @@ pub fn eliminate_doubleton_equalities(n: usize, a: &Csr, b: &[f64], g: &Csr, h: 
     // earlier substitution, and available again as a fresh candidate on
     // the *next* round.
     let mut subs: Vec<Substitution> = Vec::new();
-    let mut by_var: BTreeMap<usize, usize> = BTreeMap::new();
+    let mut by_var: Vec<Option<usize>> = vec![None; n];
     let mut claimed: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
     let mut eliminated_a_row = vec![false; a_rows.len()];
 
@@ -122,7 +129,7 @@ pub fn eliminate_doubleton_equalities(n: usize, a: &Csr, b: &[f64], g: &Csr, h: 
         let rhs = b[i];
 
         claimed.insert(var_elim);
-        by_var.insert(var_elim, subs.len());
+        by_var[var_elim] = Some(subs.len());
         subs.push(Substitution { var: var_elim, terms: vec![(var_keep, coeff_keep)], rhs, coeff: coeff_elim });
         eliminated_a_row[i] = true;
     }
@@ -189,7 +196,7 @@ pub fn eliminate_doubleton_equalities(n: usize, a: &Csr, b: &[f64], g: &Csr, h: 
     // variables lose their explicit bound rows, replaced by the
     // `extra_g_rows` derived above).
     for j in 0..n {
-        if by_var.contains_key(&j) {
+        if by_var[j].is_some() {
             continue;
         }
         if ub[j].is_finite() {

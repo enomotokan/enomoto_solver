@@ -1454,6 +1454,9 @@ pub type Csr = faer::sparse::SparseRowMat<usize, f64>;
 /// value)` list), dropping exact-zero entries. `n_cols` is the matrix's
 /// column count; the row count is `rows.len()`.
 pub fn csr_from_rows(rows: &[Vec<(usize, f64)>], n_cols: usize) -> Csr {
+    if let Some(m) = csr_from_rows_direct(rows, n_cols) {
+        return m;
+    }
     let mut triplets = Vec::new();
     for (i, row) in rows.iter().enumerate() {
         for &(j, v) in row {
@@ -1463,6 +1466,117 @@ pub fn csr_from_rows(rows: &[Vec<(usize, f64)>], n_cols: usize) -> Csr {
         }
     }
     Csr::try_new_from_triplets(rows.len(), n_cols, &triplets).expect("valid CSR triplets")
+}
+
+/// `O(nnz)` fast path for [`csr_from_rows`], producing exactly the matrix
+/// faer's `try_new_from_triplets` would (same row pointers, same sorted
+/// column indices, same values bit-for-bit) whenever no row contains a
+/// repeated column index among its nonzero entries: in that case the
+/// triplet path sums nothing, so the result is just each row's nonzeros
+/// sorted by column. Rows are almost always already sorted (they come from
+/// another `Csr`), so the per-row sort is usually a no-op check.
+///
+/// Returns `None` (caller falls back to the triplet path) when a duplicate
+/// column is found: faer merges duplicates after an *unstable* sort, so the
+/// summation order — and thus the rounded sum — is only reproducible by
+/// going through faer itself. Also `None` on an out-of-range column, so the
+/// original error/panic path is kept verbatim.
+fn csr_from_rows_direct(rows: &[Vec<(usize, f64)>], n_cols: usize) -> Option<Csr> {
+    let nnz_upper: usize = rows.iter().map(|r| r.len()).sum();
+    let mut builder = CsrRowBuilder::with_capacity(n_cols, rows.len(), nnz_upper);
+    for row in rows {
+        if !builder.push_row(row) {
+            return None;
+        }
+    }
+    Some(builder.finish())
+}
+
+/// Incremental form of [`csr_from_rows_direct`] (see its docs for the
+/// exact-equivalence contract with faer's triplet builder), for callers
+/// that assemble a matrix from several sources without first materializing
+/// a `Vec<Vec<_>>` (e.g. `propagate::rebuild_g_ref`: real rows by reference
+/// plus one singleton row per finite bound). [`CsrRowBuilder::push_row`]
+/// returns `false` when the row has a duplicate nonzero column or an
+/// out-of-range column; the caller must then fall back to
+/// [`csr_from_rows`] on the full row list.
+/// Whether `m` is already exactly what [`csr_from_rows`]`(&csr_rows(m), ncols)`
+/// would rebuild it into: compressed (no per-row nnz), no stored zeros,
+/// strictly increasing columns in every row. When it is, a pass that
+/// would only round-trip `m` through `Vec<Vec<_>>` unchanged can return
+/// `m.clone()` instead — bit-identical, `O(nnz)` with no sort.
+pub(crate) fn csr_is_canonical(m: &Csr) -> bool {
+    let r = m.as_ref();
+    r.nnz_per_row().is_none() && r.values().iter().all(|&v| v != 0.0) && (0..r.nrows()).all(|i| r.col_indices_of_row_raw(i).windows(2).all(|w| w[0] < w[1]))
+}
+
+pub(crate) struct CsrRowBuilder {
+    n_cols: usize,
+    row_ptr: Vec<usize>,
+    col_ind: Vec<usize>,
+    values: Vec<f64>,
+    scratch: Vec<(usize, f64)>,
+}
+
+impl CsrRowBuilder {
+    pub(crate) fn with_capacity(n_cols: usize, rows: usize, nnz: usize) -> Self {
+        let mut row_ptr = Vec::with_capacity(rows + 1);
+        row_ptr.push(0);
+        CsrRowBuilder { n_cols, row_ptr, col_ind: Vec::with_capacity(nnz), values: Vec::with_capacity(nnz), scratch: Vec::new() }
+    }
+
+    pub(crate) fn push_row(&mut self, row: &[(usize, f64)]) -> bool {
+        let start = self.col_ind.len();
+        let mut sorted = true;
+        let mut prev: Option<usize> = None;
+        for &(j, v) in row {
+            if v == 0.0 {
+                continue;
+            }
+            if j >= self.n_cols {
+                return false;
+            }
+            if let Some(p) = prev {
+                if j <= p {
+                    sorted = false;
+                }
+            }
+            prev = Some(j);
+            self.col_ind.push(j);
+            self.values.push(v);
+        }
+        if !sorted {
+            self.scratch.clear();
+            self.scratch.extend(self.col_ind[start..].iter().copied().zip(self.values[start..].iter().copied()));
+            self.scratch.sort_unstable_by_key(|&(j, _)| j);
+            for k in 1..self.scratch.len() {
+                if self.scratch[k].0 == self.scratch[k - 1].0 {
+                    return false;
+                }
+            }
+            for (k, &(j, v)) in self.scratch.iter().enumerate() {
+                self.col_ind[start + k] = j;
+                self.values[start + k] = v;
+            }
+        }
+        self.row_ptr.push(self.col_ind.len());
+        true
+    }
+
+    /// A row with a single `(j, v)` entry (`v != 0`, `j < n_cols`), e.g.
+    /// a bound row — no allocation, no checks needed beyond these.
+    pub(crate) fn push_singleton(&mut self, j: usize, v: f64) {
+        debug_assert!(v != 0.0 && j < self.n_cols);
+        self.col_ind.push(j);
+        self.values.push(v);
+        self.row_ptr.push(self.col_ind.len());
+    }
+
+    pub(crate) fn finish(self) -> Csr {
+        let nrows = self.row_ptr.len() - 1;
+        let symbolic = faer::sparse::SymbolicSparseRowMat::new_checked(nrows, self.n_cols, self.row_ptr, None, self.col_ind);
+        Csr::new(symbolic, self.values)
+    }
 }
 
 /// Row `i` of a faer [`Csr`] as an iterator of `(column, value)` pairs.
@@ -1659,6 +1773,38 @@ mod tests {
         assert_eq!(CsrMat::from_faer(&faer), CsrMat::from_rows(&rows, 4));
         assert_eq!(csr_rows(&CsrMat::from_rows(&rows, 4).to_faer()), rows);
         assert_eq!(csr_to_csc(&faer), CscMat::from_rows(&rows, 4));
+    }
+
+    /// The direct (no-duplicate) builder must reproduce faer's triplet
+    /// builder exactly: same structure, same values, same explicit-zero
+    /// dropping, unsorted rows sorted.
+    #[test]
+    fn csr_from_rows_direct_matches_faer_triplets() {
+        let rows: Vec<Vec<(usize, f64)>> = vec![
+            vec![(3, 1.5), (0, -2.0), (2, 0.0), (1, 7.0)],
+            vec![],
+            vec![(0, 0.0)],
+            vec![(4, -0.0), (2, 3.25), (4, 1.0)],
+            vec![(0, 1.0), (1, 2.0), (2, 3.0), (3, 4.0), (4, 5.0)],
+        ];
+        let direct = csr_from_rows_direct(&rows, 5).expect("no duplicates");
+        let mut triplets = Vec::new();
+        for (i, row) in rows.iter().enumerate() {
+            for &(j, v) in row {
+                if v != 0.0 {
+                    triplets.push((i, j, v));
+                }
+            }
+        }
+        let faer = Csr::try_new_from_triplets(rows.len(), 5, &triplets).unwrap();
+        assert_eq!(direct.as_ref().row_ptrs(), faer.as_ref().row_ptrs());
+        assert_eq!(direct.as_ref().col_indices(), faer.as_ref().col_indices());
+        let dv: Vec<u64> = direct.as_ref().values().iter().map(|v| v.to_bits()).collect();
+        let fv: Vec<u64> = faer.as_ref().values().iter().map(|v| v.to_bits()).collect();
+        assert_eq!(dv, fv);
+        // A genuine duplicate must defer to faer's own merge.
+        assert!(csr_from_rows_direct(&[vec![(1, 1.0), (1, 2.0)]], 3).is_none());
+        assert_eq!(csr_rows(&csr_from_rows(&[vec![(1, 1.0), (1, 2.0)]], 3)), vec![vec![(1, 3.0)]]);
     }
 
     #[test]

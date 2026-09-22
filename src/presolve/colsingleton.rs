@@ -37,7 +37,7 @@
 //! network-shaped equality system the same way HiGHS's own presolve does.
 
 use crate::presolve::propagate;
-use crate::sparse::{Csr, csr_from_rows, csr_rows};
+use crate::sparse::{Csr, csr_from_rows, csr_is_canonical, csr_rows};
 const TOL: f64 = 1e-9;
 /// Minimum `|coeff| / max|row|` for a column singleton to be substituted
 /// out — see the guard in `eliminate_singleton_equalities`.
@@ -91,7 +91,11 @@ pub fn eliminate_singleton_equalities(n: usize, a: &Csr, b: &[f64], g: &Csr, h: 
     // `lb`/`ub` for the box-bound part; `real_g_rows` for the "does this
     // column appear anywhere in G besides its own bound rows" part — both
     // straight from the same extraction `propagate` itself uses.
-    let (lb, ub, real_g_rows, _real_g_rhs) = propagate::extract_bounds(n, g, h);
+    // Only `lb`/`ub` and the per-column appearance counts of G's real
+    // (multi-variable) rows are needed here, so G is read in place rather
+    // than via `extract_bounds` (which copies every real row into its own
+    // `Vec`).
+    let (lb, ub) = propagate::extract_bounds_only(n, g, h);
 
     // Total appearances across every *real* row (A's rows, plus G's
     // multi-variable rows — G's own single-variable rows are box bounds,
@@ -106,10 +110,17 @@ pub fn eliminate_singleton_equalities(n: usize, a: &Csr, b: &[f64], g: &Csr, h: 
             }
         }
     }
-    for row in &real_g_rows {
-        for &(j, v) in row {
-            if v != 0.0 {
-                appearances[j] += 1;
+    {
+        let gr = g.as_ref();
+        for i in 0..gr.nrows() {
+            let cols = gr.col_indices_of_row_raw(i);
+            if cols.len() == 1 {
+                continue; // a bound row — `extract_bounds` would not list it as real
+            }
+            for (&j, &v) in cols.iter().zip(gr.values_of_row(i)) {
+                if v != 0.0 {
+                    appearances[j] += 1;
+                }
             }
         }
     }
@@ -200,8 +211,11 @@ pub fn eliminate_singleton_equalities(n: usize, a: &Csr, b: &[f64], g: &Csr, h: 
         }
     }
 
+    // Nothing eliminated: the rebuilt A would be `a` itself whenever `a` is
+    // already in `csr_from_rows`' canonical form.
+    let new_a = if substitutions.is_empty() && csr_is_canonical(a) { a.clone() } else { csr_from_rows(&new_a_rows, n) };
     EliminationResult {
-        a: csr_from_rows(&new_a_rows, n),
+        a: new_a,
         b: new_b,
         c: new_c,
         extra_g_rows,

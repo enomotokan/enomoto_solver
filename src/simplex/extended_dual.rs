@@ -876,8 +876,32 @@ const D_GROSS_MISMATCH_REL_TOL: f64 = 0.5;
 /// performed (the "found r2" branch in [`finish`]) so a direct unit test
 /// can confirm that code path was exercised, rather than needing to
 /// hand-derive in advance which hand-built example reaches it.
+///
+/// Per *thread* (tests run in parallel, and a process-global counter let
+/// any concurrently running test's cleanup pivots leak into another
+/// test's before/after comparison — a timing-dependent flake), behind an
+/// `AtomicUsize`-shaped `load`/`fetch_add` interface.
 #[cfg(test)]
-pub(crate) static CLEANUP_PIVOTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+pub(crate) struct ThreadLocalCounter;
+#[cfg(test)]
+thread_local! {
+    static CLEANUP_PIVOTS_TL: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+#[cfg(test)]
+impl ThreadLocalCounter {
+    pub(crate) fn load(&self, _: std::sync::atomic::Ordering) -> usize {
+        CLEANUP_PIVOTS_TL.with(|c| c.get())
+    }
+    pub(crate) fn fetch_add(&self, v: usize, _: std::sync::atomic::Ordering) -> usize {
+        CLEANUP_PIVOTS_TL.with(|c| {
+            let old = c.get();
+            c.set(old + v);
+            old
+        })
+    }
+}
+#[cfg(test)]
+pub(crate) static CLEANUP_PIVOTS: ThreadLocalCounter = ThreadLocalCounter;
 
 /// Test-only instrumentation: counts how many candidates the BFRT walk
 /// actually flipped (summed across every iteration of every solve) before

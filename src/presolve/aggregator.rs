@@ -340,6 +340,30 @@ pub fn eliminate_implied_free_columns(n: usize, a: &Csr, b: &[f64], c: &[f64], l
         (min_len != 2, rowlen * collen, min_len, i, j)
     });
 
+    // Column -> row indices for `a_rows` and `real_rows`, so finding the
+    // rows that contain the eliminated column costs O(column length)
+    // instead of a scan over every row of both matrices per candidate.
+    // Lists are a *superset* (entries can cancel to zero or rows get
+    // deleted); each query re-verifies membership exactly as the plain
+    // scan did and sorts/dedups, so the resulting row lists — and every
+    // decision downstream — are identical to the full-scan version.
+    let mut a_col_idx: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (i, row) in a_rows.iter().enumerate() {
+        for &(k, v) in row {
+            if v != 0.0 {
+                a_col_idx[k].push(i);
+            }
+        }
+    }
+    let mut g_col_idx: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (i, row) in real_rows.iter().enumerate() {
+        for &(k, v) in row {
+            if v != 0.0 {
+                g_col_idx[k].push(i);
+            }
+        }
+    }
+
     let mut row_deleted = vec![false; a_rows.len()];
     let mut col_eliminated = vec![false; n];
     let mut substitutions = Vec::new();
@@ -385,13 +409,20 @@ pub fn eliminate_implied_free_columns(n: usize, a: &Csr, b: &[f64], c: &[f64], l
         // what HiGHS's own gate would (the reverted first version's
         // regression was exactly this scan running on thousands of
         // never-eliminable candidates; see the module docs).
-        let other_a: Vec<usize> = a_rows
-            .iter()
-            .enumerate()
-            .filter(|&(i2, row2)| i2 != row_idx && !row_deleted[i2] && row2.iter().any(|&(k, v)| k == j && v != 0.0))
-            .map(|(i2, _)| i2)
-            .collect();
-        let other_g: Vec<usize> = real_rows.iter().enumerate().filter(|(_, row2)| row2.iter().any(|&(k, v)| k == j && v != 0.0)).map(|(i2, _)| i2).collect();
+        let other_a: Vec<usize> = {
+            let mut v = a_col_idx[j].clone();
+            v.sort_unstable();
+            v.dedup();
+            v.retain(|&i2| i2 != row_idx && !row_deleted[i2] && a_rows[i2].iter().any(|&(k, v)| k == j && v != 0.0));
+            v
+        };
+        let other_g: Vec<usize> = {
+            let mut v = g_col_idx[j].clone();
+            v.sort_unstable();
+            v.dedup();
+            v.retain(|&i2| real_rows[i2].iter().any(|&(k, v)| k == j && v != 0.0));
+            v
+        };
 
         let fillin = {
             let mut targets: Vec<&Vec<(usize, f64)>> = Vec::with_capacity(other_a.len() + other_g.len());
@@ -417,12 +448,19 @@ pub fn eliminate_implied_free_columns(n: usize, a: &Csr, b: &[f64], c: &[f64], l
             let a_i2j = a_rows[i2].iter().find(|&&(k, _)| k == j).unwrap().1;
             let factor = a_i2j / coeff;
             a_rows[i2] = axpy_row(&mut accum, &a_rows[i2], &pivot_row, factor, j, TOL);
+            // Fill-in can only land in the pivot row's other columns.
+            for &(k, _) in &terms {
+                a_col_idx[k].push(i2);
+            }
             b[i2] -= factor * rhs_i;
         }
         for &i2 in &other_g {
             let a_i2j = real_rows[i2].iter().find(|&&(k, _)| k == j).unwrap().1;
             let factor = a_i2j / coeff;
             real_rows[i2] = axpy_row(&mut accum, &real_rows[i2], &pivot_row, factor, j, TOL);
+            for &(k, _) in &terms {
+                g_col_idx[k].push(i2);
+            }
             real_rhs[i2] -= factor * rhs_i;
         }
 
