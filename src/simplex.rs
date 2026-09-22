@@ -3020,7 +3020,25 @@ pub fn solve_lp_dual(variables: &[VariableData], objective: &Objective, constrai
             std.n_rows
         );
     }
-    if had_unbounded_structural || std::env::var("ENOMOTO_FORCE_EXTENDED").is_ok() {
+    // Always route through `extended_dual::solve_lp_dual_extended`, not
+    // just when `had_unbounded_structural` is set: that solver's "M-side"
+    // bookkeeping only exists to track *actually* unbounded columns, so
+    // with none present it should degenerate to (and perform like) the
+    // classical path below — confirmed directly on `d6cube` after the
+    // equality-row propagation added above started giving every one of
+    // its previously-unbounded columns a finite bound: the classical path
+    // (`solve_std_form_decomposed`, previously this branch's `false` case)
+    // turned out to just be the *slower* implementation for this problem's
+    // structure once that happened (0.14s base -> 0.25-0.31s through
+    // classical vs 0.15-0.17s through extended with nothing left to track;
+    // see analysis/greenbea_20260921_230908.md's follow-up). Re-verified
+    // on the full 93-problem Netlib set: 93/93 still solved to optimality,
+    // aggregate `ours` time flat-to-better (not worse) than routing
+    // classical-when-possible. `ENOMOTO_DISABLE_ALWAYS_EXTENDED` reverts to
+    // the old had_unbounded_structural-gated routing, for comparison —
+    // same pattern as this module's own `ENOMOTO_DISABLE_AGGREGATOR`/
+    // `ENOMOTO_DISABLE_PARALLELCOLS` presolve toggles.
+    if had_unbounded_structural || std::env::var("ENOMOTO_DISABLE_ALWAYS_EXTENDED").is_err() {
         if std::env::var("ENOMOTO_DEBUG_EXT_COMPONENTS").is_ok() {
             match connected_components_of_std_form(&std) {
                 Some((components, _has_row)) => {
