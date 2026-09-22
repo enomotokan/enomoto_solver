@@ -213,7 +213,13 @@ impl KernelMatrix {
         assert!(m <= u32::MAX as usize, "kernel row index must fit in u32");
         assert_eq!(rows_in.len(), m, "kernel input must be square");
         let total: usize = rows_in.iter().map(|r| r.len()).sum();
-        let mut row_ent: Vec<(usize, f64)> = Vec::with_capacity(total + total / 2 + 4 * m);
+        // Capacity, not length: the reserve is here so the relocations
+        // below (and `ensure_row_cap`'s own, later) stay `push`/`resize`
+        // inside one allocation instead of repeatedly reallocating and
+        // copying the whole buffer. Nothing is *initialized* beyond what
+        // is actually written — see the zero-slack note at `row_cap`
+        // below.
+        let mut row_ent: Vec<(usize, f64)> = Vec::with_capacity(2 * total + 64);
         let mut row_start = Vec::with_capacity(m);
         let mut row_len = Vec::with_capacity(m);
         let mut row_cap = Vec::with_capacity(m);
@@ -241,12 +247,22 @@ impl KernelMatrix {
                     row_ent.push((j, acc));
                 }
             }
+            // No up-front slack (`cap == len`): a row only ever needs to
+            // grow when the merge in `eliminate` leaves it *net* longer,
+            // and the pivot column's own entry always leaves at the same
+            // time, so one fill-in still fits in place and only two or
+            // more relocate. Pre-padding every row instead cost a
+            // memset proportional to the padding on *every*
+            // refactorization, including for the many rows that never
+            // take fill at all — worst of all on a near-slack basis,
+            // where `nnz ~= m` makes a flat few-entries-per-row pad
+            // several times the size of the real data. `ensure_row_cap`
+            // doubles from here, so a row that keeps taking fill still
+            // relocates `O(log)` times, not once per insertion.
             let len = row_ent.len() - start;
-            let cap = len + len / 2 + 4;
-            row_ent.resize(start + cap, (0, 0.0));
             row_start.push(start);
             row_len.push(len);
-            row_cap.push(cap);
+            row_cap.push(len);
         }
 
         // Column mirror by counting sort. Filling it with `i` ascending is
@@ -259,16 +275,15 @@ impl KernelMatrix {
             }
         }
         let mut col_start = vec![0usize; m];
-        let mut col_cap = vec![0usize; m];
         let mut pos = 0usize;
         for j in 0..m {
-            let c = col_len[j];
-            let cap = c + c / 2 + 4;
             col_start[j] = pos;
-            col_cap[j] = cap;
-            pos += cap;
+            pos += col_len[j];
         }
-        let mut col_ent = vec![0u32; pos];
+        // Zero-slack and reserved, for the same reasons as the row side.
+        let col_cap = col_len.clone();
+        let mut col_ent: Vec<u32> = Vec::with_capacity(2 * total + 64);
+        col_ent.resize(pos, 0);
         let mut fill = vec![0usize; m];
         for i in 0..m {
             let (s, l) = (row_start[i], row_len[i]);
