@@ -176,6 +176,16 @@ U段のetaが太ると失敗しがちなので、FTRAN前の入力密度だけ�
 
 **参考度: 中** — 観測ベースの切替を1つ追加するだけ。
 
+**実装済み (2026-09-22、`analysis/ftran_density_gate_20260922_062832.md`)**:
+`sparse_lu::FtranDensity` が呼び出し地点ごとに FTRAN 結果密度の移動平均
+(HiGHS と同じ係数 0.05) を持ち、`FtLu::should_use_dense_solve_tracked` が
+入力nnz判定に `EXPECTED_DENSE_FRACTION = 0.35` のゲートを OR で足す。
+指摘どおりの状況が実在した: 入力側判定は93問題で一度も発火していない一方、
+入基底列 FTRAN の結果密度は dfl001 0.655、pilot87 0.803、fit2p 0.999、
+pilot 0.874。ゲートは 59/93 問題で発火し、全93問題で合計 -1%
+(greenbeb -20%、wood1p -18%、pilot -12%、dfl001 -4%; 最大の退行は
+pilot87 +6%、これは反復数 +6% に起因)。
+
 ### 2.8 `HVector` の packed index 表現
 
 HiGHS は RHS を `HVector { array, index, count }` で持ち、

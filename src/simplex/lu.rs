@@ -1683,6 +1683,150 @@ struct REta {
 /// benchmark yet.
 const DENSE_RHS_FRACTION: f64 = 0.4;
 
+/// Weight given to the newest observation when folding it into an
+/// [`FtranDensity`] running average. This is HiGHS's own
+/// `kRunningAverageMultiplier` (`HEkk::updateOperationResultDensity`,
+/// used there for exactly the same purpose — see that class's
+/// `col_aq_density`/`row_ep_density` fields), kept at the same value for
+/// the same reason: small enough that one atypical iteration cannot flip
+/// the dense/sparse dispatch on its own, large enough that a genuine
+/// phase change (a basis that has filled in over the last dozen pivots)
+/// is picked up within ~20 iterations rather than being averaged away
+/// over the whole solve.
+const DENSITY_AVERAGE_MULTIPLIER: f64 = 0.05;
+
+/// An FTRAN call site whose recent *results* have averaged denser than
+/// this fraction of `m` takes the dense solve regardless of how sparse
+/// the right-hand side it is handed happens to be — see [`FtranDensity`]'s
+/// own docs for why the input's own nonzero count
+/// ([`DENSE_RHS_FRACTION`]) is not a sufficient predictor on its own.
+/// Overridable at run time via `ENOMOTO_EXPECTED_DENSITY_GATE` (see
+/// [`expected_dense_gate`]) so this one number can be re-tuned against the
+/// Netlib set without a rebuild.
+///
+/// `0.35` is measured, not guessed (`analysis/ftran_density_gate_20260922_062832.md`
+/// §4.2, an A/B over the full Netlib set run *inside one process* with the
+/// setting flipped between solves, since this box's per-problem run-to-run
+/// spread otherwise reaches 4x): against the gate disabled, `0.35` is -3.9%
+/// over the 14 mid-heavy instances and -1% over all 93, while `0.2` is
+/// *worse* than no gate at all (+0.8%). The reason `0.2` loses is specific
+/// and worth keeping: it drags the BFRT combined-flip channel onto the dense
+/// path too (its results average 0.24-0.49 dense, against the entering
+/// column's 0.65-0.99), and on `greenbeb` that turns a -22% win into -1%.
+/// A threshold between the two channels' own measured densities is what the
+/// gate wants, not the lowest one that still fires.
+const EXPECTED_DENSE_FRACTION: f64 = 0.35;
+
+/// [`EXPECTED_DENSE_FRACTION`], overridable at run time via the
+/// `ENOMOTO_EXPECTED_DENSITY_GATE` environment variable (a bare float;
+/// any value `>= 1.0` disables the result-density gate outright, since no
+/// result can be denser than `m`, restoring the input-nnz-only dispatch
+/// this crate had before [`FtranDensity`] existed — which is exactly how
+/// the A/B runs behind the constant's own value were produced). Read once
+/// per [`FtranDensity::new`] — a handful of times per solve, never on the
+/// per-iteration path.
+fn expected_dense_gate() -> f64 {
+    std::env::var("ENOMOTO_EXPECTED_DENSITY_GATE")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(EXPECTED_DENSE_FRACTION)
+}
+
+/// Running average of one FTRAN *call site*'s own **result** density,
+/// feeding [`FtLu::should_use_dense_solve_tracked`]'s dense/sparse
+/// dispatch alongside the right-hand side's own nonzero count.
+///
+/// [`DENSE_RHS_FRACTION`] alone judges a solve by its *input*: the reach
+/// set the Gilbert-Peierls path walks is bounded below by the rhs's own
+/// nonzeros, so a dense rhs does prove the sparse path cannot win. The
+/// converse is not true — a one-nonzero rhs can still fill in to a fully
+/// dense `B^-1 a` once `L`'s own reach fans out, and then the sparse
+/// path has paid its DFS/epoch bookkeeping (`LuFactors::l_solve_sparse_into`'s
+/// own docs) on top of doing the same elimination work the flat dense
+/// scan would have done anyway. Nothing about the *input* distinguishes
+/// those two cases, and the gap widens exactly as `m` grows: the bigger
+/// the basis, the further a single column's reach can fan out relative to
+/// the fixed sparsity of the column itself.
+///
+/// What does distinguish them is the channel's own recent history, which
+/// is what this tracks: HiGHS solves the same problem the same way,
+/// maintaining a per-operation `expected_density` running average
+/// (`HEkk::updateOperationResultDensity`) and handing it to `ftranL`/`ftranU`
+/// so each call can decide *before* running which mode it should be in
+/// (`HFactor::ftranL`'s own `expected_density > kHyperFtranL` test).
+/// This crate's `docs/lu_comparison_enomoto_vs_highs.md` §2.7 names that
+/// as the gap this type closes.
+///
+/// One instance per *call site* (the entering column's FTRAN, the BFRT
+/// combined-flip FTRAN, ...), never one shared instance: those channels'
+/// densities genuinely differ — a BFRT combined rhs sums whole flipped
+/// columns and is routinely much denser than a single entering column —
+/// and averaging them together would smear each one's own signal.
+/// Instances live in the solve loops (`solve_lp_dual_on` and
+/// `extended_dual`'s two loops), not in [`FtLu`] itself, deliberately:
+/// `FtLu` is rebuilt from scratch at every refactorization, which would
+/// throw the history away precisely when the basis is at its densest,
+/// whereas HiGHS's own densities likewise live in `HEkk` and survive
+/// across INVERTs.
+///
+/// The measurement itself is free: every solve path already ends in an
+/// `O(m)` permutation loop over the finished result, so counting that
+/// result's nonzeros costs one branchless add per entry inside a loop
+/// that was already running — and it is the *exact* result density, not
+/// an estimate. Crucially it is also taken on **both** branches, so the
+/// gate can never latch: a channel that starts producing sparse results
+/// again is observed doing so while it is on the dense path, and returns
+/// to the sparse path on its own.
+#[derive(Clone, Copy, Debug)]
+pub struct FtranDensity {
+    /// Running average of `result_nnz / m`, in `[0, 1]`. Starts at `0.0`
+    /// (maximally sparse) so a fresh channel dispatches exactly as it did
+    /// before this type existed until it has actually observed something.
+    expected: f64,
+    /// [`expected_dense_gate`]'s value, captured once at construction
+    /// rather than re-read per call.
+    gate: f64,
+}
+
+impl FtranDensity {
+    pub fn new() -> Self {
+        Self { expected: 0.0, gate: expected_dense_gate() }
+    }
+
+    /// Folds one finished solve's own result density into the average —
+    /// call with whatever nonzero count the solve returned (`solve_into`
+    /// and friends all return it), on *either* branch.
+    #[inline]
+    pub fn record(&mut self, result_nnz: usize, m: usize) {
+        if m == 0 {
+            return;
+        }
+        let local = result_nnz as f64 / m as f64;
+        self.expected = (1.0 - DENSITY_AVERAGE_MULTIPLIER) * self.expected + DENSITY_AVERAGE_MULTIPLIER * local;
+    }
+
+    /// The running average itself, in `[0, 1]` — exposed for diagnostics
+    /// (`ENOMOTO_PROF_PHASES_EXT`) rather than for dispatch, which goes
+    /// through [`FtLu::should_use_dense_solve_tracked`].
+    #[inline]
+    pub fn expected(&self) -> f64 {
+        self.expected
+    }
+
+    /// Whether this channel's own history alone already calls for the
+    /// dense path.
+    #[inline]
+    pub fn predicts_dense(&self) -> bool {
+        self.expected > self.gate
+    }
+}
+
+impl Default for FtranDensity {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Clone)]
 pub struct FtLu {
     base: LuFactors,
@@ -1885,6 +2029,23 @@ impl FtLu {
         m > 0 && rhs_nnz as f64 > DENSE_RHS_FRACTION * m as f64
     }
 
+    /// [`Self::should_use_dense_solve`] widened by the calling channel's
+    /// own observed result density: the dense path is taken when *either*
+    /// the right-hand side handed in is already dense (that method's own
+    /// input-side test, unchanged) *or* this channel's recent results have
+    /// been dense enough that the sparse path's own bookkeeping is not
+    /// expected to pay for itself ([`FtranDensity`]'s own docs, and
+    /// `docs/lu_comparison_enomoto_vs_highs.md` §2.7).
+    ///
+    /// Deliberately only ever moves calls *towards* the dense path, never
+    /// away from it: a rhs with more than [`DENSE_RHS_FRACTION`] of `m`
+    /// nonzeros bounds the Gilbert-Peierls reach set below by that same
+    /// count, so no amount of "but this channel's results are usually
+    /// sparse" history could make the sparse path win on such a call.
+    pub fn should_use_dense_solve_tracked(&self, rhs_nnz: usize, density: &FtranDensity) -> bool {
+        self.should_use_dense_solve(rhs_nnz) || density.predicts_dense()
+    }
+
     /// `U_k^{-T}` applied in place to a step-space vector: processes the
     /// eta sequence in **forward** (creation) order, each step solving for
     /// that eta's pivotal component via eq. (8). Mutates `z` directly
@@ -2077,12 +2238,17 @@ impl FtLu {
     /// permutation) were real, repeated per-iteration heap traffic —
     /// eliminated by having the caller own `scratch`/`out` once, outside
     /// the iteration loop, and reuse them every pivot.
-    pub fn solve_into(&self, rhs: &[f64], scratch: &mut [f64], out: &mut [f64]) {
+    ///
+    /// Returns the finished result's own nonzero count, for
+    /// [`FtranDensity::record`]: the permutation loop below already visits
+    /// every entry of the result, so counting them there is one branchless
+    /// add per entry on a loop that was running anyway, and yields the
+    /// exact density rather than an estimate. Callers with no density
+    /// tracker simply ignore it.
+    pub fn solve_into(&self, rhs: &[f64], scratch: &mut [f64], out: &mut [f64]) -> usize {
         self.ftran_through_l_and_r_into(rhs, scratch);
         self.u_solve_into(scratch);
-        for s in 0..self.base.m {
-            out[self.base.col_perm[s]] = scratch[s];
-        }
+        self.permute_out(scratch, out)
     }
 
     /// Same as [`Self::solve_into`], but additionally captures the
@@ -2093,13 +2259,29 @@ impl FtLu {
     /// docs for why this capture (a plain `copy_from_slice`) lets the
     /// caller skip `try_update`'s own redundant re-derivation of the exact
     /// same value entirely.
-    pub fn solve_into_capture(&self, rhs: &[f64], scratch: &mut [f64], out: &mut [f64], a_tilde_out: &mut [f64]) {
+    pub fn solve_into_capture(&self, rhs: &[f64], scratch: &mut [f64], out: &mut [f64], a_tilde_out: &mut [f64]) -> usize {
         self.ftran_through_l_and_r_into(rhs, scratch);
         a_tilde_out.copy_from_slice(scratch);
         self.u_solve_into(scratch);
+        self.permute_out(scratch, out)
+    }
+
+    /// The last stage every FTRAN path shares: map the finished
+    /// step-space vector back to original row indexing, returning its own
+    /// nonzero count (see [`Self::solve_into`]'s own docs for why the
+    /// count rides along on this loop rather than a pass of its own).
+    /// `+= (v != 0.0) as usize` rather than a branch: the compare is a
+    /// single instruction and the add is unconditional, so the count adds
+    /// no branch misprediction to a loop whose scatter already dominates it.
+    #[inline]
+    fn permute_out(&self, scratch: &[f64], out: &mut [f64]) -> usize {
+        let mut nnz = 0usize;
         for s in 0..self.base.m {
-            out[self.base.col_perm[s]] = scratch[s];
+            let v = scratch[s];
+            out[self.base.col_perm[s]] = v;
+            nnz += (v != 0.0) as usize;
         }
+        nnz
     }
 
     /// Sparse-`rhs` counterpart to [`Self::solve_into`]: the same
@@ -2121,7 +2303,7 @@ impl FtLu {
     /// `scratch` back to all-zero, in full, right before returning — but
     /// that guarantee only holds if nothing else writes through the same
     /// buffer in between.
-    pub fn solve_sparse_into(&self, rhs_sparse: &[(usize, f64)], scratch: &mut [f64], gp: &mut GpScratch, out: &mut [f64]) {
+    pub fn solve_sparse_into(&self, rhs_sparse: &[(usize, f64)], scratch: &mut [f64], gp: &mut GpScratch, out: &mut [f64]) -> usize {
         self.base.l_solve_sparse_into(rhs_sparse, scratch, gp);
         // CLOCK-trigger accounting (`Self::tick`'s own docs): unlike the
         // dense `L`-stage in `ftran_through_l_and_r_into` (a flat `m`),
@@ -2141,10 +2323,9 @@ impl FtLu {
         // over `u_seq`, fully implemented and correct) measured as a net
         // *regression* once benchmarked, and was reverted.
         self.u_solve_into(scratch);
-        for s in 0..self.base.m {
-            out[self.base.col_perm[s]] = scratch[s];
-        }
+        let nnz = self.permute_out(scratch, out);
         scratch.fill(0.0);
+        nnz
     }
 
     /// Same as [`Self::solve_sparse_into`], but additionally captures the
@@ -2162,7 +2343,7 @@ impl FtLu {
         gp: &mut GpScratch,
         out: &mut [f64],
         a_tilde_out: &mut [f64],
-    ) {
+    ) -> usize {
         self.base.l_solve_sparse_into(rhs_sparse, scratch, gp);
         self.add_tick(gp.reach.len() as u64);
         for reta in &self.r_etas {
@@ -2175,10 +2356,9 @@ impl FtLu {
         }
         a_tilde_out.copy_from_slice(scratch);
         self.u_solve_into(scratch);
-        for s in 0..self.base.m {
-            out[self.base.col_perm[s]] = scratch[s];
-        }
+        let nnz = self.permute_out(scratch, out);
         scratch.fill(0.0);
+        nnz
     }
 
     /// Allocating convenience wrapper around [`Self::solve_into`] — kept for
@@ -3429,6 +3609,69 @@ mod tests {
         // A rhs with 5 of 10 entries nonzero exceeds DENSE_RHS_FRACTION (0.4).
         assert!(lu.should_use_dense_solve(5), "5/10 nonzero rhs should be flagged dense");
         assert!(!lu.should_use_dense_solve(2), "2/10 nonzero rhs should not be flagged dense");
+    }
+
+    /// The result-density gate (`docs/lu_comparison_enomoto_vs_highs.md`
+    /// §2.7): a channel whose *results* keep coming back dense must end up
+    /// on the dense path even when every right-hand side it is handed is
+    /// sparse enough for `should_use_dense_solve` alone to say otherwise —
+    /// and must find its way back to the sparse path once the results turn
+    /// sparse again, since the average is recorded on both branches.
+    #[test]
+    fn density_gate_flips_a_sparse_rhs_channel_dense_and_back() {
+        let m = 10;
+        let rows: Vec<Vec<(usize, f64)>> = (0..m).map(|i| vec![(i, 4.0)]).collect();
+        let lu = FtLu::new(factorize(m, &rows).expect("nonsingular"));
+        let mut density = FtranDensity::new();
+        // Untouched history: dispatch is exactly `should_use_dense_solve`'s.
+        assert!(!lu.should_use_dense_solve_tracked(2, &density), "a fresh channel must not be gated dense");
+
+        // Fully dense results, iteration after iteration: the running
+        // average climbs past EXPECTED_DENSE_FRACTION (0.35) and the same
+        // sparse rhs now dispatches dense.
+        for _ in 0..30 {
+            density.record(m, m);
+        }
+        assert!(density.expected() > EXPECTED_DENSE_FRACTION, "expected={}", density.expected());
+        assert!(lu.should_use_dense_solve_tracked(2, &density), "a persistently dense channel must be gated dense");
+
+        // ...and back: nothing latches, because the dense branch records
+        // its own result density too.
+        for _ in 0..60 {
+            density.record(0, m);
+        }
+        assert!(!lu.should_use_dense_solve_tracked(2, &density), "expected={}", density.expected());
+    }
+
+    /// Every FTRAN entry point reports the nonzero count of the result it
+    /// just wrote — the measurement [`FtranDensity::record`] is fed — and
+    /// the dense and sparse paths agree on it, since they compute the
+    /// identical vector.
+    #[test]
+    fn solve_paths_report_the_result_nonzero_count() {
+        let m = 6;
+        // Lower-bidiagonal `B`: `B^-1 e_0` fills in over *every* row, so a
+        // one-nonzero rhs has a fully dense result — exactly the case the
+        // input-side test alone cannot see coming.
+        let rows: Vec<Vec<(usize, f64)>> =
+            (0..m).map(|i| if i == 0 { vec![(0, 2.0)] } else { vec![(i - 1, -2.0), (i, 2.0)] }).collect();
+        let lu = FtLu::new(factorize(m, &rows).expect("nonsingular"));
+
+        let mut dense_rhs = vec![0.0; m];
+        dense_rhs[0] = 1.0;
+        let mut scratch = vec![0.0; m];
+        let mut out_dense = vec![0.0; m];
+        let dense_nnz = lu.solve_into(&dense_rhs, &mut scratch, &mut out_dense);
+
+        let mut sparse_scratch = vec![0.0; m];
+        let mut gp = GpScratch::new(m);
+        let mut out_sparse = vec![0.0; m];
+        let sparse_nnz = lu.solve_sparse_into(&[(0, 1.0)], &mut sparse_scratch, &mut gp, &mut out_sparse);
+
+        assert_eq!(out_dense, out_sparse, "the two FTRAN paths must agree on the result itself");
+        assert_eq!(dense_nnz, sparse_nnz, "...and on its nonzero count");
+        assert_eq!(dense_nnz, out_dense.iter().filter(|&&v| v != 0.0).count());
+        assert_eq!(dense_nnz, m, "this fixture's whole point is a dense result from a one-nonzero rhs");
     }
 
     /// A dense-coefficient basis (every column of `B` has all `m` entries,

@@ -138,6 +138,22 @@ use std::sync::OnceLock;
 mod prof_phases {
     use std::sync::atomic::AtomicUsize;
     pub(super) static BTRAN: AtomicUsize = AtomicUsize::new(0);
+    /// FTRANs this solve dispatched to the dense path *because of the
+    /// result-density gate alone* — i.e. ones whose own right-hand side
+    /// was sparse enough that `FtLu::should_use_dense_solve`'s input test
+    /// (the only test this crate had before `sparse_lu::FtranDensity`)
+    /// would have sent them down the Gilbert-Peierls path. This is the
+    /// whole population the §2.7 change moves, so it is the number to
+    /// look at first when a problem's wall time shifts:
+    /// `density_gate_ftrans=0` means the gate never fired there and any
+    /// timing difference is noise or the nonzero-counting overhead alone.
+    pub(super) static DENSITY_GATE_FTRANS: AtomicUsize = AtomicUsize::new(0);
+    /// Each tracked channel's own running-average result density at the
+    /// last iteration that updated it, in per-mille of `m` (an
+    /// `AtomicUsize` because this module's counters are all atomics; the
+    /// value is a density, not a count).
+    pub(super) static DENSITY_COL_AQ_PPT: AtomicUsize = AtomicUsize::new(0);
+    pub(super) static DENSITY_BFRT_PPT: AtomicUsize = AtomicUsize::new(0);
     pub(super) static PRICE: AtomicUsize = AtomicUsize::new(0);
     pub(super) static CHUZR: AtomicUsize = AtomicUsize::new(0);
     pub(super) static CHUZC1: AtomicUsize = AtomicUsize::new(0);
@@ -311,6 +327,9 @@ mod prof_phases {
             &DSE_ERR_LT_10PCT,
             &DSE_ERR_LT_100PCT,
             &DSE_ERR_GE_100PCT,
+            &DENSITY_GATE_FTRANS,
+            &DENSITY_COL_AQ_PPT,
+            &DENSITY_BFRT_PPT,
         ] {
             c.store(0, Relaxed);
         }
@@ -357,6 +376,12 @@ mod prof_phases {
             "  avg_bfrt_flips/iter={:.3} avg_infeasible_pool/iter={:.1}",
             BFRT_FLIPS.load(Relaxed) as f64 / iters as f64,
             INFEASIBLE_POOL.load(Relaxed) as f64 / iters as f64
+        );
+        eprintln!(
+            "  density_gate_ftrans={} final_expected_density col_aq={:.3} bfrt={:.3}",
+            DENSITY_GATE_FTRANS.load(Relaxed),
+            DENSITY_COL_AQ_PPT.load(Relaxed) as f64 / 1000.0,
+            DENSITY_BFRT_PPT.load(Relaxed) as f64 / 1000.0
         );
         eprintln!(
             "  m_exit(q_was_m)={} harris_window_m_miss={} m_enter_via_flip={}",
@@ -1824,6 +1849,22 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     let mut sparse_scratch = vec![0.0f64; m];
     let mut gp_scratch = sparse_lu::GpScratch::new(m);
 
+    // Per-call-site FTRAN **result**-density running averages, feeding the
+    // dense/sparse dispatch below alongside each solve's own input
+    // nonzero count (`sparse_lu::FtranDensity`'s own docs, and
+    // `docs/lu_comparison_enomoto_vs_highs.md` §2.7 — the gap this closes:
+    // an rhs that is sparse on input says nothing about how far `L`'s own
+    // reach fans out, and that gap widens with `m`). The entering column's
+    // FTRAN and the BFRT combined-flip FTRAN keep separate histories
+    // because their right-hand sides (one constraint column vs. a sum over
+    // every column flipped this iteration) fill in to genuinely different
+    // densities. Declared out here with the buffers they parallel, so the
+    // history survives every refactorization this loop does: it is a
+    // property of the solve, not of any one `FtLu` (HiGHS keeps the same
+    // averages in `HEkk`, likewise across INVERTs).
+    let mut density_col_aq = sparse_lu::FtranDensity::new();
+    let mut density_bfrt = sparse_lu::FtranDensity::new();
+
     // BFRT combined-flip accumulators (two channels — `Affine1` has no
     // single-`f64` representation to solve for at once): summed sparse
     // contribution of every candidate flipped this iteration, in `base`/
@@ -2926,16 +2967,34 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
             if !combined_touched.is_empty() {
                 #[cfg(test)]
                 COMBINED_FLIP_COUNT.fetch_add(best_idx, std::sync::atomic::Ordering::Relaxed);
-                if lu.should_use_dense_solve(combined_touched.len()) {
-                    lu.solve_into(&combined_base, &mut lu_scratch, &mut combined_alpha_base);
-                    lu.solve_into(&combined_slope, &mut lu_scratch, &mut combined_alpha_slope);
+                // Both `Affine1` channels share one density history: they
+                // are the same rhs pattern solved against the same basis,
+                // differing only in the values scattered into it, so their
+                // results fill in alike. Recorded on both branches (see
+                // `super::solve_lp_dual_on`'s own identical dispatch).
+                if profile_phases && density_bfrt.predicts_dense() && !lu.should_use_dense_solve(combined_touched.len()) {
+                    prof_phases::DENSITY_GATE_FTRANS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                if lu.should_use_dense_solve_tracked(combined_touched.len(), &density_bfrt) {
+                    let base_nnz = lu.solve_into(&combined_base, &mut lu_scratch, &mut combined_alpha_base);
+                    let slope_nnz = lu.solve_into(&combined_slope, &mut lu_scratch, &mut combined_alpha_slope);
+                    density_bfrt.record(base_nnz, m);
+                    density_bfrt.record(slope_nnz, m);
+                    if profile_phases {
+                        prof_phases::DENSITY_BFRT_PPT.store((density_bfrt.expected() * 1000.0) as usize, std::sync::atomic::Ordering::Relaxed);
+                    }
                 } else {
                     sparse_base_buf.clear();
                     sparse_slope_buf.clear();
                     sparse_base_buf.extend(combined_touched.iter().map(|&i| (i, combined_base[i])));
                     sparse_slope_buf.extend(combined_touched.iter().map(|&i| (i, combined_slope[i])));
-                    lu.solve_sparse_into(&sparse_base_buf, &mut sparse_scratch, &mut gp_scratch, &mut combined_alpha_base);
-                    lu.solve_sparse_into(&sparse_slope_buf, &mut sparse_scratch, &mut gp_scratch, &mut combined_alpha_slope);
+                    let base_nnz = lu.solve_sparse_into(&sparse_base_buf, &mut sparse_scratch, &mut gp_scratch, &mut combined_alpha_base);
+                    let slope_nnz = lu.solve_sparse_into(&sparse_slope_buf, &mut sparse_scratch, &mut gp_scratch, &mut combined_alpha_slope);
+                    density_bfrt.record(base_nnz, m);
+                    density_bfrt.record(slope_nnz, m);
+                    if profile_phases {
+                        prof_phases::DENSITY_BFRT_PPT.store((density_bfrt.expected() * 1000.0) as usize, std::sync::atomic::Ordering::Relaxed);
+                    }
                 }
                 // Scanned over `0..m`, not `combined_touched`: FTRAN fill-in
                 // can produce nonzeros outside the input's own sparsity
@@ -3019,10 +3078,18 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
             for &(i, v) in std.cols.row(q) {
                 dense_q[i] = v;
             }
-            if lu.should_use_dense_solve(std.cols.row(q).len()) {
-                lu.solve_into_capture(&dense_q, &mut lu_scratch, &mut alpha_full, &mut a_tilde_buf);
+            if profile_phases && density_col_aq.predicts_dense() && !lu.should_use_dense_solve(std.cols.row(q).len()) {
+                prof_phases::DENSITY_GATE_FTRANS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            if lu.should_use_dense_solve_tracked(std.cols.row(q).len(), &density_col_aq) {
+                let result_nnz = lu.solve_into_capture(&dense_q, &mut lu_scratch, &mut alpha_full, &mut a_tilde_buf);
+                density_col_aq.record(result_nnz, m);
             } else {
-                lu.solve_sparse_into_capture(std.cols.row(q), &mut sparse_scratch, &mut gp_scratch, &mut alpha_full, &mut a_tilde_buf);
+                let result_nnz = lu.solve_sparse_into_capture(std.cols.row(q), &mut sparse_scratch, &mut gp_scratch, &mut alpha_full, &mut a_tilde_buf);
+                density_col_aq.record(result_nnz, m);
+            }
+            if profile_phases {
+                prof_phases::DENSITY_COL_AQ_PPT.store((density_col_aq.expected() * 1000.0) as usize, std::sync::atomic::Ordering::Relaxed);
             }
         });
 
@@ -3840,6 +3907,23 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
     // above).
     let mut sparse_scratch = vec![0.0f64; m];
     let mut gp_scratch = sparse_lu::GpScratch::new(m);
+
+    // Per-call-site FTRAN **result**-density running averages, feeding the
+    // dense/sparse dispatch below alongside each solve's own input
+    // nonzero count (`sparse_lu::FtranDensity`'s own docs, and
+    // `docs/lu_comparison_enomoto_vs_highs.md` §2.7 — the gap this closes:
+    // an rhs that is sparse on input says nothing about how far `L`'s own
+    // reach fans out, and that gap widens with `m`). The entering column's
+    // FTRAN and the BFRT combined-flip FTRAN keep separate histories
+    // because their right-hand sides (one constraint column vs. a sum over
+    // every column flipped this iteration) fill in to genuinely different
+    // densities. Declared out here with the buffers they parallel, so the
+    // history survives every refactorization this loop does: it is a
+    // property of the solve, not of any one `FtLu` (HiGHS keeps the same
+    // averages in `HEkk`, likewise across INVERTs).
+    let mut density_col_aq = sparse_lu::FtranDensity::new();
+    let mut density_bfrt = sparse_lu::FtranDensity::new();
+
     let mut combined = vec![0.0f64; m];
     let mut combined_touched_flag = vec![false; m];
     let mut combined_touched: Vec<usize> = Vec::new();
@@ -4143,12 +4227,14 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
             }
         }
         if !combined_touched.is_empty() {
-            if lu.should_use_dense_solve(combined_touched.len()) {
-                lu.solve_into(&combined, &mut lu_scratch, &mut combined_alpha);
+            if lu.should_use_dense_solve_tracked(combined_touched.len(), &density_bfrt) {
+                let result_nnz = lu.solve_into(&combined, &mut lu_scratch, &mut combined_alpha);
+                density_bfrt.record(result_nnz, m);
             } else {
                 sparse_buf.clear();
                 sparse_buf.extend(combined_touched.iter().map(|&i| (i, combined[i])));
-                lu.solve_sparse_into(&sparse_buf, &mut sparse_scratch, &mut gp_scratch, &mut combined_alpha);
+                let result_nnz = lu.solve_sparse_into(&sparse_buf, &mut sparse_scratch, &mut gp_scratch, &mut combined_alpha);
+                density_bfrt.record(result_nnz, m);
             }
             // Scanned over `0..m`, not `combined_touched`: FTRAN fill-in
             // can produce nonzeros outside the input's own sparsity
@@ -4187,10 +4273,12 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
         for &(i, v) in std.cols.row(q) {
             dense_q[i] = v;
         }
-        if lu.should_use_dense_solve(std.cols.row(q).len()) {
-            lu.solve_into_capture(&dense_q, &mut lu_scratch, &mut alpha_full, &mut a_tilde_buf);
+        if lu.should_use_dense_solve_tracked(std.cols.row(q).len(), &density_col_aq) {
+            let result_nnz = lu.solve_into_capture(&dense_q, &mut lu_scratch, &mut alpha_full, &mut a_tilde_buf);
+            density_col_aq.record(result_nnz, m);
         } else {
-            lu.solve_sparse_into_capture(std.cols.row(q), &mut sparse_scratch, &mut gp_scratch, &mut alpha_full, &mut a_tilde_buf);
+            let result_nnz = lu.solve_sparse_into_capture(std.cols.row(q), &mut sparse_scratch, &mut gp_scratch, &mut alpha_full, &mut a_tilde_buf);
+            density_col_aq.record(result_nnz, m);
         }
 
         // `updateVerify` (`super::update_verify`'s own docs): cross-checks

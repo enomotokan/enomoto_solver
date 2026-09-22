@@ -3582,6 +3582,22 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
     // still finds them zeroed exactly as it requires.
     let mut sparse_lu_scratch = vec![0.0; m];
     let mut gp_scratch = sparse_lu::GpScratch::new(m);
+
+    // Per-call-site FTRAN **result**-density running averages, feeding the
+    // dense/sparse dispatch below alongside each solve's own input
+    // nonzero count (`sparse_lu::FtranDensity`'s own docs, and
+    // `docs/lu_comparison_enomoto_vs_highs.md` §2.7 — the gap this closes:
+    // an rhs that is sparse on input says nothing about how far `L`'s own
+    // reach fans out, and that gap widens with `m`). The entering column's
+    // FTRAN and the BFRT combined-flip FTRAN keep separate histories
+    // because their right-hand sides (one constraint column vs. a sum over
+    // every column flipped this iteration) fill in to genuinely different
+    // densities. Declared out here with the buffers they parallel, so the
+    // history survives every refactorization this loop does: it is a
+    // property of the solve, not of any one `FtLu` (HiGHS keeps the same
+    // averages in `HEkk`, likewise across INVERTs).
+    let mut density_col_aq = sparse_lu::FtranDensity::new();
+    let mut density_bfrt = sparse_lu::FtranDensity::new();
     // Dedicated capture buffers for `FtLu::try_update_precomputed` (see its
     // own docs): `e_tilde_buf` is filled as a side effect of this
     // iteration's `rho_p` BTRAN (below) and `a_tilde_buf` as a side effect
@@ -4399,11 +4415,16 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
                 // relative to `m` — see `should_use_dense_solve`'s own
                 // docs) and goes straight through the plain dense solve
                 // against `combined_buf`, which is already built above.
-                if lu.should_use_dense_solve(combined_touched.len()) {
+                if lu.should_use_dense_solve_tracked(combined_touched.len(), &density_bfrt) {
                     if profile_phases {
                         prof_phases::DENSE_RHS_BYPASSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
-                    lu.solve_into(&combined_buf, &mut sparse_lu_scratch, &mut combined_alpha_buf);
+                    let result_nnz = lu.solve_into(&combined_buf, &mut sparse_lu_scratch, &mut combined_alpha_buf);
+                    // Recorded on *both* branches (here and below), never
+                    // only on the one the gate happens to have picked: that
+                    // is what keeps the gate from latching dense forever
+                    // once it has fired once.
+                    density_bfrt.record(result_nnz, m);
                     // `solve_into`'s own scratch (unlike `solve_sparse_into`'s)
                     // isn't left zeroed — but `sparse_lu_scratch` is shared
                     // with the entering column's solve below, which *may*
@@ -4415,7 +4436,9 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
                 } else {
                     let combined_sparse: Vec<(usize, f64)> =
                         combined_touched.iter().map(|&i| (i, combined_buf[i])).collect();
-                    lu.solve_sparse_into(&combined_sparse, &mut sparse_lu_scratch, &mut gp_scratch, &mut combined_alpha_buf);
+                    let result_nnz =
+                        lu.solve_sparse_into(&combined_sparse, &mut sparse_lu_scratch, &mut gp_scratch, &mut combined_alpha_buf);
+                    density_bfrt.record(result_nnz, m);
                 }
                 #[cfg(debug_assertions)]
                 {
@@ -4492,14 +4515,16 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
             // capture `a_tilde_buf` (the post-L/R, pre-U intermediate) for
             // this iteration's `try_update_precomputed` call, near the end
             // of the loop — see that method's own docs.
-            if lu.should_use_dense_solve(t.column_sparse(q).len()) {
+            if lu.should_use_dense_solve_tracked(t.column_sparse(q).len(), &density_col_aq) {
                 if profile_phases {
                     prof_phases::DENSE_RHS_BYPASSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
-                lu.solve_into_capture(&a_enter_buf, &mut sparse_lu_scratch, &mut alpha_buf, &mut a_tilde_buf);
+                let result_nnz = lu.solve_into_capture(&a_enter_buf, &mut sparse_lu_scratch, &mut alpha_buf, &mut a_tilde_buf);
+                density_col_aq.record(result_nnz, m);
                 sparse_lu_scratch.fill(0.0); // restore solve_sparse_into's zero-on-entry precondition
             } else {
-                lu.solve_sparse_into_capture(t.column_sparse(q), &mut sparse_lu_scratch, &mut gp_scratch, &mut alpha_buf, &mut a_tilde_buf);
+                let result_nnz = lu.solve_sparse_into_capture(t.column_sparse(q), &mut sparse_lu_scratch, &mut gp_scratch, &mut alpha_buf, &mut a_tilde_buf);
+                density_col_aq.record(result_nnz, m);
             }
             if profile_phases {
                 prof_phases::ALPHA_NNZ.fetch_add(alpha_buf.iter().filter(|&&v| v != 0.0).count(), std::sync::atomic::Ordering::Relaxed);
