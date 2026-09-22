@@ -521,6 +521,37 @@ pub fn run_extended(
         let mut cur_real_rows = prop.real_rows;
         let mut cur_real_rhs = prop.real_rhs;
 
+        // Equality-row counterpart of the `propagate` call above (see
+        // `propagate::propagate_equalities`'s own docs). Run for the first
+        // two outer rounds — the round count that already captured every
+        // forcing row and bound tightening in the 93-problem measurement
+        // (analysis/greenbea_20260921_230908.md §7.1); later rounds found
+        // nothing further but still paid for the full-matrix scan.
+        //
+        // Tried running this pass *after* `dualpropagate`/`aggregator`/
+        // `parallelcols` instead, so it would only bound whatever column
+        // none of those three could already eliminate outright (they each
+        // need a column still unbounded on their own side — see every
+        // module's own docs). That ordering did preserve more of
+        // `aggregator`'s reach on `stocfor2` (its own motivating instance),
+        // but cost most of `greenbea`'s win (M-tracked columns 3,569 -> ~2k
+        // instead of ~300, since several outer rounds' worth of `aggregator`
+        // substitutions consume equality rows this pass would otherwise
+        // have used) and, measured on the full 93-problem set, a *worse*
+        // aggregate `ours` time than running here (52.1s vs 50.9s) despite
+        // "fixing" `stocfor2` partway — `pilot87`/`d2q06c` regressed instead
+        // under that ordering. Running here, before `dualfix`, remains the
+        // best aggregate result found; `stocfor2`'s own regression (~+90%,
+        // absolute ~0.13s) is this trade-off's known remaining cost — see
+        // this function's own module docs and the loop's analysis file for
+        // the full comparison table.
+        if _round_idx < 2 {
+            let eq = timed_step!("eqprop", propagate::propagate_equalities(&a, &b, &mut lb, &mut ub, prop_passes));
+            if eq.infeasible {
+                return extended_infeasible(sc, a, b, c, n);
+            }
+        }
+
         let fixes = timed_step!("dualfix", dualfix::fix_dominated_variables(n, &a, &cur_real_rows, &c, &lb, &ub));
         for &(j, value) in &fixes {
             lb[j] = value;
@@ -982,35 +1013,6 @@ pub fn run_extended(
         }
         prev_signature = Some(signature);
     }
-
-    // Equality-row counterpart of `propagate` (see
-    // `propagate::propagate_equalities`'s own docs), run exactly once here,
-    // after the round loop above has fully converged (or exhausted its
-    // round budget) rather than inside it. `dualpropagate`, `aggregator`,
-    // and `parallelcols` each only fire on a column that is *still*
-    // unbounded on the side they need (see each module's own docs) — three
-    // strictly better reductions (elimination or an implication-derived
-    // fix, not just a tighter box) that this pass would silently pre-empt
-    // for any column it bounds first. Instrumented directly on `stocfor2`
-    // (`aggregator`'s own motivating instance): running this pass inside
-    // round 0, even dead last in the round, still cost `aggregator` its
-    // round-1 reach (64 -> 2 eliminations, since round 0's tightening
-    // carries into round 1 the same way any other round-0 reduction would).
-    // Running it only after every round is done removes that interaction
-    // entirely — every earlier pass across every round sees exactly the
-    // bounds it would without this pass existing at all — and this pass
-    // only ever bounds a column none of those passes, across any round,
-    // could already resolve. See analysis/greenbea_20260921_230908.md §7.1
-    // for why this reduction still matters for `extended_dual`'s own "M-
-    // side" bookkeeping even after every other reduction above has run.
-    let (mut post_lb, mut post_ub, post_real_rows, post_real_rhs) = propagate::extract_bounds(n, &g, &h);
-    let eq = timed_step!("eqprop", propagate::propagate_equalities(&a, &b, &mut post_lb, &mut post_ub, prop_passes));
-    if eq.infeasible {
-        return extended_infeasible(sc, a, b, c, n);
-    }
-    let (ng, nh) = propagate::rebuild_g(n, post_real_rows, post_real_rhs, &post_lb, &post_ub);
-    g = ng;
-    h = nh;
 
     let prop = timed_step!("final propagate", propagate::propagate(n, &g, &h, prop_passes));
     if profile {
