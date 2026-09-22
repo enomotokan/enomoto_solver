@@ -2650,7 +2650,10 @@ impl DseState {
         let pivot = alpha[p];
         let wp_old = rho_p.iter().map(|v| v * v).sum::<f64>().max(STEEPEST_EDGE_FLOOR);
         let update_one = |i: usize, w_i: &mut f64| {
-            if i == p {
+            // `alpha[i] == 0` leaves `w_i` bit-for-bit unchanged (`w - 2*(±0)*tau
+            // + 0*wp_old == w`, and every stored weight is already floored),
+            // so those rows skip the division and the rest of the update.
+            if i == p || alpha[i] == 0.0 {
                 return;
             }
             let ratio = alpha[i] / pivot;

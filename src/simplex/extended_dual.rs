@@ -1401,6 +1401,27 @@ fn row_infeasible_affine(cache: &ColCache, basis: &[usize], x_b_base: &[f64], x_
     row_deviation(cache, basis, x_b_base, x_b_slope, noise_feasible, i).is_some()
 }
 
+/// Records row `i`'s freshly computed [`row_deviation`] in `row_dev` and
+/// its infeasibility in `infeasible_rows` — the one write path for both, so
+/// `row_dev[i]` always equals what `row_deviation` would return for row `i`
+/// right now (every change to a row's `basis`/`x_B`/`noise_feasible` input
+/// is already followed by a `set` or `rebuild`, which is what keeps
+/// `InfeasibleRows` exact). CHUZR then reads the cached value instead of
+/// recomputing it for every infeasible row every iteration, as HiGHS's
+/// `work_infeasibility` does.
+#[inline]
+fn set_row_dev(infeasible_rows: &mut super::InfeasibleRows, row_dev: &mut [Option<(i32, Affine1)>], i: usize, dv: Option<(i32, Affine1)>) {
+    row_dev[i] = dv;
+    infeasible_rows.set(i, dv.is_some());
+}
+
+/// [`set_row_dev`]'s counterpart for an `InfeasibleRows::rebuild` predicate.
+#[inline]
+fn rebuild_row_dev(row_dev: &mut [Option<(i32, Affine1)>], i: usize, dv: Option<(i32, Affine1)>) -> bool {
+    row_dev[i] = dv;
+    dv.is_some()
+}
+
 /// Plain-`f64` counterpart of [`row_deviation`]/[`compute_rhs_affine`]/
 /// [`width_affine`], for [`polish_with_true_bounds`] — once cleanup has run,
 /// no nonbasic column is ever `M`-flagged anymore, so this phase operates
@@ -1700,6 +1721,63 @@ impl Ord for Cand {
     }
 }
 
+/// `std.rows` with every fixed column (`lb == ub`) dropped, in flat
+/// `start`/`col`/`val` arrays — the matrix PRICE (`a_p = rho^T A`) walks.
+/// PRICE never wants a fixed column's entry, and `StdForm` is immutable for
+/// the whole solve, so filtering once here replaces a per-nonzero
+/// `std.lb[j] == std.ub[j]` test (two random loads) on every pivot. Kept
+/// entries stay in `std.rows`'s own order, so every `a_p[j]` accumulates
+/// the identical sequence of terms — bit-for-bit the unfiltered loop's
+/// result. Column indices are `u32` (`n_total` is far below `2^32` for any
+/// LP this crate can hold in memory) to cut the entry size from 16 to 12
+/// bytes of memory traffic.
+struct PriceRows {
+    start: Vec<usize>,
+    col: Vec<u32>,
+    val: Vec<f64>,
+}
+
+impl PriceRows {
+    fn build(std: &StdForm) -> Self {
+        let m = std.n_rows;
+        let mut start = Vec::with_capacity(m + 1);
+        let mut col = Vec::new();
+        let mut val = Vec::new();
+        start.push(0);
+        for i in 0..m {
+            for &(j, v) in std.rows.row(i) {
+                if std.lb[j] == std.ub[j] {
+                    continue;
+                }
+                col.push(j as u32);
+                val.push(v);
+            }
+            start.push(col.len());
+        }
+        PriceRows { start, col, val }
+    }
+
+    /// Row-major sparse PRICE: accumulates `rho^T A` into `a_p` over the
+    /// rows with `|rho_i| > TOL`, recording each newly touched column.
+    #[inline]
+    fn price(&self, rho: &[f64], a_p: &mut [f64], touched: &mut [bool], touched_cols: &mut Vec<usize>) {
+        for (i, &rv) in rho.iter().enumerate() {
+            if rv.abs() <= TOL {
+                continue;
+            }
+            let (lo, hi) = (self.start[i], self.start[i + 1]);
+            for (&j, &v) in self.col[lo..hi].iter().zip(&self.val[lo..hi]) {
+                let j = j as usize;
+                if !touched[j] {
+                    touched[j] = true;
+                    touched_cols.push(j);
+                }
+                a_p[j] += rv * v;
+            }
+        }
+    }
+}
+
 /// Trial BTRAN + PRICE + (BFRT-free) ratio test for a candidate leaving row
 /// `row`, without committing any basis/nonbasic-status change — the
 /// "greatest improvement" chuzr escalation's own building block (see that
@@ -1724,7 +1802,7 @@ impl Ord for Cand {
 /// of the same buffers for the row it actually commits to, is safe.
 #[allow(clippy::too_many_arguments)]
 fn trial_row_ratio(
-    std: &StdForm,
+    price_rows: &PriceRows,
     lu: &sparse_lu::FtLu,
     nb_status: &[Option<NbStatus>],
     d: &[f64],
@@ -1738,22 +1816,7 @@ fn trial_row_ratio(
 ) -> Option<f64> {
     lu.solve_transpose_unit(row, lu_scratch, rho);
 
-    for i in 0..std.n_rows {
-        let rv = rho[i];
-        if rv.abs() <= TOL {
-            continue;
-        }
-        for &(j, v) in std.rows.row(i) {
-            if std.lb[j] == std.ub[j] {
-                continue;
-            }
-            if !touched[j] {
-                touched[j] = true;
-                touched_cols.push(j);
-            }
-            a_p[j] += rv * v;
-        }
-    }
+    price_rows.price(rho, a_p, touched, touched_cols);
 
     let mut best_ratio = f64::INFINITY;
     for &j in touched_cols.iter() {
@@ -1958,6 +2021,13 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     let mut a_tilde_buf = vec![0.0f64; m];
     let mut e_tilde_buf = vec![0.0f64; m];
     let mut candidates: Vec<Cand> = Vec::new();
+    // chuzc1/BFRT's lazily-popped heap and its sorted prefix, hoisted out of
+    // the loop so neither reallocates every iteration (`Cand`'s `Ord` is a
+    // total order on `(ratio, j)`, so the pop sequence is identical however
+    // the heap was built).
+    let mut cand_heap: BinaryHeap<Reverse<Cand>> = BinaryHeap::new();
+    let mut sorted_prefix: Vec<Cand> = Vec::new();
+    let price_rows = PriceRows::build(std);
 
     // Dedicated to `solve_sparse_into` alone, per that method's own
     // documented precondition (`FtLu::solve_sparse_into`'s own docs) —
@@ -2033,7 +2103,10 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     // method's own optimization, reused verbatim (see that struct's own
     // docs on why it has no `f64`-vs-`Affine1` dependency to generalize).
     let mut infeasible_rows = InfeasibleRows::new(m);
-    infeasible_rows.rebuild(m, |i| row_infeasible_affine(&cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i));
+    // Row `i`'s current `row_deviation`, kept in lockstep with
+    // `infeasible_rows` (see [`set_row_dev`]).
+    let mut row_dev: Vec<Option<(i32, Affine1)>> = vec![None; m];
+    infeasible_rows.rebuild(m, |i| rebuild_row_dev(&mut row_dev, i, row_deviation(&cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i)));
     fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fd_cb, &mut lu_scratch, &mut fd_y, &mut d);
 
     // Leaving-row weighting (paper \S4.5): starts in cheap `Devex` mode and
@@ -2155,6 +2228,10 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     // the loop for the same reason `super::solve_lp_dual_on` hoists its
     // own copy: a single `bool` branch per pivot, not an `env::var` call.
     let update_verify_disabled = std::env::var("ENOMOTO_DISABLE_UPDATE_VERIFY").is_ok();
+    // Per-iteration debug switches, hoisted for the same reason (the
+    // `D_DRIFT` one used to be an `env::var` lookup on every pivot).
+    let debug_d_drift = std::env::var("ENOMOTO_DEBUG_D_DRIFT_EXT").is_ok();
+    let debug_xb_drift = std::env::var("ENOMOTO_DEBUG_XB_DRIFT_EXT").is_ok();
     // `ENOMOTO_PROF_PHASES_EXT` — this module's own counterpart to
     // `simplex::solve_lp_dual`'s `ENOMOTO_PROF_PHASES` (see [`prof_phases`]'s
     // own docs). Hoisted here for the same reason: a single `bool` branch
@@ -2584,7 +2661,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         let mut best: Option<(usize, i32, Affine1, Score2)> = None;
         timed!(profile_phases, prof_phases::CHUZR, {
             for &i in &infeasible_rows.rows {
-                let Some((d_dir, dev)) = row_deviation(&cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i) else { continue };
+                let Some((d_dir, dev)) = row_dev[i] else { continue };
                 // `dev` itself (returned in `best` below, used for this
                 // row's actual target/theta arithmetic if chosen) stays
                 // the true, unscaled value — only the `Score2` fed to
@@ -2636,7 +2713,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
             timed!(profile_phases, prof_phases::CHUZR, {
                 gi_candidates.clear();
                 for &i in &infeasible_rows.rows {
-                    let Some((d_dir_i, dev_i)) = row_deviation(&cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i) else { continue };
+                    let Some((d_dir_i, dev_i)) = row_dev[i] else { continue };
                     let score = Score2::new(dev_i, weights.weight(i));
                     gi_candidates.push((i, d_dir_i, dev_i, score));
                 }
@@ -2646,7 +2723,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 let mut best_gain: Option<Affine1> = None;
                 let mut best_gi: Option<(usize, i32, Affine1)> = None;
                 for &(i, d_dir_i, dev_i, _) in &gi_candidates {
-                    let Some(ratio) = trial_row_ratio(std, &lu, &nb_status, &d, d_dir_i, &mut lu_scratch, &mut rho, &mut a_p, &mut touched, &mut touched_cols, i) else {
+                    let Some(ratio) = trial_row_ratio(&price_rows, &lu, &nb_status, &d, d_dir_i, &mut lu_scratch, &mut rho, &mut a_p, &mut touched, &mut touched_cols, i) else {
                         continue;
                     };
                     let gain = dev_i.scale(ratio);
@@ -2746,22 +2823,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         // column — routine for a plain `x_j >= 0` MPS column with no
         // explicit upper bound).
         timed!(profile_phases, prof_phases::PRICE, {
-            for i in 0..m {
-                let rv = rho[i];
-                if rv.abs() <= TOL {
-                    continue;
-                }
-                for &(j, v) in std.rows.row(i) {
-                    if std.lb[j] == std.ub[j] {
-                        continue;
-                    }
-                    if !touched[j] {
-                        touched[j] = true;
-                        touched_cols.push(j);
-                    }
-                    a_p[j] += rv * v;
-                }
-            }
+            price_rows.price(&rho, &mut a_p, &mut touched, &mut touched_cols);
         });
 
         timed!(profile_phases, prof_phases::CHUZC1, {
@@ -2815,7 +2877,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
             // large rows and too loose on tiny ones.
             if bfrt_reached(w_r, Affine1::ZERO, x_b_base[r]) {
                 noise_feasible[basis[r]] = true;
-                infeasible_rows.set(r, false);
+                set_row_dev(&mut infeasible_rows, &mut row_dev, r, None);
                 continue;
             }
             // Never conclude infeasibility from an *updated* basis
@@ -2849,7 +2911,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                     lu.solve_into(&fresh_base, &mut lu_scratch, &mut x_b_base);
                     lu.solve_into(&fresh_slope, &mut lu_scratch, &mut x_b_slope);
                     snap_slopes(&mut x_b_slope);
-                    infeasible_rows.rebuild(m, |i| row_infeasible_affine(&cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i));
+                    infeasible_rows.rebuild(m, |i| rebuild_row_dev(&mut row_dev, i, row_deviation(&cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i)));
                     fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fd_cb, &mut lu_scratch, &mut fd_y, &mut d);
                     if dse_refresh_on_refactor {
                         if let super::EdgeWeights::Dse(dse) = &mut weights {
@@ -2907,7 +2969,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         // to reuse, matching this function's own preallocate-once
         // convention for its other per-iteration buffers.
         let n_candidates = candidates.len();
-        let mut sorted_prefix: Vec<Cand> = Vec::new();
+        sorted_prefix.clear();
         let mut k_star: Option<usize> = None;
         // BFRT (\S4.6), generalized: cumulative flip capacity is an
         // `Affine1` running sum, compared lexicographically against
@@ -2948,8 +3010,11 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 }
             });
         } else {
-            let mut heap: BinaryHeap<Reverse<Cand>> =
-                timed!(profile_phases, prof_phases::CHUZC1, { candidates.drain(..).map(Reverse).collect() });
+            let heap = &mut cand_heap;
+            timed!(profile_phases, prof_phases::CHUZC1, {
+                heap.clear();
+                heap.extend(candidates.drain(..).map(Reverse));
+            });
             timed!(profile_phases, prof_phases::BFRT, {
                 while let Some(Reverse(cand)) = heap.pop() {
                     let idx = sorted_prefix.len();
@@ -2996,7 +3061,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                     lu.solve_into(&fresh_base, &mut lu_scratch, &mut x_b_base);
                     lu.solve_into(&fresh_slope, &mut lu_scratch, &mut x_b_slope);
                     snap_slopes(&mut x_b_slope);
-                    infeasible_rows.rebuild(m, |i| row_infeasible_affine(&cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i));
+                    infeasible_rows.rebuild(m, |i| rebuild_row_dev(&mut row_dev, i, row_deviation(&cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i)));
                     fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fd_cb, &mut lu_scratch, &mut fd_y, &mut d);
                     if dse_refresh_on_refactor {
                         if let super::EdgeWeights::Dse(dse) = &mut weights {
@@ -3090,11 +3155,17 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
             prof_phases::BFRT_FLIPS.fetch_add(best_idx, std::sync::atomic::Ordering::Relaxed);
         }
         timed!(profile_phases, prof_phases::BFRT, {
+            // Whether any flip moves the `M`-slope channel at all: once every
+            // flipped width is `M`-free (always, after `M` is resolved, and on
+            // problems that never `M`-bound a column), `combined_slope` stays
+            // identically zero and its FTRAN below is skipped outright.
+            let mut any_slope = false;
             for cand in &sorted[..best_idx] {
                 let old = nb_status[cand.j].unwrap();
                 let width = cache.width[cand.j].unwrap();
                 let sigma = if old == NbStatus::Lower { 1.0 } else { -1.0 };
                 let delta_x = width.scale(sigma);
+                any_slope |= delta_x.slope != 0.0;
                 for &(i, v) in std.cols.col(cand.j) {
                     if !combined_touched_flag[i] {
                         combined_touched_flag[i] = true;
@@ -3115,9 +3186,18 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 if profile_phases && density_bfrt.predicts_dense() && !lu.should_use_dense_solve(combined_touched.len()) {
                     prof_phases::DENSITY_GATE_FTRANS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
+                // A skipped all-zero slope solve still charges its CLOCK
+                // tick (`FtLu::charge_zero_rhs_solve`) and records its
+                // zero result density, so both the refactorization trigger
+                // and the dense/sparse dispatch see what they always did.
                 if lu.should_use_dense_solve_tracked(combined_touched.len(), &density_bfrt) {
                     let base_nnz = lu.solve_into(&combined_base, &mut lu_scratch, &mut combined_alpha_base);
-                    let slope_nnz = lu.solve_into(&combined_slope, &mut lu_scratch, &mut combined_alpha_slope);
+                    let slope_nnz = if any_slope {
+                        lu.solve_into(&combined_slope, &mut lu_scratch, &mut combined_alpha_slope)
+                    } else {
+                        lu.charge_zero_rhs_solve(true);
+                        0
+                    };
                     density_bfrt.record(base_nnz, m);
                     density_bfrt.record(slope_nnz, m);
                     if profile_phases {
@@ -3125,11 +3205,16 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                     }
                 } else {
                     sparse_base_buf.clear();
-                    sparse_slope_buf.clear();
                     sparse_base_buf.extend(combined_touched.iter().map(|&i| (i, combined_base[i])));
-                    sparse_slope_buf.extend(combined_touched.iter().map(|&i| (i, combined_slope[i])));
                     let base_nnz = lu.solve_sparse_into(&sparse_base_buf, &mut sparse_scratch, &mut gp_scratch, &mut combined_alpha_base);
-                    let slope_nnz = lu.solve_sparse_into(&sparse_slope_buf, &mut sparse_scratch, &mut gp_scratch, &mut combined_alpha_slope);
+                    let slope_nnz = if any_slope {
+                        sparse_slope_buf.clear();
+                        sparse_slope_buf.extend(combined_touched.iter().map(|&i| (i, combined_slope[i])));
+                        lu.solve_sparse_into(&sparse_slope_buf, &mut sparse_scratch, &mut gp_scratch, &mut combined_alpha_slope)
+                    } else {
+                        lu.charge_zero_rhs_solve(false);
+                        0
+                    };
                     density_bfrt.record(base_nnz, m);
                     density_bfrt.record(slope_nnz, m);
                     if profile_phases {
@@ -3140,11 +3225,22 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 // can produce nonzeros outside the input's own sparsity
                 // pattern (`super::solve_lp_dual_on`'s own combined-flip
                 // update does the same, for the same reason).
-                for i in 0..m {
-                    if combined_alpha_base[i] != 0.0 || combined_alpha_slope[i] != 0.0 {
-                        x_b_base[i] -= combined_alpha_base[i];
-                        x_b_slope[i] = snap_slope(x_b_slope[i] - combined_alpha_slope[i]);
-                        infeasible_rows.set(i, row_infeasible_affine(&cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i));
+                if any_slope {
+                    for i in 0..m {
+                        if combined_alpha_base[i] != 0.0 || combined_alpha_slope[i] != 0.0 {
+                            x_b_base[i] -= combined_alpha_base[i];
+                            x_b_slope[i] = snap_slope(x_b_slope[i] - combined_alpha_slope[i]);
+                            set_row_dev(&mut infeasible_rows, &mut row_dev, i, row_deviation(&cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i));
+                        }
+                    }
+                } else {
+                    // `snap_slope` is idempotent, so a zero slope step leaves
+                    // `x_b_slope` bit-for-bit unchanged.
+                    for i in 0..m {
+                        if combined_alpha_base[i] != 0.0 {
+                            x_b_base[i] -= combined_alpha_base[i];
+                            set_row_dev(&mut infeasible_rows, &mut row_dev, i, row_deviation(&cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i));
+                        }
                     }
                 }
                 for &i in &combined_touched {
@@ -3196,8 +3292,8 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         // vs FTRAN — `e_r^T B^-1 A_q = (B^-T e_r)^T A_q`) — expected to
         // agree exactly in infinite precision, which is exactly what
         // `updateVerify` below checks rather than merely assumes.
-        // `dense_q` (the raw column) is still built unconditionally: it is
-        // this FTRAN's own rhs, exactly like `super::solve_lp_dual_on`'s
+        // `dense_q` (the raw column) is built only on the dense branch: it
+        // is that FTRAN's own rhs, exactly like `super::solve_lp_dual_on`'s
         // own `a_enter_buf` (`try_update_precomputed` further down no
         // longer needs the raw column itself — see its own docs — only the
         // `a_tilde_buf` this same FTRAN captures below). The FTRAN itself
@@ -3214,15 +3310,21 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         // intermediate) for this iteration's `try_update_precomputed` call
         // further down — see that method's own docs.
         timed!(profile_phases, prof_phases::FTRAN, {
-            dense_q.fill(0.0);
-            for &(i, v) in std.cols.col(q) {
-                dense_q[i] = v;
-            }
             if profile_phases && density_col_aq.predicts_dense() && !lu.should_use_dense_solve(std.cols.col(q).len()) {
                 prof_phases::DENSITY_GATE_FTRANS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
             if lu.should_use_dense_solve_tracked(std.cols.col(q).len(), &density_col_aq) {
+                // `dense_q` is all-zero between iterations: scatter the
+                // column in, solve, and zero just those entries back out
+                // (rather than an `O(m)` fill every iteration — and none at
+                // all on the sparse path, which never reads it).
+                for &(i, v) in std.cols.col(q) {
+                    dense_q[i] = v;
+                }
                 let result_nnz = lu.solve_into_capture(&dense_q, &mut lu_scratch, &mut alpha_full, &mut a_tilde_buf);
+                for &(i, _) in std.cols.col(q) {
+                    dense_q[i] = 0.0;
+                }
                 density_col_aq.record(result_nnz, m);
             } else {
                 let result_nnz = lu.solve_sparse_into_capture(std.cols.col(q), &mut sparse_scratch, &mut gp_scratch, &mut alpha_full, &mut a_tilde_buf);
@@ -3348,7 +3450,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 lu.solve_into(&fresh_base, &mut lu_scratch, &mut x_b_base);
                 lu.solve_into(&fresh_slope, &mut lu_scratch, &mut x_b_slope);
                 snap_slopes(&mut x_b_slope);
-                infeasible_rows.rebuild(m, |i| row_infeasible_affine(&cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i));
+                infeasible_rows.rebuild(m, |i| rebuild_row_dev(&mut row_dev, i, row_deviation(&cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i)));
                 fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fd_cb, &mut lu_scratch, &mut fd_y, &mut d);
                 if dse_refresh_on_refactor {
                     if let super::EdgeWeights::Dse(dse) = &mut weights {
@@ -3430,12 +3532,26 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         let theta_base = (x_r.base - target.base) / alpha_q;
         let theta_slope = (x_r.slope - target.slope) / alpha_q;
         timed!(profile_phases, prof_phases::XB_UPDATE, {
-            for i in 0..m {
-                let a = alpha_full[i];
-                if a != 0.0 {
-                    x_b_base[i] -= a * theta_base;
-                    x_b_slope[i] = snap_slope(x_b_slope[i] - a * theta_slope);
-                    infeasible_rows.set(i, row_infeasible_affine(&cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i));
+            if theta_slope != 0.0 {
+                for i in 0..m {
+                    let a = alpha_full[i];
+                    if a != 0.0 {
+                        x_b_base[i] -= a * theta_base;
+                        x_b_slope[i] = snap_slope(x_b_slope[i] - a * theta_slope);
+                        set_row_dev(&mut infeasible_rows, &mut row_dev, i, row_deviation(&cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i));
+                    }
+                }
+            } else {
+                // Zero slope step (every iteration once `M` is resolved):
+                // `x_b_slope[i] - a * 0.0` is `x_b_slope[i]` and
+                // `snap_slope` is idempotent, so the slope channel is left
+                // untouched — bit-for-bit what the general loop writes.
+                for i in 0..m {
+                    let a = alpha_full[i];
+                    if a != 0.0 {
+                        x_b_base[i] -= a * theta_base;
+                        set_row_dev(&mut infeasible_rows, &mut row_dev, i, row_deviation(&cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i));
+                    }
                 }
             }
             x_b_base[r] = nb_val_q.base + theta_base;
@@ -3578,7 +3694,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         // it, superseding whatever the `alpha`-loop above computed for
         // index `r` against the stale identity (`super::solve_lp_dual_on`'s
         // own post-swap `infeasible_rows.set` call, same reason).
-        infeasible_rows.set(r, row_infeasible_affine(&cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, r));
+        set_row_dev(&mut infeasible_rows, &mut row_dev, r, row_deviation(&cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, r));
 
         // Incremental dual update (Huangfu & Hall §2.2.3,
         // `super::solve_lp_dual_on`'s own derivation via Sherman-Morrison
@@ -3589,7 +3705,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         // so this runs once per iteration regardless of how many columns
         // just got flipped.
         let theta_d = dj_q / alpha_q;
-        if std::env::var("ENOMOTO_DEBUG_D_DRIFT_EXT").is_ok() && theta_d.abs() > 1e3 {
+        if debug_d_drift && theta_d.abs() > 1e3 {
             eprintln!(
                 "DEBUG_D_DRIFT: LARGE theta_d at iter={_iter}: q={q} dj_q={dj_q} alpha_q={alpha_q} theta_d={theta_d} touched_cols={} r={r}",
                 touched_cols.len()
@@ -3598,8 +3714,6 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         timed!(profile_phases, prof_phases::DUAL_UPDATE, {
             for &j in &touched_cols {
                 d[j] -= theta_d * a_p[j];
-            }
-            for &j in &touched_cols {
                 a_p[j] = 0.0;
                 touched[j] = false;
             }
@@ -3707,7 +3821,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 // against the unmodified `xb_drift_tol` (step `0`).
                 let escalation_steps = (drift_trigger_count / XB_DRIFT_ESCALATION_STEP) as i32;
                 let effective_drift_tol = (xb_drift_tol * XB_DRIFT_ESCALATION_FACTOR.powi(escalation_steps)).min(XB_DRIFT_TOL_MAX);
-                if std::env::var("ENOMOTO_DEBUG_XB_DRIFT_EXT").is_ok() {
+                if debug_xb_drift {
                     eprintln!(
                         "DEBUG_XB_DRIFT: iter={_iter} resid_base={resid_base:.3e} resid_slope={resid_slope:.3e} drift_trigger_count={drift_trigger_count} effective_tol={effective_drift_tol:.3e}"
                     );
@@ -3751,7 +3865,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                     }
                     let resid_d = resid_sq.sqrt();
                     let scale_d = scale_sq.sqrt().max(1.0);
-                    if std::env::var("ENOMOTO_DEBUG_D_DRIFT_EXT").is_ok() {
+                    if debug_d_drift {
                         eprintln!("DEBUG_D_DRIFT: iter={_iter} resid_d={resid_d:.3e} scale_d={scale_d:.3e} rel={:.3e}", resid_d / scale_d);
                     }
                     if resid_d > D_DRIFT_TOL * scale_d {
@@ -3783,7 +3897,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 lu.solve_into(&fresh_base, &mut lu_scratch, &mut x_b_base);
                 lu.solve_into(&fresh_slope, &mut lu_scratch, &mut x_b_slope);
                 snap_slopes(&mut x_b_slope);
-                infeasible_rows.rebuild(m, |i| row_infeasible_affine(&cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i));
+                infeasible_rows.rebuild(m, |i| rebuild_row_dev(&mut row_dev, i, row_deviation(&cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i)));
                 fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fd_cb, &mut lu_scratch, &mut fd_y, &mut d);
                 if dse_refresh_on_refactor {
                     if let super::EdgeWeights::Dse(dse) = &mut weights {
@@ -4013,6 +4127,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
     let mut lu = lu;
     let mut since_check = 0usize;
     let mut since_residual_check = 0usize;
+    let price_rows = PriceRows::build(std);
     let mut lu_scratch = vec![0.0f64; m];
     // `PROF_PHASES_EXT` diagnostic (this function's own counterpart to the
     // main loop's `prof_phases` module, see [`synth_clock_should_refactor`]'s
@@ -4245,22 +4360,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
         // full derivation, including why *basic* columns are deliberately
         // not filtered out here) — `a_p = rho^T A`, walking only `rho`'s
         // nonzero rows.
-        for i in 0..m {
-            let rv = rho[i];
-            if rv.abs() <= TOL {
-                continue;
-            }
-            for &(j, v) in std.rows.row(i) {
-                if std.lb[j] == std.ub[j] {
-                    continue;
-                }
-                if !touched[j] {
-                    touched[j] = true;
-                    touched_cols.push(j);
-                }
-                a_p[j] += rv * v;
-            }
-        }
+        price_rows.price(&rho, &mut a_p, &mut touched, &mut touched_cols);
 
         candidates.clear();
         for &j in &touched_cols {

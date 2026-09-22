@@ -3424,6 +3424,25 @@ impl FtLu {
         self.build_tick
     }
 
+    /// Charges the CLOCK tick a [`Self::solve_into`] (`dense == true`) or
+    /// [`Self::solve_sparse_into`] (`dense == false`) call would have
+    /// charged for an **all-zero** right-hand side, without doing the solve
+    /// — for callers that know a solve's result is identically zero and
+    /// skip it. Such a solve charges the `L` stage (`m` dense, the empty
+    /// reach set sparse — zero-valued seeds are dropped), every `R`-eta,
+    /// and `U`'s flat `m` (no `U` column fires on a zero entry), so the
+    /// deterministic refactorization trigger sees exactly the same tick
+    /// stream as if the solve had run.
+    pub fn charge_zero_rhs_solve(&self, dense: bool) {
+        if dense {
+            self.add_tick(self.base.m as u64);
+        }
+        for reta in &self.r_etas {
+            self.add_tick(reta.r.nnz() as u64);
+        }
+        self.add_tick(self.base.m as u64);
+    }
+
     #[inline]
     fn add_tick(&self, n: u64) {
         self.tick.set(self.tick.get() + TICK_SOLVE_NNZ_COEF * n);
