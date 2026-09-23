@@ -44,6 +44,13 @@
       "last_result": "improved",
       "last_attempt_at": "2026-09-22T06:10:00Z",
       "note": "反復#8。当初セッション内で5b(不採用)と誤判定したが、判定に使ったベンチマーク比較の方法論に欠陥があったため訂正しmainへ採用(5a)。詳細はreport/ft_refactor_trigger_20260922_053000.md追記部分を参照。最終的にsrc/simplex/lu.rs・src/simplex/extended_dual.rsに決定的tickベースのコスト再分解トリガー(FACTOR=16)を実装し採用。93問題全数でstatus/目的値不一致0件、cargo test 176件・pytest全通過。同一セッション内でold/newを直接ビルドし逐次計測した2回の独立比較(いずれも標準ベンチマークスクリプトのin-process計測)で、対象群(stocfor2 -38%/-25%、80bau3b -30%/-11%、bnl2 -27%/-19%、degen3 -23%/-21%、greenbea -22%/-17%、d2q06c -12%、scfxm3 -26%/-9.5%)が一貫して改善、pilot87のみ+7.7%(5回中央値、10%未満で許容)の既知のトレードオフ。93問題合計時間もほぼ横ばい〜微減(-0.2%〜-1.9%、計測ごとに変動)。scripts/benchmark_results.jsonを本反復のクリーンな単発フルベンチマーク結果で更新。"
+    },
+    "kernel_flat_matrix": {
+      "consecutive_failures": 0,
+      "attempts": 1,
+      "last_result": "improved",
+      "last_attempt_at": "2026-09-22T14:40:00Z",
+      "note": "docs/lu_comparison_enomoto_vs_highs.md §3.1 / §4-5 の「Markowitz カーネルの能動部分行列 (MarkowitzState の Vec<BTreeMap>/Vec<BTreeSet>) のフラット配列化」。実装自体は a4e29bf + 7289525 で入り 17c33d3 で main にマージ済みだったが、この変更単独の A/B が未取得だった(6c8edce は searchLimit=8 とのマージ後の状態を測っただけで before が無い)ため、今回事後検証した。base アーム = 6c8edce から a4e29bf/7289525 だけを revert したツリー(searchLimit=8 は両アームに残す)。両アームを別 venv に maturin develop --release で入れ、base→after 交互で NETLIB93 全93問を3周。結果: 合計 -11.39% (42.11s→37.32s、3周の中央値)、重い10問 -12.25% / 軽い83問 -1.78%。中央値で10%以上退行した12問は交互15回(重い問題は5回)の追試で全て消え(stocfor2 は +11.9% → -3.6% と符号ごと逆転)、最終的に 10% 以上の退行は 0 件。経路保存の変更で、反復数・再分解回数・pivot_search 候補数・目的関数値が両アーム完全一致(93/93 optimal、HiGHS との相対差 >1e-6 は0件)。cargo test --release は両アーム 222 件全通過。効果は refactor フェーズに集中(pilot87: wall の48%→17%、4.9s→0.95s、全体差 -4.2s のほぼ全部)。詳細: analysis/kernel_flat_matrix_20260922_143000.md。申し送り: PIVOT_SEARCH_LIMIT=8 (§2.5) は実装済みだが単独の A/B 記録が無く、lu.rs が参照する analysis/pivot_search_limit_20260922_143000.md はリポジトリに存在しない。"
     }
   }
 }

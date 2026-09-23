@@ -63,7 +63,7 @@ pub fn max_bipartite_matching(adj: &[Vec<usize>], n_cols: usize) -> Vec<Option<u
         row: usize,
         idx: usize,
     }
-    fn try_augment(start: usize, adj: &[Vec<usize>], visited: &mut [bool], match_col: &mut [Option<usize>]) -> bool {
+    fn try_augment(start: usize, adj: &[Vec<usize>], visited: &mut [u32], stamp: u32, match_col: &mut [Option<usize>]) -> bool {
         let mut stack: Vec<Frame> = vec![Frame { row: start, idx: 0 }];
         // `col_stack[k]` is the column `stack[k]` was trying when it
         // decided to push `stack[k+1]` — i.e. `match_col[col_stack[k]] ==
@@ -79,10 +79,10 @@ pub fn max_bipartite_matching(adj: &[Vec<usize>], n_cols: usize) -> Vec<Option<u
             while stack[top].idx < adj[row].len() {
                 let col = adj[row][stack[top].idx];
                 stack[top].idx += 1;
-                if visited[col] {
+                if visited[col] == stamp {
                     continue;
                 }
-                visited[col] = true;
+                visited[col] = stamp;
                 chosen = Some(col);
                 break;
             }
@@ -120,9 +120,11 @@ pub fn max_bipartite_matching(adj: &[Vec<usize>], n_cols: usize) -> Vec<Option<u
         }
     }
 
+    let mut visited: Vec<u32> = vec![0; n_cols];
     for i in 0..p {
-        let mut visited = vec![false; n_cols];
-        try_augment(i, adj, &mut visited, &mut match_col);
+        // Epoch-stamped visited set: equivalent to a fresh
+        // `vec![false; n_cols]` per row, without the O(n_cols) clear.
+        try_augment(i, adj, &mut visited, (i + 1) as u32, &mut match_col);
     }
 
     let mut match_row: Vec<Option<usize>> = vec![None; p];

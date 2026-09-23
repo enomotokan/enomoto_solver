@@ -75,8 +75,7 @@
 
 use std::collections::HashMap;
 
-use crate::sparse::{csr_from_rows, Csr};
-
+use crate::sparse::{Csr, csr_from_rows, csr_rows};
 const TOL: f64 = 1e-9;
 
 /// Result of one [`merge_parallel_rows`] call: `a`/`b` with any newly
@@ -97,7 +96,7 @@ pub struct ParallelRowsResult {
 pub fn merge_parallel_rows(a: &Csr, b: &[f64], g: &Csr, h: &[f64], n: usize) -> ParallelRowsResult {
     let gr = g.as_ref();
     let m = gr.nrows();
-    let rows: Vec<Vec<(usize, f64)>> = (0..m).map(|i| gr.col_indices_of_row(i).zip(gr.values_of_row(i)).map(|(j, &v)| (j, v)).collect()).collect();
+    let rows: Vec<Vec<(usize, f64)>> = csr_rows(g);
 
     // Group multi-variable rows by their sign-invariant signature — divide
     // by the *signed* first coefficient (matching `redundancy::dedupe_rows`'s
@@ -193,8 +192,7 @@ pub fn merge_parallel_rows(a: &Csr, b: &[f64], g: &Csr, h: &[f64], n: usize) -> 
         return ParallelRowsResult { a: a.clone(), b: b.to_vec(), g: g.clone(), h: h.to_vec(), infeasible: true };
     }
 
-    let ar = a.as_ref();
-    let mut a_rows: Vec<Vec<(usize, f64)>> = (0..ar.nrows()).map(|i| ar.col_indices_of_row(i).zip(ar.values_of_row(i)).map(|(j, &v)| (j, v)).collect()).collect();
+    let mut a_rows: Vec<Vec<(usize, f64)>> = csr_rows(a);
     let mut new_b = b.to_vec();
     a_rows.extend(new_eq_rows);
     new_b.extend(new_eq_b);

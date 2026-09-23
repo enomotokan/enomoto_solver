@@ -148,8 +148,7 @@
 //! substitution logic needed here either).
 
 use crate::presolve::propagate;
-use crate::sparse::{csr_from_rows, Csr};
-
+use crate::sparse::{Csr, CscMat, csr_from_rows, csr_row_iter};
 const TOL: f64 = 1e-9;
 
 /// Bundles both reductions [`run`] reads out of one dual-feasibility
@@ -187,31 +186,35 @@ pub fn run(n: usize, a: &Csr, real_g_rows: &[Vec<(usize, f64)>], c: &[f64], lb: 
         return DualReductions::default();
     }
 
-    // Transpose: `col_terms[j]` collects every (dual-variable index, its
+    // Transpose: `col_terms.col(j)` holds every (dual-variable index, its
     // own coefficient on column `j`) pair, `A`'s rows numbered `0..num_a`
     // and `real_g_rows`'s numbered `num_a..num_a+num_g` right after them.
-    let mut col_terms: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
-    for i in 0..num_a {
-        for (j, &v) in ar.col_indices_of_row(i).zip(ar.values_of_row(i)) {
-            if v != 0.0 {
-                col_terms[j].push((i, v));
+    // Streamed straight into the compressed column form (two allocations,
+    // one counting sort) rather than `n` growable per-column `Vec`s — see
+    // `CscMat::from_entry_stream`'s own docs; the two row blocks never have
+    // to be concatenated first.
+    let col_terms = CscMat::from_entry_stream(num_duals, n, |emit| {
+        for i in 0..num_a {
+            for (j, v) in csr_row_iter(a, i) {
+                if v != 0.0 {
+                    emit(i, j, v);
+                }
             }
         }
-    }
-    for (gi, row) in real_g_rows.iter().enumerate() {
-        let i = num_a + gi;
-        for &(j, v) in row {
-            if v != 0.0 {
-                col_terms[j].push((i, v));
+        for (gi, row) in real_g_rows.iter().enumerate() {
+            for &(j, v) in row {
+                if v != 0.0 {
+                    emit(num_a + gi, j, v);
+                }
             }
         }
-    }
+    });
 
     let mut t_rows: Vec<Vec<(usize, f64)>> = Vec::new();
     let mut t_h: Vec<f64> = Vec::new();
 
     for j in 0..n {
-        if col_terms[j].is_empty() || lb[j] == ub[j] {
+        if col_terms.col(j).is_empty() || lb[j] == ub[j] {
             continue;
         }
         // `ub_j` unreachable (literally `+inf`) => `r_j` can never be
@@ -232,12 +235,12 @@ pub fn run(n: usize, a: &Csr, real_g_rows: &[Vec<(usize, f64)>], c: &[f64], lb: 
         // dual box containing no actual optimal dual solution, moving
         // the objective by +1531).
         if ub[j] == f64::INFINITY {
-            t_rows.push(col_terms[j].iter().map(|&(i, v)| (i, -v)).collect());
+            t_rows.push(col_terms.col(j).iter().map(|&(i, v)| (i, -v)).collect());
             t_h.push(c[j]);
         }
         // Symmetric case on the lower side.
         if lb[j] == f64::NEG_INFINITY {
-            t_rows.push(col_terms[j].clone());
+            t_rows.push(col_terms.col(j).to_vec());
             t_h.push(-c[j]);
         }
     }
@@ -277,7 +280,8 @@ pub fn run(n: usize, a: &Csr, real_g_rows: &[Vec<(usize, f64)>], c: &[f64], lb: 
     // interval multiplication by a negative scalar) — `col_terms` entries
     // are never zero (filtered when built above), so no third case.
     let mut fixed_columns = Vec::new();
-    for (j, terms) in col_terms.iter().enumerate() {
+    for j in 0..n {
+        let terms = col_terms.col(j);
         if terms.is_empty() || lb[j] == ub[j] {
             continue;
         }

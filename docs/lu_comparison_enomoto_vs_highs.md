@@ -24,7 +24,7 @@ ENOMOTO 側で高速化に参考になりそうな点をまとめる。
 | 密行列dispatch | `is_dense_input()` → `faer::PartialPivLu` | なし (常にMarkowitzカーネル) |
 | 更新 | Forrest-Tomlin (U-eta列 + R-eta行) | Forrest-Tomlin (`updateFT`) — **構造が違う** |
 | 求解 (FTRAN/BTRAN) | FTRAN-L は GP疎求解、**BTRAN-L は転置行major + 密度ゲート付き scatter (§2.6 で実装)**、U は密スキャン | **L/U 両方向で hyper-sparse + sparse の切替** |
-| 再分解 | 毎回ゼロから Markowitz | **`refactor_info_` に前回ピボット列を記憶し `rebuild()` で再利用** |
+| 再分解 | 前回の**列順**を再利用 (`factorize_reusing`、行は選び直し) + フル Markowitz フォールバック (§2.2 で実装) | `refactor_info_` に前回ピボット順を記憶し `rebuild()` で再利用 (**ホットスタート時のみ**、§2.2) |
 
 ---
 
@@ -57,20 +57,42 @@ ENOMOTO も `find_best_pivot` のバケットスキャンで「スコア0」を�
 
 HiGHS は分解成功時に `refactor_info_` へ
 `pivot_row / pivot_var / pivot_type` を保存する (`buildKernel` 内で push)。
-次回の同一基底分解時、`HFactor::build()` はまず `rebuild()` を試み、
+`HFactor::build()` はまず `rebuild()` を試み、
 **記憶したピボット順で `ftranL` を回すだけで L/U を再構築**する。
 `buildSimple`+`buildKernel` のピボット探索全体をスキップできる。
 
-ENOMOTO は毎回ゼロから Markowitz 探索。反復中に基底がほぼ同じ (数本入れ替え)
-であることを考えると、HiGHS 方式は「探索コスト」を大幅に削れる。
+> **訂正 (2026-09-22)**: この節はもともと「反復中に基底がほぼ同じなのだから
+> HiGHS 方式は探索コストを大幅に削れる」と書いていたが、**HiGHS が
+> `rebuild()` を使うのは反復中の再分解ではない**。`refactor_info_.use` を
+> 立てるのは `HEkk::setNlaRefactorInfo()` だけで、これはホットスタート
+> (保存した基底へ戻って解き直す)経路である。反復中の再分解
+> (`HSimplexNla::invert()`)は `refactor_info_.clear()` 済みの状態で
+> `buildSimple`+`buildKernel` を通る。`rebuild()` が相対安定性判定を持たず
+> 絶対値 `pivot_tolerance` だけを見て、外れたら即 rank deficiency を返すのも
+> 「同じ基底を分解し直すだけだから外れないはず」という前提による
+> (`assert(abs_pivot >= pivot_tolerance);`)。
 
-> 注意: HiGHS は列順 (pivot順) の再利用が**数値的安定性の観点**でリスクにもなる
-> ため、`rebuild()` が pivot tolerance を下回ったら rank deficiency を返して
-> フル `buildSimple`+`buildKernel` にフォールバックする。この安全弁ごと移植
-> する必要がある。
+**実装済み (2026-09-22、`analysis/pivot_order_reuse_20260922_120602.md`)**:
+上記のとおり (行, 列) 両方の順をそのまま再生する HiGHS 形の移植は、
+基底が変わっている以上ほぼ必ず棄却される(NETLIB 実測で採択率 0〜4%、
+棄却理由のほぼ全部が「記録した行に成分がない」)。FT 更新は基底スロットの
+列を差し替えるが、入基底列が「出た列のピボット行」に非ゼロを持つ理由は
+ないからである。
 
-**参考度: 高** — ENOMOTO の分解は「衝突に強い BTreeMap 走査」が高コストなので、
-探索スキップの効果は大きいと思われる。
+そこで `sparse_lu::factorize_reusing` は **列順だけを再利用**し、行は
+毎ステップ選び直す(記録した行が安定性床を通ればそれを使い、だめなら
+「床を通る候補のうち未到達列に残る非ゼロ数が最小」= 列固定下の Markowitz
+カウントの残り半分で選ぶ)。分解本体は左向き (Gilbert-Peierls 形) で、
+探索も能動部分行列 (`MarkowitzState` の `BTreeMap`/`BTreeSet`) も持たない。
+安全弁は 3 つ (特異 / fill 上限 1.25 倍 / border 列基底の除外) で、いずれも
+フル Markowitz へのフォールバックに落ちる。棄却は連続しやすいので指数
+バックオフ付き。
+
+結果: 再分解フェーズ自体が 25〜40% 減り、NETLIB93 全問題の同一プロセス
+A/B で合計 **-2.55%**(46.42s → 45.24s)、目的関数値 93/93 一致、
+**10% 以上の退行ゼロ**。fill 上限を緩めると採択率は上がるが総和では負ける
+(2.0 倍で +2.7%)ことも計測済み — fill は 1 回限りのコストではなく、その
+分解が生きている間の全 FTRAN/BTRAN が払い続けるため。
 
 ### 2.3 カーネル分解の両方向一体型データ構造
 
@@ -92,18 +114,53 @@ HiGHS方式のフラット `Vec<HighsInt>` + `Vec<f64>` + 挿抜インデック�
 
 ### 2.4 `pivot_threshold` と `colFixMax` のインクリメンタル更新
 
-ENOMOTO の安定性床は固定 `STABILITY = 0.1` で、`col_max_abs[j]` を
-`refresh_column` で再計算する (BTreeSet全走査)。
+**実装して計測、両方とも不採用 (2026-09-22)**。詳細は
+`analysis/pivot_threshold_colfixmax_20260922_154500.md`。
 
 HiGHS は `pivot_threshold` (デフォルト0.1、`kMinPivotThreshold=8e-4`〜
-`kMaxPivotThreshold=0.5`) を可変にでき、`colFixMax` で
-**列の最大絶対値を O(col_count) で更新**する。安定性基準は
-`mc_min_pivot[j] = max_value * pivot_threshold` としてキャッシュ。
+`kMaxPivotThreshold=0.5`) を可変にでき、数値的失敗のたびに
+`kPivotThresholdChangeFactor=5.0` 倍して上げる。`colFixMax` は
+**列の最大絶対値を O(col_count) で更新**し、安定性基準を
+`mc_min_pivot[j] = max_value * pivot_threshold` としてキャッシュする。
 
-ENOMOTO の `refresh_column` は `col_rows[j]` 全体 (BTreeSet) を走査して
-`max` を取る。HiGHS はカーネル内部でこれを列単位の連続メモリ走査にしている。
+1. **安定性床の動的化 — 計測 +7.4%、不採用 (機構のみ温存)**。
+   HiGHS と同じ向き (数値的失敗で**きつくする**) で実装した。閾値はスレッド
+   ローカルに解ごとに持ち、分解ごとに1回だけ読む。FT更新の棄却・`x_B(M)`
+   ドリフト・`d` ドリフト・PRICEとのピボット不一致の4トリガが 10 回たまる
+   ごとに 0.25 → 0.5 へ1段上げる。
+   NETLIB93 合計 **+7.4%**、10% 以上の退行が 3 問題
+   (`pilot87` +29.2%、`brandy` +67%、`gfrd-pnc` +12.3%)。
+   上限 0.5 が重い問題には高すぎる (`STABILITY` 自身のドキュメントが記録
+   している「静的 0.5 は充填増で約4%遅い」がそのまま出る) のに対し、
+   ドリフト起因の再分解だけで 10 回に届く問題が多く (`pilot` 21、`dfl001` 24、
+   `greenbea` 22)、「病的な解にだけ効く安全弁」にならなかった。
+   段幅を上げると NETLIB93 では一度も発火しなくなるだけなので、再調整では
+   なく **既定で無効** (`extended_dual::PIVOT_ESCALATION_STEP = 0`) とし、
+   配管と env ゲート (`ENOMOTO_PIVOT_THRESHOLD` /
+   `ENOMOTO_PIVOT_ESCALATION_STEP`) だけ残した。既定ビルドの挙動は変更前と
+   同一。
+   なお本節が元々書いていた「悪条件時に**緩める**」向きは、`STABILITY` の
+   ドキュメントが既に測っている (0.1 では `pilot` のドリフト起因再分解が
+   88 → 190 回)。
 
-**参考度: 中** — `stability` を動的調整 (悪条件時に緩める) する余地。
+2. **`colFixMax` のインクリメンタル化 — 計測 +2.8%、不採用**。
+   `eliminate` のマージ内で「増えた/減った」を直接反映し、最大値が下がり
+   得るときだけ stale にする版を実装した。`max` に丸めが無いため
+   ピボット選択は変更前と**ビット単位で同一** (`ENOMOTO_VERIFY_COL_MAX=1`
+   で clean 列も再走査して一致を assert、10 問題で確認) で、差分は実装
+   コストのみ。それでも NETLIB93 合計 **+2.8%**。
+   理由は §2.5 の `PIVOT_SEARCH_LIMIT = 8` が先に入っていること:
+   `ensure_col_max_abs` は `find_best_pivot` が実際に見る候補列 (1ステップ
+   最大8列、実測平均 4〜6列) でしか呼ばれないので、削れる再走査が既に小さい。
+   `pilot87` で削減 150 万エントリに対し、マージループへ足す per-entry 更新
+   (`m` 長配列への散在 read-modify-write) が 6150 万回。30〜40 倍の負け。
+   本節が前提にしていた「`refresh_column` が毎回全列を再計算」は、既存の
+   `col_max_abs_dirty` 遅延再計算と §2.5 の探索打ち切りにより、着手時点で
+   既に成り立っていなかった。
+
+**参考度: 低 (実測済み)** — 現在の `find_best_pivot` の形では、この2点に
+残っている余地は無い。§2.5 の探索打ち切りを外す/緩める方向の変更を入れる
+なら、2. は再検討の価値がある (分母が戻るため)。
 
 ### 2.5 `searchLimit = 8` によるピボット探索の明示的打ち切り
 
@@ -255,10 +312,32 @@ HiGHS方式の方が求解自身が「今どこが非ゼロか」を持つので
 `solveHyper` の list 構築が自然。
 
 ENOMOTO は既に `solve_sparse_into(rhs_sparse)` で疎rhsを受ける形に
-しているので、本質は同じ。だが**BTRAN側 (`solve_transpose_into`) には
-疎入力版がない**。
+しているので、本質は同じ。
 
-**参考度: 中**。
+~~だが**BTRAN側 (`solve_transpose_into`) には疎入力版がない**。~~
+**(解消済み)** `FtLu::solve_transpose_unit` / `solve_transpose_unit_capture`
+を追加した。このクレートのBTRANの右辺はほぼ全てが単位ベクトル `e_i` で
+(ピボット行 `rho_p`、DSE重み更新の `rho`、`DseState::from_basis` の m 本の
+参照解、拡張法の `trial_row_ratio` と polish 側)、残る密な右辺は
+`y = B^-T c_B` と `w = B^-T alpha` だけ。単位ベクトルに限れば非ゼロは
+1個なので、
+
+- 冒頭の置換 gather `scratch[s] = rhs[col_perm[s]]` (ステップごとの
+  ランダムアクセス読み) → `fill(0.0)` + 1ストア
+- `u_transpose_solve_into` 冒頭の「z の非ゼロを needed 集合に播く」O(m)
+  走査 → そのステップ (`col_perm_inv[i]`) を直接 mark
+
+と、O(m) のパス2本が消える。`solveHyper` 相当の一般の疎入力BTRAN
+(reach集合のDFS) ではなく、右辺の形が分かっている場合の特殊化である点が
+HiGHS とは異なるが、実際に出現する右辺はこちらでほぼ尽きている。
+
+なお既存の `solve_transpose_unit_into` とは別物。あちらは更新前の `u_seq`
+の順序に依存する接頭辞スキップなので `update_count() == 0` を要求する
+(`from_basis` 専用)。新しい方は `needed` 集合の仕組みをそのまま使うので
+Forrest-Tomlin 更新後も有効。
+
+**参考度: 中** (単位ベクトル以外の疎rhs BTRANは依然未実装だが、
+該当する呼び出しが `y`/`w` の2つしかなく、どちらも密)。
 
 ### 2.9 `updateFT` — U列eta + UR転置の二重構造
 
@@ -280,9 +359,11 @@ O(1) で見つける設計で、これは HiGHS の `ur_*` と同目的 (似た�
 
 **参考度: 中** — 構造は違うが目的は同じ。ENOMOTOの方が既に工夫済み。
 
-### 2.10 etaの格納形式 (Sparse/Dense) と `pack_off_diag`
+### 2.10 etaの格納形式 (Sparse/Dense) と `HybridVec::pack`
 
-ENOMOTO は `OffDiag::Sparse | Dense` を `DENSE_ETA_FRACTION=0.4` で切替。
+ENOMOTO は `HybridVec::Sparse | Dense` を `DENSE_ETA_FRACTION=0.4` で切替
+(旧 `OffDiag` / `pack_off_diag`。疎/密ハイブリッドのベクトル表現として
+`crate::sparse` に移した)。
 HiGHS は常に `(index, value)` の疎形式 (`u_index/u_value`)。
 つまり ENOMOTO は HiGHS を既に超えている (密eta最適化) 部分がある。
 ここは逆に **ENOMOTO の方が進んでいる**。
@@ -293,19 +374,63 @@ HiGHS は常に `(index, value)` の疎形式 (`u_index/u_value`)。
 
 ### 3.1 flat `Vec` + インデックス vs `BTreeMap`/`BTreeSet`
 
-ENOMOTO の `eliminate` は1要素ごとに `BTreeMap::entry` の木走査 +
-`BTreeSet::remove/insert` を行う。要素はポインタ経由でヒープ上に散在。
+~~ENOMOTO の `eliminate` は1要素ごとに `BTreeMap::entry` の木走査 +
+`BTreeSet::remove/insert` を行う。要素はポインタ経由でヒープ上に散在。~~
+(§3.1 実装済み、下記)
 HiGHS は `mc_index/mc_value` の**連続配列**上で、`colInsert`/`colDelete` は
 末尾swapのみ。キャッシュミスが桁違いに少ない。
 
 ENOMOTO のコメントには「`l_col` を `FixedRows` にフラット化したら
-**回帰した**」という記録があるが、これは L 因子 (求解時) の話であり、
+**回帰した**」という記録があったが、これは L 因子 (求解時) の話であり、
 **分解中のアクティブ部分行列**をフラット化した記録ではない。
 HiGHSのカーネル部分行列のフラット化は別の話。
+
+なお L 因子側のほうは、その後「後付けコピーではなく分解中に直接フラットに
+構築する」版 (`CscBuilder`) で取り直したところ全93問 -1.58% の勝ちになった
+(§4-5、`analysis/sparse_consolidation_lu_20260922_095906.md`)。ただし内訳は
+重い10問 -1.77% / 軽い83問 +0.44% で、**小問題側では圧縮形のアクセスコストが
+残る**。この非対称性は、動的なカーネル部分行列を置き換える際にも効いてくる
+はず。
 
 **参考度: 高** — ただし最大のリファクタリング。ENOMOTO 自身
 「BTreeMap ベースは測定で最速」としているため、単純置換は
 前述の `FixedRows` 回帰と同様に負ける可能性も。要注意。
+
+**実装済み・採用 (2026-09-22、`analysis/kernel_flat_matrix_20260922_143000.md`)**:
+`lu.rs` の `KernelMatrix` が `MarkowitzState` の
+`Vec<BTreeMap<usize,f64>>`(行)+ `Vec<BTreeSet<usize>>`(列ミラー)を
+置き換えた。レイアウトは HiGHS の `mc_start/mc_space/mc_count` +
+`mr_start/mr_space/mr_count` と同型だが**軸が逆**で、このクレートの
+elimination は行志向 (ピボット*行*を影響行に撒く) なので値が行major、
+索引だけのミラーが列側 (`u32`) になる。
+
+HiGHS の末尾swap無順序集合とは違い**両方の run を昇順に保つ**。これは
+意図的な追加コストで (単桁長の連続 run に対する `copy_within`、それでも
+置き換えた木走査より遥かに安い)、順序つき容器との**挙動の完全一致**を買う:
+`find_best_pivot` は Markowitz スコア同点もピボット絶対値同点も
+first-encountered で解決し、LP の基底行列は ±1 の完全同点だらけなので、
+ミラーの順序を崩すと選ぶピボットが変わり、分解も反復数も変わってしまう
+= before/after が何を計測しているのか分からなくなる。
+
+同じ理由で `eliminate` は要素ごとの挿抜ではなく、影響行を
+**自身の run とピボット行スナップショットのソート済みマージ1回**で
+丸ごと書き直す (`set_row`)。「動的な部分行列は insert/remove を繰り返すので
+単純置換では負ける」という上記の警告が外れたのはこの形のおかげで、
+`BTreeMap` を素朴に `Vec` へ置き換えただけなら警告どおりだった可能性が高い。
+
+計測 (NETLIB93 全93問、base = `a4e29bf`/`7289525` だけを revert したツリー、
+searchLimit=8 は両アームに入れたまま、base→after 交互3周の中央値):
+合計 **-11.39%** (42.11s → 37.32s)、重い10問 -12.25% / 軽い83問 -1.78%、
+**10% 以上の退行ゼロ**。反復数・再分解回数・`pivot_search` の候補数まで
+両アーム完全一致 (経路保存) なので、差はそのままデータ構造のコスト差である。
+効果は `refactor` フェーズに集中 (pilot87: wall の 48% → 17%、4.9s → 0.95s、
+これだけで全体差 -4.2s のほぼ全部)。`find_best_pivot` のバケット走査も
+同じ候補数のまま pilot87 -69% / dfl001 -38% になった (候補ごとの
+`rows[i].get(&j)` が木降下から `KernelMatrix::row_get` になったため)。
+
+`L` のフラット化で残った「軽い問題では圧縮形のアクセスコストが残る」という
+非対称性は、**カーネル側では出なかった**。軽い問題は再分解回数が 0〜3 回
+(`kb2` は 0 回) で、そもそもこのコードを踏まないため。
 
 ### 3.2 リンクリストによる次数昇順走査
 
@@ -324,17 +449,27 @@ O(1) 移動。**機能的には等価**。キャッシュ的には Deque の方�
 
 ENOMOTO の高速化に効きそうな順:
 
-1. **`refactor_info_` 相当のピボット順再利用 (`rebuild()`)** — §2.2
-   - 反復中は基底がほぼ同じ。探索をスキップできる効果は大きい。
-   - ただし pivot tolerance を下回る時のフォールバック必須。
+1. ~~**`refactor_info_` 相当のピボット順再利用 (`rebuild()`)** — §2.2~~
+   **実装済み (2026-09-22)**。ただし HiGHS と同じものではない: HiGHS の
+   `rebuild()` はホットスタート (同じ基底) 専用で、(行, 列) 両方の順を
+   再生する移植は採択率 0〜4% だった。**列順だけ**を再利用し行は選び直す
+   `factorize_reusing` を採用。NETLIB93 合計 -2.55% / -4.31% (独立2回)、
+   10% 超の退行なし (`analysis/pivot_order_reuse_20260922_120602.md`)。
 
 2. **`buildSimple()` 相当の単位列・シングルトン一括剥離** — §2.1
    - Markowitz カーネル (BTreeMap/BTreeSet 構築) の起動自体を避けられる。
 
 3. ~~**`find_best_pivot` に候補数の明示的 searchLimit (≈8)** — §2.5~~
-   **実装済み (2026-09-22)**。ただし **8 ではなく 256**。NETLIB93 合計
-   −2.11%/−0.84% (独立2回)、10% 超の退行なし。効くのは実際に探索が
-   暴走していた `dfl001` (探索 2.96s → 1.54s) のみで、他86問題は挙動不変。
+   **実装済み (2026-09-22、`2840f7b` + `d4046ca`)。ただし上限は 8 ではなく 256**
+   (`ENOMOTO_PIVOT_SEARCH_LIMIT` で上書き可、`0` = 従来の無制限走査)。
+   計測記録は `analysis/pivot_search_limit_20260922_143000.md`
+   (`lu.rs` の `PIVOT_SEARCH_LIMIT` の docs が参照しているのはこれ。
+   一時期リポジトリに存在せず「記録なし」と書かれていたが、本コミットで追加した)。
+   - 基点 964d29e での NETLIB93 独立2回: 合計 −2.11%/−0.84%、10% 超の退行なし。
+     効くのは実際に探索が暴走していた `dfl001` (探索 2.96s → 1.54s) のみで、
+     他86問題は反復数・再分解回数まで挙動不変。
+   - HiGHS と同じ `8` は**計測の結果 不採用**: 93問題中64問題でピボット列が変わり、
+     独立2回とも `greenbeb` +21/+22%、`pilot` +15/+18%、`grow22` +13/+13%。
    - 「実装が軽くリスクが小さい」という当初の見立ては**半分外れていた**。
      コードは確かに軽い (実質20行) が、上限が発火した問題ではピボット列が
      変わり、そこから反復数が ±20% 動く。リスクは実装量ではなく
@@ -345,17 +480,52 @@ ENOMOTO の高速化に効きそうな順:
    NETLIB93 合計 -0.05% / -1.70% (独立2回)、10% 超の退行なし。
    同時に試した U 側の到達集合限定 FTRAN は +3.6% で不採用 (§2.6)。
 
-5. **カーネル部分行列のフラット配列化** — §3.1
-   - 理論的にはキャッシュ効率最大。ただし ENOMOTO 自身
-     `FixedRows` 実験で回帰を経験しており、慎重に。
-   - 「分解中の部分行列を直接フラットに構築」する版なら勝つ余地。
+5. ~~**カーネル部分行列のフラット配列化** — §3.1~~ → **`L`・カーネル部分行列
+   とも実施、採用** (`analysis/sparse_consolidation_lu_20260922_095906.md` §2.4、
+   `analysis/kernel_flat_matrix_20260922_143000.md`)
+   - 予想どおり「分解中に直接フラットに構築」する版なら勝った。`CscBuilder`
+     で `LuFactors::l_col` を `crate::sparse::CscMat` に。このファイルの4つの
+     分解はいずれも L の列を**昇順に**吐くので、計数パスすら要らず追記だけで
+     済む。L 全体のアロケーションが m+1 個から2個になる。
+   - 全93問3回ずつで **-1.58%**。ただし内訳は **重い10問 -1.77% / 軽い83問
+     +0.44%** で、無条件の勝ちではない。軽い問題では `l_col[s]` が短く、
+     圧縮形の「列アクセスごとに offsets を2回読む」コストが相対的に重い —
+     初回の `FixedRows` 実験が回帰した理由のうち、後付けコピーをやめても
+     消えない部分がここに残っている。
+   - ~~**カーネル部分行列 (`MarkowitzState` の `Vec<BTreeMap>`/`Vec<BTreeSet>`)
+     自体は未着手**~~ → **実施、採用** (2026-09-22、
+     `analysis/kernel_flat_matrix_20260922_143000.md`)。`KernelMatrix`
+     (行major の値 + 列major の索引ミラー、どちらも昇順維持の可変長 run)。
+     「分解中に insert/remove を繰り返すから `CscBuilder` 形では置き換え
+     られない」という当初の読みは、**挿抜の粒度を変える**ことで回避した:
+     `eliminate` が影響行を1要素ずつ触るのをやめ、行まるごとのソート済み
+     マージ + `set_row` 一括書き戻しにしたので、行側は「昇順に吐くだけ」に
+     なる。列ミラーだけが真に動的だが、こちらは索引 (`u32`) のみで
+     `partition_point` + `copy_within` で済む。
+     全93問 base→after 交互3周の中央値で **-11.39%**、重い10問 -12.25% /
+     軽い83問 -1.78%、**10% 以上の退行ゼロ**、反復数・目的関数値は
+     両アーム完全一致。`L` のときのような小問題側の負け (+0.44%) は出ない。
 
-6. **ピボット安定性床の動的調整・`colFixMax` のインクリメンタル化** — §2.4
-   - 悪条件問題での探索爆発・再分解を減らす。
+6. ~~**ピボット安定性床の動的調整・`colFixMax` のインクリメンタル化** — §2.4~~
+   **実装して計測、両方とも不採用 (2026-09-22)**
+   (`analysis/pivot_threshold_colfixmax_20260922_154500.md`)。
+   - 安定性床の動的化は NETLIB93 合計 +7.4%、10% 超の退行 3 問題
+     (`pilot87` +29.2%)。機構は既定無効で温存、env で再現可能。
+   - `colFixMax` のインクリメンタル化は +2.8%。ピボット選択はビット単位で
+     同一なので、差分はまるごと実装オーバーヘッド。§2.5 の searchLimit=8 が
+     先に入ったことで、削れる再走査が足す per-entry 更新の 1/30 以下しか
+     残っていなかった。
+
+7. **`FtLu::fill_count` の O(1) 化** — (HiGHS 比較外、このクレート固有)
+   - 再分解トリガー(3)が毎反復読むのに `u_seq` 全体 (長さ m) を舐め直して
+     いた。更新側で加減するだけで済む。
+   - 全93問3回ずつで **-0.25%**、内訳は **軽い83問 -1.86% / 重い10問 -0.10%**
+     と、上の 5 とちょうど相補的 (毎反復の固定費が支配的な小問題で効く)。
+   - **実施、採用**。
 
 逆に ENOMOTO が**既に HiGHS より進んでいる**点:
 
-- eta の Sparse/Dense 切替 (`pack_off_diag`, `DENSE_ETA_FRACTION`)
+- eta の Sparse/Dense 切替 (`HybridVec::pack`, `DENSE_ETA_FRACTION`)
 - 密入力の `faer` 全委譲 (`is_dense_input`)
 - ボーダー列検出による Schur 補分解 (`factorize_bordered`)
 - 4段の再分解トリガ (residual / pivot / eta-fill / max-updates) +

@@ -12,8 +12,7 @@
 //! one of the two bounds — same discipline as
 //! `propagate::bounds_inconsistent`/`dualfix`.
 
-use crate::sparse::{csr_from_rows, Csr};
-
+use crate::sparse::{Csr, csr_from_rows, csr_is_canonical, csr_row_iter};
 const TOL: f64 = 1e-9;
 
 pub struct RowSingletonResult {
@@ -30,13 +29,18 @@ pub struct RowSingletonResult {
 /// only afterward).
 pub fn fix_singleton_equalities(n: usize, a: &Csr, b: &[f64], lb: &[f64], ub: &[f64]) -> RowSingletonResult {
     let ar = a.as_ref();
+    // No singleton row at all (the common case after the first round):
+    // the rebuilt A would be `a` itself when it is already canonical.
+    if csr_is_canonical(a) && (0..ar.nrows()).all(|i| ar.col_indices_of_row_raw(i).len() != 1) {
+        return RowSingletonResult { a: a.clone(), b: b[..ar.nrows()].to_vec(), fixes: Vec::new(), infeasible: false };
+    }
     let mut new_a_rows = Vec::with_capacity(ar.nrows());
     let mut new_b = Vec::with_capacity(b.len());
     let mut fixes = Vec::new();
 
     for i in 0..ar.nrows() {
         let row: Vec<(usize, f64)> =
-            ar.col_indices_of_row(i).zip(ar.values_of_row(i)).map(|(j, &v)| (j, v)).filter(|&(_, v)| v != 0.0).collect();
+            csr_row_iter(a, i).filter(|&(_, v)| v != 0.0).collect();
         if row.len() == 1 {
             let (j, coeff) = row[0];
             let value = b[i] / coeff;

@@ -109,7 +109,7 @@ pub mod smallcoeff;
 pub mod sparsify;
 pub mod stuffing;
 
-use crate::sparse::{csr_from_rows, Csr};
+use crate::sparse::{Csr, csr_from_rows, csr_row_vec, csr_rows};
 use crate::types::{ConstraintRow, RowSense, VariableData};
 use scaling::Scaling;
 
@@ -404,7 +404,7 @@ pub fn run_extended(
     // small-coefficient edge filter (see that pre-pass's own docs on why an
     // unpropagated, looser bound here is safe, just more conservative, than
     // the fully-tightened `orig_lb`/`orig_ub` extracted again below).
-    let (pre_lb, pre_ub, _, _) = propagate::extract_bounds(n, &g, &h);
+    let (pre_lb, pre_ub) = propagate::extract_bounds_only(n, &g, &h);
     let (na, nb) = timed_step!("reduce_equalities", redundancy::reduce_equalities(&a, &b, n, &pre_lb, &pre_ub));
     a = na;
     b = nb;
@@ -454,7 +454,7 @@ pub fn run_extended(
     // `dualpropagate::run`'s own docs for why it needs the model's
     // *original* bounds specifically, not whatever `lb`/`ub` a later
     // round's own activity-based tightening has since narrowed them to.
-    let (orig_lb, orig_ub, _, _) = propagate::extract_bounds(n, &g, &h);
+    let (orig_lb, orig_ub) = propagate::extract_bounds_only(n, &g, &h);
 
     let mut postsolve_log: Vec<PostsolveStep> = Vec::new();
 
@@ -605,8 +605,7 @@ pub fn run_extended(
                 }
                 if !dual_red.implied_equalities.is_empty() {
                     let implied = dual_red.implied_equalities;
-                    let ar = a.as_ref();
-                    let mut a_rows: Vec<Vec<(usize, f64)>> = (0..ar.nrows()).map(|i| ar.col_indices_of_row(i).zip(ar.values_of_row(i)).map(|(j, &v)| (j, v)).collect()).collect();
+                    let mut a_rows: Vec<Vec<(usize, f64)>> = csr_rows(&a);
                     let mut new_b = b.clone();
                     let mut promoted = vec![false; cur_real_rows.len()];
                     for &gi in &implied {
@@ -646,8 +645,7 @@ pub fn run_extended(
         // to skip it (correctly, across every source of a fix — including
         // `rowsingleton`'s own, decided later in this same round's inner
         // loop and easy to under-count here) isn't worth it.
-        let ar = a.as_ref();
-        let a_rows: Vec<Vec<(usize, f64)>> = (0..ar.nrows()).map(|i| ar.col_indices_of_row(i).zip(ar.values_of_row(i)).map(|(j, &v)| (j, v)).collect()).collect();
+        let a_rows: Vec<Vec<(usize, f64)>> = csr_rows(&a);
         let fold_a = timed_step!("foldfixed(A)", foldfixed::fold_fixed_columns(&a_rows, &b, &lb, &ub, RowSense::Eq));
         if fold_a.infeasible {
             return extended_infeasible(sc, a, b, c, n);
@@ -696,7 +694,7 @@ pub fn run_extended(
             a = rs.a;
             b = rs.b;
 
-            let (ng, nh) = timed_step!("rebuild_g(inner)", propagate::rebuild_g(n, cur_real_rows.clone(), cur_real_rhs.clone(), &lb, &ub));
+            let (ng, nh) = timed_step!("rebuild_g(inner)", propagate::rebuild_g_ref(n, &cur_real_rows, &cur_real_rhs, &lb, &ub));
             g = ng;
             h = nh;
 
@@ -761,7 +759,7 @@ pub fn run_extended(
                 let mut g_rows: Vec<Vec<(usize, f64)>> = Vec::with_capacity(gr.nrows() + cs.extra_g_rows.len());
                 let mut h_vec: Vec<f64> = Vec::with_capacity(gr.nrows() + cs.extra_h.len());
                 for i in 0..gr.nrows() {
-                    let row: Vec<(usize, f64)> = gr.col_indices_of_row(i).zip(gr.values_of_row(i)).map(|(j, &v)| (j, v)).collect();
+                    let row: Vec<(usize, f64)> = csr_row_vec(&g, i);
                     if row.len() == 1 && eliminated_this_pass.contains(&row[0].0) {
                         continue;
                     }
@@ -897,7 +895,7 @@ pub fn run_extended(
                 // — same reason `doubleton`/`colsingleton` above must do
                 // this (via the inner loop's own `rebuild_g` call) before
                 // anything downstream reads `g`.
-                let (ng, nh) = timed_step!("rebuild_g(agg)", propagate::rebuild_g(n, cur_real_rows.clone(), cur_real_rhs.clone(), &lb, &ub));
+                let (ng, nh) = timed_step!("rebuild_g(agg)", propagate::rebuild_g_ref(n, &cur_real_rows, &cur_real_rhs, &lb, &ub));
                 g = ng;
                 h = nh;
             }
@@ -986,7 +984,7 @@ pub fn run_extended(
                 // mid-round dedup call and the next round's `propagate`
                 // must see this pass's own row/bound changes, not a stale
                 // `g`/`h`.
-                let (ng, nh) = timed_step!("rebuild_g(pc)", propagate::rebuild_g(n, cur_real_rows.clone(), cur_real_rhs.clone(), &lb, &ub));
+                let (ng, nh) = timed_step!("rebuild_g(pc)", propagate::rebuild_g_ref(n, &cur_real_rows, &cur_real_rhs, &lb, &ub));
                 g = ng;
                 h = nh;
             }
@@ -1135,7 +1133,10 @@ pub fn run_extended(
         }
     }
 
-    let (g, h) = propagate::rebuild_g(n, free.real_rows.clone(), free.real_rhs.clone(), &lb, &ub);
+    let (g, h) = propagate::rebuild_g_ref(n, &free.real_rows, &free.real_rhs, &lb, &ub);
+    if std::env::var("ENOMOTO_DEBUG_PRESOLVE_HASH").is_ok() {
+        eprintln!("PRESOLVE_HASH {:016x} m_eq={} m_le={} post={}", presolve_output_hash(&a, &b, &g, &h, &c, &lb, &ub), a.nrows(), g.nrows(), postsolve_log.len());
+    }
 
     ExtendedPresolveResult {
         scaling: sc,
@@ -1152,4 +1153,37 @@ pub fn run_extended(
         unbounded: false,
         postsolve_log,
     }
+}
+
+/// FNV-1a over the bit patterns of the reduced problem handed to the
+/// simplex (`ENOMOTO_DEBUG_PRESOLVE_HASH`): two builds printing the same
+/// hash hand the solver bit-identical input.
+fn presolve_output_hash(a: &Csr, b: &[f64], g: &Csr, h: &[f64], c: &[f64], lb: &[f64], ub: &[f64]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut eat = |x: u64| {
+        for byte in x.to_le_bytes() {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    };
+    for m in [a, g] {
+        let r = m.as_ref();
+        eat(r.nrows() as u64);
+        eat(r.ncols() as u64);
+        for i in 0..r.nrows() {
+            let cols = r.col_indices_of_row_raw(i);
+            eat(cols.len() as u64);
+            for (&j, &v) in cols.iter().zip(r.values_of_row(i)) {
+                eat(j as u64);
+                eat(v.to_bits());
+            }
+        }
+    }
+    for v in [b, h, c, lb, ub] {
+        eat(v.len() as u64);
+        for &x in v {
+            eat(x.to_bits());
+        }
+    }
+    hash
 }

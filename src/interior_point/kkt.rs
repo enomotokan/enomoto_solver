@@ -46,8 +46,7 @@ use faer::sparse::linalg::cholesky::{factorize_symbolic_cholesky, LdltRegulariza
 use faer::sparse::{SparseColMat, SymbolicSparseColMat, ValuesOrder};
 use faer::{Conj, Parallelism, Side};
 
-pub use crate::sparse::{mat_t_vec, mat_t_vec_into, mat_vec, mat_vec_into, Csr};
-
+pub use crate::sparse::{Csr, csr_row_iter, mat_t_vec, mat_t_vec_into, mat_vec, mat_vec_into};
 /// `0` hints faer to use `rayon::current_num_threads()` — the numeric
 /// Cholesky factorization and triangular solve below are the only
 /// genuinely expensive per-iteration steps in the IP-PMM loop, so this is
@@ -141,9 +140,8 @@ impl SparseKkt {
         }
         let top_range = 0..n;
 
-        let ar = a.as_ref();
         for i in 0..p {
-            for (j, &v) in ar.col_indices_of_row(i).zip(ar.values_of_row(i)) {
+            for (j, v) in csr_row_iter(a, i) {
                 if v != 0.0 {
                     // row = j < n <= n+i = col: always upper triangular.
                     positions.push((j, n + i));
@@ -151,9 +149,8 @@ impl SparseKkt {
                 }
             }
         }
-        let gr = g.as_ref();
         for i in 0..m {
-            for (j, &v) in gr.col_indices_of_row(i).zip(gr.values_of_row(i)) {
+            for (j, v) in csr_row_iter(g, i) {
                 if v != 0.0 {
                     positions.push((j, n + p + i));
                     values.push(v);
