@@ -1104,18 +1104,26 @@ fn bfrt_reached(w_r: Affine1, cum: Affine1, x_b_base_r: f64) -> bool {
     base_diff <= super::PRIMAL_FEAS_TOL * w_r.base.abs().max(x_b_base_r.abs()).max(1.0)
 }
 
-/// `Δ_i(M)^2 / w_i` (paper \S4.5's steepest-edge/Devex generalization),
-/// as the coefficients of the resulting degree-2 polynomial in `M` —
-/// `w_i` itself never depends on `M` (`super::DseState`/`DevexState`'s own
-/// weights are pure tableau-row quantities, `super::solve_lp_dual_on`'s
-/// module docs), so squaring `Δ_i = slope*M + base` and dividing by `w_i`
-/// is the only place a degree-2 (rather than degree-1) comparison enters
-/// this module at all.
+/// The steepest-edge/Devex score `Δ_i(M)^2 / w_i` (paper \S4.5), compared
+/// in the paper's refined form: `Δ_i ≻ 0` for every candidate row, and
+/// squaring is strictly increasing on the positive range, so ranking by
+/// `Δ_i^2/w_i` is ranking by `Δ_i/sqrt(w_i)` — itself affine in `M`
+/// (`w_i` never depends on `M`: `super::DseState`/`DevexState`'s weights
+/// are pure tableau-row quantities). The score is therefore the
+/// coefficient pair `(slope/sqrt(w), base/sqrt(w))` under the same
+/// lexicographic order as [`Affine1`], not a degree-2 polynomial's triple.
+///
+/// An `M`-free row (`slope == 0`: every row once `delta = 0`, i.e. nearly
+/// all of them) keeps the classical `base^2/w` key instead (`squared`),
+/// which orders identically without the square root; the pair form is only
+/// materialized when a comparison actually involves an `M`-scaled row.
 #[derive(Clone, Copy, Debug)]
 struct Score2 {
-    c2: f64,
-    c1: f64,
-    c0: f64,
+    /// `slope/sqrt(w)`, exactly `0.0` when `squared`.
+    slope: f64,
+    /// `base^2/w` when `squared`, else `base/sqrt(w)`.
+    key: f64,
+    squared: bool,
 }
 
 impl Score2 {
@@ -1123,45 +1131,56 @@ impl Score2 {
     fn new(dev: Affine1, w: f64) -> Self {
         let w = w.max(super::STEEPEST_EDGE_FLOOR);
         if dev.slope == 0.0 {
-            // `M`-free deviation (every row once delta=0 is reached): skip
-            // two of the three divisions. `c2` is `+0.0` either way
-            // (`0*0/w`); `c1` would be `±0.0` depending on `base`'s sign,
-            // but [`Score2::cmp_lex`] only ever looks at `|a - b|` and the
-            // sign of a nonzero `a - b`, neither of which a zero operand's
-            // sign can change — so every comparison is bit-for-bit the one
-            // the full formula would produce.
-            return Score2 { c2: 0.0, c1: 0.0, c0: dev.base * dev.base / w };
+            return Score2 { slope: 0.0, key: dev.base * dev.base / w, squared: true };
         }
-        Score2 { c2: dev.slope * dev.slope / w, c1: 2.0 * dev.slope * dev.base / w, c0: dev.base * dev.base / w }
+        let s = 1.0 / w.sqrt();
+        Score2 { slope: dev.slope * s, key: dev.base * s, squared: false }
     }
 
-    /// Degree-2 lexicographic order (paper \S4.5's "多項式の辞書式順序"),
-    /// with the same relative tolerance at every degree as
-    /// [`Affine1::cmp_lex`] and for the identical reason: two candidate
-    /// rows' scores that are mathematically tied (most commonly, both
-    /// exactly `0` before either has any `M`-dependence, or two BFRT-
-    /// unrelated rows with identical raw deviations) are computed from
-    /// unrelated FTRAN/BTRAN chains and so are not expected to agree past
-    /// a few ULPs.
-    /// `c2_tol` overrides the leading (`c2`, slope-driven) term's relative
-    /// tolerance for this one comparison — `c1`/`c0` always use the fixed
-    /// `1e-9`. EXPERIMENTAL (`ENOMOTO_SCORE2_ADAPTIVE_MAX_TOL`, its own call
-    /// site's docs): the main loop below derives `c2_tol` per iteration
-    /// from how many M-flagged columns are still unresolved, so passing
-    /// `1e-9` here (the default when that env var is unset) reproduces the
-    /// original fixed-tolerance comparison exactly.
+    /// `base/sqrt(w)` (`base > 0` for any deviation with zero slope).
+    #[inline]
+    fn linear_key(&self) -> f64 {
+        if self.squared {
+            self.key.sqrt()
+        } else {
+            self.key
+        }
+    }
+
+    /// [`Affine1::cmp_lex`]'s order and relative tolerance, for the same
+    /// reason: mathematically tied scores come from unrelated FTRAN/BTRAN
+    /// chains and are not expected to agree past a few ULPs.
+    /// `c2_tol` overrides the leading (slope) term's relative tolerance for
+    /// this one comparison — the second term always uses the fixed `1e-9`.
+    /// EXPERIMENTAL (`ENOMOTO_SCORE2_ADAPTIVE_MAX_TOL`, its own call site's
+    /// docs): the main loop derives `c2_tol` per iteration from how many
+    /// M-flagged columns are still unresolved; `1e-9` (the default when
+    /// that env var is unset) is the plain fixed-tolerance comparison.
     #[inline]
     fn cmp_lex(&self, other: &Score2, c2_tol: f64) -> std::cmp::Ordering {
         const REL_TOL: f64 = 1e-9;
-        for (idx, (a, b)) in [(self.c2, other.c2), (self.c1, other.c1), (self.c0, other.c0)].into_iter().enumerate() {
-            let tol = if idx == 0 { c2_tol } else { REL_TOL };
+        #[inline(always)]
+        fn cmp_tol(a: f64, b: f64, tol: f64) -> std::cmp::Ordering {
             let scale = a.abs().max(b.abs()).max(1.0);
             let diff = a - b;
             if diff.abs() > tol * scale {
-                return if diff > 0.0 { std::cmp::Ordering::Greater } else { std::cmp::Ordering::Less };
+                if diff > 0.0 { std::cmp::Ordering::Greater } else { std::cmp::Ordering::Less }
+            } else {
+                std::cmp::Ordering::Equal
             }
         }
-        std::cmp::Ordering::Equal
+        if self.squared && other.squared {
+            return cmp_tol(self.key, other.key, REL_TOL);
+        }
+        match cmp_tol(self.slope, other.slope, c2_tol) {
+            std::cmp::Ordering::Equal => {}
+            ord => return ord,
+        }
+        if self.squared == other.squared {
+            cmp_tol(self.key, other.key, REL_TOL)
+        } else {
+            cmp_tol(self.linear_key(), other.linear_key(), REL_TOL)
+        }
     }
 }
 
@@ -1648,7 +1667,20 @@ impl RowDevCache {
 struct RowBounds {
     lower: Vec<Option<Affine1>>,
     upper: Vec<Option<Affine1>>,
+    /// `lower`/`upper` as plain `f64` for [`deviation_flat`]: the bound's
+    /// value when it is a real finite bound (`M`-free, slope `0`), and
+    /// `∓inf` when it is absent or an artificial `∓M` side.
+    lower_f: Vec<f64>,
+    upper_f: Vec<f64>,
     noise: Vec<bool>,
+}
+
+#[inline]
+fn flat_bound(b: Option<Affine1>, missing: f64) -> f64 {
+    match b {
+        Some(a) if a.slope == 0.0 => a.base,
+        _ => missing,
+    }
 }
 
 impl RowBounds {
@@ -1656,6 +1688,8 @@ impl RowBounds {
         RowBounds {
             lower: basis.iter().map(|&j| cache.lower[j]).collect(),
             upper: basis.iter().map(|&j| cache.upper[j]).collect(),
+            lower_f: basis.iter().map(|&j| flat_bound(cache.lower[j], f64::NEG_INFINITY)).collect(),
+            upper_f: basis.iter().map(|&j| flat_bound(cache.upper[j], f64::INFINITY)).collect(),
             noise: basis.iter().map(|&j| noise_feasible[j]).collect(),
         }
     }
@@ -1665,6 +1699,8 @@ impl RowBounds {
     fn assign(&mut self, i: usize, j: usize, cache: &ColCache, noise_feasible: &[bool]) {
         self.lower[i] = cache.lower[j];
         self.upper[i] = cache.upper[j];
+        self.lower_f[i] = flat_bound(cache.lower[j], f64::NEG_INFINITY);
+        self.upper_f[i] = flat_bound(cache.upper[j], f64::INFINITY);
         self.noise[i] = noise_feasible[j];
     }
 
@@ -1676,7 +1712,42 @@ impl RowBounds {
 
     #[inline]
     fn deviation(&self, x_b_base: &[f64], x_b_slope: &[f64], i: usize) -> Option<(i32, Affine1)> {
-        deviation_core(self.noise[i], self.lower[i], self.upper[i], x_b_base[i], x_b_slope[i])
+        let xs = x_b_slope[i];
+        if xs == 0.0 {
+            deviation_flat(self.noise[i], self.lower_f[i], self.upper_f[i], x_b_base[i], xs)
+        } else {
+            deviation_core(self.noise[i], self.lower[i], self.upper[i], x_b_base[i], xs)
+        }
+    }
+}
+
+/// [`deviation_core`] for a row whose `x_B` slope is exactly zero — every
+/// row once `delta = 0` (paper \S4.6, `prop:no-return` and the closing
+/// remark "M 係数計算の打ち切り": from then on the method *is* the classical
+/// bounded dual simplex over the real bounds), which in practice is almost
+/// every row of almost every iteration. With `x_slope == 0` an artificial
+/// `∓M` bound has deviation slope `-1` and can never be `≻ 0`, so it acts
+/// exactly like an absent bound (`∓inf` in `lower_f`/`upper_f`), and a real
+/// bound's deviation is `M`-free, where [`Affine1::gt_zero`] reduces to
+/// `1e-9 < base < inf`. Bit-for-bit [`deviation_core`]'s result (same
+/// `base` arithmetic, same `slope` expressions, same tie comparison), so
+/// the pivot path is unchanged — only the `Affine1`/`Option` traffic goes.
+#[inline(always)]
+fn deviation_flat(noise: bool, lower: f64, upper: f64, x: f64, xs: f64) -> Option<(i32, Affine1)> {
+    if noise {
+        return None;
+    }
+    let vm = lower - x;
+    let vp = x - upper;
+    let m_ok = vm > 1e-9 && vm < f64::INFINITY;
+    let p_ok = vp > 1e-9 && vp < f64::INFINITY;
+    let dev_minus = Affine1::new(vm, 0.0 - xs);
+    let dev_plus = Affine1::new(vp, xs - 0.0);
+    match (m_ok, p_ok) {
+        (true, true) => Some(if dev_minus.cmp_lex(&dev_plus) == std::cmp::Ordering::Greater { (1i32, dev_minus) } else { (-1i32, dev_plus) }),
+        (true, false) => Some((1i32, dev_minus)),
+        (false, true) => Some((-1i32, dev_plus)),
+        (false, false) => None,
     }
 }
 
@@ -4430,18 +4501,14 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     None
 }
 
-/// Step III: termination classification (Proposition 4.10 — `z1 < 0` iff
-/// unbounded), the cleanup lemma (removing every nonbasic column still
-/// sitting at its artificial `M` side), and final extraction.
-///
-/// Handoff to the classical method (the paper's own "restart the classical
-/// dual simplex from the cleaned-up basis") is not yet implemented — see
-/// this module's own docs' simplification list — so this function itself
-/// performs the final extraction directly once cleanup leaves no
-/// M-flagged nonbasic behind. Since the basis was already primal feasible
-/// under the (now-irrelevant) `M` truncation and cleanup is a sequence of
-/// zero-objective-change pivots (Lemma 4.9), the result is primal feasible
-/// under the *true* bounds too.
+/// Step III: termination classification (`prop:trichotomy` — `z1 < 0` iff
+/// unbounded), the cleanup lemma (`lem:cleanup`: removing every nonbasic
+/// column still sitting at its artificial `M` side by a primal ratio test,
+/// at most `K` steps, each preserving the objective, dual feasibility and
+/// primal feasibility under the true bounds), and final extraction via
+/// [`polish_with_true_bounds`] — which, after that cleanup, has no primal
+/// infeasibility left to repair and only re-checks optimality against the
+/// unperturbed costs.
 fn finish(std: &StdForm, basis: &mut [usize], basis_pos: &mut [Option<usize>], nb_status: &mut [Option<NbStatus>], delta: &[MSide], cache: &ColCache, n_orig: usize, lu: sparse_lu::FtLu) -> Option<SimplexResult> {
     // `lu` is the main loop's own last-iteration factorization (already
     // exact for the current basis — the main loop's own termination check
@@ -4472,13 +4539,19 @@ fn finish(std: &StdForm, basis: &mut [usize], basis_pos: &mut [Option<usize>], n
         return Some(SimplexResult { status: Status::Unbounded, x: None });
     }
 
-    // Cleanup lemma (\S4.5 end): repeatedly pivot a nonbasic column still
-    // sitting at its own artificial `M` side into the basis, at zero
-    // objective cost, until none remain. `lu` (shadowing the outer one,
-    // now genuinely mutable) carries across iterations via Forrest-Tomlin
-    // `try_update` instead of a fresh `refactorize` every pivot — the same
-    // two-trigger scheme (rejected update, or a periodic safety net) the
-    // main phase uses.
+    // Cleanup lemma (\S4.5 end, `lem:cleanup`): every nonbasic column still
+    // sitting at its own artificial `M` side is moved toward its finite
+    // side by a *primal ratio test* over the true finite bounds of the
+    // basic variables — case (A) no row blocks before the column reaches
+    // its finite side (re-parked there, basis unchanged), case (B) row `r`
+    // blocks first (the column enters, `basis[r]` leaves at the finite
+    // bound it just reached). Unlike the arbitrary-row degenerate pivot
+    // this replaced, every step keeps `x(M)` primal feasible under the
+    // true bounds for all large `M` (lemma (iii)), so exactly `K` steps
+    // leave an `M`-free optimal basic solution and `polish_with_true_bounds`
+    // below finds nothing left to do — it stays only as the numerical
+    // safety net and the true-cost dual check. `ENOMOTO_LEGACY_CLEANUP=1`
+    // restores the old degenerate-pivot cleanup (A/B only).
     let mut lu = lu;
     let mut since_check = 0usize;
     let mut lu_scratch = vec![0.0f64; std.n_rows];
@@ -4491,6 +4564,136 @@ fn finish(std: &StdForm, basis: &mut [usize], basis_pos: &mut [Option<usize>], n
     let mut dense_j = vec![0.0f64; std.n_rows];
     let debug_ext = std::env::var("ENOMOTO_DEBUG_EXT_ITERS").is_ok();
     let mut cleanup_count = 0usize;
+    if std::env::var("ENOMOTO_LEGACY_CLEANUP").map_or(true, |v| v == "0") {
+        let (mut x_b_base, mut x_b_slope) = (x_b_base, x_b_slope);
+        let m = std.n_rows;
+        let at_m_side = |j: usize, nb_status: &[Option<NbStatus>]| match nb_status[j] {
+            Some(NbStatus::Lower) => delta[j].has_lower(),
+            Some(NbStatus::Upper) => delta[j].has_upper(),
+            None => false,
+        };
+        // The M-side set only ever shrinks (a leaving variable is parked at
+        // a finite bound it just reached), so it is collected once.
+        let pending: Vec<usize> = (0..n_orig).filter(|&j| at_m_side(j, nb_status)).collect();
+        let mut parked = 0usize;
+        for &j in &pending {
+            let status = nb_status[j]?;
+            let v_j = nb_value_affine(cache, status, j)?;
+            // `dir`: which way `x_j` moves (toward its finite side, or `0`
+            // for a genuinely free column); `t` is the distance moved, so
+            // `x_B` changes by `rate * t` with `rate = -dir * alpha`.
+            let (dir, target, target_status) = match status {
+                NbStatus::Lower => (1.0, if std.ub[j].is_finite() { std.ub[j] } else { 0.0 }, std.ub[j].is_finite().then_some(NbStatus::Upper)),
+                NbStatus::Upper => (-1.0, if std.lb[j].is_finite() { std.lb[j] } else { 0.0 }, std.lb[j].is_finite().then_some(NbStatus::Lower)),
+            };
+            let full = Affine1::new(target - v_j.base, -v_j.slope).scale(dir);
+            lu.solve_sparse_into(std.cols.col(j), &mut lu_scratch, &mut gp_scratch, &mut alpha_col);
+
+            // Harris two-pass primal ratio test on `Affine1` step lengths:
+            // pass 1 finds the smallest step against bounds relaxed by the
+            // row's own feasibility tolerance, pass 2 picks the largest
+            // `|alpha|` among rows blocking no later than that.
+            let blocking = |i: usize, relax: bool| -> Option<Affine1> {
+                let a = alpha_col[i];
+                if a.abs() <= TOL {
+                    return None;
+                }
+                let rate = -dir * a;
+                let bv = basis[i];
+                let bound = if rate > 0.0 { std.ub[bv] } else { std.lb[bv] };
+                if !bound.is_finite() {
+                    return None;
+                }
+                let tol = if relax { super::PRIMAL_FEAS_TOL * bound.abs().max(1.0) } else { 0.0 };
+                let slack = if rate > 0.0 {
+                    Affine1::new(bound + tol - x_b_base[i], -x_b_slope[i])
+                } else {
+                    Affine1::new(x_b_base[i] - (bound - tol), x_b_slope[i])
+                };
+                Some(slack.scale(1.0 / rate.abs()))
+            };
+            let mut t_max: Option<Affine1> = None;
+            for i in 0..m {
+                if let Some(t) = blocking(i, true) {
+                    if t_max.map_or(true, |b| t.cmp_lex(&b) == std::cmp::Ordering::Less) {
+                        t_max = Some(t);
+                    }
+                }
+            }
+            let row = match t_max {
+                Some(tm) if full.cmp_lex(&tm) == std::cmp::Ordering::Greater => {
+                    let mut best: Option<(usize, f64)> = None;
+                    for i in 0..m {
+                        if let Some(t) = blocking(i, false) {
+                            if t.cmp_lex(&tm) != std::cmp::Ordering::Greater && best.map_or(true, |(_, ba)| alpha_col[i].abs() > ba) {
+                                best = Some((i, alpha_col[i].abs()));
+                            }
+                        }
+                    }
+                    best.map(|(i, _)| i)
+                }
+                _ => None,
+            };
+
+            let Some(r) = row else {
+                // Case (A): reaches its finite side unblocked.
+                let Some(ts) = target_status else {
+                    // A genuinely free column would need the paper's state
+                    // `Z` (value `0`), which `NbStatus` has no encoding for.
+                    return None;
+                };
+                for i in 0..m {
+                    let a = alpha_col[i];
+                    if a != 0.0 {
+                        let rate = -dir * a;
+                        x_b_base[i] += rate * full.base;
+                        x_b_slope[i] = snap_slope(x_b_slope[i] + rate * full.slope);
+                    }
+                }
+                nb_status[j] = Some(ts);
+                parked += 1;
+                continue;
+            };
+
+            // Case (B): row `r` blocks first — `j` enters, `basis[r]` leaves
+            // at the finite bound it reached.
+            #[cfg(test)]
+            CLEANUP_PIVOTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            cleanup_count += 1;
+            let t_r = blocking(r, false)?;
+            let rate_r = -dir * alpha_col[r];
+            for i in 0..m {
+                let a = alpha_col[i];
+                if a != 0.0 {
+                    let rate = -dir * a;
+                    x_b_base[i] += rate * t_r.base;
+                    x_b_slope[i] = snap_slope(x_b_slope[i] + rate * t_r.slope);
+                }
+            }
+            x_b_base[r] = v_j.base + dir * t_r.base;
+            x_b_slope[r] = snap_slope(v_j.slope + dir * t_r.slope);
+            let beta_r = basis[r];
+            nb_status[beta_r] = Some(if rate_r > 0.0 { NbStatus::Upper } else { NbStatus::Lower });
+            basis_pos[beta_r] = None;
+            basis[r] = j;
+            basis_pos[j] = Some(r);
+            nb_status[j] = None;
+
+            std.cols.col_into_dense(j, &mut dense_j);
+            since_check += 1;
+            let rejected = !lu.try_update(r, &dense_j, super::FT_MIN_PIVOT);
+            if rejected || since_check >= super::FT_CHECK_INTERVAL {
+                since_check = 0;
+                lu = refactorize(std, basis_pos, Some(&lu))?;
+                (x_b_base, x_b_slope) = solve_x_b(std, &lu, nb_status, cache)?;
+                snap_slopes(&mut x_b_slope);
+            }
+        }
+        if debug_ext {
+            eprintln!("DEBUG_EXT: cleanup_pivots={cleanup_count} cleanup_parked={parked}");
+        }
+        return polish_with_true_bounds(std, basis, basis_pos, nb_status, lu);
+    }
     loop {
         let Some(j) = (0..n_orig).find(|&j| match nb_status[j] {
             Some(NbStatus::Lower) => delta[j].has_lower(),
@@ -4571,17 +4774,10 @@ fn finish(std: &StdForm, basis: &mut [usize], basis_pos: &mut [Option<usize>], n
         }
     }
 
-    // The paper's own Step III does not stop at cleanup: "得られた基底...
-    // から古典的双対単体法...を再開し、主実行可能な解...に到達するまで反復
-    // する" (\S4.8) — restart the classical dual simplex, against the
-    // *true* bounds, until primal feasible. This is not optional polish:
-    // Lemma 4.9 guarantees a cleanup pivot leaves the objective and every
-    // *other* reduced cost unchanged, but says nothing about primal
-    // feasibility of rows it didn't directly target — a cleanup pivot can
-    // (and empirically does, on real Netlib instances with a genuinely
-    // interior-valued `beta(r)`) leave *other* rows outside their true
-    // bounds, which only this phase's own deviation-driven iteration
-    // discovers and fixes.
+    // Legacy (`ENOMOTO_LEGACY_CLEANUP=1`) arbitrary-row pivots keep the
+    // objective and dual feasibility but not primal feasibility of the rows
+    // they don't target, so the dual restart in `polish_with_true_bounds`
+    // genuinely has work to do here.
     if debug_ext {
         eprintln!("DEBUG_EXT: cleanup_pivots={cleanup_count}");
     }
@@ -4850,7 +5046,18 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
             // is propagated to this function's own caller instead, which
             // already knows how to fall back (the existing `BIG_M`-clamped
             // classical path in `solve_lp_dual`) without that assumption.
+            let handoff_t0 = std::time::Instant::now();
             let status = super::run_phase(std, &mut t, false, &mut lu, &mut since_check, &mut expand, &mut se, &mut stall)?;
+            if std::env::var("ENOMOTO_DEBUG_EXT_ITERS").is_ok() {
+                let n_bad = (0..n_total)
+                    .filter(|&j| match nb_status[j] {
+                        None => false,
+                        Some(NbStatus::Lower) => true_d[j] < -TOL,
+                        Some(NbStatus::Upper) => true_d[j] > TOL,
+                    })
+                    .count();
+                eprintln!("DEBUG_EXT: primal_handoff_us={} dual_infeasible_cols={n_bad}", handoff_t0.elapsed().as_micros());
+            }
             return Some(SimplexResult {
                 status: status.clone(),
                 x: if status == Status::Optimal { Some(t.x[0..t.n_orig()].to_vec()) } else { None },
@@ -5325,6 +5532,36 @@ mod tests {
         assert!(approx(x[0], 0.0), "x={x:?}");
         assert!(approx(x[1], 3.0), "x={x:?}");
         assert_eq!(CLEANUP_PIVOTS.load(Relaxed), before, "the identically-zero branch never performs an actual pivot swap");
+    }
+
+    #[test]
+    fn cleanup_ratio_test_pivots_on_the_blocking_row_and_stays_primal_feasible() {
+        // Hand-built final state (all costs 0, so z1 = 0): x0 in [0,+inf)
+        // nonbasic at its `+M` side; x1 in [0,+inf), x2 in [0,10] basic.
+        //   -x0 + x1      + s0 = -3  ->  x1 = M - 3
+        //    x0 - x1 + x2 + s1 =  5  ->  x2 = 2
+        // Moving x0 from M toward 0 lowers x1 at rate 1, which hits its
+        // lower bound after M - 3 < M: case (B) of `lem:cleanup` — x0
+        // enters at row 0 (value 3), x1 leaves at 0, x2 stays 2. The old
+        // arbitrary-row cleanup would have had to hand this to the dual
+        // restart; here polish must find it already primal feasible.
+        let rows = vec![vec![(0, -1.0), (1, 1.0), (3, 1.0)], vec![(0, 1.0), (1, -1.0), (2, 1.0), (4, 1.0)]];
+        let std = std_form(&rows, vec![-3.0, 5.0], vec![0.0; 5], vec![0.0; 5], vec![f64::INFINITY, f64::INFINITY, 10.0, 0.0, 0.0]);
+        let n_orig = 3;
+        let mut basis = vec![1usize, 2];
+        let mut basis_pos = vec![None, Some(0), Some(1), None, None];
+        let mut nb_status = vec![Some(NbStatus::Upper), None, None, Some(NbStatus::Lower), Some(NbStatus::Lower)];
+        let delta: Vec<MSide> = (0..5).map(|j| if j < n_orig { delta_of(&std, j) } else { MSide::None }).collect();
+        let cache = ColCache::build(&std, n_orig);
+        let lu = refactorize(&std, &basis_pos, None).unwrap();
+        let before = CLEANUP_PIVOTS.load(Relaxed);
+        let res = finish(&std, &mut basis, &mut basis_pos, &mut nb_status, &delta, &cache, n_orig, lu).unwrap();
+        assert_eq!(res.status, Status::Optimal);
+        let x = res.x.unwrap();
+        assert!(approx(x[0], 3.0) && approx(x[1], 0.0) && approx(x[2], 2.0), "x={x:?}");
+        assert_eq!(CLEANUP_PIVOTS.load(Relaxed), before + 1);
+        assert_eq!(basis[0], 0, "x0 must enter at the blocking row");
+        assert_eq!(nb_status[1], Some(NbStatus::Lower), "x1 leaves at the bound it reached");
     }
 
     #[test]
