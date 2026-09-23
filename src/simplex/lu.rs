@@ -2865,6 +2865,60 @@ impl LuFactors {
         }
     }
 
+    /// [`Self::l_solve_into_pair`] plus a third right-hand side `c` (the
+    /// BFRT combined-flip column — see [`FtLu::solve_into_triple_capture`]).
+    /// Columns where all three are nonzero are walked once for all three;
+    /// otherwise `a`/`b` take the pair logic and `c` its own single pass.
+    /// Every vector still receives exactly its own single-solve operations
+    /// in the same order, so all three results are bit-identical.
+    #[allow(clippy::too_many_arguments)]
+    fn l_solve_into_triple(&self, rhs_a: &[f64], rhs_b: &[f64], rhs_c: &[f64], za: &mut [f64], zb: &mut [f64], zc: &mut [f64]) {
+        let m = self.m;
+        for s in 0..m {
+            let r = self.row_perm[s];
+            za[s] = rhs_a[r];
+            zb[s] = rhs_b[r];
+            zc[s] = rhs_c[r];
+        }
+        for s in 0..m {
+            let xa = za[s];
+            let xb = zb[s];
+            let xc = zc[s];
+            if xa != 0.0 && xb != 0.0 && xc != 0.0 {
+                for &(row_step, mult) in self.l_col.col(s) {
+                    za[row_step] -= mult * xa;
+                    zb[row_step] -= mult * xb;
+                    zc[row_step] -= mult * xc;
+                }
+                continue;
+            }
+            match (xa != 0.0, xb != 0.0) {
+                (false, false) => {}
+                (true, true) => {
+                    for &(row_step, mult) in self.l_col.col(s) {
+                        za[row_step] -= mult * xa;
+                        zb[row_step] -= mult * xb;
+                    }
+                }
+                (true, false) => {
+                    for &(row_step, mult) in self.l_col.col(s) {
+                        za[row_step] -= mult * xa;
+                    }
+                }
+                (false, true) => {
+                    for &(row_step, mult) in self.l_col.col(s) {
+                        zb[row_step] -= mult * xb;
+                    }
+                }
+            }
+            if xc != 0.0 {
+                for &(row_step, mult) in self.l_col.col(s) {
+                    zc[row_step] -= mult * xc;
+                }
+            }
+        }
+    }
+
     fn l_solve_into(&self, rhs: &[f64], z: &mut [f64]) {
         let m = self.m;
         for s in 0..m {
@@ -4092,6 +4146,134 @@ impl FtLu {
         let (na, nb) = self.pair_r_u_permute(scratch_a, scratch_b, out_a, out_b, a_tilde_out);
         scratch_a.fill(0.0);
         (na, nb)
+    }
+
+    /// [`Self::solve_into_pair_capture`] plus a third dense FTRAN `out_c =
+    /// B^-1 rhs_c` (the BFRT combined-flip column of the same iteration,
+    /// against the same pre-pivot factorization) sharing the same single
+    /// traversal of `L`/`R`/`U`. Bit-identical to `solve_into_capture(a)` +
+    /// `solve_into(b)` + `solve_into(c)`, ticks included. Returns the three
+    /// results' nonzero counts.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_into_triple_capture(
+        &self,
+        rhs_a: &[f64],
+        rhs_b: &[f64],
+        rhs_c: &[f64],
+        scratch_a: &mut [f64],
+        scratch_b: &mut [f64],
+        scratch_c: &mut [f64],
+        out_a: &mut [f64],
+        out_b: &mut [f64],
+        out_c: &mut [f64],
+        a_tilde_out: &mut [f64],
+    ) -> (usize, usize, usize) {
+        if !self.u_zero_skip {
+            let na = self.solve_into_capture(rhs_a, scratch_a, out_a, a_tilde_out);
+            let nb = self.solve_into(rhs_b, scratch_b, out_b);
+            let nc = self.solve_into(rhs_c, scratch_c, out_c);
+            return (na, nb, nc);
+        }
+        let m = self.base.m as u64;
+        self.base.l_solve_into_triple(rhs_a, rhs_b, rhs_c, scratch_a, scratch_b, scratch_c);
+        self.add_tick(3 * m);
+        self.triple_r_u_permute(scratch_a, scratch_b, scratch_c, out_a, out_b, out_c, a_tilde_out)
+    }
+
+    /// [`Self::solve_sparse_into_pair_capture`] plus the dense third
+    /// right-hand side of [`Self::solve_into_triple_capture`]. Same
+    /// `scratch_a`/`gp` contract as the pair version.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_sparse_into_triple_capture(
+        &self,
+        rhs_a: &[(usize, f64)],
+        rhs_b: &[f64],
+        rhs_c: &[f64],
+        scratch_a: &mut [f64],
+        gp: &mut GpScratch,
+        scratch_b: &mut [f64],
+        scratch_c: &mut [f64],
+        out_a: &mut [f64],
+        out_b: &mut [f64],
+        out_c: &mut [f64],
+        a_tilde_out: &mut [f64],
+    ) -> (usize, usize, usize) {
+        if !self.u_zero_skip {
+            let na = self.solve_sparse_into_capture(rhs_a, scratch_a, gp, out_a, a_tilde_out);
+            let nb = self.solve_into(rhs_b, scratch_b, out_b);
+            let nc = self.solve_into(rhs_c, scratch_c, out_c);
+            return (na, nb, nc);
+        }
+        self.base.l_solve_sparse_into(rhs_a, scratch_a, gp);
+        self.add_tick(gp.reach.len() as u64);
+        self.base.l_solve_into_pair(rhs_b, rhs_c, scratch_b, scratch_c);
+        self.add_tick(2 * self.base.m as u64);
+        let r = self.triple_r_u_permute(scratch_a, scratch_b, scratch_c, out_a, out_b, out_c, a_tilde_out);
+        scratch_a.fill(0.0);
+        r
+    }
+
+    /// [`Self::pair_r_u_permute`] with a third vector `c` (no capture).
+    #[allow(clippy::too_many_arguments)]
+    fn triple_r_u_permute(
+        &self,
+        scratch_a: &mut [f64],
+        scratch_b: &mut [f64],
+        scratch_c: &mut [f64],
+        out_a: &mut [f64],
+        out_b: &mut [f64],
+        out_c: &mut [f64],
+        a_tilde_out: &mut [f64],
+    ) -> (usize, usize, usize) {
+        let m = self.base.m as u64;
+        for reta in &self.r_etas {
+            let dot_a = reta.r.dot_dense(scratch_a);
+            let dot_b = reta.r.dot_dense(scratch_b);
+            let dot_c = reta.r.dot_dense(scratch_c);
+            self.add_tick(3 * reta.r.nnz() as u64);
+            scratch_a[reta.p] -= dot_a;
+            scratch_b[reta.p] -= dot_b;
+            scratch_c[reta.p] -= dot_c;
+        }
+        a_tilde_out.copy_from_slice(scratch_a);
+        self.add_tick(3 * m);
+        for eta in self.u_seq.iter().rev() {
+            let p = eta.slot;
+            if scratch_a[p] != 0.0 {
+                scratch_a[p] /= eta.pivot;
+                let xp = scratch_a[p];
+                self.add_tick(eta.off_diag.nnz() as u64);
+                eta.off_diag.axpy_into_dense(-xp, scratch_a);
+            }
+            if scratch_b[p] != 0.0 {
+                scratch_b[p] /= eta.pivot;
+                let xp = scratch_b[p];
+                self.add_tick(eta.off_diag.nnz() as u64);
+                eta.off_diag.axpy_into_dense(-xp, scratch_b);
+            }
+            if scratch_c[p] != 0.0 {
+                scratch_c[p] /= eta.pivot;
+                let xp = scratch_c[p];
+                self.add_tick(eta.off_diag.nnz() as u64);
+                eta.off_diag.axpy_into_dense(-xp, scratch_c);
+            }
+        }
+        for eta in &self.singles {
+            let p = eta.slot;
+            if scratch_a[p] != 0.0 {
+                scratch_a[p] /= eta.pivot;
+            }
+            if scratch_b[p] != 0.0 {
+                scratch_b[p] /= eta.pivot;
+            }
+            if scratch_c[p] != 0.0 {
+                scratch_c[p] /= eta.pivot;
+            }
+        }
+        let na = self.permute_out(scratch_a, out_a);
+        let nb = self.permute_out(scratch_b, out_b);
+        let nc = self.permute_out(scratch_c, out_c);
+        (na, nb, nc)
     }
 
     /// The shared post-`L` tail of the two pair solves above: `R` etas,

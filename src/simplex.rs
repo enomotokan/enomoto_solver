@@ -1800,6 +1800,7 @@ fn run_phase(
     let mut w_buf = vec![0.0; m];
     let mut candidates_buf: Vec<Candidate> = Vec::with_capacity(m);
 
+    let ratio_pivot_tol = if std::env::var("ENOMOTO_PRIMAL_RATIO_PIVOT_TOL_OLD").is_ok() { TOL } else { FT_MIN_PIVOT };
     let max_iters = max_iters_for(m, std.n_total);
     for iter_idx in 0..max_iters {
         let rhs = t.recompute_basics(lu);
@@ -1984,7 +1985,18 @@ fn run_phase(
         candidates_buf.clear();
         for i in 0..m {
             let rate = -best_dir * alpha[i]; // d(x_Bi)/d(theta)
-            if rate.abs() <= TOL {
+            // `FT_MIN_PIVOT`, not `TOL`: a leaving row with `|alpha|` this
+            // small makes the new basis (nearly) singular — `try_update`
+            // rejects the update and the refactorization that follows fails,
+            // aborting this phase (Netlib `dfl001`'s cleanup handoff hit a
+            // `1.2e-9` pivot this way once the extended dual's path shifted
+            // slightly, and fell back to a from-scratch solve costing more
+            // than the whole dual run). Treating such rows as non-blocking is
+            // the usual primal ratio-test pivot tolerance (HiGHS
+            // `HEkkPrimal`'s `alpha_tol` reaches `1e-7` as well); the bound
+            // violation it permits is at most `theta * 1e-7`.
+            // `ENOMOTO_PRIMAL_RATIO_PIVOT_TOL_OLD` restores `TOL` (A/B only).
+            if rate.abs() <= ratio_pivot_tol {
                 continue;
             }
             let var = t.basis[i];
