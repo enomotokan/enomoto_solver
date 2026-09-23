@@ -76,7 +76,7 @@
 //! this one direction gets the fuller treatment.
 
 use crate::sparse::{CscBuilder, CscMat, CsrMat, EpochMarks, HybridVec};
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -3455,6 +3455,25 @@ pub struct FtLu {
     /// once-*every*-iteration BTRAN/FTRAN paths, not just `try_update`)
     /// keep a plain sequential scan with no pointer-chasing indirection.
     u_seq: Vec<UEta>,
+    /// The **singleton** `U` etas (empty `off_diag`: a bare diagonal pivot)
+    /// of the factorization as built, held apart from `u_seq` — 42-99% of
+    /// all `m` etas right after a refactorization on the heavy Netlib
+    /// problems. A singleton's own division reads and writes only its own
+    /// slot, and by `u_seq`'s triangular order every eta that writes into
+    /// that slot (FTRAN) or reads it (BTRAN) sits *later* in the sequence,
+    /// so its division can run after the whole `u_seq` pass in the `U`
+    /// solves and before it in the `U^T` sweep without changing a single
+    /// result bit — while the sequential loops skip visiting them at all.
+    /// Order within `singles` is irrelevant (the divisions are
+    /// independent); `commit_update` pulls a replaced one out with
+    /// `swap_remove`. `u_seq` never feeds an eta back in here: an eta that
+    /// loses its last off-diagonal entry later just stays in `u_seq`,
+    /// exact either way.
+    singles: Vec<UEta>,
+    /// `singles_pos[slot]` is `slot`'s index into `singles`, `usize::MAX`
+    /// when `slot` lives in `u_seq` instead (and vice versa for
+    /// `slot_pos`).
+    singles_pos: Vec<usize>,
     /// `slot_pos[slot]` is `slot`'s current index into `u_seq` — kept in
     /// sync by `try_update` over exactly the range its own
     /// `Vec::remove`/`push` already touches (see `try_update`'s own docs),
@@ -3473,7 +3492,7 @@ pub struct FtLu {
     /// `slot_pos` above for O(1) access to each one), so only the
     /// (typically small — a few percent of `m`, per `ENOMOTO_DEBUG_ETA_DENSITY`
     /// measurements) handful that actually do ever get touched.
-    row_owners: Vec<Vec<usize>>,
+    row_owners: Vec<Vec<(usize, f64)>>,
     r_etas: Vec<REta>,
     /// [`Self::try_update`]'s own reusable scratch (length `m`, always
     /// restored to that length before returning — see that method's own
@@ -3491,19 +3510,6 @@ pub struct FtLu {
     /// See [`Self::scratch_a_tilde`]'s own docs — the other of
     /// [`Self::try_update`]'s two scratch buffers.
     scratch_e_tilde: Vec<f64>,
-    /// [`Self::u_transpose_solve_into`]'s own reusable [`EpochMarks`]
-    /// "needed" set (see that method's own docs): a marked step `s` is one
-    /// known to end up nonzero this call. A `RefCell` rather than a `&mut`
-    /// parameter
-    /// because `u_transpose_solve_into` and its callers
-    /// (`solve_transpose_into`/`solve_transpose_into_capture`) are called
-    /// through a shared `&FtLu` from many call sites across this crate;
-    /// threading a new scratch parameter through all of them for an
-    /// internal, call-local bookkeeping array would be a much larger,
-    /// more invasive change for the same result. Never borrowed
-    /// re-entrantly (this method doesn't call itself), so the `borrow_mut`
-    /// can't panic.
-    ut_needed: RefCell<EpochMarks>,
     /// Deterministic operation-count accumulator for the `CLOCK`
     /// refactorization trigger (`ENOMOTO_SYNTH_CLOCK_FACTOR`'s own docs at
     /// its call sites in `extended_dual.rs`) — this crate's counterpart to
@@ -3518,8 +3524,7 @@ pub struct FtLu {
     /// A `Cell` (not a plain field) because every solve stage that adds to
     /// it (`ftran_through_l_and_r_into`, `solve_sparse_into[_capture]`,
     /// `u_solve_into`, `u_transpose_solve_into`, `solve_transpose_into[_capture]`)
-    /// takes `&self`, matching this file's existing `ut_needed`
-    /// interior-mutability convention just above. Reset implicitly to `0`
+    /// takes `&self`. Reset implicitly to `0`
     /// every time a new `FtLu` is built (`Self::new`, i.e. every
     /// refactorization) — there is no explicit reset method because a fresh
     /// `FtLu` *is* the reset.
@@ -3617,7 +3622,20 @@ const TICK_SOLVE_NNZ_COEF: u64 = 1;
 impl FtLu {
     pub fn new(base: LuFactors) -> Self {
         let m = base.m;
-        let mut off_diags: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
+        // Exact per-slot/per-row counts first so every inner `Vec` below is
+        // allocated once at its final size (this runs on every
+        // refactorization).
+        let mut off_count = vec![0usize; m];
+        let mut owner_count = vec![0usize; m];
+        for row_step in 0..m {
+            for &(col_step, _) in &base.u_row[row_step] {
+                if col_step != row_step {
+                    off_count[col_step] += 1;
+                    owner_count[row_step] += 1;
+                }
+            }
+        }
+        let mut off_diags: Vec<Vec<(usize, f64)>> = off_count.iter().map(|&c| Vec::with_capacity(c)).collect();
         let mut pivots = vec![0.0; m];
         for row_step in 0..m {
             for &(col_step, v) in &base.u_row[row_step] {
@@ -3628,10 +3646,10 @@ impl FtLu {
                 }
             }
         }
-        let mut row_owners: Vec<Vec<usize>> = vec![Vec::new(); m];
+        let mut row_owners: Vec<Vec<(usize, f64)>> = owner_count.iter().map(|&c| Vec::with_capacity(c)).collect();
         for (slot, pairs) in off_diags.iter().enumerate() {
-            for &(row_step, _) in pairs {
-                row_owners[row_step].push(slot);
+            for &(row_step, v) in pairs {
+                row_owners[row_step].push((slot, v));
             }
         }
         let l_nnz: u64 = base.l_col.nnz() as u64;
@@ -3646,23 +3664,35 @@ impl FtLu {
         // every stored entry, matching what `factorize_reusing_order`
         // counts as it goes.
         let fill_baseline = (l_nnz + u_off) as usize + m;
-        let u_seq: Vec<UEta> = (0..m)
-            .map(|slot| UEta {
+        let mut u_seq: Vec<UEta> = Vec::with_capacity(m);
+        let mut singles: Vec<UEta> = Vec::new();
+        let mut slot_pos = vec![usize::MAX; m];
+        let mut singles_pos = vec![usize::MAX; m];
+        for slot in 0..m {
+            let eta = UEta {
                 slot,
                 pivot: pivots[slot],
                 off_diag: HybridVec::pack(m, std::mem::take(&mut off_diags[slot]), DENSE_ETA_FRACTION),
-            })
-            .collect();
+            };
+            if eta.off_diag.nnz() == 0 {
+                singles_pos[slot] = singles.len();
+                singles.push(eta);
+            } else {
+                slot_pos[slot] = u_seq.len();
+                u_seq.push(eta);
+            }
+        }
         let fill = u_seq.iter().map(|e: &UEta| e.off_diag.nnz()).sum();
         FtLu {
             base,
             u_seq,
-            slot_pos: (0..m).collect(),
+            singles,
+            singles_pos,
+            slot_pos,
             row_owners,
             r_etas: Vec::new(),
             scratch_a_tilde: vec![0.0; m],
             scratch_e_tilde: vec![0.0; m],
-            ut_needed: RefCell::new(EpochMarks::new(m)),
             fill,
             tick: Cell::new(0),
             build_tick,
@@ -3752,37 +3782,14 @@ impl FtLu {
     ///
     /// Hyper-sparse via [`Self::row_owners`], unlike [`Self::u_solve_into`]
     /// (see that method's own docs for why a GP-style DFS reach set was
-    /// tried there and reverted): `z`'s input here is always a single unit
-    /// vector's worth of nonzeros (BTRAN's callers only ever seed one
-    /// entry before permutation), and this loop already visits `u_seq` in
-    /// the one order (forward/creation order) in which every eta's
-    /// `off_diag` targets are guaranteed to sit at strictly earlier
-    /// positions (the same invariant `u_solve_into`'s reverse pass relies
-    /// on, mirrored) — so marking "which later etas can possibly end up
-    /// nonzero" is a single forward pass with no separate DFS/reach
-    /// pre-pass needed: whenever this loop finds `z[p] != 0.0`, every slot
-    /// listed in `row_owners[p]` (the etas whose `off_diag` reads row-step
-    /// `p`) is marked needed, and any eta never marked needed is skipped
-    /// outright. A skipped eta's `z[p]` is left at whatever `0 - 0 == 0`
-    /// (or `-0.0`) it already held — never read by any downstream code as
-    /// anything but "zero" (see `commit_update`'s `!= 0.0` filter, the
-    /// `r_etas`/PRICE/DSE consumers immediately below and downstream of
-    /// this call, all of which branch on zero-ness, not sign of zero), so
-    /// every nonzero result is bit-identical to the unconditional scan.
-    /// Measured (`analysis/greenbea_20260921_090812.md` §3-4): on
-    /// `greenbea`, only ~3% of `u_seq` ends up nonzero per call, cutting
-    /// this stage's wall time by more than half with the pivot sequence,
-    /// iteration count, refactorization count and objective value all
-    /// unchanged (bit-identical) across the full Netlib set.
+    /// tried there and reverted): the sweep ([`Self::u_transpose_sweep`])
+    /// is in scatter form over `row_owners`' row-wise copy of `U`, so a
+    /// slot whose value is zero costs one test and nothing else. (The
+    /// earlier gather form reached the same sparsity through "needed"
+    /// marks, `analysis/greenbea_20260921_090812.md` §3-4, but still paid
+    /// each needed eta's whole column dot product.)
     fn u_transpose_solve_into(&self, z: &mut [f64]) {
-        let mut needed = self.ut_needed.borrow_mut();
-        needed.begin();
-        for (s, &zs) in z.iter().enumerate() {
-            if zs != 0.0 {
-                needed.mark(s);
-            }
-        }
-        self.u_transpose_sweep(z, &mut needed);
+        self.u_transpose_sweep(z);
     }
 
     /// [`Self::u_transpose_solve_into`] for the case the caller already
@@ -3801,44 +3808,41 @@ impl FtLu {
     /// place, which [`Self::seed_unit_rhs`] replaces with a flat `fill` and
     /// one store.
     fn u_transpose_solve_seeded(&self, z: &mut [f64], seed: usize) {
-        let mut needed = self.ut_needed.borrow_mut();
-        needed.begin();
-        needed.mark(seed);
-        self.u_transpose_sweep(z, &mut needed);
+        debug_assert!(z.iter().enumerate().all(|(s, &v)| s == seed || v == 0.0));
+        self.u_transpose_sweep(z);
     }
 
     /// The `U^{-T}` sweep itself, shared by both seedings above.
-    fn u_transpose_sweep(&self, z: &mut [f64], needed: &mut EpochMarks) {
-        // CLOCK-trigger accounting (`Self::tick`'s own docs): the
-        // mark-seeding scan plus the unconditional `for eta in &self.u_seq` walk below
-        // (the `continue` only skips the dot product, not the loop
-        // iteration itself) are both `O(m)` on every single call regardless
-        // of how sparse `z` is — mirrors HiGHS's own `buildSynthticTick`
-        // fixed `num_row`-scaled term for the analogous `btranU` stage.
+    fn u_transpose_sweep(&self, z: &mut [f64]) {
+        // Scatter form (HiGHS `HFactor::btranU` over its row-wise `ur_*`
+        // copy): once slot `p`'s value is final it is divided by its pivot
+        // and pushed into every eta that reads it (`row_owners[p]`, which
+        // carries the `U` entry alongside the slot) — so the work is the
+        // nonzero `p`s' row lengths, not, as the gather form this replaced
+        // did, every needed eta's whole column dot product regardless of
+        // how few of that column's inputs are nonzero (26x more entries on
+        // `fit2p`, whose few dense border columns every BTRAN re-read).
+        // Changes the summation order into each `z[q]`, so the last bits —
+        // not the math — differ from the gather form.
         //
-        // Charged identically on the seeded path, which skips the scan but
-        // still walks all of `u_seq`: the flat `m` term models that walk,
-        // and the tick drives the deterministic `CLOCK` refactorization
-        // trigger, so making the two paths disagree here would change
-        // *which iterations refactorize* — i.e. silently move the solve
-        // onto a different trajectory — in exchange for modelling a
-        // constant factor within the same `O(m)`.
+        // CLOCK-trigger accounting (`Self::tick`'s own docs): the flat `m`
+        // for the `O(m)` walk over every slot, plus each scattered row's
+        // length.
         self.add_tick(self.base.m as u64);
-        for eta in &self.u_seq {
+        // Singletons first (see `singles`' own docs): nothing writes into a
+        // singleton's slot, so its value is final before the sweep starts.
+        for eta in self.singles.iter().chain(self.u_seq.iter()) {
             let p = eta.slot;
-            if !needed.is_marked(p) {
+            let zp = z[p];
+            if zp == 0.0 {
                 continue;
             }
-            // `HybridVec`'s dense arm zips the whole array; `data[p]` is
-            // always `0.0` (that type's skipped-index convention), so this
-            // dot product already excludes `z[p]` on its own.
-            let y = eta.off_diag.dot_dense(z);
-            self.add_tick(eta.off_diag.nnz() as u64);
-            z[p] = (z[p] - y) / eta.pivot;
-            if z[p] != 0.0 {
-                for &q in &self.row_owners[p] {
-                    needed.mark(q);
-                }
+            let zp = zp / eta.pivot;
+            z[p] = zp;
+            let owners = &self.row_owners[p];
+            self.add_tick(owners.len() as u64);
+            for &(q, v) in owners {
+                z[q] -= v * zp;
             }
         }
     }
@@ -3906,6 +3910,9 @@ impl FtLu {
                 self.add_tick(eta.off_diag.nnz() as u64);
                 eta.off_diag.axpy_into_dense(-xp, x);
             }
+            for eta in &self.singles {
+                x[eta.slot] /= eta.pivot;
+            }
             return;
         }
         for eta in self.u_seq.iter().rev() {
@@ -3932,6 +3939,14 @@ impl FtLu {
             // convention), so the dense arm leaves `x[p]` — just divided
             // above — untouched, same as the sparse one.
             eta.off_diag.axpy_into_dense(-xp, x);
+        }
+        // Singletons last (see `singles`' own docs): every write into their
+        // slots has happened by now. Same zero-skip as the loop above.
+        for eta in &self.singles {
+            let p = eta.slot;
+            if x[p] != 0.0 {
+                x[p] /= eta.pivot;
+            }
         }
     }
 
@@ -4108,6 +4123,15 @@ impl FtLu {
                 let xp = scratch_b[p];
                 self.add_tick(eta.off_diag.nnz() as u64);
                 eta.off_diag.axpy_into_dense(-xp, scratch_b);
+            }
+        }
+        for eta in &self.singles {
+            let p = eta.slot;
+            if scratch_a[p] != 0.0 {
+                scratch_a[p] /= eta.pivot;
+            }
+            if scratch_b[p] != 0.0 {
+                scratch_b[p] /= eta.pivot;
             }
         }
         let na = self.permute_out(scratch_a, out_a);
@@ -4412,7 +4436,19 @@ impl FtLu {
         debug_assert_eq!(self.r_etas.len(), 0, "solve_transpose_unit_into requires a fresh (update-free) factorization");
         let s0 = self.base.col_perm_inv[i];
         scratch[s0] = 1.0;
-        self.u_transpose_solve_from(scratch, s0);
+        // On a fresh factorization `u_seq` holds the non-singleton slots in
+        // ascending slot order, so the `[0, s0)` prefix is `u_seq`'s
+        // prefix of slots below `s0`; the singletons at or after `s0` get
+        // the same `(z - 0) / pivot` the unsplit sweep gave them, first.
+        for eta in &self.singles {
+            let p = eta.slot;
+            if p >= s0 {
+                let y = eta.off_diag.dot_dense(scratch);
+                scratch[p] = (scratch[p] - y) / eta.pivot;
+            }
+        }
+        let start = self.u_seq.partition_point(|e| e.slot < s0);
+        self.u_transpose_solve_from(scratch, start);
         self.l_transpose_solve_into(scratch, out);
         scratch.fill(0.0);
     }
@@ -4568,8 +4604,8 @@ impl FtLu {
         debug_assert_eq!(e_tilde.len(), m, "e_tilde must be the full dense row");
         let p = self.base.col_perm_inv[basis_slot];
 
-        let seq_pos = self.slot_pos[p];
-        let old_pivot = self.u_seq[seq_pos].pivot;
+        let single_idx = self.singles_pos[p];
+        let old_pivot = if single_idx != usize::MAX { self.singles[single_idx].pivot } else { self.u_seq[self.slot_pos[p]].pivot };
 
         // The `R` eta is built straight out of `e_tilde` — same entries,
         // same order, same sparse/dense choice as the `collect()`-then-
@@ -4591,18 +4627,31 @@ impl FtLu {
         // update `slot_pos` for exactly that range (elements the memmove
         // itself already touches, so this is no extra asymptotic cost)
         // rather than the old `find_seq_pos`'s full O(m) re-scan.
-        let removed = self.u_seq.remove(seq_pos);
+        let removed = if single_idx != usize::MAX {
+            // A singleton leaves `singles` instead (order there is free);
+            // `u_seq` is untouched until the push below.
+            let removed = self.singles.swap_remove(single_idx);
+            if let Some(moved) = self.singles.get(single_idx) {
+                self.singles_pos[moved.slot] = single_idx;
+            }
+            self.singles_pos[p] = usize::MAX;
+            removed
+        } else {
+            let seq_pos = self.slot_pos[p];
+            let removed = self.u_seq.remove(seq_pos);
+            for pos in seq_pos..self.u_seq.len() {
+                self.slot_pos[self.u_seq[pos].slot] = pos;
+            }
+            removed
+        };
         self.fill -= removed.off_diag.nnz();
-        for pos in seq_pos..self.u_seq.len() {
-            self.slot_pos[self.u_seq[pos].slot] = pos;
-        }
 
         // Unregister slot `p`'s *old* off-diagonal entries from
         // `row_owners` before overwriting them below — otherwise a stale
         // `p` would linger in some other row's owner list, pointing at
         // content that no longer exists there.
         removed.off_diag.for_each_index(|row_step| {
-            if let Some(idx) = self.row_owners[row_step].iter().position(|&s| s == p) {
+            if let Some(idx) = self.row_owners[row_step].iter().position(|&(s, _)| s == p) {
                 self.row_owners[row_step].swap_remove(idx);
             }
         });
@@ -4611,7 +4660,7 @@ impl FtLu {
         // 1974, eq. 12) — only the etas `row_owners[p]` actually lists,
         // not every eta in `U` (see `row_owners`'s own docs), each found
         // in O(1) via `slot_pos`.
-        for slot in std::mem::take(&mut self.row_owners[p]) {
+        for (slot, _) in std::mem::take(&mut self.row_owners[p]) {
             let pos = self.slot_pos[slot];
             if self.u_seq[pos].off_diag.remove_index(p) {
                 self.fill -= 1;
@@ -4622,7 +4671,7 @@ impl FtLu {
         // `a_tilde` (scale `1.0`, so the dense arm is a plain copy) rather
         // than through a throwaway pair list.
         let off_diag = HybridVec::pack_scaled_dense(a_tilde, p, 1.0, DENSE_ETA_FRACTION);
-        off_diag.for_each_index(|row_step| self.row_owners[row_step].push(p));
+        off_diag.for_each_entry(|row_step, v| self.row_owners[row_step].push((p, v)));
         self.fill += off_diag.nnz();
         self.u_seq.push(UEta { slot: p, pivot: new_pivot, off_diag });
         self.slot_pos[p] = self.u_seq.len() - 1;

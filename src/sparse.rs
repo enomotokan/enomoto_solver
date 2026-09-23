@@ -548,6 +548,25 @@ impl HybridVec {
         }
     }
 
+    /// [`Self::for_each_index`], also handing over each entry's value.
+    #[inline]
+    pub fn for_each_entry(&self, mut f: impl FnMut(usize, f64)) {
+        match self {
+            HybridVec::Sparse(v) => {
+                for &(i, x) in v {
+                    f(i, x);
+                }
+            }
+            HybridVec::Dense { data, .. } => {
+                for (i, &x) in data.iter().enumerate() {
+                    if x != 0.0 {
+                        f(i, x);
+                    }
+                }
+            }
+        }
+    }
+
     /// Materializes the stored entries as owned `(index, value)` pairs.
     /// The dense arm is `O(len)`, so this is for cold paths only — not the
     /// per-iteration loops, which are the two methods below.
