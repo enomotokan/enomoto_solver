@@ -1,0 +1,200 @@
+commit 2c151d601a56485ab1b0ff859b164db1bb62b7ef
+Author: Claude <noreply@anthropic.com>
+Date:   Wed Sep 23 10:22:23 2026 +0000
+
+    WIP loop: L7 incremental drift rhs, L13 lazy polish d
+
+diff --git a/src/simplex/extended_dual.rs b/src/simplex/extended_dual.rs
+index 261e387..ae2b27d 100644
+--- a/src/simplex/extended_dual.rs
++++ b/src/simplex/extended_dual.rs
+@@ -2390,6 +2390,14 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
+     let (seed_base, seed_slope) = compute_rhs_affine(std, &cache, &nb_status)?;
+     lu.solve_into(&seed_base, &mut lu_scratch, &mut x_b_base);
+     lu.solve_into(&seed_slope, &mut lu_scratch, &mut x_b_slope);
++    // `b - N x_N(M)` maintained incrementally (BFRT flips and basis changes
++    // apply their own column's contribution) for the periodic drift check
++    // below, instead of recomputing it in `O(nnz(A))` at every check; every
++    // full resync re-anchors it to `compute_rhs_affine`'s own value.
++    // `ENOMOTO_XB_RHS_INCREMENTAL=0` restores the full recompute (A/B only).
++    let rhs_incremental = std::env::var("ENOMOTO_XB_RHS_INCREMENTAL").map_or(true, |v| v != "0");
++    let mut rhs_inc_base = seed_base;
++    let mut rhs_inc_slope = seed_slope;
+     snap_slopes(&mut x_b_slope);
+ 
+     // `super::solve_lp_dual_on`'s own `noise_feasible`, ported: a row
+@@ -3310,6 +3318,8 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
+                     let (fresh_base, fresh_slope) = compute_rhs_affine(std, &cache, &nb_status)?;
+                     lu.solve_into(&fresh_base, &mut lu_scratch, &mut x_b_base);
+                     lu.solve_into(&fresh_slope, &mut lu_scratch, &mut x_b_slope);
++                    rhs_inc_base = fresh_base;
++                    rhs_inc_slope = fresh_slope;
+                     snap_slopes(&mut x_b_slope);
+                     rebuild_rows(&mut infeasible_rows, &mut row_dev, m, &row_bounds, &x_b_base, &x_b_slope);
+                     fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fd_cb, &mut lu_scratch, &mut fd_y, &mut d);
+@@ -3465,6 +3475,8 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
+                     let (fresh_base, fresh_slope) = compute_rhs_affine(std, &cache, &nb_status)?;
+                     lu.solve_into(&fresh_base, &mut lu_scratch, &mut x_b_base);
+                     lu.solve_into(&fresh_slope, &mut lu_scratch, &mut x_b_slope);
++                    rhs_inc_base = fresh_base;
++                    rhs_inc_slope = fresh_slope;
+                     snap_slopes(&mut x_b_slope);
+                     rebuild_rows(&mut infeasible_rows, &mut row_dev, m, &row_bounds, &x_b_base, &x_b_slope);
+                     fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fd_cb, &mut lu_scratch, &mut fd_y, &mut d);
+@@ -3828,6 +3840,8 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
+                     }
+                 }
+                 for &i in &combined_touched {
++                    rhs_inc_base[i] -= combined_base[i];
++                    rhs_inc_slope[i] -= combined_slope[i];
+                     combined_base[i] = 0.0;
+                     combined_slope[i] = 0.0;
+                     combined_touched_flag[i] = false;
+@@ -3844,6 +3858,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
+                     }
+                 }
+                 for &i in &combined_touched {
++                    rhs_inc_base[i] -= combined_base[i];
+                     combined_base[i] = 0.0;
+                     combined_touched_flag[i] = false;
+                 }
+@@ -3966,6 +3981,8 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
+                 let (fresh_base, fresh_slope) = compute_rhs_affine(std, &cache, &nb_status)?;
+                 lu.solve_into(&fresh_base, &mut lu_scratch, &mut x_b_base);
+                 lu.solve_into(&fresh_slope, &mut lu_scratch, &mut x_b_slope);
++                rhs_inc_base = fresh_base;
++                rhs_inc_slope = fresh_slope;
+                 snap_slopes(&mut x_b_slope);
+                 rebuild_rows(&mut infeasible_rows, &mut row_dev, m, &row_bounds, &x_b_base, &x_b_slope);
+                 fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fd_cb, &mut lu_scratch, &mut fd_y, &mut d);
+@@ -3983,7 +4000,8 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
+             if combined_pending {
+                 // Unapplied flip result: the resync above already rebuilt
+                 // `x_B(M)` from the (flipped) `nb_status`; just reset the
+-                // combined-rhs buffers.
++                // combined-rhs buffers (`rhs_inc_*` was re-anchored by the
++                // same resync, so the flips are already in it).
+                 for &i in &combined_touched {
+                     combined_base[i] = 0.0;
+                     combined_slope[i] = 0.0;
+@@ -4101,6 +4119,8 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
+                     refresh_row(&mut infeasible_rows, &mut row_dev, &row_bounds, &x_b_base, &x_b_slope, i);
+                 }
+                 for &i in &combined_touched {
++                    rhs_inc_base[i] -= combined_base[i];
++                    rhs_inc_slope[i] -= combined_slope[i];
+                     combined_base[i] = 0.0;
+                     combined_slope[i] = 0.0;
+                     combined_touched_flag[i] = false;
+@@ -4249,6 +4269,25 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
+         basis_pos[q] = Some(r);
+         nb_status[q] = None;
+         row_bounds.assign(r, q, &cache, &noise_feasible);
++        // `rhs_inc_*` (`b - N x_N(M)`): `q` leaves `N` (its term is added
++        // back), the leaving variable joins it at its new bound.
++        {
++            let val_l = nb_value_affine(&cache, nb_status[leaving_var].unwrap(), leaving_var)?;
++            for (j, val, sign) in [(q, nb_val_q, 1.0f64), (leaving_var, val_l, -1.0f64)] {
++                if val.base != 0.0 {
++                    let vb = sign * val.base;
++                    for &(i, v) in std.cols.col(j) {
++                        rhs_inc_base[i] += v * vb;
++                    }
++                }
++                if val.slope != 0.0 {
++                    let vs = sign * val.slope;
++                    for &(i, v) in std.cols.col(j) {
++                        rhs_inc_slope[i] += v * vs;
++                    }
++                }
++            }
++        }
+         if price_nonbasic_only {
+             // `HighsSparseMatrix::update`'s own swap scheme: `q` (always
+             // non-fixed — PRICE only ever offers those) moves from each of
+@@ -4421,14 +4460,20 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
+                 // plain-`f64` drift check is — see `XB_CHECK_INTERVAL`'s
+                 // own docs for why this module's `Affine1` slope channel
+                 // needs a tighter leash.
+-                let (fresh_base, fresh_slope) = compute_rhs_affine(std, &cache, &nb_status)?;
++                let fresh;
++                let (rb, rs): (&[f64], &[f64]) = if rhs_incremental {
++                    (&rhs_inc_base, &rhs_inc_slope)
++                } else {
++                    fresh = compute_rhs_affine(std, &cache, &nb_status)?;
++                    (&fresh.0, &fresh.1)
++                };
+                 let (resid_base, resid_slope) = residual_norm_affine(
+                     std,
+                     &basis,
+                     &x_b_base,
+                     &x_b_slope,
+-                    &fresh_base,
+-                    &fresh_slope,
++                    rb,
++                    rs,
+                     &mut resid_scratch_base,
+                     &mut resid_scratch_slope,
+                 );
+@@ -4514,6 +4559,8 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
+                 let (fresh_base, fresh_slope) = compute_rhs_affine(std, &cache, &nb_status)?;
+                 lu.solve_into(&fresh_base, &mut lu_scratch, &mut x_b_base);
+                 lu.solve_into(&fresh_slope, &mut lu_scratch, &mut x_b_slope);
++                rhs_inc_base = fresh_base;
++                rhs_inc_slope = fresh_slope;
+                 snap_slopes(&mut x_b_slope);
+                 rebuild_rows(&mut infeasible_rows, &mut row_dev, m, &row_bounds, &x_b_base, &x_b_slope);
+                 fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fd_cb, &mut lu_scratch, &mut fd_y, &mut d);
+@@ -4740,7 +4787,6 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
+     let stall_limit = (5 * m).max(500);
+     let mut stall_count = 0usize;
+     let mut bland_mode = false;
+-    let active_cost = super::perturb_costs(std);
+ 
+     let mut lu = lu;
+     let mut since_check = 0usize;
+@@ -4761,19 +4807,10 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
+     // basis cleanup left — so `d` needs one genuine BTRAN against that
+     // basis's own `c_B` to become valid *before* the incremental
+     // update-dual loop below can take over maintaining it.
+-    let mut d = vec![0.0f64; n_total];
+-    {
+-        let c_b: Vec<f64> = basis.iter().map(|&bv| active_cost[bv]).collect();
+-        let mut y = vec![0.0f64; m];
+-        lu.solve_transpose_into(&c_b, &mut lu_scratch, &mut y);
+-        for j in 0..n_total {
+-            let mut dj = active_cost[j];
+-            for &(i, v) in std.cols.col(j) {
+-                dj -= v * y[i];
+-            }
+-            d[j] = dj;
+-        }
+-    }
++    // The perturbed-cost `d` is only consumed by a polish *iteration*;
++    // computed lazily at the first one (every Netlib instance leaves polish
++    // at iteration 0, where only the true-cost `true_d` below is needed).
++    let mut d: Vec<f64> = Vec::new();
+ 
+     // Buffer reuse, row-major PRICE, incremental `d` — same techniques as
+     // the main phase (see its own docs), now over plain `f64` throughout
+@@ -4967,6 +5004,20 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
+                 x: if status == Status::Optimal { Some(t.x[0..t.n_orig()].to_vec()) } else { None },
+             });
+         };
++        if d.is_empty() {
++            let active_cost = super::perturb_costs(std);
++            d = vec![0.0f64; n_total];
++            let c_b: Vec<f64> = basis.iter().map(|&bv| active_cost[bv]).collect();
++            let mut y = vec![0.0f64; m];
++            lu.solve_transpose_into(&c_b, &mut lu_scratch, &mut y);
++            for j in 0..n_total {
++                let mut dj = active_cost[j];
++                for &(i, v) in std.cols.col(j) {
++                    dj -= v * y[i];
++                }
++                d[j] = dj;
++            }
++        }
+ 
+         // Captures `e_tilde_buf` for this iteration's own
+         // `try_update_precomputed` call further down — see the main
