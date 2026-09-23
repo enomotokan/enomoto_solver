@@ -405,10 +405,7 @@ pub fn run_extended(
     // unpropagated, looser bound here is safe, just more conservative, than
     // the fully-tightened `orig_lb`/`orig_ub` extracted again below).
     let (pre_lb, pre_ub) = propagate::extract_bounds_only(n, &g, &h);
-    // `ENOMOTO_REDEQ_LATE`: run the (expensive) dependent-equation search
-    // once on the *reduced* `A` after the round loop instead of here.
-    let redeq_late = std::env::var("ENOMOTO_REDEQ_LATE").is_ok();
-    let (na, nb) = if redeq_late { (a.clone(), b.to_vec()) } else { timed_step!("reduce_equalities", redundancy::reduce_equalities(&a, &b, n, &pre_lb, &pre_ub)) };
+    let (na, nb) = timed_step!("reduce_equalities", redundancy::reduce_equalities(&a, &b, n, &pre_lb, &pre_ub));
     a = na;
     b = nb;
     if profile && std::env::var("ENOMOTO_PROF_REDUNDANCY").is_ok() {
@@ -548,10 +545,7 @@ pub fn run_extended(
         // absolute ~0.13s) is this trade-off's known remaining cost — see
         // this function's own module docs and the loop's analysis file for
         // the full comparison table.
-        // `ENOMOTO_EQPROP_LATE`: skip round 0 (so the first aggregator call
-        // sees the unpropagated box) and run it on rounds 1-2 instead.
-        let eqprop_late = std::env::var("ENOMOTO_EQPROP_LATE").is_ok();
-        if (!eqprop_late && _round_idx < 2) || (eqprop_late && (1..3).contains(&_round_idx)) {
+        if _round_idx < 2 {
             let eq = timed_step!("eqprop", propagate::propagate_equalities(&a, &b, &mut lb, &mut ub, prop_passes));
             if eq.infeasible {
                 return extended_infeasible(sc, a, b, c, n);
@@ -875,23 +869,20 @@ pub fn run_extended(
         // memory on this specific mismeasurement for the full writeup.
         let agg = if std::env::var("ENOMOTO_DISABLE_AGGREGATOR").is_ok() {
             None
-        } else if std::env::var("ENOMOTO_AGG_V2").is_ok() {
-            Some(timed_step!("aggregator", aggregator::eliminate_implied_free_columns_v2(n, &a, &b, &c, &lb, &ub, &cur_real_rows, &cur_real_rhs, aggregator::AggOptions::from_env())))
         } else if std::env::var("ENOMOTO_XROW_AGGREGATOR").is_ok() {
             Some(timed_step!("aggregator", aggregator::eliminate_implied_free_columns_xrow(n, &a, &b, &c, &lb, &ub, &cur_real_rows, &cur_real_rhs)))
-        } else {
+        } else if std::env::var("ENOMOTO_ROWLOCAL_AGGREGATOR").is_ok() {
             Some(timed_step!("aggregator", aggregator::eliminate_implied_free_columns(n, &a, &b, &c, &lb, &ub, &cur_real_rows, &cur_real_rhs)))
+        } else {
+            // Default since 2026-09-23 (analysis/stocfor2_presolve_20260923.md):
+            // stocfor2 1652x1766 -> 950x1072 after presolve, -65% solve time.
+            Some(timed_step!("aggregator", aggregator::eliminate_implied_free_columns_v2(n, &a, &b, &c, &lb, &ub, &cur_real_rows, &cur_real_rhs, aggregator::AggOptions::from_env())))
         };
         if let Some(agg) = agg {
             if std::env::var("ENOMOTO_DEBUG_AGGREGATOR").is_ok() {
                 eprintln!("DEBUG_AGGREGATOR: eliminated={}", agg.substitutions.len());
             }
             if !agg.substitutions.is_empty() {
-                // `ENOMOTO_DBL_REARM`: an aggregator fold can create fresh
-                // doubleton equations, so re-arm the latched-off doubleton pass.
-                if std::env::var("ENOMOTO_DBL_REARM").is_ok() {
-                    doubleton_active = true;
-                }
                 a = agg.a;
                 b = agg.b;
                 c = agg.c;
@@ -1048,41 +1039,26 @@ pub fn run_extended(
         h = rh;
 
         let signature = (a.nrows(), g.nrows(), lb.clone(), ub.clone());
-        // `ENOMOTO_FIXPOINT_TOL`: treat bound changes below a relative 1e-3
-        // as no change — propagation over a cyclic row structure can keep
-        // shaving ever-smaller amounts off a bound forever (geometric
-        // convergence), which an exact comparison never calls a fixpoint.
+        // Bound changes below a relative 1e-3 do not count as progress
+        // (`ENOMOTO_FIXPOINT_EXACT` restores the exact comparison):
+        // propagation over a cyclic row structure — which the aggregator's
+        // folds can create (`scagr25`) — keeps shaving ever-smaller amounts
+        // off a bound (geometric convergence), which an exact comparison
+        // never calls a fixpoint, burning every remaining round. The
+        // tightened bounds themselves are still kept.
         let same = |p: &(usize, usize, Vec<f64>, Vec<f64>)| {
-            if std::env::var("ENOMOTO_FIXPOINT_TOL").is_err() {
+            if std::env::var("ENOMOTO_FIXPOINT_EXACT").is_ok() {
                 return *p == signature;
-            }
-            // `ENOMOTO_FIXPOINT_STRUCT`: only structural change counts as
-            // progress — row counts, and which bounds are finite / fixed.
-            if std::env::var("ENOMOTO_FIXPOINT_STRUCT").is_ok() {
-                let shape = |l: &[f64], u: &[f64]| -> Vec<u8> { l.iter().zip(u).map(|(&x, &y)| (x.is_finite() as u8) | ((y.is_finite() as u8) << 1) | (((x == y) as u8) << 2)).collect() };
-                return p.0 == signature.0 && p.1 == signature.1 && shape(&p.2, &p.3) == shape(&signature.2, &signature.3);
             }
             let close = |x: &[f64], y: &[f64]| x.iter().zip(y).all(|(&u, &v)| u == v || (u - v).abs() <= 1e-3 * (1.0 + u.abs().max(v.abs())));
             p.0 == signature.0 && p.1 == signature.1 && close(&p.2, &signature.2) && close(&p.3, &signature.3)
         };
-        if std::env::var("ENOMOTO_DEBUG_ROUNDDIFF").is_ok() {
-            if let Some(p) = &prev_signature {
-                let d: Vec<String> = (0..n).filter(|&j| p.2[j] != signature.2[j] || p.3[j] != signature.3[j]).take(6).map(|j| format!("x{j} [{:e},{:e}]->[{:e},{:e}]", p.2[j], p.3[j], signature.2[j], signature.3[j])).collect();
-                eprintln!("ROUNDDIFF r{_round_idx} A {}->{} G {}->{} {:?}", p.0, signature.0, p.1, signature.1, d);
-            }
-        }
         if prev_signature.as_ref().is_some_and(same) {
             break;
         }
         prev_signature = Some(signature);
     }
 
-    if redeq_late {
-        let (plb, pub_) = propagate::extract_bounds_only(n, &g, &h);
-        let (na, nb) = timed_step!("reduce_equalities(late)", redundancy::reduce_equalities(&a, &b, n, &plb, &pub_));
-        a = na;
-        b = nb;
-    }
     let prop = timed_step!("final propagate", propagate::propagate(n, &g, &h, prop_passes));
     if profile {
         eprintln!("PROF_PRESOLVE total {:.3}ms", __wall_t0.elapsed().as_secs_f64() * 1e3);

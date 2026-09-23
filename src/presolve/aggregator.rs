@@ -85,6 +85,21 @@
 //! [`residual_range`], [`implied_range`], [`fillin_cost`],
 //! [`crate::sparse::axpy_row`]).
 //!
+//! ## Default since 2026-09-23: [`eliminate_implied_free_columns_v2`]
+//!
+//! The paragraph above is superseded for the default path: on `stocfor2`
+//! the row-local gate left 704 of 1652 surviving columns in exactly the
+//! shape "one equality row + one or more inequality rows", which neither
+//! this gate (it needs >= 2 equality rows) nor `colsingleton` (it counts
+//! the inequality rows too) can remove — HiGHS with only its Aggregator
+//! switched off reproduces our old 1766x1652 presolved size almost exactly.
+//! [`eliminate_implied_free_columns_v2`] keeps the cross-row version's
+//! live re-validation (the `shell` fix), additionally uses one-sided
+//! implied bounds from real inequality rows, admits single-equality-row
+//! columns, and uses HiGHS's net fill-in with the size-2 exemption.
+//! `ENOMOTO_ROWLOCAL_AGGREGATOR` / `ENOMOTO_XROW_AGGREGATOR` select the older
+//! versions. Measurements: `analysis/stocfor2_presolve_20260923.md`.
+//!
 //! ## Candidate order and fill-in
 //!
 //! Mirrors `HPresolve::aggregator`'s own design (`HPresolve.cpp:6688`): all
@@ -793,8 +808,9 @@ pub fn eliminate_implied_free_columns_xrow(n: usize, a: &Csr, b: &[f64], c: &[f6
 
 /// Which of [`eliminate_implied_free_columns_v2`]'s generalisations over
 /// [`eliminate_implied_free_columns_xrow`] are switched on — each one is an
-/// independent countermeasure (see `analysis/stocfor2_presolve_*.md`) and is
-/// kept separately switchable so each can be A/B-measured on its own.
+/// independent countermeasure (see `analysis/stocfor2_presolve_20260923.md`)
+/// and is kept separately switchable (the `ENOMOTO_AGG_*` opt-outs in
+/// [`AggOptions::from_env`]) so each can be A/B-measured on its own.
 #[derive(Clone, Copy, Debug)]
 pub struct AggOptions {
     /// Also intersect one-sided implied bounds from `G`'s real inequality

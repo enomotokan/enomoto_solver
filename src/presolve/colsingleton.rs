@@ -72,10 +72,11 @@ impl Substitution {
 pub(crate) const IMPLIED_TOL: f64 = 1e-9;
 
 /// Whether `colsingleton`/`doubleton` skip bound-preservation rows their
-/// remaining terms' own boxes already imply (opt-in via
-/// `ENOMOTO_SKIP_IMPLIED_BOUND_ROWS`, for A/B measurement).
+/// remaining terms' own boxes already imply (default on since 2026-09-23,
+/// `analysis/stocfor2_presolve_20260923.md`; `ENOMOTO_KEEP_IMPLIED_BOUND_ROWS`
+/// turns it off).
 pub(crate) fn skip_implied_bound_rows() -> bool {
-    std::env::var("ENOMOTO_SKIP_IMPLIED_BOUND_ROWS").is_ok()
+    std::env::var("ENOMOTO_KEEP_IMPLIED_BOUND_ROWS").is_err()
 }
 
 /// `[min, max]` of `sum(v * x_k)` over the terms' boxes.
