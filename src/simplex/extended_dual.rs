@@ -1389,6 +1389,26 @@ fn residual_norm_affine(
     scratch_slope: &mut [f64],
 ) -> (f64, f64) {
     scratch_base.iter_mut().for_each(|v| *v = 0.0);
+    // `rhs_slope` empty is [`compute_rhs_affine`]'s own `delta = 0` signal,
+    // and `x_b_slope` is then exactly zero as well (the drift check's own
+    // call site documents and `debug_assert`s why), so this channel's
+    // residual is a guaranteed exact `0.0` — returned directly rather than
+    // recomputed through two `O(m)` passes and an `O(nnz(A_B))`
+    // accumulation. Bit-for-bit the value the full path produces.
+    if rhs_slope.is_empty() {
+        let mut resid_base_sq = 0.0f64;
+        for (pos, &j) in basis.iter().enumerate() {
+            let b = x_b_base[pos];
+            for &(i, v) in std.cols.col(j) {
+                scratch_base[i] += v * b;
+            }
+        }
+        for i in 0..std.n_rows {
+            let rb = scratch_base[i] - rhs_base[i];
+            resid_base_sq += rb * rb;
+        }
+        return (resid_base_sq.sqrt(), 0.0);
+    }
     scratch_slope.iter_mut().for_each(|v| *v = 0.0);
     for (pos, &j) in basis.iter().enumerate() {
         let (b, s) = (x_b_base[pos], x_b_slope[pos]);
@@ -1428,10 +1448,21 @@ fn residual_norm_affine(
 /// recompute — only at its own periodic drift-check/resync cadence, not
 /// every iteration; `finish` still wants the one-shot `solve_x_b` below
 /// exactly as before.
+///
+/// The returned `rhs_slope` is **empty** iff no nonbasic column sits at an
+/// artificial `M` bound any more (`delta = 0` in Lemma 4.1's own notation)
+/// — the paper's \S4.6 closing state. Empty rather than a length-`m` block
+/// of zeros because that block *is* the whole slope channel's content then:
+/// leaving it unallocated both skips the allocation (this runs on the drift
+/// check's own every-[`XB_CHECK_INTERVAL`]-iterations cadence, not just at
+/// resyncs) and hands every consumer — [`resolve_x_b_into`],
+/// [`residual_norm_affine`], `solve_x_b` — a one-word test for "there is no
+/// `M` coefficient left to compute with", which is exactly the condition
+/// the paper says to stop computing on.
 fn compute_rhs_affine(std: &StdForm, cache: &ColCache, nb_status: &[Option<NbStatus>]) -> Option<(Vec<f64>, Vec<f64>)> {
     let m = std.n_rows;
     let mut rhs_base = std.b.clone();
-    let mut rhs_slope = vec![0.0; m];
+    let mut rhs_slope: Vec<f64> = Vec::new();
     for j in 0..std.n_total {
         let Some(status) = nb_status[j] else { continue };
         let val = nb_value_affine(cache, status, j)?;
@@ -1450,12 +1481,47 @@ fn compute_rhs_affine(std: &StdForm, cache: &ColCache, nb_status: &[Option<NbSta
             }
             continue;
         }
+        if rhs_slope.is_empty() {
+            rhs_slope = vec![0.0; m];
+        }
         for &(i, v) in std.cols.col(j) {
             rhs_base[i] -= v * val.base;
             rhs_slope[i] -= v * val.slope;
         }
     }
     Some((rhs_base, rhs_slope))
+}
+
+/// The two FTRANs every resync site in [`solve_lp_dual_extended`] runs on
+/// [`compute_rhs_affine`]'s output, with the paper's own \S4.6 closing
+/// remark ("$M$ 係数計算の打ち切り") applied to the slope channel: when
+/// `rhs_slope` is empty (no nonbasic column at an artificial `M` bound —
+/// Proposition `prop:no-return`'s `delta = 0`), the slope right-hand side
+/// is identically `+0.0`, so `B^-1 rhs_slope` is identically `±0.0` and
+/// `snap_slopes` maps every entry of it to `+0.0` — bit-for-bit what
+/// `fill(0.0)` writes. The solve is therefore pure waste and is skipped,
+/// replaying only its synthetic-clock ticks
+/// ([`sparse_lu::FtLu::add_zero_rhs_solve_ticks`], the same mechanism the
+/// BFRT combined-flip slope skip already uses) so the CLOCK refactorization
+/// trigger — and with it the entire pivot path — stays unchanged. Verified
+/// empirically, not just argued: with the skip instrumented to run the real
+/// solve alongside it, no resync on any Netlib instance disagreed on either
+/// the result or the tick count.
+///
+/// Note this is an *exact, locally recomputed* condition, not the paper's
+/// absorbing-boundary theorem applied as a latch: it is re-derived from the
+/// live `nb_status` at every resync, so an `M` bound reappearing (which
+/// `prop:no-return` says cannot happen, but which no code here has to
+/// assume) simply turns the full solve back on.
+fn resolve_x_b_into(lu: &sparse_lu::FtLu, rhs_base: &[f64], rhs_slope: &[f64], scratch: &mut [f64], x_b_base: &mut [f64], x_b_slope: &mut [f64]) {
+    lu.solve_into(rhs_base, scratch, x_b_base);
+    if rhs_slope.is_empty() {
+        lu.add_zero_rhs_solve_ticks(false);
+        x_b_slope.fill(0.0);
+    } else {
+        lu.solve_into(rhs_slope, scratch, x_b_slope);
+        snap_slopes(x_b_slope);
+    }
 }
 
 /// `x_B(M) = base + slope*M` (Lemma 4.1), as two independent FTRAN solves
@@ -1467,7 +1533,17 @@ fn compute_rhs_affine(std: &StdForm, cache: &ColCache, nb_status: &[Option<NbSta
 /// `finish`'s own single call, not reused mid-loop.
 fn solve_x_b(std: &StdForm, lu: &sparse_lu::FtLu, nb_status: &[Option<NbStatus>], cache: &ColCache) -> Option<(Vec<f64>, Vec<f64>)> {
     let (rhs_base, rhs_slope) = compute_rhs_affine(std, cache, nb_status)?;
-    Some((lu.solve(&rhs_base), lu.solve(&rhs_slope)))
+    // Same provably-zero slope solve [`resolve_x_b_into`] skips, tick
+    // replay included (see its own docs): this `lu` outlives `finish` —
+    // `polish_with_true_bounds` inherits it and reads its synthetic clock
+    // for its own CLOCK refactorization trigger.
+    let x_b_slope = if rhs_slope.is_empty() {
+        lu.add_zero_rhs_solve_ticks(false);
+        vec![0.0; std.n_rows]
+    } else {
+        lu.solve(&rhs_slope)
+    };
+    Some((lu.solve(&rhs_base), x_b_slope))
 }
 
 /// Basic row `i`'s own deviation outside its bounds, as `(d_dir, dev)` —
@@ -2316,9 +2392,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     // scratch (see the loop body's own docs on why, and on the periodic
     // resync that re-anchors it against exactly this same computation).
     let (seed_base, seed_slope) = compute_rhs_affine(std, &cache, &nb_status)?;
-    lu.solve_into(&seed_base, &mut lu_scratch, &mut x_b_base);
-    lu.solve_into(&seed_slope, &mut lu_scratch, &mut x_b_slope);
-    snap_slopes(&mut x_b_slope);
+    resolve_x_b_into(&lu, &seed_base, &seed_slope, &mut lu_scratch, &mut x_b_base, &mut x_b_slope);
 
     // `super::solve_lp_dual_on`'s own `noise_feasible`, ported: a row
     // whose own infeasibility, at the Eligible=empty juncture below, is
@@ -3236,9 +3310,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 timed!(profile_phases, prof_phases::REFACTOR, {
                     lu = refactorize(std, &basis_pos, Some(&lu))?;
                     let (fresh_base, fresh_slope) = compute_rhs_affine(std, &cache, &nb_status)?;
-                    lu.solve_into(&fresh_base, &mut lu_scratch, &mut x_b_base);
-                    lu.solve_into(&fresh_slope, &mut lu_scratch, &mut x_b_slope);
-                    snap_slopes(&mut x_b_slope);
+                    resolve_x_b_into(&lu, &fresh_base, &fresh_slope, &mut lu_scratch, &mut x_b_base, &mut x_b_slope);
                     rebuild_rows(&mut infeasible_rows, &mut row_dev, m, &row_bounds, &x_b_base, &x_b_slope);
                     fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fd_cb, &mut lu_scratch, &mut fd_y, &mut d);
                     if dse_refresh_on_refactor {
@@ -3391,9 +3463,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 timed!(profile_phases, prof_phases::REFACTOR, {
                     lu = refactorize(std, &basis_pos, Some(&lu))?;
                     let (fresh_base, fresh_slope) = compute_rhs_affine(std, &cache, &nb_status)?;
-                    lu.solve_into(&fresh_base, &mut lu_scratch, &mut x_b_base);
-                    lu.solve_into(&fresh_slope, &mut lu_scratch, &mut x_b_slope);
-                    snap_slopes(&mut x_b_slope);
+                    resolve_x_b_into(&lu, &fresh_base, &fresh_slope, &mut lu_scratch, &mut x_b_base, &mut x_b_slope);
                     rebuild_rows(&mut infeasible_rows, &mut row_dev, m, &row_bounds, &x_b_base, &x_b_slope);
                     fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fd_cb, &mut lu_scratch, &mut fd_y, &mut d);
                     if dse_refresh_on_refactor {
@@ -3825,9 +3895,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
             timed!(profile_phases, prof_phases::REFACTOR, {
                 lu = refactorize(std, &basis_pos, Some(&lu))?;
                 let (fresh_base, fresh_slope) = compute_rhs_affine(std, &cache, &nb_status)?;
-                lu.solve_into(&fresh_base, &mut lu_scratch, &mut x_b_base);
-                lu.solve_into(&fresh_slope, &mut lu_scratch, &mut x_b_slope);
-                snap_slopes(&mut x_b_slope);
+                resolve_x_b_into(&lu, &fresh_base, &fresh_slope, &mut lu_scratch, &mut x_b_base, &mut x_b_slope);
                 rebuild_rows(&mut infeasible_rows, &mut row_dev, m, &row_bounds, &x_b_base, &x_b_slope);
                 fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fd_cb, &mut lu_scratch, &mut fd_y, &mut d);
                 if dse_refresh_on_refactor {
@@ -4226,6 +4294,25 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 // own docs for why this module's `Affine1` slope channel
                 // needs a tighter leash.
                 let (fresh_base, fresh_slope) = compute_rhs_affine(std, &cache, &nb_status)?;
+                // Paper \S4.6's closing remark, applied to the slope
+                // channel's drift check: an empty `fresh_slope` is
+                // [`compute_rhs_affine`]'s own `delta = 0` signal, and
+                // Lemma 4.1 then makes `x_B(M)`'s slope part exactly
+                // `-B^-1 A_N delta = 0`. The maintained `x_b_slope` holds
+                // that same exact zero — not merely something close to it —
+                // because every later update short-circuits on
+                // `theta_slope == 0.0` and `snap_slope` has already flushed
+                // the resolving pivot's sub-`X_B_SLOPE_NOISE` residue. So
+                // `residual_norm_affine` below is measuring `||A_B*0 - 0||`,
+                // a guaranteed exact `0.0`, over two `O(m)` passes and an
+                // `O(nnz(A_B))` accumulation; it skips the whole channel
+                // and returns that `0.0` directly. `need_refactor` is
+                // therefore bit-for-bit what it was, decided by the base
+                // channel (and `d`'s own check) exactly as before.
+                debug_assert!(
+                    !fresh_slope.is_empty() || x_b_slope.iter().all(|v| *v == 0.0),
+                    "delta = 0 must leave the maintained slope channel at exact zero (iter {_iter})"
+                );
                 let (resid_base, resid_slope) = residual_norm_affine(
                     std,
                     &basis,
@@ -4316,9 +4403,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 // resync can change many rows' feasibility at once, outside
                 // the reach of its own incremental `set` calls.
                 let (fresh_base, fresh_slope) = compute_rhs_affine(std, &cache, &nb_status)?;
-                lu.solve_into(&fresh_base, &mut lu_scratch, &mut x_b_base);
-                lu.solve_into(&fresh_slope, &mut lu_scratch, &mut x_b_slope);
-                snap_slopes(&mut x_b_slope);
+                resolve_x_b_into(&lu, &fresh_base, &fresh_slope, &mut lu_scratch, &mut x_b_base, &mut x_b_slope);
                 rebuild_rows(&mut infeasible_rows, &mut row_dev, m, &row_bounds, &x_b_base, &x_b_slope);
                 fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fd_cb, &mut lu_scratch, &mut fd_y, &mut d);
                 if dse_refresh_on_refactor {
