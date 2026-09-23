@@ -98,6 +98,7 @@ pub mod dualfix;
 pub mod dualpropagate;
 pub mod foldfixed;
 pub mod freevar;
+pub mod ineqsingleton;
 pub mod parallelcols;
 pub mod parallelrows;
 pub mod propagate;
@@ -626,6 +627,43 @@ pub fn run_extended(
                     cur_real_rows = kept_rows;
                     cur_real_rhs = kept_rhs;
                 }
+            }
+        }
+
+        // Column singletons in inequality/ranged rows (see `ineqsingleton`'s
+        // docs): fix the column at a bound, or turn its row into an
+        // equality that `colsingleton` below then substitutes out.
+        if std::env::var("ENOMOTO_INEQ_SINGLETON").is_ok() {
+            let isr = timed_step!("ineqsingleton", ineqsingleton::run(n, &a, &cur_real_rows, &cur_real_rhs, &c, &lb, &ub));
+            if std::env::var("ENOMOTO_DEBUG_INEQ_SINGLETON").is_ok() {
+                eprintln!("DEBUG_INEQ_SINGLETON: fixes={} implied_equalities={}", isr.fixes.len(), isr.implied_equalities.len());
+            }
+            for &(j, value) in &isr.fixes {
+                lb[j] = value;
+                ub[j] = value;
+            }
+            if !isr.implied_equalities.is_empty() {
+                let mut a_rows: Vec<Vec<(usize, f64)>> = csr_rows(&a);
+                let mut drop = vec![false; cur_real_rows.len()];
+                for &(gi, other) in &isr.implied_equalities {
+                    a_rows.push(cur_real_rows[gi].clone());
+                    b.push(cur_real_rhs[gi]);
+                    drop[gi] = true;
+                    if let Some(o) = other {
+                        drop[o] = true;
+                    }
+                }
+                a = csr_from_rows(&a_rows, n);
+                let mut kept_rows = Vec::with_capacity(cur_real_rows.len());
+                let mut kept_rhs = Vec::with_capacity(cur_real_rhs.len());
+                for (i, (row, rhs)) in cur_real_rows.into_iter().zip(cur_real_rhs.into_iter()).enumerate() {
+                    if !drop[i] {
+                        kept_rows.push(row);
+                        kept_rhs.push(rhs);
+                    }
+                }
+                cur_real_rows = kept_rows;
+                cur_real_rhs = kept_rhs;
             }
         }
 
