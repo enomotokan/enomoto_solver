@@ -3464,25 +3464,6 @@ impl FtLu {
         self.build_tick
     }
 
-    /// Charges the CLOCK tick a [`Self::solve_into`] (`dense == true`) or
-    /// [`Self::solve_sparse_into`] (`dense == false`) call would have
-    /// charged for an **all-zero** right-hand side, without doing the solve
-    /// — for callers that know a solve's result is identically zero and
-    /// skip it. Such a solve charges the `L` stage (`m` dense, the empty
-    /// reach set sparse — zero-valued seeds are dropped), every `R`-eta,
-    /// and `U`'s flat `m` (no `U` column fires on a zero entry), so the
-    /// deterministic refactorization trigger sees exactly the same tick
-    /// stream as if the solve had run.
-    pub fn charge_zero_rhs_solve(&self, dense: bool) {
-        if dense {
-            self.add_tick(self.base.m as u64);
-        }
-        for reta in &self.r_etas {
-            self.add_tick(reta.r.nnz() as u64);
-        }
-        self.add_tick(self.base.m as u64);
-    }
-
     #[inline]
     fn add_tick(&self, n: u64) {
         self.tick.set(self.tick.get() + TICK_SOLVE_NNZ_COEF * n);
@@ -3761,7 +3742,8 @@ impl FtLu {
     /// twice, while each vector's own arithmetic — every operation, in
     /// order — is exactly what its separate call does, so both results are
     /// bit-for-bit the separate calls' results. Charges the same CLOCK ticks
-    /// as the two separate calls together. Returns `out1`'s nonzero count.
+    /// as the two separate calls together. Returns both outputs' nonzero
+    /// counts.
     /// Used for the entering column's FTRAN and the DSE `tau` FTRAN, which
     /// run against the same pre-pivot factorization every iteration.
     #[allow(clippy::too_many_arguments)]
@@ -3774,7 +3756,7 @@ impl FtLu {
         rhs2: &[f64],
         scratch2: &mut [f64],
         out2: &mut [f64],
-    ) -> usize {
+    ) -> (usize, usize) {
         let m = self.base.m as u64;
         self.base.l_solve2_into(rhs1, scratch1, rhs2, scratch2);
         self.add_tick(m);
@@ -3788,8 +3770,7 @@ impl FtLu {
         }
         a_tilde_out.copy_from_slice(scratch1);
         self.u_solve2_into(scratch1, scratch2);
-        self.permute_out(scratch2, out2);
-        self.permute_out(scratch1, out1)
+        (self.permute_out(scratch1, out1), self.permute_out(scratch2, out2))
     }
 
     /// [`Self::u_solve_into`] on two vectors in one pass over `U` — see
@@ -3906,6 +3887,40 @@ impl FtLu {
     /// takes over), so `a_tilde_out` ends up identical regardless of which
     /// of the two FTRAN paths (`should_use_dense_solve`'s dense/sparse
     /// dispatch) a given call took.
+    /// [`Self::solve_sparse_into`], but charging the synthetic clock exactly
+    /// what [`Self::solve_into`] on the same right-hand side would have
+    /// charged (a flat `m` for the `L` stage instead of the reach-set size).
+    ///
+    /// For call sites that used to go through the dense path
+    /// unconditionally (the DSE `tau = B^-1 rho_p` solve): the result is
+    /// bit-for-bit what the dense path returns — both visit the same
+    /// nonzero steps of `L` in the same ascending order, the dense one just
+    /// also skips over the zero ones — so the only thing that could change
+    /// the pivot sequence is the CLOCK refactorization trigger reading a
+    /// smaller tick. Keeping the charge identical keeps every
+    /// refactorization at the same iteration, i.e. the change is pure cost.
+    pub fn solve_sparse_into_dense_tick(&self, rhs_sparse: &[(usize, f64)], scratch: &mut [f64], gp: &mut GpScratch, out: &mut [f64]) -> usize {
+        let nnz = self.solve_sparse_into(rhs_sparse, scratch, gp, out);
+        self.add_tick((self.base.m as u64).saturating_sub(gp.reach.len() as u64));
+        nnz
+    }
+
+    /// Charges the synthetic clock what [`Self::solve_into`]
+    /// (`dense_l == true`) or [`Self::solve_sparse_into`] (`false`) would
+    /// charge on an **all-zero** right-hand side, without doing the solve
+    /// (whose result is known to be zero). Lets a caller skip a provably
+    /// zero FTRAN while keeping the CLOCK trigger's schedule unchanged.
+    pub fn charge_zero_rhs_solve(&self, dense_l: bool) {
+        let m = self.base.m as u64;
+        if dense_l {
+            self.add_tick(m);
+        }
+        for reta in &self.r_etas {
+            self.add_tick(reta.r.nnz() as u64);
+        }
+        self.add_tick(m);
+    }
+
     pub fn solve_sparse_into_capture(
         &self,
         rhs_sparse: &[(usize, f64)],

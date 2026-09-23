@@ -61,13 +61,13 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use faer::linalg::solvers::ColPivQr;
 use faer::Mat;
 
+use crate::hash::{FxHashMap, FxHashSet};
 use crate::presolve::smallcoeff;
 use crate::sparse::{Csr, csr_from_rows, csr_row_vec};
 /// Measurement counters answering "would a dedicated block-triangularization
@@ -167,7 +167,7 @@ pub fn reduce_equalities(a: &Csr, b: &[f64], n: usize, lb: &[f64], ub: &[f64]) -
 /// `0 = 0` row; a nonzero RHS on an empty row is kept so the Farkas
 /// infeasibility certificate downstream still sees (and reports) it.
 fn dedupe_rows(rows: Vec<(Vec<(usize, f64)>, f64)>) -> Vec<(Vec<(usize, f64)>, f64)> {
-    let mut seen: HashSet<Vec<(usize, u64)>> = HashSet::new();
+    let mut seen: FxHashSet<Vec<(usize, u64)>> = FxHashSet::default();
     let mut kept = Vec::with_capacity(rows.len());
     for (row, rhs) in rows {
         if row.is_empty() {
@@ -402,81 +402,62 @@ fn drop_linearly_dependent_sparse(rows_in: &[(Vec<(usize, f64)>, f64)], n: usize
     // `heap.last()` (the true global max) then costs `O(log aug_n)`.
     let mut heap: BTreeSet<(u64, usize)> = BTreeSet::new();
     let mut col_bits: Vec<Option<u64>> = vec![None; aug_n];
-    // `col_max[j]` is column `j`'s max-abs active entry, maintained
-    // incrementally as entries change (`ColMax::note_value`/`note_removed`)
-    // rather than recomputed from every one of the column's rows — each a
-    // `BTreeMap` lookup — at every refresh: that full rescan was ~98% of
-    // this function's instructions on `maros-r7` (the RHS column and other
-    // long columns are refreshed after almost every pivot). `col_max[j]`
-    // never understates the true max (any entry that grows past it raises
-    // it), so only when the entry holding it (`col_argmax[j]`) shrinks or
-    // leaves the column is the value possibly stale (`col_dirty[j]`), and
-    // only then does `refresh_col` rescan. The value handed to `heap` is
-    // therefore always exactly the rescan's result — the pivot sequence is
-    // unchanged.
-    struct ColMax {
-        max: Vec<f64>,
-        argmax: Vec<usize>,
-        dirty: Vec<bool>,
-    }
-    impl ColMax {
-        #[inline]
-        fn note_value(&mut self, j: usize, i: usize, abs_v: f64) {
-            if abs_v > self.max[j] {
-                // Exceeds every other current entry (none is above
-                // `max[j]`), so it is the exact max whether or not the
-                // column was stale.
-                self.max[j] = abs_v;
-                self.argmax[j] = i;
-                self.dirty[j] = false;
-            } else if self.argmax[j] == i && abs_v < self.max[j] {
-                self.dirty[j] = true;
-            }
-        }
-        #[inline]
-        fn note_removed(&mut self, j: usize, i: usize) {
-            if self.argmax[j] == i {
-                self.dirty[j] = true;
-            }
-        }
-        fn rescan(&mut self, col_rows: &[BTreeSet<usize>], rows: &[BTreeMap<usize, f64>], j: usize) {
-            let mut best = 0.0f64;
-            let mut arg = usize::MAX;
-            for &i in &col_rows[j] {
-                if let Some(v) = rows[i].get(&j) {
-                    let a = v.abs();
-                    if a > best {
-                        best = a;
-                        arg = i;
-                    }
-                }
-            }
-            self.max[j] = best;
-            self.argmax[j] = arg;
-            self.dirty[j] = false;
-        }
-    }
-    let mut col_max = ColMax { max: vec![0.0; aug_n], argmax: vec![usize::MAX; aug_n], dirty: vec![false; aug_n] };
-    fn refresh_col(col_rows: &[BTreeSet<usize>], rows: &[BTreeMap<usize, f64>], heap: &mut BTreeSet<(u64, usize)>, col_bits: &mut [Option<u64>], col_max: &mut ColMax, j: usize) {
-        if col_max.dirty[j] {
-            col_max.rescan(col_rows, rows, j);
-        }
-        let new_max = col_max.max[j];
-        let new_bits = (new_max > 0.0).then(|| new_max.to_bits());
-        if col_bits[j] == new_bits {
-            return;
-        }
+    fn refresh_col(col_rows: &[BTreeSet<usize>], rows: &[BTreeMap<usize, f64>], heap: &mut BTreeSet<(u64, usize)>, col_bits: &mut [Option<u64>], j: usize) {
         if let Some(old) = col_bits[j].take() {
             heap.remove(&(old, j));
         }
-        if let Some(bits) = new_bits {
+        let new_max = col_rows[j].iter().filter_map(|&i| rows[i].get(&j).map(|v| v.abs())).fold(0.0f64, f64::max);
+        if new_max > 0.0 {
+            let bits = new_max.to_bits();
             heap.insert((bits, j));
             col_bits[j] = Some(bits);
         }
     }
     for j in 0..aug_n {
-        col_max.rescan(&col_rows, &rows, j);
-        refresh_col(&col_rows, &rows, &mut heap, &mut col_bits, &mut col_max, j);
+        refresh_col(&col_rows, &rows, &mut heap, &mut col_bits, j);
+    }
+    // Incremental column maxima. Rescanning a column in full
+    // (`refresh_col`: one `BTreeMap` lookup per entry) for every column the
+    // pivot row touches, on every step, was almost all of this function's
+    // time on matrices whose pivot rows fill in (`maros-r7`: 3.27s of
+    // 3.32s). Within one step a column's entries only change through the
+    // pivot row leaving it and through the elimination's writes, and `max`
+    // has no rounding, so the new maximum is exactly
+    // `max(old max, new values written)` *unless* an entry that held the
+    // old maximum shrank or disappeared — only then is a full rescan
+    // needed. `col_max_stale[j]` records that case, `col_new_max[j]` the
+    // largest magnitude written this step; both are reset when column `j`
+    // is settled at the end of the step. The resulting `heap` contents are
+    // identical to rescanning every touched column.
+    let mut col_max_stale = vec![false; aug_n];
+    let mut col_new_max = vec![0.0f64; aug_n];
+    let cur_max = |col_bits: &[Option<u64>], j: usize| -> f64 { col_bits[j].map_or(0.0, f64::from_bits) };
+    fn settle_col(
+        col_rows: &[BTreeSet<usize>],
+        rows: &[BTreeMap<usize, f64>],
+        heap: &mut BTreeSet<(u64, usize)>,
+        col_bits: &mut [Option<u64>],
+        col_max_stale: &mut [bool],
+        col_new_max: &mut [f64],
+        j: usize,
+    ) {
+        if col_max_stale[j] {
+            refresh_col(col_rows, rows, heap, col_bits, j);
+        } else if col_new_max[j] > col_bits[j].map_or(0.0, f64::from_bits) {
+            if let Some(old) = col_bits[j].take() {
+                heap.remove(&(old, j));
+            }
+            let bits = col_new_max[j].to_bits();
+            heap.insert((bits, j));
+            col_bits[j] = Some(bits);
+        }
+        col_max_stale[j] = false;
+        col_new_max[j] = 0.0;
+        #[cfg(debug_assertions)]
+        {
+            let full = col_rows[j].iter().filter_map(|&i| rows[i].get(&j).map(|v| v.abs())).fold(0.0f64, f64::max);
+            debug_assert_eq!(col_bits[j].map_or(0.0, f64::from_bits), full, "incremental max of column {j} disagrees with a rescan");
+        }
     }
 
     // Column bucket arrays for the ascending-Markowitz-degree scan — see
@@ -595,9 +576,13 @@ fn drop_linearly_dependent_sparse(rows_in: &[(Vec<(usize, f64)>, f64)], n: usize
         // (`wood1p`: doing it unconditionally here as well as after
         // elimination roughly doubled `reduce_equalities`' time).
         let pi_cols: Vec<usize> = rows[pi].keys().copied().filter(|&j| j != pj).collect();
+        for (&j, &v) in rows[pi].iter() {
+            if j != pj && v.abs() == cur_max(&col_bits, j) {
+                col_max_stale[j] = true;
+            }
+        }
         for &j in &pi_cols {
             col_rows[j].remove(&pi);
-            col_max.note_removed(j, pi);
             let new_deg = col_rows[j].len();
             move_bucket(&mut col_buckets, &mut col_bucket_pos, new_deg + 1, new_deg, j, &col_used);
             col_degree[j] = new_deg;
@@ -616,7 +601,7 @@ fn drop_linearly_dependent_sparse(rows_in: &[(Vec<(usize, f64)>, f64)], n: usize
             // pivot elsewhere via an inflated `gmax` on a later step.
             for &j in &pi_cols {
                 if !col_used[j] {
-                    refresh_col(&col_rows, &rows, &mut heap, &mut col_bits, &mut col_max, j);
+                    settle_col(&col_rows, &rows, &mut heap, &mut col_bits, &mut col_max_stale, &mut col_new_max, j);
                 }
             }
             continue;
@@ -641,25 +626,28 @@ fn drop_linearly_dependent_sparse(rows_in: &[(Vec<(usize, f64)>, f64)], n: usize
                 use std::collections::btree_map::Entry;
                 match rows[i].entry(j) {
                     Entry::Occupied(mut e) => {
-                        let new_val = *e.get() - mult * v;
+                        let old_val = *e.get();
+                        let new_val = old_val - mult * v;
+                        if new_val.abs() < old_val.abs() && old_val.abs() == cur_max(&col_bits, j) {
+                            col_max_stale[j] = true;
+                        }
+                        col_new_max[j] = col_new_max[j].max(new_val.abs());
                         if new_val == 0.0 {
                             e.remove();
                             col_rows[j].remove(&i);
-                            col_max.note_removed(j, i);
                             let new_deg = col_rows[j].len();
                             move_bucket(&mut col_buckets, &mut col_bucket_pos, new_deg + 1, new_deg, j, &col_used);
                             col_degree[j] = new_deg;
                         } else {
                             *e.get_mut() = new_val;
-                            col_max.note_value(j, i, new_val.abs());
                         }
                     }
                     Entry::Vacant(e) => {
                         let new_val = -mult * v;
+                        col_new_max[j] = col_new_max[j].max(new_val.abs());
                         if new_val != 0.0 {
                             e.insert(new_val);
                             col_rows[j].insert(i);
-                            col_max.note_value(j, i, new_val.abs());
                             let new_deg = col_rows[j].len();
                             move_bucket(&mut col_buckets, &mut col_bucket_pos, new_deg - 1, new_deg, j, &col_used);
                             col_degree[j] = new_deg;
@@ -680,7 +668,7 @@ fn drop_linearly_dependent_sparse(rows_in: &[(Vec<(usize, f64)>, f64)], n: usize
             if j == pj || col_used[j] {
                 continue;
             }
-            refresh_col(&col_rows, &rows, &mut heap, &mut col_bits, &mut col_max, j);
+            settle_col(&col_rows, &rows, &mut heap, &mut col_bits, &mut col_max_stale, &mut col_new_max, j);
         }
     }
 
@@ -1278,7 +1266,7 @@ pub fn reduce_inequalities(g: &Csr, h: &[f64], n: usize) -> (Csr, Vec<f64>) {
 
     // hash -> indices into `groups`; each group is `(representative row,
     // its inv scale, currently kept row, kept row's normalized h)`.
-    let mut by_hash: HashMap<u64, Vec<usize>> = HashMap::with_capacity(m);
+    let mut by_hash: FxHashMap<u64, Vec<usize>> = FxHashMap::default();
     let mut groups: Vec<(usize, f64, usize, f64)> = Vec::with_capacity(m);
     let mut keep = vec![true; m];
     for idx in 0..m {

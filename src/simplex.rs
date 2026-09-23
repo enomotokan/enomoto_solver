@@ -2669,6 +2669,37 @@ impl DseState {
         }
         self.w[p] = (wp_old / (pivot * pivot)).max(STEEPEST_EDGE_FLOOR);
     }
+
+    /// [`Self::update_after_pivot`] restricted to the rows that can change.
+    /// A row with `alpha[i] == 0` gets `ratio = 0`, i.e. `w_i - 0 + 0`
+    /// floored — and every stored weight is already floored — so it is left
+    /// exactly as it was; visiting only `alpha_nz` (the indices of
+    /// `alpha`'s nonzeros, which must include every one of them) produces
+    /// the same weights bit for bit while skipping the division and the
+    /// read-modify-write on the rest of the `m` rows. Likewise `wp_old`
+    /// summed over `rho_nz` (`rho_p`'s nonzeros, ascending) equals the
+    /// full sum: the skipped terms are all `+0.0`.
+    fn update_after_pivot_sparse(&mut self, p: usize, alpha: &[f64], alpha_nz: &[usize], tau: &[f64], rho_nz: &[(usize, f64)]) {
+        if self.use_parallel {
+            let mut rho_p = vec![0.0; alpha.len()];
+            for &(i, v) in rho_nz {
+                rho_p[i] = v;
+            }
+            self.update_after_pivot(p, alpha, tau, &rho_p);
+            return;
+        }
+        let pivot = alpha[p];
+        let wp_old = rho_nz.iter().map(|&(_, v)| v * v).sum::<f64>().max(STEEPEST_EDGE_FLOOR);
+        for &i in alpha_nz {
+            if i == p {
+                continue;
+            }
+            let ratio = alpha[i] / pivot;
+            let w_i = &mut self.w[i];
+            *w_i = (*w_i - 2.0 * ratio * tau[i] + ratio * ratio * wp_old).max(STEEPEST_EDGE_FLOOR);
+        }
+        self.w[p] = (wp_old / (pivot * pivot)).max(STEEPEST_EDGE_FLOOR);
+    }
 }
 
 /// Dual Devex weights: a cheap, approximate substitute for [`DseState`]'s

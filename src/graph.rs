@@ -63,14 +63,29 @@ pub fn max_bipartite_matching(adj: &[Vec<usize>], n_cols: usize) -> Vec<Option<u
         row: usize,
         idx: usize,
     }
-    fn try_augment(start: usize, adj: &[Vec<usize>], visited: &mut [bool], match_col: &mut [Option<usize>]) -> bool {
-        let mut stack: Vec<Frame> = vec![Frame { row: start, idx: 0 }];
+    // `visited[col] == stamp` marks `col` as visited by the current
+    // augmentation (one fresh `stamp` per starting row) — the same "reset
+    // before every row" semantics as the fresh `vec![false; n_cols]` per
+    // row this used to allocate, which cost `O(p * n_cols)` zeroing in
+    // total (`maros-r7`: 3135 rows x 9406 columns). The DFS stacks are
+    // likewise reused across rows instead of reallocated.
+    fn try_augment(
+        start: usize,
+        adj: &[Vec<usize>],
+        visited: &mut [u32],
+        stamp: u32,
+        match_col: &mut [Option<usize>],
+        stack: &mut Vec<Frame>,
+        col_stack: &mut Vec<usize>,
+    ) -> bool {
+        stack.clear();
+        col_stack.clear();
+        stack.push(Frame { row: start, idx: 0 });
         // `col_stack[k]` is the column `stack[k]` was trying when it
         // decided to push `stack[k+1]` — i.e. `match_col[col_stack[k]] ==
         // Some(stack[k+1].row)` at that moment. Always exactly one
         // shorter than `stack` itself (the bottom frame wasn't pushed to
         // satisfy any column of its own).
-        let mut col_stack: Vec<usize> = Vec::new();
 
         loop {
             let top = stack.len() - 1;
@@ -79,10 +94,10 @@ pub fn max_bipartite_matching(adj: &[Vec<usize>], n_cols: usize) -> Vec<Option<u
             while stack[top].idx < adj[row].len() {
                 let col = adj[row][stack[top].idx];
                 stack[top].idx += 1;
-                if visited[col] {
+                if visited[col] == stamp {
                     continue;
                 }
-                visited[col] = true;
+                visited[col] = stamp;
                 chosen = Some(col);
                 break;
             }
@@ -120,9 +135,11 @@ pub fn max_bipartite_matching(adj: &[Vec<usize>], n_cols: usize) -> Vec<Option<u
         }
     }
 
+    let mut visited = vec![0u32; n_cols];
+    let mut stack: Vec<Frame> = Vec::new();
+    let mut col_stack: Vec<usize> = Vec::new();
     for i in 0..p {
-        let mut visited = vec![false; n_cols];
-        try_augment(i, adj, &mut visited, &mut match_col);
+        try_augment(i, adj, &mut visited, i as u32 + 1, &mut match_col, &mut stack, &mut col_stack);
     }
 
     let mut match_row: Vec<Option<usize>> = vec![None; p];
@@ -261,13 +278,18 @@ pub fn tarjan_scc(adj: &[Vec<usize>]) -> Vec<Vec<usize>> {
 pub fn dulmage_mendelsohn_blocks(adj: &[Vec<usize>], n_cols: usize) -> Vec<Vec<usize>> {
     let p = adj.len();
     let match_row = max_bipartite_matching(adj, n_cols);
-    let match_col_owner: HashMap<usize, usize> =
-        match_row.iter().enumerate().filter_map(|(i, c)| c.map(|c| (c, i))).collect();
+    // Column -> matched row as a flat array: looked up once per nonzero.
+    let mut match_col_owner: Vec<Option<usize>> = vec![None; n_cols];
+    for (i, c) in match_row.iter().enumerate() {
+        if let Some(c) = *c {
+            match_col_owner[c] = Some(i);
+        }
+    }
 
     let scc_adj: Vec<Vec<usize>> = adj
         .iter()
         .enumerate()
-        .map(|(i, cols)| cols.iter().filter_map(|&j| match_col_owner.get(&j).copied()).filter(|&owner| owner != i).collect())
+        .map(|(i, cols)| cols.iter().filter_map(|&j| match_col_owner[j]).filter(|&owner| owner != i).collect())
         .collect();
 
     let mut components = tarjan_scc(&scc_adj);
