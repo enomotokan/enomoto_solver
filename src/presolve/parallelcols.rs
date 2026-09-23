@@ -201,9 +201,24 @@ pub fn merge_parallel_columns(n: usize, a: &Csr, real_rows: &[Vec<(usize, f64)>]
         }
     });
 
-    // Iterated only after sorting by first member, so the hasher cannot
-    // affect the result (see `crate::hash`).
-    let mut groups: crate::hash::FxHashMap<Vec<(usize, u64)>, Vec<usize>> = crate::hash::FxHashMap::default();
+    // Groups columns by their normalized signature exactly like keying a
+    // `HashMap` on the `Vec<(row, bits)>` signature would, but without
+    // allocating and SipHash-ing one signature per column: a cheap
+    // multiplicative hash picks the candidate groups and a hit is confirmed
+    // by recomputing the group representative's signature (deterministic,
+    // so bit-identical to the stored key) entry by entry. Members are
+    // still appended in increasing `j`, and groups are still ordered by
+    // their first member below, so the result is unchanged.
+    let sig_hash = |col: &[(usize, f64)], inv: f64| -> u64 {
+        let mut hash = col.len() as u64;
+        for &(row_id, v) in col {
+            hash = (hash.rotate_left(5) ^ row_id as u64).wrapping_mul(0x517c_c1b7_2722_0a95);
+            hash = (hash.rotate_left(5) ^ (v * inv).to_bits()).wrapping_mul(0x517c_c1b7_2722_0a95);
+        }
+        hash
+    };
+    let mut group_members: Vec<Vec<usize>> = Vec::new();
+    let mut heads: std::collections::HashMap<u64, Vec<usize>> = std::collections::HashMap::new();
     for j in 0..n {
         let col = columns.col(j);
         // `lb[j]` must be finite (the fixed anchor `Substitution::apply`
@@ -215,11 +230,27 @@ pub fn merge_parallel_columns(n: usize, a: &Csr, real_rows: &[Vec<(usize, f64)>]
             continue;
         }
         let inv = 1.0 / col[0].1;
-        let sig: Vec<(usize, u64)> = col.iter().map(|&(row_id, v)| (row_id, (v * inv).to_bits())).collect();
-        groups.entry(sig).or_default().push(j);
+        let hash = sig_hash(col, inv);
+        let bucket = heads.entry(hash).or_default();
+        let mut found = None;
+        for &gid in bucket.iter() {
+            let rep = columns.col(group_members[gid][0]);
+            let rep_inv = 1.0 / rep[0].1;
+            if rep.len() == col.len() && rep.iter().zip(col).all(|(&(ri, rv), &(ci, cv))| ri == ci && (rv * rep_inv).to_bits() == (cv * inv).to_bits()) {
+                found = Some(gid);
+                break;
+            }
+        }
+        match found {
+            Some(gid) => group_members[gid].push(j),
+            None => {
+                bucket.push(group_members.len());
+                group_members.push(vec![j]);
+            }
+        }
     }
 
-    let mut group_keys: Vec<&Vec<usize>> = groups.values().collect();
+    let mut group_keys: Vec<&Vec<usize>> = group_members.iter().collect();
     group_keys.sort_by_key(|v| v[0]);
 
     let mut used = vec![false; n];

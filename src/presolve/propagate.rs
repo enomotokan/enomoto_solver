@@ -48,7 +48,7 @@
 //! visible to which row and alter the pass's convergence behavior, not
 //! just its speed.
 
-use crate::sparse::{Csr, csr_from_rows, csr_row_iter, csr_row_vec};
+use crate::sparse::{Csr, CsrRowBuilder, csr_from_rows, csr_row_iter, csr_row_vec};
 const EPS: f64 = 1e-9;
 
 pub struct PropagateResult {
@@ -82,10 +82,11 @@ pub fn extract_bounds(n: usize, g: &Csr, h: &[f64]) -> (Vec<f64>, Vec<f64>, Vec<
 
     let gr = g.as_ref();
     for i in 0..gr.nrows() {
-        // Singleton rows are read in place — only the rows actually kept
-        // get an owned `Vec`.
-        if gr.col_indices_of_row(i).len() == 1 {
-            let (j, v) = (gr.col_indices_of_row(i).next().unwrap(), gr.values_of_row(i)[0]);
+        // Singleton (bound) rows are read straight from the CSR slices —
+        // only the real rows need an owned copy.
+        let cols = gr.col_indices_of_row_raw(i);
+        if cols.len() == 1 {
+            let (j, v) = (cols[0], gr.values_of_row(i)[0]);
             let bound = h[i] / v;
             if v > 0.0 {
                 if bound < ub[j] {
@@ -100,6 +101,29 @@ pub fn extract_bounds(n: usize, g: &Csr, h: &[f64]) -> (Vec<f64>, Vec<f64>, Vec<
         }
     }
     (lb, ub, rows, rhs)
+}
+
+/// The `lb`/`ub` half of [`extract_bounds`] alone — identical values,
+/// without copying G's real rows out.
+pub fn extract_bounds_only(n: usize, g: &Csr, h: &[f64]) -> (Vec<f64>, Vec<f64>) {
+    let mut lb = vec![f64::NEG_INFINITY; n];
+    let mut ub = vec![f64::INFINITY; n];
+    let gr = g.as_ref();
+    for i in 0..gr.nrows() {
+        let cols = gr.col_indices_of_row_raw(i);
+        if cols.len() == 1 {
+            let (j, v) = (cols[0], gr.values_of_row(i)[0]);
+            let bound = h[i] / v;
+            if v > 0.0 {
+                if bound < ub[j] {
+                    ub[j] = bound;
+                }
+            } else if bound > lb[j] {
+                lb[j] = bound;
+            }
+        }
+    }
+    (lb, ub)
 }
 
 /// A variable's own two folded-in bound rows can contradict each other —
@@ -137,43 +161,60 @@ pub fn propagate(n: usize, g: &Csr, h: &[f64], passes: usize) -> PropagateResult
         if infeasible {
             break;
         }
+        // A pass that neither drops a row nor writes any bound leaves the
+        // state (`rows`, `rhs`, `lb`, `ub`) exactly as it found it, so every
+        // further pass would repeat it verbatim — stop instead.
+        let mut changed = false;
+        let n_rows_before = rows.len();
         let mut kept_rows = Vec::with_capacity(rows.len());
         let mut kept_rhs = Vec::with_capacity(rhs.len());
-
-        for (row, &b) in rows.iter().zip(rhs.iter()) {
+        for (row, b) in std::mem::take(&mut rows).into_iter().zip(std::mem::take(&mut rhs)) {
             let mut finite_sum_inf = 0.0f64;
             let mut finite_sum_sup = 0.0f64;
-            let mut inf_unbounded: Vec<usize> = Vec::new();
-            let mut sup_unbounded: Vec<usize> = Vec::new();
+            // Only "how many" and "which one, if exactly one" are ever
+            // read, so no per-row allocation is needed.
+            let mut inf_unbounded_count = 0usize;
+            let mut inf_unbounded_first = usize::MAX;
+            let mut sup_unbounded_count = 0usize;
 
-            for &(j, v) in row {
+            for &(j, v) in &row {
                 if v > 0.0 {
                     if lb[j].is_finite() {
                         finite_sum_inf += v * lb[j];
                     } else {
-                        inf_unbounded.push(j);
+                        {
+                            if inf_unbounded_count == 0 {
+                                inf_unbounded_first = j;
+                            }
+                            inf_unbounded_count += 1;
+                        }
                     }
                     if ub[j].is_finite() {
                         finite_sum_sup += v * ub[j];
                     } else {
-                        sup_unbounded.push(j);
+                        sup_unbounded_count += 1;
                     }
                 } else {
                     if ub[j].is_finite() {
                         finite_sum_inf += v * ub[j];
                     } else {
-                        inf_unbounded.push(j);
+                        {
+                            if inf_unbounded_count == 0 {
+                                inf_unbounded_first = j;
+                            }
+                            inf_unbounded_count += 1;
+                        }
                     }
                     if lb[j].is_finite() {
                         finite_sum_sup += v * lb[j];
                     } else {
-                        sup_unbounded.push(j);
+                        sup_unbounded_count += 1;
                     }
                 }
             }
 
-            let true_inf = if inf_unbounded.is_empty() { finite_sum_inf } else { f64::NEG_INFINITY };
-            let true_sup = if sup_unbounded.is_empty() { finite_sum_sup } else { f64::INFINITY };
+            let true_inf = if inf_unbounded_count == 0 { finite_sum_inf } else { f64::NEG_INFINITY };
+            let true_sup = if sup_unbounded_count == 0 { finite_sum_sup } else { f64::INFINITY };
 
             if true_inf > b + EPS {
                 infeasible = true;
@@ -200,8 +241,8 @@ pub fn propagate(n: usize, g: &Csr, h: &[f64], passes: usize) -> PropagateResult
             // guarantees every bound this loop is about to read is finite
             // (that emptiness is exactly what made `true_inf` a real
             // number rather than `NEG_INFINITY` above).
-            if inf_unbounded.is_empty() && (finite_sum_inf - b).abs() <= EPS {
-                for &(j, v) in row {
+            if inf_unbounded_count == 0 && (finite_sum_inf - b).abs() <= EPS {
+                for &(j, v) in &row {
                     if v > 0.0 {
                         ub[j] = lb[j];
                     } else {
@@ -215,11 +256,11 @@ pub fn propagate(n: usize, g: &Csr, h: &[f64], passes: usize) -> PropagateResult
             // the row's minimal activity excluding x_k's own contribution.
             // Only computable (finite) when no *other* variable is the
             // source of an unbounded contribution.
-            for &(k, aik) in row {
-                let l_s = if inf_unbounded.is_empty() {
+            for &(k, aik) in &row {
+                let l_s = if inf_unbounded_count == 0 {
                     let contrib_k = if aik > 0.0 { aik * lb[k] } else { aik * ub[k] };
                     finite_sum_inf - contrib_k
-                } else if inf_unbounded.len() == 1 && inf_unbounded[0] == k {
+                } else if inf_unbounded_count == 1 && inf_unbounded_first == k {
                     finite_sum_inf
                 } else {
                     continue;
@@ -231,21 +272,29 @@ pub fn propagate(n: usize, g: &Csr, h: &[f64], passes: usize) -> PropagateResult
                     let candidate = (b - l_s) / aik;
                     if candidate < ub[k] - EPS {
                         ub[k] = candidate;
+                        changed = true;
                     }
                 } else if aik < 0.0 {
                     let candidate = (b - l_s) / aik;
                     if candidate > lb[k] + EPS {
                         lb[k] = candidate;
+                        changed = true;
                     }
                 }
             }
 
-            kept_rows.push(row.clone());
+            kept_rows.push(row);
             kept_rhs.push(b);
         }
 
+        if kept_rows.len() != n_rows_before {
+            changed = true;
+        }
         rows = kept_rows;
         rhs = kept_rhs;
+        if !changed {
+            break;
+        }
     }
 
     // Bound strengthening above tightens `lb[k]`/`ub[k]` independently
@@ -269,7 +318,7 @@ pub fn propagate(n: usize, g: &Csr, h: &[f64], passes: usize) -> PropagateResult
         };
     }
 
-    let (new_g, new_h) = rebuild_g(n, rows.clone(), rhs.clone(), &lb, &ub);
+    let (new_g, new_h) = rebuild_g_ref(n, &rows, &rhs, &lb, &ub);
     PropagateResult { g: new_g, h: new_h, lb, ub, real_rows: rows, real_rhs: rhs, infeasible: false }
 }
 
@@ -278,23 +327,47 @@ pub fn propagate(n: usize, g: &Csr, h: &[f64], passes: usize) -> PropagateResult
 /// bound — the inverse of [`extract_bounds`]. Shared by [`propagate`]'s
 /// own ending and by `dualfix`, which also needs to fold freshly-fixed
 /// bounds back into `G` the same way.
-pub fn rebuild_g(n: usize, rows: Vec<Vec<(usize, f64)>>, mut rhs: Vec<f64>, lb: &[f64], ub: &[f64]) -> (Csr, Vec<f64>) {
-    // The bound rows are appended straight into the CSR arrays (after
-    // `rows`, in the same `ub`-then-`lb` order per column) instead of as one
-    // single-entry `Vec` each; `csr_from_rows_then_bounds` is exactly
-    // `csr_from_rows` over `rows` followed by those rows.
-    let mut bound_rows: Vec<(usize, f64)> = Vec::new();
+/// [`rebuild_g`] without taking ownership of (and so without the caller
+/// having to clone) `rows`/`rhs`, and without allocating one `Vec` per
+/// bound row: builds the CSR directly. Produces a bit-identical `(G, h)`
+/// (see `sparse::CsrRowBuilder`); falls back to [`rebuild_g`] itself in
+/// the rare case a real row holds a duplicate column index.
+pub fn rebuild_g_ref(n: usize, rows: &[Vec<(usize, f64)>], rhs: &[f64], lb: &[f64], ub: &[f64]) -> (Csr, Vec<f64>) {
+    let n_bounds = (0..n).filter(|&j| ub[j].is_finite()).count() + (0..n).filter(|&j| lb[j].is_finite()).count();
+    let nnz: usize = rows.iter().map(|r| r.len()).sum::<usize>() + n_bounds;
+    let mut builder = CsrRowBuilder::with_capacity(n, rows.len() + n_bounds, nnz);
+    for row in rows {
+        if !builder.push_row(row) {
+            return rebuild_g(n, rows.to_vec(), rhs.to_vec(), lb, ub);
+        }
+    }
+    let mut new_rhs = Vec::with_capacity(rhs.len() + n_bounds);
+    new_rhs.extend_from_slice(rhs);
     for j in 0..n {
         if ub[j].is_finite() {
-            bound_rows.push((j, 1.0));
+            builder.push_singleton(j, 1.0);
+            new_rhs.push(ub[j]);
+        }
+        if lb[j].is_finite() {
+            builder.push_singleton(j, -1.0);
+            new_rhs.push(-lb[j]);
+        }
+    }
+    (builder.finish(), new_rhs)
+}
+
+pub fn rebuild_g(n: usize, mut rows: Vec<Vec<(usize, f64)>>, mut rhs: Vec<f64>, lb: &[f64], ub: &[f64]) -> (Csr, Vec<f64>) {
+    for j in 0..n {
+        if ub[j].is_finite() {
+            rows.push(vec![(j, 1.0)]);
             rhs.push(ub[j]);
         }
         if lb[j].is_finite() {
-            bound_rows.push((j, -1.0));
+            rows.push(vec![(j, -1.0)]);
             rhs.push(-lb[j]);
         }
     }
-    (crate::sparse::csr_from_rows_then_singletons(&rows, &bound_rows, n), rhs)
+    (csr_from_rows(&rows, n), rhs)
 }
 
 #[cfg(test)]

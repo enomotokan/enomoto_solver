@@ -13,10 +13,9 @@
 //! matrix's indexing).
 //!
 //! **Degree-list implementation**: row/column degrees (active nonzero
-//! counts) live in `col_degree`/`row_degree`, and columns additionally in
-//! bucket arrays (`col_buckets[d]`, each a `VecDeque` of the columns
-//! currently at degree `d`), with O(1) bucket moves via a parallel position
-//! index (`col_bucket_pos`,
+//! counts) live in bucket arrays (`col_buckets[d]`/`row_buckets[d]`, each a
+//! `Vec` of indices currently at degree `d`), with O(1) bucket moves
+//! via a parallel position index (`col_bucket_pos`/`row_bucket_pos`,
 //! swap-to-last-then-pop on removal — the same pattern `factorize`'s
 //! earlier `active_rows` bookkeeping used). Crucially, a **column-major
 //! mirror** (the exact set of currently-active rows with a nonzero at
@@ -77,9 +76,9 @@
 //! this one direction gets the fuller treatment.
 
 use crate::sparse::{CscBuilder, CscMat, CsrMat, EpochMarks, HybridVec};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, VecDeque};
+use std::collections::BinaryHeap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
 
@@ -263,7 +262,7 @@ const DENSE_COL_FRACTION: f64 = 0.5;
 /// was. That is the search-explosion case this bound closes: on an
 /// ill-conditioned or fill-heavy step, the low-degree buckets hold
 /// hundreds of columns whose rows all get walked (and whose
-/// stale column-max rescans all get paid) to improve on a pivot
+/// `ensure_col_max_abs` recomputes all get paid) to improve on a pivot
 /// that was already acceptable.
 ///
 /// Like HiGHS's, the bound is only honoured once a pivot *has* been found
@@ -338,6 +337,11 @@ fn pivot_search_limit() -> usize {
 // the large instances.
 pub(crate) static PROF_TOTAL_STEPS: AtomicUsize = AtomicUsize::new(0);
 pub(crate) static PROF_TRIVIAL_STEPS: AtomicUsize = AtomicUsize::new(0);
+/// Recorded only when `ENOMOTO_PROF_PHASES_EXT`, `ENOMOTO_PROF_PHASES` or
+/// `ENOMOTO_PROF_TRIANGULAR` is set (two `Instant::now()` per elimination
+/// step are otherwise pure hot-path overhead); the step/candidate counters
+/// around it are always kept, accumulated per factorization and flushed
+/// once from `MarkowitzState`'s `Drop`.
 pub(crate) static PROF_BUCKET_SCAN_NS: AtomicUsize = AtomicUsize::new(0);
 /// How many elimination steps had to fall back to `find_best_pivot(false)`
 /// because every remaining candidate was `initially_dense` — a direct
@@ -362,7 +366,7 @@ pub(crate) static PROF_SEARCH_CANDIDATES: AtomicUsize = AtomicUsize::new(0);
 /// threshold — without this, a flat benchmark on the §2.4 escalation
 /// can't be told apart from one where the ladder never fired at all.
 pub(crate) static PROF_PIVOT_ESCALATIONS: AtomicUsize = AtomicUsize::new(0);
-/// Entries `find_best_pivot`'s lazy rescan walked to un-stale the columns
+/// Entries `ensure_col_max_abs` walked to un-stale the columns
 /// `find_best_pivot` actually read — the total work an incremental
 /// `colFixMax` (`docs/lu_comparison_enomoto_vs_highs.md` §2.4) could have
 /// removed, and the reason removing it lost: since §2.5's
@@ -372,6 +376,13 @@ pub(crate) static PROF_PIVOT_ESCALATIONS: AtomicUsize = AtomicUsize::new(0);
 /// `analysis/pivot_threshold_colfixmax_20260922_154500.md` §2). Counted
 /// per rescan, not per touched column, so it stays off the elimination
 /// loop's own path.
+///
+/// Since `find_best_pivot` recomputes a stale max only when some entry of
+/// the column has already passed the Markowitz-score filter (see the
+/// lazy-`col_max_abs` note there; `ENOMOTO_LU_LAZY_COLMAX=0` restores the
+/// eager rescan), this counts only the rescans that were actually needed:
+/// `pilot87` 14.2M -> 9.2M entries, `d2q06c` 258K -> 223K, same
+/// pivots.
 pub(crate) static PROF_COLMAX_RESCAN_ENTRIES: AtomicUsize = AtomicUsize::new(0);
 
 /// BTRANs whose `L^{-T}` stage took the row-major scatter form, against
@@ -724,14 +735,13 @@ struct MarkowitzState {
 
     // Bucket arrays: bucket[d] = indices currently at degree exactly d.
     // Sized m + 1 (a degree can be at most the number of active rows/cols).
-    // Columns only: `find_best_pivot` walks columns by degree and reads a
-    // row's degree straight off `row_degree`, so a row-side bucket
-    // structure (kept here earlier, but never read) is not maintained.
-    col_buckets: Vec<VecDeque<usize>>,
+    col_buckets: Vec<Vec<usize>>,
+    row_buckets: Vec<Vec<usize>>,
 
     // col_bucket_pos[j] = j's index within col_buckets[col_degree[j]], or
     // None if j has been used already (removed from every bucket).
     col_bucket_pos: Vec<Option<usize>>,
+    row_bucket_pos: Vec<Option<usize>>,
 
     col_used: Vec<bool>,
     row_used: Vec<bool>,
@@ -744,7 +754,8 @@ struct MarkowitzState {
     // `col_max_abs_dirty[j]`: `col_max_abs[j]` is stale — some entry of
     // column `j` shrank or left, so the stored value is an upper bound
     // rather than the true max. Recomputing is deferred to
-    // `find_best_pivot`, and only once it is actually about to read it. Most columns `eliminate` dirties this way get
+    // `ensure_col_max_abs`, called only once `find_best_pivot` is actually
+    // about to read it. Most columns `eliminate` dirties this way get
     // dirtied again by a later elimination step before `find_best_pivot`
     // ever visits them (a column's bucket position, which *is* updated
     // eagerly by `update_col_degree`, is what determines when that
@@ -808,11 +819,55 @@ struct MarkowitzState {
     /// path, and would make two threads factorizing at once contend on
     /// one cache line.
     prof_colmax_rescan_entries: usize,
+    /// `find_best_pivot`'s per-column value cache (see its lazy
+    /// `col_max_abs` recomputation).
+    colval: Vec<Option<f64>>,
+    /// `ENOMOTO_LU_LAZY_COLMAX` (default on) — the A/B switch for that
+    /// lazy recomputation; read once per factorization.
+    lazy_colmax: bool,
+    /// `ENOMOTO_LU_ROW_SINGLETON=<rel>` — **path-changing, default off
+    /// (`-1`)**. When `>= 0` and no column singleton exists,
+    /// `find_best_pivot` takes the first active row singleton whose entry
+    /// is at least `rel` times its column's max, instead of reaching it
+    /// only once the column-degree scan arrives at its bucket. Measured
+    /// motive: numerically rejected row singletons (they fail the `0.25`
+    /// threshold) persist across many steps and every search keeps paying
+    /// for the columns in front of them. `rel = 0` is HiGHS's own rule
+    /// (no threshold on singletons). A row singleton's pivot row has no
+    /// other active entry, so it causes no fill and no update of the
+    /// active submatrix; its only numerical cost is the size of the `L`
+    /// multipliers `a_kj / v`. Never applied in [`factorize_bordered`]'s
+    /// sparse phase (reset right after `MarkowitzState::new` there): there the row's border
+    /// entries *are* updated, through the Schur complement, by exactly
+    /// those multipliers — measured as a wrong `fit2p` objective
+    /// (`-8.9e117`) when it was.
+    row_singleton_rel: f64,
+    /// Whether `find_best_pivot` times itself (`PROF_BUCKET_SCAN_NS`) —
+    /// only under the profiling env gates, resolved once per
+    /// factorization.
+    prof_timing: bool,
+    /// Plain per-factorization accumulators for `PROF_TOTAL_STEPS`,
+    /// `PROF_TRIVIAL_STEPS`, `PROF_SEARCH_LIMIT_STEPS`,
+    /// `PROF_SEARCH_CANDIDATES` and `PROF_BUCKET_SCAN_NS`, flushed in
+    /// `Drop` (same reasoning as `prof_colmax_rescan_entries`).
+    prof_steps: usize,
+    prof_trivial: usize,
+    prof_limit: usize,
+    prof_candidates: usize,
+    prof_scan_ns: usize,
+    /// `ENOMOTO_LU_INPLACE_ELIM` (default on): `eliminate`'s in-place
+    /// fast path for affected rows that take no fill-in.
+    inplace_elim: bool,
 }
 
 impl Drop for MarkowitzState {
     fn drop(&mut self) {
         PROF_COLMAX_RESCAN_ENTRIES.fetch_add(self.prof_colmax_rescan_entries, Ordering::Relaxed);
+        PROF_TOTAL_STEPS.fetch_add(self.prof_steps, Ordering::Relaxed);
+        PROF_TRIVIAL_STEPS.fetch_add(self.prof_trivial, Ordering::Relaxed);
+        PROF_SEARCH_LIMIT_STEPS.fetch_add(self.prof_limit, Ordering::Relaxed);
+        PROF_SEARCH_CANDIDATES.fetch_add(self.prof_candidates, Ordering::Relaxed);
+        PROF_BUCKET_SCAN_NS.fetch_add(self.prof_scan_ns, Ordering::Relaxed);
     }
 }
 
@@ -831,13 +886,20 @@ impl MarkowitzState {
         }
         let col_degree: Vec<usize> = (0..m).map(|j| mat.col(j).len()).collect();
 
-        let mut col_buckets = vec![VecDeque::new(); m + 1];
+        let mut col_buckets = vec![Vec::new(); m + 1];
+        let mut row_buckets = vec![Vec::new(); m + 1];
         let mut col_bucket_pos = vec![None; m];
+        let mut row_bucket_pos = vec![None; m];
 
         for j in 0..m {
             let deg = col_degree[j];
             col_bucket_pos[j] = Some(col_buckets[deg].len());
-            col_buckets[deg].push_back(j);
+            col_buckets[deg].push(j);
+        }
+        for i in 0..m {
+            let deg = row_degree[i];
+            row_bucket_pos[i] = Some(row_buckets[deg].len());
+            row_buckets[deg].push(i);
         }
 
         let dense_threshold = DENSE_COL_FRACTION * m as f64;
@@ -849,7 +911,9 @@ impl MarkowitzState {
             col_degree,
             row_degree,
             col_buckets,
+            row_buckets,
             col_bucket_pos,
+            row_bucket_pos,
             col_used: vec![false; m],
             row_used: vec![false; m],
             col_max_abs,
@@ -859,6 +923,18 @@ impl MarkowitzState {
             search_limit: pivot_search_limit(),
             threshold: pivot_threshold(),
             prof_colmax_rescan_entries: 0,
+            colval: Vec::new(),
+            inplace_elim: !matches!(std::env::var("ENOMOTO_LU_INPLACE_ELIM").as_deref(), Ok("0")),
+            prof_timing: std::env::var_os("ENOMOTO_PROF_PHASES_EXT").is_some()
+                || std::env::var_os("ENOMOTO_PROF_PHASES").is_some()
+                || std::env::var_os("ENOMOTO_PROF_TRIANGULAR").is_some(),
+            prof_steps: 0,
+            prof_trivial: 0,
+            prof_limit: 0,
+            prof_candidates: 0,
+            prof_scan_ns: 0,
+            row_singleton_rel: std::env::var("ENOMOTO_LU_ROW_SINGLETON").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(-1.0),
+            lazy_colmax: !matches!(std::env::var("ENOMOTO_LU_LAZY_COLMAX").as_deref(), Ok("0")),
         }
     }
 
@@ -890,13 +966,28 @@ impl MarkowitzState {
             let deg = self.col_degree[j];
             let bucket = &mut self.col_buckets[deg];
             if pos < bucket.len() {
-                let last_j = bucket.pop_back().unwrap();
+                let last_j = bucket.pop().unwrap();
                 if pos < bucket.len() {
                     bucket[pos] = last_j;
                     self.col_bucket_pos[last_j] = Some(pos);
                 }
             }
             self.col_bucket_pos[j] = None;
+        }
+    }
+
+    fn remove_from_bucket_row(&mut self, i: usize) {
+        if let Some(pos) = self.row_bucket_pos[i] {
+            let deg = self.row_degree[i];
+            let bucket = &mut self.row_buckets[deg];
+            if pos < bucket.len() {
+                let last_i = bucket.pop().unwrap();
+                if pos < bucket.len() {
+                    bucket[pos] = last_i;
+                    self.row_bucket_pos[last_i] = Some(pos);
+                }
+            }
+            self.row_bucket_pos[i] = None;
         }
     }
 
@@ -909,13 +1000,18 @@ impl MarkowitzState {
         self.col_degree[j] = new_deg;
         let pos = self.col_buckets[new_deg].len();
         self.col_bucket_pos[j] = Some(pos);
-        self.col_buckets[new_deg].push_back(j);
+        self.col_buckets[new_deg].push(j);
     }
 
     fn update_row_degree(&mut self, i: usize, new_deg: usize) {
-        if !self.row_used[i] {
-            self.row_degree[i] = new_deg;
+        if self.row_used[i] || new_deg == self.row_degree[i] {
+            return;
         }
+        self.remove_from_bucket_row(i);
+        self.row_degree[i] = new_deg;
+        let pos = self.row_buckets[new_deg].len();
+        self.row_bucket_pos[i] = Some(pos);
+        self.row_buckets[new_deg].push(i);
     }
 
     /// Updates `j`'s degree/bucket placement from its current
@@ -923,7 +1019,7 @@ impl MarkowitzState {
     /// never O(m).
     ///
     /// Marks `col_max_abs[j]` stale rather than recomputing it here; see
-    /// `find_best_pivot`'s lazy rescan and `col_max_abs_dirty`'s own docs for
+    /// [`Self::ensure_col_max_abs`] and `col_max_abs_dirty`'s own docs for
     /// why, including why the incremental alternative
     /// (`docs/lu_comparison_enomoto_vs_highs.md` §2.4's `colFixMax`) was
     /// measured and rejected.
@@ -936,14 +1032,25 @@ impl MarkowitzState {
         self.col_max_abs_dirty[j] = true;
     }
 
+    /// Recomputes `col_max_abs[j]` from its current column-mirror
+    /// membership if it is marked stale, otherwise a no-op — called from
+    /// `find_best_pivot` right before it reads `col_max_abs[j]`, the one
+    /// place that value's currency actually matters.
+    fn ensure_col_max_abs(&mut self, j: usize) {
+        if !self.col_max_abs_dirty[j] {
+            return;
+        }
+        self.col_max_abs[j] = self.col_max_abs_rescan(j);
+        self.col_max_abs_dirty[j] = false;
+    }
+
     /// `max |a_ij|` over column `j`'s live entries, read straight off the
-    /// column mirror — `find_best_pivot`'s lazy un-staling of a dirty
-    /// `col_max_abs[j]`, taken only once that column has a candidate entry
-    /// that actually needs the stability threshold. Through `&self` so it
-    /// can run while the search holds a borrow of column `j`.
-    fn col_max_abs_scan(&self, j: usize) -> f64 {
+    /// column mirror.
+    fn col_max_abs_rescan(&mut self, j: usize) -> f64 {
+        let col = self.mat.col(j);
+        self.prof_colmax_rescan_entries += col.len();
         let mut mx = 0.0f64;
-        for &r in self.mat.col(j) {
+        for &r in col {
             if let Some(v) = self.mat.row_get(r as usize, j) {
                 mx = f64::max(mx, v.abs());
             }
@@ -977,48 +1084,80 @@ impl MarkowitzState {
     /// honoured only once a pivot has been found, so it never turns a
     /// `Some` into a `None`.
     fn find_best_pivot(&mut self, skip_dense: bool) -> Option<(usize, usize)> {
-        let __prof_t0 = std::time::Instant::now();
-        PROF_TOTAL_STEPS.fetch_add(1, Ordering::Relaxed);
+        // Timed only under the profiling gates (resolved once per
+        // factorization in `new`): two `Instant::now()` calls per
+        // elimination step are otherwise pure overhead on the hot path.
+        let prof_t0 = if self.prof_timing { Some(std::time::Instant::now()) } else { None };
         let mut best: Option<(usize, usize)> = None;
         let mut best_score = usize::MAX;
         let mut best_pivot_abs = 0.0f64;
         // Candidate columns examined so far by *this* call — the quantity
         // `search_limit` bounds (HiGHS's `searchCount`).
         let mut searched = 0usize;
+        // 0 = score-0 exit, 1 = search-limit exit, anything else = a
+        // degree-level exit or an exhausted scan.
+        let mut exit = 3u8;
 
-        for deg_col in 1..self.col_buckets.len() {
+        // Opt-in, path-changing experiment (default off): take an active
+        // row singleton directly, HiGHS `buildKernel` step 1.2-style, when
+        // there is no column singleton — see `row_singleton_rel`.
+        let mut scan_from = 1usize;
+        if self.row_singleton_rel >= 0.0 && self.col_buckets[1].is_empty() {
+            if let Some(p) = self.try_row_singleton(skip_dense) {
+                best = Some(p);
+                exit = 0;
+                scan_from = self.col_buckets.len();
+            }
+        }
+        'scan: for deg_col in scan_from..self.col_buckets.len() {
             // Indexed rather than iterated by reference: nothing in this
             // loop body mutates `col_buckets[deg_col]` itself (bucket
             // membership only ever changes via `update_col_degree`/
             // `remove_from_bucket_col`, called elsewhere, never from
             // inside `find_best_pivot`), so its length and contents are
-            // fixed for this `deg_col`'s scan.
+            // fixed for this `deg_col`'s scan — indexing just avoids
+            // holding an immutable borrow of `self` across the lazy
+            // `col_max_abs` recomputation below, which needs `&mut self`.
             for idx in 0..self.col_buckets[deg_col].len() {
                 let j = self.col_buckets[deg_col][idx];
-                if self.col_used[j] || (skip_dense && self.initially_dense[j]) {
+                // Buckets never hold a used column: `factorize` removes
+                // the pivot column from its bucket in the same step it
+                // marks it used, and `update_col_degree` refuses to
+                // re-insert one.
+                debug_assert!(!self.col_used[j], "bucketed column must be active");
+                if skip_dense && self.initially_dense[j] {
                     continue;
                 }
-                // HiGHS's `mc_min_pivot[j] = max_value * pivot_threshold`
-                // (§2.4), a per-*column* quantity — computed lazily, on the
-                // first entry that survives the Markowitz-score filter
-                // below, rather than before the column's scan: a stale
-                // `col_max_abs[j]` costs a full column rescan, and on a
-                // column none of whose entries can beat `best_score` it is
-                // never read at all (the common case once a good pivot is
-                // in hand — `pilot87` rescanned 14.2M entries per solve
-                // up front). The rescan reads only the (unchanging, during
-                // this search) matrix, so the value — and every
-                // comparison against it — is exactly the eager one.
-                let col_dirty = self.col_max_abs_dirty[j];
-                let mut min_pivot: Option<f64> = None;
-                let mut rescanned: Option<f64> = None;
                 let col_deg = self.col_degree[j];
                 searched += 1;
-                for &r in self.mat.col(j) {
-                    let i = r as usize;
-                    if self.row_used[i] {
-                        continue;
-                    }
+                // `col_max_abs[j]` is only ever read to form `min_pivot`,
+                // and `min_pivot` is only ever read for an entry that has
+                // already passed the Markowitz-score filter below — so a
+                // stale max is recomputed lazily, at the first such entry,
+                // rather than up front for every column the scan visits.
+                // Most visited columns never produce one (their rows are
+                // all too long to beat `best_score`), and for those the
+                // rescan — a `row_get` per column entry — was pure waste.
+                // The recomputation itself fetches every entry's value
+                // once; those values are kept in `colval` so the candidate
+                // lookups that follow in the same column reuse them rather
+                // than searching the rows a second time. `min_pivot` is the
+                // same product of the same two numbers either way (HiGHS's
+                // `mc_min_pivot[j] = max_value * pivot_threshold`, §2.4),
+                // so every comparison — and hence the chosen pivot — is
+                // unchanged.
+                if !self.lazy_colmax {
+                    self.ensure_col_max_abs(j);
+                }
+                let mut min_pivot = if self.col_max_abs_dirty[j] { f64::NAN } else { self.threshold * self.col_max_abs[j] };
+                let mut cached = false;
+                let (cs, cl) = (self.mat.col_start[j], self.mat.col_len[j]);
+                for k in 0..cl {
+                    let i = self.mat.col_ent[cs + k] as usize;
+                    // The column mirror only ever holds active rows:
+                    // `eliminate` drops the retiring pivot row from every
+                    // column it touches and clears the pivot column.
+                    debug_assert!(!self.row_used[i], "column mirror holds only active rows");
                     // Markowitz score only needs row/col degree, both already
                     // known without touching the row's own run — skip the
                     // value lookup below for candidates that can't possibly
@@ -1028,19 +1167,28 @@ impl MarkowitzState {
                     if score > best_score {
                         continue;
                     }
-                    let Some(v) = self.mat.row_get(i, j) else { continue };
-                    if v == 0.0 {
-                        continue;
+                    if min_pivot.is_nan() {
+                        // First entry of a stale column to need the
+                        // threshold: rescan, caching every value.
+                        let mut mx = 0.0f64;
+                        self.colval.clear();
+                        for kk in 0..cl {
+                            let r = self.mat.col_ent[cs + kk] as usize;
+                            let v = self.mat.row_get(r, j);
+                            if let Some(v) = v {
+                                mx = f64::max(mx, v.abs());
+                            }
+                            self.colval.push(v);
+                        }
+                        self.prof_colmax_rescan_entries += cl;
+                        self.col_max_abs[j] = mx;
+                        self.col_max_abs_dirty[j] = false;
+                        min_pivot = self.threshold * mx;
+                        cached = true;
                     }
-                    let mp = *min_pivot.get_or_insert_with(|| {
-                        let mx = if col_dirty {
-                            *rescanned.insert(self.col_max_abs_scan(j))
-                        } else {
-                            self.col_max_abs[j]
-                        };
-                        self.threshold * mx
-                    });
-                    if v.abs() < mp {
+                    let v = if cached { self.colval[k] } else { self.mat.row_get(i, j) };
+                    let Some(v) = v else { continue };
+                    if v == 0.0 || v.abs() < min_pivot {
                         continue;
                     }
                     if score < best_score || (score == best_score && v.abs() > best_pivot_abs) {
@@ -1049,16 +1197,9 @@ impl MarkowitzState {
                         best_pivot_abs = v.abs();
                     }
                 }
-                if let Some(mx) = rescanned {
-                    self.prof_colmax_rescan_entries += self.mat.col(j).len();
-                    self.col_max_abs[j] = mx;
-                    self.col_max_abs_dirty[j] = false;
-                }
                 if best_score == 0 {
-                    PROF_TRIVIAL_STEPS.fetch_add(1, Ordering::Relaxed);
-                    PROF_SEARCH_CANDIDATES.fetch_add(searched, Ordering::Relaxed);
-                    PROF_BUCKET_SCAN_NS.fetch_add(__prof_t0.elapsed().as_nanos() as usize, Ordering::Relaxed);
-                    return best;
+                    exit = 0;
+                    break 'scan;
                 }
                 // Checked after this column's own scan (never before it),
                 // so the limit bounds how many columns are examined rather
@@ -1066,22 +1207,53 @@ impl MarkowitzState {
                 // column produced would otherwise depend on `col_rows`'
                 // iteration order in a way the unbounded scan's doesn't.
                 if self.search_limit != 0 && searched >= self.search_limit && best.is_some() {
-                    PROF_SEARCH_LIMIT_STEPS.fetch_add(1, Ordering::Relaxed);
-                    PROF_SEARCH_CANDIDATES.fetch_add(searched, Ordering::Relaxed);
-                    PROF_BUCKET_SCAN_NS.fetch_add(__prof_t0.elapsed().as_nanos() as usize, Ordering::Relaxed);
-                    return best;
+                    exit = 1;
+                    break 'scan;
                 }
             }
             if best.is_some() && best_score <= deg_col * deg_col {
-                PROF_SEARCH_CANDIDATES.fetch_add(searched, Ordering::Relaxed);
-                PROF_BUCKET_SCAN_NS.fetch_add(__prof_t0.elapsed().as_nanos() as usize, Ordering::Relaxed);
-                return best;
+                exit = 2;
+                break 'scan;
             }
         }
 
-        PROF_SEARCH_CANDIDATES.fetch_add(searched, Ordering::Relaxed);
-        PROF_BUCKET_SCAN_NS.fetch_add(__prof_t0.elapsed().as_nanos() as usize, Ordering::Relaxed);
+        // Profiling, accumulated in plain fields and flushed to the shared
+        // atomics once per factorization (`Drop`) rather than with three
+        // or four locked read-modify-writes per elimination step.
+        self.prof_steps += 1;
+        self.prof_candidates += searched;
+        match exit {
+            0 => self.prof_trivial += 1,
+            1 => self.prof_limit += 1,
+            _ => {}
+        }
+        if let Some(t0) = prof_t0 {
+            self.prof_scan_ns += t0.elapsed().as_nanos() as usize;
+        }
         best
+    }
+
+    /// The first active row singleton (in `row_buckets[1]` order, at most
+    /// `search_limit` of them) whose one entry clears
+    /// `row_singleton_rel * col_max_abs` — see `row_singleton_rel`.
+    fn try_row_singleton(&mut self, skip_dense: bool) -> Option<(usize, usize)> {
+        let n = self.row_buckets[1].len();
+        let cap = if self.search_limit == 0 { n } else { n.min(self.search_limit) };
+        for idx in 0..cap {
+            let i = self.row_buckets[1][idx];
+            let (j, v) = self.mat.row(i)[0];
+            if (skip_dense && self.initially_dense[j]) || v == 0.0 {
+                continue;
+            }
+            if self.row_singleton_rel == 0.0 {
+                return Some((i, j));
+            }
+            self.ensure_col_max_abs(j);
+            if v.abs() >= self.row_singleton_rel * self.col_max_abs[j] {
+                return Some((i, j));
+            }
+        }
+        None
     }
 
     /// Eliminates column `pj` (whose pivot is `(pi, pj)`, value
@@ -1127,9 +1299,77 @@ impl MarkowitzState {
             sc.merged.clear();
             sc.col_add.clear();
             sc.col_del.clear();
-            {
+            let row_len_before = self.mat.row_len[i];
+            // Optimistic in-place pass: update the row's own run directly,
+            // compacting over the pivot column's entry (and any exact
+            // cancellation) as it goes. Only a fill-in needs the run to
+            // *grow*, which cannot be done in place front-to-back; the
+            // first one hands the already-final prefix `[0, w)` plus the
+            // untouched remainder `[a, len)` to the general merge below.
+            // Most affected rows take no fill at all (`pilot87`: 68%), and
+            // for those this saves writing the whole row into `merged`
+            // and copying it back. Same entries, same values, same order
+            // and same `touch`/`col_del` calls as the merge, so the
+            // factorization is bit-identical.
+            let (mut a, mut b, mut w) = (0usize, 0usize, 0usize);
+            let mut spilled = false;
+            if self.inplace_elim {
+                let s0 = self.mat.row_start[i];
+                let ents = &mut self.mat.row_ent[s0..s0 + row_len_before];
+                let plen = pivot_row_snapshot.len();
+                while a < row_len_before && b < plen {
+                    let (ja, va) = ents[a];
+                    let (jb, vb) = pivot_row_snapshot[b];
+                    if ja < jb {
+                        if w != a {
+                            ents[w] = (ja, va);
+                        }
+                        w += 1;
+                        a += 1;
+                    } else if jb < ja {
+                        if jb != pj && -mult * vb != 0.0 {
+                            spilled = true;
+                            break;
+                        }
+                        b += 1;
+                    } else {
+                        if ja != pj {
+                            let new_val = va - mult * vb;
+                            if new_val == 0.0 {
+                                sc.col_del.push(ja);
+                            } else {
+                                ents[w] = (ja, new_val);
+                                w += 1;
+                            }
+                            sc.touch(ja);
+                        }
+                        a += 1;
+                        b += 1;
+                    }
+                }
+                if !spilled {
+                    while b < plen {
+                        let (jb, vb) = pivot_row_snapshot[b];
+                        if jb != pj && -mult * vb != 0.0 {
+                            spilled = true;
+                            break;
+                        }
+                        b += 1;
+                    }
+                }
+                if !spilled {
+                    if w != a {
+                        ents.copy_within(a..row_len_before, w);
+                    }
+                    w += row_len_before - a;
+                } else {
+                    sc.merged.extend_from_slice(&ents[..w]);
+                }
+            } else {
+                spilled = true;
+            }
+            if spilled {
                 let row = self.mat.row(i);
-                let (mut a, mut b) = (0usize, 0usize);
                 while a < row.len() && b < pivot_row_snapshot.len() {
                     let (ja, va) = row[a];
                     let (jb, vb) = pivot_row_snapshot[b];
@@ -1188,14 +1428,19 @@ impl MarkowitzState {
                 }
             }
 
-            self.mat.set_row(i, &sc.merged);
+            let new_deg_i = if spilled {
+                self.mat.set_row(i, &sc.merged);
+                sc.merged.len()
+            } else {
+                self.mat.row_len[i] = w;
+                w
+            };
             for k in 0..sc.col_del.len() {
                 self.mat.col_remove(sc.col_del[k], i);
             }
             for k in 0..sc.col_add.len() {
                 self.mat.col_insert(sc.col_add[k], i);
             }
-            let new_deg_i = sc.merged.len();
             self.update_row_degree(i, new_deg_i);
         }
         self.mat.col_clear(pj);
@@ -2160,9 +2405,33 @@ pub fn factorize(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuFactors> {
     factorize_flat_markowitz(m, rows_in)
 }
 
+/// Analysis-only: appends one kernel input to `<dir>/lu_dump.bin`
+/// (`m`, then per row `len` and `(col, f64 bits)` pairs, all little-endian
+/// `u64`) so `lu_kernel_bench` can replay the exact matrices a solve
+/// factorized.
+fn dump_lu_input(dir: &std::path::Path, m: usize, rows_in: &[Vec<(usize, f64)>]) {
+    use std::io::Write;
+    let mut buf: Vec<u8> = Vec::new();
+    buf.extend_from_slice(&(m as u64).to_le_bytes());
+    for row in rows_in {
+        buf.extend_from_slice(&(row.len() as u64).to_le_bytes());
+        for &(j, v) in row {
+            buf.extend_from_slice(&(j as u64).to_le_bytes());
+            buf.extend_from_slice(&v.to_bits().to_le_bytes());
+        }
+    }
+    let _ = std::fs::create_dir_all(dir);
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("lu_dump.bin")) {
+        let _ = f.write_all(&buf);
+    }
+}
+
 fn factorize_flat_markowitz(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuFactors> {
     if is_dense_input(m, rows_in) {
         return factorize_dense_faer(m, rows_in);
+    }
+    if let Some(dir) = std::env::var_os("ENOMOTO_DUMP_LU_DIR") {
+        dump_lu_input(std::path::Path::new(&dir), m, rows_in);
     }
     let mut state = MarkowitzState::new(m, rows_in);
 
@@ -2175,6 +2444,7 @@ fn factorize_flat_markowitz(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<L
     let mut eliminate_ns: u128 = 0;
     let mut snapshot_ns: u128 = 0;
 
+    let mut pivot_row_snapshot: Vec<(usize, f64)> = Vec::new();
     for step in 0..m {
         // Prefer a non-dense pivot column whenever one exists at all,
         // regardless of Markowitz score, and only fall back to the
@@ -2197,16 +2467,15 @@ fn factorize_flat_markowitz(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<L
         row_perm[step] = pi;
         col_perm[step] = pj;
 
+        state.remove_from_bucket_row(pi);
         state.remove_from_bucket_col(pj);
 
         let pivot_val = state.value_at(pi, pj).unwrap();
         let __t_snap0 = if debug_eliminate_cost { Some(std::time::Instant::now()) } else { None };
-        let pivot_row_snapshot: Vec<(usize, f64)> = state
-            .row(pi)
-            .iter()
-            .copied()
-            .filter(|&(j, v)| v != 0.0 && (j == pj || !state.col_used[j]))
-            .collect();
+        // One buffer for the whole factorization, not a fresh `Vec` per
+        // elimination step.
+        pivot_row_snapshot.clear();
+        pivot_row_snapshot.extend(state.row(pi).iter().copied().filter(|&(j, v)| v != 0.0 && (j == pj || !state.col_used[j])));
         if let Some(t0) = __t_snap0 {
             snapshot_ns += t0.elapsed().as_nanos();
         }
@@ -2340,6 +2609,8 @@ fn factorize_bordered(m: usize, rows_in: &[Vec<(usize, f64)>], border: &[usize])
         rows_in.iter().map(|row| row.iter().copied().filter(|&(j, v)| v != 0.0 && !is_border[j]).collect()).collect();
 
     let mut state = MarkowitzState::new(m, &sparse_rows);
+    // See `row_singleton_rel`'s docs: never in the bordered sparse phase.
+    state.row_singleton_rel = -1.0;
 
     let mut row_perm = vec![usize::MAX; m];
     let mut col_perm = vec![usize::MAX; m];
@@ -2351,6 +2622,7 @@ fn factorize_bordered(m: usize, rows_in: &[Vec<(usize, f64)>], border: &[usize])
     // appended to this same list further down.
     let mut u_entries: Vec<(usize, usize, f64)> = Vec::new();
 
+    let mut pivot_row_snapshot: Vec<(usize, f64)> = Vec::new();
     for step in 0..n_sparse {
         let (pi, pj) = state.find_best_pivot(true).or_else(|| state.find_best_pivot(false))?;
 
@@ -2358,15 +2630,14 @@ fn factorize_bordered(m: usize, rows_in: &[Vec<(usize, f64)>], border: &[usize])
         state.col_used[pj] = true;
         row_perm[step] = pi;
         col_perm[step] = pj;
+        state.remove_from_bucket_row(pi);
         state.remove_from_bucket_col(pj);
 
         let pivot_val = state.value_at(pi, pj).unwrap();
-        let pivot_row_snapshot: Vec<(usize, f64)> = state
-            .row(pi)
-            .iter()
-            .copied()
-            .filter(|&(j, v)| v != 0.0 && (j == pj || !state.col_used[j]))
-            .collect();
+        // One buffer for the whole factorization, not a fresh `Vec` per
+        // elimination step.
+        pivot_row_snapshot.clear();
+        pivot_row_snapshot.extend(state.row(pi).iter().copied().filter(|&(j, v)| v != 0.0 && (j == pj || !state.col_used[j])));
         for &(j, v) in &pivot_row_snapshot {
             u_entries.push((step, j, v));
         }
@@ -2556,6 +2827,44 @@ impl LuFactors {
     /// FTRAN, so a fresh `Vec` here would mean a fresh heap allocation on
     /// every single pivot's FTRAN/BTRAN, several times over (see
     /// `FtLu::solve_into`'s own docs).
+    /// [`Self::l_solve_into`] for two right-hand sides in one pass over
+    /// `L` — see [`FtLu::solve_into_pair_capture`]. Each vector sees exactly
+    /// the operations, in exactly the order, a separate `l_solve_into` call
+    /// would apply to it (a column is skipped for one vector iff that
+    /// vector's own `z[s]` is zero), so both results are bit-identical to
+    /// two separate calls; only the traversal of `l_col` is shared.
+    fn l_solve_into_pair(&self, rhs_a: &[f64], rhs_b: &[f64], za: &mut [f64], zb: &mut [f64]) {
+        let m = self.m;
+        for s in 0..m {
+            let r = self.row_perm[s];
+            za[s] = rhs_a[r];
+            zb[s] = rhs_b[r];
+        }
+        for s in 0..m {
+            let xa = za[s];
+            let xb = zb[s];
+            match (xa != 0.0, xb != 0.0) {
+                (false, false) => {}
+                (true, true) => {
+                    for &(row_step, mult) in self.l_col.col(s) {
+                        za[row_step] -= mult * xa;
+                        zb[row_step] -= mult * xb;
+                    }
+                }
+                (true, false) => {
+                    for &(row_step, mult) in self.l_col.col(s) {
+                        za[row_step] -= mult * xa;
+                    }
+                }
+                (false, true) => {
+                    for &(row_step, mult) in self.l_col.col(s) {
+                        zb[row_step] -= mult * xb;
+                    }
+                }
+            }
+        }
+    }
+
     fn l_solve_into(&self, rhs: &[f64], z: &mut [f64]) {
         let m = self.m;
         for s in 0..m {
@@ -2567,35 +2876,6 @@ impl LuFactors {
             }
             for &(row_step, mult) in self.l_col.col(s) {
                 z[row_step] -= mult * z[s];
-            }
-        }
-    }
-
-    /// [`Self::l_solve_into`] on two right-hand sides in one pass over `L`:
-    /// each step's column is read once for both, while each vector sees
-    /// exactly the operations — in exactly the order — its own call would.
-    fn l_solve2_into(&self, rhs1: &[f64], z1: &mut [f64], rhs2: &[f64], z2: &mut [f64]) {
-        let m = self.m;
-        for s in 0..m {
-            let src = self.row_perm[s];
-            z1[s] = rhs1[src];
-            z2[s] = rhs2[src];
-        }
-        for s in 0..m {
-            let (a, b) = (z1[s], z2[s]);
-            if a == 0.0 && b == 0.0 {
-                continue;
-            }
-            let col = self.l_col.col(s);
-            if a != 0.0 {
-                for &(row_step, mult) in col {
-                    z1[row_step] -= mult * a;
-                }
-            }
-            if b != 0.0 {
-                for &(row_step, mult) in col {
-                    z2[row_step] -= mult * b;
-                }
             }
         }
     }
@@ -3175,25 +3455,6 @@ pub struct FtLu {
     /// once-*every*-iteration BTRAN/FTRAN paths, not just `try_update`)
     /// keep a plain sequential scan with no pointer-chasing indirection.
     u_seq: Vec<UEta>,
-    /// The **singleton** `U` etas (empty `off_diag`: a bare diagonal pivot)
-    /// of the factorization as built, held apart from `u_seq` — 42-99% of
-    /// all `m` etas right after a refactorization on the heavy Netlib
-    /// problems. A singleton's own division reads and writes only its own
-    /// slot, and by `u_seq`'s triangular order every eta that writes into
-    /// that slot (FTRAN) or reads it (BTRAN) sits *later* in the sequence,
-    /// so its division can run after the whole `u_seq` pass in
-    /// [`Self::u_solve_into`] and before it in the `U^T` sweeps without
-    /// changing a single result bit — while the sequential loops skip
-    /// visiting them at all. Order within `singles` is irrelevant (the
-    /// divisions are independent); `commit_update` pulls a replaced one
-    /// out with `swap_remove`. `u_seq` never feeds an eta back in here:
-    /// an eta that loses its last off-diagonal entry later just stays in
-    /// `u_seq`, exact either way.
-    singles: Vec<UEta>,
-    /// `singles_pos[slot]` is `slot`'s index into `singles`, `usize::MAX`
-    /// when `slot` lives in `u_seq` instead (and vice versa for
-    /// `slot_pos`).
-    singles_pos: Vec<usize>,
     /// `slot_pos[slot]` is `slot`'s current index into `u_seq` — kept in
     /// sync by `try_update` over exactly the range its own
     /// `Vec::remove`/`push` already touches (see `try_update`'s own docs),
@@ -3212,7 +3473,7 @@ pub struct FtLu {
     /// `slot_pos` above for O(1) access to each one), so only the
     /// (typically small — a few percent of `m`, per `ENOMOTO_DEBUG_ETA_DENSITY`
     /// measurements) handful that actually do ever get touched.
-    row_owners: Vec<Vec<(usize, f64)>>,
+    row_owners: Vec<Vec<usize>>,
     r_etas: Vec<REta>,
     /// [`Self::try_update`]'s own reusable scratch (length `m`, always
     /// restored to that length before returning — see that method's own
@@ -3230,6 +3491,19 @@ pub struct FtLu {
     /// See [`Self::scratch_a_tilde`]'s own docs — the other of
     /// [`Self::try_update`]'s two scratch buffers.
     scratch_e_tilde: Vec<f64>,
+    /// [`Self::u_transpose_solve_into`]'s own reusable [`EpochMarks`]
+    /// "needed" set (see that method's own docs): a marked step `s` is one
+    /// known to end up nonzero this call. A `RefCell` rather than a `&mut`
+    /// parameter
+    /// because `u_transpose_solve_into` and its callers
+    /// (`solve_transpose_into`/`solve_transpose_into_capture`) are called
+    /// through a shared `&FtLu` from many call sites across this crate;
+    /// threading a new scratch parameter through all of them for an
+    /// internal, call-local bookkeeping array would be a much larger,
+    /// more invasive change for the same result. Never borrowed
+    /// re-entrantly (this method doesn't call itself), so the `borrow_mut`
+    /// can't panic.
+    ut_needed: RefCell<EpochMarks>,
     /// Deterministic operation-count accumulator for the `CLOCK`
     /// refactorization trigger (`ENOMOTO_SYNTH_CLOCK_FACTOR`'s own docs at
     /// its call sites in `extended_dual.rs`) — this crate's counterpart to
@@ -3244,7 +3518,8 @@ pub struct FtLu {
     /// A `Cell` (not a plain field) because every solve stage that adds to
     /// it (`ftran_through_l_and_r_into`, `solve_sparse_into[_capture]`,
     /// `u_solve_into`, `u_transpose_solve_into`, `solve_transpose_into[_capture]`)
-    /// takes `&self`. Reset implicitly to `0`
+    /// takes `&self`, matching this file's existing `ut_needed`
+    /// interior-mutability convention just above. Reset implicitly to `0`
     /// every time a new `FtLu` is built (`Self::new`, i.e. every
     /// refactorization) — there is no explicit reset method because a fresh
     /// `FtLu` *is* the reset.
@@ -3342,21 +3617,7 @@ const TICK_SOLVE_NNZ_COEF: u64 = 1;
 impl FtLu {
     pub fn new(base: LuFactors) -> Self {
         let m = base.m;
-        // Exact per-slot/per-row counts first so every inner `Vec` below is
-        // allocated once at its final size (this runs on every
-        // refactorization; growing ~2m small `Vec`s push by push was a
-        // visible share of the allocator's time).
-        let mut off_count = vec![0usize; m];
-        let mut owner_count = vec![0usize; m];
-        for row_step in 0..m {
-            for &(col_step, _) in &base.u_row[row_step] {
-                if col_step != row_step {
-                    off_count[col_step] += 1;
-                    owner_count[row_step] += 1;
-                }
-            }
-        }
-        let mut off_diags: Vec<Vec<(usize, f64)>> = off_count.iter().map(|&c| Vec::with_capacity(c)).collect();
+        let mut off_diags: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
         let mut pivots = vec![0.0; m];
         for row_step in 0..m {
             for &(col_step, v) in &base.u_row[row_step] {
@@ -3367,10 +3628,10 @@ impl FtLu {
                 }
             }
         }
-        let mut row_owners: Vec<Vec<(usize, f64)>> = owner_count.iter().map(|&c| Vec::with_capacity(c)).collect();
+        let mut row_owners: Vec<Vec<usize>> = vec![Vec::new(); m];
         for (slot, pairs) in off_diags.iter().enumerate() {
-            for &(row_step, v) in pairs {
-                row_owners[row_step].push((slot, v));
+            for &(row_step, _) in pairs {
+                row_owners[row_step].push(slot);
             }
         }
         let l_nnz: u64 = base.l_col.nnz() as u64;
@@ -3385,35 +3646,23 @@ impl FtLu {
         // every stored entry, matching what `factorize_reusing_order`
         // counts as it goes.
         let fill_baseline = (l_nnz + u_off) as usize + m;
-        let mut u_seq: Vec<UEta> = Vec::with_capacity(m);
-        let mut singles: Vec<UEta> = Vec::new();
-        let mut slot_pos = vec![usize::MAX; m];
-        let mut singles_pos = vec![usize::MAX; m];
-        for slot in 0..m {
-            let eta = UEta {
+        let u_seq: Vec<UEta> = (0..m)
+            .map(|slot| UEta {
                 slot,
                 pivot: pivots[slot],
                 off_diag: HybridVec::pack(m, std::mem::take(&mut off_diags[slot]), DENSE_ETA_FRACTION),
-            };
-            if eta.off_diag.nnz() == 0 {
-                singles_pos[slot] = singles.len();
-                singles.push(eta);
-            } else {
-                slot_pos[slot] = u_seq.len();
-                u_seq.push(eta);
-            }
-        }
+            })
+            .collect();
         let fill = u_seq.iter().map(|e: &UEta| e.off_diag.nnz()).sum();
         FtLu {
             base,
             u_seq,
-            singles,
-            singles_pos,
-            slot_pos,
+            slot_pos: (0..m).collect(),
             row_owners,
             r_etas: Vec::new(),
             scratch_a_tilde: vec![0.0; m],
             scratch_e_tilde: vec![0.0; m],
+            ut_needed: RefCell::new(EpochMarks::new(m)),
             fill,
             tick: Cell::new(0),
             build_tick,
@@ -3503,14 +3752,37 @@ impl FtLu {
     ///
     /// Hyper-sparse via [`Self::row_owners`], unlike [`Self::u_solve_into`]
     /// (see that method's own docs for why a GP-style DFS reach set was
-    /// tried there and reverted): the sweep ([`Self::u_transpose_sweep`])
-    /// is in scatter form over `row_owners`' row-wise copy of `U`, so a
-    /// slot whose value is zero costs one test and nothing else. (The
-    /// earlier gather form reached the same sparsity through "needed"
-    /// marks, `analysis/greenbea_20260921_090812.md` §3-4, but still paid
-    /// each needed eta's whole column dot product.)
+    /// tried there and reverted): `z`'s input here is always a single unit
+    /// vector's worth of nonzeros (BTRAN's callers only ever seed one
+    /// entry before permutation), and this loop already visits `u_seq` in
+    /// the one order (forward/creation order) in which every eta's
+    /// `off_diag` targets are guaranteed to sit at strictly earlier
+    /// positions (the same invariant `u_solve_into`'s reverse pass relies
+    /// on, mirrored) — so marking "which later etas can possibly end up
+    /// nonzero" is a single forward pass with no separate DFS/reach
+    /// pre-pass needed: whenever this loop finds `z[p] != 0.0`, every slot
+    /// listed in `row_owners[p]` (the etas whose `off_diag` reads row-step
+    /// `p`) is marked needed, and any eta never marked needed is skipped
+    /// outright. A skipped eta's `z[p]` is left at whatever `0 - 0 == 0`
+    /// (or `-0.0`) it already held — never read by any downstream code as
+    /// anything but "zero" (see `commit_update`'s `!= 0.0` filter, the
+    /// `r_etas`/PRICE/DSE consumers immediately below and downstream of
+    /// this call, all of which branch on zero-ness, not sign of zero), so
+    /// every nonzero result is bit-identical to the unconditional scan.
+    /// Measured (`analysis/greenbea_20260921_090812.md` §3-4): on
+    /// `greenbea`, only ~3% of `u_seq` ends up nonzero per call, cutting
+    /// this stage's wall time by more than half with the pivot sequence,
+    /// iteration count, refactorization count and objective value all
+    /// unchanged (bit-identical) across the full Netlib set.
     fn u_transpose_solve_into(&self, z: &mut [f64]) {
-        self.u_transpose_sweep(z);
+        let mut needed = self.ut_needed.borrow_mut();
+        needed.begin();
+        for (s, &zs) in z.iter().enumerate() {
+            if zs != 0.0 {
+                needed.mark(s);
+            }
+        }
+        self.u_transpose_sweep(z, &mut needed);
     }
 
     /// [`Self::u_transpose_solve_into`] for the case the caller already
@@ -3529,41 +3801,44 @@ impl FtLu {
     /// place, which [`Self::seed_unit_rhs`] replaces with a flat `fill` and
     /// one store.
     fn u_transpose_solve_seeded(&self, z: &mut [f64], seed: usize) {
-        debug_assert!(z.iter().enumerate().all(|(s, &v)| s == seed || v == 0.0));
-        self.u_transpose_sweep(z);
+        let mut needed = self.ut_needed.borrow_mut();
+        needed.begin();
+        needed.mark(seed);
+        self.u_transpose_sweep(z, &mut needed);
     }
 
     /// The `U^{-T}` sweep itself, shared by both seedings above.
-    fn u_transpose_sweep(&self, z: &mut [f64]) {
-        // Scatter form (HiGHS `HFactor::btranU` over its row-wise `ur_*`
-        // copy): once slot `p`'s value is final it is divided by its pivot
-        // and pushed into every eta that reads it (`row_owners[p]`, which
-        // carries the `U` entry alongside the slot) — so the work is the
-        // nonzero `p`s' row lengths, not, as the gather form this replaced
-        // did, every needed eta's whole column dot product regardless of
-        // how few of that column's inputs are nonzero (26x more entries on
-        // `fit2p`, whose few dense border columns every BTRAN re-read).
-        // Changes the summation order into each `z[q]`, so the last bits —
-        // not the math — differ from the gather form.
+    fn u_transpose_sweep(&self, z: &mut [f64], needed: &mut EpochMarks) {
+        // CLOCK-trigger accounting (`Self::tick`'s own docs): the
+        // mark-seeding scan plus the unconditional `for eta in &self.u_seq` walk below
+        // (the `continue` only skips the dot product, not the loop
+        // iteration itself) are both `O(m)` on every single call regardless
+        // of how sparse `z` is — mirrors HiGHS's own `buildSynthticTick`
+        // fixed `num_row`-scaled term for the analogous `btranU` stage.
         //
-        // CLOCK-trigger accounting (`Self::tick`'s own docs): the flat `m`
-        // for the `O(m)` walk over every slot, plus each scattered row's
-        // length.
+        // Charged identically on the seeded path, which skips the scan but
+        // still walks all of `u_seq`: the flat `m` term models that walk,
+        // and the tick drives the deterministic `CLOCK` refactorization
+        // trigger, so making the two paths disagree here would change
+        // *which iterations refactorize* — i.e. silently move the solve
+        // onto a different trajectory — in exchange for modelling a
+        // constant factor within the same `O(m)`.
         self.add_tick(self.base.m as u64);
-        // Singletons first (see `singles`' own docs): nothing writes into a
-        // singleton's slot, so its value is final before the sweep starts.
-        for eta in self.singles.iter().chain(self.u_seq.iter()) {
+        for eta in &self.u_seq {
             let p = eta.slot;
-            let zp = z[p];
-            if zp == 0.0 {
+            if !needed.is_marked(p) {
                 continue;
             }
-            let zp = zp / eta.pivot;
-            z[p] = zp;
-            let owners = &self.row_owners[p];
-            self.add_tick(owners.len() as u64);
-            for &(q, v) in owners {
-                z[q] -= v * zp;
+            // `HybridVec`'s dense arm zips the whole array; `data[p]` is
+            // always `0.0` (that type's skipped-index convention), so this
+            // dot product already excludes `z[p]` on its own.
+            let y = eta.off_diag.dot_dense(z);
+            self.add_tick(eta.off_diag.nnz() as u64);
+            z[p] = (z[p] - y) / eta.pivot;
+            if z[p] != 0.0 {
+                for &q in &self.row_owners[p] {
+                    needed.mark(q);
+                }
             }
         }
     }
@@ -3631,9 +3906,6 @@ impl FtLu {
                 self.add_tick(eta.off_diag.nnz() as u64);
                 eta.off_diag.axpy_into_dense(-xp, x);
             }
-            for eta in &self.singles {
-                x[eta.slot] /= eta.pivot;
-            }
             return;
         }
         for eta in self.u_seq.iter().rev() {
@@ -3660,14 +3932,6 @@ impl FtLu {
             // convention), so the dense arm leaves `x[p]` — just divided
             // above — untouched, same as the sparse one.
             eta.off_diag.axpy_into_dense(-xp, x);
-        }
-        // Singletons last (see `singles`' own docs): every write into their
-        // slots has happened by now. Same zero-skip as the loop above.
-        for eta in &self.singles {
-            let p = eta.slot;
-            if x[p] != 0.0 {
-                x[p] /= eta.pivot;
-            }
         }
     }
 
@@ -3736,88 +4000,119 @@ impl FtLu {
         self.permute_out(scratch, out)
     }
 
-    /// [`Self::solve_into_capture`] on `rhs1` fused with a plain
-    /// [`Self::solve_into`] on `rhs2`: one traversal of `L`, the `R` etas and
-    /// `U` serves both, so each factor entry is fetched once instead of
-    /// twice, while each vector's own arithmetic — every operation, in
-    /// order — is exactly what its separate call does, so both results are
-    /// bit-for-bit the separate calls' results. Charges the same CLOCK ticks
-    /// as the two separate calls together. Returns both outputs' nonzero
-    /// counts.
-    /// Used for the entering column's FTRAN and the DSE `tau` FTRAN, which
-    /// run against the same pre-pivot factorization every iteration.
+    /// Two dense FTRANs against the same factorization in one traversal:
+    /// `out_a = B^-1 rhs_a` exactly as [`Self::solve_into_capture`] computes
+    /// it (including the `a_tilde` capture), and `out_b = B^-1 rhs_b` exactly
+    /// as [`Self::solve_into`] does — the entering column's FTRAN and the
+    /// DSE `tau = B^-1 rho_p` FTRAN of the same iteration, which HiGHS runs
+    /// as two separate (optionally concurrent) solves
+    /// (`HEkkDual::updateFtranDSE`). Every stage (`L`, the `R` etas, `U`)
+    /// walks its factor data once and applies it to both vectors, each
+    /// vector receiving precisely its own single-solve operation sequence
+    /// (same zero skips, same accumulation order), so both results — and
+    /// the returned nonzero counts — are bit-identical to the two separate
+    /// calls. The synthetic tick is charged exactly as the two separate
+    /// calls would charge it too, so the `CLOCK` refactorization trigger
+    /// fires on exactly the same iterations. What is saved is the second
+    /// pass over `L`/`R`/`U`'s own storage (memory traffic and loop
+    /// overhead), which on the larger Netlib instances no longer fits in
+    /// cache between the two solves.
+    ///
+    /// Only the `u_zero_skip` form of the `U` stage is fused; with
+    /// `ENOMOTO_FTRAN_U_ZERO_SKIP=0` this falls back to the two separate
+    /// calls.
     #[allow(clippy::too_many_arguments)]
-    pub fn solve2_into_capture(
+    pub fn solve_into_pair_capture(
         &self,
-        rhs1: &[f64],
-        scratch1: &mut [f64],
-        out1: &mut [f64],
+        rhs_a: &[f64],
+        rhs_b: &[f64],
+        scratch_a: &mut [f64],
+        scratch_b: &mut [f64],
+        out_a: &mut [f64],
+        out_b: &mut [f64],
         a_tilde_out: &mut [f64],
-        rhs2: &[f64],
-        scratch2: &mut [f64],
-        out2: &mut [f64],
     ) -> (usize, usize) {
-        let m = self.base.m as u64;
-        self.base.l_solve2_into(rhs1, scratch1, rhs2, scratch2);
-        self.add_tick(m);
-        self.add_tick(m);
-        for reta in &self.r_etas {
-            let dot1 = reta.r.dot_dense(scratch1);
-            scratch1[reta.p] -= dot1;
-            let dot2 = reta.r.dot_dense(scratch2);
-            scratch2[reta.p] -= dot2;
-            self.add_tick(2 * reta.r.nnz() as u64);
+        if !self.u_zero_skip {
+            let na = self.solve_into_capture(rhs_a, scratch_a, out_a, a_tilde_out);
+            let nb = self.solve_into(rhs_b, scratch_b, out_b);
+            return (na, nb);
         }
-        a_tilde_out.copy_from_slice(scratch1);
-        self.u_solve2_into(scratch1, scratch2);
-        (self.permute_out(scratch1, out1), self.permute_out(scratch2, out2))
+        let m = self.base.m as u64;
+        // `L` stage (+ `ftran_through_l_and_r_into`'s own flat `m` tick,
+        // once per vector).
+        self.base.l_solve_into_pair(rhs_a, rhs_b, scratch_a, scratch_b);
+        self.add_tick(2 * m);
+        let (na, nb) = self.pair_r_u_permute(scratch_a, scratch_b, out_a, out_b, a_tilde_out);
+        (na, nb)
     }
 
-    /// [`Self::u_solve_into`] on two vectors in one pass over `U` — see
-    /// [`Self::solve2_into_capture`].
-    fn u_solve2_into(&self, x1: &mut [f64], x2: &mut [f64]) {
-        self.add_tick(self.base.m as u64);
-        self.add_tick(self.base.m as u64);
+    /// [`Self::solve_into_pair_capture`] with the entering column given
+    /// sparse — [`Self::solve_sparse_into_capture`]'s own Gilbert-Peierls
+    /// `L` stage for `rhs_a` (same `scratch_a`/`gp` precondition and
+    /// postcondition as that method), the plain dense `L` stage for
+    /// `rhs_b`, then the same fused `R`/`U`/permutation tail. Bit-identical
+    /// to `solve_sparse_into_capture(rhs_a, ..)` plus `solve_into(rhs_b, ..)`,
+    /// ticks included.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_sparse_into_pair_capture(
+        &self,
+        rhs_a: &[(usize, f64)],
+        rhs_b: &[f64],
+        scratch_a: &mut [f64],
+        gp: &mut GpScratch,
+        scratch_b: &mut [f64],
+        out_a: &mut [f64],
+        out_b: &mut [f64],
+        a_tilde_out: &mut [f64],
+    ) -> (usize, usize) {
         if !self.u_zero_skip {
-            for eta in self.u_seq.iter().rev() {
-                let p = eta.slot;
-                for x in [&mut *x1, &mut *x2] {
-                    x[p] /= eta.pivot;
-                    let xp = x[p];
-                    if xp == 0.0 {
-                        continue;
-                    }
-                    self.add_tick(eta.off_diag.nnz() as u64);
-                    eta.off_diag.axpy_into_dense(-xp, x);
-                }
-            }
-            for eta in &self.singles {
-                x1[eta.slot] /= eta.pivot;
-                x2[eta.slot] /= eta.pivot;
-            }
-            return;
+            let na = self.solve_sparse_into_capture(rhs_a, scratch_a, gp, out_a, a_tilde_out);
+            let nb = self.solve_into(rhs_b, scratch_b, out_b);
+            return (na, nb);
         }
+        self.base.l_solve_sparse_into(rhs_a, scratch_a, gp);
+        self.add_tick(gp.reach.len() as u64);
+        self.base.l_solve_into(rhs_b, scratch_b);
+        self.add_tick(self.base.m as u64);
+        let (na, nb) = self.pair_r_u_permute(scratch_a, scratch_b, out_a, out_b, a_tilde_out);
+        scratch_a.fill(0.0);
+        (na, nb)
+    }
+
+    /// The shared post-`L` tail of the two pair solves above: `R` etas,
+    /// `a_tilde` capture (vector `a` only), `U` (`u_zero_skip` form), and
+    /// the output permutation, each applied per vector exactly as the
+    /// single-vector paths apply it.
+    fn pair_r_u_permute(&self, scratch_a: &mut [f64], scratch_b: &mut [f64], out_a: &mut [f64], out_b: &mut [f64], a_tilde_out: &mut [f64]) -> (usize, usize) {
+        let m = self.base.m as u64;
+        for reta in &self.r_etas {
+            let dot_a = reta.r.dot_dense(scratch_a);
+            let dot_b = reta.r.dot_dense(scratch_b);
+            self.add_tick(2 * reta.r.nnz() as u64);
+            scratch_a[reta.p] -= dot_a;
+            scratch_b[reta.p] -= dot_b;
+        }
+        a_tilde_out.copy_from_slice(scratch_a);
+        // `U` stage: `u_solve_into`'s `u_zero_skip` loop, per vector.
+        self.add_tick(2 * m);
         for eta in self.u_seq.iter().rev() {
             let p = eta.slot;
-            for x in [&mut *x1, &mut *x2] {
-                if x[p] == 0.0 {
-                    continue;
-                }
-                x[p] /= eta.pivot;
-                let xp = x[p];
+            if scratch_a[p] != 0.0 {
+                scratch_a[p] /= eta.pivot;
+                let xp = scratch_a[p];
                 self.add_tick(eta.off_diag.nnz() as u64);
-                eta.off_diag.axpy_into_dense(-xp, x);
+                eta.off_diag.axpy_into_dense(-xp, scratch_a);
+            }
+            if scratch_b[p] != 0.0 {
+                scratch_b[p] /= eta.pivot;
+                let xp = scratch_b[p];
+                self.add_tick(eta.off_diag.nnz() as u64);
+                eta.off_diag.axpy_into_dense(-xp, scratch_b);
             }
         }
-        for eta in &self.singles {
-            let p = eta.slot;
-            if x1[p] != 0.0 {
-                x1[p] /= eta.pivot;
-            }
-            if x2[p] != 0.0 {
-                x2[p] /= eta.pivot;
-            }
-        }
+        let na = self.permute_out(scratch_a, out_a);
+        let nb = self.permute_out(scratch_b, out_b);
+        (na, nb)
     }
 
     /// The last stage every FTRAN path shares: map the finished
@@ -3879,6 +4174,27 @@ impl FtLu {
         nnz
     }
 
+    /// Adds exactly the synthetic-clock ticks ([`Self::synth_tick`]) that
+    /// [`Self::solve_into`] (`sparse == false`) or [`Self::solve_sparse_into`]
+    /// (`sparse == true`) would add for an identically-zero right-hand
+    /// side, without performing the solve — whose result is known to be
+    /// all-zero anyway. Lets a caller skip a provably-zero FTRAN (e.g. the
+    /// extended dual's BFRT slope channel when no flipped column's width
+    /// carries an `M` term) while keeping the CLOCK refactorization trigger
+    /// — and therefore the whole pivot path — bit-for-bit unchanged.
+    /// For a zero rhs: the dense `L` stage costs a flat `m`, the sparse
+    /// one's reach set is empty (`0`); every `R` eta is visited
+    /// unconditionally; the `U` stage pays its flat `m` and no eta survives
+    /// the zero skip.
+    pub fn add_zero_rhs_solve_ticks(&self, sparse: bool) {
+        let m = self.base.m as u64;
+        self.add_tick(if sparse { 0 } else { m });
+        for reta in &self.r_etas {
+            self.add_tick(reta.r.nnz() as u64);
+        }
+        self.add_tick(m);
+    }
+
     /// Same as [`Self::solve_sparse_into`], but additionally captures the
     /// post-`L`/`R`, pre-`U` intermediate into `a_tilde_out` (length `m`) —
     /// see [`Self::solve_into_capture`]'s own docs, which this mirrors for
@@ -3887,40 +4203,6 @@ impl FtLu {
     /// takes over), so `a_tilde_out` ends up identical regardless of which
     /// of the two FTRAN paths (`should_use_dense_solve`'s dense/sparse
     /// dispatch) a given call took.
-    /// [`Self::solve_sparse_into`], but charging the synthetic clock exactly
-    /// what [`Self::solve_into`] on the same right-hand side would have
-    /// charged (a flat `m` for the `L` stage instead of the reach-set size).
-    ///
-    /// For call sites that used to go through the dense path
-    /// unconditionally (the DSE `tau = B^-1 rho_p` solve): the result is
-    /// bit-for-bit what the dense path returns — both visit the same
-    /// nonzero steps of `L` in the same ascending order, the dense one just
-    /// also skips over the zero ones — so the only thing that could change
-    /// the pivot sequence is the CLOCK refactorization trigger reading a
-    /// smaller tick. Keeping the charge identical keeps every
-    /// refactorization at the same iteration, i.e. the change is pure cost.
-    pub fn solve_sparse_into_dense_tick(&self, rhs_sparse: &[(usize, f64)], scratch: &mut [f64], gp: &mut GpScratch, out: &mut [f64]) -> usize {
-        let nnz = self.solve_sparse_into(rhs_sparse, scratch, gp, out);
-        self.add_tick((self.base.m as u64).saturating_sub(gp.reach.len() as u64));
-        nnz
-    }
-
-    /// Charges the synthetic clock what [`Self::solve_into`]
-    /// (`dense_l == true`) or [`Self::solve_sparse_into`] (`false`) would
-    /// charge on an **all-zero** right-hand side, without doing the solve
-    /// (whose result is known to be zero). Lets a caller skip a provably
-    /// zero FTRAN while keeping the CLOCK trigger's schedule unchanged.
-    pub fn charge_zero_rhs_solve(&self, dense_l: bool) {
-        let m = self.base.m as u64;
-        if dense_l {
-            self.add_tick(m);
-        }
-        for reta in &self.r_etas {
-            self.add_tick(reta.r.nnz() as u64);
-        }
-        self.add_tick(m);
-    }
-
     pub fn solve_sparse_into_capture(
         &self,
         rhs_sparse: &[(usize, f64)],
@@ -4130,19 +4412,7 @@ impl FtLu {
         debug_assert_eq!(self.r_etas.len(), 0, "solve_transpose_unit_into requires a fresh (update-free) factorization");
         let s0 = self.base.col_perm_inv[i];
         scratch[s0] = 1.0;
-        // On a fresh factorization `u_seq` holds the non-singleton slots in
-        // ascending slot order, so the `[0, s0)` prefix is `u_seq`'s
-        // prefix of slots below `s0`; the singletons at or after `s0` get
-        // the same `(z - 0) / pivot` the unsplit sweep gave them, first.
-        for eta in &self.singles {
-            let p = eta.slot;
-            if p >= s0 {
-                let y = eta.off_diag.dot_dense(scratch);
-                scratch[p] = (scratch[p] - y) / eta.pivot;
-            }
-        }
-        let start = self.u_seq.partition_point(|e| e.slot < s0);
-        self.u_transpose_solve_from(scratch, start);
+        self.u_transpose_solve_from(scratch, s0);
         self.l_transpose_solve_into(scratch, out);
         scratch.fill(0.0);
     }
@@ -4298,8 +4568,8 @@ impl FtLu {
         debug_assert_eq!(e_tilde.len(), m, "e_tilde must be the full dense row");
         let p = self.base.col_perm_inv[basis_slot];
 
-        let single_idx = self.singles_pos[p];
-        let old_pivot = if single_idx != usize::MAX { self.singles[single_idx].pivot } else { self.u_seq[self.slot_pos[p]].pivot };
+        let seq_pos = self.slot_pos[p];
+        let old_pivot = self.u_seq[seq_pos].pivot;
 
         // The `R` eta is built straight out of `e_tilde` — same entries,
         // same order, same sparse/dense choice as the `collect()`-then-
@@ -4321,31 +4591,18 @@ impl FtLu {
         // update `slot_pos` for exactly that range (elements the memmove
         // itself already touches, so this is no extra asymptotic cost)
         // rather than the old `find_seq_pos`'s full O(m) re-scan.
-        let removed = if single_idx != usize::MAX {
-            // A singleton leaves `singles` instead (order there is free);
-            // `u_seq` is untouched until the push below.
-            let removed = self.singles.swap_remove(single_idx);
-            if let Some(moved) = self.singles.get(single_idx) {
-                self.singles_pos[moved.slot] = single_idx;
-            }
-            self.singles_pos[p] = usize::MAX;
-            removed
-        } else {
-            let seq_pos = self.slot_pos[p];
-            let removed = self.u_seq.remove(seq_pos);
-            for pos in seq_pos..self.u_seq.len() {
-                self.slot_pos[self.u_seq[pos].slot] = pos;
-            }
-            removed
-        };
+        let removed = self.u_seq.remove(seq_pos);
         self.fill -= removed.off_diag.nnz();
+        for pos in seq_pos..self.u_seq.len() {
+            self.slot_pos[self.u_seq[pos].slot] = pos;
+        }
 
         // Unregister slot `p`'s *old* off-diagonal entries from
         // `row_owners` before overwriting them below — otherwise a stale
         // `p` would linger in some other row's owner list, pointing at
         // content that no longer exists there.
         removed.off_diag.for_each_index(|row_step| {
-            if let Some(idx) = self.row_owners[row_step].iter().position(|&(s, _)| s == p) {
+            if let Some(idx) = self.row_owners[row_step].iter().position(|&s| s == p) {
                 self.row_owners[row_step].swap_remove(idx);
             }
         });
@@ -4354,7 +4611,7 @@ impl FtLu {
         // 1974, eq. 12) — only the etas `row_owners[p]` actually lists,
         // not every eta in `U` (see `row_owners`'s own docs), each found
         // in O(1) via `slot_pos`.
-        for (slot, _) in std::mem::take(&mut self.row_owners[p]) {
+        for slot in std::mem::take(&mut self.row_owners[p]) {
             let pos = self.slot_pos[slot];
             if self.u_seq[pos].off_diag.remove_index(p) {
                 self.fill -= 1;
@@ -4365,7 +4622,7 @@ impl FtLu {
         // `a_tilde` (scale `1.0`, so the dense arm is a plain copy) rather
         // than through a throwaway pair list.
         let off_diag = HybridVec::pack_scaled_dense(a_tilde, p, 1.0, DENSE_ETA_FRACTION);
-        off_diag.for_each_entry(|row_step, v| self.row_owners[row_step].push((p, v)));
+        off_diag.for_each_index(|row_step| self.row_owners[row_step].push(p));
         self.fill += off_diag.nnz();
         self.u_seq.push(UEta { slot: p, pivot: new_pivot, off_diag });
         self.slot_pos[p] = self.u_seq.len() - 1;
@@ -4414,6 +4671,107 @@ impl FtLu {
 
 #[cfg(test)]
 mod tests {
+
+    /// Analysis-only replay benchmark: `ENOMOTO_LU_BENCH_FILE=<lu_dump.bin>
+    /// cargo test --release lu_kernel_bench -- --ignored --nocapture`.
+    /// Factorizes every dumped kernel input under each toggle setting
+    /// listed in `ENOMOTO_LU_BENCH_CONFIGS` (`;`-separated, each a
+    /// `,`-separated list of `KEY=VAL`), alternating configurations for
+    /// `ENOMOTO_LU_BENCH_REPS` rounds, reports the minimum total per
+    /// configuration, and asserts the factors are bit-identical to the
+    /// first configuration's.
+    #[test]
+    #[ignore]
+    fn lu_kernel_bench() {
+        let Some(path) = std::env::var_os("ENOMOTO_LU_BENCH_FILE") else { return };
+        let data = std::fs::read(path).expect("read dump");
+        let words: Vec<u64> = data.chunks_exact(8).map(|c| u64::from_le_bytes(c.try_into().unwrap())).collect();
+        let mut it = words.into_iter().peekable();
+        let mut rd = || it.next().unwrap();
+        let mut mats: Vec<(usize, Vec<Vec<(usize, f64)>>)> = Vec::new();
+        let total_words = data.len() / 8;
+        let mut consumed = 0usize;
+        loop {
+            if consumed >= total_words {
+                break;
+            }
+            let m = rd() as usize;
+            consumed += 1;
+            let mut rows = Vec::with_capacity(m);
+            for _ in 0..m {
+                let len = rd() as usize;
+                consumed += 1 + 2 * len;
+                let mut r = Vec::with_capacity(len);
+                for _ in 0..len {
+                    let j = rd() as usize;
+                    let v = f64::from_bits(rd());
+                    r.push((j, v));
+                }
+                rows.push(r);
+            }
+            mats.push((m, rows));
+        }
+        let configs: Vec<String> = std::env::var("ENOMOTO_LU_BENCH_CONFIGS")
+            .unwrap_or_else(|_| "ENOMOTO_LU_NONE=0".into())
+            .split(';')
+            .map(|s| s.to_string())
+            .collect();
+        let reps: usize = std::env::var("ENOMOTO_LU_BENCH_REPS").ok().and_then(|v| v.parse().ok()).unwrap_or(5);
+        let apply = |cfg: &str| {
+            for kv in cfg.split(',') {
+                if let Some((k, v)) = kv.split_once('=') {
+                    std::env::set_var(k.trim(), v.trim());
+                }
+            }
+        };
+        let fingerprint = |lu: &LuFactors| -> u64 {
+            let mut h: u64 = 1469598103934665603;
+            let mut mix = |x: u64| {
+                h ^= x;
+                h = h.wrapping_mul(1099511628211);
+            };
+            for &r in &lu.row_perm {
+                mix(r as u64);
+            }
+            for &c in &lu.col_perm {
+                mix(c as u64);
+            }
+            for row in &lu.u_row {
+                for &(c, v) in row {
+                    mix(c as u64);
+                    mix(v.to_bits());
+                }
+            }
+            let rhs: Vec<f64> = (0..lu.m).map(|i| 1.0 + (i % 7) as f64).collect();
+            for v in lu.solve(&rhs) {
+                mix(v.to_bits());
+            }
+            h
+        };
+        let mut best = vec![f64::INFINITY; configs.len()];
+        let mut prints: Vec<Vec<u64>> = vec![Vec::new(); configs.len()];
+        for rep in 0..reps {
+            for (ci, cfg) in configs.iter().enumerate() {
+                apply(cfg);
+                let t = std::time::Instant::now();
+                let mut out = Vec::with_capacity(mats.len());
+                for (m, rows) in &mats {
+                    out.push(factorize_flat_markowitz(*m, rows));
+                }
+                let el = t.elapsed().as_secs_f64() * 1e3;
+                best[ci] = best[ci].min(el);
+                if rep == 0 {
+                    prints[ci] = out.iter().map(|o| o.as_ref().map(|lu| fingerprint(lu)).unwrap_or(0)).collect();
+                }
+            }
+        }
+        for (ci, cfg) in configs.iter().enumerate() {
+            let same = prints[ci] == prints[0];
+            let agg = prints[ci].iter().fold(0u64, |h, &x| h.wrapping_mul(31).wrapping_add(x));
+            println!("LUBENCH mats={} cfg=[{}] min_ms={:.3} identical_to_first={} factors_fp={:016x}", mats.len(), cfg, best[ci], same, agg);
+            assert!(same, "factors differ from the first configuration");
+        }
+    }
     use super::*;
 
     fn approx_vec(a: &[f64], b: &[f64]) -> bool {
@@ -5421,6 +5779,69 @@ mod tests {
                 assert_eq!(state.synth_tick() - before, unit_cost, "seed={seed} round={round}: unit and dense BTRAN must charge the same tick");
 
                 let a_q: Vec<f64> = (0..m).map(|k| if k % 7 == round { 1.0 + k as f64 } else { 0.0 }).collect();
+                if !state.try_update(round, &a_q, 1e-9) {
+                    break;
+                }
+            }
+        }
+    }
+
+    /// `solve_into_pair_capture`/`solve_sparse_into_pair_capture` must be
+    /// bit-identical to the separate single-vector solves they fuse — both
+    /// results, the `a_tilde` capture, the returned nonzero counts, and the
+    /// synthetic tick (which drives the CLOCK refactorization trigger) —
+    /// on a fresh factorization and after Forrest-Tomlin updates.
+    #[test]
+    fn pair_ftran_is_bit_identical_to_two_separate_solves() {
+        let m = 40;
+        for seed in [1u64, 2, 3, 4, 5] {
+            let rows = random_sparse_diag_dominant(m, seed);
+            let base = factorize(m, &rows).expect("diagonally dominant matrix must factorize");
+            let mut state = FtLu::new(base);
+            for round in 0..4 {
+                for variant in 0..3usize {
+                    // `a`: a sparse column-like rhs; `b`: a dense-ish one
+                    // (the DSE `rho_p` shape), varied per variant.
+                    let a: Vec<f64> = (0..m).map(|k| if (k + variant) % 9 == round { 0.5 + k as f64 } else { 0.0 }).collect();
+                    let b: Vec<f64> = (0..m).map(|k| if (k * 3 + variant) % (2 + variant) == 0 { 1.0 / (1.0 + k as f64) } else { 0.0 }).collect();
+
+                    let (mut sa, mut sb) = (vec![0.0; m], vec![0.0; m]);
+                    let (mut oa, mut ob, mut ta) = (vec![0.0; m], vec![0.0; m], vec![0.0; m]);
+                    let t0 = state.synth_tick();
+                    let na = state.solve_into_capture(&a, &mut sa, &mut oa, &mut ta);
+                    let nb = state.solve_into(&b, &mut sb, &mut ob);
+                    let sep_cost = state.synth_tick() - t0;
+
+                    let (mut pa, mut pb) = (vec![0.0; m], vec![0.0; m]);
+                    let (mut qa, mut qb, mut qt) = (vec![0.0; m], vec![0.0; m], vec![0.0; m]);
+                    let t0 = state.synth_tick();
+                    let (pna, pnb) = state.solve_into_pair_capture(&a, &b, &mut pa, &mut pb, &mut qa, &mut qb, &mut qt);
+                    assert_eq!(state.synth_tick() - t0, sep_cost, "seed={seed} round={round} v={variant}: dense pair tick");
+                    assert_eq!((pna, pnb), (na, nb));
+                    assert_eq!(qa, oa, "seed={seed} round={round} v={variant}: dense pair a");
+                    assert_eq!(qb, ob, "seed={seed} round={round} v={variant}: dense pair b");
+                    assert_eq!(qt, ta, "seed={seed} round={round} v={variant}: dense pair a_tilde");
+
+                    // Sparse-`a` form, against `solve_sparse_into_capture` + `solve_into`.
+                    let a_sp = to_sparse(&a);
+                    let mut gp = GpScratch::new(m);
+                    let mut zs = vec![0.0; m];
+                    let (mut ra, mut rt) = (vec![0.0; m], vec![0.0; m]);
+                    let t0 = state.synth_tick();
+                    let rna = state.solve_sparse_into_capture(&a_sp, &mut zs, &mut gp, &mut ra, &mut rt);
+                    let rnb = state.solve_into(&b, &mut sb, &mut ob);
+                    let sep_cost = state.synth_tick() - t0;
+                    let (mut xa, mut xb, mut xt) = (vec![0.0; m], vec![0.0; m], vec![0.0; m]);
+                    let t0 = state.synth_tick();
+                    let (xna, xnb) = state.solve_sparse_into_pair_capture(&a_sp, &b, &mut zs, &mut gp, &mut pb, &mut xa, &mut xb, &mut xt);
+                    assert_eq!(state.synth_tick() - t0, sep_cost, "seed={seed} round={round} v={variant}: sparse pair tick");
+                    assert_eq!((xna, xnb), (rna, rnb));
+                    assert_eq!(xa, ra, "seed={seed} round={round} v={variant}: sparse pair a");
+                    assert_eq!(xb, ob, "seed={seed} round={round} v={variant}: sparse pair b");
+                    assert_eq!(xt, rt, "seed={seed} round={round} v={variant}: sparse pair a_tilde");
+                    assert!(zs.iter().all(|&v| v == 0.0), "sparse pair must leave its scratch all-zero");
+                }
+                let a_q: Vec<f64> = (0..m).map(|k| if k % 5 == round { 1.0 + k as f64 } else { 0.0 }).collect();
                 if !state.try_update(round, &a_q, 1e-9) {
                     break;
                 }

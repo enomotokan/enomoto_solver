@@ -2650,10 +2650,7 @@ impl DseState {
         let pivot = alpha[p];
         let wp_old = rho_p.iter().map(|v| v * v).sum::<f64>().max(STEEPEST_EDGE_FLOOR);
         let update_one = |i: usize, w_i: &mut f64| {
-            // `alpha[i] == 0` leaves `w_i` bit-for-bit unchanged (`w - 2*(±0)*tau
-            // + 0*wp_old == w`, and every stored weight is already floored),
-            // so those rows skip the division and the rest of the update.
-            if i == p || alpha[i] == 0.0 {
+            if i == p {
                 return;
             }
             let ratio = alpha[i] / pivot;
@@ -2663,40 +2660,21 @@ impl DseState {
             use rayon::prelude::*;
             self.w.par_iter_mut().enumerate().for_each(|(i, w_i)| update_one(i, w_i));
         } else {
-            for (i, w_i) in self.w.iter_mut().enumerate() {
-                update_one(i, w_i);
+            // Branch-free over every row, `p` included: `w[p]` is
+            // overwritten unconditionally just below, so computing (and
+            // discarding) it here is exact, and dropping the `i == p` test
+            // lets this plain zip compile to packed SIMD — the very same
+            // per-element IEEE operations in the same order, so every
+            // other `w[i]` is bit-identical to the scalar closure above.
+            // (Skipping `alpha[i] == 0.0` rows instead — exact too — was
+            // measured *slower* at the ~50% `alpha` densities of `dfl001`
+            // /`pilot87`: the unpredictable branch costs more than the
+            // division it saves.)
+            let m = self.w.len();
+            for ((w_i, &a_i), &t_i) in self.w.iter_mut().zip(&alpha[..m]).zip(&tau[..m]) {
+                let ratio = a_i / pivot;
+                *w_i = (*w_i - 2.0 * ratio * t_i + ratio * ratio * wp_old).max(STEEPEST_EDGE_FLOOR);
             }
-        }
-        self.w[p] = (wp_old / (pivot * pivot)).max(STEEPEST_EDGE_FLOOR);
-    }
-
-    /// [`Self::update_after_pivot`] restricted to the rows that can change.
-    /// A row with `alpha[i] == 0` gets `ratio = 0`, i.e. `w_i - 0 + 0`
-    /// floored — and every stored weight is already floored — so it is left
-    /// exactly as it was; visiting only `alpha_nz` (the indices of
-    /// `alpha`'s nonzeros, which must include every one of them) produces
-    /// the same weights bit for bit while skipping the division and the
-    /// read-modify-write on the rest of the `m` rows. Likewise `wp_old`
-    /// summed over `rho_nz` (`rho_p`'s nonzeros, ascending) equals the
-    /// full sum: the skipped terms are all `+0.0`.
-    fn update_after_pivot_sparse(&mut self, p: usize, alpha: &[f64], alpha_nz: &[usize], tau: &[f64], rho_nz: &[(usize, f64)]) {
-        if self.use_parallel {
-            let mut rho_p = vec![0.0; alpha.len()];
-            for &(i, v) in rho_nz {
-                rho_p[i] = v;
-            }
-            self.update_after_pivot(p, alpha, tau, &rho_p);
-            return;
-        }
-        let pivot = alpha[p];
-        let wp_old = rho_nz.iter().map(|&(_, v)| v * v).sum::<f64>().max(STEEPEST_EDGE_FLOOR);
-        for &i in alpha_nz {
-            if i == p {
-                continue;
-            }
-            let ratio = alpha[i] / pivot;
-            let w_i = &mut self.w[i];
-            *w_i = (*w_i - 2.0 * ratio * tau[i] + ratio * ratio * wp_old).max(STEEPEST_EDGE_FLOOR);
         }
         self.w[p] = (wp_old / (pivot * pivot)).max(STEEPEST_EDGE_FLOOR);
     }

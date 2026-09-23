@@ -61,15 +61,15 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use faer::linalg::solvers::ColPivQr;
 use faer::Mat;
 
-use crate::hash::{FxHashMap, FxHashSet};
 use crate::presolve::smallcoeff;
-use crate::sparse::{Csr, csr_from_rows, csr_row_vec};
+use crate::sparse::{Csr, CsrRowBuilder, csr_from_rows, csr_is_canonical, csr_row_iter, csr_row_vec};
 /// Measurement counters answering "would a dedicated block-triangularization
 /// pre-pass (Dulmage-Mendelsohn / BTF, exposing structurally-forced 1x1
 /// pivots before elimination starts, the way `simplex::lu`'s own
@@ -167,7 +167,7 @@ pub fn reduce_equalities(a: &Csr, b: &[f64], n: usize, lb: &[f64], ub: &[f64]) -
 /// `0 = 0` row; a nonzero RHS on an empty row is kept so the Farkas
 /// infeasibility certificate downstream still sees (and reports) it.
 fn dedupe_rows(rows: Vec<(Vec<(usize, f64)>, f64)>) -> Vec<(Vec<(usize, f64)>, f64)> {
-    let mut seen: FxHashSet<Vec<(usize, u64)>> = FxHashSet::default();
+    let mut seen: HashSet<Vec<(usize, u64)>> = HashSet::new();
     let mut kept = Vec::with_capacity(rows.len());
     for (row, rhs) in rows {
         if row.is_empty() {
@@ -416,47 +416,39 @@ fn drop_linearly_dependent_sparse(rows_in: &[(Vec<(usize, f64)>, f64)], n: usize
     for j in 0..aug_n {
         refresh_col(&col_rows, &rows, &mut heap, &mut col_bits, j);
     }
-    // Incremental column maxima. Rescanning a column in full
-    // (`refresh_col`: one `BTreeMap` lookup per entry) for every column the
-    // pivot row touches, on every step, was almost all of this function's
-    // time on matrices whose pivot rows fill in (`maros-r7`: 3.27s of
-    // 3.32s). Within one step a column's entries only change through the
-    // pivot row leaving it and through the elimination's writes, and `max`
-    // has no rounding, so the new maximum is exactly
-    // `max(old max, new values written)` *unless* an entry that held the
-    // old maximum shrank or disappeared — only then is a full rescan
-    // needed. `col_max_stale[j]` records that case, `col_new_max[j]` the
-    // largest magnitude written this step; both are reset when column `j`
-    // is settled at the end of the step. The resulting `heap` contents are
-    // identical to rescanning every touched column.
-    let mut col_max_stale = vec![false; aug_n];
-    let mut col_new_max = vec![0.0f64; aug_n];
-    let cur_max = |col_bits: &[Option<u64>], j: usize| -> f64 { col_bits[j].map_or(0.0, f64::from_bits) };
-    fn settle_col(
-        col_rows: &[BTreeSet<usize>],
-        rows: &[BTreeMap<usize, f64>],
-        heap: &mut BTreeSet<(u64, usize)>,
-        col_bits: &mut [Option<u64>],
-        col_max_stale: &mut [bool],
-        col_new_max: &mut [f64],
-        j: usize,
-    ) {
-        if col_max_stale[j] {
-            refresh_col(col_rows, rows, heap, col_bits, j);
-        } else if col_new_max[j] > col_bits[j].map_or(0.0, f64::from_bits) {
-            if let Some(old) = col_bits[j].take() {
-                heap.remove(&(old, j));
+    // Lazy maintenance of `heap`: a column's key is only guaranteed to be
+    // an *upper bound* on its true current max-abs entry; `col_exact[j]`
+    // records whether it is known to be exactly equal. Removals / shrinking
+    // updates that may have lowered the max only clear `col_exact[j]` (O(1))
+    // instead of rescanning the whole column; the rescan happens only when
+    // that column actually reaches the top of `heap` (validation loop at the
+    // start of every step). Since every key is >= its column's true max, the
+    // first *exact* top is the true global max — bit-identical to the eager
+    // version, which rescanned every touched column (the rhs column `n`
+    // and other long columns included) after every single step.
+    let mut col_exact = vec![true; aug_n];
+    // `old_abs`: the magnitude an entry of column `j` had before being
+    // removed/changed (`0.0` if it did not exist); `new_abs`: its magnitude
+    // afterwards (`0.0` if removed).
+    fn note_change(heap: &mut BTreeSet<(u64, usize)>, col_bits: &mut [Option<u64>], col_exact: &mut [bool], j: usize, old_abs: f64, new_abs: f64) {
+        let key = col_bits[j].map_or(0.0, f64::from_bits);
+        if new_abs > key {
+            match col_bits[j].take() {
+                Some(old) => {
+                    heap.remove(&(old, j));
+                }
+                // Not in `heap` means the column's true max was 0, so the
+                // new entry is now exactly its max.
+                None => col_exact[j] = true,
             }
-            let bits = col_new_max[j].to_bits();
+            let bits = new_abs.to_bits();
             heap.insert((bits, j));
             col_bits[j] = Some(bits);
-        }
-        col_max_stale[j] = false;
-        col_new_max[j] = 0.0;
-        #[cfg(debug_assertions)]
-        {
-            let full = col_rows[j].iter().filter_map(|&i| rows[i].get(&j).map(|v| v.abs())).fold(0.0f64, f64::max);
-            debug_assert_eq!(col_bits[j].map_or(0.0, f64::from_bits), full, "incremental max of column {j} disagrees with a rescan");
+            // exactness unchanged: if the old key was exact, the new entry
+            // is now the strict maximum; if it was only an upper bound, the
+            // new key still is one.
+        } else if old_abs >= key {
+            col_exact[j] = false;
         }
     }
 
@@ -503,9 +495,20 @@ fn drop_linearly_dependent_sparse(rows_in: &[(Vec<(usize, f64)>, f64)], n: usize
     // further once that many rows have been kept.
     let max_steps = p.min(aug_n);
     for _step in 0..max_steps {
-        let gmax = match heap.iter().next_back() {
-            Some(&(bits, _)) => f64::from_bits(bits),
-            None => break, // every active column is entirely zero
+        let gmax = loop {
+            match heap.iter().next_back() {
+                Some(&(bits, j)) => {
+                    if col_exact[j] {
+                        break Some(f64::from_bits(bits));
+                    }
+                    refresh_col(&col_rows, &rows, &mut heap, &mut col_bits, j);
+                    col_exact[j] = true;
+                }
+                None => break None,
+            }
+        };
+        let Some(gmax) = gmax else {
+            break; // every active column is entirely zero
         };
         let threshold = PIVOT_STABILITY * gmax;
 
@@ -521,6 +524,17 @@ fn drop_linearly_dependent_sparse(rows_in: &[(Vec<(usize, f64)>, f64)], n: usize
         'search: for deg_col in 1..col_buckets.len() {
             for &j in &col_buckets[deg_col] {
                 if col_used[j] {
+                    continue;
+                }
+                // `col_bits[j]` is an upper bound on column `j`'s largest
+                // active |entry| (see the lazy-heap notes above; `None` =
+                // column is entirely zero). Below `threshold`, every entry
+                // would fail the `v.abs() < threshold` test in the scan
+                // below, so the scan could not record a candidate — skip it
+                // in O(1). Same pivot choice, bit for bit; this is what keeps
+                // long runs of low-degree, tiny-valued columns (`dfl001`)
+                // from being rescanned on every single step.
+                if col_bits[j].map_or(true, |bits| f64::from_bits(bits) < threshold) {
                     continue;
                 }
                 for &i in &col_rows[j] {
@@ -576,16 +590,15 @@ fn drop_linearly_dependent_sparse(rows_in: &[(Vec<(usize, f64)>, f64)], n: usize
         // (`wood1p`: doing it unconditionally here as well as after
         // elimination roughly doubled `reduce_equalities`' time).
         let pi_cols: Vec<usize> = rows[pi].keys().copied().filter(|&j| j != pj).collect();
-        for (&j, &v) in rows[pi].iter() {
-            if j != pj && v.abs() == cur_max(&col_bits, j) {
-                col_max_stale[j] = true;
-            }
-        }
         for &j in &pi_cols {
             col_rows[j].remove(&pi);
             let new_deg = col_rows[j].len();
             move_bucket(&mut col_buckets, &mut col_bucket_pos, new_deg + 1, new_deg, j, &col_used);
             col_degree[j] = new_deg;
+            if !col_used[j] {
+                let old_abs = rows[pi].get(&j).map_or(0.0, |v| v.abs());
+                note_change(&mut heap, &mut col_bits, &mut col_exact, j, old_abs, 0.0);
+            }
         }
 
         // Dependency test: is what's left of this row, at the point it
@@ -599,11 +612,8 @@ fn drop_linearly_dependent_sparse(rows_in: &[(Vec<(usize, f64)>, f64)], n: usize
             // could survive in `heap` for a column whose recorded max
             // came only from `pi`, wrongly gating out a genuinely valid
             // pivot elsewhere via an inflated `gmax` on a later step.
-            for &j in &pi_cols {
-                if !col_used[j] {
-                    settle_col(&col_rows, &rows, &mut heap, &mut col_bits, &mut col_max_stale, &mut col_new_max, j);
-                }
-            }
+            // (Lazy heap: `pi_cols`' possible max decrease was already
+            // recorded via `note_change` just above.)
             continue;
         }
         keep[pi] = true;
@@ -628,10 +638,9 @@ fn drop_linearly_dependent_sparse(rows_in: &[(Vec<(usize, f64)>, f64)], n: usize
                     Entry::Occupied(mut e) => {
                         let old_val = *e.get();
                         let new_val = old_val - mult * v;
-                        if new_val.abs() < old_val.abs() && old_val.abs() == cur_max(&col_bits, j) {
-                            col_max_stale[j] = true;
+                        if !col_used[j] {
+                            note_change(&mut heap, &mut col_bits, &mut col_exact, j, old_val.abs(), new_val.abs());
                         }
-                        col_new_max[j] = col_new_max[j].max(new_val.abs());
                         if new_val == 0.0 {
                             e.remove();
                             col_rows[j].remove(&i);
@@ -644,8 +653,10 @@ fn drop_linearly_dependent_sparse(rows_in: &[(Vec<(usize, f64)>, f64)], n: usize
                     }
                     Entry::Vacant(e) => {
                         let new_val = -mult * v;
-                        col_new_max[j] = col_new_max[j].max(new_val.abs());
                         if new_val != 0.0 {
+                            if !col_used[j] {
+                                note_change(&mut heap, &mut col_bits, &mut col_exact, j, 0.0, new_val.abs());
+                            }
                             e.insert(new_val);
                             col_rows[j].insert(i);
                             let new_deg = col_rows[j].len();
@@ -661,15 +672,8 @@ fn drop_linearly_dependent_sparse(rows_in: &[(Vec<(usize, f64)>, f64)], n: usize
         }
         col_rows[pj].clear();
 
-        // Refresh the true current max for every column touched by this
-        // elimination step, from that column's own (now-updated)
-        // `col_rows` set — O(that column's current degree).
-        for &(j, _) in &pivot_row_snapshot {
-            if j == pj || col_used[j] {
-                continue;
-            }
-            settle_col(&col_rows, &rows, &mut heap, &mut col_bits, &mut col_max_stale, &mut col_new_max, j);
-        }
+        // (Lazy heap: every value change above was already recorded via
+        // `note_change`; no per-column rescan here.)
     }
 
     (0..p).filter(|&i| keep[i]).collect()
@@ -940,6 +944,54 @@ fn drop_linearly_dependent_sparse_blocked(rows_in: &[(Vec<(usize, f64)>, f64)], 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The hashed/in-place `reduce_inequalities` must make exactly the
+    /// decisions of the straightforward reference version and return a
+    /// bit-identical `(G, h)` — on inputs with exact and scaled duplicates,
+    /// sign-flipped near-duplicates, empty rows and unsorted input.
+    #[test]
+    fn reduce_inequalities_matches_reference_bit_for_bit() {
+        let mut state: u64 = 0x1234_5678_9abc_def0;
+        let mut rnd = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for trial in 0..200 {
+            let n = 6 + (trial % 5);
+            let mut rows: Vec<Vec<(usize, f64)>> = Vec::new();
+            let mut h: Vec<f64> = Vec::new();
+            let base_count = 3 + (rnd() % 6) as usize;
+            for _ in 0..base_count {
+                let len = (rnd() % 4) as usize;
+                let mut row: Vec<(usize, f64)> = Vec::new();
+                for _ in 0..len {
+                    let j = (rnd() % n as u64) as usize;
+                    if row.iter().all(|&(k, _)| k != j) {
+                        row.push((j, ((rnd() % 7) as f64 - 3.0) * 0.5 + 0.25));
+                    }
+                }
+                rows.push(row);
+                h.push((rnd() % 11) as f64 - 5.0);
+            }
+            // Scaled copies (positive and negative factors) of random rows.
+            for _ in 0..base_count {
+                let src = (rnd() % base_count as u64) as usize;
+                let f = [1.0, 2.0, 0.5, 3.0, -1.0, 1.0 / 3.0][(rnd() % 6) as usize];
+                rows.push(rows[src].iter().map(|&(j, v)| (j, v * f)).collect());
+                h.push(h[src] * f + ((rnd() % 3) as f64 - 1.0));
+            }
+            let g = csr_from_rows(&rows, n);
+            let (g_ref, h_ref) = reduce_inequalities_reference(&g, &h, n);
+            let (g_new, h_new) = reduce_inequalities(&g, &h, n);
+            assert_eq!(g_new.as_ref().row_ptrs(), g_ref.as_ref().row_ptrs(), "trial {trial}");
+            assert_eq!(g_new.as_ref().col_indices(), g_ref.as_ref().col_indices(), "trial {trial}");
+            let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+            assert_eq!(bits(g_new.as_ref().values()), bits(g_ref.as_ref().values()), "trial {trial}");
+            assert_eq!(bits(&h_new), bits(&h_ref), "trial {trial}");
+        }
+    }
 
     /// The pivot-position -> original-row mapping must be the right one of
     /// faer's two permutation arrays, and a test can only tell them apart
@@ -1239,47 +1291,158 @@ pub fn reduce_inequalities(g: &Csr, h: &[f64], n: usize) -> (Csr, Vec<f64>) {
     if m == 0 {
         return (csr_from_rows(&[], n), Vec::new());
     }
-
-    // Grouping key: each row's `(column, (v / |first coefficient|).to_bits())`
-    // sequence, as before — but hashed in place off the CSR (a cheap
-    // multiplicative mix instead of SipHash over a freshly allocated
-    // `Vec<(usize, u64)>` per row, which was about half of `pilot`'s whole
-    // presolve), with an exact entry-by-entry comparison against the
-    // group's first row on every hash hit. Same groups, same scan order,
-    // same keep decisions as the owned-key `HashMap` it replaces.
     let gr = g.as_ref();
-    let inv_scale = |i: usize| -> Option<f64> { gr.values_of_row(i).first().map(|v| 1.0 / v.abs()) };
-    let row_hash = |i: usize, inv: f64| -> u64 {
-        let mut hsh: u64 = gr.col_indices_of_row(i).len() as u64;
-        for (j, &v) in gr.col_indices_of_row(i).zip(gr.values_of_row(i)) {
-            hsh = (hsh.rotate_left(5) ^ j as u64).wrapping_mul(0x517c_c1b7_2722_0a95);
-            hsh = (hsh.rotate_left(5) ^ (v * inv).to_bits()).wrapping_mul(0x517c_c1b7_2722_0a95);
-        }
-        hsh
-    };
-    let same_sig = |a: usize, inv_a: f64, b: usize, inv_b: f64| -> bool {
-        let (ca, cb) = (gr.col_indices_of_row(a), gr.col_indices_of_row(b));
-        ca.len() == cb.len()
-            && ca.zip(cb).all(|(x, y)| x == y)
-            && gr.values_of_row(a).iter().zip(gr.values_of_row(b)).all(|(&va, &vb)| (va * inv_a).to_bits() == (vb * inv_b).to_bits())
-    };
 
-    // hash -> indices into `groups`; each group is `(representative row,
-    // its inv scale, currently kept row, kept row's normalized h)`.
-    let mut by_hash: FxHashMap<u64, Vec<usize>> = FxHashMap::default();
-    let mut groups: Vec<(usize, f64, usize, f64)> = Vec::with_capacity(m);
+    // Same decisions as the straightforward version (kept below as
+    // `reduce_inequalities_reference` for the equivalence test), but
+    // without materializing every row and every normalized signature as
+    // its own `Vec` and SipHash-ing it: rows are read straight from the CSR
+    // slices, each signature is hashed on the fly with a cheap
+    // multiplicative mix, and a hash hit is confirmed by recomputing the
+    // class representative's signature (bit-for-bit the one the reference
+    // version would have stored as the key, since normalization is
+    // deterministic) and comparing it entry by entry.
+    #[inline]
+    fn mix(hash: u64, x: u64) -> u64 {
+        (hash.rotate_left(5) ^ x).wrapping_mul(0x517c_c1b7_2722_0a95)
+    }
+    struct Class {
+        rep: usize,
+        rep_inv: f64,
+        kept_idx: usize,
+        kept_h: f64,
+        next: usize,
+    }
+    let mut heads: HashMap<u64, usize, std::hash::BuildHasherDefault<IdentityU64Hasher>> = HashMap::default();
+    let mut classes: Vec<Class> = Vec::new();
     let mut keep = vec![true; m];
+    let mut any_dropped = false;
     for idx in 0..m {
-        let Some(inv) = inv_scale(idx) else { continue };
-        let normalized_h = h[idx] * inv;
-        let slot = by_hash.entry(row_hash(idx, inv)).or_default();
-        match slot.iter().copied().find(|&gi| same_sig(groups[gi].0, groups[gi].1, idx, inv)) {
-            None => {
-                slot.push(groups.len());
-                groups.push((idx, inv, idx, normalized_h));
+        let cols = gr.col_indices_of_row_raw(idx);
+        let vals = gr.values_of_row(idx);
+        if cols.is_empty() {
+            continue;
+        }
+        let hv = h[idx];
+        let scale = vals[0].abs();
+        let inv = 1.0 / scale;
+        let mut hash = cols.len() as u64;
+        for (&j, &v) in cols.iter().zip(vals) {
+            hash = mix(mix(hash, j as u64), (v * inv).to_bits());
+        }
+        let normalized_h = hv * inv;
+        let same_sig = |c: &Class| -> bool {
+            let rc = gr.col_indices_of_row_raw(c.rep);
+            if rc.len() != cols.len() {
+                return false;
             }
-            Some(gi) => {
-                let (_, _, kept_idx, kept_h) = &mut groups[gi];
+            let rv = gr.values_of_row(c.rep);
+            rc.iter().zip(rv).zip(cols.iter().zip(vals)).all(|((&rj, &rvv), (&j, &v))| rj == j && (rvv * c.rep_inv).to_bits() == (v * inv).to_bits())
+        };
+        let mut found: Option<usize> = None;
+        let head = heads.get(&hash).copied();
+        let mut cur = head.unwrap_or(usize::MAX);
+        while cur != usize::MAX {
+            if same_sig(&classes[cur]) {
+                found = Some(cur);
+                break;
+            }
+            cur = classes[cur].next;
+        }
+        match found {
+            None => {
+                let id = classes.len();
+                classes.push(Class { rep: idx, rep_inv: inv, kept_idx: idx, kept_h: normalized_h, next: head.unwrap_or(usize::MAX) });
+                heads.insert(hash, id);
+            }
+            Some(ci) => {
+                any_dropped = true;
+                let c = &mut classes[ci];
+                if normalized_h < c.kept_h {
+                    keep[c.kept_idx] = false;
+                    c.kept_idx = idx;
+                    c.kept_h = normalized_h;
+                } else {
+                    keep[idx] = false;
+                }
+            }
+        }
+    }
+
+    // Nothing dropped and `g` already in canonical form (no stored zeros,
+    // strictly increasing columns per row — what `csr_from_rows` would
+    // produce anyway): the rebuilt matrix would be `g` itself.
+    if !any_dropped {
+        if csr_is_canonical(g) {
+            return (g.clone(), h.to_vec());
+        }
+    }
+    let kept_rows: Vec<usize> = (0..m).filter(|&i| keep[i]).collect();
+    let nnz: usize = kept_rows.iter().map(|&i| gr.col_indices_of_row_raw(i).len()).sum();
+    let mut builder = CsrRowBuilder::with_capacity(n, kept_rows.len(), nnz);
+    let mut row_buf: Vec<(usize, f64)> = Vec::new();
+    for &i in &kept_rows {
+        row_buf.clear();
+        row_buf.extend(csr_row_iter(g, i));
+        if !builder.push_row(&row_buf) {
+            let rows: Vec<Vec<(usize, f64)>> = kept_rows.iter().map(|&i| csr_row_vec(g, i)).collect();
+            return (csr_from_rows(&rows, n), kept_rows.iter().map(|&i| h[i]).collect());
+        }
+    }
+    (builder.finish(), kept_rows.iter().map(|&i| h[i]).collect())
+}
+
+/// Pass-through hasher for keys that already are well-mixed 64-bit hashes.
+#[derive(Default)]
+struct IdentityU64Hasher(u64);
+
+impl std::hash::Hasher for IdentityU64Hasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = (self.0 << 8) | b as u64;
+        }
+    }
+    fn write_u64(&mut self, x: u64) {
+        self.0 = x;
+    }
+}
+
+#[cfg(test)]
+fn reduce_inequalities_reference(g: &Csr, h: &[f64], n: usize) -> (Csr, Vec<f64>) {
+    let m = g.nrows();
+    if m == 0 {
+        return (csr_from_rows(&[], n), Vec::new());
+    }
+
+    let rows: Vec<(Vec<(usize, f64)>, f64)> = (0..m)
+        .map(|i| {
+            let row: Vec<(usize, f64)> = csr_row_vec(g, i);
+            (row, h[i])
+        })
+        .collect();
+
+    // (normalized sig) -> (index into `rows` currently kept, its normalized h)
+    let mut best: HashMap<Vec<(usize, u64)>, (usize, f64)> = HashMap::new();
+    let mut keep = vec![true; m];
+    for (idx, (row, hv)) in rows.iter().enumerate() {
+        if row.is_empty() {
+            // `0 <= h`: either always true (drop) or a certificate of
+            // infeasibility (`propagate`'s activity check catches that) —
+            // neither is a "duplicate" in the sense this pass looks for.
+            continue;
+        }
+        let scale = row[0].1.abs();
+        let inv = 1.0 / scale;
+        let sig: Vec<(usize, u64)> = row.iter().map(|&(j, v)| (j, (v * inv).to_bits())).collect();
+        let normalized_h = hv * inv;
+        match best.get_mut(&sig) {
+            None => {
+                best.insert(sig, (idx, normalized_h));
+            }
+            Some((kept_idx, kept_h)) => {
                 if normalized_h < *kept_h {
                     keep[*kept_idx] = false;
                     *kept_idx = idx;
@@ -1291,6 +1454,13 @@ pub fn reduce_inequalities(g: &Csr, h: &[f64], n: usize) -> (Csr, Vec<f64>) {
         }
     }
 
-    let new_h: Vec<f64> = (0..m).filter(|&idx| keep[idx]).map(|idx| h[idx]).collect();
-    (crate::sparse::csr_select_rows(g, &keep, n), new_h)
+    let mut new_rows = Vec::new();
+    let mut new_h = Vec::new();
+    for (idx, (row, hv)) in rows.into_iter().enumerate() {
+        if keep[idx] {
+            new_rows.push(row);
+            new_h.push(hv);
+        }
+    }
+    (csr_from_rows(&new_rows, n), new_h)
 }

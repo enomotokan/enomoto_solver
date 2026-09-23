@@ -34,7 +34,6 @@
 //! historical reference.
 
 mod graph;
-mod hash;
 mod interior_point;
 mod mip;
 mod model;

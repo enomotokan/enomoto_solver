@@ -12,7 +12,7 @@
 //! one of the two bounds — same discipline as
 //! `propagate::bounds_inconsistent`/`dualfix`.
 
-use crate::sparse::{Csr, csr_from_rows, csr_row_iter};
+use crate::sparse::{Csr, csr_from_rows, csr_is_canonical, csr_row_iter};
 const TOL: f64 = 1e-9;
 
 pub struct RowSingletonResult {
@@ -29,6 +29,11 @@ pub struct RowSingletonResult {
 /// only afterward).
 pub fn fix_singleton_equalities(n: usize, a: &Csr, b: &[f64], lb: &[f64], ub: &[f64]) -> RowSingletonResult {
     let ar = a.as_ref();
+    // No singleton row at all (the common case after the first round):
+    // the rebuilt A would be `a` itself when it is already canonical.
+    if csr_is_canonical(a) && (0..ar.nrows()).all(|i| ar.col_indices_of_row_raw(i).len() != 1) {
+        return RowSingletonResult { a: a.clone(), b: b[..ar.nrows()].to_vec(), fixes: Vec::new(), infeasible: false };
+    }
     let mut new_a_rows = Vec::with_capacity(ar.nrows());
     let mut new_b = Vec::with_capacity(b.len());
     let mut fixes = Vec::new();
