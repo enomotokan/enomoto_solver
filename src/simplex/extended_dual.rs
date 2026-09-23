@@ -2188,6 +2188,18 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     // `ENOMOTO_FUSED_DSE_FTRAN=0` restores the two separate solves (A/B
     // only — the fused form is bit-identical, see its own docs).
     let fused_dse_ftran = std::env::var("ENOMOTO_FUSED_DSE_FTRAN").map_or(true, |v| v != "0");
+    // BFRT combined-flip FTRAN (dense branch) folded into the same fused
+    // traversal as a third vector ([`sparse_lu::FtLu::solve_into_triple_capture`]);
+    // `ENOMOTO_FUSED_BFRT_FTRAN=0` restores the separate solve (A/B only —
+    // bit-identical). `combined_scratch` is that third vector's scratch.
+    let fused_bfrt_ftran = std::env::var("ENOMOTO_FUSED_BFRT_FTRAN").map_or(true, |v| v != "0");
+    let mut combined_scratch = vec![0.0f64; m];
+    // Apply the BFRT combined-flip result to `x_B(M)` inside the entering
+    // column's own `x_B` update loop (one pass, one `refresh_row` per row)
+    // instead of a separate `0..m` pass. `ENOMOTO_MERGE_FLIP_XB=0` restores
+    // the separate pass (A/B only). Per-row arithmetic is unchanged; only the
+    // order of `InfeasibleRows` membership changes can differ.
+    let merge_flip_xb = std::env::var("ENOMOTO_MERGE_FLIP_XB").map_or(true, |v| v != "0");
     // Dedicated `try_update_precomputed` capture buffers — see
     // `super::solve_lp_dual_on`'s own identical pair (`a_tilde_buf`/
     // `e_tilde_buf`) for the full reasoning: `e_tilde_buf` is filled as a
@@ -3480,13 +3492,24 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         // by `lu.should_use_dense_solve`, the same choice `finish`'s own
         // cleanup-lemma FTRAN uses) rather than one FTRAN per flipped
         // column. Reads `nb_status[cand.j]` while it's still pre-flip, so
-        // this must run *before* the flip-commit loop just below — and
-        // applies to `x_b_base`/`x_b_slope` before the entering column's
-        // own step further down reads `x_b_base[r]`/`x_b_slope[r]`, which
-        // must already reflect every flip this same iteration made.
+        // this must run *before* the flip-commit loop just below. Its
+        // effect on `x_b_base`/`x_b_slope` is applied after the entering
+        // column's FTRAN (`combined_pending`): by default inside the
+        // entering step's own `x_B` update loop (`merge_flip_xb`), whose
+        // `theta` reads row `r`'s post-flip value, so every flip this same
+        // iteration made is reflected exactly as if applied first.
         if profile_phases {
             prof_phases::BFRT_FLIPS.fetch_add(best_idx, std::sync::atomic::Ordering::Relaxed);
         }
+        // `combined_pending`: a combined-flip FTRAN result (or, when
+        // `combined_deferred`, its still-to-be-solved rhs) is waiting to be
+        // applied to `x_B(M)`. The application runs right after the
+        // entering column's FTRAN below (which reads neither `x_B(M)` nor
+        // `InfeasibleRows`), so deferring it is invisible to the pivot path.
+        let mut combined_pending = false;
+        let mut combined_deferred = false;
+        let mut combined_slope_nonzero = false;
+        let mut combined_slope_nnz = 0usize;
         timed!(profile_phases, prof_phases::BFRT, {
             // Whether any flipped column's width carries an `M` term
             // (`width.slope != 0`, i.e. an `M`-flagged column flipping onto
@@ -3536,17 +3559,27 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                     prof_phases::DENSITY_GATE_FTRANS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
                 if lu.should_use_dense_solve_tracked(combined_touched.len(), &density_bfrt) {
-                    let base_nnz = lu.solve_into(&combined_base, &mut lu_scratch, &mut combined_alpha_base);
+                    // The slope channel (rare) is solved here on its own;
+                    // the base channel either rides along the entering
+                    // column's fused FTRAN below (`combined_deferred`) or is
+                    // solved here as before. Density samples are recorded in
+                    // the same (base, slope) order either way.
                     let slope_nnz = if slope_nonzero {
                         lu.solve_into(&combined_slope, &mut lu_scratch, &mut combined_alpha_slope)
                     } else {
                         lu.add_zero_rhs_solve_ticks(false);
                         0
                     };
-                    density_bfrt.record(base_nnz, m);
-                    density_bfrt.record(slope_nnz, m);
-                    if profile_phases {
-                        prof_phases::DENSITY_BFRT_PPT.store((density_bfrt.expected() * 1000.0) as usize, std::sync::atomic::Ordering::Relaxed);
+                    if fused_bfrt_ftran && fused_dse_ftran && matches!(weights, super::EdgeWeights::Dse(_)) {
+                        combined_deferred = true;
+                        combined_slope_nnz = slope_nnz;
+                    } else {
+                        let base_nnz = lu.solve_into(&combined_base, &mut lu_scratch, &mut combined_alpha_base);
+                        density_bfrt.record(base_nnz, m);
+                        density_bfrt.record(slope_nnz, m);
+                        if profile_phases {
+                            prof_phases::DENSITY_BFRT_PPT.store((density_bfrt.expected() * 1000.0) as usize, std::sync::atomic::Ordering::Relaxed);
+                        }
                     }
                 } else {
                     sparse_base_buf.clear();
@@ -3566,40 +3599,8 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                         prof_phases::DENSITY_BFRT_PPT.store((density_bfrt.expected() * 1000.0) as usize, std::sync::atomic::Ordering::Relaxed);
                     }
                 }
-                // Scanned over `0..m`, not `combined_touched`: FTRAN fill-in
-                // can produce nonzeros outside the input's own sparsity
-                // pattern (`super::solve_lp_dual_on`'s own combined-flip
-                // update does the same, for the same reason).
-                if slope_nonzero {
-                    for i in 0..m {
-                        if combined_alpha_base[i] != 0.0 || combined_alpha_slope[i] != 0.0 {
-                            x_b_base[i] -= combined_alpha_base[i];
-                            x_b_slope[i] = snap_slope(x_b_slope[i] - combined_alpha_slope[i]);
-                            refresh_row(&mut infeasible_rows, &mut row_dev, &row_bounds, &x_b_base, &x_b_slope, i);
-                        }
-                    }
-                    for &i in &combined_touched {
-                        combined_base[i] = 0.0;
-                        combined_slope[i] = 0.0;
-                        combined_touched_flag[i] = false;
-                    }
-                } else {
-                    // Slope channel skipped (see `slope_nonzero`): its
-                    // would-be result is all `±0.0`, which neither the
-                    // `!= 0.0` test nor `snap_slope(x - ±0.0) == x` (every
-                    // `x_b_slope` entry is already snapped) can observe.
-                    for i in 0..m {
-                        if combined_alpha_base[i] != 0.0 {
-                            x_b_base[i] -= combined_alpha_base[i];
-                            refresh_row(&mut infeasible_rows, &mut row_dev, &row_bounds, &x_b_base, &x_b_slope, i);
-                        }
-                    }
-                    for &i in &combined_touched {
-                        combined_base[i] = 0.0;
-                        combined_touched_flag[i] = false;
-                    }
-                }
-                combined_touched.clear();
+                combined_pending = true;
+                combined_slope_nonzero = slope_nonzero;
             }
 
             for cand in &sorted[..best_idx] {
@@ -3661,6 +3662,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         // intermediate) for this iteration's `try_update_precomputed` call
         // further down — see that method's own docs.
         let mut tau_ready = false;
+        let mut combined_base_nnz = 0usize;
         timed!(profile_phases, prof_phases::FTRAN, {
             if profile_phases && density_col_aq.predicts_dense() && !lu.should_use_dense_solve(std.cols.col(q).len()) {
                 prof_phases::DENSITY_GATE_FTRANS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -3674,7 +3676,23 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 for &(i, v) in std.cols.col(q) {
                     dense_q[i] = v;
                 }
-                let result_nnz = if fused_dse_ftran && matches!(weights, super::EdgeWeights::Dse(_)) {
+                let result_nnz = if combined_deferred {
+                    let (a_nnz, _, c_nnz) = lu.solve_into_triple_capture(
+                        &dense_q,
+                        &rho,
+                        &combined_base,
+                        &mut lu_scratch,
+                        &mut tau_scratch,
+                        &mut combined_scratch,
+                        &mut alpha_full,
+                        &mut tau,
+                        &mut combined_alpha_base,
+                        &mut a_tilde_buf,
+                    );
+                    combined_base_nnz = c_nnz;
+                    tau_ready = true;
+                    a_nnz
+                } else if fused_dse_ftran && matches!(weights, super::EdgeWeights::Dse(_)) {
                     // DSE's own `tau = B^-1 rho_p` FTRAN (formerly run
                     // separately inside the weight update below, against
                     // this same pre-pivot `lu` and the same `rho`) fused
@@ -3690,7 +3708,24 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 }
                 density_col_aq.record(result_nnz, m);
             } else {
-                let result_nnz = if fused_dse_ftran && matches!(weights, super::EdgeWeights::Dse(_)) {
+                let result_nnz = if combined_deferred {
+                    let (a_nnz, _, c_nnz) = lu.solve_sparse_into_triple_capture(
+                        std.cols.col(q),
+                        &rho,
+                        &combined_base,
+                        &mut sparse_scratch,
+                        &mut gp_scratch,
+                        &mut tau_scratch,
+                        &mut combined_scratch,
+                        &mut alpha_full,
+                        &mut tau,
+                        &mut combined_alpha_base,
+                        &mut a_tilde_buf,
+                    );
+                    combined_base_nnz = c_nnz;
+                    tau_ready = true;
+                    a_nnz
+                } else if fused_dse_ftran && matches!(weights, super::EdgeWeights::Dse(_)) {
                     let (a_nnz, _) = lu.solve_sparse_into_pair_capture(
                         std.cols.col(q),
                         &rho,
@@ -3712,6 +3747,52 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 prof_phases::DENSITY_COL_AQ_PPT.store((density_col_aq.expected() * 1000.0) as usize, std::sync::atomic::Ordering::Relaxed);
             }
         });
+        if combined_deferred {
+            density_bfrt.record(combined_base_nnz, m);
+            density_bfrt.record(combined_slope_nnz, m);
+            if profile_phases {
+                prof_phases::DENSITY_BFRT_PPT.store((density_bfrt.expected() * 1000.0) as usize, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        if combined_pending && !merge_flip_xb {
+            combined_pending = false;
+            timed!(profile_phases, prof_phases::BFRT, {
+                // Scanned over `0..m`, not `combined_touched`: FTRAN fill-in
+                // can produce nonzeros outside the input's own sparsity
+                // pattern (`super::solve_lp_dual_on`'s own combined-flip
+                // update does the same, for the same reason).
+                if combined_slope_nonzero {
+                    for i in 0..m {
+                        if combined_alpha_base[i] != 0.0 || combined_alpha_slope[i] != 0.0 {
+                            x_b_base[i] -= combined_alpha_base[i];
+                            x_b_slope[i] = snap_slope(x_b_slope[i] - combined_alpha_slope[i]);
+                            refresh_row(&mut infeasible_rows, &mut row_dev, &row_bounds, &x_b_base, &x_b_slope, i);
+                        }
+                    }
+                    for &i in &combined_touched {
+                        combined_base[i] = 0.0;
+                        combined_slope[i] = 0.0;
+                        combined_touched_flag[i] = false;
+                    }
+                } else {
+                    // Slope channel skipped (see `slope_nonzero`): its
+                    // would-be result is all `±0.0`, which neither the
+                    // `!= 0.0` test nor `snap_slope(x - ±0.0) == x` (every
+                    // `x_b_slope` entry is already snapped) can observe.
+                    for i in 0..m {
+                        if combined_alpha_base[i] != 0.0 {
+                            x_b_base[i] -= combined_alpha_base[i];
+                            refresh_row(&mut infeasible_rows, &mut row_dev, &row_bounds, &x_b_base, &x_b_slope, i);
+                        }
+                    }
+                    for &i in &combined_touched {
+                        combined_base[i] = 0.0;
+                        combined_touched_flag[i] = false;
+                    }
+                }
+                combined_touched.clear();
+            });
+        }
 
         // updateVerify (`super::update_verify`'s own docs, HiGHS
         // `HEkkDualRow::updateVerify` equivalent): cross-checks this
@@ -3841,6 +3922,17 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 touched[j] = false;
             }
             touched_cols.clear();
+            if combined_pending {
+                // Unapplied flip result: the resync above already rebuilt
+                // `x_B(M)` from the (flipped) `nb_status`; just reset the
+                // combined-rhs buffers.
+                for &i in &combined_touched {
+                    combined_base[i] = 0.0;
+                    combined_slope[i] = 0.0;
+                    combined_touched_flag[i] = false;
+                }
+                combined_touched.clear();
+            }
             continue;
         }
 
@@ -3906,11 +3998,57 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         // already is), so this mirrors [`nb_value_affine`]'s own "should
         // never happen" `?` rather than needing its own bailout print.
         let target = if d_dir > 0 { cache.lower[basis[r]]? } else { cache.upper[basis[r]]? };
-        let x_r = Affine1::new(x_b_base[r], x_b_slope[r]);
+        // With a still-unapplied flip result (`combined_pending`), row `r`'s
+        // post-flip value is exactly what the separate flip pass would have
+        // left there.
+        let x_r = if combined_pending {
+            let ca = combined_alpha_base[r];
+            let cs = if combined_slope_nonzero { combined_alpha_slope[r] } else { 0.0 };
+            if ca != 0.0 || cs != 0.0 {
+                let xs = if combined_slope_nonzero { snap_slope(x_b_slope[r] - cs) } else { x_b_slope[r] };
+                Affine1::new(x_b_base[r] - ca, xs)
+            } else {
+                Affine1::new(x_b_base[r], x_b_slope[r])
+            }
+        } else {
+            Affine1::new(x_b_base[r], x_b_slope[r])
+        };
         let theta_base = (x_r.base - target.base) / alpha_q;
         let theta_slope = (x_r.slope - target.slope) / alpha_q;
         timed!(profile_phases, prof_phases::XB_UPDATE, {
-            if theta_slope == 0.0 {
+            if combined_pending {
+                // Flip result and entering step in one pass: per row, the
+                // exact operations of the separate flip pass followed by
+                // those of the entering step, then one `refresh_row`.
+                for i in 0..m {
+                    let ca = combined_alpha_base[i];
+                    let cs = if combined_slope_nonzero { combined_alpha_slope[i] } else { 0.0 };
+                    let flip = ca != 0.0 || cs != 0.0;
+                    let a = alpha_full[i];
+                    if !flip && a == 0.0 {
+                        continue;
+                    }
+                    if flip {
+                        x_b_base[i] -= ca;
+                        if combined_slope_nonzero {
+                            x_b_slope[i] = snap_slope(x_b_slope[i] - cs);
+                        }
+                    }
+                    if a != 0.0 {
+                        x_b_base[i] -= a * theta_base;
+                        if theta_slope != 0.0 {
+                            x_b_slope[i] = snap_slope(x_b_slope[i] - a * theta_slope);
+                        }
+                    }
+                    refresh_row(&mut infeasible_rows, &mut row_dev, &row_bounds, &x_b_base, &x_b_slope, i);
+                }
+                for &i in &combined_touched {
+                    combined_base[i] = 0.0;
+                    combined_slope[i] = 0.0;
+                    combined_touched_flag[i] = false;
+                }
+                combined_touched.clear();
+            } else if theta_slope == 0.0 {
                 // `M`-free step (every iteration once delta=0 is reached,
                 // and most before it): the slope channel's update is an
                 // exact no-op — every `x_b_slope` entry is already
@@ -4765,7 +4903,12 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
             // is propagated to this function's own caller instead, which
             // already knows how to fall back (the existing `BIG_M`-clamped
             // classical path in `solve_lp_dual`) without that assumption.
-            let status = super::run_phase(std, &mut t, false, &mut lu, &mut since_check, &mut expand, &mut se, &mut stall)?;
+            let handoff_t0 = profile_phases_polish.then(std::time::Instant::now);
+            let status = super::run_phase(std, &mut t, false, &mut lu, &mut since_check, &mut expand, &mut se, &mut stall);
+            if let Some(t0) = handoff_t0 {
+                eprintln!("PROF_HANDOFF run_phase={:.3}ms ok={}", t0.elapsed().as_secs_f64() * 1e3, status.is_some());
+            }
+            let status = status?;
             return Some(SimplexResult {
                 status: status.clone(),
                 x: if status == Status::Optimal { Some(t.x[0..t.n_orig()].to_vec()) } else { None },
