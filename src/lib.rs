@@ -45,6 +45,75 @@ mod types;
 
 use pyo3::prelude::*;
 
+/// Rust-side global allocator: small blocks from mimalloc, large ones from
+/// the system allocator.
+///
+/// Presolve works in owned `Vec<Vec<_>>` row lists and rebuilds its CSR
+/// matrices several times per round, so on the small Netlib problems glibc
+/// `malloc`/`free` (incl. `malloc_consolidate`) measured at roughly a
+/// quarter of all instructions of a `solve()` call (callgrind); mimalloc's
+/// size-class free lists make those short-lived small allocations much
+/// cheaper. Routing *every* allocation to mimalloc, however, made several
+/// mid-size problems 20-80% slower in the simplex main loop (`fit2d`,
+/// `degen3`, `greenbea`, ... — no extra syscalls, so a placement effect on
+/// the large dense work vectors), so blocks of `LARGE` bytes or more stay
+/// with glibc exactly as before. The route is a pure function of the
+/// layout size, so `dealloc` always reaches the allocator that made the
+/// block; `realloc` across the threshold moves the block between the two.
+/// Numerics are unaffected (nothing in this crate depends on allocation
+/// addresses).
+struct SplitAlloc;
+
+const LARGE: usize = 4 * 1024;
+
+unsafe impl std::alloc::GlobalAlloc for SplitAlloc {
+    #[inline]
+    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+        if layout.size() < LARGE {
+            mimalloc::MiMalloc.alloc(layout)
+        } else {
+            std::alloc::System.alloc(layout)
+        }
+    }
+    #[inline]
+    unsafe fn alloc_zeroed(&self, layout: std::alloc::Layout) -> *mut u8 {
+        if layout.size() < LARGE {
+            mimalloc::MiMalloc.alloc_zeroed(layout)
+        } else {
+            std::alloc::System.alloc_zeroed(layout)
+        }
+    }
+    #[inline]
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
+        if layout.size() < LARGE {
+            mimalloc::MiMalloc.dealloc(ptr, layout)
+        } else {
+            std::alloc::System.dealloc(ptr, layout)
+        }
+    }
+    #[inline]
+    unsafe fn realloc(&self, ptr: *mut u8, layout: std::alloc::Layout, new_size: usize) -> *mut u8 {
+        let old_small = layout.size() < LARGE;
+        let new_small = new_size < LARGE;
+        if old_small && new_small {
+            return mimalloc::MiMalloc.realloc(ptr, layout, new_size);
+        }
+        if !old_small && !new_small {
+            return std::alloc::System.realloc(ptr, layout, new_size);
+        }
+        let new_layout = std::alloc::Layout::from_size_align_unchecked(new_size, layout.align());
+        let new_ptr = self.alloc(new_layout);
+        if !new_ptr.is_null() {
+            std::ptr::copy_nonoverlapping(ptr, new_ptr, layout.size().min(new_size));
+            self.dealloc(ptr, layout);
+        }
+        new_ptr
+    }
+}
+
+#[global_allocator]
+static GLOBAL: SplitAlloc = SplitAlloc;
+
 use model::PyModel;
 
 #[pymodule]
