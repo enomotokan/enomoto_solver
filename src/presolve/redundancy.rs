@@ -65,8 +65,9 @@ use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use faer::linalg::solvers::ColPivQr;
-use faer::Mat;
+use faer::dyn_stack::{GlobalPodBuffer, PodStack};
+use faer::linalg::qr::col_pivoting::compute as colpiv_qr;
+use faer::{Mat, Parallelism};
 
 use crate::presolve::smallcoeff;
 use crate::sparse::{Csr, CsrRowBuilder, csr_from_rows, csr_is_canonical, csr_row_iter, csr_row_vec};
@@ -218,12 +219,36 @@ fn drop_linearly_dependent(rows: &[(Vec<(usize, f64)>, f64)], n: usize) -> Vec<u
         m[(n, i)] = *rhs;
     }
 
-    let qr = ColPivQr::new(m.as_ref());
-    let r = qr.compute_thin_r(); // min(aug_n, p) x p
-    let perm = qr.col_permutation();
-    let (fwd, _inv) = perm.arrays();
+    // Column-pivoted QR in place, explicitly sequential. `ColPivQr::new`
+    // would read faer's *global* parallelism (`Rayon(0)` with the `rayon`
+    // feature on), which for the sizes seen here (at most a few thousand x a
+    // few hundred) buys nothing: on a fresh process it is what first spins up
+    // rayon's global pool (4 thread spawns + per-thread arenas, ~0.5 ms), every
+    // later call pays the hand-off to the pool, and the parallel reduction
+    // order made `wood1p`'s dropped-row set vary from run to run. Only the
+    // diagonal of R (= the diagonal of the in-place factors) and the column
+    // permutation are needed below.
+    let size = aug_n.min(p);
+    let blocksize = colpiv_qr::recommended_blocksize::<f64>(aug_n, p);
+    let mut householder = Mat::<f64>::zeros(blocksize, size);
+    let mut col_perm = vec![0usize; p];
+    let mut col_perm_inv = vec![0usize; p];
+    let params = Default::default();
+    colpiv_qr::qr_in_place(
+        m.as_mut(),
+        householder.as_mut(),
+        &mut col_perm,
+        &mut col_perm_inv,
+        Parallelism::None,
+        PodStack::new(&mut GlobalPodBuffer::new(
+            colpiv_qr::qr_in_place_req::<usize, f64>(aug_n, p, blocksize, Parallelism::None, params).unwrap(),
+        )),
+        params,
+    );
+    let r = &m; // upper triangle holds R
+    let fwd = &col_perm;
 
-    let rank_dim = r.nrows().min(r.ncols());
+    let rank_dim = size;
 
     // Dependency is judged per row, relative to that row's *own* norm:
     // `|R[k,k]|` is exactly the residual norm of pivot column `k` after
