@@ -98,6 +98,7 @@ pub mod dualfix;
 pub mod dualpropagate;
 pub mod foldfixed;
 pub mod freevar;
+pub mod ineqsingleton;
 pub mod parallelcols;
 pub mod parallelrows;
 pub mod propagate;
@@ -629,6 +630,43 @@ pub fn run_extended(
             }
         }
 
+        // Column singletons in inequality/ranged rows (see `ineqsingleton`'s
+        // docs): fix the column at a bound, or turn its row into an
+        // equality that `colsingleton` below then substitutes out.
+        if std::env::var("ENOMOTO_INEQ_SINGLETON").is_ok() {
+            let isr = timed_step!("ineqsingleton", ineqsingleton::run(n, &a, &cur_real_rows, &cur_real_rhs, &c, &lb, &ub));
+            if std::env::var("ENOMOTO_DEBUG_INEQ_SINGLETON").is_ok() {
+                eprintln!("DEBUG_INEQ_SINGLETON: fixes={} implied_equalities={}", isr.fixes.len(), isr.implied_equalities.len());
+            }
+            for &(j, value) in &isr.fixes {
+                lb[j] = value;
+                ub[j] = value;
+            }
+            if !isr.implied_equalities.is_empty() {
+                let mut a_rows: Vec<Vec<(usize, f64)>> = csr_rows(&a);
+                let mut drop = vec![false; cur_real_rows.len()];
+                for &(gi, other) in &isr.implied_equalities {
+                    a_rows.push(cur_real_rows[gi].clone());
+                    b.push(cur_real_rhs[gi]);
+                    drop[gi] = true;
+                    if let Some(o) = other {
+                        drop[o] = true;
+                    }
+                }
+                a = csr_from_rows(&a_rows, n);
+                let mut kept_rows = Vec::with_capacity(cur_real_rows.len());
+                let mut kept_rhs = Vec::with_capacity(cur_real_rhs.len());
+                for (i, (row, rhs)) in cur_real_rows.into_iter().zip(cur_real_rhs.into_iter()).enumerate() {
+                    if !drop[i] {
+                        kept_rows.push(row);
+                        kept_rhs.push(rhs);
+                    }
+                }
+                cur_real_rows = kept_rows;
+                cur_real_rhs = kept_rhs;
+            }
+        }
+
         // Fold every column fixed so far (by `dualfix`/`dualpropagate` just
         // above, by an earlier round's `rowsingleton`, or from the model's
         // own input bounds) straight out of `A`'s equality rows and `G`'s
@@ -871,9 +909,13 @@ pub fn run_extended(
             None
         } else if std::env::var("ENOMOTO_XROW_AGGREGATOR").is_ok() {
             Some(timed_step!("aggregator", aggregator::eliminate_implied_free_columns_xrow(n, &a, &b, &c, &lb, &ub, &cur_real_rows, &cur_real_rhs)))
-        } else {
+        } else if std::env::var("ENOMOTO_ROWLOCAL_AGGREGATOR").is_ok() {
             // `None` = nothing eliminated (the problem is unchanged).
             timed_step!("aggregator", aggregator::eliminate_implied_free_columns_if_any(n, &a, &b, &c, &lb, &ub, &cur_real_rows, &cur_real_rhs))
+        } else {
+            // Default since 2026-09-23 (analysis/stocfor2_presolve_20260923.md):
+            // stocfor2 1652x1766 -> 950x1072 after presolve, -65% solve time.
+            Some(timed_step!("aggregator", aggregator::eliminate_implied_free_columns_v2(n, &a, &b, &c, &lb, &ub, &cur_real_rows, &cur_real_rhs, aggregator::AggOptions::from_env())))
         };
         if let Some(agg) = agg {
             if std::env::var("ENOMOTO_DEBUG_AGGREGATOR").is_ok() {
@@ -1036,7 +1078,21 @@ pub fn run_extended(
         h = rh;
 
         let signature = (a.nrows(), g.nrows(), lb.clone(), ub.clone());
-        if prev_signature.as_ref() == Some(&signature) {
+        // Bound changes below a relative 1e-3 do not count as progress
+        // (`ENOMOTO_FIXPOINT_EXACT` restores the exact comparison):
+        // propagation over a cyclic row structure — which the aggregator's
+        // folds can create (`scagr25`) — keeps shaving ever-smaller amounts
+        // off a bound (geometric convergence), which an exact comparison
+        // never calls a fixpoint, burning every remaining round. The
+        // tightened bounds themselves are still kept.
+        let same = |p: &(usize, usize, Vec<f64>, Vec<f64>)| {
+            if std::env::var("ENOMOTO_FIXPOINT_EXACT").is_ok() {
+                return *p == signature;
+            }
+            let close = |x: &[f64], y: &[f64]| x.iter().zip(y).all(|(&u, &v)| u == v || (u - v).abs() <= 1e-3 * (1.0 + u.abs().max(v.abs())));
+            p.0 == signature.0 && p.1 == signature.1 && close(&p.2, &signature.2) && close(&p.3, &signature.3)
+        };
+        if prev_signature.as_ref().is_some_and(same) {
             break;
         }
         prev_signature = Some(signature);

@@ -85,6 +85,21 @@
 //! [`residual_range`], [`implied_range`], [`fillin_cost`],
 //! [`crate::sparse::axpy_row`]).
 //!
+//! ## Default since 2026-09-23: [`eliminate_implied_free_columns_v2`]
+//!
+//! The paragraph above is superseded for the default path: on `stocfor2`
+//! the row-local gate left 704 of 1652 surviving columns in exactly the
+//! shape "one equality row + one or more inequality rows", which neither
+//! this gate (it needs >= 2 equality rows) nor `colsingleton` (it counts
+//! the inequality rows too) can remove — HiGHS with only its Aggregator
+//! switched off reproduces our old 1766x1652 presolved size almost exactly.
+//! [`eliminate_implied_free_columns_v2`] keeps the cross-row version's
+//! live re-validation (the `shell` fix), additionally uses one-sided
+//! implied bounds from real inequality rows, admits single-equality-row
+//! columns, and uses HiGHS's net fill-in with the size-2 exemption.
+//! `ENOMOTO_ROWLOCAL_AGGREGATOR` / `ENOMOTO_XROW_AGGREGATOR` select the older
+//! versions. Measurements: `analysis/stocfor2_presolve_20260923.md`.
+//!
 //! ## Candidate order and fill-in
 //!
 //! Mirrors `HPresolve::aggregator`'s own design (`HPresolve.cpp:6688`): all
@@ -827,6 +842,253 @@ pub fn eliminate_implied_free_columns_xrow(n: usize, a: &Csr, b: &[f64], c: &[f6
     }
 }
 
+/// Which of [`eliminate_implied_free_columns_v2`]'s generalisations over
+/// [`eliminate_implied_free_columns_xrow`] are switched on — each one is an
+/// independent countermeasure (see `analysis/stocfor2_presolve_20260923.md`)
+/// and is kept separately switchable (the `ENOMOTO_AGG_*` opt-outs in
+/// [`AggOptions::from_env`]) so each can be A/B-measured on its own.
+#[derive(Clone, Copy, Debug)]
+pub struct AggOptions {
+    /// Also intersect one-sided implied bounds from `G`'s real inequality
+    /// rows into a column's implied range (HiGHS `isImpliedFree` uses the
+    /// tightest implied bound from *any* row, not just equalities).
+    pub use_ineq: bool,
+    /// Minimum number of equality rows a candidate column must appear in:
+    /// 2 is the old gate; 1 additionally admits a column in exactly one
+    /// equality row plus >= 1 inequality row (which `colsingleton` rejects
+    /// too, so nothing else in the pipeline can remove it).
+    pub min_a_count: usize,
+    /// HiGHS's net fill-in (`new nonzeros - (rowlen + collen - 1)`), with the
+    /// check skipped outright when the pivot row or the column has length 2.
+    pub net_fillin: bool,
+    /// Abort the rest of the candidate list after
+    /// `MAX_CONSECUTIVE_FILLIN_FAILURES` consecutive fill-in rejections.
+    pub fillin_break: bool,
+}
+
+impl AggOptions {
+    pub fn from_env() -> Self {
+        let on = |k: &str| std::env::var(k).is_ok();
+        AggOptions {
+            use_ineq: !on("ENOMOTO_AGG_NOINEQ"),
+            min_a_count: if on("ENOMOTO_AGG_MINACNT2") { 2 } else { 1 },
+            net_fillin: !on("ENOMOTO_AGG_GROSSFILL"),
+            fillin_break: !on("ENOMOTO_AGG_NOBREAK"),
+        }
+    }
+}
+
+/// Generalised cross-row aggregator: [`eliminate_implied_free_columns_xrow`]'s
+/// live-recomputed cross-row justification (the `shell` fix — every
+/// candidate's implied range is recomputed from *live* rows with *current*
+/// content immediately before its elimination is committed), extended by
+/// [`AggOptions`].
+///
+/// Soundness of the inequality-row justification: a `G` row is never deleted
+/// here, only folded, so the row that implied `x_j`'s bound keeps being
+/// enforced after `x_j` is substituted out, and every other column it used
+/// keeps its box (a column eliminated earlier no longer appears in any live
+/// row, so justifications only ever depend on boxes that are still
+/// enforced — the eliminations form a DAG, never a cycle).
+pub fn eliminate_implied_free_columns_v2(n: usize, a: &Csr, b: &[f64], c: &[f64], lb: &[f64], ub: &[f64], real_rows: &[Vec<(usize, f64)>], real_rhs: &[f64], opts: AggOptions) -> AggregatorResult {
+    let mut a_rows: Vec<Vec<(usize, f64)>> = csr_rows(a);
+    let mut accum = SparseAccum::new(n);
+    let mut b: Vec<f64> = b.to_vec();
+    let mut c: Vec<f64> = c.to_vec();
+    let mut real_rows: Vec<Vec<(usize, f64)>> = real_rows.to_vec();
+    let mut real_rhs: Vec<f64> = real_rhs.to_vec();
+    let is_free = |j: usize| lb[j] == f64::NEG_INFINITY && ub[j] == f64::INFINITY;
+    // Rows are kept sorted by column so a coefficient lookup is a binary
+    // search, not an O(row length) scan: dense rows (`fit2d`: ~10^4 per row)
+    // otherwise make every lookup-per-(column, row) pass quadratic.
+    for row in a_rows.iter_mut().chain(real_rows.iter_mut()) {
+        if !row.windows(2).all(|w| w[0].0 < w[1].0) {
+            row.sort_unstable_by_key(|&(k, _)| k);
+        }
+    }
+    let coef_of = |row: &[(usize, f64)], j: usize| match row.binary_search_by_key(&j, |&(k, _)| k) {
+        Ok(p) => row[p].1,
+        Err(_) => 0.0,
+    };
+
+    let mut col_a_count = vec![0usize; n];
+    let mut col_g_count = vec![0usize; n];
+    let mut a_col_idx: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut g_col_idx: Vec<Vec<usize>> = vec![Vec::new(); n];
+    // Initial `(row, coeff)` lists, used only for candidate generation
+    // (every row is still pristine then).
+    let mut a_col0: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
+    let mut g_col0: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
+    for (i, row) in a_rows.iter().enumerate() {
+        for &(j, v) in row {
+            if v != 0.0 {
+                col_a_count[j] += 1;
+                a_col_idx[j].push(i);
+                a_col0[j].push((i, v));
+            }
+        }
+    }
+    for (i, row) in real_rows.iter().enumerate() {
+        for &(j, v) in row {
+            if v != 0.0 {
+                col_g_count[j] += 1;
+                g_col_idx[j].push(i);
+                g_col0[j].push((i, v));
+            }
+        }
+    }
+    let mut row_max_a: Vec<Option<f64>> = vec![None; a_rows.len()];
+    let mut stamp = vec![usize::MAX; n];
+    let mut stamp_id = 0usize;
+    let mut act_a: Vec<Option<RowActivity>> = vec![None; a_rows.len()];
+    let mut act_g: Vec<Option<RowActivity>> = vec![None; real_rows.len()];
+    let mut row_deleted = vec![false; a_rows.len()];
+
+    // Implied range of `x_j` from the given (live) equality rows `la` and,
+    // with `use_ineq`, inequality rows `lg` (`(row, coeff)` pairs).
+    let implied = |j: usize, la: &[(usize, f64)], lg: &[(usize, f64)], a_rows: &[Vec<(usize, f64)>], b: &[f64], real_rows: &[Vec<(usize, f64)>], real_rhs: &[f64], act_a: &mut [Option<RowActivity>], act_g: &mut [Option<RowActivity>]| -> (f64, f64) {
+        let mut lo = f64::NEG_INFINITY;
+        let mut hi = f64::INFINITY;
+        for &(i, coeff) in la {
+            let act = *act_a[i].get_or_insert_with(|| compute_row_activity(&a_rows[i], lb, ub));
+            let (rlo, rhi) = implied_range(&act, j, coeff, b[i], lb, ub);
+            lo = lo.max(rlo);
+            hi = hi.min(rhi);
+        }
+        if opts.use_ineq {
+            for &(i, coeff) in lg {
+                let act = *act_g[i].get_or_insert_with(|| compute_row_activity(&real_rows[i], lb, ub));
+                let (s_lo, _) = residual_range(&act, j, coeff, lb, ub);
+                if s_lo.is_finite() {
+                    let v = (real_rhs[i] - s_lo) / coeff;
+                    if coeff > 0.0 {
+                        hi = hi.min(v);
+                    } else {
+                        lo = lo.max(v);
+                    }
+                }
+            }
+        }
+        (lo, hi)
+    };
+
+    let min_a = opts.min_a_count.max(1);
+    let mut candidates: Vec<usize> = Vec::new();
+    for j in 0..n {
+        if col_a_count[j] < min_a || col_a_count[j] + col_g_count[j] < 2 || is_free(j) {
+            continue;
+        }
+        let (la, lg) = (&a_col0[j], &g_col0[j]);
+        let (lo, hi) = implied(j, la, lg, &a_rows, &b, &real_rows, &real_rhs, &mut act_a, &mut act_g);
+        if range_within_box(j, lo, hi, lb, ub) {
+            candidates.push(j);
+        }
+    }
+    candidates.sort_by_key(|&j| {
+        let collen = col_a_count[j] + col_g_count[j];
+        let min_rowlen = a_col_idx[j].iter().map(|&i| a_rows[i].len()).min().unwrap_or(0);
+        (min_rowlen.min(collen) != 2, min_rowlen * collen, min_rowlen.min(collen), j)
+    });
+
+    let mut substitutions = Vec::new();
+    let mut consecutive_fillin_failures = 0usize;
+    for j in candidates {
+        // Live rows containing `j`, re-verified against current content.
+        a_col_idx[j].sort_unstable();
+        a_col_idx[j].dedup();
+        let la: Vec<(usize, f64)> = a_col_idx[j].iter().filter(|&&i| !row_deleted[i]).map(|&i| (i, coef_of(&a_rows[i], j))).filter(|&(_, v)| v != 0.0).collect();
+        if la.is_empty() {
+            continue;
+        }
+        g_col_idx[j].sort_unstable();
+        g_col_idx[j].dedup();
+        let lg: Vec<(usize, f64)> = g_col_idx[j].iter().map(|&i| (i, coef_of(&real_rows[i], j))).filter(|&(_, v)| v != 0.0).collect();
+        let (lo, hi) = implied(j, &la, &lg, &a_rows, &b, &real_rows, &real_rhs, &mut act_a, &mut act_g);
+        if !range_within_box(j, lo, hi, lb, ub) {
+            continue;
+        }
+        // Pivot: shortest live equality row passing the pivot-ratio guard.
+        let mut by_len = la.clone();
+        by_len.sort_by_key(|&(i, _)| a_rows[i].len());
+        let Some((row_idx, coeff)) = by_len.into_iter().find(|&(i, coeff)| {
+            let row_max = *row_max_a[i].get_or_insert_with(|| a_rows[i].iter().map(|&(_, v)| v.abs()).fold(0.0f64, f64::max));
+            coeff.abs() >= SUBSTITUTION_PIVOT_RATIO * row_max
+        }) else {
+            continue;
+        };
+        let pivot_row = a_rows[row_idx].clone();
+        let terms: Vec<(usize, f64)> = pivot_row.iter().filter(|&&(k, _)| k != j).copied().collect();
+        if terms.is_empty() {
+            continue;
+        }
+        let other_a: Vec<usize> = la.iter().map(|&(i, _)| i).filter(|&i| i != row_idx).collect();
+        let other_g: Vec<usize> = lg.iter().map(|&(i, _)| i).collect();
+        let n_other = other_a.len() + other_g.len();
+        let size2 = pivot_row.len() == 2 || n_other + 1 == 2;
+        if !(opts.net_fillin && size2) {
+            // New nonzeros the folds would create, counted with a stamp
+            // array (O(row length) per target, no per-target set).
+            let mut gross = 0i64;
+            for target in other_a.iter().map(|&i| &a_rows[i]).chain(other_g.iter().map(|&i| &real_rows[i])) {
+                stamp_id += 1;
+                for &(k, _) in target.iter() {
+                    stamp[k] = stamp_id;
+                }
+                gross += terms.iter().filter(|&&(k, _)| stamp[k] != stamp_id).count() as i64;
+            }
+            let fillin = if opts.net_fillin { gross - (pivot_row.len() + n_other) as i64 } else { gross };
+            if fillin > MAX_FILLIN as i64 {
+                consecutive_fillin_failures += 1;
+                if opts.fillin_break && consecutive_fillin_failures >= MAX_CONSECUTIVE_FILLIN_FAILURES {
+                    break;
+                }
+                continue;
+            }
+        }
+        consecutive_fillin_failures = 0;
+        let rhs_i = b[row_idx];
+        for &i2 in &other_a {
+            let factor = coef_of(&a_rows[i2], j) / coeff;
+            a_rows[i2] = axpy_row(&mut accum, &a_rows[i2], &pivot_row, factor, j, TOL);
+            b[i2] -= factor * rhs_i;
+            act_a[i2] = None;
+            row_max_a[i2] = None;
+            for &(k, _) in &terms {
+                a_col_idx[k].push(i2);
+            }
+        }
+        for &i2 in &other_g {
+            let factor = coef_of(&real_rows[i2], j) / coeff;
+            real_rows[i2] = axpy_row(&mut accum, &real_rows[i2], &pivot_row, factor, j, TOL);
+            real_rhs[i2] -= factor * rhs_i;
+            act_g[i2] = None;
+            for &(k, _) in &terms {
+                g_col_idx[k].push(i2);
+            }
+        }
+        let cj = c[j];
+        if cj != 0.0 {
+            let factor = cj / coeff;
+            for &(k, a_ik) in &terms {
+                c[k] -= factor * a_ik;
+            }
+            c[j] = 0.0;
+        }
+        substitutions.push(Substitution { var: j, terms, rhs: rhs_i, coeff });
+        row_deleted[row_idx] = true;
+    }
+
+    let mut final_a_rows = Vec::with_capacity(a_rows.len());
+    let mut final_b = Vec::with_capacity(b.len());
+    for (i, row) in a_rows.into_iter().enumerate() {
+        if !row_deleted[i] {
+            final_a_rows.push(row);
+            final_b.push(b[i]);
+        }
+    }
+    AggregatorResult { a: csr_from_rows(&final_a_rows, n), b: final_b, c, substitutions, real_rows, real_rhs }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1073,5 +1335,66 @@ mod tests {
         assert_eq!(xrow.substitutions.len(), 1, "expected only x0 eliminated, got {:?}", xrow.substitutions.iter().map(|s| s.var).collect::<Vec<_>>());
         assert_eq!(xrow.substitutions[0].var, 0);
         assert!(xrow.substitutions.iter().all(|s| s.var != 1), "x1 must not be eliminated via a since-deleted justifying row");
+    }
+
+    fn all_on() -> AggOptions {
+        AggOptions { use_ineq: true, min_a_count: 1, net_fillin: true, fillin_break: true }
+    }
+
+    #[test]
+    fn v2_rejects_a_justification_whose_shared_row_was_already_consumed() {
+        // Same `shell` regression shape as the xrow test above, through v2.
+        let a = csr(
+            &[
+                vec![(0, 1.0), (1, -1.0)],
+                vec![(0, 1.0), (2, 1.0), (4, 1.0)],
+                vec![(1, 1.0), (3, 1.0)],
+            ],
+            5,
+        );
+        let b = vec![0.0, 5.0, 0.0];
+        let c = vec![0.0; 5];
+        let lb = vec![0.0, 0.0, f64::NEG_INFINITY, -1000.0, 0.0];
+        let ub = vec![10.0, 10.0, f64::INFINITY, 1000.0, 1.0];
+        let r = eliminate_implied_free_columns_v2(5, &a, &b, &c, &lb, &ub, &[], &[], all_on());
+        assert!(r.substitutions.iter().all(|s| s.var != 1), "x1 must not be eliminated via a since-deleted justifying row");
+    }
+
+    #[test]
+    fn v2_uses_an_inequality_row_to_justify_the_other_side() {
+        // x0 - x1 = 0 (x1 >= 0) implies x0 >= 0 but no upper bound; the real
+        // inequality x0 + x2 <= 5 (x2 in [0,1]) implies x0 <= 5. Together
+        // they cover x0's box [0,5], so x0 (one equality row + one
+        // inequality row — a shape the old gate rejected) is eliminated and
+        // the inequality row is folded to x1 + x2 <= 5.
+        let a = csr(&[vec![(0, 1.0), (1, -1.0)]], 3);
+        let b = vec![0.0];
+        let c = vec![1.0, 0.0, 0.0];
+        let lb = vec![0.0, 0.0, 0.0];
+        let ub = vec![5.0, f64::INFINITY, 1.0];
+        let g = vec![vec![(0, 1.0), (2, 1.0)]];
+        let h = vec![5.0];
+        let r = eliminate_implied_free_columns_v2(3, &a, &b, &c, &lb, &ub, &g, &h, all_on());
+        assert_eq!(r.substitutions.len(), 1);
+        assert_eq!(r.substitutions[0].var, 0);
+        assert_eq!(r.a.nrows(), 0);
+        assert_eq!(r.real_rows, vec![vec![(1, 1.0), (2, 1.0)]]);
+        assert_eq!(r.real_rhs, vec![5.0]);
+        assert_eq!(r.c, vec![0.0, 1.0, 0.0]);
+
+        // Without the inequality-row justification the upper side is unproven.
+        let off = AggOptions { use_ineq: false, ..all_on() };
+        let r = eliminate_implied_free_columns_v2(3, &a, &b, &c, &lb, &ub, &g, &h, off);
+        assert!(r.substitutions.is_empty());
+    }
+
+    #[test]
+    fn v2_min_a_count_two_keeps_the_old_gate() {
+        let a = csr(&[vec![(0, 1.0), (1, -1.0)]], 3);
+        let lb = vec![0.0, 0.0, 0.0];
+        let ub = vec![5.0, f64::INFINITY, 1.0];
+        let opts = AggOptions { min_a_count: 2, ..all_on() };
+        let r = eliminate_implied_free_columns_v2(3, &a, &[0.0], &[0.0; 3], &lb, &ub, &[vec![(0, 1.0), (2, 1.0)]], &[5.0], opts);
+        assert!(r.substitutions.is_empty());
     }
 }

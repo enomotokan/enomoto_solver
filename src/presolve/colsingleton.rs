@@ -67,6 +67,29 @@ impl Substitution {
     }
 }
 
+/// Relative tolerance for treating a bound-preservation row as already
+/// implied by its terms' own boxes.
+pub(crate) const IMPLIED_TOL: f64 = 1e-9;
+
+/// Whether `colsingleton`/`doubleton` skip bound-preservation rows their
+/// remaining terms' own boxes already imply (default on since 2026-09-23,
+/// `analysis/stocfor2_presolve_20260923.md`; `ENOMOTO_KEEP_IMPLIED_BOUND_ROWS`
+/// turns it off).
+pub(crate) fn skip_implied_bound_rows() -> bool {
+    std::env::var("ENOMOTO_KEEP_IMPLIED_BOUND_ROWS").is_err()
+}
+
+/// `[min, max]` of `sum(v * x_k)` over the terms' boxes.
+pub(crate) fn terms_range(terms: &[(usize, f64)], lb: &[f64], ub: &[f64]) -> (f64, f64) {
+    let (mut lo, mut hi) = (0.0f64, 0.0f64);
+    for &(k, v) in terms {
+        let (a, b) = if v > 0.0 { (v * lb[k], v * ub[k]) } else { (v * ub[k], v * lb[k]) };
+        lo += a;
+        hi += b;
+    }
+    (if lo.is_nan() { f64::NEG_INFINITY } else { lo }, if hi.is_nan() { f64::INFINITY } else { hi })
+}
+
 pub struct EliminationResult {
     pub a: Csr,
     pub b: Vec<f64>,
@@ -189,11 +212,14 @@ pub fn eliminate_singleton_equalities(n: usize, a: &Csr, b: &[f64], g: &Csr, h: 
         let a_ub = coeff * ub[j];
         let lo = a_lb.min(a_ub);
         let hi = a_lb.max(a_ub);
-        if lo.is_finite() {
+        // A side the remaining terms' own boxes already imply is redundant
+        // (`propagate` would drop the row next round anyway) — skip it.
+        let (r_lo, r_hi) = if skip_implied_bound_rows() { terms_range(&terms, &lb, &ub) } else { (f64::NEG_INFINITY, f64::INFINITY) };
+        if lo.is_finite() && !(r_hi <= rhs - lo + IMPLIED_TOL * (1.0 + (rhs - lo).abs())) {
             extra_g_rows.push(terms.clone());
             extra_h.push(rhs - lo);
         }
-        if hi.is_finite() {
+        if hi.is_finite() && !(r_lo >= rhs - hi - IMPLIED_TOL * (1.0 + (rhs - hi).abs())) {
             extra_g_rows.push(terms.iter().map(|&(k, v)| (k, -v)).collect());
             extra_h.push(hi - rhs);
         }
