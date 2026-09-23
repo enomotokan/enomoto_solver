@@ -1,7 +1,7 @@
 # 全体非効率対策の最終結果 (2026-09-23)
 
 分析: `overall_inefficiency_20260923_064827.md` (Fable、27 件)。実装・評価: presolve / lu / loop 担当 (Opus)、
-各記録 `presolve_impl_20260923_120555.md` (presolve 担当 worktree のみ) / `lu_impl_20260923_130507.md` / `loop_impl_20260923_130526.md`。
+各記録 `presolve_impl_20260923_120555.md` / `lu_impl_20260923_130507.md` / `loop_impl_20260923_130526.md`。
 採用基準: 対処法ごとの A/B で 10% 以上速くなる問題が 1 問以上、10% 超の退行なし、全問正答。L7 はユーザー判断で境界採用。
 
 採用: P1 (従属等式検出の密 QR を逐次), P2 (aggregator 早期 return), P6 (<4KiB 確保を mimalloc), L4 (BFRT FTRAN 3 本融合 + flip の x_B 更新統合 + primal 比率テスト pivot 足切り), L7 (ドリフト検査 rhs の増分管理)。
