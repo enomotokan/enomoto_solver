@@ -1056,6 +1056,12 @@ pub fn run_extended(
             if std::env::var("ENOMOTO_FIXPOINT_TOL").is_err() {
                 return *p == signature;
             }
+            // `ENOMOTO_FIXPOINT_STRUCT`: only structural change counts as
+            // progress — row counts, and which bounds are finite / fixed.
+            if std::env::var("ENOMOTO_FIXPOINT_STRUCT").is_ok() {
+                let shape = |l: &[f64], u: &[f64]| -> Vec<u8> { l.iter().zip(u).map(|(&x, &y)| (x.is_finite() as u8) | ((y.is_finite() as u8) << 1) | (((x == y) as u8) << 2)).collect() };
+                return p.0 == signature.0 && p.1 == signature.1 && shape(&p.2, &p.3) == shape(&signature.2, &signature.3);
+            }
             let close = |x: &[f64], y: &[f64]| x.iter().zip(y).all(|(&u, &v)| u == v || (u - v).abs() <= 1e-3 * (1.0 + u.abs().max(v.abs())));
             p.0 == signature.0 && p.1 == signature.1 && close(&p.2, &signature.2) && close(&p.3, &signature.3)
         };

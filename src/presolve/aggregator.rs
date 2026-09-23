@@ -1284,4 +1284,65 @@ mod tests {
         assert_eq!(xrow.substitutions[0].var, 0);
         assert!(xrow.substitutions.iter().all(|s| s.var != 1), "x1 must not be eliminated via a since-deleted justifying row");
     }
+
+    fn all_on() -> AggOptions {
+        AggOptions { use_ineq: true, min_a_count: 1, net_fillin: true, fillin_break: true }
+    }
+
+    #[test]
+    fn v2_rejects_a_justification_whose_shared_row_was_already_consumed() {
+        // Same `shell` regression shape as the xrow test above, through v2.
+        let a = csr(
+            &[
+                vec![(0, 1.0), (1, -1.0)],
+                vec![(0, 1.0), (2, 1.0), (4, 1.0)],
+                vec![(1, 1.0), (3, 1.0)],
+            ],
+            5,
+        );
+        let b = vec![0.0, 5.0, 0.0];
+        let c = vec![0.0; 5];
+        let lb = vec![0.0, 0.0, f64::NEG_INFINITY, -1000.0, 0.0];
+        let ub = vec![10.0, 10.0, f64::INFINITY, 1000.0, 1.0];
+        let r = eliminate_implied_free_columns_v2(5, &a, &b, &c, &lb, &ub, &[], &[], all_on());
+        assert!(r.substitutions.iter().all(|s| s.var != 1), "x1 must not be eliminated via a since-deleted justifying row");
+    }
+
+    #[test]
+    fn v2_uses_an_inequality_row_to_justify_the_other_side() {
+        // x0 - x1 = 0 (x1 >= 0) implies x0 >= 0 but no upper bound; the real
+        // inequality x0 + x2 <= 5 (x2 in [0,1]) implies x0 <= 5. Together
+        // they cover x0's box [0,5], so x0 (one equality row + one
+        // inequality row — a shape the old gate rejected) is eliminated and
+        // the inequality row is folded to x1 + x2 <= 5.
+        let a = csr(&[vec![(0, 1.0), (1, -1.0)]], 3);
+        let b = vec![0.0];
+        let c = vec![1.0, 0.0, 0.0];
+        let lb = vec![0.0, 0.0, 0.0];
+        let ub = vec![5.0, f64::INFINITY, 1.0];
+        let g = vec![vec![(0, 1.0), (2, 1.0)]];
+        let h = vec![5.0];
+        let r = eliminate_implied_free_columns_v2(3, &a, &b, &c, &lb, &ub, &g, &h, all_on());
+        assert_eq!(r.substitutions.len(), 1);
+        assert_eq!(r.substitutions[0].var, 0);
+        assert_eq!(r.a.nrows(), 0);
+        assert_eq!(r.real_rows, vec![vec![(1, 1.0), (2, 1.0)]]);
+        assert_eq!(r.real_rhs, vec![5.0]);
+        assert_eq!(r.c, vec![0.0, 1.0, 0.0]);
+
+        // Without the inequality-row justification the upper side is unproven.
+        let off = AggOptions { use_ineq: false, ..all_on() };
+        let r = eliminate_implied_free_columns_v2(3, &a, &b, &c, &lb, &ub, &g, &h, off);
+        assert!(r.substitutions.is_empty());
+    }
+
+    #[test]
+    fn v2_min_a_count_two_keeps_the_old_gate() {
+        let a = csr(&[vec![(0, 1.0), (1, -1.0)]], 3);
+        let lb = vec![0.0, 0.0, 0.0];
+        let ub = vec![5.0, f64::INFINITY, 1.0];
+        let opts = AggOptions { min_a_count: 2, ..all_on() };
+        let r = eliminate_implied_free_columns_v2(3, &a, &[0.0], &[0.0; 3], &lb, &ub, &[vec![(0, 1.0), (2, 1.0)]], &[5.0], opts);
+        assert!(r.substitutions.is_empty());
+    }
 }
