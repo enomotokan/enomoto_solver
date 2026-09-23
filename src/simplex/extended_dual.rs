@@ -2330,6 +2330,14 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     let (seed_base, seed_slope) = compute_rhs_affine(std, &cache, &nb_status)?;
     lu.solve_into(&seed_base, &mut lu_scratch, &mut x_b_base);
     lu.solve_into(&seed_slope, &mut lu_scratch, &mut x_b_slope);
+    // `b - N x_N(M)` maintained incrementally (BFRT flips and basis changes
+    // apply their own column's contribution) for the periodic drift check
+    // below, instead of recomputing it in `O(nnz(A))` at every check; every
+    // full resync re-anchors it to `compute_rhs_affine`'s own value.
+    // `ENOMOTO_XB_RHS_INCREMENTAL=0` restores the full recompute (A/B only).
+    let rhs_incremental = std::env::var("ENOMOTO_XB_RHS_INCREMENTAL").map_or(true, |v| v != "0");
+    let mut rhs_inc_base = seed_base;
+    let mut rhs_inc_slope = seed_slope;
     snap_slopes(&mut x_b_slope);
 
     // `super::solve_lp_dual_on`'s own `noise_feasible`, ported: a row
@@ -3250,6 +3258,8 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                     let (fresh_base, fresh_slope) = compute_rhs_affine(std, &cache, &nb_status)?;
                     lu.solve_into(&fresh_base, &mut lu_scratch, &mut x_b_base);
                     lu.solve_into(&fresh_slope, &mut lu_scratch, &mut x_b_slope);
+                    rhs_inc_base = fresh_base;
+                    rhs_inc_slope = fresh_slope;
                     snap_slopes(&mut x_b_slope);
                     rebuild_rows(&mut infeasible_rows, &mut row_dev, m, &row_bounds, &x_b_base, &x_b_slope);
                     fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fd_cb, &mut lu_scratch, &mut fd_y, &mut d);
@@ -3405,6 +3415,8 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                     let (fresh_base, fresh_slope) = compute_rhs_affine(std, &cache, &nb_status)?;
                     lu.solve_into(&fresh_base, &mut lu_scratch, &mut x_b_base);
                     lu.solve_into(&fresh_slope, &mut lu_scratch, &mut x_b_slope);
+                    rhs_inc_base = fresh_base;
+                    rhs_inc_slope = fresh_slope;
                     snap_slopes(&mut x_b_slope);
                     rebuild_rows(&mut infeasible_rows, &mut row_dev, m, &row_bounds, &x_b_base, &x_b_slope);
                     fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fd_cb, &mut lu_scratch, &mut fd_y, &mut d);
@@ -3770,6 +3782,8 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                         }
                     }
                     for &i in &combined_touched {
+                        rhs_inc_base[i] -= combined_base[i];
+                        rhs_inc_slope[i] -= combined_slope[i];
                         combined_base[i] = 0.0;
                         combined_slope[i] = 0.0;
                         combined_touched_flag[i] = false;
@@ -3786,6 +3800,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                         }
                     }
                     for &i in &combined_touched {
+                        rhs_inc_base[i] -= combined_base[i];
                         combined_base[i] = 0.0;
                         combined_touched_flag[i] = false;
                     }
@@ -3908,6 +3923,8 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 let (fresh_base, fresh_slope) = compute_rhs_affine(std, &cache, &nb_status)?;
                 lu.solve_into(&fresh_base, &mut lu_scratch, &mut x_b_base);
                 lu.solve_into(&fresh_slope, &mut lu_scratch, &mut x_b_slope);
+                rhs_inc_base = fresh_base;
+                rhs_inc_slope = fresh_slope;
                 snap_slopes(&mut x_b_slope);
                 rebuild_rows(&mut infeasible_rows, &mut row_dev, m, &row_bounds, &x_b_base, &x_b_slope);
                 fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fd_cb, &mut lu_scratch, &mut fd_y, &mut d);
@@ -4043,6 +4060,8 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                     refresh_row(&mut infeasible_rows, &mut row_dev, &row_bounds, &x_b_base, &x_b_slope, i);
                 }
                 for &i in &combined_touched {
+                    rhs_inc_base[i] -= combined_base[i];
+                    rhs_inc_slope[i] -= combined_slope[i];
                     combined_base[i] = 0.0;
                     combined_slope[i] = 0.0;
                     combined_touched_flag[i] = false;
@@ -4191,6 +4210,25 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         basis_pos[q] = Some(r);
         nb_status[q] = None;
         row_bounds.assign(r, q, &cache, &noise_feasible);
+        // `rhs_inc_*` (`b - N x_N(M)`): `q` leaves `N` (its term is added
+        // back), the leaving variable joins it at its new bound.
+        {
+            let val_l = nb_value_affine(&cache, nb_status[leaving_var].unwrap(), leaving_var)?;
+            for (j, val, sign) in [(q, nb_val_q, 1.0f64), (leaving_var, val_l, -1.0f64)] {
+                if val.base != 0.0 {
+                    let vb = sign * val.base;
+                    for &(i, v) in std.cols.col(j) {
+                        rhs_inc_base[i] += v * vb;
+                    }
+                }
+                if val.slope != 0.0 {
+                    let vs = sign * val.slope;
+                    for &(i, v) in std.cols.col(j) {
+                        rhs_inc_slope[i] += v * vs;
+                    }
+                }
+            }
+        }
         if price_nonbasic_only {
             // `HighsSparseMatrix::update`'s own swap scheme: `q` (always
             // non-fixed — PRICE only ever offers those) moves from each of
@@ -4363,14 +4401,20 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 // plain-`f64` drift check is — see `XB_CHECK_INTERVAL`'s
                 // own docs for why this module's `Affine1` slope channel
                 // needs a tighter leash.
-                let (fresh_base, fresh_slope) = compute_rhs_affine(std, &cache, &nb_status)?;
+                let fresh;
+                let (rb, rs): (&[f64], &[f64]) = if rhs_incremental {
+                    (&rhs_inc_base, &rhs_inc_slope)
+                } else {
+                    fresh = compute_rhs_affine(std, &cache, &nb_status)?;
+                    (&fresh.0, &fresh.1)
+                };
                 let (resid_base, resid_slope) = residual_norm_affine(
                     std,
                     &basis,
                     &x_b_base,
                     &x_b_slope,
-                    &fresh_base,
-                    &fresh_slope,
+                    rb,
+                    rs,
                     &mut resid_scratch_base,
                     &mut resid_scratch_slope,
                 );
@@ -4456,6 +4500,8 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 let (fresh_base, fresh_slope) = compute_rhs_affine(std, &cache, &nb_status)?;
                 lu.solve_into(&fresh_base, &mut lu_scratch, &mut x_b_base);
                 lu.solve_into(&fresh_slope, &mut lu_scratch, &mut x_b_slope);
+                rhs_inc_base = fresh_base;
+                rhs_inc_slope = fresh_slope;
                 snap_slopes(&mut x_b_slope);
                 rebuild_rows(&mut infeasible_rows, &mut row_dev, m, &row_bounds, &x_b_base, &x_b_slope);
                 fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fd_cb, &mut lu_scratch, &mut fd_y, &mut d);
