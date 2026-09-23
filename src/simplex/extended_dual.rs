@@ -61,13 +61,17 @@
 //!   splits that residual case into `x_j = x_j^+ - x_j^-` before building
 //!   the `StdForm` this module receives — [`delta_of`]/[`hat_lower`]/
 //!   [`hat_upper`] track *both* sides of such a column independently (see
-//!   their own docs) instead. The one place this module still cannot
-//!   soundly handle a free column is the cleanup phase evicting *another*
-//!   genuinely free basic variable to make room for one (`finish`'s own
-//!   docs) — that specific, doubly-rare case bails out to `None` (the
-//!   classical `BIG_M` fallback) rather than risk an unproven termination
-//!   argument, exactly like this module's other "should be unreachable"
-//!   guards.
+//!   their own docs) instead. The paper's state `Z` (`NbStatus::Zero`,
+//!   nonbasic at value `0`) is used exactly where the paper uses it
+//!   (`rem:state-F`): [`crash`] places a *zero-cost* free column there, and
+//!   the cleanup lemma's case (A) parks a free column there. A nonzero-cost
+//!   free column starts at `-M`/`+M` by its cost sign like any other
+//!   `M`-flagged column. A `Zero` column is always eligible (ratio `0`) in
+//!   chuzc1 and, when present, is pivoted on directly with no BFRT walk
+//!   (paper \S4.6); it is never flipped and never produced by a leaving
+//!   variable. Only the legacy cleanup (`ENOMOTO_LEGACY_CLEANUP=1`) still
+//!   bails to `None` when it would have to evict another free basic
+//!   variable.
 //! - Every one-sided-unbounded structural column has already been shifted
 //!   (`simplex.rs::build_std_form_presolved`'s own shift step, unchanged
 //!   for this path) so its *finite* side sits at exactly `0` — this module
@@ -1306,6 +1310,7 @@ fn nb_value_affine(cache: &ColCache, status: NbStatus, j: usize) -> Option<Affin
     let r = match status {
         NbStatus::Lower => cache.lower[j],
         NbStatus::Upper => cache.upper[j],
+        NbStatus::Zero => Some(Affine1::ZERO),
     };
     if r.is_none() && std::env::var("ENOMOTO_DEBUG_EXT_ITERS").is_ok() {
         eprintln!("DEBUG_EXT_BAILOUT: nb_value_affine None at j={j} status={status:?}");
@@ -1836,6 +1841,7 @@ fn compute_rhs_plain(std: &StdForm, nb_status: &[Option<NbStatus>]) -> Vec<f64> 
         let val = match status {
             NbStatus::Lower => std.lb[j],
             NbStatus::Upper => std.ub[j],
+            NbStatus::Zero => continue,
         };
         if val == 0.0 {
             continue;
@@ -1845,6 +1851,27 @@ fn compute_rhs_plain(std: &StdForm, nb_status: &[Option<NbStatus>]) -> Vec<f64> 
         }
     }
     rhs
+}
+
+/// The paper's `sigma_j` (\S2.2 (ii)) for nonbasic status `status`, given
+/// the leaving row's direction `d_dir` and the column's pivot-row entry
+/// `alpha_j`: `+1` at `Lower`, `-1` at `Upper`, and for a free column at
+/// `Zero` whichever sign makes `d_dir * sigma * alpha_j < 0` — i.e. a
+/// `Zero` column is eligible in whichever direction the row needs, as long
+/// as `alpha_j != 0` (callers filter that separately).
+#[inline(always)]
+fn nb_sigma(status: NbStatus, d_dir: f64, alpha_j: f64) -> f64 {
+    match status {
+        NbStatus::Lower => 1.0,
+        NbStatus::Upper => -1.0,
+        NbStatus::Zero => {
+            if d_dir * alpha_j > 0.0 {
+                -1.0
+            } else {
+                1.0
+            }
+        }
+    }
 }
 
 /// `ub[j] - lb[j]`, plain-`f64` — [`width_affine`]'s counterpart for
@@ -1898,10 +1925,26 @@ fn fresh_d_into(std: &StdForm, lu: &sparse_lu::FtLu, basis: &[usize], basis_pos:
 /// way, but using the same cost vector the incremental reduced-cost
 /// maintenance (`d`, initialized to this same `cost.clone()`) is built on
 /// keeps the two consistent by construction rather than by coincidence.
+///
+/// A zero-cost genuinely free column (`lb == -inf` **and** `ub == +inf`)
+/// goes to `Zero` (value `0`) instead — the paper's `eq:init-status` third
+/// case: `Lower`/`Upper` would both put it at `-M`/`+M`, while `Zero` is
+/// dual feasible (`d_j = c_j = 0` at the all-slack basis) with no `M`
+/// dependence at all. `perturb_costs` leaves free columns unperturbed, so
+/// `cost[j]` here is the true cost. The paper's other zero-cost tie-break
+/// (a column with only `lb == -inf` goes to `Upper`) already falls out of
+/// `perturb_costs`, which nudges such a column's cost negative.
 fn crash(std: &StdForm, cost: &[f64], n_orig: usize) -> Vec<Option<NbStatus>> {
     let mut nb_status = vec![None; std.n_total];
     for j in 0..n_orig {
-        nb_status[j] = Some(if cost[j] >= -TOL { NbStatus::Lower } else { NbStatus::Upper });
+        let free = std.lb[j] == f64::NEG_INFINITY && std.ub[j] == f64::INFINITY;
+        nb_status[j] = Some(if free && cost[j].abs() <= TOL {
+            NbStatus::Zero
+        } else if cost[j] >= -TOL {
+            NbStatus::Lower
+        } else {
+            NbStatus::Upper
+        });
     }
     nb_status
 }
@@ -1976,7 +2019,7 @@ fn refine_zero_cost_placement(std: &StdForm, active_cost: &mut [f64], nb_status:
         let x = match nb_status[j] {
             Some(NbStatus::Lower) => lo,
             Some(NbStatus::Upper) => hi,
-            None => continue,
+            Some(NbStatus::Zero) | None => continue,
         };
         if x != 0.0 {
             for &(i, a) in std.cols.col(j) {
@@ -2141,15 +2184,14 @@ fn trial_row_ratio(
         if alpha_j.abs() <= TOL {
             continue;
         }
-        let sigma = match status {
-            NbStatus::Lower => 1.0,
-            NbStatus::Upper => -1.0,
-        };
+        let sigma = nb_sigma(status, d_dir as f64, alpha_j);
         let hat_alpha = sigma * alpha_j;
         if (d_dir as f64) * hat_alpha >= 0.0 {
             continue;
         }
-        let hat_c = (sigma * d[j]).max(0.0);
+        // A `Zero` column's reduced cost is `0` by invariant (paper \S2.2's
+        // remark), so its ratio is exactly `0`.
+        let hat_c = if status == NbStatus::Zero { 0.0 } else { (sigma * d[j]).max(0.0) };
         let ratio = hat_c / hat_alpha.abs();
         if ratio < best_ratio {
             best_ratio = ratio;
@@ -2735,11 +2777,20 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     let dse_refresh_on_refactor = std::env::var("ENOMOTO_DSE_REFRESH_ON_REFACTOR").is_ok_and(|v| v != "0");
     let debug_delta0 = std::env::var("ENOMOTO_DEBUG_EXT_DELTA0").is_ok();
     let debug_ext_iters_verbose = std::env::var("ENOMOTO_DEBUG_EXT_TRACE").is_ok();
-    let m_flagged_cols: Vec<usize> = (0..n_orig).filter(|&j| delta[j].is_flagged()).collect();
+    // A zero-cost free column `crash` placed at `Zero` starts off its `M`
+    // sides already (value `0`), so it is not counted as M-flagged here:
+    // the main phase never moves a column back to `Zero` or from `Zero` to
+    // an `M` side (paper `rem:state-F` — `Zero` only ever leaves by
+    // entering), so it never needs resolving.
+    let m_flagged_cols: Vec<usize> = (0..n_orig).filter(|&j| delta[j].is_flagged() && nb_status[j] != Some(NbStatus::Zero)).collect();
+    // Nonbasic `Zero` columns still outstanding: only ever decremented
+    // (one enters), so once `0` chuzc1's `Zero` check below is skipped
+    // entirely and the loop runs exactly as it did before `Zero` existed.
+    let mut n_zero_nb = nb_status.iter().filter(|s| **s == Some(NbStatus::Zero)).count();
     let mut delta0_iter: Option<usize> = None;
     if debug_ext_iters_verbose {
         let one_sided_total = (0..n_orig).filter(|&j| std.lb[j] == f64::NEG_INFINITY || std.ub[j] == f64::INFINITY).count();
-        eprintln!("DEBUG_EXT_TRACE: one_sided_unbounded_total={one_sided_total} n_m_flagged(|S|)={}", m_flagged_cols.len());
+        eprintln!("DEBUG_EXT_TRACE: one_sided_unbounded_total={one_sided_total} n_m_flagged(|S|)={} n_zero_start={n_zero_nb}", m_flagged_cols.len());
     }
 
     // EXPERIMENTAL (`ENOMOTO_SCORE2_ADAPTIVE_MAX_TOL`, unset = `1e-9` =
@@ -2830,6 +2881,11 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     // anything more than "the one value that happened to work here".
     let n_m_flagged = m_flagged_cols.len().max(1);
     let mut resolved_m = vec![false; n_total];
+    for j in 0..n_orig {
+        if nb_status[j] == Some(NbStatus::Zero) {
+            resolved_m[j] = true;
+        }
+    }
     let mut remaining_m_side = m_flagged_cols.len();
     // Companion best-so-far for the infeasible-row-count plateau check
     // below: `remaining_m_side` only ever decreases (its one mutation
@@ -3003,6 +3059,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 let viol = match status {
                     NbStatus::Lower => -dj,
                     NbStatus::Upper => dj,
+                    NbStatus::Zero => dj.abs(),
                 };
                 if viol > 1.0 && worst.map_or(true, |(_, w)| viol > w) {
                     worst = Some((j, viol));
@@ -3260,6 +3317,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
             prof_phases::STAT_TOUCHED_NONBASIC.fetch_add(touched_cols.iter().filter(|&&j| nb_status[j].is_some()).count(), Relaxed);
         }
 
+        let mut zero_pick: Option<Cand>;
         timed!(profile_phases, prof_phases::CHUZC1, {
             candidates.clear();
             let ban_active = ban_discarded_candidates && discard_row == Some(r);
@@ -3284,22 +3342,40 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
             let d_dir_f = d_dir as f64;
             let mut k = 0usize;
             for &j in &touched_cols {
-                let (is_nb, sigma) = match nb_status[j] {
-                    Some(NbStatus::Lower) => (true, 1.0),
-                    Some(NbStatus::Upper) => (true, -1.0),
-                    None => (false, 0.0),
-                };
                 let alpha_j = a_p[j];
+                // `c_mask` zeroes a `Zero` column's `hat_c`: its reduced
+                // cost is `0` by invariant (paper \S2.2's remark), so its
+                // ratio is exactly `0`, not whatever rounding left in `d[j]`.
+                let (is_nb, sigma, c_mask) = match nb_status[j] {
+                    Some(NbStatus::Lower) => (true, 1.0, 1.0),
+                    Some(NbStatus::Upper) => (true, -1.0, 1.0),
+                    Some(NbStatus::Zero) => (true, nb_sigma(NbStatus::Zero, d_dir_f, alpha_j), 0.0),
+                    None => (false, 0.0, 0.0),
+                };
                 let hat_alpha = sigma * alpha_j;
                 // `d[j]` here is the *incrementally maintained* reduced cost
                 // (see this function's own docs) — no per-candidate BTRAN
                 // dot-product needed, unlike this function's first version.
-                let hat_c = (sigma * d[j]).max(0.0);
+                let hat_c = (sigma * d[j]).max(0.0) * c_mask;
                 cand_scratch[k] = Cand { j, hat_alpha, ratio: hat_c / hat_alpha.abs() };
                 let keep = is_nb & !(alpha_j.abs() <= TOL) & !(d_dir_f * hat_alpha >= 0.0);
                 k += keep as usize;
             }
             let kept = &cand_scratch[..k];
+            // Paper \S4.6 (before `prop:bfrt`): if Eligible holds a `Zero`
+            // column, skip the BFRT walk and pivot on one of them (smallest
+            // index) — ratio `0`, so no reduced cost changes and nothing is
+            // flipped. Picked from `kept`, before the stopper pruning just
+            // below, which could otherwise drop it behind a tied ratio-`0`
+            // stopper with a smaller index.
+            zero_pick = None;
+            if n_zero_nb > 0 {
+                for c in kept {
+                    if nb_status[c.j] == Some(NbStatus::Zero) && zero_pick.map_or(true, |z: Cand| c.j < z.j) && !(ban_active && discard_banned_cols.contains(&c.j)) {
+                        zero_pick = Some(*c);
+                    }
+                }
+            }
             // Smallest (in `Cand`'s own `(ratio, j)` order) candidate whose
             // width is a genuine infinity (`cache.width[j] == None`, a
             // one-sided row's slack): the BFRT walk below stops
@@ -3407,6 +3483,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                     let bad = match status {
                         NbStatus::Lower => dj < -1e-6,
                         NbStatus::Upper => dj > 1e-6,
+                        NbStatus::Zero => dj.abs() > 1e-6,
                     };
                     if bad {
                         dual_violations += 1;
@@ -3451,7 +3528,11 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         // is still readable in the `k_star == None` debug print past the
         // branch.
         let mut cum = Affine1::ZERO;
-        if bland_mode {
+        if let Some(zc) = zero_pick {
+            candidates.clear();
+            sorted_prefix.push(zc);
+            k_star = Some(0);
+        } else if bland_mode {
             timed!(profile_phases, prof_phases::CHUZC1, {
                 // Same ascending `(ratio, j)` order the non-`bland` heap
                 // path below produces (`Cand`'s own `Ord` impl) -- *not* a
@@ -3514,7 +3595,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         // path's lazily-built `sorted_prefix` (only ever holds `[0,
         // k_star]`, which is all pass 2 / the flip loop below ever index
         // into).
-        let sorted: &[Cand] = if bland_mode { &candidates[..] } else { &sorted_prefix[..] };
+        let sorted: &[Cand] = if bland_mode && zero_pick.is_none() { &candidates[..] } else { &sorted_prefix[..] };
         let Some(k_star) = k_star else {
             for &j in &touched_cols {
                 a_p[j] = 0.0;
@@ -3603,7 +3684,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                     match nb_status[cand.j] {
                         Some(NbStatus::Lower) => delta[cand.j].has_lower(),
                         Some(NbStatus::Upper) => delta[cand.j].has_upper(),
-                        None => false,
+                        Some(NbStatus::Zero) | None => false,
                     }
                 });
                 if window_has_m_elsewhere {
@@ -3643,6 +3724,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
             for cand in &sorted[..best_idx] {
                 let old = nb_status[cand.j].unwrap();
                 let width = cache.width[cand.j].unwrap();
+                debug_assert_ne!(old, NbStatus::Zero, "a `Zero` column is never flipped");
                 let sigma = if old == NbStatus::Lower { 1.0 } else { -1.0 };
                 let delta_x = width.scale(sigma);
                 if delta_x.slope != 0.0 {
@@ -3748,11 +3830,13 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 let new = match old {
                     NbStatus::Lower => NbStatus::Upper,
                     NbStatus::Upper => NbStatus::Lower,
+                    NbStatus::Zero => unreachable!("a `Zero` column is never flipped"),
                 };
                 if profile_phases && delta[cand.j].is_flagged() {
                     let lands_on_m = match new {
                         NbStatus::Lower => delta[cand.j].has_lower(),
                         NbStatus::Upper => delta[cand.j].has_upper(),
+                        NbStatus::Zero => false,
                     };
                     if lands_on_m {
                         prof_phases::M_ENTER_VIA_FLIP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -4000,7 +4084,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
             let q_was_m = match nb_status[q] {
                 Some(NbStatus::Lower) => delta[q].has_lower(),
                 Some(NbStatus::Upper) => delta[q].has_upper(),
-                None => false,
+                Some(NbStatus::Zero) | None => false,
             };
             if q_was_m {
                 prof_phases::M_EXIT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -4038,6 +4122,9 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         // `target` by construction, so the direct assignment is both
         // simpler and exact.
         let old_status_q = nb_status[q].unwrap();
+        if old_status_q == NbStatus::Zero {
+            n_zero_nb -= 1;
+        }
         let nb_val_q = nb_value_affine(&cache, old_status_q, q)?;
         // `basis[r]`'s own genuinely-infinite side can never be the one
         // `d_dir` just picked (`row_deviation`'s own docs: `dev_minus`/
@@ -4221,7 +4308,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         }
         if debug_delta0 && delta0_iter.is_none() {
             let all_off_m_side = m_flagged_cols.iter().all(|&j| match nb_status[j] {
-                None => true,
+                None | Some(NbStatus::Zero) => true,
                 Some(NbStatus::Lower) => cache.lower[j].map_or(true, |a| a.slope == 0.0),
                 Some(NbStatus::Upper) => cache.upper[j].map_or(true, |a| a.slope == 0.0),
             });
@@ -4570,21 +4657,26 @@ fn finish(std: &StdForm, basis: &mut [usize], basis_pos: &mut [Option<usize>], n
         let at_m_side = |j: usize, nb_status: &[Option<NbStatus>]| match nb_status[j] {
             Some(NbStatus::Lower) => delta[j].has_lower(),
             Some(NbStatus::Upper) => delta[j].has_upper(),
-            None => false,
+            Some(NbStatus::Zero) | None => false,
         };
         // The M-side set only ever shrinks (a leaving variable is parked at
         // a finite bound it just reached), so it is collected once.
         let pending: Vec<usize> = (0..n_orig).filter(|&j| at_m_side(j, nb_status)).collect();
         let mut parked = 0usize;
+        let mut parked_zero = 0usize;
         for &j in &pending {
             let status = nb_status[j]?;
             let v_j = nb_value_affine(cache, status, j)?;
             // `dir`: which way `x_j` moves (toward its finite side, or `0`
             // for a genuinely free column); `t` is the distance moved, so
-            // `x_B` changes by `rate * t` with `rate = -dir * alpha`.
+            // `x_B` changes by `rate * t` with `rate = -dir * alpha`. A free
+            // column's case (A) parks it at the paper's state `Z` (value
+            // `0`, `rem:state-F`) — dual feasible since `z1 = 0` forces its
+            // reduced cost to `0`.
             let (dir, target, target_status) = match status {
-                NbStatus::Lower => (1.0, if std.ub[j].is_finite() { std.ub[j] } else { 0.0 }, std.ub[j].is_finite().then_some(NbStatus::Upper)),
-                NbStatus::Upper => (-1.0, if std.lb[j].is_finite() { std.lb[j] } else { 0.0 }, std.lb[j].is_finite().then_some(NbStatus::Lower)),
+                NbStatus::Lower => (1.0, if std.ub[j].is_finite() { std.ub[j] } else { 0.0 }, if std.ub[j].is_finite() { NbStatus::Upper } else { NbStatus::Zero }),
+                NbStatus::Upper => (-1.0, if std.lb[j].is_finite() { std.lb[j] } else { 0.0 }, if std.lb[j].is_finite() { NbStatus::Lower } else { NbStatus::Zero }),
+                NbStatus::Zero => continue,
             };
             let full = Affine1::new(target - v_j.base, -v_j.slope).scale(dir);
             lu.solve_sparse_into(std.cols.col(j), &mut lu_scratch, &mut gp_scratch, &mut alpha_col);
@@ -4636,12 +4728,8 @@ fn finish(std: &StdForm, basis: &mut [usize], basis_pos: &mut [Option<usize>], n
             };
 
             let Some(r) = row else {
-                // Case (A): reaches its finite side unblocked.
-                let Some(ts) = target_status else {
-                    // A genuinely free column would need the paper's state
-                    // `Z` (value `0`), which `NbStatus` has no encoding for.
-                    return None;
-                };
+                // Case (A): reaches its finite side (or `0`, for a free
+                // column) unblocked.
                 for i in 0..m {
                     let a = alpha_col[i];
                     if a != 0.0 {
@@ -4650,8 +4738,9 @@ fn finish(std: &StdForm, basis: &mut [usize], basis_pos: &mut [Option<usize>], n
                         x_b_slope[i] = snap_slope(x_b_slope[i] + rate * full.slope);
                     }
                 }
-                nb_status[j] = Some(ts);
+                nb_status[j] = Some(target_status);
                 parked += 1;
+                parked_zero += (target_status == NbStatus::Zero) as usize;
                 continue;
             };
 
@@ -4690,7 +4779,7 @@ fn finish(std: &StdForm, basis: &mut [usize], basis_pos: &mut [Option<usize>], n
             }
         }
         if debug_ext {
-            eprintln!("DEBUG_EXT: cleanup_pivots={cleanup_count} cleanup_parked={parked}");
+            eprintln!("DEBUG_EXT: cleanup_pivots={cleanup_count} cleanup_parked={parked} cleanup_parked_zero={parked_zero}");
         }
         return polish_with_true_bounds(std, basis, basis_pos, nb_status, lu);
     }
@@ -4698,7 +4787,7 @@ fn finish(std: &StdForm, basis: &mut [usize], basis_pos: &mut [Option<usize>], n
         let Some(j) = (0..n_orig).find(|&j| match nb_status[j] {
             Some(NbStatus::Lower) => delta[j].has_lower(),
             Some(NbStatus::Upper) => delta[j].has_upper(),
-            None => false,
+            Some(NbStatus::Zero) | None => false,
         }) else {
             break;
         };
@@ -4974,6 +5063,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
                     None => match nb_status[j].unwrap() {
                         NbStatus::Lower => std.lb[j],
                         NbStatus::Upper => std.ub[j],
+                        NbStatus::Zero => 0.0,
                     },
                 };
             }
@@ -5011,6 +5101,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
                 None => true,
                 Some(NbStatus::Lower) => true_d[j] >= -TOL,
                 Some(NbStatus::Upper) => true_d[j] <= TOL,
+                Some(NbStatus::Zero) => true_d[j].abs() <= TOL,
             });
             if true_dual_feasible {
                 return Some(SimplexResult { status: Status::Optimal, x: Some(x) });
@@ -5054,6 +5145,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
                         None => false,
                         Some(NbStatus::Lower) => true_d[j] < -TOL,
                         Some(NbStatus::Upper) => true_d[j] > TOL,
+                        Some(NbStatus::Zero) => true_d[j].abs() > TOL,
                     })
                     .count();
                 eprintln!("DEBUG_EXT: primal_handoff_us={} dual_infeasible_cols={n_bad}", handoff_t0.elapsed().as_micros());
@@ -5091,22 +5183,34 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
         }
 
         candidates.clear();
+        let mut zero_pick: Option<Cand> = None;
         for &j in &touched_cols {
             let Some(status) = nb_status[j] else { continue };
             let alpha_j = a_p[j];
             if alpha_j.abs() <= TOL {
                 continue;
             }
-            let sigma = match status {
-                NbStatus::Lower => 1.0,
-                NbStatus::Upper => -1.0,
-            };
+            let sigma = nb_sigma(status, d_dir as f64, alpha_j);
             let hat_alpha = sigma * alpha_j;
             if (d_dir as f64) * hat_alpha >= 0.0 {
                 continue;
             }
+            if status == NbStatus::Zero {
+                // Main phase's own rule (paper \S4.6): a `Zero` column in
+                // Eligible is pivoted on directly (smallest index), ratio
+                // `0`, no BFRT walk.
+                let c = Cand { j, hat_alpha, ratio: 0.0 };
+                if zero_pick.map_or(true, |z| j < z.j) {
+                    zero_pick = Some(c);
+                }
+                continue;
+            }
             let hat_c = (sigma * d[j]).max(0.0);
             candidates.push(Cand { j, hat_alpha, ratio: hat_c / hat_alpha.abs() });
+        }
+        if let Some(zc) = zero_pick {
+            candidates.clear();
+            candidates.push(zc);
         }
         if candidates.is_empty() {
             for &j in &touched_cols {
@@ -5199,6 +5303,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
         for cand in &candidates[..best_idx] {
             let old = nb_status[cand.j].unwrap();
             let width = width_plain(std, cand.j);
+            debug_assert_ne!(old, NbStatus::Zero, "a `Zero` column is never flipped");
             let sigma = if old == NbStatus::Lower { 1.0 } else { -1.0 };
             let delta_x = width * sigma;
             for &(i, v) in std.cols.col(cand.j) {
@@ -5239,6 +5344,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
             nb_status[cand.j] = Some(match old {
                 NbStatus::Lower => NbStatus::Upper,
                 NbStatus::Upper => NbStatus::Lower,
+                NbStatus::Zero => unreachable!("a `Zero` column is never flipped"),
             });
         }
 
@@ -5288,6 +5394,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
         let nb_val_q = match old_status_q {
             NbStatus::Lower => std.lb[q],
             NbStatus::Upper => std.ub[q],
+            NbStatus::Zero => 0.0,
         };
         let target = if d_dir > 0 { std.lb[basis[r]] } else { std.ub[basis[r]] };
         let theta = (x_b[r] - target) / alpha_q;
@@ -5433,7 +5540,7 @@ mod tests {
     }
 
     #[test]
-    fn two_free_columns_tied_only_through_opposing_inequality_rows_bails_out_gracefully() {
+    fn two_free_columns_tied_only_through_opposing_inequality_rows_park_one_at_zero() {
         // The exact shape this module's own top-of-file docs name as
         // `presolve::freevar`'s undecidable residual case: two free
         // columns (x0, x1) that appear only in inequality rows, never an
@@ -5442,26 +5549,41 @@ mod tests {
         // -x0 + x1 + s1 = 3 (s1 >= 0, i.e. x0 - x1 >= -3): min x0 - x1
         // drives the difference to its lower bound, -3, but x0 and x1
         // individually stay genuinely unbounded (only their *difference*
-        // is pinned) — the true optimal face is a whole line, not a single
-        // point, so *some* variable must end up nonbasic with no real bound
-        // to rest at. Traced by hand (and confirmed via temporary tracing
-        // during development): the main phase resolves one of the two
-        // directly, leaving the other still nonbasic at its own `M` side;
-        // cleanup's own `B^{-1}A_j` for that survivor is nonzero in exactly
-        // one row, and the variable *currently basic there* is the other
-        // free column — evicting it would need to pin it at an arbitrary
-        // real anchor this module has no representation for (`finish`'s own
-        // docs on why this specific case bails rather than guesses). This
-        // is not a rare corner this test is inventing: it is the *forced*
-        // outcome whenever two structural columns are free and coupled only
-        // to each other, with no third column anchoring either — so this
-        // asserts the graceful-`None` contract itself (falls back to the
-        // classical `BIG_M` path one level up, `simplex.rs`'s own
-        // `mutually_coupled_free_variables_falls_back_to_a_correct_answer`
-        // end-to-end test), not a wrong answer or a panic.
+        // is pinned) — the true optimal face is a whole line, so *some*
+        // variable must end up nonbasic with no real bound to rest at. The
+        // main phase resolves one of the two directly, leaving the other
+        // nonbasic at its own `M` side; cleanup's primal ratio test for
+        // that survivor is blocked by nothing (the only row it touches has
+        // the other free column basic there, with no finite bound), so
+        // case (A) parks it at the paper's state `Z` (value `0`,
+        // `rem:state-F`) — this used to bail to `None` (the `BIG_M`
+        // fallback) for lack of that state.
         let rows = vec![vec![(0, 1.0), (1, -1.0), (2, 1.0)], vec![(0, -1.0), (1, 1.0), (3, 1.0)]];
         let std = std_form(&rows, vec![3.0, 3.0], vec![1.0, -1.0, 0.0, 0.0], vec![f64::NEG_INFINITY, f64::NEG_INFINITY, 0.0, 0.0], vec![f64::INFINITY, f64::INFINITY, f64::INFINITY, f64::INFINITY]);
-        assert!(solve_lp_dual_extended(&std).is_none());
+        let res = solve_lp_dual_extended(&std).expect("cleanup case (A) parks the free survivor at Zero instead of bailing");
+        assert_eq!(res.status, Status::Optimal);
+        let x = res.x.unwrap();
+        assert!(approx(x[0] - x[1], -3.0), "x={x:?}");
+        assert!(approx(x[0], 0.0) || approx(x[1], 0.0), "one free column is parked at Zero: x={x:?}");
+    }
+
+    #[test]
+    fn zero_cost_free_column_starts_at_zero_and_enters_first() {
+        // x0 free with cost 0 (paper `eq:init-status`: crash puts it at
+        // `Zero`, value 0, not at -M), x1 in [0,10] cost 1;
+        // x0 + x1 + s = 5, s in [0,0]. At the all-slack start s = 5 is
+        // above its bound; Eligible holds both x0 (Zero, ratio 0) and x1
+        // (ratio 1), and the `Zero` rule (paper \S4.6) pivots x0 in with no
+        // BFRT walk: x0 = 5, x1 = 0, optimal in one pivot. No column ever
+        // sits at an `M` side, so cleanup has nothing to do.
+        let std = std_form(&[vec![(0, 1.0), (1, 1.0), (2, 1.0)]], vec![5.0], vec![0.0, 1.0, 0.0], vec![f64::NEG_INFINITY, 0.0, 0.0], vec![f64::INFINITY, 10.0, 0.0]);
+        assert_eq!(crash(&std, &super::super::perturb_costs(&std), 2)[0], Some(NbStatus::Zero));
+        let before = CLEANUP_PIVOTS.load(Relaxed);
+        let res = solve_lp_dual_extended(&std).expect("should reach a mathematical answer, not the None fallback sentinel");
+        assert_eq!(res.status, Status::Optimal);
+        let x = res.x.unwrap();
+        assert!(approx(x[0], 5.0) && approx(x[1], 0.0), "x={x:?}");
+        assert_eq!(CLEANUP_PIVOTS.load(Relaxed), before);
     }
 
     #[test]

@@ -16,8 +16,8 @@
 //! Every **structural** (user-facing) variable has two *finite* bounds —
 //! `model.rs::add_variable` rejects infinite `lb`/`ub` at the PyO3
 //! boundary, so this module never has to represent a free or one-sided
-//! variable and treats that as a precondition throughout (`NbStatus` has
-//! only `Lower`/`Upper`, never a "free" case). This is also what makes
+//! variable and treats that as a precondition throughout (`NbStatus::Zero`,
+//! the one "free" case, exists only for `extended_dual`'s own use). This is also what makes
 //! [`Tableau::crash_dual_feasible`] unconditional (§ its own docs) and
 //! makes a genuinely unbounded objective impossible in principle (a
 //! linear objective over a bounded box is always bounded) — `Status::Unbounded`
@@ -694,6 +694,15 @@ impl SteepestEdgeState {
 enum NbStatus {
     Lower,
     Upper,
+    /// Nonbasic at value `0` — the paper's state `Z` (\S2.2), for a
+    /// genuinely free column (`lb == -inf` **and** `ub == +inf`) only, and
+    /// only ever produced by [`extended_dual`] (its crash, for a zero-cost
+    /// free column, and its cleanup lemma's case (A)). Dual feasible iff
+    /// the reduced cost is exactly `0`; eligible to enter in either
+    /// direction; never flipped (its width is infinite). This module's own
+    /// classical paths never create it, but [`run_phase`] can inherit one
+    /// through `extended_dual`'s primal handoff, so every match handles it.
+    Zero,
 }
 
 pub struct SimplexResult {
@@ -1561,6 +1570,11 @@ impl<'a> Tableau<'a> {
                         self.x[j] = self.std.ub[j];
                     }
                 }
+                Some(NbStatus::Zero) => {
+                    if self.x[j].abs() < EXPAND_DELTA_F {
+                        self.x[j] = 0.0;
+                    }
+                }
                 None => {}
             }
         }
@@ -1593,6 +1607,7 @@ impl<'a> Tableau<'a> {
             self.x[j] = match status {
                 NbStatus::Lower => lo,
                 NbStatus::Upper => hi,
+                NbStatus::Zero => 0.0,
             };
         }
     }
@@ -1914,6 +1929,10 @@ fn run_phase(
             let (eligible, dir) = match st {
                 NbStatus::Lower => (dj < -TOL, 1.0),
                 NbStatus::Upper => (dj > TOL, -1.0),
+                // Free at `0`: improving in whichever direction lowers the
+                // objective (its width is infinite, so the ratio test below
+                // never turns this into a bound flip).
+                NbStatus::Zero => (true, if dj < 0.0 { 1.0 } else { -1.0 }),
             };
             if eligible && dj.abs() > TOL {
                 let score = dj * dj / se.gamma[j].max(STEEPEST_EDGE_FLOOR);
@@ -3910,6 +3929,7 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
                 None => true,
                 Some(NbStatus::Lower) => true_d[j] >= -TOL,
                 Some(NbStatus::Upper) => true_d[j] <= TOL,
+                Some(NbStatus::Zero) => true_d[j].abs() <= TOL,
             });
             if true_dual_feasible {
                 return SimplexResult { status: Status::Optimal, x: Some(t.x[0..t.n_orig()].to_vec()) };
@@ -4116,6 +4136,10 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
                                 a_pj < -TOL
                             }
                         }
+                        // Paper \S2.2 (ii)-(iii): a free column at `0` can
+                        // move either way, so it is eligible whenever
+                        // `|a_pj| > TOL` (already checked above).
+                        NbStatus::Zero => true,
                     };
                     if !eligible {
                         return None;
@@ -4253,6 +4277,7 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
                 let delta_x = match old_status {
                     NbStatus::Lower => width,
                     NbStatus::Upper => -width,
+                    NbStatus::Zero => unreachable!("a free (`Zero`) column's width is infinite, so it stops the walk above"),
                 };
                 let flipped_x_leaving = x_leaving_now - cand.a_pj * delta_x;
                 // A flip that lands within `reach_tol` of `target_bound`
@@ -4446,6 +4471,7 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
                     let delta_x = match old_status {
                         NbStatus::Lower => std.ub[j] - std.lb[j],
                         NbStatus::Upper => -(std.ub[j] - std.lb[j]),
+                        NbStatus::Zero => unreachable!("a free (`Zero`) column is never flipped"),
                     };
                     for &(i, v) in t.column_sparse(j) {
                         if !combined_touched_flag[i] {
@@ -4524,11 +4550,13 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
                     let new_status = match old_status {
                         NbStatus::Lower => NbStatus::Upper,
                         NbStatus::Upper => NbStatus::Lower,
+                        NbStatus::Zero => unreachable!("a free (`Zero`) column is never flipped"),
                     };
                     t.nb_status[j] = Some(new_status);
                     t.x[j] = match new_status {
                         NbStatus::Lower => std.lb[j],
                         NbStatus::Upper => std.ub[j],
+                        NbStatus::Zero => 0.0,
                     };
                 }
             }
@@ -5363,20 +5391,19 @@ mod tests {
     }
 
     #[test]
-    fn mutually_coupled_free_variables_falls_back_to_a_correct_answer() {
+    fn mutually_coupled_free_variables_reach_a_correct_answer() {
         // x0, x1 both genuinely free, coupled *only* to each other (never
         // anchored by a third column or an equality row) — the true
         // optimum is a whole line (x0 - x1 = -3), not a single point, so
         // whichever of the two ends up nonbasic in `extended_dual`'s own
         // `M`-phase has no real bound to rest at once cleanup tries to pin
-        // it down. `extended_dual::solve_lp_dual_extended` bails out to
-        // `None` for exactly this shape (that module's own `finish` docs,
-        // and its `extended_dual::tests::
-        // two_free_columns_tied_only_through_opposing_inequality_rows_bails_out_gracefully`
-        // unit test) — this end-to-end test checks the *public* contract
-        // that matters: `solve_lp_dual` falls back to the classical `BIG_M`
-        // path transparently and still reaches the true optimal objective,
-        // not a wrong answer or a panic.
+        // it down. `extended_dual`'s cleanup parks it at `NbStatus::Zero`
+        // (value `0`, the paper's state `Z`) — its
+        // `two_free_columns_tied_only_through_opposing_inequality_rows_park_one_at_zero`
+        // unit test; this shape used to bail to the classical `BIG_M`
+        // fallback instead. This end-to-end test checks the *public*
+        // contract: the true optimal objective, not a wrong answer or a
+        // panic.
         let vars = vec![var(f64::NEG_INFINITY, f64::INFINITY), var(f64::NEG_INFINITY, f64::INFINITY)];
         let obj = Objective { expr: expr(&[(0, 1.0), (1, -1.0)]), sense: Sense::Minimize };
         let cons = vec![row(&[(0, 1.0), (1, -1.0)], RowSense::Le, 3.0), row(&[(0, -1.0), (1, 1.0)], RowSense::Le, 3.0)];
