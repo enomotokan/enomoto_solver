@@ -130,7 +130,7 @@
 //! already vacuous.
 
 use crate::presolve::colsingleton::Substitution;
-use crate::sparse::{Csr, SparseAccum, axpy_row, csr_from_rows, csr_rows};
+use crate::sparse::{Csr, SparseAccum, axpy_row, csr_from_rows, csr_is_canonical, csr_rows};
 const TOL: f64 = 1e-9;
 /// Mirrors `colsingleton`/`freevar`'s own pivot guard exactly (same value,
 /// same purpose — see either module's own docs on `SUBSTITUTION_PIVOT_RATIO`).
@@ -288,20 +288,35 @@ fn fillin_cost(pivot_terms: &[(usize, f64)], targets: &[&Vec<(usize, f64)>]) -> 
 /// *only* row would otherwise lose its bound outright). One non-cascading
 /// call from a snapshot; see the module docs for why repetition is the
 /// caller's own job, not this function's.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn eliminate_implied_free_columns(n: usize, a: &Csr, b: &[f64], c: &[f64], lb: &[f64], ub: &[f64], real_rows: &[Vec<(usize, f64)>], real_rhs: &[f64]) -> AggregatorResult {
-    let mut a_rows: Vec<Vec<(usize, f64)>> = csr_rows(a);
-    // One sparse accumulator for every row fold this pass performs —
-    // see `crate::sparse::SparseAccum`'s own docs for why the merge is
-    // not a per-row `BTreeMap`.
-    let mut accum = SparseAccum::new(n);
-    let mut b: Vec<f64> = b.to_vec();
-    let mut c: Vec<f64> = c.to_vec();
-    let mut real_rows: Vec<Vec<(usize, f64)>> = real_rows.to_vec();
-    let mut real_rhs: Vec<f64> = real_rhs.to_vec();
+    eliminate_implied_free_columns_if_any(n, a, b, c, lb, ub, real_rows, real_rhs).unwrap_or_else(|| AggregatorResult {
+        a: if csr_is_canonical(a) { a.clone() } else { csr_from_rows(&csr_rows(a), n) },
+        b: b.to_vec(),
+        c: c.to_vec(),
+        substitutions: Vec::new(),
+        real_rows: real_rows.to_vec(),
+        real_rhs: real_rhs.to_vec(),
+    })
+}
+
+/// [`eliminate_implied_free_columns`], returning `None` instead of an
+/// unchanged copy of the whole problem when nothing is eliminated — the
+/// common case on most rounds of most problems. The candidate search runs
+/// straight off `a`'s CSR rows, and only when it finds at least one
+/// candidate is the problem copied into the mutable row-list form the
+/// elimination loop works in, so an empty call costs one activity pass
+/// over `A` and no allocation proportional to `A`/`real_rows`. The result,
+/// when `Some`, is bit-identical to what the unconditional-copy version
+/// produced (the candidate list is computed from exactly the same row
+/// contents, in the same order).
+pub fn eliminate_implied_free_columns_if_any(n: usize, a: &Csr, b: &[f64], c: &[f64], lb: &[f64], ub: &[f64], real_rows: &[Vec<(usize, f64)>], real_rhs: &[f64]) -> Option<AggregatorResult> {
+    let ar = a.as_ref();
+    let p = ar.nrows();
 
     let mut col_a_count = vec![0usize; n];
-    for row in &a_rows {
-        for &(j, v) in row {
+    for i in 0..p {
+        for (j, &v) in ar.col_indices_of_row(i).zip(ar.values_of_row(i)) {
             if v != 0.0 {
                 col_a_count[j] += 1;
             }
@@ -325,20 +340,36 @@ pub fn eliminate_implied_free_columns(n: usize, a: &Csr, b: &[f64], c: &[f64], l
     // module docs' division of labor.
     let is_free = |j: usize| lb[j] == f64::NEG_INFINITY && ub[j] == f64::INFINITY;
     let mut candidates: Vec<(usize, usize)> = Vec::new();
-    for (i, row) in a_rows.iter().enumerate() {
-        let activity = compute_row_activity(row, lb, ub);
-        for &(j, v) in row {
+    let mut row: Vec<(usize, f64)> = Vec::new();
+    for i in 0..p {
+        row.clear();
+        row.extend(ar.col_indices_of_row(i).zip(ar.values_of_row(i)).map(|(j, &v)| (j, v)));
+        let activity = compute_row_activity(&row, lb, ub);
+        for &(j, v) in &row {
             if v != 0.0 && col_a_count[j] >= 2 && !is_free(j) && row_implies_own_bound(&activity, j, v, b[i], lb, ub) {
                 candidates.push((i, j));
             }
         }
     }
+    if candidates.is_empty() {
+        return None;
+    }
     candidates.sort_by_key(|&(i, j)| {
-        let rowlen = a_rows[i].len();
+        let rowlen = ar.col_indices_of_row(i).len();
         let collen = col_a_count[j];
         let min_len = rowlen.min(collen);
         (min_len != 2, rowlen * collen, min_len, i, j)
     });
+
+    let mut a_rows: Vec<Vec<(usize, f64)>> = csr_rows(a);
+    // One sparse accumulator for every row fold this pass performs —
+    // see `crate::sparse::SparseAccum`'s own docs for why the merge is
+    // not a per-row `BTreeMap`.
+    let mut accum = SparseAccum::new(n);
+    let mut b: Vec<f64> = b.to_vec();
+    let mut c: Vec<f64> = c.to_vec();
+    let mut real_rows: Vec<Vec<(usize, f64)>> = real_rows.to_vec();
+    let mut real_rhs: Vec<f64> = real_rhs.to_vec();
 
     // Column -> row indices for `a_rows` and `real_rows`, so finding the
     // rows that contain the eliminated column costs O(column length)
@@ -480,6 +511,11 @@ pub fn eliminate_implied_free_columns(n: usize, a: &Csr, b: &[f64], c: &[f64], l
         col_eliminated[j] = true;
         row_deleted[row_idx] = true;
     }
+    // Nothing accepted: no row was touched (every fold above happens only
+    // on acceptance), so the problem is unchanged.
+    if substitutions.is_empty() {
+        return None;
+    }
 
     let mut final_a_rows = Vec::with_capacity(a_rows.len());
     let mut final_b = Vec::with_capacity(b.len());
@@ -490,14 +526,14 @@ pub fn eliminate_implied_free_columns(n: usize, a: &Csr, b: &[f64], c: &[f64], l
         }
     }
 
-    AggregatorResult {
+    Some(AggregatorResult {
         a: csr_from_rows(&final_a_rows, n),
         b: final_b,
         c,
         substitutions,
         real_rows,
         real_rhs,
-    }
+    })
 }
 
 /// Cross-row generalization of [`eliminate_implied_free_columns`]: a

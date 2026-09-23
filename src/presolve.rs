@@ -872,7 +872,8 @@ pub fn run_extended(
         } else if std::env::var("ENOMOTO_XROW_AGGREGATOR").is_ok() {
             Some(timed_step!("aggregator", aggregator::eliminate_implied_free_columns_xrow(n, &a, &b, &c, &lb, &ub, &cur_real_rows, &cur_real_rhs)))
         } else {
-            Some(timed_step!("aggregator", aggregator::eliminate_implied_free_columns(n, &a, &b, &c, &lb, &ub, &cur_real_rows, &cur_real_rhs)))
+            // `None` = nothing eliminated (the problem is unchanged).
+            timed_step!("aggregator", aggregator::eliminate_implied_free_columns_if_any(n, &a, &b, &c, &lb, &ub, &cur_real_rows, &cur_real_rhs))
         };
         if let Some(agg) = agg {
             if std::env::var("ENOMOTO_DEBUG_AGGREGATOR").is_ok() {
