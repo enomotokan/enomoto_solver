@@ -22,7 +22,7 @@
 //! folded away) is exactly `colsingleton`'s own derivation, reused
 //! verbatim.
 
-use crate::presolve::colsingleton::Substitution;
+use crate::presolve::colsingleton::{self, Substitution};
 use crate::presolve::propagate;
 use crate::sparse::{Csr, SparseAccum, csr_from_rows, csr_rows_pruned};
 
@@ -158,12 +158,21 @@ pub fn eliminate_doubleton_equalities(n: usize, a: &Csr, b: &[f64], g: &Csr, h: 
         let a_ub = sub.coeff * ub[sub.var];
         let lo = a_lb.min(a_ub);
         let hi = a_lb.max(a_ub);
-        if lo.is_finite() {
+        // Skip a side the kept partner's own box already implies — only when
+        // that partner is not itself eliminated in this same pass (its box
+        // must stay enforced for the implication to hold).
+        let (r_lo, r_hi) = if colsingleton::skip_implied_bound_rows() && by_var[var_keep].is_none() {
+            colsingleton::terms_range(&[(var_keep, coeff_keep)], &lb, &ub)
+        } else {
+            (f64::NEG_INFINITY, f64::INFINITY)
+        };
+        let tol = colsingleton::IMPLIED_TOL;
+        if lo.is_finite() && !(r_hi <= sub.rhs - lo + tol * (1.0 + (sub.rhs - lo).abs())) {
             let (row1, rhs1) = rewrite_row(&mut accum, &[(var_keep, coeff_keep)], sub.rhs - lo, &subs, &by_var);
             extra_g_rows.push(row1);
             extra_h.push(rhs1);
         }
-        if hi.is_finite() {
+        if hi.is_finite() && !(r_lo >= sub.rhs - hi - tol * (1.0 + (sub.rhs - hi).abs())) {
             let (row2, rhs2) = rewrite_row(&mut accum, &[(var_keep, -coeff_keep)], hi - sub.rhs, &subs, &by_var);
             extra_g_rows.push(row2);
             extra_h.push(rhs2);
