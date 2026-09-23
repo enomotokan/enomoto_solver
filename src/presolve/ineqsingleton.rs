@@ -55,10 +55,6 @@ pub struct IneqSingletonResult {
     pub implied_equalities: Vec<(usize, Option<usize>)>,
 }
 
-fn row_key(row: &[(usize, f64)], negate: bool) -> Vec<(usize, u64)> {
-    row.iter().map(|&(k, v)| (k, (if negate { -v } else { v }).to_bits())).collect()
-}
-
 /// Range of `sum(v * x_k)` over the terms' boxes, excluding column `skip`.
 fn others_range(row: &[(usize, f64)], skip: usize, lb: &[f64], ub: &[f64]) -> (f64, f64) {
     let (mut lo, mut hi) = (0.0f64, 0.0f64);
@@ -87,18 +83,44 @@ pub fn run(n: usize, a: &Csr, real_rows: &[Vec<(usize, f64)>], real_rhs: &[f64],
         }
     }
 
-    // Pair each row with its exact negation.
-    let mut index: HashMap<Vec<(usize, u64)>, usize> = HashMap::with_capacity(real_rows.len());
-    for (i, row) in real_rows.iter().enumerate() {
-        index.entry(row_key(row, false)).or_insert(i);
+    // Cheap pre-filter: a candidate column appears in no equality row and in
+    // at most two `G` rows (one logical row). Nothing qualifies -> done,
+    // without building the pairing below.
+    let mut g_count = vec![0u32; n];
+    for row in real_rows {
+        for &(k, v) in row {
+            if v != 0.0 {
+                g_count[k] += 1;
+            }
+        }
     }
+    if !(0..n).any(|j| !in_a[j] && (1..=2).contains(&g_count[j]) && c[j] != 0.0 && lb[j] != ub[j]) {
+        return out;
+    }
+
+    // Pair each row with its exact negation (hash on support + coefficient
+    // bits, then an exact comparison).
+    let row_hash = |row: &[(usize, f64)], negate: bool| -> u64 {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for &(k, v) in row {
+            let bits = (if negate { -v } else { v }).to_bits();
+            h = (h ^ k as u64).wrapping_mul(0x0100_0000_01b3);
+            h = (h ^ bits).wrapping_mul(0x0100_0000_01b3);
+        }
+        h
+    };
+    let mut index: HashMap<u64, Vec<usize>> = HashMap::with_capacity(real_rows.len());
+    for (i, row) in real_rows.iter().enumerate() {
+        index.entry(row_hash(row, false)).or_default().push(i);
+    }
+    let is_negation = |x: &[(usize, f64)], y: &[(usize, f64)]| x.len() == y.len() && x.iter().zip(y).all(|(&(k1, v1), &(k2, v2))| k1 == k2 && v1 == -v2);
     let mut partner: Vec<Option<usize>> = vec![None; real_rows.len()];
     for (i, row) in real_rows.iter().enumerate() {
         if partner[i].is_some() {
             continue;
         }
-        if let Some(&p) = index.get(&row_key(row, true)) {
-            if p != i && partner[p].is_none() {
+        if let Some(cands) = index.get(&row_hash(row, true)) {
+            if let Some(&p) = cands.iter().find(|&&p| p != i && partner[p].is_none() && is_negation(row, &real_rows[p])) {
                 partner[i] = Some(p);
                 partner[p] = Some(i);
             }
