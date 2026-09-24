@@ -1,79 +1,26 @@
-//! From-scratch sparse LU factorization of a (square) basis matrix, using
-//! **Markowitz pivoting with bucket-based degree management**: among
-//! numerically-acceptable pivot candidates (`|a_ij| >= stability *
-//! max(|a_i'j|)` over the still-active rows i' of column j — the usual
-//! "threshold pivoting" stability floor), the one minimizing the Markowitz
-//! count `(row_nnz - 1) * (col_nnz - 1)` is chosen, i.e. sparsity
-//! (fill-in) is prioritized over picking the numerically largest entry,
-//! subject to that stability floor.
+//! 基底行列 (正方行列) の疎 LU 分解と、その Forrest-Tomlin 更新・求解。
 //!
-//! This produces `P_row B P_col = L U` (`L` unit lower triangular, `U`
-//! upper triangular, both stored in *elimination-step* order — step `s`'s
-//! pivot row/column are `row_perm[s]`/`col_perm[s]` in the original basis
-//! matrix's indexing).
+//! - 分解: バケット方式で次数を管理する **Markowitz ピボット選択**。
+//!   閾値ピボット (`|a_ij| >= stability * max_i' |a_i'j|`、i' は列 j の
+//!   活性行) を満たす候補のうち、Markowitz 数 `(row_nnz - 1) * (col_nnz - 1)`
+//!   が最小のものを選ぶ (数値的最大よりフィルイン抑制を優先)。
+//! - 結果は `P_row B P_col = L U`。`L` は単位下三角、`U` は上三角で、
+//!   どちらも *消去ステップ順* に格納される (ステップ `s` のピボット行・列は
+//!   元の基底行列の添字で `row_perm[s]` / `col_perm[s]`)。
+//! - 活性部分行列は行優先の値付きラン + 列優先の添字ミラー
+//!   ([`KernelMatrix`]、HiGHS `HFactor` の `mc_*`/`mr_*` 相当のフラット配列)
+//!   で保持し、次数バケット (`col_buckets[d]` / `row_buckets[d]`) と位置索引で
+//!   O(1) の移動を行う。消去 (`eliminate`) は算術と次数・バケット更新を同時に
+//!   行い、引退したピボット行は全列の活性行リストから除かれる。
+//! - 1 ステップのコストはピボット列の次数 + 触れたフィルに比例 (`m` に
+//!   比例しない)。ただし `find_best_pivot` の探索幅は最悪保証ではない。
+//! - Forrest-Tomlin 更新 ([`FtLu::try_update`]) により、完全な再分解は
+//!   時々だけで済む。
+//! - 求解は基本的に `for s in 0..m` のゼロスキップ付き走査。FTRAN の
+//!   入力列だけは Gilbert & Peierls (1988) 型の疎前進代入
+//!   (`LuFactors::l_solve_sparse_into`, [`GpScratch`]) を使う。
 //!
-//! **Degree-list implementation**: row/column degrees (active nonzero
-//! counts) live in bucket arrays (`col_buckets[d]`/`row_buckets[d]`, each a
-//! `Vec` of indices currently at degree `d`), with O(1) bucket moves
-//! via a parallel position index (`col_bucket_pos`/`row_bucket_pos`,
-//! swap-to-last-then-pop on removal — the same pattern `factorize`'s
-//! earlier `active_rows` bookkeeping used). Crucially, a **column-major
-//! mirror** (the exact set of currently-active rows with a nonzero at
-//! column `j`) is maintained alongside the row-major active submatrix,
-//! kept in sync on every insert/remove during elimination. This is what
-//! makes the whole scheme actually sub-`O(m)` per step rather than just
-//! relocating the same cost: "which rows does eliminating column `pj`
-//! affect" is answered by that column's own live-row list directly (cost =
-//! that column's own current degree) instead of scanning every active row
-//! to test whether it still holds `pj`, and "how many rows still touch
-//! column `j`" is that list's length (O(1)) instead of a fresh
-//! full-matrix scan. Both the submatrix and its mirror are **flat arrays**
-//! ([`KernelMatrix`], HiGHS's own `HFactor` `mc_*`/`mr_*` layout), not
-//! `BTreeMap`/`BTreeSet` containers — see that struct's own docs, and
-//! [`MarkowitzState::eliminate`]'s, for why the inner elimination loop is
-//! a sorted merge over contiguous runs rather than one keyed tree descent
-//! per element touched. An
-//! earlier version of this file computed row/column degrees this way but
-//! then performed the actual elimination arithmetic *directly* in
-//! `factorize`'s main loop, ahead of a separate `eliminate_column` method
-//! that was supposed to update the bucket state — since that method
-//! detected "which rows changed" via `contains_key(&pj)`, and the earlier
-//! direct arithmetic had already removed `pj` from every affected row
-//! first, `eliminate_column` always found nothing to do. Bucket degrees
-//! then stayed frozen at their *initial* values for the rest of the
-//! factorization while the underlying matrix kept changing underneath
-//! them, which didn't corrupt the arithmetic (pivot values are always read
-//! fresh from `rows`) but could starve `find_best_pivot` of a candidate it
-//! should have found, surfacing as a spurious "singular" `None` on
-//! matrices that are not actually singular (confirmed: this crate's own
-//! HiGHS cross-check benchmark, which the prior, non-bucketed `factorize`
-//! solved without issue, started panicking at `n=2000` with exactly that
-//! message). The elimination here is a single method (`eliminate`) that
-//! does the arithmetic *and* the degree/bucket bookkeeping together, and a
-//! row being retired as a pivot removes it from every other column's
-//! live-row list too (not just its own pivot column's), so no column's
-//! degree can drift stale by continuing to count an inactive row.
-//!
-//! Within a factorization, per-pivot cost is `O(pivot column's degree)` for
-//! the elimination itself plus `O(fill touched)` for the resulting
-//! degree/`col_max_abs` refresh — bounded by actual sparsity rather than
-//! `m` — though `find_best_pivot`'s bucket scan can still fall back to
-//! examining more candidates than that on a poorly-conditioned or unusually
-//! dense step; it is not a hard worst-case guarantee, just a much smaller
-//! constant than rescanning the whole active submatrix every step.
-//!
-//! Incremental Forrest-Tomlin updates (`ft_update`, in this same file)
-//! exist specifically so a full run of this factorization is only needed
-//! occasionally, not on every basis change — see `simplex.rs`'s
-//! refactorization-trigger docs.
-//!
-//! Solving against the resulting factors is mostly a `for s in 0..m`
-//! dense scan with a per-step zero-skip (`l_solve_into` and friends) —
-//! except FTRAN's own entering-column solve, which instead uses a real
-//! Gilbert & Peierls (1988)-style sparse forward substitution
-//! (`LuFactors::l_solve_sparse_into`, via `GpScratch`'s persistent,
-//! epoch-stamped DFS scratch) — see that function's own docs for why only
-//! this one direction gets the fuller treatment.
+//! 開発経緯は `docs/_history_fragments/lu.md` を参照。
 
 use crate::sparse::{CscBuilder, CscMat, CsrMat, EpochMarks};
 use std::cell::Cell;
@@ -81,36 +28,26 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
-use crate::params::lu::{BORDER_MAX_COUNT, BORDER_MAX_FRACTION, BTRAN_L_SCATTER_FRACTION, DENSE_COL_FRACTION, DENSE_ETA_FRACTION, DENSE_INPUT_FRACTION, DENSE_RHS_FRACTION, DENSITY_AVERAGE_MULTIPLIER, EXPECTED_DENSE_FRACTION, KERNEL_LINEAR_SCAN_MAX, PIVOT_SEARCH_LIMIT, PIVOT_THRESHOLD_FACTOR, PIVOT_THRESHOLD_MAX, PIVOT_THRESHOLD_MIN, REBUILD_FILL_LIMIT, REBUILD_MIN_PIVOT, REUSE_BACKOFF_SHIFT_CAP, REUSE_MAX_BACKOFF, STABILITY, TICK_BUILD_FLOP_COEF, TICK_BUILD_LU_COEF, TICK_BUILD_M_COEF, TICK_SOLVE_NNZ_COEF, U_HYPER_ABORT_FRACTION};
+use crate::params::lu::{BORDER_MAX_COUNT, BORDER_MAX_FRACTION, BTRAN_L_SCATTER_FRACTION, BUCKET_POOL_MAX, DENSE_COL_FRACTION, DENSE_ETA_FRACTION, DENSE_INPUT_FRACTION, DENSE_RHS_FRACTION, DENSE_SWITCH_CHECK_INTERVAL, DENSE_SWITCH_FRACTION, DENSE_SWITCH_MIN_ROWS, DENSITY_AVERAGE_MULTIPLIER, EXPECTED_DENSE_FRACTION, KERNEL_LINEAR_SCAN_MAX, KERNEL_MIN_RUN_CAP, KERNEL_RESERVE_EXTRA, KERNEL_RESERVE_MULT, PIVOT_ROW_SEARCH_MAX_DEGREE, PIVOT_SEARCH_LIMIT, PIVOT_THRESHOLD_FACTOR, PIVOT_THRESHOLD_MAX, PIVOT_THRESHOLD_MIN, REBUILD_FILL_LIMIT, REBUILD_MIN_PIVOT, REUSE_BACKOFF_SHIFT_CAP, REUSE_MAX_BACKOFF, STABILITY, TAU_GP_FRACTION, TICK_BUILD_FLOP_COEF, TICK_BUILD_LU_COEF, TICK_BUILD_M_COEF, TICK_SOLVE_NNZ_COEF, TINY_DROP, U_HYPER_ABORT_FRACTION};
 
 thread_local! {
-    /// The pivot threshold in force for *this thread's* current solve —
-    /// `None` until first read, then [`pivot_threshold_base`].
+    /// このスレッドで現在実行中の求解に適用されるピボット閾値。
+    /// 初回読み出しまでは `None`、以後は [`pivot_threshold_base`] の値。
     ///
-    /// Thread-local rather than a field threaded through `factorize`'s
-    /// half-dozen entry points (and their callers in `simplex.rs`,
-    /// `extended_dual.rs`, `mip.rs`) because it is a *solve*-scoped
-    /// setting in exactly the way HiGHS's own
-    /// `info_.factor_pivot_threshold` is: one value, read once per
-    /// factorization, written only by the simplex loop that owns the
-    /// solve. Thread-local (not a `static`) keeps concurrent solves —
-    /// `mip.rs` runs LP relaxations on rayon workers — from escalating
-    /// each other's thresholds, which a shared global would do while also
-    /// making both solves' pivot sequences depend on the interleaving.
-    /// Every solve entry point calls [`reset_pivot_threshold`] before its
-    /// first factorization, so a thread that ran a troublesome solve does
-    /// not hand the escalated value to the next solve scheduled onto it.
+    /// 求解単位の設定なのでスレッドローカルにしている (HiGHS の
+    /// `info_.factor_pivot_threshold` 相当)。`mip.rs` が rayon ワーカー上で
+    /// 並行に LP を解くため、グローバルにすると互いの閾値を上げ合ってしまう。
+    /// 各求解の入口は最初の分解の前に [`reset_pivot_threshold`] を呼ぶこと。
     static PIVOT_THRESHOLD: Cell<Option<f64>> = const { Cell::new(None) };
 }
 
-/// The value [`reset_pivot_threshold`] restores: [`STABILITY`], or
-/// `ENOMOTO_PIVOT_THRESHOLD` when set (clamped to
-/// `[PIVOT_THRESHOLD_MIN, PIVOT_THRESHOLD_MAX]`), which is how the A/B
-/// behind the constant's own value is produced without a rebuild. Read
-/// from the environment once per process, not once per solve: a solve that
-/// re-read it would pay a `std::env::var` lookup inside the very loop this
-/// section is trying to speed up.
+/// [`reset_pivot_threshold`] が戻す基準値。[`STABILITY`]、または環境変数
+/// `ENOMOTO_PIVOT_THRESHOLD` が設定されていればその値
+/// (`[PIVOT_THRESHOLD_MIN, PIVOT_THRESHOLD_MAX]` にクランプ)。
+/// 環境変数はプロセスごとに 1 回だけ読む (求解ごとに読むとホットループで
+/// `std::env::var` を払うため)。
 fn pivot_threshold_base() -> f64 {
+    // プロセス内で 1 回だけ計算される基準値のキャッシュ
     static BASE: OnceLock<f64> = OnceLock::new();
     *BASE.get_or_init(|| {
         env_str!("ENOMOTO_PIVOT_THRESHOLD")
@@ -120,15 +57,11 @@ fn pivot_threshold_base() -> f64 {
     })
 }
 
-/// The threshold-pivoting floor in force right now: a candidate pivot must
-/// be at least this fraction of the largest magnitude left in its column
-/// of the active submatrix. Read **once per factorization**
-/// (`MarkowitzState::new`, `factorize_reusing_order`), never per
-/// elimination step — a factorization that read it per step could see it
-/// change underneath itself only if the simplex loop ran concurrently with
-/// its own factorization, but reading it once also keeps the whole
-/// factorization's pivot sequence a function of one scalar, which is what
-/// makes a given solve reproducible.
+/// 現在有効な閾値ピボットの下限比率を返す。ピボット候補は、活性部分行列の
+/// その列に残る最大絶対値のこの割合以上でなければならない。
+/// **分解ごとに 1 回だけ** 読むこと (`MarkowitzState::new`,
+/// `factorize_reusing_order`)。消去ステップごとに読まないことで、1 回の分解の
+/// ピボット列が 1 つのスカラーだけで決まり、再現性が保たれる。
 pub fn pivot_threshold() -> f64 {
     PIVOT_THRESHOLD.with(|c| match c.get() {
         Some(v) => v,
@@ -140,38 +73,20 @@ pub fn pivot_threshold() -> f64 {
     })
 }
 
-/// Restores [`pivot_threshold_base`] — called by every solve entry point
-/// before its first factorization, since the escalation below is
-/// deliberately monotone *within* a solve and must not leak across solves
-/// (see [`PIVOT_THRESHOLD`]'s own docs).
+/// ピボット閾値を [`pivot_threshold_base`] に戻す。各求解の入口で最初の分解の
+/// 前に呼ぶ (引き上げは求解内で単調なので、求解をまたいで漏らさないため)。
 pub fn reset_pivot_threshold() {
     PIVOT_THRESHOLD.with(|c| c.set(Some(pivot_threshold_base())));
 }
 
-/// Raises the threshold one [`PIVOT_THRESHOLD_FACTOR`] step, capped at
-/// [`PIVOT_THRESHOLD_MAX`]; returns whether it actually moved.
+/// ピボット閾値を [`PIVOT_THRESHOLD_FACTOR`] 倍に 1 段引き上げる
+/// (上限 [`PIVOT_THRESHOLD_MAX`])。実際に値が変わったら `true` を返す。
 ///
-/// This is `docs/lu_comparison_enomoto_vs_highs.md` §2.4's "loosen/tighten
-/// the stability floor when the problem is ill-conditioned", in HiGHS's
-/// own direction: a solve that keeps *failing* numerically (Forrest-Tomlin
-/// updates rejected, `x_B(M)`/`d` drifting away from the true basis,
-/// pivots grossly inconsistent with the factorization) is one whose
-/// factorizations are too permissive, so the floor goes **up**, buying
-/// stability with fill-in. Lowering it on trouble would be the wrong sign:
-/// it is exactly the marginal pivots a lower floor admits that produce the
-/// eta chains these triggers are catching.
+/// 数値的トラブル (FT 更新の棄却、`x_B`/`d` のドリフト等) が続く求解では、
+/// フィルインを払って安定性を買う方向 (閾値を上げる) に動かす。
+/// 求解内では単調で、下げるのは [`reset_pivot_threshold`] のみ。
 ///
-/// Monotone within a solve, like HiGHS's `info_.factor_pivot_threshold`:
-/// nothing lowers it again short of [`reset_pivot_threshold`]. A ratchet
-/// that also relaxed would make "how many troublesome iterations ago" part
-/// of the pivot sequence, and the extra state buys nothing measurable —
-/// the ladder is one step wide.
-///
-/// **Nothing calls this by default.** Wiring it to the numerical-failure
-/// triggers cost +7.4% over NETLIB93; see
-/// `PIVOT_ESCALATION_STEP` and
-/// `analysis/pivot_threshold_colfixmax_20260922_154500.md` for the
-/// measurement, and `ENOMOTO_PIVOT_ESCALATION_STEP` to re-enable it.
+/// **既定では誰も呼ばない** (`ENOMOTO_PIVOT_ESCALATION_STEP` で有効化)。
 pub fn escalate_pivot_threshold() -> bool {
     let cur = pivot_threshold();
     let next = (cur * PIVOT_THRESHOLD_FACTOR).min(PIVOT_THRESHOLD_MAX);
@@ -184,161 +99,82 @@ pub fn escalate_pivot_threshold() -> bool {
     }
 }
 
-/// [`PIVOT_SEARCH_LIMIT`], overridable via `ENOMOTO_PIVOT_SEARCH_LIMIT` —
-/// `0` restores the unbounded scan, which is how the A/B behind the
-/// constant's own value is produced. Read once per `MarkowitzState::new`
-/// (i.e. once per factorization), never per elimination step: the read is
-/// `find_best_pivot`'s own caller-side cost otherwise, paid `m` times per
-/// factorization, and an `std::env::var` lookup there would show up in the
-/// very measurement this gate exists to make.
+/// 1 回の `find_best_pivot` が調べてよい候補列数の上限
+/// ([`PIVOT_SEARCH_LIMIT`]、環境変数 `ENOMOTO_PIVOT_SEARCH_LIMIT` で上書き可、
+/// `0` で無制限)。分解ごとに 1 回 (`MarkowitzState::new`) だけ読む。
 fn pivot_search_limit() -> usize {
     env_str!("ENOMOTO_PIVOT_SEARCH_LIMIT")
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(PIVOT_SEARCH_LIMIT)
 }
 
-// Measurement counters for the "should `factorize` triangularize `A_B`
-// into a trivial part plus a smaller Markowitz bump before factoring, the
-// way production codes like HiGHS do" question, read back by
-// `simplex.rs`'s `ENOMOTO_PROF_TRIANGULAR`-gated diagnostic. Answered by
-// measurement rather than by adding the pre-pass speculatively: on every
-// Netlib instance checked (`ganges`, `ship12s`, `stocfor2`, `fit1p`),
-// `find_best_pivot`'s bucket-based early exit already resolves 90-100% of
-// pivots as score-0 "trivial" ones, and cumulative time inside
-// `find_best_pivot` across the *entire* solve was under 0.2% of total
-// solve time in every case — the pivot *search* was never the bottleneck
-// a dedicated triangularization pre-pass would speed up, so one was not
-// added. Kept as a live diagnostic (not deleted) in case a future problem
-// shape changes that picture — and it did: the "under 0.2%" figure above
-// holds only for the four small instances it was measured on. Re-measured
-// across the whole set for [`PIVOT_SEARCH_LIMIT`], `dfl001` spent 2.96s of
-// its 22.0s solve (13%) inside `find_best_pivot`, at an average scan width
-// of 261 candidate columns per elimination step — the search *was* a real
-// cost there, just not on problems small enough for the original sample.
-// A triangularization pre-pass still isn't what that calls for (the bound
-// in `PIVOT_SEARCH_LIMIT` addresses it directly, taking the same problem's
-// scan to 0.22s), but the 0.2% claim should not be quoted as if it covered
-// the large instances.
+// ---- プロファイル用カウンタ (診断出力でのみ読まれる) ----
+
+/// 分解で実行した消去ステップの総数 (`ENOMOTO_PROF_TRIANGULAR` 診断用)。
 pub(crate) static PROF_TOTAL_STEPS: AtomicUsize = AtomicUsize::new(0);
+/// そのうち Markowitz 数 0 の「自明な」ピボットで済んだステップ数。
 pub(crate) static PROF_TRIVIAL_STEPS: AtomicUsize = AtomicUsize::new(0);
-/// Recorded only when `ENOMOTO_PROF_PHASES_EXT`, `ENOMOTO_PROF_PHASES` or
-/// `ENOMOTO_PROF_TRIANGULAR` is set (two `Instant::now()` per elimination
-/// step are otherwise pure hot-path overhead); the step/candidate counters
-/// around it are always kept, accumulated per factorization and flushed
-/// once from `MarkowitzState`'s `Drop`.
+/// `find_best_pivot` のバケット走査に費やした累計ナノ秒。
+/// `ENOMOTO_PROF_PHASES_EXT` / `ENOMOTO_PROF_PHASES` / `ENOMOTO_PROF_TRIANGULAR`
+/// のいずれかが設定されているときだけ計測する (ステップごとに
+/// `Instant::now()` 2 回のコストがあるため)。
 pub(crate) static PROF_BUCKET_SCAN_NS: AtomicUsize = AtomicUsize::new(0);
-/// How many elimination steps had to fall back to `find_best_pivot(false)`
-/// because every remaining candidate was `initially_dense` — a direct
-/// measurement of how often the dense-column-avoidance heuristic in
-/// `factorize` actually gets exercised (as opposed to every dense column
-/// simply never coming up as a candidate at all, in which case this stays
-/// at `0` and the heuristic is a no-op for that problem).
+/// 残り候補がすべて `initially_dense` だったため `find_best_pivot(false)` に
+/// フォールバックした消去ステップ数 (稠密列回避の発動頻度)。
 pub(crate) static PROF_DENSE_FALLBACK_STEPS: AtomicUsize = AtomicUsize::new(0);
-/// How many `find_best_pivot` calls actually returned early because of
-/// [`PIVOT_SEARCH_LIMIT`] (as opposed to the score-0 exit, the
-/// per-degree-level `merit_limit` exit, or a full scan) — the direct
-/// measurement of how often the bound is exercised at all, without which
-/// a flat benchmark result can't be told apart from a no-op.
+/// [`PIVOT_SEARCH_LIMIT`] によって早期終了した `find_best_pivot` 呼び出し数。
 pub(crate) static PROF_SEARCH_LIMIT_STEPS: AtomicUsize = AtomicUsize::new(0);
-/// Total candidate columns examined across all `find_best_pivot` calls —
-/// the quantity [`PIVOT_SEARCH_LIMIT`] bounds per call. Read against
-/// [`PROF_TOTAL_STEPS`] it gives the average scan width per step, which is
-/// what the bound is supposed to move.
+/// 全 `find_best_pivot` 呼び出しで調べた候補列の総数
+/// ([`PROF_TOTAL_STEPS`] で割るとステップあたりの平均探索幅)。
 pub(crate) static PROF_SEARCH_CANDIDATES: AtomicUsize = AtomicUsize::new(0);
 
-/// How many times [`escalate_pivot_threshold`] actually moved the
-/// threshold — without this, a flat benchmark on the §2.4 escalation
-/// can't be told apart from one where the ladder never fired at all.
+/// [`escalate_pivot_threshold`] が実際に閾値を動かした回数。
 pub(crate) static PROF_PIVOT_ESCALATIONS: AtomicUsize = AtomicUsize::new(0);
-/// Entries `ensure_col_max_abs` walked to un-stale the columns
-/// `find_best_pivot` actually read — the total work an incremental
-/// `colFixMax` (`docs/lu_comparison_enomoto_vs_highs.md` §2.4) could have
-/// removed, and the reason removing it lost: since §2.5's
-/// [`PIVOT_SEARCH_LIMIT`] bounds a single search to 8 candidate columns,
-/// this is already a small fraction of the per-entry bookkeeping such a
-/// scheme costs in `eliminate` (measured in
-/// `analysis/pivot_threshold_colfixmax_20260922_154500.md` §2). Counted
-/// per rescan, not per touched column, so it stays off the elimination
-/// loop's own path.
-///
-/// Since `find_best_pivot` recomputes a stale max only when some entry of
-/// the column has already passed the Markowitz-score filter (see the
-/// lazy-`col_max_abs` note there; `ENOMOTO_LU_LAZY_COLMAX=0` restores the
-/// eager rescan), this counts only the rescans that were actually needed:
-/// `pilot87` 14.2M -> 9.2M entries, `d2q06c` 258K -> 223K, same
-/// pivots.
+/// `ensure_col_max_abs` が古くなった列最大値を再計算するために走査した
+/// 要素数の累計 (再走査ごとに加算)。
 pub(crate) static PROF_COLMAX_RESCAN_ENTRIES: AtomicUsize = AtomicUsize::new(0);
 
-/// BTRANs whose `L^{-T}` stage took the row-major scatter form, against
-/// those that fell back to the column-major gather form — see
-/// [`BTRAN_L_SCATTER_FRACTION`].
+/// BTRAN の `L^{-T}` 段で行優先スキャッタ形式を使った回数
+/// ([`BTRAN_L_SCATTER_FRACTION`] 参照)。
 pub(crate) static PROF_BTRAN_L_SCATTER: AtomicUsize = AtomicUsize::new(0);
+/// BTRAN の `L^{-T}` 段で列優先ギャザー形式にフォールバックした回数。
 pub(crate) static PROF_BTRAN_L_GATHER: AtomicUsize = AtomicUsize::new(0);
 
-/// Flat, HiGHS-`HFactor`-style storage for the active submatrix that
-/// Markowitz elimination works on — the replacement for the
-/// `Vec<BTreeMap<usize, f64>>` (rows) + `Vec<BTreeSet<usize>>` (column
-/// mirror) pair [`MarkowitzState`] used to hold directly, and the item
-/// `docs/lu_comparison_enomoto_vs_highs.md` §3.1 flagged as the largest
-/// remaining structural gap against HiGHS's own kernel (`mc_*`/`mr_*`
-/// flat arrays with in-place insert/delete, against tree nodes scattered
-/// across the heap and an `O(log d)` traversal per element touched).
+/// Markowitz 消去が作業する活性部分行列のフラット格納 (HiGHS `HFactor` の
+/// `mc_*`/`mr_*` 方式を行・列を入れ替えて採用)。
 ///
-/// Layout, mirroring HiGHS's `mc_start`/`mc_space`/`mc_count` +
-/// `mr_start`/`mr_space`/`mr_count` pattern with the two axes swapped —
-/// this crate's elimination is row-oriented (it scatters the pivot *row*
-/// into every affected row), where HiGHS's is column-oriented, so the
-/// *values* live row-major here and the index-only mirror is the column
-/// one:
+/// - 行側 (値を持つ唯一の真実): `row_idx[row_start[i] .. row_start[i] + row_len[i]]`
+///   (列番号 `u32`) と同範囲の `row_val` が行 `i` の活性ラン。**列番号昇順**。
+///   `row_cap[i]` はそのランがその場で伸びられる容量。
+/// - 列側 (添字のみのミラー): `col_ent[col_start[j] .. col_start[j] + col_len[j]]`
+///   が列 `j` の活性行リスト。**行番号昇順**。
 ///
-/// - `row_idx[row_start[i] .. row_start[i] + row_len[i]]` (columns, `u32`)
-///   and the same range of `row_val` (values) are row `i`'s live run,
-///   **sorted ascending by column**. `row_cap[i]` is how much room that
-///   run has in place before it must be relocated to the end of the row
-///   buffers.
-/// - `col_ent[col_start[j] .. col_start[j] + col_len[j]]` is column `j`'s
-///   live row list — indices only (`u32`: two rows per cache line's worth
-///   of what `usize` would cost, and the ascending-degree bucket scan in
-///   [`MarkowitzState::find_best_pivot`] reads these runs end to end),
-///   **sorted ascending by row**. The row side is the single source of
-///   truth for values; this mirror only answers "which rows are live in
-///   column `j`", exactly as `col_rows` did.
-///
-/// Both runs are kept *sorted*, rather than taking HiGHS's cheaper
-/// swap-with-last unordered sets. That is a deliberate extra cost — a
-/// `copy_within` over a contiguous, usually single-digit-length run,
-/// still far cheaper than the tree traversal it replaces — and it buys
-/// exact behavioural equivalence with the ordered containers it replaces:
-/// [`MarkowitzState::find_best_pivot`] resolves Markowitz-score *and*
-/// pivot-magnitude ties by first-encountered, `eliminate` emits its `L`
-/// multipliers and refreshes touched columns in iteration order, and LP
-/// basis matrices are full of exactly-tied `±1` coefficients. An
-/// unordered mirror would therefore silently select different pivots on
-/// real Netlib instances, changing the factorization, the iteration
-/// counts, and hence what a before/after benchmark of *this* change is
-/// actually measuring.
+/// どちらのランも昇順に保つ。これにより Markowitz 数やピボット絶対値の同点を
+/// 「最初に見つかったもの」で決める挙動、`L` 乗数の出力順などが順序付き
+/// コンテナ版と完全に一致する (LP 基底は `±1` の同点だらけなので重要)。
 struct KernelMatrix {
-    /// Row runs, structure-of-arrays: `row_idx` (column indices, `u32`)
-    /// and `row_val` (values) share one set of offsets. Splitting the
-    /// `(usize, f64)` pairs this held before means a column lookup
-    /// ([`Self::row_get`], run ~12M times per `pilot87` solve by
-    /// `find_best_pivot`'s lazy `col_max_abs` rescans) and the index side
-    /// of `eliminate`'s scatter loop stream 4 bytes per entry instead of
-    /// 16.
+    /// 行ランの列番号 (`row_val` とオフセットを共有する構造体配列形式)。
     row_idx: Vec<u32>,
+    /// 行ランの値。
     row_val: Vec<f64>,
+    /// 行 `i` のランの開始位置。
     row_start: Vec<usize>,
+    /// 行 `i` のランの長さ (活性要素数)。
     row_len: Vec<usize>,
+    /// 行 `i` のランがその場で保持できる容量。
     row_cap: Vec<usize>,
+    /// 列ミラーの行番号バッファ。
     col_ent: Vec<u32>,
+    /// 列 `j` のランの開始位置。
     col_start: Vec<usize>,
+    /// 列 `j` のランの長さ。
     col_len: Vec<usize>,
+    /// 列 `j` のランがその場で保持できる容量。
     col_cap: Vec<usize>,
 }
 
-/// Position of `j` in the ascending run `idx`, if present. Short runs
-/// (the common case: Markowitz keeps active rows short) are scanned
-/// linearly with an early exit; longer ones binary-searched.
+/// 昇順ラン `idx` 内で `j` の位置を返す (無ければ `None`)。短いラン
+/// ([`KERNEL_LINEAR_SCAN_MAX`] 以下) は早期終了付き線形探索、長いランは二分探索。
 #[inline]
 fn sorted_find(idx: &[u32], j: u32) -> Option<usize> {
     if idx.len() <= tunable!("ENOMOTO_T_KERNEL_LINEAR_SCAN_MAX", KERNEL_LINEAR_SCAN_MAX, usize) {
@@ -354,30 +190,27 @@ fn sorted_find(idx: &[u32], j: u32) -> Option<usize> {
 }
 
 impl KernelMatrix {
+    /// 疎行 `(列, 値)` の並びから `m x m` の活性部分行列を構築する。
+    /// 各行は列でソートし、重複座標は入力順に加算、厳密な 0 は落とす。
     fn new(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Self {
         assert!(m <= u32::MAX as usize, "kernel row index must fit in u32");
         assert_eq!(rows_in.len(), m, "kernel input must be square");
+        // 入力の総非ゼロ数
         let total: usize = rows_in.iter().map(|r| r.len()).sum();
-        // Capacity, not length: the reserve is here so the relocations
-        // (`ensure_row_cap`'s, later) stay `resize` inside one allocation
-        // instead of repeatedly reallocating and copying the whole
-        // buffer. Nothing is *initialized* beyond what is actually
-        // written — see the zero-slack note at `row_cap` below.
-        let mut row_idx: Vec<u32> = Vec::with_capacity(2 * total + 64);
-        let mut row_val: Vec<f64> = Vec::with_capacity(2 * total + 64);
+        // 容量だけ予約する (後の再配置を 1 回の確保内の `resize` で済ませるため)。
+        let mut row_idx: Vec<u32> = Vec::with_capacity(KERNEL_RESERVE_MULT * total + KERNEL_RESERVE_EXTRA);
+        let mut row_val: Vec<f64> = Vec::with_capacity(KERNEL_RESERVE_MULT * total + KERNEL_RESERVE_EXTRA);
         let mut row_start = Vec::with_capacity(m);
         let mut row_len = Vec::with_capacity(m);
         let mut row_cap = Vec::with_capacity(m);
+        // 1 行分をソート・重複加算するための作業バッファ
         let mut buf: Vec<(usize, f64)> = Vec::new();
 
         for row in rows_in.iter() {
             buf.clear();
             buf.extend_from_slice(row);
-            // Stable sort by column, then accumulate each duplicate run in
-            // input order and drop exact zeros — bit-for-bit what the
-            // `*entry(j).or_insert(0.0) += v` + `retain(|_, v| *v != 0.0)`
-            // construction this replaces produced, summation order of
-            // repeated coordinates included.
+            // 列で安定ソートし、重複ランを入力順に加算、厳密な 0 を除去する
+            // (加算順序も含め旧 BTreeMap 構築とビット一致)。
             buf.sort_by_key(|&(j, _)| j);
             let start = row_idx.len();
             let mut k = 0;
@@ -393,26 +226,15 @@ impl KernelMatrix {
                     row_val.push(acc);
                 }
             }
-            // No up-front slack (`cap == len`): a row only ever needs to
-            // grow when the merge in `eliminate` leaves it *net* longer,
-            // and the pivot column's own entry always leaves at the same
-            // time, so one fill-in still fits in place and only two or
-            // more relocate. Pre-padding every row instead cost a
-            // memset proportional to the padding on *every*
-            // refactorization, including for the many rows that never
-            // take fill at all — worst of all on a near-slack basis,
-            // where `nnz ~= m` makes a flat few-entries-per-row pad
-            // several times the size of the real data. `ensure_row_cap`
-            // doubles from here, so a row that keeps taking fill still
-            // relocates `O(log)` times, not once per insertion.
+            // 余白なし (`cap == len`)。フィル 1 個はピボット列要素の退出と
+            // 相殺されるのでその場に収まり、2 個以上で初めて再配置される。
             let len = row_idx.len() - start;
             row_start.push(start);
             row_len.push(len);
             row_cap.push(len);
         }
 
-        // Column mirror by counting sort. Filling it with `i` ascending is
-        // what makes every column's run sorted without a sort.
+        // 計数ソートで列ミラーを作る。`i` 昇順に詰めるので各列ランは自動的に昇順。
         let mut col_len = vec![0usize; m];
         for &j in &row_idx {
             col_len[j as usize] += 1;
@@ -423,10 +245,11 @@ impl KernelMatrix {
             col_start[j] = pos;
             pos += col_len[j];
         }
-        // Zero-slack and reserved, for the same reasons as the row side.
+        // 行側と同じ理由で余白なし・容量予約。
         let col_cap = col_len.clone();
-        let mut col_ent: Vec<u32> = Vec::with_capacity(2 * total + 64);
+        let mut col_ent: Vec<u32> = Vec::with_capacity(KERNEL_RESERVE_MULT * total + KERNEL_RESERVE_EXTRA);
         col_ent.resize(pos, 0);
+        // 各列にすでに書き込んだ行数
         let mut fill = vec![0usize; m];
         for i in 0..m {
             let (s, l) = (row_start[i], row_len[i]);
@@ -440,7 +263,7 @@ impl KernelMatrix {
         KernelMatrix { row_idx, row_val, row_start, row_len, row_cap, col_ent, col_start, col_len, col_cap }
     }
 
-    /// Row `i`'s live run: (column indices ascending, values).
+    /// 行 `i` の活性ラン (列番号昇順, 値) を返す。
     #[inline]
     fn row(&self, i: usize) -> (&[u32], &[f64]) {
         let s = self.row_start[i];
@@ -448,14 +271,14 @@ impl KernelMatrix {
         (&self.row_idx[s..e], &self.row_val[s..e])
     }
 
+    /// 列 `j` の活性行リスト (行番号昇順) を返す。
     #[inline]
     fn col(&self, j: usize) -> &[u32] {
         let s = self.col_start[j];
         &self.col_ent[s..s + self.col_len[j]]
     }
 
-    /// The value at `(i, j)`, or `None` if that coordinate is not live —
-    /// the direct stand-in for `rows[i].get(&j)`.
+    /// `(i, j)` の値を返す。その座標が活性でなければ `None`。
     #[inline]
     fn row_get(&self, i: usize, j: usize) -> Option<f64> {
         let s = self.row_start[i];
@@ -463,17 +286,14 @@ impl KernelMatrix {
         sorted_find(&self.row_idx[s..e], j as u32).map(|p| self.row_val[s + p])
     }
 
-    /// Relocates row `i`'s run to the end of the row buffers if it cannot
-    /// hold `need` entries in place, doubling its capacity (so a row that
-    /// keeps taking fill-in relocates `O(log)` times, not once per
-    /// insertion). The vacated run is left as dead space rather than
-    /// compacted: total dead space is bounded by the live total, and a
-    /// factorization is a short-lived, single-pass affair.
+    /// 行 `i` のランが `need` 要素をその場で保持できなければ、容量を倍増して
+    /// 行バッファ末尾へ再配置する。空いた旧領域は詰めずに放置する
+    /// (死領域は活性総量で抑えられ、分解は短命なため)。
     fn ensure_row_cap(&mut self, i: usize, need: usize) {
         if need <= self.row_cap[i] {
             return;
         }
-        let new_cap = need.max(self.row_cap[i] * 2).max(4);
+        let new_cap = need.max(self.row_cap[i] * 2).max(KERNEL_MIN_RUN_CAP);
         let (old_start, len) = (self.row_start[i], self.row_len[i]);
         let start = self.row_idx.len();
         self.row_idx.resize(start + new_cap, 0);
@@ -484,11 +304,12 @@ impl KernelMatrix {
         self.row_cap[i] = new_cap;
     }
 
+    /// 列 `j` のランについての [`Self::ensure_row_cap`] 相当。
     fn ensure_col_cap(&mut self, j: usize, need: usize) {
         if need <= self.col_cap[j] {
             return;
         }
-        let new_cap = need.max(self.col_cap[j] * 2).max(4);
+        let new_cap = need.max(self.col_cap[j] * 2).max(KERNEL_MIN_RUN_CAP);
         let (old_start, len) = (self.col_start[j], self.col_len[j]);
         let start = self.col_ent.len();
         self.col_ent.resize(start + new_cap, 0);
@@ -497,10 +318,7 @@ impl KernelMatrix {
         self.col_cap[j] = new_cap;
     }
 
-    /// Adds row `i` to column `j`'s live list, keeping it sorted.
-    /// `eliminate` walks its affected rows in ascending order, so the
-    /// insertion point is typically at or near the run's tail and the
-    /// shift is short.
+    /// 行 `i` を列 `j` の活性行リストに昇順を保って挿入する。
     fn col_insert(&mut self, j: usize, i: usize) {
         let len = self.col_len[j];
         let pos = {
@@ -514,10 +332,8 @@ impl KernelMatrix {
         self.col_len[j] = len + 1;
     }
 
-    /// Removes row `i` from column `j`'s live list; a no-op when it isn't
-    /// there, matching `BTreeSet::remove`'s own tolerance (callers rely on
-    /// it: a column already retired by `col_clear` still gets removal
-    /// calls for the pivot row).
+    /// 行 `i` を列 `j` の活性行リストから除く。無ければ何もしない
+    /// (`col_clear` 済みの列にもピボット行の除去呼び出しが来るため必要)。
     fn col_remove(&mut self, j: usize, i: usize) {
         let (s, len) = (self.col_start[j], self.col_len[j]);
         let run = &self.col_ent[s..s + len];
@@ -529,59 +345,60 @@ impl KernelMatrix {
         self.col_len[j] = len - 1;
     }
 
+    /// 列 `j` の活性行リストを空にする (ピボット列の引退時)。
     #[inline]
     fn col_clear(&mut self, j: usize) {
         self.col_len[j] = 0;
     }
 }
 
-/// Per-elimination-step scratch, owned by [`MarkowitzState`] and lent out
-/// via `mem::take` for the duration of [`MarkowitzState::eliminate`], so
-/// that a factorization's `m` elimination steps reuse one set of buffers
-/// instead of allocating a fresh `Vec`/`BTreeSet` per step.
+/// 消去ステップ用の作業バッファ。[`MarkowitzState`] が所有し、
+/// [`MarkowitzState::eliminate`] の間だけ `mem::take` で貸し出す
+/// (ステップごとの確保を避けるため)。
 #[derive(Default)]
 struct ElimScratch {
-    /// Rows of the pivot column that still need eliminating (a copy: the
-    /// column's own live list is mutated while they are processed).
+    /// まだ消去が必要なピボット列の行 (処理中に列リスト自体が変わるのでコピー)。
     affected: Vec<usize>,
-    /// The general merge's output for the affected row currently being
-    /// rewritten (fallback path only; see `eliminate`).
+    /// 一般マージ経路で書き換え中の行の出力 (列番号)。フォールバック時のみ使用。
     merged_idx: Vec<u32>,
+    /// 同上の値。
     merged_val: Vec<f64>,
-    /// The current affected row's fill-in, ascending by column.
+    /// 現在の影響行のフィルイン (列番号昇順)。
     fill_idx: Vec<u32>,
+    /// 同上の値。
     fill_val: Vec<f64>,
-    /// Columns gaining / losing the current affected row, applied to the
-    /// column mirror once the merge has released its borrow on the row.
+    /// 現在の影響行が新たに加わる列 (行の借用解放後に列ミラーへ反映)。
     col_add: Vec<usize>,
+    /// 現在の影響行が抜ける列。
     col_del: Vec<usize>,
-    /// `L`'s multipliers for this step, in affected-row order.
+    /// このステップの `L` 乗数 `(行, 乗数)` (影響行の順)。
     l_out: Vec<(usize, f64)>,
-    /// Columns of the retiring pivot row, to drop it from.
+    /// 引退するピボット行の列 (そこから行を除くため)。
     pi_cols: Vec<usize>,
-    /// The pivot row's active off-pivot values scattered by column
-    /// (`0.0` everywhere else — the pivot row never holds an exact zero,
-    /// so a nonzero here *is* membership). Cleared entry by entry at the
-    /// end of each step, so it stays all-zero between steps.
+    /// ピボット行の非ピボット値を列位置に散布した密配列 (他は `0.0`。
+    /// ピボット行は厳密な 0 を持たないので非ゼロ = 所属)。各ステップ末に
+    /// 要素ごとに 0 に戻す。
     wval: Vec<f64>,
-    /// Per-affected-row stamps over columns, used only when a row takes
-    /// fill-in, to tell which pivot-row columns it already held.
+    /// 影響行ごとの列スタンプ。フィルインが出る行でのみ、その行が既に
+    /// 持っていたピボット行の列を判定するのに使う。
     rmark: Vec<u32>,
+    /// `rmark` の現在のスタンプ値。
     rstamp: u32,
 }
 
 impl ElimScratch {
+    /// `m` 列分の密バッファを確保して作る。
     fn new(m: usize) -> Self {
         ElimScratch { wval: vec![0.0; m], rmark: vec![0; m], rstamp: 0, ..Default::default() }
     }
 
+    /// 1 ステップの開始時に `l_out` を空にする。
     fn begin(&mut self) {
         self.l_out.clear();
     }
 
-    /// A fresh `rmark` stamp; clears the stamps outright on the one call
-    /// in ~4 billion that wraps back to `0` (same technique as
-    /// [`GpScratch::bump_epoch`]).
+    /// 新しい `rmark` スタンプを返す。0 に一周したときだけ全スタンプを消す
+    /// ([`GpScratch::bump_epoch`] と同じ手法)。
     #[inline]
     fn next_rstamp(&mut self) -> u32 {
         self.rstamp = self.rstamp.wrapping_add(1);
@@ -593,178 +410,108 @@ impl ElimScratch {
     }
 }
 
-/// Manages the active submatrix plus row/column degrees (via bucket
-/// arrays) during Markowitz elimination — see [`KernelMatrix`] for the
-/// flat row-major-values + column-major-indices storage itself, and the
-/// module docs for why a column-major mirror alongside the row-major
-/// matrix is what actually keeps this sub-`O(m)` per step, and why the
-/// elimination and degree bookkeeping must happen in one place rather
-/// than two.
+/// Markowitz 消去中の活性部分行列と行・列次数 (バケット配列) を管理する。
+/// 格納は [`KernelMatrix`]。消去算術と次数・バケット更新は同じ場所
+/// (`eliminate`) で行う。
 struct MarkowitzState {
+    /// 行列の次数 `m` (未使用だが保持)。
     #[allow(dead_code)]
     m: usize,
 
-    /// Active submatrix: row-major values plus the column-major row-index
-    /// mirror, both flat (see [`KernelMatrix`]).
+    /// 活性部分行列 (行優先の値 + 列優先の行番号ミラー)。
     mat: KernelMatrix,
 
-    // Current degrees (active nonzero counts), mirrored by bucket
-    // placement below.
+    /// 列 `j` の現在の次数 (活性非ゼロ数)。バケット配置と一致する。
     col_degree: Vec<usize>,
+    /// 行 `i` の現在の次数。
     row_degree: Vec<usize>,
 
-    // Bucket arrays: bucket[d] = indices currently at degree exactly d.
-    // Sized m + 1 (a degree can be at most the number of active rows/cols).
+    /// 列バケット: `col_buckets[d]` = 現在次数ちょうど `d` の列。長さ `m + 1`。
     col_buckets: Vec<Vec<usize>>,
+    /// 行バケット: `row_buckets[d]` = 現在次数ちょうど `d` の行。
     row_buckets: Vec<Vec<usize>>,
 
-    // col_bucket_pos[j] = j's index within col_buckets[col_degree[j]], or
-    // None if j has been used already (removed from every bucket).
+    /// `col_bucket_pos[j]` = 列 `j` の `col_buckets[col_degree[j]]` 内の位置。
+    /// 使用済み (全バケットから除去済み) なら `None`。
     col_bucket_pos: Vec<Option<usize>>,
+    /// 行版の `col_bucket_pos`。
     row_bucket_pos: Vec<Option<usize>>,
 
+    /// 列がすでにピボットとして使われたか。
     col_used: Vec<bool>,
+    /// 行がすでにピボットとして使われたか。
     row_used: Vec<bool>,
 
-    // Column max absolute values, over that column's own active rows only
-    // (via the column mirror) — the threshold-pivoting stability
-    // reference.
+    /// 列の活性行における最大絶対値 (閾値ピボットの基準)。
     col_max_abs: Vec<f64>,
 
-    // `col_max_abs_dirty[j]`: `col_max_abs[j]` is stale — some entry of
-    // column `j` shrank or left, so the stored value is an upper bound
-    // rather than the true max. Recomputing is deferred to
-    // `ensure_col_max_abs`, called only once `find_best_pivot` is actually
-    // about to read it. Most columns `eliminate` dirties this way get
-    // dirtied again by a later elimination step before `find_best_pivot`
-    // ever visits them (a column's bucket position, which *is* updated
-    // eagerly by `update_col_degree`, is what determines when that
-    // happens), so eagerly recomputing every dirtied column's max was
-    // mostly wasted work — up to 75% of it, measured on Netlib `greenbea`.
-    //
-    // Marking, rather than maintaining, is also what
-    // `docs/lu_comparison_enomoto_vs_highs.md` §2.4's incremental
-    // `colFixMax` was measured against and beat. That variant kept
-    // `col_max_abs[j]` exact through `eliminate` — raise it on a fill-in
-    // or a growing value, mark stale only when the entry that *was* the
-    // max shrank or left — which dropped the stale fraction to 0.1-6% of
-    // touched columns and left every pivot choice bit-identical. It still
-    // lost, by 2.8% over NETLIB93: since §2.5's [`PIVOT_SEARCH_LIMIT`]
-    // bounds one search to 8 candidate columns, the rescans it removed
-    // were already small (`pilot87`: 1.9M entries) against the per-entry
-    // bookkeeping it added in the merge loop below (61.5M updates, each a
-    // scattered read-modify-write into an `m`-sized array). See
-    // `analysis/pivot_threshold_colfixmax_20260922_154500.md` §2.
+    /// `col_max_abs[j]` が古い (列の要素が縮小・退出したので上界に
+    /// すぎない) ことを示す。再計算は `find_best_pivot` が実際に読む直前の
+    /// `ensure_col_max_abs` まで遅延する。
     col_max_abs_dirty: Vec<bool>,
 
-    /// `initially_dense[j]` iff column `j`'s degree *before any
-    /// elimination* exceeded `DENSE_COL_FRACTION * m` — fixed at
-    /// construction time and never updated, deliberately: a truly dense
-    /// column's *current* degree keeps shrinking as unrelated rows get
-    /// eliminated as pivots for *other*, sparser columns (each such row
-    /// leaving the basis removes it from every column's live list,
-    /// including this one's) — dropping into a low bucket only because
-    /// its rows happened to get cannibalized elsewhere, not because it
-    /// stopped being structurally dense. Thresholding on the live,
-    /// shrinking degree would let `find_best_pivot`'s ordinary ascending-
-    /// bucket scan pick such a column early anyway, right when it looks
-    /// artificially sparse — exactly the case this field exists to still
-    /// catch. See `find_best_pivot`'s own docs for what this avoids: a
-    /// pivot on a column with `d` remaining active rows scatters the
-    /// entire pivot row's pattern into all `d` of them in one step
-    /// (`eliminate`'s `affected` list), so pivoting on a column that is
-    /// dense *by original structure* — even at a reduced current degree —
-    /// is still the single most expensive kind of step Markowitz pivoting
-    /// can take.
+    /// 消去開始前の列 `j` の次数が `DENSE_COL_FRACTION * m` を超えていたか。
+    /// 構築時に固定し更新しない (現在次数は他のピボットで行が抜けて縮むが、
+    /// 構造的に稠密な列を踏むと全影響行へピボット行を散布する最も高価な
+    /// ステップになるため、元の構造で判定する)。
     initially_dense: Vec<bool>,
 
-    /// Reused per-step buffers; see [`ElimScratch`].
+    /// ステップ間で再利用する作業バッファ ([`ElimScratch`])。
     scratch: ElimScratch,
 
-    /// [`pivot_search_limit`]'s value, resolved once here rather than per
-    /// `find_best_pivot` call — `0` means "unbounded", the pre-§2.5
-    /// behaviour.
+    /// [`pivot_search_limit`] の値 (分解ごとに 1 回解決)。`0` は無制限。
     search_limit: usize,
 
-    /// [`pivot_threshold`]'s value, resolved once per factorization here —
-    /// see that function's own docs for why this factorization's whole
-    /// pivot sequence is deliberately a function of one scalar captured at
-    /// its start, rather than of a value the simplex loop could raise
-    /// part-way through.
+    /// [`pivot_threshold`] の値 (分解開始時に 1 回だけ取得)。
     threshold: f64,
 
-    /// Plain (non-atomic) accumulator for [`PROF_COLMAX_RESCAN_ENTRIES`],
-    /// flushed once in [`Drop`] — an `AtomicUsize::fetch_add` per rescan
-    /// would be a locked read-modify-write on the factorization's own
-    /// path, and would make two threads factorizing at once contend on
-    /// one cache line.
+    /// [`PROF_COLMAX_RESCAN_ENTRIES`] 用の非アトミック累計。`Drop` で 1 回だけ
+    /// 反映する (再走査ごとの `fetch_add` を避けるため)。
     prof_colmax_rescan_entries: usize,
-    /// `find_best_pivot`'s per-column value cache (see its lazy
-    /// `col_max_abs` recomputation).
-    colval: Vec<Option<f64>>,
-    /// `ENOMOTO_LU_LAZY_COLMAX` (default on) — the A/B switch for that
-    /// lazy recomputation; read once per factorization.
+    /// `find_best_pivot` 内で列ごとの値をキャッシュする配列
+    /// (遅延 `col_max_abs` 再計算用)。
+    col_value_cache: Vec<Option<f64>>,
+    /// `ENOMOTO_LU_LAZY_COLMAX` (既定 on): 遅延再計算を使うか。分解ごとに 1 回読む。
     lazy_colmax: bool,
-    /// `ENOMOTO_LU_ROW_SINGLETON=<rel>` — **path-changing, default off
-    /// (`-1`)**. When `>= 0` and no column singleton exists,
-    /// `find_best_pivot` takes the first active row singleton whose entry
-    /// is at least `rel` times its column's max, instead of reaching it
-    /// only once the column-degree scan arrives at its bucket. Measured
-    /// motive: numerically rejected row singletons (they fail the `0.25`
-    /// threshold) persist across many steps and every search keeps paying
-    /// for the columns in front of them. `rel = 0` is HiGHS's own rule
-    /// (no threshold on singletons). A row singleton's pivot row has no
-    /// other active entry, so it causes no fill and no update of the
-    /// active submatrix; its only numerical cost is the size of the `L`
-    /// multipliers `a_kj / v`. Never applied in [`factorize_bordered`]'s
-    /// sparse phase (reset right after `MarkowitzState::new` there): there the row's border
-    /// entries *are* updated, through the Schur complement, by exactly
-    /// those multipliers — measured as a wrong `fit2p` objective
-    /// (`-8.9e117`) when it was.
+    /// `ENOMOTO_LU_ROW_SINGLETON=<rel>` (**経路が変わる。既定 off = `-1`**)。
+    /// `>= 0` のとき、列シングルトンが無ければ、列最大値の `rel` 倍以上の
+    /// 要素を持つ最初の活性行シングルトンを即座に採る (`rel = 0` は HiGHS の
+    /// 規則)。[`factorize_bordered`] の疎フェーズでは必ず無効
+    /// (境界列要素がその乗数で Schur 補行列を通じて更新されるため)。
     row_singleton_rel: f64,
-    /// `ENOMOTO_PIVOT_ROW_SEARCH` (B2(b); **path-changing, default `0` =
-    /// off**): after scanning column bucket `c`, `find_best_pivot` also
-    /// scans row bucket `c` (every entry of every active row with `c`
-    /// entries, score `(c-1)(col_degree-1)`), HiGHS `buildKernel`-style.
-    /// Short rows find small Markowitz scores early, so the per-level exit
-    /// `best_score <= c^2` fires sooner on matrices whose columns are short
-    /// but whose rows are long (`dfl001`). Each scanned row counts toward
-    /// the search limit like a column does. Off in [`factorize_bordered`]'s
-    /// sparse phase, for the same reason as `row_singleton_rel`. The value
-    /// is the largest row degree whose bucket is scanned (`1` = row
-    /// singletons only; large = every level): a long row costs a
-    /// `col_max_abs` rescan for most of its columns, which on a matrix
-    /// with a dense tail (`pilot87`) outweighs what the search saves.
+    /// `ENOMOTO_PIVOT_ROW_SEARCH` (**経路が変わる。既定 `0` = off**)。
+    /// 列バケット `c` を走査した後、次数 `c` の行バケットも走査する
+    /// (HiGHS `buildKernel` 流)。値は走査する最大の行次数 (`1` = 行
+    /// シングルトンのみ)。走査した行も探索上限に数える。
+    /// [`factorize_bordered`] の疎フェーズでは無効。
     row_search: usize,
-    /// Whether `find_best_pivot` times itself (`PROF_BUCKET_SCAN_NS`) —
-    /// only under the profiling env gates, resolved once per
-    /// factorization.
+    /// `find_best_pivot` が自身の時間を計測するか (プロファイル用環境変数が
+    /// 設定されているときのみ。分解ごとに 1 回解決)。
     prof_timing: bool,
-    /// Plain per-factorization accumulators for `PROF_TOTAL_STEPS`,
-    /// `PROF_TRIVIAL_STEPS`, `PROF_SEARCH_LIMIT_STEPS`,
-    /// `PROF_SEARCH_CANDIDATES` and `PROF_BUCKET_SCAN_NS`, flushed in
-    /// `Drop` (same reasoning as `prof_colmax_rescan_entries`).
+    /// `PROF_TOTAL_STEPS` 用の分解内累計 (`Drop` で反映)。
     prof_steps: usize,
+    /// `PROF_TRIVIAL_STEPS` 用の分解内累計。
     prof_trivial: usize,
-    prof_limit: usize,
+    /// `PROF_SEARCH_LIMIT_STEPS` 用の分解内累計。
+    prof_search_limit_hits: usize,
+    /// `PROF_SEARCH_CANDIDATES` 用の分解内累計。
     prof_candidates: usize,
+    /// `PROF_BUCKET_SCAN_NS` 用の分解内累計。
     prof_scan_ns: usize,
-    /// `ENOMOTO_LU_INPLACE_ELIM` (default on): `eliminate`'s scatter-based
-    /// in-place update; `0` takes the plain two-pointer merge for every
-    /// row (same factors, bit for bit).
+    /// `ENOMOTO_LU_INPLACE_ELIM` (既定 on): `eliminate` の散布ベースの
+    /// その場更新を使うか。`0` なら全行で単純な 2 ポインタマージ
+    /// (因子はビット一致)。
     inplace_elim: bool,
 }
 
 thread_local! {
-    /// Recycled `col_buckets`/`row_buckets` of dropped [`MarkowitzState`]s
-    /// (outer `Vec` plus each bucket's own allocation), so a refactorization
-    /// does not re-allocate `2(m+1)` bucket headers and the buckets' own
-    /// buffers every time. Contents are cleared before reuse; the buckets
-    /// are filled in the same order as fresh ones, so nothing observable
-    /// changes.
+    /// 破棄された [`MarkowitzState`] の `col_buckets`/`row_buckets` を再利用する
+    /// プール (外側 `Vec` と各バケットの確保ごと)。再利用前に中身を消し、
+    /// 新品と同じ順で詰めるので観測可能な違いはない。
     static BUCKET_POOL: std::cell::RefCell<Vec<Vec<Vec<usize>>>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
+/// プールからバケット配列を 1 つ取り出し、`n` 個の空バケットにして返す。
 fn take_buckets(n: usize) -> Vec<Vec<usize>> {
     let mut b = BUCKET_POOL.with(|p| p.borrow_mut().pop()).unwrap_or_default();
     b.truncate(n);
@@ -775,29 +522,33 @@ fn take_buckets(n: usize) -> Vec<Vec<usize>> {
     b
 }
 
+/// バケット配列をプールに返す (プールが [`BUCKET_POOL_MAX`] 個未満のときのみ)。
 fn give_buckets(b: Vec<Vec<usize>>) {
     BUCKET_POOL.with(|p| {
         let mut p = p.borrow_mut();
-        if p.len() < 4 {
+        if p.len() < BUCKET_POOL_MAX {
             p.push(b);
         }
     });
 }
 
 impl Drop for MarkowitzState {
+    /// バケットをプールへ返し、分解内のプロファイル累計を静的カウンタへ反映する。
     fn drop(&mut self) {
         give_buckets(std::mem::take(&mut self.col_buckets));
         give_buckets(std::mem::take(&mut self.row_buckets));
         PROF_COLMAX_RESCAN_ENTRIES.fetch_add(self.prof_colmax_rescan_entries, Ordering::Relaxed);
         PROF_TOTAL_STEPS.fetch_add(self.prof_steps, Ordering::Relaxed);
         PROF_TRIVIAL_STEPS.fetch_add(self.prof_trivial, Ordering::Relaxed);
-        PROF_SEARCH_LIMIT_STEPS.fetch_add(self.prof_limit, Ordering::Relaxed);
+        PROF_SEARCH_LIMIT_STEPS.fetch_add(self.prof_search_limit_hits, Ordering::Relaxed);
         PROF_SEARCH_CANDIDATES.fetch_add(self.prof_candidates, Ordering::Relaxed);
         PROF_BUCKET_SCAN_NS.fetch_add(self.prof_scan_ns, Ordering::Relaxed);
     }
 }
 
 impl MarkowitzState {
+    /// `m x m` の疎行 `rows_in` から消去状態を初期化する
+    /// (次数・バケット・列最大値・稠密列フラグ・各種環境変数設定)。
     fn new(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Self {
         let mat = KernelMatrix::new(m, rows_in);
 
@@ -829,6 +580,7 @@ impl MarkowitzState {
             row_buckets[deg].push(i);
         }
 
+        // この次数を超える列を「初期稠密」とみなす
         let dense_threshold = tunable!("ENOMOTO_T_DENSE_COL_FRACTION", DENSE_COL_FRACTION, f64) * m as f64;
         let initially_dense: Vec<bool> = col_degree.iter().map(|&d| d as f64 > dense_threshold).collect();
 
@@ -850,46 +602,43 @@ impl MarkowitzState {
             search_limit: pivot_search_limit(),
             threshold: pivot_threshold(),
             prof_colmax_rescan_entries: 0,
-            colval: Vec::new(),
+            col_value_cache: Vec::new(),
             inplace_elim: !matches!(env_str!("ENOMOTO_LU_INPLACE_ELIM"), Some("0")),
             prof_timing: env_str!("ENOMOTO_PROF_PHASES_EXT").is_some()
                 || env_str!("ENOMOTO_PROF_PHASES").is_some()
                 || env_str!("ENOMOTO_PROF_TRIANGULAR").is_some(),
             prof_steps: 0,
             prof_trivial: 0,
-            prof_limit: 0,
+            prof_search_limit_hits: 0,
             prof_candidates: 0,
             prof_scan_ns: 0,
             row_singleton_rel: env_str!("ENOMOTO_LU_ROW_SINGLETON").and_then(|v| v.parse::<f64>().ok()).unwrap_or(-1.0),
-            row_search: tunable!("ENOMOTO_PIVOT_ROW_SEARCH", 0, usize),
+            row_search: tunable!("ENOMOTO_PIVOT_ROW_SEARCH", PIVOT_ROW_SEARCH_MAX_DEGREE, usize),
             lazy_colmax: !matches!(env_str!("ENOMOTO_LU_LAZY_COLMAX"), Some("0")),
         }
     }
 
-    /// Row `i`'s live `(column, value)` entries, sorted ascending by
-    /// column — the stand-in for iterating `rows[i]`, with the same order.
+    /// 行 `i` の活性要素 `(列, 値)` を列昇順で返すイテレータ。
     #[inline]
     fn row(&self, i: usize) -> impl Iterator<Item = (usize, f64)> + '_ {
         let (idx, val) = self.mat.row(i);
         idx.iter().zip(val).map(|(&j, &v)| (j as usize, v))
     }
 
-    /// The value at `(i, j)`, or `None` — the stand-in for
-    /// `rows[i].get(&j)`.
+    /// `(i, j)` の値 (活性でなければ `None`)。
     #[inline]
     fn value_at(&self, i: usize, j: usize) -> Option<f64> {
         self.mat.row_get(i, j)
     }
 
-    /// The `(row, multiplier)` pairs the last [`Self::eliminate`] call
-    /// produced for `L`. Held in scratch rather than returned by value so
-    /// that a factorization's `m` steps share one buffer.
+    /// 直前の [`Self::eliminate`] が `L` 用に出力した `(行, 乗数)` の並び
+    /// (全ステップで 1 つのバッファを共有するためスクラッチに保持)。
     #[inline]
     fn l_out(&self) -> &[(usize, f64)] {
         &self.scratch.l_out
     }
 
-    /// Remove an item from bucket[deg] and update position tracking.
+    /// 列 `j` を現在の次数バケットから除く (末尾と入れ替えて pop)。
     fn remove_from_bucket_col(&mut self, j: usize) {
         if let Some(pos) = self.col_bucket_pos[j] {
             let deg = self.col_degree[j];
@@ -905,6 +654,7 @@ impl MarkowitzState {
         }
     }
 
+    /// 行 `i` を現在の次数バケットから除く (末尾と入れ替えて pop)。
     fn remove_from_bucket_row(&mut self, i: usize) {
         if let Some(pos) = self.row_bucket_pos[i] {
             let deg = self.row_degree[i];
@@ -920,7 +670,8 @@ impl MarkowitzState {
         }
     }
 
-    /// Update degree after modifying; move between buckets if needed.
+    /// 列 `j` の次数を `new_deg` に更新し、必要ならバケットを移す
+    /// (使用済み列や次数不変なら何もしない)。
     fn update_col_degree(&mut self, j: usize, new_deg: usize) {
         if self.col_used[j] || new_deg == self.col_degree[j] {
             return;
@@ -932,6 +683,7 @@ impl MarkowitzState {
         self.col_buckets[new_deg].push(j);
     }
 
+    /// 行 `i` の次数を `new_deg` に更新し、必要ならバケットを移す。
     fn update_row_degree(&mut self, i: usize, new_deg: usize) {
         if self.row_used[i] || new_deg == self.row_degree[i] {
             return;
@@ -943,15 +695,8 @@ impl MarkowitzState {
         self.row_buckets[new_deg].push(i);
     }
 
-    /// Updates `j`'s degree/bucket placement from its current
-    /// column-mirror membership — O(that column's own active degree),
-    /// never O(m).
-    ///
-    /// Marks `col_max_abs[j]` stale rather than recomputing it here; see
-    /// [`Self::ensure_col_max_abs`] and `col_max_abs_dirty`'s own docs for
-    /// why, including why the incremental alternative
-    /// (`docs/lu_comparison_enomoto_vs_highs.md` §2.4's `colFixMax`) was
-    /// measured and rejected.
+    /// 列 `j` の次数・バケット位置を列ミラーの現状から更新し
+    /// (O(列次数))、`col_max_abs[j]` を古い印にする (再計算は遅延)。
     fn refresh_column(&mut self, j: usize) {
         if self.col_used[j] {
             return;
@@ -961,10 +706,7 @@ impl MarkowitzState {
         self.col_max_abs_dirty[j] = true;
     }
 
-    /// Recomputes `col_max_abs[j]` from its current column-mirror
-    /// membership if it is marked stale, otherwise a no-op — called from
-    /// `find_best_pivot` right before it reads `col_max_abs[j]`, the one
-    /// place that value's currency actually matters.
+    /// `col_max_abs[j]` が古い印付きなら列ミラーから再計算する (そうでなければ何もしない)。
     fn ensure_col_max_abs(&mut self, j: usize) {
         if !self.col_max_abs_dirty[j] {
             return;
@@ -973,8 +715,7 @@ impl MarkowitzState {
         self.col_max_abs_dirty[j] = false;
     }
 
-    /// `max |a_ij|` over column `j`'s live entries, read straight off the
-    /// column mirror.
+    /// 列 `j` の活性要素の `max |a_ij|` を列ミラー経由で計算する。
     fn col_max_abs_rescan(&mut self, j: usize) -> f64 {
         let col = self.mat.col(j);
         self.prof_colmax_rescan_entries += col.len();
@@ -987,52 +728,35 @@ impl MarkowitzState {
         mx
     }
 
-    /// Find best pivot: among still-active columns in ascending-degree
-    /// order, only that column's actual active rows (via the column
-    /// mirror, not every row at that row-degree) are examined — this is
-    /// the other half (alongside `eliminate`'s use of the same mirror) of
-    /// what keeps the search from degrading into a full active-submatrix
-    /// scan. The per-degree-level early exit is a standard practical
-    /// relaxation (as in production Markowitz implementations): it does
-    /// not guarantee the globally minimal Markowitz count, only that no
-    /// further search will find something clearly better — finding the
-    /// exact minimum every step is itself more expensive than the fill-in
-    /// it would save.
+    /// 次のピボット `(行, 列)` を選ぶ。活性列を次数の小さいバケット順に走査し、
+    /// 各列ではその列の活性行 (列ミラー) だけを調べ、閾値ピボットを満たす
+    /// 候補のうち Markowitz 数最小 (同点ならピボット絶対値最大) を選ぶ。
+    /// 候補が無ければ `None`。
     ///
-    /// `skip_dense`: when true, every `initially_dense` column is skipped
-    /// outright, regardless of its current (possibly much lower, per that
-    /// field's own docs) degree or Markowitz score — `factorize`'s caller
-    /// tries this first and only falls back to a second, unrestricted call
-    /// if it finds nothing, so a truly-required dense pivot (or a genuinely
-    /// singular matrix) is still handled correctly, just not preferred.
-    ///
-    /// The scan is additionally bounded by [`PIVOT_SEARCH_LIMIT`] candidate
-    /// columns, which — unlike the per-degree-level exit above — can fire
-    /// part-way *through* a bucket, and so is what actually bounds a single
-    /// call's cost when one degree level holds hundreds of columns. It is
-    /// honoured only once a pivot has been found, so it never turns a
-    /// `Some` into a `None`.
+    /// - 次数レベルごとの早期終了 (`best_score <= deg_col^2`) は実用的緩和で、
+    ///   大域最小は保証しない。
+    /// - `skip_dense`: `true` なら `initially_dense` 列を無条件に飛ばす
+    ///   (呼び出し側は見つからなければ `false` で再試行する)。
+    /// - [`PIVOT_SEARCH_LIMIT`] 個の候補列で打ち切る (バケット途中でも)。
+    ///   ただしピボットが既に見つかっている場合のみなので `Some` を `None` に
+    ///   することはない。
     fn find_best_pivot(&mut self, skip_dense: bool) -> Option<(usize, usize)> {
-        // Timed only under the profiling gates (resolved once per
-        // factorization in `new`): two `Instant::now()` calls per
-        // elimination step are otherwise pure overhead on the hot path.
+        // プロファイル時のみ計測開始時刻を取る
         let prof_t0 = if self.prof_timing { Some(std::time::Instant::now()) } else { None };
         let mut best: Option<(usize, usize)> = None;
         let mut best_score = usize::MAX;
         let mut best_pivot_abs = 0.0f64;
-        // Candidate columns examined so far by *this* call — the quantity
-        // `search_limit` bounds (HiGHS's `searchCount`).
+        // この呼び出しで調べた候補列数 (`search_limit` の対象、HiGHS の `searchCount`)
         let mut searched = 0usize;
-        // 0 = score-0 exit, 1 = search-limit exit, anything else = a
-        // degree-level exit or an exhausted scan.
+        // 終了理由: 0 = Markowitz 数 0 で終了, 1 = 探索上限で終了,
+        // それ以外 = 次数レベルでの終了または全走査
         let mut exit = 3u8;
 
-        // Opt-in, path-changing experiment (default off): take an active
-        // row singleton directly, HiGHS `buildKernel` step 1.2-style, when
-        // there is no column singleton — see `row_singleton_rel`.
+        // 列バケット走査を開始する次数 (行シングルトン採用時は走査を飛ばす)
         let mut scan_from = 1usize;
-        // Smallest active row degree, found lazily (see the bucket-end cutoff).
+        // 活性行の最小次数 (必要になった時点で遅延計算)
         let mut rmin = usize::MAX;
+        // 任意機能 (既定 off): 列シングルトンが無ければ行シングルトンを直接採る
         if self.row_singleton_rel >= 0.0 && self.col_buckets[1].is_empty() {
             if let Some(p) = self.try_row_singleton(skip_dense) {
                 best = Some(p);
@@ -1040,11 +764,9 @@ impl MarkowitzState {
                 scan_from = self.col_buckets.len();
             }
         }
-        // Disjoint field borrows: the scan reads the buckets, the matrix
-        // and the degrees while the lazy `col_max_abs` recomputation
-        // below writes only `col_max_abs`/`col_max_abs_dirty`/`colval`, so
-        // the per-candidate lookups go through plain slices rather than
-        // re-indexing `self` (and re-checking bounds) for every entry.
+        // フィールドを分けて借用し、候補ごとの参照を素のスライス経由にする
+        // (遅延 `col_max_abs` 再計算は `col_max_abs`/`col_max_abs_dirty`/`col_value_cache`
+        // だけを書く)。
         let col_buckets = &self.col_buckets;
         let mat = &self.mat;
         let row_degree = &self.row_degree[..];
@@ -1054,37 +776,21 @@ impl MarkowitzState {
         let search_limit = self.search_limit;
         let lazy_colmax = self.lazy_colmax;
         'scan: for deg_col in scan_from..col_buckets.len() {
-            // Bucket membership only ever changes via `update_col_degree`/
-            // `remove_from_bucket_col`, called elsewhere, never from inside
-            // `find_best_pivot`, so this bucket is fixed for the scan.
+            // バケットの中身はこの走査中は変わらない。
             for &j in &col_buckets[deg_col] {
-                // Buckets never hold a used column: `factorize` removes
-                // the pivot column from its bucket in the same step it
-                // marks it used, and `update_col_degree` refuses to
-                // re-insert one.
+                // バケットには使用済み列は入らない。
                 debug_assert!(!self.col_used[j], "bucketed column must be active");
                 if skip_dense && initially_dense[j] {
                     continue;
                 }
                 let col_deg = col_degree[j];
+                // 列次数 - 1 (Markowitz 数の列側因子)
                 let cm1 = col_deg - 1;
                 searched += 1;
-                // `col_max_abs[j]` is only ever read to form `min_pivot`,
-                // and `min_pivot` is only ever read for an entry that has
-                // already passed the Markowitz-score filter below — so a
-                // stale max is recomputed lazily, at the first such entry,
-                // rather than up front for every column the scan visits.
-                // Most visited columns never produce one (their rows are
-                // all too long to beat `best_score`), and for those the
-                // rescan — a `row_get` per column entry — was pure waste.
-                // The recomputation itself fetches every entry's value
-                // once; those values are kept in `colval` so the candidate
-                // lookups that follow in the same column reuse them rather
-                // than searching the rows a second time. `min_pivot` is the
-                // same product of the same two numbers either way (HiGHS's
-                // `mc_min_pivot[j] = max_value * pivot_threshold`, §2.4),
-                // so every comparison — and hence the chosen pivot — is
-                // unchanged.
+                // 古い `col_max_abs` は、Markowitz 数の篩を通った最初の要素で
+                // 遅延再計算する (`min_pivot` はそこでしか使わないため)。
+                // 再計算で読んだ値は `col_value_cache` にキャッシュして同じ列の候補参照に
+                // 再利用する。比較結果・選ばれるピボットは不変。
                 if !lazy_colmax && self.col_max_abs_dirty[j] {
                     let mut mx = 0.0f64;
                     for &r in mat.col(j) {
@@ -1096,19 +802,16 @@ impl MarkowitzState {
                     self.col_max_abs[j] = mx;
                     self.col_max_abs_dirty[j] = false;
                 }
+                // 閾値ピボットの下限 (NaN = 未計算の古い列)
                 let mut min_pivot = if self.col_max_abs_dirty[j] { f64::NAN } else { threshold * self.col_max_abs[j] };
+                // `col_value_cache` にこの列の値がキャッシュ済みか
                 let mut cached = false;
-                // The column mirror only ever holds active rows:
-                // `eliminate` drops the retiring pivot row from every
-                // column it touches and clears the pivot column.
+                // 列ミラーは活性行だけを保持している。
                 let col = mat.col(j);
                 let mut k = 0usize;
                 while k < col.len() {
-                    // Markowitz score only needs row/col degree, both
-                    // already known without touching the row's own run —
-                    // skip the value lookup below for candidates that
-                    // can't possibly beat `best_score` (this is the vast
-                    // majority on a matrix with heavy fill-in).
+                    // Markowitz 数は次数だけで決まるので、`best_score` に勝てない
+                    // 候補は値を引かずに飛ばす。
                     let bs = best_score;
                     match col[k..].iter().position(|&r| (row_degree[r as usize] - 1) * cm1 <= bs) {
                         Some(off) => k += off,
@@ -1118,16 +821,15 @@ impl MarkowitzState {
                     debug_assert!(!self.row_used[i], "column mirror holds only active rows");
                     let score = (row_degree[i] - 1) * cm1;
                     if min_pivot.is_nan() {
-                        // First entry of a stale column to need the
-                        // threshold: rescan, caching every value.
+                        // 古い列で初めて閾値が必要になった: 全値をキャッシュしつつ再走査
                         let mut mx = 0.0f64;
-                        self.colval.clear();
+                        self.col_value_cache.clear();
                         for &r in col {
                             let v = mat.row_get(r as usize, j);
                             if let Some(v) = v {
                                 mx = f64::max(mx, v.abs());
                             }
-                            self.colval.push(v);
+                            self.col_value_cache.push(v);
                         }
                         self.prof_colmax_rescan_entries += col.len();
                         self.col_max_abs[j] = mx;
@@ -1135,7 +837,7 @@ impl MarkowitzState {
                         min_pivot = threshold * mx;
                         cached = true;
                     }
-                    let v = if cached { self.colval[k] } else { mat.row_get(i, j) };
+                    let v = if cached { self.col_value_cache[k] } else { mat.row_get(i, j) };
                     k += 1;
                     let Some(v) = v else { continue };
                     if v == 0.0 || v.abs() < min_pivot {
@@ -1151,18 +853,15 @@ impl MarkowitzState {
                     exit = 0;
                     break 'scan;
                 }
-                // Checked after this column's own scan (never before it),
-                // so the limit bounds how many columns are examined rather
-                // than cutting one short mid-way: the `best` a truncated
-                // column produced would otherwise depend on `col_rows`'
-                // iteration order in a way the unbounded scan's doesn't.
+                // 探索上限は列を途中で切らず、列単位で数える。
                 if search_limit != 0 && searched >= search_limit && best.is_some() {
                     exit = 1;
                     break 'scan;
                 }
             }
             if deg_col <= self.row_search && deg_col < self.row_buckets.len() {
-                // B2(b): the rows with `deg_col` entries (see `row_search`).
+                // 行探索 (B2(b)): 次数 `deg_col` の行を走査する (`row_search` 参照)。
+                // 行次数 - 1 (Markowitz 数の行側因子)
                 let rc1 = deg_col - 1;
                 for &i in &self.row_buckets[deg_col] {
                     let s = mat.row_start[i];
@@ -1177,9 +876,7 @@ impl MarkowitzState {
                             continue;
                         }
                         let v = mat.row_val[k];
-                        // Only a candidate that would improve on `best`
-                        // needs the threshold test (and so, for a stale
-                        // column, the `col_max_abs` rescan) at all.
+                        // `best` を改善しうる候補だけ閾値判定 (と古い列の再走査) をする。
                         if v == 0.0 || !(score < best_score || v.abs() > best_pivot_abs) {
                             continue;
                         }
@@ -1218,11 +915,9 @@ impl MarkowitzState {
                 exit = 2;
                 break 'scan;
             }
-            // Every column in a later bucket has degree > `deg_col`, and
-            // every active row has degree >= `rmin`, so no later
-            // candidate can score below `(rmin - 1) * deg_col`. Strict
-            // `<` keeps ties (broken by pivot size) exactly as the
-            // exhaustive scan would, so the chosen pivot is unchanged.
+            // 以降のバケットの列は次数 > `deg_col`、活性行の次数は >= `rmin`
+            // なので、以降の候補は `(rmin - 1) * deg_col` 未満にならない。
+            // 厳密な `<` なので同点処理は全走査と同じ (選ばれるピボットは不変)。
             if best.is_some() && tunable!("ENOMOTO_PIVOT_RMIN_CUTOFF", 1usize, usize) != 0 {
                 if rmin == usize::MAX {
                     rmin = (1..self.row_buckets.len()).find(|&d| !self.row_buckets[d].is_empty()).unwrap_or(1);
@@ -1234,14 +929,12 @@ impl MarkowitzState {
             }
         }
 
-        // Profiling, accumulated in plain fields and flushed to the shared
-        // atomics once per factorization (`Drop`) rather than with three
-        // or four locked read-modify-writes per elimination step.
+        // プロファイル累計 (`Drop` でまとめて静的カウンタへ反映)
         self.prof_steps += 1;
         self.prof_candidates += searched;
         match exit {
             0 => self.prof_trivial += 1,
-            1 => self.prof_limit += 1,
+            1 => self.prof_search_limit_hits += 1,
             _ => {}
         }
         if let Some(t0) = prof_t0 {
@@ -1250,11 +943,11 @@ impl MarkowitzState {
         best
     }
 
-    /// The first active row singleton (in `row_buckets[1]` order, at most
-    /// `search_limit` of them) whose one entry clears
-    /// `row_singleton_rel * col_max_abs` — see `row_singleton_rel`.
+    /// 活性行シングルトン (`row_buckets[1]` の順、最大 `search_limit` 個) のうち、
+    /// その唯一の要素が `row_singleton_rel * col_max_abs` 以上である最初のものを返す。
     fn try_row_singleton(&mut self, skip_dense: bool) -> Option<(usize, usize)> {
         let n = self.row_buckets[1].len();
+        // 調べる行シングルトンの最大数
         let cap = if self.search_limit == 0 { n } else { n.min(self.search_limit) };
         for idx in 0..cap {
             let i = self.row_buckets[1][idx];
@@ -1273,51 +966,18 @@ impl MarkowitzState {
         None
     }
 
-    /// Eliminates column `pj` (whose pivot is `(pi, pj)`, value
-    /// `pivot_val`) from every other active row, in one pass that performs
-    /// both the Gaussian-elimination arithmetic and the matching degree/
-    /// bucket updates — see the module docs for why splitting these two
-    /// into separate steps (as an earlier version of this file did) is
-    /// unsound: bookkeeping keyed off "did this row still contain `pj`"
-    /// only works if it runs *before* `pj` is actually removed. Also
-    /// retires row `pi` from every other column's live list (not just
-    /// column `pj`'s), so no column's degree can drift by continuing to
-    /// count a row that is no longer active. The resulting `(row,
-    /// multiplier)` pairs for `factorize`'s own `L` bookkeeping are left
-    /// in [`Self::l_out`].
+    /// ピボット `(pi, pj)` (値 `pivot_val`) で列 `pj` を他の全活性行から消去する。
+    /// ガウス消去の算術と次数・バケット更新を 1 パスで同時に行い
+    /// (分けると「行がまだ `pj` を含むか」の判定が壊れる)、行 `pi` を全列の
+    /// 活性行リストから引退させる。`L` 用の `(行, 乗数)` は [`Self::l_out`] に残す。
     ///
-    /// Each affected row is rewritten by a **single sorted merge** of its
-    /// own run against `pivot_row_snapshot` (both ascending by column),
-    /// rather than by one keyed lookup per pivot-row entry: with the
-    /// `BTreeMap` rows this replaced, this inner loop — the hottest in
-    /// the whole factorization, run once per `(affected row, pivot-row
-    /// entry)` pair, every elimination step — cost `O(d_p log d_i)` tree
-    /// descents into scattered heap nodes; the merge costs `O(d_i + d_p)`
-    /// over two contiguous, sequentially-read runs and one sequentially-
-    /// written one. That is `docs/lu_comparison_enomoto_vs_highs.md`
-    /// §3.1's point (HiGHS's `mc_*`/`mr_*` flat arrays against this
-    /// crate's tree nodes) applied to the one loop where it matters most.
-    ///
-    /// The common path works HiGHS-style off a dense scatter of the pivot
-    /// row (`ElimScratch::wval`) instead of a two-pointer merge: every
-    /// entry of the affected row does `v - mult * wval[j]` (exactly `v`
-    /// for a column outside the pivot row, since `mult` is finite and
-    /// `v != 0`), compacting out the pivot column and exact cancellations
-    /// as it goes, with no data-dependent branch per entry — the merge
-    /// mispredicted on nearly every interleaving of the two patterns.
-    /// Only a row that holds fewer pivot-row columns than the pivot row
-    /// has (it takes fill-in) needs a second look, which merges the
-    /// (sorted) fill list into the row from the back, in place. Values,
-    /// row order and every degree/bucket update are exactly the merge's,
-    /// so the factorization is bit-identical; `ENOMOTO_LU_INPLACE_ELIM=0`
-    /// (or a non-finite multiplier) takes the plain merge instead.
-    ///
-    /// No per-entry column "touched" bookkeeping: every column whose
-    /// degree or values this step can change is a column of the pivot row
-    /// (an update or a fill-in lands only there), and the pivot row is
-    /// retired from all of those columns below anyway, so refreshing the
-    /// pivot row's columns in ascending order is exactly the sorted,
-    /// deduplicated touched set the per-entry stamping used to build.
+    /// - `pivot_row_snapshot`: ピボット行の `(列, 値)` (列昇順) のコピー。
+    /// - 通常経路はピボット行の密散布 (`ElimScratch::wval`) を使い、影響行の
+    ///   全要素に `v - mult * wval[j]` を分岐なしで適用する。フィルインがある行だけ
+    ///   後方から挿入する。`ENOMOTO_LU_INPLACE_ELIM=0` または乗数が非有限なら
+    ///   単純マージ ([`Self::merge_row`])。どちらも因子はビット一致。
+    /// - 値や次数が変わりうる列はピボット行の列だけなので、それらを昇順に
+    ///   refresh すればよい。
     fn eliminate(&mut self, pi: usize, pj: usize, pivot_val: f64, pivot_row_snapshot: &[(usize, f64)]) {
         let mut sc = std::mem::take(&mut self.scratch);
         sc.begin();
@@ -1325,7 +985,8 @@ impl MarkowitzState {
         sc.affected.clear();
         sc.affected.extend(self.mat.col(pj).iter().map(|&r| r as usize).filter(|&i| i != pi));
 
-        // Scatter the pivot row's active off-pivot entries.
+        // ピボット行の非ピボット活性要素を散布する。
+        // ピボット行の非ピボット要素数
         let mut p_act = 0usize;
         for &(j, v) in pivot_row_snapshot {
             if j != pj {
@@ -1337,49 +998,47 @@ impl MarkowitzState {
             let i = sc.affected[ai];
             let s0 = self.mat.row_start[i];
             let len = self.mat.row_len[i];
+            // 行 `i` のラン内でのピボット列の位置
             let Some(p0) = sorted_find(&self.mat.row_idx[s0..s0 + len], pj as u32) else { continue };
             let aij = self.mat.row_val[s0 + p0];
             if aij == 0.0 {
                 continue;
             }
+            // 消去乗数 (= `L` の要素)
             let mult = aij / pivot_val;
             sc.l_out.push((i, mult));
 
             sc.col_add.clear();
             sc.col_del.clear();
             let new_len = if self.inplace_elim && mult.is_finite() {
-                // Update every entry in place: `v - mult * wval[j]` is the
-                // elimination for a pivot-row column and exactly `v` for
-                // any other (`wval[pj]` is `0.0`, so the pivot column's
-                // own entry is left alone too, and dropped just below).
-                // Branch-free, no compaction, no per-entry bookkeeping.
+                // 全要素をその場で更新: ピボット行の列なら消去、それ以外は
+                // `wval[j] == 0.0` なので値は `v` のまま (ピボット列も同様で、
+                // 直後に除去)。分岐なし・圧縮なし。
                 let idx = &self.mat.row_idx[s0..s0 + len];
                 let val = &mut self.mat.row_val[s0..s0 + len];
                 let wval = &sc.wval[..];
+                // この行が持っていたピボット行の列の数
                 let mut found = 0usize;
+                // 更新で厳密に 0 になった要素数
                 let mut zeros = 0usize;
                 debug_assert!(idx.iter().all(|&j| (j as usize) < wval.len()));
                 for (v, &j) in val.iter_mut().zip(idx) {
-                    // SAFETY: every column index in the kernel is `< m`
-                    // (`KernelMatrix::new` asserts the input is square and
-                    // fill-in only copies pivot-row columns), and `wval`
-                    // has length `m`.
+                    // SAFETY: カーネル内の列番号はすべて `< m` (`KernelMatrix::new`
+                    // が正方性を検査し、フィルインはピボット行の列のコピーのみ)、
+                    // `wval` の長さは `m`。
                     let pv = unsafe { *wval.get_unchecked(j as usize) };
                     found += (pv != 0.0) as usize;
                     let nv = *v - mult * pv;
                     *v = nv;
                     zeros += (nv == 0.0) as usize;
                 }
-                // Drop the pivot column's entry (and, rarely, exact
-                // cancellations), keeping the run's order.
+                // ピボット列の要素 (と稀な厳密相殺) を順序を保って除く。
                 let w = if zeros == 0 {
                     self.mat.row_idx.copy_within(s0 + p0 + 1..s0 + len, s0 + p0);
                     self.mat.row_val.copy_within(s0 + p0 + 1..s0 + len, s0 + p0);
                     len - 1
                 } else {
-                    // A cancelled entry was a pivot-row column this row
-                    // held; it leaves the row and the column mirror (in
-                    // ascending column order, as the merge did).
+                    // 相殺された要素は行と列ミラーから抜ける (列昇順)。
                     let mut w = 0usize;
                     for a in 0..len {
                         let (j, v) = (self.mat.row_idx[s0 + a], self.mat.row_val[s0 + a]);
@@ -1400,8 +1059,8 @@ impl MarkowitzState {
                 if found == p_act {
                     w
                 } else {
-                    // Fill-in: the pivot-row columns this row did not
-                    // hold (a cancelled entry was held, so it counts).
+                    // フィルイン: この行が持っていなかったピボット行の列
+                    // (相殺された要素は持っていた扱い)。
                     let stamp = sc.next_rstamp();
                     for &j in &self.mat.row_idx[s0..s0 + w] {
                         sc.rmark[j as usize] = stamp;
@@ -1421,17 +1080,16 @@ impl MarkowitzState {
                             }
                         }
                     }
+                    // フィルイン数
                     let nf = sc.fill_idx.len();
                     if nf > 0 {
                         self.mat.ensure_row_cap(i, w + nf);
                         let s = self.mat.row_start[i];
                         let idx = &mut self.mat.row_idx[s..s + w + nf];
                         let val = &mut self.mat.row_val[s..s + w + nf];
-                        // Insert the fill-ins from the last one back: each
-                        // finds its slot in the not-yet-moved prefix by
-                        // binary search, and the block after that slot moves
-                        // up in one `copy_within` — every entry moves at
-                        // most once, as in a backward merge, but in bulk.
+                        // 最後のフィルインから順に、未移動の前半を二分探索して
+                        // 挿入位置を決め、その後ろのブロックを一括で後ろへずらす
+                        // (各要素の移動は高々 1 回)。
                         let mut a = w;
                         for f in (0..nf).rev() {
                             let fj = sc.fill_idx[f];
@@ -1463,14 +1121,10 @@ impl MarkowitzState {
         }
         self.mat.col_clear(pj);
 
-        // Row pi is retiring as the new pivot row; drop it from every
-        // other column it still touches so those columns' degrees don't
-        // keep counting an inactive row, then refresh those columns'
-        // degree/bucket placement in ascending column order. The order is
-        // observable: `refresh_column` appends to a degree bucket, and
-        // `find_best_pivot` scans those buckets in stored order and breaks
-        // exact ties by first-encountered. The row run is ascending, so
-        // no sort is needed.
+        // 行 pi は新しいピボット行として引退する。まだ触れている他の列から除き、
+        // それらの列の次数・バケットを列昇順で更新する (順序は観測可能:
+        // `refresh_column` はバケット末尾に追加し、`find_best_pivot` は格納順に
+        // 走査して同点を先勝ちで決める)。
         sc.pi_cols.clear();
         {
             let (idx, _) = self.mat.row(pi);
@@ -1485,27 +1139,25 @@ impl MarkowitzState {
         self.scratch = sc;
     }
 
-    /// The plain two-pointer merge of row `i` against the pivot row — the
-    /// reference form of `eliminate`'s scatter loop, kept for
-    /// `ENOMOTO_LU_INPLACE_ELIM=0` and for a non-finite multiplier (where
-    /// `v - mult * 0.0` would not be `v`). Returns the new row length.
+    /// 行 `i` とピボット行の単純な 2 ポインタマージ (`eliminate` の散布ループの
+    /// 参照実装)。`ENOMOTO_LU_INPLACE_ELIM=0` 時と、乗数が非有限
+    /// (`v - mult * 0.0` が `v` にならない) 時に使う。新しい行長を返す。
     fn merge_row(&mut self, sc: &mut ElimScratch, i: usize, pj: usize, mult: f64, pivot_row_snapshot: &[(usize, f64)]) -> usize {
         sc.merged_idx.clear();
         sc.merged_val.clear();
         let (idx, val) = self.mat.row(i);
+        // a: 行 `i` 側の位置, b: ピボット行側の位置
         let (mut a, mut b) = (0usize, 0usize);
         while a < idx.len() && b < pivot_row_snapshot.len() {
             let (ja, va) = (idx[a] as usize, val[a]);
             let (jb, vb) = pivot_row_snapshot[b];
             if ja < jb {
-                // Only in this row — including every column already used
-                // as a pivot, which the snapshot filters out and which
-                // must survive untouched.
+                // この行にしかない列 (ピボット済み列を含む。そのまま残す)。
                 sc.merged_idx.push(ja as u32);
                 sc.merged_val.push(va);
                 a += 1;
             } else if jb < ja {
-                // Fill-in.
+                // フィルイン。
                 if jb != pj {
                     let new_val = -mult * vb;
                     if new_val != 0.0 {
@@ -1516,8 +1168,7 @@ impl MarkowitzState {
                 }
                 b += 1;
             } else {
-                // The pivot column's own entry leaves this row; its
-                // mirror is retired wholesale by `col_clear(pj)`.
+                // ピボット列の要素はこの行から抜ける (ミラーは `col_clear(pj)` で一括除去)。
                 if ja != pj {
                     let new_val = va - mult * vb;
                     if new_val == 0.0 {
@@ -1558,47 +1209,36 @@ impl MarkowitzState {
     }
 }
 
-/// Persistent, zero-allocation-in-steady-state scratch for
-/// [`LuFactors::l_solve_sparse_into`] — one instance lives for as long as
-/// its caller's own dedicated sparse-solve buffer does (`solve_lp_dual_on`
-/// creates one, alongside a `z` buffer used *only* for this path — never
-/// shared with a plain [`FtLu::solve_into`] call's own `scratch`, per
-/// [`FtLu::solve_sparse_into`]'s own docs on why that separation matters
-/// — before the pivot loop starts, and reuses both every FTRAN).
-///
-/// `visited` marks the steps already known to be in the *current* call's
-/// reach set, via [`EpochMarks`] — bumping an epoch each call instead of
-/// clearing an array is what makes marking/checking `O(1)` without an
-/// `O(m)` reset per call. (It was a hand-rolled `Vec<u32>` plus a bare
-/// `epoch += 1` until that trick was consolidated into `crate::sparse`;
-/// the bare increment had no wraparound guard, so after 2^32 calls a stale
-/// stamp would have read as a live mark and silently truncated a reach set
-/// — i.e. produced a wrong FTRAN. [`EpochMarks::begin`] handles it.)
-/// `stack` is the DFS's own
-/// (iterative, not recursive — this crate's basis matrices can have `m`
-/// in the low thousands, deep enough that a recursive DFS risks a real
-/// stack overflow on a long dependency chain) working stack. `reach` is
-/// this call's own collected, then sorted, reach set.
+/// [`LuFactors::l_solve_sparse_into`] (Gilbert-Peierls 疎前進代入) 用の
+/// 永続スクラッチ。定常状態では確保ゼロ。呼び出し側が専用の疎求解バッファと
+/// 共に 1 つ保持し、毎回の FTRAN で再利用する ([`FtLu::solve_into`] の
+/// `scratch` とは共有しないこと)。
 pub struct GpScratch {
+    /// 今回の呼び出しの到達集合に既に入ったステップの印 ([`EpochMarks`]、
+    /// エポックを進めるだけで O(1) リセット、一周対策込み)。
     visited: EpochMarks,
+    /// DFS の作業スタック (`m` が数千になりうるので再帰でなく反復)。
     stack: Vec<usize>,
+    /// DFS の起点 (右辺の非ゼロに対応するステップ)。
     seeds: Vec<usize>,
+    /// 今回の呼び出しで集めた到達集合 (後でソートされる)。
     reach: Vec<usize>,
-    /// C5: set by the caller before a sparse entering-column FTRAN
-    /// (`solve_sparse_into_capture` / `_pair_capture` / `_triple_capture`)
-    /// to run that vector's `U` stage hyper-sparsely — see
-    /// [`FtLu::u_solve_hyper`]. Read by nothing else; `false` by default.
+    /// C5: 疎な入力列 FTRAN (`solve_sparse_into_capture` / `_pair_capture` /
+    /// `_triple_capture`) の前に呼び出し側が設定し、その `U` 段を超疎に実行
+    /// させる ([`FtLu::u_solve_hyper`])。既定 `false`。
     pub u_hyper: bool,
-    /// The hyper-sparse `U` stage's own DFS state: marks over slots, the
-    /// DFS stack, every slot reached (= every slot that can be nonzero
-    /// after `U`), and the reached `u_seq` positions to apply.
+    /// 超疎 `U` 段の DFS 用スロット印。
     u_marks: EpochMarks,
+    /// 超疎 `U` 段の DFS スタック。
     u_stack: Vec<usize>,
+    /// 到達した全スロット (= `U` 後に非ゼロになりうるスロット)。
     u_list: Vec<usize>,
+    /// 適用すべき到達 `u_seq` 位置。
     u_pos: Vec<usize>,
 }
 
 impl GpScratch {
+    /// 次数 `m` 用のスクラッチを作る。
     pub fn new(m: usize) -> Self {
         GpScratch {
             visited: EpochMarks::new(m),
@@ -1614,82 +1254,40 @@ impl GpScratch {
     }
 }
 
+/// 1 回の分解結果 `P_row B P_col = L U` (更新前の素の因子)。
+/// すべて消去ステップ番号の空間で格納される。
 #[derive(Clone)]
 pub struct LuFactors {
+    /// 行列の次数。
     pub m: usize,
-    /// `l_col[s]`: `(row_step, multiplier)` pairs — the sub-diagonal
-    /// entries of `L`'s column `s`.
-    ///
-    /// Stored as a [`crate::sparse::CscMat`] — one flat `(index, value)`
-    /// buffer plus offsets, the same layout `simplex.rs`'s `StdForm` uses
-    /// for the frozen coefficient matrix, on the same reasoning: `L` never
-    /// changes once a refactorization builds it, and it is then read on
-    /// every FTRAN/BTRAN's `L`-stage for the rest of that basis's life.
-    ///
-    /// **This is the second attempt, and the first one that measured as a
-    /// win.** The first flattened a finished `Vec<Vec<(usize, f64)>>` into
-    /// the compressed form as a post-pass, and a controlled A/B showed a
-    /// consistent small regression on every instance that moved at all
-    /// (`scsd8` +2.1%, `25fv47` +1.8%, `stocfor2` +4.0%, `fit1p` +3.2%,
-    /// `degen3`/`pilotnov` flat, nothing faster). Its own post-mortem
-    /// identified the reason and named the fix: the post-pass *keeps*
-    /// building the `m` small per-column `Vec`s it was meant to remove and
-    /// then adds an `O(nnz)` copy on top, so it paid the compressed form's
-    /// cost — two offset reads per column access, against `Vec<Vec>`'s
-    /// single pointer hop to an already-known `(ptr, len)` — while buying
-    /// none of its benefit.
-    ///
-    /// [`crate::sparse::CscBuilder`] is that fix. Every one of this file's
-    /// factorizations already emits `L`'s columns in ascending step order
-    /// (left-looking elimination produces column `s` complete at step `s`),
-    /// so the flat buffer can be appended to directly, with the column
-    /// boundary recorded wherever the buffer has reached: no counting pass,
-    /// no per-column `Vec`, and no copy. What is left is a strict
-    /// improvement at build time (two allocations for the whole of `L`
-    /// instead of `m + 1`) plus contiguous entries for `l_solve_into`'s own
-    /// sequential `for s in 0..m` sweep to prefetch through.
+    /// `l_col[s]`: `L` の列 `s` の対角より下の要素 `(row_step, 乗数)`。
+    /// 分解後は不変で FTRAN/BTRAN の `L` 段で毎回読むため、フラットな
+    /// [`crate::sparse::CscMat`] に [`crate::sparse::CscBuilder`] で直接追記して作る
+    /// (各分解は `L` の列をステップ昇順に出力するので中間 `Vec<Vec>` もコピーも不要)。
     pub l_col: crate::sparse::CscMat,
-    /// `u_row[s]`: `(col_step, value)` pairs, `col_step >= s` (including
-    /// the diagonal at `col_step == s`) — the entries of `U`'s row `s`.
-    /// Unlike `l_col`, this is read exactly once per refactorization (by
-    /// `FtLu::new`, to seed `u_seq`) and never again, so it stays a plain
-    /// `Vec<Vec<...>>` — flattening it would cost the same construction
-    /// work for no repeated-read benefit.
+    /// `u_row[s]`: `U` の行 `s` の要素 `(col_step, 値)` (`col_step >= s`、
+    /// 対角 `col_step == s` を含む)。`FtLu::new` が `u_seq` を作るときに
+    /// 1 回読むだけなので `Vec<Vec>` のまま。
     pub u_row: Vec<Vec<(usize, f64)>>,
-    /// Row-major mirror of [`Self::l_col`] in the same step space:
-    /// `l_row.row(r)` lists `(s, multiplier)` for every entry `(r,
-    /// multiplier)` of `l_col[s]` — i.e. the nonzeros of `L`'s *row* `r`,
-    /// all of which sit at `s < r`. This is HiGHS's own `lr_start/
-    /// lr_index/lr_value` (`HFactor.h`, built by `buildFinish()` right
-    /// beside the column-major `l_start/l_index/l_value`), and it exists
-    /// for exactly the reason HiGHS builds it: `L^{-T}` (BTRAN's tail) is
-    /// a *gather* when read through the column-major `l_col` — step `s`
-    /// reads one `w[row_step]` per `l_col[s]` entry, so no single value's
-    /// zero-ness makes the step skippable (Hall & McKinnon 2000 §4.4's own
-    /// observation, which `l_transpose_solve_into`'s pre-`l_row` form was
-    /// stuck with) — but the very same triangular solve becomes a
-    /// *scatter* when read through this mirror: step `s` multiplies the
-    /// single value `w[s]` into every `l_row.row(s)` entry, so `w[s] ==
-    /// 0.0` makes the whole step a provable no-op, exactly the skip
-    /// `l_solve_into`/`u_solve_into` already have in the forward
-    /// direction. See [`LuFactors::l_transpose_solve_into`]'s own docs for
-    /// the measurement.
-    ///
-    /// Flat ([`CsrMat`]: two allocations, offsets + entries), like
-    /// `l_col` itself — built directly from it by [`CscMat::to_csr`]'s
-    /// counting sort (one pass to size each row's slice, one to fill it),
-    /// with no intermediate `Vec<Vec<...>>` on either side.
+    /// [`Self::l_col`] の行優先ミラー (HiGHS の `lr_start/lr_index/lr_value`)。
+    /// `l_row.row(r)` は `L` の行 `r` の非ゼロ `(s, 乗数)` (すべて `s < r`)。
+    /// BTRAN の `L^{-T}` をスキャッタ形式で解き、`w[s] == 0.0` のステップを
+    /// 丸ごと飛ばすために使う。[`CscMat::to_csr`] の計数ソートで構築。
     pub l_row: CsrMat,
+    /// `row_perm[s]` = ステップ `s` のピボット行 (元の行番号)。
     pub row_perm: Vec<usize>,
+    /// `col_perm[s]` = ステップ `s` のピボット列 (元の基底スロット番号)。
     pub col_perm: Vec<usize>,
+    /// `col_perm` の逆写像: `col_perm_inv[元の列] = ステップ`。
     pub col_perm_inv: Vec<usize>,
-    /// Inverse of `row_perm`: `row_perm_inv[orig_row]` is the step whose
-    /// pivot row was `orig_row` — needed to seed [`l_solve_sparse_into`]'s
-    /// reach-set search directly from a sparse (original-row-indexed)
-    /// right-hand side, without an `O(m)` scan of `row_perm` itself.
+    /// `row_perm` の逆写像: `row_perm_inv[元の行] = ステップ`。疎な右辺から
+    /// [`l_solve_sparse_into`] の到達集合探索を `row_perm` の O(m) 走査なしで
+    /// 始めるのに使う。
     pub row_perm_inv: Vec<usize>,
 }
 
+/// 入力の非ゼロ密度が `DENSE_INPUT_FRACTION * m^2` を超えるか
+/// (超えれば Markowitz をやめて稠密 LU [`factorize_dense_faer`] に回す)。
 fn is_dense_input(m: usize, rows_in: &[Vec<(usize, f64)>]) -> bool {
     if m == 0 {
         return false;
@@ -1698,15 +1296,12 @@ fn is_dense_input(m: usize, rows_in: &[Vec<(usize, f64)>]) -> bool {
     nnz as f64 > tunable!("ENOMOTO_T_DENSE_INPUT_FRACTION", DENSE_INPUT_FRACTION, f64) * (m as f64) * (m as f64)
 }
 
-/// Dense partial-pivoting LU via `faer` (`PartialPivLu`, `PA = LU`, row
-/// pivoting only — so `col_perm` here is always the identity). Converts
-/// `faer`'s dense `Mat<f64>` factors into this module's existing
-/// `LuFactors` representation so every downstream consumer (`FtLu`,
-/// `l_solve_into`/`u_solve_into`, the Forrest-Tomlin update machinery) is
-/// completely unaware of which path produced its `LuFactors` — see
-/// [`DENSE_INPUT_FRACTION`]'s own docs for why this exists instead of
-/// running Markowitz on an already-dense matrix.
+/// `faer` による稠密部分ピボット LU (`PA = LU`、行ピボットのみなので
+/// `col_perm` は恒等)。結果を [`LuFactors`] に変換するので、下流 (`FtLu`、
+/// 各種求解、FT 更新) はどの経路で作られたかを意識しない。
+/// 対角に厳密な 0 があれば `None` (特異)。
 fn factorize_dense_faer(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuFactors> {
+    // 稠密化した入力行列 (重複座標は加算)
     let mut a = faer::Mat::<f64>::zeros(m, m);
     for (i, row) in rows_in.iter().enumerate() {
         for &(j, v) in row {
@@ -1719,9 +1314,8 @@ fn factorize_dense_faer(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuFac
     let u = lu.compute_u();
     let perm = lu.row_permutation();
     let (fwd, _inv) = perm.arrays();
-    // `PA = LU`: row `step` of the permuted matrix `PA` is original row
-    // `fwd[step]` — exactly this module's own `row_perm[step]` meaning
-    // (`l_solve_into` permutes `rhs` the same way: `z[s] = rhs[row_perm[s]]`).
+    // `PA = LU`: `PA` の行 `step` は元の行 `fwd[step]` で、このモジュールの
+    // `row_perm[step]` と同じ意味 (`l_solve_into` は `z[s] = rhs[row_perm[s]]`)。
     let row_perm: Vec<usize> = fwd.iter().map(|&idx| usize::from(idx)).collect();
     let col_perm: Vec<usize> = (0..m).collect();
 
@@ -1763,20 +1357,14 @@ fn factorize_dense_faer(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuFac
     Some(LuFactors { m, l_col, l_row, u_row, row_perm, col_perm, col_perm_inv, row_perm_inv })
 }
 
-/// Throwaway diagnostic (`ENOMOTO_DEBUG_BLOCK_SIZES`), not wired into any
-/// production path: measures what block-size distribution a Dulmage-Mendelsohn
-/// SCC decomposition of *this* refactorization's basis matrix would actually
-/// have, to check a specific hypothesis about the previously-reverted
-/// block-triangularized `factorize` (see this function's own doc comment) —
-/// namely, whether the blocks it would find are mostly tiny (say <=10 or
-/// <=50 rows), which would matter for a proposal to special-case small
-/// blocks with a dense/product-form solve instead of the general sparse
-/// Forrest-Tomlin machinery.
+/// 診断用 (`ENOMOTO_DEBUG_BLOCK_SIZES`、本番経路では未使用)。この基底行列を
+/// Dulmage-Mendelsohn SCC 分解したときのブロックサイズ分布を標準エラーに出す。
 fn debug_print_block_sizes(m: usize, rows_in: &[Vec<(usize, f64)>]) {
+    // 行ごとの列番号リスト (二部グラフの隣接)
     let adj: Vec<Vec<usize>> = rows_in.iter().map(|row| row.iter().map(|&(j, _)| j).collect()).collect();
-    let __t0 = std::time::Instant::now();
+    let decomp_t0 = std::time::Instant::now();
     let decomp = crate::graph::dulmage_mendelsohn_blocks_topological(&adj, m);
-    let decomp_us = __t0.elapsed().as_micros();
+    let decomp_us = decomp_t0.elapsed().as_micros();
     match decomp {
         None => eprintln!("BLOCK_SIZES m={m} no-perfect-matching decomp_us={decomp_us}"),
         Some((blocks, _)) => {
@@ -1797,15 +1385,9 @@ fn debug_print_block_sizes(m: usize, rows_in: &[Vec<(usize, f64)>]) {
     }
 }
 
-/// Columns whose nonzero count exceeds [`DENSE_COL_FRACTION`] of `m` —
-/// the same "near-fully-dense trend/regression column" shape
-/// `MarkowitzState::initially_dense` already detects internally, exposed
-/// here as a free function so `factorize`'s routing decision (attempt
-/// [`factorize_bordered`] or not) can check it before paying for a
-/// `MarkowitzState` at all — this is the only extra cost non-bordered
-/// instances pay: one `O(nnz)` degree pass, measured (see
-/// `BORDER_MAX_FRACTION`'s own docs) to be cheap enough to run
-/// unconditionally rather than gated behind a flag.
+/// 非ゼロ数が `DENSE_COL_FRACTION * m` を超える列 (ほぼ稠密な「トレンド列」)
+/// の一覧を返す。`factorize` が [`factorize_bordered`] を試すかの判定に使う
+/// (`O(nnz)` の 1 パス)。
 fn detect_border_columns(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Vec<usize> {
     let mut col_degree = vec![0usize; m];
     for row in rows_in {
@@ -1819,28 +1401,19 @@ fn detect_border_columns(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Vec<usize> 
     (0..m).filter(|&j| col_degree[j] as f64 > threshold).collect()
 }
 
-/// Builds the LU factorization of a diagonal basis matrix directly — `L =
-/// I`, `U = B`, no row or column permutation — instead of running it
-/// through [`factorize`]'s general Markowitz elimination. This is exactly
-/// the shape of the initial all-slack basis (`B` a signed identity: each
-/// row has exactly one nonzero, `+/-1`, at that row's own column), so
-/// `simplex.rs`'s initial-basis call sites use this instead of paying for
-/// pivot selection, fill-in bookkeeping, and border/dense-input detection
-/// on a matrix that has nothing for any of that to do. Returns `None` if
-/// `rows_in` isn't exactly diagonal, so a caller can fall back to
-/// [`factorize`] rather than silently mis-factorizing.
+/// 対角基底行列を直接分解する (`L = I`, `U = B`, 置換なし)。初期の全スラック
+/// 基底 (符号付き単位行列) 用。`rows_in` が厳密に対角 (各行に自分の列の
+/// 非ゼロ 1 個だけ) でなければ `None` を返すので、呼び出し側は [`factorize`]
+/// にフォールバックすること。
 pub fn factorize_diagonal(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuFactors> {
-    // Shape check first, with no allocation: every mid-solve
-    // refactorization tries this and almost always fails, and building
-    // `u_row` row by row until the first non-diagonal row paid one small
-    // allocation per leading diagonal row for nothing.
+    // 確保なしで先に形状を検査する (途中の再分解でも毎回試され、ほぼ失敗するため)。
     let diagonal = rows_in.iter().enumerate().all(|(i, row)| matches!(row.as_slice(), [(j, v)] if *j == i && *v != 0.0));
     if !diagonal {
         return None;
     }
     let u_row: Vec<Vec<(usize, f64)>> = rows_in.iter().enumerate().map(|(i, row)| vec![(i, row[0].1)]).collect();
     let identity: Vec<usize> = (0..m).collect();
-    // `L` is the identity: `m` columns, every one empty.
+    // `L` は単位行列: `m` 列すべて空。
     let l_col = CscMat::empty(m, m);
     let l_row = build_l_row(&l_col, m);
     Some(LuFactors {
@@ -1856,95 +1429,66 @@ pub fn factorize_diagonal(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuF
 }
 
 // ---------------------------------------------------------------------
-// Pivot-order reuse ("rebuild", HiGHS `HFactorRefactor.cpp`)
+// ピボット順の再利用 ("rebuild"、HiGHS `HFactorRefactor.cpp` 相当)
 // ---------------------------------------------------------------------
 
-/// How many times [`factorize_reusing_order`] was attempted, how many of
-/// those attempts produced a usable factorization, and how much wall time
-/// the attempts (accepted *and* rejected) cost. Read back by the
-/// `ENOMOTO_PROF_PHASES_EXT` diagnostic: a rejected attempt is pure
-/// overhead paid on top of the full Markowitz factorization that follows,
-/// so the accepted/attempted ratio is what decides whether the reuse pays
-/// for itself.
+/// [`factorize_reusing_order`] を試みた回数 (`ENOMOTO_PROF_PHASES_EXT` 診断用)。
 pub(crate) static PROF_REBUILD_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
+/// そのうち使える分解が得られた (採用された) 回数。
 pub(crate) static PROF_REBUILD_ACCEPTED: AtomicUsize = AtomicUsize::new(0);
+/// 試行 (採用・棄却とも) に費やした累計ナノ秒。
 pub(crate) static PROF_REBUILD_NS: AtomicUsize = AtomicUsize::new(0);
-/// Why rejected attempts were rejected: the remaining submatrix had no
-/// numerically usable entry left in the column being processed (a
-/// genuinely singular or numerically spent basis), or the factors grew
-/// past [`REBUILD_FILL_LIMIT`].
+/// 棄却理由: 処理中の列の残り部分行列に数値的に使える要素が無かった回数。
 pub(crate) static PROF_REBUILD_FAIL_SINGULAR: AtomicUsize = AtomicUsize::new(0);
+/// 棄却理由: 因子が [`REBUILD_FILL_LIMIT`] を超えて膨らんだ回数。
 pub(crate) static PROF_REBUILD_FAIL_FILL: AtomicUsize = AtomicUsize::new(0);
-/// Steps whose recorded pivot *row* was unusable and had to be re-chosen
-/// (see [`factorize_reusing_order`]'s own docs) — bounded below by the
-/// number of basis columns the Forrest-Tomlin updates replaced since the
-/// order was recorded, and the reason the row order cannot simply be
-/// replayed the way the column order can.
+/// 記録されたピボット *行* が使えず選び直したステップ数
+/// ([`factorize_reusing_order`] 参照)。
 pub(crate) static PROF_REBUILD_ROW_REPICKS: AtomicUsize = AtomicUsize::new(0);
-/// Refactorizations the backoff in [`factorize_reusing`] decided not to
-/// even attempt a reuse for, after a rejection.
+/// 棄却後のバックオフ ([`factorize_reusing`]) で再利用を試みなかった再分解の回数。
 pub(crate) static PROF_REBUILD_BACKOFF_SKIPS: AtomicUsize = AtomicUsize::new(0);
 
-/// [`REBUILD_FILL_LIMIT`], overridable at run time via
-/// `ENOMOTO_REUSE_FILL_LIMIT` (a bare float) so the one number can be
-/// re-tuned against the Netlib set without a rebuild — and, more to the
-/// point, flipped *within one process* for an A/B (see
-/// [`reuse_pivot_order_enabled`]'s own docs on why cross-process timing
-/// comparisons are not usable here). Read once per refactorization.
+/// 再利用の fill 上限倍率 ([`REBUILD_FILL_LIMIT`]、環境変数
+/// `ENOMOTO_REUSE_FILL_LIMIT` で上書き可)。再分解ごとに 1 回読む。
 fn reuse_fill_limit() -> f64 {
     env_str!("ENOMOTO_REUSE_FILL_LIMIT").and_then(|v| v.parse::<f64>().ok()).unwrap_or(REBUILD_FILL_LIMIT)
 }
 
-/// Accepted reuses' own fill against the fresh Markowitz factorizations'
-/// (`L`+`U` nonzeros, summed, with the count of each) — the diagnostic
-/// behind "is a reused order producing factors every later FTRAN/BTRAN
-/// then pays for".
+/// 採用された再利用分解の `L`+`U` 非ゼロ数の累計。
 pub(crate) static PROF_REBUILD_ACCEPTED_NNZ: AtomicUsize = AtomicUsize::new(0);
+/// 通常の (Markowitz) 分解の `L`+`U` 非ゼロ数の累計。
 pub(crate) static PROF_FULL_NNZ: AtomicUsize = AtomicUsize::new(0);
+/// 通常の (Markowitz) 分解の回数。
 pub(crate) static PROF_FULL_COUNT: AtomicUsize = AtomicUsize::new(0);
 
-/// Whether pivot-order reuse is enabled (default: yes), toggled by
-/// `ENOMOTO_REUSE_PIVOT_ORDER=0`. Exists so an A/B of this feature can
-/// flip it *within one process* — per
-/// `analysis/ftran_density_gate_20260922_062832.md` §4.1, this box's
-/// per-problem run-to-run spread across separate processes reaches 4x,
-/// far wider than the effect being measured. Read once per
-/// refactorization (a handful of times per solve), never per iteration.
+/// ピボット順再利用が有効か (既定 有効、`ENOMOTO_REUSE_PIVOT_ORDER=0` で無効)。
+/// 再分解ごとに 1 回読む。
 fn reuse_pivot_order_enabled() -> bool {
     !matches!(env_str!("ENOMOTO_REUSE_PIVOT_ORDER"), Some("0") | Some("false"))
 }
 
-/// Refactorizes `rows_in` **reusing `prev`'s pivot order** when possible,
-/// falling back to a full Markowitz [`factorize`] otherwise.
+/// `rows_in` を、可能なら **`prev` のピボット順を再利用して** 再分解し、
+/// だめなら通常の Markowitz [`factorize`] にフォールバックする
+/// (HiGHS の `HFactor::build()` が `rebuild()` を先に試すのに相当)。
 ///
-/// This is this crate's counterpart to HiGHS's `HFactor::build()` trying
-/// `rebuild()` (`util/HFactorRefactor.cpp`) before `buildSimple()` +
-/// `buildKernel()`, named as gap §2.2 in
-/// `docs/lu_comparison_enomoto_vs_highs.md`: a mid-solve refactorization
-/// factorizes a basis that differs from the last factorized one only by
-/// the columns the Forrest-Tomlin updates since then replaced, so the
-/// order Markowitz chose last time is usually still a good order — and
-/// *applying a known order* costs only the elimination's own arithmetic,
-/// with none of the search, degree bookkeeping, or active-submatrix
-/// maintenance (`MarkowitzState`'s `BTreeMap`/`BTreeSet` churn) that
-/// choosing one costs.
+/// - `prev`: 直前の分解 (`None` なら普通に分解する)。
+/// - 再利用の対象は通常の疎 Markowitz ケースのみ (稠密入力・境界付き経路は除外)。
+/// - 棄却が続くと指数バックオフで一定回数だけ再利用を試みない
+///   (`reuse_fail_streak` / `reuse_skips_left`)。
+/// - 特異なら `None`。
 pub fn factorize_reusing(m: usize, rows_in: &[Vec<(usize, f64)>], prev: Option<&FtLu>) -> Option<FtLu> {
     let Some(prev) = prev else {
         return factorize(m, rows_in).map(FtLu::new);
     };
-    // The border columns and the dense-input test are computed once here
-    // and handed to `factorize_routed` below, rather than recomputed by
-    // `wants_bordered` and again by `factorize` (each an `O(nnz)` pass).
+    // 境界列と稠密判定はここで 1 回だけ計算して `factorize_routed` に渡す。
     let border = detect_border_columns(m, rows_in);
     let dense = is_dense_input(m, rows_in);
-    // A dense input goes to `factorize_dense_faer` (via `factorize`)
-    // regardless of any pivot order, and the bordered path wants its own
-    // ordering — reuse targets the ordinary sparse Markowitz case, which
-    // is every mid-solve refactorization on a real Netlib basis.
+    // 再利用の対象になるか (有効かつ非稠密かつ境界付き経路でない)
     let eligible = reuse_pivot_order_enabled() && m > 0 && !dense && !border_wanted(m, border.len());
     if eligible && prev.reuse_skips_left == 0 {
         let t0 = std::time::Instant::now();
         PROF_REBUILD_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
+        // 再利用分解が許される因子の最大非ゼロ数
         let max_nnz = (reuse_fill_limit() * prev.fill_baseline as f64) as usize + m;
         let rebuilt = factorize_reusing_order(m, rows_in, &prev.base.col_perm, &prev.base.row_perm, max_nnz);
         PROF_REBUILD_NS.fetch_add(t0.elapsed().as_nanos() as usize, Ordering::Relaxed);
@@ -1952,16 +1496,14 @@ pub fn factorize_reusing(m: usize, rows_in: &[Vec<(usize, f64)>], prev: Option<&
             PROF_REBUILD_ACCEPTED.fetch_add(1, Ordering::Relaxed);
             let mut ft = FtLu::new(lu);
             PROF_REBUILD_ACCEPTED_NNZ.fetch_add(ft.fill_baseline, Ordering::Relaxed);
-            // Keep the *full* factorization's baseline (see
-            // `REBUILD_FILL_LIMIT`'s own docs): a chain of reuses must not
-            // ratchet the fill limit up step by step.
+            // 基準 fill は最後の *通常* 分解のものを引き継ぐ
+            // (再利用の連鎖で上限が少しずつ上がらないように)。
             ft.fill_baseline = prev.fill_baseline;
             return Some(ft);
         }
     }
-    // Either the reuse was rejected, or it is being skipped under the
-    // backoff below. Both land on the full Markowitz factorization, whose
-    // own fill becomes the new baseline (`FtLu::new` sets it).
+    // 再利用が棄却されたかバックオフ中。通常の Markowitz 分解を行い、
+    // その fill が新しい基準になる (`FtLu::new` が設定)。
     let mut ft = FtLu::new(factorize_routed(m, rows_in, &border, dense)?);
     PROF_FULL_NNZ.fetch_add(ft.fill_baseline, Ordering::Relaxed);
     PROF_FULL_COUNT.fetch_add(1, Ordering::Relaxed);
@@ -1970,15 +1512,8 @@ pub fn factorize_reusing(m: usize, rows_in: &[Vec<(usize, f64)>], prev: Option<&
             ft.reuse_fail_streak = prev.reuse_fail_streak;
             ft.reuse_skips_left = prev.reuse_skips_left - 1;
         } else {
-            // A rejected attempt is wasted work on top of the full
-            // factorization that follows it, and rejections cluster: the
-            // basis that produced one (too much fill under the recorded
-            // column order, or a numerically spent order) is usually still
-            // producing them a few refactorizations later. So back off
-            // exponentially — 2, 4, 8, ... refactorizations left alone,
-            // capped at `REUSE_MAX_BACKOFF` — and reset to zero on the first
-            // acceptance, which is what keeps a problem where reuse *does*
-            // work paying nothing for this.
+            // 棄却は固まって起きるので指数バックオフする (2, 4, 8, ... 回見送り、
+            // 上限 `REUSE_MAX_BACKOFF`)。採用されれば新しい `FtLu` で 0 に戻る。
             ft.reuse_fail_streak = prev.reuse_fail_streak.saturating_add(1);
             ft.reuse_skips_left = (1u32 << ft.reuse_fail_streak.min(tunable!("ENOMOTO_T_REUSE_BACKOFF_SHIFT_CAP", REUSE_BACKOFF_SHIFT_CAP, u32))).min(tunable!("ENOMOTO_T_REUSE_MAX_BACKOFF", REUSE_MAX_BACKOFF, u32));
             PROF_REBUILD_BACKOFF_SKIPS.fetch_add(ft.reuse_skips_left as usize, Ordering::Relaxed);
@@ -1987,67 +1522,37 @@ pub fn factorize_reusing(m: usize, rows_in: &[Vec<(usize, f64)>], prev: Option<&
     Some(ft)
 }
 
-/// Whether [`factorize`] would route this input through
-/// [`factorize_bordered`] — exactly that function's own gate, factored out
-/// so [`factorize_reusing`] can decline to touch such a basis.
-///
-/// Reuse must not take a `fit1p`/`fit2p`-shaped basis: the bordered path's
-/// whole point is to keep ~20-25 near-dense "trend" columns *out* of the
-/// sparse elimination entirely (see [`factorize_bordered`]'s own docs), and
-/// a plain left-looking pass over the order it produced scatters exactly
-/// those columns back through every step — measured as `fit2p` +6.4% at a
-/// 1.1 fill limit and +16.3% at 1.25, against roughly flat everywhere else,
-/// which is what sent this gate in.
+/// [`factorize`] がこの入力を [`factorize_bordered`] に回すか (同じ判定を切り出したもの)。
+/// [`factorize_reusing`] は境界付きになる基底には再利用を使わない。
 #[allow(dead_code)]
 fn wants_bordered(m: usize, rows_in: &[Vec<(usize, f64)>]) -> bool {
     border_wanted(m, detect_border_columns(m, rows_in).len())
 }
 
-/// [`wants_bordered`] given the border column count `k` already.
+/// 境界列数 `k` が分かっているときの [`wants_bordered`]
+/// (`0 < k <= BORDER_MAX_COUNT` かつ `k <= BORDER_MAX_FRACTION * m`)。
 #[inline]
 fn border_wanted(m: usize, k: usize) -> bool {
     k > 0 && k <= BORDER_MAX_COUNT && (k as f64) <= tunable!("ENOMOTO_T_BORDER_MAX_FRACTION", BORDER_MAX_FRACTION, f64) * m as f64
 }
 
-/// Factorizes `rows_in` with the **column order given** rather than
-/// searched for: step `s` eliminates column `pivot_col[s]`, pivoting on
-/// row `pivot_row_hint[s]` when that row is still numerically acceptable
-/// and on the largest remaining entry in the column otherwise.
+/// `rows_in` を **与えられた列順** で分解する (探索しない)。ステップ `s` は列
+/// `pivot_col[s]` を消去し、行 `pivot_row_hint[s]` がまだ数値的に使えればそれを、
+/// 使えなければ閾値を満たす行のうち未処理列に残る要素数が最少のものを
+/// ピボット行にする。
 ///
-/// Left-looking (Gilbert-Peierls shape, the same one HiGHS's `rebuild()`
-/// has): column `pivot_col[s]` is loaded, pushed through the part of `L`
-/// built so far, and then split by the pivot assignment itself — entries
-/// in rows already pivotal become `U`'s column `s`, the entry at the pivot
-/// row becomes the diagonal, and entries in rows not yet pivotal become
-/// `L`'s column `s`. Nothing here searches for *sparsity*, and nothing
-/// maintains an active submatrix; per-step cost is the elimination
-/// arithmetic plus the reach-set heap, both bounded by the factors' own
-/// nonzero count.
+/// 左視 (left-looking、Gilbert-Peierls 形、HiGHS `rebuild()` と同形): 列を読み込み、
+/// ここまでの `L` で前進代入し、ピボット済み行の要素を `U` の列 `s`、ピボット行の
+/// 要素を対角、未ピボット行の要素を `L` の列 `s` に振り分ける。
+/// 活性部分行列は保持しない。
 ///
-/// **Why only the column order is replayed, not the row order.** HiGHS's
-/// own `rebuild()` replays both (`refactor_info_.pivot_row` /
-/// `pivot_var`) and gives up — rank deficiency, full rebuild — the moment
-/// a recorded pivot row's entry is too small. That is affordable *there*
-/// because HiGHS only ever sets `refactor_info_.use` for a hot start
-/// (`HEkk::setNlaRefactorInfo`), i.e. when re-factorizing the very basis
-/// the order was recorded from, where the recorded rows trivially still
-/// work. Replaying both orders across a *changed* basis was implemented
-/// here first and measured: it is rejected essentially always (Netlib
-/// `25fv47` 0/26 attempts, `degen3` 0/7, `pilot` 0/30, `fit2p` 0/32,
-/// `greenbea` 1/28), and the rejections are overwhelmingly "the recorded
-/// pivot row is numerically *empty*" (`fail zero`, not `fail stability`) —
-/// which is exactly what a replaced basis column looks like: the entering
-/// column has no reason whatsoever to be nonzero at the row that was
-/// pivotal for the column that left. The column order is what Markowitz's
-/// fill-minimization actually encodes; the row assignment is a numerical
-/// choice, and re-making it per step (partial pivoting: take the largest
-/// remaining entry) costs one pass over the column that has already been
-/// computed.
+/// 列順だけを再生し、行順は再生しない (FT 更新で入れ替わった列では記録された
+/// ピボット行が数値的に空になるため)。
 ///
-/// Returns `None` — caller falls back to [`factorize`] — if the order is
-/// not a valid permutation, if some step's column has nothing left above
-/// [`REBUILD_MIN_PIVOT`] in the remaining submatrix (a singular or
-/// numerically spent basis), or if the factors exceed `max_nnz` nonzeros.
+/// 次の場合 `None` (呼び出し側が [`factorize`] にフォールバック):
+/// 順序が正しい置換でない / ある列の残り部分行列に [`REBUILD_MIN_PIVOT`] を
+/// 超える要素が無い (特異・数値的に使い果たした基底) / 因子の非ゼロ数が
+/// `max_nnz` を超えた。
 fn factorize_reusing_order(
     m: usize,
     rows_in: &[Vec<(usize, f64)>],
@@ -2067,18 +1572,12 @@ fn factorize_reusing_order(
             seen[j] = true;
         }
     }
-    // Read once for the whole factorization, exactly as
-    // `MarkowitzState::new` does — this path reuses the previous
-    // factorization's *column* order but still picks each pivot row under
-    // the same threshold test, so an escalated threshold has to reach it
-    // too (a rebuild that kept the old, looser floor would quietly undo
-    // the escalation for as long as the pivot order keeps being reusable).
+    // `MarkowitzState::new` と同じく分解全体で 1 回だけ読む
+    // (引き上げた閾値がこの経路にも届くように)。
     let threshold = pivot_threshold();
 
-    // Column-major copy of the (row-major) input: one `O(nnz)` counting
-    // sort into flat arrays, the same shape `CscMat::from_rows` builds,
-    // kept local because this one is indexed by *basis slot* and thrown
-    // away when the factorization is done.
+    // 入力 (行優先) の列優先コピー。基底スロット番号で添字付けする、分解後に捨てる
+    // 一時配列 (`O(nnz)` の計数ソート)。
     let mut col_start = vec![0usize; m + 1];
     for row in rows_in.iter() {
         for &(j, _) in row {
@@ -2104,38 +1603,35 @@ fn factorize_reusing_order(
         }
     }
 
+    // 現在の列を元の行番号で展開した密作業ベクトル
     let mut work = vec![0.0f64; m];
+    // `work` で値を書いた行の一覧
     let mut touched: Vec<usize> = Vec::new();
+    // 行が `touched` に入っているか
     let mut in_touched = vec![false; m];
+    // 前進代入で処理すべき `L` のステップ (昇順に取り出す最小ヒープ)
     let mut heap: BinaryHeap<Reverse<usize>> = BinaryHeap::new();
+    // ステップがヒープに入っているか
     let mut queued = vec![false; m];
 
-    // `L`'s columns as one flat buffer in *original row* indexing while
-    // the rebuild runs (a row's own step is only known once it is chosen
-    // as a pivot, which for `L`'s entries is always later than the step
-    // writing them), converted to step indexing in one pass at the end.
+    // 作業中の `L` の列 (元の行番号で保持し、最後にステップ番号へ一括変換する。
+    // 行のステップはピボットに選ばれるまで分からないため)。
     let mut l_entries: Vec<(usize, f64)> = Vec::new();
+    // `l_entries` における各列の開始オフセット
     let mut l_offsets: Vec<usize> = Vec::with_capacity(m + 1);
     l_offsets.push(0);
     let mut u_row: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
+    // これまでに作った `L`+`U` の非ゼロ数
     let mut lu_nnz = 0usize;
 
-    // `row_step[r]`: the step row `r` was chosen as a pivot at, or
-    // `usize::MAX` while it is still in the remaining submatrix. Becomes
-    // `LuFactors::row_perm_inv` once every row has one.
+    // `row_step[r]`: 行 `r` がピボットに選ばれたステップ (未選択なら `usize::MAX`)。
+    // 最後に `LuFactors::row_perm_inv` になる。
     let mut row_step = vec![usize::MAX; m];
     let mut row_perm = vec![0usize; m];
 
-    // `row_remaining[r]`: how many of row `r`'s own entries still sit in
-    // columns this order has not reached yet — the row-degree half of a
-    // Markowitz count, over the *input* matrix rather than the (never
-    // materialized here) eliminated one. Maintained in `O(nnz)` total by
-    // decrementing a column's rows as that column is consumed, and used
-    // only to break the tie among numerically acceptable rows when the
-    // recorded one is unusable: with the column order fixed, the row
-    // choice is all that is left to keep fill down, and taking the
-    // absolutely largest entry (plain partial pivoting) ignores sparsity
-    // entirely.
+    // `row_remaining[r]`: 行 `r` の要素のうち、まだ到達していない列にあるものの数
+    // (入力行列上の Markowitz 数の行側)。記録された行が使えないときの行選択で、
+    // フィル抑制のために使う。
     let mut row_remaining: Vec<u32> = rows_in.iter().map(|row| row.len() as u32).collect();
 
     for s in 0..m {
@@ -2158,13 +1654,10 @@ fn factorize_reusing_order(
             }
         }
 
-        // Forward solve `L y = A[:, pj]` against the `s` columns of `L`
-        // built so far. Steps come out of the heap in ascending order, and
-        // column `t` of `L` only ever writes rows that were *not* pivotal
-        // at step `t` (so their own step, if any, is `> t`), which makes
-        // ascending step order a valid topological order — the same
-        // property `l_solve_sparse_into` relies on, reached here with a
-        // heap rather than a DFS because the graph is still being built.
+        // ここまでの `L` の `s` 列に対して `L y = A[:, pj]` を前進代入する。
+        // `L` の列 `t` はステップ `t` で未ピボットだった行 (ステップ > t) にしか
+        // 書かないので、昇順が正しいトポロジカル順になる (グラフが構築中のため
+        // DFS でなくヒープを使う)。
         while let Some(Reverse(t)) = heap.pop() {
             queued[t] = false;
             let y = work[row_perm[t]];
@@ -2186,13 +1679,8 @@ fn factorize_reusing_order(
             }
         }
 
-        // Pivot choice: the recorded row if it is still free and passes
-        // the same threshold test `find_best_pivot` applies
-        // ([`pivot_threshold`]
-        // times the largest magnitude left in this column of the
-        // *remaining* submatrix — which is what `work` now holds over the
-        // rows that have no step yet); otherwise that largest entry
-        // itself, i.e. plain partial pivoting.
+        // ピボット選択: まず残り部分行列 (ステップ未割当の行) でのこの列の
+        // 最大絶対値を求める。
         let mut best_r = usize::MAX;
         let mut best_abs = 0.0f64;
         for &r in &touched {
@@ -2209,17 +1697,12 @@ fn factorize_reusing_order(
             return None;
         }
         let hint = pivot_row_hint[s];
+        // 記録された行が未使用で閾値 (`threshold * best_abs`) を満たせばそれを使う。
         let pi = if hint < m && row_step[hint] == usize::MAX && work[hint].abs() >= threshold * best_abs {
             hint
         } else {
-            // The recorded row is gone (a basis column the Forrest-Tomlin
-            // updates replaced leaves its old pivot row numerically empty
-            // here — see this function's own docs): re-pick among the rows
-            // that clear the same [`pivot_threshold`] floor `find_best_pivot`
-            // applies, taking the one with the fewest entries left in
-            // columns this order has yet to reach, ties going to the
-            // larger pivot. That is the surviving half of a Markowitz
-            // count once the column is fixed.
+            // 記録された行が使えない: 閾値を満たす行のうち、未到達列に残る要素数が
+            // 最少の行 (同数ならピボット絶対値が大きい方) を選び直す。
             PROF_REBUILD_ROW_REPICKS.fetch_add(1, Ordering::Relaxed);
             let floor = threshold * best_abs;
             let mut pick = best_r;
@@ -2257,8 +1740,7 @@ fn factorize_reusing_order(
             if t == usize::MAX {
                 l_entries.push((r, v / pivot));
             } else {
-                // `t <= s` here: `r` is either pivotal from an earlier
-                // step or the pivot just chosen for this one.
+                // ここでは `t <= s` (以前のピボット行か、今選んだピボット行)。
                 u_row[t].push((s, v));
             }
             lu_nnz += 1;
@@ -2298,30 +1780,24 @@ fn factorize_reusing_order(
     })
 }
 
+/// `m x m` の疎行列 (疎行 `(列, 値)` の並び) を LU 分解する。数値的に特異
+/// (あるステップで許容できるピボットが残っていない) なら `None`。
+/// 境界列が適量あれば [`factorize_bordered`]、稠密なら [`factorize_dense_faer`]、
+/// それ以外は Markowitz 消去に振り分ける。
 pub fn factorize(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuFactors> {
     let border = detect_border_columns(m, rows_in);
     factorize_routed(m, rows_in, &border, is_dense_input(m, rows_in))
 }
 
-/// [`factorize`] with its two routing inputs — [`detect_border_columns`]'s
-/// result and [`is_dense_input`]'s — supplied by a caller that already
-/// computed them.
+/// [`factorize`] の本体。振り分けに使う [`detect_border_columns`] の結果
+/// (`border`) と [`is_dense_input`] の結果 (`dense`) を呼び出し側が計算済みで渡す。
 fn factorize_routed(m: usize, rows_in: &[Vec<(usize, f64)>], border: &[usize], dense: bool) -> Option<LuFactors> {
     if env_str!("ENOMOTO_DEBUG_BLOCK_SIZES").is_some() {
         debug_print_block_sizes(m, rows_in);
     }
-    // Tried *before* checking `is_dense_input`, deliberately: the measured
-    // crossover (see `BORDER_MAX_FRACTION`'s own docs) sits around
-    // `k/m ~= 0.5`, well past `is_dense_input`'s own 25%-of-`m^2` overall-
-    // density gate — a border-heavy input can easily cross that overall
-    // gate on the border columns' own density alone while `k/m` is still
-    // comfortably under `BORDER_MAX_FRACTION`, and in exactly that range
-    // `factorize_bordered` beats `factorize_dense_faer` too (not just
-    // plain Markowitz), so gating this attempt on `!is_dense_input` would
-    // give up a real win. `factorize_bordered` itself falls through to
-    // `None` (this function's own fallback to `factorize_flat_markowitz`,
-    // which still makes its own `is_dense_input` dispatch) if the sparse
-    // phase can't find `m - k` independent pivots.
+    // 境界付き分解は `is_dense_input` より *前に* 試す (境界列だけで全体密度の
+    // 判定を超える入力でも、その範囲では境界付きが稠密 LU より速いため)。
+    // 疎フェーズでピボットが揃わなければ `None` が返り、下の通常経路に落ちる。
     if border_wanted(m, border.len()) {
         if let Some(lu) = factorize_bordered(m, rows_in, border) {
             return Some(lu);
@@ -2330,10 +1806,9 @@ fn factorize_routed(m: usize, rows_in: &[Vec<(usize, f64)>], border: &[usize], d
     factorize_flat_markowitz_routed(m, rows_in, dense)
 }
 
-/// Analysis-only: appends one kernel input to `<dir>/lu_dump.bin`
-/// (`m`, then per row `len` and `(col, f64 bits)` pairs, all little-endian
-/// `u64`) so `lu_kernel_bench` can replay the exact matrices a solve
-/// factorized.
+/// 解析専用: 分解の入力 1 件を `<dir>/lu_dump.bin` に追記する (`m`、続いて
+/// 各行の `len` と `(列, f64 のビット)` の組。すべてリトルエンディアン `u64`)。
+/// `lu_kernel_bench` が同じ行列を再生するために使う。
 fn dump_lu_input(dir: &std::path::Path, m: usize, rows_in: &[Vec<(usize, f64)>]) {
     use std::io::Write;
     let mut buf: Vec<u8> = Vec::new();
@@ -2351,16 +1826,20 @@ fn dump_lu_input(dir: &std::path::Path, m: usize, rows_in: &[Vec<(usize, f64)>])
     }
 }
 
+/// 稠密判定を自分で行う [`factorize_flat_markowitz_routed`] (境界付き経路を通らない)。
 #[cfg_attr(not(test), allow(dead_code))]
 fn factorize_flat_markowitz(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuFactors> {
     factorize_flat_markowitz_routed(m, rows_in, is_dense_input(m, rows_in))
 }
 
-/// B3 diagnostics: how many factorizations switched to the dense tail, and
-/// the total size `k` of the tails they handed to `factorize_dense_faer`.
+/// B3 診断: 残りを稠密分解に切り替えた分解の回数。
 pub(crate) static PROF_DENSE_SWITCH: AtomicUsize = AtomicUsize::new(0);
+/// B3 診断: 稠密分解に渡した残りブロックのサイズ `k` の累計。
 pub(crate) static PROF_DENSE_SWITCH_ROWS: AtomicUsize = AtomicUsize::new(0);
 
+/// Markowitz 消去による分解本体 (`dense` なら [`factorize_dense_faer`] に回す)。
+/// 各ステップで稠密でないピボット列を優先し、無ければ制限なしで探す。
+/// ピボットが見つからなければ `None` (特異)。
 fn factorize_flat_markowitz_routed(m: usize, rows_in: &[Vec<(usize, f64)>], dense: bool) -> Option<LuFactors> {
     if dense {
         return factorize_dense_faer(m, rows_in);
@@ -2373,29 +1852,35 @@ fn factorize_flat_markowitz_routed(m: usize, rows_in: &[Vec<(usize, f64)>], dens
     let mut row_perm = vec![0usize; m];
     let mut col_perm = vec![0usize; m];
 
+    // `L` の要素 `(元の行, ピボットステップ, 乗数)`
     let mut l_entries: Vec<(usize, usize, f64)> = Vec::new();
+    // `U` の要素 `(ピボットステップ, 元の列, 値)`
     let mut u_entries: Vec<(usize, usize, f64)> = Vec::new();
+    // `ENOMOTO_DEBUG_ELIMINATE_COST`: 消去とスナップショットの時間を出力する
     let debug_eliminate_cost = env_str!("ENOMOTO_DEBUG_ELIMINATE_COST").is_some();
     let mut eliminate_ns: u128 = 0;
     let mut snapshot_ns: u128 = 0;
 
+    // ピボット行のコピー (分解全体で 1 つのバッファを再利用)
     let mut pivot_row_snapshot: Vec<(usize, f64)> = Vec::new();
-    // B3 (`ENOMOTO_LU_DENSE_SWITCH`, default `0` = off, path-changing):
-    // once the active submatrix's density reaches this fraction of `k^2`
-    // (`k` = rows left, at least `ENOMOTO_LU_DENSE_SWITCH_MIN`), factorize
-    // the remaining `k x k` block densely (`factorize_dense_faer`, partial
-    // pivoting) instead of continuing Markowitz on it.
-    let dense_switch = tunable!("ENOMOTO_LU_DENSE_SWITCH", 0.0, f64);
-    let dense_switch_min = tunable!("ENOMOTO_LU_DENSE_SWITCH_MIN", 64, usize);
+    // B3 (`ENOMOTO_LU_DENSE_SWITCH`、既定 `0` = off、経路が変わる): 活性部分行列の
+    // 密度が `k^2` のこの割合に達したら (`k` = 残り行数、`ENOMOTO_LU_DENSE_SWITCH_MIN`
+    // 以上)、残りの `k x k` ブロックを稠密分解する。
+    let dense_switch = tunable!("ENOMOTO_LU_DENSE_SWITCH", DENSE_SWITCH_FRACTION, f64);
+    let dense_switch_min = tunable!("ENOMOTO_LU_DENSE_SWITCH_MIN", DENSE_SWITCH_MIN_ROWS, usize);
     for step in 0..m {
-        if dense_switch > 0.0 && step % 16 == 0 && m - step >= dense_switch_min {
+        if dense_switch > 0.0 && step % DENSE_SWITCH_CHECK_INTERVAL == 0 && m - step >= dense_switch_min {
+            // 残りの行数
             let k = m - step;
+            // 活性部分行列の非ゼロ数
             let active: usize = (0..m).filter(|&i| !state.row_used[i]).map(|i| state.mat.row_len[i]).sum();
             if active as f64 >= dense_switch * (k as f64) * (k as f64) {
+                // 残りの行・列 (元の番号)
                 let rows_r: Vec<usize> = (0..m).filter(|&i| !state.row_used[i]).collect();
                 let cols_c: Vec<usize> = (0..m).filter(|&j| !state.col_used[j]).collect();
                 debug_assert_eq!(rows_r.len(), k);
                 debug_assert_eq!(cols_c.len(), k);
+                // 元の列番号 -> 残りブロック内の列番号
                 let mut col_local = vec![usize::MAX; m];
                 for (l, &j) in cols_c.iter().enumerate() {
                     col_local[j] = l;
@@ -2421,14 +1906,9 @@ fn factorize_flat_markowitz_routed(m: usize, rows_in: &[Vec<(usize, f64)>], dens
                 break;
             }
         }
-        // Prefer a non-dense pivot column whenever one exists at all,
-        // regardless of Markowitz score, and only fall back to the
-        // unrestricted search (which also correctly reports a genuinely
-        // singular matrix via `None`) once every remaining column is
-        // `initially_dense` — see `find_best_pivot`'s and
-        // `MarkowitzState::initially_dense`'s own docs for why avoiding a
-        // dense pivot column matters far more than the score it happens
-        // to carry at the moment it's chosen.
+        // 稠密でないピボット列があれば Markowitz 数に関係なくそれを優先し、
+        // 残りがすべて `initially_dense` のときだけ制限なしで探す
+        // (真に特異なら後者が `None` を返す)。
         let (pi, pj) = match state.find_best_pivot(true) {
             Some(p) => p,
             None => {
@@ -2446,12 +1926,11 @@ fn factorize_flat_markowitz_routed(m: usize, rows_in: &[Vec<(usize, f64)>], dens
         state.remove_from_bucket_col(pj);
 
         let pivot_val = state.value_at(pi, pj).unwrap();
-        let __t_snap0 = if debug_eliminate_cost { Some(std::time::Instant::now()) } else { None };
-        // One buffer for the whole factorization, not a fresh `Vec` per
-        // elimination step.
+        let snap_t0 = if debug_eliminate_cost { Some(std::time::Instant::now()) } else { None };
+        // ピボット行のうち、ピボット列と未使用列の非ゼロだけを写す。
         pivot_row_snapshot.clear();
         pivot_row_snapshot.extend(state.row(pi).filter(|&(j, v)| v != 0.0 && (j == pj || !state.col_used[j])));
-        if let Some(t0) = __t_snap0 {
+        if let Some(t0) = snap_t0 {
             snapshot_ns += t0.elapsed().as_nanos();
         }
 
@@ -2459,12 +1938,12 @@ fn factorize_flat_markowitz_routed(m: usize, rows_in: &[Vec<(usize, f64)>], dens
             u_entries.push((step, j, v));
         }
 
-        let __t_elim0 = if debug_eliminate_cost { Some(std::time::Instant::now()) } else { None };
+        let elim_t0 = if debug_eliminate_cost { Some(std::time::Instant::now()) } else { None };
         state.eliminate(pi, pj, pivot_val, &pivot_row_snapshot);
         for &(i, mult) in state.l_out() {
             l_entries.push((i, step, mult));
         }
-        if let Some(t0) = __t_elim0 {
+        if let Some(t0) = elim_t0 {
             eliminate_ns += t0.elapsed().as_nanos();
         }
     }
@@ -2486,11 +1965,8 @@ fn factorize_flat_markowitz_routed(m: usize, rows_in: &[Vec<(usize, f64)>], dens
         col_perm_inv[col_perm[step]] = step;
     }
 
-    // `l_entries` is already grouped by `pivot_step` in ascending order —
-    // the elimination loop above emits step `s`'s whole `L` column before
-    // moving to step `s + 1` — so `L` can be appended straight into its
-    // final compressed buffer, with no counting pass and no intermediate
-    // per-column `Vec`s (see `LuFactors::l_col`'s own docs).
+    // `l_entries` はピボットステップ昇順にまとまっているので、最終の圧縮
+    // バッファへ直接追記できる。
     debug_assert!(l_entries.windows(2).all(|w| w[0].1 <= w[1].1), "L entries must be grouped by ascending pivot step");
     let mut l_build = CscBuilder::with_capacity(m, m, l_entries.len());
     let mut next = 0usize;
@@ -2512,61 +1988,30 @@ fn factorize_flat_markowitz_routed(m: usize, rows_in: &[Vec<(usize, f64)>], dens
     Some(LuFactors { m, l_col, l_row, u_row, row_perm, col_perm, col_perm_inv, row_perm_inv })
 }
 
-/// Bordered (Schur-complement) factorization: `border` columns — see
-/// [`detect_border_columns`] — are excluded from the ordinary sparse
-/// Markowitz phase entirely (never appear as pivot candidates, never
-/// receive scattered fill from it) and instead resolved via a single
-/// small dense `k x k` Schur complement at the end.
-///
-/// **Why this exists**: `fit1p`-shaped Netlib instances have ~20-25
-/// columns nonzero in essentially every row (see `DENSE_COL_FRACTION`'s
-/// own docs). The ordinary Markowitz path already defers pivoting *on*
-/// these columns as long as possible (`MarkowitzState::initially_dense`),
-/// but every ordinary elimination step whose pivot row still carries one
-/// of these columns' entries scatters them into every row `eliminate`
-/// touches anyway — measured (`ENOMOTO_DEBUG_ELIMINATE_COST`) as the
-/// actual cost driver behind `fit1p`'s refactorizations (average row fill
-/// climbing from `1.0` at the initial all-slack basis to `~10` a few
-/// refactorizations later, each one costing several milliseconds despite
-/// `m` only being in the hundreds). Excluding these columns from the
-/// sparse phase's own bookkeeping entirely (rather than merely
-/// deprioritizing them as pivot targets) removes that scatter cost
-/// outright; the algebra it defers is applied once, in bulk, via the
-/// classic bordered-block-diagonal LU identity:
+/// 境界付き (Schur 補行列) 分解。`border` 列 ([`detect_border_columns`]) を
+/// 通常の疎 Markowitz フェーズから完全に除外し (ピボット候補にもならず、
+/// フィルも受けない)、最後に小さな稠密 `k x k` Schur 補行列で解決する。
 ///
 /// ```text
 /// A = [ A_SS  A_SD ]    L = [ L_SS   0  ]    U = [ U_SS  U_SD ]
 ///     [ A_DS  A_DD ]        [ L_DS  L_DD]        [  0    U_DD ]
 /// ```
 ///
-/// where `S` is the non-border columns and whichever `m - k` rows the
-/// sparse phase ends up choosing as their pivots, and `D` is the `k`
-/// border columns plus the `k` rows the sparse phase never touches.
-/// `L_SS`/`U_SS` and `L_DS` (the sparse phase's own elimination
-/// multipliers for *every* affected row, border rows included — free,
-/// already computed as a side effect of the ordinary elimination) fall
-/// out of a single Markowitz run with `border`'s entries simply absent
-/// from the input. `U_SD = L_SS^{-1} A_SD` is computed via one sparse
-/// forward solve per border column (structurally identical to
-/// [`LuFactors::l_solve_into`], just against the in-progress `L_SS`
-/// rather than a finished `LuFactors`). The Schur complement `A_DD -
-/// L_DS U_SD` (`k x k`, dense) is then factored directly via
-/// [`factorize_dense_faer`] — reusing the exact same dense path already
-/// used for a globally-dense input, just at the `k`-sized scale this
-/// bordering was meant to shrink the problem down to.
+/// `S` は非境界列と疎フェーズが選んだ `m - k` 行、`D` は `k` 本の境界列と疎フェーズが
+/// 触れない `k` 行。`L_SS`/`U_SS`/`L_DS` は境界列を除いた入力に対する 1 回の
+/// Markowitz 消去で得られ、`U_SD = L_SS^{-1} A_SD` は境界列ごとの前進代入、
+/// Schur 補行列 `A_DD - L_DS U_SD` は [`factorize_dense_faer`] で分解する。
 ///
-/// Returns `None` (falling back to [`factorize_flat_markowitz`] is the
-/// caller's job, exactly as the dense-column-avoidance fallback in that
-/// function already does for its own `skip_dense` retry) if the sparse
-/// phase gets stuck before finding pivots for every non-border column —
-/// a border column genuinely required as a pivot before all `m - k`
-/// sparse columns are resolved — or if the final `k x k` Schur complement
-/// itself turns out numerically singular.
+/// 疎フェーズが非境界列すべてのピボットを見つける前に行き詰まった場合、または
+/// Schur 補行列が数値的に特異な場合は `None` (呼び出し側が
+/// [`factorize_flat_markowitz`] にフォールバックする)。
 fn factorize_bordered(m: usize, rows_in: &[Vec<(usize, f64)>], border: &[usize]) -> Option<LuFactors> {
+    // 境界列の本数
     let k = border.len();
     if k == 0 || k >= m {
         return None;
     }
+    // 疎フェーズのステップ数
     let n_sparse = m - k;
 
     let mut is_border = vec![false; m];
@@ -2574,30 +2019,27 @@ fn factorize_bordered(m: usize, rows_in: &[Vec<(usize, f64)>], border: &[usize])
         is_border[j] = true;
     }
 
-    // Strip border columns from the input entirely before building the
-    // Markowitz state — this (not any change to `find_best_pivot` or
-    // `eliminate`) is what keeps the sparse phase from ever scattering
-    // into them: a column with zero remaining entries never appears in
-    // any `col_buckets` entry beyond bucket `0`, which `find_best_pivot`'s
-    // `for deg_col in 1..` loop never even visits.
+    // Markowitz 状態を作る前に入力から境界列を完全に取り除く。要素 0 個の列は
+    // バケット 0 にしか入らず、`find_best_pivot` の `for deg_col in 1..` は
+    // そこを訪れないので、疎フェーズが境界列に散布することはない。
     let sparse_rows: Vec<Vec<(usize, f64)>> =
         rows_in.iter().map(|row| row.iter().copied().filter(|&(j, v)| v != 0.0 && !is_border[j]).collect()).collect();
 
     let mut state = MarkowitzState::new(m, &sparse_rows);
-    // See `row_singleton_rel`'s docs: never in the bordered sparse phase.
+    // 境界付きの疎フェーズでは行シングルトン採用・行探索を必ず無効にする
+    // (`row_singleton_rel` 参照)。
     state.row_singleton_rel = -1.0;
     state.row_search = 0;
 
     let mut row_perm = vec![usize::MAX; m];
     let mut col_perm = vec![usize::MAX; m];
-    // (orig_row, pivot_step, mult) for every row `eliminate` ever touches
-    // during the sparse phase, border rows included — exactly `L_SS` and
-    // `L_DS` together, no separate bookkeeping needed for the latter.
+    // 疎フェーズで `eliminate` が触れた全行 (境界行を含む) の
+    // `(元の行, ピボットステップ, 乗数)` = `L_SS` と `L_DS` を合わせたもの。
     let mut l_entries: Vec<(usize, usize, f64)> = Vec::new();
-    // (pivot_step, orig_col, value) — `U_SS`'s own entries; `U_SD` is
-    // appended to this same list further down.
+    // `(ピボットステップ, 元の列, 値)` = `U_SS` の要素 (後で `U_SD` も追記)。
     let mut u_entries: Vec<(usize, usize, f64)> = Vec::new();
 
+    // ピボット行のコピー (分解全体で 1 つのバッファを再利用)
     let mut pivot_row_snapshot: Vec<(usize, f64)> = Vec::new();
     for step in 0..n_sparse {
         let (pi, pj) = state.find_best_pivot(true).or_else(|| state.find_best_pivot(false))?;
@@ -2610,8 +2052,6 @@ fn factorize_bordered(m: usize, rows_in: &[Vec<(usize, f64)>], border: &[usize])
         state.remove_from_bucket_col(pj);
 
         let pivot_val = state.value_at(pi, pj).unwrap();
-        // One buffer for the whole factorization, not a fresh `Vec` per
-        // elimination step.
         pivot_row_snapshot.clear();
         pivot_row_snapshot.extend(state.row(pi).filter(|&(j, v)| v != 0.0 && (j == pj || !state.col_used[j])));
         for &(j, v) in &pivot_row_snapshot {
@@ -2623,24 +2063,25 @@ fn factorize_bordered(m: usize, rows_in: &[Vec<(usize, f64)>], border: &[usize])
         }
     }
 
+    // 疎フェーズでピボットにならなかった `k` 行 (元の行番号)
     let border_rows: Vec<usize> = (0..m).filter(|&i| !state.row_used[i]).collect();
     assert_eq!(border_rows.len(), k, "sparse phase must leave exactly `k` rows unpivoted");
 
+    // 疎フェーズ部分の `row_perm` の逆写像 (境界行は `usize::MAX`)
     let mut row_perm_inv = vec![usize::MAX; m];
     for step in 0..n_sparse {
         row_perm_inv[row_perm[step]] = step;
     }
+    // 元の行番号 -> 境界行内の局所番号
     let mut border_row_local = vec![usize::MAX; m];
     for (local, &r) in border_rows.iter().enumerate() {
         border_row_local[r] = local;
     }
 
-    // `l_col_ss[s]`: `L_SS`'s own column `s` (row targets restricted to
-    // sparse-phase steps) — an intermediate used only by this function's
-    // own forward solves below, never exposed outside it.
+    // `l_col_ss[s]`: `L_SS` の列 `s` (行は疎フェーズのステップ番号)。
+    // この関数内の前進代入専用の一時データ。
     let mut l_col_ss: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n_sparse];
-    // `l_ds[local]`: border row `local`'s accumulated multipliers against
-    // each sparse step — exactly `L_DS[local, :]`, already complete.
+    // `l_ds[local]`: 境界行 `local` の各疎ステップに対する乗数 (= `L_DS[local, :]`)。
     let mut l_ds: Vec<Vec<(usize, f64)>> = vec![Vec::new(); k];
     for &(orig_row, step, mult) in &l_entries {
         let ri = row_perm_inv[orig_row];
@@ -2651,14 +2092,14 @@ fn factorize_bordered(m: usize, rows_in: &[Vec<(usize, f64)>], border: &[usize])
         }
     }
 
+    // 元の列番号 -> `border` 内の添字 (境界列でなければ `usize::MAX`)
     let mut border_index = vec![usize::MAX; m];
     for (idx, &j) in border.iter().enumerate() {
         border_index[j] = idx;
     }
 
-    // `border_col_rows[idx]`: every original `(row, value)` pair at
-    // border column `border[idx]`, gathered in one `O(nnz)` pass — reused
-    // below both for `A_SD` (this column's forward solve) and `A_DD`.
+    // `border_col_rows[idx]`: 境界列 `border[idx]` の元の `(行, 値)` 全部
+    // (1 回の `O(nnz)` パスで集め、`A_SD` と `A_DD` の両方に使う)。
     let mut border_col_rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); k];
     for (i, row) in rows_in.iter().enumerate() {
         for &(j, v) in row {
@@ -2672,10 +2113,8 @@ fn factorize_bordered(m: usize, rows_in: &[Vec<(usize, f64)>], border: &[usize])
         }
     }
 
-    // A_DD (original values; the Schur complement below subtracts the
-    // `L_DS * U_SD` correction from this directly, rather than reading
-    // any partially-reduced state — this *is* the standard bordered-LU
-    // identity, not an approximation of it).
+    // Schur 補行列。まず `A_DD` (元の値) を入れ、下で `L_DS * U_SD` を引く
+    // (標準の境界付き LU 恒等式そのもの)。
     let mut schur = vec![vec![0.0f64; k]; k];
     for (idx, rows_for_col) in border_col_rows.iter().enumerate() {
         for &(orig_row, v) in rows_for_col {
@@ -2687,6 +2126,7 @@ fn factorize_bordered(m: usize, rows_in: &[Vec<(usize, f64)>], border: &[usize])
     }
 
     for (idx, rows_for_col) in border_col_rows.iter().enumerate() {
+        // この境界列の `A_SD` 部分 (疎ステップ空間)。前進代入後は `U_SD` の列になる。
         let mut y = vec![0.0f64; n_sparse];
         for &(orig_row, v) in rows_for_col {
             let s = row_perm_inv[orig_row];
@@ -2694,8 +2134,7 @@ fn factorize_bordered(m: usize, rows_in: &[Vec<(usize, f64)>], border: &[usize])
                 y[s] += v;
             }
         }
-        // Forward solve `L_SS y = y` in place (unit lower triangular,
-        // step order) — structurally identical to `l_solve_into`.
+        // `L_SS y = y` をその場で前進代入 (単位下三角、ステップ順)。
         for s in 0..n_sparse {
             if y[s] == 0.0 {
                 continue;
@@ -2727,6 +2166,7 @@ fn factorize_bordered(m: usize, rows_in: &[Vec<(usize, f64)>], border: &[usize])
         .iter()
         .map(|row| row.iter().enumerate().filter(|&(_, &v)| v != 0.0).map(|(j, &v)| (j, v)).collect())
         .collect();
+    // Schur 補行列の稠密 LU
     let border_lu = factorize_dense_faer(k, &schur_rows)?;
 
     for s in 0..k {
@@ -2742,11 +2182,8 @@ fn factorize_bordered(m: usize, rows_in: &[Vec<(usize, f64)>], border: &[usize])
         col_perm_inv_full[col_perm[step]] = step;
     }
 
-    // As in `factorize_flat_markowitz`: `l_entries` covers steps
-    // `0..n_sparse` in ascending order, and the border block's own columns
-    // follow at `n_sparse..m`, also ascending — so the whole of `L` is
-    // still emitted in column order and goes straight into the compressed
-    // buffer (see `LuFactors::l_col`'s own docs).
+    // `l_entries` はステップ `0..n_sparse` を昇順に、境界ブロックの列は
+    // `n_sparse..m` を昇順に続けるので、`L` 全体を列順のまま圧縮バッファへ直接書ける。
     debug_assert!(l_entries.windows(2).all(|w| w[0].1 <= w[1].1), "L entries must be grouped by ascending pivot step");
     let mut l_build = CscBuilder::with_capacity(m, m, l_entries.len() + border_lu.l_col.nnz());
     let mut next = 0usize;
@@ -2780,6 +2217,7 @@ fn factorize_bordered(m: usize, rows_in: &[Vec<(usize, f64)>], border: &[usize])
 }
 
 impl LuFactors {
+    /// ステップ `step` の `U` 対角値 (無ければ `0.0`)。
     #[allow(dead_code)]
     fn u_diag(&self, step: usize) -> f64 {
         self.u_row[step]
@@ -2789,33 +2227,12 @@ impl LuFactors {
             .unwrap_or(0.0)
     }
 
-    /// Partial FTRAN through `L` only (step-space): solves `L z = P_row rhs`.
+    /// 2 本の右辺に対する [`Self::l_solve_into`] を `L` の 1 回の走査で行う
+    /// ([`FtLu::solve_into_pair_capture`] 用)。各ベクトルが受ける演算と順序は
+    /// 個別呼び出しと同じなので結果はビット一致。
     ///
-    /// Hyper-sparse (Hall & McKinnon, *"Hyper-sparsity in the revised
-    /// simplex method and how to exploit it"*, 2000, §4.2 "Hyper-sparse
-    /// FTRAN", Figure 3): `l_col[s]`'s entries only ever modify `z` by
-    /// adding a multiple of `z[s]` itself — if `z[s]` is exactly zero, the
-    /// whole inner loop is a provable no-op (every update is `x -= mult *
-    /// 0`), so it is skipped entirely rather than paying for a test-against-
-    /// zero (or worse, a real floating point op) per entry.
-    /// Writes the result into caller-provided `z` (length `m`) instead of
-    /// allocating — `FtLu`'s hot-path `solve_into` calls this once per
-    /// FTRAN, so a fresh `Vec` here would mean a fresh heap allocation on
-    /// every single pivot's FTRAN/BTRAN, several times over (see
-    /// `FtLu::solve_into`'s own docs).
-    /// [`Self::l_solve_into`] for two right-hand sides in one pass over
-    /// `L` — see [`FtLu::solve_into_pair_capture`]. Each vector sees exactly
-    /// the operations, in exactly the order, a separate `l_solve_into` call
-    /// would apply to it (a column is skipped for one vector iff that
-    /// vector's own `z[s]` is zero), so both results are bit-identical to
-    /// two separate calls; only the traversal of `l_col` is shared.
-    ///
-    /// `active` lists, ascending, the steps whose `L` column is non-empty
-    /// ([`FtLu::l_active`]): a step with an empty column does nothing
-    /// whatever its value, so the elimination loop visits only those (the
-    /// result is bit-identical; for a basis whose `L` is mostly trivial —
-    /// slack-heavy — this turns an `O(m)` zero-test scan into
-    /// `O(#non-trivial columns)`).
+    /// `active`: `L` の列が非空のステップ (昇順、[`FtLu::l_active`])。空列のステップは
+    /// 何もしないので、それだけを訪れる。
     fn l_solve_into_pair(&self, active: &[u32], rhs_a: &[f64], rhs_b: &[f64], za: &mut [f64], zb: &mut [f64]) {
         let m = self.m;
         for s in 0..m {
@@ -2849,12 +2266,10 @@ impl LuFactors {
         }
     }
 
-    /// [`Self::l_solve_into_pair`] plus a third right-hand side `c` (the
-    /// BFRT combined-flip column — see [`FtLu::solve_into_triple_capture`]).
-    /// Columns where all three are nonzero are walked once for all three;
-    /// otherwise `a`/`b` take the pair logic and `c` its own single pass.
-    /// Every vector still receives exactly its own single-solve operations
-    /// in the same order, so all three results are bit-identical.
+    /// [`Self::l_solve_into_pair`] に 3 本目の右辺 `c` (BFRT の合成フリップ列、
+    /// [`FtLu::solve_into_triple_capture`]) を加えたもの。3 本とも非ゼロの列は
+    /// 1 回で処理し、それ以外は `a`/`b` を pair の論理、`c` を単独で処理する。
+    /// 結果はそれぞれ個別呼び出しとビット一致。
     #[allow(clippy::too_many_arguments)]
     fn l_solve_into_triple(&self, active: &[u32], rhs_a: &[f64], rhs_b: &[f64], rhs_c: &[f64], za: &mut [f64], zb: &mut [f64], zc: &mut [f64]) {
         let m = self.m;
@@ -2904,6 +2319,10 @@ impl LuFactors {
         }
     }
 
+    /// `L` だけを通す部分 FTRAN (ステップ空間): `L z = P_row rhs` を解き、
+    /// 呼び出し側の `z` (長さ `m`) に書く。`z[s]` が厳密に 0 のステップは列ごと
+    /// 飛ばす (Hall & McKinnon 2000 §4.2 の超疎 FTRAN)。
+    /// `active` は [`Self::l_solve_into_pair`] と同じ。
     fn l_solve_into(&self, active: &[u32], rhs: &[f64], z: &mut [f64]) {
         let m = self.m;
         for s in 0..m {
@@ -2920,47 +2339,16 @@ impl LuFactors {
         }
     }
 
-    /// Gilbert-Peierls sparse forward substitution through `L`: given
-    /// `rhs`'s nonzero `(orig_row, value)` pairs directly (no `O(m)`
-    /// densification of the caller's own sparse column needed), computes
-    /// the *reach set* — every step whose `z` entry could possibly end up
-    /// nonzero — via a DFS over `l_col`'s step-to-step edges, then runs
-    /// exactly [`l_solve_into`]'s own elimination but restricted to that
-    /// set. A second, dense-scanning implementation of this exists
-    /// ([`l_solve_into`]) rather than making this the only one because a
-    /// dense `rhs` (this function's own worst case: `|reach| == m`) pays
-    /// for the DFS bookkeeping (stack pushes, epoch checks) on top of the
-    /// same elimination work `l_solve_into` would have done anyway with a
-    /// tight double loop — this function is a net win specifically when
-    /// `rhs` (and hence typically `reach`) is small relative to `m`, which
-    /// is the common case for the one caller that has a genuinely sparse
-    /// `rhs` on hand already (`solve_lp_dual_on`'s entering-column FTRAN:
-    /// a real LP's constraint columns are themselves sparse).
+    /// `L` を通す Gilbert-Peierls 疎前進代入。右辺の非ゼロ `(元の行, 値)` を
+    /// 直接受け取り、`l_col` のステップ間辺を DFS して到達集合 (非ゼロになりうる
+    /// ステップ) を求め、その集合に限って [`l_solve_into`] と同じ消去を行う。
+    /// 右辺・到達集合が `m` に比べて小さいときに有利。
     ///
-    /// **Why ascending numeric order is already a valid topological
-    /// order** (unlike the general Gilbert & Peierls 1988 presentation for
-    /// an arbitrary DAG, which needs a DFS-postorder-then-reverse to get
-    /// one): every `l_col[s]` entry's `row_step` is `> s`, by construction
-    /// of the elimination itself (`factorize` only ever records a
-    /// multiplier for a row not yet chosen as a pivot, which by definition
-    /// gets assigned some *later* step) — so the edges of this graph only
-    /// ever point from a lower step to a higher one, meaning simply
-    /// sorting the reach set ascending already respects every dependency,
-    /// with no need to track a separate visit order during the DFS itself.
+    /// `l_col[s]` の行ステップは常に `> s` なので、到達集合を昇順ソートする
+    /// だけで正しいトポロジカル順になる。
     ///
-    /// **Precondition**: `z` is entirely zero on entry. This is *not*
-    /// this function's own job to (re-)establish cheaply — its own reach
-    /// set only covers what the `L`-stage itself touches, but the R-eta
-    /// and `U` stages downstream (in [`FtLu::solve_sparse_into`]) can
-    /// scatter fill well beyond that set (a long-enough eta chain can, in
-    /// the worst case, touch entries across the whole vector), so knowing
-    /// "the previous call's `L`-stage reach" here would not be enough to
-    /// correctly re-zero what a *subsequent* stage left behind. Instead
-    /// [`FtLu::solve_sparse_into`] unconditionally clears its own
-    /// dedicated `z` buffer once, in full, right before returning — a
-    /// single `O(m)` `fill(0.0)` per call, far cheaper than the branchy
-    /// permute-and-scan `l_solve_into` otherwise pays, and the only
-    /// `O(m)` work left in the whole sparse path.
+    /// **前提条件**: 入口で `z` は全 0 であること (再ゼロ化は
+    /// [`FtLu::solve_sparse_into`] が返却前に行う)。
     fn l_solve_sparse_into(&self, rhs_sparse: &[(usize, f64)], z: &mut [f64], scratch: &mut GpScratch) {
         scratch.seeds.clear();
         for &(orig_row, v) in rhs_sparse {
@@ -2974,15 +2362,10 @@ impl LuFactors {
         self.l_solve_gp_seeded(z, scratch);
     }
 
-    /// [`Self::l_solve_into`] for a dense `rhs` whose nonzero *steps*
-    /// (`s` with `rhs[row_perm[s]] != 0.0`) are already known: `steps` must
-    /// list exactly those steps (any order). Clears `z` itself (no
-    /// precondition on its content) and runs the Gilbert-Peierls reach-set
-    /// elimination of [`Self::l_solve_sparse_into`]. Every step outside the
-    /// reach set is exactly zero in [`Self::l_solve_into`] too (skipped by
-    /// its own zero test), and the reach set is visited in ascending step
-    /// order, so the result is bit-identical to `l_solve_into` up to the
-    /// sign of zero entries.
+    /// 非ゼロの *ステップ* (`rhs[row_perm[s]] != 0.0` となる `s`) が分かっている
+    /// 密な `rhs` に対する [`Self::l_solve_into`]。`steps` はちょうどそれらを
+    /// (任意順で) 列挙すること。`z` は自分でクリアする。到達集合版の消去を行い、
+    /// 結果は `l_solve_into` と (ゼロの符号を除き) ビット一致。
     fn l_solve_steps_into(&self, rhs: &[f64], steps: &[usize], z: &mut [f64], scratch: &mut GpScratch) {
         z.fill(0.0);
         scratch.seeds.clear();
@@ -2995,8 +2378,8 @@ impl LuFactors {
         self.l_solve_gp_seeded(z, scratch);
     }
 
-    /// The DFS + ascending elimination shared by the two GP entry points
-    /// above; `scratch.seeds` and `z` at the seeds are already set.
+    /// 上の 2 つの GP 入口が共有する DFS と昇順消去。`scratch.seeds` と、
+    /// 起点位置の `z` は設定済みであること。
     fn l_solve_gp_seeded(&self, z: &mut [f64], scratch: &mut GpScratch) {
         scratch.visited.begin();
         scratch.reach.clear();
@@ -3029,61 +2412,18 @@ impl LuFactors {
         }
     }
 
-    /// Finishes a BTRAN given a step-space vector already transformed by
-    /// `U^{-T}`: applies `L^{-T}` and maps back to original row indices.
+    /// BTRAN の仕上げ (列優先ギャザー形式): `U^{-T}`/`R` 適用済みのステップ空間
+    /// ベクトル `w` に `L^{-T}` をその場で適用し、元の行番号に戻して `y` に書く。
     ///
-    /// Unlike `l_solve`'s forward pass, a single step `s` here can read
-    /// from *several* `w[row_step]` entries (one per `l_col[s]` entry), so
-    /// there is no single value whose zero-ness makes the whole step a
-    /// no-op — matching Hall & McKinnon §4.4's observation that BTRAN's
-    /// inner-product-shaped work has "no simple way of determining [a
-    /// trivial] intersection... without a computational overhead
-    /// comparable to evaluating the inner product itself". Skipping
-    /// per-*entry* when that specific `w[row_step]` is zero is still safe
-    /// and free, just a smaller win than `l_solve`'s whole-step skip.
-    ///
-    /// (A first attempt at a fuller DFS-based hyper-sparse implementation,
-    /// covering all four solve directions and mirroring `L`/`U` both
-    /// column- and row-major the way HiGHS does, was tried and measured
-    /// *slower* end to end: the DFS setup's own per-call cost —
-    /// allocating a fresh `visited` array plus an upfront `O(m)` density
-    /// scan on every single call, even ones that ended up taking the
-    /// dense-style branch — outweighed the fill-skipping it bought, on
-    /// the order of 15-18% slower overall. That attempt was reverted in
-    /// full. A second, narrower attempt — [`LuFactors::l_solve_sparse_into`],
-    /// covering only this module's one genuinely straightforward GP
-    /// setting (`L`'s own forward direction, already stored column-major,
-    /// fed a real LP's own sparse constraint column) with a *persistent*,
-    /// epoch-stamped scratch (see [`GpScratch`]) rather than a fresh
-    /// per-call allocation — measured as a small but real net win on the
-    /// full Netlib benchmark set (73 problems, aggregate wall time ~1%
-    /// lower, roughly even split of individually-faster/slower instances,
-    /// zero objective mismatches) once the specific cost the first
-    /// attempt's own revert blamed — the allocation, not the algorithm —
-    /// was actually removed. This `L^{-T}` direction (BTRAN's tail) was
-    /// deliberately *not* attempted a second time: Hall & McKinnon's
-    /// observation above still applies unchanged (no static column-major
-    /// structure of `L` to run the same DFS over without adding a
-    /// row-major mirror), and the first attempt's win was concentrated in
-    /// the one direction with a genuinely sparse, already-available
-    /// seed — this direction's own `w` typically isn't.)
-    /// `w` (step-space, already past `U^{-T}`/the `R` etas) is mutated in
-    /// place; the final result is written into caller-provided `y`
-    /// (original row indexing) — see `l_solve_into`'s own docs for why
-    /// this avoids allocating on `FtLu`'s hot path.
-    ///
-    /// **This is the pre-[`LuFactors::l_row`] gather form, kept only as the
-    /// `ENOMOTO_BTRAN_L_SCATTER=0` A/B arm** (and as the reference the
-    /// scatter form's own unit tests check against) — see
-    /// [`Self::l_transpose_solve_scatter_into`], which is what every
-    /// production BTRAN actually calls.
+    /// **`ENOMOTO_BTRAN_L_SCATTER=0` の A/B 用と単体テストの参照実装としてのみ
+    /// 残している**。本番の BTRAN は [`Self::l_transpose_solve_scatter_into`] を使う。
     #[cfg_attr(not(test), allow(dead_code))]
     fn l_transpose_solve_gather_into(&self, w: &mut [f64], y: &mut [f64]) {
         self.l_transpose_gather_core(w);
         permute_btran_out(&self.row_perm, w, y);
     }
 
-    /// [`Self::l_transpose_solve_gather_into`] without the final permutation.
+    /// [`Self::l_transpose_solve_gather_into`] から最後の置換を除いたもの。
     #[inline]
     fn l_transpose_gather_core(&self, w: &mut [f64]) {
         let m = self.m;
@@ -3097,46 +2437,20 @@ impl LuFactors {
         }
     }
 
-    /// [`Self::l_transpose_solve_gather_into`]'s own triangular solve, read
-    /// through the row-major mirror [`LuFactors::l_row`] instead of the
-    /// column-major `l_col` — turning BTRAN's `L^{-T}` stage from a gather
-    /// into a scatter, which is what makes it hyper-sparse.
+    /// BTRAN の `L^{-T}` 段を行優先ミラー [`LuFactors::l_row`] 経由の
+    /// スキャッタ形式で解き、元の行番号に戻して `y` に書く。`w[s]` が内側ループ
+    /// 唯一の乗数なので、`w[s] == 0.0` ならステップ全体を飛ばせる (超疎化)。
+    /// HiGHS の `btranL` と同じ手法。
     ///
-    /// The two loops compute the same `L^T w' = w` back substitution over
-    /// the same nonzeros, only associating the updates differently: the
-    /// gather form accumulates *into* `w[s]` one `l_col[s]` entry at a
-    /// time (so `w[s]`'s own value is only known once every one of them
-    /// has been read, and no prefix of them can be skipped as a group),
-    /// while this form propagates *out of* `w[s]` into every `l_row.row(s)`
-    /// entry at once. Because `w[s]` is the single multiplicand of that
-    /// whole inner loop, `w[s] == 0.0` makes the entire step a provable
-    /// no-op — the same whole-step skip [`Self::l_solve_into`] and
-    /// [`FtLu::u_solve_into`] already exploit in the forward direction,
-    /// and the one Hall & McKinnon (2000) §4.4 explains the gather form
-    /// *cannot* have ("no simple way of determining [a trivial]
-    /// intersection... without a computational overhead comparable to
-    /// evaluating the inner product itself"). HiGHS reaches the same skip
-    /// the same way, via its own row-major `lr_*` copy of `L` in `btranL`.
-    ///
-    /// `docs/lu_comparison_enomoto_vs_highs.md` §2.6 names this as the one
-    /// of HiGHS's four hyper-sparse solve directions this crate had never
-    /// attempted (the *reason* being precisely that no row-major `L`
-    /// existed to attempt it with — this method adds it).
-    ///
-    /// Not bit-identical to the gather form: the same set of products is
-    /// summed into each `w[s]` in the opposite order (descending source
-    /// step here, `l_col[s]`'s own stored order there), so results can
-    /// differ in the last ulp and, through the dual ratio test's
-    /// tie-breaks, shift iteration counts either way on degeneracy-heavy
-    /// instances. That is measured, not assumed — see this change's own
-    /// analysis note for the per-problem numbers.
+    /// ギャザー形式とはビット一致しない (各 `w[s]` への積の加算順が逆のため、
+    /// 最終 ulp が異なりうる)。
     #[cfg_attr(not(test), allow(dead_code))]
     fn l_transpose_solve_scatter_into(&self, w: &mut [f64], y: &mut [f64]) {
         self.l_transpose_scatter_core(w);
         permute_btran_out(&self.row_perm, w, y);
     }
 
-    /// [`Self::l_transpose_solve_scatter_into`] without the final permutation.
+    /// [`Self::l_transpose_solve_scatter_into`] から最後の置換を除いたもの。
     #[inline]
     fn l_transpose_scatter_core(&self, w: &mut [f64]) {
         let m = self.m;
@@ -3151,19 +2465,19 @@ impl LuFactors {
         }
     }
 
-    /// Solves `B x = rhs` using the factors (`P_row B P_col = LU`).
+    /// 因子 (`P_row B P_col = LU`) を使って `B x = rhs` を解く (テスト・参照用)。
     #[allow(dead_code)]
     pub fn solve(&self, rhs: &[f64]) -> Vec<f64> {
         let m = self.m;
         // rhs' = P_row rhs
         let mut z: Vec<f64> = (0..m).map(|s| rhs[self.row_perm[s]]).collect();
-        // Forward: L z = rhs' (unit lower triangular, step order)
+        // 前進代入: L z = rhs' (単位下三角、ステップ順)
         for s in 0..m {
             for &(row_step, mult) in self.l_col.col(s) {
                 z[row_step] -= mult * z[s];
             }
         }
-        // Back: U x' = z
+        // 後退代入: U x' = z
         let mut xp = vec![0.0; m];
         for s in (0..m).rev() {
             let mut acc = z[s];
@@ -3182,20 +2496,15 @@ impl LuFactors {
         x
     }
 
-    /// Solves `B^T y = rhs`.
+    /// `B^T y = rhs` を解く (テスト・参照用)。
     #[allow(dead_code)]
     pub fn solve_transpose(&self, rhs: &[f64]) -> Vec<f64> {
         let m = self.m;
-        // rhs2 = P_col^-1 rhs, i.e. rhs2[s] = rhs[col_perm[s]]
+        // rhs2 = P_col^-1 rhs、すなわち rhs2[s] = rhs[col_perm[s]]
         let mut z: Vec<f64> = (0..m).map(|s| rhs[self.col_perm[s]]).collect();
-        // Forward: U^T z2 = rhs2 (lower triangular in step order). Row-wise
-        // storage of U means column-wise access (needed for a textbook
-        // forward substitution) isn't available, so instead this scatters:
-        // by the time step `s` is processed, `z[s]` already holds
-        // `rhs2[s]` minus every contribution from steps `k < s` (each such
-        // `k` scattered `-U[k,s] * z[k]` into `z[s]` when `k` was
-        // processed), so dividing by the diagonal solves for `z[s]`, which
-        // is then scattered forward into `z[col_step]` for `col_step > s`.
+        // 前進代入: U^T z2 = rhs2 (ステップ順で下三角)。`U` は行格納なので
+        // スキャッタで解く: ステップ `s` の時点で `z[s]` には `k < s` からの寄与が
+        // すべて引かれているので、対角で割って確定させ、`col_step > s` へ散布する。
         for s in 0..m {
             z[s] /= self.u_diag(s);
             for &(col_step, v) in &self.u_row[s] {
@@ -3204,7 +2513,7 @@ impl LuFactors {
                 }
             }
         }
-        // Back: L^T w = z (unit upper triangular in step order)
+        // 後退代入: L^T w = z (ステップ順で単位上三角)
         let mut w = z;
         for s in (0..m).rev() {
             for &(row_step, mult) in self.l_col.col(s) {
@@ -3222,102 +2531,72 @@ impl LuFactors {
 }
 
 // ---------------------------------------------------------------------
-// Forrest-Tomlin incremental update
+// Forrest-Tomlin 更新
 // ---------------------------------------------------------------------
 //
-// Following Forrest, J.J.H. and Tomlin, J.A., "Updated triangular factors
-// of the basis to maintain sparsity in the product form simplex method",
-// Mathematical Programming 2 (1972), 263-278, as summarized precisely
-// with full derivations in Huangfu, Q. and Hall, J.A.J., "Novel update
-// techniques for the revised simplex method", Technical Report
-// ERGO-13-001, University of Edinburgh (2013) §2.1 (equations 1, 4-13).
+// Forrest & Tomlin (1972) / Huangfu & Hall, ERGO-13-001 (2013) §2.1 に従う。
 //
-// Column replacement `B̄ = B + (a_q - B e_p) e_p^T` is rearranged via the
-// fixed factorization `B = LU` as
-//   `L^{-1} B̄ = U + (L^{-1}a_q - U e_p) e_p^T = U + (ã_q - u_p) e_p^T = U'`
-// replacing column `p` of `U` with the partial FTRAN result
-// `ã_q = L^{-1} a_q`. This "spikes" column `p` of `U` (rows > p can now
-// be nonzero, breaking triangularity). Triangularity is restored by one
-// row transformation `R^{-1} = I - e_p r^T` that zeros row `p` across
-// every column: `Ū = R^{-1}U'`, where `r^T = ū_p^T U^{-1}` (`ū_p` = row
-// `p` of `U` without its diagonal) can be obtained at negligible cost
-// from `ẽ_p^T = e_p^T U^{-1}` (a partial BTRAN already computed to derive
-// `r`) as `r = -u_pp · ẽ_p` with the `p`-th entry forced to zero
-// (Tomlin 1974, eq. 12 in the 2013 paper). `R^{-1}` applied to column `p`
-// of `U'` only changes its `p`-th entry: `ã_pq := ã_pq - r·ã_q`.
+// 列置換 `B̄ = B + (a_q - B e_p) e_p^T` を固定の `B = LU` で
+//   `L^{-1} B̄ = U + (ã_q - u_p) e_p^T = U'`   (`ã_q = L^{-1} a_q`、部分 FTRAN)
+// と書き直す。これで `U` の列 `p` が「スパイク」になるので、行変換
+// `R^{-1} = I - e_p r^T` (`r^T = ū_p^T U^{-1}`、部分 BTRAN `ẽ_p^T = e_p^T U^{-1}`
+// から `r = -u_pp · ẽ_p`、第 `p` 成分は 0) で行 `p` を消して三角性を回復する。
 //
-// `L` never changes across updates. `U` is kept as a *sequence* of
-// per-slot column etas (pivot + off-diagonal vector), because after a
-// replacement the slot's eta is removed from wherever it sits and
-// *appended* to the end — this ordering, not raw slot order, is what
-// FTRAN/BTRAN through `U` must respect once updates have happened
-// (verified by hand against a direct dense re-solve while implementing
-// this). Each update additionally produces one `R` row-eta, kept in its
-// own creation-ordered list and applied between `L` and `U` per
-// `B_k^{-1} = U_k^{-1} R_k^{-1} ... R_1^{-1} L^{-1}` (eq. 13).
+// `L` は更新で変わらない。`U` はスロットごとの列 eta (ピボット + 非対角) の
+// *列* として保持し、置換されたスロットの eta は元の位置から除いて末尾に追加する
+// (更新後の FTRAN/BTRAN はこの順序に従う必要がある)。各更新は `R` 行 eta を
+// 1 つ作り、`B_k^{-1} = U_k^{-1} R_k^{-1} ... R_1^{-1} L^{-1}` の順で適用する。
+//
+// eta の非対角部は、fill が `DENSE_ETA_FRACTION * m` 以下なら疎、超えたら長さ `m`
+// の密配列で持つ ([`EtaFile`])。
 
-// An eta's off-diagonal entries are a [`HybridVec`]: a sparse `(row_step,
-// value)` list while the eta is genuinely sparse, a dense length-`m` array
-// once its fill exceeds [`DENSE_ETA_FRACTION`] of `m` (typical of a
-// dense-coefficient LP, where `U`'s eta chain is already close to fully
-// dense from the very first update). See that type's own docs for the
-// trade-off, for the skipped-slot convention that lets the dense form's
-// loops run over the whole array unconditionally, and for why its two
-// consuming operations (`dot_dense`, `axpy_into_dense`) live there rather
-// than being re-written as a two-armed `match` at each of this file's
-// eight FTRAN/BTRAN call sites.
-
-/// A singleton `U` eta: a bare diagonal pivot with no off-diagonal entries.
+/// 非対角要素を持たない `U` eta (対角ピボットだけ)。
 #[derive(Clone, Copy)]
 struct SEta {
+    /// 基底スロット。
     slot: usize,
+    /// 対角ピボット値。
     pivot: f64,
 }
 
-/// `len` value marking an eta stored densely (see [`EtaFile::dense`]).
+/// eta が密形式で格納されていることを示す `len` の番兵値 ([`EtaFile::dense`] 参照)。
 const ETA_DENSE: u32 = u32::MAX;
 
-/// One live eta of an [`EtaFile`], as yielded by [`EtaFile::iter`].
+/// [`EtaFile::iter`] が返す、生きている eta 1 つへの参照。
 #[derive(Clone, Copy)]
 struct EtaRef {
-    /// Header index (argument to [`EtaFile::nnz`] / `dot` / `axpy`).
+    /// ヘッダ番号 ([`EtaFile::nnz`] / `dot` / `axpy` の引数)。
     k: usize,
-    /// The eta's slot (`U`) or row `p` (`R`). The pivot is read from
-    /// `EtaFile::pivot[k]` only where it is needed (after a zero skip).
+    /// eta のスロット (`U`) または行 `p` (`R`)。ピボット値は必要な場所
+    /// (ゼロスキップ後) でだけ `EtaFile::pivot[k]` から読む。
     slot: usize,
 }
 
-/// A flat eta file (HiGHS `HFactor` layout): per-eta headers as parallel
-/// arrays (`key`, `pivot`, `start`, `len`) plus one contiguous pool of
-/// entries (`idx: u32`, `val: f64`), instead of a `Vec` of structs each
-/// owning its own heap `Vec` of `(usize, f64)` pairs. An FTRAN `U` stage
-/// then reads 4 B per skipped eta (its `key`) and 12 B per entry, against
-/// 48 B per eta header and 16 B per entry (plus a pointer chase per eta)
-/// before. An eta whose fill exceeds `DENSE_ETA_FRACTION` of `m` is kept in
-/// the dense form exactly as [`HybridVec`]'s dense arm (`len == ETA_DENSE`,
-/// `start` indexing `dense`), so every loop computes precisely what the
-/// per-eta `HybridVec` computed — same entries, same order, same
-/// sparse/dense choice — and the results are bit-identical.
+/// フラットな eta ファイル (HiGHS `HFactor` 方式)。eta ごとのヘッダを並列配列
+/// (`key`, `pivot`, `span`) で持ち、要素は 1 つの連続プール (`idx: u32`,
+/// `val: f64`) に置く。fill が `DENSE_ETA_FRACTION * m` を超えた eta は密形式
+/// (`len == ETA_DENSE`、`start` が `dense` の添字) で持つ。
 ///
-/// Replacing a `U` eta (Forrest-Tomlin) removes its header from the
-/// parallel arrays (a `memmove` of 20 B per later header, against 48 B per
-/// `UEta` before — tombstoning instead was measured to cost more in the
-/// per-header dead test of every FTRAN/BTRAN than it saved here); its
-/// entries stay in the pool as garbage until the next refactorization
-/// builds a fresh file.
+/// `U` eta の置換 (FT 更新) はヘッダを並列配列から削除する。要素はプールに
+/// ゴミとして残り、次の再分解で新しいファイルが作られるまで回収されない。
 #[derive(Clone, Default)]
 struct EtaFile {
+    /// eta ごとのキー (`U` ならスロット、`R` なら行 `p`)。
     key: Vec<u32>,
+    /// eta ごとのピボット値。
     pivot: Vec<f64>,
-    /// `(start, len)` into `idx`/`val`, or `(dense index, ETA_DENSE)` —
-    /// one load per eta.
+    /// `idx`/`val` への `(開始, 長さ)`、または `(dense の添字, ETA_DENSE)`。
     span: Vec<(u32, u32)>,
+    /// 疎 eta の要素の添字プール。
     idx: Vec<u32>,
+    /// 疎 eta の要素の値プール。
     val: Vec<f64>,
+    /// 密 eta の本体 (長さ `m` の配列, 非ゼロ数)。
     dense: Vec<(Box<[f64]>, usize)>,
 }
 
 impl EtaFile {
+    /// eta `etas` 個・要素 `entries` 個分の容量を予約して作る。
     fn with_capacity(etas: usize, entries: usize) -> Self {
         EtaFile {
             key: Vec::with_capacity(etas),
@@ -3329,18 +2608,19 @@ impl EtaFile {
         }
     }
 
-    /// Number of headers, dead ones included.
+    /// ヘッダ数。
     #[inline]
     fn n_headers(&self) -> usize {
         self.key.len()
     }
 
-    /// Live etas in creation order (`.rev()` for reverse).
+    /// 生きている eta を作成順に返す (逆順は `.rev()`)。
     #[inline(always)]
     fn iter(&self) -> impl DoubleEndedIterator<Item = EtaRef> + '_ {
         self.key.iter().enumerate().map(|(k, &s)| EtaRef { k, slot: s as usize })
     }
 
+    /// eta `k` の非ゼロ数。
     #[inline(always)]
     fn nnz(&self, k: usize) -> usize {
         let (start, len) = self.span[k];
@@ -3351,6 +2631,7 @@ impl EtaFile {
         }
     }
 
+    /// 疎 eta `k` の要素 (添字, 値) スライス。
     #[inline(always)]
     fn seg(&self, k: usize) -> (&[u32], &[f64]) {
         let (s, l) = self.span[k];
@@ -3359,7 +2640,7 @@ impl EtaFile {
         (&self.idx[s..e], &self.val[s..e])
     }
 
-    /// `eta . dense` — [`HybridVec::dot_dense`] exactly.
+    /// 内積 `eta_k · dense` を返す。
     #[inline(always)]
     fn dot(&self, k: usize, dense: &[f64]) -> f64 {
         let (start, len) = self.span[k];
@@ -3371,7 +2652,7 @@ impl EtaFile {
         idx.iter().zip(val.iter()).map(|(&i, &v)| v * dense[i as usize]).sum()
     }
 
-    /// `dense += alpha * eta` — [`HybridVec::axpy_into_dense`] exactly.
+    /// `dense += alpha * eta_k`。
     #[inline(always)]
     fn axpy(&self, k: usize, alpha: f64, dense: &mut [f64]) {
         let (start, len) = self.span[k];
@@ -3388,7 +2669,7 @@ impl EtaFile {
         }
     }
 
-    /// Calls `f(index, value)` for each stored entry (dense form: nonzeros).
+    /// eta `k` の各格納要素に対して `f(添字, 値)` を呼ぶ (密形式では非ゼロのみ)。
     #[inline]
     fn for_each_entry(&self, k: usize, mut f: impl FnMut(usize, f64)) {
         let (start, len) = self.span[k];
@@ -3406,8 +2687,7 @@ impl EtaFile {
         }
     }
 
-    /// Drops the entry at `index` (keeping the others' order), returning
-    /// whether there was one — [`HybridVec::remove_index`] exactly.
+    /// eta `k` から添字 `index` の要素を (他の順序を保って) 除き、あったかを返す。
     fn remove_index(&mut self, k: usize, index: usize) -> bool {
         let (start, len) = self.span[k];
         if len == ETA_DENSE {
@@ -3431,26 +2711,28 @@ impl EtaFile {
         true
     }
 
-    /// Removes header `k` (later headers shift down by one).
+    /// ヘッダ `k` を削除する (後続ヘッダは 1 つ前にずれる)。
     fn remove(&mut self, k: usize) {
         self.key.remove(k);
         self.pivot.remove(k);
         self.span.remove(k);
     }
 
-    /// Appends the eta [`HybridVec::pack_scaled_dense`] would build from
-    /// `src` (`{(i, scale * src[i]) : i != skip, kept}`, with the same
-    /// [`tiny_drop`] handling and the same sparse/dense choice), compacting
-    /// straight into the pool. Returns its header index.
+    /// 密ベクトル `src` から eta `{(i, scale * src[i]) : i != skip, 残すもの}` を
+    /// 作ってプールへ直接詰め、ヘッダ番号を返す。[`tiny_drop`] 未満の値は落とす。
+    /// 非ゼロ数が `dense_fraction * len` を超えれば密形式にする。
+    ///
+    /// - `key`: スロット (`U`) または行 (`R`)。`pivot`: ピボット値。
+    /// - `skip`: 格納しない添字 (対角位置)。`scale`: 各値に掛ける係数。
     fn push_scaled_dense(&mut self, key: usize, pivot: f64, src: &[f64], skip: usize, scale: f64, dense_fraction: f64) -> usize {
         let len = src.len();
+        // この絶対値未満は格納しない (0 なら厳密な 0 だけ落とす)
         let tiny = tiny_drop();
         let k = self.key.len();
         self.key.push(key as u32);
         self.pivot.push(pivot);
-        // Count first (a straight-line pass, `skip` corrected afterwards),
-        // decide sparse/dense, then fill — `HybridVec::pack_scaled_dense`'s
-        // own two-pass shape, minus its per-eta allocation.
+        // まず数える (直線的な 1 パス、`skip` 分は後で補正)、次に疎/密を決め、
+        // 最後に詰める。
         let nnz = if tiny > 0.0 {
             let mut n = 0usize;
             for &x in src {
@@ -3506,7 +2788,7 @@ impl EtaFile {
         k
     }
 
-    /// Removes the most recently appended eta (a rejected update's `R`).
+    /// 最後に追加した eta を取り除く (棄却された更新の `R` 用)。
     fn pop(&mut self) {
         self.key.pop();
         self.pivot.pop();
@@ -3520,36 +2802,18 @@ impl EtaFile {
     }
 }
 
-/// [`EXPECTED_DENSE_FRACTION`], overridable at run time via the
-/// `ENOMOTO_EXPECTED_DENSITY_GATE` environment variable (a bare float;
-/// any value `>= 1.0` disables the result-density gate outright, since no
-/// result can be denser than `m`, restoring the input-nnz-only dispatch
-/// this crate had before [`FtranDensity`] existed — which is exactly how
-/// the A/B runs behind the constant's own value were produced). Read once
-/// per [`FtranDensity::new`] — a handful of times per solve, never on the
-/// per-iteration path.
+/// 結果密度ゲートの閾値 ([`EXPECTED_DENSE_FRACTION`]、環境変数
+/// `ENOMOTO_EXPECTED_DENSITY_GATE` で上書き可。`>= 1.0` でゲート無効)。
+/// [`FtranDensity::new`] ごとに 1 回だけ読む。
 fn expected_dense_gate() -> f64 {
     env_str!("ENOMOTO_EXPECTED_DENSITY_GATE")
         .and_then(|v| v.parse::<f64>().ok())
         .unwrap_or(EXPECTED_DENSE_FRACTION)
 }
 
-/// Builds [`LuFactors::l_row`] — or, when the scatter form is disabled
-/// outright (`ENOMOTO_BTRAN_L_SCATTER=0`), an empty stand-in with the same
-/// `m` outer slots and no entries.
-///
-/// The empty case exists so that arm of the A/B is *genuinely* this crate's
-/// pre-§2.6 behaviour, construction cost included. Building `l_row` and
-/// then never reading it would leave the transpose's own `O(nnz(L))` build
-/// — paid at **every** refactorization, `dfl001` alone refactorizes ~100
-/// times — inside both arms, hiding exactly the cost that has to be
-/// weighed against the scatter form's own win. Measuring a change against
-/// a baseline that already pays for it is how a feature gets adopted on a
-/// number that was never real.
-///
-/// An all-empty `CscMat` transposes into a `CsrMat` with `m + 1` zero
-/// offsets and no entries, so `row(i)` stays valid (and empty) for every
-/// `i` rather than needing a separate `Option` on the hot path.
+/// [`LuFactors::l_row`] を作る。スキャッタ形式が無効
+/// (`ENOMOTO_BTRAN_L_SCATTER=0`) なら、同じ `m` 行で要素なしの空行列を返す
+/// (無効時に構築コストも払わないため。空でも `row(i)` は常に有効)。
 fn build_l_row(l_col: &CscMat, m: usize) -> CsrMat {
     if btran_l_scatter_gate() <= 0.0 {
         return CscMat::empty(m, m).to_csr();
@@ -3557,20 +2821,15 @@ fn build_l_row(l_col: &CscMat, m: usize) -> CsrMat {
     l_col.to_csr()
 }
 
-/// [`BTRAN_L_SCATTER_FRACTION`], overridable via `ENOMOTO_BTRAN_L_SCATTER`
-/// — `0` disables the scatter form outright (restoring the pre-`l_row`
-/// gather-only BTRAN, which is how the A/B behind the constant's own value
-/// is produced), `1` forces it unconditionally. Read once per
-/// refactorization, never per solve, same as [`expected_dense_gate`].
-/// Magnitude below which FTRAN/BTRAN results and new eta entries are
-/// treated as exact zeros (`0` disables dropping).
+/// FTRAN/BTRAN の結果や新しい eta 要素を厳密な 0 とみなす絶対値の閾値
+/// (環境変数 `ENOMOTO_TINY`、既定 [`TINY_DROP`] = 0 で切り捨てなし)。
 #[inline]
 pub(crate) fn tiny_drop() -> f64 {
-    tunable!("ENOMOTO_TINY", 0.0, f64)
+    tunable!("ENOMOTO_TINY", TINY_DROP, f64)
 }
 
-/// BTRAN's final scatter back to original row order, dropping values
-/// below [`tiny_drop`].
+/// BTRAN の最終段: ステップ空間の `w` を元の行順 `y[row_perm[s]] = w[s]` に戻す
+/// ([`tiny_drop`] 未満は 0 にする)。
 #[inline]
 fn permute_btran_out(row_perm: &[usize], w: &[f64], y: &mut [f64]) {
     let tiny = tiny_drop();
@@ -3585,47 +2844,45 @@ fn permute_btran_out(row_perm: &[usize], w: &[f64], y: &mut [f64]) {
     }
 }
 
-/// Nonzero *steps* of a BTRAN result, recorded by
-/// [`FtLu::solve_transpose_unit_capture_steps`] during its final
-/// permutation (free: the loop already visits every entry) and consumed by
-/// the next fused DSE `tau` FTRAN of the same vector
-/// ([`FtLu::solve_into_pair_capture`] and friends), whose `L` stage then runs
-/// the Gilbert-Peierls reach-set path instead of the dense permute + scan.
-/// Because BTRAN's output permutation (`y[row_perm[s]] = w[s]`) is exactly
-/// the inverse of FTRAN's `L`-stage input permutation (`z[s] =
-/// rhs[row_perm[s]]`), the recorded steps are directly the `L`-stage seeds.
+/// BTRAN 結果の非ゼロ *ステップ* の記録。
+/// [`FtLu::solve_transpose_unit_capture_steps`] が最終置換中に (追加コストなしで)
+/// 記録し、同じベクトルに対する次の DSE `tau` FTRAN
+/// ([`FtLu::solve_into_pair_capture`] 等) がそれを `L` 段の Gilbert-Peierls 起点
+/// として使う (BTRAN の出力置換は FTRAN の `L` 段入力置換の逆なので、記録した
+/// ステップがそのまま起点になる)。
 ///
-/// Only a sparse result is recorded: once more than `limit_frac * m`
-/// nonzeros have been seen the capture is abandoned (`valid = false`) and
-/// the FTRAN takes its dense `L` stage as before. The result is bit-identical
-/// either way (up to the sign of zeros), so the gate is a pure speed choice.
-/// A capture is consumed (invalidated) by the first FTRAN that reads it, so
-/// a stale list can never be applied to a different vector.
+/// 非ゼロが `limit_frac * m` を超えたら記録を放棄 (`valid = false`) し、FTRAN は
+/// 通常の密 `L` 段を使う (結果はどちらでもビット一致)。記録は最初に読んだ FTRAN が
+/// 消費 (無効化) するので、別のベクトルに誤用されることはない。
 pub struct StepCapture {
+    /// 記録した非ゼロのステップ。
     steps: Vec<usize>,
+    /// `steps` が有効 (未消費かつ上限内) か。
     valid: bool,
+    /// 記録を諦める非ゼロ率の上限 (`m` に対する割合)。
     limit_frac: f64,
+    /// 消費側 FTRAN が使う Gilbert-Peierls スクラッチ。
     gp: GpScratch,
 }
 
 impl StepCapture {
+    /// 次数 `m` 用の (無効状態の) 記録を作る。
     pub fn new(m: usize) -> Self {
         StepCapture {
             steps: Vec::new(),
             valid: false,
-            limit_frac: tunable!("ENOMOTO_T_TAU_GP_FRACTION", 0.1, f64),
+            limit_frac: tunable!("ENOMOTO_T_TAU_GP_FRACTION", TAU_GP_FRACTION, f64),
             gp: GpScratch::new(m),
         }
     }
 
-    /// C5 for the `tau` channel: whether the next FTRAN that consumes this
-    /// capture runs `tau`'s `U` stage hyper-sparsely (see
-    /// [`FtLu::u_solve_hyper`]; seeded from this capture's own `L` reach).
+    /// C5 (`tau` チャネル): この記録を消費する次の FTRAN で `tau` の `U` 段を
+    /// 超疎に実行するか ([`FtLu::u_solve_hyper`]、起点はこの記録の `L` 到達集合)。
     pub fn set_u_hyper(&mut self, on: bool) {
         self.gp.u_hyper = on;
     }
 
-    /// Takes the capture for one FTRAN: `Some(steps, gp)` when valid.
+    /// FTRAN 1 回分として記録を取り出す: 有効なら無効化して `Some` を返す。
     #[inline]
     fn take(cap: Option<&mut StepCapture>) -> Option<&mut StepCapture> {
         match cap {
@@ -3638,14 +2895,15 @@ impl StepCapture {
     }
 }
 
-/// [`permute_btran_out`] that also records `w`'s nonzero steps into `cap`
-/// (see [`StepCapture`]) and, with `ZERO_W`, resets `w` to all-zero in the
-/// same pass (see [`UnitBtranWork`]).
+/// `w` の非ゼロステップを `cap` に記録しつつ行う [`permute_btran_out`]。
+/// `ZERO_W` なら同じパスで `w` を全 0 に戻す ([`UnitBtranWork`] 用)。
 #[inline]
 fn permute_btran_out_capture<const ZERO_W: bool>(row_perm: &[usize], w: &mut [f64], y: &mut [f64], cap: &mut StepCapture) {
     let tiny = tiny_drop();
+    // 記録できる非ゼロ数の上限
     let limit = (cap.limit_frac * w.len() as f64) as usize;
     cap.steps.clear();
+    // 上限を超えたか
     let mut over = false;
     for (s, wv) in w.iter_mut().enumerate() {
         let v = *wv;
@@ -3665,7 +2923,7 @@ fn permute_btran_out_capture<const ZERO_W: bool>(row_perm: &[usize], w: &mut [f6
     cap.valid = !over;
 }
 
-/// [`permute_btran_out`] that also resets `w` to all-zero in the same pass.
+/// 同じパスで `w` を全 0 に戻す [`permute_btran_out`]。
 #[inline]
 fn permute_btran_out_zeroing(row_perm: &[usize], w: &mut [f64], y: &mut [f64]) {
     let tiny = tiny_drop();
@@ -3676,136 +2934,89 @@ fn permute_btran_out_zeroing(row_perm: &[usize], w: &mut [f64], y: &mut [f64]) {
     }
 }
 
-/// Caller-owned working storage for [`FtLu::solve_transpose_unit_work`], the
-/// pivotal-row BTRAN (`rho_p = B^-T e_r`) with its `e_tilde` capture, that
-/// removes that path's own `O(m)` passes other than the ones the solve
-/// inherently needs (the `U^T` sweep over every slot and the output
-/// permutation):
+/// [`FtLu::solve_transpose_unit_work`] (ピボット行 BTRAN `rho_p = B^-T e_r` と
+/// `e_tilde` の記録) 用に呼び出し側が持つ作業領域。本質的に必要なもの以外の
+/// `O(m)` パスを除く。結果は [`FtLu::solve_transpose_unit_capture`] とビット一致。
 ///
-/// - `w` is a dedicated step-space scratch kept **all-zero between calls**
-///   (the output permutation zeroes each entry as it reads it), so seeding
-///   `e_i` is one store instead of a `fill(0)`.
-/// - The `U^T` sweep records every position it turns from zero to nonzero
-///   (`touch`, capped at `m` entries — beyond that the full-copy fallback
-///   applies). Every nonzero of `e_tilde` is in `touch`, so `e_tilde_out`
-///   is written at those positions only; the positions written last call
-///   (`e_touch`) are reset first. This requires that nothing but this method
-///   writes `e_tilde_out` (true for the extended dual's `e_tilde_buf`).
-/// - `touch.len()` plus the nonzero counts of the `R` etas applied next is an
-///   upper bound on the `L^T` stage's input nonzeros; when it is already
-///   within the scatter/gather gate's limit the exact counting pass is
-///   skipped (same decision, since the exact count can only be smaller).
-///
-/// Everything is bit-identical to [`FtLu::solve_transpose_unit_capture`].
+/// - `w` は呼び出し間で **常に全 0** に保つ専用スクラッチ (出力置換が読みながら
+///   0 に戻す) なので、`e_i` の設定は 1 回の書き込みで済む。
+/// - `U^T` 掃引は 0 から非ゼロになった位置を `touch` に記録する (`m` 個まで)。
+///   `e_tilde_out` はその位置だけ書き、前回書いた位置 (`e_touch`) を先に消す。
+///   したがって `e_tilde_out` を書くのはこのメソッドだけであること。
+/// - `touch.len()` + 次に適用する `R` eta の非ゼロ数は `L^T` 段入力の非ゼロ数の
+///   上界なので、それがゲート内なら正確な数え上げを省く。
 pub struct UnitBtranWork {
+    /// ステップ空間の作業ベクトル (呼び出し間は全 0)。
     w: Vec<f64>,
+    /// 今回 `U^T` 掃引で非ゼロになった位置。
     touch: Vec<usize>,
+    /// 前回 `e_tilde_out` に書いた位置。
     e_touch: Vec<usize>,
+    /// 前回 `e_tilde_out` を全体コピーした (位置記録が溢れた) か。
     e_full: bool,
 }
 
 impl UnitBtranWork {
+    /// 次数 `m` 用の作業領域を作る。
     pub fn new(m: usize) -> Self {
         UnitBtranWork { w: vec![0.0; m], touch: Vec::with_capacity(m), e_touch: Vec::with_capacity(m), e_full: false }
     }
 }
 
+/// BTRAN `L^{-T}` 段のスキャッタ/ギャザー切替閾値 ([`BTRAN_L_SCATTER_FRACTION`]、
+/// 環境変数 `ENOMOTO_BTRAN_L_SCATTER` で上書き可。`0` でスキャッタ無効、`1` で常時)。
+/// 再分解ごとに 1 回読む。
 fn btran_l_scatter_gate() -> f64 {
     env_str!("ENOMOTO_BTRAN_L_SCATTER").and_then(|v| v.parse::<f64>().ok()).unwrap_or(BTRAN_L_SCATTER_FRACTION)
 }
 
-/// Whether [`FtLu::u_solve_into`] tests a slot for zero *before* dividing
-/// it by its eta's pivot rather than after — see that method's own docs.
-/// `ENOMOTO_FTRAN_U_ZERO_SKIP=0` restores the unconditional divide, which
-/// is how the A/B behind the default is produced. Read once per
-/// [`FtLu::new`], never per solve.
+/// [`FtLu::u_solve_into`] がスロットをピボットで割る *前に* 0 判定するか
+/// (`ENOMOTO_FTRAN_U_ZERO_SKIP=0` で無条件に割る)。[`FtLu::new`] ごとに 1 回読む。
 fn u_zero_skip_enabled() -> bool {
     env_str!("ENOMOTO_FTRAN_U_ZERO_SKIP").map(|v| v != "0").unwrap_or(true)
 }
 
-/// Running average of one FTRAN *call site*'s own **result** density,
-/// feeding [`FtLu::should_use_dense_solve_tracked`]'s dense/sparse
-/// dispatch alongside the right-hand side's own nonzero count.
+/// FTRAN の呼び出し箇所 (チャネル) ごとの **結果** 密度の移動平均。
+/// [`FtLu::should_use_dense_solve_tracked`] が右辺の非ゼロ数と併せて
+/// 密/疎の切替に使う (HiGHS の `expected_density` 相当)。
 ///
-/// [`DENSE_RHS_FRACTION`] alone judges a solve by its *input*: the reach
-/// set the Gilbert-Peierls path walks is bounded below by the rhs's own
-/// nonzeros, so a dense rhs does prove the sparse path cannot win. The
-/// converse is not true — a one-nonzero rhs can still fill in to a fully
-/// dense `B^-1 a` once `L`'s own reach fans out, and then the sparse
-/// path has paid its DFS/epoch bookkeeping (`LuFactors::l_solve_sparse_into`'s
-/// own docs) on top of doing the same elimination work the flat dense
-/// scan would have done anyway. Nothing about the *input* distinguishes
-/// those two cases, and the gap widens exactly as `m` grows: the bigger
-/// the basis, the further a single column's reach can fan out relative to
-/// the fixed sparsity of the column itself.
-///
-/// What does distinguish them is the channel's own recent history, which
-/// is what this tracks: HiGHS solves the same problem the same way,
-/// maintaining a per-operation `expected_density` running average
-/// (`HEkk::updateOperationResultDensity`) and handing it to `ftranL`/`ftranU`
-/// so each call can decide *before* running which mode it should be in
-/// (`HFactor::ftranL`'s own `expected_density > kHyperFtranL` test).
-/// This crate's `docs/lu_comparison_enomoto_vs_highs.md` §2.7 names that
-/// as the gap this type closes.
-///
-/// One instance per *call site* (the entering column's FTRAN, the BFRT
-/// combined-flip FTRAN, ...), never one shared instance: those channels'
-/// densities genuinely differ — a BFRT combined rhs sums whole flipped
-/// columns and is routinely much denser than a single entering column —
-/// and averaging them together would smear each one's own signal.
-/// Instances live in the solve loops (`solve_lp_dual_on` and
-/// `extended_dual`'s two loops), not in [`FtLu`] itself, deliberately:
-/// `FtLu` is rebuilt from scratch at every refactorization, which would
-/// throw the history away precisely when the basis is at its densest,
-/// whereas HiGHS's own densities likewise live in `HEkk` and survive
-/// across INVERTs.
-///
-/// The measurement itself is free: every solve path already ends in an
-/// `O(m)` permutation loop over the finished result, so counting that
-/// result's nonzeros costs one branchless add per entry inside a loop
-/// that was already running — and it is the *exact* result density, not
-/// an estimate. Crucially it is also taken on **both** branches, so the
-/// gate can never latch: a channel that starts producing sparse results
-/// again is observed doing so while it is on the dense path, and returns
-/// to the sparse path on its own.
+/// - 入力が疎でも結果が密になりうるので、入力だけでは判断できない。
+/// - チャネルごとに 1 つ持つ (入力列 FTRAN、BFRT 合成フリップ FTRAN など)。
+///   [`FtLu`] は再分解のたびに作り直されるので、インスタンスは求解ループ側に置く。
+/// - 計測は両方の経路で行うので、密経路に張り付くことはない。
 #[derive(Clone, Copy, Debug)]
 pub struct FtranDensity {
-    /// Running average of `result_nnz / m`, in `[0, 1]`. Starts at `0.0`
-    /// (maximally sparse) so a fresh channel dispatches exactly as it did
-    /// before this type existed until it has actually observed something.
+    /// `result_nnz / m` の移動平均 (`[0, 1]`)。初期値 `0.0` (最も疎)。
     expected: f64,
-    /// [`expected_dense_gate`]'s value, captured once at construction
-    /// rather than re-read per call.
+    /// [`expected_dense_gate`] の値 (構築時に 1 回だけ取得)。
     gate: f64,
 }
 
 impl FtranDensity {
+    /// 新しいチャネルを作る (平均 0、ゲートは環境変数から取得)。
     pub fn new() -> Self {
         Self { expected: 0.0, gate: expected_dense_gate() }
     }
 
-    /// Folds one finished solve's own result density into the average —
-    /// call with whatever nonzero count the solve returned (`solve_into`
-    /// and friends all return it), on *either* branch.
+    /// 求解 1 回の結果密度 (`result_nnz / m`) を平均に畳み込む。どちらの経路でも
+    /// 求解が返した非ゼロ数を渡すこと。
     #[inline]
     pub fn record(&mut self, result_nnz: usize, m: usize) {
         if m == 0 {
             return;
         }
+        // 今回の結果密度
         let local = result_nnz as f64 / m as f64;
         self.expected = (1.0 - tunable!("ENOMOTO_T_DENSITY_AVERAGE_MULTIPLIER", DENSITY_AVERAGE_MULTIPLIER, f64)) * self.expected + tunable!("ENOMOTO_T_DENSITY_AVERAGE_MULTIPLIER", DENSITY_AVERAGE_MULTIPLIER, f64) * local;
     }
 
-    /// The running average itself, in `[0, 1]` — exposed for diagnostics
-    /// (`ENOMOTO_PROF_PHASES_EXT`) rather than for dispatch, which goes
-    /// through [`FtLu::should_use_dense_solve_tracked`].
+    /// 移動平均の値 (`[0, 1]`)。診断出力 (`ENOMOTO_PROF_PHASES_EXT`) 用。
     #[inline]
     pub fn expected(&self) -> f64 {
         self.expected
     }
 
-    /// Whether this channel's own history alone already calls for the
-    /// dense path.
+    /// このチャネルの履歴だけで密経路を選ぶべきか (`expected > gate`)。
     #[inline]
     pub fn predicts_dense(&self) -> bool {
         self.expected > self.gate
@@ -3813,165 +3024,87 @@ impl FtranDensity {
 }
 
 impl Default for FtranDensity {
+    /// [`FtranDensity::new`] と同じ。
     fn default() -> Self {
         Self::new()
     }
 }
 
+/// Forrest-Tomlin 更新付きの LU 因子。`B_k^{-1} = U_k^{-1} R_k^{-1} ... R_1^{-1} L^{-1}`
+/// を保持し、FTRAN (`solve_*`) / BTRAN (`solve_transpose_*`) と列置換更新
+/// ([`Self::try_update`]) を提供する。再分解のたびに作り直す。
 #[derive(Clone)]
 pub struct FtLu {
+    /// 元の分解 (`L` と置換。`L` は更新で変わらない)。
     base: LuFactors,
-    /// `U`'s etas, physically stored in **creation order** — exactly as
-    /// before — so `u_transpose_solve_into`/`u_solve_into` (the hot,
-    /// once-*every*-iteration BTRAN/FTRAN paths, not just `try_update`)
-    /// keep a plain sequential scan with no pointer-chasing indirection.
+    /// `U` の非シングルトン eta を **作成順** (= 三角順) に格納したもの。
+    /// FTRAN/BTRAN の `U` 段はこれを順に走査する。
     u_seq: EtaFile,
-    /// The **singleton** `U` etas (empty `off_diag`: a bare diagonal pivot)
-    /// of the factorization as built, held apart from `u_seq` — 42-99% of
-    /// all `m` etas right after a refactorization on the heavy Netlib
-    /// problems. A singleton's own division reads and writes only its own
-    /// slot, and by `u_seq`'s triangular order every eta that writes into
-    /// that slot (FTRAN) or reads it (BTRAN) sits *later* in the sequence,
-    /// so its division can run after the whole `u_seq` pass in the `U`
-    /// solves and before it in the `U^T` sweep without changing a single
-    /// result bit — while the sequential loops skip visiting them at all.
-    /// Order within `singles` is irrelevant (the divisions are
-    /// independent); `commit_update` pulls a replaced one out with
-    /// `swap_remove`. `u_seq` never feeds an eta back in here: an eta that
-    /// loses its last off-diagonal entry later just stays in `u_seq`,
-    /// exact either way.
+    /// 分解直後の **シングルトン** `U` eta (非対角なし、対角ピボットのみ)。
+    /// 自スロットしか読み書きしないので、`U` 求解では `u_seq` の後、`U^T` 掃引
+    /// では前にまとめて割ってもビット一致。順序は無関係。置換されたら
+    /// `swap_remove` で除く (`u_seq` から戻ってくることはない)。
     singles: Vec<SEta>,
-    /// `singles_pos[slot]` is `slot`'s index into `singles`, `usize::MAX`
-    /// when `slot` lives in `u_seq` instead (and vice versa for
-    /// `slot_pos`).
+    /// `singles_pos[slot]` = `slot` の `singles` 内の位置。`u_seq` 側なら `usize::MAX`。
     singles_pos: Vec<usize>,
-    /// `single_piv[slot]` is the pivot of `slot`'s eta while it is in
-    /// `singles`, `0.0` otherwise (a pivot is never zero). The FTRAN `U`
-    /// stage's singleton divisions are done inside [`Self::permute_out`]'s
-    /// pass through this array instead of a separate walk over `singles`
-    /// (singletons are independent of each other and last in `U`'s order,
-    /// so dividing each value as it is read out is bit-identical).
+    /// `single_piv[slot]` = `slot` が `singles` にある間はそのピボット、なければ `0.0`
+    /// (ピボットは 0 にならない)。FTRAN の `U` 段のシングルトン除算を
+    /// [`Self::permute_out`] の中で行うために使う。
     single_piv: Vec<f64>,
-    /// Ascending steps whose `L` column is non-empty — the only steps the
-    /// dense `L` stage has to visit (see [`LuFactors::l_solve_into_pair`]).
+    /// `L` の列が非空のステップ (昇順)。密 `L` 段が訪れる必要があるのはこれだけ
+    /// ([`LuFactors::l_solve_into_pair`] 参照)。
     l_active: Vec<u32>,
-    /// `slot_pos[slot]` is `slot`'s current index into `u_seq` — kept in
-    /// sync by `try_update` over exactly the range its own
-    /// `Vec::remove`/`push` already touches (see `try_update`'s own docs),
-    /// so this costs nothing beyond what the reordering itself already
-    /// pays. Turns "find slot p's eta" from the O(m) linear scan
-    /// `find_seq_pos` used to do into an O(1) index.
+    /// `slot_pos[slot]` = `slot` の `u_seq` 内の現在位置 (`singles` 側なら `usize::MAX`)。
+    /// `try_update` が並べ替えと同じ範囲で同期させる。
     slot_pos: Vec<usize>,
-    /// Reverse index: `row_owners[r]` lists every slot whose `off_diag`
-    /// currently holds a nonzero at row-step `r`. `try_update`'s
-    /// replace-column step (Tomlin 1974, eq. 12) must zero row `p` out of
-    /// every *other* eta that still references it; before this index
-    /// existed, that meant visiting all `m` etas in `U` and asking each
-    /// "do you have an entry at `p`" (almost all answering no, but each
-    /// still paying a full scan of its own off-diagonal list to say so).
-    /// This answers "who has an entry at `p`" directly (combined with
-    /// `slot_pos` above for O(1) access to each one), so only the
-    /// (typically small — a few percent of `m`, per `ENOMOTO_DEBUG_ETA_DENSITY`
-    /// measurements) handful that actually do ever get touched.
+    /// 逆引き索引: `row_owners[r]` = 行ステップ `r` に非ゼロを持つ eta のスロットと値。
+    /// `try_update` が行 `p` を他の全 eta から消すとき、該当する eta だけに触れる
+    /// ために使う (Tomlin 1974, eq. 12)。
     row_owners: Vec<Vec<(usize, f64)>>,
-    /// The `R` row etas in creation order (`key` = row `p`; `pivot`
-    /// unused) — flat like `u_seq`, never tombstoned.
+    /// `R` 行 eta (作成順、`key` = 行 `p`、`pivot` は未使用)。
     r_etas: EtaFile,
-    /// [`Self::try_update`]'s own reusable scratch (length `m`, always
-    /// restored to that length before returning — see that method's own
-    /// docs on the `mem::take`/restore pattern this exists for): avoids the
-    /// two per-pivot heap allocations (`ftran_through_l_and_r`'s owned
-    /// result, and building `e_p` in place) that method used to pay on
-    /// *every* pivot commit, the same "fresh `Vec` every iteration" cost
-    /// this crate's hot dual-simplex loops elsewhere already eliminated via
-    /// caller-owned buffers (see e.g. `solve_into`'s own docs) — `try_update`
-    /// itself was the one hot-path call in this file still allocating,
-    /// found via `ENOMOTO_PROF_PHASES_EXT` naming `ft_update` as 13-20% of
-    /// wall time on several Netlib instances with no single other phase
-    /// anywhere near as consistently large.
+    /// [`Self::try_update`] の再利用スクラッチ (`a_tilde` 用、長さ `m`、
+    /// 返却前に必ず長さ `m` に戻す)。ピボットごとのヒープ確保を避ける。
     scratch_a_tilde: Vec<f64>,
-    /// See [`Self::scratch_a_tilde`]'s own docs — the other of
-    /// [`Self::try_update`]'s two scratch buffers.
+    /// [`Self::try_update`] の再利用スクラッチ (`e_tilde` 用)。
     scratch_e_tilde: Vec<f64>,
-    /// Deterministic operation-count accumulator for the `CLOCK`
-    /// refactorization trigger (`ENOMOTO_SYNTH_CLOCK_FACTOR`'s own docs at
-    /// its call sites in `extended_dual.rs`) — this crate's counterpart to
-    /// HiGHS's `total_synthetic_tick_` (`HFactor.cpp`/`HEkk.cpp`). Unlike
-    /// the wall-clock prototype this replaces
-    /// (`analysis/ft_refactor_trigger_20260922_040850.md` §5/§6), every
-    /// increment here is a plain nonzero-count add driven only by the
-    /// (already-deterministic) eta chain and right-hand-side content, never
-    /// by `Instant::now()` — so two solves of the same problem always
-    /// accumulate the exact same tick sequence and therefore refactorize at
-    /// the exact same iterations, keeping the whole solve bit-reproducible.
-    /// A `Cell` (not a plain field) because every solve stage that adds to
-    /// it (`ftran_through_l_and_r_into`, `solve_sparse_into[_capture]`,
-    /// `u_solve_into`, `u_transpose_solve_into`, `solve_transpose_into[_capture]`)
-    /// takes `&self`. Reset implicitly to `0`
-    /// every time a new `FtLu` is built (`Self::new`, i.e. every
-    /// refactorization) — there is no explicit reset method because a fresh
-    /// `FtLu` *is* the reset.
+    /// `CLOCK` 再分解トリガ用の決定的な演算量カウンタ (HiGHS の
+    /// `total_synthetic_tick_` 相当)。非ゼロ数の加算だけで増えるので、同じ問題は
+    /// 常に同じ反復で再分解される。`&self` の求解段から加算するので `Cell`。
+    /// 新しい `FtLu` を作る (= 再分解する) と 0 から始まる。
     tick: Cell<u64>,
-    /// Running total of the off-diagonal fill currently held across
-    /// `u_seq` and `r_etas` — [`Self::fill_count`]'s answer, maintained
-    /// incrementally by [`Self::commit_update`] rather than re-summed on
-    /// demand.
-    ///
-    /// The refactorization trigger reads it **once per simplex iteration**
-    /// (`simplex.rs`'s own trigger (3)), and re-summing meant walking all
-    /// `m` entries of `u_seq` — touching every `UEta` header in the
-    /// process — for a number that changes only at the handful of places
-    /// an update already touches. Its own doc comment called that sum
-    /// "`O(1)`-ish"; it was `O(m)`, one more full sweep of the eta file
-    /// per iteration on top of the ones `u_solve_into`/
-    /// `u_transpose_solve_into` genuinely need. This is that number
-    /// actually being `O(1)`, with a `debug_assert` in `fill_count` that
-    /// it still agrees with the sum it replaced.
+    /// `u_seq` と `r_etas` が現在保持する非対角 fill の合計
+    /// ([`Self::fill_count`] の値)。[`Self::commit_update`] が差分で更新する。
     fill: usize,
-    /// Nonzero count of the last *full* (Markowitz) factorization's
-    /// `L`+`U` — the baseline [`factorize_reusing`] caps a reused order's
-    /// own fill against (see [`REBUILD_FILL_LIMIT`]). Set in [`Self::new`]
-    /// to this factorization's own count, then overwritten back to the
-    /// predecessor's by `factorize_reusing` whenever the factorization it
-    /// just built came from a reuse rather than a fresh Markowitz run, so
-    /// a chain of reuses is always measured against the last order
-    /// actually chosen by Markowitz.
+    /// 最後の *通常* (Markowitz) 分解の `L`+`U` 非ゼロ数。[`factorize_reusing`] が
+    /// 再利用分解の fill 上限の基準に使う ([`REBUILD_FILL_LIMIT`])。
     fill_baseline: usize,
-    /// Consecutive rejected pivot-order reuses leading up to this
-    /// factorization, and how many refactorizations are still to be left
-    /// alone before the next attempt — see [`factorize_reusing`]'s own
-    /// backoff docs. Carried across refactorizations the same way
-    /// [`Self::fill_baseline`] is.
+    /// この分解までに連続して棄却されたピボット順再利用の回数
+    /// ([`factorize_reusing`] のバックオフ)。
     reuse_fail_streak: u32,
+    /// 次の再利用試行まで見送る残り再分解回数。
     reuse_skips_left: u32,
-    /// This factorization's own one-time build cost, in the same tick
-    /// units as [`Self::tick`] — computed once in [`Self::new`] from the
-    /// freshly-built `L`/`U` (`m` rows plus their combined off-diagonal
-    /// nonzero count), never recomputed afterward. The `CLOCK` trigger
-    /// refactorizes once `tick` reaches `FACTOR * build_tick`, i.e. once
-    /// the *solving* work done against this factorization is estimated to
-    /// cost as much as `FACTOR` fresh refactorizations of it would have —
-    /// see [`TICK_BUILD_M_COEF`]/[`TICK_BUILD_LU_COEF`]'s own docs for
-    /// where the two coefficients come from.
+    /// この分解自体の構築コスト ([`Self::tick`] と同じ単位)。[`Self::new`] で
+    /// `m` と `L`/`U` の非対角非ゼロ数から 1 回だけ計算する。`CLOCK` トリガは
+    /// `tick` が `FACTOR * build_tick` に達したら再分解する。
     build_tick: u64,
-    /// [`btran_l_scatter_gate`]'s value, captured once per refactorization
-    /// rather than re-read per call — see [`BTRAN_L_SCATTER_FRACTION`].
-    /// Lives on [`FtLu`] rather than [`LuFactors`] so the factor struct
-    /// stays pure data.
+    /// [`btran_l_scatter_gate`] の値 (再分解ごとに 1 回取得)。
     btran_l_scatter: f64,
-    /// [`u_zero_skip_enabled`]'s value, captured once per refactorization —
-    /// see [`Self::u_solve_into`].
+    /// [`u_zero_skip_enabled`] の値 (再分解ごとに 1 回取得、[`Self::u_solve_into`] 参照)。
     u_zero_skip: bool,
 }
 
 impl FtLu {
+    /// 分解結果 `base` から更新可能な因子を作る (`U` を eta ファイルとシングルトンに
+    /// 分け、逆引き索引・構築 tick・fill 基準などを初期化する)。再分解のたびに呼ばれる。
     pub fn new(base: LuFactors) -> Self {
         let m = base.m;
-        // Exact per-slot/per-row counts first so every inner `Vec` below is
-        // allocated once at its final size (this runs on every
-        // refactorization).
+        // 先にスロット・行ごとの正確な個数を数え、内側の `Vec` を最終サイズで 1 回だけ確保する。
+        // スロット (= `U` の列ステップ) ごとの非対角要素数
         let mut off_count = vec![0usize; m];
+        // 行ステップごとの非対角要素数 (`row_owners` の容量)
         let mut owner_count = vec![0usize; m];
+        // スロットごとの対角ピボット
         let mut pivots = vec![0.0; m];
         for row_step in 0..m {
             for &(col_step, v) in &base.u_row[row_step] {
@@ -3984,44 +3117,37 @@ impl FtLu {
             }
         }
         let l_nnz: u64 = base.l_col.nnz() as u64;
-        // `u_row[s]` includes its own diagonal entry (`col_step == s`,
-        // filtered out just above into `pivots`), so its off-diagonal count
-        // is one less than its length — mirrors HiGHS's own `u_countX`
-        // (`HFactor.cpp`'s `buildFinish`), which likewise counts only
-        // off-diagonal `U` nonzeros.
+        // `U` の非対角非ゼロ数 (`u_row[s]` は対角を 1 個含むので長さ - 1。HiGHS の
+        // `u_countX` と同じく非対角だけを数える)。
         let u_off: u64 = base.u_row.iter().map(|v| v.len().saturating_sub(1) as u64).sum();
         let mut build_tick = tunable!("ENOMOTO_T_TICK_BUILD_M_COEF", TICK_BUILD_M_COEF, u64) * m as u64 + tunable!("ENOMOTO_T_TICK_BUILD_LU_COEF", TICK_BUILD_LU_COEF, u64) * (l_nnz + u_off);
-        // S16 (default off): the elimination's own multiply-add count,
-        // `Σ_s |L col s| · |U row s off-diagonal|` — each step `s` updates
-        // one entry per (L entry, U entry) pair of its pivot column/row, so
-        // this is the classical LU flop count recovered from the finished
-        // factors. Unlike `nnz(L+U)` it grows quadratically with the dense
-        // tail's size, which is where this crate's Markowitz refactor time
-        // concentrates (`dfl001`).
+        // S16 (既定 off): 消去の積和回数 `Σ_s |L 列 s| · |U 行 s の非対角|`
+        // (完成した因子から復元した古典的 LU 演算数) を構築 tick に加える。
         let flop_coef = tunable!("ENOMOTO_T_TICK_BUILD_FLOP_COEF", TICK_BUILD_FLOP_COEF, u64);
         if flop_coef > 0 {
             let flops: u64 = (0..m).map(|s| base.l_col.col(s).len() as u64 * owner_count[s] as u64).sum();
             build_tick += flop_coef * flops;
         }
-        // `u_off` above excludes `U`'s diagonals; the fill baseline counts
-        // every stored entry, matching what `factorize_reusing_order`
-        // counts as it goes.
+        // fill 基準は対角も含めた全格納要素数 (`factorize_reusing_order` の数え方と一致)。
         let fill_baseline = (l_nnz + u_off) as usize + m;
         let mut singles: Vec<SEta> = Vec::new();
         let mut slot_pos = vec![usize::MAX; m];
         let mut singles_pos = vec![usize::MAX; m];
         let mut single_piv = vec![0.0f64; m];
         let l_active: Vec<u32> = (0..m).filter(|&s| !base.l_col.col(s).is_empty()).map(|s| s as u32).collect();
-        // `U`'s etas straight into the flat file: headers in slot order
-        // (singletons apart), each sparse eta's entries in ascending
-        // `row_step` order — exactly what the former per-slot
-        // `Vec` + `HybridVec::pack` produced, same sparse/dense choice.
+        // `U` の eta をフラットファイルへ直接詰める: ヘッダはスロット順
+        // (シングルトンは別)、疎 eta の要素は `row_step` 昇順。
         let dense_fraction = tunable!("ENOMOTO_T_DENSE_ETA_FRACTION", DENSE_ETA_FRACTION, f64);
+        // 非シングルトン eta の数
         let n_live = off_count.iter().filter(|&&c| c > 0).count();
+        // 非対角要素の総数
         let total_off: usize = off_count.iter().sum();
         let mut u_seq = EtaFile::with_capacity(n_live, total_off);
+        // 疎 eta ごとの次の書き込み位置 (プール内)
         let mut cursor = vec![u32::MAX; m];
+        // 密 eta の `dense` 内の添字 (疎なら `u32::MAX`)
         let mut dense_of = vec![u32::MAX; m];
+        // 疎 eta 用に確保したプールの長さ
         let mut pool = 0usize;
         for slot in 0..m {
             let c = off_count[slot];
@@ -4091,27 +3217,23 @@ impl FtLu {
         }
     }
 
-    /// BTRAN's `L^{-T}` stage: counts `w`'s nonzeros (bailing out of the
-    /// count as soon as it is clearly over the line) and runs the
-    /// row-major scatter form on a sparse `w`, the column-major gather
-    /// form otherwise — see [`BTRAN_L_SCATTER_FRACTION`] for why both
-    /// forms have to stay.
+    /// BTRAN の `L^{-T}` 段。`w` の非ゼロを数え (上限を超えたら打ち切り)、疎なら
+    /// 行優先スキャッタ形式、密なら列優先ギャザー形式で解き、元の行順で `y` に書く。
     fn l_transpose_solve_into(&self, w: &mut [f64], y: &mut [f64]) {
         self.l_transpose_solve_into_cap(w, y, None)
     }
 
-    /// [`Self::l_transpose_solve_into`], optionally recording the result's
-    /// nonzero steps (see [`StepCapture`]).
+    /// [`Self::l_transpose_solve_into`] に、結果の非ゼロステップ記録
+    /// ([`StepCapture`]) を任意で付けたもの。
     fn l_transpose_solve_into_cap(&self, w: &mut [f64], y: &mut [f64], cap: Option<&mut StepCapture>) {
         self.l_transpose_solve_into_ext::<false>(w, y, cap, usize::MAX)
     }
 
-    /// [`Self::l_transpose_solve_into_cap`] with two extras for
-    /// [`UnitBtranWork`]: `nnz_bound` (an upper bound on `w`'s nonzero
-    /// count; when it is within the gate's limit the counting pass is
-    /// skipped — the exact count could only be smaller, so the decision is
-    /// the same) and `ZERO_W` (reset `w` to zero in the output pass).
+    /// [`Self::l_transpose_solve_into_cap`] に [`UnitBtranWork`] 用の 2 機能を加えたもの。
+    /// `nnz_bound`: `w` の非ゼロ数の上界 (ゲート内なら数え上げを省く)。
+    /// `ZERO_W`: 出力パスで `w` を 0 に戻す。
     fn l_transpose_solve_into_ext<const ZERO_W: bool>(&self, w: &mut [f64], y: &mut [f64], cap: Option<&mut StepCapture>, nnz_bound: usize) {
+        // スキャッタ形式を使う非ゼロ数の上限
         let limit = (self.btran_l_scatter * self.base.m as f64) as usize;
         let mut sparse = true;
         if nnz_bound > limit {
@@ -4138,108 +3260,59 @@ impl FtLu {
         }
     }
 
-    /// Current value of the deterministic operation-count accumulator (see
-    /// [`Self::tick`]'s own docs) — read by the `CLOCK` refactorization
-    /// trigger in `extended_dual.rs`, never consulted by anything in this
-    /// file itself.
+    /// 決定的演算量カウンタ ([`Self::tick`]) の現在値。`extended_dual.rs` の
+    /// `CLOCK` 再分解トリガが読む。
     pub fn synth_tick(&self) -> u64 {
         self.tick.get()
     }
 
-    /// This factorization's own build cost, in the same units as
-    /// [`Self::synth_tick`] — see [`Self::build_tick`]'s own docs.
+    /// この分解自体の構築コスト ([`Self::synth_tick`] と同じ単位)。
     pub fn build_tick(&self) -> u64 {
         self.build_tick
     }
 
+    /// 求解段の非ゼロ数 `n` を tick に加える (係数 [`TICK_SOLVE_NNZ_COEF`])。
     #[inline]
     fn add_tick(&self, n: u64) {
         self.tick.set(self.tick.get() + TICK_SOLVE_NNZ_COEF * n);
     }
 
-    /// Whether an FTRAN right-hand side with `rhs_nnz` nonzero entries
-    /// (out of this basis's `m`) is dense enough that callers should skip
-    /// [`Self::solve_sparse_into`] in favor of the plain dense
-    /// [`Self::solve_into`] — see [`DENSE_RHS_FRACTION`]'s own docs.
+    /// 非ゼロ `rhs_nnz` 個の FTRAN 右辺が十分密で、[`Self::solve_sparse_into`] でなく
+    /// 密な [`Self::solve_into`] を使うべきか (`rhs_nnz > DENSE_RHS_FRACTION * m`)。
     pub fn should_use_dense_solve(&self, rhs_nnz: usize) -> bool {
         let m = self.base.m;
         m > 0 && rhs_nnz as f64 > tunable!("ENOMOTO_T_DENSE_RHS_FRACTION", DENSE_RHS_FRACTION, f64) * m as f64
     }
 
-    /// [`Self::should_use_dense_solve`] widened by the calling channel's
-    /// own observed result density: the dense path is taken when *either*
-    /// the right-hand side handed in is already dense (that method's own
-    /// input-side test, unchanged) *or* this channel's recent results have
-    /// been dense enough that the sparse path's own bookkeeping is not
-    /// expected to pay for itself ([`FtranDensity`]'s own docs, and
-    /// `docs/lu_comparison_enomoto_vs_highs.md` §2.7).
-    ///
-    /// Deliberately only ever moves calls *towards* the dense path, never
-    /// away from it: a rhs with more than [`DENSE_RHS_FRACTION`] of `m`
-    /// nonzeros bounds the Gilbert-Peierls reach set below by that same
-    /// count, so no amount of "but this channel's results are usually
-    /// sparse" history could make the sparse path win on such a call.
+    /// [`Self::should_use_dense_solve`] を呼び出しチャネルの結果密度履歴
+    /// ([`FtranDensity`]) で広げたもの: 右辺が密 *または* 最近の結果が密なら密経路。
+    /// 密経路側にしか動かさない (密な右辺では疎経路は勝てないため)。
     pub fn should_use_dense_solve_tracked(&self, rhs_nnz: usize, density: &FtranDensity) -> bool {
         self.should_use_dense_solve(rhs_nnz) || density.predicts_dense()
     }
 
-    /// `U_k^{-T}` applied in place to a step-space vector: processes the
-    /// eta sequence in **forward** (creation) order, each step solving for
-    /// that eta's pivotal component via eq. (8). Mutates `z` directly
-    /// (rather than allocating a fresh result) — see `LuFactors::l_solve_into`'s
-    /// own docs for why this matters on `FtLu`'s hot path.
-    ///
-    /// Hyper-sparse via [`Self::row_owners`], unlike [`Self::u_solve_into`]
-    /// (see that method's own docs for why a GP-style DFS reach set was
-    /// tried there and reverted): the sweep ([`Self::u_transpose_sweep`])
-    /// is in scatter form over `row_owners`' row-wise copy of `U`, so a
-    /// slot whose value is zero costs one test and nothing else. (The
-    /// earlier gather form reached the same sparsity through "needed"
-    /// marks, `analysis/greenbea_20260921_090812.md` §3-4, but still paid
-    /// each needed eta's whole column dot product.)
+    /// ステップ空間ベクトル `z` に `U_k^{-T}` をその場で適用する (eta 列を作成順に
+    /// 処理、eq. (8))。[`Self::row_owners`] 上のスキャッタ形式なので、値 0 の
+    /// スロットは判定 1 回で済む (超疎)。
     fn u_transpose_solve_into(&self, z: &mut [f64]) {
         self.u_transpose_sweep(z);
     }
 
-    /// [`Self::u_transpose_solve_into`] for the case the caller already
-    /// knows `z`'s entire support: a single nonzero at step `seed`.
-    ///
-    /// This is the BTRAN whose right-hand side is a unit vector `e_i` —
-    /// the pivotal-row `rho_p`, the steepest-edge weight update's own
-    /// `rho`, and `DseState::from_basis`'s `m` reference solves are all
-    /// that shape. Seeding the "needed" set from `seed` directly is
-    /// *exact*, not approximate: [`Self::u_transpose_solve_into`]'s own
-    /// seeding loop marks precisely the steps where `z` is nonzero, and
-    /// for a permuted unit vector that set is exactly `{seed}`. What it
-    /// saves is that `O(m)` scan — and, at the call site, the `O(m)`
-    /// permutation *gather* (`z[s] = rhs[col_perm[s]]`, a random-access
-    /// read per step) that materialized the unit vector in the first
-    /// place, which [`Self::seed_unit_rhs`] replaces with a flat `fill` and
-    /// one store.
+    /// `z` の非ゼロがステップ `seed` の 1 個だけと分かっている場合の
+    /// [`Self::u_transpose_solve_into`] (単位ベクトル右辺の BTRAN: ピボット行 `rho_p`、
+    /// DSE の `rho`、`DseState::from_basis` の参照解など)。
     fn u_transpose_solve_seeded(&self, z: &mut [f64], seed: usize) {
         debug_assert!(z.iter().enumerate().all(|(s, &v)| s == seed || v == 0.0));
         self.u_transpose_sweep(z);
     }
 
-    /// The `U^{-T}` sweep itself, shared by both seedings above.
+    /// `U^{-T}` 掃引本体 (上の 2 つが共有)。スキャッタ形式 (HiGHS `HFactor::btranU`
+    /// と同様): スロット `p` の値が確定したらピボットで割り、それを読む全 eta
+    /// (`row_owners[p]`) へ散布する。
     fn u_transpose_sweep(&self, z: &mut [f64]) {
-        // Scatter form (HiGHS `HFactor::btranU` over its row-wise `ur_*`
-        // copy): once slot `p`'s value is final it is divided by its pivot
-        // and pushed into every eta that reads it (`row_owners[p]`, which
-        // carries the `U` entry alongside the slot) — so the work is the
-        // nonzero `p`s' row lengths, not, as the gather form this replaced
-        // did, every needed eta's whole column dot product regardless of
-        // how few of that column's inputs are nonzero (26x more entries on
-        // `fit2p`, whose few dense border columns every BTRAN re-read).
-        // Changes the summation order into each `z[q]`, so the last bits —
-        // not the math — differ from the gather form.
-        //
-        // CLOCK-trigger accounting (`Self::tick`'s own docs): the flat `m`
-        // for the `O(m)` walk over every slot, plus each scattered row's
-        // length.
+        // CLOCK トリガ用: 全スロット走査の `m` と、散布した各行の長さを tick に加える。
         self.add_tick(self.base.m as u64);
-        // Singletons first (see `singles`' own docs): nothing writes into a
-        // singleton's slot, so its value is final before the sweep starts.
+        // シングルトンが先 (そのスロットに書く eta は無いので値は掃引前に確定)。
         for (p, pivot) in self.u_transpose_order() {
             let zp = z[p];
             if zp == 0.0 {
@@ -4255,21 +3328,20 @@ impl FtLu {
         }
     }
 
-    /// `(slot, pivot)` of every `U` eta in `U^T` order: singletons, then
-    /// `u_seq`'s live etas in creation order.
+    /// 全 `U` eta の `(スロット, ピボット)` を `U^T` 順 (シングルトン → `u_seq` の作成順) で返す。
     #[inline(always)]
     fn u_transpose_order(&self) -> impl Iterator<Item = (usize, f64)> + '_ {
         self.singles.iter().map(|e| (e.slot, e.pivot)).chain(self.u_seq.key.iter().zip(self.u_seq.pivot.iter()).map(|(&s, &v)| (s as usize, v)))
     }
 
-    /// [`Self::u_transpose_sweep`] that also appends to `touch` every
-    /// position it turns from zero to nonzero (a position can appear more
-    /// than once). Returns `false` if `touch` would have exceeded `m`
-    /// entries (recording stopped; the caller must treat every position as
-    /// possibly nonzero). Same operations in the same order as the untracked
-    /// sweep, ticks included.
+    /// 0 から非ゼロに変えた位置を `touch` に追記しながら行う
+    /// [`Self::u_transpose_sweep`] (同じ位置が複数回入ることもある)。`touch` が
+    /// `m` 個を超えそうなら記録を止めて `false` を返す (呼び出し側は全位置を
+    /// 非ゼロの可能性ありと扱うこと)。演算と順序・tick は非追跡版と同じ。
     fn u_transpose_sweep_track(&self, z: &mut [f64], touch: &mut Vec<usize>) -> bool {
+        // `touch` の上限
         let cap = self.base.m;
+        // まだ記録を続けているか
         let mut ok = true;
         self.add_tick(self.base.m as u64);
         for (p, pivot) in self.u_transpose_order() {
@@ -4299,13 +3371,9 @@ impl FtLu {
         ok
     }
 
-    /// [`Self::u_transpose_solve_into`], restricted to `u_seq[start..]` —
-    /// see [`FtLu::solve_transpose_unit_into`]'s own docs for why skipping
-    /// the `[0, start)` prefix is *exact*, not approximate, whenever `z`
-    /// is already known to be all-zero there on entry (true only for a
-    /// freshly-factorized `u_seq` where Vec position equals slot, per
-    /// that method's own precondition — never called on its own from
-    /// anywhere `try_update` may have reordered `u_seq`).
+    /// `u_seq[start..]` に限った [`Self::u_transpose_solve_into`] (ギャザー形式)。
+    /// **前提条件**: 入口で `z` が `[0, start)` で全 0 であり、`u_seq` が分解直後
+    /// (位置 = スロット) であること。`try_update` で並べ替わった後に単独で呼ばないこと。
     fn u_transpose_solve_from(&self, z: &mut [f64], start: usize) {
         for eta in self.u_seq.iter().skip(start) {
             let p = eta.slot;
@@ -4314,51 +3382,18 @@ impl FtLu {
         }
     }
 
-    /// `U_k^{-1}` applied in place: processes the eta sequence in
-    /// **reverse** order, each step solving via eq. (7). Hyper-sparse: same
-    /// skip as `LuFactors::l_solve_into` — `xp` is the only value this
-    /// eta's off-diagonal entries get multiplied by, so a zero `xp` makes
-    /// the whole inner loop a provable no-op.
+    /// `x` に `U_k^{-1}` をその場で適用する (eta 列を逆順に処理、eq. (7))。
+    /// `xp` が 0 の eta は内側ループ全体を飛ばす (超疎)。シングルトンの除算は
+    /// ここではせず [`Self::permute_out`] が `single_piv` を使って行う
+    /// (`u_zero_skip` off 時を除く)。
     ///
-    /// (A GP-sparsified counterpart to this function — restricting the
-    /// scan to a DFS-computed reach set over `u_seq`'s own dependency
-    /// graph, exactly mirroring [`LuFactors::l_solve_sparse_into`]'s own
-    /// approach for `L` — was fully implemented, proven correct (an
-    /// inductive argument that every `off_diag` target always sits at a
-    /// strictly *lower* `u_seq` position than its referrer, mirroring
-    /// `L`'s own low-to-high property, so descending position order needs
-    /// no separate topological-sort step either) and tested (multiple
-    /// sequential `try_update` calls reordering `u_seq` non-trivially,
-    /// checked against the dense reference after every single one). It
-    /// was still reverted after measuring it on the full Netlib benchmark
-    /// set: aggregate wall time **+10.4%** versus `L`-only sparsification,
-    /// 52 of 73 problems slower and only 6 faster. Unlike `L` (a *static*
-    /// matrix, fixed once per full refactorization, whose seed — a real
-    /// LP's own sparse constraint column — is reliably sparse), `U`'s own
-    /// eta chain accumulates fill from every `try_update` since the last
-    /// refactorization, so its reach set is typically far less sparse in
-    /// practice — the DFS/reach-tracking overhead this function's outer
-    /// loop is cheap enough to not need in the first place stopped paying
-    /// for itself. See this file's own history if revisiting this.)
-    ///
-    /// (C5, third form, opt-in: [`Self::u_solve_hyper`] — gated per channel
-    /// on the caller's result-density average (`ENOMOTO_FTRAN_U_HYPER`,
-    /// `ENOMOTO_FTRAN_U_HYPER_TAU`), aborting to this scan past
-    /// `ENOMOTO_T_U_HYPER_ABORT` of `m`, and replacing the `O(m)` output
-    /// permutation with a list scatter as well — the O(m) passes, not the
-    /// eta loop alone, are what a sparse FTRAN is bound by.)
+    /// 超疎版は [`Self::u_solve_hyper`] (任意機能)。
     fn u_solve_into(&self, x: &mut [f64]) {
-        // CLOCK-trigger accounting (`Self::tick`'s own docs): every eta
-        // pays the `O(1)` division unconditionally (the `for` loop itself
-        // always visits all of `u_seq`, one per basis row), so that part is
-        // a flat `m`; the off-diagonal update below is the hyper-sparse
-        // part this function's own docs describe, so its cost is added
-        // only for etas whose `xp` actually survives the skip.
+        // CLOCK トリガ用: 全 eta の除算分として一律 `m`、非対角更新分は
+        // `xp` がスキップされなかった eta についてだけ加える。
         self.add_tick(self.base.m as u64);
         if !self.u_zero_skip {
-            // `ENOMOTO_FTRAN_U_ZERO_SKIP=0`: the pre-§2.6 loop exactly, so
-            // that arm of the A/B is this crate's own previous behaviour
-            // and not "previous behaviour plus one unrelated change".
+            // `ENOMOTO_FTRAN_U_ZERO_SKIP=0`: 以前のループそのまま (A/B 用)。
             for eta in self.u_seq.iter().rev() {
                 let p = eta.slot;
                 x[p] /= self.u_seq.pivot[eta.k];
@@ -4376,58 +3411,38 @@ impl FtLu {
         }
         for eta in self.u_seq.iter().rev() {
             let p = eta.slot;
-            // Test *before* dividing, not after: `0.0 / pivot` is `±0.0`,
-            // so an already-zero slot's division is a no-op that still
-            // costs a division and — worse on a hyper-sparse right-hand
-            // side — a store back into a random position of `x`, dirtying
-            // a cache line per zero slot for nothing. The skipped store
-            // can leave `+0.0` where the unconditional one would have
-            // written `-0.0` (when `pivot < 0`), which is exactly the
-            // difference `u_transpose_solve_into`'s own hyper-sparse skip
-            // already accepts, on the same grounds: every consumer of this
-            // result branches on zero-ness (`permute_out`'s own `!= 0.0`
-            // count, `commit_update`'s filter, the PRICE/DSE consumers),
-            // never on the sign of a zero.
+            // 除算の *前に* 0 判定する (0 のスロットへの無駄な除算とストアを省く)。
+            // `pivot < 0` のとき `-0.0` の代わりに `+0.0` が残りうるが、結果の利用側は
+            // すべて 0 かどうかで分岐し、0 の符号には依存しない。
             if x[p] == 0.0 {
                 continue;
             }
             x[p] /= self.u_seq.pivot[eta.k];
             let xp = x[p];
             self.add_tick(self.u_seq.nnz(eta.k) as u64);
-            // `data[p] == 0.0` always (`HybridVec`'s skipped-index
-            // convention), so the dense arm leaves `x[p]` — just divided
-            // above — untouched, same as the sparse one.
+            // 密形式でも `data[p] == 0.0` (対角位置は格納しない) なので、
+            // いま割った `x[p]` は変わらない。
             self.u_seq.axpy(eta.k, -xp, x);
         }
-        // Singletons last (see `singles`' own docs): every write into their
-        // slots has happened by now. Their divisions (same zero-skip as the
-        // loop above) are done by `permute_out`, reading `single_piv`.
+        // シングルトンは最後 (そのスロットへの書き込みは全て済んでいる)。
+        // その除算 (同じゼロスキップ付き) は `permute_out` が `single_piv` で行う。
     }
 
-    /// C5: the `U` stage of one FTRAN vector, restricted to the etas its
-    /// nonzeros can reach. `x` is the post-`L`/`R` vector; its nonzeros lie
-    /// within `gp.reach` (the `L` stage's Gilbert-Peierls reach set) plus
-    /// the `R` etas' slots. A DFS from the nonzero ones over `U`'s eta
-    /// graph (slot `p` -> the rows of its eta's off-diagonal entries)
-    /// collects every slot that can become nonzero into `gp.u_list`; the
-    /// reached `u_seq` etas are then applied in **descending `u_seq`
-    /// position** — exactly the subsequence of [`Self::u_solve_into`]'s
-    /// reverse scan that can do anything, with the same zero skip, so every
-    /// value (and the tick count) is bit-identical: an eta outside the
-    /// reach sees `x[p] == 0.0` in the full scan and is skipped there too,
-    /// and applying the rest in the scan's own order keeps each entry's
-    /// accumulation order (a DFS topological order alone would not).
-    /// Sorting is `O(r log r)` in the reach size `r`, against the full
-    /// scan's `O(m)`.
+    /// C5: FTRAN 1 本の `U` 段を、非ゼロから到達しうる eta だけに限って行う。
+    /// `x` は `L`/`R` 適用後のベクトルで、非ゼロは `gp.reach` (`L` 段の到達集合) と
+    /// `R` eta のスロットに含まれる。そこから `U` の eta グラフ (スロット `p` → その
+    /// eta の非対角要素の行) を DFS して到達スロットを `gp.u_list` に集め、到達した
+    /// `u_seq` eta を **`u_seq` 位置の降順** に適用する。[`Self::u_solve_into`] の
+    /// 逆順走査の部分列そのものなので、値も tick もビット一致。
     ///
-    /// Returns `false` without touching `x` (the caller then runs the full
-    /// scan) when the reach passes [`U_HYPER_ABORT_FRACTION`] of `m`, or
-    /// when `U` holds a dense-arm eta (whose `axpy` spans all of `x`).
+    /// 到達数が [`U_HYPER_ABORT_FRACTION`] `* m` を超えた場合、または `U` に密 eta が
+    /// ある場合は `x` に触れずに `false` を返す (呼び出し側が全走査する)。
     fn u_solve_hyper(&self, x: &mut [f64], gp: &mut GpScratch) -> bool {
         let m = self.base.m;
         if !self.u_seq.dense.is_empty() {
             return false;
         }
+        // 到達スロット数の上限
         let limit = (tunable!("ENOMOTO_T_U_HYPER_ABORT", U_HYPER_ABORT_FRACTION, f64) * m as f64) as usize;
         gp.u_marks.begin();
         gp.u_list.clear();
@@ -4435,6 +3450,7 @@ impl FtLu {
         let n_reach = gp.reach.len();
         let n_r = self.r_etas.n_headers();
         for i in 0..n_reach + n_r {
+            // DFS 起点候補: `L` 段の到達ステップ、続いて `R` eta の行
             let seed = if i < n_reach { gp.reach[i] } else { self.r_etas.key[i - n_reach] as usize };
             if x[seed] == 0.0 || gp.u_marks.is_marked(seed) {
                 continue;
@@ -4476,11 +3492,9 @@ impl FtLu {
         true
     }
 
-    /// [`Self::permute_out`] over the slots in `list` only (every other
-    /// slot of `scratch` is zero): `out` is cleared by a `fill` (a
-    /// `memset`, far cheaper than `permute_out`'s per-entry loop) and the
-    /// listed values are scattered with the same singleton division.
-    /// Only used with `u_zero_skip` on and no tiny-value dropping.
+    /// `list` のスロットだけを対象にした [`Self::permute_out`] (他のスロットの
+    /// `scratch` は 0)。`out` を `fill` でクリアしてから、列挙した値をシングルトン除算
+    /// 付きで散布する。非ゼロ数を返す。`u_zero_skip` on かつ微小値切捨てなしのときのみ使う。
     fn permute_list(&self, scratch: &[f64], out: &mut [f64], list: &[usize]) -> usize {
         out.fill(0.0);
         let mut nnz = 0usize;
@@ -4498,71 +3512,42 @@ impl FtLu {
         nnz
     }
 
-    /// Whether a sparse FTRAN may take the hyper-sparse `U` stage at all
-    /// (on top of the caller's own `gp.u_hyper` request).
+    /// 疎 FTRAN が超疎 `U` 段を使ってよいか (呼び出し側の `gp.u_hyper` 要求に加えて、
+    /// `u_zero_skip` on かつ微小値切捨てなし)。
     #[inline]
     fn u_hyper_ok(&self, gp: &GpScratch) -> bool {
         gp.u_hyper && self.u_zero_skip && tiny_drop() <= 0.0
     }
 
-    /// `R_k^{-1} ... R_1^{-1} L^{-1}` applied to a vector in original row
-    /// indexing, written into caller-provided `z` (step-space) — i.e.
-    /// everything `solve_into` does except the final `U_k^{-1}`. This is
-    /// also exactly what a new update needs to turn `a_q` into `ã_q`: per
-    /// eq. (11), `ã_q` must be `(L R_1 ... R_{k-1})^{-1} a_q`, *not* just
-    /// `L^{-1} a_q` — the existing `R`s are already part of the "L-like"
-    /// fixed factor that update `k` treats as known, since `B_{k-1} = L R_1
-    /// ... R_{k-1} U_{k-1}` (eq. 13) rather than `B_{k-1} = L U_{k-1}` once
-    /// `k > 1`.
+    /// 元の行番号のベクトルに `R_k^{-1} ... R_1^{-1} L^{-1}` を適用し、ステップ空間で
+    /// `z` に書く (`solve_into` から最後の `U_k^{-1}` を除いたもの)。新しい更新が
+    /// `a_q` から `ã_q = (L R_1 ... R_{k-1})^{-1} a_q` (eq. (11)) を得るのにも使う。
     fn ftran_through_l_and_r_into(&self, rhs: &[f64], z: &mut [f64]) {
         self.base.l_solve_into(&self.l_active, rhs, z);
-        // CLOCK-trigger accounting (`Self::tick`'s own docs): `l_solve_into`
-        // is a dense `O(m)` scan of `z` regardless of fill (this is the
-        // dense FTRAN path — the sparse `L`-stage reach set is accounted
-        // separately in `solve_sparse_into`/`_capture`).
+        // CLOCK トリガ用: 密 `L` 段は fill に関係なく `O(m)`。
         self.add_tick(self.base.m as u64);
         for reta in self.r_etas.iter() {
             let dot = self.r_etas.dot(reta.k, z);
-            // Unconditional (every `r_eta` is visited regardless of `z`'s
-            // sparsity — the very "gather-type, no zero-skip" cost this
-            // trigger's own analysis (§2.1/§2.2) identified as the eta-chain
-            // bottleneck), so this term alone is what makes `tick` grow
-            // with chain length the way FTRAN's own measured wall time does.
+            // `R` eta は `z` の疎性に関係なく全部訪れる (ゼロスキップなし) ので、
+            // この項で tick が eta 列の長さに比例して増える。
             self.add_tick(self.r_etas.nnz(reta.k) as u64);
             z[reta.slot] -= dot;
         }
     }
 
-    /// Writes `B^-1 rhs` into `out` (length `m`), using `scratch` (also
-    /// length `m`) as working space — no allocation. `solve_lp_dual_on`
-    /// calls this 2-4 times *every pivot* (BTRAN-DSE's `tau`, the entering
-    /// column's `alpha`, and, when BFRT flips are pending, one more for
-    /// `combined`), so the 2-3 `Vec` allocations each fresh `solve()` call
-    /// used to cost here (one each in `l_solve`, `u_solve`, and the final
-    /// permutation) were real, repeated per-iteration heap traffic —
-    /// eliminated by having the caller own `scratch`/`out` once, outside
-    /// the iteration loop, and reuse them every pivot.
-    ///
-    /// Returns the finished result's own nonzero count, for
-    /// [`FtranDensity::record`]: the permutation loop below already visits
-    /// every entry of the result, so counting them there is one branchless
-    /// add per entry on a loop that was running anyway, and yields the
-    /// exact density rather than an estimate. Callers with no density
-    /// tracker simply ignore it.
+    /// `B^-1 rhs` を `out` (長さ `m`) に書く (FTRAN)。`scratch` (長さ `m`) を作業領域に
+    /// 使い、確保は行わない。戻り値は結果の非ゼロ数 ([`FtranDensity::record`] 用、
+    /// 不要なら無視してよい)。
     pub fn solve_into(&self, rhs: &[f64], scratch: &mut [f64], out: &mut [f64]) -> usize {
         self.ftran_through_l_and_r_into(rhs, scratch);
         self.u_solve_into(scratch);
         self.permute_out(scratch, out)
     }
 
-    /// Same as [`Self::solve_into`], but additionally captures the
-    /// post-`L`/`R`, pre-`U` intermediate (`(L R_1...R_{k-1})^-1 rhs`) into
-    /// `a_tilde_out` (length `m`) — exactly the `a_tilde` value
-    /// [`Self::try_update_precomputed`] needs when `rhs` is the entering
-    /// column being FTRAN'd this same iteration. See that method's own
-    /// docs for why this capture (a plain `copy_from_slice`) lets the
-    /// caller skip `try_update`'s own redundant re-derivation of the exact
-    /// same value entirely.
+    /// [`Self::solve_into`] と同じだが、`L`/`R` 適用後・`U` 適用前の中間値
+    /// (`(L R_1...R_{k-1})^-1 rhs`) を `a_tilde_out` (長さ `m`) にも書き出す。
+    /// `rhs` がこの反復の入力列なら、これがそのまま
+    /// [`Self::try_update_precomputed`] に渡す `a_tilde` になる。
     pub fn solve_into_capture(&self, rhs: &[f64], scratch: &mut [f64], out: &mut [f64], a_tilde_out: &mut [f64]) -> usize {
         self.ftran_through_l_and_r_into(rhs, scratch);
         a_tilde_out.copy_from_slice(scratch);
@@ -4570,27 +3555,16 @@ impl FtLu {
         self.permute_out(scratch, out)
     }
 
-    /// Two dense FTRANs against the same factorization in one traversal:
-    /// `out_a = B^-1 rhs_a` exactly as [`Self::solve_into_capture`] computes
-    /// it (including the `a_tilde` capture), and `out_b = B^-1 rhs_b` exactly
-    /// as [`Self::solve_into`] does — the entering column's FTRAN and the
-    /// DSE `tau = B^-1 rho_p` FTRAN of the same iteration, which HiGHS runs
-    /// as two separate (optionally concurrent) solves
-    /// (`HEkkDual::updateFtranDSE`). Every stage (`L`, the `R` etas, `U`)
-    /// walks its factor data once and applies it to both vectors, each
-    /// vector receiving precisely its own single-solve operation sequence
-    /// (same zero skips, same accumulation order), so both results — and
-    /// the returned nonzero counts — are bit-identical to the two separate
-    /// calls. The synthetic tick is charged exactly as the two separate
-    /// calls would charge it too, so the `CLOCK` refactorization trigger
-    /// fires on exactly the same iterations. What is saved is the second
-    /// pass over `L`/`R`/`U`'s own storage (memory traffic and loop
-    /// overhead), which on the larger Netlib instances no longer fits in
-    /// cache between the two solves.
+    /// 同じ因子に対する 2 本の密 FTRAN を 1 回の走査で行う:
+    /// `out_a = B^-1 rhs_a` ([`Self::solve_into_capture`] と同じ、`a_tilde` 記録込み) と
+    /// `out_b = B^-1 rhs_b` ([`Self::solve_into`] と同じ)。入力列の FTRAN と DSE の
+    /// `tau = B^-1 rho_p` FTRAN 用。各段 (`L`, `R`, `U`) の因子データを 1 回だけ
+    /// 走査し、各ベクトルには単独求解と同じ演算列を適用するので、結果・非ゼロ数・
+    /// tick すべて 2 回の個別呼び出しとビット一致。
     ///
-    /// Only the `u_zero_skip` form of the `U` stage is fused; with
-    /// `ENOMOTO_FTRAN_U_ZERO_SKIP=0` this falls back to the two separate
-    /// calls.
+    /// - `rho_cap`: `rhs_b` の BTRAN 時に記録した非ゼロステップ ([`StepCapture`])。
+    ///   有効なら `rhs_b` の `L` 段を Gilbert-Peierls で行う。
+    /// - `ENOMOTO_FTRAN_U_ZERO_SKIP=0` のときは 2 回の個別呼び出しに落ちる。
     #[allow(clippy::too_many_arguments)]
     pub fn solve_into_pair_capture(
         &self,
@@ -4610,9 +3584,9 @@ impl FtLu {
             return (na, nb);
         }
         let m = self.base.m as u64;
-        // `L` stage (+ `ftran_through_l_and_r_into`'s own flat `m` tick,
-        // once per vector — also when `rhs_b`'s `L` stage takes the GP path,
-        // so the CLOCK trigger is unchanged).
+        // `L` 段 (+ `ftran_through_l_and_r_into` と同じ一律 `m` の tick をベクトルごとに。
+        // `rhs_b` が GP 経路でも同じなので CLOCK トリガは変わらない)。
+        // `rhs_b` の `U` 段を超疎に行う場合のスクラッチ
         let hyper_b = if let Some(c) = rho_cap {
             self.base.l_solve_into(&self.l_active, rhs_a, scratch_a);
             self.base.l_solve_steps_into(rhs_b, &c.steps, scratch_b, &mut c.gp);
@@ -4630,13 +3604,11 @@ impl FtLu {
         (na, nb)
     }
 
-    /// [`Self::solve_into_pair_capture`] with the entering column given
-    /// sparse — [`Self::solve_sparse_into_capture`]'s own Gilbert-Peierls
-    /// `L` stage for `rhs_a` (same `scratch_a`/`gp` precondition and
-    /// postcondition as that method), the plain dense `L` stage for
-    /// `rhs_b`, then the same fused `R`/`U`/permutation tail. Bit-identical
-    /// to `solve_sparse_into_capture(rhs_a, ..)` plus `solve_into(rhs_b, ..)`,
-    /// ticks included.
+    /// 入力列を疎で受け取る [`Self::solve_into_pair_capture`]。`rhs_a` は
+    /// [`Self::solve_sparse_into_capture`] と同じ Gilbert-Peierls `L` 段
+    /// (`scratch_a`/`gp` の前提・事後条件も同じ)、`rhs_b` は密 `L` 段、その後は
+    /// 共通の `R`/`U`/置換。`solve_sparse_into_capture(rhs_a, ..)` +
+    /// `solve_into(rhs_b, ..)` と tick 込みでビット一致。
     #[allow(clippy::too_many_arguments)]
     pub fn solve_sparse_into_pair_capture(
         &self,
@@ -4679,12 +3651,10 @@ impl FtLu {
         (na, nb)
     }
 
-    /// [`Self::solve_into_pair_capture`] plus a third dense FTRAN `out_c =
-    /// B^-1 rhs_c` (the BFRT combined-flip column of the same iteration,
-    /// against the same pre-pivot factorization) sharing the same single
-    /// traversal of `L`/`R`/`U`. Bit-identical to `solve_into_capture(a)` +
-    /// `solve_into(b)` + `solve_into(c)`, ticks included. Returns the three
-    /// results' nonzero counts.
+    /// [`Self::solve_into_pair_capture`] に 3 本目の密 FTRAN `out_c = B^-1 rhs_c`
+    /// (同じ反復の BFRT 合成フリップ列) を加え、`L`/`R`/`U` の同じ 1 回の走査を
+    /// 共有する。`solve_into_capture(a)` + `solve_into(b)` + `solve_into(c)` と
+    /// tick 込みでビット一致。3 つの結果の非ゼロ数を返す。
     #[allow(clippy::too_many_arguments)]
     pub fn solve_into_triple_capture(
         &self,
@@ -4724,9 +3694,8 @@ impl FtLu {
         self.triple_r_u_permute(scratch_a, scratch_b, scratch_c, out_a, out_b, out_c, a_tilde_out, None, hyper_b)
     }
 
-    /// [`Self::solve_sparse_into_pair_capture`] plus the dense third
-    /// right-hand side of [`Self::solve_into_triple_capture`]. Same
-    /// `scratch_a`/`gp` contract as the pair version.
+    /// [`Self::solve_sparse_into_pair_capture`] に [`Self::solve_into_triple_capture`] の
+    /// 密な 3 本目の右辺を加えたもの。`scratch_a`/`gp` の約束は pair 版と同じ。
     #[allow(clippy::too_many_arguments)]
     pub fn solve_sparse_into_triple_capture(
         &self,
@@ -4771,7 +3740,7 @@ impl FtLu {
         r
     }
 
-    /// [`Self::pair_r_u_permute`] with a third vector `c` (no capture).
+    /// 3 本目のベクトル `c` (記録なし) を加えた [`Self::pair_r_u_permute`]。
     #[allow(clippy::too_many_arguments)]
     fn triple_r_u_permute(
         &self,
@@ -4797,9 +3766,9 @@ impl FtLu {
         }
         a_tilde_out.copy_from_slice(scratch_a);
         self.add_tick(3 * m);
-        // C5: vector `a`'s `U` stage alone, hyper-sparsely (the vectors
-        // are independent, so taking `a` out of the fused scan changes no
-        // operation of `b`/`c`).
+        // C5: ベクトル `a` の `U` 段だけを超疎に行う (ベクトルは独立なので、
+        // `a` を融合走査から外しても `b`/`c` の演算は変わらない)。
+        // 超疎 `U` 段が成功したときの `a` の到達スロット一覧
         let a_list = match hyper_a {
             Some(gp) => {
                 if self.u_solve_hyper(scratch_a, gp) {
@@ -4810,6 +3779,7 @@ impl FtLu {
             }
             None => None,
         };
+        // `a` を融合走査で処理するか
         let a_in_scan = a_list.is_none();
         let b_list = match hyper_b {
             Some(gp) => {
@@ -4843,7 +3813,7 @@ impl FtLu {
                 self.u_seq.axpy(eta.k, -xp, scratch_c);
             }
         }
-        // Singleton divisions: done by `permute_out` (see `single_piv`).
+        // シングルトンの除算は `permute_out` が行う (`single_piv` 参照)。
         let na = match a_list {
             Some(list) => self.permute_list(scratch_a, out_a, list),
             None => self.permute_out(scratch_a, out_a),
@@ -4856,10 +3826,9 @@ impl FtLu {
         (na, nb, nc)
     }
 
-    /// The shared post-`L` tail of the two pair solves above: `R` etas,
-    /// `a_tilde` capture (vector `a` only), `U` (`u_zero_skip` form), and
-    /// the output permutation, each applied per vector exactly as the
-    /// single-vector paths apply it.
+    /// 上の 2 つの pair 求解が共有する `L` 以降の処理: `R` eta、`a_tilde` 記録
+    /// (ベクトル `a` のみ)、`U` (`u_zero_skip` 形式、`hyper_*` があれば超疎形式)、
+    /// 出力置換。各ベクトルに単独求解と同じ演算を適用する。
     fn pair_r_u_permute(
         &self,
         scratch_a: &mut [f64],
@@ -4879,8 +3848,8 @@ impl FtLu {
             scratch_b[reta.slot] -= dot_b;
         }
         a_tilde_out.copy_from_slice(scratch_a);
-        // `U` stage: `u_solve_into`'s `u_zero_skip` loop, per vector — or,
-        // for `a` under C5, its hyper-sparse form (see `triple_r_u_permute`).
+        // `U` 段: ベクトルごとに `u_solve_into` の `u_zero_skip` ループ
+        // (C5 なら超疎形式、`triple_r_u_permute` 参照)。
         self.add_tick(2 * m);
         let a_list = match hyper_a {
             Some(gp) => {
@@ -4919,7 +3888,7 @@ impl FtLu {
                 self.u_seq.axpy(eta.k, -xp, scratch_b);
             }
         }
-        // Singleton divisions: done by `permute_out` (see `single_piv`).
+        // シングルトンの除算は `permute_out` が行う (`single_piv` 参照)。
         let na = match a_list {
             Some(list) => self.permute_list(scratch_a, out_a, list),
             None => self.permute_out(scratch_a, out_a),
@@ -4931,18 +3900,12 @@ impl FtLu {
         (na, nb)
     }
 
-    /// The last stage every FTRAN path shares: map the finished
-    /// step-space vector back to original row indexing, returning its own
-    /// nonzero count (see [`Self::solve_into`]'s own docs for why the
-    /// count rides along on this loop rather than a pass of its own).
-    /// `+= (v != 0.0) as usize` rather than a branch: the compare is a
-    /// single instruction and the add is unconditional, so the count adds
-    /// no branch misprediction to a loop whose scatter already dominates it.
+    /// 全 FTRAN 経路共通の最終段: 完成したステップ空間ベクトルを元の順
+    /// (`out[col_perm[s]] = scratch[s]`) に戻し、非ゼロ数を返す
+    /// (カウントは分岐なしの加算)。`U` 段のシングルトン除算
+    /// ([`Self::single_piv`]) もここで行う (`ENOMOTO_FTRAN_U_ZERO_SKIP=0` 時を除く)。
+    /// [`tiny_drop`] 未満は 0 にする。
     #[inline]
-    ///
-    /// Also performs the `U` stage's singleton divisions (see
-    /// [`Self::single_piv`]) — except in the `ENOMOTO_FTRAN_U_ZERO_SKIP=0`
-    /// arm, whose `u_solve_into` still does its own unconditional ones.
     fn permute_out(&self, scratch: &[f64], out: &mut [f64]) -> usize {
         let mut nnz = 0usize;
         let tiny = tiny_drop();
@@ -4984,59 +3947,33 @@ impl FtLu {
         nnz
     }
 
-    /// Sparse-`rhs` counterpart to [`Self::solve_into`]: the same
-    /// `B^-1 rhs` computation, but taking `rhs`'s nonzero
-    /// `(orig_row, value)` pairs directly and running the `L`-stage
-    /// through [`LuFactors::l_solve_sparse_into`] instead of densifying
-    /// `rhs` into `scratch` first — see that function's own docs for the
-    /// reach-set algorithm.
+    /// 疎な右辺版の [`Self::solve_into`]: `rhs` の非ゼロ `(元の行, 値)` を直接受け取り、
+    /// `L` 段を [`LuFactors::l_solve_sparse_into`] で行う。非ゼロ数を返す。
     ///
-    /// **`scratch`/`gp` must be dedicated to this call site alone, never
-    /// shared with a plain [`Self::solve_into`] call's own buffer**:
-    /// `l_solve_into` (the dense path) starts by unconditionally
-    /// overwriting every entry of `scratch` (`z[s] = rhs[row_perm[s]]`
-    /// for every `s`), so it tolerates arbitrary leftover content — but
-    /// `l_solve_sparse_into` requires `scratch` to *already* be all-zero
-    /// on entry (see its own docs for why cheaply reconstructing that
-    /// precondition is this function's job, not its own). This function
-    /// upholds that precondition for its *own* next call by clearing
-    /// `scratch` back to all-zero, in full, right before returning — but
-    /// that guarantee only holds if nothing else writes through the same
-    /// buffer in between.
+    /// **`scratch`/`gp` はこの呼び出し箇所専用にすること** ([`Self::solve_into`] の
+    /// バッファと共有しない)。`l_solve_sparse_into` は入口で `scratch` が全 0 である
+    /// ことを要求し、この関数は返却直前に `scratch` を全 0 に戻してその前提を
+    /// 次回のために保つ。
     pub fn solve_sparse_into(&self, rhs_sparse: &[(usize, f64)], scratch: &mut [f64], gp: &mut GpScratch, out: &mut [f64]) -> usize {
         self.base.l_solve_sparse_into(rhs_sparse, scratch, gp);
-        // CLOCK-trigger accounting (`Self::tick`'s own docs): unlike the
-        // dense `L`-stage in `ftran_through_l_and_r_into` (a flat `m`),
-        // this GP-sparse path's own real cost is its reach-set size.
+        // CLOCK トリガ用: 疎 `L` 段のコストは到達集合のサイズ。
         self.add_tick(gp.reach.len() as u64);
         for reta in self.r_etas.iter() {
             let dot = self.r_etas.dot(reta.k, scratch);
             self.add_tick(self.r_etas.nnz(reta.k) as u64);
             scratch[reta.slot] -= dot;
         }
-        // `U` stays on the plain `u_solve_into` scan — see that function's
-        // own docs for the *two* separate attempts at a reach-restricted
-        // counterpart (one ungated, one gated exactly the way HiGHS gates
-        // its own `ftranU`) that were both implemented, proven correct,
-        // measured over the full Netlib set, and reverted as regressions.
+        // `U` は通常の `u_solve_into` 走査のまま。
         self.u_solve_into(scratch);
         let nnz = self.permute_out(scratch, out);
         scratch.fill(0.0);
         nnz
     }
 
-    /// Adds exactly the synthetic-clock ticks ([`Self::synth_tick`]) that
-    /// [`Self::solve_into`] (`sparse == false`) or [`Self::solve_sparse_into`]
-    /// (`sparse == true`) would add for an identically-zero right-hand
-    /// side, without performing the solve — whose result is known to be
-    /// all-zero anyway. Lets a caller skip a provably-zero FTRAN (e.g. the
-    /// extended dual's BFRT slope channel when no flipped column's width
-    /// carries an `M` term) while keeping the CLOCK refactorization trigger
-    /// — and therefore the whole pivot path — bit-for-bit unchanged.
-    /// For a zero rhs: the dense `L` stage costs a flat `m`, the sparse
-    /// one's reach set is empty (`0`); every `R` eta is visited
-    /// unconditionally; the `U` stage pays its flat `m` and no eta survives
-    /// the zero skip.
+    /// 右辺が恒等的に 0 のときに [`Self::solve_into`] (`sparse == false`) または
+    /// [`Self::solve_sparse_into`] (`sparse == true`) が加えるのと同じ tick だけを、
+    /// 求解せずに加える。結果が 0 と分かっている FTRAN を省いても CLOCK トリガ
+    /// (ひいてはピボット経路) をビット一致に保つため。
     pub fn add_zero_rhs_solve_ticks(&self, sparse: bool) {
         let m = self.base.m as u64;
         self.add_tick(if sparse { 0 } else { m });
@@ -5046,27 +3983,18 @@ impl FtLu {
         self.add_tick(m);
     }
 
-    /// BTRAN counterpart of [`Self::add_zero_rhs_solve_ticks`]: adds exactly
-    /// the ticks [`Self::solve_transpose_into`] adds for an identically-zero
-    /// right-hand side — the `U^T` sweep's flat `m` (every slot is zero, so
-    /// no row is scattered), no `R` eta (each is skipped on its zero `yp`),
-    /// and the `L^T` tail's flat `m`. Lets a caller that knows `y = 0`
-    /// (the extended dual's all-slack-cost start, S14) skip the solve while
-    /// keeping the CLOCK trigger bit-for-bit unchanged.
+    /// [`Self::add_zero_rhs_solve_ticks`] の BTRAN 版: 右辺 0 のとき
+    /// [`Self::solve_transpose_into`] が加える tick (`U^T` 掃引の `m` と `L^T` 段の `m`)
+    /// だけを加える。
     pub fn add_zero_rhs_btran_ticks(&self) {
         let m = self.base.m as u64;
         self.add_tick(m);
         self.add_tick(m);
     }
 
-    /// Same as [`Self::solve_sparse_into`], but additionally captures the
-    /// post-`L`/`R`, pre-`U` intermediate into `a_tilde_out` (length `m`) —
-    /// see [`Self::solve_into_capture`]'s own docs, which this mirrors for
-    /// the sparse-`rhs` FTRAN path. The capture happens after the `R`-eta
-    /// loop (this stage's own last write to `scratch` before `u_solve_into`
-    /// takes over), so `a_tilde_out` ends up identical regardless of which
-    /// of the two FTRAN paths (`should_use_dense_solve`'s dense/sparse
-    /// dispatch) a given call took.
+    /// [`Self::solve_sparse_into`] と同じだが、`L`/`R` 適用後・`U` 適用前の中間値を
+    /// `a_tilde_out` (長さ `m`) にも書き出す (疎経路版の [`Self::solve_into_capture`])。
+    /// `gp.u_hyper` が有効なら `U` 段を超疎に試みる。
     pub fn solve_sparse_into_capture(
         &self,
         rhs_sparse: &[(usize, f64)],
@@ -5090,8 +4018,7 @@ impl FtLu {
                 scratch.fill(0.0);
                 return nnz;
             }
-            // Aborted before touching `scratch`: the full scan, minus the
-            // flat tick already charged.
+            // `scratch` に触れる前に中断した: 既に加えた一律 tick を戻して全走査する。
             self.tick.set(self.tick.get() - self.base.m as u64);
         }
         self.u_solve_into(scratch);
@@ -5100,9 +4027,7 @@ impl FtLu {
         nnz
     }
 
-    /// Allocating convenience wrapper around [`Self::solve_into`] — kept for
-    /// call sites (tests, `try_update`) that don't already have a reusable
-    /// buffer on hand.
+    /// [`Self::solve_into`] の確保付き簡易版 (テストや再利用バッファを持たない呼び出し用)。
     pub fn solve(&self, rhs: &[f64]) -> Vec<f64> {
         let m = self.base.m;
         let mut scratch = vec![0.0; m];
@@ -5111,18 +4036,15 @@ impl FtLu {
         out
     }
 
-    /// Writes `B^-T rhs` into `out` (length `m`), using `scratch` (also
-    /// length `m`) as working space — no allocation; see [`Self::solve_into`]'s
-    /// own docs for why this matters (this is `solve_lp_dual_on`'s
-    /// once-per-pivot BTRAN for `rho_p`).
+    /// `B^-T rhs` を `out` (長さ `m`) に書く (BTRAN)。`scratch` (長さ `m`) を作業領域に
+    /// 使い、確保は行わない。
     pub fn solve_transpose_into(&self, rhs: &[f64], scratch: &mut [f64], out: &mut [f64]) {
         self.permute_transpose_rhs(rhs, scratch);
         self.u_transpose_solve_into(scratch);
         self.btran_tail(scratch, out);
     }
 
-    /// `P_col^{-1} rhs` into `scratch` — an `O(m)` gather through the
-    /// column permutation, every BTRAN's first step.
+    /// `P_col^{-1} rhs` を `scratch` に書く (全 BTRAN の最初の段、`O(m)` のギャザー)。
     #[inline]
     fn permute_transpose_rhs(&self, rhs: &[f64], scratch: &mut [f64]) {
         for s in 0..self.base.m {
@@ -5130,11 +4052,8 @@ impl FtLu {
         }
     }
 
-    /// [`Self::permute_transpose_rhs`] for `rhs = e_i`, returning the one
-    /// step it lands on. `P_col^{-1} e_i` is the unit vector at step
-    /// `col_perm_inv[i]`, so the gather collapses to a flat `fill` plus a
-    /// single store — no random-access read per step, and the caller never
-    /// has to own (or keep re-zeroing) a length-`m` `e_i` buffer of its own.
+    /// `rhs = e_i` 用の [`Self::permute_transpose_rhs`]。`scratch` を 0 で埋めて
+    /// ステップ `col_perm_inv[i]` に 1 を置き、そのステップを返す。
     #[inline]
     fn seed_unit_rhs(&self, i: usize, scratch: &mut [f64]) -> usize {
         scratch.fill(0.0);
@@ -5143,17 +4062,16 @@ impl FtLu {
         s0
     }
 
-    /// Everything a BTRAN does after `U^{-T}`: the `R` etas in reverse,
-    /// then `L^{-T}` back into original row indexing.
+    /// BTRAN の `U^{-T}` 以降すべて: `R` eta を逆順に適用し、`L^{-T}` で元の行順に戻す。
     #[inline]
     fn btran_tail(&self, scratch: &mut [f64], out: &mut [f64]) {
         self.btran_tail_cap(scratch, out, None)
     }
 
+    /// 結果の非ゼロステップ記録 ([`StepCapture`]) を任意で付けた [`Self::btran_tail`]。
     #[inline]
     fn btran_tail_cap(&self, scratch: &mut [f64], out: &mut [f64], cap: Option<&mut StepCapture>) {
-        // Hyper-sparse: same skip as `u_solve_into`/`l_solve_into` — `yp`
-        // is the only value each `r_eta`'s entries get multiplied by here.
+        // 超疎: `yp` が各 `R` eta の要素に掛かる唯一の値なので、0 なら飛ばす。
         for reta in self.r_etas.iter().rev() {
             let yp = scratch[reta.slot];
             if yp == 0.0 {
@@ -5162,38 +4080,29 @@ impl FtLu {
             self.add_tick(self.r_etas.nnz(reta.k) as u64);
             self.r_etas.axpy(reta.k, -yp, scratch);
         }
-        // CLOCK-trigger accounting (`Self::tick`'s own docs): `l_transpose_solve_into`
-        // is a dense `O(m)` reverse scan regardless of fill (see that
-        // method's own docs for why sparsifying it wasn't worth trying).
+        // CLOCK トリガ用: `L^{-T}` 段は一律 `m` として数える。
         self.add_tick(self.base.m as u64);
         self.l_transpose_solve_into_cap(scratch, out, cap);
     }
 
-    /// [`Self::solve_transpose_into`] for `rhs = e_i`, the shape every
-    /// pivotal-row BTRAN in this crate actually has — see
-    /// [`Self::u_transpose_solve_seeded`] for what the specialization
-    /// saves and why it is exact. Unlike
-    /// [`Self::solve_transpose_unit_into`] this makes no assumption about
-    /// `u_seq`'s ordering, so it is valid with Forrest-Tomlin updates
-    /// applied; unlike [`Self::solve_transpose_into`] it needs no `e_i`
-    /// buffer from the caller. `scratch` is fully overwritten on entry, so
-    /// it carries no precondition (same as `solve_transpose_into`).
+    /// `rhs = e_i` 専用の [`Self::solve_transpose_into`] (ピボット行 BTRAN の形)。
+    /// FT 更新後でも有効で、呼び出し側は `e_i` バッファを持つ必要がない。
+    /// `scratch` は入口で上書きされるので前提条件なし。
     pub fn solve_transpose_unit(&self, i: usize, scratch: &mut [f64], out: &mut [f64]) {
         let s0 = self.seed_unit_rhs(i, scratch);
         self.u_transpose_solve_seeded(scratch, s0);
         self.btran_tail(scratch, out);
     }
 
-    /// [`Self::solve_transpose_unit`] plus [`Self::solve_transpose_into_capture`]'s
-    /// own `e_tilde` capture.
+    /// [`Self::solve_transpose_unit`] に `e_tilde` の記録
+    /// ([`Self::solve_transpose_into_capture`] と同じ) を加えたもの。
     pub fn solve_transpose_unit_capture(&self, i: usize, scratch: &mut [f64], out: &mut [f64], e_tilde_out: &mut [f64]) {
         self.solve_transpose_unit_capture_steps(i, scratch, out, e_tilde_out, None)
     }
 
-    /// [`Self::solve_transpose_unit_capture_steps`] using a
-    /// [`UnitBtranWork`] instead of a caller scratch — see that type for the
-    /// passes it removes. `out`, `e_tilde_out`, the capture and the ticks are
-    /// bit-identical.
+    /// 呼び出し側スクラッチの代わりに [`UnitBtranWork`] を使う
+    /// [`Self::solve_transpose_unit_capture_steps`]。`out`・`e_tilde_out`・記録・tick は
+    /// ビット一致。
     pub fn solve_transpose_unit_work(&self, i: usize, out: &mut [f64], e_tilde_out: &mut [f64], work: &mut UnitBtranWork, cap: Option<&mut StepCapture>) {
         let m = self.base.m;
         if work.w.len() != m {
@@ -5206,8 +4115,9 @@ impl FtLu {
         w[s0] = 1.0;
         work.touch.clear();
         work.touch.push(s0);
+        // 非ゼロ位置の記録が溢れずに済んだか
         let tracked = self.u_transpose_sweep_track(w, &mut work.touch);
-        // `e_tilde` capture: reset last call's positions, write this call's.
+        // `e_tilde` の記録: 前回の位置を消してから今回の値を書く。
         if work.e_full {
             e_tilde_out.fill(0.0);
         } else {
@@ -5215,6 +4125,7 @@ impl FtLu {
                 e_tilde_out[q] = 0.0;
             }
         }
+        // `L^T` 段入力の非ゼロ数の上界
         let mut bound;
         if tracked {
             for &q in &work.touch {
@@ -5228,7 +4139,7 @@ impl FtLu {
             bound = usize::MAX;
             work.e_full = true;
         }
-        // `btran_tail`, with the nonzero bound carried through the `R` etas.
+        // `btran_tail` と同じ処理を、非ゼロ数の上界を `R` eta 分増やしながら行う。
         for reta in self.r_etas.iter().rev() {
             let yp = w[reta.slot];
             if yp == 0.0 {
@@ -5243,9 +4154,8 @@ impl FtLu {
         self.l_transpose_solve_into_ext::<true>(w, out, cap, bound);
     }
 
-    /// [`Self::solve_transpose_unit_capture`] that additionally records
-    /// `out`'s nonzero steps into `cap` for the fused `tau` FTRAN that
-    /// follows (see [`StepCapture`]). `out` itself is bit-identical.
+    /// [`Self::solve_transpose_unit_capture`] に加え、続く融合 `tau` FTRAN のために
+    /// `out` の非ゼロステップを `cap` に記録する ([`StepCapture`])。`out` はビット一致。
     pub fn solve_transpose_unit_capture_steps(&self, i: usize, scratch: &mut [f64], out: &mut [f64], e_tilde_out: &mut [f64], cap: Option<&mut StepCapture>) {
         let s0 = self.seed_unit_rhs(i, scratch);
         self.u_transpose_solve_seeded(scratch, s0);
@@ -5253,23 +4163,12 @@ impl FtLu {
         self.btran_tail_cap(scratch, out, cap);
     }
 
-    /// Same as [`Self::solve_transpose_into`], but additionally captures
-    /// the post-`U^-T`, pre-`R`-reverse intermediate into `e_tilde_out`
-    /// (length `m`) — exactly the `e_tilde` value
-    /// [`Self::try_update_precomputed`] needs when `rhs` is the unit
-    /// vector at the leaving row (original indexing) being BTRAN'd this
-    /// same iteration for `rho_p`. See that method's own docs for why this
-    /// capture lets the caller skip `try_update`'s own redundant
-    /// re-derivation of the exact same value.
+    /// [`Self::solve_transpose_into`] と同じだが、`U^-T` 適用後・`R` 逆適用前の中間値を
+    /// `e_tilde_out` (長さ `m`) にも書き出す。`rhs` がこの反復の離脱行の単位ベクトル
+    /// なら、これがそのまま [`Self::try_update_precomputed`] に渡す `e_tilde` になる。
     ///
-    /// **No production call site left**: every `e_tilde`-capturing BTRAN in
-    /// this crate has a unit-vector right-hand side and goes through
-    /// [`Self::solve_transpose_unit_capture`] instead. Kept, rather than
-    /// deleted, because it is the general-`rhs` reference that
-    /// specialization is *checked against* — `solve_transpose_unit_is_bit_identical_to_the_dense_unit_rhs_path`
-    /// asserts the two agree entry for entry, and on the synthetic tick,
-    /// both on a fresh factorization and after Forrest-Tomlin updates have
-    /// reordered `u_seq`. Deleting it would delete the proof.
+    /// 本番の呼び出し箇所はもう無い (単位ベクトル版を使う) が、特殊化版と一致する
+    /// ことを確認するテストの参照実装として残している。
     #[allow(dead_code)]
     pub fn solve_transpose_into_capture(&self, rhs: &[f64], scratch: &mut [f64], out: &mut [f64], e_tilde_out: &mut [f64]) {
         self.permute_transpose_rhs(rhs, scratch);
@@ -5278,9 +4177,7 @@ impl FtLu {
         self.btran_tail(scratch, out);
     }
 
-    /// Allocating convenience wrapper around [`Self::solve_transpose_into`]
-    /// — kept for call sites (tests) that don't already have a reusable
-    /// buffer on hand.
+    /// [`Self::solve_transpose_into`] の確保付き簡易版 (テスト用)。
     #[cfg(test)]
     pub fn solve_transpose(&self, rhs: &[f64]) -> Vec<f64> {
         let m = self.base.m;
@@ -5290,170 +4187,60 @@ impl FtLu {
         out
     }
 
-    /// Sparse-seed BTRAN specialized for `rhs = e_i` (a single unit vector
-    /// at original row index `i`), built for [`super::DseState::from_basis`]'s
-    /// own `m` back-to-back unit-vector solves after every refactorization
-    /// — measured as 27% of `dfl001`'s total wall time before this method
-    /// existed (`dfl001-bottleneck-max-iters-cap` memory), because that
-    /// call site pays `solve_transpose_into`'s full `O(m)`-per-call cost
-    /// `m` times over, every refactorization.
+    /// `rhs = e_i` (元の行番号 `i` の単位ベクトル) 専用の BTRAN。
+    /// [`super::DseState::from_basis`] が再分解後に行う `m` 回の単位ベクトル求解用。
     ///
-    /// **Requires `self.update_count() == 0`** — checked by the caller
-    /// (`update_count()` is already the cheapest possible signal, so this
-    /// method itself only asserts it rather than re-deriving it). The
-    /// optimization below exploits a structural invariant of a *freshly
-    /// factorized* `u_seq` (`FtLu::new`'s own construction: `u_seq[slot]`'s
-    /// `off_diag` entries only ever reference `row_step < slot`, `U`'s own
-    /// upper-triangular structure — the same property [`Self::u_solve_into`]'s
-    /// own docs describe, mirrored for the transpose direction) that
-    /// `try_update` is free to break (its own Forrest-Tomlin bump-and-
-    /// replace algorithm reorders `u_seq` and can introduce entries
-    /// referencing a *later* row-step than before) — so this method is
-    /// only exact on a `u_seq` no `try_update` call has touched yet.
+    /// **`self.update_count() == 0` (FT 更新なしの分解直後) が必要** (呼び出し側が
+    /// 確認し、ここでは assert のみ)。分解直後の `u_seq` では位置 = スロットで、
+    /// 非対角要素は常により小さいステップを参照するため、`e_i` を置換したステップ
+    /// `s0` より前のスロットは掃引後も 0 のままと証明できる。そこで `s0` から掃引を
+    /// 始める ([`Self::u_transpose_solve_from`])。`L^{-T}` 段は通常どおり。
     ///
-    /// **The optimization**: permuting `e_i` (`col_perm_inv[i]`) yields a
-    /// single nonzero at step `s0`; [`Self::u_transpose_solve_into`]'s own
-    /// forward recurrence can only ever produce a nonzero at slot `p` if
-    /// some earlier slot `< p` it depends on is already nonzero — with
-    /// nothing nonzero below `s0`, every slot `< s0` is therefore provably
-    /// still `0` after the sweep, without computing a single one of their
-    /// dot products. Starting the sweep at `s0` ([`Self::u_transpose_solve_from`])
-    /// instead of `0` is exact, not approximate, and needs no DFS/epoch
-    /// bookkeeping the way a full Gilbert-Peierls reach-set restriction
-    /// would (see [`LuFactors::l_solve_sparse_into`]'s own docs for that
-    /// technique, and `[[dfl001-bottleneck-max-iters-cap]]`/this crate's
-    /// own history for why a *fuller* sparsification of the shared
-    /// `u_transpose_solve_into` — applied to every per-iteration `rho_p`
-    /// BTRAN, not just `from_basis`'s refactor-time calls — was tried and
-    /// reverted as a net aggregate regression across the full Netlib set):
-    /// that measurement's DFS/epoch overhead was paid on tens of thousands
-    /// of per-iteration calls across many small problems where the skip
-    /// bought little; this plain prefix skip carries no such per-call
-    /// bookkeeping cost, and `from_basis`'s own access pattern (`m` calls,
-    /// but only at refactor time) concentrates exactly on the large/
-    /// refactor-heavy instances (`dfl001`, `pilot87`) a fuller
-    /// sparsification would have helped too, without the small-problem
-    /// dilution that sank the earlier attempt.
-    ///
-    /// `L^{-T}` (this BTRAN's tail, applied after the skip above via the
-    /// unmodified [`LuFactors::l_transpose_solve_into`]) is left exactly
-    /// as dense as it always was — see that method's own docs for why a
-    /// *second* attempt to sparsify it specifically was never worth
-    /// trying (its own input is typically no longer sparse by that point,
-    /// fill having already spread across `[s0, m)` during the `U^{-T}`
-    /// sweep above).
-    ///
-    /// **Precondition/postcondition** (mirrors [`Self::solve_sparse_into`]'s
-    /// own convention): `scratch` must be all-zero on entry, and is
-    /// restored to all-zero before returning — `L^{-T}`'s own reverse
-    /// sweep can scatter fill back into positions below `s0`, so (unlike
-    /// [`LuFactors::l_solve_sparse_into`]'s own narrower reach-set
-    /// cleanup) nothing cheaper than a full `O(m)` reset is safe here.
+    /// **前提/事後条件**: `scratch` は入口で全 0、返却前に全 0 に戻す。
     pub fn solve_transpose_unit_into(&self, i: usize, scratch: &mut [f64], out: &mut [f64]) {
         debug_assert_eq!(self.r_etas.n_headers(), 0, "solve_transpose_unit_into requires a fresh (update-free) factorization");
         let s0 = self.base.col_perm_inv[i];
         scratch[s0] = 1.0;
-        // On a fresh factorization `u_seq` holds the non-singleton slots in
-        // ascending slot order, so the `[0, s0)` prefix is `u_seq`'s
-        // prefix of slots below `s0`; the singletons at or after `s0` get
-        // the same `(z - 0) / pivot` the unsplit sweep gave them, first.
+        // 分解直後の `u_seq` は非シングルトンのスロットを昇順に持つので、`[0, s0)` は
+        // `u_seq` の先頭部分に当たる。`s0` 以降のシングルトンは先に
+        // `(z - 0) / pivot` を適用する (分割前の掃引と同じ演算)。
         for eta in &self.singles {
             let p = eta.slot;
             if p >= s0 {
-                // A singleton's off-diagonal part is empty: the same empty
-                // `f64` sum the former `HybridVec::dot_dense` returned.
+                // シングルトンの非対角部は空: 以前と同じ空の `f64` 和 (= 0)。
                 let y: f64 = std::iter::empty::<f64>().sum();
                 scratch[p] = (scratch[p] - y) / eta.pivot;
             }
         }
+        // `u_seq` 内で最初にスロット `>= s0` となる位置
         let start = self.u_seq.key.partition_point(|&k| (k as usize) < s0);
         self.u_transpose_solve_from(scratch, start);
         self.l_transpose_solve_into(scratch, out);
         scratch.fill(0.0);
     }
 
-    /// Records a Forrest-Tomlin update replacing the column at basis slot
-    /// `basis_slot` (an index into the simplex basis array, i.e. a
-    /// *column* index of `B`) with `a_q_original` (the entering column,
-    /// dense, length `m`, in original row indexing — this is `a_q` from
-    /// eq. 1, *not* `alpha = B^{-1}a_q`: unlike a product-form update,
-    /// FT needs only the partial FTRAN result `L^{-1}a_q`, not the full
-    /// solve). Returns `false` (recording nothing) if the resulting pivot
-    /// is too small — refactorization trigger (2): the caller must
-    /// refactorize the new basis from scratch instead.
-    ///
-    /// **Schork & Gondzio (2017), "Permuting Spiked Matrices to Triangular
-    /// Form and its Application to the Forrest-Tomlin Update"**: tried and
-    /// reverted this session. The idea: when the spike's own diagonal
-    /// `a_tilde[p]` is nonzero and its off-diagonal support is disjoint
-    /// from the structural `Reach(p)` (every slot whose value transitively
-    /// depends on `p` — a single forward walk over `u_seq`, mirroring
-    /// `u_transpose_solve_into`'s own traversal but following every
-    /// *stored* `off_diag` edge unconditionally rather than only the ones
-    /// whose *propagated* value under one unit-impulse seed happens to
-    /// still be nonzero — the two differ on real, coefficient-heavy LP
-    /// data via exact numerical cancellation, confirmed against real
-    /// Netlib instances via a dedicated invariant cross-check during
-    /// development), the spiked matrix is *already* permutable to
-    /// triangular form with no elimination and no [`REta`] at all (their
-    /// Theorem 3.1 / Lemma 3.2) — repositioning `p` and every member of
-    /// `Reach(p)` to the end of `u_seq`, preserving their relative order,
-    /// instead.
-    ///
-    /// Implemented fully correctly (including the structural-vs-numerical
-    /// reach distinction above, found and fixed via a randomized stress
-    /// test plus real-Netlib debug cross-checks) and, separately, a real
-    /// unrelated bug it exposed (`simplex.rs`'s `FT_MAX_UPDATES` hard
-    /// refactorization cap read `update_count()`, i.e. `r_etas.len()` —
-    /// which a permutation-only update never grows, so on instances where
-    /// many updates resolve that way the cap could go uncrossed far longer
-    /// than intended, letting numerical drift compound until a later
-    /// refactorization hit a matrix too corrupted to factor; fixed by
-    /// counting *every* successful update, not just row-eta ones, for that
-    /// specific trigger). Even after replacing an initial `HashSet`-based
-    /// reach implementation with an epoch-stamped array (the same
-    /// bump-instead-of-clear trick `sparse_lu::GpScratch` already uses),
-    /// full-Netlib measurement still showed a net regression — not from
-    /// this function's own added cost (which the epoch-array version
-    /// brought back down close to baseline), but because the permutation
-    /// path's slightly different rounding characteristics than the
-    /// standard row-eta path perturbed dual-simplex tie-breaks on
-    /// degeneracy-heavy instances (`pilotnov` needed 3218 iterations
-    /// instead of 1286 for the *same* correct answer) — a downstream
-    /// effect no amount of tuning this function itself can address. See
-    /// the project history around this doc comment's own commit for the
-    /// full numbers if revisiting.
+    /// 基底スロット `basis_slot` (基底配列の添字 = `B` の *列* 番号) の列を
+    /// `a_q_original` (入る列。密、長さ `m`、元の行番号。`alpha = B^{-1}a_q` では
+    /// なく `a_q` そのもの) で置き換える Forrest-Tomlin 更新を記録する。
+    /// 新しいピボットの絶対値が `min_pivot` 未満なら何も記録せず `false` を返す
+    /// (再分解トリガ (2): 呼び出し側は新しい基底を最初から分解すること)。
     pub fn try_update(&mut self, basis_slot: usize, a_q_original: &[f64], min_pivot: f64) -> bool {
         let m = self.base.m;
+        // 置換される列のステップ
         let p = self.base.col_perm_inv[basis_slot];
 
-        // `scratch_a_tilde`/`scratch_e_tilde` (see their own docs): taken out
-        // of `self` (rather than borrowed) so the `&self` FTRAN/BTRAN calls
-        // just below don't conflict with holding a `&mut` into one of
-        // `self`'s own fields at the same time — restored to `self` right
-        // after `commit_update` (which needs `&mut self`) is done reading
-        // them. A length mismatch (only possible if a *previous* call
-        // somehow left it empty, which no current code path does) falls
-        // back to a fresh allocation rather than indexing out of bounds.
+        // スクラッチを `self` から取り出す (下の `&self` の FTRAN/BTRAN と借用が
+        // 衝突しないように)。`commit_update` の後で `self` に戻す。長さが合わなければ
+        // (現状の経路では起きない) 新たに確保する。
         let mut a_tilde = std::mem::take(&mut self.scratch_a_tilde);
         if a_tilde.len() != m {
             a_tilde = vec![0.0; m];
         }
-        // `l_solve_into` (this function's own first step) fully overwrites
-        // every entry of `a_tilde` before ever reading one back, so no
-        // explicit zeroing is needed here regardless of what this buffer
-        // held from its previous use.
+        // `l_solve_into` が最初に全要素を上書きするので事前のゼロ化は不要。
         self.ftran_through_l_and_r_into(a_q_original, &mut a_tilde);
 
-        // Unlike `a_tilde` above, `u_transpose_solve_into` mutates `z` as
-        // *both* the input right-hand side and the evolving solution in
-        // place (eq. 8's forward substitution) — reusing this buffer
-        // without resetting every entry to the true input (`e_p`) first
-        // would solve against whatever stale values its previous use left
-        // behind instead. Zeroing it here is still one `O(m)` pass, exactly
-        // as `vec![0.0; m]` used to pay for its own zero-initialization —
-        // what this reuse actually saves is the allocator round-trip
-        // itself, not this fill.
+        // `u_transpose_solve_into` は `z` を入力兼出力として使うので、入力 `e_p` に
+        // するため全要素を 0 に戻す必要がある。
         let mut e_tilde = std::mem::take(&mut self.scratch_e_tilde);
         if e_tilde.len() != m {
             e_tilde = vec![0.0; m];
@@ -5469,89 +4256,51 @@ impl FtLu {
         result
     }
 
-    /// Same update as [`Self::try_update`], but for a caller that has
-    /// *already computed* `a_tilde`/`e_tilde` this same iteration as an
-    /// intermediate of its own FTRAN/BTRAN calls, and can hand them over
-    /// directly instead of paying for [`Self::try_update`]'s own redundant
-    /// re-derivation of both.
+    /// [`Self::try_update`] と同じ更新を、同じ反復の FTRAN/BTRAN の途中で記録済みの
+    /// `a_tilde`/`e_tilde` を受け取って行う (再計算を省く)。
     ///
-    /// **Why this exists**: a typical dual-simplex iteration already runs
-    /// exactly the two solves `try_update` used to redo from scratch, for
-    /// its own unrelated purposes — `rho_p = B^-T e_p` (`solve_transpose_into`,
-    /// needed for PRICE) computes `U^-T e_p` as an internal step before
-    /// applying the `R`-etas and `L^-T`, and the entering column's own FTRAN
-    /// (`solve_into`/`solve_sparse_into`, needed for the primal update and
-    /// DSE) computes `(L R_1...R_{k-1})^-1 a_q` as an internal step before
-    /// applying `U^-1` — both are simply overwritten in place by the next
-    /// stage rather than kept. Since `p`/`a_q_original` are identical
-    /// between that earlier call and this update (same leaving row, same
-    /// entering column, same iteration, `self` unchanged in between), the
-    /// values are not merely *equivalent* to what `try_update` would
-    /// recompute — they are bit-for-bit identical, `ftran_through_l_and_r_into`/
-    /// `u_transpose_solve_into` being pure functions of `(self, input)` and
-    /// neither `self` nor the input changing between the two computations.
-    /// Capturing them (a plain `copy_from_slice`, via
-    /// [`Self::solve_into_capture`]/[`Self::solve_sparse_into_capture`]/
-    /// [`Self::solve_transpose_into_capture`]) is far cheaper than either of
-    /// the two full solves this replaces — a dense `O(m)` pass through `L`
-    /// plus every accumulated `R`-eta for `a_tilde`, and an `O(nnz(U))` scan
-    /// of the whole eta chain for `e_tilde`, both of which grow as updates
-    /// accumulate since the last refactorization.
+    /// - `a_tilde`: 入る列の FTRAN の `L`/`R` 適用後の中間値
+    ///   ([`Self::solve_into_capture`] / [`Self::solve_sparse_into_capture`] 等で記録)。
+    /// - `e_tilde`: 離脱行の単位ベクトル BTRAN の `U^-T` 適用後の中間値
+    ///   ([`Self::solve_transpose_unit_capture`] 等で記録)。
     ///
-    /// **Caller's responsibility**: `a_tilde`/`e_tilde` must come from a
-    /// capture made *this same iteration*, for this exact `basis_slot` and
-    /// the same `a_q_original` that is about to become basic — anything
-    /// else (a stale capture from a discarded/refactorized iteration, or a
-    /// mismatched `basis_slot`) silently corrupts the update with no way
-    /// for this function to detect it, since it has no independent way to
-    /// check what produced the slices it's handed.
+    /// **呼び出し側の責任**: 両者は *この同じ反復* に、この `basis_slot` と入る列に
+    /// ついて記録したものであること (古い記録や別スロットのものを渡すと、検出
+    /// できないまま更新が壊れる)。
     pub fn try_update_precomputed(&mut self, basis_slot: usize, a_tilde: &[f64], e_tilde: &[f64], min_pivot: f64) -> bool {
         self.commit_update(basis_slot, a_tilde, e_tilde, min_pivot)
     }
 
-    /// Shared success/failure logic between [`Self::try_update`] (which
-    /// computes `a_tilde`/`e_tilde` itself) and [`Self::try_update_precomputed`]
-    /// (which takes them from the caller) — see the latter's own docs for
-    /// why both end up needing exactly this same tail. Pulled out into its
-    /// own `&mut self` method (rather than duplicated in both callers)
-    /// specifically so the intricate `row_owners`/`slot_pos`/`u_seq`
-    /// bookkeeping below — the part a copy-paste split would risk drifting
-    /// out of sync between two copies — exists in exactly one place.
+    /// [`Self::try_update`] と [`Self::try_update_precomputed`] 共通の本体:
+    /// `R` eta を作ってピボットを判定し、合格なら `U` のスロット `p` の eta を
+    /// 除いて (行 `p` を他の eta からも消し) 新しい列 eta を末尾に追加する。
+    /// `row_owners`/`slot_pos`/`u_seq`/`fill` の整合を 1 か所で保つ。
     fn commit_update(&mut self, basis_slot: usize, a_tilde: &[f64], e_tilde: &[f64], min_pivot: f64) -> bool {
         let m = self.base.m;
         debug_assert_eq!(a_tilde.len(), m, "a_tilde must be the full dense column");
         debug_assert_eq!(e_tilde.len(), m, "e_tilde must be the full dense row");
         let p = self.base.col_perm_inv[basis_slot];
 
+        // スロット `p` の eta が `singles` にあればその位置 (無ければ `usize::MAX`)
         let single_idx = self.singles_pos[p];
+        // 置換前の対角ピボット `u_pp`
         let old_pivot = if single_idx != usize::MAX { self.singles[single_idx].pivot } else { self.u_seq.pivot[self.slot_pos[p]] };
 
-        // The `R` eta is built straight out of `e_tilde` — same entries,
-        // same order, same sparse/dense choice as the `collect()`-then-
-        // `HybridVec::pack` this replaces, minus that intermediate `Vec`
-        // (see [`HybridVec::pack_scaled_dense`]'s own docs). It is built
-        // *before* the pivot test because `dot` is exactly this eta
-        // against `a_tilde`, so the test can read it off the eta rather
-        // than needing a separate pass of its own; the previous code
-        // likewise materialized the whole thing before testing, so a
-        // rejected update is no more expensive than it already was.
-        // Appended to `r_etas` right away (compacted straight into its
-        // pool) and popped again if the update is rejected below.
+        // `R` eta (`r = -u_pp · ẽ_p`、第 `p` 成分除く) を `e_tilde` から直接作って
+        // `r_etas` に追加する。ピボット判定に要る `dot` はこの eta と `a_tilde` の
+        // 内積なので判定より先に作り、棄却なら pop する。
         let rk = self.r_etas.push_scaled_dense(p, 0.0, e_tilde, p, -old_pivot, tunable!("ENOMOTO_T_DENSE_ETA_FRACTION", DENSE_ETA_FRACTION, f64));
         let dot = self.r_etas.dot(rk, a_tilde);
+        // 更新後の対角ピボット `ã_pq - r·ã_q`
         let new_pivot = a_tilde[p] - dot;
         if new_pivot.abs() < min_pivot {
             self.r_etas.pop();
             return false;
         }
 
-        // `Vec::remove` shifts every later element down by one position —
-        // update `slot_pos` for exactly that range (elements the memmove
-        // itself already touches, so this is no extra asymptotic cost)
-        // rather than the old `find_seq_pos`'s full O(m) re-scan.
+        // 旧 eta を除く。`u_seq` 側では削除で後ろがずれる範囲だけ `slot_pos` を直す。
         if single_idx != usize::MAX {
-            // A singleton leaves `singles` instead (order there is free);
-            // `u_seq` is untouched until the push below. No entries.
+            // シングルトンは `singles` から除く (順序は自由、要素なし)。
             self.singles.swap_remove(single_idx);
             if let Some(moved) = self.singles.get(single_idx) {
                 self.singles_pos[moved.slot] = single_idx;
@@ -5561,10 +4310,8 @@ impl FtLu {
         } else {
             let k = self.slot_pos[p];
             self.fill -= self.u_seq.nnz(k);
-            // Unregister slot `p`'s *old* off-diagonal entries from
-            // `row_owners` before overwriting them below — otherwise a stale
-            // `p` would linger in some other row's owner list, pointing at
-            // content that no longer exists there.
+            // 上書き前に、スロット `p` の旧非対角要素を `row_owners` から登録解除する
+            // (残すと他の行の所有者リストに無効な `p` が残る)。
             let row_owners = &mut self.row_owners;
             self.u_seq.for_each_entry(k, |row_step, _| {
                 if let Some(idx) = row_owners[row_step].iter().position(|&(s, _)| s == p) {
@@ -5577,10 +4324,8 @@ impl FtLu {
             }
         }
 
-        // Zero row `p` out of every eta that still references it (Tomlin
-        // 1974, eq. 12) — only the etas `row_owners[p]` actually lists,
-        // not every eta in `U` (see `row_owners`'s own docs), each found
-        // in O(1) via `slot_pos`.
+        // 行 `p` をまだ参照している eta からそれを消す (Tomlin 1974, eq. 12)。
+        // 対象は `row_owners[p]` に載っている eta だけで、`slot_pos` で O(1) に引く。
         for (slot, _) in std::mem::take(&mut self.row_owners[p]) {
             let pos = self.slot_pos[slot];
             if self.u_seq.remove_index(pos, p) {
@@ -5588,9 +4333,7 @@ impl FtLu {
             }
         }
 
-        // Same replacement column as before, built directly from
-        // `a_tilde` (scale `1.0`, so the dense arm is a plain copy) rather
-        // than through a throwaway pair list.
+        // 置換後の列 eta を `a_tilde` から直接作って末尾に追加する (scale `1.0`)。
         let k = self.u_seq.push_scaled_dense(p, new_pivot, a_tilde, p, 1.0, tunable!("ENOMOTO_T_DENSE_ETA_FRACTION", DENSE_ETA_FRACTION, f64));
         let row_owners = &mut self.row_owners;
         self.u_seq.for_each_entry(k, |row_step, v| row_owners[row_step].push((p, v)));
@@ -5602,21 +4345,14 @@ impl FtLu {
         true
     }
 
+    /// 最後の分解以降に成功した FT 更新の数 (= `R` eta の数)。
     pub fn update_count(&self) -> usize {
         self.r_etas.n_headers()
     }
 
-    /// Total off-diagonal fill currently held across `U`'s eta sequence
-    /// and the `R` etas — used as the "bump size" measure for
-    /// refactorization trigger (3): as updates accumulate, the eta file
-    /// grows (each `R` and each replaced `U` slot can carry up to `m-1`
-    /// entries), which is exactly the cost this trigger exists to bound.
-    /// Counts true nonzeros via [`HybridVec::nnz`], not storage length, so
-    /// switching an eta to the dense representation doesn't spuriously
-    /// inflate this and trip the trigger early.
-    ///
-    /// `O(1)`: maintained by [`Self::commit_update`] as it goes — see
-    /// [`Self::fill`]'s own docs for why re-summing was worth removing.
+    /// `U` の eta 列と `R` eta が保持する非対角 fill の合計 (真の非ゼロ数。密形式でも
+    /// 格納長ではなく非ゼロ数)。再分解トリガ (3) の「バンプサイズ」指標。
+    /// [`Self::commit_update`] が差分更新するので `O(1)`。
     pub fn fill_count(&self) -> usize {
         debug_assert_eq!(
             self.fill,
@@ -5631,14 +4367,11 @@ impl FtLu {
 #[cfg(test)]
 mod tests {
 
-    /// Analysis-only replay benchmark: `ENOMOTO_LU_BENCH_FILE=<lu_dump.bin>
-    /// cargo test --release lu_kernel_bench -- --ignored --nocapture`.
-    /// Factorizes every dumped kernel input under each toggle setting
-    /// listed in `ENOMOTO_LU_BENCH_CONFIGS` (`;`-separated, each a
-    /// `,`-separated list of `KEY=VAL`), alternating configurations for
-    /// `ENOMOTO_LU_BENCH_REPS` rounds, reports the minimum total per
-    /// configuration, and asserts the factors are bit-identical to the
-    /// first configuration's.
+    /// 解析専用の再生ベンチマーク (`#[ignore]`):
+    /// `ENOMOTO_LU_BENCH_FILE=<lu_dump.bin> cargo test --release lu_kernel_bench -- --ignored --nocapture`。
+    /// ダンプされた全入力を `ENOMOTO_LU_BENCH_CONFIGS` (`;` 区切り、各々 `,` 区切りの
+    /// `KEY=VAL`) の各設定で分解し、`ENOMOTO_LU_BENCH_REPS` 回交互に回して設定ごとの
+    /// 最小合計時間を出し、因子が最初の設定とビット一致することを確認する。
     #[test]
     #[ignore]
     fn lu_kernel_bench() {
@@ -5683,6 +4416,7 @@ mod tests {
                 }
             }
         };
+        // 因子 (置換・`U`・求解結果) の FNV-1a 風ハッシュ
         let fingerprint = |lu: &LuFactors| -> u64 {
             let mut h: u64 = 1469598103934665603;
             let mut mix = |x: u64| {
@@ -5737,13 +4471,15 @@ mod tests {
     }
     use super::*;
 
+    /// 2 つのベクトルが要素ごとに `1e-8` 以内で一致するか。
     fn approx_vec(a: &[f64], b: &[f64]) -> bool {
         a.len() == b.len() && a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-8)
     }
 
+    /// 3x3 三重対角行列で `factorize` + `solve` / `solve_transpose` が既知解を再現する。
     #[test]
     fn factorize_and_solve_matches_expected() {
-        // B = [[2,1,0],[1,3,1],[0,1,4]] (tridiagonal, sparse).
+        // B = [[2,1,0],[1,3,1],[0,1,4]] (三重対角、疎)。
         let rows = vec![vec![(0, 2.0), (1, 1.0)], vec![(0, 1.0), (1, 3.0), (2, 1.0)], vec![(1, 1.0), (2, 4.0)]];
         let lu = factorize(3, &rows).expect("nonsingular");
         let x_true = [1.0, 2.0, 3.0];
@@ -5763,12 +4499,8 @@ mod tests {
         assert!(approx_vec(&y, &y_true), "y={y:?}");
     }
 
-    /// Times `factorize_diagonal` against the general `factorize` on the
-    /// exact shape `factorize_diagonal` exists for (a signed-identity
-    /// initial basis), across the `m` range this crate's Netlib benchmark
-    /// actually exercises. `#[ignore]`d for the same reason as
-    /// `border_crossover_sweep` above: a live diagnostic, not a
-    /// pass/fail correctness check.
+    /// 診断用 (`#[ignore]`): 符号付き単位行列で `factorize_diagonal` と
+    /// 一般の `factorize` の時間を比べる。
     #[test]
     #[ignore]
     fn factorize_diagonal_vs_markowitz_sweep() {
@@ -5796,6 +4528,7 @@ mod tests {
         }
     }
 
+    /// `factorize_diagonal` が `L = I`・恒等置換を作り、既知解を再現する。
     #[test]
     fn factorize_diagonal_matches_expected_solve() {
         let rows = vec![vec![(0, 1.0)], vec![(1, -1.0)], vec![(2, 1.0)]];
@@ -5810,6 +4543,7 @@ mod tests {
         assert!(approx_vec(&x, &x_true), "x={x:?}");
     }
 
+    /// 非対角要素・列ずれ・0 対角のいずれでも `factorize_diagonal` が `None` を返す。
     #[test]
     fn factorize_diagonal_rejects_off_diagonal_entries() {
         let rows = vec![vec![(0, 1.0), (1, 2.0)], vec![(1, 1.0)]];
@@ -5822,22 +4556,16 @@ mod tests {
         assert!(factorize_diagonal(2, &rows_zero).is_none());
     }
 
+    /// 特異行列で `factorize` が `None` を返す。
     #[test]
     fn factorize_detects_singular() {
-        // Row 2 = 2 * row 0 in a 3x3 with cols {0,1} only used -> column 2 empty -> singular.
+        // 3x3 で列 {0,1} しか使わず行 2 = 2 * 行 0 -> 列 2 が空 -> 特異。
         let rows = vec![vec![(0, 1.0), (1, 2.0)], vec![(0, 3.0), (1, 1.0)], vec![(0, 2.0), (1, 4.0)]];
         assert!(factorize(3, &rows).is_none());
     }
 
-    /// A dense diagonally-dominant matrix well past `DENSE_INPUT_FRACTION`
-    /// (100% fill), fed straight to `factorize_dense_faer` (not through
-    /// `factorize`'s dispatch, to test this path in isolation regardless
-    /// of where the threshold currently sits) and checked against a
-    /// hand-verified solve, the same style `factorize_and_solve_matches_expected`
-    /// uses for the Markowitz path — this is the ground truth that
-    /// actually matters (not "does it match Markowitz's own answer",
-    /// which would only prove the two agree with *each other*, not with
-    /// reality).
+    /// 稠密な対角優位行列を `factorize_dense_faer` に直接渡し、既知解
+    /// (`solve` と `solve_transpose` の両方) を再現することを確認する。
     #[test]
     fn factorize_dense_faer_matches_hand_verified_solve() {
         let m = 8;
@@ -5850,18 +4578,15 @@ mod tests {
         let x = lu.solve(&rhs);
         assert!(approx_vec(&x, &x_true), "x={x:?} x_true={x_true:?}");
 
-        // B^T y = rhs2, same cross-check for the transpose solve path.
+        // B^T y = rhs2 (転置求解も同様に確認)。
         let y_true: Vec<f64> = (0..m).map(|i| 0.3 - i as f64 * 0.2).collect();
         let rhs2: Vec<f64> = (0..m).map(|j| (0..m).map(|i| entry(i, j) * y_true[i]).sum()).collect();
         let y = lu.solve_transpose(&rhs2);
         assert!(approx_vec(&y, &y_true), "y={y:?} y_true={y_true:?}");
     }
 
-    /// `factorize` itself (the public dispatcher) must route this input to
-    /// `factorize_dense_faer` — confirms `is_dense_input` actually fires
-    /// for a fully dense matrix at a size realistic for this crate's
-    /// target problems, not just in the tiny fixtures the Markowitz-path
-    /// tests use (which could accidentally clear a generous threshold too).
+    /// 完全に稠密な 20x20 入力で `is_dense_input` が発火し、`factorize` が
+    /// 稠密経路で正しく解けることを確認する。
     #[test]
     fn factorize_dispatches_dense_input_to_faer() {
         let m = 20;
@@ -5875,26 +4600,18 @@ mod tests {
         assert!(approx_vec(&x, &x_true), "x={x:?}");
     }
 
-    /// A dense but rank-deficient matrix (two identical rows) must still
-    /// be reported as singular through the `faer` path, exactly as the
-    /// Markowitz path already does for its own sparse singular fixture
-    /// (`factorize_detects_singular`, above).
+    /// 稠密だが階数落ち (同一行 2 本) の行列で `factorize_dense_faer` が `None` を返す。
     #[test]
     fn factorize_dense_faer_detects_singular() {
         let m = 6;
         let mut rows: Vec<Vec<(usize, f64)>> =
             (0..m).map(|i| (0..m).map(|j| (j, 1.0 + ((i + j) % 4) as f64)).collect()).collect();
-        rows[3] = rows[1].clone(); // row 3 duplicates row 1 -> rank-deficient
+        rows[3] = rows[1].clone(); // 行 3 が行 1 と同一 -> 階数落ち
         assert!(factorize_dense_faer(m, &rows).is_none());
     }
 
-    /// `fit1p`-shaped fixture for [`factorize_bordered`]: `m - k` "local"
-    /// rows each with one sparse entry of their own plus every border
-    /// column, and `k` purely-border rows forming an invertible `k x k`
-    /// core — checked against `factorize_flat_markowitz`'s own answer for
-    /// the same matrix (both must solve `Bx = rhs` correctly, not just
-    /// agree with each other, so `rhs` is built from a known `x_true`
-    /// exactly as `factorize_and_solve_matches_expected` does).
+    /// `fit1p` 型 (局所行 + 全境界列、境界行が可逆な `k x k` コア) の 10x10 行列で、
+    /// [`factorize_bordered`] と `factorize_flat_markowitz` の両方が既知解を再現する。
     #[test]
     fn factorize_bordered_matches_flat_markowitz() {
         let m = 10;
@@ -5921,9 +4638,8 @@ mod tests {
         assert!(approx_vec(&x_flat, &x_true), "flat x={x_flat:?}");
     }
 
-    /// Larger version of the same fixture (30 rows, 6 border columns) to
-    /// catch indexing bugs a tiny fixture could miss (e.g. an off-by-one
-    /// in the `n_sparse`/border step-offset arithmetic).
+    /// 同じ形の大きめの版 (30 行、境界列 6 本)。`n_sparse`/境界ステップの
+    /// オフセット計算の off-by-one などを検出する。
     #[test]
     fn factorize_bordered_matches_flat_markowitz_larger() {
         let m = 30;
@@ -5937,7 +4653,7 @@ mod tests {
             }
             rows.push(row);
         }
-        // Diagonally dominant k x k border core -> nonsingular.
+        // 対角優位な k x k 境界コア -> 正則。
         for bi in 0..k {
             let mut row = Vec::new();
             for (bj, &b2) in border.iter().enumerate() {
@@ -5961,22 +4677,16 @@ mod tests {
         assert!(approx_vec(&x_flat, &x_true), "flat x={x_flat:?}");
     }
 
-    /// A border column that is genuinely required as a pivot before the
-    /// sparse phase can finish (the two sparse columns share a
-    /// proportional pattern in the only rows that touch them at all) must
-    /// make `factorize_bordered` bail out with `None` rather than produce
-    /// wrong factors — and per the rank argument in this file's own docs
-    /// (`rank(A) <= rank(A_sparse) + k`), a sparse phase that cannot find
-    /// `m - k` independent pivots means the *full* matrix is genuinely
-    /// singular too, which `factorize`'s own dispatch (falling back to
-    /// `factorize_flat_markowitz`) must also report as such.
+    /// 疎フェーズが終わる前に境界列がピボットとして必要になる (疎部分が比例する)
+    /// 場合、`factorize_bordered` は `None` を返し、行列全体も特異として報告される
+    /// (`rank(A) <= rank(A_sparse) + k`)。
     #[test]
     fn factorize_bordered_falls_back_to_none_on_stuck_sparse_phase() {
         let m = 3;
         let border = [2usize];
         let rows = vec![
             vec![(0, 1.0), (1, 2.0)],
-            vec![(0, 2.0), (1, 4.0), (2, 1.0)], // sparse part proportional to row 0
+            vec![(0, 2.0), (1, 4.0), (2, 1.0)], // 疎部分が行 0 に比例
             vec![(2, 5.0)],
         ];
         assert!(factorize_bordered(m, &rows, &border).is_none());
@@ -5984,13 +4694,8 @@ mod tests {
         assert!(factorize(m, &rows).is_none());
     }
 
-    /// Builds an `fit1p`-shaped arrowhead matrix at a chosen `m` and
-    /// border fraction `k/m`: `m - k` "local" rows each with one local
-    /// sparse entry (own diagonal-ish column) plus every border column,
-    /// and `k` purely-border rows forming a diagonally dominant (hence
-    /// nonsingular) `k x k` core — the same shape
-    /// `factorize_bordered_matches_flat_markowitz_larger` uses, just
-    /// parameterized for the crossover sweep below.
+    /// 次数 `m`・境界列 `k` 本の `fit1p` 型矢じり行列 (境界列は全行で非ゼロ、
+    /// 境界コアは対角優位) と境界列一覧を作る (クロスオーバー掃引用)。
     fn arrowhead(m: usize, k: usize) -> (Vec<Vec<(usize, f64)>>, Vec<usize>) {
         let border: Vec<usize> = (m - k..m).collect();
         let mut rows: Vec<Vec<(usize, f64)>> = Vec::with_capacity(m);
@@ -6012,17 +4717,9 @@ mod tests {
         (rows, border)
     }
 
-    /// **Diagnostic, not a correctness test** (`#[ignore]`d — run
-    /// explicitly via `cargo test --release -- --ignored --nocapture
-    /// border_crossover`): sweeps the border fraction `k/m` at a fixed
-    /// `m` on the synthetic `arrowhead` shape above and times
-    /// `factorize_bordered` against `factorize_flat_markowitz`, to find
-    /// where [`BORDER_MAX_FRACTION`]'s `0.3` cap should actually sit —
-    /// that constant's own docs candidly note it was never tuned against
-    /// real data (Netlib's own `fit1p`/`fit2p` family only ever exercises
-    /// `k/m` in the few-percent range). Kept as a live diagnostic (like
-    /// `debug_print_block_sizes`) rather than deleted, since a future
-    /// problem shape or a revisit of the threshold can just rerun it.
+    /// **診断用** (`#[ignore]`、`cargo test --release -- --ignored --nocapture border_crossover`):
+    /// `m = 800` で境界率 `k/m` を掃引し、`factorize_bordered` と
+    /// `factorize_flat_markowitz` の時間を比較する ([`BORDER_MAX_FRACTION`] の調整用)。
     #[test]
     #[ignore]
     fn border_crossover_sweep() {
@@ -6057,24 +4754,13 @@ mod tests {
         }
     }
 
-    /// Second half of the sweep: the arrowhead shape above makes border
-    /// columns *fully* dense (every local row touches every border
-    /// column), which means `nnz` grows with `k` fast enough to trip
-    /// [`is_dense_input`]'s own 25%-of-`m^2` gate on its own once `k/m`
-    /// crosses roughly that same 25% (a border column population of `k`
-    /// fully-dense columns alone already contributes `k/m` density) — so
-    /// the sweep above never actually exercises `factorize_bordered`
-    /// against a *genuinely sparse-overall* `flat_markowitz` at large
-    /// `k/m`; `factorize`'s own `is_dense_input` check would already have
-    /// routed those cases to `factorize_dense_faer` before `k/m` ever
-    /// became this function's own problem. This variant holds overall
-    /// density far below that gate by making border columns only
-    /// partially populated (`border_density`), to see whether `k/m` still
-    /// has a *genuine* independent crossover once that confound is
-    /// removed.
+    /// 境界列を部分的にだけ埋めた (`border_density`) 矢じり行列を作る。全体密度を
+    /// `is_dense_input` のゲートよりずっと低く保ち、`k/m` 自体のクロスオーバーを
+    /// 密度の影響と切り離して測るため。
     fn arrowhead_partial(m: usize, k: usize, border_density: f64) -> (Vec<Vec<(usize, f64)>>, Vec<usize>) {
         let border: Vec<usize> = (m - k..m).collect();
         let mut rows: Vec<Vec<(usize, f64)>> = Vec::with_capacity(m);
+        // 境界列を何行に 1 回埋めるか
         let step = (1.0 / border_density).round().max(1.0) as usize;
         for i in 0..(m - k) {
             let mut row = vec![(i, 5.0 + i as f64)];
@@ -6096,11 +4782,9 @@ mod tests {
         (rows, border)
     }
 
-    /// Runs one `(m, k/m)` point of the partial-density sweep and prints
-    /// bordered-vs-`factorize_flat_markowitz` timing (the latter dispatches
-    /// to `factorize_dense_faer` itself once `is_dense_input` fires, so
-    /// this is really "bordered vs whatever `factorize` would otherwise
-    /// pick" once density crosses that gate).
+    /// 部分密度掃引の 1 点 `(m, k/m)` を `n_runs` 回ずつ計測し、境界付きと
+    /// `factorize_flat_markowitz` (密度が閾値を超えれば稠密 LU に振り分けられる) の
+    /// 時間を出力する。
     fn run_border_crossover_point(m: usize, frac: f64, n_runs: usize) {
         let k = ((m as f64) * frac).round() as usize;
         if k == 0 || k >= m {
@@ -6129,6 +4813,7 @@ mod tests {
         );
     }
 
+    /// 診断用 (`#[ignore]`): `m = 800` の部分密度掃引。
     #[test]
     #[ignore]
     fn border_crossover_sweep_partial_density() {
@@ -6137,9 +4822,7 @@ mod tests {
         }
     }
 
-    /// Fine-grained pass around the `m=800` crossover found above
-    /// (bordered wins at `k/m=0.50`, loses at `0.60`) to pin it down more
-    /// precisely.
+    /// 診断用 (`#[ignore]`): `m = 800` のクロスオーバー付近 (`k/m` 0.50-0.60) の細かい掃引。
     #[test]
     #[ignore]
     fn border_crossover_sweep_fine() {
@@ -6148,13 +4831,8 @@ mod tests {
         }
     }
 
-    /// Same `k/m` points at a different `m` (`2000` instead of `800`), to
-    /// tell whether the crossover found above is a genuine *fraction*
-    /// (`k/m`) effect — in which case this should land at roughly the same
-    /// `k/m` — or actually an *absolute-`k`* effect (the `k x k` Schur
-    /// complement's own `O(k^3)` dense factorization cost), in which case
-    /// a larger `m` should cross over at a *smaller* `k/m` (same absolute
-    /// `k`).
+    /// 診断用 (`#[ignore]`): `m = 2000` で同じ `k/m` を測り、クロスオーバーが
+    /// 割合 (`k/m`) の効果か絶対数 `k` の効果かを見分ける。
     #[test]
     #[ignore]
     fn border_crossover_sweep_scaling() {
@@ -6163,19 +4841,19 @@ mod tests {
         }
     }
 
+    /// 3x3 単位行列の列 1 を置換する FT 更新 1 回が、新しい基底の完全再分解と
+    /// FTRAN/BTRAN で一致する。
     #[test]
     fn ft_update_matches_full_refactor() {
-        // B0 = I (3x3). Replace column 1 with [1,5,2] (basis_slot=1).
+        // B0 = I (3x3)。列 1 を [1,5,2] で置換する (basis_slot=1)。
         let rows0: Vec<Vec<(usize, f64)>> = (0..3).map(|i| vec![(i, 1.0)]).collect();
         let base = factorize(3, &rows0).unwrap();
         let mut state = FtLu::new(base);
         let a_q = [1.0, 5.0, 2.0];
         assert!(state.try_update(1, &a_q, 1e-9));
 
-        // Full refactor of the new basis for comparison: column 1 of I
-        // replaced by [1,5,2] (row-sparse, so the new column shows up as
-        // one entry per row: (col1,1.0) in row0, (col1,5.0) in row1,
-        // (col1,2.0) plus the untouched (col2,1.0) in row2).
+        // 比較用の新基底の完全再分解 (I の列 1 を [1,5,2] に置換。行疎なので
+        // 行 0 に (列1,1.0)、行 1 に (列1,5.0)、行 2 に (列1,2.0) と元の (列2,1.0))。
         let rows1 = vec![vec![(0, 1.0), (1, 1.0)], vec![(1, 5.0)], vec![(1, 2.0), (2, 1.0)]];
         let full = factorize(3, &rows1).unwrap();
 
@@ -6189,10 +4867,10 @@ mod tests {
         assert!(approx_vec(&y_ft, &y_full), "ft={y_ft:?} full={y_full:?}");
     }
 
+    /// 非自明な基底に 2 回連続で FT 更新した結果が完全再分解と一致する。
     #[test]
     fn ft_update_chain_of_two_matches_full_refactor() {
-        // B0 nontrivial (not identity) so the second update's partial
-        // BTRAN must go through an already-updated U, not the base case.
+        // B0 を単位行列でなくし、2 回目の更新の部分 BTRAN が更新済みの U を通るようにする。
         let rows0 =
             vec![vec![(0, 2.0), (1, 1.0)], vec![(0, 1.0), (1, 3.0), (2, 1.0)], vec![(1, 1.0), (2, 4.0)]];
         let base = factorize(3, &rows0).unwrap();
@@ -6204,7 +4882,7 @@ mod tests {
         let a_q2 = [4.0, 1.0, 3.0];
         assert!(state.try_update(0, &a_q2, 1e-9));
 
-        // New basis columns: col0 = a_q2, col1 = a_q1, col2 unchanged from B0.
+        // 新しい基底の列: col0 = a_q2, col1 = a_q1, col2 は B0 のまま。
         let rows_full = vec![
             vec![(0, 4.0), (1, 1.0)],
             vec![(0, 1.0), (1, 5.0), (2, 1.0)],
@@ -6222,11 +4900,10 @@ mod tests {
         assert!(approx_vec(&y_ft, &y_full), "ft={y_ft:?} full={y_full:?}");
     }
 
+    /// 4x4 で 3 回連続の FT 更新 (新しい `a_tilde` の計算で既存 `R` eta の
+    /// ループを通る) が完全再分解と一致する。
     #[test]
     fn ft_update_chain_of_three_matches_full_refactor() {
-        // 4x4, three sequential updates (exercising the r_etas loop with
-        // two, then two-more-accumulated, prior updates when computing
-        // each new a_tilde).
         let rows0 = vec![
             vec![(0, 4.0), (1, 1.0)],
             vec![(0, 1.0), (1, 3.0), (2, 1.0)],
@@ -6243,8 +4920,8 @@ mod tests {
         let a_q3 = [1.0, 6.0, 2.0, 3.0];
         assert!(state.try_update(3, &a_q3, 1e-9));
 
-        // Final basis: col0=a_q2=[5,1,4,2], col1 unchanged=[1,3,1,0],
-        // col2=a_q1=[2,7,1,3], col3=a_q3=[1,6,2,3].
+        // 最終基底: col0=a_q2=[5,1,4,2], col1 は元のまま=[1,3,1,0],
+        // col2=a_q1=[2,7,1,3], col3=a_q3=[1,6,2,3]。
         let rows_full = vec![
             vec![(0, 5.0), (1, 1.0), (2, 2.0), (3, 1.0)],
             vec![(0, 1.0), (1, 3.0), (2, 7.0), (3, 6.0)],
@@ -6263,31 +4940,21 @@ mod tests {
         assert!(approx_vec(&y_ft, &y_full), "ft={y_ft:?} full={y_full:?}");
     }
 
+    /// 新しいピボットが 0 になる更新は棄却され、何も記録されない。
     #[test]
     fn ft_update_rejects_tiny_pivot() {
         let rows0: Vec<Vec<(usize, f64)>> = (0..2).map(|i| vec![(i, 1.0)]).collect();
         let base = factorize(2, &rows0).unwrap();
         let mut state = FtLu::new(base);
-        // Replacing column 0 with something whose L^-1-transformed value
-        // at slot 0 is 0 (after the r-correction) makes the new pivot 0.
+        // 列 0 を、(r 補正後の) L^-1 変換値がスロット 0 で 0 になるもので置換 -> ピボット 0。
         let a_q = [0.0, 1.0];
         assert!(!state.try_update(0, &a_q, 1e-9));
         assert_eq!(state.update_count(), 0);
     }
 
-    /// Direct regression test for the whole premise behind
-    /// `try_update_precomputed`/`solve_into_capture`/`solve_sparse_into_capture`/
-    /// `solve_transpose_into_capture` (see their own docs): feeding
-    /// `try_update` a manually-recomputed `a_tilde`/`e_tilde` vs. feeding
-    /// `try_update_precomputed` the *captured* intermediate from an
-    /// otherwise-ordinary FTRAN/BTRAN call for the same `basis_slot`/
-    /// `a_q_original` must produce bit-identical results — not merely
-    /// close ones — since both are meant to compute exactly the same
-    /// values. Runs on a state that already has two prior updates applied
-    /// (non-trivial `u_seq`/`r_etas`), the realistic case, not just a
-    /// freshly-refactored one, and checks both the dense
-    /// (`solve_into_capture`) and sparse (`solve_sparse_into_capture`)
-    /// FTRAN capture paths independently.
+    /// `try_update` (自前で `a_tilde`/`e_tilde` を再計算) と、FTRAN/BTRAN で記録した
+    /// 中間値を渡す `try_update_precomputed` が、密・疎どちらの記録経路でも
+    /// ビット一致の結果になる (既に 2 回更新済みの状態で確認)。
     #[test]
     fn try_update_precomputed_matches_try_update() {
         let rows0 = vec![vec![(0, 2.0), (1, 1.0)], vec![(0, 1.0), (1, 3.0), (2, 1.0)], vec![(1, 1.0), (2, 4.0)]];
@@ -6300,15 +4967,12 @@ mod tests {
         let basis_slot = 2;
         let a_q = [2.0, 1.0, 6.0];
 
-        // Reference: plain `try_update`, which recomputes `a_tilde`/`e_tilde`
-        // itself from scratch.
+        // 参照: 素の `try_update` (`a_tilde`/`e_tilde` を自分で再計算)。
         let mut state_ref = state.clone();
         assert!(state_ref.try_update(basis_slot, &a_q, 1e-9));
 
-        // Dense-capture path: `solve_into_capture` (as `simplex.rs`'s
-        // dense-rhs bypass branch uses it) supplies `a_tilde`, and
-        // `solve_transpose_into_capture` (as its `rho_p` BTRAN uses it)
-        // supplies `e_tilde`.
+        // 密記録経路: `solve_into_capture` が `a_tilde`、
+        // `solve_transpose_into_capture` が `e_tilde` を供給する。
         let mut state_dense = state.clone();
         let (mut scratch, mut out, mut a_tilde) = (vec![0.0; m], vec![0.0; m], vec![0.0; m]);
         state_dense.solve_into_capture(&a_q, &mut scratch, &mut out, &mut a_tilde);
@@ -6318,11 +4982,8 @@ mod tests {
         state_dense.solve_transpose_into_capture(&e_p, &mut scratch2, &mut out2, &mut e_tilde);
         assert!(state_dense.try_update_precomputed(basis_slot, &a_tilde, &e_tilde, 1e-9));
 
-        // Sparse-capture path: `solve_sparse_into_capture` (as
-        // `simplex.rs`'s sparse-rhs branch uses it) supplies `a_tilde`
-        // instead — must land on the exact same intermediate despite going
-        // through the Gilbert-Peierls reach-set machinery rather than a
-        // dense scan.
+        // 疎記録経路: `solve_sparse_into_capture` が `a_tilde` を供給する
+        // (Gilbert-Peierls 経由でも全く同じ中間値になること)。
         let mut state_sparse = state.clone();
         let (mut sscratch, mut sout, mut sa_tilde) = (vec![0.0; m], vec![0.0; m], vec![0.0; m]);
         let mut gp = GpScratch::new(m);
@@ -6346,19 +5007,14 @@ mod tests {
         }
     }
 
-    /// Deterministic xorshift-ish LCG, no external `rand` dependency
-    /// needed for a test fixture this small.
+    /// 決定的な線形合同法の擬似乱数 (`[-1, 1)` 程度)。外部 `rand` 依存なしで使う。
     fn next_rand(state: &mut u64) -> f64 {
         *state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
         ((*state >> 33) as f64 / (1u64 << 31) as f64) - 1.0
     }
 
-    /// A moderately-sized, genuinely off-diagonal sparse matrix (diagonal
-    /// dominance guarantees `factorize` never needs a singularity
-    /// fallback) — big enough that `factorize`'s own Markowitz pivoting
-    /// produces a non-identity `col_perm`/`row_perm` and real off-diagonal
-    /// `U`/`L` fill, unlike the crate's other, smaller hand-written
-    /// fixtures.
+    /// 非対角要素を持つ対角優位な疎行列 (`m x m`、各行に非対角最大 3 個) を作る。
+    /// Markowitz が非恒等な置換と実際の fill を生む程度の大きさで使う。
     fn random_sparse_diag_dominant(m: usize, seed: u64) -> Vec<Vec<(usize, f64)>> {
         let mut state = seed;
         let mut rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
@@ -6383,10 +5039,7 @@ mod tests {
         rows
     }
 
-    /// `l_row` really is `l_col`'s transpose: every stored entry of one
-    /// appears exactly once, with the same value, at the mirrored index of
-    /// the other. Checked on a factorization with genuine fill (a plain
-    /// diagonal basis would pass vacuously with both structures empty).
+    /// `l_row` が `l_col` のちょうど転置である (全要素が 1 回ずつ、同じ値で対応する)。
     #[test]
     fn l_row_is_the_exact_transpose_of_l_col() {
         for m in [3usize, 12, 40] {
@@ -6414,13 +5067,8 @@ mod tests {
         }
     }
 
-    /// The scatter form of `L^{-T}` (via `l_row`) and the original gather
-    /// form (via `l_col`) solve the same system. Not bit-identical by
-    /// construction (the same products are summed in the opposite order —
-    /// see `l_transpose_solve_scatter_into`'s own docs), so this checks
-    /// agreement to a tight relative tolerance rather than exact equality,
-    /// on right-hand sides ranging from a single nonzero (the hyper-sparse
-    /// case the scatter form exists for) to fully dense.
+    /// `L^{-T}` のスキャッタ形式とギャザー形式が、単一非ゼロから密までの右辺で
+    /// 相対 `1e-12` 以内で一致する (加算順が逆なのでビット一致ではない)。
     #[test]
     fn l_transpose_scatter_matches_gather() {
         for m in [3usize, 12, 40] {
@@ -6453,12 +5101,8 @@ mod tests {
         }
     }
 
-    /// End-to-end: a full `B^-T rhs` BTRAN agrees between the two arms of
-    /// the `ENOMOTO_BTRAN_L_SCATTER` dispatch, *after* Forrest-Tomlin
-    /// updates have put `R`-etas in front of the `L^{-T}` stage (the state
-    /// every per-iteration BTRAN actually runs in, and the one where a
-    /// wrong transpose would show up as a wrong `rho_p` rather than a
-    /// merely differently-rounded one).
+    /// FT 更新で `R` eta が入った後でも、BTRAN 全体 (`B^-T rhs`) がスキャッタ/
+    /// ギャザー両経路で一致する。
     #[test]
     fn btran_agrees_between_scatter_and_gather_after_ft_updates() {
         let m = 40;
@@ -6492,10 +5136,7 @@ mod tests {
         }
     }
 
-    /// Residual `‖A x - b‖_inf` against the sparse rows `A` — what a
-    /// factorization is actually *for*, and therefore a stronger check on
-    /// a reused order than comparing its `L`/`U` against a Markowitz
-    /// run's (the two legitimately differ: same matrix, two valid orders).
+    /// 疎行 `A` に対する残差 `‖A x - b‖_inf`。
     fn residual_inf(rows: &[Vec<(usize, f64)>], x: &[f64], b: &[f64]) -> f64 {
         rows.iter()
             .enumerate()
@@ -6503,11 +5144,9 @@ mod tests {
             .fold(0.0, f64::max)
     }
 
-    /// Replaces `n` columns of `rows` with fresh content whose nonzeros
-    /// sit in *different rows* than the column they replace — what a
-    /// Forrest-Tomlin update does to a basis, and specifically the case
-    /// that makes replaying the recorded *row* order impossible (see
-    /// `factorize_reusing_order`'s own docs).
+    /// `rows` の列を `n` 本、置き換える列とは *別の行* に非ゼロを持つ新しい内容で
+    /// 置換する (FT 更新が基底に対して行うことの模擬。記録した行順を再生できなく
+    /// なるケース)。
     fn replace_columns(rows: &mut [Vec<(usize, f64)>], n: usize, seed: u64) {
         let m = rows.len();
         let mut state = seed;
@@ -6525,6 +5164,8 @@ mod tests {
         }
     }
 
+    /// 列を置換した基底でも、記録した列順を再利用した分解が `Bx = b` と
+    /// `B^T y = b` を解き、`l_row` が `l_col` の転置のままである。
     #[test]
     fn reused_order_solves_a_basis_whose_columns_were_replaced() {
         for seed in [1u64, 7, 99] {
@@ -6542,9 +5183,8 @@ mod tests {
             let x = reused.solve(&b);
             assert!(residual_inf(&rows2, &x, &b) < 1e-9, "seed {seed}: reused order solves the updated matrix");
 
-            // And `B^T y = b` through the same factors, since the transpose
-            // path reads `l_col`/`u_row` in the other direction (a wrong
-            // permutation would pass one and fail the other).
+            // 転置求解も確認 (転置経路は `l_col`/`u_row` を逆向きに読むので、
+            // 置換の誤りは片方だけで現れうる)。
             let y = reused.solve_transpose(&b);
             let mut rows_t: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
             for (i, row) in rows2.iter().enumerate() {
@@ -6554,8 +5194,7 @@ mod tests {
             }
             assert!(residual_inf(&rows_t, &y, &b) < 1e-9, "seed {seed}: reused order solves the transpose");
 
-            // `l_row` must stay `l_col`'s exact transpose on this path too
-            // (BTRAN's scatter form reads it).
+            // この経路でも `l_row` は `l_col` の転置であること (BTRAN のスキャッタ形式が読む)。
             let mut from_col: Vec<(usize, usize, u64)> = Vec::new();
             for s in 0..m {
                 for &(row_step, mult) in reused.l_col.col(s) {
@@ -6575,6 +5214,7 @@ mod tests {
         }
     }
 
+    /// 同じ行列を自分自身の順序で再利用分解すると、因子そのものが一致する。
     #[test]
     fn reused_order_reproduces_a_fresh_factorization_of_the_same_matrix() {
         let m = 50;
@@ -6583,8 +5223,7 @@ mod tests {
         let again = factorize_reusing_order(m, &rows, &first.col_perm, &first.row_perm, usize::MAX)
             .expect("its own order is trivially acceptable for the same matrix");
 
-        // Same matrix, same order, so the factors themselves must match —
-        // not merely solve alike.
+        // 同じ行列・同じ順序なので、解が同じだけでなく因子自体が一致すること。
         assert_eq!(again.row_perm, first.row_perm);
         assert_eq!(again.col_perm, first.col_perm);
         for s in 0..m {
@@ -6600,6 +5239,7 @@ mod tests {
         }
     }
 
+    /// 特異行列では再利用分解が `None` を返す。
     #[test]
     fn reused_order_rejects_a_singular_matrix() {
         let identity_order: Vec<usize> = vec![0, 1];
@@ -6610,12 +5250,11 @@ mod tests {
         );
     }
 
+    /// 記録された行が数値的に弱いとき、順序全体を棄却せずに行だけ選び直す。
     #[test]
     fn reused_order_repicks_the_row_when_the_recorded_one_is_numerically_weak() {
-        // Recorded order says step 0 pivots on row 0 of column 0, but in
-        // *this* matrix that entry is numerically nothing against the same
-        // column's other entry: the row must be re-picked (to row 1),
-        // rather than the whole order rejected.
+        // 記録ではステップ 0 は列 0 の行 0 でピボットするが、この行列ではその要素が
+        // 同じ列の他の要素に比べて無視できるほど小さい: 行 1 に選び直されるべき。
         let order: Vec<usize> = vec![0, 1];
         let weak = vec![vec![(0usize, 1e-14f64), (1usize, 1.0f64)], vec![(0usize, 1.0f64), (1usize, 1.0f64)]];
         let lu = factorize_reusing_order(2, &weak, &order, &order, usize::MAX)
@@ -6626,22 +5265,20 @@ mod tests {
         assert!(residual_inf(&weak, &x, &b) < 1e-9, "re-picked pivot still solves: {x:?}");
     }
 
+    /// `max_nnz` を超える因子になる再利用分解は `None` を返す。
     #[test]
     fn reused_order_respects_the_fill_limit() {
         let m = 40;
         let rows = random_sparse_diag_dominant(m, 31337);
         let first = factorize(m, &rows).expect("factorizes");
-        // `max_nnz` below even the diagonal alone: no factorization of
-        // anything can fit, so the guard must fire rather than return
-        // factors that exceed it.
+        // `max_nnz` が対角だけより小さい: どんな分解も収まらないのでガードが働くこと。
         assert!(factorize_reusing_order(m, &rows, &first.col_perm, &first.row_perm, 1).is_none());
     }
 
+    /// 列置換を繰り返しながら `factorize_reusing` で再分解した結果が、同じ行列の
+    /// 一からの分解と FTRAN/BTRAN で一致する (エンドツーエンド)。
     #[test]
     fn factorize_reusing_matches_a_from_scratch_factorization_through_column_replacements() {
-        // End-to-end: build a factorization, replace basis columns the way
-        // the simplex loop does, refactorize with reuse, and check the
-        // result against a from-scratch factorization of the same matrix.
         let m = 45;
         let mut rows = random_sparse_diag_dominant(m, 555);
         let mut lu = FtLu::new(factorize(m, &rows).expect("factorizes"));
@@ -6663,7 +5300,7 @@ mod tests {
                 assert!((out[i] - fresh_out[i]).abs() < 1e-9, "round {round}, row {i}: reuse vs fresh");
             }
 
-            // BTRAN too, through both of `l_transpose_solve_into`'s arms.
+            // BTRAN も (`l_transpose_solve_into` の両経路を通して) 確認する。
             let ours = lu.solve_transpose(&b);
             let theirs = fresh.solve_transpose(&b);
             for i in 0..m {
@@ -6672,6 +5309,8 @@ mod tests {
         }
     }
 
+    /// 分解直後の因子で `solve_transpose_unit_into` が密な `solve_transpose` と
+    /// ビット一致し、`scratch` を全 0 に戻す。
     #[test]
     fn solve_transpose_unit_into_matches_dense_on_fresh_factorization() {
         let m = 40;
@@ -6695,6 +5334,9 @@ mod tests {
         }
     }
 
+    /// 単位ベクトル BTRAN (`solve_transpose_unit_capture` / `solve_transpose_unit`) が、
+    /// 分解直後でも FT 更新後でも、一般右辺版 (`solve_transpose_into_capture`) と
+    /// 結果・`e_tilde`・tick までビット一致する。
     #[test]
     fn solve_transpose_unit_is_bit_identical_to_the_dense_unit_rhs_path() {
         let m = 40;
@@ -6703,10 +5345,8 @@ mod tests {
             let base = factorize(m, &rows).expect("diagonally dominant matrix must factorize");
             let mut state = FtLu::new(base);
 
-            // Once fresh, and again after Forrest-Tomlin updates have
-            // reordered `u_seq` — the case `solve_transpose_unit_into`'s
-            // own prefix-skip is *not* valid for, and the whole reason
-            // this seeded variant exists alongside it.
+            // 分解直後と、FT 更新で `u_seq` が並べ替わった後 (`solve_transpose_unit_into`
+            // の先頭スキップが使えないケース) の両方で確認する。
             for round in 0..3 {
                 let (mut scratch, mut out, mut e_tilde) = (vec![0.0; m], vec![0.0; m], vec![0.0; m]);
                 let (mut rscratch, mut rout, mut re_tilde) = (vec![0.0; m], vec![0.0; m], vec![0.0; m]);
@@ -6719,15 +5359,13 @@ mod tests {
                     assert_eq!(out, rout, "seed={seed} round={round} i={i}: unit BTRAN diverged from the dense-rhs one");
                     assert_eq!(e_tilde, re_tilde, "seed={seed} round={round} i={i}: captured e_tilde diverged");
 
-                    // The non-capturing form must agree with both.
+                    // 記録なし版も両者と一致すること。
                     let mut out2 = vec![0.0; m];
                     state.solve_transpose_unit(i, &mut scratch, &mut out2);
                     assert_eq!(out2, rout, "seed={seed} round={round} i={i}: solve_transpose_unit diverged");
                 }
-                // The tick is what drives the deterministic CLOCK
-                // refactorization trigger, so the two paths must charge
-                // identically or the solve would take a different
-                // trajectory (see `u_transpose_sweep`'s own note).
+                // tick は決定的な CLOCK 再分解トリガを駆動するので、両経路で同じだけ
+                // 加算されなければならない (でないと求解の軌跡が変わる)。
                 let before = state.synth_tick();
                 let mut s1 = vec![0.0; m];
                 let mut o1 = vec![0.0; m];
@@ -6748,10 +5386,9 @@ mod tests {
         }
     }
 
-    /// `solve_transpose_unit_work` (dedicated zero-kept scratch, tracked
-    /// `e_tilde` copy, bounded `L^T` gate) and the `StepCapture`-driven GP
-    /// `L` stage of the fused `tau` FTRAN must be bit-identical to the plain
-    /// paths, ticks included, fresh and after Forrest-Tomlin updates.
+    /// `solve_transpose_unit_work` (0 に保つ専用スクラッチ、追跡付き `e_tilde` コピー、
+    /// 上界付き `L^T` ゲート) と、`StepCapture` による融合 `tau` FTRAN の GP `L` 段が、
+    /// 通常経路と tick 込みでビット一致する (分解直後・FT 更新後とも)。
     #[test]
     fn unit_btran_work_and_tau_gp_are_bit_identical() {
         for m in [40usize, 200] {
@@ -6775,7 +5412,7 @@ mod tests {
                         assert_eq!(out_w, out, "m={m} seed={seed} round={round} i={i}: rho");
                         assert_eq!(e_work, e_tilde, "m={m} seed={seed} round={round} i={i}: e_tilde");
                         assert!(work.w.iter().all(|&v| v == 0.0));
-                        // Fused tau FTRAN with and without the capture.
+                        // 記録ありとなしで融合 tau FTRAN を比較する。
                         let a: Vec<f64> = (0..m).map(|k| if (k + i) % 11 == round { 0.5 + k as f64 } else { 0.0 }).collect();
                         let (mut sa, mut sb, mut oa, mut ob, mut ta) = (vec![0.0; m], vec![0.0; m], vec![0.0; m], vec![0.0; m], vec![0.0; m]);
                         let t0 = state.synth_tick();
@@ -6801,11 +5438,8 @@ mod tests {
         }
     }
 
-    /// `solve_into_pair_capture`/`solve_sparse_into_pair_capture` must be
-    /// bit-identical to the separate single-vector solves they fuse — both
-    /// results, the `a_tilde` capture, the returned nonzero counts, and the
-    /// synthetic tick (which drives the CLOCK refactorization trigger) —
-    /// on a fresh factorization and after Forrest-Tomlin updates.
+    /// `solve_into_pair_capture` / `solve_sparse_into_pair_capture` が、融合元の個別求解と
+    /// 結果・`a_tilde`・非ゼロ数・tick までビット一致する (分解直後・FT 更新後とも)。
     #[test]
     fn pair_ftran_is_bit_identical_to_two_separate_solves() {
         let m = 40;
@@ -6815,8 +5449,7 @@ mod tests {
             let mut state = FtLu::new(base);
             for round in 0..4 {
                 for variant in 0..3usize {
-                    // `a`: a sparse column-like rhs; `b`: a dense-ish one
-                    // (the DSE `rho_p` shape), varied per variant.
+                    // `a`: 列のような疎な右辺、`b`: やや密な右辺 (DSE の `rho_p` 形)。variant ごとに変える。
                     let a: Vec<f64> = (0..m).map(|k| if (k + variant) % 9 == round { 0.5 + k as f64 } else { 0.0 }).collect();
                     let b: Vec<f64> = (0..m).map(|k| if (k * 3 + variant) % (2 + variant) == 0 { 1.0 / (1.0 + k as f64) } else { 0.0 }).collect();
 
@@ -6837,7 +5470,7 @@ mod tests {
                     assert_eq!(qb, ob, "seed={seed} round={round} v={variant}: dense pair b");
                     assert_eq!(qt, ta, "seed={seed} round={round} v={variant}: dense pair a_tilde");
 
-                    // Sparse-`a` form, against `solve_sparse_into_capture` + `solve_into`.
+                    // 疎な `a` 版を `solve_sparse_into_capture` + `solve_into` と比較する。
                     let a_sp = to_sparse(&a);
                     let mut gp = GpScratch::new(m);
                     let mut zs = vec![0.0; m];
@@ -6864,15 +5497,18 @@ mod tests {
         }
     }
 
+    /// 超疎 `U` 段 (C5) の有無で、疎 FTRAN 系のすべての入口 (単独・pair・triple、
+    /// `StepCapture` 経由含む) の結果・非ゼロ数・tick がビット一致し、超疎段が
+    /// 実際に 1 回以上走る。
     #[test]
     fn hyper_u_ftran_is_bit_identical() {
         let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<u64>>();
         let m = 200;
+        // 超疎 `U` 段が中断せずに走った回数
         let mut hyper_taken = 0usize;
         for seed in [11u64, 12, 13, 14] {
-            // Sparser than `random_sparse_diag_dominant`: keep one
-            // off-diagonal entry per row, so `U`'s reach from a short rhs
-            // stays under the abort fraction.
+            // `random_sparse_diag_dominant` より疎にする: 各行の非対角を 1 個だけ残し、
+            // 短い右辺からの `U` の到達が中断率を超えないようにする。
             let rows: Vec<Vec<(usize, f64)>> = random_sparse_diag_dominant(m, seed)
                 .into_iter()
                 .enumerate()
@@ -6895,8 +5531,7 @@ mod tests {
             for round in 0..6 {
                 for variant in 0..4usize {
                     let a: Vec<f64> = (0..m).map(|k| if (k * 7 + variant) % 97 == round { 0.5 + k as f64 } else { 0.0 }).collect();
-                    // Variant 3 gives `b` a single nonzero, so its hyper
-                    // `U` stage runs rather than aborting.
+                    // variant 3 では `b` を非ゼロ 1 個にして、その超疎 `U` 段が中断せず走るようにする。
                     let b: Vec<f64> = (0..m)
                         .map(|k| {
                             let on = if variant == 3 { k == 17 + round } else { (k * 3 + variant) % (2 + variant) == 0 };
@@ -6922,8 +5557,7 @@ mod tests {
                         let (n2, _) = state.solve_sparse_into_pair_capture(&a_sp, &b, &mut zs, &mut gp, &mut sb, &mut o2a, &mut o2b, &mut t2, None);
                         let (mut o3a, mut o3b, mut o3c, mut t3) = (vec![0.0; m], vec![0.0; m], vec![0.0; m], vec![0.0; m]);
                         let (n3, _, n3c) = state.solve_sparse_into_triple_capture(&a_sp, &b, &c, &mut zs, &mut gp, &mut sb, &mut sc, &mut o3a, &mut o3b, &mut o3c, &mut t3, None);
-                        // `tau` channel through a step capture (C3's GP `L`
-                        // stage for `b`), hyper-sparse `U` when requested.
+                        // `tau` チャネルをステップ記録経由で (`b` の GP `L` 段)、要求時は超疎 `U` で。
                         let steps: Vec<usize> = (0..m).filter(|&s| b[state.base.row_perm[s]] != 0.0).collect();
                         let mk_cap = |steps: &Vec<usize>| {
                             let mut cap = StepCapture::new(m);
@@ -6957,8 +5591,7 @@ mod tests {
                             (n1, n2, n3, n3c),
                         ));
                         if hyper {
-                            // Direct check that the hyper stage really ran
-                            // (rather than aborting) on some of these.
+                            // 超疎段が (中断せずに) 実際に走ったことを直接確認する。
                             let mut x = t1.clone();
                             let mut gp2 = GpScratch::new(m);
                             gp2.reach = (0..m).filter(|&s| x[s] != 0.0).collect();
@@ -6978,28 +5611,24 @@ mod tests {
         assert!(hyper_taken > 0, "the hyper-sparse U stage never ran");
     }
 
+    /// 密ベクトルを非ゼロの `(添字, 値)` 列に変換する。
     fn to_sparse(dense: &[f64]) -> Vec<(usize, f64)> {
         dense.iter().enumerate().filter(|&(_, &v)| v != 0.0).map(|(i, &v)| (i, v)).collect()
     }
 
-    /// Runs `rhs` (converted to sparse form) through `solve_sparse_into`
-    /// and asserts it matches `state.solve(rhs)` (the dense reference)
-    /// exactly — both should compute the identical sequence of floating
-    /// point operations restricted to the same reach set, just reached by
-    /// different bookkeeping, so unlike `approx_vec`'s tolerance
-    /// elsewhere in this module (guarding against genuinely different
-    /// numerical paths, e.g. FT-updated vs freshly-refactored), this
-    /// checks bit-for-bit equality — any mismatch at all means the reach
-    /// set or the zero-management between calls is wrong.
+    /// `rhs` を疎形式で `solve_sparse_into` に通し、密な参照 `state.solve(rhs)` と
+    /// **ビット一致** することを確認する (同じ到達集合上で同じ演算列になるはずなので、
+    /// 少しでも違えば到達集合か呼び出し間のゼロ管理が誤っている)。
     fn assert_sparse_matches_dense(state: &FtLu, m: usize, rhs: &[f64], scratch: &mut [f64], gp: &mut GpScratch, out: &mut [f64]) {
         let expected = state.solve(rhs);
         state.solve_sparse_into(&to_sparse(rhs), scratch, gp, out);
         assert_eq!(&out[..m], &expected[..], "rhs={rhs:?}");
     }
 
+    /// 3x3 三重対角行列で疎 FTRAN が密 FTRAN とビット一致する。
     #[test]
     fn sparse_solve_matches_dense_on_simple_case() {
-        // Same 3x3 tridiagonal fixture as `factorize_and_solve_matches_expected`.
+        // `factorize_and_solve_matches_expected` と同じ 3x3 三重対角行列。
         let rows = vec![vec![(0, 2.0), (1, 1.0)], vec![(0, 1.0), (1, 3.0), (2, 1.0)], vec![(1, 1.0), (2, 4.0)]];
         let base = factorize(3, &rows).unwrap();
         let state = FtLu::new(base);
@@ -7019,13 +5648,10 @@ mod tests {
         }
     }
 
+    /// FT 更新後 (`r_etas` が非空) でも疎 FTRAN が密 FTRAN とビット一致する。
     #[test]
     fn sparse_solve_matches_dense_with_ft_updates() {
-        // Same fixture (and update sequence) as
-        // `ft_update_chain_of_two_matches_full_refactor` — `state.r_etas`
-        // is non-empty here, exercising the sparse path's R-eta stage
-        // (unchanged from the dense path, but only actually run if this
-        // wiring is correct).
+        // `ft_update_chain_of_two_matches_full_refactor` と同じ行列・更新列。
         let rows0 = vec![vec![(0, 2.0), (1, 1.0)], vec![(0, 1.0), (1, 3.0), (2, 1.0)], vec![(1, 1.0), (2, 4.0)]];
         let base = factorize(3, &rows0).unwrap();
         let mut state = FtLu::new(base);
@@ -7042,20 +5668,11 @@ mod tests {
         }
     }
 
+    /// 同じ `scratch`/`gp` を使って多様な右辺 (単一非ゼロ・散在・密・全 0) を連続で
+    /// 疎 FTRAN しても毎回密版と一致し、最後に `scratch` が全 0 に戻っている
+    /// (前回の残りが次回を壊さないことの確認)。
     #[test]
     fn sparse_solve_repeated_calls_reuse_scratch_correctly() {
-        // A larger (6x6), more sparsely-structured matrix — enough steps
-        // and fill-in variety that the reach set genuinely differs across
-        // calls — solved for a long, varied sequence of sparse right-hand
-        // sides (single nonzero, several scattered nonzeros, fully dense,
-        // and all-zero) through the *same* `scratch`/`gp` buffers, back
-        // to back. This is the specific scenario `l_solve_sparse_into`'s
-        // "z must be all-zero on entry" precondition depends on
-        // `solve_sparse_into`'s own end-of-call `fill(0.0)` to uphold —
-        // if that cleanup were wrong or incomplete, an *earlier* call's
-        // leftover values would corrupt a *later* call's result, so
-        // running many varied calls in sequence and checking every one
-        // (not just the first) is the point of this test.
         let rows0 = vec![
             vec![(0, 4.0), (2, 1.0)],
             vec![(1, 3.0), (3, 1.0)],
@@ -7084,26 +5701,14 @@ mod tests {
         for rhs in &rhs_sequence {
             assert_sparse_matches_dense(&state, m, rhs, &mut scratch, &mut gp, &mut out);
         }
-        // The buffer must be back to exactly zero after the last call too
-        // — not just "happened to match the expected output" — since
-        // that's the invariant the *next* caller (whoever it is) relies on.
+        // 最後の呼び出し後もバッファが厳密に 0 であること (次の呼び出し側が依存する不変条件)。
         assert!(scratch.iter().all(|&v| v == 0.0), "scratch not fully cleared: {scratch:?}");
     }
 
+    /// 6x6 基底で位置をばらした 5 回の FT 更新 (`u_seq` の並べ替え) の *毎回* の後に、
+    /// 疎 FTRAN が密 FTRAN とビット一致する。
     #[test]
     fn sparse_solve_matches_dense_after_reordering_u_seq() {
-        // `solve_sparse_into` (sparse `L` + dense `U`) must keep matching
-        // the dense reference through *repeated* `u_seq` reordering
-        // (every `try_update` removes one eta from wherever it sits and
-        // appends a fresh one at the end, shifting everything after the
-        // removal point down by one) — a single update, as the other
-        // FT-update tests already exercise, isn't enough to be confident
-        // this stays right across several. Five sequential updates on a
-        // 6x6 basis, each replacing a different slot (including slots at
-        // both ends and the middle of the current `u_seq`, so removals
-        // happen at varied positions), checked against the dense
-        // reference for a run of varied sparse right-hand sides after
-        // *every single* update — not just the final one.
         let rows0 = vec![
             vec![(0, 3.0), (2, 1.0)],
             vec![(1, 4.0), (3, 1.0)],
@@ -7126,10 +5731,8 @@ mod tests {
             [1.0, 0.0, 0.0, 2.0, 0.0, 3.0],
             [1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
         ];
-        // Updates hit slot 4 (near the end), then 0 (the start), then 5
-        // (the new end), then 2 (the middle), then 1 — deliberately not a
-        // monotonic sequence, so `u_seq`'s position-vs-slot relationship
-        // is scrambled well beyond a simple "always append" pattern.
+        // 更新するスロット: 4 (末尾近く), 0 (先頭), 5 (新しい末尾), 2 (中央), 1。
+        // 単調でない順にして `u_seq` の位置とスロットの関係をかき混ぜる。
         let updates: [(usize, [f64; 6]); 5] = [
             (4, [1.0, 0.0, 2.0, 0.0, 3.0, 0.0]),
             (0, [4.0, 1.0, 0.0, 0.0, 1.0, 2.0]),
@@ -7146,58 +5749,49 @@ mod tests {
         assert!(scratch.iter().all(|&v| v == 0.0), "scratch not fully cleared: {scratch:?}");
     }
 
+    /// `should_use_dense_solve` が密な右辺 (5/10) を密と判定し、疎な右辺 (2/10) は判定しない。
     #[test]
     fn should_use_dense_solve_flags_dense_rhs_and_not_sparse() {
         let m = 10;
         let rows: Vec<Vec<(usize, f64)>> = (0..m).map(|i| vec![(i, 4.0)]).collect();
         let lu = FtLu::new(factorize(m, &rows).expect("nonsingular"));
-        // A rhs with 5 of 10 entries nonzero exceeds DENSE_RHS_FRACTION (0.4).
+        // 10 個中 5 個が非ゼロの右辺は DENSE_RHS_FRACTION (0.4) を超える。
         assert!(lu.should_use_dense_solve(5), "5/10 nonzero rhs should be flagged dense");
         assert!(!lu.should_use_dense_solve(2), "2/10 nonzero rhs should not be flagged dense");
     }
 
-    /// The result-density gate (`docs/lu_comparison_enomoto_vs_highs.md`
-    /// §2.7): a channel whose *results* keep coming back dense must end up
-    /// on the dense path even when every right-hand side it is handed is
-    /// sparse enough for `should_use_dense_solve` alone to say otherwise —
-    /// and must find its way back to the sparse path once the results turn
-    /// sparse again, since the average is recorded on both branches.
+    /// 結果密度ゲート: 結果が密であり続けるチャネルは、右辺が疎でも密経路に切り替わり、
+    /// 結果が疎に戻れば疎経路に戻る (両経路で記録するので張り付かない)。
     #[test]
     fn density_gate_flips_a_sparse_rhs_channel_dense_and_back() {
         let m = 10;
         let rows: Vec<Vec<(usize, f64)>> = (0..m).map(|i| vec![(i, 4.0)]).collect();
         let lu = FtLu::new(factorize(m, &rows).expect("nonsingular"));
         let mut density = FtranDensity::new();
-        // Untouched history: dispatch is exactly `should_use_dense_solve`'s.
+        // 履歴なし: 判定は `should_use_dense_solve` と同じ。
         assert!(!lu.should_use_dense_solve_tracked(2, &density), "a fresh channel must not be gated dense");
 
-        // Fully dense results, iteration after iteration: the running
-        // average climbs past EXPECTED_DENSE_FRACTION (0.35) and the same
-        // sparse rhs now dispatches dense.
+        // 毎回完全に密な結果: 移動平均が EXPECTED_DENSE_FRACTION (0.35) を超え、
+        // 同じ疎な右辺が密経路になる。
         for _ in 0..30 {
             density.record(m, m);
         }
         assert!(density.expected() > EXPECTED_DENSE_FRACTION, "expected={}", density.expected());
         assert!(lu.should_use_dense_solve_tracked(2, &density), "a persistently dense channel must be gated dense");
 
-        // ...and back: nothing latches, because the dense branch records
-        // its own result density too.
+        // 戻る: 密経路も自分の結果密度を記録するので張り付かない。
         for _ in 0..60 {
             density.record(0, m);
         }
         assert!(!lu.should_use_dense_solve_tracked(2, &density), "expected={}", density.expected());
     }
 
-    /// Every FTRAN entry point reports the nonzero count of the result it
-    /// just wrote — the measurement [`FtranDensity::record`] is fed — and
-    /// the dense and sparse paths agree on it, since they compute the
-    /// identical vector.
+    /// FTRAN の各入口が書いた結果の非ゼロ数を返し、密・疎経路で一致する。
     #[test]
     fn solve_paths_report_the_result_nonzero_count() {
         let m = 6;
-        // Lower-bidiagonal `B`: `B^-1 e_0` fills in over *every* row, so a
-        // one-nonzero rhs has a fully dense result — exactly the case the
-        // input-side test alone cannot see coming.
+        // 下二重対角の `B`: `B^-1 e_0` は全行に fill するので、非ゼロ 1 個の右辺から
+        // 完全に密な結果になる (入力側の判定だけでは予見できないケース)。
         let rows: Vec<Vec<(usize, f64)>> =
             (0..m).map(|i| if i == 0 { vec![(0, 2.0)] } else { vec![(i - 1, -2.0), (i, 2.0)] }).collect();
         let lu = FtLu::new(factorize(m, &rows).expect("nonsingular"));
@@ -7219,13 +5813,9 @@ mod tests {
         assert_eq!(dense_nnz, m, "this fixture's whole point is a dense result from a one-nonzero rhs");
     }
 
-    /// A dense-coefficient basis (every column of `B` has all `m` entries,
-    /// well past `DENSE_ETA_FRACTION` after a couple of FT updates) run
-    /// through several `try_update` calls with equally dense entering
-    /// columns, then cross-checked against a completely independent full
-    /// refactorization of the final basis — the same style of ground truth
-    /// the sparse-fixture tests above use, just sized and shaped to
-    /// actually exercise `HybridVec`'s dense arm instead of its sparse one.
+    /// 係数が稠密な基底 (FT 更新後に `DENSE_ETA_FRACTION` を超える) に稠密な入る列で
+    /// 複数回 FT 更新し、最終基底の独立な完全再分解と FTRAN/BTRAN/疎 FTRAN で一致する
+    /// (eta の密形式を通すため)。
     #[test]
     fn ft_update_matches_full_refactor_on_dense_basis() {
         let m = 10;
@@ -7234,8 +5824,7 @@ mod tests {
         let base = factorize(m, &rows0).expect("nonsingular");
         let mut state = FtLu::new(base);
 
-        // Dense entering columns (every entry nonzero), replacing a few
-        // different slots.
+        // 稠密な入る列 (全要素非ゼロ) で、いくつかの異なるスロットを置換する。
         let entering = |k: usize, slot: usize| -> Vec<f64> {
             (0..m).map(|i| if i == slot { 40.0 + k as f64 } else { 2.0 + ((i * 3 + k) % 7) as f64 }).collect()
         };
@@ -7263,10 +5852,8 @@ mod tests {
         let y_full = full.solve_transpose(&rhs);
         assert!(approx_vec(&y_ft, &y_full), "ft={y_ft:?} full={y_full:?}");
 
-        // `solve_sparse_into` must still agree too, even though a dense
-        // rhs is routed around it at the `simplex.rs` call sites (see
-        // `should_use_dense_solve`'s own docs) — it remains public API and
-        // must stay correct regardless of caller choice.
+        // 呼び出し側では密な右辺は `solve_sparse_into` を通らないが、公開 API として
+        // 常に正しくなければならないので確認する。
         let mut scratch = vec![0.0; m];
         let mut gp = GpScratch::new(m);
         let mut out = vec![0.0; m];
