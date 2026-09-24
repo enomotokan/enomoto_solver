@@ -510,6 +510,7 @@ pub fn run_extended(
     // "run at most this many times, fewer if convergence comes first".
     let mut prev_signature: Option<(usize, usize, Vec<f64>, Vec<f64>)> = None;
     let mut prev_struct: Option<(usize, usize, usize, usize)> = None;
+    let mut eqprop_idle = false;
     for _round_idx in 0..rounds.max(1) {
         let prop = timed_step!("propagate", propagate::propagate(n, &g, &h, prop_passes));
         if prop.infeasible {
@@ -550,10 +551,18 @@ pub fn run_extended(
         // absolute ~0.13s) is this trade-off's known remaining cost — see
         // this function's own module docs and the loop's analysis file for
         // the full comparison table.
-        if _round_idx < tunable!("ENOMOTO_T_EQPROP_ROUNDS", 2, usize) {
+        //
+        // `ENOMOTO_T_EQPROP_SKIP_IDLE=1` (default 0): once a round's call
+        // reports no forcing row, fixed column or tightened bound, skip the
+        // remaining eqprop rounds (C20; not guaranteed identical — a later
+        // round starts from tighter bounds and could still find something).
+        if _round_idx < tunable!("ENOMOTO_T_EQPROP_ROUNDS", 2, usize) && !eqprop_idle {
             let eq = timed_step!("eqprop", propagate::propagate_equalities(&a, &b, &mut lb, &mut ub, prop_passes));
             if eq.infeasible {
                 return extended_infeasible(sc, a, b, c, n);
+            }
+            if tunable!("ENOMOTO_T_EQPROP_SKIP_IDLE", 0, usize) != 0 && eq.forcing_rows == 0 && eq.fixed_cols == 0 && eq.tightened == 0 {
+                eqprop_idle = true;
             }
         }
 
