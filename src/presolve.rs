@@ -1035,20 +1035,16 @@ pub fn run_extended(
         // false `Infeasible`. Fixed by rejecting that specific fold
         // outright rather than by touching anything downstream.
         let pc = if parallelcols_active && std::env::var("ENOMOTO_DISABLE_PARALLELCOLS").is_err() {
-            Some(timed_step!("parallelcols", parallelcols::merge_parallel_columns(n, &a, &cur_real_rows, &c, &lb, &ub)))
+            // Inner `None` = ran, nothing merged (no copy of the problem made).
+            Some(timed_step!("parallelcols", parallelcols::merge_parallel_columns_if_any(n, &a, &cur_real_rows, &c, &lb, &ub)))
         } else {
             None
         };
         if let Some(pc) = pc {
             if std::env::var("ENOMOTO_DEBUG_PARALLELCOLS").is_ok() {
-                eprintln!("DEBUG_PARALLELCOLS: eliminated={}", pc.substitutions.len());
+                eprintln!("DEBUG_PARALLELCOLS: eliminated={}", pc.as_ref().map_or(0, |pc| pc.substitutions.len()));
             }
-            if pc.substitutions.is_empty() {
-                parallelcols_empty_streak += 1;
-                if parallelcols_empty_streak >= tunable!("ENOMOTO_T_PARALLELCOLS_STRIKES", 2, usize) {
-                    parallelcols_active = false;
-                }
-            } else {
+            if let Some(pc) = pc {
                 parallelcols_empty_streak = 0;
                 a = pc.a;
                 c = pc.c;
@@ -1063,6 +1059,11 @@ pub fn run_extended(
                 let (ng, nh) = timed_step!("rebuild_g(pc)", propagate::rebuild_g_ref(n, &cur_real_rows, &cur_real_rhs, &lb, &ub));
                 g = ng;
                 h = nh;
+            } else {
+                parallelcols_empty_streak += 1;
+                if parallelcols_empty_streak >= tunable!("ENOMOTO_T_PARALLELCOLS_STRIKES", 2, usize) {
+                    parallelcols_active = false;
+                }
             }
         }
 

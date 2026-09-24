@@ -61,6 +61,7 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
+#[cfg(test)]
 use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1547,7 +1548,7 @@ pub fn reduce_inequalities(g: &Csr, h: &[f64], n: usize) -> (Csr, Vec<f64>) {
 
 /// Pass-through hasher for keys that already are well-mixed 64-bit hashes.
 #[derive(Default)]
-struct IdentityU64Hasher(u64);
+pub(crate) struct IdentityU64Hasher(u64);
 
 impl std::hash::Hasher for IdentityU64Hasher {
     fn finish(&self) -> u64 {
