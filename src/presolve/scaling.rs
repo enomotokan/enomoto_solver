@@ -31,7 +31,7 @@
 //! race was pure overhead for a decision with a fixed, always-the-same
 //! answer at every problem size this crate has ever actually measured.
 
-use crate::sparse::{Csr, csr_from_rows, csr_row_iter};
+use crate::sparse::{Csr, CsrRowBuilder, csr_from_rows, csr_row_iter};
 /// Above this many combined `A`/`G` rows, prefer `rayon`'s parallel
 /// reduce for `compute`'s column-norm fold over a plain sequential scan —
 /// same constant and rationale as `simplex.rs`'s `RAYON_SIZE_THRESHOLD`
@@ -56,11 +56,29 @@ pub struct Scaling {
 /// Sequential, not rayon — see `compute`'s own docs.
 fn col_norm_fold(mat: faer::sparse::SparseRowMatRef<usize, f64>, d: &[f64], e: &[f64], rows: std::ops::Range<usize>, acc: &mut [f64]) {
     for i in rows {
-        for (j, &v) in mat.col_indices_of_row(i).zip(mat.values_of_row(i)) {
-            let cand = (v * d[j] * e[i]).abs();
+        let ei = e[i];
+        for (&j, &v) in mat.col_indices_of_row_raw(i).iter().zip(mat.values_of_row(i)) {
+            let cand = (v * d[j] * ei).abs();
             if cand > acc[j] {
                 acc[j] = cand;
             }
+        }
+    }
+}
+
+/// `e[i] <- e[i] / sqrt(max_j |v_ij * d_j * e[i]|)` for every row of `mat`
+/// (skipped when that max is at most the zero tolerance) — the row-norm
+/// half of one Ruiz iteration, over the raw CSR slices.
+fn row_norm_update(mat: faer::sparse::SparseRowMatRef<usize, f64>, d: &[f64], e: &mut [f64]) {
+    let zero_tol = tunable!("ENOMOTO_T_SCALING_ZERO_TOL", 1e-12, f64);
+    for (i, e) in e.iter_mut().enumerate() {
+        let old_e = *e;
+        let mut row_norm = 0.0f64;
+        for (&j, &v) in mat.col_indices_of_row_raw(i).iter().zip(mat.values_of_row(i)) {
+            row_norm = row_norm.max((v * d[j] * old_e).abs());
+        }
+        if row_norm > zero_tol {
+            *e = old_e / row_norm.sqrt();
         }
     }
 }
@@ -157,26 +175,8 @@ pub fn compute(n: usize, a: &Csr, g: &Csr, c: &[f64], iters: usize) -> Scaling {
 
         // Row-norm updates: row `i`'s own coefficients only, writing only
         // `e_a[i]`/`e_g[i]`.
-        for (i, e) in e_a.iter_mut().enumerate() {
-            let old_e = *e;
-            let mut row_norm = 0.0f64;
-            for (j, v) in csr_row_iter(a, i) {
-                row_norm = row_norm.max((v * d[j] * old_e).abs());
-            }
-            if row_norm > tunable!("ENOMOTO_T_SCALING_ZERO_TOL", 1e-12, f64) {
-                *e = old_e / row_norm.sqrt();
-            }
-        }
-        for (i, e) in e_g.iter_mut().enumerate() {
-            let old_e = *e;
-            let mut row_norm = 0.0f64;
-            for (j, v) in csr_row_iter(g, i) {
-                row_norm = row_norm.max((v * d[j] * old_e).abs());
-            }
-            if row_norm > tunable!("ENOMOTO_T_SCALING_ZERO_TOL", 1e-12, f64) {
-                *e = old_e / row_norm.sqrt();
-            }
-        }
+        row_norm_update(ar, &d, &mut e_a);
+        row_norm_update(gr, &d, &mut e_g);
     }
 
     Scaling { d, e_a, e_g }
@@ -189,18 +189,38 @@ pub fn apply(scaling: &Scaling, a: &Csr, g: &Csr, b: &[f64], h: &[f64], c: &[f64
 
     // Each row's rescaled entries are independent of every other row —
     // sequential nonetheless, per this module's own parallelization note.
-    let a_rows: Vec<Vec<(usize, f64)>> =
-        (0..p).map(|i| csr_row_iter(a, i).map(|(j, v)| (j, v * scaling.e_a[i] * scaling.d[j])).collect()).collect();
-    let g_rows: Vec<Vec<(usize, f64)>> =
-        (0..m).map(|i| csr_row_iter(g, i).map(|(j, v)| (j, v * scaling.e_g[i] * scaling.d[j])).collect()).collect();
-
-    let a_scaled = csr_from_rows(&a_rows, n);
-    let g_scaled = csr_from_rows(&g_rows, n);
+    let a_scaled = scale_rows(a, &scaling.e_a, &scaling.d, n);
+    let g_scaled = scale_rows(g, &scaling.e_g, &scaling.d, n);
+    debug_assert_eq!(a_scaled.nrows(), p);
+    debug_assert_eq!(g_scaled.nrows(), m);
     let b_scaled: Vec<f64> = b.iter().zip(&scaling.e_a).map(|(v, e)| v * e).collect();
     let h_scaled: Vec<f64> = h.iter().zip(&scaling.e_g).map(|(v, e)| v * e).collect();
     let c_scaled: Vec<f64> = c.iter().zip(&scaling.d).map(|(v, d)| v * d).collect();
 
     (a_scaled, g_scaled, b_scaled, h_scaled, c_scaled)
+}
+
+/// `csr_from_rows` of the rows `(j, v * e[i] * d[j])`, written straight
+/// into a [`CsrRowBuilder`] through one reused row buffer instead of a
+/// `Vec` per row (the builder applies `csr_from_rows`'s own zero-dropping
+/// and sorting, so the result is the same matrix bit for bit; a row the
+/// builder rejects falls back to the original construction).
+fn scale_rows(mat: &Csr, e: &[f64], d: &[f64], n: usize) -> Csr {
+    let r = mat.as_ref();
+    let rows = r.nrows();
+    let nnz: usize = (0..rows).map(|i| r.col_indices_of_row_raw(i).len()).sum();
+    let mut builder = CsrRowBuilder::with_capacity(n, rows, nnz);
+    let mut buf: Vec<(usize, f64)> = Vec::new();
+    for i in 0..rows {
+        let ei = e[i];
+        buf.clear();
+        buf.extend(r.col_indices_of_row_raw(i).iter().zip(r.values_of_row(i)).map(|(&j, &v)| (j, v * ei * d[j])));
+        if !builder.push_row(&buf) {
+            let all: Vec<Vec<(usize, f64)>> = (0..rows).map(|i| csr_row_iter(mat, i).map(|(j, v)| (j, v * e[i] * d[j])).collect()).collect();
+            return csr_from_rows(&all, n);
+        }
+    }
+    builder.finish()
 }
 
 /// Recovers the original-problem solution `x = diag(d) x'` from a solve
