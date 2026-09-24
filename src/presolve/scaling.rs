@@ -1,49 +1,31 @@
-//! Modified Ruiz equilibration: a diagonal preconditioner that rescales
-//! variables and constraint rows so that `[A; G]`'s rows and columns have
-//! roughly unit infinity-norm, improving the conditioning of both the KKT
-//! systems `interior_point.rs` solves and the LU systems `simplex.rs`
-//! factorizes. This is a one-time step per `presolve::run_extended()` call
-//! (not per iteration), computed on the original problem data before
-//! either engine's main loop starts.
+//! 修正 Ruiz 均衡化 (スケーリング)。
 //!
-//! The scaled problem is `x = D x'`, `A' = diag(e_a) A diag(d)`,
-//! `b' = diag(e_a) b`, `G' = diag(e_g) G diag(d)`, `h' = diag(e_g) h`,
-//! `c' = diag(d) c`. Solving the scaled problem and recovering
-//! `x = diag(d) x'` gives the same solution as solving the original
-//! problem directly (a diagonal reparametrization changes neither
-//! feasibility nor boundedness).
-
-//! **Parallelization**: every per-row/per-column loop in this module
-//! (`compute`'s column-norm accumulation and row/column normalization,
-//! `apply`'s rescaling, `unscale_x`) is embarrassingly parallel in
-//! principle, but `apply`/`unscale_x` run sequentially unconditionally —
-//! profiling on this crate's target problem sizes (~1000 columns, a
-//! couple thousand rows across `A`/`G`) found rayon's per-call dispatch
-//! overhead exceeding the arithmetic itself there, the same finding as
-//! `simplex.rs`'s per-pivot loops (see `solve_lp_dual_on`'s module docs).
-//! `compute`'s own column-norm fold — by far the largest single cost in
-//! this crate's presolve pipeline at that same target size (measured at
-//! ~38% of total presolve time before this file's sequential rewrite) —
-//! picks sequential vs. `rayon` once per call from `RAYON_SIZE_THRESHOLD`
-//! (own docs), replacing an earlier run-both-and-time self-calibration:
-//! this crate's own microbenchmark never found `rayon` beating a plain
-//! sequential fold at any size tried, up to 4,000,000 rows, so the live
-//! race was pure overhead for a decision with a fixed, always-the-same
-//! answer at every problem size this crate has ever actually measured.
+//! 変数と制約行を対角行列で再スケールし、`[A; G]` の各行・各列の無限大ノルムを
+//! ほぼ 1 に揃えて、単体法の LU 系 (および内点法の KKT 系) の条件数を改善する。
+//! `presolve::run_extended()` 1 回につき 1 度だけ、元データ上で計算する。
+//!
+//! スケール後の問題は `x = D x'`, `A' = diag(e_a) A diag(d)`, `b' = diag(e_a) b`,
+//! `G' = diag(e_g) G diag(d)`, `h' = diag(e_g) h`, `c' = diag(d) c`。
+//! 対角変換なので実行可能性・有界性は変わらず、`x = diag(d) x'` で元の解に戻る。
+//!
+//! 並列化: `apply`/`unscale_x` は常に逐次。`compute` の列ノルム集計だけは
+//! 行数が [`RAYON_SIZE_THRESHOLD`] を超えたら rayon 版を使う。
 
 use crate::sparse::{Csr, CsrRowBuilder, csr_from_rows, csr_row_iter};
-use crate::params::presolve::RAYON_SIZE_THRESHOLD;
+use crate::params::presolve::{RAYON_SIZE_THRESHOLD, SCALE_NOBOUNDS, SCALE_UNIT_FAST, SCALING_ZERO_TOL};
 
+/// スケーリング係数一式。
 pub struct Scaling {
+    /// 列 (変数) スケール `d_j` (長さ n)。`x = d ∘ x'`。
     pub d: Vec<f64>,
+    /// 等式行 (A) のスケール `e_a_i` (長さ p)。
     pub e_a: Vec<f64>,
+    /// 不等式行 (G) のスケール `e_g_i` (長さ m)。
     pub e_g: Vec<f64>,
 }
 
-/// The per-row-subset half of the column-norm fold: folds `rows` of `mat`
-/// (scaled by `d` and that row's own `e`) into a length-`n` buffer via
-/// elementwise max. Shared by the `A` and `G` accumulations in `compute`.
-/// Sequential, not rayon — see `compute`'s own docs.
+/// 列ノルム集計 (逐次版): `mat` の `rows` の各要素 `|v * d_j * e_i|` を
+/// 列ごとの最大値として `acc` (長さ n) に畳み込む。A と G の両方で使う。
 fn col_norm_fold(mat: faer::sparse::SparseRowMatRef<usize, f64>, d: &[f64], e: &[f64], rows: std::ops::Range<usize>, acc: &mut [f64]) {
     for i in rows {
         let ei = e[i];
@@ -56,11 +38,10 @@ fn col_norm_fold(mat: faer::sparse::SparseRowMatRef<usize, f64>, d: &[f64], e: &
     }
 }
 
-/// `e[i] <- e[i] / sqrt(max_j |v_ij * d_j * e[i]|)` for every row of `mat`
-/// (skipped when that max is at most the zero tolerance) — the row-norm
-/// half of one Ruiz iteration, over the raw CSR slices.
+/// Ruiz 反復の行側の更新: `mat` の全行で
+/// `e[i] <- e[i] / sqrt(max_j |v_ij * d_j * e[i]|)` (最大値がゼロ判定閾値以下なら据え置き)。
 fn row_norm_update(mat: faer::sparse::SparseRowMatRef<usize, f64>, d: &[f64], e: &mut [f64]) {
-    let zero_tol = tunable!("ENOMOTO_T_SCALING_ZERO_TOL", 1e-12, f64);
+    let zero_tol = tunable!("ENOMOTO_T_SCALING_ZERO_TOL", SCALING_ZERO_TOL, f64);
     for (i, e) in e.iter_mut().enumerate() {
         let old_e = *e;
         let mut row_norm = 0.0f64;
@@ -73,25 +54,14 @@ fn row_norm_update(mat: faer::sparse::SparseRowMatRef<usize, f64>, d: &[f64], e:
     }
 }
 
-/// Same fold as `col_norm_fold`, via rayon: a per-thread local buffer
-/// (fold) merged by elementwise max (reduce) — merging needed because
-/// different rows can update the same column `j`, so a naive
-/// `par_iter_mut` over `acc` would race. Only ever invoked by `compute`'s
-/// own self-calibration, never on its own, so it always starts from an
-/// all-zero `acc` in practice; written to merge into whatever `acc`
-/// already holds anyway; matching `col_norm_fold`'s own contract exactly.
+/// `col_norm_fold` の rayon 版: スレッドごとの局所バッファに畳み込み (fold)、
+/// 要素ごとの max で統合 (reduce) してから `acc` に反映する。
+/// 異なる行が同じ列を更新しうるので、`acc` を直接並列更新はできない。
 fn col_norm_fold_parallel(mat: faer::sparse::SparseRowMatRef<usize, f64>, d: &[f64], e: &[f64], rows: std::ops::Range<usize>, acc: &mut [f64]) {
     use rayon::prelude::*;
     let n = acc.len();
-    // Each fold/reduce leaf allocates and later merges an O(n) buffer, so
-    // an unbounded split (rayon's default for a plain range with no
-    // length hint keeps splitting under work-stealing, not just once per
-    // thread) makes the O(n) merge cost dominate at just a few thousand
-    // rows — measured directly making this ~500x slower than sequential
-    // at 200,000 rows before `with_min_len` was added. Bounding the chunk
-    // size to roughly rows/threads caps the number of leaves at the
-    // thread count, so the merge overhead stays O(threads * n) instead of
-    // O(rows * n).
+    // 葉ごとに O(n) のバッファを確保・統合するので、分割数をスレッド数程度に
+    // 抑える (チャンク長 ≈ 行数 / スレッド数)。統合コストは O(threads * n)。
     let n_rows = rows.end - rows.start;
     let min_len = (n_rows / rayon::current_num_threads().max(1)).max(1);
     let folded = rows.into_par_iter().with_min_len(min_len).fold(
@@ -124,10 +94,14 @@ fn col_norm_fold_parallel(mat: faer::sparse::SparseRowMatRef<usize, f64>, d: &[f
     }
 }
 
+/// Ruiz 均衡化のスケール係数を計算する。`iters` は Ruiz 反復回数。
+/// 目的係数 `c` も列ノルムに含める。
 pub fn compute(n: usize, a: &Csr, g: &Csr, c: &[f64], iters: usize) -> Scaling {
-    compute_impl(n, a, g, c, iters, tunable!("ENOMOTO_T_SCALE_UNIT_FAST", 1, usize) != 0)
+    compute_impl(n, a, g, c, iters, tunable!("ENOMOTO_T_SCALE_UNIT_FAST", SCALE_UNIT_FAST, usize) != 0)
 }
 
+/// [`compute`] の本体。`unit_fast` が真なら G の単一要素行 (箱制約行) を
+/// 専用リストで処理する高速経路を使う (結果は通常経路とビット一致)。
 fn compute_impl(n: usize, a: &Csr, g: &Csr, c: &[f64], iters: usize, unit_fast: bool) -> Scaling {
     let p = a.nrows();
     let m = g.nrows();
@@ -138,22 +112,16 @@ fn compute_impl(n: usize, a: &Csr, g: &Csr, c: &[f64], iters: usize, unit_fast: 
     let ar = a.as_ref();
     let gr = g.as_ref();
 
+    // 各列のスケール済み最大絶対値 (Ruiz 反復ごとに再計算)。
     let mut col_norm = vec![0.0f64; n];
 
-    // Decided once from the combined row count against
-    // `RAYON_SIZE_THRESHOLD` — see that constant's own docs for why this
-    // replaced an earlier run-both-and-time self-calibration.
+    // 列ノルム集計を rayon で行うか (A+G の行数で一度だけ決める)。
     let use_parallel_fold = (p + m) > tunable!("ENOMOTO_T_SCALING_RAYON_SIZE_THRESHOLD", RAYON_SIZE_THRESHOLD, usize);
 
-    // `ENOMOTO_T_SCALE_NOBOUNDS=1` (default 0 = off, the historical
-    // behaviour): leave `g`'s single-entry rows (the box-bound rows
-    // `build_a_g` adds per finite bound — on e.g. `fit2d` 99% of `g`) out
-    // of the Ruiz iteration entirely, so they neither pull on `d` nor get
-    // scanned every iteration, and give each one the closed-form row scale
-    // `1/|v * d_j|` afterwards (a bound row's own Ruiz fixed point: its
-    // scaled coefficient becomes +-1, i.e. the plain bound on `x'_j`).
-    // Changes the scale factors, hence the numerical path.
-    if tunable!("ENOMOTO_T_SCALE_NOBOUNDS", 0, usize) != 0 {
+    // 実験用 (既定オフ): G の単一要素行 (箱制約行) を Ruiz 反復から除外し、
+    // 最後に閉形式のスケール `1/|v * d_j|` を与える。スケール係数が変わるので数値経路も変わる。
+    if tunable!("ENOMOTO_T_SCALE_NOBOUNDS", SCALE_NOBOUNDS, usize) != 0 {
+        // G の多変数行の番号。
         let multi: Vec<usize> = (0..m).filter(|&i| gr.col_indices_of_row_raw(i).len() > 1).collect();
         for _ in 0..iters {
             col_norm.fill(0.0);
@@ -168,12 +136,12 @@ fn compute_impl(n: usize, a: &Csr, g: &Csr, c: &[f64], iters: usize, unit_fast: 
                 }
             }
             for j in 0..n {
-                if col_norm[j] > tunable!("ENOMOTO_T_SCALING_ZERO_TOL", 1e-12, f64) {
+                if col_norm[j] > tunable!("ENOMOTO_T_SCALING_ZERO_TOL", SCALING_ZERO_TOL, f64) {
                     d[j] /= col_norm[j].sqrt();
                 }
             }
             row_norm_update(ar, &d, &mut e_a);
-            let zero_tol = tunable!("ENOMOTO_T_SCALING_ZERO_TOL", 1e-12, f64);
+            let zero_tol = tunable!("ENOMOTO_T_SCALING_ZERO_TOL", SCALING_ZERO_TOL, f64);
             for &i in &multi {
                 let old_e = e_g[i];
                 let mut row_norm = 0.0f64;
@@ -189,7 +157,7 @@ fn compute_impl(n: usize, a: &Csr, g: &Csr, c: &[f64], iters: usize, unit_fast: 
             let cols = gr.col_indices_of_row_raw(i);
             if cols.len() == 1 {
                 let s = (gr.values_of_row(i)[0] * d[cols[0]]).abs();
-                if s > tunable!("ENOMOTO_T_SCALING_ZERO_TOL", 1e-12, f64) && s.is_finite() {
+                if s > tunable!("ENOMOTO_T_SCALING_ZERO_TOL", SCALING_ZERO_TOL, f64) && s.is_finite() {
                     e_g[i] = 1.0 / s;
                 }
             }
@@ -197,20 +165,17 @@ fn compute_impl(n: usize, a: &Csr, g: &Csr, c: &[f64], iters: usize, unit_fast: 
         return Scaling { d, e_a, e_g };
     }
 
-    // Sequential path: `G`'s single-entry rows (the bound rows `build_a_g`
-    // adds, often most of `G`) go through a flat `(column, coefficient)`
-    // list instead of the CSR walk, and a row whose column and `|v|` equal
-    // the previous single-entry row's (a variable's `ub` row followed by its
-    // `lb` row: `(j, 1.0)`, `(j, -1.0)`) shares that row's scale — both
-    // start at 1 and every update reads only `|v * d_j * e|`, so their
-    // factors are equal bit for bit at every iteration. The column-norm
-    // fold is a max (order-free), and row updates are per row, so this
-    // computes exactly the same `d`/`e_a`/`e_g` as the plain loop below.
+    // 逐次の高速経路: G の単一要素行 (箱制約行) を CSR 走査でなく
+    // `(行, 列, 係数)` の平坦なリストで処理し、直前の単一要素行と列・|係数| が
+    // 同じ行 (ub 行に続く lb 行など) はそのスケールを共有する (常にビット一致するため)。
+    // 列ノルムは max なので順序非依存であり、結果は下の通常ループと完全に一致する。
     if !use_parallel_fold && unit_fast {
-        let zero_tol = tunable!("ENOMOTO_T_SCALING_ZERO_TOL", 1e-12, f64);
+        let zero_tol = tunable!("ENOMOTO_T_SCALING_ZERO_TOL", SCALING_ZERO_TOL, f64);
+        // G の多変数行の番号。
         let mut multi: Vec<usize> = Vec::new();
-        // Leaders: (row, column, coefficient); `follow[k] = leader index`.
+        // 代表となる単一要素行 `(行, 列, 係数)`。
         let mut unit: Vec<(usize, usize, f64)> = Vec::new();
+        // スケールを代表に従わせる行 `(行, unit 内の代表の添字)`。
         let mut follow: Vec<(usize, usize)> = Vec::new();
         for i in 0..m {
             let cols = gr.col_indices_of_row_raw(i);
@@ -224,6 +189,7 @@ fn compute_impl(n: usize, a: &Csr, g: &Csr, c: &[f64], iters: usize, unit_fast: 
                 multi.push(i);
             }
         }
+        // `unit` の各代表行のスケール (最後に e_g へ書き戻す)。
         let mut ue = vec![1.0f64; unit.len()];
         for _ in 0..iters {
             col_norm.fill(0.0);
@@ -282,6 +248,7 @@ fn compute_impl(n: usize, a: &Csr, g: &Csr, c: &[f64], iters: usize, unit_fast: 
         return Scaling { d, e_a, e_g };
     }
 
+    // 通常経路: CSR をそのまま走査する Ruiz 反復。
     for _ in 0..iters {
         col_norm.fill(0.0);
         if use_parallel_fold {
@@ -299,13 +266,12 @@ fn compute_impl(n: usize, a: &Csr, g: &Csr, c: &[f64], iters: usize, unit_fast: 
         }
 
         for j in 0..n {
-            if col_norm[j] > tunable!("ENOMOTO_T_SCALING_ZERO_TOL", 1e-12, f64) {
+            if col_norm[j] > tunable!("ENOMOTO_T_SCALING_ZERO_TOL", SCALING_ZERO_TOL, f64) {
                 d[j] /= col_norm[j].sqrt();
             }
         }
 
-        // Row-norm updates: row `i`'s own coefficients only, writing only
-        // `e_a[i]`/`e_g[i]`.
+        // 行側の更新 (各行は自分の e のみを書き換える)。
         row_norm_update(ar, &d, &mut e_a);
         row_norm_update(gr, &d, &mut e_g);
     }
@@ -313,13 +279,13 @@ fn compute_impl(n: usize, a: &Csr, g: &Csr, c: &[f64], iters: usize, unit_fast: 
     Scaling { d, e_a, e_g }
 }
 
+/// スケーリングを問題データに適用し、`(A', G', b', h', c')` を返す。
 pub fn apply(scaling: &Scaling, a: &Csr, g: &Csr, b: &[f64], h: &[f64], c: &[f64]) -> (Csr, Csr, Vec<f64>, Vec<f64>, Vec<f64>) {
     let n = scaling.d.len();
     let p = a.nrows();
     let m = g.nrows();
 
-    // Each row's rescaled entries are independent of every other row —
-    // sequential nonetheless, per this module's own parallelization note.
+    // 行ごとに独立だが逐次で処理する (モジュール冒頭の並列化の注記を参照)。
     let a_scaled = scale_rows(a, &scaling.e_a, &scaling.d, n);
     let g_scaled = scale_rows(g, &scaling.e_g, &scaling.d, n);
     debug_assert_eq!(a_scaled.nrows(), p);
@@ -331,11 +297,9 @@ pub fn apply(scaling: &Scaling, a: &Csr, g: &Csr, b: &[f64], h: &[f64], c: &[f64
     (a_scaled, g_scaled, b_scaled, h_scaled, c_scaled)
 }
 
-/// `csr_from_rows` of the rows `(j, v * e[i] * d[j])`, written straight
-/// into a [`CsrRowBuilder`] through one reused row buffer instead of a
-/// `Vec` per row (the builder applies `csr_from_rows`'s own zero-dropping
-/// and sorting, so the result is the same matrix bit for bit; a row the
-/// builder rejects falls back to the original construction).
+/// 各要素を `v * e[i] * d[j]` に置き換えた行列を作る。[`CsrRowBuilder`] に
+/// 使い回しの行バッファで直接書き込む (`csr_from_rows` と同一の結果)。
+/// ビルダーが行を受け付けない場合は `csr_from_rows` での構築に切り替える。
 fn scale_rows(mat: &Csr, e: &[f64], d: &[f64], n: usize) -> Csr {
     let r = mat.as_ref();
     let rows = r.nrows();
@@ -354,11 +318,8 @@ fn scale_rows(mat: &Csr, e: &[f64], d: &[f64], n: usize) -> Csr {
     builder.finish()
 }
 
-/// Recovers the original-problem solution `x = diag(d) x'` from a solve
-/// performed on the scaled problem's `x'` — the inverse of what `apply`
-/// did to the variables, applied once at the very end after either
-/// engine's main loop converges (not needed at any point during the loop
-/// itself, which works entirely in scaled space).
+/// スケール後の解 `x'` から元の問題の解 `x = diag(d) x'` を復元する
+/// (求解終了後に一度だけ呼ぶ)。
 pub fn unscale_x(scaling: &Scaling, x: &[f64]) -> Vec<f64> {
     x.iter().zip(&scaling.d).map(|(v, d)| v * d).collect()
 }
@@ -367,9 +328,8 @@ pub fn unscale_x(scaling: &Scaling, x: &[f64]) -> Vec<f64> {
 mod tests {
     use super::*;
 
-    /// The single-entry-row fast path must give exactly the plain loop's
-    /// factors (bit for bit), with bound-row pairs, lone bound rows,
-    /// scaled singleton constraints, empty rows and multi-entry rows.
+    /// 単一要素行の高速経路が通常ループとビット単位で同じ係数を出すことを、
+    /// 箱制約行の対・単独の箱制約行・係数付き単一行・空行・多変数行を含む乱数問題で確認する。
     #[test]
     fn unit_fast_path_matches_plain_loop_bit_for_bit() {
         let mut state: u64 = 0x5eed_1234_abcd_ef01;
@@ -421,12 +381,9 @@ mod tests {
         }
     }
 
-    /// Same purpose as `simplex.rs`'s `rayon_threshold_microbench`, timing
-    /// `col_norm_fold` vs `col_norm_fold_parallel` on synthetic sparse
-    /// matrices of increasing row count (~5 nonzeros/row, similar density
-    /// to this crate's real problem data). `#[ignore]`d by default; run
-    /// with `cargo test --release col_norm_fold_rayon_threshold_microbench
-    /// -- --ignored --nocapture`.
+    /// `col_norm_fold` と `col_norm_fold_parallel` の所要時間を行数を変えて比較する
+    /// マイクロベンチ (1 行あたり約 5 非零)。既定では `#[ignore]`。実行は
+    /// `cargo test --release col_norm_fold_rayon_threshold_microbench -- --ignored --nocapture`。
     #[test]
     #[ignore]
     fn col_norm_fold_rayon_threshold_microbench() {

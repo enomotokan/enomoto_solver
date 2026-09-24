@@ -1,67 +1,38 @@
-//! Removes redundant equality-constraint rows from `(A, b)`, run once (on
-//! the Ruiz-scaled problem) before either engine's main loop starts —
-//! shared by `interior_point.rs` and `simplex.rs` via `presolve::run_extended`.
-//! [`reduce_inequalities`]'s own duplicate-row pass over `(G, h)` is the
-//! exception: cheap enough (a single hash scan, no linear algebra) that
-//! `run_extended`'s own round loop calls it again at the end of every outer
-//! round, not just once here — see that call site's own docs for why (in
-//! short: `doubleton`/`colsingleton` substitution can turn two originally-
-//! distinct inequality rows into duplicates only *after* this pre-loop call
-//! already ran).
+//! 冗長な制約行の除去(プリソルブ)。
 //!
-//! Two passes:
-//!  1. **Direct duplicate detection**: a row that is an exact or
-//!     scalar-multiple duplicate of an already-kept row (same coefficient
-//!     pattern up to one scalar, including the right-hand side) is dropped.
-//!     This is a cheap hash comparison, no linear algebra.
-//!  2. **Rank-revealing elimination**, via *either* of two implementations
-//!     chosen per-call by [`reduce_equalities`] (see its own docs for the
-//!     dispatch rule): dense column-pivoted QR ([`drop_linearly_dependent`])
-//!     or sparse Gaussian elimination ([`drop_linearly_dependent_sparse_blocked`],
-//!     picking at each step the column carrying the most numerical weight
-//!     and, within it, the largest-magnitude row as pivot, mirroring dense
-//!     QR's own strategy). Both answer the identical question — a row
-//!     whose residual after eliminating every previously-kept row's pivot
-//!     is negligible relative to its own original norm is a linear
-//!     combination of the others — just via different arithmetic paths,
-//!     each cheap in the regime the other is expensive in. The sparse path
-//!     is itself a thin wrapper ([`drop_linearly_dependent_sparse_blocked`])
-//!     around the core per-block algorithm ([`drop_linearly_dependent_sparse`]):
-//!     a Dulmage-Mendelsohn-style block-triangularization pre-pass
-//!     ([`dulmage_mendelsohn_blocks`], via a maximum bipartite matching plus
-//!     Tarjan strongly-connected-components) first splits the system into
-//!     sub-problems — some real Netlib instances decompose into dozens of
-//!     near-identical-size blocks this way (one per vessel/route/period in
-//!     a multi-period scheduling LP), and instances that share no exploitable
-//!     structure by plain column-disjointness alone still often decompose
-//!     into hundreds of much smaller blocks once the matching's dependency
-//!     structure is taken into account — which are then solved, and above a
-//!     total-size threshold dispatched via `rayon`: unlike using this same
-//!     decomposition for LU factorization or solving, redundancy detection
-//!     only ever asks a *local* per-row question ("is this row exactly some
-//!     combination of these specific other rows?"), which holds
-//!     unconditionally once verified — so every block here is safe to check
-//!     independently and in any order, including concurrently, with no
-//!     triangular ordering dependency to respect (see
-//!     [`dulmage_mendelsohn_blocks`]'s own docs for the full argument).
+//! 等式制約 `(A, b)` については、Ruiz スケーリング後の問題に対して
+//! `presolve::run_extended` から主ループ開始前に一度だけ呼ばれる
+//! (内点法・単体法の両エンジン共通)。不等式制約 `(G, h)` の重複行除去
+//! [`reduce_inequalities`] は安価なハッシュ走査なので、`run_extended` の
+//! 外側ラウンドの最後にも毎回呼ばれる(代入系の手法が後から重複行を
+//! 生むことがあるため)。
 //!
-//! **Parallelization**: extracting each row's coefficients out of the CSR
-//! `A`/`G` (below) is independent per row, but runs sequentially rather
-//! than via rayon — profiling on this crate's target problem sizes found
-//! rayon's per-call dispatch overhead exceeding the cost of this simple
-//! scan (the same finding as `scaling.rs`'s and `simplex.rs`'s own
-//! per-iteration loops; see `simplex.rs`'s `solve_lp_dual_on` module
-//! docs). Step 1 (`dedupe_rows`) is a single sequential scan over a
-//! shared `HashSet` by design regardless — which duplicate of an equal
-//! pair survives depends on scan order, so parallelizing it would make
-//! that choice (immaterial to correctness, since the kept row is an
-//! exact/scalar-multiple of the dropped one either way) nondeterministic
-//! between runs.
+//! 等式側は 2 段階:
+//!  1. **重複行の直接検出** ([`dedupe_rows`]): 右辺も含めて既存の行の
+//!     完全一致またはスカラー倍である行を落とす。ハッシュ比較のみで
+//!     線形代数は使わない。逐次走査なのは、どちらの行が残るかを実行ごとに
+//!     決定的にするため。
+//!  2. **ランク判定による一次従属行の除去**: 行密度に応じて
+//!     [`reduce_equalities`] が次のどちらかを選ぶ。
+//!     - 密な列ピボット付き QR ([`drop_linearly_dependent`])
+//!     - 疎なガウス消去 ([`drop_linearly_dependent_sparse_blocked`] →
+//!       ブロックごとに [`drop_linearly_dependent_sparse`])。事前に
+//!       Dulmage-Mendelsohn 型ブロック分解 ([`dulmage_mendelsohn_blocks`]:
+//!       最大二部マッチング + Tarjan の強連結成分分解)で小問題に分け、
+//!       総行数が閾値以上なら `rayon` で並列に処理する。冗長性判定は
+//!       各行について局所的な恒等式の確認にすぎないので、ブロックは
+//!       任意の順序・並列で独立に調べてよい(見落としはあり得るが、
+//!       独立な行を誤って落とすことはない)。
+//!
+//!     どちらも「既に残した行で消去した後の残差が、その行自身の元の
+//!     ノルムに比べて無視できる行は他の行の一次結合である」という同じ
+//!     判定を行う。右辺を追加の列として扱うので、係数だけ従属で右辺が
+//!     矛盾する行(実行不能)は落とさずに残す。
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
-use crate::params::presolve::{DENSE_DENSITY_THRESHOLD, DEP_TOL, MIN_ROWS_FOR_BLOCK_DECOMPOSE, PARALLEL_DECOMPOSE_ROW_THRESHOLD, PIVOT_STABILITY};
+use crate::params::presolve::{DENSE_DENSITY_THRESHOLD, DEP_TOL, MIN_ROWS_FOR_BLOCK_DECOMPOSE, PARALLEL_DECOMPOSE_ROW_THRESHOLD, PIVOT_STABILITY, REDEQ_QR_RANK_TOL};
 #[cfg(test)]
 use std::collections::HashSet;
 use std::collections::VecDeque;
@@ -73,46 +44,35 @@ use faer::{Mat, Parallelism};
 
 use crate::presolve::smallcoeff;
 use crate::sparse::{Csr, CsrRowBuilder, csr_from_rows, csr_is_canonical, csr_row_iter, csr_row_vec};
-/// Measurement counters answering "would a dedicated block-triangularization
-/// pre-pass (Dulmage-Mendelsohn / BTF, exposing structurally-forced 1x1
-/// pivots before elimination starts, the way `simplex::lu`'s own
-/// `PROF_TOTAL_STEPS`/`PROF_TRIVIAL_STEPS` counters investigated for the
-/// basis LU) help [`drop_linearly_dependent_sparse`] the same way it was
-/// found *not* to help there — see this module's own `ENOMOTO_PROF_REDUNDANCY`
-/// diagnostic (`presolve.rs`'s `reduce_equalities` call site) for the
-/// answer. A step is "trivial" under the identical definition
-/// `simplex::lu::MarkowitzState::find_best_pivot` uses: the winning
-/// `(row_degree - 1) * (col_degree - 1)` Markowitz score is `0`, i.e. a
-/// structurally forced pivot a BTF pre-pass would also have found for free.
+/// 計測用カウンタ: [`drop_linearly_dependent_sparse`] が実行したピボット
+/// ステップの総数(`ENOMOTO_PROF_REDUNDANCY` 診断で `presolve.rs` が読む)。
 pub(crate) static PROF_TOTAL_STEPS: AtomicUsize = AtomicUsize::new(0);
+/// 計測用カウンタ: そのうち Markowitz スコア
+/// `(row_degree - 1) * (col_degree - 1)` が 0 だった「自明な」ステップ数
+/// (BTF 前処理でも見つかる構造的に強制されたピボット。
+/// `simplex::lu::MarkowitzState::find_best_pivot` と同じ定義)。
 pub(crate) static PROF_TRIVIAL_STEPS: AtomicUsize = AtomicUsize::new(0);
 
-/// Returns a reduced `(A, b)` with duplicate/linearly-dependent equality
-/// rows removed.
+/// 等式制約 `(A, b)` から重複行と一次従属行を取り除いた `(A', b')` を返す。
 ///
-/// Dispatches to whichever of [`drop_linearly_dependent`] (dense
-/// column-pivoted QR) or [`drop_linearly_dependent_sparse`] (sparse
-/// Gaussian elimination) is expected to be cheaper for this problem's
-/// shape — see [`DENSE_DENSITY_THRESHOLD`]'s own docs for the rule and the
-/// real Netlib instances that motivated it.
+/// 重複除去 ([`dedupe_rows`]) の後、行密度が
+/// [`DENSE_DENSITY_THRESHOLD`] を超えれば密 QR ([`drop_linearly_dependent`])、
+/// そうでなければ疎ガウス消去 ([`drop_linearly_dependent_sparse_blocked`])
+/// でランク判定する。
 ///
-/// `lb`/`ub` are used only by the sparse path's own
-/// [`dulmage_mendelsohn_blocks`] block-decomposition pre-pass, to decide
-/// which structural edges a negligible coefficient should be left out of
-/// (see that function's own docs) — never to touch `a`/`b` themselves.
-/// Dropping an edge here is safe regardless of how accurate `lb`/`ub` are
-/// (see that same function's docs on why it only costs recall, never
-/// soundness), so passing the model's raw, not-yet-propagated bounds —
-/// this runs before presolve's own bound-tightening rounds start — is
-/// fine: staler/wider bounds just make the negligibility test fire less
-/// often, i.e. a more conservative (coarser, never incorrect) split than
-/// the fully-tightened bounds would give.
+/// - `n`: 変数(列)数。
+/// - `lb`/`ub`: 変数の下限・上限。疎経路のブロック分解
+///   ([`dulmage_mendelsohn_blocks`]) で、無視できる小係数を二部グラフの
+///   辺から外す判定にだけ使う。`a`/`b` 自体は変更しない。緩い(未伝播の)
+///   境界を渡しても分割が粗くなるだけで正しさは損なわれない。
 pub fn reduce_equalities(a: &Csr, b: &[f64], n: usize, lb: &[f64], ub: &[f64]) -> (Csr, Vec<f64>) {
+    // 等式行数
     let p = a.nrows();
     if p == 0 {
         return (csr_from_rows(&[], n), Vec::new());
     }
 
+    // (行の疎係数, 右辺) の組に展開
     let rows: Vec<(Vec<(usize, f64)>, f64)> = (0..p)
         .map(|i| {
             let row: Vec<(usize, f64)> = csr_row_vec(a, i);
@@ -121,8 +81,10 @@ pub fn reduce_equalities(a: &Csr, b: &[f64], n: usize, lb: &[f64], ub: &[f64]) -
         .collect();
 
     let deduped = dedupe_rows(rows);
+    // 重複除去後の行密度(非零数 / (行数 × 列数))で密・疎経路を選ぶ
     let nnz: usize = deduped.iter().map(|(row, _)| row.len()).sum();
     let density = nnz as f64 / (deduped.len() as f64 * n.max(1) as f64);
+    // 残す行の(deduped 内)インデックス
     let keep = if density > tunable!("ENOMOTO_T_DENSE_DENSITY_THRESHOLD", DENSE_DENSITY_THRESHOLD, f64) {
         drop_linearly_dependent(&deduped, n)
     } else {
@@ -138,9 +100,9 @@ pub fn reduce_equalities(a: &Csr, b: &[f64], n: usize, lb: &[f64], ub: &[f64]) -
     (csr_from_rows(&new_rows, n), new_b)
 }
 
-/// [`reduce_equalities`]' duplicate-row step alone ([`dedupe_rows`]), with
-/// no rank detection — what `run_extended` runs by default (see
-/// `ENOMOTO_REDEQ_MODE` there).
+/// [`reduce_equalities`] の重複行除去 ([`dedupe_rows`]) だけを行い、
+/// ランク判定はしない版。`run_extended` の既定動作
+/// (`ENOMOTO_REDEQ_MODE` で切替)。
 pub fn dedupe_equalities(a: &Csr, b: &[f64], n: usize) -> (Csr, Vec<f64>) {
     let p = a.nrows();
     if p == 0 {
@@ -152,32 +114,30 @@ pub fn dedupe_equalities(a: &Csr, b: &[f64], n: usize) -> (Csr, Vec<f64>) {
     (csr_from_rows(&rows, n), rhs)
 }
 
-/// Step 1: drops exact or scalar-multiple duplicate rows, by normalizing
-/// each row (and its RHS) by its first coefficient and hashing the bit
-/// pattern of the result. A structurally empty row (`0 = rhs`) is dropped
-/// outright when `rhs` is also (bit-exactly) zero — a trivially redundant
-/// `0 = 0` row; a nonzero RHS on an empty row is kept so the Farkas
-/// infeasibility certificate downstream still sees (and reports) it.
+/// 段階 1: 完全一致またはスカラー倍の重複行を落とし、残った行を入力順で返す。
+///
+/// 各行(と右辺)を先頭係数で割って正規化し、そのビット列をハッシュして
+/// 比較する(符号も含めて割るので、負のスカラー倍も同一視される。等式
+/// なので問題ない)。構造的に空の行は、右辺がビット単位で 0 (`0 = 0`) なら
+/// 落とし、非零なら下流の Farkas 実行不能判定のために残す。
+///
+/// 判定結果はテスト用の単純版 `dedupe_rows_reference` と完全に一致する。
 fn dedupe_rows(rows: Vec<(Vec<(usize, f64)>, f64)>) -> Vec<(Vec<(usize, f64)>, f64)> {
-    // Same decisions as keying a `HashSet` on the normalized signature
-    // `[(j, bits(v/pivot))..., (usize::MAX, bits(rhs/pivot))]` (kept below
-    // as `dedupe_rows_reference` for the equivalence test), but without
-    // materializing each signature as its own `Vec` and SipHash-ing it:
-    // the signature is hashed on the fly (the same multiplicative mix
-    // `reduce_inequalities` uses) and a hash hit is confirmed by
-    // recomputing the kept row's signature — normalization is
-    // deterministic — and comparing it entry by entry.
+    // 正規化済みシグネチャをその場でハッシュし、ハッシュ一致時は残した行の
+    // シグネチャを再計算して要素ごとに照合する。
+    /// ハッシュ値 `hash` に 64 ビット値 `x` を混ぜ込む乗算型ミキサ。
     #[inline]
     fn mix(hash: u64, x: u64) -> u64 {
         (hash.rotate_left(5) ^ x).wrapping_mul(0x517c_c1b7_2722_0a95)
     }
+    // ハッシュ値 -> そのハッシュを持つ連鎖の先頭 (`chain` の添字)
     let mut heads: HashMap<u64, usize, std::hash::BuildHasherDefault<IdentityU64Hasher>> = HashMap::with_capacity_and_hasher(rows.len(), Default::default());
-    // Per kept row: its inverse pivot and the next kept row in the same
-    // hash chain.
+    // 残した(空でない)行ごとに: (先頭係数の逆数, 同じハッシュ連鎖の次の要素。末尾は usize::MAX)
     let mut chain: Vec<(f64, usize)> = Vec::with_capacity(rows.len());
+    // 残した行(出力)
     let mut kept: Vec<(Vec<(usize, f64)>, f64)> = Vec::with_capacity(rows.len());
-    // `chain` is indexed like `kept` except for empty rows, which never
-    // enter a chain; `slot_of_chain[k]` maps chain entry -> `kept` index.
+    // 空行は連鎖に入らないので `chain` と `kept` の添字はずれる。
+    // `slot_of_chain[k]` は連鎖要素 k に対応する `kept` の添字。
     let mut slot_of_chain: Vec<usize> = Vec::with_capacity(rows.len());
     for (row, rhs) in rows {
         if row.is_empty() {
@@ -186,14 +146,17 @@ fn dedupe_rows(rows: Vec<(Vec<(usize, f64)>, f64)>) -> Vec<(Vec<(usize, f64)>, f
             }
             continue;
         }
+        // 正規化に使う先頭係数とその逆数
         let pivot = row[0].1;
         let inv = 1.0 / pivot;
         let mut hash = row.len() as u64;
         for &(j, v) in &row {
             hash = mix(mix(hash, j as u64), (v * inv).to_bits());
         }
+        // 正規化後の右辺のビット列
         let rhs_bits = (rhs * inv).to_bits();
         hash = mix(hash, rhs_bits);
+        // 同じハッシュの連鎖を先頭からたどり、正規化後に完全一致する行を探す
         let head = heads.get(&hash).copied().unwrap_or(usize::MAX);
         let mut cur = head;
         let mut dup = false;
@@ -219,8 +182,12 @@ fn dedupe_rows(rows: Vec<(Vec<(usize, f64)>, f64)>) -> Vec<(Vec<(usize, f64)>, f
     kept
 }
 
+/// テスト用の単純な参照実装: 正規化シグネチャ
+/// `[(j, bits(v/pivot))..., (usize::MAX, bits(rhs/pivot))]` を `HashSet` に
+/// 入れて重複判定する。[`dedupe_rows`] と同じ結果になるべきもの。
 #[cfg(test)]
 fn dedupe_rows_reference(rows: Vec<(Vec<(usize, f64)>, f64)>) -> Vec<(Vec<(usize, f64)>, f64)> {
+    // 既出の正規化シグネチャ
     let mut seen: HashSet<Vec<(usize, u64)>> = HashSet::new();
     let mut kept = Vec::with_capacity(rows.len());
     for (row, rhs) in rows {
@@ -241,29 +208,25 @@ fn dedupe_rows_reference(rows: Vec<(Vec<(usize, f64)>, f64)>) -> Vec<(Vec<(usize
     kept
 }
 
-/// Rank-revealing alternative to [`drop_linearly_dependent_sparse`]:
-/// returns the indices into `rows` of a maximal linearly independent
-/// subset, found via column-pivoted QR of the dense `(n+1) x p` matrix
-/// whose columns are `rows`' own coefficients (plus one extra row for the
-/// RHS, at index `n`). Cost is a fixed `O((n+1) * p^2)` regardless of how
-/// dense or sparse `rows` actually are — see [`DENSE_DENSITY_THRESHOLD`]'s
-/// own docs for when [`reduce_equalities`] picks this over the sparse
-/// method instead.
+/// 密な列ピボット付き QR によるランク判定。`rows` のうち極大な一次独立
+/// 部分集合の添字(昇順)を返す。
+///
+/// 各行を列とした `(n+1) x p` の密行列(最後の行 `n` は右辺)を QR 分解し、
+/// `|R[k,k]|`(それ以前のピボットを射影で除いた残差ノルム)がその行自身の
+/// 元のノルムの [`REDEQ_QR_RANK_TOL`] 倍以下なら従属とみなす。コストは
+/// 密度に関係なく `O((n+1) * p^2)`。行密度が [`DENSE_DENSITY_THRESHOLD`]
+/// を超えるときに [`reduce_equalities`] がこちらを選ぶ。
 fn drop_linearly_dependent(rows: &[(Vec<(usize, f64)>, f64)], n: usize) -> Vec<usize> {
     let p = rows.len();
     if p == 0 {
         return Vec::new();
     }
 
-    // Columns are [row coefficients ; rhs] (n+1 entries), not just the
-    // coefficients: a row whose *coefficients* are a linear combination of
-    // other rows' coefficients but whose *rhs* breaks that same
-    // combination is an inconsistency (the system is infeasible), not
-    // redundancy, and must not be dropped here — appending rhs as an extra
-    // coordinate makes such a row linearly independent in the augmented
-    // sense, so QR correctly keeps it (the existing Farkas-certificate
-    // infeasibility detection downstream is what reports it).
+    // 列は [行の係数 ; 右辺] の n+1 成分。係数は従属でも右辺が矛盾する行は
+    // (冗長ではなく実行不能なので)拡大した意味で独立となり、QR で残る。
+    // その報告は下流の Farkas 判定が行う。
     let aug_n = n + 1;
+    // 拡大係数行列(列 i = 行 i)。QR 後は上三角部分に R が入る
     let mut m = Mat::<f64>::zeros(aug_n, p);
     for (i, (row, rhs)) in rows.iter().enumerate() {
         for &(j, v) in row {
@@ -272,19 +235,17 @@ fn drop_linearly_dependent(rows: &[(Vec<(usize, f64)>, f64)], n: usize) -> Vec<u
         m[(n, i)] = *rhs;
     }
 
-    // Column-pivoted QR in place, explicitly sequential. `ColPivQr::new`
-    // would read faer's *global* parallelism (`Rayon(0)` with the `rayon`
-    // feature on), which for the sizes seen here (at most a few thousand x a
-    // few hundred) buys nothing: on a fresh process it is what first spins up
-    // rayon's global pool (4 thread spawns + per-thread arenas, ~0.5 ms), every
-    // later call pays the hand-off to the pool, and the parallel reduction
-    // order made `wood1p`'s dropped-row set vary from run to run. Only the
-    // diagonal of R (= the diagonal of the in-place factors) and the column
-    // permutation are needed below.
+    // 列ピボット付き QR をその場で、明示的に逐次 (`Parallelism::None`) で
+    // 実行する(並列版はこの規模では得がなく、縮約順序で結果が実行ごとに
+    // 揺れるため)。以下で使うのは R の対角と列置換だけ。
+    // R の対角長 = 判定できる最大ランク
     let size = aug_n.min(p);
     let blocksize = colpiv_qr::recommended_blocksize::<f64>(aug_n, p);
+    // Householder 係数の作業領域
     let mut householder = Mat::<f64>::zeros(blocksize, size);
+    // col_perm[k] = ピボット位置 k に来た元の列(=元の行)番号
     let mut col_perm = vec![0usize; p];
+    // その逆置換(未使用だが faer の API が要求する)
     let mut col_perm_inv = vec![0usize; p];
     let params = Default::default();
     colpiv_qr::qr_in_place(
@@ -298,133 +259,68 @@ fn drop_linearly_dependent(rows: &[(Vec<(usize, f64)>, f64)], n: usize) -> Vec<u
         )),
         params,
     );
-    let r = &m; // upper triangle holds R
-    let fwd = &col_perm;
+    let r = &m; // 上三角部分が R
+    // ピボット位置 -> 元の行番号
+    let pivot_to_row = &col_perm;
 
+    // 対角成分を持つピボット位置の数
     let rank_dim = size;
 
-    // Dependency is judged per row, relative to that row's *own* norm:
-    // `|R[k,k]|` is exactly the residual norm of pivot column `k` after
-    // projecting out every earlier pivot, so a row is (numerically) a
-    // combination of the rows chosen before it iff that residual is
-    // negligible *compared to the row itself*. An earlier version used one
-    // global threshold, `1e-10 * max(n+1, p) * max_k |R[k,k]|` — on a
-    // problem with ~1600 columns and a large appended-rhs coordinate that
-    // came to ~1e-2 in absolute terms, and it dropped equality rows whose
-    // genuine independent component was of that size (confirmed on Netlib
-    // `modszk1`/`ganges`: the solves then ended at points *violating* the
-    // dropped rows by ~1e-2, with objectives "better" than the true
-    // optimum). A tiny absolute floor still catches exact zeros.
+    // 従属判定は行ごとに、その行自身のノルムに対する相対値で行う:
+    // `|R[k,k]|` はピボット列 k から先行ピボットを射影で除いた残差ノルム。
+    // 1e-300 は完全な零行でのゼロ除算相当を避ける下限。
+    // 行 i の拡大ノルム ||[係数; 右辺]||_2
     let col_norm = |i: usize| -> f64 {
         let (row, rhs) = &rows[i];
         (row.iter().map(|&(_, v)| v * v).sum::<f64>() + rhs * rhs).sqrt()
     };
+    // keep[i] = 行 i を残すか
     let mut keep = vec![true; p];
     for k in 0..rank_dim {
-        let orig = fwd[k];
-        if r[(k, k)].abs() <= tunable!("ENOMOTO_T_REDEQ_QR_RANK_TOL", 1e-9, f64) * col_norm(orig).max(1e-300) {
+        let orig = pivot_to_row[k];
+        if r[(k, k)].abs() <= tunable!("ENOMOTO_T_REDEQ_QR_RANK_TOL", REDEQ_QR_RANK_TOL, f64) * col_norm(orig).max(1e-300) {
             keep[orig] = false;
         }
     }
-    // If p > aug_n, there can be at most aug_n independent rows: every
-    // pivot position beyond rank_dim never received a diagonal entry at
-    // all, so its row is necessarily redundant too.
-    for &orig in &fwd[rank_dim..] {
+    // p > aug_n のとき独立な行は高々 aug_n 本: rank_dim 以降のピボット位置は
+    // 対角成分を持たないので、その行は必ず従属。
+    for &orig in &pivot_to_row[rank_dim..] {
         keep[orig] = false;
     }
 
     (0..p).filter(|&i| keep[i]).collect()
 }
 
-/// Returns the indices into `rows` of a maximal linearly independent
-/// subset, via sparse Gaussian elimination over the `p` rows treated as
-/// sparse rows over `n+1` columns (the row's own coefficients plus one
-/// extra "virtual" column at index `n` for its RHS).
+/// 疎ガウス消去によるランク判定。`rows_in` のうち極大な一次独立部分集合の
+/// 添字(昇順)を返す。
 ///
-/// Columns are `[row coefficients ; rhs]` (`n+1` entries), not just the
-/// coefficients: a row whose *coefficients* are a linear combination of
-/// other rows' coefficients but whose *rhs* breaks that same combination
-/// is an inconsistency (the system is infeasible), not redundancy, and
-/// must not be dropped here — appending rhs as an extra coordinate makes
-/// such a row linearly independent in the augmented sense, so this
-/// correctly keeps it (the existing Farkas-certificate infeasibility
-/// detection downstream is what reports it).
+/// 各行を `n+1` 列上の疎行として扱う(列 `n` は右辺を表す仮想列)。
+/// 右辺を拡大列に含めるので、係数だけ従属で右辺が矛盾する行は独立と
+/// みなされて残る(実行不能の報告は下流の Farkas 判定が行う)。コストは
+/// 実際の fill-in に比例するので疎な問題向き。密な問題では
+/// [`drop_linearly_dependent`] が使われる。
 ///
-/// This exists alongside [`drop_linearly_dependent`] (dense QR), not in
-/// place of it: dense QR's own docs used to assume "`p` is expected to be
-/// small relative to `n`" and had no fallback when several real Netlib
-/// instances violate that badly (`ganges`: `n=1681`, `p=1284` equality
-/// rows — almost every constraint is an equality), which paid for it
-/// directly — dense QR there measured at >99% of `ganges`'s *entire*
-/// presolve time, dwarfing every other technique in this pipeline
-/// combined. This function instead treats each of the `p` rows as a
-/// native sparse row over `n+1` columns (the same RHS-augmentation trick
-/// dense QR uses, via a genuinely sparse map entry instead of a dense
-/// matrix row), so cost scales with actual nonzero fill rather than
-/// `n * p` — but that same fill-dependence is a liability of its own on a
-/// matrix that isn't actually sparse to begin with (`wood1p`: only
-/// `p=243` but 11% row density, an order of magnitude denser than every
-/// other measured instance — fill-in during elimination blew up to
-/// 962ms there, while dense QR's cost bound doesn't care about density at
-/// all). [`reduce_equalities`] picks between the two per call based on
-/// row density — see [`DENSE_DENSITY_THRESHOLD`]'s own docs.
+/// **ピボット選択**: Markowitz 次数の昇順バケット走査
+/// (`simplex::lu::MarkowitzState::find_best_pivot` と同様、fill-in 抑制)
+/// で候補を探すが、候補として受理するのは絶対値が行列全体の現在の最大
+/// 活性要素の [`PIVOT_STABILITY`] 倍以上のものだけ(列内の相対値では
+/// なく**全体**に対する閾値。ランク判定を正しく行うため)。
 ///
-/// **Pivot selection is a hybrid of dense `ColPivQr`'s numerical strategy
-/// and `simplex::lu::MarkowitzState`'s fill-minimizing one, not purely
-/// either**: candidates are still found via an ascending-Markowitz-degree
-/// bucket scan exactly like `find_best_pivot` (for fill control — see that
-/// function's own docs for why this keeps the scan sub-`O(m)` per step in
-/// the common case), but a candidate is only *acceptable* if its magnitude
-/// is within `PIVOT_STABILITY` of the current **global** maximum active
-/// entry anywhere in the matrix (tracked incrementally via `heap`/
-/// `col_bits` below, not rescanned from scratch each step) — not, as an
-/// earlier version of this function tried, relative only to its *own
-/// column's* current maximum.
-///
-/// That earlier, purely-local-threshold version is what `simplex::lu`'s
-/// own Markowitz factorization uses (appropriate for *solving*, where any
-/// non-negligible pivot is fine), but it does not work for *rank
-/// revelation*: a column's own max is trivially satisfied by its own max
-/// entry, so on real data (`ganges`) a low-degree column holding only
-/// small, easily-corrupted-by-cancellation entries got chosen as a pivot
-/// purely because it had few nonzeros, ahead of a column that was
-/// numerically dominant *matrix-wide* — three genuinely independent rows
-/// were misclassified as dependent as a result (confirmed by direct
-/// comparison against the dense reference; raising the local threshold
-/// had *no* effect, proving the bug was about which column got selected,
-/// not how strong the pivot was once one was chosen). A purely
-/// global-norm-maximizing version (no degree preference at all, matching
-/// dense QR's own strategy exactly) fixed that but gave up fill control
-/// entirely, causing severe fill-in blowups on several *other* real
-/// instances (`modszk1`, `standmps`, `wood1p`, `fffff800` all measured
-/// 3-10x slower). Gating the *same* degree-ascending search with a
-/// *global*, not local, acceptance threshold gets both: fill-minimizing
-/// order is still preferred among candidates that are numerically safe,
-/// and a candidate that is only locally-large-but-globally-negligible
-/// (the actual `ganges` failure mode) is skipped in favor of continuing
-/// the search until a genuinely significant pivot is found — worst case,
-/// the column realizing the global maximum itself, which always trivially
-/// passes its own threshold.
-///
-/// A row here is classified *dependent*, not treated as a hard elimination
-/// failure the way a singular basis would be: after eliminating every
-/// previously-kept row's pivot column out of it, a row whose largest
-/// remaining active entry is negligible relative to its own *original*
-/// norm (`DEP_TOL`, same role [`drop_linearly_dependent`]'s own
-/// `col_norm(orig)` check plays) is dropped, and elimination simply continues
-/// with whatever rows/columns remain — exactly the "residual after
-/// projecting out earlier pivots" meaning `|R[k,k]|` carries in the dense
-/// QR, arrived at here via direct Gaussian elimination instead. No `L`/`U`
-/// factors are kept (nothing downstream needs to *solve* against this
-/// matrix) — only which rows got a pivot at all.
+/// **従属判定**: 選ばれたピボット値が、その行の元の(拡大)ノルムの
+/// [`DEP_TOL`] 倍以下なら、先行ピボットで消去した残りが無視できる、
+/// すなわち従属とみなして行を落とし、消去せずに次へ進む。
+/// L/U 因子は保持しない(どの行がピボットを得たかだけが必要)。
 fn drop_linearly_dependent_sparse(rows_in: &[(Vec<(usize, f64)>, f64)], n: usize) -> Vec<usize> {
     let p = rows_in.len();
     if p == 0 {
         return Vec::new();
     }
+    // 右辺列を含む拡大列数
     let aug_n = n + 1;
 
+    // 作業用の行表現 (列 -> 値)。消去によって更新される
     let mut rows: Vec<BTreeMap<usize, f64>> = Vec::with_capacity(p);
+    // 各行の元の拡大ノルム(従属判定の基準)
     let mut row_orig_norm = vec![0.0f64; p];
     for (i, (row, rhs)) in rows_in.iter().enumerate() {
         let mut m: BTreeMap<usize, f64> = BTreeMap::new();
@@ -441,7 +337,9 @@ fn drop_linearly_dependent_sparse(rows_in: &[(Vec<(usize, f64)>, f64)], n: usize
         rows.push(m);
     }
 
+    // col_rows[j] = 列 j に(活性な)非零を持つ行の集合
     let mut col_rows: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); aug_n];
+    // 各行の現在の非零数
     let mut row_degree = vec![0usize; p];
     for (i, row) in rows.iter().enumerate() {
         row_degree[i] = row.len();
@@ -449,18 +347,16 @@ fn drop_linearly_dependent_sparse(rows_in: &[(Vec<(usize, f64)>, f64)], n: usize
             col_rows[j].insert(i);
         }
     }
+    // 各列の現在の非零数 (= col_rows[j].len())
     let mut col_degree: Vec<usize> = col_rows.iter().map(|s| s.len()).collect();
 
-    // Tracks which column currently holds the largest active entry
-    // anywhere in the matrix, without an `O(aug_n)` rescan every step:
-    // `heap` is ordered by each active column's current max-abs entry
-    // (`f64::to_bits` preserves ordering for non-negative values, so
-    // sorting the bit pattern sorts by magnitude directly), and
-    // `col_bits[j]` records which entry (if any) column `j` currently has
-    // in `heap` so it can be removed before a fresh one is inserted.
-    // `heap.last()` (the true global max) then costs `O(log aug_n)`.
+    // 行列全体の最大活性要素を持つ列を、毎ステップ全走査せずに追跡する。
+    // `heap`: (列の最大 |要素| のビット列, 列) の順序付き集合。非負の f64 は
+    // `to_bits` で大小順が保たれるので、末尾が全体最大 (O(log aug_n))。
     let mut heap: BTreeSet<(u64, usize)> = BTreeSet::new();
+    // col_bits[j] = 列 j が現在 `heap` に登録しているキー(None = 未登録 = 全零)
     let mut col_bits: Vec<Option<u64>> = vec![None; aug_n];
+    /// 列 `j` の最大 |要素| を走査し直して `heap`/`col_bits` のキーを正確な値に更新する。
     fn refresh_col(col_rows: &[BTreeSet<usize>], rows: &[BTreeMap<usize, f64>], heap: &mut BTreeSet<(u64, usize)>, col_bits: &mut [Option<u64>], j: usize) {
         if let Some(old) = col_bits[j].take() {
             heap.remove(&(old, j));
@@ -475,54 +371,48 @@ fn drop_linearly_dependent_sparse(rows_in: &[(Vec<(usize, f64)>, f64)], n: usize
     for j in 0..aug_n {
         refresh_col(&col_rows, &rows, &mut heap, &mut col_bits, j);
     }
-    // Lazy maintenance of `heap`: a column's key is only guaranteed to be
-    // an *upper bound* on its true current max-abs entry; `col_exact[j]`
-    // records whether it is known to be exactly equal. Removals / shrinking
-    // updates that may have lowered the max only clear `col_exact[j]` (O(1))
-    // instead of rescanning the whole column; the rescan happens only when
-    // that column actually reaches the top of `heap` (validation loop at the
-    // start of every step). Since every key is >= its column's true max, the
-    // first *exact* top is the true global max — bit-identical to the eager
-    // version, which rescanned every touched column (the rhs column `n`
-    // and other long columns included) after every single step.
+    // `heap` の遅延更新: 各列のキーは真の最大 |要素| の「上界」であることだけが
+    // 保証され、`col_exact[j]` はそれが厳密に等しいと分かっているかを示す。
+    // 最大値を下げうる変更は `col_exact[j]` を false にするだけ (O(1)) で、
+    // 再走査はその列が `heap` の先頭に来たときだけ行う(各ステップ冒頭の
+    // 検証ループ)。全キーが真の最大以上なので、最初に現れる厳密な先頭が
+    // 真の全体最大となり、毎回再走査する版と結果は完全に一致する。
     let mut col_exact = vec![true; aug_n];
-    // `old_abs`: the magnitude an entry of column `j` had before being
-    // removed/changed (`0.0` if it did not exist); `new_abs`: its magnitude
-    // afterwards (`0.0` if removed).
+    /// 列 `j` の要素が変化したことを `heap` に反映する(遅延更新)。
+    /// `old_abs`: 変化前の |値|(存在しなかった場合 0.0)、
+    /// `new_abs`: 変化後の |値|(削除された場合 0.0)。
     fn note_change(heap: &mut BTreeSet<(u64, usize)>, col_bits: &mut [Option<u64>], col_exact: &mut [bool], j: usize, old_abs: f64, new_abs: f64) {
+        // 現在のキー(未登録なら 0)
         let key = col_bits[j].map_or(0.0, f64::from_bits);
         if new_abs > key {
             match col_bits[j].take() {
                 Some(old) => {
                     heap.remove(&(old, j));
                 }
-                // Not in `heap` means the column's true max was 0, so the
-                // new entry is now exactly its max.
+                // 未登録 = 列の真の最大が 0 だったので、新要素がちょうど最大
                 None => col_exact[j] = true,
             }
             let bits = new_abs.to_bits();
             heap.insert((bits, j));
             col_bits[j] = Some(bits);
-            // exactness unchanged: if the old key was exact, the new entry
-            // is now the strict maximum; if it was only an upper bound, the
-            // new key still is one.
+            // 厳密性は変わらない: 旧キーが厳密なら新要素が真の最大、
+            // 上界にすぎなかったなら新キーも上界のまま。
         } else if old_abs >= key {
+            // 最大要素が減った/消えた可能性があるので、上界扱いに落とす
             col_exact[j] = false;
         }
     }
 
-    // Column bucket arrays for the ascending-Markowitz-degree scan — see
-    // `simplex::lu::MarkowitzState::find_best_pivot`'s own docs for why
-    // this (rather than a full active-submatrix scan) is what keeps this
-    // sub-`O(m)` per step. Unlike that function, only columns are bucketed
-    // here: nothing below scans rows by degree bucket, `row_degree` alone
-    // (updated in place) is enough to evaluate the Markowitz score.
+    // Markowitz 次数昇順走査用の列バケット: col_buckets[d] = 次数 d の列。
+    // 行側はバケット化しない(スコア計算には `row_degree` だけで足りる)。
     let mut col_buckets: Vec<VecDeque<usize>> = vec![VecDeque::new(); p + 1];
+    // col_bucket_pos[j] = 列 j のバケット内位置(None = バケット外 = 使用済み)
     let mut col_bucket_pos: Vec<Option<usize>> = vec![None; aug_n];
     for j in 0..aug_n {
         col_bucket_pos[j] = Some(col_buckets[col_degree[j]].len());
         col_buckets[col_degree[j]].push_back(j);
     }
+    /// 要素 `idx` を次数 `degree` のバケットから取り除く(末尾要素と入れ替える O(1) 削除)。
     fn remove_from_bucket(buckets: &mut [VecDeque<usize>], pos: &mut [Option<usize>], degree: usize, idx: usize) {
         if let Some(p) = pos[idx] {
             let bucket = &mut buckets[degree];
@@ -536,6 +426,8 @@ fn drop_linearly_dependent_sparse(rows_in: &[(Vec<(usize, f64)>, f64)], n: usize
             pos[idx] = None;
         }
     }
+    /// 要素 `idx` を次数 `old_degree` のバケットから `new_degree` のバケットへ移す
+    /// (`used[idx]`、つまりピボット済みなら何もしない)。
     fn move_bucket(buckets: &mut [VecDeque<usize>], pos: &mut [Option<usize>], old_degree: usize, new_degree: usize, idx: usize, used: &[bool]) {
         if used[idx] || old_degree == new_degree {
             return;
@@ -546,15 +438,17 @@ fn drop_linearly_dependent_sparse(rows_in: &[(Vec<(usize, f64)>, f64)], n: usize
         buckets[new_degree].push_back(idx);
     }
 
+    // ピボット済みの列・行
     let mut col_used = vec![false; aug_n];
     let mut row_used = vec![false; p];
+    // keep[i] = 行 i が独立としてピボットを得たか
     let mut keep = vec![false; p];
 
-    // `min(p, aug_n)` is the maximum possible rank — no point searching
-    // further once that many rows have been kept.
+    // 最大ランクは min(p, aug_n)。それ以上は探す意味がない
     let max_steps = p.min(aug_n);
     for _step in 0..max_steps {
-        let gmax = loop {
+        // `heap` の先頭が厳密になるまで再走査し、全体最大 |要素| を得る
+        let global_max_abs = loop {
             match heap.iter().next_back() {
                 Some(&(bits, j)) => {
                     if col_exact[j] {
@@ -566,17 +460,16 @@ fn drop_linearly_dependent_sparse(rows_in: &[(Vec<(usize, f64)>, f64)], n: usize
                 None => break None,
             }
         };
-        let Some(gmax) = gmax else {
-            break; // every active column is entirely zero
+        let Some(global_max_abs) = global_max_abs else {
+            break; // 活性な列がすべて零
         };
-        let threshold = tunable!("ENOMOTO_T_REDEQ_PIVOT_STABILITY", PIVOT_STABILITY, f64) * gmax;
+        // ピボット候補として受理する最小 |値|(全体最大に対する相対閾値)
+        let threshold = tunable!("ENOMOTO_T_REDEQ_PIVOT_STABILITY", PIVOT_STABILITY, f64) * global_max_abs;
 
-        // Ascending-degree bucket scan over columns, exactly like
-        // `find_best_pivot`, but a candidate is only ever recorded into
-        // `best` once it passes the *global* `threshold` above — see this
-        // function's own docs for why that, not local column-relative
-        // magnitude, is what actually determines a correct rank here.
+        // 列の次数昇順バケット走査 (`find_best_pivot` と同様)。ただし候補は
+        // 全体閾値 `threshold` を満たすものだけを `best` に記録する。
         PROF_TOTAL_STEPS.fetch_add(1, Ordering::Relaxed);
+        // 最良候補 (行, 列)、その Markowitz スコアと |値|
         let mut best: Option<(usize, usize)> = None;
         let mut best_score = usize::MAX;
         let mut best_abs = 0.0f64;
@@ -585,14 +478,9 @@ fn drop_linearly_dependent_sparse(rows_in: &[(Vec<(usize, f64)>, f64)], n: usize
                 if col_used[j] {
                     continue;
                 }
-                // `col_bits[j]` is an upper bound on column `j`'s largest
-                // active |entry| (see the lazy-heap notes above; `None` =
-                // column is entirely zero). Below `threshold`, every entry
-                // would fail the `v.abs() < threshold` test in the scan
-                // below, so the scan could not record a candidate — skip it
-                // in O(1). Same pivot choice, bit for bit; this is what keeps
-                // long runs of low-degree, tiny-valued columns (`dfl001`)
-                // from being rescanned on every single step.
+                // `col_bits[j]` は列 j の最大 |要素| の上界 (None = 全零)。
+                // それが閾値未満なら列内に候補はありえないので O(1) で飛ばす
+                // (ピボット選択は走査した場合と完全に同じ)。
                 if col_bits[j].map_or(true, |bits| f64::from_bits(bits) < threshold) {
                     continue;
                 }
@@ -604,6 +492,7 @@ fn drop_linearly_dependent_sparse(rows_in: &[(Vec<(usize, f64)>, f64)], n: usize
                     if v == 0.0 || v.abs() < threshold {
                         continue;
                     }
+                    // Markowitz スコア(fill-in の見積もり)
                     let score = (row_degree[i] - 1) * (col_degree[j] - 1);
                     if score < best_score || (score == best_score && v.abs() > best_abs) {
                         best_score = score;
@@ -616,84 +505,71 @@ fn drop_linearly_dependent_sparse(rows_in: &[(Vec<(usize, f64)>, f64)], n: usize
                     break 'search;
                 }
             }
+            // 候補のスコアが現在の列次数の 2 乗以下なら十分良いとみなして走査を打ち切る
+            // (`find_best_pivot` と同じ打ち切り条件)
             if best.is_some() && best_score <= deg_col * deg_col {
                 break;
             }
         }
-        let Some((pi, pj)) = best else {
-            // No column has an entry within `PIVOT_STABILITY` of the
-            // current global maximum — since the column *realizing* that
-            // maximum always trivially passes its own threshold, this
-            // cannot happen while any active column remains nonzero; take
-            // it as "rank exhausted" defensively.
+        // 選ばれたピボットの行・列
+        let Some((piv_row, piv_col)) = best else {
+            // 全体最大を実現する列は必ず閾値を満たすので、活性な非零列が
+            // 残る限りここには来ない。防御的に「ランク尽き」とみなす。
             break;
         };
 
-        let pivot_val = *rows[pi].get(&pj).unwrap();
-        row_used[pi] = true;
-        col_used[pj] = true;
-        remove_from_bucket(&mut col_buckets, &mut col_bucket_pos, col_degree[pj], pj);
-        if let Some(old) = col_bits[pj].take() {
-            heap.remove(&(old, pj));
+        let pivot_val = *rows[piv_row].get(&piv_col).unwrap();
+        row_used[piv_row] = true;
+        col_used[piv_col] = true;
+        remove_from_bucket(&mut col_buckets, &mut col_bucket_pos, col_degree[piv_col], piv_col);
+        if let Some(old) = col_bits[piv_col].take() {
+            heap.remove(&(old, piv_col));
         }
 
-        // Row `pi` is retiring (whether it ends up kept or dependent,
-        // decided just below) — drop it from every *other* column it
-        // still touches so a later column's scan never has to consider an
-        // inactive row's stale membership. `heap`/`col_bits` are refreshed
-        // separately below, once, in whichever of the two branches is
-        // actually taken — not here — since the kept branch's own
-        // elimination pass touches these same columns' *values* again
-        // right after this, and refreshing twice per step is a real,
-        // measured cost on matrices with high average column degree
-        // (`wood1p`: doing it unconditionally here as well as after
-        // elimination roughly doubled `reduce_equalities`' time).
-        let pi_cols: Vec<usize> = rows[pi].keys().copied().filter(|&j| j != pj).collect();
-        for &j in &pi_cols {
-            col_rows[j].remove(&pi);
+        // ピボット行は(残すか従属かにかかわらず)退場するので、ピボット列
+        // 以外の各列の行集合から取り除き、次数と `heap` の上界情報を更新する。
+        // ピボット行が持つピボット列以外の列
+        let piv_row_other_cols: Vec<usize> = rows[piv_row].keys().copied().filter(|&j| j != piv_col).collect();
+        for &j in &piv_row_other_cols {
+            col_rows[j].remove(&piv_row);
             let new_deg = col_rows[j].len();
             move_bucket(&mut col_buckets, &mut col_bucket_pos, new_deg + 1, new_deg, j, &col_used);
             col_degree[j] = new_deg;
             if !col_used[j] {
-                let old_abs = rows[pi].get(&j).map_or(0.0, |v| v.abs());
+                let old_abs = rows[piv_row].get(&j).map_or(0.0, |v| v.abs());
                 note_change(&mut heap, &mut col_bits, &mut col_exact, j, old_abs, 0.0);
             }
         }
 
-        // Dependency test: is what's left of this row, at the point it
-        // was chosen, negligible relative to its own *original* scale?
-        if pivot_val.abs() <= tunable!("ENOMOTO_T_REDEQ_DEP_TOL", DEP_TOL, f64) * row_orig_norm[pi].max(1e-300) {
-            // Dependent: drop it (leave `keep[pi] = false`) without
-            // eliminating — it contributes no independent structure to
-            // scatter into the other rows. This branch never reaches the
-            // post-elimination refresh pass below, so `pi_cols` must be
-            // refreshed here instead — otherwise a stale, too-high entry
-            // could survive in `heap` for a column whose recorded max
-            // came only from `pi`, wrongly gating out a genuinely valid
-            // pivot elsewhere via an inflated `gmax` on a later step.
-            // (Lazy heap: `pi_cols`' possible max decrease was already
-            // recorded via `note_change` just above.)
+        // 従属判定: 選ばれた時点での残差(ピボット値)が、行の元のノルムに
+        // 比べて無視できるか。1e-300 は零ノルム行でのゼロ除算相当を避ける下限。
+        if pivot_val.abs() <= tunable!("ENOMOTO_T_REDEQ_DEP_TOL", DEP_TOL, f64) * row_orig_norm[piv_row].max(1e-300) {
+            // 従属: 消去せずに落とす (`keep[piv_row] = false` のまま)。
+            // `heap` への反映は上の `note_change` で済んでいる。
             continue;
         }
-        keep[pi] = true;
+        keep[piv_row] = true;
 
-        // Eliminate column `pj` from every other row that still has it —
-        // the same scatter `simplex::lu::MarkowitzState::eliminate` does,
-        // via a single `entry()` descent per touched `(row, col)` pair.
-        let pivot_row_snapshot: Vec<(usize, f64)> = rows[pi].iter().map(|(&j, &v)| (j, v)).collect();
-        let affected_rows: Vec<usize> = col_rows[pj].iter().copied().filter(|&i| i != pi).collect();
+        // ピボット列を他の全行から消去する(`simplex::lu::MarkowitzState::eliminate`
+        // と同じ scatter。各 (行, 列) につき `entry()` 1 回)。
+        // ピボット行の (列, 値) の写し
+        let pivot_row_snapshot: Vec<(usize, f64)> = rows[piv_row].iter().map(|(&j, &v)| (j, v)).collect();
+        // ピボット列に非零を持つ他の行
+        let affected_rows: Vec<usize> = col_rows[piv_col].iter().copied().filter(|&i| i != piv_row).collect();
         for i in affected_rows {
-            let Some(&aij) = rows[i].get(&pj) else { continue };
+            let Some(&aij) = rows[i].get(&piv_col) else { continue };
             if aij == 0.0 {
                 continue;
             }
+            // 消去乗数
             let mult = aij / pivot_val;
             for &(j, v) in &pivot_row_snapshot {
-                if j == pj {
+                if j == piv_col {
                     continue;
                 }
                 use std::collections::btree_map::Entry;
                 match rows[i].entry(j) {
+                    // 既存要素の更新(ちょうど 0 になれば削除して次数を下げる)
                     Entry::Occupied(mut e) => {
                         let old_val = *e.get();
                         let new_val = old_val - mult * v;
@@ -710,6 +586,7 @@ fn drop_linearly_dependent_sparse(rows_in: &[(Vec<(usize, f64)>, f64)], n: usize
                             *e.get_mut() = new_val;
                         }
                     }
+                    // fill-in: 新しい非零の追加(次数を上げる)
                     Entry::Vacant(e) => {
                         let new_val = -mult * v;
                         if new_val != 0.0 {
@@ -725,105 +602,37 @@ fn drop_linearly_dependent_sparse(rows_in: &[(Vec<(usize, f64)>, f64)], n: usize
                     }
                 }
             }
-            rows[i].remove(&pj);
+            rows[i].remove(&piv_col);
             let new_row_degree = rows[i].len();
             row_degree[i] = new_row_degree;
         }
-        col_rows[pj].clear();
+        col_rows[piv_col].clear();
 
-        // (Lazy heap: every value change above was already recorded via
-        // `note_change`; no per-column rescan here.)
+        // 値の変化はすべて `note_change` で `heap` に反映済みなので、列の再走査は不要
     }
 
     (0..p).filter(|&i| keep[i]).collect()
 }
 
-/// Partitions `rows` into blocks via a Dulmage-Mendelsohn-style
-/// decomposition — thin wrapper around the shared [`crate::graph`]
-/// implementation (maximum bipartite matching plus Tarjan
-/// strongly-connected-components; see that module's own docs for the
-/// algorithm), passing just each row's own nonzero-column pattern as
-/// adjacency. Strictly finer than a plain connected-components partition
-/// of the same bipartite graph would be — two rows sharing no column at
-/// all can never end up in the same SCC either, since the matching
-/// graph's edges are themselves derived from real nonzeros — so this
-/// never *loses* the block-diagonal structure a simpler decomposition
-/// would already find; real Netlib instances that show as a single
-/// connected component by raw column-sharing alone (`shell`, `scsd8`,
-/// `fit1p`, `ganges`) decompose into hundreds of much smaller SCCs this
-/// way instead (`shell`: 531 blocks from 534 rows; `ganges`: 998 from
-/// 1284), most of them singletons.
+/// 等式行を Dulmage-Mendelsohn 型のブロックに分割し、ブロックごとの行番号
+/// リスト(各ブロック内は昇順、ブロックは先頭行の昇順)を返す。
 ///
-/// **Why checking each block in isolation is sound here, unlike using
-/// this same decomposition for LU factorization/solving**: LU needs
-/// blocks processed in dependency order because it *propagates computed
-/// values* forward through the matrix (well, needs it for *solving* —
-/// see `crate::graph::dulmage_mendelsohn_blocks`'s own docs on why even
-/// LU *factorization* itself, as opposed to solving, turns out not to
-/// need that ordering after all, since off-diagonal spillover entries
-/// are carried through unchanged rather than requiring elimination).
-/// Redundancy detection asks a different, purely *local* question per
-/// row — "is row `R` exactly equal to some linear combination of these
-/// specific other rows?" — and that identity, once verified using the
-/// rows' full, untruncated content (not just their entries in the
-/// block's own columns), holds unconditionally regardless of what any
-/// other block contains. So every block found here can be checked
-/// independently, in any order, including concurrently — the same
-/// parallel dispatch [`drop_linearly_dependent_sparse_blocked`] applies
-/// unchanged. The only cost of this independence is *recall*, not
-/// soundness: a redundancy whose witnessing combination genuinely spans
-/// multiple blocks (possible here, unlike with disjoint-column
-/// components, since an earlier block's row can still have nonzeros
-/// reaching into a later block's own columns) goes undetected and that
-/// row is conservatively kept — never the reverse (an independent row is
-/// never wrongly dropped), so this trades a little reduction
-/// *aggressiveness* for a lot more exploitable structure, the same trade
-/// already accepted for the rhs-augmentation edge case below.
-/// Builds the bipartite adjacency from each row's *structural* nonzeros —
-/// except a coefficient [`smallcoeff::clean_row`] judges negligible for
-/// that row's own worst-case activity (Achterberg, Bixby, Gu, Rothberg &
-/// Weninger, "Presolve Reductions in Mixed Integer Programming", §3.1) is
-/// left out of the edge set entirely, so two rows linked only by such a
-/// coefficient are no longer forced into the same block by it.
+/// 共通実装 [`crate::graph::dulmage_mendelsohn_blocks`](最大二部マッチング +
+/// Tarjan の強連結成分分解)への薄いラッパで、各行の非零列パターンを隣接
+/// リストとして渡す。単純な連結成分分解より常に細かい(粗くはならない)。
 ///
-/// **Non-destructive**: `rows` itself — what every block's own
-/// [`drop_linearly_dependent_sparse`] call actually eliminates against —
-/// is untouched; only which edges this decomposition *sees* changes.
-/// [`smallcoeff`]'s own module docs record two prior attempts at wiring
-/// its reduction into the live pipeline, each reverted after it
-/// numerically destabilized a real instance (`perold` newly crashing,
-/// `beale_cycling_example_terminates_correctly` newly failing its IPM
-/// cross-check) — both traced to the reduction *mutating* a row/rhs a
-/// later stage then solved against. Using the exact same negligibility
-/// test only to decide which edges feed a graph algorithm carries none of
-/// that risk: per this module's own docs on why every block found here is
-/// sound to check independently, dropping an edge (even a "real" one)
-/// only costs *recall* — a redundancy whose witness spans two blocks this
-/// now separates goes undetected and that row is conservatively kept,
-/// never the reverse — the identical trade-off this decomposition's own
-/// matching-vs-plain-connected-components choice already accepts.
+/// ただし、その行の最悪ケース活動量に対して無視できる係数
+/// ([`smallcoeff::clean_row`] の判定、Achterberg et al.
+/// "Presolve Reductions in MIP" §3.1)は辺から外す。`rows` 自体は変更せず、
+/// グラフが見る辺だけが変わる(`lb`/`ub` はこの判定用の変数境界)。
 ///
-/// **Measured (instrumented directly, not inferred from timing) against
-/// real Netlib instances already known to exercise this decomposition**:
-/// the filter is far from a no-op on some of them — `shell` drops 500 of
-/// 3550 structural edges (14%), `25fv47` 72 of 3609, `sierra` 40 of 3973
-/// — but the resulting block *count* barely moves either way (`shell`
-/// 529 -> 524, `sierra` 438 -> 438 unchanged, `scfxm3` 326 -> 329,
-/// `25fv47` 247 -> 241): most negligible coefficients turn out to sit
-/// inside a block the matching would have kept together anyway on other,
-/// non-negligible edges, not to be the sole bridge between two blocks.
-/// `25fv47` landing on *fewer* blocks after filtering (not more) is not a
-/// soundness concern — a maximum bipartite matching is generally
-/// non-unique, so removing an edge can steer the matcher to a different
-/// one with its own, differently-shaped SCC condensation; every block
-/// either matching produces is independently sound per this function's
-/// own docs above, just not guaranteed monotonic in *count* the way plain
-/// connected components would be. A full-Netlib wall-clock A/B (73
-/// in-scope instances, 3 repeats each side) showed no aggregate
-/// difference distinguishable from this machine's own run-to-run noise
-/// (both sides landed in the same ~4.1-5.1s band) — consistent with the
-/// small, block-count-neutral effect measured directly above.
+/// 各ブロックを独立に(任意の順序・並列で)調べてよい理由: 冗長性判定は
+/// 「この行は特定の他の行の一次結合か」という局所的な恒等式の確認で、
+/// 行の全内容で確認すれば他ブロックに関係なく成り立つ。独立化の代償は
+/// 複数ブロックにまたがる冗長性を見落とすこと(その行は保守的に残る)だけで、
+/// 独立な行を誤って落とすことはない。辺を外す場合も同様。
 fn dulmage_mendelsohn_blocks(rows: &[(Vec<(usize, f64)>, f64)], n: usize, lb: &[f64], ub: &[f64]) -> Vec<Vec<usize>> {
+    // 各行の隣接リスト(無視できる小係数を除いた非零列)。clean_row の右辺引数はダミー
     let adj: Vec<Vec<usize>> = rows
         .iter()
         .map(|(row, _)| smallcoeff::clean_row(row, 0.0, lb, ub).0.into_iter().map(|(j, _)| j).collect())
@@ -831,103 +640,53 @@ fn dulmage_mendelsohn_blocks(rows: &[(Vec<(usize, f64)>, f64)], n: usize, lb: &[
     crate::graph::dulmage_mendelsohn_blocks(&adj, n)
 }
 
-/// Wraps [`drop_linearly_dependent_sparse`] with a Dulmage-Mendelsohn-style
-/// block-triangularization pre-pass (see [`dulmage_mendelsohn_blocks`]):
-/// the equality system is first split into blocks via a maximum bipartite
-/// matching plus strongly-connected-components search, each solved by
-/// calling the same core algorithm on just that block's rows with columns
-/// remapped to a compact local index range (`0..local_n`) — without that
-/// remapping, every block's call would still pay for `aug_n`-sized scratch
-/// arrays (`col_rows`, `col_buckets`, `heap`/`col_bits`) proportional to
-/// the *whole* problem's `n`, defeating the point of splitting at all.
+/// [`drop_linearly_dependent_sparse`] の前にブロック分解
+/// ([`dulmage_mendelsohn_blocks`]) を挟むラッパ。戻り値は残す行の添字(昇順)。
 ///
-/// Real Netlib multi-vessel/multi-period scheduling LPs (`ship12s`,
-/// `ship08s`, `ship04l`, `ship04s`, `sierra`) decompose into dozens of
-/// blocks of *nearly identical size* this way (`ship12s`: 12 blocks of
-/// exactly 78 rows each, plus 109 size-1 singletons) — one instance per
-/// vessel/route/period. A first version of this decomposition used plain
-/// connected components (disjoint column support only) and stopped there,
-/// since it correctly found *those* instances but left several others
-/// (`shell`, `scsd8`, `fit1p`, `ganges`) showing as a single, fully-coupled
-/// component with nothing to split. Replacing it with the full
-/// Dulmage-Mendelsohn matching-plus-SCC decomposition finds much finer
-/// structure in exactly those remaining instances too (`shell`: 531 blocks
-/// from 534 rows; `ganges`: 998 from 1284; `fit1p`: 605 from 627) — the
-/// matching exploits a *directional* dependency structure (a block's rows
-/// can still reach into a later block's own columns) that pure
-/// column-disjointness can never see, since two rows sharing a column can
-/// still end up in different SCCs as long as the dependency isn't mutual.
-/// `wood1p` stays on the *dense* path entirely (density dispatch above)
-/// and is unaffected either way.
+/// - 行数が [`MIN_ROWS_FOR_BLOCK_DECOMPOSE`] 未満、または分解で 1 ブロック
+///   しか得られなければ、分解せずそのまま呼ぶ。
+/// - 1 行だけのブロックは無条件に残す(他の行と実列を共有しないので従属
+///   になりえない。`0 = 0` の零行は [`dedupe_rows`] で既に除去済み)。
+/// - 2 行以上のブロックは、列番号を `0..local_n` に詰め直してから個別に
+///   ランク判定する(作業配列を全体の `n` ではなくブロックの大きさにするため)。
+///   総行数が [`PARALLEL_DECOMPOSE_ROW_THRESHOLD`] 以上かつ複数ブロックなら
+///   `rayon` で並列処理する。
 ///
-/// **Why every block found here is still sound to check independently,
-/// unlike using this same decomposition for LU factorization or
-/// solving**: LU needs strict block order because it propagates *computed
-/// values* forward — a later block's solve genuinely depends on an earlier
-/// block's result. Redundancy detection instead asks, per row, "is this
-/// row exactly equal to some linear combination of these specific other
-/// rows?" — an identity that, once verified using the rows' full,
-/// untruncated content, holds unconditionally regardless of what any other
-/// block contains. So unlike a general block-triangular form's usual
-/// sequential constraint, every block here can be checked in any order,
-/// including concurrently — the only cost is *recall*, not soundness: a
-/// redundancy whose witnessing combination genuinely spans multiple blocks
-/// (possible here, since an earlier block's row can still reach into a
-/// later block's columns — impossible with plain connected components,
-/// where blocks share no column at all) goes undetected and that row is
-/// conservatively kept, never the reverse. See
-/// [`dulmage_mendelsohn_blocks`]'s own docs for the full argument.
-///
-/// **The rhs-augmentation edge case**: [`drop_linearly_dependent_sparse`]
-/// augments each row with the equation's rhs as one extra shared column
-/// (index `n`), used to distinguish genuine redundancy from an
-/// inconsistency (Farkas infeasibility witness) — but
-/// [`dulmage_mendelsohn_blocks`] deliberately does not treat that column as
-/// a graph edge, so two *originally* all-zero-coefficient rows with
-/// different nonzero rhs (`0 = 5`, `0 = 3`) land in separate singleton
-/// blocks here, whereas the un-decomposed algorithm's single shared rhs
-/// column would link them and drop one as "dependent" on the other. Both
-/// outcomes are correct — each such row is already its own infeasibility
-/// witness on its own, so dropping one loses no information the solver
-/// needs — this function is just more conservative (keeps a
-/// possibly-redundant-but-harmless extra row) in that one narrow,
-/// degenerate edge case. The same reasoning applies to a row that only
-/// reduces to a pure rhs residual *during* elimination (the general Farkas
-/// case): that reduction happens entirely from real columns within one
-/// block, so it is still caught correctly and entirely locally.
+/// ブロックを独立に扱ってよい理由は [`dulmage_mendelsohn_blocks`] 参照。
+/// 右辺列はグラフの辺として扱わないので、係数がすべて 0 で右辺が異なる行
+/// 同士(`0 = 5` と `0 = 3`)は別ブロックになり両方残る。どちらもそれ自体
+/// 実行不能の証拠なので、分解しない場合(片方を落とす)と比べて保守的な
+/// だけで正しさは変わらない。
 fn drop_linearly_dependent_sparse_blocked(rows_in: &[(Vec<(usize, f64)>, f64)], n: usize, lb: &[f64], ub: &[f64]) -> Vec<usize> {
     if rows_in.len() < tunable!("ENOMOTO_T_MIN_ROWS_FOR_BLOCK_DECOMPOSE", MIN_ROWS_FOR_BLOCK_DECOMPOSE, usize) {
         return drop_linearly_dependent_sparse(rows_in, n);
     }
+    // ブロック(各要素は rows_in の行番号リスト)
     let components = dulmage_mendelsohn_blocks(rows_in, n, lb, ub);
     if components.len() <= 1 {
         return drop_linearly_dependent_sparse(rows_in, n);
     }
 
+    // 残す行(rows_in の添字)
     let mut kept: Vec<usize> = Vec::new();
+    // 2 行以上のブロック(ランク判定が必要なもの)
     let mut nontrivial: Vec<Vec<usize>> = Vec::with_capacity(components.len());
     for comp in components {
         if comp.len() == 1 {
-            // A row with zero real-column edges to anything else cannot
-            // be a linear combination of any other row's real
-            // coefficients — the only way it could be "dependent" is by
-            // literally being the zero vector including its rhs, which
-            // `dedupe_rows` already drops as a trivial `0 = 0` row before
-            // this function ever sees it. Always kept, no elimination
-            // machinery needed at all.
+            // 単独ブロックの行は他の行と実列を共有しないので従属になりえない
+            // (右辺まで零の行は dedupe_rows で除去済み)。無条件に残す。
             kept.push(comp[0]);
         } else {
             nontrivial.push(comp);
         }
     }
 
-    // Longest-processing-time-first: the biggest components are hardest
-    // to load-balance, so dispatching them first gives `rayon`'s
-    // work-stealing scheduler the best chance of not stranding two large
-    // blocks on the same thread behind a run of smaller ones.
+    // 大きいブロックから処理する (LPT 順: 並列時の負荷分散のため)
     nontrivial.sort_by_key(|c| std::cmp::Reverse(c.len()));
 
+    // 1 ブロックを列番号を詰め直してランク判定し、残す行を元の添字で返す
     let solve_component = |comp: &[usize]| -> Vec<usize> {
+        // 元の列番号 -> ブロック内の局所列番号(初出順に採番)
         let mut col_map: HashMap<usize, usize> = HashMap::new();
         let local_rows: Vec<(Vec<(usize, f64)>, f64)> = comp
             .iter()
@@ -951,6 +710,7 @@ fn drop_linearly_dependent_sparse_blocked(rows_in: &[(Vec<(usize, f64)>, f64)], 
             .collect::<Vec<usize>>()
     };
 
+    // 並列化の判断に使う、ランク判定対象の総行数
     let total_nontrivial_rows: usize = nontrivial.iter().map(|c| c.len()).sum();
     if nontrivial.len() > 1 && total_nontrivial_rows >= tunable!("ENOMOTO_T_PARALLEL_DECOMPOSE_ROW_THRESHOLD", PARALLEL_DECOMPOSE_ROW_THRESHOLD, usize) {
         use rayon::prelude::*;
@@ -963,14 +723,13 @@ fn drop_linearly_dependent_sparse_blocked(rows_in: &[(Vec<(usize, f64)>, f64)], 
     kept
 }
 
+/// 単体テスト。
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// The hashed/in-place `reduce_inequalities` must make exactly the
-    /// decisions of the straightforward reference version and return a
-    /// bit-identical `(G, h)` — on inputs with exact and scaled duplicates,
-    /// sign-flipped near-duplicates, empty rows and unsorted input.
+    /// ハッシュ版 `reduce_inequalities` が参照実装と同じ判定をし、ビット単位で同一の `(G, h)` を返すことを
+    /// 乱数入力(完全一致・スカラー倍・符号反転の重複、空行、未整列入力を含む)で確認する。
     #[test]
     fn reduce_inequalities_matches_reference_bit_for_bit() {
         let mut state: u64 = 0x1234_5678_9abc_def0;
@@ -997,7 +756,7 @@ mod tests {
                 rows.push(row);
                 h.push((rnd() % 11) as f64 - 5.0);
             }
-            // Scaled copies (positive and negative factors) of random rows.
+            // ランダムな行のスカラー倍(正負の倍率)の写しを追加(右辺は少しずらすこともある)
             for _ in 0..base_count {
                 let src = (rnd() % base_count as u64) as usize;
                 let f = [1.0, 2.0, 0.5, 3.0, -1.0, 1.0 / 3.0][(rnd() % 6) as usize];
@@ -1015,9 +774,8 @@ mod tests {
         }
     }
 
-    /// On a canonical split `G`, `reduce_inequality_rows` must keep exactly
-    /// the real rows `reduce_inequalities` keeps on the materialized matrix,
-    /// and every bound row must survive.
+    /// 分割表現の `G` に対する `reduce_inequality_rows` が、実体化した `G` に対する
+    /// `reduce_inequalities` と同じ実制約行を残し、境界行はすべて残ることを確認する。
     #[test]
     fn reduce_inequality_rows_matches_materialized_g() {
         let mut state: u64 = 0x0bad_cafe_1234_5678;
@@ -1073,8 +831,7 @@ mod tests {
         assert!(dropped_any > 50, "only {dropped_any} trials dropped a row");
     }
 
-    /// `dedupe_rows` (on-the-fly u64 hash + chain) must keep exactly the
-    /// rows the `HashSet<Vec<_>>` reference keeps, in the same order.
+    /// `dedupe_rows`(その場ハッシュ + 連鎖)が `HashSet` 版の参照実装と同じ行を同じ順序で残すことを確認する。
     #[test]
     fn dedupe_rows_matches_reference_bit_for_bit() {
         let mut state: u64 = 0x0fed_cba9_8765_4321;
@@ -1119,15 +876,10 @@ mod tests {
         }
     }
 
-    /// The pivot-position -> original-row mapping must be the right one of
-    /// faer's two permutation arrays, and a test can only tell them apart
-    /// when the pivot permutation is *not* its own inverse (a single swap
-    /// is, so "largest-norm row placed last" proves nothing). Here rows 0,
-    /// 2, 3 form the dependent set (`r3 = r0 + r2`), while row 1 is
-    /// independent of everything. Column norms force pivot order
-    /// `r1, r3, ...` — a 3-cycle-containing permutation — so the negligible
-    /// pivot lands at position 2 or 3 and must map back to one of rows
-    /// `{0, 2, 3}`; mapping through the wrong array instead drops row 1.
+    /// 密 QR がピボット位置 -> 元の行の対応に faer の 2 つの置換配列のうち正しい方を使っていることを確認する。
+    ///
+    /// 行 0, 2, 3 が従属集合 (`r3 = r0 + r2`)、行 1 は独立。列ノルムによりピボット順が
+    /// `r1, r3, ...`(自己逆でない置換)となるので、誤った配列を使うと行 1 が落ちる。
     #[test]
     fn drop_linearly_dependent_maps_pivot_positions_to_the_right_rows() {
         let rows: Vec<(Vec<(usize, f64)>, f64)> = vec![
@@ -1142,13 +894,8 @@ mod tests {
         assert_eq!(keep.iter().filter(|&&i| i != 1).count(), 2, "keep={keep:?}");
     }
 
-    /// Same scenario, checked against [`drop_linearly_dependent_sparse`] —
-    /// rows 0, 2, 3 form a rank-2 dependent set (`r3 = r0 + r2`, so *any* 2
-    /// of the 3 are a valid independent basis for it — which 2 survive is
-    /// a legitimate, pivot-order-dependent choice both implementations are
-    /// free to make differently), hence checking the *count* and row 1's
-    /// survival rather than the exact index set, matching the dense test's
-    /// own already order-agnostic assertions.
+    /// 上と同じ例を疎版で確認する。従属集合のどの 2 行が残るかはピボット順次第なので、
+    /// 残る行数と行 1 が残ることだけを確認する。
     #[test]
     fn drop_linearly_dependent_sparse_matches_dense_on_the_same_case() {
         let rows: Vec<(Vec<(usize, f64)>, f64)> = vec![
@@ -1163,37 +910,23 @@ mod tests {
         assert_eq!(keep.iter().filter(|&&i| i != 1).count(), 2, "keep={keep:?}");
     }
 
-    /// [`reduce_equalities`] itself must route a high-density case
-    /// (mirroring `wood1p`'s own shape — small `p` but 11% row density) to
-    /// dense QR, and every genuinely sparse case to the sparse method
-    /// regardless of `p`, per [`DENSE_DENSITY_THRESHOLD`]'s own docs —
-    /// checked indirectly here (both paths are independently tested for
-    /// correctness above) by confirming the *density arithmetic*
-    /// [`reduce_equalities`] uses picks the expected side for `(n, p,
-    /// nnz)` shapes drawn from real measured instances. `standmps` and
-    /// `fffff800` are the cases that specifically ruled out a pure
-    /// size-based cost estimate in an earlier version of this rule (see
-    /// [`DENSE_DENSITY_THRESHOLD`]'s own docs) — both have modest `p` but
-    /// low density, and must stay on the sparse path despite that.
+    /// 実インスタンスの `(n, p, nnz)` 形状について、[`reduce_equalities`] の密度計算が
+    /// [`DENSE_DENSITY_THRESHOLD`] に照らして期待どおり密/疎経路を選ぶことを確認する。
     #[test]
     fn dense_density_threshold_routes_known_instances_correctly() {
         let density = |n: usize, p: usize, nnz: usize| nnz as f64 / (p as f64 * n as f64);
-        // wood1p: p=243, n=2594, nnz=70214 (11.1% density) -- must go dense.
+        // wood1p: p=243, n=2594, nnz=70214 (密度 11.1%) -- 密経路になるべき
         assert!(density(2594, 243, 70214) > DENSE_DENSITY_THRESHOLD);
-        // standmps: p=268, n=1075, nnz=2776 (0.96% density) -- must stay sparse.
+        // standmps: p=268, n=1075, nnz=2776 (密度 0.96%) -- 疎経路のままであるべき
         assert!(density(1075, 268, 2776) <= DENSE_DENSITY_THRESHOLD);
-        // fffff800: p=350, n=854, nnz=4775 (1.6% density) -- must stay sparse.
+        // fffff800: p=350, n=854, nnz=4775 (密度 1.6%) -- 疎経路のままであるべき
         assert!(density(854, 350, 4775) <= DENSE_DENSITY_THRESHOLD);
-        // ganges: p=1284, n=1681, nnz=6612 (0.31% density) -- must stay sparse.
+        // ganges: p=1284, n=1681, nnz=6612 (密度 0.31%) -- 疎経路のままであるべき
         assert!(density(1681, 1284, 6612) <= DENSE_DENSITY_THRESHOLD);
     }
 
-    /// A row whose *coefficients* are a linear combination of others' but
-    /// whose *rhs* breaks that same combination is an inconsistency
-    /// (infeasible system), not redundancy — must NOT be dropped, exactly
-    /// why this function's own docs augment with `rhs` as an extra
-    /// coordinate. `r0 - r1`'s
-    /// coefficients, `(1,0,-1)`, match `r2`'s exactly, but `3-4=-1 != 7`.
+    /// 係数は一次結合だが右辺が矛盾する行(実行不能であって冗長ではない)を疎版が落とさないことを確認する。
+    /// `r0 - r1` の係数 `(1,0,-1)` は `r2` と一致するが、`3-4=-1 != 7`。
     #[test]
     fn drop_linearly_dependent_sparse_keeps_rhs_inconsistent_rows() {
         let rows: Vec<(Vec<(usize, f64)>, f64)> = vec![
@@ -1205,7 +938,7 @@ mod tests {
         assert_eq!(keep, vec![0, 1, 2], "an rhs-inconsistent row must survive; keep={keep:?}");
     }
 
-    /// No dependency anywhere: every row must survive.
+    /// 従属関係がないとき、疎版がすべての行を残すことを確認する。
     #[test]
     fn drop_linearly_dependent_sparse_keeps_everything_when_independent() {
         let rows: Vec<(Vec<(usize, f64)>, f64)> = vec![
@@ -1217,9 +950,7 @@ mod tests {
         assert_eq!(keep, vec![0, 1, 2], "keep={keep:?}");
     }
 
-    /// An exact duplicate row (same coefficients *and* rhs) is genuinely
-    /// redundant — unambiguous, so the exact surviving index is checked
-    /// too, not just the count.
+    /// 完全に重複した行(係数も右辺も同じ)を疎版が落とし、先に現れた方を残すことを確認する。
     #[test]
     fn drop_linearly_dependent_sparse_drops_an_exact_duplicate() {
         let rows: Vec<(Vec<(usize, f64)>, f64)> = vec![
@@ -1231,13 +962,8 @@ mod tests {
         assert_eq!(keep, vec![0, 2], "keep={keep:?}");
     }
 
-    /// A larger synthetic system with a known rank deficiency (row 4 is a
-    /// linear combination of rows 0-3, constructed with non-trivial
-    /// coefficients so no single pairwise/duplicate shortcut could catch
-    /// it) — checks the sparse path finds the correct *rank* (4
-    /// survivors) on a case too large to eyeball by hand, without pinning
-    /// down which specific row is dropped (multiple valid bases exist
-    /// here too).
+    /// 自明でない係数の一次結合で作った従属行を含む 5 行の系で、疎版が正しいランク 4 を得ることを確認する
+    /// (どの行が落ちるかは問わない)。
     #[test]
     fn drop_linearly_dependent_sparse_finds_the_right_rank_in_a_larger_system() {
         let n = 6;
@@ -1247,9 +973,7 @@ mod tests {
             (vec![(2, 1.0), (3, 4.0)], 2.0),
             (vec![(3, 1.0), (4, 2.0), (5, 1.0)], 6.0),
         ];
-        // row 4 = 2*row0 - row1 + 3*row2 (coefficients and rhs both
-        // combined the same way, so this is genuinely redundant, not
-        // inconsistent).
+        // 行 4 = 2*行0 - 行1 + 3*行2(係数も右辺も同じ結合なので、矛盾ではなく冗長)
         let mut combo: BTreeMap<usize, f64> = BTreeMap::new();
         let mut rhs = 0.0;
         for (mult, (row, r)) in [(2.0, &base[0]), (-1.0, &base[1]), (3.0, &base[2])] {
@@ -1265,13 +989,8 @@ mod tests {
         assert_eq!(keep.len(), 4, "expected rank 4 out of 5 rows; keep={keep:?}");
     }
 
-    /// Two mutually-referencing (genuine 2-cycle in the matching graph,
-    /// however the matching happens to pick columns) blocks — rows
-    /// `{0,1}` over columns `{0,1}`, rows `{2,3}` over columns `{2,3}` —
-    /// plus one truly isolated row (`{4}`, column `{4}`) must land in
-    /// exactly three blocks, each in ascending row order, sorted by first
-    /// row: a case where the finer Dulmage-Mendelsohn decomposition must
-    /// still agree with what plain column-disjointness alone would find.
+    /// 互いに列を共有しない 2 つの巡回的な 2 行グループと孤立した 1 行が、ちょうど 3 ブロック
+    /// (各ブロック内は行の昇順、ブロックは先頭行の昇順)に分かれることを確認する。
     #[test]
     fn dulmage_mendelsohn_blocks_splits_disjoint_cyclic_groups() {
         let rows: Vec<(Vec<(usize, f64)>, f64)> = vec![
@@ -1285,14 +1004,8 @@ mod tests {
         assert_eq!(comps, vec![vec![0, 1], vec![2, 3], vec![4]], "comps={comps:?}");
     }
 
-    /// A pure dependency *chain* (row `i` and `i+1` always share a column,
-    /// but never cyclically — row `i` never depends back on row `i+1`)
-    /// stays one connected component under plain column-sharing alone, but
-    /// has *no* genuine cycles in the matching graph, so the finer
-    /// Dulmage-Mendelsohn decomposition must split it into `n` singleton
-    /// blocks — exactly the structure real instances like `fit1p`/`ganges`
-    /// showed (hundreds of singleton SCCs) despite looking like one
-    /// fully-coupled component by column-sharing alone.
+    /// 隣り合う行が列を共有するだけの鎖状の系(列共有では 1 つの連結成分だが、マッチンググラフに
+    /// 巡回がない)が、単独行ブロックに分かれることを確認する。
     #[test]
     fn dulmage_mendelsohn_blocks_splits_a_pure_chain_into_singletons() {
         let rows: Vec<(Vec<(usize, f64)>, f64)> = vec![
@@ -1304,10 +1017,8 @@ mod tests {
         assert_eq!(comps, vec![vec![0], vec![1], vec![2]], "comps={comps:?}");
     }
 
-    /// The blocked wrapper must match the un-decomposed sparse algorithm's
-    /// rank count on a case that is all *one* component (no decomposition
-    /// possible) — exercises the `components.len() <= 1` direct-fallback
-    /// path specifically.
+    /// 全体が 1 ブロックの場合(`components.len() <= 1` の直接呼び出し経路)に、ブロック版が
+    /// 非ブロック版と同じ結果になることを確認する。
     #[test]
     fn drop_linearly_dependent_sparse_blocked_matches_unblocked_on_a_single_component() {
         let rows: Vec<(Vec<(usize, f64)>, f64)> = vec![
@@ -1319,32 +1030,19 @@ mod tests {
         assert_eq!(keep, vec![0, 1, 2], "keep={keep:?}");
     }
 
-    /// Two independent blocks, each internally rank-deficient by exactly
-    /// one row, stitched together in a single call — the redundant row in
-    /// block A must not affect block B's own (independent) redundant row
-    /// and vice versa, and the combined result must be exactly rank
-    /// `2 + 2 = 4` out of the 6 rows the two blocks contribute. Each
-    /// block's own 3 rows form a genuine cycle in the matching graph (row
-    /// 2 touches all of columns {0,1,2}, so whichever column the maximum
-    /// matching assigns it, tracing back through the other two rows'
-    /// matches closes a cycle), so [`dulmage_mendelsohn_blocks`] keeps
-    /// each block together as one SCC — and the two blocks share no
-    /// column at all, so they land in different SCCs from each other.
-    /// Padded with 300 trivially-independent singleton rows (each its own
-    /// isolated column, always kept — see
-    /// [`drop_linearly_dependent_sparse_blocked`]'s own docs) purely to
-    /// clear [`MIN_ROWS_FOR_BLOCK_DECOMPOSE`] and actually exercise
-    /// [`dulmage_mendelsohn_blocks`] rather than that size gate's direct
-    /// fallback — the singletons are otherwise inert and checked only in
-    /// aggregate.
+    /// それぞれ 1 行ずつ従属な 2 つの独立ブロックが別々に処理され、各ブロックでランク 2 になることを確認する。
+    ///
+    /// 各ブロックの 3 行はマッチンググラフ上で巡回をなすので 1 つの SCC にまとまり、2 ブロックは列を
+    /// 共有しないので別の SCC になる。[`MIN_ROWS_FOR_BLOCK_DECOMPOSE`] を超えて実際に分解経路を
+    /// 通すため、独立な単独行を詰め物として加えている(すべて残るはず)。
     #[test]
     fn drop_linearly_dependent_sparse_blocked_handles_independent_blocks_separately() {
         let mut rows: Vec<(Vec<(usize, f64)>, f64)> = vec![
-            // Block A: columns {0,1,2}, row 2 = row0 + row1 (x0+2x1+x2=7).
+            // ブロック A: 列 {0,1,2}、行 2 = 行 0 + 行 1 (x0+2x1+x2=7)
             (vec![(0, 1.0), (1, 1.0)], 3.0),
             (vec![(1, 1.0), (2, 1.0)], 4.0),
             (vec![(0, 1.0), (1, 2.0), (2, 1.0)], 7.0),
-            // Block B: columns {3,4,5}, row 5 = 2*row3 - row4 (2x3+x4-x5=-1).
+            // ブロック B: 列 {3,4,5}、行 5 = 2*行 3 - 行 4 (2x3+x4-x5=-1)
             (vec![(3, 1.0), (4, 1.0)], 2.0),
             (vec![(4, 1.0), (5, 1.0)], 5.0),
             (vec![(3, 2.0), (4, 1.0), (5, -1.0)], -1.0),
@@ -1366,24 +1064,17 @@ mod tests {
         assert_eq!(keep_filler, filler_count, "every isolated singleton row must survive; keep={keep:?}");
     }
 
-    /// Same as the previous test but with enough repeated blocks to push
-    /// `drop_linearly_dependent_sparse_blocked` past both
-    /// `MIN_ROWS_FOR_BLOCK_DECOMPOSE` (so it doesn't take the small-input
-    /// direct-fallback path at all) and `PARALLEL_DECOMPOSE_ROW_THRESHOLD`
-    /// (so it actually dispatches via `rayon` rather than iterating
-    /// sequentially) — every block is an independent copy of the same
-    /// rank-2 (out of 3 rows) pattern on disjoint columns, so the correct
-    /// answer is mechanically checkable (rank `2 * block_count`)
-    /// regardless of which thread processes which block.
+    /// ブロック数を増やして [`MIN_ROWS_FOR_BLOCK_DECOMPOSE`] と [`PARALLEL_DECOMPOSE_ROW_THRESHOLD`] の
+    /// 両方を超え、`rayon` 並列経路でも各ブロックがランク 2 になることを確認する。
     #[test]
     fn drop_linearly_dependent_sparse_blocked_matches_sequential_result_under_parallel_dispatch() {
-        let block_count = 120; // 120 * 3 = 360 rows, clears both thresholds above.
+        let block_count = 120; // 120 * 3 = 360 行で上記 2 つの閾値を両方超える
         let mut rows: Vec<(Vec<(usize, f64)>, f64)> = Vec::new();
         for b in 0..block_count {
             let base = b * 3;
             rows.push((vec![(base, 1.0), (base + 1, 1.0)], 3.0));
             rows.push((vec![(base + 1, 1.0), (base + 2, 1.0)], 4.0));
-            rows.push((vec![(base, 1.0), (base + 1, 2.0), (base + 2, 1.0)], 7.0)); // = row0 + row1
+            rows.push((vec![(base, 1.0), (base + 1, 2.0), (base + 2, 1.0)], 7.0)); // = 行0 + 行1
         }
         let n = block_count * 3;
         assert!(rows.len() >= MIN_ROWS_FOR_BLOCK_DECOMPOSE, "test must clear the small-input fallback gate");
@@ -1397,60 +1088,59 @@ mod tests {
     }
 }
 
-/// Removes duplicate / positive-scalar-multiple rows from `(G, h)` —
-/// PaPILO's "ParallelRows" (Achterberg et al. 2019, §4.4), the `<=`-sense
-/// analogue of [`reduce_equalities`]'s duplicate detection (step 1 only —
-/// there is no inequality analogue of step 2's rank-revealing QR: a
-/// *positive* combination of several `<=` rows can imply another one, but
-/// detecting that in general is Fourier-Motzkin elimination, well beyond
-/// a cheap presolve pass, so only pairwise duplicates are caught here).
+/// 不等式制約 `(G, h)`(`G x <= h`)から、正のスカラー倍で一致する重複行を
+/// 取り除いた `(G', h')` を返す。PaPILO の "ParallelRows"
+/// (Achterberg et al. 2019, §4.4) にあたり、[`reduce_equalities`] の段階 1
+/// の不等式版(ランク判定に相当する処理はない)。
 ///
-/// Sign matters here in a way it doesn't for equalities: `a.x <= h` and
-/// `(-a).x <= h'` are *not* the same constraint (that would be
-/// `a.x >= -h'`), so a row is normalized by dividing by `|row[0].1]`
-/// (never flipping any sign) rather than by the signed first coefficient
-/// the way `dedupe_rows` does. When two rows normalize to the identical
-/// coefficient pattern, they bound the same linear combination from
-/// above and only the tighter (smaller normalized `h`) is kept.
+/// 不等式では符号が意味を持つ(`a.x <= h` と `(-a).x <= h'` は別の制約)ので、
+/// 符号を変えない `|先頭係数|` で割って正規化する。正規化後の係数パターンが
+/// 一致する行同士は同じ一次式を上から抑えているので、正規化後の右辺が
+/// 小さい(きつい)方だけを残す。空行は常に残す。
+///
+/// 判定はテスト用の参照実装 `reduce_inequalities_reference` と完全に一致し、
+/// 何も落とさず `g` が既に正準形ならそのまま複製を返す。
 pub fn reduce_inequalities(g: &Csr, h: &[f64], n: usize) -> (Csr, Vec<f64>) {
+    // 不等式行数
     let m = g.nrows();
     if m == 0 {
         return (csr_from_rows(&[], n), Vec::new());
     }
     let gr = g.as_ref();
 
-    // Same decisions as the straightforward version (kept below as
-    // `reduce_inequalities_reference` for the equivalence test), but
-    // without materializing every row and every normalized signature as
-    // its own `Vec` and SipHash-ing it: rows are read straight from the CSR
-    // slices, each signature is hashed on the fly with a cheap
-    // multiplicative mix, and a hash hit is confirmed by recomputing the
-    // class representative's signature (bit-for-bit the one the reference
-    // version would have stored as the key, since normalization is
-    // deterministic) and comparing it entry by entry.
+    // 正規化シグネチャを CSR から直接その場でハッシュし、ハッシュ一致時は
+    // クラス代表行のシグネチャを再計算して要素ごとに照合する。
+    /// ハッシュ値 `hash` に 64 ビット値 `x` を混ぜ込む乗算型ミキサ。
     #[inline]
     fn mix(hash: u64, x: u64) -> u64 {
         (hash.rotate_left(5) ^ x).wrapping_mul(0x517c_c1b7_2722_0a95)
     }
+    /// 正規化シグネチャが等しい行の同値類。
     struct Class {
+        /// 代表行(この類を最初に作った行)の添字
         rep: usize,
+        /// 代表行の正規化係数 `1 / |先頭係数|`
         rep_inv: f64,
+        /// 現在残している行の添字(正規化右辺が最小の行)
         kept_idx: usize,
+        /// 残している行の正規化右辺
         kept_h: f64,
+        /// 同じハッシュ連鎖の次の類(末尾は usize::MAX)
         next: usize,
     }
-    // Single-entry rows (the box-bound rows `rebuild_g` emits, usually the
-    // bulk of `g`) are not hashed: their class chain starts at
-    // `unit_head[j]` instead, keyed by their only column (a class's
-    // signature still decides membership, exactly as for a hashed row —
-    // rows of different length never share a class, so splitting the
-    // lookup this way changes no decision). Only multi-entry rows go
-    // through `heads`, sized up front.
+    // 非零が 1 個の行(`rebuild_g` が出す変数境界行で、通常 `g` の大半)は
+    // ハッシュせず、その列 j をキーに `unit_head[j]` から連鎖をたどる
+    // (長さが違う行は同じ類にならないので判定は変わらない)。
+    // 非零 2 個以上の行数(`heads` の初期容量)
     let multi_rows = (0..m).filter(|&i| gr.col_indices_of_row_raw(i).len() > 1).count();
+    // ハッシュ値 -> 連鎖の先頭の類 (`classes` の添字)
     let mut heads: HashMap<u64, usize, std::hash::BuildHasherDefault<IdentityU64Hasher>> = HashMap::with_capacity_and_hasher(multi_rows, Default::default());
+    // unit_head[j] = 列 j のみを持つ行の類連鎖の先頭 (usize::MAX = なし)
     let mut unit_head: Vec<usize> = vec![usize::MAX; n];
     let mut classes: Vec<Class> = Vec::with_capacity(m);
+    // keep[i] = 行 i を残すか
     let mut keep = vec![true; m];
+    // 1 行でも落としたか
     let mut any_dropped = false;
     for idx in 0..m {
         let cols = gr.col_indices_of_row_raw(idx);
@@ -1459,8 +1149,10 @@ pub fn reduce_inequalities(g: &Csr, h: &[f64], n: usize) -> (Csr, Vec<f64>) {
             continue;
         }
         let hv = h[idx];
+        // 正規化に使う |先頭係数| とその逆数
         let scale = vals[0].abs();
         let inv = 1.0 / scale;
+        // 非零 1 個の行か
         let unit = cols.len() == 1;
         let mut hash = cols.len() as u64;
         if !unit {
@@ -1468,7 +1160,9 @@ pub fn reduce_inequalities(g: &Csr, h: &[f64], n: usize) -> (Csr, Vec<f64>) {
                 hash = mix(mix(hash, j as u64), (v * inv).to_bits());
             }
         }
+        // 正規化後の右辺
         let normalized_h = hv * inv;
+        // 類 c の代表行とこの行の正規化シグネチャがビット単位で一致するか
         let same_sig = |c: &Class| -> bool {
             let rc = gr.col_indices_of_row_raw(c.rep);
             if rc.len() != cols.len() {
@@ -1477,7 +1171,9 @@ pub fn reduce_inequalities(g: &Csr, h: &[f64], n: usize) -> (Csr, Vec<f64>) {
             let rv = gr.values_of_row(c.rep);
             rc.iter().zip(rv).zip(cols.iter().zip(vals)).all(|((&rj, &rvv), (&j, &v))| rj == j && (rvv * c.rep_inv).to_bits() == (v * inv).to_bits())
         };
+        // 一致する既存の類
         let mut found: Option<usize> = None;
+        // この行が属しうる連鎖の先頭
         let head = if unit {
             Some(unit_head[cols[0]]).filter(|&h| h != usize::MAX)
         } else {
@@ -1501,6 +1197,7 @@ pub fn reduce_inequalities(g: &Csr, h: &[f64], n: usize) -> (Csr, Vec<f64>) {
                     heads.insert(hash, id);
                 }
             }
+            // 既存の類に属する: きつい方を残し、もう一方を落とす
             Some(ci) => {
                 any_dropped = true;
                 let c = &mut classes[ci];
@@ -1515,21 +1212,23 @@ pub fn reduce_inequalities(g: &Csr, h: &[f64], n: usize) -> (Csr, Vec<f64>) {
         }
     }
 
-    // Nothing dropped and `g` already in canonical form (no stored zeros,
-    // strictly increasing columns per row — what `csr_from_rows` would
-    // produce anyway): the rebuilt matrix would be `g` itself.
+    // 何も落とさず `g` が既に正準形(格納された零なし、各行の列が狭義昇順:
+    // `csr_from_rows` が作るのと同じ形)なら、作り直した行列は `g` そのもの。
     if !any_dropped {
         if csr_is_canonical(g) {
             return (g.clone(), h.to_vec());
         }
     }
+    // 残す行の添字
     let kept_rows: Vec<usize> = (0..m).filter(|&i| keep[i]).collect();
     let nnz: usize = kept_rows.iter().map(|&i| gr.col_indices_of_row_raw(i).len()).sum();
     let mut builder = CsrRowBuilder::with_capacity(n, kept_rows.len(), nnz);
+    // 1 行分の (列, 値) の再利用バッファ
     let mut row_buf: Vec<(usize, f64)> = Vec::new();
     for &i in &kept_rows {
         row_buf.clear();
         row_buf.extend(csr_row_iter(g, i));
+        // 重複列や範囲外の列があって追加できなければ、汎用の csr_from_rows で作り直す
         if !builder.push_row(&row_buf) {
             let rows: Vec<Vec<(usize, f64)>> = kept_rows.iter().map(|&i| csr_row_vec(g, i)).collect();
             return (csr_from_rows(&rows, n), kept_rows.iter().map(|&i| h[i]).collect());
@@ -1538,43 +1237,57 @@ pub fn reduce_inequalities(g: &Csr, h: &[f64], n: usize) -> (Csr, Vec<f64>) {
     (builder.finish(), kept_rows.iter().map(|&i| h[i]).collect())
 }
 
-/// [`reduce_inequalities`] on a split `G` (`propagate::GView::Split`:
-/// `rows` are the canonical multi-entry real rows, followed in `G` by one
-/// unit bound row per finite bound). Bound rows never share a class with
-/// each other (one `(j, +1)` and one `(j, -1)` row per column at most) nor
-/// with a multi-entry row, so none of them is ever dropped and the
-/// decisions among `rows` are exactly the ones [`reduce_inequalities`]
-/// makes on the materialized `G`. Returns the keep mask over `rows`, or
-/// `None` when nothing is dropped.
+/// 分割表現の `G`(`propagate::GView::Split`: 非零 2 個以上の正準な実制約行
+/// `rows` と、有限な境界ごとの単位境界行からなる)に対する
+/// [`reduce_inequalities`]。
+///
+/// 境界行は互いにも(列ごとに `(j, +1)` と `(j, -1)` が高々 1 本ずつ)、
+/// 非零 2 個以上の行とも同じ類にならないので決して落ちず、`rows` 間の判定は
+/// 実体化した `G` に対する [`reduce_inequalities`] と完全に一致する。
+/// 戻り値は `rows` 上の残すかどうかのマスク。何も落とさなければ `None`。
+/// `rhs[i]` は `rows[i]` の右辺。
 pub fn reduce_inequality_rows(rows: &[Vec<(usize, f64)>], rhs: &[f64]) -> Option<Vec<bool>> {
+    /// ハッシュ値 `hash` に 64 ビット値 `x` を混ぜ込む乗算型ミキサ([`reduce_inequalities`] と同じ)。
     #[inline]
     fn mix(hash: u64, x: u64) -> u64 {
         (hash.rotate_left(5) ^ x).wrapping_mul(0x517c_c1b7_2722_0a95)
     }
+    /// 正規化シグネチャが等しい行の同値類(フィールドの意味は [`reduce_inequalities`] 内のものと同じ)。
     struct Class {
+        /// 代表行の添字
         rep: usize,
+        /// 代表行の正規化係数 `1 / |先頭係数|`
         rep_inv: f64,
+        /// 現在残している行の添字
         kept_idx: usize,
+        /// 残している行の正規化右辺
         kept_h: f64,
+        /// 同じハッシュ連鎖の次の類(末尾は usize::MAX)
         next: usize,
     }
     let m = rows.len();
+    // ハッシュ値 -> 連鎖の先頭の類
     let mut heads: HashMap<u64, usize, std::hash::BuildHasherDefault<IdentityU64Hasher>> = HashMap::with_capacity_and_hasher(m, Default::default());
     let mut classes: Vec<Class> = Vec::with_capacity(m);
+    // 最初に落とす行が見つかった時点で確保する残す/落とすマスク
     let mut keep: Option<Vec<bool>> = None;
     for (idx, row) in rows.iter().enumerate() {
         debug_assert!(row.len() >= 2);
+        // 正規化係数 1 / |先頭係数|
         let inv = 1.0 / row[0].1.abs();
         let mut hash = row.len() as u64;
         for &(j, v) in row {
             hash = mix(mix(hash, j as u64), (v * inv).to_bits());
         }
+        // 正規化後の右辺
         let normalized_h = rhs[idx] * inv;
+        // 類 c の代表行とこの行の正規化シグネチャがビット単位で一致するか
         let same_sig = |c: &Class| -> bool {
             let rep = &rows[c.rep];
             rep.len() == row.len() && rep.iter().zip(row).all(|(&(rj, rv), &(j, v))| rj == j && (rv * c.rep_inv).to_bits() == (v * inv).to_bits())
         };
         let head = heads.get(&hash).copied();
+        // 一致する既存の類
         let mut found: Option<usize> = None;
         let mut cur = head.unwrap_or(usize::MAX);
         while cur != usize::MAX {
@@ -1606,24 +1319,30 @@ pub fn reduce_inequality_rows(rows: &[Vec<(usize, f64)>], rhs: &[f64]) -> Option
     keep
 }
 
-/// Pass-through hasher for keys that already are well-mixed 64-bit hashes.
+/// 既に十分混ぜ合わされた 64 ビットのハッシュ値をキーとする `HashMap` 用の
+/// 恒等ハッシャ(値をそのまま返す)。
 #[derive(Default)]
 pub(crate) struct IdentityU64Hasher(u64);
 
 impl std::hash::Hasher for IdentityU64Hasher {
+    /// 保持している値をそのままハッシュ値として返す。
     fn finish(&self) -> u64 {
         self.0
     }
+    /// 任意バイト列用(通常は使われない): バイトを順に左シフトで詰め込む。
     fn write(&mut self, bytes: &[u8]) {
         for &b in bytes {
             self.0 = (self.0 << 8) | b as u64;
         }
     }
+    /// `u64` キーをそのまま保持する。
     fn write_u64(&mut self, x: u64) {
         self.0 = x;
     }
 }
 
+/// テスト用の単純な参照実装: 行ごとに正規化シグネチャの `Vec` を作り
+/// `HashMap` で重複判定する。[`reduce_inequalities`] と同じ結果になるべきもの。
 #[cfg(test)]
 fn reduce_inequalities_reference(g: &Csr, h: &[f64], n: usize) -> (Csr, Vec<f64>) {
     let m = g.nrows();
@@ -1638,14 +1357,13 @@ fn reduce_inequalities_reference(g: &Csr, h: &[f64], n: usize) -> (Csr, Vec<f64>
         })
         .collect();
 
-    // (normalized sig) -> (index into `rows` currently kept, its normalized h)
+    // 正規化シグネチャ -> (現在残している行の添字, その正規化右辺)
     let mut best: HashMap<Vec<(usize, u64)>, (usize, f64)> = HashMap::new();
     let mut keep = vec![true; m];
     for (idx, (row, hv)) in rows.iter().enumerate() {
         if row.is_empty() {
-            // `0 <= h`: either always true (drop) or a certificate of
-            // infeasibility (`propagate`'s activity check catches that) —
-            // neither is a "duplicate" in the sense this pass looks for.
+            // `0 <= h` は重複の対象外なので残す(常に真か、実行不能の証拠で
+            // それは `propagate` の活動量検査が検出する)。
             continue;
         }
         let scale = row[0].1.abs();
