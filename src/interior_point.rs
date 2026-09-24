@@ -311,7 +311,7 @@ pub fn solve(qp: &QpStd) -> IpmResult {
     // Everything below operates on the scaled/reduced problem; `x` is
     // mapped back to original-variable space at every return site via
     // `unscale_with_substitutions`.
-    let pre = presolve::run_extended(n, &qp.a, &qp.b, &qp.g, &qp.h, &qp.c, 10, PROPAGATION_PASSES, PRESOLVE_ROUNDS, ROWSINGLETON_COLSINGLETON_INNER_ROUNDS);
+    let pre = presolve::run_extended(n, &qp.a, &qp.b, &qp.g, &qp.h, &qp.c, 10, PROPAGATION_PASSES, PRESOLVE_ROUNDS, ROWSINGLETON_COLSINGLETON_INNER_ROUNDS, true);
     if pre.infeasible {
         return IpmResult { status: Status::Infeasible, x: None };
     }

@@ -101,12 +101,14 @@ class Model:
         solving the same model with each is a genuine cross-check rather
         than comparing an engine against itself.
 
-        When the solver proves early that there is no finite optimum
-        (stage A of the extended dual simplex ends with ``z^1 < 0``: the
-        model is infeasible or unbounded), it stops and reports
-        ``"infeasible_or_unbounded"`` by default. Pass
-        ``distinguish_infeasible_unbounded=True`` to keep solving until it
-        can report ``"infeasible"`` or ``"unbounded"`` specifically.
+        With the simplex engine the dual simplex alone classifies the
+        model. By default the status is ``"optimal"``, ``"infeasible"`` or
+        ``"infeasible_or_unbounded"``: stage A of the extended dual simplex
+        ending with ``z^1 < 0`` proves there is no finite optimum and stops
+        there, while ``z^1 = 0`` rules out unboundedness and stage B then
+        finds an optimum or proves infeasibility. Pass
+        ``distinguish_infeasible_unbounded=True`` to also split the first
+        case into ``"infeasible"`` and ``"unbounded"``.
         """
         result = self._core.solve(
             root_solver=root_solver,

@@ -206,10 +206,13 @@ pub enum Status {
 /// built — threaded from `Model.solve` down to the LP engines.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LpOptions {
-    /// When stage A of the extended dual simplex finds `z^1 < 0`, keep
-    /// going through stage B to decide whether the problem is infeasible or
-    /// unbounded (`true`), or stop right there and report
-    /// [`Status::InfeasibleOrUnbounded`] (`false`, the default).
+    /// `false` (the default): report `Optimal`, `Infeasible` or
+    /// [`Status::InfeasibleOrUnbounded`] — stage A of the extended dual
+    /// simplex stops at `z^1 < 0` (no finite optimum), and `z^1 = 0` goes on
+    /// to stage B, which finds an optimum or proves infeasibility.
+    /// `true`: also split `z^1 < 0` into `Infeasible` / `Unbounded` by
+    /// running stage B there too; presolve's improving-ray shortcut is then
+    /// refused, since it cannot check the rest of the problem's feasibility.
     pub distinguish_infeasible_unbounded: bool,
 }
 

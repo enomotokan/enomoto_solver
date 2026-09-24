@@ -371,6 +371,7 @@ pub fn run_extended(
     prop_passes: usize,
     rounds: usize,
     inner_rounds: usize,
+    allow_unbounded_verdict: bool,
 ) -> ExtendedPresolveResult {
     // One-off, env-var-gated wall-clock breakdown of this function's own
     // major steps — `ENOMOTO_PROF_PHASES`'s `solve_lp_dual` timer starts
@@ -1151,19 +1152,26 @@ pub fn run_extended(
     // not before: an already-eliminated column's own box row is long gone
     // by this point, so without pinning it to `[0,0]` first it would
     // misread here as a genuinely fresh free variable.
+    let skipped_freevar = || freevar::FreeVarResult {
+        a: a.clone(),
+        b: b.clone(),
+        c: c.clone(),
+        substitutions: Vec::new(),
+        fixed: Vec::new(),
+        unbounded: false,
+        real_rows: prop.real_rows.clone(),
+        real_rhs: prop.real_rhs.clone(),
+    };
     let free = if std::env::var("ENOMOTO_DISABLE_FREEVAR").is_ok() {
-        freevar::FreeVarResult {
-            a: a.clone(),
-            b: b.clone(),
-            c: c.clone(),
-            substitutions: Vec::new(),
-            fixed: Vec::new(),
-            unbounded: false,
-            real_rows: prop.real_rows.clone(),
-            real_rhs: prop.real_rhs.clone(),
-        }
+        skipped_freevar()
     } else {
-        timed_step!("freevar", freevar::eliminate_free_variables(n, &a, &b, &c, &lb, &ub, &prop.real_rows, &prop.real_rhs))
+        let free = timed_step!("freevar", freevar::eliminate_free_variables(n, &a, &b, &c, &lb, &ub, &prop.real_rows, &prop.real_rhs));
+        // `freevar`'s "unbounded" only proves `z^1 < 0` (an improving ray
+        // exists); it is a true unboundedness verdict only if the rest of
+        // the problem is feasible, which presolve never checks. A caller
+        // that must tell infeasible from unbounded refuses the verdict:
+        // the step is skipped and the solver decides.
+        if free.unbounded && !allow_unbounded_verdict { skipped_freevar() } else { free }
     };
     if std::env::var("ENOMOTO_DEBUG_FREEVAR").is_ok() {
         eprintln!("DEBUG_FREEVAR: eliminated={} fixed={} unbounded={}", free.substitutions.len(), free.fixed.len(), free.unbounded);

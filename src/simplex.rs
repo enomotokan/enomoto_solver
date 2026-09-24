@@ -973,6 +973,7 @@ fn build_std_form_presolved(
     objective: &Objective,
     constraints: &[ConstraintRow],
     clamp_unbounded: bool,
+    allow_unbounded_verdict: bool,
 ) -> Result<PresolvedForm, Status> {
     let n = variables.len();
     let sign = match objective.sense {
@@ -986,7 +987,7 @@ fn build_std_form_presolved(
 
     let (a, b, g, h) = presolve::build_a_g(variables, constraints);
 
-    let pre = presolve::run_extended(n, &a, &b, &g, &h, &c0, RUIZ_ITERS, PROPAGATION_PASSES, PRESOLVE_ROUNDS, ROWSINGLETON_COLSINGLETON_INNER_ROUNDS);
+    let pre = presolve::run_extended(n, &a, &b, &g, &h, &c0, RUIZ_ITERS, PROPAGATION_PASSES, PRESOLVE_ROUNDS, ROWSINGLETON_COLSINGLETON_INNER_ROUNDS, allow_unbounded_verdict);
     if std::env::var("ENOMOTO_DEBUG_PRESOLVE_INFEAS").is_ok() {
         eprintln!("DEBUG_PRESOLVE: infeasible={} unbounded={}", pre.infeasible, pre.unbounded);
     }
@@ -994,11 +995,12 @@ fn build_std_form_presolved(
         return Err(Status::Infeasible);
     }
     if pre.unbounded {
-        // `presolve::freevar::eliminate_free_variables` found a free
-        // variable with no remaining appearance anywhere and a nonzero
-        // cost — decidable directly, with no basis ever needing to be
-        // built (see that module's own docs).
-        return Err(Status::Unbounded);
+        // `presolve::freevar::eliminate_free_variables` found an improving
+        // ray (a free variable whose cost pushes it toward an unconstrained
+        // side) — that proves `z^1 < 0`, i.e. no finite optimum, but not
+        // that the rest of the problem is feasible. Only reachable with
+        // `allow_unbounded_verdict` (the default, non-distinguishing mode).
+        return Err(Status::InfeasibleOrUnbounded);
     }
 
     // `pre.lb`/`pre.ub`/`pre.real_rows`/`pre.real_rhs` are the box bounds
@@ -3067,14 +3069,29 @@ pub fn solve_lp_dual(variables: &[VariableData], objective: &Objective, constrai
 
 /// [`solve_lp_dual`] with explicit [`crate::types::LpOptions`] — see
 /// [`crate::types::LpOptions::distinguish_infeasible_unbounded`] for the one
-/// option this path honors (the extended dual simplex's stage-A early exit).
+/// option this path honors.
+///
+/// By default the reported status is one of `Optimal`, `Infeasible` or
+/// `InfeasibleOrUnbounded` (`prop:trichotomy`: stage A's `z^1 < 0` rules out
+/// a finite optimum, `z^1 = 0` rules out unboundedness and stage B decides
+/// the rest). An `Unbounded` reached by any other route (the `m == 0`
+/// shortcut, the `BIG_M` fallback) is reported the same way, so the set of
+/// possible answers does not depend on which path solved the problem.
 pub fn solve_lp_dual_with(variables: &[VariableData], objective: &Objective, constraints: &[ConstraintRow], opts: crate::types::LpOptions) -> SimplexResult {
+    let result = solve_lp_dual_classified(variables, objective, constraints, opts);
+    if result.status == Status::Unbounded && !opts.distinguish_infeasible_unbounded {
+        return SimplexResult { status: Status::InfeasibleOrUnbounded, x: None };
+    }
+    result
+}
+
+fn solve_lp_dual_classified(variables: &[VariableData], objective: &Objective, constraints: &[ConstraintRow], opts: crate::types::LpOptions) -> SimplexResult {
     // `clamp_unbounded: false` — this function always fully handles a
     // one-sided infinite structural bound itself, either via the
     // classical path below (when none survived, the common case) or via
     // `extended_dual::solve_lp_dual_extended` (when `had_unbounded_structural`
     // is set) — see that parameter's own docs.
-    let PresolvedForm { std, scaling: sc, postsolve_log, orig_of_free, sign, fixed_values, shift, had_unbounded_structural } = match build_std_form_presolved(variables, objective, constraints, false) {
+    let PresolvedForm { std, scaling: sc, postsolve_log, orig_of_free, sign, fixed_values, shift, had_unbounded_structural } = match build_std_form_presolved(variables, objective, constraints, false, !opts.distinguish_infeasible_unbounded) {
         Ok(pf) => pf,
         Err(status) => return SimplexResult { status, x: None },
     };
@@ -3171,7 +3188,7 @@ pub fn solve_lp_dual_with(variables: &[VariableData], objective: &Objective, con
         // `solve_lp`-vs-`solve_lp_dual` cross-check test exercised the
         // *dual* side of this exact scenario, never the primal one, once
         // `solve_lp` itself was removed as dead code).
-        let PresolvedForm { std, scaling: sc, postsolve_log, orig_of_free, sign, fixed_values, shift, .. } = match build_std_form_presolved(variables, objective, constraints, true) {
+        let PresolvedForm { std, scaling: sc, postsolve_log, orig_of_free, sign, fixed_values, shift, .. } = match build_std_form_presolved(variables, objective, constraints, true, !opts.distinguish_infeasible_unbounded) {
             Ok(pf) => pf,
             Err(status) => return SimplexResult { status, x: None },
         };
@@ -5339,7 +5356,29 @@ mod tests {
         let obj = Objective { expr: expr(&[(0, 1.0)]), sense: Sense::Minimize };
         let cons = vec![row(&[(1, 1.0)], RowSense::Le, 5.0)];
 
-        assert_eq!(solve_lp_dual(&vars, &obj, &cons).status, Status::Unbounded);
+        assert_eq!(solve_lp_dual(&vars, &obj, &cons).status, Status::InfeasibleOrUnbounded);
+        let distinguish = crate::types::LpOptions { distinguish_infeasible_unbounded: true };
+        assert_eq!(solve_lp_dual_with(&vars, &obj, &cons, distinguish).status, Status::Unbounded);
+    }
+
+    #[test]
+    fn improving_ray_over_an_infeasible_rest_is_infeasible_when_distinguishing() {
+        // Same leftover free x0 (an improving ray, so no finite optimum),
+        // but y1 - y2 >= 1, y2 - y3 >= 1, y3 - y1 >= 1 sum to 0 >= 3: no
+        // feasible point at all, and bound propagation cannot see it (it
+        // only keeps raising the lower bounds). Presolve's ray alone must
+        // not be reported as `Unbounded`.
+        let vars = vec![var(f64::NEG_INFINITY, f64::INFINITY), var(0.0, f64::INFINITY), var(0.0, f64::INFINITY), var(0.0, f64::INFINITY)];
+        let obj = Objective { expr: expr(&[(0, 1.0)]), sense: Sense::Minimize };
+        let cons = vec![
+            row(&[(1, 1.0), (2, -1.0)], RowSense::Ge, 1.0),
+            row(&[(2, 1.0), (3, -1.0)], RowSense::Ge, 1.0),
+            row(&[(3, 1.0), (1, -1.0)], RowSense::Ge, 1.0),
+        ];
+
+        assert_eq!(solve_lp_dual(&vars, &obj, &cons).status, Status::InfeasibleOrUnbounded);
+        let distinguish = crate::types::LpOptions { distinguish_infeasible_unbounded: true };
+        assert_eq!(solve_lp_dual_with(&vars, &obj, &cons, distinguish).status, Status::Infeasible);
     }
 
     #[test]
@@ -5450,7 +5489,7 @@ mod tests {
         let obj = Objective { expr: expr(&[(0, -1.0)]), sense: Sense::Minimize };
         let cons = vec![row(&[(0, 1.0), (1, 1.0)], RowSense::Le, 8.0)];
 
-        let pf = build_std_form_presolved(&vars, &obj, &cons, false).unwrap();
+        let pf = build_std_form_presolved(&vars, &obj, &cons, false, true).unwrap();
         assert!(!pf.had_unbounded_structural, "x0 should be fully eliminated by presolve, never reaching a structural column at all");
 
         let check = |x: Vec<f64>| {
@@ -5539,7 +5578,9 @@ mod tests {
         let vars = vec![var(0.0, f64::INFINITY), var(0.0, 10.0)];
         let obj = Objective { expr: expr(&[(0, -1.0)]), sense: Sense::Minimize };
         let cons = vec![row(&[(1, 1.0)], RowSense::Le, 5.0)];
-        assert_eq!(solve_lp_dual(&vars, &obj, &cons).status, Status::Unbounded);
+        assert_eq!(solve_lp_dual(&vars, &obj, &cons).status, Status::InfeasibleOrUnbounded);
+        let distinguish = crate::types::LpOptions { distinguish_infeasible_unbounded: true };
+        assert_eq!(solve_lp_dual_with(&vars, &obj, &cons, distinguish).status, Status::Unbounded);
     }
 
     #[test]
@@ -5588,7 +5629,7 @@ mod tests {
         let vars = vec![var(0.0, 10.0), var(0.0, 10.0)];
         let obj = Objective { expr: expr(&[(0, 1.0), (1, 1.0)]), sense: Sense::Minimize };
         let cons = vec![row(&[(0, 1.0), (1, 1.0)], RowSense::Le, 10.0)];
-        let pf = build_std_form_presolved(&vars, &obj, &cons, true).unwrap();
+        let pf = build_std_form_presolved(&vars, &obj, &cons, true, true).unwrap();
         assert!(!pf.had_unbounded_structural);
 
         // A one-sided-unbounded structural variable whose favored
@@ -5603,11 +5644,11 @@ mod tests {
         let vars = vec![var(0.0, f64::INFINITY), var(0.0, 10.0)];
         let obj = Objective { expr: expr(&[(0, -1.0)]), sense: Sense::Minimize };
         let cons = vec![row(&[(1, 1.0)], RowSense::Le, 5.0)];
-        let pf = build_std_form_presolved(&vars, &obj, &cons, true).unwrap();
+        let pf = build_std_form_presolved(&vars, &obj, &cons, true, true).unwrap();
         assert!(pf.had_unbounded_structural);
         assert!(pf.std.ub[0].is_finite(), "clamp_unbounded:true should still BIG_M-substitute, ub={}", pf.std.ub[0]);
 
-        let pf = build_std_form_presolved(&vars, &obj, &cons, false).unwrap();
+        let pf = build_std_form_presolved(&vars, &obj, &cons, false, true).unwrap();
         assert!(pf.had_unbounded_structural);
         assert_eq!(pf.std.ub[0], f64::INFINITY, "clamp_unbounded:false must leave the true infinity in place");
     }
