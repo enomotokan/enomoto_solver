@@ -509,6 +509,7 @@ pub fn run_extended(
     // this is what turns `rounds` from "run exactly this many times" into
     // "run at most this many times, fewer if convergence comes first".
     let mut prev_signature: Option<(usize, usize, Vec<f64>, Vec<f64>)> = None;
+    let mut prev_struct: Option<(usize, usize, usize, usize)> = None;
     for _round_idx in 0..rounds.max(1) {
         let prop = timed_step!("propagate", propagate::propagate(n, &g, &h, prop_passes));
         if prop.infeasible {
@@ -1089,6 +1090,24 @@ pub fn run_extended(
         let (rg, rh) = timed_step!("reduce_inequalities(round)", redundancy::reduce_inequalities(&g, &h, n));
         g = rg;
         h = rh;
+
+        // `ENOMOTO_T_ROUND_STRUCT_STOP=1` (default 0 = off): stop as soon as
+        // a whole round left the structure unchanged — `A`'s row count,
+        // `g`'s multi-entry (real) row count, the number of fixed columns
+        // and the postsolve log length all equal to the previous round's.
+        // Unlike the signature check below this ignores bound values, so a
+        // round that only keeps shaving bounds (geometric convergence) ends
+        // the loop after one such idle round instead of running to the cap.
+        if tunable!("ENOMOTO_T_ROUND_STRUCT_STOP", 0, usize) != 0 {
+            let gr = g.as_ref();
+            let g_multi = (0..gr.nrows()).filter(|&i| gr.col_indices_of_row_raw(i).len() > 1).count();
+            let fixed = (0..n).filter(|&j| lb[j] == ub[j]).count();
+            let st = (a.nrows(), g_multi, fixed, postsolve_log.len());
+            if prev_struct == Some(st) {
+                break;
+            }
+            prev_struct = Some(st);
+        }
 
         let signature = (a.nrows(), g.nrows(), lb.clone(), ub.clone());
         // Bound changes below a relative 1e-3 do not count as progress

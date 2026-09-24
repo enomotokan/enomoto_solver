@@ -143,6 +143,12 @@ pub fn bounds_inconsistent(n: usize, lb: &[f64], ub: &[f64]) -> bool {
 
 pub fn propagate(n: usize, g: &Csr, h: &[f64], passes: usize) -> PropagateResult {
     let (mut lb, mut ub, mut rows, mut rhs) = extract_bounds(n, g, h);
+    // `ENOMOTO_T_PROP_RELTOL` (default 0 = off, the historical absolute-EPS
+    // rule only): HiGHS-style, a finite bound is only tightened when the
+    // improvement also exceeds `reltol * (1 + |bound|)` — stops the
+    // geometric shaving of bounds over cyclic row structures that keeps
+    // the outer presolve rounds from reaching a fixpoint.
+    let reltol = tunable!("ENOMOTO_T_PROP_RELTOL", 0.0, f64);
 
     if bounds_inconsistent(n, &lb, &ub) {
         return PropagateResult {
@@ -270,13 +276,13 @@ pub fn propagate(n: usize, g: &Csr, h: &[f64], passes: usize) -> PropagateResult
                 }
                 if aik > 0.0 {
                     let candidate = (b - l_s) / aik;
-                    if candidate < ub[k] - EPS {
+                    if candidate < ub[k] - EPS && (reltol == 0.0 || !ub[k].is_finite() || candidate < ub[k] - reltol * (1.0 + ub[k].abs())) {
                         ub[k] = candidate;
                         changed = true;
                     }
                 } else if aik < 0.0 {
                     let candidate = (b - l_s) / aik;
-                    if candidate > lb[k] + EPS {
+                    if candidate > lb[k] + EPS && (reltol == 0.0 || !lb[k].is_finite() || candidate > lb[k] + reltol * (1.0 + lb[k].abs())) {
                         lb[k] = candidate;
                         changed = true;
                     }
@@ -466,11 +472,14 @@ pub fn propagate_equalities(a: &Csr, b: &[f64], lb: &mut [f64], ub: &mut [f64], 
     let ar = a.as_ref();
     // A finite bound is only replaced when the change exceeds `EPS`; an
     // infinite bound is always replaced by a finite one.
+    // `ENOMOTO_T_EQPROP_RELTOL` (default 0 = off): additionally require a
+    // finite bound to move by more than `reltol * (1 + |old|)`.
+    let reltol = tunable!("ENOMOTO_T_EQPROP_RELTOL", 0.0, f64);
     let improves = |old: f64, new: f64| -> bool {
         if !old.is_finite() {
             return true;
         }
-        (old - new).abs() > EPS
+        (old - new).abs() > EPS && (reltol == 0.0 || (old - new).abs() > reltol * (1.0 + old.abs()))
     };
     let mut res = EqPropagateResult { infeasible: false, forcing_rows: 0, fixed_cols: 0, tightened: 0 };
     let mut forcing_seen = vec![false; ar.nrows()];
