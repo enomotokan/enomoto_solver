@@ -132,6 +132,7 @@ use std::collections::BinaryHeap;
 /// variables/parameters through this file that are themselves named `lu`
 /// (an `FtLu` instance, the live basis factorization).
 mod lu;
+pub(crate) use lu::tiny_drop;
 use self::lu as sparse_lu;
 
 mod extended_dual;
@@ -475,7 +476,7 @@ pub(super) const UPDATE_VERIFY_TOL: f64 = 1e-7;
 /// that module to generalize here, only to call.
 #[inline]
 pub(super) fn update_verify(alpha_row: f64, alpha_col: f64) -> bool {
-    let scale = alpha_row.abs().max(alpha_col.abs()).max(FT_MIN_PIVOT);
+    let scale = alpha_row.abs().max(alpha_col.abs()).max(tunable!("ENOMOTO_T_FT_MIN_PIVOT", FT_MIN_PIVOT, f64));
     let rel = (alpha_row - alpha_col).abs() / scale;
     rel <= UPDATE_VERIFY_TOL
 }
@@ -651,7 +652,7 @@ impl SteepestEdgeState {
         let n_orig = std.n_total - std.n_rows;
         for j in 0..n_orig {
             let norm_sq: f64 = std.cols.col(j).iter().map(|&(_, v)| v * v).sum();
-            gamma[j] = norm_sq.max(STEEPEST_EDGE_FLOOR);
+            gamma[j] = norm_sq.max(tunable!("ENOMOTO_T_STEEPEST_EDGE_FLOOR", STEEPEST_EDGE_FLOOR, f64));
         }
         SteepestEdgeState { gamma }
     }
@@ -685,7 +686,7 @@ impl SteepestEdgeState {
             let pivot_sj: f64 = col.iter().map(|&(i, v)| v * rho[i]).sum();
             let tau_j: f64 = col.iter().map(|&(i, v)| v * w[i]).sum();
             let beta_j = pivot_sj / pivot;
-            *gamma_j = (*gamma_j + beta_j * beta_j * (1.0 + gamma_t_old) - 2.0 * beta_j * tau_j).max(STEEPEST_EDGE_FLOOR);
+            *gamma_j = (*gamma_j + beta_j * beta_j * (1.0 + gamma_t_old) - 2.0 * beta_j * tau_j).max(tunable!("ENOMOTO_T_STEEPEST_EDGE_FLOOR", STEEPEST_EDGE_FLOOR, f64));
         }
     }
 }
@@ -1815,7 +1816,7 @@ fn run_phase(
     let mut w_buf = vec![0.0; m];
     let mut candidates_buf: Vec<Candidate> = Vec::with_capacity(m);
 
-    let ratio_pivot_tol = if std::env::var("ENOMOTO_PRIMAL_RATIO_PIVOT_TOL_OLD").is_ok() { TOL } else { FT_MIN_PIVOT };
+    let ratio_pivot_tol = if std::env::var("ENOMOTO_PRIMAL_RATIO_PIVOT_TOL_OLD").is_ok() { TOL } else { tunable!("ENOMOTO_T_FT_MIN_PIVOT", FT_MIN_PIVOT, f64) };
     let max_iters = max_iters_for(m, std.n_total);
     for iter_idx in 0..max_iters {
         let rhs = t.recompute_basics(lu);
@@ -1824,7 +1825,7 @@ fn run_phase(
         *since_check += 1;
         if *since_check >= FT_CHECK_INTERVAL {
             *since_check = 0;
-            let bump_too_big = lu.fill_count() > FT_BUMP_LIMIT_FACTOR * m.max(1);
+            let bump_too_big = lu.fill_count() > tunable!("ENOMOTO_T_FT_BUMP_LIMIT_FACTOR", FT_BUMP_LIMIT_FACTOR, usize) * m.max(1);
             let residual_too_big = !bump_too_big && t.basis_residual_norm(&rhs) > FT_RESIDUAL_TOL;
             if bump_too_big || residual_too_big {
                 // `None` here, not a panic — see this function's own docs
@@ -1936,7 +1937,7 @@ fn run_phase(
                 NbStatus::Zero => (true, if dj < 0.0 { 1.0 } else { -1.0 }),
             };
             if eligible && dj.abs() > TOL {
-                let score = dj * dj / se.gamma[j].max(STEEPEST_EDGE_FLOOR);
+                let score = dj * dj / se.gamma[j].max(tunable!("ENOMOTO_T_STEEPEST_EDGE_FLOOR", STEEPEST_EDGE_FLOOR, f64));
                 Some((j, score, dir, dj))
             } else {
                 None
@@ -1950,7 +1951,7 @@ fn run_phase(
         // dual method's own `bland_mode` bypasses DSE-based `chuzr`.
         let best = if stall.bland_mode {
             (0..std.n_total).filter_map(price_one).min_by_key(|&(j, ..)| j)
-        } else if std.n_total >= PARTIAL_PRICING_THRESHOLD {
+        } else if std.n_total >= tunable!("ENOMOTO_T_PARTIAL_PRICING_THRESHOLD", PARTIAL_PRICING_THRESHOLD, usize) {
             let iter_u64 = iter_idx as u64;
             let sample_best = (0..std.n_total)
                 .filter(|&j| partial_pricing_sampled(pricing_seed, iter_u64, j))
@@ -2077,7 +2078,7 @@ fn run_phase(
         // largest pivot — matching Bland's rule's own leaving-variable
         // requirement (consistent, deterministic tie-breaking on both
         // sides of a pivot is what its finite-termination proof needs).
-        let admitted = candidates.iter().filter(|c| c.exact <= alpha1 + PRIMAL_HARRIS_TOL);
+        let admitted = candidates.iter().filter(|c| c.exact <= alpha1 + tunable!("ENOMOTO_T_PRIMAL_HARRIS_TOL", PRIMAL_HARRIS_TOL, f64));
         let leaving = if stall.bland_mode {
             admitted.min_by_key(|c| t.basis[c.row])
         } else {
@@ -2166,7 +2167,7 @@ fn run_phase(
                 // the resulting pivot is too small to use safely. `None`
                 // here too — see the identical fallback earlier in this
                 // same loop, and this function's own docs.
-                if !lu.try_update(r, a_enter, FT_MIN_PIVOT) {
+                if !lu.try_update(r, a_enter, tunable!("ENOMOTO_T_FT_MIN_PIVOT", FT_MIN_PIVOT, f64)) {
                     let Some(l) = try_refactorize(std, t, Some(&*lu)) else {
                         if std::env::var("ENOMOTO_DEBUG_PHASES").is_ok() {
                             eprintln!("run_phase None@ft_update iter={iter_idx} phase1={phase1} pivot={pivot}");
@@ -2634,13 +2635,13 @@ impl DseState {
             for i in 0..m {
                 lu.solve_transpose_unit_into(i, &mut scratch, &mut z);
                 let norm_sq: f64 = z.iter().map(|&v| v * v).sum();
-                w[i] = norm_sq.max(STEEPEST_EDGE_FLOOR);
+                w[i] = norm_sq.max(tunable!("ENOMOTO_T_STEEPEST_EDGE_FLOOR", STEEPEST_EDGE_FLOOR, f64));
             }
         } else {
             for i in 0..m {
                 lu.solve_transpose_unit(i, &mut scratch, &mut z);
                 let norm_sq: f64 = z.iter().map(|&v| v * v).sum();
-                w[i] = norm_sq.max(STEEPEST_EDGE_FLOOR);
+                w[i] = norm_sq.max(tunable!("ENOMOTO_T_STEEPEST_EDGE_FLOOR", STEEPEST_EDGE_FLOOR, f64));
             }
         }
         DseState { w, use_parallel: m > RAYON_SIZE_THRESHOLD }
@@ -2679,13 +2680,13 @@ impl DseState {
     /// sitting there, unread, at every single call site.
     fn update_after_pivot(&mut self, p: usize, alpha: &[f64], tau: &[f64], rho_p: &[f64]) {
         let pivot = alpha[p];
-        let wp_old = rho_p.iter().map(|v| v * v).sum::<f64>().max(STEEPEST_EDGE_FLOOR);
+        let wp_old = rho_p.iter().map(|v| v * v).sum::<f64>().max(tunable!("ENOMOTO_T_STEEPEST_EDGE_FLOOR", STEEPEST_EDGE_FLOOR, f64));
         let update_one = |i: usize, w_i: &mut f64| {
             if i == p {
                 return;
             }
             let ratio = alpha[i] / pivot;
-            *w_i = (*w_i - 2.0 * ratio * tau[i] + ratio * ratio * wp_old).max(STEEPEST_EDGE_FLOOR);
+            *w_i = (*w_i - 2.0 * ratio * tau[i] + ratio * ratio * wp_old).max(tunable!("ENOMOTO_T_STEEPEST_EDGE_FLOOR", STEEPEST_EDGE_FLOOR, f64));
         };
         if self.use_parallel {
             use rayon::prelude::*;
@@ -2704,10 +2705,10 @@ impl DseState {
             let m = self.w.len();
             for ((w_i, &a_i), &t_i) in self.w.iter_mut().zip(&alpha[..m]).zip(&tau[..m]) {
                 let ratio = a_i / pivot;
-                *w_i = (*w_i - 2.0 * ratio * t_i + ratio * ratio * wp_old).max(STEEPEST_EDGE_FLOOR);
+                *w_i = (*w_i - 2.0 * ratio * t_i + ratio * ratio * wp_old).max(tunable!("ENOMOTO_T_STEEPEST_EDGE_FLOOR", STEEPEST_EDGE_FLOOR, f64));
             }
         }
-        self.w[p] = (wp_old / (pivot * pivot)).max(STEEPEST_EDGE_FLOOR);
+        self.w[p] = (wp_old / (pivot * pivot)).max(tunable!("ENOMOTO_T_STEEPEST_EDGE_FLOOR", STEEPEST_EDGE_FLOOR, f64));
     }
 }
 
@@ -2835,7 +2836,7 @@ fn row_infeasible(std: &StdForm, t: &Tableau, noise_feasible: &[bool], i: usize)
         return false;
     }
     let val = t.x[var];
-    val < std.lb[var] - PRIMAL_FEAS_TOL || val > std.ub[var] + PRIMAL_FEAS_TOL
+    val < std.lb[var] - tunable!("ENOMOTO_T_PRIMAL_FEAS_TOL", PRIMAL_FEAS_TOL, f64) || val > std.ub[var] + tunable!("ENOMOTO_T_PRIMAL_FEAS_TOL", PRIMAL_FEAS_TOL, f64)
 }
 
 /// Hyper-sparse `chuzr`: the set of basic rows currently primal-infeasible,
@@ -3731,7 +3732,7 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
         since_check += 1;
         if since_check >= FT_CHECK_INTERVAL {
             since_check = 0;
-            let bump_too_big = lu.fill_count() > FT_BUMP_LIMIT_FACTOR * m.max(1);
+            let bump_too_big = lu.fill_count() > tunable!("ENOMOTO_T_FT_BUMP_LIMIT_FACTOR", FT_BUMP_LIMIT_FACTOR, usize) * m.max(1);
             since_residual_check += 1;
             let due_for_residual_check = since_residual_check >= RESIDUAL_CHECK_MULTIPLIER;
             if bump_too_big || due_for_residual_check {
@@ -3804,17 +3805,17 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
             if noise_feasible[var] {
                 return None;
             }
-            let delta = if val < std.lb[var] - PRIMAL_FEAS_TOL {
+            let delta = if val < std.lb[var] - tunable!("ENOMOTO_T_PRIMAL_FEAS_TOL", PRIMAL_FEAS_TOL, f64) {
                 std.lb[var] - val
-            } else if val > std.ub[var] + PRIMAL_FEAS_TOL {
+            } else if val > std.ub[var] + tunable!("ENOMOTO_T_PRIMAL_FEAS_TOL", PRIMAL_FEAS_TOL, f64) {
                 val - std.ub[var]
             } else {
                 0.0
             };
-            if delta <= PRIMAL_FEAS_TOL {
+            if delta <= tunable!("ENOMOTO_T_PRIMAL_FEAS_TOL", PRIMAL_FEAS_TOL, f64) {
                 return None;
             }
-            let score = delta * delta / weights.weight(i).max(STEEPEST_EDGE_FLOOR);
+            let score = delta * delta / weights.weight(i).max(tunable!("ENOMOTO_T_STEEPEST_EDGE_FLOOR", STEEPEST_EDGE_FLOOR, f64));
             Some((i, score, val < std.lb[var]))
         };
         // In `bland_mode`, chuzr also switches to Bland's rule: smallest
@@ -4180,7 +4181,7 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
             // otherwise well-behaved instances.
             let lv = t.basis[p];
             let infeas = (std.lb[lv] - t.x[lv]).max(t.x[lv] - std.ub[lv]).max(0.0);
-            if infeas <= PRIMAL_FEAS_TOL * std.b[p].abs().max(1.0) {
+            if infeas <= tunable!("ENOMOTO_T_PRIMAL_FEAS_TOL", PRIMAL_FEAS_TOL, f64) * std.b[p].abs().max(1.0) {
                 noise_feasible[lv] = true;
                 infeasible_rows.set(p, false);
                 for &j in &touched_cols {
@@ -4226,7 +4227,7 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
             // pivot is that small.
             let best = candidates
                 .iter()
-                .filter(|c| c.a_pj.abs() > FT_MIN_PIVOT)
+                .filter(|c| c.a_pj.abs() > tunable!("ENOMOTO_T_FT_MIN_PIVOT", FT_MIN_PIVOT, f64))
                 .min_by_key(|c| c.j)
                 .unwrap_or_else(|| candidates.iter().min_by_key(|c| c.j).unwrap());
             (best.j, best.dj, Vec::new())
@@ -4275,7 +4276,7 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
             // reaching flip into a false "still short" — exhausting the
             // list and reporting `Infeasible`. Small moves keep the plain
             // `PRIMAL_FEAS_TOL` (the `max(1.0)` floor).
-            let reach_tol = PRIMAL_FEAS_TOL * (x_leaving_now - target_bound).abs().max(1.0);
+            let reach_tol = tunable!("ENOMOTO_T_PRIMAL_FEAS_TOL", PRIMAL_FEAS_TOL, f64) * (x_leaving_now - target_bound).abs().max(1.0);
             let mut stop_idx: Option<usize> = None;
             while let Some(Reverse(cand)) = heap.pop() {
                 let idx = sorted_prefix.len();
@@ -4439,7 +4440,7 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
             // not a proof; widening it — by any rule — needs the same
             // Netlib A/B this comment is built from, not just a cleaner
             // formula.
-            let min_ratio = sorted_prefix[stop_idx].ratio - HARRIS_RATIO_TOL;
+            let min_ratio = sorted_prefix[stop_idx].ratio - tunable!("ENOMOTO_T_HARRIS_RATIO_TOL", HARRIS_RATIO_TOL, f64);
             let mut window_start = stop_idx;
             while window_start > 0 && sorted_prefix[window_start - 1].ratio >= min_ratio {
                 window_start -= 1;
@@ -4654,7 +4655,7 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
                     verify_failed = true;
                     if debug_update_verify {
                         use std::sync::atomic::Ordering::Relaxed;
-                        let scale = alpha_row.abs().max(alpha_col.abs()).max(FT_MIN_PIVOT);
+                        let scale = alpha_row.abs().max(alpha_col.abs()).max(tunable!("ENOMOTO_T_FT_MIN_PIVOT", FT_MIN_PIVOT, f64));
                         let rel_ppm = ((alpha_row - alpha_col).abs() / scale * 1_000_000.0) as usize;
                         prof_phases::UPDATE_VERIFY_TRIGGERS.fetch_add(1, Relaxed);
                         prof_phases::UPDATE_VERIFY_SUM_REL_PPM.fetch_add(rel_ppm, Relaxed);
@@ -4936,7 +4937,7 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
         let update_ok = timed!(
             profile_phases,
             prof_phases::FT_UPDATE,
-            lu.try_update_precomputed(p, &a_tilde_buf, &e_tilde_buf, FT_MIN_PIVOT)
+            lu.try_update_precomputed(p, &a_tilde_buf, &e_tilde_buf, tunable!("ENOMOTO_T_FT_MIN_PIVOT", FT_MIN_PIVOT, f64))
         );
         if update_ok && debug_eta_density {
             let denom = std.n_rows.saturating_sub(1).max(1);
@@ -5056,7 +5057,7 @@ mod tests {
                     return;
                 }
                 let ratio = alpha[i] / pivot;
-                *w_i = (*w_i - 2.0 * ratio * tau[i] + ratio * ratio * wp_old).max(STEEPEST_EDGE_FLOOR);
+                *w_i = (*w_i - 2.0 * ratio * tau[i] + ratio * ratio * wp_old).max(tunable!("ENOMOTO_T_STEEPEST_EDGE_FLOOR", STEEPEST_EDGE_FLOOR, f64));
             };
             const REPS: usize = 200;
 

@@ -33,6 +33,17 @@
 //! of the module tree entirely (not even `mod`-declared here), purely for
 //! historical reference.
 
+/// Reads a numeric tuning knob from the environment once per process
+/// (cached in a `OnceLock`), falling back to `$default`. Used for A/B
+/// sweeps of tolerances and thresholds without a rebuild; the defaults are
+/// the tuned values.
+macro_rules! tunable {
+    ($name:literal, $default:expr, $t:ty) => {{
+        static V: std::sync::OnceLock<$t> = std::sync::OnceLock::new();
+        *V.get_or_init(|| std::env::var($name).ok().and_then(|s| s.parse::<$t>().ok()).unwrap_or($default))
+    }};
+}
+
 mod graph;
 mod interior_point;
 mod mip;

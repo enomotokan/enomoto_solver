@@ -451,6 +451,10 @@ impl HybridVec {
     /// Panics if `skip >= src.len()`, exactly as [`Self::pack`] does on an
     /// out-of-range index.
     pub fn pack_scaled_dense(src: &[f64], skip: usize, scale: f64, dense_fraction: f64) -> Self {
+        let tiny = crate::simplex::tiny_drop();
+        if tiny > 0.0 {
+            return Self::pack_scaled_dense_drop(src, skip, scale, dense_fraction, tiny);
+        }
         let len = src.len();
         let mut nnz = 0usize;
         for &x in src {
@@ -478,6 +482,25 @@ impl HybridVec {
                 let v = scale * x;
                 if i != skip && v != 0.0 {
                     pairs.push((i, v));
+                }
+            }
+            HybridVec::Sparse(pairs)
+        }
+    }
+
+    /// [`Self::pack_scaled_dense`] treating `|scale * x| < tiny` as zero.
+    fn pack_scaled_dense_drop(src: &[f64], skip: usize, scale: f64, dense_fraction: f64, tiny: f64) -> Self {
+        let len = src.len();
+        let keep = |i: usize, x: f64| i != skip && (scale * x).abs() >= tiny;
+        let nnz = src.iter().enumerate().filter(|&(i, &x)| keep(i, x)).count();
+        if nnz as f64 > dense_fraction * len as f64 {
+            let data: Vec<f64> = src.iter().enumerate().map(|(i, &x)| if keep(i, x) { scale * x } else { 0.0 }).collect();
+            HybridVec::Dense { data: data.into_boxed_slice(), nnz }
+        } else {
+            let mut pairs = Vec::with_capacity(nnz);
+            for (i, &x) in src.iter().enumerate() {
+                if keep(i, x) {
+                    pairs.push((i, scale * x));
                 }
             }
             HybridVec::Sparse(pairs)

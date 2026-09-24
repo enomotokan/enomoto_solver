@@ -168,8 +168,8 @@ fn pivot_threshold_base() -> f64 {
         std::env::var("ENOMOTO_PIVOT_THRESHOLD")
             .ok()
             .and_then(|v| v.parse::<f64>().ok())
-            .map(|v| v.clamp(PIVOT_THRESHOLD_MIN, PIVOT_THRESHOLD_MAX))
-            .unwrap_or(STABILITY)
+            .map(|v| v.clamp(tunable!("ENOMOTO_T_PIVOT_THRESHOLD_MIN", PIVOT_THRESHOLD_MIN, f64), PIVOT_THRESHOLD_MAX))
+            .unwrap_or(tunable!("ENOMOTO_T_STABILITY", STABILITY, f64))
     })
 }
 
@@ -557,7 +557,7 @@ impl KernelMatrix {
     #[inline]
     fn row_get(&self, i: usize, j: usize) -> Option<f64> {
         let row = self.row(i);
-        if row.len() <= KERNEL_LINEAR_SCAN_MAX {
+        if row.len() <= tunable!("ENOMOTO_T_KERNEL_LINEAR_SCAN_MAX", KERNEL_LINEAR_SCAN_MAX, usize) {
             for &(c, v) in row {
                 if c == j {
                     return Some(v);
@@ -902,7 +902,7 @@ impl MarkowitzState {
             row_buckets[deg].push(i);
         }
 
-        let dense_threshold = DENSE_COL_FRACTION * m as f64;
+        let dense_threshold = tunable!("ENOMOTO_T_DENSE_COL_FRACTION", DENSE_COL_FRACTION, f64) * m as f64;
         let initially_dense: Vec<bool> = col_degree.iter().map(|&d| d as f64 > dense_threshold).collect();
 
         MarkowitzState {
@@ -1102,6 +1102,8 @@ impl MarkowitzState {
         // row singleton directly, HiGHS `buildKernel` step 1.2-style, when
         // there is no column singleton — see `row_singleton_rel`.
         let mut scan_from = 1usize;
+        // Smallest active row degree, found lazily (see the bucket-end cutoff).
+        let mut rmin = usize::MAX;
         if self.row_singleton_rel >= 0.0 && self.col_buckets[1].is_empty() {
             if let Some(p) = self.try_row_singleton(skip_dense) {
                 best = Some(p);
@@ -1214,6 +1216,20 @@ impl MarkowitzState {
             if best.is_some() && best_score <= deg_col * deg_col {
                 exit = 2;
                 break 'scan;
+            }
+            // Every column in a later bucket has degree > `deg_col`, and
+            // every active row has degree >= `rmin`, so no later
+            // candidate can score below `(rmin - 1) * deg_col`. Strict
+            // `<` keeps ties (broken by pivot size) exactly as the
+            // exhaustive scan would, so the chosen pivot is unchanged.
+            if best.is_some() && tunable!("ENOMOTO_PIVOT_RMIN_CUTOFF", 1usize, usize) != 0 {
+                if rmin == usize::MAX {
+                    rmin = (1..self.row_buckets.len()).find(|&d| !self.row_buckets[d].is_empty()).unwrap_or(1);
+                }
+                if best_score < (rmin - 1) * deg_col {
+                    exit = 2;
+                    break 'scan;
+                }
             }
         }
 
@@ -1656,7 +1672,7 @@ fn is_dense_input(m: usize, rows_in: &[Vec<(usize, f64)>]) -> bool {
         return false;
     }
     let nnz: usize = rows_in.iter().map(|r| r.len()).sum();
-    nnz as f64 > DENSE_INPUT_FRACTION * (m as f64) * (m as f64)
+    nnz as f64 > tunable!("ENOMOTO_T_DENSE_INPUT_FRACTION", DENSE_INPUT_FRACTION, f64) * (m as f64) * (m as f64)
 }
 
 /// Dense partial-pivoting LU via `faer` (`PartialPivLu`, `PA = LU`, row
@@ -1866,7 +1882,7 @@ fn detect_border_columns(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Vec<usize> 
             }
         }
     }
-    let threshold = DENSE_COL_FRACTION * m as f64;
+    let threshold = tunable!("ENOMOTO_T_DENSE_COL_FRACTION", DENSE_COL_FRACTION, f64) * m as f64;
     (0..m).filter(|&j| col_degree[j] as f64 > threshold).collect()
 }
 
@@ -2061,7 +2077,7 @@ pub fn factorize_reusing(m: usize, rows_in: &[Vec<(usize, f64)>], prev: Option<&
             // acceptance, which is what keeps a problem where reuse *does*
             // work paying nothing for this.
             ft.reuse_fail_streak = prev.reuse_fail_streak.saturating_add(1);
-            ft.reuse_skips_left = (1u32 << ft.reuse_fail_streak.min(REUSE_BACKOFF_SHIFT_CAP)).min(REUSE_MAX_BACKOFF);
+            ft.reuse_skips_left = (1u32 << ft.reuse_fail_streak.min(tunable!("ENOMOTO_T_REUSE_BACKOFF_SHIFT_CAP", REUSE_BACKOFF_SHIFT_CAP, u32))).min(tunable!("ENOMOTO_T_REUSE_MAX_BACKOFF", REUSE_MAX_BACKOFF, u32));
             PROF_REBUILD_BACKOFF_SKIPS.fetch_add(ft.reuse_skips_left as usize, Ordering::Relaxed);
         }
     }
@@ -2081,7 +2097,7 @@ pub fn factorize_reusing(m: usize, rows_in: &[Vec<(usize, f64)>], prev: Option<&
 /// which is what sent this gate in.
 fn wants_bordered(m: usize, rows_in: &[Vec<(usize, f64)>]) -> bool {
     let k = detect_border_columns(m, rows_in).len();
-    k > 0 && k <= BORDER_MAX_COUNT && (k as f64) <= BORDER_MAX_FRACTION * m as f64
+    k > 0 && k <= BORDER_MAX_COUNT && (k as f64) <= tunable!("ENOMOTO_T_BORDER_MAX_FRACTION", BORDER_MAX_FRACTION, f64) * m as f64
 }
 
 /// Caps on [`factorize_reusing`]'s own exponential backoff after a
@@ -2285,7 +2301,7 @@ fn factorize_reusing_order(
                 }
             }
         }
-        if best_abs < REBUILD_MIN_PIVOT {
+        if best_abs < tunable!("ENOMOTO_T_REBUILD_MIN_PIVOT", REBUILD_MIN_PIVOT, f64) {
             PROF_REBUILD_FAIL_SINGULAR.fetch_add(1, Ordering::Relaxed);
             return None;
         }
@@ -2397,7 +2413,7 @@ pub fn factorize(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuFactors> {
     // phase can't find `m - k` independent pivots.
     let border = detect_border_columns(m, rows_in);
     let k = border.len();
-    if k > 0 && k <= BORDER_MAX_COUNT && (k as f64) <= BORDER_MAX_FRACTION * m as f64 {
+    if k > 0 && k <= BORDER_MAX_COUNT && (k as f64) <= tunable!("ENOMOTO_T_BORDER_MAX_FRACTION", BORDER_MAX_FRACTION, f64) * m as f64 {
         if let Some(lu) = factorize_bordered(m, rows_in, &border) {
             return Some(lu);
         }
@@ -3075,9 +3091,7 @@ impl LuFactors {
                 w[s] -= mult * w[row_step];
             }
         }
-        for s in 0..m {
-            y[self.row_perm[s]] = w[s];
-        }
+        permute_btran_out(&self.row_perm, w, y);
     }
 
     /// [`Self::l_transpose_solve_gather_into`]'s own triangular solve, read
@@ -3124,9 +3138,7 @@ impl LuFactors {
                 w[k] -= mult * ws;
             }
         }
-        for s in 0..m {
-            y[self.row_perm[s]] = w[s];
-        }
+        permute_btran_out(&self.row_perm, w, y);
     }
 
     /// Solves `B x = rhs` using the factors (`P_row B P_col = LU`).
@@ -3393,6 +3405,29 @@ fn build_l_row(l_col: &CscMat, m: usize) -> CsrMat {
 /// gather-only BTRAN, which is how the A/B behind the constant's own value
 /// is produced), `1` forces it unconditionally. Read once per
 /// refactorization, never per solve, same as [`expected_dense_gate`].
+/// Magnitude below which FTRAN/BTRAN results and new eta entries are
+/// treated as exact zeros (`0` disables dropping).
+#[inline]
+pub(crate) fn tiny_drop() -> f64 {
+    tunable!("ENOMOTO_TINY", 0.0, f64)
+}
+
+/// BTRAN's final scatter back to original row order, dropping values
+/// below [`tiny_drop`].
+#[inline]
+fn permute_btran_out(row_perm: &[usize], w: &[f64], y: &mut [f64]) {
+    let tiny = tiny_drop();
+    if tiny > 0.0 {
+        for (s, &v) in w.iter().enumerate() {
+            y[row_perm[s]] = if v.abs() < tiny { 0.0 } else { v };
+        }
+    } else {
+        for (s, &v) in w.iter().enumerate() {
+            y[row_perm[s]] = v;
+        }
+    }
+}
+
 fn btran_l_scatter_gate() -> f64 {
     std::env::var("ENOMOTO_BTRAN_L_SCATTER").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(BTRAN_L_SCATTER_FRACTION)
 }
@@ -3476,7 +3511,7 @@ impl FtranDensity {
             return;
         }
         let local = result_nnz as f64 / m as f64;
-        self.expected = (1.0 - DENSITY_AVERAGE_MULTIPLIER) * self.expected + DENSITY_AVERAGE_MULTIPLIER * local;
+        self.expected = (1.0 - tunable!("ENOMOTO_T_DENSITY_AVERAGE_MULTIPLIER", DENSITY_AVERAGE_MULTIPLIER, f64)) * self.expected + tunable!("ENOMOTO_T_DENSITY_AVERAGE_MULTIPLIER", DENSITY_AVERAGE_MULTIPLIER, f64) * local;
     }
 
     /// The running average itself, in `[0, 1]` — exposed for diagnostics
@@ -3726,7 +3761,7 @@ impl FtLu {
             let eta = UEta {
                 slot,
                 pivot: pivots[slot],
-                off_diag: HybridVec::pack(m, std::mem::take(&mut off_diags[slot]), DENSE_ETA_FRACTION),
+                off_diag: HybridVec::pack(m, std::mem::take(&mut off_diags[slot]), tunable!("ENOMOTO_T_DENSE_ETA_FRACTION", DENSE_ETA_FRACTION, f64)),
             };
             if eta.off_diag.nnz() == 0 {
                 singles_pos[slot] = singles.len();
@@ -3808,7 +3843,7 @@ impl FtLu {
     /// [`Self::solve_into`] — see [`DENSE_RHS_FRACTION`]'s own docs.
     pub fn should_use_dense_solve(&self, rhs_nnz: usize) -> bool {
         let m = self.base.m;
-        m > 0 && rhs_nnz as f64 > DENSE_RHS_FRACTION * m as f64
+        m > 0 && rhs_nnz as f64 > tunable!("ENOMOTO_T_DENSE_RHS_FRACTION", DENSE_RHS_FRACTION, f64) * m as f64
     }
 
     /// [`Self::should_use_dense_solve`] widened by the calling channel's
@@ -4331,6 +4366,16 @@ impl FtLu {
     #[inline]
     fn permute_out(&self, scratch: &[f64], out: &mut [f64]) -> usize {
         let mut nnz = 0usize;
+        let tiny = tiny_drop();
+        if tiny > 0.0 {
+            for s in 0..self.base.m {
+                let v = scratch[s];
+                let v = if v.abs() < tiny { 0.0 } else { v };
+                out[self.base.col_perm[s]] = v;
+                nnz += (v != 0.0) as usize;
+            }
+            return nnz;
+        }
         for s in 0..self.base.m {
             let v = scratch[s];
             out[self.base.col_perm[s]] = v;
@@ -4798,7 +4843,7 @@ impl FtLu {
         // than needing a separate pass of its own; the previous code
         // likewise materialized the whole thing before testing, so a
         // rejected update is no more expensive than it already was.
-        let r_eta = HybridVec::pack_scaled_dense(e_tilde, p, -old_pivot, DENSE_ETA_FRACTION);
+        let r_eta = HybridVec::pack_scaled_dense(e_tilde, p, -old_pivot, tunable!("ENOMOTO_T_DENSE_ETA_FRACTION", DENSE_ETA_FRACTION, f64));
         let dot = r_eta.dot_dense(a_tilde);
         let new_pivot = a_tilde[p] - dot;
         if new_pivot.abs() < min_pivot {
@@ -4852,7 +4897,7 @@ impl FtLu {
         // Same replacement column as before, built directly from
         // `a_tilde` (scale `1.0`, so the dense arm is a plain copy) rather
         // than through a throwaway pair list.
-        let off_diag = HybridVec::pack_scaled_dense(a_tilde, p, 1.0, DENSE_ETA_FRACTION);
+        let off_diag = HybridVec::pack_scaled_dense(a_tilde, p, 1.0, tunable!("ENOMOTO_T_DENSE_ETA_FRACTION", DENSE_ETA_FRACTION, f64));
         off_diag.for_each_entry(|row_step, v| self.row_owners[row_step].push((p, v)));
         self.fill += off_diag.nnz();
         self.u_seq.push(UEta { slot: p, pivot: new_pivot, off_diag });

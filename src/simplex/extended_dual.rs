@@ -776,7 +776,7 @@ const FT_MAX_UPDATES_FLOOR: usize = super::FT_MAX_UPDATES;
 /// `super::FT_MAX_UPDATES`'s flat value directly.
 #[inline]
 fn ft_max_updates(m: usize) -> usize {
-    ((FT_MAX_UPDATES_FACTOR * m as f64) as usize).max(FT_MAX_UPDATES_FLOOR)
+    ((tunable!("ENOMOTO_T_FT_MAX_UPDATES_FACTOR", FT_MAX_UPDATES_FACTOR, f64) * m as f64) as usize).max(FT_MAX_UPDATES_FLOOR)
 }
 
 /// Trigger (5): the deterministic, cost-based refactorization trigger
@@ -882,7 +882,7 @@ const SYNTH_CLOCK_MIN_UPDATES: usize = 50;
 /// variables exist) that has no polish-phase equivalent to share against.
 #[inline]
 fn synth_clock_should_refactor(lu: &sparse_lu::FtLu) -> bool {
-    lu.update_count() >= SYNTH_CLOCK_MIN_UPDATES && (lu.synth_tick() as f64) >= synth_clock_factor() * (lu.build_tick().max(1) as f64)
+    lu.update_count() >= tunable!("ENOMOTO_T_SYNTH_CLOCK_MIN_UPDATES", SYNTH_CLOCK_MIN_UPDATES, usize) && (lu.synth_tick() as f64) >= synth_clock_factor() * (lu.build_tick().max(1) as f64)
 }
 
 /// Independent drift check for the incrementally-maintained `d` (reduced
@@ -974,7 +974,7 @@ const X_B_SLOPE_NOISE: f64 = 1e-7;
 
 #[inline]
 fn snap_slope(v: f64) -> f64 {
-    if v.abs() < X_B_SLOPE_NOISE {
+    if v.abs() < tunable!("ENOMOTO_T_X_B_SLOPE_NOISE", X_B_SLOPE_NOISE, f64) {
         0.0
     } else {
         v
@@ -1105,7 +1105,7 @@ fn bfrt_reached(w_r: Affine1, cum: Affine1, x_b_base_r: f64) -> bool {
         return slope_diff <= 0.0;
     }
     let base_diff = w_r.base - cum.base;
-    base_diff <= super::PRIMAL_FEAS_TOL * w_r.base.abs().max(x_b_base_r.abs()).max(1.0)
+    base_diff <= tunable!("ENOMOTO_T_PRIMAL_FEAS_TOL", super::PRIMAL_FEAS_TOL, f64) * w_r.base.abs().max(x_b_base_r.abs()).max(1.0)
 }
 
 /// The steepest-edge/Devex score `Δ_i(M)^2 / w_i` (paper \S4.5), compared
@@ -1133,7 +1133,7 @@ struct Score2 {
 impl Score2 {
     #[inline]
     fn new(dev: Affine1, w: f64) -> Self {
-        let w = w.max(super::STEEPEST_EDGE_FLOOR);
+        let w = w.max(tunable!("ENOMOTO_T_STEEPEST_EDGE_FLOOR", super::STEEPEST_EDGE_FLOOR, f64));
         if dev.slope == 0.0 {
             return Score2 { slope: 0.0, key: dev.base * dev.base / w, squared: true };
         }
@@ -1922,7 +1922,7 @@ fn row_deviation_plain(std: &StdForm, basis: &[usize], x_b: &[f64], noise_feasib
         return None;
     }
     let xi = x_b[i];
-    let feas_tol = super::PRIMAL_FEAS_TOL * xi.abs().max(1.0);
+    let feas_tol = tunable!("ENOMOTO_T_PRIMAL_FEAS_TOL", super::PRIMAL_FEAS_TOL, f64) * xi.abs().max(1.0);
     if xi < std.lb[bv] - feas_tol {
         Some((1, std.lb[bv] - xi))
     } else if xi > std.ub[bv] + feas_tol {
@@ -2822,6 +2822,9 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     // from any static per-problem property, is what finally separates
     // "genuinely drift-heavy solve" from "fragile to any loosening at all".
     let mut drift_trigger_count: usize = 0;
+    // Residual measured at the first drift check after a refactorization
+    // (the factorization's own noise floor) — see the drift check below.
+    let mut drift_r0: f64 = 0.0;
     // §2.4's own per-solve ladder, counted separately from
     // `drift_trigger_count` because it answers a different question: that
     // one counts only the `x_B(M)` residual trigger (whose *tolerance* it
@@ -3935,7 +3938,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         // either reverted alternative.
         let mut best_idx = k_star;
         timed!(profile_phases, prof_phases::BFRT, {
-            let min_ratio = sorted[k_star].ratio - super::HARRIS_RATIO_TOL;
+            let min_ratio = sorted[k_star].ratio - tunable!("ENOMOTO_T_HARRIS_RATIO_TOL", super::HARRIS_RATIO_TOL, f64);
             let mut window_start = k_star;
             while window_start > 0 && sorted[window_start - 1].ratio >= min_ratio {
                 window_start -= 1;
@@ -4863,7 +4866,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         let mut need_refactor = timed!(
             profile_phases,
             prof_phases::FT_UPDATE,
-            !lu.try_update_precomputed(r, &a_tilde_buf, &e_tilde_buf, super::FT_MIN_PIVOT)
+            !lu.try_update_precomputed(r, &a_tilde_buf, &e_tilde_buf, tunable!("ENOMOTO_T_FT_MIN_PIVOT", super::FT_MIN_PIVOT, f64))
         );
         if need_refactor {
             // Trigger (2), the Forrest-Tomlin update rejecting its own
@@ -4899,7 +4902,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         }
         if !need_refactor && since_check >= XB_CHECK_INTERVAL {
             since_check = 0;
-            let bump_too_big = lu.fill_count() > super::FT_BUMP_LIMIT_FACTOR * m.max(1);
+            let bump_too_big = lu.fill_count() > tunable!("ENOMOTO_T_FT_BUMP_LIMIT_FACTOR", super::FT_BUMP_LIMIT_FACTOR, usize) * m.max(1);
             if bump_too_big {
                 need_refactor = true;
                 if profile_phases {
@@ -4955,14 +4958,31 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 // one call to `solve_lp_dual_extended`, so a solve that
                 // hasn't yet proven itself drift-heavy always compares
                 // against the unmodified `xb_drift_tol` (step `0`).
-                let escalation_steps = (drift_trigger_count / XB_DRIFT_ESCALATION_STEP) as i32;
-                let effective_drift_tol = (xb_drift_tol * XB_DRIFT_ESCALATION_FACTOR.powi(escalation_steps)).min(XB_DRIFT_TOL_MAX);
+                let escalation_steps = (drift_trigger_count / tunable!("ENOMOTO_T_XB_DRIFT_ESCALATION_STEP", XB_DRIFT_ESCALATION_STEP, usize)) as i32;
+                let mut effective_drift_tol = (xb_drift_tol * XB_DRIFT_ESCALATION_FACTOR.powi(escalation_steps)).min(XB_DRIFT_TOL_MAX);
+                let resid_max = resid_base.max(resid_slope);
+                let updates = lu.update_count();
+                if updates <= XB_CHECK_INTERVAL {
+                    drift_r0 = resid_max;
+                } else {
+                    // Relative floor: a refactorization cannot push the
+                    // residual below its own post-refactor level `r0`.
+                    let rel_k: f64 = tunable!("ENOMOTO_XB_DRIFT_REL_K", 0.0, f64);
+                    effective_drift_tol = effective_drift_tol.max((rel_k * drift_r0).min(XB_DRIFT_TOL_MAX));
+                }
+                // Young eta files: tolerate moderate drift until enough
+                // updates have accumulated for a refactor to pay off.
+                let min_updates: usize = tunable!("ENOMOTO_XB_DRIFT_MIN_UPDATES", 0, usize);
+                if updates < min_updates {
+                    let mult: f64 = tunable!("ENOMOTO_XB_DRIFT_MIN_UPDATES_MULT", 100.0, f64);
+                    effective_drift_tol = effective_drift_tol.max((mult * effective_drift_tol).min(XB_DRIFT_TOL_MAX));
+                }
                 if std::env::var("ENOMOTO_DEBUG_XB_DRIFT_EXT").is_ok() {
                     eprintln!(
                         "DEBUG_XB_DRIFT: iter={_iter} resid_base={resid_base:.3e} resid_slope={resid_slope:.3e} drift_trigger_count={drift_trigger_count} effective_tol={effective_drift_tol:.3e}"
                     );
                 }
-                need_refactor = resid_base > effective_drift_tol || resid_slope > effective_drift_tol;
+                need_refactor = resid_max > effective_drift_tol;
                 if need_refactor {
                     drift_trigger_count += 1;
                     note_numeric_trouble!();
@@ -5166,7 +5186,7 @@ fn finish(std: &StdForm, basis: &mut [usize], basis_pos: &mut [Option<usize>], n
                 if !bound.is_finite() {
                     return None;
                 }
-                let tol = if relax { super::PRIMAL_FEAS_TOL * bound.abs().max(1.0) } else { 0.0 };
+                let tol = if relax { tunable!("ENOMOTO_T_PRIMAL_FEAS_TOL", super::PRIMAL_FEAS_TOL, f64) * bound.abs().max(1.0) } else { 0.0 };
                 let slack = if rate > 0.0 {
                     Affine1::new(bound + tol - x_b_base[i], -x_b_slope[i])
                 } else {
@@ -5240,7 +5260,7 @@ fn finish(std: &StdForm, basis: &mut [usize], basis_pos: &mut [Option<usize>], n
 
             std.cols.col_into_dense(j, &mut dense_j);
             since_check += 1;
-            let rejected = !lu.try_update(r, &dense_j, super::FT_MIN_PIVOT);
+            let rejected = !lu.try_update(r, &dense_j, tunable!("ENOMOTO_T_FT_MIN_PIVOT", super::FT_MIN_PIVOT, f64));
             if rejected || since_check >= super::FT_CHECK_INTERVAL {
                 since_check = 0;
                 lu = refactorize(std, basis_pos, Some(&lu))?;
@@ -5326,7 +5346,7 @@ fn finish(std: &StdForm, basis: &mut [usize], basis_pos: &mut [Option<usize>], n
 
         std.cols.col_into_dense(j, &mut dense_j);
         since_check += 1;
-        let rejected = !lu.try_update(r2, &dense_j, super::FT_MIN_PIVOT);
+        let rejected = !lu.try_update(r2, &dense_j, tunable!("ENOMOTO_T_FT_MIN_PIVOT", super::FT_MIN_PIVOT, f64));
         if rejected || since_check >= super::FT_CHECK_INTERVAL {
             since_check = 0;
             lu = refactorize(std, basis_pos, Some(&lu))?;
@@ -5699,7 +5719,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
             // infeasibility, check whether `r`'s own deviation is actually
             // within this row's rounding noise (scaled by its own RHS
             // magnitude — `PRIMAL_FEAS_TOL`'s own docs).
-            if needed <= super::PRIMAL_FEAS_TOL * std.b[r].abs().max(1.0) {
+            if needed <= tunable!("ENOMOTO_T_PRIMAL_FEAS_TOL", super::PRIMAL_FEAS_TOL, f64) * std.b[r].abs().max(1.0) {
                 noise_feasible[basis[r]] = true;
                 infeasible_rows.set(r, false);
                 continue;
@@ -5752,7 +5772,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
         // magnitude, and pivot on that one instead.
         let mut best_idx = k_star;
         {
-            let min_ratio = candidates[k_star].ratio - super::HARRIS_RATIO_TOL;
+            let min_ratio = candidates[k_star].ratio - tunable!("ENOMOTO_T_HARRIS_RATIO_TOL", super::HARRIS_RATIO_TOL, f64);
             let mut window_start = k_star;
             while window_start > 0 && candidates[window_start - 1].ratio >= min_ratio {
                 window_start -= 1;
@@ -5925,7 +5945,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
         // `try_update_precomputed` capture reuse (`a_tilde_buf`/
         // `e_tilde_buf`, filled above by this iteration's own FTRAN/BTRAN).
         since_check += 1;
-        let mut need_refactor = !lu.try_update_precomputed(r, &a_tilde_buf, &e_tilde_buf, super::FT_MIN_PIVOT);
+        let mut need_refactor = !lu.try_update_precomputed(r, &a_tilde_buf, &e_tilde_buf, tunable!("ENOMOTO_T_FT_MIN_PIVOT", super::FT_MIN_PIVOT, f64));
         // Trigger (4) ([`ft_max_updates`]'s own docs) — unconditional every
         // iteration, same as the main phase's own identical check.
         if !need_refactor && lu.update_count() > ft_max_updates(m) {
@@ -5941,7 +5961,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
         }
         if !need_refactor && since_check >= super::FT_CHECK_INTERVAL {
             since_check = 0;
-            let bump_too_big = lu.fill_count() > super::FT_BUMP_LIMIT_FACTOR * m.max(1);
+            let bump_too_big = lu.fill_count() > tunable!("ENOMOTO_T_FT_BUMP_LIMIT_FACTOR", super::FT_BUMP_LIMIT_FACTOR, usize) * m.max(1);
             since_residual_check += 1;
             if bump_too_big {
                 need_refactor = true;
