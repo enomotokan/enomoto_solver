@@ -2710,6 +2710,26 @@ impl DseState {
         }
         self.w[p] = (wp_old / (pivot * pivot)).max(tunable!("ENOMOTO_T_STEEPEST_EDGE_FLOOR", STEEPEST_EDGE_FLOOR, f64));
     }
+
+    /// [`Self::update_after_pivot`] restricted to `rows`, a superset of
+    /// `alpha`'s nonzero rows (any order): for `alpha[i] == 0` the update is
+    /// `w_i - 2*(±0)*tau_i + (±0)*(±0)*wp_old = w_i` exactly (`w_i` is
+    /// already floored), so skipping those rows is bit-identical while the
+    /// work drops from `O(m)` to `O(nnz(alpha))`. `wp_old` is passed in
+    /// (`Σ rho_p[i]^2` summed in ascending `i`, zeros skipped — also exact,
+    /// adding `+0.0` to a nonnegative partial sum changes nothing that the
+    /// floor below does not already absorb).
+    fn update_after_pivot_rows(&mut self, p: usize, alpha: &[f64], tau: &[f64], wp_old: f64, rows: &[u32]) {
+        let floor = tunable!("ENOMOTO_T_STEEPEST_EDGE_FLOOR", STEEPEST_EDGE_FLOOR, f64);
+        let pivot = alpha[p];
+        let wp_old = wp_old.max(floor);
+        for &i in rows {
+            let i = i as usize;
+            let ratio = alpha[i] / pivot;
+            self.w[i] = (self.w[i] - 2.0 * ratio * tau[i] + ratio * ratio * wp_old).max(floor);
+        }
+        self.w[p] = (wp_old / (pivot * pivot)).max(floor);
+    }
 }
 
 /// Dual Devex weights: a cheap, approximate substitute for [`DseState`]'s

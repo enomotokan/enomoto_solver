@@ -4676,7 +4676,15 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 if !tau_ready {
                     timed!(profile_phases, prof_phases::DSE_FTRAN, lu.solve_into(&rho, &mut lu_scratch, &mut tau));
                 }
-                dse.update_after_pivot(r, &alpha_full, &tau, &rho);
+                match xb_list_len {
+                    // S7: only `alpha`'s nonzero rows (the `x_B` update's
+                    // own list, a superset when a flip result was merged).
+                    Some(k) => {
+                        let wp_old = rho.iter().map(|v| v * v).sum::<f64>();
+                        dse.update_after_pivot_rows(r, &alpha_full, &tau, wp_old, &xb_rows[..k]);
+                    }
+                    None => dse.update_after_pivot(r, &alpha_full, &tau, &rho),
+                }
             }
         });
         if profile_work {
