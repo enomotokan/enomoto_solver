@@ -2480,13 +2480,6 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     // intercept problem, swapped at the stage A -> B handoff.
     let cache_orig = ColCache::build(std, n_orig);
     let mut phase = if env_str!("ENOMOTO_LEX_EXTENDED").is_some_and(|v| v != "0") { Phase::Lex } else { Phase::A };
-    let mut cache = match phase {
-        Phase::A => ColCache::slope_problem(&cache_orig),
-        _ => ColCache::build(std, n_orig),
-    };
-    // `cache.width[j].is_none()`, one byte per column — chuzc1's stopper
-    // test reads it for every candidate.
-    let mut width_inf: Vec<bool> = cache.width.iter().map(|w| w.is_none()).collect();
 
     if m == 0 {
         // No constraints at all (mirrors `solve_lp_on`'s own `n_rows == 0`
@@ -2525,7 +2518,10 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     // (its objective `c^T x^1 = 0` and every slope deviation is `0`). Start
     // directly in stage B on the unmodified bounds instead of entering
     // stage A only to hand off on its first iteration.
-    if phase == Phase::A
+    // (S15: `cache` is built once, here, for whichever stage the solve
+    // actually starts in — previously the slope problem was always built
+    // first and thrown away when stage A turned out empty.)
+    let mut cache = if phase == Phase::A
         && nb_status.iter().enumerate().all(|(j, s)| match s {
             Some(NbStatus::Lower) => cache_orig.lower[j].map_or(true, |a| a.slope == 0.0),
             Some(NbStatus::Upper) => cache_orig.upper[j].map_or(true, |a| a.slope == 0.0),
@@ -2533,12 +2529,19 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         })
     {
         phase = Phase::B;
-        cache = ColCache::intercept_problem(&cache_orig, &nb_status, &basis, &vec![0.0; m])?;
-        width_inf = cache.width.iter().map(|w| w.is_none()).collect();
         if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
             eprintln!("DEBUG_EXT: stage A skipped (S empty)");
         }
-    }
+        ColCache::intercept_problem(&cache_orig, &nb_status, &basis, &vec![0.0; m])?
+    } else {
+        match phase {
+            Phase::A => ColCache::slope_problem(&cache_orig),
+            _ => ColCache::build(std, n_orig),
+        }
+    };
+    // `cache.width[j].is_none()`, one byte per column — chuzc1's stopper
+    // test reads it for every candidate.
+    let mut width_inf: Vec<bool> = cache.width.iter().map(|w| w.is_none()).collect();
 
     // This solve's own pivot-threshold ladder starts from the default
     // (`sparse_lu::STABILITY`, or `ENOMOTO_PIVOT_THRESHOLD`): the
@@ -2631,30 +2634,6 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     let mut cand_scratch: Vec<Cand> = Vec::new();
     let mut sorted_prefix: Vec<Cand> = Vec::new();
 
-    // PRICE's own row-major copy of `A`, built once: `std.rows` minus
-    // every fixed column (`lb == ub`, which PRICE skips anyway), in
-    // struct-of-arrays form with `u32` column indices. Each row keeps
-    // `std.rows.row(i)`'s own column order, so the accumulation into
-    // `a_p` (and hence every `a_p[j]` bit) is unchanged — what it saves is
-    // the two random `std.lb[j]`/`std.ub[j]` loads and the branch per
-    // visited entry, plus 4 bytes of index per entry (12 vs 16 bytes).
-    let (price_start, mut price_col, mut price_val) = {
-        let mut start: Vec<usize> = Vec::with_capacity(m + 1);
-        let mut col: Vec<u32> = Vec::with_capacity(std.rows.nnz());
-        let mut val: Vec<f64> = Vec::with_capacity(std.rows.nnz());
-        start.push(0);
-        for i in 0..m {
-            for &(j, v) in std.rows.row(i) {
-                if std.lb[j] == std.ub[j] {
-                    continue;
-                }
-                col.push(u32::try_from(j).ok()?);
-                val.push(v);
-            }
-            start.push(col.len());
-        }
-        (start, col, val)
-    };
     // **Path-changing, default on** (`ENOMOTO_PRICE_NONBASIC_ONLY=0`
     // restores the old every-non-fixed-column PRICE; NETLIB93 A/B against
     // that: -5.3% total, no problem >10% slower): HiGHS's own row-wise
@@ -2674,7 +2653,6 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     // `price_nb_end[i]` is row `i`'s partition boundary; with the flag off
     // it is simply the row end (every non-fixed column priced, as before).
     let price_nonbasic_only = env_str!("ENOMOTO_PRICE_NONBASIC_ONLY").map_or(true, |v| v != "0");
-    let mut price_nb_end: Vec<usize> = price_start[1..].to_vec();
     // S12: position index for the partition swaps below (HiGHS keeps no such
     // index and pays `O(row length)` per swapped entry, as this loop used
     // to). `cm_off[j]` is column `j`'s offset into `std.cols`' entry order,
@@ -2687,40 +2665,68 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     let mut cm_off: Vec<usize> = Vec::with_capacity(if price_nonbasic_only { n_total + 1 } else { 0 });
     let mut cm_pos: Vec<u32> = Vec::new();
     let mut price_cm: Vec<u32> = Vec::new();
-    if price_nonbasic_only {
-        cm_off.push(0);
-        for j in 0..n_total {
-            cm_off.push(cm_off[j] + std.cols.col(j).len());
-        }
+    // PRICE's own row-major copy of `A`, built once: `std.rows` minus
+    // every fixed column (`lb == ub`, which PRICE skips anyway), in
+    // struct-of-arrays form with `u32` column indices. Each row keeps
+    // `std.rows.row(i)`'s own column order (within each partition part),
+    // so the accumulation into `a_p` (and hence every `a_p[j]` bit) is
+    // unchanged — what it saves is the two random `std.lb[j]`/`std.ub[j]`
+    // loads and the branch per visited entry, plus 4 bytes of index per
+    // entry (12 vs 16 bytes). With `price_nonbasic_only` each row is
+    // written already partitioned (nonbasic entries, then basic ones, each
+    // in row order — S15: formerly a second pass through a temporary).
+    let mut price_nb_end: Vec<usize> = Vec::with_capacity(m);
+    let (price_start, mut price_col, mut price_val) = {
+        let mut start: Vec<usize> = Vec::with_capacity(m + 1);
+        let mut col: Vec<u32> = Vec::with_capacity(std.rows.nnz());
+        let mut val: Vec<f64> = Vec::with_capacity(std.rows.nnz());
         // `std.cols` entry index of every PRICE entry, found through a
         // per-column cursor (rows are visited in ascending order, so for
         // row-sorted columns the cursor always sits on the match).
-        let mut cursor: Vec<u32> = vec![0; n_total];
-        price_cm.reserve(price_col.len());
-        for i in 0..m {
-            for p in price_start[i]..price_start[i + 1] {
-                let j = price_col[p] as usize;
-                let col = std.cols.col(j);
-                let c = cursor[j] as usize;
-                let k = if c < col.len() && col[c].0 == i { c } else { col.iter().position(|&(r, _)| r == i)? };
-                cursor[j] = (k + 1) as u32;
-                price_cm.push(u32::try_from(cm_off[j] + k).ok()?);
+        let mut cursor: Vec<u32> = Vec::new();
+        if price_nonbasic_only {
+            cm_off.push(0);
+            for j in 0..n_total {
+                cm_off.push(cm_off[j] + std.cols.col(j).len());
             }
+            cursor = vec![0; n_total];
+            price_cm.reserve(std.rows.nnz());
         }
-        let mut tmp: Vec<(u32, f64, u32)> = Vec::new();
+        start.push(0);
         for i in 0..m {
-            let (lo, hi) = (price_start[i], price_start[i + 1]);
-            tmp.clear();
-            tmp.extend((lo..hi).filter(|&p| nb_status[price_col[p] as usize].is_some()).map(|p| (price_col[p], price_val[p], price_cm[p])));
-            let n_nb = tmp.len();
-            tmp.extend((lo..hi).filter(|&p| nb_status[price_col[p] as usize].is_none()).map(|p| (price_col[p], price_val[p], price_cm[p])));
-            for (k, &(j, v, e)) in tmp.iter().enumerate() {
-                price_col[lo + k] = j;
-                price_val[lo + k] = v;
-                price_cm[lo + k] = e;
+            if price_nonbasic_only {
+                for want_nonbasic in [true, false] {
+                    for &(j, v) in std.rows.row(i) {
+                        if std.lb[j] == std.ub[j] || nb_status[j].is_some() != want_nonbasic {
+                            continue;
+                        }
+                        col.push(u32::try_from(j).ok()?);
+                        val.push(v);
+                        let c = std.cols.col(j);
+                        let cur = cursor[j] as usize;
+                        let k = if cur < c.len() && c[cur].0 == i { cur } else { c.iter().position(|&(r, _)| r == i)? };
+                        cursor[j] = (k + 1) as u32;
+                        price_cm.push(u32::try_from(cm_off[j] + k).ok()?);
+                    }
+                    if want_nonbasic {
+                        price_nb_end.push(col.len());
+                    }
+                }
+            } else {
+                for &(j, v) in std.rows.row(i) {
+                    if std.lb[j] == std.ub[j] {
+                        continue;
+                    }
+                    col.push(u32::try_from(j).ok()?);
+                    val.push(v);
+                }
+                price_nb_end.push(col.len());
             }
-            price_nb_end[i] = lo + n_nb;
+            start.push(col.len());
         }
+        (start, col, val)
+    };
+    if price_nonbasic_only {
         cm_pos = vec![u32::MAX; cm_off[n_total]];
         for (p, &e) in price_cm.iter().enumerate() {
             cm_pos[e as usize] = p as u32;
@@ -2809,6 +2815,11 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     let mut row_dev = RowDevCache::new(m);
     let mut row_bounds = RowBounds::new(&cache, &basis, &noise_feasible);
     rebuild_rows(&mut infeasible_rows, &mut row_dev, m, &row_bounds, &x_b_base, &x_b_slope);
+    // (S14, not done: at the all-slack start `y = B^-T c_B` is exactly zero
+    // and this pass reproduces `d = active_cost` bit-for-bit, but its BTRAN
+    // also advances the LU's synthetic CLOCK (`FtLu::add_tick`), so skipping
+    // it moves the first CLOCK refactorization and changes the pivot path —
+    // measured on `degen2`/`dfl001`/`stocfor2`/`tuff`.)
     fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fd_cb, &mut lu_scratch, &mut fd_y, &mut d);
 
     // Leaving-row weighting (paper \S4.5): starts in cheap `Devex` mode and
