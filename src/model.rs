@@ -149,7 +149,7 @@ impl PyModel {
     /// (`types::LpOptions`'s own docs).
     #[pyo3(signature = (root_solver=None, distinguish_infeasible_unbounded=false))]
     fn solve<'py>(&self, py: Python<'py>, root_solver: Option<&str>, distinguish_infeasible_unbounded: bool) -> PyResult<Bound<'py, PyDict>> {
-        let objective = self.objective.clone().ok_or_else(|| {
+        let objective = self.objective.as_ref().ok_or_else(|| {
             PyValueError::new_err("no objective set: call Model.set_objective(...) before solve()")
         })?;
         let root_solver = match root_solver {
@@ -158,21 +158,21 @@ impl PyModel {
         };
 
         let opts = LpOptions { distinguish_infeasible_unbounded };
-        let result = solve_mip(&self.variables, &objective, &self.constraints, root_solver, opts);
+        let result = solve_mip(&self.variables, objective, &self.constraints, root_solver, opts);
 
         let dict = PyDict::new_bound(py);
-        dict.set_item("status", result.status.as_str())?;
+        dict.set_item(pyo3::intern!(py, "status"), result.status.as_str())?;
         match result.status {
             Status::Optimal => {
-                dict.set_item("objective", result.objective)?;
-                dict.set_item("x", result.x)?;
+                dict.set_item(pyo3::intern!(py, "objective"), result.objective)?;
+                dict.set_item(pyo3::intern!(py, "x"), result.x)?;
             }
             Status::Infeasible | Status::Unbounded | Status::InfeasibleOrUnbounded => {
-                dict.set_item("objective", py.None())?;
-                dict.set_item("x", py.None())?;
+                dict.set_item(pyo3::intern!(py, "objective"), py.None())?;
+                dict.set_item(pyo3::intern!(py, "x"), py.None())?;
             }
         }
-        dict.set_item("node_limit_hit", result.node_limit_hit)?;
+        dict.set_item(pyo3::intern!(py, "node_limit_hit"), result.node_limit_hit)?;
         Ok(dict)
     }
 

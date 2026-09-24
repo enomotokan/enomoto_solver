@@ -132,6 +132,7 @@ use std::collections::BinaryHeap;
 /// variables/parameters through this file that are themselves named `lu`
 /// (an `FtLu` instance, the live basis factorization).
 mod lu;
+pub(crate) use lu::tiny_drop;
 use self::lu as sparse_lu;
 
 mod extended_dual;
@@ -475,7 +476,7 @@ pub(super) const UPDATE_VERIFY_TOL: f64 = 1e-7;
 /// that module to generalize here, only to call.
 #[inline]
 pub(super) fn update_verify(alpha_row: f64, alpha_col: f64) -> bool {
-    let scale = alpha_row.abs().max(alpha_col.abs()).max(FT_MIN_PIVOT);
+    let scale = alpha_row.abs().max(alpha_col.abs()).max(tunable!("ENOMOTO_T_FT_MIN_PIVOT", FT_MIN_PIVOT, f64));
     let rel = (alpha_row - alpha_col).abs() / scale;
     rel <= UPDATE_VERIFY_TOL
 }
@@ -651,7 +652,7 @@ impl SteepestEdgeState {
         let n_orig = std.n_total - std.n_rows;
         for j in 0..n_orig {
             let norm_sq: f64 = std.cols.col(j).iter().map(|&(_, v)| v * v).sum();
-            gamma[j] = norm_sq.max(STEEPEST_EDGE_FLOOR);
+            gamma[j] = norm_sq.max(tunable!("ENOMOTO_T_STEEPEST_EDGE_FLOOR", STEEPEST_EDGE_FLOOR, f64));
         }
         SteepestEdgeState { gamma }
     }
@@ -685,7 +686,7 @@ impl SteepestEdgeState {
             let pivot_sj: f64 = col.iter().map(|&(i, v)| v * rho[i]).sum();
             let tau_j: f64 = col.iter().map(|&(i, v)| v * w[i]).sum();
             let beta_j = pivot_sj / pivot;
-            *gamma_j = (*gamma_j + beta_j * beta_j * (1.0 + gamma_t_old) - 2.0 * beta_j * tau_j).max(STEEPEST_EDGE_FLOOR);
+            *gamma_j = (*gamma_j + beta_j * beta_j * (1.0 + gamma_t_old) - 2.0 * beta_j * tau_j).max(tunable!("ENOMOTO_T_STEEPEST_EDGE_FLOOR", STEEPEST_EDGE_FLOOR, f64));
         }
     }
 }
@@ -987,8 +988,20 @@ fn build_std_form_presolved(
 
     let (a, b, g, h) = presolve::build_a_g(variables, constraints);
 
-    let pre = presolve::run_extended(n, &a, &b, &g, &h, &c0, RUIZ_ITERS, PROPAGATION_PASSES, PRESOLVE_ROUNDS, ROWSINGLETON_COLSINGLETON_INNER_ROUNDS, allow_unbounded_verdict);
-    if std::env::var("ENOMOTO_DEBUG_PRESOLVE_INFEAS").is_ok() {
+    let pre = presolve::run_extended(
+        n,
+        &a,
+        &b,
+        &g,
+        &h,
+        &c0,
+        tunable!("ENOMOTO_T_RUIZ_ITERS", RUIZ_ITERS, usize),
+        tunable!("ENOMOTO_T_PROPAGATION_PASSES", PROPAGATION_PASSES, usize),
+        tunable!("ENOMOTO_T_PRESOLVE_ROUNDS", PRESOLVE_ROUNDS, usize),
+        tunable!("ENOMOTO_T_INNER_ROUNDS", ROWSINGLETON_COLSINGLETON_INNER_ROUNDS, usize),
+        allow_unbounded_verdict,
+    );
+    if env_str!("ENOMOTO_DEBUG_PRESOLVE_INFEAS").is_some() {
         eprintln!("DEBUG_PRESOLVE: infeasible={} unbounded={}", pre.infeasible, pre.unbounded);
     }
     if pre.infeasible {
@@ -1114,7 +1127,7 @@ fn build_std_form_presolved(
     // shape, not the sentinel this function still falls back to
     // substituting for now.
     let had_unbounded_structural = (0..n).any(|j| lb[j] == f64::NEG_INFINITY || ub[j] == f64::INFINITY);
-    if std::env::var("ENOMOTO_DEBUG_UNBOUNDED_VARS").is_ok() && had_unbounded_structural {
+    if env_str!("ENOMOTO_DEBUG_UNBOUNDED_VARS").is_some() && had_unbounded_structural {
         eprintln!(
             "PRESOLVE: {} structural column(s) still have a genuine infinite bound ({})",
             (0..n).filter(|&j| lb[j] == f64::NEG_INFINITY || ub[j] == f64::INFINITY).count(),
@@ -1230,17 +1243,24 @@ fn build_std_form_presolved(
     new_lb[..n_free].copy_from_slice(&slot_lb);
     new_ub[..n_free].copy_from_slice(&slot_ub);
 
-    let mut rows = Vec::with_capacity(n_rows);
     let mut b_out = Vec::with_capacity(n_rows);
+    // The rows go straight into one flat CSR buffer (row `k` =
+    // `entries[offsets[k]..offsets[k + 1]]`) rather than one `Vec` per
+    // row, and the column form is transposed from it — the same matrices,
+    // entry for entry, that `freeze_std_matrices` builds from the
+    // equivalent `Vec<Vec<_>>`.
+    let nnz_bound = pre.a.as_ref().compute_nnz() + g_rows.iter().map(|r| r.len()).sum::<usize>() + n_rows;
+    let mut offsets: Vec<usize> = Vec::with_capacity(n_rows + 1);
+    offsets.push(0);
+    let mut entries: Vec<(usize, f64)> = Vec::with_capacity(nnz_bound);
 
     for i in 0..n_eq {
         let slack = n_free + i;
         let mut rhs_i = pre.b[i];
-        let mut r: Vec<(usize, f64)> = Vec::new();
         for (j, v) in csr_row_iter(&pre.a, i) {
             match new_index[j] {
                 Some(nj) => {
-                    r.push((nj, v * sign[nj]));
+                    entries.push((nj, v * sign[nj]));
                     rhs_i -= v * sign[nj] * shift[j];
                 }
                 None => rhs_i -= v * lb[j],
@@ -1248,18 +1268,17 @@ fn build_std_form_presolved(
         }
         new_lb[slack] = 0.0;
         new_ub[slack] = 0.0;
-        r.push((slack, 1.0));
-        rows.push(r);
+        entries.push((slack, 1.0));
+        offsets.push(entries.len());
         b_out.push(rhs_i);
     }
     for (k, row) in g_rows.into_iter().enumerate() {
         let slack = n_free + n_eq + k;
         let mut rhs_k = g_rhs[k];
-        let mut r: Vec<(usize, f64)> = Vec::new();
         for (j, v) in row {
             match new_index[j] {
                 Some(nj) => {
-                    r.push((nj, v * sign[nj]));
+                    entries.push((nj, v * sign[nj]));
                     rhs_k -= v * sign[nj] * shift[j];
                 }
                 None => rhs_k -= v * lb[j],
@@ -1267,12 +1286,17 @@ fn build_std_form_presolved(
         }
         new_lb[slack] = 0.0;
         new_ub[slack] = f64::INFINITY;
-        r.push((slack, 1.0));
-        rows.push(r);
+        entries.push((slack, 1.0));
+        offsets.push(entries.len());
         b_out.push(rhs_k);
     }
 
-    let (rows, cols) = freeze_std_matrices(&rows, n_total);
+    debug_assert!(
+        offsets.windows(2).all(|w| entries[w[0]..w[1]].windows(2).all(|e| e[0].0 < e[1].0)),
+        "StdForm rows must be strictly column-ascending"
+    );
+    let rows = CsrMat::from_flat(n_total, offsets, entries);
+    let cols = rows.to_csc();
     let shift_of_free: Vec<f64> = orig_of_free.iter().map(|&j| shift[j]).collect();
     Ok(PresolvedForm {
         std: StdForm { n_total, n_rows, c, rows, cols, b: b_out, lb: new_lb, ub: new_ub },
@@ -1817,22 +1841,23 @@ fn run_phase(
     let mut w_buf = vec![0.0; m];
     let mut candidates_buf: Vec<Candidate> = Vec::with_capacity(m);
 
-    let ratio_pivot_tol = if std::env::var("ENOMOTO_PRIMAL_RATIO_PIVOT_TOL_OLD").is_ok() { TOL } else { FT_MIN_PIVOT };
+    let ratio_pivot_tol = if env_str!("ENOMOTO_PRIMAL_RATIO_PIVOT_TOL_OLD").is_some() { TOL } else { tunable!("ENOMOTO_T_FT_MIN_PIVOT", FT_MIN_PIVOT, f64) };
     let max_iters = max_iters_for(m, std.n_total);
     for iter_idx in 0..max_iters {
+        prof_phases::RUN_PHASE_ITERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let rhs = t.recompute_basics(lu);
 
         // Triggers (1) and (3): periodic residual / eta-file-fill checks.
         *since_check += 1;
         if *since_check >= FT_CHECK_INTERVAL {
             *since_check = 0;
-            let bump_too_big = lu.fill_count() > FT_BUMP_LIMIT_FACTOR * m.max(1);
+            let bump_too_big = lu.fill_count() > tunable!("ENOMOTO_T_FT_BUMP_LIMIT_FACTOR", FT_BUMP_LIMIT_FACTOR, usize) * m.max(1);
             let residual_too_big = !bump_too_big && t.basis_residual_norm(&rhs) > FT_RESIDUAL_TOL;
             if bump_too_big || residual_too_big {
                 // `None` here, not a panic — see this function's own docs
                 // for what that signals to the caller.
                 let Some(l) = try_refactorize(std, t, Some(&*lu)) else {
-                    if std::env::var("ENOMOTO_DEBUG_PHASES").is_ok() {
+                    if env_str!("ENOMOTO_DEBUG_PHASES").is_some() {
                         eprintln!("run_phase None@residual iter={iter_idx} phase1={phase1} bump={bump_too_big} residual={residual_too_big}");
                     }
                     return None;
@@ -1843,7 +1868,7 @@ fn run_phase(
         // Trigger (4): unconditional cap on accumulated updates.
         if lu.update_count() > FT_MAX_UPDATES {
             let Some(l) = try_refactorize(std, t, Some(&*lu)) else {
-                if std::env::var("ENOMOTO_DEBUG_PHASES").is_ok() {
+                if env_str!("ENOMOTO_DEBUG_PHASES").is_some() {
                     eprintln!("run_phase None@ft_max_updates iter={iter_idx} phase1={phase1}");
                 }
                 return None;
@@ -1938,7 +1963,7 @@ fn run_phase(
                 NbStatus::Zero => (true, if dj < 0.0 { 1.0 } else { -1.0 }),
             };
             if eligible && dj.abs() > TOL {
-                let score = dj * dj / se.gamma[j].max(STEEPEST_EDGE_FLOOR);
+                let score = dj * dj / se.gamma[j].max(tunable!("ENOMOTO_T_STEEPEST_EDGE_FLOOR", STEEPEST_EDGE_FLOOR, f64));
                 Some((j, score, dir, dj))
             } else {
                 None
@@ -1952,7 +1977,7 @@ fn run_phase(
         // dual method's own `bland_mode` bypasses DSE-based `chuzr`.
         let best = if stall.bland_mode {
             (0..std.n_total).filter_map(price_one).min_by_key(|&(j, ..)| j)
-        } else if std.n_total >= PARTIAL_PRICING_THRESHOLD {
+        } else if std.n_total >= tunable!("ENOMOTO_T_PARTIAL_PRICING_THRESHOLD", PARTIAL_PRICING_THRESHOLD, usize) {
             let iter_u64 = iter_idx as u64;
             let sample_best = (0..std.n_total)
                 .filter(|&j| partial_pricing_sampled(pricing_seed, iter_u64, j))
@@ -2079,7 +2104,7 @@ fn run_phase(
         // largest pivot — matching Bland's rule's own leaving-variable
         // requirement (consistent, deterministic tie-breaking on both
         // sides of a pivot is what its finite-termination proof needs).
-        let admitted = candidates.iter().filter(|c| c.exact <= alpha1 + PRIMAL_HARRIS_TOL);
+        let admitted = candidates.iter().filter(|c| c.exact <= alpha1 + tunable!("ENOMOTO_T_PRIMAL_HARRIS_TOL", PRIMAL_HARRIS_TOL, f64));
         let leaving = if stall.bland_mode {
             admitted.min_by_key(|c| t.basis[c.row])
         } else {
@@ -2168,9 +2193,9 @@ fn run_phase(
                 // the resulting pivot is too small to use safely. `None`
                 // here too — see the identical fallback earlier in this
                 // same loop, and this function's own docs.
-                if !lu.try_update(r, a_enter, FT_MIN_PIVOT) {
+                if !lu.try_update(r, a_enter, tunable!("ENOMOTO_T_FT_MIN_PIVOT", FT_MIN_PIVOT, f64)) {
                     let Some(l) = try_refactorize(std, t, Some(&*lu)) else {
-                        if std::env::var("ENOMOTO_DEBUG_PHASES").is_ok() {
+                        if env_str!("ENOMOTO_DEBUG_PHASES").is_some() {
                             eprintln!("run_phase None@ft_update iter={iter_idx} phase1={phase1} pivot={pivot}");
                         }
                         return None;
@@ -2182,6 +2207,294 @@ fn run_phase(
     }
 
     Some(Status::Optimal) // iteration cap hit; best-effort
+}
+
+/// Incremental phase-2 primal simplex — the S4 alternative to
+/// [`run_phase`] for `extended_dual`'s polish -> primal handoff only
+/// (`ENOMOTO_HANDOFF_INCREMENTAL=1`, default off; see
+/// `analysis/simplex_loop_20260924_113533.md` §3.2/§4 S4).
+///
+/// [`run_phase`] re-derives everything every iteration: `x_B` from scratch
+/// (`compute_rhs` `O(nnz(A))` + an FTRAN), `y` by a BTRAN, every nonbasic
+/// column's reduced cost by a dot product, and the steepest-edge update's
+/// own two BTRANs (`rho`, `w`) plus two dot products per nonbasic column.
+/// On Netlib `pilot87` that made one handoff pivot cost 2.3x a dual one.
+/// This loop keeps `x_B` and `d` up to date incrementally instead, the way
+/// the dual loops do:
+///
+/// - `x_B` moves by the ratio test's own step (`run_phase` applies the
+///   same step, then discards it at its next `recompute_basics`), and is
+///   re-derived from scratch only at a refresh point (below);
+/// - `d` is updated from the pivot row: with `rho = B^-T e_r` and
+///   `alpha_r = rho^T A` (a row-wise PRICE over `rho`'s nonzeros),
+///   `d_j -= (d_q / alpha_rq) alpha_rj`, and the leaving column gets
+///   `-d_q / alpha_rq`;
+/// - the steepest-edge update reads `alpha_r` (and `w^T A`, gathered in the
+///   same row-wise pass over `w = B^-T alpha`'s nonzeros) instead of two
+///   dot products per nonbasic column; `ENOMOTO_HANDOFF_INC_DEVEX=1`
+///   swaps it for primal Devex (reference weights, `rho` only — one BTRAN
+///   per pivot instead of two).
+///
+/// Refresh points (fresh `x_B` via `recompute_basics` + the residual /
+/// eta-fill refactorization check, fresh `d` via one BTRAN on `c_B`): the
+/// first iteration, every EXPAND reset (`EXPAND_K` iterations, where the
+/// nonbasic values move anyway), after every refactorization, and — the
+/// correctness guard — before trusting either "no entering candidate"
+/// (`Optimal`) or "no blocking row" (`Unbounded`): the maintained `d` only
+/// proposes those, a freshly computed one confirms them, which is exactly
+/// the test [`run_phase`] applies every iteration.
+fn run_phase2_incremental(std: &StdForm, t: &mut Tableau, lu: &mut sparse_lu::FtLu, stall: &mut PrimalStallState) -> Option<Status> {
+    use std::sync::atomic::Ordering::Relaxed;
+    let m = std.n_rows;
+    let n = std.n_total;
+    let stall_limit = (5 * m).max(500);
+    let floor = tunable!("ENOMOTO_T_STEEPEST_EDGE_FLOOR", STEEPEST_EDGE_FLOOR, f64);
+    let min_pivot = tunable!("ENOMOTO_T_FT_MIN_PIVOT", FT_MIN_PIVOT, f64);
+    let harris = tunable!("ENOMOTO_T_PRIMAL_HARRIS_TOL", PRIMAL_HARRIS_TOL, f64);
+    let bump_limit = tunable!("ENOMOTO_T_FT_BUMP_LIMIT_FACTOR", FT_BUMP_LIMIT_FACTOR, usize) * m.max(1);
+    let use_devex = tunable!("ENOMOTO_HANDOFF_INC_DEVEX", 0u8, u8) != 0;
+    let mut expand = ExpandState::new();
+
+    let mut gamma: Vec<f64> = if use_devex { vec![1.0; n] } else { SteepestEdgeState::new(std).gamma };
+    let mut cost_b = vec![0.0; m];
+    let mut y = vec![0.0; m];
+    let mut scratch = vec![0.0; m];
+    let mut d = vec![0.0; n];
+    let mut a_enter = vec![0.0; m];
+    let mut alpha = vec![0.0; m];
+    let mut rho = vec![0.0; m];
+    let mut w = vec![0.0; m];
+    let mut ap = vec![0.0; n];
+    let mut tp = vec![0.0; n];
+    let mut touched = vec![false; n];
+    let mut touched_cols: Vec<usize> = Vec::new();
+
+    struct Candidate {
+        row: usize,
+        exact: f64,
+        relaxed: f64,
+        pivot_abs: f64,
+        hits_upper: bool,
+    }
+    let mut candidates: Vec<Candidate> = Vec::with_capacity(m);
+
+    let mut need_fresh = true;
+    let mut since_check = 0usize;
+    let max_iters = max_iters_for(m, n);
+    for _iter in 0..max_iters {
+        prof_phases::RUN_PHASE_ITERS.fetch_add(1, Relaxed);
+        let fresh_now = need_fresh;
+        if need_fresh {
+            need_fresh = false;
+            let rhs = t.recompute_basics(lu);
+            if lu.fill_count() > bump_limit || t.basis_residual_norm(&rhs) > FT_RESIDUAL_TOL {
+                *lu = try_refactorize(std, t, Some(&*lu))?;
+                t.recompute_basics(lu);
+            }
+            for i in 0..m {
+                cost_b[i] = std.c[t.basis[i]];
+            }
+            lu.solve_transpose_into(&cost_b, &mut scratch, &mut y);
+            for j in 0..n {
+                d[j] = if t.nb_status[j].is_some() { std.c[j] - sparse_dot_dense(t.column_sparse(j), &y) } else { 0.0 };
+            }
+        }
+
+        // Refactorization triggers (`run_phase`'s (3)/(4); its per-iteration
+        // residual check (1) is paid only at refresh points).
+        since_check += 1;
+        if since_check >= FT_CHECK_INTERVAL {
+            since_check = 0;
+            if lu.fill_count() > bump_limit {
+                *lu = try_refactorize(std, t, Some(&*lu))?;
+                need_fresh = true;
+                continue;
+            }
+        }
+        if lu.update_count() > FT_MAX_UPDATES {
+            *lu = try_refactorize(std, t, Some(&*lu))?;
+            need_fresh = true;
+            continue;
+        }
+
+        expand.delta += EXPAND_TAU;
+        expand.iters_since_reset += 1;
+        if expand.iters_since_reset >= EXPAND_K {
+            expand.iters_since_reset = 0;
+            expand.delta = EXPAND_DELTA_0;
+            t.expand_reset_nonbasics();
+            need_fresh = true;
+            continue;
+        }
+
+        // Pricing over the maintained `d` (`run_phase`'s `price_one`
+        // eligibility rule, without its per-column dot product).
+        let mut best: Option<(usize, f64, f64, f64)> = None;
+        for j in 0..n {
+            let Some(st) = t.nb_status[j] else { continue };
+            if std.lb[j] == std.ub[j] {
+                continue;
+            }
+            let dj = d[j];
+            let (eligible, dir) = match st {
+                NbStatus::Lower => (dj < -TOL, 1.0),
+                NbStatus::Upper => (dj > TOL, -1.0),
+                NbStatus::Zero => (true, if dj < 0.0 { 1.0 } else { -1.0 }),
+            };
+            if !(eligible && dj.abs() > TOL) {
+                continue;
+            }
+            if stall.bland_mode {
+                if best.is_none() {
+                    best = Some((j, 0.0, dir, dj));
+                }
+                continue;
+            }
+            let score = dj * dj / gamma[j].max(floor);
+            if best.map_or(true, |b| score > b.1) {
+                best = Some((j, score, dir, dj));
+            }
+        }
+        let Some((enter, _, best_dir, dj_enter)) = best else {
+            if fresh_now {
+                return Some(Status::Optimal);
+            }
+            need_fresh = true;
+            continue;
+        };
+
+        t.column_into(enter, &mut a_enter);
+        lu.solve_into(&a_enter, &mut scratch, &mut alpha);
+
+        // Ratio test: `run_phase`'s phase-2 Harris/EXPAND two-pass test.
+        let self_width = std.ub[enter] - std.lb[enter];
+        let init_alpha1 = if self_width.is_finite() { self_width } else { f64::INFINITY };
+        candidates.clear();
+        for i in 0..m {
+            let rate = -best_dir * alpha[i];
+            if rate.abs() <= min_pivot {
+                continue;
+            }
+            let var = t.basis[i];
+            let val = t.x[var];
+            let (bound, is_upper) = if rate < 0.0 { (std.lb[var], false) } else { (std.ub[var], true) };
+            if !bound.is_finite() {
+                continue;
+            }
+            let exact = (bound - val) / rate;
+            let relaxed_bound = if is_upper { bound + expand.delta } else { bound - expand.delta };
+            let relaxed = (relaxed_bound - val) / rate;
+            candidates.push(Candidate { row: i, exact, relaxed, pivot_abs: alpha[i].abs(), hits_upper: is_upper });
+        }
+        let alpha1 = candidates.iter().map(|c| c.relaxed).fold(init_alpha1, f64::min);
+        let admitted = candidates.iter().filter(|c| c.exact <= alpha1 + harris);
+        let leaving = if stall.bland_mode { admitted.min_by_key(|c| t.basis[c.row]) } else { admitted.max_by(|a, b| a.pivot_abs.total_cmp(&b.pivot_abs)) };
+        let (leaving_row, leaving_hits_upper, alpha2, best_pivot_mag) = match leaving {
+            Some(c) if c.pivot_abs > 0.0 => (Some(c.row), c.hits_upper, c.exact, c.pivot_abs),
+            _ => (None, false, 0.0, 0.0),
+        };
+        let theta = match leaving_row {
+            None => {
+                if !alpha1.is_finite() {
+                    if fresh_now {
+                        return Some(Status::Unbounded);
+                    }
+                    need_fresh = true;
+                    continue;
+                }
+                alpha1
+            }
+            Some(_) => alpha2.max(EXPAND_TAU / best_pivot_mag),
+        };
+
+        if (theta * dj_enter).abs() < STALL_PROGRESS_EPS {
+            stall.stall_count += 1;
+            if stall.stall_count > stall_limit {
+                stall.bland_mode = true;
+            }
+        } else {
+            stall.stall_count = 0;
+        }
+
+        for i in 0..m {
+            let var = t.basis[i];
+            t.x[var] -= best_dir * alpha[i] * theta;
+        }
+        t.x[enter] += best_dir * theta;
+
+        let Some(r) = leaving_row else {
+            let new_status = if best_dir > 0.0 { NbStatus::Upper } else { NbStatus::Lower };
+            t.nb_status[enter] = Some(new_status);
+            t.x[enter] = if best_dir > 0.0 { std.ub[enter] } else { std.lb[enter] };
+            continue;
+        };
+
+        // Pivot row (and, for steepest edge, `w^T A`) against the OLD basis.
+        lu.solve_transpose_unit(r, &mut scratch, &mut rho);
+        if !use_devex {
+            lu.solve_transpose_into(&alpha, &mut scratch, &mut w);
+        }
+        for i in 0..m {
+            let rv = rho[i];
+            let wv = if use_devex { 0.0 } else { w[i] };
+            if rv.abs() <= TOL && wv.abs() <= TOL {
+                continue;
+            }
+            for &(j, v) in std.rows.row(i) {
+                if std.lb[j] == std.ub[j] {
+                    continue;
+                }
+                if !touched[j] {
+                    touched[j] = true;
+                    touched_cols.push(j);
+                }
+                ap[j] += rv * v;
+                tp[j] += wv * v;
+            }
+        }
+
+        let pivot = alpha[r];
+        let theta_d = d[enter] / pivot;
+        let gamma_q = gamma[enter];
+
+        let leaving_var = t.basis[r];
+        t.nb_status[leaving_var] = Some(if leaving_hits_upper { NbStatus::Upper } else { NbStatus::Lower });
+        t.basis_pos[leaving_var] = None;
+        t.basis[r] = enter;
+        t.basis_pos[enter] = Some(r);
+        t.nb_status[enter] = None;
+
+        for &j in &touched_cols {
+            if t.nb_status[j].is_some() {
+                let beta = ap[j] / pivot;
+                if j != leaving_var {
+                    d[j] -= theta_d * ap[j];
+                    if use_devex {
+                        gamma[j] = gamma[j].max(beta * beta * gamma_q);
+                    }
+                }
+                if !use_devex {
+                    gamma[j] = (gamma[j] + beta * beta * (1.0 + gamma_q) - 2.0 * beta * tp[j]).max(floor);
+                }
+            }
+            ap[j] = 0.0;
+            tp[j] = 0.0;
+            touched[j] = false;
+        }
+        touched_cols.clear();
+        d[leaving_var] = -theta_d;
+        d[enter] = 0.0;
+        if use_devex {
+            gamma[leaving_var] = (gamma_q / (pivot * pivot)).max(1.0);
+        }
+
+        if !lu.try_update(r, &a_enter, min_pivot) {
+            *lu = try_refactorize(std, t, Some(&*lu))?;
+            need_fresh = true;
+        }
+    }
+
+    Some(Status::Optimal) // iteration cap hit; best-effort, as in `run_phase`
 }
 
 /// Above this many variables, a connected component found by
@@ -2638,13 +2951,13 @@ impl DseState {
             for i in 0..m {
                 lu.solve_transpose_unit_into(i, &mut scratch, &mut z);
                 let norm_sq: f64 = z.iter().map(|&v| v * v).sum();
-                w[i] = norm_sq.max(STEEPEST_EDGE_FLOOR);
+                w[i] = norm_sq.max(tunable!("ENOMOTO_T_STEEPEST_EDGE_FLOOR", STEEPEST_EDGE_FLOOR, f64));
             }
         } else {
             for i in 0..m {
                 lu.solve_transpose_unit(i, &mut scratch, &mut z);
                 let norm_sq: f64 = z.iter().map(|&v| v * v).sum();
-                w[i] = norm_sq.max(STEEPEST_EDGE_FLOOR);
+                w[i] = norm_sq.max(tunable!("ENOMOTO_T_STEEPEST_EDGE_FLOOR", STEEPEST_EDGE_FLOOR, f64));
             }
         }
         DseState { w, use_parallel: m > RAYON_SIZE_THRESHOLD }
@@ -2683,13 +2996,13 @@ impl DseState {
     /// sitting there, unread, at every single call site.
     fn update_after_pivot(&mut self, p: usize, alpha: &[f64], tau: &[f64], rho_p: &[f64]) {
         let pivot = alpha[p];
-        let wp_old = rho_p.iter().map(|v| v * v).sum::<f64>().max(STEEPEST_EDGE_FLOOR);
+        let wp_old = rho_p.iter().map(|v| v * v).sum::<f64>().max(tunable!("ENOMOTO_T_STEEPEST_EDGE_FLOOR", STEEPEST_EDGE_FLOOR, f64));
         let update_one = |i: usize, w_i: &mut f64| {
             if i == p {
                 return;
             }
             let ratio = alpha[i] / pivot;
-            *w_i = (*w_i - 2.0 * ratio * tau[i] + ratio * ratio * wp_old).max(STEEPEST_EDGE_FLOOR);
+            *w_i = (*w_i - 2.0 * ratio * tau[i] + ratio * ratio * wp_old).max(tunable!("ENOMOTO_T_STEEPEST_EDGE_FLOOR", STEEPEST_EDGE_FLOOR, f64));
         };
         if self.use_parallel {
             use rayon::prelude::*;
@@ -2708,10 +3021,30 @@ impl DseState {
             let m = self.w.len();
             for ((w_i, &a_i), &t_i) in self.w.iter_mut().zip(&alpha[..m]).zip(&tau[..m]) {
                 let ratio = a_i / pivot;
-                *w_i = (*w_i - 2.0 * ratio * t_i + ratio * ratio * wp_old).max(STEEPEST_EDGE_FLOOR);
+                *w_i = (*w_i - 2.0 * ratio * t_i + ratio * ratio * wp_old).max(tunable!("ENOMOTO_T_STEEPEST_EDGE_FLOOR", STEEPEST_EDGE_FLOOR, f64));
             }
         }
-        self.w[p] = (wp_old / (pivot * pivot)).max(STEEPEST_EDGE_FLOOR);
+        self.w[p] = (wp_old / (pivot * pivot)).max(tunable!("ENOMOTO_T_STEEPEST_EDGE_FLOOR", STEEPEST_EDGE_FLOOR, f64));
+    }
+
+    /// [`Self::update_after_pivot`] restricted to `rows`, a superset of
+    /// `alpha`'s nonzero rows (any order): for `alpha[i] == 0` the update is
+    /// `w_i - 2*(±0)*tau_i + (±0)*(±0)*wp_old = w_i` exactly (`w_i` is
+    /// already floored), so skipping those rows is bit-identical while the
+    /// work drops from `O(m)` to `O(nnz(alpha))`. `wp_old` is passed in
+    /// (`Σ rho_p[i]^2` summed in ascending `i`, zeros skipped — also exact,
+    /// adding `+0.0` to a nonnegative partial sum changes nothing that the
+    /// floor below does not already absorb).
+    fn update_after_pivot_rows(&mut self, p: usize, alpha: &[f64], tau: &[f64], wp_old: f64, rows: &[u32]) {
+        let floor = tunable!("ENOMOTO_T_STEEPEST_EDGE_FLOOR", STEEPEST_EDGE_FLOOR, f64);
+        let pivot = alpha[p];
+        let wp_old = wp_old.max(floor);
+        for &i in rows {
+            let i = i as usize;
+            let ratio = alpha[i] / pivot;
+            self.w[i] = (self.w[i] - 2.0 * ratio * tau[i] + ratio * ratio * wp_old).max(floor);
+        }
+        self.w[p] = (wp_old / (pivot * pivot)).max(floor);
     }
 }
 
@@ -2839,7 +3172,7 @@ fn row_infeasible(std: &StdForm, t: &Tableau, noise_feasible: &[bool], i: usize)
         return false;
     }
     let val = t.x[var];
-    val < std.lb[var] - PRIMAL_FEAS_TOL || val > std.ub[var] + PRIMAL_FEAS_TOL
+    val < std.lb[var] - tunable!("ENOMOTO_T_PRIMAL_FEAS_TOL", PRIMAL_FEAS_TOL, f64) || val > std.ub[var] + tunable!("ENOMOTO_T_PRIMAL_FEAS_TOL", PRIMAL_FEAS_TOL, f64)
 }
 
 /// Hyper-sparse `chuzr`: the set of basic rows currently primal-infeasible,
@@ -2908,6 +3241,12 @@ impl InfeasibleRows {
     /// since that's the only operation that can change many rows' `x_B`
     /// values at once without this struct's own incremental `set` calls
     /// seeing each change individually.
+    /// Whether row `i` is currently in the pool.
+    #[inline]
+    pub(super) fn contains(&self, i: usize) -> bool {
+        self.pos[i].is_some()
+    }
+
     pub(super) fn rebuild(&mut self, m: usize, mut pred: impl FnMut(usize) -> bool) {
         self.rows.clear();
         for i in 0..m {
@@ -2988,6 +3327,10 @@ mod prof_phases {
     /// this common rather than a rare edge case.
     pub(super) static COMPUTE_RHS_COLS_TOTAL: AtomicUsize = AtomicUsize::new(0);
     pub(super) static COMPUTE_RHS_COLS_SKIPPED: AtomicUsize = AtomicUsize::new(0);
+    /// Iterations [`super::run_phase`] has run (cumulative, per process) —
+    /// read as a before/after difference by `extended_dual`'s primal
+    /// handoff diagnostic (`ENOMOTO_DEBUG_EXT_ITERS`).
+    pub(crate) static RUN_PHASE_ITERS: AtomicUsize = AtomicUsize::new(0);
     pub(super) static ITERS: AtomicUsize = AtomicUsize::new(0);
     /// Per-iteration *shape* of the chuzr/BFRT work, reported alongside
     /// the phase timings above when `ENOMOTO_DEBUG_CHUZR` is also set:
@@ -3095,7 +3438,7 @@ fn solve_lp_dual_classified(variables: &[VariableData], objective: &Objective, c
         Ok(pf) => pf,
         Err(status) => return SimplexResult { status, x: None },
     };
-    if std::env::var("ENOMOTO_DEBUG_PRESOLVE_SIZE").is_ok() {
+    if env_str!("ENOMOTO_DEBUG_PRESOLVE_SIZE").is_some() {
         // Moved here (from inside the `!had_unbounded_structural` branch
         // below, where it used to live) so it fires for *every* solve, not
         // just the common finite-bounds case: this `std` is the one
@@ -3139,8 +3482,8 @@ fn solve_lp_dual_classified(variables: &[VariableData], objective: &Objective, c
     // the old had_unbounded_structural-gated routing, for comparison —
     // same pattern as this module's own `ENOMOTO_DISABLE_AGGREGATOR`/
     // `ENOMOTO_DISABLE_PARALLELCOLS` presolve toggles.
-    if had_unbounded_structural || std::env::var("ENOMOTO_DISABLE_ALWAYS_EXTENDED").is_err() {
-        if std::env::var("ENOMOTO_DEBUG_EXT_COMPONENTS").is_ok() {
+    if had_unbounded_structural || env_str!("ENOMOTO_DISABLE_ALWAYS_EXTENDED").is_none() {
+        if env_str!("ENOMOTO_DEBUG_EXT_COMPONENTS").is_some() {
             match connected_components_of_std_form(&std) {
                 Some((components, _has_row)) => {
                     let mut sizes: Vec<usize> = components.iter().map(|c| c.len()).collect();
@@ -3155,7 +3498,7 @@ fn solve_lp_dual_classified(variables: &[VariableData], objective: &Objective, c
             }
         }
         let ext_result = extended_dual::solve_lp_dual_extended(&std, &opts);
-        if std::env::var("ENOMOTO_DEBUG_EXT_ITERS").is_ok() {
+        if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
             match &ext_result {
                 Some(r) => eprintln!("DEBUG_EXT: solve_lp_dual_extended returned Some({:?})", r.status),
                 None => eprintln!("DEBUG_EXT: solve_lp_dual_extended returned None (falling back)"),
@@ -3194,16 +3537,16 @@ fn solve_lp_dual_classified(variables: &[VariableData], objective: &Objective, c
         };
         return unscale_result(solve_std_form_decomposed(&std, true), &sc, &postsolve_log, &orig_of_free, &sign, &fixed_values, &shift, variables.len());
     }
-    let profile_phases = std::env::var("ENOMOTO_PROF_PHASES").is_ok();
-    let debug_eta_density = std::env::var("ENOMOTO_DEBUG_ETA_DENSITY").is_ok();
-    let debug_update_verify = std::env::var("ENOMOTO_PROF_UPDATE_VERIFY").is_ok();
+    let profile_phases = env_str!("ENOMOTO_PROF_PHASES").is_some();
+    let debug_eta_density = env_str!("ENOMOTO_DEBUG_ETA_DENSITY").is_some();
+    let debug_update_verify = env_str!("ENOMOTO_PROF_UPDATE_VERIFY").is_some();
     if profile_phases || debug_eta_density || debug_update_verify {
         prof_phases::reset();
     }
     let wall_t0 = std::time::Instant::now();
     let result = solve_std_form_decomposed(&std, true);
     let wall_ns = wall_t0.elapsed().as_nanos() as usize;
-    if std::env::var("ENOMOTO_PROF_TRIANGULAR").is_ok() {
+    if env_str!("ENOMOTO_PROF_TRIANGULAR").is_some() {
         use std::sync::atomic::Ordering::Relaxed;
         let total = sparse_lu::PROF_TOTAL_STEPS.load(Relaxed);
         let trivial = sparse_lu::PROF_TRIVIAL_STEPS.load(Relaxed);
@@ -3262,7 +3605,7 @@ fn solve_lp_dual_classified(variables: &[VariableData], objective: &Objective, c
             "  compute_rhs_cols total={compute_rhs_total} skipped={compute_rhs_skipped} ({:.1}%)",
             100.0 * compute_rhs_skipped as f64 / compute_rhs_total.max(1) as f64
         );
-        if std::env::var("ENOMOTO_DEBUG_CHUZR").is_ok() {
+        if env_str!("ENOMOTO_DEBUG_CHUZR").is_some() {
             let m = std.n_rows.max(1);
             eprintln!(
                 "  DEBUG_CHUZR m={m} avg_infeasible_rows/iter={:.1} ({:.1}% of m) avg_alpha_nnz/iter={:.1} ({:.1}% of m) avg_bfrt_cands/iter={:.1} avg_bfrt_walk/iter={:.1}",
@@ -3470,17 +3813,17 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
     // Checked once here (not per-iteration) — see `timed!`'s own docs for
     // why this keeps a normal, non-profiling solve from paying for any
     // `Instant::now()` calls at all.
-    let profile_phases = std::env::var("ENOMOTO_PROF_PHASES").is_ok();
+    let profile_phases = env_str!("ENOMOTO_PROF_PHASES").is_some();
     // Hoisted out of the loop like `profile_phases` itself — an
     // `env::var` lookup per iteration would otherwise inflate the very
     // wall-clock this diagnostic is meant to explain.
-    let debug_chuzr = profile_phases && std::env::var("ENOMOTO_DEBUG_CHUZR").is_ok();
-    let debug_eta_density = std::env::var("ENOMOTO_DEBUG_ETA_DENSITY").is_ok();
+    let debug_chuzr = profile_phases && env_str!("ENOMOTO_DEBUG_CHUZR").is_some();
+    let debug_eta_density = env_str!("ENOMOTO_DEBUG_ETA_DENSITY").is_some();
     // Gates the `UPDATE_VERIFY_*` atomic counters below (see
     // [`update_verify`]'s own docs) — hoisted for the same per-iteration
     // `env::var`-cost reason as `debug_chuzr` above, since `update_verify`
     // itself runs every single pivot, not just every `FT_CHECK_INTERVAL`.
-    let debug_update_verify = std::env::var("ENOMOTO_PROF_UPDATE_VERIFY").is_ok();
+    let debug_update_verify = env_str!("ENOMOTO_PROF_UPDATE_VERIFY").is_some();
     // Escape hatch for A/B measurement against the always-on default (see
     // [`update_verify`]'s own docs and this feature's own commit message):
     // the check normally runs unconditionally, like `FT_MIN_PIVOT`'s own
@@ -3489,13 +3832,13 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
     // disabling it can only ever make a solve *more* exposed to stale
     // eta-chain drift between trigger (1)'s own coarser checks, never
     // change which pivot a healthy solve picks.
-    let update_verify_disabled = std::env::var("ENOMOTO_DISABLE_UPDATE_VERIFY").is_ok();
+    let update_verify_disabled = env_str!("ENOMOTO_DISABLE_UPDATE_VERIFY").is_some();
     // Reports the one-way Devex→DSE escalation (see [`DEVEX_STAGNATION_WINDOW`]'s
     // own docs) if/when it happens — at most once per solve, so unlike
     // `profile_phases`/`debug_chuzr` above this isn't hoisted for a
     // per-iteration cost reason, just for this file's own convention of
     // reading every `ENOMOTO_DEBUG_*` flag once, up front.
-    let debug_devex = std::env::var("ENOMOTO_DEBUG_DEVEX").is_ok();
+    let debug_devex = env_str!("ENOMOTO_DEBUG_DEVEX").is_some();
     // EXPERIMENTAL (measurement only, inert unless a caller has set
     // `tie_experiment::IN` via `solve_lp_dual_with_tie_experiment` — every
     // normal call path, including plain `solve_lp_dual`, leaves this `None`
@@ -3573,7 +3916,7 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
     // opposes it. This is exactly why the default stays reactive
     // (Devex-start, escalate only on an actual trigger) rather than
     // switched to DSE-always based on any upfront guess.
-    let force_dse = force_dse || std::env::var("ENOMOTO_FORCE_DSE").is_ok();
+    let force_dse = force_dse || env_str!("ENOMOTO_FORCE_DSE").is_some();
     let mut weights = if force_dse { EdgeWeights::Dse(DseState::new(m)) } else { EdgeWeights::Devex(DevexState::new(m)) };
     // Rolling window + running sum for the Devex→DSE stagnation check
     // below (see [`DEVEX_STAGNATION_WINDOW`]'s own docs) — a `VecDeque`
@@ -3757,7 +4100,7 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
         since_check += 1;
         if since_check >= FT_CHECK_INTERVAL {
             since_check = 0;
-            let bump_too_big = lu.fill_count() > FT_BUMP_LIMIT_FACTOR * m.max(1);
+            let bump_too_big = lu.fill_count() > tunable!("ENOMOTO_T_FT_BUMP_LIMIT_FACTOR", FT_BUMP_LIMIT_FACTOR, usize) * m.max(1);
             since_residual_check += 1;
             let due_for_residual_check = since_residual_check >= RESIDUAL_CHECK_MULTIPLIER;
             if bump_too_big || due_for_residual_check {
@@ -3830,17 +4173,17 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
             if noise_feasible[var] {
                 return None;
             }
-            let delta = if val < std.lb[var] - PRIMAL_FEAS_TOL {
+            let delta = if val < std.lb[var] - tunable!("ENOMOTO_T_PRIMAL_FEAS_TOL", PRIMAL_FEAS_TOL, f64) {
                 std.lb[var] - val
-            } else if val > std.ub[var] + PRIMAL_FEAS_TOL {
+            } else if val > std.ub[var] + tunable!("ENOMOTO_T_PRIMAL_FEAS_TOL", PRIMAL_FEAS_TOL, f64) {
                 val - std.ub[var]
             } else {
                 0.0
             };
-            if delta <= PRIMAL_FEAS_TOL {
+            if delta <= tunable!("ENOMOTO_T_PRIMAL_FEAS_TOL", PRIMAL_FEAS_TOL, f64) {
                 return None;
             }
-            let score = delta * delta / weights.weight(i).max(STEEPEST_EDGE_FLOOR);
+            let score = delta * delta / weights.weight(i).max(tunable!("ENOMOTO_T_STEEPEST_EDGE_FLOOR", STEEPEST_EDGE_FLOOR, f64));
             Some((i, score, val < std.lb[var]))
         };
         // In `bland_mode`, chuzr also switches to Bland's rule: smallest
@@ -4206,7 +4549,7 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
             // otherwise well-behaved instances.
             let lv = t.basis[p];
             let infeas = (std.lb[lv] - t.x[lv]).max(t.x[lv] - std.ub[lv]).max(0.0);
-            if infeas <= PRIMAL_FEAS_TOL * std.b[p].abs().max(1.0) {
+            if infeas <= tunable!("ENOMOTO_T_PRIMAL_FEAS_TOL", PRIMAL_FEAS_TOL, f64) * std.b[p].abs().max(1.0) {
                 noise_feasible[lv] = true;
                 infeasible_rows.set(p, false);
                 for &j in &touched_cols {
@@ -4252,7 +4595,7 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
             // pivot is that small.
             let best = candidates
                 .iter()
-                .filter(|c| c.a_pj.abs() > FT_MIN_PIVOT)
+                .filter(|c| c.a_pj.abs() > tunable!("ENOMOTO_T_FT_MIN_PIVOT", FT_MIN_PIVOT, f64))
                 .min_by_key(|c| c.j)
                 .unwrap_or_else(|| candidates.iter().min_by_key(|c| c.j).unwrap());
             (best.j, best.dj, Vec::new())
@@ -4301,7 +4644,7 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
             // reaching flip into a false "still short" — exhausting the
             // list and reporting `Infeasible`. Small moves keep the plain
             // `PRIMAL_FEAS_TOL` (the `max(1.0)` floor).
-            let reach_tol = PRIMAL_FEAS_TOL * (x_leaving_now - target_bound).abs().max(1.0);
+            let reach_tol = tunable!("ENOMOTO_T_PRIMAL_FEAS_TOL", PRIMAL_FEAS_TOL, f64) * (x_leaving_now - target_bound).abs().max(1.0);
             let mut stop_idx: Option<usize> = None;
             while let Some(Reverse(cand)) = heap.pop() {
                 let idx = sorted_prefix.len();
@@ -4465,7 +4808,7 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
             // not a proof; widening it — by any rule — needs the same
             // Netlib A/B this comment is built from, not just a cleaner
             // formula.
-            let min_ratio = sorted_prefix[stop_idx].ratio - HARRIS_RATIO_TOL;
+            let min_ratio = sorted_prefix[stop_idx].ratio - tunable!("ENOMOTO_T_HARRIS_RATIO_TOL", HARRIS_RATIO_TOL, f64);
             let mut window_start = stop_idx;
             while window_start > 0 && sorted_prefix[window_start - 1].ratio >= min_ratio {
                 window_start -= 1;
@@ -4680,7 +5023,7 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
                     verify_failed = true;
                     if debug_update_verify {
                         use std::sync::atomic::Ordering::Relaxed;
-                        let scale = alpha_row.abs().max(alpha_col.abs()).max(FT_MIN_PIVOT);
+                        let scale = alpha_row.abs().max(alpha_col.abs()).max(tunable!("ENOMOTO_T_FT_MIN_PIVOT", FT_MIN_PIVOT, f64));
                         let rel_ppm = ((alpha_row - alpha_col).abs() / scale * 1_000_000.0) as usize;
                         prof_phases::UPDATE_VERIFY_TRIGGERS.fetch_add(1, Relaxed);
                         prof_phases::UPDATE_VERIFY_SUM_REL_PPM.fetch_add(rel_ppm, Relaxed);
@@ -4962,7 +5305,7 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
         let update_ok = timed!(
             profile_phases,
             prof_phases::FT_UPDATE,
-            lu.try_update_precomputed(p, &a_tilde_buf, &e_tilde_buf, FT_MIN_PIVOT)
+            lu.try_update_precomputed(p, &a_tilde_buf, &e_tilde_buf, tunable!("ENOMOTO_T_FT_MIN_PIVOT", FT_MIN_PIVOT, f64))
         );
         if update_ok && debug_eta_density {
             let denom = std.n_rows.saturating_sub(1).max(1);
@@ -5082,7 +5425,7 @@ mod tests {
                     return;
                 }
                 let ratio = alpha[i] / pivot;
-                *w_i = (*w_i - 2.0 * ratio * tau[i] + ratio * ratio * wp_old).max(STEEPEST_EDGE_FLOOR);
+                *w_i = (*w_i - 2.0 * ratio * tau[i] + ratio * ratio * wp_old).max(tunable!("ENOMOTO_T_STEEPEST_EDGE_FLOOR", STEEPEST_EDGE_FLOOR, f64));
             };
             const REPS: usize = 200;
 

@@ -36,7 +36,7 @@
 //! *zero* replacement rows, letting a chain of these cascade through a
 //! network-shaped equality system the same way HiGHS's own presolve does.
 
-use crate::presolve::propagate;
+use crate::presolve::propagate::GView;
 use crate::sparse::{Csr, csr_from_rows, csr_is_canonical, csr_rows};
 const TOL: f64 = 1e-9;
 /// Minimum `|coeff| / max|row|` for a column singleton to be substituted
@@ -76,7 +76,7 @@ pub(crate) const IMPLIED_TOL: f64 = 1e-9;
 /// `analysis/stocfor2_presolve_20260923.md`; `ENOMOTO_KEEP_IMPLIED_BOUND_ROWS`
 /// turns it off).
 pub(crate) fn skip_implied_bound_rows() -> bool {
-    std::env::var("ENOMOTO_KEEP_IMPLIED_BOUND_ROWS").is_err()
+    env_str!("ENOMOTO_KEEP_IMPLIED_BOUND_ROWS").is_none()
 }
 
 /// `[min, max]` of `sum(v * x_k)` over the terms' boxes.
@@ -108,7 +108,14 @@ pub struct EliminationResult {
 /// becomes a singleton only *after* another elimination removes its other
 /// occurrence isn't caught here (a later call, given this pass's own
 /// output, would catch it).
+#[allow(dead_code)] // `run_extended` calls the `GView` form directly
 pub fn eliminate_singleton_equalities(n: usize, a: &Csr, b: &[f64], g: &Csr, h: &[f64], c: &[f64]) -> EliminationResult {
+    eliminate_singleton_equalities_view(n, a, b, GView::Mat { g, h }, c)
+}
+
+/// [`eliminate_singleton_equalities`] on either form of `G` (see
+/// [`GView`]): a split `G` supplies `lb`/`ub` and its real rows directly.
+pub fn eliminate_singleton_equalities_view(n: usize, a: &Csr, b: &[f64], gv: GView<'_>, c: &[f64]) -> EliminationResult {
     let a_rows: Vec<Vec<(usize, f64)>> = csr_rows(a);
 
     // `lb`/`ub` for the box-bound part; `real_g_rows` for the "does this
@@ -118,7 +125,7 @@ pub fn eliminate_singleton_equalities(n: usize, a: &Csr, b: &[f64], g: &Csr, h: 
     // (multi-variable) rows are needed here, so G is read in place rather
     // than via `extract_bounds` (which copies every real row into its own
     // `Vec`).
-    let (lb, ub) = propagate::extract_bounds_only(n, g, h);
+    let (lb, ub) = gv.bounds(n);
 
     // Total appearances across every *real* row (A's rows, plus G's
     // multi-variable rows — G's own single-variable rows are box bounds,
@@ -133,15 +140,25 @@ pub fn eliminate_singleton_equalities(n: usize, a: &Csr, b: &[f64], g: &Csr, h: 
             }
         }
     }
-    {
-        let gr = g.as_ref();
-        for i in 0..gr.nrows() {
-            let cols = gr.col_indices_of_row_raw(i);
-            if cols.len() == 1 {
-                continue; // a bound row — `extract_bounds` would not list it as real
+    match gv {
+        GView::Mat { g, .. } => {
+            let gr = g.as_ref();
+            for i in 0..gr.nrows() {
+                let cols = gr.col_indices_of_row_raw(i);
+                if cols.len() == 1 {
+                    continue; // a bound row — `extract_bounds` would not list it as real
+                }
+                for (&j, &v) in cols.iter().zip(gr.values_of_row(i)) {
+                    if v != 0.0 {
+                        appearances[j] += 1;
+                    }
+                }
             }
-            for (&j, &v) in cols.iter().zip(gr.values_of_row(i)) {
-                if v != 0.0 {
+        }
+        // Canonical split form: exactly the multi-entry rows above.
+        GView::Split { rows, .. } => {
+            for row in rows {
+                for &(j, _) in row {
                     appearances[j] += 1;
                 }
             }
@@ -183,10 +200,10 @@ pub fn eliminate_singleton_equalities(n: usize, a: &Csr, b: &[f64], g: &Csr, h: 
         // objective slightly *below* the true optimum. Such a column is
         // simply left in the problem.
         let row_max = row.iter().map(|&(_, v)| v.abs()).fold(0.0f64, f64::max);
-        if coeff.abs() < SUBSTITUTION_PIVOT_RATIO * row_max {
+        if coeff.abs() < tunable!("ENOMOTO_T_CS_SUBSTITUTION_PIVOT_RATIO", SUBSTITUTION_PIVOT_RATIO, f64) * row_max {
             continue;
         }
-        let terms: Vec<(usize, f64)> = row.iter().filter(|&&(k, _)| k != j).cloned().collect();
+        let terms: Vec<(usize, f64)> = crate::sparse::collect_with_capacity(row.len(), row.iter().filter(|&&(k, _)| k != j).cloned());
         let rhs = b[i];
 
         let cj = new_c[j];

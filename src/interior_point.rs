@@ -324,11 +324,10 @@ pub fn solve(qp: &QpStd) -> IpmResult {
         // further iteration needed).
         return IpmResult { status: Status::Unbounded, x: None };
     }
+    let (g, h) = pre.g_h();
     let sc = pre.scaling;
     let a = pre.a;
     let b = pre.b;
-    let g = pre.g;
-    let h = pre.h;
     let c = pre.c;
     let postsolve_log = pre.postsolve_log;
     let p = a.nrows();

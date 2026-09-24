@@ -358,6 +358,11 @@ pub fn scatter_dense(sparse: &[(usize, f64)], out: &mut [f64]) {
 // Hybrid sparse/dense vectors
 // ===========================================================================
 
+thread_local! {
+    /// [`HybridVec::pack_scaled_dense`]'s reusable compaction buffer.
+    static PACK_SCRATCH: std::cell::RefCell<Vec<(usize, f64)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 /// A vector held **either** as an `(index, value)` list **or** as a full
 /// dense array, the representation picked once at construction from its own
 /// fill — [`HybridVec::pack`].
@@ -451,33 +456,60 @@ impl HybridVec {
     /// Panics if `skip >= src.len()`, exactly as [`Self::pack`] does on an
     /// out-of-range index.
     pub fn pack_scaled_dense(src: &[f64], skip: usize, scale: f64, dense_fraction: f64) -> Self {
-        let len = src.len();
-        let mut nnz = 0usize;
-        for &x in src {
-            nnz += usize::from(scale * x != 0.0);
+        let tiny = crate::simplex::tiny_drop();
+        if tiny > 0.0 {
+            return Self::pack_scaled_dense_drop(src, skip, scale, dense_fraction, tiny);
         }
-        // `skip` is excluded from the vector, so undo its contribution
-        // rather than branching on it `len` times above. It was counted
-        // if and only if this same test holds, so this cannot underflow.
-        nnz -= usize::from(scale * src[skip] != 0.0);
-
-        if nnz as f64 > dense_fraction * len as f64 {
-            let mut data = src.to_vec();
-            if scale != 1.0 {
-                for d in data.iter_mut() {
-                    *d *= scale;
-                }
+        let len = src.len();
+        // One pass: every `(i, scale * src[i])` is written unconditionally
+        // into a reusable length-`len` scratch and the write cursor advances
+        // only for a kept entry (branch-free compaction), so the pair list
+        // and its count come out of a single read of `src`. The sparse arm
+        // then copies exactly `nnz` pairs out (same content and capacity as
+        // the former two-pass form); the dense arm is unchanged.
+        let _ = src[skip];
+        PACK_SCRATCH.with(|cell| {
+            let mut buf = cell.borrow_mut();
+            if buf.len() < len {
+                buf.resize(len, (0, 0.0));
             }
-            // Upholds "the skipped index" convention documented above:
-            // the dense form stores a literal `0.0` at its own pivot slot.
-            data[skip] = 0.0;
+            let mut nnz = 0usize;
+            for (i, &x) in src.iter().enumerate() {
+                let v = scale * x;
+                // In bounds: `nnz <= i < len <= buf.len()`.
+                buf[nnz] = (i, v);
+                nnz += usize::from(v != 0.0 && i != skip);
+            }
+            if nnz as f64 > dense_fraction * len as f64 {
+                let mut data = src.to_vec();
+                if scale != 1.0 {
+                    for d in data.iter_mut() {
+                        *d *= scale;
+                    }
+                }
+                // Upholds "the skipped index" convention documented above:
+                // the dense form stores a literal `0.0` at its own pivot slot.
+                data[skip] = 0.0;
+                HybridVec::Dense { data: data.into_boxed_slice(), nnz }
+            } else {
+                HybridVec::Sparse(buf[..nnz].to_vec())
+            }
+        })
+    }
+
+    /// [`Self::pack_scaled_dense`] treating `|scale * x| < tiny` as zero.
+    fn pack_scaled_dense_drop(src: &[f64], skip: usize, scale: f64, dense_fraction: f64, tiny: f64) -> Self {
+        let len = src.len();
+        let keep = |i: usize, x: f64| i != skip && (scale * x).abs() >= tiny;
+        let nnz = src.iter().enumerate().filter(|&(i, &x)| keep(i, x)).count();
+        if nnz as f64 > dense_fraction * len as f64 {
+            let data: Vec<f64> = src.iter().enumerate().map(|(i, &x)| if keep(i, x) { scale * x } else { 0.0 }).collect();
             HybridVec::Dense { data: data.into_boxed_slice(), nnz }
         } else {
             let mut pairs = Vec::with_capacity(nnz);
             for (i, &x) in src.iter().enumerate() {
-                let v = scale * x;
-                if i != skip && v != 0.0 {
-                    pairs.push((i, v));
+                if keep(i, x) {
+                    pairs.push((i, scale * x));
                 }
             }
             HybridVec::Sparse(pairs)
@@ -1045,6 +1077,15 @@ impl CsrMat {
         CsrMat { n_rows: rows.len(), n_cols, inner: Compressed::from_groups(rows) }
     }
 
+    /// Takes an already-flattened layout: row `i` is
+    /// `entries[offsets[i]..offsets[i + 1]]` (`offsets[0] == 0`, one more
+    /// offset than rows) — exactly what [`Self::from_rows`] builds from the
+    /// equivalent `Vec<Vec<_>>`, without the per-row vectors.
+    pub(crate) fn from_flat(n_cols: usize, offsets: Vec<usize>, entries: Vec<(usize, f64)>) -> Self {
+        debug_assert!(offsets.first() == Some(&0) && offsets.last() == Some(&entries.len()) && offsets.windows(2).all(|w| w[0] <= w[1]));
+        CsrMat { n_rows: offsets.len() - 1, n_cols, inner: Compressed { offsets, entries } }
+    }
+
     /// Like [`Self::from_rows`], but canonicalizing each row first: sorted
     /// by column, duplicate columns summed, and anything within `tol` of
     /// zero dropped.
@@ -1585,7 +1626,8 @@ impl CsrRowBuilder {
     /// A row with a single `(j, v)` entry (`v != 0`, `j < n_cols`), e.g.
     /// a bound row — no allocation, no checks needed beyond these.
     pub(crate) fn push_singleton(&mut self, j: usize, v: f64) {
-        debug_assert!(v != 0.0 && j < self.n_cols);
+        debug_assert!(v != 0.0);
+        assert!(j < self.n_cols, "column out of range");
         self.col_ind.push(j);
         self.values.push(v);
         self.row_ptr.push(self.col_ind.len());
@@ -1593,7 +1635,22 @@ impl CsrRowBuilder {
 
     pub(crate) fn finish(self) -> Csr {
         let nrows = self.row_ptr.len() - 1;
-        let symbolic = faer::sparse::SymbolicSparseRowMat::new_checked(nrows, self.n_cols, self.row_ptr, None, self.col_ind);
+        // Every row went through `push_row` (columns in range, strictly
+        // increasing — duplicates are rejected) or `push_singleton` (one
+        // in-range column), and `row_ptr` is monotone by construction, so
+        // faer's `new_checked` re-validation (a second pass over every
+        // column index; ~4% of a small LP's `solve()` under callgrind)
+        // would only re-prove this. Still checked in debug builds.
+        debug_assert!(self.row_ptr.windows(2).all(|w| w[0] <= w[1]) && *self.row_ptr.last().unwrap() == self.col_ind.len());
+        debug_assert!((0..nrows).all(|i| {
+            let r = &self.col_ind[self.row_ptr[i]..self.row_ptr[i + 1]];
+            r.iter().all(|&j| j < self.n_cols) && r.windows(2).all(|w| w[0] < w[1])
+        }));
+        // SAFETY: the invariants `new_checked` asserts (monotone row
+        // pointers ending at `col_ind.len()`, in-range and strictly
+        // increasing column indices within each row) hold by construction,
+        // see above.
+        let symbolic = unsafe { faer::sparse::SymbolicSparseRowMat::new_unchecked(nrows, self.n_cols, self.row_ptr, None, self.col_ind) };
         Csr::new(symbolic, self.values)
     }
 }
@@ -1608,6 +1665,17 @@ impl CsrRowBuilder {
 pub fn csr_row_iter(mat: &Csr, i: usize) -> impl Iterator<Item = (usize, f64)> + '_ {
     let r = mat.as_ref();
     r.col_indices_of_row(i).zip(r.values_of_row(i)).map(|(j, &v)| (j, v))
+}
+
+/// `iter.collect::<Vec<_>>()` with the capacity reserved up front
+/// (`cap` is an upper bound on the item count, e.g. the length of the
+/// slice a `filter` runs over) — a filtered iterator has no exact size
+/// hint, so a plain `collect` grows the vector step by step.
+#[inline]
+pub fn collect_with_capacity<T>(cap: usize, iter: impl Iterator<Item = T>) -> Vec<T> {
+    let mut v = Vec::with_capacity(cap);
+    v.extend(iter);
+    v
 }
 
 /// Row `i` of a faer [`Csr`] as an owned `(column, value)` list.
@@ -1797,6 +1865,23 @@ mod tests {
     /// The direct (no-duplicate) builder must reproduce faer's triplet
     /// builder exactly: same structure, same values, same explicit-zero
     /// dropping, unsorted rows sorted.
+    /// `CsrMat::from_flat` + `to_csc` must equal `CsrMat::from_rows` +
+    /// `CscMat::from_rows` on the same rows (the standard-form build relies
+    /// on this).
+    #[test]
+    fn csr_from_flat_and_to_csc_match_from_rows() {
+        let rows: Vec<Vec<(usize, f64)>> = vec![vec![(0, 1.0), (3, -2.0), (5, 1.0)], vec![], vec![(1, 0.5), (6, 1.0)], vec![(0, -1.0), (1, 2.0), (2, 3.0), (7, 1.0)]];
+        let mut offsets = vec![0usize];
+        let mut entries = Vec::new();
+        for r in &rows {
+            entries.extend_from_slice(r);
+            offsets.push(entries.len());
+        }
+        let flat = CsrMat::from_flat(8, offsets, entries);
+        assert_eq!(flat, CsrMat::from_rows(&rows, 8));
+        assert_eq!(flat.to_csc(), CscMat::from_rows(&rows, 8));
+    }
+
     #[test]
     fn csr_from_rows_direct_matches_faer_triplets() {
         let rows: Vec<Vec<(usize, f64)>> = vec![

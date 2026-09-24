@@ -166,10 +166,25 @@ pub struct ParallelColsResult {
 /// becomes parallel to another *after* this call's own folds take effect
 /// is left for the next call (`run_extended`'s own outer-round fixpoint
 /// loop already re-invokes every stage until nothing changes).
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn merge_parallel_columns(n: usize, a: &Csr, real_rows: &[Vec<(usize, f64)>], c: &[f64], lb: &[f64], ub: &[f64]) -> ParallelColsResult {
+    merge_parallel_columns_if_any(n, a, real_rows, c, lb, ub).unwrap_or_else(|| ParallelColsResult {
+        a: a.clone(),
+        c: c.to_vec(),
+        lb: lb.to_vec(),
+        ub: ub.to_vec(),
+        real_rows: real_rows.to_vec(),
+        substitutions: Vec::new(),
+    })
+}
+
+/// [`merge_parallel_columns`], returning `None` (nothing merged, the
+/// problem is unchanged) instead of a full copy of its inputs — the common
+/// case (most calls find nothing). `A`'s rows are read straight from the
+/// CSR slices and only copied out when something is actually merged.
+pub fn merge_parallel_columns_if_any(n: usize, a: &Csr, real_rows: &[Vec<(usize, f64)>], c: &[f64], lb: &[f64], ub: &[f64]) -> Option<ParallelColsResult> {
     let ar = a.as_ref();
     let n_a_rows = ar.nrows();
-    let a_rows: Vec<Vec<(usize, f64)>> = csr_rows(a);
 
     // One combined row-id space, local to this call: `a`'s own rows first,
     // `real_rows`'s multi-variable ones after — meaningless outside this
@@ -185,8 +200,8 @@ pub fn merge_parallel_columns(n: usize, a: &Csr, real_rows: &[Vec<(usize, f64)>]
     // per-column `sort_unstable_by_key` it used to run was (redundantly)
     // producing.
     let columns = CscMat::from_entry_stream(n_a_rows + real_rows.len(), n, |emit| {
-        for (i, row) in a_rows.iter().enumerate() {
-            for &(j, v) in row {
+        for i in 0..n_a_rows {
+            for (&j, &v) in ar.col_indices_of_row_raw(i).iter().zip(ar.values_of_row(i)) {
                 if v != 0.0 {
                     emit(i, j, v);
                 }
@@ -217,8 +232,13 @@ pub fn merge_parallel_columns(n: usize, a: &Csr, real_rows: &[Vec<(usize, f64)>]
         }
         hash
     };
+    // Hash chains instead of a `Vec` bucket per hash: `heads[hash]` is the
+    // newest group with that hash, `group_next[gid]` the next older one.
+    // At most one group can match a column's signature (groups are formed
+    // by exactly that match), so the scan order does not affect the result.
     let mut group_members: Vec<Vec<usize>> = Vec::new();
-    let mut heads: std::collections::HashMap<u64, Vec<usize>> = std::collections::HashMap::new();
+    let mut group_next: Vec<usize> = Vec::new();
+    let mut heads: std::collections::HashMap<u64, usize, std::hash::BuildHasherDefault<crate::presolve::redundancy::IdentityU64Hasher>> = std::collections::HashMap::default();
     for j in 0..n {
         let col = columns.col(j);
         // `lb[j]` must be finite (the fixed anchor `Substitution::apply`
@@ -231,20 +251,23 @@ pub fn merge_parallel_columns(n: usize, a: &Csr, real_rows: &[Vec<(usize, f64)>]
         }
         let inv = 1.0 / col[0].1;
         let hash = sig_hash(col, inv);
-        let bucket = heads.entry(hash).or_default();
+        let head = heads.get(&hash).copied().unwrap_or(usize::MAX);
         let mut found = None;
-        for &gid in bucket.iter() {
+        let mut gid = head;
+        while gid != usize::MAX {
             let rep = columns.col(group_members[gid][0]);
             let rep_inv = 1.0 / rep[0].1;
             if rep.len() == col.len() && rep.iter().zip(col).all(|(&(ri, rv), &(ci, cv))| ri == ci && (rv * rep_inv).to_bits() == (cv * inv).to_bits()) {
                 found = Some(gid);
                 break;
             }
+            gid = group_next[gid];
         }
         match found {
             Some(gid) => group_members[gid].push(j),
             None => {
-                bucket.push(group_members.len());
+                heads.insert(hash, group_members.len());
+                group_next.push(head);
                 group_members.push(vec![j]);
             }
         }
@@ -339,7 +362,7 @@ pub fn merge_parallel_columns(n: usize, a: &Csr, real_rows: &[Vec<(usize, f64)>]
     }
 
     if eliminated.is_empty() {
-        return ParallelColsResult { a: a.clone(), c: new_c, lb: new_lb, ub: new_ub, real_rows: real_rows.to_vec(), substitutions };
+        return None;
     }
 
     for &j in &eliminated {
@@ -348,10 +371,10 @@ pub fn merge_parallel_columns(n: usize, a: &Csr, real_rows: &[Vec<(usize, f64)>]
         new_ub[j] = 0.0;
     }
 
-    let new_a_rows: Vec<Vec<(usize, f64)>> = a_rows.into_iter().map(|row| row.into_iter().filter(|&(j, _)| !eliminated.contains(&j)).collect()).collect();
+    let new_a_rows: Vec<Vec<(usize, f64)>> = csr_rows(a).into_iter().map(|row| row.into_iter().filter(|&(j, _)| !eliminated.contains(&j)).collect()).collect();
     let new_real_rows: Vec<Vec<(usize, f64)>> = real_rows.iter().map(|row| row.iter().copied().filter(|&(j, _)| !eliminated.contains(&j)).collect()).collect();
 
-    ParallelColsResult { a: crate::sparse::csr_from_rows(&new_a_rows, n), c: new_c, lb: new_lb, ub: new_ub, real_rows: new_real_rows, substitutions }
+    Some(ParallelColsResult { a: crate::sparse::csr_from_rows(&new_a_rows, n), c: new_c, lb: new_lb, ub: new_ub, real_rows: new_real_rows, substitutions })
 }
 
 #[cfg(test)]

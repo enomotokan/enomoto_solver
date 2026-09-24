@@ -337,7 +337,7 @@ pub fn dulmage_mendelsohn_blocks_topological(adj: &[Vec<usize>], n_cols: usize) 
     if p != n_cols {
         return None;
     }
-    let debug = std::env::var("ENOMOTO_DEBUG_DM_SPLIT").is_ok();
+    let debug = env_str!("ENOMOTO_DEBUG_DM_SPLIT").is_some();
     let t0 = std::time::Instant::now();
     let match_row = max_bipartite_matching(adj, n_cols);
     let matching_us = t0.elapsed().as_micros();

@@ -61,6 +61,7 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
+#[cfg(test)]
 use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -146,7 +147,7 @@ pub fn reduce_equalities(a: &Csr, b: &[f64], n: usize, lb: &[f64], ub: &[f64]) -
     let deduped = dedupe_rows(rows);
     let nnz: usize = deduped.iter().map(|(row, _)| row.len()).sum();
     let density = nnz as f64 / (deduped.len() as f64 * n.max(1) as f64);
-    let keep = if density > DENSE_DENSITY_THRESHOLD {
+    let keep = if density > tunable!("ENOMOTO_T_DENSE_DENSITY_THRESHOLD", DENSE_DENSITY_THRESHOLD, f64) {
         drop_linearly_dependent(&deduped, n)
     } else {
         drop_linearly_dependent_sparse_blocked(&deduped, n, lb, ub)
@@ -161,6 +162,20 @@ pub fn reduce_equalities(a: &Csr, b: &[f64], n: usize, lb: &[f64], ub: &[f64]) -
     (csr_from_rows(&new_rows, n), new_b)
 }
 
+/// [`reduce_equalities`]' duplicate-row step alone ([`dedupe_rows`]), with
+/// no rank detection — what `run_extended` runs by default (see
+/// `ENOMOTO_REDEQ_MODE` there).
+pub fn dedupe_equalities(a: &Csr, b: &[f64], n: usize) -> (Csr, Vec<f64>) {
+    let p = a.nrows();
+    if p == 0 {
+        return (csr_from_rows(&[], n), Vec::new());
+    }
+    let rows: Vec<(Vec<(usize, f64)>, f64)> = (0..p).map(|i| (csr_row_vec(a, i), b[i])).collect();
+    let deduped = dedupe_rows(rows);
+    let (rows, rhs): (Vec<Vec<(usize, f64)>>, Vec<f64>) = deduped.into_iter().unzip();
+    (csr_from_rows(&rows, n), rhs)
+}
+
 /// Step 1: drops exact or scalar-multiple duplicate rows, by normalizing
 /// each row (and its RHS) by its first coefficient and hashing the bit
 /// pattern of the result. A structurally empty row (`0 = rhs`) is dropped
@@ -168,6 +183,68 @@ pub fn reduce_equalities(a: &Csr, b: &[f64], n: usize, lb: &[f64], ub: &[f64]) -
 /// `0 = 0` row; a nonzero RHS on an empty row is kept so the Farkas
 /// infeasibility certificate downstream still sees (and reports) it.
 fn dedupe_rows(rows: Vec<(Vec<(usize, f64)>, f64)>) -> Vec<(Vec<(usize, f64)>, f64)> {
+    // Same decisions as keying a `HashSet` on the normalized signature
+    // `[(j, bits(v/pivot))..., (usize::MAX, bits(rhs/pivot))]` (kept below
+    // as `dedupe_rows_reference` for the equivalence test), but without
+    // materializing each signature as its own `Vec` and SipHash-ing it:
+    // the signature is hashed on the fly (the same multiplicative mix
+    // `reduce_inequalities` uses) and a hash hit is confirmed by
+    // recomputing the kept row's signature — normalization is
+    // deterministic — and comparing it entry by entry.
+    #[inline]
+    fn mix(hash: u64, x: u64) -> u64 {
+        (hash.rotate_left(5) ^ x).wrapping_mul(0x517c_c1b7_2722_0a95)
+    }
+    let mut heads: HashMap<u64, usize, std::hash::BuildHasherDefault<IdentityU64Hasher>> = HashMap::with_capacity_and_hasher(rows.len(), Default::default());
+    // Per kept row: its inverse pivot and the next kept row in the same
+    // hash chain.
+    let mut chain: Vec<(f64, usize)> = Vec::with_capacity(rows.len());
+    let mut kept: Vec<(Vec<(usize, f64)>, f64)> = Vec::with_capacity(rows.len());
+    // `chain` is indexed like `kept` except for empty rows, which never
+    // enter a chain; `slot_of_chain[k]` maps chain entry -> `kept` index.
+    let mut slot_of_chain: Vec<usize> = Vec::with_capacity(rows.len());
+    for (row, rhs) in rows {
+        if row.is_empty() {
+            if rhs != 0.0 {
+                kept.push((row, rhs));
+            }
+            continue;
+        }
+        let pivot = row[0].1;
+        let inv = 1.0 / pivot;
+        let mut hash = row.len() as u64;
+        for &(j, v) in &row {
+            hash = mix(mix(hash, j as u64), (v * inv).to_bits());
+        }
+        let rhs_bits = (rhs * inv).to_bits();
+        hash = mix(hash, rhs_bits);
+        let head = heads.get(&hash).copied().unwrap_or(usize::MAX);
+        let mut cur = head;
+        let mut dup = false;
+        while cur != usize::MAX {
+            let (k_inv, next) = chain[cur];
+            let (k_row, k_rhs) = &kept[slot_of_chain[cur]];
+            if k_row.len() == row.len()
+                && (k_rhs * k_inv).to_bits() == rhs_bits
+                && k_row.iter().zip(&row).all(|(&(kj, kv), &(j, v))| kj == j && (kv * k_inv).to_bits() == (v * inv).to_bits())
+            {
+                dup = true;
+                break;
+            }
+            cur = next;
+        }
+        if !dup {
+            heads.insert(hash, chain.len());
+            chain.push((inv, head));
+            slot_of_chain.push(kept.len());
+            kept.push((row, rhs));
+        }
+    }
+    kept
+}
+
+#[cfg(test)]
+fn dedupe_rows_reference(rows: Vec<(Vec<(usize, f64)>, f64)>) -> Vec<(Vec<(usize, f64)>, f64)> {
     let mut seen: HashSet<Vec<(usize, u64)>> = HashSet::new();
     let mut kept = Vec::with_capacity(rows.len());
     for (row, rhs) in rows {
@@ -269,7 +346,7 @@ fn drop_linearly_dependent(rows: &[(Vec<(usize, f64)>, f64)], n: usize) -> Vec<u
     let mut keep = vec![true; p];
     for k in 0..rank_dim {
         let orig = fwd[k];
-        if r[(k, k)].abs() <= 1e-9 * col_norm(orig).max(1e-300) {
+        if r[(k, k)].abs() <= tunable!("ENOMOTO_T_REDEQ_QR_RANK_TOL", 1e-9, f64) * col_norm(orig).max(1e-300) {
             keep[orig] = false;
         }
     }
@@ -535,7 +612,7 @@ fn drop_linearly_dependent_sparse(rows_in: &[(Vec<(usize, f64)>, f64)], n: usize
         let Some(gmax) = gmax else {
             break; // every active column is entirely zero
         };
-        let threshold = PIVOT_STABILITY * gmax;
+        let threshold = tunable!("ENOMOTO_T_REDEQ_PIVOT_STABILITY", PIVOT_STABILITY, f64) * gmax;
 
         // Ascending-degree bucket scan over columns, exactly like
         // `find_best_pivot`, but a candidate is only ever recorded into
@@ -628,7 +705,7 @@ fn drop_linearly_dependent_sparse(rows_in: &[(Vec<(usize, f64)>, f64)], n: usize
 
         // Dependency test: is what's left of this row, at the point it
         // was chosen, negligible relative to its own *original* scale?
-        if pivot_val.abs() <= DEP_TOL * row_orig_norm[pi].max(1e-300) {
+        if pivot_val.abs() <= tunable!("ENOMOTO_T_REDEQ_DEP_TOL", DEP_TOL, f64) * row_orig_norm[pi].max(1e-300) {
             // Dependent: drop it (leave `keep[pi] = false`) without
             // eliminating — it contributes no independent structure to
             // scatter into the other rows. This branch never reaches the
@@ -899,7 +976,7 @@ const MIN_ROWS_FOR_BLOCK_DECOMPOSE: usize = 300;
 /// case): that reduction happens entirely from real columns within one
 /// block, so it is still caught correctly and entirely locally.
 fn drop_linearly_dependent_sparse_blocked(rows_in: &[(Vec<(usize, f64)>, f64)], n: usize, lb: &[f64], ub: &[f64]) -> Vec<usize> {
-    if rows_in.len() < MIN_ROWS_FOR_BLOCK_DECOMPOSE {
+    if rows_in.len() < tunable!("ENOMOTO_T_MIN_ROWS_FOR_BLOCK_DECOMPOSE", MIN_ROWS_FOR_BLOCK_DECOMPOSE, usize) {
         return drop_linearly_dependent_sparse(rows_in, n);
     }
     let components = dulmage_mendelsohn_blocks(rows_in, n, lb, ub);
@@ -955,7 +1032,7 @@ fn drop_linearly_dependent_sparse_blocked(rows_in: &[(Vec<(usize, f64)>, f64)], 
     };
 
     let total_nontrivial_rows: usize = nontrivial.iter().map(|c| c.len()).sum();
-    if nontrivial.len() > 1 && total_nontrivial_rows >= PARALLEL_DECOMPOSE_ROW_THRESHOLD {
+    if nontrivial.len() > 1 && total_nontrivial_rows >= tunable!("ENOMOTO_T_PARALLEL_DECOMPOSE_ROW_THRESHOLD", PARALLEL_DECOMPOSE_ROW_THRESHOLD, usize) {
         use rayon::prelude::*;
         kept.extend(nontrivial.par_iter().flat_map(|c| solve_component(c)).collect::<Vec<usize>>());
     } else {
@@ -1015,6 +1092,110 @@ mod tests {
             let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
             assert_eq!(bits(g_new.as_ref().values()), bits(g_ref.as_ref().values()), "trial {trial}");
             assert_eq!(bits(&h_new), bits(&h_ref), "trial {trial}");
+        }
+    }
+
+    /// On a canonical split `G`, `reduce_inequality_rows` must keep exactly
+    /// the real rows `reduce_inequalities` keeps on the materialized matrix,
+    /// and every bound row must survive.
+    #[test]
+    fn reduce_inequality_rows_matches_materialized_g() {
+        let mut state: u64 = 0x0bad_cafe_1234_5678;
+        let mut rnd = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut dropped_any = 0;
+        for trial in 0..300 {
+            let n = 5 + (trial % 4);
+            let mut rows: Vec<Vec<(usize, f64)>> = Vec::new();
+            let mut rhs: Vec<f64> = Vec::new();
+            let base = 2 + (rnd() % 5) as usize;
+            for _ in 0..base {
+                let mut row: Vec<(usize, f64)> = Vec::new();
+                while row.len() < 2 + (rnd() % 2) as usize {
+                    let j = (rnd() % n as u64) as usize;
+                    if row.iter().all(|&(k, _)| k != j) {
+                        row.push((j, ((rnd() % 7) as f64 - 3.0) * 0.5 + 0.25));
+                    }
+                }
+                row.sort_by_key(|&(j, _)| j);
+                rows.push(row);
+                rhs.push((rnd() % 11) as f64 - 5.0);
+            }
+            for _ in 0..base {
+                let src = (rnd() % base as u64) as usize;
+                let f = [1.0, 2.0, 0.5, 3.0, -1.0, 1.0 / 3.0][(rnd() % 6) as usize];
+                rows.push(rows[src].iter().map(|&(j, v)| (j, v * f)).collect());
+                rhs.push(rhs[src] * f + ((rnd() % 3) as f64 - 1.0));
+            }
+            let lb: Vec<f64> = (0..n).map(|_| [f64::NEG_INFINITY, 0.0, -1.0][(rnd() % 3) as usize]).collect();
+            let ub: Vec<f64> = (0..n).map(|_| [f64::INFINITY, 2.0, 5.0][(rnd() % 3) as usize]).collect();
+            assert!(crate::presolve::propagate::split_is_canonical(n, &rows, &lb, &ub));
+            let (g, h) = crate::presolve::propagate::rebuild_g_ref(n, &rows, &rhs, &lb, &ub);
+            let (g_mat, h_mat) = reduce_inequalities(&g, &h, n);
+            let keep = reduce_inequality_rows(&rows, &rhs);
+            if keep.is_some() {
+                dropped_any += 1;
+            }
+            let kept: Vec<usize> = (0..rows.len()).filter(|&i| keep.as_ref().is_none_or(|k| k[i])).collect();
+            let kept_rows: Vec<Vec<(usize, f64)>> = kept.iter().map(|&i| rows[i].clone()).collect();
+            let kept_rhs: Vec<f64> = kept.iter().map(|&i| rhs[i]).collect();
+            let (g_split, h_split) = crate::presolve::propagate::rebuild_g_ref(n, &kept_rows, &kept_rhs, &lb, &ub);
+            assert_eq!(g_split.as_ref().row_ptrs(), g_mat.as_ref().row_ptrs(), "trial {trial}");
+            assert_eq!(g_split.as_ref().col_indices(), g_mat.as_ref().col_indices(), "trial {trial}");
+            let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+            assert_eq!(bits(g_split.as_ref().values()), bits(g_mat.as_ref().values()), "trial {trial}");
+            assert_eq!(bits(&h_split), bits(&h_mat), "trial {trial}");
+        }
+        assert!(dropped_any > 50, "only {dropped_any} trials dropped a row");
+    }
+
+    /// `dedupe_rows` (on-the-fly u64 hash + chain) must keep exactly the
+    /// rows the `HashSet<Vec<_>>` reference keeps, in the same order.
+    #[test]
+    fn dedupe_rows_matches_reference_bit_for_bit() {
+        let mut state: u64 = 0x0fed_cba9_8765_4321;
+        let mut rnd = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for trial in 0..300 {
+            let n = 4 + (trial % 5);
+            let mut rows: Vec<(Vec<(usize, f64)>, f64)> = Vec::new();
+            let base_count = 2 + (rnd() % 6) as usize;
+            for _ in 0..base_count {
+                let len = (rnd() % 4) as usize;
+                let mut row: Vec<(usize, f64)> = Vec::new();
+                for _ in 0..len {
+                    let j = (rnd() % n as u64) as usize;
+                    if row.iter().all(|&(k, _)| k != j) {
+                        row.push((j, ((rnd() % 7) as f64 - 3.0) * 0.5 + 0.25));
+                    }
+                }
+                rows.push((row, [0.0, 1.0, -2.0, 0.5][(rnd() % 4) as usize]));
+            }
+            for _ in 0..base_count {
+                let src = (rnd() % base_count as u64) as usize;
+                let f = [1.0, 2.0, 0.5, 3.0, -1.0, 1.0 / 3.0][(rnd() % 6) as usize];
+                let (r, b) = rows[src].clone();
+                let db = [0.0, 0.0, 1.0][(rnd() % 3) as usize];
+                rows.push((r.iter().map(|&(j, v)| (j, v * f)).collect(), b * f + db));
+            }
+            let got = dedupe_rows(rows.clone());
+            let want = dedupe_rows_reference(rows);
+            assert_eq!(got.len(), want.len(), "trial {trial}");
+            for ((gr, gb), (wr, wb)) in got.iter().zip(&want) {
+                assert_eq!(gb.to_bits(), wb.to_bits(), "trial {trial}");
+                assert_eq!(gr.len(), wr.len(), "trial {trial}");
+                for (&(gj, gv), &(wj, wv)) in gr.iter().zip(wr) {
+                    assert_eq!((gj, gv.to_bits()), (wj, wv.to_bits()), "trial {trial}");
+                }
+            }
         }
     }
 
@@ -1338,8 +1519,17 @@ pub fn reduce_inequalities(g: &Csr, h: &[f64], n: usize) -> (Csr, Vec<f64>) {
         kept_h: f64,
         next: usize,
     }
-    let mut heads: HashMap<u64, usize, std::hash::BuildHasherDefault<IdentityU64Hasher>> = HashMap::default();
-    let mut classes: Vec<Class> = Vec::new();
+    // Single-entry rows (the box-bound rows `rebuild_g` emits, usually the
+    // bulk of `g`) are not hashed: their class chain starts at
+    // `unit_head[j]` instead, keyed by their only column (a class's
+    // signature still decides membership, exactly as for a hashed row —
+    // rows of different length never share a class, so splitting the
+    // lookup this way changes no decision). Only multi-entry rows go
+    // through `heads`, sized up front.
+    let multi_rows = (0..m).filter(|&i| gr.col_indices_of_row_raw(i).len() > 1).count();
+    let mut heads: HashMap<u64, usize, std::hash::BuildHasherDefault<IdentityU64Hasher>> = HashMap::with_capacity_and_hasher(multi_rows, Default::default());
+    let mut unit_head: Vec<usize> = vec![usize::MAX; n];
+    let mut classes: Vec<Class> = Vec::with_capacity(m);
     let mut keep = vec![true; m];
     let mut any_dropped = false;
     for idx in 0..m {
@@ -1351,9 +1541,12 @@ pub fn reduce_inequalities(g: &Csr, h: &[f64], n: usize) -> (Csr, Vec<f64>) {
         let hv = h[idx];
         let scale = vals[0].abs();
         let inv = 1.0 / scale;
+        let unit = cols.len() == 1;
         let mut hash = cols.len() as u64;
-        for (&j, &v) in cols.iter().zip(vals) {
-            hash = mix(mix(hash, j as u64), (v * inv).to_bits());
+        if !unit {
+            for (&j, &v) in cols.iter().zip(vals) {
+                hash = mix(mix(hash, j as u64), (v * inv).to_bits());
+            }
         }
         let normalized_h = hv * inv;
         let same_sig = |c: &Class| -> bool {
@@ -1365,7 +1558,11 @@ pub fn reduce_inequalities(g: &Csr, h: &[f64], n: usize) -> (Csr, Vec<f64>) {
             rc.iter().zip(rv).zip(cols.iter().zip(vals)).all(|((&rj, &rvv), (&j, &v))| rj == j && (rvv * c.rep_inv).to_bits() == (v * inv).to_bits())
         };
         let mut found: Option<usize> = None;
-        let head = heads.get(&hash).copied();
+        let head = if unit {
+            Some(unit_head[cols[0]]).filter(|&h| h != usize::MAX)
+        } else {
+            heads.get(&hash).copied()
+        };
         let mut cur = head.unwrap_or(usize::MAX);
         while cur != usize::MAX {
             if same_sig(&classes[cur]) {
@@ -1378,7 +1575,11 @@ pub fn reduce_inequalities(g: &Csr, h: &[f64], n: usize) -> (Csr, Vec<f64>) {
             None => {
                 let id = classes.len();
                 classes.push(Class { rep: idx, rep_inv: inv, kept_idx: idx, kept_h: normalized_h, next: head.unwrap_or(usize::MAX) });
-                heads.insert(hash, id);
+                if unit {
+                    unit_head[cols[0]] = id;
+                } else {
+                    heads.insert(hash, id);
+                }
             }
             Some(ci) => {
                 any_dropped = true;
@@ -1417,9 +1618,77 @@ pub fn reduce_inequalities(g: &Csr, h: &[f64], n: usize) -> (Csr, Vec<f64>) {
     (builder.finish(), kept_rows.iter().map(|&i| h[i]).collect())
 }
 
+/// [`reduce_inequalities`] on a split `G` (`propagate::GView::Split`:
+/// `rows` are the canonical multi-entry real rows, followed in `G` by one
+/// unit bound row per finite bound). Bound rows never share a class with
+/// each other (one `(j, +1)` and one `(j, -1)` row per column at most) nor
+/// with a multi-entry row, so none of them is ever dropped and the
+/// decisions among `rows` are exactly the ones [`reduce_inequalities`]
+/// makes on the materialized `G`. Returns the keep mask over `rows`, or
+/// `None` when nothing is dropped.
+pub fn reduce_inequality_rows(rows: &[Vec<(usize, f64)>], rhs: &[f64]) -> Option<Vec<bool>> {
+    #[inline]
+    fn mix(hash: u64, x: u64) -> u64 {
+        (hash.rotate_left(5) ^ x).wrapping_mul(0x517c_c1b7_2722_0a95)
+    }
+    struct Class {
+        rep: usize,
+        rep_inv: f64,
+        kept_idx: usize,
+        kept_h: f64,
+        next: usize,
+    }
+    let m = rows.len();
+    let mut heads: HashMap<u64, usize, std::hash::BuildHasherDefault<IdentityU64Hasher>> = HashMap::with_capacity_and_hasher(m, Default::default());
+    let mut classes: Vec<Class> = Vec::with_capacity(m);
+    let mut keep: Option<Vec<bool>> = None;
+    for (idx, row) in rows.iter().enumerate() {
+        debug_assert!(row.len() >= 2);
+        let inv = 1.0 / row[0].1.abs();
+        let mut hash = row.len() as u64;
+        for &(j, v) in row {
+            hash = mix(mix(hash, j as u64), (v * inv).to_bits());
+        }
+        let normalized_h = rhs[idx] * inv;
+        let same_sig = |c: &Class| -> bool {
+            let rep = &rows[c.rep];
+            rep.len() == row.len() && rep.iter().zip(row).all(|(&(rj, rv), &(j, v))| rj == j && (rv * c.rep_inv).to_bits() == (v * inv).to_bits())
+        };
+        let head = heads.get(&hash).copied();
+        let mut found: Option<usize> = None;
+        let mut cur = head.unwrap_or(usize::MAX);
+        while cur != usize::MAX {
+            if same_sig(&classes[cur]) {
+                found = Some(cur);
+                break;
+            }
+            cur = classes[cur].next;
+        }
+        match found {
+            None => {
+                let id = classes.len();
+                classes.push(Class { rep: idx, rep_inv: inv, kept_idx: idx, kept_h: normalized_h, next: head.unwrap_or(usize::MAX) });
+                heads.insert(hash, id);
+            }
+            Some(ci) => {
+                let keep = keep.get_or_insert_with(|| vec![true; m]);
+                let c = &mut classes[ci];
+                if normalized_h < c.kept_h {
+                    keep[c.kept_idx] = false;
+                    c.kept_idx = idx;
+                    c.kept_h = normalized_h;
+                } else {
+                    keep[idx] = false;
+                }
+            }
+        }
+    }
+    keep
+}
+
 /// Pass-through hasher for keys that already are well-mixed 64-bit hashes.
 #[derive(Default)]
-struct IdentityU64Hasher(u64);
+pub(crate) struct IdentityU64Hasher(u64);
 
 impl std::hash::Hasher for IdentityU64Hasher {
     fn finish(&self) -> u64 {

@@ -51,6 +51,7 @@
 use crate::sparse::{Csr, CsrRowBuilder, csr_from_rows, csr_row_iter, csr_row_vec};
 const EPS: f64 = 1e-9;
 
+#[allow(dead_code)] // the pipeline uses `PropagateSplit`; kept for tests / G-form callers
 pub struct PropagateResult {
     pub g: Csr,
     pub h: Vec<f64>,
@@ -141,10 +142,28 @@ pub fn bounds_inconsistent(n: usize, lb: &[f64], ub: &[f64]) -> bool {
     (0..n).any(|j| lb[j] > ub[j] + EPS)
 }
 
-pub fn propagate(n: usize, g: &Csr, h: &[f64], passes: usize) -> PropagateResult {
-    let (mut lb, mut ub, mut rows, mut rhs) = extract_bounds(n, g, h);
+/// [`propagate`]'s outcome without the re-folded `g`/`h` — what every
+/// caller inside the presolve pipeline actually reads (`run_extended`
+/// works on the split `lb`/`ub`/real-row form, `dualpropagate` only reads
+/// the propagated box), so building the CSR there was pure overhead.
+pub struct PropagateSplit {
+    pub lb: Vec<f64>,
+    pub ub: Vec<f64>,
+    pub real_rows: Vec<Vec<(usize, f64)>>,
+    pub real_rhs: Vec<f64>,
+    pub infeasible: bool,
+}
 
-    if bounds_inconsistent(n, &lb, &ub) {
+impl PropagateSplit {
+    fn infeasible() -> Self {
+        PropagateSplit { lb: Vec::new(), ub: Vec::new(), real_rows: Vec::new(), real_rhs: Vec::new(), infeasible: true }
+    }
+}
+
+#[allow(dead_code)]
+pub fn propagate(n: usize, g: &Csr, h: &[f64], passes: usize) -> PropagateResult {
+    let r = propagate_nog(n, g, h, passes);
+    if r.infeasible {
         return PropagateResult {
             g: csr_from_rows(&[], n),
             h: Vec::new(),
@@ -154,6 +173,30 @@ pub fn propagate(n: usize, g: &Csr, h: &[f64], passes: usize) -> PropagateResult
             real_rhs: Vec::new(),
             infeasible: true,
         };
+    }
+    let (new_g, new_h) = rebuild_g_ref(n, &r.real_rows, &r.real_rhs, &r.lb, &r.ub);
+    PropagateResult { g: new_g, h: new_h, lb: r.lb, ub: r.ub, real_rows: r.real_rows, real_rhs: r.real_rhs, infeasible: false }
+}
+
+/// [`propagate`] without rebuilding `g`/`h` at the end (same `lb`/`ub`/
+/// real rows, bit for bit).
+pub fn propagate_nog(n: usize, g: &Csr, h: &[f64], passes: usize) -> PropagateSplit {
+    let (lb, ub, rows, rhs) = extract_bounds(n, g, h);
+    propagate_split(n, lb, ub, rows, rhs, passes)
+}
+
+/// [`propagate_nog`] on an already split `G` — `lb`/`ub` and the real
+/// rows exactly as [`extract_bounds`] would return them for that `G`.
+pub fn propagate_split(n: usize, mut lb: Vec<f64>, mut ub: Vec<f64>, mut rows: Vec<Vec<(usize, f64)>>, mut rhs: Vec<f64>, passes: usize) -> PropagateSplit {
+    // `ENOMOTO_T_PROP_RELTOL` (default 0 = off, the historical absolute-EPS
+    // rule only): HiGHS-style, a finite bound is only tightened when the
+    // improvement also exceeds `reltol * (1 + |bound|)` — stops the
+    // geometric shaving of bounds over cyclic row structures that keeps
+    // the outer presolve rounds from reaching a fixpoint.
+    let reltol = tunable!("ENOMOTO_T_PROP_RELTOL", 0.0, f64);
+
+    if bounds_inconsistent(n, &lb, &ub) {
+        return PropagateSplit::infeasible();
     }
 
     let mut infeasible = false;
@@ -270,13 +313,13 @@ pub fn propagate(n: usize, g: &Csr, h: &[f64], passes: usize) -> PropagateResult
                 }
                 if aik > 0.0 {
                     let candidate = (b - l_s) / aik;
-                    if candidate < ub[k] - EPS {
+                    if candidate < ub[k] - EPS && (reltol == 0.0 || !ub[k].is_finite() || candidate < ub[k] - reltol * (1.0 + ub[k].abs())) {
                         ub[k] = candidate;
                         changed = true;
                     }
                 } else if aik < 0.0 {
                     let candidate = (b - l_s) / aik;
-                    if candidate > lb[k] + EPS {
+                    if candidate > lb[k] + EPS && (reltol == 0.0 || !lb[k].is_finite() || candidate > lb[k] + reltol * (1.0 + lb[k].abs())) {
                         lb[k] = candidate;
                         changed = true;
                     }
@@ -307,19 +350,57 @@ pub fn propagate(n: usize, g: &Csr, h: &[f64], passes: usize) -> PropagateResult
     }
 
     if infeasible {
-        return PropagateResult {
-            g: csr_from_rows(&[], n),
-            h: Vec::new(),
-            lb: Vec::new(),
-            ub: Vec::new(),
-            real_rows: Vec::new(),
-            real_rhs: Vec::new(),
-            infeasible: true,
-        };
+        return PropagateSplit::infeasible();
     }
 
-    let (new_g, new_h) = rebuild_g_ref(n, &rows, &rhs, &lb, &ub);
-    PropagateResult { g: new_g, h: new_h, lb, ub, real_rows: rows, real_rhs: rhs, infeasible: false }
+    PropagateSplit { lb, ub, real_rows: rows, real_rhs: rhs, infeasible: false }
+}
+
+/// `G x <= h` as a pass reads it: either a materialized CSR, or the split
+/// form `(rows, rhs, lb, ub)` standing for exactly
+/// `rebuild_g_ref(rows, rhs, lb, ub)` — only used when
+/// [`split_is_canonical`] holds, so that `extract_bounds` of that matrix
+/// would hand back `lb`/`ub`/`rows`/`rhs` themselves, bit for bit, and a
+/// pass can read the split form directly instead of building the CSR (the
+/// "bounds as rows" round trip, analysis/presolve_pipeline_20260924 C13).
+#[derive(Clone, Copy)]
+pub enum GView<'a> {
+    Mat { g: &'a Csr, h: &'a [f64] },
+    Split { rows: &'a [Vec<(usize, f64)>], rhs: &'a [f64], lb: &'a [f64], ub: &'a [f64] },
+}
+
+impl GView<'_> {
+    /// Row count of the matrix this view stands for.
+    pub fn nrows(&self) -> usize {
+        match *self {
+            GView::Mat { g, .. } => g.nrows(),
+            GView::Split { rows, lb, ub, .. } => rows.len() + lb.iter().filter(|v| v.is_finite()).count() + ub.iter().filter(|v| v.is_finite()).count(),
+        }
+    }
+
+    /// `extract_bounds_only` of the matrix this view stands for.
+    pub fn bounds(&self, n: usize) -> (std::borrow::Cow<'_, [f64]>, std::borrow::Cow<'_, [f64]>) {
+        match *self {
+            GView::Mat { g, h } => {
+                let (lb, ub) = extract_bounds_only(n, g, h);
+                (std::borrow::Cow::Owned(lb), std::borrow::Cow::Owned(ub))
+            }
+            GView::Split { lb, ub, .. } => (std::borrow::Cow::Borrowed(lb), std::borrow::Cow::Borrowed(ub)),
+        }
+    }
+}
+
+/// Whether `rebuild_g_ref(rows, _, lb, ub)` round-trips exactly through
+/// [`extract_bounds`]: every row has at least two entries, no stored zero
+/// and strictly increasing in-range columns (so `rebuild_g_ref` stores it
+/// verbatim and `extract_bounds` does not fold it into a bound), and every
+/// bound is finite or infinite on its own side (a `-inf` upper / `+inf`
+/// lower bound / NaN would emit no row and come back as the opposite
+/// infinity).
+pub fn split_is_canonical(n: usize, rows: &[Vec<(usize, f64)>], lb: &[f64], ub: &[f64]) -> bool {
+    lb.iter().all(|&v| v.is_finite() || v == f64::NEG_INFINITY)
+        && ub.iter().all(|&v| v.is_finite() || v == f64::INFINITY)
+        && rows.iter().all(|r| r.len() >= 2 && r.iter().all(|&(j, v)| v != 0.0 && j < n) && r.windows(2).all(|w| w[0].0 < w[1].0))
 }
 
 /// Rebuilds `G x <= h` from a set of "real" (multi-variable) rows plus a
@@ -466,11 +547,14 @@ pub fn propagate_equalities(a: &Csr, b: &[f64], lb: &mut [f64], ub: &mut [f64], 
     let ar = a.as_ref();
     // A finite bound is only replaced when the change exceeds `EPS`; an
     // infinite bound is always replaced by a finite one.
+    // `ENOMOTO_T_EQPROP_RELTOL` (default 0 = off): additionally require a
+    // finite bound to move by more than `reltol * (1 + |old|)`.
+    let reltol = tunable!("ENOMOTO_T_EQPROP_RELTOL", 0.0, f64);
     let improves = |old: f64, new: f64| -> bool {
         if !old.is_finite() {
             return true;
         }
-        (old - new).abs() > EPS
+        (old - new).abs() > EPS && (reltol == 0.0 || (old - new).abs() > reltol * (1.0 + old.abs()))
     };
     let mut res = EqPropagateResult { infeasible: false, forcing_rows: 0, fixed_cols: 0, tightened: 0 };
     let mut forcing_seen = vec![false; ar.nrows()];

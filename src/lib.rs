@@ -33,6 +33,31 @@
 //! of the module tree entirely (not even `mod`-declared here), purely for
 //! historical reference.
 
+/// Reads a numeric tuning knob from the environment once per process
+/// (cached in a `OnceLock`), falling back to `$default`. Used for A/B
+/// sweeps of tolerances and thresholds without a rebuild; the defaults are
+/// the tuned values.
+macro_rules! tunable {
+    ($name:literal, $default:expr, $t:ty) => {{
+        static V: std::sync::OnceLock<$t> = std::sync::OnceLock::new();
+        *V.get_or_init(|| std::env::var($name).ok().and_then(|s| s.parse::<$t>().ok()).unwrap_or($default))
+    }};
+}
+
+/// Reads an environment variable (a flag or a string/number setting) once
+/// per process, caching it in a `OnceLock` — `std::env::var` costs an
+/// environment lock + a linear `environ` scan + a `String` allocation, and
+/// the solve path consults ~100 `ENOMOTO_*` flags per LP (callgrind: ~10%
+/// of `afiro`'s instructions). Yields `Option<&'static str>`; like
+/// [`tunable!`], a value changed with `std::env::set_var` after the first
+/// read is not observed (set flags before the process starts).
+macro_rules! env_str {
+    ($name:literal) => {{
+        static V: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+        V.get_or_init(|| std::env::var($name).ok()).as_deref()
+    }};
+}
+
 mod graph;
 mod interior_point;
 mod mip;

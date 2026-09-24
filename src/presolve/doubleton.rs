@@ -23,8 +23,8 @@
 //! verbatim.
 
 use crate::presolve::colsingleton::{self, Substitution};
-use crate::presolve::propagate;
-use crate::sparse::{Csr, SparseAccum, csr_from_rows, csr_rows_pruned};
+use crate::presolve::propagate::{self, GView};
+use crate::sparse::{Csr, CsrRowBuilder, SparseAccum, csr_from_rows, csr_is_canonical, csr_rows_pruned};
 
 const TOL: f64 = 1e-9;
 
@@ -35,6 +35,82 @@ pub struct DoubletonResult {
     pub h: Vec<f64>,
     pub c: Vec<f64>,
     pub substitutions: Vec<Substitution>,
+    /// Set by the no-candidate fast path: `a`/`b`/`g`/`h`/`c` are exact
+    /// copies of the inputs (see [`unchanged_if_no_candidate`]).
+    #[allow(dead_code)] // read by tests; `eliminate_doubleton_equalities_view` returns `None` instead
+    pub unchanged: bool,
+}
+
+/// The no-substitution fast path of [`eliminate_doubleton_equalities`]:
+/// when no pruned `A` row is a doubleton candidate, and the full pass
+/// would only rebuild its inputs verbatim, returns copies of the inputs
+/// instead of rewriting every row and rebuilding both matrices.
+///
+/// With no substitution the full pass outputs `A`'s pruned rows with
+/// entries `|v| <= TOL` dropped, and `G` as its non-singleton rows (same
+/// filter) followed by one `(j, 1.0) <= ub_j` / `(j, -1.0) <= -lb_j` row per
+/// finite bound of `extract_bounds(G)`, in column order — exactly the shape
+/// `propagate::rebuild_g_ref` produces. So the copy is taken only when `A`
+/// and `G` are canonical CSR with every entry above `TOL`, and `G`'s
+/// singleton rows are exactly that trailing bound block (bit for bit,
+/// including `h`); anything else goes through the full pass.
+///
+/// Returns `true` when that copy would be exact (the caller keeps its
+/// inputs as they are). A split `G` ([`GView::Split`]) is canonical with
+/// exactly that bound block by construction, so only its real rows' `TOL`
+/// test remains.
+fn no_candidate(n: usize, a: &Csr, gv: GView<'_>) -> bool {
+    let ar = a.as_ref();
+    for i in 0..ar.nrows() {
+        let vals = ar.values_of_row(i);
+        // Same candidate test as the main loop's, on the pruned row (the
+        // first doubleton row always claims its variables, since nothing
+        // is claimed yet).
+        let mut nz = vals.iter().enumerate().filter(|&(_, &v)| v != 0.0);
+        if let (Some((p0, &v0)), Some((p1, &v1)), None) = (nz.next(), nz.next(), nz.next()) {
+            let cols = ar.col_indices_of_row_raw(i);
+            let big = if v0.abs() < v1.abs() { v1 } else { v0 };
+            if !(big.abs() < TOL || cols[p0] == cols[p1]) {
+                return false;
+            }
+        }
+    }
+    if !csr_is_canonical(a) || ar.values().iter().any(|&v| v.abs() <= TOL) {
+        return false;
+    }
+    let (g, h) = match gv {
+        GView::Mat { g, h } => (g, h),
+        GView::Split { rows, .. } => return rows.iter().all(|r| r.iter().all(|&(_, v)| v.abs() > TOL)),
+    };
+    if !csr_is_canonical(g) {
+        return false;
+    }
+    let gr = g.as_ref();
+    let m = gr.nrows();
+    let mut i = 0;
+    while i < m && gr.col_indices_of_row_raw(i).len() != 1 {
+        if gr.values_of_row(i).iter().any(|&v| v.abs() <= TOL) {
+            return false;
+        }
+        i += 1;
+    }
+    let (lb, ub) = propagate::extract_bounds_only(n, g, h);
+    for j in 0..n {
+        for (bound_finite, coef, rhs) in [(ub[j].is_finite(), 1.0f64, ub[j]), (lb[j].is_finite(), -1.0f64, -lb[j])] {
+            if !bound_finite {
+                continue;
+            }
+            if i >= m {
+                return false;
+            }
+            let cols = gr.col_indices_of_row_raw(i);
+            if cols.len() != 1 || cols[0] != j || gr.values_of_row(i)[0].to_bits() != coef.to_bits() || h[i].to_bits() != rhs.to_bits() {
+                return false;
+            }
+            i += 1;
+        }
+    }
+    i == m
 }
 
 /// Rewrites `row`/`rhs` in place for every eliminated variable `row`
@@ -57,7 +133,7 @@ fn rewrite_row(accum: &mut SparseAccum, row: &[(usize, f64)], rhs: f64, subs: &[
     // minus entries at or below `TOL` — each `accum.add` is the first
     // write to its slot, so the stored value is `v` exactly.
     if row.windows(2).all(|w| w[0].0 < w[1].0) && row.iter().all(|&(j, _)| by_var[j].is_none()) {
-        return (row.iter().copied().filter(|&(_, v)| v.abs() > TOL).collect(), rhs);
+        return (crate::sparse::collect_with_capacity(row.len(), row.iter().copied().filter(|&(_, v)| v.abs() > TOL)), rhs);
     }
     // The surviving terms land in the caller's shared sparse accumulator
     // rather than a `BTreeMap` built per rewritten row — see
@@ -86,12 +162,36 @@ fn rewrite_row(accum: &mut SparseAccum, row: &[(usize, f64)], rhs: f64, subs: &[
 /// only claimed as "already eliminated" within this same pass (so two
 /// doubleton rows never both try to eliminate it), not re-checked after
 /// rewriting (mirrors `colsingleton`'s own single-pass scope).
+#[allow(dead_code)] // `run_extended` calls the `GView` form directly
 pub fn eliminate_doubleton_equalities(n: usize, a: &Csr, b: &[f64], g: &Csr, h: &[f64], c: &[f64]) -> DoubletonResult {
+    match eliminate_doubleton_equalities_view(n, a, b, GView::Mat { g, h }, c) {
+        Some(r) => r,
+        None => DoubletonResult { a: a.clone(), b: b.to_vec(), g: g.clone(), h: h.to_vec(), c: c.to_vec(), substitutions: Vec::new(), unchanged: true },
+    }
+}
+
+/// [`eliminate_doubleton_equalities`] on either form of `G`; `None` when
+/// the pass would hand back its inputs unchanged (no copy is made).
+pub fn eliminate_doubleton_equalities_view(n: usize, a: &Csr, b: &[f64], gv: GView<'_>, c: &[f64]) -> Option<DoubletonResult> {
+    if no_candidate(n, a, gv) {
+        return None;
+    }
+    Some(eliminate_doubleton_equalities_full(n, a, b, gv, c))
+}
+
+fn eliminate_doubleton_equalities_full(n: usize, a: &Csr, b: &[f64], gv: GView<'_>, c: &[f64]) -> DoubletonResult {
     let a_rows: Vec<Vec<(usize, f64)>> = csr_rows_pruned(a);
     // One sparse accumulator for every `rewrite_row` call below.
     let mut accum = SparseAccum::new(n);
 
-    let (lb, ub, real_g_rows, real_g_rhs) = propagate::extract_bounds(n, g, h);
+    let extracted;
+    let (lb, ub, real_g_rows, real_g_rhs): (&[f64], &[f64], &[Vec<(usize, f64)>], &[f64]) = match gv {
+        GView::Mat { g, h } => {
+            extracted = propagate::extract_bounds(n, g, h);
+            (&extracted.0, &extracted.1, &extracted.2, &extracted.3)
+        }
+        GView::Split { rows, rhs, lb, ub } => (lb, ub, rows, rhs),
+    };
 
     // `subs` in true discovery (row-iteration) order — required for
     // correct recovery later (a *different* round's substitution can
@@ -192,10 +292,10 @@ pub fn eliminate_doubleton_equalities(n: usize, a: &Csr, b: &[f64], g: &Csr, h: 
         new_b.push(new_rhs);
     }
 
-    let mut new_g_rows = Vec::with_capacity(real_g_rows.len() + extra_g_rows.len());
-    let mut new_h = Vec::with_capacity(real_g_rhs.len() + extra_h.len());
-    for (row, rhs) in real_g_rows.into_iter().zip(real_g_rhs) {
-        let (new_row, new_rhs) = rewrite_row(&mut accum, &row, rhs, &subs, &by_var);
+    let mut new_g_rows = Vec::with_capacity(real_g_rows.len());
+    let mut new_h = Vec::with_capacity(real_g_rhs.len() + 2 * n + extra_h.len());
+    for (row, &rhs) in real_g_rows.iter().zip(real_g_rhs) {
+        let (new_row, new_rhs) = rewrite_row(&mut accum, row, rhs, &subs, &by_var);
         new_g_rows.push(new_row);
         new_h.push(new_rhs);
     }
@@ -203,22 +303,34 @@ pub fn eliminate_doubleton_equalities(n: usize, a: &Csr, b: &[f64], g: &Csr, h: 
     // single-variable rows exactly as `build_a_g`/`propagate` do — `lb`/
     // `ub` themselves are untouched by this pass (only `subs`' own
     // variables lose their explicit bound rows, replaced by the
-    // `extra_g_rows` derived above).
-    for j in 0..n {
-        if by_var[j].is_some() {
-            continue;
+    // `extra_g_rows` derived above). `G` is
+    // `csr_from_rows([new_g_rows, bound rows, extra_g_rows])`, assembled in
+    // a `CsrRowBuilder` without a `Vec` per bound row (same matrix; the
+    // rare row the builder rejects falls back to exactly that call).
+    let bound_rows = || (0..n).filter(|&j| by_var[j].is_none()).flat_map(|j| [(ub[j].is_finite(), j, 1.0, ub[j]), (lb[j].is_finite(), j, -1.0, -lb[j])]).filter(|t| t.0);
+    let nnz: usize = new_g_rows.iter().chain(&extra_g_rows).map(|r| r.len()).sum::<usize>() + 2 * n;
+    let mut builder = CsrRowBuilder::with_capacity(n, new_g_rows.len() + 2 * n + extra_g_rows.len(), nnz);
+    let mut direct = new_g_rows.iter().all(|r| builder.push_row(r));
+    if direct {
+        for (_, j, v, rhs) in bound_rows() {
+            builder.push_singleton(j, v);
+            new_h.push(rhs);
         }
-        if ub[j].is_finite() {
-            new_g_rows.push(vec![(j, 1.0)]);
-            new_h.push(ub[j]);
-        }
-        if lb[j].is_finite() {
-            new_g_rows.push(vec![(j, -1.0)]);
-            new_h.push(-lb[j]);
+        direct = extra_g_rows.iter().all(|r| builder.push_row(r));
+    } else {
+        for (_, _, _, rhs) in bound_rows() {
+            new_h.push(rhs);
         }
     }
-    new_g_rows.extend(extra_g_rows);
     new_h.extend(extra_h);
+    let new_g = if direct {
+        builder.finish()
+    } else {
+        let mut all = new_g_rows;
+        all.extend(bound_rows().map(|(_, j, v, _)| vec![(j, v)]));
+        all.extend(extra_g_rows);
+        csr_from_rows(&all, n)
+    };
 
     let mut new_c = c.to_vec();
     for sub in &subs {
@@ -234,10 +346,11 @@ pub fn eliminate_doubleton_equalities(n: usize, a: &Csr, b: &[f64], g: &Csr, h: 
     DoubletonResult {
         a: csr_from_rows(&new_a_rows, n),
         b: new_b,
-        g: csr_from_rows(&new_g_rows, n),
+        g: new_g,
         h: new_h,
         c: new_c,
         substitutions: subs,
+        unchanged: false,
     }
 }
 
@@ -245,6 +358,64 @@ pub fn eliminate_doubleton_equalities(n: usize, a: &Csr, b: &[f64], g: &Csr, h: 
 mod tests {
     use super::*;
     use crate::sparse::csr_row_vec;
+
+    /// The no-candidate fast path must return exactly what the full pass
+    /// would (bit for bit), whenever it fires.
+    #[test]
+    fn no_candidate_fast_path_matches_full_pass() {
+        let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut rnd = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut fired = 0;
+        for trial in 0..400 {
+            let n = 4 + (trial % 4);
+            let mut rand_row = |len: usize, rnd: &mut dyn FnMut() -> u64| -> Vec<(usize, f64)> {
+                let mut row: Vec<(usize, f64)> = Vec::new();
+                for _ in 0..len {
+                    let j = (rnd() % n as u64) as usize;
+                    if row.iter().all(|&(k, _)| k != j) {
+                        let v = [1.0, -2.0, 0.5, 3.0, 1e-12][(rnd() % 5) as usize];
+                        row.push((j, v));
+                    }
+                }
+                row.sort_by_key(|&(k, _)| k);
+                row
+            };
+            let a_rows: Vec<Vec<(usize, f64)>> = (0..(1 + rnd() % 3)).map(|_| { let l = [1usize, 3, 3, 2][(rnd() % 4) as usize]; rand_row(l, &mut rnd) }).collect();
+            let g_real: Vec<Vec<(usize, f64)>> = (0..(rnd() % 3)).map(|_| { let l = 2 + (rnd() % 2) as usize; rand_row(l, &mut rnd) }).collect();
+            let g_rhs: Vec<f64> = g_real.iter().map(|_| (rnd() % 5) as f64).collect();
+            let lb: Vec<f64> = (0..n).map(|_| [f64::NEG_INFINITY, 0.0, -1.0][(rnd() % 3) as usize]).collect();
+            let ub: Vec<f64> = (0..n).map(|_| [f64::INFINITY, 2.0, 5.0][(rnd() % 3) as usize]).collect();
+            let (g, h) = propagate::rebuild_g_ref(n, &g_real, &g_rhs, &lb, &ub);
+            let a = csr_from_rows(&a_rows, n);
+            let b: Vec<f64> = a_rows.iter().map(|_| (rnd() % 4) as f64).collect();
+            let c: Vec<f64> = (0..n).map(|_| (rnd() % 3) as f64).collect();
+            if !no_candidate(n, &a, GView::Mat { g: &g, h: &h }) {
+                continue;
+            }
+            let fast = eliminate_doubleton_equalities(n, &a, &b, &g, &h, &c);
+            assert!(fast.unchanged);
+            // The split form of the same `G` must take the fast path too.
+            assert!(no_candidate(n, &a, GView::Split { rows: &g_real, rhs: &g_rhs, lb: &lb, ub: &ub }) || !propagate::split_is_canonical(n, &g_real, &lb, &ub), "trial {trial}");
+            fired += 1;
+            let full = eliminate_doubleton_equalities_full(n, &a, &b, GView::Mat { g: &g, h: &h }, &c);
+            assert!(full.substitutions.is_empty(), "trial {trial}");
+            let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+            for (x, y) in [(&fast.a, &full.a), (&fast.g, &full.g)] {
+                assert_eq!(x.as_ref().row_ptrs(), y.as_ref().row_ptrs(), "trial {trial}");
+                assert_eq!(x.as_ref().col_indices(), y.as_ref().col_indices(), "trial {trial}");
+                assert_eq!(bits(x.as_ref().values()), bits(y.as_ref().values()), "trial {trial}");
+            }
+            assert_eq!(bits(&fast.b), bits(&full.b));
+            assert_eq!(bits(&fast.h), bits(&full.h));
+            assert_eq!(bits(&fast.c), bits(&full.c));
+        }
+        assert!(fired > 20, "fast path fired only {fired} times");
+    }
 
     #[test]
     fn eliminates_larger_coefficient_variable_and_rewrites_other_rows() {
