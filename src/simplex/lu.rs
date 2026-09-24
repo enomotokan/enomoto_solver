@@ -1706,13 +1706,41 @@ pub struct GpScratch {
     stack: Vec<usize>,
     seeds: Vec<usize>,
     reach: Vec<usize>,
+    /// C5: set by the caller before a sparse entering-column FTRAN
+    /// (`solve_sparse_into_capture` / `_pair_capture` / `_triple_capture`)
+    /// to run that vector's `U` stage hyper-sparsely — see
+    /// [`FtLu::u_solve_hyper`]. Read by nothing else; `false` by default.
+    pub u_hyper: bool,
+    /// The hyper-sparse `U` stage's own DFS state: marks over slots, the
+    /// DFS stack, every slot reached (= every slot that can be nonzero
+    /// after `U`), and the reached `u_seq` positions to apply.
+    u_marks: EpochMarks,
+    u_stack: Vec<usize>,
+    u_list: Vec<usize>,
+    u_pos: Vec<usize>,
 }
 
 impl GpScratch {
     pub fn new(m: usize) -> Self {
-        GpScratch { visited: EpochMarks::new(m), stack: Vec::new(), seeds: Vec::new(), reach: Vec::new() }
+        GpScratch {
+            visited: EpochMarks::new(m),
+            stack: Vec::new(),
+            seeds: Vec::new(),
+            reach: Vec::new(),
+            u_hyper: false,
+            u_marks: EpochMarks::new(m),
+            u_stack: Vec::new(),
+            u_list: Vec::new(),
+            u_pos: Vec::new(),
+        }
     }
 }
+
+/// C5 hyper-sparse `U` stage: give up (and take the plain full scan) once
+/// the DFS has reached more than this fraction of the `m` slots — past it,
+/// sorting the reach and scattering the result by list stop paying for
+/// themselves (HiGHS's own `kHyperFtranU` is `0.10`).
+const U_HYPER_ABORT_FRACTION: f64 = 0.25;
 
 #[derive(Clone)]
 pub struct LuFactors {
@@ -4014,6 +4042,13 @@ impl StepCapture {
         }
     }
 
+    /// C5 for the `tau` channel: whether the next FTRAN that consumes this
+    /// capture runs `tau`'s `U` stage hyper-sparsely (see
+    /// [`FtLu::u_solve_hyper`]; seeded from this capture's own `L` reach).
+    pub fn set_u_hyper(&mut self, on: bool) {
+        self.gp.u_hyper = on;
+    }
+
     /// Takes the capture for one FTRAN: `Some(steps, gp)` when valid.
     #[inline]
     fn take(cap: Option<&mut StepCapture>) -> Option<&mut StepCapture> {
@@ -4755,6 +4790,13 @@ impl FtLu {
     /// practice — the DFS/reach-tracking overhead this function's outer
     /// loop is cheap enough to not need in the first place stopped paying
     /// for itself. See this file's own history if revisiting this.)
+    ///
+    /// (C5, third form, opt-in: [`Self::u_solve_hyper`] — gated per channel
+    /// on the caller's result-density average (`ENOMOTO_FTRAN_U_HYPER`,
+    /// `ENOMOTO_FTRAN_U_HYPER_TAU`), aborting to this scan past
+    /// `ENOMOTO_T_U_HYPER_ABORT` of `m`, and replacing the `O(m)` output
+    /// permutation with a list scatter as well — the O(m) passes, not the
+    /// eta loop alone, are what a sparse FTRAN is bound by.)
     fn u_solve_into(&self, x: &mut [f64]) {
         // CLOCK-trigger accounting (`Self::tick`'s own docs): every eta
         // pays the `O(1)` division unconditionally (the `for` loop itself
@@ -4810,6 +4852,107 @@ impl FtLu {
         // Singletons last (see `singles`' own docs): every write into their
         // slots has happened by now. Their divisions (same zero-skip as the
         // loop above) are done by `permute_out`, reading `single_piv`.
+    }
+
+    /// C5: the `U` stage of one FTRAN vector, restricted to the etas its
+    /// nonzeros can reach. `x` is the post-`L`/`R` vector; its nonzeros lie
+    /// within `gp.reach` (the `L` stage's Gilbert-Peierls reach set) plus
+    /// the `R` etas' slots. A DFS from the nonzero ones over `U`'s eta
+    /// graph (slot `p` -> the rows of its eta's off-diagonal entries)
+    /// collects every slot that can become nonzero into `gp.u_list`; the
+    /// reached `u_seq` etas are then applied in **descending `u_seq`
+    /// position** — exactly the subsequence of [`Self::u_solve_into`]'s
+    /// reverse scan that can do anything, with the same zero skip, so every
+    /// value (and the tick count) is bit-identical: an eta outside the
+    /// reach sees `x[p] == 0.0` in the full scan and is skipped there too,
+    /// and applying the rest in the scan's own order keeps each entry's
+    /// accumulation order (a DFS topological order alone would not).
+    /// Sorting is `O(r log r)` in the reach size `r`, against the full
+    /// scan's `O(m)`.
+    ///
+    /// Returns `false` without touching `x` (the caller then runs the full
+    /// scan) when the reach passes [`U_HYPER_ABORT_FRACTION`] of `m`, or
+    /// when `U` holds a dense-arm eta (whose `axpy` spans all of `x`).
+    fn u_solve_hyper(&self, x: &mut [f64], gp: &mut GpScratch) -> bool {
+        let m = self.base.m;
+        if !self.u_seq.dense.is_empty() {
+            return false;
+        }
+        let limit = (tunable!("ENOMOTO_T_U_HYPER_ABORT", U_HYPER_ABORT_FRACTION, f64) * m as f64) as usize;
+        gp.u_marks.begin();
+        gp.u_list.clear();
+        gp.u_pos.clear();
+        let n_reach = gp.reach.len();
+        let n_r = self.r_etas.n_headers();
+        for i in 0..n_reach + n_r {
+            let seed = if i < n_reach { gp.reach[i] } else { self.r_etas.key[i - n_reach] as usize };
+            if x[seed] == 0.0 || gp.u_marks.is_marked(seed) {
+                continue;
+            }
+            gp.u_marks.mark(seed);
+            gp.u_stack.push(seed);
+            while let Some(node) = gp.u_stack.pop() {
+                gp.u_list.push(node);
+                if gp.u_list.len() > limit {
+                    gp.u_stack.clear();
+                    return false;
+                }
+                let k = self.slot_pos[node];
+                if k == usize::MAX {
+                    continue;
+                }
+                gp.u_pos.push(k);
+                let (idx, _) = self.u_seq.seg(k);
+                for &r in idx {
+                    let r = r as usize;
+                    if !gp.u_marks.is_marked(r) {
+                        gp.u_marks.mark(r);
+                        gp.u_stack.push(r);
+                    }
+                }
+            }
+        }
+        gp.u_pos.sort_unstable();
+        for &k in gp.u_pos.iter().rev() {
+            let p = self.u_seq.key[k] as usize;
+            if x[p] == 0.0 {
+                continue;
+            }
+            x[p] /= self.u_seq.pivot[k];
+            let xp = x[p];
+            self.add_tick(self.u_seq.nnz(k) as u64);
+            self.u_seq.axpy(k, -xp, x);
+        }
+        true
+    }
+
+    /// [`Self::permute_out`] over the slots in `list` only (every other
+    /// slot of `scratch` is zero): `out` is cleared by a `fill` (a
+    /// `memset`, far cheaper than `permute_out`'s per-entry loop) and the
+    /// listed values are scattered with the same singleton division.
+    /// Only used with `u_zero_skip` on and no tiny-value dropping.
+    fn permute_list(&self, scratch: &[f64], out: &mut [f64], list: &[usize]) -> usize {
+        out.fill(0.0);
+        let mut nnz = 0usize;
+        let col_perm = &self.base.col_perm;
+        let piv = &self.single_piv;
+        for &s in list {
+            let mut v = scratch[s];
+            let d = piv[s];
+            if d != 0.0 && v != 0.0 {
+                v /= d;
+            }
+            out[col_perm[s]] = v;
+            nnz += (v != 0.0) as usize;
+        }
+        nnz
+    }
+
+    /// Whether a sparse FTRAN may take the hyper-sparse `U` stage at all
+    /// (on top of the caller's own `gp.u_hyper` request).
+    #[inline]
+    fn u_hyper_ok(&self, gp: &GpScratch) -> bool {
+        gp.u_hyper && self.u_zero_skip && tiny_drop() <= 0.0
     }
 
     /// `R_k^{-1} ... R_1^{-1} L^{-1}` applied to a vector in original row
@@ -4920,14 +5063,20 @@ impl FtLu {
         // `L` stage (+ `ftran_through_l_and_r_into`'s own flat `m` tick,
         // once per vector — also when `rhs_b`'s `L` stage takes the GP path,
         // so the CLOCK trigger is unchanged).
-        if let Some(c) = rho_cap {
+        let hyper_b = if let Some(c) = rho_cap {
             self.base.l_solve_into(&self.l_active, rhs_a, scratch_a);
             self.base.l_solve_steps_into(rhs_b, &c.steps, scratch_b, &mut c.gp);
+            if self.u_hyper_ok(&c.gp) {
+                Some(&mut c.gp)
+            } else {
+                None
+            }
         } else {
             self.base.l_solve_into_pair(&self.l_active, rhs_a, rhs_b, scratch_a, scratch_b);
-        }
+            None
+        };
         self.add_tick(2 * m);
-        let (na, nb) = self.pair_r_u_permute(scratch_a, scratch_b, out_a, out_b, a_tilde_out);
+        let (na, nb) = self.pair_r_u_permute(scratch_a, scratch_b, out_a, out_b, a_tilde_out, None, hyper_b);
         (na, nb)
     }
 
@@ -4959,12 +5108,23 @@ impl FtLu {
         }
         self.base.l_solve_sparse_into(rhs_a, scratch_a, gp);
         self.add_tick(gp.reach.len() as u64);
-        match rho_cap {
-            Some(c) => self.base.l_solve_steps_into(rhs_b, &c.steps, scratch_b, &mut c.gp),
-            None => self.base.l_solve_into(&self.l_active, rhs_b, scratch_b),
-        }
+        let hyper_b = match rho_cap {
+            Some(c) => {
+                self.base.l_solve_steps_into(rhs_b, &c.steps, scratch_b, &mut c.gp);
+                if self.u_hyper_ok(&c.gp) {
+                    Some(&mut c.gp)
+                } else {
+                    None
+                }
+            }
+            None => {
+                self.base.l_solve_into(&self.l_active, rhs_b, scratch_b);
+                None
+            }
+        };
         self.add_tick(self.base.m as u64);
-        let (na, nb) = self.pair_r_u_permute(scratch_a, scratch_b, out_a, out_b, a_tilde_out);
+        let hyper = if self.u_hyper_ok(gp) { Some(gp) } else { None };
+        let (na, nb) = self.pair_r_u_permute(scratch_a, scratch_b, out_a, out_b, a_tilde_out, hyper, hyper_b);
         scratch_a.fill(0.0);
         (na, nb)
     }
@@ -4998,14 +5158,20 @@ impl FtLu {
             return (na, nb, nc);
         }
         let m = self.base.m as u64;
-        if let Some(c) = rho_cap {
+        let hyper_b = if let Some(c) = rho_cap {
             self.base.l_solve_into_pair(&self.l_active, rhs_a, rhs_c, scratch_a, scratch_c);
             self.base.l_solve_steps_into(rhs_b, &c.steps, scratch_b, &mut c.gp);
+            if self.u_hyper_ok(&c.gp) {
+                Some(&mut c.gp)
+            } else {
+                None
+            }
         } else {
             self.base.l_solve_into_triple(&self.l_active, rhs_a, rhs_b, rhs_c, scratch_a, scratch_b, scratch_c);
-        }
+            None
+        };
         self.add_tick(3 * m);
-        self.triple_r_u_permute(scratch_a, scratch_b, scratch_c, out_a, out_b, out_c, a_tilde_out)
+        self.triple_r_u_permute(scratch_a, scratch_b, scratch_c, out_a, out_b, out_c, a_tilde_out, None, hyper_b)
     }
 
     /// [`Self::solve_sparse_into_pair_capture`] plus the dense third
@@ -5036,14 +5202,21 @@ impl FtLu {
         }
         self.base.l_solve_sparse_into(rhs_a, scratch_a, gp);
         self.add_tick(gp.reach.len() as u64);
-        if let Some(c) = rho_cap {
+        let hyper_b = if let Some(c) = rho_cap {
             self.base.l_solve_into(&self.l_active, rhs_c, scratch_c);
             self.base.l_solve_steps_into(rhs_b, &c.steps, scratch_b, &mut c.gp);
+            if self.u_hyper_ok(&c.gp) {
+                Some(&mut c.gp)
+            } else {
+                None
+            }
         } else {
             self.base.l_solve_into_pair(&self.l_active, rhs_b, rhs_c, scratch_b, scratch_c);
-        }
+            None
+        };
         self.add_tick(2 * self.base.m as u64);
-        let r = self.triple_r_u_permute(scratch_a, scratch_b, scratch_c, out_a, out_b, out_c, a_tilde_out);
+        let hyper = if self.u_hyper_ok(gp) { Some(gp) } else { None };
+        let r = self.triple_r_u_permute(scratch_a, scratch_b, scratch_c, out_a, out_b, out_c, a_tilde_out, hyper, hyper_b);
         scratch_a.fill(0.0);
         r
     }
@@ -5059,6 +5232,8 @@ impl FtLu {
         out_b: &mut [f64],
         out_c: &mut [f64],
         a_tilde_out: &mut [f64],
+        hyper_a: Option<&mut GpScratch>,
+        hyper_b: Option<&mut GpScratch>,
     ) -> (usize, usize, usize) {
         let m = self.base.m as u64;
         for reta in self.r_etas.iter() {
@@ -5072,15 +5247,40 @@ impl FtLu {
         }
         a_tilde_out.copy_from_slice(scratch_a);
         self.add_tick(3 * m);
+        // C5: vector `a`'s `U` stage alone, hyper-sparsely (the vectors
+        // are independent, so taking `a` out of the fused scan changes no
+        // operation of `b`/`c`).
+        let a_list = match hyper_a {
+            Some(gp) => {
+                if self.u_solve_hyper(scratch_a, gp) {
+                    Some(&gp.u_list)
+                } else {
+                    None
+                }
+            }
+            None => None,
+        };
+        let a_in_scan = a_list.is_none();
+        let b_list = match hyper_b {
+            Some(gp) => {
+                if self.u_solve_hyper(scratch_b, gp) {
+                    Some(&gp.u_list)
+                } else {
+                    None
+                }
+            }
+            None => None,
+        };
+        let b_in_scan = b_list.is_none();
         for eta in self.u_seq.iter().rev() {
             let p = eta.slot;
-            if scratch_a[p] != 0.0 {
+            if a_in_scan && scratch_a[p] != 0.0 {
                 scratch_a[p] /= self.u_seq.pivot[eta.k];
                 let xp = scratch_a[p];
                 self.add_tick(self.u_seq.nnz(eta.k) as u64);
                 self.u_seq.axpy(eta.k, -xp, scratch_a);
             }
-            if scratch_b[p] != 0.0 {
+            if b_in_scan && scratch_b[p] != 0.0 {
                 scratch_b[p] /= self.u_seq.pivot[eta.k];
                 let xp = scratch_b[p];
                 self.add_tick(self.u_seq.nnz(eta.k) as u64);
@@ -5094,8 +5294,14 @@ impl FtLu {
             }
         }
         // Singleton divisions: done by `permute_out` (see `single_piv`).
-        let na = self.permute_out(scratch_a, out_a);
-        let nb = self.permute_out(scratch_b, out_b);
+        let na = match a_list {
+            Some(list) => self.permute_list(scratch_a, out_a, list),
+            None => self.permute_out(scratch_a, out_a),
+        };
+        let nb = match b_list {
+            Some(list) => self.permute_list(scratch_b, out_b, list),
+            None => self.permute_out(scratch_b, out_b),
+        };
         let nc = self.permute_out(scratch_c, out_c);
         (na, nb, nc)
     }
@@ -5104,7 +5310,16 @@ impl FtLu {
     /// `a_tilde` capture (vector `a` only), `U` (`u_zero_skip` form), and
     /// the output permutation, each applied per vector exactly as the
     /// single-vector paths apply it.
-    fn pair_r_u_permute(&self, scratch_a: &mut [f64], scratch_b: &mut [f64], out_a: &mut [f64], out_b: &mut [f64], a_tilde_out: &mut [f64]) -> (usize, usize) {
+    fn pair_r_u_permute(
+        &self,
+        scratch_a: &mut [f64],
+        scratch_b: &mut [f64],
+        out_a: &mut [f64],
+        out_b: &mut [f64],
+        a_tilde_out: &mut [f64],
+        hyper_a: Option<&mut GpScratch>,
+        hyper_b: Option<&mut GpScratch>,
+    ) -> (usize, usize) {
         let m = self.base.m as u64;
         for reta in self.r_etas.iter() {
             let dot_a = self.r_etas.dot(reta.k, scratch_a);
@@ -5114,17 +5329,40 @@ impl FtLu {
             scratch_b[reta.slot] -= dot_b;
         }
         a_tilde_out.copy_from_slice(scratch_a);
-        // `U` stage: `u_solve_into`'s `u_zero_skip` loop, per vector.
+        // `U` stage: `u_solve_into`'s `u_zero_skip` loop, per vector — or,
+        // for `a` under C5, its hyper-sparse form (see `triple_r_u_permute`).
         self.add_tick(2 * m);
+        let a_list = match hyper_a {
+            Some(gp) => {
+                if self.u_solve_hyper(scratch_a, gp) {
+                    Some(&gp.u_list)
+                } else {
+                    None
+                }
+            }
+            None => None,
+        };
+        let a_in_scan = a_list.is_none();
+        let b_list = match hyper_b {
+            Some(gp) => {
+                if self.u_solve_hyper(scratch_b, gp) {
+                    Some(&gp.u_list)
+                } else {
+                    None
+                }
+            }
+            None => None,
+        };
+        let b_in_scan = b_list.is_none();
         for eta in self.u_seq.iter().rev() {
             let p = eta.slot;
-            if scratch_a[p] != 0.0 {
+            if a_in_scan && scratch_a[p] != 0.0 {
                 scratch_a[p] /= self.u_seq.pivot[eta.k];
                 let xp = scratch_a[p];
                 self.add_tick(self.u_seq.nnz(eta.k) as u64);
                 self.u_seq.axpy(eta.k, -xp, scratch_a);
             }
-            if scratch_b[p] != 0.0 {
+            if b_in_scan && scratch_b[p] != 0.0 {
                 scratch_b[p] /= self.u_seq.pivot[eta.k];
                 let xp = scratch_b[p];
                 self.add_tick(self.u_seq.nnz(eta.k) as u64);
@@ -5132,8 +5370,14 @@ impl FtLu {
             }
         }
         // Singleton divisions: done by `permute_out` (see `single_piv`).
-        let na = self.permute_out(scratch_a, out_a);
-        let nb = self.permute_out(scratch_b, out_b);
+        let na = match a_list {
+            Some(list) => self.permute_list(scratch_a, out_a, list),
+            None => self.permute_out(scratch_a, out_a),
+        };
+        let nb = match b_list {
+            Some(list) => self.permute_list(scratch_b, out_b, list),
+            None => self.permute_out(scratch_b, out_b),
+        };
         (na, nb)
     }
 
@@ -5276,6 +5520,17 @@ impl FtLu {
             scratch[reta.slot] -= dot;
         }
         a_tilde_out.copy_from_slice(scratch);
+        if self.u_hyper_ok(gp) {
+            self.add_tick(self.base.m as u64);
+            if self.u_solve_hyper(scratch, gp) {
+                let nnz = self.permute_list(scratch, out, &gp.u_list);
+                scratch.fill(0.0);
+                return nnz;
+            }
+            // Aborted before touching `scratch`: the full scan, minus the
+            // flat tick already charged.
+            self.tick.set(self.tick.get() - self.base.m as u64);
+        }
         self.u_solve_into(scratch);
         let nnz = self.permute_out(scratch, out);
         scratch.fill(0.0);
@@ -7054,6 +7309,120 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn hyper_u_ftran_is_bit_identical() {
+        let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<u64>>();
+        let m = 200;
+        let mut hyper_taken = 0usize;
+        for seed in [11u64, 12, 13, 14] {
+            // Sparser than `random_sparse_diag_dominant`: keep one
+            // off-diagonal entry per row, so `U`'s reach from a short rhs
+            // stays under the abort fraction.
+            let rows: Vec<Vec<(usize, f64)>> = random_sparse_diag_dominant(m, seed)
+                .into_iter()
+                .enumerate()
+                .map(|(i, r)| {
+                    let mut kept = false;
+                    r.into_iter()
+                        .filter(|&(j, _)| {
+                            if j == i {
+                                return true;
+                            }
+                            let keep = !kept;
+                            kept = true;
+                            keep
+                        })
+                        .collect()
+                })
+                .collect();
+            let base = factorize(m, &rows).expect("diagonally dominant matrix must factorize");
+            let mut state = FtLu::new(base);
+            for round in 0..6 {
+                for variant in 0..4usize {
+                    let a: Vec<f64> = (0..m).map(|k| if (k * 7 + variant) % 97 == round { 0.5 + k as f64 } else { 0.0 }).collect();
+                    // Variant 3 gives `b` a single nonzero, so its hyper
+                    // `U` stage runs rather than aborting.
+                    let b: Vec<f64> = (0..m)
+                        .map(|k| {
+                            let on = if variant == 3 { k == 17 + round } else { (k * 3 + variant) % (2 + variant) == 0 };
+                            if on {
+                                1.0 / (1.0 + k as f64)
+                            } else {
+                                0.0
+                            }
+                        })
+                        .collect();
+                    let c: Vec<f64> = (0..m).map(|k| if (k + 2 * variant) % 5 == 0 { -1.0 - k as f64 } else { 0.0 }).collect();
+                    let a_sp = to_sparse(&a);
+                    let mut res: Vec<(u64, Vec<Vec<u64>>, (usize, usize, usize, usize))> = Vec::new();
+                    for hyper in [false, true] {
+                        let mut gp = GpScratch::new(m);
+                        gp.u_hyper = hyper;
+                        let mut zs = vec![0.0; m];
+                        let (mut o1, mut t1) = (vec![0.0; m], vec![0.0; m]);
+                        let t0 = state.synth_tick();
+                        let n1 = state.solve_sparse_into_capture(&a_sp, &mut zs, &mut gp, &mut o1, &mut t1);
+                        let (mut sb, mut sc) = (vec![0.0; m], vec![0.0; m]);
+                        let (mut o2a, mut o2b, mut t2) = (vec![0.0; m], vec![0.0; m], vec![0.0; m]);
+                        let (n2, _) = state.solve_sparse_into_pair_capture(&a_sp, &b, &mut zs, &mut gp, &mut sb, &mut o2a, &mut o2b, &mut t2, None);
+                        let (mut o3a, mut o3b, mut o3c, mut t3) = (vec![0.0; m], vec![0.0; m], vec![0.0; m], vec![0.0; m]);
+                        let (n3, _, n3c) = state.solve_sparse_into_triple_capture(&a_sp, &b, &c, &mut zs, &mut gp, &mut sb, &mut sc, &mut o3a, &mut o3b, &mut o3c, &mut t3, None);
+                        // `tau` channel through a step capture (C3's GP `L`
+                        // stage for `b`), hyper-sparse `U` when requested.
+                        let steps: Vec<usize> = (0..m).filter(|&s| b[state.base.row_perm[s]] != 0.0).collect();
+                        let mk_cap = |steps: &Vec<usize>| {
+                            let mut cap = StepCapture::new(m);
+                            cap.steps = steps.clone();
+                            cap.valid = true;
+                            cap.set_u_hyper(hyper);
+                            cap
+                        };
+                        let mut cap = mk_cap(&steps);
+                        let (mut o4a, mut o4b, mut t4) = (vec![0.0; m], vec![0.0; m], vec![0.0; m]);
+                        let (n4a, n4b) = state.solve_sparse_into_pair_capture(&a_sp, &b, &mut zs, &mut gp, &mut sb, &mut o4a, &mut o4b, &mut t4, Some(&mut cap));
+                        let mut cap = mk_cap(&steps);
+                        let (mut sa, mut o5a, mut o5b, mut t5) = (vec![0.0; m], vec![0.0; m], vec![0.0; m], vec![0.0; m]);
+                        let (n5a, n5b) = state.solve_into_pair_capture(&a, &b, &mut sa, &mut sb, &mut o5a, &mut o5b, &mut t5, Some(&mut cap));
+                        let mut cap = mk_cap(&steps);
+                        let (mut o6a, mut o6b, mut o6c, mut t6) = (vec![0.0; m], vec![0.0; m], vec![0.0; m], vec![0.0; m]);
+                        let (n6a, n6b, n6c) = state.solve_sparse_into_triple_capture(&a_sp, &b, &c, &mut zs, &mut gp, &mut sb, &mut sc, &mut o6a, &mut o6b, &mut o6c, &mut t6, Some(&mut cap));
+                        let mut cap = mk_cap(&steps);
+                        let (mut o7a, mut o7b, mut o7c, mut t7) = (vec![0.0; m], vec![0.0; m], vec![0.0; m], vec![0.0; m]);
+                        let (n7a, n7b, n7c) = state.solve_into_triple_capture(&a, &b, &c, &mut sa, &mut sb, &mut sc, &mut o7a, &mut o7b, &mut o7c, &mut t7, Some(&mut cap));
+                        assert!(zs.iter().all(|&v| v == 0.0), "scratch must be left all-zero");
+                        let tick = state.synth_tick() - t0;
+                        res.push((
+                            tick,
+                            vec![
+                                bits(&o1), bits(&t1), bits(&o2a), bits(&o2b), bits(&t2), bits(&o3a), bits(&o3b), bits(&o3c), bits(&t3),
+                                bits(&o4a), bits(&o4b), bits(&t4), bits(&o5a), bits(&o5b), bits(&t5),
+                                bits(&o6a), bits(&o6b), bits(&o6c), bits(&t6), bits(&o7a), bits(&o7b), bits(&o7c), bits(&t7),
+                                vec![n4a as u64, n4b as u64, n5a as u64, n5b as u64, n6a as u64, n6b as u64, n6c as u64, n7a as u64, n7b as u64, n7c as u64],
+                            ],
+                            (n1, n2, n3, n3c),
+                        ));
+                        if hyper {
+                            // Direct check that the hyper stage really ran
+                            // (rather than aborting) on some of these.
+                            let mut x = t1.clone();
+                            let mut gp2 = GpScratch::new(m);
+                            gp2.reach = (0..m).filter(|&s| x[s] != 0.0).collect();
+                            if state.u_solve_hyper(&mut x, &mut gp2) {
+                                hyper_taken += 1;
+                            }
+                        }
+                    }
+                    assert_eq!(res[0], res[1], "seed={seed} round={round} v={variant}: hyper U stage must be bit-identical");
+                }
+                let a_q: Vec<f64> = (0..m).map(|k| if k % 11 == round { 1.0 + k as f64 } else { 0.0 }).collect();
+                if !state.try_update(round * 3, &a_q, 1e-9) {
+                    break;
+                }
+            }
+        }
+        assert!(hyper_taken > 0, "the hyper-sparse U stage never ran");
     }
 
     fn to_sparse(dense: &[f64]) -> Vec<(usize, f64)> {

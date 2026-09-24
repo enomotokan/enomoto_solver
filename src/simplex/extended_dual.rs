@@ -2787,6 +2787,9 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     // averages in `HEkk`, likewise across INVERTs).
     let mut density_col_aq = sparse_lu::FtranDensity::new();
     let mut density_bfrt = sparse_lu::FtranDensity::new();
+    // C5: result density of the fused DSE `tau` FTRAN, gating its
+    // hyper-sparse `U` stage (`ENOMOTO_FTRAN_U_HYPER_TAU`).
+    let mut density_tau = sparse_lu::FtranDensity::new();
 
     // BFRT combined-flip accumulators (two channels — `Affine1` has no
     // single-`f64` representation to solve for at once): summed sparse
@@ -4436,6 +4439,10 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         let mut combined_base_nnz = 0usize;
         // Nonzero count of `alpha_full` (the FTRAN's own count).
         let mut alpha_nnz = m;
+        // `tau`'s result nonzero count when a fused FTRAN produced it.
+        let mut tau_nnz: Option<usize> = None;
+        let u_hyper_tau_gate = tunable!("ENOMOTO_FTRAN_U_HYPER_TAU", 0.1, f64);
+        rho_steps.set_u_hyper(u_hyper_tau_gate > 0.0 && density_tau.expected() < u_hyper_tau_gate);
         timed!(profile_phases, prof_phases::FTRAN, {
             if profile_phases && density_col_aq.predicts_dense() && !lu.should_use_dense_solve(std.cols.col(q).len()) {
                 prof_phases::DENSITY_GATE_FTRANS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -4450,7 +4457,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                     dense_q[i] = v;
                 }
                 let result_nnz = if combined_deferred {
-                    let (a_nnz, _, c_nnz) = lu.solve_into_triple_capture(
+                    let (a_nnz, b_nnz, c_nnz) = lu.solve_into_triple_capture(
                         &dense_q,
                         &rho,
                         &combined_base,
@@ -4465,14 +4472,16 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                     );
                     combined_base_nnz = c_nnz;
                     tau_ready = true;
+                    tau_nnz = Some(b_nnz);
                     a_nnz
                 } else if fused_dse_ftran && matches!(weights, super::EdgeWeights::Dse(_)) {
                     // DSE's own `tau = B^-1 rho_p` FTRAN (formerly run
                     // separately inside the weight update below, against
                     // this same pre-pivot `lu` and the same `rho`) fused
                     // into this one — see `solve_into_pair_capture`'s docs.
-                    let (a_nnz, _) = lu.solve_into_pair_capture(&dense_q, &rho, &mut lu_scratch, &mut tau_scratch, &mut alpha_full, &mut tau, &mut a_tilde_buf, Some(&mut rho_steps));
+                    let (a_nnz, b_nnz) = lu.solve_into_pair_capture(&dense_q, &rho, &mut lu_scratch, &mut tau_scratch, &mut alpha_full, &mut tau, &mut a_tilde_buf, Some(&mut rho_steps));
                     tau_ready = true;
+                    tau_nnz = Some(b_nnz);
                     a_nnz
                 } else {
                     lu.solve_into_capture(&dense_q, &mut lu_scratch, &mut alpha_full, &mut a_tilde_buf)
@@ -4483,8 +4492,13 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 alpha_nnz = result_nnz;
                 density_col_aq.record(result_nnz, m);
             } else {
+                // C5 (`ENOMOTO_FTRAN_U_HYPER=<gate>`, default `0.1`; `0` = off):
+                // run this channel's `U` stage hyper-sparsely while its
+                // recent result density is below `gate` (bit-identical).
+                let u_hyper_gate = tunable!("ENOMOTO_FTRAN_U_HYPER", 0.1, f64);
+                gp_scratch.u_hyper = u_hyper_gate > 0.0 && density_col_aq.expected() < u_hyper_gate;
                 let result_nnz = if combined_deferred {
-                    let (a_nnz, _, c_nnz) = lu.solve_sparse_into_triple_capture(
+                    let (a_nnz, b_nnz, c_nnz) = lu.solve_sparse_into_triple_capture(
                         std.cols.col(q),
                         &rho,
                         &combined_base,
@@ -4500,9 +4514,10 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                     );
                     combined_base_nnz = c_nnz;
                     tau_ready = true;
+                    tau_nnz = Some(b_nnz);
                     a_nnz
                 } else if fused_dse_ftran && matches!(weights, super::EdgeWeights::Dse(_)) {
-                    let (a_nnz, _) = lu.solve_sparse_into_pair_capture(
+                    let (a_nnz, b_nnz) = lu.solve_sparse_into_pair_capture(
                         std.cols.col(q),
                         &rho,
                         &mut sparse_scratch,
@@ -4514,12 +4529,17 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                         Some(&mut rho_steps),
                     );
                     tau_ready = true;
+                    tau_nnz = Some(b_nnz);
                     a_nnz
                 } else {
                     lu.solve_sparse_into_capture(std.cols.col(q), &mut sparse_scratch, &mut gp_scratch, &mut alpha_full, &mut a_tilde_buf)
                 };
+                gp_scratch.u_hyper = false;
                 alpha_nnz = result_nnz;
                 density_col_aq.record(result_nnz, m);
+            }
+            if let Some(n) = tau_nnz {
+                density_tau.record(n, m);
             }
             if profile_phases {
                 prof_phases::DENSITY_COL_AQ_PPT.store((density_col_aq.expected() * 1000.0) as usize, std::sync::atomic::Ordering::Relaxed);
