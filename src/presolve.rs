@@ -927,7 +927,8 @@ pub fn run_extended(
         } else {
             // Default since 2026-09-23 (analysis/stocfor2_presolve_20260923.md):
             // stocfor2 1652x1766 -> 950x1072 after presolve, -65% solve time.
-            Some(timed_step!("aggregator", aggregator::eliminate_implied_free_columns_v2(n, &a, &b, &c, &lb, &ub, &cur_real_rows, &cur_real_rhs, aggregator::AggOptions::from_env())))
+            // `None` = no candidate at all (checked without copying the problem).
+            timed_step!("aggregator", aggregator::eliminate_implied_free_columns_v2_if_any(n, &a, &b, &c, &lb, &ub, &cur_real_rows, &cur_real_rhs, aggregator::AggOptions::from_env()))
         };
         if let Some(agg) = agg {
             if std::env::var("ENOMOTO_DEBUG_AGGREGATOR").is_ok() {
