@@ -32,17 +32,7 @@
 //! answer at every problem size this crate has ever actually measured.
 
 use crate::sparse::{Csr, CsrRowBuilder, csr_from_rows, csr_row_iter};
-/// Above this many combined `A`/`G` rows, prefer `rayon`'s parallel
-/// reduce for `compute`'s column-norm fold over a plain sequential scan —
-/// same constant and rationale as `simplex.rs`'s `RAYON_SIZE_THRESHOLD`
-/// (this crate's own `#[ignore]`d `col_norm_fold_rayon_threshold_microbench`
-/// never found `rayon` winning, not even at 4,000,000 rows), duplicated
-/// locally rather than shared cross-module since each of this crate's
-/// rayon-threshold constants is already tuned/re-derived independently per
-/// call site (see e.g. `interior_point.rs`'s own separate
-/// `PROPAGATION_PASSES` copy for the same "each engine keeps its own
-/// tuning constant" convention).
-const RAYON_SIZE_THRESHOLD: usize = 100_000;
+use crate::params::presolve::RAYON_SIZE_THRESHOLD;
 
 pub struct Scaling {
     pub d: Vec<f64>,

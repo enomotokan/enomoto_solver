@@ -38,10 +38,7 @@
 
 use crate::presolve::propagate::GView;
 use crate::sparse::{Csr, csr_from_rows, csr_is_canonical, csr_rows};
-const TOL: f64 = 1e-9;
-/// Minimum `|coeff| / max|row|` for a column singleton to be substituted
-/// out — see the guard in `eliminate_singleton_equalities`.
-const SUBSTITUTION_PIVOT_RATIO: f64 = 1e-2;
+use crate::params::presolve::{IMPLIED_TOL, SUBSTITUTION_PIVOT_RATIO, TOL};
 
 /// `x[var] = (rhs - sum(terms[k].1 * x[terms[k].0])) / coeff`, using the
 /// *other* variables' already-solved values.
@@ -66,10 +63,6 @@ impl Substitution {
         rhs / self.coeff
     }
 }
-
-/// Relative tolerance for treating a bound-preservation row as already
-/// implied by its terms' own boxes.
-pub(crate) const IMPLIED_TOL: f64 = 1e-9;
 
 /// Whether `colsingleton`/`doubleton` skip bound-preservation rows their
 /// remaining terms' own boxes already imply (default on since 2026-09-23,

@@ -6,18 +6,7 @@
 use crate::solver::solve_lp;
 use crate::types::{ConstraintRow, LpOptions, Objective, RootSolver, Sense, SolveResult, Status, VarType, VariableData};
 use std::collections::HashMap;
-
-/// How close to an integer a discrete variable's LP-relaxation value must
-/// be to count as "already integer" (`most_fractional` below).
-const INT_TOL: f64 = 1e-6;
-/// How much better a candidate objective must be than the current
-/// incumbent to replace it — guards against replacing the incumbent over
-/// and over for a difference that's really just floating-point noise.
-const OBJ_EPS: f64 = 1e-7;
-/// Safety cap on the number of branch-and-bound nodes explored; if hit,
-/// `solve_mip` returns the best incumbent found so far with
-/// `node_limit_hit: true` rather than the (unproven) true optimum.
-const MAX_NODES: usize = 20_000;
+use crate::params::mip::{INT_TOL, MAX_NODES, OBJ_EPS};
 
 /// One node of the branch-and-bound tree: the original problem with some
 /// variables' bounds further tightened. `overrides[j] = (lo, hi)` means

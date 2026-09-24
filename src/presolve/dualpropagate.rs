@@ -149,7 +149,7 @@
 
 use crate::presolve::propagate;
 use crate::sparse::{Csr, CscMat, csr_from_rows, csr_row_iter};
-const TOL: f64 = 1e-9;
+use crate::params::presolve::TOL;
 
 /// Bundles both reductions [`run`] reads out of one dual-feasibility
 /// propagation pass: `implied_equalities` (indices into `real_g_rows`

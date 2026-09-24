@@ -49,7 +49,7 @@
 //! just its speed.
 
 use crate::sparse::{Csr, CsrRowBuilder, csr_from_rows, csr_row_iter, csr_row_vec};
-const EPS: f64 = 1e-9;
+use crate::params::presolve::PROPAGATE_EPS;
 
 #[allow(dead_code)] // the pipeline uses `PropagateSplit`; kept for tests / G-form callers
 pub struct PropagateResult {
@@ -139,7 +139,7 @@ pub fn extract_bounds_only(n: usize, g: &Csr, h: &[f64]) -> (Vec<f64>, Vec<f64>)
 /// "fix" an already-inconsistent variable to one of its two contradictory
 /// bounds, silently discarding the other and erasing the infeasibility.
 pub fn bounds_inconsistent(n: usize, lb: &[f64], ub: &[f64]) -> bool {
-    (0..n).any(|j| lb[j] > ub[j] + EPS)
+    (0..n).any(|j| lb[j] > ub[j] + PROPAGATE_EPS)
 }
 
 /// [`propagate`]'s outcome without the re-folded `g`/`h` — what every
@@ -188,7 +188,7 @@ pub fn propagate_nog(n: usize, g: &Csr, h: &[f64], passes: usize) -> PropagateSp
 /// [`propagate_nog`] on an already split `G` — `lb`/`ub` and the real
 /// rows exactly as [`extract_bounds`] would return them for that `G`.
 pub fn propagate_split(n: usize, mut lb: Vec<f64>, mut ub: Vec<f64>, mut rows: Vec<Vec<(usize, f64)>>, mut rhs: Vec<f64>, passes: usize) -> PropagateSplit {
-    // `ENOMOTO_T_PROP_RELTOL` (default 0 = off, the historical absolute-EPS
+    // `ENOMOTO_T_PROP_RELTOL` (default 0 = off, the historical absolute-PROPAGATE_EPS
     // rule only): HiGHS-style, a finite bound is only tightened when the
     // improvement also exceeds `reltol * (1 + |bound|)` — stops the
     // geometric shaving of bounds over cyclic row structures that keeps
@@ -259,11 +259,11 @@ pub fn propagate_split(n: usize, mut lb: Vec<f64>, mut ub: Vec<f64>, mut rows: V
             let true_inf = if inf_unbounded_count == 0 { finite_sum_inf } else { f64::NEG_INFINITY };
             let true_sup = if sup_unbounded_count == 0 { finite_sum_sup } else { f64::INFINITY };
 
-            if true_inf > b + EPS {
+            if true_inf > b + PROPAGATE_EPS {
                 infeasible = true;
                 break;
             }
-            if true_sup <= b + EPS {
+            if true_sup <= b + PROPAGATE_EPS {
                 // Row can never be violated: redundant, drop it (§3.1).
                 continue;
             }
@@ -284,7 +284,7 @@ pub fn propagate_split(n: usize, mut lb: Vec<f64>, mut ub: Vec<f64>, mut rows: V
             // guarantees every bound this loop is about to read is finite
             // (that emptiness is exactly what made `true_inf` a real
             // number rather than `NEG_INFINITY` above).
-            if inf_unbounded_count == 0 && (finite_sum_inf - b).abs() <= EPS {
+            if inf_unbounded_count == 0 && (finite_sum_inf - b).abs() <= PROPAGATE_EPS {
                 for &(j, v) in &row {
                     if v > 0.0 {
                         ub[j] = lb[j];
@@ -313,13 +313,13 @@ pub fn propagate_split(n: usize, mut lb: Vec<f64>, mut ub: Vec<f64>, mut rows: V
                 }
                 if aik > 0.0 {
                     let candidate = (b - l_s) / aik;
-                    if candidate < ub[k] - EPS && (reltol == 0.0 || !ub[k].is_finite() || candidate < ub[k] - reltol * (1.0 + ub[k].abs())) {
+                    if candidate < ub[k] - PROPAGATE_EPS && (reltol == 0.0 || !ub[k].is_finite() || candidate < ub[k] - reltol * (1.0 + ub[k].abs())) {
                         ub[k] = candidate;
                         changed = true;
                     }
                 } else if aik < 0.0 {
                     let candidate = (b - l_s) / aik;
-                    if candidate > lb[k] + EPS && (reltol == 0.0 || !lb[k].is_finite() || candidate > lb[k] + reltol * (1.0 + lb[k].abs())) {
+                    if candidate > lb[k] + PROPAGATE_EPS && (reltol == 0.0 || !lb[k].is_finite() || candidate > lb[k] + reltol * (1.0 + lb[k].abs())) {
                         lb[k] = candidate;
                         changed = true;
                     }
@@ -545,7 +545,7 @@ pub struct EqPropagateResult {
 
 pub fn propagate_equalities(a: &Csr, b: &[f64], lb: &mut [f64], ub: &mut [f64], passes: usize) -> EqPropagateResult {
     let ar = a.as_ref();
-    // A finite bound is only replaced when the change exceeds `EPS`; an
+    // A finite bound is only replaced when the change exceeds `PROPAGATE_EPS`; an
     // infinite bound is always replaced by a finite one.
     // `ENOMOTO_T_EQPROP_RELTOL` (default 0 = off): additionally require a
     // finite bound to move by more than `reltol * (1 + |old|)`.
@@ -554,7 +554,7 @@ pub fn propagate_equalities(a: &Csr, b: &[f64], lb: &mut [f64], ub: &mut [f64], 
         if !old.is_finite() {
             return true;
         }
-        (old - new).abs() > EPS && (reltol == 0.0 || (old - new).abs() > reltol * (1.0 + old.abs()))
+        (old - new).abs() > PROPAGATE_EPS && (reltol == 0.0 || (old - new).abs() > reltol * (1.0 + old.abs()))
     };
     let mut res = EqPropagateResult { infeasible: false, forcing_rows: 0, fixed_cols: 0, tightened: 0 };
     let mut forcing_seen = vec![false; ar.nrows()];
@@ -603,13 +603,13 @@ pub fn propagate_equalities(a: &Csr, b: &[f64], lb: &mut [f64], ub: &mut [f64], 
             }
             let true_inf = if inf_unbounded.is_empty() { finite_sum_inf } else { f64::NEG_INFINITY };
             let true_sup = if sup_unbounded.is_empty() { finite_sum_sup } else { f64::INFINITY };
-            if true_inf > bi + EPS || true_sup < bi - EPS {
+            if true_inf > bi + PROPAGATE_EPS || true_sup < bi - PROPAGATE_EPS {
                 res.infeasible = true;
                 return res;
             }
             // Forcing on the lower side: activity can only reach `b` with
             // every term at its inf-bound.
-            if inf_unbounded.is_empty() && (finite_sum_inf - bi).abs() <= EPS {
+            if inf_unbounded.is_empty() && (finite_sum_inf - bi).abs() <= PROPAGATE_EPS {
                 if !forcing_seen[i] {
                     forcing_seen[i] = true;
                     res.forcing_rows += 1;
@@ -631,7 +631,7 @@ pub fn propagate_equalities(a: &Csr, b: &[f64], lb: &mut [f64], ub: &mut [f64], 
                 continue;
             }
             // Forcing on the upper side: symmetric, at every term's sup-bound.
-            if sup_unbounded.is_empty() && (finite_sum_sup - bi).abs() <= EPS {
+            if sup_unbounded.is_empty() && (finite_sum_sup - bi).abs() <= PROPAGATE_EPS {
                 if !forcing_seen[i] {
                     forcing_seen[i] = true;
                     res.forcing_rows += 1;
@@ -668,12 +668,12 @@ pub fn propagate_equalities(a: &Csr, b: &[f64], lb: &mut [f64], ub: &mut [f64], 
                 if let Some(l_s) = l_s {
                     let candidate = (bi - l_s) / aik;
                     if aik > 0.0 {
-                        if candidate < ub[k] - EPS && improves(ub[k], candidate) {
+                        if candidate < ub[k] - PROPAGATE_EPS && improves(ub[k], candidate) {
                             ub[k] = candidate;
                             changed += 1;
                             res.tightened += 1;
                         }
-                    } else if candidate > lb[k] + EPS && improves(lb[k], candidate) {
+                    } else if candidate > lb[k] + PROPAGATE_EPS && improves(lb[k], candidate) {
                         lb[k] = candidate;
                         changed += 1;
                         res.tightened += 1;
@@ -691,23 +691,23 @@ pub fn propagate_equalities(a: &Csr, b: &[f64], lb: &mut [f64], ub: &mut [f64], 
                 if let Some(u_s) = u_s {
                     let candidate = (bi - u_s) / aik;
                     if aik > 0.0 {
-                        if candidate > lb[k] + EPS && improves(lb[k], candidate) {
+                        if candidate > lb[k] + PROPAGATE_EPS && improves(lb[k], candidate) {
                             lb[k] = candidate;
                             changed += 1;
                             res.tightened += 1;
                         }
-                    } else if candidate < ub[k] - EPS && improves(ub[k], candidate) {
+                    } else if candidate < ub[k] - PROPAGATE_EPS && improves(ub[k], candidate) {
                         ub[k] = candidate;
                         changed += 1;
                         res.tightened += 1;
                     }
                 }
-                if lb[k] > ub[k] + EPS {
+                if lb[k] > ub[k] + PROPAGATE_EPS {
                     res.infeasible = true;
                     return res;
                 }
                 if lb[k] > ub[k] {
-                    // Within EPS: snap to a single point.
+                    // Within PROPAGATE_EPS: snap to a single point.
                     lb[k] = ub[k];
                 }
             }

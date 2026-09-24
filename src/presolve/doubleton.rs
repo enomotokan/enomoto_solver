@@ -25,8 +25,7 @@
 use crate::presolve::colsingleton::{self, Substitution};
 use crate::presolve::propagate::{self, GView};
 use crate::sparse::{Csr, CsrRowBuilder, SparseAccum, csr_from_rows, csr_is_canonical, csr_rows_pruned};
-
-const TOL: f64 = 1e-9;
+use crate::params::presolve::{IMPLIED_TOL, TOL};
 
 pub struct DoubletonResult {
     pub a: Csr,
@@ -266,7 +265,7 @@ fn eliminate_doubleton_equalities_full(n: usize, a: &Csr, b: &[f64], gv: GView<'
         } else {
             (f64::NEG_INFINITY, f64::INFINITY)
         };
-        let tol = colsingleton::IMPLIED_TOL;
+        let tol = IMPLIED_TOL;
         if lo.is_finite() && !(r_hi <= sub.rhs - lo + tol * (1.0 + (sub.rhs - lo).abs())) {
             let (row1, rhs1) = rewrite_row(&mut accum, &[(var_keep, coeff_keep)], sub.rhs - lo, &subs, &by_var);
             extra_g_rows.push(row1);

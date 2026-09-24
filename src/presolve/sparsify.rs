@@ -94,8 +94,7 @@
 
 use crate::presolve::propagate;
 use crate::sparse::{Csr, SparseAccum, csr_from_rows, csr_rows_pruned};
-
-const TOL: f64 = 1e-9;
+use crate::params::presolve::TOL;
 
 pub struct SparsifyResult {
     pub a: Csr,

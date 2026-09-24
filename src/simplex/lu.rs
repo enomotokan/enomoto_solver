@@ -81,59 +81,7 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
-
-/// Threshold-pivoting stability floor (see this module's own top docs): a
-/// pivot candidate must be at least this fraction of its column's live max
-/// magnitude to be eligible, regardless of Markowitz count. Raised from the
-/// textbook-default `0.1` after measuring that `0.1` lets `factorize()` pick
-/// pivots numerically weak enough to make the *resulting* `L`/`U` drift
-/// faster under `extended_dual`'s `XB_DRIFT_TOL` check (see that constant's
-/// own docs) — i.e. a chain of numerically-marginal Markowitz choices, not
-/// any single one bad enough to fail `FT_MIN_PIVOT` outright, was forcing
-/// extra mid-solve refactorizations well before `FT_BUMP_LIMIT_FACTOR`'s own
-/// eta-fill trigger would have. Netlib's `pilot` (the clearest case)
-/// dropped from 190 drift-triggered refactorizations to 88 at `0.25`
-/// (measured twice, deterministic — refactor counts don't vary run to run,
-/// only wall-clock does), for a ~51% wall-time cut on that instance alone;
-/// `greenbeb`/`fit2p` improved or held flat; `d2q06c` was unchanged within
-/// run-to-run noise (~5%, from system load, confirmed by re-running the
-/// unchanged `0.1` baseline twice). The standard 73-problem Netlib set
-/// (`enomoto_solver.benchmark_highs`, which skips these largest instances on
-/// `n_vars`) is flat within the same noise band either way — this constant
-/// only matters for problems that already refactorize dozens-to-hundreds of
-/// times. `0.5` was tried first and rejected: fill-in from the stricter
-/// floor made every iteration measurably more expensive (`d2q06c`,
-/// `greenbeb`, `fit2p` all ~4% slower net, more than offsetting their own
-/// small refactor-count drops), so `0.5` is *not* simply "more of the same
-/// good direction" — `0.25` is a measured sweet spot, not a floor to keep
-/// pushing from without re-benchmarking.
-/// Since `docs/lu_comparison_enomoto_vs_highs.md` §2.4 this is the
-/// *starting* value of a per-solve threshold that a simplex loop may
-/// escalate ([`pivot_threshold`]) — but that escalation is off by default
-/// (`extended_dual::PIVOT_ESCALATION_STEP`, which records what enabling it
-/// measured), so this remains the floor every solve actually runs at, and
-/// everything measured above still describes the default build.
-const STABILITY: f64 = 0.25;
-
-/// Ceiling on the escalated pivot threshold ([`escalate_pivot_threshold`])
-/// — HiGHS's own `kMaxPivotThreshold`. [`STABILITY`]'s docs record that a
-/// *static* `0.5` costs ~4% on `d2q06c`/`greenbeb`/`fit2p` through extra
-/// fill-in, which is exactly why this value is reachable only after the
-/// escalation ladder below has evidence that *this* solve is paying more
-/// for instability than it would for fill.
-const PIVOT_THRESHOLD_MAX: f64 = 0.5;
-
-/// Floor for an operator-supplied `ENOMOTO_PIVOT_THRESHOLD` — HiGHS's own
-/// `kMinPivotThreshold`. Nothing escalates *downwards*, so this only ever
-/// clamps the env override.
-const PIVOT_THRESHOLD_MIN: f64 = 8e-4;
-
-/// Multiplier applied per [`escalate_pivot_threshold`] step. HiGHS uses
-/// `kPivotThresholdChangeFactor = 5.0` from a `0.1` default; from this
-/// crate's `0.25` a factor of `2.0` lands exactly on
-/// [`PIVOT_THRESHOLD_MAX`] in one step, so the ladder here is
-/// `0.25 -> 0.5`, and a second escalation is a no-op.
-const PIVOT_THRESHOLD_FACTOR: f64 = 2.0;
+use crate::params::lu::{BORDER_MAX_COUNT, BORDER_MAX_FRACTION, BTRAN_L_SCATTER_FRACTION, DENSE_COL_FRACTION, DENSE_ETA_FRACTION, DENSE_INPUT_FRACTION, DENSE_RHS_FRACTION, DENSITY_AVERAGE_MULTIPLIER, EXPECTED_DENSE_FRACTION, KERNEL_LINEAR_SCAN_MAX, PIVOT_SEARCH_LIMIT, PIVOT_THRESHOLD_FACTOR, PIVOT_THRESHOLD_MAX, PIVOT_THRESHOLD_MIN, REBUILD_FILL_LIMIT, REBUILD_MIN_PIVOT, REUSE_BACKOFF_SHIFT_CAP, REUSE_MAX_BACKOFF, STABILITY, TICK_BUILD_FLOP_COEF, TICK_BUILD_LU_COEF, TICK_BUILD_M_COEF, TICK_SOLVE_NNZ_COEF, U_HYPER_ABORT_FRACTION};
 
 thread_local! {
     /// The pivot threshold in force for *this thread's* current solve —
@@ -221,7 +169,7 @@ pub fn reset_pivot_threshold() {
 ///
 /// **Nothing calls this by default.** Wiring it to the numerical-failure
 /// triggers cost +7.4% over NETLIB93; see
-/// `extended_dual::PIVOT_ESCALATION_STEP` and
+/// `PIVOT_ESCALATION_STEP` and
 /// `analysis/pivot_threshold_colfixmax_20260922_154500.md` for the
 /// measurement, and `ENOMOTO_PIVOT_ESCALATION_STEP` to re-enable it.
 pub fn escalate_pivot_threshold() -> bool {
@@ -235,68 +183,6 @@ pub fn escalate_pivot_threshold() -> bool {
         false
     }
 }
-
-/// A column whose *initial* (pre-elimination) degree exceeds this fraction
-/// of `m` is treated as "dense" by `find_best_pivot`'s dense-avoidance
-/// pass — see `MarkowitzState::initially_dense`'s own docs for why a
-/// column's *current* (post-elimination) degree is the wrong thing to
-/// threshold on here. `0.5` catches the handful of near-fully-dense
-/// "trend"/regression columns Netlib `fit1p`/`fit1d`-shaped problems are
-/// built around (confirmed: `fit1p`'s basis has columns with degree
-/// 610-627 out of `m=627`, against a median column degree of `1`) without
-/// also catching moderately-populated columns that pose no real fill-in
-/// risk.
-const DENSE_COL_FRACTION: f64 = 0.5;
-
-/// How many candidate columns a single `find_best_pivot` call may examine
-/// before it settles for the best pivot it has already found — HiGHS's
-/// `searchLimit = min(nwork, 8)` in `HFactor::buildKernel`
-/// (`docs/lu_comparison_enomoto_vs_highs.md` §2.5), adapted to this file's
-/// bucket scan.
-///
-/// The existing per-degree-level early exit (`best_score <= deg_col *
-/// deg_col`, the analogue of HiGHS's `merit_limit`) only ever fires at a
-/// *level* boundary, so a single heavily-populated bucket is scanned to
-/// its end no matter how good the pivot found in its first few columns
-/// was. That is the search-explosion case this bound closes: on an
-/// ill-conditioned or fill-heavy step, the low-degree buckets hold
-/// hundreds of columns whose rows all get walked (and whose
-/// `ensure_col_max_abs` recomputes all get paid) to improve on a pivot
-/// that was already acceptable.
-///
-/// Like HiGHS's, the bound is only honoured once a pivot *has* been found
-/// — `find_best_pivot` never returns `None` because of it, so `factorize`'s
-/// `skip_dense` fallback and its genuine-singularity detection are
-/// unchanged. What it does change is *which* acceptable pivot is returned:
-/// the Markowitz count can be worse than the unbounded scan's, so this
-/// trades (bounded) extra fill-in for a bounded search.
-///
-/// **`256`, not HiGHS's `8` — measured, see
-/// `analysis/pivot_search_limit_20260922_143000.md`.** `8` was tried first
-/// and rejected: it is not "more of the same good direction", it is a
-/// different intervention. At `8` the bound fires on ordinary steps and
-/// changes the chosen pivot on **64 of the 93** Netlib problems; each such
-/// change perturbs the factorization's last digits, which moves the dual
-/// ratio test's tie-breaks, which moves the iteration count by an amount
-/// whose *sign is effectively arbitrary per problem* (`greenbeb` +18%
-/// iterations, `25fv47` −11%). Reproduced over two independent 93-problem
-/// runs, `8` left three problems past +10% (`greenbeb` +21/+22%, `pilot`
-/// +15/+18%, `grow22` +13/+13%) even though it cut the search everywhere,
-/// and a sweep showed no smaller constant escapes the lottery: `16` made
-/// `pilot87` **2.9x slower**, `64` still perturbed 26 problems.
-///
-/// `256` is chosen so the bound is a worst-case guard and nothing else. It
-/// fires on 7 of 93 problems, and only one of those (`dfl001`, the single
-/// instance where the unbounded scan is genuinely expensive: 2.96s of a
-/// 22.0s solve, averaging 261 candidate columns per elimination step)
-/// changes materially — its scan drops to 1.54s. The other 86 problems are
-/// bit-identical to the unbounded scan, iteration count and
-/// refactorization count included, so the change cannot regress them at
-/// all. Two independent 93-problem runs: −2.1% and −0.8% in total, no
-/// problem past ±10% in either. `512` was also measured (−3.2%/−, perturbs
-/// only 2 problems) but put `wood1p` at +10.6%, so it fails the same rule
-/// `8` does.
-const PIVOT_SEARCH_LIMIT: usize = 256;
 
 /// [`PIVOT_SEARCH_LIMIT`], overridable via `ENOMOTO_PIVOT_SEARCH_LIMIT` —
 /// `0` restores the unbounded scan, which is how the A/B behind the
@@ -388,14 +274,6 @@ pub(crate) static PROF_COLMAX_RESCAN_ENTRIES: AtomicUsize = AtomicUsize::new(0);
 /// [`BTRAN_L_SCATTER_FRACTION`].
 pub(crate) static PROF_BTRAN_L_SCATTER: AtomicUsize = AtomicUsize::new(0);
 pub(crate) static PROF_BTRAN_L_GATHER: AtomicUsize = AtomicUsize::new(0);
-
-/// Rows shorter than this are searched for a column linearly rather than
-/// by binary search ([`KernelMatrix::row_get`]). Markowitz elimination is
-/// specifically choosing pivots to keep the active rows short, so the
-/// linear branch is the common one: a run this size fits in one or two
-/// cache lines and scans branch-predictably, where `binary_search` pays a
-/// mispredict per level for the same work.
-const KERNEL_LINEAR_SCAN_MAX: usize = 16;
 
 /// Flat, HiGHS-`HFactor`-style storage for the active submatrix that
 /// Markowitz elimination works on — the replacement for the
@@ -1736,12 +1614,6 @@ impl GpScratch {
     }
 }
 
-/// C5 hyper-sparse `U` stage: give up (and take the plain full scan) once
-/// the DFS has reached more than this fraction of the `m` slots — past it,
-/// sorting the reach and scattering the result by list stop paying for
-/// themselves (HiGHS's own `kHyperFtranU` is `0.10`).
-const U_HYPER_ABORT_FRACTION: f64 = 0.25;
-
 #[derive(Clone)]
 pub struct LuFactors {
     pub m: usize,
@@ -1817,76 +1689,6 @@ pub struct LuFactors {
     /// right-hand side, without an `O(m)` scan of `row_perm` itself.
     pub row_perm_inv: Vec<usize>,
 }
-
-/// Factorizes the `m x m` sparse matrix given as sparse rows
-/// `(col, value)`. Returns `None` if the matrix is (numerically)
-/// singular — no acceptable pivot remains at some step.
-///
-/// **A Dulmage-Mendelsohn block-triangularized variant of this function
-/// was implemented, thoroughly validated, and measured — then reverted**:
-/// rows were partitioned into strongly-connected blocks (via bipartite
-/// matching + Tarjan SCC, [`crate::graph::dulmage_mendelsohn_blocks_topological`],
-/// which remains implemented and tested for a possible future, more
-/// targeted revisit) in topological order, each factorized independently,
-/// then reassembled via the block-LU identity `U_ij = L_i^{-1} A_ij` for
-/// "spillover" entries outside a block's own matched columns (`L` itself
-/// stays exactly block-diagonal). Implementation correctness was
-/// confirmed via unit tests (including one that caught a real bug: an
-/// initial version copied spillover entries unchanged, which is only
-/// valid when the emitting block's own `L` is trivial/identity — true for
-/// singleton blocks, which is why singleton-only spillover tests passed
-/// by coincidence before the fix) and zero objective mismatches across
-/// the full 73-problem Netlib benchmark.
-///
-/// **But it measured as a net ~4% aggregate regression** in a controlled
-/// back-to-back A/B (same machine, same run, only the feature toggled):
-/// dramatic wins on a few instances with genuine block-angular structure
-/// (`fit1p` -44%, `wood1p` -17%, `scsd8` -10%, `sierra`/`sctap3`/`scrs8`
-/// a few percent) were outweighed by a broad ~10-25% tax on most other
-/// medium/large instances (`grow15` +25%, `bnl1` +18%, `modszk1` +17%,
-/// `perold` +16%, `25fv47` +16%, `stocfor2` +14%, `pilotnov` +13%,
-/// `ganges` +11%) — paying bipartite-matching-plus-SCC cost on *every*
-/// refactorization, whether or not it finds anything worth exploiting.
-/// Two cheap pre-gating heuristics were tried to avoid paying that cost
-/// on instances unlikely to benefit, and both failed: (1) whether
-/// `presolve::redundancy`'s own equality-row block decomposition found
-/// structure — `ganges` decomposes beautifully there (1053 blocks, a 1%
-/// bump) yet was still a net loss here, since the *basis* matrix (all
-/// rows, reshuffled by every pivot) doesn't share the *equality
-/// system*'s (static, presolve-time-only) structure; (2) the *basis*
-/// matrix's own bump size at the first real refactorization — `stocfor2`
-/// and `ganges` again showed excellent bump ratios (0.2-1.3%, as good as
-/// or better than the actual winners) yet remained net losses, showing
-/// the fixed decomposition cost itself, not just a poor decomposition
-/// outcome, was the problem. This mirrors HiGHS's own architecture:
-/// `HFactor::buildSimple()` peels off trivial (degree-1/logical) pivots
-/// via a cheap `O(nnz)` sweep with no bipartite matching at all, leaving
-/// full Markowitz elimination (`buildKernel()`) for only the remaining
-/// kernel — this file's own bucket-based `find_best_pivot` already gets
-/// that same cheap benefit for free (confirmed earlier via
-/// `PROF_TOTAL_STEPS`/`PROF_TRIVIAL_STEPS` showing 90-100% of pivots
-/// already resolve trivially), so the *additional*, much more expensive
-/// structure genuine Dulmage-Mendelsohn decomposition can find beyond
-/// that cheap peeling isn't reliably worth its own cost. Fully reverted;
-/// see the project history around this doc comment's own commit for the
-/// full numbers if revisiting.
-/// Input whose nonzero density exceeds this fraction of `m^2` skips
-/// Markowitz elimination entirely in favor of [`factorize_dense_faer`]'s
-/// dense partial-pivoting LU (via the `faer` crate). Markowitz's whole
-/// point is to *minimize fill-in*; a matrix already this dense has none
-/// left to save, so its bucket/degree bookkeeping ([`KernelMatrix`]'s own
-/// row/column runs plus `col_buckets`/`row_buckets`) is pure overhead at
-/// that point — confirmed on a synthetic dense LP
-/// (Netlib has none dense enough to exercise this at all): `factorize`
-/// dominated wall time (95-98%, repeated every few dozen `try_update`
-/// calls since a dense basis's eta fill crosses `FT_BUMP_LIMIT_FACTOR *
-/// m` almost immediately) while this file's own FTRAN-side dense
-/// optimizations (`HybridVec`'s dense arm, `FtLu::should_use_dense_solve`)
-/// together accounted for under 1% of the same wall time — i.e. the eta
-/// chain was never the bottleneck for a dense basis, the cold
-/// factorization was. `0.25` is a first-pass threshold, not yet tuned
-/// against a real dense-problem benchmark (Netlib has none).
-const DENSE_INPUT_FRACTION: f64 = 0.25;
 
 fn is_dense_input(m: usize, rows_in: &[Vec<(usize, f64)>]) -> bool {
     if m == 0 {
@@ -1995,96 +1797,6 @@ fn debug_print_block_sizes(m: usize, rows_in: &[Vec<(usize, f64)>]) {
     }
 }
 
-/// **A second, "peel trivial pivots then Dulmage-Mendelsohn-decompose only
-/// the remaining kernel" variant of block triangularization was also
-/// implemented, tested, and measured — then reverted.** This directly
-/// followed up the first attempt documented below, on the hypothesis that
-/// peeling first (mirroring HiGHS's own `buildSimple()`/`buildKernel()`
-/// split) would fix that attempt's "pays matching+SCC cost on every
-/// refactorization regardless of payoff" problem by shrinking the kernel
-/// matching+SCC actually runs on. It did not: full 73-problem Netlib A/B
-/// showed a **net ~37% aggregate regression** — far worse than the first
-/// attempt's ~4%, and a regression on `fit1p` specifically (+80%), the
-/// exact instance this was meant to speed up. Root cause, confirmed by
-/// direct instrumentation: `fit1p`'s kernel (post-peel) is a single
-/// irreducible ~20-row SCC block every time, so the decomposition gate
-/// *always* rejects it and falls back to a from-scratch
-/// `factorize_flat_markowitz` call — meaning the (redundant) peel work is
-/// paid twice, for zero benefit, every refactorization. Worse, the
-/// underlying premise turned out wrong: `fit1p`'s real cost was never a
-/// large interleaved non-trivial block in the first place. `eliminate`'s
-/// cost is `O(col_rows[pj].len())` (the pivot *column*'s remaining active
-/// rows) times the pivot row's own snapshot size — a pivot with Markowitz
-/// score exactly `0` (row degree `1`, the "trivial" case `PROF_TRIVIAL_STEPS`
-/// counts) is only free when its *column*'s degree is also small; a
-/// degree-1 *row* whose sole entry sits in an otherwise-still-dense
-/// "hub" column is scored as trivial yet costs `O(hub column's current
-/// degree)` to eliminate (every other row sharing that column must be
-/// updated). `fit1p`'s basis apparently has exactly this shape — many
-/// row-degree-1 pivots landing on a handful of not-yet-thinned dense
-/// columns — which no SCC/block decomposition addresses, since those rows
-/// don't form a separable block with the hub column at all. Fully
-/// reverted (including the two dedicated unit tests that validated its
-/// spillover-reassembly correctness, which was never in question — the
-/// numerics were right, just not worth what they cost). See the project
-/// history around this comment's own commit for the full A/B numbers and
-/// the `ENOMOTO_DEBUG_BLOCK_TRIANGULAR` trace output that pinned down the
-/// root cause, if revisiting; `debug_print_block_sizes`
-/// (`ENOMOTO_DEBUG_BLOCK_SIZES`) and the `ENOMOTO_DEBUG_ELIMINATE_COST`
-/// timer below remain as live diagnostics either attempt's numbers came
-/// from.
-/// `factorize`'s own gate for attempting [`factorize_bordered`] before
-/// falling back to plain [`factorize_flat_markowitz`] — see
-/// `factorize_bordered`'s own docs for the technique and why it exists.
-///
-/// This gate's own detection cost (`detect_border_columns`, one `O(nnz)`
-/// pass) is cheap enough to run unconditionally: a controlled full-73-
-/// problem Netlib A/B (this gate enabled vs. plain
-/// `factorize_flat_markowitz` always) showed no measurable regression on
-/// any instance once run-to-run subprocess scheduling noise was
-/// controlled for (repeated head-to-head timing, not two independently-
-/// scheduled full-batch runs — several apparent double-digit-percent
-/// "regressions" in the first batch-vs-batch comparison, e.g.
-/// `fffff800`/`scfxm1`/`ganges`, vanished under direct repeated
-/// comparison), while several instances beyond `fit1p` itself improved
-/// substantially (`scrs8` -58%, `ship04s` -57%, `shell` -52%, `maros`
-/// -41%, `fit1p` -26%, plus a handful more in the 20-45% range) — this is
-/// the same `k`-nonzero-columns detection [`DENSE_COL_FRACTION`] already
-/// made cheap for `MarkowitzState::initially_dense`'s own purposes,
-/// evidently common enough across Netlib-shaped LPs (not just the
-/// `fit1p`/`fit2p` "trend column" family) to be worth attempting by
-/// default rather than gating behind an opt-in flag.
-///
-/// **`BORDER_MAX_FRACTION` (`k / m`) is the real, measured constraint —
-/// not an absolute `k` count.** A synthetic-`fit1p`-shaped sweep
-/// (`border_crossover_sweep*` in this module's own tests, `#[ignore]`d,
-/// rerun via `cargo test --release -- --ignored --nocapture border_`) at
-/// both `m=800` and `m=2000` found `factorize_bordered` beating
-/// whatever `factorize_flat_markowitz` would otherwise pick (plain
-/// Markowitz below `is_dense_input`'s own 25% gate, `factorize_dense_faer`
-/// above it — `factorize_bordered` beats *that* too, up to a point) by
-/// **30x-600x** for `k/m` up to `0.40`, crossing over to a wash somewhere
-/// around `k/m ~= 0.5` and a clear loss by `k/m = 0.6` — at *both* `m`
-/// values, i.e. this is a genuine fraction effect (the `k x k` Schur
-/// complement's own `O(k^3)` dense-factor cost, relative to the `(m-k)`-
-/// sized sparse part it's carved out of), not an absolute-`k` one: `m=800,
-/// k=400` and `m=2000, k=1000` (both `k/m=0.5`) landed at the same
-/// break-even point despite `k` itself differing by 2.5x. `0.4` sits with
-/// real margin below the measured crossover.
-///
-/// The *previous* version of this gate paired that fraction with a
-/// `BORDER_MAX_COUNT` of `200` on the mistaken assumption that unbounded
-/// `k` needed an absolute backstop the way the reverted Dulmage-Mendelsohn
-/// attempt did — the sweep above disproves that directly (`m=2000, k=800`,
-/// five times over `200`, still won by 603x). `BORDER_MAX_COUNT` here is
-/// now a purely defensive sanity bound, sized so its own `O(k^3)` dense
-/// factor stays well under this crate's stated basis-size envelope ("`m`
-/// in the low thousands", per `GpScratch`'s own docs) rather than
-/// something expected to actually bind — `BORDER_MAX_FRACTION` is doing
-/// the real work.
-const BORDER_MAX_FRACTION: f64 = 0.4;
-const BORDER_MAX_COUNT: usize = 3000;
-
 /// Columns whose nonzero count exceeds [`DENSE_COL_FRACTION`] of `m` —
 /// the same "near-fully-dense trend/regression column" shape
 /// `MarkowitzState::initially_dense` already detects internally, exposed
@@ -2173,35 +1885,6 @@ pub(crate) static PROF_REBUILD_ROW_REPICKS: AtomicUsize = AtomicUsize::new(0);
 /// even attempt a reuse for, after a rejection.
 pub(crate) static PROF_REBUILD_BACKOFF_SKIPS: AtomicUsize = AtomicUsize::new(0);
 
-/// A reuse is abandoned (falling back to a full Markowitz `factorize`)
-/// once the factors it is producing exceed this multiple of the nonzero
-/// count of the last *full* factorization's own `L`+`U`.
-///
-/// **`1.25` is measured, not guessed.** Fill a reuse produces is not a
-/// one-off cost — it is paid again by every FTRAN/BTRAN for the whole life
-/// of the resulting factorization — and a generous limit is a net *loss*
-/// even though it accepts more reuses: over a 25-problem in-process A/B
-/// (`analysis/` note for this change, §3) the aggregate against the
-/// feature disabled ran `2.0` +2.7%, `1.1` +0.4%, `1.25` -1.5%, with the
-/// `2.0` arm's worst case `greenbeb` +30%. Too *tight* loses the other
-/// way: `1.0`/`1.05` reject nearly every attempt (the basis genuinely
-/// densifies between refactorizations), so the backoff below stops even
-/// trying and the feature turns into pure overhead.
-///
-/// The reused order was chosen by Markowitz against a *previous* basis;
-/// the current one differs from it by however many Forrest-Tomlin updates
-/// happened since, so the same order can be numerically fine yet produce
-/// far more fill than a fresh Markowitz run would. Fill produced here is
-/// not a one-off cost: it is paid again by every FTRAN/BTRAN for the whole
-/// life of the resulting factorization, which is exactly the trade this
-/// guard exists to cap. The baseline deliberately tracks the last *full*
-/// factorization rather than the immediately-preceding one (see
-/// [`FtLu::fill_baseline`]), so a long chain of reuses cannot ratchet the
-/// limit upward one small increment at a time; a basis whose fill
-/// genuinely grew simply fails this guard once, gets a fresh Markowitz
-/// factorization, and the new baseline is that one's own.
-const REBUILD_FILL_LIMIT: f64 = 1.25;
-
 /// [`REBUILD_FILL_LIMIT`], overridable at run time via
 /// `ENOMOTO_REUSE_FILL_LIMIT` (a bare float) so the one number can be
 /// re-tuned against the Netlib set without a rebuild — and, more to the
@@ -2219,14 +1902,6 @@ fn reuse_fill_limit() -> f64 {
 pub(crate) static PROF_REBUILD_ACCEPTED_NNZ: AtomicUsize = AtomicUsize::new(0);
 pub(crate) static PROF_FULL_NNZ: AtomicUsize = AtomicUsize::new(0);
 pub(crate) static PROF_FULL_COUNT: AtomicUsize = AtomicUsize::new(0);
-
-/// Absolute floor on a pivot's magnitude: below this the column has
-/// nothing usable left in the remaining submatrix at all, and the whole
-/// attempt is abandoned rather than dividing by (almost) zero. Far below
-/// `simplex.rs`'s own `FT_MIN_PIVOT` deliberately — this is a "there is no
-/// pivot here" test, not a quality test, which the [`STABILITY`] check
-/// next to it already is.
-const REBUILD_MIN_PIVOT: f64 = 1e-12;
 
 /// Whether pivot-order reuse is enabled (default: yes), toggled by
 /// `ENOMOTO_REUSE_PIVOT_ORDER=0`. Exists so an A/B of this feature can
@@ -2333,12 +2008,6 @@ fn wants_bordered(m: usize, rows_in: &[Vec<(usize, f64)>]) -> bool {
 fn border_wanted(m: usize, k: usize) -> bool {
     k > 0 && k <= BORDER_MAX_COUNT && (k as f64) <= tunable!("ENOMOTO_T_BORDER_MAX_FRACTION", BORDER_MAX_FRACTION, f64) * m as f64
 }
-
-/// Caps on [`factorize_reusing`]'s own exponential backoff after a
-/// rejected reuse: the streak's shift is capped first (so the shift itself
-/// can never overflow), then the resulting skip count.
-const REUSE_BACKOFF_SHIFT_CAP: u32 = 5;
-const REUSE_MAX_BACKOFF: u32 = 16;
 
 /// Factorizes `rows_in` with the **column order given** rather than
 /// searched for: step `s` eliminates column `pivot_col[s]`, pivoting on
@@ -3598,14 +3267,6 @@ impl LuFactors {
 // than being re-written as a two-armed `match` at each of this file's
 // eight FTRAN/BTRAN call sites.
 
-/// A column/row whose off-diagonal fill exceeds this fraction of `m` is
-/// stored densely (see [`HybridVec`]). Unlike [`DENSE_COL_FRACTION`] (tuned
-/// against real Netlib data, all of it sparse), this threshold has no
-/// dense-problem benchmark to tune against yet in this crate's own test
-/// set — `0.4` is a first-pass value, not a measured one; re-tune once a
-/// genuinely dense-coefficient LP is available to benchmark against.
-const DENSE_ETA_FRACTION: f64 = 0.4;
-
 /// A singleton `U` eta: a bare diagonal pivot with no off-diagonal entries.
 #[derive(Clone, Copy)]
 struct SEta {
@@ -3859,61 +3520,6 @@ impl EtaFile {
     }
 }
 
-
-/// A caller-provided FTRAN right-hand side whose own nonzero count exceeds
-/// this fraction of `m` is dense enough that the Gilbert-Peierls sparse
-/// path's DFS/epoch bookkeeping (see `LuFactors::l_solve_sparse_into`'s own
-/// docs) no longer pays for itself — its reach set is bounded below by the
-/// rhs's own nonzero count, so a dense rhs alone already guarantees a large
-/// reach regardless of how sparse `L` itself is. Exposed as
-/// [`FtLu::should_use_dense_solve`] rather than a flag fixed at
-/// construction time: an earlier version of this gate measured density
-/// once per refactorization from the *basis*'s own `L`/`U` fill and cached
-/// it — which reads as permanently sparse for the entire solve whenever
-/// the crash-start basis (the slack identity, always maximally sparse)
-/// never gets refactorized a second time, silently never firing even on a
-/// genuinely dense-coefficient LP whose real (post-pivoting) basis is
-/// dense throughout. Checking the actual rhs at each call site instead has
-/// no such staleness problem and costs nothing extra (the caller already
-/// has the sparse rhs's length on hand). Like `DENSE_ETA_FRACTION`, `0.4`
-/// is a first-pass threshold, not one tuned against a real dense-problem
-/// benchmark yet.
-const DENSE_RHS_FRACTION: f64 = 0.4;
-
-/// Weight given to the newest observation when folding it into an
-/// [`FtranDensity`] running average. This is HiGHS's own
-/// `kRunningAverageMultiplier` (`HEkk::updateOperationResultDensity`,
-/// used there for exactly the same purpose — see that class's
-/// `col_aq_density`/`row_ep_density` fields), kept at the same value for
-/// the same reason: small enough that one atypical iteration cannot flip
-/// the dense/sparse dispatch on its own, large enough that a genuine
-/// phase change (a basis that has filled in over the last dozen pivots)
-/// is picked up within ~20 iterations rather than being averaged away
-/// over the whole solve.
-const DENSITY_AVERAGE_MULTIPLIER: f64 = 0.05;
-
-/// An FTRAN call site whose recent *results* have averaged denser than
-/// this fraction of `m` takes the dense solve regardless of how sparse
-/// the right-hand side it is handed happens to be — see [`FtranDensity`]'s
-/// own docs for why the input's own nonzero count
-/// ([`DENSE_RHS_FRACTION`]) is not a sufficient predictor on its own.
-/// Overridable at run time via `ENOMOTO_EXPECTED_DENSITY_GATE` (see
-/// [`expected_dense_gate`]) so this one number can be re-tuned against the
-/// Netlib set without a rebuild.
-///
-/// `0.35` is measured, not guessed (`analysis/ftran_density_gate_20260922_062832.md`
-/// §4.2, an A/B over the full Netlib set run *inside one process* with the
-/// setting flipped between solves, since this box's per-problem run-to-run
-/// spread otherwise reaches 4x): against the gate disabled, `0.35` is -3.9%
-/// over the 14 mid-heavy instances and -1% over all 93, while `0.2` is
-/// *worse* than no gate at all (+0.8%). The reason `0.2` loses is specific
-/// and worth keeping: it drags the BFRT combined-flip channel onto the dense
-/// path too (its results average 0.24-0.49 dense, against the entering
-/// column's 0.65-0.99), and on `greenbeb` that turns a -22% win into -1%.
-/// A threshold between the two channels' own measured densities is what the
-/// gate wants, not the lowest one that still fires.
-const EXPECTED_DENSE_FRACTION: f64 = 0.35;
-
 /// [`EXPECTED_DENSE_FRACTION`], overridable at run time via the
 /// `ENOMOTO_EXPECTED_DENSITY_GATE` environment variable (a bare float;
 /// any value `>= 1.0` disables the result-density gate outright, since no
@@ -3927,36 +3533,6 @@ fn expected_dense_gate() -> f64 {
         .and_then(|v| v.parse::<f64>().ok())
         .unwrap_or(EXPECTED_DENSE_FRACTION)
 }
-
-/// Density ceiling for BTRAN's row-major scatter form
-/// ([`LuFactors::l_transpose_solve_scatter_into`]): the `L^{-T}` stage
-/// takes it only when under this fraction of the incoming `w` is nonzero,
-/// and falls back to the column-major gather form
-/// ([`LuFactors::l_transpose_solve_gather_into`]) otherwise.
-///
-/// **A gate is needed here, not just a faster kernel.** The two forms
-/// touch exactly the same `L` entries; what differs is the access shape.
-/// Gather reads `w[row_step]` at random and accumulates into one place
-/// (`w[s]`, which the compiler keeps in a register across the whole inner
-/// loop); scatter reads one place (`w[s]`) and does a random
-/// read-modify-write per entry. On a sparse `w` the scatter's whole-step
-/// skip wins outright — most steps do no work at all — but on a dense `w`
-/// nothing is skipped and the scatter is left paying random *stores*
-/// where the gather paid random *loads*, which is strictly worse. Measured
-/// exactly that way on the first ungated A/B of this change: `dfl001`
-/// (whose BTRAN `w` is dense by the time `U^{-T}` and the `R` etas are
-/// done with it) +6.5%, against wins on the sparse-`w` instances. HiGHS
-/// gates all four of its own solve directions for the same reason
-/// (`HFactor::btranL`'s own `sparse_solve` test, `kHyperBtranL`).
-///
-/// The test is an exact nonzero count of `w`, not a running-average
-/// prediction: unlike an FTRAN's input (whose density is only knowable
-/// from history — see [`FtranDensity`]'s own docs), `w` is right there in
-/// a buffer that every path over it already scans at least once more
-/// (the permutation into `y`), so one early-exiting `O(m)` sequential
-/// pass answers the question exactly, for a fraction of the `nnz(L)`
-/// random accesses the stage itself is about to do either way.
-const BTRAN_L_SCATTER_FRACTION: f64 = 0.10;
 
 /// Builds [`LuFactors::l_row`] — or, when the scatter form is disabled
 /// outright (`ENOMOTO_BTRAN_L_SCATTER=0`), an empty stand-in with the same
@@ -4387,48 +3963,6 @@ pub struct FtLu {
     /// see [`Self::u_solve_into`].
     u_zero_skip: bool,
 }
-
-/// Per-row-of-`U`-and-`L` coefficient for [`FtLu::build_tick`]'s `m`-only
-/// term — HiGHS's own `buildSynthticTick` (`HFactor.cpp`) uses `80` for the
-/// analogous term (`num_row * 80`); kept unchanged here rather than
-/// re-derived, since this crate's `refactorize` pays the same *kind* of
-/// fixed per-row bookkeeping (permutation arrays, `u_seq`/`row_owners`
-/// construction in [`FtLu::new`]) HiGHS's own `buildFinish` does, just at a
-/// different (higher, per `docs/lu_comparison_enomoto_vs_highs.md` §3.1 and
-/// this trigger's own analysis §4) constant of proportionality that the
-/// *other* coefficient ([`TICK_BUILD_LU_COEF`]) already carries — see
-/// [`SYNTH_CLOCK_FACTOR`]'s own docs for why the *ratio* between the two
-/// build-tick terms and the *solve*-side tick units is what calibration
-/// actually tunes, not this constant in isolation.
-const TICK_BUILD_M_COEF: u64 = 80;
-/// Per-nonzero-of-`(L+U)` coefficient for [`FtLu::build_tick`] — HiGHS's own
-/// `buildSynthticTick` uses `60` for `(l_nnz + u_off) * 60`. Kept at HiGHS's
-/// own value for the same reason as [`TICK_BUILD_M_COEF`]: this crate's
-/// Markowitz `factorize` (§4/§5 of this trigger's own analysis, measured
-/// when the kernel still used `BTreeMap`/`BTreeSet` storage rather than
-/// today's [`KernelMatrix`]) is 3-25x more expensive *per nonzero* than
-/// HiGHS's `HFactor::buildKernel` — the flattening narrowed that gap but
-/// did not close it, and it is the gap's *existence*, not its exact size,
-/// that makes a
-/// *higher* [`SYNTH_CLOCK_FACTOR`] (not a higher `TICK_BUILD_*_COEF`) the
-/// right lever: raising these two coefficients would inflate `build_tick`
-/// but leave the *solve*-side tick (driven by [`TICK_SOLVE_NNZ_COEF`]) at
-/// the same scale, which double-counts the same "our factorization is
-/// slower" fact the factor calibration already absorbs once.
-const TICK_BUILD_LU_COEF: u64 = 60;
-/// Per-multiply-add coefficient of the elimination flop term in
-/// [`FtLu::build_tick`] (S16, `ENOMOTO_T_TICK_BUILD_FLOP_COEF`). `0` (the
-/// default) leaves `build_tick` exactly the HiGHS-shaped `m`/`nnz(L+U)` sum.
-const TICK_BUILD_FLOP_COEF: u64 = 0;
-/// Per-nonzero coefficient applied to every solve-stage tick increment
-/// (`R`-eta nonzeros touched, `U`/`U^T`-eta nonzeros touched, `L`-stage
-/// reach-set size) — kept at `1` (i.e. `tick` is a plain nonzero count,
-/// unscaled) so [`SYNTH_CLOCK_FACTOR`] alone carries the crate-specific
-/// per-nonzero cost ratio between this crate's own solves and HiGHS's; splitting that ratio across two constants
-/// (this one and the factor) would make calibration harder to reason about
-/// with no accuracy benefit, since both only ever appear multiplied
-/// together in the trigger's own comparison.
-const TICK_SOLVE_NNZ_COEF: u64 = 1;
 
 impl FtLu {
     pub fn new(base: LuFactors) -> Self {
@@ -6811,7 +6345,6 @@ mod tests {
             assert_eq!(y_ref, y_sparse, "sparse-capture diverged from try_update on solve_transpose: rhs={rhs:?}");
         }
     }
-
 
     /// Deterministic xorshift-ish LCG, no external `rand` dependency
     /// needed for a test fixture this small.

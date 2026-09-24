@@ -118,11 +118,13 @@
 //!    pass, tie-breaking permanently switches to smallest-index-first
 //!    (`bland_mode`).
 
-use super::{sparse_lu, InfeasibleRows, NbStatus, SimplexResult, StdForm, Status, TOL};
+use super::{sparse_lu, InfeasibleRows, NbStatus, SimplexResult, StdForm, Status};
 use crate::sparse::sparse_axpy_dense;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::sync::OnceLock;
+use crate::params::simplex::{FT_BUMP_LIMIT_FACTOR, FT_CHECK_INTERVAL, FT_MIN_PIVOT, FT_RESIDUAL_TOL, HARRIS_RATIO_TOL, MAX_ITERS_FLOOR, PRIMAL_FEAS_TOL, RESIDUAL_CHECK_MULTIPLIER, STALL_PROGRESS_EPS, STEEPEST_EDGE_FLOOR, TOL};
+use crate::params::extended_dual::{D_DRIFT_TOL, D_GROSS_MISMATCH_REL_TOL, FT_MAX_UPDATES_FACTOR, FT_MAX_UPDATES_FLOOR, PIVOT_ESCALATION_STEP, SLOPE_TOL, SYNTH_CLOCK_FACTOR, SYNTH_CLOCK_MIN_UPDATES, XB_CHECK_INTERVAL, XB_DRIFT_ESCALATION_FACTOR, XB_DRIFT_ESCALATION_STEP, XB_DRIFT_TOL, XB_DRIFT_TOL_MAX, X_B_SLOPE_NOISE, Z_SLOPE_TOL};
 
 /// Per-phase wall-clock counters for the `ENOMOTO_PROF_PHASES_EXT`
 /// diagnostic — this module's own counterpart to `simplex::prof_phases`
@@ -183,7 +185,7 @@ mod prof_phases {
     pub(super) static REFACTOR_CAUSE_TRY_UPDATE: AtomicUsize = AtomicUsize::new(0);
     pub(super) static REFACTOR_CAUSE_BUMP: AtomicUsize = AtomicUsize::new(0);
     pub(super) static REFACTOR_CAUSE_DRIFT: AtomicUsize = AtomicUsize::new(0);
-    /// `d`'s own independent drift check ([`super::D_DRIFT_TOL`]'s own
+    /// `d`'s own independent drift check ([`D_DRIFT_TOL`]'s own
     /// docs) firing — distinct from `DRIFT` above, which only ever checks
     /// `x_B(M)`.
     pub(super) static REFACTOR_CAUSE_D_DRIFT: AtomicUsize = AtomicUsize::new(0);
@@ -206,7 +208,7 @@ mod prof_phases {
     /// means this guard actually saved (or at least delayed) an
     /// infeasibility report — on `greenbea` it fires exactly once.
     pub(super) static REFACTOR_CAUSE_INFEAS_CHECK: AtomicUsize = AtomicUsize::new(0);
-    /// Trigger (5) ([`super::extended_dual::SYNTH_CLOCK_FACTOR`]'s own
+    /// Trigger (5) ([`SYNTH_CLOCK_FACTOR`]'s own
     /// docs) firing — the deterministic operation-count ("synthetic tick")
     /// cost-based trigger, this module's counterpart to HiGHS's own
     /// `kRebuildReasonSyntheticClockSaysInvert`
@@ -223,7 +225,7 @@ mod prof_phases {
     /// Peak `lu.update_count()` observed *at any point* during the solve
     /// (via `fetch_max`, so this is the true peak across every
     /// refactorization interval, not just the value at solve end) — a
-    /// calibration gauge for [`super::extended_dual::FT_MAX_UPDATES_FACTOR`]
+    /// calibration gauge for [`FT_MAX_UPDATES_FACTOR`]
     /// itself, printed by `ENOMOTO_PROF_PHASES_EXT` but never consulted by
     /// any control-flow decision.
     pub(super) static MAX_UPDATE_STREAK: AtomicUsize = AtomicUsize::new(0);
@@ -558,284 +560,13 @@ macro_rules! timed {
     }};
 }
 
-/// How often (in main-loop iterations) the incremental `x_B(M)` drift
-/// check runs, checked every time regardless of `fill_count` — *not*
-/// gated by a further `RESIDUAL_CHECK_MULTIPLIER`-style coarser cadence
-/// the way `super::solve_lp_dual_on`'s own plain-`f64` `x_B` drift check
-/// is. That module's comparisons are plain Dantzig ratios; this one's
-/// (`Affine1::cmp_lex`/`Score2::cmp_lex`) decide almost every comparison
-/// on the *slope* term first, at a much tighter `REL_TOL` (`1e-9`) than
-/// the classical method's own drift tolerance (`FT_RESIDUAL_TOL`,
-/// `1e-4`) ever has to survive. Confirmed load-bearing, not merely
-/// tighter-for-safety's-sake: Netlib `maros`, at the classical method's
-/// own 100-iteration cadence, silently drifted its incrementally-
-/// maintained `x_B(M)` enough (each individual step well inside a loose
-/// tolerance, but accumulating over ~900 pivots) to flip a `cmp_lex`
-/// decision and reach the "no eligible entering column" case on a
-/// problem HiGHS solves — a false `Infeasible`, not a numerical no-op —
-/// before this tighter cadence existed.
-///
-/// **Loosening just this interval (keeping `XB_DRIFT_TOL` itself tight)
-/// was tried and reverted** — a bottleneck-analysis follow-up
-/// (`ENOMOTO_DEBUG_XB_DRIFT_EXT`) found that every drift-triggered
-/// refactor sampled across several slow Netlib instances, `maros`
-/// included, came from the `base` channel alone (`slope` never exceeded
-/// ~1e-12, four-plus orders of magnitude below even this tight
-/// tolerance), which made "check less often, same tolerance" look like a
-/// safe lever: `maros` itself stayed optimal all the way out to a
-/// (temporary, env-var-overridden) 100-iteration interval. But a full
-/// 73-problem benchmark run at interval `50` told a different story: 5
-/// problems broke — `cycle` and `degen3` regressed to a **false
-/// `Infeasible`** (exactly the failure mode this whole mechanism exists
-/// to prevent, just on different instances than `maros`), and
-/// `perold`/`pilotnov`/`wood1p` blew past a 30s timeout (a degenerate
-/// instance's pivot sequence is sensitive to the exact floating-point
-/// state a resync leaves behind — `25fv47`'s own iteration count swung
-/// non-monotonically between roughly 5,000 and 20,000 across intervals
-/// 5–100 during this same sweep, confirming the effect isn't isolated to
-/// the two infeasible cases). `maros` alone passing was not
-/// representative of the other 72 problems' own margins — reverted back
-/// to `FT_CHECK_INTERVAL` (`5`).
-const XB_CHECK_INTERVAL: usize = super::FT_CHECK_INTERVAL;
-
-/// The drift tolerance [`XB_CHECK_INTERVAL`]'s own check compares against
-/// — tighter than `super::FT_RESIDUAL_TOL` for the same reason that
-/// constant's own docs give: this module's decisions are sensitive at
-/// `Affine1::cmp_lex`'s `1e-9` `REL_TOL`, so the drift check needs
-/// headroom below that, not `FT_RESIDUAL_TOL`'s much looser `1e-4`.
-///
-/// **History — four single-knob loosening attempts tried and reverted
-/// before landing on the per-solve escalation below:**
-///
-/// 1. Loosening [`XB_CHECK_INTERVAL`] (keeping the tolerance itself tight)
-///    broke `cycle`/`degen3` into false `Infeasible`.
-/// 2. Loosening this *absolute* bound itself (`1e-8` -> `1e-7`) fixed
-///    `maros` but regressed `fit1p` 5.8x on a full 73-problem sweep.
-/// 3. A *relative* bound scaled by `‖fresh_base‖`/`‖fresh_slope‖` alone
-///    (mirroring [`D_DRIFT_TOL`]'s own `scale_d` pattern for `d`), tried at
-///    two values three orders of magnitude apart, regressed the
-///    73-problem set either way (~+8-9%) while giving big wins on
-///    `d2q06c`/`greenbeb`/`pilot` — the `‖x_B(M)‖`-only floor (`1.0`) never
-///    actually engages on real Netlib instances (every instance measured
-///    sits far above it), so a single multiplier just applies uniformly to
-///    everyone.
-/// 4. A backward-error-style scale (`‖A_B‖_max * ‖x_B(M)‖ + ‖fresh_rhs‖`,
-///    the standard LAPACK relative-residual formula for `Ax=b`) measured
-///    real per-instance scales spanning `~43` (`wood1p`) to `~3.6e6`
-///    (`maros`) — but `fit1p` (scale `~859`, fragile to *any* loosening per
-///    attempt 2) sits *above* `wood1p` (scale `~43`, which needs loosening
-///    just to avoid becoming *stricter* than the old absolute bound). No
-///    single scale-derived multiplier can loosen `wood1p` without loosening
-///    `fit1p` by more than its own known-fragile margin — fragility and
-///    problem-scale don't correlate under any norm tried.
-///
-/// **This version** breaks that correlation requirement entirely: instead
-/// of predicting up front which problems need a looser bound from some
-/// static property, it escalates *within a single solve*, based only on
-/// how many times *this solve's own* drift check has already fired
-/// ([`XB_DRIFT_ESCALATION_STEP`]/[`XB_DRIFT_ESCALATION_FACTOR`]/
-/// [`XB_DRIFT_TOL_MAX`]'s own docs). A problem that drift-refactors 0-9
-/// times in its whole solve (measured: `fit1p` 5, `wood1p` 1, `cycle` 0-2,
-/// `degen3` 0, `pilotnov` 6 — every instance any prior attempt broke or
-/// nearly broke) never reaches the first escalation step, so it sees
-/// *zero* behavior change from the unmodified `1e-8` this constant always
-/// was. Only a solve that has already proven itself drift-heavy (`d2q06c`
-/// 546, `greenbeb` 236, `pilot` 88-190, `fit2p` 25, all measured at the
-/// flat `1e-8` baseline) earns a progressively looser bound — and since
-/// loosening it also slows the *rate* new drift triggers accumulate, this
-/// is a self-damping control loop, not an open-loop guess: a solve
-/// escalates only as fast as its own residual growth actually demands.
-const XB_DRIFT_TOL: f64 = 1e-8;
-/// Every this many drift-triggered refactorizations *within the same
-/// solve*, [`XB_DRIFT_TOL`]'s own effective bound multiplies by
-/// [`XB_DRIFT_ESCALATION_FACTOR`] (capped at [`XB_DRIFT_TOL_MAX`]) — see
-/// that constant's own docs for why this is a per-solve escalation rather
-/// than a static per-problem scale. `10` keeps every instance measured at
-/// single-digit drift-refactor counts (the ones prior attempts broke)
-/// entirely below the first step, while still letting a genuinely
-/// pathological solve (hundreds of triggers at the flat bound) climb
-/// through several steps before this cap's own `1e-4` ceiling.
-const XB_DRIFT_ESCALATION_STEP: usize = 10;
-/// Multiplier applied per [`XB_DRIFT_ESCALATION_STEP`] drift triggers.
-/// `10` mirrors the *single* absolute-loosening step attempt 2 (this
-/// constant's own docs) already measured in isolation (`1e-8` -> `1e-7`
-/// fixed `maros`, broke `fit1p`) — the escalation ladder repeats that same,
-/// already-characterized step size rather than inventing a new one, but
-/// only after `XB_DRIFT_ESCALATION_STEP` proves the *current* solve is
-/// actually the kind that benefits from it.
-const XB_DRIFT_ESCALATION_FACTOR: f64 = 10.0;
-/// Ceiling on the escalated [`XB_DRIFT_TOL`] — reuses `super::FT_RESIDUAL_TOL`'s
-/// already-proven-safe order of magnitude (the classical method's own
-/// absolute drift bound, `1e-4`) rather than letting escalation grow
-/// unbounded into territory no measurement has ever validated.
-const XB_DRIFT_TOL_MAX: f64 = super::FT_RESIDUAL_TOL;
-
-/// How many *numerically-caused* refactorizations this solve has to take
-/// before its LU pivot threshold is escalated one step
-/// (`sparse_lu::escalate_pivot_threshold`,
-/// `docs/lu_comparison_enomoto_vs_highs.md` §2.4) — **`0`, i.e. the
-/// escalation is off by default**, because it was measured and lost.
-///
-/// HiGHS raises `info_.factor_pivot_threshold` on a numerical failure and
-/// this crate can too, but on NETLIB93 tightening the floor costs far more
-/// in fill-in than it saves in refactorizations: at `10` (the value
-/// [`XB_DRIFT_ESCALATION_STEP`]'s own ladder uses, and the one measured)
-/// the 93-problem total went **+7.4%**, with `pilot87` +29.2% (6.50s ->
-/// 8.40s, reproducible across all three runs), `brandy` +67% and
-/// `gfrd-pnc` +12.3% — three problems past the 10%-regression bar on their
-/// own. The escalation fired on 7 of the 10 heaviest problems, because the
-/// `x_B(M)` drift trigger alone reaches 10 on most of them (`pilot` 21,
-/// `dfl001` 24), so it is the *ordinary* heavy solve that gets the `0.5`
-/// floor `sparse_lu::STABILITY`'s own docs already measured as ~4% worse.
-/// Raising this constant until only pathological solves qualify makes it
-/// fire nowhere on NETLIB93 at all, which is not a measurable improvement
-/// either — hence off, rather than retuned.
-///
-/// The mechanism is kept (and reachable via
-/// `ENOMOTO_PIVOT_ESCALATION_STEP`, alongside `ENOMOTO_PIVOT_THRESHOLD`
-/// for the floor itself) so that a future attempt — a smaller step than
-/// `sparse_lu::PIVOT_THRESHOLD_FACTOR`'s doubling, or a trouble signal
-/// narrower than the four below — can be A/B'd without re-plumbing it.
-///
-/// "Numerically caused" means the four triggers that fire because the
-/// factorization stopped agreeing with the basis it stands for — a
-/// rejected Forrest-Tomlin update, `x_B(M)` drift, `d` drift, and a pivot
-/// grossly inconsistent with PRICE. It deliberately excludes the
-/// *cost*-based triggers (eta-bump fill, `ft_max_updates`, the
-/// deterministic CLOCK): those fire on schedule even on a perfectly
-/// conditioned problem, so counting them would escalate `dfl001`'s
-/// hundreds of routine refactorizations into fill-in it has no numerical
-/// reason to pay for.
-const PIVOT_ESCALATION_STEP: usize = 0;
-
-/// Trigger (4) for this module — `super::FT_MAX_UPDATES`'s own equivalent
-/// (an unconditional backstop against unbounded Forrest-Tomlin eta-chain
-/// growth, independent of the fill-based trigger (3) above and the
-/// `XB_CHECK_INTERVAL`/`XB_DRIFT_TOL` drift check), which this module never
-/// had at all until now — `super::FT_MAX_UPDATES` itself is only ever read
-/// from `super::solve_lp_dual_on`/`run_phase` (`grep` confirms no reference
-/// here), so a pathological pivot sequence whose eta fill happens to stay
-/// under trigger (3)'s own `FT_BUMP_LIMIT_FACTOR * m` budget indefinitely
-/// (a very sparse basis, or one where each update's own fill stays small)
-/// could accumulate Forrest-Tomlin updates without any hard ceiling.
-///
-/// **Sized adaptively to `m`, not copied as `super::FT_MAX_UPDATES`'s flat
-/// `300`** — a flat value tuned against the classical method's own problem
-/// mix would be wrong here by construction: this module already runs
-/// noticeably longer streaks between refactorizations, on some instances
-/// well past `super::FT_MAX_UPDATES` itself, before this trigger existed at
-/// all. Confirmed by adding [`prof_phases::MAX_UPDATE_STREAK`] (a
-/// `fetch_max` gauge of `lu.update_count()`, paying nothing beyond one
-/// atomic op per pivot) and sweeping essentially every Netlib `.mps` file
-/// available locally — not just the 73-problem, <=3000-variable subset the
-/// rest of this crate's own benchmark methodology otherwise targets, since
-/// calibrating a hard safety ceiling specifically wants the *widest*
-/// available range of `m` and pivot-sequence shapes, including the larger
-/// instances that benchmark excludes. The worst observed ratio
-/// (`peak_streak / m`) was **not** the largest basis in the sweep — it was
-/// `nesm` (`m=662`, peak streak `1090`, ratio `1.647`) — ahead of `scsd6`
-/// (`1.395`), `scsd1` (`1.338`), `adlittle` (`1.732`, but `m=56` is small
-/// enough [`FT_MAX_UPDATES_FLOOR`]'s own floor absorbs it), and `stocfor2`
-/// (`m=2157`, peak streak `1665`, ratio `0.772` — the instance this
-/// constant's very first draft was calibrated against, before the fuller
-/// sweep found worse ratios elsewhere; kept in this history as a reminder
-/// that a handful of hand-picked instances is not a substitute for sweeping
-/// everything available). [`ft_max_updates`] scales with `m`
-/// ([`FT_MAX_UPDATES_FACTOR`] `* m`, floored at [`FT_MAX_UPDATES_FLOOR`] so
-/// a tiny basis still gets at least the classical method's own
-/// already-proven `300`) — at `nesm`'s own `m=662` this gives `1986`, a
-/// `1.82x` margin over its own observed peak, comfortably wider than the
-/// `1.21x` a smaller factor (`2.0`) left there. Every other instance in the
-/// sweep has a lower ratio than `nesm`'s, so this margin is the binding one
-/// crate-wide, not merely for one instance. Generous by design — this is
-/// meant to sit as a rarely-firing safety net (mirroring
-/// `super::FT_MAX_UPDATES`'s own documented role once tuned high enough —
-/// see that constant's own docs), not a routine performance lever the way
-/// trigger (3) is; `max_updates_fired=0` across every instance in the same
-/// sweep (see [`prof_phases::REFACTOR_CAUSE_MAX_UPDATES`]) confirms this
-/// trigger changes nothing about the current benchmark's own behavior —
-/// its only job is bounding the *next* pathological instance that shows up.
-///
-/// `3.0` carries real margin above the worst case actually measured, not an
-/// exhaustively swept optimum the way [`super::FT_BUMP_LIMIT_FACTOR`] was —
-/// re-tune (sweeping *at least* as wide a problem set as the survey above,
-/// not just the 73-problem subset) if
-/// [`prof_phases::REFACTOR_CAUSE_MAX_UPDATES`] is ever observed firing
-/// nonzero on a real instance, which would mean either the factor needs
-/// raising further or a genuinely pathological low-fill/long-streak
-/// instance has been found.
-const FT_MAX_UPDATES_FACTOR: f64 = 3.0;
-/// Floor for [`ft_max_updates`] — never weaker than the classical method's
-/// own already-proven-safe flat cap, regardless of how small `m` is.
-const FT_MAX_UPDATES_FLOOR: usize = super::FT_MAX_UPDATES;
-
 /// `m`-scaled trigger (4) threshold — see [`FT_MAX_UPDATES_FACTOR`]'s own
 /// docs for the reasoning and the measurement that ruled out reusing
-/// `super::FT_MAX_UPDATES`'s flat value directly.
+/// `FT_MAX_UPDATES`'s flat value directly.
 #[inline]
 fn ft_max_updates(m: usize) -> usize {
     ((tunable!("ENOMOTO_T_FT_MAX_UPDATES_FACTOR", FT_MAX_UPDATES_FACTOR, f64) * m as f64) as usize).max(FT_MAX_UPDATES_FLOOR)
 }
-
-/// Trigger (5): the deterministic, cost-based refactorization trigger
-/// (`analysis/ft_refactor_trigger_20260922_040850.md` §5/§6) — this
-/// module's replacement for that analysis's wall-clock
-/// `ENOMOTO_SYNTH_CLOCK` prototype, using [`sparse_lu::FtLu::synth_tick`]'s
-/// deterministic operation-count accumulator instead of `Instant::now()` so
-/// the same solve always refactorizes at the same iterations (the
-/// analysis's own §6 explicitly calls out replacing the wall-clock stand-in
-/// with exactly this kind of counter before shipping it, precisely to avoid
-/// making refactorization timing — and hence the whole pivot sequence —
-/// depend on machine load/scheduling noise).
-///
-/// Mirrors HiGHS's own `HEkk::updateFactor` (`HEkk.cpp:3075-3090`,
-/// `total_synthetic_tick_ >= build_synthetic_tick_ && update_count >= 50`):
-/// once `update_count` reaches [`SYNTH_CLOCK_MIN_UPDATES`] *and* the
-/// accumulated solve-side tick since the last refactorization reaches
-/// `SYNTH_CLOCK_FACTOR * lu.build_tick()`, this basis is deemed to have
-/// already "paid for" a fresh factorization in the FTRAN/BTRAN work spent
-/// solving against the current (eta-chain-lengthened) one — see this
-/// trigger's own analysis file, §2.3 in particular, for why that FTRAN/BTRAN
-/// unit cost keeps climbing with chain length (the `R`-eta stage's own
-/// gather structure can't skip zeros, so a longer chain means literally
-/// more nonzero-multiply-adds every single solve).
-///
-/// **`SYNTH_CLOCK_FACTOR` calibration**: the wall-clock prototype
-/// (`ENOMOTO_SYNTH_CLOCK`) found 2-4x optimal in *wall-clock* units, but a
-/// tick built from [`sparse_lu::TICK_BUILD_M_COEF`]/[`sparse_lu::TICK_BUILD_LU_COEF`]
-/// left at HiGHS's own values is **not** the same unit as wall-clock
-/// seconds, so that factor doesn't carry over — re-swept from scratch here,
-/// in tick units, over the same 24-problem set the analysis itself used
-/// (`analysis/ft_refactor_trigger_20260922_040850.md` §5's own table).
-///
-/// A coarse sweep (`ENOMOTO_SYNTH_CLOCK_FACTOR` in `{1, 1.5, 2, 3, 4, 6, 8,
-/// 12, 16, 20, 24, 32, 48, 64, 100}`, one full 24-problem pass per value)
-/// found the aggregate 24-problem total *non-monotonic* — individual
-/// instances (`pilot87` worst, occasionally `dfl001`) are sensitive to
-/// exactly where a refactorization lands (a changed pivot sequence can
-/// resync onto a longer or shorter path than before; §5's own note that
-/// "反復数の変化は...丸めが変わるため" already flags this), so a single
-/// aggregate-total-minimizing value can hide a large regression on one
-/// instance a small improvement on many others outweighs in the sum. `12`,
-/// for instance, is a genuine cliff (`pilot87` alone balloons from ~10s to
-/// ~70s at that exact value, not measurement noise — confirmed
-/// reproducible bit-for-bit given [`Self::tick`]'s own determinism) that a
-/// coarser or finer grid could easily have stepped over in either
-/// direction. `16` was chosen instead by the same per-problem regression
-/// budget this trigger's own verification uses (no instance may regress
-/// >10%): every one of the 24 problems is flat-to-improved at `16` except
-/// `pilot87` (+7-9%, confirmed stable — not a cliff — at `10`/`14`/`16`/
-/// `18`/`20` alike) and `dfl001` (-1.6%, i.e. not a regression at all) —
-/// the two instances with by far the largest absolute runtime, so keeping
-/// *both* comfortably inside the regression budget outweighed chasing a
-/// marginally lower 24-problem aggregate at `20` (which flips that
-/// trade-off: `dfl001` +5.1%, `pilot87` ~flat) or higher. The target
-/// instances this trigger exists for (`stocfor2` -39%, `bnl2` -27%,
-/// `80bau3b` -31%, `greenbea` -23%, `degen3` -24%, `d2q06c` -17%) are all
-/// comfortably at or beyond the wall-clock prototype's own §5 numbers at
-/// this value. See this crate's commit history around this trigger's
-/// introduction for the full sweep's raw numbers if re-calibrating.
-const SYNTH_CLOCK_FACTOR: f64 = 16.0;
 
 /// [`SYNTH_CLOCK_FACTOR`], overridable via `ENOMOTO_SYNTH_CLOCK_FACTOR` —
 /// a calibration knob only (parsed once, cached), matching this file's
@@ -845,7 +576,7 @@ const SYNTH_CLOCK_FACTOR: f64 = 16.0;
 /// *shipped* behavior is [`SYNTH_CLOCK_FACTOR`]'s own hardcoded, calibrated
 /// value; this override exists so a future re-calibration sweep (a basis
 /// composition shift large enough to move the crate's own per-nonzero cost
-/// ratios — see [`sparse_lu::TICK_BUILD_LU_COEF`]'s own docs) doesn't need a
+/// ratios — see [`TICK_BUILD_LU_COEF`]'s own docs) doesn't need a
 /// rebuild per candidate value.
 fn synth_clock_factor() -> f64 {
     static FACTOR: OnceLock<f64> = OnceLock::new();
@@ -856,18 +587,6 @@ fn synth_clock_factor() -> f64 {
             .unwrap_or(SYNTH_CLOCK_FACTOR)
     })
 }
-/// Same role as HiGHS's own `kSyntheticTickReinversionMinUpdateCount`
-/// (`50`, `HEkk.h`) — a floor below which this trigger never fires
-/// regardless of `synth_tick`, so a basis that has barely been updated at
-/// all (where a stray large tick from a single unusually dense solve could
-/// otherwise fire this trigger prematurely) always gets at least this many
-/// Forrest-Tomlin updates first. Kept at HiGHS's own value: nothing in this
-/// crate's own cost structure (unlike [`SYNTH_CLOCK_FACTOR`], which *does*
-/// need re-deriving — see that constant's own docs) gives a reason to move
-/// off HiGHS's number here, since this floor's only job is ruling out a
-/// noisy false-positive on the *first few* updates, independent of either
-/// side's own per-update cost.
-const SYNTH_CLOCK_MIN_UPDATES: usize = 50;
 
 /// Trigger (5) itself — see [`SYNTH_CLOCK_FACTOR`]'s own docs. Checked
 /// unconditionally (like trigger (4)'s own `ft_max_updates` check, a single
@@ -881,46 +600,6 @@ const SYNTH_CLOCK_MIN_UPDATES: usize = 50;
 fn synth_clock_should_refactor(lu: &sparse_lu::FtLu) -> bool {
     lu.update_count() >= tunable!("ENOMOTO_T_SYNTH_CLOCK_MIN_UPDATES", SYNTH_CLOCK_MIN_UPDATES, usize) && (lu.synth_tick() as f64) >= synth_clock_factor() * (lu.build_tick().max(1) as f64)
 }
-
-/// Independent drift check for the incrementally-maintained `d` (reduced
-/// costs), checked on the same [`XB_CHECK_INTERVAL`] cadence as
-/// [`XB_DRIFT_TOL`] but against its own residual (`‖d - fresh_d‖` scaled by
-/// `‖fresh_d‖`, [`fresh_d_into`]'s own recomputation), not `x_B(M)`'s.
-///
-/// Added after tracking down a real false `Infeasible` on Netlib `pilot4`:
-/// `d` drifted from its true (BTRAN-recomputed) value by an amount that
-/// reached the *millions* — not noise — for over 200 nonbasic columns by
-/// the time chuzc1 found no eligible entering column and this loop
-/// concluded (wrongly) that the row it had just selected was a genuine
-/// Proposition 4.6(ii) infeasibility. Before this check, `d`'s only
-/// correction was as a *side effect* of `x_B(M)`'s own drift/refactor
-/// triggers (`fresh_d_into` is called there anyway once a refactor already
-/// fires) — nothing ever measured `d`'s own drift directly, so a pivot
-/// sequence that happened to keep `x_B(M)`'s residual under [`XB_DRIFT_TOL`]
-/// and `try_update` succeeding could let `d`'s independent error compound
-/// unchecked for as long as that held. Confirmed present but *harmless* on
-/// the unmodified baseline too (a genuine, moderate-magnitude violation at
-/// one `pilot4` iteration that never compounded before the next refactor
-/// happened to clear it) — this check does not depend on, and was not
-/// caused by, any experimental pivot-selection change; it closes a latent
-/// gap in this loop's own numerical safety net that any sufficiently
-/// unlucky pivot sequence could have hit.
-const D_DRIFT_TOL: f64 = 1.0;
-
-/// How far apart `alpha_q` (PRICE) and `alpha_full[r]` (FTRAN) may be,
-/// relatively, before the entering pivot counts as "grossly inconsistent"
-/// (its own call site's docs) rather than merely the ordinary floating-
-/// point disagreement `super::UPDATE_VERIFY_TOL` (`1e-7`) already screens
-/// for when `lu.update_count() > 0`. Sits far above `UPDATE_VERIFY_TOL`
-/// deliberately: `0.5` still comfortably separates Netlib `pilot4`'s
-/// `alpha_q ~ 3.4e-9` vs `alpha_full[r] ~ 1e-21` (a relative gap of
-/// essentially `1.0`) from `bnl1`'s persistent, perfectly legitimate
-/// `~2.4e-7` disagreement on a normal-magnitude (`~3.3e-3`) pivot — the
-/// two Netlib instances that pinned this threshold's lower and upper
-/// bounds respectively (confirmed via a full 73-problem sweep both ways:
-/// tighter reproduced `perold`'s old refactor-storm pathology on `bnl1`
-/// instead; this value reproduces neither).
-const D_GROSS_MISMATCH_REL_TOL: f64 = 0.5;
 
 /// Test-only instrumentation: counts cleanup-lemma pivots actually
 /// performed (the "found r2" branch in [`finish`]) so a direct unit test
@@ -962,12 +641,6 @@ pub(crate) static CLEANUP_PIVOTS: ThreadLocalCounter = ThreadLocalCounter;
 /// needing to hand-derive in advance exactly which iteration does.
 #[cfg(test)]
 pub(crate) static COMBINED_FLIP_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
-/// `x_B(M)`'s `M`-coefficients are exactly zero or of order one in exact
-/// arithmetic; anything this small is accumulated LU/update noise. Left in,
-/// `Affine1::cmp_lex`'s slope-first order lets it override a comfortably
-/// feasible `base` and drives two-variable cycles (Netlib `greenbea`).
-const X_B_SLOPE_NOISE: f64 = 1e-7;
 
 #[inline]
 fn snap_slope(v: f64) -> f64 {
@@ -1090,7 +763,7 @@ impl Affine1 {
 /// and the walk runs off the end reporting a false `Infeasible` — even
 /// though a fresh factorization shows the same row's deviation is exactly
 /// covered. Mirrors `polish_with_true_bounds`'s own `reach_tol` (its own
-/// docs) and `super::PRIMAL_FEAS_TOL`'s stated purpose (a large-magnitude
+/// docs) and `PRIMAL_FEAS_TOL`'s stated purpose (a large-magnitude
 /// row's rounding floor scales with it; a fixed absolute bar is
 /// simultaneously too strict on large rows and too loose on tiny ones).
 #[inline]
@@ -1102,7 +775,7 @@ fn bfrt_reached(w_r: Affine1, cum: Affine1, x_b_base_r: f64) -> bool {
         return slope_diff <= 0.0;
     }
     let base_diff = w_r.base - cum.base;
-    base_diff <= tunable!("ENOMOTO_T_PRIMAL_FEAS_TOL", super::PRIMAL_FEAS_TOL, f64) * w_r.base.abs().max(x_b_base_r.abs()).max(1.0)
+    base_diff <= tunable!("ENOMOTO_T_PRIMAL_FEAS_TOL", PRIMAL_FEAS_TOL, f64) * w_r.base.abs().max(x_b_base_r.abs()).max(1.0)
 }
 
 /// The steepest-edge/Devex score `Δ_i(M)^2 / w_i` (paper \S4.5), compared
@@ -1130,7 +803,7 @@ struct Score2 {
 impl Score2 {
     #[inline]
     fn new(dev: Affine1, w: f64) -> Self {
-        let w = w.max(tunable!("ENOMOTO_T_STEEPEST_EDGE_FLOOR", super::STEEPEST_EDGE_FLOOR, f64));
+        let w = w.max(tunable!("ENOMOTO_T_STEEPEST_EDGE_FLOOR", STEEPEST_EDGE_FLOOR, f64));
         if dev.slope == 0.0 {
             return Score2 { slope: 0.0, key: dev.base * dev.base / w, squared: true };
         }
@@ -1632,25 +1305,6 @@ enum Phase {
     B,
 }
 
-/// Absolute tolerance on an `M`-coefficient: stage A treats a slope
-/// deviation as positive only above it, and the stage A -> B handoff counts
-/// a basic `x^1_j` as sitting *on* its slope bound `l^1_j`/`u^1_j` (so that
-/// bound survives into `l^B`/`u^B`) within it. Matches
-/// [`Affine1::gt_zero`]'s own slope threshold, so the stage split draws the
-/// line exactly where the lexicographic comparison it replaces did.
-const SLOPE_TOL: f64 = 1e-9;
-
-/// How negative `z^1` (the slope of the optimal value `z(M) = z^0 + z^1 M`)
-/// must be to count as `z^1 < 0` (`prop:trichotomy`). A small absolute
-/// tolerance rather than `TOL`: `z^1` is a sum of (possibly many)
-/// reduced-cost terms, so its floor scales with the problem's own cost
-/// magnitudes, not with `TOL`'s coefficient-level tightness — matches this
-/// crate's own precedent of using a looser, separate tolerance for
-/// accumulated-magnitude checks (see `simplex.rs::PRIMAL_FEAS_TOL`'s own
-/// docs for the same reasoning). Shared by stage A's early exit and
-/// [`finish`]'s own unboundedness test so the two can never disagree.
-const Z_SLOPE_TOL: f64 = 1e-7;
-
 /// [`compute_rhs_affine`]'s slope channel alone — stage A's right-hand side
 /// `0 - N x_N^1` (`eq:slope` has right-hand side `0`), with the same
 /// empty-means-identically-zero convention.
@@ -2012,7 +1666,7 @@ fn rebuild_rows(rows: &mut InfeasibleRows, dc: &mut RowDevCache, m: usize, rb: &
 ///
 /// Returns `(d_dir, magnitude)`: `d_dir == 1` for a deviation *below* `lb`
 /// (row wants to increase), `-1` for *above* `ub`. The tolerance is scaled
-/// by the row's own computed value (`super::PRIMAL_FEAS_TOL * xi.abs().max(1.0)`),
+/// by the row's own computed value (`PRIMAL_FEAS_TOL * xi.abs().max(1.0)`),
 /// not a bare `PRIMAL_FEAS_TOL`, matching this function's own long-standing
 /// convention (a flat tolerance is simultaneously too strict on large-
 /// magnitude rows and too loose on tiny ones — `PRIMAL_FEAS_TOL`'s own docs).
@@ -2022,7 +1676,7 @@ fn row_deviation_plain(std: &StdForm, basis: &[usize], x_b: &[f64], noise_feasib
         return None;
     }
     let xi = x_b[i];
-    let feas_tol = tunable!("ENOMOTO_T_PRIMAL_FEAS_TOL", super::PRIMAL_FEAS_TOL, f64) * xi.abs().max(1.0);
+    let feas_tol = tunable!("ENOMOTO_T_PRIMAL_FEAS_TOL", PRIMAL_FEAS_TOL, f64) * xi.abs().max(1.0);
     if xi < std.lb[bv] - feas_tol {
         Some((1, std.lb[bv] - xi))
     } else if xi > std.ub[bv] + feas_tol {
@@ -2660,7 +2314,7 @@ pub fn solve_lp_dual_extended(std: &StdForm, opts: &crate::types::LpOptions) -> 
     let mut width_inf: Vec<bool> = cache.width.iter().map(|w| w.is_none()).collect();
 
     // This solve's own pivot-threshold ladder starts from the default
-    // (`sparse_lu::STABILITY`, or `ENOMOTO_PIVOT_THRESHOLD`): the
+    // (`STABILITY`, or `ENOMOTO_PIVOT_THRESHOLD`): the
     // escalation below is per-solve state living in a thread-local, so a
     // thread that has just finished a numerically nasty solve must not
     // hand its raised floor — and the extra fill-in that buys — to this
@@ -3020,7 +2674,7 @@ pub fn solve_lp_dual_extended(std: &StdForm, opts: &crate::types::LpOptions) -> 
     // against a 20,000-iteration budget, with the infeasible count sitting
     // at a constant 302 for the last ~12,000 of them). A safety net sized
     // above the budget it is meant to protect is not a safety net.
-    let infeasible_plateau_limit = (4 * stall_limit).min(super::MAX_ITERS_FLOOR / 4);
+    let infeasible_plateau_limit = (4 * stall_limit).min(MAX_ITERS_FLOOR / 4);
     let mut infeasible_plateau_count = 0usize;
     // Smallest infeasible-row count seen so far, *not* the previous
     // iteration's — see the plateau check's own docs in the loop body.
@@ -3078,7 +2732,7 @@ pub fn solve_lp_dual_extended(std: &StdForm, opts: &crate::types::LpOptions) -> 
         }};
     }
     // Separate, coarser cadence for the `d`-drift check below, mirroring
-    // `super::RESIDUAL_CHECK_MULTIPLIER`'s own rationale for the classical
+    // `RESIDUAL_CHECK_MULTIPLIER`'s own rationale for the classical
     // path's `since_residual_check`: this check's residual is dominated by
     // fixed columns (`lb == ub`) that `d` is never updated for in the first
     // place (PRICE skips them), so once those are excluded from the
@@ -4304,7 +3958,7 @@ pub fn solve_lp_dual_extended(std: &StdForm, opts: &crate::types::LpOptions) -> 
             return Some(SimplexResult { status: Status::Infeasible, x: None });
         };
 
-        // Harris-style pass 2 (`super::HARRIS_RATIO_TOL`'s own docs,
+        // Harris-style pass 2 (`HARRIS_RATIO_TOL`'s own docs,
         // `super::solve_lp_dual_on`'s own BFRT): search *backward* from
         // `k_star` (never forward -- see that constant's own docs for why,
         // confirmed the hard way there) within a flat ratio-space window
@@ -4325,7 +3979,7 @@ pub fn solve_lp_dual_extended(std: &StdForm, opts: &crate::types::LpOptions) -> 
         // either reverted alternative.
         let mut best_idx = k_star;
         timed!(profile_phases, prof_phases::BFRT, {
-            let min_ratio = sorted[k_star].ratio - tunable!("ENOMOTO_T_HARRIS_RATIO_TOL", super::HARRIS_RATIO_TOL, f64);
+            let min_ratio = sorted[k_star].ratio - tunable!("ENOMOTO_T_HARRIS_RATIO_TOL", HARRIS_RATIO_TOL, f64);
             let mut window_start = k_star;
             while window_start > 0 && sorted[window_start - 1].ratio >= min_ratio {
                 window_start -= 1;
@@ -4790,7 +4444,7 @@ pub fn solve_lp_dual_extended(std: &StdForm, opts: &crate::types::LpOptions) -> 
         // re-verification, both tried first, cannot: both would recompute
         // from the same already-singular basis and simply agree with the
         // garbage more precisely.
-        // Deliberately *not* `.max(super::FT_MIN_PIVOT)` the way
+        // Deliberately *not* `.max(FT_MIN_PIVOT)` the way
         // `super::update_verify`'s own `scale` is: flooring at
         // `FT_MIN_PIVOT` is exactly right for a tight, `~1e-7`-scale
         // relative tolerance (it keeps two values that both happen to be
@@ -5136,7 +4790,7 @@ pub fn solve_lp_dual_extended(std: &StdForm, opts: &crate::types::LpOptions) -> 
         // `theta_q`; see that computation's own docs for why a nonzero
         // slope is treated as unambiguous progress rather than folded into
         // the base-term comparison.
-        if contribution_slope == 0.0 && contribution_base.abs() < super::STALL_PROGRESS_EPS {
+        if contribution_slope == 0.0 && contribution_base.abs() < STALL_PROGRESS_EPS {
             stall_count += 1;
             if stall_count > stall_limit {
                 bland_mode = true;
@@ -5366,7 +5020,7 @@ pub fn solve_lp_dual_extended(std: &StdForm, opts: &crate::types::LpOptions) -> 
         let mut need_refactor = timed!(
             profile_phases,
             prof_phases::FT_UPDATE,
-            !lu.try_update_precomputed(r, &a_tilde_buf, &e_tilde_buf, tunable!("ENOMOTO_T_FT_MIN_PIVOT", super::FT_MIN_PIVOT, f64))
+            !lu.try_update_precomputed(r, &a_tilde_buf, &e_tilde_buf, tunable!("ENOMOTO_T_FT_MIN_PIVOT", FT_MIN_PIVOT, f64))
         );
         if need_refactor {
             // Trigger (2), the Forrest-Tomlin update rejecting its own
@@ -5378,7 +5032,7 @@ pub fn solve_lp_dual_extended(std: &StdForm, opts: &crate::types::LpOptions) -> 
             }
         }
         // Trigger (4) ([`ft_max_updates`]'s own docs) — an unconditional,
-        // every-iteration check (like `super::FT_MAX_UPDATES`'s own site),
+        // every-iteration check (like `FT_MAX_UPDATES`'s own site),
         // not gated by `XB_CHECK_INTERVAL`: it is a single `usize`
         // comparison, cheap enough to run every pivot regardless.
         if profile_phases {
@@ -5402,7 +5056,7 @@ pub fn solve_lp_dual_extended(std: &StdForm, opts: &crate::types::LpOptions) -> 
         }
         if !need_refactor && since_check >= tunable!("ENOMOTO_T_XB_CHECK_INTERVAL", XB_CHECK_INTERVAL, usize) {
             since_check = 0;
-            let bump_too_big = lu.fill_count() > tunable!("ENOMOTO_T_FT_BUMP_LIMIT_FACTOR", super::FT_BUMP_LIMIT_FACTOR, usize) * m.max(1);
+            let bump_too_big = lu.fill_count() > tunable!("ENOMOTO_T_FT_BUMP_LIMIT_FACTOR", FT_BUMP_LIMIT_FACTOR, usize) * m.max(1);
             if bump_too_big {
                 need_refactor = true;
                 if profile_phases {
@@ -5536,7 +5190,7 @@ pub fn solve_lp_dual_extended(std: &StdForm, opts: &crate::types::LpOptions) -> 
                 // (`analysis/simplex_loop_20260924_113533.md` §4 S18), so
                 // this only saves its BTRAN + `O(nnz(A))` every
                 // `RESIDUAL_CHECK_MULTIPLIER` checks.
-                if !need_refactor && since_d_drift_check >= super::RESIDUAL_CHECK_MULTIPLIER && tunable!("ENOMOTO_D_DRIFT_REFACTOR_ONLY", 0u8, u8) == 0 {
+                if !need_refactor && since_d_drift_check >= RESIDUAL_CHECK_MULTIPLIER && tunable!("ENOMOTO_D_DRIFT_REFACTOR_ONLY", 0u8, u8) == 0 {
                     since_d_drift_check = 0;
                     fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fd_cb, &mut lu_scratch, &mut fd_y, &mut fresh_d_buf);
                     let mut resid_sq = 0.0f64;
@@ -5726,7 +5380,7 @@ fn finish(std: &StdForm, basis: &mut [usize], basis_pos: &mut [Option<usize>], n
                 if !bound.is_finite() {
                     return None;
                 }
-                let tol = if relax { tunable!("ENOMOTO_T_PRIMAL_FEAS_TOL", super::PRIMAL_FEAS_TOL, f64) * bound.abs().max(1.0) } else { 0.0 };
+                let tol = if relax { tunable!("ENOMOTO_T_PRIMAL_FEAS_TOL", PRIMAL_FEAS_TOL, f64) * bound.abs().max(1.0) } else { 0.0 };
                 let slack = if rate > 0.0 {
                     Affine1::new(bound + tol - x_b_base[i], -x_b_slope[i])
                 } else {
@@ -5800,8 +5454,8 @@ fn finish(std: &StdForm, basis: &mut [usize], basis_pos: &mut [Option<usize>], n
 
             std.cols.col_into_dense(j, &mut dense_j);
             since_check += 1;
-            let rejected = !lu.try_update(r, &dense_j, tunable!("ENOMOTO_T_FT_MIN_PIVOT", super::FT_MIN_PIVOT, f64));
-            if rejected || since_check >= super::FT_CHECK_INTERVAL {
+            let rejected = !lu.try_update(r, &dense_j, tunable!("ENOMOTO_T_FT_MIN_PIVOT", FT_MIN_PIVOT, f64));
+            if rejected || since_check >= FT_CHECK_INTERVAL {
                 since_check = 0;
                 lu = refactorize(std, basis_pos, Some(&lu))?;
                 (x_b_base, x_b_slope) = solve_x_b(std, &lu, nb_status, cache)?;
@@ -5886,8 +5540,8 @@ fn finish(std: &StdForm, basis: &mut [usize], basis_pos: &mut [Option<usize>], n
 
         std.cols.col_into_dense(j, &mut dense_j);
         since_check += 1;
-        let rejected = !lu.try_update(r2, &dense_j, tunable!("ENOMOTO_T_FT_MIN_PIVOT", super::FT_MIN_PIVOT, f64));
-        if rejected || since_check >= super::FT_CHECK_INTERVAL {
+        let rejected = !lu.try_update(r2, &dense_j, tunable!("ENOMOTO_T_FT_MIN_PIVOT", FT_MIN_PIVOT, f64));
+        if rejected || since_check >= FT_CHECK_INTERVAL {
             since_check = 0;
             lu = refactorize(std, basis_pos, Some(&lu))?;
         }
@@ -6352,7 +6006,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
             // infeasibility, check whether `r`'s own deviation is actually
             // within this row's rounding noise (scaled by its own RHS
             // magnitude — `PRIMAL_FEAS_TOL`'s own docs).
-            if needed <= tunable!("ENOMOTO_T_PRIMAL_FEAS_TOL", super::PRIMAL_FEAS_TOL, f64) * std.b[r].abs().max(1.0) {
+            if needed <= tunable!("ENOMOTO_T_PRIMAL_FEAS_TOL", PRIMAL_FEAS_TOL, f64) * std.b[r].abs().max(1.0) {
                 noise_feasible[basis[r]] = true;
                 infeasible_rows.set(r, false);
                 continue;
@@ -6405,7 +6059,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
         // magnitude, and pivot on that one instead.
         let mut best_idx = k_star;
         {
-            let min_ratio = candidates[k_star].ratio - tunable!("ENOMOTO_T_HARRIS_RATIO_TOL", super::HARRIS_RATIO_TOL, f64);
+            let min_ratio = candidates[k_star].ratio - tunable!("ENOMOTO_T_HARRIS_RATIO_TOL", HARRIS_RATIO_TOL, f64);
             let mut window_start = k_star;
             while window_start > 0 && candidates[window_start - 1].ratio >= min_ratio {
                 window_start -= 1;
@@ -6540,7 +6194,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
         // function needed for lack of a real `theta_q`: the incremental
         // `x_B` step just above now computes a real one.
         let contribution = theta * dj_q;
-        if contribution.abs() < super::STALL_PROGRESS_EPS {
+        if contribution.abs() < STALL_PROGRESS_EPS {
             stall_count += 1;
             if stall_count > stall_limit {
                 bland_mode = true;
@@ -6578,7 +6232,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
         // `try_update_precomputed` capture reuse (`a_tilde_buf`/
         // `e_tilde_buf`, filled above by this iteration's own FTRAN/BTRAN).
         since_check += 1;
-        let mut need_refactor = !lu.try_update_precomputed(r, &a_tilde_buf, &e_tilde_buf, tunable!("ENOMOTO_T_FT_MIN_PIVOT", super::FT_MIN_PIVOT, f64));
+        let mut need_refactor = !lu.try_update_precomputed(r, &a_tilde_buf, &e_tilde_buf, tunable!("ENOMOTO_T_FT_MIN_PIVOT", FT_MIN_PIVOT, f64));
         // Trigger (4) ([`ft_max_updates`]'s own docs) — unconditional every
         // iteration, same as the main phase's own identical check.
         if !need_refactor && lu.update_count() > ft_max_updates(m) {
@@ -6592,16 +6246,16 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
                 polish_clock_refactors += 1;
             }
         }
-        if !need_refactor && since_check >= super::FT_CHECK_INTERVAL {
+        if !need_refactor && since_check >= FT_CHECK_INTERVAL {
             since_check = 0;
-            let bump_too_big = lu.fill_count() > tunable!("ENOMOTO_T_FT_BUMP_LIMIT_FACTOR", super::FT_BUMP_LIMIT_FACTOR, usize) * m.max(1);
+            let bump_too_big = lu.fill_count() > tunable!("ENOMOTO_T_FT_BUMP_LIMIT_FACTOR", FT_BUMP_LIMIT_FACTOR, usize) * m.max(1);
             since_residual_check += 1;
             if bump_too_big {
                 need_refactor = true;
-            } else if since_residual_check >= super::RESIDUAL_CHECK_MULTIPLIER {
+            } else if since_residual_check >= RESIDUAL_CHECK_MULTIPLIER {
                 since_residual_check = 0;
                 let fresh_rhs = compute_rhs_plain(std, nb_status);
-                need_refactor = residual_norm(std, basis_pos, &x_b, &fresh_rhs) > super::FT_RESIDUAL_TOL;
+                need_refactor = residual_norm(std, basis_pos, &x_b, &fresh_rhs) > FT_RESIDUAL_TOL;
             }
         }
         if need_refactor {

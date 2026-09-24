@@ -26,8 +26,7 @@
 //! pass anyway).
 
 use crate::types::RowSense;
-
-const TOL: f64 = 1e-9;
+use crate::params::presolve::TOL;
 
 pub struct FoldFixedResult {
     pub rows: Vec<Vec<(usize, f64)>>,

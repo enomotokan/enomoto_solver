@@ -93,26 +93,7 @@
 //! there only costs decomposition recall, never soundness.
 
 use std::collections::BTreeMap;
-
-/// Analogue of this solver's own primal feasibility tolerance
-/// (`simplex.rs`'s `PRIMAL_FEAS_TOL`) — the "eps" the cumulative budget
-/// below is measured against, kept as this module's own copy rather than
-/// importing `simplex`'s (this pipeline is shared with `interior_point`,
-/// which has no reason to depend on `simplex`'s own module) since both
-/// represent the same underlying concept: how much primal infeasibility
-/// this solver is willing to call negligible.
-const EPS: f64 = 1e-7;
-
-/// Per-row ceiling (as a fraction of [`EPS`]) on the *total*, summed
-/// worst-case activity perturbation this reduction may introduce into any
-/// one row — Achterberg et al.'s own `1e-1 * eps` (see the module docs
-/// for why this single, looser budget suffices on its own).
-const CUMULATIVE_FRACTION: f64 = 0.1;
-
-/// Coefficients at or below this magnitude are dropped unconditionally,
-/// regardless of the cumulative budget above — Achterberg et al.'s own
-/// `1e-10`, floating-point noise on any realistically scaled problem.
-const NOISE_THRESHOLD: f64 = 1e-10;
+use crate::params::presolve::{CUMULATIVE_FRACTION, NOISE_THRESHOLD, SMALLCOEFF_EPS};
 
 /// Cleans one already-column-deduplicated row: drops every coefficient
 /// this reduction judges negligible, adjusting `rhs` to compensate
@@ -125,7 +106,7 @@ const NOISE_THRESHOLD: f64 = 1e-10;
 /// order, matching the paper's own "starting from the first non-zero
 /// coefficient".
 pub(crate) fn clean_row(row: &[(usize, f64)], rhs: f64, lb: &[f64], ub: &[f64]) -> (Vec<(usize, f64)>, f64) {
-    let budget = CUMULATIVE_FRACTION * EPS;
+    let budget = CUMULATIVE_FRACTION * SMALLCOEFF_EPS;
     let mut new_row = Vec::with_capacity(row.len());
     let mut new_rhs = rhs;
     let mut used_budget = 0.0;
@@ -180,7 +161,7 @@ mod tests {
         // above NOISE_THRESHOLD on its own, but its bound width is tiny
         // (2.0 to 2.0+1e-6), so its worst-case contribution
         // (1e-4 * 1e-6 = 1e-10) is negligible against the cumulative
-        // budget (CUMULATIVE_FRACTION * EPS = 1e-8) -- exercising the
+        // budget (CUMULATIVE_FRACTION * SMALLCOEFF_EPS = 1e-8) -- exercising the
         // contribution-based branch specifically, not the raw-noise one.
         let row = vec![(0, 5.0), (1, 1e-4)];
         let lb = vec![0.0, 2.0];
@@ -218,7 +199,7 @@ mod tests {
         // Three equal-sized small contributions where two fit the row's
         // total budget but a third would exceed it -- only the two
         // encountered first (ascending column order) should be dropped.
-        let budget = CUMULATIVE_FRACTION * EPS;
+        let budget = CUMULATIVE_FRACTION * SMALLCOEFF_EPS;
         let per_term = budget / 2.5; // 2 terms fit (0.8*budget), 3 don't (1.2*budget)
         let row = vec![(0, 100.0), (1, per_term), (2, per_term), (3, per_term)];
         let lb = vec![0.0, 0.0, 0.0, 0.0];

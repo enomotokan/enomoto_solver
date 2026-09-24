@@ -88,22 +88,7 @@
 
 use crate::presolve::colsingleton::Substitution;
 use crate::sparse::{Csr, SparseAccum, axpy_row, csr_from_rows, csr_rows};
-const TOL: f64 = 1e-9;
-
-/// Minimum `|coeff| / max|row|` for either pass below to actually
-/// eliminate a free variable through a given row — mirrors
-/// `colsingleton::SUBSTITUTION_PIVOT_RATIO` exactly (same value, same
-/// purpose: a pivot that is tiny only *relative to its own row* still
-/// amplifies whatever floating-point error the row already carries when
-/// every other entry gets divided by it). Confirmed load-bearing, not
-/// merely defensive: two real Netlib instances (`perold`, `pilot4`, both
-/// already flagged elsewhere in this crate as numerically difficult) were
-/// pushed to a false `Infeasible` — reproducing identically through
-/// `extended_dual` *and* the classical `BIG_M` path, and only when this
-/// module's own elimination ran at all — by a handful of sub-1%-of-row
-/// pivots this module used to accept unconditionally, before this guard
-/// existed.
-const SUBSTITUTION_PIVOT_RATIO: f64 = 1e-2;
+use crate::params::presolve::{SUBSTITUTION_PIVOT_RATIO, TOL};
 
 pub struct FreeVarResult {
     pub a: Csr,

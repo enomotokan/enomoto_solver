@@ -47,37 +47,7 @@ use self::kkt::{mat_t_vec, mat_t_vec_into, mat_vec, mat_vec_into, Csr, SparseKkt
 use self::qp::QpStd;
 use crate::presolve::{self, scaling};
 use crate::types::{ConstraintRow, Objective, Sense, Status, VariableData};
-
-const TAU: f64 = 0.995;
-const RHO_MIN: f64 = 1e-10;
-const DELTA_MIN: f64 = 1e-10;
-const RHO0: f64 = 1e-1;
-const DELTA0: f64 = 1e-1;
-const EPS_ABS: f64 = 1e-8;
-const EPS_REL: f64 = 1e-8;
-const MAX_ITERS: usize = 100;
-const STALL_ITERS: usize = 8;
-/// Number of times to redo constraint propagation (bound strengthening +
-/// redundant/infeasible row detection) over the inequality rows after
-/// removing redundant equality rows (see `propagate.rs`). The underlying
-/// technique is itself iterative until a fixpoint; two rounds here mirror
-/// how Gurobi's presolve caps propagation passes per presolve round rather
-/// than iterating to convergence.
-const PROPAGATION_PASSES: usize = 2;
-/// Upper bound on how many times `presolve::run_extended` cycles through
-/// propagate → dualfix → row-singleton → doubleton → colsingleton —
-/// mirrors `simplex.rs`'s own `PRESOLVE_ROUNDS` (see that constant's own
-/// docs for why this is a cap, not a fixed count: `run_extended` itself
-/// stops early once a round converges).
-const PRESOLVE_ROUNDS: usize = 20;
-/// Upper bound on how many times each outer `PRESOLVE_ROUNDS` pass itself
-/// cycles through row-singleton <-> colsingleton before `propagate`/
-/// `dualfix` run again — mirrors `simplex.rs`'s own
-/// `ROWSINGLETON_COLSINGLETON_INNER_ROUNDS` (see that constant's own docs
-/// for why this inner pair can have more to find after its own first
-/// pass, why `doubleton` isn't part of this inner repetition, and for the
-/// fixpoint check that stops it short of this cap).
-const ROWSINGLETON_COLSINGLETON_INNER_ROUNDS: usize = 1;
+use crate::params::interior_point::{DELTA0, DELTA_MIN, EPS_ABS, EPS_REL, MAX_ITERS, PRESOLVE_ROUNDS, PROPAGATION_PASSES, RHO0, RHO_MIN, ROWSINGLETON_COLSINGLETON_INNER_ROUNDS, STALL_ITERS, TAU};
 
 pub struct IpmResult {
     pub status: Status,

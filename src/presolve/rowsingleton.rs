@@ -13,7 +13,7 @@
 //! `propagate::bounds_inconsistent`/`dualfix`.
 
 use crate::sparse::{Csr, csr_from_rows, csr_is_canonical, csr_row_iter};
-const TOL: f64 = 1e-9;
+use crate::params::presolve::TOL;
 
 pub struct RowSingletonResult {
     pub a: Csr,

@@ -61,6 +61,7 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
+use crate::params::presolve::{DENSE_DENSITY_THRESHOLD, DEP_TOL, MIN_ROWS_FOR_BLOCK_DECOMPOSE, PARALLEL_DECOMPOSE_ROW_THRESHOLD, PIVOT_STABILITY};
 #[cfg(test)]
 use std::collections::HashSet;
 use std::collections::VecDeque;
@@ -85,31 +86,6 @@ use crate::sparse::{Csr, CsrRowBuilder, csr_from_rows, csr_is_canonical, csr_row
 /// structurally forced pivot a BTF pre-pass would also have found for free.
 pub(crate) static PROF_TOTAL_STEPS: AtomicUsize = AtomicUsize::new(0);
 pub(crate) static PROF_TRIVIAL_STEPS: AtomicUsize = AtomicUsize::new(0);
-
-/// Above this fraction of nonzero coefficients (`nnz / (p * n)`, over the
-/// deduplicated equality rows), [`reduce_equalities`] uses
-/// [`drop_linearly_dependent`] (dense QR) instead of
-/// [`drop_linearly_dependent_sparse`].
-///
-/// Density, not `p` or a dense-QR flop-count estimate, is what actually
-/// separates the two regimes — calibrated directly against measured
-/// Netlib instances, not derived analytically. The first cut at this
-/// dispatch rule used a pure cost estimate (`(n+1) * p^2`, dense QR's own
-/// flop order, thresholded so `wood1p`'s small `p` routed to dense): it
-/// fixed `wood1p` but *also* routed `standmps` (`p=268`, density 0.96%)
-/// and `fffff800` (`p=350`, density 1.6%) to dense even though the sparse
-/// method was already faster for both there (their low density means
-/// elimination stays close to its own nonzero count, with none of the
-/// fill-in blowup a size-based estimate implicitly worries about) —
-/// measured regressions of roughly 2-4x on both after that first cut.
-/// `wood1p` itself is the outlier that actually needs dense: 11.1% row
-/// density, roughly 7-30x denser than every other measured instance
-/// (`fffff800` 1.6%, `standmps` 0.96%, `sierra` 0.37%, `ganges` 0.31%,
-/// `modszk1` 0.28%, `stocfor2` 0.21%) — dense QR there stayed a bounded
-/// ~30ms while the sparse method's fill-in blew up to 962ms. `3%` sits
-/// with comfortable margin above every instance that must stay sparse and
-/// below `wood1p`'s own density.
-const DENSE_DENSITY_THRESHOLD: f64 = 0.03;
 
 /// Returns a reduced `(A, b)` with duplicate/linearly-dependent equality
 /// rows removed.
@@ -359,25 +335,6 @@ fn drop_linearly_dependent(rows: &[(Vec<(usize, f64)>, f64)], n: usize) -> Vec<u
 
     (0..p).filter(|&i| keep[i]).collect()
 }
-
-/// Numerical-stability floor a candidate pivot must clear, relative to the
-/// current **global** maximum active entry anywhere in the matrix (not
-/// just its own column's) — see [`drop_linearly_dependent_sparse`]'s own
-/// docs for why "global" here, not "local to the column", is what makes
-/// this a correct rank-revealing criterion instead of merely a safe-enough
-/// pivot for solving. A different, narrower purpose than `DEP_TOL` below:
-/// this only gates which *candidates* the fill-minimizing search is
-/// allowed to accept, the same role `simplex::lu`'s own `STABILITY`
-/// constant plays for the (unrelated) basis factorization.
-const PIVOT_STABILITY: f64 = 0.1;
-/// Dependency floor, relative to a row's own *original* norm (computed
-/// once, before any elimination) — this is the actual redundancy
-/// criterion. `DEP_TOL * row_orig_norm` plays the same role here that
-/// `1e-9 * col_norm(orig)` plays against `|R[k,k]|` in
-/// [`drop_linearly_dependent`] (see that function's own docs for why a
-/// per-row-relative, not global, threshold matters — the same reasoning
-/// applies here).
-const DEP_TOL: f64 = 1e-9;
 
 /// Returns the indices into `rows` of a maximal linearly independent
 /// subset, via sparse Gaussian elimination over the `p` rows treated as
@@ -873,43 +830,6 @@ fn dulmage_mendelsohn_blocks(rows: &[(Vec<(usize, f64)>, f64)], n: usize, lb: &[
         .collect();
     crate::graph::dulmage_mendelsohn_blocks(&adj, n)
 }
-
-/// Below this total row count across a decomposition's non-trivial
-/// (size > 1) components, [`drop_linearly_dependent_sparse_blocked`] runs
-/// them sequentially rather than via `rayon` — see that function's own
-/// docs for why, unlike every *other* `rayon` call site in this crate
-/// (all gated by `RAYON_SIZE_THRESHOLD`-style raw *problem* size, per
-/// `simplex.rs`'s own docs on measured per-element dispatch overhead),
-/// the right threshold here is total row count *within the blocks
-/// actually being split*, since a component's own elimination is real,
-/// non-trivial work per row (unlike a cheap per-element scan) — a modest
-/// absolute row count here still comfortably pays for `rayon`'s task
-/// dispatch.
-const PARALLEL_DECOMPOSE_ROW_THRESHOLD: usize = 64;
-
-/// Below this many equality rows, [`drop_linearly_dependent_sparse_blocked`]
-/// skips [`dulmage_mendelsohn_blocks`] entirely and calls
-/// [`drop_linearly_dependent_sparse`] directly, rather than always paying
-/// for the bipartite-matching-plus-SCC pass (and, if it does find multiple
-/// blocks, the per-block `HashMap`-based column remapping and fresh
-/// `BTreeMap`/bucket/heap scaffolding for each one). Measured directly (with
-/// the earlier, coarser connected-components version of this same
-/// decomposition, before it was replaced by the finer Dulmage-Mendelsohn
-/// one — the size/regression picture below is unaffected by that swap,
-/// since both pay similar decomposition overhead on tiny inputs): every
-/// real Netlib win from decomposition (`ship12s` `p=1045`, `ship08s`
-/// `p=698`, `ship04l`/`ship04s` `p=354`, `sierra` `p=528`) has `p` well
-/// above this; every case that regressed when decomposition ran
-/// unconditionally (`sc105` `p=45`, `scorpion` `p=280`, `sc205` `p=91`,
-/// `capri` `p=142`, `standgub`/`standata` `p=160`, `recipe` `p=67`,
-/// `bore3d` `p=214`) sits below it — all by a comfortable margin, so `300`
-/// is not a tight cutoff. Every one of those regressions was itself only
-/// a fraction of a millisecond in absolute terms (these are already
-/// sub-10ms problems), but with nothing to gain there either — the
-/// decomposition's benefit scales with how much per-row elimination work
-/// it *avoids* doing across blocks, which is negligible when the whole
-/// problem is this small to begin with.
-const MIN_ROWS_FOR_BLOCK_DECOMPOSE: usize = 300;
 
 /// Wraps [`drop_linearly_dependent_sparse`] with a Dulmage-Mendelsohn-style
 /// block-triangularization pre-pass (see [`dulmage_mendelsohn_blocks`]):

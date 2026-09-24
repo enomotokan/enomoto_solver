@@ -44,8 +44,7 @@
 use std::collections::HashMap;
 
 use crate::sparse::Csr;
-
-const TOL: f64 = 1e-9;
+use crate::params::presolve::TOL;
 
 pub struct IneqSingletonResult {
     /// `(column, value)` to fix.

@@ -62,6 +62,7 @@ mod graph;
 mod interior_point;
 mod mip;
 mod model;
+mod params;
 mod presolve;
 mod simplex;
 mod solver;
@@ -69,6 +70,7 @@ mod sparse;
 mod types;
 
 use pyo3::prelude::*;
+use crate::params::alloc::LARGE;
 
 /// Rust-side global allocator: small blocks from mimalloc, large ones from
 /// the system allocator.
@@ -88,8 +90,6 @@ use pyo3::prelude::*;
 /// Numerics are unaffected (nothing in this crate depends on allocation
 /// addresses).
 struct SplitAlloc;
-
-const LARGE: usize = 4 * 1024;
 
 unsafe impl std::alloc::GlobalAlloc for SplitAlloc {
     #[inline]

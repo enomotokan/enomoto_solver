@@ -146,21 +146,7 @@
 
 use crate::presolve::colsingleton::Substitution;
 use crate::sparse::{Csr, SparseAccum, axpy_row, csr_from_rows, csr_is_canonical, csr_rows};
-const TOL: f64 = 1e-9;
-/// Mirrors `colsingleton`/`freevar`'s own pivot guard exactly (same value,
-/// same purpose — see either module's own docs on `SUBSTITUTION_PIVOT_RATIO`).
-const SUBSTITUTION_PIVOT_RATIO: f64 = 1e-2;
-/// Mirrors HiGHS's own `presolve_substitution_maxfillin` default (registered
-/// range `[0, 10]`, default `10`, `HighsOptions.h`): total new nonzeros a
-/// single column's elimination may introduce across every row it folds
-/// into, above which the column is left for a later call instead of
-/// risking a dense-equality-system blowup.
-const MAX_FILLIN: usize = 10;
-/// Mirrors HiGHS's own `nfail == 3` cutoff in `HPresolve::aggregator`: after
-/// this many *consecutive* fill-in rejections, stop trying the rest of this
-/// call's candidate list outright rather than keep paying for the fill-in
-/// check on an already-too-dense region.
-const MAX_CONSECUTIVE_FILLIN_FAILURES: usize = 3;
+use crate::params::presolve::{MAX_CONSECUTIVE_FILLIN_FAILURES, MAX_FILLIN, SUBSTITUTION_PIVOT_RATIO, TOL};
 
 pub struct AggregatorResult {
     pub a: Csr,

@@ -23,7 +23,7 @@
 //! up-lock count of `0` and cost `<= 0`.
 
 use crate::sparse::{Csr, csr_row_iter};
-const TOL: f64 = 1e-9;
+use crate::params::presolve::TOL;
 
 /// Returns `(j, value)` for every variable that can be fixed outright.
 /// `real_g_rows` is `G`'s multi-variable rows only — the same "real rows"

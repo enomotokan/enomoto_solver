@@ -124,7 +124,7 @@
 //! order the two are evaluated in.
 
 use crate::sparse::{Csr, csr_row_iter};
-const TOL: f64 = 1e-9;
+use crate::params::presolve::TOL;
 
 /// One continuous singleton column being decided for a single row, already
 /// in the `a>0, c<0` orientation `stuffing_core` expects — `l`/`u` are

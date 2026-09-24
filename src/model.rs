@@ -131,7 +131,7 @@ impl PyModel {
     /// regardless of outcome: `"status"` (always present),
     /// `"objective"`/`"x"` (populated only when `status == "optimal"`,
     /// `None` otherwise), and `"node_limit_hit"` (only ever `True` for a
-    /// MIP that hit `mip::MAX_NODES` before proving optimality). The
+    /// MIP that hit `MAX_NODES` before proving optimality). The
     /// Python-side `Model.solve` wraps this dict into a `Solution`
     /// namedtuple and raises `InfeasibleError`/`UnboundedError` for the
     /// corresponding statuses.

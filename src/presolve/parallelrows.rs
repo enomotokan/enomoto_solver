@@ -76,7 +76,7 @@
 use std::collections::HashMap;
 
 use crate::sparse::{Csr, csr_from_rows, csr_rows};
-const TOL: f64 = 1e-9;
+use crate::params::presolve::TOL;
 
 /// Result of one [`merge_parallel_rows`] call: `a`/`b` with any newly
 /// discovered equality merged in (appended after the existing rows), `g`/`h`

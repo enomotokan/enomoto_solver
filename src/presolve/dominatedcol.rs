@@ -99,8 +99,7 @@
 
 use crate::sparse::{Csr, csr_row_iter};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
-
-const TOL: f64 = 1e-9;
+use crate::params::presolve::TOL;
 
 /// Returns `(j, value)` for every variable fixed outright — same shape as
 /// [`dualfix::fix_dominated_variables`](super::dualfix::fix_dominated_variables).

@@ -111,7 +111,7 @@
 //! own round cap ever runs.
 
 use crate::sparse::{Csr, CscMat, csr_rows};
-const TOL: f64 = 1e-9;
+use crate::params::presolve::TOL;
 
 /// Recovers both `x[var]` and `x[kept]`'s own true values from `x[kept]`'s
 /// current, merged-`z` value — see the module docs for why any such split

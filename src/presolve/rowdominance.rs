@@ -98,7 +98,7 @@ use std::collections::BTreeSet;
 use std::collections::HashSet;
 
 use crate::sparse::{Csr, csr_row_iter};
-const TOL: f64 = 1e-9;
+use crate::params::presolve::TOL;
 
 /// Returns the row indices (into `g`) that are dominated and safe to drop
 /// this call — same shape contract as every other reduction here: the
