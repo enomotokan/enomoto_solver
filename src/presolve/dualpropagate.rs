@@ -260,14 +260,14 @@ pub fn run(n: usize, a: &Csr, real_g_rows: &[Vec<(usize, f64)>], c: &[f64], lb: 
         for gi in 0..num_g {
             lb[num_a + gi] = 0.0 / -1.0;
         }
-        propagate::PropagateResult { g: csr_from_rows(&[], num_duals), h: Vec::new(), lb, ub: vec![f64::INFINITY; num_duals], real_rows: Vec::new(), real_rhs: Vec::new(), infeasible: false }
+        propagate::PropagateSplit { lb, ub: vec![f64::INFINITY; num_duals], real_rows: Vec::new(), real_rhs: Vec::new(), infeasible: false }
     } else {
         for gi in 0..num_g {
             t_rows.push(vec![(num_a + gi, -1.0)]);
             t_h.push(0.0);
         }
         let t_g = csr_from_rows(&t_rows, num_duals);
-        propagate::propagate(num_duals, &t_g, &t_h, passes)
+        propagate::propagate_nog(num_duals, &t_g, &t_h, passes)
     };
     if result.infeasible {
         // A genuinely infeasible dual system here would mean the primal

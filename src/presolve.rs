@@ -527,7 +527,7 @@ pub fn run_extended(
     let mut prev_struct: Option<(usize, usize, usize, usize)> = None;
     let mut eqprop_idle = false;
     for _round_idx in 0..rounds.max(1) {
-        let prop = timed_step!("propagate", propagate::propagate(n, &g, &h, prop_passes));
+        let prop = timed_step!("propagate", propagate::propagate_nog(n, &g, &h, prop_passes));
         if prop.infeasible {
             return extended_infeasible(sc, a, b, c, n);
         }
@@ -1186,7 +1186,7 @@ pub fn run_extended(
         b = nb;
     }
 
-    let prop = timed_step!("final propagate", propagate::propagate(n, &g, &h, prop_passes));
+    let prop = timed_step!("final propagate", propagate::propagate_nog(n, &g, &h, prop_passes));
     if profile {
         eprintln!("PROF_PRESOLVE total {:.3}ms", __wall_t0.elapsed().as_secs_f64() * 1e3);
     }
@@ -1195,8 +1195,8 @@ pub fn run_extended(
             scaling: sc,
             a,
             b,
-            g: prop.g,
-            h: prop.h,
+            g: csr_from_rows(&[], n),
+            h: Vec::new(),
             lb: prop.lb,
             ub: prop.ub,
             real_rows: prop.real_rows,

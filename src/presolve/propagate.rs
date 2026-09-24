@@ -51,6 +51,7 @@
 use crate::sparse::{Csr, CsrRowBuilder, csr_from_rows, csr_row_iter, csr_row_vec};
 const EPS: f64 = 1e-9;
 
+#[allow(dead_code)] // the pipeline uses `PropagateSplit`; kept for tests / G-form callers
 pub struct PropagateResult {
     pub g: Csr,
     pub h: Vec<f64>,
@@ -141,16 +142,28 @@ pub fn bounds_inconsistent(n: usize, lb: &[f64], ub: &[f64]) -> bool {
     (0..n).any(|j| lb[j] > ub[j] + EPS)
 }
 
-pub fn propagate(n: usize, g: &Csr, h: &[f64], passes: usize) -> PropagateResult {
-    let (mut lb, mut ub, mut rows, mut rhs) = extract_bounds(n, g, h);
-    // `ENOMOTO_T_PROP_RELTOL` (default 0 = off, the historical absolute-EPS
-    // rule only): HiGHS-style, a finite bound is only tightened when the
-    // improvement also exceeds `reltol * (1 + |bound|)` — stops the
-    // geometric shaving of bounds over cyclic row structures that keeps
-    // the outer presolve rounds from reaching a fixpoint.
-    let reltol = tunable!("ENOMOTO_T_PROP_RELTOL", 0.0, f64);
+/// [`propagate`]'s outcome without the re-folded `g`/`h` — what every
+/// caller inside the presolve pipeline actually reads (`run_extended`
+/// works on the split `lb`/`ub`/real-row form, `dualpropagate` only reads
+/// the propagated box), so building the CSR there was pure overhead.
+pub struct PropagateSplit {
+    pub lb: Vec<f64>,
+    pub ub: Vec<f64>,
+    pub real_rows: Vec<Vec<(usize, f64)>>,
+    pub real_rhs: Vec<f64>,
+    pub infeasible: bool,
+}
 
-    if bounds_inconsistent(n, &lb, &ub) {
+impl PropagateSplit {
+    fn infeasible() -> Self {
+        PropagateSplit { lb: Vec::new(), ub: Vec::new(), real_rows: Vec::new(), real_rhs: Vec::new(), infeasible: true }
+    }
+}
+
+#[allow(dead_code)]
+pub fn propagate(n: usize, g: &Csr, h: &[f64], passes: usize) -> PropagateResult {
+    let r = propagate_nog(n, g, h, passes);
+    if r.infeasible {
         return PropagateResult {
             g: csr_from_rows(&[], n),
             h: Vec::new(),
@@ -160,6 +173,30 @@ pub fn propagate(n: usize, g: &Csr, h: &[f64], passes: usize) -> PropagateResult
             real_rhs: Vec::new(),
             infeasible: true,
         };
+    }
+    let (new_g, new_h) = rebuild_g_ref(n, &r.real_rows, &r.real_rhs, &r.lb, &r.ub);
+    PropagateResult { g: new_g, h: new_h, lb: r.lb, ub: r.ub, real_rows: r.real_rows, real_rhs: r.real_rhs, infeasible: false }
+}
+
+/// [`propagate`] without rebuilding `g`/`h` at the end (same `lb`/`ub`/
+/// real rows, bit for bit).
+pub fn propagate_nog(n: usize, g: &Csr, h: &[f64], passes: usize) -> PropagateSplit {
+    let (lb, ub, rows, rhs) = extract_bounds(n, g, h);
+    propagate_split(n, lb, ub, rows, rhs, passes)
+}
+
+/// [`propagate_nog`] on an already split `G` — `lb`/`ub` and the real
+/// rows exactly as [`extract_bounds`] would return them for that `G`.
+pub fn propagate_split(n: usize, mut lb: Vec<f64>, mut ub: Vec<f64>, mut rows: Vec<Vec<(usize, f64)>>, mut rhs: Vec<f64>, passes: usize) -> PropagateSplit {
+    // `ENOMOTO_T_PROP_RELTOL` (default 0 = off, the historical absolute-EPS
+    // rule only): HiGHS-style, a finite bound is only tightened when the
+    // improvement also exceeds `reltol * (1 + |bound|)` — stops the
+    // geometric shaving of bounds over cyclic row structures that keeps
+    // the outer presolve rounds from reaching a fixpoint.
+    let reltol = tunable!("ENOMOTO_T_PROP_RELTOL", 0.0, f64);
+
+    if bounds_inconsistent(n, &lb, &ub) {
+        return PropagateSplit::infeasible();
     }
 
     let mut infeasible = false;
@@ -313,19 +350,10 @@ pub fn propagate(n: usize, g: &Csr, h: &[f64], passes: usize) -> PropagateResult
     }
 
     if infeasible {
-        return PropagateResult {
-            g: csr_from_rows(&[], n),
-            h: Vec::new(),
-            lb: Vec::new(),
-            ub: Vec::new(),
-            real_rows: Vec::new(),
-            real_rhs: Vec::new(),
-            infeasible: true,
-        };
+        return PropagateSplit::infeasible();
     }
 
-    let (new_g, new_h) = rebuild_g_ref(n, &rows, &rhs, &lb, &ub);
-    PropagateResult { g: new_g, h: new_h, lb, ub, real_rows: rows, real_rhs: rhs, infeasible: false }
+    PropagateSplit { lb, ub, real_rows: rows, real_rhs: rhs, infeasible: false }
 }
 
 /// Rebuilds `G x <= h` from a set of "real" (multi-variable) rows plus a
