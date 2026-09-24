@@ -151,6 +151,58 @@ pub fn compute(n: usize, a: &Csr, g: &Csr, c: &[f64], iters: usize) -> Scaling {
     // replaced an earlier run-both-and-time self-calibration.
     let use_parallel_fold = (p + m) > tunable!("ENOMOTO_T_SCALING_RAYON_SIZE_THRESHOLD", RAYON_SIZE_THRESHOLD, usize);
 
+    // `ENOMOTO_T_SCALE_NOBOUNDS=1` (default 0 = off, the historical
+    // behaviour): leave `g`'s single-entry rows (the box-bound rows
+    // `build_a_g` adds per finite bound — on e.g. `fit2d` 99% of `g`) out
+    // of the Ruiz iteration entirely, so they neither pull on `d` nor get
+    // scanned every iteration, and give each one the closed-form row scale
+    // `1/|v * d_j|` afterwards (a bound row's own Ruiz fixed point: its
+    // scaled coefficient becomes +-1, i.e. the plain bound on `x'_j`).
+    // Changes the scale factors, hence the numerical path.
+    if tunable!("ENOMOTO_T_SCALE_NOBOUNDS", 0, usize) != 0 {
+        let multi: Vec<usize> = (0..m).filter(|&i| gr.col_indices_of_row_raw(i).len() > 1).collect();
+        for _ in 0..iters {
+            col_norm.fill(0.0);
+            col_norm_fold(ar, &d, &e_a, 0..p, &mut col_norm);
+            for &i in &multi {
+                col_norm_fold(gr, &d, &e_g, i..i + 1, &mut col_norm);
+            }
+            for j in 0..n {
+                let cj = (c[j] * d[j]).abs();
+                if cj > col_norm[j] {
+                    col_norm[j] = cj;
+                }
+            }
+            for j in 0..n {
+                if col_norm[j] > tunable!("ENOMOTO_T_SCALING_ZERO_TOL", 1e-12, f64) {
+                    d[j] /= col_norm[j].sqrt();
+                }
+            }
+            row_norm_update(ar, &d, &mut e_a);
+            let zero_tol = tunable!("ENOMOTO_T_SCALING_ZERO_TOL", 1e-12, f64);
+            for &i in &multi {
+                let old_e = e_g[i];
+                let mut row_norm = 0.0f64;
+                for (&j, &v) in gr.col_indices_of_row_raw(i).iter().zip(gr.values_of_row(i)) {
+                    row_norm = row_norm.max((v * d[j] * old_e).abs());
+                }
+                if row_norm > zero_tol {
+                    e_g[i] = old_e / row_norm.sqrt();
+                }
+            }
+        }
+        for i in 0..m {
+            let cols = gr.col_indices_of_row_raw(i);
+            if cols.len() == 1 {
+                let s = (gr.values_of_row(i)[0] * d[cols[0]]).abs();
+                if s > tunable!("ENOMOTO_T_SCALING_ZERO_TOL", 1e-12, f64) && s.is_finite() {
+                    e_g[i] = 1.0 / s;
+                }
+            }
+        }
+        return Scaling { d, e_a, e_g };
+    }
+
     for _ in 0..iters {
         col_norm.fill(0.0);
         if use_parallel_fold {
