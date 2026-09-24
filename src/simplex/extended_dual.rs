@@ -2495,6 +2495,26 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     if std::env::var("ENOMOTO_CRASH_ZERO_COST_PLACEMENT").is_ok_and(|v| v != "0") {
         refine_zero_cost_placement(std, &mut active_cost, &mut nb_status, n_orig);
     }
+    // Stage A is empty when crash parks no nonbasic column on an `M` side
+    // (`S = empty`, eq:init-status): then `x_N^1 = 0`, so the all-slack
+    // basis has `x^1 = 0`, which is already optimal for the slope problem
+    // (its objective `c^T x^1 = 0` and every slope deviation is `0`). Start
+    // directly in stage B on the unmodified bounds instead of entering
+    // stage A only to hand off on its first iteration.
+    if phase == Phase::A
+        && nb_status.iter().enumerate().all(|(j, s)| match s {
+            Some(NbStatus::Lower) => cache_orig.lower[j].map_or(true, |a| a.slope == 0.0),
+            Some(NbStatus::Upper) => cache_orig.upper[j].map_or(true, |a| a.slope == 0.0),
+            Some(NbStatus::Zero) | None => true,
+        })
+    {
+        phase = Phase::B;
+        cache = ColCache::intercept_problem(&cache_orig, &nb_status, &basis, &vec![0.0; m])?;
+        width_inf = cache.width.iter().map(|w| w.is_none()).collect();
+        if std::env::var("ENOMOTO_DEBUG_EXT_ITERS").is_ok() {
+            eprintln!("DEBUG_EXT: stage A skipped (S empty)");
+        }
+    }
 
     // This solve's own pivot-threshold ladder starts from the default
     // (`sparse_lu::STABILITY`, or `ENOMOTO_PIVOT_THRESHOLD`): the
