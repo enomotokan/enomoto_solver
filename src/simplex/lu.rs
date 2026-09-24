@@ -844,6 +844,20 @@ struct MarkowitzState {
     /// those multipliers — measured as a wrong `fit2p` objective
     /// (`-8.9e117`) when it was.
     row_singleton_rel: f64,
+    /// `ENOMOTO_PIVOT_ROW_SEARCH` (B2(b); **path-changing, default `0` =
+    /// off**): after scanning column bucket `c`, `find_best_pivot` also
+    /// scans row bucket `c` (every entry of every active row with `c`
+    /// entries, score `(c-1)(col_degree-1)`), HiGHS `buildKernel`-style.
+    /// Short rows find small Markowitz scores early, so the per-level exit
+    /// `best_score <= c^2` fires sooner on matrices whose columns are short
+    /// but whose rows are long (`dfl001`). Each scanned row counts toward
+    /// the search limit like a column does. Off in [`factorize_bordered`]'s
+    /// sparse phase, for the same reason as `row_singleton_rel`. The value
+    /// is the largest row degree whose bucket is scanned (`1` = row
+    /// singletons only; large = every level): a long row costs a
+    /// `col_max_abs` rescan for most of its columns, which on a matrix
+    /// with a dense tail (`pilot87`) outweighs what the search saves.
+    row_search: usize,
     /// Whether `find_best_pivot` times itself (`PROF_BUCKET_SCAN_NS`) —
     /// only under the profiling env gates, resolved once per
     /// factorization.
@@ -969,6 +983,7 @@ impl MarkowitzState {
             prof_candidates: 0,
             prof_scan_ns: 0,
             row_singleton_rel: env_str!("ENOMOTO_LU_ROW_SINGLETON").and_then(|v| v.parse::<f64>().ok()).unwrap_or(-1.0),
+            row_search: tunable!("ENOMOTO_PIVOT_ROW_SEARCH", 0, usize),
             lazy_colmax: !matches!(env_str!("ENOMOTO_LU_LAZY_COLMAX"), Some("0")),
         }
     }
@@ -1266,6 +1281,59 @@ impl MarkowitzState {
                 if search_limit != 0 && searched >= search_limit && best.is_some() {
                     exit = 1;
                     break 'scan;
+                }
+            }
+            if deg_col <= self.row_search && deg_col < self.row_buckets.len() {
+                // B2(b): the rows with `deg_col` entries (see `row_search`).
+                let rc1 = deg_col - 1;
+                for &i in &self.row_buckets[deg_col] {
+                    let s = mat.row_start[i];
+                    let e = s + mat.row_len[i];
+                    for k in s..e {
+                        let j = mat.row_idx[k] as usize;
+                        if skip_dense && initially_dense[j] {
+                            continue;
+                        }
+                        let score = rc1 * (col_degree[j] - 1);
+                        if score > best_score {
+                            continue;
+                        }
+                        let v = mat.row_val[k];
+                        // Only a candidate that would improve on `best`
+                        // needs the threshold test (and so, for a stale
+                        // column, the `col_max_abs` rescan) at all.
+                        if v == 0.0 || !(score < best_score || v.abs() > best_pivot_abs) {
+                            continue;
+                        }
+                        if self.col_max_abs_dirty[j] {
+                            let mut mx = 0.0f64;
+                            for &r in mat.col(j) {
+                                if let Some(x) = mat.row_get(r as usize, j) {
+                                    mx = f64::max(mx, x.abs());
+                                }
+                            }
+                            self.prof_colmax_rescan_entries += mat.col_len[j];
+                            self.col_max_abs[j] = mx;
+                            self.col_max_abs_dirty[j] = false;
+                        }
+                        if v.abs() < threshold * self.col_max_abs[j] {
+                            continue;
+                        }
+                        if score < best_score || (score == best_score && v.abs() > best_pivot_abs) {
+                            best_score = score;
+                            best = Some((i, j));
+                            best_pivot_abs = v.abs();
+                        }
+                    }
+                    searched += 1;
+                    if best_score == 0 {
+                        exit = 0;
+                        break 'scan;
+                    }
+                    if search_limit != 0 && searched >= search_limit && best.is_some() {
+                        exit = 1;
+                        break 'scan;
+                    }
                 }
             }
             if best.is_some() && best_score <= deg_col * deg_col {
@@ -2821,6 +2889,7 @@ fn factorize_bordered(m: usize, rows_in: &[Vec<(usize, f64)>], border: &[usize])
     let mut state = MarkowitzState::new(m, &sparse_rows);
     // See `row_singleton_rel`'s docs: never in the bordered sparse phase.
     state.row_singleton_rel = -1.0;
+    state.row_search = 0;
 
     let mut row_perm = vec![usize::MAX; m];
     let mut col_perm = vec![usize::MAX; m];
@@ -5831,6 +5900,7 @@ mod tests {
         };
         let mut best = vec![f64::INFINITY; configs.len()];
         let mut prints: Vec<Vec<u64>> = vec![Vec::new(); configs.len()];
+        let mut lu_nnz = vec![0usize; configs.len()];
         for rep in 0..reps {
             for (ci, cfg) in configs.iter().enumerate() {
                 apply(cfg);
@@ -5843,14 +5913,17 @@ mod tests {
                 best[ci] = best[ci].min(el);
                 if rep == 0 {
                     prints[ci] = out.iter().map(|o| o.as_ref().map(|lu| fingerprint(lu)).unwrap_or(0)).collect();
+                    lu_nnz[ci] = out.iter().flatten().map(|lu| lu.u_row.iter().map(|r| r.len()).sum::<usize>() + (0..lu.m).map(|s| lu.l_col.col(s).len()).sum::<usize>()).sum();
                 }
             }
         }
         for (ci, cfg) in configs.iter().enumerate() {
             let same = prints[ci] == prints[0];
             let agg = prints[ci].iter().fold(0u64, |h, &x| h.wrapping_mul(31).wrapping_add(x));
-            println!("LUBENCH mats={} cfg=[{}] min_ms={:.3} identical_to_first={} factors_fp={:016x}", mats.len(), cfg, best[ci], same, agg);
-            assert!(same, "factors differ from the first configuration");
+            println!("LUBENCH mats={} cfg=[{}] min_ms={:.3} identical_to_first={} factors_fp={:016x} lu_nnz={}", mats.len(), cfg, best[ci], same, agg, lu_nnz[ci]);
+            if std::env::var_os("ENOMOTO_LU_BENCH_ALLOW_DIFF").is_none() {
+                assert!(same, "factors differ from the first configuration");
+            }
         }
     }
     use super::*;
