@@ -2650,19 +2650,55 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     // it is simply the row end (every non-fixed column priced, as before).
     let price_nonbasic_only = env_str!("ENOMOTO_PRICE_NONBASIC_ONLY").map_or(true, |v| v != "0");
     let mut price_nb_end: Vec<usize> = price_start[1..].to_vec();
+    // S12: position index for the partition swaps below (HiGHS keeps no such
+    // index and pays `O(row length)` per swapped entry, as this loop used
+    // to). `cm_off[j]` is column `j`'s offset into `std.cols`' entry order,
+    // `cm_pos[cm_off[j] + k]` the PRICE position of `std.cols.col(j)[k]`
+    // (`u32::MAX` for a fixed column, never in the PRICE matrix), and
+    // `price_cm[p]` the inverse (`std.cols` entry index of PRICE entry `p`).
+    // Every swap keeps both in step, so the swapped positions — and hence
+    // `price_col`/`price_val` — are exactly the ones the linear `position`
+    // search found (one entry per (row, column) pair).
+    let mut cm_off: Vec<usize> = Vec::with_capacity(if price_nonbasic_only { n_total + 1 } else { 0 });
+    let mut cm_pos: Vec<u32> = Vec::new();
+    let mut price_cm: Vec<u32> = Vec::new();
     if price_nonbasic_only {
-        let mut tmp: Vec<(u32, f64)> = Vec::new();
+        cm_off.push(0);
+        for j in 0..n_total {
+            cm_off.push(cm_off[j] + std.cols.col(j).len());
+        }
+        // `std.cols` entry index of every PRICE entry, found through a
+        // per-column cursor (rows are visited in ascending order, so for
+        // row-sorted columns the cursor always sits on the match).
+        let mut cursor: Vec<u32> = vec![0; n_total];
+        price_cm.reserve(price_col.len());
+        for i in 0..m {
+            for p in price_start[i]..price_start[i + 1] {
+                let j = price_col[p] as usize;
+                let col = std.cols.col(j);
+                let c = cursor[j] as usize;
+                let k = if c < col.len() && col[c].0 == i { c } else { col.iter().position(|&(r, _)| r == i)? };
+                cursor[j] = (k + 1) as u32;
+                price_cm.push(u32::try_from(cm_off[j] + k).ok()?);
+            }
+        }
+        let mut tmp: Vec<(u32, f64, u32)> = Vec::new();
         for i in 0..m {
             let (lo, hi) = (price_start[i], price_start[i + 1]);
             tmp.clear();
-            tmp.extend(price_col[lo..hi].iter().zip(&price_val[lo..hi]).filter(|(&j, _)| nb_status[j as usize].is_some()).map(|(&j, &v)| (j, v)));
+            tmp.extend((lo..hi).filter(|&p| nb_status[price_col[p] as usize].is_some()).map(|p| (price_col[p], price_val[p], price_cm[p])));
             let n_nb = tmp.len();
-            tmp.extend(price_col[lo..hi].iter().zip(&price_val[lo..hi]).filter(|(&j, _)| nb_status[j as usize].is_none()).map(|(&j, &v)| (j, v)));
-            for (k, &(j, v)) in tmp.iter().enumerate() {
+            tmp.extend((lo..hi).filter(|&p| nb_status[price_col[p] as usize].is_none()).map(|p| (price_col[p], price_val[p], price_cm[p])));
+            for (k, &(j, v, e)) in tmp.iter().enumerate() {
                 price_col[lo + k] = j;
                 price_val[lo + k] = v;
+                price_cm[lo + k] = e;
             }
             price_nb_end[i] = lo + n_nb;
+        }
+        cm_pos = vec![u32::MAX; cm_off[n_total]];
+        for (p, &e) in price_cm.iter().enumerate() {
+            cm_pos[e as usize] = p as u32;
         }
     }
 
@@ -4836,21 +4872,29 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
             // the other way. Within-row order is irrelevant to `a_p`'s
             // values: each `a_p[j]` still accumulates over rows `i` in
             // ascending order, one entry per row.
-            for &(i, _) in std.cols.col(q) {
-                let lo = price_start[i];
+            // Positions come from the `cm_pos` index (S12) instead of a
+            // linear search of the row; see its own docs.
+            #[inline(always)]
+            fn swap_entries(col: &mut [u32], val: &mut [f64], pcm: &mut [u32], cm_pos: &mut [u32], a: usize, b: usize) {
+                col.swap(a, b);
+                val.swap(a, b);
+                pcm.swap(a, b);
+                cm_pos[pcm[a] as usize] = a as u32;
+                cm_pos[pcm[b] as usize] = b as u32;
+            }
+            for (k, &(i, _)) in std.cols.col(q).iter().enumerate() {
                 let last = price_nb_end[i] - 1;
-                let pos = lo + price_col[lo..=last].iter().position(|&c| c as usize == q).expect("entering column missing from its row's nonbasic PRICE partition");
-                price_col.swap(pos, last);
-                price_val.swap(pos, last);
+                let pos = cm_pos[cm_off[q] + k] as usize;
+                debug_assert!(pos >= price_start[i] && pos <= last && price_col[pos] as usize == q, "entering column missing from its row's nonbasic PRICE partition");
+                swap_entries(&mut price_col, &mut price_val, &mut price_cm, &mut cm_pos, pos, last);
                 price_nb_end[i] = last;
             }
             if std.lb[leaving_var] != std.ub[leaving_var] {
-                for &(i, _) in std.cols.col(leaving_var) {
+                for (k, &(i, _)) in std.cols.col(leaving_var).iter().enumerate() {
                     let first = price_nb_end[i];
-                    let hi = price_start[i + 1];
-                    let pos = first + price_col[first..hi].iter().position(|&c| c as usize == leaving_var).expect("leaving column missing from its row's basic PRICE partition");
-                    price_col.swap(pos, first);
-                    price_val.swap(pos, first);
+                    let pos = cm_pos[cm_off[leaving_var] + k] as usize;
+                    debug_assert!(pos >= first && pos < price_start[i + 1] && price_col[pos] as usize == leaving_var, "leaving column missing from its row's basic PRICE partition");
+                    swap_entries(&mut price_col, &mut price_val, &mut price_cm, &mut cm_pos, pos, first);
                     price_nb_end[i] = first + 1;
                 }
             }
