@@ -3748,7 +3748,7 @@ impl FtLu {
         // (`HFactor.cpp`'s `buildFinish`), which likewise counts only
         // off-diagonal `U` nonzeros.
         let u_off: u64 = base.u_row.iter().map(|v| v.len().saturating_sub(1) as u64).sum();
-        let build_tick = TICK_BUILD_M_COEF * m as u64 + TICK_BUILD_LU_COEF * (l_nnz + u_off);
+        let build_tick = TICK_BUILD_M_COEF * m as u64 + tunable!("ENOMOTO_T_TICK_BUILD_LU_COEF", TICK_BUILD_LU_COEF, u64) * (l_nnz + u_off);
         // `u_off` above excludes `U`'s diagonals; the fill baseline counts
         // every stored entry, matching what `factorize_reusing_order`
         // counts as it goes.

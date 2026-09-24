@@ -4900,7 +4900,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 prof_phases::REFACTOR_CAUSE_CLOCK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         }
-        if !need_refactor && since_check >= XB_CHECK_INTERVAL {
+        if !need_refactor && since_check >= tunable!("ENOMOTO_T_XB_CHECK_INTERVAL", XB_CHECK_INTERVAL, usize) {
             since_check = 0;
             let bump_too_big = lu.fill_count() > tunable!("ENOMOTO_T_FT_BUMP_LIMIT_FACTOR", super::FT_BUMP_LIMIT_FACTOR, usize) * m.max(1);
             if bump_too_big {
