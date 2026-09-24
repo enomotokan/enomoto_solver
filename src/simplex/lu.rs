@@ -2849,14 +2849,22 @@ impl LuFactors {
     /// would apply to it (a column is skipped for one vector iff that
     /// vector's own `z[s]` is zero), so both results are bit-identical to
     /// two separate calls; only the traversal of `l_col` is shared.
-    fn l_solve_into_pair(&self, rhs_a: &[f64], rhs_b: &[f64], za: &mut [f64], zb: &mut [f64]) {
+    ///
+    /// `active` lists, ascending, the steps whose `L` column is non-empty
+    /// ([`FtLu::l_active`]): a step with an empty column does nothing
+    /// whatever its value, so the elimination loop visits only those (the
+    /// result is bit-identical; for a basis whose `L` is mostly trivial —
+    /// slack-heavy — this turns an `O(m)` zero-test scan into
+    /// `O(#non-trivial columns)`).
+    fn l_solve_into_pair(&self, active: &[u32], rhs_a: &[f64], rhs_b: &[f64], za: &mut [f64], zb: &mut [f64]) {
         let m = self.m;
         for s in 0..m {
             let r = self.row_perm[s];
             za[s] = rhs_a[r];
             zb[s] = rhs_b[r];
         }
-        for s in 0..m {
+        for &s in active {
+            let s = s as usize;
             let xa = za[s];
             let xb = zb[s];
             match (xa != 0.0, xb != 0.0) {
@@ -2888,7 +2896,7 @@ impl LuFactors {
     /// Every vector still receives exactly its own single-solve operations
     /// in the same order, so all three results are bit-identical.
     #[allow(clippy::too_many_arguments)]
-    fn l_solve_into_triple(&self, rhs_a: &[f64], rhs_b: &[f64], rhs_c: &[f64], za: &mut [f64], zb: &mut [f64], zc: &mut [f64]) {
+    fn l_solve_into_triple(&self, active: &[u32], rhs_a: &[f64], rhs_b: &[f64], rhs_c: &[f64], za: &mut [f64], zb: &mut [f64], zc: &mut [f64]) {
         let m = self.m;
         for s in 0..m {
             let r = self.row_perm[s];
@@ -2896,7 +2904,8 @@ impl LuFactors {
             zb[s] = rhs_b[r];
             zc[s] = rhs_c[r];
         }
-        for s in 0..m {
+        for &s in active {
+            let s = s as usize;
             let xa = za[s];
             let xb = zb[s];
             let xc = zc[s];
@@ -2935,12 +2944,13 @@ impl LuFactors {
         }
     }
 
-    fn l_solve_into(&self, rhs: &[f64], z: &mut [f64]) {
+    fn l_solve_into(&self, active: &[u32], rhs: &[f64], z: &mut [f64]) {
         let m = self.m;
         for s in 0..m {
             z[s] = rhs[self.row_perm[s]];
         }
-        for s in 0..m {
+        for &s in active {
+            let s = s as usize;
             if z[s] == 0.0 {
                 continue;
             }
@@ -3721,6 +3731,16 @@ pub struct FtLu {
     /// when `slot` lives in `u_seq` instead (and vice versa for
     /// `slot_pos`).
     singles_pos: Vec<usize>,
+    /// `single_piv[slot]` is the pivot of `slot`'s eta while it is in
+    /// `singles`, `0.0` otherwise (a pivot is never zero). The FTRAN `U`
+    /// stage's singleton divisions are done inside [`Self::permute_out`]'s
+    /// pass through this array instead of a separate walk over `singles`
+    /// (singletons are independent of each other and last in `U`'s order,
+    /// so dividing each value as it is read out is bit-identical).
+    single_piv: Vec<f64>,
+    /// Ascending steps whose `L` column is non-empty — the only steps the
+    /// dense `L` stage has to visit (see [`LuFactors::l_solve_into_pair`]).
+    l_active: Vec<u32>,
     /// `slot_pos[slot]` is `slot`'s current index into `u_seq` — kept in
     /// sync by `try_update` over exactly the range its own
     /// `Vec::remove`/`push` already touches (see `try_update`'s own docs),
@@ -3915,6 +3935,8 @@ impl FtLu {
         let mut singles: Vec<UEta> = Vec::new();
         let mut slot_pos = vec![usize::MAX; m];
         let mut singles_pos = vec![usize::MAX; m];
+        let mut single_piv = vec![0.0f64; m];
+        let l_active: Vec<u32> = (0..m).filter(|&s| !base.l_col.col(s).is_empty()).map(|s| s as u32).collect();
         for slot in 0..m {
             let eta = UEta {
                 slot,
@@ -3923,6 +3945,7 @@ impl FtLu {
             };
             if eta.off_diag.nnz() == 0 {
                 singles_pos[slot] = singles.len();
+                single_piv[slot] = eta.pivot;
                 singles.push(eta);
             } else {
                 slot_pos[slot] = u_seq.len();
@@ -3935,6 +3958,8 @@ impl FtLu {
             u_seq,
             singles,
             singles_pos,
+            single_piv,
+            l_active,
             slot_pos,
             row_owners,
             r_etas: Vec::new(),
@@ -4248,13 +4273,8 @@ impl FtLu {
             eta.off_diag.axpy_into_dense(-xp, x);
         }
         // Singletons last (see `singles`' own docs): every write into their
-        // slots has happened by now. Same zero-skip as the loop above.
-        for eta in &self.singles {
-            let p = eta.slot;
-            if x[p] != 0.0 {
-                x[p] /= eta.pivot;
-            }
-        }
+        // slots has happened by now. Their divisions (same zero-skip as the
+        // loop above) are done by `permute_out`, reading `single_piv`.
     }
 
     /// `R_k^{-1} ... R_1^{-1} L^{-1}` applied to a vector in original row
@@ -4267,7 +4287,7 @@ impl FtLu {
     /// ... R_{k-1} U_{k-1}` (eq. 13) rather than `B_{k-1} = L U_{k-1}` once
     /// `k > 1`.
     fn ftran_through_l_and_r_into(&self, rhs: &[f64], z: &mut [f64]) {
-        self.base.l_solve_into(rhs, z);
+        self.base.l_solve_into(&self.l_active, rhs, z);
         // CLOCK-trigger accounting (`Self::tick`'s own docs): `l_solve_into`
         // is a dense `O(m)` scan of `z` regardless of fill (this is the
         // dense FTRAN path — the sparse `L`-stage reach set is accounted
@@ -4366,10 +4386,10 @@ impl FtLu {
         // once per vector — also when `rhs_b`'s `L` stage takes the GP path,
         // so the CLOCK trigger is unchanged).
         if let Some(c) = rho_cap {
-            self.base.l_solve_into(rhs_a, scratch_a);
+            self.base.l_solve_into(&self.l_active, rhs_a, scratch_a);
             self.base.l_solve_steps_into(rhs_b, &c.steps, scratch_b, &mut c.gp);
         } else {
-            self.base.l_solve_into_pair(rhs_a, rhs_b, scratch_a, scratch_b);
+            self.base.l_solve_into_pair(&self.l_active, rhs_a, rhs_b, scratch_a, scratch_b);
         }
         self.add_tick(2 * m);
         let (na, nb) = self.pair_r_u_permute(scratch_a, scratch_b, out_a, out_b, a_tilde_out);
@@ -4406,7 +4426,7 @@ impl FtLu {
         self.add_tick(gp.reach.len() as u64);
         match rho_cap {
             Some(c) => self.base.l_solve_steps_into(rhs_b, &c.steps, scratch_b, &mut c.gp),
-            None => self.base.l_solve_into(rhs_b, scratch_b),
+            None => self.base.l_solve_into(&self.l_active, rhs_b, scratch_b),
         }
         self.add_tick(self.base.m as u64);
         let (na, nb) = self.pair_r_u_permute(scratch_a, scratch_b, out_a, out_b, a_tilde_out);
@@ -4444,10 +4464,10 @@ impl FtLu {
         }
         let m = self.base.m as u64;
         if let Some(c) = rho_cap {
-            self.base.l_solve_into_pair(rhs_a, rhs_c, scratch_a, scratch_c);
+            self.base.l_solve_into_pair(&self.l_active, rhs_a, rhs_c, scratch_a, scratch_c);
             self.base.l_solve_steps_into(rhs_b, &c.steps, scratch_b, &mut c.gp);
         } else {
-            self.base.l_solve_into_triple(rhs_a, rhs_b, rhs_c, scratch_a, scratch_b, scratch_c);
+            self.base.l_solve_into_triple(&self.l_active, rhs_a, rhs_b, rhs_c, scratch_a, scratch_b, scratch_c);
         }
         self.add_tick(3 * m);
         self.triple_r_u_permute(scratch_a, scratch_b, scratch_c, out_a, out_b, out_c, a_tilde_out)
@@ -4482,10 +4502,10 @@ impl FtLu {
         self.base.l_solve_sparse_into(rhs_a, scratch_a, gp);
         self.add_tick(gp.reach.len() as u64);
         if let Some(c) = rho_cap {
-            self.base.l_solve_into(rhs_c, scratch_c);
+            self.base.l_solve_into(&self.l_active, rhs_c, scratch_c);
             self.base.l_solve_steps_into(rhs_b, &c.steps, scratch_b, &mut c.gp);
         } else {
-            self.base.l_solve_into_pair(rhs_b, rhs_c, scratch_b, scratch_c);
+            self.base.l_solve_into_pair(&self.l_active, rhs_b, rhs_c, scratch_b, scratch_c);
         }
         self.add_tick(2 * self.base.m as u64);
         let r = self.triple_r_u_permute(scratch_a, scratch_b, scratch_c, out_a, out_b, out_c, a_tilde_out);
@@ -4538,18 +4558,7 @@ impl FtLu {
                 eta.off_diag.axpy_into_dense(-xp, scratch_c);
             }
         }
-        for eta in &self.singles {
-            let p = eta.slot;
-            if scratch_a[p] != 0.0 {
-                scratch_a[p] /= eta.pivot;
-            }
-            if scratch_b[p] != 0.0 {
-                scratch_b[p] /= eta.pivot;
-            }
-            if scratch_c[p] != 0.0 {
-                scratch_c[p] /= eta.pivot;
-            }
-        }
+        // Singleton divisions: done by `permute_out` (see `single_piv`).
         let na = self.permute_out(scratch_a, out_a);
         let nb = self.permute_out(scratch_b, out_b);
         let nc = self.permute_out(scratch_c, out_c);
@@ -4587,15 +4596,7 @@ impl FtLu {
                 eta.off_diag.axpy_into_dense(-xp, scratch_b);
             }
         }
-        for eta in &self.singles {
-            let p = eta.slot;
-            if scratch_a[p] != 0.0 {
-                scratch_a[p] /= eta.pivot;
-            }
-            if scratch_b[p] != 0.0 {
-                scratch_b[p] /= eta.pivot;
-            }
-        }
+        // Singleton divisions: done by `permute_out` (see `single_piv`).
         let na = self.permute_out(scratch_a, out_a);
         let nb = self.permute_out(scratch_b, out_b);
         (na, nb)
@@ -4609,21 +4610,46 @@ impl FtLu {
     /// single instruction and the add is unconditional, so the count adds
     /// no branch misprediction to a loop whose scatter already dominates it.
     #[inline]
+    ///
+    /// Also performs the `U` stage's singleton divisions (see
+    /// [`Self::single_piv`]) — except in the `ENOMOTO_FTRAN_U_ZERO_SKIP=0`
+    /// arm, whose `u_solve_into` still does its own unconditional ones.
     fn permute_out(&self, scratch: &[f64], out: &mut [f64]) -> usize {
         let mut nnz = 0usize;
         let tiny = tiny_drop();
-        if tiny > 0.0 {
-            for s in 0..self.base.m {
+        let m = self.base.m;
+        let col_perm = &self.base.col_perm[..m];
+        let scratch = &scratch[..m];
+        if !self.u_zero_skip {
+            for s in 0..m {
                 let v = scratch[s];
-                let v = if v.abs() < tiny { 0.0 } else { v };
-                out[self.base.col_perm[s]] = v;
+                let v = if tiny > 0.0 && v.abs() < tiny { 0.0 } else { v };
+                out[col_perm[s]] = v;
                 nnz += (v != 0.0) as usize;
             }
             return nnz;
         }
-        for s in 0..self.base.m {
-            let v = scratch[s];
-            out[self.base.col_perm[s]] = v;
+        let piv = &self.single_piv[..m];
+        if tiny > 0.0 {
+            for s in 0..m {
+                let mut v = scratch[s];
+                let d = piv[s];
+                if d != 0.0 && v != 0.0 {
+                    v /= d;
+                }
+                let v = if v.abs() < tiny { 0.0 } else { v };
+                out[col_perm[s]] = v;
+                nnz += (v != 0.0) as usize;
+            }
+            return nnz;
+        }
+        for s in 0..m {
+            let mut v = scratch[s];
+            let d = piv[s];
+            if d != 0.0 && v != 0.0 {
+                v /= d;
+            }
+            out[col_perm[s]] = v;
             nnz += (v != 0.0) as usize;
         }
         nnz
@@ -5172,6 +5198,7 @@ impl FtLu {
                 self.singles_pos[moved.slot] = single_idx;
             }
             self.singles_pos[p] = usize::MAX;
+            self.single_piv[p] = 0.0;
             removed
         } else {
             let seq_pos = self.slot_pos[p];
