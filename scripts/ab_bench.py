@@ -90,6 +90,19 @@ def main() -> None:
     info: dict[str, dict[str, dict]] = {n: {} for n in names}
     reps: dict[str, int] = {}
 
+    # Calibration pass (discarded): one cold solve per arm and problem sets
+    # the per-process repetition count, so every measured sample is warm.
+    for n in names:
+        mps = args.cache_dir / "mps" / f"{n}.mps"
+        if not mps.exists() or mps.stat().st_size == 0:
+            continue
+        ts = []
+        for arm in ("base", "new"):
+            r = run_arm(arms[arm], n, mps, 1, args.timeout, arm_env[arm])
+            ts.extend(r["times"])
+        t = min(ts, default=1.0)
+        reps[n] = max(1, min(100, int(args.min_sample_time / max(t, 1e-4))))
+
     for rnd in range(args.rounds):
         order = ["base", "new"] if rnd % 2 == 0 else ["new", "base"]
         t_round = time.time()
@@ -101,9 +114,6 @@ def main() -> None:
                 r = run_arm(arms[arm], n, mps, reps.get(n, 1), args.timeout, arm_env[arm])
                 samples[n][arm].extend(r["times"])
                 info[n][arm] = {"status": r.get("status"), "obj": r.get("obj")}
-            if n not in reps:
-                t = min((min(v) for v in samples[n].values() if v), default=1.0)
-                reps[n] = max(1, min(20, int(args.min_sample_time / max(t, 1e-4))))
         print(f"round {rnd + 1}/{args.rounds} done in {time.time() - t_round:.0f}s", file=sys.stderr, flush=True)
         args.out.write_text(json.dumps({"samples": samples, "info": info}, indent=1))
 
