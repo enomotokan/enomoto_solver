@@ -3712,32 +3712,37 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         // nonzeros) also feeds the DSE update's `Σ rho_i^2`.
         let mut rho_list_len: Option<usize> = None;
         timed!(profile_phases, prof_phases::PRICE, {
-            let mut row = |i: usize| -> bool {
-                let rv = rho[i];
-                if rv.abs() <= TOL {
-                    return false;
-                }
-                let (lo, hi) = (price_start[i], price_nb_end[i]);
-                for (&j, &v) in price_col[lo..hi].iter().zip(&price_val[lo..hi]) {
-                    let j = j as usize;
-                    if !touched[j] {
-                        touched[j] = true;
-                        touched_cols.push(j);
-                    }
-                    a_p[j] += rv * v;
-                }
-                true
-            };
             let mut n_priced = 0usize;
+            // A macro, not a closure: the body must be inlined into both
+            // loops (a non-inlined closure call per row cost more than the
+            // skipped rows saved on small problems).
+            macro_rules! price_row {
+                ($i:expr) => {{
+                    let i: usize = $i;
+                    let rv = rho[i];
+                    if !(rv.abs() <= TOL) {
+                        n_priced += 1;
+                        let (lo, hi) = (price_start[i], price_nb_end[i]);
+                        for (&j, &v) in price_col[lo..hi].iter().zip(&price_val[lo..hi]) {
+                            let j = j as usize;
+                            if !touched[j] {
+                                touched[j] = true;
+                                touched_cols.push(j);
+                            }
+                            a_p[j] += rv * v;
+                        }
+                    }
+                }};
+            }
             if (last_rho_nnz as f64) <= tunable!("ENOMOTO_T_PRICE_LIST_DENSITY", 0.1, f64) * m as f64 {
                 let k = compact_rows(m, &mut rho_rows, |i| rho[i].to_bits() << 1);
                 for &i in &rho_rows[..k] {
-                    n_priced += row(i as usize) as usize;
+                    price_row!(i as usize);
                 }
                 rho_list_len = Some(k);
             } else {
                 for i in 0..m {
-                    n_priced += row(i) as usize;
+                    price_row!(i);
                 }
             }
             last_rho_nnz = n_priced;
@@ -4762,31 +4767,42 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 // Flip result and entering step in one pass: per row, the
                 // exact operations of the separate flip pass followed by
                 // those of the entering step, then one `refresh_row`.
-                let mut row = |i: usize| {
-                    let ca = combined_alpha_base[i];
-                    let cs = if combined_slope_nonzero { combined_alpha_slope[i] } else { 0.0 };
-                    let flip = ca != 0.0 || cs != 0.0;
-                    let a = alpha_full[i];
-                    if !flip && a == 0.0 {
-                        return;
-                    }
-                    if flip {
-                        x_b_base[i] -= ca;
-                        if combined_slope_nonzero {
-                            x_b_slope[i] = snap_slope(x_b_slope[i] - cs);
+                // (A macro so the body is inlined into both loops.)
+                macro_rules! flip_step_row {
+                    ($i:expr) => {{
+                        let i: usize = $i;
+                        let ca = combined_alpha_base[i];
+                        let cs = if combined_slope_nonzero { combined_alpha_slope[i] } else { 0.0 };
+                        let flip = ca != 0.0 || cs != 0.0;
+                        let a = alpha_full[i];
+                        if flip || a != 0.0 {
+                            if flip {
+                                x_b_base[i] -= ca;
+                                if combined_slope_nonzero {
+                                    x_b_slope[i] = snap_slope(x_b_slope[i] - cs);
+                                }
+                            }
+                            if a != 0.0 {
+                                x_b_base[i] -= a * theta_base;
+                                if theta_slope != 0.0 {
+                                    x_b_slope[i] = snap_slope(x_b_slope[i] - a * theta_slope);
+                                }
+                            }
+                            refresh_row(&mut infeasible_rows, &mut row_dev, &row_bounds, &x_b_base, &x_b_slope, i);
                         }
-                    }
-                    if a != 0.0 {
-                        x_b_base[i] -= a * theta_base;
-                        if theta_slope != 0.0 {
-                            x_b_slope[i] = snap_slope(x_b_slope[i] - a * theta_slope);
-                        }
-                    }
-                    refresh_row(&mut infeasible_rows, &mut row_dev, &row_bounds, &x_b_base, &x_b_slope, i);
-                };
+                    }};
+                }
                 match xb_list_len {
-                    Some(k) => xb_rows[..k].iter().for_each(|&i| row(i as usize)),
-                    None => (0..m).for_each(&mut row),
+                    Some(k) => {
+                        for &i in &xb_rows[..k] {
+                            flip_step_row!(i as usize);
+                        }
+                    }
+                    None => {
+                        for i in 0..m {
+                            flip_step_row!(i);
+                        }
+                    }
                 }
                 for &i in &combined_touched {
                     rhs_inc_base[i] -= combined_base[i];
