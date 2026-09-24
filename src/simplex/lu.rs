@@ -2497,6 +2497,11 @@ fn factorize_flat_markowitz(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<L
     factorize_flat_markowitz_routed(m, rows_in, is_dense_input(m, rows_in))
 }
 
+/// B3 diagnostics: how many factorizations switched to the dense tail, and
+/// the total size `k` of the tails they handed to `factorize_dense_faer`.
+pub(crate) static PROF_DENSE_SWITCH: AtomicUsize = AtomicUsize::new(0);
+pub(crate) static PROF_DENSE_SWITCH_ROWS: AtomicUsize = AtomicUsize::new(0);
+
 fn factorize_flat_markowitz_routed(m: usize, rows_in: &[Vec<(usize, f64)>], dense: bool) -> Option<LuFactors> {
     if dense {
         return factorize_dense_faer(m, rows_in);
@@ -2516,7 +2521,47 @@ fn factorize_flat_markowitz_routed(m: usize, rows_in: &[Vec<(usize, f64)>], dens
     let mut snapshot_ns: u128 = 0;
 
     let mut pivot_row_snapshot: Vec<(usize, f64)> = Vec::new();
+    // B3 (`ENOMOTO_LU_DENSE_SWITCH`, default `0` = off, path-changing):
+    // once the active submatrix's density reaches this fraction of `k^2`
+    // (`k` = rows left, at least `ENOMOTO_LU_DENSE_SWITCH_MIN`), factorize
+    // the remaining `k x k` block densely (`factorize_dense_faer`, partial
+    // pivoting) instead of continuing Markowitz on it.
+    let dense_switch = tunable!("ENOMOTO_LU_DENSE_SWITCH", 0.0, f64);
+    let dense_switch_min = tunable!("ENOMOTO_LU_DENSE_SWITCH_MIN", 64, usize);
     for step in 0..m {
+        if dense_switch > 0.0 && step % 16 == 0 && m - step >= dense_switch_min {
+            let k = m - step;
+            let active: usize = (0..m).filter(|&i| !state.row_used[i]).map(|i| state.row(i).len()).sum();
+            if active as f64 >= dense_switch * (k as f64) * (k as f64) {
+                let rows_r: Vec<usize> = (0..m).filter(|&i| !state.row_used[i]).collect();
+                let cols_c: Vec<usize> = (0..m).filter(|&j| !state.col_used[j]).collect();
+                debug_assert_eq!(rows_r.len(), k);
+                debug_assert_eq!(cols_c.len(), k);
+                let mut col_local = vec![usize::MAX; m];
+                for (l, &j) in cols_c.iter().enumerate() {
+                    col_local[j] = l;
+                }
+                let sub: Vec<Vec<(usize, f64)>> = rows_r
+                    .iter()
+                    .map(|&i| state.row(i).iter().filter(|&&(j, v)| v != 0.0 && col_local[j] != usize::MAX).map(|&(j, v)| (col_local[j], v)).collect())
+                    .collect();
+                let dlu = factorize_dense_faer(k, &sub)?;
+                for s in 0..k {
+                    debug_assert_eq!(dlu.col_perm[s], s);
+                    row_perm[step + s] = rows_r[dlu.row_perm[s]];
+                    col_perm[step + s] = cols_c[s];
+                    for &(cs, val) in &dlu.u_row[s] {
+                        u_entries.push((step + s, cols_c[cs], val));
+                    }
+                    for &(rs, mult) in dlu.l_col.col(s) {
+                        l_entries.push((rows_r[dlu.row_perm[rs]], step + s, mult));
+                    }
+                }
+                PROF_DENSE_SWITCH.fetch_add(1, Ordering::Relaxed);
+                PROF_DENSE_SWITCH_ROWS.fetch_add(k, Ordering::Relaxed);
+                break;
+            }
+        }
         // Prefer a non-dense pivot column whenever one exists at all,
         // regardless of Markowitz score, and only fall back to the
         // unrestricted search (which also correctly reports a genuinely

@@ -454,6 +454,11 @@ mod prof_phases {
                 sparse_lu::PROF_FULL_NNZ.load(Relaxed) as f64
                     / sparse_lu::PROF_FULL_COUNT.load(Relaxed).max(1) as f64,
             );
+            eprintln!(
+                "  lu_dense_switch: count={} rows={}",
+                sparse_lu::PROF_DENSE_SWITCH.load(Relaxed),
+                sparse_lu::PROF_DENSE_SWITCH_ROWS.load(Relaxed),
+            );
         }
         eprintln!(
             "  density_gate_ftrans={} final_expected_density col_aq={:.3} bfrt={:.3}",
