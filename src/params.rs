@@ -7,373 +7,125 @@
 
 /// 単体法共通 (src/simplex.rs)
 pub(crate) mod simplex {
+    /// 汎用のゼロ判定許容誤差 (係数・比率・被約費用が実質 0 かどうか)。
     pub(crate) const TOL: f64 = 1e-9;
 
-    /// Floor for [`max_iters_for`]'s size-scaled cap — the crate's own
-    /// historical fixed value, kept as a lower bound so every small/medium
-    /// instance that already solved within it (the whole Netlib 73-problem
-    /// `--max-vars 3000` set, per `netlib_benchmark_workflow`) sees no
-    /// behavior change at all.
+    /// `max_iters_for` が返す反復上限の下限値。
     pub(crate) const MAX_ITERS_FLOOR: usize = 20_000;
 
-    /// Absolute ceiling on [`max_iters_for`]'s output — a defensive backstop,
-    /// not a value any known Netlib instance approaches (the largest, `dfl001`
-    /// at `m=4554`/`n_total=9773` post-presolve, needs `MAX_ITERS_SCALE *
-    /// (m+n_total) = 286,540`, far below this), so a pathological future
-    /// instance can't turn an unbounded-looking cycle into a multi-hour hang.
+    /// `max_iters_for` が返す反復上限の絶対的な上限値 (病的な問題での長時間化を防ぐ保険)。
     pub(crate) const MAX_ITERS_CEILING: usize = 2_000_000;
 
-    /// Multiplier applied to `m + n_total` by [`max_iters_for`].
+    /// 反復上限の倍率: 上限 = `MAX_ITERS_SCALE * (m + n_total)` (を下限/上限で挟む)。
     pub(crate) const MAX_ITERS_SCALE: usize = 20;
 
-    /// Primal feasibility tolerance for chuzr's basic-variable bound check —
-    /// deliberately separate from (and looser than) `TOL`, which stays tight
-    /// for "is this coefficient/ratio exactly zero"-type tests. Matches
-    /// HiGHS's own default `primal_feasibility_tolerance` (1e-7, `HighsOptions`)
-    /// rather than reusing `TOL`'s 1e-9: confirmed on real data (Netlib's
-    /// `agg`, whose bounds/data reach the millions) that `TOL` alone is too
-    /// tight for a basic variable's accumulated floating-point noise once the
-    /// problem's own natural scale is large — a variable sitting `-6.25e-9`
-    /// off its own `lb = 0` (utterly negligible against that scale) still
-    /// cleared the old `> TOL` (1e-9) threshold, was treated as a genuine
-    /// primal infeasibility for chuzr to "fix", and — since it wasn't a real
-    /// one — sometimes left chuzc1/BFRT with no genuine way to fix it,
-    /// surfacing as a false `Infeasible` report on an actually-optimal LP.
+    /// chuzr が基底変数の上下限違反とみなす主実行可能性許容誤差 (HiGHS の
+    /// `primal_feasibility_tolerance` と同じ 1e-7)。`TOL` より緩い。
     pub(crate) const PRIMAL_FEAS_TOL: f64 = 1e-7;
 
-    /// Harris (1973) two-pass ratio test tolerance for the dual method's BFRT
-    /// (Huangfu & Hall §2.2.2's plain single-boundary BFRT, used until now,
-    /// picks strictly the smallest-ratio candidate that stops the walk — with
-    /// no regard for how small its own pivot `a_pj` is. A pivot near zero can
-    /// make the resulting basis numerically singular even though the LP
-    /// itself is perfectly well-posed: confirmed on real data (the Netlib LP
-    /// set's `wood1p`), where the basis `factorize()` eventually rejected as
-    /// singular had rank 242/243 with a smallest singular value at machine
-    /// epsilon — not a `factorize()` bug, but a pivot this ratio test should
-    /// never have accepted). This tolerance widens the acceptance window
-    /// *backward* (see the BFRT loop below for why backward, not forward) so
-    /// a slightly smaller-ratio candidate with a much better-conditioned
-    /// pivot can be chosen instead, at the cost of a small, bounded amount of
-    /// ratio sub-optimality (more dual-simplex iterations to fully restore
-    /// optimality, not a feasibility violation). Inspired by HiGHS's
-    /// `HEkkDualRow::chooseFinal`/`chooseFinalLargeAlpha` (`HEkkDualRow.cpp`),
-    /// which searches a similar tolerance window but can safely extend
-    /// forward too, since its bookkeeping (a budget over total remaining
-    /// infeasibility) isn't tied to a step-by-step walk the way this crate's
-    /// BFRT loop is.
-    ///
-    /// Widening this constant was tried directly against the Netlib LP set
-    /// (1e-7, 1e-5, 1e-4) expecting a monotonic improvement in how many
-    /// instances crash or mis-report infeasible — it wasn't monotonic. 1e-5
-    /// fixed some instances 1e-7 missed (`pilot.ja`, `pilotnov`, `qap8`) but
-    /// broke one 1e-7 got right (`bnl1`) and added a new false-infeasible
-    /// (`pilot4`); 1e-4 was worse on both counts than either. This is a
-    /// whack-a-mole pattern, not a tuning curve with a clear optimum — the
-    /// affected instances (`agg`, `cycle`, `degen2`, `degen3`, `maros`,
-    /// `perold`, `pilotnov`, `stair`, `vtp.base`, ...) are also independently
-    /// known in the LP literature as highly degenerate stress tests for
-    /// anti-cycling machinery specifically, which points at the *actual* gap:
-    /// this dual method has no anti-degeneracy mechanism of its own (the
-    /// primal method's EXPAND, per this crate's own history, was never
-    /// ported to the dual side). A pivot-tolerance constant can only ever
-    /// paper over that, not fix it — kept at 1e-7 (tied for best of the three
-    /// tried, and the smallest deviation from ratio-optimality of the tied
-    /// pair) rather than tuned further.
-    ///
-    /// **A genuine per-row-scaled version (Harris's actual `r_i + tol/|alpha_i|
-    /// >= r_stop`, i.e. using `HARRIS_RATIO_TOL / a_pj.abs()` as each
-    /// candidate's own admission threshold instead of subtracting this flat
-    /// constant from `stop_idx`'s ratio) was implemented and benchmarked
-    /// against the same Netlib set, then reverted** — see the BFRT block's
-    /// pass-2 comment for the full mechanism. Summary: +9.7% aggregate wall
-    /// time, concentrated entirely in the degenerate instances already named
-    /// above (`cycle`, `grow22`, `degen3`, `perold`, `fit1p`, `bnl1`,
-    /// `pilot4`), zero instances newly fixed, and on `cycle` a silently wrong
-    /// reported optimum. The per-row scaling is real Harris (1973), not a
-    /// simplification of it, but it widens admission using the *substitute*
-    /// candidate's own pivot — exactly backwards from what this function's
-    /// safety argument needs, which is a bound on the *skipped* candidates'
-    /// worst-case tolerance.
-    ///
-    /// **A second, independently-sourced attempt was also tried and reverted**:
-    /// a direct port of HiGHS's real `HEkkDualRow::chooseFinalLargeAlpha`
-    /// (`highs/simplex/HEkkDualRow.cpp`, read from source, not memory) — an
-    /// *absolute* pivot-magnitude floor over the candidate pool rather than any
-    /// ratio-space window, substitution attempted only when `stop_idx`'s own
-    /// pivot fails it, nearest-clearing-candidate-wins rather than best-in-reach.
-    /// Faithful to the real source, and it *still* broke `cycle` (a different
-    /// wrong objective than the first attempt). A follow-up A/B isolated the
-    /// fault to substitution *at all*, not to either rule's shape: with pass 2
-    /// short-circuited to a no-op, `cycle` solves correctly. See the BFRT
-    /// block's pass-2 comment for the full diagnosis — this crate's flip/theta/
-    /// dual-update accounting doesn't actually defend dual feasibility for the
-    /// candidates skipped between a substitute and `stop_idx`, only primal
-    /// non-overshoot of the flip itself; the flat window below stays because it
-    /// is empirically narrow enough, on the full Netlib set including `cycle`
-    /// itself, that this gap never becomes large enough to surface.
+    /// 双対法 BFRT の Harris 2 パス比率テストの許容幅。比率が少し小さい候補でも
+    /// ピボットの条件が良ければ選べるよう、受け入れ窓を後ろ向きに広げる量。
     pub(crate) const HARRIS_RATIO_TOL: f64 = 1e-7;
 
-    /// The primal method's own analogue of [`HARRIS_RATIO_TOL`] above, for
-    /// exactly the same reason: `run_phase`'s two-pass ratio test already
-    /// widens its acceptance window by the *EXPAND* working tolerance
-    /// (`expand.delta`, §4.2) to prevent cycling, but that tolerance is
-    /// designed to be minuscule (order `1e-6`, per [`EXPAND_DELTA_F`]) — its
-    /// job is proving a strictly positive step exists, not steering the
-    /// ratio test toward a numerically better-conditioned pivot the way this
-    /// constant does. When only one candidate row falls inside that
-    /// razor-thin window, Pass 2's own "largest pivot magnitude" tie-break
-    /// has nothing to choose between and must accept whatever pivot that one
-    /// candidate has, however close to zero — confirmed on Netlib's
-    /// `forplan` (unrelated to EXPAND/cycling: a perfectly ordinary
-    /// non-degenerate phase-2 iteration, iteration 118, picked a pivot of
-    /// `~2.4e-9`, well under [`FT_MIN_PIVOT`], which then made the
-    /// mid-solve refactorization triggered by rejecting it find the *basis
-    /// itself* singular — not a `factorize()` bug, the same class of finding
-    /// `HARRIS_RATIO_TOL`'s own docs describe for `wood1p`). Widening the
-    /// Pass 2 admission window by this much lets a slightly-worse-ratio
-    /// candidate with a far better pivot be picked instead, at the cost of a
-    /// small bounded overshoot past the exact leaving bound — well within
-    /// the same "temporary infeasibility, cleaned up later by
-    /// `expand_reset_nonbasics`" tolerance this function's EXPAND step
-    /// already accepts by design, so this doesn't weaken any invariant the
-    /// algorithm didn't already rely on.
+    /// 主単体法 `run_phase` の比率テスト第 2 パスの受け入れ窓を広げる量
+    /// ([`HARRIS_RATIO_TOL`] の主単体法版)。ごく小さいピボットを避けるため。
     pub(crate) const PRIMAL_HARRIS_TOL: f64 = 1e-7;
 
-    /// Threshold below which a pivot's actual contribution to the objective
-    /// (`theta_q * dj_q`) counts as "no real progress" for `bland_mode`'s
-    /// stall counter — see that flag's own docs.
+    /// ピボットの目的関数への寄与 (`theta * d_q`) がこれ未満なら「進展なし」として
+    /// 停滞カウンタ (`bland_mode` 判定) を進める。
     pub(crate) const STALL_PROGRESS_EPS: f64 = 1e-9;
 
-    /// Trigger (2): an FT update whose resulting pivot is smaller than this
-    /// is rejected by `FtLu::try_update`, forcing an immediate refactorization.
+    /// 再分解トリガ (2): FT 更新後のピボットがこれより小さければ更新を拒否して再分解する。
+    /// 主単体法の比率テストでブロック行とみなす `|alpha_i|` の下限にも使う。
     pub(crate) const FT_MIN_PIVOT: f64 = 1e-7;
 
-    /// Cadence (in iterations) for triggers (1) and (3).
+    /// 再分解トリガ (1)(3) を検査する周期 (反復数)。
     pub(crate) const FT_CHECK_INTERVAL: usize = 5;
 
-    /// Trigger (1)'s own check (`compute_rhs` + `basis_residual_norm`, an
-    /// `O(nnz(A))` scan plus a full basis-matrix multiply) runs only once
-    /// every this many [`FT_CHECK_INTERVAL`]-cadence checks — i.e. every
-    /// `FT_CHECK_INTERVAL * RESIDUAL_CHECK_MULTIPLIER` iterations — rather
-    /// than every single one, per [`FT_RESIDUAL_TOL`]'s own docs: measured
-    /// residuals on this crate's target problem sizes stay around
-    /// `1e-11..1e-12`, seven to eight orders of magnitude below the `1e-4`
-    /// trigger, so this check has enormous slack before genuine drift could
-    /// ever approach it — checking it this much less often still catches real
-    /// drift long before it matters, while no longer paying `compute_rhs`'s
-    /// full-matrix cost on every one of trigger (3)'s own (cheap,
-    /// `fill_count()`-only) checks. Trigger (3) itself is unaffected — its own
-    /// `fill_count()` check (an `O(1)`-ish length sum, no matrix scan) still
-    /// runs every `FT_CHECK_INTERVAL` iterations, and still supplies `rhs` for
-    /// the resync whenever it actually fires, since `compute_rhs` is only
-    /// skipped when *neither* trigger has a reason to run this round.
+    /// トリガ (1) の残差検査は `FT_CHECK_INTERVAL` 周期の検査のうちこの回数に 1 回だけ行う
+    /// (= `FT_CHECK_INTERVAL * RESIDUAL_CHECK_MULTIPLIER` 反復ごと)。
     pub(crate) const RESIDUAL_CHECK_MULTIPLIER: usize = 20;
 
-    /// Trigger (1): refactor if the true-basis residual exceeds this. In
-    /// practice this essentially never fires (measured residuals on this
-    /// crate's target problem sizes stayed around 1e-11..1e-12, several
-    /// orders of magnitude below even the old 1e-6) — trigger (3) below is
-    /// what actually governs refactorization frequency — but it costs nothing
-    /// to leave a wide safety margin here too.
+    /// 再分解トリガ (1): 真の基底残差 `‖A_B x_B - rhs‖` がこれを超えたら再分解する。
     pub(crate) const FT_RESIDUAL_TOL: f64 = 1e-4;
 
-    /// Trigger (3): refactor if accumulated eta-file fill exceeds this factor
-    /// times the basis dimension. This is the trigger that actually fires
-    /// repeatedly in practice (confirmed by instrumenting a 1000-variable
-    /// benchmark: every refactorization past the first was this one) — and per
-    /// that same instrumentation, `fill_count()` grows *compounding*, not
-    /// linearly, in the update count (each FTRAN/BTRAN walks every existing
-    /// `U`-eta/`R`-eta, so a longer eta chain smears more fill into every
-    /// subsequent update, roughly doubling the per-update fill rate every ~50
-    /// updates in that benchmark). This constant trades more accumulated
-    /// Forrest-Tomlin eta fill (slower FTRAN/BTRAN per iteration, since each
-    /// solve walks every eta since the last refactorization) for fewer, less
-    /// frequent Markowitz refactorizations, and the empirical trade curve is
-    /// *not* "smaller is safer": a direct A/B sweep on the same benchmark
-    /// (total wall time across 10 solves) found lowering this factor makes
-    /// solves slower, not faster — `4` and `2` cost ~10% and ~65% *more* total
-    /// time than `8` did, because refactorization has its own fixed cost (a
-    /// full Markowitz factorize plus a full fresh-reduced-cost recompute) that
-    /// more frequent triggering pays more often than the FTRAN/BTRAN savings
-    /// recoup. Raising it instead helped monotonically up to a point:
-    /// `16`/`32`/`64` measured ~5%/~12%/~15% *faster* than `8` on that same
-    /// benchmark, `128` gave no further improvement (the gain plateaus once
-    /// refactorizations become rare enough that trigger (4)'s `FT_MAX_UPDATES`
-    /// cap — or genuine numerical drift via trigger (1) — would dominate
-    /// instead). `64` is kept rather than pushing further, since it already
-    /// captures the measured gain with a comfortable margin before the point
-    /// where a large eta file's numerical safety margin would need
-    /// re-examining. Re-benchmark if this crate's typical problem shape
-    /// changes significantly.
+    /// 再分解トリガ (3): eta ファイルの累積 fill が `FT_BUMP_LIMIT_FACTOR * m` を超えたら再分解する。
     pub(crate) const FT_BUMP_LIMIT_FACTOR: usize = 64;
 
-    /// Trigger (4): refactor unconditionally once the update count passes
-    /// this. Measured to be the very first refactorization in a solve (fired
-    /// once, right around 100, before trigger (3) ever got a chance to) —
-    /// raising it lets a solve run further into trigger (3)'s own eta-fill
-    /// budget before this unconditional cap would cut in first.
+    /// 再分解トリガ (4): FT 更新回数がこれを超えたら無条件に再分解する。
     pub(crate) const FT_MAX_UPDATES: usize = 300;
 
-    /// Trigger (5), HiGHS `HEkkDualRow::updateVerify` equivalent: refactor if
-    /// the pivot element this iteration is about to commit disagrees, by more
-    /// than this relative amount, between its two independent sources — PRICE's
-    /// row-direction value (`a_p[q]`, from `rho_p^T A`) and FTRAN's
-    /// column-direction value (`alpha_buf[p]`, from `B^-1 A_q`). Both are exact
-    /// in infinite precision; a real gap between them means the Forrest-Tomlin
-    /// eta chain (`lu`) has already drifted enough to misrepresent `B^-1` by
-    /// this iteration, *before* that error is baked into `x_B`/`d` by the
-    /// primal/dual updates that would otherwise follow immediately.
-    ///
-    /// This is deliberately a *different, earlier* signal than the existing
-    /// triggers above: trigger (1) (`FT_RESIDUAL_TOL`) only re-checks
-    /// `‖A_B x_B - rhs‖` every `FT_CHECK_INTERVAL * RESIDUAL_CHECK_MULTIPLIER`
-    /// iterations, so a bad pivot can still be committed (and the resulting
-    /// drift compounded by further updates) for up to that many iterations
-    /// before it's caught; trigger (2) (`FT_MIN_PIVOT`) only rejects a pivot
-    /// whose magnitude is small in an absolute sense, which says nothing about
-    /// whether the *value itself* is still accurate. `updateVerify` instead
-    /// checks every single pivot, immediately, using values both already
-    /// computed as ordinary byproducts of this iteration's own BTRAN/PRICE and
-    /// FTRAN (see `extended_dual`'s main loop) — no extra BTRAN/FTRAN call
-    /// is added to pay for it.
-    ///
-    /// Chosen at `1e-7`, two orders of magnitude above the `~1e-9` (`TOL`)
-    /// rounding-noise floor a healthy sparse dot-product/triangular-solve pair
-    /// of this size actually exhibits on this crate's target problem sizes, and
-    /// matching [`FT_MIN_PIVOT`]'s own order of magnitude (the point below
-    /// which a pivot is rejected outright regardless of what triggered the
-    /// check) rather than [`FT_RESIDUAL_TOL`]'s much looser `1e-4` (that
-    /// constant bounds a *whole-basis* aggregate residual after many updates,
-    /// not one freshly computed pivot pair — reusing it here would let real
-    /// per-pivot drift accumulate for a long time before firing). Set too
-    /// tight, this fires on ordinary floating-point noise and forces far more
-    /// refactorizations than the drift it exists to catch would ever justify
-    /// (each refactorization is a full Markowitz factorize plus a full fresh
-    /// reduced-cost recompute — not cheap, see [`FT_BUMP_LIMIT_FACTOR`]'s own
-    /// docs on that trade-off); set too loose, it never fires before trigger
-    /// (1) would have caught the same drift anyway, making it dead code. `1e-7`
-    /// is the recommended starting point from the port's own spec, not yet
-    /// independently re-tuned against this crate's Netlib benchmark set beyond
-    /// the sweep recorded in this feature's own commit message — re-measure
-    /// with `ENOMOTO_PROF_UPDATE_VERIFY` (below) before moving it.
+    /// 再分解トリガ (5) (HiGHS `updateVerify` 相当): ピボット要素の行方向の値 (PRICE) と
+    /// 列方向の値 (FTRAN) の相対差がこれを超えたら、コミット前に再分解する。
     pub(crate) const UPDATE_VERIFY_TOL: f64 = 1e-7;
 
-    /// EXPAND anti-cycling (Gill, Murray, Saunders & Wright, "A practical
-    /// anti-cycling procedure for linearly constrained optimization",
-    /// Mathematical Programming 45 (1989) 437-474). "Master" feasibility
-    /// tolerance the working tolerance `delta` is kept strictly below during
-    /// an expanding sequence; also the snap-to-bound threshold used when
-    /// resetting nonbasic variables (§4.2-4.3, eq. (4.2)/(4.3)).
+    /// EXPAND 巡回回避 (Gill, Murray, Saunders & Wright 1989) の基準実行可能性許容誤差
+    /// `delta_f`。作業許容誤差 `delta` は常にこれ未満に保つ。非基底変数を上下限に
+    /// 戻すときのスナップ幅にも使う (§4.2-4.3)。
     pub(crate) const EXPAND_DELTA_F: f64 = 1e-6;
 
-    /// Iterations per expanding sequence before a reset (§4.2); the paper's
-    /// own worked example uses 10000 for large industrial LPs, but this
-    /// project's test-scale LPs warrant a much shorter cycle so resets are
-    /// actually exercised.
+    /// EXPAND の 1 拡大系列の反復数 (この反復数ごとにリセットする, §4.2)。
     pub(crate) const EXPAND_K: usize = 50;
 
-    /// Feasibility tolerance an expanding sequence starts from (§4.2: `delta_0 = 0.5 delta_f`).
+    /// 拡大系列の開始時の作業許容誤差 (§4.2: `delta_0 = 0.5 delta_f`)。
     pub(crate) const EXPAND_DELTA_0: f64 = 0.5 * EXPAND_DELTA_F;
 
-    /// Ceiling `delta_k` approaches but never reaches within `EXPAND_K` steps
-    /// (§4.2: `delta_K = 0.99 delta_f`).
+    /// `EXPAND_K` 反復で近づく作業許容誤差の上限 (§4.2: `delta_K = 0.99 delta_f`)。
     pub(crate) const EXPAND_DELTA_K: f64 = 0.99 * EXPAND_DELTA_F;
 
-    /// Per-iteration growth of the working tolerance (§4.2: `tau = (delta_K - delta_0) / K`).
+    /// 作業許容誤差の 1 反復あたりの増分 (§4.2: `tau = (delta_K - delta_0) / K`)。
+    /// 比率テストの最小ステップ `tau / |pivot|` にも使う。
     pub(crate) const EXPAND_TAU: f64 = (EXPAND_DELTA_K - EXPAND_DELTA_0) / (EXPAND_K as f64);
 
-    /// Weights never allowed to fall below this — guards against a tiny or
-    /// negative value (from accumulated rounding) making a column look
-    /// spuriously "steep".
+    /// 最急辺/DSE 重みの下限 (丸め誤差で極小・負になった重みを防ぐ)。
     pub(crate) const STEEPEST_EDGE_FLOOR: f64 = 1e-10;
 
-    /// Above this many rows/elements, prefer `rayon`'s parallel iterator over
-    /// a plain sequential loop for `chuzr`'s row scan and `DseState`'s weight
-    /// update (both O(one problem dimension) per pivot); `scaling::compute`'s
-    /// own column-norm fold uses the same constant against its own combined
-    /// `A`/`G` row count.
-    ///
-    /// Replaces an earlier "run both ways once, time them, keep the faster"
-    /// self-calibration at all three call sites: this crate's own
-    /// `#[ignore]`d microbenchmarks (`rayon_threshold_microbench`,
-    /// `dse_update_rayon_threshold_microbench`,
-    /// `col_norm_fold_rayon_threshold_microbench`) never found `rayon` beating
-    /// a plain sequential scan at *any* size tried on this crate's own
-    /// development machine — not at `n`/`m` = 200,000, not even at 4,000,000
-    /// rows for the scaling fold (rayon's own fixed per-call dispatch/thread-
-    /// wake cost dominates every one of these workloads' actual per-element
-    /// work) — so the live race was pure overhead on every solve for zero
-    /// benefit at this crate's realistic problem sizes (Netlib-scale LPs, at
-    /// most a few thousand rows), and one more source of run-to-run
-    /// nondeterminism to reason about (see the `chuzr` tie-breaking fix
-    /// elsewhere in this file, prompted by exactly that). `100_000` sits an
-    /// order of magnitude above the largest size any of those microbenchmarks
-    /// found `rayon` still losing at, as a nominal safety valve for a
-    /// hypothetical future problem far past anything this crate currently
-    /// targets — not a proven crossover point (none was found).
+    /// 行数/要素数がこれを超えたら rayon 並列版を使う (chuzr の行走査、DSE 重み更新、
+    /// スケーリングの列ノルム計算)。現実的な問題サイズでは常に逐次になる安全弁的な値。
     pub(crate) const RAYON_SIZE_THRESHOLD: usize = 100_000;
 
-    /// Below this many structural+slack columns, pricing every nonbasic
-    /// column's reduced cost every iteration is cheap enough that partial
-    /// pricing would only add overhead for no benefit; at or above it, both
-    /// `run_phase`'s primal entering-variable scan and the dual method's
-    /// `chuzc1` switch to [`partial_pricing_sampled`]'s random-group scheme.
+    /// 全列数 (構造 + スラック) がこれ以上なら部分価格付けを使う (主単体法の入る変数選択と
+    /// 双対法の chuzc1)。
     pub(crate) const PARTIAL_PRICING_THRESHOLD: usize = 300;
 
-    /// Group count for partial pricing: roughly `1/PARTIAL_PRICING_GROUPS` of
-    /// eligible candidates are priced first; the rest are only priced if that
-    /// first group has nothing improving (see [`partial_pricing_sampled`]).
+    /// 部分価格付けのグループ数: まず約 `1/PARTIAL_PRICING_GROUPS` の列を標本として調べる。
     pub(crate) const PARTIAL_PRICING_GROUPS: u64 = 10;
 
-    /// Ruiz-scaling iterations for the shared presolve pass below — the same
-    /// value `interior_point.rs` used before `crate::presolve` was extracted
-    /// out to be shared with this module.
+    /// 前処理での Ruiz スケーリングの反復回数。
     pub(crate) const RUIZ_ITERS: usize = 10;
 
-    /// Constraint-propagation passes per presolve round (`propagate::propagate`'s
-    /// own internal bound-tightening loop — see its module docs for the §3.2
-    /// activity-bound derivation each pass repeats).
+    /// 前処理 1 ラウンドあたりの制約伝播 (上下限の強化) のパス数。
     pub(crate) const PROPAGATION_PASSES: usize = 2;
 
-    /// Upper bound on how many times `presolve::run_extended` cycles through
-    /// propagate → dualfix → row-singleton → doubleton → colsingleton — see
-    /// that function's own docs for why later rounds can unlock reductions an
-    /// earlier round's static structure couldn't yet see, and for the
-    /// fixpoint check that stops it short of this cap once a round finds
-    /// nothing left to do (so raising this constant costs nothing on a
-    /// problem that stops converging early — only genuinely deep elimination
-    /// chains ever run all the way to the cap).
+    /// `presolve::run_extended` の外側ラウンド (propagate → dualfix → rowsingleton →
+    /// doubleton → colsingleton) の最大回数。何も変化しなくなれば早く止まる。
     pub(crate) const PRESOLVE_ROUNDS: usize = 20;
 
-    /// Upper bound on how many times each outer `PRESOLVE_ROUNDS` pass itself
-    /// cycles through row-singleton <-> colsingleton before `propagate`/
-    /// `dualfix` run again — see `presolve::run_extended`'s own docs for why
-    /// this inner pair can have more to find after its own first pass (e.g.
-    /// colsingleton eliminating a variable turning a row rowsingleton had no
-    /// reason to touch into a fresh row singleton), for why `doubleton` isn't
-    /// part of this inner repetition (measured net regression when it was),
-    /// and for the fixpoint check that stops this loop short of its own cap
-    /// once a pass finds nothing left to do.
+    /// 外側ラウンド 1 回あたりの rowsingleton ⇔ colsingleton の内側反復の最大回数。
     pub(crate) const ROWSINGLETON_COLSINGLETON_INNER_ROUNDS: usize = 1;
 
-    /// Above this many variables, a connected component found by
-    /// [`connected_components_of_std_form`] is solved via a separate `rayon`
-    /// task rather than in the main sequential loop, once *any* component in
-    /// the batch clears this size — solving an entire LP (its own presolved
-    /// simplex loop, potentially thousands of pivots) is substantial work,
-    /// unlike this file's other, deliberately sequential per-*iteration*
-    /// loops (`chuzr`, `chuzc1`, DSE weight updates — see
-    /// this module's own docs for the profiling that found
-    /// `rayon`'s per-call dispatch overhead exceeding *those* loop bodies at
-    /// this crate's realistic problem sizes); at this much coarser
-    /// "solve a whole sub-problem" granularity, that same dispatch cost is
-    /// comfortably negligible in comparison. `200` is the size the user
-    /// requesting this feature asked for directly, not independently tuned —
-    /// see [`solve_std_form_decomposed`]'s own docs for why no Netlib
-    /// instance in this crate's own benchmark set actually exercises the
-    /// parallel path at all (every genuine split found there lands well
-    /// under this threshold).
+    /// 連結成分分解で、いずれかの成分の変数数がこれ以上なら成分を rayon で並列に解く。
     pub(crate) const PARALLEL_COMPONENT_MIN_VARS: usize = 200;
+
+    /// 主単体法の停滞上限 `stall_limit = max(PRIMAL_STALL_LIMIT_PER_ROW * m, PRIMAL_STALL_LIMIT_MIN)`
+    /// の行数あたりの係数。進展のないピボットがこれを超えて続いたら Bland 規則に切り替える。
+    pub(crate) const PRIMAL_STALL_LIMIT_PER_ROW: usize = 5;
+
+    /// 主単体法の停滞上限 `stall_limit` の最小値。
+    pub(crate) const PRIMAL_STALL_LIMIT_MIN: usize = 500;
+
+    /// 費用摂動: 最大費用の絶対値がこれを超えたら 4 乗根で減衰させる (HiGHS と同じ)。
+    pub(crate) const COST_PERTURB_LARGE_COST: f64 = 100.0;
+
+    /// 費用摂動: 箱型 (両側有限) 列の割合がこれ未満なら、最大費用を
+    /// [`COST_PERTURB_FEW_BOXED_COST_CAP`] で頭打ちにする。
+    pub(crate) const COST_PERTURB_BOXED_FRACTION: f64 = 0.01;
+
+    /// 費用摂動: 箱型列がごく少ないときの最大費用の頭打ち値。
+    pub(crate) const COST_PERTURB_FEW_BOXED_COST_CAP: f64 = 1.0;
+
+    /// 費用摂動の基準係数: 基準の大きさ = `COST_PERTURB_BASE * (減衰後の最大費用)`。
+    pub(crate) const COST_PERTURB_BASE: f64 = 5e-7;
 }
 
 /// 拡張双対単体法 (src/simplex/extended_dual.rs)
