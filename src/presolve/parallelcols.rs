@@ -1,171 +1,90 @@
-//! ParallelColumns (HiGHS's own name, bundled into its "Parallel rows and
-//! columns" presolve-log category; Andersen & Andersen, "Presolving in
-//! Linear Programming", Mathematical Programming 71 (1995), transpose
-//! counterpart of the row-duplicate technique [`parallelrows`](super::parallelrows)
-//! already implements): two columns whose constraint-matrix entries are
-//! exact scalar multiples of one another across every real row they
-//! appear in — `A[:,j] = s * A[:,k]` for a single nonzero scalar `s` — move
-//! every row's own activity in that same fixed `s : 1` ratio no matter how
-//! `x_j`/`x_k` are individually split, so *both* can be replaced by a
-//! single merged variable `z = x_k + s*x_j`, occupying column `k`'s own
-//! position with `k`'s own bounds widened to `z`'s reachable range. `j` is
-//! dropped entirely — from every row and from the objective.
+//! ParallelColumns (平行列の併合, HiGHS の "Parallel rows and columns" の列側 /
+//! Andersen & Andersen 1995 の行重複除去 [`parallelrows`](super::parallelrows) の転置版)。
 //!
-//! ## When this is sound without any further case analysis
+//! 全実制約行にわたって `A[:,j] = s * A[:,k]` (非零スカラー `s`) となる 2 列は、各行の活動値を
+//! 常に同じ比率で動かすので、併合変数 `z = x_k + s*x_j` 1 本に置き換えられる。`z` は列 `k` の位置に置き、
+//! `k` の境界を `z` の到達範囲に広げる。列 `j` は全行と目的関数から取り除く。
 //!
-//! Substituting `x_k = z - s*x_j` turns the pair's own objective
-//! contribution `c_j*x_j + c_k*x_k` into `c_k*z + (c_j - s*c_k)*x_j` — a
-//! term in `z` alone plus a residual term in `x_j` alone. When
-//! `c_j == s*c_k` (checked with the same relative `TOL` every reduction in
-//! this crate uses), that residual term vanishes identically: the
-//! objective no longer depends on how `z` is actually split between
-//! `x_j`/`x_k`, only on `z` itself, so *every* split respecting both
-//! original box bounds is equally optimal. This module only ever merges in
-//! that exact-proportional-cost case — the "objective strictly prefers one
-//! over the other" case is [`dominatedcol`](super::dominatedcol)'s job (a
-//! strict, `<=`-row-only relationship, deliberately excluding equality-row
-//! columns — see that module's own docs), not duplicated here.
+//! ## 健全性の条件
 //!
-//! Given that indifference, a valid split is derived purely algebraically
-//! in [`Substitution::apply`] — it never depends on which particular
-//! vertex the simplex method actually lands on, since every split is
-//! equally optimal by construction. See that method's own docs for the
-//! derivation (a clamp of `x_j` into its own original range from `z`'s
-//! recovered value, general to either sign of `s`).
+//! `x_k = z - s*x_j` を代入すると目的関数は `c_k*z + (c_j - s*c_k)*x_j` になる。
+//! `c_j == s*c_k` (相対 `TOL` で判定) のときに限り併合する。このとき `z` の分け方によらず目的値が
+//! 同じなので、どの分割も最適であり、[`Substitution::apply`] で代数的に分割を復元できる。
+//! 目的関数が一方を厳密に好む場合は [`dominatedcol`](super::dominatedcol) の担当 (現在は無効)。
 //!
-//! ## Scope
+//! ## 対象範囲
 //!
-//! Every column's own *lower* bound must be finite, checked before `s` is
-//! ever computed — that finite `lb` is the fixed anchor
-//! [`Substitution::apply`]'s recovery formula clamps around (see its own
-//! docs), so a lower-unbounded column (surplus-variable-shaped, `lb=-inf`)
-//! is left untouched entirely — no mirrored upper-anchor formula is
-//! implemented, since no Netlib instance in this crate's own benchmark set
-//! has ever needed one (see the "Candidate search" section below for the
-//! instance that *does* need the upper side left open). The *upper* bound,
-//! by contrast, may be finite or genuinely infinite: a real Netlib
-//! instance (`standgub`) has a 108-column GUB block that is exactly this
-//! shape (`lb=0`, `ub=+inf`, `cost=0` on every member) and is otherwise
-//! untouched by every other presolve pass in this pipeline. A column with
-//! *both* sides infinite (genuinely free) is excluded outright — `lb`
-//! already failing the finiteness check above catches it, so it's left for
-//! [`super::freevar`] instead, matching that module's own scope. This
-//! reduction otherwise never interacts with the free-variable / extended-
-//! dual / `BIG_M` machinery `solve_lp_dual`'s own unbounded-structural
-//! routing exists for (see its own docs): a `kept` column that already had
-//! `ub=+inf` before any merge keeps exactly that same one-sided shape
-//! after, just with a wider finite `lb` contribution folded in — nothing
-//! about *which* side is unbounded ever changes. A column already fixed
-//! (`lb == ub`, from an earlier reduction this same round, possibly not
-//! yet folded out of `real_rows`/`a` by `foldfixed`) is skipped the same
-//! way — merging into or out of a phantom fixed slot serves no purpose.
+//! - 列の下限は有限でなければならない (復元式の基準点になるため)。上限は有限でも `+inf` でもよい。
+//! - 自由列 (両側無限) は [`super::freevar`] の担当なので対象外。
+//! - 既に固定された列 (`lb == ub`) は飛ばす。
+//! - 併合で `kept` の下限が `-inf` になる (自由列ができる) 組は併合しない。
 //!
-//! **Implemented, unit-tested, measured against the full Netlib set —
-//! regressed the aggregate 73-problem `ours` time 8.6% when first measured,
-//! concentrated on the same degenerate/shape-sensitive instances every
-//! other structural presolve extension in this crate's history has hit,
-//! but turned on by default anyway (2026-09-21, `presolve.rs`'s own
-//! `ENOMOTO_DISABLE_PARALLELCOLS` opt-out) to make forward progress on the
-//! actual structural win** (`standgub`'s own 108-column GUB block shrinks
-//! as expected) while leaving the regression itself as deliberately
-//! deferred future work — see `presolve.rs`'s own call site for the full
-//! measurement history, and the `parallelcols-regression-mechanism` memory
-//! for what the regression actually turned out to be (mostly extra
-//! `XB_DRIFT_REL_TOL`-triggered refactorizations, not more simplex iterations).
-//! A separate correctness bug (a merge that could produce a genuinely free
-//! column, degenerate enough after `simplex.rs`'s own free-variable split
-//! to blow `extended_dual`'s iteration budget and fall back to a false
-//! `Infeasible` via the unreliable classical `BIG_M` path) was found and
-//! fixed first — see the merge loop's own comment below and the
-//! `parallelcols-greenbea-false-infeasible` memory.
+//! 既定で有効 (`ENOMOTO_DISABLE_PARALLELCOLS` で無効化可)。計測結果・不具合修正の経緯は履歴メモ参照。
 //!
-//! ## Candidate search
+//! ## 候補探索
 //!
-//! Mirrors `parallelrows`'s own signature-grouping trick, transposed: each
-//! column is normalized by dividing every entry — across every real row it
-//! appears in, `a`'s own rows plus `real_rows`'s multi-variable ones,
-//! combined into one row-id space local to this call — by its own *signed*
-//! first entry, so two columns proportional by *either* sign of scalar
-//! land on the identical signature (exactly `parallelrows`'s own reasoning
-//! for why it divides by the signed, not absolute, leading value). Within
-//! one signature group, the lowest-indexed column becomes that group's
-//! single merge target for this call (`kept`); every other eligible member
-//! (cost-proportional too, both fully bounded, neither already claimed)
-//! folds into it, in ascending index order, each with its own correctly-
-//! chained [`Substitution`] — `kept_lb` is `kept`'s own lower bound at the
-//! moment *that specific* member is folded in, capturing whatever
-//! cumulative widening every earlier fold in the same call already
-//! applied, so postsolve's reverse-discovery-order unwind (see
-//! `Substitution::apply`'s own docs) peels a large group back apart one
-//! layer at a time, in the opposite order it was folded together.
-//!
-//! Unlike `parallelrows` (one merge per call, full stop — its own docs
-//! explain why: repeated calls across this pipeline's own outer-round
-//! fixpoint loop pick up whatever a single call leaves behind), a single
-//! call here can absorb an entire group at once. That is deliberate, not
-//! merely an optimization: a real Netlib instance in this crate's own
-//! benchmark set (`standgub`) has one 108-column parallel group (a GUB
-//! block of genuinely interchangeable decision variables), and capping
-//! this module at one merge per call would need as many outer rounds as a
-//! group has members to fully collapse it — far more than `run_extended`'s
-//! own round cap ever runs.
+//! 各列を、その列の最初の (符号付き) 要素で割って正規化した「署名」で分類する (`parallelrows` と同じ方法)。
+//! 同じ署名の群では番号最小の列を併合先 `kept` とし、他の条件を満たす列を番号順にすべて畳み込む。
+//! 各 [`Substitution`] はその時点での `kept` の下限 (`kept_lb`) を記録するので、ポストソルブは
+//! 逆順に 1 層ずつ正しく分解できる。1 呼び出しで群全体を吸収する (大きな群を外側ラウンド数に依存せず潰すため)。
 
 use crate::sparse::{Csr, CscMat, csr_rows};
 use crate::params::presolve::TOL;
 
-/// Recovers both `x[var]` and `x[kept]`'s own true values from `x[kept]`'s
-/// current, merged-`z` value — see the module docs for why any such split
-/// is optimal, and why this can't be expressed as
-/// [`super::colsingleton::Substitution`]'s single linear formula (that
-/// writes to exactly one index from *other*, already-resolved ones; this
-/// writes to *two*, one of which — `kept` — is also its own input).
+/// 1 回の列併合のポストソルブ記録。併合変数 `z = x[kept]` の値から `x[var]` と `x[kept]` の
+/// 本来の値を復元する。
+///
+/// 書き込み先が 2 か所で、しかも `kept` は入力でもあるため、
+/// [`super::colsingleton::Substitution`] の単一の線形式では表せない。
 pub struct Substitution {
+    /// 消去された列
     pub var: usize,
+    /// 併合先の列 (`z` を保持する)
     pub kept: usize,
+    /// 比率 `s` (`A[:,var] = s * A[:,kept]`、`z = x_kept + s * x_var`)
     pub s: f64,
-    pub lb: f64,
-    pub ub: f64,
-    /// `kept`'s own lower bound at the moment this fold was performed —
-    /// *not* necessarily `kept`'s original problem bound, when several
-    /// merges chained onto the same `kept` in one call (see the module
-    /// docs' "Candidate search" section).
+    /// 併合時点での `var` の下限
+    pub var_lb: f64,
+    /// 併合時点での `var` の上限
+    pub var_ub: f64,
+    /// この併合を行った時点での `kept` の下限 (同じ `kept` に複数併合した場合、元問題の下限とは限らない)
     pub kept_lb: f64,
 }
 
 impl Substitution {
-    /// `z = x[kept]` currently holds `x_kept_true + s * x[var]` (see the
-    /// module docs for the derivation of `z`). Recovering the true split:
-    /// `raw = (z - kept_lb) / s` is `var`'s own value *were `kept` sitting
-    /// exactly at `kept_lb`* — always within `[lb, ub]` when `z` is
-    /// genuinely reachable and unclamped, and clamping to whichever end of
-    /// `[lb, ub]` `raw` overshoots is provably still feasible for `kept`
-    /// (worked out in full, both signs of `s`, in this module's own
-    /// commit/test history — `merges_and_recovers_*` below exercise every
-    /// case): `x[kept] = z - s*x[var]` then lands back in `kept`'s own
-    /// `[kept_lb, ...]` range by construction.
+    /// `x[kept]` に入っている `z = x_kept + s * x[var]` から本来の分割を復元して `x` に書き戻す。
+    ///
+    /// `raw = (z - kept_lb) / s` は `kept` が `kept_lb` にあるときの `var` の値。これを
+    /// `[var_lb, var_ub]` にクランプすれば、`x[kept] = z - s*x[var]` は `kept` の範囲内に収まる
+    /// (`s` の符号によらず成り立つ)。
     pub fn apply(&self, x: &mut [f64]) {
         let z = x[self.kept];
         let raw = (z - self.kept_lb) / self.s;
-        let xj = raw.clamp(self.lb, self.ub);
+        let xj = raw.clamp(self.var_lb, self.var_ub);
         x[self.var] = xj;
         x[self.kept] = z - self.s * xj;
     }
 }
 
+/// 平行列併合の結果。消去された列は係数を行から除き、`c`・`lb`・`ub` を 0 にしてある (列番号は保持)。
 pub struct ParallelColsResult {
+    /// 消去列を除いた等式行列
     pub a: Csr,
+    /// 目的関数係数 (消去列は 0)
     pub c: Vec<f64>,
+    /// 下限 (併合先は `z` の範囲に拡大、消去列は 0)
     pub lb: Vec<f64>,
+    /// 上限 (併合先は `z` の範囲に拡大、消去列は 0)
     pub ub: Vec<f64>,
+    /// 消去列を除いた `G` の実制約行
     pub real_rows: Vec<Vec<(usize, f64)>>,
+    /// ポストソルブ用の併合記録 (発見順)
     pub substitutions: Vec<Substitution>,
 }
 
-/// One non-cascading pass: candidates are found from the input snapshot
-/// alone (mirrors every other pass in this pipeline) — a column that only
-/// becomes parallel to another *after* this call's own folds take effect
-/// is left for the next call (`run_extended`'s own outer-round fixpoint
-/// loop already re-invokes every stage until nothing changes).
+/// 平行列を併合する (入力スナップショットから候補を決める 1 パス。連鎖はしない)。
+/// 何も併合しなかった場合は入力の複製を返す。現在はテストからのみ使用
+/// (本番のパイプラインは [`merge_parallel_columns_if_any`] を呼ぶ)。
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn merge_parallel_columns(n: usize, a: &Csr, real_rows: &[Vec<(usize, f64)>], c: &[f64], lb: &[f64], ub: &[f64]) -> ParallelColsResult {
     merge_parallel_columns_if_any(n, a, real_rows, c, lb, ub).unwrap_or_else(|| ParallelColsResult {
@@ -178,27 +97,18 @@ pub fn merge_parallel_columns(n: usize, a: &Csr, real_rows: &[Vec<(usize, f64)>]
     })
 }
 
-/// [`merge_parallel_columns`], returning `None` (nothing merged, the
-/// problem is unchanged) instead of a full copy of its inputs — the common
-/// case (most calls find nothing). `A`'s rows are read straight from the
-/// CSR slices and only copied out when something is actually merged.
+/// [`merge_parallel_columns`] と同じだが、何も併合しなかった場合 (よくある場合) は入力を複製せず `None` を返す。
+///
+/// - `n`: 列数
+/// - `a`: 等式行列
+/// - `real_rows`: `G` の実制約行
+/// - `c`, `lb`, `ub`: 目的関数係数と境界
 pub fn merge_parallel_columns_if_any(n: usize, a: &Csr, real_rows: &[Vec<(usize, f64)>], c: &[f64], lb: &[f64], ub: &[f64]) -> Option<ParallelColsResult> {
     let ar = a.as_ref();
     let n_a_rows = ar.nrows();
 
-    // One combined row-id space, local to this call: `a`'s own rows first,
-    // `real_rows`'s multi-variable ones after — meaningless outside this
-    // function, but stable within it, which is all the signature grouping
-    // below needs.
-    //
-    // Streamed straight into the compressed column form rather than `n`
-    // growable per-column `Vec`s — see `CscMat::from_entry_stream`'s own
-    // docs; the two row blocks never have to be concatenated first. Both
-    // blocks are emitted in row order and `a`'s ids all precede
-    // `real_rows`'s, so each column comes out already ascending by row id
-    // — which is what the signature scan below needs, and what the
-    // per-column `sort_unstable_by_key` it used to run was (redundantly)
-    // producing.
+    // この呼び出し内だけの通し行番号: `a` の行が 0..n_a_rows、`real_rows` がその後。
+    // 圧縮列形式へ直接流し込む。行順に出力するので各列は行番号昇順になる (署名計算の前提)。
     let columns = CscMat::from_entry_stream(n_a_rows + real_rows.len(), n, |emit| {
         for i in 0..n_a_rows {
             for (&j, &v) in ar.col_indices_of_row_raw(i).iter().zip(ar.values_of_row(i)) {
@@ -216,14 +126,9 @@ pub fn merge_parallel_columns_if_any(n: usize, a: &Csr, real_rows: &[Vec<(usize,
         }
     });
 
-    // Groups columns by their normalized signature exactly like keying a
-    // `HashMap` on the `Vec<(row, bits)>` signature would, but without
-    // allocating and SipHash-ing one signature per column: a cheap
-    // multiplicative hash picks the candidate groups and a hit is confirmed
-    // by recomputing the group representative's signature (deterministic,
-    // so bit-identical to the stored key) entry by entry. Members are
-    // still appended in increasing `j`, and groups are still ordered by
-    // their first member below, so the result is unchanged.
+    // 正規化した署名 (行番号, 係数/先頭係数 のビット列) で列を群に分ける。
+    // 署名を実体化せず、安価な乗算ハッシュで候補群を引き、群の代表列の署名を再計算して要素ごとに厳密比較する。
+    // sig_hash(col, inv): 列 col を inv (= 1/先頭係数) 倍した署名のハッシュ
     let sig_hash = |col: &[(usize, f64)], inv: f64| -> u64 {
         let mut hash = col.len() as u64;
         for &(row_id, v) in col {
@@ -232,23 +137,19 @@ pub fn merge_parallel_columns_if_any(n: usize, a: &Csr, real_rows: &[Vec<(usize,
         }
         hash
     };
-    // Hash chains instead of a `Vec` bucket per hash: `heads[hash]` is the
-    // newest group with that hash, `group_next[gid]` the next older one.
-    // At most one group can match a column's signature (groups are formed
-    // by exactly that match), so the scan order does not affect the result.
+    // ハッシュ連鎖: `heads[hash]` はそのハッシュの最新の群、`group_next[gid]` は次に古い群。
+    // 署名が一致する群は高々 1 つなので、走査順は結果に影響しない。
+    // group_members[gid]: 群 gid に属する列 (番号昇順に追加される)
     let mut group_members: Vec<Vec<usize>> = Vec::new();
     let mut group_next: Vec<usize> = Vec::new();
     let mut heads: std::collections::HashMap<u64, usize, std::hash::BuildHasherDefault<crate::presolve::redundancy::IdentityU64Hasher>> = std::collections::HashMap::default();
     for j in 0..n {
         let col = columns.col(j);
-        // `lb[j]` must be finite (the fixed anchor `Substitution::apply`
-        // clamps around — see the module docs' "Scope" section); `ub[j]`
-        // may be finite or `+inf` (a one-sided-unbounded column, e.g. the
-        // `standgub` GUB block those same docs describe, is still eligible
-        // — only a *fully* free column, `lb=-inf`, fails this check).
+        // 候補条件: 実制約行に現れる、下限が有限 (上限は `+inf` でもよい)、固定されていない。
         if col.is_empty() || !lb[j].is_finite() || (ub[j] - lb[j]).abs() < TOL {
             continue;
         }
+        // 先頭係数の逆数 (正規化用)
         let inv = 1.0 / col[0].1;
         let hash = sig_hash(col, inv);
         let head = heads.get(&hash).copied().unwrap_or(usize::MAX);
@@ -273,17 +174,20 @@ pub fn merge_parallel_columns_if_any(n: usize, a: &Csr, real_rows: &[Vec<(usize,
         }
     }
 
-    let mut group_keys: Vec<&Vec<usize>> = group_members.iter().collect();
-    group_keys.sort_by_key(|v| v[0]);
+    // 群を先頭の列番号順に並べたもの
+    let mut groups_by_first: Vec<&Vec<usize>> = group_members.iter().collect();
+    groups_by_first.sort_by_key(|v| v[0]);
 
+    // used[j]: 列 j がこの呼び出しで既に併合 (併合先または消去) に使われたか
     let mut used = vec![false; n];
     let mut new_lb = lb.to_vec();
     let mut new_ub = ub.to_vec();
     let mut new_c = c.to_vec();
     let mut substitutions = Vec::new();
+    // 消去された列の集合
     let mut eliminated: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
 
-    for members in group_keys {
+    for members in groups_by_first {
         if members.len() < 2 {
             continue;
         }
@@ -293,6 +197,7 @@ pub fn merge_parallel_columns_if_any(n: usize, a: &Csr, real_rows: &[Vec<(usize,
         if used[kept] {
             continue;
         }
+        // kept_lead: 併合先の先頭係数 / cur_lb, cur_ub: 併合を重ねた時点での z の範囲
         let kept_lead = columns.col(kept)[0].1;
         let mut cur_lb = new_lb[kept];
         let mut cur_ub = new_ub[kept];
@@ -303,6 +208,7 @@ pub fn merge_parallel_columns_if_any(n: usize, a: &Csr, real_rows: &[Vec<(usize,
             }
             let var_lead = columns.col(var)[0].1;
             let s = var_lead / kept_lead;
+            // 比例コスト条件 c_var == s * c_kept を相対許容誤差で判定
             let predicted_c_var = s * new_c[kept];
             let tol = TOL * (1.0 + new_c[var].abs().max(predicted_c_var.abs()));
             if (new_c[var] - predicted_c_var).abs() > tol {
@@ -310,44 +216,14 @@ pub fn merge_parallel_columns_if_any(n: usize, a: &Csr, real_rows: &[Vec<(usize,
             }
             let s_lb = s * new_lb[var];
             let s_ub = s * new_ub[var];
+            // s * x_var の取りうる範囲 (z の範囲の増分)
             let (lo, hi) = (s_lb.min(s_ub), s_lb.max(s_ub));
-            // `var`'s own candidacy only required *its* `lb` to be finite
-            // (see this module's own "Scope" docs) — nothing there stops a
-            // *negative* `s` (opposite-signed leading entry) paired with
-            // `var`'s `ub = +inf` from making `lo` itself `-inf`, which
-            // would push `kept`'s own merged lower bound to `-inf`, turning
-            // it into a genuinely free (`lb=-inf` *and* `ub=+inf`, since
-            // this exact shape's `ub` is already `+inf`) structural column.
-            // `simplex.rs::build_std_form_presolved` *does* still handle
-            // that correctly on its own — it splits any surviving doubly-
-            // infinite column into `x_j = x_j^+ - x_j^-` (two `[0, inf)`
-            // slots) before `extended_dual` ever sees it, exactly the
-            // documented fallback for `presolve::freevar`'s own residual
-            // case — so this is not unsound, just a shape nothing upstream
-            // was ever exercised against. Measured directly on a real
-            // Netlib instance (`greenbea`, eleven `s=-1`/`ub=+inf` pairs):
-            // the split's own two halves are forced to occupy *exactly* the
-            // same rows with exactly opposite coefficients (`x_j^+`/`x_j^-`
-            // both M-flagged, perfectly anti-parallel by construction) —
-            // apparently degenerate enough, stacked onto an already-large
-            // M-flagged column count, to run `extended_dual`'s main loop
-            // out of its own `MAX_ITERS` budget (confirmed via
-            // `ENOMOTO_DEBUG_EXT_ITERS`: `DEBUG_EXT_BAILOUT: MAX_ITERS
-            // exhausted`), which then falls back to the classical `BIG_M`
-            // path (`solve_lp_dual`'s own documented "should be
-            // unreachable" fallback) — and *that* path is the one that
-            // actually reports the false `Infeasible` (see
-            // [[bigm-fallback-invalid-reference]] memory: already known
-            // unreliable independent of this module). Skip this particular
-            // fold outright rather than manufacture that worst-case shape;
-            // `var` is simply left unmerged (eligible for a future call
-            // once its own shape changes, same as any other unpicked
-            // candidate) — cheaper than teaching either solver path to cope
-            // with an adversarially anti-parallel column pair.
+            // 負の s と `var` の上限 `+inf` の組では lo = -inf となり、併合先が自由列になってしまう。
+            // その形は下流で非常に退化しやすいため、この併合は行わず `var` を未併合のまま残す (経緯は履歴メモ参照)。
             if lo == f64::NEG_INFINITY {
                 continue;
             }
-            substitutions.push(Substitution { var, kept, s, lb: new_lb[var], ub: new_ub[var], kept_lb: cur_lb });
+            substitutions.push(Substitution { var, kept, s, var_lb: new_lb[var], var_ub: new_ub[var], kept_lb: cur_lb });
             cur_lb += lo;
             cur_ub += hi;
             used[var] = true;
@@ -365,6 +241,7 @@ pub fn merge_parallel_columns_if_any(n: usize, a: &Csr, real_rows: &[Vec<(usize,
         return None;
     }
 
+    // 消去列は係数・境界を 0 にし (列番号は残す)、全行からその項を取り除く。
     for &j in &eliminated {
         new_c[j] = 0.0;
         new_lb[j] = 0.0;

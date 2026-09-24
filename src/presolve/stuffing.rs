@@ -1,152 +1,65 @@
-//! Stuffing Singleton Columns (Gamrath, Koch, Martin, Miltenberger,
-//! Weninger, "Progress in Presolving for Mixed Integer Programming", Math.
-//! Prog. Comp. 7 (2015) 367-398, §3 — preprint ZIB-Report 13-48): fixes a
-//! continuous singleton column (a variable whose column has exactly one
-//! nonzero entry across every real row — the same structural condition
-//! `colsingleton` and `dualfix`'s own lock-counting already key off) whose
-//! objective sign is the *unfavorable* one for its row, by reasoning about
-//! how much room the row itself has left rather than that one column in
-//! isolation.
+//! Stuffing Singleton Columns (シングルトン列の詰め込み, Gamrath et al. "Progress in Presolving
+//! for Mixed Integer Programming" 2015 §3)。**現在は未使用** (パイプラインから呼ばれていない。
+//! 経緯は `presolve.rs` の呼び出し箇所のコメントおよび履歴メモ参照)。
 //!
-//! ## Relationship to `dualfix`
+//! 実不等式行にちょうど 1 回だけ現れる連続変数 (シングルトン列) のうち、目的関数の符号が
+//! 行にとって「不利な」向き (`dualfix` が扱えない残り) のものを、その行の余裕をナップサック的に
+//! 分け合う推論で境界値に固定する。
 //!
-//! A singleton column's one nonzero entry gives it either `up_lock=0` or
-//! `down_lock=0` (never both locked, since a lone entry can only resist
-//! movement in *one* direction — see `dualfix`'s own docs on lock
-//! counting). `dualfix` already fixes the case where the objective sign
-//! *agrees* with the unlocked direction (`down_lock==0 && c>=0`, or
-//! symmetrically `up_lock==0 && c<=0`) — no row reasoning needed there,
-//! moving that far is free for every row simultaneously. This module picks
-//! up exactly dualfix's residual: `a_rj>0 && c_j<0` (wants to move *up*,
-//! the *locked* direction for a `<=` row with a positive entry) and its
-//! mirror `a_rj<0 && c_j>0` (wants to move *down*, likewise locked). Moving
-//! that way is no longer unconditionally safe — it uses up row `r`'s own
-//! slack — but with only *one* row to reason about (the column's single
-//! appearance), and every other flexible column in that row treated as a
-//! knapsack of competing claims on the same slack, it can still often be
-//! decided outright which of these columns end up at a bound in some
-//! optimum, without solving the LP.
+//! ## `a_rj > 0, c_j < 0` の場合 (論文の Algorithm 1)
 //!
-//! `colsingleton`'s own docs note that a column singleton's *inequality*
-//! case "needs a sign-based case analysis of whether the row is guaranteed
-//! to bind" and is deferred; `dualpropagate` resolved the case where the
-//! row provably always binds (a global, propagated argument). This module
-//! resolves the opposite residual — the row does *not* provably bind, so
-//! instead of asking "is there room," it asks "how much room, shared
-//! between how many competing columns."
-//!
-//! ## The `a_rj>0, c_j<0` case (Algorithm 1 in the paper)
-//!
-//! For a `<=` row `r` (`sum_k a_rk x_k <= b_r` — this crate's `G` rows are
-//! already in that sense, see `build_a_g`), let `J(r)` be every continuous
-//! singleton column in `r` with `a_rj>0` and `c_j<0` — pushing any of them
-//! up improves the objective but tightens the row. Define two activity
-//! bounds that treat every `j in J(r)` as if still sitting at its lower
-//! bound (the "hasn't been granted the push yet" baseline — moving one to
-//! its upper bound later only ever *adds* to both, see the loop below) and
-//! every other column at its ordinary best/worst case:
+//! `<=` 行 `r` の候補集合 `J(r)` について、候補を下限に置いたまま他列を最悪/最良にした活動値
 //!
 //! ```text
 //! Ũr = sum_{j in J(r)} a_rj*lb_j + sum_{k not in J(r), a_rk>0} a_rk*ub_k + sum_{k not in J(r), a_rk<0} a_rk*lb_k
 //! L̃r = sum_{j in J(r)} a_rj*lb_j + sum_{k not in J(r), a_rk<0} a_rk*ub_k + sum_{k not in J(r), a_rk>0} a_rk*lb_k
 //! ```
 //!
-//! Then process `J(r)` in ascending order of `c_j/a_rj` (most-negative
-//! ratio — best objective gain per unit of row slack spent — first): for
-//! `alpha = a_rj*ub_j`, `beta = a_rj*lb_j`,
+//! を求め、`c_j/a_rj` の昇順に `alpha = a_rj*ub_j`, `beta = a_rj*lb_j` として:
 //!
-//!   - `alpha <= b_r - Ũr + beta` — even in the worst case for every column
-//!     not yet decided, pushing this one to its upper bound still leaves
-//!     `r` satisfiable, and doing so can only help the objective — fix
-//!     `x_j = ub_j`.
-//!   - otherwise, `b_r <= L̃r` — the row's minimum possible activity
-//!     (everything not yet decided at its *most* row-tightening extreme)
-//!     already saturates `b_r`, so this column (and, once triggered, every
-//!     column processed after it — `L̃r` only ever grows from here) cannot
-//!     move up at all — fix `x_j = lb_j`.
-//!   - otherwise: genuinely undetermined by this row alone (the true LP
-//!     optimum may sit at a fractional point, the classic continuous-
-//!     knapsack shape the paper motivates this with) — left alone.
+//! - `alpha <= b_r - Ũr + beta` なら上限に固定
+//! - そうでなく `b_r <= L̃r` なら下限に固定
+//! - それ以外は未決定
 //!
-//! `Ũr`/`L̃r` are then advanced by `alpha - beta` unconditionally (matching
-//! the paper's own Algorithm 1 line-for-line, not just on the branch that
-//! fires) before moving to the next column: once a column's slot has been
-//! *considered* in this ratio order, every column considered after it must
-//! reason about the worst case *including* the possibility that this one
-//! ends up granted its push, whether or not it *was* — a column left
-//! undetermined might still take any value up to `ub_j` in the eventual
-//! LP solution, so later, less-attractive columns cannot assume otherwise
-//! and stay sound.
+//! 判定の結果によらず毎回 `Ũr`・`L̃r` に `alpha - beta` を加える (後の候補は、この候補が上限まで動く可能性を考慮する必要があるため)。
 //!
-//! ## The mirror case, `a_rj<0, c_j>0`
+//! ## 鏡像の場合 `a_rj < 0, c_j > 0`
 //!
-//! Here pushing `x_j` down (its objective-favorable direction) is what
-//! tightens the row instead, so the roles of "granted" and "forced" swap:
-//! the default is the *low* bound (cost-favorable), and a column only
-//! moves to its *high* bound when the row's slack genuinely requires it.
-//! Rather than re-deriving a second, easily-miscrossed set of `Ũ`/`L̃`
-//! formulas and branch conditions from scratch, this module reduces the
-//! mirror case to the one above by the substitution `y_j = ub_j - x_j`
-//! (`y_j in [0, ub_j-lb_j]`, `y_j=0 <=> x_j=ub_j`, `y_j=ub_j-lb_j <=>
-//! x_j=lb_j`) applied to every such column in the row at once: its new
-//! coefficient is `-a_rj>0` and its new cost is `-c_j<0`, exactly the case
-//! above, with `b_r` shifted by `-sum_j a_rj*ub_j` to absorb the constant
-//! `a_rj*ub_j` terms the substitution introduces. Running the identical
-//! [`stuffing_core`] on this transformed row and translating its `(j,
-//! at "upper" in y)` results back (`y` at its upper bound means `x_j` at
-//! its *lower* bound, and vice versa) is a pure change of variables — no
-//! separate derivation to get subtly wrong, and no second implementation
-//! to keep in sync with the first if either is ever revisited.
+//! `y_j = ub_j - x_j` と変数変換すると係数 `-a_rj > 0`、コスト `-c_j < 0`、右辺 `b_r - sum a_rj*ub_j` の
+//! 上の場合に帰着するので、同じ [`stuffing_core`] で判定し、結果を `x` に戻す (`y` 上限 ⇔ `x` 下限)。
 //!
-//! ## What this does *not* attempt
+//! ## 対象外
 //!
-//! Both cases require `lb_j`/`ub_j` finite for every candidate column
-//! (`lb`/`ub` for every *other* column in the row may still be infinite —
-//! only ever contributing a consistent `+inf` to `Ũr` or `-inf` to `L̃r`,
-//! never both in the same running sum, so no `inf - inf` ever arises
-//! there): a candidate with an infinite bound has no finite `alpha`/`beta`
-//! baseline to reason about, and — since it is a genuinely unbounded
-//! column, dualfix's own unconditional fix would already have caught the
-//! favorable-sign case — the unfavorable-sign case with an infinite bound
-//! is simply left to whatever bound-tightening or the LP solve itself
-//! resolves it into. This module also only ever fixes a column to one of
-//! its *own* two bounds, never tightens a bound partway (unlike
-//! `propagate`'s activity-bound tightening) — the paper's own algorithm
-//! is a fixing procedure, not a bound-strengthening one.
-//!
-//! Both cases run independently per row using each column's real, current
-//! `lb`/`ub` for every column *not* in the case currently being decided —
-//! including a same-row column that belongs to the *other* case, which is
-//! therefore treated as ordinary "else" uncertainty rather than folding in
-//! whatever this call might otherwise have decided for it. This costs a
-//! little potential extra reduction on the rare row with columns of both
-//! signs, in exchange for each case's own result never depending on which
-//! order the two are evaluated in.
+//! 候補列自身の境界は両側有限でなければならない (他の列は無限でもよい)。固定は自分の境界値へのみで、
+//! 境界の部分的な強化はしない。同じ行の 2 つの場合は互いを通常の「他列」として独立に扱う。
 
 use crate::sparse::{Csr, csr_row_iter};
 use crate::params::presolve::TOL;
 
-/// One continuous singleton column being decided for a single row, already
-/// in the `a>0, c<0` orientation `stuffing_core` expects — `l`/`u` are
-/// whichever bounds correspond to that orientation (a caller in the mirror
-/// case passes the *transformed* `y`-space bounds, not `lb[j]`/`ub[j]`
-/// directly; see the module docs).
+/// 1 つの行について判定する連続シングルトン列の候補。`stuffing_core` が前提とする
+/// `a > 0, c < 0` の向きに変換済み (鏡像の場合は `y` 空間の値)。
 struct Candidate {
+    /// 元の列番号
     j: usize,
+    /// 行での係数 (> 0)
     a: f64,
+    /// 下限 (鏡像の場合は `y` の下限 0)
     l: f64,
+    /// 上限 (鏡像の場合は `y` の上限 `ub - lb`)
     u: f64,
+    /// コスト (< 0)
     c: f64,
 }
 
-/// Algorithm 1 of the module docs, exactly: decides, for the `a>0, c<0`
-/// orientation only, which of `candidates` can be fixed to their `u` or
-/// `l` and which are left undetermined. `row_other` is every *other*
-/// nonzero entry of this row (not a member of `candidates`) together with
-/// its real, global `lb`/`ub` (via `k`) — used only for `Ũr`/`L̃r`'s
-/// "else" sums, never reassigned. Returns `(j, true)` for "fix to `u`" and
-/// `(j, false)` for "fix to `l`".
+/// モジュール docs の Algorithm 1 (`a > 0, c < 0` の向きのみ)。各候補を `u` に固定するか
+/// `l` に固定するか未決定のままにするかを決め、`(j, true)` = `u` へ固定、`(j, false)` = `l` へ固定 を返す。
+///
+/// - `row_other`: 候補以外の行の非零要素 (`Ũr`/`L̃r` の「その他」の和に、実際の `lb`/`ub` で使う)
+/// - `b`: 行の右辺 (鏡像の場合はシフト済み)
+/// - `candidates`: 判定対象の候補
+/// - `lb`, `ub`: 全変数の境界
 fn stuffing_core(row_other: &[(usize, f64)], b: f64, mut candidates: Vec<Candidate>, lb: &[f64], ub: &[f64]) -> Vec<(usize, bool)> {
+    // tilde_u = Ũr (活動値の上界), tilde_l = L̃r (活動値の下界)
     let mut tilde_u = 0.0f64;
     let mut tilde_l = 0.0f64;
     for cand in &candidates {
@@ -163,9 +76,7 @@ fn stuffing_core(row_other: &[(usize, f64)], b: f64, mut candidates: Vec<Candida
         }
     }
 
-    // Ascending c/a: `a>0` always here, so this is just ascending `c` order
-    // among equal `a`, but written as the general ratio the paper uses
-    // since candidates in the same row can have any positive `a`.
+    // c/a の昇順 (単位余裕あたりの目的改善が大きい順)。同値なら列番号順。
     candidates.sort_by(|x, y| {
         let rx = x.c / x.a;
         let ry = y.c / y.a;
@@ -181,22 +92,22 @@ fn stuffing_core(row_other: &[(usize, f64)], b: f64, mut candidates: Vec<Candida
         } else if b <= tilde_l - TOL {
             fixings.push((cand.j, false));
         }
-        // Unconditional, per the module docs: whether or not this column
-        // was just decided, every column considered after it must assume
-        // it could still end up granted its push.
+        // 判定結果によらず無条件に更新する (後の候補はこの候補が上限まで動く可能性を仮定する)。
         tilde_l += alpha - beta;
         tilde_u += alpha - beta;
     }
     fixings
 }
 
-/// Returns `(j, value)` for every continuous singleton column this module
-/// can fix outright. `real_g_rows`/`real_g_rhs` are `G`'s multi-variable
-/// rows and right-hand sides only (the same "real rows" `dualfix` and
-/// `propagate::extract_bounds` already separate out from `G`'s own
-/// single-variable bound rows) — a column's box-bound rows never count as
-/// its "one appearance" any more than they do for `dualfix`/`colsingleton`.
+/// 固定できる連続シングルトン列の `(j, 値)` の一覧を返す。
+///
+/// - `n`: 列数
+/// - `a`: 等式行列 (ここに現れる列は対象外)
+/// - `real_g_rows`, `real_g_rhs`: `G` の複数変数の実制約行とその右辺 (箱境界行は出現回数に数えない)
+/// - `c`: 目的関数係数
+/// - `lb`, `ub`: 変数の境界
 pub fn fix_singleton_columns(n: usize, a: &Csr, real_g_rows: &[Vec<(usize, f64)>], real_g_rhs: &[f64], c: &[f64], lb: &[f64], ub: &[f64]) -> Vec<(usize, f64)> {
+    // in_equality[j]: 列 j が等式行に現れるか
     let mut in_equality = vec![false; n];
     let ar = a.as_ref();
     for i in 0..ar.nrows() {
@@ -207,10 +118,7 @@ pub fn fix_singleton_columns(n: usize, a: &Csr, real_g_rows: &[Vec<(usize, f64)>
         }
     }
 
-    // A column's single appearance across every real inequality row, once
-    // it has one; seeing a second appearance anywhere disqualifies it
-    // (`seen_twice`), matching `colsingleton`'s own non-cascading, "counts
-    // computed once from the input" appearance tally.
+    // occ[j]: 列 j の実不等式行でのただ 1 回の出現 (行番号, 係数)。2 回目を見たら seen_twice[j] を立てて除外する。
     let mut occ: Vec<Option<(usize, f64)>> = vec![None; n];
     let mut seen_twice = vec![false; n];
     for (i, row) in real_g_rows.iter().enumerate() {
@@ -227,11 +135,8 @@ pub fn fix_singleton_columns(n: usize, a: &Csr, real_g_rows: &[Vec<(usize, f64)>
         }
     }
 
-    // Group each row's `a_rj>0, c_j<0` candidates (case A, decided
-    // directly) and `a_rj<0, c_j>0` candidates (case B, decided via the
-    // `y = ub-x` reduction to case A — see the module docs) separately;
-    // a column can only ever land in one of the two, never both (its one
-    // coefficient has a single sign).
+    // 各行の候補を 2 つに分ける: case_a = `a_rj>0, c_j<0` (直接判定)、
+    // case_b = `a_rj<0, c_j>0` (`y = ub-x` で case A に帰着)。1 列はどちらか一方にしか入らない。
     let mut case_a: Vec<Vec<(usize, f64)>> = vec![Vec::new(); real_g_rows.len()];
     let mut case_b: Vec<Vec<(usize, f64)>> = vec![Vec::new(); real_g_rows.len()];
     for j in 0..n {
@@ -249,6 +154,7 @@ pub fn fix_singleton_columns(n: usize, a: &Csr, real_g_rows: &[Vec<(usize, f64)>
     let mut fixed = Vec::new();
     for (i, row) in real_g_rows.iter().enumerate() {
         if !case_a[i].is_empty() {
+            // members: この行の候補列の集合 / row_other: 候補以外の要素
             let members: std::collections::HashSet<usize> = case_a[i].iter().map(|&(j, _)| j).collect();
             let row_other: Vec<(usize, f64)> = row.iter().filter(|&&(k, _)| !members.contains(&k)).cloned().collect();
             let candidates: Vec<Candidate> = case_a[i].iter().map(|&(j, coeff)| Candidate { j, a: coeff, l: lb[j], u: ub[j], c: c[j] }).collect();
@@ -259,6 +165,7 @@ pub fn fix_singleton_columns(n: usize, a: &Csr, real_g_rows: &[Vec<(usize, f64)>
         if !case_b[i].is_empty() {
             let members: std::collections::HashSet<usize> = case_b[i].iter().map(|&(j, _)| j).collect();
             let row_other: Vec<(usize, f64)> = row.iter().filter(|&&(k, _)| !members.contains(&k)).cloned().collect();
+            // y 変換で生じる定数項を右辺へ移したもの
             let mut b_shifted = real_g_rhs[i];
             let candidates: Vec<Candidate> = case_b[i]
                 .iter()
@@ -268,10 +175,7 @@ pub fn fix_singleton_columns(n: usize, a: &Csr, real_g_rows: &[Vec<(usize, f64)>
                 })
                 .collect();
             for (j, at_upper_y) in stuffing_core(&row_other, b_shifted, candidates, lb, ub) {
-                // `y` at its upper bound (`ub_j - lb_j`) means `x_j =
-                // ub_j - (ub_j-lb_j) = lb_j`; `y` at its lower bound (`0`)
-                // means `x_j = ub_j - 0 = ub_j` — the reverse of case A's
-                // own `(j, at_upper) -> ub_j`/`lb_j` mapping above.
+                // y が上限なら x_j = lb_j、y が下限 (0) なら x_j = ub_j (case A と逆の対応)。
                 fixed.push((j, if at_upper_y { lb[j] } else { ub[j] }));
             }
         }

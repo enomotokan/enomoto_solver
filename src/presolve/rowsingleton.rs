@@ -1,36 +1,37 @@
-//! RowSingleton: an equality row with exactly one nonzero variable,
-//! `coeff * x_j = rhs`, directly fixes `x_j = rhs / coeff` — no
-//! substitution bookkeeping needed (unlike `colsingleton`/`doubleton`,
-//! there are no *other* variables in the row to express anything in terms
-//! of). Distinct from `dualfix`'s cost-sign-based fixing and from
-//! `propagate::extract_bounds`'s single-variable-row handling, which only
-//! ever looks at `G`'s (inequality/bound) rows, never `A`'s equalities.
+//! RowSingleton (行シングルトン): 非零係数がちょうど 1 個の等式行 `coeff * x_j = rhs` から
+//! `x_j = rhs / coeff` を直接固定し、その行を削除する。
 //!
-//! A fixed value outside the variable's current `[lb, ub]` is a genuine
-//! infeasibility (an equality forcing a value the variable's own bounds
-//! already rule out), reported directly rather than silently overriding
-//! one of the two bounds — same discipline as
-//! `propagate::bounds_inconsistent`/`dualfix`.
+//! - 行内に他の変数がないので、`colsingleton`/`doubleton` のような代入の記録は不要。
+//! - `dualfix` (コスト符号による固定) や `propagate::extract_bounds` (`G` の単変数行のみを扱う)
+//!   とは別物で、こちらは `A` の等式行だけを見る。
+//! - 固定値が変数の `[lb, ub]` の外にあれば、境界を黙って上書きせず実行不能として報告する。
 
 use crate::sparse::{Csr, csr_from_rows, csr_is_canonical, csr_row_iter};
 use crate::params::presolve::TOL;
 
+/// [`fix_singleton_equalities`] の結果。
 pub struct RowSingletonResult {
+    /// シングルトン行を除いた後の等式行列 `A`
     pub a: Csr,
+    /// `a` に対応する右辺
     pub b: Vec<f64>,
-    /// `(j, value)` for every variable fixed this pass.
+    /// このパスで固定した変数の `(j, 値)`
     pub fixes: Vec<(usize, f64)>,
+    /// 固定値が境界外になり実行不能と判明したか (true のとき他フィールドは空)
     pub infeasible: bool,
 }
 
-/// One non-cascading pass over `A`'s rows (mirrors `colsingleton`'s own
-/// "computed once, not re-checked after each fix" scope — a later call on
-/// this pass's own output catches anything that becomes a singleton row
-/// only afterward).
+/// `A` の行を 1 回だけ走査し、シングルトン等式行を固定・削除する (連鎖はしない)。
+///
+/// 固定後に新たにシングルトンになった行は、呼び出し側の次のラウンドで拾われる
+/// (`colsingleton` と同じ「1 パスのみ」方針)。
+///
+/// - `n`: 列数
+/// - `a`, `b`: 等式制約 `A x = b`
+/// - `lb`, `ub`: 変数の現在の境界 (実行不能判定に使用)
 pub fn fix_singleton_equalities(n: usize, a: &Csr, b: &[f64], lb: &[f64], ub: &[f64]) -> RowSingletonResult {
     let ar = a.as_ref();
-    // No singleton row at all (the common case after the first round):
-    // the rebuilt A would be `a` itself when it is already canonical.
+    // シングルトン行が一つもない場合 (初回ラウンド以降はこれが普通) は、正準形なら `a` をそのまま返す。
     if csr_is_canonical(a) && (0..ar.nrows()).all(|i| ar.col_indices_of_row_raw(i).len() != 1) {
         return RowSingletonResult { a: a.clone(), b: b[..ar.nrows()].to_vec(), fixes: Vec::new(), infeasible: false };
     }
@@ -39,6 +40,7 @@ pub fn fix_singleton_equalities(n: usize, a: &Csr, b: &[f64], lb: &[f64], ub: &[
     let mut fixes = Vec::new();
 
     for i in 0..ar.nrows() {
+        // 明示的な 0 を除いた行 i の非零要素
         let row: Vec<(usize, f64)> =
             csr_row_iter(a, i).filter(|&(_, v)| v != 0.0).collect();
         if row.len() == 1 {

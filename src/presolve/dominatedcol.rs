@@ -1,109 +1,36 @@
-//! DominatedColumns (Andersen & Andersen, "Presolving in Linear
-//! Programming", Mathematical Programming 71 (1995), §3.1): generalizes
-//! [`dualfix`](super::dualfix)'s own zero-lock special case — there, a
-//! variable is fixed only by comparing it implicitly against the all-zero
-//! "column" (no real row resists moving it at all, i.e. its lock count on
-//! one side is `0`); here, any *other* real column can play that role,
-//! catching a variable `dualfix` alone never would because some row
-//! genuinely does resist moving it — just not as much as it resists
-//! moving some other column.
+//! DominatedColumns (支配列の固定, Andersen & Andersen 1995 §3.1)。**現在は未使用**
+//! (パイプラインから呼ばれていない。経緯は履歴メモ参照)。
 //!
-//! For two variables `j`, `k`, neither appearing in any equality row (the
-//! same disqualification `dualfix` uses — an equality-locked variable
-//! can't be pushed either direction without a compensating move
-//! elsewhere, which this pass doesn't attempt to find), `j` *dominates*
-//! `k` when `c[j] <= c[k]` and, for every real inequality row `i`,
-//! `G[i,j] <= G[i,k]` (both compared with `TOL` slack). Given that,
-//! shifting mass from `k` to `j` (`x_j += delta, x_k -= delta`, any
-//! `delta >= 0`) never increases any row's activity (each row's own change
-//! is `delta * (G[i,j] - G[i,k]) <= 0`) and never increases the objective
-//! (`delta * (c[j] - c[k]) <= 0`), so there is always an optimal solution
-//! at one of the two extremes of how far that shift can run before a bound
-//! stops it:
+//! [`dualfix`](super::dualfix) のロック数 0 の場合 (暗黙の全零列との比較) を、任意の他の列との比較に一般化したもの。
 //!
-//!   - if `j` has no finite upper bound, the shift can run until `k` hits
-//!     its own lower bound (needs that bound finite, or there's nowhere
-//!     for the shift to stop) — fix `k` there.
-//!   - if `k` has no finite lower bound, the shift can instead run until
-//!     `j` hits its own upper bound (needs that bound finite) — fix `j`
-//!     there.
+//! 等式行に現れない 2 変数 `j`, `k` について、`c[j] <= c[k]` かつすべての実不等式行 `i` で
+//! `G[i,j] <= G[i,k]` (`TOL` 込み) なら `j` は `k` を支配する。このとき `k` から `j` へ量を移しても
+//! 行の活動値も目的値も増えないので、移動が境界で止まる端点のどちらかに最適解がある:
 //!
-//! (When *both* escape routes are open the shift is unbounded in the
-//! direction that only helps the objective — a real unboundedness the LP
-//! has regardless, not a reduction this pass should paper over by
-//! guessing a side; when *neither* is open, only a partial bound
-//! tightening is available, which — like `dualfix` and `doubleton` — this
-//! pass leaves alone rather than folding a second reduction kind into one.)
+//! - `j` の上限が無限なら、`k` をその (有限の) 下限に固定する
+//! - `k` の下限が無限なら、`j` をその (有限の) 上限に固定する
 //!
-//! **Candidate search**: checking every pair of columns is `O(n^2)`;
-//! instead, for each candidate column `j` this only compares against the
-//! columns sharing `j`'s own *shortest* row (the row bounding the fewest
-//! other candidates) — the same "let the cheapest available row bound the
-//! search" idea [`sparsify`](super::sparsify)'s own `anchor` uses, just
-//! picked per-column here instead of per-equality-row there. A domination
-//! this misses (its partner column never shares that particular shortest
-//! row) is left for a later round's structural change to expose, not
-//! chased down exhaustively.
+//! 両方の逃げ道が開いていれば本当の非有界性なので何もしない。どちらも開いていなければ部分的な境界強化しかできず、
+//! それはこのパスでは扱わない。逃げ道には文字通りの無限大が必要 (有限の広い範囲では不健全)。
 //!
-//! Single-pass, non-cascading, decided from the input snapshot (mirrors
-//! every other pass in this pipeline): a column committed as *either* side
-//! of one fix this call — the one being fixed, or the one whose infinite
-//! bound justified it — is never reused as either side of a second fix in
-//! the same call, even though reusing it purely as an *anchor* again would
-//! often still be sound (its own freedom to absorb a shift isn't used up
-//! by lending it to one fix). The conservative blanket rule is simpler to
-//! prove correct outright: once a column might itself end up fixed this
-//! same pass, letting it also serve as the premise for fixing something
-//! else risks the same kind of stale-assumption bug `doubleton`'s own
-//! `claimed` guard exists to rule out (see that module's docs) — any
-//! opportunity this costs is picked up by the next round instead.
+//! **候補探索**: 全列対 `O(n^2)` を避け、各列 `j` について最も短い行 (anchor) を共有する列とだけ比較する。
 //!
-//! **Implemented, unit-tested, measured against the full Netlib set — then
-//! left unintegrated (kept here, tested, but never called from
-//! [`crate::presolve::run_extended`]), mirroring [`sparsify`](super::sparsify)'s
-//! own precedent.** The two escape-route conditions above genuinely need a
-//! *literal* infinity, not merely "a wide finite range" — a finite range,
-//! however large, can always be defeated by an adversarial choice of the
-//! *other* variable's own starting point within *its* range: e.g. with `j`
-//! ranging over `[0,3]` and `k` over `[0,10]` (`k`'s range wider), an
-//! optimal solution sitting at `x_j=0, x_k=0` has *zero* room to shift
-//! either way, even though `range_k >= range_j` — a tempting but unsound
-//! generalization this module's own history once tried and caught before
-//! shipping. Only an unbounded side sidesteps this (infinity beats any
-//! finite worst case unconditionally), which is also exactly why
-//! `dualfix`'s own zero-lock case needs no escape route at all: comparing
-//! against the *implicit* all-zero column never needs the zero column
-//! itself to move, so there is nothing for an adversarial starting point to
-//! defeat.
-//!
-//! That requirement collides with an invariant the rest of this crate
-//! enforces outright: every variable must have two *finite* bounds
-//! (`model.rs::add_variable` rejects `+/-inf` bounds at the API boundary;
-//! see `presolve.rs`'s own "bounded-variable invariant" docs on
-//! [`super::build_a_g`]) — so neither `ub[j] == f64::INFINITY` nor
-//! `lb[k] == f64::NEG_INFINITY` can ever be true for any model this crate
-//! can actually build, and this pass's two fix branches are unreachable in
-//! practice, not merely rare. Confirmed empirically, not just argued:
-//! instrumented and run across all 73 solvable Netlib/HiGHS-comparison
-//! instances (`python/enomoto_solver/benchmark_highs.py`), this pass fixed
-//! zero variables on every single one (consistent with every instance's
-//! `+/-inf` bounds already having been substituted with a large finite
-//! `BIG_M` before reaching this crate — itself downstream of the same
-//! finite-bounds invariant), while still costing roughly 5-8% of this
-//! crate's own total solve time in pure candidate-search overhead if wired
-//! into [`crate::presolve::run_extended`] (aggregate Netlib total: 3.67s
-//! unwired vs. 3.88s wired, `ours`-side only; the `ours`-vs-HiGHS ratio
-//! itself stayed within run-to-run noise, ~2.02-2.03x either way). Kept
-//! here for its correct, tested core logic — e.g. if this crate's
-//! finite-bounds invariant is ever relaxed — rather than deleted outright.
+//! **1 パス・非連鎖**: 1 回の固定に使った 2 列 (固定される側と根拠となる側) は、この呼び出しでは再利用しない。
 
 use crate::sparse::{Csr, csr_row_iter};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use crate::params::presolve::TOL;
 
-/// Returns `(j, value)` for every variable fixed outright — same shape as
-/// [`dualfix::fix_dominated_variables`](super::dualfix::fix_dominated_variables).
+/// 固定できる変数の `(j, 値)` の一覧を返す
+/// ([`dualfix::fix_dominated_variables`](super::dualfix::fix_dominated_variables) と同じ形式)。
+///
+/// - `n`: 列数
+/// - `a`: 等式行列 (ここに現れる列は対象外)
+/// - `real_g_rows`: `G` の実制約 (複数変数) 行
+/// - `c`: 目的関数係数
+/// - `lb`, `ub`: 変数の境界
 pub fn fix_dominated_columns(n: usize, a: &Csr, real_g_rows: &[Vec<(usize, f64)>], c: &[f64], lb: &[f64], ub: &[f64]) -> Vec<(usize, f64)> {
+    // in_equality[j]: 列 j が等式行に現れるか
     let mut in_equality = vec![false; n];
     let ar = a.as_ref();
     for i in 0..ar.nrows() {
@@ -114,10 +41,7 @@ pub fn fix_dominated_columns(n: usize, a: &Csr, real_g_rows: &[Vec<(usize, f64)>
         }
     }
 
-    // Full column vectors (row index -> coefficient), one per non-equality
-    // variable, restricted to `real_g_rows` (box-bound rows carry no
-    // domination information of their own — they're the bounds being
-    // compared against, not additional constraints).
+    // col_rows[j]: 等式行に現れない列 j の、実制約行での (行番号 -> 係数)。箱境界行は含めない。
     let mut col_rows: Vec<BTreeMap<usize, f64>> = vec![BTreeMap::new(); n];
     for (i, row) in real_g_rows.iter().enumerate() {
         for &(j, v) in row {
@@ -127,10 +51,8 @@ pub fn fix_dominated_columns(n: usize, a: &Csr, real_g_rows: &[Vec<(usize, f64)>
         }
     }
 
-    // Deterministic iteration order matters here: which of two competing
-    // candidates gets to claim a shared column first decides which fix
-    // survives the `used` guard below, so candidate order must not depend
-    // on hash-map iteration order.
+    // 比較する列対 (小さい番号, 大きい番号)。どの固定が `used` 判定を通るかが順序に依存するので、決定的な BTreeSet を使う。
+    // 各列 j について、最も短い行 anchor を共有する列とだけ組にする。
     let mut candidates: BTreeSet<(usize, usize)> = BTreeSet::new();
     for j in 0..n {
         if in_equality[j] || col_rows[j].is_empty() {
@@ -144,6 +66,7 @@ pub fn fix_dominated_columns(n: usize, a: &Csr, real_g_rows: &[Vec<(usize, f64)>
         }
     }
 
+    // used: この呼び出しで既に固定に使われた列
     let mut used: HashSet<usize> = HashSet::new();
     let mut fixed: Vec<(usize, f64)> = Vec::new();
     for (p, q) in candidates {
@@ -160,10 +83,8 @@ pub fn fix_dominated_columns(n: usize, a: &Csr, real_g_rows: &[Vec<(usize, f64)>
     fixed
 }
 
-/// Checks whether `j` dominates `k` per the module docs, returning the
-/// resulting `(var, value)` fix — whichever side's infinite bound made it
-/// possible — or `None` if the pointwise comparison fails or neither
-/// escape route is open.
+/// `j` が `k` を支配するかを調べ、支配し逃げ道が開いていれば固定 `(変数, 値)` を返す。
+/// 点ごとの比較が成り立たないか、逃げ道がどちらも開いていなければ `None`。
 fn try_fix_pair(j: usize, k: usize, col_rows: &[BTreeMap<usize, f64>], c: &[f64], lb: &[f64], ub: &[f64]) -> Option<(usize, f64)> {
     if c[j] > c[k] + TOL {
         return None;
@@ -176,9 +97,9 @@ fn try_fix_pair(j: usize, k: usize, col_rows: &[BTreeMap<usize, f64>], c: &[f64]
     }
     for (&i, &vj) in &col_rows[j] {
         if col_rows[k].contains_key(&i) {
-            continue; // already covered by the loop above
+            continue; // 上のループで判定済み
         }
-        // `k`'s implicit coefficient on this row is `0.0`.
+        // この行での k の係数は暗黙に 0。
         if vj > TOL {
             return None;
         }
