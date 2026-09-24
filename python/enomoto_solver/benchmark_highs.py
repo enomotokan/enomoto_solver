@@ -77,13 +77,19 @@ def _build_our_model(lp) -> tuple[_core.PyModel, int, int]:
     own docs). Returns `(model, n_constraints, nnz)`."""
     m = _core.PyModel()
     n = lp.num_col_
+    # highspy copies the whole vector on every attribute access, so read
+    # each one exactly once — per-element `lp.col_lower_[j]` is O(n^2).
+    col_lower = [float(v) for v in lp.col_lower_]
+    col_upper = [float(v) for v in lp.col_upper_]
+    integrality = [int(v) for v in lp.integrality_]
+    row_lower = [float(v) for v in lp.row_lower_]
+    row_upper = [float(v) for v in lp.row_upper_]
 
     for j in range(n):
-        lb = float(lp.col_lower_[j])
-        ub = float(lp.col_upper_[j])
+        lb, ub = col_lower[j], col_upper[j]
         if lb > ub:
             lb, ub = ub, lb
-        is_int = len(lp.integrality_) > j and int(lp.integrality_[j]) != 0
+        is_int = len(integrality) > j and integrality[j] != 0
         m.add_variable("integer" if is_int else "continuous", lb, ub)
 
     obj_coeffs = [(j, float(c)) for j, c in enumerate(lp.col_cost_) if c != 0.0]
@@ -107,7 +113,7 @@ def _build_our_model(lp) -> tuple[_core.PyModel, int, int]:
 
     n_constraints = 0
     for i in range(n_rows):
-        lo, hi = lp.row_lower_[i], lp.row_upper_[i]
+        lo, hi = row_lower[i], row_upper[i]
         terms = rows[i]
         if math.isinf(lo) and math.isinf(hi):
             continue
