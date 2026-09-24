@@ -2067,6 +2067,46 @@ fn fresh_d_into(std: &StdForm, lu: &sparse_lu::FtLu, basis: &[usize], basis_pos:
     }
 }
 
+/// [`fresh_d_into`] for the case every basic cost is exactly `+0.0` (the
+/// all-slack start), without the BTRAN or the `O(nnz(A))` pass (S14).
+/// Returns `false`, touching nothing, when that precondition fails.
+///
+/// Bit-for-bit: with `c_B` all `+0.0` the BTRAN's every stage sees only
+/// zeros (the `U^T` sweep and `R` etas skip them, the `L^T` tail's sparse
+/// scatter skips them), so `scratch`/`y_buf` end up all `+0.0` — written
+/// here directly — and [`sparse_lu::FtLu::add_zero_rhs_btran_ticks`] adds
+/// the same synthetic-CLOCK ticks the solve would have. Each nonbasic
+/// `d[j] = c_j - Σ v·(+0.0)` then equals `c_j` exactly, except for `c_j =
+/// -0.0`, where the sign of the result depends on the entries' signs; that
+/// (rare) column is recomputed through the same loop as [`fresh_d_into`].
+fn fresh_d_into_zero_y(std: &StdForm, lu: &sparse_lu::FtLu, basis: &[usize], basis_pos: &[Option<usize>], active_cost: &[f64], cb_buf: &mut [f64], scratch: &mut [f64], y_buf: &mut [f64], d: &mut [f64]) -> bool {
+    if !basis.iter().all(|&bv| active_cost[bv].to_bits() == 0) {
+        return false;
+    }
+    cb_buf.iter_mut().for_each(|v| *v = 0.0);
+    scratch.iter_mut().for_each(|v| *v = 0.0);
+    y_buf.iter_mut().for_each(|v| *v = 0.0);
+    lu.add_zero_rhs_btran_ticks();
+    const NEG_ZERO: u64 = 0x8000_0000_0000_0000;
+    for j in 0..std.n_total {
+        if basis_pos[j].is_some() {
+            d[j] = 0.0;
+            continue;
+        }
+        let cj = active_cost[j];
+        if cj.to_bits() == NEG_ZERO {
+            let mut dj = cj;
+            for &(i, v) in std.cols.col(j) {
+                dj -= v * y_buf[i];
+            }
+            d[j] = dj;
+        } else {
+            d[j] = cj;
+        }
+    }
+    true
+}
+
 /// Sign-of-cost dual-feasible crash (Proposition 4.3): unlike
 /// [`super::Tableau::crash_dual_feasible`], this never needs both of a
 /// column's bounds to be finite — [`hat_lower`]/[`hat_upper`] are total
@@ -2846,12 +2886,18 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     let mut row_dev = RowDevCache::new(m);
     let mut row_bounds = RowBounds::new(&cache, &basis, &noise_feasible);
     rebuild_rows(&mut infeasible_rows, &mut row_dev, m, &row_bounds, &x_b_base, &x_b_slope);
-    // (S14, not done: at the all-slack start `y = B^-T c_B` is exactly zero
-    // and this pass reproduces `d = active_cost` bit-for-bit, but its BTRAN
-    // also advances the LU's synthetic CLOCK (`FtLu::add_tick`), so skipping
-    // it moves the first CLOCK refactorization and changes the pivot path —
-    // measured on `degen2`/`dfl001`/`stocfor2`/`tuff`.)
-    fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fd_cb, &mut lu_scratch, &mut fd_y, &mut d);
+    // S14: at the all-slack start every basic cost is `+0.0`, so `y = B^-T
+    // c_B` is exactly `+0.0` everywhere and `fresh_d_into` reproduces `d =
+    // active_cost` — [`fresh_d_into_zero_y`] writes that directly and
+    // replays only the BTRAN's synthetic-CLOCK ticks, so the CLOCK trigger
+    // (and hence the pivot path) is bit-for-bit unchanged.
+    if fresh_d_into_zero_y(std, &lu, &basis, &basis_pos, &active_cost, &mut fd_cb, &mut lu_scratch, &mut fd_y, &mut d) {
+        if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
+            eprintln!("DEBUG_EXT: initial fresh_d skipped (c_B = 0)");
+        }
+    } else {
+        fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fd_cb, &mut lu_scratch, &mut fd_y, &mut d);
+    }
 
     // Leaving-row weighting (paper \S4.5): starts in cheap `Devex` mode and
     // escalates one-way to exact `Dse`, reusing `super::DevexState`/

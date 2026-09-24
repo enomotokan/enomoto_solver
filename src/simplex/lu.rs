@@ -5087,6 +5087,19 @@ impl FtLu {
         self.add_tick(m);
     }
 
+    /// BTRAN counterpart of [`Self::add_zero_rhs_solve_ticks`]: adds exactly
+    /// the ticks [`Self::solve_transpose_into`] adds for an identically-zero
+    /// right-hand side — the `U^T` sweep's flat `m` (every slot is zero, so
+    /// no row is scattered), no `R` eta (each is skipped on its zero `yp`),
+    /// and the `L^T` tail's flat `m`. Lets a caller that knows `y = 0`
+    /// (the extended dual's all-slack-cost start, S14) skip the solve while
+    /// keeping the CLOCK trigger bit-for-bit unchanged.
+    pub fn add_zero_rhs_btran_ticks(&self) {
+        let m = self.base.m as u64;
+        self.add_tick(m);
+        self.add_tick(m);
+    }
+
     /// Same as [`Self::solve_sparse_into`], but additionally captures the
     /// post-`L`/`R`, pre-`U` intermediate into `a_tilde_out` (length `m`) —
     /// see [`Self::solve_into_capture`]'s own docs, which this mirrors for
