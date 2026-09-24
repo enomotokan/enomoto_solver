@@ -1,7 +1,8 @@
-"""Small shared helpers for the Python-side input interface."""
+"""Python 側入力インターフェースの小さな共通補助関数。"""
 
 from __future__ import annotations
 
+# 変数型の文字列表記 (小文字化後) -> 正規名
 _ALIASES = {
     "continuous": "continuous",
     "cont": "continuous",
@@ -12,10 +13,9 @@ _ALIASES = {
     "i": "integer",
 }
 
-# Variable("continuous"/"integer", lb, ub) is still accepted, but the primary
-# spelling is the builtin type itself: Variable(float, ...) / Variable(int, ...).
-# There is no dedicated binary vtype (on either side) — a binary variable is
-# just an integer variable bounded to [0, 1]: Variable(int, 0, 1).
+# 組み込み型 -> 正規名。Variable(float, ...) / Variable(int, ...) が基本の書き方
+# (文字列 "continuous"/"integer" も受け付ける)。二値専用の型はなく、
+# 二値変数は境界 [0, 1] の整数変数 Variable(int, 0, 1) で表す。
 _TYPE_ALIASES = {
     float: "continuous",
     int: "integer",
@@ -23,10 +23,9 @@ _TYPE_ALIASES = {
 
 
 def normalize_vtype(vtype) -> str:
-    """Normalizes a user-supplied variable type — either a builtin type
-    (``int`` / ``float``) or a string spelling — to one of
-    'continuous' | 'integer', which is what the Rust core
-    (``VarType::parse``) understands."""
+    """ユーザー指定の変数型 (組み込み型 ``int`` / ``float``、または文字列表記) を、
+    Rust コア (``VarType::parse``) が理解する 'continuous' | 'integer' に正規化する。
+    未知の型・表記なら ValueError、型でも文字列でもなければ TypeError。"""
     if isinstance(vtype, type):
         try:
             return _TYPE_ALIASES[vtype]

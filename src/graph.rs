@@ -1,80 +1,48 @@
-//! Small, reusable graph algorithms shared across presolve
-//! ([`crate::presolve::redundancy`]'s redundant-row block decomposition)
-//! and the basis LU factorization ([`crate::simplex::lu`]): maximum
-//! bipartite matching (Kuhn's algorithm) and strongly connected
-//! components (iterative Tarjan), combined into a Dulmage-Mendelsohn-style
-//! block decomposition of a general sparse matrix given as row-major
-//! adjacency lists.
+//! 前処理 ([`crate::presolve::redundancy`] の冗長行のブロック分解) と基底の LU 分解
+//! ([`crate::simplex::lu`]) で共用する小さなグラフアルゴリズム集:
+//! 最大二部マッチング (Kuhn 法)、強連結成分分解 (反復版 Tarjan 法)、および
+//! それらを組み合わせた Dulmage-Mendelsohn 型のブロック分解。
 //!
-//! Kept generic over just `adj: &[Vec<usize>]` (row index -> the column
-//! indices it has a nonzero in) rather than either caller's own richer row
-//! representation, so it carries no assumption about values, an augmented
-//! right-hand side, or any other caller-specific structure.
+//! 入力は行ごとの隣接リスト `adj: &[Vec<usize>]` (行番号 → 非零のある列番号) だけで、
+//! 値や右辺など呼び出し側固有の構造は仮定しない。
 
 use std::collections::HashMap;
 
-/// Finds a maximum matching between rows `0..adj.len()` and columns
-/// `0..n_cols` of the bipartite graph defined by `adj` — Kuhn's algorithm
-/// (repeated augmenting-path search, `O(rows * nnz)` worst case, typically
-/// far faster in practice on real sparse graphs): for each row in turn, a
-/// DFS over its columns looks for either a free column or one whose
-/// current match can itself be re-routed to a different column, freeing
-/// this one up.
+/// `adj` が定める二部グラフで、行 `0..adj.len()` と列 `0..n_cols` の最大マッチングを
+/// Kuhn 法 (増加路探索の繰り返し。最悪 `O(行数 * nnz)`) で求める。各行について DFS で
+/// 空いている列、または現在の相手を別の列へ付け替えられる列を探す。
 ///
-/// Returns `match_row[i] = Some(column)` for each matched row `i`, `None`
-/// for rows the matching couldn't cover (more rows than the matching can
-/// place, or a genuinely rank-deficient structural pattern) — see
-/// [`dulmage_mendelsohn_blocks`]'s own docs for how unmatched rows are
-/// still handled soundly despite having no designated column.
+/// 戻り値は `match_row[i] = Some(列)` (行 `i` がマッチした列) で、マッチできなかった行は
+/// `None`。DFS は長い増加路でもスタックオーバーフローしないよう明示的なスタックで行う。
 pub fn max_bipartite_matching(adj: &[Vec<usize>], n_cols: usize) -> Vec<Option<usize>> {
-    let p = adj.len();
+    let n_rows = adj.len();
+    // 列 → その列にマッチしている行
     let mut match_col: Vec<Option<usize>> = vec![None; n_cols];
 
-    // Iterative augmenting-path DFS — an explicit stack instead of real
-    // recursion, for exactly the reason [`tarjan_scc`]'s own docs give for
-    // doing the same thing to Tarjan's algorithm just below: an augmenting
-    // path's length is bounded only by `min(p, n_cols)`, which can run
-    // into the thousands on this crate's own problem sizes, and a
-    // genuinely long one previously *did* overflow the call stack on a
-    // production Netlib instance (`degen3`) once a presolve change shifted
-    // which rows got fed to this matcher in what order — this crate's own
-    // project history has the full incident.
-    //
-    // Mirrors the recursive statement exactly: `for col in adj[row]` (skip
-    // visited, mark visited, try the free-or-recursible case, `return true`
-    // the moment one works) becomes a per-frame `idx` cursor so re-entering
-    // a row already on the stack resumes its own loop instead of
-    // restarting it. The one property worth spelling out because it's easy
-    // to get wrong in this exact shape: *every* frame along a successful
-    // path — not just the one that found a literally free column —
-    // performs the identical final step `match_col[its_own_col] =
-    // its_own_row` once its own attempt succeeds, whether that success
-    // came from the column being free outright or from a deeper recursive
-    // call re-placing whoever held it (the recursive code's `if
-    // match_col[col].is_none_or(|r| try_augment(r, ..)) { match_col[col] =
-    // Some(row); return true; }` runs that same assignment either way, and
-    // both branches of `match match_col[col]` below reach it too — the
-    // `None` branch immediately, the `Some(r2)` branch only after the
-    // frame it pushes for `r2` eventually says so). So a single success
-    // unwinds the *entire* active path in one pass: no separate "did my
-    // child succeed?" branch is needed on the way back down, just walking
-    // `stack`/`col_stack` off in lockstep and assigning each level.
+    // 増加路 DFS の反復版。再帰版の `for col in adj[row]` を、フレームごとの
+    // カーソル `idx` で再開できる形にしたもの。成功した経路上の全フレームは
+    // 「自分が試していた列を自分の行にマッチさせる」という同じ最終処理を行うので、
+    // 1 回の成功で経路全体を一気に巻き戻して割り当てればよい。
+    /// 増加路 DFS のスタックフレーム。
     struct Frame {
+        /// 探索中の行。
         row: usize,
+        /// `adj[row]` の次に試す位置。
         idx: usize,
     }
+    /// 行 `start` から増加路を探し、見つかれば経路に沿ってマッチングを更新して true を返す。
+    /// `visited[col] == stamp` の列はこの探索で訪問済み。
     fn try_augment(start: usize, adj: &[Vec<usize>], visited: &mut [u32], stamp: u32, match_col: &mut [Option<usize>]) -> bool {
         let mut stack: Vec<Frame> = vec![Frame { row: start, idx: 0 }];
-        // `col_stack[k]` is the column `stack[k]` was trying when it
-        // decided to push `stack[k+1]` — i.e. `match_col[col_stack[k]] ==
-        // Some(stack[k+1].row)` at that moment. Always exactly one
-        // shorter than `stack` itself (the bottom frame wasn't pushed to
-        // satisfy any column of its own).
+        // `col_stack[k]` は `stack[k]` が `stack[k+1]` を積んだときに試していた列
+        // (その時点で `match_col[col_stack[k]] == Some(stack[k+1].row)`)。
+        // 常に `stack` より 1 つ短い (最下段のフレームは列のために積まれたのではない)。
         let mut col_stack: Vec<usize> = Vec::new();
 
         loop {
             let top = stack.len() - 1;
             let row = stack[top].row;
+            // この行で次に試す未訪問の列
             let mut chosen: Option<usize> = None;
             while stack[top].idx < adj[row].len() {
                 let col = adj[row][stack[top].idx];
@@ -88,9 +56,7 @@ pub fn max_bipartite_matching(adj: &[Vec<usize>], n_cols: usize) -> Vec<Option<u
             }
 
             let Some(col) = chosen else {
-                // `row`'s own neighbor list is exhausted with no success —
-                // the recursive equivalent of falling off the end of the
-                // `for` loop and returning `false`.
+                // この行の隣接列を使い切って失敗 (再帰版で false を返すのに相当)。
                 stack.pop();
                 let Some(_) = stack.last() else { return false };
                 col_stack.pop();
@@ -99,15 +65,13 @@ pub fn max_bipartite_matching(adj: &[Vec<usize>], n_cols: usize) -> Vec<Option<u
 
             match match_col[col] {
                 Some(r2) => {
-                    // Occupied: recurse into whoever currently holds `col`.
+                    // 使用中: その列を持っている行へ「再帰」する。
                     stack.push(Frame { row: r2, idx: 0 });
                     col_stack.push(col);
                 }
                 None => {
-                    // Free column: an immediate success that unwinds the
-                    // whole active path in one go (see this function's own
-                    // docs above for why every level performs the same
-                    // assignment, not just this innermost one).
+                    // 空き列: 成功。経路上の全フレームで「試していた列 ← 自分の行」を
+                    // 割り当てながら一気に巻き戻す。
                     match_col[col] = Some(row);
                     stack.pop();
                     while let Some(parent) = stack.pop() {
@@ -120,14 +84,14 @@ pub fn max_bipartite_matching(adj: &[Vec<usize>], n_cols: usize) -> Vec<Option<u
         }
     }
 
+    // 訪問済み印 (エポックスタンプ方式: 行ごとに番号を変えることで、毎回 O(n_cols) で
+    // クリアせずに新しい訪問集合として使える)
     let mut visited: Vec<u32> = vec![0; n_cols];
-    for i in 0..p {
-        // Epoch-stamped visited set: equivalent to a fresh
-        // `vec![false; n_cols]` per row, without the O(n_cols) clear.
+    for i in 0..n_rows {
         try_augment(i, adj, &mut visited, (i + 1) as u32, &mut match_col);
     }
 
-    let mut match_row: Vec<Option<usize>> = vec![None; p];
+    let mut match_row: Vec<Option<usize>> = vec![None; n_rows];
     for (col, row) in match_col.into_iter().enumerate() {
         if let Some(r) = row {
             match_row[r] = Some(col);
@@ -136,28 +100,26 @@ pub fn max_bipartite_matching(adj: &[Vec<usize>], n_cols: usize) -> Vec<Option<u
     match_row
 }
 
-/// Iterative Tarjan's strongly-connected-components algorithm (recursive
-/// would risk stack overflow on a single long dependency chain — a real
-/// possibility on this crate's problem sizes, where chain length is
-/// bounded only by the number of nodes, which can run into the
-/// thousands). `adj[i]` lists the directed out-edges from node `i`.
-/// Returns each SCC as a `Vec<usize>` of node indices, in no particular
-/// order between components (callers needing determinism sort afterward,
-/// as [`dulmage_mendelsohn_blocks`] does).
+/// 反復版の Tarjan 強連結成分分解 (再帰版は長い依存鎖でスタックオーバーフローしうるため)。
+/// `adj[i]` はノード `i` から出る有向辺の行き先。各強連結成分をノード番号の
+/// `Vec<usize>` で返す。成分間の順序は不定 (決定性が必要なら呼び出し側で並べ替える)。
 pub fn tarjan_scc(adj: &[Vec<usize>]) -> Vec<Vec<usize>> {
     let n = adj.len();
+    // DFS の訪問順番号 (未訪問は None)
     let mut index: Vec<Option<u32>> = vec![None; n];
+    // 到達可能な最小の訪問順番号
     let mut lowlink: Vec<u32> = vec![0; n];
     let mut on_stack: Vec<bool> = vec![false; n];
+    // Tarjan のノードスタック
     let mut stack: Vec<usize> = Vec::new();
     let mut next_index: u32 = 0;
     let mut components: Vec<Vec<usize>> = Vec::new();
 
-    // Explicit work-stack frame: which node, and how far through its
-    // adjacency list we've already processed (so re-entering after a
-    // recursive-equivalent call resumes rather than restarting the loop).
+    /// 明示的な作業スタックのフレーム。
     enum Frame {
+        /// ノードに初めて入る。
         Enter(usize),
+        /// ノードの隣接リストを、指定位置から処理再開する (再帰呼び出しからの復帰に相当)。
         Continue(usize, usize),
     }
 
@@ -178,6 +140,7 @@ pub fn tarjan_scc(adj: &[Vec<usize>]) -> Vec<Vec<usize>> {
                 }
                 Frame::Continue(v, next_edge) => {
                     let mut i = next_edge;
+                    // 未訪問の子に降りたか
                     let mut recursed = false;
                     while i < adj[v].len() {
                         let w = adj[v][i];
@@ -194,13 +157,13 @@ pub fn tarjan_scc(adj: &[Vec<usize>]) -> Vec<Vec<usize>> {
                     if recursed {
                         continue;
                     }
-                    // Finished `v`'s adjacency list: propagate its lowlink
-                    // up to whichever node called into it (the new top of
-                    // `work`, if this wasn't the root of this DFS tree).
+                    // `v` の隣接リストを処理し終えた: lowlink を呼び出し元
+                    // (`work` の新しい先頭。DFS 木の根でなければ存在する) に伝える。
                     if let Some(Frame::Continue(parent, _)) = work.last() {
                         lowlink[*parent] = lowlink[*parent].min(lowlink[v]);
                     }
                     if lowlink[v] == index[v].unwrap() {
+                        // `v` が成分の根: スタックから `v` までを 1 成分として取り出す
                         let mut comp = Vec::new();
                         loop {
                             let w = stack.pop().unwrap();
@@ -219,53 +182,29 @@ pub fn tarjan_scc(adj: &[Vec<usize>]) -> Vec<Vec<usize>> {
     components
 }
 
-/// Partitions the rows `0..adj.len()` of a general sparse matrix (given as
-/// row -> nonzero-column adjacency, `n_cols` columns total) into blocks
-/// via a Dulmage-Mendelsohn-style decomposition: a maximum bipartite
-/// matching ([`max_bipartite_matching`]) pairs each (coverable) row with
-/// one of its own columns, then a directed graph on rows — edge `i -> j`
-/// when row `i` has a nonzero in row `j`'s matched column — is decomposed
-/// into strongly connected components ([`tarjan_scc`]). Each SCC (plus
-/// each unmatched row, on its own) becomes one block, returned sorted by
-/// its smallest row index (each block's own rows sorted ascending too) for
-/// determinism, since union-find/DFS-derived groupings are otherwise
-/// traversal-order-dependent.
+/// 一般の疎行列 (行 → 非零列の隣接リスト、列数 `n_cols`) の行 `0..adj.len()` を、
+/// Dulmage-Mendelsohn 型の分解でブロックに分ける。最大二部マッチング
+/// ([`max_bipartite_matching`]) で各行に自分の列を 1 つ対応させ、「行 `i` が行 `j` の
+/// マッチ列に非零を持つ」ときに辺 `i -> j` を張った行の有向グラフを強連結成分
+/// ([`tarjan_scc`]) に分解する。各成分 (およびマッチしなかった各行の単独ブロック) が
+/// 1 ブロックになる。決定性のため、各ブロック内は昇順、ブロックは最小行番号の順に並べる。
 ///
-/// Strictly finer than a plain connected-components partition of the same
-/// bipartite graph would be: two rows sharing no column at all can never
-/// end up in the same SCC either, since the matching graph's edges are
-/// themselves derived from real nonzeros — so this never *loses* the
-/// block-diagonal structure a simpler decomposition would already find.
+/// 列を共有しない 2 行は同じ成分に入らないので、単純な連結成分分解より細かい
+/// (粗くはならない)。マッチしなかった行は辺の始点にはなれても終点にはならないので、
+/// 自動的に単独の成分になる。
 ///
-/// Unmatched rows need no special-casing to land in a sound singleton
-/// block: lacking a column of their own, they can still be the *source*
-/// of a graph edge (if one of their columns happens to be some other
-/// row's match) but never a *target*, so nothing can complete a cycle
-/// through them — Tarjan's algorithm places each in a trivial singleton
-/// SCC automatically.
-///
-/// **What "safe to process independently" means depends on the caller.**
-/// For a matrix known to be square and structurally nonsingular (a valid
-/// LU factorization target), each diagonal block from this decomposition
-/// is *itself* square and structurally nonsingular, and — because a block
-/// upper-triangular matrix's off-diagonal spillover entries are carried
-/// into the factored form completely unchanged, never touched by any
-/// pivot outside their own row's block — every block can be **factored**
-/// independently too, not just checked, with no value propagation between
-/// blocks required (unlike using this decomposition for *solving*
-/// `Lx = b`, which genuinely does need triangular order, since back- and
-/// forward-substitution propagate computed values through those same
-/// spillover entries). For a general rectangular/rank-deficient matrix
-/// used only to *test* per-row properties (e.g. linear-dependence
-/// detection), a weaker but still useful guarantee holds: see
-/// `presolve::redundancy::dulmage_mendelsohn_blocks`'s own docs for that
-/// argument specifically.
+/// 「独立に処理してよい」の意味は用途による。正方で構造的に正則な行列なら各対角
+/// ブロックも正方・構造的正則で、ブロックごとに独立に LU 分解できる。一般の長方形・
+/// 階数落ち行列で行ごとの性質 (一次従属性など) を調べる用途での保証は
+/// `presolve::redundancy::dulmage_mendelsohn_blocks` の説明を参照。
 pub fn dulmage_mendelsohn_blocks(adj: &[Vec<usize>], n_cols: usize) -> Vec<Vec<usize>> {
-    let p = adj.len();
+    let n_rows = adj.len();
     let match_row = max_bipartite_matching(adj, n_cols);
+    // 列 → その列をマッチ相手に持つ行
     let match_col_owner: HashMap<usize, usize> =
         match_row.iter().enumerate().filter_map(|(i, c)| c.map(|c| (c, i))).collect();
 
+    // 行グラフの隣接リスト: 行 i → (i が非零を持つ列をマッチ相手に持つ他の行)
     let scc_adj: Vec<Vec<usize>> = adj
         .iter()
         .enumerate()
@@ -273,68 +212,35 @@ pub fn dulmage_mendelsohn_blocks(adj: &[Vec<usize>], n_cols: usize) -> Vec<Vec<u
         .collect();
 
     let mut components = tarjan_scc(&scc_adj);
-    components.sort_by_key(|c| c.iter().copied().min().unwrap_or(p));
+    components.sort_by_key(|c| c.iter().copied().min().unwrap_or(n_rows));
     for comp in &mut components {
         comp.sort_unstable();
     }
     components
 }
 
-/// The square-matrix, order-sensitive counterpart to
-/// [`dulmage_mendelsohn_blocks`]: for a matrix known to have `adj.len() ==
-/// n_cols` (square) and a *perfect* matching (every row matched to a
-/// distinct column — the generic case for a structurally nonsingular
-/// matrix, e.g. a valid simplex basis), returns the same SCC blocks but in
-/// a genuine **topological order** — for every edge `i -> j` in the
-/// matching-induced graph (row `i` has a nonzero in row `j`'s matched
-/// column), the block containing `i` comes *before* the block containing
-/// `j`. That ordering is exactly what a block-triangular *factorization*
-/// (as opposed to [`dulmage_mendelsohn_blocks`]'s order-independent
-/// per-row *checking*) needs: assigning increasing global step ranges to
-/// blocks in this order makes every spillover entry land at a column-step
-/// greater than or equal to its own row-step, satisfying the same
-/// "upper triangular in step-space" invariant a plain, undecomposed
-/// factorization already produces.
+/// [`dulmage_mendelsohn_blocks`] の正方行列・順序付き版。`adj.len() == n_cols` で
+/// 完全マッチング (全行が相異なる列にマッチ。構造的に正則な行列、例えば単体法の基底)
+/// がある場合に、同じ強連結成分ブロックを**位相順**で返す: マッチング誘導グラフの
+/// 各辺 `i -> j` について、`i` を含むブロックが `j` を含むブロックより前に来る。
+/// ブロック三角分解では、この順にステップ範囲を割り当てるとブロック外の要素が
+/// すべて「ステップ空間で上三角」になる。
 ///
-/// Returns `None` (signalling "fall back to an undecomposed
-/// factorization") when the matching isn't perfect — some row couldn't be
-/// matched to its own column, which for a square input means the matrix
-/// is not structurally nonsingular (or `adj.len() != n_cols`) and this
-/// decomposition's whole premise (square, structurally-independent
-/// diagonal blocks) doesn't apply; the caller's own numerical
-/// factorization is what correctly detects and reports genuine
-/// singularity in that case, not this purely structural pre-pass.
+/// Tarjan 法は到達先の成分を先に完了させるので、生の出力はこの辺の向きに対して
+/// 逆位相順になっている。ここではそれを反転して返す。
 ///
-/// Also returns the underlying `match_row` (row -> its own matched
-/// column) alongside the blocks, since a factorization caller needs it
-/// again anyway (to know which columns belong to which block when
-/// building each block's local sub-matrix).
+/// 完全マッチングがない (または正方でない) 場合は `None` を返す (呼び出し側は分解なしの
+/// 通常の分解にフォールバックし、特異性の判定は数値分解に任せる)。
+/// 成功時はブロックと一緒に `match_row` (行 → マッチ列) も返す
+/// (各ブロックの部分行列を作るのに呼び出し側が再び必要とするため)。
 ///
-/// **Why reversing Tarjan's own output order is the correct topological
-/// order, not an arbitrary choice**: Tarjan's algorithm completes
-/// (pops) a strongly connected component only after every node it can
-/// reach has already been fully explored, so a "source" component (with
-/// edges leading to others) is necessarily completed *after* the
-/// components it points to — i.e. raw Tarjan output is already in
-/// *reverse* topological order for this edge convention. Reversing it
-/// once here, rather than asking every caller to remember to, is the
-/// only change from [`dulmage_mendelsohn_blocks`]'s own version (which
-/// instead sorts by minimum row index purely for reproducible test
-/// output, since order doesn't matter for its own use case).
-///
-/// **Currently unused in production** (kept, with tests, for a possible
-/// future revisit): `simplex::lu::factorize` was extended to use this for
-/// a block-triangularized basis-matrix factorization, validated for
-/// correctness, then reverted after measuring a net ~4% aggregate
-/// regression on the Netlib benchmark — see that function's own doc
-/// comment for the full write-up (wins on a few block-angular instances
-/// outweighed by a broad tax elsewhere from paying bipartite-matching
-/// cost on every refactorization, mirroring why HiGHS itself only does
-/// cheap degree-1 peeling here, not full matching-based decomposition).
+/// 現在は本番コードから使われていない (テスト付きで保持。経緯は
+/// `docs/_history_fragments/misc.md`)。`ENOMOTO_DEBUG_DM_SPLIT` を設定すると
+/// 各段階の所要時間を標準エラーに出す。
 #[allow(dead_code)]
 pub fn dulmage_mendelsohn_blocks_topological(adj: &[Vec<usize>], n_cols: usize) -> Option<(Vec<Vec<usize>>, Vec<usize>)> {
-    let p = adj.len();
-    if p != n_cols {
+    let n_rows = adj.len();
+    if n_rows != n_cols {
         return None;
     }
     let debug = env_str!("ENOMOTO_DEBUG_DM_SPLIT").is_some();
@@ -346,8 +252,10 @@ pub fn dulmage_mendelsohn_blocks_topological(adj: &[Vec<usize>], n_cols: usize) 
     }
     let match_row: Vec<usize> = match_row.into_iter().map(|c| c.unwrap()).collect();
     let t1 = std::time::Instant::now();
+    // 列 → その列をマッチ相手に持つ行
     let match_col_owner: HashMap<usize, usize> = match_row.iter().enumerate().map(|(i, &c)| (c, i)).collect();
 
+    // 行グラフの隣接リスト (`dulmage_mendelsohn_blocks` と同じ)
     let scc_adj: Vec<Vec<usize>> = adj
         .iter()
         .enumerate()
@@ -360,7 +268,7 @@ pub fn dulmage_mendelsohn_blocks_topological(adj: &[Vec<usize>], n_cols: usize) 
     let tarjan_us = t2.elapsed().as_micros();
     components.reverse();
     if debug {
-        eprintln!("DM_SPLIT p={p} matching_us={matching_us} remap_us={remap_us} tarjan_us={tarjan_us}");
+        eprintln!("DM_SPLIT p={n_rows} matching_us={matching_us} remap_us={remap_us} tarjan_us={tarjan_us}");
     }
     Some((components, match_row))
 }
@@ -369,9 +277,10 @@ pub fn dulmage_mendelsohn_blocks_topological(adj: &[Vec<usize>], n_cols: usize) 
 mod tests {
     use super::*;
 
+    /// 完全マッチングが存在するグラフで全行がマッチし、列が重複しないこと。
     #[test]
     fn max_bipartite_matching_covers_a_perfect_matching() {
-        // Triangle-shaped: row0->{0,1}, row1->{1,2}, row2->{0,1,2}.
+        // 三角形状: row0->{0,1}, row1->{1,2}, row2->{0,1,2}
         let adj = vec![vec![0, 1], vec![1, 2], vec![0, 1, 2]];
         let m = max_bipartite_matching(&adj, 3);
         assert!(m.iter().all(|c| c.is_some()), "expected every row matched: {m:?}");
@@ -379,18 +288,20 @@ mod tests {
         assert_eq!(cols.len(), 3, "matched columns must be distinct: {m:?}");
     }
 
+    /// 列が足りないとき、余った行はマッチしないこと。
     #[test]
     fn max_bipartite_matching_leaves_excess_rows_unmatched() {
-        // Two rows both only touching column 0 -- only one can be matched.
+        // 2 行とも列 0 にしか触れない: 1 行しかマッチできない
         let adj = vec![vec![0], vec![0]];
         let m = max_bipartite_matching(&adj, 1);
         let matched = m.iter().filter(|c| c.is_some()).count();
         assert_eq!(matched, 1, "m={m:?}");
     }
 
+    /// 単純な閉路が 1 つの強連結成分になること。
     #[test]
     fn tarjan_scc_finds_a_simple_cycle() {
-        // 0 -> 1 -> 2 -> 0 is one cycle; 3 is isolated.
+        // 0 -> 1 -> 2 -> 0 が 1 つの閉路、3 は孤立
         let adj = vec![vec![1], vec![2], vec![0], vec![]];
         let mut comps = tarjan_scc(&adj);
         for c in &mut comps {
@@ -400,6 +311,7 @@ mod tests {
         assert_eq!(comps, vec![vec![0, 1, 2], vec![3]], "comps={comps:?}");
     }
 
+    /// 閉路のない鎖は各ノードが単独の成分になること。
     #[test]
     fn tarjan_scc_splits_a_pure_chain_into_singletons() {
         let adj = vec![vec![1], vec![2], vec![]];
@@ -411,35 +323,30 @@ mod tests {
         assert_eq!(comps, vec![vec![0], vec![1], vec![2]], "comps={comps:?}");
     }
 
+    /// 列集合が互いに素な行グループがそれぞれ別ブロックになること。
     #[test]
     fn dulmage_mendelsohn_blocks_matches_disjoint_column_groups() {
-        // rows {0,1} over cols {0,1} (mutually referencing), rows {2,3}
-        // over cols {2,3} (same), row 4 isolated over col 4.
+        // 行 {0,1} は列 {0,1}、行 {2,3} は列 {2,3}、行 4 は列 4 のみ
         let adj = vec![vec![0, 1], vec![0, 1], vec![2, 3], vec![2, 3], vec![4]];
         let comps = dulmage_mendelsohn_blocks(&adj, 5);
         assert_eq!(comps, vec![vec![0, 1], vec![2, 3], vec![4]], "comps={comps:?}");
     }
 
+    /// 閉路のない鎖では、位相順 (始点側が先) にブロックが並ぶこと。
     #[test]
     fn dulmage_mendelsohn_blocks_topological_orders_a_pure_chain_source_first() {
-        // Square 3x3, upper-triangular-by-construction: row0 touches
-        // {0,1}, row1 touches {1,2}, row2 touches only {2} -- forces the
-        // matching row0->0, row1->1, row2->2, giving edges 0->1->2 with no
-        // cycle, so each row is its own block and must come out in the
-        // order [0, 1, 2] (source before target), not Tarjan's own raw
-        // (reverse) completion order.
+        // 正方 3x3 の上三角: マッチングは row_i -> col_i に決まり、辺 0->1->2 で閉路なし。
+        // 各行が単独ブロックで、Tarjan の生の (逆) 順ではなく [0, 1, 2] の順になるはず。
         let adj = vec![vec![0, 1], vec![1, 2], vec![2]];
         let (blocks, match_row) = dulmage_mendelsohn_blocks_topological(&adj, 3).expect("perfect matching expected");
         assert_eq!(blocks, vec![vec![0], vec![1], vec![2]], "blocks={blocks:?}");
         assert_eq!(match_row, vec![0, 1, 2], "match_row={match_row:?}");
     }
 
+    /// 本物の閉路はひとつのブロックにまとまること。
     #[test]
     fn dulmage_mendelsohn_blocks_topological_keeps_a_genuine_cycle_together() {
-        // Same triangle as the matching test above: a perfect matching
-        // exists, and the induced graph among matched rows forms one
-        // 3-cycle regardless of which valid matching is chosen, so all 3
-        // rows must land in a single block.
+        // マッチングテストと同じ三角形: どの完全マッチングでも 3 行が 1 つの閉路になる
         let adj = vec![vec![0, 1], vec![1, 2], vec![0, 1, 2]];
         let (blocks, _match_row) = dulmage_mendelsohn_blocks_topological(&adj, 3).expect("perfect matching expected");
         assert_eq!(blocks.len(), 1, "blocks={blocks:?}");
@@ -448,96 +355,50 @@ mod tests {
         assert_eq!(only, vec![0, 1, 2], "blocks={blocks:?}");
     }
 
+    /// 完全マッチングがなければ `None` を返すこと。
     #[test]
     fn dulmage_mendelsohn_blocks_topological_none_when_matching_is_imperfect() {
-        // Two rows, both only touching column 0 -- no perfect matching.
+        // 2 行とも列 0 にしか触れない: 完全マッチングなし
         let adj = vec![vec![0], vec![0]];
         assert!(dulmage_mendelsohn_blocks_topological(&adj, 2).is_none());
     }
 
+    /// 正方でなければ `None` を返すこと。
     #[test]
     fn dulmage_mendelsohn_blocks_topological_none_when_not_square() {
         let adj = vec![vec![0], vec![1]];
         assert!(dulmage_mendelsohn_blocks_topological(&adj, 3).is_none());
     }
 
+    /// 再帰先の付け替えが失敗したら、自分の次の候補 (空き列) に進むこと。
     #[test]
     fn max_bipartite_matching_falls_through_a_failed_recursion_to_its_own_free_column() {
-        // row0 only reaches col0 (no alternative once displaced); row1
-        // reaches {col0, col1}, tries col0 first, recurses into row0, and
-        // that recursion fails outright (row0 truly has nowhere else to
-        // go) — row1 must then fall through to its own next candidate
-        // (col1) rather than come back empty despite col1 being reachable.
+        // row0 は col0 のみ。row1 は {col0, col1} で先に col0 を試して row0 へ再帰するが
+        // row0 には行き場がなく失敗 → row1 は次の候補 col1 を取るはず。
         let adj = vec![vec![0], vec![0, 1]];
         let m = max_bipartite_matching(&adj, 2);
         assert_eq!(m, vec![Some(0), Some(1)], "m={m:?}");
     }
 
+    /// 再帰先の付け替えが成功したら、既存のマッチを押し出すこと。
     #[test]
     fn max_bipartite_matching_displaces_an_existing_match_on_success() {
-        // row0 reaches {col0, col1} and grabs col0 first (its own free
-        // choice); row1 reaches only col0, forcing a recursion into row0
-        // that this time *succeeds* (row0 relocates to its own remaining
-        // col1) — row1 ends up with col0, row0 with col1: a genuine
-        // one-level displacement, hand-verified here as a companion to the
-        // failed-recursion case above and the randomized cross-check and
-        // deep-chain tests below (which exercise longer versions of both
-        // without a hand-computable expected answer).
+        // row0 は {col0, col1} で先に col0 を取る。row1 は col0 のみなので row0 へ再帰し、
+        // row0 が col1 に移ることで成功 → row1 が col0、row0 が col1。
         let adj = vec![vec![0, 1], vec![0]];
         let m = max_bipartite_matching(&adj, 2);
         assert_eq!(m, vec![Some(1), Some(0)], "m={m:?}");
     }
 
+    /// 非常に深い (最終的に失敗する) 増加路でもスタックオーバーフローしないこと。
     #[test]
     fn max_bipartite_matching_handles_a_deep_augmenting_chain_without_overflowing_the_stack() {
-        // Built in two phases so the whole test stays `O(N)` rather than
-        // `O(N^2)` (an earlier version of this test listed each row's
-        // *previous*-column preference first, which forces recursion
-        // during every single row's own initial placement below — still
-        // correct, but O(N) work apiece made the whole test O(N^2) and
-        // far too slow to run routinely; the swapped preference order
-        // here keeps every one of the first `N` rows' own placements
-        // `O(1)`, so the only genuinely deep call is the one probe row
-        // added afterward):
-        //
-        // Phase 1: row `i` (i in 0..N) reaches {col i, col(i-1)} — its own
-        // column *first* — so processing rows in ascending order always
-        // finds col `i` free immediately (no row before it could ever
-        // want it) and every one of these `N` placements is `O(1)`, no
-        // recursion at all: `row_i` ends up matched to `col_i`, but the
-        // link to `col(i-1)` is still there, latent, in row `i`'s own
-        // adjacency for phase 2 to walk.
-        //
-        // Phase 2: one more probe row reaches every column `N-1, N-2,
-        // ..., 0` in descending order (no genuinely free column left for
-        // it — `n_cols == N`, all already taken by phase 1). Its own
-        // search must recurse into `row(N-1)` (which holds col `N-1`),
-        // which — via its own latent `col(N-2)` link — recurses into
-        // `row(N-2)`, and so on all the way down to `row0`, which finally
-        // has nowhere left to go and fails, unwinding the whole probe as
-        // one `O(N)`-deep, ultimately-unsuccessful call. That single call
-        // is the exact shape (long, ultimately-failing recursive descent)
-        // that overflowed the call stack with a genuinely recursive DFS
-        // on a large production instance (`degen3`; see this function's
-        // own docs) — `N = 1_000_000` here comfortably exceeds anything a
-        // 1-2MB call stack could survive recursively at any plausible
-        // per-frame size, so simply not hanging or crashing is itself
-        // most of the test; the assertions below also confirm every
-        // phase-1 row *kept* its own column (the failed probe must leave
-        // every existing match untouched) and that the probe row itself
-        // comes back unmatched, exactly as the old recursive version
-        // would also have concluded (just by overflowing its own stack
-        // before it could).
-        //
-        // `N = 100_000` rather than something larger: `max_bipartite_matching`'s
-        // own per-row `vec![false; n_cols]` (one fresh visited buffer per
-        // top-level call, `n_cols` long) makes the *whole test* — not
-        // just the probe — `O(N^2)` regardless of how cheap each
-        // individual row's own search is, so this is chosen as the
-        // smallest value that still leaves no realistic doubt (100,000
-        // call frames is far beyond what any plausible thread stack, even
-        // a generously-sized one, could hold) without costing more than a
-        // fraction of a second here.
+        // 第 1 段: 行 i (0..N) は {col i, col(i-1)} を自分の列を先にして持つので、
+        // 昇順に処理すると各行は再帰なしで col i を取る (全体 O(N))。
+        // 第 2 段: 最後に全列を降順に持つ探査行を追加する。空き列がないので
+        // row(N-1) → row(N-2) → ... → row0 と深さ N の探索をして最終的に失敗する。
+        // 第 1 段の行はすべて自分の列を保持し、探査行はマッチしないはず。
+        // 第 1 段の行数 (= 探査の深さ)
         const N: usize = 100_000;
         let mut adj: Vec<Vec<usize>> = vec![vec![0]];
         adj.extend((1..N).map(|i| vec![i, i - 1]));
@@ -547,33 +408,29 @@ mod tests {
         assert_eq!(m[N], None, "expected the probe row to end up unmatched");
     }
 
-    /// Small deterministic PRNG (xorshift64*) — no `rand` dependency in
-    /// this crate, and a fixed, seedable generator keeps a failing
-    /// property-test run reproducible from its own seed rather than from
-    /// whatever `std`'s own unspecified default source would give.
+    /// テスト用の小さな決定的乱数生成器 (xorshift64*)。`rand` に依存せず、
+    /// 失敗時にシードから再現できるようにするため。
     struct XorShift64(u64);
     impl XorShift64 {
+        /// 次の 64 ビット乱数。
         fn next_u64(&mut self) -> u64 {
             self.0 ^= self.0 << 13;
             self.0 ^= self.0 >> 7;
             self.0 ^= self.0 << 17;
             self.0
         }
+        /// `0..n` の一様乱数 (近似)。
         fn next_range(&mut self, n: usize) -> usize {
             (self.next_u64() % n as u64) as usize
         }
     }
 
-    /// The original (pre-iterative-rewrite) recursive statement of
-    /// [`max_bipartite_matching`]'s own augmenting-path DFS, kept only
-    /// here as a from-first-principles reference for the property test
-    /// below — safe to leave genuinely recursive since every call in this
-    /// test module uses small graphs (bounded rows/cols), nowhere near
-    /// deep enough to risk the stack overflow the real function was
-    /// rewritten to avoid.
+    /// [`max_bipartite_matching`] の再帰版 (反復版の参照実装)。小さなグラフでしか
+    /// 使わないので再帰でも安全。
     fn max_bipartite_matching_recursive_reference(adj: &[Vec<usize>], n_cols: usize) -> Vec<Option<usize>> {
-        let p = adj.len();
+        let n_rows = adj.len();
         let mut match_col: Vec<Option<usize>> = vec![None; n_cols];
+        /// 行 `row` から増加路を再帰的に探す。
         fn try_augment(row: usize, adj: &[Vec<usize>], visited: &mut [bool], match_col: &mut [Option<usize>]) -> bool {
             for &col in &adj[row] {
                 if visited[col] {
@@ -587,11 +444,11 @@ mod tests {
             }
             false
         }
-        for i in 0..p {
+        for i in 0..n_rows {
             let mut visited = vec![false; n_cols];
             try_augment(i, adj, &mut visited, &mut match_col);
         }
-        let mut match_row: Vec<Option<usize>> = vec![None; p];
+        let mut match_row: Vec<Option<usize>> = vec![None; n_rows];
         for (col, row) in match_col.into_iter().enumerate() {
             if let Some(r) = row {
                 match_row[r] = Some(col);
@@ -600,18 +457,10 @@ mod tests {
         match_row
     }
 
+    /// 多数の小さなランダム二部グラフで、反復版が再帰版と完全に同じ `match_row` を返すこと
+    /// (同じ行順・同じ候補順で同じ判断をするので、サイズだけでなく中身まで一致するはず)。
     #[test]
     fn max_bipartite_matching_matches_the_recursive_reference_on_many_random_graphs() {
-        // Cross-checks the iterative rewrite against the recursive
-        // statement it replaces, across many small random bipartite
-        // graphs (rows/cols small enough that the reference's own
-        // recursion is safe — see its own docs). Both are Kuhn's
-        // algorithm processing rows in the same `0..p` order with the
-        // same per-row preference order, so they don't just find matchings
-        // of the same *size* (true of any two correct maximum-matching
-        // algorithms, tie-breaking or not) — they make the identical
-        // sequence of greedy/augment decisions and so must produce the
-        // exact same `match_row`, not merely an equally-sized one.
         let mut rng = XorShift64(0x9E3779B97F4A7C15);
         for _ in 0..500 {
             let p = 1 + rng.next_range(10);
@@ -619,9 +468,7 @@ mod tests {
             let adj: Vec<Vec<usize>> = (0..p)
                 .map(|_| {
                     let mut row: Vec<usize> = (0..n_cols).filter(|_| rng.next_range(3) == 0).collect();
-                    // Shuffle so preference order isn't always ascending —
-                    // exercises the "first free/recursible candidate isn't
-                    // just the lowest index" path in both implementations.
+                    // 候補順が常に昇順にならないようシャッフルする
                     for k in (1..row.len()).rev() {
                         let j = rng.next_range(k + 1);
                         row.swap(k, j);

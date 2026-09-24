@@ -1,27 +1,19 @@
-"""Runtime comparison: this crate's simplex engine vs. HiGHS (via `highspy`)
-on the Netlib LP benchmark set, restricted to problems with at most
-`--max-vars` (default 3000) columns.
+"""実行時間の比較: このクレートの単体法エンジン vs. HiGHS (`highspy` 経由)。
+Netlib の LP ベンチマーク集合のうち、列数が `--max-vars` (既定 3000) 以下の問題で比較する。
 
-`model.rs::add_variable` now accepts genuine `+/-inf` bounds directly (see
-its own docs) — this crate's presolve pipeline substitutes a finite
-`BIG_M` internally only for whatever survives presolve without being
-eliminated outright (`simplex.rs::build_std_form_presolved`), not before
-presolve ever runs. So every Netlib problem here is handed to this crate
-exactly as HiGHS itself reads it from the `.mps` file, MPS `+inf` bounds
-included — no bound substitution happens in this script at all anymore.
-Objective values are still compared as a sanity check.
+MPS ファイルの無限大境界も含め、各問題は HiGHS が読み込んだままの形でこのクレートに
+渡す (このスクリプトでは境界の置き換えをしない)。目的関数値も健全性確認として比較する。
 
-Usage:
+使い方:
     python -m enomoto_solver.benchmark_highs [--max-vars 3000] [--timeout 60]
 
-Netlib's LP data is not committed to this repository (see
-docs/netlib-data.md) and this script never itself talks to netlib.org:
-run `python scripts/setup_netlib_data.py` once per environment first — it
-fetches Netlib's custom "compressed MPS" format and decompresses it via
-Netlib's own `emps.c` (compiled once, requires a C compiler in `PATH`, e.g.
-`gcc`) into `--cache-dir` (default: `<repo>/.netlib_cache`, gitignored).
-This script only ever reads that cache.
+Netlib の LP データはリポジトリに含まれず (docs/netlib-data.md 参照)、このスクリプトは
+netlib.org にアクセスしない。環境ごとに一度 `python scripts/setup_netlib_data.py` を実行して
+`--cache-dir` (既定: `<repo>/.netlib_cache`、gitignore 済み) にデータを用意すること
+(Netlib 独自の圧縮 MPS 形式を Netlib の `emps.c` で展開するので、`gcc` などの C コンパイラが
+`PATH` に必要)。このスクリプトはそのキャッシュを読むだけ。
 """
+
 
 from __future__ import annotations
 
@@ -40,11 +32,12 @@ from . import _core
 
 
 class NetlibCacheError(RuntimeError):
-    """Needed Netlib data isn't cached — run `scripts/setup_netlib_data.py`
-    (from a checkout of this repo) once per environment first."""
+    """必要な Netlib データがキャッシュにない。環境ごとに一度 (リポジトリのチェックアウトから)
+    `scripts/setup_netlib_data.py` を実行すること。"""
 
 
 def _cached_problem_list(cache_dir: Path) -> list[str]:
+    """キャッシュの `problems.txt` から問題名の一覧を読む。なければ NetlibCacheError。"""
     list_path = cache_dir / "problems.txt"
     if not list_path.exists():
         raise NetlibCacheError(f"{list_path} not found — run `python scripts/setup_netlib_data.py` once to fetch it")
@@ -52,14 +45,14 @@ def _cached_problem_list(cache_dir: Path) -> list[str]:
 
 
 def _cached_mps(name: str, cache_dir: Path) -> Path | None:
+    """問題 `name` の展開済み MPS ファイルのパス。存在しないか空なら None。"""
     mps_path = cache_dir / "mps" / f"{name}.mps"
     return mps_path if mps_path.exists() and mps_path.stat().st_size > 0 else None
 
 
 def _load_lp(mps_path: Path):
-    """Reads `mps_path` via HiGHS and returns `(highs_instance, lp)` — the
-    `highs_instance` is reused as-is for the HiGHS-side timing below, so
-    the same parsed model backs both solves."""
+    """`mps_path` を HiGHS で読み込み `(highs_instance, lp)` を返す。`highs_instance` は
+    HiGHS 側の計測にそのまま使うので、両ソルバーは同じ読み込み結果を解く。"""
     h = highspy.Highs()
     h.setOptionValue("output_flag", False)
     status = h.readModel(str(mps_path))
@@ -69,16 +62,14 @@ def _load_lp(mps_path: Path):
 
 
 def _build_our_model(lp) -> tuple[_core.PyModel, int, int]:
-    """Builds this crate's `PyModel` directly from HiGHS's parsed LP data
-    (bypassing the Python `Variable`/`Constraint` DSL, which would add
-    per-term Python-object overhead irrelevant to the solver's own
-    runtime) — bounds passed through exactly as HiGHS parsed them,
-    `+/-inf` included (`add_variable` accepts real infinities now; see its
-    own docs). Returns `(model, n_constraints, nnz)`."""
+    """HiGHS が読み込んだ LP データから、このクレートの `PyModel` を直接組み立てる
+    (項ごとの Python オブジェクトの負担を避けるため `Variable`/`Constraint` の DSL は使わない)。
+    境界は `+/-inf` も含め HiGHS が読んだとおりに渡す。範囲制約 (両側有限で幅のあるもの) は
+    `<=` と `>=` の 2 行に分ける。`(model, 制約数, 非零数)` を返す。"""
     m = _core.PyModel()
     n = lp.num_col_
-    # highspy copies the whole vector on every attribute access, so read
-    # each one exactly once — per-element `lp.col_lower_[j]` is O(n^2).
+    # highspy は属性アクセスのたびにベクトル全体を複製するので、各属性は 1 回だけ読む
+    # (要素ごとに `lp.col_lower_[j]` とすると O(n^2) になる)。
     col_lower = [float(v) for v in lp.col_lower_]
     col_upper = [float(v) for v in lp.col_upper_]
     integrality = [int(v) for v in lp.integrality_]
@@ -97,6 +88,7 @@ def _build_our_model(lp) -> tuple[_core.PyModel, int, int]:
     m.set_objective(obj_coeffs, float(lp.offset_), sense)
 
     n_rows = lp.num_row_
+    # 行ごとの非零 (列, 値) の一覧 (列優先・行優先どちらの格納形式からも作る)
     rows: list[list[tuple[int, float]]] = [[] for _ in range(n_rows)]
     am = lp.a_matrix_
     start, index, value = list(am.start_), list(am.index_), list(am.value_)
@@ -116,8 +108,8 @@ def _build_our_model(lp) -> tuple[_core.PyModel, int, int]:
         lo, hi = row_lower[i], row_upper[i]
         terms = rows[i]
         if math.isinf(lo) and math.isinf(hi):
-            continue
-        if not math.isinf(lo) and abs(hi - lo) < 1e-12:
+            continue  # 両側無限 (自由行) は制約にならない
+        if not math.isinf(lo) and abs(hi - lo) < 1e-12:  # 上下限がほぼ等しければ等式
             m.add_constraint(terms, "==", float(lo))
             n_constraints += 1
             continue
@@ -133,6 +125,9 @@ def _build_our_model(lp) -> tuple[_core.PyModel, int, int]:
 
 
 def _run_one(name: str, mps_path: Path, solve_timeout: float) -> dict:
+    """問題 1 つを HiGHS とこのクレートの両方で解き、時間・状態・目的関数値を dict で返す。
+    途中の例外は送出せず `*error` キーに記録する。(`solve_timeout` は未使用。
+    時間制限は呼び出し元のサブプロセスで課す。)"""
     result: dict = {"name": name}
     try:
         h, lp = _load_lp(mps_path)
@@ -171,9 +166,8 @@ def _run_one(name: str, mps_path: Path, solve_timeout: float) -> dict:
 
 
 def _run_worker(name: str, cache_dir: Path, timeout: float) -> None:
-    """`--worker` entry point: solves exactly one problem in *this* process
-    and prints a single JSON line to stdout. Invoked by `main()` as a
-    subprocess (see its own docs for why) rather than called in-process."""
+    """`--worker` の入口: このプロセスで問題を 1 つだけ解き、結果を JSON 1 行で標準出力に
+    出す。`main()` からサブプロセスとして呼ばれる。"""
     mps_path = _cached_mps(name, cache_dir)
     if mps_path is None:
         print(json.dumps({"name": name, "error": "could not decompress"}))
@@ -182,19 +176,19 @@ def _run_worker(name: str, cache_dir: Path, timeout: float) -> None:
 
 
 def main() -> None:
+    """コマンドライン入口。各問題をサブプロセスで解いて結果を表示し、CSV に書き出し、
+    両ソルバーが最適に解けた問題の合計時間と比を表示する。"""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--max-vars", type=int, default=3000, help="skip problems with more columns than this")
     parser.add_argument("--timeout", type=float, default=60.0, help="per-problem wall-clock budget, seconds — enforced (SIGTERM/kill) via a per-problem subprocess")
-    # Relative to the current working directory, not `__file__`: once this
-    # package is installed from a wheel, `__file__` sits under site-packages
-    # with no reliable path back to a repo checkout (see this module's own
-    # docs). Both this and `scripts/setup_netlib_data.py`'s own default
-    # resolve to `<cwd>/.netlib_cache`, so running both from the repo root
-    # (the documented usage) still lines them up.
+    # `__file__` ではなくカレントディレクトリ基準 (wheel からインストールすると
+    # `__file__` は site-packages 下になりリポジトリに辿れないため)。
+    # `scripts/setup_netlib_data.py` の既定値も `<cwd>/.netlib_cache` なので、
+    # 両方をリポジトリのルートから実行すれば一致する。
     parser.add_argument("--cache-dir", type=Path, default=Path.cwd() / ".netlib_cache")
     parser.add_argument("--out", type=Path, default=Path.cwd() / "netlib_benchmark_results.csv")
     parser.add_argument("--only", nargs="*", help="run only these problem names (default: all, size-filtered)")
-    parser.add_argument("--worker", metavar="NAME", help=argparse.SUPPRESS)  # internal: single-problem subprocess mode
+    parser.add_argument("--worker", metavar="NAME", help=argparse.SUPPRESS)  # 内部用: 問題 1 つだけを解くサブプロセスモード
     args = parser.parse_args()
 
     args.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -209,6 +203,7 @@ def main() -> None:
         print(f"error: {e}", file=sys.stderr)
         sys.exit(1)
 
+    # 各問題の結果 dict
     rows = []
     for name in names:
         mps_path = _cached_mps(name, args.cache_dir)
@@ -216,9 +211,8 @@ def main() -> None:
             print(f"{name:12s} SKIP (not cached — run `python scripts/setup_netlib_data.py` to fetch it)")
             continue
 
-        # Cheap pre-check so an oversized problem is never even handed to
-        # a worker subprocess — `readModel` itself is fast even for the
-        # largest Netlib instances.
+        # 大きすぎる問題をサブプロセスに渡さないための安価な事前チェック
+        # (`readModel` は最大級の Netlib 問題でも速い)。
         h, lp = _load_lp(mps_path)
         n_vars = lp.num_col_
         del h, lp
@@ -226,15 +220,9 @@ def main() -> None:
             print(f"{name:12s} SKIP (n_vars={n_vars} > {args.max_vars})")
             continue
 
-        # Run this problem's actual solve in its own subprocess: this
-        # crate's simplex engine `panic!`s (rather than returning an error)
-        # on a handful of known-hard Netlib instances (e.g. `cycle`, named
-        # for exactly the degenerate-pivoting behavior it stresses) when a
-        # refactorization hits a numerically singular basis — a Rust panic
-        # crossing the PyO3 boundary aborts the whole interpreter, which
-        # would otherwise take the entire batch down with one bad problem.
-        # A subprocess also gives `--timeout` real teeth (a hung/slow solve
-        # is simply killed), which an in-process call has no way to do.
+        # 実際の求解は問題ごとのサブプロセスで行う。Rust 側の panic が PyO3 境界を越えると
+        # インタプリタごと落ちるので、1 問の失敗でバッチ全体が止まらないようにするため。
+        # また `--timeout` を実際に効かせる (遅い/固まった求解を kill する) ためでもある。
         try:
             proc = subprocess.run(
                 [sys.executable, "-m", "enomoto_solver.benchmark_highs", "--worker", name, "--cache-dir", str(args.cache_dir)],
@@ -261,6 +249,7 @@ def main() -> None:
         if "error" in result:
             print(f"{name:12s} ERROR: {result['error']}")
             continue
+        # ot/ht: このクレート/HiGHS の時間、os_/hs: それぞれの状態
         ot = result.get("ours_time")
         ht = result.get("highs_time")
         os_ = result.get("ours_status", "?")
@@ -280,6 +269,7 @@ def main() -> None:
             writer.writerow(r)
     print(f"\nwrote {len(rows)} rows to {args.out}")
 
+    # 両ソルバーが最適に解けた問題だけで合計時間を比べる
     solved = [r for r in rows if r.get("ours_status") == "optimal" and r.get("highs_status") and "kOptimal" in r["highs_status"]]
     if solved:
         total_ours = sum(r["ours_time"] for r in solved)

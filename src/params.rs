@@ -1385,69 +1385,114 @@ pub(crate) mod presolve {
     // dominatedcol) のコード中から新たに切り出した定数 ====
 }
 
-/// 内点法 (src/interior_point.rs, 現在は未使用のエンジン)
+/// 内点法 IP-PMM (src/interior_point.rs と interior_point/kkt.rs)。
+/// 既定のエンジンではなく、`Model.solve(root_solver="interior")` のときだけ使われる。
 pub(crate) mod interior_point {
+    /// fraction-to-boundary 則の係数 τ。スラック `s` と双対 `z` が 0 に達しないよう、
+    /// 境界までの最大ステップの τ 倍までしか進まない。
     pub(crate) const TAU: f64 = 0.995;
 
+    /// 主変数側の近接正則化パラメータ ρ の下限。
     pub(crate) const RHO_MIN: f64 = 1e-10;
 
+    /// 双対側の近接正則化パラメータ δ の下限。
     pub(crate) const DELTA_MIN: f64 = 1e-10;
 
+    /// ρ の初期値。
     pub(crate) const RHO0: f64 = 1e-1;
 
+    /// δ の初期値。
     pub(crate) const DELTA0: f64 = 1e-1;
 
+    /// 停止判定 (主・双対残差と双対ギャップ) の絶対許容誤差。
     pub(crate) const EPS_ABS: f64 = 1e-8;
 
+    /// 停止判定の相対許容誤差 (各量のノルムに掛ける)。
     pub(crate) const EPS_REL: f64 = 1e-8;
 
+    /// Newton 反復の最大回数。
     pub(crate) const MAX_ITERS: usize = 100;
 
+    /// 正則化が下限に張り付いたまま残差が改善しない反復がこの回数続いたら停滞とみなし、
+    /// 残差の大小で実行不能/非有界を推定して打ち切る。
     pub(crate) const STALL_ITERS: usize = 8;
 
-    /// Number of times to redo constraint propagation (bound strengthening +
-    /// redundant/infeasible row detection) over the inequality rows after
-    /// removing redundant equality rows (see `propagate.rs`). The underlying
-    /// technique is itself iterative until a fixpoint; two rounds here mirror
-    /// how Gurobi's presolve caps propagation passes per presolve round rather
-    /// than iterating to convergence.
+    /// 前処理 (`presolve::run_extended`) に渡す Ruiz 平衡化の反復回数。
+    pub(crate) const RUIZ_ITERS: usize = 10;
+
+    /// 冗長等式行の除去後に、不等式行の制約伝播 (境界強化 + 冗長/実行不能行の検出) を
+    /// 何回繰り返すか。
     pub(crate) const PROPAGATION_PASSES: usize = 2;
 
-    /// Upper bound on how many times `presolve::run_extended` cycles through
-    /// propagate → dualfix → row-singleton → doubleton → colsingleton —
-    /// mirrors `simplex.rs`'s own `PRESOLVE_ROUNDS` (see that constant's own
-    /// docs for why this is a cap, not a fixed count: `run_extended` itself
-    /// stops early once a round converges).
+    /// `presolve::run_extended` の外側ラウンド
+    /// (propagate → dualfix → 行シングルトン → ダブルトン → 列シングルトン) の上限回数。
+    /// 収束すればそれより早く止まる。
     pub(crate) const PRESOLVE_ROUNDS: usize = 20;
 
-    /// Upper bound on how many times each outer `PRESOLVE_ROUNDS` pass itself
-    /// cycles through row-singleton <-> colsingleton before `propagate`/
-    /// `dualfix` run again — mirrors `simplex.rs`'s own
-    /// `ROWSINGLETON_COLSINGLETON_INNER_ROUNDS` (see that constant's own docs
-    /// for why this inner pair can have more to find after its own first
-    /// pass, why `doubleton` isn't part of this inner repetition, and for the
-    /// fixpoint check that stops it short of this cap).
+    /// 外側ラウンド 1 回の中で、行シングルトン ⇔ 列シングルトンの組を繰り返す上限回数。
     pub(crate) const ROWSINGLETON_COLSINGLETON_INNER_ROUNDS: usize = 1;
+
+    /// Farkas 証明の判定で、候補ベクトルの無限大ノルムがこれ未満なら
+    /// 「ほぼ零ベクトル」とみなして証明なしと判定する。
+    pub(crate) const CERT_SCALE_MIN: f64 = 1e-8;
+
+    /// Farkas 証明の判定許容誤差 (正規化後の残差がこれ未満、かつ目的の改善がこれ超なら成立)。
+    pub(crate) const CERT_TOL: f64 = 1e-5;
+
+    /// 不等式が 1 本もない (`m == 0`) 場合、初期化系の双対残差の無限大ノルムが
+    /// これを超えたら非有界と判定する。
+    pub(crate) const NO_INEQ_DUAL_RES_TOL: f64 = 1e-4;
+
+    /// 初期点のシフト量 `0.5 * (-min) * この値` に使う倍率 (PIQP の初期化式)。
+    pub(crate) const INIT_SHIFT_MULTIPLIER: f64 = 3.0;
+
+    /// 初期点シフトの割り算で分母 (総和) にかける下限 (ゼロ除算よけ)。
+    pub(crate) const INIT_DIV_GUARD: f64 = 1e-12;
+
+    /// 初期スラック `s` と初期双対 `z` の各成分の下限 (厳密に正の内点から始めるため)。
+    pub(crate) const INIT_POSITIVE_FLOOR: f64 = 1e-6;
+
+    /// 「ρ, δ が下限に達した」とみなす余裕倍率 (下限 × この値 以下なら到達)。
+    pub(crate) const REG_FLOOR_SLACK: f64 = 1.001;
+
+    /// 停滞判定: 今回の残差が前回の残差 × この値 以上なら「改善なし」とみなす。
+    pub(crate) const STALL_PROGRESS_RATIO: f64 = 0.999999;
+
+    /// 相補性 μ や双対ギャップで割るときの分母の下限 (ゼロ除算よけ)。
+    pub(crate) const GAP_DIV_GUARD: f64 = 1e-16;
+
+    /// 残差が前回の この倍率 以下まで減ったら近接中心 (λ, ν または ξ) を更新し、
+    /// 正則化パラメータを大きく減らす。
+    pub(crate) const RES_DECREASE_RATIO: f64 = 0.95;
+
+    /// 残差が十分減らなかったときの正則化パラメータの減らし方
+    /// (`(1 - r / この値)` 倍、`r` は相補性ギャップの相対減少率)。
+    pub(crate) const SLOW_DECREASE_DIVISOR: f64 = 3.0;
+
+    /// KKT 系の数値 LDLᵀ 分解と三角求解に使う faer の並列度。
+    /// `Rayon(0)` は rayon のスレッド数をそのまま使う指定。
+    /// スクラッチ量の見積もり (`_req`) と実際の呼び出しで同じ値を使う必要がある。
+    pub(crate) const KKT_PARALLELISM: faer::Parallelism = faer::Parallelism::Rayon(0);
 }
 
 /// 分枝限定法 (src/mip.rs)
 pub(crate) mod mip {
-    /// How close to an integer a discrete variable's LP-relaxation value must
-    /// be to count as "already integer" (`most_fractional` below).
+    /// 整数変数の緩和解が整数からこの距離以内なら「整数値」とみなす。
     pub(crate) const INT_TOL: f64 = 1e-6;
 
-    /// How much better a candidate objective must be than the current
-    /// incumbent to replace it — guards against replacing the incumbent over
-    /// and over for a difference that's really just floating-point noise.
+    /// 暫定解を置き換えるのに必要な目的関数値の最小改善量 (浮動小数点の雑音で
+    /// 暫定解が入れ替わり続けるのを防ぐ)。
     pub(crate) const OBJ_EPS: f64 = 1e-7;
 
-    /// Safety cap on the number of branch-and-bound nodes explored; if hit,
-    /// `solve_mip` returns the best incumbent found so far with
-    /// `node_limit_hit: true` rather than the (unproven) true optimum.
+    /// 探索ノード数の上限。超えたらその時点の最良暫定解を `node_limit_hit: true` 付きで返す。
     pub(crate) const MAX_NODES: usize = 20_000;
+
+    /// 分枝で締めた境界が `下限 > 上限 + この値` になったら、そのノードを実行不能として捨てる。
+    pub(crate) const BOUND_INFEAS_TOL: f64 = 1e-9;
 }
 
 /// メモリアロケータ (src/lib.rs)
 pub(crate) mod alloc {
-    pub(crate) const LARGE: usize = 4 * 1024;
+    /// このバイト数未満のメモリブロックは mimalloc に、以上はシステムアロケータに割り当てる。
+    pub(crate) const MIMALLOC_SIZE_LIMIT: usize = 4 * 1024;
 }

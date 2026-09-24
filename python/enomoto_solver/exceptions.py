@@ -1,25 +1,26 @@
+"""モデルの構築・求解で送出される例外。"""
+
+
 class SolverError(Exception):
-    """Base class for errors raised while building or solving a model."""
+    """モデルの構築・求解中のエラーの基底クラス。"""
 
 
 class InfeasibleError(SolverError):
-    """Raised by Model.solve() when the problem has no feasible solution."""
+    """Model.solve() で、問題に実行可能解がないときに送出される。"""
 
 
 class UnboundedError(SolverError):
-    """Raised by Model.solve() when the objective is unbounded."""
+    """Model.solve() で、目的関数が非有界のときに送出される。"""
 
 
 class InfeasibleOrUnboundedError(SolverError):
-    """Raised by Model.solve() when the problem is proven to have no finite
-    optimum but was not classified further (the default; pass
-    ``distinguish_infeasible_unbounded=True`` to get InfeasibleError or
-    UnboundedError instead). Deliberately not a subclass of either, since
-    it may be either one."""
+    """Model.solve() で、有限の最適値を持たないこと (実行不能か非有界) は証明したが、
+    どちらかは区別していないときに送出される (既定の動作。
+    ``distinguish_infeasible_unbounded=True`` を渡すと InfeasibleError か
+    UnboundedError のどちらかになる)。どちらでもありうるので、意図的に
+    どちらのサブクラスにもしていない。"""
 
 
 class NotSolvedError(SolverError):
-    """Raised by Model.solve() when the solver gave up without reaching a
-    verdict (e.g. a numerically singular basis it could not recover from,
-    or its iteration budget running out). Nothing is claimed about the
-    model itself."""
+    """Model.solve() で、ソルバーが判定に至らずに諦めたときに送出される
+    (回復できない数値的に特異な基底や反復上限など)。モデル自体については何も主張しない。"""
