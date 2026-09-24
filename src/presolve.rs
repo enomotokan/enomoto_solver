@@ -837,20 +837,35 @@ pub fn run_extended(
         // to skip it (correctly, across every source of a fix — including
         // `rowsingleton`'s own, decided later in this same round's inner
         // loop and easy to under-count here) isn't worth it.
-        let a_rows: Vec<Vec<(usize, f64)>> = csr_rows(&a);
-        let fold_a = timed_step!("foldfixed(A)", foldfixed::fold_fixed_columns(&a_rows, &b, &lb, &ub, RowSense::Eq));
-        if fold_a.infeasible {
-            return extended_infeasible(sc, a, b, c, n);
+        //
+        // Skipped (bit-identical) when it would hand its input back: every
+        // row non-empty, no stored zero and no fixed column — then each
+        // row survives verbatim with an untouched rhs, and `A` (canonical)
+        // would be rebuilt into itself.
+        let is_fixed = |j: usize| lb[j] == ub[j];
+        let a_noop = crate::sparse::csr_is_canonical(&a) && {
+            let ar = a.as_ref();
+            (0..ar.nrows()).all(|i| !ar.col_indices_of_row_raw(i).is_empty()) && ar.col_indices().iter().all(|&j| !is_fixed(j))
+        };
+        if !a_noop {
+            let a_rows: Vec<Vec<(usize, f64)>> = csr_rows(&a);
+            let fold_a = timed_step!("foldfixed(A)", foldfixed::fold_fixed_columns(&a_rows, &b, &lb, &ub, RowSense::Eq));
+            if fold_a.infeasible {
+                return extended_infeasible(sc, a, b, c, n);
+            }
+            a = csr_from_rows(&fold_a.rows, n);
+            b = fold_a.rhs;
         }
-        a = csr_from_rows(&fold_a.rows, n);
-        b = fold_a.rhs;
 
-        let fold_g = timed_step!("foldfixed(G)", foldfixed::fold_fixed_columns(&cur_real_rows, &cur_real_rhs, &lb, &ub, RowSense::Le));
-        if fold_g.infeasible {
-            return extended_infeasible(sc, a, b, c, n);
+        let g_noop = cur_real_rows.iter().all(|r| !r.is_empty() && r.iter().all(|&(j, v)| v != 0.0 && !is_fixed(j)));
+        if !g_noop {
+            let fold_g = timed_step!("foldfixed(G)", foldfixed::fold_fixed_columns(&cur_real_rows, &cur_real_rhs, &lb, &ub, RowSense::Le));
+            if fold_g.infeasible {
+                return extended_infeasible(sc, a, b, c, n);
+            }
+            cur_real_rows = fold_g.rows;
+            cur_real_rhs = fold_g.rhs;
         }
-        cur_real_rows = fold_g.rows;
-        cur_real_rhs = fold_g.rhs;
 
         // Inner fixpoint: rowsingleton -> colsingleton, up to `inner_rounds`
         // times within this same outer round (before `propagate`/`dualfix`
