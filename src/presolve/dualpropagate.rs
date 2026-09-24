@@ -249,13 +249,26 @@ pub fn run(n: usize, a: &Csr, real_g_rows: &[Vec<(usize, f64)>], c: &[f64], lb: 
     // `-mu_i <= 0` — folded in as a box row exactly like a variable's own
     // bound, per `build_a_g`'s convention. `A`-row duals get no such row
     // (free sign), matching `extract_bounds`'s "no row => infinite" rule.
-    for gi in 0..num_g {
-        t_rows.push(vec![(num_a + gi, -1.0)]);
-        t_h.push(0.0);
-    }
-
-    let t_g = csr_from_rows(&t_rows, num_duals);
-    let result = propagate::propagate(num_duals, &t_g, &t_h, passes);
+    //
+    // No column-derived row at all (no column with a literally infinite
+    // bound): the system is only those sign rows, which `propagate` would
+    // read straight back as the dual box (`-mu_i <= 0` -> `lb = 0.0 /
+    // -1.0`, everything else unbounded) without any propagation — built
+    // directly here instead of via the CSR build + `propagate` round trip.
+    let result = if t_rows.is_empty() {
+        let mut lb = vec![f64::NEG_INFINITY; num_duals];
+        for gi in 0..num_g {
+            lb[num_a + gi] = 0.0 / -1.0;
+        }
+        propagate::PropagateResult { g: csr_from_rows(&[], num_duals), h: Vec::new(), lb, ub: vec![f64::INFINITY; num_duals], real_rows: Vec::new(), real_rhs: Vec::new(), infeasible: false }
+    } else {
+        for gi in 0..num_g {
+            t_rows.push(vec![(num_a + gi, -1.0)]);
+            t_h.push(0.0);
+        }
+        let t_g = csr_from_rows(&t_rows, num_duals);
+        propagate::propagate(num_duals, &t_g, &t_h, passes)
+    };
     if result.infeasible {
         // A genuinely infeasible dual system here would mean the primal
         // is unbounded or infeasible outright — a real finding, but too
