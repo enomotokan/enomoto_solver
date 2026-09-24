@@ -413,10 +413,11 @@ const KERNEL_LINEAR_SCAN_MAX: usize = 16;
 /// *values* live row-major here and the index-only mirror is the column
 /// one:
 ///
-/// - `row_ent[row_start[i] .. row_start[i] + row_len[i]]` is row `i`'s
-///   live `(column, value)` run, **sorted ascending by column**.
-///   `row_cap[i]` is how much room that run has in place before it must
-///   be relocated to the end of `row_ent`.
+/// - `row_idx[row_start[i] .. row_start[i] + row_len[i]]` (columns, `u32`)
+///   and the same range of `row_val` (values) are row `i`'s live run,
+///   **sorted ascending by column**. `row_cap[i]` is how much room that
+///   run has in place before it must be relocated to the end of the row
+///   buffers.
 /// - `col_ent[col_start[j] .. col_start[j] + col_len[j]]` is column `j`'s
 ///   live row list — indices only (`u32`: two rows per cache line's worth
 ///   of what `usize` would cost, and the ascending-degree bucket scan in
@@ -439,7 +440,15 @@ const KERNEL_LINEAR_SCAN_MAX: usize = 16;
 /// counts, and hence what a before/after benchmark of *this* change is
 /// actually measuring.
 struct KernelMatrix {
-    row_ent: Vec<(usize, f64)>,
+    /// Row runs, structure-of-arrays: `row_idx` (column indices, `u32`)
+    /// and `row_val` (values) share one set of offsets. Splitting the
+    /// `(usize, f64)` pairs this held before means a column lookup
+    /// ([`Self::row_get`], run ~12M times per `pilot87` solve by
+    /// `find_best_pivot`'s lazy `col_max_abs` rescans) and the index side
+    /// of `eliminate`'s scatter loop stream 4 bytes per entry instead of
+    /// 16.
+    row_idx: Vec<u32>,
+    row_val: Vec<f64>,
     row_start: Vec<usize>,
     row_len: Vec<usize>,
     row_cap: Vec<usize>,
@@ -449,18 +458,35 @@ struct KernelMatrix {
     col_cap: Vec<usize>,
 }
 
+/// Position of `j` in the ascending run `idx`, if present. Short runs
+/// (the common case: Markowitz keeps active rows short) are scanned
+/// linearly with an early exit; longer ones binary-searched.
+#[inline]
+fn sorted_find(idx: &[u32], j: u32) -> Option<usize> {
+    if idx.len() <= tunable!("ENOMOTO_T_KERNEL_LINEAR_SCAN_MAX", KERNEL_LINEAR_SCAN_MAX, usize) {
+        for (p, &c) in idx.iter().enumerate() {
+            if c >= j {
+                return if c == j { Some(p) } else { None };
+            }
+        }
+        None
+    } else {
+        idx.binary_search(&j).ok()
+    }
+}
+
 impl KernelMatrix {
     fn new(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Self {
         assert!(m <= u32::MAX as usize, "kernel row index must fit in u32");
         assert_eq!(rows_in.len(), m, "kernel input must be square");
         let total: usize = rows_in.iter().map(|r| r.len()).sum();
         // Capacity, not length: the reserve is here so the relocations
-        // below (and `ensure_row_cap`'s own, later) stay `push`/`resize`
-        // inside one allocation instead of repeatedly reallocating and
-        // copying the whole buffer. Nothing is *initialized* beyond what
-        // is actually written — see the zero-slack note at `row_cap`
-        // below.
-        let mut row_ent: Vec<(usize, f64)> = Vec::with_capacity(2 * total + 64);
+        // (`ensure_row_cap`'s, later) stay `resize` inside one allocation
+        // instead of repeatedly reallocating and copying the whole
+        // buffer. Nothing is *initialized* beyond what is actually
+        // written — see the zero-slack note at `row_cap` below.
+        let mut row_idx: Vec<u32> = Vec::with_capacity(2 * total + 64);
+        let mut row_val: Vec<f64> = Vec::with_capacity(2 * total + 64);
         let mut row_start = Vec::with_capacity(m);
         let mut row_len = Vec::with_capacity(m);
         let mut row_cap = Vec::with_capacity(m);
@@ -475,7 +501,7 @@ impl KernelMatrix {
             // construction this replaces produced, summation order of
             // repeated coordinates included.
             buf.sort_by_key(|&(j, _)| j);
-            let start = row_ent.len();
+            let start = row_idx.len();
             let mut k = 0;
             while k < buf.len() {
                 let j = buf[k].0;
@@ -485,7 +511,8 @@ impl KernelMatrix {
                     k += 1;
                 }
                 if acc != 0.0 {
-                    row_ent.push((j, acc));
+                    row_idx.push(j as u32);
+                    row_val.push(acc);
                 }
             }
             // No up-front slack (`cap == len`): a row only ever needs to
@@ -500,7 +527,7 @@ impl KernelMatrix {
             // several times the size of the real data. `ensure_row_cap`
             // doubles from here, so a row that keeps taking fill still
             // relocates `O(log)` times, not once per insertion.
-            let len = row_ent.len() - start;
+            let len = row_idx.len() - start;
             row_start.push(start);
             row_len.push(len);
             row_cap.push(len);
@@ -509,11 +536,8 @@ impl KernelMatrix {
         // Column mirror by counting sort. Filling it with `i` ascending is
         // what makes every column's run sorted without a sort.
         let mut col_len = vec![0usize; m];
-        for i in 0..m {
-            let (s, l) = (row_start[i], row_len[i]);
-            for k in s..s + l {
-                col_len[row_ent[k].0] += 1;
-            }
+        for &j in &row_idx {
+            col_len[j as usize] += 1;
         }
         let mut col_start = vec![0usize; m];
         let mut pos = 0usize;
@@ -528,20 +552,22 @@ impl KernelMatrix {
         let mut fill = vec![0usize; m];
         for i in 0..m {
             let (s, l) = (row_start[i], row_len[i]);
-            for k in s..s + l {
-                let j = row_ent[k].0;
+            for &j in &row_idx[s..s + l] {
+                let j = j as usize;
                 col_ent[col_start[j] + fill[j]] = i as u32;
                 fill[j] += 1;
             }
         }
 
-        KernelMatrix { row_ent, row_start, row_len, row_cap, col_ent, col_start, col_len, col_cap }
+        KernelMatrix { row_idx, row_val, row_start, row_len, row_cap, col_ent, col_start, col_len, col_cap }
     }
 
+    /// Row `i`'s live run: (column indices ascending, values).
     #[inline]
-    fn row(&self, i: usize) -> &[(usize, f64)] {
+    fn row(&self, i: usize) -> (&[u32], &[f64]) {
         let s = self.row_start[i];
-        &self.row_ent[s..s + self.row_len[i]]
+        let e = s + self.row_len[i];
+        (&self.row_idx[s..e], &self.row_val[s..e])
     }
 
     #[inline]
@@ -554,27 +580,13 @@ impl KernelMatrix {
     /// the direct stand-in for `rows[i].get(&j)`.
     #[inline]
     fn row_get(&self, i: usize, j: usize) -> Option<f64> {
-        let row = self.row(i);
-        if row.len() <= tunable!("ENOMOTO_T_KERNEL_LINEAR_SCAN_MAX", KERNEL_LINEAR_SCAN_MAX, usize) {
-            for &(c, v) in row {
-                if c == j {
-                    return Some(v);
-                }
-                if c > j {
-                    return None;
-                }
-            }
-            None
-        } else {
-            match row.binary_search_by(|e| e.0.cmp(&j)) {
-                Ok(p) => Some(row[p].1),
-                Err(_) => None,
-            }
-        }
+        let s = self.row_start[i];
+        let e = s + self.row_len[i];
+        sorted_find(&self.row_idx[s..e], j as u32).map(|p| self.row_val[s + p])
     }
 
-    /// Relocates row `i`'s run to the end of `row_ent` if it cannot hold
-    /// `need` entries in place, doubling its capacity (so a row that
+    /// Relocates row `i`'s run to the end of the row buffers if it cannot
+    /// hold `need` entries in place, doubling its capacity (so a row that
     /// keeps taking fill-in relocates `O(log)` times, not once per
     /// insertion). The vacated run is left as dead space rather than
     /// compacted: total dead space is bounded by the live total, and a
@@ -585,22 +597,13 @@ impl KernelMatrix {
         }
         let new_cap = need.max(self.row_cap[i] * 2).max(4);
         let (old_start, len) = (self.row_start[i], self.row_len[i]);
-        let start = self.row_ent.len();
-        self.row_ent.resize(start + new_cap, (0, 0.0));
-        self.row_ent.copy_within(old_start..old_start + len, start);
+        let start = self.row_idx.len();
+        self.row_idx.resize(start + new_cap, 0);
+        self.row_val.resize(start + new_cap, 0.0);
+        self.row_idx.copy_within(old_start..old_start + len, start);
+        self.row_val.copy_within(old_start..old_start + len, start);
         self.row_start[i] = start;
         self.row_cap[i] = new_cap;
-    }
-
-    /// Overwrites row `i` with `ents` (which must already be sorted
-    /// ascending by column) — `eliminate` rebuilds a whole affected row
-    /// in one merge pass rather than poking at it entry by entry, so this
-    /// bulk form is the only row mutation the kernel needs.
-    fn set_row(&mut self, i: usize, ents: &[(usize, f64)]) {
-        self.ensure_row_cap(i, ents.len());
-        let s = self.row_start[i];
-        self.row_ent[s..s + ents.len()].copy_from_slice(ents);
-        self.row_len[i] = ents.len();
     }
 
     fn ensure_col_cap(&mut self, j: usize, need: usize) {
@@ -663,8 +666,13 @@ struct ElimScratch {
     /// Rows of the pivot column that still need eliminating (a copy: the
     /// column's own live list is mutated while they are processed).
     affected: Vec<usize>,
-    /// The merge output for the affected row currently being rewritten.
-    merged: Vec<(usize, f64)>,
+    /// The general merge's output for the affected row currently being
+    /// rewritten (fallback path only; see `eliminate`).
+    merged_idx: Vec<u32>,
+    merged_val: Vec<f64>,
+    /// The current affected row's fill-in, ascending by column.
+    fill_idx: Vec<u32>,
+    fill_val: Vec<f64>,
     /// Columns gaining / losing the current affected row, applied to the
     /// column mirror once the merge has released its borrow on the row.
     col_add: Vec<usize>,
@@ -673,41 +681,37 @@ struct ElimScratch {
     l_out: Vec<(usize, f64)>,
     /// Columns of the retiring pivot row, to drop it from.
     pi_cols: Vec<usize>,
-    /// Columns whose degree or values this step changed, deduplicated via
-    /// `mark`/`epoch` stamping (an `O(1)` membership test against the
-    /// `BTreeSet<usize>` this replaces) and sorted before use — see
-    /// `eliminate`'s own note on why the *order* matters.
-    touched: Vec<usize>,
-    mark: Vec<u32>,
-    epoch: u32,
+    /// The pivot row's active off-pivot values scattered by column
+    /// (`0.0` everywhere else — the pivot row never holds an exact zero,
+    /// so a nonzero here *is* membership). Cleared entry by entry at the
+    /// end of each step, so it stays all-zero between steps.
+    wval: Vec<f64>,
+    /// Per-affected-row stamps over columns, used only when a row takes
+    /// fill-in, to tell which pivot-row columns it already held.
+    rmark: Vec<u32>,
+    rstamp: u32,
 }
 
 impl ElimScratch {
     fn new(m: usize) -> Self {
-        ElimScratch { mark: vec![0; m], epoch: 0, ..Default::default() }
+        ElimScratch { wval: vec![0.0; m], rmark: vec![0; m], rstamp: 0, ..Default::default() }
     }
 
-    /// Starts a step: advances the stamp epoch, clearing the stamps
-    /// outright on the one call in ~4 billion that wraps back to `0`
-    /// (where a never-stamped entry's own `0` would read as "already
-    /// touched"). Same technique, and same wrap-around caveat, as
-    /// [`GpScratch::bump_epoch`].
     fn begin(&mut self) {
-        self.epoch = self.epoch.wrapping_add(1);
-        if self.epoch == 0 {
-            self.mark.iter_mut().for_each(|e| *e = 0);
-            self.epoch = 1;
-        }
-        self.touched.clear();
         self.l_out.clear();
     }
 
+    /// A fresh `rmark` stamp; clears the stamps outright on the one call
+    /// in ~4 billion that wraps back to `0` (same technique as
+    /// [`GpScratch::bump_epoch`]).
     #[inline]
-    fn touch(&mut self, j: usize) {
-        if self.mark[j] != self.epoch {
-            self.mark[j] = self.epoch;
-            self.touched.push(j);
+    fn next_rstamp(&mut self) -> u32 {
+        self.rstamp = self.rstamp.wrapping_add(1);
+        if self.rstamp == 0 {
+            self.rmark.iter_mut().for_each(|e| *e = 0);
+            self.rstamp = 1;
         }
+        self.rstamp
     }
 }
 
@@ -853,8 +857,9 @@ struct MarkowitzState {
     prof_limit: usize,
     prof_candidates: usize,
     prof_scan_ns: usize,
-    /// `ENOMOTO_LU_INPLACE_ELIM` (default on): `eliminate`'s in-place
-    /// fast path for affected rows that take no fill-in.
+    /// `ENOMOTO_LU_INPLACE_ELIM` (default on): `eliminate`'s scatter-based
+    /// in-place update; `0` takes the plain two-pointer merge for every
+    /// row (same factors, bit for bit).
     inplace_elim: bool,
 }
 
@@ -907,9 +912,10 @@ impl MarkowitzState {
         let mut col_max_abs = vec![0.0f64; m];
         let mut row_degree = vec![0usize; m];
         for i in 0..m {
-            let row = mat.row(i);
-            row_degree[i] = row.len();
-            for &(j, v) in row {
+            let (idx, val) = mat.row(i);
+            row_degree[i] = idx.len();
+            for (&j, &v) in idx.iter().zip(val) {
+                let j = j as usize;
                 col_max_abs[j] = col_max_abs[j].max(v.abs());
             }
         }
@@ -970,8 +976,9 @@ impl MarkowitzState {
     /// Row `i`'s live `(column, value)` entries, sorted ascending by
     /// column — the stand-in for iterating `rows[i]`, with the same order.
     #[inline]
-    fn row(&self, i: usize) -> &[(usize, f64)] {
-        self.mat.row(i)
+    fn row(&self, i: usize) -> impl Iterator<Item = (usize, f64)> + '_ {
+        let (idx, val) = self.mat.row(i);
+        idx.iter().zip(val).map(|(&j, &v)| (j as usize, v))
     }
 
     /// The value at `(i, j)`, or `None` — the stand-in for
@@ -1140,26 +1147,34 @@ impl MarkowitzState {
                 scan_from = self.col_buckets.len();
             }
         }
-        'scan: for deg_col in scan_from..self.col_buckets.len() {
-            // Indexed rather than iterated by reference: nothing in this
-            // loop body mutates `col_buckets[deg_col]` itself (bucket
-            // membership only ever changes via `update_col_degree`/
-            // `remove_from_bucket_col`, called elsewhere, never from
-            // inside `find_best_pivot`), so its length and contents are
-            // fixed for this `deg_col`'s scan — indexing just avoids
-            // holding an immutable borrow of `self` across the lazy
-            // `col_max_abs` recomputation below, which needs `&mut self`.
-            for idx in 0..self.col_buckets[deg_col].len() {
-                let j = self.col_buckets[deg_col][idx];
+        // Disjoint field borrows: the scan reads the buckets, the matrix
+        // and the degrees while the lazy `col_max_abs` recomputation
+        // below writes only `col_max_abs`/`col_max_abs_dirty`/`colval`, so
+        // the per-candidate lookups go through plain slices rather than
+        // re-indexing `self` (and re-checking bounds) for every entry.
+        let col_buckets = &self.col_buckets;
+        let mat = &self.mat;
+        let row_degree = &self.row_degree[..];
+        let col_degree = &self.col_degree[..];
+        let initially_dense = &self.initially_dense[..];
+        let threshold = self.threshold;
+        let search_limit = self.search_limit;
+        let lazy_colmax = self.lazy_colmax;
+        'scan: for deg_col in scan_from..col_buckets.len() {
+            // Bucket membership only ever changes via `update_col_degree`/
+            // `remove_from_bucket_col`, called elsewhere, never from inside
+            // `find_best_pivot`, so this bucket is fixed for the scan.
+            for &j in &col_buckets[deg_col] {
                 // Buckets never hold a used column: `factorize` removes
                 // the pivot column from its bucket in the same step it
                 // marks it used, and `update_col_degree` refuses to
                 // re-insert one.
                 debug_assert!(!self.col_used[j], "bucketed column must be active");
-                if skip_dense && self.initially_dense[j] {
+                if skip_dense && initially_dense[j] {
                     continue;
                 }
-                let col_deg = self.col_degree[j];
+                let col_deg = col_degree[j];
+                let cm1 = col_deg - 1;
                 searched += 1;
                 // `col_max_abs[j]` is only ever read to form `min_pivot`,
                 // and `min_pivot` is only ever read for an entry that has
@@ -1177,47 +1192,58 @@ impl MarkowitzState {
                 // `mc_min_pivot[j] = max_value * pivot_threshold`, §2.4),
                 // so every comparison — and hence the chosen pivot — is
                 // unchanged.
-                if !self.lazy_colmax {
-                    self.ensure_col_max_abs(j);
-                }
-                let mut min_pivot = if self.col_max_abs_dirty[j] { f64::NAN } else { self.threshold * self.col_max_abs[j] };
-                let mut cached = false;
-                let (cs, cl) = (self.mat.col_start[j], self.mat.col_len[j]);
-                for k in 0..cl {
-                    let i = self.mat.col_ent[cs + k] as usize;
-                    // The column mirror only ever holds active rows:
-                    // `eliminate` drops the retiring pivot row from every
-                    // column it touches and clears the pivot column.
-                    debug_assert!(!self.row_used[i], "column mirror holds only active rows");
-                    // Markowitz score only needs row/col degree, both already
-                    // known without touching the row's own run — skip the
-                    // value lookup below for candidates that can't possibly
-                    // beat `best_score` (this is the vast majority on a
-                    // matrix with heavy fill-in after many FT updates).
-                    let score = (self.row_degree[i] - 1) * (col_deg - 1);
-                    if score > best_score {
-                        continue;
+                if !lazy_colmax && self.col_max_abs_dirty[j] {
+                    let mut mx = 0.0f64;
+                    for &r in mat.col(j) {
+                        if let Some(v) = mat.row_get(r as usize, j) {
+                            mx = f64::max(mx, v.abs());
+                        }
                     }
+                    self.prof_colmax_rescan_entries += mat.col_len[j];
+                    self.col_max_abs[j] = mx;
+                    self.col_max_abs_dirty[j] = false;
+                }
+                let mut min_pivot = if self.col_max_abs_dirty[j] { f64::NAN } else { threshold * self.col_max_abs[j] };
+                let mut cached = false;
+                // The column mirror only ever holds active rows:
+                // `eliminate` drops the retiring pivot row from every
+                // column it touches and clears the pivot column.
+                let col = mat.col(j);
+                let mut k = 0usize;
+                while k < col.len() {
+                    // Markowitz score only needs row/col degree, both
+                    // already known without touching the row's own run —
+                    // skip the value lookup below for candidates that
+                    // can't possibly beat `best_score` (this is the vast
+                    // majority on a matrix with heavy fill-in).
+                    let bs = best_score;
+                    match col[k..].iter().position(|&r| (row_degree[r as usize] - 1) * cm1 <= bs) {
+                        Some(off) => k += off,
+                        None => break,
+                    }
+                    let i = col[k] as usize;
+                    debug_assert!(!self.row_used[i], "column mirror holds only active rows");
+                    let score = (row_degree[i] - 1) * cm1;
                     if min_pivot.is_nan() {
                         // First entry of a stale column to need the
                         // threshold: rescan, caching every value.
                         let mut mx = 0.0f64;
                         self.colval.clear();
-                        for kk in 0..cl {
-                            let r = self.mat.col_ent[cs + kk] as usize;
-                            let v = self.mat.row_get(r, j);
+                        for &r in col {
+                            let v = mat.row_get(r as usize, j);
                             if let Some(v) = v {
                                 mx = f64::max(mx, v.abs());
                             }
                             self.colval.push(v);
                         }
-                        self.prof_colmax_rescan_entries += cl;
+                        self.prof_colmax_rescan_entries += col.len();
                         self.col_max_abs[j] = mx;
                         self.col_max_abs_dirty[j] = false;
-                        min_pivot = self.threshold * mx;
+                        min_pivot = threshold * mx;
                         cached = true;
                     }
-                    let v = if cached { self.colval[k] } else { self.mat.row_get(i, j) };
+                    let v = if cached { self.colval[k] } else { mat.row_get(i, j) };
+                    k += 1;
                     let Some(v) = v else { continue };
                     if v == 0.0 || v.abs() < min_pivot {
                         continue;
@@ -1237,7 +1263,7 @@ impl MarkowitzState {
                 // than cutting one short mid-way: the `best` a truncated
                 // column produced would otherwise depend on `col_rows`'
                 // iteration order in a way the unbounded scan's doesn't.
-                if self.search_limit != 0 && searched >= self.search_limit && best.is_some() {
+                if search_limit != 0 && searched >= search_limit && best.is_some() {
                     exit = 1;
                     break 'scan;
                 }
@@ -1286,7 +1312,7 @@ impl MarkowitzState {
         let cap = if self.search_limit == 0 { n } else { n.min(self.search_limit) };
         for idx in 0..cap {
             let i = self.row_buckets[1][idx];
-            let (j, v) = self.mat.row(i)[0];
+            let (j, v) = self.row(i).next().unwrap();
             if (skip_dense && self.initially_dense[j]) || v == 0.0 {
                 continue;
             }
@@ -1325,6 +1351,27 @@ impl MarkowitzState {
     /// written one. That is `docs/lu_comparison_enomoto_vs_highs.md`
     /// §3.1's point (HiGHS's `mc_*`/`mr_*` flat arrays against this
     /// crate's tree nodes) applied to the one loop where it matters most.
+    ///
+    /// The common path works HiGHS-style off a dense scatter of the pivot
+    /// row (`ElimScratch::wval`) instead of a two-pointer merge: every
+    /// entry of the affected row does `v - mult * wval[j]` (exactly `v`
+    /// for a column outside the pivot row, since `mult` is finite and
+    /// `v != 0`), compacting out the pivot column and exact cancellations
+    /// as it goes, with no data-dependent branch per entry — the merge
+    /// mispredicted on nearly every interleaving of the two patterns.
+    /// Only a row that holds fewer pivot-row columns than the pivot row
+    /// has (it takes fill-in) needs a second look, which merges the
+    /// (sorted) fill list into the row from the back, in place. Values,
+    /// row order and every degree/bucket update are exactly the merge's,
+    /// so the factorization is bit-identical; `ENOMOTO_LU_INPLACE_ELIM=0`
+    /// (or a non-finite multiplier) takes the plain merge instead.
+    ///
+    /// No per-entry column "touched" bookkeeping: every column whose
+    /// degree or values this step can change is a column of the pivot row
+    /// (an update or a fill-in lands only there), and the pivot row is
+    /// retired from all of those columns below anyway, so refreshing the
+    /// pivot row's columns in ascending order is exactly the sorted,
+    /// deduplicated touched set the per-entry stamping used to build.
     fn eliminate(&mut self, pi: usize, pj: usize, pivot_val: f64, pivot_row_snapshot: &[(usize, f64)]) {
         let mut sc = std::mem::take(&mut self.scratch);
         sc.begin();
@@ -1332,187 +1379,236 @@ impl MarkowitzState {
         sc.affected.clear();
         sc.affected.extend(self.mat.col(pj).iter().map(|&r| r as usize).filter(|&i| i != pi));
 
+        // Scatter the pivot row's active off-pivot entries.
+        let mut p_act = 0usize;
+        for &(j, v) in pivot_row_snapshot {
+            if j != pj {
+                sc.wval[j] = v;
+                p_act += 1;
+            }
+        }
         for ai in 0..sc.affected.len() {
             let i = sc.affected[ai];
-            let Some(aij) = self.mat.row_get(i, pj) else { continue };
+            let s0 = self.mat.row_start[i];
+            let len = self.mat.row_len[i];
+            let Some(p0) = sorted_find(&self.mat.row_idx[s0..s0 + len], pj as u32) else { continue };
+            let aij = self.mat.row_val[s0 + p0];
             if aij == 0.0 {
                 continue;
             }
             let mult = aij / pivot_val;
             sc.l_out.push((i, mult));
 
-            sc.merged.clear();
             sc.col_add.clear();
             sc.col_del.clear();
-            let row_len_before = self.mat.row_len[i];
-            // Optimistic in-place pass: update the row's own run directly,
-            // compacting over the pivot column's entry (and any exact
-            // cancellation) as it goes. Only a fill-in needs the run to
-            // *grow*, which cannot be done in place front-to-back; the
-            // first one hands the already-final prefix `[0, w)` plus the
-            // untouched remainder `[a, len)` to the general merge below.
-            // Most affected rows take no fill at all (`pilot87`: 68%), and
-            // for those this saves writing the whole row into `merged`
-            // and copying it back. Same entries, same values, same order
-            // and same `touch`/`col_del` calls as the merge, so the
-            // factorization is bit-identical.
-            let (mut a, mut b, mut w) = (0usize, 0usize, 0usize);
-            let mut spilled = false;
-            if self.inplace_elim {
-                let s0 = self.mat.row_start[i];
-                let ents = &mut self.mat.row_ent[s0..s0 + row_len_before];
-                let plen = pivot_row_snapshot.len();
-                while a < row_len_before && b < plen {
-                    let (ja, va) = ents[a];
-                    let (jb, vb) = pivot_row_snapshot[b];
-                    if ja < jb {
-                        if w != a {
-                            ents[w] = (ja, va);
-                        }
-                        w += 1;
-                        a += 1;
-                    } else if jb < ja {
-                        if jb != pj && -mult * vb != 0.0 {
-                            spilled = true;
-                            break;
-                        }
-                        b += 1;
-                    } else {
-                        if ja != pj {
-                            let new_val = va - mult * vb;
-                            if new_val == 0.0 {
-                                sc.col_del.push(ja);
-                            } else {
-                                ents[w] = (ja, new_val);
-                                w += 1;
-                            }
-                            sc.touch(ja);
-                        }
-                        a += 1;
-                        b += 1;
-                    }
+            let new_len = if self.inplace_elim && mult.is_finite() {
+                // Update every entry in place: `v - mult * wval[j]` is the
+                // elimination for a pivot-row column and exactly `v` for
+                // any other (`wval[pj]` is `0.0`, so the pivot column's
+                // own entry is left alone too, and dropped just below).
+                // Branch-free, no compaction, no per-entry bookkeeping.
+                let idx = &self.mat.row_idx[s0..s0 + len];
+                let val = &mut self.mat.row_val[s0..s0 + len];
+                let wval = &sc.wval[..];
+                let mut found = 0usize;
+                let mut zeros = 0usize;
+                debug_assert!(idx.iter().all(|&j| (j as usize) < wval.len()));
+                for (v, &j) in val.iter_mut().zip(idx) {
+                    // SAFETY: every column index in the kernel is `< m`
+                    // (`KernelMatrix::new` asserts the input is square and
+                    // fill-in only copies pivot-row columns), and `wval`
+                    // has length `m`.
+                    let pv = unsafe { *wval.get_unchecked(j as usize) };
+                    found += (pv != 0.0) as usize;
+                    let nv = *v - mult * pv;
+                    *v = nv;
+                    zeros += (nv == 0.0) as usize;
                 }
-                if !spilled {
-                    while b < plen {
-                        let (jb, vb) = pivot_row_snapshot[b];
-                        if jb != pj && -mult * vb != 0.0 {
-                            spilled = true;
-                            break;
-                        }
-                        b += 1;
-                    }
-                }
-                if !spilled {
-                    if w != a {
-                        ents.copy_within(a..row_len_before, w);
-                    }
-                    w += row_len_before - a;
+                // Drop the pivot column's entry (and, rarely, exact
+                // cancellations), keeping the run's order.
+                let w = if zeros == 0 {
+                    self.mat.row_idx.copy_within(s0 + p0 + 1..s0 + len, s0 + p0);
+                    self.mat.row_val.copy_within(s0 + p0 + 1..s0 + len, s0 + p0);
+                    len - 1
                 } else {
-                    sc.merged.extend_from_slice(&ents[..w]);
-                }
-            } else {
-                spilled = true;
-            }
-            if spilled {
-                let row = self.mat.row(i);
-                while a < row.len() && b < pivot_row_snapshot.len() {
-                    let (ja, va) = row[a];
-                    let (jb, vb) = pivot_row_snapshot[b];
-                    if ja < jb {
-                        // Only in this row — including every column
-                        // already used as a pivot, which the snapshot
-                        // filters out and which must survive untouched.
-                        sc.merged.push((ja, va));
-                        a += 1;
-                    } else if jb < ja {
-                        // Fill-in.
-                        if jb != pj {
-                            let new_val = -mult * vb;
-                            if new_val != 0.0 {
-                                sc.merged.push((jb, new_val));
-                                sc.col_add.push(jb);
-                                sc.touch(jb);
-                            }
+                    // A cancelled entry was a pivot-row column this row
+                    // held; it leaves the row and the column mirror (in
+                    // ascending column order, as the merge did).
+                    let mut w = 0usize;
+                    for a in 0..len {
+                        let (j, v) = (self.mat.row_idx[s0 + a], self.mat.row_val[s0 + a]);
+                        if a == p0 {
+                            continue;
                         }
-                        b += 1;
-                    } else {
-                        if ja == pj {
-                            // The pivot column's own entry leaves this
-                            // row; its mirror is retired wholesale by the
-                            // `col_clear(pj)` below, so no `col_del` and
-                            // no `touch` here — exactly what the
-                            // `rows[i].remove(&pj)` this replaces did.
-                        } else {
-                            let new_val = va - mult * vb;
-                            if new_val == 0.0 {
-                                sc.col_del.push(ja);
-                            } else {
-                                sc.merged.push((ja, new_val));
-                            }
-                            sc.touch(ja);
+                        if v == 0.0 {
+                            sc.col_del.push(j as usize);
+                            continue;
                         }
-                        a += 1;
-                        b += 1;
+                        self.mat.row_idx[s0 + w] = j;
+                        self.mat.row_val[s0 + w] = v;
+                        w += 1;
                     }
-                }
-                while a < row.len() {
-                    sc.merged.push(row[a]);
-                    a += 1;
-                }
-                while b < pivot_row_snapshot.len() {
-                    let (jb, vb) = pivot_row_snapshot[b];
-                    if jb != pj {
-                        let new_val = -mult * vb;
-                        if new_val != 0.0 {
-                            sc.merged.push((jb, new_val));
-                            sc.col_add.push(jb);
-                            sc.touch(jb);
-                        }
-                    }
-                    b += 1;
-                }
-            }
-
-            let new_deg_i = if spilled {
-                self.mat.set_row(i, &sc.merged);
-                sc.merged.len()
-            } else {
+                    w
+                };
                 self.mat.row_len[i] = w;
-                w
+                if found == p_act {
+                    w
+                } else {
+                    // Fill-in: the pivot-row columns this row did not
+                    // hold (a cancelled entry was held, so it counts).
+                    let stamp = sc.next_rstamp();
+                    for &j in &self.mat.row_idx[s0..s0 + w] {
+                        sc.rmark[j as usize] = stamp;
+                    }
+                    for &j in &sc.col_del {
+                        sc.rmark[j] = stamp;
+                    }
+                    sc.fill_idx.clear();
+                    sc.fill_val.clear();
+                    for &(jb, vb) in pivot_row_snapshot {
+                        if jb != pj && sc.rmark[jb] != stamp {
+                            let nv = -mult * vb;
+                            if nv != 0.0 {
+                                sc.fill_idx.push(jb as u32);
+                                sc.fill_val.push(nv);
+                                sc.col_add.push(jb);
+                            }
+                        }
+                    }
+                    let nf = sc.fill_idx.len();
+                    if nf > 0 {
+                        self.mat.ensure_row_cap(i, w + nf);
+                        let s = self.mat.row_start[i];
+                        let idx = &mut self.mat.row_idx[s..s + w + nf];
+                        let val = &mut self.mat.row_val[s..s + w + nf];
+                        // Insert the fill-ins from the last one back: each
+                        // finds its slot in the not-yet-moved prefix by
+                        // binary search, and the block after that slot moves
+                        // up in one `copy_within` — every entry moves at
+                        // most once, as in a backward merge, but in bulk.
+                        let mut a = w;
+                        for f in (0..nf).rev() {
+                            let fj = sc.fill_idx[f];
+                            let pos = idx[..a].partition_point(|&c| c < fj);
+                            idx.copy_within(pos..a, pos + f + 1);
+                            val.copy_within(pos..a, pos + f + 1);
+                            idx[pos + f] = fj;
+                            val[pos + f] = sc.fill_val[f];
+                            a = pos;
+                        }
+                        self.mat.row_len[i] = w + nf;
+                    }
+                    w + nf
+                }
+            } else {
+                self.merge_row(&mut sc, i, pj, mult, pivot_row_snapshot)
             };
+
             for k in 0..sc.col_del.len() {
                 self.mat.col_remove(sc.col_del[k], i);
             }
             for k in 0..sc.col_add.len() {
                 self.mat.col_insert(sc.col_add[k], i);
             }
-            self.update_row_degree(i, new_deg_i);
+            self.update_row_degree(i, new_len);
+        }
+        for &(j, _) in pivot_row_snapshot {
+            sc.wval[j] = 0.0;
         }
         self.mat.col_clear(pj);
 
         // Row pi is retiring as the new pivot row; drop it from every
         // other column it still touches so those columns' degrees don't
-        // keep counting an inactive row.
+        // keep counting an inactive row, then refresh those columns'
+        // degree/bucket placement in ascending column order. The order is
+        // observable: `refresh_column` appends to a degree bucket, and
+        // `find_best_pivot` scans those buckets in stored order and breaks
+        // exact ties by first-encountered. The row run is ascending, so
+        // no sort is needed.
         sc.pi_cols.clear();
-        sc.pi_cols.extend(self.mat.row(pi).iter().map(|&(j, _)| j).filter(|&j| j != pj));
+        {
+            let (idx, _) = self.mat.row(pi);
+            sc.pi_cols.extend(idx.iter().map(|&j| j as usize).filter(|&j| j != pj));
+        }
         for k in 0..sc.pi_cols.len() {
             let j = sc.pi_cols[k];
             self.mat.col_remove(j, pi);
-            sc.touch(j);
-        }
-
-        // Sorted, not merely deduplicated: `refresh_column` appends to a
-        // degree bucket, and `find_best_pivot` scans those buckets in
-        // stored order and breaks exact ties by first-encountered, so the
-        // refresh order is observable in which pivot gets chosen. The
-        // `BTreeSet` this replaced delivered ascending order; sorting the
-        // stamped `Vec` reproduces it for strictly less work.
-        sc.touched.sort_unstable();
-        for k in 0..sc.touched.len() {
-            self.refresh_column(sc.touched[k]);
+            self.refresh_column(j);
         }
 
         self.scratch = sc;
+    }
+
+    /// The plain two-pointer merge of row `i` against the pivot row — the
+    /// reference form of `eliminate`'s scatter loop, kept for
+    /// `ENOMOTO_LU_INPLACE_ELIM=0` and for a non-finite multiplier (where
+    /// `v - mult * 0.0` would not be `v`). Returns the new row length.
+    fn merge_row(&mut self, sc: &mut ElimScratch, i: usize, pj: usize, mult: f64, pivot_row_snapshot: &[(usize, f64)]) -> usize {
+        sc.merged_idx.clear();
+        sc.merged_val.clear();
+        let (idx, val) = self.mat.row(i);
+        let (mut a, mut b) = (0usize, 0usize);
+        while a < idx.len() && b < pivot_row_snapshot.len() {
+            let (ja, va) = (idx[a] as usize, val[a]);
+            let (jb, vb) = pivot_row_snapshot[b];
+            if ja < jb {
+                // Only in this row — including every column already used
+                // as a pivot, which the snapshot filters out and which
+                // must survive untouched.
+                sc.merged_idx.push(ja as u32);
+                sc.merged_val.push(va);
+                a += 1;
+            } else if jb < ja {
+                // Fill-in.
+                if jb != pj {
+                    let new_val = -mult * vb;
+                    if new_val != 0.0 {
+                        sc.merged_idx.push(jb as u32);
+                        sc.merged_val.push(new_val);
+                        sc.col_add.push(jb);
+                    }
+                }
+                b += 1;
+            } else {
+                // The pivot column's own entry leaves this row; its
+                // mirror is retired wholesale by `col_clear(pj)`.
+                if ja != pj {
+                    let new_val = va - mult * vb;
+                    if new_val == 0.0 {
+                        sc.col_del.push(ja);
+                    } else {
+                        sc.merged_idx.push(ja as u32);
+                        sc.merged_val.push(new_val);
+                    }
+                }
+                a += 1;
+                b += 1;
+            }
+        }
+        while a < idx.len() {
+            sc.merged_idx.push(idx[a]);
+            sc.merged_val.push(val[a]);
+            a += 1;
+        }
+        while b < pivot_row_snapshot.len() {
+            let (jb, vb) = pivot_row_snapshot[b];
+            if jb != pj {
+                let new_val = -mult * vb;
+                if new_val != 0.0 {
+                    sc.merged_idx.push(jb as u32);
+                    sc.merged_val.push(new_val);
+                    sc.col_add.push(jb);
+                }
+            }
+            b += 1;
+        }
+        let n = sc.merged_idx.len();
+        self.mat.ensure_row_cap(i, n);
+        let s = self.mat.row_start[i];
+        self.mat.row_idx[s..s + n].copy_from_slice(&sc.merged_idx);
+        self.mat.row_val[s..s + n].copy_from_slice(&sc.merged_val);
+        self.mat.row_len[i] = n;
+        n
     }
 }
 
@@ -2529,7 +2625,7 @@ fn factorize_flat_markowitz_routed(m: usize, rows_in: &[Vec<(usize, f64)>], dens
     for step in 0..m {
         if dense_switch > 0.0 && step % 16 == 0 && m - step >= dense_switch_min {
             let k = m - step;
-            let active: usize = (0..m).filter(|&i| !state.row_used[i]).map(|i| state.row(i).len()).sum();
+            let active: usize = (0..m).filter(|&i| !state.row_used[i]).map(|i| state.mat.row_len[i]).sum();
             if active as f64 >= dense_switch * (k as f64) * (k as f64) {
                 let rows_r: Vec<usize> = (0..m).filter(|&i| !state.row_used[i]).collect();
                 let cols_c: Vec<usize> = (0..m).filter(|&j| !state.col_used[j]).collect();
@@ -2541,7 +2637,7 @@ fn factorize_flat_markowitz_routed(m: usize, rows_in: &[Vec<(usize, f64)>], dens
                 }
                 let sub: Vec<Vec<(usize, f64)>> = rows_r
                     .iter()
-                    .map(|&i| state.row(i).iter().filter(|&&(j, v)| v != 0.0 && col_local[j] != usize::MAX).map(|&(j, v)| (col_local[j], v)).collect())
+                    .map(|&i| state.row(i).filter(|&(j, v)| v != 0.0 && col_local[j] != usize::MAX).map(|(j, v)| (col_local[j], v)).collect())
                     .collect();
                 let dlu = factorize_dense_faer(k, &sub)?;
                 for s in 0..k {
@@ -2589,7 +2685,7 @@ fn factorize_flat_markowitz_routed(m: usize, rows_in: &[Vec<(usize, f64)>], dens
         // One buffer for the whole factorization, not a fresh `Vec` per
         // elimination step.
         pivot_row_snapshot.clear();
-        pivot_row_snapshot.extend(state.row(pi).iter().copied().filter(|&(j, v)| v != 0.0 && (j == pj || !state.col_used[j])));
+        pivot_row_snapshot.extend(state.row(pi).filter(|&(j, v)| v != 0.0 && (j == pj || !state.col_used[j])));
         if let Some(t0) = __t_snap0 {
             snapshot_ns += t0.elapsed().as_nanos();
         }
@@ -2751,7 +2847,7 @@ fn factorize_bordered(m: usize, rows_in: &[Vec<(usize, f64)>], border: &[usize])
         // One buffer for the whole factorization, not a fresh `Vec` per
         // elimination step.
         pivot_row_snapshot.clear();
-        pivot_row_snapshot.extend(state.row(pi).iter().copied().filter(|&(j, v)| v != 0.0 && (j == pj || !state.col_used[j])));
+        pivot_row_snapshot.extend(state.row(pi).filter(|&(j, v)| v != 0.0 && (j == pj || !state.col_used[j])));
         for &(j, v) in &pivot_row_snapshot {
             u_entries.push((step, j, v));
         }
