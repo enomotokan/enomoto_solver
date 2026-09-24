@@ -4216,6 +4216,10 @@ const TICK_BUILD_M_COEF: u64 = 80;
 /// the same scale, which double-counts the same "our factorization is
 /// slower" fact the factor calibration already absorbs once.
 const TICK_BUILD_LU_COEF: u64 = 60;
+/// Per-multiply-add coefficient of the elimination flop term in
+/// [`FtLu::build_tick`] (S16, `ENOMOTO_T_TICK_BUILD_FLOP_COEF`). `0` (the
+/// default) leaves `build_tick` exactly the HiGHS-shaped `m`/`nnz(L+U)` sum.
+const TICK_BUILD_FLOP_COEF: u64 = 0;
 /// Per-nonzero coefficient applied to every solve-stage tick increment
 /// (`R`-eta nonzeros touched, `U`/`U^T`-eta nonzeros touched, `L`-stage
 /// reach-set size) — kept at `1` (i.e. `tick` is a plain nonzero count,
@@ -4252,7 +4256,19 @@ impl FtLu {
         // (`HFactor.cpp`'s `buildFinish`), which likewise counts only
         // off-diagonal `U` nonzeros.
         let u_off: u64 = base.u_row.iter().map(|v| v.len().saturating_sub(1) as u64).sum();
-        let build_tick = TICK_BUILD_M_COEF * m as u64 + tunable!("ENOMOTO_T_TICK_BUILD_LU_COEF", TICK_BUILD_LU_COEF, u64) * (l_nnz + u_off);
+        let mut build_tick = tunable!("ENOMOTO_T_TICK_BUILD_M_COEF", TICK_BUILD_M_COEF, u64) * m as u64 + tunable!("ENOMOTO_T_TICK_BUILD_LU_COEF", TICK_BUILD_LU_COEF, u64) * (l_nnz + u_off);
+        // S16 (default off): the elimination's own multiply-add count,
+        // `Σ_s |L col s| · |U row s off-diagonal|` — each step `s` updates
+        // one entry per (L entry, U entry) pair of its pivot column/row, so
+        // this is the classical LU flop count recovered from the finished
+        // factors. Unlike `nnz(L+U)` it grows quadratically with the dense
+        // tail's size, which is where this crate's Markowitz refactor time
+        // concentrates (`dfl001`).
+        let flop_coef = tunable!("ENOMOTO_T_TICK_BUILD_FLOP_COEF", TICK_BUILD_FLOP_COEF, u64);
+        if flop_coef > 0 {
+            let flops: u64 = (0..m).map(|s| base.l_col.col(s).len() as u64 * owner_count[s] as u64).sum();
+            build_tick += flop_coef * flops;
+        }
         // `u_off` above excludes `U`'s diagonals; the fill baseline counts
         // every stored entry, matching what `factorize_reusing_order`
         // counts as it goes.
