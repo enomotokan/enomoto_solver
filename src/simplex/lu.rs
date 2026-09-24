@@ -3001,7 +3001,33 @@ impl LuFactors {
             z[s] = v;
             scratch.seeds.push(s);
         }
+        self.l_solve_gp_seeded(z, scratch);
+    }
 
+    /// [`Self::l_solve_into`] for a dense `rhs` whose nonzero *steps*
+    /// (`s` with `rhs[row_perm[s]] != 0.0`) are already known: `steps` must
+    /// list exactly those steps (any order). Clears `z` itself (no
+    /// precondition on its content) and runs the Gilbert-Peierls reach-set
+    /// elimination of [`Self::l_solve_sparse_into`]. Every step outside the
+    /// reach set is exactly zero in [`Self::l_solve_into`] too (skipped by
+    /// its own zero test), and the reach set is visited in ascending step
+    /// order, so the result is bit-identical to `l_solve_into` up to the
+    /// sign of zero entries.
+    fn l_solve_steps_into(&self, rhs: &[f64], steps: &[usize], z: &mut [f64], scratch: &mut GpScratch) {
+        z.fill(0.0);
+        scratch.seeds.clear();
+        for &s in steps {
+            let v = rhs[self.row_perm[s]];
+            debug_assert!(v != 0.0);
+            z[s] = v;
+            scratch.seeds.push(s);
+        }
+        self.l_solve_gp_seeded(z, scratch);
+    }
+
+    /// The DFS + ascending elimination shared by the two GP entry points
+    /// above; `scratch.seeds` and `z` at the seeds are already set.
+    fn l_solve_gp_seeded(&self, z: &mut [f64], scratch: &mut GpScratch) {
         scratch.visited.begin();
         scratch.reach.clear();
         for i in 0..scratch.seeds.len() {
@@ -3081,7 +3107,15 @@ impl LuFactors {
     /// scatter form's own unit tests check against) — see
     /// [`Self::l_transpose_solve_scatter_into`], which is what every
     /// production BTRAN actually calls.
+    #[cfg_attr(not(test), allow(dead_code))]
     fn l_transpose_solve_gather_into(&self, w: &mut [f64], y: &mut [f64]) {
+        self.l_transpose_gather_core(w);
+        permute_btran_out(&self.row_perm, w, y);
+    }
+
+    /// [`Self::l_transpose_solve_gather_into`] without the final permutation.
+    #[inline]
+    fn l_transpose_gather_core(&self, w: &mut [f64]) {
         let m = self.m;
         for s in (0..m).rev() {
             for &(row_step, mult) in self.l_col.col(s) {
@@ -3091,7 +3125,6 @@ impl LuFactors {
                 w[s] -= mult * w[row_step];
             }
         }
-        permute_btran_out(&self.row_perm, w, y);
     }
 
     /// [`Self::l_transpose_solve_gather_into`]'s own triangular solve, read
@@ -3127,7 +3160,15 @@ impl LuFactors {
     /// tie-breaks, shift iteration counts either way on degeneracy-heavy
     /// instances. That is measured, not assumed — see this change's own
     /// analysis note for the per-problem numbers.
+    #[cfg_attr(not(test), allow(dead_code))]
     fn l_transpose_solve_scatter_into(&self, w: &mut [f64], y: &mut [f64]) {
+        self.l_transpose_scatter_core(w);
+        permute_btran_out(&self.row_perm, w, y);
+    }
+
+    /// [`Self::l_transpose_solve_scatter_into`] without the final permutation.
+    #[inline]
+    fn l_transpose_scatter_core(&self, w: &mut [f64]) {
         let m = self.m;
         for s in (0..m).rev() {
             let ws = w[s];
@@ -3138,7 +3179,6 @@ impl LuFactors {
                 w[k] -= mult * ws;
             }
         }
-        permute_btran_out(&self.row_perm, w, y);
     }
 
     /// Solves `B x = rhs` using the factors (`P_row B P_col = LU`).
@@ -3426,6 +3466,74 @@ fn permute_btran_out(row_perm: &[usize], w: &[f64], y: &mut [f64]) {
             y[row_perm[s]] = v;
         }
     }
+}
+
+/// Nonzero *steps* of a BTRAN result, recorded by
+/// [`FtLu::solve_transpose_unit_capture_steps`] during its final
+/// permutation (free: the loop already visits every entry) and consumed by
+/// the next fused DSE `tau` FTRAN of the same vector
+/// ([`FtLu::solve_into_pair_capture`] and friends), whose `L` stage then runs
+/// the Gilbert-Peierls reach-set path instead of the dense permute + scan.
+/// Because BTRAN's output permutation (`y[row_perm[s]] = w[s]`) is exactly
+/// the inverse of FTRAN's `L`-stage input permutation (`z[s] =
+/// rhs[row_perm[s]]`), the recorded steps are directly the `L`-stage seeds.
+///
+/// Only a sparse result is recorded: once more than `limit_frac * m`
+/// nonzeros have been seen the capture is abandoned (`valid = false`) and
+/// the FTRAN takes its dense `L` stage as before. The result is bit-identical
+/// either way (up to the sign of zeros), so the gate is a pure speed choice.
+/// A capture is consumed (invalidated) by the first FTRAN that reads it, so
+/// a stale list can never be applied to a different vector.
+pub struct StepCapture {
+    steps: Vec<usize>,
+    valid: bool,
+    limit_frac: f64,
+    gp: GpScratch,
+}
+
+impl StepCapture {
+    pub fn new(m: usize) -> Self {
+        StepCapture {
+            steps: Vec::new(),
+            valid: false,
+            limit_frac: tunable!("ENOMOTO_T_TAU_GP_FRACTION", 0.1, f64),
+            gp: GpScratch::new(m),
+        }
+    }
+
+    /// Takes the capture for one FTRAN: `Some(steps, gp)` when valid.
+    #[inline]
+    fn take(cap: Option<&mut StepCapture>) -> Option<&mut StepCapture> {
+        match cap {
+            Some(c) if c.valid => {
+                c.valid = false;
+                Some(c)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// [`permute_btran_out`] that also records `w`'s nonzero steps into `cap`
+/// (see [`StepCapture`]).
+#[inline]
+fn permute_btran_out_capture(row_perm: &[usize], w: &[f64], y: &mut [f64], cap: &mut StepCapture) {
+    let tiny = tiny_drop();
+    let limit = (cap.limit_frac * w.len() as f64) as usize;
+    cap.steps.clear();
+    let mut over = false;
+    for (s, &v) in w.iter().enumerate() {
+        let v = if tiny > 0.0 && v.abs() < tiny { 0.0 } else { v };
+        y[row_perm[s]] = v;
+        if v != 0.0 && !over {
+            if cap.steps.len() < limit {
+                cap.steps.push(s);
+            } else {
+                over = true;
+            }
+        }
+    }
+    cap.valid = !over;
 }
 
 fn btran_l_scatter_gate() -> f64 {
@@ -3799,6 +3907,12 @@ impl FtLu {
     /// form otherwise — see [`BTRAN_L_SCATTER_FRACTION`] for why both
     /// forms have to stay.
     fn l_transpose_solve_into(&self, w: &mut [f64], y: &mut [f64]) {
+        self.l_transpose_solve_into_cap(w, y, None)
+    }
+
+    /// [`Self::l_transpose_solve_into`], optionally recording the result's
+    /// nonzero steps (see [`StepCapture`]).
+    fn l_transpose_solve_into_cap(&self, w: &mut [f64], y: &mut [f64], cap: Option<&mut StepCapture>) {
         let limit = (self.btran_l_scatter * self.base.m as f64) as usize;
         let mut nnz = 0usize;
         let mut sparse = true;
@@ -3811,10 +3925,14 @@ impl FtLu {
         }
         if sparse {
             PROF_BTRAN_L_SCATTER.fetch_add(1, Ordering::Relaxed);
-            self.base.l_transpose_solve_scatter_into(w, y);
+            self.base.l_transpose_scatter_core(w);
         } else {
             PROF_BTRAN_L_GATHER.fetch_add(1, Ordering::Relaxed);
-            self.base.l_transpose_solve_gather_into(w, y);
+            self.base.l_transpose_gather_core(w);
+        }
+        match cap {
+            Some(c) => permute_btran_out_capture(&self.base.row_perm, w, y, c),
+            None => permute_btran_out(&self.base.row_perm, w, y),
         }
     }
 
@@ -4135,7 +4253,9 @@ impl FtLu {
         out_a: &mut [f64],
         out_b: &mut [f64],
         a_tilde_out: &mut [f64],
+        rho_cap: Option<&mut StepCapture>,
     ) -> (usize, usize) {
+        let rho_cap = StepCapture::take(rho_cap);
         if !self.u_zero_skip {
             let na = self.solve_into_capture(rhs_a, scratch_a, out_a, a_tilde_out);
             let nb = self.solve_into(rhs_b, scratch_b, out_b);
@@ -4143,8 +4263,14 @@ impl FtLu {
         }
         let m = self.base.m as u64;
         // `L` stage (+ `ftran_through_l_and_r_into`'s own flat `m` tick,
-        // once per vector).
-        self.base.l_solve_into_pair(rhs_a, rhs_b, scratch_a, scratch_b);
+        // once per vector — also when `rhs_b`'s `L` stage takes the GP path,
+        // so the CLOCK trigger is unchanged).
+        if let Some(c) = rho_cap {
+            self.base.l_solve_into(rhs_a, scratch_a);
+            self.base.l_solve_steps_into(rhs_b, &c.steps, scratch_b, &mut c.gp);
+        } else {
+            self.base.l_solve_into_pair(rhs_a, rhs_b, scratch_a, scratch_b);
+        }
         self.add_tick(2 * m);
         let (na, nb) = self.pair_r_u_permute(scratch_a, scratch_b, out_a, out_b, a_tilde_out);
         (na, nb)
@@ -4168,7 +4294,9 @@ impl FtLu {
         out_a: &mut [f64],
         out_b: &mut [f64],
         a_tilde_out: &mut [f64],
+        rho_cap: Option<&mut StepCapture>,
     ) -> (usize, usize) {
+        let rho_cap = StepCapture::take(rho_cap);
         if !self.u_zero_skip {
             let na = self.solve_sparse_into_capture(rhs_a, scratch_a, gp, out_a, a_tilde_out);
             let nb = self.solve_into(rhs_b, scratch_b, out_b);
@@ -4176,7 +4304,10 @@ impl FtLu {
         }
         self.base.l_solve_sparse_into(rhs_a, scratch_a, gp);
         self.add_tick(gp.reach.len() as u64);
-        self.base.l_solve_into(rhs_b, scratch_b);
+        match rho_cap {
+            Some(c) => self.base.l_solve_steps_into(rhs_b, &c.steps, scratch_b, &mut c.gp),
+            None => self.base.l_solve_into(rhs_b, scratch_b),
+        }
         self.add_tick(self.base.m as u64);
         let (na, nb) = self.pair_r_u_permute(scratch_a, scratch_b, out_a, out_b, a_tilde_out);
         scratch_a.fill(0.0);
@@ -4202,7 +4333,9 @@ impl FtLu {
         out_b: &mut [f64],
         out_c: &mut [f64],
         a_tilde_out: &mut [f64],
+        rho_cap: Option<&mut StepCapture>,
     ) -> (usize, usize, usize) {
+        let rho_cap = StepCapture::take(rho_cap);
         if !self.u_zero_skip {
             let na = self.solve_into_capture(rhs_a, scratch_a, out_a, a_tilde_out);
             let nb = self.solve_into(rhs_b, scratch_b, out_b);
@@ -4210,7 +4343,12 @@ impl FtLu {
             return (na, nb, nc);
         }
         let m = self.base.m as u64;
-        self.base.l_solve_into_triple(rhs_a, rhs_b, rhs_c, scratch_a, scratch_b, scratch_c);
+        if let Some(c) = rho_cap {
+            self.base.l_solve_into_pair(rhs_a, rhs_c, scratch_a, scratch_c);
+            self.base.l_solve_steps_into(rhs_b, &c.steps, scratch_b, &mut c.gp);
+        } else {
+            self.base.l_solve_into_triple(rhs_a, rhs_b, rhs_c, scratch_a, scratch_b, scratch_c);
+        }
         self.add_tick(3 * m);
         self.triple_r_u_permute(scratch_a, scratch_b, scratch_c, out_a, out_b, out_c, a_tilde_out)
     }
@@ -4232,7 +4370,9 @@ impl FtLu {
         out_b: &mut [f64],
         out_c: &mut [f64],
         a_tilde_out: &mut [f64],
+        rho_cap: Option<&mut StepCapture>,
     ) -> (usize, usize, usize) {
+        let rho_cap = StepCapture::take(rho_cap);
         if !self.u_zero_skip {
             let na = self.solve_sparse_into_capture(rhs_a, scratch_a, gp, out_a, a_tilde_out);
             let nb = self.solve_into(rhs_b, scratch_b, out_b);
@@ -4241,7 +4381,12 @@ impl FtLu {
         }
         self.base.l_solve_sparse_into(rhs_a, scratch_a, gp);
         self.add_tick(gp.reach.len() as u64);
-        self.base.l_solve_into_pair(rhs_b, rhs_c, scratch_b, scratch_c);
+        if let Some(c) = rho_cap {
+            self.base.l_solve_into(rhs_c, scratch_c);
+            self.base.l_solve_steps_into(rhs_b, &c.steps, scratch_b, &mut c.gp);
+        } else {
+            self.base.l_solve_into_pair(rhs_b, rhs_c, scratch_b, scratch_c);
+        }
         self.add_tick(2 * self.base.m as u64);
         let r = self.triple_r_u_permute(scratch_a, scratch_b, scratch_c, out_a, out_b, out_c, a_tilde_out);
         scratch_a.fill(0.0);
@@ -4523,6 +4668,11 @@ impl FtLu {
     /// then `L^{-T}` back into original row indexing.
     #[inline]
     fn btran_tail(&self, scratch: &mut [f64], out: &mut [f64]) {
+        self.btran_tail_cap(scratch, out, None)
+    }
+
+    #[inline]
+    fn btran_tail_cap(&self, scratch: &mut [f64], out: &mut [f64], cap: Option<&mut StepCapture>) {
         // Hyper-sparse: same skip as `u_solve_into`/`l_solve_into` — `yp`
         // is the only value each `r_eta`'s entries get multiplied by here.
         for reta in self.r_etas.iter().rev() {
@@ -4537,7 +4687,7 @@ impl FtLu {
         // is a dense `O(m)` reverse scan regardless of fill (see that
         // method's own docs for why sparsifying it wasn't worth trying).
         self.add_tick(self.base.m as u64);
-        self.l_transpose_solve_into(scratch, out);
+        self.l_transpose_solve_into_cap(scratch, out, cap);
     }
 
     /// [`Self::solve_transpose_into`] for `rhs = e_i`, the shape every
@@ -4558,10 +4708,17 @@ impl FtLu {
     /// [`Self::solve_transpose_unit`] plus [`Self::solve_transpose_into_capture`]'s
     /// own `e_tilde` capture.
     pub fn solve_transpose_unit_capture(&self, i: usize, scratch: &mut [f64], out: &mut [f64], e_tilde_out: &mut [f64]) {
+        self.solve_transpose_unit_capture_steps(i, scratch, out, e_tilde_out, None)
+    }
+
+    /// [`Self::solve_transpose_unit_capture`] that additionally records
+    /// `out`'s nonzero steps into `cap` for the fused `tau` FTRAN that
+    /// follows (see [`StepCapture`]). `out` itself is bit-identical.
+    pub fn solve_transpose_unit_capture_steps(&self, i: usize, scratch: &mut [f64], out: &mut [f64], e_tilde_out: &mut [f64], cap: Option<&mut StepCapture>) {
         let s0 = self.seed_unit_rhs(i, scratch);
         self.u_transpose_solve_seeded(scratch, s0);
         e_tilde_out.copy_from_slice(scratch);
-        self.btran_tail(scratch, out);
+        self.btran_tail_cap(scratch, out, cap);
     }
 
     /// Same as [`Self::solve_transpose_into`], but additionally captures
@@ -6091,7 +6248,7 @@ mod tests {
                     let (mut pa, mut pb) = (vec![0.0; m], vec![0.0; m]);
                     let (mut qa, mut qb, mut qt) = (vec![0.0; m], vec![0.0; m], vec![0.0; m]);
                     let t0 = state.synth_tick();
-                    let (pna, pnb) = state.solve_into_pair_capture(&a, &b, &mut pa, &mut pb, &mut qa, &mut qb, &mut qt);
+                    let (pna, pnb) = state.solve_into_pair_capture(&a, &b, &mut pa, &mut pb, &mut qa, &mut qb, &mut qt, None);
                     assert_eq!(state.synth_tick() - t0, sep_cost, "seed={seed} round={round} v={variant}: dense pair tick");
                     assert_eq!((pna, pnb), (na, nb));
                     assert_eq!(qa, oa, "seed={seed} round={round} v={variant}: dense pair a");
@@ -6109,7 +6266,7 @@ mod tests {
                     let sep_cost = state.synth_tick() - t0;
                     let (mut xa, mut xb, mut xt) = (vec![0.0; m], vec![0.0; m], vec![0.0; m]);
                     let t0 = state.synth_tick();
-                    let (xna, xnb) = state.solve_sparse_into_pair_capture(&a_sp, &b, &mut zs, &mut gp, &mut pb, &mut xa, &mut xb, &mut xt);
+                    let (xna, xnb) = state.solve_sparse_into_pair_capture(&a_sp, &b, &mut zs, &mut gp, &mut pb, &mut xa, &mut xb, &mut xt, None);
                     assert_eq!(state.synth_tick() - t0, sep_cost, "seed={seed} round={round} v={variant}: sparse pair tick");
                     assert_eq!((xna, xnb), (rna, rnb));
                     assert_eq!(xa, ra, "seed={seed} round={round} v={variant}: sparse pair a");
