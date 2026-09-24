@@ -1626,7 +1626,8 @@ impl CsrRowBuilder {
     /// A row with a single `(j, v)` entry (`v != 0`, `j < n_cols`), e.g.
     /// a bound row — no allocation, no checks needed beyond these.
     pub(crate) fn push_singleton(&mut self, j: usize, v: f64) {
-        debug_assert!(v != 0.0 && j < self.n_cols);
+        debug_assert!(v != 0.0);
+        assert!(j < self.n_cols, "column out of range");
         self.col_ind.push(j);
         self.values.push(v);
         self.row_ptr.push(self.col_ind.len());
@@ -1634,7 +1635,22 @@ impl CsrRowBuilder {
 
     pub(crate) fn finish(self) -> Csr {
         let nrows = self.row_ptr.len() - 1;
-        let symbolic = faer::sparse::SymbolicSparseRowMat::new_checked(nrows, self.n_cols, self.row_ptr, None, self.col_ind);
+        // Every row went through `push_row` (columns in range, strictly
+        // increasing — duplicates are rejected) or `push_singleton` (one
+        // in-range column), and `row_ptr` is monotone by construction, so
+        // faer's `new_checked` re-validation (a second pass over every
+        // column index; ~4% of a small LP's `solve()` under callgrind)
+        // would only re-prove this. Still checked in debug builds.
+        debug_assert!(self.row_ptr.windows(2).all(|w| w[0] <= w[1]) && *self.row_ptr.last().unwrap() == self.col_ind.len());
+        debug_assert!((0..nrows).all(|i| {
+            let r = &self.col_ind[self.row_ptr[i]..self.row_ptr[i + 1]];
+            r.iter().all(|&j| j < self.n_cols) && r.windows(2).all(|w| w[0] < w[1])
+        }));
+        // SAFETY: the invariants `new_checked` asserts (monotone row
+        // pointers ending at `col_ind.len()`, in-range and strictly
+        // increasing column indices within each row) hold by construction,
+        // see above.
+        let symbolic = unsafe { faer::sparse::SymbolicSparseRowMat::new_unchecked(nrows, self.n_cols, self.row_ptr, None, self.col_ind) };
         Csr::new(symbolic, self.values)
     }
 }
@@ -1649,6 +1665,17 @@ impl CsrRowBuilder {
 pub fn csr_row_iter(mat: &Csr, i: usize) -> impl Iterator<Item = (usize, f64)> + '_ {
     let r = mat.as_ref();
     r.col_indices_of_row(i).zip(r.values_of_row(i)).map(|(j, &v)| (j, v))
+}
+
+/// `iter.collect::<Vec<_>>()` with the capacity reserved up front
+/// (`cap` is an upper bound on the item count, e.g. the length of the
+/// slice a `filter` runs over) — a filtered iterator has no exact size
+/// hint, so a plain `collect` grows the vector step by step.
+#[inline]
+pub fn collect_with_capacity<T>(cap: usize, iter: impl Iterator<Item = T>) -> Vec<T> {
+    let mut v = Vec::with_capacity(cap);
+    v.extend(iter);
+    v
 }
 
 /// Row `i` of a faer [`Csr`] as an owned `(column, value)` list.
