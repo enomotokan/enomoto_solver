@@ -526,8 +526,25 @@ pub fn run_extended(
     let mut prev_signature: Option<(usize, usize, Vec<f64>, Vec<f64>)> = None;
     let mut prev_struct: Option<(usize, usize, usize, usize)> = None;
     let mut eqprop_idle = false;
+    // Bounds kept apart from `G` (analysis/presolve_pipeline_20260924 C13):
+    // whenever `G` would just be `rebuild_g_ref(cur_real_rows, cur_real_rhs,
+    // lb, ub)` of a canonical split (`propagate::split_is_canonical`), the
+    // CSR is not built — `g_split` is set, `g`/`h` are stale, and every
+    // reader of `G` below takes the split form instead (`GView::Split`,
+    // `reduce_inequality_rows`, `propagate_split`), which by construction
+    // decides exactly what it would on the materialized matrix. Between
+    // rounds the split travels in `carry`. `ENOMOTO_T_PRESOLVE_SPLIT_G=0`
+    // always materializes (the previous behaviour, for A/B).
+    let split_enabled = tunable!("ENOMOTO_T_PRESOLVE_SPLIT_G", 1, usize) != 0;
+    let mut carry: Option<(Vec<Vec<(usize, f64)>>, Vec<f64>, Vec<f64>, Vec<f64>)> = None;
     for _round_idx in 0..rounds.max(1) {
-        let prop = timed_step!("propagate", propagate::propagate_nog(n, &g, &h, prop_passes));
+        let prop = timed_step!(
+            "propagate",
+            match carry.take() {
+                Some((rows, rhs, clb, cub)) => propagate::propagate_split(n, clb, cub, rows, rhs, prop_passes),
+                None => propagate::propagate_nog(n, &g, &h, prop_passes),
+            }
+        );
         if prop.infeasible {
             return extended_infeasible(sc, a, b, c, n);
         }
@@ -541,6 +558,32 @@ pub fn run_extended(
         // made in an earlier inner pass (see the inner loop's own docs).
         let mut cur_real_rows = prop.real_rows;
         let mut cur_real_rhs = prop.real_rhs;
+        // See `carry` above: `true` while `G` is held only as the split
+        // `(cur_real_rows, cur_real_rhs, lb, ub)`.
+        let mut g_split = false;
+        // `G := rebuild_g_ref(cur_real_rows, cur_real_rhs, lb, ub)`, kept
+        // split when that is exact.
+        macro_rules! set_g_from_split {
+            ($label:expr) => {
+                if split_enabled && propagate::split_is_canonical(n, &cur_real_rows, &lb, &ub) {
+                    g_split = true;
+                } else {
+                    let (ng, nh) = timed_step!($label, propagate::rebuild_g_ref(n, &cur_real_rows, &cur_real_rhs, &lb, &ub));
+                    g = ng;
+                    h = nh;
+                    g_split = false;
+                }
+            };
+        }
+        macro_rules! g_view {
+            () => {
+                if g_split {
+                    propagate::GView::Split { rows: &cur_real_rows, rhs: &cur_real_rhs, lb: &lb, ub: &ub }
+                } else {
+                    propagate::GView::Mat { g: &g, h: &h }
+                }
+            };
+        }
 
         // Equality-row counterpart of the `propagate` call above (see
         // `propagate::propagate_equalities`'s own docs). Run for the first
@@ -764,17 +807,16 @@ pub fn run_extended(
             a = rs.a;
             b = rs.b;
 
-            let (ng, nh) = timed_step!("rebuild_g(inner)", propagate::rebuild_g_ref(n, &cur_real_rows, &cur_real_rhs, &lb, &ub));
-            g = ng;
-            h = nh;
+            set_g_from_split!("rebuild_g(inner)");
             // Whether `(g, h)` is still exactly `rebuild_g_ref(cur_real_rows,
             // cur_real_rhs, lb, ub)` — see the `extract_bounds(inner)` skip
             // below.
             let mut g_is_rebuilt = true;
 
             if _inner == 0 && doubleton_active {
-                let dbl = timed_step!("doubleton", doubleton::eliminate_doubleton_equalities(n, &a, &b, &g, &h, &c));
-                if dbl.substitutions.is_empty() {
+                // `None`: nothing to do, every input stands as it is.
+                let dbl = timed_step!("doubleton", doubleton::eliminate_doubleton_equalities_view(n, &a, &b, g_view!(), &c));
+                if dbl.as_ref().is_none_or(|d| d.substitutions.is_empty()) {
                     doubleton_empty_streak += 1;
                     if doubleton_empty_streak >= tunable!("ENOMOTO_T_DOUBLETON_STRIKES", 1, usize) {
                         doubleton_active = false;
@@ -782,32 +824,33 @@ pub fn run_extended(
                 } else {
                     doubleton_empty_streak = 0;
                 }
-                if !dbl.unchanged {
+                if let Some(dbl) = dbl {
                     g_is_rebuilt = false;
+                    g_split = false;
+                    a = dbl.a;
+                    b = dbl.b;
+                    g = dbl.g;
+                    h = dbl.h;
+                    c = dbl.c;
+                    // Pin every newly eliminated variable's bounds to `[0, 0]`
+                    // *now*, not deferred to this function's own end-of-run
+                    // fix-up (see that fix-up's own docs for the general reason):
+                    // this inner loop's own next iteration calls `rebuild_g`
+                    // again with these same `lb`/`ub`, and `rebuild_g` emits a
+                    // box row for *every* variable with a finite bound with no
+                    // notion of "already eliminated" — leaving a substituted
+                    // variable's original bounds live would reintroduce it as a
+                    // free column for that next `rowsingleton`/`colsingleton`
+                    // pass to see and (incorrectly) act on again.
+                    for sub in &dbl.substitutions {
+                        lb[sub.var] = 0.0;
+                        ub[sub.var] = 0.0;
+                    }
+                    postsolve_log.extend(dbl.substitutions.into_iter().map(PostsolveStep::Sub));
                 }
-                a = dbl.a;
-                b = dbl.b;
-                g = dbl.g;
-                h = dbl.h;
-                c = dbl.c;
-                // Pin every newly eliminated variable's bounds to `[0, 0]`
-                // *now*, not deferred to this function's own end-of-run
-                // fix-up (see that fix-up's own docs for the general reason):
-                // this inner loop's own next iteration calls `rebuild_g`
-                // again with these same `lb`/`ub`, and `rebuild_g` emits a
-                // box row for *every* variable with a finite bound with no
-                // notion of "already eliminated" — leaving a substituted
-                // variable's original bounds live would reintroduce it as a
-                // free column for that next `rowsingleton`/`colsingleton`
-                // pass to see and (incorrectly) act on again.
-                for sub in &dbl.substitutions {
-                    lb[sub.var] = 0.0;
-                    ub[sub.var] = 0.0;
-                }
-                postsolve_log.extend(dbl.substitutions.into_iter().map(PostsolveStep::Sub));
             }
 
-            let cs = timed_step!("colsingleton", colsingleton::eliminate_singleton_equalities(n, &a, &b, &g, &h, &c));
+            let cs = timed_step!("colsingleton", colsingleton::eliminate_singleton_equalities_view(n, &a, &b, g_view!(), &c));
             let cs_unchanged = cs.substitutions.is_empty();
             a = cs.a;
             b = cs.b;
@@ -830,6 +873,14 @@ pub fn run_extended(
                 // degrees of freedom, instead of the single value its own
                 // substitution now fully determines.
                 let eliminated_this_pass: std::collections::BTreeSet<usize> = cs.substitutions.iter().map(|s| s.var).collect();
+                // The row surgery below works on the materialized `G`
+                // (built from the bounds *before* this pass's pinning).
+                if g_split {
+                    let (ng, nh) = timed_step!("rebuild_g(cs)", propagate::rebuild_g_ref(n, &cur_real_rows, &cur_real_rhs, &lb, &ub));
+                    g = ng;
+                    h = nh;
+                    g_split = false;
+                }
                 // Same reason as `dbl.substitutions` above: pin now, not
                 // deferred, so this inner loop's next `rebuild_g` call
                 // sees these variables as fixed rather than reintroducing
@@ -856,7 +907,7 @@ pub fn run_extended(
             }
             postsolve_log.extend(cs.substitutions.into_iter().map(PostsolveStep::Sub));
 
-            let inner_signature = (a.nrows(), g.nrows());
+            let inner_signature = (a.nrows(), g_view!().nrows());
             if inner_prev_signature == Some(inner_signature) {
                 break;
             }
@@ -883,7 +934,7 @@ pub fn run_extended(
             // entry, strictly ascending columns, no stored zero) — then
             // `extract_bounds` would hand back `lb`/`ub` and the real rows
             // and rhs bit for bit.
-            let round_trip = g_is_rebuilt && cs_unchanged && cur_real_rows.iter().all(|r| r.len() != 1 && r.iter().all(|&(_, v)| v != 0.0) && r.windows(2).all(|w| w[0].0 < w[1].0));
+            let round_trip = g_split || g_is_rebuilt && cs_unchanged && cur_real_rows.iter().all(|r| r.len() != 1 && r.iter().all(|&(_, v)| v != 0.0) && r.windows(2).all(|w| w[0].0 < w[1].0));
             if !round_trip {
                 let (refreshed_lb, refreshed_ub, refreshed_real_rows, refreshed_real_rhs) = timed_step!("extract_bounds(inner)", propagate::extract_bounds(n, &g, &h));
                 for j in 0..n {
@@ -995,9 +1046,7 @@ pub fn run_extended(
                 // — same reason `doubleton`/`colsingleton` above must do
                 // this (via the inner loop's own `rebuild_g` call) before
                 // anything downstream reads `g`.
-                let (ng, nh) = timed_step!("rebuild_g(agg)", propagate::rebuild_g_ref(n, &cur_real_rows, &cur_real_rhs, &lb, &ub));
-                g = ng;
-                h = nh;
+                set_g_from_split!("rebuild_g(agg)");
             }
         }
 
@@ -1080,9 +1129,7 @@ pub fn run_extended(
                 // mid-round dedup call and the next round's `propagate`
                 // must see this pass's own row/bound changes, not a stale
                 // `g`/`h`.
-                let (ng, nh) = timed_step!("rebuild_g(pc)", propagate::rebuild_g_ref(n, &cur_real_rows, &cur_real_rhs, &lb, &ub));
-                g = ng;
-                h = nh;
+                set_g_from_split!("rebuild_g(pc)");
             } else {
                 parallelcols_empty_streak += 1;
                 if parallelcols_empty_streak >= tunable!("ENOMOTO_T_PARALLELCOLS_STRIKES", 2, usize) {
@@ -1131,9 +1178,18 @@ pub fn run_extended(
         // instances' real size reduction and the wasted-work-avoided
         // argument above, not for any aggregate speedup this measurement
         // actually showed.
-        let (rg, rh) = timed_step!("reduce_inequalities(round)", redundancy::reduce_inequalities(&g, &h, n));
-        g = rg;
-        h = rh;
+        if g_split {
+            if let Some(keep) = timed_step!("reduce_inequalities(round)", redundancy::reduce_inequality_rows(&cur_real_rows, &cur_real_rhs)) {
+                let mut k = keep.iter();
+                cur_real_rows.retain(|_| *k.next().unwrap());
+                let mut k = keep.iter();
+                cur_real_rhs.retain(|_| *k.next().unwrap());
+            }
+        } else {
+            let (rg, rh) = timed_step!("reduce_inequalities(round)", redundancy::reduce_inequalities(&g, &h, n));
+            g = rg;
+            h = rh;
+        }
 
         // `ENOMOTO_T_ROUND_STRUCT_STOP=1` (default 0 = off): stop as soon as
         // a whole round left the structure unchanged — `A`'s row count,
@@ -1142,18 +1198,29 @@ pub fn run_extended(
         // Unlike the signature check below this ignores bound values, so a
         // round that only keeps shaving bounds (geometric convergence) ends
         // the loop after one such idle round instead of running to the cap.
-        if tunable!("ENOMOTO_T_ROUND_STRUCT_STOP", 0, usize) != 0 {
-            let gr = g.as_ref();
-            let g_multi = (0..gr.nrows()).filter(|&i| gr.col_indices_of_row_raw(i).len() > 1).count();
+        let struct_stop = if tunable!("ENOMOTO_T_ROUND_STRUCT_STOP", 0, usize) != 0 {
+            let g_multi = if g_split {
+                cur_real_rows.len()
+            } else {
+                let gr = g.as_ref();
+                (0..gr.nrows()).filter(|&i| gr.col_indices_of_row_raw(i).len() > 1).count()
+            };
             let fixed = (0..n).filter(|&j| lb[j] == ub[j]).count();
             let st = (a.nrows(), g_multi, fixed, postsolve_log.len());
-            if prev_struct == Some(st) {
-                break;
-            }
+            let stop = prev_struct == Some(st);
             prev_struct = Some(st);
-        }
+            stop
+        } else {
+            false
+        };
 
-        let signature = (a.nrows(), g.nrows(), lb.clone(), ub.clone());
+        let signature = (a.nrows(), g_view!().nrows(), lb.clone(), ub.clone());
+        if g_split {
+            carry = Some((cur_real_rows, cur_real_rhs, lb, ub));
+        }
+        if struct_stop {
+            break;
+        }
         // Bound changes below a relative 1e-3 do not count as progress
         // (`ENOMOTO_FIXPOINT_EXACT` restores the exact comparison):
         // propagation over a cyclic row structure — which the aggregator's
@@ -1180,13 +1247,22 @@ pub fn run_extended(
         // elimination cost is paid on the reduced system only. Current
         // bounds feed only the block decomposition's negligible-edge filter
         // (see `reduce_equalities`' docs).
-        let (cur_lb, cur_ub) = propagate::extract_bounds_only(n, &g, &h);
+        let (cur_lb, cur_ub) = match &carry {
+            Some((_, _, clb, cub)) => (clb.clone(), cub.clone()),
+            None => propagate::extract_bounds_only(n, &g, &h),
+        };
         let (na, nb) = timed_step!("reduce_equalities(post)", redundancy::reduce_equalities(&a, &b, n, &cur_lb, &cur_ub));
         a = na;
         b = nb;
     }
 
-    let prop = timed_step!("final propagate", propagate::propagate_nog(n, &g, &h, prop_passes));
+    let prop = timed_step!(
+        "final propagate",
+        match carry.take() {
+            Some((rows, rhs, clb, cub)) => propagate::propagate_split(n, clb, cub, rows, rhs, prop_passes),
+            None => propagate::propagate_nog(n, &g, &h, prop_passes),
+        }
+    );
     if profile {
         eprintln!("PROF_PRESOLVE total {:.3}ms", __wall_t0.elapsed().as_secs_f64() * 1e3);
     }

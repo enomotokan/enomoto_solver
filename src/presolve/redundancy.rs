@@ -1095,6 +1095,64 @@ mod tests {
         }
     }
 
+    /// On a canonical split `G`, `reduce_inequality_rows` must keep exactly
+    /// the real rows `reduce_inequalities` keeps on the materialized matrix,
+    /// and every bound row must survive.
+    #[test]
+    fn reduce_inequality_rows_matches_materialized_g() {
+        let mut state: u64 = 0x0bad_cafe_1234_5678;
+        let mut rnd = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut dropped_any = 0;
+        for trial in 0..300 {
+            let n = 5 + (trial % 4);
+            let mut rows: Vec<Vec<(usize, f64)>> = Vec::new();
+            let mut rhs: Vec<f64> = Vec::new();
+            let base = 2 + (rnd() % 5) as usize;
+            for _ in 0..base {
+                let mut row: Vec<(usize, f64)> = Vec::new();
+                while row.len() < 2 + (rnd() % 2) as usize {
+                    let j = (rnd() % n as u64) as usize;
+                    if row.iter().all(|&(k, _)| k != j) {
+                        row.push((j, ((rnd() % 7) as f64 - 3.0) * 0.5 + 0.25));
+                    }
+                }
+                row.sort_by_key(|&(j, _)| j);
+                rows.push(row);
+                rhs.push((rnd() % 11) as f64 - 5.0);
+            }
+            for _ in 0..base {
+                let src = (rnd() % base as u64) as usize;
+                let f = [1.0, 2.0, 0.5, 3.0, -1.0, 1.0 / 3.0][(rnd() % 6) as usize];
+                rows.push(rows[src].iter().map(|&(j, v)| (j, v * f)).collect());
+                rhs.push(rhs[src] * f + ((rnd() % 3) as f64 - 1.0));
+            }
+            let lb: Vec<f64> = (0..n).map(|_| [f64::NEG_INFINITY, 0.0, -1.0][(rnd() % 3) as usize]).collect();
+            let ub: Vec<f64> = (0..n).map(|_| [f64::INFINITY, 2.0, 5.0][(rnd() % 3) as usize]).collect();
+            assert!(crate::presolve::propagate::split_is_canonical(n, &rows, &lb, &ub));
+            let (g, h) = crate::presolve::propagate::rebuild_g_ref(n, &rows, &rhs, &lb, &ub);
+            let (g_mat, h_mat) = reduce_inequalities(&g, &h, n);
+            let keep = reduce_inequality_rows(&rows, &rhs);
+            if keep.is_some() {
+                dropped_any += 1;
+            }
+            let kept: Vec<usize> = (0..rows.len()).filter(|&i| keep.as_ref().is_none_or(|k| k[i])).collect();
+            let kept_rows: Vec<Vec<(usize, f64)>> = kept.iter().map(|&i| rows[i].clone()).collect();
+            let kept_rhs: Vec<f64> = kept.iter().map(|&i| rhs[i]).collect();
+            let (g_split, h_split) = crate::presolve::propagate::rebuild_g_ref(n, &kept_rows, &kept_rhs, &lb, &ub);
+            assert_eq!(g_split.as_ref().row_ptrs(), g_mat.as_ref().row_ptrs(), "trial {trial}");
+            assert_eq!(g_split.as_ref().col_indices(), g_mat.as_ref().col_indices(), "trial {trial}");
+            let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+            assert_eq!(bits(g_split.as_ref().values()), bits(g_mat.as_ref().values()), "trial {trial}");
+            assert_eq!(bits(&h_split), bits(&h_mat), "trial {trial}");
+        }
+        assert!(dropped_any > 50, "only {dropped_any} trials dropped a row");
+    }
+
     /// `dedupe_rows` (on-the-fly u64 hash + chain) must keep exactly the
     /// rows the `HashSet<Vec<_>>` reference keeps, in the same order.
     #[test]
@@ -1558,6 +1616,74 @@ pub fn reduce_inequalities(g: &Csr, h: &[f64], n: usize) -> (Csr, Vec<f64>) {
         }
     }
     (builder.finish(), kept_rows.iter().map(|&i| h[i]).collect())
+}
+
+/// [`reduce_inequalities`] on a split `G` (`propagate::GView::Split`:
+/// `rows` are the canonical multi-entry real rows, followed in `G` by one
+/// unit bound row per finite bound). Bound rows never share a class with
+/// each other (one `(j, +1)` and one `(j, -1)` row per column at most) nor
+/// with a multi-entry row, so none of them is ever dropped and the
+/// decisions among `rows` are exactly the ones [`reduce_inequalities`]
+/// makes on the materialized `G`. Returns the keep mask over `rows`, or
+/// `None` when nothing is dropped.
+pub fn reduce_inequality_rows(rows: &[Vec<(usize, f64)>], rhs: &[f64]) -> Option<Vec<bool>> {
+    #[inline]
+    fn mix(hash: u64, x: u64) -> u64 {
+        (hash.rotate_left(5) ^ x).wrapping_mul(0x517c_c1b7_2722_0a95)
+    }
+    struct Class {
+        rep: usize,
+        rep_inv: f64,
+        kept_idx: usize,
+        kept_h: f64,
+        next: usize,
+    }
+    let m = rows.len();
+    let mut heads: HashMap<u64, usize, std::hash::BuildHasherDefault<IdentityU64Hasher>> = HashMap::with_capacity_and_hasher(m, Default::default());
+    let mut classes: Vec<Class> = Vec::with_capacity(m);
+    let mut keep: Option<Vec<bool>> = None;
+    for (idx, row) in rows.iter().enumerate() {
+        debug_assert!(row.len() >= 2);
+        let inv = 1.0 / row[0].1.abs();
+        let mut hash = row.len() as u64;
+        for &(j, v) in row {
+            hash = mix(mix(hash, j as u64), (v * inv).to_bits());
+        }
+        let normalized_h = rhs[idx] * inv;
+        let same_sig = |c: &Class| -> bool {
+            let rep = &rows[c.rep];
+            rep.len() == row.len() && rep.iter().zip(row).all(|(&(rj, rv), &(j, v))| rj == j && (rv * c.rep_inv).to_bits() == (v * inv).to_bits())
+        };
+        let head = heads.get(&hash).copied();
+        let mut found: Option<usize> = None;
+        let mut cur = head.unwrap_or(usize::MAX);
+        while cur != usize::MAX {
+            if same_sig(&classes[cur]) {
+                found = Some(cur);
+                break;
+            }
+            cur = classes[cur].next;
+        }
+        match found {
+            None => {
+                let id = classes.len();
+                classes.push(Class { rep: idx, rep_inv: inv, kept_idx: idx, kept_h: normalized_h, next: head.unwrap_or(usize::MAX) });
+                heads.insert(hash, id);
+            }
+            Some(ci) => {
+                let keep = keep.get_or_insert_with(|| vec![true; m]);
+                let c = &mut classes[ci];
+                if normalized_h < c.kept_h {
+                    keep[c.kept_idx] = false;
+                    c.kept_idx = idx;
+                    c.kept_h = normalized_h;
+                } else {
+                    keep[idx] = false;
+                }
+            }
+        }
+    }
+    keep
 }
 
 /// Pass-through hasher for keys that already are well-mixed 64-bit hashes.

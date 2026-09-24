@@ -356,6 +356,53 @@ pub fn propagate_split(n: usize, mut lb: Vec<f64>, mut ub: Vec<f64>, mut rows: V
     PropagateSplit { lb, ub, real_rows: rows, real_rhs: rhs, infeasible: false }
 }
 
+/// `G x <= h` as a pass reads it: either a materialized CSR, or the split
+/// form `(rows, rhs, lb, ub)` standing for exactly
+/// `rebuild_g_ref(rows, rhs, lb, ub)` — only used when
+/// [`split_is_canonical`] holds, so that `extract_bounds` of that matrix
+/// would hand back `lb`/`ub`/`rows`/`rhs` themselves, bit for bit, and a
+/// pass can read the split form directly instead of building the CSR (the
+/// "bounds as rows" round trip, analysis/presolve_pipeline_20260924 C13).
+#[derive(Clone, Copy)]
+pub enum GView<'a> {
+    Mat { g: &'a Csr, h: &'a [f64] },
+    Split { rows: &'a [Vec<(usize, f64)>], rhs: &'a [f64], lb: &'a [f64], ub: &'a [f64] },
+}
+
+impl GView<'_> {
+    /// Row count of the matrix this view stands for.
+    pub fn nrows(&self) -> usize {
+        match *self {
+            GView::Mat { g, .. } => g.nrows(),
+            GView::Split { rows, lb, ub, .. } => rows.len() + lb.iter().filter(|v| v.is_finite()).count() + ub.iter().filter(|v| v.is_finite()).count(),
+        }
+    }
+
+    /// `extract_bounds_only` of the matrix this view stands for.
+    pub fn bounds(&self, n: usize) -> (std::borrow::Cow<'_, [f64]>, std::borrow::Cow<'_, [f64]>) {
+        match *self {
+            GView::Mat { g, h } => {
+                let (lb, ub) = extract_bounds_only(n, g, h);
+                (std::borrow::Cow::Owned(lb), std::borrow::Cow::Owned(ub))
+            }
+            GView::Split { lb, ub, .. } => (std::borrow::Cow::Borrowed(lb), std::borrow::Cow::Borrowed(ub)),
+        }
+    }
+}
+
+/// Whether `rebuild_g_ref(rows, _, lb, ub)` round-trips exactly through
+/// [`extract_bounds`]: every row has at least two entries, no stored zero
+/// and strictly increasing in-range columns (so `rebuild_g_ref` stores it
+/// verbatim and `extract_bounds` does not fold it into a bound), and every
+/// bound is finite or infinite on its own side (a `-inf` upper / `+inf`
+/// lower bound / NaN would emit no row and come back as the opposite
+/// infinity).
+pub fn split_is_canonical(n: usize, rows: &[Vec<(usize, f64)>], lb: &[f64], ub: &[f64]) -> bool {
+    lb.iter().all(|&v| v.is_finite() || v == f64::NEG_INFINITY)
+        && ub.iter().all(|&v| v.is_finite() || v == f64::INFINITY)
+        && rows.iter().all(|r| r.len() >= 2 && r.iter().all(|&(j, v)| v != 0.0 && j < n) && r.windows(2).all(|w| w[0].0 < w[1].0))
+}
+
 /// Rebuilds `G x <= h` from a set of "real" (multi-variable) rows plus a
 /// fresh pair of single-variable bound rows per variable with a finite
 /// bound — the inverse of [`extract_bounds`]. Shared by [`propagate`]'s
