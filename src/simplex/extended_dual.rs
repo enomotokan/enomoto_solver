@@ -5661,8 +5661,6 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
             // (unrelated quantities to this phase's own dual state;
             // `solve_lp_dual_on`'s own identical handoff confirms this only
             // costs pricing quality, not correctness).
-            let mut expand = super::ExpandState::new();
-            let mut se = super::SteepestEdgeState::new(std);
             let mut stall = super::PrimalStallState::new();
             if std::env::var("ENOMOTO_DEBUG_EXT_ITERS").is_ok() {
                 eprintln!("DEBUG_EXT: polish DUAL->PRIMAL cleanup handoff at polish_iter={_iter}");
@@ -5677,7 +5675,17 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
             // classical path in `solve_lp_dual`) without that assumption.
             let handoff_t0 = std::time::Instant::now();
             let handoff_iters0 = super::prof_phases::RUN_PHASE_ITERS.load(std::sync::atomic::Ordering::Relaxed);
-            let status = super::run_phase(std, &mut t, false, &mut lu, &mut since_check, &mut expand, &mut se, &mut stall);
+            // `ENOMOTO_HANDOFF_INCREMENTAL=1` (S4, default off): the
+            // incremental-`x_B`/`d` primal loop instead of `run_phase`'s
+            // recompute-everything one — same invariant and ratio test,
+            // different arithmetic, so the pivot path can differ.
+            let status = if tunable!("ENOMOTO_HANDOFF_INCREMENTAL", 0u8, u8) != 0 {
+                super::run_phase2_incremental(std, &mut t, &mut lu, &mut stall)
+            } else {
+                let mut expand = super::ExpandState::new();
+                let mut se = super::SteepestEdgeState::new(std);
+                super::run_phase(std, &mut t, false, &mut lu, &mut since_check, &mut expand, &mut se, &mut stall)
+            };
             if profile_phases_polish {
                 eprintln!("PROF_HANDOFF run_phase={:.3}ms ok={}", handoff_t0.elapsed().as_secs_f64() * 1e3, status.is_some());
             }
