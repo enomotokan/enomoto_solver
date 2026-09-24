@@ -999,7 +999,7 @@ fn build_std_form_presolved(
         tunable!("ENOMOTO_T_PRESOLVE_ROUNDS", PRESOLVE_ROUNDS, usize),
         tunable!("ENOMOTO_T_INNER_ROUNDS", ROWSINGLETON_COLSINGLETON_INNER_ROUNDS, usize),
     );
-    if std::env::var("ENOMOTO_DEBUG_PRESOLVE_INFEAS").is_ok() {
+    if env_str!("ENOMOTO_DEBUG_PRESOLVE_INFEAS").is_some() {
         eprintln!("DEBUG_PRESOLVE: infeasible={} unbounded={}", pre.infeasible, pre.unbounded);
     }
     if pre.infeasible {
@@ -1124,7 +1124,7 @@ fn build_std_form_presolved(
     // shape, not the sentinel this function still falls back to
     // substituting for now.
     let had_unbounded_structural = (0..n).any(|j| lb[j] == f64::NEG_INFINITY || ub[j] == f64::INFINITY);
-    if std::env::var("ENOMOTO_DEBUG_UNBOUNDED_VARS").is_ok() && had_unbounded_structural {
+    if env_str!("ENOMOTO_DEBUG_UNBOUNDED_VARS").is_some() && had_unbounded_structural {
         eprintln!(
             "PRESOLVE: {} structural column(s) still have a genuine infinite bound ({})",
             (0..n).filter(|&j| lb[j] == f64::NEG_INFINITY || ub[j] == f64::INFINITY).count(),
@@ -1838,7 +1838,7 @@ fn run_phase(
     let mut w_buf = vec![0.0; m];
     let mut candidates_buf: Vec<Candidate> = Vec::with_capacity(m);
 
-    let ratio_pivot_tol = if std::env::var("ENOMOTO_PRIMAL_RATIO_PIVOT_TOL_OLD").is_ok() { TOL } else { tunable!("ENOMOTO_T_FT_MIN_PIVOT", FT_MIN_PIVOT, f64) };
+    let ratio_pivot_tol = if env_str!("ENOMOTO_PRIMAL_RATIO_PIVOT_TOL_OLD").is_some() { TOL } else { tunable!("ENOMOTO_T_FT_MIN_PIVOT", FT_MIN_PIVOT, f64) };
     let max_iters = max_iters_for(m, std.n_total);
     for iter_idx in 0..max_iters {
         prof_phases::RUN_PHASE_ITERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1854,7 +1854,7 @@ fn run_phase(
                 // `None` here, not a panic — see this function's own docs
                 // for what that signals to the caller.
                 let Some(l) = try_refactorize(std, t, Some(&*lu)) else {
-                    if std::env::var("ENOMOTO_DEBUG_PHASES").is_ok() {
+                    if env_str!("ENOMOTO_DEBUG_PHASES").is_some() {
                         eprintln!("run_phase None@residual iter={iter_idx} phase1={phase1} bump={bump_too_big} residual={residual_too_big}");
                     }
                     return None;
@@ -1865,7 +1865,7 @@ fn run_phase(
         // Trigger (4): unconditional cap on accumulated updates.
         if lu.update_count() > FT_MAX_UPDATES {
             let Some(l) = try_refactorize(std, t, Some(&*lu)) else {
-                if std::env::var("ENOMOTO_DEBUG_PHASES").is_ok() {
+                if env_str!("ENOMOTO_DEBUG_PHASES").is_some() {
                     eprintln!("run_phase None@ft_max_updates iter={iter_idx} phase1={phase1}");
                 }
                 return None;
@@ -2192,7 +2192,7 @@ fn run_phase(
                 // same loop, and this function's own docs.
                 if !lu.try_update(r, a_enter, tunable!("ENOMOTO_T_FT_MIN_PIVOT", FT_MIN_PIVOT, f64)) {
                     let Some(l) = try_refactorize(std, t, Some(&*lu)) else {
-                        if std::env::var("ENOMOTO_DEBUG_PHASES").is_ok() {
+                        if env_str!("ENOMOTO_DEBUG_PHASES").is_some() {
                             eprintln!("run_phase None@ft_update iter={iter_idx} phase1={phase1} pivot={pivot}");
                         }
                         return None;
@@ -3021,6 +3021,26 @@ impl DseState {
         }
         self.w[p] = (wp_old / (pivot * pivot)).max(tunable!("ENOMOTO_T_STEEPEST_EDGE_FLOOR", STEEPEST_EDGE_FLOOR, f64));
     }
+
+    /// [`Self::update_after_pivot`] restricted to `rows`, a superset of
+    /// `alpha`'s nonzero rows (any order): for `alpha[i] == 0` the update is
+    /// `w_i - 2*(±0)*tau_i + (±0)*(±0)*wp_old = w_i` exactly (`w_i` is
+    /// already floored), so skipping those rows is bit-identical while the
+    /// work drops from `O(m)` to `O(nnz(alpha))`. `wp_old` is passed in
+    /// (`Σ rho_p[i]^2` summed in ascending `i`, zeros skipped — also exact,
+    /// adding `+0.0` to a nonnegative partial sum changes nothing that the
+    /// floor below does not already absorb).
+    fn update_after_pivot_rows(&mut self, p: usize, alpha: &[f64], tau: &[f64], wp_old: f64, rows: &[u32]) {
+        let floor = tunable!("ENOMOTO_T_STEEPEST_EDGE_FLOOR", STEEPEST_EDGE_FLOOR, f64);
+        let pivot = alpha[p];
+        let wp_old = wp_old.max(floor);
+        for &i in rows {
+            let i = i as usize;
+            let ratio = alpha[i] / pivot;
+            self.w[i] = (self.w[i] - 2.0 * ratio * tau[i] + ratio * ratio * wp_old).max(floor);
+        }
+        self.w[p] = (wp_old / (pivot * pivot)).max(floor);
+    }
 }
 
 /// Dual Devex weights: a cheap, approximate substitute for [`DseState`]'s
@@ -3216,6 +3236,12 @@ impl InfeasibleRows {
     /// since that's the only operation that can change many rows' `x_B`
     /// values at once without this struct's own incremental `set` calls
     /// seeing each change individually.
+    /// Whether row `i` is currently in the pool.
+    #[inline]
+    pub(super) fn contains(&self, i: usize) -> bool {
+        self.pos[i].is_some()
+    }
+
     pub(super) fn rebuild(&mut self, m: usize, mut pred: impl FnMut(usize) -> bool) {
         self.rows.clear();
         for i in 0..m {
@@ -3385,7 +3411,7 @@ pub fn solve_lp_dual(variables: &[VariableData], objective: &Objective, constrai
         Ok(pf) => pf,
         Err(status) => return SimplexResult { status, x: None },
     };
-    if std::env::var("ENOMOTO_DEBUG_PRESOLVE_SIZE").is_ok() {
+    if env_str!("ENOMOTO_DEBUG_PRESOLVE_SIZE").is_some() {
         // Moved here (from inside the `!had_unbounded_structural` branch
         // below, where it used to live) so it fires for *every* solve, not
         // just the common finite-bounds case: this `std` is the one
@@ -3429,8 +3455,8 @@ pub fn solve_lp_dual(variables: &[VariableData], objective: &Objective, constrai
     // the old had_unbounded_structural-gated routing, for comparison —
     // same pattern as this module's own `ENOMOTO_DISABLE_AGGREGATOR`/
     // `ENOMOTO_DISABLE_PARALLELCOLS` presolve toggles.
-    if had_unbounded_structural || std::env::var("ENOMOTO_DISABLE_ALWAYS_EXTENDED").is_err() {
-        if std::env::var("ENOMOTO_DEBUG_EXT_COMPONENTS").is_ok() {
+    if had_unbounded_structural || env_str!("ENOMOTO_DISABLE_ALWAYS_EXTENDED").is_none() {
+        if env_str!("ENOMOTO_DEBUG_EXT_COMPONENTS").is_some() {
             match connected_components_of_std_form(&std) {
                 Some((components, _has_row)) => {
                     let mut sizes: Vec<usize> = components.iter().map(|c| c.len()).collect();
@@ -3445,7 +3471,7 @@ pub fn solve_lp_dual(variables: &[VariableData], objective: &Objective, constrai
             }
         }
         let ext_result = extended_dual::solve_lp_dual_extended(&std);
-        if std::env::var("ENOMOTO_DEBUG_EXT_ITERS").is_ok() {
+        if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
             match &ext_result {
                 Some(r) => eprintln!("DEBUG_EXT: solve_lp_dual_extended returned Some({:?})", r.status),
                 None => eprintln!("DEBUG_EXT: solve_lp_dual_extended returned None (falling back)"),
@@ -3484,16 +3510,16 @@ pub fn solve_lp_dual(variables: &[VariableData], objective: &Objective, constrai
         };
         return unscale_result(solve_std_form_decomposed(&std, true), &sc, &postsolve_log, &orig_of_free, &sign, &fixed_values, &shift, variables.len());
     }
-    let profile_phases = std::env::var("ENOMOTO_PROF_PHASES").is_ok();
-    let debug_eta_density = std::env::var("ENOMOTO_DEBUG_ETA_DENSITY").is_ok();
-    let debug_update_verify = std::env::var("ENOMOTO_PROF_UPDATE_VERIFY").is_ok();
+    let profile_phases = env_str!("ENOMOTO_PROF_PHASES").is_some();
+    let debug_eta_density = env_str!("ENOMOTO_DEBUG_ETA_DENSITY").is_some();
+    let debug_update_verify = env_str!("ENOMOTO_PROF_UPDATE_VERIFY").is_some();
     if profile_phases || debug_eta_density || debug_update_verify {
         prof_phases::reset();
     }
     let wall_t0 = std::time::Instant::now();
     let result = solve_std_form_decomposed(&std, true);
     let wall_ns = wall_t0.elapsed().as_nanos() as usize;
-    if std::env::var("ENOMOTO_PROF_TRIANGULAR").is_ok() {
+    if env_str!("ENOMOTO_PROF_TRIANGULAR").is_some() {
         use std::sync::atomic::Ordering::Relaxed;
         let total = sparse_lu::PROF_TOTAL_STEPS.load(Relaxed);
         let trivial = sparse_lu::PROF_TRIVIAL_STEPS.load(Relaxed);
@@ -3552,7 +3578,7 @@ pub fn solve_lp_dual(variables: &[VariableData], objective: &Objective, constrai
             "  compute_rhs_cols total={compute_rhs_total} skipped={compute_rhs_skipped} ({:.1}%)",
             100.0 * compute_rhs_skipped as f64 / compute_rhs_total.max(1) as f64
         );
-        if std::env::var("ENOMOTO_DEBUG_CHUZR").is_ok() {
+        if env_str!("ENOMOTO_DEBUG_CHUZR").is_some() {
             let m = std.n_rows.max(1);
             eprintln!(
                 "  DEBUG_CHUZR m={m} avg_infeasible_rows/iter={:.1} ({:.1}% of m) avg_alpha_nnz/iter={:.1} ({:.1}% of m) avg_bfrt_cands/iter={:.1} avg_bfrt_walk/iter={:.1}",
@@ -3760,17 +3786,17 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
     // Checked once here (not per-iteration) — see `timed!`'s own docs for
     // why this keeps a normal, non-profiling solve from paying for any
     // `Instant::now()` calls at all.
-    let profile_phases = std::env::var("ENOMOTO_PROF_PHASES").is_ok();
+    let profile_phases = env_str!("ENOMOTO_PROF_PHASES").is_some();
     // Hoisted out of the loop like `profile_phases` itself — an
     // `env::var` lookup per iteration would otherwise inflate the very
     // wall-clock this diagnostic is meant to explain.
-    let debug_chuzr = profile_phases && std::env::var("ENOMOTO_DEBUG_CHUZR").is_ok();
-    let debug_eta_density = std::env::var("ENOMOTO_DEBUG_ETA_DENSITY").is_ok();
+    let debug_chuzr = profile_phases && env_str!("ENOMOTO_DEBUG_CHUZR").is_some();
+    let debug_eta_density = env_str!("ENOMOTO_DEBUG_ETA_DENSITY").is_some();
     // Gates the `UPDATE_VERIFY_*` atomic counters below (see
     // [`update_verify`]'s own docs) — hoisted for the same per-iteration
     // `env::var`-cost reason as `debug_chuzr` above, since `update_verify`
     // itself runs every single pivot, not just every `FT_CHECK_INTERVAL`.
-    let debug_update_verify = std::env::var("ENOMOTO_PROF_UPDATE_VERIFY").is_ok();
+    let debug_update_verify = env_str!("ENOMOTO_PROF_UPDATE_VERIFY").is_some();
     // Escape hatch for A/B measurement against the always-on default (see
     // [`update_verify`]'s own docs and this feature's own commit message):
     // the check normally runs unconditionally, like `FT_MIN_PIVOT`'s own
@@ -3779,13 +3805,13 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
     // disabling it can only ever make a solve *more* exposed to stale
     // eta-chain drift between trigger (1)'s own coarser checks, never
     // change which pivot a healthy solve picks.
-    let update_verify_disabled = std::env::var("ENOMOTO_DISABLE_UPDATE_VERIFY").is_ok();
+    let update_verify_disabled = env_str!("ENOMOTO_DISABLE_UPDATE_VERIFY").is_some();
     // Reports the one-way Devex→DSE escalation (see [`DEVEX_STAGNATION_WINDOW`]'s
     // own docs) if/when it happens — at most once per solve, so unlike
     // `profile_phases`/`debug_chuzr` above this isn't hoisted for a
     // per-iteration cost reason, just for this file's own convention of
     // reading every `ENOMOTO_DEBUG_*` flag once, up front.
-    let debug_devex = std::env::var("ENOMOTO_DEBUG_DEVEX").is_ok();
+    let debug_devex = env_str!("ENOMOTO_DEBUG_DEVEX").is_some();
     // EXPERIMENTAL (measurement only, inert unless a caller has set
     // `tie_experiment::IN` via `solve_lp_dual_with_tie_experiment` — every
     // normal call path, including plain `solve_lp_dual`, leaves this `None`
@@ -3863,7 +3889,7 @@ fn solve_lp_dual_on(std: &StdForm, force_dse: bool) -> SimplexResult {
     // opposes it. This is exactly why the default stays reactive
     // (Devex-start, escalate only on an actual trigger) rather than
     // switched to DSE-always based on any upfront guess.
-    let force_dse = force_dse || std::env::var("ENOMOTO_FORCE_DSE").is_ok();
+    let force_dse = force_dse || env_str!("ENOMOTO_FORCE_DSE").is_some();
     let mut weights = if force_dse { EdgeWeights::Dse(DseState::new(m)) } else { EdgeWeights::Devex(DevexState::new(m)) };
     // Rolling window + running sum for the Devex→DSE stagnation check
     // below (see [`DEVEX_STAGNATION_WINDOW`]'s own docs) — a `VecDeque`

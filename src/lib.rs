@@ -44,6 +44,20 @@ macro_rules! tunable {
     }};
 }
 
+/// Reads an environment variable (a flag or a string/number setting) once
+/// per process, caching it in a `OnceLock` — `std::env::var` costs an
+/// environment lock + a linear `environ` scan + a `String` allocation, and
+/// the solve path consults ~100 `ENOMOTO_*` flags per LP (callgrind: ~10%
+/// of `afiro`'s instructions). Yields `Option<&'static str>`; like
+/// [`tunable!`], a value changed with `std::env::set_var` after the first
+/// read is not observed (set flags before the process starts).
+macro_rules! env_str {
+    ($name:literal) => {{
+        static V: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+        V.get_or_init(|| std::env::var($name).ok()).as_deref()
+    }};
+}
+
 mod graph;
 mod interior_point;
 mod mip;

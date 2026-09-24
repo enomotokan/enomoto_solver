@@ -868,12 +868,11 @@ pub struct AggOptions {
 
 impl AggOptions {
     pub fn from_env() -> Self {
-        let on = |k: &str| std::env::var(k).is_ok();
         AggOptions {
-            use_ineq: !on("ENOMOTO_AGG_NOINEQ"),
-            min_a_count: if on("ENOMOTO_AGG_MINACNT2") { 2 } else { 1 },
-            net_fillin: !on("ENOMOTO_AGG_GROSSFILL"),
-            fillin_break: !on("ENOMOTO_AGG_NOBREAK"),
+            use_ineq: env_str!("ENOMOTO_AGG_NOINEQ").is_none(),
+            min_a_count: if env_str!("ENOMOTO_AGG_MINACNT2").is_some() { 2 } else { 1 },
+            net_fillin: env_str!("ENOMOTO_AGG_GROSSFILL").is_none(),
+            fillin_break: env_str!("ENOMOTO_AGG_NOBREAK").is_none(),
         }
     }
 }

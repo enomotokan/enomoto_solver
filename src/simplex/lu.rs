@@ -165,8 +165,7 @@ thread_local! {
 fn pivot_threshold_base() -> f64 {
     static BASE: OnceLock<f64> = OnceLock::new();
     *BASE.get_or_init(|| {
-        std::env::var("ENOMOTO_PIVOT_THRESHOLD")
-            .ok()
+        env_str!("ENOMOTO_PIVOT_THRESHOLD")
             .and_then(|v| v.parse::<f64>().ok())
             .map(|v| v.clamp(tunable!("ENOMOTO_T_PIVOT_THRESHOLD_MIN", PIVOT_THRESHOLD_MIN, f64), PIVOT_THRESHOLD_MAX))
             .unwrap_or(tunable!("ENOMOTO_T_STABILITY", STABILITY, f64))
@@ -307,8 +306,7 @@ const PIVOT_SEARCH_LIMIT: usize = 256;
 /// factorization, and an `std::env::var` lookup there would show up in the
 /// very measurement this gate exists to make.
 fn pivot_search_limit() -> usize {
-    std::env::var("ENOMOTO_PIVOT_SEARCH_LIMIT")
-        .ok()
+    env_str!("ENOMOTO_PIVOT_SEARCH_LIMIT")
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(PIVOT_SEARCH_LIMIT)
 }
@@ -955,17 +953,17 @@ impl MarkowitzState {
             threshold: pivot_threshold(),
             prof_colmax_rescan_entries: 0,
             colval: Vec::new(),
-            inplace_elim: !matches!(std::env::var("ENOMOTO_LU_INPLACE_ELIM").as_deref(), Ok("0")),
-            prof_timing: std::env::var_os("ENOMOTO_PROF_PHASES_EXT").is_some()
-                || std::env::var_os("ENOMOTO_PROF_PHASES").is_some()
-                || std::env::var_os("ENOMOTO_PROF_TRIANGULAR").is_some(),
+            inplace_elim: !matches!(env_str!("ENOMOTO_LU_INPLACE_ELIM"), Some("0")),
+            prof_timing: env_str!("ENOMOTO_PROF_PHASES_EXT").is_some()
+                || env_str!("ENOMOTO_PROF_PHASES").is_some()
+                || env_str!("ENOMOTO_PROF_TRIANGULAR").is_some(),
             prof_steps: 0,
             prof_trivial: 0,
             prof_limit: 0,
             prof_candidates: 0,
             prof_scan_ns: 0,
-            row_singleton_rel: std::env::var("ENOMOTO_LU_ROW_SINGLETON").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(-1.0),
-            lazy_colmax: !matches!(std::env::var("ENOMOTO_LU_LAZY_COLMAX").as_deref(), Ok("0")),
+            row_singleton_rel: env_str!("ENOMOTO_LU_ROW_SINGLETON").and_then(|v| v.parse::<f64>().ok()).unwrap_or(-1.0),
+            lazy_colmax: !matches!(env_str!("ENOMOTO_LU_LAZY_COLMAX"), Some("0")),
         }
     }
 
@@ -2019,7 +2017,7 @@ const REBUILD_FILL_LIMIT: f64 = 1.25;
 /// [`reuse_pivot_order_enabled`]'s own docs on why cross-process timing
 /// comparisons are not usable here). Read once per refactorization.
 fn reuse_fill_limit() -> f64 {
-    std::env::var("ENOMOTO_REUSE_FILL_LIMIT").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(REBUILD_FILL_LIMIT)
+    env_str!("ENOMOTO_REUSE_FILL_LIMIT").and_then(|v| v.parse::<f64>().ok()).unwrap_or(REBUILD_FILL_LIMIT)
 }
 
 /// Accepted reuses' own fill against the fresh Markowitz factorizations'
@@ -2046,7 +2044,7 @@ const REBUILD_MIN_PIVOT: f64 = 1e-12;
 /// far wider than the effect being measured. Read once per
 /// refactorization (a handful of times per solve), never per iteration.
 fn reuse_pivot_order_enabled() -> bool {
-    !matches!(std::env::var("ENOMOTO_REUSE_PIVOT_ORDER").as_deref(), Ok("0") | Ok("false"))
+    !matches!(env_str!("ENOMOTO_REUSE_PIVOT_ORDER"), Some("0") | Some("false"))
 }
 
 /// Refactorizes `rows_in` **reusing `prev`'s pivot order** when possible,
@@ -2448,7 +2446,7 @@ pub fn factorize(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuFactors> {
 /// result and [`is_dense_input`]'s — supplied by a caller that already
 /// computed them.
 fn factorize_routed(m: usize, rows_in: &[Vec<(usize, f64)>], border: &[usize], dense: bool) -> Option<LuFactors> {
-    if std::env::var("ENOMOTO_DEBUG_BLOCK_SIZES").is_ok() {
+    if env_str!("ENOMOTO_DEBUG_BLOCK_SIZES").is_some() {
         debug_print_block_sizes(m, rows_in);
     }
     // Tried *before* checking `is_dense_input`, deliberately: the measured
@@ -2516,7 +2514,7 @@ fn factorize_flat_markowitz_routed(m: usize, rows_in: &[Vec<(usize, f64)>], dens
 
     let mut l_entries: Vec<(usize, usize, f64)> = Vec::new();
     let mut u_entries: Vec<(usize, usize, f64)> = Vec::new();
-    let debug_eliminate_cost = std::env::var("ENOMOTO_DEBUG_ELIMINATE_COST").is_ok();
+    let debug_eliminate_cost = env_str!("ENOMOTO_DEBUG_ELIMINATE_COST").is_some();
     let mut eliminate_ns: u128 = 0;
     let mut snapshot_ns: u128 = 0;
 
@@ -3732,8 +3730,7 @@ const EXPECTED_DENSE_FRACTION: f64 = 0.35;
 /// per [`FtranDensity::new`] — a handful of times per solve, never on the
 /// per-iteration path.
 fn expected_dense_gate() -> f64 {
-    std::env::var("ENOMOTO_EXPECTED_DENSITY_GATE")
-        .ok()
+    env_str!("ENOMOTO_EXPECTED_DENSITY_GATE")
         .and_then(|v| v.parse::<f64>().ok())
         .unwrap_or(EXPECTED_DENSE_FRACTION)
 }
@@ -3938,7 +3935,7 @@ impl UnitBtranWork {
 }
 
 fn btran_l_scatter_gate() -> f64 {
-    std::env::var("ENOMOTO_BTRAN_L_SCATTER").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(BTRAN_L_SCATTER_FRACTION)
+    env_str!("ENOMOTO_BTRAN_L_SCATTER").and_then(|v| v.parse::<f64>().ok()).unwrap_or(BTRAN_L_SCATTER_FRACTION)
 }
 
 /// Whether [`FtLu::u_solve_into`] tests a slot for zero *before* dividing
@@ -3947,7 +3944,7 @@ fn btran_l_scatter_gate() -> f64 {
 /// is how the A/B behind the default is produced. Read once per
 /// [`FtLu::new`], never per solve.
 fn u_zero_skip_enabled() -> bool {
-    std::env::var("ENOMOTO_FTRAN_U_ZERO_SKIP").map(|v| v != "0").unwrap_or(true)
+    env_str!("ENOMOTO_FTRAN_U_ZERO_SKIP").map(|v| v != "0").unwrap_or(true)
 }
 
 /// Running average of one FTRAN *call site*'s own **result** density,
