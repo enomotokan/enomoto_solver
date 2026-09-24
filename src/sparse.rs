@@ -358,6 +358,11 @@ pub fn scatter_dense(sparse: &[(usize, f64)], out: &mut [f64]) {
 // Hybrid sparse/dense vectors
 // ===========================================================================
 
+thread_local! {
+    /// [`HybridVec::pack_scaled_dense`]'s reusable compaction buffer.
+    static PACK_SCRATCH: std::cell::RefCell<Vec<(usize, f64)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 /// A vector held **either** as an `(index, value)` list **or** as a full
 /// dense array, the representation picked once at construction from its own
 /// fill — [`HybridVec::pack`].
@@ -395,11 +400,6 @@ pub fn scatter_dense(sparse: &[(usize, f64)], out: &mut [f64]) {
 /// array's length — which is always the full length and says nothing about
 /// fill — so `simplex::lu`'s refactorization triggers keep measuring true
 /// fill regardless of which representation an eta happens to be in.
-thread_local! {
-    /// [`HybridVec::pack_scaled_dense`]'s reusable compaction buffer.
-    static PACK_SCRATCH: std::cell::RefCell<Vec<(usize, f64)>> = const { std::cell::RefCell::new(Vec::new()) };
-}
-
 #[derive(Clone, Debug)]
 pub enum HybridVec {
     Sparse(Vec<(usize, f64)>),
