@@ -1667,6 +1667,17 @@ pub fn csr_row_iter(mat: &Csr, i: usize) -> impl Iterator<Item = (usize, f64)> +
     r.col_indices_of_row(i).zip(r.values_of_row(i)).map(|(j, &v)| (j, v))
 }
 
+/// `iter.collect::<Vec<_>>()` with the capacity reserved up front
+/// (`cap` is an upper bound on the item count, e.g. the length of the
+/// slice a `filter` runs over) — a filtered iterator has no exact size
+/// hint, so a plain `collect` grows the vector step by step.
+#[inline]
+pub fn collect_with_capacity<T>(cap: usize, iter: impl Iterator<Item = T>) -> Vec<T> {
+    let mut v = Vec::with_capacity(cap);
+    v.extend(iter);
+    v
+}
+
 /// Row `i` of a faer [`Csr`] as an owned `(column, value)` list.
 pub fn csr_row_vec(mat: &Csr, i: usize) -> Vec<(usize, f64)> {
     csr_row_iter(mat, i).collect()

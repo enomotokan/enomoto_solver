@@ -203,7 +203,7 @@ pub fn eliminate_singleton_equalities_view(n: usize, a: &Csr, b: &[f64], gv: GVi
         if coeff.abs() < tunable!("ENOMOTO_T_CS_SUBSTITUTION_PIVOT_RATIO", SUBSTITUTION_PIVOT_RATIO, f64) * row_max {
             continue;
         }
-        let terms: Vec<(usize, f64)> = row.iter().filter(|&&(k, _)| k != j).cloned().collect();
+        let terms: Vec<(usize, f64)> = crate::sparse::collect_with_capacity(row.len(), row.iter().filter(|&&(k, _)| k != j).cloned());
         let rhs = b[i];
 
         let cj = new_c[j];

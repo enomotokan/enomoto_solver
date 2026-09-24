@@ -133,7 +133,7 @@ fn rewrite_row(accum: &mut SparseAccum, row: &[(usize, f64)], rhs: f64, subs: &[
     // minus entries at or below `TOL` — each `accum.add` is the first
     // write to its slot, so the stored value is `v` exactly.
     if row.windows(2).all(|w| w[0].0 < w[1].0) && row.iter().all(|&(j, _)| by_var[j].is_none()) {
-        return (row.iter().copied().filter(|&(_, v)| v.abs() > TOL).collect(), rhs);
+        return (crate::sparse::collect_with_capacity(row.len(), row.iter().copied().filter(|&(_, v)| v.abs() > TOL)), rhs);
     }
     // The surviving terms land in the caller's shared sparse accumulator
     // rather than a `BTreeMap` built per rewritten row — see

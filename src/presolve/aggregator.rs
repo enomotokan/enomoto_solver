@@ -1149,7 +1149,7 @@ pub fn eliminate_implied_free_columns_v2(n: usize, a: &Csr, b: &[f64], c: &[f64]
             a_col_idx[j].dedup();
             a_dirty[j] = false;
         }
-        let la: Vec<(usize, f64)> = a_col_idx[j].iter().filter(|&&i| !row_deleted[i]).map(|&i| (i, coef_of(&a_rows[i], j))).filter(|&(_, v)| v != 0.0).collect();
+        let la: Vec<(usize, f64)> = crate::sparse::collect_with_capacity(a_col_idx[j].len(), a_col_idx[j].iter().filter(|&&i| !row_deleted[i]).map(|&i| (i, coef_of(&a_rows[i], j))).filter(|&(_, v)| v != 0.0));
         if la.is_empty() {
             continue;
         }
@@ -1158,7 +1158,7 @@ pub fn eliminate_implied_free_columns_v2(n: usize, a: &Csr, b: &[f64], c: &[f64]
             g_col_idx[j].dedup();
             g_dirty[j] = false;
         }
-        let lg: Vec<(usize, f64)> = g_col_idx[j].iter().map(|&i| (i, coef_of(&real_rows[i], j))).filter(|&(_, v)| v != 0.0).collect();
+        let lg: Vec<(usize, f64)> = crate::sparse::collect_with_capacity(g_col_idx[j].len(), g_col_idx[j].iter().map(|&i| (i, coef_of(&real_rows[i], j))).filter(|&(_, v)| v != 0.0));
         let (lo, hi) = implied(j, &la, &lg, &a_rows, &b, &real_rows, &real_rhs, &mut act_a, &mut act_g);
         if !range_within_box(j, lo, hi, lb, ub) {
             continue;
@@ -1173,11 +1173,11 @@ pub fn eliminate_implied_free_columns_v2(n: usize, a: &Csr, b: &[f64], c: &[f64]
             continue;
         };
         let pivot_row = a_rows[row_idx].clone();
-        let terms: Vec<(usize, f64)> = pivot_row.iter().filter(|&&(k, _)| k != j).copied().collect();
+        let terms: Vec<(usize, f64)> = crate::sparse::collect_with_capacity(pivot_row.len(), pivot_row.iter().filter(|&&(k, _)| k != j).copied());
         if terms.is_empty() {
             continue;
         }
-        let other_a: Vec<usize> = la.iter().map(|&(i, _)| i).filter(|&i| i != row_idx).collect();
+        let other_a: Vec<usize> = crate::sparse::collect_with_capacity(la.len(), la.iter().map(|&(i, _)| i).filter(|&i| i != row_idx));
         let other_g: Vec<usize> = lg.iter().map(|&(i, _)| i).collect();
         let n_other = other_a.len() + other_g.len();
         let size2 = pivot_row.len() == 2 || n_other + 1 == 2;
