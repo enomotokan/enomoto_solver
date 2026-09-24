@@ -743,6 +743,10 @@ pub fn run_extended(
             let (ng, nh) = timed_step!("rebuild_g(inner)", propagate::rebuild_g_ref(n, &cur_real_rows, &cur_real_rhs, &lb, &ub));
             g = ng;
             h = nh;
+            // Whether `(g, h)` is still exactly `rebuild_g_ref(cur_real_rows,
+            // cur_real_rhs, lb, ub)` — see the `extract_bounds(inner)` skip
+            // below.
+            let mut g_is_rebuilt = true;
 
             if _inner == 0 && doubleton_active {
                 let dbl = timed_step!("doubleton", doubleton::eliminate_doubleton_equalities(n, &a, &b, &g, &h, &c));
@@ -753,6 +757,9 @@ pub fn run_extended(
                     }
                 } else {
                     doubleton_empty_streak = 0;
+                }
+                if !dbl.unchanged {
+                    g_is_rebuilt = false;
                 }
                 a = dbl.a;
                 b = dbl.b;
@@ -777,6 +784,7 @@ pub fn run_extended(
             }
 
             let cs = timed_step!("colsingleton", colsingleton::eliminate_singleton_equalities(n, &a, &b, &g, &h, &c));
+            let cs_unchanged = cs.substitutions.is_empty();
             a = cs.a;
             b = cs.b;
             c = cs.c;
@@ -843,13 +851,24 @@ pub fn run_extended(
             // from `extract_bounds` as a *bound*, not a row — folded into
             // `lb`/`ub` here (tighter of the two) rather than discarded,
             // since dropping it would silently lose a real constraint.
-            let (refreshed_lb, refreshed_ub, refreshed_real_rows, refreshed_real_rhs) = timed_step!("extract_bounds(inner)", propagate::extract_bounds(n, &g, &h));
-            for j in 0..n {
-                lb[j] = lb[j].max(refreshed_lb[j]);
-                ub[j] = ub[j].min(refreshed_ub[j]);
+            //
+            // Skipped when it would be an exact round trip: `g` is still the
+            // `rebuild_g_ref` output of this pass (no doubleton rewrite, no
+            // colsingleton substitution since), and every real row is
+            // already in the form `rebuild_g_ref` stores it (not a single
+            // entry, strictly ascending columns, no stored zero) — then
+            // `extract_bounds` would hand back `lb`/`ub` and the real rows
+            // and rhs bit for bit.
+            let round_trip = g_is_rebuilt && cs_unchanged && cur_real_rows.iter().all(|r| r.len() != 1 && r.iter().all(|&(_, v)| v != 0.0) && r.windows(2).all(|w| w[0].0 < w[1].0));
+            if !round_trip {
+                let (refreshed_lb, refreshed_ub, refreshed_real_rows, refreshed_real_rhs) = timed_step!("extract_bounds(inner)", propagate::extract_bounds(n, &g, &h));
+                for j in 0..n {
+                    lb[j] = lb[j].max(refreshed_lb[j]);
+                    ub[j] = ub[j].min(refreshed_ub[j]);
+                }
+                cur_real_rows = refreshed_real_rows;
+                cur_real_rhs = refreshed_real_rhs;
             }
-            cur_real_rows = refreshed_real_rows;
-            cur_real_rhs = refreshed_real_rhs;
         }
 
         // Aggregator (HiGHS's own name; `HPresolve::aggregator`): eliminates
