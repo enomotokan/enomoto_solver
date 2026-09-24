@@ -1,5 +1,5 @@
-"""ENOMOTO-Solver: a Python problem-input interface backed by a Rust core
-(CSR storage, preprocessing, optimization algorithms).
+"""ENOMOTO-Solver: 線形計画・混合整数計画ソルバーの Python 入力インターフェース。
+行列の保持・前処理・最適化アルゴリズムは Rust コア (``enomoto_solver._core``) が担う。
 
     from enomoto_solver import Model, Variable
 
@@ -20,6 +20,7 @@ from .function import Function
 from .model import Model, Solution
 from .variable import Variable
 
+# 公開 API
 __all__ = [
     "Model",
     "Variable",
@@ -33,4 +34,5 @@ __all__ = [
     "UnboundedError",
 ]
 
+# パッケージのバージョン
 __version__ = "0.1.0"

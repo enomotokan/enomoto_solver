@@ -1,58 +1,43 @@
-//! Crate layout, grouped by function:
+//! ENOMOTO-Solver の Rust コア (Python 拡張モジュール `enomoto_solver._core`)。
 //!
-//!   - `types`, `model`, `solver` — shared types, the PyO3 API entry
-//!     point, and top-level LP dispatch (thin orchestration, kept flat).
-//!   - `sparse` — the crate's one home for sparse storage: the `CsrMat`/
-//!     `CscMat` compressed pair and the conversions between them, the
-//!     `SparseVec` sparse vector and the `SparseAccum` accumulator its
-//!     row merges run on, the sparse x dense arithmetic built on all of
-//!     them, and the `Csr` alias (faer's own row-major type) plus the
-//!     helpers that bridge to it. Used by `simplex`, `presolve` and
-//!     `interior_point::kkt` alike — no other module re-derives a
-//!     transpose, a `(index, value)` merge, or a mat-vec for itself.
-//!   - `presolve` (+ `presolve::{scaling,redundancy,propagate}`) — the
-//!     **shared** presolve pipeline (Ruiz scaling, redundant-equality
-//!     removal, inequality propagation) run identically by both `simplex`
-//!     and `interior_point` — one implementation of each pass, not two.
-//!   - `mip` — branch-and-bound for integer/binary variables, sitting on
-//!     top of `solver`.
-//!   - `simplex` (+ `simplex::lu`) — the **active** engine: a from-scratch
-//!     bounded-variable primal/dual revised simplex (Markowitz/Forrest-
-//!     Tomlin sparse LU, EXPAND anti-cycling, (dual) steepest-edge
-//!     pricing), presolved via `presolve`. `solver::solve_lp` calls
-//!     straight into this.
-//!   - `interior_point` (+ its `qp`/`kkt` submodules) — the **inactive**
-//!     IP-PMM interior-point solver this project used before `simplex` was
-//!     implemented and verified. Kept in the module tree, unused, in case
-//!     that path is wanted again; also presolved via `presolve`.
+//! 線形計画問題 (LP) と混合整数計画問題 (MIP) を解く。モジュール構成:
 //!
-//! `legacy/` (`csr.rs`, `preprocess.rs`, `simplex.rs`) holds the very
-//! first, since-superseded implementation (a two-phase simplex with its
-//! own dense-oriented CSR type). It predates both `simplex` and
-//! `interior_point` above and is unrelated to either; left on disk, out
-//! of the module tree entirely (not even `mod`-declared here), purely for
-//! historical reference.
+//!   - `types` — 各層で共有するデータ型 (変数・目的関数・制約・求解結果など)。
+//!   - `model` — PyO3 の入口 `PyModel`。Python 側 `Model` からの入力を検証して保持する。
+//!   - `solver` — LP を選択されたエンジンへ振り分け、目的関数値を復元する薄い層。
+//!   - `mip` — 整数変数を含む問題のための深さ優先の分枝限定法 (`solver` の上に乗る)。
+//!   - `simplex` (+ `simplex::lu`, `simplex::extended_dual`) — 既定の LP エンジン。
+//!     現在は拡張双対単体法のエンジンだけを含む (古典的な双対単体法は削除済み)。
+//!   - `presolve` (+ `presolve/*`) — 前処理 (スケーリング、冗長行の除去、制約伝播、
+//!     各種の変数消去) と、その後処理 (消去した変数の値の復元)。
+//!   - `interior_point` (+ `qp`, `kkt`) — IP-PMM 内点法。既定では使われず、
+//!     `Model.solve(root_solver="interior")` を指定したときだけ呼ばれる。
+//!   - `sparse` — 疎行列 (CSR/CSC)・疎ベクトル・疎アキュムレータなど疎データ構造の一式。
+//!   - `graph` — 二部マッチング・強連結成分分解などのグラフアルゴリズム。
+//!   - `params` — 閾値・許容誤差・反復上限などの調整用定数をすべて集約したもの。
+//!
+//! `src/legacy/` は最初期の実装の残骸で、コンパイル対象外 (`mod` 宣言なし)。
+//! 開発経緯は `docs/_history_fragments/misc.md` などを参照。
 
-/// Reads a numeric tuning knob from the environment once per process
-/// (cached in a `OnceLock`), falling back to `$default`. Used for A/B
-/// sweeps of tolerances and thresholds without a rebuild; the defaults are
-/// the tuned values.
+/// 数値の調整用パラメータを環境変数から読む (プロセスごとに 1 回だけ読み、
+/// `OnceLock` にキャッシュする)。未設定・解釈不能なら `$default` を返す。
+/// 再ビルドなしで閾値の A/B 比較をするためのもの。既定値は調整済みの値。
 macro_rules! tunable {
     ($name:literal, $default:expr, $t:ty) => {{
+        // 呼び出し箇所ごとの値のキャッシュ
         static V: std::sync::OnceLock<$t> = std::sync::OnceLock::new();
         *V.get_or_init(|| std::env::var($name).ok().and_then(|s| s.parse::<$t>().ok()).unwrap_or($default))
     }};
 }
 
-/// Reads an environment variable (a flag or a string/number setting) once
-/// per process, caching it in a `OnceLock` — `std::env::var` costs an
-/// environment lock + a linear `environ` scan + a `String` allocation, and
-/// the solve path consults ~100 `ENOMOTO_*` flags per LP (callgrind: ~10%
-/// of `afiro`'s instructions). Yields `Option<&'static str>`; like
-/// [`tunable!`], a value changed with `std::env::set_var` after the first
-/// read is not observed (set flags before the process starts).
+/// 環境変数 (フラグや文字列設定) をプロセスごとに 1 回だけ読み、`OnceLock` に
+/// キャッシュして `Option<&'static str>` で返す。求解中に何度も参照される
+/// `ENOMOTO_*` フラグの読み取りコストを避けるため。
+/// 初回読み取り後に `std::env::set_var` で変えても反映されない
+/// (フラグはプロセス起動前に設定すること)。
 macro_rules! env_str {
     ($name:literal) => {{
+        // 呼び出し箇所ごとの値のキャッシュ
         static V: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
         V.get_or_init(|| std::env::var($name).ok()).as_deref()
     }};
@@ -70,56 +55,53 @@ mod sparse;
 mod types;
 
 use pyo3::prelude::*;
-use crate::params::alloc::LARGE;
+use crate::params::alloc::MIMALLOC_SIZE_LIMIT;
 
-/// Rust-side global allocator: small blocks from mimalloc, large ones from
-/// the system allocator.
+/// Rust 側のグローバルアロケータ。小さいブロック (`MIMALLOC_SIZE_LIMIT` バイト未満) は
+/// mimalloc、大きいブロックはシステムアロケータに割り当てる。
 ///
-/// Presolve works in owned `Vec<Vec<_>>` row lists and rebuilds its CSR
-/// matrices several times per round, so on the small Netlib problems glibc
-/// `malloc`/`free` (incl. `malloc_consolidate`) measured at roughly a
-/// quarter of all instructions of a `solve()` call (callgrind); mimalloc's
-/// size-class free lists make those short-lived small allocations much
-/// cheaper. Routing *every* allocation to mimalloc, however, made several
-/// mid-size problems 20-80% slower in the simplex main loop (`fit2d`,
-/// `degen3`, `greenbea`, ... — no extra syscalls, so a placement effect on
-/// the large dense work vectors), so blocks of `LARGE` bytes or more stay
-/// with glibc exactly as before. The route is a pure function of the
-/// layout size, so `dealloc` always reaches the allocator that made the
-/// block; `realloc` across the threshold moves the block between the two.
-/// Numerics are unaffected (nothing in this crate depends on allocation
-/// addresses).
+/// 前処理が短命の小さな確保を大量に行うため、それを mimalloc で安くしつつ、
+/// 単体法の大きな密作業ベクトルはシステムアロケータのままにしている。
+/// 振り分けはレイアウトのサイズだけで決まるので、`dealloc` は必ず確保した側に届く。
+/// しきい値をまたぐ `realloc` は、新しい側で確保 → コピー → 古い側で解放する。
+/// 数値結果はアドレスに依存しないので影響しない。
 struct SplitAlloc;
 
 unsafe impl std::alloc::GlobalAlloc for SplitAlloc {
+    /// サイズに応じて mimalloc かシステムアロケータで確保する。
     #[inline]
     unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
-        if layout.size() < LARGE {
+        if layout.size() < MIMALLOC_SIZE_LIMIT {
             mimalloc::MiMalloc.alloc(layout)
         } else {
             std::alloc::System.alloc(layout)
         }
     }
+    /// ゼロ初期化付きの確保。振り分けは `alloc` と同じ。
     #[inline]
     unsafe fn alloc_zeroed(&self, layout: std::alloc::Layout) -> *mut u8 {
-        if layout.size() < LARGE {
+        if layout.size() < MIMALLOC_SIZE_LIMIT {
             mimalloc::MiMalloc.alloc_zeroed(layout)
         } else {
             std::alloc::System.alloc_zeroed(layout)
         }
     }
+    /// 解放。確保時と同じ基準でアロケータを選ぶので、必ず確保した側に返る。
     #[inline]
     unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
-        if layout.size() < LARGE {
+        if layout.size() < MIMALLOC_SIZE_LIMIT {
             mimalloc::MiMalloc.dealloc(ptr, layout)
         } else {
             std::alloc::System.dealloc(ptr, layout)
         }
     }
+    /// 再確保。新旧サイズが同じ側なら、そのアロケータの `realloc` をそのまま使う。
+    /// しきい値をまたぐ場合は新しい側で確保し、内容をコピーして古い側で解放する。
     #[inline]
     unsafe fn realloc(&self, ptr: *mut u8, layout: std::alloc::Layout, new_size: usize) -> *mut u8 {
-        let old_small = layout.size() < LARGE;
-        let new_small = new_size < LARGE;
+        // 旧/新ブロックがそれぞれ mimalloc 側 (小) かどうか
+        let old_small = layout.size() < MIMALLOC_SIZE_LIMIT;
+        let new_small = new_size < MIMALLOC_SIZE_LIMIT;
         if old_small && new_small {
             return mimalloc::MiMalloc.realloc(ptr, layout, new_size);
         }
@@ -136,11 +118,13 @@ unsafe impl std::alloc::GlobalAlloc for SplitAlloc {
     }
 }
 
+/// このクレート全体で使うグローバルアロケータ (`SplitAlloc`)。
 #[global_allocator]
 static GLOBAL: SplitAlloc = SplitAlloc;
 
 use model::PyModel;
 
+/// Python 拡張モジュール `enomoto_solver._core` の初期化。`PyModel` クラスを登録する。
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyModel>()?;

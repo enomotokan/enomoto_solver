@@ -1,25 +1,11 @@
-//! The crate's sole PyO3 entry point: `PyModel` is what Python's
-//! `enomoto_solver._core.PyModel` binds to, and every method here is
-//! called directly by the Python-side `Model` class in
-//! `python/enomoto_solver/model.py`. This is also the crate's *only*
-//! input-validation boundary — every other module trusts the data it's
-//! given (e.g. `add_variable` below is the only place `VariableData` gets
-//! constructed from outside input, so it alone is responsible for
-//! rejecting NaN and `lb > ub`).
+//! このクレート唯一の PyO3 の入口。`PyModel` は Python の `enomoto_solver._core.PyModel`
+//! に対応し、各メソッドは Python 側 `Model` (`python/enomoto_solver/model.py`) から
+//! 直接呼ばれる。ここが唯一の入力検証の境界で、他のモジュールは渡されたデータを
+//! そのまま信頼する (例: 変数境界の NaN と `lb > ub` を弾くのは `add_variable` だけ)。
 //!
-//! A variable's bounds *may* be genuine `+/-inf` — `simplex.rs`'s presolve
-//! pipeline (`colsingleton`/`doubleton` in particular) can eliminate a
-//! truly free variable's row entirely, at zero replacement-row cost,
-//! exactly the way HiGHS's own free-column-singleton substitution does;
-//! substituting a finite `BIG_M` sentinel here instead — the old
-//! invariant this module used to enforce — would hide that from presolve
-//! and force it to re-materialize the variable's (fake) box bound as real
-//! rows on every such elimination, capping how far a chain of them can
-//! cascade. Only `simplex.rs`'s own `Tableau` (the dual-feasible crash, in
-//! particular) still needs every *surviving* variable to have two finite
-//! bounds — `build_std_form_presolved` substitutes `BIG_M` for any
-//! genuine infinity presolve didn't eliminate, but only *after* presolve
-//! has had its chance, not before.
+//! 変数境界は本物の `+/-inf` でもよい。自由変数などは前処理で消去されうるので、
+//! ここでは有限の大きな値 (`BIG_M`) に置き換えない。前処理で消えずに残った
+//! 無限境界だけを、単体法の標準形構築 (`build_std_form_presolved`) で扱う。
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -30,22 +16,22 @@ use crate::mip::solve_mip;
 
 use crate::types::{ConstraintRow, LinearExpr, LpOptions, Objective, RootSolver, RowSense, Sense, Status, VarType, VariableData};
 
-/// A model's accumulated state: every variable, the (single) objective
-/// once set, and every constraint added so far. Mutated in place by
-/// `add_variable`/`set_objective`/`add_constraint`; read (never mutated)
-/// by `solve`.
+/// モデルの蓄積状態: 登録済みの全変数、(1 つだけの) 目的関数、全制約。
+/// `add_variable` / `set_objective` / `add_constraint` で追加・更新され、
+/// `solve` は読むだけで変更しない。
 #[pyclass(name = "PyModel", module = "enomoto_solver._core")]
 pub struct PyModel {
+    /// 変数の種類と境界 (添字が変数番号)。
     variables: Vec<VariableData>,
+    /// 目的関数 (`set_objective` が呼ばれるまで `None`)。
     objective: Option<Objective>,
+    /// 追加順の制約行。
     constraints: Vec<ConstraintRow>,
 }
 
-/// Converts the `Vec<(variable_index, coefficient)>` pairs PyO3 hands
-/// across the FFI boundary (Python's `Function.coeffs.items()`) into a
-/// `LinearExpr`'s `BTreeMap` form, summing duplicate indices (so e.g.
-/// `x + x` and `2*x` produce the same coefficient) and rejecting any
-/// index outside the model's registered variable range.
+/// FFI 境界から渡された `(変数番号, 係数)` の列 (Python の `Function.coeffs.items()`) を
+/// `LinearExpr` (`BTreeMap` 形) に変換する。同じ番号の係数は合算し
+/// (`x + x` と `2*x` が同じになる)、登録済み変数の範囲外の番号は `ValueError` にする。
 fn to_linear_expr(coeffs: Vec<(usize, f64)>, constant: f64, n_vars: usize) -> PyResult<LinearExpr> {
     let mut map: BTreeMap<usize, f64> = BTreeMap::new();
     for (j, v) in coeffs {
@@ -61,6 +47,7 @@ fn to_linear_expr(coeffs: Vec<(usize, f64)>, constant: f64, n_vars: usize) -> Py
 
 #[pymethods]
 impl PyModel {
+    /// 空のモデルを作る。
     #[new]
     fn new() -> Self {
         PyModel {
@@ -70,16 +57,11 @@ impl PyModel {
         }
     }
 
-    /// Registers a new variable in the model's internal storage and
-    /// returns its index. A binary variable is just an integer variable
-    /// bounded to [0, 1] by the caller (there is no dedicated binary
-    /// vtype — Continuous and Integer are the only two kinds).
+    /// 変数を 1 つ登録し、その変数番号を返す。`vtype` は `"continuous"` / `"integer"`。
+    /// 二値変数は呼び出し側が境界 `[0, 1]` の整数変数として登録する。
     ///
-    /// `lb`/`ub` may be `+/-inf` (a genuinely free or one-sided-unbounded
-    /// variable, e.g. straight from an MPS `FR`/`MI`/`PL` bound) — see
-    /// this module's own docs for why that is no longer rejected here.
-    /// `NaN` and `lb > ub` are the only bound values actually invalid at
-    /// this boundary.
+    /// `lb`/`ub` は `+/-inf` でもよい (自由変数・片側非有界の変数。例: MPS の
+    /// `FR`/`MI`/`PL` 境界)。不正なのは NaN と `lb > ub` だけで、その場合は `ValueError`。
     fn add_variable(&mut self, vtype: &str, lb: f64, ub: f64) -> PyResult<usize> {
         let vt = VarType::parse(vtype)?;
         if lb.is_nan() || ub.is_nan() {
@@ -96,13 +78,13 @@ impl PyModel {
         Ok(self.variables.len() - 1)
     }
 
+    /// 登録済みの変数の数。
     fn n_variables(&self) -> usize {
         self.variables.len()
     }
 
-    /// Replaces the model's objective. Python's `Model.set_objective`
-    /// calls this once per `Function`/`sense` pair — a second call simply
-    /// overwrites the first, there is no "add to objective" operation.
+    /// 目的関数を設定する (`sense` は `"minimize"` / `"maximize"`)。
+    /// 2 回目以降の呼び出しは前の目的関数を上書きする (加算ではない)。
     fn set_objective(&mut self, coeffs: Vec<(usize, f64)>, constant: f64, sense: &str) -> PyResult<()> {
         let sense = Sense::parse(sense)?;
         let expr = to_linear_expr(coeffs, constant, self.variables.len())?;
@@ -110,10 +92,8 @@ impl PyModel {
         Ok(())
     }
 
-    /// Appends one constraint row. Python's `Model.add_constraint` calls
-    /// this once per `Constraint` object (each `Constraint` already
-    /// normalized to a single `expr <sense> rhs` row on the Python side
-    /// by the time it reaches here).
+    /// 制約を 1 行追加する (`sense` は `"<="` / `">="` / `"=="`)。Python 側で
+    /// `expr <sense> rhs` の 1 行に正規化済みの `Constraint` 1 つにつき 1 回呼ばれる。
     fn add_constraint(&mut self, coeffs: Vec<(usize, f64)>, sense: &str, rhs: f64) -> PyResult<()> {
         let sense = RowSense::parse(sense)?;
         let expr = to_linear_expr(coeffs, 0.0, self.variables.len())?;
@@ -121,32 +101,23 @@ impl PyModel {
         Ok(())
     }
 
+    /// 登録済みの制約の数。
     fn n_constraints(&self) -> usize {
         self.constraints.len()
     }
 
-    /// Solves the model (via branch-and-bound if any variable is
-    /// `Integer`, a plain LP solve otherwise — `mip::solve_mip` decides
-    /// which) and returns a Python dict with the same four keys
-    /// regardless of outcome: `"status"` (always present),
-    /// `"objective"`/`"x"` (populated only when `status == "optimal"`,
-    /// `None` otherwise), and `"node_limit_hit"` (only ever `True` for a
-    /// MIP that hit `MAX_NODES` before proving optimality). The
-    /// Python-side `Model.solve` wraps this dict into a `Solution`
-    /// namedtuple and raises `InfeasibleError`/`UnboundedError` for the
-    /// corresponding statuses.
+    /// モデルを解き、結果を dict で返す。整数変数があれば分枝限定法、なければ LP を
+    /// 1 回解く (判断は `mip::solve_mip`)。dict のキーは常に次の 4 つ:
+    /// `"status"` (状態文字列)、`"objective"` と `"x"` (`"optimal"` のときだけ値、
+    /// それ以外は `None`)、`"node_limit_hit"` (MIP がノード数上限で打ち切られたときだけ `True`)。
     ///
-    /// `root_solver` selects which LP engine every relaxation is solved
-    /// with (`types::RootSolver::parse`: `"simplex"`, the default, or
-    /// `"interior"`) — both are full independent implementations sharing
-    /// only the presolve pipeline, kept reachable side by side so results
-    /// can be cross-checked rather than one being deleted outright.
+    /// `root_solver`: 各 LP の解法。`"simplex"` (既定) か `"interior"`。
     ///
-    /// `distinguish_infeasible_unbounded` (default `false`): when the
-    /// extended dual simplex's stage A already proves there is no finite
-    /// optimum (`z^1 < 0`), stop and report `"infeasible_or_unbounded"`
-    /// instead of running stage B to tell the two apart
-    /// (`types::LpOptions`'s own docs).
+    /// `distinguish_infeasible_unbounded` (既定 `false`): `false` なら、有限の最適値が
+    /// ないと分かった時点で `"infeasible_or_unbounded"` を返す。`true` なら
+    /// `"infeasible"` と `"unbounded"` を区別する (`types::LpOptions` 参照)。
+    ///
+    /// 目的関数が未設定なら `ValueError`。
     #[pyo3(signature = (root_solver=None, distinguish_infeasible_unbounded=false))]
     fn solve<'py>(&self, py: Python<'py>, root_solver: Option<&str>, distinguish_infeasible_unbounded: bool) -> PyResult<Bound<'py, PyDict>> {
         let objective = self.objective.as_ref().ok_or_else(|| {
@@ -160,6 +131,7 @@ impl PyModel {
         let opts = LpOptions { distinguish_infeasible_unbounded };
         let result = solve_mip(&self.variables, objective, &self.constraints, root_solver, opts);
 
+        // Python に返す結果 dict
         let dict = PyDict::new_bound(py);
         dict.set_item(pyo3::intern!(py, "status"), result.status.as_str())?;
         match result.status {

@@ -1,17 +1,15 @@
-//! Top-level orchestration: dispatch an LP to whichever engine
-//! `root_solver` selects (`types::RootSolver` — `Model.solve`'s
-//! Python-facing `root_solver` argument) and reconstruct the objective
-//! value. `Simplex` (`simplex::solve_lp_dual`, the bounded-variable dual
-//! revised simplex) is the default, having replaced the original IP-PMM
-//! (PIQP-style interior point) path as the primary engine; `Interior`
-//! (`interior_point::solve_lp`) is kept fully reachable rather than
-//! deleted, both as a fallback and so the two independent implementations
-//! can be run against the same input and compared directly.
+//! LP 求解の最上位の振り分け。`root_solver` (`types::RootSolver`、Python の
+//! `Model.solve(root_solver=...)`) で選ばれたエンジンに LP を渡し、
+//! 得られた解から目的関数値 (定数項込み) を計算して `SolveResult` にまとめる。
+//! 既定は `Simplex` (拡張双対単体法)。`Interior` (IP-PMM 内点法) は明示指定時のみ。
 
 use crate::interior_point;
 use crate::simplex;
 use crate::types::{ConstraintRow, LpOptions, Objective, RootSolver, SolveResult, Status, VariableData};
 
+/// LP を 1 回解き、状態・目的関数値・解ベクトルを `SolveResult` で返す。
+/// `Optimal` 以外では `objective`/`x` は `None`。`node_limit_hit` は常に `false`
+/// (MIP の打ち切りは `mip::solve_mip` 側で設定する)。
 pub fn solve_lp(
     variables: &[VariableData],
     objective: &Objective,
@@ -57,6 +55,7 @@ pub fn solve_lp(
         },
         Status::Optimal => {
             let x = x.unwrap();
+            // 目的関数値 = 定数項 + Σ c_j x_j (元の変数空間で計算)
             let obj_val = objective.expr.constant
                 + objective
                     .expr
