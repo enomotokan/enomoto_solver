@@ -5628,6 +5628,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
             // already knows how to fall back (the existing `BIG_M`-clamped
             // classical path in `solve_lp_dual`) without that assumption.
             let handoff_t0 = std::time::Instant::now();
+            let handoff_iters0 = super::prof_phases::RUN_PHASE_ITERS.load(std::sync::atomic::Ordering::Relaxed);
             let status = super::run_phase(std, &mut t, false, &mut lu, &mut since_check, &mut expand, &mut se, &mut stall);
             if profile_phases_polish {
                 eprintln!("PROF_HANDOFF run_phase={:.3}ms ok={}", handoff_t0.elapsed().as_secs_f64() * 1e3, status.is_some());
@@ -5642,7 +5643,8 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
                         Some(NbStatus::Zero) => true_d[j].abs() > TOL,
                     })
                     .count();
-                eprintln!("DEBUG_EXT: primal_handoff_us={} dual_infeasible_cols={n_bad}", handoff_t0.elapsed().as_micros());
+                let handoff_iters = super::prof_phases::RUN_PHASE_ITERS.load(std::sync::atomic::Ordering::Relaxed) - handoff_iters0;
+                eprintln!("DEBUG_EXT: primal_handoff_us={} dual_infeasible_cols={n_bad} primal_handoff_iters={handoff_iters}", handoff_t0.elapsed().as_micros());
             }
             return Some(SimplexResult {
                 status: status.clone(),

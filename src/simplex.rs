@@ -1819,6 +1819,7 @@ fn run_phase(
     let ratio_pivot_tol = if std::env::var("ENOMOTO_PRIMAL_RATIO_PIVOT_TOL_OLD").is_ok() { TOL } else { tunable!("ENOMOTO_T_FT_MIN_PIVOT", FT_MIN_PIVOT, f64) };
     let max_iters = max_iters_for(m, std.n_total);
     for iter_idx in 0..max_iters {
+        prof_phases::RUN_PHASE_ITERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let rhs = t.recompute_basics(lu);
 
         // Triggers (1) and (3): periodic residual / eta-file-fill checks.
@@ -2985,6 +2986,10 @@ mod prof_phases {
     /// this common rather than a rare edge case.
     pub(super) static COMPUTE_RHS_COLS_TOTAL: AtomicUsize = AtomicUsize::new(0);
     pub(super) static COMPUTE_RHS_COLS_SKIPPED: AtomicUsize = AtomicUsize::new(0);
+    /// Iterations [`super::run_phase`] has run (cumulative, per process) —
+    /// read as a before/after difference by `extended_dual`'s primal
+    /// handoff diagnostic (`ENOMOTO_DEBUG_EXT_ITERS`).
+    pub(crate) static RUN_PHASE_ITERS: AtomicUsize = AtomicUsize::new(0);
     pub(super) static ITERS: AtomicUsize = AtomicUsize::new(0);
     /// Per-iteration *shape* of the chuzr/BFRT work, reported alongside
     /// the phase timings above when `ENOMOTO_DEBUG_CHUZR` is also set:
