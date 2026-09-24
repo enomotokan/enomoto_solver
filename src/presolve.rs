@@ -381,7 +381,7 @@ pub fn run_extended(
     // local `Instant`/`eprintln!` here (not the atomics-based `timed!`
     // machinery `simplex.rs` uses) is enough since this function runs
     // once per solve, not once per pivot.
-    let profile = std::env::var("ENOMOTO_PROF_PRESOLVE").is_ok();
+    let profile = env_str!("ENOMOTO_PROF_PRESOLVE").is_some();
     macro_rules! timed_step {
         ($label:expr, $body:expr) => {{
             if profile {
@@ -409,7 +409,7 @@ pub fn run_extended(
     let (na, nb) = timed_step!("reduce_equalities", redundancy::reduce_equalities(&a, &b, n, &pre_lb, &pre_ub));
     a = na;
     b = nb;
-    if profile && std::env::var("ENOMOTO_PROF_REDUNDANCY").is_ok() {
+    if profile && env_str!("ENOMOTO_PROF_REDUNDANCY").is_some() {
         use std::sync::atomic::Ordering::Relaxed;
         let total = redundancy::PROF_TOTAL_STEPS.load(Relaxed);
         let trivial = redundancy::PROF_TRIVIAL_STEPS.load(Relaxed);
@@ -597,7 +597,7 @@ pub fn run_extended(
             if dual_red.implied_equalities.is_empty() && dual_red.fixed_columns.is_empty() {
                 dualpropagate_active = false;
             } else {
-                if std::env::var("ENOMOTO_DEBUG_DUALPROPAGATE").is_ok() {
+                if env_str!("ENOMOTO_DEBUG_DUALPROPAGATE").is_some() {
                     eprintln!("DEBUG_DUALPROPAGATE: implied_equalities={} fixed_columns={}", dual_red.implied_equalities.len(), dual_red.fixed_columns.len());
                 }
                 for &(j, value) in &dual_red.fixed_columns {
@@ -633,9 +633,9 @@ pub fn run_extended(
         // Column singletons in inequality/ranged rows (see `ineqsingleton`'s
         // docs): fix the column at a bound, or turn its row into an
         // equality that `colsingleton` below then substitutes out.
-        if std::env::var("ENOMOTO_INEQ_SINGLETON").is_ok() {
+        if env_str!("ENOMOTO_INEQ_SINGLETON").is_some() {
             let isr = timed_step!("ineqsingleton", ineqsingleton::run(n, &a, &cur_real_rows, &cur_real_rhs, &c, &lb, &ub));
-            if std::env::var("ENOMOTO_DEBUG_INEQ_SINGLETON").is_ok() {
+            if env_str!("ENOMOTO_DEBUG_INEQ_SINGLETON").is_some() {
                 eprintln!("DEBUG_INEQ_SINGLETON: fixes={} implied_equalities={}", isr.fixes.len(), isr.implied_equalities.len());
             }
             for &(j, value) in &isr.fixes {
@@ -905,11 +905,11 @@ pub fn run_extended(
         // than flipping the default a second time on inconclusive numbers —
         // see `presolve-fxhash-and-rebuildg-measured` and the follow-up
         // memory on this specific mismeasurement for the full writeup.
-        let agg = if std::env::var("ENOMOTO_DISABLE_AGGREGATOR").is_ok() {
+        let agg = if env_str!("ENOMOTO_DISABLE_AGGREGATOR").is_some() {
             None
-        } else if std::env::var("ENOMOTO_XROW_AGGREGATOR").is_ok() {
+        } else if env_str!("ENOMOTO_XROW_AGGREGATOR").is_some() {
             Some(timed_step!("aggregator", aggregator::eliminate_implied_free_columns_xrow(n, &a, &b, &c, &lb, &ub, &cur_real_rows, &cur_real_rhs)))
-        } else if std::env::var("ENOMOTO_ROWLOCAL_AGGREGATOR").is_ok() {
+        } else if env_str!("ENOMOTO_ROWLOCAL_AGGREGATOR").is_some() {
             // `None` = nothing eliminated (the problem is unchanged).
             timed_step!("aggregator", aggregator::eliminate_implied_free_columns_if_any(n, &a, &b, &c, &lb, &ub, &cur_real_rows, &cur_real_rhs))
         } else {
@@ -918,7 +918,7 @@ pub fn run_extended(
             Some(timed_step!("aggregator", aggregator::eliminate_implied_free_columns_v2(n, &a, &b, &c, &lb, &ub, &cur_real_rows, &cur_real_rhs, aggregator::AggOptions::from_env())))
         };
         if let Some(agg) = agg {
-            if std::env::var("ENOMOTO_DEBUG_AGGREGATOR").is_ok() {
+            if env_str!("ENOMOTO_DEBUG_AGGREGATOR").is_some() {
                 eprintln!("DEBUG_AGGREGATOR: eliminated={}", agg.substitutions.len());
             }
             if !agg.substitutions.is_empty() {
@@ -1001,13 +1001,13 @@ pub fn run_extended(
         // `bigm-fallback-invalid-reference` memory), which then reported a
         // false `Infeasible`. Fixed by rejecting that specific fold
         // outright rather than by touching anything downstream.
-        let pc = if parallelcols_active && std::env::var("ENOMOTO_DISABLE_PARALLELCOLS").is_err() {
+        let pc = if parallelcols_active && env_str!("ENOMOTO_DISABLE_PARALLELCOLS").is_none() {
             Some(timed_step!("parallelcols", parallelcols::merge_parallel_columns(n, &a, &cur_real_rows, &c, &lb, &ub)))
         } else {
             None
         };
         if let Some(pc) = pc {
-            if std::env::var("ENOMOTO_DEBUG_PARALLELCOLS").is_ok() {
+            if env_str!("ENOMOTO_DEBUG_PARALLELCOLS").is_some() {
                 eprintln!("DEBUG_PARALLELCOLS: eliminated={}", pc.substitutions.len());
             }
             if pc.substitutions.is_empty() {
@@ -1086,7 +1086,7 @@ pub fn run_extended(
         // never calls a fixpoint, burning every remaining round. The
         // tightened bounds themselves are still kept.
         let same = |p: &(usize, usize, Vec<f64>, Vec<f64>)| {
-            if std::env::var("ENOMOTO_FIXPOINT_EXACT").is_ok() {
+            if env_str!("ENOMOTO_FIXPOINT_EXACT").is_some() {
                 return *p == signature;
             }
             let close = |x: &[f64], y: &[f64]| x.iter().zip(y).all(|(&u, &v)| u == v || (u - v).abs() <= 1e-3 * (1.0 + u.abs().max(v.abs())));
@@ -1151,7 +1151,7 @@ pub fn run_extended(
     // not before: an already-eliminated column's own box row is long gone
     // by this point, so without pinning it to `[0,0]` first it would
     // misread here as a genuinely fresh free variable.
-    let free = if std::env::var("ENOMOTO_DISABLE_FREEVAR").is_ok() {
+    let free = if env_str!("ENOMOTO_DISABLE_FREEVAR").is_some() {
         freevar::FreeVarResult {
             a: a.clone(),
             b: b.clone(),
@@ -1165,7 +1165,7 @@ pub fn run_extended(
     } else {
         timed_step!("freevar", freevar::eliminate_free_variables(n, &a, &b, &c, &lb, &ub, &prop.real_rows, &prop.real_rhs))
     };
-    if std::env::var("ENOMOTO_DEBUG_FREEVAR").is_ok() {
+    if env_str!("ENOMOTO_DEBUG_FREEVAR").is_some() {
         eprintln!("DEBUG_FREEVAR: eliminated={} fixed={} unbounded={}", free.substitutions.len(), free.fixed.len(), free.unbounded);
     }
     if free.unbounded {
@@ -1191,7 +1191,7 @@ pub fn run_extended(
     }
 
     let (g, h) = propagate::rebuild_g_ref(n, &free.real_rows, &free.real_rhs, &lb, &ub);
-    if std::env::var("ENOMOTO_DEBUG_PRESOLVE_HASH").is_ok() {
+    if env_str!("ENOMOTO_DEBUG_PRESOLVE_HASH").is_some() {
         eprintln!("PRESOLVE_HASH {:016x} m_eq={} m_le={} post={}", presolve_output_hash(&a, &b, &g, &h, &c, &lb, &ub), a.nrows(), g.nrows(), postsolve_log.len());
     }
 

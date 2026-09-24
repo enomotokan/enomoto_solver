@@ -852,8 +852,7 @@ const SYNTH_CLOCK_FACTOR: f64 = 16.0;
 fn synth_clock_factor() -> f64 {
     static FACTOR: OnceLock<f64> = OnceLock::new();
     *FACTOR.get_or_init(|| {
-        std::env::var("ENOMOTO_SYNTH_CLOCK_FACTOR")
-            .ok()
+        env_str!("ENOMOTO_SYNTH_CLOCK_FACTOR")
             .and_then(|s| s.parse::<f64>().ok())
             .filter(|f| f.is_finite() && *f > 0.0)
             .unwrap_or(SYNTH_CLOCK_FACTOR)
@@ -1312,7 +1311,7 @@ fn nb_value_affine(cache: &ColCache, status: NbStatus, j: usize) -> Option<Affin
         NbStatus::Upper => cache.upper[j],
         NbStatus::Zero => Some(Affine1::ZERO),
     };
-    if r.is_none() && std::env::var("ENOMOTO_DEBUG_EXT_ITERS").is_ok() {
+    if r.is_none() && env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
         eprintln!("DEBUG_EXT_BAILOUT: nb_value_affine None at j={j} status={status:?}");
     }
     r
@@ -1353,7 +1352,7 @@ fn refactorize(
     let r = sparse_lu::factorize_diagonal(m, &rows)
         .map(sparse_lu::FtLu::new)
         .or_else(|| sparse_lu::factorize_reusing(m, &rows, prev));
-    if r.is_none() && std::env::var("ENOMOTO_DEBUG_EXT_ITERS").is_ok() {
+    if r.is_none() && env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
         eprintln!("DEBUG_EXT_BAILOUT: refactorize returned None (singular basis)");
     }
     r
@@ -2145,7 +2144,7 @@ fn refine_zero_cost_placement(std: &StdForm, active_cost: &mut [f64], nb_status:
     if flexible.is_empty() {
         return;
     }
-    let debug = std::env::var("ENOMOTO_DEBUG_EXT_CRASH").is_ok();
+    let debug = env_str!("ENOMOTO_DEBUG_EXT_CRASH").is_some();
     let violation = |v: f64, lo: f64, hi: f64| -> f64 {
         if v < lo { lo - v } else if v > hi { v - hi } else { 0.0 }
     };
@@ -2455,7 +2454,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     // stage solves ([`Phase`]'s own docs): the slope problem first, then the
     // intercept problem, swapped at the stage A -> B handoff.
     let cache_orig = ColCache::build(std, n_orig);
-    let mut phase = if std::env::var("ENOMOTO_LEX_EXTENDED").is_ok_and(|v| v != "0") { Phase::Lex } else { Phase::A };
+    let mut phase = if env_str!("ENOMOTO_LEX_EXTENDED").is_some_and(|v| v != "0") { Phase::Lex } else { Phase::A };
     let mut cache = match phase {
         Phase::A => ColCache::slope_problem(&cache_orig),
         _ => ColCache::build(std, n_orig),
@@ -2492,7 +2491,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     let mut nb_status = crash(std, &active_cost, n_orig);
     // EXPERIMENTAL, confirmed not to help by default — see
     // `refine_zero_cost_placement`'s own docs for the measured regressions.
-    if std::env::var("ENOMOTO_CRASH_ZERO_COST_PLACEMENT").is_ok_and(|v| v != "0") {
+    if env_str!("ENOMOTO_CRASH_ZERO_COST_PLACEMENT").is_some_and(|v| v != "0") {
         refine_zero_cost_placement(std, &mut active_cost, &mut nb_status, n_orig);
     }
     // Stage A is empty when crash parks no nonbasic column on an `M` side
@@ -2511,7 +2510,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         phase = Phase::B;
         cache = ColCache::intercept_problem(&cache_orig, &nb_status, &basis, &vec![0.0; m])?;
         width_inf = cache.width.iter().map(|w| w.is_none()).collect();
-        if std::env::var("ENOMOTO_DEBUG_EXT_ITERS").is_ok() {
+        if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
             eprintln!("DEBUG_EXT: stage A skipped (S empty)");
         }
     }
@@ -2567,19 +2566,19 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     let mut tau_scratch = vec![0.0f64; m];
     // `ENOMOTO_FUSED_DSE_FTRAN=0` restores the two separate solves (A/B
     // only — the fused form is bit-identical, see its own docs).
-    let fused_dse_ftran = std::env::var("ENOMOTO_FUSED_DSE_FTRAN").map_or(true, |v| v != "0");
+    let fused_dse_ftran = env_str!("ENOMOTO_FUSED_DSE_FTRAN").map_or(true, |v| v != "0");
     // BFRT combined-flip FTRAN (dense branch) folded into the same fused
     // traversal as a third vector ([`sparse_lu::FtLu::solve_into_triple_capture`]);
     // `ENOMOTO_FUSED_BFRT_FTRAN=0` restores the separate solve (A/B only —
     // bit-identical). `combined_scratch` is that third vector's scratch.
-    let fused_bfrt_ftran = std::env::var("ENOMOTO_FUSED_BFRT_FTRAN").map_or(true, |v| v != "0");
+    let fused_bfrt_ftran = env_str!("ENOMOTO_FUSED_BFRT_FTRAN").map_or(true, |v| v != "0");
     let mut combined_scratch = vec![0.0f64; m];
     // Apply the BFRT combined-flip result to `x_B(M)` inside the entering
     // column's own `x_B` update loop (one pass, one `refresh_row` per row)
     // instead of a separate `0..m` pass. `ENOMOTO_MERGE_FLIP_XB=0` restores
     // the separate pass (A/B only). Per-row arithmetic is unchanged; only the
     // order of `InfeasibleRows` membership changes can differ.
-    let merge_flip_xb = std::env::var("ENOMOTO_MERGE_FLIP_XB").map_or(true, |v| v != "0");
+    let merge_flip_xb = env_str!("ENOMOTO_MERGE_FLIP_XB").map_or(true, |v| v != "0");
     // Dedicated `try_update_precomputed` capture buffers — see
     // `super::solve_lp_dual_on`'s own identical pair (`a_tilde_buf`/
     // `e_tilde_buf`) for the full reasoning: `e_tilde_buf` is filled as a
@@ -2642,7 +2641,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     // used to feed into `d`, so the pivot path can drift.
     // `price_nb_end[i]` is row `i`'s partition boundary; with the flag off
     // it is simply the row end (every non-fixed column priced, as before).
-    let price_nonbasic_only = std::env::var("ENOMOTO_PRICE_NONBASIC_ONLY").map_or(true, |v| v != "0");
+    let price_nonbasic_only = env_str!("ENOMOTO_PRICE_NONBASIC_ONLY").map_or(true, |v| v != "0");
     let mut price_nb_end: Vec<usize> = price_start[1..].to_vec();
     if price_nonbasic_only {
         let mut tmp: Vec<(u32, f64)> = Vec::new();
@@ -2713,7 +2712,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     // below, instead of recomputing it in `O(nnz(A))` at every check; every
     // full resync re-anchors it to `compute_rhs_affine`'s own value.
     // `ENOMOTO_XB_RHS_INCREMENTAL=0` restores the full recompute (A/B only).
-    let rhs_incremental = std::env::var("ENOMOTO_XB_RHS_INCREMENTAL").map_or(true, |v| v != "0");
+    let rhs_incremental = env_str!("ENOMOTO_XB_RHS_INCREMENTAL").map_or(true, |v| v != "0");
     let mut rhs_inc_base = seed_base;
     let mut rhs_inc_slope = seed_slope;
 
@@ -2790,8 +2789,8 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     // only add cost for no benefit DSE wasn't already providing.
     const GREATEST_IMPROVEMENT_TOP_K: usize = 8;
     let greatest_improvement_stall_threshold = (stall_limit / 4).max(30);
-    let greatest_improvement_enabled = std::env::var("ENOMOTO_DISABLE_GREATEST_IMPROVEMENT").is_err();
-    let debug_greatest_improvement = std::env::var("ENOMOTO_DEBUG_EXT_GREATEST_IMPROVEMENT").is_ok();
+    let greatest_improvement_enabled = env_str!("ENOMOTO_DISABLE_GREATEST_IMPROVEMENT").is_none();
+    let debug_greatest_improvement = env_str!("ENOMOTO_DEBUG_EXT_GREATEST_IMPROVEMENT").is_some();
     let mut gi_candidates: Vec<(usize, i32, Affine1, Score2)> = Vec::with_capacity(GREATEST_IMPROVEMENT_TOP_K * 4);
     // See the infeasible-row-count plateau check's own docs (this loop's
     // body, next to `stall_count`'s own increment) — a much larger
@@ -2814,7 +2813,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     // Override for A/B testing [`XB_DRIFT_TOL`] itself (the escalation
     // ladder's own starting point) — see that constant's own docs for the
     // four prior single-knob attempts this per-solve escalation replaced.
-    let xb_drift_tol: f64 = std::env::var("ENOMOTO_XB_DRIFT_TOL").ok().and_then(|s| s.parse::<f64>().ok()).unwrap_or(XB_DRIFT_TOL);
+    let xb_drift_tol: f64 = env_str!("ENOMOTO_XB_DRIFT_TOL").and_then(|s| s.parse::<f64>().ok()).unwrap_or(XB_DRIFT_TOL);
     // Escalation state for [`XB_DRIFT_TOL`]'s own per-solve ladder — counts
     // drift-triggered refactorizations *in this solve only* (reset to `0`
     // for every call, unlike a module-level constant); see that constant's
@@ -2832,8 +2831,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     // (see [`PIVOT_ESCALATION_STEP`]) and tightens the *factorization*
     // instead. `0` disables the escalation entirely, which is how the A/B
     // behind it is produced without a rebuild.
-    let pivot_escalation_step: usize = std::env::var("ENOMOTO_PIVOT_ESCALATION_STEP")
-        .ok()
+    let pivot_escalation_step: usize = env_str!("ENOMOTO_PIVOT_ESCALATION_STEP")
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(PIVOT_ESCALATION_STEP);
     let mut numeric_trouble_count: usize = 0;
@@ -2865,18 +2863,18 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     // `super::update_verify`'s own env-var escape hatch, hoisted outside
     // the loop for the same reason `super::solve_lp_dual_on` hoists its
     // own copy: a single `bool` branch per pivot, not an `env::var` call.
-    let update_verify_disabled = std::env::var("ENOMOTO_DISABLE_UPDATE_VERIFY").is_ok();
+    let update_verify_disabled = env_str!("ENOMOTO_DISABLE_UPDATE_VERIFY").is_some();
     // Hoisted for the same reason: `ENOMOTO_DEBUG_D_DRIFT_EXT` used to be
     // looked up with `std::env::var` (environment lock + linear scan +
     // `String` allocation) on *every* pivot just to guard a debug print.
-    let debug_d_drift_ext = std::env::var("ENOMOTO_DEBUG_D_DRIFT_EXT").is_ok();
+    let debug_d_drift_ext = env_str!("ENOMOTO_DEBUG_D_DRIFT_EXT").is_some();
     // `ENOMOTO_PROF_PHASES_EXT` — this module's own counterpart to
     // `simplex::solve_lp_dual`'s `ENOMOTO_PROF_PHASES` (see [`prof_phases`]'s
     // own docs). Hoisted here for the same reason: a single `bool` branch
     // per phase per iteration, not an `env::var` call. Only covers this
     // function's own main loop, not `polish_with_true_bounds`'s separate
     // (and typically far shorter) cleanup loop.
-    let profile_phases = std::env::var("ENOMOTO_PROF_PHASES_EXT").is_ok();
+    let profile_phases = env_str!("ENOMOTO_PROF_PHASES_EXT").is_some();
     if profile_phases {
         prof_phases::reset();
         prof_phases::STAT_M.store(m, std::sync::atomic::Ordering::Relaxed);
@@ -2886,7 +2884,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     // PRICE entries, touched columns, chuzc1 candidates). Separate because
     // gathering them costs `O(m + PRICE entries)` per iteration outside
     // every phase timer — enough to distort the report's own wall total.
-    let profile_work = profile_phases && std::env::var("ENOMOTO_PROF_PHASES_EXT_WORK").is_ok_and(|v| v != "0");
+    let profile_work = profile_phases && env_str!("ENOMOTO_PROF_PHASES_EXT_WORK").is_some_and(|v| v != "0");
     // Diagnostic only (`ENOMOTO_DEBUG_EXT_DELTA0`): the paper's own
     // remark (\S4.5's absorbing-boundary result, `prop:no-return`) says
     // that once every M-flagged structural column is off its `M` side —
@@ -2987,9 +2985,9 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     // sweep with the refresh off: -10.8% total wall time, no status or
     // objective changes. `ENOMOTO_DSE_REFRESH_ON_REFACTOR=1` re-enables it
     // for A/B comparison if a future drift regression reappears.
-    let dse_refresh_on_refactor = std::env::var("ENOMOTO_DSE_REFRESH_ON_REFACTOR").is_ok_and(|v| v != "0");
-    let debug_delta0 = std::env::var("ENOMOTO_DEBUG_EXT_DELTA0").is_ok();
-    let debug_ext_iters_verbose = std::env::var("ENOMOTO_DEBUG_EXT_TRACE").is_ok();
+    let dse_refresh_on_refactor = env_str!("ENOMOTO_DSE_REFRESH_ON_REFACTOR").is_some_and(|v| v != "0");
+    let debug_delta0 = env_str!("ENOMOTO_DEBUG_EXT_DELTA0").is_some();
+    let debug_ext_iters_verbose = env_str!("ENOMOTO_DEBUG_EXT_TRACE").is_some();
     // A zero-cost free column `crash` placed at `Zero` starts off its `M`
     // sides already (value `0`), so it is not counted as M-flagged here:
     // the main phase never moves a column back to `Zero` or from `Zero` to
@@ -3116,17 +3114,15 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     // 4762 over the same span), which is what this tracks.
     let mut best_remaining_m_side = remaining_m_side;
     let mut iters_since_m_progress: usize = 0;
-    let score2_stall_halflife: f64 = std::env::var("ENOMOTO_SCORE2_STALL_HALFLIFE")
-        .ok()
+    let score2_stall_halflife: f64 = env_str!("ENOMOTO_SCORE2_STALL_HALFLIFE")
         .and_then(|s| s.parse::<f64>().ok())
         .unwrap_or(50.0);
-    let score2_max_tol = std::env::var("ENOMOTO_SCORE2_ADAPTIVE_MAX_TOL")
-        .ok()
+    let score2_max_tol = env_str!("ENOMOTO_SCORE2_ADAPTIVE_MAX_TOL")
         .and_then(|s| s.parse::<f64>().ok())
         .unwrap_or(1e-9);
     let wall_t0 = std::time::Instant::now();
 
-    let debug_dual_check = std::env::var("ENOMOTO_DEBUG_EXT_DUAL_CHECK").is_ok();
+    let debug_dual_check = env_str!("ENOMOTO_DEBUG_EXT_DUAL_CHECK").is_some();
     let mut dual_violation_reported = false;
     let mut prev_q: Option<usize> = None;
     let mut prev_r: Option<usize> = None;
@@ -3175,12 +3171,10 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     // re-selection) rather than reweighting chuzr's own row scores.
     let mut stuck_row: Option<usize> = None;
     let mut stuck_row_streak: usize = 0;
-    let stuck_row_boost_threshold: usize = std::env::var("ENOMOTO_STUCK_ROW_BOOST_THRESHOLD")
-        .ok()
+    let stuck_row_boost_threshold: usize = env_str!("ENOMOTO_STUCK_ROW_BOOST_THRESHOLD")
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(3);
-    let stuck_row_boost_factor: f64 = std::env::var("ENOMOTO_STUCK_ROW_BOOST_FACTOR")
-        .ok()
+    let stuck_row_boost_factor: f64 = env_str!("ENOMOTO_STUCK_ROW_BOOST_FACTOR")
         .and_then(|s| s.parse::<f64>().ok())
         .unwrap_or(1.0);
 
@@ -3435,7 +3429,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 // FTRAN stage A ever needed. The basis, `d` and the DSE
                 // weights carry over unchanged: `c` and `B` are shared by
                 // both problems, so dual feasibility does too.
-                if std::env::var("ENOMOTO_DEBUG_EXT_ITERS").is_ok() {
+                if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
                     let z1: f64 = (0..n_total)
                         .map(|j| {
                             let s = match (basis_pos[j], nb_status[j]) {
@@ -3468,7 +3462,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
             }
             // Primal feasible for the M-truncated problem (\S4.5's
             // `V_infty = empty`; stage B's optimum): proceed to Step III.
-            if std::env::var("ENOMOTO_DEBUG_EXT_ITERS").is_ok() {
+            if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
                 eprintln!("DEBUG_EXT: main_loop_iters={_iter} bland_mode={bland_mode}");
             }
             if debug_delta0 {
@@ -3727,7 +3721,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
             // Genuine mathematical conclusion (Proposition 4.6, the
             // classical `Eligible = empty` case), not a numerical
             // artifact — reported directly, no fallback.
-            if std::env::var("ENOMOTO_DEBUG_EXT_INFEASIBLE").is_ok() {
+            if env_str!("ENOMOTO_DEBUG_EXT_INFEASIBLE").is_some() {
                 eprintln!(
                     "DEBUG_EXT_INFEASIBLE: site=eligible_empty iter={_iter} r={r} basis_r={} d_dir={d_dir} w_r=({},{}) noise_feasible_check_failed=true remaining_m_side={remaining_m_side}",
                     basis[r], w_r.base, w_r.slope
@@ -3758,7 +3752,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 // never prove infeasibility (`prop:two-phase` (i)): reaching
                 // here is numerical breakdown, not a conclusion — bail to the
                 // caller's fallback instead of reporting a false `Infeasible`.
-                if std::env::var("ENOMOTO_DEBUG_EXT_ITERS").is_ok() {
+                if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
                     eprintln!("DEBUG_EXT_BAILOUT: stage A found no entering column at iter={_iter} r={r} (numerical)");
                 }
                 return None;
@@ -3895,7 +3889,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
             }
             // Every eligible column fully flipped and still short:
             // Proposition 4.6(ii) — genuine, reported directly.
-            if std::env::var("ENOMOTO_DEBUG_EXT_INFEASIBLE").is_ok() {
+            if env_str!("ENOMOTO_DEBUG_EXT_INFEASIBLE").is_some() {
                 eprintln!(
                     "DEBUG_EXT_INFEASIBLE: site=bfrt_exhausted iter={_iter} r={r} basis_r={} d_dir={d_dir} w_r=({},{}) n_candidates={} cum=({},{}) remaining_m_side={remaining_m_side}",
                     basis[r], w_r.base, w_r.slope, n_candidates, cum.base, cum.slope
@@ -3909,7 +3903,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 // never prove infeasibility (`prop:two-phase` (i)): reaching
                 // here is numerical breakdown, not a conclusion — bail to the
                 // caller's fallback instead of reporting a false `Infeasible`.
-                if std::env::var("ENOMOTO_DEBUG_EXT_ITERS").is_ok() {
+                if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
                     eprintln!("DEBUG_EXT_BAILOUT: stage A found no entering column at iter={_iter} r={r} (numerical)");
                 }
                 return None;
@@ -4389,7 +4383,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
             (alpha_q - alpha_full[r]).abs() / scale > D_GROSS_MISMATCH_REL_TOL
         };
         if pivot_grossly_inconsistent || (!update_verify_disabled && lu.update_count() > 0 && !super::update_verify(alpha_q, alpha_full[r])) {
-            if std::env::var("ENOMOTO_DEBUG_D_DRIFT_EXT").is_ok() {
+            if env_str!("ENOMOTO_DEBUG_D_DRIFT_EXT").is_some() {
                 eprintln!("DEBUG_D_DRIFT: VERIFY_FAIL at iter={_iter} q={q} r={r} alpha_q={alpha_q} alpha_full_r={}", alpha_full[r]);
             }
             if stuck_row == Some(r) {
@@ -4977,7 +4971,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                     let mult: f64 = tunable!("ENOMOTO_XB_DRIFT_MIN_UPDATES_MULT", 100.0, f64);
                     effective_drift_tol = effective_drift_tol.max((mult * effective_drift_tol).min(XB_DRIFT_TOL_MAX));
                 }
-                if std::env::var("ENOMOTO_DEBUG_XB_DRIFT_EXT").is_ok() {
+                if env_str!("ENOMOTO_DEBUG_XB_DRIFT_EXT").is_some() {
                     eprintln!(
                         "DEBUG_XB_DRIFT: iter={_iter} resid_base={resid_base:.3e} resid_slope={resid_slope:.3e} drift_trigger_count={drift_trigger_count} effective_tol={effective_drift_tol:.3e}"
                     );
@@ -5021,7 +5015,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                     }
                     let resid_d = resid_sq.sqrt();
                     let scale_d = scale_sq.sqrt().max(1.0);
-                    if std::env::var("ENOMOTO_DEBUG_D_DRIFT_EXT").is_ok() {
+                    if env_str!("ENOMOTO_DEBUG_D_DRIFT_EXT").is_some() {
                         eprintln!("DEBUG_D_DRIFT: iter={_iter} resid_d={resid_d:.3e} scale_d={scale_d:.3e} rel={:.3e}", resid_d / scale_d);
                     }
                     if resid_d > D_DRIFT_TOL * scale_d {
@@ -5069,7 +5063,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     if profile_phases {
         prof_phases::report(wall_t0.elapsed().as_nanos() as usize);
     }
-    if std::env::var("ENOMOTO_DEBUG_EXT_ITERS").is_ok() {
+    if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
         eprintln!(
             "DEBUG_EXT_BAILOUT: max_iters={max_iters} exhausted bland_mode={bland_mode} stall_count={stall_count} remaining_m_side={remaining_m_side} n_m_flagged={}",
             m_flagged_cols.len()
@@ -5109,7 +5103,7 @@ fn finish(std: &StdForm, basis: &mut [usize], basis_pos: &mut [Option<usize>], n
     // separate tolerance for accumulated-magnitude checks (see
     // `simplex.rs::PRIMAL_FEAS_TOL`'s own docs for the same reasoning).
     const Z_SLOPE_TOL: f64 = 1e-7;
-    if std::env::var("ENOMOTO_DEBUG_EXT_ITERS").is_ok() {
+    if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
         eprintln!("DEBUG_EXT: z=({},{}) z0_base={}", z.base, z.slope, z_b.base);
     }
     if z.slope < -Z_SLOPE_TOL {
@@ -5139,9 +5133,9 @@ fn finish(std: &StdForm, basis: &mut [usize], basis_pos: &mut [Option<usize>], n
     // `CscMat::col_into_dense` each pivot, rather than a fresh `Vec` per
     // cleanup pivot.
     let mut dense_j = vec![0.0f64; std.n_rows];
-    let debug_ext = std::env::var("ENOMOTO_DEBUG_EXT_ITERS").is_ok();
+    let debug_ext = env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some();
     let mut cleanup_count = 0usize;
-    if std::env::var("ENOMOTO_LEGACY_CLEANUP").map_or(true, |v| v == "0") {
+    if env_str!("ENOMOTO_LEGACY_CLEANUP").map_or(true, |v| v == "0") {
         let (mut x_b_base, mut x_b_slope) = (x_b_base, x_b_slope);
         let m = std.n_rows;
         let at_m_side = |j: usize, nb_status: &[Option<NbStatus>]| match nb_status[j] {
@@ -5416,7 +5410,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
     // this phase has no other profiling instrumentation, so this trigger's
     // own fire count is tracked in a plain local rather than threading a
     // new module-level atomic through a function that otherwise has none.
-    let profile_phases_polish = std::env::var("ENOMOTO_PROF_PHASES_EXT").is_ok();
+    let profile_phases_polish = env_str!("ENOMOTO_PROF_PHASES_EXT").is_some();
     let mut polish_clock_refactors = 0usize;
     let mut polish_refactors = 0usize;
 
@@ -5484,7 +5478,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
     let mut sparse_buf: Vec<(usize, f64)> = Vec::with_capacity(m);
 
     let mut noise_feasible = vec![false; n_total];
-    let update_verify_disabled = std::env::var("ENOMOTO_DISABLE_UPDATE_VERIFY").is_ok();
+    let update_verify_disabled = env_str!("ENOMOTO_DISABLE_UPDATE_VERIFY").is_some();
 
     // `x_B`'s own one-time seed ([`compute_rhs_plain`]'s own docs) — every
     // iteration from here on maintains it incrementally instead of paying
@@ -5557,7 +5551,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
                     },
                 };
             }
-            if std::env::var("ENOMOTO_DEBUG_EXT_ITERS").is_ok() {
+            if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
                 let obj: f64 = (0..n_total).map(|j| std.c[j] * x[j]).sum();
                 eprintln!("DEBUG_EXT: polish_iters={_iter} bland_mode={bland_mode} obj={obj}");
             }
@@ -5616,7 +5610,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
             let mut expand = super::ExpandState::new();
             let mut se = super::SteepestEdgeState::new(std);
             let mut stall = super::PrimalStallState::new();
-            if std::env::var("ENOMOTO_DEBUG_EXT_ITERS").is_ok() {
+            if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
                 eprintln!("DEBUG_EXT: polish DUAL->PRIMAL cleanup handoff at polish_iter={_iter}");
             }
             // Unlike `solve_lp_dual_on`'s identical handoff, a singular
@@ -5633,7 +5627,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
                 eprintln!("PROF_HANDOFF run_phase={:.3}ms ok={}", handoff_t0.elapsed().as_secs_f64() * 1e3, status.is_some());
             }
             let status = status?;
-            if std::env::var("ENOMOTO_DEBUG_EXT_ITERS").is_ok() {
+            if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
                 let n_bad = (0..n_total)
                     .filter(|&j| match nb_status[j] {
                         None => false,
