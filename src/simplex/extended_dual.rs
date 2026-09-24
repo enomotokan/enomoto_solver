@@ -1548,6 +1548,121 @@ fn resolve_x_b_into(lu: &sparse_lu::FtLu, rhs_base: &[f64], rhs_slope: &[f64], s
     }
 }
 
+/// Which problem the main loop is currently solving (paper \S4.8-\S4.10,
+/// Algorithm `alg:extended`). `A` and `B` are the three-stage algorithm's
+/// first two stages; the third (the cleanup lemma's primal push) is
+/// [`finish`]. `Lex` is the previous single-loop form that compares every
+/// `M`-affine quantity as a `(slope, base)` pair throughout
+/// (`ENOMOTO_LEX_EXTENDED=1`, kept for A/B comparison only).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Phase {
+    Lex,
+    /// Stage A, the slope problem (`eq:slope`): only `x^1` is maintained,
+    /// against the bounds `l^1, u^1` alone ([`ColCache::slope_problem`]).
+    /// The intercept `x^0` is never computed — no base-channel FTRAN at any
+    /// seed/resync or BFRT flip — until the handoff to `B` solves it once.
+    A,
+    /// Stage B, the intercept problem (`eq:intercept`): `x^1` is frozen
+    /// (`prop:two-phase` (ii)), so the loop is the classical real-valued
+    /// dual simplex over the bounds `l^B, u^B` ([`ColCache::intercept_problem`]).
+    B,
+}
+
+/// Absolute tolerance on an `M`-coefficient: stage A treats a slope
+/// deviation as positive only above it, and the stage A -> B handoff counts
+/// a basic `x^1_j` as sitting *on* its slope bound `l^1_j`/`u^1_j` (so that
+/// bound survives into `l^B`/`u^B`) within it. Matches
+/// [`Affine1::gt_zero`]'s own slope threshold, so the stage split draws the
+/// line exactly where the lexicographic comparison it replaces did.
+const SLOPE_TOL: f64 = 1e-9;
+
+/// [`compute_rhs_affine`]'s slope channel alone — stage A's right-hand side
+/// `0 - N x_N^1` (`eq:slope` has right-hand side `0`), with the same
+/// empty-means-identically-zero convention.
+fn compute_rhs_slope_only(std: &StdForm, cache: &ColCache, nb_status: &[Option<NbStatus>]) -> Option<Vec<f64>> {
+    let mut rhs_slope: Vec<f64> = Vec::new();
+    for j in 0..std.n_total {
+        let Some(status) = nb_status[j] else { continue };
+        let val = nb_value_affine(cache, status, j)?;
+        if val.slope == 0.0 {
+            continue;
+        }
+        if rhs_slope.is_empty() {
+            rhs_slope = vec![0.0; std.n_rows];
+        }
+        for &(i, v) in std.cols.col(j) {
+            rhs_slope[i] -= v * val.slope;
+        }
+    }
+    Some(rhs_slope)
+}
+
+/// [`resolve_x_b_into`] for stage A: solves the slope channel only and
+/// leaves `x_b_base` at its stage-A value of exact zero (no FTRAN).
+fn resolve_x_b_slope_only(lu: &sparse_lu::FtLu, rhs_slope: &[f64], scratch: &mut [f64], x_b_base: &mut [f64], x_b_slope: &mut [f64]) {
+    x_b_base.fill(0.0);
+    if rhs_slope.is_empty() {
+        lu.add_zero_rhs_solve_ticks(false);
+        x_b_slope.fill(0.0);
+    } else {
+        lu.solve_into(rhs_slope, scratch, x_b_slope);
+        snap_slopes(x_b_slope);
+    }
+}
+
+/// Full `x_B(M)` resync from `nb_status` for the current stage: returns the
+/// fresh right-hand side pair (the drift check's `rhs_inc_*` anchor) after
+/// solving it into `x_b_base`/`x_b_slope`. Stage A solves the slope channel
+/// only and returns an all-zero base (`eq:slope`'s right-hand side is `0`
+/// and every stage-A bound has intercept `0`); stage B's bounds carry no
+/// slope, so its slope channel comes back empty and is skipped by
+/// [`resolve_x_b_into`] itself.
+#[allow(clippy::too_many_arguments)]
+fn resync_x_b(
+    std: &StdForm,
+    cache: &ColCache,
+    nb_status: &[Option<NbStatus>],
+    lu: &sparse_lu::FtLu,
+    phase: Phase,
+    scratch: &mut [f64],
+    x_b_base: &mut [f64],
+    x_b_slope: &mut [f64],
+) -> Option<(Vec<f64>, Vec<f64>)> {
+    if phase == Phase::A {
+        let rhs_slope = compute_rhs_slope_only(std, cache, nb_status)?;
+        resolve_x_b_slope_only(lu, &rhs_slope, scratch, x_b_base, x_b_slope);
+        Some((vec![0.0; std.n_rows], rhs_slope))
+    } else {
+        let (rhs_base, rhs_slope) = compute_rhs_affine(std, cache, nb_status)?;
+        resolve_x_b_into(lu, &rhs_base, &rhs_slope, scratch, x_b_base, x_b_slope);
+        Some((rhs_base, rhs_slope))
+    }
+}
+
+/// [`residual_norm_affine`]'s slope channel alone, for stage A's drift
+/// check (`rhs_slope` empty = identically zero).
+fn residual_norm_slope(std: &StdForm, basis: &[usize], x_b_slope: &[f64], rhs_slope: &[f64], scratch: &mut [f64]) -> f64 {
+    if rhs_slope.is_empty() {
+        return 0.0;
+    }
+    scratch.iter_mut().for_each(|v| *v = 0.0);
+    for (pos, &j) in basis.iter().enumerate() {
+        let s = x_b_slope[pos];
+        if s == 0.0 {
+            continue;
+        }
+        for &(i, v) in std.cols.col(j) {
+            scratch[i] += v * s;
+        }
+    }
+    let mut resid_sq = 0.0f64;
+    for i in 0..std.n_rows {
+        let r = scratch[i] - rhs_slope[i];
+        resid_sq += r * r;
+    }
+    resid_sq.sqrt()
+}
+
 /// `x_B(M) = base + slope*M` (Lemma 4.1), as two independent FTRAN solves
 /// against the *same* factorization — the "M-dependent and M-independent
 /// parts are the same linear operation, run twice" structure this whole
@@ -2253,6 +2368,52 @@ impl ColCache {
         let width: Vec<Option<Affine1>> = (0..n_total).map(|j| width_affine(lower[j], upper[j])).collect();
         ColCache { lower, upper, width }
     }
+
+    /// Stage A's bounds (`eq:slope`): each side keeps only its
+    /// `M`-coefficient (`l^1 in {-1, 0}`, `u^1 in {0, 1}`; a finite side
+    /// becomes `0`), and a genuine infinity (an inequality row's slack)
+    /// stays absent. The widths are then exactly the slope-channel flip
+    /// capacities `s_j` of \S4.6.
+    fn slope_problem(orig: &ColCache) -> Self {
+        let slope_only = |b: &Option<Affine1>| b.map(|a| Affine1::new(0.0, a.slope));
+        let lower: Vec<Option<Affine1>> = orig.lower.iter().map(slope_only).collect();
+        let upper: Vec<Option<Affine1>> = orig.upper.iter().map(slope_only).collect();
+        let width = lower.iter().zip(&upper).map(|(&lo, &hi)| width_affine(lo, hi)).collect();
+        ColCache { lower, upper, width }
+    }
+
+    /// Stage B's bounds (`eq:intercept`), from the stage-A optimal slope
+    /// vector `x^1` (basic entries from `x_b_slope`, nonbasic ones from the
+    /// slope of the bound `nb_status` places them at). A side survives —
+    /// as its intercept (`l_j`, or `0` for an artificial `-M`) — exactly
+    /// when `x^1_j` sits on that side's slope bound; otherwise `x_j` clears
+    /// it by a positive multiple of `M` and it is dropped (`-inf`/`+inf`).
+    /// `x^1` never changes during stage B (`prop:two-phase` (ii)), so these
+    /// bounds are fixed for the whole stage even as columns enter and
+    /// leave. `None` if a nonbasic status sits on a side `orig` lacks
+    /// (never produced by this module's own pivots).
+    fn intercept_problem(orig: &ColCache, nb_status: &[Option<NbStatus>], basis: &[usize], x_b_slope: &[f64]) -> Option<Self> {
+        let n_total = orig.lower.len();
+        let mut x1 = vec![0.0f64; n_total];
+        for (j, s) in nb_status.iter().enumerate() {
+            x1[j] = match s {
+                None | Some(NbStatus::Zero) => 0.0,
+                Some(NbStatus::Lower) => orig.lower[j]?.slope,
+                Some(NbStatus::Upper) => orig.upper[j]?.slope,
+            };
+        }
+        for (pos, &j) in basis.iter().enumerate() {
+            x1[j] = x_b_slope[pos];
+        }
+        let lower: Vec<Option<Affine1>> = (0..n_total)
+            .map(|j| orig.lower[j].and_then(|lo| (x1[j] <= lo.slope + SLOPE_TOL).then_some(Affine1::new(lo.base, 0.0))))
+            .collect();
+        let upper: Vec<Option<Affine1>> = (0..n_total)
+            .map(|j| orig.upper[j].and_then(|hi| (x1[j] >= hi.slope - SLOPE_TOL).then_some(Affine1::new(hi.base, 0.0))))
+            .collect();
+        let width = lower.iter().zip(&upper).map(|(&lo, &hi)| width_affine(lo, hi)).collect();
+        Some(ColCache { lower, upper, width })
+    }
 }
 
 /// The extended dual simplex's own main phase (paper \S4.2-\S4.7): reaches
@@ -2288,10 +2449,20 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     // un-`S`-restricted form: every one-sided-unbounded or genuinely free
     // structural column is flagged, regardless of `active_cost`'s sign).
     let delta: Vec<MSide> = (0..n_total).map(|j| if j < n_orig { delta_of(std, j) } else { MSide::None }).collect();
-    let cache = ColCache::build(std, n_orig);
+    // `cache_orig` holds the true `M`-affine bounds (`hat_l`, `hat_u`) —
+    // what `finish`'s cleanup and the `m == 0` shortcut need. The main loop
+    // itself runs on `cache`, the bounds of whichever problem the current
+    // stage solves ([`Phase`]'s own docs): the slope problem first, then the
+    // intercept problem, swapped at the stage A -> B handoff.
+    let cache_orig = ColCache::build(std, n_orig);
+    let mut phase = if std::env::var("ENOMOTO_LEX_EXTENDED").is_ok_and(|v| v != "0") { Phase::Lex } else { Phase::A };
+    let mut cache = match phase {
+        Phase::A => ColCache::slope_problem(&cache_orig),
+        _ => ColCache::build(std, n_orig),
+    };
     // `cache.width[j].is_none()`, one byte per column — chuzc1's stopper
     // test reads it for every candidate.
-    let width_inf: Vec<bool> = cache.width.iter().map(|w| w.is_none()).collect();
+    let mut width_inf: Vec<bool> = cache.width.iter().map(|w| w.is_none()).collect();
 
     if m == 0 {
         // No constraints at all (mirrors `solve_lp_on`'s own `n_rows == 0`
@@ -2304,7 +2475,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         let mut x = vec![0.0; n_total];
         for j in 0..n_orig {
             let status = if active_cost[j] >= -TOL { NbStatus::Lower } else { NbStatus::Upper };
-            let val = nb_value_affine(&cache, status, j)?;
+            let val = nb_value_affine(&cache_orig, status, j)?;
             if val.slope != 0.0 && active_cost[j].abs() > TOL {
                 return Some(SimplexResult { status: Status::Unbounded, x: None });
             }
@@ -2516,8 +2687,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     // incrementally instead of recomputing this same `O(nnz(A))` sum from
     // scratch (see the loop body's own docs on why, and on the periodic
     // resync that re-anchors it against exactly this same computation).
-    let (seed_base, seed_slope) = compute_rhs_affine(std, &cache, &nb_status)?;
-    resolve_x_b_into(&lu, &seed_base, &seed_slope, &mut lu_scratch, &mut x_b_base, &mut x_b_slope);
+    let (seed_base, seed_slope) = resync_x_b(std, &cache, &nb_status, &lu, phase, &mut lu_scratch, &mut x_b_base, &mut x_b_slope)?;
     // `b - N x_N(M)` maintained incrementally (BFRT flips and basis changes
     // apply their own column's contribution) for the periodic drift check
     // below, instead of recomputing it in `O(nnz(A))` at every check; every
@@ -3231,8 +3401,50 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         }
 
         let Some((r, d_dir, w_r)) = best else {
+            if phase == Phase::A {
+                // Stage A -> B handoff (Algorithm `alg:extended`): the slope
+                // problem is optimal (`V_A = empty`), so `x^1` — and with it
+                // `z^1` and every bound of the intercept problem — is fixed
+                // from here on (`prop:two-phase` (ii)). Swap in stage B's
+                // bounds, freeze the slope channel at zero (stage B's bounds
+                // carry no `M` term, so nothing downstream reads it), and
+                // solve the intercept `x^0` once — the only base-channel
+                // FTRAN stage A ever needed. The basis, `d` and the DSE
+                // weights carry over unchanged: `c` and `B` are shared by
+                // both problems, so dual feasibility does too.
+                if std::env::var("ENOMOTO_DEBUG_EXT_ITERS").is_ok() {
+                    let z1: f64 = (0..n_total)
+                        .map(|j| {
+                            let s = match (basis_pos[j], nb_status[j]) {
+                                (Some(pos), _) => x_b_slope[pos],
+                                (None, Some(NbStatus::Lower)) => cache.lower[j].map_or(0.0, |a| a.slope),
+                                (None, Some(NbStatus::Upper)) => cache.upper[j].map_or(0.0, |a| a.slope),
+                                _ => 0.0,
+                            };
+                            std.c[j] * s
+                        })
+                        .sum();
+                    eprintln!("DEBUG_EXT: stage_a_iters={_iter} z1={z1}");
+                }
+                cache = ColCache::intercept_problem(&cache_orig, &nb_status, &basis, &x_b_slope)?;
+                width_inf = cache.width.iter().map(|w| w.is_none()).collect();
+                row_bounds = RowBounds::new(&cache, &basis, &noise_feasible);
+                phase = Phase::B;
+                x_b_slope.fill(0.0);
+                let (fresh_base, fresh_slope) = resync_x_b(std, &cache, &nb_status, &lu, phase, &mut lu_scratch, &mut x_b_base, &mut x_b_slope)?;
+                rhs_inc_base = fresh_base;
+                rhs_inc_slope = fresh_slope;
+                rebuild_rows(&mut infeasible_rows, &mut row_dev, m, &row_bounds, &x_b_base, &x_b_slope);
+                // A new LP starts here: its own anti-cycling/stall history
+                // begins from scratch.
+                stall_count = 0;
+                bland_mode = false;
+                infeasible_plateau_count = 0;
+                best_infeasible_len = infeasible_rows.rows.len();
+                continue;
+            }
             // Primal feasible for the M-truncated problem (\S4.5's
-            // `V_infty = empty`): proceed to Step III.
+            // `V_infty = empty`; stage B's optimum): proceed to Step III.
             if std::env::var("ENOMOTO_DEBUG_EXT_ITERS").is_ok() {
                 eprintln!("DEBUG_EXT: main_loop_iters={_iter} bland_mode={bland_mode}");
             }
@@ -3248,7 +3460,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
             if profile_phases {
                 prof_phases::report(wall_t0.elapsed().as_nanos() as usize);
             }
-            return finish(std, &mut basis, &mut basis_pos, &mut nb_status, &delta, &cache, n_orig, lu);
+            return finish(std, &mut basis, &mut basis_pos, &mut nb_status, &delta, &cache_orig, n_orig, lu);
         };
 
         // (c): pivot row, BTRAN against `e_r` — `M`-independent (paper
@@ -3476,8 +3688,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 }
                 timed!(profile_phases, prof_phases::REFACTOR, {
                     lu = refactorize(std, &basis_pos, Some(&lu))?;
-                    let (fresh_base, fresh_slope) = compute_rhs_affine(std, &cache, &nb_status)?;
-                    resolve_x_b_into(&lu, &fresh_base, &fresh_slope, &mut lu_scratch, &mut x_b_base, &mut x_b_slope);
+                    let (fresh_base, fresh_slope) = resync_x_b(std, &cache, &nb_status, &lu, phase, &mut lu_scratch, &mut x_b_base, &mut x_b_slope)?;
                     rhs_inc_base = fresh_base;
                     rhs_inc_slope = fresh_slope;
                     rebuild_rows(&mut infeasible_rows, &mut row_dev, m, &row_bounds, &x_b_base, &x_b_slope);
@@ -3518,6 +3729,16 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
             }
             if profile_phases {
                 prof_phases::report(wall_t0.elapsed().as_nanos() as usize);
+            }
+            if phase == Phase::A {
+                // The slope problem is feasible at `x^1 = 0`, so stage A can
+                // never prove infeasibility (`prop:two-phase` (i)): reaching
+                // here is numerical breakdown, not a conclusion — bail to the
+                // caller's fallback instead of reporting a false `Infeasible`.
+                if std::env::var("ENOMOTO_DEBUG_EXT_ITERS").is_ok() {
+                    eprintln!("DEBUG_EXT_BAILOUT: stage A found no entering column at iter={_iter} r={r} (numerical)");
+                }
+                return None;
             }
             return Some(SimplexResult { status: Status::Infeasible, x: None });
         }
@@ -3636,8 +3857,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 }
                 timed!(profile_phases, prof_phases::REFACTOR, {
                     lu = refactorize(std, &basis_pos, Some(&lu))?;
-                    let (fresh_base, fresh_slope) = compute_rhs_affine(std, &cache, &nb_status)?;
-                    resolve_x_b_into(&lu, &fresh_base, &fresh_slope, &mut lu_scratch, &mut x_b_base, &mut x_b_slope);
+                    let (fresh_base, fresh_slope) = resync_x_b(std, &cache, &nb_status, &lu, phase, &mut lu_scratch, &mut x_b_base, &mut x_b_slope)?;
                     rhs_inc_base = fresh_base;
                     rhs_inc_slope = fresh_slope;
                     rebuild_rows(&mut infeasible_rows, &mut row_dev, m, &row_bounds, &x_b_base, &x_b_slope);
@@ -3660,6 +3880,16 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
             }
             if profile_phases {
                 prof_phases::report(wall_t0.elapsed().as_nanos() as usize);
+            }
+            if phase == Phase::A {
+                // The slope problem is feasible at `x^1 = 0`, so stage A can
+                // never prove infeasibility (`prop:two-phase` (i)): reaching
+                // here is numerical breakdown, not a conclusion — bail to the
+                // caller's fallback instead of reporting a false `Infeasible`.
+                if std::env::var("ENOMOTO_DEBUG_EXT_ITERS").is_ok() {
+                    eprintln!("DEBUG_EXT_BAILOUT: stage A found no entering column at iter={_iter} r={r} (numerical)");
+                }
+                return None;
             }
             return Some(SimplexResult { status: Status::Infeasible, x: None });
         };
@@ -3772,7 +4002,10 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                         combined_base[i] += v * delta_x.base;
                         combined_slope[i] += v * delta_x.slope;
                     }
-                } else {
+                } else if phase != Phase::A {
+                    // (Stage A: a slope-free flip — a boxed column, `s_j = 0`
+                    // — moves only the intercept `x^0`, which stage A does not
+                    // track, so it contributes nothing to solve for.)
                     for &(i, v) in std.cols.col(cand.j) {
                         if !combined_touched_flag[i] {
                             combined_touched_flag[i] = true;
@@ -3793,7 +4026,23 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 if profile_phases && density_bfrt.predicts_dense() && !lu.should_use_dense_solve(combined_touched.len()) {
                     prof_phases::DENSITY_GATE_FTRANS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
-                if lu.should_use_dense_solve_tracked(combined_touched.len(), &density_bfrt) {
+                if phase == Phase::A {
+                    // Stage A: the slope channel is the only one — every
+                    // touched row got here from a slope-carrying flip, and the
+                    // base channel is identically zero, so it is neither
+                    // solved nor fused into the entering column's FTRAN.
+                    // `combined_alpha_base` is never written in stage A and so
+                    // stays all-zero for the application below.
+                    debug_assert!(slope_nonzero);
+                    let slope_nnz = if lu.should_use_dense_solve_tracked(combined_touched.len(), &density_bfrt) {
+                        lu.solve_into(&combined_slope, &mut lu_scratch, &mut combined_alpha_slope)
+                    } else {
+                        sparse_slope_buf.clear();
+                        sparse_slope_buf.extend(combined_touched.iter().map(|&i| (i, combined_slope[i])));
+                        lu.solve_sparse_into(&sparse_slope_buf, &mut sparse_scratch, &mut gp_scratch, &mut combined_alpha_slope)
+                    };
+                    density_bfrt.record(slope_nnz, m);
+                } else if lu.should_use_dense_solve_tracked(combined_touched.len(), &density_bfrt) {
                     // The slope channel (rare) is solved here on its own;
                     // the base channel either rides along the entering
                     // column's fused FTRAN below (`combined_deferred`) or is
@@ -4152,8 +4401,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
             }
             timed!(profile_phases, prof_phases::REFACTOR, {
                 lu = refactorize(std, &basis_pos, Some(&lu))?;
-                let (fresh_base, fresh_slope) = compute_rhs_affine(std, &cache, &nb_status)?;
-                resolve_x_b_into(&lu, &fresh_base, &fresh_slope, &mut lu_scratch, &mut x_b_base, &mut x_b_slope);
+                let (fresh_base, fresh_slope) = resync_x_b(std, &cache, &nb_status, &lu, phase, &mut lu_scratch, &mut x_b_base, &mut x_b_slope)?;
                 rhs_inc_base = fresh_base;
                 rhs_inc_slope = fresh_slope;
                 rebuild_rows(&mut infeasible_rows, &mut row_dev, m, &row_bounds, &x_b_base, &x_b_slope);
@@ -4502,8 +4750,8 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         if debug_delta0 && delta0_iter.is_none() {
             let all_off_m_side = m_flagged_cols.iter().all(|&j| match nb_status[j] {
                 None | Some(NbStatus::Zero) => true,
-                Some(NbStatus::Lower) => cache.lower[j].map_or(true, |a| a.slope == 0.0),
-                Some(NbStatus::Upper) => cache.upper[j].map_or(true, |a| a.slope == 0.0),
+                Some(NbStatus::Lower) => cache_orig.lower[j].map_or(true, |a| a.slope == 0.0),
+                Some(NbStatus::Upper) => cache_orig.upper[j].map_or(true, |a| a.slope == 0.0),
             });
             if all_off_m_side {
                 delta0_iter = Some(_iter);
@@ -4648,7 +4896,11 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 let (rb, rs): (&[f64], &[f64]) = if rhs_incremental {
                     (&rhs_inc_base, &rhs_inc_slope)
                 } else {
-                    fresh = compute_rhs_affine(std, &cache, &nb_status)?;
+                    fresh = if phase == Phase::A {
+                        (Vec::new(), compute_rhs_slope_only(std, &cache, &nb_status)?)
+                    } else {
+                        compute_rhs_affine(std, &cache, &nb_status)?
+                    };
                     (&fresh.0, &fresh.1)
                 };
                 // Paper \S4.6's closing remark, applied to the slope
@@ -4670,16 +4922,14 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                     !rs.is_empty() || x_b_slope.iter().all(|v| *v == 0.0),
                     "delta = 0 must leave the maintained slope channel at exact zero (iter {_iter})"
                 );
-                let (resid_base, resid_slope) = residual_norm_affine(
-                    std,
-                    &basis,
-                    &x_b_base,
-                    &x_b_slope,
-                    rb,
-                    rs,
-                    &mut resid_scratch_base,
-                    &mut resid_scratch_slope,
-                );
+                // Stage A's base channel is identically zero on both sides
+                // (`eq:slope` has right-hand side `0`), so only the slope
+                // residual is measured there.
+                let (resid_base, resid_slope) = if phase == Phase::A {
+                    (0.0, residual_norm_slope(std, &basis, &x_b_slope, rs, &mut resid_scratch_slope))
+                } else {
+                    residual_norm_affine(std, &basis, &x_b_base, &x_b_slope, rb, rs, &mut resid_scratch_base, &mut resid_scratch_slope)
+                };
                 // Per-solve escalation ladder — see [`XB_DRIFT_TOL`]'s own
                 // docs. `drift_trigger_count` only ever grows within this
                 // one call to `solve_lp_dual_extended`, so a solve that
@@ -4759,8 +5009,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 // `InfeasibleRows` is rebuilt from scratch to match, since a
                 // resync can change many rows' feasibility at once, outside
                 // the reach of its own incremental `set` calls.
-                let (fresh_base, fresh_slope) = compute_rhs_affine(std, &cache, &nb_status)?;
-                resolve_x_b_into(&lu, &fresh_base, &fresh_slope, &mut lu_scratch, &mut x_b_base, &mut x_b_slope);
+                let (fresh_base, fresh_slope) = resync_x_b(std, &cache, &nb_status, &lu, phase, &mut lu_scratch, &mut x_b_base, &mut x_b_slope)?;
                 rhs_inc_base = fresh_base;
                 rhs_inc_slope = fresh_slope;
                 rebuild_rows(&mut infeasible_rows, &mut row_dev, m, &row_bounds, &x_b_base, &x_b_slope);
