@@ -168,6 +168,68 @@ pub fn reduce_equalities(a: &Csr, b: &[f64], n: usize, lb: &[f64], ub: &[f64]) -
 /// `0 = 0` row; a nonzero RHS on an empty row is kept so the Farkas
 /// infeasibility certificate downstream still sees (and reports) it.
 fn dedupe_rows(rows: Vec<(Vec<(usize, f64)>, f64)>) -> Vec<(Vec<(usize, f64)>, f64)> {
+    // Same decisions as keying a `HashSet` on the normalized signature
+    // `[(j, bits(v/pivot))..., (usize::MAX, bits(rhs/pivot))]` (kept below
+    // as `dedupe_rows_reference` for the equivalence test), but without
+    // materializing each signature as its own `Vec` and SipHash-ing it:
+    // the signature is hashed on the fly (the same multiplicative mix
+    // `reduce_inequalities` uses) and a hash hit is confirmed by
+    // recomputing the kept row's signature — normalization is
+    // deterministic — and comparing it entry by entry.
+    #[inline]
+    fn mix(hash: u64, x: u64) -> u64 {
+        (hash.rotate_left(5) ^ x).wrapping_mul(0x517c_c1b7_2722_0a95)
+    }
+    let mut heads: HashMap<u64, usize, std::hash::BuildHasherDefault<IdentityU64Hasher>> = HashMap::with_capacity_and_hasher(rows.len(), Default::default());
+    // Per kept row: its inverse pivot and the next kept row in the same
+    // hash chain.
+    let mut chain: Vec<(f64, usize)> = Vec::with_capacity(rows.len());
+    let mut kept: Vec<(Vec<(usize, f64)>, f64)> = Vec::with_capacity(rows.len());
+    // `chain` is indexed like `kept` except for empty rows, which never
+    // enter a chain; `slot_of_chain[k]` maps chain entry -> `kept` index.
+    let mut slot_of_chain: Vec<usize> = Vec::with_capacity(rows.len());
+    for (row, rhs) in rows {
+        if row.is_empty() {
+            if rhs != 0.0 {
+                kept.push((row, rhs));
+            }
+            continue;
+        }
+        let pivot = row[0].1;
+        let inv = 1.0 / pivot;
+        let mut hash = row.len() as u64;
+        for &(j, v) in &row {
+            hash = mix(mix(hash, j as u64), (v * inv).to_bits());
+        }
+        let rhs_bits = (rhs * inv).to_bits();
+        hash = mix(hash, rhs_bits);
+        let head = heads.get(&hash).copied().unwrap_or(usize::MAX);
+        let mut cur = head;
+        let mut dup = false;
+        while cur != usize::MAX {
+            let (k_inv, next) = chain[cur];
+            let (k_row, k_rhs) = &kept[slot_of_chain[cur]];
+            if k_row.len() == row.len()
+                && (k_rhs * k_inv).to_bits() == rhs_bits
+                && k_row.iter().zip(&row).all(|(&(kj, kv), &(j, v))| kj == j && (kv * k_inv).to_bits() == (v * inv).to_bits())
+            {
+                dup = true;
+                break;
+            }
+            cur = next;
+        }
+        if !dup {
+            heads.insert(hash, chain.len());
+            chain.push((inv, head));
+            slot_of_chain.push(kept.len());
+            kept.push((row, rhs));
+        }
+    }
+    kept
+}
+
+#[cfg(test)]
+fn dedupe_rows_reference(rows: Vec<(Vec<(usize, f64)>, f64)>) -> Vec<(Vec<(usize, f64)>, f64)> {
     let mut seen: HashSet<Vec<(usize, u64)>> = HashSet::new();
     let mut kept = Vec::with_capacity(rows.len());
     for (row, rhs) in rows {
@@ -1015,6 +1077,52 @@ mod tests {
             let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
             assert_eq!(bits(g_new.as_ref().values()), bits(g_ref.as_ref().values()), "trial {trial}");
             assert_eq!(bits(&h_new), bits(&h_ref), "trial {trial}");
+        }
+    }
+
+    /// `dedupe_rows` (on-the-fly u64 hash + chain) must keep exactly the
+    /// rows the `HashSet<Vec<_>>` reference keeps, in the same order.
+    #[test]
+    fn dedupe_rows_matches_reference_bit_for_bit() {
+        let mut state: u64 = 0x0fed_cba9_8765_4321;
+        let mut rnd = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for trial in 0..300 {
+            let n = 4 + (trial % 5);
+            let mut rows: Vec<(Vec<(usize, f64)>, f64)> = Vec::new();
+            let base_count = 2 + (rnd() % 6) as usize;
+            for _ in 0..base_count {
+                let len = (rnd() % 4) as usize;
+                let mut row: Vec<(usize, f64)> = Vec::new();
+                for _ in 0..len {
+                    let j = (rnd() % n as u64) as usize;
+                    if row.iter().all(|&(k, _)| k != j) {
+                        row.push((j, ((rnd() % 7) as f64 - 3.0) * 0.5 + 0.25));
+                    }
+                }
+                rows.push((row, [0.0, 1.0, -2.0, 0.5][(rnd() % 4) as usize]));
+            }
+            for _ in 0..base_count {
+                let src = (rnd() % base_count as u64) as usize;
+                let f = [1.0, 2.0, 0.5, 3.0, -1.0, 1.0 / 3.0][(rnd() % 6) as usize];
+                let (r, b) = rows[src].clone();
+                let db = [0.0, 0.0, 1.0][(rnd() % 3) as usize];
+                rows.push((r.iter().map(|&(j, v)| (j, v * f)).collect(), b * f + db));
+            }
+            let got = dedupe_rows(rows.clone());
+            let want = dedupe_rows_reference(rows);
+            assert_eq!(got.len(), want.len(), "trial {trial}");
+            for ((gr, gb), (wr, wb)) in got.iter().zip(&want) {
+                assert_eq!(gb.to_bits(), wb.to_bits(), "trial {trial}");
+                assert_eq!(gr.len(), wr.len(), "trial {trial}");
+                for (&(gj, gv), &(wj, wv)) in gr.iter().zip(wr) {
+                    assert_eq!((gj, gv.to_bits()), (wj, wv.to_bits()), "trial {trial}");
+                }
+            }
         }
     }
 
