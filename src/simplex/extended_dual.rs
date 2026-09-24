@@ -2557,6 +2557,10 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     let mut resid_scratch_base = vec![0.0f64; m];
     let mut resid_scratch_slope = vec![0.0f64; m];
     let mut rho = vec![0.0f64; m];
+    // Ascending nonzero-row list of `rho` for the sparse PRICE (S8), and the
+    // previous iteration's priced-row count that predicts `rho`'s density.
+    let mut rho_rows = vec![0u32; m];
+    let mut last_rho_nnz = 0usize;
     let mut dense_q = vec![0.0f64; m];
     let mut alpha_full = vec![0.0f64; m];
     // Ascending nonzero-row list of `alpha_full` (plus the BFRT flip
@@ -3533,11 +3537,18 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         // own M-bounding logic even fires for a single unbounded-above
         // column — routine for a plain `x_j >= 0` MPS column with no
         // explicit upper bound).
+        // S8: when `rho` is predicted sparse (the previous iteration's
+        // `|rho_i| > TOL` count at most `ENOMOTO_T_PRICE_LIST_DENSITY * m`),
+        // compact its nonzero rows (ascending, branch-free) and walk only
+        // those — the same rows in the same order, so every `a_p[j]` and the
+        // `touched_cols` order are bit-for-bit unchanged. The list (exact
+        // nonzeros) also feeds the DSE update's `Σ rho_i^2`.
+        let mut rho_list_len: Option<usize> = None;
         timed!(profile_phases, prof_phases::PRICE, {
-            for i in 0..m {
+            let mut row = |i: usize| -> bool {
                 let rv = rho[i];
                 if rv.abs() <= TOL {
-                    continue;
+                    return false;
                 }
                 let (lo, hi) = (price_start[i], price_nb_end[i]);
                 for (&j, &v) in price_col[lo..hi].iter().zip(&price_val[lo..hi]) {
@@ -3548,7 +3559,21 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                     }
                     a_p[j] += rv * v;
                 }
+                true
+            };
+            let mut n_priced = 0usize;
+            if (last_rho_nnz as f64) <= tunable!("ENOMOTO_T_PRICE_LIST_DENSITY", 0.1, f64) * m as f64 {
+                let k = compact_rows(m, &mut rho_rows, |i| rho[i].to_bits() << 1);
+                for &i in &rho_rows[..k] {
+                    n_priced += row(i as usize) as usize;
+                }
+                rho_list_len = Some(k);
+            } else {
+                for i in 0..m {
+                    n_priced += row(i) as usize;
+                }
             }
+            last_rho_nnz = n_priced;
         });
         if profile_work {
             use std::sync::atomic::Ordering::Relaxed;
@@ -4554,20 +4579,13 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         let xb_list_len: Option<usize> = {
             let est = alpha_nnz + if combined_pending { combined_nnz } else { 0 };
             if (est as f64) <= tunable!("ENOMOTO_T_XB_LIST_DENSITY", 0.3, f64) * m as f64 {
-                let mut k = 0usize;
-                if combined_pending {
-                    for i in 0..m {
-                        xb_rows[k] = i as u32;
-                        let cs = if combined_slope_nonzero { combined_alpha_slope[i] } else { 0.0 };
-                        k += (alpha_full[i] != 0.0 || combined_alpha_base[i] != 0.0 || cs != 0.0) as usize;
-                    }
+                Some(if combined_pending && combined_slope_nonzero {
+                    compact_rows(m, &mut xb_rows, |i| (alpha_full[i].to_bits() | combined_alpha_base[i].to_bits() | combined_alpha_slope[i].to_bits()) << 1)
+                } else if combined_pending {
+                    compact_rows(m, &mut xb_rows, |i| (alpha_full[i].to_bits() | combined_alpha_base[i].to_bits()) << 1)
                 } else {
-                    for i in 0..m {
-                        xb_rows[k] = i as u32;
-                        k += (alpha_full[i] != 0.0) as usize;
-                    }
-                }
-                Some(k)
+                    compact_rows(m, &mut xb_rows, |i| alpha_full[i].to_bits() << 1)
+                })
             } else {
                 None
             }
@@ -4680,7 +4698,10 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                     // S7: only `alpha`'s nonzero rows (the `x_B` update's
                     // own list, a superset when a flip result was merged).
                     Some(k) => {
-                        let wp_old = rho.iter().map(|v| v * v).sum::<f64>();
+                        let wp_old = match rho_list_len {
+                            Some(kr) => rho_rows[..kr].iter().map(|&i| rho[i as usize] * rho[i as usize]).sum::<f64>(),
+                            None => rho.iter().map(|v| v * v).sum::<f64>(),
+                        };
                         dse.update_after_pivot_rows(r, &alpha_full, &tau, wp_old, &xb_rows[..k]);
                     }
                     None => dse.update_after_pivot(r, &alpha_full, &tau, &rho),
@@ -6049,6 +6070,38 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
     }
 
     None
+}
+
+/// Writes, in ascending order, every row `i < m` whose `key(i)` is nonzero
+/// into `out` and returns their count. `key(i)` is `x.to_bits() << 1` of the
+/// value(s) tested (OR-ed when several vectors are merged): zero exactly for
+/// `±0.0`, so this lists precisely the rows a `!= 0.0` scan would visit.
+/// Blocks of 8 rows are first tested together (a branch-free OR, cheap and
+/// well predicted on a sparse vector) and only a block with a nonzero is
+/// compacted, branch-free, row by row.
+#[inline(always)]
+fn compact_rows(m: usize, out: &mut [u32], key: impl Fn(usize) -> u64) -> usize {
+    const C: usize = 8;
+    let mut k = 0usize;
+    let mut i0 = 0usize;
+    while i0 + C <= m {
+        let mut any = 0u64;
+        for i in i0..i0 + C {
+            any |= key(i);
+        }
+        if any != 0 {
+            for i in i0..i0 + C {
+                out[k] = i as u32;
+                k += (key(i) != 0) as usize;
+            }
+        }
+        i0 += C;
+    }
+    for i in i0..m {
+        out[k] = i as u32;
+        k += (key(i) != 0) as usize;
+    }
+    k
 }
 
 fn dot(a: &[f64], b: &[f64]) -> f64 {
