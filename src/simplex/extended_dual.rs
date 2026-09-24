@@ -3311,8 +3311,32 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     let mut discard_row: Option<usize> = None;
     let mut discard_banned_cols: Vec<usize> = Vec::new();
     let mut prev_pool_len: Option<usize> = None;
+    // S11 (EXPERIMENTAL, path-changing, default off): hyper-sparse chuzr
+    // short list in the spirit of HiGHS `HEkkDualRHS::chooseHyperSparse`.
+    // A full pool scan also records the `K` best rows (`sl_rows`) and the
+    // `(K+1)`-th best score (`sl_cut`). Every row whose deviation or DSE
+    // weight changes afterwards (the `x_B` update's row list, plus `r`) is
+    // appended to `sl_rows`; every other pool row still scores at most
+    // `sl_cut`. So while no full resync intervenes, the best of `sl_rows`
+    // is the pool's best whenever it beats `sl_cut` (`cmp_lex` `Greater`);
+    // otherwise, or once the list outgrows `4K + 64` rows, a full scan runs.
+    // Not bit-identical: `Score2::cmp_lex`'s `1e-9` tie tolerance is not
+    // transitive, so the scan order can change which of two near-tied rows
+    // wins. `ENOMOTO_T_CHUZR_SHORTLIST=K` (e.g. `8`) enables it; `0` = off.
+    let sl_k = tunable!("ENOMOTO_T_CHUZR_SHORTLIST", 0usize, usize);
+    let sl_enabled = sl_k > 0 && merge_flip_xb && score2_max_tol == 1e-9 && stuck_row_boost_factor == 1.0;
+    let mut sl_rows: Vec<usize> = Vec::new();
+    let mut sl_in = vec![false; if sl_enabled { m } else { 0 }];
+    let mut sl_top: Vec<(Score2, usize)> = Vec::with_capacity(sl_k + 2);
+    let mut sl_cut: Option<Score2> = None;
+    let mut sl_valid = false;
     let max_iters = super::max_iters_for(m, n_total);
     for _iter in 0..max_iters {
+        let sl_was_valid = sl_valid;
+        sl_valid = false;
+        // Whether `sl_rows`/`sl_cut` describe the pool as of this
+        // iteration's chuzr (a short-list hit or a fresh full scan).
+        let mut sl_ready = false;
         iters_since_m_progress += 1;
         if debug_ext_iters_verbose && _iter % 2000 == 0 {
             eprintln!(
@@ -3392,6 +3416,37 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         let stall_shrink = score2_stall_halflife / (score2_stall_halflife + iters_since_m_progress as f64);
         let score2_c2_tol = (1e-9 + (score2_max_tol - 1e-9) * (remaining_m_side as f64 / n_m_flagged as f64) * stall_shrink).max(1e-9);
         let mut best: Option<(usize, i32, Affine1, Score2)> = None;
+        let sl_active = sl_enabled && !bland_mode;
+        if sl_active && sl_was_valid && infeasible_rows.rows.len() > 4 * sl_k {
+            timed!(profile_phases, prof_phases::CHUZR, {
+                let mut b: Option<(usize, i32, Affine1, Score2)> = None;
+                for &i in &sl_rows {
+                    if !infeasible_rows.contains(i) {
+                        continue;
+                    }
+                    let (d_dir, dev) = (row_dev.dir[i], row_dev.dev[i]);
+                    let score = Score2::new(dev, weights.weight(i));
+                    let better = match b {
+                        None => true,
+                        Some((br, _, _, bscore)) => match score.cmp_lex(&bscore, score2_c2_tol) {
+                            std::cmp::Ordering::Greater => true,
+                            std::cmp::Ordering::Less => false,
+                            std::cmp::Ordering::Equal => i < br,
+                        },
+                    };
+                    if better {
+                        b = Some((i, d_dir, dev, score));
+                    }
+                }
+                if let Some(bb) = b {
+                    if sl_cut.map_or(true, |c| bb.3.cmp_lex(&c, score2_c2_tol) == std::cmp::Ordering::Greater) {
+                        best = b;
+                        sl_ready = true;
+                    }
+                }
+            });
+        }
+        if !sl_ready {
         timed!(profile_phases, prof_phases::CHUZR, {
             for &i in &infeasible_rows.rows {
                 // Cached at this row's last membership decision
@@ -3428,7 +3483,47 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                     best = Some((i, d_dir, dev, score));
                 }
             }
+            if sl_active {
+                // Rebuild the short list: the `K + 1` best pool rows.
+                sl_top.clear();
+                let before = |score: &Score2, i: usize, t: &(Score2, usize)| match score.cmp_lex(&t.0, score2_c2_tol) {
+                    std::cmp::Ordering::Greater => true,
+                    std::cmp::Ordering::Less => false,
+                    std::cmp::Ordering::Equal => i < t.1,
+                };
+                for &i in &infeasible_rows.rows {
+                    let score = Score2::new(row_dev.dev[i], weights.weight(i));
+                    // Fast reject: not better than the current (K+1)-th.
+                    if sl_top.len() > sl_k && !before(&score, i, &sl_top[sl_k]) {
+                        continue;
+                    }
+                    let pos = sl_top.iter().position(|(ts, ti)| match score.cmp_lex(ts, score2_c2_tol) {
+                        std::cmp::Ordering::Greater => true,
+                        std::cmp::Ordering::Less => false,
+                        std::cmp::Ordering::Equal => i < *ti,
+                    });
+                    match pos {
+                        Some(p) => {
+                            sl_top.insert(p, (score, i));
+                            sl_top.truncate(sl_k + 1);
+                        }
+                        None if sl_top.len() <= sl_k => sl_top.push((score, i)),
+                        None => {}
+                    }
+                }
+                for &i in &sl_rows {
+                    sl_in[i] = false;
+                }
+                sl_rows.clear();
+                sl_cut = if sl_top.len() > sl_k { Some(sl_top[sl_k].0) } else { None };
+                for &(_, i) in sl_top.iter().take(sl_k) {
+                    sl_in[i] = true;
+                    sl_rows.push(i);
+                }
+                sl_ready = true;
+            }
         });
+        }
         #[cfg(debug_assertions)]
         {
             // `InfeasibleRows`'s own exactness claim (its docs): every row
@@ -4780,6 +4875,22 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 }
             }
         });
+        if sl_ready {
+            if let Some(k) = xb_list_len {
+                for &i in xb_rows[..k].iter() {
+                    let i = i as usize;
+                    if !sl_in[i] {
+                        sl_in[i] = true;
+                        sl_rows.push(i);
+                    }
+                }
+                if !sl_in[r] {
+                    sl_in[r] = true;
+                    sl_rows.push(r);
+                }
+                sl_valid = sl_rows.len() <= 4 * sl_k + 64;
+            }
+        }
         if profile_work {
             use std::sync::atomic::Ordering::Relaxed;
             prof_phases::STAT_TAU_NNZ.fetch_add(tau.iter().filter(|v| **v != 0.0).count(), Relaxed);
@@ -5200,6 +5311,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
             }
         }
         if need_refactor {
+            sl_valid = false;
             if profile_phases {
                 prof_phases::REFACTOR_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }

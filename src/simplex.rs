@@ -2925,6 +2925,12 @@ impl InfeasibleRows {
     /// since that's the only operation that can change many rows' `x_B`
     /// values at once without this struct's own incremental `set` calls
     /// seeing each change individually.
+    /// Whether row `i` is currently in the pool.
+    #[inline]
+    pub(super) fn contains(&self, i: usize) -> bool {
+        self.pos[i].is_some()
+    }
+
     pub(super) fn rebuild(&mut self, m: usize, mut pred: impl FnMut(usize) -> bool) {
         self.rows.clear();
         for i in 0..m {
