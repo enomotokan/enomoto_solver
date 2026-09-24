@@ -5006,7 +5006,14 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 if !need_refactor {
                     since_d_drift_check += 1;
                 }
-                if !need_refactor && since_d_drift_check >= super::RESIDUAL_CHECK_MULTIPLIER {
+                // `ENOMOTO_D_DRIFT_REFACTOR_ONLY=1` (S18, A/B, default off)
+                // drops this periodic check altogether and leaves `d`'s
+                // resync to the `fresh_d_into` every refactorization already
+                // does — measured to fire 0 times on all 93 Netlib problems
+                // (`analysis/simplex_loop_20260924_113533.md` §4 S18), so
+                // this only saves its BTRAN + `O(nnz(A))` every
+                // `RESIDUAL_CHECK_MULTIPLIER` checks.
+                if !need_refactor && since_d_drift_check >= super::RESIDUAL_CHECK_MULTIPLIER && tunable!("ENOMOTO_D_DRIFT_REFACTOR_ONLY", 0u8, u8) == 0 {
                     since_d_drift_check = 0;
                     fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fd_cb, &mut lu_scratch, &mut fd_y, &mut fresh_d_buf);
                     let mut resid_sq = 0.0f64;
