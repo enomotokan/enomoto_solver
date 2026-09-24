@@ -1477,6 +1477,61 @@ fn residual_norm_affine(
     (resid_base_sq.sqrt(), resid_slope_sq.sqrt())
 }
 
+/// S2's cheap pre-check for the drift check (`ENOMOTO_XB_DRIFT_SAMPLE`):
+/// the residual `A_B x_B - rhs` on the rows `i ≡ offset (mod k)` only,
+/// computed row-wise through `std.rows` (every entry of the row, nonbasic
+/// ones skipped through `basis_pos`), scaled up to an estimate of the full
+/// two-norm, `sqrt(Σ_sample r_i² · m / |sample|)`. Costs about `nnz(A)/k`
+/// instead of [`residual_norm_affine`]'s `nnz(A_B) + 3m`. `slope_only` is
+/// stage A (base channel identically zero); an empty `rhs_slope` is the
+/// `delta = 0` signal (slope channel exactly zero, see
+/// [`residual_norm_affine`]).
+#[allow(clippy::too_many_arguments)]
+fn sampled_residual_affine(
+    std: &StdForm,
+    basis_pos: &[Option<usize>],
+    x_b_base: &[f64],
+    x_b_slope: &[f64],
+    rhs_base: &[f64],
+    rhs_slope: &[f64],
+    slope_only: bool,
+    k: usize,
+    offset: usize,
+) -> (f64, f64) {
+    let m = std.n_rows;
+    let do_slope = !rhs_slope.is_empty();
+    let do_base = !slope_only;
+    let mut sq_base = 0.0f64;
+    let mut sq_slope = 0.0f64;
+    let mut n = 0usize;
+    let mut i = offset;
+    while i < m {
+        let mut sb = 0.0f64;
+        let mut ss = 0.0f64;
+        for &(j, v) in std.rows.row(i) {
+            if let Some(p) = basis_pos[j] {
+                sb += v * x_b_base[p];
+                ss += v * x_b_slope[p];
+            }
+        }
+        if do_base {
+            let r = sb - rhs_base[i];
+            sq_base += r * r;
+        }
+        if do_slope {
+            let r = ss - rhs_slope[i];
+            sq_slope += r * r;
+        }
+        n += 1;
+        i += k;
+    }
+    if n == 0 {
+        return (0.0, 0.0);
+    }
+    let scale = m as f64 / n as f64;
+    ((sq_base * scale).sqrt(), (sq_slope * scale).sqrt())
+}
+
 /// `B x_B(M) = base + slope*M`'s own right-hand side (Lemma 4.1's `b - N
 /// x_N`, split into its `M`-independent and `M`-coefficient parts) — an
 /// `O(nnz(A))` pass over every nonbasic column, the same cost
@@ -2980,6 +3035,19 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     // Residual measured at the first drift check after a refactorization
     // (the factorization's own noise floor) — see the drift check below.
     let mut drift_r0: f64 = 0.0;
+    // S2 (`ENOMOTO_XB_DRIFT_SAMPLE`, default off): rotating row-subsample
+    // pre-check of the drift residual — see [`sampled_residual_affine`].
+    let xb_drift_sample: usize = tunable!("ENOMOTO_XB_DRIFT_SAMPLE", 0, usize);
+    let xb_drift_sample_guard: f64 = tunable!("ENOMOTO_XB_DRIFT_SAMPLE_GUARD", 0.1, f64);
+    let mut drift_sample_offset: usize = 0;
+    // Fresh-residual floor (`ENOMOTO_XB_DRIFT_FRESH_FLOOR`, default off):
+    // the residual measured right after each refactorization's resync;
+    // when that fresh value is itself already close to the drift
+    // tolerance (refactorizing cannot bring it lower), `factor * fresh`
+    // becomes a floor on the tolerance until the next refactorization.
+    let xb_fresh_floor_factor: f64 = tunable!("ENOMOTO_XB_DRIFT_FRESH_FLOOR", 0.0, f64);
+    let xb_fresh_floor_frac: f64 = tunable!("ENOMOTO_XB_DRIFT_FRESH_FLOOR_FRAC", 0.5, f64);
+    let mut xb_fresh_floor: f64 = 0.0;
     // §2.4's own per-solve ladder, counted separately from
     // `drift_trigger_count` because it answers a different question: that
     // one counts only the `x_B(M)` residual trigger (whose *tolerance* it
@@ -5351,11 +5419,6 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 // Stage A's base channel is identically zero on both sides
                 // (`eq:slope` has right-hand side `0`), so only the slope
                 // residual is measured there.
-                let (resid_base, resid_slope) = if phase == Phase::A {
-                    (0.0, residual_norm_slope(std, &basis, &x_b_slope, rs, &mut resid_scratch_slope))
-                } else {
-                    residual_norm_affine(std, &basis, &x_b_base, &x_b_slope, rb, rs, &mut resid_scratch_base, &mut resid_scratch_slope)
-                };
                 // Per-solve escalation ladder — see [`XB_DRIFT_TOL`]'s own
                 // docs. `drift_trigger_count` only ever grows within this
                 // one call to `solve_lp_dual_extended`, so a solve that
@@ -5363,11 +5426,8 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 // against the unmodified `xb_drift_tol` (step `0`).
                 let escalation_steps = (drift_trigger_count / tunable!("ENOMOTO_T_XB_DRIFT_ESCALATION_STEP", XB_DRIFT_ESCALATION_STEP, usize)) as i32;
                 let mut effective_drift_tol = (xb_drift_tol * XB_DRIFT_ESCALATION_FACTOR.powi(escalation_steps)).min(XB_DRIFT_TOL_MAX);
-                let resid_max = resid_base.max(resid_slope);
                 let updates = lu.update_count();
-                if updates <= XB_CHECK_INTERVAL {
-                    drift_r0 = resid_max;
-                } else {
+                if updates > XB_CHECK_INTERVAL {
                     // Relative floor: a refactorization cannot push the
                     // residual below its own post-refactor level `r0`.
                     let rel_k: f64 = tunable!("ENOMOTO_XB_DRIFT_REL_K", 0.0, f64);
@@ -5380,17 +5440,48 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                     let mult: f64 = tunable!("ENOMOTO_XB_DRIFT_MIN_UPDATES_MULT", 100.0, f64);
                     effective_drift_tol = effective_drift_tol.max((mult * effective_drift_tol).min(XB_DRIFT_TOL_MAX));
                 }
-                if env_str!("ENOMOTO_DEBUG_XB_DRIFT_EXT").is_some() {
-                    eprintln!(
-                        "DEBUG_XB_DRIFT: iter={_iter} resid_base={resid_base:.3e} resid_slope={resid_slope:.3e} drift_trigger_count={drift_trigger_count} effective_tol={effective_drift_tol:.3e}"
-                    );
+                // Fresh-residual floor (see `xb_fresh_floor`'s declaration);
+                // `0.0` whenever the knob is off, leaving the tolerance as is.
+                if xb_fresh_floor > 0.0 {
+                    effective_drift_tol = effective_drift_tol.max(xb_fresh_floor);
                 }
-                need_refactor = resid_max > effective_drift_tol;
-                if need_refactor {
-                    drift_trigger_count += 1;
-                    note_numeric_trouble!();
-                    if profile_phases {
-                        prof_phases::REFACTOR_CAUSE_DRIFT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                // S2 (`ENOMOTO_XB_DRIFT_SAMPLE = k >= 2`, default off): a
+                // `1/k` rotating row sample estimates the residual first;
+                // only a sample estimate above `guard * tol` pays for the
+                // full `O(nnz(A_B))` check below. The first check after a
+                // refactorization always runs in full (it records `drift_r0`).
+                let sample_clear = xb_drift_sample >= 2 && updates > XB_CHECK_INTERVAL && {
+                    let (sb, ss) = sampled_residual_affine(std, &basis_pos, &x_b_base, &x_b_slope, rb, rs, phase == Phase::A, xb_drift_sample, drift_sample_offset);
+                    drift_sample_offset = (drift_sample_offset + 1) % xb_drift_sample;
+                    if env_str!("ENOMOTO_DEBUG_XB_DRIFT_EXT").is_some() {
+                        eprintln!("DEBUG_XB_DRIFT_SAMPLE: iter={_iter} est_base={sb:.3e} est_slope={ss:.3e} effective_tol={effective_drift_tol:.3e}");
+                    }
+                    sb.max(ss) <= xb_drift_sample_guard * effective_drift_tol
+                };
+                if sample_clear {
+                    need_refactor = false;
+                } else {
+                    let (resid_base, resid_slope) = if phase == Phase::A {
+                        (0.0, residual_norm_slope(std, &basis, &x_b_slope, rs, &mut resid_scratch_slope))
+                    } else {
+                        residual_norm_affine(std, &basis, &x_b_base, &x_b_slope, rb, rs, &mut resid_scratch_base, &mut resid_scratch_slope)
+                    };
+                    let resid_max = resid_base.max(resid_slope);
+                    if updates <= XB_CHECK_INTERVAL {
+                        drift_r0 = resid_max;
+                    }
+                    if env_str!("ENOMOTO_DEBUG_XB_DRIFT_EXT").is_some() {
+                        eprintln!(
+                            "DEBUG_XB_DRIFT: iter={_iter} resid_base={resid_base:.3e} resid_slope={resid_slope:.3e} drift_trigger_count={drift_trigger_count} effective_tol={effective_drift_tol:.3e}"
+                        );
+                    }
+                    need_refactor = resid_max > effective_drift_tol;
+                    if need_refactor {
+                        drift_trigger_count += 1;
+                        note_numeric_trouble!();
+                        if profile_phases {
+                            prof_phases::REFACTOR_CAUSE_DRIFT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
                     }
                 }
                 // `d`'s own independent drift check ([`D_DRIFT_TOL`]'s own
@@ -5463,6 +5554,24 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 let (fresh_base, fresh_slope) = resync_x_b(std, &cache, &nb_status, &lu, phase, &mut lu_scratch, &mut x_b_base, &mut x_b_slope)?;
                 rhs_inc_base = fresh_base;
                 rhs_inc_slope = fresh_slope;
+                // Fresh-residual floor (`ENOMOTO_XB_DRIFT_FRESH_FLOOR`,
+                // default off; see `xb_fresh_floor`'s declaration): one
+                // `O(nnz(A_B))` residual per refactorization, measuring what
+                // the fresh factorization itself leaves behind.
+                if xb_fresh_floor_factor > 0.0 {
+                    let (fb, fs) = if phase == Phase::A {
+                        (0.0, residual_norm_slope(std, &basis, &x_b_slope, &rhs_inc_slope, &mut resid_scratch_slope))
+                    } else {
+                        residual_norm_affine(std, &basis, &x_b_base, &x_b_slope, &rhs_inc_base, &rhs_inc_slope, &mut resid_scratch_base, &mut resid_scratch_slope)
+                    };
+                    let fresh_resid = fb.max(fs);
+                    let steps = (drift_trigger_count / tunable!("ENOMOTO_T_XB_DRIFT_ESCALATION_STEP", XB_DRIFT_ESCALATION_STEP, usize)) as i32;
+                    let tol_now = (xb_drift_tol * XB_DRIFT_ESCALATION_FACTOR.powi(steps)).min(XB_DRIFT_TOL_MAX);
+                    xb_fresh_floor = if fresh_resid > xb_fresh_floor_frac * tol_now { (xb_fresh_floor_factor * fresh_resid).min(XB_DRIFT_TOL_MAX) } else { 0.0 };
+                    if env_str!("ENOMOTO_DEBUG_XB_DRIFT_EXT").is_some() {
+                        eprintln!("DEBUG_XB_DRIFT_FRESH: iter={_iter} fresh_resid={fresh_resid:.3e} tol={tol_now:.3e} floor={xb_fresh_floor:.3e}");
+                    }
+                }
                 rebuild_rows(&mut infeasible_rows, &mut row_dev, m, &row_bounds, &x_b_base, &x_b_slope);
                 fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fd_cb, &mut lu_scratch, &mut fd_y, &mut d);
                 if dse_refresh_on_refactor {
