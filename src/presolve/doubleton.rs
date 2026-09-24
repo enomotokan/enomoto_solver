@@ -24,7 +24,7 @@
 
 use crate::presolve::colsingleton::{self, Substitution};
 use crate::presolve::propagate::{self, GView};
-use crate::sparse::{Csr, SparseAccum, csr_from_rows, csr_is_canonical, csr_rows_pruned};
+use crate::sparse::{Csr, CsrRowBuilder, SparseAccum, csr_from_rows, csr_is_canonical, csr_rows_pruned};
 
 const TOL: f64 = 1e-9;
 
@@ -292,8 +292,8 @@ fn eliminate_doubleton_equalities_full(n: usize, a: &Csr, b: &[f64], gv: GView<'
         new_b.push(new_rhs);
     }
 
-    let mut new_g_rows = Vec::with_capacity(real_g_rows.len() + extra_g_rows.len());
-    let mut new_h = Vec::with_capacity(real_g_rhs.len() + extra_h.len());
+    let mut new_g_rows = Vec::with_capacity(real_g_rows.len());
+    let mut new_h = Vec::with_capacity(real_g_rhs.len() + 2 * n + extra_h.len());
     for (row, &rhs) in real_g_rows.iter().zip(real_g_rhs) {
         let (new_row, new_rhs) = rewrite_row(&mut accum, row, rhs, &subs, &by_var);
         new_g_rows.push(new_row);
@@ -303,22 +303,34 @@ fn eliminate_doubleton_equalities_full(n: usize, a: &Csr, b: &[f64], gv: GView<'
     // single-variable rows exactly as `build_a_g`/`propagate` do — `lb`/
     // `ub` themselves are untouched by this pass (only `subs`' own
     // variables lose their explicit bound rows, replaced by the
-    // `extra_g_rows` derived above).
-    for j in 0..n {
-        if by_var[j].is_some() {
-            continue;
+    // `extra_g_rows` derived above). `G` is
+    // `csr_from_rows([new_g_rows, bound rows, extra_g_rows])`, assembled in
+    // a `CsrRowBuilder` without a `Vec` per bound row (same matrix; the
+    // rare row the builder rejects falls back to exactly that call).
+    let bound_rows = || (0..n).filter(|&j| by_var[j].is_none()).flat_map(|j| [(ub[j].is_finite(), j, 1.0, ub[j]), (lb[j].is_finite(), j, -1.0, -lb[j])]).filter(|t| t.0);
+    let nnz: usize = new_g_rows.iter().chain(&extra_g_rows).map(|r| r.len()).sum::<usize>() + 2 * n;
+    let mut builder = CsrRowBuilder::with_capacity(n, new_g_rows.len() + 2 * n + extra_g_rows.len(), nnz);
+    let mut direct = new_g_rows.iter().all(|r| builder.push_row(r));
+    if direct {
+        for (_, j, v, rhs) in bound_rows() {
+            builder.push_singleton(j, v);
+            new_h.push(rhs);
         }
-        if ub[j].is_finite() {
-            new_g_rows.push(vec![(j, 1.0)]);
-            new_h.push(ub[j]);
-        }
-        if lb[j].is_finite() {
-            new_g_rows.push(vec![(j, -1.0)]);
-            new_h.push(-lb[j]);
+        direct = extra_g_rows.iter().all(|r| builder.push_row(r));
+    } else {
+        for (_, _, _, rhs) in bound_rows() {
+            new_h.push(rhs);
         }
     }
-    new_g_rows.extend(extra_g_rows);
     new_h.extend(extra_h);
+    let new_g = if direct {
+        builder.finish()
+    } else {
+        let mut all = new_g_rows;
+        all.extend(bound_rows().map(|(_, j, v, _)| vec![(j, v)]));
+        all.extend(extra_g_rows);
+        csr_from_rows(&all, n)
+    };
 
     let mut new_c = c.to_vec();
     for sub in &subs {
@@ -334,7 +346,7 @@ fn eliminate_doubleton_equalities_full(n: usize, a: &Csr, b: &[f64], gv: GView<'
     DoubletonResult {
         a: csr_from_rows(&new_a_rows, n),
         b: new_b,
-        g: csr_from_rows(&new_g_rows, n),
+        g: new_g,
         h: new_h,
         c: new_c,
         substitutions: subs,

@@ -199,8 +199,6 @@ pub struct ExtendedPresolveResult {
     pub scaling: Scaling,
     pub a: Csr,
     pub b: Vec<f64>,
-    pub g: Csr,
-    pub h: Vec<f64>,
     pub lb: Vec<f64>,
     pub ub: Vec<f64>,
     pub real_rows: Vec<Vec<(usize, f64)>>,
@@ -251,6 +249,16 @@ pub struct ExtendedPresolveResult {
     pub postsolve_log: Vec<PostsolveStep>,
 }
 
+impl ExtendedPresolveResult {
+    /// `G x <= h` with the bounds folded back in as single-variable rows
+    /// (what `interior_point.rs` wants): `rebuild_g_ref` of this result's own
+    /// split form, built only on request — `simplex.rs` reads the split
+    /// `lb`/`ub`/`real_rows`/`real_rhs` directly and never needs it.
+    pub fn g_h(&self) -> (Csr, Vec<f64>) {
+        propagate::rebuild_g_ref(self.lb.len(), &self.real_rows, &self.real_rhs, &self.lb, &self.ub)
+    }
+}
+
 /// One step of [`ExtendedPresolveResult::postsolve_log`] — either kind of
 /// elimination this pipeline performs, kept in one shared chronological
 /// order specifically so postsolve can undo them in a single reverse pass
@@ -266,13 +274,11 @@ pub enum PostsolveStep {
     ParallelCol(parallelcols::Substitution),
 }
 
-fn extended_infeasible(sc: Scaling, a: Csr, b: Vec<f64>, c: Vec<f64>, n: usize) -> ExtendedPresolveResult {
+fn extended_infeasible(sc: Scaling, a: Csr, b: Vec<f64>, c: Vec<f64>, _n: usize) -> ExtendedPresolveResult {
     ExtendedPresolveResult {
         scaling: sc,
         a,
         b,
-        g: csr_from_rows(&[], n),
-        h: Vec::new(),
         lb: Vec::new(),
         ub: Vec::new(),
         real_rows: Vec::new(),
@@ -284,13 +290,11 @@ fn extended_infeasible(sc: Scaling, a: Csr, b: Vec<f64>, c: Vec<f64>, n: usize) 
     }
 }
 
-fn extended_unbounded(sc: Scaling, a: Csr, b: Vec<f64>, c: Vec<f64>, n: usize) -> ExtendedPresolveResult {
+fn extended_unbounded(sc: Scaling, a: Csr, b: Vec<f64>, c: Vec<f64>, _n: usize) -> ExtendedPresolveResult {
     ExtendedPresolveResult {
         scaling: sc,
         a,
         b,
-        g: csr_from_rows(&[], n),
-        h: Vec::new(),
         lb: Vec::new(),
         ub: Vec::new(),
         real_rows: Vec::new(),
@@ -470,7 +474,10 @@ pub fn run_extended(
     // `dualpropagate::run`'s own docs for why it needs the model's
     // *original* bounds specifically, not whatever `lb`/`ub` a later
     // round's own activity-based tightening has since narrowed them to.
-    let (orig_lb, orig_ub) = propagate::extract_bounds_only(n, &g, &h);
+    // (One `extract_bounds` of the pre-loop `G` serves both this and the
+    // first round's `propagate`, see `carry` below.)
+    let (first_lb, first_ub, first_rows, first_rhs) = propagate::extract_bounds(n, &g, &h);
+    let (orig_lb, orig_ub) = (first_lb.clone(), first_ub.clone());
 
     let mut postsolve_log: Vec<PostsolveStep> = Vec::new();
 
@@ -536,7 +543,9 @@ pub fn run_extended(
     // rounds the split travels in `carry`. `ENOMOTO_T_PRESOLVE_SPLIT_G=0`
     // always materializes (the previous behaviour, for A/B).
     let split_enabled = tunable!("ENOMOTO_T_PRESOLVE_SPLIT_G", 1, usize) != 0;
-    let mut carry: Option<(Vec<Vec<(usize, f64)>>, Vec<f64>, Vec<f64>, Vec<f64>)> = None;
+    // The first round starts from the pre-loop `G`, already split once for
+    // `orig_lb`/`orig_ub` above.
+    let mut carry: Option<(Vec<Vec<(usize, f64)>>, Vec<f64>, Vec<f64>, Vec<f64>)> = Some((first_rows, first_rhs, first_lb, first_ub));
     for _round_idx in 0..rounds.max(1) {
         let prop = timed_step!(
             "propagate",
@@ -872,38 +881,92 @@ pub fn run_extended(
                 // reason about this variable as if it still had independent
                 // degrees of freedom, instead of the single value its own
                 // substitution now fully determines.
-                let eliminated_this_pass: std::collections::BTreeSet<usize> = cs.substitutions.iter().map(|s| s.var).collect();
-                // The row surgery below works on the materialized `G`
-                // (built from the bounds *before* this pass's pinning).
-                if g_split {
-                    let (ng, nh) = timed_step!("rebuild_g(cs)", propagate::rebuild_g_ref(n, &cur_real_rows, &cur_real_rhs, &lb, &ub));
-                    g = ng;
-                    h = nh;
-                    g_split = false;
+                let mut eliminated_this_pass = vec![false; n];
+                for s in &cs.substitutions {
+                    eliminated_this_pass[s.var] = true;
                 }
+                // New `G`: every row of the current one except eliminated
+                // variables' single-entry rows, then `cs.extra_g_rows` —
+                // i.e. `csr_from_rows` of those rows, assembled straight
+                // into a `CsrRowBuilder` (from the split form when `G` is
+                // held split: its real rows, then the bound rows of the
+                // not-eliminated columns, from the bounds *before* the
+                // pinning below). A row the builder rejects (a repeated
+                // column) falls back to building that row list explicitly.
+                let (ng, nh) = {
+                    let n_rows = if g_split { cur_real_rows.len() + 2 * n } else { g.nrows() } + cs.extra_g_rows.len();
+                    let mut builder = crate::sparse::CsrRowBuilder::with_capacity(n, n_rows, 0);
+                    let mut h_vec: Vec<f64> = Vec::with_capacity(n_rows);
+                    let mut ok = true;
+                    if g_split {
+                        for (row, &r) in cur_real_rows.iter().zip(&cur_real_rhs) {
+                            ok = ok && builder.push_row(row);
+                            h_vec.push(r);
+                        }
+                        for j in 0..n {
+                            if eliminated_this_pass[j] {
+                                continue;
+                            }
+                            if ub[j].is_finite() {
+                                builder.push_singleton(j, 1.0);
+                                h_vec.push(ub[j]);
+                            }
+                            if lb[j].is_finite() {
+                                builder.push_singleton(j, -1.0);
+                                h_vec.push(-lb[j]);
+                            }
+                        }
+                    } else {
+                        let gr = g.as_ref();
+                        let mut buf: Vec<(usize, f64)> = Vec::new();
+                        for i in 0..gr.nrows() {
+                            let cols = gr.col_indices_of_row_raw(i);
+                            if cols.len() == 1 && eliminated_this_pass[cols[0]] {
+                                continue;
+                            }
+                            buf.clear();
+                            buf.extend(cols.iter().copied().zip(gr.values_of_row(i).iter().copied()));
+                            ok = ok && builder.push_row(&buf);
+                            h_vec.push(h[i]);
+                        }
+                    }
+                    for row in &cs.extra_g_rows {
+                        ok = ok && builder.push_row(row);
+                    }
+                    h_vec.extend_from_slice(&cs.extra_h);
+                    if ok {
+                        (builder.finish(), h_vec)
+                    } else {
+                        let (g0, h0) = if g_split { propagate::rebuild_g_ref(n, &cur_real_rows, &cur_real_rhs, &lb, &ub) } else { (g.clone(), h.clone()) };
+                        let gr = g0.as_ref();
+                        let mut g_rows: Vec<Vec<(usize, f64)>> = Vec::new();
+                        let mut h_vec: Vec<f64> = Vec::new();
+                        for i in 0..gr.nrows() {
+                            let row: Vec<(usize, f64)> = csr_row_vec(&g0, i);
+                            if row.len() == 1 && eliminated_this_pass[row[0].0] {
+                                continue;
+                            }
+                            g_rows.push(row);
+                            h_vec.push(h0[i]);
+                        }
+                        g_rows.extend(cs.extra_g_rows.iter().cloned());
+                        h_vec.extend_from_slice(&cs.extra_h);
+                        (csr_from_rows(&g_rows, n), h_vec)
+                    }
+                };
+                g = ng;
+                h = nh;
+                g_split = false;
                 // Same reason as `dbl.substitutions` above: pin now, not
                 // deferred, so this inner loop's next `rebuild_g` call
                 // sees these variables as fixed rather than reintroducing
                 // their original bounds as a live box row.
-                for &j in &eliminated_this_pass {
-                    lb[j] = 0.0;
-                    ub[j] = 0.0;
-                }
-                let gr = g.as_ref();
-                let mut g_rows: Vec<Vec<(usize, f64)>> = Vec::with_capacity(gr.nrows() + cs.extra_g_rows.len());
-                let mut h_vec: Vec<f64> = Vec::with_capacity(gr.nrows() + cs.extra_h.len());
-                for i in 0..gr.nrows() {
-                    let row: Vec<(usize, f64)> = csr_row_vec(&g, i);
-                    if row.len() == 1 && eliminated_this_pass.contains(&row[0].0) {
-                        continue;
+                for (j, &e) in eliminated_this_pass.iter().enumerate() {
+                    if e {
+                        lb[j] = 0.0;
+                        ub[j] = 0.0;
                     }
-                    g_rows.push(row);
-                    h_vec.push(h[i]);
                 }
-                g_rows.extend(cs.extra_g_rows);
-                h_vec.extend(cs.extra_h);
-                g = csr_from_rows(&g_rows, n);
-                h = h_vec;
             }
             postsolve_log.extend(cs.substitutions.into_iter().map(PostsolveStep::Sub));
 
@@ -1271,8 +1334,6 @@ pub fn run_extended(
             scaling: sc,
             a,
             b,
-            g: csr_from_rows(&[], n),
-            h: Vec::new(),
             lb: prop.lb,
             ub: prop.ub,
             real_rows: prop.real_rows,
@@ -1354,8 +1415,8 @@ pub fn run_extended(
         }
     }
 
-    let (g, h) = propagate::rebuild_g_ref(n, &free.real_rows, &free.real_rhs, &lb, &ub);
     if env_str!("ENOMOTO_DEBUG_PRESOLVE_HASH").is_some() {
+        let (g, h) = propagate::rebuild_g_ref(n, &free.real_rows, &free.real_rhs, &lb, &ub);
         eprintln!("PRESOLVE_HASH {:016x} m_eq={} m_le={} post={}", presolve_output_hash(&a, &b, &g, &h, &c, &lb, &ub), a.nrows(), g.nrows(), postsolve_log.len());
     }
 
@@ -1363,8 +1424,6 @@ pub fn run_extended(
         scaling: sc,
         a,
         b,
-        g,
-        h,
         lb,
         ub,
         real_rows: free.real_rows,
