@@ -1027,10 +1027,21 @@ pub fn eliminate_implied_free_columns_v2(n: usize, a: &Csr, b: &[f64], c: &[f64]
     // (every row is still pristine then).
     let mut a_col0: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
     let mut g_col0: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
+    // `a_col_idx[j]`/`g_col_idx[j]` need the `sort_unstable + dedup` below
+    // only once they hold an out-of-order or repeated row id: built row by
+    // row they are ascending, repeating an id only for a row with a
+    // duplicate column; a fold appends, so it marks the column dirty.
+    // Sorting/deduping an ascending duplicate-free list is a no-op, so
+    // skipping it for clean columns changes nothing.
+    let mut a_dirty = vec![false; n];
+    let mut g_dirty = vec![false; n];
     for (i, row) in a_rows.iter().enumerate() {
         for &(j, v) in row {
             if v != 0.0 {
                 col_a_count[j] += 1;
+                if a_col_idx[j].last() == Some(&i) {
+                    a_dirty[j] = true;
+                }
                 a_col_idx[j].push(i);
                 a_col0[j].push((i, v));
             }
@@ -1040,6 +1051,9 @@ pub fn eliminate_implied_free_columns_v2(n: usize, a: &Csr, b: &[f64], c: &[f64]
         for &(j, v) in row {
             if v != 0.0 {
                 col_g_count[j] += 1;
+                if g_col_idx[j].last() == Some(&i) {
+                    g_dirty[j] = true;
+                }
                 g_col_idx[j].push(i);
                 g_col0[j].push((i, v));
             }
@@ -1102,14 +1116,20 @@ pub fn eliminate_implied_free_columns_v2(n: usize, a: &Csr, b: &[f64], c: &[f64]
     let mut consecutive_fillin_failures = 0usize;
     for j in candidates {
         // Live rows containing `j`, re-verified against current content.
-        a_col_idx[j].sort_unstable();
-        a_col_idx[j].dedup();
+        if a_dirty[j] {
+            a_col_idx[j].sort_unstable();
+            a_col_idx[j].dedup();
+            a_dirty[j] = false;
+        }
         let la: Vec<(usize, f64)> = a_col_idx[j].iter().filter(|&&i| !row_deleted[i]).map(|&i| (i, coef_of(&a_rows[i], j))).filter(|&(_, v)| v != 0.0).collect();
         if la.is_empty() {
             continue;
         }
-        g_col_idx[j].sort_unstable();
-        g_col_idx[j].dedup();
+        if g_dirty[j] {
+            g_col_idx[j].sort_unstable();
+            g_col_idx[j].dedup();
+            g_dirty[j] = false;
+        }
         let lg: Vec<(usize, f64)> = g_col_idx[j].iter().map(|&i| (i, coef_of(&real_rows[i], j))).filter(|&(_, v)| v != 0.0).collect();
         let (lo, hi) = implied(j, &la, &lg, &a_rows, &b, &real_rows, &real_rhs, &mut act_a, &mut act_g);
         if !range_within_box(j, lo, hi, lb, ub) {
@@ -1163,6 +1183,7 @@ pub fn eliminate_implied_free_columns_v2(n: usize, a: &Csr, b: &[f64], c: &[f64]
             row_max_a[i2] = None;
             for &(k, _) in &terms {
                 a_col_idx[k].push(i2);
+                a_dirty[k] = true;
             }
         }
         for &i2 in &other_g {
@@ -1172,6 +1193,7 @@ pub fn eliminate_implied_free_columns_v2(n: usize, a: &Csr, b: &[f64], c: &[f64]
             act_g[i2] = None;
             for &(k, _) in &terms {
                 g_col_idx[k].push(i2);
+                g_dirty[k] = true;
             }
         }
         let cj = c[j];
