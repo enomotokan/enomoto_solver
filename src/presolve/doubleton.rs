@@ -24,7 +24,7 @@
 
 use crate::presolve::colsingleton::{self, Substitution};
 use crate::presolve::propagate;
-use crate::sparse::{Csr, SparseAccum, csr_from_rows, csr_rows_pruned};
+use crate::sparse::{Csr, SparseAccum, csr_from_rows, csr_is_canonical, csr_rows_pruned};
 
 const TOL: f64 = 1e-9;
 
@@ -35,6 +35,72 @@ pub struct DoubletonResult {
     pub h: Vec<f64>,
     pub c: Vec<f64>,
     pub substitutions: Vec<Substitution>,
+    /// Set by the no-candidate fast path: `a`/`b`/`g`/`h`/`c` are exact
+    /// copies of the inputs (see [`unchanged_if_no_candidate`]).
+    pub unchanged: bool,
+}
+
+/// The no-substitution fast path of [`eliminate_doubleton_equalities`]:
+/// when no pruned `A` row is a doubleton candidate, and the full pass
+/// would only rebuild its inputs verbatim, returns copies of the inputs
+/// instead of rewriting every row and rebuilding both matrices.
+///
+/// With no substitution the full pass outputs `A`'s pruned rows with
+/// entries `|v| <= TOL` dropped, and `G` as its non-singleton rows (same
+/// filter) followed by one `(j, 1.0) <= ub_j` / `(j, -1.0) <= -lb_j` row per
+/// finite bound of `extract_bounds(G)`, in column order — exactly the shape
+/// `propagate::rebuild_g_ref` produces. So the copy is taken only when `A`
+/// and `G` are canonical CSR with every entry above `TOL`, and `G`'s
+/// singleton rows are exactly that trailing bound block (bit for bit,
+/// including `h`); anything else goes through the full pass.
+fn unchanged_if_no_candidate(n: usize, a: &Csr, b: &[f64], g: &Csr, h: &[f64], c: &[f64]) -> Option<DoubletonResult> {
+    let ar = a.as_ref();
+    for i in 0..ar.nrows() {
+        let vals = ar.values_of_row(i);
+        // Same candidate test as the main loop's, on the pruned row (the
+        // first doubleton row always claims its variables, since nothing
+        // is claimed yet).
+        let mut nz = vals.iter().enumerate().filter(|&(_, &v)| v != 0.0);
+        if let (Some((p0, &v0)), Some((p1, &v1)), None) = (nz.next(), nz.next(), nz.next()) {
+            let cols = ar.col_indices_of_row_raw(i);
+            let big = if v0.abs() < v1.abs() { v1 } else { v0 };
+            if !(big.abs() < TOL || cols[p0] == cols[p1]) {
+                return None;
+            }
+        }
+    }
+    if !csr_is_canonical(a) || ar.values().iter().any(|&v| v.abs() <= TOL) || !csr_is_canonical(g) {
+        return None;
+    }
+    let gr = g.as_ref();
+    let m = gr.nrows();
+    let mut i = 0;
+    while i < m && gr.col_indices_of_row_raw(i).len() != 1 {
+        if gr.values_of_row(i).iter().any(|&v| v.abs() <= TOL) {
+            return None;
+        }
+        i += 1;
+    }
+    let (lb, ub) = propagate::extract_bounds_only(n, g, h);
+    for j in 0..n {
+        for (bound_finite, coef, rhs) in [(ub[j].is_finite(), 1.0f64, ub[j]), (lb[j].is_finite(), -1.0f64, -lb[j])] {
+            if !bound_finite {
+                continue;
+            }
+            if i >= m {
+                return None;
+            }
+            let cols = gr.col_indices_of_row_raw(i);
+            if cols.len() != 1 || cols[0] != j || gr.values_of_row(i)[0].to_bits() != coef.to_bits() || h[i].to_bits() != rhs.to_bits() {
+                return None;
+            }
+            i += 1;
+        }
+    }
+    if i != m {
+        return None;
+    }
+    Some(DoubletonResult { a: a.clone(), b: b.to_vec(), g: g.clone(), h: h.to_vec(), c: c.to_vec(), substitutions: Vec::new(), unchanged: true })
 }
 
 /// Rewrites `row`/`rhs` in place for every eliminated variable `row`
@@ -87,6 +153,13 @@ fn rewrite_row(accum: &mut SparseAccum, row: &[(usize, f64)], rhs: f64, subs: &[
 /// doubleton rows never both try to eliminate it), not re-checked after
 /// rewriting (mirrors `colsingleton`'s own single-pass scope).
 pub fn eliminate_doubleton_equalities(n: usize, a: &Csr, b: &[f64], g: &Csr, h: &[f64], c: &[f64]) -> DoubletonResult {
+    if let Some(r) = unchanged_if_no_candidate(n, a, b, g, h, c) {
+        return r;
+    }
+    eliminate_doubleton_equalities_full(n, a, b, g, h, c)
+}
+
+fn eliminate_doubleton_equalities_full(n: usize, a: &Csr, b: &[f64], g: &Csr, h: &[f64], c: &[f64]) -> DoubletonResult {
     let a_rows: Vec<Vec<(usize, f64)>> = csr_rows_pruned(a);
     // One sparse accumulator for every `rewrite_row` call below.
     let mut accum = SparseAccum::new(n);
@@ -238,6 +311,7 @@ pub fn eliminate_doubleton_equalities(n: usize, a: &Csr, b: &[f64], g: &Csr, h: 
         h: new_h,
         c: new_c,
         substitutions: subs,
+        unchanged: false,
     }
 }
 
@@ -245,6 +319,60 @@ pub fn eliminate_doubleton_equalities(n: usize, a: &Csr, b: &[f64], g: &Csr, h: 
 mod tests {
     use super::*;
     use crate::sparse::csr_row_vec;
+
+    /// The no-candidate fast path must return exactly what the full pass
+    /// would (bit for bit), whenever it fires.
+    #[test]
+    fn no_candidate_fast_path_matches_full_pass() {
+        let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut rnd = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut fired = 0;
+        for trial in 0..400 {
+            let n = 4 + (trial % 4);
+            let mut rand_row = |len: usize, rnd: &mut dyn FnMut() -> u64| -> Vec<(usize, f64)> {
+                let mut row: Vec<(usize, f64)> = Vec::new();
+                for _ in 0..len {
+                    let j = (rnd() % n as u64) as usize;
+                    if row.iter().all(|&(k, _)| k != j) {
+                        let v = [1.0, -2.0, 0.5, 3.0, 1e-12][(rnd() % 5) as usize];
+                        row.push((j, v));
+                    }
+                }
+                row.sort_by_key(|&(k, _)| k);
+                row
+            };
+            let a_rows: Vec<Vec<(usize, f64)>> = (0..(1 + rnd() % 3)).map(|_| { let l = [1usize, 3, 3, 2][(rnd() % 4) as usize]; rand_row(l, &mut rnd) }).collect();
+            let g_real: Vec<Vec<(usize, f64)>> = (0..(rnd() % 3)).map(|_| { let l = 2 + (rnd() % 2) as usize; rand_row(l, &mut rnd) }).collect();
+            let g_rhs: Vec<f64> = g_real.iter().map(|_| (rnd() % 5) as f64).collect();
+            let lb: Vec<f64> = (0..n).map(|_| [f64::NEG_INFINITY, 0.0, -1.0][(rnd() % 3) as usize]).collect();
+            let ub: Vec<f64> = (0..n).map(|_| [f64::INFINITY, 2.0, 5.0][(rnd() % 3) as usize]).collect();
+            let (g, h) = propagate::rebuild_g_ref(n, &g_real, &g_rhs, &lb, &ub);
+            let a = csr_from_rows(&a_rows, n);
+            let b: Vec<f64> = a_rows.iter().map(|_| (rnd() % 4) as f64).collect();
+            let c: Vec<f64> = (0..n).map(|_| (rnd() % 3) as f64).collect();
+            let Some(fast) = unchanged_if_no_candidate(n, &a, &b, &g, &h, &c) else {
+                continue;
+            };
+            fired += 1;
+            let full = eliminate_doubleton_equalities_full(n, &a, &b, &g, &h, &c);
+            assert!(full.substitutions.is_empty(), "trial {trial}");
+            let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+            for (x, y) in [(&fast.a, &full.a), (&fast.g, &full.g)] {
+                assert_eq!(x.as_ref().row_ptrs(), y.as_ref().row_ptrs(), "trial {trial}");
+                assert_eq!(x.as_ref().col_indices(), y.as_ref().col_indices(), "trial {trial}");
+                assert_eq!(bits(x.as_ref().values()), bits(y.as_ref().values()), "trial {trial}");
+            }
+            assert_eq!(bits(&fast.b), bits(&full.b));
+            assert_eq!(bits(&fast.h), bits(&full.h));
+            assert_eq!(bits(&fast.c), bits(&full.c));
+        }
+        assert!(fired > 20, "fast path fired only {fired} times");
+    }
 
     #[test]
     fn eliminates_larger_coefficient_variable_and_rewrites_other_rows() {

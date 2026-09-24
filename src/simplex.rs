@@ -987,7 +987,18 @@ fn build_std_form_presolved(
 
     let (a, b, g, h) = presolve::build_a_g(variables, constraints);
 
-    let pre = presolve::run_extended(n, &a, &b, &g, &h, &c0, RUIZ_ITERS, PROPAGATION_PASSES, PRESOLVE_ROUNDS, ROWSINGLETON_COLSINGLETON_INNER_ROUNDS);
+    let pre = presolve::run_extended(
+        n,
+        &a,
+        &b,
+        &g,
+        &h,
+        &c0,
+        tunable!("ENOMOTO_T_RUIZ_ITERS", RUIZ_ITERS, usize),
+        tunable!("ENOMOTO_T_PROPAGATION_PASSES", PROPAGATION_PASSES, usize),
+        tunable!("ENOMOTO_T_PRESOLVE_ROUNDS", PRESOLVE_ROUNDS, usize),
+        tunable!("ENOMOTO_T_INNER_ROUNDS", ROWSINGLETON_COLSINGLETON_INNER_ROUNDS, usize),
+    );
     if std::env::var("ENOMOTO_DEBUG_PRESOLVE_INFEAS").is_ok() {
         eprintln!("DEBUG_PRESOLVE: infeasible={} unbounded={}", pre.infeasible, pre.unbounded);
     }
@@ -1229,17 +1240,24 @@ fn build_std_form_presolved(
     new_lb[..n_free].copy_from_slice(&slot_lb);
     new_ub[..n_free].copy_from_slice(&slot_ub);
 
-    let mut rows = Vec::with_capacity(n_rows);
     let mut b_out = Vec::with_capacity(n_rows);
+    // The rows go straight into one flat CSR buffer (row `k` =
+    // `entries[offsets[k]..offsets[k + 1]]`) rather than one `Vec` per
+    // row, and the column form is transposed from it — the same matrices,
+    // entry for entry, that `freeze_std_matrices` builds from the
+    // equivalent `Vec<Vec<_>>`.
+    let nnz_bound = pre.a.as_ref().compute_nnz() + g_rows.iter().map(|r| r.len()).sum::<usize>() + n_rows;
+    let mut offsets: Vec<usize> = Vec::with_capacity(n_rows + 1);
+    offsets.push(0);
+    let mut entries: Vec<(usize, f64)> = Vec::with_capacity(nnz_bound);
 
     for i in 0..n_eq {
         let slack = n_free + i;
         let mut rhs_i = pre.b[i];
-        let mut r: Vec<(usize, f64)> = Vec::new();
         for (j, v) in csr_row_iter(&pre.a, i) {
             match new_index[j] {
                 Some(nj) => {
-                    r.push((nj, v * sign[nj]));
+                    entries.push((nj, v * sign[nj]));
                     rhs_i -= v * sign[nj] * shift[j];
                 }
                 None => rhs_i -= v * lb[j],
@@ -1247,18 +1265,17 @@ fn build_std_form_presolved(
         }
         new_lb[slack] = 0.0;
         new_ub[slack] = 0.0;
-        r.push((slack, 1.0));
-        rows.push(r);
+        entries.push((slack, 1.0));
+        offsets.push(entries.len());
         b_out.push(rhs_i);
     }
     for (k, row) in g_rows.into_iter().enumerate() {
         let slack = n_free + n_eq + k;
         let mut rhs_k = g_rhs[k];
-        let mut r: Vec<(usize, f64)> = Vec::new();
         for (j, v) in row {
             match new_index[j] {
                 Some(nj) => {
-                    r.push((nj, v * sign[nj]));
+                    entries.push((nj, v * sign[nj]));
                     rhs_k -= v * sign[nj] * shift[j];
                 }
                 None => rhs_k -= v * lb[j],
@@ -1266,12 +1283,17 @@ fn build_std_form_presolved(
         }
         new_lb[slack] = 0.0;
         new_ub[slack] = f64::INFINITY;
-        r.push((slack, 1.0));
-        rows.push(r);
+        entries.push((slack, 1.0));
+        offsets.push(entries.len());
         b_out.push(rhs_k);
     }
 
-    let (rows, cols) = freeze_std_matrices(&rows, n_total);
+    debug_assert!(
+        offsets.windows(2).all(|w| entries[w[0]..w[1]].windows(2).all(|e| e[0].0 < e[1].0)),
+        "StdForm rows must be strictly column-ascending"
+    );
+    let rows = CsrMat::from_flat(n_total, offsets, entries);
+    let cols = rows.to_csc();
     let shift_of_free: Vec<f64> = orig_of_free.iter().map(|&j| shift[j]).collect();
     Ok(PresolvedForm {
         std: StdForm { n_total, n_rows, c, rows, cols, b: b_out, lb: new_lb, ub: new_ub },

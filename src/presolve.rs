@@ -405,8 +405,23 @@ pub fn run_extended(
     // small-coefficient edge filter (see that pre-pass's own docs on why an
     // unpropagated, looser bound here is safe, just more conservative, than
     // the fully-tightened `orig_lb`/`orig_ub` extracted again below).
-    let (pre_lb, pre_ub) = propagate::extract_bounds_only(n, &g, &h);
-    let (na, nb) = timed_step!("reduce_equalities", redundancy::reduce_equalities(&a, &b, n, &pre_lb, &pre_ub));
+    //
+    // `ENOMOTO_REDEQ_MODE` picks where the rank-revealing half of
+    // `reduce_equalities` runs (analysis/presolve_pipeline_20260924_031005.md
+    // §2.1/C1: on 89 of the 93 Netlib problems it finds nothing beyond the
+    // exact duplicates `dedupe_rows` already drops, yet costs ~10% of the
+    // light problems' solve time):
+    //   0 = here, on the full scaled `A` (the historical behaviour);
+    //   1 = (default) duplicates only, no rank detection at all;
+    //   2 = duplicates here, rank detection once on the much smaller `A`
+    //       left after the round loop (see below).
+    let redeq_mode = tunable!("ENOMOTO_REDEQ_MODE", 1, usize);
+    let (na, nb) = if redeq_mode == 0 {
+        let (pre_lb, pre_ub) = propagate::extract_bounds_only(n, &g, &h);
+        timed_step!("reduce_equalities", redundancy::reduce_equalities(&a, &b, n, &pre_lb, &pre_ub))
+    } else {
+        timed_step!("reduce_equalities(dedupe)", redundancy::dedupe_equalities(&a, &b, n))
+    };
     a = na;
     b = nb;
     if profile && std::env::var("ENOMOTO_PROF_REDUNDANCY").is_ok() {
@@ -472,12 +487,15 @@ pub fn run_extended(
     // doubleton-equality row (measured to be rare enough in practice that
     // this one-way latch is worth its own presolve-time savings).
     let mut doubleton_active = true;
+    // Consecutive empty calls before the latch engages (`ENOMOTO_T_DOUBLETON_STRIKES`).
+    let mut doubleton_empty_streak = 0usize;
 
     // Same one-way latch, same reason: `dualpropagate`'s own transpose-and-
     // propagate call is a full-matrix pass, worth skipping once a round's
     // call finds neither a new implied-equality row to promote nor a new
     // column to fix (its two reductions — see `dualpropagate::run`'s docs).
     let mut dualpropagate_active = true;
+    let mut dualpropagate_empty_streak = 0usize;
 
     // Same one-way latch, same reason again: `parallelcols`'s own
     // signature-grouping scan is a full-matrix pass (see its own module
@@ -496,7 +514,7 @@ pub fn run_extended(
     // cost one avoidable extra call across its own 9 rounds, judged not
     // worth a third latch state to also chase down.
     let mut parallelcols_active = true;
-    let mut parallelcols_prev_empty = false;
+    let mut parallelcols_empty_streak = 0usize;
 
     // Fixpoint detection: a round that leaves `a`/`g`'s row counts and
     // every bound unchanged found nothing a further round could act on
@@ -506,6 +524,8 @@ pub fn run_extended(
     // this is what turns `rounds` from "run exactly this many times" into
     // "run at most this many times, fewer if convergence comes first".
     let mut prev_signature: Option<(usize, usize, Vec<f64>, Vec<f64>)> = None;
+    let mut prev_struct: Option<(usize, usize, usize, usize)> = None;
+    let mut eqprop_idle = false;
     for _round_idx in 0..rounds.max(1) {
         let prop = timed_step!("propagate", propagate::propagate(n, &g, &h, prop_passes));
         if prop.infeasible {
@@ -546,10 +566,18 @@ pub fn run_extended(
         // absolute ~0.13s) is this trade-off's known remaining cost — see
         // this function's own module docs and the loop's analysis file for
         // the full comparison table.
-        if _round_idx < 2 {
+        //
+        // `ENOMOTO_T_EQPROP_SKIP_IDLE=1` (default 0): once a round's call
+        // reports no forcing row, fixed column or tightened bound, skip the
+        // remaining eqprop rounds (C20; not guaranteed identical — a later
+        // round starts from tighter bounds and could still find something).
+        if _round_idx < tunable!("ENOMOTO_T_EQPROP_ROUNDS", 2, usize) && !eqprop_idle {
             let eq = timed_step!("eqprop", propagate::propagate_equalities(&a, &b, &mut lb, &mut ub, prop_passes));
             if eq.infeasible {
                 return extended_infeasible(sc, a, b, c, n);
+            }
+            if tunable!("ENOMOTO_T_EQPROP_SKIP_IDLE", 0, usize) != 0 && eq.forcing_rows == 0 && eq.fixed_cols == 0 && eq.tightened == 0 {
+                eqprop_idle = true;
             }
         }
 
@@ -595,8 +623,12 @@ pub fn run_extended(
         if dualpropagate_active {
             let dual_red = timed_step!("dualpropagate", dualpropagate::run(n, &a, &cur_real_rows, &c, &lb, &ub, &orig_lb, &orig_ub, prop_passes));
             if dual_red.implied_equalities.is_empty() && dual_red.fixed_columns.is_empty() {
-                dualpropagate_active = false;
+                dualpropagate_empty_streak += 1;
+                if dualpropagate_empty_streak >= tunable!("ENOMOTO_T_DUALPROPAGATE_STRIKES", 1, usize) {
+                    dualpropagate_active = false;
+                }
             } else {
+                dualpropagate_empty_streak = 0;
                 if std::env::var("ENOMOTO_DEBUG_DUALPROPAGATE").is_ok() {
                     eprintln!("DEBUG_DUALPROPAGATE: implied_equalities={} fixed_columns={}", dual_red.implied_equalities.len(), dual_red.fixed_columns.len());
                 }
@@ -735,11 +767,23 @@ pub fn run_extended(
             let (ng, nh) = timed_step!("rebuild_g(inner)", propagate::rebuild_g_ref(n, &cur_real_rows, &cur_real_rhs, &lb, &ub));
             g = ng;
             h = nh;
+            // Whether `(g, h)` is still exactly `rebuild_g_ref(cur_real_rows,
+            // cur_real_rhs, lb, ub)` — see the `extract_bounds(inner)` skip
+            // below.
+            let mut g_is_rebuilt = true;
 
             if _inner == 0 && doubleton_active {
                 let dbl = timed_step!("doubleton", doubleton::eliminate_doubleton_equalities(n, &a, &b, &g, &h, &c));
                 if dbl.substitutions.is_empty() {
-                    doubleton_active = false;
+                    doubleton_empty_streak += 1;
+                    if doubleton_empty_streak >= tunable!("ENOMOTO_T_DOUBLETON_STRIKES", 1, usize) {
+                        doubleton_active = false;
+                    }
+                } else {
+                    doubleton_empty_streak = 0;
+                }
+                if !dbl.unchanged {
+                    g_is_rebuilt = false;
                 }
                 a = dbl.a;
                 b = dbl.b;
@@ -764,6 +808,7 @@ pub fn run_extended(
             }
 
             let cs = timed_step!("colsingleton", colsingleton::eliminate_singleton_equalities(n, &a, &b, &g, &h, &c));
+            let cs_unchanged = cs.substitutions.is_empty();
             a = cs.a;
             b = cs.b;
             c = cs.c;
@@ -830,13 +875,24 @@ pub fn run_extended(
             // from `extract_bounds` as a *bound*, not a row — folded into
             // `lb`/`ub` here (tighter of the two) rather than discarded,
             // since dropping it would silently lose a real constraint.
-            let (refreshed_lb, refreshed_ub, refreshed_real_rows, refreshed_real_rhs) = timed_step!("extract_bounds(inner)", propagate::extract_bounds(n, &g, &h));
-            for j in 0..n {
-                lb[j] = lb[j].max(refreshed_lb[j]);
-                ub[j] = ub[j].min(refreshed_ub[j]);
+            //
+            // Skipped when it would be an exact round trip: `g` is still the
+            // `rebuild_g_ref` output of this pass (no doubleton rewrite, no
+            // colsingleton substitution since), and every real row is
+            // already in the form `rebuild_g_ref` stores it (not a single
+            // entry, strictly ascending columns, no stored zero) — then
+            // `extract_bounds` would hand back `lb`/`ub` and the real rows
+            // and rhs bit for bit.
+            let round_trip = g_is_rebuilt && cs_unchanged && cur_real_rows.iter().all(|r| r.len() != 1 && r.iter().all(|&(_, v)| v != 0.0) && r.windows(2).all(|w| w[0].0 < w[1].0));
+            if !round_trip {
+                let (refreshed_lb, refreshed_ub, refreshed_real_rows, refreshed_real_rhs) = timed_step!("extract_bounds(inner)", propagate::extract_bounds(n, &g, &h));
+                for j in 0..n {
+                    lb[j] = lb[j].max(refreshed_lb[j]);
+                    ub[j] = ub[j].min(refreshed_ub[j]);
+                }
+                cur_real_rows = refreshed_real_rows;
+                cur_real_rhs = refreshed_real_rhs;
             }
-            cur_real_rows = refreshed_real_rows;
-            cur_real_rhs = refreshed_real_rhs;
         }
 
         // Aggregator (HiGHS's own name; `HPresolve::aggregator`): eliminates
@@ -915,7 +971,8 @@ pub fn run_extended(
         } else {
             // Default since 2026-09-23 (analysis/stocfor2_presolve_20260923.md):
             // stocfor2 1652x1766 -> 950x1072 after presolve, -65% solve time.
-            Some(timed_step!("aggregator", aggregator::eliminate_implied_free_columns_v2(n, &a, &b, &c, &lb, &ub, &cur_real_rows, &cur_real_rhs, aggregator::AggOptions::from_env())))
+            // `None` = no candidate at all (checked without copying the problem).
+            timed_step!("aggregator", aggregator::eliminate_implied_free_columns_v2_if_any(n, &a, &b, &c, &lb, &ub, &cur_real_rows, &cur_real_rhs, aggregator::AggOptions::from_env()))
         };
         if let Some(agg) = agg {
             if std::env::var("ENOMOTO_DEBUG_AGGREGATOR").is_ok() {
@@ -1002,21 +1059,17 @@ pub fn run_extended(
         // false `Infeasible`. Fixed by rejecting that specific fold
         // outright rather than by touching anything downstream.
         let pc = if parallelcols_active && std::env::var("ENOMOTO_DISABLE_PARALLELCOLS").is_err() {
-            Some(timed_step!("parallelcols", parallelcols::merge_parallel_columns(n, &a, &cur_real_rows, &c, &lb, &ub)))
+            // Inner `None` = ran, nothing merged (no copy of the problem made).
+            Some(timed_step!("parallelcols", parallelcols::merge_parallel_columns_if_any(n, &a, &cur_real_rows, &c, &lb, &ub)))
         } else {
             None
         };
         if let Some(pc) = pc {
             if std::env::var("ENOMOTO_DEBUG_PARALLELCOLS").is_ok() {
-                eprintln!("DEBUG_PARALLELCOLS: eliminated={}", pc.substitutions.len());
+                eprintln!("DEBUG_PARALLELCOLS: eliminated={}", pc.as_ref().map_or(0, |pc| pc.substitutions.len()));
             }
-            if pc.substitutions.is_empty() {
-                if parallelcols_prev_empty {
-                    parallelcols_active = false;
-                }
-                parallelcols_prev_empty = true;
-            } else {
-                parallelcols_prev_empty = false;
+            if let Some(pc) = pc {
+                parallelcols_empty_streak = 0;
                 a = pc.a;
                 c = pc.c;
                 lb = pc.lb;
@@ -1030,6 +1083,11 @@ pub fn run_extended(
                 let (ng, nh) = timed_step!("rebuild_g(pc)", propagate::rebuild_g_ref(n, &cur_real_rows, &cur_real_rhs, &lb, &ub));
                 g = ng;
                 h = nh;
+            } else {
+                parallelcols_empty_streak += 1;
+                if parallelcols_empty_streak >= tunable!("ENOMOTO_T_PARALLELCOLS_STRIKES", 2, usize) {
+                    parallelcols_active = false;
+                }
             }
         }
 
@@ -1077,6 +1135,24 @@ pub fn run_extended(
         g = rg;
         h = rh;
 
+        // `ENOMOTO_T_ROUND_STRUCT_STOP=1` (default 0 = off): stop as soon as
+        // a whole round left the structure unchanged — `A`'s row count,
+        // `g`'s multi-entry (real) row count, the number of fixed columns
+        // and the postsolve log length all equal to the previous round's.
+        // Unlike the signature check below this ignores bound values, so a
+        // round that only keeps shaving bounds (geometric convergence) ends
+        // the loop after one such idle round instead of running to the cap.
+        if tunable!("ENOMOTO_T_ROUND_STRUCT_STOP", 0, usize) != 0 {
+            let gr = g.as_ref();
+            let g_multi = (0..gr.nrows()).filter(|&i| gr.col_indices_of_row_raw(i).len() > 1).count();
+            let fixed = (0..n).filter(|&j| lb[j] == ub[j]).count();
+            let st = (a.nrows(), g_multi, fixed, postsolve_log.len());
+            if prev_struct == Some(st) {
+                break;
+            }
+            prev_struct = Some(st);
+        }
+
         let signature = (a.nrows(), g.nrows(), lb.clone(), ub.clone());
         // Bound changes below a relative 1e-3 do not count as progress
         // (`ENOMOTO_FIXPOINT_EXACT` restores the exact comparison):
@@ -1089,13 +1165,25 @@ pub fn run_extended(
             if std::env::var("ENOMOTO_FIXPOINT_EXACT").is_ok() {
                 return *p == signature;
             }
-            let close = |x: &[f64], y: &[f64]| x.iter().zip(y).all(|(&u, &v)| u == v || (u - v).abs() <= 1e-3 * (1.0 + u.abs().max(v.abs())));
+            let close = |x: &[f64], y: &[f64]| x.iter().zip(y).all(|(&u, &v)| u == v || (u - v).abs() <= tunable!("ENOMOTO_T_FIXPOINT_RELTOL", 1e-3, f64) * (1.0 + u.abs().max(v.abs())));
             p.0 == signature.0 && p.1 == signature.1 && close(&p.2, &signature.2) && close(&p.3, &signature.3)
         };
         if prev_signature.as_ref().is_some_and(same) {
             break;
         }
         prev_signature = Some(signature);
+    }
+
+    if redeq_mode == 2 && a.nrows() > 0 {
+        // Deferred rank detection (C1 option ii): the round loop has
+        // removed most rows and columns by now, so the dense-QR / sparse-
+        // elimination cost is paid on the reduced system only. Current
+        // bounds feed only the block decomposition's negligible-edge filter
+        // (see `reduce_equalities`' docs).
+        let (cur_lb, cur_ub) = propagate::extract_bounds_only(n, &g, &h);
+        let (na, nb) = timed_step!("reduce_equalities(post)", redundancy::reduce_equalities(&a, &b, n, &cur_lb, &cur_ub));
+        a = na;
+        b = nb;
     }
 
     let prop = timed_step!("final propagate", propagate::propagate(n, &g, &h, prop_passes));

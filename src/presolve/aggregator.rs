@@ -435,7 +435,7 @@ pub fn eliminate_implied_free_columns_if_any(n: usize, a: &Csr, b: &[f64], c: &[
             continue;
         }
         let row_max = pivot_row.iter().map(|&(_, v)| v.abs()).fold(0.0f64, f64::max);
-        if coeff.abs() < SUBSTITUTION_PIVOT_RATIO * row_max {
+        if coeff.abs() < tunable!("ENOMOTO_T_SUBSTITUTION_PIVOT_RATIO", SUBSTITUTION_PIVOT_RATIO, f64) * row_max {
             // This specific (row, col) pair fails the numerical guard --
             // unlike a plain eligibility failure, a *different* row for the
             // same column may still be a later candidate in this same list
@@ -480,9 +480,9 @@ pub fn eliminate_implied_free_columns_if_any(n: usize, a: &Csr, b: &[f64], c: &[
             }
             fillin_cost(&terms, &targets)
         };
-        if fillin > MAX_FILLIN {
+        if fillin > tunable!("ENOMOTO_T_MAX_FILLIN", MAX_FILLIN, usize) {
             consecutive_fillin_failures += 1;
-            if consecutive_fillin_failures >= MAX_CONSECUTIVE_FILLIN_FAILURES {
+            if consecutive_fillin_failures >= tunable!("ENOMOTO_T_MAX_CONSECUTIVE_FILLIN_FAILURES", MAX_CONSECUTIVE_FILLIN_FAILURES, usize) {
                 break;
             }
             continue;
@@ -750,7 +750,7 @@ pub fn eliminate_implied_free_columns_xrow(n: usize, a: &Csr, b: &[f64], c: &[f6
             let row = &a_rows[i];
             let Some(&(_, coeff)) = row.iter().find(|&&(k, _)| k == j) else { continue };
             let row_max = row.iter().map(|&(_, v)| v.abs()).fold(0.0f64, f64::max);
-            if coeff.abs() >= SUBSTITUTION_PIVOT_RATIO * row_max {
+            if coeff.abs() >= tunable!("ENOMOTO_T_SUBSTITUTION_PIVOT_RATIO", SUBSTITUTION_PIVOT_RATIO, f64) * row_max {
                 chosen = Some((i, coeff));
                 break;
             }
@@ -783,9 +783,9 @@ pub fn eliminate_implied_free_columns_xrow(n: usize, a: &Csr, b: &[f64], c: &[f6
             }
             fillin_cost(&terms, &targets)
         };
-        if fillin > MAX_FILLIN {
+        if fillin > tunable!("ENOMOTO_T_MAX_FILLIN", MAX_FILLIN, usize) {
             consecutive_fillin_failures += 1;
-            if consecutive_fillin_failures >= MAX_CONSECUTIVE_FILLIN_FAILURES {
+            if consecutive_fillin_failures >= tunable!("ENOMOTO_T_MAX_CONSECUTIVE_FILLIN_FAILURES", MAX_CONSECUTIVE_FILLIN_FAILURES, usize) {
                 break;
             }
             continue;
@@ -890,6 +890,114 @@ impl AggOptions {
 /// keeps its box (a column eliminated earlier no longer appears in any live
 /// row, so justifications only ever depend on boxes that are still
 /// enforced — the eliminations form a DAG, never a cycle).
+/// [`eliminate_implied_free_columns_v2`], returning `None` (the problem is
+/// unchanged) without copying anything when its candidate list would be
+/// empty — the v2 counterpart of [`eliminate_implied_free_columns_if_any`]
+/// (most rounds of most problems find no candidate at all). The pre-check
+/// [`v2_has_candidate`] evaluates exactly v2's own candidate test, in the
+/// same floating-point order, straight off `a`'s CSR slices and the
+/// borrowed `real_rows`, so `Some` results are bit-identical to calling
+/// v2 directly and `None` is returned only where v2 would have eliminated
+/// nothing.
+pub fn eliminate_implied_free_columns_v2_if_any(n: usize, a: &Csr, b: &[f64], c: &[f64], lb: &[f64], ub: &[f64], real_rows: &[Vec<(usize, f64)>], real_rhs: &[f64], opts: AggOptions) -> Option<AggregatorResult> {
+    if !v2_has_candidate(n, a, b, lb, ub, real_rows, real_rhs, opts) {
+        return None;
+    }
+    Some(eliminate_implied_free_columns_v2(n, a, b, c, lb, ub, real_rows, real_rhs, opts))
+}
+
+/// Whether [`eliminate_implied_free_columns_v2`]'s candidate list is
+/// non-empty. Mirrors its candidate generation exactly: the same
+/// eligibility test, each row's activity summed over the row sorted by
+/// column (v2 sorts unsorted rows before anything else), and, per column,
+/// the same sequence of `max`/`min` folds (equality rows in ascending
+/// order, then inequality rows in ascending order).
+pub fn v2_has_candidate(n: usize, a: &Csr, b: &[f64], lb: &[f64], ub: &[f64], real_rows: &[Vec<(usize, f64)>], real_rhs: &[f64], opts: AggOptions) -> bool {
+    let ar = a.as_ref();
+    let p = ar.nrows();
+    let is_free = |j: usize| lb[j] == f64::NEG_INFINITY && ub[j] == f64::INFINITY;
+    let mut col_a_count = vec![0usize; n];
+    let mut col_g_count = vec![0usize; n];
+    for i in 0..p {
+        for (&j, &v) in ar.col_indices_of_row_raw(i).iter().zip(ar.values_of_row(i)) {
+            if v != 0.0 {
+                col_a_count[j] += 1;
+            }
+        }
+    }
+    for row in real_rows {
+        for &(j, v) in row {
+            if v != 0.0 {
+                col_g_count[j] += 1;
+            }
+        }
+    }
+    let min_a = opts.min_a_count.max(1);
+    let eligible: Vec<bool> = (0..n).map(|j| !(col_a_count[j] < min_a || col_a_count[j] + col_g_count[j] < 2 || is_free(j))).collect();
+    if !eligible.iter().any(|&e| e) {
+        return false;
+    }
+    let mut lo = vec![f64::NEG_INFINITY; n];
+    let mut hi = vec![f64::INFINITY; n];
+    let mut row_buf: Vec<(usize, f64)> = Vec::new();
+    // `row` itself when already sorted by column, else a sorted copy in
+    // `row_buf` (v2 sorts before computing any activity).
+    fn sorted<'r>(row: &'r [(usize, f64)], buf: &'r mut Vec<(usize, f64)>) -> &'r [(usize, f64)] {
+        if row.windows(2).all(|w| w[0].0 < w[1].0) {
+            row
+        } else {
+            buf.clear();
+            buf.extend_from_slice(row);
+            buf.sort_unstable_by_key(|&(k, _)| k);
+            buf
+        }
+    }
+    let mut a_buf: Vec<(usize, f64)> = Vec::new();
+    for i in 0..p {
+        let cols = ar.col_indices_of_row_raw(i);
+        let vals = ar.values_of_row(i);
+        if !cols.iter().zip(vals).any(|(&j, &v)| v != 0.0 && eligible[j]) {
+            continue;
+        }
+        a_buf.clear();
+        a_buf.extend(cols.iter().copied().zip(vals.iter().copied()));
+        let row = sorted(&a_buf, &mut row_buf);
+        let act = compute_row_activity(row, lb, ub);
+        for &(j, coeff) in row {
+            if coeff == 0.0 || !eligible[j] {
+                continue;
+            }
+            let (rlo, rhi) = implied_range(&act, j, coeff, b[i], lb, ub);
+            lo[j] = lo[j].max(rlo);
+            hi[j] = hi[j].min(rhi);
+        }
+    }
+    if opts.use_ineq {
+        for (i, row) in real_rows.iter().enumerate() {
+            if !row.iter().any(|&(j, v)| v != 0.0 && eligible[j]) {
+                continue;
+            }
+            let row = sorted(row, &mut row_buf);
+            let act = compute_row_activity(row, lb, ub);
+            for &(j, coeff) in row {
+                if coeff == 0.0 || !eligible[j] {
+                    continue;
+                }
+                let (s_lo, _) = residual_range(&act, j, coeff, lb, ub);
+                if s_lo.is_finite() {
+                    let v = (real_rhs[i] - s_lo) / coeff;
+                    if coeff > 0.0 {
+                        hi[j] = hi[j].min(v);
+                    } else {
+                        lo[j] = lo[j].max(v);
+                    }
+                }
+            }
+        }
+    }
+    (0..n).any(|j| eligible[j] && range_within_box(j, lo[j], hi[j], lb, ub))
+}
+
 pub fn eliminate_implied_free_columns_v2(n: usize, a: &Csr, b: &[f64], c: &[f64], lb: &[f64], ub: &[f64], real_rows: &[Vec<(usize, f64)>], real_rhs: &[f64], opts: AggOptions) -> AggregatorResult {
     let mut a_rows: Vec<Vec<(usize, f64)>> = csr_rows(a);
     let mut accum = SparseAccum::new(n);
@@ -919,10 +1027,21 @@ pub fn eliminate_implied_free_columns_v2(n: usize, a: &Csr, b: &[f64], c: &[f64]
     // (every row is still pristine then).
     let mut a_col0: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
     let mut g_col0: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
+    // `a_col_idx[j]`/`g_col_idx[j]` need the `sort_unstable + dedup` below
+    // only once they hold an out-of-order or repeated row id: built row by
+    // row they are ascending, repeating an id only for a row with a
+    // duplicate column; a fold appends, so it marks the column dirty.
+    // Sorting/deduping an ascending duplicate-free list is a no-op, so
+    // skipping it for clean columns changes nothing.
+    let mut a_dirty = vec![false; n];
+    let mut g_dirty = vec![false; n];
     for (i, row) in a_rows.iter().enumerate() {
         for &(j, v) in row {
             if v != 0.0 {
                 col_a_count[j] += 1;
+                if a_col_idx[j].last() == Some(&i) {
+                    a_dirty[j] = true;
+                }
                 a_col_idx[j].push(i);
                 a_col0[j].push((i, v));
             }
@@ -932,6 +1051,9 @@ pub fn eliminate_implied_free_columns_v2(n: usize, a: &Csr, b: &[f64], c: &[f64]
         for &(j, v) in row {
             if v != 0.0 {
                 col_g_count[j] += 1;
+                if g_col_idx[j].last() == Some(&i) {
+                    g_dirty[j] = true;
+                }
                 g_col_idx[j].push(i);
                 g_col0[j].push((i, v));
             }
@@ -994,14 +1116,20 @@ pub fn eliminate_implied_free_columns_v2(n: usize, a: &Csr, b: &[f64], c: &[f64]
     let mut consecutive_fillin_failures = 0usize;
     for j in candidates {
         // Live rows containing `j`, re-verified against current content.
-        a_col_idx[j].sort_unstable();
-        a_col_idx[j].dedup();
+        if a_dirty[j] {
+            a_col_idx[j].sort_unstable();
+            a_col_idx[j].dedup();
+            a_dirty[j] = false;
+        }
         let la: Vec<(usize, f64)> = a_col_idx[j].iter().filter(|&&i| !row_deleted[i]).map(|&i| (i, coef_of(&a_rows[i], j))).filter(|&(_, v)| v != 0.0).collect();
         if la.is_empty() {
             continue;
         }
-        g_col_idx[j].sort_unstable();
-        g_col_idx[j].dedup();
+        if g_dirty[j] {
+            g_col_idx[j].sort_unstable();
+            g_col_idx[j].dedup();
+            g_dirty[j] = false;
+        }
         let lg: Vec<(usize, f64)> = g_col_idx[j].iter().map(|&i| (i, coef_of(&real_rows[i], j))).filter(|&(_, v)| v != 0.0).collect();
         let (lo, hi) = implied(j, &la, &lg, &a_rows, &b, &real_rows, &real_rhs, &mut act_a, &mut act_g);
         if !range_within_box(j, lo, hi, lb, ub) {
@@ -1012,7 +1140,7 @@ pub fn eliminate_implied_free_columns_v2(n: usize, a: &Csr, b: &[f64], c: &[f64]
         by_len.sort_by_key(|&(i, _)| a_rows[i].len());
         let Some((row_idx, coeff)) = by_len.into_iter().find(|&(i, coeff)| {
             let row_max = *row_max_a[i].get_or_insert_with(|| a_rows[i].iter().map(|&(_, v)| v.abs()).fold(0.0f64, f64::max));
-            coeff.abs() >= SUBSTITUTION_PIVOT_RATIO * row_max
+            coeff.abs() >= tunable!("ENOMOTO_T_SUBSTITUTION_PIVOT_RATIO", SUBSTITUTION_PIVOT_RATIO, f64) * row_max
         }) else {
             continue;
         };
@@ -1037,9 +1165,9 @@ pub fn eliminate_implied_free_columns_v2(n: usize, a: &Csr, b: &[f64], c: &[f64]
                 gross += terms.iter().filter(|&&(k, _)| stamp[k] != stamp_id).count() as i64;
             }
             let fillin = if opts.net_fillin { gross - (pivot_row.len() + n_other) as i64 } else { gross };
-            if fillin > MAX_FILLIN as i64 {
+            if fillin > tunable!("ENOMOTO_T_MAX_FILLIN", MAX_FILLIN, usize) as i64 {
                 consecutive_fillin_failures += 1;
-                if opts.fillin_break && consecutive_fillin_failures >= MAX_CONSECUTIVE_FILLIN_FAILURES {
+                if opts.fillin_break && consecutive_fillin_failures >= tunable!("ENOMOTO_T_MAX_CONSECUTIVE_FILLIN_FAILURES", MAX_CONSECUTIVE_FILLIN_FAILURES, usize) {
                     break;
                 }
                 continue;
@@ -1055,6 +1183,7 @@ pub fn eliminate_implied_free_columns_v2(n: usize, a: &Csr, b: &[f64], c: &[f64]
             row_max_a[i2] = None;
             for &(k, _) in &terms {
                 a_col_idx[k].push(i2);
+                a_dirty[k] = true;
             }
         }
         for &i2 in &other_g {
@@ -1064,6 +1193,7 @@ pub fn eliminate_implied_free_columns_v2(n: usize, a: &Csr, b: &[f64], c: &[f64]
             act_g[i2] = None;
             for &(k, _) in &terms {
                 g_col_idx[k].push(i2);
+                g_dirty[k] = true;
             }
         }
         let cj = c[j];
@@ -1396,5 +1526,64 @@ mod tests {
         let opts = AggOptions { min_a_count: 2, ..all_on() };
         let r = eliminate_implied_free_columns_v2(3, &a, &[0.0], &[0.0; 3], &lb, &ub, &[vec![(0, 1.0), (2, 1.0)]], &[5.0], opts);
         assert!(r.substitutions.is_empty());
+    }
+
+    /// `v2_has_candidate == false` must imply v2 eliminates nothing, and the
+    /// `_if_any` wrapper must return v2's own result whenever it is `Some`.
+    #[test]
+    fn v2_has_candidate_is_consistent_with_v2() {
+        let mut state: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut rnd = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut seen_none = 0;
+        let mut seen_some = 0;
+        for trial in 0..400 {
+            let n = 3 + (trial % 5);
+            let mut rows: Vec<Vec<(usize, f64)>> = Vec::new();
+            for _ in 0..(1 + rnd() % 4) {
+                let mut row: Vec<(usize, f64)> = Vec::new();
+                for _ in 0..(1 + rnd() % 3) {
+                    let j = (rnd() % n as u64) as usize;
+                    if row.iter().all(|&(k, _)| k != j) {
+                        row.push((j, ((rnd() % 5) as f64 - 2.0) + 0.5));
+                    }
+                }
+                rows.push(row);
+            }
+            let b: Vec<f64> = rows.iter().map(|_| (rnd() % 7) as f64 - 3.0).collect();
+            let mut g: Vec<Vec<(usize, f64)>> = Vec::new();
+            for _ in 0..(rnd() % 3) {
+                // Deliberately unsorted inequality rows.
+                let j1 = (rnd() % n as u64) as usize;
+                let j0 = (rnd() % n as u64) as usize;
+                if j0 != j1 {
+                    g.push(vec![(j1.max(j0), 1.0), (j1.min(j0), -0.5)]);
+                }
+            }
+            let h: Vec<f64> = g.iter().map(|_| (rnd() % 9) as f64).collect();
+            let bnd = |x: u64| [f64::NEG_INFINITY, -5.0, 0.0, 1.0][(x % 4) as usize];
+            let lb: Vec<f64> = (0..n).map(|_| bnd(rnd())).collect();
+            let ub: Vec<f64> = lb.iter().map(|&l| if rnd() % 4 == 0 { f64::INFINITY } else { l.max(0.0) + (rnd() % 10) as f64 + 1.0 }).collect();
+            let c: Vec<f64> = (0..n).map(|_| (rnd() % 3) as f64).collect();
+            let a = csr(&rows, n);
+            let full = eliminate_implied_free_columns_v2(n, &a, &b, &c, &lb, &ub, &g, &h, all_on());
+            match eliminate_implied_free_columns_v2_if_any(n, &a, &b, &c, &lb, &ub, &g, &h, all_on()) {
+                None => {
+                    seen_none += 1;
+                    assert!(full.substitutions.is_empty(), "trial {trial}");
+                }
+                Some(r) => {
+                    seen_some += 1;
+                    assert_eq!(r.substitutions.len(), full.substitutions.len(), "trial {trial}");
+                    assert_eq!(r.real_rows, full.real_rows, "trial {trial}");
+                    assert_eq!(r.c, full.c, "trial {trial}");
+                }
+            }
+        }
+        assert!(seen_none > 0 && seen_some > 0, "none={seen_none} some={seen_some}");
     }
 }

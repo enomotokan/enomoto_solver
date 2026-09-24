@@ -1068,6 +1068,15 @@ impl CsrMat {
         CsrMat { n_rows: rows.len(), n_cols, inner: Compressed::from_groups(rows) }
     }
 
+    /// Takes an already-flattened layout: row `i` is
+    /// `entries[offsets[i]..offsets[i + 1]]` (`offsets[0] == 0`, one more
+    /// offset than rows) — exactly what [`Self::from_rows`] builds from the
+    /// equivalent `Vec<Vec<_>>`, without the per-row vectors.
+    pub(crate) fn from_flat(n_cols: usize, offsets: Vec<usize>, entries: Vec<(usize, f64)>) -> Self {
+        debug_assert!(offsets.first() == Some(&0) && offsets.last() == Some(&entries.len()) && offsets.windows(2).all(|w| w[0] <= w[1]));
+        CsrMat { n_rows: offsets.len() - 1, n_cols, inner: Compressed { offsets, entries } }
+    }
+
     /// Like [`Self::from_rows`], but canonicalizing each row first: sorted
     /// by column, duplicate columns summed, and anything within `tol` of
     /// zero dropped.
@@ -1820,6 +1829,23 @@ mod tests {
     /// The direct (no-duplicate) builder must reproduce faer's triplet
     /// builder exactly: same structure, same values, same explicit-zero
     /// dropping, unsorted rows sorted.
+    /// `CsrMat::from_flat` + `to_csc` must equal `CsrMat::from_rows` +
+    /// `CscMat::from_rows` on the same rows (the standard-form build relies
+    /// on this).
+    #[test]
+    fn csr_from_flat_and_to_csc_match_from_rows() {
+        let rows: Vec<Vec<(usize, f64)>> = vec![vec![(0, 1.0), (3, -2.0), (5, 1.0)], vec![], vec![(1, 0.5), (6, 1.0)], vec![(0, -1.0), (1, 2.0), (2, 3.0), (7, 1.0)]];
+        let mut offsets = vec![0usize];
+        let mut entries = Vec::new();
+        for r in &rows {
+            entries.extend_from_slice(r);
+            offsets.push(entries.len());
+        }
+        let flat = CsrMat::from_flat(8, offsets, entries);
+        assert_eq!(flat, CsrMat::from_rows(&rows, 8));
+        assert_eq!(flat.to_csc(), CscMat::from_rows(&rows, 8));
+    }
+
     #[test]
     fn csr_from_rows_direct_matches_faer_triplets() {
         let rows: Vec<Vec<(usize, f64)>> = vec![
