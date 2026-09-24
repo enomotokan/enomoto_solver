@@ -3515,14 +3515,19 @@ impl StepCapture {
 }
 
 /// [`permute_btran_out`] that also records `w`'s nonzero steps into `cap`
-/// (see [`StepCapture`]).
+/// (see [`StepCapture`]) and, with `ZERO_W`, resets `w` to all-zero in the
+/// same pass (see [`UnitBtranWork`]).
 #[inline]
-fn permute_btran_out_capture(row_perm: &[usize], w: &[f64], y: &mut [f64], cap: &mut StepCapture) {
+fn permute_btran_out_capture<const ZERO_W: bool>(row_perm: &[usize], w: &mut [f64], y: &mut [f64], cap: &mut StepCapture) {
     let tiny = tiny_drop();
     let limit = (cap.limit_frac * w.len() as f64) as usize;
     cap.steps.clear();
     let mut over = false;
-    for (s, &v) in w.iter().enumerate() {
+    for (s, wv) in w.iter_mut().enumerate() {
+        let v = *wv;
+        if ZERO_W {
+            *wv = 0.0;
+        }
         let v = if tiny > 0.0 && v.abs() < tiny { 0.0 } else { v };
         y[row_perm[s]] = v;
         if v != 0.0 && !over {
@@ -3534,6 +3539,51 @@ fn permute_btran_out_capture(row_perm: &[usize], w: &[f64], y: &mut [f64], cap: 
         }
     }
     cap.valid = !over;
+}
+
+/// [`permute_btran_out`] that also resets `w` to all-zero in the same pass.
+#[inline]
+fn permute_btran_out_zeroing(row_perm: &[usize], w: &mut [f64], y: &mut [f64]) {
+    let tiny = tiny_drop();
+    for (s, wv) in w.iter_mut().enumerate() {
+        let v = *wv;
+        *wv = 0.0;
+        y[row_perm[s]] = if tiny > 0.0 && v.abs() < tiny { 0.0 } else { v };
+    }
+}
+
+/// Caller-owned working storage for [`FtLu::solve_transpose_unit_work`], the
+/// pivotal-row BTRAN (`rho_p = B^-T e_r`) with its `e_tilde` capture, that
+/// removes that path's own `O(m)` passes other than the ones the solve
+/// inherently needs (the `U^T` sweep over every slot and the output
+/// permutation):
+///
+/// - `w` is a dedicated step-space scratch kept **all-zero between calls**
+///   (the output permutation zeroes each entry as it reads it), so seeding
+///   `e_i` is one store instead of a `fill(0)`.
+/// - The `U^T` sweep records every position it turns from zero to nonzero
+///   (`touch`, capped at `m` entries — beyond that the full-copy fallback
+///   applies). Every nonzero of `e_tilde` is in `touch`, so `e_tilde_out`
+///   is written at those positions only; the positions written last call
+///   (`e_touch`) are reset first. This requires that nothing but this method
+///   writes `e_tilde_out` (true for the extended dual's `e_tilde_buf`).
+/// - `touch.len()` plus the nonzero counts of the `R` etas applied next is an
+///   upper bound on the `L^T` stage's input nonzeros; when it is already
+///   within the scatter/gather gate's limit the exact counting pass is
+///   skipped (same decision, since the exact count can only be smaller).
+///
+/// Everything is bit-identical to [`FtLu::solve_transpose_unit_capture`].
+pub struct UnitBtranWork {
+    w: Vec<f64>,
+    touch: Vec<usize>,
+    e_touch: Vec<usize>,
+    e_full: bool,
+}
+
+impl UnitBtranWork {
+    pub fn new(m: usize) -> Self {
+        UnitBtranWork { w: vec![0.0; m], touch: Vec::with_capacity(m), e_touch: Vec::with_capacity(m), e_full: false }
+    }
 }
 
 fn btran_l_scatter_gate() -> f64 {
@@ -3913,14 +3963,25 @@ impl FtLu {
     /// [`Self::l_transpose_solve_into`], optionally recording the result's
     /// nonzero steps (see [`StepCapture`]).
     fn l_transpose_solve_into_cap(&self, w: &mut [f64], y: &mut [f64], cap: Option<&mut StepCapture>) {
+        self.l_transpose_solve_into_ext::<false>(w, y, cap, usize::MAX)
+    }
+
+    /// [`Self::l_transpose_solve_into_cap`] with two extras for
+    /// [`UnitBtranWork`]: `nnz_bound` (an upper bound on `w`'s nonzero
+    /// count; when it is within the gate's limit the counting pass is
+    /// skipped — the exact count could only be smaller, so the decision is
+    /// the same) and `ZERO_W` (reset `w` to zero in the output pass).
+    fn l_transpose_solve_into_ext<const ZERO_W: bool>(&self, w: &mut [f64], y: &mut [f64], cap: Option<&mut StepCapture>, nnz_bound: usize) {
         let limit = (self.btran_l_scatter * self.base.m as f64) as usize;
-        let mut nnz = 0usize;
         let mut sparse = true;
-        for &v in w.iter() {
-            nnz += (v != 0.0) as usize;
-            if nnz > limit {
-                sparse = false;
-                break;
+        if nnz_bound > limit {
+            let mut nnz = 0usize;
+            for &v in w.iter() {
+                nnz += (v != 0.0) as usize;
+                if nnz > limit {
+                    sparse = false;
+                    break;
+                }
             }
         }
         if sparse {
@@ -3931,7 +3992,8 @@ impl FtLu {
             self.base.l_transpose_gather_core(w);
         }
         match cap {
-            Some(c) => permute_btran_out_capture(&self.base.row_perm, w, y, c),
+            Some(c) => permute_btran_out_capture::<ZERO_W>(&self.base.row_perm, w, y, c),
+            None if ZERO_W => permute_btran_out_zeroing(&self.base.row_perm, w, y),
             None => permute_btran_out(&self.base.row_perm, w, y),
         }
     }
@@ -4052,6 +4114,44 @@ impl FtLu {
                 z[q] -= v * zp;
             }
         }
+    }
+
+    /// [`Self::u_transpose_sweep`] that also appends to `touch` every
+    /// position it turns from zero to nonzero (a position can appear more
+    /// than once). Returns `false` if `touch` would have exceeded `m`
+    /// entries (recording stopped; the caller must treat every position as
+    /// possibly nonzero). Same operations in the same order as the untracked
+    /// sweep, ticks included.
+    fn u_transpose_sweep_track(&self, z: &mut [f64], touch: &mut Vec<usize>) -> bool {
+        let cap = self.base.m;
+        let mut ok = true;
+        self.add_tick(self.base.m as u64);
+        for eta in self.singles.iter().chain(self.u_seq.iter()) {
+            let p = eta.slot;
+            let zp = z[p];
+            if zp == 0.0 {
+                continue;
+            }
+            let zp = zp / eta.pivot;
+            z[p] = zp;
+            let owners = &self.row_owners[p];
+            self.add_tick(owners.len() as u64);
+            if ok && touch.len() + owners.len() <= cap {
+                for &(q, v) in owners {
+                    let old = z[q];
+                    z[q] = old - v * zp;
+                    if old == 0.0 {
+                        touch.push(q);
+                    }
+                }
+            } else {
+                ok = false;
+                for &(q, v) in owners {
+                    z[q] -= v * zp;
+                }
+            }
+        }
+        ok
     }
 
     /// [`Self::u_transpose_solve_into`], restricted to `u_seq[start..]` —
@@ -4709,6 +4809,59 @@ impl FtLu {
     /// own `e_tilde` capture.
     pub fn solve_transpose_unit_capture(&self, i: usize, scratch: &mut [f64], out: &mut [f64], e_tilde_out: &mut [f64]) {
         self.solve_transpose_unit_capture_steps(i, scratch, out, e_tilde_out, None)
+    }
+
+    /// [`Self::solve_transpose_unit_capture_steps`] using a
+    /// [`UnitBtranWork`] instead of a caller scratch — see that type for the
+    /// passes it removes. `out`, `e_tilde_out`, the capture and the ticks are
+    /// bit-identical.
+    pub fn solve_transpose_unit_work(&self, i: usize, out: &mut [f64], e_tilde_out: &mut [f64], work: &mut UnitBtranWork, cap: Option<&mut StepCapture>) {
+        let m = self.base.m;
+        if work.w.len() != m {
+            work.w = vec![0.0; m];
+            work.e_full = true;
+        }
+        let w = &mut work.w;
+        debug_assert!(w.iter().all(|&v| v == 0.0));
+        let s0 = self.base.col_perm_inv[i];
+        w[s0] = 1.0;
+        work.touch.clear();
+        work.touch.push(s0);
+        let tracked = self.u_transpose_sweep_track(w, &mut work.touch);
+        // `e_tilde` capture: reset last call's positions, write this call's.
+        if work.e_full {
+            e_tilde_out.fill(0.0);
+        } else {
+            for &q in &work.e_touch {
+                e_tilde_out[q] = 0.0;
+            }
+        }
+        let mut bound;
+        if tracked {
+            for &q in &work.touch {
+                e_tilde_out[q] = w[q];
+            }
+            bound = work.touch.len();
+            std::mem::swap(&mut work.touch, &mut work.e_touch);
+            work.e_full = false;
+        } else {
+            e_tilde_out.copy_from_slice(w);
+            bound = usize::MAX;
+            work.e_full = true;
+        }
+        // `btran_tail`, with the nonzero bound carried through the `R` etas.
+        for reta in self.r_etas.iter().rev() {
+            let yp = w[reta.p];
+            if yp == 0.0 {
+                continue;
+            }
+            let nnz = reta.r.nnz();
+            self.add_tick(nnz as u64);
+            bound = bound.saturating_add(nnz);
+            reta.r.axpy_into_dense(-yp, w);
+        }
+        self.add_tick(m as u64);
+        self.l_transpose_solve_into_ext::<true>(w, out, cap, bound);
     }
 
     /// [`Self::solve_transpose_unit_capture`] that additionally records
@@ -6214,6 +6367,59 @@ mod tests {
                 let a_q: Vec<f64> = (0..m).map(|k| if k % 7 == round { 1.0 + k as f64 } else { 0.0 }).collect();
                 if !state.try_update(round, &a_q, 1e-9) {
                     break;
+                }
+            }
+        }
+    }
+
+    /// `solve_transpose_unit_work` (dedicated zero-kept scratch, tracked
+    /// `e_tilde` copy, bounded `L^T` gate) and the `StepCapture`-driven GP
+    /// `L` stage of the fused `tau` FTRAN must be bit-identical to the plain
+    /// paths, ticks included, fresh and after Forrest-Tomlin updates.
+    #[test]
+    fn unit_btran_work_and_tau_gp_are_bit_identical() {
+        for m in [40usize, 200] {
+            for seed in [1u64, 2, 3, 4, 5] {
+                let rows = random_sparse_diag_dominant(m, seed);
+                let base = factorize(m, &rows).expect("diagonally dominant matrix must factorize");
+                let mut state = FtLu::new(base);
+                let mut work = UnitBtranWork::new(m);
+                let mut cap = StepCapture::new(m);
+                let mut e_work = vec![0.0; m];
+                for round in 0..6 {
+                    for i in 0..m {
+                        let (mut scratch, mut out, mut e_tilde) = (vec![0.0; m], vec![0.0; m], vec![0.0; m]);
+                        let t0 = state.synth_tick();
+                        state.solve_transpose_unit_capture(i, &mut scratch, &mut out, &mut e_tilde);
+                        let ref_cost = state.synth_tick() - t0;
+                        let mut out_w = vec![0.0; m];
+                        let t0 = state.synth_tick();
+                        state.solve_transpose_unit_work(i, &mut out_w, &mut e_work, &mut work, Some(&mut cap));
+                        assert_eq!(state.synth_tick() - t0, ref_cost, "m={m} seed={seed} round={round} i={i}: tick");
+                        assert_eq!(out_w, out, "m={m} seed={seed} round={round} i={i}: rho");
+                        assert_eq!(e_work, e_tilde, "m={m} seed={seed} round={round} i={i}: e_tilde");
+                        assert!(work.w.iter().all(|&v| v == 0.0));
+                        // Fused tau FTRAN with and without the capture.
+                        let a: Vec<f64> = (0..m).map(|k| if (k + i) % 11 == round { 0.5 + k as f64 } else { 0.0 }).collect();
+                        let (mut sa, mut sb, mut oa, mut ob, mut ta) = (vec![0.0; m], vec![0.0; m], vec![0.0; m], vec![0.0; m], vec![0.0; m]);
+                        let t0 = state.synth_tick();
+                        let r1 = state.solve_into_pair_capture(&a, &out, &mut sa, &mut sb, &mut oa, &mut ob, &mut ta, None);
+                        let c1 = state.synth_tick() - t0;
+                        let (mut sa2, mut sb2, mut oa2, mut ob2, mut ta2) = (vec![0.0; m], vec![7.0; m], vec![0.0; m], vec![0.0; m], vec![0.0; m]);
+                        let t0 = state.synth_tick();
+                        let r2 = state.solve_into_pair_capture(&a, &out, &mut sa2, &mut sb2, &mut oa2, &mut ob2, &mut ta2, Some(&mut cap));
+                        assert_eq!(state.synth_tick() - t0, c1);
+                        assert_eq!(r1, r2);
+                        assert_eq!(oa, oa2);
+                        assert_eq!(ta, ta2);
+                        for k in 0..m {
+                            assert!(ob[k] == ob2[k], "m={m} seed={seed} round={round} i={i}: tau[{k}]");
+                        }
+                    }
+                    let a_q: Vec<f64> = (0..m).map(|k| if k % 7 == round { 1.0 + k as f64 } else { 0.0 }).collect();
+                    if !state.try_update(round, &a_q, 1e-9) {
+                        break;
+                    }
                 }
             }
         }

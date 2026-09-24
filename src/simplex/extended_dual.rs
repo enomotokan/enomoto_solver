@@ -2569,6 +2569,10 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     // fused `tau` FTRAN's `L` stage can take the Gilbert-Peierls path — see
     // [`sparse_lu::StepCapture`]. Bit-identical to the dense `L` stage.
     let mut rho_steps = sparse_lu::StepCapture::new(m);
+    // Dedicated zero-kept scratch + touched-position lists for the pivotal-row
+    // BTRAN — see [`sparse_lu::UnitBtranWork`]. `e_tilde_buf` must not be
+    // written by anything else in this loop (it is not).
+    let mut btran_work = sparse_lu::UnitBtranWork::new(m);
     // `ENOMOTO_FUSED_DSE_FTRAN=0` restores the two separate solves (A/B
     // only — the fused form is bit-identical, see its own docs).
     let fused_dse_ftran = std::env::var("ENOMOTO_FUSED_DSE_FTRAN").map_or(true, |v| v != "0");
@@ -3498,7 +3502,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         // call further down — see `FtLu::try_update_precomputed`'s own
         // docs for why this is bit-for-bit the value that call would
         // otherwise recompute from scratch.
-        timed!(profile_phases, prof_phases::BTRAN, lu.solve_transpose_unit_capture_steps(r, &mut lu_scratch, &mut rho, &mut e_tilde_buf, Some(&mut rho_steps)));
+        timed!(profile_phases, prof_phases::BTRAN, lu.solve_transpose_unit_work(r, &mut rho, &mut e_tilde_buf, &mut btran_work, Some(&mut rho_steps)));
         if profile_phases {
             let exact_w = dot(&rho, &rho);
             let maintained_w = weights.weight(r);
