@@ -1208,177 +1208,142 @@ pub(crate) mod lu {
 
 /// 前処理 (src/presolve.rs, src/presolve/*.rs)
 pub(crate) mod presolve {
-    /// 【元: src/presolve/aggregator.rs】
-    /// 【元: src/presolve/colsingleton.rs】
-    /// 【元: src/presolve/dominatedcol.rs】
-    /// 【元: src/presolve/doubleton.rs】
-    /// 【元: src/presolve/dualfix.rs】
-    /// 【元: src/presolve/dualpropagate.rs】
-    /// 【元: src/presolve/foldfixed.rs】
-    /// 【元: src/presolve/freevar.rs】
-    /// 【元: src/presolve/ineqsingleton.rs】
-    /// 【元: src/presolve/parallelcols.rs】
-    /// 【元: src/presolve/parallelrows.rs】
-    /// 【元: src/presolve/rowdominance.rs】
-    /// 【元: src/presolve/rowsingleton.rs】
-    /// 【元: src/presolve/sparsify.rs】
-    /// 【元: src/presolve/stuffing.rs】
+    // ---- 共通 ----
+
+    /// 前処理全般で「0 とみなす」係数・差の絶対許容誤差 (ピボットが 0 か、係数が
+    /// 実質 0 か、行が空か等の判定)。
+    /// 【元: aggregator, colsingleton, dominatedcol, doubleton, dualfix, dualpropagate,
+    /// foldfixed, freevar, ineqsingleton, parallelcols, parallelrows, rowdominance,
+    /// rowsingleton, sparsify, stuffing の各 `TOL` を統合】
     pub(crate) const TOL: f64 = 1e-9;
 
-    /// 【元: src/presolve/aggregator.rs】
-    /// Mirrors `colsingleton`/`freevar`'s own pivot guard exactly (same value,
-    /// same purpose — see either module's own docs on `SUBSTITUTION_PIVOT_RATIO`).
-    /// 【元: src/presolve/colsingleton.rs】
-    /// Minimum `|coeff| / max|row|` for a column singleton to be substituted
-    /// out — see the guard in `eliminate_singleton_equalities`.
-    /// 【元: src/presolve/freevar.rs】
-    /// Minimum `|coeff| / max|row|` for either pass below to actually
-    /// eliminate a free variable through a given row — mirrors
-    /// `colsingleton::SUBSTITUTION_PIVOT_RATIO` exactly (same value, same
-    /// purpose: a pivot that is tiny only *relative to its own row* still
-    /// amplifies whatever floating-point error the row already carries when
-    /// every other entry gets divided by it). Confirmed load-bearing, not
-    /// merely defensive: two real Netlib instances (`perold`, `pilot4`, both
-    /// already flagged elsewhere in this crate as numerically difficult) were
-    /// pushed to a false `Infeasible` — reproducing identically through
-    /// `extended_dual` *and* the classical `BIG_M` path, and only when this
-    /// module's own elimination ran at all — by a handful of sub-1%-of-row
-    /// pivots this module used to accept unconditionally, before this guard
-    /// existed.
+    /// 代入消去のピボット判定: 消去に使う係数が `|coeff| >= この値 * max|row|` を
+    /// 満たさなければその行では消去しない (小さいピボットで割ると復元時の誤差が増幅される)。
+    /// colsingleton / freevar / aggregator で共通 (`ENOMOTO_T_*SUBSTITUTION_PIVOT_RATIO`)。
     pub(crate) const SUBSTITUTION_PIVOT_RATIO: f64 = 1e-2;
 
-    /// Mirrors HiGHS's own `presolve_substitution_maxfillin` default (registered
-    /// range `[0, 10]`, default `10`, `HighsOptions.h`): total new nonzeros a
-    /// single column's elimination may introduce across every row it folds
-    /// into, above which the column is left for a later call instead of
-    /// risking a dense-equality-system blowup.
-    pub(crate) const MAX_FILLIN: usize = 10;
-
-    /// Mirrors HiGHS's own `nfail == 3` cutoff in `HPresolve::aggregator`: after
-    /// this many *consecutive* fill-in rejections, stop trying the rest of this
-    /// call's candidate list outright rather than keep paying for the fill-in
-    /// check on an already-too-dense region.
-    pub(crate) const MAX_CONSECUTIVE_FILLIN_FAILURES: usize = 3;
-
-    /// Relative tolerance for treating a bound-preservation row as already
-    /// implied by its terms' own boxes.
+    /// 境界保存行が残りの項の箱制約から既に含意されているかを判定する相対許容誤差
+    /// (colsingleton / doubleton)。
     pub(crate) const IMPLIED_TOL: f64 = 1e-9;
 
+    // ---- aggregator ----
+
+    /// aggregator: 1 列の消去で増えてよい非零要素数の上限 (HiGHS の
+    /// `presolve_substitution_maxfillin` の既定値)。超える列は見送る。
+    pub(crate) const MAX_FILLIN: usize = 10;
+
+    /// aggregator: fill-in 超過による却下がこの回数連続したら、その呼び出しの残り候補を
+    /// 打ち切る (HiGHS の `nfail == 3`)。
+    pub(crate) const MAX_CONSECUTIVE_FILLIN_FAILURES: usize = 3;
+
+    // ---- propagate ----
+
+    /// 上下限伝播の絶対許容誤差 (上下限の更新幅・矛盾判定・行の冗長判定に使う)。
     pub(crate) const PROPAGATE_EPS: f64 = 1e-9;
 
-    /// Above this fraction of nonzero coefficients (`nnz / (p * n)`, over the
-    /// deduplicated equality rows), [`reduce_equalities`] uses
-    /// [`drop_linearly_dependent`] (dense QR) instead of
-    /// [`drop_linearly_dependent_sparse`].
-    ///
-    /// Density, not `p` or a dense-QR flop-count estimate, is what actually
-    /// separates the two regimes — calibrated directly against measured
-    /// Netlib instances, not derived analytically. The first cut at this
-    /// dispatch rule used a pure cost estimate (`(n+1) * p^2`, dense QR's own
-    /// flop order, thresholded so `wood1p`'s small `p` routed to dense): it
-    /// fixed `wood1p` but *also* routed `standmps` (`p=268`, density 0.96%)
-    /// and `fffff800` (`p=350`, density 1.6%) to dense even though the sparse
-    /// method was already faster for both there (their low density means
-    /// elimination stays close to its own nonzero count, with none of the
-    /// fill-in blowup a size-based estimate implicitly worries about) —
-    /// measured regressions of roughly 2-4x on both after that first cut.
-    /// `wood1p` itself is the outlier that actually needs dense: 11.1% row
-    /// density, roughly 7-30x denser than every other measured instance
-    /// (`fffff800` 1.6%, `standmps` 0.96%, `sierra` 0.37%, `ganges` 0.31%,
-    /// `modszk1` 0.28%, `stocfor2` 0.21%) — dense QR there stayed a bounded
-    /// ~30ms while the sparse method's fill-in blew up to 962ms. `3%` sits
-    /// with comfortable margin above every instance that must stay sparse and
-    /// below `wood1p`'s own density.
+    /// 不等式伝播 (`propagate_split`) の相対改善閾値 (`ENOMOTO_T_PROP_RELTOL`)。
+    /// 有限の境界は改善幅が `reltol * (1 + |bound|)` を超えるときだけ更新する。
+    /// 0 で無効 (絶対閾値 `PROPAGATE_EPS` のみ)。
+    pub(crate) const PROP_RELTOL: f64 = 0.0;
+
+    /// 等式伝播 (`propagate_equalities`) の相対改善閾値 (`ENOMOTO_T_EQPROP_RELTOL`)。
+    /// 有限の境界は変化量が `reltol * (1 + |old|)` を超えるときだけ更新する。0 で無効。
+    pub(crate) const EQPROP_RELTOL: f64 = 0.0;
+
+    // ---- redundancy (等式行の一次従属検出) ----
+
+    /// 重複除去後の等式行の非零密度 `nnz / (p * n)` がこれを超えたら密 QR
+    /// (`drop_linearly_dependent`)、以下なら疎消去 (`drop_linearly_dependent_sparse`) を使う。
     pub(crate) const DENSE_DENSITY_THRESHOLD: f64 = 0.03;
 
-    /// Numerical-stability floor a candidate pivot must clear, relative to the
-    /// current **global** maximum active entry anywhere in the matrix (not
-    /// just its own column's) — see [`drop_linearly_dependent_sparse`]'s own
-    /// docs for why "global" here, not "local to the column", is what makes
-    /// this a correct rank-revealing criterion instead of merely a safe-enough
-    /// pivot for solving. A different, narrower purpose than `DEP_TOL` below:
-    /// this only gates which *candidates* the fill-minimizing search is
-    /// allowed to accept, the same role `simplex::lu`'s own `STABILITY`
-    /// constant plays for the (unrelated) basis factorization.
+    /// 密 QR 経路 (`drop_linearly_dependent`) の従属判定の相対許容誤差。`|R[k,k]|` が
+    /// その行自身の拡大ノルム `||[係数; 右辺]||_2` のこの倍数以下なら一次従属として落とす
+    /// (`ENOMOTO_T_REDEQ_QR_RANK_TOL`)。
+    pub(crate) const REDEQ_QR_RANK_TOL: f64 = 1e-9;
+
+    /// 疎消去でピボット候補が満たすべき安定性の下限。行列全体の現在の最大絶対値に
+    /// 対する比で判定する (列内最大でなく全体最大に対する比なので階数判定として正しい)。
     pub(crate) const PIVOT_STABILITY: f64 = 0.1;
 
-    /// Dependency floor, relative to a row's own *original* norm (computed
-    /// once, before any elimination) — this is the actual redundancy
-    /// criterion. `DEP_TOL * row_orig_norm` plays the same role here that
-    /// `1e-9 * col_norm(orig)` plays against `|R[k,k]|` in
-    /// [`drop_linearly_dependent`] (see that function's own docs for why a
-    /// per-row-relative, not global, threshold matters — the same reasoning
-    /// applies here).
+    /// 疎消去で行を一次従属 (冗長) とみなす閾値。ピボット値が
+    /// `DEP_TOL * (その行の元のノルム)` 以下なら従属と判定する。
     pub(crate) const DEP_TOL: f64 = 1e-9;
 
-    /// Below this total row count across a decomposition's non-trivial
-    /// (size > 1) components, [`drop_linearly_dependent_sparse_blocked`] runs
-    /// them sequentially rather than via `rayon` — see that function's own
-    /// docs for why, unlike every *other* `rayon` call site in this crate
-    /// (all gated by `RAYON_SIZE_THRESHOLD`-style raw *problem* size, per
-    /// `simplex.rs`'s own docs on measured per-element dispatch overhead),
-    /// the right threshold here is total row count *within the blocks
-    /// actually being split*, since a component's own elimination is real,
-    /// non-trivial work per row (unlike a cheap per-element scan) — a modest
-    /// absolute row count here still comfortably pays for `rayon`'s task
-    /// dispatch.
+    /// ブロック分解後の非自明ブロック (サイズ > 1) の総行数がこれ以上なら、
+    /// ブロックごとの消去を rayon で並列実行する。
     pub(crate) const PARALLEL_DECOMPOSE_ROW_THRESHOLD: usize = 64;
 
-    /// Below this many equality rows, [`drop_linearly_dependent_sparse_blocked`]
-    /// skips [`dulmage_mendelsohn_blocks`] entirely and calls
-    /// [`drop_linearly_dependent_sparse`] directly, rather than always paying
-    /// for the bipartite-matching-plus-SCC pass (and, if it does find multiple
-    /// blocks, the per-block `HashMap`-based column remapping and fresh
-    /// `BTreeMap`/bucket/heap scaffolding for each one). Measured directly (with
-    /// the earlier, coarser connected-components version of this same
-    /// decomposition, before it was replaced by the finer Dulmage-Mendelsohn
-    /// one — the size/regression picture below is unaffected by that swap,
-    /// since both pay similar decomposition overhead on tiny inputs): every
-    /// real Netlib win from decomposition (`ship12s` `p=1045`, `ship08s`
-    /// `p=698`, `ship04l`/`ship04s` `p=354`, `sierra` `p=528`) has `p` well
-    /// above this; every case that regressed when decomposition ran
-    /// unconditionally (`sc105` `p=45`, `scorpion` `p=280`, `sc205` `p=91`,
-    /// `capri` `p=142`, `standgub`/`standata` `p=160`, `recipe` `p=67`,
-    /// `bore3d` `p=214`) sits below it — all by a comfortable margin, so `300`
-    /// is not a tight cutoff. Every one of those regressions was itself only
-    /// a fraction of a millisecond in absolute terms (these are already
-    /// sub-10ms problems), but with nothing to gain there either — the
-    /// decomposition's benefit scales with how much per-row elimination work
-    /// it *avoids* doing across blocks, which is negligible when the whole
-    /// problem is this small to begin with.
+    /// 等式行数がこれ未満なら Dulmage-Mendelsohn ブロック分解を省き、
+    /// 疎消去を直接呼ぶ (小さい問題では分解のオーバーヘッドが得にならない)。
     pub(crate) const MIN_ROWS_FOR_BLOCK_DECOMPOSE: usize = 300;
 
-    /// Above this many combined `A`/`G` rows, prefer `rayon`'s parallel
-    /// reduce for `compute`'s column-norm fold over a plain sequential scan —
-    /// same constant and rationale as `simplex.rs`'s `RAYON_SIZE_THRESHOLD`
-    /// (this crate's own `#[ignore]`d `col_norm_fold_rayon_threshold_microbench`
-    /// never found `rayon` winning, not even at 4,000,000 rows), duplicated
-    /// locally rather than shared cross-module since each of this crate's
-    /// rayon-threshold constants is already tuned/re-derived independently per
-    /// call site (see e.g. `interior_point.rs`'s own separate
-    /// `PROPAGATION_PASSES` copy for the same "each engine keeps its own
-    /// tuning constant" convention).
+    // ---- scaling ----
+
+    /// scaling: A と G の合計行数がこれを超えたら列ノルム集計を rayon で並列化する
+    /// (`simplex.rs` の `RAYON_SIZE_THRESHOLD` と同値の独立コピー)。
     pub(crate) const RAYON_SIZE_THRESHOLD: usize = 100_000;
 
-    /// Analogue of this solver's own primal feasibility tolerance
-    /// (`simplex.rs`'s `PRIMAL_FEAS_TOL`) — the "eps" the cumulative budget
-    /// below is measured against, kept as this module's own copy rather than
-    /// importing `simplex`'s (this pipeline is shared with `interior_point`,
-    /// which has no reason to depend on `simplex`'s own module) since both
-    /// represent the same underlying concept: how much primal infeasibility
-    /// this solver is willing to call negligible.
+    /// scaling: 行・列のノルムがこれ以下なら 0 とみなしてスケールを更新しない
+    /// (`ENOMOTO_T_SCALING_ZERO_TOL`)。
+    pub(crate) const SCALING_ZERO_TOL: f64 = 1e-12;
+
+    /// scaling: G の単一要素行 (箱制約行) を専用リストで処理する高速経路を使うか
+    /// (1 = 使う。結果は通常経路とビット一致。`ENOMOTO_T_SCALE_UNIT_FAST`)。
+    pub(crate) const SCALE_UNIT_FAST: usize = 1;
+
+    /// scaling: 箱制約行を Ruiz 反復から除外し閉形式のスケールを与える実験的経路を使うか
+    /// (0 = 使わない。スケール係数が変わる。`ENOMOTO_T_SCALE_NOBOUNDS`)。
+    pub(crate) const SCALE_NOBOUNDS: usize = 0;
+
+    // ---- smallcoeff ----
+
+    /// smallcoeff: 無視できる主実行不能量の基準 eps (単体法の `PRIMAL_FEAS_TOL` 相当の独立コピー)。
     pub(crate) const SMALLCOEFF_EPS: f64 = 1e-7;
 
-    /// Per-row ceiling (as a fraction of [`EPS`]) on the *total*, summed
-    /// worst-case activity perturbation this reduction may introduce into any
-    /// one row — Achterberg et al.'s own `1e-1 * eps` (see the module docs
-    /// for why this single, looser budget suffices on its own).
+    /// smallcoeff: 1 行あたりに許す係数除去による最悪活動度変化の合計の上限
+    /// (`SMALLCOEFF_EPS` に対する比。Achterberg et al. の `1e-1 * eps`)。
     pub(crate) const CUMULATIVE_FRACTION: f64 = 0.1;
 
-    /// Coefficients at or below this magnitude are dropped unconditionally,
-    /// regardless of the cumulative budget above — Achterberg et al.'s own
-    /// `1e-10`, floating-point noise on any realistically scaled problem.
+    /// smallcoeff: 絶対値がこれ以下の係数は予算と無関係に除去する (Achterberg et al. の `1e-10`)。
     pub(crate) const NOISE_THRESHOLD: f64 = 1e-10;
+
+    // ---- パイプライン (src/presolve.rs の run_extended) ----
+
+    /// 等式の冗長行削除の方式 (`ENOMOTO_REDEQ_MODE`)。
+    /// 0 = ラウンド前に完全版 (重複 + 階数判定)、1 = 重複削除のみ、
+    /// 2 = ラウンド前に重複削除、ラウンド後の縮小問題で階数判定。
+    pub(crate) const REDEQ_MODE: usize = 1;
+
+    /// G を上下限と多変数行に分離したまま保持するか (1 = 保持。0 だと毎回 CSR を構築。
+    /// `ENOMOTO_T_PRESOLVE_SPLIT_G`)。
+    pub(crate) const PRESOLVE_SPLIT_G: usize = 1;
+
+    /// 等式行による上下限伝播を行う外側ラウンド数 (最初のこの回数だけ。`ENOMOTO_T_EQPROP_ROUNDS`)。
+    pub(crate) const EQPROP_ROUNDS: usize = 2;
+
+    /// 等式行伝播が 1 回でも何も見つけなければ残りのラウンドで省略するか
+    /// (0 = 省略しない。`ENOMOTO_T_EQPROP_SKIP_IDLE`)。
+    pub(crate) const EQPROP_SKIP_IDLE: usize = 0;
+
+    /// dualpropagate がこの回数連続で何も見つけなければ以降のラウンドで停止する
+    /// (`ENOMOTO_T_DUALPROPAGATE_STRIKES`)。
+    pub(crate) const DUALPROPAGATE_STRIKES: usize = 1;
+
+    /// doubleton がこの回数連続で何も消去しなければ以降のラウンドで停止する
+    /// (`ENOMOTO_T_DOUBLETON_STRIKES`)。
+    pub(crate) const DOUBLETON_STRIKES: usize = 1;
+
+    /// parallelcols がこの回数連続で何も併合しなければ以降のラウンドで停止する
+    /// (`ENOMOTO_T_PARALLELCOLS_STRIKES`)。
+    pub(crate) const PARALLELCOLS_STRIKES: usize = 2;
+
+    /// 構造 (行数・固定列数・ログ長) が前ラウンドと同じなら上下限の変化を無視して
+    /// ラウンドを打ち切るか (0 = しない。`ENOMOTO_T_ROUND_STRUCT_STOP`)。
+    pub(crate) const ROUND_STRUCT_STOP: usize = 0;
+
+    /// 外側ラウンドの不動点判定で、上下限の変化を進展とみなす相対閾値。
+    /// `|u - v| <= この値 * (1 + max(|u|, |v|))` の変化は無視する (`ENOMOTO_T_FIXPOINT_RELTOL`)。
+    pub(crate) const FIXPOINT_RELTOL: f64 = 1e-3;
 
     // ==== 以下: presolve/ の小規模モジュール (dualfix, dualpropagate, foldfixed, ineqsingleton,
     // parallelcols, parallelrows, rowdominance, rowsingleton, smallcoeff, sparsify, stuffing,

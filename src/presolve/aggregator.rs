@@ -1,195 +1,84 @@
-//! Aggregator (HiGHS's own name for this technique, `HPresolve::aggregator`
-//! in its `HPresolve.cpp`): generalizes [`crate::presolve::colsingleton`]'s
-//! "exactly one row" restriction to "any number of rows", for columns whose
-//! box bound is *implied* — already forced by the constraint system as a
-//! whole, so the column can be eliminated via any one of its equality rows
-//! without needing `colsingleton`'s own `extra_g_rows` bound-preservation
-//! mechanism at all (the eliminated variable's true value, recovered via
-//! `Substitution::value` after solving, is *mathematically guaranteed* to
-//! land inside its own box bound — nothing needs to re-impose that as a
-//! separate row).
+//! Aggregator(暗黙的自由列の消去)。HiGHS の `HPresolve::aggregator` に相当する。
 //!
-//! ## Why the first version of this module was reverted, and what changed
+//! [`crate::presolve::colsingleton`] の「列がちょうど 1 行にしか現れない」という
+//! 制約を「任意本数の行」に一般化したもの。対象は、箱制約 `[lb_j, ub_j]` が
+//! 制約系全体によって既に *暗に* 強制されている列 (implied-free 列)。
+//! そのような列は等式行のどれか 1 本を使って代入消去でき、`colsingleton` の
+//! `extra_g_rows` のような境界保存行は不要 (消去した変数を事後処理
+//! (`Substitution::value`) で復元した値は数学的に箱の内側に入る)。
 //!
-//! A first version eliminated *every* non-free bounded column (any bound,
-//! not just an implied one) appearing in >= 2 equality rows, unconditionally
-//! emitting `colsingleton`-style bound-preservation rows. Measured on the
-//! full 73-problem Netlib set: +162% aggregate time, and a follow-up that
-//! added a *pivot-row-only* skip (a `row_implied_bound` helper, since
-//! removed — its logic now lives in [`row_implies_own_bound`]) for those extra
-//! rows still measured +175% (worse). Both were wrongly blamed (in an
-//! earlier version of this doc comment, and of `presolve.rs`'s own wiring
-//! comment) on fill-in from the elimination fold itself slowing down the
-//! simplex loop — that was never profiled and was wrong. `ENOMOTO_PROF_PRESOLVE`
-//! showed the real cost was this *pass's own* running time: the eligibility
-//! test ("any non-free bounded column") let through thousands of columns
-//! with no realistic elimination (`wood1p`: 2592 "eligible" columns, 0
-//! actually eliminated, 3260ms spent finding that out; HiGHS's own
-//! `isImpliedFree` gate lets through only 2 columns on that same model),
-//! each costing a fresh full-matrix rescan.
+//! 3 つの版がある:
+//! - [`eliminate_implied_free_columns`] / [`eliminate_implied_free_columns_if_any`]:
+//!   行局所版。1 本の等式行だけで箱が冗長と示せる (行, 列) 対のみ消去する。
+//!   `ENOMOTO_ROWLOCAL_AGGREGATOR` で選択。
+//! - [`eliminate_implied_free_columns_xrow`]: 行横断版。列が現れる全等式行の
+//!   含意範囲の共通部分で判定する。`ENOMOTO_XROW_AGGREGATOR` で選択。
+//! - [`eliminate_implied_free_columns_v2`] / [`eliminate_implied_free_columns_v2_if_any`]:
+//!   既定版。行横断版に、不等式行からの片側含意境界・等式行 1 本の列の許可・
+//!   HiGHS 流の正味 fill-in 判定を加えたもの ([`AggOptions`] で個別に切替可能)。
 //!
-//! This version fixes the *performance* defect (the eligibility test is
-//! now [`row_implies_own_bound`], gating on a real implied-bound check
-//! rather than "any non-free bounded column" — see that function's own
-//! docs, and [`RowActivity`]'s for how it stays cheap), and keeps the
-//! *safety* condition row-local: [`eliminate_implied_free_columns`] only
-//! eliminates a column via a specific row `R` when `R`'s *own* activity
-//! (using every other column's current bound, nothing aggregated in from
-//! any other row) already proves `x_j`'s box bound redundant. Re-validated
-//! at *elimination* time against the pivot row's *current* content (not
-//! just at candidate-generation time against the initial snapshot): a fold
-//! performed earlier in this same call can rewrite a row that is also some
-//! other column's pivot candidate, and the row-local check must hold for
-//! whatever content that row actually has when used, not merely what it
-//! had when candidates were first collected.
+//! 共通の設計:
+//! - 候補は安い順 (行長か列長が 2 の対を最優先、次に `行長 * 列長` 昇順) に処理し、
+//!   ピボット比ガード (`SUBSTITUTION_PIVOT_RATIO`) と fill-in 上限 (`MAX_FILLIN`) を課す。
+//!   fill-in 超過が `MAX_CONSECUTIVE_FILLIN_FAILURES` 回連続したら残り候補を打ち切る。
+//! - 行横断判定では、消去を確定する直前に「生きている行・現在の内容」から
+//!   含意範囲を必ず再計算する (先に別列のピボットとして消費された行を
+//!   根拠に使ってしまう誤りを防ぐため)。
+//! - 1 回の呼び出しは入力スナップショットから候補を 1 回だけ作る非連鎖処理であり、
+//!   不動点までの反復は呼び出し側 (`presolve.rs` のラウンドループ) の責務。
+//! - 完全な自由変数 (`lb == -inf && ub == inf`) は [`crate::presolve::freevar`] に任せ、
+//!   ここでは扱わない。
+//! - 消去した列を含む `G` の実不等式行 (`real_rows`) も代入で書き換える (fold)。
 //!
-//! ## Cross-row aggregation (the default since 2026-09-22)
-//!
-//! A first cross-row aggregate version (intersecting every row's own
-//! implication for a column before checking against `[lb_j, ub_j]`,
-//! catching a column no *single* row alone justifies but several together
-//! do) was tried and reverted early on: it eliminated `stocfor2` correctly,
-//! matching an ablation of HiGHS's own Aggregator to within a few percent,
-//! but produced a false `Unbounded` on `shell` — a real correctness bug
-//! this crate's benchmark objective-check caught before it shipped, root-
-//! caused only much later (its exact mechanism was unknown at revert time,
-//! and [`eliminate_implied_free_columns`] above shipped instead as the
-//! version already known safe).
-//!
-//! [`eliminate_implied_free_columns_xrow`] is the fixed reattempt: a
-//! justifying row for a column can be *deleted* — consumed as a *different*
-//! column's own pivot earlier in the same call — and a justification
-//! computed once at candidate-generation time can go stale exactly that
-//! way (confirmed as `shell`'s own actual mechanism: two columns there
-//! mutually justify each other through one shared row; eliminating one
-//! consumes that row, then a stale check wrongly still treats it as
-//! justifying the other). The fix is to always recompute a candidate's
-//! justification from *live* rows with *current* content immediately
-//! before that specific elimination is committed, never trusting the
-//! snapshot — see that function's own (considerably longer) docs for the
-//! full argument and the numeric trace.
-//!
-//! **Stays opt-in** (`ENOMOTO_XROW_AGGREGATOR` in `presolve.rs`), row-local
-//! stays this module's default: a first 93-problem-Netlib measurement
-//! (2026-09-22) was accidentally taken on a stale feature branch 44 commits
-//! behind `main`, where `greenbea` was pathologically slow for unrelated
-//! reasons (missing this crate's own `propagate_equalities` wiring, not
-//! anything cross-row-specific) and dominated the aggregate enough to show
-//! a spurious ~12% win. Re-measured on actual `main` (3 reps each way,
-//! `greenbea` corrected): row-local and cross-row land within about a
-//! percent of each other, overlapping ranges — a wash, not a reproducible
-//! win, on this benchmark set. [`eliminate_implied_free_columns`] stays the
-//! default; [`eliminate_implied_free_columns_xrow`] stays available (its
-//! own correctness fix is real and independently regression-tested) and
-//! still shares this module's helpers ([`compute_row_activity`],
-//! [`residual_range`], [`implied_range`], [`fillin_cost`],
-//! [`crate::sparse::axpy_row`]).
-//!
-//! ## Default since 2026-09-23: [`eliminate_implied_free_columns_v2`]
-//!
-//! The paragraph above is superseded for the default path: on `stocfor2`
-//! the row-local gate left 704 of 1652 surviving columns in exactly the
-//! shape "one equality row + one or more inequality rows", which neither
-//! this gate (it needs >= 2 equality rows) nor `colsingleton` (it counts
-//! the inequality rows too) can remove — HiGHS with only its Aggregator
-//! switched off reproduces our old 1766x1652 presolved size almost exactly.
-//! [`eliminate_implied_free_columns_v2`] keeps the cross-row version's
-//! live re-validation (the `shell` fix), additionally uses one-sided
-//! implied bounds from real inequality rows, admits single-equality-row
-//! columns, and uses HiGHS's net fill-in with the size-2 exemption.
-//! `ENOMOTO_ROWLOCAL_AGGREGATOR` / `ENOMOTO_XROW_AGGREGATOR` select the older
-//! versions. Measurements: `analysis/stocfor2_presolve_20260923.md`.
-//!
-//! ## Candidate order and fill-in
-//!
-//! Mirrors `HPresolve::aggregator`'s own design (`HPresolve.cpp:6688`): all
-//! `(row, col)` candidate pairs are collected once, sorted cheapest-first
-//! (row-length-2-or-column-length-2 pairs before anything else, then by
-//! `rowlen * collen` ascending — the same fill-in proxy HiGHS's own
-//! `pdqsort` comparator uses), then processed in that order with a
-//! `SUBSTITUTION_PIVOT_RATIO` numerical guard and a `MAX_FILLIN` cap (HiGHS's
-//! own registered default, `presolve_substitution_maxfillin = 10`) — a
-//! candidate whose fold would exceed it is left for a later call rather than
-//! forced through. Three consecutive fill-in failures abort the rest of this
-//! call's candidate list outright (mirrors HiGHS's own `nfail == 3` cutoff:
-//! "indicates the rows/columns are becoming too dense for substitutions").
-//!
-//! ## One non-cascading call; repetition is the caller's job
-//!
-//! Like `colsingleton`'s own single pass, this computes implied bounds and
-//! candidates once from an input snapshot; it does not loop internally to a
-//! fixpoint. `presolve.rs`'s own round loop is what should call this
-//! repeatedly (HiGHS itself calls its `aggregator` once per outer main-loop
-//! iteration, right after its fast singleton/doubleton inner loop converges,
-//! re-entering that inner loop whenever `aggregator` shrinks the problem —
-//! `HPresolve.cpp:5901-5917`) so that a column exposed as implied-free only
-//! *after* an earlier fold, or after `rowsingleton`/`colsingleton` tighten a
-//! bound, gets caught on the next call rather than never.
-//!
-//! Only `A`'s equality rows are used both as elimination pivots *and* as
-//! the implied-bound justification (an inequality row can't be solved for
-//! one variable in terms of the others the same way, and `G`'s real rows
-//! are never used to justify an elimination even indirectly — the same
-//! staleness hazard the cross-row version's own fix above addresses for
-//! `A`'s rows would need its own analogous argument to extend safely to
-//! `G`, not yet made); `G`'s real rows still get folded like any other row
-//! referencing an eliminated
-//! column, exactly as `colsingleton`/`freevar` already do — they just never
-//! contribute to deciding *whether* to eliminate. Like every other pass in
-//! this crate, only appearances in `A`'s own rows (plus `G`'s real,
-//! multi-variable rows, for fold purposes only) count — a variable's own
-//! box-bound rows in `G` never count (same convention
-//! `dualfix`/`colsingleton`/`freevar` use). Free variables (`lb == -inf &&
-//! ub == inf`) are left to [`crate::presolve::freevar`], which needs no
-//! implied-bound justification at all since a free variable's bound is
-//! already vacuous.
+//! 開発経緯・計測値は改良履歴メモを参照。
 
 use crate::presolve::colsingleton::Substitution;
 use crate::sparse::{Csr, SparseAccum, axpy_row, csr_from_rows, csr_is_canonical, csr_rows};
 use crate::params::presolve::{MAX_CONSECUTIVE_FILLIN_FAILURES, MAX_FILLIN, SUBSTITUTION_PIVOT_RATIO, TOL};
 
+/// Aggregator の 1 回の呼び出し結果 (縮小後の問題と、事後復元用の代入列)。
 pub struct AggregatorResult {
+    /// 消去に使った等式行を取り除き、他の行へ代入を反映した後の等式制約行列 `A`。
     pub a: Csr,
+    /// `a` に対応する等式右辺 `b`。
     pub b: Vec<f64>,
+    /// 消去列の目的係数を他列へ移し替えた後の目的係数 `c` (消去列の係数は 0)。
     pub c: Vec<f64>,
+    /// 消去した列ごとの代入式 (事後処理で消去変数の値を復元するのに使う)。消去順。
     pub substitutions: Vec<Substitution>,
-    /// `real_rows`/`real_rhs` with every fold this pass performed already
-    /// applied — the caller must use these, not its own original copies,
-    /// for anything downstream (mirrors `freevar::FreeVarResult`'s own
-    /// fields of these names).
+    /// 本パスの代入をすべて反映済みの実不等式行 (`G` のうち多変数行)。
+    /// 呼び出し側は元のコピーではなく必ずこちらを使うこと
+    /// (`freevar::FreeVarResult` の同名フィールドと同じ約束)。
     pub real_rows: Vec<Vec<(usize, f64)>>,
+    /// `real_rows` に対応する右辺 (`real_rows[i] · x <= real_rhs[i]`)。
     pub real_rhs: Vec<f64>,
 }
 
-/// One row's activity, summarized so that any single column's *residual*
-/// range (the row's achievable range with that one column's own term
-/// removed) can be recovered in O(1) via [`residual_range`]. An earlier
-/// version of this module instead recomputed each column's residual from
-/// scratch (an `O(row_len)` activity scan over the row's *other* terms,
-/// once per nonzero), making the caller `O(row_len^2)` per row; on a real
-/// Netlib instance (`wood1p`, a max row length of 2592 out of 2594
-/// columns) that cost ~225ms per call for zero eliminations, this crate's
-/// `ENOMOTO_PROF_PRESOLVE` showed — exactly the kind of self-inflicted cost
-/// the module docs warn a naive candidate scan can hide. Rather than a
-/// per-column subtraction of a possibly-infinite running sum (which risks
-/// the `inf - inf` case outright), this tracks how many terms are
-/// unbounded on each side and, when there is exactly one, which —
-/// mirroring HiGHS's own `getNumInfSumUpperOrig`/`getResidualSumLowerOrig`
-/// pattern in `HPresolve.cpp` for the same reason.
+/// 1 本の行の活動量 (activity) の要約。各列の箱境界の下で行の値
+/// `Σ a_k x_k` が取り得る範囲を、有限部分の和と無限大項の個数に分けて保持する。
+/// これにより、任意の 1 列の項を除いた残差範囲を [`residual_range`] で O(1) で
+/// 求められる (無限大の和から引き算して `inf - inf` になる事態を避けるため、
+/// HiGHS の `getNumInfSumUpperOrig` / `getResidualSumLowerOrig` と同じ方式)。
 #[derive(Clone, Copy)]
 struct RowActivity {
+    /// 行の最小値側: 有限な境界を持つ項の寄与 `a_k * (a_k>0 ? lb_k : ub_k)` の和。
     lo_finite_sum: f64,
+    /// 行の最小値側で境界が無限大 (-inf に寄与) の項の個数。
     lo_inf_count: usize,
+    /// 行の最大値側: 有限な境界を持つ項の寄与 `a_k * (a_k>0 ? ub_k : lb_k)` の和。
     hi_finite_sum: f64,
+    /// 行の最大値側で境界が無限大 (+inf に寄与) の項の個数。
     hi_inf_count: usize,
 }
 
+/// 行 `row` の活動量要約 [`RowActivity`] を、各列の箱 `[lb, ub]` から 1 パスで計算する。
 fn compute_row_activity(row: &[(usize, f64)], lb: &[f64], ub: &[f64]) -> RowActivity {
     let mut lo_finite_sum = 0.0f64;
     let mut lo_inf_count = 0usize;
     let mut hi_finite_sum = 0.0f64;
     let mut hi_inf_count = 0usize;
     for &(k, v) in row {
+        // 係数の符号に応じて、行の最小側/最大側に効く境界を選ぶ。
         let (klo, khi) = if v > 0.0 { (lb[k], ub[k]) } else { (ub[k], lb[k]) };
         if klo.is_finite() {
             lo_finite_sum += v * klo;
@@ -205,9 +94,8 @@ fn compute_row_activity(row: &[(usize, f64)], lb: &[f64], ub: &[f64]) -> RowActi
     RowActivity { lo_finite_sum, lo_inf_count, hi_finite_sum, hi_inf_count }
 }
 
-/// The row's own achievable `[s_lo, s_hi]` range with column `j`'s term
-/// (coefficient `j_coeff`) excluded — O(1) given `activity`, `compute_row_activity`'s
-/// one-pass-per-row summary of every term including `j`'s own.
+/// 列 `j` (係数 `j_coeff`) の項を除いた、行の残り部分が取り得る範囲 `(s_lo, s_hi)` を返す。
+/// `activity` は `j` 自身の項も含めた同じ行の [`compute_row_activity`] の結果。O(1)。
 fn residual_range(activity: &RowActivity, j: usize, j_coeff: f64, lb: &[f64], ub: &[f64]) -> (f64, f64) {
     let (jlo, jhi) = if j_coeff > 0.0 { (lb[j], ub[j]) } else { (ub[j], lb[j]) };
     let s_lo = if jlo.is_finite() {
@@ -217,8 +105,7 @@ fn residual_range(activity: &RowActivity, j: usize, j_coeff: f64, lb: &[f64], ub
             f64::NEG_INFINITY
         }
     } else if activity.lo_inf_count == 1 {
-        // `j` itself was the row's only lo-unbounded term -- removing it
-        // leaves the (already-finite) rest.
+        // 無限大項が `j` 自身だけなら、それを除いた残り (有限和) がそのまま下限。
         activity.lo_finite_sum
     } else {
         f64::NEG_INFINITY
@@ -237,12 +124,9 @@ fn residual_range(activity: &RowActivity, j: usize, j_coeff: f64, lb: &[f64], ub
     (s_lo, s_hi)
 }
 
-/// Row `sum + coeff*x_j = rhs`'s own implied range for `x_j` alone (its
-/// achievable range with every *other* column at its current bound) —
-/// factored out of [`row_implies_own_bound`] so [`eliminate_implied_free_columns_xrow`]
-/// can intersect this same per-row computation across several rows instead
-/// of checking just one (see that function's own docs for why the
-/// intersection needs this, not the boolean `row_implies_own_bound` itself).
+/// 等式行 `(残り) + coeff*x_j = rhs` から、他の列を現在の箱の範囲で動かしたときに
+/// `x_j` が取り得る範囲 (含意範囲) `(lo, hi)` を返す。
+/// 行横断版では複数行のこの範囲の共通部分を取る。
 fn implied_range(activity: &RowActivity, j: usize, coeff: f64, rhs: f64, lb: &[f64], ub: &[f64]) -> (f64, f64) {
     let (s_lo, s_hi) = residual_range(activity, j, coeff, lb, ub);
     let v1 = (rhs - s_hi) / coeff;
@@ -250,45 +134,38 @@ fn implied_range(activity: &RowActivity, j: usize, coeff: f64, rhs: f64, lb: &[f
     (v1.min(v2), v1.max(v2))
 }
 
+/// 含意範囲 `[lo, hi]` が列 `j` の箱 `[lb[j], ub[j]]` に (許容誤差 `TOL` 込みで)
+/// 収まるか、すなわち箱制約が冗長か。無限大側の境界は常に満たされるとみなす。
 fn range_within_box(j: usize, lo: f64, hi: f64, lb: &[f64], ub: &[f64]) -> bool {
     (lb[j] == f64::NEG_INFINITY || lo >= lb[j] - TOL) && (ub[j] == f64::INFINITY || hi <= ub[j] + TOL)
 }
 
-/// Whether equality row `sum + coeff*x_j = rhs`'s *own* activity (using
-/// every other column's current bound, via `activity` —
-/// `compute_row_activity`'s summary of this same row, nothing aggregated in
-/// from any other row `j` might also appear in) already proves `x_j`'s box
-/// bound `[lb[j], ub[j]]` redundant. See the module docs for why this stays
-/// row-local rather than aggregating across every row `j` appears in (a
-/// cross-row aggregate version was tried and reverted after producing a
-/// false `Unbounded` on a real Netlib instance — see
-/// [`eliminate_implied_free_columns_xrow`] for the root-caused, fixed
-/// reattempt).
+/// 等式行 `(残り) + coeff*x_j = rhs` の *この行単独* の活動量 (`activity`) だけで、
+/// `x_j` の箱 `[lb[j], ub[j]]` が冗長だと示せるか (行局所版の判定)。
+/// 他の行の情報は一切使わない。
 fn row_implies_own_bound(activity: &RowActivity, j: usize, coeff: f64, rhs: f64, lb: &[f64], ub: &[f64]) -> bool {
     let (lo, hi) = implied_range(activity, j, coeff, rhs, lb, ub);
     range_within_box(j, lo, hi, lb, ub)
 }
 
-/// Total nonzeros `pivot_terms` would newly introduce (not already present)
-/// across every row in `targets` — the fill-in a fold into all of them at
-/// once would cost.
+/// ピボット行の残り項 `pivot_terms` を `targets` の各行へ代入したとき、
+/// 新たに生じる非零の総数 (各行に未だ無い列の数の合計) を返す。
 fn fillin_cost(pivot_terms: &[(usize, f64)], targets: &[&Vec<(usize, f64)>]) -> usize {
     let mut cost = 0usize;
     for target in targets {
+        // この対象行に既にある列の集合。
         let existing: std::collections::BTreeSet<usize> = target.iter().map(|&(k, _)| k).collect();
         cost += pivot_terms.iter().filter(|&&(k, _)| !existing.contains(&k)).count();
     }
     cost
 }
 
-/// Eliminates every *implied-free* structural column — one whose box bound
-/// is already forced by the constraint system as a whole (see the module
-/// docs) — reachable through two or more of `A`'s own equality rows (a
-/// single-row appearance is `colsingleton`'s own, strictly cheaper case,
-/// with no implied-bound computation needed since removing the column's
-/// *only* row would otherwise lose its bound outright). One non-cascading
-/// call from a snapshot; see the module docs for why repetition is the
-/// caller's own job, not this function's.
+/// 行局所版 Aggregator。`A` の等式行 2 本以上に現れ、そのうちの 1 本単独で箱が
+/// 冗長と示せる非自由列を消去する (行 1 本だけの列は `colsingleton` の担当)。
+/// 何も消去しなかった場合は入力の (正準化した) コピーを返す。
+///
+/// 引数: `n` 列数、`a`/`b` 等式制約、`c` 目的係数、`lb`/`ub` 各列の箱、
+/// `real_rows`/`real_rhs` 実不等式行 (代入は反映するが判定には使わない)。
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn eliminate_implied_free_columns(n: usize, a: &Csr, b: &[f64], c: &[f64], lb: &[f64], ub: &[f64], real_rows: &[Vec<(usize, f64)>], real_rhs: &[f64]) -> AggregatorResult {
     eliminate_implied_free_columns_if_any(n, a, b, c, lb, ub, real_rows, real_rhs).unwrap_or_else(|| AggregatorResult {
@@ -301,20 +178,16 @@ pub fn eliminate_implied_free_columns(n: usize, a: &Csr, b: &[f64], c: &[f64], l
     })
 }
 
-/// [`eliminate_implied_free_columns`], returning `None` instead of an
-/// unchanged copy of the whole problem when nothing is eliminated — the
-/// common case on most rounds of most problems. The candidate search runs
-/// straight off `a`'s CSR rows, and only when it finds at least one
-/// candidate is the problem copied into the mutable row-list form the
-/// elimination loop works in, so an empty call costs one activity pass
-/// over `A` and no allocation proportional to `A`/`real_rows`. The result,
-/// when `Some`, is bit-identical to what the unconditional-copy version
-/// produced (the candidate list is computed from exactly the same row
-/// contents, in the same order).
+/// [`eliminate_implied_free_columns`] の本体。1 列も消去しなかった場合は
+/// 問題をコピーせず `None` を返す (多くのラウンドではこれが普通)。
+/// 候補探索は `a` の CSR 行を直接読み、候補が 1 つ以上あったときだけ
+/// 可変な行リスト形式へコピーする。`Some` の結果は無条件コピー版と同一。
 pub fn eliminate_implied_free_columns_if_any(n: usize, a: &Csr, b: &[f64], c: &[f64], lb: &[f64], ub: &[f64], real_rows: &[Vec<(usize, f64)>], real_rhs: &[f64]) -> Option<AggregatorResult> {
     let ar = a.as_ref();
+    // 等式行の本数。
     let p = ar.nrows();
 
+    // 各列が `A` の何本の行に (非零で) 現れるか。
     let mut col_a_count = vec![0usize; n];
     for i in 0..p {
         for (j, &v) in ar.col_indices_of_row(i).zip(ar.values_of_row(i)) {
@@ -324,23 +197,12 @@ pub fn eliminate_implied_free_columns_if_any(n: usize, a: &Csr, b: &[f64], c: &[
         }
     }
 
-    // All (row, col) candidate pairs where `row`'s *own* activity already
-    // proves col's box bound redundant (`row_implies_own_bound`) and col
-    // appears in >= 2 equality rows, sorted cheapest-first: size-2 pairs
-    // (row length or column length exactly 2 -- fill-in can never be
-    // problematic there) before anything else, then by `rowlen * collen`
-    // ascending (a fill-in proxy) -- mirrors HiGHS's own `pdqsort`
-    // comparator in `HPresolve::aggregator` exactly (`HPresolve.cpp:6703`).
-    // One `compute_row_activity` call per row (not per nonzero) keeps this
-    // `O(nnz)` overall rather than `O(row_len)` per nonzero -- see
-    // `RowActivity`'s own docs on why that distinction matters.
-    // Truly free columns (`lb == -inf && ub == inf`) trivially satisfy
-    // `row_implies_own_bound` from *any* row (both sides of its check
-    // short-circuit true) -- correct on its own terms, but left to
-    // `freevar`'s own dedicated pivot selection instead, matching the
-    // module docs' division of labor.
+    // 候補 (行, 列) 対: その行単独で列の箱が冗長 (`row_implies_own_bound`) かつ
+    // 列が等式行 2 本以上に現れるもの。活動量は行ごとに 1 回だけ計算する (全体 O(nnz))。
+    // 完全な自由列はどの行でも自明に真になるが、`freevar` に任せるため除外する。
     let is_free = |j: usize| lb[j] == f64::NEG_INFINITY && ub[j] == f64::INFINITY;
     let mut candidates: Vec<(usize, usize)> = Vec::new();
+    // 行 `i` の (列, 係数) を詰め直す再利用バッファ。
     let mut row: Vec<(usize, f64)> = Vec::new();
     for i in 0..p {
         row.clear();
@@ -355,6 +217,8 @@ pub fn eliminate_implied_free_columns_if_any(n: usize, a: &Csr, b: &[f64], c: &[
     if candidates.is_empty() {
         return None;
     }
+    // 安い順: 行長か列長が 2 の対を先頭に、次に `行長*列長` (fill-in の目安) 昇順
+    // (HiGHS `HPresolve::aggregator` の比較関数と同じ)。
     candidates.sort_by_key(|&(i, j)| {
         let rowlen = ar.col_indices_of_row(i).len();
         let collen = col_a_count[j];
@@ -362,23 +226,19 @@ pub fn eliminate_implied_free_columns_if_any(n: usize, a: &Csr, b: &[f64], c: &[
         (min_len != 2, rowlen * collen, min_len, i, j)
     });
 
+    // ここから先は可変な行リスト形式で作業する。
     let mut a_rows: Vec<Vec<(usize, f64)>> = csr_rows(a);
-    // One sparse accumulator for every row fold this pass performs —
-    // see `crate::sparse::SparseAccum`'s own docs for why the merge is
-    // not a per-row `BTreeMap`.
+    // 全ての行 fold で共有する疎アキュムレータ。
     let mut accum = SparseAccum::new(n);
     let mut b: Vec<f64> = b.to_vec();
     let mut c: Vec<f64> = c.to_vec();
     let mut real_rows: Vec<Vec<(usize, f64)>> = real_rows.to_vec();
     let mut real_rhs: Vec<f64> = real_rhs.to_vec();
 
-    // Column -> row indices for `a_rows` and `real_rows`, so finding the
-    // rows that contain the eliminated column costs O(column length)
-    // instead of a scan over every row of both matrices per candidate.
-    // Lists are a *superset* (entries can cancel to zero or rows get
-    // deleted); each query re-verifies membership exactly as the plain
-    // scan did and sorts/dedups, so the resulting row lists — and every
-    // decision downstream — are identical to the full-scan version.
+    // 列 -> その列を含む行番号の索引 (`a_rows` 用と `real_rows` 用)。
+    // 列長ぶんのコストで該当行を探すためのもの。内容は上位集合
+    // (係数の相殺や行削除で古くなり得る) なので、参照時に毎回
+    // 実際の所属を確認し、ソート・重複除去してから使う。
     let mut a_col_idx: Vec<Vec<usize>> = vec![Vec::new(); n];
     for (i, row) in a_rows.iter().enumerate() {
         for &(k, v) in row {
@@ -396,9 +256,12 @@ pub fn eliminate_implied_free_columns_if_any(n: usize, a: &Csr, b: &[f64], c: &[
         }
     }
 
+    // ピボットとして消費済み (最終的に取り除く) の等式行。
     let mut row_deleted = vec![false; a_rows.len()];
+    // 消去済みの列。
     let mut col_eliminated = vec![false; n];
     let mut substitutions = Vec::new();
+    // fill-in 上限超過の連続回数。
     let mut consecutive_fillin_failures = 0usize;
 
     for (row_idx, j) in candidates {
@@ -410,37 +273,27 @@ pub fn eliminate_implied_free_columns_if_any(n: usize, a: &Csr, b: &[f64], c: &[
             Some(&(_, v)) if v != 0.0 => v,
             _ => continue,
         };
-        // Re-validate against the row's *current* content: an earlier
-        // elimination this same call can have folded into this row (if it
-        // was some other column's "other_a"), changing what it implies
-        // about `j` since candidate generation ran on the initial snapshot
-        // — see the module docs on why this re-check, not just the
-        // generation-time one, is what soundness actually depends on.
+        // 行の *現在の* 内容で再検証する (同じ呼び出し内の先行 fold で
+        // この行が書き換わっている可能性があるため。健全性はこちらに依存する)。
         let activity = compute_row_activity(&pivot_row, lb, ub);
         if !row_implies_own_bound(&activity, j, coeff, b[row_idx], lb, ub) {
             continue;
         }
+        // ピボット行の係数絶対値の最大値。
         let row_max = pivot_row.iter().map(|&(_, v)| v.abs()).fold(0.0f64, f64::max);
         if coeff.abs() < tunable!("ENOMOTO_T_SUBSTITUTION_PIVOT_RATIO", SUBSTITUTION_PIVOT_RATIO, f64) * row_max {
-            // This specific (row, col) pair fails the numerical guard --
-            // unlike a plain eligibility failure, a *different* row for the
-            // same column may still be a later candidate in this same list
-            // (mirrors HiGHS's own per-pair, not per-column, processing).
+            // この (行, 列) 対だけが数値ガードで不合格。同じ列の別の行が
+            // 後続の候補として残っている可能性がある (HiGHS と同様に対単位で処理)。
             continue;
         }
+        // ピボット行から `j` を除いた残り項 (代入式 x_j = (rhs - Σ terms) / coeff の項)。
         let terms: Vec<(usize, f64)> = pivot_row.iter().filter(|&&(k, _)| k != j).copied().collect();
         if terms.is_empty() {
-            // A genuine row singleton slipped through (rowsingleton should
-            // already have caught this earlier in the same round).
+            // 行シングルトンが紛れ込んだ場合 (本来 rowsingleton が先に処理する)。
             continue;
         }
 
-        // Every *other* row (in `A` or `real_rows`) still referencing `j`,
-        // scanned fresh from the current state -- cheap now that
-        // `row_implies_own_bound` has already cut the candidate set down to
-        // what HiGHS's own gate would (the reverted first version's
-        // regression was exactly this scan running on thousands of
-        // never-eliminable candidates; see the module docs).
+        // `j` をまだ含む他の等式行 (ピボット行と削除済み行を除く)。現在の状態から確認。
         let other_a: Vec<usize> = {
             let mut v = a_col_idx[j].clone();
             v.sort_unstable();
@@ -448,6 +301,7 @@ pub fn eliminate_implied_free_columns_if_any(n: usize, a: &Csr, b: &[f64], c: &[
             v.retain(|&i2| i2 != row_idx && !row_deleted[i2] && a_rows[i2].iter().any(|&(k, v)| k == j && v != 0.0));
             v
         };
+        // `j` を含む実不等式行。
         let other_g: Vec<usize> = {
             let mut v = g_col_idx[j].clone();
             v.sort_unstable();
@@ -456,6 +310,7 @@ pub fn eliminate_implied_free_columns_if_any(n: usize, a: &Csr, b: &[f64], c: &[
             v
         };
 
+        // 全対象行へ代入したときに増える非零数。
         let fillin = {
             let mut targets: Vec<&Vec<(usize, f64)>> = Vec::with_capacity(other_a.len() + other_g.len());
             for &i2 in &other_a {
@@ -475,17 +330,20 @@ pub fn eliminate_implied_free_columns_if_any(n: usize, a: &Csr, b: &[f64], c: &[
         }
         consecutive_fillin_failures = 0;
 
+        // ピボット行の右辺。
         let rhs_i = b[row_idx];
+        // 他の等式行へ代入: row_i2 -= (a_i2j / coeff) * pivot_row。
         for &i2 in &other_a {
             let a_i2j = a_rows[i2].iter().find(|&&(k, _)| k == j).unwrap().1;
             let factor = a_i2j / coeff;
             a_rows[i2] = axpy_row(&mut accum, &a_rows[i2], &pivot_row, factor, j, TOL);
-            // Fill-in can only land in the pivot row's other columns.
+            // fill-in はピボット行の残り列にしか生じないので、その列の索引に追記。
             for &(k, _) in &terms {
                 a_col_idx[k].push(i2);
             }
             b[i2] -= factor * rhs_i;
         }
+        // 実不等式行へ同様に代入。
         for &i2 in &other_g {
             let a_i2j = real_rows[i2].iter().find(|&&(k, _)| k == j).unwrap().1;
             let factor = a_i2j / coeff;
@@ -496,6 +354,7 @@ pub fn eliminate_implied_free_columns_if_any(n: usize, a: &Csr, b: &[f64], c: &[
             real_rhs[i2] -= factor * rhs_i;
         }
 
+        // 目的関数へ代入: c_k -= (c_j / coeff) * a_k、c_j = 0。
         let cj = c[j];
         if cj != 0.0 {
             let factor = cj / coeff;
@@ -505,19 +364,17 @@ pub fn eliminate_implied_free_columns_if_any(n: usize, a: &Csr, b: &[f64], c: &[
             c[j] = 0.0;
         }
 
-        // No bound-preservation row: `j` is implied-free, so its true
-        // (postsolve-recovered) value is guaranteed inside `[lb[j], ub[j]]`
-        // without one -- see the module docs.
+        // 境界保存行は不要: `j` は implied-free なので復元値は箱の内側に入る。
         substitutions.push(Substitution { var: j, terms, rhs: rhs_i, coeff });
         col_eliminated[j] = true;
         row_deleted[row_idx] = true;
     }
-    // Nothing accepted: no row was touched (every fold above happens only
-    // on acceptance), so the problem is unchanged.
+    // 1 件も受理されなければ行は一切書き換わっていない (fold は受理時のみ) ので問題は不変。
     if substitutions.is_empty() {
         return None;
     }
 
+    // 削除済み行を取り除いた最終的な `A`, `b`。
     let mut final_a_rows = Vec::with_capacity(a_rows.len());
     let mut final_b = Vec::with_capacity(b.len());
     for (i, row) in a_rows.into_iter().enumerate() {
@@ -537,74 +394,28 @@ pub fn eliminate_implied_free_columns_if_any(n: usize, a: &Csr, b: &[f64], c: &[
     })
 }
 
-/// Cross-row generalization of [`eliminate_implied_free_columns`]: a
-/// column's implied range is the *intersection* of every one of its own
-/// live equality rows' local implied range ([`implied_range`]), not just
-/// one — catching a column no *single* row alone proves implied-free but
-/// several together do (this module's own docs' `stocfor2` motivation: an
-/// earlier attempt at exactly this matched an ablation of HiGHS's own
-/// Aggregator there to within a few percent). Not wired into
-/// [`crate::presolve::run_extended`]'s default pipeline — reachable only
-/// via `presolve.rs`'s own `ENOMOTO_XROW_AGGREGATOR` opt-in gate, pending a
-/// full-Netlib reach/cost measurement — because reproducing this
-/// generalization faithfully surfaced a real, previously un-root-caused
-/// correctness bug (see below) rather than the "aggregate the intersection
-/// once and go" shape the module docs' own history describes; this
-/// function is the fixed reattempt, not a resurrection of the original.
+/// 行横断版 Aggregator ([`eliminate_implied_free_columns`] の一般化)。
+/// 列の含意範囲を、その列を含む全ての生きている等式行の [`implied_range`] の
+/// *共通部分* とし、1 本では足りないが複数本合わせれば箱が冗長になる列も消去する。
+/// 既定パイプラインでは使わず、`presolve.rs` の `ENOMOTO_XROW_AGGREGATOR` で選択する。
 ///
-/// **The correctness-critical difference from the row-local version, and
-/// from every earlier cross-row attempt**: a candidate's justification is
-/// *recomputed from live rows only, with their current content*,
-/// immediately before that specific elimination is committed — never
-/// trusted from the snapshot candidate-generation pass below, and never
-/// merely re-validated against the one row chosen as pivot (contrast the
-/// row-local version's own single `pivot_row` re-check at its own call
-/// site, sound there only because the row-local version's pivot row *is*
-/// its sole justification, so `row_deleted[row_idx]` alone is enough to
-/// catch a stale candidate). A justifying row for column `j` can itself be
-/// *deleted* — consumed as the pivot row of an *earlier* elimination
-/// within this same call — while a snapshot-only computation still "sees"
-/// it as live and unchanged. Confirmed as the actual mechanism behind the
-/// historical false `Unbounded` on Netlib `shell` (root-caused directly,
-/// not inferred): columns 32 and 52 there mutually justify each other
-/// through one shared length-2 row (`0.236*x32 - 0.983*x52 = 0`);
-/// eliminating column 32 first consumes that row as its own pivot, and a
-/// snapshot-only justification for column 52 then wrongly treats its own
-/// bound as still implied by a row that is already gone, dropping *both*
-/// variables' boxes with nothing left to enforce either — `x52`'s own
-/// nonzero objective coefficient then drives it to `-inf` under plain
-/// simplex, an entirely soundness bug in this presolve reduction itself,
-/// not anything downstream. Re-scanning every currently-live row for `j`
-/// fresh (rather than trusting the snapshot's `col_rows[j]` list, which
-/// this function still uses for cheap candidate *generation* and ordering
-/// only) is what closes this gap: a stale or deleted justifying row simply
-/// no longer contributes to the recomputed intersection, so a candidate
-/// whose justification depended on it is correctly rejected instead of
-/// silently eliminated.
+/// 健全性の要点: 候補の根拠 (含意範囲) は、消去を確定する直前に
+/// 「削除されていない行・その現在の内容」だけから必ず再計算する。
+/// 根拠だった行が先行する別列の消去のピボットとして消費 (削除) されている場合、
+/// スナップショットの根拠を信用すると箱を不正に落としてしまう (Netlib `shell` の
+/// 偽 `Unbounded` の原因)。候補生成時のスナップショットは順序付けにのみ使う。
 ///
-/// A closely related question — can a similarly-shaped bug hide even when
-/// only a *single* row justifies a column, if that row (not just a
-/// multi-row intersection) is the one that gets consumed by an earlier
-/// elimination? — turns out to already be answered by the row-local
-/// version's own design: there, the pivot row *is* the sole justifying
-/// row, so `row_deleted[row_idx]` (checked before any re-validation even
-/// runs) already catches exactly that case. The bug specific to a
-/// cross-row version is a justifying row surviving deletion of some *other*
-/// row that happened to be a *different* column's pivot while still being
-/// treated, by a stale computation, as if it still backed `j`'s own
-/// elimination — a distinction that only exists once more than one row can
-/// jointly justify a single column.
+/// 引数は [`eliminate_implied_free_columns`] と同じ。常に結果を返す (無変更でもコピー)。
 pub fn eliminate_implied_free_columns_xrow(n: usize, a: &Csr, b: &[f64], c: &[f64], lb: &[f64], ub: &[f64], real_rows: &[Vec<(usize, f64)>], real_rhs: &[f64]) -> AggregatorResult {
     let mut a_rows: Vec<Vec<(usize, f64)>> = csr_rows(a);
-    // One sparse accumulator for every row fold this pass performs —
-    // see `crate::sparse::SparseAccum`'s own docs for why the merge is
-    // not a per-row `BTreeMap`.
+    // 全ての行 fold で共有する疎アキュムレータ。
     let mut accum = SparseAccum::new(n);
     let mut b: Vec<f64> = b.to_vec();
     let mut c: Vec<f64> = c.to_vec();
     let mut real_rows: Vec<Vec<(usize, f64)>> = real_rows.to_vec();
     let mut real_rhs: Vec<f64> = real_rhs.to_vec();
 
+    // 各列が `A` の何本の行に (非零で) 現れるか。
     let mut col_a_count = vec![0usize; n];
     for row in &a_rows {
         for &(j, v) in row {
@@ -615,31 +426,18 @@ pub fn eliminate_implied_free_columns_xrow(n: usize, a: &Csr, b: &[f64], c: &[f6
     }
     let is_free = |j: usize| lb[j] == f64::NEG_INFINITY && ub[j] == f64::INFINITY;
 
-    // One `RowActivity` per row, computed lazily and reused across every
-    // column that shares it — `None` means "stale or never computed",
-    // forcing a fresh `compute_row_activity` next time it's read.
-    // Essential, not just an optimization: without this, a row with many
-    // nonzeros gets its `O(row_len)` activity recomputed once per column
-    // that references it, both here and again at elimination time below —
-    // `O(row_len)` per column times up to `row_len` columns sharing one row
-    // is exactly the `O(row_len^2)` blowup `RowActivity`'s own docs
-    // describe an *earlier* version of the row-local pass paying on
-    // Netlib `wood1p` (a single row with 2592 of 2594 columns nonzero) —
-    // confirmed to reproduce here too (0.13s -> 0.46s on the full Netlib
-    // set) before this cache was added. A row's cached entry is
-    // invalidated (`None`) the moment a fold changes its content (see the
-    // elimination loop below), so a cache hit always reflects that row's
-    // *current* state, never a stale one — the fold sites are the only
-    // places `a_rows[i]` changes after this point.
+    // 行ごとの `RowActivity` のキャッシュ (遅延計算)。`None` は未計算または無効。
+    // 行が fold で書き換わった瞬間に `None` に戻すので、ヒットは常に現在の内容を反映する。
+    // 長い行で O(行長^2) になるのを防ぐために必須。
     let mut row_activity: Vec<Option<RowActivity>> = vec![None; a_rows.len()];
 
-    // Intersects every row in `rows` that still carries a nonzero `j` term
-    // (in `a_rows`'s *current* content — always read fresh here, only the
-    // per-row `RowActivity` summary is cached) into one combined implied
-    // range; `None` if no such row remains.
+    /// `rows` のうち (現在の内容で) 列 `j` の非零項を持つ行の含意範囲を
+    /// すべて交差させた範囲を返す。該当行が 1 本も無ければ `None`。
+    /// 行の内容は毎回 `a_rows` から読み、活動量要約だけ `row_activity` にキャッシュする。
     fn aggregate_range(j: usize, rows: &[usize], a_rows: &[Vec<(usize, f64)>], b: &[f64], lb: &[f64], ub: &[f64], row_activity: &mut [Option<RowActivity>]) -> Option<(f64, f64)> {
         let mut lo = f64::NEG_INFINITY;
         let mut hi = f64::INFINITY;
+        // 1 本でも該当行があったか。
         let mut any = false;
         for &i in rows {
             let row = &a_rows[i];
@@ -656,13 +454,8 @@ pub fn eliminate_implied_free_columns_xrow(n: usize, a: &Csr, b: &[f64], c: &[f6
         any.then_some((lo, hi))
     }
 
-    // Snapshot candidate generation: column -> its own equality rows at
-    // call-input time, used only to decide *which columns are worth
-    // trying* and in what order — the elimination loop below never trusts
-    // this list's own membership or the rows' snapshot content, only uses
-    // it (still live rows filtered back in) as a candidate-ordering hint;
-    // see this function's own docs for why the actual justification is
-    // always recomputed fresh from live rows at elimination time instead.
+    // 入力時点のスナップショット: 列 -> その列を含む等式行。候補の選別と順序付けにのみ使い、
+    // 消去時の判定には使わない。
     let mut col_rows: Vec<Vec<usize>> = vec![Vec::new(); n];
     for (i, row) in a_rows.iter().enumerate() {
         for &(j, v) in row {
@@ -672,6 +465,7 @@ pub fn eliminate_implied_free_columns_xrow(n: usize, a: &Csr, b: &[f64], c: &[f6
         }
     }
 
+    // 候補列: 等式行 2 本以上に現れ、自由列でなく、スナップショット上の共通含意範囲が箱に収まる列。
     let mut candidates: Vec<usize> = Vec::new();
     for j in 0..n {
         if col_a_count[j] < 2 || is_free(j) {
@@ -683,34 +477,27 @@ pub fn eliminate_implied_free_columns_xrow(n: usize, a: &Csr, b: &[f64], c: &[f6
             }
         }
     }
-    // Cheapest-first, mirroring the row-local version's own fill-in proxy
-    // (`rowlen * collen`, size-2 pairs first): estimated via this column's
-    // own least-cost row, the one an actual elimination would most likely
-    // pivot through.
+    // 安い順: 行局所版と同じ fill-in 目安を、その列を含む最短行で見積もる。
     candidates.sort_by_key(|&j| {
         let collen = col_a_count[j];
         let min_rowlen = col_rows[j].iter().map(|&i| a_rows[i].len()).min().unwrap_or(0);
         (min_rowlen.min(collen) != 2, min_rowlen * collen, min_rowlen.min(collen), j)
     });
 
+    // ピボットとして消費済みの等式行。
     let mut row_deleted = vec![false; a_rows.len()];
+    // 消去済みの列。
     let mut col_eliminated = vec![false; n];
     let mut substitutions = Vec::new();
+    // fill-in 上限超過の連続回数。
     let mut consecutive_fillin_failures = 0usize;
 
     for j in candidates {
         if col_eliminated[j] {
             continue;
         }
-        // The fix: recompute from *every currently-live* row referencing
-        // `j` (not just `col_rows[j]`'s snapshot list — a different
-        // column's own fold can have introduced a fresh `j` term into a
-        // row that had none at snapshot time; omitting such a row here
-        // only widens the intersection, i.e. makes this check *more*
-        // conservative, never unsound) and with *current* row content, not
-        // the snapshot's. See this function's own docs for why this,
-        // rather than a pivot-row-only re-check, is what soundness
-        // actually depends on here.
+        // 現在生きていて `j` を含む全等式行を毎回走査し直す (スナップショットは信用しない)。
+        // fold で新たに `j` を含むようになった行を取りこぼしても範囲が広がるだけで安全側。
         let live_rows: Vec<usize> = a_rows
             .iter()
             .enumerate()
@@ -724,13 +511,11 @@ pub fn eliminate_implied_free_columns_xrow(n: usize, a: &Csr, b: &[f64], c: &[f6
             continue;
         }
 
-        // Pivot through whichever still-live justifying row is cheapest
-        // (least fill-in) and clears the numerical pivot-ratio guard —
-        // any of them is equally valid algebraically now that the
-        // intersection above has already confirmed the *combined*
-        // justification holds.
+        // ピボット行: 生きている行のうち最短で、ピボット比ガードを通る最初の行
+        // (共通範囲で根拠は確認済みなので、どの行を使っても代数的に正しい)。
         let mut sorted_live = live_rows.clone();
         sorted_live.sort_by_key(|&i| a_rows[i].len());
+        // 選んだ (ピボット行番号, `j` の係数)。
         let mut chosen: Option<(usize, f64)> = None;
         for &i in &sorted_live {
             let row = &a_rows[i];
@@ -746,11 +531,13 @@ pub fn eliminate_implied_free_columns_xrow(n: usize, a: &Csr, b: &[f64], c: &[f6
         };
 
         let pivot_row = a_rows[row_idx].clone();
+        // ピボット行から `j` を除いた残り項。
         let terms: Vec<(usize, f64)> = pivot_row.iter().filter(|&&(k, _)| k != j).copied().collect();
         if terms.is_empty() {
             continue;
         }
 
+        // `j` を含む他の生きている等式行と、`j` を含む実不等式行。
         let other_a: Vec<usize> = a_rows
             .iter()
             .enumerate()
@@ -759,6 +546,7 @@ pub fn eliminate_implied_free_columns_xrow(n: usize, a: &Csr, b: &[f64], c: &[f6
             .collect();
         let other_g: Vec<usize> = real_rows.iter().enumerate().filter(|(_, row2)| row2.iter().any(|&(k, v)| k == j && v != 0.0)).map(|(i2, _)| i2).collect();
 
+        // 全対象行へ代入したときに増える非零数。
         let fillin = {
             let mut targets: Vec<&Vec<(usize, f64)>> = Vec::with_capacity(other_a.len() + other_g.len());
             for &i2 in &other_a {
@@ -778,14 +566,14 @@ pub fn eliminate_implied_free_columns_xrow(n: usize, a: &Csr, b: &[f64], c: &[f6
         }
         consecutive_fillin_failures = 0;
 
+        // ピボット行の右辺。
         let rhs_i = b[row_idx];
         for &i2 in &other_a {
             let a_i2j = a_rows[i2].iter().find(|&&(k, _)| k == j).unwrap().1;
             let factor = a_i2j / coeff;
             a_rows[i2] = axpy_row(&mut accum, &a_rows[i2], &pivot_row, factor, j, TOL);
             b[i2] -= factor * rhs_i;
-            // This row's content just changed — its cached `RowActivity`
-            // (if any) is now stale; see `row_activity`'s own docs.
+            // 行の内容が変わったので活動量キャッシュを無効化。
             row_activity[i2] = None;
         }
         for &i2 in &other_g {
@@ -795,6 +583,7 @@ pub fn eliminate_implied_free_columns_xrow(n: usize, a: &Csr, b: &[f64], c: &[f6
             real_rhs[i2] -= factor * rhs_i;
         }
 
+        // 目的関数へ代入。
         let cj = c[j];
         if cj != 0.0 {
             let factor = cj / coeff;
@@ -809,6 +598,7 @@ pub fn eliminate_implied_free_columns_xrow(n: usize, a: &Csr, b: &[f64], c: &[f6
         row_deleted[row_idx] = true;
     }
 
+    // 削除済み行を取り除いた最終的な `A`, `b`。
     let mut final_a_rows = Vec::with_capacity(a_rows.len());
     let mut final_b = Vec::with_capacity(b.len());
     for (i, row) in a_rows.into_iter().enumerate() {
@@ -828,31 +618,29 @@ pub fn eliminate_implied_free_columns_xrow(n: usize, a: &Csr, b: &[f64], c: &[f6
     }
 }
 
-/// Which of [`eliminate_implied_free_columns_v2`]'s generalisations over
-/// [`eliminate_implied_free_columns_xrow`] are switched on — each one is an
-/// independent countermeasure (see `analysis/stocfor2_presolve_20260923.md`)
-/// and is kept separately switchable (the `ENOMOTO_AGG_*` opt-outs in
-/// [`AggOptions::from_env`]) so each can be A/B-measured on its own.
+/// [`eliminate_implied_free_columns_v2`] で [`eliminate_implied_free_columns_xrow`] に
+/// 追加した各拡張の ON/OFF。各項目は独立に切り替えられる
+/// (既定はすべて ON、[`AggOptions::from_env`] の `ENOMOTO_AGG_*` で個別に OFF)。
 #[derive(Clone, Copy, Debug)]
 pub struct AggOptions {
-    /// Also intersect one-sided implied bounds from `G`'s real inequality
-    /// rows into a column's implied range (HiGHS `isImpliedFree` uses the
-    /// tightest implied bound from *any* row, not just equalities).
+    /// `G` の実不等式行から得られる片側の含意境界も列の含意範囲に交差させるか
+    /// (HiGHS の `isImpliedFree` は等式に限らず任意の行の最も厳しい含意境界を使う)。
     pub use_ineq: bool,
-    /// Minimum number of equality rows a candidate column must appear in:
-    /// 2 is the old gate; 1 additionally admits a column in exactly one
-    /// equality row plus >= 1 inequality row (which `colsingleton` rejects
-    /// too, so nothing else in the pipeline can remove it).
+    /// 候補列が現れなければならない等式行の最小本数。2 は旧来の条件、
+    /// 1 は「等式行 1 本 + 不等式行 1 本以上」の列も許可する
+    /// (この形は `colsingleton` も扱えない)。
     pub min_a_count: usize,
-    /// HiGHS's net fill-in (`new nonzeros - (rowlen + collen - 1)`), with the
-    /// check skipped outright when the pivot row or the column has length 2.
+    /// HiGHS 流の正味 fill-in (`新規非零 - (行長 + 列長 - 1)`) を使い、
+    /// ピボット行長か列長が 2 のときは fill-in 判定自体を省くか。false なら総 fill-in。
     pub net_fillin: bool,
-    /// Abort the rest of the candidate list after
-    /// `MAX_CONSECUTIVE_FILLIN_FAILURES` consecutive fill-in rejections.
+    /// fill-in 超過が `MAX_CONSECUTIVE_FILLIN_FAILURES` 回連続したら残り候補を打ち切るか。
     pub fillin_break: bool,
 }
 
 impl AggOptions {
+    /// 環境変数から設定を作る。既定は全拡張 ON (`min_a_count = 1`)。
+    /// `ENOMOTO_AGG_NOINEQ` で `use_ineq` OFF、`ENOMOTO_AGG_MINACNT2` で `min_a_count = 2`、
+    /// `ENOMOTO_AGG_GROSSFILL` で総 fill-in、`ENOMOTO_AGG_NOBREAK` で打ち切りなし。
     pub fn from_env() -> Self {
         AggOptions {
             use_ineq: env_str!("ENOMOTO_AGG_NOINEQ").is_none(),
@@ -863,27 +651,11 @@ impl AggOptions {
     }
 }
 
-/// Generalised cross-row aggregator: [`eliminate_implied_free_columns_xrow`]'s
-/// live-recomputed cross-row justification (the `shell` fix — every
-/// candidate's implied range is recomputed from *live* rows with *current*
-/// content immediately before its elimination is committed), extended by
-/// [`AggOptions`].
-///
-/// Soundness of the inequality-row justification: a `G` row is never deleted
-/// here, only folded, so the row that implied `x_j`'s bound keeps being
-/// enforced after `x_j` is substituted out, and every other column it used
-/// keeps its box (a column eliminated earlier no longer appears in any live
-/// row, so justifications only ever depend on boxes that are still
-/// enforced — the eliminations form a DAG, never a cycle).
-/// [`eliminate_implied_free_columns_v2`], returning `None` (the problem is
-/// unchanged) without copying anything when its candidate list would be
-/// empty — the v2 counterpart of [`eliminate_implied_free_columns_if_any`]
-/// (most rounds of most problems find no candidate at all). The pre-check
-/// [`v2_has_candidate`] evaluates exactly v2's own candidate test, in the
-/// same floating-point order, straight off `a`'s CSR slices and the
-/// borrowed `real_rows`, so `Some` results are bit-identical to calling
-/// v2 directly and `None` is returned only where v2 would have eliminated
-/// nothing.
+/// [`eliminate_implied_free_columns_v2`] の前段付き版 (既定の Aggregator 入口)。
+/// まず [`v2_has_candidate`] で候補の有無だけを安価に調べ、候補が無ければ
+/// 何もコピーせず `None` (問題は不変) を返す。候補があれば v2 の結果を `Some` で返す。
+/// 前段判定は v2 の候補判定と同じ浮動小数点演算順序で行うので、
+/// `Some` の結果は v2 を直接呼んだ場合と同一で、`None` は v2 が何も消去しない場合に限る。
 pub fn eliminate_implied_free_columns_v2_if_any(n: usize, a: &Csr, b: &[f64], c: &[f64], lb: &[f64], ub: &[f64], real_rows: &[Vec<(usize, f64)>], real_rhs: &[f64], opts: AggOptions) -> Option<AggregatorResult> {
     if !v2_has_candidate(n, a, b, lb, ub, real_rows, real_rhs, opts) {
         return None;
@@ -891,16 +663,16 @@ pub fn eliminate_implied_free_columns_v2_if_any(n: usize, a: &Csr, b: &[f64], c:
     Some(eliminate_implied_free_columns_v2(n, a, b, c, lb, ub, real_rows, real_rhs, opts))
 }
 
-/// Whether [`eliminate_implied_free_columns_v2`]'s candidate list is
-/// non-empty. Mirrors its candidate generation exactly: the same
-/// eligibility test, each row's activity summed over the row sorted by
-/// column (v2 sorts unsorted rows before anything else), and, per column,
-/// the same sequence of `max`/`min` folds (equality rows in ascending
-/// order, then inequality rows in ascending order).
+/// [`eliminate_implied_free_columns_v2`] の候補リストが空でないかを判定する。
+/// v2 の候補生成を正確に再現する: 同じ適格性判定、列番号順にソートした行での
+/// 活動量計算 (v2 は最初に未ソート行をソートするため)、列ごとの `max`/`min` の
+/// 畳み込み順 (等式行を昇順 → 不等式行を昇順)。行列のコピーは作らない。
 pub fn v2_has_candidate(n: usize, a: &Csr, b: &[f64], lb: &[f64], ub: &[f64], real_rows: &[Vec<(usize, f64)>], real_rhs: &[f64], opts: AggOptions) -> bool {
     let ar = a.as_ref();
+    // 等式行の本数。
     let p = ar.nrows();
     let is_free = |j: usize| lb[j] == f64::NEG_INFINITY && ub[j] == f64::INFINITY;
+    // 各列が現れる等式行 / 実不等式行の本数。
     let mut col_a_count = vec![0usize; n];
     let mut col_g_count = vec![0usize; n];
     for i in 0..p {
@@ -917,17 +689,21 @@ pub fn v2_has_candidate(n: usize, a: &Csr, b: &[f64], lb: &[f64], ub: &[f64], re
             }
         }
     }
+    // 等式行本数の下限 (最低 1)。
     let min_a = opts.min_a_count.max(1);
+    // 列ごとの適格性 (v2 の候補条件のうち範囲判定以外の部分)。
     let eligible: Vec<bool> = (0..n).map(|j| !(col_a_count[j] < min_a || col_a_count[j] + col_g_count[j] < 2 || is_free(j))).collect();
     if !eligible.iter().any(|&e| e) {
         return false;
     }
+    // 列ごとの含意範囲 (全行の交差)。
     let mut lo = vec![f64::NEG_INFINITY; n];
     let mut hi = vec![f64::INFINITY; n];
+    // ソート済みコピー用の再利用バッファ。
     let mut row_buf: Vec<(usize, f64)> = Vec::new();
-    // `row` itself when already sorted by column, else a sorted copy in
-    // `row_buf` (v2 sorts before computing any activity).
-    fn sorted<'r>(row: &'r [(usize, f64)], buf: &'r mut Vec<(usize, f64)>) -> &'r [(usize, f64)] {
+    /// `row` が既に列番号昇順ならそのまま、そうでなければ `buf` にソート済みコピーを作って返す
+    /// (v2 は活動量計算の前に行をソートするので、同じ加算順序にするため)。
+    fn sorted_by_col<'r>(row: &'r [(usize, f64)], buf: &'r mut Vec<(usize, f64)>) -> &'r [(usize, f64)] {
         if row.windows(2).all(|w| w[0].0 < w[1].0) {
             row
         } else {
@@ -937,16 +713,18 @@ pub fn v2_has_candidate(n: usize, a: &Csr, b: &[f64], lb: &[f64], ub: &[f64], re
             buf
         }
     }
+    // CSR 行を (列, 係数) 列に詰め直す再利用バッファ。
     let mut a_buf: Vec<(usize, f64)> = Vec::new();
     for i in 0..p {
         let cols = ar.col_indices_of_row_raw(i);
         let vals = ar.values_of_row(i);
+        // 適格列を 1 つも含まない行は飛ばす。
         if !cols.iter().zip(vals).any(|(&j, &v)| v != 0.0 && eligible[j]) {
             continue;
         }
         a_buf.clear();
         a_buf.extend(cols.iter().copied().zip(vals.iter().copied()));
-        let row = sorted(&a_buf, &mut row_buf);
+        let row = sorted_by_col(&a_buf, &mut row_buf);
         let act = compute_row_activity(row, lb, ub);
         for &(j, coeff) in row {
             if coeff == 0.0 || !eligible[j] {
@@ -962,12 +740,13 @@ pub fn v2_has_candidate(n: usize, a: &Csr, b: &[f64], lb: &[f64], ub: &[f64], re
             if !row.iter().any(|&(j, v)| v != 0.0 && eligible[j]) {
                 continue;
             }
-            let row = sorted(row, &mut row_buf);
+            let row = sorted_by_col(row, &mut row_buf);
             let act = compute_row_activity(row, lb, ub);
             for &(j, coeff) in row {
                 if coeff == 0.0 || !eligible[j] {
                     continue;
                 }
+                // `coeff*x_j <= rhs - s_lo` から片側の境界を得る。
                 let (s_lo, _) = residual_range(&act, j, coeff, lb, ub);
                 if s_lo.is_finite() {
                     let v = (real_rhs[i] - s_lo) / coeff;
@@ -983,30 +762,36 @@ pub fn v2_has_candidate(n: usize, a: &Csr, b: &[f64], lb: &[f64], ub: &[f64], re
     (0..n).any(|j| eligible[j] && range_within_box(j, lo[j], hi[j], lb, ub))
 }
 
+/// 既定版 Aggregator (v2)。行横断版の「消去直前に生きている行・現在の内容から
+/// 含意範囲を再計算する」方式を引き継ぎ、[`AggOptions`] の拡張を加えたもの。
+///
+/// 不等式行を根拠に使う場合の健全性: `G` の行は削除されず fold されるだけなので、
+/// `x_j` の境界を含意した行は代入後も強制され続け、その行が使う他の列の箱も残る
+/// (先に消去された列はもう生きている行に現れないので、根拠の依存関係は循環しない)。
+///
+/// 引数は [`eliminate_implied_free_columns`] と同じ + `opts`。常に結果を返す。
 pub fn eliminate_implied_free_columns_v2(n: usize, a: &Csr, b: &[f64], c: &[f64], lb: &[f64], ub: &[f64], real_rows: &[Vec<(usize, f64)>], real_rhs: &[f64], opts: AggOptions) -> AggregatorResult {
     let mut a_rows: Vec<Vec<(usize, f64)>> = csr_rows(a);
+    // 全ての行 fold で共有する疎アキュムレータ。
     let mut accum = SparseAccum::new(n);
     let mut b: Vec<f64> = b.to_vec();
     let mut c: Vec<f64> = c.to_vec();
     let mut real_rows: Vec<Vec<(usize, f64)>> = real_rows.to_vec();
     let mut real_rhs: Vec<f64> = real_rhs.to_vec();
     let is_free = |j: usize| lb[j] == f64::NEG_INFINITY && ub[j] == f64::INFINITY;
-    // Rows are kept sorted by column so a coefficient lookup is a binary
-    // search, not an O(row length) scan: dense rows (`fit2d`: ~10^4 per row)
-    // otherwise make every lookup-per-(column, row) pass quadratic.
+    // 係数参照を二分探索にするため、全行を列番号順にソートしておく (密な行で二乗時間になるのを防ぐ)。
     for row in a_rows.iter_mut().chain(real_rows.iter_mut()) {
         if !row.windows(2).all(|w| w[0].0 < w[1].0) {
             row.sort_unstable_by_key(|&(k, _)| k);
         }
     }
+    // ソート済み行 `row` における列 `j` の係数 (無ければ 0)。
     let coef_of = |row: &[(usize, f64)], j: usize| match row.binary_search_by_key(&j, |&(k, _)| k) {
         Ok(p) => row[p].1,
         Err(_) => 0.0,
     };
 
-    // Column counts first, so every per-column list below is allocated
-    // once at its final size (building them by `push` alone reallocated
-    // each one log2(count) times — ~6% of `stocfor1`'s solve).
+    // 先に列ごとの出現本数を数え、下の列別リストを最終サイズで一度に確保する。
     let mut col_a_count = vec![0usize; n];
     let mut col_g_count = vec![0usize; n];
     for row in &a_rows {
@@ -1023,12 +808,12 @@ pub fn eliminate_implied_free_columns_v2(n: usize, a: &Csr, b: &[f64], c: &[f64]
             }
         }
     }
+    // 列 -> その列を含む行番号の索引 (等式行用 / 実不等式行用)。fold で追記されるので上位集合。
     let mut a_col_idx: Vec<Vec<usize>> = col_a_count.iter().map(|&k| Vec::with_capacity(k)).collect();
     let mut g_col_idx: Vec<Vec<usize>> = col_g_count.iter().map(|&k| Vec::with_capacity(k)).collect();
-    // Initial `(row, coeff)` lists, used only for candidate generation
-    // (every row is still pristine then): column-compressed, column `j`'s
-    // list is `a_col0[a_col0_ptr[j]..a_col0_ptr[j + 1]]` (same entries, same
-    // order as one `Vec` per column filled row by row).
+    // 初期状態の列別 `(行, 係数)` リスト (候補生成専用。その時点では全行が未加工)。
+    // 列圧縮形式で、列 `j` の分は `a_col0[a_col0_ptr[j]..a_col0_ptr[j + 1]]`。
+    // `col_ptr` は列ごとの本数から累積和ポインタ (長さ n+1) を作る。
     let col_ptr = |count: &[usize]| {
         let mut ptr = Vec::with_capacity(n + 1);
         let mut acc = 0usize;
@@ -1043,12 +828,10 @@ pub fn eliminate_implied_free_columns_v2(n: usize, a: &Csr, b: &[f64], c: &[f64]
     let g_col0_ptr = col_ptr(&col_g_count);
     let mut a_col0: Vec<(usize, f64)> = vec![(0, 0.0); a_col0_ptr[n]];
     let mut g_col0: Vec<(usize, f64)> = vec![(0, 0.0); g_col0_ptr[n]];
-    // `a_col_idx[j]`/`g_col_idx[j]` need the `sort_unstable + dedup` below
-    // only once they hold an out-of-order or repeated row id: built row by
-    // row they are ascending, repeating an id only for a row with a
-    // duplicate column; a fold appends, so it marks the column dirty.
-    // Sorting/deduping an ascending duplicate-free list is a no-op, so
-    // skipping it for clean columns changes nothing.
+    // `a_col_idx[j]` / `g_col_idx[j]` が順序の乱れや重複を含み得る (= 使用前に
+    // ソート・重複除去が必要) ことを示すフラグ。行順に構築した直後は昇順で、
+    // 重複は同一列を重複して持つ行でのみ生じる。fold で追記すると dirty になる。
+    // クリーンな列ではソート・重複除去は無操作なので省略しても結果は同じ。
     let mut a_dirty = vec![false; n];
     let mut g_dirty = vec![false; n];
     for (i, row) in a_rows.iter().enumerate() {
@@ -1073,16 +856,20 @@ pub fn eliminate_implied_free_columns_v2(n: usize, a: &Csr, b: &[f64], c: &[f64]
             }
         }
     }
+    // 等式行ごとの係数絶対値最大値のキャッシュ (fold で `None` に戻す)。
     let mut row_max_a: Vec<Option<f64>> = vec![None; a_rows.len()];
+    // fill-in 計数用のスタンプ配列: `stamp[k] == stamp_id` なら列 `k` は現在の対象行に既存。
     let mut stamp = vec![usize::MAX; n];
     let mut stamp_id = 0usize;
+    // 等式行 / 実不等式行ごとの `RowActivity` キャッシュ (fold で `None` に戻す)。
     let mut act_a: Vec<Option<RowActivity>> = vec![None; a_rows.len()];
     let mut act_g: Vec<Option<RowActivity>> = vec![None; real_rows.len()];
+    // ピボットとして消費済みの等式行。
     let mut row_deleted = vec![false; a_rows.len()];
 
-    // Implied range of `x_j` from the given (live) equality rows `la` and,
-    // with `use_ineq`, inequality rows `lg` (`(row, coeff)` pairs).
-    let implied = |j: usize, la: &[(usize, f64)], lg: &[(usize, f64)], a_rows: &[Vec<(usize, f64)>], b: &[f64], real_rows: &[Vec<(usize, f64)>], real_rhs: &[f64], act_a: &mut [Option<RowActivity>], act_g: &mut [Option<RowActivity>]| -> (f64, f64) {
+    // 列 `j` の含意範囲: 等式行 `la` の含意範囲と、`use_ineq` なら不等式行 `lg` の
+    // 片側境界をすべて交差させる (`la`/`lg` は `(行番号, j の係数)` の列)。
+    let col_implied_range = |j: usize, la: &[(usize, f64)], lg: &[(usize, f64)], a_rows: &[Vec<(usize, f64)>], b: &[f64], real_rows: &[Vec<(usize, f64)>], real_rhs: &[f64], act_a: &mut [Option<RowActivity>], act_g: &mut [Option<RowActivity>]| -> (f64, f64) {
         let mut lo = f64::NEG_INFINITY;
         let mut hi = f64::INFINITY;
         for &(i, coeff) in la {
@@ -1094,6 +881,7 @@ pub fn eliminate_implied_free_columns_v2(n: usize, a: &Csr, b: &[f64], c: &[f64]
         if opts.use_ineq {
             for &(i, coeff) in lg {
                 let act = *act_g[i].get_or_insert_with(|| compute_row_activity(&real_rows[i], lb, ub));
+                // `coeff*x_j <= rhs - s_lo` から片側の境界を得る。
                 let (s_lo, _) = residual_range(&act, j, coeff, lb, ub);
                 if s_lo.is_finite() {
                     let v = (real_rhs[i] - s_lo) / coeff;
@@ -1108,18 +896,21 @@ pub fn eliminate_implied_free_columns_v2(n: usize, a: &Csr, b: &[f64], c: &[f64]
         (lo, hi)
     };
 
+    // 等式行本数の下限 (最低 1)。
     let min_a = opts.min_a_count.max(1);
+    // 候補列: 適格 (等式行 min_a 本以上・全出現 2 本以上・非自由) で、初期状態の含意範囲が箱に収まる列。
     let mut candidates: Vec<usize> = Vec::new();
     for j in 0..n {
         if col_a_count[j] < min_a || col_a_count[j] + col_g_count[j] < 2 || is_free(j) {
             continue;
         }
         let (la, lg) = (&a_col0[a_col0_ptr[j]..a_col0_ptr[j + 1]], &g_col0[g_col0_ptr[j]..g_col0_ptr[j + 1]]);
-        let (lo, hi) = implied(j, la, lg, &a_rows, &b, &real_rows, &real_rhs, &mut act_a, &mut act_g);
+        let (lo, hi) = col_implied_range(j, la, lg, &a_rows, &b, &real_rows, &real_rhs, &mut act_a, &mut act_g);
         if range_within_box(j, lo, hi, lb, ub) {
             candidates.push(j);
         }
     }
+    // 安い順: 長さ 2 の対を先頭に、次に `最短等式行長 * 列長` 昇順。
     candidates.sort_by_key(|&j| {
         let collen = col_a_count[j] + col_g_count[j];
         let min_rowlen = a_col_idx[j].iter().map(|&i| a_rows[i].len()).min().unwrap_or(0);
@@ -1127,14 +918,16 @@ pub fn eliminate_implied_free_columns_v2(n: usize, a: &Csr, b: &[f64], c: &[f64]
     });
 
     let mut substitutions = Vec::new();
+    // fill-in 上限超過の連続回数。
     let mut consecutive_fillin_failures = 0usize;
     for j in candidates {
-        // Live rows containing `j`, re-verified against current content.
+        // `j` を含む生きている行を、現在の内容で確認し直して集める。
         if a_dirty[j] {
             a_col_idx[j].sort_unstable();
             a_col_idx[j].dedup();
             a_dirty[j] = false;
         }
+        // `la`: `j` を含む生きている等式行の `(行, j の係数)`。
         let la: Vec<(usize, f64)> = crate::sparse::collect_with_capacity(a_col_idx[j].len(), a_col_idx[j].iter().filter(|&&i| !row_deleted[i]).map(|&i| (i, coef_of(&a_rows[i], j))).filter(|&(_, v)| v != 0.0));
         if la.is_empty() {
             continue;
@@ -1144,12 +937,13 @@ pub fn eliminate_implied_free_columns_v2(n: usize, a: &Csr, b: &[f64], c: &[f64]
             g_col_idx[j].dedup();
             g_dirty[j] = false;
         }
+        // `lg`: `j` を含む実不等式行の `(行, j の係数)`。
         let lg: Vec<(usize, f64)> = crate::sparse::collect_with_capacity(g_col_idx[j].len(), g_col_idx[j].iter().map(|&i| (i, coef_of(&real_rows[i], j))).filter(|&(_, v)| v != 0.0));
-        let (lo, hi) = implied(j, &la, &lg, &a_rows, &b, &real_rows, &real_rhs, &mut act_a, &mut act_g);
+        let (lo, hi) = col_implied_range(j, &la, &lg, &a_rows, &b, &real_rows, &real_rhs, &mut act_a, &mut act_g);
         if !range_within_box(j, lo, hi, lb, ub) {
             continue;
         }
-        // Pivot: shortest live equality row passing the pivot-ratio guard.
+        // ピボット: ピボット比ガードを通る最短の生きている等式行。
         let mut by_len = la.clone();
         by_len.sort_by_key(|&(i, _)| a_rows[i].len());
         let Some((row_idx, coeff)) = by_len.into_iter().find(|&(i, coeff)| {
@@ -1159,17 +953,19 @@ pub fn eliminate_implied_free_columns_v2(n: usize, a: &Csr, b: &[f64], c: &[f64]
             continue;
         };
         let pivot_row = a_rows[row_idx].clone();
+        // ピボット行から `j` を除いた残り項。
         let terms: Vec<(usize, f64)> = crate::sparse::collect_with_capacity(pivot_row.len(), pivot_row.iter().filter(|&&(k, _)| k != j).copied());
         if terms.is_empty() {
             continue;
         }
+        // 代入先: ピボット以外の等式行と、全ての該当実不等式行。
         let other_a: Vec<usize> = crate::sparse::collect_with_capacity(la.len(), la.iter().map(|&(i, _)| i).filter(|&i| i != row_idx));
         let other_g: Vec<usize> = lg.iter().map(|&(i, _)| i).collect();
         let n_other = other_a.len() + other_g.len();
-        let size2 = pivot_row.len() == 2 || n_other + 1 == 2;
-        if !(opts.net_fillin && size2) {
-            // New nonzeros the folds would create, counted with a stamp
-            // array (O(row length) per target, no per-target set).
+        // ピボット行長か列長 (= 代入先本数 + 1) が 2 か。正味 fill-in モードでは判定を省く。
+        let is_size2_pair = pivot_row.len() == 2 || n_other + 1 == 2;
+        if !(opts.net_fillin && is_size2_pair) {
+            // 代入で新たに生じる非零数 (総 fill-in) をスタンプ配列で数える。
             let mut gross = 0i64;
             for target in other_a.iter().map(|&i| &a_rows[i]).chain(other_g.iter().map(|&i| &real_rows[i])) {
                 stamp_id += 1;
@@ -1178,6 +974,7 @@ pub fn eliminate_implied_free_columns_v2(n: usize, a: &Csr, b: &[f64], c: &[f64]
                 }
                 gross += terms.iter().filter(|&&(k, _)| stamp[k] != stamp_id).count() as i64;
             }
+            // 正味 fill-in = 総 fill-in - 消える非零 (ピボット行 + 代入先の `j` 項)。
             let fillin = if opts.net_fillin { gross - (pivot_row.len() + n_other) as i64 } else { gross };
             if fillin > tunable!("ENOMOTO_T_MAX_FILLIN", MAX_FILLIN, usize) as i64 {
                 consecutive_fillin_failures += 1;
@@ -1188,11 +985,13 @@ pub fn eliminate_implied_free_columns_v2(n: usize, a: &Csr, b: &[f64], c: &[f64]
             }
         }
         consecutive_fillin_failures = 0;
+        // ピボット行の右辺。
         let rhs_i = b[row_idx];
         for &i2 in &other_a {
             let factor = coef_of(&a_rows[i2], j) / coeff;
             a_rows[i2] = axpy_row(&mut accum, &a_rows[i2], &pivot_row, factor, j, TOL);
             b[i2] -= factor * rhs_i;
+            // 内容が変わったのでキャッシュを無効化し、新たに現れ得る列の索引へ追記。
             act_a[i2] = None;
             row_max_a[i2] = None;
             for &(k, _) in &terms {
@@ -1210,6 +1009,7 @@ pub fn eliminate_implied_free_columns_v2(n: usize, a: &Csr, b: &[f64], c: &[f64]
                 g_dirty[k] = true;
             }
         }
+        // 目的関数へ代入。
         let cj = c[j];
         if cj != 0.0 {
             let factor = cj / coeff;
@@ -1222,6 +1022,7 @@ pub fn eliminate_implied_free_columns_v2(n: usize, a: &Csr, b: &[f64], c: &[f64]
         row_deleted[row_idx] = true;
     }
 
+    // 削除済み行を取り除いた最終的な `A`, `b`。
     let mut final_a_rows = Vec::with_capacity(a_rows.len());
     let mut final_b = Vec::with_capacity(b.len());
     for (i, row) in a_rows.into_iter().enumerate() {
@@ -1237,16 +1038,16 @@ pub fn eliminate_implied_free_columns_v2(n: usize, a: &Csr, b: &[f64], c: &[f64]
 mod tests {
     use super::*;
 
+    /// 行リストから CSR を作るテスト用ヘルパ。
     fn csr(rows: &[Vec<(usize, f64)>], n: usize) -> Csr {
         csr_from_rows(rows, n)
     }
 
+    /// implied-free 列が無い問題では何も変えないことを確認する。
     #[test]
     fn no_implied_free_columns_is_a_no_op() {
-        // x0 free (freevar's own domain, not implied-free-checked here);
-        // x1/x2 bounded but each appears in only one row (colsingleton's
-        // domain). Neither x1 nor x2 is implied free by their one row
-        // anyway (row0 alone gives x1 in [-inf,inf] since x0 is free).
+        // x0 は自由 (freevar の担当)。x1/x2 は有界だが各 1 行にしか現れない
+        // (colsingleton の担当)。そもそも row0 単独では x0 が自由なので x1 の箱は冗長にならない。
         let a = csr(&[vec![(0, 1.0), (1, 1.0)], vec![(0, 1.0), (2, -1.0)]], 3);
         let b = vec![5.0, 1.0];
         let c = vec![3.0, 1.0, 1.0];
@@ -1258,44 +1059,42 @@ mod tests {
         assert_eq!(r.c, c);
     }
 
+    /// `compute_row_activity` が手計算と一致することを確認する。
     #[test]
     fn row_activity_matches_hand_derivation() {
         let row = vec![(0, 1.0), (1, -1.0)];
         let lb = vec![0.0, -5.0];
         let ub = vec![10.0, 5.0];
         let activity = compute_row_activity(&row, &lb, &ub);
-        // Term 0 (coeff +1, bound [0,10]): contributes 0 to lo, 10 to hi.
-        // Term 1 (coeff -1, bound [-5,5]): its lo-side uses ub=5 -> -5; its
-        // hi-side uses lb=-5 -> +5. Totals: lo=0-5=-5, hi=10+5=15.
+        // 項0 (係数 +1, [0,10]): 下側 0, 上側 10。
+        // 項1 (係数 -1, [-5,5]): 下側は ub=5 を使い -5、上側は lb=-5 を使い +5。
+        // 合計: 下側 = -5, 上側 = 15。
         assert_eq!(activity.lo_finite_sum, -5.0);
         assert_eq!(activity.lo_inf_count, 0);
         assert_eq!(activity.hi_finite_sum, 15.0);
         assert_eq!(activity.hi_inf_count, 0);
     }
 
+    /// `residual_range` が指定した列の項だけを除くことを確認する。
     #[test]
     fn residual_range_excludes_only_the_named_columns_own_term() {
-        // Row [x0 + x1], x0 in [0,10] (finite), x1 in [-inf,inf] (the row's
-        // only unbounded contributor on both sides).
+        // 行 [x0 + x1]、x0 ∈ [0,10] (有限)、x1 ∈ [-inf,inf] (両側で唯一の無限大項)。
         let row = vec![(0, 1.0), (1, 1.0)];
         let lb = vec![0.0, f64::NEG_INFINITY];
         let ub = vec![10.0, f64::INFINITY];
         let activity = compute_row_activity(&row, &lb, &ub);
         assert_eq!(activity.lo_inf_count, 1);
         assert_eq!(activity.hi_inf_count, 1);
-        // Excluding col0 (finite, not the unbounded one) still leaves col1's
-        // own unboundedness in the residual.
+        // col0 を除いても col1 の無限大は残る。
         assert_eq!(residual_range(&activity, 0, 1.0, &lb, &ub), (f64::NEG_INFINITY, f64::INFINITY));
-        // Excluding col1 (the row's *only* unbounded contributor) leaves
-        // exactly col0's own finite range: [0,10].
+        // 唯一の無限大項 col1 を除くと col0 の範囲 [0,10] だけが残る。
         assert_eq!(residual_range(&activity, 1, 1.0, &lb, &ub), (0.0, 10.0));
     }
 
+    /// 2 行に現れる implied-free 列が境界行なしで消去されることを確認する。
     #[test]
     fn eliminates_an_implied_free_column_appearing_in_two_rows() {
-        // x0 in [0,10]; x1 in [-5,5] specifically makes row0 alone prove
-        // x0's bound redundant (x0 = 5-x1 in [0,10] for any x1 in [-5,5]),
-        // so x0 is implied-free and gets eliminated with *no* extra row.
+        // x0 ∈ [0,10]、x1 ∈ [-5,5] なので row0 単独で x0 = 5-x1 ∈ [0,10] となり x0 は implied-free。
         let a = csr(&[vec![(0, 1.0), (1, 1.0)], vec![(0, 1.0), (2, -1.0)]], 3);
         let b = vec![5.0, 1.0];
         let c = vec![3.0, 1.0, 1.0];
@@ -1305,22 +1104,19 @@ mod tests {
         assert_eq!(r.substitutions.len(), 1);
         assert_eq!(r.substitutions[0].var, 0);
         assert_eq!(r.a.nrows(), 1);
-        // Row 1 (x0 - x2 = 1) folds to -x1 - x2 = -4 (pivot row0, x0's only
-        // >=2-appearance candidate row here, matches with itself).
+        // row1 (x0 - x2 = 1) は -x1 - x2 = -4 に fold される (ピボットは row0)。
         assert_eq!(r.c[1], 1.0 - 3.0);
         assert_eq!(r.c[2], 1.0);
-        // Recover x0 given x1=2, x2=1: x0 = 5 - 2 = 3.
+        // x1=2, x2=1 のとき x0 = 5 - 2 = 3 が復元される。
         let x = vec![3.0, 2.0, 1.0];
         assert!((r.substitutions[0].value(&x) - 3.0).abs() < 1e-9);
     }
 
+    /// implied-free でない列は消去しないことを確認する。
     #[test]
     fn non_implied_free_column_is_left_alone() {
-        // Same shape, but x1's bound [0,100] is loose enough that row0
-        // alone implies x0 in [-95,5], not contained in [0,10] -- x0 is
-        // *not* implied-free (no other row helps either), so this pass
-        // must leave it untouched (unlike the reverted version, which
-        // would have eliminated it anyway with an explicit bound row).
+        // 同じ形だが x1 ∈ [0,100] と緩いので row0 単独では x0 ∈ [-95,5] で [0,10] に収まらない。
+        // 他の行も助けにならないので x0 は消去してはならない。
         let a = csr(&[vec![(0, 1.0), (1, 1.0)], vec![(0, 1.0), (2, -1.0)]], 3);
         let b = vec![5.0, 1.0];
         let c = vec![3.0, 1.0, 1.0];
@@ -1331,21 +1127,12 @@ mod tests {
         assert_eq!(r.a.nrows(), 2);
     }
 
+    /// 行局所版では、どの行も単独で箱を示せない列は消去されないことを確認する。
     #[test]
     fn neither_row_alone_proving_it_leaves_the_column_un_eliminated() {
-        // x0's own bound is [0,10]. row0 (x0+x1=5, x1 in [-100,100]) alone
-        // implies x0 in [-95,105] -- not contained in [0,10]. row1
-        // (x0-x2=1, x2 in [-100,-4]) alone implies x0 = 1+x2 in
-        // [1-100, 1-(-4)] = [-99,-3] -- also not contained. This module's
-        // check is deliberately row-local (see the module docs on why a
-        // cross-row aggregate was tried and reverted), so even though a
-        // human could intersect both rows' own true implications to a
-        // tighter [-95,-3] (still not enough here, but illustrating the
-        // gap this design accepts), this pass only ever asks a single row
-        // at a time and finds neither sufficient -- x0 remains
-        // un-eliminated by this pass (though `A`'s equality rows are equal
-        // to `x0`'s own true value regardless, so nothing is *lost*, just
-        // not caught by this particular column-elimination technique).
+        // x0 ∈ [0,10]。row0 (x0+x1=5, x1 ∈ [-100,100]) 単独では x0 ∈ [-95,105]、
+        // row1 (x0-x2=1, x2 ∈ [-100,-4]) 単独では x0 ∈ [-99,-3]。どちらも [0,10] に収まらない。
+        // 行局所版は 1 行ずつしか見ないので消去しない。
         let a = csr(&[vec![(0, 1.0), (1, 1.0)], vec![(0, 1.0), (2, -1.0)]], 3);
         let b = vec![5.0, 1.0];
         let c = vec![0.0, 0.0, 0.0];
@@ -1355,10 +1142,10 @@ mod tests {
         assert!(r.substitutions.is_empty());
     }
 
+    /// 消去列を含む実不等式行にも代入が反映されることを確認する。
     #[test]
     fn fold_reaches_a_shared_real_row_too() {
-        // x0 in [0,10], x1 in [-5,5] (implied-free via row0). One real_rows
-        // inequality also references x0.
+        // x0 ∈ [0,10], x1 ∈ [-5,5] (row0 で implied-free)。実不等式行 1 本も x0 を含む。
         let a = csr(&[vec![(0, 1.0), (1, 1.0)], vec![(0, 1.0), (2, -1.0)]], 3);
         let b = vec![5.0, 1.0];
         let c = vec![0.0, 0.0, 0.0];
@@ -1368,37 +1155,24 @@ mod tests {
         let real_rhs = vec![7.0];
         let r = eliminate_implied_free_columns(3, &a, &b, &c, &lb, &ub, &real_rows, &real_rhs);
         assert_eq!(r.substitutions.len(), 1);
-        // real_rows must no longer mention column 0: x0 + x2 <= 7 becomes
-        // (5 - x1) + x2 <= 7 => -x1 + x2 <= 2.
+        // x0 + x2 <= 7 は (5 - x1) + x2 <= 7、すなわち -x1 + x2 <= 2 になる。
         assert_eq!(r.real_rows.len(), 1);
         assert_eq!(r.real_rows[0], vec![(1, -1.0), (2, 1.0)]);
         assert_eq!(r.real_rhs, vec![2.0]);
     }
 
+    /// 1 回の呼び出しで最初から implied-free な 2 列が両方消去されることを確認する。
     #[test]
     fn cascading_elimination_within_one_call() {
-        // x0 in [0,10] implied-free via row0 given x1 in [-5,5]. Once x0 is
-        // eliminated, row1 (x0+x3=3, originally x1... ) -- construct so
-        // that x1 *also* becomes implied-free and eliminable within this
-        // same call once its own candidacy is checked against the
-        // *original* snapshot's bounds (this pass doesn't recompute
-        // implied bounds mid-call, but a column already implied-free up
-        // front and appearing in >=2 rows is eliminated regardless of
-        // fold order).
         // Row0: x0 + x1 = 5. Row1: x0 - x2 = 1. Row2: x1 + x3 = 3.
-        // x1 in [-2,2] is implied-free via row2 alone (x3 in [1,5] ->
-        // x1 = 3-x3 in [-2,2], matching its own bound exactly).
+        // x1 ∈ [-2,2] は row2 単独で implied-free (x3 ∈ [1,5] より x1 = 3-x3 ∈ [-2,2])。
+        // x0 は row0 で x0 = 5-x1 ∈ [3,7] ⊂ [0,10] なので implied-free。
+        // x0 は行 0,1、x1 は行 0,2 に現れるので両方が候補 (途中で含意範囲は再計算しない)。
         let a = csr(&[vec![(0, 1.0), (1, 1.0)], vec![(0, 1.0), (2, -1.0)], vec![(1, 1.0), (3, 1.0)]], 4);
         let b = vec![5.0, 1.0, 3.0];
         let c = vec![0.0, 0.0, 0.0, 0.0];
         let lb = vec![0.0, -2.0, f64::NEG_INFINITY, 1.0];
         let ub = vec![10.0, 2.0, f64::INFINITY, 5.0];
-        // x0 implied-free via row0 needs x1 in [-5,5] to cover [0,10] via
-        // x0=5-x1; x1's own bound here is [-2,2] (tighter), giving x0's
-        // row0-implied range [3,7] -- still inside [0,10], so x0 is
-        // implied-free too. Both x0 and x1 appear in >= 2 A-rows apiece
-        // once row0's own two occurrences count (x0 in rows 0,1; x1 in
-        // rows 0,2), so both are candidates.
         let r = eliminate_implied_free_columns(4, &a, &b, &c, &lb, &ub, &[], &[]);
         assert_eq!(r.substitutions.len(), 2);
         let vars: std::collections::BTreeSet<usize> = r.substitutions.iter().map(|s| s.var).collect();
@@ -1406,67 +1180,53 @@ mod tests {
         assert_eq!(r.a.nrows(), 1);
     }
 
+    /// `fillin_cost` が対象行に未だ無い列だけを数えることを確認する。
     #[test]
     fn fillin_cost_counts_only_genuinely_new_columns() {
         let terms = vec![(1, 1.0), (2, 1.0), (3, 1.0)];
         let existing_row = vec![(2, 5.0), (4, 1.0)];
         let targets: Vec<&Vec<(usize, f64)>> = vec![&existing_row];
-        // Columns 1 and 3 are new to `existing_row`; column 2 already there.
+        // 列 1 と 3 が新規、列 2 は既存。
         assert_eq!(fillin_cost(&terms, &targets), 2);
     }
 
     // --- eliminate_implied_free_columns_xrow --------------------------
 
+    /// 行横断版が、単独では不十分な 2 行の共通範囲で列を消去することを確認する。
     #[test]
     fn xrow_eliminates_a_column_no_single_row_alone_justifies() {
-        // x0 in [0,10]. Row0 (x0+x1=5), x1 in [-3,8]: x0 = 5-x1 ranges over
-        // [-3,8] -- pokes below the box (-3 < 0), not within [0,10] alone.
-        // Row1 (x0-x2=1), x2 in [1,12]: x0 = 1+x2 ranges over [2,13] --
-        // pokes above the box (13 > 10), also not within [0,10] alone.
-        // Neither row alone suffices, but the two defects are on opposite
-        // sides: intersected, [-3,8] n [2,13] = [2,8], comfortably inside
-        // [0,10] -- genuinely needs both rows together.
+        // x0 ∈ [0,10]。row0 (x0+x1=5, x1 ∈ [-3,8]) では x0 ∈ [-3,8] (下側がはみ出す)。
+        // row1 (x0-x2=1, x2 ∈ [1,12]) では x0 ∈ [2,13] (上側がはみ出す)。
+        // 共通部分 [2,8] は [0,10] に収まるので、両方の行が揃って初めて消去できる。
         let a = csr(&[vec![(0, 1.0), (1, 1.0)], vec![(0, 1.0), (2, -1.0)]], 3);
         let b = vec![5.0, 1.0];
         let c = vec![0.0, 0.0, 0.0];
         let lb = vec![0.0, -3.0, 1.0];
         let ub = vec![10.0, 8.0, 12.0];
-        // Row-local (`eliminate_implied_free_columns`) must find nothing:
-        // neither row alone proves x0's bound.
+        // 行局所版は何も見つけてはならない。
         let row_local = eliminate_implied_free_columns(3, &a, &b, &c, &lb, &ub, &[], &[]);
         assert!(row_local.substitutions.is_empty());
-        // The cross-row version must catch it via the intersection.
+        // 行横断版は共通部分で検出する。
         let xrow = eliminate_implied_free_columns_xrow(3, &a, &b, &c, &lb, &ub, &[], &[]);
         assert_eq!(xrow.substitutions.len(), 1);
         assert_eq!(xrow.substitutions[0].var, 0);
     }
 
+    /// 行横断版が、先に消費された共有行を根拠に使わないことを確認する (`shell` 回帰テスト)。
     #[test]
     fn xrow_rejects_a_justification_whose_shared_row_was_already_consumed() {
-        // Regression test for the root-caused Netlib `shell` false-`Unbounded`
-        // bug (see `eliminate_implied_free_columns_xrow`'s own docs): two
-        // columns (x0, x1) mutually justify each other through one shared
-        // row (row0), but x0 also has an independent (if individually
-        // insufficient) second row, so x0 gets processed and eliminated
-        // first, consuming row0 as *its own* pivot. x1's only other row
-        // (row2) is, alone, nowhere near tight enough (`x1 + x3 = 0`, `x3`
-        // in [-1000,1000]) -- x1's *only* real justification was row0,
-        // which is gone by the time x1's own turn comes. A version that
-        // trusts row0's snapshot-time contribution here would wrongly
-        // eliminate x1 too, dropping its box entirely; the fixed version
-        // must instead leave x1 exactly as it was.
+        // x0 と x1 は共有行 row0 を通じて互いの箱を根拠づけ合う。x0 は先に処理され、
+        // row0 を自身のピボットとして消費する。x1 のもう 1 本の行 row2 (x1 + x3 = 0,
+        // x3 ∈ [-1000,1000]) は単独では緩すぎるので、x1 の唯一の実質的根拠は row0 だった。
+        // その row0 は x1 の番には既に無いので、x1 を消去してはならない。
         //
-        // x0 in [0,10], x1 in [0,10], x2 free (makes row1 -- x0's second,
-        // longer row -- individually vacuous so it never gets picked as
-        // x0's pivot ahead of the shorter, shared row0), x3 in
-        // [-1000,1000] (makes row2 -- x1's second row -- individually far
-        // too loose), x4 in [0,1] (padding so row1 is strictly longer than
-        // row0, biasing pivot selection toward row0).
+        // x0, x1 ∈ [0,10]; x2 自由 (row1 を単独では無意味にし、x0 のピボットに選ばれないように);
+        // x3 ∈ [-1000,1000] (row2 を緩くする); x4 ∈ [0,1] (row1 を row0 より長くする詰め物)。
         let a = csr(
             &[
-                vec![(0, 1.0), (1, -1.0)],           // row0 (shared): x0 - x1 = 0
-                vec![(0, 1.0), (2, 1.0), (4, 1.0)],  // row1 (x0's own, vacuous): x0 + x2 + x4 = 5
-                vec![(1, 1.0), (3, 1.0)],             // row2 (x1's own, too loose): x1 + x3 = 0
+                vec![(0, 1.0), (1, -1.0)],           // row0 (共有): x0 - x1 = 0
+                vec![(0, 1.0), (2, 1.0), (4, 1.0)],  // row1 (x0 用, 無意味): x0 + x2 + x4 = 5
+                vec![(1, 1.0), (3, 1.0)],             // row2 (x1 用, 緩い): x1 + x3 = 0
             ],
             5,
         );
@@ -1481,13 +1241,15 @@ mod tests {
         assert!(xrow.substitutions.iter().all(|s| s.var != 1), "x1 must not be eliminated via a since-deleted justifying row");
     }
 
+    /// 全拡張を ON にした [`AggOptions`] (テスト用)。
     fn all_on() -> AggOptions {
         AggOptions { use_ineq: true, min_a_count: 1, net_fillin: true, fillin_break: true }
     }
 
+    /// v2 でも消費済み共有行を根拠に使わないことを確認する (`shell` 回帰テスト)。
     #[test]
     fn v2_rejects_a_justification_whose_shared_row_was_already_consumed() {
-        // Same `shell` regression shape as the xrow test above, through v2.
+        // 上の xrow テストと同じ形を v2 で。
         let a = csr(
             &[
                 vec![(0, 1.0), (1, -1.0)],
@@ -1504,13 +1266,12 @@ mod tests {
         assert!(r.substitutions.iter().all(|s| s.var != 1), "x1 must not be eliminated via a since-deleted justifying row");
     }
 
+    /// v2 が不等式行の片側境界を使って列を消去できること、`use_ineq` OFF ではできないことを確認する。
     #[test]
     fn v2_uses_an_inequality_row_to_justify_the_other_side() {
-        // x0 - x1 = 0 (x1 >= 0) implies x0 >= 0 but no upper bound; the real
-        // inequality x0 + x2 <= 5 (x2 in [0,1]) implies x0 <= 5. Together
-        // they cover x0's box [0,5], so x0 (one equality row + one
-        // inequality row — a shape the old gate rejected) is eliminated and
-        // the inequality row is folded to x1 + x2 <= 5.
+        // x0 - x1 = 0 (x1 >= 0) から x0 >= 0、実不等式 x0 + x2 <= 5 (x2 ∈ [0,1]) から x0 <= 5。
+        // 合わせて x0 の箱 [0,5] を覆うので x0 (等式 1 本 + 不等式 1 本) は消去され、
+        // 不等式行は x1 + x2 <= 5 に fold される。
         let a = csr(&[vec![(0, 1.0), (1, -1.0)]], 3);
         let b = vec![0.0];
         let c = vec![1.0, 0.0, 0.0];
@@ -1526,12 +1287,13 @@ mod tests {
         assert_eq!(r.real_rhs, vec![5.0]);
         assert_eq!(r.c, vec![0.0, 1.0, 0.0]);
 
-        // Without the inequality-row justification the upper side is unproven.
+        // 不等式行を根拠に使わなければ上側が示せない。
         let off = AggOptions { use_ineq: false, ..all_on() };
         let r = eliminate_implied_free_columns_v2(3, &a, &b, &c, &lb, &ub, &g, &h, off);
         assert!(r.substitutions.is_empty());
     }
 
+    /// `min_a_count = 2` で等式行 1 本の列を候補にしない旧条件になることを確認する。
     #[test]
     fn v2_min_a_count_two_keeps_the_old_gate() {
         let a = csr(&[vec![(0, 1.0), (1, -1.0)]], 3);
@@ -1542,10 +1304,11 @@ mod tests {
         assert!(r.substitutions.is_empty());
     }
 
-    /// `v2_has_candidate == false` must imply v2 eliminates nothing, and the
-    /// `_if_any` wrapper must return v2's own result whenever it is `Some`.
+    /// ランダム問題で、`v2_has_candidate == false` なら v2 は何も消去しないこと、
+    /// `_if_any` 版が `Some` のときは v2 本体と同じ結果を返すことを確認する。
     #[test]
     fn v2_has_candidate_is_consistent_with_v2() {
+        // xorshift64 乱数の状態。
         let mut state: u64 = 0x2545_f491_4f6c_dd1d;
         let mut rnd = move || {
             state ^= state << 13;
@@ -1571,7 +1334,7 @@ mod tests {
             let b: Vec<f64> = rows.iter().map(|_| (rnd() % 7) as f64 - 3.0).collect();
             let mut g: Vec<Vec<(usize, f64)>> = Vec::new();
             for _ in 0..(rnd() % 3) {
-                // Deliberately unsorted inequality rows.
+                // わざと列順がソートされていない不等式行を作る。
                 let j1 = (rnd() % n as u64) as usize;
                 let j0 = (rnd() % n as u64) as usize;
                 if j0 != j1 {

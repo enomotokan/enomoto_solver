@@ -1,60 +1,38 @@
-//! ColSingleton (Achterberg et al. 2019; PaPILO's `ColSingleton`
-//! presolver): a variable whose *column* has exactly one nonzero entry
-//! across every row — appears in exactly one constraint, full stop — can,
-//! when that one row is an equality, always be substituted out: solve the
-//! row for the variable in terms of the row's other variables, fold its
-//! objective cost into theirs, and drop both the variable and the row
-//! from what the solver actually has to work with. The eliminated
-//! variable's true value is recovered afterward by plugging the other
-//! (now-solved) variables from that same row back into the formula.
+//! 列シングルトン消去 (Achterberg et al. 2019 / PaPILO の `ColSingleton`)。
 //!
-//! "Appears in exactly one row" only counts *real* rows — a variable's
-//! own box-bound rows in `G` don't count any more than they do for
-//! `dualfix` (see that module's docs); this module additionally only
-//! looks at `A` for candidates, since only an equality row's singleton
-//! case is a *substitution* (the inequality case needs a sign-based case
-//! analysis of whether the row is guaranteed to bind, and is deferred).
+//! 実制約 (A の行と G の多変数行) にちょうど 1 回しか現れない変数 `x_j` が
+//! 等式行に現れる場合、その行を `x_j` について解いて代入消去する:
+//! 目的係数を行内の他変数へ振り替え、変数と行の両方を問題から落とす。
+//! `x_j` の値は後処理で [`Substitution::value`] により復元する。
 //!
-//! Dropping the row is only sound if the eliminated variable's own box
-//! bounds are preserved *somewhere*: `x_j = (rhs - r) / coeff` (`r` = the
-//! row's other terms) must still satisfy `lb_j <= x_j <= ub_j`, and
-//! nothing else in the reduced problem enforces that once the row and the
-//! variable's own place in the objective are both gone. So every
-//! elimination here also emits up to two new `<=` rows on `r` alone —
-//! derived by solving `lb_j <= (rhs - r)/coeff <= ub_j` for `r` — that the
-//! caller must fold into `G`/`h`. Skipping this (the first version of
-//! this module did) silently drops the eliminated variable's bounds: e.g.
-//! `x0 + x1 = 5` with only `x0` eliminated left `x1` completely
-//! unconstrained above, since removing the row was the *only* place
-//! `x1`'s upper reach had been limited.
+//! G の単一変数行 (箱制約) は出現回数に数えない。候補は A の等式行のみ
+//! (不等式行の場合は符号による場合分けが必要なので扱わない)。
 //!
-//! A genuinely infinite `lb_j`/`ub_j` — a real free (or one-sided) source
-//! variable, not a finite sentinel — makes the corresponding derived row
-//! vacuous (`r <= +inf` constrains nothing) rather than merely very wide,
-//! so it is omitted outright instead of emitted with an infinite `h`: the
-//! classic "free column singleton" case (both bounds infinite) then costs
-//! *zero* replacement rows, letting a chain of these cascade through a
-//! network-shaped equality system the same way HiGHS's own presolve does.
+//! 行を落とすと `lb_j <= x_j <= ub_j` を強制するものが無くなるため、
+//! `lb_j <= (rhs - r)/coeff <= ub_j` (`r` = 行の他項の和) を `r` についての
+//! 最大 2 本の `<=` 行に変換し、呼び出し側が G/h に追加する。無限の側は
+//! 空の制約になるので出力しない (両側無限の「自由列シングルトン」は置換行 0 本)。
 
 use crate::presolve::propagate::GView;
 use crate::sparse::{Csr, csr_from_rows, csr_is_canonical, csr_rows};
 use crate::params::presolve::{IMPLIED_TOL, SUBSTITUTION_PIVOT_RATIO, TOL};
 
-/// `x[var] = (rhs - sum(terms[k].1 * x[terms[k].0])) / coeff`, using the
-/// *other* variables' already-solved values.
+/// 代入式 `x[var] = (rhs - Σ terms[k].1 * x[terms[k].0]) / coeff`。
+/// 後処理で他変数の解から消去変数の値を復元するのに使う。
 pub struct Substitution {
+    /// 消去された変数の列番号。
     pub var: usize,
+    /// 行内の他変数 `(列番号, 係数)`。
     pub terms: Vec<(usize, f64)>,
+    /// 行の右辺。
     pub rhs: f64,
+    /// 消去変数の係数 (ピボット)。
     pub coeff: f64,
 }
 
 impl Substitution {
-    /// Recovers `x[self.var]` from the other variables' solved values in
-    /// `x` (which must already hold correct values at every index this
-    /// substitution's `terms` reference — guaranteed by construction,
-    /// since a substituted variable's own row is never itself a term of
-    /// another substitution; see `eliminate_singleton_equalities`'s docs).
+    /// `x` 中の他変数の値から `x[self.var]` を計算して返す。
+    /// `terms` が参照する全添字の値が既に確定していることが前提。
     pub fn value(&self, x: &[f64]) -> f64 {
         let mut rhs = self.rhs;
         for &(k, v) in &self.terms {
@@ -64,15 +42,15 @@ impl Substitution {
     }
 }
 
-/// Whether `colsingleton`/`doubleton` skip bound-preservation rows their
-/// remaining terms' own boxes already imply (default on since 2026-09-23,
-/// `analysis/stocfor2_presolve_20260923.md`; `ENOMOTO_KEEP_IMPLIED_BOUND_ROWS`
-/// turns it off).
+/// `colsingleton`/`doubleton` が、残りの項の箱制約から既に含意される
+/// 境界保存行を省略するかどうか (既定で省略。`ENOMOTO_KEEP_IMPLIED_BOUND_ROWS`
+/// を設定すると省略しない)。
 pub(crate) fn skip_implied_bound_rows() -> bool {
     env_str!("ENOMOTO_KEEP_IMPLIED_BOUND_ROWS").is_none()
 }
 
-/// `[min, max]` of `sum(v * x_k)` over the terms' boxes.
+/// 各項の箱 `[lb_k, ub_k]` 上での `Σ v * x_k` の値域 `(最小, 最大)`。
+/// NaN (∞-∞) は該当側の無限大として扱う。
 pub(crate) fn terms_range(terms: &[(usize, f64)], lb: &[f64], ub: &[f64]) -> (f64, f64) {
     let (mut lo, mut hi) = (0.0f64, 0.0f64);
     for &(k, v) in terms {
@@ -83,47 +61,44 @@ pub(crate) fn terms_range(terms: &[(usize, f64)], lb: &[f64], ub: &[f64]) -> (f6
     (if lo.is_nan() { f64::NEG_INFINITY } else { lo }, if hi.is_nan() { f64::INFINITY } else { hi })
 }
 
+/// 列シングルトン消去 1 パスの結果。
 pub struct EliminationResult {
+    /// 消去した行を除いた新しい等式行列 A。
     pub a: Csr,
+    /// 新しい等式右辺 b。
     pub b: Vec<f64>,
+    /// 目的係数を振り替えた後の c (消去変数の係数は 0)。
     pub c: Vec<f64>,
-    /// New `<=` rows the caller must append to `G`/`h`: each eliminated
-    /// variable's own box bounds, translated onto its substitution's
-    /// remaining variables (see the module docs for why this is required,
-    /// not optional).
+    /// 呼び出し側が G に追加すべき `<=` 行: 消去変数の箱制約を
+    /// 残りの変数に写したもの (正しさのため必須)。
     pub extra_g_rows: Vec<Vec<(usize, f64)>>,
+    /// `extra_g_rows` に対応する右辺 h。
     pub extra_h: Vec<f64>,
+    /// 行った代入 (後処理で逆順に適用する)。
     pub substitutions: Vec<Substitution>,
 }
 
-/// One non-cascading pass: appearance counts are computed once from the
-/// input and never updated as eliminations are found, so a variable that
-/// becomes a singleton only *after* another elimination removes its other
-/// occurrence isn't caught here (a later call, given this pass's own
-/// output, would catch it).
-#[allow(dead_code)] // `run_extended` calls the `GView` form directly
+/// G を行列形式で受け取る版の列シングルトン消去 (1 パス、連鎖しない)。
+/// 出現回数は入力から一度だけ数えるので、消去によって新たに生じた
+/// シングルトンは次回の呼び出しで拾われる。
+#[allow(dead_code)] // `run_extended` は `GView` 版を直接呼ぶ
 pub fn eliminate_singleton_equalities(n: usize, a: &Csr, b: &[f64], g: &Csr, h: &[f64], c: &[f64]) -> EliminationResult {
     eliminate_singleton_equalities_view(n, a, b, GView::Mat { g, h }, c)
 }
 
-/// [`eliminate_singleton_equalities`] on either form of `G` (see
-/// [`GView`]): a split `G` supplies `lb`/`ub` and its real rows directly.
+/// 列シングルトン消去の本体。G は [`GView`] のどちらの形式でもよい
+/// (分割形式なら `lb`/`ub` と多変数行をそのまま使う)。
+///
+/// `n`: 変数数、`a`/`b`: 等式制約、`gv`: 不等式制約 (箱制約込み)、`c`: 目的係数。
 pub fn eliminate_singleton_equalities_view(n: usize, a: &Csr, b: &[f64], gv: GView<'_>, c: &[f64]) -> EliminationResult {
     let a_rows: Vec<Vec<(usize, f64)>> = csr_rows(a);
 
-    // `lb`/`ub` for the box-bound part; `real_g_rows` for the "does this
-    // column appear anywhere in G besides its own bound rows" part — both
-    // straight from the same extraction `propagate` itself uses.
-    // Only `lb`/`ub` and the per-column appearance counts of G's real
-    // (multi-variable) rows are needed here, so G is read in place rather
-    // than via `extract_bounds` (which copies every real row into its own
-    // `Vec`).
+    // 各変数の箱制約。G の多変数行はコピーせずその場で出現回数だけ数える。
     let (lb, ub) = gv.bounds(n);
 
-    // Total appearances across every *real* row (A's rows, plus G's
-    // multi-variable rows — G's own single-variable rows are box bounds,
-    // not independent appearances, same exclusion `dualfix` applies).
+    // 実制約 (A の行 + G の多変数行) での各変数の出現回数。G の単一変数行は箱制約なので数えない。
     let mut appearances = vec![0usize; n];
+    // 各変数が最後に現れた A の行 (出現 1 回の変数ではその唯一の行)。
     let mut owning_a_row = vec![None; n];
     for (i, row) in a_rows.iter().enumerate() {
         for &(j, v) in row {
@@ -139,7 +114,7 @@ pub fn eliminate_singleton_equalities_view(n: usize, a: &Csr, b: &[f64], gv: GVi
             for i in 0..gr.nrows() {
                 let cols = gr.col_indices_of_row_raw(i);
                 if cols.len() == 1 {
-                    continue; // a bound row — `extract_bounds` would not list it as real
+                    continue; // 箱制約行は数えない
                 }
                 for (&j, &v) in cols.iter().zip(gr.values_of_row(i)) {
                     if v != 0.0 {
@@ -148,7 +123,7 @@ pub fn eliminate_singleton_equalities_view(n: usize, a: &Csr, b: &[f64], gv: GVi
                 }
             }
         }
-        // Canonical split form: exactly the multi-entry rows above.
+        // 分割形式: rows は多変数行のみ。
         GView::Split { rows, .. } => {
             for row in rows {
                 for &(j, _) in row {
@@ -158,6 +133,7 @@ pub fn eliminate_singleton_equalities_view(n: usize, a: &Csr, b: &[f64], gv: GVi
         }
     }
 
+    // 代入に使って削除する A の行。
     let mut eliminated_rows = vec![false; a_rows.len()];
     let mut substitutions = Vec::new();
     let mut extra_g_rows = Vec::new();
@@ -168,14 +144,10 @@ pub fn eliminate_singleton_equalities_view(n: usize, a: &Csr, b: &[f64], gv: GVi
         if appearances[j] != 1 {
             continue;
         }
-        let Some(i) = owning_a_row[j] else { continue }; // its one appearance is in G, not A
+        let Some(i) = owning_a_row[j] else { continue }; // 唯一の出現が G 側
         if eliminated_rows[i] {
-            // This row already substituted a *different* singleton column
-            // of its own (two singleton columns can share one row, e.g.
-            // `x5 + x7 = 3` with neither appearing anywhere else) — only
-            // one variable per row can be solved for; `j` remains a real
-            // decision variable, referenced as a term in that other
-            // substitution instead.
+            // この行は既に別のシングルトン列の消去に使われた (1 行で解けるのは 1 変数のみ)。
+            // `j` は変数として残り、その代入式の項になる。
             continue;
         }
         let row = &a_rows[i];
@@ -183,22 +155,17 @@ pub fn eliminate_singleton_equalities_view(n: usize, a: &Csr, b: &[f64], gv: GVi
         if coeff.abs() < TOL {
             continue;
         }
-        // Markowitz-style pivot guard (PaPILO applies the same kind of
-        // relative threshold before any substitution): solving the row for
-        // `x_j` divides every other coefficient by `coeff`, so a `coeff`
-        // that is tiny *relative to its own row* amplifies whatever
-        // residual the reduced problem is later solved to (`~1e-7`) by
-        // `max|row| / |coeff|` when `x_j` is recovered — measured on Netlib
-        // `modszk1` as ~1e-6 violations of the eliminated rows and an
-        // objective slightly *below* the true optimum. Such a column is
-        // simply left in the problem.
+        // Markowitz 型のピボット判定: 行の最大絶対値に比べて小さすぎる係数で割ると、
+        // 復元時に誤差が `max|row|/|coeff|` 倍に増幅されるので消去しない。
         let row_max = row.iter().map(|&(_, v)| v.abs()).fold(0.0f64, f64::max);
         if coeff.abs() < tunable!("ENOMOTO_T_CS_SUBSTITUTION_PIVOT_RATIO", SUBSTITUTION_PIVOT_RATIO, f64) * row_max {
             continue;
         }
+        // x_j 以外の項。
         let terms: Vec<(usize, f64)> = crate::sparse::collect_with_capacity(row.len(), row.iter().filter(|&&(k, _)| k != j).cloned());
         let rhs = b[i];
 
+        // 目的係数 c_j を他変数へ振り替える: c_k -= c_j * a_ik / coeff。
         let cj = new_c[j];
         if cj != 0.0 {
             for &(k, a_ik) in &terms {
@@ -207,23 +174,16 @@ pub fn eliminate_singleton_equalities_view(n: usize, a: &Csr, b: &[f64], gv: GVi
             new_c[j] = 0.0;
         }
 
-        // x_j's own box bounds, translated onto `r = sum(terms)`:
-        // lb_j <= (rhs - r)/coeff <= ub_j  <=>  rhs-hi <= r <= rhs-lo,
-        // where lo/hi = min/max(coeff*lb_j, coeff*ub_j) handles either
-        // sign of `coeff` uniformly. A side of `[lb_j, ub_j]` that was
-        // genuinely infinite carries through this arithmetic to an
-        // infinite `lo`/`hi` (finite `coeff` times `+/-inf` is exactly
-        // `+/-inf`, correctly signed) — the corresponding row would then
-        // be `r <= +inf`, true unconditionally, so it is skipped rather
-        // than emitted with that infinite `h` (see the module docs' "free
-        // column singleton" case above for why this is exactly the
-        // reduction that matters).
+        // x_j の箱制約を r = Σterms に写す:
+        // lb_j <= (rhs - r)/coeff <= ub_j  <=>  rhs-hi <= r <= rhs-lo
+        // (lo/hi = min/max(coeff*lb_j, coeff*ub_j) で coeff の符号を吸収)。
+        // 無限の側は自明な制約になるので出力しない。
         let a_lb = coeff * lb[j];
         let a_ub = coeff * ub[j];
         let lo = a_lb.min(a_ub);
         let hi = a_lb.max(a_ub);
-        // A side the remaining terms' own boxes already imply is redundant
-        // (`propagate` would drop the row next round anyway) — skip it.
+        // 残りの項の箱から既に含意される側は冗長なので省略する。
+        // r_lo/r_hi: 項の箱から得られる r の値域。
         let (r_lo, r_hi) = if skip_implied_bound_rows() { terms_range(&terms, &lb, &ub) } else { (f64::NEG_INFINITY, f64::INFINITY) };
         if lo.is_finite() && !(r_hi <= rhs - lo + IMPLIED_TOL * (1.0 + (rhs - lo).abs())) {
             extra_g_rows.push(terms.clone());
@@ -247,8 +207,7 @@ pub fn eliminate_singleton_equalities_view(n: usize, a: &Csr, b: &[f64], gv: GVi
         }
     }
 
-    // Nothing eliminated: the rebuilt A would be `a` itself whenever `a` is
-    // already in `csr_from_rows`' canonical form.
+    // 何も消去せず `a` が既に正準形なら、再構築せずそのまま複製する。
     let new_a = if substitutions.is_empty() && csr_is_canonical(a) { a.clone() } else { csr_from_rows(&new_a_rows, n) };
     EliminationResult {
         a: new_a,
