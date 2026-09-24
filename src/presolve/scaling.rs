@@ -135,6 +135,10 @@ fn col_norm_fold_parallel(mat: faer::sparse::SparseRowMatRef<usize, f64>, d: &[f
 }
 
 pub fn compute(n: usize, a: &Csr, g: &Csr, c: &[f64], iters: usize) -> Scaling {
+    compute_impl(n, a, g, c, iters, tunable!("ENOMOTO_T_SCALE_UNIT_FAST", 1, usize) != 0)
+}
+
+fn compute_impl(n: usize, a: &Csr, g: &Csr, c: &[f64], iters: usize, unit_fast: bool) -> Scaling {
     let p = a.nrows();
     let m = g.nrows();
     let mut d = vec![1.0; n];
@@ -199,6 +203,91 @@ pub fn compute(n: usize, a: &Csr, g: &Csr, c: &[f64], iters: usize) -> Scaling {
                     e_g[i] = 1.0 / s;
                 }
             }
+        }
+        return Scaling { d, e_a, e_g };
+    }
+
+    // Sequential path: `G`'s single-entry rows (the bound rows `build_a_g`
+    // adds, often most of `G`) go through a flat `(column, coefficient)`
+    // list instead of the CSR walk, and a row whose column and `|v|` equal
+    // the previous single-entry row's (a variable's `ub` row followed by its
+    // `lb` row: `(j, 1.0)`, `(j, -1.0)`) shares that row's scale — both
+    // start at 1 and every update reads only `|v * d_j * e|`, so their
+    // factors are equal bit for bit at every iteration. The column-norm
+    // fold is a max (order-free), and row updates are per row, so this
+    // computes exactly the same `d`/`e_a`/`e_g` as the plain loop below.
+    if !use_parallel_fold && unit_fast {
+        let zero_tol = tunable!("ENOMOTO_T_SCALING_ZERO_TOL", 1e-12, f64);
+        let mut multi: Vec<usize> = Vec::new();
+        // Leaders: (row, column, coefficient); `follow[k] = leader index`.
+        let mut unit: Vec<(usize, usize, f64)> = Vec::new();
+        let mut follow: Vec<(usize, usize)> = Vec::new();
+        for i in 0..m {
+            let cols = gr.col_indices_of_row_raw(i);
+            if cols.len() == 1 {
+                let (j, v) = (cols[0], gr.values_of_row(i)[0]);
+                match unit.last() {
+                    Some(&(_, lj, lv)) if lj == j && lv.abs().to_bits() == v.abs().to_bits() => follow.push((i, unit.len() - 1)),
+                    _ => unit.push((i, j, v)),
+                }
+            } else {
+                multi.push(i);
+            }
+        }
+        let mut ue = vec![1.0f64; unit.len()];
+        for _ in 0..iters {
+            col_norm.fill(0.0);
+            col_norm_fold(ar, &d, &e_a, 0..p, &mut col_norm);
+            for &i in &multi {
+                let ei = e_g[i];
+                for (&j, &v) in gr.col_indices_of_row_raw(i).iter().zip(gr.values_of_row(i)) {
+                    let cand = (v * d[j] * ei).abs();
+                    if cand > col_norm[j] {
+                        col_norm[j] = cand;
+                    }
+                }
+            }
+            for (&(_, j, v), &ei) in unit.iter().zip(&ue) {
+                let cand = (v * d[j] * ei).abs();
+                if cand > col_norm[j] {
+                    col_norm[j] = cand;
+                }
+            }
+            for j in 0..n {
+                let cj = (c[j] * d[j]).abs();
+                if cj > col_norm[j] {
+                    col_norm[j] = cj;
+                }
+            }
+            for j in 0..n {
+                if col_norm[j] > zero_tol {
+                    d[j] /= col_norm[j].sqrt();
+                }
+            }
+            row_norm_update(ar, &d, &mut e_a);
+            for &i in &multi {
+                let old_e = e_g[i];
+                let mut row_norm = 0.0f64;
+                for (&j, &v) in gr.col_indices_of_row_raw(i).iter().zip(gr.values_of_row(i)) {
+                    row_norm = row_norm.max((v * d[j] * old_e).abs());
+                }
+                if row_norm > zero_tol {
+                    e_g[i] = old_e / row_norm.sqrt();
+                }
+            }
+            for (&(_, j, v), e) in unit.iter().zip(ue.iter_mut()) {
+                let old_e = *e;
+                let row_norm = 0.0f64.max((v * d[j] * old_e).abs());
+                if row_norm > zero_tol {
+                    *e = old_e / row_norm.sqrt();
+                }
+            }
+        }
+        for (&(i, _, _), &e) in unit.iter().zip(&ue) {
+            e_g[i] = e;
+        }
+        for &(i, k) in &follow {
+            e_g[i] = ue[k];
         }
         return Scaling { d, e_a, e_g };
     }
@@ -287,6 +376,60 @@ pub fn unscale_x(scaling: &Scaling, x: &[f64]) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The single-entry-row fast path must give exactly the plain loop's
+    /// factors (bit for bit), with bound-row pairs, lone bound rows,
+    /// scaled singleton constraints, empty rows and multi-entry rows.
+    #[test]
+    fn unit_fast_path_matches_plain_loop_bit_for_bit() {
+        let mut state: u64 = 0x5eed_1234_abcd_ef01;
+        let mut rnd = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for trial in 0..100 {
+            let n = 3 + (trial % 6);
+            let val = |r: u64| [1.0, -2.5, 0.125, 7.0, -0.3, 1e3][(r % 6) as usize];
+            let mut rows_of = |count: usize, rnd: &mut dyn FnMut() -> u64| -> Vec<Vec<(usize, f64)>> {
+                (0..count)
+                    .map(|_| {
+                        let mut row: Vec<(usize, f64)> = Vec::new();
+                        for _ in 0..(rnd() % 4) {
+                            let j = (rnd() % n as u64) as usize;
+                            if row.iter().all(|&(k, _)| k != j) {
+                                row.push((j, val(rnd())));
+                            }
+                        }
+                        row
+                    })
+                    .collect()
+            };
+            let a_rows = rows_of(1 + (rnd() % 3) as usize, &mut rnd);
+            let mut g_rows = rows_of((rnd() % 4) as usize, &mut rnd);
+            for j in 0..n {
+                match rnd() % 4 {
+                    0 => {
+                        g_rows.push(vec![(j, 1.0)]);
+                        g_rows.push(vec![(j, -1.0)]);
+                    }
+                    1 => g_rows.push(vec![(j, -1.0)]),
+                    2 => g_rows.push(vec![(j, val(rnd()))]),
+                    _ => {}
+                }
+            }
+            let a = csr_from_rows(&a_rows, n);
+            let g = csr_from_rows(&g_rows, n);
+            let c: Vec<f64> = (0..n).map(|_| val(rnd())).collect();
+            let fast = compute_impl(n, &a, &g, &c, 10, true);
+            let plain = compute_impl(n, &a, &g, &c, 10, false);
+            let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+            assert_eq!(bits(&fast.d), bits(&plain.d), "trial {trial}");
+            assert_eq!(bits(&fast.e_a), bits(&plain.e_a), "trial {trial}");
+            assert_eq!(bits(&fast.e_g), bits(&plain.e_g), "trial {trial}");
+        }
+    }
 
     /// Same purpose as `simplex.rs`'s `rayon_threshold_microbench`, timing
     /// `col_norm_fold` vs `col_norm_fold_parallel` on synthetic sparse
