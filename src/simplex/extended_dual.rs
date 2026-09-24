@@ -5587,14 +5587,56 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
                     true_d[j] = dj;
                 }
             }
-            let true_dual_feasible = (0..n_total).all(|j| match nb_status[j] {
-                None => true,
-                Some(NbStatus::Lower) => true_d[j] >= -TOL,
-                Some(NbStatus::Upper) => true_d[j] <= TOL,
-                Some(NbStatus::Zero) => true_d[j].abs() <= TOL,
-            });
+            // Fixed columns (`lb == ub`) are left out of this check: no
+            // pivot can ever move them (PRICE above and `run_phase`'s own
+            // `price_one` both skip them, and the main loop's `d`-drift
+            // check excludes them too), so a "wrong-signed" reduced cost
+            // on one is not a dual infeasibility anything could act on —
+            // counting it only sent the whole solve through a primal
+            // handoff that then found nothing to price
+            // (`analysis/simplex_loop_20260924_113533.md` §3.2: 36 of the
+            // 48 Netlib handoffs were exactly that). `polish_dual_tol` is
+            // `TOL` unless overridden (`ENOMOTO_POLISH_DUAL_TOL`, A/B).
+            let polish_dual_tol = tunable!("ENOMOTO_POLISH_DUAL_TOL", TOL, f64);
+            let exclude_fixed = tunable!("ENOMOTO_POLISH_DUAL_KEEP_FIXED", 0u8, u8) == 0;
+            let is_dual_bad = |j: usize| -> bool {
+                if exclude_fixed && std.lb[j] == std.ub[j] {
+                    return false;
+                }
+                match nb_status[j] {
+                    None => false,
+                    Some(NbStatus::Lower) => true_d[j] < -polish_dual_tol,
+                    Some(NbStatus::Upper) => true_d[j] > polish_dual_tol,
+                    Some(NbStatus::Zero) => true_d[j].abs() > polish_dual_tol,
+                }
+            };
+            let true_dual_feasible = !(0..n_total).any(is_dual_bad);
+            let mut t = super::Tableau { std, basis: basis.to_vec(), basis_pos: basis_pos.to_vec(), nb_status: nb_status.to_vec(), x };
             if true_dual_feasible {
-                return Some(SimplexResult { status: Status::Optimal, x: Some(x) });
+                // Only a fixed-column (or, with a loosened
+                // `ENOMOTO_POLISH_DUAL_TOL`, sub-tolerance) mismatch
+                // remained, or none at all. In the former case the old
+                // path handed off to `run_phase`, whose first iteration
+                // re-derives `x_B` from scratch (`recompute_basics`) and
+                // then stops with nothing to price — so this returns
+                // exactly that re-derived `x_B`, bit for bit, without the
+                // pricing/BTRAN/steepest-edge setup around it. When the
+                // unfiltered check passes as well, `x` is returned as it
+                // always was.
+                let any_bad_unfiltered = (0..n_total).any(|j| match nb_status[j] {
+                    None => false,
+                    Some(NbStatus::Lower) => true_d[j] < -TOL,
+                    Some(NbStatus::Upper) => true_d[j] > TOL,
+                    Some(NbStatus::Zero) => true_d[j].abs() > TOL,
+                });
+                if any_bad_unfiltered {
+                    t.recompute_basics(&lu);
+                    if std::env::var("ENOMOTO_DEBUG_EXT_ITERS").is_ok() {
+                        eprintln!("DEBUG_EXT: polish handoff skipped (only fixed-column/sub-tolerance dual infeasibilities)");
+                    }
+                    return Some(SimplexResult { status: Status::Optimal, x: Some(t.x[0..t.n_orig()].to_vec()) });
+                }
+                return Some(SimplexResult { status: Status::Optimal, x: Some(t.x) });
             }
             // Perturbation masked a genuine dual infeasibility: this basis
             // is primal feasible (feasibility never depended on costs) but
@@ -5612,7 +5654,6 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
             // (unrelated quantities to this phase's own dual state;
             // `solve_lp_dual_on`'s own identical handoff confirms this only
             // costs pricing quality, not correctness).
-            let mut t = super::Tableau { std, basis: basis.to_vec(), basis_pos: basis_pos.to_vec(), nb_status: nb_status.to_vec(), x };
             let mut expand = super::ExpandState::new();
             let mut se = super::SteepestEdgeState::new(std);
             let mut stall = super::PrimalStallState::new();
@@ -5635,14 +5676,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
             }
             let status = status?;
             if std::env::var("ENOMOTO_DEBUG_EXT_ITERS").is_ok() {
-                let n_bad = (0..n_total)
-                    .filter(|&j| match nb_status[j] {
-                        None => false,
-                        Some(NbStatus::Lower) => true_d[j] < -TOL,
-                        Some(NbStatus::Upper) => true_d[j] > TOL,
-                        Some(NbStatus::Zero) => true_d[j].abs() > TOL,
-                    })
-                    .count();
+                let n_bad = (0..n_total).filter(|&j| is_dual_bad(j)).count();
                 let handoff_iters = super::prof_phases::RUN_PHASE_ITERS.load(std::sync::atomic::Ordering::Relaxed) - handoff_iters0;
                 eprintln!("DEBUG_EXT: primal_handoff_us={} dual_infeasible_cols={n_bad} primal_handoff_iters={handoff_iters}", handoff_t0.elapsed().as_micros());
             }
