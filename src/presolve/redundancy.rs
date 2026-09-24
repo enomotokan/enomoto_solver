@@ -1446,8 +1446,17 @@ pub fn reduce_inequalities(g: &Csr, h: &[f64], n: usize) -> (Csr, Vec<f64>) {
         kept_h: f64,
         next: usize,
     }
-    let mut heads: HashMap<u64, usize, std::hash::BuildHasherDefault<IdentityU64Hasher>> = HashMap::default();
-    let mut classes: Vec<Class> = Vec::new();
+    // Single-entry rows (the box-bound rows `rebuild_g` emits, usually the
+    // bulk of `g`) are not hashed: their class chain starts at
+    // `unit_head[j]` instead, keyed by their only column (a class's
+    // signature still decides membership, exactly as for a hashed row —
+    // rows of different length never share a class, so splitting the
+    // lookup this way changes no decision). Only multi-entry rows go
+    // through `heads`, sized up front.
+    let multi_rows = (0..m).filter(|&i| gr.col_indices_of_row_raw(i).len() > 1).count();
+    let mut heads: HashMap<u64, usize, std::hash::BuildHasherDefault<IdentityU64Hasher>> = HashMap::with_capacity_and_hasher(multi_rows, Default::default());
+    let mut unit_head: Vec<usize> = vec![usize::MAX; n];
+    let mut classes: Vec<Class> = Vec::with_capacity(m);
     let mut keep = vec![true; m];
     let mut any_dropped = false;
     for idx in 0..m {
@@ -1459,9 +1468,12 @@ pub fn reduce_inequalities(g: &Csr, h: &[f64], n: usize) -> (Csr, Vec<f64>) {
         let hv = h[idx];
         let scale = vals[0].abs();
         let inv = 1.0 / scale;
+        let unit = cols.len() == 1;
         let mut hash = cols.len() as u64;
-        for (&j, &v) in cols.iter().zip(vals) {
-            hash = mix(mix(hash, j as u64), (v * inv).to_bits());
+        if !unit {
+            for (&j, &v) in cols.iter().zip(vals) {
+                hash = mix(mix(hash, j as u64), (v * inv).to_bits());
+            }
         }
         let normalized_h = hv * inv;
         let same_sig = |c: &Class| -> bool {
@@ -1473,7 +1485,11 @@ pub fn reduce_inequalities(g: &Csr, h: &[f64], n: usize) -> (Csr, Vec<f64>) {
             rc.iter().zip(rv).zip(cols.iter().zip(vals)).all(|((&rj, &rvv), (&j, &v))| rj == j && (rvv * c.rep_inv).to_bits() == (v * inv).to_bits())
         };
         let mut found: Option<usize> = None;
-        let head = heads.get(&hash).copied();
+        let head = if unit {
+            Some(unit_head[cols[0]]).filter(|&h| h != usize::MAX)
+        } else {
+            heads.get(&hash).copied()
+        };
         let mut cur = head.unwrap_or(usize::MAX);
         while cur != usize::MAX {
             if same_sig(&classes[cur]) {
@@ -1486,7 +1502,11 @@ pub fn reduce_inequalities(g: &Csr, h: &[f64], n: usize) -> (Csr, Vec<f64>) {
             None => {
                 let id = classes.len();
                 classes.push(Class { rep: idx, rep_inv: inv, kept_idx: idx, kept_h: normalized_h, next: head.unwrap_or(usize::MAX) });
-                heads.insert(hash, id);
+                if unit {
+                    unit_head[cols[0]] = id;
+                } else {
+                    heads.insert(hash, id);
+                }
             }
             Some(ci) => {
                 any_dropped = true;
