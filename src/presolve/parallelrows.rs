@@ -1,117 +1,53 @@
-//! ParallelRows, opposite-sign half (Andersen & Andersen, "Presolving in
-//! Linear Programming", Mathematical Programming 71 (1995); also PaPILO's
-//! "ParallelRows", Achterberg et al. 2019 §4.4): [`redundancy::reduce_inequalities`](super::redundancy::reduce_inequalities)
-//! already collapses two `<=` rows that are *positive* scalar multiples of
-//! each other (same half-space, keep only the tighter), but leaves
-//! *negative* scalar multiples untouched — `a.x <= h_i` and
-//! `(-s*a).x <= h_j` (`s > 0`) are two independent half-spaces (an upper
-//! and a lower bound on the same linear form `a.x`), not duplicates of one
-//! another, so the existing sign-preserving normalization in
-//! [`redundancy::dedupe_rows`](super::redundancy) correctly leaves them
-//! both in place. This module picks up exactly that remainder: rewriting
-//! `a.x <= h_i` and `(-s*a).x <= h_j` as the single two-sided bound
-//! `-h_j/s <= a.x <= h_i`, then:
+//! ParallelRows (平行行の併合, 逆符号側。Andersen & Andersen 1995 / PaPILO "ParallelRows",
+//! Achterberg et al. 2019 §4.4)。**現在は未使用** (パイプラインから呼ばれていない。理由は履歴メモ参照)。
 //!
-//!   - `-h_j/s > h_i` (beyond `TOL`): the two rows jointly rule out every
-//!     point — infeasible, reported the same way [`ExtendedPresolveResult`]'s
-//!     other `infeasible` producers are.
-//!   - `-h_j/s == h_i` (within `TOL`): the two rows pin `a.x` to exactly
-//!     `h_i` — **merged into one** new equality row appended to `(A, b)`,
-//!     with both original inequality rows dropped from `(G, h)`. This is
-//!     the literal row-count reduction the technique is named for — the
-//!     shape it targets (an MPS `RANGES`-section range constraint, split by
-//!     this crate's own `>=`-as-negated-`<=` convention in
-//!     [`super::build_a_g`] into exactly this opposite-sign pair) whenever
-//!     the range width collapses to (near) zero.
-//!   - otherwise: genuine slack remains between the two bounds — no row
-//!     reduction is possible from this pairwise comparison alone (tightening
-//!     either bound further would need the other rows/variable bounds too,
-//!     which is [`propagate`](super::propagate)'s job, not this cheap
-//!     pairwise one) — both rows are left exactly as they were.
+//! 正の定数倍の関係にある `<=` 行の組は [`redundancy::reduce_inequalities`](super::redundancy::reduce_inequalities)
+//! が既に処理するので、本モジュールは残りの「負の定数倍」の組 `a.x <= h_i` と `(-s*a).x <= h_j` (`s > 0`)
+//! を扱う。これは両側制約 `-h_j/s <= a.x <= h_i` と書けるので:
 //!
-//! Candidates are found the same way [`redundancy::dedupe_rows`](super::redundancy)
-//! finds its own (equality-row) duplicates: normalize every row (skipping
-//! length-1 rows — those are box-bound rows folding a variable's own
-//! `lb`/`ub` into `G`, see [`super::build_a_g`]'s docs, and merging a
-//! variable's own two box rows into an equality would just re-derive a
-//! bound [`propagate`] already maintains directly, not a real reduction)
-//! by dividing by its own *signed* first nonzero coefficient — not
-//! [`redundancy::reduce_inequalities`]'s own `|first coeff|` normalization,
-//! which deliberately keeps each entry's sign relative to the row's
-//! overall sign and so never lets two negated rows collide; dividing by
-//! the signed value instead always normalizes the first entry to `+1`, so
-//! two rows that are negatives of each other land on the identical
-//! signature regardless of which one happens to be written with a
-//! positive leading coefficient. Run *after*
-//! [`redundancy::reduce_inequalities`] in the pipeline, so by construction
-//! no two rows sharing a signature here can still be a *positive* multiple
-//! of one another — every match this module finds is a genuine opposite-sign
-//! pair, the complement [`redundancy::reduce_inequalities`] leaves behind.
+//! - `-h_j/s > h_i` (`TOL` を超える): 実行不能
+//! - `-h_j/s == h_i` (`TOL` 以内): `a.x = h_i` の等式行 1 本に併合して `(A, b)` に追加し、元の 2 行を `G` から削除
+//! - それ以外: 余裕があるので何もしない (さらなる強化は [`propagate`](super::propagate) の担当)
 //!
-//! Single-pass, non-cascading, decided from the input snapshot (mirrors
-//! every other pass in this pipeline): a row used on either side of one
-//! merge this call is never reused on either side of a second merge in the
-//! same call — a signature group with more than 2 rows only ever produces
-//! one merge per call, the rest picked up by the pipeline's own outer
-//! fixpoint loop calling this again.
+//! 候補は、各行を「符号付きの」先頭係数で割った署名で分類して探す (互いに符号反転な行が同じ署名になる)。
+//! 長さ 1 の行 (変数自身の箱境界行) は対象外。
 //!
-//! **Implemented, unit-tested, measured against the full Netlib set — then
-//! left unintegrated (kept here, tested, but never called from
-//! [`crate::presolve::run_extended`]), mirroring [`dominatedcol`](super::dominatedcol)/
-//! [`sparsify`](super::sparsify)'s own precedent.** Wired in once, right
-//! after [`redundancy::reduce_inequalities`], and instrumented directly
-//! (not inferred from timing alone): across all 73 in-scope Netlib
-//! instances, zero opposite-sign proportional row pairs were ever found —
-//! `benchmark_highs.py`'s own MPS-reading (see its module docs) always
-//! keeps a range constraint's two sides with real slack between them on
-//! every instance in this set, never the tight-both-ways degenerate case
-//! this module exists to collapse. Wiring it in therefore cost pure
-//! candidate-search overhead (grouping every multi-variable `G` row by
-//! signature) for zero reductions anywhere: aggregate `ours` time went
-//! from 3.85s to 3.91s (+1.5%), 73/73 objective values unchanged either
-//! way. Kept here for its correct, tested core logic — e.g. a future
-//! problem source that actually produces tight-range constraints, or a
-//! model-building layer that emits them directly — rather than deleted.
+//! 入力のスナップショットから 1 パスで決める。1 回の併合に使った行はその呼び出し中は再利用しない。
 
 use std::collections::HashMap;
 
 use crate::sparse::{Csr, csr_from_rows, csr_rows};
 use crate::params::presolve::TOL;
 
-/// Result of one [`merge_parallel_rows`] call: `a`/`b` with any newly
-/// discovered equality merged in (appended after the existing rows), `g`/`h`
-/// with both sides of each merge removed, and `infeasible` set the same way
-/// every other pass in this pipeline reports a Farkas-style contradiction —
-/// without attempting to still produce a meaningful `g`/`h` in that case
-/// (the caller checks `infeasible` first, same convention as
-/// [`super::propagate::propagate`]'s own result).
+/// [`merge_parallel_rows`] の結果。`infeasible` が true のときは他のフィールドは入力の複製で意味を持たない
+/// (呼び出し側は先に `infeasible` を確認する)。
 pub struct ParallelRowsResult {
+    /// 新たに見つかった等式行を末尾に追加した等式行列
     pub a: Csr,
+    /// `a` に対応する右辺
     pub b: Vec<f64>,
+    /// 併合した行の組を両方とも除いた不等式行列
     pub g: Csr,
+    /// `g` に対応する右辺
     pub h: Vec<f64>,
+    /// 逆符号の組の境界が交差し、実行不能と判明したか
     pub infeasible: bool,
 }
 
+/// 逆符号の平行な `<=` 行の組を探し、等式への併合または実行不能の検出を行う。
+///
+/// - `a`, `b`: 等式制約 `A x = b`
+/// - `g`, `h`: 不等式制約 `G x <= h`
+/// - `n`: 列数
 pub fn merge_parallel_rows(a: &Csr, b: &[f64], g: &Csr, h: &[f64], n: usize) -> ParallelRowsResult {
     let gr = g.as_ref();
     let m = gr.nrows();
+    // G の各行 (列番号, 係数)
     let rows: Vec<Vec<(usize, f64)>> = csr_rows(g);
 
-    // Group multi-variable rows by their sign-invariant signature — divide
-    // by the *signed* first coefficient (matching `redundancy::dedupe_rows`'s
-    // own normalization exactly, not `reduce_inequalities`'s sign-preserving
-    // `|first coeff|` one: dividing by `|v|` keeps each entry's sign
-    // relative to the row's *own* overall sign, so two rows that are
-    // negatives of each other normalize to *different* signatures there —
-    // exactly why `reduce_inequalities` doesn't already catch this case;
-    // dividing by the signed value instead always normalizes the first
-    // entry to `+1`, making two negated rows land on the identical
-    // signature regardless of which one happens to be written with a
-    // positive leading coefficient). Any two rows landing in the same
-    // bucket are proportional up to sign; `rows[i][0].1`/`rows[j][0].1`
-    // below (the original, un-normalized leading coefficients) are what
-    // then distinguishes "same-sign" from "opposite-sign" for a given pair.
+    // 複数変数の行を、符号付き先頭係数で割った署名で分類する (先頭が常に +1 になるので、
+    // 符号反転した行同士も同じ署名になる)。同じ群の 2 行は符号を除いて比例しており、
+    // 元の先頭係数の符号で同符号か逆符号かを区別する。
     let mut groups: HashMap<Vec<(usize, u64)>, Vec<usize>> = HashMap::new();
     for (i, row) in rows.iter().enumerate() {
         if row.len() < 2 {
@@ -122,19 +58,15 @@ pub fn merge_parallel_rows(a: &Csr, b: &[f64], g: &Csr, h: &[f64], n: usize) -> 
         groups.entry(sig).or_default().push(i);
     }
 
+    // used[i]: 行 i がこの呼び出しで既に併合に使われたか / drop_g[i]: 行 i を G から削除するか
     let mut used = vec![false; m];
     let mut drop_g: Vec<bool> = vec![false; m];
+    // 新たに追加する等式行とその右辺
     let mut new_eq_rows: Vec<Vec<(usize, f64)>> = Vec::new();
     let mut new_eq_b: Vec<f64> = Vec::new();
     let mut infeasible = false;
 
-    // Deterministic order: sort groups' own keys isn't needed for
-    // correctness (every group is independent), but iterating a `HashMap`
-    // directly would make which-pair-merges-first nondeterministic across
-    // runs when a group has more than 2 members — harmless for correctness
-    // (every valid pairing here is equally valid) but still worth pinning
-    // down for reproducible benchmarking, so rows within a group are always
-    // tried in ascending row-index order.
+    // 再現性のため、HashMap の走査順に依存せず、群を先頭行番号順に、群内の行を昇順に試す。
     let mut group_indices: Vec<&Vec<usize>> = groups.values().collect();
     group_indices.sort_by_key(|v| v[0]);
 
@@ -151,21 +83,15 @@ pub fn merge_parallel_rows(a: &Csr, b: &[f64], g: &Csr, h: &[f64], n: usize) -> 
                 if used[j] {
                     continue;
                 }
+                // 行 i, j の元の先頭係数
                 let vi = rows[i][0].1;
                 let vj = rows[j][0].1;
                 if vi.signum() == vj.signum() {
-                    // Same-sign duplicate: already handled upstream by
-                    // `redundancy::reduce_inequalities` (and if it somehow
-                    // wasn't — e.g. this function called standalone in a
-                    // test — merging it here too would need the same
-                    // keep-tighter logic that function already implements;
-                    // skip rather than duplicate that logic).
+                    // 同符号の重複は上流の `redundancy::reduce_inequalities` の担当なので飛ばす。
                     continue;
                 }
-                // rows[j] ~= (vj/vi) * rows[i], with vj/vi < 0. Let
-                // s = -(vj/vi) > 0, so rows[j] ~= -s * rows[i]: row j's
-                // constraint `rows[j].x <= h[j]` becomes, divided by `-s`
-                // (flipping the inequality), `rows[i].x >= -h[j]/s`.
+                // rows[j] = -s * rows[i] (s > 0) なので、行 j は `rows[i].x >= -h[j]/s` と書ける。
+                // lower, upper: rows[i].x の下限・上限
                 let s = -(vj / vi);
                 let lower = -h[j] / s;
                 let upper = h[i];
@@ -180,10 +106,9 @@ pub fn merge_parallel_rows(a: &Csr, b: &[f64], g: &Csr, h: &[f64], n: usize) -> 
                     drop_g[j] = true;
                     new_eq_rows.push(rows[i].clone());
                     new_eq_b.push(upper);
-                    break; // i is claimed; move on to the next unclaimed i
+                    break; // 行 i は使用済みになったので次の i へ
                 }
-                // Otherwise genuine slack remains — leave both rows alone
-                // and keep looking for a different partner for `i`.
+                // 余裕が残る場合は両行ともそのままにし、i の別の相手を探す。
             }
         }
     }

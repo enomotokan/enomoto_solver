@@ -1,60 +1,41 @@
-//! Column singletons in *inequality* (and ranged) rows — the case
-//! [`colsingleton`](super::colsingleton) leaves alone (it only handles a
-//! column whose one appearance is an equality row), resolved with the
-//! sign-based argument Andersen & Andersen ("Presolving in Linear
-//! Programming", 1995, §3.2) and HiGHS's own `colSingleton` use.
+//! IneqSingleton (不等式行の列シングルトン): 不等式行 (範囲制約行を含む) にだけ一度現れる列を、
+//! コストの符号に基づいて処理する (Andersen & Andersen 1995 §3.2, HiGHS `colSingleton` と同じ論法)。
+//! 等式行に一度だけ現れる列は [`colsingleton`](super::colsingleton) の担当。
 //!
-//! ## Ranged rows are one row here
+//! ## 範囲制約行は 1 論理行として扱う
 //!
-//! `G` is all `<=` rows, so a ranged row `L <= r.x <= U` lives there as the
-//! pair `r.x <= U`, `-r.x <= -L` — and every bound-preservation row pair
-//! `colsingleton`/`doubleton` emit has exactly that shape. Counted naively a
-//! column appearing only in such a row has *two* appearances and looks like
-//! no singleton at all (Netlib `seba`: 86 of its 121 surviving columns were
-//! exactly this). This pass first pairs every `G` row with its exact
-//! negation and treats the pair as one logical row with both sides.
+//! `G` は全て `<=` 行なので、範囲制約 `L <= r.x <= U` は `r.x <= U` と `-r.x <= -L` の
+//! 2 行の組として格納される。まず各 `G` 行を厳密に符号反転した相方と組にし、1 論理行とみなす。
 //!
-//! ## The reduction
+//! ## 縮約
 //!
-//! Column `x_j` (cost `c_j != 0`, no equality-row appearance) appears in
-//! exactly one logical row `L <= a x_j + r <= U`. The objective pushes `x_j`
-//! in direction `d` (`+1` when `c_j < 0`) toward its box bound `t` on that
-//! side, and moving that way pushes the row's activity toward exactly one
-//! of its sides, `S` (`U` when `a*d > 0`, else `L`). With `[r_lo, r_hi]` the
-//! range of `r` over the other columns' boxes:
+//! 列 `x_j` (コスト `c_j != 0`、等式行に現れない) が 1 論理行 `L <= a x_j + r <= U` にだけ現れるとする。
+//! 目的関数は `x_j` を方向 `d` (`c_j < 0` なら `+1`) の箱境界 `t` へ押し、それにより行の活動値は
+//! 片側 `S` (`a*d > 0` なら `U`、そうでなければ `L`) へ向かう。`[r_lo, r_hi]` を他列の箱上での `r` の範囲とする。
 //!
-//! - **Fix** `x_j = t` when `t` is finite and `x_j = t` can never violate
-//!   `S` whatever the others do: replacing `x_j` by `t` in any feasible point
-//!   keeps it feasible (the opposite side only gets looser) and does not
-//!   worsen the objective.
-//! - **Tight row** when side `S` alone already implies `x_j`'s bound `t`
-//!   (finite implied value, `t` on the far side of it): then every optimum
-//!   has `S` holding with equality — if `S` were slack, `x_j` could move
-//!   toward `t` (it is strictly short of `t`, or at `t` which forces `S`
-//!   tight by the implication) and strictly improve the objective. The row
-//!   becomes the equality `a x_j + r = S`, dropping its other side
-//!   (implied by the equality), and `colsingleton` then substitutes `x_j`
-//!   out, skipping the now-redundant bound-preservation row for `t`.
+//! - **固定**: `t` が有限で、他列がどうであれ `x_j = t` が `S` を破らないなら `x_j = t` に固定する。
+//! - **等式化**: 側 `S` だけで `x_j` の境界 `t` が含意されるなら、最適解では `S` が必ず等号で成り立つ。
+//!   行を等式 `a x_j + r = S` に置き換え (反対側は冗長なので捨てる)、その後 `colsingleton` が `x_j` を消去する。
 //!
-//! One decision per logical row per call (a row turned into an equality is
-//! no longer a candidate for its other columns this call); fixing several
-//! columns of one row is fine since each test uses the other columns' full
-//! boxes, a superset of whatever an earlier fix left them.
+//! 1 呼び出しにつき 1 論理行あたり 1 回だけ判定する (等式化した行はその呼び出し中は他列の候補にしない)。
+//! 同じ行の複数列を固定するのは、各判定が他列の箱全体を使うので問題ない。
 
 use std::collections::HashMap;
 
 use crate::sparse::Csr;
 use crate::params::presolve::TOL;
 
+/// [`run`] の結果。
 pub struct IneqSingletonResult {
-    /// `(column, value)` to fix.
+    /// 固定する `(列, 値)`
     pub fixes: Vec<(usize, f64)>,
-    /// `(g_row, partner)`: `real_rows[g_row]` (as `<=` row with its own rhs)
-    /// becomes an equality; it and its paired opposite side (if any) leave `G`.
+    /// `(g_row, partner)`: `real_rows[g_row]` (右辺込みの `<=` 行) を等式に変える。
+    /// この行と、組になった反対側の行 `partner` (あれば) は `G` から取り除かれる。
     pub implied_equalities: Vec<(usize, Option<usize>)>,
 }
 
-/// Range of `sum(v * x_k)` over the terms' boxes, excluding column `skip`.
+/// 列 `skip` を除いた各項の箱境界上で `sum(v * x_k)` が取りうる範囲 `(下限, 上限)` を返す。
+/// 無限大同士の打ち消しで NaN になった端は、それぞれ -∞ / +∞ とみなす。
 fn others_range(row: &[(usize, f64)], skip: usize, lb: &[f64], ub: &[f64]) -> (f64, f64) {
     let (mut lo, mut hi) = (0.0f64, 0.0f64);
     for &(k, v) in row {
@@ -68,10 +49,17 @@ fn others_range(row: &[(usize, f64)], skip: usize, lb: &[f64], ub: &[f64]) -> (f
     (if lo.is_nan() { f64::NEG_INFINITY } else { lo }, if hi.is_nan() { f64::INFINITY } else { hi })
 }
 
+/// 不等式行の列シングルトンを探し、固定と等式化の候補を返す (行列自体は書き換えない)。
+///
+/// - `n`: 列数
+/// - `a`: 等式制約行列 (ここに現れる列は対象外)
+/// - `real_rows`, `real_rhs`: `G` の実制約行 (`<=` 正規化済み) とその右辺
+/// - `c`: 目的関数係数
+/// - `lb`, `ub`: 変数の境界
 pub fn run(n: usize, a: &Csr, real_rows: &[Vec<(usize, f64)>], real_rhs: &[f64], c: &[f64], lb: &[f64], ub: &[f64]) -> IneqSingletonResult {
     let mut out = IneqSingletonResult { fixes: Vec::new(), implied_equalities: Vec::new() };
 
-    // Columns with any equality-row appearance are colsingleton's/aggregator's.
+    // 等式行に現れる列は colsingleton / aggregator の担当なので除外する。
     let mut in_a = vec![false; n];
     {
         let ar = a.as_ref();
@@ -82,9 +70,9 @@ pub fn run(n: usize, a: &Csr, real_rows: &[Vec<(usize, f64)>], real_rhs: &[f64],
         }
     }
 
-    // Cheap pre-filter: a candidate column appears in no equality row and in
-    // at most two `G` rows (one logical row). Nothing qualifies -> done,
-    // without building the pairing below.
+    // 安価な事前判定: 候補列は等式行に現れず、`G` 行に高々 2 回 (1 論理行) だけ現れる。
+    // 該当列がなければ、下の組み合わせ構築をせずに終了する。
+    // g_count[k]: 列 k が現れる `G` 行の数
     let mut g_count = vec![0u32; n];
     for row in real_rows {
         for &(k, v) in row {
@@ -97,8 +85,8 @@ pub fn run(n: usize, a: &Csr, real_rows: &[Vec<(usize, f64)>], real_rhs: &[f64],
         return out;
     }
 
-    // Pair each row with its exact negation (hash on support + coefficient
-    // bits, then an exact comparison).
+    // 各行を厳密な符号反転行と組にする (列番号と係数ビット列の FNV-1a 系ハッシュで候補を引き、厳密比較で確定)。
+    // row_hash(row, negate): negate=true なら係数を符号反転したものとしてハッシュする。
     let row_hash = |row: &[(usize, f64)], negate: bool| -> u64 {
         let mut h: u64 = 0xcbf2_9ce4_8422_2325;
         for &(k, v) in row {
@@ -108,11 +96,14 @@ pub fn run(n: usize, a: &Csr, real_rows: &[Vec<(usize, f64)>], real_rhs: &[f64],
         }
         h
     };
+    // ハッシュ値 -> その値を持つ行番号の一覧
     let mut index: HashMap<u64, Vec<usize>> = HashMap::with_capacity(real_rows.len());
     for (i, row) in real_rows.iter().enumerate() {
         index.entry(row_hash(row, false)).or_default().push(i);
     }
+    // x と y が同じ台で係数が互いに符号反転か
     let is_negation = |x: &[(usize, f64)], y: &[(usize, f64)]| x.len() == y.len() && x.iter().zip(y).all(|(&(k1, v1), &(k2, v2))| k1 == k2 && v1 == -v2);
+    // partner[i]: 行 i と組になる符号反転行 (なければ None)
     let mut partner: Vec<Option<usize>> = vec![None; real_rows.len()];
     for (i, row) in real_rows.iter().enumerate() {
         if partner[i].is_some() {
@@ -126,7 +117,8 @@ pub fn run(n: usize, a: &Csr, real_rows: &[Vec<(usize, f64)>], real_rhs: &[f64],
         }
     }
 
-    // Logical rows: the lower-indexed row of each pair stands for both.
+    // 論理行: 各組は番号の小さい方の行で代表させる。
+    // logical_count[k]: 列 k が現れる論理行の数 / logical_row_of[k]: 最後に現れた論理行の代表行
     let mut logical_count = vec![0usize; n];
     let mut logical_row_of = vec![usize::MAX; n];
     for (i, row) in real_rows.iter().enumerate() {
@@ -141,6 +133,7 @@ pub fn run(n: usize, a: &Csr, real_rows: &[Vec<(usize, f64)>], real_rhs: &[f64],
         }
     }
 
+    // row_done[i]: 論理行 i がこの呼び出しで既に等式化されたか
     let mut row_done = vec![false; real_rows.len()];
     for j in 0..n {
         if in_a[j] || logical_count[j] != 1 || c[j] == 0.0 || lb[j] == ub[j] {
@@ -152,15 +145,19 @@ pub fn run(n: usize, a: &Csr, real_rows: &[Vec<(usize, f64)>], real_rhs: &[f64],
         }
         let row = &real_rows[i];
         let Some(&(_, aj)) = row.iter().find(|&&(k, _)| k == j) else { continue };
+        // aj: 列 j の係数 / upper, lower: 論理行の上側・下側の右辺 (相方がなければ下側は -∞)
         let upper = real_rhs[i];
         let lower = partner[i].map_or(f64::NEG_INFINITY, |p| -real_rhs[p]);
         let (r_lo, r_hi) = others_range(row, j, lb, ub);
+        // d: 目的関数が x_j を押す方向 (+1: 増加), target: その方向の箱境界 t
+        // toward_upper: その移動で行の活動値が上側 U へ向かうか
         let d = if c[j] < 0.0 { 1.0 } else { -1.0 };
         let target = if d > 0.0 { ub[j] } else { lb[j] };
         let toward_upper = aj * d > 0.0;
+        // 値 x の大きさに応じた相対許容誤差
         let tol = |x: f64| TOL * (1.0 + x.abs());
 
-        // Fix: moving all the way to `target` never violates side S.
+        // 固定: target まで動かしても側 S を決して破らない。
         if target.is_finite() {
             let never_violates = if toward_upper {
                 aj * target + r_hi <= upper + tol(upper)
@@ -173,7 +170,8 @@ pub fn run(n: usize, a: &Csr, real_rows: &[Vec<(usize, f64)>], real_rhs: &[f64],
             }
         }
 
-        // Tight row: side S alone implies x_j's bound in direction d.
+        // 等式化: 側 S だけで方向 d の x_j の境界が含意される。
+        // side/side_rhs: 側 S の右辺, residual: S に最も有利な他列の寄与, g_row: 側 S を表す G 行
         let (side, side_rhs, residual, g_row) = if toward_upper {
             (upper, upper, r_lo, Some(i))
         } else {
@@ -183,10 +181,11 @@ pub fn run(n: usize, a: &Csr, real_rows: &[Vec<(usize, f64)>], real_rhs: &[f64],
         if !side.is_finite() || !residual.is_finite() {
             continue;
         }
-        // a x_j <= S - r_lo (upper side) or a x_j >= S - r_hi (lower side).
+        // 上側なら a x_j <= S - r_lo、下側なら a x_j >= S - r_hi から得られる x_j の含意値。
         let implied = (side_rhs - residual) / aj;
         let implies_target = if d > 0.0 { implied <= target + tol(target) } else { implied >= target - tol(target) };
         if implies_target {
+            // 等式化した行の反対側 (これも G から除く)
             let other = if g_row == i { partner[i] } else { Some(i) };
             out.implied_equalities.push((g_row, other));
             row_done[i] = true;

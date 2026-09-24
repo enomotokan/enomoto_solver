@@ -1,114 +1,35 @@
-//! Removes negligible ("small") coefficients from a constraint row —
-//! Achterberg, Bixby, Gu, Rothberg & Weninger, "Presolve Reductions in
-//! Mixed Integer Programming" (INFORMS Journal on Computing 32(2), 2020;
-//! originally ZIB-Report 16-44), §3.1 "Model cleanup and removal of
-//! redundant constraints": a nonzero `a_ik` whose worst-case contribution
-//! to row `i`'s own activity, `|a_ik| * (ub[k] - lb[k])`, is small enough
-//! relative to the solver's own feasibility tolerance can be dropped from
-//! the row entirely (folding its value at `lb[k]` into the row's own
-//! right-hand side) without changing which points the row considers
-//! feasible by more than that tolerance.
+//! SmallCoeff (微小係数の除去, Achterberg et al. "Presolve Reductions in Mixed Integer
+//! Programming" 2020 §3.1)。
 //!
-//! Distinct from every other reduction in this pipeline: it never removes
-//! a row or a variable, only individual matrix entries — a variable whose
-//! *every* remaining appearance happens to get dropped this way simply
-//! becomes a free column for `dualfix`/`propagate` to pick up on a later
-//! round, the same "one step's leftover is another step's opportunity"
-//! pattern `run_extended`'s own docs describe for its other stages.
+//! 行 `i` の係数 `a_ik` の最悪寄与 `|a_ik| * (ub[k] - lb[k])` が実行可能性許容誤差に比べて十分小さければ、
+//! その項を行から取り除き、`lb[k]` での値を右辺へ移す。行や変数は削除せず、個々の係数だけを消す。
 //!
-//! **The paper's own two-part scheme is implemented here as a single,
-//! strictly more general, per-row cumulative budget**, rather than
-//! transcribed literally. Achterberg et al. first test each entry
-//! individually (`|a_ik| < 1e-3` *and* `|a_ik| * (ub_k - lb_k) *
-//! |supp(A_i·)| < 1e-2 * eps`), then *separately* re-scan the row with a
-//! looser, purely cumulative budget (drop entries, in column order, as
-//! long as the running sum of `|a_ik| * (ub_k - lb_k)` stays below
-//! `1e-1 * eps`) — but the second pass already subsumes the first: if
-//! every one of a row's (at most `|supp(A_i·)|`) entries satisfied the
-//! first test, their contributions would sum to at most `1e-2 * eps`,
-//! comfortably inside the second pass's own `1e-1 * eps` ceiling
-//! regardless of any entry's raw magnitude. Running only the single,
-//! looser cumulative-budget pass therefore finds everything the paper's
-//! own two-pass scheme does (and more, since it never additionally
-//! requires `|a_ik| < 1e-3`), while staying just as sound: the *total*
-//! perturbation to row `i`'s own activity from every dropped entry
-//! combined never exceeds the same `1e-1 * eps` ceiling the paper itself
-//! already accepts as safe.
+//! - 行ごとの累積予算: 列番号順に、寄与の累計が `CUMULATIVE_FRACTION * SMALLCOEFF_EPS` 以下に収まる限り除去する
+//!   (論文の 2 段階の判定を包含する単一の判定)。
+//! - 無条件除去: `|a_ik| <= NOISE_THRESHOLD` の係数は予算と無関係に除去する。
 //!
-//! A separate, unconditional pass — matching the paper's own "finally, we
-//! set coefficients with `|a_ik| < 1e-10` to zero" — drops any coefficient
-//! this small regardless of the cumulative budget or the variable's own
-//! bound width, since a coefficient at that scale is floating-point noise
-//! on any problem this solver's own Ruiz scaling has already normalized.
-//!
-//! **Implemented, unit-tested, and measured against the full Netlib set —
-//! then left unintegrated (kept here, tested, but never called from
-//! [`crate::presolve::run_extended`]).** Wired in two ways, each measured
-//! in turn: once per outer round (right after `propagate` derives fresh
-//! bounds, so a coefficient a bound this round just tightened could
-//! newly qualify) and, after that measured a reproducible ~20% aggregate
-//! slowdown for a real but small yield (`ENOMOTO_PROF_SMALLCOEFF`: well
-//! under 1% of scanned entries dropped on every instance checked — e.g.
-//! `pilotnov` 889/119286, `ganges` 80/33500, `bnl1` 144/23989, several
-//! instances finding nothing at all), once only, at the very end of the
-//! pipeline against its final, tightest bounds. The once-only version
-//! recovered the lost performance (back in line with the pre-change
-//! baseline) — but on the exact same full-Netlib run, `perold` newly
-//! crashed ("simplex basis matrix must be nonsingular"), and a synthetic
-//! regression test already in this crate's own suite
-//! (`simplex::tests::beale_cycling_example_terminates_correctly`) newly
-//! failed its interior-point cross-check (misreporting `Unbounded` on a
-//! provably bounded LP). Root cause (established, not just suspected):
-//! dropping a coefficient whose *variable* happens to already be exactly
-//! fixed (`lb[k] == ub[k]`, `contribution == 0` unconditionally, so this
-//! reduction accepts it regardless of the coefficient's own magnitude) is
-//! an *exact*, zero-error transformation in real arithmetic, but it still
-//! changes the row's shape and shifts its right-hand side by a tiny
-//! floating-point amount — enough to send the affected instance down a
-//! different numerical path, the same "a locally-sound change can still
-//! expose latent fragility on an already-marginal, highly degenerate
-//! instance" pattern this session hit repeatedly elsewhere (the `chuzr`
-//! rayon-vs-sequential tie-break fix, the Schork-Gondzio Forrest-Tomlin
-//! variant, the fixed-width `chuzc1` candidacy exclusion — see
-//! `simplex.rs`'s own history for those). `perold` and `beale_cycling`'s
-//! own IPM cross-check are both independently already documented
-//! elsewhere in this codebase (`HARRIS_RATIO_TOL`'s own docs; this test's
-//! own comment) as sensitive to exactly this class of small numerical
-//! perturbation, so this is consistent with, not an outlier from, that
-//! established picture. Kept registered and tested (not deleted) in case
-//! a future, more targeted version — e.g. skipping any entry whose
-//! variable is already exactly fixed, since that specific case is what
-//! triggered both failures above and contributes nothing `dualfix`'s own
-//! fixing hasn't already captured — is worth trying later.
-//!
-//! **A third wiring, non-destructive this time, is live**: [`clean_row`]
-//! (not [`remove_small_coefficients`] — the model's `A`/`b` are never
-//! touched) feeds `redundancy::dulmage_mendelsohn_blocks`'s own
-//! block-decomposition pre-pass, deciding which structural edges a
-//! negligible coefficient should be left out of when building that
-//! pre-pass's graph. Both prior failures above trace to *mutating* a
-//! row/rhs a later stage then solved against; using the identical
-//! negligibility test only to drop a graph edge carries none of that risk
-//! — see `dulmage_mendelsohn_blocks`'s own docs for why dropping an edge
-//! there only costs decomposition recall, never soundness.
+//! 使われ方: 行列を書き換える [`remove_small_coefficients`] は **現在は未使用** (有効化すると不安定化したため。
+//! 経緯は履歴メモ参照)。[`clean_row`] だけが `redundancy` のブロック分解の前処理で、
+//! グラフの辺を省く判定として非破壊的に使われている。
 
 use std::collections::BTreeMap;
 use crate::params::presolve::{CUMULATIVE_FRACTION, NOISE_THRESHOLD, SMALLCOEFF_EPS};
 
-/// Cleans one already-column-deduplicated row: drops every coefficient
-/// this reduction judges negligible, adjusting `rhs` to compensate
-/// (folding the dropped term's value at `lb[k]` into the row's own
-/// right-hand side, so the row stays *exactly* equivalent at `x_k =
-/// lb[k]` and off by at most that term's own worst-case contribution
-/// everywhere else in `[lb[k], ub[k]]` — see the module docs for the
-/// error-budget argument bounding that worst case across the whole row).
-/// Entries are visited in the row's own stored (ascending column index)
-/// order, matching the paper's own "starting from the first non-zero
-/// coefficient".
+/// 列の重複を解消済みの 1 行から微小係数を除去し、`(除去後の行, 調整後の右辺)` を返す。
+///
+/// 除去した項は `lb[k]` での値を右辺から引くので、`x_k = lb[k]` では厳密に同値、
+/// それ以外でもずれはその項の最悪寄与以下 (行全体で予算以下) に収まる。
+/// 項は格納順 (列番号昇順) に調べる。
+///
+/// - `row`: 行の `(列, 係数)`
+/// - `rhs`: 行の右辺
+/// - `lb`, `ub`: 変数の境界 (寄与の幅に使用)
 pub(crate) fn clean_row(row: &[(usize, f64)], rhs: f64, lb: &[f64], ub: &[f64]) -> (Vec<(usize, f64)>, f64) {
+    // 行全体で許される最悪寄与の合計
     let budget = CUMULATIVE_FRACTION * SMALLCOEFF_EPS;
     let mut new_row = Vec::with_capacity(row.len());
     let mut new_rhs = rhs;
+    // これまでに除去した項の最悪寄与の累計
     let mut used_budget = 0.0;
     for &(k, v) in row {
         if v == 0.0 {
@@ -129,16 +50,16 @@ pub(crate) fn clean_row(row: &[(usize, f64)], rhs: f64, lb: &[f64], ub: &[f64]) 
     (new_row, new_rhs)
 }
 
-/// Applies [`clean_row`] to every row of a sparse system, merging
-/// duplicate column indices first (mirroring every other pass in this
-/// pipeline, e.g. `doubleton`/`colsingleton`'s own row construction) so a
-/// row's true per-column coefficient — not one of several raw entries
-/// that happen to sum to it — is what gets tested.
+/// 疎な制約系の全行に [`clean_row`] を適用する。先に同じ列の重複要素を合算し、
+/// 列ごとの真の係数で判定する。**現在は未使用** (パイプラインから呼ばれていない)。
+///
+/// 戻り値は `(除去後の各行, 調整後の各右辺)`。
 #[allow(dead_code)]
 pub fn remove_small_coefficients(rows: &[Vec<(usize, f64)>], rhs: &[f64], lb: &[f64], ub: &[f64]) -> (Vec<Vec<(usize, f64)>>, Vec<f64>) {
     let mut new_rows = Vec::with_capacity(rows.len());
     let mut new_rhs = Vec::with_capacity(rhs.len());
     for (row, &b) in rows.iter().zip(rhs) {
+        // 列ごとに係数を合算した行
         let mut merged: BTreeMap<usize, f64> = BTreeMap::new();
         for &(k, v) in row {
             *merged.entry(k).or_insert(0.0) += v;

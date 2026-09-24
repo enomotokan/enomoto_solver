@@ -1,97 +1,22 @@
-//! DominatedRows (Andersen & Andersen, "Presolving in Linear Programming",
-//! Mathematical Programming 71 (1995), §3.1): the row-dual of
-//! [`dominatedcol`](super::dominatedcol)'s column domination. There, two
-//! *columns* sharing every row were compared coefficient-by-coefficient to
-//! decide whether one variable could always be substituted for another
-//! without hurting feasibility or the objective. Here, two *rows* sharing
-//! every column are compared the same way to decide whether satisfying one
-//! row's constraint always forces the other's to hold too — making the
-//! forced one redundant, droppable outright, no bound-shifting or fixing
-//! needed (unlike the column case, a dropped row changes nothing about
-//! which `x` remain feasible, so there is no `infeasible`/fix-value
-//! bookkeeping here at all).
+//! DominatedRows (支配行の削除, Andersen & Andersen 1995 §3.1)。[`dominatedcol`](super::dominatedcol) の行版。
+//! **現在は未使用** (パイプラインから呼ばれていない。理由は履歴メモ参照)。
 //!
-//! For two `<=` rows `p` (the *dominated*, candidate for removal) and `q`
-//! (the *dominating*, kept) with no shared column an equality row also
-//! touches (same exclusion [`dualfix`](super::dualfix)/[`dominatedcol`]
-//! use — a column elsewhere pinned exactly by an equality has no freedom
-//! left for this per-column argument to reason about, see below), `q`
-//! dominates `p` when, for every column `k`:
+//! 2 本の `<=` 行 `p` (被支配, 削除候補) と `q` (支配, 残す) について、すべての列 `k` で
 //!
-//!   - `G[q,k] == G[p,k]` (both compared with `TOL` slack) — identical on
-//!     this column, so whatever `x_k` contributes to one row's activity it
-//!     contributes identically to the other's, regardless of `x_k`'s own
-//!     sign; **or**
-//!   - `G[q,k] >= G[p,k]` **and** `lb[k] >= -TOL` — `q`'s coefficient is at
-//!     least as large and `x_k` is never negative, so `G[q,k]*x_k >=
-//!     G[p,k]*x_k` for every feasible `x_k`.
+//! - `G[q,k] == G[p,k]` (`TOL` 以内)、または
+//! - `G[q,k] >= G[p,k]` かつ `lb[k] >= -TOL` (`x_k` が非負)
 //!
-//! and, in addition, `h[q] <= h[p]` (`q`'s own bound is at least as tight).
-//! Given all of that, summing the per-column inequalities above over every
-//! `k` gives `(G[q,:]).x >= (G[p,:]).x` for every `x` satisfying the
-//! variable bounds, so `(G[q,:]).x <= h[q]` (row `q` holding) implies
-//! `(G[p,:]).x <= (G[q,:]).x <= h[q] <= h[p]` (row `p` automatically
-//! holding too) — row `p` can never be the binding constraint and is
-//! dropped.
+//! が成り立ち、さらに `h[q] <= h[p]` なら、`G[p,:].x <= G[q,:].x <= h[q] <= h[p]` となり、
+//! 行 `q` が成り立てば行 `p` も必ず成り立つので `p` を削除できる (実行可能領域は変わらない)。
+//! 等式行に現れる列を含む行、および長さ 1 の行 (箱境界行) は対象外。
 //!
-//! This is strictly weaker than (and cannot rediscover) the *proportional*
-//! case [`parallelrows`](super::parallelrows)/[`redundancy::reduce_inequalities`](super::redundancy::reduce_inequalities)
-//! already catch (a row that is some row's exact scalar multiple has
-//! `G[q,k] == G[p,k]` nowhere in general, yet is still redundant via a
-//! *different* argument those passes already make) — it exists for the
-//! complementary case those can't reach at all: two rows whose coefficients
-//! are **not** proportional, only pointwise-ordered, need a column's
-//! nonnegativity to license the comparison (see `TOL` usage above) rather
-//! than a single shared scalar. The `lb[k] >= 0` requirement is what makes
-//! this pass non-vacuous on real Netlib data in a way
-//! [`dominatedcol`](super::dominatedcol)'s own escape-route conditions
-//! measurably are not there (see that module's own docs on why every
-//! structural variable in this crate always has two *finite* bounds): a
-//! variable merely needs a `0` lower bound, which is the common case for
-//! ordinary (non-free, non-negative-only) structural/slack variables, not
-//! a *literal infinity* on either side.
+//! 比例関係にある行 ([`parallelrows`](super::parallelrows)・`redundancy::reduce_inequalities` の担当) ではなく、
+//! 係数が点ごとに順序付けられているだけの行の組を扱う。
 //!
-//! **Candidate search**: checking every pair of rows is `O(m^2)`; instead,
-//! for each candidate row this only compares against rows sharing its own
-//! *rarest* column (the column touched by the fewest other candidate rows)
-//! — the same "let the cheapest available index bound the search" idea
-//! [`dominatedcol`]'s own candidate search and [`sparsify`](super::sparsify)'s
-//! `anchor` both use, just picked per-row here instead of per-column/
-//! per-equality-row there.
+//! **候補探索**: 全行対 `O(m^2)` を避け、各行について「最も出現行数の少ない列 (anchor)」を共有する行とだけ比較する。
 //!
-//! **Single-pass, non-cascading, decided from the input snapshot**: every
-//! domination edge `p -> q` (`q` dominates `p`) is computed once, up front,
-//! against the original, unmodified rows. A row is only ever actually
-//! dropped if *no* edge anywhere in this same call points *at* it (i.e. it
-//! never itself appears as someone else's dominated side) — so every row
-//! used to justify a drop is guaranteed to survive this call uncut, the
-//! same conservative "a committed row is never reused/invalidated in the
-//! same pass" rule [`dominatedcol`]'s own docs describe for its columns.
-//! This costs a genuine (if likely rare) chain `p -> q -> r` nothing gets
-//! resolved in one call — `p` is left alone since `q` itself is some other
-//! row's dominated side here — but the next call (this pipeline's own outer
-//! fixpoint loop) picks it up once `q` is actually gone.
-//!
-//! **Implemented, unit-tested, measured against the full Netlib set — then
-//! left unintegrated (kept here, tested, but never called from
-//! [`crate::presolve::run_extended`]), mirroring [`dominatedcol`]/
-//! [`sparsify`](super::sparsify)'s own precedent.** Wired in once, right
-//! after [`parallelrows`](super::parallelrows), and instrumented directly
-//! (not inferred from timing alone): zero domination edges were found on
-//! any of the 73 in-scope Netlib instances — the joint condition (every
-//! shared column pointwise ordered *and* nonnegative-lower-bounded on the
-//! side that needs it, *and* the right-hand sides ordered to match) never
-//! held for any real row pair measured, the same zero-hit-rate outcome
-//! [`dominatedcol`]'s own docs report for the analogous column case (there
-//! for a structural reason specific to this crate's finite-bounds
-//! invariant; here, simply because no row pair in this particular problem
-//! set happens to satisfy a genuinely strict joint condition). Wiring it
-//! in cost pure candidate-search overhead (the anchor-column scan below,
-//! over every multi-variable row) for zero reductions anywhere —
-//! contributing, together with [`parallelrows`], +1.5% aggregate `ours`
-//! time (3.85s unwired vs. 3.91s wired), 73/73 objective values unchanged
-//! either way. Kept here for its correct, tested core logic rather than
-//! deleted.
+//! **1 パス・非連鎖**: 支配関係は入力のまま一度に計算する。他の行を支配する行はこの呼び出しでは削除しない
+//! (削除の根拠となる行が必ず残るようにするため)。連鎖 `p -> q -> r` は次の呼び出しで解消される。
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -100,13 +25,16 @@ use std::collections::HashSet;
 use crate::sparse::{Csr, csr_row_iter};
 use crate::params::presolve::TOL;
 
-/// Returns the row indices (into `g`) that are dominated and safe to drop
-/// this call — same shape contract as every other reduction here: the
-/// caller removes exactly these rows from `(G, h)` and nothing else
-/// changes (no bound fix, no infeasibility — see module docs for why
-/// dropping a dominated row can never affect feasibility either way).
+/// この呼び出しで安全に削除できる被支配行の番号 (`g` の行番号, 昇順) を返す。
+/// 呼び出し側はこれらの行を `(G, h)` から除くだけでよい (境界の固定や実行不能判定はない)。
+///
+/// - `n`: 列数
+/// - `a`: 等式行列 (ここに現れる列を含む行は対象外)
+/// - `g`, `h`: 不等式制約 `G x <= h`
+/// - `lb`: 変数の下限 (非負性の判定に使用)
 pub fn find_dominated_rows(n: usize, a: &Csr, g: &Csr, h: &[f64], lb: &[f64]) -> Vec<usize> {
     let ar = a.as_ref();
+    // in_equality[j]: 列 j が等式行に現れるか
     let mut in_equality = vec![false; n];
     for i in 0..ar.nrows() {
         for (j, v) in csr_row_iter(a, i) {
@@ -118,11 +46,8 @@ pub fn find_dominated_rows(n: usize, a: &Csr, g: &Csr, h: &[f64], lb: &[f64]) ->
 
     let gr = g.as_ref();
     let m = gr.nrows();
-    // Real (multi-variable) candidate rows only -- a length-1 row is a
-    // variable's own box bound (see `super::build_a_g`) and carries
-    // structural meaning elsewhere (`propagate::extract_bounds`) that
-    // dropping it here would silently lose, mirroring why
-    // `parallelrows`/`dominatedcol` both make the same exclusion.
+    // 候補は複数変数の行のみ (長さ 1 の行は変数の箱境界行で、他所で意味を持つので削除しない)。
+    // rows[i]: 行 i の (列 -> 係数)。長さ 1 の行は空、等式行の列を含む行は番兵 usize::MAX のみを持つ。
     let rows: Vec<BTreeMap<usize, f64>> = (0..m)
         .map(|i| {
             let raw: Vec<(usize, f64)> = csr_row_iter(g, i).filter(|&(_, v)| v != 0.0).collect();
@@ -130,10 +55,7 @@ pub fn find_dominated_rows(n: usize, a: &Csr, g: &Csr, h: &[f64], lb: &[f64]) ->
             if raw.len() >= 2 {
                 for (j, v) in raw {
                     if in_equality[j] {
-                        // A candidate row touching an equality-locked
-                        // column is excluded outright (see module docs) --
-                        // marked via a sentinel so it's skipped below
-                        // rather than compared on an incomplete pattern.
+                        // 等式行の列を含む行は対象外。番兵を入れて後で除外する。
                         row.clear();
                         row.insert(usize::MAX, 0.0);
                         break;
@@ -145,11 +67,13 @@ pub fn find_dominated_rows(n: usize, a: &Csr, g: &Csr, h: &[f64], lb: &[f64]) ->
         })
         .collect();
 
+    // 比較対象となる候補行
     let candidates: Vec<usize> = (0..m).filter(|&i| !rows[i].is_empty() && !rows[i].contains_key(&usize::MAX)).collect();
     if candidates.len() < 2 {
         return Vec::new();
     }
 
+    // col_candidates[k]: 列 k を含む候補行の集合
     let mut col_candidates: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); n];
     for &i in &candidates {
         for &k in rows[i].keys() {
@@ -157,7 +81,7 @@ pub fn find_dominated_rows(n: usize, a: &Csr, g: &Csr, h: &[f64], lb: &[f64]) ->
         }
     }
 
-    // `q` dominates `p` (returns true) per the module docs' per-column test.
+    // `q` が `p` を支配するなら true (モジュール docs の列ごとの判定 + 右辺の比較)。
     let dominates = |q: usize, p: usize| -> bool {
         for (&k, &gp) in &rows[p] {
             let gq = rows[q].get(&k).copied().unwrap_or(0.0);
@@ -171,7 +95,7 @@ pub fn find_dominated_rows(n: usize, a: &Csr, g: &Csr, h: &[f64], lb: &[f64]) ->
         }
         for (&k, &gq) in &rows[q] {
             if rows[p].contains_key(&k) {
-                continue; // already covered above
+                continue; // 上のループで判定済み
             }
             let gp = 0.0;
             if (gq - gp).abs() <= TOL {
@@ -185,12 +109,8 @@ pub fn find_dominated_rows(n: usize, a: &Csr, g: &Csr, h: &[f64], lb: &[f64]) ->
         h[q] <= h[p] + TOL
     };
 
-    // Deterministic candidate pairing: for each row, anchor on its own
-    // rarest column (fewest other candidate rows touching it) and only
-    // compare against rows sharing that column -- a domination this misses
-    // (its partner never shares this particular rarest column) is left for
-    // a later round's structural change to expose, same scope limit
-    // `dominatedcol`'s own candidate search accepts.
+    // 候補対の列挙: 各行について最も出現の少ない列 (anchor) を共有する行とだけ組にする。
+    // これで見逃す支配関係は後のラウンドに任せる。pairs は (小さい番号, 大きい番号) の決定的な集合。
     let mut pairs: BTreeSet<(usize, usize)> = BTreeSet::new();
     for &i in &candidates {
         let anchor = *rows[i].keys().min_by_key(|&&k| col_candidates[k].len()).unwrap();
@@ -201,7 +121,7 @@ pub fn find_dominated_rows(n: usize, a: &Csr, g: &Csr, h: &[f64], lb: &[f64]) ->
         }
     }
 
-    // `dominated_by[p]` collects every `q` found to dominate `p`.
+    // dominated_by[p]: p を支配する行 q の一覧 / ever_dominates: 何らかの行を支配した行の集合
     let mut dominated_by: Vec<Vec<usize>> = vec![Vec::new(); m];
     let mut ever_dominates: HashSet<usize> = HashSet::new();
     for (x, y) in pairs {
@@ -215,14 +135,12 @@ pub fn find_dominated_rows(n: usize, a: &Csr, g: &Csr, h: &[f64], lb: &[f64]) ->
         }
     }
 
-    // A row that ever dominates something is never itself dropped this
-    // call, full stop -- so any `q` appearing in `dominated_by[p]` is
-    // guaranteed to survive (it's in `ever_dominates`, hence skipped by the
-    // check below), making it a always-safe citation for dropping `p`.
+    // 他の行を支配した行はこの呼び出しでは削除しない。したがって dominated_by[p] の q は必ず残り、
+    // p を削除する根拠として常に安全である。
     let mut drop = Vec::new();
     for &p in &candidates {
         if ever_dominates.contains(&p) {
-            continue; // used to justify dropping something else -- never itself dropped this call
+            continue; // 他の行の削除根拠なので、この呼び出しでは削除しない
         }
         if !dominated_by[p].is_empty() {
             drop.push(p);

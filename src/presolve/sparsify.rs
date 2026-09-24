@@ -1,156 +1,80 @@
-//! Sparsify (HiGHS/PaPILO "Sparsify" presolver): rewrites a row `r`
-//! (either an equality row of `A` or a real, multi-variable inequality row
-//! of `G`) as `r - scale * eq` for some *other* equality row `eq` whose
-//! entire support is contained in `r`'s (`S_eq subset-eq S_r`) —
-//! guaranteed to remove at least one nonzero from `r` (the variable used
-//! to derive `scale`) with **zero fill-in**, since every variable `eq`
-//! touches is already present in `r`. This is the conservative half of
-//! the general technique (PaPILO/HiGHS also allow a bounded amount of
-//! fill-in when the net nonzero count still improves) — restricting to
-//! the subset case trades away those opportunities for a substitution
-//! that can never make anything *less* sparse, no fill-in accounting or
-//! budget needed to prove it.
+//! Sparsify (疎化, HiGHS/PaPILO の "Sparsify")。**現在は未使用** (パイプラインから呼ばれていない。理由は履歴メモ参照)。
 //!
-//! Both rows still describe the exact same feasible region afterward:
-//! `eq` itself is unchanged and still holds, so `r - scale*eq` is
-//! satisfied by every point that satisfies both `r` and `eq`, and `r` can
-//! be recovered from it by adding `scale*eq` back — a standard reversible
-//! row operation, valid whether `r` is an equality or an inequality (only
-//! its coefficients/RHS change; its own sense is untouched).
+//! 行 `r` (`A` の等式行、または `G` の複数変数の実不等式行) を、台 (非零の列集合) が `r` の台に含まれる
+//! 別の等式行 `eq` を使って `r - scale * eq` に書き換える。`eq` の変数はすべて `r` に既にあるので
+//! フィルインは生じず、少なくとも 1 つの非零 (消去変数) が減る。フィルインを許す一般版は扱わない保守的な半分。
 //!
-//! Unlike `doubleton`/`colsingleton`, this never eliminates a variable or
-//! a row outright — it only makes existing rows sparser, which can turn a
-//! row into a fresh row singleton, or shrink a variable's own column
-//! degree enough to make it eligible for `colsingleton`/`dualfix` on a
-//! later pass (the same "unlocks a later stage" relationship
-//! `run_extended`'s own module docs describe for its other passes).
+//! `eq` 自体は変わらず成り立つので、書き換え後も実行可能領域は同じ (可逆な行演算。行の向きも不変)。
+//! 変数や行は削除せず行を疎にするだけだが、それにより後のパスで他の縮約が可能になりうる。
 //!
-//! Candidate search, for each equality row `eq` (support `S_eq`, needs
-//! `|S_eq| >= 2`): among `S_eq`'s own variables, the one with the fewest
-//! *other* row appearances (`anchor`) bounds how many candidate target
-//! rows need checking at all — every row that could possibly contain all
-//! of `S_eq` must at least contain `anchor`. For each such candidate `r`
-//! (skipping `eq` itself and anything shorter than `S_eq`, which can
-//! never be a superset), `S_eq subset-eq S_r` is checked directly against
-//! `r`'s own coefficients. The variable actually eliminated (`scale`'s
-//! denominator) is `S_eq`'s own largest-magnitude entry, not necessarily
-//! `anchor` — the same "eliminate the row's largest term" stability rule
-//! `doubleton` uses (dividing by the smallest available coefficient
-//! amplifies rounding noise), decoupled here from which variable happened
-//! to be cheapest to search candidates on.
+//! 候補探索: 各等式行 `eq` (`|S_eq| >= 2`) について、出現行数が最も少ない変数 (`anchor`) を含む行だけを
+//! 調べ、`S_eq ⊆ S_r` を直接確認する。消去する変数は `eq` の中で絶対値最大の係数を持つもの (数値安定性のため)。
 //!
-//! **A row already rewritten as a target this call is never itself used
-//! as a later pivot** — this is required for correctness, not just a
-//! simplifying scope choice. An earlier version allowed it (reading every
-//! pivot from an immutable start-of-call snapshot, on the reasoning that
-//! a row's *original* content is an equally valid fact about the system
-//! regardless of what its own stored form has since become): confirmed
-//! on Netlib `scorpion` to silently corrupt the system when two rows
-//! reference each other this way in the same pass (row 0 used to
-//! sparsify row 1, then row 1's *original* content — while row 1 itself
-//! had just been overwritten — used to sparsify row 0 right back).
-//! Each individual substitution is a locally valid row operation, but
-//! replacing a *pair* (or longer chain) of rows with independently-
-//! computed linear combinations of their originals is only guaranteed
-//! equivalent to the original pair if the combined transformation is
-//! invertible — true for an isolated pair often enough to not show up
-//! immediately, but not guaranteed once many such substitutions chain
-//! together across a whole pass, where it measurably was not. Forbidding
-//! a just-modified row from being read as a pivot keeps every pivot's
-//! own stored form and the fact used to derive other rows identical,
-//! side-stepping the question entirely: a target is always rewritten
-//! against a pivot whose own row is returned completely unchanged.
-//!
-//! Single-pass, non-cascading otherwise (mirrors `doubleton`/
-//! `colsingleton`'s own scope): a target row is rewritten at most once
-//! per call. A chain of opportunities this pass reveals (a target
-//! sparsified here newly becoming a valid pivot, or a newly-shrunk row
-//! unlocking a different target) is picked up by `run_extended`'s outer
-//! fixpoint loop calling this again, not resolved here.
-//!
-//! **Implemented, unit-tested (including a regression test for the
-//! mutual-reference bug above), and measured against the full Netlib
-//! set — then left unintegrated (kept here, tested, but never called
-//! from [`crate::presolve::run_extended`]).** Wired in once per outer
-//! round, right before `colsingleton`: with the correctness bug fixed,
-//! zero objective mismatches across all 73 Netlib instances — but total
-//! `ours` time went from 3.68s to 7.30s (a ~2x aggregate regression),
-//! concentrated almost entirely on a handful of instances already known
-//! in this crate's own history to be unusually sensitive to *any* change
-//! in matrix shape: `degen3` (+390%), `25fv47` (+315%), `wood1p`
-//! (+127%), `cycle` (+95%) — `iters` on `degen3` alone went from 2,422 to
-//! 11,676 with an *identical, still-correct* final objective, the same
-//! "reshaping the matrix changes chuzc/DSE tie-breaking, which cascades
-//! into a completely different (and on a degenerate instance, potentially
-//! far longer) pivot sequence" pattern this session already hit
-//! repeatedly for other structural presolve changes (the
-//! Dulmage-Mendelsohn block-triangularization attempt documented in
-//! `simplex::lu`, connected-component splitting's own "at least 2 real
-//! components" gate in `simplex.rs`). A handful of small instances did
-//! improve (`bnl1` -21%, `brandy` -29%), but nowhere near enough to
-//! offset the losses. No cheap pre-gate (route only instances likely to
-//! benefit) was tried before reverting — see this doc comment's own
-//! commit for the full numbers if revisiting.
+//! **この呼び出しで書き換えられた行は、後でピボット (`eq`) として使わない** (正しさのために必須。
+//! 相互参照で系が壊れた事例は履歴メモ参照)。各対象行は 1 呼び出しにつき高々 1 回だけ書き換える。
 
 use crate::presolve::propagate;
 use crate::sparse::{Csr, SparseAccum, csr_from_rows, csr_rows_pruned};
 use crate::params::presolve::TOL;
 
+/// [`sparsify`] の結果。
 pub struct SparsifyResult {
+    /// 書き換え後の等式行列
     pub a: Csr,
+    /// `a` に対応する右辺
     pub b: Vec<f64>,
+    /// 書き換え後の不等式行列 (箱境界行を含めて再構築したもの)
     pub g: Csr,
+    /// `g` に対応する右辺
     pub h: Vec<f64>,
-    /// How many rows (`A`'s and `G`'s combined) were rewritten this call —
-    /// `0` means this pass found nothing, letting `run_extended`'s
-    /// fixpoint loop stop repeating it.
+    /// この呼び出しで書き換えた行数 (`A` と `G` の合計)。0 なら何も見つからなかった
     pub n_rows_changed: usize,
 }
 
+/// 対象行がどちらの行列の行か。
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Src {
+enum RowSource {
+    /// 等式行列 `A` の行
     A,
+    /// `G` の実制約 (複数変数) 行
     G,
 }
 
+/// 等式行による部分集合型の疎化を 1 パス行う。
+///
+/// - `n`: 列数
+/// - `a`, `b`: 等式制約 `A x = b`
+/// - `g`, `h`: 不等式制約 `G x <= h` (内部で箱境界行と実制約行に分離し、最後に再構築する)
 pub fn sparsify(n: usize, a: &Csr, b: &[f64], g: &Csr, h: &[f64]) -> SparsifyResult {
     let mut a_rows: Vec<Vec<(usize, f64)>> = csr_rows_pruned(a);
     let mut b: Vec<f64> = b.to_vec();
 
     let (lb, ub, mut real_g_rows, mut real_g_rhs) = propagate::extract_bounds(n, g, h);
 
-    // Column -> (source, row index) for every currently-eligible *target*
-    // row (`A`'s own rows plus `G`'s real, multi-variable rows) — box-
-    // bound rows are never touched, as either pivot or target: they're
-    // already minimal. Built once, from the same pre-rewrite state.
-    let mut col_to_rows: Vec<Vec<(Src, usize)>> = vec![Vec::new(); n];
+    // col_to_rows[j]: 列 j を含む対象候補行 (行列の種類, 行番号) の一覧。書き換え前の状態から一度だけ作る。
+    // 箱境界行はピボットにも対象にもしない (既に最小なので)。
+    let mut col_to_rows: Vec<Vec<(RowSource, usize)>> = vec![Vec::new(); n];
     for (i, row) in a_rows.iter().enumerate() {
         for &(j, _) in row {
-            col_to_rows[j].push((Src::A, i));
+            col_to_rows[j].push((RowSource::A, i));
         }
     }
     for (i, row) in real_g_rows.iter().enumerate() {
         for &(j, _) in row {
-            col_to_rows[j].push((Src::G, i));
+            col_to_rows[j].push((RowSource::G, i));
         }
     }
 
+    // changed_a / changed_g: その行がこの呼び出しで既に書き換えられたか
     let mut changed_a = vec![false; a_rows.len()];
     let mut changed_g = vec![false; real_g_rows.len()];
-    // One sparse accumulator for every target-row rewrite below — see
-    // `crate::sparse::SparseAccum`'s own docs for why the merge is not a
-    // per-target `BTreeMap`.
+    // 全対象行の書き換えで共用する疎アキュムレータ
     let mut accum = SparseAccum::new(n);
     let mut n_rows_changed = 0usize;
 
     for eq_idx in 0..a_rows.len() {
-        // A row already rewritten as someone else's target this call is
-        // never used as a pivot — see the module docs for why this is
-        // required for correctness, not just scope. `b[eq_idx]` is read
-        // fresh here (not from a start-of-call snapshot) for the same
-        // reason: by the time this row is used as a pivot, `changed_a`
-        // guarantees it hasn't been touched yet this call, so its current
-        // stored content and rhs *are* its original, untouched form.
+        // 既に書き換えられた行はピボットにしない (正しさのため)。したがってここで読む行と
+        // `b[eq_idx]` は、この呼び出しで未変更の元の形である。
         if changed_a[eq_idx] {
             continue;
         }
@@ -158,8 +82,9 @@ pub fn sparsify(n: usize, a: &Csr, b: &[f64], g: &Csr, h: &[f64]) -> SparsifyRes
         if eq_row.len() < 2 {
             continue;
         }
+        // anchor: eq の変数のうち出現行数が最小のもの (候補行の絞り込み用)
         let anchor = eq_row.iter().map(|&(j, _)| j).min_by_key(|&j| col_to_rows[j].len()).unwrap();
-        // Elimination target within `eq` itself: largest-magnitude entry.
+        // 消去する変数: eq の中で絶対値最大の係数を持つもの。
         let (elim_var, elim_coeff) = *eq_row.iter().max_by(|x, y| x.1.abs().total_cmp(&y.1.abs())).unwrap();
         if elim_coeff.abs() < TOL {
             continue;
@@ -167,62 +92,52 @@ pub fn sparsify(n: usize, a: &Csr, b: &[f64], g: &Csr, h: &[f64]) -> SparsifyRes
         let eq_rhs = b[eq_idx];
 
         for &(src, idx) in &col_to_rows[anchor] {
-            if src == Src::A && idx == eq_idx {
+            if src == RowSource::A && idx == eq_idx {
                 continue;
             }
             let already_changed = match src {
-                Src::A => changed_a[idx],
-                Src::G => changed_g[idx],
+                RowSource::A => changed_a[idx],
+                RowSource::G => changed_g[idx],
             };
             if already_changed {
                 continue;
             }
             let target_row = match src {
-                Src::A => &a_rows[idx],
-                Src::G => &real_g_rows[idx],
+                RowSource::A => &a_rows[idx],
+                RowSource::G => &real_g_rows[idx],
             };
             if target_row.len() < eq_row.len() {
-                // Can never be a superset of `S_eq` — a cheap pre-filter
-                // ahead of the O(|eq_row|) subset scan below.
+                // eq より短い行は台を包含しえないので、部分集合判定の前に除外する。
                 continue;
             }
-            // Load the target into the shared accumulator, then test the
-            // subset condition against *it* (`contains` is an O(1) epoch
-            // check) rather than against a freshly built per-target map —
-            // see `crate::sparse::SparseAccum`'s own docs.
+            // 対象行をアキュムレータに読み込み、S_eq ⊆ S_r を O(1) の `contains` で判定する。
             accum.load(target_row);
             if !eq_row.iter().all(|&(k, _)| accum.contains(k)) {
                 continue;
             }
             debug_assert!(accum.contains(elim_var), "elim_var is in eq_row's support, which the subset check just verified the target covers");
+            // 対象行での消去変数の係数と、それを 0 にする倍率
             let target_elim_coeff = accum.get(elim_var);
             let scale = target_elim_coeff / elim_coeff;
             if scale == 0.0 {
                 continue;
             }
             accum.axpy(-scale, &eq_row);
-            // Only `elim_var` is *proven* to cancel exactly (`scale` was
-            // chosen specifically to zero it) — any other entry's
-            // subtraction result, however small, is the mathematically
-            // correct new coefficient, not noise, and must be kept as-is
-            // rather than dropped by some absolute tolerance: a target
-            // row's other shared coefficient can land close to (but not
-            // at) zero by sheer coincidence without being a true
-            // cancellation, and silently discarding it would corrupt the
-            // row.
+            // 厳密に打ち消されるのは elim_var だけなので、それだけを取り除く。
+            // 他の要素は小さくても正しい新係数なので、許容誤差で捨ててはならない。
             accum.remove(elim_var);
             let new_rhs = match src {
-                Src::A => b[idx] - scale * eq_rhs,
-                Src::G => real_g_rhs[idx] - scale * eq_rhs,
+                RowSource::A => b[idx] - scale * eq_rhs,
+                RowSource::G => real_g_rhs[idx] - scale * eq_rhs,
             };
             let new_row_vec: Vec<(usize, f64)> = accum.take_sorted(0.0);
             match src {
-                Src::A => {
+                RowSource::A => {
                     a_rows[idx] = new_row_vec;
                     b[idx] = new_rhs;
                     changed_a[idx] = true;
                 }
-                Src::G => {
+                RowSource::G => {
                     real_g_rows[idx] = new_row_vec;
                     real_g_rhs[idx] = new_rhs;
                     changed_g[idx] = true;

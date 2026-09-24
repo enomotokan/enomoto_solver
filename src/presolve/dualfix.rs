@@ -1,34 +1,25 @@
-//! DualFix (Achterberg, Bixby, Gu, Rothberg, Weninger, "Presolve
-//! Reductions in Mixed Integer Programming", §4.4): a variable whose
-//! objective cost prefers one direction can be fixed to the corresponding
-//! bound outright — no simplex iteration needed — provided *no* real
-//! constraint would resist moving it that way. "Real" excludes the
-//! variable's own box-bound rows (folded into `G` by `build_a_g`): those
-//! aren't independent constraints, they're the bounds themselves, so
-//! counting them would make every variable look locked in both
-//! directions by its own bounds and this reduction would never fire.
+//! DualFix (双対固定, Achterberg et al. "Presolve Reductions in Mixed Integer
+//! Programming" §4.4)。
 //!
-//! The decision is "up-lock"/"down-lock" counting: for each real row, an
-//! entry locks the direction that would move that row's activity *closer*
-//! to violating it. `G`'s rows are already normalized to `<=` sense (see
-//! `build_a_g`), so within them a positive entry always locks "up" and a
-//! negative entry always locks "down". An equality row locks *both*
-//! directions at once (moving either way breaks it, absent compensation
-//! from other variables) — a variable appearing in any equality row is
-//! disqualified outright, not analyzed further.
+//! 目的関数が一方向を好み、かつその方向への移動を妨げる「実制約」が一つもない変数を、
+//! 対応する境界値へ直ちに固定する。
 //!
-//! If a variable's total down-lock count is `0` and its cost is `>= 0`
-//! (minimization wants it small, and nothing stops it from going all the
-//! way down), it is fixed to its lower bound; symmetrically for an
-//! up-lock count of `0` and cost `<= 0`.
+//! - 各実制約行 (`G` は `<=` 正規化済み) について、正係数は「上ロック」、負係数は「下ロック」を数える。
+//! - 等式行に現れる変数は両方向ロックとみなし、対象外とする。
+//! - 変数自身の箱境界行は実制約に含めない (含めると全変数が自分の境界でロックされてしまう)。
+//! - 下ロック数 0 かつ コスト `>= 0` なら下限へ、上ロック数 0 かつ コスト `<= 0` なら上限へ固定。
 
 use crate::sparse::{Csr, csr_row_iter};
 use crate::params::presolve::TOL;
 
-/// Returns `(j, value)` for every variable that can be fixed outright.
-/// `real_g_rows` is `G`'s multi-variable rows only — the same "real rows"
-/// list `propagate::extract_bounds` already separates out from `G`'s
-/// single-variable bound rows, reused here instead of re-deriving it.
+/// 直ちに固定できる変数の `(列番号 j, 固定値)` の一覧を返す。
+///
+/// - `n`: 変数 (列) 数
+/// - `a`: 等式制約行列 `A` (ここに現れる変数は固定対象外)
+/// - `real_g_rows`: `G` のうち複数変数を含む「実制約」行のみ
+///   (`propagate::extract_bounds` が単変数の境界行と分離済みのものを再利用)
+/// - `c`: 目的関数係数 (最小化)
+/// - `lb`, `ub`: 各変数の下限・上限 (固定先の境界が有限でなければ固定しない)
 pub fn fix_dominated_variables(
     n: usize,
     a: &Csr,
@@ -37,8 +28,10 @@ pub fn fix_dominated_variables(
     lb: &[f64],
     ub: &[f64],
 ) -> Vec<(usize, f64)> {
+    // 各変数の上ロック数・下ロック数 (G の実制約行での正係数・負係数の個数)
     let mut up_lock = vec![0usize; n];
     let mut down_lock = vec![0usize; n];
+    // 変数がいずれかの等式行に非零係数で現れるか
     let mut in_equality = vec![false; n];
 
     let ar = a.as_ref();
@@ -60,6 +53,7 @@ pub fn fix_dominated_variables(
         }
     }
 
+    // 固定する (列番号, 値) の一覧
     let mut fixed = Vec::new();
     for j in 0..n {
         if in_equality[j] {

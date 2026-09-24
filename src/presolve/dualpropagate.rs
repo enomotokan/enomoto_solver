@@ -1,184 +1,64 @@
-//! DualPropagate: [`propagate`](super::propagate)'s own row-activity bound
-//! tightening, run a second time on the *transpose* of the constraint
-//! system, to derive implied bounds on each real row's own dual variable
-//! (shadow price) — and, from those, to recognize when an inequality row
-//! is *provably tight in every optimal solution*, even though nothing in
-//! the primal system alone (its own activity range, `propagate`'s own
-//! §3.1 forcing-row check) would show that.
+//! DualPropagate (双対側の境界伝播): [`propagate`](super::propagate) の行活動値による境界強化を
+//! 制約系の「転置」に対してもう一度実行し、各実制約行の双対変数 (シャドウプライス) の含意境界を得る。
+//! そこから次の 2 種類の縮約を読み出す (HiGHS `HPresolve.cpp` の `isDualImpliedFree` /
+//! `updateRowDualImpliedBounds` / `isDominatedCol` と同じ考え方)。
 //!
-//! ## Why this exists
+//! ## 仕組み
 //!
-//! `colsingleton`'s own docs note that a column singleton's *inequality*
-//! case "needs a sign-based case analysis of whether the row is guaranteed
-//! to bind" and is deferred — and a naive per-column version of that case
-//! analysis (checking only that one column's own objective sign against
-//! its one row) turns out to require a convex epigraph reformulation that
-//! *grows* the problem rather than shrinking it (a variable+row swapped
-//! for a variable+two rows), because a single column's own cost sign says
-//! nothing about whether the *row* itself must bind. HiGHS's own
-//! `HPresolve.cpp` (`isDualImpliedFree`, `updateRowDualImpliedBounds`)
-//! resolves this the sound way: instead of asking one column in isolation,
-//! it propagates the *entire* dual feasibility system (every column's own
-//! reduced-cost identity, across every row that column touches) and asks
-//! whether *that* proves the row's dual variable can never be zero. This
-//! module is that same idea, implemented by reusing this crate's existing
-//! primal propagation code on a transposed problem instead of writing a
-//! second, parallel bound-tightening algorithm from scratch.
+//! `min c^T x`, `A x = b` (双対 `lambda`, 符号自由), `G x <= h` (双対 `mu >= 0`) に対し、
+//! 列 `j` の被約費用は `r_j := c_j + sum_i d_i * M_ij` (`d_i` は行 `i` の双対, `M_ij` は格納済み係数)。
+//! 相補性より、変数が存在しない境界に張り付くことはないので:
 //!
-//! ## The mechanics
+//! - `ub_j = +inf` なら `r_j >= 0` が強制され、`sum_i d_i * M_ij >= -c_j`
+//! - `lb_j = -inf` なら `r_j <= 0` が強制され、`sum_i d_i * M_ij <= -c_j`
+//! - 両側有限なら何も得られないので飛ばす / 両側無限 (自由変数) なら両方が成り立ち等式になる
 //!
-//! For `minimize c^T x` subject to `A x = b` (dual `lambda`, free sign)
-//! and `G x <= h` (dual `mu >= 0`), stationarity for column `j` reads
-//! (writing `d_i` for whichever of `lambda_i`/`mu_i` multiplies row `i`,
-//! and `M_ij` for that row's own coefficient on column `j`, exactly as
-//! stored — no sign flip needed since every row here is already in `<=`
-//! form):
+//! これらを双対変数 `d_i` を「変数」とする新しい `<=` 系 (t 行) として組み、`G` 行の双対には
+//! 符号制約 `-mu_i <= 0` を箱行として加え、[`propagate::propagate`] 系の関数で伝播する。
 //!
-//!   r_j := c_j + sum_i d_i * M_ij
+//! ## 縮約 1: 含意等式
 //!
-//! and complementary slackness ties `r_j`'s sign to which of `x_j`'s own
-//! bounds is active: `r_j >= 0` is consistent with `x_j` sitting at a
-//! finite lower bound, `r_j <= 0` with a finite upper bound, and (since a
-//! variable can never sit at a bound that doesn't exist) an *infinite*
-//! bound on one side rules out the matching sign outright:
+//! 伝播後の `mu_i` の下限が正なら、どの双対実行可能点でも `mu_i > 0` なので、相補性により
+//! その `G` 行はすべての最適解で等号成立する。この行を `A` 側へ移せば、既存の
+//! `doubleton`/`colsingleton`/`rowsingleton` がそのまま利用できる。
 //!
-//!   - `ub_j = +inf` => `r_j` can never be negative => `r_j >= 0` forced
-//!     => `sum_i d_i * M_ij >= -c_j` (a lower bound on that weighted sum).
-//!   - `lb_j = -inf` => `r_j` can never be positive => `r_j <= 0` forced
-//!     => `sum_i d_i * M_ij <= -c_j` (an upper bound on that same sum).
-//!   - both finite: neither sign is ruled out, so column `j` contributes
-//!     nothing usable — skipped outright, the same way `propagate`'s own
-//!     activity sums skip a term that can't tighten anything.
-//!   - both infinite (a genuinely free `x_j`): *both* rules apply at once,
-//!     pinning `sum_i d_i * M_ij` to *exactly* `-c_j` — the classic "free
-//!     column's reduced cost is zero" fact, expressed here as an equality
-//!     (represented, like every two-sided bound elsewhere in this crate,
-//!     as two opposing `<=` rows rather than a separate equality system).
+//! 「無限」は文字通り `±inf` のみを意味する。境界強化で元の境界より内側になっただけの列は
+//! t 行を作らない (健全でないため。経緯は履歴メモ参照)。固定済み列 (`lb[j] == ub[j]`) は定数なので除外する。
 //!
-//! Each column `j` with at least one infinite bound therefore contributes
-//! one (or, if fully free, two) row(s) to a *new* `<=` system whose own
-//! "variables" are the original problem's row duals `d_i` — exactly
-//! [`propagate::propagate`]'s own input shape, just built from the
-//! transpose. `G`-row duals additionally get their sign-constraint row
-//! (`-mu_i <= 0`, i.e. `mu_i >= 0`, folded in as a box row exactly like
-//! [`build_a_g`](super::build_a_g) folds a variable's own bound); `A`-row
-//! duals get none (free sign, matching a variable with no box row at all
-//! under [`propagate::extract_bounds`]'s "no row => infinite" convention).
-//! Running [`propagate::propagate`] on this transposed system tightens
-//! each `mu_i`'s own `[lb, ub]` the same way it would tighten any
-//! primal variable's — and a `G`-row whose tightened `mu_i` lower bound
-//! comes back strictly positive can *never* have `mu_i = 0` in any dual-
-//! feasible point, so by complementary slackness that row must be tight
-//! (`(Gx)_i = h_i`) at *every* primal optimum: a real, provable implied
-//! equality, safe to migrate into the `A` system outright and pick up
-//! everything `doubleton`/`colsingleton`/`rowsingleton` already know how
-//! to do with a true equality — no new substitution logic needed.
+//! ## 縮約 2: 列固定 (HiGHS の「dominated column」)
 //!
-//! **"Infinite" means literally `+/-inf`, not merely tighter than the
-//! model's own bound.** An earlier version of this module also fired a
-//! column's t-row whenever `propagate`'s own activity tightening had
-//! proven a bound strictly inside the model's original one (mirroring
-//! HiGHS's `isLowerStrictlyImplied`/`isUpperStrictlyImplied`), on the
-//! theory that `x_j` could then never reach that original bound either.
-//! That theory silently assumed the row which justified the tightening
-//! was still part of the row set (`real_g_rows`/`a`) this function is
-//! handed — but `propagate` itself deletes a row as redundant right
-//! after using it to tighten a bound, so the assumption frequently
-//! doesn't hold, and the resulting t-row can be false in every optimal
-//! dual solution (found on Netlib `80bau3b`: it fixed 106 columns off a
-//! dual box with no actual optimal point, moving the objective by
-//! +1531). `orig_lb`/`orig_ub` (the model's own, never-tightened bounds,
-//! captured once before `run_extended`'s round loop starts) are kept as
-//! parameters for whichever future fix re-derives this reduction with
-//! the row/bound bookkeeping it actually needs, but this module no
-//! longer reads them.
-//! `lb[j] == ub[j]` (a column fixed outright — a genuine decision by
-//! `dualfix`/`colsingleton`/`doubleton`, not a mere activity-derived
-//! tightening) is excluded either way: a fixed column is a constant, not
-//! a live unknown, and correctly contributes nothing regardless of what
-//! its original bounds were.
+//! 同じ双対の箱 `[dlo_i, dhi_i]` から、区間演算で各列の被約費用の範囲 `[rlo_j, rhi_j]` を求める。
+//! `rlo_j > 0` なら `x_j` は下限に、`rhi_j < 0` なら上限に固定できる (追加の伝播は不要)。
+//! Andersen & Andersen の列同士の比較 ([`super::dominatedcol`]) とは別の手法で、名前が似ているのは偶然。
 //!
-//! Single-pass, non-cascading, decided from the input snapshot (mirrors
-//! every other pass in this pipeline): a row promoted to an implied
-//! equality this call is picked up by `doubleton`/`colsingleton` starting
-//! next round, not immediately re-examined within this same call.
-//!
-//! ## Column fixing (HiGHS's "dominated column", reached this module's way)
-//!
-//! The same propagated `[dlo_i, dhi_i]` box on every real row's dual `d_i`
-//! that [`run`] reads out for row promotion also bounds every column's own
-//! reduced cost `r_j = c_j + sum_i d_i * M_ij`, by plain interval
-//! arithmetic over `M_ij`'s already-collected `col_terms[j]` entries — not
-//! just the columns whose own infinite bound helped build the box in the
-//! first place, *any* column sharing a row with one of those. The same
-//! box-constrained-Lagrangian argument the module docs above use to derive
-//! `r_j`'s forced sign for an infinite-bound column (minimizing
-//! `c^T x + d^T(\text{row terms})` over a box `[lb,ub]` independently per
-//! coordinate: `r_j > 0` forces `x_j` down to `lb_j`, `r_j < 0` up to
-//! `ub_j`) applies unconditionally, since it only assumes `d` is *some*
-//! dual-optimal value — which the propagated box always contains, no
-//! matter which of its own bounds happen to be finite. So: if the box's
-//! own worst case still leaves `r_j` strictly one-signed (`rlo_j > 0` or
-//! `rhi_j < 0`, computed by interval arithmetic over the box), that sign
-//! holds at the *true* optimal `d` too, and the column can be fixed
-//! outright — reading out the same fixed point [`run`] already computed,
-//! no extra propagation pass. This is HiGHS's `HPresolve.cpp` "dominated
-//! column" reduction (`impliedDualRowBounds` feeding `isDominatedCol`),
-//! *not* Andersen & Andersen's column-vs-column comparison
-//! ([`super::dominatedcol`], a different, complementary technique reached
-//! from an entirely different angle) — this crate's own name collision is
-//! coincidental, not a claim the two modules do the same thing.
-//!
-//! This is exactly what closes the gap this crate's own presolve leaves on
-//! network-shaped models dense with equality-row column singletons (e.g.
-//! Netlib's `seba`: HiGHS reduces it to 2 rows / 8 columns, largely via
-//! this reduction's own long fix/substitute cascade — see this crate's
-//! project memory for the full investigation): such a column's cost-0,
-//! one-sided-bound "slack" is exactly the case
-//! [`find_implied_equalities`]'s own infinite-bound test already builds a
-//! dual-sign constraint from, but the *box* variable sharing that same
-//! equality row (finite on both sides, so invisible to that test's own
-//! column selection) is precisely the kind of column only this read-out
-//! can fix — `dualfix`'s simple lock-counting can't reach it either,
-//! since it explicitly disqualifies any column touching an equality row.
-//! Once fixed, the row shrinks by one variable, which is exactly the
-//! "row now short enough to be implied-free" condition `aggregator`
-//! needs to fire, cascading into everything downstream that already knows
-//! what to do with a fixed column or a shorter equality row (no new
-//! substitution logic needed here either).
+//! どちらも入力のスナップショットから 1 パスで決め、連鎖はしない (次ラウンドで拾われる)。
 
 use crate::presolve::propagate;
 use crate::sparse::{Csr, CscMat, csr_from_rows, csr_row_iter};
 use crate::params::presolve::TOL;
 
-/// Bundles both reductions [`run`] reads out of one dual-feasibility
-/// propagation pass: `implied_equalities` (indices into `real_g_rows`
-/// proven tight in every optimum — see the module docs) and
-/// `fixed_columns` (`(column index, bound value)` pairs — always one of
-/// that column's own `lb[j]`/`ub[j]`, whichever side its reduced cost is
-/// proven pinned to; see the module docs' "Column fixing" section).
+/// [`run`] が 1 回の双対伝播から読み出す 2 種類の縮約。
 #[derive(Default)]
 pub struct DualReductions {
+    /// すべての最適解で等号成立が証明された `real_g_rows` の行番号
     pub implied_equalities: Vec<usize>,
+    /// 固定する `(列番号, 境界値)`。値は被約費用の符号に応じた `lb[j]` か `ub[j]` のどちらか
     pub fixed_columns: Vec<(usize, f64)>,
 }
 
-/// Propagates the dual feasibility system derived from `c` and both `a`
-/// and `real_g_rows`'s own coefficients, and reads out both reductions
-/// the resulting propagated dual box proves — see [`DualReductions`] and
-/// the module docs' "Column fixing" section for the second half. `lb`/
-/// `ub` are the current round's bounds, consulted to recognize a column
-/// already fixed to a point (`lb[j] == ub[j]`), which contributes nothing
-/// to the propagated system and is never a candidate for (re-)fixing
-/// here, and to test literal `+/-inf`. `a`'s rows contribute their own
-/// (always-free-sign) duals to the propagated system but are never
-/// themselves candidates for row promotion — they are already part of
-/// the equality system the caller maintains, with nothing left to
-/// promote. `orig_lb`/`orig_ub` are unused (see the module docs' "means
-/// literally `+/-inf`" note) and kept only so callers don't need to
-/// change; a future fix may need them again.
+/// `c`・`a`・`real_g_rows` から双対実行可能性の系を組んで伝播し、得られた双対の箱から
+/// 2 種類の縮約 ([`DualReductions`]) を読み出す。
+///
+/// - `n`: 列数
+/// - `a`: 等式行 (双対は符号自由として伝播に加わるが、行昇格の候補にはならない)
+/// - `real_g_rows`: `G` の実制約行 (`<=` 正規化済み。行昇格の候補)
+/// - `c`: 目的関数係数
+/// - `lb`, `ub`: 現ラウンドの境界 (固定済み列の判定と、文字通りの `±inf` 判定に使う)
+/// - `_orig_lb`, `_orig_ub`: 未使用 (呼び出し側を変えないために残している。経緯は履歴メモ参照)
+/// - `passes`: 転置系に対する境界伝播のパス数
 pub fn run(n: usize, a: &Csr, real_g_rows: &[Vec<(usize, f64)>], c: &[f64], lb: &[f64], ub: &[f64], _orig_lb: &[f64], _orig_ub: &[f64], passes: usize) -> DualReductions {
     let ar = a.as_ref();
+    // 双対変数の番号付け: A 行が 0..num_a、G 実制約行が num_a..num_a+num_g
     let num_a = ar.nrows();
     let num_g = real_g_rows.len();
     let num_duals = num_a + num_g;
@@ -186,13 +66,8 @@ pub fn run(n: usize, a: &Csr, real_g_rows: &[Vec<(usize, f64)>], c: &[f64], lb: 
         return DualReductions::default();
     }
 
-    // Transpose: `col_terms.col(j)` holds every (dual-variable index, its
-    // own coefficient on column `j`) pair, `A`'s rows numbered `0..num_a`
-    // and `real_g_rows`'s numbered `num_a..num_a+num_g` right after them.
-    // Streamed straight into the compressed column form (two allocations,
-    // one counting sort) rather than `n` growable per-column `Vec`s — see
-    // `CscMat::from_entry_stream`'s own docs; the two row blocks never have
-    // to be concatenated first.
+    // 転置: `col_terms.col(j)` は列 j に係数を持つ (双対変数番号, 係数) の組をすべて保持する。
+    // 列ごとの Vec を作らず、圧縮列形式へ直接流し込む (`CscMat::from_entry_stream` 参照)。
     let col_terms = CscMat::from_entry_stream(num_duals, n, |emit| {
         for i in 0..num_a {
             for (j, v) in csr_row_iter(a, i) {
@@ -210,6 +85,7 @@ pub fn run(n: usize, a: &Csr, real_g_rows: &[Vec<(usize, f64)>], c: &[f64], lb: 
         }
     });
 
+    // 転置系の `<=` 行 (双対変数についての制約) とその右辺
     let mut t_rows: Vec<Vec<(usize, f64)>> = Vec::new();
     let mut t_h: Vec<f64> = Vec::new();
 
@@ -217,44 +93,23 @@ pub fn run(n: usize, a: &Csr, real_g_rows: &[Vec<(usize, f64)>], c: &[f64], lb: 
         if col_terms.col(j).is_empty() || lb[j] == ub[j] {
             continue;
         }
-        // `ub_j` unreachable (literally `+inf`) => `r_j` can never be
-        // negative => `r_j >= 0` forced => `sum d_i*M_ij >= -c_j` =>
-        // `-sum d_i*M_ij <= c_j`.
-        //
-        // Deliberately *not* also firing on `orig_ub[j] > ub[j] + TOL`
-        // (a bound `propagate` tightened below the model's own): that
-        // reasoning silently assumed the row that justified the
-        // tightening is still part of `real_g_rows`/`a` by the time this
-        // runs, but `propagate` itself drops a row as redundant right
-        // after using it to tighten a bound (`propagate.rs`'s own
-        // redundant-row elimination) — so the row whose dual this t-row
-        // would need is frequently already gone, making the t-row's
-        // implicit "no other constraint keeps `x_j` off `orig_ub[j]`"
-        // premise false in the *current* row set and unsound in general
-        // (confirmed on Netlib `80bau3b`: it fixed 106 columns off a
-        // dual box containing no actual optimal dual solution, moving
-        // the objective by +1531).
+        // `ub_j = +inf` なら `r_j >= 0` が強制される: `-sum d_i*M_ij <= c_j`。
+        // (境界強化で `ub` が元より内側になっただけの場合は t 行を作らない。理由は履歴メモ参照。)
         if ub[j] == f64::INFINITY {
             t_rows.push(col_terms.col(j).iter().map(|&(i, v)| (i, -v)).collect());
             t_h.push(c[j]);
         }
-        // Symmetric case on the lower side.
+        // 下側の対称な場合: `lb_j = -inf` なら `sum d_i*M_ij <= -c_j`。
         if lb[j] == f64::NEG_INFINITY {
             t_rows.push(col_terms.col(j).to_vec());
             t_h.push(-c[j]);
         }
     }
 
-    // Sign constraint on every `G`-row's own dual: `mu_i >= 0`, i.e.
-    // `-mu_i <= 0` — folded in as a box row exactly like a variable's own
-    // bound, per `build_a_g`'s convention. `A`-row duals get no such row
-    // (free sign), matching `extract_bounds`'s "no row => infinite" rule.
+    // G 行の双対には符号制約 `mu_i >= 0` (`-mu_i <= 0`) を箱行として加える。A 行の双対は符号自由。
     //
-    // No column-derived row at all (no column with a literally infinite
-    // bound): the system is only those sign rows, which `propagate` would
-    // read straight back as the dual box (`-mu_i <= 0` -> `lb = 0.0 /
-    // -1.0`, everything else unbounded) without any propagation — built
-    // directly here instead of via the CSR build + `propagate` round trip.
+    // 列由来の t 行が一つもなければ、系は符号制約行だけなので、伝播を経由せずに双対の箱を直接作る
+    // (`propagate` が返すのと同じ値 `lb = 0.0 / -1.0`、それ以外は非有界)。
     let result = if t_rows.is_empty() {
         let mut lb = vec![f64::NEG_INFINITY; num_duals];
         for gi in 0..num_g {
@@ -270,28 +125,16 @@ pub fn run(n: usize, a: &Csr, real_g_rows: &[Vec<(usize, f64)>], c: &[f64], lb: 
         propagate::propagate_nog(num_duals, &t_g, &t_h, passes)
     };
     if result.infeasible {
-        // A genuinely infeasible dual system here would mean the primal
-        // is unbounded or infeasible outright — a real finding, but too
-        // strong a conclusion to act on from this single, partial (box-
-        // bound-driven) slice of the full dual system alone. Left for
-        // whichever existing pass (`propagate` on the primal side, the
-        // simplex/interior-point solve itself) is actually responsible
-        // for that determination; this call simply finds nothing usable.
+        // 双対系の一部だけから主問題の非有界・実行不能を結論するのは強すぎるので、
+        // ここでは「何も見つからなかった」として返し、判定は他の処理 (主側の propagate やソルバ本体) に任せる。
         return DualReductions::default();
     }
 
     let implied_equalities = (0..num_g).filter(|&gi| result.lb[num_a + gi] > TOL).collect();
 
-    // Column fixing (see the module docs' "Column fixing" section): for
-    // every column with at least one real-row appearance and not already
-    // fixed to a point, compute `r_j`'s range over the just-propagated
-    // dual box by plain interval arithmetic on `col_terms[j]` — reusing
-    // the same fixed point `implied_equalities` just read from, not a
-    // second propagation pass. `v > 0.0`'s branch pairs `dlo_i` with the
-    // range's low end and `dhi_i` with its high end (a positive
-    // coefficient preserves order); `v < 0.0` flips both pairings (matches
-    // interval multiplication by a negative scalar) — `col_terms` entries
-    // are never zero (filtered when built above), so no third case.
+    // 列固定: 実制約行に現れ、未固定の各列について、伝播済みの双対の箱上で区間演算により
+    // 被約費用 r_j の範囲 [rlo, rhi] を求める。負係数では区間の端が入れ替わる
+    // (`col_terms` に 0 係数はないので場合分けは 2 通り)。
     let mut fixed_columns = Vec::new();
     for j in 0..n {
         let terms = col_terms.col(j);
@@ -307,18 +150,10 @@ pub fn run(n: usize, a: &Csr, real_g_rows: &[Vec<(usize, f64)>], c: &[f64], lb: 
             rhi += thi;
         }
         if rlo.is_nan() || rhi.is_nan() {
-            // Only reachable if the propagated box itself is degenerate in
-            // a way `result.infeasible` didn't already catch (e.g. an
-            // `inf - inf` cancellation across two terms) — treat as
-            // "nothing proven" rather than risk acting on a bogus sign.
+            // `inf - inf` などで NaN になった場合は何も証明できなかったとみなす。
             continue;
         }
-        // `r_j > 0` everywhere the box allows => forced to `lb_j` (needs
-        // `lb_j` finite: an infinite one can never be "fixed" to, and by
-        // the same argument this module's row-promotion half already
-        // relies on, a genuinely infinite `lb_j` would instead have
-        // contributed its *own* `r_j <= 0` constraint above, making
-        // `rlo > TOL` here self-contradictory in practice).
+        // 箱全体で r_j > 0 なら下限へ、r_j < 0 なら上限へ固定する (固定先の境界が有限の場合のみ)。
         if rlo > TOL && lb[j] > f64::NEG_INFINITY {
             fixed_columns.push((j, lb[j]));
         } else if rhi < -TOL && ub[j] < f64::INFINITY {
@@ -329,10 +164,7 @@ pub fn run(n: usize, a: &Csr, real_g_rows: &[Vec<(usize, f64)>], c: &[f64], lb: 
     DualReductions { implied_equalities, fixed_columns }
 }
 
-/// Thin wrapper over [`run`] for callers wanting only the row-promotion
-/// half (and this module's own tests, written before [`DualReductions`]
-/// existed) — see [`run`]'s own docs for the shared derivation and the
-/// module docs' "Column fixing" section for the other half.
+/// [`run`] の含意等式 (行昇格) の結果だけを返す薄いラッパー。現在はこのモジュールのテストからのみ使用。
 pub fn find_implied_equalities(n: usize, a: &Csr, real_g_rows: &[Vec<(usize, f64)>], c: &[f64], lb: &[f64], ub: &[f64], orig_lb: &[f64], orig_ub: &[f64], passes: usize) -> Vec<usize> {
     run(n, a, real_g_rows, c, lb, ub, orig_lb, orig_ub, passes).implied_equalities
 }

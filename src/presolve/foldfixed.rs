@@ -1,61 +1,43 @@
-//! FoldFixed: drops every already-fixed column's own term from a set of
-//! rows, folding `coeff * value` into that row's own right-hand side
-//! instead — the "plug in a known constant" half of ordinary variable
-//! elimination that merely *fixing* a variable's bound (`dualfix`,
-//! [`super::dualpropagate`]'s column fixing, `rowsingleton`) leaves
-//! undone on its own: setting `lb[j] = ub[j] = value` only tells later
-//! passes *what* `x_j` is, not that a row still carrying its literal term
-//! has one fewer *live* variable than its own length says. Left undone, a
-//! row that starts with (say) 16 terms and has 14 of them fixed away
-//! elsewhere still *looks* like a 16-variable row to `rowsingleton` (wants
-//! exactly 1 live term), `doubleton` (wants exactly 2), and `aggregator`'s
-//! implied-free gate — none of which can fire on it until something drops
-//! those 14 dead terms and shrinks it down to the 2 genuinely live ones.
-//! (`doubleton`/`colsingleton`/`aggregator` themselves never leave this
-//! kind of residue behind for their *own* eliminated variable — each
-//! rewrites every row it touches directly — so this module exists purely
-//! to clean up after the bound-only fixers, which don't touch `A`/`G` at
-//! all.)
+//! FoldFixed (固定列の畳み込み): 既に固定された列 (`lb[j] == ub[j]`) の項を各行から取り除き、
+//! `coeff * value` を右辺へ移す。
 //!
-//! Run once per outer round, right after whichever passes did the fixing
-//! for that round (mirrors this crate's own "single pass, caller repeats
-//! via the round loop" idiom used throughout this pipeline — a column
-//! fixed by *this* round's own `rowsingleton` is picked up by *next*
-//! round's call, not re-scanned within this same one, since
-//! `ROWSINGLETON_COLSINGLETON_INNER_ROUNDS` defaults to a single inner
-//! pass anyway).
+//! `dualfix`・[`super::dualpropagate`] の列固定・`rowsingleton` は境界を固定するだけで
+//! `A`/`G` の行を書き換えないため、固定済み変数の項が行に残り、`rowsingleton`・`doubleton`・
+//! `aggregator` から見た「生きている項の数」が実際より多くなる。本モジュールはその後始末を行う。
+//! (`doubleton`/`colsingleton`/`aggregator` は自分で行を書き換えるのでこの残骸を残さない。)
+//!
+//! 外側ラウンドごとに 1 回、固定処理の直後に呼ばれる。同ラウンド内で新たに固定された列は
+//! 次ラウンドで処理される。
 
 use crate::types::RowSense;
 use crate::params::presolve::TOL;
 
+/// [`fold_fixed_columns`] の結果。
 pub struct FoldFixedResult {
+    /// 固定列の項を除いた後の行 (生きている項が 0 になった行は削除済み)
     pub rows: Vec<Vec<(usize, f64)>>,
+    /// `rows` に対応する、定数を畳み込んだ後の右辺
     pub rhs: Vec<f64>,
+    /// 項がすべて消えた行が矛盾し、実行不能と判明したか (true のとき他フィールドは空)
     pub infeasible: bool,
 }
 
-/// Drops every term whose column is fixed (`lb[j] == ub[j]`) from each of
-/// `rows`, subtracting `coeff * lb[j]` from that row's own `rhs` entry so
-/// the row stays algebraically identical with one fewer live variable —
-/// works identically for `A`'s equality rows and `G`'s real inequality
-/// rows, since folding a constant into the right-hand side needs no sign
-/// case analysis either way. `sense` only matters for a row that loses
-/// *every* term this way: [`RowSense::Eq`] needs the folded constant to
-/// already equal `rhs` (within `TOL`, else the row is a genuine
-/// infeasibility, same check `rowsingleton`'s own fixed-value case
-/// makes), [`RowSense::Le`] only needs `0 <= rhs'` (the row's own leftover
-/// slack must still be nonnegative, the same forcing-row-style check
-/// `propagate` already makes elsewhere) — [`RowSense::Ge`] is never
-/// actually passed (this crate's `G` rows are always pre-normalized to
-/// `<=`) but handled the mirror-image way for completeness rather than
-/// left to panic. A row that survives with zero live terms and passes
-/// this check is simply dropped (it now says nothing `rhs`'s own folded
-/// value doesn't already guarantee).
+/// `rows` の各行から固定列 (`lb[j] == ub[j]`) の項を取り除き、`coeff * lb[j]` を右辺から引く。
+///
+/// `A` の等式行にも `G` の実不等式行にも同じように使える。`sense` は項がすべて消えた行の
+/// 判定にのみ使う:
+/// - [`RowSense::Eq`]: 畳み込み後の右辺が `TOL` 以内で 0 であること
+/// - [`RowSense::Le`]: 畳み込み後の右辺が `-TOL` 以上 (余裕が非負) であること
+/// - [`RowSense::Ge`]: 実際には渡されない (`G` は常に `<=` 正規化済み) が、対称に扱う
+///
+/// 判定を通った空行は削除し、通らなければ実行不能を返す。明示的な 0 係数は右辺に触れず捨てる。
 pub fn fold_fixed_columns(rows: &[Vec<(usize, f64)>], rhs: &[f64], lb: &[f64], ub: &[f64], sense: RowSense) -> FoldFixedResult {
     let mut new_rows = Vec::with_capacity(rows.len());
     let mut new_rhs = Vec::with_capacity(rhs.len());
     for (row, &r) in rows.iter().zip(rhs.iter()) {
+        // 固定されていない (生きている) 項
         let mut live = Vec::with_capacity(row.len());
+        // 固定列の寄与を差し引いた右辺
         let mut folded = r;
         for &(j, v) in row {
             if v == 0.0 {
