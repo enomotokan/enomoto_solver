@@ -1819,6 +1819,7 @@ fn run_phase(
     let ratio_pivot_tol = if std::env::var("ENOMOTO_PRIMAL_RATIO_PIVOT_TOL_OLD").is_ok() { TOL } else { tunable!("ENOMOTO_T_FT_MIN_PIVOT", FT_MIN_PIVOT, f64) };
     let max_iters = max_iters_for(m, std.n_total);
     for iter_idx in 0..max_iters {
+        prof_phases::RUN_PHASE_ITERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let rhs = t.recompute_basics(lu);
 
         // Triggers (1) and (3): periodic residual / eta-file-fill checks.
@@ -2181,6 +2182,294 @@ fn run_phase(
     }
 
     Some(Status::Optimal) // iteration cap hit; best-effort
+}
+
+/// Incremental phase-2 primal simplex — the S4 alternative to
+/// [`run_phase`] for `extended_dual`'s polish -> primal handoff only
+/// (`ENOMOTO_HANDOFF_INCREMENTAL=1`, default off; see
+/// `analysis/simplex_loop_20260924_113533.md` §3.2/§4 S4).
+///
+/// [`run_phase`] re-derives everything every iteration: `x_B` from scratch
+/// (`compute_rhs` `O(nnz(A))` + an FTRAN), `y` by a BTRAN, every nonbasic
+/// column's reduced cost by a dot product, and the steepest-edge update's
+/// own two BTRANs (`rho`, `w`) plus two dot products per nonbasic column.
+/// On Netlib `pilot87` that made one handoff pivot cost 2.3x a dual one.
+/// This loop keeps `x_B` and `d` up to date incrementally instead, the way
+/// the dual loops do:
+///
+/// - `x_B` moves by the ratio test's own step (`run_phase` applies the
+///   same step, then discards it at its next `recompute_basics`), and is
+///   re-derived from scratch only at a refresh point (below);
+/// - `d` is updated from the pivot row: with `rho = B^-T e_r` and
+///   `alpha_r = rho^T A` (a row-wise PRICE over `rho`'s nonzeros),
+///   `d_j -= (d_q / alpha_rq) alpha_rj`, and the leaving column gets
+///   `-d_q / alpha_rq`;
+/// - the steepest-edge update reads `alpha_r` (and `w^T A`, gathered in the
+///   same row-wise pass over `w = B^-T alpha`'s nonzeros) instead of two
+///   dot products per nonbasic column; `ENOMOTO_HANDOFF_INC_DEVEX=1`
+///   swaps it for primal Devex (reference weights, `rho` only — one BTRAN
+///   per pivot instead of two).
+///
+/// Refresh points (fresh `x_B` via `recompute_basics` + the residual /
+/// eta-fill refactorization check, fresh `d` via one BTRAN on `c_B`): the
+/// first iteration, every EXPAND reset (`EXPAND_K` iterations, where the
+/// nonbasic values move anyway), after every refactorization, and — the
+/// correctness guard — before trusting either "no entering candidate"
+/// (`Optimal`) or "no blocking row" (`Unbounded`): the maintained `d` only
+/// proposes those, a freshly computed one confirms them, which is exactly
+/// the test [`run_phase`] applies every iteration.
+fn run_phase2_incremental(std: &StdForm, t: &mut Tableau, lu: &mut sparse_lu::FtLu, stall: &mut PrimalStallState) -> Option<Status> {
+    use std::sync::atomic::Ordering::Relaxed;
+    let m = std.n_rows;
+    let n = std.n_total;
+    let stall_limit = (5 * m).max(500);
+    let floor = tunable!("ENOMOTO_T_STEEPEST_EDGE_FLOOR", STEEPEST_EDGE_FLOOR, f64);
+    let min_pivot = tunable!("ENOMOTO_T_FT_MIN_PIVOT", FT_MIN_PIVOT, f64);
+    let harris = tunable!("ENOMOTO_T_PRIMAL_HARRIS_TOL", PRIMAL_HARRIS_TOL, f64);
+    let bump_limit = tunable!("ENOMOTO_T_FT_BUMP_LIMIT_FACTOR", FT_BUMP_LIMIT_FACTOR, usize) * m.max(1);
+    let use_devex = tunable!("ENOMOTO_HANDOFF_INC_DEVEX", 0u8, u8) != 0;
+    let mut expand = ExpandState::new();
+
+    let mut gamma: Vec<f64> = if use_devex { vec![1.0; n] } else { SteepestEdgeState::new(std).gamma };
+    let mut cost_b = vec![0.0; m];
+    let mut y = vec![0.0; m];
+    let mut scratch = vec![0.0; m];
+    let mut d = vec![0.0; n];
+    let mut a_enter = vec![0.0; m];
+    let mut alpha = vec![0.0; m];
+    let mut rho = vec![0.0; m];
+    let mut w = vec![0.0; m];
+    let mut ap = vec![0.0; n];
+    let mut tp = vec![0.0; n];
+    let mut touched = vec![false; n];
+    let mut touched_cols: Vec<usize> = Vec::new();
+
+    struct Candidate {
+        row: usize,
+        exact: f64,
+        relaxed: f64,
+        pivot_abs: f64,
+        hits_upper: bool,
+    }
+    let mut candidates: Vec<Candidate> = Vec::with_capacity(m);
+
+    let mut need_fresh = true;
+    let mut since_check = 0usize;
+    let max_iters = max_iters_for(m, n);
+    for _iter in 0..max_iters {
+        prof_phases::RUN_PHASE_ITERS.fetch_add(1, Relaxed);
+        let fresh_now = need_fresh;
+        if need_fresh {
+            need_fresh = false;
+            let rhs = t.recompute_basics(lu);
+            if lu.fill_count() > bump_limit || t.basis_residual_norm(&rhs) > FT_RESIDUAL_TOL {
+                *lu = try_refactorize(std, t, Some(&*lu))?;
+                t.recompute_basics(lu);
+            }
+            for i in 0..m {
+                cost_b[i] = std.c[t.basis[i]];
+            }
+            lu.solve_transpose_into(&cost_b, &mut scratch, &mut y);
+            for j in 0..n {
+                d[j] = if t.nb_status[j].is_some() { std.c[j] - sparse_dot_dense(t.column_sparse(j), &y) } else { 0.0 };
+            }
+        }
+
+        // Refactorization triggers (`run_phase`'s (3)/(4); its per-iteration
+        // residual check (1) is paid only at refresh points).
+        since_check += 1;
+        if since_check >= FT_CHECK_INTERVAL {
+            since_check = 0;
+            if lu.fill_count() > bump_limit {
+                *lu = try_refactorize(std, t, Some(&*lu))?;
+                need_fresh = true;
+                continue;
+            }
+        }
+        if lu.update_count() > FT_MAX_UPDATES {
+            *lu = try_refactorize(std, t, Some(&*lu))?;
+            need_fresh = true;
+            continue;
+        }
+
+        expand.delta += EXPAND_TAU;
+        expand.iters_since_reset += 1;
+        if expand.iters_since_reset >= EXPAND_K {
+            expand.iters_since_reset = 0;
+            expand.delta = EXPAND_DELTA_0;
+            t.expand_reset_nonbasics();
+            need_fresh = true;
+            continue;
+        }
+
+        // Pricing over the maintained `d` (`run_phase`'s `price_one`
+        // eligibility rule, without its per-column dot product).
+        let mut best: Option<(usize, f64, f64, f64)> = None;
+        for j in 0..n {
+            let Some(st) = t.nb_status[j] else { continue };
+            if std.lb[j] == std.ub[j] {
+                continue;
+            }
+            let dj = d[j];
+            let (eligible, dir) = match st {
+                NbStatus::Lower => (dj < -TOL, 1.0),
+                NbStatus::Upper => (dj > TOL, -1.0),
+                NbStatus::Zero => (true, if dj < 0.0 { 1.0 } else { -1.0 }),
+            };
+            if !(eligible && dj.abs() > TOL) {
+                continue;
+            }
+            if stall.bland_mode {
+                if best.is_none() {
+                    best = Some((j, 0.0, dir, dj));
+                }
+                continue;
+            }
+            let score = dj * dj / gamma[j].max(floor);
+            if best.map_or(true, |b| score > b.1) {
+                best = Some((j, score, dir, dj));
+            }
+        }
+        let Some((enter, _, best_dir, dj_enter)) = best else {
+            if fresh_now {
+                return Some(Status::Optimal);
+            }
+            need_fresh = true;
+            continue;
+        };
+
+        t.column_into(enter, &mut a_enter);
+        lu.solve_into(&a_enter, &mut scratch, &mut alpha);
+
+        // Ratio test: `run_phase`'s phase-2 Harris/EXPAND two-pass test.
+        let self_width = std.ub[enter] - std.lb[enter];
+        let init_alpha1 = if self_width.is_finite() { self_width } else { f64::INFINITY };
+        candidates.clear();
+        for i in 0..m {
+            let rate = -best_dir * alpha[i];
+            if rate.abs() <= min_pivot {
+                continue;
+            }
+            let var = t.basis[i];
+            let val = t.x[var];
+            let (bound, is_upper) = if rate < 0.0 { (std.lb[var], false) } else { (std.ub[var], true) };
+            if !bound.is_finite() {
+                continue;
+            }
+            let exact = (bound - val) / rate;
+            let relaxed_bound = if is_upper { bound + expand.delta } else { bound - expand.delta };
+            let relaxed = (relaxed_bound - val) / rate;
+            candidates.push(Candidate { row: i, exact, relaxed, pivot_abs: alpha[i].abs(), hits_upper: is_upper });
+        }
+        let alpha1 = candidates.iter().map(|c| c.relaxed).fold(init_alpha1, f64::min);
+        let admitted = candidates.iter().filter(|c| c.exact <= alpha1 + harris);
+        let leaving = if stall.bland_mode { admitted.min_by_key(|c| t.basis[c.row]) } else { admitted.max_by(|a, b| a.pivot_abs.total_cmp(&b.pivot_abs)) };
+        let (leaving_row, leaving_hits_upper, alpha2, best_pivot_mag) = match leaving {
+            Some(c) if c.pivot_abs > 0.0 => (Some(c.row), c.hits_upper, c.exact, c.pivot_abs),
+            _ => (None, false, 0.0, 0.0),
+        };
+        let theta = match leaving_row {
+            None => {
+                if !alpha1.is_finite() {
+                    if fresh_now {
+                        return Some(Status::Unbounded);
+                    }
+                    need_fresh = true;
+                    continue;
+                }
+                alpha1
+            }
+            Some(_) => alpha2.max(EXPAND_TAU / best_pivot_mag),
+        };
+
+        if (theta * dj_enter).abs() < STALL_PROGRESS_EPS {
+            stall.stall_count += 1;
+            if stall.stall_count > stall_limit {
+                stall.bland_mode = true;
+            }
+        } else {
+            stall.stall_count = 0;
+        }
+
+        for i in 0..m {
+            let var = t.basis[i];
+            t.x[var] -= best_dir * alpha[i] * theta;
+        }
+        t.x[enter] += best_dir * theta;
+
+        let Some(r) = leaving_row else {
+            let new_status = if best_dir > 0.0 { NbStatus::Upper } else { NbStatus::Lower };
+            t.nb_status[enter] = Some(new_status);
+            t.x[enter] = if best_dir > 0.0 { std.ub[enter] } else { std.lb[enter] };
+            continue;
+        };
+
+        // Pivot row (and, for steepest edge, `w^T A`) against the OLD basis.
+        lu.solve_transpose_unit(r, &mut scratch, &mut rho);
+        if !use_devex {
+            lu.solve_transpose_into(&alpha, &mut scratch, &mut w);
+        }
+        for i in 0..m {
+            let rv = rho[i];
+            let wv = if use_devex { 0.0 } else { w[i] };
+            if rv.abs() <= TOL && wv.abs() <= TOL {
+                continue;
+            }
+            for &(j, v) in std.rows.row(i) {
+                if std.lb[j] == std.ub[j] {
+                    continue;
+                }
+                if !touched[j] {
+                    touched[j] = true;
+                    touched_cols.push(j);
+                }
+                ap[j] += rv * v;
+                tp[j] += wv * v;
+            }
+        }
+
+        let pivot = alpha[r];
+        let theta_d = d[enter] / pivot;
+        let gamma_q = gamma[enter];
+
+        let leaving_var = t.basis[r];
+        t.nb_status[leaving_var] = Some(if leaving_hits_upper { NbStatus::Upper } else { NbStatus::Lower });
+        t.basis_pos[leaving_var] = None;
+        t.basis[r] = enter;
+        t.basis_pos[enter] = Some(r);
+        t.nb_status[enter] = None;
+
+        for &j in &touched_cols {
+            if t.nb_status[j].is_some() {
+                let beta = ap[j] / pivot;
+                if j != leaving_var {
+                    d[j] -= theta_d * ap[j];
+                    if use_devex {
+                        gamma[j] = gamma[j].max(beta * beta * gamma_q);
+                    }
+                }
+                if !use_devex {
+                    gamma[j] = (gamma[j] + beta * beta * (1.0 + gamma_q) - 2.0 * beta * tp[j]).max(floor);
+                }
+            }
+            ap[j] = 0.0;
+            tp[j] = 0.0;
+            touched[j] = false;
+        }
+        touched_cols.clear();
+        d[leaving_var] = -theta_d;
+        d[enter] = 0.0;
+        if use_devex {
+            gamma[leaving_var] = (gamma_q / (pivot * pivot)).max(1.0);
+        }
+
+        if !lu.try_update(r, &a_enter, min_pivot) {
+            *lu = try_refactorize(std, t, Some(&*lu))?;
+            need_fresh = true;
+        }
+    }
+
+    Some(Status::Optimal) // iteration cap hit; best-effort, as in `run_phase`
 }
 
 /// Above this many variables, a connected component found by
@@ -2985,6 +3274,10 @@ mod prof_phases {
     /// this common rather than a rare edge case.
     pub(super) static COMPUTE_RHS_COLS_TOTAL: AtomicUsize = AtomicUsize::new(0);
     pub(super) static COMPUTE_RHS_COLS_SKIPPED: AtomicUsize = AtomicUsize::new(0);
+    /// Iterations [`super::run_phase`] has run (cumulative, per process) —
+    /// read as a before/after difference by `extended_dual`'s primal
+    /// handoff diagnostic (`ENOMOTO_DEBUG_EXT_ITERS`).
+    pub(crate) static RUN_PHASE_ITERS: AtomicUsize = AtomicUsize::new(0);
     pub(super) static ITERS: AtomicUsize = AtomicUsize::new(0);
     /// Per-iteration *shape* of the chuzr/BFRT work, reported alongside
     /// the phase timings above when `ENOMOTO_DEBUG_CHUZR` is also set:

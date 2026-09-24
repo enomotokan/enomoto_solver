@@ -2659,6 +2659,12 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
             price_nb_end[i] = lo + n_nb;
         }
     }
+    // S9 (`ENOMOTO_PRICE_COLUMN=1`, default off): column-wise PRICE when
+    // `rho` is dense (`ENOMOTO_PRICE_COLUMN_DENSITY`, default 0.1 — HiGHS's
+    // own row/column switch point) — see the PRICE site below.
+    let price_by_column = tunable!("ENOMOTO_PRICE_COLUMN", 0u8, u8) != 0;
+    let price_column_density = tunable!("ENOMOTO_PRICE_COLUMN_DENSITY", 0.1, f64);
+    let price_col_list: Vec<u32> = if price_by_column { (0..std.n_total).filter(|&j| std.lb[j] != std.ub[j]).map(|j| j as u32).collect() } else { Vec::new() };
 
     // Dedicated to `solve_sparse_into` alone, per that method's own
     // documented precondition (`FtLu::solve_sparse_into`'s own docs) —
@@ -3536,8 +3542,37 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         // own M-bounding logic even fires for a single unbounded-above
         // column — routine for a plain `x_j >= 0` MPS column with no
         // explicit upper bound).
+        // S9 (`price_by_column`, default off): with a dense `rho` the
+        // row-wise scatter visits most of `A` anyway, so gather instead —
+        // one dot product `rho^T A_j` per non-fixed (and, under the
+        // default partition, nonbasic) column over `std.cols`, no
+        // `touched` bookkeeping per entry (HiGHS `priceByColumn`, used
+        // above density 0.1). Summation order changes from row order to
+        // column order, so `a_p` rounding and hence the path can differ.
+        let price_rows_end = if price_by_column && (rho.iter().filter(|v| v.abs() > TOL).count() as f64) > price_column_density * m as f64 {
+            timed!(profile_phases, prof_phases::PRICE, {
+                for &j in &price_col_list {
+                    let j = j as usize;
+                    if price_nonbasic_only && nb_status[j].is_none() {
+                        continue;
+                    }
+                    let mut acc = 0.0f64;
+                    for &(i, v) in std.cols.col(j) {
+                        acc += rho[i] * v;
+                    }
+                    if acc != 0.0 {
+                        a_p[j] = acc;
+                        touched[j] = true;
+                        touched_cols.push(j);
+                    }
+                }
+            });
+            0
+        } else {
+            m
+        };
         timed!(profile_phases, prof_phases::PRICE, {
-            for i in 0..m {
+            for i in 0..price_rows_end {
                 let rv = rho[i];
                 if rv.abs() <= TOL {
                     continue;
@@ -5006,7 +5041,14 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 if !need_refactor {
                     since_d_drift_check += 1;
                 }
-                if !need_refactor && since_d_drift_check >= super::RESIDUAL_CHECK_MULTIPLIER {
+                // `ENOMOTO_D_DRIFT_REFACTOR_ONLY=1` (S18, A/B, default off)
+                // drops this periodic check altogether and leaves `d`'s
+                // resync to the `fresh_d_into` every refactorization already
+                // does — measured to fire 0 times on all 93 Netlib problems
+                // (`analysis/simplex_loop_20260924_113533.md` §4 S18), so
+                // this only saves its BTRAN + `O(nnz(A))` every
+                // `RESIDUAL_CHECK_MULTIPLIER` checks.
+                if !need_refactor && since_d_drift_check >= super::RESIDUAL_CHECK_MULTIPLIER && tunable!("ENOMOTO_D_DRIFT_REFACTOR_ONLY", 0u8, u8) == 0 {
                     since_d_drift_check = 0;
                     fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fd_cb, &mut lu_scratch, &mut fd_y, &mut fresh_d_buf);
                     let mut resid_sq = 0.0f64;
@@ -5494,6 +5536,13 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
     let mut infeasible_rows = InfeasibleRows::new(m);
     infeasible_rows.rebuild(m, |i| row_infeasible_plain(std, basis, &x_b, &noise_feasible, i));
 
+    // S5 (`ENOMOTO_HANDOFF_FLIP=1`, default off): at most one restart of
+    // this loop on the true costs after bound-flipping the dual-infeasible
+    // boxed columns — see the restart site below.
+    let handoff_flip_mode = tunable!("ENOMOTO_HANDOFF_FLIP", 0u8, u8);
+    let handoff_flip = handoff_flip_mode != 0;
+    let mut flip_restarted = false;
+
     let max_iters = super::max_iters_for(m, n_total);
     for _iter in 0..max_iters {
         // chuzr: plain largest-deviation Dantzig rule, exactly as this
@@ -5587,14 +5636,101 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
                     true_d[j] = dj;
                 }
             }
-            let true_dual_feasible = (0..n_total).all(|j| match nb_status[j] {
-                None => true,
-                Some(NbStatus::Lower) => true_d[j] >= -TOL,
-                Some(NbStatus::Upper) => true_d[j] <= TOL,
-                Some(NbStatus::Zero) => true_d[j].abs() <= TOL,
-            });
+            // Fixed columns (`lb == ub`) are left out of this check: no
+            // pivot can ever move them (PRICE above and `run_phase`'s own
+            // `price_one` both skip them, and the main loop's `d`-drift
+            // check excludes them too), so a "wrong-signed" reduced cost
+            // on one is not a dual infeasibility anything could act on —
+            // counting it only sent the whole solve through a primal
+            // handoff that then found nothing to price
+            // (`analysis/simplex_loop_20260924_113533.md` §3.2: 36 of the
+            // 48 Netlib handoffs were exactly that). `polish_dual_tol` is
+            // `TOL` unless overridden (`ENOMOTO_POLISH_DUAL_TOL`, A/B).
+            let polish_dual_tol = tunable!("ENOMOTO_POLISH_DUAL_TOL", TOL, f64);
+            let exclude_fixed = tunable!("ENOMOTO_POLISH_DUAL_KEEP_FIXED", 0u8, u8) == 0;
+            let is_dual_bad = |j: usize| -> bool {
+                if exclude_fixed && std.lb[j] == std.ub[j] {
+                    return false;
+                }
+                match nb_status[j] {
+                    None => false,
+                    Some(NbStatus::Lower) => true_d[j] < -polish_dual_tol,
+                    Some(NbStatus::Upper) => true_d[j] > polish_dual_tol,
+                    Some(NbStatus::Zero) => true_d[j].abs() > polish_dual_tol,
+                }
+            };
+            let true_dual_feasible = !(0..n_total).any(is_dual_bad);
+            let mut t = super::Tableau { std, basis: basis.to_vec(), basis_pos: basis_pos.to_vec(), nb_status: nb_status.to_vec(), x };
             if true_dual_feasible {
-                return Some(SimplexResult { status: Status::Optimal, x: Some(x) });
+                // Only a fixed-column (or, with a loosened
+                // `ENOMOTO_POLISH_DUAL_TOL`, sub-tolerance) mismatch
+                // remained, or none at all. In the former case the old
+                // path handed off to `run_phase`, whose first iteration
+                // re-derives `x_B` from scratch (`recompute_basics`) and
+                // then stops with nothing to price — so this returns
+                // exactly that re-derived `x_B`, bit for bit, without the
+                // pricing/BTRAN/steepest-edge setup around it. When the
+                // unfiltered check passes as well, `x` is returned as it
+                // always was.
+                let any_bad_unfiltered = (0..n_total).any(|j| match nb_status[j] {
+                    None => false,
+                    Some(NbStatus::Lower) => true_d[j] < -TOL,
+                    Some(NbStatus::Upper) => true_d[j] > TOL,
+                    Some(NbStatus::Zero) => true_d[j].abs() > TOL,
+                });
+                if any_bad_unfiltered {
+                    t.recompute_basics(&lu);
+                    if std::env::var("ENOMOTO_DEBUG_EXT_ITERS").is_ok() {
+                        eprintln!("DEBUG_EXT: polish handoff skipped (only fixed-column/sub-tolerance dual infeasibilities)");
+                    }
+                    return Some(SimplexResult { status: Status::Optimal, x: Some(t.x[0..t.n_orig()].to_vec()) });
+                }
+                return Some(SimplexResult { status: Status::Optimal, x: Some(t.x) });
+            }
+            // S5 (`ENOMOTO_HANDOFF_FLIP=1`, default off;
+            // `analysis/simplex_loop_20260924_113533.md` §4 S5): when every
+            // true-cost dual infeasibility sits on a column whose opposite
+            // bound is finite, flipping those columns to that bound makes
+            // this basis dual feasible for the *true* costs (`d` itself
+            // does not move — only which sign it needs to have), at the
+            // price of primal infeasibility from the moved nonbasic values.
+            // That is exactly what this dual loop repairs, so it simply
+            // continues on the true reduced costs instead of handing off to
+            // the (per pivot costlier) primal method. Once only: a second
+            // failure — or any infeasibility on a free / one-sided column,
+            // which no flip can fix — still goes to the primal handoff
+            // below.
+            if handoff_flip && !flip_restarted {
+                let mut flips: Vec<usize> = Vec::new();
+                let mut unflippable = false;
+                for j in 0..n_total {
+                    if !is_dual_bad(j) {
+                        continue;
+                    }
+                    match nb_status[j] {
+                        Some(NbStatus::Lower) if std.ub[j].is_finite() => flips.push(j),
+                        Some(NbStatus::Upper) if std.lb[j].is_finite() => flips.push(j),
+                        _ => unflippable = true,
+                    }
+                }
+                if std::env::var("ENOMOTO_DEBUG_EXT_ITERS").is_ok() {
+                    eprintln!("DEBUG_EXT: polish flip candidates={} unflippable={unflippable} at polish_iter={_iter}", flips.len());
+                }
+                if (!unflippable || handoff_flip_mode >= 2) && !flips.is_empty() {
+                    for &j in &flips {
+                        nb_status[j] = Some(match nb_status[j] {
+                            Some(NbStatus::Lower) => NbStatus::Upper,
+                            _ => NbStatus::Lower,
+                        });
+                    }
+                    d.copy_from_slice(&true_d);
+                    lu.solve_into(&compute_rhs_plain(std, nb_status), &mut lu_scratch, &mut x_b);
+                    noise_feasible.fill(false);
+                    infeasible_rows.rebuild(m, |i| row_infeasible_plain(std, basis, &x_b, &noise_feasible, i));
+                    stall_count = 0;
+                    flip_restarted = true;
+                    continue;
+                }
             }
             // Perturbation masked a genuine dual infeasibility: this basis
             // is primal feasible (feasibility never depended on costs) but
@@ -5612,9 +5748,6 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
             // (unrelated quantities to this phase's own dual state;
             // `solve_lp_dual_on`'s own identical handoff confirms this only
             // costs pricing quality, not correctness).
-            let mut t = super::Tableau { std, basis: basis.to_vec(), basis_pos: basis_pos.to_vec(), nb_status: nb_status.to_vec(), x };
-            let mut expand = super::ExpandState::new();
-            let mut se = super::SteepestEdgeState::new(std);
             let mut stall = super::PrimalStallState::new();
             if std::env::var("ENOMOTO_DEBUG_EXT_ITERS").is_ok() {
                 eprintln!("DEBUG_EXT: polish DUAL->PRIMAL cleanup handoff at polish_iter={_iter}");
@@ -5628,21 +5761,26 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
             // already knows how to fall back (the existing `BIG_M`-clamped
             // classical path in `solve_lp_dual`) without that assumption.
             let handoff_t0 = std::time::Instant::now();
-            let status = super::run_phase(std, &mut t, false, &mut lu, &mut since_check, &mut expand, &mut se, &mut stall);
+            let handoff_iters0 = super::prof_phases::RUN_PHASE_ITERS.load(std::sync::atomic::Ordering::Relaxed);
+            // `ENOMOTO_HANDOFF_INCREMENTAL=1` (S4, default off): the
+            // incremental-`x_B`/`d` primal loop instead of `run_phase`'s
+            // recompute-everything one — same invariant and ratio test,
+            // different arithmetic, so the pivot path can differ.
+            let status = if tunable!("ENOMOTO_HANDOFF_INCREMENTAL", 0u8, u8) != 0 {
+                super::run_phase2_incremental(std, &mut t, &mut lu, &mut stall)
+            } else {
+                let mut expand = super::ExpandState::new();
+                let mut se = super::SteepestEdgeState::new(std);
+                super::run_phase(std, &mut t, false, &mut lu, &mut since_check, &mut expand, &mut se, &mut stall)
+            };
             if profile_phases_polish {
                 eprintln!("PROF_HANDOFF run_phase={:.3}ms ok={}", handoff_t0.elapsed().as_secs_f64() * 1e3, status.is_some());
             }
             let status = status?;
             if std::env::var("ENOMOTO_DEBUG_EXT_ITERS").is_ok() {
-                let n_bad = (0..n_total)
-                    .filter(|&j| match nb_status[j] {
-                        None => false,
-                        Some(NbStatus::Lower) => true_d[j] < -TOL,
-                        Some(NbStatus::Upper) => true_d[j] > TOL,
-                        Some(NbStatus::Zero) => true_d[j].abs() > TOL,
-                    })
-                    .count();
-                eprintln!("DEBUG_EXT: primal_handoff_us={} dual_infeasible_cols={n_bad}", handoff_t0.elapsed().as_micros());
+                let n_bad = (0..n_total).filter(|&j| is_dual_bad(j)).count();
+                let handoff_iters = super::prof_phases::RUN_PHASE_ITERS.load(std::sync::atomic::Ordering::Relaxed) - handoff_iters0;
+                eprintln!("DEBUG_EXT: primal_handoff_us={} dual_infeasible_cols={n_bad} primal_handoff_iters={handoff_iters}", handoff_t0.elapsed().as_micros());
             }
             return Some(SimplexResult {
                 status: status.clone(),
