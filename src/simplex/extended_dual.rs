@@ -454,6 +454,11 @@ mod prof_phases {
                 sparse_lu::PROF_FULL_NNZ.load(Relaxed) as f64
                     / sparse_lu::PROF_FULL_COUNT.load(Relaxed).max(1) as f64,
             );
+            eprintln!(
+                "  lu_dense_switch: count={} rows={}",
+                sparse_lu::PROF_DENSE_SWITCH.load(Relaxed),
+                sparse_lu::PROF_DENSE_SWITCH_ROWS.load(Relaxed),
+            );
         }
         eprintln!(
             "  density_gate_ftrans={} final_expected_density col_aq={:.3} bfrt={:.3}",
@@ -1337,7 +1342,18 @@ fn refactorize(
     prev: Option<&sparse_lu::FtLu>,
 ) -> Option<sparse_lu::FtLu> {
     let m = std.n_rows;
-    let mut rows = vec![Vec::new(); m];
+    // The row lists are recycled across refactorizations (thread-local):
+    // cleared, not reallocated, so each row keeps its capacity. Contents and
+    // order are exactly those of fresh lists.
+    thread_local! {
+        static ROWS: std::cell::RefCell<Vec<Vec<(usize, f64)>>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+    let mut rows = ROWS.with(|r| std::mem::take(&mut *r.borrow_mut()));
+    rows.truncate(m);
+    for row in rows.iter_mut() {
+        row.clear();
+    }
+    rows.resize_with(m, Vec::new);
     // Column-driven, via `std.cols` — `nnz(A_B)` work instead of the
     // `nnz(A)` scan this replaced, which read every nonbasic entry only to
     // drop it. Visiting `j` in ascending order reproduces each row's entry
@@ -1353,6 +1369,7 @@ fn refactorize(
     let r = sparse_lu::factorize_diagonal(m, &rows)
         .map(sparse_lu::FtLu::new)
         .or_else(|| sparse_lu::factorize_reusing(m, &rows, prev));
+    ROWS.with(|r| *r.borrow_mut() = rows);
     if r.is_none() && std::env::var("ENOMOTO_DEBUG_EXT_ITERS").is_ok() {
         eprintln!("DEBUG_EXT_BAILOUT: refactorize returned None (singular basis)");
     }
@@ -2565,6 +2582,14 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     // FTRAN ([`sparse_lu::FtLu::solve_into_pair_capture`]); `lu_scratch`
     // serves the entering-column half, as it does for the plain dense solve.
     let mut tau_scratch = vec![0.0f64; m];
+    // Nonzero steps of this iteration's `rho` (recorded by its BTRAN) so the
+    // fused `tau` FTRAN's `L` stage can take the Gilbert-Peierls path — see
+    // [`sparse_lu::StepCapture`]. Bit-identical to the dense `L` stage.
+    let mut rho_steps = sparse_lu::StepCapture::new(m);
+    // Dedicated zero-kept scratch + touched-position lists for the pivotal-row
+    // BTRAN — see [`sparse_lu::UnitBtranWork`]. `e_tilde_buf` must not be
+    // written by anything else in this loop (it is not).
+    let mut btran_work = sparse_lu::UnitBtranWork::new(m);
     // `ENOMOTO_FUSED_DSE_FTRAN=0` restores the two separate solves (A/B
     // only — the fused form is bit-identical, see its own docs).
     let fused_dse_ftran = std::env::var("ENOMOTO_FUSED_DSE_FTRAN").map_or(true, |v| v != "0");
@@ -3500,7 +3525,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         // call further down — see `FtLu::try_update_precomputed`'s own
         // docs for why this is bit-for-bit the value that call would
         // otherwise recompute from scratch.
-        timed!(profile_phases, prof_phases::BTRAN, lu.solve_transpose_unit_capture(r, &mut lu_scratch, &mut rho, &mut e_tilde_buf));
+        timed!(profile_phases, prof_phases::BTRAN, lu.solve_transpose_unit_work(r, &mut rho, &mut e_tilde_buf, &mut btran_work, Some(&mut rho_steps)));
         if profile_phases {
             let exact_w = dot(&rho, &rho);
             let maintained_w = weights.weight(r);
@@ -4232,6 +4257,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                         &mut tau,
                         &mut combined_alpha_base,
                         &mut a_tilde_buf,
+                        Some(&mut rho_steps),
                     );
                     combined_base_nnz = c_nnz;
                     tau_ready = true;
@@ -4241,7 +4267,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                     // separately inside the weight update below, against
                     // this same pre-pivot `lu` and the same `rho`) fused
                     // into this one — see `solve_into_pair_capture`'s docs.
-                    let (a_nnz, _) = lu.solve_into_pair_capture(&dense_q, &rho, &mut lu_scratch, &mut tau_scratch, &mut alpha_full, &mut tau, &mut a_tilde_buf);
+                    let (a_nnz, _) = lu.solve_into_pair_capture(&dense_q, &rho, &mut lu_scratch, &mut tau_scratch, &mut alpha_full, &mut tau, &mut a_tilde_buf, Some(&mut rho_steps));
                     tau_ready = true;
                     a_nnz
                 } else {
@@ -4265,6 +4291,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                         &mut tau,
                         &mut combined_alpha_base,
                         &mut a_tilde_buf,
+                        Some(&mut rho_steps),
                     );
                     combined_base_nnz = c_nnz;
                     tau_ready = true;
@@ -4279,6 +4306,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                         &mut alpha_full,
                         &mut tau,
                         &mut a_tilde_buf,
+                        Some(&mut rho_steps),
                     );
                     tau_ready = true;
                     a_nnz
