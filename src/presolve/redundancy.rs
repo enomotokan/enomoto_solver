@@ -146,7 +146,7 @@ pub fn reduce_equalities(a: &Csr, b: &[f64], n: usize, lb: &[f64], ub: &[f64]) -
     let deduped = dedupe_rows(rows);
     let nnz: usize = deduped.iter().map(|(row, _)| row.len()).sum();
     let density = nnz as f64 / (deduped.len() as f64 * n.max(1) as f64);
-    let keep = if density > DENSE_DENSITY_THRESHOLD {
+    let keep = if density > tunable!("ENOMOTO_T_DENSE_DENSITY_THRESHOLD", DENSE_DENSITY_THRESHOLD, f64) {
         drop_linearly_dependent(&deduped, n)
     } else {
         drop_linearly_dependent_sparse_blocked(&deduped, n, lb, ub)
@@ -269,7 +269,7 @@ fn drop_linearly_dependent(rows: &[(Vec<(usize, f64)>, f64)], n: usize) -> Vec<u
     let mut keep = vec![true; p];
     for k in 0..rank_dim {
         let orig = fwd[k];
-        if r[(k, k)].abs() <= 1e-9 * col_norm(orig).max(1e-300) {
+        if r[(k, k)].abs() <= tunable!("ENOMOTO_T_REDEQ_QR_RANK_TOL", 1e-9, f64) * col_norm(orig).max(1e-300) {
             keep[orig] = false;
         }
     }
@@ -535,7 +535,7 @@ fn drop_linearly_dependent_sparse(rows_in: &[(Vec<(usize, f64)>, f64)], n: usize
         let Some(gmax) = gmax else {
             break; // every active column is entirely zero
         };
-        let threshold = PIVOT_STABILITY * gmax;
+        let threshold = tunable!("ENOMOTO_T_REDEQ_PIVOT_STABILITY", PIVOT_STABILITY, f64) * gmax;
 
         // Ascending-degree bucket scan over columns, exactly like
         // `find_best_pivot`, but a candidate is only ever recorded into
@@ -628,7 +628,7 @@ fn drop_linearly_dependent_sparse(rows_in: &[(Vec<(usize, f64)>, f64)], n: usize
 
         // Dependency test: is what's left of this row, at the point it
         // was chosen, negligible relative to its own *original* scale?
-        if pivot_val.abs() <= DEP_TOL * row_orig_norm[pi].max(1e-300) {
+        if pivot_val.abs() <= tunable!("ENOMOTO_T_REDEQ_DEP_TOL", DEP_TOL, f64) * row_orig_norm[pi].max(1e-300) {
             // Dependent: drop it (leave `keep[pi] = false`) without
             // eliminating — it contributes no independent structure to
             // scatter into the other rows. This branch never reaches the
@@ -899,7 +899,7 @@ const MIN_ROWS_FOR_BLOCK_DECOMPOSE: usize = 300;
 /// case): that reduction happens entirely from real columns within one
 /// block, so it is still caught correctly and entirely locally.
 fn drop_linearly_dependent_sparse_blocked(rows_in: &[(Vec<(usize, f64)>, f64)], n: usize, lb: &[f64], ub: &[f64]) -> Vec<usize> {
-    if rows_in.len() < MIN_ROWS_FOR_BLOCK_DECOMPOSE {
+    if rows_in.len() < tunable!("ENOMOTO_T_MIN_ROWS_FOR_BLOCK_DECOMPOSE", MIN_ROWS_FOR_BLOCK_DECOMPOSE, usize) {
         return drop_linearly_dependent_sparse(rows_in, n);
     }
     let components = dulmage_mendelsohn_blocks(rows_in, n, lb, ub);
@@ -955,7 +955,7 @@ fn drop_linearly_dependent_sparse_blocked(rows_in: &[(Vec<(usize, f64)>, f64)], 
     };
 
     let total_nontrivial_rows: usize = nontrivial.iter().map(|c| c.len()).sum();
-    if nontrivial.len() > 1 && total_nontrivial_rows >= PARALLEL_DECOMPOSE_ROW_THRESHOLD {
+    if nontrivial.len() > 1 && total_nontrivial_rows >= tunable!("ENOMOTO_T_PARALLEL_DECOMPOSE_ROW_THRESHOLD", PARALLEL_DECOMPOSE_ROW_THRESHOLD, usize) {
         use rayon::prelude::*;
         kept.extend(nontrivial.par_iter().flat_map(|c| solve_component(c)).collect::<Vec<usize>>());
     } else {

@@ -229,7 +229,7 @@ pub fn eliminate_free_variables(n: usize, a: &Csr, b: &[f64], c: &[f64], lb: &[f
         let coeff = best_coeff;
         let pivot_row = a_rows[best_i].clone();
         let row_max = pivot_row.iter().map(|&(_, v)| v.abs()).fold(0.0f64, f64::max);
-        if coeff.abs() < SUBSTITUTION_PIVOT_RATIO * row_max {
+        if coeff.abs() < tunable!("ENOMOTO_T_FV_SUBSTITUTION_PIVOT_RATIO", SUBSTITUTION_PIVOT_RATIO, f64) * row_max {
             skip_a[j] = true;
             continue;
         }
@@ -306,7 +306,7 @@ pub fn eliminate_free_variables(n: usize, a: &Csr, b: &[f64], c: &[f64], lb: &[f
         let row = real_rows[i].clone();
         let coeff = row.iter().find(|&&(k, _)| k == j).unwrap().1;
         let row_max = row.iter().map(|&(_, v)| v.abs()).fold(0.0f64, f64::max);
-        if coeff.abs() < SUBSTITUTION_PIVOT_RATIO * row_max {
+        if coeff.abs() < tunable!("ENOMOTO_T_FV_SUBSTITUTION_PIVOT_RATIO", SUBSTITUTION_PIVOT_RATIO, f64) * row_max {
             skip_g[j] = true;
             continue;
         }

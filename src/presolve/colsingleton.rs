@@ -183,7 +183,7 @@ pub fn eliminate_singleton_equalities(n: usize, a: &Csr, b: &[f64], g: &Csr, h: 
         // objective slightly *below* the true optimum. Such a column is
         // simply left in the problem.
         let row_max = row.iter().map(|&(_, v)| v.abs()).fold(0.0f64, f64::max);
-        if coeff.abs() < SUBSTITUTION_PIVOT_RATIO * row_max {
+        if coeff.abs() < tunable!("ENOMOTO_T_CS_SUBSTITUTION_PIVOT_RATIO", SUBSTITUTION_PIVOT_RATIO, f64) * row_max {
             continue;
         }
         let terms: Vec<(usize, f64)> = row.iter().filter(|&&(k, _)| k != j).cloned().collect();

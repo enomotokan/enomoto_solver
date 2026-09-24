@@ -472,12 +472,15 @@ pub fn run_extended(
     // doubleton-equality row (measured to be rare enough in practice that
     // this one-way latch is worth its own presolve-time savings).
     let mut doubleton_active = true;
+    // Consecutive empty calls before the latch engages (`ENOMOTO_T_DOUBLETON_STRIKES`).
+    let mut doubleton_empty_streak = 0usize;
 
     // Same one-way latch, same reason: `dualpropagate`'s own transpose-and-
     // propagate call is a full-matrix pass, worth skipping once a round's
     // call finds neither a new implied-equality row to promote nor a new
     // column to fix (its two reductions — see `dualpropagate::run`'s docs).
     let mut dualpropagate_active = true;
+    let mut dualpropagate_empty_streak = 0usize;
 
     // Same one-way latch, same reason again: `parallelcols`'s own
     // signature-grouping scan is a full-matrix pass (see its own module
@@ -496,7 +499,7 @@ pub fn run_extended(
     // cost one avoidable extra call across its own 9 rounds, judged not
     // worth a third latch state to also chase down.
     let mut parallelcols_active = true;
-    let mut parallelcols_prev_empty = false;
+    let mut parallelcols_empty_streak = 0usize;
 
     // Fixpoint detection: a round that leaves `a`/`g`'s row counts and
     // every bound unchanged found nothing a further round could act on
@@ -546,7 +549,7 @@ pub fn run_extended(
         // absolute ~0.13s) is this trade-off's known remaining cost — see
         // this function's own module docs and the loop's analysis file for
         // the full comparison table.
-        if _round_idx < 2 {
+        if _round_idx < tunable!("ENOMOTO_T_EQPROP_ROUNDS", 2, usize) {
             let eq = timed_step!("eqprop", propagate::propagate_equalities(&a, &b, &mut lb, &mut ub, prop_passes));
             if eq.infeasible {
                 return extended_infeasible(sc, a, b, c, n);
@@ -595,8 +598,12 @@ pub fn run_extended(
         if dualpropagate_active {
             let dual_red = timed_step!("dualpropagate", dualpropagate::run(n, &a, &cur_real_rows, &c, &lb, &ub, &orig_lb, &orig_ub, prop_passes));
             if dual_red.implied_equalities.is_empty() && dual_red.fixed_columns.is_empty() {
-                dualpropagate_active = false;
+                dualpropagate_empty_streak += 1;
+                if dualpropagate_empty_streak >= tunable!("ENOMOTO_T_DUALPROPAGATE_STRIKES", 1, usize) {
+                    dualpropagate_active = false;
+                }
             } else {
+                dualpropagate_empty_streak = 0;
                 if std::env::var("ENOMOTO_DEBUG_DUALPROPAGATE").is_ok() {
                     eprintln!("DEBUG_DUALPROPAGATE: implied_equalities={} fixed_columns={}", dual_red.implied_equalities.len(), dual_red.fixed_columns.len());
                 }
@@ -739,7 +746,12 @@ pub fn run_extended(
             if _inner == 0 && doubleton_active {
                 let dbl = timed_step!("doubleton", doubleton::eliminate_doubleton_equalities(n, &a, &b, &g, &h, &c));
                 if dbl.substitutions.is_empty() {
-                    doubleton_active = false;
+                    doubleton_empty_streak += 1;
+                    if doubleton_empty_streak >= tunable!("ENOMOTO_T_DOUBLETON_STRIKES", 1, usize) {
+                        doubleton_active = false;
+                    }
+                } else {
+                    doubleton_empty_streak = 0;
                 }
                 a = dbl.a;
                 b = dbl.b;
@@ -1011,12 +1023,12 @@ pub fn run_extended(
                 eprintln!("DEBUG_PARALLELCOLS: eliminated={}", pc.substitutions.len());
             }
             if pc.substitutions.is_empty() {
-                if parallelcols_prev_empty {
+                parallelcols_empty_streak += 1;
+                if parallelcols_empty_streak >= tunable!("ENOMOTO_T_PARALLELCOLS_STRIKES", 2, usize) {
                     parallelcols_active = false;
                 }
-                parallelcols_prev_empty = true;
             } else {
-                parallelcols_prev_empty = false;
+                parallelcols_empty_streak = 0;
                 a = pc.a;
                 c = pc.c;
                 lb = pc.lb;
@@ -1089,7 +1101,7 @@ pub fn run_extended(
             if std::env::var("ENOMOTO_FIXPOINT_EXACT").is_ok() {
                 return *p == signature;
             }
-            let close = |x: &[f64], y: &[f64]| x.iter().zip(y).all(|(&u, &v)| u == v || (u - v).abs() <= 1e-3 * (1.0 + u.abs().max(v.abs())));
+            let close = |x: &[f64], y: &[f64]| x.iter().zip(y).all(|(&u, &v)| u == v || (u - v).abs() <= tunable!("ENOMOTO_T_FIXPOINT_RELTOL", 1e-3, f64) * (1.0 + u.abs().max(v.abs())));
             p.0 == signature.0 && p.1 == signature.1 && close(&p.2, &signature.2) && close(&p.3, &signature.3)
         };
         if prev_signature.as_ref().is_some_and(same) {

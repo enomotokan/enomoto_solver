@@ -987,7 +987,18 @@ fn build_std_form_presolved(
 
     let (a, b, g, h) = presolve::build_a_g(variables, constraints);
 
-    let pre = presolve::run_extended(n, &a, &b, &g, &h, &c0, RUIZ_ITERS, PROPAGATION_PASSES, PRESOLVE_ROUNDS, ROWSINGLETON_COLSINGLETON_INNER_ROUNDS);
+    let pre = presolve::run_extended(
+        n,
+        &a,
+        &b,
+        &g,
+        &h,
+        &c0,
+        tunable!("ENOMOTO_T_RUIZ_ITERS", RUIZ_ITERS, usize),
+        tunable!("ENOMOTO_T_PROPAGATION_PASSES", PROPAGATION_PASSES, usize),
+        tunable!("ENOMOTO_T_PRESOLVE_ROUNDS", PRESOLVE_ROUNDS, usize),
+        tunable!("ENOMOTO_T_INNER_ROUNDS", ROWSINGLETON_COLSINGLETON_INNER_ROUNDS, usize),
+    );
     if std::env::var("ENOMOTO_DEBUG_PRESOLVE_INFEAS").is_ok() {
         eprintln!("DEBUG_PRESOLVE: infeasible={} unbounded={}", pre.infeasible, pre.unbounded);
     }

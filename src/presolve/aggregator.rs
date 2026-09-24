@@ -435,7 +435,7 @@ pub fn eliminate_implied_free_columns_if_any(n: usize, a: &Csr, b: &[f64], c: &[
             continue;
         }
         let row_max = pivot_row.iter().map(|&(_, v)| v.abs()).fold(0.0f64, f64::max);
-        if coeff.abs() < SUBSTITUTION_PIVOT_RATIO * row_max {
+        if coeff.abs() < tunable!("ENOMOTO_T_SUBSTITUTION_PIVOT_RATIO", SUBSTITUTION_PIVOT_RATIO, f64) * row_max {
             // This specific (row, col) pair fails the numerical guard --
             // unlike a plain eligibility failure, a *different* row for the
             // same column may still be a later candidate in this same list
@@ -480,9 +480,9 @@ pub fn eliminate_implied_free_columns_if_any(n: usize, a: &Csr, b: &[f64], c: &[
             }
             fillin_cost(&terms, &targets)
         };
-        if fillin > MAX_FILLIN {
+        if fillin > tunable!("ENOMOTO_T_MAX_FILLIN", MAX_FILLIN, usize) {
             consecutive_fillin_failures += 1;
-            if consecutive_fillin_failures >= MAX_CONSECUTIVE_FILLIN_FAILURES {
+            if consecutive_fillin_failures >= tunable!("ENOMOTO_T_MAX_CONSECUTIVE_FILLIN_FAILURES", MAX_CONSECUTIVE_FILLIN_FAILURES, usize) {
                 break;
             }
             continue;
@@ -750,7 +750,7 @@ pub fn eliminate_implied_free_columns_xrow(n: usize, a: &Csr, b: &[f64], c: &[f6
             let row = &a_rows[i];
             let Some(&(_, coeff)) = row.iter().find(|&&(k, _)| k == j) else { continue };
             let row_max = row.iter().map(|&(_, v)| v.abs()).fold(0.0f64, f64::max);
-            if coeff.abs() >= SUBSTITUTION_PIVOT_RATIO * row_max {
+            if coeff.abs() >= tunable!("ENOMOTO_T_SUBSTITUTION_PIVOT_RATIO", SUBSTITUTION_PIVOT_RATIO, f64) * row_max {
                 chosen = Some((i, coeff));
                 break;
             }
@@ -783,9 +783,9 @@ pub fn eliminate_implied_free_columns_xrow(n: usize, a: &Csr, b: &[f64], c: &[f6
             }
             fillin_cost(&terms, &targets)
         };
-        if fillin > MAX_FILLIN {
+        if fillin > tunable!("ENOMOTO_T_MAX_FILLIN", MAX_FILLIN, usize) {
             consecutive_fillin_failures += 1;
-            if consecutive_fillin_failures >= MAX_CONSECUTIVE_FILLIN_FAILURES {
+            if consecutive_fillin_failures >= tunable!("ENOMOTO_T_MAX_CONSECUTIVE_FILLIN_FAILURES", MAX_CONSECUTIVE_FILLIN_FAILURES, usize) {
                 break;
             }
             continue;
@@ -1012,7 +1012,7 @@ pub fn eliminate_implied_free_columns_v2(n: usize, a: &Csr, b: &[f64], c: &[f64]
         by_len.sort_by_key(|&(i, _)| a_rows[i].len());
         let Some((row_idx, coeff)) = by_len.into_iter().find(|&(i, coeff)| {
             let row_max = *row_max_a[i].get_or_insert_with(|| a_rows[i].iter().map(|&(_, v)| v.abs()).fold(0.0f64, f64::max));
-            coeff.abs() >= SUBSTITUTION_PIVOT_RATIO * row_max
+            coeff.abs() >= tunable!("ENOMOTO_T_SUBSTITUTION_PIVOT_RATIO", SUBSTITUTION_PIVOT_RATIO, f64) * row_max
         }) else {
             continue;
         };
@@ -1037,9 +1037,9 @@ pub fn eliminate_implied_free_columns_v2(n: usize, a: &Csr, b: &[f64], c: &[f64]
                 gross += terms.iter().filter(|&&(k, _)| stamp[k] != stamp_id).count() as i64;
             }
             let fillin = if opts.net_fillin { gross - (pivot_row.len() + n_other) as i64 } else { gross };
-            if fillin > MAX_FILLIN as i64 {
+            if fillin > tunable!("ENOMOTO_T_MAX_FILLIN", MAX_FILLIN, usize) as i64 {
                 consecutive_fillin_failures += 1;
-                if opts.fillin_break && consecutive_fillin_failures >= MAX_CONSECUTIVE_FILLIN_FAILURES {
+                if opts.fillin_break && consecutive_fillin_failures >= tunable!("ENOMOTO_T_MAX_CONSECUTIVE_FILLIN_FAILURES", MAX_CONSECUTIVE_FILLIN_FAILURES, usize) {
                     break;
                 }
                 continue;

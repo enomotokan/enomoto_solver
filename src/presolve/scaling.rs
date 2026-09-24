@@ -131,7 +131,7 @@ pub fn compute(n: usize, a: &Csr, g: &Csr, c: &[f64], iters: usize) -> Scaling {
     // Decided once from the combined row count against
     // `RAYON_SIZE_THRESHOLD` — see that constant's own docs for why this
     // replaced an earlier run-both-and-time self-calibration.
-    let use_parallel_fold = (p + m) > RAYON_SIZE_THRESHOLD;
+    let use_parallel_fold = (p + m) > tunable!("ENOMOTO_T_SCALING_RAYON_SIZE_THRESHOLD", RAYON_SIZE_THRESHOLD, usize);
 
     for _ in 0..iters {
         col_norm.fill(0.0);
@@ -150,7 +150,7 @@ pub fn compute(n: usize, a: &Csr, g: &Csr, c: &[f64], iters: usize) -> Scaling {
         }
 
         for j in 0..n {
-            if col_norm[j] > 1e-12 {
+            if col_norm[j] > tunable!("ENOMOTO_T_SCALING_ZERO_TOL", 1e-12, f64) {
                 d[j] /= col_norm[j].sqrt();
             }
         }
@@ -163,7 +163,7 @@ pub fn compute(n: usize, a: &Csr, g: &Csr, c: &[f64], iters: usize) -> Scaling {
             for (j, v) in csr_row_iter(a, i) {
                 row_norm = row_norm.max((v * d[j] * old_e).abs());
             }
-            if row_norm > 1e-12 {
+            if row_norm > tunable!("ENOMOTO_T_SCALING_ZERO_TOL", 1e-12, f64) {
                 *e = old_e / row_norm.sqrt();
             }
         }
@@ -173,7 +173,7 @@ pub fn compute(n: usize, a: &Csr, g: &Csr, c: &[f64], iters: usize) -> Scaling {
             for (j, v) in csr_row_iter(g, i) {
                 row_norm = row_norm.max((v * d[j] * old_e).abs());
             }
-            if row_norm > 1e-12 {
+            if row_norm > tunable!("ENOMOTO_T_SCALING_ZERO_TOL", 1e-12, f64) {
                 *e = old_e / row_norm.sqrt();
             }
         }
