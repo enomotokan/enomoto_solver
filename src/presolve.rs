@@ -110,7 +110,7 @@ pub mod smallcoeff;
 pub mod sparsify;
 pub mod stuffing;
 
-use crate::sparse::{Csr, csr_from_rows, csr_row_vec, csr_rows};
+use crate::sparse::{Csr, CsrRowBuilder, csr_from_rows, csr_row_vec, csr_rows};
 use crate::types::{ConstraintRow, RowSense, VariableData};
 use scaling::Scaling;
 
@@ -126,6 +126,76 @@ use scaling::Scaling;
 /// adds its own `c` from `obj_coeffs_for_min`) and `simplex.rs`'s presolve
 /// entry point.
 pub fn build_a_g(variables: &[VariableData], constraints: &[ConstraintRow]) -> (Csr, Vec<f64>, Csr, Vec<f64>) {
+    // Straight into two `CsrRowBuilder`s (one reused row buffer, no `Vec`
+    // per row or per bound row): the same rows in the same order through
+    // the same `push_row`/`push_singleton` logic `csr_from_rows` itself
+    // uses, so the same matrices bit for bit; a row the builder rejects
+    // (out-of-range column) falls back to the original construction below.
+    if let Some(r) = build_a_g_direct(variables, constraints) {
+        return r;
+    }
+    build_a_g_rows(variables, constraints)
+}
+
+fn build_a_g_direct(variables: &[VariableData], constraints: &[ConstraintRow]) -> Option<(Csr, Vec<f64>, Csr, Vec<f64>)> {
+    let n = variables.len();
+    let (mut nnz_a, mut nnz_g, mut rows_a) = (0usize, 0usize, 0usize);
+    for row in constraints {
+        if matches!(row.sense, RowSense::Eq) {
+            nnz_a += row.expr.coeffs.len();
+            rows_a += 1;
+        } else {
+            nnz_g += row.expr.coeffs.len();
+        }
+    }
+    let n_bounds = variables.iter().map(|v| v.ub.is_finite() as usize + v.lb.is_finite() as usize).sum::<usize>();
+    let rows_g = constraints.len() - rows_a + n_bounds;
+    let mut a = CsrRowBuilder::with_capacity(n, rows_a, nnz_a);
+    let mut g = CsrRowBuilder::with_capacity(n, rows_g, nnz_g + n_bounds);
+    let mut b: Vec<f64> = Vec::with_capacity(rows_a);
+    let mut h: Vec<f64> = Vec::with_capacity(rows_g);
+    let mut buf: Vec<(usize, f64)> = Vec::new();
+    for row in constraints {
+        let rhs = row.rhs - row.expr.constant;
+        buf.clear();
+        match row.sense {
+            RowSense::Eq => {
+                buf.extend(row.expr.coeffs.iter().map(|(&j, &v)| (j, v)));
+                if !a.push_row(&buf) {
+                    return None;
+                }
+                b.push(rhs);
+            }
+            RowSense::Le => {
+                buf.extend(row.expr.coeffs.iter().map(|(&j, &v)| (j, v)));
+                if !g.push_row(&buf) {
+                    return None;
+                }
+                h.push(rhs);
+            }
+            RowSense::Ge => {
+                buf.extend(row.expr.coeffs.iter().map(|(&j, &v)| (j, -v)));
+                if !g.push_row(&buf) {
+                    return None;
+                }
+                h.push(-rhs);
+            }
+        }
+    }
+    for (j, v) in variables.iter().enumerate() {
+        if v.ub.is_finite() {
+            g.push_singleton(j, 1.0);
+            h.push(v.ub);
+        }
+        if v.lb.is_finite() {
+            g.push_singleton(j, -1.0);
+            h.push(-v.lb);
+        }
+    }
+    Some((a.finish(), b, g.finish(), h))
+}
+
+fn build_a_g_rows(variables: &[VariableData], constraints: &[ConstraintRow]) -> (Csr, Vec<f64>, Csr, Vec<f64>) {
     let n = variables.len();
 
     let mut a_rows: Vec<Vec<(usize, f64)>> = Vec::new();
