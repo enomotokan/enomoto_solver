@@ -2520,6 +2520,7 @@ fn solve_std_form_decomposed(std: &StdForm, use_dual: bool) -> SimplexResult {
         match result.status {
             Status::Infeasible => return SimplexResult { status: Status::Infeasible, x: None },
             Status::Unbounded => return SimplexResult { status: Status::Unbounded, x: None },
+            Status::InfeasibleOrUnbounded => return SimplexResult { status: Status::InfeasibleOrUnbounded, x: None },
             Status::Optimal => {
                 let sub_x = result.x.as_ref().expect("Optimal result must carry x");
                 for (local_j, &orig_j) in component.iter().enumerate() {
@@ -2573,6 +2574,7 @@ fn solve_lp_on(std: &StdForm) -> SimplexResult {
     match phase2_status {
         Status::Unbounded => SimplexResult { status: Status::Unbounded, x: None },
         Status::Infeasible => SimplexResult { status: Status::Infeasible, x: None }, // shouldn't happen after phase 1
+        Status::InfeasibleOrUnbounded => unreachable!("the primal tableau method always classifies"),
         Status::Optimal => SimplexResult { status: Status::Optimal, x: Some(t.x[0..t.n_orig()].to_vec()) },
     }
 }
@@ -3060,6 +3062,13 @@ macro_rules! timed {
 }
 
 pub fn solve_lp_dual(variables: &[VariableData], objective: &Objective, constraints: &[ConstraintRow]) -> SimplexResult {
+    solve_lp_dual_with(variables, objective, constraints, crate::types::LpOptions::default())
+}
+
+/// [`solve_lp_dual`] with explicit [`crate::types::LpOptions`] — see
+/// [`crate::types::LpOptions::distinguish_infeasible_unbounded`] for the one
+/// option this path honors (the extended dual simplex's stage-A early exit).
+pub fn solve_lp_dual_with(variables: &[VariableData], objective: &Objective, constraints: &[ConstraintRow], opts: crate::types::LpOptions) -> SimplexResult {
     // `clamp_unbounded: false` — this function always fully handles a
     // one-sided infinite structural bound itself, either via the
     // classical path below (when none survived, the common case) or via
@@ -3128,7 +3137,7 @@ pub fn solve_lp_dual(variables: &[VariableData], objective: &Objective, constrai
                 None => eprintln!("DEBUG_EXT_COMPONENTS: single component (no split found)"),
             }
         }
-        let ext_result = extended_dual::solve_lp_dual_extended(&std);
+        let ext_result = extended_dual::solve_lp_dual_extended(&std, &opts);
         if std::env::var("ENOMOTO_DEBUG_EXT_ITERS").is_ok() {
             match &ext_result {
                 Some(r) => eprintln!("DEBUG_EXT: solve_lp_dual_extended returned Some({:?})", r.status),
@@ -5106,7 +5115,7 @@ mod tests {
     /// `Model.solve(root_solver="interior")` uses on the Python side, not
     /// a test-only shortcut.
     fn solve_via_ipm(variables: &[VariableData], objective: &Objective, constraints: &[ConstraintRow]) -> crate::types::SolveResult {
-        crate::solver::solve_lp(variables, objective, constraints, crate::types::RootSolver::Interior)
+        crate::solver::solve_lp(variables, objective, constraints, crate::types::RootSolver::Interior, crate::types::LpOptions::default())
     }
 
     #[test]

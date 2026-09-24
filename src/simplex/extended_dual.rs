@@ -1576,6 +1576,17 @@ enum Phase {
 /// line exactly where the lexicographic comparison it replaces did.
 const SLOPE_TOL: f64 = 1e-9;
 
+/// How negative `z^1` (the slope of the optimal value `z(M) = z^0 + z^1 M`)
+/// must be to count as `z^1 < 0` (`prop:trichotomy`). A small absolute
+/// tolerance rather than `TOL`: `z^1` is a sum of (possibly many)
+/// reduced-cost terms, so its floor scales with the problem's own cost
+/// magnitudes, not with `TOL`'s coefficient-level tightness — matches this
+/// crate's own precedent of using a looser, separate tolerance for
+/// accumulated-magnitude checks (see `simplex.rs::PRIMAL_FEAS_TOL`'s own
+/// docs for the same reasoning). Shared by stage A's early exit and
+/// [`finish`]'s own unboundedness test so the two can never disagree.
+const Z_SLOPE_TOL: f64 = 1e-7;
+
 /// [`compute_rhs_affine`]'s slope channel alone — stage A's right-hand side
 /// `0 - N x_N^1` (`eq:slope` has right-hand side `0`), with the same
 /// empty-means-identically-zero convention.
@@ -2421,7 +2432,7 @@ impl ColCache {
 /// never fixing a numeric `M`, then hands off to [`finish`] for the
 /// termination classification, cleanup (\S4.5 end), and handoff to the
 /// classical method.
-pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
+pub fn solve_lp_dual_extended(std: &StdForm, opts: &crate::types::LpOptions) -> Option<SimplexResult> {
     let n_total = std.n_total;
     let m = std.n_rows;
     let n_orig = n_total - m;
@@ -3432,19 +3443,34 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 // FTRAN stage A ever needed. The basis, `d` and the DSE
                 // weights carry over unchanged: `c` and `B` are shared by
                 // both problems, so dual feasibility does too.
+                // `z^1 = c^T x^1`, the slope problem's optimal value, with
+                // the *true* (unperturbed) cost — the same quantity
+                // `finish` tests, and fixed from here on (stage B never
+                // changes `x^1`).
+                let z1: f64 = (0..n_total)
+                    .map(|j| {
+                        let s = match (basis_pos[j], nb_status[j]) {
+                            (Some(pos), _) => x_b_slope[pos],
+                            (None, Some(NbStatus::Lower)) => cache.lower[j].map_or(0.0, |a| a.slope),
+                            (None, Some(NbStatus::Upper)) => cache.upper[j].map_or(0.0, |a| a.slope),
+                            _ => 0.0,
+                        };
+                        std.c[j] * s
+                    })
+                    .sum();
                 if std::env::var("ENOMOTO_DEBUG_EXT_ITERS").is_ok() {
-                    let z1: f64 = (0..n_total)
-                        .map(|j| {
-                            let s = match (basis_pos[j], nb_status[j]) {
-                                (Some(pos), _) => x_b_slope[pos],
-                                (None, Some(NbStatus::Lower)) => cache.lower[j].map_or(0.0, |a| a.slope),
-                                (None, Some(NbStatus::Upper)) => cache.upper[j].map_or(0.0, |a| a.slope),
-                                _ => 0.0,
-                            };
-                            std.c[j] * s
-                        })
-                        .sum();
                     eprintln!("DEBUG_EXT: stage_a_iters={_iter} z1={z1}");
+                }
+                // `z^1 < 0`: infeasible or unbounded, never a finite optimum
+                // (`prop:trichotomy`); stage B would only decide *which*.
+                // (`z^1 = 0`: finite optimum or infeasible, never unbounded —
+                // stage B is needed either way.) Stop here unless the caller
+                // asked for that distinction.
+                if z1 < -Z_SLOPE_TOL && !opts.distinguish_infeasible_unbounded {
+                    if profile_phases {
+                        prof_phases::report(wall_t0.elapsed().as_nanos() as usize);
+                    }
+                    return Some(SimplexResult { status: Status::InfeasibleOrUnbounded, x: None });
                 }
                 cache = ColCache::intercept_problem(&cache_orig, &nb_status, &basis, &x_b_slope)?;
                 width_inf = cache.width.iter().map(|w| w.is_none()).collect();
@@ -5082,13 +5108,6 @@ fn finish(std: &StdForm, basis: &mut [usize], basis_pos: &mut [Option<usize>], n
         }
     }
     let z = z_b.add(z_n);
-    // Small absolute tolerance rather than `TOL`: `z.slope` is a sum of
-    // (possibly many) reduced-cost terms, so its floor scales with the
-    // problem's own cost magnitudes, not with `TOL`'s coefficient-level
-    // tightness — matches this crate's own precedent of using a looser,
-    // separate tolerance for accumulated-magnitude checks (see
-    // `simplex.rs::PRIMAL_FEAS_TOL`'s own docs for the same reasoning).
-    const Z_SLOPE_TOL: f64 = 1e-7;
     if std::env::var("ENOMOTO_DEBUG_EXT_ITERS").is_ok() {
         eprintln!("DEBUG_EXT: z=({},{}) z0_base={}", z.base, z.slope, z_b.base);
     }
@@ -6006,7 +6025,7 @@ mod tests {
         // `hat_lower`/`hat_upper` both being `Some` (M-tracked) for the
         // same column at once.
         let std = std_form(&[vec![(0, 1.0), (1, 1.0), (2, 1.0)]], vec![5.0], vec![-1.0, 0.0, 0.0], vec![f64::NEG_INFINITY, 0.0, 0.0], vec![f64::INFINITY, 10.0, 0.0]);
-        let res = solve_lp_dual_extended(&std).expect("should reach a mathematical answer, not the None fallback sentinel");
+        let res = solve_lp_dual_extended(&std, &crate::types::LpOptions::default()).expect("should reach a mathematical answer, not the None fallback sentinel");
         assert_eq!(res.status, Status::Optimal);
         let x = res.x.unwrap();
         assert!(approx(x[0], 5.0), "x={x:?}");
@@ -6034,7 +6053,7 @@ mod tests {
         // fallback) for lack of that state.
         let rows = vec![vec![(0, 1.0), (1, -1.0), (2, 1.0)], vec![(0, -1.0), (1, 1.0), (3, 1.0)]];
         let std = std_form(&rows, vec![3.0, 3.0], vec![1.0, -1.0, 0.0, 0.0], vec![f64::NEG_INFINITY, f64::NEG_INFINITY, 0.0, 0.0], vec![f64::INFINITY, f64::INFINITY, f64::INFINITY, f64::INFINITY]);
-        let res = solve_lp_dual_extended(&std).expect("cleanup case (A) parks the free survivor at Zero instead of bailing");
+        let res = solve_lp_dual_extended(&std, &crate::types::LpOptions::default()).expect("cleanup case (A) parks the free survivor at Zero instead of bailing");
         assert_eq!(res.status, Status::Optimal);
         let x = res.x.unwrap();
         assert!(approx(x[0] - x[1], -3.0), "x={x:?}");
@@ -6053,7 +6072,7 @@ mod tests {
         let std = std_form(&[vec![(0, 1.0), (1, 1.0), (2, 1.0)]], vec![5.0], vec![0.0, 1.0, 0.0], vec![f64::NEG_INFINITY, 0.0, 0.0], vec![f64::INFINITY, 10.0, 0.0]);
         assert_eq!(crash(&std, &super::super::perturb_costs(&std), 2)[0], Some(NbStatus::Zero));
         let before = CLEANUP_PIVOTS.load(Relaxed);
-        let res = solve_lp_dual_extended(&std).expect("should reach a mathematical answer, not the None fallback sentinel");
+        let res = solve_lp_dual_extended(&std, &crate::types::LpOptions::default()).expect("should reach a mathematical answer, not the None fallback sentinel");
         assert_eq!(res.status, Status::Optimal);
         let x = res.x.unwrap();
         assert!(approx(x[0], 5.0) && approx(x[1], 0.0), "x={x:?}");
@@ -6070,7 +6089,7 @@ mod tests {
         // cleanup never fires here (`CLEANUP_PIVOTS` stays untouched).
         let std = std_form(&[vec![(0, 1.0), (1, 1.0), (2, 1.0)]], vec![5.0], vec![-1.0, 0.0, 0.0], vec![0.0, 0.0, 0.0], vec![f64::INFINITY, 10.0, 0.0]);
         let before = CLEANUP_PIVOTS.load(Relaxed);
-        let res = solve_lp_dual_extended(&std).expect("should reach a mathematical answer, not the None fallback sentinel");
+        let res = solve_lp_dual_extended(&std, &crate::types::LpOptions::default()).expect("should reach a mathematical answer, not the None fallback sentinel");
         assert_eq!(res.status, Status::Optimal);
         let x = res.x.unwrap();
         assert!(approx(x[0], 5.0), "x={x:?}");
@@ -6083,7 +6102,7 @@ mod tests {
         // No rows at all; x0 in [0, +inf), cost favors the finite (lower)
         // side directly — the `m == 0` shortcut's own "bounded" branch.
         let std = std_form(&[], vec![], vec![1.0], vec![0.0], vec![f64::INFINITY]);
-        let res = solve_lp_dual_extended(&std).expect("should reach a mathematical answer, not the None fallback sentinel");
+        let res = solve_lp_dual_extended(&std, &crate::types::LpOptions::default()).expect("should reach a mathematical answer, not the None fallback sentinel");
         assert_eq!(res.status, Status::Optimal);
         assert!(approx(res.x.unwrap()[0], 0.0));
     }
@@ -6093,7 +6112,7 @@ mod tests {
         // No rows at all; x0 in [0, +inf), cost favors the infinite side —
         // the `m == 0` shortcut's own "unbounded" branch.
         let std = std_form(&[], vec![], vec![-1.0], vec![0.0], vec![f64::INFINITY]);
-        let res = solve_lp_dual_extended(&std).expect("should reach a mathematical answer, not the None fallback sentinel");
+        let res = solve_lp_dual_extended(&std, &crate::types::LpOptions::default()).expect("should reach a mathematical answer, not the None fallback sentinel");
         assert_eq!(res.status, Status::Unbounded);
     }
 
@@ -6103,7 +6122,7 @@ mod tests {
         // infeasible regardless of x0's own bound shape, since x0,x1 >= 0
         // can never sum to a negative right-hand side.
         let std = std_form(&[vec![(0, 1.0), (1, 1.0), (2, 1.0)]], vec![-1.0], vec![0.0, 0.0, 0.0], vec![0.0, 0.0, 0.0], vec![f64::INFINITY, 5.0, 0.0]);
-        let res = solve_lp_dual_extended(&std).expect("should reach a mathematical answer, not the None fallback sentinel");
+        let res = solve_lp_dual_extended(&std, &crate::types::LpOptions::default()).expect("should reach a mathematical answer, not the None fallback sentinel");
         assert_eq!(res.status, Status::Infeasible);
     }
 
@@ -6122,7 +6141,7 @@ mod tests {
         // `m == 0` shortcut.
         let std = std_form(&[vec![(1, 1.0), (2, 1.0)]], vec![3.0], vec![0.0, 0.0, 0.0], vec![f64::NEG_INFINITY, 0.0, 0.0], vec![0.0, 10.0, 0.0]);
         let before = CLEANUP_PIVOTS.load(Relaxed);
-        let res = solve_lp_dual_extended(&std).expect("should reach a mathematical answer, not the None fallback sentinel");
+        let res = solve_lp_dual_extended(&std, &crate::types::LpOptions::default()).expect("should reach a mathematical answer, not the None fallback sentinel");
         assert_eq!(res.status, Status::Optimal);
         let x = res.x.unwrap();
         assert!(approx(x[0], 0.0), "x={x:?}");
@@ -6189,7 +6208,7 @@ mod tests {
             vec![f64::INFINITY, 1.0, 1.0, 0.0],
         );
         let flips_before = COMBINED_FLIP_COUNT.load(Relaxed);
-        let res = solve_lp_dual_extended(&std).expect("should reach a mathematical answer, not the None fallback sentinel");
+        let res = solve_lp_dual_extended(&std, &crate::types::LpOptions::default()).expect("should reach a mathematical answer, not the None fallback sentinel");
         assert_eq!(res.status, Status::Optimal);
         let x = res.x.unwrap();
         assert!(approx(x[0], 8.0), "x={x:?}");

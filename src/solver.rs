@@ -10,17 +10,18 @@
 
 use crate::interior_point;
 use crate::simplex;
-use crate::types::{ConstraintRow, Objective, RootSolver, SolveResult, Status, VariableData};
+use crate::types::{ConstraintRow, LpOptions, Objective, RootSolver, SolveResult, Status, VariableData};
 
 pub fn solve_lp(
     variables: &[VariableData],
     objective: &Objective,
     constraints: &[ConstraintRow],
     root_solver: RootSolver,
+    opts: LpOptions,
 ) -> SolveResult {
     let (status, x) = match root_solver {
         RootSolver::Simplex => {
-            let result = simplex::solve_lp_dual(variables, objective, constraints);
+            let result = simplex::solve_lp_dual_with(variables, objective, constraints, opts);
             (result.status, result.x)
         }
         RootSolver::Interior => {
@@ -38,6 +39,12 @@ pub fn solve_lp(
         },
         Status::Unbounded => SolveResult {
             status: Status::Unbounded,
+            objective: None,
+            x: None,
+            node_limit_hit: false,
+        },
+        Status::InfeasibleOrUnbounded => SolveResult {
+            status: Status::InfeasibleOrUnbounded,
             objective: None,
             x: None,
             node_limit_hit: false,

@@ -4,7 +4,7 @@
 //! problem sizes this MVP targets.
 
 use crate::solver::solve_lp;
-use crate::types::{ConstraintRow, Objective, RootSolver, Sense, SolveResult, Status, VarType, VariableData};
+use crate::types::{ConstraintRow, LpOptions, Objective, RootSolver, Sense, SolveResult, Status, VarType, VariableData};
 use std::collections::HashMap;
 
 /// How close to an integer a discrete variable's LP-relaxation value must
@@ -76,10 +76,11 @@ pub fn solve_mip(
     objective: &Objective,
     constraints: &[ConstraintRow],
     root_solver: RootSolver,
+    opts: LpOptions,
 ) -> SolveResult {
     let has_discrete = variables.iter().any(|v| v.vtype != VarType::Continuous);
     if !has_discrete {
-        return solve_lp(variables, objective, constraints, root_solver);
+        return solve_lp(variables, objective, constraints, root_solver, opts);
     }
 
     let mut stack: Vec<Node> = vec![Node {
@@ -112,7 +113,9 @@ pub fn solve_mip(
             continue;
         }
 
-        let relax = solve_lp(&vars_eff, objective, constraints, root_solver);
+        // Any non-`Optimal` relaxation prunes the node, so the cheaper
+        // unclassified early exit is always enough here.
+        let relax = solve_lp(&vars_eff, objective, constraints, root_solver, LpOptions::default());
         if relax.status != Status::Optimal {
             continue;
         }
@@ -190,10 +193,11 @@ pub fn solve_mip(
         // reached an integer point, the MIP has no integer-feasible
         // solution even though its LP relaxation does.
         None => {
-            let root = solve_lp(variables, objective, constraints, root_solver);
+            let root = solve_lp(variables, objective, constraints, root_solver, opts);
             match root.status {
                 Status::Infeasible => root,
                 Status::Unbounded => root,
+                Status::InfeasibleOrUnbounded => root,
                 Status::Optimal => SolveResult {
                     status: Status::Infeasible,
                     objective: None,

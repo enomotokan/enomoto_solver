@@ -28,7 +28,7 @@ use std::collections::BTreeMap;
 
 use crate::mip::solve_mip;
 use crate::simplex;
-use crate::types::{ConstraintRow, LinearExpr, Objective, RootSolver, RowSense, Sense, Status, VarType, VariableData};
+use crate::types::{ConstraintRow, LinearExpr, LpOptions, Objective, RootSolver, RowSense, Sense, Status, VarType, VariableData};
 
 /// A model's accumulated state: every variable, the (single) objective
 /// once set, and every constraint added so far. Mutated in place by
@@ -141,8 +141,14 @@ impl PyModel {
     /// `"interior"`) — both are full independent implementations sharing
     /// only the presolve pipeline, kept reachable side by side so results
     /// can be cross-checked rather than one being deleted outright.
-    #[pyo3(signature = (root_solver=None))]
-    fn solve<'py>(&self, py: Python<'py>, root_solver: Option<&str>) -> PyResult<Bound<'py, PyDict>> {
+    ///
+    /// `distinguish_infeasible_unbounded` (default `false`): when the
+    /// extended dual simplex's stage A already proves there is no finite
+    /// optimum (`z^1 < 0`), stop and report `"infeasible_or_unbounded"`
+    /// instead of running stage B to tell the two apart
+    /// (`types::LpOptions`'s own docs).
+    #[pyo3(signature = (root_solver=None, distinguish_infeasible_unbounded=false))]
+    fn solve<'py>(&self, py: Python<'py>, root_solver: Option<&str>, distinguish_infeasible_unbounded: bool) -> PyResult<Bound<'py, PyDict>> {
         let objective = self.objective.clone().ok_or_else(|| {
             PyValueError::new_err("no objective set: call Model.set_objective(...) before solve()")
         })?;
@@ -151,7 +157,8 @@ impl PyModel {
             None => RootSolver::Simplex,
         };
 
-        let result = solve_mip(&self.variables, &objective, &self.constraints, root_solver);
+        let opts = LpOptions { distinguish_infeasible_unbounded };
+        let result = solve_mip(&self.variables, &objective, &self.constraints, root_solver, opts);
 
         let dict = PyDict::new_bound(py);
         dict.set_item("status", result.status.as_str())?;
@@ -160,7 +167,7 @@ impl PyModel {
                 dict.set_item("objective", result.objective)?;
                 dict.set_item("x", result.x)?;
             }
-            Status::Infeasible | Status::Unbounded => {
+            Status::Infeasible | Status::Unbounded | Status::InfeasibleOrUnbounded => {
                 dict.set_item("objective", py.None())?;
                 dict.set_item("x", py.None())?;
             }
@@ -213,7 +220,7 @@ impl PyModel {
                         let obj_val = objective.expr.constant + objective.expr.coeffs.iter().map(|(&j, &c)| c * x[j]).sum::<f64>();
                         dict.set_item("objective", obj_val)?;
                     }
-                    Status::Infeasible | Status::Unbounded => {
+                    Status::Infeasible | Status::Unbounded | Status::InfeasibleOrUnbounded => {
                         dict.set_item("objective", py.None())?;
                     }
                 }

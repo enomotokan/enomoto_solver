@@ -2,7 +2,15 @@ import math
 
 import pytest
 
-from enomoto_solver import Constraint, Function, InfeasibleError, Model, Variable
+from enomoto_solver import (
+    Constraint,
+    Function,
+    InfeasibleError,
+    InfeasibleOrUnboundedError,
+    Model,
+    UnboundedError,
+    Variable,
+)
 
 
 def approx(a, b, tol=1e-6):
@@ -126,3 +134,48 @@ def test_unknown_vtype_raises():
         Variable("nope", 0, 1)
     with pytest.raises(TypeError):
         Variable(3.14, 0, 1)
+
+
+# -- stage-A early exit (z^1 < 0 => infeasible or unbounded) ----------------
+# Both models below get past presolve with columns parked on an artificial
+# `M` side, so the extended dual simplex's stage A ends with `z^1 < 0`.
+
+
+def _unbounded_model():
+    M = Model()
+    x = [Variable(float, 0, math.inf, model=M) for _ in range(4)]
+    M.set_objective(-x[0] - x[1] + x[2])
+    M.add_constraint(x[0] - x[1] + x[2] + x[3] == 1)
+    M.add_constraint(2 * x[0] - x[1] - x[2] <= 3)
+    M.add_constraint(x[0] + x[2] >= 0.5)
+    return M
+
+
+def _infeasible_z1_negative_model():
+    M = Model()
+    x = [Variable(float, 0, math.inf, model=M) for _ in range(4)]
+    M.set_objective(-x[0] - x[1])
+    M.add_constraint(x[0] - x[1] + x[2] - x[3] == 1)
+    M.add_constraint(x[0] - x[1] + x[2] - x[3] == 2)
+    M.add_constraint(x[0] + x[1] - x[2] >= 0.5)
+    return M
+
+
+@pytest.mark.parametrize("build", [_unbounded_model, _infeasible_z1_negative_model])
+def test_no_finite_optimum_reported_early_by_default(build):
+    sol = build().solve(raise_on_failure=False)
+    assert sol.status == "infeasible_or_unbounded"
+    assert sol.objective is None
+    with pytest.raises(InfeasibleOrUnboundedError):
+        build().solve()
+
+
+def test_distinguish_infeasible_unbounded_runs_stage_b():
+    sol = _unbounded_model().solve(raise_on_failure=False, distinguish_infeasible_unbounded=True)
+    assert sol.status == "unbounded"
+    with pytest.raises(UnboundedError):
+        _unbounded_model().solve(distinguish_infeasible_unbounded=True)
+    sol = _infeasible_z1_negative_model().solve(raise_on_failure=False, distinguish_infeasible_unbounded=True)
+    assert sol.status == "infeasible"
+    with pytest.raises(InfeasibleError):
+        _infeasible_z1_negative_model().solve(distinguish_infeasible_unbounded=True)

@@ -190,6 +190,27 @@ pub enum Status {
     Optimal,
     Infeasible,
     Unbounded,
+    /// Proven *not* to have a finite optimum, without having spent the extra
+    /// work to tell which of `Infeasible`/`Unbounded` holds: the extended
+    /// dual simplex's stage A (the slope problem) ended with `z^1 < 0`,
+    /// which by the paper's `prop:trichotomy` means the problem is
+    /// infeasible or unbounded (whereas `z^1 = 0` means a finite optimum or
+    /// infeasible, never unbounded). Only returned when
+    /// [`LpOptions::distinguish_infeasible_unbounded`] is `false` (the
+    /// default); with it `true` the solve continues through stage B and
+    /// reports `Infeasible` or `Unbounded` instead.
+    InfeasibleOrUnbounded,
+}
+
+/// Per-solve options that change *what* is reported, not how the model is
+/// built — threaded from `Model.solve` down to the LP engines.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LpOptions {
+    /// When stage A of the extended dual simplex finds `z^1 < 0`, keep
+    /// going through stage B to decide whether the problem is infeasible or
+    /// unbounded (`true`), or stop right there and report
+    /// [`Status::InfeasibleOrUnbounded`] (`false`, the default).
+    pub distinguish_infeasible_unbounded: bool,
 }
 
 impl Status {
@@ -200,6 +221,7 @@ impl Status {
             Status::Optimal => "optimal",
             Status::Infeasible => "infeasible",
             Status::Unbounded => "unbounded",
+            Status::InfeasibleOrUnbounded => "infeasible_or_unbounded",
         }
     }
 }

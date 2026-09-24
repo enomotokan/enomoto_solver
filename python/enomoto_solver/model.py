@@ -19,7 +19,7 @@ from typing import ClassVar, List, Optional
 
 from . import _core
 from .constraint import Constraint
-from .exceptions import InfeasibleError, UnboundedError
+from .exceptions import InfeasibleError, InfeasibleOrUnboundedError, UnboundedError
 from .function import Function
 
 
@@ -86,7 +86,12 @@ class Model:
         self._core.add_constraint(g.nonzero_terms(), g.sense, g.rhs)
 
     # -- solve ------------------------------------------------------------
-    def solve(self, raise_on_failure: bool = True, root_solver: Optional[str] = None) -> Solution:
+    def solve(
+        self,
+        raise_on_failure: bool = True,
+        root_solver: Optional[str] = None,
+        distinguish_infeasible_unbounded: bool = False,
+    ) -> Solution:
         """Runs preprocessing + the optimization algorithm in the Rust
         core. On success, each Variable's ``.value`` becomes readable.
 
@@ -95,8 +100,18 @@ class Model:
         independent implementations sharing only the presolve pipeline, so
         solving the same model with each is a genuine cross-check rather
         than comparing an engine against itself.
+
+        When the solver proves early that there is no finite optimum
+        (stage A of the extended dual simplex ends with ``z^1 < 0``: the
+        model is infeasible or unbounded), it stops and reports
+        ``"infeasible_or_unbounded"`` by default. Pass
+        ``distinguish_infeasible_unbounded=True`` to keep solving until it
+        can report ``"infeasible"`` or ``"unbounded"`` specifically.
         """
-        result = self._core.solve(root_solver=root_solver)
+        result = self._core.solve(
+            root_solver=root_solver,
+            distinguish_infeasible_unbounded=distinguish_infeasible_unbounded,
+        )
         status = result["status"]
         self._solution_x = result["x"]
         self._solution = Solution(
@@ -109,6 +124,11 @@ class Model:
             raise InfeasibleError("model is infeasible: no assignment satisfies all constraints")
         if raise_on_failure and status == "unbounded":
             raise UnboundedError("objective is unbounded on the feasible region")
+        if raise_on_failure and status == "infeasible_or_unbounded":
+            raise InfeasibleOrUnboundedError(
+                "model has no finite optimum (infeasible or unbounded); "
+                "pass distinguish_infeasible_unbounded=True to find out which"
+            )
 
         return self._solution
 
