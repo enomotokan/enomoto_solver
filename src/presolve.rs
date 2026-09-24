@@ -405,8 +405,23 @@ pub fn run_extended(
     // small-coefficient edge filter (see that pre-pass's own docs on why an
     // unpropagated, looser bound here is safe, just more conservative, than
     // the fully-tightened `orig_lb`/`orig_ub` extracted again below).
-    let (pre_lb, pre_ub) = propagate::extract_bounds_only(n, &g, &h);
-    let (na, nb) = timed_step!("reduce_equalities", redundancy::reduce_equalities(&a, &b, n, &pre_lb, &pre_ub));
+    //
+    // `ENOMOTO_REDEQ_MODE` picks where the rank-revealing half of
+    // `reduce_equalities` runs (analysis/presolve_pipeline_20260924_031005.md
+    // §2.1/C1: on 89 of the 93 Netlib problems it finds nothing beyond the
+    // exact duplicates `dedupe_rows` already drops, yet costs ~10% of the
+    // light problems' solve time):
+    //   0 = here, on the full scaled `A` (the historical behaviour);
+    //   1 = (default) duplicates only, no rank detection at all;
+    //   2 = duplicates here, rank detection once on the much smaller `A`
+    //       left after the round loop (see below).
+    let redeq_mode = tunable!("ENOMOTO_REDEQ_MODE", 1, usize);
+    let (na, nb) = if redeq_mode == 0 {
+        let (pre_lb, pre_ub) = propagate::extract_bounds_only(n, &g, &h);
+        timed_step!("reduce_equalities", redundancy::reduce_equalities(&a, &b, n, &pre_lb, &pre_ub))
+    } else {
+        timed_step!("reduce_equalities(dedupe)", redundancy::dedupe_equalities(&a, &b, n))
+    };
     a = na;
     b = nb;
     if profile && std::env::var("ENOMOTO_PROF_REDUNDANCY").is_ok() {
@@ -1157,6 +1172,18 @@ pub fn run_extended(
             break;
         }
         prev_signature = Some(signature);
+    }
+
+    if redeq_mode == 2 && a.nrows() > 0 {
+        // Deferred rank detection (C1 option ii): the round loop has
+        // removed most rows and columns by now, so the dense-QR / sparse-
+        // elimination cost is paid on the reduced system only. Current
+        // bounds feed only the block decomposition's negligible-edge filter
+        // (see `reduce_equalities`' docs).
+        let (cur_lb, cur_ub) = propagate::extract_bounds_only(n, &g, &h);
+        let (na, nb) = timed_step!("reduce_equalities(post)", redundancy::reduce_equalities(&a, &b, n, &cur_lb, &cur_ub));
+        a = na;
+        b = nb;
     }
 
     let prop = timed_step!("final propagate", propagate::propagate(n, &g, &h, prop_passes));

@@ -162,6 +162,20 @@ pub fn reduce_equalities(a: &Csr, b: &[f64], n: usize, lb: &[f64], ub: &[f64]) -
     (csr_from_rows(&new_rows, n), new_b)
 }
 
+/// [`reduce_equalities`]' duplicate-row step alone ([`dedupe_rows`]), with
+/// no rank detection — what `run_extended` runs by default (see
+/// `ENOMOTO_REDEQ_MODE` there).
+pub fn dedupe_equalities(a: &Csr, b: &[f64], n: usize) -> (Csr, Vec<f64>) {
+    let p = a.nrows();
+    if p == 0 {
+        return (csr_from_rows(&[], n), Vec::new());
+    }
+    let rows: Vec<(Vec<(usize, f64)>, f64)> = (0..p).map(|i| (csr_row_vec(a, i), b[i])).collect();
+    let deduped = dedupe_rows(rows);
+    let (rows, rhs): (Vec<Vec<(usize, f64)>>, Vec<f64>) = deduped.into_iter().unzip();
+    (csr_from_rows(&rows, n), rhs)
+}
+
 /// Step 1: drops exact or scalar-multiple duplicate rows, by normalizing
 /// each row (and its RHS) by its first coefficient and hashing the bit
 /// pattern of the result. A structurally empty row (`0 = rhs`) is dropped
