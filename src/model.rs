@@ -143,7 +143,7 @@ impl PyModel {
     /// can be cross-checked rather than one being deleted outright.
     #[pyo3(signature = (root_solver=None))]
     fn solve<'py>(&self, py: Python<'py>, root_solver: Option<&str>) -> PyResult<Bound<'py, PyDict>> {
-        let objective = self.objective.clone().ok_or_else(|| {
+        let objective = self.objective.as_ref().ok_or_else(|| {
             PyValueError::new_err("no objective set: call Model.set_objective(...) before solve()")
         })?;
         let root_solver = match root_solver {
@@ -151,21 +151,21 @@ impl PyModel {
             None => RootSolver::Simplex,
         };
 
-        let result = solve_mip(&self.variables, &objective, &self.constraints, root_solver);
+        let result = solve_mip(&self.variables, objective, &self.constraints, root_solver);
 
         let dict = PyDict::new_bound(py);
-        dict.set_item("status", result.status.as_str())?;
+        dict.set_item(pyo3::intern!(py, "status"), result.status.as_str())?;
         match result.status {
             Status::Optimal => {
-                dict.set_item("objective", result.objective)?;
-                dict.set_item("x", result.x)?;
+                dict.set_item(pyo3::intern!(py, "objective"), result.objective)?;
+                dict.set_item(pyo3::intern!(py, "x"), result.x)?;
             }
             Status::Infeasible | Status::Unbounded => {
-                dict.set_item("objective", py.None())?;
-                dict.set_item("x", py.None())?;
+                dict.set_item(pyo3::intern!(py, "objective"), py.None())?;
+                dict.set_item(pyo3::intern!(py, "x"), py.None())?;
             }
         }
-        dict.set_item("node_limit_hit", result.node_limit_hit)?;
+        dict.set_item(pyo3::intern!(py, "node_limit_hit"), result.node_limit_hit)?;
         Ok(dict)
     }
 
