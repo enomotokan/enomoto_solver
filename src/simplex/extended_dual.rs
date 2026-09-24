@@ -5501,6 +5501,13 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
     let mut infeasible_rows = InfeasibleRows::new(m);
     infeasible_rows.rebuild(m, |i| row_infeasible_plain(std, basis, &x_b, &noise_feasible, i));
 
+    // S5 (`ENOMOTO_HANDOFF_FLIP=1`, default off): at most one restart of
+    // this loop on the true costs after bound-flipping the dual-infeasible
+    // boxed columns — see the restart site below.
+    let handoff_flip_mode = tunable!("ENOMOTO_HANDOFF_FLIP", 0u8, u8);
+    let handoff_flip = handoff_flip_mode != 0;
+    let mut flip_restarted = false;
+
     let max_iters = super::max_iters_for(m, n_total);
     for _iter in 0..max_iters {
         // chuzr: plain largest-deviation Dantzig rule, exactly as this
@@ -5644,6 +5651,51 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
                     return Some(SimplexResult { status: Status::Optimal, x: Some(t.x[0..t.n_orig()].to_vec()) });
                 }
                 return Some(SimplexResult { status: Status::Optimal, x: Some(t.x) });
+            }
+            // S5 (`ENOMOTO_HANDOFF_FLIP=1`, default off;
+            // `analysis/simplex_loop_20260924_113533.md` §4 S5): when every
+            // true-cost dual infeasibility sits on a column whose opposite
+            // bound is finite, flipping those columns to that bound makes
+            // this basis dual feasible for the *true* costs (`d` itself
+            // does not move — only which sign it needs to have), at the
+            // price of primal infeasibility from the moved nonbasic values.
+            // That is exactly what this dual loop repairs, so it simply
+            // continues on the true reduced costs instead of handing off to
+            // the (per pivot costlier) primal method. Once only: a second
+            // failure — or any infeasibility on a free / one-sided column,
+            // which no flip can fix — still goes to the primal handoff
+            // below.
+            if handoff_flip && !flip_restarted {
+                let mut flips: Vec<usize> = Vec::new();
+                let mut unflippable = false;
+                for j in 0..n_total {
+                    if !is_dual_bad(j) {
+                        continue;
+                    }
+                    match nb_status[j] {
+                        Some(NbStatus::Lower) if std.ub[j].is_finite() => flips.push(j),
+                        Some(NbStatus::Upper) if std.lb[j].is_finite() => flips.push(j),
+                        _ => unflippable = true,
+                    }
+                }
+                if std::env::var("ENOMOTO_DEBUG_EXT_ITERS").is_ok() {
+                    eprintln!("DEBUG_EXT: polish flip candidates={} unflippable={unflippable} at polish_iter={_iter}", flips.len());
+                }
+                if (!unflippable || handoff_flip_mode >= 2) && !flips.is_empty() {
+                    for &j in &flips {
+                        nb_status[j] = Some(match nb_status[j] {
+                            Some(NbStatus::Lower) => NbStatus::Upper,
+                            _ => NbStatus::Lower,
+                        });
+                    }
+                    d.copy_from_slice(&true_d);
+                    lu.solve_into(&compute_rhs_plain(std, nb_status), &mut lu_scratch, &mut x_b);
+                    noise_feasible.fill(false);
+                    infeasible_rows.rebuild(m, |i| row_infeasible_plain(std, basis, &x_b, &noise_feasible, i));
+                    stall_count = 0;
+                    flip_restarted = true;
+                    continue;
+                }
             }
             // Perturbation masked a genuine dual infeasibility: this basis
             // is primal feasible (feasibility never depended on costs) but
