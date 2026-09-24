@@ -198,6 +198,7 @@ pub fn solve_mip(
                 Status::Infeasible => root,
                 Status::Unbounded => root,
                 Status::InfeasibleOrUnbounded => root,
+                Status::NotSolved => root,
                 Status::Optimal => SolveResult {
                     status: Status::Infeasible,
                     objective: None,

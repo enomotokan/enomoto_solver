@@ -19,7 +19,7 @@ from typing import ClassVar, List, Optional
 
 from . import _core
 from .constraint import Constraint
-from .exceptions import InfeasibleError, InfeasibleOrUnboundedError, UnboundedError
+from .exceptions import InfeasibleError, InfeasibleOrUnboundedError, NotSolvedError, UnboundedError
 from .function import Function
 
 
@@ -108,7 +108,8 @@ class Model:
         there, while ``z^1 = 0`` rules out unboundedness and stage B then
         finds an optimum or proves infeasibility. Pass
         ``distinguish_infeasible_unbounded=True`` to also split the first
-        case into ``"infeasible"`` and ``"unbounded"``.
+        case into ``"infeasible"`` and ``"unbounded"``. ``"not_solved"``
+        means the solver gave up without reaching any verdict.
         """
         result = self._core.solve(
             root_solver=root_solver,
@@ -131,6 +132,8 @@ class Model:
                 "model has no finite optimum (infeasible or unbounded); "
                 "pass distinguish_infeasible_unbounded=True to find out which"
             )
+        if raise_on_failure and status == "not_solved":
+            raise NotSolvedError("solver gave up without reaching a verdict (numerical breakdown or iteration limit)")
 
         return self._solution
 

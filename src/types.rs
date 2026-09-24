@@ -184,7 +184,7 @@ pub struct ConstraintRow {
 
 /// The outcome of a solve attempt, independent of *why* — every solver
 /// (`simplex`, `mip`, the inactive `interior_point`) reports one of these
-/// three regardless of its internal algorithm.
+/// regardless of its internal algorithm.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Status {
     Optimal,
@@ -200,6 +200,12 @@ pub enum Status {
     /// default); with it `true` the solve continues through stage B and
     /// reports `Infeasible` or `Unbounded` instead.
     InfeasibleOrUnbounded,
+    /// The solver gave up without reaching any of the verdicts above: the
+    /// extended dual simplex hit one of its "should be unreachable"
+    /// bail-outs (a singular basis it could not recover from, or its
+    /// iteration budget running out). Nothing is claimed about the
+    /// problem itself.
+    NotSolved,
 }
 
 /// Per-solve options that change *what* is reported, not how the model is
@@ -225,6 +231,7 @@ impl Status {
             Status::Infeasible => "infeasible",
             Status::Unbounded => "unbounded",
             Status::InfeasibleOrUnbounded => "infeasible_or_unbounded",
+            Status::NotSolved => "not_solved",
         }
     }
 }

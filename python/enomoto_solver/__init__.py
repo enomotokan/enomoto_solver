@@ -15,7 +15,7 @@
 """
 
 from .constraint import Constraint
-from .exceptions import InfeasibleError, InfeasibleOrUnboundedError, SolverError, UnboundedError
+from .exceptions import InfeasibleError, InfeasibleOrUnboundedError, NotSolvedError, SolverError, UnboundedError
 from .function import Function
 from .model import Model, Solution
 from .variable import Variable
@@ -29,6 +29,7 @@ __all__ = [
     "SolverError",
     "InfeasibleError",
     "InfeasibleOrUnboundedError",
+    "NotSolvedError",
     "UnboundedError",
 ]
 

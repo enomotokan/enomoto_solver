@@ -5747,6 +5747,7 @@ impl FtLu {
     /// Allocating convenience wrapper around [`Self::solve_transpose_into`]
     /// — kept for call sites (tests) that don't already have a reusable
     /// buffer on hand.
+    #[cfg(test)]
     pub fn solve_transpose(&self, rhs: &[f64]) -> Vec<f64> {
         let m = self.base.m;
         let mut scratch = vec![0.0; m];
@@ -6091,16 +6092,6 @@ impl FtLu {
         self.fill
     }
 
-    /// Debug/instrumentation only: off-diagonal nonzero count of the `U`
-    /// eta most recently appended by `try_update` (0 if no update has
-    /// happened yet) — the fill-in from a single update, as opposed to
-    /// `fill_count`'s running total. Used by `simplex.rs`'s
-    /// `ENOMOTO_DEBUG_ETA_DENSITY` diagnostic to measure how eta density
-    /// is distributed across a real solve, which is what motivated
-    /// `HybridVec`'s sparse/dense hybrid representation.
-    pub fn last_update_off_diag_len(&self) -> usize {
-        self.u_seq.iter().next_back().map(|e| self.u_seq.nnz(e.k)).unwrap_or(0)
-    }
 }
 
 #[cfg(test)]

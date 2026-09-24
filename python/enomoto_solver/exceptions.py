@@ -16,3 +16,10 @@ class InfeasibleOrUnboundedError(SolverError):
     ``distinguish_infeasible_unbounded=True`` to get InfeasibleError or
     UnboundedError instead). Deliberately not a subclass of either, since
     it may be either one."""
+
+
+class NotSolvedError(SolverError):
+    """Raised by Model.solve() when the solver gave up without reaching a
+    verdict (e.g. a numerically singular basis it could not recover from,
+    or its iteration budget running out). Nothing is claimed about the
+    model itself."""

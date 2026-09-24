@@ -27,7 +27,7 @@ use pyo3::types::PyDict;
 use std::collections::BTreeMap;
 
 use crate::mip::solve_mip;
-use crate::simplex;
+
 use crate::types::{ConstraintRow, LinearExpr, LpOptions, Objective, RootSolver, RowSense, Sense, Status, VarType, VariableData};
 
 /// A model's accumulated state: every variable, the (single) objective
@@ -167,65 +167,12 @@ impl PyModel {
                 dict.set_item(pyo3::intern!(py, "objective"), result.objective)?;
                 dict.set_item(pyo3::intern!(py, "x"), result.x)?;
             }
-            Status::Infeasible | Status::Unbounded | Status::InfeasibleOrUnbounded => {
+            Status::Infeasible | Status::Unbounded | Status::InfeasibleOrUnbounded | Status::NotSolved => {
                 dict.set_item(pyo3::intern!(py, "objective"), py.None())?;
                 dict.set_item(pyo3::intern!(py, "x"), py.None())?;
             }
         }
         dict.set_item(pyo3::intern!(py, "node_limit_hit"), result.node_limit_hit)?;
-        Ok(dict)
-    }
-
-    /// EXPERIMENTAL (measurement only): drives
-    /// `simplex::solve_lp_dual_with_tie_experiment` for the tie-triggered
-    /// branch-and-merge measurement (see that function's own docs) — never
-    /// called by `Model.solve` or any other production path. LP only (no
-    /// MIP branch-and-bound); `forced` maps a dual-simplex iteration index
-    /// to which rank, within that iteration's tied chuzr group, to pick.
-    #[pyo3(signature = (forced, iter_cap=None, stop_at_new_tie=false, tie_tol=0.01, static_rule=None))]
-    fn solve_dual_tie_experiment<'py>(
-        &self,
-        py: Python<'py>,
-        forced: std::collections::HashMap<usize, usize>,
-        iter_cap: Option<usize>,
-        stop_at_new_tie: bool,
-        tie_tol: f64,
-        static_rule: Option<u8>,
-    ) -> PyResult<Bound<'py, PyDict>> {
-        let objective = self.objective.clone().ok_or_else(|| {
-            PyValueError::new_err("no objective set: call Model.set_objective(...) before solve()")
-        })?;
-        let input = simplex::tie_experiment::In { forced, iter_cap, stop_at_new_tie, tie_tol, static_rule };
-        let outcome = simplex::solve_lp_dual_with_tie_experiment(&self.variables, &objective, &self.constraints, input);
-
-        let dict = PyDict::new_bound(py);
-        match outcome {
-            simplex::TieExperimentRun::Capped { iters, obj } => {
-                dict.set_item("kind", "capped")?;
-                dict.set_item("iters", iters)?;
-                dict.set_item("obj", obj)?;
-            }
-            simplex::TieExperimentRun::NewTie { iter, tied_rows } => {
-                dict.set_item("kind", "new_tie")?;
-                dict.set_item("iter", iter)?;
-                dict.set_item("tied_rows", tied_rows)?;
-            }
-            simplex::TieExperimentRun::Done { iters, result } => {
-                dict.set_item("kind", "done")?;
-                dict.set_item("iters", iters)?;
-                dict.set_item("status", result.status.as_str())?;
-                match result.status {
-                    Status::Optimal => {
-                        let x = result.x.unwrap();
-                        let obj_val = objective.expr.constant + objective.expr.coeffs.iter().map(|(&j, &c)| c * x[j]).sum::<f64>();
-                        dict.set_item("objective", obj_val)?;
-                    }
-                    Status::Infeasible | Status::Unbounded | Status::InfeasibleOrUnbounded => {
-                        dict.set_item("objective", py.None())?;
-                    }
-                }
-            }
-        }
         Ok(dict)
     }
 }

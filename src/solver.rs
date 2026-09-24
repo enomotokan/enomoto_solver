@@ -49,6 +49,12 @@ pub fn solve_lp(
             x: None,
             node_limit_hit: false,
         },
+        Status::NotSolved => SolveResult {
+            status: Status::NotSolved,
+            objective: None,
+            x: None,
+            node_limit_hit: false,
+        },
         Status::Optimal => {
             let x = x.unwrap();
             let obj_val = objective.expr.constant

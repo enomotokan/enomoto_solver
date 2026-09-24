@@ -1,17 +1,17 @@
-//! Extended dual simplex with BFRT, for `StdForm`s where some *structural*
-//! column still carries a genuine one-sided infinite bound (Stage 3 of the
-//! paper's algorithm — see the plan this implements). Dispatched to by
-//! `solve_lp_dual` exactly when `PresolvedForm::had_unbounded_structural`
-//! is set; every other call path (the overwhelming majority of problems)
-//! never reaches this module at all and keeps using the classical
-//! bounded-variable [`super::solve_lp_dual_on`] unchanged.
+//! Extended dual simplex with BFRT — the one LP engine behind
+//! `solve_lp_dual`, for every presolved `StdForm` whether or not some
+//! *structural* column still carries a genuine infinite bound (with none
+//! left, the M-side bookkeeping simply stays empty). Called once per
+//! independent connected component by `simplex::solve_std_form_decomposed`.
+//! A `None` return (one of the "should be unreachable" bail-outs below) is
+//! reported to the user as `Status::NotSolved`; there is no other solver to
+//! fall back to.
 //!
 //! ## The M→∞ symbolic trick, and why no number ever stands for `M`
 //!
 //! The paper this implements replaces a fixed numeric truncation
 //! (`+/-M` substituted for `+/-inf`, this crate's own former `BIG_M`
-//! sentinel — see `simplex.rs::BIG_M`'s own docs for the numerical
-//! fragility that motivated dropping it here) with a *symbolic* analysis:
+//! sentinel, since removed for its numerical fragility) with a *symbolic* analysis:
 //! every quantity that would depend on the truncation value is tracked as
 //! an affine function `base + slope * M` ([`Affine1`]) instead of a plain
 //! number, and every comparison between two such quantities is decided by
@@ -89,8 +89,8 @@
 //! ## Deliberate simplifications versus the classical method
 //!
 //! This started as a first, from-scratch implementation of the paper's
-//! algorithm, not a symbolic-`M` retrofit of [`super::solve_lp_dual_on`]'s
-//! far more elaborate machinery — but two of the three simplifications
+//! algorithm, not a symbolic-`M` retrofit of the (since removed) classical
+//! dual method's far more elaborate machinery — but two of the three simplifications
 //! originally listed here have since been ported over (see each item
 //! below); only the third remains as originally written. Kept as a record
 //! of what was deliberately deferred versus what has since caught up, not
@@ -98,16 +98,15 @@
 //! call sites for what actually runs today.
 //!
 //! 1. ~~Dantzig's rule only for the leaving row~~ — **superseded**: the main
-//!    loop now uses the same `super::EdgeWeights::Dse`/`DseState` this
-//!    module shares with [`super::solve_lp_dual_on`], generalized to
+//!    loop now uses `super::DseState`, generalized to
 //!    [`Score2`]'s lexicographic degree-2-in-`M` comparison exactly as the
-//!    paper's §4.5 describes (`weights.weight(i)` feeding every [`Score2`]
+//!    paper's §4.5 describes (`dse.weight(i)` feeding every [`Score2`]
 //!    built in the main loop below). Ported once `x_B(M)`'s incremental
 //!    maintenance (item 2 below) made the leaving row's true deviation
 //!    available every iteration instead of only after a full recompute.
 //! 2. ~~No incremental basis update~~ — **superseded**: the main loop calls
 //!    `FtLu::try_update` (Forrest-Tomlin eta update) every pivot, exactly
-//!    like [`super::solve_lp_dual_on`], and only falls back to a full
+//!    and only falls back to a full
 //!    [`refactorize`] on `try_update`'s own rejection, the eta-bump-count
 //!    cap, or this module's own tightened drift check ([`XB_CHECK_INTERVAL`]/
 //!    [`XB_DRIFT_TOL`]) — typically single digits per solve, not once per
@@ -117,9 +116,7 @@
 //!    originally implemented), not the paper's own full `(M, epsilon)`-
 //!    extended lexicographic rule (§4.7): once `stall_limit` iterations
 //!    pass, tie-breaking permanently switches to smallest-index-first
-//!    (`bland_mode`), matching this crate's existing convention for the
-//!    classical dual method's own Bland fallback (see
-//!    `simplex.rs::solve_lp_dual_on`'s own `bland_mode`).
+//!    (`bland_mode`).
 
 use super::{sparse_lu, InfeasibleRows, NbStatus, SimplexResult, StdForm, Status, TOL};
 use crate::sparse::sparse_axpy_dense;
@@ -279,7 +276,7 @@ mod prof_phases {
     /// `B^-1 e_r`) is *exactly* `super::DseState`'s own target quantity
     /// (`gamma_r = ||B^-1 e_r||^2`) for the chosen row `r` — so comparing
     /// `dot(rho, rho)` against the incrementally-maintained
-    /// `weights.weight(r)` (read just before it, still pre-update) costs
+    /// `dse.weight(r)` (read just before it, still pre-update) costs
     /// nothing extra (no additional linear solve) and answers whether
     /// `chuzr`'s notion of "how disruptive is pivoting on this row" has
     /// drifted from the true value by the time it actually gets picked —
@@ -473,12 +470,8 @@ mod prof_phases {
                 lu::PROF_BTRAN_L_SCATTER.load(Relaxed),
                 lu::PROF_BTRAN_L_GATHER.load(Relaxed),
             );
-            // Markowitz pivot search, from this module's side: `simplex.rs`'s
-            // own `ENOMOTO_PROF_TRIANGULAR` block only ever runs on the
-            // classical fallback path, which this solver returns before
-            // reaching — so without these lines the pivot-search counters
-            // are unreadable for every problem the extended solver actually
-            // handles (i.e. all of them).
+            // Markowitz pivot search (`ENOMOTO_PROF_TRIANGULAR` enables the
+            // scan timer in `lu.rs`; this is where its counters get printed).
             let steps = lu::PROF_TOTAL_STEPS.load(Relaxed);
             eprintln!(
                 "  pivot_search steps={steps} search_limit_hits={} ({:.1}%) candidates={} (avg {:.2}/step) scan={:.3}ms",
@@ -1303,8 +1296,8 @@ fn hat_upper(std: &StdForm, n_orig: usize, j: usize) -> Option<Affine1> {
 /// pivot only ever place a column at a side [`hat_lower`]/[`hat_upper`]
 /// resolves to `Some`), but a
 /// violation is a signal to give up cleanly (propagated via `?` up to
-/// [`solve_lp_dual_extended`]'s `None` return, which `solve_lp_dual` reads
-/// as "fall back to the classical path") rather than the outright process
+/// [`solve_lp_dual_extended`]'s `None` return, which `solve_lp_dual`
+/// reports as `Status::NotSolved`) rather than the outright process
 /// abort a `.expect()`/`.unwrap()` here would cause across the PyO3
 /// boundary — confirmed to actually occur on two real Netlib instances
 /// (`perold`, `pilot4`) before this was a graceful `None` instead of a
@@ -2968,16 +2961,13 @@ pub fn solve_lp_dual_extended(std: &StdForm, opts: &crate::types::LpOptions) -> 
         fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fd_cb, &mut lu_scratch, &mut fd_y, &mut d);
     }
 
-    // Leaving-row weighting (paper \S4.5): starts in cheap `Devex` mode and
-    // escalates one-way to exact `Dse`, reusing `super::DevexState`/
-    // `super::DseState`/`super::EdgeWeights` directly rather than
-    // reimplementing them — their own weights are pure, `M`-independent
-    // tableau-row quantities (see [`Score2`]'s own docs), so nothing about
-    // them needs to change to serve this module; only the *score* they
-    // feed into (`Score2`, generalizing the classical method's plain
-    // `delta^2/w` to a degree-2 polynomial in `M`) is new.
-    // Exact DSE from the very first pivot, not the classical loop's
-    // Devex-then-escalate scheme. The all-slack `B0` is a signed identity,
+    // Leaving-row weighting (paper \S4.5): `super::DseState`, reused
+    // directly — its weights are pure, `M`-independent tableau-row
+    // quantities (see [`Score2`]'s own docs); only the *score* they feed
+    // into (`Score2`, generalizing plain `delta^2/w` to a degree-2
+    // polynomial in `M`) is specific to this module.
+    // Exact DSE from the very first pivot (a Devex-then-escalate scheme was
+    // tried and measured slower). The all-slack `B0` is a signed identity,
     // so `DseState::new`'s unit weights are exact here. The earlier
     // "DSE from the start is a gamble" finding (`bnl1`/`perold` ~190x
     // slower) was not a pricing effect at all: both blow-ups were the
@@ -2987,7 +2977,7 @@ pub fn solve_lp_dual_extended(std: &StdForm, opts: &crate::types::LpOptions) -> 
     // 10.7s for Devex-start (fit1p 1.95s -> 0.49s, wood1p 0.31s -> 0.16s,
     // cycle 0.42s -> 0.13s), with no problem regressing by more than the
     // run-to-run noise except `maros` (0.15s -> 0.24s).
-    let mut weights = super::EdgeWeights::Dse(super::DseState::new(m));
+    let mut dse = super::DseState::new(m);
 
     let stall_limit = (5 * m).max(500);
     let mut stall_count = 0usize;
@@ -3584,7 +3574,7 @@ pub fn solve_lp_dual_extended(std: &StdForm, opts: &crate::types::LpOptions) -> 
                         continue;
                     }
                     let (d_dir, dev) = (row_dev.dir[i], row_dev.dev[i]);
-                    let score = Score2::new(dev, weights.weight(i));
+                    let score = Score2::new(dev, dse.weight(i));
                     let better = match b {
                         None => true,
                         Some((br, _, _, bscore)) => match score.cmp_lex(&bscore, score2_c2_tol) {
@@ -3623,7 +3613,7 @@ pub fn solve_lp_dual_extended(std: &StdForm, opts: &crate::types::LpOptions) -> 
                 } else {
                     dev
                 };
-                let score = Score2::new(scored_dev, weights.weight(i));
+                let score = Score2::new(scored_dev, dse.weight(i));
                 let better = match best {
                     None => true,
                     Some((br, _, _, bscore)) => {
@@ -3651,7 +3641,7 @@ pub fn solve_lp_dual_extended(std: &StdForm, opts: &crate::types::LpOptions) -> 
                     std::cmp::Ordering::Equal => i < t.1,
                 };
                 for &i in &infeasible_rows.rows {
-                    let score = Score2::new(row_dev.dev[i], weights.weight(i));
+                    let score = Score2::new(row_dev.dev[i], dse.weight(i));
                     // Fast reject: not better than the current (K+1)-th.
                     if sl_top.len() > sl_k && !before(&score, i, &sl_top[sl_k]) {
                         continue;
@@ -3713,7 +3703,7 @@ pub fn solve_lp_dual_extended(std: &StdForm, opts: &crate::types::LpOptions) -> 
                 gi_candidates.clear();
                 for &i in &infeasible_rows.rows {
                     let (d_dir_i, dev_i) = (row_dev.dir[i], row_dev.dev[i]);
-                    let score = Score2::new(dev_i, weights.weight(i));
+                    let score = Score2::new(dev_i, dse.weight(i));
                     gi_candidates.push((i, d_dir_i, dev_i, score));
                 }
                 gi_candidates.sort_by(|a, b| b.3.cmp_lex(&a.3, score2_c2_tol));
@@ -3839,7 +3829,7 @@ pub fn solve_lp_dual_extended(std: &StdForm, opts: &crate::types::LpOptions) -> 
         timed!(profile_phases, prof_phases::BTRAN, lu.solve_transpose_unit_work(r, &mut rho, &mut e_tilde_buf, &mut btran_work, Some(&mut rho_steps)));
         if profile_phases {
             let exact_w = dot(&rho, &rho);
-            let maintained_w = weights.weight(r);
+            let maintained_w = dse.weight(r);
             let rel_err = (maintained_w - exact_w).abs() / exact_w.max(1e-9);
             prof_phases::DSE_CHECKED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let bucket = if rel_err < 0.01 {
@@ -4116,9 +4106,7 @@ pub fn solve_lp_dual_extended(std: &StdForm, opts: &crate::types::LpOptions) -> 
                     rebuild_rows(&mut infeasible_rows, &mut row_dev, m, &row_bounds, &x_b_base, &x_b_slope);
                     fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fd_cb, &mut lu_scratch, &mut fd_y, &mut d);
                     if dse_refresh_on_refactor {
-                        if let super::EdgeWeights::Dse(dse) = &mut weights {
-                            *dse = super::DseState::from_basis(m, &lu);
-                        }
+                        dse = super::DseState::from_basis(m, &lu);
                     }
                 });
                 continue;
@@ -4155,8 +4143,9 @@ pub fn solve_lp_dual_extended(std: &StdForm, opts: &crate::types::LpOptions) -> 
             if phase == Phase::A {
                 // The slope problem is feasible at `x^1 = 0`, so stage A can
                 // never prove infeasibility (`prop:two-phase` (i)): reaching
-                // here is numerical breakdown, not a conclusion — bail to the
-                // caller's fallback instead of reporting a false `Infeasible`.
+                // here is numerical breakdown, not a conclusion — bail out
+                // (`None`, reported as `NotSolved`) instead of reporting a
+                // false `Infeasible`.
                 if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
                     eprintln!("DEBUG_EXT_BAILOUT: stage A found no entering column at iter={_iter} r={r} (numerical)");
                 }
@@ -4285,9 +4274,7 @@ pub fn solve_lp_dual_extended(std: &StdForm, opts: &crate::types::LpOptions) -> 
                     rebuild_rows(&mut infeasible_rows, &mut row_dev, m, &row_bounds, &x_b_base, &x_b_slope);
                     fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fd_cb, &mut lu_scratch, &mut fd_y, &mut d);
                     if dse_refresh_on_refactor {
-                        if let super::EdgeWeights::Dse(dse) = &mut weights {
-                            *dse = super::DseState::from_basis(m, &lu);
-                        }
+                        dse = super::DseState::from_basis(m, &lu);
                     }
                 });
                 continue;
@@ -4306,8 +4293,9 @@ pub fn solve_lp_dual_extended(std: &StdForm, opts: &crate::types::LpOptions) -> 
             if phase == Phase::A {
                 // The slope problem is feasible at `x^1 = 0`, so stage A can
                 // never prove infeasibility (`prop:two-phase` (i)): reaching
-                // here is numerical breakdown, not a conclusion — bail to the
-                // caller's fallback instead of reporting a false `Infeasible`.
+                // here is numerical breakdown, not a conclusion — bail out
+                // (`None`, reported as `NotSolved`) instead of reporting a
+                // false `Infeasible`.
                 if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
                     eprintln!("DEBUG_EXT_BAILOUT: stage A found no entering column at iter={_iter} r={r} (numerical)");
                 }
@@ -4480,7 +4468,7 @@ pub fn solve_lp_dual_extended(std: &StdForm, opts: &crate::types::LpOptions) -> 
                         lu.add_zero_rhs_solve_ticks(false);
                         0
                     };
-                    if fused_bfrt_ftran && fused_dse_ftran && matches!(weights, super::EdgeWeights::Dse(_)) {
+                    if fused_bfrt_ftran && fused_dse_ftran {
                         combined_deferred = true;
                         combined_slope_nnz = slope_nnz;
                     } else {
@@ -4614,7 +4602,7 @@ pub fn solve_lp_dual_extended(std: &StdForm, opts: &crate::types::LpOptions) -> 
                     tau_ready = true;
                     tau_nnz = Some(b_nnz);
                     a_nnz
-                } else if fused_dse_ftran && matches!(weights, super::EdgeWeights::Dse(_)) {
+                } else if fused_dse_ftran {
                     // DSE's own `tau = B^-1 rho_p` FTRAN (formerly run
                     // separately inside the weight update below, against
                     // this same pre-pivot `lu` and the same `rho`) fused
@@ -4656,7 +4644,7 @@ pub fn solve_lp_dual_extended(std: &StdForm, opts: &crate::types::LpOptions) -> 
                     tau_ready = true;
                     tau_nnz = Some(b_nnz);
                     a_nnz
-                } else if fused_dse_ftran && matches!(weights, super::EdgeWeights::Dse(_)) {
+                } else if fused_dse_ftran {
                     let (a_nnz, b_nnz) = lu.solve_sparse_into_pair_capture(
                         std.cols.col(q),
                         &rho,
@@ -4860,9 +4848,7 @@ pub fn solve_lp_dual_extended(std: &StdForm, opts: &crate::types::LpOptions) -> 
                 rebuild_rows(&mut infeasible_rows, &mut row_dev, m, &row_bounds, &x_b_base, &x_b_slope);
                 fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fd_cb, &mut lu_scratch, &mut fd_y, &mut d);
                 if dse_refresh_on_refactor {
-                    if let super::EdgeWeights::Dse(dse) = &mut weights {
-                        *dse = super::DseState::from_basis(m, &lu);
-                    }
+                    dse = super::DseState::from_basis(m, &lu);
                 }
             });
             for &j in &touched_cols {
@@ -5096,24 +5082,21 @@ pub fn solve_lp_dual_extended(std: &StdForm, opts: &crate::types::LpOptions) -> 
         let contribution_base = theta_base * dj_q;
         let contribution_slope = theta_slope * dj_q;
 
-        timed!(profile_phases, prof_phases::DSE_UPDATE, match &mut weights {
-            super::EdgeWeights::Devex(dv) => dv.update_after_pivot(r, &alpha_full),
-            super::EdgeWeights::Dse(dse) => {
-                if !tau_ready {
-                    timed!(profile_phases, prof_phases::DSE_FTRAN, lu.solve_into(&rho, &mut lu_scratch, &mut tau));
+        timed!(profile_phases, prof_phases::DSE_UPDATE, {
+            if !tau_ready {
+                timed!(profile_phases, prof_phases::DSE_FTRAN, lu.solve_into(&rho, &mut lu_scratch, &mut tau));
+            }
+            match xb_list_len {
+                // S7: only `alpha`'s nonzero rows (the `x_B` update's
+                // own list, a superset when a flip result was merged).
+                Some(k) => {
+                    let wp_old = match rho_list_len {
+                        Some(kr) => rho_rows[..kr].iter().map(|&i| rho[i as usize] * rho[i as usize]).sum::<f64>(),
+                        None => rho.iter().map(|v| v * v).sum::<f64>(),
+                    };
+                    dse.update_after_pivot_rows(r, &alpha_full, &tau, wp_old, &xb_rows[..k]);
                 }
-                match xb_list_len {
-                    // S7: only `alpha`'s nonzero rows (the `x_B` update's
-                    // own list, a superset when a flip result was merged).
-                    Some(k) => {
-                        let wp_old = match rho_list_len {
-                            Some(kr) => rho_rows[..kr].iter().map(|&i| rho[i as usize] * rho[i as usize]).sum::<f64>(),
-                            None => rho.iter().map(|v| v * v).sum::<f64>(),
-                        };
-                        dse.update_after_pivot_rows(r, &alpha_full, &tau, wp_old, &xb_rows[..k]);
-                    }
-                    None => dse.update_after_pivot(r, &alpha_full, &tau, &rho),
-                }
+                None => dse.update_after_pivot(r, &alpha_full, &tau, &rho),
             }
         });
         if sl_ready {
@@ -5621,17 +5604,15 @@ pub fn solve_lp_dual_extended(std: &StdForm, opts: &crate::types::LpOptions) -> 
                 rebuild_rows(&mut infeasible_rows, &mut row_dev, m, &row_bounds, &x_b_base, &x_b_slope);
                 fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fd_cb, &mut lu_scratch, &mut fd_y, &mut d);
                 if dse_refresh_on_refactor {
-                    if let super::EdgeWeights::Dse(dse) = &mut weights {
-                        *dse = super::DseState::from_basis(m, &lu);
-                    }
+                    dse = super::DseState::from_basis(m, &lu);
                 }
             });
         }
 
     }
 
-    // `max_iters` exceeded without reaching Step III — `None` (fall back
-    // to the classical `BIG_M` path) rather than a false `Infeasible`.
+    // `max_iters` exceeded without reaching Step III — `None` (reported as
+    // `NotSolved`) rather than a false `Infeasible`.
     if profile_phases {
         prof_phases::report(wall_t0.elapsed().as_nanos() as usize);
     }
@@ -5886,7 +5867,7 @@ fn finish(std: &StdForm, basis: &mut [usize], basis_pos: &mut [Option<usize>], n
         // count) is established for the one-sided case, not for evicting
         // *another* free variable — rather than risk an unproven
         // termination argument or an unsound placement, bail to `None`
-        // (the classical `BIG_M` fallback) exactly like this module's
+        // (reported as `NotSolved`) exactly like this module's
         // other "should be unreachable" guards.
         let Some(true_status) = (if std.lb[beta_r2].is_finite() {
             Some(NbStatus::Lower)
@@ -6269,14 +6250,11 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
             if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
                 eprintln!("DEBUG_EXT: polish DUAL->PRIMAL cleanup handoff at polish_iter={_iter}");
             }
-            // Unlike `solve_lp_dual_on`'s identical handoff, a singular
-            // basis here does *not* fall back to a from-scratch classical
-            // solve: `solve_lp_on`/`Tableau::new` assume every structural
-            // column has a finite bound (their own docs), which this
-            // module exists specifically to handle when false -- so `None`
-            // is propagated to this function's own caller instead, which
-            // already knows how to fall back (the existing `BIG_M`-clamped
-            // classical path in `solve_lp_dual`) without that assumption.
+            // A singular basis here propagates `None` (reported as
+            // `NotSolved`): there is no from-scratch solver to restart
+            // with, since `Tableau::new` assumes every structural column
+            // has a finite bound, which this module exists specifically to
+            // handle when false.
             let handoff_t0 = std::time::Instant::now();
             let handoff_iters0 = super::prof_phases::RUN_PHASE_ITERS.load(std::sync::atomic::Ordering::Relaxed);
             // `ENOMOTO_HANDOFF_INCREMENTAL=1` (S4, default off): the
