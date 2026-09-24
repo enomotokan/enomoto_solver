@@ -2659,6 +2659,12 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
             price_nb_end[i] = lo + n_nb;
         }
     }
+    // S9 (`ENOMOTO_PRICE_COLUMN=1`, default off): column-wise PRICE when
+    // `rho` is dense (`ENOMOTO_PRICE_COLUMN_DENSITY`, default 0.1 — HiGHS's
+    // own row/column switch point) — see the PRICE site below.
+    let price_by_column = tunable!("ENOMOTO_PRICE_COLUMN", 0u8, u8) != 0;
+    let price_column_density = tunable!("ENOMOTO_PRICE_COLUMN_DENSITY", 0.1, f64);
+    let price_col_list: Vec<u32> = if price_by_column { (0..std.n_total).filter(|&j| std.lb[j] != std.ub[j]).map(|j| j as u32).collect() } else { Vec::new() };
 
     // Dedicated to `solve_sparse_into` alone, per that method's own
     // documented precondition (`FtLu::solve_sparse_into`'s own docs) —
@@ -3536,8 +3542,37 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         // own M-bounding logic even fires for a single unbounded-above
         // column — routine for a plain `x_j >= 0` MPS column with no
         // explicit upper bound).
+        // S9 (`price_by_column`, default off): with a dense `rho` the
+        // row-wise scatter visits most of `A` anyway, so gather instead —
+        // one dot product `rho^T A_j` per non-fixed (and, under the
+        // default partition, nonbasic) column over `std.cols`, no
+        // `touched` bookkeeping per entry (HiGHS `priceByColumn`, used
+        // above density 0.1). Summation order changes from row order to
+        // column order, so `a_p` rounding and hence the path can differ.
+        let price_rows_end = if price_by_column && (rho.iter().filter(|v| v.abs() > TOL).count() as f64) > price_column_density * m as f64 {
+            timed!(profile_phases, prof_phases::PRICE, {
+                for &j in &price_col_list {
+                    let j = j as usize;
+                    if price_nonbasic_only && nb_status[j].is_none() {
+                        continue;
+                    }
+                    let mut acc = 0.0f64;
+                    for &(i, v) in std.cols.col(j) {
+                        acc += rho[i] * v;
+                    }
+                    if acc != 0.0 {
+                        a_p[j] = acc;
+                        touched[j] = true;
+                        touched_cols.push(j);
+                    }
+                }
+            });
+            0
+        } else {
+            m
+        };
         timed!(profile_phases, prof_phases::PRICE, {
-            for i in 0..m {
+            for i in 0..price_rows_end {
                 let rv = rho[i];
                 if rv.abs() <= TOL {
                     continue;
