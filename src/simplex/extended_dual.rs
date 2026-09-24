@@ -2559,6 +2559,9 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
     let mut rho = vec![0.0f64; m];
     let mut dense_q = vec![0.0f64; m];
     let mut alpha_full = vec![0.0f64; m];
+    // Ascending nonzero-row list of `alpha_full` (plus the BFRT flip
+    // result) for the sparse `x_B` update (see its use site).
+    let mut xb_rows = vec![0u32; m];
     let mut tau = vec![0.0f64; m];
     // Scratch for the DSE `tau` half of the fused entering-column/`tau`
     // FTRAN ([`sparse_lu::FtLu::solve_into_pair_capture`]); `lu_scratch`
@@ -3991,6 +3994,9 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         let mut combined_deferred = false;
         let mut combined_slope_nonzero = false;
         let mut combined_slope_nnz = 0usize;
+        // Upper bound on the combined-flip result's nonzero count (sum of
+        // both channels' counts), for the `x_B` update's list/scan choice.
+        let mut combined_nnz = 0usize;
         timed!(profile_phases, prof_phases::BFRT, {
             // Whether any flipped column's width carries an `M` term
             // (`width.slope != 0`, i.e. an `M`-flagged column flipping onto
@@ -4059,6 +4065,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                         lu.solve_sparse_into(&sparse_slope_buf, &mut sparse_scratch, &mut gp_scratch, &mut combined_alpha_slope)
                     };
                     density_bfrt.record(slope_nnz, m);
+                    combined_nnz = slope_nnz;
                 } else if lu.should_use_dense_solve_tracked(combined_touched.len(), &density_bfrt) {
                     // The slope channel (rare) is solved here on its own;
                     // the base channel either rides along the entering
@@ -4078,6 +4085,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                         let base_nnz = lu.solve_into(&combined_base, &mut lu_scratch, &mut combined_alpha_base);
                         density_bfrt.record(base_nnz, m);
                         density_bfrt.record(slope_nnz, m);
+                        combined_nnz = base_nnz + slope_nnz;
                         if profile_phases {
                             prof_phases::DENSITY_BFRT_PPT.store((density_bfrt.expected() * 1000.0) as usize, std::sync::atomic::Ordering::Relaxed);
                         }
@@ -4096,6 +4104,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                     };
                     density_bfrt.record(base_nnz, m);
                     density_bfrt.record(slope_nnz, m);
+                    combined_nnz = base_nnz + slope_nnz;
                     if profile_phases {
                         prof_phases::DENSITY_BFRT_PPT.store((density_bfrt.expected() * 1000.0) as usize, std::sync::atomic::Ordering::Relaxed);
                     }
@@ -4166,6 +4175,8 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         // further down — see that method's own docs.
         let mut tau_ready = false;
         let mut combined_base_nnz = 0usize;
+        // Nonzero count of `alpha_full` (the FTRAN's own count).
+        let mut alpha_nnz = m;
         timed!(profile_phases, prof_phases::FTRAN, {
             if profile_phases && density_col_aq.predicts_dense() && !lu.should_use_dense_solve(std.cols.col(q).len()) {
                 prof_phases::DENSITY_GATE_FTRANS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -4209,6 +4220,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 for &(i, _) in std.cols.col(q) {
                     dense_q[i] = 0.0;
                 }
+                alpha_nnz = result_nnz;
                 density_col_aq.record(result_nnz, m);
             } else {
                 let result_nnz = if combined_deferred {
@@ -4244,6 +4256,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 } else {
                     lu.solve_sparse_into_capture(std.cols.col(q), &mut sparse_scratch, &mut gp_scratch, &mut alpha_full, &mut a_tilde_buf)
                 };
+                alpha_nnz = result_nnz;
                 density_col_aq.record(result_nnz, m);
             }
             if profile_phases {
@@ -4251,6 +4264,7 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
             }
         });
         if combined_deferred {
+            combined_nnz = combined_base_nnz + combined_slope_nnz;
             density_bfrt.record(combined_base_nnz, m);
             density_bfrt.record(combined_slope_nnz, m);
             if profile_phases {
@@ -4530,18 +4544,46 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
         };
         let theta_base = (x_r.base - target.base) / alpha_q;
         let theta_slope = (x_r.slope - target.slope) / alpha_q;
+        // Rows the loops below touch, listed in ascending order (S6): when
+        // `alpha` (plus the flip result) is sparse, a branch-free compaction
+        // pass builds the nonzero-row list and the update walks only it —
+        // the same rows in the same order as the `0..m` scan, so every
+        // `x_B` value and every `InfeasibleRows` membership change (whose
+        // order the pool's layout, and hence chuzr's tie-breaking, depends
+        // on) is bit-for-bit unchanged.
+        let xb_list_len: Option<usize> = {
+            let est = alpha_nnz + if combined_pending { combined_nnz } else { 0 };
+            if (est as f64) <= tunable!("ENOMOTO_T_XB_LIST_DENSITY", 0.3, f64) * m as f64 {
+                let mut k = 0usize;
+                if combined_pending {
+                    for i in 0..m {
+                        xb_rows[k] = i as u32;
+                        let cs = if combined_slope_nonzero { combined_alpha_slope[i] } else { 0.0 };
+                        k += (alpha_full[i] != 0.0 || combined_alpha_base[i] != 0.0 || cs != 0.0) as usize;
+                    }
+                } else {
+                    for i in 0..m {
+                        xb_rows[k] = i as u32;
+                        k += (alpha_full[i] != 0.0) as usize;
+                    }
+                }
+                Some(k)
+            } else {
+                None
+            }
+        };
         timed!(profile_phases, prof_phases::XB_UPDATE, {
             if combined_pending {
                 // Flip result and entering step in one pass: per row, the
                 // exact operations of the separate flip pass followed by
                 // those of the entering step, then one `refresh_row`.
-                for i in 0..m {
+                let mut row = |i: usize| {
                     let ca = combined_alpha_base[i];
                     let cs = if combined_slope_nonzero { combined_alpha_slope[i] } else { 0.0 };
                     let flip = ca != 0.0 || cs != 0.0;
                     let a = alpha_full[i];
                     if !flip && a == 0.0 {
-                        continue;
+                        return;
                     }
                     if flip {
                         x_b_base[i] -= ca;
@@ -4556,6 +4598,10 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                         }
                     }
                     refresh_row(&mut infeasible_rows, &mut row_dev, &row_bounds, &x_b_base, &x_b_slope, i);
+                };
+                match xb_list_len {
+                    Some(k) => xb_rows[..k].iter().for_each(|&i| row(i as usize)),
+                    None => (0..m).for_each(&mut row),
                 }
                 for &i in &combined_touched {
                     rhs_inc_base[i] -= combined_base[i];
@@ -4579,12 +4625,28 @@ pub fn solve_lp_dual_extended(std: &StdForm) -> Option<SimplexResult> {
                 // `snap_slope`-normalized (never `-0.0`, never below
                 // `X_B_SLOPE_NOISE` in magnitude), so `x - a*(±0.0)` is `x`
                 // bit-for-bit and `snap_slope(x) == x` — so it is skipped.
-                for i in 0..m {
-                    let a = alpha_full[i];
-                    if a != 0.0 {
-                        x_b_base[i] -= a * theta_base;
+                if let Some(k) = xb_list_len {
+                    for &i in &xb_rows[..k] {
+                        let i = i as usize;
+                        x_b_base[i] -= alpha_full[i] * theta_base;
                         refresh_row(&mut infeasible_rows, &mut row_dev, &row_bounds, &x_b_base, &x_b_slope, i);
                     }
+                } else {
+                    for i in 0..m {
+                        let a = alpha_full[i];
+                        if a != 0.0 {
+                            x_b_base[i] -= a * theta_base;
+                            refresh_row(&mut infeasible_rows, &mut row_dev, &row_bounds, &x_b_base, &x_b_slope, i);
+                        }
+                    }
+                }
+            } else if let Some(k) = xb_list_len {
+                for &i in &xb_rows[..k] {
+                    let i = i as usize;
+                    let a = alpha_full[i];
+                    x_b_base[i] -= a * theta_base;
+                    x_b_slope[i] = snap_slope(x_b_slope[i] - a * theta_slope);
+                    refresh_row(&mut infeasible_rows, &mut row_dev, &row_bounds, &x_b_base, &x_b_slope, i);
                 }
             } else {
                 for i in 0..m {
