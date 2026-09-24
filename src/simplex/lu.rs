@@ -860,8 +860,39 @@ struct MarkowitzState {
     inplace_elim: bool,
 }
 
+thread_local! {
+    /// Recycled `col_buckets`/`row_buckets` of dropped [`MarkowitzState`]s
+    /// (outer `Vec` plus each bucket's own allocation), so a refactorization
+    /// does not re-allocate `2(m+1)` bucket headers and the buckets' own
+    /// buffers every time. Contents are cleared before reuse; the buckets
+    /// are filled in the same order as fresh ones, so nothing observable
+    /// changes.
+    static BUCKET_POOL: std::cell::RefCell<Vec<Vec<Vec<usize>>>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn take_buckets(n: usize) -> Vec<Vec<usize>> {
+    let mut b = BUCKET_POOL.with(|p| p.borrow_mut().pop()).unwrap_or_default();
+    b.truncate(n);
+    for v in b.iter_mut() {
+        v.clear();
+    }
+    b.resize_with(n, Vec::new);
+    b
+}
+
+fn give_buckets(b: Vec<Vec<usize>>) {
+    BUCKET_POOL.with(|p| {
+        let mut p = p.borrow_mut();
+        if p.len() < 4 {
+            p.push(b);
+        }
+    });
+}
+
 impl Drop for MarkowitzState {
     fn drop(&mut self) {
+        give_buckets(std::mem::take(&mut self.col_buckets));
+        give_buckets(std::mem::take(&mut self.row_buckets));
         PROF_COLMAX_RESCAN_ENTRIES.fetch_add(self.prof_colmax_rescan_entries, Ordering::Relaxed);
         PROF_TOTAL_STEPS.fetch_add(self.prof_steps, Ordering::Relaxed);
         PROF_TRIVIAL_STEPS.fetch_add(self.prof_trivial, Ordering::Relaxed);
@@ -886,8 +917,8 @@ impl MarkowitzState {
         }
         let col_degree: Vec<usize> = (0..m).map(|j| mat.col(j).len()).collect();
 
-        let mut col_buckets = vec![Vec::new(); m + 1];
-        let mut row_buckets = vec![Vec::new(); m + 1];
+        let mut col_buckets = take_buckets(m + 1);
+        let mut row_buckets = take_buckets(m + 1);
         let mut col_bucket_pos = vec![None; m];
         let mut row_bucket_pos = vec![None; m];
 
@@ -1897,13 +1928,15 @@ fn detect_border_columns(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Vec<usize> 
 /// `rows_in` isn't exactly diagonal, so a caller can fall back to
 /// [`factorize`] rather than silently mis-factorizing.
 pub fn factorize_diagonal(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuFactors> {
-    let mut u_row = Vec::with_capacity(m);
-    for (i, row) in rows_in.iter().enumerate() {
-        match row.as_slice() {
-            [(j, v)] if *j == i && *v != 0.0 => u_row.push(vec![(i, *v)]),
-            _ => return None,
-        }
+    // Shape check first, with no allocation: every mid-solve
+    // refactorization tries this and almost always fails, and building
+    // `u_row` row by row until the first non-diagonal row paid one small
+    // allocation per leading diagonal row for nothing.
+    let diagonal = rows_in.iter().enumerate().all(|(i, row)| matches!(row.as_slice(), [(j, v)] if *j == i && *v != 0.0));
+    if !diagonal {
+        return None;
     }
+    let u_row: Vec<Vec<(usize, f64)>> = rows_in.iter().enumerate().map(|(i, row)| vec![(i, row[0].1)]).collect();
     let identity: Vec<usize> = (0..m).collect();
     // `L` is the identity: `m` columns, every one empty.
     let l_col = CscMat::empty(m, m);
@@ -2034,11 +2067,16 @@ pub fn factorize_reusing(m: usize, rows_in: &[Vec<(usize, f64)>], prev: Option<&
     let Some(prev) = prev else {
         return factorize(m, rows_in).map(FtLu::new);
     };
+    // The border columns and the dense-input test are computed once here
+    // and handed to `factorize_routed` below, rather than recomputed by
+    // `wants_bordered` and again by `factorize` (each an `O(nnz)` pass).
+    let border = detect_border_columns(m, rows_in);
+    let dense = is_dense_input(m, rows_in);
     // A dense input goes to `factorize_dense_faer` (via `factorize`)
     // regardless of any pivot order, and the bordered path wants its own
     // ordering — reuse targets the ordinary sparse Markowitz case, which
     // is every mid-solve refactorization on a real Netlib basis.
-    let eligible = reuse_pivot_order_enabled() && m > 0 && !is_dense_input(m, rows_in) && !wants_bordered(m, rows_in);
+    let eligible = reuse_pivot_order_enabled() && m > 0 && !dense && !border_wanted(m, border.len());
     if eligible && prev.reuse_skips_left == 0 {
         let t0 = std::time::Instant::now();
         PROF_REBUILD_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
@@ -2059,7 +2097,7 @@ pub fn factorize_reusing(m: usize, rows_in: &[Vec<(usize, f64)>], prev: Option<&
     // Either the reuse was rejected, or it is being skipped under the
     // backoff below. Both land on the full Markowitz factorization, whose
     // own fill becomes the new baseline (`FtLu::new` sets it).
-    let mut ft = FtLu::new(factorize(m, rows_in)?);
+    let mut ft = FtLu::new(factorize_routed(m, rows_in, &border, dense)?);
     PROF_FULL_NNZ.fetch_add(ft.fill_baseline, Ordering::Relaxed);
     PROF_FULL_COUNT.fetch_add(1, Ordering::Relaxed);
     if eligible {
@@ -2095,8 +2133,14 @@ pub fn factorize_reusing(m: usize, rows_in: &[Vec<(usize, f64)>], prev: Option<&
 /// those columns back through every step — measured as `fit2p` +6.4% at a
 /// 1.1 fill limit and +16.3% at 1.25, against roughly flat everywhere else,
 /// which is what sent this gate in.
+#[allow(dead_code)]
 fn wants_bordered(m: usize, rows_in: &[Vec<(usize, f64)>]) -> bool {
-    let k = detect_border_columns(m, rows_in).len();
+    border_wanted(m, detect_border_columns(m, rows_in).len())
+}
+
+/// [`wants_bordered`] given the border column count `k` already.
+#[inline]
+fn border_wanted(m: usize, k: usize) -> bool {
     k > 0 && k <= BORDER_MAX_COUNT && (k as f64) <= tunable!("ENOMOTO_T_BORDER_MAX_FRACTION", BORDER_MAX_FRACTION, f64) * m as f64
 }
 
@@ -2396,6 +2440,14 @@ fn factorize_reusing_order(
 }
 
 pub fn factorize(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuFactors> {
+    let border = detect_border_columns(m, rows_in);
+    factorize_routed(m, rows_in, &border, is_dense_input(m, rows_in))
+}
+
+/// [`factorize`] with its two routing inputs — [`detect_border_columns`]'s
+/// result and [`is_dense_input`]'s — supplied by a caller that already
+/// computed them.
+fn factorize_routed(m: usize, rows_in: &[Vec<(usize, f64)>], border: &[usize], dense: bool) -> Option<LuFactors> {
     if std::env::var("ENOMOTO_DEBUG_BLOCK_SIZES").is_ok() {
         debug_print_block_sizes(m, rows_in);
     }
@@ -2411,14 +2463,12 @@ pub fn factorize(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuFactors> {
     // `None` (this function's own fallback to `factorize_flat_markowitz`,
     // which still makes its own `is_dense_input` dispatch) if the sparse
     // phase can't find `m - k` independent pivots.
-    let border = detect_border_columns(m, rows_in);
-    let k = border.len();
-    if k > 0 && k <= BORDER_MAX_COUNT && (k as f64) <= tunable!("ENOMOTO_T_BORDER_MAX_FRACTION", BORDER_MAX_FRACTION, f64) * m as f64 {
-        if let Some(lu) = factorize_bordered(m, rows_in, &border) {
+    if border_wanted(m, border.len()) {
+        if let Some(lu) = factorize_bordered(m, rows_in, border) {
             return Some(lu);
         }
     }
-    factorize_flat_markowitz(m, rows_in)
+    factorize_flat_markowitz_routed(m, rows_in, dense)
 }
 
 /// Analysis-only: appends one kernel input to `<dir>/lu_dump.bin`
@@ -2442,8 +2492,13 @@ fn dump_lu_input(dir: &std::path::Path, m: usize, rows_in: &[Vec<(usize, f64)>])
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn factorize_flat_markowitz(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuFactors> {
-    if is_dense_input(m, rows_in) {
+    factorize_flat_markowitz_routed(m, rows_in, is_dense_input(m, rows_in))
+}
+
+fn factorize_flat_markowitz_routed(m: usize, rows_in: &[Vec<(usize, f64)>], dense: bool) -> Option<LuFactors> {
+    if dense {
         return factorize_dense_faer(m, rows_in);
     }
     if let Some(dir) = std::env::var_os("ENOMOTO_DUMP_LU_DIR") {

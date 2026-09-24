@@ -1337,7 +1337,18 @@ fn refactorize(
     prev: Option<&sparse_lu::FtLu>,
 ) -> Option<sparse_lu::FtLu> {
     let m = std.n_rows;
-    let mut rows = vec![Vec::new(); m];
+    // The row lists are recycled across refactorizations (thread-local):
+    // cleared, not reallocated, so each row keeps its capacity. Contents and
+    // order are exactly those of fresh lists.
+    thread_local! {
+        static ROWS: std::cell::RefCell<Vec<Vec<(usize, f64)>>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+    let mut rows = ROWS.with(|r| std::mem::take(&mut *r.borrow_mut()));
+    rows.truncate(m);
+    for row in rows.iter_mut() {
+        row.clear();
+    }
+    rows.resize_with(m, Vec::new);
     // Column-driven, via `std.cols` — `nnz(A_B)` work instead of the
     // `nnz(A)` scan this replaced, which read every nonbasic entry only to
     // drop it. Visiting `j` in ascending order reproduces each row's entry
@@ -1353,6 +1364,7 @@ fn refactorize(
     let r = sparse_lu::factorize_diagonal(m, &rows)
         .map(sparse_lu::FtLu::new)
         .or_else(|| sparse_lu::factorize_reusing(m, &rows, prev));
+    ROWS.with(|r| *r.borrow_mut() = rows);
     if r.is_none() && std::env::var("ENOMOTO_DEBUG_EXT_ITERS").is_ok() {
         eprintln!("DEBUG_EXT_BAILOUT: refactorize returned None (singular basis)");
     }
