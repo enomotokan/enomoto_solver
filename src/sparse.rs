@@ -395,6 +395,11 @@ pub fn scatter_dense(sparse: &[(usize, f64)], out: &mut [f64]) {
 /// array's length — which is always the full length and says nothing about
 /// fill — so `simplex::lu`'s refactorization triggers keep measuring true
 /// fill regardless of which representation an eta happens to be in.
+thread_local! {
+    /// [`HybridVec::pack_scaled_dense`]'s reusable compaction buffer.
+    static PACK_SCRATCH: std::cell::RefCell<Vec<(usize, f64)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 #[derive(Clone, Debug)]
 pub enum HybridVec {
     Sparse(Vec<(usize, f64)>),
@@ -456,36 +461,40 @@ impl HybridVec {
             return Self::pack_scaled_dense_drop(src, skip, scale, dense_fraction, tiny);
         }
         let len = src.len();
-        let mut nnz = 0usize;
-        for &x in src {
-            nnz += usize::from(scale * x != 0.0);
-        }
-        // `skip` is excluded from the vector, so undo its contribution
-        // rather than branching on it `len` times above. It was counted
-        // if and only if this same test holds, so this cannot underflow.
-        nnz -= usize::from(scale * src[skip] != 0.0);
-
-        if nnz as f64 > dense_fraction * len as f64 {
-            let mut data = src.to_vec();
-            if scale != 1.0 {
-                for d in data.iter_mut() {
-                    *d *= scale;
-                }
+        // One pass: every `(i, scale * src[i])` is written unconditionally
+        // into a reusable length-`len` scratch and the write cursor advances
+        // only for a kept entry (branch-free compaction), so the pair list
+        // and its count come out of a single read of `src`. The sparse arm
+        // then copies exactly `nnz` pairs out (same content and capacity as
+        // the former two-pass form); the dense arm is unchanged.
+        let _ = src[skip];
+        PACK_SCRATCH.with(|cell| {
+            let mut buf = cell.borrow_mut();
+            if buf.len() < len {
+                buf.resize(len, (0, 0.0));
             }
-            // Upholds "the skipped index" convention documented above:
-            // the dense form stores a literal `0.0` at its own pivot slot.
-            data[skip] = 0.0;
-            HybridVec::Dense { data: data.into_boxed_slice(), nnz }
-        } else {
-            let mut pairs = Vec::with_capacity(nnz);
+            let mut nnz = 0usize;
             for (i, &x) in src.iter().enumerate() {
                 let v = scale * x;
-                if i != skip && v != 0.0 {
-                    pairs.push((i, v));
-                }
+                // In bounds: `nnz <= i < len <= buf.len()`.
+                buf[nnz] = (i, v);
+                nnz += usize::from(v != 0.0 && i != skip);
             }
-            HybridVec::Sparse(pairs)
-        }
+            if nnz as f64 > dense_fraction * len as f64 {
+                let mut data = src.to_vec();
+                if scale != 1.0 {
+                    for d in data.iter_mut() {
+                        *d *= scale;
+                    }
+                }
+                // Upholds "the skipped index" convention documented above:
+                // the dense form stores a literal `0.0` at its own pivot slot.
+                data[skip] = 0.0;
+                HybridVec::Dense { data: data.into_boxed_slice(), nnz }
+            } else {
+                HybridVec::Sparse(buf[..nnz].to_vec())
+            }
+        })
     }
 
     /// [`Self::pack_scaled_dense`] treating `|scale * x| < tiny` as zero.
