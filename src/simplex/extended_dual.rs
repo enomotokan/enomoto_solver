@@ -1786,12 +1786,23 @@ impl RowDevCache {
 struct RowBounds {
     lower: Vec<Option<Affine1>>,
     upper: Vec<Option<Affine1>>,
-    /// `lower`/`upper` as plain `f64` for [`deviation_flat`]: the bound's
+    /// `(lower, upper)` as plain `f64` for [`deviation_flat`]: the bound's
     /// value when it is a real finite bound (`M`-free, slope `0`), and
-    /// `∓inf` when it is absent or an artificial `∓M` side.
-    lower_f: Vec<f64>,
-    upper_f: Vec<f64>,
+    /// `∓inf` when it is absent or an artificial `∓M` side. A `noise` row
+    /// is stored as `(-inf, +inf)`: [`deviation_flat`] then returns `None`
+    /// for it exactly as its `noise` early-out does, so the flat path reads
+    /// one 16-byte pair per row and no `noise` flag (S10).
+    flat: Vec<[f64; 2]>,
     noise: Vec<bool>,
+}
+
+#[inline]
+fn flat_pair(lower: Option<Affine1>, upper: Option<Affine1>, noise: bool) -> [f64; 2] {
+    if noise {
+        [f64::NEG_INFINITY, f64::INFINITY]
+    } else {
+        [flat_bound(lower, f64::NEG_INFINITY), flat_bound(upper, f64::INFINITY)]
+    }
 }
 
 #[inline]
@@ -1807,8 +1818,7 @@ impl RowBounds {
         RowBounds {
             lower: basis.iter().map(|&j| cache.lower[j]).collect(),
             upper: basis.iter().map(|&j| cache.upper[j]).collect(),
-            lower_f: basis.iter().map(|&j| flat_bound(cache.lower[j], f64::NEG_INFINITY)).collect(),
-            upper_f: basis.iter().map(|&j| flat_bound(cache.upper[j], f64::INFINITY)).collect(),
+            flat: basis.iter().map(|&j| flat_pair(cache.lower[j], cache.upper[j], noise_feasible[j])).collect(),
             noise: basis.iter().map(|&j| noise_feasible[j]).collect(),
         }
     }
@@ -1818,8 +1828,7 @@ impl RowBounds {
     fn assign(&mut self, i: usize, j: usize, cache: &ColCache, noise_feasible: &[bool]) {
         self.lower[i] = cache.lower[j];
         self.upper[i] = cache.upper[j];
-        self.lower_f[i] = flat_bound(cache.lower[j], f64::NEG_INFINITY);
-        self.upper_f[i] = flat_bound(cache.upper[j], f64::INFINITY);
+        self.flat[i] = flat_pair(cache.lower[j], cache.upper[j], noise_feasible[j]);
         self.noise[i] = noise_feasible[j];
     }
 
@@ -1827,13 +1836,15 @@ impl RowBounds {
     #[inline]
     fn mark_noise(&mut self, i: usize) {
         self.noise[i] = true;
+        self.flat[i] = [f64::NEG_INFINITY, f64::INFINITY];
     }
 
     #[inline]
     fn deviation(&self, x_b_base: &[f64], x_b_slope: &[f64], i: usize) -> Option<(i32, Affine1)> {
         let xs = x_b_slope[i];
         if xs == 0.0 {
-            deviation_flat(self.noise[i], self.lower_f[i], self.upper_f[i], x_b_base[i], xs)
+            let [lo, hi] = self.flat[i];
+            deviation_flat(false, lo, hi, x_b_base[i], xs)
         } else {
             deviation_core(self.noise[i], self.lower[i], self.upper[i], x_b_base[i], xs)
         }
@@ -1876,6 +1887,20 @@ fn deviation_flat(noise: bool, lower: f64, upper: f64, x: f64, xs: f64) -> Optio
 #[inline]
 #[allow(clippy::too_many_arguments)]
 fn refresh_row(rows: &mut InfeasibleRows, dc: &mut RowDevCache, rb: &RowBounds, x_b_base: &[f64], x_b_slope: &[f64], i: usize) {
+    // S10 fast path: a flat row (`x_slope == 0`, nearly every row) that is
+    // feasible — [`deviation_flat`]'s own two tests both fail — only needs
+    // its pool membership cleared, without building the `Option<(i32,
+    // Affine1)>` result. Same tests on the same values, so bit-identical.
+    if x_b_slope[i] == 0.0 {
+        let [lo, hi] = rb.flat[i];
+        let x = x_b_base[i];
+        let vm = lo - x;
+        let vp = x - hi;
+        if !(vm > 1e-9 && vm < f64::INFINITY) && !(vp > 1e-9 && vp < f64::INFINITY) {
+            rows.set(i, false);
+            return;
+        }
+    }
     match rb.deviation(x_b_base, x_b_slope, i) {
         Some((dir, dev)) => {
             dc.dir[i] = dir;
