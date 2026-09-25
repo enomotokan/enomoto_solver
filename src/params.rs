@@ -462,6 +462,12 @@ pub(crate) mod lu {
     /// (`ENOMOTO_BTRAN_L_SCATTER` で上書き、`0` でスキャッタ無効)。
     pub(crate) const BTRAN_L_SCATTER_FRACTION: f64 = 0.10;
 
+    /// 超疎ピボット行 BTRAN (`UnitBtranWork`、stormG2 報告 §4 策2): 非ゼロになりうる位置が
+    /// `m` のこの割合を超えたら、優先度付きキューをやめてその位置から全走査に切り替える
+    /// (`ENOMOTO_T_BTRAN_HYPER_FRACTION`)。前回の結果がこれを超えていたら最初から全走査。
+    /// 結果はどちらでもビット一致なので速度だけの閾値。
+    pub(crate) const BTRAN_HYPER_FRACTION: f64 = 0.10;
+
     /// C5 超疎 `U` 段: DFS の到達スロット数が `m` のこの割合を超えたら諦めて通常の
     /// 全走査にする (HiGHS の `kHyperFtranU` は 0.10)。
     pub(crate) const U_HYPER_ABORT_FRACTION: f64 = 0.25;

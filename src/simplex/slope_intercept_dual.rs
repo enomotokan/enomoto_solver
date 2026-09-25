@@ -1948,6 +1948,11 @@ fn solve_slope_intercept_dual_with(std: &StdForm, opts: &crate::types::LpOptions
     // この反復の `rho` の BTRAN が記録した非ゼロステップ。融合 `tau` FTRAN の `L` 段を
     // Gilbert-Peierls 経路にするために使う([`sparse_lu::StepCapture`]、密 `L` 段とビット同一)。
     let mut rho_steps = sparse_lu::StepCapture::new(m);
+    // 融合 FTRAN の出力(`alpha_full`/`tau`/`a_tilde_buf`)の非ゼロ位置の記録([`sparse_lu::FtranTrack`])。
+    // 超疎経路では前回の位置だけを消して書くので、長さ `m` の `fill`/`copy` を省ける(ビット同一)。
+    // `ENOMOTO_SPARSE_FTRAN_OUT=0` で従来の全体書き出し(A/B 用)。
+    let sparse_ftran_out = env_str!("ENOMOTO_SPARSE_FTRAN_OUT").map_or(true, |v| v != "0");
+    let mut ftran_track = sparse_lu::FtranTrack::new();
     // ピボット行 BTRAN 専用の 0 維持作業領域と触れた位置の一覧([`sparse_lu::UnitBtranWork`])。
     let mut btran_work = sparse_lu::UnitBtranWork::new(m);
     // DSE の `tau` FTRAN を入る列の FTRAN と融合するか(`ENOMOTO_FUSED_DSE_FTRAN=0` で別々。ビット同一)。
@@ -2532,6 +2537,8 @@ fn solve_slope_intercept_dual_with(std: &StdForm, opts: &crate::types::LpOptions
                 let mut best_gain: Option<Affine1> = None;
                 let mut best_gi: Option<(usize, i32, Affine1)> = None;
                 for &(i, d_dir_i, dev_i, _) in &greatest_improvement_cands {
+                    // `rho` を全体で書くので、超疎 BTRAN の出力位置の記録を無効化する。
+                    btran_work.invalidate_out();
                     let Some(ratio) = trial_row_ratio(std, &lu, &nb_status, &d, d_dir_i, &mut lu_scratch, &mut rho, &mut a_p, &mut touched, &mut touched_cols, i) else {
                         continue;
                     };
@@ -2630,8 +2637,9 @@ fn solve_slope_intercept_dual_with(std: &StdForm, opts: &crate::types::LpOptions
         // 通常の `f64`)。この反復の `try_update_precomputed` 用に `e_tilde_buf`
         // (U^-T 後・R 逆適用前の中間値)を副産物としてキャプチャする。
         timed!(profile_phases, prof_phases::BTRAN, lu.solve_transpose_unit_work(r, &mut rho, &mut e_tilde_buf, &mut btran_work, Some(&mut rho_steps)));
-        // 診断: 維持している DSE 重みと `‖rho‖^2`(真の値)の相対誤差を区間別に数える。
-        if profile_phases {
+        // 診断: 維持している DSE 重みと `‖rho‖^2`(真の値)の相対誤差を区間別に数える
+        // (`O(m)` なので作業量集計 `ENOMOTO_PROF_PHASES_EXT_WORK` のときだけ。策8)。
+        if profile_work {
             let exact_w = dot(&rho, &rho);
             let maintained_w = dse.weight(r);
             let rel_err = (maintained_w - exact_w).abs() / exact_w.max(1e-9);
@@ -2706,6 +2714,15 @@ fn solve_slope_intercept_dual_with(std: &StdForm, opts: &crate::types::LpOptions
             }
             if price_by_col_now {
                 n_priced = rho_count_for_col;
+            } else if let Some(rows) = btran_work.nonzero_rows() {
+                // 策5: 超疎 BTRAN が返した非ゼロ行(昇順)をそのまま使う(`compact_rows` と同じ行・順序)。
+                for (dst, &i) in rho_rows.iter_mut().zip(rows) {
+                    *dst = i as u32;
+                }
+                for &i in rows {
+                    price_row!(i);
+                }
+                rho_list_len = Some(rows.len());
             } else if (last_rho_nnz as f64) <= tunable!("ENOMOTO_T_PRICE_LIST_DENSITY", PRICE_LIST_DENSITY, f64) * m as f64 {
                 let k = compact_rows(m, &mut rho_rows, |i| rho[i].to_bits() << 1);
                 for &i in &rho_rows[..k] {
@@ -3263,6 +3280,7 @@ fn solve_slope_intercept_dual_with(std: &StdForm, opts: &crate::types::LpOptions
                         &mut combined_alpha_base,
                         &mut a_tilde_buf,
                         Some(&mut rho_steps),
+                        sparse_ftran_out.then_some(&mut ftran_track),
                     );
                     combined_base_nnz = c_nnz;
                     tau_ready = true;
@@ -3271,11 +3289,13 @@ fn solve_slope_intercept_dual_with(std: &StdForm, opts: &crate::types::LpOptions
                 } else if fused_dse_ftran {
                     // DSE の `tau = B^-1 rho_p` FTRAN を同じ走査に融合する
                     // (`solve_into_pair_capture` 参照)。
-                    let (a_nnz, b_nnz) = lu.solve_into_pair_capture(&dense_q, &rho, &mut lu_scratch, &mut tau_scratch, &mut alpha_full, &mut tau, &mut a_tilde_buf, Some(&mut rho_steps));
+                    let (a_nnz, b_nnz) = lu.solve_into_pair_capture(&dense_q, &rho, &mut lu_scratch, &mut tau_scratch, &mut alpha_full, &mut tau, &mut a_tilde_buf, Some(&mut rho_steps), sparse_ftran_out.then_some(&mut ftran_track));
                     tau_ready = true;
                     tau_nnz = Some(b_nnz);
                     a_nnz
                 } else {
+                    ftran_track.alpha.set_full();
+                    ftran_track.a_tilde.set_full();
                     lu.solve_into_capture(&dense_q, &mut lu_scratch, &mut alpha_full, &mut a_tilde_buf)
                 };
                 for &(i, _) in std.cols.col(q) {
@@ -3302,6 +3322,7 @@ fn solve_slope_intercept_dual_with(std: &StdForm, opts: &crate::types::LpOptions
                         &mut combined_alpha_base,
                         &mut a_tilde_buf,
                         Some(&mut rho_steps),
+                        sparse_ftran_out.then_some(&mut ftran_track),
                     );
                     combined_base_nnz = c_nnz;
                     tau_ready = true;
@@ -3318,11 +3339,14 @@ fn solve_slope_intercept_dual_with(std: &StdForm, opts: &crate::types::LpOptions
                         &mut tau,
                         &mut a_tilde_buf,
                         Some(&mut rho_steps),
+                        sparse_ftran_out.then_some(&mut ftran_track),
                     );
                     tau_ready = true;
                     tau_nnz = Some(b_nnz);
                     a_nnz
                 } else {
+                    ftran_track.alpha.set_full();
+                    ftran_track.a_tilde.set_full();
                     lu.solve_sparse_into_capture(std.cols.col(q), &mut sparse_scratch, &mut gp_scratch, &mut alpha_full, &mut a_tilde_buf)
                 };
                 gp_scratch.u_hyper = false;
@@ -3537,6 +3561,18 @@ fn solve_slope_intercept_dual_with(std: &StdForm, opts: &crate::types::LpOptions
                     compact_rows(m, &mut xb_rows, |i| (alpha_full[i].to_bits() | combined_alpha_base[i].to_bits() | combined_alpha_slope[i].to_bits()) << 1)
                 } else if combined_pending {
                     compact_rows(m, &mut xb_rows, |i| (alpha_full[i].to_bits() | combined_alpha_base[i].to_bits()) << 1)
+                } else if let Some(idx) = ftran_track.alpha.indices() {
+                    // 策5: 融合 FTRAN が記録した位置(超疎経路)から非ゼロ行を昇順に集める
+                    // (`compact_rows` の `O(m)` 走査の代わり。同じ行の集合・順序)。
+                    let mut k = 0usize;
+                    for &i in idx {
+                        if alpha_full[i] != 0.0 {
+                            xb_rows[k] = i as u32;
+                            k += 1;
+                        }
+                    }
+                    xb_rows[..k].sort_unstable();
+                    k
                 } else {
                     compact_rows(m, &mut xb_rows, |i| alpha_full[i].to_bits() << 1)
                 })
@@ -3647,6 +3683,7 @@ fn solve_slope_intercept_dual_with(std: &StdForm, opts: &crate::types::LpOptions
 
         timed!(profile_phases, prof_phases::DSE_UPDATE, {
             if !tau_ready {
+                ftran_track.tau.set_full();
                 timed!(profile_phases, prof_phases::DSE_FTRAN, lu.solve_into(&rho, &mut lu_scratch, &mut tau));
             }
             match xb_list_len {
@@ -3845,7 +3882,7 @@ fn solve_slope_intercept_dual_with(std: &StdForm, opts: &crate::types::LpOptions
         let mut need_refactor = timed!(
             profile_phases,
             prof_phases::FT_UPDATE,
-            !lu.try_update_precomputed(r, &a_tilde_buf, &e_tilde_buf, tunable!("ENOMOTO_T_FT_MIN_PIVOT", FT_MIN_PIVOT, f64))
+            !lu.try_update_tracked(r, &a_tilde_buf, &mut ftran_track, &e_tilde_buf, &mut btran_work, tunable!("ENOMOTO_T_FT_MIN_PIVOT", FT_MIN_PIVOT, f64))
         );
         if need_refactor {
             // トリガ (2): FT 更新が自らピボットを拒否した(分解が緩すぎる直接の証拠、`docs/lu_comparison_enomoto_vs_highs.md` §2.4)。

@@ -20,6 +20,7 @@
 - 前処理コア (presolve.rs / aggregator / redundancy / scaling / propagate / colsingleton / doubleton / freevar)
 - 前処理 小規模モジュール群 (src/presolve/*.rs)
 - その他のモジュール (sparse / graph / interior_point / mip / model / solver / types / lib / Python パッケージ)
+- stormG2_1000 対応: 反復あたりの `O(m)` パス削減 (2026-09-25)
 
 ## 単体法共通 (src/simplex.rs)
 ### src/simplex.rs
@@ -6697,6 +6698,67 @@ longer rejected here.")
 
 > highspy copies the whole vector on every attribute access, so read each one
 > exactly once — per-element `lp.col_lower_[j]` is O(n^2).
+
+## stormG2_1000 対応: 反復あたりの `O(m)` パス削減 (2026-09-25)
+
+分析 `analysis/stormG2_1000_20260925_055112.md` の §4 の改善策を実装した記録。stormG2_1000 (presolve 後
+m ≈ 378K 行) は反復数が HiGHS と同等なのに 1 反復 8.8 ms (HiGHS 0.1 ms) で、原因は 1 反復あたり
+15〜16 本の長さ `m` の密ベクトル `fill`/`copy`/全走査だった。策番号は同報告のもの。
+
+### 策1・策5・策6: 融合 FTRAN の出力を非ゼロ位置の記録付きに (src/simplex/lu.rs `NzTrack` / `FtranTrack`)
+
+- 入る列と DSE `tau` の融合 FTRAN (`solve_sparse_into_pair_capture` 等) が超疎 `U` 段 (C5) で解けたとき、
+  出力 `alpha_full`/`tau` は `permute_list` が `out.fill(0.0)` してから一覧の位置を書いていた。
+  `NzTrack` で前回書いた位置を覚え、そこだけ 0 に戻してから書く。記録の外で全体を書いた場合
+  (密経路・非融合経路・DSE の単独 FTRAN) は `set_full` で無効化し、次の疎書き出しが 1 回だけ全体を戻す。
+- `a_tilde` (FT 更新用の `L`/`R` 適用後の値) の `copy_from_slice` を、Gilbert-Peierls の到達集合 ∪ 値が非ゼロの
+  `R` eta の行だけの書き込みに (策6)。
+- 入る列側スクラッチの返却前 `fill(0.0)` と、`tau` 側スクラッチの `l_solve_steps_into` 入口の `fill(0.0)` を、
+  超疎 `U` 段の到達スロット (`u_list`) だけの 0 戻しに。`U` 段で全 0 と分かっているかを `FtranTrack` が持つ。
+  値 0 の位置はすべて `+0.0` のまま (`+0.0 - x` が `-0.0` になることはない) なので、スクラッチの状態は従来と同一。
+- 両ベクトルとも超疎 `U` 段なら、何もしない `u_seq` 全 eta の走査自体を省く。
+- 主ループの `x_B` 更新・DSE 更新の行一覧 `xb_rows` を `compact_rows` (`O(m/8)` のブロック走査) ではなく
+  記録した位置から作る (値が非ゼロの行を集めて昇順ソート。同じ行・同じ順序) (策5)。
+- `ENOMOTO_SPARSE_FTRAN_OUT=0` で従来の全体書き出し (A/B 用)。
+
+### 策2・策5: ピボット行 BTRAN の超疎化 (src/simplex/lu.rs `UnitBtranWork` / `solve_transpose_unit_work`)
+
+- `U^T` 掃引 (`u_transpose_sweep_track`) は `U^T` 順の全スロット (m 個) を `z[p] == 0.0` 判定しながら走査していた。
+  非ゼロになった位置をキー (`U^T` 順の位置 = シングルトンの並び → `u_seq` の位置) の最小ヒープに積み、小さい順に
+  処理する (`u_transpose_sweep_heap`)。スロット `p` に書く eta はすべて `p` よりキーが小さいので、取り出した時点で
+  `z[p]` は確定しており、全走査と同じスロットを同じ順に処理する (値・CLOCK tick ともビット一致)。
+- `R` eta を逆適用した位置も一覧に加え、`L^{-T}` 段 (スキャッタ形式) は非ゼロステップの最大ヒープで降順に処理する
+  (`l_transpose_hyper_out`)。スキャッタ/ギャザーの選択は従来と同じ判定 (入力の非ゼロ数 ≤ `BTRAN_L_SCATTER_FRACTION * m`)。
+- 出力置換 (`permute_btran_out_capture`、`w` 全体を読み `y` 全体に書く) を一覧の位置だけに。`rho` の前回の位置は
+  `NzTrack` で消す。非ゼロ行の昇順一覧をそのまま PRICE の行一覧 `rho_rows` に使う (`compact_rows` を省く、策5)。
+  `tau` FTRAN 用の非ゼロステップ記録 (`StepCapture`) は昇順ソートして従来と同じ内容にする。
+- 一覧が `BTRAN_HYPER_FRACTION` (0.10) `* m` を超えたらその位置から全走査に切り替える (途中から全走査しても同じ
+  順序)。前回が密だったら最初から全走査にし、全走査の結果が疎 (`StepCapture` が有効) なら次回また試す。
+- `ENOMOTO_SPARSE_BTRAN=0` で従来の全走査 (A/B 用)。`ENOMOTO_T_BTRAN_HYPER_FRACTION` で閾値を上書き。
+- 大域最適化で `rho` を別経路 (`trial_row_ratio`、全体書き) で書く場合は `invalidate_out` で記録を無効化する。
+
+### 策3: FT 更新の eta を疎入力から作る (src/simplex/lu.rs `EtaFile::push_scaled_list` / `FtLu::try_update_tracked`)
+
+- `commit_update` の `push_scaled_dense` は長さ `m` の `e_tilde`/`a_tilde` を 2 回ずつ走査 (数える → 詰める) していた。
+  BTRAN の `e_tilde` 記録位置 (`UnitBtranWork::e_touch`) と FTRAN の `a_tilde` 記録位置 (`FtranTrack::a_tilde`) を
+  昇順ソート・重複除去して、そこだけから同じ eta を作る。非ゼロ数・疎/密判定・要素順 (添字昇順) が同じなので
+  ビット一致。密形式になる場合と記録が無効な場合は従来の密走査。
+
+### 策4: `U` eta の置換で `Vec::remove` をやめる (src/simplex/lu.rs `EtaFile::remove`)
+
+- 置換された `U` eta のヘッダを 3 本の並列配列から `Vec::remove` で除き、後続ヘッダの `slot_pos` を付け直していた
+  (後続ヘッダ数 = 非シングルトン `U` 列数に比例する memmove)。ヘッダに死んだ印 (`key = ETA_DEAD_KEY`、要素なし)
+  を付けるだけにし、`EtaFile::iter`・`u_transpose_order`・超疎 `U^T` の全走査への切り替えで飛ばす。位置がずれない
+  ので `slot_pos` の付け直しも不要。死んだヘッダは次の再分解で捨てられる。
+
+### 策8: `profile_phases` 時の `dot(rho, rho)` 診断を作業量集計側へ
+
+- DSE 重みの相対誤差の診断 (`O(m)`) を `ENOMOTO_PROF_PHASES_EXT_WORK` のときだけにした (フェーズ計測の歪み除去)。
+
+### 効果 (策1〜6・8)
+
+- Netlib 93 問: 全問でステータス・目的関数値 (ビット)・反復数がベースと一致。
+- storm 縮小版 (k=50, m=18,936): 6.3 s → 2.3 s。k=200 (m=75,636): 132 s → 43 s (反復数 95,510 で不変)。
 
 ## 改名一覧 (整理時)
 
