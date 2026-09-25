@@ -2,7 +2,7 @@
 //! PIQP (Schwan, Jiang, Kuhn, Jones, "PIQP: A Proximal Interior-Point Quadratic
 //! Programming Solver", CDC 2023) のアルゴリズムを P = 0 (線形計画) に特化して
 //! 独自に実装したもの。各反復の KKT (Newton) 系はスラックのステップを消去すると
-//! 対称準定値になり (論文の Remark 1)、faer の疎行列機能だけで組み立て・分解する
+//! 対称準定値になり (PIQP 論文の Remark 1)、faer の疎行列機能だけで組み立て・分解する
 //! (`kkt.rs`)。`A`/`G` は最後まで CSR のまま扱う。
 //!
 //! 前処理: 単体法と同じ拡張前処理 `presolve::run_extended` (Ruiz 平衡化、冗長等式の

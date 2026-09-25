@@ -897,7 +897,7 @@ pub fn run_extended(
         }
     }
 
-    // 一般の自由変数消去 (論文 §4.1、`freevar`)。出現回数に制限なし。
+    // 一般の自由変数消去 (`freevar`)。出現回数に制限なし。
     // 上の固定の後に実行すること (消去済み列を新しい自由変数と誤認しないため)。
     // freevar を実行しない場合の、入力をそのまま返す結果。
     let skipped_freevar = || freevar::FreeVarResult {

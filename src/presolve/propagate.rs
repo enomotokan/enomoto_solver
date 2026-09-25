@@ -11,7 +11,7 @@
 //! - `sup <= b + eps` なら行は冗長 (常に満たされる) なので削除、
 //! - `inf > b + eps` なら問題は実行不能、
 //! - `inf == b` なら強制行 (forcing row): 全変数を最小活動度側の境界に固定して行を削除、
-//! - それ以外は「x_k を除いた最小活動度」から x_k の境界を締める (§3.2)。
+//! - それ以外は「x_k を除いた最小活動度」から x_k の境界を締める (ZIB Report 16-44 §3.2)。
 //!
 //! このコードベースでは変数境界は `G x <= h` の単一変数行として畳み込まれて
 //! いるため、まず [`extract_bounds`] で `lb`/`ub` と多変数行 (real rows) に
@@ -170,7 +170,7 @@ pub fn propagate_without_g_rebuild(n: usize, g: &FaerCsr, h: &[f64], passes: usi
 /// の戻り値と同じ形) に対して制約伝播を行う本体。
 ///
 /// 各パスで各行について: 実行不能判定 → 冗長行削除 → 強制行の固定と削除 →
-/// 境界強化 (§3.2)。行も境界も変化しなかったパスで打ち切る。
+/// 境界強化 (ZIB Report 16-44 §3.2)。行も境界も変化しなかったパスで打ち切る。
 /// 最後に境界の自己矛盾を再確認する。
 pub fn propagate_split(n: usize, mut lb: Vec<f64>, mut ub: Vec<f64>, mut rows: Vec<Vec<(usize, f64)>>, mut rhs: Vec<f64>, passes: usize) -> PropagateSplit {
     // 相対改善閾値 (`ENOMOTO_T_PROP_RELTOL`、0 で無効)。有限境界は改善幅が
@@ -247,7 +247,7 @@ pub fn propagate_split(n: usize, mut lb: Vec<f64>, mut ub: Vec<f64>, mut rows: V
                 break;
             }
             if max_activity <= b + PROPAGATE_EPS {
-                // 決して破られない行: 冗長なので削除 (§3.1)。
+                // 決して破られない行: 冗長なので削除 (ZIB Report 16-44 §3.1)。
                 continue;
             }
 
@@ -266,7 +266,7 @@ pub fn propagate_split(n: usize, mut lb: Vec<f64>, mut ub: Vec<f64>, mut rows: V
                 continue;
             }
 
-            // 境界強化 (§3.2): l_s は x_k の寄与を除いた最小活動度。x_k 以外に
+            // 境界強化 (ZIB Report 16-44 §3.2): l_s は x_k の寄与を除いた最小活動度。x_k 以外に
             // 無限の寄与がない場合だけ有限になる。
             for &(k, aik) in &row {
                 let l_s = if inf_unbounded_count == 0 {

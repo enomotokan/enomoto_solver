@@ -181,7 +181,7 @@ mod tests {
         // upper bound so its dual-row is genuinely an equality: -1 + mu*1
         // = 0 => mu = 1 > 0), so the row is proven tight in every optimal
         // solution even though nothing about its own primal activity
-        // range (x0+x1 can range from 0 to +inf, no §3.1 forcing-row
+        // range (x0+x1 can range from 0 to +inf, no ZIB Report 16-44 §3.1 forcing-row
         // shape at all) would show that.
         let n = 2;
         let a = csr_from_rows(&[], n);

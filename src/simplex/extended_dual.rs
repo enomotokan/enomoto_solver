@@ -3,6 +3,9 @@
 //! から独立な連結成分ごとに 1 回呼ばれる。`None` を返した場合(「到達しないはず」の破綻)は
 //! `Status::NotSolved` として報告され、代わりに使う別ソルバーは無い。
 //!
+//! 以下で「論文」と書くのは『双対単体法のみによる線形計画問題の完全な判別：傾き問題と切片問題からなる
+//! 2段階法』(`paper.tex`)で、節・式・命題などの番号はその現行版に合わせてある。
+//!
 //! ## 記号的な `M` (M→∞)
 //!
 //! 無限の境界 `±inf` を数値の `±M` で切り詰める代わりに、`M` に依存する量をすべてアフィン関数
@@ -14,17 +17,17 @@
 //! (2) そのような列も BFRT(境界フリップ比率テスト)でフリップできるようにする。
 //!
 //! どの列を `M` 追跡するかは [`delta_of`] が決める(現在は片側非有界・自由な構造列をすべて
-//! フラグする。論文の改訂版 §4.2 の最小集合 `S` への制限は行っていない)。
+//! フラグする。論文 5.2 節の有界化と同じく、非有界な側はすべて `M` で置き換える)。
 //!
-//! ## 3 段階アルゴリズム(論文 Algorithm `alg:extended`)
+//! ## 3 段階アルゴリズム(論文 Algorithm 1)
 //!
-//! - **段階 A**(傾き問題 `eq:slope`): `x_B` の `M` 係数 `x^1` だけを、境界の `M` 係数
+//! - **段階 A**(傾き問題、論文の式 (7)): `x_B` の `M` 係数 `x^1` だけを、境界の `M` 係数
 //!   `l^1, u^1` に対して最適化する([`Phase::A`]、[`ColCache::slope_problem`])。
-//!   最適値 `z^1 < 0` なら実行不能か非有界(`prop:trichotomy`)。
-//! - **段階 B**(切片問題 `eq:intercept`): `x^1` を固定し、残った境界 `l^B, u^B` に対する通常の
+//!   最適値 `z^1 < 0` なら実行不能か非有界(論文の系 7.3 (i))。
+//! - **段階 B**(切片問題、論文の式 (8)): `x^1` を固定し、残った境界 `l^B, u^B` に対する通常の
 //!   実数値の双対単体法で定数項 `x^0` を求める([`Phase::B`]、[`ColCache::intercept_problem`])。
 //! - **cleanup**([`finish`]): 人工的な `M` 側に残る非基底列を主比率テストで有限側へ移し
-//!   (`lem:cleanup`)、[`polish_with_true_bounds`] が真の境界・真のコストで最終確認して解を取り出す。
+//!   (論文の補題 6.6)、[`polish_with_true_bounds`] が真の境界・真のコストで最終確認して解を取り出す。
 //!
 //! ## 主ループの構成
 //!
@@ -34,12 +37,12 @@
 //! 選ぶ)→ FTRAN(`alpha = B^-1 A_q`、DSE の `tau` と融合)→ `x_B(M)`・DSE 重み・被約費用 `d` の
 //! 増分更新 → Forrest-Tomlin 更新(再分解トリガ付き)、の順。主実行不能行の集合は
 //! [`InfeasibleRows`] で増分維持する(超疎 chuzr)。巡回防止は停滞カウンタによる Bland 規則への
-//! 切り替え(`bland_mode`)で行う(論文 §4.7 の完全な辞書式規則ではない)。
+//! 切り替え(`bland_mode`)で行う(論文 6.5 節の費用摂動による辞書式規則ではない)。
 //!
 //! ## 前提条件(前段で保証される)
 //!
 //! - 構造列は真に自由(`lb == -inf` かつ `ub == +inf`)でもよい。[`delta_of`]/[`hat_lower`]/
-//!   [`hat_upper`] が両側を独立に追跡する。論文の状態 `Z`(`NbStatus::Zero`、値 0 の非基底)は
+//!   [`hat_upper`] が両側を独立に追跡する。論文の状態 `Z`(3.1 節。`NbStatus::Zero`、値 0 の非基底)は
 //!   コスト 0 の自由列の初期配置([`crash`])と cleanup の場合 (A) でだけ使い、`Zero` 列は
 //!   chuzc1 で常に適格(比 0)で、BFRT なしに直接ピボットされる(フリップされず、離基で
 //!   作られることも無い)。旧 cleanup(`ENOMOTO_LEGACY_CLEANUP=1`)は別の自由基底変数を
@@ -340,7 +343,7 @@ mod prof_phases {
                 lu::PROF_SEARCH_CANDIDATES.load(Relaxed) as f64 / steps.max(1) as f64,
                 lu::PROF_BUCKET_SCAN_NS.load(Relaxed) as f64 / 1e6,
             );
-            // §2.4: 増分 `colFixMax` で省けたはずの作業量と、この求解のピボット閾値が初期値から
+            // `docs/lu_comparison_enomoto_vs_highs.md` §2.4: 増分 `colFixMax` で省けたはずの作業量と、この求解のピボット閾値が初期値から
             // 変わったか(段階的引き上げの有無)。
             eprintln!(
                 "  col_max_abs rescan_entries={} pivot_threshold={} (escalations={})",
@@ -515,7 +518,7 @@ impl Affine1 {
         Affine1 { base, slope }
     }
 
-    /// 論文の `succ`(§4.5): `(slope, base)` を辞書式に比較する。十分大きい任意の `M` について
+    /// 論文の `≻`(6.1 節): `(slope, base)` を辞書式に比較する。十分大きい任意の `M` について
     /// `self.value(M) > other.value(M)` のときちょうど `Greater` を返す。
     ///
     /// 両成分とも完全一致ではなく相対許容誤差 [`LEX_REL_TOL`] で比較する(尺度は
@@ -585,7 +588,7 @@ fn bfrt_reached(w_r: Affine1, cum: Affine1, x_b_base_r: f64) -> bool {
     base_diff <= tunable!("ENOMOTO_T_PRIMAL_FEAS_TOL", PRIMAL_FEAS_TOL, f64) * w_r.base.abs().max(x_b_base_r.abs()).max(1.0)
 }
 
-/// steepest-edge/Devex のスコア `Δ_i(M)^2 / w_i`(論文 §4.5)の比較用表現。候補行では
+/// steepest-edge/Devex のスコア `Δ_i(M)^2 / w_i`(論文 5.4 節 Step 2(b) の行の重み付き選択を 6.1 節 (b') の辞書式比較に拡張したもの)の比較用表現。候補行では
 /// `Δ_i ≻ 0` で、正の範囲では 2 乗は単調増加なので `Δ_i/sqrt(w_i)` で順位付けしてよく、
 /// これは `M` のアフィン関数(`w_i` は `M` に依存しない)。よってスコアは
 /// `(slope/sqrt(w), base/sqrt(w))` の組を [`Affine1`] と同じ辞書式順で比べる。
@@ -657,7 +660,7 @@ impl Score2 {
     }
 }
 
-/// 構造列 `j` のどちら側を `M` で追跡するか(論文 Lemma 4.1 を、自由列では両側追跡に一般化)。
+/// 構造列 `j` のどちら側を `M` で追跡するか(論文の補題 6.1 を、自由列では両側追跡に一般化)。
 /// スラック列では常に `None`(呼び出し側が強制する)。現在は S 制限なし: 片側非有界の列は
 /// コストの符号にかかわらずすべてフラグする。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -921,12 +924,12 @@ fn sampled_residual_affine(
     ((sq_base * scale).sqrt(), (sq_slope * scale).sqrt())
 }
 
-/// `B x_B(M) = base + slope*M` の右辺(Lemma 4.1 の `b - N x_N` を `M` に依存しない部分と
+/// `B x_B(M) = base + slope*M` の右辺(論文の補題 6.1 の `b - N x_N` を `M` に依存しない部分と
 /// `M` の係数に分けたもの)を `(rhs_base, rhs_slope)` で返す。全非基底列を走査する `O(nnz(A))`。
 /// 主ループは `x_B(M)` を増分維持するので、これは周期的なドリフト検査/再同期でだけ呼ぶ。
 ///
-/// 返す `rhs_slope` は、人工 `M` 境界にある非基底列が 1 本も無い(`delta = 0`、論文 §4.6 の
-/// 終状態)ときに限り**空**になる(長さ `m` の 0 を確保しない)。これが各利用者
+/// 返す `rhs_slope` は、人工 `M` 境界にある非基底列が 1 本も無い(`delta = 0`、論文の注意 6.11 の
+/// 吸収状態 `x_N^1 = 0`)ときに限り**空**になる(長さ `m` の 0 を確保しない)。これが各利用者
 /// ([`resolve_x_b_into`]・[`residual_norm_affine`]・`solve_x_b`)への「`M` 係数はもう無い」
 /// という 1 語の合図になる。非基底列の値が得られなければ `None`。
 fn compute_rhs_affine(std: &StdForm, cache: &ColCache, nb_status: &[Option<NbStatus>]) -> Option<(Vec<f64>, Vec<f64>)> {
@@ -960,7 +963,7 @@ fn compute_rhs_affine(std: &StdForm, cache: &ColCache, nb_status: &[Option<NbSta
 }
 
 /// [`compute_rhs_affine`] の出力に対する 2 回の FTRAN(`x_b_base = B^-1 rhs_base`、
-/// `x_b_slope = B^-1 rhs_slope`)。論文 §4.6 の結び(「M 係数計算の打ち切り」)を傾きチャネルに
+/// `x_b_slope = B^-1 rhs_slope`)。論文の注意 6.11(`x_N^1 = 0` 以降は逸脱量が `M` に依存しない)を傾きチャネルに
 /// 適用する: `rhs_slope` が空(`delta = 0`)なら `B^-1 rhs_slope` は恒等的に `±0.0` で、
 /// `snap_slopes` 後は `fill(0.0)` とビット同一なので、求解を省いて合成クロックの tick だけを
 /// 再現する([`sparse_lu::FtLu::add_zero_rhs_solve_ticks`]。CLOCK トリガとピボット経路は不変)。
@@ -977,7 +980,7 @@ fn resolve_x_b_into(lu: &sparse_lu::FtLu, rhs_base: &[f64], rhs_slope: &[f64], s
     }
 }
 
-/// 主ループが現在解いている問題(論文 §4.8〜§4.10、Algorithm `alg:extended`)。
+/// 主ループが現在解いている問題(論文 7 節、Algorithm 1)。
 /// `A` と `B` は 3 段階アルゴリズムの最初の 2 段階で、3 段階目(cleanup 補題の主押し出し)は
 /// [`finish`]。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -985,15 +988,15 @@ enum Phase {
     /// 旧来の単一ループ形式: `M`-アフィン量を常に `(slope, base)` の組で比較する
     /// (`ENOMOTO_LEX_EXTENDED=1`、A/B 比較用のみ)。
     Lex,
-    /// 段階 A、傾き問題(`eq:slope`): 境界 `l^1, u^1` だけに対して `x^1` のみを維持する
+    /// 段階 A、傾き問題(論文の式 (7)): 境界 `l^1, u^1` だけに対して `x^1` のみを維持する
     /// ([`ColCache::slope_problem`])。切片 `x^0` は段階 B への移行時に一度解くまで計算しない。
     A,
-    /// 段階 B、切片問題(`eq:intercept`): `x^1` は固定(`prop:two-phase` (ii))で、境界
+    /// 段階 B、切片問題(論文の式 (8)): `x^1` は固定(論文の命題 7.2 (ii))で、境界
     /// `l^B, u^B`([`ColCache::intercept_problem`])に対する通常の実数値双対単体法。
     B,
 }
 
-/// [`compute_rhs_affine`] の傾きチャネルだけ: 段階 A の右辺 `0 - N x_N^1`(`eq:slope` の右辺は 0)。
+/// [`compute_rhs_affine`] の傾きチャネルだけ: 段階 A の右辺 `0 - N x_N^1`(論文の式 (7) の右辺は 0)。
 /// 空なら恒等的に 0 という同じ約束に従う。
 fn compute_rhs_slope_only(std: &StdForm, cache: &ColCache, nb_status: &[Option<NbStatus>]) -> Option<Vec<f64>> {
     let mut rhs_slope: Vec<f64> = Vec::new();
@@ -1075,7 +1078,7 @@ fn residual_norm_slope(std: &StdForm, basis: &[usize], x_b_slope: &[f64], rhs_sl
     resid_sq.sqrt()
 }
 
-/// `x_B(M) = base + slope*M`(Lemma 4.1)を同じ分解に対する 2 回の独立な FTRAN で求める
+/// `x_B(M) = base + slope*M`(論文の補題 6.1)を同じ分解に対する 2 回の独立な FTRAN で求める
 /// (記号的な線形代数ではなく、通常の数値求解を 2 回行うだけ)。都度確保する一回限りの版で、
 /// `finish` から呼ぶ。
 fn solve_x_b(std: &StdForm, lu: &sparse_lu::FtLu, nb_status: &[Option<NbStatus>], cache: &ColCache) -> Option<(Vec<f64>, Vec<f64>)> {
@@ -1347,7 +1350,7 @@ fn compute_rhs_plain(std: &StdForm, nb_status: &[Option<NbStatus>]) -> Vec<f64> 
     rhs
 }
 
-/// 論文の `sigma_j`(§2.2 (ii)): 非基底状態 `status` の列の向き。`Lower` なら `+1`、`Upper` なら
+/// 論文の `sigma_j`(3.1 節 (ii)): 非基底状態 `status` の列の向き。`Lower` なら `+1`、`Upper` なら
 /// `-1`、自由列の `Zero` なら `d_dir * sigma * alpha_j < 0` となる符号(離基行が必要とする
 /// 方向にいつでも適格。`alpha_j != 0` の判定は呼び出し側が行う)。
 /// `d_dir` は離基行の方向、`alpha_j` はその列のピボット行要素。
@@ -1433,13 +1436,13 @@ fn fresh_d_into_zero_y(std: &StdForm, lu: &sparse_lu::FtLu, basis: &[usize], bas
     true
 }
 
-/// コスト符号による双対実行可能な crash(命題 4.3): 各構造列を、コスト `cost[j]` が非負なら
+/// コスト符号による双対実行可能な crash(論文の命題 5.1): 各構造列を、コスト `cost[j]` が非負なら
 /// `Lower`、負なら `Upper` に置く(スラック列は基底なので `None`)。[`hat_lower`]/[`hat_upper`]
 /// が全構造列で定義されるので、両側の境界が有限である必要は無い。
 ///
 /// `cost` は摂動済みコスト(`super::perturb_costs` の出力)を受け取る(`d` の増分維持と
 /// 同じコストを使って整合を保つため)。コスト 0 の自由列(`lb == -inf` かつ `ub == +inf`)は
-/// `Zero`(値 0)に置く(論文 `eq:init-status` の第 3 の場合。`Lower`/`Upper` だと `-M`/`+M`
+/// `Zero`(値 0)に置く(論文の式 (4) の第 3 の場合。`Lower`/`Upper` だと `-M`/`+M`
 /// になる)。`perturb_costs` は自由列を摂動しないので `cost[j]` は真のコスト。
 fn crash(std: &StdForm, cost: &[f64], n_orig: usize) -> Vec<Option<NbStatus>> {
     let mut nb_status = vec![None; std.n_total];
@@ -1638,7 +1641,7 @@ fn trial_row_ratio(
         if (d_dir as f64) * hat_alpha >= 0.0 {
             continue;
         }
-        // `Zero` 列の被約費用は不変条件により 0(論文 §2.2 の注意)なので比も 0。
+        // `Zero` 列の被約費用は不変条件により 0(論文の注意 3.1)なので比も 0。
         let hat_c = if status == NbStatus::Zero { 0.0 } else { (sigma * d[j]).max(0.0) };
         let ratio = hat_c / hat_alpha.abs();
         if ratio < best_ratio {
@@ -1687,9 +1690,9 @@ impl ColCache {
         ColCache { lower, upper, width }
     }
 
-    /// 段階 A(傾き問題 `eq:slope`)の境界: 各側の `M` 係数だけを残す(`l^1 ∈ {-1, 0}`、
+    /// 段階 A(傾き問題、論文の式 (7))の境界: 各側の `M` 係数だけを残す(`l^1 ∈ {-1, 0}`、
     /// `u^1 ∈ {0, 1}`、有限側は 0)。真の無限(不等式行のスラック)は無いまま。幅はちょうど
-    /// §4.6 の傾きチャネルのフリップ容量 `s_j` になる。
+    /// 傾きチャネルの BFRT フリップ容量 `s_j` になる。
     fn slope_problem(orig: &ColCache) -> Self {
         let slope_only = |b: &Option<Affine1>| b.map(|a| Affine1::new(0.0, a.slope));
         let lower: Vec<Option<Affine1>> = orig.lower.iter().map(slope_only).collect();
@@ -1698,11 +1701,11 @@ impl ColCache {
         ColCache { lower, upper, width }
     }
 
-    /// 段階 B(切片問題 `eq:intercept`)の境界を、段階 A の最適な傾きベクトル `x^1`(基底は
+    /// 段階 B(切片問題、論文の式 (8))の境界を、段階 A の最適な傾きベクトル `x^1`(基底は
     /// `x_b_slope`、非基底は `nb_status` の側の傾き)から作る。`x^1_j` がその側の傾き境界上に
     /// ある(`SLOPE_TOL` 以内)ときだけその側が切片(`l_j`、人工 `-M` なら 0)として残り、
     /// そうでなければ `x_j` は `M` の正の倍数だけ離れているので捨てる(`±inf`)。段階 B の間
-    /// `x^1` は変わらない(`prop:two-phase` (ii))ので境界も固定。`orig` に無い側に非基底状態が
+    /// `x^1` は変わらない(論文の命題 7.2 (ii))ので境界も固定。`orig` に無い側に非基底状態が
     /// あれば `None`(このモジュールのピボットでは起きない)。
     fn intercept_problem(orig: &ColCache, nb_status: &[Option<NbStatus>], basis: &[usize], x_b_slope: &[f64]) -> Option<Self> {
         let n_total = orig.lower.len();
@@ -1729,7 +1732,7 @@ impl ColCache {
     }
 }
 
-/// 拡張双対単体法の本体(論文 §4.2〜§4.7)。数値の `M` を固定せずに、`M` 切り詰め問題で
+/// 拡張双対単体法の本体(論文 6 節・7 節、Algorithm 1)。数値の `M` を固定せずに、`M` 切り詰め問題で
 /// 主実行可能な状態(段階 A: 傾き問題 → 段階 B: 切片問題)に到達し、その後
 /// [`finish`] で終了判定・cleanup・真の境界での仕上げを行う。
 ///
@@ -1994,7 +1997,7 @@ pub fn solve_lp_dual_extended(std: &StdForm, opts: &crate::types::LpOptions) -> 
     let mut combined_alpha_base = vec![0.0f64; m];
     let mut combined_alpha_slope = vec![0.0f64; m];
 
-    // `x_B(M)` の初期値(Lemma 4.1 の `b - N x_N` を一度だけ解く)。以後は増分で維持し、
+    // `x_B(M)` の初期値(論文の補題 6.1 の `b - N x_N` を一度だけ解く)。以後は増分で維持し、
     // 周期的な再同期で同じ計算に合わせ直す。
     let (seed_base, seed_slope) = resync_x_b(std, &cache, &nb_status, &lu, phase, &mut lu_scratch, &mut x_b_base, &mut x_b_slope)?;
     // `b - N x_N(M)` を増分維持するか(BFRT フリップと基底交換が自列の寄与を反映する)。
@@ -2029,7 +2032,7 @@ pub fn solve_lp_dual_extended(std: &StdForm, opts: &crate::types::LpOptions) -> 
         fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fresh_d_cb, &mut lu_scratch, &mut fresh_d_y, &mut d);
     }
 
-    // 離基行の重み(論文 §4.5): `super::DseState` をそのまま使う(重みは `M` に依存しない
+    // 離基行の重み(論文 5.4 節 Step 2(b) の `γ_i`、注意 7.7): `super::DseState` をそのまま使う(重みは `M` に依存しない
     // 表の行の量。`M` に依存するのはそれを使うスコア `Score2` だけ)。最初のピボットから
     // 厳密 DSE を使う。全スラックの `B0` は符号付き単位行列なので `DseState::new` の単位重みは正確。
     let mut dse = super::DseState::new(m);
@@ -2074,7 +2077,7 @@ pub fn solve_lp_dual_extended(std: &StdForm, opts: &crate::types::LpOptions) -> 
     let xb_fresh_floor_factor: f64 = tunable!("ENOMOTO_XB_DRIFT_FRESH_FLOOR", XB_DRIFT_FRESH_FLOOR_FACTOR, f64);
     let xb_fresh_floor_frac: f64 = tunable!("ENOMOTO_XB_DRIFT_FRESH_FLOOR_FRAC", XB_DRIFT_FRESH_FLOOR_FRAC, f64);
     let mut xb_fresh_floor: f64 = 0.0;
-    // §2.4 のピボット閾値の段階的引き上げ: 数値的原因による再分解
+    // `docs/lu_comparison_enomoto_vs_highs.md` §2.4 のピボット閾値の段階的引き上げ: 数値的原因による再分解
     // ([`PIVOT_ESCALATION_STEP`] 参照)を数え、その回数ごとに LU の閾値を上げる(0 で無効)。
     let pivot_escalation_step: usize = env_str!("ENOMOTO_PIVOT_ESCALATION_STEP")
         .and_then(|s| s.parse::<usize>().ok())
@@ -2114,14 +2117,14 @@ pub fn solve_lp_dual_extended(std: &StdForm, opts: &crate::types::LpOptions) -> 
     // 作り直すか(`ENOMOTO_DSE_REFRESH_ON_REFACTOR=1`、既定オフ)。
     let dse_refresh_on_refactor = env_str!("ENOMOTO_DSE_REFRESH_ON_REFACTOR").is_some_and(|v| v != "0");
     // 診断(`ENOMOTO_DEBUG_EXT_DELTA0`): 全 M フラグ列が `M` 側を離れた(delta=0)反復を報告する。
-    // 論文の吸収境界の結果(`prop:no-return`)により、以後この方法は古典的な有界双対単体法と
+    // 論文の吸収境界の結果(命題 6.10、注意 6.11)により、以後この方法は古典的な有界双対単体法と
     // 一致する。
     let debug_delta0 = env_str!("ENOMOTO_DEBUG_EXT_DELTA0").is_some();
     // 詳細トレース(`ENOMOTO_DEBUG_EXT_TRACE`)を出すか。
     let debug_ext_iters_verbose = env_str!("ENOMOTO_DEBUG_EXT_TRACE").is_some();
     // M フラグ付きで開始時に `M` 側にある構造列の一覧(求解中は不変)。crash が `Zero` に置いた
     // コスト 0 の自由列は値 0 で最初から `M` 側に無く、`Zero` から `M` 側へ戻ることも無い
-    // (`rem:state-F`)ので含めない。
+    // (論文の注意 6.7)ので含めない。
     let m_flagged_cols: Vec<usize> = (0..n_orig).filter(|&j| delta[j].is_flagged() && nb_status[j] != Some(NbStatus::Zero)).collect();
     // 非基底 `Zero` 列の残数: 入基でしか減らないので、0 になれば chuzc1 の `Zero` 判定を省略できる。
     let mut n_zero_nonbasic = nb_status.iter().filter(|s| **s == Some(NbStatus::Zero)).count();
@@ -2134,7 +2137,7 @@ pub fn solve_lp_dual_extended(std: &StdForm, opts: &crate::types::LpOptions) -> 
 
     // 実験的(`ENOMOTO_SCORE2_ADAPTIVE_MAX_TOL`、未設定なら `1e-9` = 固定許容誤差と同一):
     // M フラグ列が `M` 側を離れるのは入る列 `q` になるときだけ(BFRT フリップでは離れない、
-    // `prop:no-return`)なので、`resolved_m`/`remaining_m_side` は `q` だけを見ればよい。
+    // 論文の命題 6.10)なので、`resolved_m`/`remaining_m_side` は `q` だけを見ればよい。
     // 未解決の割合から `Score2::cmp_lex` の先頭(傾き)項の許容誤差を決め、多くの M フラグ列が
     // 未解決の間は緩く、delta=0 に近づくにつれ正確な `1e-9` に戻す。さらに M 側の進展が
     // 止まっている間は `stall_shrink`(半減期 `score2_stall_halflife`)で `1e-9` へ引き戻す。
@@ -2280,7 +2283,7 @@ pub fn solve_lp_dual_extended(std: &StdForm, opts: &crate::types::LpOptions) -> 
                 dual_violation_reported = true;
             }
         }
-        // (a')(b'): 主実行可能性の確認と離基行の選択。DSE 重み付き(論文 §4.5 の一般化、
+        // (a')(b')(論文 6.1 節): 主実行可能性の確認と離基行の選択。DSE 重み付き(5.4 節 Step 2(b) の一般化、
         // `Score2`)で、`infeasible_rows.rows`(主実行不能な行)だけを走査する。
         // `score2_c2_tol`: `Score2` の先頭(傾き)項の相対許容誤差。M フラグ列が全て未解決のとき
         // `score2_max_tol`、`remaining_m_side == 0`(delta=0)のとき基準値 `LEX_REL_TOL` になるよう
@@ -2460,11 +2463,11 @@ pub fn solve_lp_dual_extended(std: &StdForm, opts: &crate::types::LpOptions) -> 
             });
         }
 
-        // 主実行不能な行が無い: 段階 A なら段階 B へ移行し、そうでなければ Step III へ進む。
+        // 主実行不能な行が無い: 段階 A なら段階 B へ移行し、そうでなければ後処理(Algorithm 1)へ進む。
         let Some((r, d_dir, w_r)) = best else {
             if phase == Phase::A {
-                // 段階 A → B の移行(Algorithm `alg:extended`): 傾き問題が最適になったので
-                // `x^1`(したがって `z^1` と切片問題の全境界)は以後固定(`prop:two-phase` (ii))。
+                // 段階 A → B の移行(論文 Algorithm 1): 傾き問題が最適になったので
+                // `x^1`(したがって `z^1` と切片問題の全境界)は以後固定(論文の命題 7.2 (ii))。
                 // 段階 B の境界に差し替え、傾きチャネルを 0 に固定し、切片 `x^0` を一度だけ解く。
                 // 基底・`d`・DSE 重みはそのまま引き継ぐ(`c` と `B` は両問題で共通)。
                 // `z^1 = c^T x^1` は真の(摂動なし)コストで計算する(`finish` の判定と同じ量)。
@@ -2482,7 +2485,7 @@ pub fn solve_lp_dual_extended(std: &StdForm, opts: &crate::types::LpOptions) -> 
                 if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
                     eprintln!("DEBUG_EXT: stage_a_iters={iter_idx} z1={z1}");
                 }
-                // `z^1 < 0`: 実行不能か非有界で、有限最適は無い(`prop:trichotomy`)。どちらかの
+                // `z^1 < 0`: 実行不能か非有界で、有限最適は無い(論文の系 7.3 (i))。どちらかの
                 // 区別を呼び出し側が求めていなければここで `InfeasibleOrUnbounded` を返す。
                 // (`z^1 = 0` なら有限最適か実行不能で、どちらにせよ段階 B が必要。)
                 if z1 < -Z_SLOPE_TOL && !opts.distinguish_infeasible_unbounded {
@@ -2507,7 +2510,7 @@ pub fn solve_lp_dual_extended(std: &StdForm, opts: &crate::types::LpOptions) -> 
                 best_infeasible_len = infeasible_rows.rows.len();
                 continue;
             }
-            // M 切り詰め問題で主実行可能(§4.5 の `V_infty = empty`、段階 B の最適): Step III へ。
+            // M 切り詰め問題で主実行可能(論文 6.1 節 (a') の `V_∞ = ∅`、段階 B の最適): 後処理へ。
             if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
                 eprintln!("DEBUG_EXT: main_loop_iters={iter_idx} bland_mode={bland_mode}");
             }
@@ -2672,7 +2675,7 @@ pub fn solve_lp_dual_extended(std: &StdForm, opts: &crate::types::LpOptions) -> 
                 k += keep as usize;
             }
             let kept = &cand_scratch[..k];
-            // 論文 §4.6(`prop:bfrt` の前): Eligible に `Zero` 列があれば BFRT を行わず、そのうち
+            // 論文 3.1 節 (iii)・注意 3.1・Algorithm 1: Eligible に `Zero` 列があれば BFRT を行わず、そのうち
             // 最小添字の列にピボットする(比 0、被約費用もフリップも変化なし)。下の停止候補による
             // 刈り込みより前に `kept` から選ぶ。
             zero_pick = None;
@@ -2735,7 +2738,7 @@ pub fn solve_lp_dual_extended(std: &StdForm, opts: &crate::types::LpOptions) -> 
                 });
                 continue;
             }
-            // 真の数学的結論(命題 4.6、古典的な `Eligible = empty` の場合)。
+            // 真の数学的結論(論文 5.4 節 Step 2(c)・命題 7.4 の `Eligible = ∅` による実行不能判定)。
             // 診断(`ENOMOTO_DEBUG_EXT_INFEASIBLE`): 行情報と双対実行可能性違反の数を出力する。
             if env_str!("ENOMOTO_DEBUG_EXT_INFEASIBLE").is_some() {
                 eprintln!(
@@ -2764,8 +2767,8 @@ pub fn solve_lp_dual_extended(std: &StdForm, opts: &crate::types::LpOptions) -> 
                 prof_phases::report(wall_t0.elapsed().as_nanos() as usize);
             }
             if phase == Phase::A {
-                // 傾き問題は `x^1 = 0` で実行可能なので段階 A が実行不能を証明することは無い
-                // (`prop:two-phase` (i))。ここに来たのは数値的破綻なので `None`(`NotSolved`)で抜ける。
+                // 傾き問題は `x^1 = 0` で実行可能(論文 7.1 節)なので段階 A が実行不能を証明することは
+                // 無い。ここに来たのは数値的破綻なので `None`(`NotSolved`)で抜ける。
                 if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
                     eprintln!("DEBUG_EXT_BAILOUT: stage A found no entering column at iter={iter_idx} r={r} (numerical)");
                 }
@@ -2782,7 +2785,7 @@ pub fn solve_lp_dual_extended(std: &StdForm, opts: &crate::types::LpOptions) -> 
         let n_candidates = candidates.len();
         sorted_prefix.clear();
         let mut k_star: Option<usize> = None;
-        // BFRT(§4.6)の一般化: 累積フリップ容量 `cum` は `Affine1` の累積和で、`w_r` と辞書式に
+        // BFRT の `M` 付きへの一般化: 累積フリップ容量 `cum` は `Affine1` の累積和で、`w_r` と辞書式に
         // 比較する。幅が真の無限 (`None`) の候補に来たら即座に止まる。`k_star == None` の
         // 診断出力でも読むので分岐の外で宣言する。
         let mut cum = Affine1::ZERO;
@@ -2868,7 +2871,7 @@ pub fn solve_lp_dual_extended(std: &StdForm, opts: &crate::types::LpOptions) -> 
                 });
                 continue;
             }
-            // 全候補をフリップしてもまだ足りない: 命題 4.6(ii)、真の実行不能。
+            // 全候補をフリップしてもまだ足りない: 論文 5.4 節 Step 2(c) の実行不能判定の BFRT 版で、真の実行不能。
             if env_str!("ENOMOTO_DEBUG_EXT_INFEASIBLE").is_some() {
                 eprintln!(
                     "DEBUG_EXT_INFEASIBLE: site=bfrt_exhausted iter={iter_idx} r={r} basis_r={} d_dir={d_dir} w_r=({},{}) n_candidates={} cum=({},{}) remaining_m_side={remaining_m_side}",
@@ -2879,7 +2882,7 @@ pub fn solve_lp_dual_extended(std: &StdForm, opts: &crate::types::LpOptions) -> 
                 prof_phases::report(wall_t0.elapsed().as_nanos() as usize);
             }
             if phase == Phase::A {
-                // 段階 A は実行不能を証明できない(`prop:two-phase` (i))ので数値的破綻として `None`。
+                // 段階 A は実行不能を証明できない(傾き問題は `x^1 = 0` で実行可能、論文 7.1 節)ので数値的破綻として `None`。
                 if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
                     eprintln!("DEBUG_EXT_BAILOUT: stage A found no entering column at iter={iter_idx} r={r} (numerical)");
                 }
@@ -3288,7 +3291,7 @@ pub fn solve_lp_dual_extended(std: &StdForm, opts: &crate::types::LpOptions) -> 
                     discard_banned_cols.push(q);
                 }
             }
-            // ここで捕まえた PRICE/FTRAN の不一致は分解の数値的破綻(§2.4)なので記録する。
+            // ここで捕まえた PRICE/FTRAN の不一致は分解の数値的破綻(`docs/lu_comparison_enomoto_vs_highs.md` §2.4)なので記録する。
             note_numeric_trouble!();
             if profile_phases {
                 prof_phases::REFACTOR_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -3708,7 +3711,7 @@ pub fn solve_lp_dual_extended(std: &StdForm, opts: &crate::types::LpOptions) -> 
             !lu.try_update_precomputed(r, &a_tilde_buf, &e_tilde_buf, tunable!("ENOMOTO_T_FT_MIN_PIVOT", FT_MIN_PIVOT, f64))
         );
         if need_refactor {
-            // トリガ (2): FT 更新が自らピボットを拒否した(分解が緩すぎる直接の証拠、§2.4)。
+            // トリガ (2): FT 更新が自らピボットを拒否した(分解が緩すぎる直接の証拠、`docs/lu_comparison_enomoto_vs_highs.md` §2.4)。
             note_numeric_trouble!();
             if profile_phases {
                 prof_phases::REFACTOR_CAUSE_TRY_UPDATE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -3897,7 +3900,7 @@ pub fn solve_lp_dual_extended(std: &StdForm, opts: &crate::types::LpOptions) -> 
 
     }
 
-    // `max_iters` を使い切って Step III に達しなかった: 誤った `Infeasible` ではなく
+    // `max_iters` を使い切って後処理に達しなかった: 誤った `Infeasible` ではなく
     // `None`(`NotSolved`)を返す。
     if profile_phases {
         prof_phases::report(wall_t0.elapsed().as_nanos() as usize);
@@ -3911,8 +3914,8 @@ pub fn solve_lp_dual_extended(std: &StdForm, opts: &crate::types::LpOptions) -> 
     None
 }
 
-/// Step III: 終了判定(`prop:trichotomy`: `z^1 < 0` なら非有界)、cleanup 補題
-/// (`lem:cleanup`: 人工的な `M` 側に残る非基底列を、真の境界に対する主比率テストで
+/// 後処理(論文 Algorithm 1): 終了判定(命題 6.5 (ii): `z^1 < 0` なら非有界)、cleanup 補題
+/// (補題 6.6: 人工的な `M` 側に残る非基底列を、真の境界に対する主比率テストで
 /// 高々 `K` 回の操作で取り除く。各操作は目的関数値・双対実行可能性・真の境界での
 /// 主実行可能性を保つ)、最後に [`polish_with_true_bounds`] による解の取り出し。
 ///
@@ -3939,7 +3942,7 @@ fn finish(std: &StdForm, basis: &mut [usize], basis_pos: &mut [Option<usize>], n
         return Some(SimplexResult { status: Status::Unbounded, x: None });
     }
 
-    // cleanup 補題(`lem:cleanup`): 自分の人工 `M` 側にある非基底列を、基底変数の真の
+    // cleanup 補題(論文の補題 6.6): 自分の人工 `M` 側にある非基底列を、基底変数の真の
     // 有限境界に対する主比率テストで有限側へ動かす。場合 (A): どの行にも塞がれず
     // 有限側に到達(基底は不変でその側に置き直す)、場合 (B): 行 `r` が先に塞ぐ
     // (列が入基し、`basis[r]` が到達した有限境界で離基)。各操作が真の境界での主実行可能性を
@@ -3977,8 +3980,8 @@ fn finish(std: &StdForm, basis: &mut [usize], basis_pos: &mut [Option<usize>], n
             let v_j = nb_value_affine(cache, status, j)?;
             // `dir`: `x_j` の移動方向(有限側へ。自由列なら 0 へ)、`target`/`target_status`:
             // 移動先の値と非基底状態。移動量を `t` とすると `x_B` は `rate * t`
-            // (`rate = -dir * alpha`)だけ変わる。自由列の場合 (A) は論文の状態 `Z`
-            // (値 0、`rem:state-F`)に置く(`z1 = 0` よりその被約費用は 0 なので双対実行可能)。
+            // (`rate = -dir * alpha`)だけ変わる。自由列の場合(補題 6.6 (A))は論文の状態 `Z`
+            // (値 0、注意 6.7)に置く(`z1 = 0` よりその被約費用は 0 なので双対実行可能)。
             let (dir, target, target_status) = match status {
                 NbStatus::Lower => (1.0, if std.ub[j].is_finite() { std.ub[j] } else { 0.0 }, if std.ub[j].is_finite() { NbStatus::Upper } else { NbStatus::Zero }),
                 NbStatus::Upper => (-1.0, if std.lb[j].is_finite() { std.lb[j] } else { 0.0 }, if std.lb[j].is_finite() { NbStatus::Lower } else { NbStatus::Zero }),
@@ -4154,7 +4157,7 @@ fn finish(std: &StdForm, basis: &mut [usize], basis_pos: &mut [Option<usize>], n
     polish_with_true_bounds(std, basis, basis_pos, nb_status, lu)
 }
 
-/// Step III の最終段: `M`/`Affine1` を使わず `std.lb`/`std.ub` 上で直接動く
+/// 後処理の最終段: `M`/`Affine1` を使わず `std.lb`/`std.ub` 上で直接動く
 /// 通常の有界双対単体法。主フェーズと同じ増分機構(`InfeasibleRows` による
 /// 超疎 chuzr、`x_B` の増分維持、Harris 型 BFRT パス 2、確定前の `updateVerify`)を使う。
 ///
@@ -4478,7 +4481,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
                 continue;
             }
             if status == NbStatus::Zero {
-                // 主フェーズと同じ規則(論文 §4.6): Eligible 内の `Zero` 列には
+                // 主フェーズと同じ規則(論文 3.1 節 (iii)・注意 3.1): Eligible 内の `Zero` 列には
                 // 比 0 で直接ピボットし、BFRT は行わない。
                 let c = Cand { j, hat_alpha, ratio: 0.0 };
                 if zero_pick.map_or(true, |z| j < z.j) {
@@ -4814,7 +4817,7 @@ mod tests {
         // 差 x0 - x1 は -3 に固定されるが個々の値は非有界(最適面は直線)なので、
         // どちらかは実の境界を持たないまま非基底に残る。主ループが片方を解決し、
         // 残った方は cleanup の主比率テストで何にも塞がれず、場合 (A) で
-        // 状態 `Z`(値 0、`rem:state-F`)に置かれる。
+        // 状態 `Z`(値 0、論文の注意 6.7)に置かれる。
         let rows = vec![vec![(0, 1.0), (1, -1.0), (2, 1.0)], vec![(0, -1.0), (1, 1.0), (3, 1.0)]];
         let std = std_form(&rows, vec![3.0, 3.0], vec![1.0, -1.0, 0.0, 0.0], vec![f64::NEG_INFINITY, f64::NEG_INFINITY, 0.0, 0.0], vec![f64::INFINITY, f64::INFINITY, f64::INFINITY, f64::INFINITY]);
         let res = solve_lp_dual_extended(&std, &crate::types::LpOptions::default()).expect("cleanup case (A) parks the free survivor at Zero instead of bailing");
@@ -4827,10 +4830,10 @@ mod tests {
     /// コスト 0 の自由列が crash で `Zero` に置かれ、BFRT なしで最初に入基することを確認する。
     #[test]
     fn zero_cost_free_column_starts_at_zero_and_enters_first() {
-        // x0 は自由・コスト 0(`eq:init-status` により crash は -M ではなく `Zero` に置く)、
+        // x0 は自由・コスト 0(論文の式 (4) により crash は -M ではなく `Zero` に置く)、
         // x1 ∈ [0,10] コスト 1、x0 + x1 + s = 5、s ∈ [0,0]。初期の全スラック基底では
         // s = 5 が上限超過。Eligible には x0(Zero、比 0)と x1(比 1)があり、
-        // `Zero` 規則(論文 §4.6)で x0 が BFRT なしに入基して x0 = 5, x1 = 0 で最適。
+        // `Zero` 規則(論文 3.1 節 (iii)・注意 3.1)で x0 が BFRT なしに入基して x0 = 5, x1 = 0 で最適。
         // M 側に置かれる列は無いので cleanup は何もしない。
         let std = std_form(&[vec![(0, 1.0), (1, 1.0), (2, 1.0)]], vec![5.0], vec![0.0, 1.0, 0.0], vec![f64::NEG_INFINITY, 0.0, 0.0], vec![f64::INFINITY, 10.0, 0.0]);
         assert_eq!(crash(&std, &super::super::perturb_costs(&std), 2)[0], Some(NbStatus::Zero));
@@ -4905,7 +4908,7 @@ mod tests {
         assert_eq!(CLEANUP_PIVOTS.load(Relaxed), before, "the identically-zero branch never performs an actual pivot swap");
     }
 
-    /// cleanup の主比率テストが塞ぐ行でピボットし(`lem:cleanup` の場合 (B))、
+    /// cleanup の主比率テストが塞ぐ行でピボットし(論文の補題 6.6 の場合 (B))、
     /// 主実行可能性を保つことを確認する。
     #[test]
     fn cleanup_ratio_test_pivots_on_the_blocking_row_and_stays_primal_feasible() {

@@ -205,7 +205,7 @@ enum NbStatus {
     Lower,
     /// 上限に置かれている。
     Upper,
-    /// 値 0 に置かれた自由列 (論文の状態 `Z`, §2.2)。`lb == -inf` かつ `ub == +inf` の
+    /// 値 0 に置かれた自由列 (論文の状態 `Z`, 3.1 節)。`lb == -inf` かつ `ub == +inf` の
     /// 列に限り、`extended_dual` だけが作る (費用 0 の自由列のクラッシュ、cleanup の場合 (A))。
     /// 被約費用がちょうど 0 のとき双対実行可能で、どちら向きにも入れ、フリップはしない。
     /// [`run_phase`] も引き継ぎで受け取りうるので、すべての match で扱う。
@@ -718,7 +718,7 @@ impl<'a> Tableau<'a> {
         resid_sq.sqrt()
     }
 
-    /// EXPAND のリセット (§4.3): 状態が指す上下限から `EXPAND_DELTA_F` 以内にある
+    /// EXPAND のリセット (Gill et al. 1989 §4.3): 状態が指す上下限から `EXPAND_DELTA_F` 以内にある
     /// 非基底変数をちょうどその値に戻す。基底変数の値は呼び出し側の次の
     /// `recompute_basics` で更新される。
     fn expand_reset_nonbasics(&mut self) {
@@ -894,7 +894,7 @@ fn run_phase(
             *lu = l;
         }
 
-        // EXPAND (§4.2): 作業許容誤差を毎反復増やし、EXPAND_K 反復ごとに
+        // EXPAND (Gill et al. 1989 §4.2): 作業許容誤差を毎反復増やし、EXPAND_K 反復ごとに
         // 非基底値を上下限に戻して新しい拡大系列を始める。
         expand.delta += EXPAND_TAU;
         expand.iters_since_reset += 1;
@@ -1018,7 +1018,7 @@ fn run_phase(
 
             // この行をブロックする上下限: 実行可能な行は進行方向の上下限。違反している行
             // (第 1 段階のみ) は実行可能側へ戻る向きの上下限だけでブロックされ、違反を
-            // 深める向きはブロックしない (§7.1)。実行可能へ戻る行は緩め幅なし (relaxed == exact)。
+            // 深める向きはブロックしない (Gill et al. 1989 §7.1)。実行可能へ戻る行は緩め幅なし (relaxed == exact)。
             // `active` = この行がブロックしうるか、`returning_to_feasibility` = 違反から戻る途中か。
             let (bound, is_upper, active, returning_to_feasibility) = if rate < 0.0 {
                 if infeasible_high {
@@ -1798,7 +1798,7 @@ pub fn solve_lp_dual(variables: &[VariableData], objective: &Objective, constrai
 /// モデルの LP を前処理 → 拡張双対単体法 → 後処理で解く (オプション指定版)。
 ///
 /// 既定では状態は `Optimal`/`Infeasible`/`InfeasibleOrUnbounded` のいずれか
-/// (`prop:trichotomy`)。他の経路で得た `Unbounded` も
+/// (論文の系 7.3 (i))。他の経路で得た `Unbounded` も
 /// `opts.distinguish_infeasible_unbounded` が偽なら `InfeasibleOrUnbounded` にまとめる。
 /// 拡張双対が解を出せなければ [`Status::NotSolved`]。
 pub fn solve_lp_dual_with(variables: &[VariableData], objective: &Objective, constraints: &[ConstraintRow], opts: crate::types::LpOptions) -> SimplexResult {

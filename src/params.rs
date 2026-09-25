@@ -61,19 +61,19 @@ pub(crate) mod simplex {
 
     /// EXPAND 巡回回避 (Gill, Murray, Saunders & Wright 1989) の基準実行可能性許容誤差
     /// `delta_f`。作業許容誤差 `delta` は常にこれ未満に保つ。非基底変数を上下限に
-    /// 戻すときのスナップ幅にも使う (§4.2-4.3)。
+    /// 戻すときのスナップ幅にも使う (Gill et al. 1989 §4.2-4.3)。
     pub(crate) const EXPAND_DELTA_F: f64 = 1e-6;
 
-    /// EXPAND の 1 拡大系列の反復数 (この反復数ごとにリセットする, §4.2)。
+    /// EXPAND の 1 拡大系列の反復数 (この反復数ごとにリセットする, Gill et al. 1989 §4.2)。
     pub(crate) const EXPAND_K: usize = 50;
 
-    /// 拡大系列の開始時の作業許容誤差 (§4.2: `delta_0 = 0.5 delta_f`)。
+    /// 拡大系列の開始時の作業許容誤差 (Gill et al. 1989 §4.2: `delta_0 = 0.5 delta_f`)。
     pub(crate) const EXPAND_DELTA_0: f64 = 0.5 * EXPAND_DELTA_F;
 
-    /// `EXPAND_K` 反復で近づく作業許容誤差の上限 (§4.2: `delta_K = 0.99 delta_f`)。
+    /// `EXPAND_K` 反復で近づく作業許容誤差の上限 (Gill et al. 1989 §4.2: `delta_K = 0.99 delta_f`)。
     pub(crate) const EXPAND_DELTA_K: f64 = 0.99 * EXPAND_DELTA_F;
 
-    /// 作業許容誤差の 1 反復あたりの増分 (§4.2: `tau = (delta_K - delta_0) / K`)。
+    /// 作業許容誤差の 1 反復あたりの増分 (Gill et al. 1989 §4.2: `tau = (delta_K - delta_0) / K`)。
     /// 比率テストの最小ステップ `tau / |pivot|` にも使う。
     pub(crate) const EXPAND_TAU: f64 = (EXPAND_DELTA_K - EXPAND_DELTA_0) / (EXPAND_K as f64);
 
@@ -196,7 +196,7 @@ pub(crate) mod extended_dual {
     pub(crate) const SLOPE_TOL: f64 = 1e-9;
 
     /// 最適値の傾き `z^1`(`z(M) = z^0 + z^1 M`)が `z^1 < 0`(実行不能または非有界、
-    /// `prop:trichotomy`)とみなされる負の閾値(`-Z_SLOPE_TOL` 未満)。段階 A の早期終了と
+    /// 論文の系 7.3 (i))とみなされる負の閾値(`-Z_SLOPE_TOL` 未満)。段階 A の早期終了と
     /// `finish` の非有界判定で共有する。
     pub(crate) const Z_SLOPE_TOL: f64 = 1e-7;
 
