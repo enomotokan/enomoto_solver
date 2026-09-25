@@ -229,8 +229,10 @@ pub(crate) mod slope_intercept_dual {
     pub(crate) const SYNTH_CLOCK_LARGE_M: usize = 10_000;
 
     /// 策10: 係数を広げるときの基準行数(`ENOMOTO_T_SYNTH_CLOCK_LARGE_REF_M`)。
-    /// storm 縮小版で m=19K → 係数約 31、m=76K → 約 62 が最良付近だった。
-    pub(crate) const SYNTH_CLOCK_LARGE_REF_M: usize = 5_000;
+    /// 当初は 5,000(storm 縮小版で m=19K → 係数約 31、m=76K → 約 62 が最良付近)。疎な `R` 段(策13)で
+    /// 更新 1 回ごとの増分が減った後は 2,000 が良い(本体 m=378K: 5,000 / 2,000 / 1,000 で 92 / 84 / 87 s、
+    /// k=200: 5.95 / 5.41 / 5.27 s、k=50: 0.79 / 0.74 / 0.76 s)。
+    pub(crate) const SYNTH_CLOCK_LARGE_REF_M: usize = 2_000;
 
     /// 増分維持している被約費用 `d` のドリフト検査の相対許容誤差: `‖d - fresh_d‖`(固定列を除く)が
     /// `D_DRIFT_TOL * max(‖fresh_d‖, 1)` を超えたら再分解する。
