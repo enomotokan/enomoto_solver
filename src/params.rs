@@ -229,7 +229,7 @@ pub(crate) mod slope_intercept_dual {
     pub(crate) const SYNTH_CLOCK_LARGE_M: usize = 10_000;
 
     /// 策10: 係数を広げるときの基準行数(`ENOMOTO_T_SYNTH_CLOCK_LARGE_REF_M`)。
-    /// 当初は 5,000(storm 縮小版で m=19K → 係数約 31、m=76K → 約 62 が最良付近)。疎な `R` 段(策13)で
+    /// 当初は 5,000(storm 縮小版で m=19K → 係数約 31、m=76K → 約 62 が最良付近)。疎な `R` 段(追加策 R)で
     /// 更新 1 回ごとの増分が減った後は 2,000 が良い(本体 m=378K: 5,000 / 2,000 / 1,000 で 92 / 84 / 87 s、
     /// k=200: 5.95 / 5.41 / 5.27 s、k=50: 0.79 / 0.74 / 0.76 s)。
     pub(crate) const SYNTH_CLOCK_LARGE_REF_M: usize = 2_000;
@@ -527,7 +527,7 @@ pub(crate) mod lu {
     /// `ENOMOTO_T_TAU_GP_FRACTION`)。これ以下なら続く `tau` FTRAN の `L` 段を GP で行う。
     pub(crate) const TAU_GP_FRACTION: f64 = 0.1;
 
-    /// 策13: 融合 FTRAN の `R` 段を疎に当てる (`FtLu::apply_r_sparse`) のは `R` eta がこの数以上
+    /// 追加策 R: 融合 FTRAN の `R` 段を疎に当てる (`FtLu::apply_r_sparse`) のは `R` eta がこの数以上
     /// あるときだけ (`ENOMOTO_T_R_SPARSE_MIN_ETAS`)。少ないうちは全 eta を順に当てる方が速い
     /// (Netlib sctap1 で常時疎にすると +5%)。結果はどちらでもビット一致。
     pub(crate) const R_SPARSE_MIN_ETAS: usize = 256;

@@ -1349,7 +1349,7 @@ pub struct GpScratch {
     /// 直前の `R` eta 適用で値が変わった行 (超疎 `U` 段の起点の候補。`reach` と合わせて
     /// `U` 段入力の非ゼロ位置をすべて含む)。`R` eta を適用する側が毎回作り直す。
     r_seeds: Vec<usize>,
-    /// 疎な `R` eta 適用の作業領域 (策13)。
+    /// 疎な `R` eta 適用の作業領域 (追加策 R)。
     r_work: RSparseWork,
 }
 
@@ -3486,7 +3486,7 @@ pub struct FtLu {
     row_owners: Vec<Vec<(usize, f64)>>,
     /// `R` 行 eta (作成順、`key` = 行 `p`、`pivot` は未使用)。
     r_etas: EtaFile,
-    /// `R` eta の列方向索引 (策13): `r_head[i]` は位置 `i` に要素を持つ `R` eta の要素 (プール位置) の
+    /// `R` eta の列方向索引 (追加策 R): `r_head[i]` は位置 `i` に要素を持つ `R` eta の要素 (プール位置) の
     /// 連結リストの先頭 (`u32::MAX` で空)、`r_next[e]` は次の要素。新しい eta ほど前に入る。
     /// 疎なベクトルに `R` eta を当てるとき、内積が 0 でありえない eta だけを選ぶのに使う
     /// ([`Self::apply_r_sparse`])。密形式の `R` eta は載せず `r_dense` に番号を持つ。
@@ -4316,7 +4316,7 @@ impl FtLu {
         (na, nb, nc)
     }
 
-    /// 策13: `R` eta (`x[p_k] -= r_k · x`、作成順) を、非ゼロになりうる位置が `seeds` に限られる
+    /// 追加策 R: `R` eta (`x[p_k] -= r_k · x`、作成順) を、非ゼロになりうる位置が `seeds` に限られる
     /// 疎なベクトル `x` に当てる。内積が 0 でありえない eta (非ゼロの位置に要素を持つもの) だけを
     /// 列方向索引 ([`Self::r_head`]) で選び、作成順 (番号の小さい順) に最小ヒープで処理する。
     /// eta `k` が `x[p_k]` を変えたら、`p_k` に要素を持つ `k` より新しい eta を加える。選ばれない
@@ -4556,7 +4556,7 @@ impl FtLu {
     ) -> (usize, usize, bool) {
         let m = self.base.m as u64;
         if let (true, Some(ga), Some(gb)) = (self.r_etas.n_headers() >= self.r_sparse_min, gp_a.as_deref_mut(), gp_b.as_deref_mut()) {
-            // 両ベクトルとも `L` 段が Gilbert-Peierls (非ゼロ位置が分かっている): 策13 の疎な `R` 段。
+            // 両ベクトルとも `L` 段が Gilbert-Peierls (非ゼロ位置が分かっている): 追加策 R の疎な `R` 段。
             self.add_tick(2 * self.r_nnz_total as u64);
             let GpScratch { reach, r_seeds, r_work, .. } = ga;
             self.apply_r_sparse(scratch_a, reach, r_seeds, r_work);
@@ -4698,7 +4698,7 @@ impl FtLu {
         // CLOCK トリガ用: 疎 `L` 段のコストは到達集合のサイズ。
         self.add_tick(gp.reach.len() as u64);
         if self.u_hyper_ok(gp) && self.r_etas.n_headers() >= self.r_sparse_min {
-            // 疎な `R` 段 (策13、tick は全 eta 分を一括で)。
+            // 疎な `R` 段 (追加策 R、tick は全 eta 分を一括で)。
             self.add_tick(self.r_nnz_total as u64);
             let GpScratch { reach, r_seeds, r_work, .. } = &mut *gp;
             self.apply_r_sparse(scratch, reach, r_seeds, r_work);
@@ -5405,7 +5405,7 @@ impl FtLu {
 
         self.fill += self.r_etas.nnz(rk);
         self.r_nnz_total += self.r_etas.nnz(rk);
-        // 採用した `R` eta を列方向索引に載せる (策13)。
+        // 採用した `R` eta を列方向索引に載せる (追加策 R)。
         if self.r_etas.is_dense(rk) {
             self.r_dense.push(rk as u32);
         } else {
@@ -6553,7 +6553,7 @@ mod tests {
                         .collect()
                 };
                 let mut st = FtLu::new(factorize(m, &rows).unwrap());
-                // 疎な `R` 段 (策13) を少ない `R` eta でも通す (参照側 `sr` は常に全 eta を順に当てる)。
+                // 疎な `R` 段 (追加策 R) を少ない `R` eta でも通す (参照側 `sr` は常に全 eta を順に当てる)。
                 st.r_sparse_min = 0;
                 let mut sr = st.clone();
                 sr.r_sparse_min = usize::MAX;
