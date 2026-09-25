@@ -5298,6 +5298,53 @@ impl FtLu {
         nnz
     }
 
+    /// 出力の非ゼロ位置の記録 `track` 付きの [`Self::solve_sparse_into_hyper`] (pds-100 報告の策13 の一部、
+    /// BFRT の合成フリップ列用)。超疎 `U` 段が成功したら前回の位置だけを 0 に戻してから一覧の位置を書き
+    /// ([`Self::permute_list_tracked`])、長さ `m` の `fill` を省く。それ以外は全体を書いて記録を無効化する。
+    /// 値・tick はビット一致。
+    #[inline(never)]
+    pub fn solve_sparse_into_hyper_tracked(&self, rhs_sparse: &[(usize, f64)], scratch: &mut [f64], gp: &mut GpScratch, out: &mut [f64], track: &mut NzTrack) -> usize {
+        self.base.l_solve_sparse_into(rhs_sparse, scratch, gp);
+        self.add_tick(gp.reach.len() as u64);
+        if self.u_hyper_ok(gp) && self.r_sparse_ready() {
+            self.add_tick(self.r_nnz_total as u64);
+            let GpScratch { reach, r_seeds, r_work, .. } = &mut *gp;
+            self.apply_r_sparse(scratch, reach, r_seeds, r_work);
+        } else {
+            gp.r_seeds.clear();
+            for reta in self.r_etas.iter() {
+                let dot = self.r_etas.dot(reta.k, scratch);
+                self.add_tick(self.r_etas.nnz(reta.k) as u64);
+                scratch[reta.slot] -= dot;
+                if dot != 0.0 {
+                    gp.r_seeds.push(reta.slot);
+                }
+            }
+        }
+        if self.u_hyper_ok(gp) {
+            self.add_tick(self.base.m as u64);
+            match self.u_solve_hyper_heap(scratch, gp) {
+                UHyper::Hyper => {
+                    let nnz = self.permute_list_tracked(scratch, out, &gp.u_list, track);
+                    clear_after_hyper(scratch, true, gp);
+                    return nnz;
+                }
+                UHyper::Full => {
+                    track.set_full();
+                    let nnz = self.permute_out(scratch, out);
+                    scratch.fill(0.0);
+                    return nnz;
+                }
+                UHyper::NotTried => self.tick.set(self.tick.get() - self.base.m as u64),
+            }
+        }
+        track.set_full();
+        self.u_solve_into(scratch);
+        let nnz = self.permute_out(scratch, out);
+        scratch.fill(0.0);
+        nnz
+    }
+
     /// 右辺が恒等的に 0 のときに [`Self::solve_into`] (`sparse == false`) または
     /// [`Self::solve_sparse_into`] (`sparse == true`) が加えるのと同じ tick だけを、
     /// 求解せずに加える。結果が 0 と分かっている FTRAN を省いても CLOCK トリガ

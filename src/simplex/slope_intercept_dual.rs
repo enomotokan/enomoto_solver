@@ -2143,6 +2143,8 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     // 策8: chuzc1 の上位候補の選択数 (`BIG` のみ、0 = 全体ヒープ。`ENOMOTO_T_CHUZC1_TOPK`)、
     // 上限付き最大ヒープと並べた結果。
     let chuzc1_topk: usize = if BIG { tunable!("ENOMOTO_T_CHUZC1_TOPK", CHUZC1_TOPK, usize) } else { 0 };
+    // 策7 (停止候補の刈り込みの省略) を使うか (`ENOMOTO_T_CHUZC1_FAST=1`、既定オフ)。
+    let chuzc1_fast = BIG && tunable!("ENOMOTO_T_CHUZC1_FAST", 0u8, u8) != 0;
     let mut topk_heap: BinaryHeap<Cand> = BinaryHeap::with_capacity(chuzc1_topk);
     let mut topk_sorted: Vec<Cand> = Vec::with_capacity(chuzc1_topk);
 
@@ -2251,6 +2253,13 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     // 結合フリップの FTRAN 結果(`B^-1 × 累積右辺`、チャネルごと)。
     let mut combined_alpha_base = vec![0.0f64; m];
     let mut combined_alpha_slope = vec![0.0f64; m];
+    // pds-100 報告の策13 の一部 (`BIG` のみ): 合成フリップ列の FTRAN 結果 (`combined_alpha_base`/`_slope`) の
+    // 非ゼロ位置の記録。超疎に解けた反復は長さ `m` の `fill` を省き、`x_B` 更新の行一覧もこの記録から作る
+    // (`compact_rows` の `O(m)` 走査を省く)。記録の外で全体を書いたら `set_full` で無効化する。
+    let mut cab_track = sparse_lu::NzTrack::new();
+    let mut cas_track = sparse_lu::NzTrack::new();
+    // 行一覧の和集合を作る作業領域。
+    let mut xb_union: Vec<usize> = Vec::new();
 
     // `x_B(M)` の初期値(論文の補題 6.1 の `b - N x_N` を一度だけ解く)。以後は増分で維持し、
     // 周期的な再同期で同じ計算に合わせ直す。
@@ -3109,12 +3118,11 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
             // 順で最小のもの(停止候補)。BFRT の歩進はそこで無条件に止まるので、それより後ろの
             // 候補は何にも影響しない。それらを捨てても選ばれる `q`・フリップ集合・浮動小数点値は
             // 不変で、ヒープの元になる候補数だけが減る(HiGHS `choosePossible` と同じ考え)。
-            //
-            // 策7 (`BIG` のみ): 下の策8 (上位候補の選択) を使う場合は、停止候補による刈り込みと
-            // `candidates` への写しを省き、`cand_scratch[..k]` をそのまま候補列にする (`fast_n`)。
-            // 歩進は `(ratio, j)` 順で最初の幅無限の候補 (= 停止候補) で必ず止まるので、刈り込まなくても
-            // 選ばれる `q`・フリップ集合・値は同じ。`width_inf` のランダムな読みと候補の写しが消える。
-            if BIG && chuzc1_topk > 0 && !ban_active && !bland_mode && k > chuzc1_topk {
+            if BIG && chuzc1_fast && chuzc1_topk > 0 && !ban_active && !bland_mode && k > chuzc1_topk {
+                // 策7 (`ENOMOTO_T_CHUZC1_FAST=1` のときだけ): 下の策8 (上位候補の選択) を使う場合に、停止候補による
+                // 刈り込みと `candidates` への写しを省き、`cand_scratch[..k]` をそのまま候補列にする。歩進は
+                // `(ratio, j)` 順で最初の幅無限の候補 (= 停止候補) で必ず止まるので結果は同じ。既定はオフ
+                // (片側行のスラックが多い問題では刈り込みで候補が桁違いに減るため、刈り込まないと遅くなる)。
                 fast_n = Some(k);
             } else {
                 let mut stopper: Option<Cand> = None;
@@ -3526,6 +3534,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                         sparse_slope_buf.extend(combined_touched.iter().map(|&i| (i, combined_slope[i])));
                         lu.solve_sparse_into(&sparse_slope_buf, &mut sparse_scratch, &mut gp_scratch, &mut combined_alpha_slope)
                     };
+                    cas_track.set_full();
                     density_bfrt.record(slope_nnz, m);
                     combined_nnz = slope_nnz;
                 } else if lu.should_use_dense_solve_tracked(combined_touched.len(), &density_bfrt) {
@@ -3533,11 +3542,14 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                     // 相乗りする (`combined_deferred`) か、ここで解く。密度サンプルはどちらでも
                     // (基底, 傾き) の順に記録する。
                     let slope_nnz = if slope_nonzero {
+                        cas_track.set_full();
                         lu.solve_into(&combined_slope, &mut lu_scratch, &mut combined_alpha_slope)
                     } else {
                         lu.add_zero_rhs_solve_ticks(false);
                         0
                     };
+                    // 基底チャネルはこの後の融合 FTRAN かここで全体を書く。
+                    cab_track.set_full();
                     if fused_bfrt_ftran && fused_dse_ftran {
                         combined_deferred = true;
                         combined_slope_nnz = slope_nnz;
@@ -3559,14 +3571,14 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                     let u_hyper_gate = tunable!("ENOMOTO_FTRAN_U_HYPER", FTRAN_U_HYPER_DENSITY, f64);
                     gp_scratch.u_hyper = BIG && u_hyper_gate > 0.0 && density_bfrt.expected() < u_hyper_gate;
                     let base_nnz = if BIG {
-                        lu.solve_sparse_into_hyper(&sparse_base_buf, &mut sparse_scratch, &mut gp_scratch, &mut combined_alpha_base)
+                        lu.solve_sparse_into_hyper_tracked(&sparse_base_buf, &mut sparse_scratch, &mut gp_scratch, &mut combined_alpha_base, &mut cab_track)
                     } else {
                         lu.solve_sparse_into(&sparse_base_buf, &mut sparse_scratch, &mut gp_scratch, &mut combined_alpha_base)
                     };
                     let slope_nnz = if slope_nonzero {
                         sparse_slope_buf.extend(combined_touched.iter().map(|&i| (i, combined_slope[i])));
                         if BIG {
-                            lu.solve_sparse_into_hyper(&sparse_slope_buf, &mut sparse_scratch, &mut gp_scratch, &mut combined_alpha_slope)
+                            lu.solve_sparse_into_hyper_tracked(&sparse_slope_buf, &mut sparse_scratch, &mut gp_scratch, &mut combined_alpha_slope, &mut cas_track)
                         } else {
                             lu.solve_sparse_into(&sparse_slope_buf, &mut sparse_scratch, &mut gp_scratch, &mut combined_alpha_slope)
                         }
@@ -3983,7 +3995,31 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         let xb_list_len: Option<usize> = {
             let est = alpha_nnz + if combined_pending { combined_nnz } else { 0 };
             if (est as f64) <= tunable!("ENOMOTO_T_XB_LIST_DENSITY", XB_LIST_DENSITY, f64) * m as f64 {
-                Some(if combined_pending && combined_slope_nonzero {
+                // 策13 の一部: フリップ結果と入る列の結果の非ゼロ位置がすべて記録されていれば、その和集合から
+                // 非ゼロ行を昇順に集める (`compact_rows` と同じ行の集合・順序)。
+                let union_lists = if BIG && combined_pending {
+                    match (ftran_track.alpha.indices(), cab_track.indices(), if combined_slope_nonzero { cas_track.indices() } else { Some(&[][..]) }) {
+                        (Some(a), Some(b), Some(c)) => Some((a, b, c)),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                Some(if let Some((la, lb, lc)) = union_lists {
+                    xb_union.clear();
+                    for &i in la.iter().chain(lb).chain(lc) {
+                        let nz = alpha_full[i] != 0.0 || combined_alpha_base[i] != 0.0 || (combined_slope_nonzero && combined_alpha_slope[i] != 0.0);
+                        if nz {
+                            xb_union.push(i);
+                        }
+                    }
+                    xb_union.sort_unstable();
+                    xb_union.dedup();
+                    for (k, &i) in xb_union.iter().enumerate() {
+                        xb_rows[k] = i as u32;
+                    }
+                    xb_union.len()
+                } else if combined_pending && combined_slope_nonzero {
                     compact_rows(m, &mut xb_rows, |i| (alpha_full[i].to_bits() | combined_alpha_base[i].to_bits() | combined_alpha_slope[i].to_bits()) << 1)
                 } else if combined_pending {
                     compact_rows(m, &mut xb_rows, |i| (alpha_full[i].to_bits() | combined_alpha_base[i].to_bits()) << 1)
