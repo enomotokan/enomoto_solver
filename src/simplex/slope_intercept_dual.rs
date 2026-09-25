@@ -58,9 +58,9 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::sync::OnceLock;
 use crate::params::simplex::{FT_BUMP_LIMIT_FACTOR, FT_CHECK_INTERVAL, FT_MIN_PIVOT, FT_RESIDUAL_TOL, HARRIS_RATIO_TOL, MAX_ITERS_FLOOR, PRIMAL_FEAS_TOL, RESIDUAL_CHECK_MULTIPLIER, STALL_PROGRESS_EPS, STEEPEST_EDGE_FLOOR, TOL};
-use crate::params::slope_intercept_dual::{D_DRIFT_TOL, D_GROSS_MISMATCH_REL_TOL, FT_MAX_UPDATES_FACTOR, FT_MAX_UPDATES_FLOOR, PIVOT_ESCALATION_STEP, SLOPE_TOL, STUCK_ROW_MIN_PIVOT, SYNTH_CLOCK_FACTOR, SYNTH_CLOCK_MIN_UPDATES, XB_CHECK_CADENCE, XB_CHECK_INTERVAL, XB_DRIFT_ESCALATION_FACTOR, XB_DRIFT_ESCALATION_STEP, XB_DRIFT_REL_TOL, XB_DRIFT_TOL, XB_DRIFT_TOL_MAX, X_B_SLOPE_NOISE, Z_SLOPE_TOL};
+use crate::params::slope_intercept_dual::{D_DRIFT_TOL, D_GROSS_MISMATCH_REL_TOL, FT_MAX_UPDATES_FACTOR, FT_MAX_UPDATES_FLOOR, PIVOT_ESCALATION_STEP, SLOPE_TOL, STUCK_ROW_MIN_PIVOT, SYNTH_CLOCK_FACTOR, SYNTH_CLOCK_LARGE_M, SYNTH_CLOCK_LARGE_REF_M, SYNTH_CLOCK_MIN_UPDATES, XB_CHECK_CADENCE, XB_CHECK_CADENCE_LARGE, XB_CHECK_CADENCE_LARGE_M, XB_CHECK_INTERVAL, XB_DRIFT_ESCALATION_FACTOR, XB_DRIFT_ESCALATION_STEP, XB_DRIFT_REL_TOL, XB_DRIFT_TOL, XB_DRIFT_TOL_MAX, X_B_SLOPE_NOISE, Z_SLOPE_TOL};
 use crate::params::slope_intercept_dual::{
-    CHUZR_SHORTLIST_K, CHUZR_SHORTLIST_MAX_LEN_FACTOR, CHUZR_SHORTLIST_MAX_LEN_SLACK, CHUZR_SHORTLIST_MIN_POOL_FACTOR, COMPACT_ROWS_BLOCK, FTRAN_U_HYPER_DENSITY, FTRAN_U_HYPER_TAU_DENSITY,
+    CHUZR_SHORTLIST_AUTO_DIV, CHUZR_SHORTLIST_AUTO_K, CHUZR_SHORTLIST_AUTO_K_MAX, CHUZR_SHORTLIST_AUTO_MIN_M, CHUZR_SHORTLIST_K, CHUZR_SHORTLIST_MAX_LEN_FACTOR, CHUZR_SHORTLIST_MAX_LEN_SLACK, CHUZR_SHORTLIST_MIN_POOL_FACTOR, COMPACT_ROWS_BLOCK, FTRAN_U_HYPER_DENSITY, FTRAN_U_HYPER_TAU_DENSITY,
     GREATEST_IMPROVEMENT_STALL_DIVISOR, GREATEST_IMPROVEMENT_STALL_MIN, GREATEST_IMPROVEMENT_TOP_K, GROSS_MISMATCH_SCALE_FLOOR, INFEASIBLE_PLATEAU_BUDGET_DIVISOR, INFEASIBLE_PLATEAU_STALL_MULT,
     LEX_REL_TOL, PRICE_COLUMN_DENSITY, PRICE_LIST_DENSITY, SCORE2_STALL_HALFLIFE, STALL_LIMIT_MIN, STALL_LIMIT_PER_ROW, STUCK_ROW_BOOST_FACTOR, STUCK_ROW_BOOST_THRESHOLD, XB_DRIFT_FRESH_FLOOR_FACTOR,
     XB_DRIFT_FRESH_FLOOR_FRAC, XB_DRIFT_MIN_UPDATES, XB_DRIFT_MIN_UPDATES_MULT, XB_DRIFT_REL_K, XB_DRIFT_SAMPLE_GUARD, XB_DRIFT_SAMPLE_K, XB_LIST_DENSITY,
@@ -441,7 +441,19 @@ fn synth_clock_factor() -> f64 {
 /// [`polish_with_true_bounds`] で共有する(毎ピボット呼べるほど安価)。
 #[inline]
 fn synth_clock_should_refactor(lu: &sparse_lu::FtLu) -> bool {
-    lu.update_count() >= tunable!("ENOMOTO_T_SYNTH_CLOCK_MIN_UPDATES", SYNTH_CLOCK_MIN_UPDATES, usize) && (lu.synth_tick() as f64) >= synth_clock_factor() * (lu.build_tick().max(1) as f64)
+    lu.update_count() >= tunable!("ENOMOTO_T_SYNTH_CLOCK_MIN_UPDATES", SYNTH_CLOCK_MIN_UPDATES, usize) && (lu.synth_tick() as f64) >= synth_clock_factor_for(lu.dim()) * (lu.build_tick().max(1) as f64)
+}
+
+/// 行数 `m` の問題に使う合成クロックの係数: [`synth_clock_factor`]、ただし策10 で
+/// `m >= SYNTH_CLOCK_LARGE_M` なら `sqrt(m / SYNTH_CLOCK_LARGE_REF_M)` 倍する。
+#[inline]
+fn synth_clock_factor_for(m: usize) -> f64 {
+    let large_m = tunable!("ENOMOTO_T_SYNTH_CLOCK_LARGE_M", SYNTH_CLOCK_LARGE_M, usize);
+    if large_m > 0 && m >= large_m {
+        synth_clock_factor() * (m as f64 / tunable!("ENOMOTO_T_SYNTH_CLOCK_LARGE_REF_M", SYNTH_CLOCK_LARGE_REF_M, usize).max(1) as f64).sqrt()
+    } else {
+        synth_clock_factor()
+    }
 }
 
 /// テスト専用の計測: cleanup 補題で実際に行った基底交換(`finish` の「塞ぐ行あり」分岐)の
@@ -838,10 +850,62 @@ fn residual_norm(std: &StdForm, basis_pos: &[Option<usize>], x_b: &[f64], rhs: &
     resid_sq.sqrt()
 }
 
+/// chuzr 候補短縮リスト (S11・策7) の上位 `cap` 行ヒープに `(score, i)` を提示する。`heap` は
+/// 「最も劣る行」を根に持つ二分ヒープ (順位は `Score2::cmp_lex` の降順、同点は行番号の昇順)。
+/// 満杯なら根より良いときだけ根と入れ替える。1 行あたり `O(log cap)`。`cmp_lex` の許容誤差は推移的で
+/// ないのでヒープの順序は近似だが、比較で panic することはない (集めた集合が上位 `cap` 行の近似になるだけ)。
+fn shortlist_heap_offer(heap: &mut Vec<(Score2, usize)>, cap: usize, item: (Score2, usize), c2_tol: f64) {
+    // `a` が `b` より上位か
+    let before = |a: &(Score2, usize), b: &(Score2, usize)| match a.0.cmp_lex(&b.0, c2_tol) {
+        std::cmp::Ordering::Greater => true,
+        std::cmp::Ordering::Less => false,
+        std::cmp::Ordering::Equal => a.1 < b.1,
+    };
+    if heap.len() < cap {
+        heap.push(item);
+        // 上へ: 親より劣るなら入れ替える。
+        let mut c = heap.len() - 1;
+        while c > 0 {
+            let p = (c - 1) / 2;
+            if before(&heap[p], &heap[c]) {
+                heap.swap(p, c);
+                c = p;
+            } else {
+                break;
+            }
+        }
+        return;
+    }
+    if !before(&item, &heap[0]) {
+        return;
+    }
+    heap[0] = item;
+    // 下へ: より劣る子と入れ替える。
+    let n = heap.len();
+    let mut p = 0;
+    loop {
+        let (l, r) = (2 * p + 1, 2 * p + 2);
+        let mut worst = p;
+        if l < n && before(&heap[worst], &heap[l]) {
+            worst = l;
+        }
+        if r < n && before(&heap[worst], &heap[r]) {
+            worst = r;
+        }
+        if worst == p {
+            break;
+        }
+        heap.swap(p, worst);
+        p = worst;
+    }
+}
+
 /// [`residual_norm`] の 2 チャネル版: `x_B(M)` のドリフト検査用に、
 /// `(‖A_B x_b_base - rhs_base‖, ‖A_B x_b_slope - rhs_slope‖)` を返す。基底列だけを
 /// 1 回走査する(`nnz(A_B)` の手間)。`basis` は基底位置 → 変数番号。
-/// `scratch_base`/`scratch_slope` は呼び出し側の長さ `m` の作業領域で、使用前に上書きする。
+/// `scratch_base`/`scratch_slope` は呼び出し側の長さ `m` の作業領域で、入口で全 0 であること。
+/// 残差を集める最後の走査で 0 に戻して返す (入口の `fill` を省く。策9)。[`residual_scale_affine`]・
+/// [`residual_norm_slope`] も同じ約束。
 fn residual_norm_affine(
     std: &StdForm,
     basis: &[usize],
@@ -852,7 +916,7 @@ fn residual_norm_affine(
     scratch_base: &mut [f64],
     scratch_slope: &mut [f64],
 ) -> (f64, f64) {
-    scratch_base.iter_mut().for_each(|v| *v = 0.0);
+    debug_assert!(scratch_base.iter().all(|&v| v == 0.0));
     // `rhs_slope` が空なのは `delta = 0` の合図で、そのとき `x_b_slope` も正確に 0 なので、
     // 傾きチャネルの残差は正確に `0.0`。計算せずに直接返す(全経路の値とビット同一)。
     if rhs_slope.is_empty() {
@@ -865,11 +929,12 @@ fn residual_norm_affine(
         }
         for i in 0..std.n_rows {
             let rb = scratch_base[i] - rhs_base[i];
+            scratch_base[i] = 0.0;
             resid_base_sq += rb * rb;
         }
         return (resid_base_sq.sqrt(), 0.0);
     }
-    scratch_slope.iter_mut().for_each(|v| *v = 0.0);
+    debug_assert!(scratch_slope.iter().all(|&v| v == 0.0));
     for (pos, &j) in basis.iter().enumerate() {
         let (b, s) = (x_b_base[pos], x_b_slope[pos]);
         if s == 0.0 {
@@ -890,6 +955,8 @@ fn residual_norm_affine(
     for i in 0..std.n_rows {
         let rb = scratch_base[i] - rhs_base[i];
         let rs = scratch_slope[i] - rhs_slope[i];
+        scratch_base[i] = 0.0;
+        scratch_slope[i] = 0.0;
         resid_base_sq += rb * rb;
         resid_slope_sq += rs * rs;
     }
@@ -911,10 +978,7 @@ fn residual_scale_affine(
     scratch_slope: &mut [f64],
 ) -> (f64, f64) {
     let slope = !rhs_slope.is_empty();
-    scratch_base.iter_mut().for_each(|v| *v = 0.0);
-    if slope {
-        scratch_slope.iter_mut().for_each(|v| *v = 0.0);
-    }
+    debug_assert!(scratch_base.iter().all(|&v| v == 0.0) && (!slope || scratch_slope.iter().all(|&v| v == 0.0)));
     for (pos, &j) in basis.iter().enumerate() {
         let (b, s) = (x_b_base[pos].abs(), if slope { x_b_slope[pos].abs() } else { 0.0 });
         for &(i, v) in std.cols.col(j) {
@@ -928,9 +992,11 @@ fn residual_scale_affine(
     let mut slope_sq = 0.0f64;
     for i in 0..std.n_rows {
         let sb = scratch_base[i] + rhs_base.get(i).map_or(0.0, |r| r.abs());
+        scratch_base[i] = 0.0;
         base_sq += sb * sb;
         if slope {
             let ss = scratch_slope[i] + rhs_slope[i].abs();
+            scratch_slope[i] = 0.0;
             slope_sq += ss * ss;
         }
     }
@@ -1124,7 +1190,7 @@ fn residual_norm_slope(std: &StdForm, basis: &[usize], x_b_slope: &[f64], rhs_sl
     if rhs_slope.is_empty() {
         return 0.0;
     }
-    scratch.iter_mut().for_each(|v| *v = 0.0);
+    debug_assert!(scratch.iter().all(|&v| v == 0.0));
     for (pos, &j) in basis.iter().enumerate() {
         let s = x_b_slope[pos];
         if s == 0.0 {
@@ -1137,6 +1203,7 @@ fn residual_norm_slope(std: &StdForm, basis: &[usize], x_b_slope: &[f64], rhs_sl
     let mut resid_sq = 0.0f64;
     for i in 0..std.n_rows {
         let r = scratch[i] - rhs_slope[i];
+        scratch[i] = 0.0;
         resid_sq += r * r;
     }
     resid_sq.sqrt()
@@ -2300,7 +2367,18 @@ fn solve_slope_intercept_dual_with(std: &StdForm, opts: &crate::types::LpOptions
     // `shortlist_cut` を上回ればそれがプールの最良行。そうでないか、リストが `4K + 64` 行を超えたら
     // 全走査する。`Score2::cmp_lex` の許容誤差は推移的でないのでビット同一ではない。
     // `ENOMOTO_T_CHUZR_SHORTLIST=K`(例: 8)で有効、0 でオフ。
-    let shortlist_k = tunable!("ENOMOTO_T_CHUZR_SHORTLIST", CHUZR_SHORTLIST_K, usize);
+    // 策7: 未指定(0)でも `m >= CHUZR_SHORTLIST_AUTO_MIN_M` の大きな問題では長さ `CHUZR_SHORTLIST_AUTO_K` で
+    // 有効にする(実行不能行プールが数万〜十数万行になり、毎反復の全走査が支配的になるため)。
+    // 自動のときは全走査のたびにプールの大きさから `K` を決め直す(`shortlist_auto`)。
+    let (mut shortlist_k, shortlist_auto) = {
+        let k = tunable!("ENOMOTO_T_CHUZR_SHORTLIST", CHUZR_SHORTLIST_K, usize);
+        let auto_min_m = tunable!("ENOMOTO_T_CHUZR_SHORTLIST_AUTO_MIN_M", CHUZR_SHORTLIST_AUTO_MIN_M, usize);
+        if k == 0 && auto_min_m > 0 && m >= auto_min_m {
+            (tunable!("ENOMOTO_T_CHUZR_SHORTLIST_AUTO_K", CHUZR_SHORTLIST_AUTO_K, usize), true)
+        } else {
+            (k, false)
+        }
+    };
     let shortlist_enabled = shortlist_k > 0 && merge_flip_xb && score2_max_tol == LEX_REL_TOL && stuck_row_boost_factor == 1.0;
     // 短縮リストの行一覧、リスト所属の印、全走査時の上位 `K+1` 行、カットのスコア、有効か。
     let mut shortlist_rows: Vec<usize> = Vec::new();
@@ -2308,6 +2386,16 @@ fn solve_slope_intercept_dual_with(std: &StdForm, opts: &crate::types::LpOptions
     let mut shortlist_top: Vec<(Score2, usize)> = Vec::with_capacity(shortlist_k + 2);
     let mut shortlist_cut: Option<Score2> = None;
     let mut shortlist_valid = false;
+    // `x_B(M)` のドリフト検査(と eta フィル検査)の反復間隔。策9: `m >= XB_CHECK_CADENCE_LARGE_M` の
+    // 大きな問題では `XB_CHECK_CADENCE_LARGE` に伸ばす。
+    let xb_check_cadence = {
+        let large_m = tunable!("ENOMOTO_T_XB_CHECK_LARGE_M", XB_CHECK_CADENCE_LARGE_M, usize);
+        if large_m > 0 && m >= large_m {
+            tunable!("ENOMOTO_T_XB_CHECK_CADENCE_LARGE", XB_CHECK_CADENCE_LARGE, usize)
+        } else {
+            tunable!("ENOMOTO_T_XB_CHECK_INTERVAL", XB_CHECK_CADENCE, usize)
+        }
+    };
     // 反復上限(`super::max_iters_for`)。
     let max_iters = super::max_iters_for(m, n_total);
     // ===== 主ループ(1 反復 = chuzr → BTRAN → PRICE → chuzc1/BFRT → FTRAN → 更新) =====
@@ -2420,6 +2508,15 @@ fn solve_slope_intercept_dual_with(std: &StdForm, opts: &crate::types::LpOptions
         // 短縮リストで決まらなければプール全体を走査する(必要なら短縮リストも作り直す)。
         if !shortlist_ready {
         timed!(profile_phases, prof_phases::CHUZR, {
+            if shortlist_active {
+                // 短縮リストを同じ走査で作り直す: プール中の上位 `K + 1` 行を、最も劣る行を根に持つ
+                // 二分ヒープ(`shortlist_top`)に集める。策7 の自動モードでは `K` をプールの大きさから決める。
+                if shortlist_auto {
+                    shortlist_k = (infeasible_rows.rows.len() / tunable!("ENOMOTO_T_CHUZR_SHORTLIST_AUTO_DIV", CHUZR_SHORTLIST_AUTO_DIV, usize).max(1))
+                        .clamp(tunable!("ENOMOTO_T_CHUZR_SHORTLIST_AUTO_K", CHUZR_SHORTLIST_AUTO_K, usize), tunable!("ENOMOTO_T_CHUZR_SHORTLIST_AUTO_K_MAX", CHUZR_SHORTLIST_AUTO_K_MAX, usize).max(1));
+                }
+                shortlist_top.clear();
+            }
             for &i in &infeasible_rows.rows {
                 // 行のメンバーシップを最後に判定した時点でキャッシュした逸脱(`RowDevCache`)。
                 let (d_dir, dev) = (row_dev.dir[i], row_dev.dev[i]);
@@ -2448,41 +2545,20 @@ fn solve_slope_intercept_dual_with(std: &StdForm, opts: &crate::types::LpOptions
                 if better {
                     best = Some((i, d_dir, dev, score));
                 }
+                if shortlist_active {
+                    // `shortlist_enabled` はブースト無効が条件なので `score` はブーストなしのスコア。
+                    shortlist_heap_offer(&mut shortlist_top, shortlist_k + 1, (score, i), score2_c2_tol);
+                }
             }
             if shortlist_active {
-                // 短縮リストを作り直す: プール中の上位 `K + 1` 行。
-                shortlist_top.clear();
-                let before = |score: &Score2, i: usize, t: &(Score2, usize)| match score.cmp_lex(&t.0, score2_c2_tol) {
-                    std::cmp::Ordering::Greater => true,
-                    std::cmp::Ordering::Less => false,
-                    std::cmp::Ordering::Equal => i < t.1,
-                };
-                for &i in &infeasible_rows.rows {
-                    let score = Score2::new(row_dev.dev[i], dse.weight(i));
-                    // 早期棄却: 現在の (K+1) 番目より良くない。
-                    if shortlist_top.len() > shortlist_k && !before(&score, i, &shortlist_top[shortlist_k]) {
-                        continue;
-                    }
-                    let pos = shortlist_top.iter().position(|(ts, ti)| match score.cmp_lex(ts, score2_c2_tol) {
-                        std::cmp::Ordering::Greater => true,
-                        std::cmp::Ordering::Less => false,
-                        std::cmp::Ordering::Equal => i < *ti,
-                    });
-                    match pos {
-                        Some(p) => {
-                            shortlist_top.insert(p, (score, i));
-                            shortlist_top.truncate(shortlist_k + 1);
-                        }
-                        None if shortlist_top.len() <= shortlist_k => shortlist_top.push((score, i)),
-                        None => {}
-                    }
-                }
                 for &i in &shortlist_rows {
                     in_shortlist[i] = false;
                 }
                 shortlist_rows.clear();
-                shortlist_cut = if shortlist_top.len() > shortlist_k { Some(shortlist_top[shortlist_k].0) } else { None };
-                for &(_, i) in shortlist_top.iter().take(shortlist_k) {
+                // ヒープが `K + 1` 行で満杯なら根(最も劣る行)がカット、残り `K` 行がリスト。
+                let full = shortlist_top.len() > shortlist_k;
+                shortlist_cut = if full { Some(shortlist_top[0].0) } else { None };
+                for &(_, i) in shortlist_top.iter().skip(usize::from(full)) {
                     in_shortlist[i] = true;
                     shortlist_rows.push(i);
                 }
@@ -3908,7 +3984,7 @@ fn solve_slope_intercept_dual_with(std: &StdForm, opts: &crate::types::LpOptions
                 prof_phases::REFACTOR_CAUSE_CLOCK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         }
-        if !need_refactor && since_check >= tunable!("ENOMOTO_T_XB_CHECK_INTERVAL", XB_CHECK_CADENCE, usize) {
+        if !need_refactor && since_check >= xb_check_cadence {
             since_check = 0;
             let bump_too_big = lu.fill_count() > tunable!("ENOMOTO_T_FT_BUMP_LIMIT_FACTOR", FT_BUMP_LIMIT_FACTOR, usize) * m.max(1);
             if bump_too_big {

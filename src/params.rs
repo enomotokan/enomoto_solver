@@ -148,6 +148,15 @@ pub(crate) mod slope_intercept_dual {
     /// `ENOMOTO_T_XB_CHECK_INTERVAL` で上書き可。
     pub(crate) const XB_CHECK_CADENCE: usize = 20;
 
+    /// 策9(stormG2 報告 §4): 行数 `m` がこれ以上の問題では、ドリフト検査の間隔を
+    /// [`XB_CHECK_CADENCE_LARGE`] にする(検査 1 回が `O(m + nnz(A_B))` で、m が数十万行では
+    /// 20 反復ごとだと反復本体より重くなるため)。Netlib(`m` ≤ 約 6K)には掛からない。
+    /// `ENOMOTO_T_XB_CHECK_LARGE_M` で上書き可(0 = 無効)。
+    pub(crate) const XB_CHECK_CADENCE_LARGE_M: usize = 10_000;
+
+    /// 策9: 大きな問題でのドリフト検査の反復間隔(`ENOMOTO_T_XB_CHECK_CADENCE_LARGE`)。
+    pub(crate) const XB_CHECK_CADENCE_LARGE: usize = 100;
+
     /// `x_B(M)` のドリフト検査の許容誤差(残差 `‖A_B x_B - rhs‖` の絶対値、基底・傾きの両チャネル)。
     /// 比較が `1e-9` の相対許容誤差で決まるので、古典法の `FT_RESIDUAL_TOL`(1e-4)より十分厳しくする。
     /// 1 回の求解内で、ドリフト起因の再分解が [`XB_DRIFT_ESCALATION_STEP`] 回起きるごとに
@@ -198,6 +207,18 @@ pub(crate) mod slope_intercept_dual {
     /// トリガ (5) が発火するのに必要な最小の FT 更新回数(HiGHS の
     /// `kSyntheticTickReinversionMinUpdateCount` と同じ 50)。更新直後の誤発火を防ぐ。
     pub(crate) const SYNTH_CLOCK_MIN_UPDATES: usize = 50;
+
+    /// 策10(stormG2 報告 §4): 行数 `m` がこれ以上の問題では、合成クロックの係数を
+    /// `SYNTH_CLOCK_FACTOR * sqrt(m / SYNTH_CLOCK_LARGE_REF_M)` に広げる
+    /// (`ENOMOTO_T_SYNTH_CLOCK_LARGE_M`、0 = 無効)。求解の `O(m)` パスを消した後も tick は段ごとに
+    /// 一律 `m` を数えるので再分解間隔は `m` によらずほぼ一定だが、再分解 1 回の手間は `m` に比例し、
+    /// 更新 1 回ごとに増える `R` eta の手間は `m` によらない。両者の釣り合う間隔は `sqrt(m)` に比例する。
+    /// Netlib(`m` ≤ 約 6K)には掛からない。
+    pub(crate) const SYNTH_CLOCK_LARGE_M: usize = 10_000;
+
+    /// 策10: 係数を広げるときの基準行数(`ENOMOTO_T_SYNTH_CLOCK_LARGE_REF_M`)。
+    /// storm 縮小版で m=19K → 係数約 31、m=76K → 約 62 が最良付近だった。
+    pub(crate) const SYNTH_CLOCK_LARGE_REF_M: usize = 5_000;
 
     /// 増分維持している被約費用 `d` のドリフト検査の相対許容誤差: `‖d - fresh_d‖`(固定列を除く)が
     /// `D_DRIFT_TOL * max(‖fresh_d‖, 1)` を超えたら再分解する。
@@ -307,6 +328,22 @@ pub(crate) mod slope_intercept_dual {
 
     /// S11(実験的): chuzr 候補短縮リストの長さ `K`(0 = オフ)。`ENOMOTO_T_CHUZR_SHORTLIST` で上書き可。
     pub(crate) const CHUZR_SHORTLIST_K: usize = 0;
+
+    /// 策7(stormG2 報告 §4): 行数 `m` がこれ以上の問題では、`CHUZR_SHORTLIST_K == 0`(既定)でも
+    /// S11 の短縮リストを長さ `CHUZR_SHORTLIST_AUTO_K` で有効にする(`ENOMOTO_T_CHUZR_SHORTLIST_AUTO_MIN_M`、
+    /// 0 = 無効)。Netlib(`m` ≤ 約 6K)には掛からないので経路は変わらない。
+    pub(crate) const CHUZR_SHORTLIST_AUTO_MIN_M: usize = 10_000;
+
+    /// 策7: 自動で有効にした短縮リストの長さ `K` の下限(`ENOMOTO_T_CHUZR_SHORTLIST_AUTO_K`)。
+    /// 全走査のたびに `K = clamp(プール行数 / CHUZR_SHORTLIST_AUTO_DIV, この値, CHUZR_SHORTLIST_AUTO_K_MAX)`。
+    pub(crate) const CHUZR_SHORTLIST_AUTO_K: usize = 64;
+
+    /// 策7: 自動モードの `K` をプール行数から決めるときの除数(`ENOMOTO_T_CHUZR_SHORTLIST_AUTO_DIV`)。
+    pub(crate) const CHUZR_SHORTLIST_AUTO_DIV: usize = 64;
+
+    /// 策7: 自動モードの `K` の上限(`ENOMOTO_T_CHUZR_SHORTLIST_AUTO_K_MAX`)。リストの走査は毎反復
+    /// `O(K)` なので大きくしすぎない。
+    pub(crate) const CHUZR_SHORTLIST_AUTO_K_MAX: usize = 512;
 
     /// S11: 実行不能行プールが `CHUZR_SHORTLIST_MIN_POOL_FACTOR * K` 行を超えるときだけ短縮リストを使う。
     pub(crate) const CHUZR_SHORTLIST_MIN_POOL_FACTOR: usize = 4;

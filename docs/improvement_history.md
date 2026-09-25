@@ -6755,6 +6755,38 @@ m ≈ 378K 行) は反復数が HiGHS と同等なのに 1 反復 8.8 ms (HiGHS 
 
 - DSE 重みの相対誤差の診断 (`O(m)`) を `ENOMOTO_PROF_PHASES_EXT_WORK` のときだけにした (フェーズ計測の歪み除去)。
 
+### 策7: 大きな問題で chuzr 候補短縮リスト (S11) を自動で有効に (src/simplex/slope_intercept_dual.rs)
+
+- 主実行不能行プールが数万〜十数万行 (stormG2_1000 で m の 35%) になり、毎反復のプール全走査
+  (`Score2::new` + `cmp_lex`、約 8 ns/行) が支配的になっていた。既存の S11 (HiGHS `chooseHyperSparse` 風の
+  短縮リスト、既定オフ) を、`m >= CHUZR_SHORTLIST_AUTO_MIN_M` (10,000) の問題では `K` 未指定でも有効にする。
+  Netlib (m ≤ 約 6K) には掛からないので経路は変わらない。
+- 自動モードの `K` は全走査のたびに `clamp(プール行数 / 64, 64, 512)` で決め直す (storm k=200 で固定 K=32/64/128 は
+  chuzr 47.7 / 29.8 / 14.7 µs/反復、プール比例 (除数 32/64/128) では 11.2 / 9.1 / 10.9 µs/反復)。
+- 全走査の 2 パス目 (上位 `K+1` 行を挿入ソートで集める。`K` が大きいと `O(K)` の挿入が重い) をやめ、最良行を探す
+  1 パス目の中で「最も劣る行を根に持つ二分ヒープ」(`shortlist_heap_offer`) に集める。`cmp_lex` の許容誤差は推移的で
+  ないがヒープは panic しない (集合が近似になるだけ)。明示指定 (`ENOMOTO_T_CHUZR_SHORTLIST=K`) の S11 も同じ実装になる。
+- 経路はビット同一ではない (近い同点の選び方が変わりうる) が、storm k=50/200 で反復数・目的関数値は不変。
+- `ENOMOTO_T_CHUZR_SHORTLIST_AUTO_MIN_M=0` で無効。`_AUTO_K` / `_AUTO_DIV` / `_AUTO_K_MAX` で調整。
+
+### 策9: ドリフト検査の `fill` 省略と大きな問題での間引き (src/simplex/slope_intercept_dual.rs)
+
+- `residual_norm_affine` / `residual_scale_affine` / `residual_norm_slope` の入口の `fill(0.0)` をやめ、残差を集める
+  最後の走査で作業領域を 0 に戻す約束にした (値・順序は同じでビット一致)。
+- `m >= XB_CHECK_CADENCE_LARGE_M` (10,000) の問題ではドリフト検査の間隔を 20 → 100 反復に (`XB_CHECK_CADENCE_LARGE`)。
+  検査 1 回が `O(m + nnz(A_B))` で、storm k=50 では 20 反復ごとの検査だけで総時間の約 15% だった。storm の再分解は
+  合成クロック起因だけでドリフト起因は 0 回。Netlib には掛からない。`ENOMOTO_T_XB_CHECK_LARGE_M=0` で無効。
+
+### 策10: 大きな問題で合成クロックの再分解間隔を `sqrt(m)` に比例して広げる (src/simplex/slope_intercept_dual.rs)
+
+- 求解の `O(m)` パスを消した後も CLOCK tick は段ごとに一律 `m` を数えるので、再分解は m によらず約 436 反復ごと
+  (storm) のまま。再分解 1 回の手間は m に比例し、更新 1 回ごとに増える `R` eta の手間は m によらないので、
+  釣り合う間隔は `sqrt(m)` に比例する。`m >= SYNTH_CLOCK_LARGE_M` (10,000) なら係数を
+  `SYNTH_CLOCK_FACTOR * sqrt(m / 5000)` にする (m=19K で約 31、m=76K で約 62、m=378K で約 139)。
+- 報告の案 (tick を実作業量にする) は Netlib を含む全問題の再分解時期を変えるので、m でゲートできる係数の拡大にした。
+- storm k=200: 係数 16 / 32 / 64 で 20.0 / 17.7 / 16.3 s (再分解 219 / 110 / 56 回)。反復数・目的関数値は不変。
+  `ENOMOTO_T_SYNTH_CLOCK_LARGE_M=0` で無効。
+
 ### 効果 (策1〜6・8)
 
 - Netlib 93 問: 全問でステータス・目的関数値 (ビット)・反復数がベースと一致。

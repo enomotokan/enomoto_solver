@@ -3629,6 +3629,12 @@ impl FtLu {
         }
     }
 
+    /// 行列の次数 `m`。
+    #[inline]
+    pub fn dim(&self) -> usize {
+        self.base.m
+    }
+
     /// 決定的演算量カウンタ ([`Self::tick`]) の現在値。`slope_intercept_dual.rs` の
     /// `CLOCK` 再分解トリガが読む。
     pub fn synth_tick(&self) -> u64 {
