@@ -116,6 +116,7 @@ python -m enomoto_solver.benchmark_highs --max-vars 100000 --out netlib_results.
 | `src/params.rs` | 許容誤差と調整用パラメータ |
 | `docs/improvement_history.md` | 実装の変更とその計測結果の記録 |
 | `benchmarks/netlib_dev_results.csv` | 開発中に行った Netlib の計測結果(1行が1問・1回の計測．`source_file` 列が元の結果ファイル名) |
+| `benchmarks/mittelmann_results.*` | Mittelmann LPopt ベンチマークの HiGHS との比較(2026-09-24，公開 44 問，制限 600 秒．`scripts/run_mittelmann_benchmark.py`，Linux 専用) |
 
 ## 論文
 

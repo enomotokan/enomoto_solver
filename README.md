@@ -116,6 +116,7 @@ Each problem is solved in its own subprocess. The reported times cover the solve
 | `src/params.rs` | Tolerances and tuning parameters |
 | `docs/improvement_history.md` | Record of implementation changes and their measured effects |
 | `benchmarks/netlib_dev_results.csv` | Netlib measurements taken during development (one row per problem and run; `source_file` names the original result file) |
+| `benchmarks/mittelmann_results.*` | Mittelmann LPopt benchmark against HiGHS (2026-09-24, 44 public instances, 600 s limit; `scripts/run_mittelmann_benchmark.py`, Linux only) |
 
 ## Paper
 

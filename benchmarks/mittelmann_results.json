@@ -1,0 +1,702 @@
+{
+ "config": {
+  "generated_at": "2026-09-24 23:13 UTC",
+  "highs_version": "1.15.1",
+  "machine": "4 CPU, 16GB RAM (Linux)",
+  "mem_gb": 11.0,
+  "mem_note": "12GB\u3002\u6700\u5f8c\u306e 3 \u554f (Dual2_5000, L2CTA3D, dlr2) \u306f\u30b3\u30f3\u30c6\u30ca\u518d\u8d77\u52d5\u5f8c\u306e\u518d\u958b\u6642\u306b 11GB",
+  "timeout_s": 600.0
+ },
+ "problems": {
+  "Dual2_5000": {
+   "highs": {
+    "code": "m",
+    "status": "crash rc=1",
+    "stderr": "Traceback (most recent call last):\n  File \"/home/user/enomoto_solver/scripts/run_mittelmann_benchmark.py\", line 512, in <module>\n    main()\n  File \"/home/user/enomoto_solver/scripts/run_mittelmann_benchmark.py\", line 459, in main\n    _worker_highs(args.worker_highs, args.timeout)\n  File \"/home/user/enomoto_solver/scripts/run_mittelmann_benchmark.py\", line 167, in _worker_highs\n    status = h.readModel(mps)\n             ^^^^^^^^^^^^^^^^\nMemoryError: std::bad_alloc\n"
+   },
+   "ours": {
+    "code": "m",
+    "status": "crash rc=1",
+    "stderr": "Traceback (most recent call last):\n  File \"/home/user/enomoto_solver/scripts/run_mittelmann_benchmark.py\", line 512, in <module>\n    main()\n  File \"/home/user/enomoto_solver/scripts/run_mittelmann_benchmark.py\", line 462, in main\n    _worker_ours(args.worker_ours)\n  File \"/home/user/enomoto_solver/scripts/run_mittelmann_benchmark.py\", line 192, in _worker_ours\n    status = h.readModel(mps)\n             ^^^^^^^^^^^^^^^^\nMemoryError: std::bad_alloc\n"
+   }
+  },
+  "L1_sixm1000obs": {
+   "highs": {
+    "code": "t",
+    "ipm_iters": 0,
+    "iters": 19531,
+    "obj": null,
+    "read_time": 26.907286102003127,
+    "status": "kTimeLimit",
+    "time": 600.4258619769971
+   },
+   "ours": {
+    "build_time": 36.76012419900508,
+    "code": "t",
+    "status": "killed"
+   }
+  },
+  "L1_sixm250obs": {
+   "highs": {
+    "code": "t",
+    "ipm_iters": 0,
+    "iters": 28330,
+    "obj": null,
+    "read_time": 7.886964009001531,
+    "status": "kTimeLimit",
+    "time": 600.1374149830008
+   },
+   "ours": {
+    "build_time": 9.593653681000433,
+    "code": "t",
+    "status": "killed"
+   }
+  },
+  "L2CTA3D": {
+   "highs": {
+    "code": "m",
+    "status": "crash rc=1",
+    "stderr": "Traceback (most recent call last):\n  File \"/home/user/enomoto_solver/scripts/run_mittelmann_benchmark.py\", line 512, in <module>\n    main()\n  File \"/home/user/enomoto_solver/scripts/run_mittelmann_benchmark.py\", line 459, in main\n    _worker_highs(args.worker_highs, args.timeout)\n  File \"/home/user/enomoto_solver/scripts/run_mittelmann_benchmark.py\", line 173, in _worker_highs\n    h.run()\nMemoryError: std::bad_alloc\n"
+   },
+   "ours": {
+    "build_time": 81.30969510199793,
+    "code": "t",
+    "status": "killed"
+   }
+  },
+  "Linf_520c": {
+   "highs": {
+    "code": "t",
+    "ipm_iters": 0,
+    "iters": 67678,
+    "obj": null,
+    "read_time": 0.7896334170000046,
+    "status": "kTimeLimit",
+    "time": 600.0339613740007
+   },
+   "ours": {
+    "build_time": 0.7952960790007637,
+    "code": "t",
+    "status": "killed"
+   }
+  },
+  "Primal2_1000": {
+   "highs": {
+    "code": "t",
+    "ipm_iters": 0,
+    "iters": 369010,
+    "obj": null,
+    "read_time": 16.887354608999885,
+    "status": "kTimeLimit",
+    "time": 600.2611808599977
+   },
+   "ours": {
+    "build_time": 15.538418739997724,
+    "code": "t",
+    "status": "killed"
+   }
+  },
+  "a2864": {
+   "highs": {
+    "code": "t",
+    "ipm_iters": 0,
+    "iters": 35035,
+    "obj": null,
+    "read_time": 22.48465076600405,
+    "status": "kTimeLimit",
+    "time": 611.8076588230033
+   },
+   "ours": {
+    "build_time": 36.84867697599839,
+    "code": "t",
+    "status": "killed"
+   }
+  },
+  "bdry2": {
+   "highs": {
+    "code": "t",
+    "ipm_iters": 0,
+    "iters": 55374,
+    "obj": null,
+    "read_time": 2.951332699998602,
+    "status": "kTimeLimit",
+    "time": 600.0979554899968
+   },
+   "ours": {
+    "build_time": 1.8702161719993455,
+    "code": "t",
+    "status": "killed"
+   }
+  },
+  "cont1": {
+   "highs": {
+    "code": "ok",
+    "ipm_iters": 0,
+    "iters": 80927,
+    "obj": 0.00878248600370569,
+    "read_time": 0.8091010119997009,
+    "status": "kOptimal",
+    "time": 304.1832437640005
+   },
+   "ours": {
+    "build_time": 0.7348499580002681,
+    "code": "t",
+    "status": "killed"
+   }
+  },
+  "cont11": {
+   "highs": {
+    "code": "t",
+    "ipm_iters": 0,
+    "iters": 117286,
+    "obj": null,
+    "read_time": 0.9340270570000939,
+    "status": "kTimeLimit",
+    "time": 607.7935029150003
+   },
+   "ours": {
+    "build_time": 0.8113074000002598,
+    "code": "t",
+    "status": "killed"
+   }
+  },
+  "datt256": {
+   "highs": {
+    "code": "t",
+    "ipm_iters": 0,
+    "iters": 127322,
+    "obj": null,
+    "read_time": 2.7096024549973663,
+    "status": "kTimeLimit",
+    "time": 600.0263577009973
+   },
+   "ours": {
+    "build_time": 2.0713051489983627,
+    "code": "t",
+    "status": "killed"
+   }
+  },
+  "dlr1": {
+   "highs": {
+    "code": "t",
+    "ipm_iters": 0,
+    "iters": 67886,
+    "obj": null,
+    "read_time": 44.014833080000244,
+    "status": "kTimeLimit",
+    "time": 600.209978576997
+   },
+   "ours": {
+    "build_time": 51.833002790001046,
+    "code": "t",
+    "status": "killed"
+   }
+  },
+  "dlr2": {
+   "highs": {
+    "code": "m",
+    "ipm_iters": -1,
+    "iters": -1,
+    "obj": null,
+    "read_time": 233.51675941400026,
+    "status": "kMemoryLimit",
+    "time": 15.67174354299641
+   },
+   "ours": {
+    "code": "m",
+    "status": "crash rc=1",
+    "stderr": "solver/scripts/run_mittelmann_benchmark.py\", line 197, in _worker_ours\n    model = _build_our_model(h.getLp())\n            ^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/user/enomoto_solver/scripts/run_mittelmann_benchmark.py\", line 216, in _build_our_model\n    col_lower, col_upper = list(lp.col_lower_), list(lp.col_upper_)\n                                ^^^^^^^^^^^^^\nTypeError: Unable to convert function return value to a Python type! The signature was\n\t(self: highspy._core.HighsLp) -> list[float]\n"
+   }
+  },
+  "ex10": {
+   "highs": {
+    "code": "ok",
+    "ipm_iters": 0,
+    "iters": 25974,
+    "obj": 100.00000000000013,
+    "read_time": 1.8399713180006074,
+    "status": "kOptimal",
+    "time": 130.03906893899875
+   },
+   "ours": {
+    "build_time": 1.8228116880000016,
+    "code": "t",
+    "status": "killed"
+   }
+  },
+  "fhnw-binschedule1": {
+   "highs": {
+    "code": "t",
+    "ipm_iters": 0,
+    "iters": 22568,
+    "obj": null,
+    "read_time": 18.254077953002707,
+    "status": "kTimeLimit",
+    "time": 600.333686294005
+   },
+   "ours": {
+    "build_time": 17.48336083299364,
+    "code": "t",
+    "status": "killed"
+   }
+  },
+  "fome13": {
+   "highs": {
+    "code": "ok",
+    "ipm_iters": 0,
+    "iters": 137029,
+    "obj": 90131168.3733714,
+    "read_time": 0.42749261900007696,
+    "status": "kOptimal",
+    "time": 105.37170617899983
+   },
+   "ours": {
+    "build_time": 0.5195349119999264,
+    "code": "ok",
+    "obj": 90131168.37337139,
+    "status": "optimal",
+    "time": 405.63345180600027
+   }
+  },
+  "graph40-40": {
+   "highs": {
+    "code": "t",
+    "ipm_iters": 0,
+    "iters": 39167,
+    "obj": null,
+    "read_time": 3.5160398879997956,
+    "status": "kTimeLimit",
+    "time": 600.0479684689999
+   },
+   "ours": {
+    "build_time": 2.534821416998966,
+    "code": "t",
+    "status": "killed"
+   }
+  },
+  "irish-electricity": {
+   "highs": {
+    "code": "ok",
+    "ipm_iters": 0,
+    "iters": 86602,
+    "obj": 2546254.563314395,
+    "read_time": 1.118710705999547,
+    "status": "kOptimal",
+    "time": 213.76596682000036
+   },
+   "ours": {
+    "build_time": 0.8642079880000892,
+    "code": "t",
+    "status": "killed"
+   }
+  },
+  "neos": {
+   "highs": {
+    "code": "ok",
+    "ipm_iters": 0,
+    "iters": 105344,
+    "obj": 225425492.20475438,
+    "read_time": 2.2184690770009183,
+    "status": "kOptimal",
+    "time": 520.1945970289999
+   },
+   "ours": {
+    "build_time": 2.359814802000983,
+    "code": "t",
+    "status": "killed"
+   }
+  },
+  "neos-3025225": {
+   "highs": {
+    "code": "t",
+    "ipm_iters": 0,
+    "iters": 57494,
+    "obj": null,
+    "read_time": 9.616710187001445,
+    "status": "kTimeLimit",
+    "time": 600.4469101709983
+   },
+   "ours": {
+    "build_time": 12.254384658997878,
+    "code": "t",
+    "status": "killed"
+   }
+  },
+  "neos-5052403-cygnet": {
+   "highs": {
+    "code": "t",
+    "ipm_iters": 0,
+    "iters": 356518,
+    "obj": null,
+    "read_time": 4.391713612996682,
+    "status": "kTimeLimit",
+    "time": 600.0191698649978
+   },
+   "ours": {
+    "build_time": 4.68666544000007,
+    "code": "t",
+    "status": "killed"
+   }
+  },
+  "neos-5251015": {
+   "highs": {
+    "code": "t",
+    "ipm_iters": 0,
+    "iters": 42852,
+    "obj": null,
+    "read_time": 4.146793887997774,
+    "status": "kTimeLimit",
+    "time": 600.089479995997
+   },
+   "ours": {
+    "build_time": 3.1731971709996287,
+    "code": "t",
+    "status": "killed"
+   }
+  },
+  "neos3": {
+   "highs": {
+    "code": "t",
+    "ipm_iters": 0,
+    "iters": 18771,
+    "obj": null,
+    "read_time": 2.3729020549981215,
+    "status": "kTimeLimit",
+    "time": 600.0986292509988
+   },
+   "ours": {
+    "build_time": 2.8249590070008708,
+    "code": "t",
+    "status": "killed"
+   }
+  },
+  "ns1687037": {
+   "highs": {
+    "code": "t",
+    "ipm_iters": 0,
+    "iters": 44227,
+    "obj": null,
+    "read_time": 1.587628887999017,
+    "status": "kTimeLimit",
+    "time": 600.4119033529987
+   },
+   "ours": {
+    "build_time": 1.810498118000396,
+    "code": "t",
+    "status": "killed"
+   }
+  },
+  "ns1688926": {
+   "highs": {
+    "code": "t",
+    "ipm_iters": 0,
+    "iters": 390890,
+    "obj": null,
+    "read_time": 1.5945121930017194,
+    "status": "kTimeLimit",
+    "time": 600.011352507001
+   },
+   "ours": {
+    "build_time": 1.6480446440000378,
+    "code": "t",
+    "status": "killed"
+   }
+  },
+  "nug08-3rd": {
+   "highs": {
+    "code": "ok",
+    "ipm_iters": 0,
+    "iters": 33719,
+    "obj": 214.00000000037113,
+    "read_time": 0.16283065800007535,
+    "status": "kOptimal",
+    "time": 352.2958487279998
+   },
+   "ours": {
+    "build_time": 0.19420473299987862,
+    "code": "t",
+    "status": "killed"
+   }
+  },
+  "pds-100": {
+   "highs": {
+    "code": "ok",
+    "ipm_iters": 0,
+    "iters": 284637,
+    "obj": 10928229968.0,
+    "read_time": 2.561744163000185,
+    "status": "kOptimal",
+    "time": 116.10784827600037
+   },
+   "ours": {
+    "build_time": 2.260220948001006,
+    "code": "t",
+    "status": "killed"
+   }
+  },
+  "physiciansched3-3": {
+   "highs": {
+    "code": "t",
+    "ipm_iters": 0,
+    "iters": 150992,
+    "obj": null,
+    "read_time": 2.1100372389992117,
+    "status": "kTimeLimit",
+    "time": 600.0173610479997
+   },
+   "ours": {
+    "build_time": 1.7565103320011985,
+    "code": "t",
+    "status": "killed"
+   }
+  },
+  "qap15": {
+   "highs": {
+    "code": "t",
+    "ipm_iters": 0,
+    "iters": 250023,
+    "obj": null,
+    "read_time": 0.1251999399999022,
+    "status": "kTimeLimit",
+    "time": 600.0070780829999
+   },
+   "ours": {
+    "build_time": 0.1476592089998121,
+    "code": "t",
+    "status": "killed"
+   }
+  },
+  "rail4284": {
+   "highs": {
+    "code": "t",
+    "ipm_iters": 0,
+    "iters": 15888,
+    "obj": null,
+    "read_time": 10.304626252996968,
+    "status": "kTimeLimit",
+    "time": 600.167986927001
+   },
+   "ours": {
+    "build_time": 21.471413400999154,
+    "code": "t",
+    "status": "killed"
+   }
+  },
+  "rmine15": {
+   "highs": {
+    "code": "t",
+    "ipm_iters": 0,
+    "iters": 76153,
+    "obj": null,
+    "read_time": 2.4545179209999333,
+    "status": "kTimeLimit",
+    "time": 600.0835805379993
+   },
+   "ours": {
+    "build_time": 1.8542142210008024,
+    "code": "t",
+    "status": "killed"
+   }
+  },
+  "s100": {
+   "highs": {
+    "code": "t",
+    "ipm_iters": 0,
+    "iters": 152103,
+    "obj": null,
+    "read_time": 4.097149237000849,
+    "status": "kTimeLimit",
+    "time": 600.0414822029998
+   },
+   "ours": {
+    "build_time": 2.4752779539994663,
+    "code": "t",
+    "status": "killed"
+   }
+  },
+  "s250r10": {
+   "highs": {
+    "code": "ok",
+    "ipm_iters": 0,
+    "iters": 177198,
+    "obj": -0.17267704190548075,
+    "read_time": 3.0071429179988627,
+    "status": "kOptimal",
+    "time": 147.298183349998
+   },
+   "ours": {
+    "build_time": 2.023875005001173,
+    "code": "t",
+    "status": "killed"
+   }
+  },
+  "s82": {
+   "highs": {
+    "code": "t",
+    "ipm_iters": 0,
+    "iters": 70529,
+    "obj": null,
+    "read_time": 18.367991820996394,
+    "status": "kTimeLimit",
+    "time": 600.2920685900026
+   },
+   "ours": {
+    "build_time": 15.668222193002293,
+    "code": "t",
+    "status": "killed"
+   }
+  },
+  "savsched1": {
+   "highs": {
+    "code": "t",
+    "ipm_iters": 0,
+    "iters": 133704,
+    "obj": null,
+    "read_time": 3.5641862929987838,
+    "status": "kTimeLimit",
+    "time": 600.0765508889999
+   },
+   "ours": {
+    "build_time": 2.4820930259993474,
+    "code": "t",
+    "status": "killed"
+   }
+  },
+  "scpm1": {
+   "highs": {
+    "code": "t",
+    "ipm_iters": 0,
+    "iters": 18363,
+    "obj": null,
+    "read_time": 8.921930971999245,
+    "status": "kTimeLimit",
+    "time": 600.1240043610014
+   },
+   "ours": {
+    "build_time": 11.043011483001465,
+    "code": "t",
+    "status": "killed"
+   }
+  },
+  "set-cover-model": {
+   "highs": {
+    "code": "t",
+    "ipm_iters": 0,
+    "iters": 14960,
+    "obj": null,
+    "read_time": 26.12849075900158,
+    "status": "kTimeLimit",
+    "time": 600.3840110659949
+   },
+   "ours": {
+    "build_time": 56.40141562400095,
+    "code": "t",
+    "status": "killed"
+   }
+  },
+  "square41": {
+   "highs": {
+    "code": "ok",
+    "ipm_iters": 0,
+    "iters": 10227,
+    "obj": 8.839612486545837,
+    "read_time": 13.765155442000832,
+    "status": "kOptimal",
+    "time": 103.5612304899987
+   },
+   "ours": {
+    "build_time": 22.560704445997544,
+    "code": "t",
+    "status": "killed"
+   }
+  },
+  "stormG2_1000": {
+   "highs": {
+    "code": "ok",
+    "ipm_iters": 0,
+    "iters": 522245,
+    "obj": 15802591.12088125,
+    "read_time": 6.185835234999104,
+    "status": "kOptimal",
+    "time": 94.44232240700148
+   },
+   "ours": {
+    "build_time": 8.070405621998361,
+    "code": "t",
+    "status": "killed"
+   }
+  },
+  "supportcase10": {
+   "highs": {
+    "code": "ok",
+    "ipm_iters": 0,
+    "iters": 104360,
+    "obj": 3.383923666138003,
+    "read_time": 1.070967458999803,
+    "status": "kOptimal",
+    "time": 251.43023184899994
+   },
+   "ours": {
+    "build_time": 0.9331067539997093,
+    "code": "t",
+    "status": "killed"
+   }
+  },
+  "thk_48": {
+   "highs": {
+    "code": "m",
+    "status": "crash rc=1",
+    "stderr": "Traceback (most recent call last):\n  File \"/home/user/enomoto_solver/scripts/run_mittelmann_benchmark.py\", line 512, in <module>\n    main()\n  File \"/home/user/enomoto_solver/scripts/run_mittelmann_benchmark.py\", line 459, in main\n    _worker_highs(args.worker_highs, args.timeout)\n  File \"/home/user/enomoto_solver/scripts/run_mittelmann_benchmark.py\", line 173, in _worker_highs\n    h.run()\nMemoryError: std::bad_alloc\n"
+   },
+   "ours": {
+    "code": "m",
+    "status": "crash rc=-6",
+    "stderr": "ject_Vectorcall\n  13: _PyEval_EvalFrameDefault\n  14: <unknown>\n  15: PyEval_EvalCode\n  16: <unknown>\n  17: <unknown>\n  18: <unknown>\n  19: _PyRun_SimpleFileObject\n  20: _PyRun_AnyFileObject\n  21: Py_RunMain\n  22: Py_BytesMain\n  23: __libc_start_call_main\n             at ./csu/../sysdeps/nptl/libc_start_call_main.h:58:16\n  24: __libc_start_main_impl\n             at ./csu/../csu/libc-start.c:360:3\n  25: _start\nnote: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.\n"
+   }
+  },
+  "thk_63": {
+   "highs": {
+    "code": "m",
+    "status": "crash rc=1",
+    "stderr": "Traceback (most recent call last):\n  File \"/home/user/enomoto_solver/scripts/run_mittelmann_benchmark.py\", line 512, in <module>\n    main()\n  File \"/home/user/enomoto_solver/scripts/run_mittelmann_benchmark.py\", line 459, in main\n    _worker_highs(args.worker_highs, args.timeout)\n  File \"/home/user/enomoto_solver/scripts/run_mittelmann_benchmark.py\", line 173, in _worker_highs\n    h.run()\nMemoryError: std::bad_alloc\n"
+   },
+   "ours": {
+    "code": "m",
+    "status": "crash rc=-6",
+    "stderr": "memory allocation of 43586680 bytes failed\nstack backtrace:\nnote: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.\n"
+   }
+  },
+  "tpl-tub-ws1617": {
+   "highs": {
+    "code": "t",
+    "ipm_iters": 0,
+    "iters": 47670,
+    "obj": null,
+    "read_time": 28.235498268997617,
+    "status": "kTimeLimit",
+    "time": 600.1751506910005
+   },
+   "ours": {
+    "build_time": 17.99561389399969,
+    "code": "t",
+    "status": "killed"
+   }
+  },
+  "woodlands09": {
+   "highs": {
+    "code": "t",
+    "ipm_iters": 0,
+    "iters": 55758,
+    "obj": null,
+    "read_time": 4.046756843999901,
+    "status": "kTimeLimit",
+    "time": 600.0357192680021
+   },
+   "ours": {
+    "build_time": 3.000499244997627,
+    "code": "t",
+    "status": "killed"
+   }
+  }
+ }
+}
