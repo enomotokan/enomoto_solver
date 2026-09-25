@@ -6834,6 +6834,14 @@ m ≈ 378K 行) は反復数が HiGHS と同等なのに 1 反復 8.8 ms (HiGHS 
   `R_SPARSE_MIN_ETAS` (256) 個以上あるときだけ使う (少ないうちは全部順に当てる方が速い。常時使うと Netlib sctap1 で +5%)。
 - storm k=200: FTRAN 17 → 11 µs/反復、総時間 8.5 → 7.2 s。Netlib 93 問はビット一致。
 
+### BFRT 合成フリップ列の疎 FTRAN にも超疎 `U` 段・疎な `R` 段 (src/simplex/lu.rs `FtLu::solve_sparse_into`)
+
+- BFRT のフリップ列 (`combined_base`/`combined_slope`) の疎 FTRAN は `U` 段を全 eta 走査し、出力を全体置換して
+  スクラッチを全体 `fill` していた (1 回 `O(m)` × 3)。本体ではフリップのある反復は 1% 強だが 1 回 1 ms 近く、
+  BFRT 段が平均 9.7 µs/反復あった。入る列と同じく、結果密度の移動平均 (`density_bfrt`) が
+  `FTRAN_U_HYPER_DENSITY` 未満なら超疎 `U` 段 (`gp.u_hyper`) と疎な `R` 段 (策13) を使う。値・tick はビット一致
+  (単体テストで確認)。storm k=200 で BFRT 段 0.7 µs/反復。
+
 ### 効果 (策1〜6・8)
 
 - Netlib 93 問: 全問でステータス・目的関数値 (ビット)・反復数がベースと一致。

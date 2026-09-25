@@ -3347,6 +3347,9 @@ fn solve_slope_intercept_dual_with(std: &StdForm, opts: &crate::types::LpOptions
                     sparse_base_buf.clear();
                     sparse_slope_buf.clear();
                     sparse_base_buf.extend(combined_touched.iter().map(|&i| (i, combined_base[i])));
+                    // 結果密度が低ければ `U` 段を超疎で解く(入る列の FTRAN と同じ `FTRAN_U_HYPER_DENSITY`、ビット同一)。
+                    let u_hyper_gate = tunable!("ENOMOTO_FTRAN_U_HYPER", FTRAN_U_HYPER_DENSITY, f64);
+                    gp_scratch.u_hyper = u_hyper_gate > 0.0 && density_bfrt.expected() < u_hyper_gate;
                     let base_nnz = lu.solve_sparse_into(&sparse_base_buf, &mut sparse_scratch, &mut gp_scratch, &mut combined_alpha_base);
                     let slope_nnz = if slope_nonzero {
                         sparse_slope_buf.extend(combined_touched.iter().map(|&i| (i, combined_slope[i])));
@@ -3355,6 +3358,7 @@ fn solve_slope_intercept_dual_with(std: &StdForm, opts: &crate::types::LpOptions
                         lu.add_zero_rhs_solve_ticks(true);
                         0
                     };
+                    gp_scratch.u_hyper = false;
                     density_bfrt.record(base_nnz, m);
                     density_bfrt.record(slope_nnz, m);
                     combined_nnz = base_nnz + slope_nnz;

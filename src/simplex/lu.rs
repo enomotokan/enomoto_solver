@@ -3499,6 +3499,8 @@ pub struct FtLu {
     r_dense: Vec<u32>,
     /// 全 `R` eta の非ゼロ数の和 (tick 用)。
     r_nnz_total: usize,
+    /// 疎な `R` 段を使う `R` eta 数の下限 ([`R_SPARSE_MIN_ETAS`]、[`Self::new`] で 1 回だけ読む)。
+    r_sparse_min: usize,
     /// [`Self::try_update`] の再利用スクラッチ (`a_tilde` 用、長さ `m`、
     /// 返却前に必ず長さ `m` に戻す)。ピボットごとのヒープ確保を避ける。
     scratch_a_tilde: Vec<f64>,
@@ -3645,6 +3647,7 @@ impl FtLu {
             r_owner: Vec::new(),
             r_dense: Vec::new(),
             r_nnz_total: 0,
+            r_sparse_min: tunable!("ENOMOTO_T_R_SPARSE_MIN_ETAS", R_SPARSE_MIN_ETAS, usize),
             scratch_a_tilde: vec![0.0; m],
             scratch_e_tilde: vec![0.0; m],
             fill,
@@ -4321,6 +4324,8 @@ impl FtLu {
     /// 内積が 0 でなかった eta の行を `r_seeds` に積む。tick は呼び出し側が全 eta 分を加える。
     /// 選んだ eta が全体の半分を超えたら、残りは全 eta を順に当てる。
     fn apply_r_sparse(&self, x: &mut [f64], seeds: &[usize], r_seeds: &mut Vec<usize>, work: &mut RSparseWork) {
+        #[cfg(test)]
+        tests::R_SPARSE_CALLS.with(|c| c.set(c.get() + 1));
         let n_r = self.r_etas.n_headers();
         r_seeds.clear();
         if n_r == 0 {
@@ -4550,7 +4555,7 @@ impl FtLu {
         mut track: Option<&mut FtranTrack>,
     ) -> (usize, usize, bool) {
         let m = self.base.m as u64;
-        if let (true, Some(ga), Some(gb)) = (self.r_etas.n_headers() >= tunable!("ENOMOTO_T_R_SPARSE_MIN_ETAS", R_SPARSE_MIN_ETAS, usize), gp_a.as_deref_mut(), gp_b.as_deref_mut()) {
+        if let (true, Some(ga), Some(gb)) = (self.r_etas.n_headers() >= self.r_sparse_min, gp_a.as_deref_mut(), gp_b.as_deref_mut()) {
             // 両ベクトルとも `L` 段が Gilbert-Peierls (非ゼロ位置が分かっている): 策13 の疎な `R` 段。
             self.add_tick(2 * self.r_nnz_total as u64);
             let GpScratch { reach, r_seeds, r_work, .. } = ga;
@@ -4692,12 +4697,39 @@ impl FtLu {
         self.base.l_solve_sparse_into(rhs_sparse, scratch, gp);
         // CLOCK トリガ用: 疎 `L` 段のコストは到達集合のサイズ。
         self.add_tick(gp.reach.len() as u64);
-        for reta in self.r_etas.iter() {
-            let dot = self.r_etas.dot(reta.k, scratch);
-            self.add_tick(self.r_etas.nnz(reta.k) as u64);
-            scratch[reta.slot] -= dot;
+        if self.u_hyper_ok(gp) && self.r_etas.n_headers() >= self.r_sparse_min {
+            // 疎な `R` 段 (策13、tick は全 eta 分を一括で)。
+            self.add_tick(self.r_nnz_total as u64);
+            let GpScratch { reach, r_seeds, r_work, .. } = &mut *gp;
+            self.apply_r_sparse(scratch, reach, r_seeds, r_work);
+        } else {
+            gp.r_seeds.clear();
+            for reta in self.r_etas.iter() {
+                let dot = self.r_etas.dot(reta.k, scratch);
+                self.add_tick(self.r_etas.nnz(reta.k) as u64);
+                scratch[reta.slot] -= dot;
+                if dot != 0.0 {
+                    gp.r_seeds.push(reta.slot);
+                }
+            }
         }
-        // `U` は通常の `u_solve_into` 走査のまま。
+        if self.u_hyper_ok(gp) {
+            // `gp.u_hyper` の要求があれば `U` 段を超疎に試みる (BFRT の合成フリップ列など。値・tick はビット一致)。
+            self.add_tick(self.base.m as u64);
+            match self.u_solve_hyper(scratch, gp) {
+                UHyper::Hyper => {
+                    let nnz = self.permute_list(scratch, out, &gp.u_list);
+                    clear_after_hyper(scratch, true, gp);
+                    return nnz;
+                }
+                UHyper::Full => {
+                    let nnz = self.permute_out(scratch, out);
+                    scratch.fill(0.0);
+                    return nnz;
+                }
+                UHyper::NotTried => self.tick.set(self.tick.get() - self.base.m as u64),
+            }
+        }
         self.u_solve_into(scratch);
         let nnz = self.permute_out(scratch, out);
         scratch.fill(0.0);
@@ -5415,6 +5447,10 @@ impl FtLu {
 
 #[cfg(test)]
 mod tests {
+    thread_local! {
+        /// このスレッドで [`super::FtLu::apply_r_sparse`] が呼ばれた回数 (テストが経路を通ったかの確認用)。
+        pub(super) static R_SPARSE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
 
     /// 解析専用の再生ベンチマーク (`#[ignore]`):
     /// `ENOMOTO_LU_BENCH_FILE=<lu_dump.bin> cargo test --release lu_kernel_bench -- --ignored --nocapture`。
@@ -6517,7 +6553,10 @@ mod tests {
                         .collect()
                 };
                 let mut st = FtLu::new(factorize(m, &rows).unwrap());
+                // 疎な `R` 段 (策13) を少ない `R` eta でも通す (参照側 `sr` は常に全 eta を順に当てる)。
+                st.r_sparse_min = 0;
                 let mut sr = st.clone();
+                sr.r_sparse_min = usize::MAX;
                 let mut work = UnitBtranWork::new(m);
                 let mut cap = StepCapture::new(m);
                 let mut gp = GpScratch::new(m);
@@ -6593,14 +6632,32 @@ mod tests {
                         n_sparse_out += 1;
                     }
                     n_sparse_btran += work.nonzero_rows().is_some() as usize;
+                    // 単独の疎 FTRAN (BFRT の合成フリップ列の経路): 超疎 `U` 段・疎な `R` 段ありとなしで
+                    // 値・非ゼロ数・tick が一致する。
+                    {
+                        let (mut z1, mut z2, mut o1, mut o2) = (vec![0.0; m], vec![0.0; m], vec![0.0; m], vec![0.0; m]);
+                        let (mut g1, mut g2) = (GpScratch::new(m), GpScratch::new(m));
+                        g2.u_hyper = true;
+                        let t1 = sr.synth_tick();
+                        let n1 = sr.solve_sparse_into(&a_sp, &mut z1, &mut g1, &mut o1);
+                        let c1 = sr.synth_tick() - t1;
+                        let t2 = st.synth_tick();
+                        let n2 = st.solve_sparse_into(&a_sp, &mut z2, &mut g2, &mut o2);
+                        assert_eq!(st.synth_tick() - t2, c1, "m={m} seed={seed} it={it}: solve_sparse_into tick");
+                        assert_eq!(n1, n2);
+                        assert!(o1.iter().zip(&o2).all(|(x, y)| x.to_bits() == y.to_bits()), "m={m} seed={seed} it={it}: solve_sparse_into");
+                        assert!(z2.iter().all(|&v| v == 0.0));
+                    }
                     let slot = st.base.col_perm[st.base.row_perm_inv[r].min(m - 1)];
                     let ok_r = sr.try_update_precomputed(slot, &rat, &re, 1e-9);
                     let ok_t = st.try_update_tracked(slot, &a_t, &mut track, &e_t, &mut work, 1e-9);
                     assert_eq!(ok_r, ok_t);
-                    if !ok_r || st.update_count() > 60 {
+                    if !ok_r || st.update_count() > 3 * m / 2 {
                         let rows2 = rows.clone();
                         st = FtLu::new(factorize(m, &rows2).unwrap());
+                        st.r_sparse_min = 0;
                         sr = st.clone();
+                        sr.r_sparse_min = usize::MAX;
                     }
                     assert_eq!(st.fill_count(), sr.fill_count());
                 }
@@ -6608,6 +6665,7 @@ mod tests {
             }
         }
         assert!(n_partial > 0, "partial tau never exercised");
+        assert!(R_SPARSE_CALLS.with(|c| c.get()) > 0, "sparse R stage never exercised");
     }
 
     /// `solve_into_pair_capture` / `solve_sparse_into_pair_capture` が、融合元の個別求解と
