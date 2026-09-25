@@ -239,10 +239,20 @@ pub(crate) mod slope_intercept_dual {
     /// pds-100 は約 0.09、stormG2_1000 はさらに小さい。策10 自体が `m >= SYNTH_CLOCK_LARGE_M` だけなので Netlib 不変。
     pub(crate) const SYNTH_CLOCK_DENSE_FRACTION: f64 = 0.3;
 
+    /// pds-100 報告の策5(b): DSE `tau` の FTRAN 結果の非ゼロ率 (移動平均) がこれ以上 (かつ上の密の条件に
+    /// 当たらない) なら、策10 の基準行数を `SYNTH_CLOCK_MID_REF_MULT` 倍にして `sqrt(m)` 倍を小さくする
+    /// (`ENOMOTO_T_SYNTH_CLOCK_MID_TAU_FRACTION`、0 = 無効)。pds-100 は約 0.01〜0.05、stormG2_1000 は約 2e-5。
+    pub(crate) const SYNTH_CLOCK_MID_TAU_FRACTION: f64 = 0.002;
+
+    /// 中程度の密度のときの基準行数の倍率 (`ENOMOTO_T_SYNTH_CLOCK_MID_REF_MULT`)。pds-100 で基準行数
+    /// 2,000 / 8,000 / 32,000 (係数 106 / 53 / 26) は 179〜206 / 136 / 150 s。
+    pub(crate) const SYNTH_CLOCK_MID_REF_MULT: f64 = 4.0;
+
     /// 策8 (pds-100 / s250r10 報告): chuzc1 で候補全体をヒープ化する代わりに、`(ratio, j)` 順の
     /// 小さい方からこの個数を 1 パスで選んで並べ、先に BFRT の歩進を行う (`BIG` のみ、0 = 全体ヒープ)。
-    /// `ENOMOTO_T_CHUZC1_TOPK` で上書き可。
-    pub(crate) const CHUZC1_TOPK: usize = 32;
+    /// 止まらなければ次の組を 4 倍の個数で選ぶ。s250r10 の最初の 2 万反復で 16 / 32 / 64 / 128 / 256 / 512 は
+    /// 661〜694 / 652〜668 / 633 / 605〜633 / 612 / 636 µs/反復。`ENOMOTO_T_CHUZC1_TOPK` で上書き可。
+    pub(crate) const CHUZC1_TOPK: usize = 128;
 
     /// square41 報告の策3: 前反復の PRICE 要素数が `n_total` のこの倍を超えたら PRICE を密結果モード
     /// (初到達の判定をせず加算だけ行い、触れた列の一覧は後で `a_p` を全走査して作る) にする

@@ -58,7 +58,7 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::sync::OnceLock;
 use crate::params::simplex::{FT_BUMP_LIMIT_FACTOR, FT_CHECK_INTERVAL, FT_MIN_PIVOT, FT_RESIDUAL_TOL, HARRIS_RATIO_TOL, MAX_ITERS_FLOOR, PRIMAL_FEAS_TOL, RESIDUAL_CHECK_MULTIPLIER, STALL_PROGRESS_EPS, STEEPEST_EDGE_FLOOR, TOL};
-use crate::params::slope_intercept_dual::{CHUZC1_TOPK, PREFETCH_DIST, PREFETCH_MIN_COLS, PRICE_DENSE_RESULT_RATIO, SYNTH_CLOCK_DENSE_FRACTION, D_DRIFT_TOL, FT_BUMP_LU_RATIO, PLATEAU_OBJ_REL, D_GROSS_MISMATCH_REL_TOL, FT_MAX_UPDATES_FACTOR, FT_MAX_UPDATES_FLOOR, PARTIAL_TAU_MIN_M, PIVOT_ESCALATION_STEP, SLOPE_TOL, STUCK_ROW_MIN_PIVOT, SYNTH_CLOCK_FACTOR, SYNTH_CLOCK_LARGE_M, SYNTH_CLOCK_LARGE_REF_M, SYNTH_CLOCK_MIN_UPDATES, XB_CHECK_CADENCE, XB_CHECK_CADENCE_LARGE, XB_CHECK_CADENCE_LARGE_DIV, XB_CHECK_CADENCE_LARGE_M, XB_CHECK_INTERVAL, XB_DRIFT_ESCALATION_FACTOR, XB_DRIFT_ESCALATION_STEP, XB_DRIFT_REL_TOL, XB_DRIFT_TOL, XB_DRIFT_TOL_MAX, X_B_SLOPE_NOISE, Z_SLOPE_TOL};
+use crate::params::slope_intercept_dual::{CHUZC1_TOPK, SYNTH_CLOCK_MID_REF_MULT, SYNTH_CLOCK_MID_TAU_FRACTION, PREFETCH_DIST, PREFETCH_MIN_COLS, PRICE_DENSE_RESULT_RATIO, SYNTH_CLOCK_DENSE_FRACTION, D_DRIFT_TOL, FT_BUMP_LU_RATIO, PLATEAU_OBJ_REL, D_GROSS_MISMATCH_REL_TOL, FT_MAX_UPDATES_FACTOR, FT_MAX_UPDATES_FLOOR, PARTIAL_TAU_MIN_M, PIVOT_ESCALATION_STEP, SLOPE_TOL, STUCK_ROW_MIN_PIVOT, SYNTH_CLOCK_FACTOR, SYNTH_CLOCK_LARGE_M, SYNTH_CLOCK_LARGE_REF_M, SYNTH_CLOCK_MIN_UPDATES, XB_CHECK_CADENCE, XB_CHECK_CADENCE_LARGE, XB_CHECK_CADENCE_LARGE_DIV, XB_CHECK_CADENCE_LARGE_M, XB_CHECK_INTERVAL, XB_DRIFT_ESCALATION_FACTOR, XB_DRIFT_ESCALATION_STEP, XB_DRIFT_REL_TOL, XB_DRIFT_TOL, XB_DRIFT_TOL_MAX, X_B_SLOPE_NOISE, Z_SLOPE_TOL};
 use crate::params::slope_intercept_dual::{
     CHUZR_SHORTLIST_AUTO_DIV, CHUZR_SHORTLIST_AUTO_K, CHUZR_SHORTLIST_AUTO_K_MAX, CHUZR_SHORTLIST_AUTO_MIN_M, CHUZR_SHORTLIST_K, CHUZR_SHORTLIST_MAX_LEN_FACTOR, CHUZR_SHORTLIST_MAX_LEN_SLACK, CHUZR_SHORTLIST_MIN_POOL_FACTOR, COMPACT_ROWS_BLOCK, FTRAN_U_HYPER_DENSITY, FTRAN_U_HYPER_TAU_DENSITY,
     GREATEST_IMPROVEMENT_STALL_DIVISOR, GREATEST_IMPROVEMENT_STALL_MIN, GREATEST_IMPROVEMENT_TOP_K, GROSS_MISMATCH_SCALE_FLOOR, INFEASIBLE_PLATEAU_BUDGET_DIVISOR, INFEASIBLE_PLATEAU_STALL_MULT,
@@ -441,15 +441,31 @@ fn synth_clock_factor() -> f64 {
 /// [`polish_with_true_bounds`] で共有する(毎ピボット呼べるほど安価)。
 #[inline]
 fn synth_clock_should_refactor(lu: &sparse_lu::FtLu) -> bool {
-    synth_clock_should_refactor_dense(lu, false)
+    synth_clock_should_refactor_density(lu, SynthDensity::Sparse)
 }
 
-/// [`synth_clock_should_refactor`] に、求解結果が密か (`dense`) を加えたもの。square41 / ex10 報告の策11:
-/// 策10 の `sqrt(m)` 倍は「求解の `O(m)` パスを消したので実際の求解の手間は `m` によらない」ことが前提で、
-/// 入る列の FTRAN 結果が密な問題 (ex10: `alpha` の 80% が非ゼロ) では求解の手間も `m` に比例するので掛けない。
+/// 合成クロックの係数を選ぶための求解結果の密度の区分 (square41 / ex10 報告の策11 と pds-100 報告の策5(b))。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SynthDensity {
+    /// 求解結果が超疎 (stormG2_1000: DSE `tau` の非ゼロ率 1e-5 程度)。策10 の `sqrt(m / REF)` 倍をそのまま掛ける。
+    Sparse,
+    /// 中程度 (pds-100: `tau` の非ゼロ率 1〜5%)。基準行数を [`SYNTH_CLOCK_MID_REF_MULT`] 倍にして倍率を小さくする。
+    Mid,
+    /// 密 (ex10: 入る列の結果の 80% が非ゼロ)。倍率を掛けない。
+    Dense,
+}
+
+/// [`synth_clock_should_refactor`] に求解結果の密度の区分を加えたもの。策10 の `sqrt(m)` 倍は「求解の `O(m)`
+/// パスを消したので実際の求解の手間は `m` によらない」ことが前提で、結果が密になるほど前提が崩れる:
+/// 密なら掛けず (策11)、中程度なら基準行数を大きくして倍率を下げる (pds-100 は FT 更新が積もるにつれて
+/// `R` 段と `tau` の密な反復が重くなり、2,270 反復ごとの再分解では遅すぎた)。
 #[inline]
-fn synth_clock_should_refactor_dense(lu: &sparse_lu::FtLu, dense: bool) -> bool {
-    let factor = if dense { synth_clock_factor() } else { synth_clock_factor_for(lu.dim()) };
+fn synth_clock_should_refactor_density(lu: &sparse_lu::FtLu, density: SynthDensity) -> bool {
+    let factor = match density {
+        SynthDensity::Sparse => synth_clock_factor_for(lu.dim()),
+        SynthDensity::Mid => synth_clock_factor_for_ref(lu.dim(), tunable!("ENOMOTO_T_SYNTH_CLOCK_MID_REF_MULT", SYNTH_CLOCK_MID_REF_MULT, f64)),
+        SynthDensity::Dense => synth_clock_factor(),
+    };
     lu.update_count() >= tunable!("ENOMOTO_T_SYNTH_CLOCK_MIN_UPDATES", SYNTH_CLOCK_MIN_UPDATES, usize) && (lu.synth_tick() as f64) >= factor * (lu.build_tick().max(1) as f64)
 }
 
@@ -457,9 +473,16 @@ fn synth_clock_should_refactor_dense(lu: &sparse_lu::FtLu, dense: bool) -> bool 
 /// `m >= SYNTH_CLOCK_LARGE_M` なら `sqrt(m / SYNTH_CLOCK_LARGE_REF_M)` 倍する。
 #[inline]
 fn synth_clock_factor_for(m: usize) -> f64 {
+    synth_clock_factor_for_ref(m, 1.0)
+}
+
+/// [`synth_clock_factor_for`] の基準行数 `SYNTH_CLOCK_LARGE_REF_M` を `ref_mult` 倍したもの。
+#[inline]
+fn synth_clock_factor_for_ref(m: usize, ref_mult: f64) -> f64 {
     let large_m = tunable!("ENOMOTO_T_SYNTH_CLOCK_LARGE_M", SYNTH_CLOCK_LARGE_M, usize);
     if large_m > 0 && m >= large_m {
-        synth_clock_factor() * (m as f64 / tunable!("ENOMOTO_T_SYNTH_CLOCK_LARGE_REF_M", SYNTH_CLOCK_LARGE_REF_M, usize).max(1) as f64).sqrt()
+        let ref_m = tunable!("ENOMOTO_T_SYNTH_CLOCK_LARGE_REF_M", SYNTH_CLOCK_LARGE_REF_M, usize).max(1) as f64 * ref_mult;
+        synth_clock_factor() * (m as f64 / ref_m).sqrt().max(1.0)
     } else {
         synth_clock_factor()
     }
@@ -3238,32 +3261,13 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
             // 策8 (`BIG` のみ): 候補全体をヒープ化する代わりに、1 パスで `(ratio, j)` 順の小さい方から
             // `chuzc1_topk` 個を上限付きの最大ヒープに集めて並べ、先に歩進する。BFRT の歩進は
             // 通常フリップ数 + 1 個 (数個〜十数個) で止まるので、数千候補の heapify を省ける。
-            // 歩進が上位 `chuzc1_topk` 個で止まらなければ、残り (その最大より大きい候補) だけを
-            // ヒープにして続ける。取り出す順序は全体ヒープと同じ `(ratio, j)` 昇順なのでビット一致。
+            // 歩進が止まらなければ、直前の組の最大より大きい候補から次の組 (個数は 4 倍ずつ) を同じように
+            // 選んで続ける。取り出す順序は全体ヒープと同じ `(ratio, j)` 昇順なのでビット一致。
             // 候補列 (策7 なら刈り込み前の `cand_scratch[..n]`)。
             let cand_src: &[Cand] = match fast_n {
                 Some(n) => &cand_scratch[..n],
                 None => &candidates[..],
             };
-            let heap_t0 = profile_phases.then(std::time::Instant::now);
-            timed!(profile_phases, prof_phases::CHUZC1, {
-                topk_heap.clear();
-                for c in cand_src.iter() {
-                    if topk_heap.len() < chuzc1_topk {
-                        topk_heap.push(*c);
-                    } else if let Some(mut top) = topk_heap.peek_mut() {
-                        if *c < *top {
-                            *top = *c;
-                        }
-                    }
-                }
-                topk_sorted.clear();
-                topk_sorted.extend(topk_heap.drain());
-                topk_sorted.sort_unstable();
-            });
-            if let Some(t0) = heap_t0 {
-                prof_phases::CHUZC1_HEAP.fetch_add(t0.elapsed().as_nanos() as usize, std::sync::atomic::Ordering::Relaxed);
-            }
             // 候補 1 つ分の歩進 (下の全体ヒープ経路と同じ)。止まったら `true`。
             macro_rules! bfrt_step {
                 ($cand:expr) => {{
@@ -3288,30 +3292,47 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                     }
                 }};
             }
-            let mut stopped = false;
-            timed!(profile_phases, prof_phases::BFRT, {
-                for i in 0..topk_sorted.len() {
-                    if bfrt_step!(topk_sorted[i]) {
-                        stopped = true;
-                        break;
+            // この組で選ぶ個数と、前の組の最大 (これより大きい候補だけから選ぶ)。
+            let mut group = chuzc1_topk;
+            let mut after: Option<Cand> = None;
+            loop {
+                let heap_t0 = profile_phases.then(std::time::Instant::now);
+                timed!(profile_phases, prof_phases::CHUZC1, {
+                    topk_heap.clear();
+                    for c in cand_src.iter() {
+                        if after.is_some_and(|a| *c <= a) {
+                            continue;
+                        }
+                        if topk_heap.len() < group {
+                            topk_heap.push(*c);
+                        } else if let Some(mut top) = topk_heap.peek_mut() {
+                            if *c < *top {
+                                *top = *c;
+                            }
+                        }
                     }
-                }
-            });
-            if !stopped {
-                let kth = *topk_sorted.last().unwrap();
-                let mut heap: BinaryHeap<Reverse<Cand>> = timed!(profile_phases, prof_phases::CHUZC1, {
-                    heap_buf.clear();
-                    heap_buf.extend(cand_src.iter().filter(|c| **c > kth).map(|c| Reverse(*c)));
-                    BinaryHeap::from(std::mem::take(&mut heap_buf))
+                    topk_sorted.clear();
+                    topk_sorted.extend(topk_heap.drain());
+                    topk_sorted.sort_unstable();
                 });
+                if let Some(t0) = heap_t0 {
+                    prof_phases::CHUZC1_HEAP.fetch_add(t0.elapsed().as_nanos() as usize, std::sync::atomic::Ordering::Relaxed);
+                }
+                let mut stopped = false;
                 timed!(profile_phases, prof_phases::BFRT, {
-                    while let Some(Reverse(cand)) = heap.pop() {
-                        if bfrt_step!(cand) {
+                    for i in 0..topk_sorted.len() {
+                        if bfrt_step!(topk_sorted[i]) {
+                            stopped = true;
                             break;
                         }
                     }
                 });
-                heap_buf = heap.into_vec();
+                // 止まった、または候補を使い切った (この組が満杯でない)。
+                if stopped || topk_sorted.len() < group {
+                    break;
+                }
+                after = topk_sorted.last().copied();
+                group = group.saturating_mul(4);
             }
             candidates.clear();
         } else {
@@ -4358,13 +4379,21 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
             }
         }
         // トリガ (5)(`synth_clock_should_refactor` 参照): 毎反復の無条件チェック。
-        // 策11: 入る列の FTRAN 結果の非ゼロ率の移動平均が `SYNTH_CLOCK_DENSE_FRACTION` 以上なら、
-        // 策10 の `sqrt(m)` 倍を掛けない (`ENOMOTO_T_SYNTH_CLOCK_DENSE_FRACTION`、0 = 無効)。
-        let synth_dense = {
-            let f = tunable!("ENOMOTO_T_SYNTH_CLOCK_DENSE_FRACTION", SYNTH_CLOCK_DENSE_FRACTION, f64);
-            f > 0.0 && density_col_aq.expected() >= f
+        // 策11 / 報告 P 策5(b): 求解結果の密度で合成クロックの係数を選ぶ ([`SynthDensity`])。入る列の FTRAN 結果の
+        // 非ゼロ率の移動平均が `SYNTH_CLOCK_DENSE_FRACTION` 以上なら密、DSE `tau` の非ゼロ率の移動平均が
+        // `SYNTH_CLOCK_MID_TAU_FRACTION` 以上なら中程度 (それぞれ `ENOMOTO_T_...`、0 = 無効)。
+        let synth_density = {
+            let fd = tunable!("ENOMOTO_T_SYNTH_CLOCK_DENSE_FRACTION", SYNTH_CLOCK_DENSE_FRACTION, f64);
+            let fm = tunable!("ENOMOTO_T_SYNTH_CLOCK_MID_TAU_FRACTION", SYNTH_CLOCK_MID_TAU_FRACTION, f64);
+            if fd > 0.0 && density_col_aq.expected() >= fd {
+                SynthDensity::Dense
+            } else if fm > 0.0 && density_tau.expected() >= fm {
+                SynthDensity::Mid
+            } else {
+                SynthDensity::Sparse
+            }
         };
-        if !need_refactor && synth_clock_should_refactor_dense(&lu, synth_dense) {
+        if !need_refactor && synth_clock_should_refactor_density(&lu, synth_density) {
             need_refactor = true;
             if profile_phases {
                 prof_phases::REFACTOR_CAUSE_CLOCK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
