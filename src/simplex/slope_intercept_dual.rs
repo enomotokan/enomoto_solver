@@ -58,7 +58,7 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::sync::OnceLock;
 use crate::params::simplex::{FT_BUMP_LIMIT_FACTOR, FT_CHECK_INTERVAL, FT_MIN_PIVOT, FT_RESIDUAL_TOL, HARRIS_RATIO_TOL, MAX_ITERS_FLOOR, PRIMAL_FEAS_TOL, RESIDUAL_CHECK_MULTIPLIER, STALL_PROGRESS_EPS, STEEPEST_EDGE_FLOOR, TOL};
-use crate::params::slope_intercept_dual::{D_DRIFT_TOL, D_GROSS_MISMATCH_REL_TOL, FT_MAX_UPDATES_FACTOR, FT_MAX_UPDATES_FLOOR, PIVOT_ESCALATION_STEP, SLOPE_TOL, SYNTH_CLOCK_FACTOR, SYNTH_CLOCK_MIN_UPDATES, XB_CHECK_INTERVAL, XB_DRIFT_ESCALATION_FACTOR, XB_DRIFT_ESCALATION_STEP, XB_DRIFT_TOL, XB_DRIFT_TOL_MAX, X_B_SLOPE_NOISE, Z_SLOPE_TOL};
+use crate::params::slope_intercept_dual::{D_DRIFT_TOL, D_GROSS_MISMATCH_REL_TOL, FT_MAX_UPDATES_FACTOR, FT_MAX_UPDATES_FLOOR, PIVOT_ESCALATION_STEP, SLOPE_TOL, STUCK_ROW_MIN_PIVOT, SYNTH_CLOCK_FACTOR, SYNTH_CLOCK_MIN_UPDATES, XB_CHECK_INTERVAL, XB_DRIFT_ESCALATION_FACTOR, XB_DRIFT_ESCALATION_STEP, XB_DRIFT_TOL, XB_DRIFT_TOL_MAX, X_B_SLOPE_NOISE, Z_SLOPE_TOL};
 use crate::params::slope_intercept_dual::{
     CHUZR_SHORTLIST_K, CHUZR_SHORTLIST_MAX_LEN_FACTOR, CHUZR_SHORTLIST_MAX_LEN_SLACK, CHUZR_SHORTLIST_MIN_POOL_FACTOR, COMPACT_ROWS_BLOCK, FTRAN_U_HYPER_DENSITY, FTRAN_U_HYPER_TAU_DENSITY,
     GREATEST_IMPROVEMENT_STALL_DIVISOR, GREATEST_IMPROVEMENT_STALL_MIN, GREATEST_IMPROVEMENT_TOP_K, GROSS_MISMATCH_SCALE_FLOOR, INFEASIBLE_PLATEAU_BUDGET_DIVISOR, INFEASIBLE_PLATEAU_STALL_MULT,
@@ -769,6 +769,8 @@ fn refactorize(
     // 中身と順序は新規作成と同一。
     thread_local! {
         static ROWS: std::cell::RefCell<Vec<Vec<(usize, f64)>>> = const { std::cell::RefCell::new(Vec::new()) };
+        /// 基底位置 → 変数番号の作業配列(同じくスレッドローカルに再利用)。
+        static BASIS_OF: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) };
     }
     let mut rows = ROWS.with(|r| std::mem::take(&mut *r.borrow_mut()));
     rows.truncate(m);
@@ -776,23 +778,44 @@ fn refactorize(
         row.clear();
     }
     rows.resize_with(m, Vec::new);
-    // `std.cols` による列駆動の構築(`nnz(A_B)` の手間)。`j` を昇順に訪れるので各行の要素順は
-    // 行駆動と同一で、Markowitz のタイブレークを含め分解結果は変わらない。
+    // 基底位置 → 変数番号の逆引き(基底位置を持つ変数はちょうど `m` 個)。
+    let mut basis_of = BASIS_OF.with(|b| std::mem::take(&mut *b.borrow_mut()));
+    basis_of.clear();
+    basis_of.resize(m, usize::MAX);
     for j in 0..std.n_total {
         if let Some(col) = basis_pos[j] {
-            for &(i, v) in std.cols.col(j) {
-                rows[i].push((col, v));
-            }
+            basis_of[col] = j;
         }
     }
+    // `std.cols` による列駆動の構築(`nnz(A_B)` の手間)。基底位置 `col` の昇順に訪れるので
+    // 各行の要素は列番号順に並び、`KernelMatrix::new` の安定ソートが並べ替えなしで済む
+    // (整列済み入力なので分解結果は変数番号順に積んだ場合と同一)。
+    for (col, &j) in basis_of.iter().enumerate() {
+        if j == usize::MAX {
+            continue;
+        }
+        for &(i, v) in std.cols.col(j) {
+            rows[i].push((col, v));
+        }
+    }
+    BASIS_OF.with(|b| *b.borrow_mut() = basis_of);
     let r = sparse_lu::factorize_diagonal(m, &rows)
         .map(sparse_lu::FtLu::new)
         .or_else(|| sparse_lu::factorize_reusing(m, &rows, prev));
     ROWS.with(|r| *r.borrow_mut() = rows);
-    if r.is_none() && env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
-        eprintln!("DEBUG_EXT_BAILOUT: refactorize returned None (singular basis)");
+    if r.is_none() {
+        SINGULAR_BAILOUT.with(|f| f.set(true));
+        if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
+            eprintln!("DEBUG_EXT_BAILOUT: refactorize returned None (singular basis)");
+        }
     }
     r
+}
+
+thread_local! {
+    /// このスレッドの直近の求解で [`refactorize`] が特異基底を報告したか
+    /// ([`solve_slope_intercept_dual`] が安全モードでの解き直しを判断するのに使う)。
+    static SINGULAR_BAILOUT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// `‖A_B x_B - rhs‖`(真の基底行列 `std.cols` の基底列と、解いた `x_b` による残差)。
@@ -1740,7 +1763,25 @@ impl ColCache {
 /// (`distinguish_infeasible_unbounded` が偽なら `z^1 < 0` の時点で
 /// `InfeasibleOrUnbounded` を返す)。戻り値 `None` は「到達しないはず」の数値的破綻や
 /// 反復上限到達で、呼び出し側が `Status::NotSolved` として報告する。
+///
+/// 再分解が特異基底で失敗して `None` になったときだけ、`safe_pivot` を有効にして最初から
+/// 1 回だけ解き直す(`STUCK_ROW_MIN_PIVOT` 参照)。通常の求解が成功する問題では
+/// 経路は変わらず、数値的に破綻した求解だけを救済する。
 pub fn solve_slope_intercept_dual(std: &StdForm, opts: &crate::types::LpOptions) -> Option<SimplexResult> {
+    SINGULAR_BAILOUT.with(|f| f.set(false));
+    let res = solve_slope_intercept_dual_with(std, opts, false);
+    if res.is_some() || !SINGULAR_BAILOUT.with(|f| f.get()) {
+        return res;
+    }
+    if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
+        eprintln!("DEBUG_EXT: singular-basis bailout, retrying with safe_pivot");
+    }
+    solve_slope_intercept_dual_with(std, opts, true)
+}
+
+/// [`solve_slope_intercept_dual`] の本体。`safe_pivot` が真なら、updateVerify で破棄された直後の行を
+/// 再試行するとき、より大きなピボット候補があれば極小ピボットを避ける(`STUCK_ROW_MIN_PIVOT` 参照)。
+fn solve_slope_intercept_dual_with(std: &StdForm, opts: &crate::types::LpOptions, safe_pivot: bool) -> Option<SimplexResult> {
     // 全列数(構造列+スラック列)、行数、構造列数。スラック列は `n_orig..n_total`。
     let n_total = std.n_total;
     let m = std.n_rows;
@@ -2051,7 +2092,7 @@ pub fn solve_slope_intercept_dual(std: &StdForm, opts: &crate::types::LpOptions)
     let greatest_improvement_enabled = env_str!("ENOMOTO_DISABLE_GREATEST_IMPROVEMENT").is_none();
     let debug_greatest_improvement = env_str!("ENOMOTO_DEBUG_EXT_GREATEST_IMPROVEMENT").is_some();
     // 候補行 `(行, 方向, 逸脱, DSE スコア)` の作業領域。
-    let mut greatest_improvement_cands: Vec<(usize, i32, Affine1, Score2)> = Vec::with_capacity(GREATEST_IMPROVEMENT_TOP_K * 4);
+    let mut greatest_improvement_cands: Vec<(usize, i32, Affine1, Score2)> = Vec::with_capacity(GREATEST_IMPROVEMENT_TOP_K + 1);
     // 実行不能行数プラトー検出(ループ本体の該当箇所参照)の上限反復数。健全だが遅い求解の
     // 通常の揺らぎを避けるため `stall_limit` より大きくするが、反復上限の予算内で発火できる
     // よう `MAX_ITERS_FLOOR / 4` で頭打ちにする。
@@ -2184,6 +2225,9 @@ pub fn solve_slope_intercept_dual(std: &StdForm, opts: &crate::types::LpOptions)
     // `stuck_row_boost_factor` 倍してスコア付けする。
     let mut stuck_row: Option<usize> = None;
     let mut stuck_row_streak: usize = 0;
+    // `stuck_row_taboo` で一時的にプールから外したことのある行(デバッグ時の整合性検査で、
+    // 新規走査にあってプールに無いことを許す)。
+    let mut stuck_row_tabooed = vec![false; m];
     let stuck_row_boost_threshold: usize = env_str!("ENOMOTO_STUCK_ROW_BOOST_THRESHOLD")
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(STUCK_ROW_BOOST_THRESHOLD);
@@ -2401,8 +2445,8 @@ pub fn solve_slope_intercept_dual(std: &StdForm, opts: &crate::types::LpOptions)
         #[cfg(debug_assertions)]
         {
             // `InfeasibleRows` と `RowDevCache` が全行の新規走査結果と一致することを確認する。
-            let mut fresh: Vec<usize> = (0..m).filter(|&i| row_infeasible_affine(&cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i)).collect();
-            let mut maintained: Vec<usize> = infeasible_rows.rows.clone();
+            let mut fresh: Vec<usize> = (0..m).filter(|&i| !stuck_row_tabooed[i] && row_infeasible_affine(&cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i)).collect();
+            let mut maintained: Vec<usize> = infeasible_rows.rows.iter().copied().filter(|&i| !stuck_row_tabooed[i]).collect();
             fresh.sort_unstable();
             maintained.sort_unstable();
             debug_assert_eq!(fresh, maintained, "InfeasibleRows drifted from a fresh scan at iter {iter_idx}");
@@ -2423,14 +2467,24 @@ pub fn solve_slope_intercept_dual(std: &StdForm, opts: &crate::types::LpOptions)
         // 並べ直す。
         if greatest_improvement_enabled && !bland_mode && stall_count > greatest_improvement_stall_threshold && infeasible_rows.rows.len() > 1 {
             timed!(profile_phases, prof_phases::CHUZR, {
+                // スコア降順の上位 `GREATEST_IMPROVEMENT_TOP_K` 件を安定挿入で保つ(同点は先に来た行が前)。
+                // `cmp_lex` は許容誤差つきで推移律を満たさないことがあり、`sort_by` に渡すと
+                // 標準ライブラリが順序違反を検出して panic する(klein2)。挿入なら panic せず、
+                // 比較が整合している入力では安定ソート + truncate と同じ結果になる。
                 greatest_improvement_cands.clear();
                 for &i in &infeasible_rows.rows {
                     let (d_dir_i, dev_i) = (row_dev.dir[i], row_dev.dev[i]);
                     let score = Score2::new(dev_i, dse.weight(i));
-                    greatest_improvement_cands.push((i, d_dir_i, dev_i, score));
+                    let pos = greatest_improvement_cands.iter().position(|t| score.cmp_lex(&t.3, score2_c2_tol) == std::cmp::Ordering::Greater);
+                    match pos {
+                        Some(p) => {
+                            greatest_improvement_cands.insert(p, (i, d_dir_i, dev_i, score));
+                            greatest_improvement_cands.truncate(GREATEST_IMPROVEMENT_TOP_K);
+                        }
+                        None if greatest_improvement_cands.len() < GREATEST_IMPROVEMENT_TOP_K => greatest_improvement_cands.push((i, d_dir_i, dev_i, score)),
+                        None => {}
+                    }
                 }
-                greatest_improvement_cands.sort_by(|a, b| b.3.cmp_lex(&a.3, score2_c2_tol));
-                greatest_improvement_cands.truncate(GREATEST_IMPROVEMENT_TOP_K);
 
                 let mut best_gain: Option<Affine1> = None;
                 let mut best_gi: Option<(usize, i32, Affine1)> = None;
@@ -2644,6 +2698,8 @@ pub fn solve_slope_intercept_dual(std: &StdForm, opts: &crate::types::LpOptions)
 
         // Eligible 内の `Zero` 列(あれば BFRT を行わずこれにピボットする)。
         let mut zero_pick: Option<Cand>;
+        // この反復で行 `r` を一時的にプールから外すか(`STUCK_ROW_MIN_PIVOT` 参照)。
+        let mut stuck_row_taboo = false;
         timed!(profile_phases, prof_phases::CHUZC1, {
             candidates.clear();
             // この行 `r` について破棄済み候補の禁止が有効か。
@@ -2674,6 +2730,28 @@ pub fn solve_slope_intercept_dual(std: &StdForm, opts: &crate::types::LpOptions)
                 let keep = is_nb & !(alpha_j.abs() <= TOL) & !(d_dir_f * hat_alpha >= 0.0);
                 k += keep as usize;
             }
+            // 破棄直後の行の再試行(`STUCK_ROW_MIN_PIVOT` 参照):
+            // - 下限を満たす候補が 1 つも無く他に実行不能行があれば、この行を一時的にプールから外して
+            //   別の行を選ばせる(HiGHS のタブー行と同じ考え。下の `stuck_row_taboo` 参照)。常に行う。
+            // - 安全モード(`safe_pivot`)では、下限を満たす候補があるとき極小ピボットを候補から外す
+            //   (順序は保つ)。経路を変える範囲が広いので通常モードでは行わない。
+            // 他に行が無ければ何もせず、従来どおり極小ピボットを使う。
+            if stuck_row == Some(r) {
+                let min_pivot = tunable!("ENOMOTO_T_STUCK_ROW_MIN_PIVOT", STUCK_ROW_MIN_PIVOT, f64);
+                let any_large = cand_scratch[..k].iter().any(|c| c.hat_alpha.abs() > min_pivot);
+                if any_large && safe_pivot {
+                    let mut w = 0usize;
+                    for idx in 0..k {
+                        if cand_scratch[idx].hat_alpha.abs() > min_pivot {
+                            cand_scratch[w] = cand_scratch[idx];
+                            w += 1;
+                        }
+                    }
+                    k = w;
+                } else if !any_large && infeasible_rows.rows.len() > 1 {
+                    stuck_row_taboo = true;
+                }
+            }
             let kept = &cand_scratch[..k];
             // 論文 3.1 節 (iii)・注意 3.1・Algorithm 1: Eligible に `Zero` 列があれば BFRT を行わず、そのうち
             // 最小添字の列にピボットする(比 0、被約費用もフリップも変化なし)。下の停止候補による
@@ -2698,6 +2776,22 @@ pub fn solve_slope_intercept_dual(std: &StdForm, opts: &crate::types::LpOptions)
             }
             candidates.extend(kept.iter().filter(|c| stopper.map_or(true, |s| **c <= s) && !(ban_active && discard_banned_cols.contains(&c.j))));
         });
+        if stuck_row_taboo {
+            // 破棄直後の行 `r` に有効な大きさのピボットが無い: 極小ピボットで基底を特異に近づける
+            // 代わりに、`r` を一時的に実行不能行プールから外して次の反復で別の行を選ぶ。`x_B[r]` が
+            // 変われば `refresh_row` が、再分解では `rebuild_rows` が `r` を戻す(`stuck_row` は残るので、
+            // 戻った `r` を選べば同じ判定をやり直す)。プールが空になっても `finish` 後の
+            // `polish_with_true_bounds` が真の境界で主実行可能性を検査し直す。
+            for &j in &touched_cols {
+                a_p[j] = 0.0;
+                touched[j] = false;
+            }
+            touched_cols.clear();
+            candidates.clear();
+            infeasible_rows.set(r, false);
+            stuck_row_tabooed[r] = true;
+            continue;
+        }
         if profile_work {
             prof_phases::STAT_CANDS.fetch_add(candidates.len(), std::sync::atomic::Ordering::Relaxed);
         }
@@ -3820,6 +3914,17 @@ pub fn solve_slope_intercept_dual(std: &StdForm, opts: &crate::types::LpOptions)
                     need_refactor = resid_max > effective_drift_tol;
                     if need_refactor {
                         drift_trigger_count += 1;
+                        // 再分解後最初の検査(FT 更新 `XB_CHECK_INTERVAL` 回以内)で既に超えているなら、
+                        // 分解し直しても残差はこの許容誤差まで下がらない(分解自体の誤差が許容誤差と
+                        // 同程度)。`XB_DRIFT_ESCALATION_STEP` 回の無駄な再分解を待たず、次の段へ
+                        // すぐ緩める(klein3: 再分解 22 → 15 回)。緩め方は既存の段と上限
+                        // `XB_DRIFT_TOL_MAX` の範囲に収まる。分解直後の残差を基準にした相対許容誤差
+                        // (`ENOMOTO_XB_DRIFT_FRESH_FLOOR`)も試したが、係数 10 で Netlib 93 問 +1.7%、
+                        // 100 では pilot87 の目的関数値が狂った。
+                        if updates <= XB_CHECK_INTERVAL {
+                            let step = tunable!("ENOMOTO_T_XB_DRIFT_ESCALATION_STEP", XB_DRIFT_ESCALATION_STEP, usize);
+                            drift_trigger_count = drift_trigger_count.div_ceil(step) * step;
+                        }
                         note_numeric_trouble!();
                         if profile_phases {
                             prof_phases::REFACTOR_CAUSE_DRIFT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

@@ -147,7 +147,10 @@ pub(crate) static PROF_BTRAN_L_GATHER: AtomicUsize = AtomicUsize::new(0);
 ///   (列番号 `u32`) と同範囲の `row_val` が行 `i` の活性ラン。**列番号昇順**。
 ///   `row_cap[i]` はそのランがその場で伸びられる容量。
 /// - 列側 (添字のみのミラー): `col_ent[col_start[j] .. col_start[j] + col_len[j]]`
-///   が列 `j` の活性行リスト。**行番号昇順**。
+///   が列 `j` の活性行リスト。**行番号昇順**。例外は列シングルトン前処理
+///   ([`MarkowitzState::peel_column_singletons`]) の間だけで、そこでは引退した
+///   ピボット行をその場で除かずに残し (遅延削除)、前処理の最後に一括で詰め直す。
+///   列 `j` の活性行数 (= 列次数) は常に `col_act[j]`。
 ///
 /// どちらのランも昇順に保つ。これにより Markowitz 数やピボット絶対値の同点を
 /// 「最初に見つかったもの」で決める挙動、`L` 乗数の出力順などが順序付き
@@ -171,6 +174,8 @@ struct KernelMatrix {
     col_len: Vec<usize>,
     /// 列 `j` のランがその場で保持できる容量。
     col_cap: Vec<usize>,
+    /// 列 `j` のランのうち活性行 (引退していない行) の数。
+    col_act: Vec<usize>,
 }
 
 /// 昇順ラン `idx` 内で `j` の位置を返す (無ければ `None`)。短いラン
@@ -260,7 +265,8 @@ impl KernelMatrix {
             }
         }
 
-        KernelMatrix { row_idx, row_val, row_start, row_len, row_cap, col_ent, col_start, col_len, col_cap }
+        let col_act = col_len.clone();
+        KernelMatrix { row_idx, row_val, row_start, row_len, row_cap, col_ent, col_start, col_len, col_cap, col_act }
     }
 
     /// 行 `i` の活性ラン (列番号昇順, 値) を返す。
@@ -330,6 +336,7 @@ impl KernelMatrix {
         self.col_ent.copy_within(s + pos..s + len, s + pos + 1);
         self.col_ent[s + pos] = i as u32;
         self.col_len[j] = len + 1;
+        self.col_act[j] += 1;
     }
 
     /// 行 `i` を列 `j` の活性行リストから除く。無ければ何もしない
@@ -343,12 +350,42 @@ impl KernelMatrix {
         }
         self.col_ent.copy_within(s + pos + 1..s + len, s + pos);
         self.col_len[j] = len - 1;
+        self.col_act[j] -= 1;
+    }
+
+    /// 列 `j` の活性行が 1 つ引退したことだけを記録する (ランからは除かない遅延削除。
+    /// 列シングルトン前処理専用で、最後に [`Self::compact_cols`] で詰め直す)。
+    #[inline]
+    fn col_retire(&mut self, j: usize) {
+        self.col_act[j] -= 1;
+    }
+
+    /// 遅延削除で引退行が残っている列ランから、`row_used` の行を順序を保って除く
+    /// (`O(列ミラーの総長)`)。以後は全列のランが活性行だけになる。
+    fn compact_cols(&mut self, row_used: &[bool]) {
+        for j in 0..self.col_len.len() {
+            if self.col_len[j] == self.col_act[j] {
+                continue;
+            }
+            let s = self.col_start[j];
+            let mut w = s;
+            for p in s..s + self.col_len[j] {
+                let r = self.col_ent[p];
+                if !row_used[r as usize] {
+                    self.col_ent[w] = r;
+                    w += 1;
+                }
+            }
+            self.col_len[j] = w - s;
+            debug_assert_eq!(self.col_len[j], self.col_act[j], "column run must hold exactly the active rows after compaction");
+        }
     }
 
     /// 列 `j` の活性行リストを空にする (ピボット列の引退時)。
     #[inline]
     fn col_clear(&mut self, j: usize) {
         self.col_len[j] = 0;
+        self.col_act[j] = 0;
     }
 }
 
@@ -695,13 +732,13 @@ impl MarkowitzState {
         self.row_buckets[new_deg].push(i);
     }
 
-    /// 列 `j` の次数・バケット位置を列ミラーの現状から更新し
-    /// (O(列次数))、`col_max_abs[j]` を古い印にする (再計算は遅延)。
+    /// 列 `j` の次数・バケット位置を列ミラーの活性行数から更新し
+    /// (O(1))、`col_max_abs[j]` を古い印にする (再計算は遅延)。
     fn refresh_column(&mut self, j: usize) {
         if self.col_used[j] {
             return;
         }
-        let new_deg = self.mat.col(j).len();
+        let new_deg = self.mat.col_act[j];
         self.update_col_degree(j, new_deg);
         self.col_max_abs_dirty[j] = true;
     }
@@ -964,6 +1001,82 @@ impl MarkowitzState {
             }
         }
         None
+    }
+
+    /// 列シングルトンの前処理 (HiGHS `buildSimple` 相当)。消去の先頭で
+    /// `find_best_pivot(true)` + `eliminate` が列シングルトンを 1 本ずつ採るのと
+    /// **同じピボット・同じバケット操作** を、探索と消去の汎用処理を通さずに行う。
+    /// 採ったステップ数を返し、呼び出し側はその次のステップから通常の消去を続ける。
+    ///
+    /// - 対象: `col_buckets[1]` に `initially_dense` でない列がある間。
+    ///   `find_best_pivot(true)` はその格納順で最初の列を選び (唯一の活性要素は
+    ///   列最大値そのものなので閾値 `<= 1` なら必ず通り、Markowitz 数 0 で即終了)、
+    ///   ここでも同じ列を採る。
+    /// - 列シングルトンのピボットは他の行を消去しないので、行の値・行次数は
+    ///   変わらず、`L` も出ない。変わるのはピボット行の各列の次数 (引退による
+    ///   `-1`) だけで、それを `eliminate` と同じく列昇順に `refresh_column` する。
+    /// - ピボット行の引退は列ミラーの遅延削除 ([`KernelMatrix::col_retire`]) で済ませ、
+    ///   前処理の最後に 1 回だけ詰め直す (1 要素ごとの二分探索と詰め直しを省く)。
+    ///   以後の通常の消去が見る列ミラーは従来どおり活性行だけになる。
+    /// - 行シングルトン採用・行探索 (経路が変わる任意機能) が有効なら何もしない。
+    fn peel_column_singletons(&mut self, row_perm: &mut [usize], col_perm: &mut [usize], u_entries: &mut Vec<(usize, usize, f64)>) -> usize {
+        if self.row_singleton_rel >= 0.0 || self.row_search > 0 || !(self.threshold <= 1.0) {
+            return 0;
+        }
+        // 採ったステップ数 (= 次のステップ番号)
+        let mut step = 0usize;
+        loop {
+            let pj = {
+                let dense = &self.initially_dense;
+                match self.col_buckets[1].iter().find(|&&j| !dense[j]) {
+                    Some(&j) => j,
+                    None => break,
+                }
+            };
+            // 列 `pj` の唯一の活性行 (列ミラーには引退行も残っている)
+            let pi = {
+                let row_used = &self.row_used;
+                self.mat.col(pj).iter().map(|&r| r as usize).find(|&r| !row_used[r]).expect("degree-1 column must have an active row")
+            };
+            self.row_used[pi] = true;
+            self.col_used[pj] = true;
+            row_perm[step] = pi;
+            col_perm[step] = pj;
+            self.remove_from_bucket_row(pi);
+            self.remove_from_bucket_col(pj);
+
+            // `U` の行 = ピボット行のうちピボット列と未使用列の非ゼロ (通常経路のスナップショットと同一)。
+            let (s, len) = (self.mat.row_start[pi], self.mat.row_len[pi]);
+            for p in s..s + len {
+                let (j, v) = (self.mat.row_idx[p] as usize, self.mat.row_val[p]);
+                if v != 0.0 && (j == pj || !self.col_used[j]) {
+                    u_entries.push((step, j, v));
+                }
+            }
+            // `eliminate` の可観測な効果: ピボット列を空にし、ピボット行を引退させる
+            // (他の列の次数・バケットを列昇順に更新)。
+            self.mat.col_clear(pj);
+            for p in s..s + len {
+                let j = self.mat.row_idx[p] as usize;
+                if j == pj {
+                    continue;
+                }
+                if !self.col_used[j] {
+                    self.mat.col_retire(j);
+                }
+                self.refresh_column(j);
+            }
+
+            // プロファイル累計も `find_best_pivot` の即決ステップと同じに数える。
+            self.prof_steps += 1;
+            self.prof_trivial += 1;
+            self.prof_candidates += 1;
+            step += 1;
+        }
+        if step > 0 {
+            self.mat.compact_cols(&self.row_used);
+        }
+        step
     }
 
     /// ピボット `(pi, pj)` (値 `pivot_val`) で列 `pj` を他の全活性行から消去する。
@@ -1647,8 +1760,10 @@ fn factorize_reusing_order(
                 in_touched[r] = true;
                 touched.push(r);
             }
+            // `L` の列が空のステップはヒープに積まない (取り出しても何もしないため。
+            // ステップ `t < s` の `l_offsets[t + 1]` は確定済み)。
             let t = row_step[r];
-            if t != usize::MAX && !queued[t] {
+            if t != usize::MAX && !queued[t] && l_offsets[t + 1] > l_offsets[t] {
                 queued[t] = true;
                 heap.push(Reverse(t));
             }
@@ -1672,7 +1787,7 @@ fn factorize_reusing_order(
                 }
                 work[r] -= mult * y;
                 let t2 = row_step[r];
-                if t2 != usize::MAX && !queued[t2] {
+                if t2 != usize::MAX && !queued[t2] && l_offsets[t2 + 1] > l_offsets[t2] {
                     queued[t2] = true;
                     heap.push(Reverse(t2));
                 }
@@ -1728,6 +1843,8 @@ fn factorize_reusing_order(
         let pivot = work[pi];
         row_step[pi] = s;
         row_perm[s] = pi;
+        // `U` の行 `s` は入力行 `pi` の残りの列から埋まるので、その長さで予約する。
+        u_row[s].reserve(rows_in[pi].len());
 
         for &r in &touched {
             let v = work[r];
@@ -1868,7 +1985,10 @@ fn factorize_flat_markowitz_routed(m: usize, rows_in: &[Vec<(usize, f64)>], dens
     // 以上)、残りの `k x k` ブロックを稠密分解する。
     let dense_switch = tunable!("ENOMOTO_LU_DENSE_SWITCH", DENSE_SWITCH_FRACTION, f64);
     let dense_switch_min = tunable!("ENOMOTO_LU_DENSE_SWITCH_MIN", DENSE_SWITCH_MIN_ROWS, usize);
-    for step in 0..m {
+    // 先頭の列シングルトンをまとめて採る (経路は下のループと同一)。B3 が有効なら
+    // ステップ 0 の密度判定を先に行う必要があるので使わない。
+    let peeled = if dense_switch > 0.0 { 0 } else { state.peel_column_singletons(&mut row_perm, &mut col_perm, &mut u_entries) };
+    for step in peeled..m {
         if dense_switch > 0.0 && step % DENSE_SWITCH_CHECK_INTERVAL == 0 && m - step >= dense_switch_min {
             // 残りの行数
             let k = m - step;
@@ -1979,9 +2099,16 @@ fn factorize_flat_markowitz_routed(m: usize, rows_in: &[Vec<(usize, f64)>], dens
         l_build.end_column();
     }
     let l_col = l_build.build();
-    let mut u_row: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
-    for (pivot_step, orig_col, val) in u_entries {
-        u_row[pivot_step].push((col_perm_inv[orig_col], val));
+    // `u_entries` もステップ昇順にまとまっているので、各行をちょうどの容量で 1 回で作る。
+    debug_assert!(u_entries.windows(2).all(|w| w[0].0 <= w[1].0), "U entries must be grouped by ascending pivot step");
+    let mut u_row: Vec<Vec<(usize, f64)>> = Vec::with_capacity(m);
+    let mut next = 0usize;
+    for step in 0..m {
+        let start = next;
+        while next < u_entries.len() && u_entries[next].0 == step {
+            next += 1;
+        }
+        u_row.push(u_entries[start..next].iter().map(|&(_, orig_col, val)| (col_perm_inv[orig_col], val)).collect());
     }
 
     let l_row = build_l_row(&l_col, m);
@@ -2041,7 +2168,10 @@ fn factorize_bordered(m: usize, rows_in: &[Vec<(usize, f64)>], border: &[usize])
 
     // ピボット行のコピー (分解全体で 1 つのバッファを再利用)
     let mut pivot_row_snapshot: Vec<(usize, f64)> = Vec::new();
-    for step in 0..n_sparse {
+    // 先頭の列シングルトンをまとめて採る (経路は下のループと同一。境界列は
+    // バケット 0 にいるので採られず、採れる数は高々 `n_sparse`)。
+    let peeled = state.peel_column_singletons(&mut row_perm, &mut col_perm, &mut u_entries);
+    for step in peeled..n_sparse {
         let (pi, pj) = state.find_best_pivot(true).or_else(|| state.find_best_pivot(false))?;
 
         state.row_used[pi] = true;

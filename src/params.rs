@@ -126,6 +126,10 @@ pub(crate) mod simplex {
 
     /// 費用摂動の基準係数: 基準の大きさ = `COST_PERTURB_BASE * (減衰後の最大費用)`。
     pub(crate) const COST_PERTURB_BASE: f64 = 5e-7;
+
+    /// 費用摂動: 費用が全部 0 の問題で「最大費用」の代わりに使う値。0 のままだと摂動が消えて
+    /// 双対退化で反復が大きく増える(klein2: 1740 → 214 反復)。
+    pub(crate) const COST_PERTURB_ZERO_COST_SCALE: f64 = 1.0;
 }
 
 /// 傾き・切片二段解法 (src/simplex/slope_intercept_dual.rs)
@@ -144,7 +148,8 @@ pub(crate) mod slope_intercept_dual {
     pub(crate) const XB_DRIFT_TOL: f64 = 1e-8;
 
     /// 同じ求解内でドリフト起因の再分解がこの回数起きるごとに、[`XB_DRIFT_TOL`] の実効値を
-    /// [`XB_DRIFT_ESCALATION_FACTOR`] 倍にする(上限 [`XB_DRIFT_TOL_MAX`])。
+    /// [`XB_DRIFT_ESCALATION_FACTOR`] 倍にする(上限 [`XB_DRIFT_TOL_MAX`])。ただし再分解後最初の
+    /// 検査で既に超えたとき(分解し直しても下がらない)は、回数を待たず次の段へ進める。
     pub(crate) const XB_DRIFT_ESCALATION_STEP: usize = 10;
 
     /// [`XB_DRIFT_ESCALATION_STEP`] 回ごとに [`XB_DRIFT_TOL`] の実効値に掛ける倍率。
@@ -186,6 +191,17 @@ pub(crate) mod slope_intercept_dual {
     /// 「桁違いの不一致」(`pivot_grossly_inconsistent`)としてピボットを破棄する。
     /// `pivot_values_agree` の厳しい許容誤差(1e-7)よりずっと緩く、`update_count` によらず常に検査する。
     pub(crate) const D_GROSS_MISMATCH_REL_TOL: f64 = 0.5;
+
+    /// 直前のピボットが updateVerify で破棄された行(`stuck_row`)を再試行するときの比率テストの
+    /// ピボット下限 `|alpha_j|`。破棄直後の再分解で `update_count == 0` になり厳しい照合が
+    /// 効かないため、ここで 1e-9 級の極小ピボットを選ぶと基底が特異に近づき、verify 失敗の連鎖の末に
+    /// 再分解が特異で失敗する(cplex2 が `NotSolved`)。FT 更新が拒否する大きさ([`super::simplex::FT_MIN_PIVOT`])に
+    /// 揃える。この下限を満たす候補が無いときは、他に実行不能行があればこの行を一時的に外し
+    /// (常に行う。cplex2 はこれで最初の求解で解ける)、無ければ通常の [`super::simplex::TOL`] の
+    /// 候補をそのまま使う(候補を空にすると `Eligible = ∅` の実行不能判定を誤って下すため)。
+    /// 下限を満たす候補があるとき小さい候補を除く方は、特異基底で破綻した求解を解き直す
+    /// 安全モード(`safe_pivot`)でだけ行う(経路を変える範囲が広いため)。
+    pub(crate) const STUCK_ROW_MIN_PIVOT: f64 = 1e-7;
 
     /// `x_B(M)` の `M` 係数は厳密には 0 か 1 のオーダーなので、絶対値がこれ未満の係数は
     /// LU/更新の雑音とみなして 0 に丸める(`snap_slope`)。`ENOMOTO_T_X_B_SLOPE_NOISE` で上書き可。
@@ -362,6 +378,7 @@ pub(crate) mod lu {
 
     /// 行・列ランを再配置するときの最小容量。
     pub(crate) const KERNEL_MIN_RUN_CAP: usize = 4;
+
 
     /// スレッドごとに保持しておく再利用バケット配列の最大個数 (`BUCKET_POOL`)。
     pub(crate) const BUCKET_POOL_MAX: usize = 4;
