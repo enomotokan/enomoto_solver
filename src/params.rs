@@ -152,6 +152,14 @@ pub(crate) mod slope_intercept_dual {
     /// 検査で既に超えたとき(分解し直しても下がらない)は、回数を待たず次の段へ進める。
     pub(crate) const XB_DRIFT_ESCALATION_STEP: usize = 10;
 
+    /// `x_B(M)` ドリフト検査の相対許容誤差(0 = 無効)。残差が絶対許容誤差を超えても、
+    /// `XB_DRIFT_REL_TOL × ‖|A_B||x_B| + |rhs|‖`(`A_B x_B` の丸め誤差の尺度)以下なら再分解しない。
+    /// 絶対許容誤差 1e-8 は `‖x_B‖` が大きい問題では相対 1e-15 程度になり、丸めノイズだけで
+    /// 発火して再分解を繰り返す(klein3: ‖x_B‖ が 2e5 → 9e8 に育ち、再分解 15 → 5 回)。
+    /// 1e-14 で Netlib 93 問 -3.1%(pilot87 -6%、pilot -11%)、全問一致。1e-15 は差なし。
+    /// `ENOMOTO_XB_DRIFT_REL_TOL` で上書き可(0 で無効)。
+    pub(crate) const XB_DRIFT_REL_TOL: f64 = 1e-14;
+
     /// [`XB_DRIFT_ESCALATION_STEP`] 回ごとに [`XB_DRIFT_TOL`] の実効値に掛ける倍率。
     pub(crate) const XB_DRIFT_ESCALATION_FACTOR: f64 = 10.0;
 

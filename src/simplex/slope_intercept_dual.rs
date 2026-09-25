@@ -58,7 +58,7 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::sync::OnceLock;
 use crate::params::simplex::{FT_BUMP_LIMIT_FACTOR, FT_CHECK_INTERVAL, FT_MIN_PIVOT, FT_RESIDUAL_TOL, HARRIS_RATIO_TOL, MAX_ITERS_FLOOR, PRIMAL_FEAS_TOL, RESIDUAL_CHECK_MULTIPLIER, STALL_PROGRESS_EPS, STEEPEST_EDGE_FLOOR, TOL};
-use crate::params::slope_intercept_dual::{D_DRIFT_TOL, D_GROSS_MISMATCH_REL_TOL, FT_MAX_UPDATES_FACTOR, FT_MAX_UPDATES_FLOOR, PIVOT_ESCALATION_STEP, SLOPE_TOL, STUCK_ROW_MIN_PIVOT, SYNTH_CLOCK_FACTOR, SYNTH_CLOCK_MIN_UPDATES, XB_CHECK_INTERVAL, XB_DRIFT_ESCALATION_FACTOR, XB_DRIFT_ESCALATION_STEP, XB_DRIFT_TOL, XB_DRIFT_TOL_MAX, X_B_SLOPE_NOISE, Z_SLOPE_TOL};
+use crate::params::slope_intercept_dual::{D_DRIFT_TOL, D_GROSS_MISMATCH_REL_TOL, FT_MAX_UPDATES_FACTOR, FT_MAX_UPDATES_FLOOR, PIVOT_ESCALATION_STEP, SLOPE_TOL, STUCK_ROW_MIN_PIVOT, SYNTH_CLOCK_FACTOR, SYNTH_CLOCK_MIN_UPDATES, XB_CHECK_INTERVAL, XB_DRIFT_ESCALATION_FACTOR, XB_DRIFT_ESCALATION_STEP, XB_DRIFT_REL_TOL, XB_DRIFT_TOL, XB_DRIFT_TOL_MAX, X_B_SLOPE_NOISE, Z_SLOPE_TOL};
 use crate::params::slope_intercept_dual::{
     CHUZR_SHORTLIST_K, CHUZR_SHORTLIST_MAX_LEN_FACTOR, CHUZR_SHORTLIST_MAX_LEN_SLACK, CHUZR_SHORTLIST_MIN_POOL_FACTOR, COMPACT_ROWS_BLOCK, FTRAN_U_HYPER_DENSITY, FTRAN_U_HYPER_TAU_DENSITY,
     GREATEST_IMPROVEMENT_STALL_DIVISOR, GREATEST_IMPROVEMENT_STALL_MIN, GREATEST_IMPROVEMENT_TOP_K, GROSS_MISMATCH_SCALE_FLOOR, INFEASIBLE_PLATEAU_BUDGET_DIVISOR, INFEASIBLE_PLATEAU_STALL_MULT,
@@ -894,6 +894,47 @@ fn residual_norm_affine(
         resid_slope_sq += rs * rs;
     }
     (resid_base_sq.sqrt(), resid_slope_sq.sqrt())
+}
+
+/// [`residual_norm_affine`] の残差の丸め誤差の尺度 `(‖|A_B||x_b_base| + |rhs_base|‖, 傾きチャネルの同じ量)`。
+/// `A_B x_B` を浮動小数点で計算するだけで、残差には `ε × この量` 程度の誤差が乗る。
+/// 引数と空の `rhs_slope`(`delta = 0`)の扱いは [`residual_norm_affine`] と同じ。
+#[allow(clippy::too_many_arguments)]
+fn residual_scale_affine(
+    std: &StdForm,
+    basis: &[usize],
+    x_b_base: &[f64],
+    x_b_slope: &[f64],
+    rhs_base: &[f64],
+    rhs_slope: &[f64],
+    scratch_base: &mut [f64],
+    scratch_slope: &mut [f64],
+) -> (f64, f64) {
+    let slope = !rhs_slope.is_empty();
+    scratch_base.iter_mut().for_each(|v| *v = 0.0);
+    if slope {
+        scratch_slope.iter_mut().for_each(|v| *v = 0.0);
+    }
+    for (pos, &j) in basis.iter().enumerate() {
+        let (b, s) = (x_b_base[pos].abs(), if slope { x_b_slope[pos].abs() } else { 0.0 });
+        for &(i, v) in std.cols.col(j) {
+            scratch_base[i] += v.abs() * b;
+            if slope {
+                scratch_slope[i] += v.abs() * s;
+            }
+        }
+    }
+    let mut base_sq = 0.0f64;
+    let mut slope_sq = 0.0f64;
+    for i in 0..std.n_rows {
+        let sb = scratch_base[i] + rhs_base.get(i).map_or(0.0, |r| r.abs());
+        base_sq += sb * sb;
+        if slope {
+            let ss = scratch_slope[i] + rhs_slope[i].abs();
+            slope_sq += ss * ss;
+        }
+    }
+    (base_sq.sqrt(), slope_sq.sqrt())
 }
 
 /// ドリフト検査の安価な事前検査 S2(`ENOMOTO_XB_DRIFT_SAMPLE`): 行 `i ≡ offset (mod k)` だけで
@@ -2103,6 +2144,8 @@ fn solve_slope_intercept_dual_with(std: &StdForm, opts: &crate::types::LpOptions
     let mut best_infeasible_len = infeasible_rows.rows.len();
     // [`XB_DRIFT_TOL`](エスカレーションの出発点)の上書き(`ENOMOTO_XB_DRIFT_TOL`、A/B 用)。
     let xb_drift_tol: f64 = env_str!("ENOMOTO_XB_DRIFT_TOL").and_then(|s| s.parse::<f64>().ok()).unwrap_or(XB_DRIFT_TOL);
+    // 丸め誤差の尺度に対する相対許容誤差([`XB_DRIFT_REL_TOL`]、0 = 無効)。
+    let xb_drift_rel_tol: f64 = tunable!("ENOMOTO_XB_DRIFT_REL_TOL", XB_DRIFT_REL_TOL, f64);
     // この求解内でのドリフト起因の再分解回数([`XB_DRIFT_TOL`] の段階的緩和に使う)。
     let mut drift_trigger_count: usize = 0;
     // 再分解後最初のドリフト検査で測った残差(その分解自体の雑音水準)。
@@ -3912,6 +3955,20 @@ fn solve_slope_intercept_dual_with(std: &StdForm, opts: &crate::types::LpOptions
                         );
                     }
                     need_refactor = resid_max > effective_drift_tol;
+                    // 丸め誤差の尺度に対する相対判定(`XB_DRIFT_REL_TOL` 参照): 絶対許容誤差を超えても、
+                    // 残差が `A_B x_B` の丸めだけで出る大きさ以下なら再分解しても下がらないので再分解しない。
+                    // 尺度は絶対判定で発火しそうなときだけ計算する(発火しない限り経路と手間は従来どおり)。
+                    if need_refactor && xb_drift_rel_tol > 0.0 {
+                        let (scale_base, scale_slope) = if phase == Phase::A {
+                            (0.0, residual_scale_affine(std, &basis, &x_b_slope, &[], check_rhs_slope, &[], &mut resid_scratch_slope, &mut resid_scratch_base).0)
+                        } else {
+                            residual_scale_affine(std, &basis, &x_b_base, &x_b_slope, check_rhs_base, check_rhs_slope, &mut resid_scratch_base, &mut resid_scratch_slope)
+                        };
+                        need_refactor = resid_base > effective_drift_tol.max(xb_drift_rel_tol * scale_base) || resid_slope > effective_drift_tol.max(xb_drift_rel_tol * scale_slope);
+                        if env_str!("ENOMOTO_DEBUG_XB_DRIFT_EXT").is_some() {
+                            eprintln!("DEBUG_XB_DRIFT_REL: iter={iter_idx} scale_base={scale_base:.3e} scale_slope={scale_slope:.3e} refactor={need_refactor}");
+                        }
+                    }
                     if need_refactor {
                         drift_trigger_count += 1;
                         // 再分解後最初の検査(FT 更新 `XB_CHECK_INTERVAL` 回以内)で既に超えているなら、
