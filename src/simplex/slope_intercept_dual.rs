@@ -1823,6 +1823,9 @@ pub fn solve_slope_intercept_dual(std: &StdForm, opts: &crate::types::LpOptions)
 /// [`solve_slope_intercept_dual`] の本体。`safe_pivot` が真なら、updateVerify で破棄された直後の行を
 /// 再試行するとき、より大きなピボット候補があれば極小ピボットを避ける(`STUCK_ROW_MIN_PIVOT` 参照)。
 fn solve_slope_intercept_dual_with(std: &StdForm, opts: &crate::types::LpOptions, safe_pivot: bool) -> Option<SimplexResult> {
+    // 試し分解がピボットを特異として却下したら、この求解の残りは安全モードにする(下の
+    // `pivot_makes_singular` 参照)。
+    let mut safe_pivot = safe_pivot;
     // 全列数(構造列+スラック列)、行数、構造列数。スラック列は `n_orig..n_total`。
     let n_total = std.n_total;
     let m = std.n_rows;
@@ -3407,7 +3410,33 @@ fn solve_slope_intercept_dual_with(std: &StdForm, opts: &crate::types::LpOptions
             let scale = alpha_q.abs().max(alpha_full[r].abs()).max(GROSS_MISMATCH_SCALE_FLOOR);
             (alpha_q - alpha_full[r]).abs() / scale > D_GROSS_MISMATCH_REL_TOL
         };
-        if pivot_grossly_inconsistent || (!update_verify_disabled && lu.update_count() > 0 && !super::pivot_values_agree(alpha_q, alpha_full[r])) {
+        // 特異になる基底の事前検査: `|alpha_r|` が `FT_MIN_PIVOT` 未満なら FT 更新はこのピボットを
+        // 拒否し、`q` を入れた基底を丸ごと再分解することになる。その基底がほぼ一次従属だと再分解が
+        // 特異で失敗し、確定済みの状態を戻せないまま `NotSolved` で抜けるしかない(greenbea_dual:
+        // `|alpha_r|` = 3.5e-8、2.5e-9)。そこで確定前に `q` を入れた基底を試しに分解し、特異なら
+        // 照合失敗と同じくこのピボットを破棄する(`(r, q)` を禁止して現在の基底で再同期し、選び直す)。
+        // 試し分解は `|alpha_r|` が小さいときだけで、正則なら何も変えない(経路は従来どおり)。
+        // 特異を一度でも検出したら、この求解の残りは安全モード(`safe_pivot`)にする。
+        let pivot_makes_singular = !pivot_grossly_inconsistent && alpha_full[r].abs() < tunable!("ENOMOTO_T_FT_MIN_PIVOT", FT_MIN_PIVOT, f64) && {
+            let leaving = basis[r];
+            basis_pos[leaving] = None;
+            basis_pos[q] = Some(r);
+            // 試し分解の失敗は求解の破綻ではないので、解き直しの判断に使うフラグは元に戻す。
+            let bailout_before = SINGULAR_BAILOUT.with(|f| f.get());
+            let singular = refactorize(std, &basis_pos, Some(&lu)).is_none();
+            SINGULAR_BAILOUT.with(|f| f.set(bailout_before));
+            basis_pos[q] = None;
+            basis_pos[leaving] = Some(r);
+            if singular && env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
+                eprintln!("DEBUG_EXT: singular-pivot probe rejected iter={iter_idx} q={q} r={r} alpha_r={:.3e}", alpha_full[r]);
+            }
+            // 極小ピボットで基底が特異になりかける問題なので、以後この求解は安全モードで続ける
+            // (破棄した行を再試行するとき、より大きな候補があれば極小ピボットを避ける)。
+            // 最初からの解き直しより安い(greenbea_dual)。
+            safe_pivot |= singular;
+            singular
+        };
+        if pivot_grossly_inconsistent || pivot_makes_singular || (!update_verify_disabled && lu.update_count() > 0 && !super::pivot_values_agree(alpha_q, alpha_full[r])) {
             if env_str!("ENOMOTO_DEBUG_D_DRIFT_EXT").is_some() {
                 eprintln!("DEBUG_D_DRIFT: VERIFY_FAIL at iter={iter_idx} q={q} r={r} alpha_q={alpha_q} alpha_full_r={}", alpha_full[r]);
             }
@@ -3432,7 +3461,7 @@ fn solve_slope_intercept_dual_with(std: &StdForm, opts: &crate::types::LpOptions
             note_numeric_trouble!();
             if profile_phases {
                 prof_phases::REFACTOR_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                if pivot_grossly_inconsistent {
+                if pivot_grossly_inconsistent || pivot_makes_singular {
                     prof_phases::REFACTOR_CAUSE_ILLCOND.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 } else {
                     prof_phases::REFACTOR_CAUSE_VERIFY.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
