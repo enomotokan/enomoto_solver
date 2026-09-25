@@ -3260,7 +3260,7 @@ impl FtLu {
         }
     }
 
-    /// 決定的演算量カウンタ ([`Self::tick`]) の現在値。`extended_dual.rs` の
+    /// 決定的演算量カウンタ ([`Self::tick`]) の現在値。`slope_intercept_dual.rs` の
     /// `CLOCK` 再分解トリガが読む。
     pub fn synth_tick(&self) -> u64 {
         self.tick.get()

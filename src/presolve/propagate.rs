@@ -493,7 +493,7 @@ pub struct EqPropagateResult {
 /// 検出 (全項が一方の境界に張り付くときだけ b に届く) と、有限な側からの境界
 /// 強化を行う。書き換えるのは `lb`/`ub` だけで、行自体の縮約は `foldfixed` や
 /// rowsingleton/doubleton/colsingleton に任せる。等式にしか現れない無限境界の
-/// 列に有限境界を与え、拡張双対単体法の M 側処理を減らすのが目的。
+/// 列に有限境界を与え、傾き・切片二段解法の M 側処理を減らすのが目的。
 /// 最大 `passes` パス、変化がなければ打ち切り。
 pub fn propagate_equalities(a: &FaerCsr, b: &[f64], lb: &mut [f64], ub: &mut [f64], passes: usize) -> EqPropagateResult {
     let ar = a.as_ref();

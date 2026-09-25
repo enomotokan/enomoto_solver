@@ -1,4 +1,4 @@
-//! BFRT 付き拡張双対単体法。`solve_lp_dual` の唯一の LP エンジンで、presolve 後の `StdForm`
+//! BFRT 付き傾き・切片二段解法。`solve_lp_dual` の唯一の LP エンジンで、presolve 後の `StdForm`
 //! (構造列に真の無限境界が残っていてもいなくても)を解く。`simplex::solve_std_form_decomposed`
 //! から独立な連結成分ごとに 1 回呼ばれる。`None` を返した場合(「到達しないはず」の破綻)は
 //! `Status::NotSolved` として報告され、代わりに使う別ソルバーは無い。
@@ -58,8 +58,8 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::sync::OnceLock;
 use crate::params::simplex::{FT_BUMP_LIMIT_FACTOR, FT_CHECK_INTERVAL, FT_MIN_PIVOT, FT_RESIDUAL_TOL, HARRIS_RATIO_TOL, MAX_ITERS_FLOOR, PRIMAL_FEAS_TOL, RESIDUAL_CHECK_MULTIPLIER, STALL_PROGRESS_EPS, STEEPEST_EDGE_FLOOR, TOL};
-use crate::params::extended_dual::{D_DRIFT_TOL, D_GROSS_MISMATCH_REL_TOL, FT_MAX_UPDATES_FACTOR, FT_MAX_UPDATES_FLOOR, PIVOT_ESCALATION_STEP, SLOPE_TOL, SYNTH_CLOCK_FACTOR, SYNTH_CLOCK_MIN_UPDATES, XB_CHECK_INTERVAL, XB_DRIFT_ESCALATION_FACTOR, XB_DRIFT_ESCALATION_STEP, XB_DRIFT_TOL, XB_DRIFT_TOL_MAX, X_B_SLOPE_NOISE, Z_SLOPE_TOL};
-use crate::params::extended_dual::{
+use crate::params::slope_intercept_dual::{D_DRIFT_TOL, D_GROSS_MISMATCH_REL_TOL, FT_MAX_UPDATES_FACTOR, FT_MAX_UPDATES_FLOOR, PIVOT_ESCALATION_STEP, SLOPE_TOL, SYNTH_CLOCK_FACTOR, SYNTH_CLOCK_MIN_UPDATES, XB_CHECK_INTERVAL, XB_DRIFT_ESCALATION_FACTOR, XB_DRIFT_ESCALATION_STEP, XB_DRIFT_TOL, XB_DRIFT_TOL_MAX, X_B_SLOPE_NOISE, Z_SLOPE_TOL};
+use crate::params::slope_intercept_dual::{
     CHUZR_SHORTLIST_K, CHUZR_SHORTLIST_MAX_LEN_FACTOR, CHUZR_SHORTLIST_MAX_LEN_SLACK, CHUZR_SHORTLIST_MIN_POOL_FACTOR, COMPACT_ROWS_BLOCK, FTRAN_U_HYPER_DENSITY, FTRAN_U_HYPER_TAU_DENSITY,
     GREATEST_IMPROVEMENT_STALL_DIVISOR, GREATEST_IMPROVEMENT_STALL_MIN, GREATEST_IMPROVEMENT_TOP_K, GROSS_MISMATCH_SCALE_FLOOR, INFEASIBLE_PLATEAU_BUDGET_DIVISOR, INFEASIBLE_PLATEAU_STALL_MULT,
     LEX_REL_TOL, PRICE_COLUMN_DENSITY, PRICE_LIST_DENSITY, SCORE2_STALL_HALFLIFE, STALL_LIMIT_MIN, STALL_LIMIT_PER_ROW, STUCK_ROW_BOOST_FACTOR, STUCK_ROW_BOOST_THRESHOLD, XB_DRIFT_FRESH_FLOOR_FACTOR,
@@ -67,7 +67,7 @@ use crate::params::extended_dual::{
 };
 
 /// `ENOMOTO_PROF_PHASES_EXT` 診断用のフェーズ別計時カウンタ(`simplex::prof_phases` の拡張版)。
-/// [`solve_lp_dual_extended`] の主ループの時間がどこで使われるかを測る。値はすべてナノ秒または
+/// [`solve_slope_intercept_dual`] の主ループの時間がどこで使われるかを測る。値はすべてナノ秒または
 /// 回数の累計で、`reset` で 0 に戻し `report` で標準エラーに出力する。制御フローには使わない。
 mod prof_phases {
     use std::sync::atomic::AtomicUsize;
@@ -737,7 +737,7 @@ fn hat_upper(std: &StdForm, n_orig: usize, j: usize) -> Option<Affine1> {
 
 /// 非基底状態 `status` にある列 `j` の値(`Lower`/`Upper` は [`ColCache`] の値、`Zero` は 0)。
 /// その側が真の無限(スラックのみ)なら `None`。不変条件上起きないはずだが、起きた場合は
-/// パニックではなく `?` で [`solve_lp_dual_extended`] の `None`(`NotSolved`)まで伝播させる
+/// パニックではなく `?` で [`solve_slope_intercept_dual`] の `None`(`NotSolved`)まで伝播させる
 /// (PyO3 境界でのプロセス中断を避けるため)。
 #[inline]
 fn nb_value_affine(cache: &ColCache, status: NbStatus, j: usize) -> Option<Affine1> {
@@ -1732,7 +1732,7 @@ impl ColCache {
     }
 }
 
-/// 拡張双対単体法の本体(論文 6 節・7 節、Algorithm 1)。数値の `M` を固定せずに、`M` 切り詰め問題で
+/// 傾き・切片二段解法の本体(論文 6 節・7 節、Algorithm 1)。数値の `M` を固定せずに、`M` 切り詰め問題で
 /// 主実行可能な状態(段階 A: 傾き問題 → 段階 B: 切片問題)に到達し、その後
 /// [`finish`] で終了判定・cleanup・真の境界での仕上げを行う。
 ///
@@ -1740,7 +1740,7 @@ impl ColCache {
 /// (`distinguish_infeasible_unbounded` が偽なら `z^1 < 0` の時点で
 /// `InfeasibleOrUnbounded` を返す)。戻り値 `None` は「到達しないはず」の数値的破綻や
 /// 反復上限到達で、呼び出し側が `Status::NotSolved` として報告する。
-pub fn solve_lp_dual_extended(std: &StdForm, opts: &crate::types::LpOptions) -> Option<SimplexResult> {
+pub fn solve_slope_intercept_dual(std: &StdForm, opts: &crate::types::LpOptions) -> Option<SimplexResult> {
     // 全列数(構造列+スラック列)、行数、構造列数。スラック列は `n_orig..n_total`。
     let n_total = std.n_total;
     let m = std.n_rows;
@@ -4772,7 +4772,7 @@ fn dot(a: &[f64], b: &[f64]) -> f64 {
     a.iter().zip(b.iter()).map(|(&x, &y)| x * y).sum()
 }
 
-/// 拡張双対単体法の単体テスト(手作りの小さな `StdForm` で各経路を検証する)。
+/// 傾き・切片二段解法の単体テスト(手作りの小さな `StdForm` で各経路を検証する)。
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4780,7 +4780,7 @@ mod tests {
     use std::sync::atomic::Ordering::Relaxed;
 
     /// 各行がスラック項を含んだ疎行リストから `StdForm` を直接組み立てる
-    /// (presolve を経由せず、[`solve_lp_dual_extended`] 単体を検証するため)。
+    /// (presolve を経由せず、[`solve_slope_intercept_dual`] 単体を検証するため)。
     fn std_form(rows: &[Vec<(usize, f64)>], b: Vec<f64>, c: Vec<f64>, lb: Vec<f64>, ub: Vec<f64>) -> StdForm {
         let n_total = lb.len();
         let n_rows = rows.len();
@@ -4802,7 +4802,7 @@ mod tests {
         // x0 は自由、x1 ∈ [0,10]、x0 + x1 + s = 5、s ∈ [0,0]。min -x0(= max x0)。
         // x0 = 5 - x1 ∈ [-5, 5] なので最適は x0 = 5, x1 = 0。
         let std = std_form(&[vec![(0, 1.0), (1, 1.0), (2, 1.0)]], vec![5.0], vec![-1.0, 0.0, 0.0], vec![f64::NEG_INFINITY, 0.0, 0.0], vec![f64::INFINITY, 10.0, 0.0]);
-        let res = solve_lp_dual_extended(&std, &crate::types::LpOptions::default()).expect("should reach a mathematical answer, not the None fallback sentinel");
+        let res = solve_slope_intercept_dual(&std, &crate::types::LpOptions::default()).expect("should reach a mathematical answer, not the None fallback sentinel");
         assert_eq!(res.status, Status::Optimal);
         let x = res.x.unwrap();
         assert!(approx(x[0], 5.0), "x={x:?}");
@@ -4820,7 +4820,7 @@ mod tests {
         // 状態 `Z`(値 0、論文の注意 6.7)に置かれる。
         let rows = vec![vec![(0, 1.0), (1, -1.0), (2, 1.0)], vec![(0, -1.0), (1, 1.0), (3, 1.0)]];
         let std = std_form(&rows, vec![3.0, 3.0], vec![1.0, -1.0, 0.0, 0.0], vec![f64::NEG_INFINITY, f64::NEG_INFINITY, 0.0, 0.0], vec![f64::INFINITY, f64::INFINITY, f64::INFINITY, f64::INFINITY]);
-        let res = solve_lp_dual_extended(&std, &crate::types::LpOptions::default()).expect("cleanup case (A) parks the free survivor at Zero instead of bailing");
+        let res = solve_slope_intercept_dual(&std, &crate::types::LpOptions::default()).expect("cleanup case (A) parks the free survivor at Zero instead of bailing");
         assert_eq!(res.status, Status::Optimal);
         let x = res.x.unwrap();
         assert!(approx(x[0] - x[1], -3.0), "x={x:?}");
@@ -4838,7 +4838,7 @@ mod tests {
         let std = std_form(&[vec![(0, 1.0), (1, 1.0), (2, 1.0)]], vec![5.0], vec![0.0, 1.0, 0.0], vec![f64::NEG_INFINITY, 0.0, 0.0], vec![f64::INFINITY, 10.0, 0.0]);
         assert_eq!(crash(&std, &super::super::perturb_costs(&std), 2)[0], Some(NbStatus::Zero));
         let before = CLEANUP_PIVOTS.load(Relaxed);
-        let res = solve_lp_dual_extended(&std, &crate::types::LpOptions::default()).expect("should reach a mathematical answer, not the None fallback sentinel");
+        let res = solve_slope_intercept_dual(&std, &crate::types::LpOptions::default()).expect("should reach a mathematical answer, not the None fallback sentinel");
         assert_eq!(res.status, Status::Optimal);
         let x = res.x.unwrap();
         assert!(approx(x[0], 5.0) && approx(x[1], 0.0), "x={x:?}");
@@ -4853,7 +4853,7 @@ mod tests {
         // 着地するので cleanup は発火しない(`CLEANUP_PIVOTS` 不変)。
         let std = std_form(&[vec![(0, 1.0), (1, 1.0), (2, 1.0)]], vec![5.0], vec![-1.0, 0.0, 0.0], vec![0.0, 0.0, 0.0], vec![f64::INFINITY, 10.0, 0.0]);
         let before = CLEANUP_PIVOTS.load(Relaxed);
-        let res = solve_lp_dual_extended(&std, &crate::types::LpOptions::default()).expect("should reach a mathematical answer, not the None fallback sentinel");
+        let res = solve_slope_intercept_dual(&std, &crate::types::LpOptions::default()).expect("should reach a mathematical answer, not the None fallback sentinel");
         assert_eq!(res.status, Status::Optimal);
         let x = res.x.unwrap();
         assert!(approx(x[0], 5.0), "x={x:?}");
@@ -4866,7 +4866,7 @@ mod tests {
     fn m_zero_bounded_direction_is_optimal_at_its_finite_bound() {
         // 行なし。x0 ∈ [0, +inf)、コストは有限の下限側を好む(`m == 0` 近道の有界分岐)。
         let std = std_form(&[], vec![], vec![1.0], vec![0.0], vec![f64::INFINITY]);
-        let res = solve_lp_dual_extended(&std, &crate::types::LpOptions::default()).expect("should reach a mathematical answer, not the None fallback sentinel");
+        let res = solve_slope_intercept_dual(&std, &crate::types::LpOptions::default()).expect("should reach a mathematical answer, not the None fallback sentinel");
         assert_eq!(res.status, Status::Optimal);
         assert!(approx(res.x.unwrap()[0], 0.0));
     }
@@ -4876,7 +4876,7 @@ mod tests {
     fn m_zero_unbounded_direction_reports_unbounded() {
         // 行なし。x0 ∈ [0, +inf)、コストは無限側を好む(`m == 0` 近道の非有界分岐)。
         let std = std_form(&[], vec![], vec![-1.0], vec![0.0], vec![f64::INFINITY]);
-        let res = solve_lp_dual_extended(&std, &crate::types::LpOptions::default()).expect("should reach a mathematical answer, not the None fallback sentinel");
+        let res = solve_slope_intercept_dual(&std, &crate::types::LpOptions::default()).expect("should reach a mathematical answer, not the None fallback sentinel");
         assert_eq!(res.status, Status::Unbounded);
     }
 
@@ -4886,7 +4886,7 @@ mod tests {
         // x0 ∈ [0,+inf)、x1 ∈ [0,5]、x0 + x1 + s = -1、s ∈ [0,0]。
         // x0, x1 >= 0 の和が負になることはないので実行不能。
         let std = std_form(&[vec![(0, 1.0), (1, 1.0), (2, 1.0)]], vec![-1.0], vec![0.0, 0.0, 0.0], vec![0.0, 0.0, 0.0], vec![f64::INFINITY, 5.0, 0.0]);
-        let res = solve_lp_dual_extended(&std, &crate::types::LpOptions::default()).expect("should reach a mathematical answer, not the None fallback sentinel");
+        let res = solve_slope_intercept_dual(&std, &crate::types::LpOptions::default()).expect("should reach a mathematical answer, not the None fallback sentinel");
         assert_eq!(res.status, Status::Infeasible);
     }
 
@@ -4900,7 +4900,7 @@ mod tests {
         // `m == 0` 近道ではなく主ループ→cleanup の経路を通す。
         let std = std_form(&[vec![(1, 1.0), (2, 1.0)]], vec![3.0], vec![0.0, 0.0, 0.0], vec![f64::NEG_INFINITY, 0.0, 0.0], vec![0.0, 10.0, 0.0]);
         let before = CLEANUP_PIVOTS.load(Relaxed);
-        let res = solve_lp_dual_extended(&std, &crate::types::LpOptions::default()).expect("should reach a mathematical answer, not the None fallback sentinel");
+        let res = solve_slope_intercept_dual(&std, &crate::types::LpOptions::default()).expect("should reach a mathematical answer, not the None fallback sentinel");
         assert_eq!(res.status, Status::Optimal);
         let x = res.x.unwrap();
         assert!(approx(x[0], 0.0), "x={x:?}");
@@ -4955,7 +4955,7 @@ mod tests {
             vec![f64::INFINITY, 1.0, 1.0, 0.0],
         );
         let flips_before = COMBINED_FLIP_COUNT.load(Relaxed);
-        let res = solve_lp_dual_extended(&std, &crate::types::LpOptions::default()).expect("should reach a mathematical answer, not the None fallback sentinel");
+        let res = solve_slope_intercept_dual(&std, &crate::types::LpOptions::default()).expect("should reach a mathematical answer, not the None fallback sentinel");
         assert_eq!(res.status, Status::Optimal);
         let x = res.x.unwrap();
         assert!(approx(x[0], 8.0), "x={x:?}");

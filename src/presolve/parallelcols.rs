@@ -403,7 +403,7 @@ mod tests {
         // to `-inf` (`lo = min(s*lb[var], s*ub[var]) = min(0, -inf) =
         // -inf`), producing a genuinely free (`lb=-inf` *and* `ub=+inf`)
         // structural column downstream -- exactly what
-        // `presolve::freevar`/`simplex::extended_dual`'s own preconditions
+        // `presolve::freevar`/`simplex::slope_intercept_dual`'s own preconditions
         // require never exists past this point (see this loop's own
         // comment). Must be refused outright, not merged.
         let a = csr_from_rows(&[vec![(0, 1.0), (1, -1.0)]], 2);

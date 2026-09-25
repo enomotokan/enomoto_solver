@@ -6704,6 +6704,8 @@ longer rejected here.")
 
 | 旧名 | 新名 | 場所 |
 |---|---|---|
+| モジュール `simplex::extended_dual` (`extended_dual.rs`)、`params::extended_dual` | `simplex::slope_intercept_dual` (`slope_intercept_dual.rs`)、`params::slope_intercept_dual` | simplex |
+| `solve_lp_dual_extended` | `solve_slope_intercept_dual` | slope_intercept_dual.rs |
 | `LARGE` | `MIMALLOC_SIZE_LIMIT` | params::alloc (lib.rs) |
 | `EPS` (propagate / smallcoeff) | `PROPAGATE_EPS` / `SMALLCOEFF_EPS` | params::presolve |
 | 関数内 `REL_TOL` (4 箇所) | `LEX_REL_TOL` | params::extended_dual |

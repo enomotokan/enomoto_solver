@@ -7,7 +7,7 @@ the deterministic-tick ("CLOCK") refactorization trigger — see
 `analysis/ft_refactor_trigger_20260922_040850.md`.
 
 New fields per problem (parsed from this crate's own
-`ENOMOTO_PROF_PHASES_EXT` diagnostic, `src/simplex/extended_dual.rs`'s own
+`ENOMOTO_PROF_PHASES_EXT` diagnostic, `src/simplex/slope_intercept_dual.rs`'s own
 `prof_phases` module — collected in a *second*, untimed subprocess per
 problem so the profiling overhead it adds (+5-8%, measured in the analysis
 above) never contaminates `ours_time` itself, which stays comparable to

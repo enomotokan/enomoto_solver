@@ -128,8 +128,8 @@ pub(crate) mod simplex {
     pub(crate) const COST_PERTURB_BASE: f64 = 5e-7;
 }
 
-/// 拡張双対単体法 (src/simplex/extended_dual.rs)
-pub(crate) mod extended_dual {
+/// 傾き・切片二段解法 (src/simplex/slope_intercept_dual.rs)
+pub(crate) mod slope_intercept_dual {
     /// `x_B(M)` の増分維持値のドリフト検査(と eta フィル検査)を行う主ループの反復間隔。
     /// `fill_count` にかかわらず毎回検査し、古典法のように `RESIDUAL_CHECK_MULTIPLIER` で
     /// さらに間引くことはしない(比較の多くが傾き項で `LEX_REL_TOL = 1e-9` という厳しさで決まるため)。

@@ -1,7 +1,7 @@
 //! LP 求解の最上位の振り分け。`root_solver` (`types::RootSolver`、Python の
 //! `Model.solve(root_solver=...)`) で選ばれたエンジンに LP を渡し、
 //! 得られた解から目的関数値 (定数項込み) を計算して `SolveResult` にまとめる。
-//! 既定は `Simplex` (拡張双対単体法)。`Interior` (IP-PMM 内点法) は明示指定時のみ。
+//! 既定は `Simplex` (傾き・切片二段解法)。`Interior` (IP-PMM 内点法) は明示指定時のみ。
 
 use crate::interior_point;
 use crate::simplex;

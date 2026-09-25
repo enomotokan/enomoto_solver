@@ -6,8 +6,8 @@
 //!   - `model` — PyO3 の入口 `PyModel`。Python 側 `Model` からの入力を検証して保持する。
 //!   - `solver` — LP を選択されたエンジンへ振り分け、目的関数値を復元する薄い層。
 //!   - `mip` — 整数変数を含む問題のための深さ優先の分枝限定法 (`solver` の上に乗る)。
-//!   - `simplex` (+ `simplex::lu`, `simplex::extended_dual`) — 既定の LP エンジン。
-//!     現在は拡張双対単体法のエンジンだけを含む (古典的な双対単体法は削除済み)。
+//!   - `simplex` (+ `simplex::lu`, `simplex::slope_intercept_dual`) — 既定の LP エンジン。
+//!     現在は傾き・切片二段解法のエンジンだけを含む (古典的な双対単体法は削除済み)。
 //!   - `presolve` (+ `presolve/*`) — 前処理 (スケーリング、冗長行の除去、制約伝播、
 //!     各種の変数消去) と、その後処理 (消去した変数の値の復元)。
 //!   - `interior_point` (+ `qp`, `kkt`) — IP-PMM 内点法。既定では使われず、

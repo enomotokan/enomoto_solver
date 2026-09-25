@@ -93,7 +93,7 @@ impl RowSense {
 /// 同じ問題で結果を突き合わせる検証に使える。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RootSolver {
-    /// 拡張双対単体法 (既定)。
+    /// 傾き・切片二段解法 (既定)。
     Simplex,
     /// IP-PMM 内点法。
     Interior,
@@ -170,7 +170,7 @@ pub enum Status {
     /// 目的関数が非有界。
     Unbounded,
     /// 有限の最適値を持たないこと (実行不能か非有界のどちらか) は証明したが、
-    /// どちらかは区別していない。拡張双対単体法の段階 A (傾き問題) が `z^1 < 0` で
+    /// どちらかは区別していない。傾き・切片二段解法の段階 A (傾き問題) が `z^1 < 0` で
     /// 終わった場合 (論文の系 7.3 (i))。
     /// [`LpOptions::distinguish_infeasible_unbounded`] が `false` (既定) のときだけ返る。
     /// `true` なら段階 B まで進めて `Infeasible` か `Unbounded` を返す。

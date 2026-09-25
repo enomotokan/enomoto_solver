@@ -1,19 +1,19 @@
 //! 有界変数つき改訂単体法の共通基盤。
 //!
 //! `solver::solve_lp` の既定エンジン (MIP の各分枝限定ノードでも使用) で、
-//! 実際の求解は拡張双対単体法 [`extended_dual::solve_lp_dual_extended`] が行う。
+//! 実際の求解は傾き・切片二段解法 [`slope_intercept_dual::solve_slope_intercept_dual`] が行う。
 //! 前処理後の問題が独立な連結成分に分かれる場合は成分ごとに解く
 //! ([`solve_std_form_decomposed`])。このモジュールが持つのは次の共通部品:
 //! 標準形 [`StdForm`] の構築と前処理との接続、基底状態 [`Tableau`]、
-//! 拡張双対の仕上げ段階から引き継がれる主単体法 [`run_phase`]、
-//! 双対最急辺 (DSE) の重み [`DseState`] など。拡張双対が解を出せなかった場合は
+//! 傾き・切片二段解法の仕上げ段階から引き継がれる主単体法 [`run_phase`]、
+//! 双対最急辺 (DSE) の重み [`DseState`] など。傾き・切片二段解法が解を出せなかった場合は
 //! [`Status::NotSolved`] を返す。
 //!
 //! ## 変数の上下限
 //!
 //! 構造変数の上下限は片側/両側とも無限でもよい。前処理で消せなかった無限の上下限は
-//! そのまま `extended_dual` に渡され、そこで記号的 (M の係数) に扱われる。
-//! [`Tableau`] と主単体法は、`extended_dual` が真の上下限内に収めた基底しか受け取らない。
+//! そのまま `slope_intercept_dual` に渡され、そこで記号的 (M の係数) に扱われる。
+//! [`Tableau`] と主単体法は、`slope_intercept_dual` が真の上下限内に収めた基底しか受け取らない。
 //! スラック列 (各行に 1 本) は `<=`/`>=` 行では `[0, inf)` の片側無限なので、
 //! 比率テスト/EXPAND は無限上限を扱う必要がある。
 //!
@@ -52,7 +52,7 @@
 //!
 //! ## 双対法
 //!
-//! 本体は `extended_dual` (DSE 価格付け・BFRT・被約費用の差分更新)。
+//! 本体は `slope_intercept_dual` (DSE 価格付け・BFRT・被約費用の差分更新)。
 //! 上の主単体法はその仕上げ段階の引き継ぎ先としてだけ使われる。
 //!
 //! ## 並列化の方針
@@ -75,8 +75,8 @@ pub(crate) use lu::tiny_drop;
 /// `lu` モジュールの別名 (ローカル変数 `lu` との衝突回避)。
 use self::lu as sparse_lu;
 
-/// 拡張双対単体法 (実際の LP 求解本体)。
-mod extended_dual;
+/// 傾き・切片二段解法 (実際の LP 求解本体)。
+mod slope_intercept_dual;
 
 /// 単体法の各メインループの反復上限を問題サイズから決める。
 ///
@@ -93,7 +93,7 @@ fn max_iters_for(m: usize, n_total: usize) -> usize {
 /// 列方向の値 (`alpha_buf[p]`) で、同じピボットの 2 通りの計算値でなければならない。
 /// 両者の相対差が [`UPDATE_VERIFY_TOL`] 以下なら `true` (このピボットで続行)、
 /// そうでなければ `false` (コミット前に再分解すべき)。ピボットの選び方には影響せず、
-/// 再分解のタイミングだけを変える。`extended_dual` からも呼ばれる。
+/// 再分解のタイミングだけを変える。`slope_intercept_dual` からも呼ばれる。
 #[inline]
 pub(super) fn pivot_values_agree(alpha_row: f64, alpha_col: f64) -> bool {
     let scale = alpha_row.abs().max(alpha_col.abs()).max(tunable!("ENOMOTO_T_FT_MIN_PIVOT", FT_MIN_PIVOT, f64));
@@ -206,7 +206,7 @@ enum NbStatus {
     /// 上限に置かれている。
     Upper,
     /// 値 0 に置かれた自由列 (論文の状態 `Z`, 3.1 節)。`lb == -inf` かつ `ub == +inf` の
-    /// 列に限り、`extended_dual` だけが作る (費用 0 の自由列のクラッシュ、cleanup の場合 (A))。
+    /// 列に限り、`slope_intercept_dual` だけが作る (費用 0 の自由列のクラッシュ、cleanup の場合 (A))。
     /// 被約費用がちょうど 0 のとき双対実行可能で、どちら向きにも入れ、フリップはしない。
     /// [`run_phase`] も引き継ぎで受け取りうるので、すべての match で扱う。
     Zero,
@@ -431,7 +431,7 @@ fn build_std_form_presolved(
         ub[j] -= s;
     }
 
-    // まだ無限の上下限を持つ構造列はそのまま残し、`extended_dual` が記号的に扱う。
+    // まだ無限の上下限を持つ構造列はそのまま残し、`slope_intercept_dual` が記号的に扱う。
     if env_str!("ENOMOTO_DEBUG_UNBOUNDED_VARS").is_some() {
         let count = (0..n).filter(|&j| lb[j] == f64::NEG_INFINITY || ub[j] == f64::INFINITY).count();
         if count > 0 {
@@ -441,7 +441,7 @@ fn build_std_form_presolved(
 
     // 列の圧縮: `lb[j] < ub[j]` の構造列だけに連番の列番号を振り、固定列は
     // 求解の列空間から外す (その寄与は下で各行の右辺に畳み込む)。両側無限の
-    // 自由列も通常の列と同じく 1 列として残す (`extended_dual` が両側を記号的に扱う)。
+    // 自由列も通常の列と同じく 1 列として残す (`slope_intercept_dual` が両側を記号的に扱う)。
     let mut new_index: Vec<Option<usize>> = vec![None; n]; // 元の列 j → 圧縮後の列番号 (固定列は None)
     let mut orig_of_kept: Vec<usize> = Vec::new();
     let mut sign: Vec<f64> = Vec::new();
@@ -817,7 +817,7 @@ fn try_refactorize(std: &StdForm, t: &Tableau, prev: Option<&sparse_lu::FtLu>) -
 ///
 /// 戻り値は段階の結果の状態。途中の再分解で基底が数値的に特異になった場合は `None`
 /// を返し、このとき `t` の内容は信用できないので呼び出し側は読んではならない
-/// (唯一の呼び出し元である `extended_dual` の仕上げ引き継ぎは `NotSolved` を報告する)。
+/// (唯一の呼び出し元である `slope_intercept_dual` の仕上げ引き継ぎは `NotSolved` を報告する)。
 /// 反復上限に達した場合は最善努力として `Optimal` を返す。
 fn run_phase(
     std: &StdForm,
@@ -1141,7 +1141,7 @@ fn run_phase(
     Some(Status::Optimal) // 反復上限に到達 (最善努力)
 }
 
-/// 差分更新版の第 2 段階主単体法 (`extended_dual` の仕上げ → 主単体法引き継ぎ専用、
+/// 差分更新版の第 2 段階主単体法 (`slope_intercept_dual` の仕上げ → 主単体法引き継ぎ専用、
 /// `ENOMOTO_HANDOFF_INCREMENTAL=1` で有効、既定は無効)。
 ///
 /// [`run_phase`] が毎反復すべてを作り直すのに対し、`x_B` と被約費用 `d` を差分更新する:
@@ -1544,18 +1544,18 @@ fn split_std_form(std: &StdForm, components: &[Vec<usize>]) -> Vec<StdForm> {
     result
 }
 
-/// 前処理済みの `StdForm` を [`extended_dual::solve_lp_dual_extended`] で解く。
+/// 前処理済みの `StdForm` を [`slope_intercept_dual::solve_slope_intercept_dual`] で解く。
 ///
 /// [`connected_components_of_std_form`] が「実質的な」成分 (2 変数以上、または行に
 /// 現れる 1 変数) を 2 つ以上見つけたときだけ成分ごとに分けて解き、元の変数番号で
 /// 1 つの [`SimplexResult`] に組み立てる (状態の合成は [`combine_component_statuses`])。
 /// どれかの成分が [`PARALLEL_COMPONENT_MIN_VARS`] 以上なら rayon で並列に解く。
 /// 行を持たない孤立変数だけを切り出しても利益がない (かえって遅く、ピボット経路も
-/// 変わる) ので、その場合は分割せず一括で解く。拡張双対が `None` を返したら
+/// 変わる) ので、その場合は分割せず一括で解く。傾き・切片二段解法が `None` を返したら
 /// [`Status::NotSolved`] とする。
 fn solve_std_form_decomposed(std: &StdForm, opts: &crate::types::LpOptions) -> SimplexResult {
-    // 1 つの標準形を拡張双対で解く (諦めたら NotSolved)。
-    let solve_one = |s: &StdForm| extended_dual::solve_lp_dual_extended(s, opts).unwrap_or(SimplexResult { status: Status::NotSolved, x: None });
+    // 1 つの標準形を傾き・切片二段解法で解く (諦めたら NotSolved)。
+    let solve_one = |s: &StdForm| slope_intercept_dual::solve_slope_intercept_dual(s, opts).unwrap_or(SimplexResult { status: Status::NotSolved, x: None });
 
     let Some((components, has_row)) = connected_components_of_std_form(std) else {
         return solve_one(std);
@@ -1646,7 +1646,7 @@ impl DseState {
 
     /// 任意の (分解済みの) 基底に対する正確な重みを計算する。行 `i` ごとに BTRAN
     /// (`B^T z = e_i`) を 1 回行い `w[i] = ||z||^2` とする (計 m 回)。`lu` は重みを
-    /// 求めたい基底の分解でなければならない (`extended_dual` は再分解の直後に呼ぶ)。
+    /// 求めたい基底の分解でなければならない (`slope_intercept_dual` は再分解の直後に呼ぶ)。
     fn from_basis(m: usize, lu: &sparse_lu::FtLu) -> Self {
         let mut w = vec![1.0; m];
         let mut scratch = vec![0.0; m];
@@ -1726,7 +1726,7 @@ impl DseState {
 /// 実行可能な行は `chuzr` のスコアがちょうど 0 で選ばれ得ないので、候補はこの集合だけで十分。
 /// 行の実行可能性が変わるのは `x_B` の値か基底変数が変わるときだけで、それらは既存の
 /// O(m) ループ内で行ごとに `set` を呼んで追跡する (HiGHS の `HEkkDualRHS::workIndex` 相当)。
-/// `extended_dual` からも使われる。
+/// `slope_intercept_dual` からも使われる。
 pub(super) struct InfeasibleRows {
     /// 現在実行不能な行番号 (順不同)。
     pub(super) rows: Vec<usize>,
@@ -1781,7 +1781,7 @@ impl InfeasibleRows {
     }
 }
 
-/// `extended_dual` の診断出力が読むプロセス全体のカウンタ。
+/// `slope_intercept_dual` の診断出力が読むプロセス全体のカウンタ。
 mod prof_phases {
     use std::sync::atomic::AtomicUsize;
     /// 主単体法ループ ([`super::run_phase`] 等) の累計反復数 (プロセス全体)。
@@ -1795,12 +1795,12 @@ pub fn solve_lp_dual(variables: &[VariableData], objective: &Objective, constrai
     solve_lp_dual_with(variables, objective, constraints, crate::types::LpOptions::default())
 }
 
-/// モデルの LP を前処理 → 拡張双対単体法 → 後処理で解く (オプション指定版)。
+/// モデルの LP を前処理 → 傾き・切片二段解法 → 後処理で解く (オプション指定版)。
 ///
 /// 既定では状態は `Optimal`/`Infeasible`/`InfeasibleOrUnbounded` のいずれか
 /// (論文の系 7.3 (i))。他の経路で得た `Unbounded` も
 /// `opts.distinguish_infeasible_unbounded` が偽なら `InfeasibleOrUnbounded` にまとめる。
-/// 拡張双対が解を出せなければ [`Status::NotSolved`]。
+/// 傾き・切片二段解法が解を出せなければ [`Status::NotSolved`]。
 pub fn solve_lp_dual_with(variables: &[VariableData], objective: &Objective, constraints: &[ConstraintRow], opts: crate::types::LpOptions) -> SimplexResult {
     let result = solve_lp_dual_full_status(variables, objective, constraints, opts);
     if result.status == Status::Unbounded && !opts.distinguish_infeasible_unbounded {
@@ -2165,7 +2165,7 @@ mod tests {
     }
 
     /// 不等式行の対でのみ x0+x1=5, x0-x1=1 に拘束される両側無限の自由変数 2 つ
-    /// (前処理で消せない残余ケース) を、分割せずに `extended_dual` が解けることを確認する。正解 (3,2)。
+    /// (前処理で消せない残余ケース) を、分割せずに `slope_intercept_dual` が解けることを確認する。正解 (3,2)。
     #[test]
     fn freevar_residual_both_sides_infinite_only_in_inequality_rows_end_to_end() {
         let vars = vec![var(f64::NEG_INFINITY, f64::INFINITY), var(f64::NEG_INFINITY, f64::INFINITY)];
@@ -2200,7 +2200,7 @@ mod tests {
         assert!(approx(x[1], 2.5), "x={x:?}");
     }
 
-    /// 互いにだけ結合した 2 つの自由変数 (最適解は直線 x0 - x1 = -3)。`extended_dual` の
+    /// 互いにだけ結合した 2 つの自由変数 (最適解は直線 x0 - x1 = -3)。`slope_intercept_dual` の
     /// cleanup が一方を `NbStatus::Zero` に置き、正しい目的値で終わることを確認する。
     #[test]
     fn mutually_coupled_free_variables_reach_a_correct_answer() {
@@ -2280,7 +2280,7 @@ mod tests {
         check(dual.x.unwrap());
     }
 
-    /// 行に現れない x0∈[0,+inf) の費用が無限側を向く → 非有界 (前処理 → 標準形 → 拡張双対の全経路)。
+    /// 行に現れない x0∈[0,+inf) の費用が無限側を向く → 非有界 (前処理 → 標準形 → 傾き・切片二段解法の全経路)。
     #[test]
     fn solve_lp_dual_end_to_end_unbounded_structural_column() {
         let vars = vec![var(0.0, f64::INFINITY), var(0.0, 10.0)];
@@ -2488,9 +2488,9 @@ mod tests {
         StdForm { n_total, n_rows: 2, c, rows, cols, b: caps.to_vec(), lb, ub }
     }
 
-    /// 各 250 変数の 2 ブロック (`PARALLEL_COMPONENT_MIN_VARS` 以上) を rayon 並列の拡張双対で解くこと。
+    /// 各 250 変数の 2 ブロック (`PARALLEL_COMPONENT_MIN_VARS` 以上) を rayon 並列の傾き・切片二段解法で解くこと。
     #[test]
-    fn large_independent_components_are_solved_by_parallel_extended_calls() {
+    fn large_independent_components_are_solved_by_parallel_slope_intercept_calls() {
         /// 1 ブロックあたりの変数数。
         const K: usize = 250;
         assert!(K >= PARALLEL_COMPONENT_MIN_VARS);

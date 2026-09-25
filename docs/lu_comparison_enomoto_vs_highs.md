@@ -135,7 +135,7 @@ HiGHS は `pivot_threshold` (デフォルト0.1、`kMinPivotThreshold=8e-4`〜
    ドリフト起因の再分解だけで 10 回に届く問題が多く (`pilot` 21、`dfl001` 24、
    `greenbea` 22)、「病的な解にだけ効く安全弁」にならなかった。
    段幅を上げると NETLIB93 では一度も発火しなくなるだけなので、再調整では
-   なく **既定で無効** (`extended_dual::PIVOT_ESCALATION_STEP = 0`) とし、
+   なく **既定で無効** (`slope_intercept_dual::PIVOT_ESCALATION_STEP = 0`) とし、
    配管と env ゲート (`ENOMOTO_PIVOT_THRESHOLD` /
    `ENOMOTO_PIVOT_ESCALATION_STEP`) だけ残した。既定ビルドの挙動は変更前と
    同一。
