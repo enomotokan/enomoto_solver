@@ -157,6 +157,12 @@ pub(crate) mod slope_intercept_dual {
     /// 策9: 大きな問題でのドリフト検査の反復間隔(`ENOMOTO_T_XB_CHECK_CADENCE_LARGE`)。
     pub(crate) const XB_CHECK_CADENCE_LARGE: usize = 100;
 
+    /// 策12(部分 `tau`): 行数 `m` がこれ以上の問題では、融合 FTRAN の DSE `tau = B^-1 rho` を
+    /// 入る列の結果の非ゼロ行(DSE 重み更新が読む行)でだけ求める(`ENOMOTO_T_PARTIAL_TAU_MIN_M`、0 = 無効)。
+    /// 求めた値はビット一致だが CLOCK tick の数え方が変わる(再分解の時期が変わりうる)ので、
+    /// Netlib(`m` ≤ 約 6K)には掛からないようにしている。
+    pub(crate) const PARTIAL_TAU_MIN_M: usize = 10_000;
+
     /// `x_B(M)` のドリフト検査の許容誤差(残差 `‖A_B x_B - rhs‖` の絶対値、基底・傾きの両チャネル)。
     /// 比較が `1e-9` の相対許容誤差で決まるので、古典法の `FT_RESIDUAL_TOL`(1e-4)より十分厳しくする。
     /// 1 回の求解内で、ドリフト起因の再分解が [`XB_DRIFT_ESCALATION_STEP`] 回起きるごとに

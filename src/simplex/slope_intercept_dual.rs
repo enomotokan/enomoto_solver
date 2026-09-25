@@ -58,7 +58,7 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::sync::OnceLock;
 use crate::params::simplex::{FT_BUMP_LIMIT_FACTOR, FT_CHECK_INTERVAL, FT_MIN_PIVOT, FT_RESIDUAL_TOL, HARRIS_RATIO_TOL, MAX_ITERS_FLOOR, PRIMAL_FEAS_TOL, RESIDUAL_CHECK_MULTIPLIER, STALL_PROGRESS_EPS, STEEPEST_EDGE_FLOOR, TOL};
-use crate::params::slope_intercept_dual::{D_DRIFT_TOL, D_GROSS_MISMATCH_REL_TOL, FT_MAX_UPDATES_FACTOR, FT_MAX_UPDATES_FLOOR, PIVOT_ESCALATION_STEP, SLOPE_TOL, STUCK_ROW_MIN_PIVOT, SYNTH_CLOCK_FACTOR, SYNTH_CLOCK_LARGE_M, SYNTH_CLOCK_LARGE_REF_M, SYNTH_CLOCK_MIN_UPDATES, XB_CHECK_CADENCE, XB_CHECK_CADENCE_LARGE, XB_CHECK_CADENCE_LARGE_M, XB_CHECK_INTERVAL, XB_DRIFT_ESCALATION_FACTOR, XB_DRIFT_ESCALATION_STEP, XB_DRIFT_REL_TOL, XB_DRIFT_TOL, XB_DRIFT_TOL_MAX, X_B_SLOPE_NOISE, Z_SLOPE_TOL};
+use crate::params::slope_intercept_dual::{D_DRIFT_TOL, D_GROSS_MISMATCH_REL_TOL, FT_MAX_UPDATES_FACTOR, FT_MAX_UPDATES_FLOOR, PARTIAL_TAU_MIN_M, PIVOT_ESCALATION_STEP, SLOPE_TOL, STUCK_ROW_MIN_PIVOT, SYNTH_CLOCK_FACTOR, SYNTH_CLOCK_LARGE_M, SYNTH_CLOCK_LARGE_REF_M, SYNTH_CLOCK_MIN_UPDATES, XB_CHECK_CADENCE, XB_CHECK_CADENCE_LARGE, XB_CHECK_CADENCE_LARGE_M, XB_CHECK_INTERVAL, XB_DRIFT_ESCALATION_FACTOR, XB_DRIFT_ESCALATION_STEP, XB_DRIFT_REL_TOL, XB_DRIFT_TOL, XB_DRIFT_TOL_MAX, X_B_SLOPE_NOISE, Z_SLOPE_TOL};
 use crate::params::slope_intercept_dual::{
     CHUZR_SHORTLIST_AUTO_DIV, CHUZR_SHORTLIST_AUTO_K, CHUZR_SHORTLIST_AUTO_K_MAX, CHUZR_SHORTLIST_AUTO_MIN_M, CHUZR_SHORTLIST_K, CHUZR_SHORTLIST_MAX_LEN_FACTOR, CHUZR_SHORTLIST_MAX_LEN_SLACK, CHUZR_SHORTLIST_MIN_POOL_FACTOR, COMPACT_ROWS_BLOCK, FTRAN_U_HYPER_DENSITY, FTRAN_U_HYPER_TAU_DENSITY,
     GREATEST_IMPROVEMENT_STALL_DIVISOR, GREATEST_IMPROVEMENT_STALL_MIN, GREATEST_IMPROVEMENT_TOP_K, GROSS_MISMATCH_SCALE_FLOOR, INFEASIBLE_PLATEAU_BUDGET_DIVISOR, INFEASIBLE_PLATEAU_STALL_MULT,
@@ -2020,6 +2020,11 @@ fn solve_slope_intercept_dual_with(std: &StdForm, opts: &crate::types::LpOptions
     // `ENOMOTO_SPARSE_FTRAN_OUT=0` で従来の全体書き出し(A/B 用)。
     let sparse_ftran_out = env_str!("ENOMOTO_SPARSE_FTRAN_OUT").map_or(true, |v| v != "0");
     let mut ftran_track = sparse_lu::FtranTrack::new();
+    // 策12: 大きな問題では DSE の `tau` を入る列の結果の非ゼロ行でだけ求める(`PARTIAL_TAU_MIN_M`)。
+    let partial_tau = sparse_ftran_out && {
+        let min_m = tunable!("ENOMOTO_T_PARTIAL_TAU_MIN_M", PARTIAL_TAU_MIN_M, usize);
+        min_m > 0 && m >= min_m
+    };
     // ピボット行 BTRAN 専用の 0 維持作業領域と触れた位置の一覧([`sparse_lu::UnitBtranWork`])。
     let mut btran_work = sparse_lu::UnitBtranWork::new(m);
     // DSE の `tau` FTRAN を入る列の FTRAN と融合するか(`ENOMOTO_FUSED_DSE_FTRAN=0` で別々。ビット同一)。
@@ -3333,6 +3338,8 @@ fn solve_slope_intercept_dual_with(std: &StdForm, opts: &crate::types::LpOptions
         // C5: `tau` の結果密度がこの値未満なら `U` 段を超疎で解く(`ENOMOTO_FTRAN_U_HYPER_TAU`、0 でオフ)。
         let u_hyper_tau_gate = tunable!("ENOMOTO_FTRAN_U_HYPER_TAU", FTRAN_U_HYPER_TAU_DENSITY, f64);
         rho_steps.set_u_hyper(u_hyper_tau_gate > 0.0 && density_tau.expected() < u_hyper_tau_gate);
+        // 部分 `tau` は DSE 重み更新が入る列の非ゼロ行だけを読む場合(フリップ結果の併合なし)に限る。
+        ftran_track.partial_tau = partial_tau && !combined_pending;
         timed!(profile_phases, prof_phases::FTRAN, {
             if profile_phases && density_col_aq.predicts_dense() && !lu.should_use_dense_solve(std.cols.col(q).len()) {
                 prof_phases::DENSITY_GATE_FTRANS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -3757,6 +3764,10 @@ fn solve_slope_intercept_dual_with(std: &StdForm, opts: &crate::types::LpOptions
         let contribution_base = theta_base * dj_q;
         let contribution_slope = theta_slope * dj_q;
 
+        // 部分 `tau` は行一覧での DSE 更新にしか使えない(全行更新になるなら `tau` を全体で求め直す)。
+        if ftran_track.tau_is_partial() && xb_list_len.is_none() {
+            tau_ready = false;
+        }
         timed!(profile_phases, prof_phases::DSE_UPDATE, {
             if !tau_ready {
                 ftran_track.tau.set_full();
