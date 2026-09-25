@@ -1148,7 +1148,7 @@ fn run_phase(
 }
 
 /// 差分更新版の第 2 段階主単体法 (`slope_intercept_dual` の仕上げ → 主単体法引き継ぎ専用、
-/// `ENOMOTO_HANDOFF_INCREMENTAL=1` で有効、既定は無効)。
+/// 既定で有効、`ENOMOTO_HANDOFF_INCREMENTAL=0` で無効)。
 ///
 /// [`run_phase`] が毎反復すべてを作り直すのに対し、`x_B` と被約費用 `d` を差分更新する:
 ///
@@ -1156,7 +1156,7 @@ fn run_phase(
 /// - `d` はピボット行から更新する: `rho = B^-T e_r`, `alpha_r = rho^T A` (rho の非零行に
 ///   沿った行方向 PRICE) として `d_j -= (d_q / alpha_rq) alpha_rj`、出る列は `-d_q / alpha_rq`。
 /// - 最急辺重みは `alpha_r` と `w^T A` (`w = B^-T alpha`) を同じ行方向走査で集めて更新する。
-///   `ENOMOTO_HANDOFF_INC_DEVEX=1` なら主 Devex (参照重み、BTRAN は rho の 1 回だけ)。
+///   既定 (`ENOMOTO_HANDOFF_INC_DEVEX=1`) は主 Devex (参照重み、BTRAN は rho の 1 回だけ)。
 ///
 /// リフレッシュ (`recompute_basics` と残差/fill 検査による再分解、`c_B` の BTRAN による `d` の
 /// 作り直し) は、最初の反復、EXPAND リセット時、再分解後、そして「入る候補なし」(Optimal)
@@ -1171,7 +1171,7 @@ fn run_phase2_incremental(std: &StdForm, t: &mut Tableau, lu: &mut sparse_lu::Ft
     let min_pivot = tunable!("ENOMOTO_T_FT_MIN_PIVOT", FT_MIN_PIVOT, f64);
     let harris = tunable!("ENOMOTO_T_PRIMAL_HARRIS_TOL", PRIMAL_HARRIS_TOL, f64);
     let bump_limit = tunable!("ENOMOTO_T_FT_BUMP_LIMIT_FACTOR", FT_BUMP_LIMIT_FACTOR, usize) * m.max(1);
-    let use_devex = tunable!("ENOMOTO_HANDOFF_INC_DEVEX", 0u8, u8) != 0;
+    let use_devex = tunable!("ENOMOTO_HANDOFF_INC_DEVEX", 1u8, u8) != 0;
     let mut expand = ExpandState::new();
 
     let mut gamma: Vec<f64> = if use_devex { vec![1.0; n] } else { SteepestEdgeState::new(std).gamma }; // 最急辺 (または Devex) 重み

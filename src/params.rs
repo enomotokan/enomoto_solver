@@ -137,8 +137,16 @@ pub(crate) mod slope_intercept_dual {
     /// `x_B(M)` の増分維持値のドリフト検査(と eta フィル検査)を行う主ループの反復間隔。
     /// `fill_count` にかかわらず毎回検査し、古典法のように `RESIDUAL_CHECK_MULTIPLIER` で
     /// さらに間引くことはしない(比較の多くが傾き項で `LEX_REL_TOL = 1e-9` という厳しさで決まるため)。
-    /// 値は `simplex::FT_CHECK_INTERVAL`(5)と同じ。
+    /// 値は `simplex::FT_CHECK_INTERVAL`(5)と同じ。「再分解後の最初の検査」の判定
+    /// (`updates <= XB_CHECK_INTERVAL`)にも使う。実際の検査の間隔は [`XB_CHECK_CADENCE`]。
     pub(crate) const XB_CHECK_INTERVAL: usize = super::simplex::FT_CHECK_INTERVAL;
+
+    /// 主ループで `x_B(M)` のドリフト検査(と eta フィル検査)を行う反復間隔。2026-09 に
+    /// [`XB_CHECK_INTERVAL`](5)から 20 に再調整した(`PIVOT_SEARCH_LIMIT = 64`・主 handoff の
+    /// 増分化と Devex 化と合わせて Netlib 93 問 -8.3%、全問一致)。`XB_CHECK_INTERVAL` ごと 20 に
+    /// すると再分解後最初の検査の判定まで変わり、dfl001・pilot87 が遅くなって効果の大半が消えた。
+    /// `ENOMOTO_T_XB_CHECK_INTERVAL` で上書き可。
+    pub(crate) const XB_CHECK_CADENCE: usize = 20;
 
     /// `x_B(M)` のドリフト検査の許容誤差(残差 `‖A_B x_B - rhs‖` の絶対値、基底・傾きの両チャネル)。
     /// 比較が `1e-9` の相対許容誤差で決まるので、古典法の `FT_RESIDUAL_TOL`(1e-4)より十分厳しくする。
@@ -365,8 +373,9 @@ pub(crate) mod lu {
 
     /// 1 回の `find_best_pivot` が調べる候補列数の上限 (ピボットが見つかっている
     /// 場合のみ適用。`ENOMOTO_PIVOT_SEARCH_LIMIT` で上書き、`0` で無制限)。
-    /// 最悪ケースの保険として大きめの値 (HiGHS は 8)。
-    pub(crate) const PIVOT_SEARCH_LIMIT: usize = 256;
+    /// 最悪ケースの保険として大きめの値 (HiGHS は 8)。2026-09 に 256 から 64 に再調整
+    /// ([`super::slope_intercept_dual::XB_CHECK_CADENCE`] 参照)。
+    pub(crate) const PIVOT_SEARCH_LIMIT: usize = 64;
 
     /// `find_best_pivot` の行探索 (`ENOMOTO_PIVOT_ROW_SEARCH`) で走査する最大の行次数の
     /// 既定値。`0` = 行探索なし (経路が変わるため既定 off)。
