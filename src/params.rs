@@ -254,6 +254,10 @@ pub(crate) mod slope_intercept_dual {
     /// 661〜694 / 652〜668 / 633 / 605〜633 / 612 / 636 µs/反復。`ENOMOTO_T_CHUZC1_TOPK` で上書き可。
     pub(crate) const CHUZC1_TOPK: usize = 128;
 
+    /// 策8 の上位候補の選択を使う最小候補数 (停止候補で刈り込んだ後)。これ未満は全体ヒープのほうが安い
+    /// (Netlib czprob で K = 128 の選択が全体ヒープより 5% 遅かった)。`ENOMOTO_T_CHUZC1_TOPK_MIN_CANDS`。
+    pub(crate) const CHUZC1_TOPK_MIN_CANDS: usize = 1024;
+
     /// 策7 (chuzc1 の停止候補による刈り込みの省略) の測定間隔: 上位候補の選択を使う反復のこの回数に 1 回は
     /// 刈り込みを行い、半分より多く残ったら次の測定まで刈り込みを省く。
     pub(crate) const CHUZC1_FAST_PROBE: usize = 64;
