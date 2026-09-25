@@ -1736,40 +1736,46 @@ impl DseState {
 pub(super) struct InfeasibleRows {
     /// 現在実行不能な行番号 (順不同)。
     pub(super) rows: Vec<usize>,
-    /// `pos[i] == Some(k)` ⇔ `rows[k] == i` (O(1) の所属判定と削除用)。
-    pos: Vec<Option<usize>>,
+    /// `pos[i] == k` ⇔ `rows[k] == i`、集合外なら [`INFEASIBLE_ROWS_NONE`] (O(1) の所属判定と削除用)。
+    /// `Option<usize>` (16 バイト) ではなく `u32` にして、`x_B` 更新で全行を走査する問題
+    /// (ex10: 1 反復 5 万行) のメモリ量を減らす。
+    pos: Vec<u32>,
 }
+
+/// [`InfeasibleRows::pos`] の「集合外」の印。
+const INFEASIBLE_ROWS_NONE: u32 = u32::MAX;
 
 impl InfeasibleRows {
     /// m 行分の空の集合を作る。
     pub(super) fn new(m: usize) -> Self {
-        InfeasibleRows { rows: Vec::new(), pos: vec![None; m] }
+        assert!(m < INFEASIBLE_ROWS_NONE as usize, "InfeasibleRows: too many rows for u32 positions");
+        InfeasibleRows { rows: Vec::new(), pos: vec![INFEASIBLE_ROWS_NONE; m] }
     }
 
     /// 行 `i` の所属を `infeasible` に設定する (既にその状態なら何もしない)。O(1)。
     pub(super) fn set(&mut self, i: usize, infeasible: bool) {
-        match (infeasible, self.pos[i]) {
-            (true, None) => {
-                self.pos[i] = Some(self.rows.len());
+        let p = self.pos[i];
+        if infeasible {
+            if p == INFEASIBLE_ROWS_NONE {
+                self.pos[i] = self.rows.len() as u32;
                 self.rows.push(i);
             }
-            (false, Some(idx)) => {
-                let last = self.rows.len() - 1;
-                self.rows.swap(idx, last);
-                self.rows.pop();
-                if idx < self.rows.len() {
-                    self.pos[self.rows[idx]] = Some(idx);
-                }
-                self.pos[i] = None;
+        } else if p != INFEASIBLE_ROWS_NONE {
+            let idx = p as usize;
+            let last = self.rows.len() - 1;
+            self.rows.swap(idx, last);
+            self.rows.pop();
+            if idx < self.rows.len() {
+                self.pos[self.rows[idx]] = idx as u32;
             }
-            _ => {}
+            self.pos[i] = INFEASIBLE_ROWS_NONE;
         }
     }
 
     /// 行 `i` が集合に含まれるか。
     #[inline]
     pub(super) fn contains(&self, i: usize) -> bool {
-        self.pos[i].is_some()
+        self.pos[i] != INFEASIBLE_ROWS_NONE
     }
 
     /// 述語 `pred(i)` (行 i が実行不能か) で集合を O(m) で作り直す。多数の行の `x_B` を
@@ -1778,10 +1784,10 @@ impl InfeasibleRows {
         self.rows.clear();
         for i in 0..m {
             if pred(i) {
-                self.pos[i] = Some(self.rows.len());
+                self.pos[i] = self.rows.len() as u32;
                 self.rows.push(i);
             } else {
-                self.pos[i] = None;
+                self.pos[i] = INFEASIBLE_ROWS_NONE;
             }
         }
     }
