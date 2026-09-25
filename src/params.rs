@@ -525,6 +525,11 @@ pub(crate) mod lu {
     /// `ENOMOTO_T_TAU_GP_FRACTION`)。これ以下なら続く `tau` FTRAN の `L` 段を GP で行う。
     pub(crate) const TAU_GP_FRACTION: f64 = 0.1;
 
+    /// 策13: 融合 FTRAN の `R` 段を疎に当てる (`FtLu::apply_r_sparse`) のは `R` eta がこの数以上
+    /// あるときだけ (`ENOMOTO_T_R_SPARSE_MIN_ETAS`)。少ないうちは全 eta を順に当てる方が速い
+    /// (Netlib sctap1 で常時疎にすると +5%)。結果はどちらでもビット一致。
+    pub(crate) const R_SPARSE_MIN_ETAS: usize = 256;
+
     /// FTRAN/BTRAN の結果や新しい eta 要素を厳密な 0 とみなす絶対値の閾値
     /// (`ENOMOTO_TINY`)。既定 `0.0` = 切り捨てなし。
     pub(crate) const TINY_DROP: f64 = 0.0;

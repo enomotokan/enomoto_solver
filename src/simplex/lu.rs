@@ -28,7 +28,7 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
-use crate::params::lu::{BORDER_MAX_COUNT, BORDER_MAX_FRACTION, BTRAN_HYPER_FRACTION, BTRAN_L_SCATTER_FRACTION, BUCKET_POOL_MAX, DENSE_COL_FRACTION, DENSE_ETA_FRACTION, DENSE_INPUT_FRACTION, DENSE_RHS_FRACTION, DENSE_SWITCH_CHECK_INTERVAL, DENSE_SWITCH_FRACTION, DENSE_SWITCH_MIN_ROWS, DENSITY_AVERAGE_MULTIPLIER, EXPECTED_DENSE_FRACTION, KERNEL_LINEAR_SCAN_MAX, KERNEL_MIN_RUN_CAP, KERNEL_RESERVE_EXTRA, KERNEL_RESERVE_MULT, PIVOT_ROW_SEARCH_MAX_DEGREE, PIVOT_SEARCH_LIMIT, PIVOT_THRESHOLD_FACTOR, PIVOT_THRESHOLD_MAX, PIVOT_THRESHOLD_MIN, REBUILD_FILL_LIMIT, REBUILD_MIN_PIVOT, REUSE_BACKOFF_SHIFT_CAP, REUSE_MAX_BACKOFF, STABILITY, TAU_GP_FRACTION, TICK_BUILD_FLOP_COEF, TICK_BUILD_LU_COEF, TICK_BUILD_M_COEF, TICK_SOLVE_NNZ_COEF, TINY_DROP, U_HYPER_ABORT_FRACTION};
+use crate::params::lu::{BORDER_MAX_COUNT, BORDER_MAX_FRACTION, BTRAN_HYPER_FRACTION, BTRAN_L_SCATTER_FRACTION, BUCKET_POOL_MAX, DENSE_COL_FRACTION, DENSE_ETA_FRACTION, DENSE_INPUT_FRACTION, DENSE_RHS_FRACTION, DENSE_SWITCH_CHECK_INTERVAL, DENSE_SWITCH_FRACTION, DENSE_SWITCH_MIN_ROWS, DENSITY_AVERAGE_MULTIPLIER, EXPECTED_DENSE_FRACTION, KERNEL_LINEAR_SCAN_MAX, KERNEL_MIN_RUN_CAP, KERNEL_RESERVE_EXTRA, KERNEL_RESERVE_MULT, PIVOT_ROW_SEARCH_MAX_DEGREE, PIVOT_SEARCH_LIMIT, PIVOT_THRESHOLD_FACTOR, PIVOT_THRESHOLD_MAX, PIVOT_THRESHOLD_MIN, R_SPARSE_MIN_ETAS, REBUILD_FILL_LIMIT, REBUILD_MIN_PIVOT, REUSE_BACKOFF_SHIFT_CAP, REUSE_MAX_BACKOFF, STABILITY, TAU_GP_FRACTION, TICK_BUILD_FLOP_COEF, TICK_BUILD_LU_COEF, TICK_BUILD_M_COEF, TICK_SOLVE_NNZ_COEF, TINY_DROP, U_HYPER_ABORT_FRACTION};
 
 thread_local! {
     /// このスレッドで現在実行中の求解に適用されるピボット閾値。
@@ -3318,7 +3318,7 @@ fn permute_btran_out_zeroing(row_perm: &[usize], w: &mut [f64], y: &mut [f64]) {
 /// `out` も前回の非ゼロ位置だけを消して書く。処理するスロット・ステップの集合と順序は
 /// 全走査と同じ (値 0 の位置を飛ばすだけ) なので、`out`・`e_tilde_out`・記録・tick は
 /// ビット一致。非ゼロが [`BTRAN_HYPER_FRACTION`] `* m` を超えたらその位置から全走査に
-/// 切り替え、前回の結果が密なら最初から全走査にする。
+/// 切り替え、結果の非ゼロ率の移動平均がその半分以上なら最初から全走査にする。
 pub struct UnitBtranWork {
     /// ステップ空間の作業ベクトル (呼び出し間は全 0)。
     w: Vec<f64>,
@@ -3330,8 +3330,9 @@ pub struct UnitBtranWork {
     e_full: bool,
     /// 超疎経路を使うか (`ENOMOTO_SPARSE_BTRAN`)。
     sparse: bool,
-    /// 前回の超疎経路が最後まで疎のままだったか (偽なら今回は最初から全走査)。
-    last_sparse: bool,
+    /// 結果 (`out`) の非ゼロ率の移動平均 ([`FtranDensity`] と同じ重み)。
+    /// [`BTRAN_HYPER_FRACTION`] の半分未満のときだけ超疎経路を試す (途中で全走査に落ちる無駄を避ける)。
+    density: f64,
     /// 超疎経路の「一覧に入った」印 (`U^T` 段と `L^T` 段で別のエポックを使う)。
     marks: EpochMarks,
     /// `U^T` 段の最小ヒープ (キー = `U^T` 順の位置、[`FtLu::u_transpose_key`])。
@@ -3355,7 +3356,7 @@ impl UnitBtranWork {
             e_touch: Vec::with_capacity(m),
             e_full: false,
             sparse: env_str!("ENOMOTO_SPARSE_BTRAN").map_or(true, |v| v != "0"),
-            last_sparse: true,
+            density: 0.0,
             marks: EpochMarks::new(m),
             uheap: BinaryHeap::new(),
             lheap: BinaryHeap::new(),
@@ -4549,7 +4550,7 @@ impl FtLu {
         mut track: Option<&mut FtranTrack>,
     ) -> (usize, usize, bool) {
         let m = self.base.m as u64;
-        if let (Some(ga), Some(gb)) = (gp_a.as_deref_mut(), gp_b.as_deref_mut()) {
+        if let (true, Some(ga), Some(gb)) = (self.r_etas.n_headers() >= tunable!("ENOMOTO_T_R_SPARSE_MIN_ETAS", R_SPARSE_MIN_ETAS, usize), gp_a.as_deref_mut(), gp_b.as_deref_mut()) {
             // 両ベクトルとも `L` 段が Gilbert-Peierls (非ゼロ位置が分かっている): 策13 の疎な `R` 段。
             self.add_tick(2 * self.r_nnz_total as u64);
             let GpScratch { reach, r_seeds, r_work, .. } = ga;
@@ -4858,8 +4859,13 @@ impl FtLu {
             work.marks = EpochMarks::new(m);
         }
         // 策2 の超疎経路を試すか (微小値切捨てがあるときは全走査の判定に任せる)。
-        let hyper = work.sparse && work.last_sparse && tiny_drop() <= 0.0;
-        let UnitBtranWork { w, touch, e_touch, e_full, marks, uheap, lheap, y, rows, rows_valid, last_sparse, .. } = work;
+        let hyper = work.sparse && work.density < 0.5 * tunable!("ENOMOTO_T_BTRAN_HYPER_FRACTION", BTRAN_HYPER_FRACTION, f64) && tiny_drop() <= 0.0;
+        let UnitBtranWork { w, touch, e_touch, e_full, marks, uheap, lheap, y, rows, rows_valid, density, .. } = work;
+        // 結果の非ゼロ率を移動平均に畳み込む。
+        let mut record = |nnz_frac: f64| {
+            let a = tunable!("ENOMOTO_T_DENSITY_AVERAGE_MULTIPLIER", DENSITY_AVERAGE_MULTIPLIER, f64);
+            *density = (1.0 - a) * *density + a * nnz_frac;
+        };
         *rows_valid = false;
         debug_assert!(w.iter().all(|&v| v == 0.0));
         let s0 = self.base.col_perm_inv[i];
@@ -4927,18 +4933,23 @@ impl FtLu {
         if list_ok {
             if self.l_transpose_hyper_out(w, out, cap.as_deref_mut(), touch, marks, lheap, y, rows) {
                 *rows_valid = true;
-                *last_sparse = true;
+                record(rows.len() as f64 / m.max(1) as f64);
                 return;
             }
             // `L^T` 段で非ゼロが増えすぎた: 全走査で出力済み。
             y.set_full();
-            *last_sparse = false;
+            record(tunable!("ENOMOTO_T_BTRAN_HYPER_FRACTION", BTRAN_HYPER_FRACTION, f64));
             return;
         }
         y.set_full();
         // 全走査の結果が疎だったら次回は超疎経路をまた試す (記録が有効 = 非ゼロが上限以下)。
         self.l_transpose_solve_into_ext::<true>(w, out, cap.as_deref_mut(), bound);
-        *last_sparse = !hyper && cap.as_ref().map_or(true, |c| c.valid);
+        // 全走査の結果の非ゼロ率: 記録が有効なら正確、溢れたら上限 (`limit_frac`) 以上。
+        match cap.as_ref() {
+            Some(c) if c.valid => record(c.steps.len() as f64 / m.max(1) as f64),
+            Some(c) => record(c.limit_frac),
+            None => {}
+        }
     }
 
     /// 策2: [`Self::u_transpose_sweep_track`] を非ゼロ位置の最小ヒープで駆動したもの。
