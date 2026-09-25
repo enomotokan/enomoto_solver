@@ -254,6 +254,14 @@ pub(crate) mod slope_intercept_dual {
     /// 661〜694 / 652〜668 / 633 / 605〜633 / 612 / 636 µs/反復。`ENOMOTO_T_CHUZC1_TOPK` で上書き可。
     pub(crate) const CHUZC1_TOPK: usize = 128;
 
+    /// 策7 (chuzc1 の停止候補による刈り込みの省略) の測定間隔: 上位候補の選択を使う反復のこの回数に 1 回は
+    /// 刈り込みを行い、半分より多く残ったら次の測定まで刈り込みを省く。
+    pub(crate) const CHUZC1_FAST_PROBE: usize = 64;
+
+    /// pds-100 報告の策13 の一部: BFRT の合成フリップ列の FTRAN 結果に非ゼロ位置の記録を付ける最小行数
+    /// (`ENOMOTO_T_FLIP_TRACK_MIN_M`、0 = 無効)。小さな問題では `fill`・`compact_rows` のほうが安い。
+    pub(crate) const FLIP_TRACK_MIN_M: usize = 10_000;
+
     /// square41 報告の策3: 前反復の PRICE 要素数が `n_total` のこの倍を超えたら PRICE を密結果モード
     /// (初到達の判定をせず加算だけ行い、触れた列の一覧は後で `a_p` を全走査して作る) にする
     /// (`BIG` のみ。`ENOMOTO_T_PRICE_DENSE_RESULT`、0 = 無効)。ビット一致。

@@ -58,7 +58,7 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::sync::OnceLock;
 use crate::params::simplex::{FT_BUMP_LIMIT_FACTOR, FT_CHECK_INTERVAL, FT_MIN_PIVOT, FT_RESIDUAL_TOL, HARRIS_RATIO_TOL, MAX_ITERS_FLOOR, PRIMAL_FEAS_TOL, RESIDUAL_CHECK_MULTIPLIER, STALL_PROGRESS_EPS, STEEPEST_EDGE_FLOOR, TOL};
-use crate::params::slope_intercept_dual::{CHUZC1_TOPK, SYNTH_CLOCK_MID_REF_MULT, SYNTH_CLOCK_MID_TAU_FRACTION, PREFETCH_DIST, PREFETCH_MIN_COLS, PRICE_DENSE_RESULT_RATIO, SYNTH_CLOCK_DENSE_FRACTION, D_DRIFT_TOL, FT_BUMP_LU_RATIO, PLATEAU_OBJ_REL, D_GROSS_MISMATCH_REL_TOL, FT_MAX_UPDATES_FACTOR, FT_MAX_UPDATES_FLOOR, PARTIAL_TAU_MIN_M, PIVOT_ESCALATION_STEP, SLOPE_TOL, STUCK_ROW_MIN_PIVOT, SYNTH_CLOCK_FACTOR, SYNTH_CLOCK_LARGE_M, SYNTH_CLOCK_LARGE_REF_M, SYNTH_CLOCK_MIN_UPDATES, XB_CHECK_CADENCE, XB_CHECK_CADENCE_LARGE, XB_CHECK_CADENCE_LARGE_DIV, XB_CHECK_CADENCE_LARGE_M, XB_CHECK_INTERVAL, XB_DRIFT_ESCALATION_FACTOR, XB_DRIFT_ESCALATION_STEP, XB_DRIFT_REL_TOL, XB_DRIFT_TOL, XB_DRIFT_TOL_MAX, X_B_SLOPE_NOISE, Z_SLOPE_TOL};
+use crate::params::slope_intercept_dual::{CHUZC1_TOPK, FLIP_TRACK_MIN_M, CHUZC1_FAST_PROBE, SYNTH_CLOCK_MID_REF_MULT, SYNTH_CLOCK_MID_TAU_FRACTION, PREFETCH_DIST, PREFETCH_MIN_COLS, PRICE_DENSE_RESULT_RATIO, SYNTH_CLOCK_DENSE_FRACTION, D_DRIFT_TOL, FT_BUMP_LU_RATIO, PLATEAU_OBJ_REL, D_GROSS_MISMATCH_REL_TOL, FT_MAX_UPDATES_FACTOR, FT_MAX_UPDATES_FLOOR, PARTIAL_TAU_MIN_M, PIVOT_ESCALATION_STEP, SLOPE_TOL, STUCK_ROW_MIN_PIVOT, SYNTH_CLOCK_FACTOR, SYNTH_CLOCK_LARGE_M, SYNTH_CLOCK_LARGE_REF_M, SYNTH_CLOCK_MIN_UPDATES, XB_CHECK_CADENCE, XB_CHECK_CADENCE_LARGE, XB_CHECK_CADENCE_LARGE_DIV, XB_CHECK_CADENCE_LARGE_M, XB_CHECK_INTERVAL, XB_DRIFT_ESCALATION_FACTOR, XB_DRIFT_ESCALATION_STEP, XB_DRIFT_REL_TOL, XB_DRIFT_TOL, XB_DRIFT_TOL_MAX, X_B_SLOPE_NOISE, Z_SLOPE_TOL};
 use crate::params::slope_intercept_dual::{
     CHUZR_SHORTLIST_AUTO_DIV, CHUZR_SHORTLIST_AUTO_K, CHUZR_SHORTLIST_AUTO_K_MAX, CHUZR_SHORTLIST_AUTO_MIN_M, CHUZR_SHORTLIST_K, CHUZR_SHORTLIST_MAX_LEN_FACTOR, CHUZR_SHORTLIST_MAX_LEN_SLACK, CHUZR_SHORTLIST_MIN_POOL_FACTOR, COMPACT_ROWS_BLOCK, FTRAN_U_HYPER_DENSITY, FTRAN_U_HYPER_TAU_DENSITY,
     GREATEST_IMPROVEMENT_STALL_DIVISOR, GREATEST_IMPROVEMENT_STALL_MIN, GREATEST_IMPROVEMENT_TOP_K, GROSS_MISMATCH_SCALE_FLOOR, INFEASIBLE_PLATEAU_BUDGET_DIVISOR, INFEASIBLE_PLATEAU_STALL_MULT,
@@ -2143,8 +2143,16 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     // 策8: chuzc1 の上位候補の選択数 (`BIG` のみ、0 = 全体ヒープ。`ENOMOTO_T_CHUZC1_TOPK`)、
     // 上限付き最大ヒープと並べた結果。
     let chuzc1_topk: usize = if BIG { tunable!("ENOMOTO_T_CHUZC1_TOPK", CHUZC1_TOPK, usize) } else { 0 };
-    // 策7 (停止候補の刈り込みの省略) を使うか (`ENOMOTO_T_CHUZC1_FAST=1`、既定オフ)。
-    let chuzc1_fast = BIG && tunable!("ENOMOTO_T_CHUZC1_FAST", 0u8, u8) != 0;
+    // 策7 (停止候補の刈り込みの省略): 刈り込みで候補がほとんど減らない問題 (s250r10) では刈り込みの走査
+    // (`width_inf` のランダムな読み) と候補の写しが無駄だが、片側行のスラックや上限のない列が多い問題
+    // (Netlib の多く) では刈り込みで候補が桁違いに減り、省くと遅くなる (scsd8・pilot.we などで 10〜19%)。
+    // 上位候補の選択を使う反復の `CHUZC1_FAST_PROBE` 回に 1 回は刈り込みを行って残った割合を測り、半分より多く
+    // 残ったら次の測定まで省く。どちらでも結果はビット一致。`ENOMOTO_T_CHUZC1_FAST=0` で常に刈り込む。
+    // 列数の多い問題 (`prefetch_on` と同じ `n_total >= PREFETCH_MIN_COLS`) だけ: 小さな問題では `width_inf` が
+    // キャッシュに乗っていて刈り込みが安い。
+    let chuzc1_fast_allowed = prefetch_on && tunable!("ENOMOTO_T_CHUZC1_FAST", 1u8, u8) != 0;
+    let mut chuzc1_fast_on = false;
+    let mut chuzc1_fast_probe: usize = 0;
     let mut topk_heap: BinaryHeap<Cand> = BinaryHeap::with_capacity(chuzc1_topk);
     let mut topk_sorted: Vec<Cand> = Vec::with_capacity(chuzc1_topk);
 
@@ -2258,6 +2266,12 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     // (`compact_rows` の `O(m)` 走査を省く)。記録の外で全体を書いたら `set_full` で無効化する。
     let mut cab_track = sparse_lu::NzTrack::new();
     let mut cas_track = sparse_lu::NzTrack::new();
+    // 記録を使うか (`m >= FLIP_TRACK_MIN_M`、`ENOMOTO_T_FLIP_TRACK_MIN_M`、0 = 無効): 小さな問題では `fill` も
+    // `compact_rows` も安く、一覧の和集合の並べ替えのほうが高い。
+    let flip_track = BIG && {
+        let v = tunable!("ENOMOTO_T_FLIP_TRACK_MIN_M", FLIP_TRACK_MIN_M, usize);
+        v > 0 && m >= v
+    };
     // 行一覧の和集合を作る作業領域。
     let mut xb_union: Vec<usize> = Vec::new();
 
@@ -3118,11 +3132,15 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
             // 順で最小のもの(停止候補)。BFRT の歩進はそこで無条件に止まるので、それより後ろの
             // 候補は何にも影響しない。それらを捨てても選ばれる `q`・フリップ集合・浮動小数点値は
             // 不変で、ヒープの元になる候補数だけが減る(HiGHS `choosePossible` と同じ考え)。
-            if BIG && chuzc1_fast && chuzc1_topk > 0 && !ban_active && !bland_mode && k > chuzc1_topk {
-                // 策7 (`ENOMOTO_T_CHUZC1_FAST=1` のときだけ): 下の策8 (上位候補の選択) を使う場合に、停止候補による
-                // 刈り込みと `candidates` への写しを省き、`cand_scratch[..k]` をそのまま候補列にする。歩進は
-                // `(ratio, j)` 順で最初の幅無限の候補 (= 停止候補) で必ず止まるので結果は同じ。既定はオフ
-                // (片側行のスラックが多い問題では刈り込みで候補が桁違いに減るため、刈り込まないと遅くなる)。
+            // 策7 を検討する反復か (上位候補の選択を使う反復)。
+            let fast_eligible = chuzc1_fast_allowed && chuzc1_topk > 0 && !ban_active && !bland_mode && k > chuzc1_topk;
+            if fast_eligible {
+                chuzc1_fast_probe += 1;
+            }
+            if fast_eligible && chuzc1_fast_on && chuzc1_fast_probe % CHUZC1_FAST_PROBE != 0 {
+                // 策7 (`chuzc1_fast`、幅無限の列が少ない問題のみ): 下の策8 (上位候補の選択) を使う場合に、停止候補
+                // による刈り込みと `candidates` への写しを省き、`cand_scratch[..k]` をそのまま候補列にする。歩進は
+                // `(ratio, j)` 順で最初の幅無限の候補 (= 停止候補) で必ず止まるので結果は同じ。
                 fast_n = Some(k);
             } else {
                 let mut stopper: Option<Cand> = None;
@@ -3132,6 +3150,10 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                     }
                 }
                 candidates.extend(kept.iter().filter(|c| stopper.map_or(true, |s| **c <= s) && !(ban_active && discard_banned_cols.contains(&c.j))));
+                if fast_eligible {
+                    // 策7 の測定: 刈り込みで半分より多く残ったら、次の測定まで刈り込みを省く。
+                    chuzc1_fast_on = 2 * candidates.len() > k;
+                }
             }
         });
         if stuck_row_taboo {
@@ -3570,15 +3592,21 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                     // (大きな問題のみ。`solve_sparse_into_hyper`)
                     let u_hyper_gate = tunable!("ENOMOTO_FTRAN_U_HYPER", FTRAN_U_HYPER_DENSITY, f64);
                     gp_scratch.u_hyper = BIG && u_hyper_gate > 0.0 && density_bfrt.expected() < u_hyper_gate;
-                    let base_nnz = if BIG {
+                    let base_nnz = if flip_track {
                         lu.solve_sparse_into_hyper_tracked(&sparse_base_buf, &mut sparse_scratch, &mut gp_scratch, &mut combined_alpha_base, &mut cab_track)
+                    } else if BIG {
+                        cab_track.set_full();
+                        lu.solve_sparse_into_hyper(&sparse_base_buf, &mut sparse_scratch, &mut gp_scratch, &mut combined_alpha_base)
                     } else {
                         lu.solve_sparse_into(&sparse_base_buf, &mut sparse_scratch, &mut gp_scratch, &mut combined_alpha_base)
                     };
                     let slope_nnz = if slope_nonzero {
                         sparse_slope_buf.extend(combined_touched.iter().map(|&i| (i, combined_slope[i])));
-                        if BIG {
+                        if flip_track {
                             lu.solve_sparse_into_hyper_tracked(&sparse_slope_buf, &mut sparse_scratch, &mut gp_scratch, &mut combined_alpha_slope, &mut cas_track)
+                        } else if BIG {
+                            cas_track.set_full();
+                            lu.solve_sparse_into_hyper(&sparse_slope_buf, &mut sparse_scratch, &mut gp_scratch, &mut combined_alpha_slope)
                         } else {
                             lu.solve_sparse_into(&sparse_slope_buf, &mut sparse_scratch, &mut gp_scratch, &mut combined_alpha_slope)
                         }
@@ -3997,7 +4025,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
             if (est as f64) <= tunable!("ENOMOTO_T_XB_LIST_DENSITY", XB_LIST_DENSITY, f64) * m as f64 {
                 // 策13 の一部: フリップ結果と入る列の結果の非ゼロ位置がすべて記録されていれば、その和集合から
                 // 非ゼロ行を昇順に集める (`compact_rows` と同じ行の集合・順序)。
-                let union_lists = if BIG && combined_pending {
+                let union_lists = if flip_track && combined_pending {
                     match (ftran_track.alpha.indices(), cab_track.indices(), if combined_slope_nonzero { cas_track.indices() } else { Some(&[][..]) }) {
                         (Some(a), Some(b), Some(c)) => Some((a, b, c)),
                         _ => None,
