@@ -115,6 +115,7 @@ Each problem is solved in its own subprocess. The reported times cover the solve
 | `src/mip.rs` | Branch and bound |
 | `src/params.rs` | Tolerances and tuning parameters |
 | `docs/improvement_history.md` | Record of implementation changes and their measured effects |
+| `benchmarks/netlib_dev_results.csv` | Netlib measurements taken during development (one row per problem and run; `source_file` names the original result file) |
 
 ## Paper
 
