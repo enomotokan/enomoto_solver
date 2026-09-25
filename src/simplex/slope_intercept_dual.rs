@@ -58,7 +58,7 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::sync::OnceLock;
 use crate::params::simplex::{FT_BUMP_LIMIT_FACTOR, FT_CHECK_INTERVAL, FT_MIN_PIVOT, FT_RESIDUAL_TOL, HARRIS_RATIO_TOL, MAX_ITERS_FLOOR, PRIMAL_FEAS_TOL, RESIDUAL_CHECK_MULTIPLIER, STALL_PROGRESS_EPS, STEEPEST_EDGE_FLOOR, TOL};
-use crate::params::slope_intercept_dual::{D_DRIFT_TOL, D_GROSS_MISMATCH_REL_TOL, FT_MAX_UPDATES_FACTOR, FT_MAX_UPDATES_FLOOR, PARTIAL_TAU_MIN_M, PIVOT_ESCALATION_STEP, SLOPE_TOL, STUCK_ROW_MIN_PIVOT, SYNTH_CLOCK_FACTOR, SYNTH_CLOCK_LARGE_M, SYNTH_CLOCK_LARGE_REF_M, SYNTH_CLOCK_MIN_UPDATES, XB_CHECK_CADENCE, XB_CHECK_CADENCE_LARGE, XB_CHECK_CADENCE_LARGE_DIV, XB_CHECK_CADENCE_LARGE_M, XB_CHECK_INTERVAL, XB_DRIFT_ESCALATION_FACTOR, XB_DRIFT_ESCALATION_STEP, XB_DRIFT_REL_TOL, XB_DRIFT_TOL, XB_DRIFT_TOL_MAX, X_B_SLOPE_NOISE, Z_SLOPE_TOL};
+use crate::params::slope_intercept_dual::{CHUZC1_TOPK, PREFETCH_DIST, PREFETCH_MIN_COLS, PRICE_DENSE_RESULT_RATIO, SYNTH_CLOCK_DENSE_FRACTION, D_DRIFT_TOL, FT_BUMP_LU_RATIO, PLATEAU_OBJ_REL, D_GROSS_MISMATCH_REL_TOL, FT_MAX_UPDATES_FACTOR, FT_MAX_UPDATES_FLOOR, PARTIAL_TAU_MIN_M, PIVOT_ESCALATION_STEP, SLOPE_TOL, STUCK_ROW_MIN_PIVOT, SYNTH_CLOCK_FACTOR, SYNTH_CLOCK_LARGE_M, SYNTH_CLOCK_LARGE_REF_M, SYNTH_CLOCK_MIN_UPDATES, XB_CHECK_CADENCE, XB_CHECK_CADENCE_LARGE, XB_CHECK_CADENCE_LARGE_DIV, XB_CHECK_CADENCE_LARGE_M, XB_CHECK_INTERVAL, XB_DRIFT_ESCALATION_FACTOR, XB_DRIFT_ESCALATION_STEP, XB_DRIFT_REL_TOL, XB_DRIFT_TOL, XB_DRIFT_TOL_MAX, X_B_SLOPE_NOISE, Z_SLOPE_TOL};
 use crate::params::slope_intercept_dual::{
     CHUZR_SHORTLIST_AUTO_DIV, CHUZR_SHORTLIST_AUTO_K, CHUZR_SHORTLIST_AUTO_K_MAX, CHUZR_SHORTLIST_AUTO_MIN_M, CHUZR_SHORTLIST_K, CHUZR_SHORTLIST_MAX_LEN_FACTOR, CHUZR_SHORTLIST_MAX_LEN_SLACK, CHUZR_SHORTLIST_MIN_POOL_FACTOR, COMPACT_ROWS_BLOCK, FTRAN_U_HYPER_DENSITY, FTRAN_U_HYPER_TAU_DENSITY,
     GREATEST_IMPROVEMENT_STALL_DIVISOR, GREATEST_IMPROVEMENT_STALL_MIN, GREATEST_IMPROVEMENT_TOP_K, GROSS_MISMATCH_SCALE_FLOOR, INFEASIBLE_PLATEAU_BUDGET_DIVISOR, INFEASIBLE_PLATEAU_STALL_MULT,
@@ -441,7 +441,16 @@ fn synth_clock_factor() -> f64 {
 /// [`polish_with_true_bounds`] で共有する(毎ピボット呼べるほど安価)。
 #[inline]
 fn synth_clock_should_refactor(lu: &sparse_lu::FtLu) -> bool {
-    lu.update_count() >= tunable!("ENOMOTO_T_SYNTH_CLOCK_MIN_UPDATES", SYNTH_CLOCK_MIN_UPDATES, usize) && (lu.synth_tick() as f64) >= synth_clock_factor_for(lu.dim()) * (lu.build_tick().max(1) as f64)
+    synth_clock_should_refactor_dense(lu, false)
+}
+
+/// [`synth_clock_should_refactor`] に、求解結果が密か (`dense`) を加えたもの。square41 / ex10 報告の策11:
+/// 策10 の `sqrt(m)` 倍は「求解の `O(m)` パスを消したので実際の求解の手間は `m` によらない」ことが前提で、
+/// 入る列の FTRAN 結果が密な問題 (ex10: `alpha` の 80% が非ゼロ) では求解の手間も `m` に比例するので掛けない。
+#[inline]
+fn synth_clock_should_refactor_dense(lu: &sparse_lu::FtLu, dense: bool) -> bool {
+    let factor = if dense { synth_clock_factor() } else { synth_clock_factor_for(lu.dim()) };
+    lu.update_count() >= tunable!("ENOMOTO_T_SYNTH_CLOCK_MIN_UPDATES", SYNTH_CLOCK_MIN_UPDATES, usize) && (lu.synth_tick() as f64) >= factor * (lu.build_tick().max(1) as f64)
 }
 
 /// 行数 `m` の問題に使う合成クロックの係数: [`synth_clock_factor`]、ただし策10 で
@@ -2048,6 +2057,19 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     // 疎 PRICE(S8)用の `rho` の非ゼロ行一覧(昇順)と、密度予測に使う前反復の PRICE 行数。
     let mut rho_rows = vec![0u32; m];
     let mut last_rho_nnz = 0usize;
+    // square41 報告の策3: 前反復の PRICE 要素数 (密結果モードの判定用)。
+    let mut last_price_entries = 0usize;
+    // 密結果モードに入る PRICE 要素数の閾値 (`n_total` に対する比、`ENOMOTO_T_PRICE_DENSE_RESULT`、0 = 無効)。
+    let price_dense_ratio = tunable!("ENOMOTO_T_PRICE_DENSE_RESULT", PRICE_DENSE_RESULT_RATIO, f64);
+    // 列添字でランダムに引く PRICE・chuzc1・`d` 更新のループでソフトウェアプリフェッチを使うか
+    // (`BIG` かつ `n_total >= PREFETCH_MIN_COLS`。`a_p`・`d` がキャッシュに収まらない列数の多い問題用。
+    // 値は変わらない。`ENOMOTO_T_PREFETCH_MIN_COLS` で閾値を上書き、0 = 無効)。
+    let prefetch_on = BIG && {
+        let min_cols = tunable!("ENOMOTO_T_PREFETCH_MIN_COLS", PREFETCH_MIN_COLS, usize);
+        min_cols > 0 && n_total >= min_cols
+    };
+    // 先読み距離 (要素数、`ENOMOTO_T_PREFETCH_DIST`)。
+    let prefetch_dist = tunable!("ENOMOTO_T_PREFETCH_DIST", PREFETCH_DIST, usize);
     // 入る列 `A_q` の密ベクトル(密 FTRAN の右辺。反復間は常に 0)。
     let mut dense_q = vec![0.0f64; m];
     // `alpha_full = B^-1 A_q`(入る列の FTRAN 結果)。
@@ -2095,6 +2117,11 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     // chuzc1 の分岐なしフィルタ用の書き込み領域と、非 bland 歩進でヒープから取り出した先頭部分。
     let mut cand_scratch: Vec<Cand> = Vec::new();
     let mut sorted_prefix: Vec<Cand> = Vec::new();
+    // 策8: chuzc1 の上位候補の選択数 (`BIG` のみ、0 = 全体ヒープ。`ENOMOTO_T_CHUZC1_TOPK`)、
+    // 上限付き最大ヒープと並べた結果。
+    let chuzc1_topk: usize = if BIG { tunable!("ENOMOTO_T_CHUZC1_TOPK", CHUZC1_TOPK, usize) } else { 0 };
+    let mut topk_heap: BinaryHeap<Cand> = BinaryHeap::with_capacity(chuzc1_topk);
+    let mut topk_sorted: Vec<Cand> = Vec::with_capacity(chuzc1_topk);
 
     // 経路を変える・既定オン(`ENOMOTO_PRICE_NONBASIC_ONLY=0` で全非固定列を PRICE):
     // HiGHS の行方向分割 PRICE 行列と同じく、各行の非基底要素を `[start, p_end)` に、
@@ -2270,6 +2297,11 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     let infeasible_plateau_limit = (INFEASIBLE_PLATEAU_STALL_MULT * stall_limit).min(plateau_budget / INFEASIBLE_PLATEAU_BUDGET_DIVISOR);
     // 最小の実行不能行数を更新できていない連続反復数。
     let mut infeasible_plateau_count = 0usize;
+    // 双対目的関数の進展の尺度 (ループ本体のプラトー検出参照): 求解開始からの `|contribution_base|` の累積、
+    // 最後にプラトー計数をリセットしてからの累積、進展とみなす相対量 (`ENOMOTO_T_PLATEAU_OBJ_REL`、0 = 無効)。
+    let mut plateau_obj_total = 0.0f64;
+    let mut plateau_obj_acc = 0.0f64;
+    let plateau_obj_rel: f64 = tunable!("ENOMOTO_T_PLATEAU_OBJ_REL", PLATEAU_OBJ_REL, f64);
     // これまでに見た最小の実行不能行数(前反復の値ではない)。
     let mut best_infeasible_len = infeasible_rows.rows.len();
     // [`XB_DRIFT_TOL`](エスカレーションの出発点)の上書き(`ENOMOTO_XB_DRIFT_TOL`、A/B 用)。
@@ -2453,6 +2485,13 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     let mut chuzr_ver: Vec<u32> = vec![0; if chuzr_heap_mode { m } else { 0 }];
     // 前反復の終わりにヒープがプールを正しく表していたか。
     let mut chuzr_heap_valid = false;
+    // square41 / ex10 報告の策7: 前反復の `x_B` 更新が一覧なし (全行走査 = `alpha` が密) だったら、この反復は
+    // 遅延ヒープを作り直さずプール全体の走査で選ぶ。ex10 (`alpha` の 80% が非ゼロ) では毎反復ヒープが
+    // 無効になり、プール 2 万行の `BinaryHeap::from` を毎反復払っていた (走査は同じ `O(プール)` でも
+    // 比較 1 回/行で済む)。選ぶ行は `cmp_lex` の許容誤差の非推移性のぶんヒープと違いうる (経路が変わる)。
+    // 次に一覧のある反復が来たらヒープを作り直す。`ENOMOTO_T_CHUZR_DENSE_SCAN=0` で無効。
+    let chuzr_dense_scan = chuzr_heap_mode && tunable!("ENOMOTO_T_CHUZR_DENSE_SCAN", 1u8, u8) != 0;
+    let mut chuzr_scan_next = false;
     // `x_B(M)` のドリフト検査(と eta フィル検査)の反復間隔。策9: `m >= XB_CHECK_CADENCE_LARGE_M` の
     // 大きな問題では `max(XB_CHECK_CADENCE_LARGE, m / XB_CHECK_CADENCE_LARGE_DIV)` に伸ばす。
     let xb_check_cadence = {
@@ -2470,6 +2509,9 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         shortlist_valid = false;
         let chuzr_heap_was_valid = chuzr_heap_valid;
         chuzr_heap_valid = false;
+        // 策7 (ex10): この反復は遅延ヒープではなく全走査で選ぶか。
+        let chuzr_scan_now = chuzr_scan_next && !chuzr_heap_was_valid;
+        chuzr_scan_next = false;
         // この反復の chuzr を遅延ヒープで行ったか(反復の終わりに変わった行を積めば有効なまま保てる)。
         let mut chuzr_heap_ready = false;
         // この反復の chuzr 時点で `shortlist_rows`/`shortlist_cut` がプールを正しく表しているか
@@ -2544,7 +2586,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         let mut best: Option<(usize, i32, Affine1, Score2)> = None;
         // この反復で候補短縮リスト(S11)を使うか(遅延ヒープの自動モードでは使わない)。
         let shortlist_active = shortlist_enabled && !bland_mode && !chuzr_heap_mode;
-        if chuzr_heap_mode && !bland_mode {
+        if chuzr_heap_mode && !bland_mode && !chuzr_scan_now {
             timed!(profile_phases, prof_phases::CHUZR, {
                 let pool = infeasible_rows.rows.len();
                 // 作り直しが要るか(前反復で無効になった、または古い要素がたまりすぎた)。
@@ -2877,6 +2919,17 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         // この一覧(正確な非ゼロ)は DSE 更新の `Σ rho_i^2` にも使う。
         // `rho_list_len`: 圧縮した一覧の長さ(全行走査なら `None`)。
         let mut rho_list_len: Option<usize> = None;
+        // square41 報告の策3: 前反復の PRICE 要素数が `price_dense_ratio · n_total` を超えたら密結果モード
+        // (`rho` が密で、ほぼ全列に触れる)。PRICE の各要素での初到達判定 (`a_p` の読みに依存する分岐) と
+        // `touched_cols` への積み込みをやめ、加算後に `a_p` を 1 回順に走査して「触れた」列 (`a_p` のビットが
+        // `+0.0` でない列) を列番号の昇順で一覧にする。`a_p` の値と触れた列の集合は同じで、
+        // 一覧の順序は後段 (chuzc1 の候補は `(ratio, j)` の全順序で並べる、`d` 更新は列ごとに独立) に
+        // 影響しないのでビット一致。加算の結果がちょうど 0 になった列は `-0.0` を置いて「触れた」印を残す
+        // (`-0.0 + x` は `+0.0 + x` と同じ値。`-0.0` を読むのは chuzc1 (`|alpha_j| <= TOL` で落ちる) と
+        // `d` 更新 (`+ 0.0` で戻す) だけ)。このモードでは `touched` は立てない (消去で `false` を書くのは無害)。
+        let price_dense_now = BIG && !price_by_col_now && price_dense_ratio > 0.0 && last_price_entries as f64 > price_dense_ratio * n_total as f64;
+        // この反復の PRICE 要素数。
+        let mut n_entries = 0usize;
         timed!(profile_phases, prof_phases::PRICE, {
             // この反復で PRICE した(非ゼロの)行数。
             let mut n_priced = 0usize;
@@ -2888,13 +2941,21 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                     if !(rv.abs() <= TOL) {
                         n_priced += 1;
                         let (lo, hi) = (price_start[i], price_nb_end[i]);
-                        for (&j, &v) in price_col[lo..hi].iter().zip(&price_val[lo..hi]) {
-                            let j = j as usize;
-                            if !touched[j] {
-                                touched[j] = true;
-                                touched_cols.push(j);
+                        n_entries += hi - lo;
+                        if price_dense_now {
+                            // 策3 (密結果モード): 初到達の判定と `touched_cols` への積み込みをせず加算だけ。
+                            price_row_dense(&mut a_p, &price_col[lo..hi], &price_val[lo..hi], rv);
+                        } else if prefetch_on {
+                            price_row_prefetch(&mut a_p, &mut touched, &mut touched_cols, &price_col[lo..hi], &price_val[lo..hi], rv, prefetch_dist);
+                        } else {
+                            for (&j, &v) in price_col[lo..hi].iter().zip(&price_val[lo..hi]) {
+                                let j = j as usize;
+                                if !touched[j] {
+                                    touched[j] = true;
+                                    touched_cols.push(j);
+                                }
+                                a_p[j] += rv * v;
                             }
-                            a_p[j] += rv * v;
                         }
                     }
                 }};
@@ -2922,7 +2983,15 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                 }
             }
             last_rho_nnz = n_priced;
+            if price_dense_now {
+                for (j, v) in a_p.iter().enumerate() {
+                    if v.to_bits() != 0 {
+                        touched_cols.push(j);
+                    }
+                }
+            }
         });
+        last_price_entries = n_entries;
         // 診断(`ENOMOTO_PROF_PHASES_EXT_WORK`): PRICE の作業量を集計する。
         if profile_work {
             use std::sync::atomic::Ordering::Relaxed;
@@ -2947,6 +3016,8 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         let mut zero_pick: Option<Cand>;
         // この反復で行 `r` を一時的にプールから外すか(`STUCK_ROW_MIN_PIVOT` 参照)。
         let mut stuck_row_taboo = false;
+        // 策7: 候補列を `candidates` に写さず `cand_scratch[..n]` のまま使う場合の候補数 `n`。
+        let mut fast_n: Option<usize> = None;
         timed!(profile_phases, prof_phases::CHUZC1, {
             candidates.clear();
             // この行 `r` について破棄済み候補の禁止が有効か。
@@ -2961,21 +3032,21 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
             let d_dir_f = d_dir as f64;
             // 残した候補数。
             let mut k = 0usize;
-            for &j in &touched_cols {
-                let alpha_j = a_p[j];
-                // `c_mask` は `Zero` 列の `hat_c` を 0 にする(不変条件により被約費用が 0 なので比も 0)。
-                let (is_nb, sigma, c_mask) = match nb_status[j] {
-                    Some(NbStatus::Lower) => (true, 1.0, 1.0),
-                    Some(NbStatus::Upper) => (true, -1.0, 1.0),
-                    Some(NbStatus::Zero) => (true, nb_sigma(NbStatus::Zero, d_dir_f, alpha_j), 0.0),
-                    None => (false, 0.0, 0.0),
-                };
-                let hat_alpha = sigma * alpha_j;
-                // `d[j]` は増分維持している被約費用。
-                let hat_c = (sigma * d[j]).max(0.0) * c_mask;
-                cand_scratch[k] = Cand { j, hat_alpha, ratio: hat_c / hat_alpha.abs() };
-                let keep = is_nb & !(alpha_j.abs() <= TOL) & !(d_dir_f * hat_alpha >= 0.0);
-                k += keep as usize;
+            // 1 列分のフィルタ (本体は [`chuzc1_filter_one`]、プリフェッチ付きの経路と共有)。
+            macro_rules! chuzc1_filter_col {
+                ($j:expr) => {{
+                    let j: usize = $j;
+                    let (c, keep) = chuzc1_filter_one(j, a_p[j], nb_status[j], d[j], d_dir_f);
+                    cand_scratch[k] = c;
+                    k += keep as usize;
+                }};
+            }
+            if prefetch_on {
+                k = chuzc1_filter_prefetch(&touched_cols, &a_p, &nb_status, &d, &mut cand_scratch, d_dir_f, prefetch_dist);
+            } else {
+                for &j in &touched_cols {
+                    chuzc1_filter_col!(j);
+                }
             }
             // 破棄直後の行の再試行(`STUCK_ROW_MIN_PIVOT` 参照):
             // - 下限を満たす候補が 1 つも無く他に実行不能行があれば、この行を一時的にプールから外して
@@ -3015,13 +3086,22 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
             // 順で最小のもの(停止候補)。BFRT の歩進はそこで無条件に止まるので、それより後ろの
             // 候補は何にも影響しない。それらを捨てても選ばれる `q`・フリップ集合・浮動小数点値は
             // 不変で、ヒープの元になる候補数だけが減る(HiGHS `choosePossible` と同じ考え)。
-            let mut stopper: Option<Cand> = None;
-            for c in kept {
-                if width_inf[c.j] && stopper.map_or(true, |s| *c < s) && !(ban_active && discard_banned_cols.contains(&c.j)) {
-                    stopper = Some(*c);
+            //
+            // 策7 (`BIG` のみ): 下の策8 (上位候補の選択) を使う場合は、停止候補による刈り込みと
+            // `candidates` への写しを省き、`cand_scratch[..k]` をそのまま候補列にする (`fast_n`)。
+            // 歩進は `(ratio, j)` 順で最初の幅無限の候補 (= 停止候補) で必ず止まるので、刈り込まなくても
+            // 選ばれる `q`・フリップ集合・値は同じ。`width_inf` のランダムな読みと候補の写しが消える。
+            if BIG && chuzc1_topk > 0 && !ban_active && !bland_mode && k > chuzc1_topk {
+                fast_n = Some(k);
+            } else {
+                let mut stopper: Option<Cand> = None;
+                for c in kept {
+                    if width_inf[c.j] && stopper.map_or(true, |s| *c < s) && !(ban_active && discard_banned_cols.contains(&c.j)) {
+                        stopper = Some(*c);
+                    }
                 }
+                candidates.extend(kept.iter().filter(|c| stopper.map_or(true, |s| **c <= s) && !(ban_active && discard_banned_cols.contains(&c.j))));
             }
-            candidates.extend(kept.iter().filter(|c| stopper.map_or(true, |s| **c <= s) && !(ban_active && discard_banned_cols.contains(&c.j))));
         });
         if stuck_row_taboo {
             // 破棄直後の行 `r` に有効な大きさのピボットが無い: 極小ピボットで基底を特異に近づける
@@ -3040,9 +3120,9 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
             continue;
         }
         if profile_work {
-            prof_phases::STAT_CANDS.fetch_add(candidates.len(), std::sync::atomic::Ordering::Relaxed);
+            prof_phases::STAT_CANDS.fetch_add(candidates.len() + fast_n.unwrap_or(0), std::sync::atomic::Ordering::Relaxed);
         }
-        if candidates.is_empty() {
+        if candidates.is_empty() && fast_n.is_none() {
             for &j in &touched_cols {
                 a_p[j] = 0.0;
                 touched[j] = false;
@@ -3123,7 +3203,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         // `candidates.drain(..)` で割り当てを次反復に残す。
         // `n_candidates`: 候補数(診断出力用)。`sorted_prefix`: ヒープから取り出した先頭部分。
         // `k_star`: 累積フリップ容量が `w_r` に達した候補の位置(達しなければ `None`)。
-        let n_candidates = candidates.len();
+        let n_candidates = candidates.len() + fast_n.unwrap_or(0);
         sorted_prefix.clear();
         let mut k_star: Option<usize> = None;
         // BFRT の `M` 付きへの一般化: 累積フリップ容量 `cum` は `Affine1` の累積和で、`w_r` と辞書式に
@@ -3154,6 +3234,86 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                     cum = new_cum;
                 }
             });
+        } else if BIG && chuzc1_topk > 0 && (fast_n.is_some() || candidates.len() > chuzc1_topk) {
+            // 策8 (`BIG` のみ): 候補全体をヒープ化する代わりに、1 パスで `(ratio, j)` 順の小さい方から
+            // `chuzc1_topk` 個を上限付きの最大ヒープに集めて並べ、先に歩進する。BFRT の歩進は
+            // 通常フリップ数 + 1 個 (数個〜十数個) で止まるので、数千候補の heapify を省ける。
+            // 歩進が上位 `chuzc1_topk` 個で止まらなければ、残り (その最大より大きい候補) だけを
+            // ヒープにして続ける。取り出す順序は全体ヒープと同じ `(ratio, j)` 昇順なのでビット一致。
+            // 候補列 (策7 なら刈り込み前の `cand_scratch[..n]`)。
+            let cand_src: &[Cand] = match fast_n {
+                Some(n) => &cand_scratch[..n],
+                None => &candidates[..],
+            };
+            let heap_t0 = profile_phases.then(std::time::Instant::now);
+            timed!(profile_phases, prof_phases::CHUZC1, {
+                topk_heap.clear();
+                for c in cand_src.iter() {
+                    if topk_heap.len() < chuzc1_topk {
+                        topk_heap.push(*c);
+                    } else if let Some(mut top) = topk_heap.peek_mut() {
+                        if *c < *top {
+                            *top = *c;
+                        }
+                    }
+                }
+                topk_sorted.clear();
+                topk_sorted.extend(topk_heap.drain());
+                topk_sorted.sort_unstable();
+            });
+            if let Some(t0) = heap_t0 {
+                prof_phases::CHUZC1_HEAP.fetch_add(t0.elapsed().as_nanos() as usize, std::sync::atomic::Ordering::Relaxed);
+            }
+            // 候補 1 つ分の歩進 (下の全体ヒープ経路と同じ)。止まったら `true`。
+            macro_rules! bfrt_step {
+                ($cand:expr) => {{
+                    let cand: Cand = $cand;
+                    let idx = sorted_prefix.len();
+                    sorted_prefix.push(cand);
+                    match cache.width[cand.j] {
+                        None => {
+                            k_star = Some(idx);
+                            true
+                        }
+                        Some(width) => {
+                            let new_cum = cum.add(width.scale(cand.hat_alpha.abs()));
+                            if bfrt_reached(w_r, new_cum, x_b_base[r]) {
+                                k_star = Some(idx);
+                                true
+                            } else {
+                                cum = new_cum;
+                                false
+                            }
+                        }
+                    }
+                }};
+            }
+            let mut stopped = false;
+            timed!(profile_phases, prof_phases::BFRT, {
+                for i in 0..topk_sorted.len() {
+                    if bfrt_step!(topk_sorted[i]) {
+                        stopped = true;
+                        break;
+                    }
+                }
+            });
+            if !stopped {
+                let kth = *topk_sorted.last().unwrap();
+                let mut heap: BinaryHeap<Reverse<Cand>> = timed!(profile_phases, prof_phases::CHUZC1, {
+                    heap_buf.clear();
+                    heap_buf.extend(cand_src.iter().filter(|c| **c > kth).map(|c| Reverse(*c)));
+                    BinaryHeap::from(std::mem::take(&mut heap_buf))
+                });
+                timed!(profile_phases, prof_phases::BFRT, {
+                    while let Some(Reverse(cand)) = heap.pop() {
+                        if bfrt_step!(cand) {
+                            break;
+                        }
+                    }
+                });
+                heap_buf = heap.into_vec();
+            }
+            candidates.clear();
         } else {
             let heap_t0 = profile_phases.then(std::time::Instant::now);
             let mut heap: BinaryHeap<Reverse<Cand>> = timed!(profile_phases, prof_phases::CHUZC1, {
@@ -4000,7 +4160,16 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         if made_m_side_progress {
             best_remaining_m_side = remaining_m_side;
         }
-        if made_infeasible_progress || made_m_side_progress {
+        // 策1 の補強 (pds-100 / s250r10 報告の策2、square41 / ex10 報告の策1(b)): 双対目的関数の進展も
+        // 進展として数える。最後にリセットしてからの `|contribution_base|` の累積が、求解開始からの累積
+        // (目的関数の尺度) の `plateau_obj_rel` 倍を超えたら進展ありとする (傾き成分の寄与は常に進展)。
+        // 実行不能行数は最適解の手前まで増減しうるので、目的関数が着実に伸びている健全な求解で
+        // Bland 規則に落とさない。寄与が微小なまま行集合も動かない本物の停滞だけを捕まえる。
+        plateau_obj_total += contribution_base.abs();
+        plateau_obj_acc += contribution_base.abs();
+        let made_obj_progress = plateau_obj_rel > 0.0 && (contribution_slope != 0.0 || plateau_obj_acc > plateau_obj_rel * plateau_obj_total.max(1.0));
+        if made_infeasible_progress || made_m_side_progress || made_obj_progress {
+            plateau_obj_acc = 0.0;
             infeasible_plateau_count = 0;
         } else {
             infeasible_plateau_count += 1;
@@ -4111,6 +4280,9 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                 chuzr_heap_valid = true;
             }
         }
+        if chuzr_dense_scan && xb_list_len.is_none() {
+            chuzr_scan_next = true;
+        }
 
         // 双対値の増分更新(Huangfu & Hall §2.2.3): PRICE が触った全列で
         // `d[j] -= theta_d * a_p[j]`。BFRT フリップは `B`/`c_B` を変えないので `d` に影響しない。
@@ -4123,10 +4295,24 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         }
         timed!(profile_phases, prof_phases::DUAL_UPDATE, {
             // 更新と `a_p` のクリアを 1 パスで行う。
-            for &j in &touched_cols {
-                d[j] -= theta_d * a_p[j];
-                a_p[j] = 0.0;
-                touched[j] = false;
+            if BIG {
+                // 策3 の密結果モードで打ち消しに置いた `-0.0` は `+ 0.0` で `+0.0` に戻す (従来と同じ `d` の
+                // ビット。通常の PRICE では `a_p` は `-0.0` にならないので恒等)。
+                if prefetch_on {
+                    dual_update_prefetch(&touched_cols, &mut d, &mut a_p, &mut touched, theta_d, prefetch_dist);
+                } else {
+                    for &j in &touched_cols {
+                        d[j] -= theta_d * (a_p[j] + 0.0);
+                        a_p[j] = 0.0;
+                        touched[j] = false;
+                    }
+                }
+            } else {
+                for &j in &touched_cols {
+                    d[j] -= theta_d * a_p[j];
+                    a_p[j] = 0.0;
+                    touched[j] = false;
+                }
             }
             touched_cols.clear();
             if price_nonbasic_only {
@@ -4172,7 +4358,13 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
             }
         }
         // トリガ (5)(`synth_clock_should_refactor` 参照): 毎反復の無条件チェック。
-        if !need_refactor && synth_clock_should_refactor(&lu) {
+        // 策11: 入る列の FTRAN 結果の非ゼロ率の移動平均が `SYNTH_CLOCK_DENSE_FRACTION` 以上なら、
+        // 策10 の `sqrt(m)` 倍を掛けない (`ENOMOTO_T_SYNTH_CLOCK_DENSE_FRACTION`、0 = 無効)。
+        let synth_dense = {
+            let f = tunable!("ENOMOTO_T_SYNTH_CLOCK_DENSE_FRACTION", SYNTH_CLOCK_DENSE_FRACTION, f64);
+            f > 0.0 && density_col_aq.expected() >= f
+        };
+        if !need_refactor && synth_clock_should_refactor_dense(&lu, synth_dense) {
             need_refactor = true;
             if profile_phases {
                 prof_phases::REFACTOR_CAUSE_CLOCK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -4180,7 +4372,18 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         }
         if !need_refactor && since_check >= xb_check_cadence {
             since_check = 0;
-            let bump_too_big = lu.fill_count() > tunable!("ENOMOTO_T_FT_BUMP_LIMIT_FACTOR", FT_BUMP_LIMIT_FACTOR, usize) * m.max(1);
+            // square41 報告の策2: 分解自体が従来の上限 `FT_BUMP_LIMIT_FACTOR · m` より大きい (基底が密な)
+            // 場合は、上限を `FT_BUMP_LU_RATIO · nnz(LU)` にする。そうした問題では FT 更新 1 回の eta が
+            // 数千要素になり、`64·m` だと数十反復ごとに再分解していた (square41: 20 反復に 1 回、1 回 179 ms)。
+            // Netlib (`nnz(LU)` は最大でも `~35·m`) には掛からない。
+            let bump_base_limit = tunable!("ENOMOTO_T_FT_BUMP_LIMIT_FACTOR", FT_BUMP_LIMIT_FACTOR, usize) * m.max(1);
+            let bump_lu_ratio = tunable!("ENOMOTO_T_FT_BUMP_LU_RATIO", FT_BUMP_LU_RATIO, f64);
+            let bump_limit = if bump_lu_ratio > 0.0 && lu.lu_nnz() >= bump_base_limit {
+                bump_base_limit.max((bump_lu_ratio * lu.lu_nnz() as f64) as usize)
+            } else {
+                bump_base_limit
+            };
+            let bump_too_big = lu.fill_count() > bump_limit;
             if bump_too_big {
                 need_refactor = true;
                 if profile_phases {
@@ -5235,6 +5438,103 @@ fn compact_rows(m: usize, out: &mut [u32], key: impl Fn(usize) -> u64) -> usize 
         k += (key(i) != 0) as usize;
     }
     k
+}
+
+/// 読み出し用のソフトウェアプリフェッチ (x86_64 のみ。他のアーキテクチャでは何もしない)。
+/// 値には影響しない。列添字でランダムに引く大きな配列 (`a_p`・`d` など) の読みを先に出すのに使う。
+#[inline(always)]
+fn prefetch_read<T>(p: *const T) {
+    #[cfg(target_arch = "x86_64")]
+    // SAFETY: `_mm_prefetch` はアドレスを読まない (無効なアドレスでも例外にならない) ヒント命令。
+    unsafe {
+        std::arch::x86_64::_mm_prefetch::<{ std::arch::x86_64::_MM_HINT_T0 }>(p as *const i8)
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    let _ = p;
+}
+
+/// chuzc1 の分岐なし候補フィルタの 1 列分: 候補 `Cand` と、残すか (非基底、`|alpha_j| > TOL`、
+/// 比率テストの符号条件) を返す。`d_j` は増分維持している被約費用。
+#[inline(always)]
+fn chuzc1_filter_one(j: usize, alpha_j: f64, status: Option<NbStatus>, d_j: f64, d_dir_f: f64) -> (Cand, bool) {
+    // `c_mask` は `Zero` 列の `hat_c` を 0 にする(不変条件により被約費用が 0 なので比も 0)。
+    let (is_nb, sigma, c_mask) = match status {
+        Some(NbStatus::Lower) => (true, 1.0, 1.0),
+        Some(NbStatus::Upper) => (true, -1.0, 1.0),
+        Some(NbStatus::Zero) => (true, nb_sigma(NbStatus::Zero, d_dir_f, alpha_j), 0.0),
+        None => (false, 0.0, 0.0),
+    };
+    let hat_alpha = sigma * alpha_j;
+    let hat_c = (sigma * d_j).max(0.0) * c_mask;
+    let keep = is_nb & !(alpha_j.abs() <= TOL) & !(d_dir_f * hat_alpha >= 0.0);
+    (Cand { j, hat_alpha, ratio: hat_c / hat_alpha.abs() }, keep)
+}
+
+/// 列数の多い問題用 (`prefetch_on`): `dist` 列先の `a_p`・`d`・`nb_status` を先読みしながら行う
+/// chuzc1 の候補フィルタ (主ループの `chuzc1_filter_col!` と同じ結果)。残した候補数を返す。
+/// 小さな問題の主ループのコードを増やさないよう別関数にしている。
+#[inline(never)]
+fn chuzc1_filter_prefetch(tc: &[usize], a_p: &[f64], nb_status: &[Option<NbStatus>], d: &[f64], cand_scratch: &mut [Cand], d_dir_f: f64, dist: usize) -> usize {
+    let mut k = 0usize;
+    for idx in 0..tc.len() {
+        if let Some(&jn) = tc.get(idx + dist) {
+            prefetch_read(a_p.as_ptr().wrapping_add(jn));
+            prefetch_read(d.as_ptr().wrapping_add(jn));
+            prefetch_read(nb_status.as_ptr().wrapping_add(jn));
+        }
+        let j = tc[idx];
+        let (c, keep) = chuzc1_filter_one(j, a_p[j], nb_status[j], d[j], d_dir_f);
+        cand_scratch[k] = c;
+        k += keep as usize;
+    }
+    k
+}
+
+/// 列数の多い問題用 (`prefetch_on`): 先読み付きの `d` 更新と `a_p`・`touched` の消去
+/// (主ループの `BIG` 経路と同じ演算)。
+#[inline(never)]
+fn dual_update_prefetch(tc: &[usize], d: &mut [f64], a_p: &mut [f64], touched: &mut [bool], theta_d: f64, dist: usize) {
+    for idx in 0..tc.len() {
+        if let Some(&jn) = tc.get(idx + dist) {
+            prefetch_read(d.as_ptr().wrapping_add(jn));
+            prefetch_read(a_p.as_ptr().wrapping_add(jn));
+        }
+        let j = tc[idx];
+        d[j] -= theta_d * (a_p[j] + 0.0);
+        a_p[j] = 0.0;
+        touched[j] = false;
+    }
+}
+
+/// 列数の多い問題用 (`prefetch_on`): `dist` 要素先の列の `a_p`・`touched` を先読みしながら行う
+/// 行方向 PRICE の 1 行分 (主ループの通常経路と同じ演算・同じ `touched_cols` の順)。
+#[inline(never)]
+fn price_row_prefetch(a_p: &mut [f64], touched: &mut [bool], touched_cols: &mut Vec<usize>, cols: &[u32], vals: &[f64], rv: f64, dist: usize) {
+    let n = cols.len();
+    for e in 0..n {
+        if e + dist < n {
+            let jn = cols[e + dist] as usize;
+            prefetch_read(a_p.as_ptr().wrapping_add(jn));
+            prefetch_read(touched.as_ptr().wrapping_add(jn));
+        }
+        let j = cols[e] as usize;
+        if !touched[j] {
+            touched[j] = true;
+            touched_cols.push(j);
+        }
+        a_p[j] += rv * vals[e];
+    }
+}
+
+/// square41 報告の策3 (PRICE の密結果モード) の 1 行分: 初到達の判定をせず `a_p` に加算だけ行い、
+/// 加算の結果がちょうど 0 になった列には `-0.0` を置いて「触れた」印を残す。
+#[inline(never)]
+fn price_row_dense(a_p: &mut [f64], cols: &[u32], vals: &[f64], rv: f64) {
+    for (&j, &v) in cols.iter().zip(vals) {
+        let j = j as usize;
+        let new = a_p[j] + rv * v;
+        a_p[j] = if new == 0.0 { -0.0 } else { new };
+    }
 }
 
 /// 2 つの同長ベクトルの内積 `Σ a_i b_i`(先頭から順に加算)。

@@ -3556,6 +3556,9 @@ pub struct FtLu {
     /// 最後の *通常* (Markowitz) 分解の `L`+`U` 非ゼロ数。[`factorize_reusing`] が
     /// 再利用分解の fill 上限の基準に使う ([`REBUILD_FILL_LIMIT`])。
     fill_baseline: usize,
+    /// この分解自体の `L`/`U` の格納要素数 (対角を含む。[`Self::fill_baseline`] と違い再利用時も
+    /// この分解の値)。FT 更新の fill 上限を分解の大きさに比例させるのに使う ([`Self::lu_nnz`])。
+    lu_nnz: usize,
     /// この分解までに連続して棄却されたピボット順再利用の回数
     /// ([`factorize_reusing`] のバックオフ)。
     reuse_fail_streak: u32,
@@ -3696,6 +3699,7 @@ impl FtLu {
             tick: Cell::new(0),
             build_tick,
             fill_baseline,
+            lu_nnz: fill_baseline,
             reuse_fail_streak: 0,
             reuse_skips_left: 0,
             btran_l_scatter: btran_l_scatter_gate(),
@@ -6122,6 +6126,11 @@ impl FtLu {
     /// 最後の分解以降に成功した FT 更新の数 (= `R` eta の数)。
     pub fn update_count(&self) -> usize {
         self.r_etas.n_headers()
+    }
+
+    /// この分解の `L`/`U` の格納要素数 (対角を含む)。
+    pub fn lu_nnz(&self) -> usize {
+        self.lu_nnz
     }
 
     /// `U` の eta 列と `R` eta が保持する非対角 fill の合計 (真の非ゼロ数。密形式でも

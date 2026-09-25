@@ -234,9 +234,41 @@ pub(crate) mod slope_intercept_dual {
     /// k=200: 5.95 / 5.41 / 5.27 s、k=50: 0.79 / 0.74 / 0.76 s)。
     pub(crate) const SYNTH_CLOCK_LARGE_REF_M: usize = 2_000;
 
+    /// square41 / ex10 報告の策11: 入る列の FTRAN 結果の非ゼロ率 (移動平均) がこれ以上なら策10 の
+    /// `sqrt(m)` 倍を掛けない (`ENOMOTO_T_SYNTH_CLOCK_DENSE_FRACTION`、0 = 無効)。ex10 は約 0.8、
+    /// pds-100 は約 0.09、stormG2_1000 はさらに小さい。策10 自体が `m >= SYNTH_CLOCK_LARGE_M` だけなので Netlib 不変。
+    pub(crate) const SYNTH_CLOCK_DENSE_FRACTION: f64 = 0.3;
+
+    /// 策8 (pds-100 / s250r10 報告): chuzc1 で候補全体をヒープ化する代わりに、`(ratio, j)` 順の
+    /// 小さい方からこの個数を 1 パスで選んで並べ、先に BFRT の歩進を行う (`BIG` のみ、0 = 全体ヒープ)。
+    /// `ENOMOTO_T_CHUZC1_TOPK` で上書き可。
+    pub(crate) const CHUZC1_TOPK: usize = 32;
+
+    /// square41 報告の策3: 前反復の PRICE 要素数が `n_total` のこの倍を超えたら PRICE を密結果モード
+    /// (初到達の判定をせず加算だけ行い、触れた列の一覧は後で `a_p` を全走査して作る) にする
+    /// (`BIG` のみ。`ENOMOTO_T_PRICE_DENSE_RESULT`、0 = 無効)。ビット一致。
+    pub(crate) const PRICE_DENSE_RESULT_RATIO: f64 = 1.0;
+
+    /// 列添字でランダムに引く PRICE・chuzc1・`d` 更新のループでソフトウェアプリフェッチを使う最小列数
+    /// (`n_total`、`BIG` のみ。`ENOMOTO_T_PREFETCH_MIN_COLS`、0 = 無効)。Netlib (`n_total` ≤ 約 2 万) には掛からない。
+    pub(crate) const PREFETCH_MIN_COLS: usize = 100_000;
+
+    /// ソフトウェアプリフェッチの先読み距離 (要素数)。
+    pub(crate) const PREFETCH_DIST: usize = 16;
+
     /// 増分維持している被約費用 `d` のドリフト検査の相対許容誤差: `‖d - fresh_d‖`(固定列を除く)が
     /// `D_DRIFT_TOL * max(‖fresh_d‖, 1)` を超えたら再分解する。
     pub(crate) const D_DRIFT_TOL: f64 = 1.0;
+
+    /// square41 報告の策2: 双対単体法 (`slope_intercept_dual`) で分解の格納要素数 `nnz(LU)` (対角込み) が
+    /// 従来の fill 上限 `FT_BUMP_LIMIT_FACTOR · m` 以上なら、上限を `FT_BUMP_LU_RATIO · nnz(LU)` にする
+    /// (`ENOMOTO_T_FT_BUMP_LU_RATIO`、0 = 常に従来の `64·m`)。Netlib (`nnz(LU)` ≤ 約 35·m) では従来と同じ。
+    pub(crate) const FT_BUMP_LU_RATIO: f64 = 3.0;
+
+    /// 実行不能行数プラトー検出で、双対目的関数の進展とみなす相対量: 最後のリセットからの
+    /// `|contribution_base|` の累積が求解開始からの累積のこの倍を超えたらプラトー計数をリセットする
+    /// (`ENOMOTO_T_PLATEAU_OBJ_REL`、0 = 無効)。
+    pub(crate) const PLATEAU_OBJ_REL: f64 = 1e-6;
 
     /// PRICE によるピボット要素 `alpha_q` と FTRAN による `alpha_full[r]` の相対差がこれを超えたら
     /// 「桁違いの不一致」(`pivot_grossly_inconsistent`)としてピボットを破棄する。
