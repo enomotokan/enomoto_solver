@@ -28,7 +28,7 @@
 //! 各 [`Substitution`] はその時点での `kept` の下限 (`kept_lb`) を記録するので、ポストソルブは
 //! 逆順に 1 層ずつ正しく分解できる。1 呼び出しで群全体を吸収する (大きな群を外側ラウンド数に依存せず潰すため)。
 
-use crate::sparse::{Csr, CscMat, csr_rows};
+use crate::sparse::{FaerCsr, CscMat, csr_rows};
 use crate::params::presolve::TOL;
 
 /// 1 回の列併合のポストソルブ記録。併合変数 `z = x[kept]` の値から `x[var]` と `x[kept]` の
@@ -69,7 +69,7 @@ impl Substitution {
 /// 平行列併合の結果。消去された列は係数を行から除き、`c`・`lb`・`ub` を 0 にしてある (列番号は保持)。
 pub struct ParallelColsResult {
     /// 消去列を除いた等式行列
-    pub a: Csr,
+    pub a: FaerCsr,
     /// 目的関数係数 (消去列は 0)
     pub c: Vec<f64>,
     /// 下限 (併合先は `z` の範囲に拡大、消去列は 0)
@@ -86,7 +86,7 @@ pub struct ParallelColsResult {
 /// 何も併合しなかった場合は入力の複製を返す。現在はテストからのみ使用
 /// (本番のパイプラインは [`merge_parallel_columns_if_any`] を呼ぶ)。
 #[cfg_attr(not(test), allow(dead_code))]
-pub fn merge_parallel_columns(n: usize, a: &Csr, real_rows: &[Vec<(usize, f64)>], c: &[f64], lb: &[f64], ub: &[f64]) -> ParallelColsResult {
+pub fn merge_parallel_columns(n: usize, a: &FaerCsr, real_rows: &[Vec<(usize, f64)>], c: &[f64], lb: &[f64], ub: &[f64]) -> ParallelColsResult {
     merge_parallel_columns_if_any(n, a, real_rows, c, lb, ub).unwrap_or_else(|| ParallelColsResult {
         a: a.clone(),
         c: c.to_vec(),
@@ -103,7 +103,7 @@ pub fn merge_parallel_columns(n: usize, a: &Csr, real_rows: &[Vec<(usize, f64)>]
 /// - `a`: 等式行列
 /// - `real_rows`: `G` の実制約行
 /// - `c`, `lb`, `ub`: 目的関数係数と境界
-pub fn merge_parallel_columns_if_any(n: usize, a: &Csr, real_rows: &[Vec<(usize, f64)>], c: &[f64], lb: &[f64], ub: &[f64]) -> Option<ParallelColsResult> {
+pub fn merge_parallel_columns_if_any(n: usize, a: &FaerCsr, real_rows: &[Vec<(usize, f64)>], c: &[f64], lb: &[f64], ub: &[f64]) -> Option<ParallelColsResult> {
     let ar = a.as_ref();
     let n_a_rows = ar.nrows();
 

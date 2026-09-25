@@ -17,19 +17,19 @@
 //!
 //! **1 パス・非連鎖**: 1 回の固定に使った 2 列 (固定される側と根拠となる側) は、この呼び出しでは再利用しない。
 
-use crate::sparse::{Csr, csr_row_iter};
+use crate::sparse::{FaerCsr, csr_row_iter};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use crate::params::presolve::TOL;
 
 /// 固定できる変数の `(j, 値)` の一覧を返す
-/// ([`dualfix::fix_dominated_variables`](super::dualfix::fix_dominated_variables) と同じ形式)。
+/// ([`dualfix::fix_by_lock_count`](super::dualfix::fix_by_lock_count) と同じ形式)。
 ///
 /// - `n`: 列数
 /// - `a`: 等式行列 (ここに現れる列は対象外)
 /// - `real_g_rows`: `G` の実制約 (複数変数) 行
 /// - `c`: 目的関数係数
 /// - `lb`, `ub`: 変数の境界
-pub fn fix_dominated_columns(n: usize, a: &Csr, real_g_rows: &[Vec<(usize, f64)>], c: &[f64], lb: &[f64], ub: &[f64]) -> Vec<(usize, f64)> {
+pub fn fix_dominated_columns(n: usize, a: &FaerCsr, real_g_rows: &[Vec<(usize, f64)>], c: &[f64], lb: &[f64], ub: &[f64]) -> Vec<(usize, f64)> {
     // in_equality[j]: 列 j が等式行に現れるか
     let mut in_equality = vec![false; n];
     let ar = a.as_ref();

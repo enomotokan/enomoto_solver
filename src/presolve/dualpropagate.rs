@@ -34,7 +34,7 @@
 //! どちらも入力のスナップショットから 1 パスで決め、連鎖はしない (次ラウンドで拾われる)。
 
 use crate::presolve::propagate;
-use crate::sparse::{Csr, CscMat, csr_from_rows, csr_row_iter};
+use crate::sparse::{FaerCsr, CscMat, csr_from_rows, csr_row_iter};
 use crate::params::presolve::TOL;
 
 /// [`run`] が 1 回の双対伝播から読み出す 2 種類の縮約。
@@ -56,7 +56,7 @@ pub struct DualReductions {
 /// - `lb`, `ub`: 現ラウンドの境界 (固定済み列の判定と、文字通りの `±inf` 判定に使う)
 /// - `_orig_lb`, `_orig_ub`: 未使用 (呼び出し側を変えないために残している。経緯は履歴メモ参照)
 /// - `passes`: 転置系に対する境界伝播のパス数
-pub fn run(n: usize, a: &Csr, real_g_rows: &[Vec<(usize, f64)>], c: &[f64], lb: &[f64], ub: &[f64], _orig_lb: &[f64], _orig_ub: &[f64], passes: usize) -> DualReductions {
+pub fn propagate_dual_bounds(n: usize, a: &FaerCsr, real_g_rows: &[Vec<(usize, f64)>], c: &[f64], lb: &[f64], ub: &[f64], _orig_lb: &[f64], _orig_ub: &[f64], passes: usize) -> DualReductions {
     let ar = a.as_ref();
     // 双対変数の番号付け: A 行が 0..num_a、G 実制約行が num_a..num_a+num_g
     let num_a = ar.nrows();
@@ -122,7 +122,7 @@ pub fn run(n: usize, a: &Csr, real_g_rows: &[Vec<(usize, f64)>], c: &[f64], lb: 
             t_h.push(0.0);
         }
         let t_g = csr_from_rows(&t_rows, num_duals);
-        propagate::propagate_nog(num_duals, &t_g, &t_h, passes)
+        propagate::propagate_without_g_rebuild(num_duals, &t_g, &t_h, passes)
     };
     if result.infeasible {
         // 双対系の一部だけから主問題の非有界・実行不能を結論するのは強すぎるので、
@@ -165,8 +165,8 @@ pub fn run(n: usize, a: &Csr, real_g_rows: &[Vec<(usize, f64)>], c: &[f64], lb: 
 }
 
 /// [`run`] の含意等式 (行昇格) の結果だけを返す薄いラッパー。現在はこのモジュールのテストからのみ使用。
-pub fn find_implied_equalities(n: usize, a: &Csr, real_g_rows: &[Vec<(usize, f64)>], c: &[f64], lb: &[f64], ub: &[f64], orig_lb: &[f64], orig_ub: &[f64], passes: usize) -> Vec<usize> {
-    run(n, a, real_g_rows, c, lb, ub, orig_lb, orig_ub, passes).implied_equalities
+pub fn find_implied_equalities(n: usize, a: &FaerCsr, real_g_rows: &[Vec<(usize, f64)>], c: &[f64], lb: &[f64], ub: &[f64], orig_lb: &[f64], orig_ub: &[f64], passes: usize) -> Vec<usize> {
+    propagate_dual_bounds(n, a, real_g_rows, c, lb, ub, orig_lb, orig_ub, passes).implied_equalities
 }
 
 #[cfg(test)]

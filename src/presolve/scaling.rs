@@ -11,7 +11,7 @@
 //! 並列化: `apply`/`unscale_x` は常に逐次。`compute` の列ノルム集計だけは
 //! 行数が [`RAYON_SIZE_THRESHOLD`] を超えたら rayon 版を使う。
 
-use crate::sparse::{Csr, CsrRowBuilder, csr_from_rows, csr_row_iter};
+use crate::sparse::{FaerCsr, CsrRowBuilder, csr_from_rows, csr_row_iter};
 use crate::params::presolve::{RAYON_SIZE_THRESHOLD, SCALE_NOBOUNDS, SCALE_UNIT_FAST, SCALING_ZERO_TOL};
 
 /// スケーリング係数一式。
@@ -96,13 +96,13 @@ fn col_norm_fold_parallel(mat: faer::sparse::SparseRowMatRef<usize, f64>, d: &[f
 
 /// Ruiz 均衡化のスケール係数を計算する。`iters` は Ruiz 反復回数。
 /// 目的係数 `c` も列ノルムに含める。
-pub fn compute(n: usize, a: &Csr, g: &Csr, c: &[f64], iters: usize) -> Scaling {
+pub fn compute(n: usize, a: &FaerCsr, g: &FaerCsr, c: &[f64], iters: usize) -> Scaling {
     compute_impl(n, a, g, c, iters, tunable!("ENOMOTO_T_SCALE_UNIT_FAST", SCALE_UNIT_FAST, usize) != 0)
 }
 
 /// [`compute`] の本体。`unit_fast` が真なら G の単一要素行 (箱制約行) を
 /// 専用リストで処理する高速経路を使う (結果は通常経路とビット一致)。
-fn compute_impl(n: usize, a: &Csr, g: &Csr, c: &[f64], iters: usize, unit_fast: bool) -> Scaling {
+fn compute_impl(n: usize, a: &FaerCsr, g: &FaerCsr, c: &[f64], iters: usize, unit_fast: bool) -> Scaling {
     let p = a.nrows();
     let m = g.nrows();
     let mut d = vec![1.0; n];
@@ -280,7 +280,7 @@ fn compute_impl(n: usize, a: &Csr, g: &Csr, c: &[f64], iters: usize, unit_fast: 
 }
 
 /// スケーリングを問題データに適用し、`(A', G', b', h', c')` を返す。
-pub fn apply(scaling: &Scaling, a: &Csr, g: &Csr, b: &[f64], h: &[f64], c: &[f64]) -> (Csr, Csr, Vec<f64>, Vec<f64>, Vec<f64>) {
+pub fn apply(scaling: &Scaling, a: &FaerCsr, g: &FaerCsr, b: &[f64], h: &[f64], c: &[f64]) -> (FaerCsr, FaerCsr, Vec<f64>, Vec<f64>, Vec<f64>) {
     let n = scaling.d.len();
     let p = a.nrows();
     let m = g.nrows();
@@ -300,7 +300,7 @@ pub fn apply(scaling: &Scaling, a: &Csr, g: &Csr, b: &[f64], h: &[f64], c: &[f64
 /// 各要素を `v * e[i] * d[j]` に置き換えた行列を作る。[`CsrRowBuilder`] に
 /// 使い回しの行バッファで直接書き込む (`csr_from_rows` と同一の結果)。
 /// ビルダーが行を受け付けない場合は `csr_from_rows` での構築に切り替える。
-fn scale_rows(mat: &Csr, e: &[f64], d: &[f64], n: usize) -> Csr {
+fn scale_rows(mat: &FaerCsr, e: &[f64], d: &[f64], n: usize) -> FaerCsr {
     let r = mat.as_ref();
     let rows = r.nrows();
     let nnz: usize = (0..rows).map(|i| r.col_indices_of_row_raw(i).len()).sum();

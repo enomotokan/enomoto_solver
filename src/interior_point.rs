@@ -24,7 +24,7 @@ pub mod kkt;
 
 use rayon::prelude::*;
 
-use self::kkt::{mat_t_vec, mat_t_vec_into, mat_vec, mat_vec_into, Csr, SparseKkt};
+use self::kkt::{csr_mat_t_vec, csr_mat_t_vec_into, csr_mat_vec, csr_mat_vec_into, FaerCsr, SparseKkt};
 use self::qp::QpStd;
 use crate::presolve::{self, scaling};
 use crate::types::{ConstraintRow, Objective, Sense, Status, VariableData};
@@ -75,7 +75,7 @@ fn write_add_scaled(out: &mut [f64], a: &[f64], alpha: f64, d: &[f64]) {
 /// `b·y + h·z > 0` を満たす `(y, z)` があれば `{Ax=b, Gx<=h}` は空。
 /// `(y, z)` は無限大ノルムで正規化してから判定する。正則化が下限に達したとき
 /// (まれ) だけ呼ばれるので、メモリ確保してよい。
-fn primal_infeasibility_certificate(a: &Csr, g: &Csr, n: usize, b: &[f64], h: &[f64], y: &[f64], z: &[f64]) -> bool {
+fn primal_infeasibility_certificate(a: &FaerCsr, g: &FaerCsr, n: usize, b: &[f64], h: &[f64], y: &[f64], z: &[f64]) -> bool {
     let scale = norm_inf(y).max(norm_inf(z));
     if scale < CERT_SCALE_MIN {
         return false;
@@ -83,21 +83,21 @@ fn primal_infeasibility_certificate(a: &Csr, g: &Csr, n: usize, b: &[f64], h: &[
     let yhat: Vec<f64> = y.iter().map(|v| v / scale).collect();
     let zhat: Vec<f64> = z.iter().map(|v| v / scale).collect();
     // 定常性残差 A^T ŷ + G^T ẑ
-    let mut stat = mat_t_vec(a, n, &yhat);
-    axpy(&mut stat, 1.0, &mat_t_vec(g, n, &zhat));
+    let mut stat = csr_mat_t_vec(a, n, &yhat);
+    axpy(&mut stat, 1.0, &csr_mat_t_vec(g, n, &zhat));
     norm_inf(&stat) < CERT_TOL && dot(b, &yhat) + dot(h, &zhat) > CERT_TOL
 }
 
 /// 双対の実行不能性 (主問題の非有界性) の Farkas 証明を判定する:
 /// `Ax ≈ 0`, `Gx <= 0`, `c·x < 0` を満たす `x` は目的関数を減らし続ける非有界な方向。
-fn dual_infeasibility_certificate(a: &Csr, g: &Csr, c: &[f64], x: &[f64]) -> bool {
+fn dual_infeasibility_certificate(a: &FaerCsr, g: &FaerCsr, c: &[f64], x: &[f64]) -> bool {
     let scale = norm_inf(x);
     if scale < CERT_SCALE_MIN {
         return false;
     }
     let xhat: Vec<f64> = x.iter().map(|v| v / scale).collect();
-    let eq_ok = norm_inf(&mat_vec(a, &xhat)) < CERT_TOL;
-    let ineq_ok = mat_vec(g, &xhat).iter().all(|&v| v <= CERT_TOL);
+    let eq_ok = norm_inf(&csr_mat_vec(a, &xhat)) < CERT_TOL;
+    let ineq_ok = csr_mat_vec(g, &xhat).iter().all(|&v| v <= CERT_TOL);
     eq_ok && ineq_ok && dot(c, &xhat) < -CERT_TOL
 }
 
@@ -119,8 +119,8 @@ fn fraction_to_boundary(v: &[f64], dv: &[f64]) -> f64 {
 #[allow(clippy::too_many_arguments)]
 fn newton_solve(
     kkt: &mut SparseKkt,
-    a: &Csr,
-    g: &Csr,
+    a: &FaerCsr,
+    g: &FaerCsr,
     rho: f64,
     delta: f64,
     s: &[f64],
@@ -344,7 +344,7 @@ pub fn solve(qp: &QpStd) -> IpmResult {
     if m == 0 {
         // 不等式・境界が 1 つもない: xi が既に ρ 正則化付きの定常条件を満たすので、
         // 双対残差の大きさだけで分類する。
-        let aty = mat_t_vec(a, n, &y0_init);
+        let aty = csr_mat_t_vec(a, n, &y0_init);
         let mut dual_res = c.clone();
         axpy(&mut dual_res, 1.0, &aty);
         if norm_inf(&dual_res) > NO_INEQ_DUAL_RES_TOL {
@@ -382,8 +382,8 @@ pub fn solve(qp: &QpStd) -> IpmResult {
     let mut stall = 0usize;
 
     for _iter in 0..MAX_ITERS {
-        mat_vec_into(a, &x, &mut ws.ax);
-        mat_vec_into(g, &x, &mut ws.gx);
+        csr_mat_vec_into(a, &x, &mut ws.ax);
+        csr_mat_vec_into(g, &x, &mut ws.gx);
 
         // 停止判定 (PIQP 論文 式 13a-13c、P = 0)
         write_sub(&mut ws.primal_res[0..p], &ws.ax, b);
@@ -393,8 +393,8 @@ pub fn solve(qp: &QpStd) -> IpmResult {
         // 主残差の無限大ノルム
         let primal_res_inf = norm_inf(&ws.primal_res);
 
-        mat_t_vec_into(a, &y, &mut ws.aty);
-        mat_t_vec_into(g, &z, &mut ws.gtz);
+        csr_mat_t_vec_into(a, &y, &mut ws.aty);
+        csr_mat_t_vec_into(g, &z, &mut ws.gtz);
         ws.dual_res.copy_from_slice(c);
         axpy(&mut ws.dual_res, 1.0, &ws.aty);
         axpy(&mut ws.dual_res, 1.0, &ws.gtz);
@@ -531,8 +531,8 @@ pub fn solve(qp: &QpStd) -> IpmResult {
         let gap_after = dot(&ws.s_new, &ws.z_new);
         let r = ((gap_before - gap_after) / gap_before).abs();
 
-        mat_vec_into(a, &ws.x_new, &mut ws.ax_new);
-        mat_vec_into(g, &ws.x_new, &mut ws.gx_new);
+        csr_mat_vec_into(a, &ws.x_new, &mut ws.ax_new);
+        csr_mat_vec_into(g, &ws.x_new, &mut ws.gx_new);
         write_sub(&mut ws.primal_res_new[0..p], &ws.ax_new, b);
         for i in 0..m {
             ws.primal_res_new[p + i] = ws.gx_new[i] - h[i] + ws.s_new[i];
@@ -549,8 +549,8 @@ pub fn solve(qp: &QpStd) -> IpmResult {
         }
         delta = delta.max(DELTA_MIN);
 
-        mat_t_vec_into(a, &ws.y_new, &mut ws.aty_new);
-        mat_t_vec_into(g, &ws.z_new, &mut ws.gtz_new);
+        csr_mat_t_vec_into(a, &ws.y_new, &mut ws.aty_new);
+        csr_mat_t_vec_into(g, &ws.z_new, &mut ws.gtz_new);
         ws.dual_res_new.copy_from_slice(c);
         axpy(&mut ws.dual_res_new, 1.0, &ws.aty_new);
         axpy(&mut ws.dual_res_new, 1.0, &ws.gtz_new);
@@ -580,14 +580,14 @@ pub fn solve(qp: &QpStd) -> IpmResult {
     if dual_infeasibility_certificate(a, g, c, &x) {
         return IpmResult { status: Status::Unbounded, x: None };
     }
-    let ax = mat_vec(a, &x);
-    let gx = mat_vec(g, &x);
+    let ax = csr_mat_vec(a, &x);
+    let gx = csr_mat_vec(g, &x);
     let mut primal_res_vec = ax.iter().zip(b).map(|(x, y)| x - y).collect::<Vec<_>>();
     let mut ineq_res: Vec<f64> = (0..m).map(|i| gx[i] - h[i] + s[i]).collect();
     primal_res_vec.append(&mut ineq_res);
     let primal_res_inf = norm_inf(&primal_res_vec);
-    let aty = mat_t_vec(a, n, &y);
-    let gtz = mat_t_vec(g, n, &z);
+    let aty = csr_mat_t_vec(a, n, &y);
+    let gtz = csr_mat_t_vec(g, n, &z);
     let mut dual_res_vec = c.clone();
     axpy(&mut dual_res_vec, 1.0, &aty);
     axpy(&mut dual_res_vec, 1.0, &gtz);

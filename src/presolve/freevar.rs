@@ -23,13 +23,13 @@
 //! 詳しい導出・経緯は改良履歴メモを参照。
 
 use crate::presolve::colsingleton::Substitution;
-use crate::sparse::{Csr, SparseAccum, axpy_row, csr_from_rows, csr_rows};
+use crate::sparse::{FaerCsr, SparseAccum, axpy_row, csr_from_rows, csr_rows};
 use crate::params::presolve::{SUBSTITUTION_PIVOT_RATIO, TOL};
 
 /// [`eliminate_free_variables`] の結果。
 pub struct FreeVarResult {
     /// 消去後の等式行列 `A` (ピボット行は削除済み)。
-    pub a: Csr,
+    pub a: FaerCsr,
     /// 消去後の等式右辺 `b`。
     pub b: Vec<f64>,
     /// 消去後の目的係数 `c` (消去変数のコストは他の列に畳み込み済み、自身は 0)。
@@ -62,7 +62,7 @@ fn appears_in(real_rows: &[Vec<(usize, f64)>], j: usize) -> bool {
 /// - `real_rows`/`real_rhs`: 多変数の不等式行 `G x <= h` (単一変数の境界行は除く)。
 ///
 /// 自由変数がなければ入力のコピーをそのまま返す。
-pub fn eliminate_free_variables(n: usize, a: &Csr, b: &[f64], c: &[f64], lb: &[f64], ub: &[f64], real_rows: &[Vec<(usize, f64)>], real_rhs: &[f64]) -> FreeVarResult {
+pub fn eliminate_free_variables(n: usize, a: &FaerCsr, b: &[f64], c: &[f64], lb: &[f64], ub: &[f64], real_rows: &[Vec<(usize, f64)>], real_rhs: &[f64]) -> FreeVarResult {
     // 変数ごとの「真の自由変数か」
     let is_free: Vec<bool> = (0..n).map(|j| lb[j] == f64::NEG_INFINITY && ub[j] == f64::INFINITY).collect();
     if !is_free.iter().any(|&f| f) {
@@ -251,7 +251,7 @@ mod tests {
     use super::*;
 
     /// 行リストから CSR を作るテスト用の短縮ヘルパ。
-    fn csr(rows: &[Vec<(usize, f64)>], n: usize) -> Csr {
+    fn csr(rows: &[Vec<(usize, f64)>], n: usize) -> FaerCsr {
         csr_from_rows(rows, n)
     }
 

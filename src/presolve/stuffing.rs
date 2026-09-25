@@ -33,7 +33,7 @@
 //! 候補列自身の境界は両側有限でなければならない (他の列は無限でもよい)。固定は自分の境界値へのみで、
 //! 境界の部分的な強化はしない。同じ行の 2 つの場合は互いを通常の「他列」として独立に扱う。
 
-use crate::sparse::{Csr, csr_row_iter};
+use crate::sparse::{FaerCsr, csr_row_iter};
 use crate::params::presolve::TOL;
 
 /// 1 つの行について判定する連続シングルトン列の候補。`stuffing_core` が前提とする
@@ -106,7 +106,7 @@ fn stuffing_core(row_other: &[(usize, f64)], b: f64, mut candidates: Vec<Candida
 /// - `real_g_rows`, `real_g_rhs`: `G` の複数変数の実制約行とその右辺 (箱境界行は出現回数に数えない)
 /// - `c`: 目的関数係数
 /// - `lb`, `ub`: 変数の境界
-pub fn fix_singleton_columns(n: usize, a: &Csr, real_g_rows: &[Vec<(usize, f64)>], real_g_rhs: &[f64], c: &[f64], lb: &[f64], ub: &[f64]) -> Vec<(usize, f64)> {
+pub fn fix_singleton_columns(n: usize, a: &FaerCsr, real_g_rows: &[Vec<(usize, f64)>], real_g_rhs: &[f64], c: &[f64], lb: &[f64], ub: &[f64]) -> Vec<(usize, f64)> {
     // in_equality[j]: 列 j が等式行に現れるか
     let mut in_equality = vec![false; n];
     let ar = a.as_ref();

@@ -14,17 +14,17 @@
 //! 相互参照で系が壊れた事例は履歴メモ参照)。各対象行は 1 呼び出しにつき高々 1 回だけ書き換える。
 
 use crate::presolve::propagate;
-use crate::sparse::{Csr, SparseAccum, csr_from_rows, csr_rows_pruned};
+use crate::sparse::{FaerCsr, SparseAccum, csr_from_rows, csr_rows_pruned};
 use crate::params::presolve::TOL;
 
 /// [`sparsify`] の結果。
 pub struct SparsifyResult {
     /// 書き換え後の等式行列
-    pub a: Csr,
+    pub a: FaerCsr,
     /// `a` に対応する右辺
     pub b: Vec<f64>,
     /// 書き換え後の不等式行列 (箱境界行を含めて再構築したもの)
-    pub g: Csr,
+    pub g: FaerCsr,
     /// `g` に対応する右辺
     pub h: Vec<f64>,
     /// この呼び出しで書き換えた行数 (`A` と `G` の合計)。0 なら何も見つからなかった
@@ -45,7 +45,7 @@ enum RowSource {
 /// - `n`: 列数
 /// - `a`, `b`: 等式制約 `A x = b`
 /// - `g`, `h`: 不等式制約 `G x <= h` (内部で箱境界行と実制約行に分離し、最後に再構築する)
-pub fn sparsify(n: usize, a: &Csr, b: &[f64], g: &Csr, h: &[f64]) -> SparsifyResult {
+pub fn sparsify(n: usize, a: &FaerCsr, b: &[f64], g: &FaerCsr, h: &[f64]) -> SparsifyResult {
     let mut a_rows: Vec<Vec<(usize, f64)>> = csr_rows_pruned(a);
     let mut b: Vec<f64> = b.to_vec();
 

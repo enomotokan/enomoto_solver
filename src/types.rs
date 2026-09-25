@@ -130,7 +130,7 @@ pub struct VariableData {
 ///
 /// `HashMap` ではなく `BTreeMap` を使うのは、行の項の並び順を実行ごとに固定する
 /// ため。退化した問題では項の順序がタイブレークを左右し、ピボット列や実行時間が
-/// 実行ごとに変わりうる (経緯は `docs/_history_fragments/misc.md`)。
+/// 実行ごとに変わりうる (経緯は `docs/improvement_history.md`)。
 #[derive(Debug, Clone)]
 pub struct LinearExpr {
     /// 変数番号 → 係数 (番号の昇順に並ぶ)。

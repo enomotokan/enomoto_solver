@@ -9,7 +9,7 @@
 //! - 変数自身の箱境界行は実制約に含めない (含めると全変数が自分の境界でロックされてしまう)。
 //! - 下ロック数 0 かつ コスト `>= 0` なら下限へ、上ロック数 0 かつ コスト `<= 0` なら上限へ固定。
 
-use crate::sparse::{Csr, csr_row_iter};
+use crate::sparse::{FaerCsr, csr_row_iter};
 use crate::params::presolve::TOL;
 
 /// 直ちに固定できる変数の `(列番号 j, 固定値)` の一覧を返す。
@@ -20,9 +20,9 @@ use crate::params::presolve::TOL;
 ///   (`propagate::extract_bounds` が単変数の境界行と分離済みのものを再利用)
 /// - `c`: 目的関数係数 (最小化)
 /// - `lb`, `ub`: 各変数の下限・上限 (固定先の境界が有限でなければ固定しない)
-pub fn fix_dominated_variables(
+pub fn fix_by_lock_count(
     n: usize,
-    a: &Csr,
+    a: &FaerCsr,
     real_g_rows: &[Vec<(usize, f64)>],
     c: &[f64],
     lb: &[f64],

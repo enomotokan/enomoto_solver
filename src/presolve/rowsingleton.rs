@@ -6,13 +6,13 @@
 //!   とは別物で、こちらは `A` の等式行だけを見る。
 //! - 固定値が変数の `[lb, ub]` の外にあれば、境界を黙って上書きせず実行不能として報告する。
 
-use crate::sparse::{Csr, csr_from_rows, csr_is_canonical, csr_row_iter};
+use crate::sparse::{FaerCsr, csr_from_rows, csr_is_canonical, csr_row_iter};
 use crate::params::presolve::TOL;
 
 /// [`fix_singleton_equalities`] の結果。
 pub struct RowSingletonResult {
     /// シングルトン行を除いた後の等式行列 `A`
-    pub a: Csr,
+    pub a: FaerCsr,
     /// `a` に対応する右辺
     pub b: Vec<f64>,
     /// このパスで固定した変数の `(j, 値)`
@@ -29,7 +29,7 @@ pub struct RowSingletonResult {
 /// - `n`: 列数
 /// - `a`, `b`: 等式制約 `A x = b`
 /// - `lb`, `ub`: 変数の現在の境界 (実行不能判定に使用)
-pub fn fix_singleton_equalities(n: usize, a: &Csr, b: &[f64], lb: &[f64], ub: &[f64]) -> RowSingletonResult {
+pub fn fix_singleton_equalities(n: usize, a: &FaerCsr, b: &[f64], lb: &[f64], ub: &[f64]) -> RowSingletonResult {
     let ar = a.as_ref();
     // シングルトン行が一つもない場合 (初回ラウンド以降はこれが普通) は、正準形なら `a` をそのまま返す。
     if csr_is_canonical(a) && (0..ar.nrows()).all(|i| ar.col_indices_of_row_raw(i).len() != 1) {

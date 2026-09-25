@@ -20,7 +20,7 @@
 //!   入力列だけは Gilbert & Peierls (1988) 型の疎前進代入
 //!   (`LuFactors::l_solve_sparse_into`, [`GpScratch`]) を使う。
 //!
-//! 開発経緯は `docs/_history_fragments/lu.md` を参照。
+//! 開発経緯は `docs/improvement_history.md` を参照。
 
 use crate::sparse::{CscBuilder, CscMat, CsrMat, EpochMarks};
 use std::cell::Cell;

@@ -22,7 +22,7 @@
 
 use std::collections::HashMap;
 
-use crate::sparse::Csr;
+use crate::sparse::FaerCsr;
 use crate::params::presolve::TOL;
 
 /// [`run`] の結果。
@@ -56,7 +56,7 @@ fn others_range(row: &[(usize, f64)], skip: usize, lb: &[f64], ub: &[f64]) -> (f
 /// - `real_rows`, `real_rhs`: `G` の実制約行 (`<=` 正規化済み) とその右辺
 /// - `c`: 目的関数係数
 /// - `lb`, `ub`: 変数の境界
-pub fn run(n: usize, a: &Csr, real_rows: &[Vec<(usize, f64)>], real_rhs: &[f64], c: &[f64], lb: &[f64], ub: &[f64]) -> IneqSingletonResult {
+pub fn resolve_inequality_singletons(n: usize, a: &FaerCsr, real_rows: &[Vec<(usize, f64)>], real_rhs: &[f64], c: &[f64], lb: &[f64], ub: &[f64]) -> IneqSingletonResult {
     let mut out = IneqSingletonResult { fixes: Vec::new(), implied_equalities: Vec::new() };
 
     // 等式行に現れる列は colsingleton / aggregator の担当なので除外する。
@@ -199,14 +199,14 @@ mod tests {
     use super::*;
     use crate::sparse::csr_from_rows;
 
-    fn empty_a(n: usize) -> Csr {
+    fn empty_a(n: usize) -> FaerCsr {
         csr_from_rows(&[], n)
     }
 
     #[test]
     fn fixes_when_the_row_can_never_bind() {
         // min -x0, 0 <= x0 <= 1, x0 + x1 <= 5, x1 in [0,1]: x0 = 1 never violates.
-        let r = run(2, &empty_a(2), &[vec![(0, 1.0), (1, 1.0)]], &[5.0], &[-1.0, 0.0], &[0.0, 0.0], &[1.0, 1.0]);
+        let r = resolve_inequality_singletons(2, &empty_a(2), &[vec![(0, 1.0), (1, 1.0)]], &[5.0], &[-1.0, 0.0], &[0.0, 0.0], &[1.0, 1.0]);
         assert_eq!(r.fixes, vec![(0, 1.0)]);
         assert!(r.implied_equalities.is_empty());
     }
@@ -216,7 +216,7 @@ mod tests {
         // min -x0, x0 in [0,10], 1 <= x0 + x1 <= 3 (as a pair), x1 in [0,1]:
         // the upper side implies x0 <= 3 <= 10, so it is tight at every optimum.
         let rows = vec![vec![(0, 1.0), (1, 1.0)], vec![(0, -1.0), (1, -1.0)]];
-        let r = run(2, &empty_a(2), &rows, &[3.0, -1.0], &[-1.0, 0.0], &[0.0, 0.0], &[10.0, 1.0]);
+        let r = resolve_inequality_singletons(2, &empty_a(2), &rows, &[3.0, -1.0], &[-1.0, 0.0], &[0.0, 0.0], &[10.0, 1.0]);
         assert!(r.fixes.is_empty());
         assert_eq!(r.implied_equalities, vec![(0, Some(1))]);
     }
@@ -226,7 +226,7 @@ mod tests {
         // min x0 (pushes down), x0 in [0,10], 1 <= x0 + x1 <= 3, x1 in [0,1]:
         // the lower side implies x0 >= 0 = lb only when 1 - r_hi = 0 >= 0.
         let rows = vec![vec![(0, 1.0), (1, 1.0)], vec![(0, -1.0), (1, -1.0)]];
-        let r = run(2, &empty_a(2), &rows, &[3.0, -1.0], &[1.0, 0.0], &[0.0, 0.0], &[10.0, 1.0]);
+        let r = resolve_inequality_singletons(2, &empty_a(2), &rows, &[3.0, -1.0], &[1.0, 0.0], &[0.0, 0.0], &[10.0, 1.0]);
         assert!(r.fixes.is_empty());
         assert_eq!(r.implied_equalities, vec![(1, Some(0))]);
     }
@@ -235,14 +235,14 @@ mod tests {
     fn neither_when_the_box_and_the_row_both_can_bind() {
         // min -x0, x0 in [0,2], x0 + x1 <= 2.5, x1 in [0,1]: x0 = 2 violates when
         // x1 = 1, and the row only implies x0 <= 2.5 > 2 — no reduction.
-        let r = run(2, &empty_a(2), &[vec![(0, 1.0), (1, 1.0)]], &[2.5], &[-1.0, 0.0], &[0.0, 0.0], &[2.0, 1.0]);
+        let r = resolve_inequality_singletons(2, &empty_a(2), &[vec![(0, 1.0), (1, 1.0)]], &[2.5], &[-1.0, 0.0], &[0.0, 0.0], &[2.0, 1.0]);
         assert!(r.fixes.is_empty() && r.implied_equalities.is_empty());
     }
 
     #[test]
     fn equality_row_columns_are_left_to_colsingleton() {
         let a = csr_from_rows(&[vec![(0, 1.0), (1, 1.0)]], 2);
-        let r = run(2, &a, &[vec![(0, 1.0), (1, 1.0)]], &[5.0], &[-1.0, 0.0], &[0.0, 0.0], &[1.0, 1.0]);
+        let r = resolve_inequality_singletons(2, &a, &[vec![(0, 1.0), (1, 1.0)]], &[5.0], &[-1.0, 0.0], &[0.0, 0.0], &[1.0, 1.0]);
         assert!(r.fixes.is_empty() && r.implied_equalities.is_empty());
     }
 }

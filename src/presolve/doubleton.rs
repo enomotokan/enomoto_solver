@@ -12,17 +12,17 @@
 
 use crate::presolve::colsingleton::{self, Substitution};
 use crate::presolve::propagate::{self, GView};
-use crate::sparse::{Csr, CsrRowBuilder, SparseAccum, csr_from_rows, csr_is_canonical, csr_rows_pruned};
+use crate::sparse::{FaerCsr, CsrRowBuilder, SparseAccum, csr_from_rows, csr_is_canonical, csr_rows_pruned};
 use crate::params::presolve::{IMPLIED_TOL, TOL};
 
 /// [`eliminate_doubleton_equalities`] の結果。
 pub struct DoubletonResult {
     /// 消去後の等式行列 `A` (二項等式行は削除、他の行は書き換え済み)。
-    pub a: Csr,
+    pub a: FaerCsr,
     /// 消去後の等式右辺。
     pub b: Vec<f64>,
     /// 消去後の不等式行列 `G` (多変数行 + 残る変数の境界行 + 境界保存行)。
-    pub g: Csr,
+    pub g: FaerCsr,
     /// `g` の右辺。
     pub h: Vec<f64>,
     /// 消去後の目的係数 (消去変数のコストは相手変数へ畳み込み済み)。
@@ -41,7 +41,7 @@ pub struct DoubletonResult {
 /// 全要素の絶対値が `TOL` 超、かつ `G` の単一変数行が `rebuild_g_ref` と同じ
 /// 形の末尾境界ブロック (`h` も含めビット一致) になっていること。
 /// 分離形 `G` ([`GView::Split`]) は構成上この形なので、多変数行の `TOL` 判定だけ行う。
-fn inputs_pass_through_unchanged(n: usize, a: &Csr, gv: GView<'_>) -> bool {
+fn inputs_pass_through_unchanged(n: usize, a: &FaerCsr, gv: GView<'_>) -> bool {
     let ar = a.as_ref();
     for i in 0..ar.nrows() {
         let vals = ar.values_of_row(i);
@@ -134,7 +134,7 @@ fn rewrite_row(accum: &mut SparseAccum, row: &[(usize, f64)], rhs: f64, subs: &[
 /// (連鎖しない)。同じ変数を 2 つの行が消去しないよう、パス内で変数を確保する。
 /// 何も変わらない場合は `unchanged = true` で入力のコピーを返す。
 #[allow(dead_code)] // `run_extended` calls the `GView` form directly
-pub fn eliminate_doubleton_equalities(n: usize, a: &Csr, b: &[f64], g: &Csr, h: &[f64], c: &[f64]) -> DoubletonResult {
+pub fn eliminate_doubleton_equalities(n: usize, a: &FaerCsr, b: &[f64], g: &FaerCsr, h: &[f64], c: &[f64]) -> DoubletonResult {
     match eliminate_doubleton_equalities_view(n, a, b, GView::Mat { g, h }, c) {
         Some(r) => r,
         None => DoubletonResult { a: a.clone(), b: b.to_vec(), g: g.clone(), h: h.to_vec(), c: c.to_vec(), substitutions: Vec::new(), unchanged: true },
@@ -143,7 +143,7 @@ pub fn eliminate_doubleton_equalities(n: usize, a: &Csr, b: &[f64], g: &Csr, h: 
 
 /// [`eliminate_doubleton_equalities`] の `G` をどちらの形 ([`GView`]) でも受け取る版。
 /// 入力が変わらない場合は `None` を返す (コピーを作らない)。
-pub fn eliminate_doubleton_equalities_view(n: usize, a: &Csr, b: &[f64], gv: GView<'_>, c: &[f64]) -> Option<DoubletonResult> {
+pub fn eliminate_doubleton_equalities_view(n: usize, a: &FaerCsr, b: &[f64], gv: GView<'_>, c: &[f64]) -> Option<DoubletonResult> {
     if inputs_pass_through_unchanged(n, a, gv) {
         return None;
     }
@@ -152,7 +152,7 @@ pub fn eliminate_doubleton_equalities_view(n: usize, a: &Csr, b: &[f64], gv: GVi
 
 /// 高速経路を使わない本体。候補選択 → 境界保存行の生成 → 全行の書き換え →
 /// `G` の再組み立て → 目的関数への代入、の順に行う。
-fn eliminate_doubleton_equalities_full(n: usize, a: &Csr, b: &[f64], gv: GView<'_>, c: &[f64]) -> DoubletonResult {
+fn eliminate_doubleton_equalities_full(n: usize, a: &FaerCsr, b: &[f64], gv: GView<'_>, c: &[f64]) -> DoubletonResult {
     // 刈り込み済み (ゼロ要素なし) の A の各行
     let a_rows: Vec<Vec<(usize, f64)>> = csr_rows_pruned(a);
     // 全ての `rewrite_row` 呼び出しで共有する疎アキュムレータ。

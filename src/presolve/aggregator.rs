@@ -33,13 +33,13 @@
 //! 開発経緯・計測値は改良履歴メモを参照。
 
 use crate::presolve::colsingleton::Substitution;
-use crate::sparse::{Csr, SparseAccum, axpy_row, csr_from_rows, csr_is_canonical, csr_rows};
+use crate::sparse::{FaerCsr, SparseAccum, axpy_row, csr_from_rows, csr_is_canonical, csr_rows};
 use crate::params::presolve::{MAX_CONSECUTIVE_FILLIN_FAILURES, MAX_FILLIN, SUBSTITUTION_PIVOT_RATIO, TOL};
 
 /// Aggregator の 1 回の呼び出し結果 (縮小後の問題と、事後復元用の代入列)。
 pub struct AggregatorResult {
     /// 消去に使った等式行を取り除き、他の行へ代入を反映した後の等式制約行列 `A`。
-    pub a: Csr,
+    pub a: FaerCsr,
     /// `a` に対応する等式右辺 `b`。
     pub b: Vec<f64>,
     /// 消去列の目的係数を他列へ移し替えた後の目的係数 `c` (消去列の係数は 0)。
@@ -167,7 +167,7 @@ fn fillin_cost(pivot_terms: &[(usize, f64)], targets: &[&Vec<(usize, f64)>]) -> 
 /// 引数: `n` 列数、`a`/`b` 等式制約、`c` 目的係数、`lb`/`ub` 各列の箱、
 /// `real_rows`/`real_rhs` 実不等式行 (代入は反映するが判定には使わない)。
 #[cfg_attr(not(test), allow(dead_code))]
-pub fn eliminate_implied_free_columns(n: usize, a: &Csr, b: &[f64], c: &[f64], lb: &[f64], ub: &[f64], real_rows: &[Vec<(usize, f64)>], real_rhs: &[f64]) -> AggregatorResult {
+pub fn eliminate_implied_free_columns(n: usize, a: &FaerCsr, b: &[f64], c: &[f64], lb: &[f64], ub: &[f64], real_rows: &[Vec<(usize, f64)>], real_rhs: &[f64]) -> AggregatorResult {
     eliminate_implied_free_columns_if_any(n, a, b, c, lb, ub, real_rows, real_rhs).unwrap_or_else(|| AggregatorResult {
         a: if csr_is_canonical(a) { a.clone() } else { csr_from_rows(&csr_rows(a), n) },
         b: b.to_vec(),
@@ -182,7 +182,7 @@ pub fn eliminate_implied_free_columns(n: usize, a: &Csr, b: &[f64], c: &[f64], l
 /// 問題をコピーせず `None` を返す (多くのラウンドではこれが普通)。
 /// 候補探索は `a` の CSR 行を直接読み、候補が 1 つ以上あったときだけ
 /// 可変な行リスト形式へコピーする。`Some` の結果は無条件コピー版と同一。
-pub fn eliminate_implied_free_columns_if_any(n: usize, a: &Csr, b: &[f64], c: &[f64], lb: &[f64], ub: &[f64], real_rows: &[Vec<(usize, f64)>], real_rhs: &[f64]) -> Option<AggregatorResult> {
+pub fn eliminate_implied_free_columns_if_any(n: usize, a: &FaerCsr, b: &[f64], c: &[f64], lb: &[f64], ub: &[f64], real_rows: &[Vec<(usize, f64)>], real_rhs: &[f64]) -> Option<AggregatorResult> {
     let ar = a.as_ref();
     // 等式行の本数。
     let p = ar.nrows();
@@ -406,7 +406,7 @@ pub fn eliminate_implied_free_columns_if_any(n: usize, a: &Csr, b: &[f64], c: &[
 /// 偽 `Unbounded` の原因)。候補生成時のスナップショットは順序付けにのみ使う。
 ///
 /// 引数は [`eliminate_implied_free_columns`] と同じ。常に結果を返す (無変更でもコピー)。
-pub fn eliminate_implied_free_columns_xrow(n: usize, a: &Csr, b: &[f64], c: &[f64], lb: &[f64], ub: &[f64], real_rows: &[Vec<(usize, f64)>], real_rhs: &[f64]) -> AggregatorResult {
+pub fn eliminate_implied_free_columns_xrow(n: usize, a: &FaerCsr, b: &[f64], c: &[f64], lb: &[f64], ub: &[f64], real_rows: &[Vec<(usize, f64)>], real_rhs: &[f64]) -> AggregatorResult {
     let mut a_rows: Vec<Vec<(usize, f64)>> = csr_rows(a);
     // 全ての行 fold で共有する疎アキュムレータ。
     let mut accum = SparseAccum::new(n);
@@ -656,7 +656,7 @@ impl AggOptions {
 /// 何もコピーせず `None` (問題は不変) を返す。候補があれば v2 の結果を `Some` で返す。
 /// 前段判定は v2 の候補判定と同じ浮動小数点演算順序で行うので、
 /// `Some` の結果は v2 を直接呼んだ場合と同一で、`None` は v2 が何も消去しない場合に限る。
-pub fn eliminate_implied_free_columns_v2_if_any(n: usize, a: &Csr, b: &[f64], c: &[f64], lb: &[f64], ub: &[f64], real_rows: &[Vec<(usize, f64)>], real_rhs: &[f64], opts: AggOptions) -> Option<AggregatorResult> {
+pub fn eliminate_implied_free_columns_v2_if_any(n: usize, a: &FaerCsr, b: &[f64], c: &[f64], lb: &[f64], ub: &[f64], real_rows: &[Vec<(usize, f64)>], real_rhs: &[f64], opts: AggOptions) -> Option<AggregatorResult> {
     if !v2_has_candidate(n, a, b, lb, ub, real_rows, real_rhs, opts) {
         return None;
     }
@@ -667,7 +667,7 @@ pub fn eliminate_implied_free_columns_v2_if_any(n: usize, a: &Csr, b: &[f64], c:
 /// v2 の候補生成を正確に再現する: 同じ適格性判定、列番号順にソートした行での
 /// 活動量計算 (v2 は最初に未ソート行をソートするため)、列ごとの `max`/`min` の
 /// 畳み込み順 (等式行を昇順 → 不等式行を昇順)。行列のコピーは作らない。
-pub fn v2_has_candidate(n: usize, a: &Csr, b: &[f64], lb: &[f64], ub: &[f64], real_rows: &[Vec<(usize, f64)>], real_rhs: &[f64], opts: AggOptions) -> bool {
+pub fn v2_has_candidate(n: usize, a: &FaerCsr, b: &[f64], lb: &[f64], ub: &[f64], real_rows: &[Vec<(usize, f64)>], real_rhs: &[f64], opts: AggOptions) -> bool {
     let ar = a.as_ref();
     // 等式行の本数。
     let p = ar.nrows();
@@ -770,7 +770,7 @@ pub fn v2_has_candidate(n: usize, a: &Csr, b: &[f64], lb: &[f64], ub: &[f64], re
 /// (先に消去された列はもう生きている行に現れないので、根拠の依存関係は循環しない)。
 ///
 /// 引数は [`eliminate_implied_free_columns`] と同じ + `opts`。常に結果を返す。
-pub fn eliminate_implied_free_columns_v2(n: usize, a: &Csr, b: &[f64], c: &[f64], lb: &[f64], ub: &[f64], real_rows: &[Vec<(usize, f64)>], real_rhs: &[f64], opts: AggOptions) -> AggregatorResult {
+pub fn eliminate_implied_free_columns_v2(n: usize, a: &FaerCsr, b: &[f64], c: &[f64], lb: &[f64], ub: &[f64], real_rows: &[Vec<(usize, f64)>], real_rhs: &[f64], opts: AggOptions) -> AggregatorResult {
     let mut a_rows: Vec<Vec<(usize, f64)>> = csr_rows(a);
     // 全ての行 fold で共有する疎アキュムレータ。
     let mut accum = SparseAccum::new(n);
@@ -1039,7 +1039,7 @@ mod tests {
     use super::*;
 
     /// 行リストから CSR を作るテスト用ヘルパ。
-    fn csr(rows: &[Vec<(usize, f64)>], n: usize) -> Csr {
+    fn csr(rows: &[Vec<(usize, f64)>], n: usize) -> FaerCsr {
         csr_from_rows(rows, n)
     }
 

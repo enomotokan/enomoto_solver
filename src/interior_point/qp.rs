@@ -9,7 +9,7 @@
 //! 変数境界は `G` の追加行になる (共通の [`crate::presolve::build_a_g`] を使用)。
 //! `A` と `G` は faer の CSR (`SparseRowMat`) のまま最後まで疎で扱う。
 
-use super::kkt::Csr;
+use super::kkt::FaerCsr;
 use crate::presolve::build_a_g;
 use crate::types::{ConstraintRow, VariableData};
 
@@ -20,11 +20,11 @@ pub struct QpStd {
     /// 目的関数の係数 (最小化形)。
     pub c: Vec<f64>,
     /// 等式制約の係数行列。
-    pub a: Csr,
+    pub a: FaerCsr,
     /// 等式制約の右辺。
     pub b: Vec<f64>,
     /// 不等式制約 (変数境界を含む) の係数行列。
-    pub g: Csr,
+    pub g: FaerCsr,
     /// 不等式制約の右辺。
     pub h: Vec<f64>,
 }

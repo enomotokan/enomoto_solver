@@ -95,7 +95,7 @@ fn max_iters_for(m: usize, n_total: usize) -> usize {
 /// そうでなければ `false` (コミット前に再分解すべき)。ピボットの選び方には影響せず、
 /// 再分解のタイミングだけを変える。`extended_dual` からも呼ばれる。
 #[inline]
-pub(super) fn update_verify(alpha_row: f64, alpha_col: f64) -> bool {
+pub(super) fn pivot_values_agree(alpha_row: f64, alpha_col: f64) -> bool {
     let scale = alpha_row.abs().max(alpha_col.abs()).max(tunable!("ENOMOTO_T_FT_MIN_PIVOT", FT_MIN_PIVOT, f64));
     let rel = (alpha_row - alpha_col).abs() / scale;
     rel <= UPDATE_VERIFY_TOL
@@ -620,7 +620,7 @@ impl<'a> Tableau<'a> {
     }
 
     /// 構造変数 (スラック以外) の列数。
-    fn n_orig(&self) -> usize {
+    fn n_structural(&self) -> usize {
         self.std.n_total - self.std.n_rows
     }
 

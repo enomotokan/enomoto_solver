@@ -14,7 +14,7 @@
 //! 空の制約になるので出力しない (両側無限の「自由列シングルトン」は置換行 0 本)。
 
 use crate::presolve::propagate::GView;
-use crate::sparse::{Csr, csr_from_rows, csr_is_canonical, csr_rows};
+use crate::sparse::{FaerCsr, csr_from_rows, csr_is_canonical, csr_rows};
 use crate::params::presolve::{IMPLIED_TOL, SUBSTITUTION_PIVOT_RATIO, TOL};
 
 /// 代入式 `x[var] = (rhs - Σ terms[k].1 * x[terms[k].0]) / coeff`。
@@ -64,7 +64,7 @@ pub(crate) fn terms_range(terms: &[(usize, f64)], lb: &[f64], ub: &[f64]) -> (f6
 /// 列シングルトン消去 1 パスの結果。
 pub struct EliminationResult {
     /// 消去した行を除いた新しい等式行列 A。
-    pub a: Csr,
+    pub a: FaerCsr,
     /// 新しい等式右辺 b。
     pub b: Vec<f64>,
     /// 目的係数を振り替えた後の c (消去変数の係数は 0)。
@@ -82,7 +82,7 @@ pub struct EliminationResult {
 /// 出現回数は入力から一度だけ数えるので、消去によって新たに生じた
 /// シングルトンは次回の呼び出しで拾われる。
 #[allow(dead_code)] // `run_extended` は `GView` 版を直接呼ぶ
-pub fn eliminate_singleton_equalities(n: usize, a: &Csr, b: &[f64], g: &Csr, h: &[f64], c: &[f64]) -> EliminationResult {
+pub fn eliminate_singleton_equalities(n: usize, a: &FaerCsr, b: &[f64], g: &FaerCsr, h: &[f64], c: &[f64]) -> EliminationResult {
     eliminate_singleton_equalities_view(n, a, b, GView::Mat { g, h }, c)
 }
 
@@ -90,7 +90,7 @@ pub fn eliminate_singleton_equalities(n: usize, a: &Csr, b: &[f64], g: &Csr, h: 
 /// (分割形式なら `lb`/`ub` と多変数行をそのまま使う)。
 ///
 /// `n`: 変数数、`a`/`b`: 等式制約、`gv`: 不等式制約 (箱制約込み)、`c`: 目的係数。
-pub fn eliminate_singleton_equalities_view(n: usize, a: &Csr, b: &[f64], gv: GView<'_>, c: &[f64]) -> EliminationResult {
+pub fn eliminate_singleton_equalities_view(n: usize, a: &FaerCsr, b: &[f64], gv: GView<'_>, c: &[f64]) -> EliminationResult {
     let a_rows: Vec<Vec<(usize, f64)>> = csr_rows(a);
 
     // 各変数の箱制約。G の多変数行はコピーせずその場で出現回数だけ数える。

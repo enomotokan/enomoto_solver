@@ -184,7 +184,7 @@ pub(crate) mod extended_dual {
 
     /// PRICE によるピボット要素 `alpha_q` と FTRAN による `alpha_full[r]` の相対差がこれを超えたら
     /// 「桁違いの不一致」(`pivot_grossly_inconsistent`)としてピボットを破棄する。
-    /// `update_verify` の厳しい許容誤差(1e-7)よりずっと緩く、`update_count` によらず常に検査する。
+    /// `pivot_values_agree` の厳しい許容誤差(1e-7)よりずっと緩く、`update_count` によらず常に検査する。
     pub(crate) const D_GROSS_MISMATCH_REL_TOL: f64 = 0.5;
 
     /// `x_B(M)` の `M` 係数は厳密には 0 か 1 のオーダーなので、絶対値がこれ未満の係数は
@@ -315,7 +315,7 @@ pub(crate) mod extended_dual {
 
 /// 疎 LU 分解・Forrest-Tomlin 更新 (src/simplex/lu.rs)
 ///
-/// 各定数の測定経緯は `docs/_history_fragments/lu.md` を参照。
+/// 各定数の測定経緯は `docs/improvement_history.md` を参照。
 pub(crate) mod lu {
     // ---- ピボット選択 (Markowitz) ----
 

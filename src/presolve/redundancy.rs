@@ -43,7 +43,7 @@ use faer::linalg::qr::col_pivoting::compute as colpiv_qr;
 use faer::{Mat, Parallelism};
 
 use crate::presolve::smallcoeff;
-use crate::sparse::{Csr, CsrRowBuilder, csr_from_rows, csr_is_canonical, csr_row_iter, csr_row_vec};
+use crate::sparse::{FaerCsr, CsrRowBuilder, csr_from_rows, csr_is_canonical, csr_row_iter, csr_row_vec};
 /// 計測用カウンタ: [`drop_linearly_dependent_sparse`] が実行したピボット
 /// ステップの総数(`ENOMOTO_PROF_REDUNDANCY` 診断で `presolve.rs` が読む)。
 pub(crate) static PROF_TOTAL_STEPS: AtomicUsize = AtomicUsize::new(0);
@@ -65,7 +65,7 @@ pub(crate) static PROF_TRIVIAL_STEPS: AtomicUsize = AtomicUsize::new(0);
 ///   ([`dulmage_mendelsohn_blocks`]) で、無視できる小係数を二部グラフの
 ///   辺から外す判定にだけ使う。`a`/`b` 自体は変更しない。緩い(未伝播の)
 ///   境界を渡しても分割が粗くなるだけで正しさは損なわれない。
-pub fn reduce_equalities(a: &Csr, b: &[f64], n: usize, lb: &[f64], ub: &[f64]) -> (Csr, Vec<f64>) {
+pub fn reduce_equalities(a: &FaerCsr, b: &[f64], n: usize, lb: &[f64], ub: &[f64]) -> (FaerCsr, Vec<f64>) {
     // 等式行数
     let p = a.nrows();
     if p == 0 {
@@ -103,7 +103,7 @@ pub fn reduce_equalities(a: &Csr, b: &[f64], n: usize, lb: &[f64], ub: &[f64]) -
 /// [`reduce_equalities`] の重複行除去 ([`dedupe_rows`]) だけを行い、
 /// ランク判定はしない版。`run_extended` の既定動作
 /// (`ENOMOTO_REDEQ_MODE` で切替)。
-pub fn dedupe_equalities(a: &Csr, b: &[f64], n: usize) -> (Csr, Vec<f64>) {
+pub fn dedupe_equalities(a: &FaerCsr, b: &[f64], n: usize) -> (FaerCsr, Vec<f64>) {
     let p = a.nrows();
     if p == 0 {
         return (csr_from_rows(&[], n), Vec::new());
@@ -1100,7 +1100,7 @@ mod tests {
 ///
 /// 判定はテスト用の参照実装 `reduce_inequalities_reference` と完全に一致し、
 /// 何も落とさず `g` が既に正準形ならそのまま複製を返す。
-pub fn reduce_inequalities(g: &Csr, h: &[f64], n: usize) -> (Csr, Vec<f64>) {
+pub fn reduce_inequalities(g: &FaerCsr, h: &[f64], n: usize) -> (FaerCsr, Vec<f64>) {
     // 不等式行数
     let m = g.nrows();
     if m == 0 {
@@ -1344,7 +1344,7 @@ impl std::hash::Hasher for IdentityU64Hasher {
 /// テスト用の単純な参照実装: 行ごとに正規化シグネチャの `Vec` を作り
 /// `HashMap` で重複判定する。[`reduce_inequalities`] と同じ結果になるべきもの。
 #[cfg(test)]
-fn reduce_inequalities_reference(g: &Csr, h: &[f64], n: usize) -> (Csr, Vec<f64>) {
+fn reduce_inequalities_reference(g: &FaerCsr, h: &[f64], n: usize) -> (FaerCsr, Vec<f64>) {
     let m = g.nrows();
     if m == 0 {
         return (csr_from_rows(&[], n), Vec::new());

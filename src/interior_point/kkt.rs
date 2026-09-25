@@ -24,7 +24,7 @@ use faer::sparse::linalg::cholesky::{factorize_symbolic_cholesky, LdltRegulariza
 use faer::sparse::{SparseColMat, SymbolicSparseColMat, ValuesOrder};
 use faer::{Conj, Side};
 
-pub use crate::sparse::{Csr, csr_row_iter, mat_t_vec, mat_t_vec_into, mat_vec, mat_vec_into};
+pub use crate::sparse::{FaerCsr, csr_row_iter, csr_mat_t_vec, csr_mat_t_vec_into, csr_mat_vec, csr_mat_vec_into};
 use crate::params::interior_point::KKT_PARALLELISM;
 
 /// `A`/`G` の非零パターンごとに一度だけ計算して使い回すもの一式:
@@ -80,7 +80,7 @@ impl SparseKkt {
     }
 
     /// 非零パターン (上三角) と初期値を組み立て、記号分解と作業領域を用意する。
-    fn build_setup(&self, a: &Csr, g: &Csr, top_diag: f64, mid_diag: f64, bottom_diag: &[f64]) -> Setup {
+    fn build_setup(&self, a: &FaerCsr, g: &FaerCsr, top_diag: f64, mid_diag: f64, bottom_diag: &[f64]) -> Setup {
         let (n, p, m) = (self.n, self.p, self.m);
         let dim = self.dim();
 
@@ -164,7 +164,7 @@ impl SparseKkt {
 
     /// 上記ブロック形の KKT 系 `K x = rhs` を解き、長さ `dim()` の解を `out` に書く。
     /// `top_diag` / `mid_diag` は上段・中段の対角値 (スカラー)、`bottom_diag` は下段の対角。
-    pub fn solve_into(&mut self, a: &Csr, g: &Csr, top_diag: f64, mid_diag: f64, bottom_diag: &[f64], rhs: &[f64], out: &mut [f64]) {
+    pub fn solve_into(&mut self, a: &FaerCsr, g: &FaerCsr, top_diag: f64, mid_diag: f64, bottom_diag: &[f64], rhs: &[f64], out: &mut [f64]) {
         if self.setup.is_none() {
             self.setup = Some(self.build_setup(a, g, top_diag, mid_diag, bottom_diag));
         }

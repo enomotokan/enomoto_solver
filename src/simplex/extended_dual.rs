@@ -2096,7 +2096,7 @@ pub fn solve_lp_dual_extended(std: &StdForm, opts: &crate::types::LpOptions) -> 
     // FT チェックごとに 1 回)。固定列を除けば真のドリフトは `D_DRIFT_TOL` よりはるかに小さく、
     // `O(n_total)` の BTRAN 付き `fresh_d_into` を毎回払う価値が無いため。
     let mut since_d_drift_check: usize = 0;
-    // `super::update_verify` を無効化するか(`ENOMOTO_DISABLE_UPDATE_VERIFY`)。ループ外で一度だけ読む。
+    // `super::pivot_values_agree` を無効化するか(`ENOMOTO_DISABLE_UPDATE_VERIFY`)。ループ外で一度だけ読む。
     let update_verify_disabled = env_str!("ENOMOTO_DISABLE_UPDATE_VERIFY").is_some();
     // `ENOMOTO_DEBUG_D_DRIFT_EXT` の診断出力を行うか(ループ外で一度だけ読む)。
     let debug_d_drift_ext = env_str!("ENOMOTO_DEBUG_D_DRIFT_EXT").is_some();
@@ -3255,7 +3255,7 @@ pub fn solve_lp_dual_extended(std: &StdForm, opts: &crate::types::LpOptions) -> 
         // BFRT フリップは戻さない(独立した有効な退化ステップで、再同期がフリップ後の
         // `nb_status` から `x_B(M)` を作り直す)。
         //
-        // 厳しい `update_verify` は `lu.update_count() > 0` のときだけ使う(再分解直後に
+        // 厳しい `pivot_values_agree` は `lu.update_count() > 0` のときだけ使う(再分解直後に
         // 拒否しても同じ選択が繰り返されるだけのため)。
         //
         // `pivot_grossly_inconsistent` は `update_count` によらず常に行う、ずっと緩い第 2 の
@@ -3267,7 +3267,7 @@ pub fn solve_lp_dual_extended(std: &StdForm, opts: &crate::types::LpOptions) -> 
             let scale = alpha_q.abs().max(alpha_full[r].abs()).max(GROSS_MISMATCH_SCALE_FLOOR);
             (alpha_q - alpha_full[r]).abs() / scale > D_GROSS_MISMATCH_REL_TOL
         };
-        if pivot_grossly_inconsistent || (!update_verify_disabled && lu.update_count() > 0 && !super::update_verify(alpha_q, alpha_full[r])) {
+        if pivot_grossly_inconsistent || (!update_verify_disabled && lu.update_count() > 0 && !super::pivot_values_agree(alpha_q, alpha_full[r])) {
             if env_str!("ENOMOTO_DEBUG_D_DRIFT_EXT").is_some() {
                 eprintln!("DEBUG_D_DRIFT: VERIFY_FAIL at iter={iter_idx} q={q} r={r} alpha_q={alpha_q} alpha_full_r={}", alpha_full[r]);
             }
@@ -4362,7 +4362,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
                     if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
                         eprintln!("DEBUG_EXT: polish handoff skipped (only fixed-column/sub-tolerance dual infeasibilities)");
                     }
-                    return Some(SimplexResult { status: Status::Optimal, x: Some(t.x[0..t.n_orig()].to_vec()) });
+                    return Some(SimplexResult { status: Status::Optimal, x: Some(t.x[0..t.n_structural()].to_vec()) });
                 }
                 return Some(SimplexResult { status: Status::Optimal, x: Some(t.x) });
             }
@@ -4435,7 +4435,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
             }
             return Some(SimplexResult {
                 status: status.clone(),
-                x: if status == Status::Optimal { Some(t.x[0..t.n_orig()].to_vec()) } else { None },
+                x: if status == Status::Optimal { Some(t.x[0..t.n_structural()].to_vec()) } else { None },
             });
         };
 
@@ -4631,7 +4631,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
 
         // updateVerify: PRICE の値 `alpha_q` と FTRAN の値 `alpha_full[r]` を照合し、
         // 不一致なら再分解・再同期してこの反復をやり直す。
-        if !update_verify_disabled && lu.update_count() > 0 && !super::update_verify(alpha_q, alpha_full[r]) {
+        if !update_verify_disabled && lu.update_count() > 0 && !super::pivot_values_agree(alpha_q, alpha_full[r]) {
             lu = refactorize(std, basis_pos, Some(&lu))?;
             lu.solve_into(&compute_rhs_plain(std, nb_status), &mut lu_scratch, &mut x_b);
             infeasible_rows.rebuild(m, |i| row_infeasible_plain(std, basis, &x_b, &noise_feasible, i));

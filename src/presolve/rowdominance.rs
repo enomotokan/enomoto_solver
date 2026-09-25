@@ -22,7 +22,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashSet;
 
-use crate::sparse::{Csr, csr_row_iter};
+use crate::sparse::{FaerCsr, csr_row_iter};
 use crate::params::presolve::TOL;
 
 /// この呼び出しで安全に削除できる被支配行の番号 (`g` の行番号, 昇順) を返す。
@@ -32,7 +32,7 @@ use crate::params::presolve::TOL;
 /// - `a`: 等式行列 (ここに現れる列を含む行は対象外)
 /// - `g`, `h`: 不等式制約 `G x <= h`
 /// - `lb`: 変数の下限 (非負性の判定に使用)
-pub fn find_dominated_rows(n: usize, a: &Csr, g: &Csr, h: &[f64], lb: &[f64]) -> Vec<usize> {
+pub fn find_dominated_rows(n: usize, a: &FaerCsr, g: &FaerCsr, h: &[f64], lb: &[f64]) -> Vec<usize> {
     let ar = a.as_ref();
     // in_equality[j]: 列 j が等式行に現れるか
     let mut in_equality = vec![false; n];

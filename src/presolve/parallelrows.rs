@@ -16,18 +16,18 @@
 
 use std::collections::HashMap;
 
-use crate::sparse::{Csr, csr_from_rows, csr_rows};
+use crate::sparse::{FaerCsr, csr_from_rows, csr_rows};
 use crate::params::presolve::TOL;
 
 /// [`merge_parallel_rows`] の結果。`infeasible` が true のときは他のフィールドは入力の複製で意味を持たない
 /// (呼び出し側は先に `infeasible` を確認する)。
 pub struct ParallelRowsResult {
     /// 新たに見つかった等式行を末尾に追加した等式行列
-    pub a: Csr,
+    pub a: FaerCsr,
     /// `a` に対応する右辺
     pub b: Vec<f64>,
     /// 併合した行の組を両方とも除いた不等式行列
-    pub g: Csr,
+    pub g: FaerCsr,
     /// `g` に対応する右辺
     pub h: Vec<f64>,
     /// 逆符号の組の境界が交差し、実行不能と判明したか
@@ -39,7 +39,7 @@ pub struct ParallelRowsResult {
 /// - `a`, `b`: 等式制約 `A x = b`
 /// - `g`, `h`: 不等式制約 `G x <= h`
 /// - `n`: 列数
-pub fn merge_parallel_rows(a: &Csr, b: &[f64], g: &Csr, h: &[f64], n: usize) -> ParallelRowsResult {
+pub fn merge_parallel_rows(a: &FaerCsr, b: &[f64], g: &FaerCsr, h: &[f64], n: usize) -> ParallelRowsResult {
     let gr = g.as_ref();
     let m = gr.nrows();
     // G の各行 (列番号, 係数)

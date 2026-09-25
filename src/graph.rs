@@ -235,7 +235,7 @@ pub fn dulmage_mendelsohn_blocks(adj: &[Vec<usize>], n_cols: usize) -> Vec<Vec<u
 /// (各ブロックの部分行列を作るのに呼び出し側が再び必要とするため)。
 ///
 /// 現在は本番コードから使われていない (テスト付きで保持。経緯は
-/// `docs/_history_fragments/misc.md`)。`ENOMOTO_DEBUG_DM_SPLIT` を設定すると
+/// `docs/improvement_history.md`)。`ENOMOTO_DEBUG_DM_SPLIT` を設定すると
 /// 各段階の所要時間を標準エラーに出す。
 #[allow(dead_code)]
 pub fn dulmage_mendelsohn_blocks_topological(adj: &[Vec<usize>], n_cols: usize) -> Option<(Vec<Vec<usize>>, Vec<usize>)> {

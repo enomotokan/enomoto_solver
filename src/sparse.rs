@@ -22,9 +22,9 @@
 //! どちらも構築後は不変 (挿入不可)。行列を書き換える前処理は
 //! `Vec<Vec<(usize, f64)>>` で作業し、最後に [`CsrMat`] に固める。
 //!
-//! # faer の `Csr` と自前の [`CsrMat`]
+//! # faer の `FaerCsr` と自前の [`CsrMat`]
 //!
-//!   - [`Csr`] は faer の `SparseRowMat` の別名。`presolve` の公開インターフェースと、
+//!   - [`FaerCsr`] は faer の `SparseRowMat` の別名。`presolve` の公開インターフェースと、
 //!     faer の Cholesky に渡す `interior_point::kkt` で使う。
 //!   - [`CsrMat`]/[`CscMat`] は自前の型。単体法の内側ループで行・列を
 //!     `&[(usize, f64)]` として直接読みたい場合や、同じ行列の CSR と CSC を並べて
@@ -914,14 +914,14 @@ impl CsrMat {
         CsrMat::from_rows(&rows, n_cols)
     }
 
-    /// faer の [`Csr`] を自前の行優先形式に読み込む。
-    pub fn from_faer(mat: &Csr) -> Self {
+    /// faer の [`FaerCsr`] を自前の行優先形式に読み込む。
+    pub fn from_faer(mat: &FaerCsr) -> Self {
         let r = mat.as_ref();
         CsrMat::from_rows(&csr_rows(mat), r.ncols())
     }
 
-    /// faer の [`Csr`] に変換する。厳密な 0 は捨てる。
-    pub fn to_faer(&self) -> Csr {
+    /// faer の [`FaerCsr`] に変換する。厳密な 0 は捨てる。
+    pub fn to_faer(&self) -> FaerCsr {
         csr_from_rows(&self.to_rows(), self.n_cols)
     }
 
@@ -1075,8 +1075,8 @@ impl CscMat {
         CscMat { n_rows, n_cols, inner: Compressed { offsets: vec![0; n_cols + 1], entries: Vec::new() } }
     }
 
-    /// faer の [`Csr`] を直接列優先形式に読み込む。
-    pub fn from_faer(mat: &Csr) -> Self {
+    /// faer の [`FaerCsr`] を直接列優先形式に読み込む。
+    pub fn from_faer(mat: &FaerCsr) -> Self {
         let r = mat.as_ref();
         CscMat::from_rows(&csr_rows(mat), r.ncols())
     }
@@ -1263,12 +1263,12 @@ impl CscBuilder {
 
 /// faer の行優先疎行列。`presolve` の公開インターフェースと `interior_point::kkt`
 /// (faer の Cholesky に直接渡す) で使う型。[`CsrMat`] との使い分けはモジュール説明を参照。
-pub type Csr = faer::sparse::SparseRowMat<usize, f64>;
+pub type FaerCsr = faer::sparse::SparseRowMat<usize, f64>;
 
-/// 疎な行 (`(列, 値)` の列) の並びから [`Csr`] を作る。厳密な 0 は捨てる。
+/// 疎な行 (`(列, 値)` の列) の並びから [`FaerCsr`] を作る。厳密な 0 は捨てる。
 /// 行数は `rows.len()`、列数は `n_cols`。重複列がなければ高速経路
 /// ([`csr_from_rows_direct`])、あれば faer の三つ組ビルダーを使う。
-pub fn csr_from_rows(rows: &[Vec<(usize, f64)>], n_cols: usize) -> Csr {
+pub fn csr_from_rows(rows: &[Vec<(usize, f64)>], n_cols: usize) -> FaerCsr {
     if let Some(m) = csr_from_rows_direct(rows, n_cols) {
         return m;
     }
@@ -1281,7 +1281,7 @@ pub fn csr_from_rows(rows: &[Vec<(usize, f64)>], n_cols: usize) -> Csr {
             }
         }
     }
-    Csr::try_new_from_triplets(rows.len(), n_cols, &triplets).expect("valid CSR triplets")
+    FaerCsr::try_new_from_triplets(rows.len(), n_cols, &triplets).expect("valid CSR triplets")
 }
 
 /// [`csr_from_rows`] の `O(nnz)` 高速経路。どの行にも非零の重複列がなければ、faer の
@@ -1291,7 +1291,7 @@ pub fn csr_from_rows(rows: &[Vec<(usize, f64)>], n_cols: usize) -> Csr {
 /// 重複列があれば `None` (三つ組経路に戻る。faer は不安定ソート後に重複を合算するので、
 /// 合算順序と丸めを再現するには faer を通すしかない)。範囲外の列でも `None`
 /// (元のエラー/panic の経路をそのまま使うため)。
-fn csr_from_rows_direct(rows: &[Vec<(usize, f64)>], n_cols: usize) -> Option<Csr> {
+fn csr_from_rows_direct(rows: &[Vec<(usize, f64)>], n_cols: usize) -> Option<FaerCsr> {
     let nnz_upper: usize = rows.iter().map(|r| r.len()).sum();
     let mut builder = CsrRowBuilder::with_capacity(n_cols, rows.len(), nnz_upper);
     for row in rows {
@@ -1306,7 +1306,7 @@ fn csr_from_rows_direct(rows: &[Vec<(usize, f64)>], n_cols: usize) -> Option<Csr
 /// (圧縮形式で行ごとの nnz 配列なし、格納された 0 なし、各行の列が狭義単調増加)。
 /// そうなら、`Vec<Vec<_>>` を経由して作り直すだけの処理は `m.clone()` で代用できる
 /// (ビット単位で同一、ソート不要)。
-pub(crate) fn csr_is_canonical(m: &Csr) -> bool {
+pub(crate) fn csr_is_canonical(m: &FaerCsr) -> bool {
     let r = m.as_ref();
     r.nnz_per_row().is_none() && r.values().iter().all(|&v| v != 0.0) && (0..r.nrows()).all(|i| r.col_indices_of_row_raw(i).windows(2).all(|w| w[0] < w[1]))
 }
@@ -1388,8 +1388,8 @@ impl CsrRowBuilder {
         self.row_ptr.push(self.col_ind.len());
     }
 
-    /// 組み立てを終えて faer の [`Csr`] を返す。
-    pub(crate) fn finish(self) -> Csr {
+    /// 組み立てを終えて faer の [`FaerCsr`] を返す。
+    pub(crate) fn finish(self) -> FaerCsr {
         let nrows = self.row_ptr.len() - 1;
         // 全行は `push_row` (範囲内・狭義単調増加の列。重複は拒否) か `push_singleton`
         // (範囲内の 1 列) を通っており、`row_ptr` も構成上単調なので、faer の
@@ -1402,14 +1402,14 @@ impl CsrRowBuilder {
         // SAFETY: `new_checked` が確かめる不変条件 (`col_ind.len()` で終わる単調な
         // 行ポインタ、各行内で範囲内かつ狭義単調増加の列添字) は上記のとおり構成上成り立つ。
         let symbolic = unsafe { faer::sparse::SymbolicSparseRowMat::new_unchecked(nrows, self.n_cols, self.row_ptr, None, self.col_ind) };
-        Csr::new(symbolic, self.values)
+        FaerCsr::new(symbolic, self.values)
     }
 }
 
-/// faer の [`Csr`] の行 `i` を `(列, 値)` のイテレータとして返す
+/// faer の [`FaerCsr`] の行 `i` を `(列, 値)` のイテレータとして返す
 /// (格納された 0 もそのまま返す)。
 #[inline]
-pub fn csr_row_iter(mat: &Csr, i: usize) -> impl Iterator<Item = (usize, f64)> + '_ {
+pub fn csr_row_iter(mat: &FaerCsr, i: usize) -> impl Iterator<Item = (usize, f64)> + '_ {
     let r = mat.as_ref();
     r.col_indices_of_row(i).zip(r.values_of_row(i)).map(|(j, &v)| (j, v))
 }
@@ -1423,25 +1423,25 @@ pub fn collect_with_capacity<T>(cap: usize, iter: impl Iterator<Item = T>) -> Ve
     v
 }
 
-/// faer の [`Csr`] の行 `i` を `(列, 値)` の `Vec` として複製する。
-pub fn csr_row_vec(mat: &Csr, i: usize) -> Vec<(usize, f64)> {
+/// faer の [`FaerCsr`] の行 `i` を `(列, 値)` の `Vec` として複製する。
+pub fn csr_row_vec(mat: &FaerCsr, i: usize) -> Vec<(usize, f64)> {
     csr_row_iter(mat, i).collect()
 }
 
-/// faer の [`Csr`] の全行を `Vec<Vec<_>>` にする (前処理が書き換えに使い、
+/// faer の [`FaerCsr`] の全行を `Vec<Vec<_>>` にする (前処理が書き換えに使い、
 /// [`csr_from_rows`] で固め直す形式)。格納された 0 も含む ([`csr_rows_pruned`] は除く)。
-pub fn csr_rows(mat: &Csr) -> Vec<Vec<(usize, f64)>> {
+pub fn csr_rows(mat: &FaerCsr) -> Vec<Vec<(usize, f64)>> {
     (0..mat.as_ref().nrows()).map(|i| csr_row_vec(mat, i)).collect()
 }
 
 /// [`csr_rows`] と同じだが、厳密な 0 を除く (行の長さやシングルトン/ダブルトン判定など、
 /// 行の台で判断する処理向け。格納された 0 を数えると誤判定するため)。
-pub fn csr_rows_pruned(mat: &Csr) -> Vec<Vec<(usize, f64)>> {
+pub fn csr_rows_pruned(mat: &FaerCsr) -> Vec<Vec<(usize, f64)>> {
     (0..mat.as_ref().nrows()).map(|i| csr_row_iter(mat, i).filter(|&(_, v)| v != 0.0).collect()).collect()
 }
 
-/// faer の [`Csr`] の列ごとの非零数 (`O(nnz)`、転置を作らない)。
-pub fn csr_col_counts(mat: &Csr) -> Vec<usize> {
+/// faer の [`FaerCsr`] の列ごとの非零数 (`O(nnz)`、転置を作らない)。
+pub fn csr_col_counts(mat: &FaerCsr) -> Vec<usize> {
     let r = mat.as_ref();
     let mut counts = vec![0usize; r.ncols()];
     for i in 0..r.nrows() {
@@ -1452,13 +1452,13 @@ pub fn csr_col_counts(mat: &Csr) -> Vec<usize> {
     counts
 }
 
-/// faer の [`Csr`] の列優先表示 ([`CscMat`]) を計数ソート 1 回で作る。
-pub fn csr_to_csc(mat: &Csr) -> CscMat {
+/// faer の [`FaerCsr`] の列優先表示 ([`CscMat`]) を計数ソート 1 回で作る。
+pub fn csr_to_csc(mat: &FaerCsr) -> CscMat {
     CscMat::from_faer(mat)
 }
 
 /// faer の `mat` について `mat * x` を `out` (長さ `mat.nrows()`) に書く (確保なし、行ごとに並列)。
-pub fn mat_vec_into(mat: &Csr, x: &[f64], out: &mut [f64]) {
+pub fn csr_mat_vec_into(mat: &FaerCsr, x: &[f64], out: &mut [f64]) {
     let r = mat.as_ref();
     out.par_iter_mut().enumerate().for_each(|(i, o)| {
         *o = r.col_indices_of_row(i).zip(r.values_of_row(i)).map(|(j, &v)| v * x[j]).sum();
@@ -1466,7 +1466,7 @@ pub fn mat_vec_into(mat: &Csr, x: &[f64], out: &mut [f64]) {
 }
 
 /// faer の `mat` について `mat^T * y` を `out` (長さ `mat.ncols()`) に書く (確保なし、逐次)。
-pub fn mat_t_vec_into(mat: &Csr, y: &[f64], out: &mut [f64]) {
+pub fn csr_mat_t_vec_into(mat: &FaerCsr, y: &[f64], out: &mut [f64]) {
     for v in out.iter_mut() {
         *v = 0.0;
     }
@@ -1483,16 +1483,16 @@ pub fn mat_t_vec_into(mat: &Csr, y: &[f64], out: &mut [f64]) {
 }
 
 /// `mat * x` を新しい `Vec` で返す (`mat_vec_into` の確保版)。
-pub fn mat_vec(mat: &Csr, x: &[f64]) -> Vec<f64> {
+pub fn csr_mat_vec(mat: &FaerCsr, x: &[f64]) -> Vec<f64> {
     let mut out = vec![0.0; mat.nrows()];
-    mat_vec_into(mat, x, &mut out);
+    csr_mat_vec_into(mat, x, &mut out);
     out
 }
 
-/// `mat^T * y` を長さ `n_cols` の新しい `Vec` で返す (`mat_t_vec_into` の確保版)。
-pub fn mat_t_vec(mat: &Csr, n_cols: usize, y: &[f64]) -> Vec<f64> {
+/// `mat^T * y` を長さ `n_cols` の新しい `Vec` で返す (`csr_mat_t_vec_into` の確保版)。
+pub fn csr_mat_t_vec(mat: &FaerCsr, n_cols: usize, y: &[f64]) -> Vec<f64> {
     let mut out = vec![0.0; n_cols];
-    mat_t_vec_into(mat, y, &mut out);
+    csr_mat_t_vec_into(mat, y, &mut out);
     out
 }
 
@@ -1596,7 +1596,7 @@ mod tests {
         assert_eq!(csr.to_csc().row_counts(), vec![2, 1, 2]);
     }
 
-    /// faer の `Csr` との相互変換が往復で一致すること。
+    /// faer の `FaerCsr` との相互変換が往復で一致すること。
     #[test]
     fn faer_interop_round_trips() {
         let rows = sample_rows();
@@ -1643,7 +1643,7 @@ mod tests {
                 }
             }
         }
-        let faer = Csr::try_new_from_triplets(rows.len(), 5, &triplets).unwrap();
+        let faer = FaerCsr::try_new_from_triplets(rows.len(), 5, &triplets).unwrap();
         assert_eq!(direct.as_ref().row_ptrs(), faer.as_ref().row_ptrs());
         assert_eq!(direct.as_ref().col_indices(), faer.as_ref().col_indices());
         let dv: Vec<u64> = direct.as_ref().values().iter().map(|v| v.to_bits()).collect();
@@ -1658,7 +1658,7 @@ mod tests {
     #[test]
     fn csr_rows_pruned_drops_explicitly_stored_zeros() {
         // `csr_from_rows` は 0 を捨てるので、格納された 0 は faer の三つ組ビルダーで直接作る
-        let faer = Csr::try_new_from_triplets(1, 3, &[(0, 0, 1.0), (0, 1, 0.0), (0, 2, 3.0)]).unwrap();
+        let faer = FaerCsr::try_new_from_triplets(1, 3, &[(0, 0, 1.0), (0, 1, 0.0), (0, 2, 3.0)]).unwrap();
         assert_eq!(csr_row_vec(&faer, 0), vec![(0, 1.0), (1, 0.0), (2, 3.0)]);
         assert_eq!(csr_rows(&faer), vec![vec![(0, 1.0), (1, 0.0), (2, 3.0)]]);
         assert_eq!(csr_rows_pruned(&faer), vec![vec![(0, 1.0), (2, 3.0)]]);

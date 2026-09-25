@@ -42,7 +42,7 @@ pub mod smallcoeff;
 pub mod sparsify;
 pub mod stuffing;
 
-use crate::sparse::{Csr, CsrRowBuilder, csr_from_rows, csr_row_vec, csr_rows};
+use crate::sparse::{FaerCsr, CsrRowBuilder, csr_from_rows, csr_row_vec, csr_rows};
 use crate::types::{ConstraintRow, RowSense, VariableData};
 use scaling::Scaling;
 use crate::params::presolve::{
@@ -56,7 +56,7 @@ use crate::params::presolve::{
 /// 変数の有限な上下限は G の単一変数行 (`ub`: `(j, 1.0)`, `h=ub` /
 /// `lb`: `(j, -1.0)`, `h=-lb`) として追加し、無限の上下限は行を作らない。
 /// `interior_point::qp::build` と `simplex.rs` の前処理入口が共用する。
-pub fn build_a_g(variables: &[VariableData], constraints: &[ConstraintRow]) -> (Csr, Vec<f64>, Csr, Vec<f64>) {
+pub fn build_a_g(variables: &[VariableData], constraints: &[ConstraintRow]) -> (FaerCsr, Vec<f64>, FaerCsr, Vec<f64>) {
     // 高速版 (CsrRowBuilder へ直接書き込む) を試し、行が拒否されたら行リスト版で作り直す。
     // どちらも同じ行列をビット単位で生成する。
     if let Some(r) = build_a_g_direct(variables, constraints) {
@@ -67,7 +67,7 @@ pub fn build_a_g(variables: &[VariableData], constraints: &[ConstraintRow]) -> (
 
 /// [`build_a_g`] の高速版: 2 つの [`CsrRowBuilder`] に使い回しの行バッファで
 /// 直接書き込む。範囲外の列などで行が拒否されたら `None`。
-fn build_a_g_direct(variables: &[VariableData], constraints: &[ConstraintRow]) -> Option<(Csr, Vec<f64>, Csr, Vec<f64>)> {
+fn build_a_g_direct(variables: &[VariableData], constraints: &[ConstraintRow]) -> Option<(FaerCsr, Vec<f64>, FaerCsr, Vec<f64>)> {
     let n = variables.len();
     let (mut nnz_a, mut nnz_g, mut rows_a) = (0usize, 0usize, 0usize);
     for row in constraints {
@@ -127,7 +127,7 @@ fn build_a_g_direct(variables: &[VariableData], constraints: &[ConstraintRow]) -
 }
 
 /// [`build_a_g`] の行リスト版 (`csr_from_rows` で構築する従来の実装)。
-fn build_a_g_rows(variables: &[VariableData], constraints: &[ConstraintRow]) -> (Csr, Vec<f64>, Csr, Vec<f64>) {
+fn build_a_g_rows(variables: &[VariableData], constraints: &[ConstraintRow]) -> (FaerCsr, Vec<f64>, FaerCsr, Vec<f64>) {
     let n = variables.len();
 
     let mut a_rows: Vec<Vec<(usize, f64)>> = Vec::new();
@@ -182,7 +182,7 @@ pub struct ExtendedPresolveResult {
     /// 適用したスケーリング係数 (解の逆スケールに使う)。
     pub scaling: Scaling,
     /// 縮小後の等式行列 A。
-    pub a: Csr,
+    pub a: FaerCsr,
     /// 縮小後の等式右辺 b。
     pub b: Vec<f64>,
     /// 各変数の下限 (消去変数は 0)。
@@ -209,7 +209,7 @@ pub struct ExtendedPresolveResult {
 impl ExtendedPresolveResult {
     /// 上下限を単一変数行として G に戻した `(G, h)` を必要時に構築して返す
     /// (内点法用。単体法は分離形式を直接読む)。
-    pub fn g_h(&self) -> (Csr, Vec<f64>) {
+    pub fn g_h(&self) -> (FaerCsr, Vec<f64>) {
         propagate::rebuild_g_ref(self.lb.len(), &self.real_rows, &self.real_rhs, &self.lb, &self.ub)
     }
 }
@@ -225,7 +225,7 @@ pub enum PostsolveStep {
 }
 
 /// 実行不能と判定したときの [`ExtendedPresolveResult`] を作る (`_n` は未使用)。
-fn extended_infeasible(sc: Scaling, a: Csr, b: Vec<f64>, c: Vec<f64>, _n: usize) -> ExtendedPresolveResult {
+fn extended_infeasible(sc: Scaling, a: FaerCsr, b: Vec<f64>, c: Vec<f64>, _n: usize) -> ExtendedPresolveResult {
     ExtendedPresolveResult {
         scaling: sc,
         a,
@@ -242,7 +242,7 @@ fn extended_infeasible(sc: Scaling, a: Csr, b: Vec<f64>, c: Vec<f64>, _n: usize)
 }
 
 /// 非有界と判定したときの [`ExtendedPresolveResult`] を作る (`_n` は未使用)。
-fn extended_unbounded(sc: Scaling, a: Csr, b: Vec<f64>, c: Vec<f64>, _n: usize) -> ExtendedPresolveResult {
+fn extended_unbounded(sc: Scaling, a: FaerCsr, b: Vec<f64>, c: Vec<f64>, _n: usize) -> ExtendedPresolveResult {
     ExtendedPresolveResult {
         scaling: sc,
         a,
@@ -274,9 +274,9 @@ fn extended_unbounded(sc: Scaling, a: Csr, b: Vec<f64>, c: Vec<f64>, _n: usize) 
 /// 以降停止する (ラッチ)。
 pub fn run_extended(
     n: usize,
-    a: &Csr,
+    a: &FaerCsr,
     b: &[f64],
-    g: &Csr,
+    g: &FaerCsr,
     h: &[f64],
     c: &[f64],
     ruiz_iters: usize,
@@ -336,7 +336,7 @@ pub fn run_extended(
     // 注: parallelrows / rowdominance / dominatedcol / stuffing / sparsify / smallcoeff は
     // 実装済みだが接続していない (経緯は改良履歴メモを参照)。
 
-    // ラウンド開始前の上下限を凍結して保持する (`dualpropagate::run` は伝播で
+    // ラウンド開始前の上下限を凍結して保持する (`dualpropagate::propagate_dual_bounds` は伝播で
     // 狭める前の元の上下限を必要とする)。同じ抽出結果を最初のラウンドの伝播にも使う。
     let (first_lb, first_ub, first_rows, first_rhs) = propagate::extract_bounds(n, &g, &h);
     let (orig_lb, orig_ub) = (first_lb.clone(), first_ub.clone());
@@ -380,7 +380,7 @@ pub fn run_extended(
             "propagate",
             match carry.take() {
                 Some((rows, rhs, clb, cub)) => propagate::propagate_split(n, clb, cub, rows, rhs, prop_passes),
-                None => propagate::propagate_nog(n, &g, &h, prop_passes),
+                None => propagate::propagate_without_g_rebuild(n, &g, &h, prop_passes),
             }
         );
         if prop.infeasible {
@@ -433,7 +433,7 @@ pub fn run_extended(
         }
 
         // 双対による固定: 目的係数の向きを妨げる行がない変数を上下限に固定する。
-        let fixes = timed_step!("dualfix", dualfix::fix_dominated_variables(n, &a, &cur_real_rows, &c, &lb, &ub));
+        let fixes = timed_step!("dualfix", dualfix::fix_by_lock_count(n, &a, &cur_real_rows, &c, &lb, &ub));
         for &(j, value) in &fixes {
             lb[j] = value;
             ub[j] = value;
@@ -442,7 +442,7 @@ pub fn run_extended(
         // 双対実行可能性の伝播による 2 つの縮小 (`dualpropagate`):
         // 全最適解で等号成立する不等式行を等式系へ昇格し、被約費用の符号が確定する列を固定する。
         if dualpropagate_active {
-            let dual_red = timed_step!("dualpropagate", dualpropagate::run(n, &a, &cur_real_rows, &c, &lb, &ub, &orig_lb, &orig_ub, prop_passes));
+            let dual_red = timed_step!("dualpropagate", dualpropagate::propagate_dual_bounds(n, &a, &cur_real_rows, &c, &lb, &ub, &orig_lb, &orig_ub, prop_passes));
             if dual_red.implied_equalities.is_empty() && dual_red.fixed_columns.is_empty() {
                 dualpropagate_empty_streak += 1;
                 if dualpropagate_empty_streak >= tunable!("ENOMOTO_T_DUALPROPAGATE_STRIKES", DUALPROPAGATE_STRIKES, usize) {
@@ -488,7 +488,7 @@ pub fn run_extended(
         // 不等式行の列シングルトン (`ineqsingleton`、`ENOMOTO_INEQ_SINGLETON` 設定時のみ):
         // 列を上下限に固定するか、その行を等式に変えて後段の colsingleton に消去させる。
         if env_str!("ENOMOTO_INEQ_SINGLETON").is_some() {
-            let isr = timed_step!("ineqsingleton", ineqsingleton::run(n, &a, &cur_real_rows, &cur_real_rhs, &c, &lb, &ub));
+            let isr = timed_step!("ineqsingleton", ineqsingleton::resolve_inequality_singletons(n, &a, &cur_real_rows, &cur_real_rhs, &c, &lb, &ub));
             if env_str!("ENOMOTO_DEBUG_INEQ_SINGLETON").is_some() {
                 eprintln!("DEBUG_INEQ_SINGLETON: fixes={} implied_equalities={}", isr.fixes.len(), isr.implied_equalities.len());
             }
@@ -864,7 +864,7 @@ pub fn run_extended(
         "final propagate",
         match carry.take() {
             Some((rows, rhs, clb, cub)) => propagate::propagate_split(n, clb, cub, rows, rhs, prop_passes),
-            None => propagate::propagate_nog(n, &g, &h, prop_passes),
+            None => propagate::propagate_without_g_rebuild(n, &g, &h, prop_passes),
         }
     );
     if profile {
@@ -962,7 +962,7 @@ pub fn run_extended(
 
 /// 縮小後の問題のビットパターンに対する FNV-1a ハッシュ (`ENOMOTO_DEBUG_PRESOLVE_HASH`)。
 /// 2 つのビルドで同じ値が出れば、ソルバーへの入力はビット単位で同一。
-fn presolve_output_hash(a: &Csr, b: &[f64], g: &Csr, h: &[f64], c: &[f64], lb: &[f64], ub: &[f64]) -> u64 {
+fn presolve_output_hash(a: &FaerCsr, b: &[f64], g: &FaerCsr, h: &[f64], c: &[f64], lb: &[f64], ub: &[f64]) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     // 64 ビット値をリトルエンディアンの 8 バイトとしてハッシュに取り込む。
     let mut eat = |x: u64| {

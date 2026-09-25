@@ -21,7 +21,7 @@
 //!
 //! 開発経緯・並列化を見送った理由などは改良履歴メモを参照。
 
-use crate::sparse::{Csr, CsrRowBuilder, csr_from_rows, csr_row_iter, csr_row_vec};
+use crate::sparse::{FaerCsr, CsrRowBuilder, csr_from_rows, csr_row_iter, csr_row_vec};
 use crate::params::presolve::{EQPROP_RELTOL, PROPAGATE_EPS, PROP_RELTOL};
 
 /// [`propagate`] の結果 (境界を再度畳み込んだ `g`/`h` を含む完全版)。
@@ -31,7 +31,7 @@ use crate::params::presolve::{EQPROP_RELTOL, PROPAGATE_EPS, PROP_RELTOL};
 #[allow(dead_code)] // the pipeline uses `PropagateSplit`; kept for tests / G-form callers
 pub struct PropagateResult {
     /// 伝播後の不等式行列 `G` (多変数行 + 各有限境界の単一変数行)。
-    pub g: Csr,
+    pub g: FaerCsr,
     /// `g` に対応する右辺 `h`。
     pub h: Vec<f64>,
     /// 伝播後の変数下限 (`g`/`h` の境界行から取り出したものと同一)。
@@ -54,7 +54,7 @@ pub struct PropagateResult {
 /// `build_a_g` 直後のどの `G` にも使える。境界行がない変数は `-inf`/`+inf`。
 /// 同じ変数に複数の境界行があれば最もきつい値を採る。
 /// 戻り値は `(lb, ub, rows, rhs)`。
-pub fn extract_bounds(n: usize, g: &Csr, h: &[f64]) -> (Vec<f64>, Vec<f64>, Vec<Vec<(usize, f64)>>, Vec<f64>) {
+pub fn extract_bounds(n: usize, g: &FaerCsr, h: &[f64]) -> (Vec<f64>, Vec<f64>, Vec<Vec<(usize, f64)>>, Vec<f64>) {
     let mut lb = vec![f64::NEG_INFINITY; n];
     let mut ub = vec![f64::INFINITY; n];
     let mut rows: Vec<Vec<(usize, f64)>> = Vec::new();
@@ -84,7 +84,7 @@ pub fn extract_bounds(n: usize, g: &Csr, h: &[f64]) -> (Vec<f64>, Vec<f64>, Vec<
 }
 
 /// [`extract_bounds`] の `lb`/`ub` だけを返す版 (値は同一、多変数行のコピーを省く)。
-pub fn extract_bounds_only(n: usize, g: &Csr, h: &[f64]) -> (Vec<f64>, Vec<f64>) {
+pub fn extract_bounds_only(n: usize, g: &FaerCsr, h: &[f64]) -> (Vec<f64>, Vec<f64>) {
     let mut lb = vec![f64::NEG_INFINITY; n];
     let mut ub = vec![f64::INFINITY; n];
     let gr = g.as_ref();
@@ -140,11 +140,11 @@ impl PropagateSplit {
 
 /// `G x <= h` に制約伝播を最大 `passes` パス適用し、`G`/`h` を再構築して返す。
 ///
-/// `n` は変数数。内部は [`propagate_nog`] + [`rebuild_g_ref`]。
+/// `n` は変数数。内部は [`propagate_without_g_rebuild`] + [`rebuild_g_ref`]。
 #[allow(dead_code)]
-pub fn propagate(n: usize, g: &Csr, h: &[f64], passes: usize) -> PropagateResult {
+pub fn propagate(n: usize, g: &FaerCsr, h: &[f64], passes: usize) -> PropagateResult {
     // 分離形での伝播結果
-    let split = propagate_nog(n, g, h, passes);
+    let split = propagate_without_g_rebuild(n, g, h, passes);
     if split.infeasible {
         return PropagateResult {
             g: csr_from_rows(&[], n),
@@ -161,7 +161,7 @@ pub fn propagate(n: usize, g: &Csr, h: &[f64], passes: usize) -> PropagateResult
 }
 
 /// [`propagate`] の `g`/`h` 再構築を省いた版 (`lb`/`ub`/多変数行はビット単位で同一)。
-pub fn propagate_nog(n: usize, g: &Csr, h: &[f64], passes: usize) -> PropagateSplit {
+pub fn propagate_without_g_rebuild(n: usize, g: &FaerCsr, h: &[f64], passes: usize) -> PropagateSplit {
     let (lb, ub, rows, rhs) = extract_bounds(n, g, h);
     propagate_split(n, lb, ub, rows, rhs, passes)
 }
@@ -332,7 +332,7 @@ pub fn propagate_split(n: usize, mut lb: Vec<f64>, mut ub: Vec<f64>, mut rows: V
 #[derive(Clone, Copy)]
 pub enum GView<'a> {
     /// CSR 実体 `g` と右辺 `h`。
-    Mat { g: &'a Csr, h: &'a [f64] },
+    Mat { g: &'a FaerCsr, h: &'a [f64] },
     /// 分離形: 多変数行 `rows`/`rhs` と境界 `lb`/`ub`。
     Split { rows: &'a [Vec<(usize, f64)>], rhs: &'a [f64], lb: &'a [f64], ub: &'a [f64] },
 }
@@ -377,7 +377,7 @@ pub fn split_is_canonical(n: usize, rows: &[Vec<(usize, f64)>], lb: &[f64], ub: 
 /// 結果は [`rebuild_g`] とビット単位で同一。多変数行に重複列があって
 /// ビルダーが拒否した場合は [`rebuild_g`] にフォールバックする。
 /// 行の並びは `rows`、続いて変数順に (上限行 `x_j <= ub_j`, 下限行 `-x_j <= -lb_j`)。
-pub fn rebuild_g_ref(n: usize, rows: &[Vec<(usize, f64)>], rhs: &[f64], lb: &[f64], ub: &[f64]) -> (Csr, Vec<f64>) {
+pub fn rebuild_g_ref(n: usize, rows: &[Vec<(usize, f64)>], rhs: &[f64], lb: &[f64], ub: &[f64]) -> (FaerCsr, Vec<f64>) {
     // 有限境界の個数 = 追加する境界行の数
     let n_bounds = (0..n).filter(|&j| ub[j].is_finite()).count() + (0..n).filter(|&j| lb[j].is_finite()).count();
     let nnz: usize = rows.iter().map(|r| r.len()).sum::<usize>() + n_bounds;
@@ -404,7 +404,7 @@ pub fn rebuild_g_ref(n: usize, rows: &[Vec<(usize, f64)>], rhs: &[f64], lb: &[f6
 
 /// 多変数行 `rows`/`rhs` の末尾に有限境界ごとの単一変数行を追加して
 /// `G x <= h` を再構築する ([`extract_bounds`] の逆)。`dualfix` 等も使う。
-pub fn rebuild_g(n: usize, mut rows: Vec<Vec<(usize, f64)>>, mut rhs: Vec<f64>, lb: &[f64], ub: &[f64]) -> (Csr, Vec<f64>) {
+pub fn rebuild_g(n: usize, mut rows: Vec<Vec<(usize, f64)>>, mut rhs: Vec<f64>, lb: &[f64], ub: &[f64]) -> (FaerCsr, Vec<f64>) {
     for j in 0..n {
         if ub[j].is_finite() {
             rows.push(vec![(j, 1.0)]);
@@ -495,7 +495,7 @@ pub struct EqPropagateResult {
 /// rowsingleton/doubleton/colsingleton に任せる。等式にしか現れない無限境界の
 /// 列に有限境界を与え、拡張双対単体法の M 側処理を減らすのが目的。
 /// 最大 `passes` パス、変化がなければ打ち切り。
-pub fn propagate_equalities(a: &Csr, b: &[f64], lb: &mut [f64], ub: &mut [f64], passes: usize) -> EqPropagateResult {
+pub fn propagate_equalities(a: &FaerCsr, b: &[f64], lb: &mut [f64], ub: &mut [f64], passes: usize) -> EqPropagateResult {
     let ar = a.as_ref();
     // 相対改善閾値 (`ENOMOTO_T_EQPROP_RELTOL`、0 で無効)。
     let reltol = tunable!("ENOMOTO_T_EQPROP_RELTOL", EQPROP_RELTOL, f64);
