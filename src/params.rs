@@ -292,11 +292,11 @@ pub(crate) mod slope_intercept_dual {
     pub(crate) const GREATEST_IMPROVEMENT_STALL_MIN: usize = 30;
 
     /// 実行不能行数プラトー検出の上限 `min(INFEASIBLE_PLATEAU_STALL_MULT * stall_limit,
-    /// MAX_ITERS_FLOOR / INFEASIBLE_PLATEAU_BUDGET_DIVISOR)` の `stall_limit` に対する倍率
+    /// max_iters / INFEASIBLE_PLATEAU_BUDGET_DIVISOR)` の `stall_limit` に対する倍率
     /// (健全だが遅い求解の揺らぎで誤発火しないよう大きめにする)。
     pub(crate) const INFEASIBLE_PLATEAU_STALL_MULT: usize = 4;
 
-    /// 実行不能行数プラトー検出の上限を反復予算 `MAX_ITERS_FLOOR` の何分の一に抑えるか
+    /// 実行不能行数プラトー検出の上限を反復予算 `max_iters`(`simplex::max_iters_for`)の何分の一に抑えるか
     /// (予算内で確実に発火できるようにする)。
     pub(crate) const INFEASIBLE_PLATEAU_BUDGET_DIVISOR: usize = 4;
 

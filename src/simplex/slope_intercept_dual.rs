@@ -2257,10 +2257,17 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     let debug_greatest_improvement = env_str!("ENOMOTO_DEBUG_EXT_GREATEST_IMPROVEMENT").is_some();
     // 候補行 `(行, 方向, 逸脱, DSE スコア)` の作業領域。
     let mut greatest_improvement_cands: Vec<(usize, i32, Affine1, Score2)> = Vec::with_capacity(GREATEST_IMPROVEMENT_TOP_K + 1);
+    // 反復上限(`super::max_iters_for`)。
+    let max_iters = super::max_iters_for(m, n_total);
     // 実行不能行数プラトー検出(ループ本体の該当箇所参照)の上限反復数。健全だが遅い求解の
     // 通常の揺らぎを避けるため `stall_limit` より大きくするが、反復上限の予算内で発火できる
-    // よう `MAX_ITERS_FLOOR / 4` で頭打ちにする。
-    let infeasible_plateau_limit = (INFEASIBLE_PLATEAU_STALL_MULT * stall_limit).min(MAX_ITERS_FLOOR / INFEASIBLE_PLATEAU_BUDGET_DIVISOR);
+    // よう実際の反復予算 `max_iters / 4` で頭打ちにする(m + n ≤ 1,000 なら予算は
+    // `MAX_ITERS_FLOOR` なので従来と同じ 5,000)。以前は予算によらず `MAX_ITERS_FLOOR / 4`
+    // (= 5,000) 固定で、大きな問題 (pds-100, s250r10) では実行不能行数が振動するだけの健全な
+    // 求解で誤発火して Bland 規則に落ち、収束しなくなっていた。
+    // `ENOMOTO_T_PLATEAU_BUDGET_FLOOR=1` で従来の上限 (A/B 用)。
+    let plateau_budget = if tunable!("ENOMOTO_T_PLATEAU_BUDGET_FLOOR", 0usize, usize) != 0 { MAX_ITERS_FLOOR } else { max_iters };
+    let infeasible_plateau_limit = (INFEASIBLE_PLATEAU_STALL_MULT * stall_limit).min(plateau_budget / INFEASIBLE_PLATEAU_BUDGET_DIVISOR);
     // 最小の実行不能行数を更新できていない連続反復数。
     let mut infeasible_plateau_count = 0usize;
     // これまでに見た最小の実行不能行数(前反復の値ではない)。
@@ -2456,8 +2463,6 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
             tunable!("ENOMOTO_T_XB_CHECK_INTERVAL", XB_CHECK_CADENCE, usize)
         }
     };
-    // 反復上限(`super::max_iters_for`)。
-    let max_iters = super::max_iters_for(m, n_total);
     // ===== 主ループ(1 反復 = chuzr → BTRAN → PRICE → chuzc1/BFRT → FTRAN → 更新) =====
     for iter_idx in 0..max_iters {
         // 前反復終了時点で候補短縮リストが有効だったか(この反復では一旦無効にする)。
