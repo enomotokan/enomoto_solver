@@ -95,9 +95,10 @@ M = Model()
 - `M.set_objective(f, sense="minimize")`: `f` が `Function` 型でなければ `TypeError`。
 - `M.add_constraint(g)`: `g` が `Constraint` 型でなければ `TypeError`。
 - `M.solve() -> Solution`: Rust 側の前処理・最適化アルゴリズムを実行。
-  `status` が `"infeasible"` / `"unbounded"` の場合はそれぞれ
-  `InfeasibleError` / `UnboundedError` を送出(`raise_on_failure=False` で抑制可能)。
-  成功時は各 `Variable.value` が読み出せるようになる。
+  最適解が得られたかどうかにかかわらず例外は送出せず、常に `Solution` を返す
+  (HiGHS・Gurobi などと同じ流儀)。結果は `Solution.status` で判断する。
+  `status` が `"optimal"` のときだけ `objective` に値が入り、各 `Variable.value` が
+  読み出せるようになる(それ以外で読むと `RuntimeError`)。
 
 ### 3.2 Variable(Function のサブクラス)
 
@@ -456,8 +457,7 @@ ENOMOTO-Solver/
 │   ├── variable.py
 │   ├── function.py
 │   ├── constraint.py
-│   ├── types.py
-│   └── exceptions.py
+│   └── types.py
 ├── tests/test_model.py
 └── examples/smoke_test.py
 ```
@@ -471,8 +471,8 @@ ENOMOTO-Solver/
 | 制約の右辺・左辺で `<=`/`>=`/`==` 以外        | (構文上発生しない。比較演算子経由でのみ `Constraint` を生成) |
 | 異なる `Model` に属する変数同士を演算          | `ValueError`                      |
 | `Variable` の下限・上限に無限大を渡した       | `ValueError`(Rust 側 `model.rs::add_variable`、PyO3 経由) |
-| `solve()` が実行不可能と判定                  | `InfeasibleError`                 |
-| `solve()` の目的関数が非有界                  | `UnboundedError`(§7.1 の通り、境界付き変数のみの現行実装では理論上到達不能な安全網) |
+| `solve()` が最適解を得られなかった(実行不可能・非有界・求解失敗) | 例外なし(`Solution.status` で判断) |
+| 最適解が得られていない状態で `Variable.value` を読んだ | `RuntimeError` |
 | 未知の変数型・不等号文字列                    | Rust 側で `ValueError`(PyO3 経由）|
 
 ## 7. 既知の制約(MVP スコープ)

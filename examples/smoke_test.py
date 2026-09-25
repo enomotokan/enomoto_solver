@@ -1,6 +1,6 @@
 import math
 
-from enomoto_solver import Constraint, Function, InfeasibleError, Model, Variable
+from enomoto_solver import Constraint, Function, Model, Variable
 
 
 def close(a, b, tol=1e-6):
@@ -75,11 +75,9 @@ M6 = Model()
 w = Variable(float, 0, 5)
 M6.set_objective(w)
 M6.add_constraint(w >= 10)
-try:
-    M6.solve()
-    raise AssertionError("expected InfeasibleError")
-except InfeasibleError:
-    print("Infeasible correctly detected")
+sol6 = M6.solve()
+assert sol6.status == "infeasible", sol6.status
+print("Infeasible correctly detected")
 
 # 7) Infinite bounds are accepted (model.rs::add_variable's own docs: no
 # longer rejected at the PyO3 boundary — only NaN and lb > ub are).

@@ -18,7 +18,6 @@ from typing import ClassVar, List, Optional
 
 from . import _core
 from .constraint import Constraint
-from .exceptions import InfeasibleError, InfeasibleOrUnboundedError, NotSolvedError, UnboundedError
 from .function import Function
 
 
@@ -105,15 +104,14 @@ class Model:
     # -- 求解 ------------------------------------------------------------
     def solve(
         self,
-        raise_on_failure: bool = True,
         root_solver: Optional[str] = None,
         distinguish_infeasible_unbounded: bool = False,
     ) -> Solution:
-        """Rust コアで前処理と最適化を実行する。成功すると各 Variable の ``.value`` が読める。
+        """Rust コアで前処理と最適化を実行し、結果を Solution で返す。
 
-        ``raise_on_failure``: True (既定) なら、最適解が得られなかったとき状態に応じた
-        例外 (InfeasibleError / UnboundedError / InfeasibleOrUnboundedError /
-        NotSolvedError) を送出する。False なら例外を出さず Solution を返す。
+        最適解が得られたかどうかにかかわらず例外は送出しない。結果は ``Solution.status``
+        で判断する。``"optimal"`` のときだけ ``objective`` に値が入り、各 Variable の
+        ``.value`` が読める (それ以外で ``.value`` を読むと RuntimeError)。
 
         ``root_solver``: 各 LP (整数計画では各緩和問題) の解法。``"simplex"`` (既定) か
         ``"interior"``。両者は前処理だけを共有する独立実装なので、同じモデルを両方で
@@ -137,19 +135,6 @@ class Model:
             objective=result["objective"],
             node_limit_hit=result["node_limit_hit"],
         )
-
-        if raise_on_failure and status == "infeasible":
-            raise InfeasibleError("model is infeasible: no assignment satisfies all constraints")
-        if raise_on_failure and status == "unbounded":
-            raise UnboundedError("objective is unbounded on the feasible region")
-        if raise_on_failure and status == "infeasible_or_unbounded":
-            raise InfeasibleOrUnboundedError(
-                "model has no finite optimum (infeasible or unbounded); "
-                "pass distinguish_infeasible_unbounded=True to find out which"
-            )
-        if raise_on_failure and status == "not_solved":
-            raise NotSolvedError("solver gave up without reaching a verdict (numerical breakdown or iteration limit)")
-
         return self._solution
 
     def __repr__(self) -> str:

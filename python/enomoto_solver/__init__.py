@@ -15,7 +15,6 @@
 """
 
 from .constraint import Constraint
-from .exceptions import InfeasibleError, InfeasibleOrUnboundedError, NotSolvedError, SolverError, UnboundedError
 from .function import Function
 from .model import Model, Solution
 from .variable import Variable
@@ -27,11 +26,6 @@ __all__ = [
     "Function",
     "Constraint",
     "Solution",
-    "SolverError",
-    "InfeasibleError",
-    "InfeasibleOrUnboundedError",
-    "NotSolvedError",
-    "UnboundedError",
 ]
 
 # パッケージのバージョン

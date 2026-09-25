@@ -5,10 +5,7 @@ import pytest
 from enomoto_solver import (
     Constraint,
     Function,
-    InfeasibleError,
-    InfeasibleOrUnboundedError,
     Model,
-    UnboundedError,
     Variable,
 )
 
@@ -88,13 +85,16 @@ def test_binary_knapsack():
     assert approx(sol.objective, 220.0)
 
 
-def test_infeasible_raises():
+def test_infeasible_status():
     M = Model()
     w = Variable(float, 0, 5)
     M.set_objective(w)
     M.add_constraint(w >= 10)
-    with pytest.raises(InfeasibleError):
-        M.solve()
+    sol = M.solve()
+    assert sol.status == "infeasible"
+    assert sol.objective is None
+    with pytest.raises(RuntimeError):
+        w.value
 
 
 def test_set_objective_type_error():
@@ -163,19 +163,15 @@ def _infeasible_z1_negative_model():
 
 @pytest.mark.parametrize("build", [_unbounded_model, _infeasible_z1_negative_model])
 def test_no_finite_optimum_reported_early_by_default(build):
-    sol = build().solve(raise_on_failure=False)
+    sol = build().solve()
     assert sol.status == "infeasible_or_unbounded"
     assert sol.objective is None
-    with pytest.raises(InfeasibleOrUnboundedError):
-        build().solve()
 
 
 def test_distinguish_infeasible_unbounded_runs_stage_b():
-    sol = _unbounded_model().solve(raise_on_failure=False, distinguish_infeasible_unbounded=True)
+    sol = _unbounded_model().solve(distinguish_infeasible_unbounded=True)
     assert sol.status == "unbounded"
-    with pytest.raises(UnboundedError):
-        _unbounded_model().solve(distinguish_infeasible_unbounded=True)
-    sol = _infeasible_z1_negative_model().solve(raise_on_failure=False, distinguish_infeasible_unbounded=True)
+    assert sol.objective is None
+    sol = _infeasible_z1_negative_model().solve(distinguish_infeasible_unbounded=True)
     assert sol.status == "infeasible"
-    with pytest.raises(InfeasibleError):
-        _infeasible_z1_negative_model().solve(distinguish_infeasible_unbounded=True)
+    assert sol.objective is None
