@@ -154,8 +154,14 @@ pub(crate) mod slope_intercept_dual {
     /// `ENOMOTO_T_XB_CHECK_LARGE_M` で上書き可(0 = 無効)。
     pub(crate) const XB_CHECK_CADENCE_LARGE_M: usize = 10_000;
 
-    /// 策9: 大きな問題でのドリフト検査の反復間隔(`ENOMOTO_T_XB_CHECK_CADENCE_LARGE`)。
+    /// 策9: 大きな問題でのドリフト検査の反復間隔の下限(`ENOMOTO_T_XB_CHECK_CADENCE_LARGE`)。
+    /// 間隔は `max(この値, m / XB_CHECK_CADENCE_LARGE_DIV)`。
     pub(crate) const XB_CHECK_CADENCE_LARGE: usize = 100;
+
+    /// 策9: 大きな問題でのドリフト検査の間隔を `m` に比例させる除数(`ENOMOTO_T_XB_CHECK_CADENCE_LARGE_DIV`)。
+    /// 検査 1 回の手間は `O(m + nnz(A_B))` なので、反復あたりの償却コストを `m` によらず一定にする
+    /// (m=76K で約 300、m=378K で約 1,480 反復ごと)。storm k=200 で間隔 100 → 300 は総時間 -11%。
+    pub(crate) const XB_CHECK_CADENCE_LARGE_DIV: usize = 256;
 
     /// 策12(部分 `tau`): 行数 `m` がこれ以上の問題では、融合 FTRAN の DSE `tau = B^-1 rho` を
     /// 入る列の結果の非ゼロ行(DSE 重み更新が読む行)でだけ求める(`ENOMOTO_T_PARTIAL_TAU_MIN_M`、0 = 無効)。

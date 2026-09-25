@@ -58,7 +58,7 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::sync::OnceLock;
 use crate::params::simplex::{FT_BUMP_LIMIT_FACTOR, FT_CHECK_INTERVAL, FT_MIN_PIVOT, FT_RESIDUAL_TOL, HARRIS_RATIO_TOL, MAX_ITERS_FLOOR, PRIMAL_FEAS_TOL, RESIDUAL_CHECK_MULTIPLIER, STALL_PROGRESS_EPS, STEEPEST_EDGE_FLOOR, TOL};
-use crate::params::slope_intercept_dual::{D_DRIFT_TOL, D_GROSS_MISMATCH_REL_TOL, FT_MAX_UPDATES_FACTOR, FT_MAX_UPDATES_FLOOR, PARTIAL_TAU_MIN_M, PIVOT_ESCALATION_STEP, SLOPE_TOL, STUCK_ROW_MIN_PIVOT, SYNTH_CLOCK_FACTOR, SYNTH_CLOCK_LARGE_M, SYNTH_CLOCK_LARGE_REF_M, SYNTH_CLOCK_MIN_UPDATES, XB_CHECK_CADENCE, XB_CHECK_CADENCE_LARGE, XB_CHECK_CADENCE_LARGE_M, XB_CHECK_INTERVAL, XB_DRIFT_ESCALATION_FACTOR, XB_DRIFT_ESCALATION_STEP, XB_DRIFT_REL_TOL, XB_DRIFT_TOL, XB_DRIFT_TOL_MAX, X_B_SLOPE_NOISE, Z_SLOPE_TOL};
+use crate::params::slope_intercept_dual::{D_DRIFT_TOL, D_GROSS_MISMATCH_REL_TOL, FT_MAX_UPDATES_FACTOR, FT_MAX_UPDATES_FLOOR, PARTIAL_TAU_MIN_M, PIVOT_ESCALATION_STEP, SLOPE_TOL, STUCK_ROW_MIN_PIVOT, SYNTH_CLOCK_FACTOR, SYNTH_CLOCK_LARGE_M, SYNTH_CLOCK_LARGE_REF_M, SYNTH_CLOCK_MIN_UPDATES, XB_CHECK_CADENCE, XB_CHECK_CADENCE_LARGE, XB_CHECK_CADENCE_LARGE_DIV, XB_CHECK_CADENCE_LARGE_M, XB_CHECK_INTERVAL, XB_DRIFT_ESCALATION_FACTOR, XB_DRIFT_ESCALATION_STEP, XB_DRIFT_REL_TOL, XB_DRIFT_TOL, XB_DRIFT_TOL_MAX, X_B_SLOPE_NOISE, Z_SLOPE_TOL};
 use crate::params::slope_intercept_dual::{
     CHUZR_SHORTLIST_AUTO_DIV, CHUZR_SHORTLIST_AUTO_K, CHUZR_SHORTLIST_AUTO_K_MAX, CHUZR_SHORTLIST_AUTO_MIN_M, CHUZR_SHORTLIST_K, CHUZR_SHORTLIST_MAX_LEN_FACTOR, CHUZR_SHORTLIST_MAX_LEN_SLACK, CHUZR_SHORTLIST_MIN_POOL_FACTOR, COMPACT_ROWS_BLOCK, FTRAN_U_HYPER_DENSITY, FTRAN_U_HYPER_TAU_DENSITY,
     GREATEST_IMPROVEMENT_STALL_DIVISOR, GREATEST_IMPROVEMENT_STALL_MIN, GREATEST_IMPROVEMENT_TOP_K, GROSS_MISMATCH_SCALE_FLOOR, INFEASIBLE_PLATEAU_BUDGET_DIVISOR, INFEASIBLE_PLATEAU_STALL_MULT,
@@ -848,6 +848,39 @@ fn residual_norm(std: &StdForm, basis_pos: &[Option<usize>], x_b: &[f64], rhs: &
         resid_sq += r * r;
     }
     resid_sq.sqrt()
+}
+
+/// 策7 の chuzr 遅延最大ヒープの要素 (行 `row` の版 `ver` 時点のスコア)。順序は `Score2::cmp_lex`
+/// (許容誤差 `LEX_REL_TOL`、短縮リストが有効なときの `score2_c2_tol` と同じ)、同点は行番号の小さい方が上。
+/// 許容誤差は推移的でないのでヒープの根は近似的な最良だが、`BinaryHeap` は順序の矛盾で panic しない。
+#[derive(Clone, Copy)]
+struct ChuzrEntry {
+    /// スコア。
+    score: Score2,
+    /// 行。
+    row: u32,
+    /// 積んだ時点の行の版番号 (`chuzr_ver[row]` と違えば古い)。
+    ver: u32,
+}
+
+impl PartialEq for ChuzrEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == std::cmp::Ordering::Equal
+    }
+}
+
+impl Eq for ChuzrEntry {}
+
+impl PartialOrd for ChuzrEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ChuzrEntry {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.score.cmp_lex(&other.score, LEX_REL_TOL).then_with(|| other.row.cmp(&self.row))
+    }
 }
 
 /// chuzr 候補短縮リスト (S11・策7) の上位 `cap` 行ヒープに `(score, i)` を提示する。`heap` は
@@ -2391,12 +2424,21 @@ fn solve_slope_intercept_dual_with(std: &StdForm, opts: &crate::types::LpOptions
     let mut shortlist_top: Vec<(Score2, usize)> = Vec::with_capacity(shortlist_k + 2);
     let mut shortlist_cut: Option<Score2> = None;
     let mut shortlist_valid = false;
+    // 策7(自動モード): 短縮リストの代わりに、プール全行のスコアを持つ遅延最大ヒープで chuzr を行う
+    // (`ChuzrEntry`)。逸脱か DSE 重みが変わった行(`x_B` 更新の一覧と `r`)は版番号 `chuzr_ver` を
+    // 進めて新しい要素を積み、古い要素は取り出し時に捨てる。完全な再同期(再分解など)や一覧のない
+    // 反復の後は作り直す。`ENOMOTO_T_CHUZR_HEAP=0` で自動モードも S11 の短縮リストを使う。
+    let chuzr_heap_mode = shortlist_enabled && shortlist_auto && tunable!("ENOMOTO_T_CHUZR_HEAP", 1u8, u8) != 0;
+    let mut chuzr_heap: BinaryHeap<ChuzrEntry> = BinaryHeap::new();
+    let mut chuzr_ver: Vec<u32> = vec![0; if chuzr_heap_mode { m } else { 0 }];
+    // 前反復の終わりにヒープがプールを正しく表していたか。
+    let mut chuzr_heap_valid = false;
     // `x_B(M)` のドリフト検査(と eta フィル検査)の反復間隔。策9: `m >= XB_CHECK_CADENCE_LARGE_M` の
-    // 大きな問題では `XB_CHECK_CADENCE_LARGE` に伸ばす。
+    // 大きな問題では `max(XB_CHECK_CADENCE_LARGE, m / XB_CHECK_CADENCE_LARGE_DIV)` に伸ばす。
     let xb_check_cadence = {
         let large_m = tunable!("ENOMOTO_T_XB_CHECK_LARGE_M", XB_CHECK_CADENCE_LARGE_M, usize);
         if large_m > 0 && m >= large_m {
-            tunable!("ENOMOTO_T_XB_CHECK_CADENCE_LARGE", XB_CHECK_CADENCE_LARGE, usize)
+            tunable!("ENOMOTO_T_XB_CHECK_CADENCE_LARGE", XB_CHECK_CADENCE_LARGE, usize).max(m / tunable!("ENOMOTO_T_XB_CHECK_CADENCE_LARGE_DIV", XB_CHECK_CADENCE_LARGE_DIV, usize).max(1))
         } else {
             tunable!("ENOMOTO_T_XB_CHECK_INTERVAL", XB_CHECK_CADENCE, usize)
         }
@@ -2408,6 +2450,10 @@ fn solve_slope_intercept_dual_with(std: &StdForm, opts: &crate::types::LpOptions
         // 前反復終了時点で候補短縮リストが有効だったか(この反復では一旦無効にする)。
         let shortlist_was_valid = shortlist_valid;
         shortlist_valid = false;
+        let chuzr_heap_was_valid = chuzr_heap_valid;
+        chuzr_heap_valid = false;
+        // この反復の chuzr を遅延ヒープで行ったか(反復の終わりに変わった行を積めば有効なまま保てる)。
+        let mut chuzr_heap_ready = false;
         // この反復の chuzr 時点で `shortlist_rows`/`shortlist_cut` がプールを正しく表しているか
         // (短縮リストが当たったか、全走査で作り直したか)。
         let mut shortlist_ready = false;
@@ -2478,8 +2524,42 @@ fn solve_slope_intercept_dual_with(std: &StdForm, opts: &crate::types::LpOptions
         let score2_c2_tol = (LEX_REL_TOL + (score2_max_tol - LEX_REL_TOL) * (remaining_m_side as f64 / n_m_flagged as f64) * stall_shrink).max(LEX_REL_TOL);
         // 選ばれた離基行 `(行, 方向 d_dir, 逸脱 dev, スコア)`。
         let mut best: Option<(usize, i32, Affine1, Score2)> = None;
-        // この反復で候補短縮リスト(S11)を使うか。
-        let shortlist_active = shortlist_enabled && !bland_mode;
+        // この反復で候補短縮リスト(S11)を使うか(遅延ヒープの自動モードでは使わない)。
+        let shortlist_active = shortlist_enabled && !bland_mode && !chuzr_heap_mode;
+        if chuzr_heap_mode && !bland_mode {
+            timed!(profile_phases, prof_phases::CHUZR, {
+                let pool = infeasible_rows.rows.len();
+                // 作り直しが要るか(前反復で無効になった、または古い要素がたまりすぎた)。
+                let mut rebuild = !chuzr_heap_was_valid || chuzr_heap.len() > 2 * pool + 1024;
+                loop {
+                    if rebuild {
+                        let mut v = std::mem::take(&mut chuzr_heap).into_vec();
+                        v.clear();
+                        v.extend(infeasible_rows.rows.iter().map(|&i| ChuzrEntry { score: Score2::new(row_dev.dev[i], dse.weight(i)), row: i as u32, ver: chuzr_ver[i] }));
+                        chuzr_heap = BinaryHeap::from(v);
+                    }
+                    // 古い要素(版番号が違う、またはプールを外れた行)を捨てる。
+                    while let Some(top) = chuzr_heap.peek() {
+                        let i = top.row as usize;
+                        if top.ver == chuzr_ver[i] && infeasible_rows.contains(i) {
+                            break;
+                        }
+                        chuzr_heap.pop();
+                    }
+                    if chuzr_heap.is_empty() && pool > 0 && !rebuild {
+                        rebuild = true;
+                        continue;
+                    }
+                    break;
+                }
+                best = chuzr_heap.peek().map(|top| {
+                    let i = top.row as usize;
+                    (i, row_dev.dir[i], row_dev.dev[i], top.score)
+                });
+            });
+            shortlist_ready = true;
+            chuzr_heap_ready = true;
+        }
         // 短縮リストが有効でプールが十分大きければ、リスト内の最良行がカットを超えるかを試す。
         if shortlist_active && shortlist_was_valid && infeasible_rows.rows.len() > CHUZR_SHORTLIST_MIN_POOL_FACTOR * shortlist_k {
             timed!(profile_phases, prof_phases::CHUZR, {
@@ -3786,7 +3866,7 @@ fn solve_slope_intercept_dual_with(std: &StdForm, opts: &crate::types::LpOptions
             }
         });
         // 候補短縮リストに、この反復で逸脱または DSE 重みが変わった行(`x_B` 更新の一覧と `r`)を追加する。
-        if shortlist_ready {
+        if shortlist_ready && !chuzr_heap_mode {
             if let Some(k) = xb_list_len {
                 for &i in xb_rows[..k].iter() {
                     let i = i as usize;
@@ -3932,6 +4012,21 @@ fn solve_slope_intercept_dual_with(std: &StdForm, opts: &crate::types::LpOptions
         // 行 `r` の基底変数が `leaving_var` から `q` に替わったので、新しい変数の境界で
         // 実行可能性を判定し直す(上の `alpha` ループでの判定を上書きする)。
         refresh_row(&mut infeasible_rows, &mut row_dev, &row_bounds, &x_b_base, &x_b_slope, r);
+        // 策7: 遅延ヒープに、この反復で逸脱か DSE 重みが変わった行(`x_B` 更新の一覧と `r`)の新しい
+        // スコアを積む。一覧が無い(全行走査した)反復は次の反復で作り直す。
+        if chuzr_heap_ready {
+            if let Some(k) = xb_list_len {
+                timed!(profile_phases, prof_phases::CHUZR, {
+                    for i in xb_rows[..k].iter().map(|&i| i as usize).chain(std::iter::once(r)) {
+                        chuzr_ver[i] = chuzr_ver[i].wrapping_add(1);
+                        if infeasible_rows.contains(i) {
+                            chuzr_heap.push(ChuzrEntry { score: Score2::new(row_dev.dev[i], dse.weight(i)), row: i as u32, ver: chuzr_ver[i] });
+                        }
+                    }
+                });
+                chuzr_heap_valid = true;
+            }
+        }
 
         // 双対値の増分更新(Huangfu & Hall §2.2.3): PRICE が触った全列で
         // `d[j] -= theta_d * a_p[j]`。BFRT フリップは `B`/`c_B` を変えないので `d` に影響しない。
@@ -4150,6 +4245,7 @@ fn solve_slope_intercept_dual_with(std: &StdForm, opts: &crate::types::LpOptions
         }
         if need_refactor {
             shortlist_valid = false;
+            chuzr_heap_valid = false;
             if profile_phases {
                 prof_phases::REFACTOR_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }

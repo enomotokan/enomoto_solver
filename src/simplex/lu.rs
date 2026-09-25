@@ -1349,6 +1349,8 @@ pub struct GpScratch {
     /// 直前の `R` eta 適用で値が変わった行 (超疎 `U` 段の起点の候補。`reach` と合わせて
     /// `U` 段入力の非ゼロ位置をすべて含む)。`R` eta を適用する側が毎回作り直す。
     r_seeds: Vec<usize>,
+    /// 疎な `R` eta 適用の作業領域 (策13)。
+    r_work: RSparseWork,
 }
 
 impl GpScratch {
@@ -1364,8 +1366,20 @@ impl GpScratch {
             u_heap: BinaryHeap::new(),
             u_list: Vec::new(),
             r_seeds: Vec::new(),
+            r_work: RSparseWork::default(),
         }
     }
+}
+
+/// [`FtLu::apply_r_sparse`] の作業領域 (eta 番号の印と最小ヒープ)。[`GpScratch`] が持つ。
+#[derive(Default)]
+struct RSparseWork {
+    /// eta 番号ごとの印 (`stamp[k] == epoch` なら選択済み)。
+    stamp: Vec<u32>,
+    /// 現在のエポック。
+    epoch: u32,
+    /// 未処理の eta 番号の最小ヒープ。
+    heap: BinaryHeap<Reverse<u32>>,
 }
 
 /// [`FtLu::u_solve_hyper`] の結果。
@@ -3471,6 +3485,19 @@ pub struct FtLu {
     row_owners: Vec<Vec<(usize, f64)>>,
     /// `R` 行 eta (作成順、`key` = 行 `p`、`pivot` は未使用)。
     r_etas: EtaFile,
+    /// `R` eta の列方向索引 (策13): `r_head[i]` は位置 `i` に要素を持つ `R` eta の要素 (プール位置) の
+    /// 連結リストの先頭 (`u32::MAX` で空)、`r_next[e]` は次の要素。新しい eta ほど前に入る。
+    /// 疎なベクトルに `R` eta を当てるとき、内積が 0 でありえない eta だけを選ぶのに使う
+    /// ([`Self::apply_r_sparse`])。密形式の `R` eta は載せず `r_dense` に番号を持つ。
+    r_head: Vec<u32>,
+    /// [`Self::r_head`] の次要素。
+    r_next: Vec<u32>,
+    /// 要素 (プール位置) → その要素を持つ `R` eta の番号。
+    r_owner: Vec<u32>,
+    /// 密形式の `R` eta の番号。
+    r_dense: Vec<u32>,
+    /// 全 `R` eta の非ゼロ数の和 (tick 用)。
+    r_nnz_total: usize,
     /// [`Self::try_update`] の再利用スクラッチ (`a_tilde` 用、長さ `m`、
     /// 返却前に必ず長さ `m` に戻す)。ピボットごとのヒープ確保を避ける。
     scratch_a_tilde: Vec<f64>,
@@ -3612,6 +3639,11 @@ impl FtLu {
             slot_pos,
             row_owners,
             r_etas: EtaFile::default(),
+            r_head: vec![u32::MAX; m],
+            r_next: Vec::new(),
+            r_owner: Vec::new(),
+            r_dense: Vec::new(),
+            r_nnz_total: 0,
             scratch_a_tilde: vec![0.0; m],
             scratch_e_tilde: vec![0.0; m],
             fill,
@@ -4280,6 +4312,84 @@ impl FtLu {
         (na, nb, nc)
     }
 
+    /// 策13: `R` eta (`x[p_k] -= r_k · x`、作成順) を、非ゼロになりうる位置が `seeds` に限られる
+    /// 疎なベクトル `x` に当てる。内積が 0 でありえない eta (非ゼロの位置に要素を持つもの) だけを
+    /// 列方向索引 ([`Self::r_head`]) で選び、作成順 (番号の小さい順) に最小ヒープで処理する。
+    /// eta `k` が `x[p_k]` を変えたら、`p_k` に要素を持つ `k` より新しい eta を加える。選ばれない
+    /// eta の内積は `±0` の和で `x` を変えないので、全 eta を当てるのと値はビット一致。
+    /// 内積が 0 でなかった eta の行を `r_seeds` に積む。tick は呼び出し側が全 eta 分を加える。
+    /// 選んだ eta が全体の半分を超えたら、残りは全 eta を順に当てる。
+    fn apply_r_sparse(&self, x: &mut [f64], seeds: &[usize], r_seeds: &mut Vec<usize>, work: &mut RSparseWork) {
+        let n_r = self.r_etas.n_headers();
+        r_seeds.clear();
+        if n_r == 0 {
+            return;
+        }
+        if work.stamp.len() < n_r {
+            work.stamp.resize(n_r, 0);
+        }
+        work.epoch = work.epoch.wrapping_add(1);
+        if work.epoch == 0 {
+            work.stamp.iter_mut().for_each(|v| *v = 0);
+            work.epoch = 1;
+        }
+        let epoch = work.epoch;
+        let heap = &mut work.heap;
+        heap.clear();
+        let stamp = &mut work.stamp;
+        for &i in seeds {
+            let mut e = self.r_head[i];
+            while e != u32::MAX {
+                let k = self.r_owner[e as usize];
+                if stamp[k as usize] != epoch {
+                    stamp[k as usize] = epoch;
+                    heap.push(Reverse(k));
+                }
+                e = self.r_next[e as usize];
+            }
+        }
+        for &k in &self.r_dense {
+            if stamp[k as usize] != epoch {
+                stamp[k as usize] = epoch;
+                heap.push(Reverse(k));
+            }
+        }
+        // 処理した eta の数
+        let mut done = 0usize;
+        while let Some(Reverse(k)) = heap.pop() {
+            let k = k as usize;
+            let slot = self.r_etas.key[k] as usize;
+            let dot = self.r_etas.dot(k, x);
+            x[slot] -= dot;
+            done += 1;
+            if dot != 0.0 {
+                r_seeds.push(slot);
+                if 2 * done > n_r {
+                    // 残り (`k` より新しい eta) は全部順に当てる。
+                    heap.clear();
+                    for k2 in k + 1..n_r {
+                        let slot = self.r_etas.key[k2] as usize;
+                        let dot = self.r_etas.dot(k2, x);
+                        x[slot] -= dot;
+                        if dot != 0.0 {
+                            r_seeds.push(slot);
+                        }
+                    }
+                    return;
+                }
+                let mut e = self.r_head[slot];
+                while e != u32::MAX {
+                    let k2 = self.r_owner[e as usize];
+                    if k2 as usize > k && stamp[k2 as usize] != epoch {
+                        stamp[k2 as usize] = epoch;
+                        heap.push(Reverse(k2));
+                    }
+                    e = self.r_next[e as usize];
+                }
+            }
+        }
+    }
+
     /// `R` eta 適用後の `scratch_a` を `a_tilde_out` に記録する (FT 更新用)。
     /// `gp_a` (`a` の `L` 段が Gilbert-Peierls で、到達集合 `reach` が有効) と `track` が
     /// あれば、非ゼロになりうる位置 (`reach` ∪ 値が非ゼロの `R` eta の行) だけを書いて
@@ -4439,15 +4549,24 @@ impl FtLu {
         mut track: Option<&mut FtranTrack>,
     ) -> (usize, usize, bool) {
         let m = self.base.m as u64;
-        clear_r_seeds(&mut gp_a, &mut gp_b);
-        for reta in self.r_etas.iter() {
-            let dot_a = self.r_etas.dot(reta.k, scratch_a);
-            let dot_b = self.r_etas.dot(reta.k, scratch_b);
-            self.add_tick(2 * self.r_etas.nnz(reta.k) as u64);
-            scratch_a[reta.slot] -= dot_a;
-            scratch_b[reta.slot] -= dot_b;
-            Self::note_r_seed(&mut gp_a, reta.slot, dot_a);
-            Self::note_r_seed(&mut gp_b, reta.slot, dot_b);
+        if let (Some(ga), Some(gb)) = (gp_a.as_deref_mut(), gp_b.as_deref_mut()) {
+            // 両ベクトルとも `L` 段が Gilbert-Peierls (非ゼロ位置が分かっている): 策13 の疎な `R` 段。
+            self.add_tick(2 * self.r_nnz_total as u64);
+            let GpScratch { reach, r_seeds, r_work, .. } = ga;
+            self.apply_r_sparse(scratch_a, reach, r_seeds, r_work);
+            let GpScratch { reach, r_seeds, r_work, .. } = gb;
+            self.apply_r_sparse(scratch_b, reach, r_seeds, r_work);
+        } else {
+            clear_r_seeds(&mut gp_a, &mut gp_b);
+            for reta in self.r_etas.iter() {
+                let dot_a = self.r_etas.dot(reta.k, scratch_a);
+                let dot_b = self.r_etas.dot(reta.k, scratch_b);
+                self.add_tick(2 * self.r_etas.nnz(reta.k) as u64);
+                scratch_a[reta.slot] -= dot_a;
+                scratch_b[reta.slot] -= dot_b;
+                Self::note_r_seed(&mut gp_a, reta.slot, dot_a);
+                Self::note_r_seed(&mut gp_b, reta.slot, dot_b);
+            }
         }
         self.capture_a_tilde(scratch_a, a_tilde_out, gp_a.as_deref_mut(), track.as_deref_mut());
         // `U` 段: ベクトルごとに `u_solve_into` の `u_zero_skip` ループ
@@ -5242,6 +5361,24 @@ impl FtLu {
         self.slot_pos[p] = k;
 
         self.fill += self.r_etas.nnz(rk);
+        self.r_nnz_total += self.r_etas.nnz(rk);
+        // 採用した `R` eta を列方向索引に載せる (策13)。
+        if self.r_etas.is_dense(rk) {
+            self.r_dense.push(rk as u32);
+        } else {
+            let (start, len) = self.r_etas.span[rk];
+            let (start, len) = (start as usize, len as usize);
+            if self.r_next.len() < start + len {
+                self.r_next.resize(start + len, u32::MAX);
+                self.r_owner.resize(start + len, u32::MAX);
+            }
+            for e in start..start + len {
+                let i = self.r_etas.idx[e] as usize;
+                self.r_next[e] = self.r_head[i];
+                self.r_head[i] = e as u32;
+                self.r_owner[e] = rk as u32;
+            }
+        }
 
         true
     }
