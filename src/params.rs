@@ -532,6 +532,15 @@ pub(crate) mod lu {
     /// (Netlib sctap1 で常時疎にすると +5%)。結果はどちらでもビット一致。
     pub(crate) const R_SPARSE_MIN_ETAS: usize = 256;
 
+    /// 新しい疎経路 (stormG2 報告 §4 の策1〜4・12、追加策 R: 超疎ピボット行 BTRAN、融合 FTRAN の出力記録、
+    /// 疎入力の FT 更新、死んだ `U` eta ヘッダ、疎な `R` 段、chuzr の遅延ヒープ) を使う最小行数
+    /// (`ENOMOTO_T_SPARSE_PATH_MIN_M`)。これ未満の問題は元の経路 (同じ値・同じ順序の全走査版) だけを通る。
+    /// 新経路のコードは別関数 (`#[inline(never)]`、主ループは `const BIG: bool` の別実体) にしてあり、
+    /// 小さな問題のホット経路のコード量・配置を元と同じに保つ (極小問題では命令キャッシュのミス増で
+    /// 5〜7% 遅くなっていた)。300 は Netlib の中規模問題での計測から (presolve 後 m: ship04l 313 は新経路で
+    /// -9%、czprob 463 / ganges 490 は -15%、sctap1 269 / fffff800 279 は新経路だと +3〜5%)。
+    pub(crate) const SPARSE_PATH_MIN_M: usize = 300;
+
     /// FTRAN/BTRAN の結果や新しい eta 要素を厳密な 0 とみなす絶対値の閾値
     /// (`ENOMOTO_TINY`)。既定 `0.0` = 切り捨てなし。
     pub(crate) const TINY_DROP: f64 = 0.0;

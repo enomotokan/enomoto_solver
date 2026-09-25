@@ -1923,6 +1923,19 @@ pub fn solve_slope_intercept_dual(std: &StdForm, opts: &crate::types::LpOptions)
 /// [`solve_slope_intercept_dual`] の本体。`safe_pivot` が真なら、updateVerify で破棄された直後の行を
 /// 再試行するとき、より大きなピボット候補があれば極小ピボットを避ける(`STUCK_ROW_MIN_PIVOT` 参照)。
 fn solve_slope_intercept_dual_with(std: &StdForm, opts: &crate::types::LpOptions, safe_pivot: bool) -> Option<SimplexResult> {
+    // 行数が `SPARSE_PATH_MIN_M` 以上なら新しい疎経路を含む実体 (`BIG = true`)、未満なら元の経路の
+    // コードだけの実体を使う (小さな問題のホット経路のコード量・配置を変えないため。
+    // `sparse_lu::sparse_path_min_m` 参照)。どちらも結果はビット一致 (`m >= 10,000` でゲートした
+    // 経路変更は `BIG` の中にある)。
+    if std.n_rows >= sparse_lu::sparse_path_min_m() {
+        solve_slope_intercept_dual_impl::<true>(std, opts, safe_pivot)
+    } else {
+        solve_slope_intercept_dual_impl::<false>(std, opts, safe_pivot)
+    }
+}
+
+/// [`solve_slope_intercept_dual_with`] の本体。`BIG` は新しい疎経路 (stormG2 報告 §4 の策) を使うか。
+fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate::types::LpOptions, safe_pivot: bool) -> Option<SimplexResult> {
     // 全列数(構造列+スラック列)、行数、構造列数。スラック列は `n_orig..n_total`。
     let n_total = std.n_total;
     let m = std.n_rows;
@@ -2051,7 +2064,7 @@ fn solve_slope_intercept_dual_with(std: &StdForm, opts: &crate::types::LpOptions
     // 融合 FTRAN の出力(`alpha_full`/`tau`/`a_tilde_buf`)の非ゼロ位置の記録([`sparse_lu::FtranTrack`])。
     // 超疎経路では前回の位置だけを消して書くので、長さ `m` の `fill`/`copy` を省ける(ビット同一)。
     // `ENOMOTO_SPARSE_FTRAN_OUT=0` で従来の全体書き出し(A/B 用)。
-    let sparse_ftran_out = env_str!("ENOMOTO_SPARSE_FTRAN_OUT").map_or(true, |v| v != "0");
+    let sparse_ftran_out = BIG && env_str!("ENOMOTO_SPARSE_FTRAN_OUT").map_or(true, |v| v != "0");
     let mut ftran_track = sparse_lu::FtranTrack::new();
     // 策12: 大きな問題では DSE の `tau` を入る列の結果の非ゼロ行でだけ求める(`PARTIAL_TAU_MIN_M`)。
     let partial_tau = sparse_ftran_out && {
@@ -2428,7 +2441,7 @@ fn solve_slope_intercept_dual_with(std: &StdForm, opts: &crate::types::LpOptions
     // (`ChuzrEntry`)。逸脱か DSE 重みが変わった行(`x_B` 更新の一覧と `r`)は版番号 `chuzr_ver` を
     // 進めて新しい要素を積み、古い要素は取り出し時に捨てる。完全な再同期(再分解など)や一覧のない
     // 反復の後は作り直す。`ENOMOTO_T_CHUZR_HEAP=0` で自動モードも S11 の短縮リストを使う。
-    let chuzr_heap_mode = shortlist_enabled && shortlist_auto && tunable!("ENOMOTO_T_CHUZR_HEAP", 1u8, u8) != 0;
+    let chuzr_heap_mode = BIG && shortlist_enabled && shortlist_auto && tunable!("ENOMOTO_T_CHUZR_HEAP", 1u8, u8) != 0;
     let mut chuzr_heap: BinaryHeap<ChuzrEntry> = BinaryHeap::new();
     let mut chuzr_ver: Vec<u32> = vec![0; if chuzr_heap_mode { m } else { 0 }];
     // 前反復の終わりにヒープがプールを正しく表していたか。
@@ -2699,7 +2712,9 @@ fn solve_slope_intercept_dual_with(std: &StdForm, opts: &crate::types::LpOptions
                 let mut best_gi: Option<(usize, i32, Affine1)> = None;
                 for &(i, d_dir_i, dev_i, _) in &greatest_improvement_cands {
                     // `rho` を全体で書くので、超疎 BTRAN の出力位置の記録を無効化する。
-                    btran_work.invalidate_out();
+                    if BIG {
+                        btran_work.invalidate_out();
+                    }
                     let Some(ratio) = trial_row_ratio(std, &lu, &nb_status, &d, d_dir_i, &mut lu_scratch, &mut rho, &mut a_p, &mut touched, &mut touched_cols, i) else {
                         continue;
                     };
@@ -2797,7 +2812,13 @@ fn solve_slope_intercept_dual_with(std: &StdForm, opts: &crate::types::LpOptions
         // (c): ピボット行の BTRAN `rho = B^-T e_r`(`M` に依存しないので `rho`/`a_p`/`d` は
         // 通常の `f64`)。この反復の `try_update_precomputed` 用に `e_tilde_buf`
         // (U^-T 後・R 逆適用前の中間値)を副産物としてキャプチャする。
-        timed!(profile_phases, prof_phases::BTRAN, lu.solve_transpose_unit_work(r, &mut rho, &mut e_tilde_buf, &mut btran_work, Some(&mut rho_steps)));
+        timed!(profile_phases, prof_phases::BTRAN, {
+            if BIG {
+                lu.solve_transpose_unit_work_sparse(r, &mut rho, &mut e_tilde_buf, &mut btran_work, Some(&mut rho_steps))
+            } else {
+                lu.solve_transpose_unit_work(r, &mut rho, &mut e_tilde_buf, &mut btran_work, Some(&mut rho_steps))
+            }
+        });
         // 診断: 維持している DSE 重みと `‖rho‖^2`(真の値)の相対誤差を区間別に数える
         // (`O(m)` なので作業量集計 `ENOMOTO_PROF_PHASES_EXT_WORK` のときだけ。策8)。
         if profile_work {
@@ -2875,7 +2896,7 @@ fn solve_slope_intercept_dual_with(std: &StdForm, opts: &crate::types::LpOptions
             }
             if price_by_col_now {
                 n_priced = rho_count_for_col;
-            } else if let Some(rows) = btran_work.nonzero_rows() {
+            } else if let Some(rows) = if BIG { btran_work.nonzero_rows() } else { None } {
                 // 策5: 超疎 BTRAN が返した非ゼロ行(昇順)をそのまま使う(`compact_rows` と同じ行・順序)。
                 for (dst, &i) in rho_rows.iter_mut().zip(rows) {
                     *dst = i as u32;
@@ -3348,12 +3369,21 @@ fn solve_slope_intercept_dual_with(std: &StdForm, opts: &crate::types::LpOptions
                     sparse_slope_buf.clear();
                     sparse_base_buf.extend(combined_touched.iter().map(|&i| (i, combined_base[i])));
                     // 結果密度が低ければ `U` 段を超疎で解く(入る列の FTRAN と同じ `FTRAN_U_HYPER_DENSITY`、ビット同一)。
+                    // (大きな問題のみ。`solve_sparse_into_hyper`)
                     let u_hyper_gate = tunable!("ENOMOTO_FTRAN_U_HYPER", FTRAN_U_HYPER_DENSITY, f64);
-                    gp_scratch.u_hyper = u_hyper_gate > 0.0 && density_bfrt.expected() < u_hyper_gate;
-                    let base_nnz = lu.solve_sparse_into(&sparse_base_buf, &mut sparse_scratch, &mut gp_scratch, &mut combined_alpha_base);
+                    gp_scratch.u_hyper = BIG && u_hyper_gate > 0.0 && density_bfrt.expected() < u_hyper_gate;
+                    let base_nnz = if BIG {
+                        lu.solve_sparse_into_hyper(&sparse_base_buf, &mut sparse_scratch, &mut gp_scratch, &mut combined_alpha_base)
+                    } else {
+                        lu.solve_sparse_into(&sparse_base_buf, &mut sparse_scratch, &mut gp_scratch, &mut combined_alpha_base)
+                    };
                     let slope_nnz = if slope_nonzero {
                         sparse_slope_buf.extend(combined_touched.iter().map(|&i| (i, combined_slope[i])));
-                        lu.solve_sparse_into(&sparse_slope_buf, &mut sparse_scratch, &mut gp_scratch, &mut combined_alpha_slope)
+                        if BIG {
+                            lu.solve_sparse_into_hyper(&sparse_slope_buf, &mut sparse_scratch, &mut gp_scratch, &mut combined_alpha_slope)
+                        } else {
+                            lu.solve_sparse_into(&sparse_slope_buf, &mut sparse_scratch, &mut gp_scratch, &mut combined_alpha_slope)
+                        }
                     } else {
                         lu.add_zero_rhs_solve_ticks(true);
                         0
@@ -3435,7 +3465,7 @@ fn solve_slope_intercept_dual_with(std: &StdForm, opts: &crate::types::LpOptions
                     dense_q[i] = v;
                 }
                 let result_nnz = if combined_deferred {
-                    let (a_nnz, b_nnz, c_nnz) = lu.solve_into_triple_capture(
+                    let (a_nnz, b_nnz, c_nnz) = if BIG { lu.solve_into_triple_capture_tracked(
                         &dense_q,
                         &rho,
                         &combined_base,
@@ -3448,7 +3478,19 @@ fn solve_slope_intercept_dual_with(std: &StdForm, opts: &crate::types::LpOptions
                         &mut a_tilde_buf,
                         Some(&mut rho_steps),
                         sparse_ftran_out.then_some(&mut ftran_track),
-                    );
+                    ) } else { lu.solve_into_triple_capture(
+                        &dense_q,
+                        &rho,
+                        &combined_base,
+                        &mut lu_scratch,
+                        &mut tau_scratch,
+                        &mut combined_scratch,
+                        &mut alpha_full,
+                        &mut tau,
+                        &mut combined_alpha_base,
+                        &mut a_tilde_buf,
+                        Some(&mut rho_steps),
+                    ) };
                     combined_base_nnz = c_nnz;
                     tau_ready = true;
                     tau_nnz = Some(b_nnz);
@@ -3456,13 +3498,19 @@ fn solve_slope_intercept_dual_with(std: &StdForm, opts: &crate::types::LpOptions
                 } else if fused_dse_ftran {
                     // DSE の `tau = B^-1 rho_p` FTRAN を同じ走査に融合する
                     // (`solve_into_pair_capture` 参照)。
-                    let (a_nnz, b_nnz) = lu.solve_into_pair_capture(&dense_q, &rho, &mut lu_scratch, &mut tau_scratch, &mut alpha_full, &mut tau, &mut a_tilde_buf, Some(&mut rho_steps), sparse_ftran_out.then_some(&mut ftran_track));
+                    let (a_nnz, b_nnz) = if BIG {
+                        lu.solve_into_pair_capture_tracked(&dense_q, &rho, &mut lu_scratch, &mut tau_scratch, &mut alpha_full, &mut tau, &mut a_tilde_buf, Some(&mut rho_steps), sparse_ftran_out.then_some(&mut ftran_track))
+                    } else {
+                        lu.solve_into_pair_capture(&dense_q, &rho, &mut lu_scratch, &mut tau_scratch, &mut alpha_full, &mut tau, &mut a_tilde_buf, Some(&mut rho_steps))
+                    };
                     tau_ready = true;
                     tau_nnz = Some(b_nnz);
                     a_nnz
                 } else {
-                    ftran_track.alpha.set_full();
-                    ftran_track.a_tilde.set_full();
+                    if BIG {
+                        ftran_track.alpha.set_full();
+                        ftran_track.a_tilde.set_full();
+                    }
                     lu.solve_into_capture(&dense_q, &mut lu_scratch, &mut alpha_full, &mut a_tilde_buf)
                 };
                 for &(i, _) in std.cols.col(q) {
@@ -3476,7 +3524,7 @@ fn solve_slope_intercept_dual_with(std: &StdForm, opts: &crate::types::LpOptions
                 let u_hyper_gate = tunable!("ENOMOTO_FTRAN_U_HYPER", FTRAN_U_HYPER_DENSITY, f64);
                 gp_scratch.u_hyper = u_hyper_gate > 0.0 && density_col_aq.expected() < u_hyper_gate;
                 let result_nnz = if combined_deferred {
-                    let (a_nnz, b_nnz, c_nnz) = lu.solve_sparse_into_triple_capture(
+                    let (a_nnz, b_nnz, c_nnz) = if BIG { lu.solve_sparse_into_triple_capture_tracked(
                         std.cols.col(q),
                         &rho,
                         &combined_base,
@@ -3490,13 +3538,26 @@ fn solve_slope_intercept_dual_with(std: &StdForm, opts: &crate::types::LpOptions
                         &mut a_tilde_buf,
                         Some(&mut rho_steps),
                         sparse_ftran_out.then_some(&mut ftran_track),
-                    );
+                    ) } else { lu.solve_sparse_into_triple_capture(
+                        std.cols.col(q),
+                        &rho,
+                        &combined_base,
+                        &mut sparse_scratch,
+                        &mut gp_scratch,
+                        &mut tau_scratch,
+                        &mut combined_scratch,
+                        &mut alpha_full,
+                        &mut tau,
+                        &mut combined_alpha_base,
+                        &mut a_tilde_buf,
+                        Some(&mut rho_steps),
+                    ) };
                     combined_base_nnz = c_nnz;
                     tau_ready = true;
                     tau_nnz = Some(b_nnz);
                     a_nnz
                 } else if fused_dse_ftran {
-                    let (a_nnz, b_nnz) = lu.solve_sparse_into_pair_capture(
+                    let (a_nnz, b_nnz) = if BIG { lu.solve_sparse_into_pair_capture_tracked(
                         std.cols.col(q),
                         &rho,
                         &mut sparse_scratch,
@@ -3507,13 +3568,25 @@ fn solve_slope_intercept_dual_with(std: &StdForm, opts: &crate::types::LpOptions
                         &mut a_tilde_buf,
                         Some(&mut rho_steps),
                         sparse_ftran_out.then_some(&mut ftran_track),
-                    );
+                    ) } else { lu.solve_sparse_into_pair_capture(
+                        std.cols.col(q),
+                        &rho,
+                        &mut sparse_scratch,
+                        &mut gp_scratch,
+                        &mut tau_scratch,
+                        &mut alpha_full,
+                        &mut tau,
+                        &mut a_tilde_buf,
+                        Some(&mut rho_steps),
+                    ) };
                     tau_ready = true;
                     tau_nnz = Some(b_nnz);
                     a_nnz
                 } else {
-                    ftran_track.alpha.set_full();
-                    ftran_track.a_tilde.set_full();
+                    if BIG {
+                        ftran_track.alpha.set_full();
+                        ftran_track.a_tilde.set_full();
+                    }
                     lu.solve_sparse_into_capture(std.cols.col(q), &mut sparse_scratch, &mut gp_scratch, &mut alpha_full, &mut a_tilde_buf)
                 };
                 gp_scratch.u_hyper = false;
@@ -3728,7 +3801,7 @@ fn solve_slope_intercept_dual_with(std: &StdForm, opts: &crate::types::LpOptions
                     compact_rows(m, &mut xb_rows, |i| (alpha_full[i].to_bits() | combined_alpha_base[i].to_bits() | combined_alpha_slope[i].to_bits()) << 1)
                 } else if combined_pending {
                     compact_rows(m, &mut xb_rows, |i| (alpha_full[i].to_bits() | combined_alpha_base[i].to_bits()) << 1)
-                } else if let Some(idx) = ftran_track.alpha.indices() {
+                } else if let Some(idx) = if BIG { ftran_track.alpha.indices() } else { None } {
                     // 策5: 融合 FTRAN が記録した位置(超疎経路)から非ゼロ行を昇順に集める
                     // (`compact_rows` の `O(m)` 走査の代わり。同じ行の集合・順序)。
                     let mut k = 0usize;
@@ -3849,12 +3922,14 @@ fn solve_slope_intercept_dual_with(std: &StdForm, opts: &crate::types::LpOptions
         let contribution_slope = theta_slope * dj_q;
 
         // 部分 `tau` は行一覧での DSE 更新にしか使えない(全行更新になるなら `tau` を全体で求め直す)。
-        if ftran_track.tau_is_partial() && xb_list_len.is_none() {
+        if BIG && ftran_track.tau_is_partial() && xb_list_len.is_none() {
             tau_ready = false;
         }
         timed!(profile_phases, prof_phases::DSE_UPDATE, {
             if !tau_ready {
-                ftran_track.tau.set_full();
+                if BIG {
+                    ftran_track.tau.set_full();
+                }
                 timed!(profile_phases, prof_phases::DSE_FTRAN, lu.solve_into(&rho, &mut lu_scratch, &mut tau));
             }
             match xb_list_len {
@@ -4018,7 +4093,7 @@ fn solve_slope_intercept_dual_with(std: &StdForm, opts: &crate::types::LpOptions
         refresh_row(&mut infeasible_rows, &mut row_dev, &row_bounds, &x_b_base, &x_b_slope, r);
         // 策7: 遅延ヒープに、この反復で逸脱か DSE 重みが変わった行(`x_B` 更新の一覧と `r`)の新しい
         // スコアを積む。一覧が無い(全行走査した)反復は次の反復で作り直す。
-        if chuzr_heap_ready {
+        if BIG && chuzr_heap_ready {
             if let Some(k) = xb_list_len {
                 timed!(profile_phases, prof_phases::CHUZR, {
                     for i in xb_rows[..k].iter().map(|&i| i as usize).chain(std::iter::once(r)) {
@@ -4068,7 +4143,11 @@ fn solve_slope_intercept_dual_with(std: &StdForm, opts: &crate::types::LpOptions
         let mut need_refactor = timed!(
             profile_phases,
             prof_phases::FT_UPDATE,
-            !lu.try_update_tracked(r, &a_tilde_buf, &mut ftran_track, &e_tilde_buf, &mut btran_work, tunable!("ENOMOTO_T_FT_MIN_PIVOT", FT_MIN_PIVOT, f64))
+            !(if BIG {
+                lu.try_update_tracked(r, &a_tilde_buf, &mut ftran_track, &e_tilde_buf, &mut btran_work, tunable!("ENOMOTO_T_FT_MIN_PIVOT", FT_MIN_PIVOT, f64))
+            } else {
+                lu.try_update_precomputed(r, &a_tilde_buf, &e_tilde_buf, tunable!("ENOMOTO_T_FT_MIN_PIVOT", FT_MIN_PIVOT, f64))
+            })
         );
         if need_refactor {
             // トリガ (2): FT 更新が自らピボットを拒否した(分解が緩すぎる直接の証拠、`docs/lu_comparison_enomoto_vs_highs.md` §2.4)。

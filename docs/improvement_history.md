@@ -6843,6 +6843,31 @@ m ≈ 378K 行) は反復数が HiGHS と同等なのに 1 反復 8.8 ms (HiGHS 
   `FTRAN_U_HYPER_DENSITY` 未満なら超疎 `U` 段 (`gp.u_hyper`) と疎な `R` 段 (追加策 R) を使う。値・tick はビット一致
   (単体テストで確認)。storm k=200 で BFRT 段 0.7 µs/反復。
 
+### 小さな問題のコード配置を元に戻す (`SPARSE_PATH_MIN_M`)
+
+- 最終判定ベンチで、極小問題 (sc50a/sc50b/kb2/adlittle/blend) が一貫して 5〜7% 遅くなっていた (sc50a +11%、
+  sc50b +11.7%)。命令数はほぼ同じ (+0.5〜0.8%) で、callgrind のキャッシュシミュレーションでは I1 ミスが主ループ・
+  BTRAN・FT 更新・融合 FTRAN で 1.5〜2 倍 (新しい疎経路のコードがホット関数に入ってコードが肥大・配置が変わった)。
+  経路を env で切っても差は縮まらなかった (実行しない分岐でも配置で効く)。
+- 新しい疎経路 (超疎 BTRAN、融合 FTRAN の出力記録、疎入力の FT 更新、疎な `R` 段、部分 `tau`、BFRT 列の超疎 FTRAN、
+  chuzr の遅延ヒープ、死んだ `U` eta ヘッダ) をすべて元の関数から分離した:
+  - `lu.rs`: 元の関数 (`solve_*_pair/triple_capture`、`pair/triple_r_u_permute`、DFS 版 `u_solve_hyper`、
+    `solve_sparse_into(_capture)`、`solve_transpose_unit_work`、`commit_update`、`l_solve_steps_into`、`EtaFile::iter/remove`)
+    は元のコードに戻し、新経路は `*_tracked` / `*_sparse` / `*_hyper` / `u_solve_hyper_heap` / `commit_update_tracked` の
+    別関数 (`#[inline(never)]`) にした。
+  - 死んだ `U` eta ヘッダ (策4) はキー (スロット) を残したままピボット 1・要素なしにする形 (`EtaFile::kill`) に変えた。
+    `U` 段の走査はそのまま通しても値・tick が変わらないので元のループのままでよく、`U^T` 掃引だけ死んだヘッダがあるとき
+    (`n_dead > 0`) に別関数 (`u_transpose_sweep(_track)_live`、`slot_pos[スロット] != 位置` で判定) に回す。
+    `lazy_remove` は `m >= SPARSE_PATH_MIN_M` の `FtLu` だけ。
+  - 疎な `R` 段は、全 `R` eta が `commit_update_tracked` で列方向索引に載ったときだけ使う (`r_indexed`)。
+  - 主ループ `solve_slope_intercept_dual_with` は `solve_slope_intercept_dual_impl::<BIG>` の 2 つの実体に分け、
+    `m < SPARSE_PATH_MIN_M` (300) なら新経路のコードを含まない `BIG = false` の実体を使う。
+- 閾値 300 は presolve 後 m での計測から (ship04l 313 は新経路で -9%、czprob 463 / ganges 490 は -15%、
+  sctap1 269 / fffff800 279 は新経路だと +3〜5%)。
+- 結果: 400 回求解の最小時間でベース比 sc50a -1.7%、sc50b +1.7%、kb2 -0.4%、adlittle +0.5%、blend +0.4%、
+  afiro +2.2%、sc105 +0.3%。adlittle ×20 の I1 ミスは全体で 4.58M → 4.62M (+1%)、主ループ 206K → 228K
+  (分離前は 301K)。Netlib 93 問はビット一致のまま、storm k=200 は 5.5 → 4.9〜5.3 s。
+
 ### 効果
 
 - 策1〜6・8 (すべてビット同一) の時点: Netlib 93 問は全問でステータス・目的関数値 (ビット)・反復数がベースと一致。
