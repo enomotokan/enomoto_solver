@@ -7272,7 +7272,7 @@ Netlib への影響がないものはビット一致 (経路不変) を確かめ
   (`ENOMOTO_LU_DENSE_BLOCK=0`) で status・目的関数値・解ベクトルのビットが全問一致 (37 問で切替が経路を変える。内積化の後は
   5 問が末尾の桁で違い、status と目的関数値 1e-7 以内は全問一致)。単体テスト `ft_update_on_dense_block_matches_full_refactor`
   (m = 420、末尾 120 x 120 の密ブロック、ブロック内外のスロットを 40 回置換して 10 回ごとに再分解と FTRAN/BTRAN/単位 BTRAN を照合)。
-- nug08-3rd (1 本ずつ、同じ build の A/B): ブロックなし 363 s → ブロックあり 333 s (ギャザーの内積化前、2 本並走、反復は同じ 46,963)、
+- nug08-3rd (同じ build の `ENOMOTO_LU_DENSE_BLOCK` の A/B): ブロックなし 363 s → ブロックあり 333 s (ギャザーの内積化前、2 本並走、反復は同じ 46,963)、
   内積化後 255 s (FTRAN 1.85 ms / BTRAN 1.30 ms / 再分解 1.42 ms 毎反復)。
 
 #### 報告 D #3: `L` と `row_owners` の添字圧縮 (src/simplex/lu.rs `LPack`、`RowOwners`)
