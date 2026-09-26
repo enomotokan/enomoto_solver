@@ -1966,6 +1966,22 @@ fn solve_slope_intercept_dual_with(std: &StdForm, opts: &crate::types::LpOptions
     }
 }
 
+/// 双対単体法の主ループと仕上げの段 ([`polish_with_true_bounds`]) が共有する摂動済み費用。
+///
+/// `super::perturb_costs` の出力のうち、スラック列 (`n_orig..n_total`) だけを真の (0 の) 費用に
+/// 戻す: スラックを摂動すると全スラック基底でも `y = B^-T c_B` が非ゼロになり、`active_cost` の
+/// 符号で置く `crash` が双対実行不能から始まってしまう。摂動しなければ開始時 `y = 0` で crash は
+/// 構成上双対実行可能。polish も同じ費用を使わないと、主ループが最適と判断した基底が polish の
+/// 費用では (スラックの摂動の分だけ) 双対実行不能になりうる。
+fn dual_active_costs(std: &StdForm) -> Vec<f64> {
+    let n_orig = std.n_total - std.n_rows;
+    let mut active_cost = super::perturb_costs(std);
+    for j in n_orig..std.n_total {
+        active_cost[j] = std.c[j];
+    }
+    active_cost
+}
+
 /// [`solve_slope_intercept_dual_with`] の本体。`BIG` は新しい疎経路 (stormG2 報告 §4 の策) を使うか。
 fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate::types::LpOptions, safe_pivot: bool) -> Option<SimplexResult> {
     // 全列数(構造列+スラック列)、行数、構造列数。スラック列は `n_orig..n_total`。
@@ -1973,15 +1989,8 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     let m = std.n_rows;
     let n_orig = n_total - m;
 
-    // コスト摂動(`super::perturb_costs`)を再利用する。`d` の増分維持と `crash` はこの
-    // 摂動済みコストに基づく。
-    let mut active_cost = super::perturb_costs(std);
-    // スラック列は正確な(0 の)コストのまま: スラックを摂動すると全スラック基底でも
-    // `y = B^-T c_B` が非ゼロになり、`active_cost` の符号で置く `crash` が双対実行不能から
-    // 始まってしまう。摂動しなければ開始時 `y = 0` で crash は構成上双対実行可能。
-    for j in n_orig..n_total {
-        active_cost[j] = std.c[j];
-    }
+    // コスト摂動([`dual_active_costs`])。`d` の増分維持と `crash` はこの摂動済みコストに基づく。
+    let mut active_cost = dual_active_costs(std);
 
     // `delta[j]`: 列 `j` の `M` 追跡側([`delta_of`] 参照。現在は S 制限なしで、片側非有界・
     // 自由な構造列をすべてフラグする)。スラック列は常に `MSide::None`。
@@ -4948,8 +4957,11 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
     let mut stall_count = 0usize;
     // Bland 規則(最小添字優先)による巡回防止モードか。
     let mut bland_mode = false;
-    // 摂動済みコスト(`super::perturb_costs`)。この段の双対値 `d` はこれに基づく。
-    let active_cost = super::perturb_costs(std);
+    // 摂動済みコスト。この段の双対値 `d` はこれに基づく。主ループと同じ [`dual_active_costs`]
+    // (スラック列は真の費用) を使い、主ループが最適と判断した基底がこの段の費用でも双対実行
+    // 可能になるようにする (cont1 分析の策5 前半)。`ENOMOTO_POLISH_PERTURB_SLACK=1` で旧動作
+    // (`super::perturb_costs` をそのまま使い、スラック列も摂動する。A/B 用)。
+    let active_cost = if tunable!("ENOMOTO_POLISH_PERTURB_SLACK", 0u8, u8) != 0 { super::perturb_costs(std) } else { dual_active_costs(std) };
 
     let mut lu = lu;
     // 前回の FT 更新チェック/再分解からの反復数。
@@ -4977,6 +4989,21 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
             }
             d[j] = dj;
         }
+    }
+    if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
+        // 開始時の (この段の費用での) 双対実行不能列数。固定列は除く。
+        let n_bad = (0..n_total)
+            .filter(|&j| {
+                std.lb[j] != std.ub[j]
+                    && match nb_status[j] {
+                        None => false,
+                        Some(NbStatus::Lower) => d[j] < -TOL,
+                        Some(NbStatus::Upper) => d[j] > TOL,
+                        Some(NbStatus::Zero) => d[j].abs() > TOL,
+                    }
+            })
+            .count();
+        eprintln!("DEBUG_EXT: polish_start_dual_infeasible_cols={n_bad}");
     }
 
     // 作業バッファ(ループ前に一度だけ確保し毎反復再利用)、行方向 PRICE、`d` の増分更新は
