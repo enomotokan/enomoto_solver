@@ -8810,6 +8810,92 @@ mod tests {
     /// 係数が稠密な基底 (FT 更新後に `DENSE_ETA_FRACTION` を超える) に稠密な入る列で
     /// 複数回 FT 更新し、最終基底の独立な完全再分解と FTRAN/BTRAN/疎 FTRAN で一致する
     /// (eta の密形式を通すため)。
+    /// 密行列の分解 #2: 稠密切替した分解 (密ブロックを密な区間で持つ) に FT 更新を重ねても、
+    /// 更新後の基底を分解し直した結果と FTRAN/BTRAN が一致する (ブロック内・外のスロットを置換)。
+    #[test]
+    fn ft_update_on_dense_block_matches_full_refactor() {
+        let m = 420;
+        let mut st = 12345u64;
+        // 疎な対角優位行列 + 末尾 120 行 x 120 列の密なブロック
+        let mut rows: Vec<Vec<(usize, f64)>> = random_sparse_diag_dominant(m, 7);
+        for i in (m - 120)..m {
+            for j in (m - 120)..m {
+                if i != j {
+                    rows[i].push((j, 0.5 + next_rand(&mut st)));
+                }
+            }
+        }
+        let base = factorize_flat_markowitz_routed(m, &rows, false, 0.3).expect("nonsingular");
+        assert!(base.dense_s0 < m, "dense switch must trigger (s0={})", base.dense_s0);
+        assert!(base.l_col.has_block());
+        let mut state = FtLu::new(base);
+        let mut cur = rows.clone();
+        let mut applied = 0;
+        for k in 0..40 {
+            // 半分はブロック内のスロット
+            let slot = if k % 2 == 0 { m - 120 + (k * 37) % 120 } else { (k * 97) % (m - 120) };
+            // 入る列: 元の列 + 乱数の摂動 (非特異を保つ)
+            let mut a_q = vec![0.0; m];
+            for i in 0..m {
+                for &(c, v) in &cur[i] {
+                    if c == slot {
+                        a_q[i] += v;
+                    }
+                }
+            }
+            for _ in 0..6 {
+                let i = (next_rand(&mut st) * m as f64) as usize % m;
+                a_q[i] += next_rand(&mut st) - 0.5;
+            }
+            if !state.try_update(slot, &a_q, 1e-9) {
+                continue;
+            }
+            applied += 1;
+            for i in 0..m {
+                cur[i].retain(|&(c, _)| c != slot);
+                if a_q[i] != 0.0 {
+                    cur[i].push((slot, a_q[i]));
+                }
+            }
+            if k % 10 == 9 {
+                let full = factorize(m, &cur).expect("updated basis must stay nonsingular");
+                let rhs: Vec<f64> = (0..m).map(|i| 1.0 + (i % 11) as f64 * 0.25).collect();
+                let x_ft = state.solve(&rhs);
+                let x_full = full.solve(&rhs);
+                let err = x_ft.iter().zip(&x_full).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max);
+                assert!(err < 1e-8, "ftran mismatch after {applied} updates: {err}");
+                let y_ft = state.solve_transpose(&rhs);
+                let y_full = full.solve_transpose(&rhs);
+                let err = y_ft.iter().zip(&y_full).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max);
+                assert!(err < 1e-8, "btran mismatch after {applied} updates: {err}");
+                let mut scratch = vec![0.0; m];
+                let mut gp = GpScratch::new(m);
+                let mut out = vec![0.0; m];
+                state.solve_sparse_into(&to_sparse(&rhs), &mut scratch, &mut gp, &mut out);
+                let err = out.iter().zip(&x_full).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max);
+                assert!(err < 1e-8, "sparse ftran mismatch after {applied} updates: {err}");
+                for i in [0usize, m / 2, m - 1] {
+                    let mut e = vec![0.0; m];
+                    e[i] = 1.0;
+                    let y_full = full.solve_transpose(&e);
+                    let mut scratch = vec![0.0; m];
+                    let mut out = vec![0.0; m];
+                    state.solve_transpose_unit(i, &mut scratch, &mut out);
+                    let err = out.iter().zip(&y_full).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max);
+                    assert!(err < 1e-8, "unit btran mismatch (row {i}) after {applied} updates: {err}");
+                    // 大きな問題の主ループの経路 (超疎 BTRAN の作業領域付き)
+                    let mut work = UnitBtranWork::new(m);
+                    let mut out2 = vec![0.0; m];
+                    let mut e_tilde = vec![0.0; m];
+                    state.solve_transpose_unit_work_sparse(i, &mut out2, &mut e_tilde, &mut work, None);
+                    let err = out2.iter().zip(&y_full).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max);
+                    assert!(err < 1e-8, "unit btran (work_sparse) mismatch (row {i}) after {applied} updates: {err}");
+                }
+            }
+        }
+        assert!(applied >= 30, "too many rejected updates ({applied})");
+    }
+
     #[test]
     fn ft_update_matches_full_refactor_on_dense_basis() {
         let m = 10;
