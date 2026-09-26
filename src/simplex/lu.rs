@@ -2626,6 +2626,8 @@ fn factorize_flat_markowitz_routed(m: usize, rows_in: &[Vec<(usize, f64)>], dens
     let debug_eliminate_cost = env_str!("ENOMOTO_DEBUG_ELIMINATE_COST").is_some();
     let mut eliminate_ns: u128 = 0;
     let mut snapshot_ns: u128 = 0;
+    let mut dense_ns: u128 = 0;
+    let mut search_ns: u128 = 0;
 
     // ピボット行のコピー (分解全体で 1 つのバッファを再利用)
     let mut pivot_row_snapshot: Vec<(usize, f64)> = Vec::new();
@@ -2650,6 +2652,7 @@ fn factorize_flat_markowitz_routed(m: usize, rows_in: &[Vec<(usize, f64)>], dens
             // 活性部分行列の非ゼロ数
             let active: usize = if (state.mat.row_idx.len() as f64) < need { 0 } else { (0..m).filter(|&i| !state.row_used[i]).map(|i| state.mat.row_len[i]).sum() };
             if active > 0 && active as f64 >= need {
+                let dense_t0 = if debug_eliminate_cost { Some(std::time::Instant::now()) } else { None };
                 // 残りの行・列 (元の番号)
                 let rows_r: Vec<usize> = (0..m).filter(|&i| !state.row_used[i]).collect();
                 let cols_c: Vec<usize> = (0..m).filter(|&j| !state.col_used[j]).collect();
@@ -2679,12 +2682,16 @@ fn factorize_flat_markowitz_routed(m: usize, rows_in: &[Vec<(usize, f64)>], dens
                 PROF_DENSE_SWITCH.fetch_add(1, Ordering::Relaxed);
                 PROF_DENSE_SWITCH_ROWS.fetch_add(k, Ordering::Relaxed);
                 switched_at = step;
+                if let Some(t0) = dense_t0 {
+                    dense_ns += t0.elapsed().as_nanos();
+                }
                 break;
             }
         }
         // 稠密でないピボット列があれば Markowitz 数に関係なくそれを優先し、
         // 残りがすべて `initially_dense` のときだけ制限なしで探す
         // (真に特異なら後者が `None` を返す)。
+        let search_t0 = if debug_eliminate_cost { Some(std::time::Instant::now()) } else { None };
         let (pi, pj) = match state.find_best_pivot(true) {
             Some(p) => p,
             None => {
@@ -2692,6 +2699,9 @@ fn factorize_flat_markowitz_routed(m: usize, rows_in: &[Vec<(usize, f64)>], dens
                 state.find_best_pivot(false)?
             }
         };
+        if let Some(t0) = search_t0 {
+            search_ns += t0.elapsed().as_nanos();
+        }
 
         state.row_used[pi] = true;
         state.col_used[pj] = true;
@@ -2725,9 +2735,11 @@ fn factorize_flat_markowitz_routed(m: usize, rows_in: &[Vec<(usize, f64)>], dens
     }
     if debug_eliminate_cost {
         eprintln!(
-            "ELIMINATE_COST m={m} eliminate_ms={:.3} snapshot_ms={:.3} l_nnz={} u_nnz={} avg_row_fill={:.1}",
+            "ELIMINATE_COST m={m} eliminate_ms={:.3} snapshot_ms={:.3} search_ms={:.3} dense_ms={:.3} switched_at={switched_at} l_nnz={} u_nnz={} avg_row_fill={:.1}",
             eliminate_ns as f64 / 1e6,
             snapshot_ns as f64 / 1e6,
+            search_ns as f64 / 1e6,
+            dense_ns as f64 / 1e6,
             l_entries.len(),
             u_entries.len(),
             u_entries.len() as f64 / m as f64,
@@ -7149,6 +7161,61 @@ mod tests {
     /// ダンプされた全入力を `ENOMOTO_LU_BENCH_CONFIGS` (`;` 区切り、各々 `,` 区切りの
     /// `KEY=VAL`) の各設定で分解し、`ENOMOTO_LU_BENCH_REPS` 回交互に回して設定ごとの
     /// 最小合計時間を出し、因子が最初の設定とビット一致することを確認する。
+    /// 密行列の分解 #2 の計測用: `ENOMOTO_LU_BENCH_FILE` の `ENOMOTO_LU_BENCH_PICK` 番目の基底を
+    /// 稠密切替 (`ENOMOTO_LU_DENSE_SWITCH`、既定 0.3) で分解し、分解・`FtLu::new`・FTRAN/BTRAN の時間を出す。
+    #[test]
+    #[ignore]
+    fn dense_block_bench() {
+        let Some(path) = std::env::var_os("ENOMOTO_LU_BENCH_FILE") else { return };
+        let pick: usize = std::env::var("ENOMOTO_LU_BENCH_PICK").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+        let data = std::fs::read(path).expect("read dump");
+        let words: Vec<u64> = data.chunks_exact(8).map(|c| u64::from_le_bytes(c.try_into().unwrap())).collect();
+        let mut pos = 0usize;
+        let mut idx = 0usize;
+        let (m, rows) = loop {
+            let m = words[pos] as usize;
+            pos += 1;
+            let mut rows = Vec::with_capacity(m);
+            for _ in 0..m {
+                let len = words[pos] as usize;
+                pos += 1;
+                let r: Vec<(usize, f64)> = (0..len).map(|t| (words[pos + 2 * t] as usize, f64::from_bits(words[pos + 2 * t + 1]))).collect();
+                pos += 2 * len;
+                rows.push(r);
+            }
+            if idx == pick || pos >= words.len() {
+                break (m, rows);
+            }
+            idx += 1;
+        };
+        let sw: f64 = std::env::var("ENOMOTO_LU_DENSE_SWITCH").ok().and_then(|v| v.parse().ok()).unwrap_or(0.3);
+        for rep in 0..3 {
+            let t0 = std::time::Instant::now();
+            let lu = factorize_flat_markowitz_routed(m, &rows, false, sw).expect("nonsingular");
+            let t1 = std::time::Instant::now();
+            let ft = FtLu::new(lu);
+            let t2 = std::time::Instant::now();
+            let rhs: Vec<f64> = (0..m).map(|i| 1.0 + (i % 7) as f64).collect();
+            let mut scratch = vec![0.0; m];
+            let mut out = vec![0.0; m];
+            ft.solve_into(&rhs, &mut scratch, &mut out);
+            let t3 = std::time::Instant::now();
+            let mut out2 = vec![0.0; m];
+            ft.solve_transpose_into(&rhs, &mut scratch, &mut out2);
+            let t4 = std::time::Instant::now();
+            eprintln!(
+                "rep {rep}: m={m} s0={} factor={:.1}ms ftlu_new={:.1}ms ftran={:.2}ms btran={:.2}ms nnz(L)={} lu_nnz={}",
+                ft.base.dense_s0,
+                (t1 - t0).as_secs_f64() * 1e3,
+                (t2 - t1).as_secs_f64() * 1e3,
+                (t3 - t2).as_secs_f64() * 1e3,
+                (t4 - t3).as_secs_f64() * 1e3,
+                ft.base.l_col.nnz(),
+                ft.lu_nnz
+            );
+        }
+    }
+
     #[test]
     #[ignore]
     fn lu_kernel_bench() {
