@@ -529,6 +529,25 @@ pub(crate) mod lu {
     /// 達したら残りを稠密分解に切り替える。既定 `0.0` = 無効 (経路が変わるため)。
     pub(crate) const DENSE_SWITCH_FRACTION: f64 = 0.0;
 
+    /// nug08 報告 #3: 稠密切替を自動で有効にする行数の下限 (`ENOMOTO_T_LU_DENSE_SWITCH_AUTO_MIN_M`、
+    /// 0 で自動切替なし)。他の「大きな問題」向けの経路 (`XB_CHECK_CADENCE_LARGE_M` など) と同じ 1 万行。
+    /// Netlib (m ≤ 約 6K) には掛からない。
+    pub(crate) const DENSE_SWITCH_AUTO_MIN_M: usize = 10_000;
+
+    /// nug08 報告 #3: 直前の通常分解の `nnz(L+U)` がこの値 `* m` 以上なら稠密切替を自動で有効にする
+    /// (`ENOMOTO_T_LU_DENSE_SWITCH_AUTO_LU_PER_ROW`)。根拠: Markowitz 消去の手間は活性部分行列の
+    /// 行・列の長さの積で増え、LU が 1 行あたり数十要素まで膨らんだ基底では消去の終盤の活性部分が
+    /// ほぼ密になって、疎な探索 (`find_best_pivot` の走査・`col_max_abs` の再計算) が稠密 LU より
+    /// 桁違いに高くつく。LP 基底の LU は通常 1 行あたり数要素 (stormG2・pds-100 は 2〜4、cont1 は 12)
+    /// なので、32 は「疎な LU」の典型値より一桁大きい。nug08-3rd は 2 万反復以降 33〜84/行。
+    pub(crate) const DENSE_SWITCH_AUTO_LU_PER_ROW: usize = 32;
+
+    /// nug08 報告 #3: 自動で有効にしたときの稠密切替の閾値 (活性非ゼロ数 / `k^2`、
+    /// `ENOMOTO_T_LU_DENSE_SWITCH_AUTO`)。nug08-3rd の 30K 反復固定の実験で 0.15 は fill が増えすぎ
+    /// (−15%)、0.3〜0.5 が同程度 (−23〜25%)。稠密化した残りブロックは密度 0.3 で既に
+    /// 1 要素あたりの疎な更新 (添字・値の間接参照) が稠密な BLAS 更新の数倍かかる領域なので 0.3 を採る。
+    pub(crate) const DENSE_SWITCH_AUTO_FRACTION: f64 = 0.3;
+
     /// B3: 稠密切替を検討する残り行数の下限 (`ENOMOTO_LU_DENSE_SWITCH_MIN`)。
     pub(crate) const DENSE_SWITCH_MIN_ROWS: usize = 64;
 

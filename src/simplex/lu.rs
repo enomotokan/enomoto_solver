@@ -22,13 +22,146 @@
 //!
 //! 開発経緯は `docs/improvement_history.md` を参照。
 
-use crate::sparse::{CscBuilder, CscMat, CsrMat, EpochMarks};
+use crate::sparse::EpochMarks;
 use std::cell::Cell;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
-use crate::params::lu::{BORDER_MAX_COUNT, BORDER_MAX_FRACTION, BTRAN_HYPER_FRACTION, BTRAN_L_SCATTER_FRACTION, BUCKET_POOL_MAX, DENSE_COL_FRACTION, DENSE_ETA_FRACTION, DENSE_INPUT_FRACTION, DENSE_RHS_FRACTION, DENSE_SWITCH_CHECK_INTERVAL, DENSE_SWITCH_FRACTION, DENSE_SWITCH_MIN_ROWS, DENSITY_AVERAGE_MULTIPLIER, EXPECTED_DENSE_FRACTION, KERNEL_LINEAR_SCAN_MAX, KERNEL_MIN_RUN_CAP, KERNEL_RESERVE_EXTRA, KERNEL_RESERVE_MULT, PIVOT_ROW_SEARCH_MAX_DEGREE, PIVOT_SEARCH_LIMIT, PIVOT_THRESHOLD_FACTOR, PIVOT_THRESHOLD_MAX, PIVOT_THRESHOLD_MIN, R_SPARSE_MIN_ETAS, REBUILD_FILL_LIMIT, SPARSE_PATH_MIN_M, REBUILD_MIN_PIVOT, REUSE_BACKOFF_SHIFT_CAP, REUSE_MAX_BACKOFF, STABILITY, TAU_GP_FRACTION, TICK_BUILD_FLOP_COEF, TICK_BUILD_LU_COEF, TICK_BUILD_M_COEF, TICK_SOLVE_NNZ_COEF, TINY_DROP, U_HYPER_ABORT_FRACTION};
+use crate::params::lu::{BORDER_MAX_COUNT, BORDER_MAX_FRACTION, BTRAN_HYPER_FRACTION, BTRAN_L_SCATTER_FRACTION, BUCKET_POOL_MAX, DENSE_COL_FRACTION, DENSE_ETA_FRACTION, DENSE_INPUT_FRACTION, DENSE_RHS_FRACTION, DENSE_SWITCH_AUTO_FRACTION, DENSE_SWITCH_AUTO_LU_PER_ROW, DENSE_SWITCH_AUTO_MIN_M, DENSE_SWITCH_CHECK_INTERVAL, DENSE_SWITCH_FRACTION, DENSE_SWITCH_MIN_ROWS, DENSITY_AVERAGE_MULTIPLIER, EXPECTED_DENSE_FRACTION, KERNEL_LINEAR_SCAN_MAX, KERNEL_MIN_RUN_CAP, KERNEL_RESERVE_EXTRA, KERNEL_RESERVE_MULT, PIVOT_ROW_SEARCH_MAX_DEGREE, PIVOT_SEARCH_LIMIT, PIVOT_THRESHOLD_FACTOR, PIVOT_THRESHOLD_MAX, PIVOT_THRESHOLD_MIN, R_SPARSE_MIN_ETAS, REBUILD_FILL_LIMIT, SPARSE_PATH_MIN_M, REBUILD_MIN_PIVOT, REUSE_BACKOFF_SHIFT_CAP, REUSE_MAX_BACKOFF, STABILITY, TAU_GP_FRACTION, TICK_BUILD_FLOP_COEF, TICK_BUILD_LU_COEF, TICK_BUILD_M_COEF, TICK_SOLVE_NNZ_COEF, TINY_DROP, U_HYPER_ABORT_FRACTION};
+
+/// `L` の列 (および行優先ミラー) の圧縮格納 (密行列の分解の調査 #3)。添字 `u32` と値 `f64` を
+/// 別配列に持つ (1 要素 12 B。旧 [`CscMat`] は `(usize, f64)` の 16 B)。FTRAN/BTRAN の `L` 段は
+/// `nnz(L)` に比例する帯域律速の走査なので、同じ演算順序のまま読む量を 3/4 にする (ビット一致)。
+#[derive(Clone, Default)]
+pub struct LPack {
+    /// 外側 (列または行) `i` の要素は `idx/val[start[i]..start[i + 1]]`。
+    start: Vec<usize>,
+    /// 要素の内側添字 (行ステップまたは列ステップ)。
+    idx: Vec<u32>,
+    /// 要素の値。
+    val: Vec<f64>,
+}
+
+/// [`LPack::seg`] が返す 1 本分の要素 (添字と値のスライス)。
+#[derive(Clone, Copy)]
+pub struct LSeg<'a> {
+    idx: &'a [u32],
+    val: &'a [f64],
+}
+
+impl<'a> LSeg<'a> {
+    /// 要素数。
+    #[inline(always)]
+    pub fn len(&self) -> usize {
+        self.idx.len()
+    }
+    /// 要素がないか。
+    #[inline(always)]
+    pub fn is_empty(&self) -> bool {
+        self.idx.is_empty()
+    }
+    /// `(添字, 値)` の組の `Vec` (テスト用)。
+    #[allow(dead_code)]
+    pub fn to_vec(&self) -> Vec<(usize, f64)> {
+        self.into_iter().collect()
+    }
+}
+
+impl<'a> IntoIterator for LSeg<'a> {
+    type Item = (usize, f64);
+    type IntoIter = std::iter::Map<std::iter::Zip<std::slice::Iter<'a, u32>, std::slice::Iter<'a, f64>>, fn((&'a u32, &'a f64)) -> (usize, f64)>;
+    #[inline(always)]
+    fn into_iter(self) -> Self::IntoIter {
+        fn pair<'b>((i, v): (&'b u32, &'b f64)) -> (usize, f64) {
+            (*i as usize, *v)
+        }
+        self.idx.iter().zip(self.val.iter()).map(pair as fn((&'a u32, &'a f64)) -> (usize, f64))
+    }
+}
+
+impl LPack {
+    /// 外側 `n` 本の空の格納。
+    pub fn empty(n: usize) -> Self {
+        LPack { start: vec![0; n + 1], idx: Vec::new(), val: Vec::new() }
+    }
+    /// 外側 `i` の要素。
+    #[inline(always)]
+    pub fn seg(&self, i: usize) -> LSeg<'_> {
+        let (s, e) = (self.start[i], self.start[i + 1]);
+        LSeg { idx: &self.idx[s..e], val: &self.val[s..e] }
+    }
+    /// 全要素数。
+    #[inline]
+    pub fn nnz(&self) -> usize {
+        self.idx.len()
+    }
+    /// 外側の本数。
+    #[inline]
+    pub fn n_outer(&self) -> usize {
+        self.start.len() - 1
+    }
+    /// 転置 (内側の次数 `n_inner`、計数ソート。各外側の要素は元の外側番号の昇順)。
+    pub fn transposed(&self, n_inner: usize) -> LPack {
+        let mut count = vec![0usize; n_inner + 1];
+        for &i in &self.idx {
+            count[i as usize + 1] += 1;
+        }
+        for i in 0..n_inner {
+            count[i + 1] += count[i];
+        }
+        let start = count.clone();
+        let nnz = self.idx.len();
+        let mut idx = vec![0u32; nnz];
+        let mut val = vec![0.0f64; nnz];
+        let mut cursor = count;
+        for o in 0..self.n_outer() {
+            for p in self.start[o]..self.start[o + 1] {
+                let i = self.idx[p] as usize;
+                let c = cursor[i];
+                idx[c] = o as u32;
+                val[c] = self.val[p];
+                cursor[i] += 1;
+            }
+        }
+        LPack { start, idx, val }
+    }
+    /// 全外側を `Vec<Vec<_>>` にする (テスト用)。
+    #[allow(dead_code)]
+    pub fn to_cols(&self) -> Vec<Vec<(usize, f64)>> {
+        (0..self.n_outer()).map(|i| self.seg(i).to_vec()).collect()
+    }
+}
+
+/// 外側を昇順に 1 本ずつ出力して [`LPack`] を組み立てる ([`CscBuilder`] と同じ使い方)。
+pub struct LPackBuilder {
+    pack: LPack,
+}
+
+impl LPackBuilder {
+    /// 外側 `n` 本・要素 `nnz` 個分の領域を予約する。
+    pub fn with_capacity(n: usize, nnz: usize) -> Self {
+        let mut start = Vec::with_capacity(n + 1);
+        start.push(0);
+        LPackBuilder { pack: LPack { start, idx: Vec::with_capacity(nnz), val: Vec::with_capacity(nnz) } }
+    }
+    /// 構築中の外側に要素を 1 つ追加する。
+    #[inline]
+    pub fn push(&mut self, i: usize, v: f64) {
+        debug_assert!(i <= u32::MAX as usize);
+        self.pack.idx.push(i as u32);
+        self.pack.val.push(v);
+    }
+    /// 現在の外側を閉じる (空でも外側ごとに 1 回)。
+    #[inline]
+    pub fn end_column(&mut self) {
+        self.pack.start.push(self.pack.idx.len());
+    }
+    /// 完成させる。
+    pub fn build(self) -> LPack {
+        self.pack
+    }
+}
 
 thread_local! {
     /// このスレッドで現在実行中の求解に適用されるピボット閾値。
@@ -1399,6 +1532,90 @@ enum UHyper {
     Full,
 }
 
+/// `U` の行ミラー (`FtLu::row_owners`) の格納 (密行列の分解の調査 #3)。行ごとの `Vec<(usize, f64)>`
+/// (16 B/要素、行ごとのヒープ確保) をやめ、全行で共有するプールに添字 `u32` と値 `f64` を別配列で置く
+/// (12 B/要素)。行 `r` は `idx/val[start[r]..start[r] + len[r]]`、容量 `cap[r]`。容量を超える追加は
+/// その行をプール末尾へ倍の容量で移す (旧領域は再分解まで放置)。追加は末尾、削除は `swap_remove`
+/// なので、行内の要素の並びは旧 `Vec` 版と同じ (演算順序もビット一致)。
+#[derive(Clone, Default)]
+struct RowOwners {
+    start: Vec<usize>,
+    len: Vec<u32>,
+    cap: Vec<u32>,
+    idx: Vec<u32>,
+    val: Vec<f64>,
+}
+
+impl RowOwners {
+    /// 行ごとの要素数 `count` で容量を確保した空の索引。
+    fn with_counts(count: &[usize]) -> Self {
+        let m = count.len();
+        let mut start = Vec::with_capacity(m);
+        let mut total = 0usize;
+        for &c in count {
+            start.push(total);
+            total += c;
+        }
+        RowOwners { start, len: vec![0; m], cap: count.iter().map(|&c| c as u32).collect(), idx: vec![0; total], val: vec![0.0; total] }
+    }
+
+    /// 行 `r` の `(スロット, 値)`。
+    #[inline(always)]
+    fn row(&self, r: usize) -> (&[u32], &[f64]) {
+        let s = self.start[r];
+        let e = s + self.len[r] as usize;
+        (&self.idx[s..e], &self.val[s..e])
+    }
+
+    /// 行 `r` の要素数。
+    #[inline(always)]
+    fn row_len(&self, r: usize) -> usize {
+        self.len[r] as usize
+    }
+
+    /// 行 `r` の末尾に `(slot, v)` を追加する。
+    #[inline]
+    fn push(&mut self, r: usize, slot: usize, v: f64) {
+        let l = self.len[r] as usize;
+        if l == self.cap[r] as usize {
+            let new_cap = (2 * l).max(4);
+            let new_start = self.idx.len();
+            let old = self.start[r];
+            self.idx.resize(new_start + new_cap, 0);
+            self.val.resize(new_start + new_cap, 0.0);
+            self.idx.copy_within(old..old + l, new_start);
+            self.val.copy_within(old..old + l, new_start);
+            self.start[r] = new_start;
+            self.cap[r] = new_cap as u32;
+        }
+        let at = self.start[r] + l;
+        self.idx[at] = slot as u32;
+        self.val[at] = v;
+        self.len[r] += 1;
+    }
+
+    /// 行 `r` からスロット `slot` の要素を `swap_remove` で除く (無ければ何もしない)。
+    #[inline]
+    fn remove_slot(&mut self, r: usize, slot: usize) {
+        let s = self.start[r];
+        let l = self.len[r] as usize;
+        if let Some(pos) = self.idx[s..s + l].iter().position(|&q| q as usize == slot) {
+            self.idx[s + pos] = self.idx[s + l - 1];
+            self.val[s + pos] = self.val[s + l - 1];
+            self.len[r] -= 1;
+        }
+    }
+
+    /// 行 `r` のスロットを `out` に写して行を空にする (`std::mem::take` 相当)。
+    #[inline]
+    fn take_slots(&mut self, r: usize, out: &mut Vec<u32>) {
+        let s = self.start[r];
+        out.clear();
+        out.extend_from_slice(&self.idx[s..s + self.len[r] as usize]);
+        self.len[r] = 0;
+    }
+}
+
 /// 1 回の分解結果 `P_row B P_col = L U` (更新前の素の因子)。
 /// すべて消去ステップ番号の空間で格納される。
 #[derive(Clone)]
@@ -1409,7 +1626,7 @@ pub struct LuFactors {
     /// 分解後は不変で FTRAN/BTRAN の `L` 段で毎回読むため、フラットな
     /// [`crate::sparse::CscMat`] に [`crate::sparse::CscBuilder`] で直接追記して作る
     /// (各分解は `L` の列をステップ昇順に出力するので中間 `Vec<Vec>` もコピーも不要)。
-    pub l_col: crate::sparse::CscMat,
+    pub l_col: LPack,
     /// `u_row[s]`: `U` の行 `s` の要素 `(col_step, 値)` (`col_step >= s`、
     /// 対角 `col_step == s` を含む)。`FtLu::new` が `u_seq` を作るときに
     /// 1 回読むだけなので `Vec<Vec>` のまま。
@@ -1418,7 +1635,7 @@ pub struct LuFactors {
     /// `l_row.row(r)` は `L` の行 `r` の非ゼロ `(s, 乗数)` (すべて `s < r`)。
     /// BTRAN の `L^{-T}` をスキャッタ形式で解き、`w[s] == 0.0` のステップを
     /// 丸ごと飛ばすために使う。[`CscMat::to_csr`] の計数ソートで構築。
-    pub l_row: CsrMat,
+    pub l_row: LPack,
     /// `row_perm[s]` = ステップ `s` のピボット行 (元の行番号)。
     pub row_perm: Vec<usize>,
     /// `col_perm[s]` = ステップ `s` のピボット列 (元の基底スロット番号)。
@@ -1477,7 +1694,7 @@ fn factorize_dense_faer(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuFac
         col_perm_inv[col_perm[step]] = step;
     }
 
-    let mut l_build = CscBuilder::new(m);
+    let mut l_build = LPackBuilder::with_capacity(m, 0);
     for step in 0..m {
         for row_step in (step + 1)..m {
             let v = l[(row_step, step)];
@@ -1559,7 +1776,7 @@ pub fn factorize_diagonal(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuF
     let u_row: Vec<Vec<(usize, f64)>> = rows_in.iter().enumerate().map(|(i, row)| vec![(i, row[0].1)]).collect();
     let identity: Vec<usize> = (0..m).collect();
     // `L` は単位行列: `m` 列すべて空。
-    let l_col = CscMat::empty(m, m);
+    let l_col = LPack::empty(m);
     let l_row = build_l_row(&l_col, m);
     Some(LuFactors {
         m,
@@ -1649,7 +1866,7 @@ pub fn factorize_reusing(m: usize, rows_in: &[Vec<(usize, f64)>], prev: Option<&
     }
     // 再利用が棄却されたかバックオフ中。通常の Markowitz 分解を行い、
     // その fill が新しい基準になる (`FtLu::new` が設定)。
-    let mut ft = FtLu::new(factorize_routed(m, rows_in, &border, dense)?);
+    let mut ft = FtLu::new(factorize_routed(m, rows_in, &border, dense, dense_switch_for(m, prev))?);
     PROF_FULL_NNZ.fetch_add(ft.fill_baseline, Ordering::Relaxed);
     PROF_FULL_COUNT.fetch_add(1, Ordering::Relaxed);
     if eligible {
@@ -1906,7 +2123,7 @@ fn factorize_reusing_order(
     for (s, &j) in pivot_col.iter().enumerate() {
         col_perm_inv[j] = s;
     }
-    let mut l_build = CscBuilder::with_capacity(m, m, l_entries.len());
+    let mut l_build = LPackBuilder::with_capacity(m, l_entries.len());
     for s in 0..m {
         for idx in l_offsets[s]..l_offsets[s + 1] {
             let (r, mult) = l_entries[idx];
@@ -1915,7 +2132,7 @@ fn factorize_reusing_order(
         l_build.end_column();
     }
     let l_col = l_build.build();
-    let l_row = l_col.to_csr();
+    let l_row = l_col.transposed(m);
 
     Some(LuFactors {
         m,
@@ -1935,12 +2152,12 @@ fn factorize_reusing_order(
 /// それ以外は Markowitz 消去に振り分ける。
 pub fn factorize(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuFactors> {
     let border = detect_border_columns(m, rows_in);
-    factorize_routed(m, rows_in, &border, is_dense_input(m, rows_in))
+    factorize_routed(m, rows_in, &border, is_dense_input(m, rows_in), explicit_dense_switch())
 }
 
 /// [`factorize`] の本体。振り分けに使う [`detect_border_columns`] の結果
 /// (`border`) と [`is_dense_input`] の結果 (`dense`) を呼び出し側が計算済みで渡す。
-fn factorize_routed(m: usize, rows_in: &[Vec<(usize, f64)>], border: &[usize], dense: bool) -> Option<LuFactors> {
+fn factorize_routed(m: usize, rows_in: &[Vec<(usize, f64)>], border: &[usize], dense: bool, dense_switch: f64) -> Option<LuFactors> {
     if env_str!("ENOMOTO_DEBUG_BLOCK_SIZES").is_some() {
         debug_print_block_sizes(m, rows_in);
     }
@@ -1952,7 +2169,7 @@ fn factorize_routed(m: usize, rows_in: &[Vec<(usize, f64)>], border: &[usize], d
             return Some(lu);
         }
     }
-    factorize_flat_markowitz_routed(m, rows_in, dense)
+    factorize_flat_markowitz_routed(m, rows_in, dense, dense_switch)
 }
 
 /// 解析専用: 分解の入力 1 件を `<dir>/lu_dump.bin` に追記する (`m`、続いて
@@ -1978,7 +2195,31 @@ fn dump_lu_input(dir: &std::path::Path, m: usize, rows_in: &[Vec<(usize, f64)>])
 /// 稠密判定を自分で行う [`factorize_flat_markowitz_routed`] (境界付き経路を通らない)。
 #[cfg_attr(not(test), allow(dead_code))]
 fn factorize_flat_markowitz(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuFactors> {
-    factorize_flat_markowitz_routed(m, rows_in, is_dense_input(m, rows_in))
+    factorize_flat_markowitz_routed(m, rows_in, is_dense_input(m, rows_in), explicit_dense_switch())
+}
+
+/// `ENOMOTO_LU_DENSE_SWITCH` で明示された稠密切替の閾値 (未設定なら [`DENSE_SWITCH_FRACTION`] = 0 = off)。
+fn explicit_dense_switch() -> f64 {
+    tunable!("ENOMOTO_LU_DENSE_SWITCH", DENSE_SWITCH_FRACTION, f64)
+}
+
+/// nug08 報告 #3: [`factorize_reusing`] の通常分解で使う稠密切替の閾値。
+/// `ENOMOTO_LU_DENSE_SWITCH` が設定されていればその値 (全分解で有効)。未設定なら、行数が
+/// [`DENSE_SWITCH_AUTO_MIN_M`] 以上で、直前の通常分解の `nnz(L+U)` が
+/// [`DENSE_SWITCH_AUTO_LU_PER_ROW`] `* m` 以上 (= LU が 1 行あたり数十要素まで密になった基底)
+/// のときだけ [`DENSE_SWITCH_AUTO_FRACTION`] を使う。それ以外は 0 (off) で経路は従来どおり。
+/// 疎な LU の問題 (Netlib 全問、stormG2・pds-100・cont1 など) はこの条件を満たさない。
+fn dense_switch_for(m: usize, prev: &FtLu) -> f64 {
+    if env_str!("ENOMOTO_LU_DENSE_SWITCH").is_some() {
+        return explicit_dense_switch();
+    }
+    let min_m = tunable!("ENOMOTO_T_LU_DENSE_SWITCH_AUTO_MIN_M", DENSE_SWITCH_AUTO_MIN_M, usize);
+    let per_row = tunable!("ENOMOTO_T_LU_DENSE_SWITCH_AUTO_LU_PER_ROW", DENSE_SWITCH_AUTO_LU_PER_ROW, usize);
+    if min_m != 0 && m >= min_m && prev.fill_baseline >= per_row.saturating_mul(m) {
+        tunable!("ENOMOTO_T_LU_DENSE_SWITCH_AUTO", DENSE_SWITCH_AUTO_FRACTION, f64)
+    } else {
+        0.0
+    }
 }
 
 /// B3 診断: 残りを稠密分解に切り替えた分解の回数。
@@ -1989,7 +2230,7 @@ pub(crate) static PROF_DENSE_SWITCH_ROWS: AtomicUsize = AtomicUsize::new(0);
 /// Markowitz 消去による分解本体 (`dense` なら [`factorize_dense_faer`] に回す)。
 /// 各ステップで稠密でないピボット列を優先し、無ければ制限なしで探す。
 /// ピボットが見つからなければ `None` (特異)。
-fn factorize_flat_markowitz_routed(m: usize, rows_in: &[Vec<(usize, f64)>], dense: bool) -> Option<LuFactors> {
+fn factorize_flat_markowitz_routed(m: usize, rows_in: &[Vec<(usize, f64)>], dense: bool, dense_switch: f64) -> Option<LuFactors> {
     if dense {
         return factorize_dense_faer(m, rows_in);
     }
@@ -2012,21 +2253,25 @@ fn factorize_flat_markowitz_routed(m: usize, rows_in: &[Vec<(usize, f64)>], dens
 
     // ピボット行のコピー (分解全体で 1 つのバッファを再利用)
     let mut pivot_row_snapshot: Vec<(usize, f64)> = Vec::new();
-    // B3 (`ENOMOTO_LU_DENSE_SWITCH`、既定 `0` = off、経路が変わる): 活性部分行列の
-    // 密度が `k^2` のこの割合に達したら (`k` = 残り行数、`ENOMOTO_LU_DENSE_SWITCH_MIN`
-    // 以上)、残りの `k x k` ブロックを稠密分解する。
-    let dense_switch = tunable!("ENOMOTO_LU_DENSE_SWITCH", DENSE_SWITCH_FRACTION, f64);
+    // B3 (`ENOMOTO_LU_DENSE_SWITCH`、経路が変わる): 活性部分行列の密度が `k^2` のこの割合に
+    // 達したら (`k` = 残り行数、`ENOMOTO_LU_DENSE_SWITCH_MIN` 以上)、残りの `k x k` ブロックを
+    // 稠密分解する。閾値は呼び出し側が決める (`dense_switch_for`、既定は LU が密な大きい基底だけ)。
     let dense_switch_min = tunable!("ENOMOTO_LU_DENSE_SWITCH_MIN", DENSE_SWITCH_MIN_ROWS, usize);
-    // 先頭の列シングルトンをまとめて採る (経路は下のループと同一)。B3 が有効なら
-    // ステップ 0 の密度判定を先に行う必要があるので使わない。
-    let peeled = if dense_switch > 0.0 { 0 } else { state.peel_column_singletons(&mut row_perm, &mut col_perm, &mut u_entries) };
+    // 先頭の列シングルトンをまとめて採る (経路は下のループと同一)。列シングルトンは消去を
+    // 伴わず活性部分行列を密にしないので、密度判定はその後から始めてよい (nug08 報告 #3:
+    // 旧版は B3 有効時に前処理ごと止めていたので、切替の有無にかかわらず経路が変わっていた)。
+    let peeled = state.peel_column_singletons(&mut row_perm, &mut col_perm, &mut u_entries);
     for step in peeled..m {
         if dense_switch > 0.0 && step % DENSE_SWITCH_CHECK_INTERVAL == 0 && m - step >= dense_switch_min {
             // 残りの行数
             let k = m - step;
+            // 閾値となる非ゼロ数
+            let need = dense_switch * (k as f64) * (k as f64);
+            // 行バッファの長さ (死領域を含む) は活性非ゼロ数の上界。これが届かないうちは
+            // `O(m)` の数え上げを省く (大きな `m` で 16 ステップごとの全行走査を避ける)。
             // 活性部分行列の非ゼロ数
-            let active: usize = (0..m).filter(|&i| !state.row_used[i]).map(|i| state.mat.row_len[i]).sum();
-            if active as f64 >= dense_switch * (k as f64) * (k as f64) {
+            let active: usize = if (state.mat.row_idx.len() as f64) < need { 0 } else { (0..m).filter(|&i| !state.row_used[i]).map(|i| state.mat.row_len[i]).sum() };
+            if active > 0 && active as f64 >= need {
                 // 残りの行・列 (元の番号)
                 let rows_r: Vec<usize> = (0..m).filter(|&i| !state.row_used[i]).collect();
                 let cols_c: Vec<usize> = (0..m).filter(|&j| !state.col_used[j]).collect();
@@ -2049,7 +2294,7 @@ fn factorize_flat_markowitz_routed(m: usize, rows_in: &[Vec<(usize, f64)>], dens
                     for &(cs, val) in &dlu.u_row[s] {
                         u_entries.push((step + s, cols_c[cs], val));
                     }
-                    for &(rs, mult) in dlu.l_col.col(s) {
+                    for (rs, mult) in dlu.l_col.seg(s) {
                         l_entries.push((rows_r[dlu.row_perm[rs]], step + s, mult));
                     }
                 }
@@ -2120,7 +2365,7 @@ fn factorize_flat_markowitz_routed(m: usize, rows_in: &[Vec<(usize, f64)>], dens
     // `l_entries` はピボットステップ昇順にまとまっているので、最終の圧縮
     // バッファへ直接追記できる。
     debug_assert!(l_entries.windows(2).all(|w| w[0].1 <= w[1].1), "L entries must be grouped by ascending pivot step");
-    let mut l_build = CscBuilder::with_capacity(m, m, l_entries.len());
+    let mut l_build = LPackBuilder::with_capacity(m, l_entries.len());
     let mut next = 0usize;
     for step in 0..m {
         while next < l_entries.len() && l_entries[next].1 == step {
@@ -2347,7 +2592,7 @@ fn factorize_bordered(m: usize, rows_in: &[Vec<(usize, f64)>], border: &[usize])
     // `l_entries` はステップ `0..n_sparse` を昇順に、境界ブロックの列は
     // `n_sparse..m` を昇順に続けるので、`L` 全体を列順のまま圧縮バッファへ直接書ける。
     debug_assert!(l_entries.windows(2).all(|w| w[0].1 <= w[1].1), "L entries must be grouped by ascending pivot step");
-    let mut l_build = CscBuilder::with_capacity(m, m, l_entries.len() + border_lu.l_col.nnz());
+    let mut l_build = LPackBuilder::with_capacity(m, l_entries.len() + border_lu.l_col.nnz());
     let mut next = 0usize;
     for step in 0..n_sparse {
         while next < l_entries.len() && l_entries[next].1 == step {
@@ -2358,7 +2603,7 @@ fn factorize_bordered(m: usize, rows_in: &[Vec<(usize, f64)>], border: &[usize])
         l_build.end_column();
     }
     for s in 0..k {
-        for &(row_step, mult) in border_lu.l_col.col(s) {
+        for (row_step, mult) in border_lu.l_col.seg(s) {
             l_build.push(n_sparse + row_step, mult);
         }
         l_build.end_column();
@@ -2409,18 +2654,18 @@ impl LuFactors {
             match (xa != 0.0, xb != 0.0) {
                 (false, false) => {}
                 (true, true) => {
-                    for &(row_step, mult) in self.l_col.col(s) {
+                    for (row_step, mult) in self.l_col.seg(s) {
                         za[row_step] -= mult * xa;
                         zb[row_step] -= mult * xb;
                     }
                 }
                 (true, false) => {
-                    for &(row_step, mult) in self.l_col.col(s) {
+                    for (row_step, mult) in self.l_col.seg(s) {
                         za[row_step] -= mult * xa;
                     }
                 }
                 (false, true) => {
-                    for &(row_step, mult) in self.l_col.col(s) {
+                    for (row_step, mult) in self.l_col.seg(s) {
                         zb[row_step] -= mult * xb;
                     }
                 }
@@ -2447,7 +2692,7 @@ impl LuFactors {
             let xb = zb[s];
             let xc = zc[s];
             if xa != 0.0 && xb != 0.0 && xc != 0.0 {
-                for &(row_step, mult) in self.l_col.col(s) {
+                for (row_step, mult) in self.l_col.seg(s) {
                     za[row_step] -= mult * xa;
                     zb[row_step] -= mult * xb;
                     zc[row_step] -= mult * xc;
@@ -2457,24 +2702,24 @@ impl LuFactors {
             match (xa != 0.0, xb != 0.0) {
                 (false, false) => {}
                 (true, true) => {
-                    for &(row_step, mult) in self.l_col.col(s) {
+                    for (row_step, mult) in self.l_col.seg(s) {
                         za[row_step] -= mult * xa;
                         zb[row_step] -= mult * xb;
                     }
                 }
                 (true, false) => {
-                    for &(row_step, mult) in self.l_col.col(s) {
+                    for (row_step, mult) in self.l_col.seg(s) {
                         za[row_step] -= mult * xa;
                     }
                 }
                 (false, true) => {
-                    for &(row_step, mult) in self.l_col.col(s) {
+                    for (row_step, mult) in self.l_col.seg(s) {
                         zb[row_step] -= mult * xb;
                     }
                 }
             }
             if xc != 0.0 {
-                for &(row_step, mult) in self.l_col.col(s) {
+                for (row_step, mult) in self.l_col.seg(s) {
                     zc[row_step] -= mult * xc;
                 }
             }
@@ -2495,7 +2740,7 @@ impl LuFactors {
             if z[s] == 0.0 {
                 continue;
             }
-            for &(row_step, mult) in self.l_col.col(s) {
+            for (row_step, mult) in self.l_col.seg(s) {
                 z[row_step] -= mult * z[s];
             }
         }
@@ -2573,7 +2818,7 @@ impl LuFactors {
             scratch.stack.push(seed);
             while let Some(node) = scratch.stack.pop() {
                 scratch.reach.push(node);
-                for &(next, _) in self.l_col.col(node) {
+                for (next, _) in self.l_col.seg(node) {
                     if !scratch.visited.is_marked(next) {
                         scratch.visited.mark(next);
                         scratch.stack.push(next);
@@ -2587,7 +2832,7 @@ impl LuFactors {
             if z[s] == 0.0 {
                 continue;
             }
-            for &(row_step, mult) in self.l_col.col(s) {
+            for (row_step, mult) in self.l_col.seg(s) {
                 z[row_step] -= mult * z[s];
             }
         }
@@ -2609,7 +2854,7 @@ impl LuFactors {
     fn l_transpose_gather_core(&self, w: &mut [f64]) {
         let m = self.m;
         for s in (0..m).rev() {
-            for &(row_step, mult) in self.l_col.col(s) {
+            for (row_step, mult) in self.l_col.seg(s) {
                 if w[row_step] == 0.0 {
                     continue;
                 }
@@ -2640,7 +2885,7 @@ impl LuFactors {
             if ws == 0.0 {
                 continue;
             }
-            for &(k, mult) in self.l_row.row(s) {
+            for (k, mult) in self.l_row.seg(s) {
                 w[k] -= mult * ws;
             }
         }
@@ -2654,7 +2899,7 @@ impl LuFactors {
         let mut z: Vec<f64> = (0..m).map(|s| rhs[self.row_perm[s]]).collect();
         // 前進代入: L z = rhs' (単位下三角、ステップ順)
         for s in 0..m {
-            for &(row_step, mult) in self.l_col.col(s) {
+            for (row_step, mult) in self.l_col.seg(s) {
                 z[row_step] -= mult * z[s];
             }
         }
@@ -2697,7 +2942,7 @@ impl LuFactors {
         // 後退代入: L^T w = z (ステップ順で単位上三角)
         let mut w = z;
         for s in (0..m).rev() {
-            for &(row_step, mult) in self.l_col.col(s) {
+            for (row_step, mult) in self.l_col.seg(s) {
                 w[s] -= mult * w[row_step];
             }
         }
@@ -3051,11 +3296,11 @@ fn expected_dense_gate() -> f64 {
 /// [`LuFactors::l_row`] を作る。スキャッタ形式が無効
 /// (`ENOMOTO_BTRAN_L_SCATTER=0`) なら、同じ `m` 行で要素なしの空行列を返す
 /// (無効時に構築コストも払わないため。空でも `row(i)` は常に有効)。
-fn build_l_row(l_col: &CscMat, m: usize) -> CsrMat {
+fn build_l_row(l_col: &LPack, m: usize) -> LPack {
     if btran_l_scatter_gate() <= 0.0 {
-        return CscMat::empty(m, m).to_csr();
+        return LPack::empty(m);
     }
-    l_col.to_csr()
+    l_col.transposed(m)
 }
 
 /// FTRAN/BTRAN の結果や新しい eta 要素を厳密な 0 とみなす絶対値の閾値
@@ -3516,7 +3761,9 @@ pub struct FtLu {
     /// 逆引き索引: `row_owners[r]` = 行ステップ `r` に非ゼロを持つ eta のスロットと値。
     /// `try_update` が行 `p` を他の全 eta から消すとき、該当する eta だけに触れる
     /// ために使う (Tomlin 1974, eq. 12)。
-    row_owners: Vec<Vec<(usize, f64)>>,
+    row_owners: RowOwners,
+    /// [`RowOwners::take_slots`] の作業領域 (FT 更新の行 `p` 消去用)。
+    owner_scratch: Vec<u32>,
     /// `R` 行 eta (作成順、`key` = 行 `p`、`pivot` は未使用)。
     r_etas: EtaFile,
     /// `R` eta の列方向索引 (追加策 R): `r_head[i]` は位置 `i` に要素を持つ `R` eta の要素 (プール位置) の
@@ -3605,7 +3852,7 @@ impl FtLu {
         // (完成した因子から復元した古典的 LU 演算数) を構築 tick に加える。
         let flop_coef = tunable!("ENOMOTO_T_TICK_BUILD_FLOP_COEF", TICK_BUILD_FLOP_COEF, u64);
         if flop_coef > 0 {
-            let flops: u64 = (0..m).map(|s| base.l_col.col(s).len() as u64 * owner_count[s] as u64).sum();
+            let flops: u64 = (0..m).map(|s| base.l_col.seg(s).len() as u64 * owner_count[s] as u64).sum();
             build_tick += flop_coef * flops;
         }
         // fill 基準は対角も含めた全格納要素数 (`factorize_reusing_order` の数え方と一致)。
@@ -3614,7 +3861,7 @@ impl FtLu {
         let mut slot_pos = vec![usize::MAX; m];
         let mut singles_pos = vec![usize::MAX; m];
         let mut single_piv = vec![0.0f64; m];
-        let l_active: Vec<u32> = (0..m).filter(|&s| !base.l_col.col(s).is_empty()).map(|s| s as u32).collect();
+        let l_active: Vec<u32> = (0..m).filter(|&s| !base.l_col.seg(s).is_empty()).map(|s| s as u32).collect();
         // `U` の eta をフラットファイルへ直接詰める: ヘッダはスロット順
         // (シングルトンは別)、疎 eta の要素は `row_step` 昇順。
         let dense_fraction = tunable!("ENOMOTO_T_DENSE_ETA_FRACTION", DENSE_ETA_FRACTION, f64);
@@ -3668,10 +3915,10 @@ impl FtLu {
                 }
             }
         }
-        let mut row_owners: Vec<Vec<(usize, f64)>> = owner_count.iter().map(|&c| Vec::with_capacity(c)).collect();
+        let mut row_owners = RowOwners::with_counts(&owner_count);
         for k in 0..u_seq.n_headers() {
             let slot = u_seq.key[k] as usize;
-            u_seq.for_each_entry(k, |row_step, v| row_owners[row_step].push((slot, v)));
+            u_seq.for_each_entry(k, |row_step, v| row_owners.push(row_step, slot, v));
         }
         let fill = total_off;
         FtLu {
@@ -3683,6 +3930,7 @@ impl FtLu {
             l_active,
             slot_pos,
             row_owners,
+            owner_scratch: Vec::new(),
             r_etas: EtaFile::default(),
             r_head: vec![u32::MAX; m],
             r_next: Vec::new(),
@@ -3827,10 +4075,10 @@ impl FtLu {
             }
             let zp = zp / pivot;
             z[p] = zp;
-            let owners = &self.row_owners[p];
-            self.add_tick(owners.len() as u64);
-            for &(q, v) in owners {
-                z[q] -= v * zp;
+            let (oq, ov) = self.row_owners.row(p);
+            self.add_tick(oq.len() as u64);
+            for (&q, &v) in oq.iter().zip(ov) {
+                z[q as usize] -= v * zp;
             }
         }
     }
@@ -3861,10 +4109,11 @@ impl FtLu {
             }
             let zp = zp / pivot;
             z[p] = zp;
-            let owners = &self.row_owners[p];
-            self.add_tick(owners.len() as u64);
-            if ok && touch.len() + owners.len() <= cap {
-                for &(q, v) in owners {
+            let (oq, ov) = self.row_owners.row(p);
+            self.add_tick(oq.len() as u64);
+            if ok && touch.len() + oq.len() <= cap {
+                for (&q, &v) in oq.iter().zip(ov) {
+                    let q = q as usize;
                     let old = z[q];
                     z[q] = old - v * zp;
                     if old == 0.0 {
@@ -3873,8 +4122,8 @@ impl FtLu {
                 }
             } else {
                 ok = false;
-                for &(q, v) in owners {
-                    z[q] -= v * zp;
+                for (&q, &v) in oq.iter().zip(ov) {
+                    z[q as usize] -= v * zp;
                 }
             }
         }
@@ -3901,10 +4150,10 @@ impl FtLu {
             }
             let zp = zp / pivot;
             z[p] = zp;
-            let owners = &self.row_owners[p];
-            self.add_tick(owners.len() as u64);
-            for &(q, v) in owners {
-                z[q] -= v * zp;
+            let (oq, ov) = self.row_owners.row(p);
+            self.add_tick(oq.len() as u64);
+            for (&q, &v) in oq.iter().zip(ov) {
+                z[q as usize] -= v * zp;
             }
         }
     }
@@ -3922,10 +4171,11 @@ impl FtLu {
             }
             let zp = zp / pivot;
             z[p] = zp;
-            let owners = &self.row_owners[p];
-            self.add_tick(owners.len() as u64);
-            if ok && touch.len() + owners.len() <= cap {
-                for &(q, v) in owners {
+            let (oq, ov) = self.row_owners.row(p);
+            self.add_tick(oq.len() as u64);
+            if ok && touch.len() + oq.len() <= cap {
+                for (&q, &v) in oq.iter().zip(ov) {
+                    let q = q as usize;
                     let old = z[q];
                     z[q] = old - v * zp;
                     if old == 0.0 {
@@ -3934,8 +4184,8 @@ impl FtLu {
                 }
             } else {
                 ok = false;
-                for &(q, v) in owners {
-                    z[q] -= v * zp;
+                for (&q, &v) in oq.iter().zip(ov) {
+                    z[q as usize] -= v * zp;
                 }
             }
         }
@@ -4172,12 +4422,13 @@ impl FtLu {
         while head < u_list.len() {
             let p = u_list[head];
             head += 1;
-            let owners = &self.row_owners[p];
-            edges += owners.len();
+            let (oq, _) = self.row_owners.row(p);
+            edges += oq.len();
             if edges > limit {
                 return false;
             }
-            for &(q, _) in owners {
+            for &q in oq {
+                let q = q as usize;
                 if !u_marks.is_marked(q) {
                     u_marks.mark(q);
                     u_list.push(q);
@@ -4191,7 +4442,8 @@ impl FtLu {
         for &p in u_list.iter() {
             let mut xp = x[p];
             tmp.clear();
-            tmp.extend(self.row_owners[p].iter().map(|&(q, v)| (slot_pos[q], q, v)));
+            let (oq, ov) = self.row_owners.row(p);
+            tmp.extend(oq.iter().zip(ov).map(|(&q, &v)| (slot_pos[q as usize], q as usize, v)));
             tmp.sort_unstable_by_key(|e| Reverse(e.0));
             work += tmp.len() as u64;
             for &(_, q, v) in tmp.iter() {
@@ -5661,9 +5913,10 @@ impl FtLu {
             }
             let zp = zp / pivot;
             z[p] = zp;
-            let owners = &self.row_owners[p];
-            self.add_tick(owners.len() as u64);
-            for &(q, v) in owners {
+            let (oq, ov) = self.row_owners.row(p);
+            self.add_tick(oq.len() as u64);
+            for (&q, &v) in oq.iter().zip(ov) {
+                let q = q as usize;
                 z[q] -= v * zp;
                 if !marks.is_marked(q) {
                     marks.mark(q);
@@ -5688,10 +5941,10 @@ impl FtLu {
                     }
                     let zp = zp / pivot;
                     z[p] = zp;
-                    let owners = &self.row_owners[p];
-                    self.add_tick(owners.len() as u64);
-                    for &(q, v) in owners {
-                        z[q] -= v * zp;
+                    let (oq, ov) = self.row_owners.row(p);
+                    self.add_tick(oq.len() as u64);
+                    for (&q, &v) in oq.iter().zip(ov) {
+                        z[q as usize] -= v * zp;
                     }
                 }
                 return false;
@@ -5767,7 +6020,7 @@ impl FtLu {
             if ws == 0.0 {
                 continue;
             }
-            for &(k, mult) in base.l_row.row(s) {
+            for (k, mult) in base.l_row.seg(s) {
                 w[k] -= mult * ws;
                 if !marks.is_marked(k) {
                     marks.mark(k);
@@ -5783,7 +6036,7 @@ impl FtLu {
                     if ws == 0.0 {
                         continue;
                     }
-                    for &(k, mult) in base.l_row.row(s2) {
+                    for (k, mult) in base.l_row.seg(s2) {
                         w[k] -= mult * ws;
                     }
                 }
@@ -6035,18 +6288,16 @@ impl FtLu {
             // 上書き前に、スロット `p` の旧非対角要素を `row_owners` から登録解除する
             // (残すと他の行の所有者リストに無効な `p` が残る)。
             let row_owners = &mut self.row_owners;
-            self.u_seq.for_each_entry(k, |row_step, _| {
-                if let Some(idx) = row_owners[row_step].iter().position(|&(s, _)| s == p) {
-                    row_owners[row_step].swap_remove(idx);
-                }
-            });
+            self.u_seq.for_each_entry(k, |row_step, _| row_owners.remove_slot(row_step, p));
             self.remove_u_eta(k);
         }
 
         // 行 `p` をまだ参照している eta からそれを消す (Tomlin 1974, eq. 12)。
         // 対象は `row_owners[p]` に載っている eta だけで、`slot_pos` で O(1) に引く。
-        for (slot, _) in std::mem::take(&mut self.row_owners[p]) {
-            let pos = self.slot_pos[slot];
+        let mut owners = std::mem::take(&mut self.owner_scratch);
+        self.row_owners.take_slots(p, &mut owners);
+        for &slot in &owners {
+            let pos = self.slot_pos[slot as usize];
             if self.u_seq.remove_index(pos, p) {
                 self.fill -= 1;
             }
@@ -6054,8 +6305,9 @@ impl FtLu {
 
         // 置換後の列 eta を `a_tilde` から直接作って末尾に追加する (scale `1.0`)。
         let k = self.u_seq.push_scaled_dense(p, new_pivot, a_tilde, p, 1.0, tunable!("ENOMOTO_T_DENSE_ETA_FRACTION", DENSE_ETA_FRACTION, f64));
+        self.owner_scratch = owners;
         let row_owners = &mut self.row_owners;
-        self.u_seq.for_each_entry(k, |row_step, v| row_owners[row_step].push((p, v)));
+        self.u_seq.for_each_entry(k, |row_step, v| row_owners.push(row_step, p, v));
         self.fill += self.u_seq.nnz(k);
         self.slot_pos[p] = k;
 
@@ -6116,18 +6368,16 @@ impl FtLu {
             // 上書き前に、スロット `p` の旧非対角要素を `row_owners` から登録解除する
             // (残すと他の行の所有者リストに無効な `p` が残る)。
             let row_owners = &mut self.row_owners;
-            self.u_seq.for_each_entry(k, |row_step, _| {
-                if let Some(idx) = row_owners[row_step].iter().position(|&(s, _)| s == p) {
-                    row_owners[row_step].swap_remove(idx);
-                }
-            });
+            self.u_seq.for_each_entry(k, |row_step, _| row_owners.remove_slot(row_step, p));
             self.remove_u_eta(k);
         }
 
         // 行 `p` をまだ参照している eta からそれを消す (Tomlin 1974, eq. 12)。
         // 対象は `row_owners[p]` に載っている eta だけで、`slot_pos` で O(1) に引く。
-        for (slot, _) in std::mem::take(&mut self.row_owners[p]) {
-            let pos = self.slot_pos[slot];
+        let mut owners = std::mem::take(&mut self.owner_scratch);
+        self.row_owners.take_slots(p, &mut owners);
+        for &slot in &owners {
+            let pos = self.slot_pos[slot as usize];
             if self.u_seq.remove_index(pos, p) {
                 self.fill -= 1;
             }
@@ -6138,8 +6388,9 @@ impl FtLu {
             Some(list) => self.u_seq.push_scaled_list(p, new_pivot, a_tilde, list, p, 1.0, dense_fraction),
             None => self.u_seq.push_scaled_dense(p, new_pivot, a_tilde, p, 1.0, dense_fraction),
         };
+        self.owner_scratch = owners;
         let row_owners = &mut self.row_owners;
-        self.u_seq.for_each_entry(k, |row_step, v| row_owners[row_step].push((p, v)));
+        self.u_seq.for_each_entry(k, |row_step, v| row_owners.push(row_step, p, v));
         self.fill += self.u_seq.nnz(k);
         self.slot_pos[p] = k;
 
@@ -6290,7 +6541,7 @@ mod tests {
                 best[ci] = best[ci].min(el);
                 if rep == 0 {
                     prints[ci] = out.iter().map(|o| o.as_ref().map(|lu| fingerprint(lu)).unwrap_or(0)).collect();
-                    lu_nnz[ci] = out.iter().flatten().map(|lu| lu.u_row.iter().map(|r| r.len()).sum::<usize>() + (0..lu.m).map(|s| lu.l_col.col(s).len()).sum::<usize>()).sum();
+                    lu_nnz[ci] = out.iter().flatten().map(|lu| lu.u_row.iter().map(|r| r.len()).sum::<usize>() + (0..lu.m).map(|s| lu.l_col.seg(s).len()).sum::<usize>()).sum();
                 }
             }
         }
@@ -6882,14 +7133,14 @@ mod tests {
                 let lu = factorize(m, &rows).expect("nonsingular");
                 let mut from_col: Vec<(usize, usize, u64)> = Vec::new();
                 for s in 0..m {
-                    for &(row_step, mult) in lu.l_col.col(s) {
+                    for (row_step, mult) in lu.l_col.seg(s) {
                         assert!(row_step > s, "L must be strictly lower triangular in step space");
                         from_col.push((s, row_step, mult.to_bits()));
                     }
                 }
                 let mut from_row: Vec<(usize, usize, u64)> = Vec::new();
                 for r in 0..m {
-                    for &(s, mult) in lu.l_row.row(r) {
+                    for (s, mult) in lu.l_row.seg(r) {
                         assert!(s < r, "l_row.row(r) must only hold entries at s < r");
                         from_row.push((s, r, mult.to_bits()));
                     }
@@ -7031,14 +7282,14 @@ mod tests {
             // この経路でも `l_row` は `l_col` の転置であること (BTRAN のスキャッタ形式が読む)。
             let mut from_col: Vec<(usize, usize, u64)> = Vec::new();
             for s in 0..m {
-                for &(row_step, mult) in reused.l_col.col(s) {
+                for (row_step, mult) in reused.l_col.seg(s) {
                     assert!(row_step > s, "L must be strictly lower triangular in step space");
                     from_col.push((s, row_step, mult.to_bits()));
                 }
             }
             let mut from_row: Vec<(usize, usize, u64)> = Vec::new();
             for r in 0..m {
-                for &(s, mult) in reused.l_row.row(r) {
+                for (s, mult) in reused.l_row.seg(r) {
                     from_row.push((s, r, mult.to_bits()));
                 }
             }
@@ -7061,8 +7312,8 @@ mod tests {
         assert_eq!(again.row_perm, first.row_perm);
         assert_eq!(again.col_perm, first.col_perm);
         for s in 0..m {
-            let mut a: Vec<(usize, f64)> = first.l_col.col(s).to_vec();
-            let mut b: Vec<(usize, f64)> = again.l_col.col(s).iter().copied().filter(|&(_, v)| v != 0.0).collect();
+            let mut a: Vec<(usize, f64)> = first.l_col.seg(s).to_vec();
+            let mut b: Vec<(usize, f64)> = again.l_col.seg(s).into_iter().filter(|&(_, v)| v != 0.0).collect();
             a.sort_unstable_by_key(|&(r, _)| r);
             b.sort_unstable_by_key(|&(r, _)| r);
             assert_eq!(a.len(), b.len(), "L column {s} nonzero count");
