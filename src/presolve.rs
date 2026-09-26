@@ -46,7 +46,7 @@ use crate::sparse::{FaerCsr, CsrRowBuilder, csr_from_rows, csr_row_vec, csr_rows
 use crate::types::{ConstraintRow, RowSense, VariableData};
 use scaling::Scaling;
 use crate::params::presolve::{
-    DOUBLETON_STRIKES, DUALPROPAGATE_STRIKES, EQPROP_ROUNDS, EQPROP_SKIP_IDLE, FIXPOINT_RELTOL, INEQ_SINGLETON_LARGE, LARGE_PRESOLVE_MIN_ROWS, PARALLELCOLS_STRIKES, PROPAGATION_PASSES_LARGE, PRESOLVE_SPLIT_G, REDEQ_MODE,
+    DOUBLETON_STRIKES, DUALPROPAGATE_STRIKES, EQPROP_ROUNDS, EQPROP_SKIP_IDLE, FIXPOINT_RELTOL, INEQ_SINGLETON_LARGE, LARGE_PRESOLVE_MIN_ROWS, PARALLELCOLS_STRIKES, PRESOLVE_EXTRA_ROUNDS_LARGE, PROPAGATION_PASSES_LARGE, PRESOLVE_SPLIT_G, REDEQ_MODE,
     ROUND_STRUCT_STOP,
 };
 
@@ -340,12 +340,19 @@ pub fn run_extended(
     // 狭める前の元の上下限を必要とする)。同じ抽出結果を最初のラウンドの伝播にも使う。
     let (first_lb, first_ub, first_rows, first_rhs) = propagate::extract_bounds(n, &g, &h);
     let (orig_lb, orig_ub) = (first_lb.clone(), first_ub.clone());
-    // 大きな問題向けの設定 (`LARGE_PRESOLVE_MIN_ROWS` 参照): 伝播パス数の下限と `ineqsingleton` の既定有効化。
+    // 大きな問題向けの設定 (`LARGE_PRESOLVE_MIN_ROWS` 参照): 外側ラウンドの延長と `ineqsingleton` の既定有効化。
     let large = {
         let min_rows = tunable!("ENOMOTO_T_LARGE_PRESOLVE_MIN_ROWS", LARGE_PRESOLVE_MIN_ROWS, usize);
         min_rows != 0 && b.len() + first_rows.len() >= min_rows
     };
-    let prop_passes = if large { prop_passes.max(tunable!("ENOMOTO_T_PROPAGATION_PASSES_LARGE", PROPAGATION_PASSES_LARGE, usize)) } else { prop_passes };
+    // 延長ラウンドの数 (`PRESOLVE_EXTRA_ROUNDS_LARGE`)。大きな問題で `rounds` 回のラウンドを終えても不動点に達して
+    // いなければ、伝播パス数を `PROPAGATION_PASSES_LARGE` に上げてこの回数まで続ける。
+    let extra_rounds = if large { tunable!("ENOMOTO_T_PRESOLVE_EXTRA_ROUNDS_LARGE", PRESOLVE_EXTRA_ROUNDS_LARGE, usize) } else { 0 };
+    let mut prop_passes = prop_passes;
+    // 延長の判定用 (大きな問題のみ): 直前のラウンド終了時の構造 (A の行数, G の多変数行数, 固定列数, ログ長) と、
+    // 最後のラウンドで構造が変わったか。上下限だけが少しずつ締まり続ける問題 (neos) は延長しない。
+    let mut ext_prev_struct: Option<(usize, usize, usize, usize)> = None;
+    let mut ext_last_round_structural = false;
     let ineq_singleton_on = match env_str!("ENOMOTO_INEQ_SINGLETON") {
         Some(v) => v != "0",
         None => large && tunable!("ENOMOTO_T_INEQ_SINGLETON_LARGE", INEQ_SINGLETON_LARGE, usize) != 0,
@@ -385,7 +392,16 @@ pub fn run_extended(
     // 次ラウンドの伝播に渡す分離形式 G (多変数行, 右辺, lb, ub)。最初はループ前の抽出結果。
     let mut carry: Option<(Vec<Vec<(usize, f64)>>, Vec<f64>, Vec<f64>, Vec<f64>)> = Some((first_rows, first_rhs, first_lb, first_ub));
     // 外側ラウンドループ。
-    for round_idx in 0..rounds.max(1) {
+    for round_idx in 0..rounds.max(1) + extra_rounds {
+        if round_idx == rounds.max(1) {
+            // 通常のラウンド数を使い切っても不動点に達していない (大きな問題のみここに来る)。最後のラウンドでも
+            // 行・列の縮約が進んでいれば、上下限伝播が 1 ラウンドに数段しか進まない連鎖が残っているので、パス数を
+            // 上げて延長する。上下限の変化だけなら従来どおりここで止める。
+            if !ext_last_round_structural {
+                break;
+            }
+            prop_passes = prop_passes.max(tunable!("ENOMOTO_T_PROPAGATION_PASSES_LARGE", PROPAGATION_PASSES_LARGE, usize));
+        }
         let prop = timed_step!(
             "propagate",
             match carry.take() {
@@ -834,6 +850,17 @@ pub fn run_extended(
         };
 
         // 外側ループの不動点判定用の状態。分離形式なら次ラウンドへ `carry` で渡す。
+        if extra_rounds > 0 {
+            let g_multi = if g_split {
+                cur_real_rows.len()
+            } else {
+                let gr = g.as_ref();
+                (0..gr.nrows()).filter(|&i| gr.col_indices_of_row_raw(i).len() > 1).count()
+            };
+            let st = (a.nrows(), g_multi, (0..n).filter(|&j| lb[j] == ub[j]).count(), postsolve_log.len());
+            ext_last_round_structural = ext_prev_struct.is_some_and(|p| p != st);
+            ext_prev_struct = Some(st);
+        }
         let signature = (a.nrows(), g_view!().nrows(), lb.clone(), ub.clone());
         if g_split {
             carry = Some((cur_real_rows, cur_real_rhs, lb, ub));

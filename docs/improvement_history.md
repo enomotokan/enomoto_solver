@@ -7142,17 +7142,24 @@ irish-electricity (104,259 行 × 61,728 列、HiGHS 156 s / 86,602 反復) を�
   (報告 N の「tiny_r」「候補が |alpha| 1e-9〜6e-6 の 1 列だけ」はこの結果)。HiGHS に自前の前処理の出力を presolve なしで
   渡しても目的関数値が -1e11 まで崩れ、HiGHS の presolve (追加で 1,635 行) を通すと 4.3 万反復で解ける。
 
-### 採用: 大きな問題の前処理設定 (src/presolve.rs、src/params.rs `PROPAGATION_PASSES_LARGE`・`LARGE_PRESOLVE_MIN_ROWS`・`INEQ_SINGLETON_LARGE`)
+### 採用: 大きな問題の前処理設定 (src/presolve.rs、src/params.rs `PRESOLVE_EXTRA_ROUNDS_LARGE`・`PROPAGATION_PASSES_LARGE`・`LARGE_PRESOLVE_MIN_ROWS`・`INEQ_SINGLETON_LARGE`)
 
 - 等式行 + 多変数の不等式行が `LARGE_PRESOLVE_MIN_ROWS` (1 万) 以上の問題では、
-  - 上下限伝播のパス数の上限を `PROPAGATION_PASSES_LARGE` (20) に上げる (伝播は変化の無いパスで打ち切るので収束済みの
-    問題の手間は増えない)。
+  - 外側ラウンドを上限 (`PRESOLVE_ROUNDS`、20) まで回しても不動点に達せず、しかも最後のラウンドで行・列の縮約
+    (A の行数・G の多変数行数・固定列数・消去ログ長のいずれか) が進んでいたら、上下限伝播のパス数を
+    `PROPAGATION_PASSES_LARGE` (20) に上げて `PRESOLVE_EXTRA_ROUNDS_LARGE` (20) ラウンドまで延長する。
   - 不等式行の列シングルトン (`ineqsingleton`) を既定で有効にする (`ENOMOTO_INEQ_SINGLETON` を設定すればそちらが優先)。
+- 最初は全ラウンドの伝播を 20 パスにしたが、fome13 (18 ラウンドで収束) の経路が変わって 15.9 → 18.6〜19.4 s (+17%)、
+  延長を「上限到達」だけで判定すると neos (20 ラウンドとも行・列は不変で、上下限だけが少しずつ締まり続ける) が延長されて
+  536 s → 600 s 超になったので、上の 2 条件にした。11 問の前処理の出力ハッシュ (`ENOMOTO_DEBUG_PRESOLVE_HASH`) を段階 1 と
+  比べると、変わるのは irish-electricity (20 → 24 ラウンド、73,879 → 67,470 行) と pds-100 (20 → 26 ラウンド、等式 80,031 →
+  79,866 行) だけで、他の 9 問は前処理の出力がビット単位で同じ (ineqsingleton も効かない) なので経路不変。
 - Netlib (最大 6,071 行) は条件を満たさず経路不変 (目的関数値のビットが全問一致)。`ENOMOTO_T_LARGE_PRESOLVE_MIN_ROWS=0` で
-  全体を、`ENOMOTO_T_PROPAGATION_PASSES_LARGE=2`・`ENOMOTO_T_INEQ_SINGLETON_LARGE=0` で個別に無効化できる。
-- irish-electricity (1 本ずつ): 伝播 20 パス + ineqsingleton で **最適 121 s (約 4.6 万反復)**、目的関数値
-  2546254.5633362 (HiGHS 2546254.5633092 と相対 1e-11)、元問題の最大行違反 1.6e-9。伝播 20 パスだけ (ineqsingleton なし)
-  は 272 s (約 9 万反復)、ineqsingleton だけ (伝播 2 パス) は報告 N のとおり 9.3 万反復で特異基底 → `NotSolved`。
+  全体を、`ENOMOTO_T_PRESOLVE_EXTRA_ROUNDS_LARGE=0`・`ENOMOTO_T_INEQ_SINGLETON_LARGE=0` で個別に無効化できる。
+- irish-electricity: **最適 126 s (約 4.6 万反復)**、目的関数値 2546254.563336 (HiGHS 2546254.5633092 と相対 1e-11)、
+  元問題の最大行違反 2.7e-9。前処理は 1.6 s → 2.1 s。ablation (全ラウンド 20 パス版、1 本ずつ): 20 パス + ineqsingleton
+  121 s、20 パスだけ (ineqsingleton なし) 272 s (約 9 万反復)、ineqsingleton だけ (伝播 2 パス・20 ラウンド) は報告 N のとおり
+  9.3 万反復で特異基底 → `NotSolved`。
 
 ### 試して取り下げたもの
 

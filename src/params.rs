@@ -744,16 +744,28 @@ pub(crate) mod presolve {
     /// (`ENOMOTO_T_DUALPROPAGATE_STRIKES`)。
     pub(crate) const DUALPROPAGATE_STRIKES: usize = 1;
 
-    /// 大きな問題 (等式行 + 多変数の不等式行が [`LARGE_PRESOLVE_MIN_ROWS`] 以上) で 1 回の上下限伝播に許すパス数の下限
-    /// (`ENOMOTO_T_PROPAGATION_PASSES_LARGE`)。伝播は行も上下限も変わらなくなったパスで打ち切るので、上限を上げても
-    /// 収束済みの問題の手間は増えない。既定の 2 パスでは、時間方向に連なる制約 (irish-electricity のランプ制約) で
-    /// 上下限が 1 ラウンドに 2 段しか伝わらず、そこから決まる冗長行・双対固定 (毎ラウンド約 80 行・34 列) が外側ラウンドの
-    /// 上限 (20) まで続いて打ち切られていた (73,879 行)。20 パスなら 7 ラウンドで不動点 (67,470 行) に達し、前処理も
-    /// 1.6 s → 0.9 s。残った冗長な行は双対単体法の基底を悪条件にし (`|B^-T e_r|` が 1e7〜1e12)、反復 10 万を超えて
-    /// 特異基底で失敗していた (HiGHS に presolve なしで渡しても数値的に破綻する)。
+    /// 大きな問題 (等式行 + 多変数の不等式行が [`LARGE_PRESOLVE_MIN_ROWS`] 以上) で、外側ラウンドを上限
+    /// (`PRESOLVE_ROUNDS`、20) まで回しても不動点に達しなかったときに続ける延長ラウンドの数
+    /// (`ENOMOTO_T_PRESOLVE_EXTRA_ROUNDS_LARGE`、0 = 延長しない)。延長中は上下限伝播のパス数を
+    /// [`PROPAGATION_PASSES_LARGE`] に上げる。最後のラウンドで行・列の縮約 (A の行数・G の多変数行数・固定列数・
+    /// 消去ログ長のいずれか) が進んでいたときだけ延長し、上下限だけが少しずつ締まり続ける問題 (neos: 20 ラウンドとも
+    /// 構造は不変) は延長しない (延長すると neos の経路が変わって 536 s → 600 s 超になった)。上限内で収束する問題の
+    /// 経路は変えない。
+    ///
+    /// irish-electricity では、時間方向に連なるランプ制約を上下限が 1 ラウンドに 2 段 (伝播 2 パス) しか進まず、
+    /// そこから決まる冗長行・双対固定 (毎ラウンド約 80 行・34 列) が 20 ラウンドの上限まで続いて打ち切られ、
+    /// 73,879 行が残っていた (不動点は 67,470 行)。残った冗長な行は双対単体法の基底を悪条件にし
+    /// (`|B^-T e_r|` が 1e7〜1e12)、反復 10 万を超えて特異基底で失敗していた (HiGHS に presolve なしで渡しても
+    /// 数値的に破綻する)。伝播 20 パスなら数ラウンドで不動点に達する。
+    pub(crate) const PRESOLVE_EXTRA_ROUNDS_LARGE: usize = 20;
+
+    /// 延長ラウンド ([`PRESOLVE_EXTRA_ROUNDS_LARGE`]) で 1 回の上下限伝播に許すパス数の下限
+    /// (`ENOMOTO_T_PROPAGATION_PASSES_LARGE`)。伝播は行も上下限も変わらなくなったパスで打ち切るので、収束済みの
+    /// 部分の手間は増えない。最初から全ラウンドで 20 パスにすると fome13 (18 ラウンドで収束) の経路が変わって
+    /// +15% になったので、延長時だけにする。
     pub(crate) const PROPAGATION_PASSES_LARGE: usize = 20;
 
-    /// 大きな問題向けの前処理の設定 ([`PROPAGATION_PASSES_LARGE`]、[`INEQ_SINGLETON_LARGE`]) を使う行数の下限
+    /// 大きな問題向けの前処理の設定 ([`PRESOLVE_EXTRA_ROUNDS_LARGE`]、[`INEQ_SINGLETON_LARGE`]) を使う行数の下限
     /// (等式行 + 多変数の不等式行、`ENOMOTO_T_LARGE_PRESOLVE_MIN_ROWS`、0 = 無効)。Netlib (最大 6,071 行) の経路を
     /// 変えないよう、他の大問題向け経路と同じ 1 万行。
     pub(crate) const LARGE_PRESOLVE_MIN_ROWS: usize = 10_000;
