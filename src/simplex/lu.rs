@@ -28,7 +28,7 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
-use crate::params::lu::{BORDER_MAX_COUNT, BORDER_MAX_FRACTION, BTRAN_HYPER_FRACTION, BTRAN_L_SCATTER_FRACTION, BUCKET_POOL_MAX, DENSE_COL_FRACTION, DENSE_ETA_FRACTION, DENSE_INPUT_FRACTION, DENSE_RHS_FRACTION, DENSE_SWITCH_AUTO_FRACTION, DENSE_SWITCH_AUTO_LU_PER_ROW, DENSE_SWITCH_AUTO_MIN_M, DENSE_SWITCH_CHECK_INTERVAL, DENSE_SWITCH_FRACTION, DENSE_SWITCH_MIN_ROWS, DENSITY_AVERAGE_MULTIPLIER, EXPECTED_DENSE_FRACTION, KERNEL_LINEAR_SCAN_MAX, KERNEL_MIN_RUN_CAP, KERNEL_RESERVE_EXTRA, KERNEL_RESERVE_MULT, PIVOT_ROW_SEARCH_MAX_DEGREE, PIVOT_SEARCH_LIMIT, PIVOT_THRESHOLD_FACTOR, PIVOT_THRESHOLD_MAX, PIVOT_THRESHOLD_MIN, R_SPARSE_MIN_ETAS, REBUILD_FILL_LIMIT, SPARSE_PATH_MIN_M, REBUILD_MIN_PIVOT, REUSE_BACKOFF_SHIFT_CAP, REUSE_MAX_BACKOFF, STABILITY, TAU_GP_FRACTION, TICK_BUILD_FLOP_COEF, TICK_BUILD_LU_COEF, TICK_BUILD_M_COEF, TICK_SOLVE_NNZ_COEF, TINY_DROP, U_HYPER_ABORT_FRACTION};
+use crate::params::lu::{BORDER_MAX_COUNT, BORDER_MAX_FRACTION, BTRAN_HYPER_FRACTION, BTRAN_L_SCATTER_FRACTION, BUCKET_POOL_MAX, DENSE_COL_FRACTION, DENSE_ETA_FRACTION, DENSE_INPUT_FRACTION, DENSE_RHS_FRACTION, DENSE_SWITCH_CHECK_INTERVAL, DENSE_SWITCH_FRACTION, DENSE_SWITCH_MIN_ROWS, DENSITY_AVERAGE_MULTIPLIER, EXPECTED_DENSE_FRACTION, KERNEL_LINEAR_SCAN_MAX, KERNEL_MIN_RUN_CAP, KERNEL_RESERVE_EXTRA, KERNEL_RESERVE_MULT, PIVOT_ROW_SEARCH_MAX_DEGREE, PIVOT_SEARCH_LIMIT, PIVOT_THRESHOLD_FACTOR, PIVOT_THRESHOLD_MAX, PIVOT_THRESHOLD_MIN, R_SPARSE_MIN_ETAS, REBUILD_FILL_LIMIT, SPARSE_PATH_MIN_M, REBUILD_MIN_PIVOT, REUSE_BACKOFF_SHIFT_CAP, REUSE_MAX_BACKOFF, STABILITY, TAU_GP_FRACTION, TICK_BUILD_FLOP_COEF, TICK_BUILD_LU_COEF, TICK_BUILD_M_COEF, TICK_SOLVE_NNZ_COEF, TINY_DROP, U_HYPER_ABORT_FRACTION};
 
 thread_local! {
     /// このスレッドで現在実行中の求解に適用されるピボット閾値。
@@ -539,12 +539,6 @@ struct MarkowitzState {
     /// その場更新を使うか。`0` なら全行で単純な 2 ポインタマージ
     /// (因子はビット一致)。
     inplace_elim: bool,
-    /// 従属等式の検出 ([`markowitz_independent_columns`]) 専用: 列 `j` のピボットの絶対値の下限
-    /// (これ未満の要素は消去の丸め残りとみなしてピボットにしない)。空なら無効 (通常の分解)。
-    col_floor: Vec<f64>,
-    /// 同上: `find_best_pivot` が見つけた「全要素が `col_floor` 未満の列」(一次従属と確定した列)。
-    /// 呼び出し側がバケットから除く (以後の探索で毎回走査しないため)。
-    dead_cols: Vec<usize>,
 }
 
 thread_local! {
@@ -658,8 +652,6 @@ impl MarkowitzState {
             row_singleton_rel: env_str!("ENOMOTO_LU_ROW_SINGLETON").and_then(|v| v.parse::<f64>().ok()).unwrap_or(-1.0),
             row_search: tunable!("ENOMOTO_PIVOT_ROW_SEARCH", PIVOT_ROW_SEARCH_MAX_DEGREE, usize),
             lazy_colmax: !matches!(env_str!("ENOMOTO_LU_LAZY_COLMAX"), Some("0")),
-            col_floor: Vec::new(),
-            dead_cols: Vec::new(),
         }
     }
 
@@ -786,14 +778,6 @@ impl MarkowitzState {
     ///   ただしピボットが既に見つかっている場合のみなので `Some` を `None` に
     ///   することはない。
     fn find_best_pivot(&mut self, skip_dense: bool) -> Option<(usize, usize)> {
-        self.find_best_pivot_impl::<false>(skip_dense)
-    }
-
-    /// [`Self::find_best_pivot`] の本体。`FLOOR` は従属等式の検出 ([`markowitz_independent_columns`]) 用の
-    /// 列ごとのピボット下限 (`col_floor`) と従属列の記録 (`dead_cols`) を使うか (通常の分解は偽で、
-    /// その判定のコードを含まない実体を使う)。
-    #[inline(always)]
-    fn find_best_pivot_impl<const FLOOR: bool>(&mut self, skip_dense: bool) -> Option<(usize, usize)> {
         // プロファイル時のみ計測開始時刻を取る
         let prof_t0 = if self.prof_timing { Some(std::time::Instant::now()) } else { None };
         let mut best: Option<(usize, usize)> = None;
@@ -828,8 +812,6 @@ impl MarkowitzState {
         let threshold = self.threshold;
         let search_limit = self.search_limit;
         let lazy_colmax = self.lazy_colmax;
-        // 従属等式の検出用のピボット下限があるか (通常の分解では偽)。
-        let has_floor = FLOOR && !self.col_floor.is_empty();
         'scan: for deg_col in scan_from..col_buckets.len() {
             // バケットの中身はこの走査中は変わらない。
             for &j in &col_buckets[deg_col] {
@@ -895,7 +877,7 @@ impl MarkowitzState {
                     let v = if cached { self.col_value_cache[k] } else { mat.row_get(i, j) };
                     k += 1;
                     let Some(v) = v else { continue };
-                    if v == 0.0 || v.abs() < min_pivot || (has_floor && v.abs() < self.col_floor[j]) {
+                    if v == 0.0 || v.abs() < min_pivot {
                         continue;
                     }
                     if score < best_score || (score == best_score && v.abs() > best_pivot_abs) {
@@ -903,10 +885,6 @@ impl MarkowitzState {
                         best = Some((i, j));
                         best_pivot_abs = v.abs();
                     }
-                }
-                // 従属等式の検出: 列最大値が確定していて下限未満なら、この列はもうピボットを持たない。
-                if has_floor && !self.col_max_abs_dirty[j] && self.col_max_abs[j] < self.col_floor[j] {
-                    self.dead_cols.push(j);
                 }
                 if best_score == 0 {
                     exit = 0;
@@ -950,7 +928,7 @@ impl MarkowitzState {
                             self.col_max_abs[j] = mx;
                             self.col_max_abs_dirty[j] = false;
                         }
-                        if v.abs() < threshold * self.col_max_abs[j] || (has_floor && v.abs() < self.col_floor[j]) {
+                        if v.abs() < threshold * self.col_max_abs[j] {
                             continue;
                         }
                         if score < best_score || (score == best_score && v.abs() > best_pivot_abs) {
@@ -1671,7 +1649,7 @@ pub fn factorize_reusing(m: usize, rows_in: &[Vec<(usize, f64)>], prev: Option<&
     }
     // 再利用が棄却されたかバックオフ中。通常の Markowitz 分解を行い、
     // その fill が新しい基準になる (`FtLu::new` が設定)。
-    let mut ft = FtLu::new(factorize_routed(m, rows_in, &border, dense, dense_switch_for(m, prev))?);
+    let mut ft = FtLu::new(factorize_routed(m, rows_in, &border, dense)?);
     PROF_FULL_NNZ.fetch_add(ft.fill_baseline, Ordering::Relaxed);
     PROF_FULL_COUNT.fetch_add(1, Ordering::Relaxed);
     if eligible {
@@ -1957,12 +1935,12 @@ fn factorize_reusing_order(
 /// それ以外は Markowitz 消去に振り分ける。
 pub fn factorize(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuFactors> {
     let border = detect_border_columns(m, rows_in);
-    factorize_routed(m, rows_in, &border, is_dense_input(m, rows_in), explicit_dense_switch())
+    factorize_routed(m, rows_in, &border, is_dense_input(m, rows_in))
 }
 
 /// [`factorize`] の本体。振り分けに使う [`detect_border_columns`] の結果
 /// (`border`) と [`is_dense_input`] の結果 (`dense`) を呼び出し側が計算済みで渡す。
-fn factorize_routed(m: usize, rows_in: &[Vec<(usize, f64)>], border: &[usize], dense: bool, dense_switch: f64) -> Option<LuFactors> {
+fn factorize_routed(m: usize, rows_in: &[Vec<(usize, f64)>], border: &[usize], dense: bool) -> Option<LuFactors> {
     if env_str!("ENOMOTO_DEBUG_BLOCK_SIZES").is_some() {
         debug_print_block_sizes(m, rows_in);
     }
@@ -1974,7 +1952,7 @@ fn factorize_routed(m: usize, rows_in: &[Vec<(usize, f64)>], border: &[usize], d
             return Some(lu);
         }
     }
-    factorize_flat_markowitz_routed(m, rows_in, dense, dense_switch)
+    factorize_flat_markowitz_routed(m, rows_in, dense)
 }
 
 /// 解析専用: 分解の入力 1 件を `<dir>/lu_dump.bin` に追記する (`m`、続いて
@@ -2000,132 +1978,7 @@ fn dump_lu_input(dir: &std::path::Path, m: usize, rows_in: &[Vec<(usize, f64)>])
 /// 稠密判定を自分で行う [`factorize_flat_markowitz_routed`] (境界付き経路を通らない)。
 #[cfg_attr(not(test), allow(dead_code))]
 fn factorize_flat_markowitz(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuFactors> {
-    factorize_flat_markowitz_routed(m, rows_in, is_dense_input(m, rows_in), explicit_dense_switch())
-}
-
-/// `ENOMOTO_LU_DENSE_SWITCH` で明示された稠密切替の閾値 (未設定なら [`DENSE_SWITCH_FRACTION`] = 0 = off)。
-fn explicit_dense_switch() -> f64 {
-    tunable!("ENOMOTO_LU_DENSE_SWITCH", DENSE_SWITCH_FRACTION, f64)
-}
-
-/// nug08 報告 #3: [`factorize_reusing`] の通常分解で使う稠密切替の閾値。
-/// `ENOMOTO_LU_DENSE_SWITCH` が設定されていればその値 (全分解で有効)。未設定なら、行数が
-/// [`DENSE_SWITCH_AUTO_MIN_M`] 以上で、直前の通常分解の `nnz(L+U)` が
-/// [`DENSE_SWITCH_AUTO_LU_PER_ROW`] `* m` 以上 (= LU が 1 行あたり数十要素まで密になった基底)
-/// のときだけ [`DENSE_SWITCH_AUTO_FRACTION`] を使う。それ以外は 0 (off) で経路は従来どおり。
-/// 疎な LU の問題 (Netlib 全問、stormG2・pds-100・cont1 など) はこの条件を満たさない。
-fn dense_switch_for(m: usize, prev: &FtLu) -> f64 {
-    if env_str!("ENOMOTO_LU_DENSE_SWITCH").is_some() {
-        return explicit_dense_switch();
-    }
-    let min_m = tunable!("ENOMOTO_T_LU_DENSE_SWITCH_AUTO_MIN_M", DENSE_SWITCH_AUTO_MIN_M, usize);
-    let per_row = tunable!("ENOMOTO_T_LU_DENSE_SWITCH_AUTO_LU_PER_ROW", DENSE_SWITCH_AUTO_LU_PER_ROW, usize);
-    if min_m != 0 && m >= min_m && prev.fill_baseline >= per_row.saturating_mul(m) {
-        tunable!("ENOMOTO_T_LU_DENSE_SWITCH_AUTO", DENSE_SWITCH_AUTO_FRACTION, f64)
-    } else {
-        0.0
-    }
-}
-
-/// nug08 報告 #6: 従属等式の検出。`m x m` の疎行列 `rows_in` (行 `(列, 値)`) を通常の分解と同じ
-/// Markowitz 消去 (閾値ピボット・列シングルトンの前処理・探索上限も同じ) で消去し、ピボットが取れた
-/// 列の一覧 (昇順) を返す。特異 (ピボットが取れない列が残る) でも止まらず、取れた列だけを返す。
-/// 列 `j` の要素は絶対値が `col_floor[j]` 未満ならピボットにしない (消去で打ち消し合った丸め残りを
-/// 独立とみなさないため。呼び出し側が列の元のノルムに比例した値を渡す)。因子は作らない。
-///
-/// 消去の終盤で活性部分 (残りの列 × 要素のある残りの行) が `dense_limit` 要素以下かつ密度が
-/// `dense_fraction` 以上になったら、そこで止めて残りの活性部分を列ごとの疎ベクトル `(元の列, [(局所行, 値)])`
-/// として返す (呼び出し側が稠密な階数判定で仕上げる。疎な消去は密になった終盤で極端に遅くなるため)。
-/// `dense_limit == 0` なら最後まで疎に消去する。
-///
-/// 等式行を列、変数を行とした行列を渡すと、返る列の集合が一次独立な等式の極大集合になる
-/// (HiGHS の従属等式除去が `HFactor` の階数落ち情報を使うのと同じ考え方)。基底行列を渡すと、
-/// ピボットが取れない列 (数値的に従属な基底列) とピボットが取れない行 (2 番目の戻り値) が基底修復に使える。
-#[allow(clippy::type_complexity)]
-pub(crate) fn markowitz_independent_columns(m: usize, rows_in: &[Vec<(usize, f64)>], col_floor: &[f64], dense_limit: usize, dense_fraction: f64) -> (Vec<usize>, Vec<usize>, Vec<(usize, Vec<(usize, f64)>)>) {
-    assert_eq!(col_floor.len(), m, "col_floor must have one entry per column");
-    let mut state = MarkowitzState::new(m, rows_in);
-    state.col_floor = col_floor.to_vec();
-    let mut row_perm = vec![0usize; m];
-    let mut col_perm = vec![0usize; m];
-    // 前処理の出力 (`U` の要素) は使わないが、前処理の引数として要る。
-    let mut u_entries: Vec<(usize, usize, f64)> = Vec::new();
-    let peeled = state.peel_column_singletons(&mut row_perm, &mut col_perm, &mut u_entries);
-    let mut pivoted: Vec<usize> = col_perm[..peeled].to_vec();
-    let mut pivot_row_snapshot: Vec<(usize, f64)> = Vec::new();
-    let dbg_indep = env_str!("ENOMOTO_DEBUG_INDEP").is_some();
-    let t0 = std::time::Instant::now();
-    let mut remainder: Vec<(usize, Vec<(usize, f64)>)> = Vec::new();
-    let check_every = ((0..m).filter(|&j| state.mat.col_act[j] > 0).count() / 128).max(64);
-    for step in peeled..m {
-        let found = state.find_best_pivot_impl::<true>(true).or_else(|| state.find_best_pivot_impl::<true>(false));
-        // 全要素が下限未満になった列 (従属と確定) をバケットから除き、以後は消去の対象からも外す
-        // (使用済みの印を付けるとピボット行の写しに入らないので、値も更新されない)。
-        while let Some(j) = state.dead_cols.pop() {
-            if !state.col_used[j] {
-                state.remove_from_bucket_col(j);
-                state.col_used[j] = true;
-            }
-        }
-        let Some((pi, pj)) = found else { break };
-        // 稠密切替の判定は `O(m)` なので、要素のある列数の 1/128 (最低 64) ステップごとに行う
-        // (判定は高々 128 回程度で総手間 `O(128 m)`、終盤の密になる区間も同じ細かさで捉える)。
-        if dense_limit > 0 && step % check_every == 0 {
-            // 残りの列 (未使用で活性要素あり) と要素のある残りの行
-            let cols_left = (0..m).filter(|&j| !state.col_used[j] && state.mat.col_act[j] > 0).count();
-            let rows_left = (0..m).filter(|&i| !state.row_used[i] && state.mat.row_len[i] > 0).count();
-            let active: usize = (0..m).filter(|&i| !state.row_used[i]).map(|i| state.mat.row_len[i]).sum();
-            let size = cols_left.saturating_mul(rows_left);
-            if dbg_indep {
-                eprintln!("INDEP step={step} pivoted={} active={active} cols_left={cols_left} rows_left={rows_left} t={:.3}s", pivoted.len(), t0.elapsed().as_secs_f64());
-            }
-            if size > 0 && size <= dense_limit && active as f64 >= dense_fraction * size as f64 {
-                // 残りの活性部分を列ごとに書き出す (行は要素のある残りの行に詰め直す)。
-                let mut row_local = vec![usize::MAX; m];
-                let mut next = 0usize;
-                for i in 0..m {
-                    if !state.row_used[i] && state.mat.row_len[i] > 0 {
-                        row_local[i] = next;
-                        next += 1;
-                    }
-                }
-                let mut col_local = vec![usize::MAX; m];
-                for j in 0..m {
-                    if !state.col_used[j] && state.mat.col_act[j] > 0 {
-                        col_local[j] = remainder.len();
-                        remainder.push((j, Vec::new()));
-                    }
-                }
-                for i in 0..m {
-                    if row_local[i] == usize::MAX {
-                        continue;
-                    }
-                    for (j, v) in state.row(i) {
-                        if v != 0.0 && col_local[j] != usize::MAX {
-                            remainder[col_local[j]].1.push((row_local[i], v));
-                        }
-                    }
-                }
-                break;
-            }
-        }
-        state.row_used[pi] = true;
-        state.col_used[pj] = true;
-        state.remove_from_bucket_row(pi);
-        state.remove_from_bucket_col(pj);
-        let pivot_val = state.value_at(pi, pj).unwrap();
-        pivot_row_snapshot.clear();
-        pivot_row_snapshot.extend(state.row(pi).filter(|&(j, v)| v != 0.0 && (j == pj || !state.col_used[j])));
-        state.eliminate(pi, pj, pivot_val, &pivot_row_snapshot);
-        pivoted.push(pj);
-    }
-    if dbg_indep {
-        eprintln!("INDEP done pivoted={} remainder_cols={} t={:.3}s", pivoted.len(), remainder.len(), t0.elapsed().as_secs_f64());
-    }
-    pivoted.sort_unstable();
-    // ピボットが取れなかった行 (稠密な仕上げに回した場合はその行も含む)。
-    let free_rows: Vec<usize> = (0..m).filter(|&i| !state.row_used[i]).collect();
-    (pivoted, free_rows, remainder)
+    factorize_flat_markowitz_routed(m, rows_in, is_dense_input(m, rows_in))
 }
 
 /// B3 診断: 残りを稠密分解に切り替えた分解の回数。
@@ -2136,7 +1989,7 @@ pub(crate) static PROF_DENSE_SWITCH_ROWS: AtomicUsize = AtomicUsize::new(0);
 /// Markowitz 消去による分解本体 (`dense` なら [`factorize_dense_faer`] に回す)。
 /// 各ステップで稠密でないピボット列を優先し、無ければ制限なしで探す。
 /// ピボットが見つからなければ `None` (特異)。
-fn factorize_flat_markowitz_routed(m: usize, rows_in: &[Vec<(usize, f64)>], dense: bool, dense_switch: f64) -> Option<LuFactors> {
+fn factorize_flat_markowitz_routed(m: usize, rows_in: &[Vec<(usize, f64)>], dense: bool) -> Option<LuFactors> {
     if dense {
         return factorize_dense_faer(m, rows_in);
     }
@@ -2159,25 +2012,21 @@ fn factorize_flat_markowitz_routed(m: usize, rows_in: &[Vec<(usize, f64)>], dens
 
     // ピボット行のコピー (分解全体で 1 つのバッファを再利用)
     let mut pivot_row_snapshot: Vec<(usize, f64)> = Vec::new();
-    // B3 (`ENOMOTO_LU_DENSE_SWITCH`、経路が変わる): 活性部分行列の密度が `k^2` のこの割合に
-    // 達したら (`k` = 残り行数、`ENOMOTO_LU_DENSE_SWITCH_MIN` 以上)、残りの `k x k` ブロックを
-    // 稠密分解する。閾値は呼び出し側が決める (`dense_switch_for`、既定は LU が密な大きい基底だけ)。
+    // B3 (`ENOMOTO_LU_DENSE_SWITCH`、既定 `0` = off、経路が変わる): 活性部分行列の
+    // 密度が `k^2` のこの割合に達したら (`k` = 残り行数、`ENOMOTO_LU_DENSE_SWITCH_MIN`
+    // 以上)、残りの `k x k` ブロックを稠密分解する。
+    let dense_switch = tunable!("ENOMOTO_LU_DENSE_SWITCH", DENSE_SWITCH_FRACTION, f64);
     let dense_switch_min = tunable!("ENOMOTO_LU_DENSE_SWITCH_MIN", DENSE_SWITCH_MIN_ROWS, usize);
-    // 先頭の列シングルトンをまとめて採る (経路は下のループと同一)。列シングルトンは消去を
-    // 伴わず活性部分行列を密にしないので、密度判定はその後から始めてよい (nug08 報告 #3:
-    // 旧版は B3 有効時に前処理ごと止めていたので、切替の有無にかかわらず経路が変わっていた)。
-    let peeled = state.peel_column_singletons(&mut row_perm, &mut col_perm, &mut u_entries);
+    // 先頭の列シングルトンをまとめて採る (経路は下のループと同一)。B3 が有効なら
+    // ステップ 0 の密度判定を先に行う必要があるので使わない。
+    let peeled = if dense_switch > 0.0 { 0 } else { state.peel_column_singletons(&mut row_perm, &mut col_perm, &mut u_entries) };
     for step in peeled..m {
         if dense_switch > 0.0 && step % DENSE_SWITCH_CHECK_INTERVAL == 0 && m - step >= dense_switch_min {
             // 残りの行数
             let k = m - step;
-            // 閾値となる非ゼロ数
-            let need = dense_switch * (k as f64) * (k as f64);
-            // 行バッファの長さ (死領域を含む) は活性非ゼロ数の上界。これが届かないうちは
-            // `O(m)` の数え上げを省く (大きな `m` で 16 ステップごとの全行走査を避ける)。
             // 活性部分行列の非ゼロ数
-            let active: usize = if (state.mat.row_idx.len() as f64) < need { 0 } else { (0..m).filter(|&i| !state.row_used[i]).map(|i| state.mat.row_len[i]).sum() };
-            if active > 0 && active as f64 >= need {
+            let active: usize = (0..m).filter(|&i| !state.row_used[i]).map(|i| state.mat.row_len[i]).sum();
+            if active as f64 >= dense_switch * (k as f64) * (k as f64) {
                 // 残りの行・列 (元の番号)
                 let rows_r: Vec<usize> = (0..m).filter(|&i| !state.row_used[i]).collect();
                 let cols_c: Vec<usize> = (0..m).filter(|&j| !state.col_used[j]).collect();

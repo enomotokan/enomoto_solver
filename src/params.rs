@@ -141,11 +141,6 @@ pub(crate) mod slope_intercept_dual {
     /// まだ引き継ぎが要るなら解を信用せず `NotSolved` にする。
     pub(crate) const HANDOFF_MAX_ROUNDS: usize = 3;
 
-    /// nug08/irish 報告 #2: 特異基底の修復で、基底列 (Markowitz 消去の列) の要素を「消去の丸め残り」と
-    /// みなす絶対値の下限 (列の元のノルムに対する比、`ENOMOTO_T_BASIS_REPAIR_TOL`)。従属等式の検出
-    /// (`presolve::DEP_TOL`) と同じ 1e-9。
-    pub(crate) const BASIS_REPAIR_TOL: f64 = 1e-9;
-
     /// `x_B(M)` の増分維持値のドリフト検査(と eta フィル検査)を行う主ループの反復間隔。
     /// `fill_count` にかかわらず毎回検査し、古典法のように `RESIDUAL_CHECK_MULTIPLIER` で
     /// さらに間引くことはしない(比較の多くが傾き項で `LEX_REL_TOL = 1e-9` という厳しさで決まるため)。
@@ -534,25 +529,6 @@ pub(crate) mod lu {
     /// 達したら残りを稠密分解に切り替える。既定 `0.0` = 無効 (経路が変わるため)。
     pub(crate) const DENSE_SWITCH_FRACTION: f64 = 0.0;
 
-    /// nug08 報告 #3: 稠密切替を自動で有効にする行数の下限 (`ENOMOTO_T_LU_DENSE_SWITCH_AUTO_MIN_M`、
-    /// 0 で自動切替なし)。他の「大きな問題」向けの経路 (`XB_CHECK_CADENCE_LARGE_M` など) と同じ 1 万行。
-    /// Netlib (m ≤ 約 6K) には掛からない。
-    pub(crate) const DENSE_SWITCH_AUTO_MIN_M: usize = 10_000;
-
-    /// nug08 報告 #3: 直前の通常分解の `nnz(L+U)` がこの値 `* m` 以上なら稠密切替を自動で有効にする
-    /// (`ENOMOTO_T_LU_DENSE_SWITCH_AUTO_LU_PER_ROW`)。根拠: Markowitz 消去の手間は活性部分行列の
-    /// 行・列の長さの積で増え、LU が 1 行あたり数十要素まで膨らんだ基底では消去の終盤の活性部分が
-    /// ほぼ密になって、疎な探索 (`find_best_pivot` の走査・`col_max_abs` の再計算) が稠密 LU より
-    /// 桁違いに高くつく。LP 基底の LU は通常 1 行あたり数要素 (stormG2・pds-100 は 2〜4、cont1 は 12)
-    /// なので、32 は「疎な LU」の典型値より一桁大きい。nug08-3rd は 2 万反復以降 33〜84/行。
-    pub(crate) const DENSE_SWITCH_AUTO_LU_PER_ROW: usize = 32;
-
-    /// nug08 報告 #3: 自動で有効にしたときの稠密切替の閾値 (活性非ゼロ数 / `k^2`、
-    /// `ENOMOTO_T_LU_DENSE_SWITCH_AUTO`)。nug08-3rd の 30K 反復固定の実験で 0.15 は fill が増えすぎ
-    /// (−15%)、0.3〜0.5 が同程度 (−23〜25%)。稠密化した残りブロックは密度 0.3 で既に
-    /// 1 要素あたりの疎な更新 (添字・値の間接参照) が稠密な BLAS 更新の数倍かかる領域なので 0.3 を採る。
-    pub(crate) const DENSE_SWITCH_AUTO_FRACTION: f64 = 0.3;
-
     /// B3: 稠密切替を検討する残り行数の下限 (`ENOMOTO_LU_DENSE_SWITCH_MIN`)。
     pub(crate) const DENSE_SWITCH_MIN_ROWS: usize = 64;
 
@@ -752,37 +728,6 @@ pub(crate) mod presolve {
     /// 0 = ラウンド前に完全版 (重複 + 階数判定)、1 = 重複削除のみ、
     /// 2 = ラウンド前に重複削除、ラウンド後の縮小問題で階数判定。
     pub(crate) const REDEQ_MODE: usize = 1;
-
-    /// nug08 報告 #5・#6: ラウンド後の縮小した等式行から一次従属な行を Markowitz 消去
-    /// (`redundancy::drop_dependent_equalities_markowitz`) で落とす問題の大きさ (等式行 + 多変数の不等式行の数の
-    /// 下限、`ENOMOTO_T_REDEQ_MARKOWITZ_MIN_ROWS`、0 = 無効。`ENOMOTO_REDEQ_MARKOWITZ=0/1` で上書き)。
-    /// Netlib の A/B では階数判定を切って (REDEQ_MODE 1) −9.5% だった (presolve_pipeline_20260924 §6) ので
-    /// 小さな問題は従来どおり階数判定なし。従属等式は双対単体法では基底に残る人工的な自由度 (基底から
-    /// 出られないスラック) になり、反復の無駄と退化を増やすので、大きな問題では落とす (HiGHS も常に行う)。
-    pub(crate) const REDEQ_MARKOWITZ_MIN_ROWS: usize = 10_000;
-
-    /// nug08 報告 #5・#6: 上の従属等式の除去を行う等式行の平均要素数の上限
-    /// (`ENOMOTO_T_REDEQ_MARKOWITZ_MAX_ROW_LEN`)。消去の手間は行が疎なら fill に比例してほぼ線形だが、
-    /// 行が密だと「等式数^2 × 行の長さ」の稠密な消去になり (square41 は 1 行 2,524 要素で 8 s、従属行 0)、
-    /// 求解に比べて割に合わない。64 は LU の「密な列」の目安 (`DENSE_COL_FRACTION`) と同程度の、
-    /// 疎な LP の行 (数〜数十要素) より十分大きい値。
-    pub(crate) const REDEQ_MARKOWITZ_MAX_ROW_LEN: usize = 64;
-
-    /// nug08 報告 #5・#6: 見つかった従属等式が等式行のこの割合未満なら落とさない
-    /// (`ENOMOTO_T_REDEQ_MARKOWITZ_MIN_DROP_FRACTION`)。双対単体法では従属等式は基底に残るスラック 1 本で、
-    /// 数本なら反復への害はほぼ無い一方、行を落とすと反復経路が変わる (fome13 は 24,559 行中 104 行 (0.4%) を
-    /// 落として 14.7 → 17.5 s、pds-100 は 80,031 行中 11 行で 107 → 118 s)。nug08-3rd (14%) のように従属等式が
-    /// 退化の大きな原因になる規模だけで落とす。1% は両者の間の、桁で分かれる値。
-    pub(crate) const REDEQ_MARKOWITZ_MIN_DROP_FRACTION: f64 = 0.01;
-
-    /// nug08 報告 #6: 従属等式の Markowitz 消去で、残りの活性部分 (残りの列 × 要素のある残りの行) がこの要素数
-    /// 以下かつ密度が [`REDEQ_DENSE_FRACTION`] 以上になったら稠密な列ピボット付き QR に切り替える
-    /// (`ENOMOTO_T_REDEQ_DENSE_LIMIT`、0 = 最後まで疎)。1,600 万要素 = 128 MB の稠密行列が上限。
-    pub(crate) const REDEQ_DENSE_LIMIT: usize = 16_000_000;
-
-    /// nug08 報告 #6: 上の稠密切替の密度の下限。疎な消去は 1 ステップの手間が「ピボット列の要素数 × ピボット行の
-    /// 長さ」で、活性部分の密度が数 % を超えると稠密な QR (1 要素あたりの手間が数倍小さい) に負ける。
-    pub(crate) const REDEQ_DENSE_FRACTION: f64 = 0.05;
 
     /// G を上下限と多変数行に分離したまま保持するか (1 = 保持。0 だと毎回 CSR を構築。
     /// `ENOMOTO_T_PRESOLVE_SPLIT_G`)。
