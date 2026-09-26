@@ -740,9 +740,6 @@ struct MarkowitzState {
     col_value_cache: Vec<Option<f64>>,
     /// `ENOMOTO_LU_LAZY_COLMAX` (既定 on): 遅延再計算を使うか。分解ごとに 1 回読む。
     lazy_colmax: bool,
-    /// 密行列の分解 #6 (`ENOMOTO_LU_EXACT_COLMAX`、既定 on): 消去の値の変化で `col_max_abs` を保ち、
-    /// 最大値だった要素が小さくなった列だけ古い印にする ([`Self::colmax_note`])。選ばれるピボットは不変。
-    exact_colmax: bool,
     /// `ENOMOTO_LU_ROW_SINGLETON=<rel>` (**経路が変わる。既定 off = `-1`**)。
     /// `>= 0` のとき、列シングルトンが無ければ、列最大値の `rel` 倍以上の
     /// 要素を持つ最初の活性行シングルトンを即座に採る (`rel = 0` は HiGHS の
@@ -891,7 +888,6 @@ impl MarkowitzState {
             row_singleton_rel: env_str!("ENOMOTO_LU_ROW_SINGLETON").and_then(|v| v.parse::<f64>().ok()).unwrap_or(-1.0),
             row_search: tunable!("ENOMOTO_PIVOT_ROW_SEARCH", PIVOT_ROW_SEARCH_MAX_DEGREE, usize),
             lazy_colmax: !matches!(env_str!("ENOMOTO_LU_LAZY_COLMAX"), Some("0")),
-            exact_colmax: !matches!(env_str!("ENOMOTO_LU_EXACT_COLMAX"), Some("0")),
             col_floor: Vec::new(),
             dead_cols: Vec::new(),
         }
@@ -982,26 +978,7 @@ impl MarkowitzState {
         }
         let new_deg = self.mat.col_act[j];
         self.update_col_degree(j, new_deg);
-        if !self.exact_colmax {
-            self.col_max_abs_dirty[j] = true;
-        }
-    }
-
-    /// 密行列の分解 #6: 列 `j` の活性要素の絶対値が `old_abs` から `new_abs` に変わった (退出は
-    /// `new_abs = 0`、フィルインは `old_abs = 0`) ことを `col_max_abs` に反映する。古い印の列は
-    /// そのまま (後で再計算される)。最大値だった要素が小さくなったときだけ古い印を付けるので、
-    /// 印のない列の `col_max_abs` は常に列ミラーからの再計算と同じ値 (最大値は順序によらない)。
-    #[inline(always)]
-    fn colmax_note(cmax: &mut [f64], dirty: &mut [bool], j: usize, old_abs: f64, new_abs: f64) {
-        if dirty[j] {
-            return;
-        }
-        let c = cmax[j];
-        if new_abs > c {
-            cmax[j] = new_abs;
-        } else if old_abs == c && new_abs < c {
-            dirty[j] = true;
-        }
+        self.col_max_abs_dirty[j] = true;
     }
 
     /// `col_max_abs[j]` が古い印付きなら列ミラーから再計算する (そうでなければ何もしない)。
@@ -1112,12 +1089,6 @@ impl MarkowitzState {
                 }
                 // 閾値ピボットの下限 (NaN = 未計算の古い列)
                 let mut min_pivot = if self.col_max_abs_dirty[j] { f64::NAN } else { threshold * self.col_max_abs[j] };
-                // #6: 印のない列の `col_max_abs` は列ミラーからの再計算と一致する
-                #[cfg(debug_assertions)]
-                if !self.col_max_abs_dirty[j] {
-                    let mx = mat.col(j).iter().filter_map(|&r| mat.row_get(r as usize, j)).fold(0.0f64, |a, v| a.max(v.abs()));
-                    debug_assert_eq!(mx, self.col_max_abs[j], "col_max_abs of column {j} is stale");
-                }
                 // `col_value_cache` にこの列の値がキャッシュ済みか
                 let mut cached = false;
                 // 列ミラーは活性行だけを保持している。
@@ -1344,11 +1315,6 @@ impl MarkowitzState {
                 }
                 if !self.col_used[j] {
                     self.mat.col_retire(j);
-                    if self.exact_colmax {
-                        // 引退したピボット行の要素が列 `j` から退出する (#6)
-                        let v = self.mat.row_val[p];
-                        Self::colmax_note(&mut self.col_max_abs, &mut self.col_max_abs_dirty, j, v.abs(), 0.0);
-                    }
                 }
                 self.refresh_column(j);
             }
@@ -1380,10 +1346,6 @@ impl MarkowitzState {
     fn eliminate(&mut self, pi: usize, pj: usize, pivot_val: f64, pivot_row_snapshot: &[(usize, f64)]) {
         let mut sc = std::mem::take(&mut self.scratch);
         sc.begin();
-        // #6: `col_max_abs` を値の変化で保つか
-        let exact_colmax = self.exact_colmax;
-        // 単純マージ経路 (`merge_row`) を通った行があったか
-        let mut merged = false;
 
         sc.affected.clear();
         sc.affected.extend(self.mat.col(pj).iter().map(|&r| r as usize).filter(|&i| i != pi));
@@ -1420,8 +1382,6 @@ impl MarkowitzState {
                 let idx = &self.mat.row_idx[s0..s0 + len];
                 let val = &mut self.mat.row_val[s0..s0 + len];
                 let wval = &sc.wval[..];
-                let cmax = &mut self.col_max_abs[..];
-                let cdirty = &mut self.col_max_abs_dirty[..];
                 // この行が持っていたピボット行の列の数
                 let mut found = 0usize;
                 // 更新で厳密に 0 になった要素数
@@ -1434,9 +1394,6 @@ impl MarkowitzState {
                     let pv = unsafe { *wval.get_unchecked(j as usize) };
                     found += (pv != 0.0) as usize;
                     let nv = *v - mult * pv;
-                    if exact_colmax && pv != 0.0 {
-                        Self::colmax_note(cmax, cdirty, j as usize, v.abs(), nv.abs());
-                    }
                     *v = nv;
                     zeros += (nv == 0.0) as usize;
                 }
@@ -1482,9 +1439,6 @@ impl MarkowitzState {
                         if jb != pj && sc.rmark[jb] != stamp {
                             let nv = -mult * vb;
                             if nv != 0.0 {
-                                if exact_colmax {
-                                    Self::colmax_note(&mut self.col_max_abs, &mut self.col_max_abs_dirty, jb, 0.0, nv.abs());
-                                }
                                 sc.fill_idx.push(jb as u32);
                                 sc.fill_val.push(nv);
                                 sc.col_add.push(jb);
@@ -1516,8 +1470,6 @@ impl MarkowitzState {
                     w + nf
                 }
             } else {
-                // 単純マージ経路では値の変化を追わない (ピボット行の列を最後に古い印にする)
-                merged = true;
                 self.merge_row(&mut sc, i, pj, mult, pivot_row_snapshot)
             };
 
@@ -1540,22 +1492,8 @@ impl MarkowitzState {
         // 走査して同点を先勝ちで決める)。
         sc.pi_cols.clear();
         {
-            let (idx, val) = self.mat.row(pi);
+            let (idx, _) = self.mat.row(pi);
             sc.pi_cols.extend(idx.iter().map(|&j| j as usize).filter(|&j| j != pj));
-            if self.exact_colmax {
-                // ピボット行の要素が各列から退出する (#6)。単純マージ経路を通った列は古い印にする。
-                for (&j, &v) in idx.iter().zip(val.iter()) {
-                    let j = j as usize;
-                    if j == pj || self.col_used[j] {
-                        continue;
-                    }
-                    if merged {
-                        self.col_max_abs_dirty[j] = true;
-                    } else {
-                        Self::colmax_note(&mut self.col_max_abs, &mut self.col_max_abs_dirty, j, v.abs(), 0.0);
-                    }
-                }
-            }
         }
         for k in 0..sc.pi_cols.len() {
             let j = sc.pi_cols[k];
@@ -3269,13 +3207,22 @@ impl LuFactors {
             scratch.stack.push(seed);
             while let Some(node) = scratch.stack.pop() {
                 scratch.reach.push(node);
-                self.l_col.seg(node).for_each(|next, v| {
+                let seg = self.l_col.seg(node);
+                for &next in seg.idx {
+                    let next = next as usize;
+                    if !scratch.visited.is_marked(next) {
+                        scratch.visited.mark(next);
+                        scratch.stack.push(next);
+                    }
+                }
+                for (t, &v) in seg.rval.iter().enumerate() {
                     // 密な区間の 0 は辺でない (疎な形式と同じ到達集合にする)
+                    let next = seg.rlo + t;
                     if v != 0.0 && !scratch.visited.is_marked(next) {
                         scratch.visited.mark(next);
                         scratch.stack.push(next);
                     }
-                });
+                }
             }
         }
         scratch.reach.sort_unstable();
@@ -4318,6 +4265,8 @@ pub struct FtLu {
     single_piv: Vec<f64>,
     /// `col_perm` の `u32` 版 ([`Self::permute_out_pair`] 用)。
     perm32: Vec<u32>,
+    /// #5 の 2 本同時の出力置換を使うか (`ENOMOTO_PERMUTE_PAIR=0` で無効、A/B 用)。
+    permute_pair: bool,
     /// `L` の列が非空のステップ (昇順)。密 `L` 段が訪れる必要があるのはこれだけ
     /// ([`LuFactors::l_solve_into_pair`] 参照)。
     l_active: Vec<u32>,
@@ -4525,6 +4474,7 @@ impl FtLu {
             singles_pos,
             single_piv,
             perm32,
+            permute_pair: !matches!(env_str!("ENOMOTO_PERMUTE_PAIR"), Some("0")),
             l_active,
             slot_pos,
             row_owners,
@@ -6035,7 +5985,7 @@ impl FtLu {
         }
         // シングルトンの除算は `permute_out` が行う (`single_piv` 参照)。
         let a_list = if a_u == UHyper::Hyper { gp_a.as_deref().map(|g| g.u_list.as_slice()) } else { None };
-        if !b_partial && a_list.is_none() && b_u != UHyper::Hyper {
+        if self.permute_pair && !b_partial && a_list.is_none() && b_u != UHyper::Hyper {
             // #5: 両方とも全走査の出力なら 1 回の走査で置換する (置換表・ピボットを 1 回読む)。
             if let Some(t) = track.as_deref_mut() {
                 t.alpha.set_full();
