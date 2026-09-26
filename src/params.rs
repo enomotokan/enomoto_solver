@@ -553,6 +553,10 @@ pub(crate) mod lu {
     /// 1 要素あたりの疎な更新 (添字・値の間接参照) が稠密な BLAS 更新の数倍かかる領域なので 0.3 を採る。
     pub(crate) const DENSE_SWITCH_AUTO_FRACTION: f64 = 0.3;
 
+    /// 密行列の分解 #7: 稠密切替した分解の構築 tick (`FtLu::build_tick`) で、密ブロックの `k^2` 要素を
+    /// この倍率で数える (`ENOMOTO_T_DENSE_BLOCK_TICK_FRACTION`)。1.0 = 他の要素と同じ。
+    pub(crate) const DENSE_BLOCK_TICK_FRACTION: f64 = 1.0;
+
     /// B3: 稠密切替を検討する残り行数の下限 (`ENOMOTO_LU_DENSE_SWITCH_MIN`)。
     pub(crate) const DENSE_SWITCH_MIN_ROWS: usize = 64;
 

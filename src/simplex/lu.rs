@@ -28,7 +28,7 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
-use crate::params::lu::{BORDER_MAX_COUNT, BORDER_MAX_FRACTION, BTRAN_HYPER_FRACTION, BTRAN_L_SCATTER_FRACTION, BUCKET_POOL_MAX, DENSE_COL_FRACTION, DENSE_ETA_FRACTION, DENSE_INPUT_FRACTION, DENSE_RHS_FRACTION, DENSE_SWITCH_AUTO_FRACTION, DENSE_SWITCH_AUTO_LU_PER_ROW, DENSE_SWITCH_AUTO_MIN_M, DENSE_SWITCH_CHECK_INTERVAL, DENSE_SWITCH_FRACTION, DENSE_SWITCH_MIN_ROWS, DENSITY_AVERAGE_MULTIPLIER, EXPECTED_DENSE_FRACTION, KERNEL_LINEAR_SCAN_MAX, KERNEL_MIN_RUN_CAP, KERNEL_RESERVE_EXTRA, KERNEL_RESERVE_MULT, PIVOT_ROW_SEARCH_MAX_DEGREE, PIVOT_SEARCH_LIMIT, PIVOT_THRESHOLD_FACTOR, PIVOT_THRESHOLD_MAX, PIVOT_THRESHOLD_MIN, R_SPARSE_MIN_ETAS, REBUILD_FILL_LIMIT, SPARSE_PATH_MIN_M, REBUILD_MIN_PIVOT, REUSE_BACKOFF_SHIFT_CAP, REUSE_MAX_BACKOFF, STABILITY, TAU_GP_FRACTION, TICK_BUILD_FLOP_COEF, TICK_BUILD_LU_COEF, TICK_BUILD_M_COEF, TICK_SOLVE_NNZ_COEF, TINY_DROP, U_HYPER_ABORT_FRACTION};
+use crate::params::lu::{BORDER_MAX_COUNT, BORDER_MAX_FRACTION, BTRAN_HYPER_FRACTION, BTRAN_L_SCATTER_FRACTION, BUCKET_POOL_MAX, DENSE_COL_FRACTION, DENSE_ETA_FRACTION, DENSE_INPUT_FRACTION, DENSE_RHS_FRACTION, DENSE_BLOCK_TICK_FRACTION, DENSE_SWITCH_AUTO_FRACTION, DENSE_SWITCH_AUTO_LU_PER_ROW, DENSE_SWITCH_AUTO_MIN_M, DENSE_SWITCH_CHECK_INTERVAL, DENSE_SWITCH_FRACTION, DENSE_SWITCH_MIN_ROWS, DENSITY_AVERAGE_MULTIPLIER, EXPECTED_DENSE_FRACTION, KERNEL_LINEAR_SCAN_MAX, KERNEL_MIN_RUN_CAP, KERNEL_RESERVE_EXTRA, KERNEL_RESERVE_MULT, PIVOT_ROW_SEARCH_MAX_DEGREE, PIVOT_SEARCH_LIMIT, PIVOT_THRESHOLD_FACTOR, PIVOT_THRESHOLD_MAX, PIVOT_THRESHOLD_MIN, R_SPARSE_MIN_ETAS, REBUILD_FILL_LIMIT, SPARSE_PATH_MIN_M, REBUILD_MIN_PIVOT, REUSE_BACKOFF_SHIFT_CAP, REUSE_MAX_BACKOFF, STABILITY, TAU_GP_FRACTION, TICK_BUILD_FLOP_COEF, TICK_BUILD_LU_COEF, TICK_BUILD_M_COEF, TICK_SOLVE_NNZ_COEF, TINY_DROP, U_HYPER_ABORT_FRACTION};
 
 /// `L` の列 (および行優先ミラー) の圧縮格納 (密行列の分解の調査 #3)。添字 `u32` と値 `f64` を
 /// 別配列に持つ (1 要素 12 B。旧 [`CscMat`] は `(usize, f64)` の 16 B)。FTRAN/BTRAN の `L` 段は
@@ -2111,7 +2111,11 @@ pub fn factorize_reusing(m: usize, rows_in: &[Vec<(usize, f64)>], prev: Option<&
     let border = detect_border_columns(m, rows_in);
     let dense = is_dense_input(m, rows_in);
     // 再利用の対象になるか (有効かつ非稠密かつ境界付き経路でない)
-    let eligible = reuse_pivot_order_enabled() && m > 0 && !dense && !border_wanted(m, border.len());
+    // 密行列の分解 #2: 直前の分解が稠密切替した (密ブロックを持つ) なら、ピボット順の再利用は試さない
+    // (左視分解が密ブロックの k^2 要素を疎に扱うので高くつき、nug08-3rd では fill 超過で大半が棄却される。
+    // `ENOMOTO_LU_REUSE_AFTER_SWITCH=1` で従来どおり試す)。
+    let after_switch = prev.base.dense_s0 < m && !matches!(env_str!("ENOMOTO_LU_REUSE_AFTER_SWITCH"), Some("1"));
+    let eligible = reuse_pivot_order_enabled() && m > 0 && !dense && !border_wanted(m, border.len()) && !after_switch;
     if eligible && prev.reuse_skips_left == 0 {
         let t0 = std::time::Instant::now();
         PROF_REBUILD_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
@@ -4410,6 +4414,15 @@ impl FtLu {
         // `u_countX` と同じく非対角だけを数える)。
         let u_off: u64 = base.u_row.iter().map(|v| v.len().saturating_sub(1) as u64).sum();
         let mut build_tick = tunable!("ENOMOTO_T_TICK_BUILD_M_COEF", TICK_BUILD_M_COEF, u64) * m as u64 + tunable!("ENOMOTO_T_TICK_BUILD_LU_COEF", TICK_BUILD_LU_COEF, u64) * (l_nnz + u_off);
+        if s0 < m {
+            // 密行列の分解 #7: 密ブロック (k x k) の分解は稠密 LU で疎な消去より桁違いに安いので、構築 tick の
+            // ブロック分 (k^2 要素) を `DENSE_BLOCK_TICK_FRACTION` 倍に数える (再分解を早めて eta の蓄積を抑える)。
+            let frac = tunable!("ENOMOTO_T_DENSE_BLOCK_TICK_FRACTION", DENSE_BLOCK_TICK_FRACTION, f64);
+            let k = (m - s0) as f64;
+            let block = (k * k).min((l_nnz + u_off) as f64);
+            let cut = ((1.0 - frac.clamp(0.0, 1.0)) * block) as u64 * tunable!("ENOMOTO_T_TICK_BUILD_LU_COEF", TICK_BUILD_LU_COEF, u64);
+            build_tick = build_tick.saturating_sub(cut);
+        }
         // S16 (既定 off): 消去の積和回数 `Σ_s |L 列 s| · |U 行 s の非対角|`
         // (完成した因子から復元した古典的 LU 演算数) を構築 tick に加える。
         let flop_coef = tunable!("ENOMOTO_T_TICK_BUILD_FLOP_COEF", TICK_BUILD_FLOP_COEF, u64);
