@@ -740,6 +740,9 @@ struct MarkowitzState {
     col_value_cache: Vec<Option<f64>>,
     /// `ENOMOTO_LU_LAZY_COLMAX` (既定 on): 遅延再計算を使うか。分解ごとに 1 回読む。
     lazy_colmax: bool,
+    /// 密行列の分解 #6 (`ENOMOTO_LU_EXACT_COLMAX`、既定 on): 消去の値の変化で `col_max_abs` を保ち、
+    /// 最大値だった要素が小さくなった列だけ古い印にする ([`Self::colmax_note`])。選ばれるピボットは不変。
+    exact_colmax: bool,
     /// `ENOMOTO_LU_ROW_SINGLETON=<rel>` (**経路が変わる。既定 off = `-1`**)。
     /// `>= 0` のとき、列シングルトンが無ければ、列最大値の `rel` 倍以上の
     /// 要素を持つ最初の活性行シングルトンを即座に採る (`rel = 0` は HiGHS の
@@ -888,6 +891,7 @@ impl MarkowitzState {
             row_singleton_rel: env_str!("ENOMOTO_LU_ROW_SINGLETON").and_then(|v| v.parse::<f64>().ok()).unwrap_or(-1.0),
             row_search: tunable!("ENOMOTO_PIVOT_ROW_SEARCH", PIVOT_ROW_SEARCH_MAX_DEGREE, usize),
             lazy_colmax: !matches!(env_str!("ENOMOTO_LU_LAZY_COLMAX"), Some("0")),
+            exact_colmax: !matches!(env_str!("ENOMOTO_LU_EXACT_COLMAX"), Some("0")),
             col_floor: Vec::new(),
             dead_cols: Vec::new(),
         }
@@ -978,7 +982,26 @@ impl MarkowitzState {
         }
         let new_deg = self.mat.col_act[j];
         self.update_col_degree(j, new_deg);
-        self.col_max_abs_dirty[j] = true;
+        if !self.exact_colmax {
+            self.col_max_abs_dirty[j] = true;
+        }
+    }
+
+    /// 密行列の分解 #6: 列 `j` の活性要素の絶対値が `old_abs` から `new_abs` に変わった (退出は
+    /// `new_abs = 0`、フィルインは `old_abs = 0`) ことを `col_max_abs` に反映する。古い印の列は
+    /// そのまま (後で再計算される)。最大値だった要素が小さくなったときだけ古い印を付けるので、
+    /// 印のない列の `col_max_abs` は常に列ミラーからの再計算と同じ値 (最大値は順序によらない)。
+    #[inline(always)]
+    fn colmax_note(cmax: &mut [f64], dirty: &mut [bool], j: usize, old_abs: f64, new_abs: f64) {
+        if dirty[j] {
+            return;
+        }
+        let c = cmax[j];
+        if new_abs > c {
+            cmax[j] = new_abs;
+        } else if old_abs == c && new_abs < c {
+            dirty[j] = true;
+        }
     }
 
     /// `col_max_abs[j]` が古い印付きなら列ミラーから再計算する (そうでなければ何もしない)。
@@ -1089,6 +1112,12 @@ impl MarkowitzState {
                 }
                 // 閾値ピボットの下限 (NaN = 未計算の古い列)
                 let mut min_pivot = if self.col_max_abs_dirty[j] { f64::NAN } else { threshold * self.col_max_abs[j] };
+                // #6: 印のない列の `col_max_abs` は列ミラーからの再計算と一致する
+                #[cfg(debug_assertions)]
+                if !self.col_max_abs_dirty[j] {
+                    let mx = mat.col(j).iter().filter_map(|&r| mat.row_get(r as usize, j)).fold(0.0f64, |a, v| a.max(v.abs()));
+                    debug_assert_eq!(mx, self.col_max_abs[j], "col_max_abs of column {j} is stale");
+                }
                 // `col_value_cache` にこの列の値がキャッシュ済みか
                 let mut cached = false;
                 // 列ミラーは活性行だけを保持している。
@@ -1315,6 +1344,11 @@ impl MarkowitzState {
                 }
                 if !self.col_used[j] {
                     self.mat.col_retire(j);
+                    if self.exact_colmax {
+                        // 引退したピボット行の要素が列 `j` から退出する (#6)
+                        let v = self.mat.row_val[p];
+                        Self::colmax_note(&mut self.col_max_abs, &mut self.col_max_abs_dirty, j, v.abs(), 0.0);
+                    }
                 }
                 self.refresh_column(j);
             }
@@ -1346,6 +1380,10 @@ impl MarkowitzState {
     fn eliminate(&mut self, pi: usize, pj: usize, pivot_val: f64, pivot_row_snapshot: &[(usize, f64)]) {
         let mut sc = std::mem::take(&mut self.scratch);
         sc.begin();
+        // #6: `col_max_abs` を値の変化で保つか
+        let exact_colmax = self.exact_colmax;
+        // 単純マージ経路 (`merge_row`) を通った行があったか
+        let mut merged = false;
 
         sc.affected.clear();
         sc.affected.extend(self.mat.col(pj).iter().map(|&r| r as usize).filter(|&i| i != pi));
@@ -1382,6 +1420,8 @@ impl MarkowitzState {
                 let idx = &self.mat.row_idx[s0..s0 + len];
                 let val = &mut self.mat.row_val[s0..s0 + len];
                 let wval = &sc.wval[..];
+                let cmax = &mut self.col_max_abs[..];
+                let cdirty = &mut self.col_max_abs_dirty[..];
                 // この行が持っていたピボット行の列の数
                 let mut found = 0usize;
                 // 更新で厳密に 0 になった要素数
@@ -1394,6 +1434,9 @@ impl MarkowitzState {
                     let pv = unsafe { *wval.get_unchecked(j as usize) };
                     found += (pv != 0.0) as usize;
                     let nv = *v - mult * pv;
+                    if exact_colmax && pv != 0.0 {
+                        Self::colmax_note(cmax, cdirty, j as usize, v.abs(), nv.abs());
+                    }
                     *v = nv;
                     zeros += (nv == 0.0) as usize;
                 }
@@ -1439,6 +1482,9 @@ impl MarkowitzState {
                         if jb != pj && sc.rmark[jb] != stamp {
                             let nv = -mult * vb;
                             if nv != 0.0 {
+                                if exact_colmax {
+                                    Self::colmax_note(&mut self.col_max_abs, &mut self.col_max_abs_dirty, jb, 0.0, nv.abs());
+                                }
                                 sc.fill_idx.push(jb as u32);
                                 sc.fill_val.push(nv);
                                 sc.col_add.push(jb);
@@ -1470,6 +1516,8 @@ impl MarkowitzState {
                     w + nf
                 }
             } else {
+                // 単純マージ経路では値の変化を追わない (ピボット行の列を最後に古い印にする)
+                merged = true;
                 self.merge_row(&mut sc, i, pj, mult, pivot_row_snapshot)
             };
 
@@ -1492,8 +1540,22 @@ impl MarkowitzState {
         // 走査して同点を先勝ちで決める)。
         sc.pi_cols.clear();
         {
-            let (idx, _) = self.mat.row(pi);
+            let (idx, val) = self.mat.row(pi);
             sc.pi_cols.extend(idx.iter().map(|&j| j as usize).filter(|&j| j != pj));
+            if self.exact_colmax {
+                // ピボット行の要素が各列から退出する (#6)。単純マージ経路を通った列は古い印にする。
+                for (&j, &v) in idx.iter().zip(val.iter()) {
+                    let j = j as usize;
+                    if j == pj || self.col_used[j] {
+                        continue;
+                    }
+                    if merged {
+                        self.col_max_abs_dirty[j] = true;
+                    } else {
+                        Self::colmax_note(&mut self.col_max_abs, &mut self.col_max_abs_dirty, j, v.abs(), 0.0);
+                    }
+                }
+            }
         }
         for k in 0..sc.pi_cols.len() {
             let j = sc.pi_cols[k];
@@ -2978,20 +3040,36 @@ impl LuFactors {
             match (xa != 0.0, xb != 0.0) {
                 (false, false) => {}
                 (true, true) => {
-                    self.l_col.seg(s).for_each(|row_step, mult| {
+                    let seg = self.l_col.seg(s);
+                    for (&row_step, &mult) in seg.idx.iter().zip(seg.val.iter()) {
+                        let row_step = row_step as usize;
                         za[row_step] -= mult * xa;
                         zb[row_step] -= mult * xb;
-                    });
+                    }
+                    if !seg.rval.is_empty() {
+                        sub_scaled_range(&mut za[seg.rlo..seg.rlo + seg.rval.len()], seg.rval, xa);
+                        sub_scaled_range(&mut zb[seg.rlo..seg.rlo + seg.rval.len()], seg.rval, xb);
+                    }
                 }
                 (true, false) => {
-                    self.l_col.seg(s).for_each(|row_step, mult| {
+                    let seg = self.l_col.seg(s);
+                    for (&row_step, &mult) in seg.idx.iter().zip(seg.val.iter()) {
+                        let row_step = row_step as usize;
                         za[row_step] -= mult * xa;
-                    });
+                    }
+                    if !seg.rval.is_empty() {
+                        sub_scaled_range(&mut za[seg.rlo..seg.rlo + seg.rval.len()], seg.rval, xa);
+                    }
                 }
                 (false, true) => {
-                    self.l_col.seg(s).for_each(|row_step, mult| {
+                    let seg = self.l_col.seg(s);
+                    for (&row_step, &mult) in seg.idx.iter().zip(seg.val.iter()) {
+                        let row_step = row_step as usize;
                         zb[row_step] -= mult * xb;
-                    });
+                    }
+                    if !seg.rval.is_empty() {
+                        sub_scaled_range(&mut zb[seg.rlo..seg.rlo + seg.rval.len()], seg.rval, xb);
+                    }
                 }
             }
         }
@@ -3016,36 +3094,64 @@ impl LuFactors {
             let xb = zb[s];
             let xc = zc[s];
             if xa != 0.0 && xb != 0.0 && xc != 0.0 {
-                self.l_col.seg(s).for_each(|row_step, mult| {
+                let seg = self.l_col.seg(s);
+                for (&row_step, &mult) in seg.idx.iter().zip(seg.val.iter()) {
+                    let row_step = row_step as usize;
                     za[row_step] -= mult * xa;
                     zb[row_step] -= mult * xb;
                     zc[row_step] -= mult * xc;
-                });
+                }
+                if !seg.rval.is_empty() {
+                    sub_scaled_range(&mut za[seg.rlo..seg.rlo + seg.rval.len()], seg.rval, xa);
+                    sub_scaled_range(&mut zb[seg.rlo..seg.rlo + seg.rval.len()], seg.rval, xb);
+                    sub_scaled_range(&mut zc[seg.rlo..seg.rlo + seg.rval.len()], seg.rval, xc);
+                }
                 continue;
             }
             match (xa != 0.0, xb != 0.0) {
                 (false, false) => {}
                 (true, true) => {
-                    self.l_col.seg(s).for_each(|row_step, mult| {
+                    let seg = self.l_col.seg(s);
+                    for (&row_step, &mult) in seg.idx.iter().zip(seg.val.iter()) {
+                        let row_step = row_step as usize;
                         za[row_step] -= mult * xa;
                         zb[row_step] -= mult * xb;
-                    });
+                    }
+                    if !seg.rval.is_empty() {
+                        sub_scaled_range(&mut za[seg.rlo..seg.rlo + seg.rval.len()], seg.rval, xa);
+                        sub_scaled_range(&mut zb[seg.rlo..seg.rlo + seg.rval.len()], seg.rval, xb);
+                    }
                 }
                 (true, false) => {
-                    self.l_col.seg(s).for_each(|row_step, mult| {
+                    let seg = self.l_col.seg(s);
+                    for (&row_step, &mult) in seg.idx.iter().zip(seg.val.iter()) {
+                        let row_step = row_step as usize;
                         za[row_step] -= mult * xa;
-                    });
+                    }
+                    if !seg.rval.is_empty() {
+                        sub_scaled_range(&mut za[seg.rlo..seg.rlo + seg.rval.len()], seg.rval, xa);
+                    }
                 }
                 (false, true) => {
-                    self.l_col.seg(s).for_each(|row_step, mult| {
+                    let seg = self.l_col.seg(s);
+                    for (&row_step, &mult) in seg.idx.iter().zip(seg.val.iter()) {
+                        let row_step = row_step as usize;
                         zb[row_step] -= mult * xb;
-                    });
+                    }
+                    if !seg.rval.is_empty() {
+                        sub_scaled_range(&mut zb[seg.rlo..seg.rlo + seg.rval.len()], seg.rval, xb);
+                    }
                 }
             }
             if xc != 0.0 {
-                self.l_col.seg(s).for_each(|row_step, mult| {
+                let seg = self.l_col.seg(s);
+                for (&row_step, &mult) in seg.idx.iter().zip(seg.val.iter()) {
+                    let row_step = row_step as usize;
                     zc[row_step] -= mult * xc;
-                });
+                }
+                if !seg.rval.is_empty() {
+                    sub_scaled_range(&mut zc[seg.rlo..seg.rlo + seg.rval.len()], seg.rval, xc);
+                }
             }
         }
     }
@@ -3064,9 +3170,14 @@ impl LuFactors {
             if z[s] == 0.0 {
                 continue;
             }
-            self.l_col.seg(s).for_each(|row_step, mult| {
-                z[row_step] -= mult * z[s];
-            });
+            let zs = z[s];
+            let seg = self.l_col.seg(s);
+            for (&row_step, &mult) in seg.idx.iter().zip(seg.val.iter()) {
+                z[row_step as usize] -= mult * zs;
+            }
+            if !seg.rval.is_empty() {
+                sub_scaled_range(&mut z[seg.rlo..seg.rlo + seg.rval.len()], seg.rval, zs);
+            }
         }
     }
 
@@ -3157,9 +3268,14 @@ impl LuFactors {
             if z[s] == 0.0 {
                 continue;
             }
-            self.l_col.seg(s).for_each(|row_step, mult| {
-                z[row_step] -= mult * z[s];
-            });
+            let zs = z[s];
+            let seg = self.l_col.seg(s);
+            for (&row_step, &mult) in seg.idx.iter().zip(seg.val.iter()) {
+                z[row_step as usize] -= mult * zs;
+            }
+            if !seg.rval.is_empty() {
+                sub_scaled_range(&mut z[seg.rlo..seg.rlo + seg.rval.len()], seg.rval, zs);
+            }
         }
     }
 
@@ -3178,6 +3294,9 @@ impl LuFactors {
     #[inline]
     fn l_transpose_gather_core(&self, w: &mut [f64]) {
         let m = self.m;
+        if self.l_col.has_block() {
+            return self.l_transpose_gather_core_block(w);
+        }
         for s in (0..m).rev() {
             self.l_col.seg(s).for_each(|row_step, mult| {
                 if w[row_step] == 0.0 {
@@ -3185,6 +3304,27 @@ impl LuFactors {
                 }
                 w[s] -= mult * w[row_step];
             });
+        }
+    }
+
+    /// 密ブロックがあるときの [`Self::l_transpose_gather_core`] (密行列の分解 #2)。ブロック内の列 (区間
+    /// `(s, m)`) は 0 判定なしの内積 ([`dot_lanes`]、4 本の部分和) で引く。疎な部分は従来どおり。
+    #[inline(never)]
+    fn l_transpose_gather_core_block(&self, w: &mut [f64]) {
+        let m = self.m;
+        for s in (0..m).rev() {
+            let seg = self.l_col.seg(s);
+            for (&r, &mult) in seg.idx.iter().zip(seg.val.iter()) {
+                let r = r as usize;
+                if w[r] == 0.0 {
+                    continue;
+                }
+                w[s] -= mult * w[r];
+            }
+            if !seg.rval.is_empty() {
+                let d = dot_lanes(seg.rval, &w[seg.rlo..seg.rlo + seg.rval.len()]);
+                w[s] -= d;
+            }
         }
     }
 
@@ -3210,9 +3350,14 @@ impl LuFactors {
             if ws == 0.0 {
                 continue;
             }
-            self.l_row.seg(s).for_each(|k, mult| {
+            let seg = self.l_row.seg(s);
+            for (&k, &mult) in seg.idx.iter().zip(seg.val.iter()) {
+                let k = k as usize;
                 w[k] -= mult * ws;
-            });
+            }
+            if !seg.rval.is_empty() {
+                sub_scaled_range(&mut w[seg.rlo..seg.rlo + seg.rval.len()], seg.rval, ws);
+            }
         }
     }
 
@@ -3665,6 +3810,35 @@ fn expected_dense_gate() -> f64 {
     env_str!("ENOMOTO_EXPECTED_DENSITY_GATE")
         .and_then(|v| v.parse::<f64>().ok())
         .unwrap_or(EXPECTED_DENSE_FRACTION)
+}
+
+/// `z[t] -= v[t] * x` (密行列の分解 #2 の密な区間の散布。各要素の演算は疎な形式と同じ)。
+#[inline(always)]
+fn sub_scaled_range(z: &mut [f64], v: &[f64], x: f64) {
+    for (zt, &vt) in z.iter_mut().zip(v.iter()) {
+        *zt -= vt * x;
+    }
+}
+
+/// 密な内積 (4 本の部分和で依存連鎖を切る。密行列の分解 #2 の密ブロック用)。
+#[inline]
+fn dot_lanes(a: &[f64], b: &[f64]) -> f64 {
+    debug_assert_eq!(a.len(), b.len());
+    let mut acc = [0.0f64; 4];
+    let ca = a.chunks_exact(4);
+    let cb = b.chunks_exact(4);
+    let (ra, rb) = (ca.remainder(), cb.remainder());
+    for (x, y) in ca.zip(cb) {
+        acc[0] += x[0] * y[0];
+        acc[1] += x[1] * y[1];
+        acc[2] += x[2] * y[2];
+        acc[3] += x[3] * y[3];
+    }
+    let mut tail = 0.0f64;
+    for (x, y) in ra.iter().zip(rb.iter()) {
+        tail += x * y;
+    }
+    (acc[0] + acc[1]) + (acc[2] + acc[3]) + tail
 }
 
 /// [`LuFactors::l_row`] を作る。スキャッタ形式が無効
@@ -6488,9 +6662,14 @@ impl FtLu {
                     if ws == 0.0 {
                         continue;
                     }
-                    base.l_row.seg(s2).for_each(|k, mult| {
+                    let seg = base.l_row.seg(s2);
+                    for (&k, &mult) in seg.idx.iter().zip(seg.val.iter()) {
+                        let k = k as usize;
                         w[k] -= mult * ws;
-                    });
+                    }
+                    if !seg.rval.is_empty() {
+                        sub_scaled_range(&mut w[seg.rlo..seg.rlo + seg.rval.len()], seg.rval, ws);
+                    }
                 }
                 btran_full_out(&base.row_perm, w, out, cap);
                 return false;
