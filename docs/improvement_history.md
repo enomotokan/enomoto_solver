@@ -7118,6 +7118,25 @@ m ≈ 378K 行) は反復数が HiGHS と同等なのに 1 反復 8.8 ms (HiGHS 
 - Mittelmann 5 問 (2 本並走): 目的関数値は HEAD と同じ (s250r10 のみ相対 3e-15 の差。pds-100・s250r10 は引き継ぎ経路に
   入り、戻った後の実行不能行 0)。stormG2_1000 73.2 s、square41 142.1 s、pds-100 128.0 s、ex10 114.5 s、s250r10 80.9 s。
 
+## nug08-3rd / irish-electricity 対応 (2026-09-26)
+
+分析 `analysis/nug08_irish_20260926_013500.md` (以下「報告 N」) の §5 の改善策の記録。策番号は報告 N のもの。比較の基準は
+cont1 対応 (上の節) の後のコミット。
+
+### 報告 N #3: 大きく密な LU の基底で稠密切替を自動で有効に (src/simplex/lu.rs `dense_switch_for`)
+
+- 既存の B3 (`ENOMOTO_LU_DENSE_SWITCH`、活性部分行列の密度が残り `k^2` の割合に達したら残りを faer の稠密 LU で分解) を、
+  [`factorize_reusing`] の通常分解で、行数 `m >= DENSE_SWITCH_AUTO_MIN_M` (1 万) かつ直前の通常分解の
+  `nnz(L+U) >= DENSE_SWITCH_AUTO_LU_PER_ROW · m` (32 m) のときだけ閾値 `DENSE_SWITCH_AUTO_FRACTION` (0.3) で有効にする。
+  LP 基底の LU は通常 1 行あたり数要素 (stormG2・pds-100 は 2〜4、cont1 は 12) で、nug08-3rd は 2 万反復以降 33〜84/行。
+  閾値 0.3 は報告 N §3 の 30K 反復固定の実験 (0.15 は fill が増えすぎ、0.3〜0.5 が同程度) から。
+- 旧実装は B3 が有効だと列シングルトンの前処理 (`peel_column_singletons`) ごと止めていたので、切替の有無にかかわらず
+  経路が変わっていた。列シングルトンは消去を伴わず密度を上げないので、前処理の後から密度判定をするようにした。
+- 密度判定の `O(m)` の数え上げは、行バッファの長さ (活性非零数の上界) が閾値に届くまで省く。
+- `ENOMOTO_LU_DENSE_SWITCH` を設定すれば従来どおり全分解でその値 (A/B 用)、`ENOMOTO_T_LU_DENSE_SWITCH_AUTO_MIN_M=0` で自動切替なし。
+- Netlib 93 問・Mittelmann の LU が疎な問題は条件を満たさず経路不変 (Netlib は目的関数値のビットが全問一致)。
+- nug08-3rd (2 本並走): 642 s (報告 N の HEAD) → 489 s (再分解 13%、稠密切替 51〜80 回)。
+
 ## 改名一覧 (整理時)
 
 本メモ中は旧名で書かれている。

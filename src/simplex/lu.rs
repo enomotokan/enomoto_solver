@@ -28,7 +28,7 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
-use crate::params::lu::{BORDER_MAX_COUNT, BORDER_MAX_FRACTION, BTRAN_HYPER_FRACTION, BTRAN_L_SCATTER_FRACTION, BUCKET_POOL_MAX, DENSE_COL_FRACTION, DENSE_ETA_FRACTION, DENSE_INPUT_FRACTION, DENSE_RHS_FRACTION, DENSE_SWITCH_CHECK_INTERVAL, DENSE_SWITCH_FRACTION, DENSE_SWITCH_MIN_ROWS, DENSITY_AVERAGE_MULTIPLIER, EXPECTED_DENSE_FRACTION, KERNEL_LINEAR_SCAN_MAX, KERNEL_MIN_RUN_CAP, KERNEL_RESERVE_EXTRA, KERNEL_RESERVE_MULT, PIVOT_ROW_SEARCH_MAX_DEGREE, PIVOT_SEARCH_LIMIT, PIVOT_THRESHOLD_FACTOR, PIVOT_THRESHOLD_MAX, PIVOT_THRESHOLD_MIN, R_SPARSE_MIN_ETAS, REBUILD_FILL_LIMIT, SPARSE_PATH_MIN_M, REBUILD_MIN_PIVOT, REUSE_BACKOFF_SHIFT_CAP, REUSE_MAX_BACKOFF, STABILITY, TAU_GP_FRACTION, TICK_BUILD_FLOP_COEF, TICK_BUILD_LU_COEF, TICK_BUILD_M_COEF, TICK_SOLVE_NNZ_COEF, TINY_DROP, U_HYPER_ABORT_FRACTION};
+use crate::params::lu::{BORDER_MAX_COUNT, BORDER_MAX_FRACTION, BTRAN_HYPER_FRACTION, BTRAN_L_SCATTER_FRACTION, BUCKET_POOL_MAX, DENSE_COL_FRACTION, DENSE_ETA_FRACTION, DENSE_INPUT_FRACTION, DENSE_RHS_FRACTION, DENSE_SWITCH_AUTO_FRACTION, DENSE_SWITCH_AUTO_LU_PER_ROW, DENSE_SWITCH_AUTO_MIN_M, DENSE_SWITCH_CHECK_INTERVAL, DENSE_SWITCH_FRACTION, DENSE_SWITCH_MIN_ROWS, DENSITY_AVERAGE_MULTIPLIER, EXPECTED_DENSE_FRACTION, KERNEL_LINEAR_SCAN_MAX, KERNEL_MIN_RUN_CAP, KERNEL_RESERVE_EXTRA, KERNEL_RESERVE_MULT, PIVOT_ROW_SEARCH_MAX_DEGREE, PIVOT_SEARCH_LIMIT, PIVOT_THRESHOLD_FACTOR, PIVOT_THRESHOLD_MAX, PIVOT_THRESHOLD_MIN, R_SPARSE_MIN_ETAS, REBUILD_FILL_LIMIT, SPARSE_PATH_MIN_M, REBUILD_MIN_PIVOT, REUSE_BACKOFF_SHIFT_CAP, REUSE_MAX_BACKOFF, STABILITY, TAU_GP_FRACTION, TICK_BUILD_FLOP_COEF, TICK_BUILD_LU_COEF, TICK_BUILD_M_COEF, TICK_SOLVE_NNZ_COEF, TINY_DROP, U_HYPER_ABORT_FRACTION};
 
 thread_local! {
     /// このスレッドで現在実行中の求解に適用されるピボット閾値。
@@ -1649,7 +1649,7 @@ pub fn factorize_reusing(m: usize, rows_in: &[Vec<(usize, f64)>], prev: Option<&
     }
     // 再利用が棄却されたかバックオフ中。通常の Markowitz 分解を行い、
     // その fill が新しい基準になる (`FtLu::new` が設定)。
-    let mut ft = FtLu::new(factorize_routed(m, rows_in, &border, dense)?);
+    let mut ft = FtLu::new(factorize_routed(m, rows_in, &border, dense, dense_switch_for(m, prev))?);
     PROF_FULL_NNZ.fetch_add(ft.fill_baseline, Ordering::Relaxed);
     PROF_FULL_COUNT.fetch_add(1, Ordering::Relaxed);
     if eligible {
@@ -1935,12 +1935,12 @@ fn factorize_reusing_order(
 /// それ以外は Markowitz 消去に振り分ける。
 pub fn factorize(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuFactors> {
     let border = detect_border_columns(m, rows_in);
-    factorize_routed(m, rows_in, &border, is_dense_input(m, rows_in))
+    factorize_routed(m, rows_in, &border, is_dense_input(m, rows_in), explicit_dense_switch())
 }
 
 /// [`factorize`] の本体。振り分けに使う [`detect_border_columns`] の結果
 /// (`border`) と [`is_dense_input`] の結果 (`dense`) を呼び出し側が計算済みで渡す。
-fn factorize_routed(m: usize, rows_in: &[Vec<(usize, f64)>], border: &[usize], dense: bool) -> Option<LuFactors> {
+fn factorize_routed(m: usize, rows_in: &[Vec<(usize, f64)>], border: &[usize], dense: bool, dense_switch: f64) -> Option<LuFactors> {
     if env_str!("ENOMOTO_DEBUG_BLOCK_SIZES").is_some() {
         debug_print_block_sizes(m, rows_in);
     }
@@ -1952,7 +1952,7 @@ fn factorize_routed(m: usize, rows_in: &[Vec<(usize, f64)>], border: &[usize], d
             return Some(lu);
         }
     }
-    factorize_flat_markowitz_routed(m, rows_in, dense)
+    factorize_flat_markowitz_routed(m, rows_in, dense, dense_switch)
 }
 
 /// 解析専用: 分解の入力 1 件を `<dir>/lu_dump.bin` に追記する (`m`、続いて
@@ -1978,7 +1978,31 @@ fn dump_lu_input(dir: &std::path::Path, m: usize, rows_in: &[Vec<(usize, f64)>])
 /// 稠密判定を自分で行う [`factorize_flat_markowitz_routed`] (境界付き経路を通らない)。
 #[cfg_attr(not(test), allow(dead_code))]
 fn factorize_flat_markowitz(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuFactors> {
-    factorize_flat_markowitz_routed(m, rows_in, is_dense_input(m, rows_in))
+    factorize_flat_markowitz_routed(m, rows_in, is_dense_input(m, rows_in), explicit_dense_switch())
+}
+
+/// `ENOMOTO_LU_DENSE_SWITCH` で明示された稠密切替の閾値 (未設定なら [`DENSE_SWITCH_FRACTION`] = 0 = off)。
+fn explicit_dense_switch() -> f64 {
+    tunable!("ENOMOTO_LU_DENSE_SWITCH", DENSE_SWITCH_FRACTION, f64)
+}
+
+/// nug08 報告 #3: [`factorize_reusing`] の通常分解で使う稠密切替の閾値。
+/// `ENOMOTO_LU_DENSE_SWITCH` が設定されていればその値 (全分解で有効)。未設定なら、行数が
+/// [`DENSE_SWITCH_AUTO_MIN_M`] 以上で、直前の通常分解の `nnz(L+U)` が
+/// [`DENSE_SWITCH_AUTO_LU_PER_ROW`] `* m` 以上 (= LU が 1 行あたり数十要素まで密になった基底)
+/// のときだけ [`DENSE_SWITCH_AUTO_FRACTION`] を使う。それ以外は 0 (off) で経路は従来どおり。
+/// 疎な LU の問題 (Netlib 全問、stormG2・pds-100・cont1 など) はこの条件を満たさない。
+fn dense_switch_for(m: usize, prev: &FtLu) -> f64 {
+    if env_str!("ENOMOTO_LU_DENSE_SWITCH").is_some() {
+        return explicit_dense_switch();
+    }
+    let min_m = tunable!("ENOMOTO_T_LU_DENSE_SWITCH_AUTO_MIN_M", DENSE_SWITCH_AUTO_MIN_M, usize);
+    let per_row = tunable!("ENOMOTO_T_LU_DENSE_SWITCH_AUTO_LU_PER_ROW", DENSE_SWITCH_AUTO_LU_PER_ROW, usize);
+    if min_m != 0 && m >= min_m && prev.fill_baseline >= per_row.saturating_mul(m) {
+        tunable!("ENOMOTO_T_LU_DENSE_SWITCH_AUTO", DENSE_SWITCH_AUTO_FRACTION, f64)
+    } else {
+        0.0
+    }
 }
 
 /// B3 診断: 残りを稠密分解に切り替えた分解の回数。
@@ -1989,7 +2013,7 @@ pub(crate) static PROF_DENSE_SWITCH_ROWS: AtomicUsize = AtomicUsize::new(0);
 /// Markowitz 消去による分解本体 (`dense` なら [`factorize_dense_faer`] に回す)。
 /// 各ステップで稠密でないピボット列を優先し、無ければ制限なしで探す。
 /// ピボットが見つからなければ `None` (特異)。
-fn factorize_flat_markowitz_routed(m: usize, rows_in: &[Vec<(usize, f64)>], dense: bool) -> Option<LuFactors> {
+fn factorize_flat_markowitz_routed(m: usize, rows_in: &[Vec<(usize, f64)>], dense: bool, dense_switch: f64) -> Option<LuFactors> {
     if dense {
         return factorize_dense_faer(m, rows_in);
     }
@@ -2012,21 +2036,25 @@ fn factorize_flat_markowitz_routed(m: usize, rows_in: &[Vec<(usize, f64)>], dens
 
     // ピボット行のコピー (分解全体で 1 つのバッファを再利用)
     let mut pivot_row_snapshot: Vec<(usize, f64)> = Vec::new();
-    // B3 (`ENOMOTO_LU_DENSE_SWITCH`、既定 `0` = off、経路が変わる): 活性部分行列の
-    // 密度が `k^2` のこの割合に達したら (`k` = 残り行数、`ENOMOTO_LU_DENSE_SWITCH_MIN`
-    // 以上)、残りの `k x k` ブロックを稠密分解する。
-    let dense_switch = tunable!("ENOMOTO_LU_DENSE_SWITCH", DENSE_SWITCH_FRACTION, f64);
+    // B3 (`ENOMOTO_LU_DENSE_SWITCH`、経路が変わる): 活性部分行列の密度が `k^2` のこの割合に
+    // 達したら (`k` = 残り行数、`ENOMOTO_LU_DENSE_SWITCH_MIN` 以上)、残りの `k x k` ブロックを
+    // 稠密分解する。閾値は呼び出し側が決める (`dense_switch_for`、既定は LU が密な大きい基底だけ)。
     let dense_switch_min = tunable!("ENOMOTO_LU_DENSE_SWITCH_MIN", DENSE_SWITCH_MIN_ROWS, usize);
-    // 先頭の列シングルトンをまとめて採る (経路は下のループと同一)。B3 が有効なら
-    // ステップ 0 の密度判定を先に行う必要があるので使わない。
-    let peeled = if dense_switch > 0.0 { 0 } else { state.peel_column_singletons(&mut row_perm, &mut col_perm, &mut u_entries) };
+    // 先頭の列シングルトンをまとめて採る (経路は下のループと同一)。列シングルトンは消去を
+    // 伴わず活性部分行列を密にしないので、密度判定はその後から始めてよい (nug08 報告 #3:
+    // 旧版は B3 有効時に前処理ごと止めていたので、切替の有無にかかわらず経路が変わっていた)。
+    let peeled = state.peel_column_singletons(&mut row_perm, &mut col_perm, &mut u_entries);
     for step in peeled..m {
         if dense_switch > 0.0 && step % DENSE_SWITCH_CHECK_INTERVAL == 0 && m - step >= dense_switch_min {
             // 残りの行数
             let k = m - step;
+            // 閾値となる非ゼロ数
+            let need = dense_switch * (k as f64) * (k as f64);
+            // 行バッファの長さ (死領域を含む) は活性非ゼロ数の上界。これが届かないうちは
+            // `O(m)` の数え上げを省く (大きな `m` で 16 ステップごとの全行走査を避ける)。
             // 活性部分行列の非ゼロ数
-            let active: usize = (0..m).filter(|&i| !state.row_used[i]).map(|i| state.mat.row_len[i]).sum();
-            if active as f64 >= dense_switch * (k as f64) * (k as f64) {
+            let active: usize = if (state.mat.row_idx.len() as f64) < need { 0 } else { (0..m).filter(|&i| !state.row_used[i]).map(|i| state.mat.row_len[i]).sum() };
+            if active > 0 && active as f64 >= need {
                 // 残りの行・列 (元の番号)
                 let rows_r: Vec<usize> = (0..m).filter(|&i| !state.row_used[i]).collect();
                 let cols_c: Vec<usize> = (0..m).filter(|&j| !state.col_used[j]).collect();
