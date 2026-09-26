@@ -4276,8 +4276,6 @@ pub struct FtLu {
     l_active: Vec<u32>,
     /// 融合 FTRAN で入る列の非ゼロ一覧から `L` 段の入力を作るか (`ENOMOTO_L_NZ_ENTRY=0` で無効、A/B 用)。
     l_nz_entry: bool,
-    /// 出力置換を 2 パス ([`Self::permute_out_split`]) で行うか (`ENOMOTO_PERMUTE_SPLIT=0` で 1 パス、A/B 用)。
-    permute_split: bool,
     /// `slot_pos[slot]` = `slot` の `u_seq` 内の現在位置 (`singles` 側なら `usize::MAX`)。
     /// `try_update` が並べ替えと同じ範囲で同期させる。
     slot_pos: Vec<usize>,
@@ -4483,7 +4481,6 @@ impl FtLu {
             single_piv,
             l_active,
             l_row_active,
-            permute_split: !matches!(env_str!("ENOMOTO_PERMUTE_SPLIT"), Some("0")),
             l_nz_entry: !matches!(env_str!("ENOMOTO_L_NZ_ENTRY"), Some("0")),
             slot_pos,
             row_owners,
@@ -6079,9 +6076,6 @@ impl FtLu {
             }
             return nnz;
         }
-        if self.permute_split {
-            return self.permute_out_split(scratch, out);
-        }
         for s in 0..m {
             let mut v = scratch[s];
             let d = piv[s];
@@ -6090,30 +6084,6 @@ impl FtLu {
             }
             out[col_perm[s]] = v;
             nnz += (v != 0.0) as usize;
-        }
-        nnz
-    }
-
-    /// [`Self::permute_out`] の既定経路を 2 パスに分けたもの: 全スロットを分岐なしで置換し、続いて
-    /// シングルトンのスロットだけを割り直す (要素ごとの `d != 0 && v != 0` 分岐の予測失敗をなくす)。
-    /// 値・非ゼロ数は 1 パス版と同じ (割った結果が 0 にアンダーフローした分は数え直す)。
-    #[inline(never)]
-    fn permute_out_split(&self, scratch: &[f64], out: &mut [f64]) -> usize {
-        let m = self.base.m;
-        let col_perm = &self.base.col_perm[..m];
-        let scratch = &scratch[..m];
-        let mut nnz = 0usize;
-        for s in 0..m {
-            let v = scratch[s];
-            out[col_perm[s]] = v;
-            nnz += (v != 0.0) as usize;
-        }
-        for e in &self.singles {
-            let v = scratch[e.slot];
-            let q = v / e.pivot;
-            let nz = v != 0.0;
-            out[col_perm[e.slot]] = if nz { q } else { v };
-            nnz -= (nz && q == 0.0) as usize;
         }
         nnz
     }
