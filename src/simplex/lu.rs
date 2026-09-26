@@ -2893,6 +2893,37 @@ impl LuFactors {
             za[s] = rhs_a[r];
             zb[s] = rhs_b[r];
         }
+        self.l_pair_active(active, za, zb);
+    }
+
+    /// [`Self::l_solve_into_pair`] の `rhs_a` の非ゼロ `(元の行, 値)` が分かっている版: `za` は 0 で埋めて
+    /// 非ゼロだけを置く (`O(m)` の間接読み出しの代わりに連続な 0 埋め)。`rhs_a` の他の位置は 0 なので
+    /// `za` の初期値は同じ (同じ行が複数回あれば密な `rhs_a` と同じく最後の値)。以降はビット一致。
+    fn l_solve_into_pair_nz(&self, active: &[u32], rhs_a_nz: &[(usize, f64)], rhs_b: &[f64], za: &mut [f64], zb: &mut [f64]) {
+        let m = self.m;
+        za[..m].fill(0.0);
+        for &(i, v) in rhs_a_nz {
+            za[self.row_perm_inv[i]] = v;
+        }
+        for s in 0..m {
+            zb[s] = rhs_b[self.row_perm[s]];
+        }
+        self.l_pair_active(active, za, zb);
+    }
+
+    /// [`Self::l_solve_into`] の `rhs` の非ゼロ `(元の行, 値)` が分かっている版 ([`Self::l_solve_into_pair_nz`] 参照)。
+    fn l_solve_into_nz(&self, active: &[u32], rhs_nz: &[(usize, f64)], z: &mut [f64]) {
+        let m = self.m;
+        z[..m].fill(0.0);
+        for &(i, v) in rhs_nz {
+            z[self.row_perm_inv[i]] = v;
+        }
+        self.l_active_loop(active, z);
+    }
+
+    /// [`Self::l_solve_into_pair`] の消去部分 (入力置換の後)。
+    #[inline]
+    fn l_pair_active(&self, active: &[u32], za: &mut [f64], zb: &mut [f64]) {
         for &s in active {
             let s = s as usize;
             let xa = za[s];
@@ -2948,6 +2979,28 @@ impl LuFactors {
             zb[s] = rhs_b[r];
             zc[s] = rhs_c[r];
         }
+        self.l_triple_active(active, za, zb, zc);
+    }
+
+    /// [`Self::l_solve_into_triple`] の `rhs_a` の非ゼロが分かっている版 ([`Self::l_solve_into_pair_nz`] 参照)。
+    #[allow(clippy::too_many_arguments)]
+    fn l_solve_into_triple_nz(&self, active: &[u32], rhs_a_nz: &[(usize, f64)], rhs_b: &[f64], rhs_c: &[f64], za: &mut [f64], zb: &mut [f64], zc: &mut [f64]) {
+        let m = self.m;
+        za[..m].fill(0.0);
+        for &(i, v) in rhs_a_nz {
+            za[self.row_perm_inv[i]] = v;
+        }
+        for s in 0..m {
+            let r = self.row_perm[s];
+            zb[s] = rhs_b[r];
+            zc[s] = rhs_c[r];
+        }
+        self.l_triple_active(active, za, zb, zc);
+    }
+
+    /// [`Self::l_solve_into_triple`] の消去部分 (入力置換の後)。
+    #[inline]
+    fn l_triple_active(&self, active: &[u32], za: &mut [f64], zb: &mut [f64], zc: &mut [f64]) {
         for &s in active {
             let s = s as usize;
             let xa = za[s];
@@ -3025,6 +3078,12 @@ impl LuFactors {
         for s in 0..m {
             z[s] = rhs[self.row_perm[s]];
         }
+        self.l_active_loop(active, z);
+    }
+
+    /// [`Self::l_solve_into`] の消去部分 (入力置換の後)。
+    #[inline]
+    fn l_active_loop(&self, active: &[u32], z: &mut [f64]) {
         for &s in active {
             let s = s as usize;
             if z[s] == 0.0 {
@@ -3208,6 +3267,47 @@ impl LuFactors {
     fn l_transpose_solve_scatter_into(&self, w: &mut [f64], y: &mut [f64]) {
         self.l_transpose_scatter_core(w);
         permute_btran_out(&self.row_perm, w, y);
+    }
+
+    /// [`Self::l_transpose_scatter_core`] を `L` の行が非空のステップ `rows` (昇順) だけで行う
+    /// ([`FtLu::l_row_active`]、空の行は何もしないのでビット一致。`O(m)` の 0 判定の走査を省く)。
+    #[inline]
+    fn l_transpose_scatter_rows(&self, w: &mut [f64], rows: &[u32]) {
+        for &s in rows.iter().rev() {
+            let s = s as usize;
+            let ws = w[s];
+            if ws == 0.0 {
+                continue;
+            }
+            let seg = self.l_row.seg(s);
+            for (&k, &mult) in seg.idx.iter().zip(seg.val.iter()) {
+                let k = k as usize;
+                w[k] -= mult * ws;
+            }
+            if !seg.rval.is_empty() {
+                sub_scaled_range(&mut w[seg.rlo..seg.rlo + seg.rval.len()], seg.rval, ws);
+            }
+        }
+    }
+
+    /// [`Self::l_transpose_gather_core`] を `L` の列が非空のステップ `cols` (昇順、[`FtLu::l_active`]) だけで
+    /// 行う (空の列は何もしないのでビット一致)。
+    #[inline]
+    fn l_transpose_gather_cols(&self, w: &mut [f64], cols: &[u32]) {
+        if self.l_col.has_block() {
+            return self.l_transpose_gather_core_block(w);
+        }
+        for &s in cols.iter().rev() {
+            let s = s as usize;
+            let seg = self.l_col.seg(s);
+            for (&r, &mult) in seg.idx.iter().zip(seg.val.iter()) {
+                let r = r as usize;
+                if w[r] == 0.0 {
+                    continue;
+                }
+                w[s] -= mult * w[r];
+            }
+        }
     }
 
     /// [`Self::l_transpose_solve_scatter_into`] から最後の置換を除いたもの。
@@ -4169,9 +4269,15 @@ pub struct FtLu {
     /// (ピボットは 0 にならない)。FTRAN の `U` 段のシングルトン除算を
     /// [`Self::permute_out`] の中で行うために使う。
     single_piv: Vec<f64>,
+    /// `L` の行 (`l_row`) が非空のステップ (昇順)。BTRAN の `L^T` スキャッタが訪れる必要があるのはこれだけ。
+    l_row_active: Vec<u32>,
     /// `L` の列が非空のステップ (昇順)。密 `L` 段が訪れる必要があるのはこれだけ
     /// ([`LuFactors::l_solve_into_pair`] 参照)。
     l_active: Vec<u32>,
+    /// 融合 FTRAN で入る列の非ゼロ一覧から `L` 段の入力を作るか (`ENOMOTO_L_NZ_ENTRY=0` で無効、A/B 用)。
+    l_nz_entry: bool,
+    /// 出力置換を 2 パス ([`Self::permute_out_split`]) で行うか (`ENOMOTO_PERMUTE_SPLIT=0` で 1 パス、A/B 用)。
+    permute_split: bool,
     /// `slot_pos[slot]` = `slot` の `u_seq` 内の現在位置 (`singles` 側なら `usize::MAX`)。
     /// `try_update` が並べ替えと同じ範囲で同期させる。
     slot_pos: Vec<usize>,
@@ -4300,6 +4406,7 @@ impl FtLu {
         let mut singles_pos = vec![usize::MAX; m];
         let mut single_piv = vec![0.0f64; m];
         let l_active: Vec<u32> = (0..m).filter(|&s| !base.l_col.seg(s).is_empty()).map(|s| s as u32).collect();
+        let l_row_active: Vec<u32> = (0..base.l_row.n_outer()).filter(|&s| !base.l_row.seg(s).is_empty()).map(|s| s as u32).collect();
         // `U` の eta をフラットファイルへ直接詰める: ヘッダはスロット順
         // (シングルトンは別)、疎 eta の要素は `row_step` 昇順。
         let dense_fraction = tunable!("ENOMOTO_T_DENSE_ETA_FRACTION", DENSE_ETA_FRACTION, f64);
@@ -4375,6 +4482,9 @@ impl FtLu {
             singles_pos,
             single_piv,
             l_active,
+            l_row_active,
+            permute_split: !matches!(env_str!("ENOMOTO_PERMUTE_SPLIT"), Some("0")),
+            l_nz_entry: !matches!(env_str!("ENOMOTO_L_NZ_ENTRY"), Some("0")),
             slot_pos,
             row_owners,
             owner_scratch: Vec::new(),
@@ -4433,10 +4543,10 @@ impl FtLu {
         }
         if sparse {
             PROF_BTRAN_L_SCATTER.fetch_add(1, Ordering::Relaxed);
-            self.base.l_transpose_scatter_core(w);
+            self.base.l_transpose_scatter_rows(w, &self.l_row_active);
         } else {
             PROF_BTRAN_L_GATHER.fetch_add(1, Ordering::Relaxed);
-            self.base.l_transpose_gather_core(w);
+            self.base.l_transpose_gather_cols(w, &self.l_active);
         }
         match cap {
             Some(c) => permute_btran_out_capture::<ZERO_W>(&self.base.row_perm, w, y, c),
@@ -5409,6 +5519,7 @@ impl FtLu {
         a_tilde_out: &mut [f64],
         rho_cap: Option<&mut StepCapture>,
         mut track: Option<&mut FtranTrack>,
+        rhs_a_nz: Option<&[(usize, f64)]>,
     ) -> (usize, usize) {
         let rho_cap = StepCapture::take(rho_cap);
         if !self.u_zero_skip {
@@ -5427,12 +5538,20 @@ impl FtLu {
         // `L` 段 (+ `ftran_through_l_and_r_into` と同じ一律 `m` の tick をベクトルごとに。
         // `rhs_b` が GP 経路でも同じなので CLOCK トリガは変わらない)。
         // `rhs_b` の `L` 段を GP で行った場合のスクラッチ
+        // `rhs_a` の非ゼロが分かっていれば `L` 段の入力置換をその位置だけにする (`ENOMOTO_L_NZ_ENTRY=0` で無効)
+        let rhs_a_nz = rhs_a_nz.filter(|_| self.l_nz_entry);
         let gp_b = if let Some(c) = rho_cap {
-            self.base.l_solve_into(&self.l_active, rhs_a, scratch_a);
+            match rhs_a_nz {
+                Some(nz) => self.base.l_solve_into_nz(&self.l_active, nz, scratch_a),
+                None => self.base.l_solve_into(&self.l_active, rhs_a, scratch_a),
+            }
             self.base.l_solve_steps_into_clean(rhs_b, &c.steps, scratch_b, &mut c.gp, take_b_clean(&mut track));
             Some(&mut c.gp)
         } else {
-            self.base.l_solve_into_pair(&self.l_active, rhs_a, rhs_b, scratch_a, scratch_b);
+            match rhs_a_nz {
+                Some(nz) => self.base.l_solve_into_pair_nz(&self.l_active, nz, rhs_b, scratch_a, scratch_b),
+                None => self.base.l_solve_into_pair(&self.l_active, rhs_a, rhs_b, scratch_a, scratch_b),
+            }
             take_b_clean(&mut track);
             None
         };
@@ -5513,6 +5632,7 @@ impl FtLu {
         a_tilde_out: &mut [f64],
         rho_cap: Option<&mut StepCapture>,
         mut track: Option<&mut FtranTrack>,
+        rhs_a_nz: Option<&[(usize, f64)]>,
     ) -> (usize, usize, usize) {
         let rho_cap = StepCapture::take(rho_cap);
         if !self.u_zero_skip {
@@ -5529,12 +5649,19 @@ impl FtLu {
             return (na, nb, nc);
         }
         let m = self.base.m as u64;
+        let rhs_a_nz = rhs_a_nz.filter(|_| self.l_nz_entry);
         let gp_b = if let Some(c) = rho_cap {
-            self.base.l_solve_into_pair(&self.l_active, rhs_a, rhs_c, scratch_a, scratch_c);
+            match rhs_a_nz {
+                Some(nz) => self.base.l_solve_into_pair_nz(&self.l_active, nz, rhs_c, scratch_a, scratch_c),
+                None => self.base.l_solve_into_pair(&self.l_active, rhs_a, rhs_c, scratch_a, scratch_c),
+            }
             self.base.l_solve_steps_into_clean(rhs_b, &c.steps, scratch_b, &mut c.gp, take_b_clean(&mut track));
             Some(&mut c.gp)
         } else {
-            self.base.l_solve_into_triple(&self.l_active, rhs_a, rhs_b, rhs_c, scratch_a, scratch_b, scratch_c);
+            match rhs_a_nz {
+                Some(nz) => self.base.l_solve_into_triple_nz(&self.l_active, nz, rhs_b, rhs_c, scratch_a, scratch_b, scratch_c),
+                None => self.base.l_solve_into_triple(&self.l_active, rhs_a, rhs_b, rhs_c, scratch_a, scratch_b, scratch_c),
+            }
             take_b_clean(&mut track);
             None
         };
@@ -5952,6 +6079,9 @@ impl FtLu {
             }
             return nnz;
         }
+        if self.permute_split {
+            return self.permute_out_split(scratch, out);
+        }
         for s in 0..m {
             let mut v = scratch[s];
             let d = piv[s];
@@ -5960,6 +6090,30 @@ impl FtLu {
             }
             out[col_perm[s]] = v;
             nnz += (v != 0.0) as usize;
+        }
+        nnz
+    }
+
+    /// [`Self::permute_out`] の既定経路を 2 パスに分けたもの: 全スロットを分岐なしで置換し、続いて
+    /// シングルトンのスロットだけを割り直す (要素ごとの `d != 0 && v != 0` 分岐の予測失敗をなくす)。
+    /// 値・非ゼロ数は 1 パス版と同じ (割った結果が 0 にアンダーフローした分は数え直す)。
+    #[inline(never)]
+    fn permute_out_split(&self, scratch: &[f64], out: &mut [f64]) -> usize {
+        let m = self.base.m;
+        let col_perm = &self.base.col_perm[..m];
+        let scratch = &scratch[..m];
+        let mut nnz = 0usize;
+        for s in 0..m {
+            let v = scratch[s];
+            out[col_perm[s]] = v;
+            nnz += (v != 0.0) as usize;
+        }
+        for e in &self.singles {
+            let v = scratch[e.slot];
+            let q = v / e.pivot;
+            let nz = v != 0.0;
+            out[col_perm[e.slot]] = if nz { q } else { v };
+            nnz -= (nz && q == 0.0) as usize;
         }
         nnz
     }
@@ -6502,7 +6656,7 @@ impl FtLu {
         let nnz = touch.iter().filter(|&&s| w[s] != 0.0).count();
         if nnz > limit {
             PROF_BTRAN_L_GATHER.fetch_add(1, Ordering::Relaxed);
-            base.l_transpose_gather_core(w);
+            base.l_transpose_gather_cols(w, &self.l_active);
             btran_full_out(&base.row_perm, w, out, cap);
             return false;
         }

@@ -3715,6 +3715,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                         &mut a_tilde_buf,
                         Some(&mut rho_steps),
                         sparse_ftran_out.then_some(&mut ftran_track),
+                        Some(std.cols.col(q)),
                     ) } else { lu.solve_into_triple_capture(
                         &dense_q,
                         &rho,
@@ -3736,7 +3737,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                     // DSE の `tau = B^-1 rho_p` FTRAN を同じ走査に融合する
                     // (`solve_into_pair_capture` 参照)。
                     let (a_nnz, b_nnz) = if BIG {
-                        lu.solve_into_pair_capture_tracked(&dense_q, &rho, &mut lu_scratch, &mut tau_scratch, &mut alpha_full, &mut tau, &mut a_tilde_buf, Some(&mut rho_steps), sparse_ftran_out.then_some(&mut ftran_track))
+                        lu.solve_into_pair_capture_tracked(&dense_q, &rho, &mut lu_scratch, &mut tau_scratch, &mut alpha_full, &mut tau, &mut a_tilde_buf, Some(&mut rho_steps), sparse_ftran_out.then_some(&mut ftran_track), Some(std.cols.col(q)))
                     } else {
                         lu.solve_into_pair_capture(&dense_q, &rho, &mut lu_scratch, &mut tau_scratch, &mut alpha_full, &mut tau, &mut a_tilde_buf, Some(&mut rho_steps))
                     };
