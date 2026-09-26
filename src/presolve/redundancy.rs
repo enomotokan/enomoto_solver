@@ -32,7 +32,7 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
-use crate::params::presolve::{DENSE_DENSITY_THRESHOLD, DEP_TOL, MIN_ROWS_FOR_BLOCK_DECOMPOSE, PARALLEL_DECOMPOSE_ROW_THRESHOLD, PIVOT_STABILITY, REDEQ_DENSE_FRACTION, REDEQ_DENSE_LIMIT, REDEQ_QR_RANK_TOL};
+use crate::params::presolve::{DENSE_DENSITY_THRESHOLD, DEP_TOL, MIN_ROWS_FOR_BLOCK_DECOMPOSE, PARALLEL_DECOMPOSE_ROW_THRESHOLD, PIVOT_STABILITY, REDEQ_QR_RANK_TOL};
 #[cfg(test)]
 use std::collections::HashSet;
 use std::collections::VecDeque;
@@ -96,98 +96,6 @@ pub fn reduce_equalities(a: &FaerCsr, b: &[f64], n: usize, lb: &[f64], ub: &[f64
     for &idx in &keep {
         new_rows.push(deduped[idx].0.clone());
         new_b.push(deduped[idx].1);
-    }
-    (csr_from_rows(&new_rows, n), new_b)
-}
-
-/// nug08 報告 #5・#6: 一次従属な等式行を LU の Markowitz 消去 ([`crate::simplex::markowitz_independent_columns`])
-/// で見つけて落とす (重複行の除去は済んでいる前提)。戻り値は残した行の `(A, b)`。
-///
-/// 等式行を列、変数 (と右辺) を行とする正方行列 (足りない行・列は空で埋める) を消去し、ピボットが取れた
-/// 列 = 一次独立な等式の極大集合を残す。右辺も 1 行として含める (拡大行列 `[A | b]` の階数) ので、矛盾する
-/// 行 (`0 = 5` になるもの) は独立として残り、実行不能の判定は下流に任せる ([`drop_linearly_dependent_sparse`]
-/// と同じ意味)。行 `i` の要素は絶対値が `DEP_TOL * (行 i の元の拡大ノルム)` 未満ならピボットにしない
-/// (こちらも既存の判定と同じ基準)。
-///
-/// 既存の [`reduce_equalities`] は Dulmage-Mendelsohn の細かいブロックごとに階数を判定するので、長方形で
-/// 階数の落ちた系ではブロックをまたぐ従属を見逃し (nug08-3rd は真の 1,458 行中 462 行)、分割しないと
-/// `BTreeMap` の消去が遅い (nug08-3rd で 126 s)。こちらは単体法の基底分解と同じ平坦な格納・バケット探索の
-/// 消去で全体を一度に扱う。
-pub fn drop_dependent_equalities_markowitz(a: &FaerCsr, b: &[f64], n: usize) -> (FaerCsr, Vec<f64>) {
-    let p = a.nrows();
-    if p == 0 {
-        return (csr_from_rows(&[], n), Vec::new());
-    }
-    // 正方行列の次数: 変数 n 個 + 右辺 1 行と、等式 p 本の大きい方。
-    let size = (n + 1).max(p);
-    let mut rows_t: Vec<Vec<(usize, f64)>> = vec![Vec::new(); size];
-    let mut floor = vec![0.0f64; size];
-    let mut rows_kept: Vec<Vec<(usize, f64)>> = Vec::with_capacity(p);
-    for i in 0..p {
-        let row = csr_row_vec(a, i);
-        let mut norm_sq = b[i] * b[i];
-        for &(j, v) in &row {
-            if v != 0.0 {
-                rows_t[j].push((i, v));
-                norm_sq += v * v;
-            }
-        }
-        if b[i] != 0.0 {
-            rows_t[n].push((i, b[i]));
-        }
-        floor[i] = DEP_TOL * norm_sq.sqrt();
-        rows_kept.push(row);
-    }
-    let dense_limit = tunable!("ENOMOTO_T_REDEQ_DENSE_LIMIT", REDEQ_DENSE_LIMIT, usize);
-    let (mut keep, _, remainder) = crate::simplex::markowitz_independent_columns(size, &rows_t, &floor, dense_limit, REDEQ_DENSE_FRACTION);
-    if !remainder.is_empty() {
-        // 疎な消去が密になった終盤は、残りの活性部分を列ピボット付き QR で判定する
-        // ([`drop_linearly_dependent`] と同じ基準: `|R[k,k]|` が列 (等式) の元の拡大ノルムの
-        // `REDEQ_QR_RANK_TOL` 倍以下なら従属)。先に消去したピボット列の成分はすでに除かれているので、
-        // この部分の階数が残りの独立な等式の数になる。
-        let t0 = std::time::Instant::now();
-        let nr = remainder.iter().flat_map(|(_, c)| c.iter().map(|&(r, _)| r + 1)).max().unwrap_or(0);
-        let nc = remainder.len();
-        let mut mat = Mat::<f64>::zeros(nr, nc);
-        for (k, (_, col)) in remainder.iter().enumerate() {
-            for &(r, v) in col {
-                mat[(r, k)] = v;
-            }
-        }
-        let rank_size = nr.min(nc);
-        let blocksize = colpiv_qr::recommended_blocksize::<f64>(nr, nc);
-        let mut householder = Mat::<f64>::zeros(blocksize, rank_size);
-        let mut col_perm = vec![0usize; nc];
-        let mut col_perm_inv = vec![0usize; nc];
-        let params = Default::default();
-        colpiv_qr::qr_in_place(
-            mat.as_mut(),
-            householder.as_mut(),
-            &mut col_perm,
-            &mut col_perm_inv,
-            Parallelism::None,
-            PodStack::new(&mut GlobalPodBuffer::new(colpiv_qr::qr_in_place_req::<usize, f64>(nr, nc, blocksize, Parallelism::None, params).unwrap())),
-            params,
-        );
-        let tol = tunable!("ENOMOTO_T_REDEQ_QR_RANK_TOL", REDEQ_QR_RANK_TOL, f64) / DEP_TOL;
-        for k in 0..rank_size {
-            let j = remainder[col_perm[k]].0;
-            if mat[(k, k)].abs() > tol * floor[j].max(1e-300) {
-                keep.push(j);
-            }
-        }
-        keep.sort_unstable();
-        if env_str!("ENOMOTO_DEBUG_INDEP").is_some() {
-            eprintln!("INDEP dense QR {nr}x{nc} in {:.3}s", t0.elapsed().as_secs_f64());
-        }
-    }
-    let mut new_rows = Vec::with_capacity(keep.len());
-    let mut new_b = Vec::with_capacity(keep.len());
-    for &i in &keep {
-        if i < p {
-            new_rows.push(std::mem::take(&mut rows_kept[i]));
-            new_b.push(b[i]);
-        }
     }
     (csr_from_rows(&new_rows, n), new_b)
 }
@@ -1079,47 +987,6 @@ mod tests {
 
         let keep = drop_linearly_dependent_sparse(&rows, n);
         assert_eq!(keep.len(), 4, "expected rank 4 out of 5 rows; keep={keep:?}");
-    }
-
-    /// `rows` を `(A, b)` にして [`drop_dependent_equalities_markowitz`] を通し、残った行を返す (テスト用)。
-    fn markowitz_kept(rows: &[(Vec<(usize, f64)>, f64)], n: usize) -> Vec<(Vec<(usize, f64)>, f64)> {
-        let a_rows: Vec<Vec<(usize, f64)>> = rows.iter().map(|(r, _)| r.clone()).collect();
-        let b: Vec<f64> = rows.iter().map(|(_, rhs)| *rhs).collect();
-        let (a2, b2) = drop_dependent_equalities_markowitz(&csr_from_rows(&a_rows, n), &b, n);
-        (0..a2.nrows()).map(|i| (csr_row_vec(&a2, i), b2[i])).collect()
-    }
-
-    /// Markowitz 版の従属等式除去が、一次結合で作った従属行を落として階数 4 を残し、
-    /// 右辺が矛盾する行 (実行不能の証拠) は残すことを確認する。
-    #[test]
-    fn drop_dependent_equalities_markowitz_finds_the_rank_and_keeps_inconsistent_rows() {
-        let n = 6;
-        let base: Vec<(Vec<(usize, f64)>, f64)> = vec![
-            (vec![(0, 2.0), (1, 1.0)], 5.0),
-            (vec![(1, 3.0), (2, 1.0)], 8.0),
-            (vec![(2, 1.0), (3, 4.0)], 2.0),
-            (vec![(3, 1.0), (4, 2.0), (5, 1.0)], 6.0),
-        ];
-        // 行 4 = 2*行0 - 行1 + 3*行2 (冗長)
-        let mut combo: BTreeMap<usize, f64> = BTreeMap::new();
-        let mut rhs = 0.0;
-        for (mult, (row, r)) in [(2.0, &base[0]), (-1.0, &base[1]), (3.0, &base[2])] {
-            for &(j, v) in row {
-                *combo.entry(j).or_insert(0.0) += mult * v;
-            }
-            rhs += mult * r;
-        }
-        let combo: Vec<(usize, f64)> = combo.into_iter().filter(|&(_, v)| v != 0.0).collect();
-        let mut rows = base.clone();
-        rows.push((combo.clone(), rhs));
-        let kept = markowitz_kept(&rows, n);
-        assert_eq!(kept.len(), 4, "expected rank 4 out of 5 rows; kept={kept:?}");
-
-        // 同じ係数で右辺だけ矛盾させた行は拡大行列の階数を上げるので残る。
-        let mut rows2 = base.clone();
-        rows2.push((combo, rhs + 1.0));
-        let kept2 = markowitz_kept(&rows2, n);
-        assert_eq!(kept2.len(), 5, "an rhs-inconsistent row must survive; kept={kept2:?}");
     }
 
     /// 互いに列を共有しない 2 つの巡回的な 2 行グループと孤立した 1 行が、ちょうど 3 ブロック

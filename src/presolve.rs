@@ -46,7 +46,7 @@ use crate::sparse::{FaerCsr, CsrRowBuilder, csr_from_rows, csr_row_vec, csr_rows
 use crate::types::{ConstraintRow, RowSense, VariableData};
 use scaling::Scaling;
 use crate::params::presolve::{
-    DOUBLETON_STRIKES, DUALPROPAGATE_STRIKES, EQPROP_ROUNDS, EQPROP_SKIP_IDLE, FIXPOINT_RELTOL, INEQ_SINGLETON_LARGE, LARGE_PRESOLVE_MIN_ROWS, PARALLELCOLS_STRIKES, PRESOLVE_EXTRA_ROUNDS_LARGE, PROPAGATION_PASSES_LARGE, PRESOLVE_SPLIT_G, REDEQ_MARKOWITZ_MAX_ROW_LEN, REDEQ_MARKOWITZ_MIN_DROP_FRACTION, REDEQ_MARKOWITZ_MIN_ROWS, REDEQ_MODE,
+    DOUBLETON_STRIKES, DUALPROPAGATE_STRIKES, EQPROP_ROUNDS, EQPROP_SKIP_IDLE, FIXPOINT_RELTOL, INEQ_SINGLETON_LARGE, LARGE_PRESOLVE_MIN_ROWS, PARALLELCOLS_STRIKES, PRESOLVE_EXTRA_ROUNDS_LARGE, PROPAGATION_PASSES_LARGE, PRESOLVE_SPLIT_G, REDEQ_MODE,
     ROUND_STRUCT_STOP,
 };
 
@@ -389,18 +389,6 @@ pub fn run_extended(
     // `g_split` を立て、G の読み手は分離形式 (`GView::Split` など) を使う。
     // ラウンド間では分離形式を `carry` で受け渡す。
     let split_enabled = tunable!("ENOMOTO_T_PRESOLVE_SPLIT_G", PRESOLVE_SPLIT_G, usize) != 0;
-    // 大きな問題向けの前処理の判定に使う行数 (等式行 + 多変数の不等式行。上下限だけの行は数えない)。
-    let problem_rows = b.len() + first_rows.len();
-    // nug08 報告 #5・#6: ラウンド後の縮小した A で従属等式を Markowitz 消去で落とすか
-    // (`REDEQ_MARKOWITZ_MIN_ROWS` 参照。`REDEQ_MODE` が 1 (既定) のときだけ)。
-    let redeq_markowitz_on = redeq_mode == 1
-        && match env_str!("ENOMOTO_REDEQ_MARKOWITZ") {
-            Some(v) => v != "0",
-            None => {
-                let min_rows = tunable!("ENOMOTO_T_REDEQ_MARKOWITZ_MIN_ROWS", REDEQ_MARKOWITZ_MIN_ROWS, usize);
-                min_rows != 0 && problem_rows >= min_rows
-            }
-        };
     // 次ラウンドの伝播に渡す分離形式 G (多変数行, 右辺, lb, ub)。最初はループ前の抽出結果。
     let mut carry: Option<(Vec<Vec<(usize, f64)>>, Vec<f64>, Vec<f64>, Vec<f64>)> = Some((first_rows, first_rhs, first_lb, first_ub));
     // 外側ラウンドループ。
@@ -896,23 +884,6 @@ pub fn run_extended(
         prev_signature = Some(signature);
     }
 
-    // 等式行が平均 `REDEQ_MARKOWITZ_MAX_ROW_LEN` 要素を超えるほど密なら行わない (定数の根拠は params 参照)。
-    let redeq_markowitz_on = redeq_markowitz_on
-        && a.nrows() > 0
-        && a.as_ref().compute_nnz() <= tunable!("ENOMOTO_T_REDEQ_MARKOWITZ_MAX_ROW_LEN", REDEQ_MARKOWITZ_MAX_ROW_LEN, usize).saturating_mul(a.nrows());
-    if redeq_markowitz_on {
-        let rows_before = a.nrows();
-        let (na, nb) = timed_step!("reduce_equalities(markowitz)", redundancy::drop_dependent_equalities_markowitz(&a, &b, n));
-        if env_str!("ENOMOTO_DEBUG_PRESOLVE_SIZE").is_some() {
-            eprintln!("REDEQ_MARKOWITZ rows {rows_before} -> {}", na.nrows());
-        }
-        // 従属な等式が少ないなら落とさない (`REDEQ_MARKOWITZ_MIN_DROP_FRACTION` 参照)。
-        let dropped = rows_before - na.nrows();
-        if dropped as f64 >= tunable!("ENOMOTO_T_REDEQ_MARKOWITZ_MIN_DROP_FRACTION", REDEQ_MARKOWITZ_MIN_DROP_FRACTION, f64) * rows_before as f64 {
-            a = na;
-            b = nb;
-        }
-    }
     if redeq_mode == 2 && a.nrows() > 0 {
         // 遅延した階数判定 (`REDEQ_MODE == 2`): 縮小済みの A に対して一次従属行を削除する。
         // 現在の上下限はブロック分解の辺フィルタにだけ使う。
