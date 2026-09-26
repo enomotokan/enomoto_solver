@@ -4300,6 +4300,8 @@ pub struct FtLu {
     /// (ピボットは 0 にならない)。FTRAN の `U` 段のシングルトン除算を
     /// [`Self::permute_out`] の中で行うために使う。
     single_piv: Vec<f64>,
+    /// `col_perm` の `u32` 版 ([`Self::permute_out_pair`] 用)。
+    perm32: Vec<u32>,
     /// `L` の列が非空のステップ (昇順)。密 `L` 段が訪れる必要があるのはこれだけ
     /// ([`LuFactors::l_solve_into_pair`] 参照)。
     l_active: Vec<u32>,
@@ -4490,12 +4492,14 @@ impl FtLu {
             u_seq.for_each_entry(k, |row_step, v| row_owners.push(row_step, slot, v));
         }
         let fill = total_off;
+        let perm32: Vec<u32> = base.col_perm.iter().map(|&c| c as u32).collect();
         FtLu {
             base,
             u_seq,
             singles,
             singles_pos,
             single_piv,
+            perm32,
             l_active,
             slot_pos,
             row_owners,
@@ -6006,6 +6010,16 @@ impl FtLu {
         }
         // シングルトンの除算は `permute_out` が行う (`single_piv` 参照)。
         let a_list = if a_u == UHyper::Hyper { gp_a.as_deref().map(|g| g.u_list.as_slice()) } else { None };
+        if !b_partial && a_list.is_none() && b_u != UHyper::Hyper {
+            // #5: 両方とも全走査の出力なら 1 回の走査で置換する (置換表・ピボットを 1 回読む)。
+            if let Some(t) = track.as_deref_mut() {
+                t.alpha.set_full();
+                t.tau.set_full();
+            }
+            let (na, nb) = self.permute_out_pair(scratch_a, out_a, scratch_b, out_b);
+            finish_b_scratch(scratch_b, None, track);
+            return (na, nb, false);
+        }
         let na = self.permute_fused_out(scratch_a, out_a, a_list, track.as_deref_mut().map(|t| &mut t.alpha));
         if b_partial {
             // 部分 `tau`: `a` の非ゼロのスロットだけを書き、`scratch_b` の触れた位置を 0 に戻す。
@@ -6084,6 +6098,40 @@ impl FtLu {
             nnz += (v != 0.0) as usize;
         }
         nnz
+    }
+
+    /// 2 本の [`Self::permute_out`] を 1 回の走査で行う (密行列の分解 #5、`u_zero_skip` の既定経路)。
+    /// 各ベクトルの演算は単独の呼び出しと同じなのでビット一致。
+    #[inline(never)]
+    fn permute_out_pair(&self, sa: &[f64], out_a: &mut [f64], sb: &[f64], out_b: &mut [f64]) -> (usize, usize) {
+        if !self.u_zero_skip || tiny_drop() > 0.0 {
+            let na = self.permute_out(sa, out_a);
+            let nb = self.permute_out(sb, out_b);
+            return (na, nb);
+        }
+        let m = self.base.m;
+        let perm = &self.perm32[..m];
+        let piv = &self.single_piv[..m];
+        let (sa, sb) = (&sa[..m], &sb[..m]);
+        let (mut na, mut nb) = (0usize, 0usize);
+        for s in 0..m {
+            let (mut va, mut vb) = (sa[s], sb[s]);
+            let d = piv[s];
+            if d != 0.0 {
+                if va != 0.0 {
+                    va /= d;
+                }
+                if vb != 0.0 {
+                    vb /= d;
+                }
+            }
+            let c = perm[s] as usize;
+            out_a[c] = va;
+            out_b[c] = vb;
+            na += (va != 0.0) as usize;
+            nb += (vb != 0.0) as usize;
+        }
+        (na, nb)
     }
 
     /// 疎な右辺版の [`Self::solve_into`]: `rhs` の非ゼロ `(元の行, 値)` を直接受け取り、
