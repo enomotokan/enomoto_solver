@@ -41,90 +41,187 @@ pub struct LPack {
     idx: Vec<u32>,
     /// 要素の値。
     val: Vec<f64>,
+    /// 密ブロック (密行列の分解 #2): 外側 `i >= blk_s0` は上の疎な部分に加えて、内側添字の連続区間
+    /// `[rng_lo[i - blk_s0], rng_lo + 長さ)` の値を `rng_val[rng_off[i - blk_s0]..rng_off[i - blk_s0 + 1]]`
+    /// に密に持つ (値 0 も格納)。密ブロックが無ければ `blk_s0 = usize::MAX`。
+    blk_s0: usize,
+    /// 区間の開始 (内側添字)。
+    rng_lo: Vec<u32>,
+    /// 区間の値の位置 (長さ `外側数 - blk_s0 + 1`)。
+    rng_off: Vec<usize>,
+    /// 区間の値。
+    rng_val: Vec<f64>,
 }
 
-/// [`LPack::seg`] が返す 1 本分の要素 (添字と値のスライス)。
+/// [`LPack::seg`] が返す 1 本分の要素 (添字と値のスライス、および密な区間)。
 #[derive(Clone, Copy)]
 pub struct LSeg<'a> {
     idx: &'a [u32],
     val: &'a [f64],
+    /// 密な区間の開始 (内側添字)。
+    rlo: usize,
+    /// 密な区間の値 (`rval[t]` が添字 `rlo + t`)。無ければ空。
+    rval: &'a [f64],
 }
 
 impl<'a> LSeg<'a> {
-    /// 要素数。
+    /// 格納要素数 (密な区間の 0 を含む)。
     #[inline(always)]
     pub fn len(&self) -> usize {
-        self.idx.len()
+        self.idx.len() + self.rval.len()
     }
     /// 要素がないか。
     #[inline(always)]
     pub fn is_empty(&self) -> bool {
-        self.idx.is_empty()
+        self.idx.is_empty() && self.rval.is_empty()
     }
-    /// `(添字, 値)` の組の `Vec` (テスト用)。
+    /// `(添字, 値)` の組の `Vec` (テスト用。密な区間の 0 は除く)。
     #[allow(dead_code)]
     pub fn to_vec(&self) -> Vec<(usize, f64)> {
-        self.into_iter().collect()
+        self.into_iter().filter(|&(_, v)| v != 0.0).collect()
+    }
+    /// 各要素に `f(添字, 値)` を呼ぶ (疎な部分、続いて密な区間。区間の 0 も呼ぶ)。
+    #[inline(always)]
+    pub fn for_each(&self, mut f: impl FnMut(usize, f64)) {
+        for (&i, &v) in self.idx.iter().zip(self.val.iter()) {
+            f(i as usize, v);
+        }
+        let lo = self.rlo;
+        for (t, &v) in self.rval.iter().enumerate() {
+            f(lo + t, v);
+        }
+    }
+}
+
+/// [`LSeg`] の要素の反復子 (疎な部分、続いて密な区間)。
+pub struct LSegIter<'a> {
+    idx: std::slice::Iter<'a, u32>,
+    val: std::slice::Iter<'a, f64>,
+    rlo: usize,
+    rval: std::iter::Enumerate<std::slice::Iter<'a, f64>>,
+}
+
+impl<'a> Iterator for LSegIter<'a> {
+    type Item = (usize, f64);
+    #[inline(always)]
+    fn next(&mut self) -> Option<(usize, f64)> {
+        if let Some(&i) = self.idx.next() {
+            return Some((i as usize, *self.val.next().unwrap()));
+        }
+        self.rval.next().map(|(t, &v)| (self.rlo + t, v))
     }
 }
 
 impl<'a> IntoIterator for LSeg<'a> {
     type Item = (usize, f64);
-    type IntoIter = std::iter::Map<std::iter::Zip<std::slice::Iter<'a, u32>, std::slice::Iter<'a, f64>>, fn((&'a u32, &'a f64)) -> (usize, f64)>;
+    type IntoIter = LSegIter<'a>;
     #[inline(always)]
-    fn into_iter(self) -> Self::IntoIter {
-        fn pair<'b>((i, v): (&'b u32, &'b f64)) -> (usize, f64) {
-            (*i as usize, *v)
-        }
-        self.idx.iter().zip(self.val.iter()).map(pair as fn((&'a u32, &'a f64)) -> (usize, f64))
+    fn into_iter(self) -> LSegIter<'a> {
+        LSegIter { idx: self.idx.iter(), val: self.val.iter(), rlo: self.rlo, rval: self.rval.iter().enumerate() }
     }
 }
 
 impl LPack {
     /// 外側 `n` 本の空の格納。
     pub fn empty(n: usize) -> Self {
-        LPack { start: vec![0; n + 1], idx: Vec::new(), val: Vec::new() }
+        LPack { start: vec![0; n + 1], blk_s0: usize::MAX, ..Default::default() }
     }
     /// 外側 `i` の要素。
     #[inline(always)]
     pub fn seg(&self, i: usize) -> LSeg<'_> {
         let (s, e) = (self.start[i], self.start[i + 1]);
-        LSeg { idx: &self.idx[s..e], val: &self.val[s..e] }
+        if i >= self.blk_s0 {
+            let b = i - self.blk_s0;
+            return LSeg { idx: &self.idx[s..e], val: &self.val[s..e], rlo: self.rng_lo[b] as usize, rval: &self.rng_val[self.rng_off[b]..self.rng_off[b + 1]] };
+        }
+        LSeg { idx: &self.idx[s..e], val: &self.val[s..e], rlo: 0, rval: &[] }
     }
-    /// 全要素数。
+    /// 全格納要素数 (密な区間の 0 を含む)。
     #[inline]
     pub fn nnz(&self) -> usize {
-        self.idx.len()
+        self.idx.len() + self.rng_val.len()
     }
     /// 外側の本数。
     #[inline]
     pub fn n_outer(&self) -> usize {
         self.start.len() - 1
     }
+    /// 密ブロックを持つか。
+    #[inline]
+    pub fn has_block(&self) -> bool {
+        self.blk_s0 != usize::MAX
+    }
     /// 転置 (内側の次数 `n_inner`、計数ソート。各外側の要素は元の外側番号の昇順)。
+    /// 密な区間は疎な要素として (0 を除いて) 転置する。
     pub fn transposed(&self, n_inner: usize) -> LPack {
         let mut count = vec![0usize; n_inner + 1];
-        for &i in &self.idx {
-            count[i as usize + 1] += 1;
+        for o in 0..self.n_outer() {
+            self.seg(o).for_each(|i, v| {
+                if v != 0.0 {
+                    count[i + 1] += 1;
+                }
+            });
         }
         for i in 0..n_inner {
             count[i + 1] += count[i];
         }
         let start = count.clone();
-        let nnz = self.idx.len();
+        let nnz = start[n_inner];
         let mut idx = vec![0u32; nnz];
         let mut val = vec![0.0f64; nnz];
         let mut cursor = count;
         for o in 0..self.n_outer() {
-            for p in self.start[o]..self.start[o + 1] {
-                let i = self.idx[p] as usize;
-                let c = cursor[i];
-                idx[c] = o as u32;
-                val[c] = self.val[p];
-                cursor[i] += 1;
-            }
+            self.seg(o).for_each(|i, v| {
+                if v != 0.0 {
+                    let c = cursor[i];
+                    idx[c] = o as u32;
+                    val[c] = v;
+                    cursor[i] += 1;
+                }
+            });
         }
-        LPack { start, idx, val }
+        LPack { start, idx, val, blk_s0: usize::MAX, ..Default::default() }
+    }
+    /// 外側 `s0` 以降の要素のうち内側添字が `lo(i)` 以上のものを密な区間 `[lo(i), hi(i))` に移す
+    /// (密行列の分解 #2)。`lo(i)` 未満の要素は疎なまま残る。区間外 (`>= hi(i)`) の要素があってはならない。
+    pub fn with_block(self, s0: usize, lo: impl Fn(usize) -> usize, hi: impl Fn(usize) -> usize) -> LPack {
+        let n = self.n_outer();
+        if s0 >= n {
+            return self;
+        }
+        let mut start = Vec::with_capacity(n + 1);
+        start.push(0);
+        let mut idx = Vec::with_capacity(self.idx.len());
+        let mut val = Vec::with_capacity(self.val.len());
+        let mut rng_lo = Vec::with_capacity(n - s0);
+        let mut rng_off = Vec::with_capacity(n - s0 + 1);
+        rng_off.push(0);
+        let mut rng_val: Vec<f64> = Vec::new();
+        for o in 0..n {
+            let (a, b) = (self.start[o], self.start[o + 1]);
+            if o < s0 {
+                idx.extend_from_slice(&self.idx[a..b]);
+                val.extend_from_slice(&self.val[a..b]);
+            } else {
+                let (l, h) = (lo(o), hi(o).max(lo(o)));
+                let base = rng_val.len();
+                rng_val.resize(base + (h - l), 0.0);
+                for p in a..b {
+                    let i = self.idx[p] as usize;
+                    if i >= l {
+                        debug_assert!(i < h);
+                        rng_val[base + i - l] = self.val[p];
+                    } else {
+                        idx.push(self.idx[p]);
+                        val.push(self.val[p]);
+                    }
+                }
+                rng_lo.push(l as u32);
+                rng_off.push(rng_val.len());
+            }
+            start.push(idx.len());
+        }
+        LPack { start, idx, val, blk_s0: s0, rng_lo, rng_off, rng_val }
     }
     /// 全外側を `Vec<Vec<_>>` にする (テスト用)。
     #[allow(dead_code)]
@@ -143,7 +240,7 @@ impl LPackBuilder {
     pub fn with_capacity(n: usize, nnz: usize) -> Self {
         let mut start = Vec::with_capacity(n + 1);
         start.push(0);
-        LPackBuilder { pack: LPack { start, idx: Vec::with_capacity(nnz), val: Vec::with_capacity(nnz) } }
+        LPackBuilder { pack: LPack { start, idx: Vec::with_capacity(nnz), val: Vec::with_capacity(nnz), blk_s0: usize::MAX, ..Default::default() } }
     }
     /// 構築中の外側に要素を 1 つ追加する。
     #[inline]
@@ -1566,6 +1663,37 @@ struct RowOwners {
     cap: Vec<u32>,
     idx: Vec<u32>,
     val: Vec<f64>,
+    /// 密ブロック (密行列の分解 #2): 行 `r >= blk_s0` はスロットの連続区間 `[r + 1, m)` の値を
+    /// `rng_val[rng_off[r - blk_s0]..]` に密に持つ (値 0 = その区間のスロットは所有者でない)。
+    /// 密ブロックが無ければ `usize::MAX`。
+    blk_s0: usize,
+    /// 区間の値の位置 (長さ `m - blk_s0 + 1`)。
+    rng_off: Vec<usize>,
+    /// 区間の値。
+    rng_val: Vec<f64>,
+    /// 区間の非ゼロ数 (行ごと)。tick と追跡版の上限判定を疎な形式と同じ数で行うため。
+    rng_nz: Vec<u32>,
+}
+
+/// [`RowOwners::row`] が返す 1 行分 (疎な `(スロット, 値)` と密な区間)。
+#[derive(Clone, Copy)]
+struct OwnRow<'a> {
+    idx: &'a [u32],
+    val: &'a [f64],
+    /// 密な区間の先頭スロット。
+    rlo: usize,
+    /// 密な区間の値 (無ければ空)。
+    rval: &'a [f64],
+    /// 密な区間の非ゼロ数。
+    rnz: usize,
+}
+
+impl<'a> OwnRow<'a> {
+    /// 非ゼロ要素数 (密な区間の 0 を除く。疎な形式の要素数と同じ)。
+    #[inline(always)]
+    fn len(&self) -> usize {
+        self.idx.len() + self.rnz
+    }
 }
 
 impl RowOwners {
@@ -1578,26 +1706,58 @@ impl RowOwners {
             start.push(total);
             total += c;
         }
-        RowOwners { start, len: vec![0; m], cap: count.iter().map(|&c| c as u32).collect(), idx: vec![0; total], val: vec![0.0; total] }
+        RowOwners { start, len: vec![0; m], cap: count.iter().map(|&c| c as u32).collect(), idx: vec![0; total], val: vec![0.0; total], blk_s0: usize::MAX, rng_off: Vec::new(), rng_val: Vec::new(), rng_nz: Vec::new() }
+    }
+
+    /// 行 `r >= s0` に密な区間 `[r + 1, m)` を持たせる (密行列の分解 #2、要素を入れる前に呼ぶ)。
+    fn set_block(&mut self, s0: usize) {
+        let m = self.start.len();
+        if s0 >= m {
+            return;
+        }
+        self.blk_s0 = s0;
+        self.rng_off = Vec::with_capacity(m - s0 + 1);
+        let mut off = 0usize;
+        self.rng_off.push(0);
+        for r in s0..m {
+            off += m - r - 1;
+            self.rng_off.push(off);
+        }
+        self.rng_val = vec![0.0; off];
+        self.rng_nz = vec![0; m - s0];
     }
 
     /// 行 `r` の `(スロット, 値)`。
     #[inline(always)]
-    fn row(&self, r: usize) -> (&[u32], &[f64]) {
+    fn row(&self, r: usize) -> OwnRow<'_> {
         let s = self.start[r];
         let e = s + self.len[r] as usize;
-        (&self.idx[s..e], &self.val[s..e])
+        if r >= self.blk_s0 {
+            let b = r - self.blk_s0;
+            return OwnRow { idx: &self.idx[s..e], val: &self.val[s..e], rlo: r + 1, rval: &self.rng_val[self.rng_off[b]..self.rng_off[b + 1]], rnz: self.rng_nz[b] as usize };
+        }
+        OwnRow { idx: &self.idx[s..e], val: &self.val[s..e], rlo: 0, rval: &[], rnz: 0 }
     }
 
-    /// 行 `r` の要素数。
+    /// 行 `r` の密な区間でのスロット `slot` の値の位置 (区間外なら `None`)。
     #[inline(always)]
-    fn row_len(&self, r: usize) -> usize {
-        self.len[r] as usize
+    fn rng_pos(&self, r: usize, slot: usize) -> Option<usize> {
+        if r >= self.blk_s0 && slot > r {
+            Some(self.rng_off[r - self.blk_s0] + (slot - r - 1))
+        } else {
+            None
+        }
     }
 
     /// 行 `r` の末尾に `(slot, v)` を追加する。
     #[inline]
     fn push(&mut self, r: usize, slot: usize, v: f64) {
+        if let Some(at) = self.rng_pos(r, slot) {
+            debug_assert!(self.rng_val[at] == 0.0);
+            self.rng_val[at] = v;
+            self.rng_nz[r - self.blk_s0] += (v != 0.0) as u32;
+            return;
+        }
         let l = self.len[r] as usize;
         if l == self.cap[r] as usize {
             let new_cap = (2 * l).max(4);
@@ -1619,6 +1779,11 @@ impl RowOwners {
     /// 行 `r` からスロット `slot` の要素を `swap_remove` で除く (無ければ何もしない)。
     #[inline]
     fn remove_slot(&mut self, r: usize, slot: usize) {
+        if let Some(at) = self.rng_pos(r, slot) {
+            self.rng_nz[r - self.blk_s0] -= (self.rng_val[at] != 0.0) as u32;
+            self.rng_val[at] = 0.0;
+            return;
+        }
         let s = self.start[r];
         let l = self.len[r] as usize;
         if let Some(pos) = self.idx[s..s + l].iter().position(|&q| q as usize == slot) {
@@ -1635,6 +1800,17 @@ impl RowOwners {
         out.clear();
         out.extend_from_slice(&self.idx[s..s + self.len[r] as usize]);
         self.len[r] = 0;
+        if r >= self.blk_s0 {
+            let b = r - self.blk_s0;
+            let (a, e) = (self.rng_off[b], self.rng_off[b + 1]);
+            for (t, v) in self.rng_val[a..e].iter_mut().enumerate() {
+                if *v != 0.0 {
+                    out.push((r + 1 + t) as u32);
+                    *v = 0.0;
+                }
+            }
+            self.rng_nz[b] = 0;
+        }
     }
 }
 
@@ -1668,6 +1844,10 @@ pub struct LuFactors {
     /// [`l_solve_sparse_into`] の到達集合探索を `row_perm` の O(m) 走査なしで
     /// 始めるのに使う。
     pub row_perm_inv: Vec<usize>,
+    /// 密ブロック (密行列の分解 #2) の先頭ステップ。稠密切替で残り `m - dense_s0` 行を稠密分解した
+    /// 分解だけ `< m`。そのとき `l_col`/`l_row` はステップ `>= dense_s0` の部分を密な区間で持ち、
+    /// [`FtLu::new`] は `U` のブロック内の列・行も密な区間で持つ。それ以外は `usize::MAX`。
+    pub dense_s0: usize,
 }
 
 /// 入力の非ゼロ密度が `DENSE_INPUT_FRACTION * m^2` を超えるか
@@ -1738,7 +1918,7 @@ fn factorize_dense_faer(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuFac
     }
 
     let l_row = build_l_row(&l_col, m);
-    Some(LuFactors { m, l_col, l_row, u_row, row_perm, col_perm, col_perm_inv, row_perm_inv })
+    Some(LuFactors { m, l_col, l_row, u_row, row_perm, col_perm, col_perm_inv, row_perm_inv, dense_s0: usize::MAX })
 }
 
 /// 診断用 (`ENOMOTO_DEBUG_BLOCK_SIZES`、本番経路では未使用)。この基底行列を
@@ -1809,6 +1989,7 @@ pub fn factorize_diagonal(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuF
         col_perm: identity.clone(),
         col_perm_inv: identity.clone(),
         row_perm_inv: identity,
+        dense_s0: usize::MAX,
     })
 }
 
@@ -2165,6 +2346,7 @@ fn factorize_reusing_order(
         col_perm: pivot_col.to_vec(),
         col_perm_inv,
         row_perm_inv: row_step,
+        dense_s0: usize::MAX,
     })
 }
 
@@ -2218,6 +2400,11 @@ fn dump_lu_input(dir: &std::path::Path, m: usize, rows_in: &[Vec<(usize, f64)>])
 #[cfg_attr(not(test), allow(dead_code))]
 fn factorize_flat_markowitz(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuFactors> {
     factorize_flat_markowitz_routed(m, rows_in, is_dense_input(m, rows_in), explicit_dense_switch())
+}
+
+/// 密行列の分解 #2: 稠密切替したブロックを密な区間で持つか (`ENOMOTO_LU_DENSE_BLOCK=0` で無効、A/B 用)。
+fn dense_block_enabled() -> bool {
+    env_str!("ENOMOTO_LU_DENSE_BLOCK").map_or(true, |v| v != "0")
 }
 
 /// `ENOMOTO_LU_DENSE_SWITCH` で明示された稠密切替の閾値 (未設定なら [`DENSE_SWITCH_FRACTION`] = 0 = off)。
@@ -2384,6 +2571,8 @@ fn factorize_flat_markowitz_routed(m: usize, rows_in: &[Vec<(usize, f64)>], dens
     // 伴わず活性部分行列を密にしないので、密度判定はその後から始めてよい (nug08 報告 #3:
     // 旧版は B3 有効時に前処理ごと止めていたので、切替の有無にかかわらず経路が変わっていた)。
     let peeled = state.peel_column_singletons(&mut row_perm, &mut col_perm, &mut u_entries);
+    // 稠密切替したステップ (切替なしなら `usize::MAX`)
+    let mut switched_at = usize::MAX;
     for step in peeled..m {
         if dense_switch > 0.0 && step % DENSE_SWITCH_CHECK_INTERVAL == 0 && m - step >= dense_switch_min {
             // 残りの行数
@@ -2423,6 +2612,7 @@ fn factorize_flat_markowitz_routed(m: usize, rows_in: &[Vec<(usize, f64)>], dens
                 }
                 PROF_DENSE_SWITCH.fetch_add(1, Ordering::Relaxed);
                 PROF_DENSE_SWITCH_ROWS.fetch_add(k, Ordering::Relaxed);
+                switched_at = step;
                 break;
             }
         }
@@ -2511,8 +2701,19 @@ fn factorize_flat_markowitz_routed(m: usize, rows_in: &[Vec<(usize, f64)>], dens
         u_row.push(u_entries[start..next].iter().map(|&(_, orig_col, val)| (col_perm_inv[orig_col], val)).collect());
     }
 
-    let l_row = build_l_row(&l_col, m);
-    Some(LuFactors { m, l_col, l_row, u_row, row_perm, col_perm, col_perm_inv, row_perm_inv })
+    // 密行列の分解 #2: 稠密切替した分解は、ブロック (ステップ `switched_at..m`) の `L` を密な区間で持つ
+    // (`ENOMOTO_LU_DENSE_BLOCK=0` で従来どおり疎な形式のまま)。
+    let block = switched_at < m && dense_block_enabled();
+    let (l_col, l_row, dense_s0) = if block {
+        let s0 = switched_at;
+        let l_row = build_l_row(&l_col, m);
+        let l_row = if l_row.nnz() > 0 { l_row.with_block(s0, |_| s0, |r| r) } else { l_row };
+        (l_col.with_block(s0, |s| s + 1, |_| m), l_row, s0)
+    } else {
+        let l_row = build_l_row(&l_col, m);
+        (l_col, l_row, usize::MAX)
+    };
+    Some(LuFactors { m, l_col, l_row, u_row, row_perm, col_perm, col_perm_inv, row_perm_inv, dense_s0 })
 }
 
 /// 境界付き (Schur 補行列) 分解。`border` 列 ([`detect_border_columns`]) を
@@ -2743,7 +2944,7 @@ fn factorize_bordered(m: usize, rows_in: &[Vec<(usize, f64)>], border: &[usize])
     }
 
     let l_row = build_l_row(&l_col, m);
-    Some(LuFactors { m, l_col, l_row, u_row, row_perm, col_perm, col_perm_inv: col_perm_inv_full, row_perm_inv: row_perm_inv_full })
+    Some(LuFactors { m, l_col, l_row, u_row, row_perm, col_perm, col_perm_inv: col_perm_inv_full, row_perm_inv: row_perm_inv_full, dense_s0: usize::MAX })
 }
 
 impl LuFactors {
@@ -2777,20 +2978,20 @@ impl LuFactors {
             match (xa != 0.0, xb != 0.0) {
                 (false, false) => {}
                 (true, true) => {
-                    for (row_step, mult) in self.l_col.seg(s) {
+                    self.l_col.seg(s).for_each(|row_step, mult| {
                         za[row_step] -= mult * xa;
                         zb[row_step] -= mult * xb;
-                    }
+                    });
                 }
                 (true, false) => {
-                    for (row_step, mult) in self.l_col.seg(s) {
+                    self.l_col.seg(s).for_each(|row_step, mult| {
                         za[row_step] -= mult * xa;
-                    }
+                    });
                 }
                 (false, true) => {
-                    for (row_step, mult) in self.l_col.seg(s) {
+                    self.l_col.seg(s).for_each(|row_step, mult| {
                         zb[row_step] -= mult * xb;
-                    }
+                    });
                 }
             }
         }
@@ -2815,36 +3016,36 @@ impl LuFactors {
             let xb = zb[s];
             let xc = zc[s];
             if xa != 0.0 && xb != 0.0 && xc != 0.0 {
-                for (row_step, mult) in self.l_col.seg(s) {
+                self.l_col.seg(s).for_each(|row_step, mult| {
                     za[row_step] -= mult * xa;
                     zb[row_step] -= mult * xb;
                     zc[row_step] -= mult * xc;
-                }
+                });
                 continue;
             }
             match (xa != 0.0, xb != 0.0) {
                 (false, false) => {}
                 (true, true) => {
-                    for (row_step, mult) in self.l_col.seg(s) {
+                    self.l_col.seg(s).for_each(|row_step, mult| {
                         za[row_step] -= mult * xa;
                         zb[row_step] -= mult * xb;
-                    }
+                    });
                 }
                 (true, false) => {
-                    for (row_step, mult) in self.l_col.seg(s) {
+                    self.l_col.seg(s).for_each(|row_step, mult| {
                         za[row_step] -= mult * xa;
-                    }
+                    });
                 }
                 (false, true) => {
-                    for (row_step, mult) in self.l_col.seg(s) {
+                    self.l_col.seg(s).for_each(|row_step, mult| {
                         zb[row_step] -= mult * xb;
-                    }
+                    });
                 }
             }
             if xc != 0.0 {
-                for (row_step, mult) in self.l_col.seg(s) {
+                self.l_col.seg(s).for_each(|row_step, mult| {
                     zc[row_step] -= mult * xc;
-                }
+                });
             }
         }
     }
@@ -2863,9 +3064,9 @@ impl LuFactors {
             if z[s] == 0.0 {
                 continue;
             }
-            for (row_step, mult) in self.l_col.seg(s) {
+            self.l_col.seg(s).for_each(|row_step, mult| {
                 z[row_step] -= mult * z[s];
-            }
+            });
         }
     }
 
@@ -2941,12 +3142,13 @@ impl LuFactors {
             scratch.stack.push(seed);
             while let Some(node) = scratch.stack.pop() {
                 scratch.reach.push(node);
-                for (next, _) in self.l_col.seg(node) {
-                    if !scratch.visited.is_marked(next) {
+                self.l_col.seg(node).for_each(|next, v| {
+                    // 密な区間の 0 は辺でない (疎な形式と同じ到達集合にする)
+                    if v != 0.0 && !scratch.visited.is_marked(next) {
                         scratch.visited.mark(next);
                         scratch.stack.push(next);
                     }
-                }
+                });
             }
         }
         scratch.reach.sort_unstable();
@@ -2955,9 +3157,9 @@ impl LuFactors {
             if z[s] == 0.0 {
                 continue;
             }
-            for (row_step, mult) in self.l_col.seg(s) {
+            self.l_col.seg(s).for_each(|row_step, mult| {
                 z[row_step] -= mult * z[s];
-            }
+            });
         }
     }
 
@@ -2977,12 +3179,12 @@ impl LuFactors {
     fn l_transpose_gather_core(&self, w: &mut [f64]) {
         let m = self.m;
         for s in (0..m).rev() {
-            for (row_step, mult) in self.l_col.seg(s) {
+            self.l_col.seg(s).for_each(|row_step, mult| {
                 if w[row_step] == 0.0 {
-                    continue;
+                    return;
                 }
                 w[s] -= mult * w[row_step];
-            }
+            });
         }
     }
 
@@ -3008,9 +3210,9 @@ impl LuFactors {
             if ws == 0.0 {
                 continue;
             }
-            for (k, mult) in self.l_row.seg(s) {
+            self.l_row.seg(s).for_each(|k, mult| {
                 w[k] -= mult * ws;
-            }
+            });
         }
     }
 
@@ -3143,8 +3345,25 @@ struct EtaFile {
     idx: Vec<u32>,
     /// 疎 eta の要素の値プール。
     val: Vec<f64>,
-    /// 密 eta の本体 (長さ `m` の配列, 非ゼロ数)。
-    dense: Vec<(Box<[f64]>, usize)>,
+    /// 密 eta の本体 ([`DenseEta`])。
+    dense: Vec<DenseEta>,
+}
+
+/// 密形式の eta ([`EtaFile::dense`])。通常は長さ `m` の配列 (`lo = 0`、疎な部分なし)。
+/// 密ブロック (密行列の分解 #2) の列 eta は、ブロック内の行 `[lo, lo + data.len())` を密に、
+/// ブロックより上の行 (`< lo`) を疎な部分 (`idx/val[sp_start..sp_start + sp_len]`) に持つ。
+#[derive(Clone)]
+struct DenseEta {
+    /// 行 `lo..` の値 (0 を含む)。
+    data: Box<[f64]>,
+    /// 非ゼロ数 (疎な部分を含む)。
+    nnz: usize,
+    /// `data[0]` の行。
+    lo: usize,
+    /// 疎な部分のプール内の開始位置。
+    sp_start: u32,
+    /// 疎な部分の長さ。
+    sp_len: u32,
 }
 
 impl EtaFile {
@@ -3178,7 +3397,7 @@ impl EtaFile {
     fn nnz(&self, k: usize) -> usize {
         let (start, len) = self.span[k];
         if len == ETA_DENSE {
-            self.dense[start as usize].1
+            self.dense[start as usize].nnz
         } else {
             len as usize
         }
@@ -3198,8 +3417,15 @@ impl EtaFile {
     fn dot(&self, k: usize, dense: &[f64]) -> f64 {
         let (start, len) = self.span[k];
         if len == ETA_DENSE {
-            let data = &self.dense[start as usize].0;
-            return data.iter().zip(dense.iter()).map(|(&v, &d)| v * d).sum();
+            let de = &self.dense[start as usize];
+            let data = &de.data;
+            let dd: f64 = data.iter().zip(dense[de.lo..].iter()).map(|(&v, &d)| v * d).sum();
+            if de.sp_len == 0 {
+                return dd;
+            }
+            let (s, e) = (de.sp_start as usize, de.sp_start as usize + de.sp_len as usize);
+            let sp: f64 = self.idx[s..e].iter().zip(self.val[s..e].iter()).map(|(&i, &v)| v * dense[i as usize]).sum();
+            return sp + dd;
         }
         let (idx, val) = self.seg(k);
         idx.iter().zip(val.iter()).map(|(&i, &v)| v * dense[i as usize]).sum()
@@ -3210,8 +3436,14 @@ impl EtaFile {
     fn axpy(&self, k: usize, alpha: f64, dense: &mut [f64]) {
         let (start, len) = self.span[k];
         if len == ETA_DENSE {
-            let data = &self.dense[start as usize].0;
-            for (d, &v) in dense.iter_mut().zip(data.iter()) {
+            let de = &self.dense[start as usize];
+            if de.sp_len != 0 {
+                let (s, e) = (de.sp_start as usize, de.sp_start as usize + de.sp_len as usize);
+                for (&i, &v) in self.idx[s..e].iter().zip(self.val[s..e].iter()) {
+                    dense[i as usize] += alpha * v;
+                }
+            }
+            for (d, &v) in dense[de.lo..].iter_mut().zip(de.data.iter()) {
                 *d += alpha * v;
             }
             return;
@@ -3227,9 +3459,14 @@ impl EtaFile {
     fn for_each_entry(&self, k: usize, mut f: impl FnMut(usize, f64)) {
         let (start, len) = self.span[k];
         if len == ETA_DENSE {
-            for (i, &x) in self.dense[start as usize].0.iter().enumerate() {
+            let de = &self.dense[start as usize];
+            let (s, e) = (de.sp_start as usize, de.sp_start as usize + de.sp_len as usize);
+            for (&i, &v) in self.idx[s..e].iter().zip(self.val[s..e].iter()) {
+                f(i as usize, v);
+            }
+            for (i, &x) in de.data.iter().enumerate() {
                 if x != 0.0 {
-                    f(i, x);
+                    f(de.lo + i, x);
                 }
             }
             return;
@@ -3244,13 +3481,27 @@ impl EtaFile {
     fn remove_index(&mut self, k: usize, index: usize) -> bool {
         let (start, len) = self.span[k];
         if len == ETA_DENSE {
-            let (data, nnz) = &mut self.dense[start as usize];
-            if data[index] != 0.0 {
-                data[index] = 0.0;
-                *nnz -= 1;
-                return true;
+            let de = &mut self.dense[start as usize];
+            if index >= de.lo {
+                let t = index - de.lo;
+                if t < de.data.len() && de.data[t] != 0.0 {
+                    de.data[t] = 0.0;
+                    de.nnz -= 1;
+                    return true;
+                }
+                return false;
             }
-            return false;
+            let s = de.sp_start as usize;
+            let e = s + de.sp_len as usize;
+            let Some(pos) = self.idx[s..e].iter().position(|&i| i as usize == index) else {
+                return false;
+            };
+            let pos = s + pos;
+            self.idx.copy_within(pos + 1..e, pos);
+            self.val.copy_within(pos + 1..e, pos);
+            de.sp_len -= 1;
+            de.nnz -= 1;
+            return true;
         }
         let s = start as usize;
         let e = s + len as usize;
@@ -3327,7 +3578,7 @@ impl EtaFile {
                 data
             };
             self.span.push((self.dense.len() as u32, ETA_DENSE));
-            self.dense.push((data.into_boxed_slice(), nnz));
+            self.dense.push(DenseEta { data: data.into_boxed_slice(), nnz, lo: 0, sp_start: 0, sp_len: 0 });
         } else {
             let base = self.idx.len();
             self.idx.reserve(nnz);
@@ -3956,17 +4207,29 @@ impl FtLu {
         let mut owner_count = vec![0usize; m];
         // スロットごとの対角ピボット
         let mut pivots = vec![0.0; m];
+        // 密ブロック (密行列の分解 #2) の先頭ステップ (無ければ `m`)。ブロック内のスロット `q` の
+        // eta は行 `[s0, q)` を密な区間に、行 `< s0` を疎な部分に持ち、ブロック内の行 `r` の
+        // `row_owners` はスロット `(r, m)` を密な区間に持つ。
+        let s0 = base.dense_s0.min(m);
+        // ブロック内のスロットの疎な部分 (行 `< s0`) の要素数
+        let mut sp_count = vec![0usize; m];
         for row_step in 0..m {
             for &(col_step, v) in &base.u_row[row_step] {
                 if col_step != row_step {
                     off_count[col_step] += 1;
-                    owner_count[row_step] += 1;
+                    if row_step < s0 {
+                        owner_count[row_step] += 1;
+                        if col_step >= s0 {
+                            sp_count[col_step] += 1;
+                        }
+                    }
                 } else {
                     pivots[col_step] = v;
                 }
             }
         }
-        let l_nnz: u64 = base.l_col.nnz() as u64;
+        // `L` の非ゼロ数 (密な区間の 0 は数えない。ブロックの有無で fill 基準などが変わらないように)
+        let l_nnz: u64 = if base.l_col.has_block() { (0..m).map(|s| base.l_col.seg(s).into_iter().filter(|&(_, v)| v != 0.0).count() as u64).sum() } else { base.l_col.nnz() as u64 };
         // `U` の非対角非ゼロ数 (`u_row[s]` は対角を 1 個含むので長さ - 1。HiGHS の
         // `u_countX` と同じく非対角だけを数える)。
         let u_off: u64 = base.u_row.iter().map(|v| v.len().saturating_sub(1) as u64).sum();
@@ -4010,10 +4273,17 @@ impl FtLu {
             slot_pos[slot] = u_seq.key.len();
             u_seq.key.push(slot as u32);
             u_seq.pivot.push(pivots[slot]);
-            if c as f64 > dense_fraction * m as f64 {
+            if slot >= s0 {
+                // 密ブロックの列: 行 `[s0, slot)` を密に、行 `< s0` を疎な部分 (プール) に持つ。
                 dense_of[slot] = u_seq.dense.len() as u32;
                 u_seq.span.push((u_seq.dense.len() as u32, ETA_DENSE));
-                u_seq.dense.push((vec![0.0; m].into_boxed_slice(), c));
+                cursor[slot] = pool as u32;
+                u_seq.dense.push(DenseEta { data: vec![0.0; slot - s0].into_boxed_slice(), nnz: c, lo: s0, sp_start: pool as u32, sp_len: sp_count[slot] as u32 });
+                pool += sp_count[slot];
+            } else if c as f64 > dense_fraction * m as f64 {
+                dense_of[slot] = u_seq.dense.len() as u32;
+                u_seq.span.push((u_seq.dense.len() as u32, ETA_DENSE));
+                u_seq.dense.push(DenseEta { data: vec![0.0; m].into_boxed_slice(), nnz: c, lo: 0, sp_start: 0, sp_len: 0 });
             } else {
                 cursor[slot] = pool as u32;
                 u_seq.span.push((pool as u32, c as u32));
@@ -4028,8 +4298,9 @@ impl FtLu {
                     continue;
                 }
                 let d = dense_of[col_step];
-                if d != u32::MAX {
-                    u_seq.dense[d as usize].0[row_step] = v;
+                if d != u32::MAX && row_step >= u_seq.dense[d as usize].lo {
+                    let lo = u_seq.dense[d as usize].lo;
+                    u_seq.dense[d as usize].data[row_step - lo] = v;
                 } else {
                     let c = cursor[col_step] as usize;
                     u_seq.idx[c] = row_step as u32;
@@ -4039,6 +4310,7 @@ impl FtLu {
             }
         }
         let mut row_owners = RowOwners::with_counts(&owner_count);
+        row_owners.set_block(s0);
         for k in 0..u_seq.n_headers() {
             let slot = u_seq.key[k] as usize;
             u_seq.for_each_entry(k, |row_step, v| row_owners.push(row_step, slot, v));
@@ -4198,10 +4470,16 @@ impl FtLu {
             }
             let zp = zp / pivot;
             z[p] = zp;
-            let (oq, ov) = self.row_owners.row(p);
-            self.add_tick(oq.len() as u64);
-            for (&q, &v) in oq.iter().zip(ov) {
+            let orow = self.row_owners.row(p);
+            self.add_tick(orow.len() as u64);
+            for (&q, &v) in orow.idx.iter().zip(orow.val) {
                 z[q as usize] -= v * zp;
+            }
+            if !orow.rval.is_empty() {
+                // 密ブロックの行 (密行列の分解 #2): スロット `rlo..` へ連続に散布する。
+                for (zq, &v) in z[orow.rlo..orow.rlo + orow.rval.len()].iter_mut().zip(orow.rval) {
+                    *zq -= v * zp;
+                }
             }
         }
     }
@@ -4232,11 +4510,22 @@ impl FtLu {
             }
             let zp = zp / pivot;
             z[p] = zp;
-            let (oq, ov) = self.row_owners.row(p);
-            self.add_tick(oq.len() as u64);
-            if ok && touch.len() + oq.len() <= cap {
-                for (&q, &v) in oq.iter().zip(ov) {
+            let orow = self.row_owners.row(p);
+            self.add_tick(orow.len() as u64);
+            if ok && touch.len() + orow.len() <= cap {
+                for (&q, &v) in orow.idx.iter().zip(orow.val) {
                     let q = q as usize;
+                    let old = z[q];
+                    z[q] = old - v * zp;
+                    if old == 0.0 {
+                        touch.push(q);
+                    }
+                }
+                for (t, &v) in orow.rval.iter().enumerate() {
+                    if v == 0.0 {
+                        continue;
+                    }
+                    let q = orow.rlo + t;
                     let old = z[q];
                     z[q] = old - v * zp;
                     if old == 0.0 {
@@ -4245,8 +4534,11 @@ impl FtLu {
                 }
             } else {
                 ok = false;
-                for (&q, &v) in oq.iter().zip(ov) {
+                for (&q, &v) in orow.idx.iter().zip(orow.val) {
                     z[q as usize] -= v * zp;
+                }
+                for (zq, &v) in z[orow.rlo..orow.rlo + orow.rval.len()].iter_mut().zip(orow.rval) {
+                    *zq -= v * zp;
                 }
             }
         }
@@ -4273,10 +4565,16 @@ impl FtLu {
             }
             let zp = zp / pivot;
             z[p] = zp;
-            let (oq, ov) = self.row_owners.row(p);
-            self.add_tick(oq.len() as u64);
-            for (&q, &v) in oq.iter().zip(ov) {
+            let orow = self.row_owners.row(p);
+            self.add_tick(orow.len() as u64);
+            for (&q, &v) in orow.idx.iter().zip(orow.val) {
                 z[q as usize] -= v * zp;
+            }
+            if !orow.rval.is_empty() {
+                // 密ブロックの行 (密行列の分解 #2): スロット `rlo..` へ連続に散布する。
+                for (zq, &v) in z[orow.rlo..orow.rlo + orow.rval.len()].iter_mut().zip(orow.rval) {
+                    *zq -= v * zp;
+                }
             }
         }
     }
@@ -4294,11 +4592,22 @@ impl FtLu {
             }
             let zp = zp / pivot;
             z[p] = zp;
-            let (oq, ov) = self.row_owners.row(p);
-            self.add_tick(oq.len() as u64);
-            if ok && touch.len() + oq.len() <= cap {
-                for (&q, &v) in oq.iter().zip(ov) {
+            let orow = self.row_owners.row(p);
+            self.add_tick(orow.len() as u64);
+            if ok && touch.len() + orow.len() <= cap {
+                for (&q, &v) in orow.idx.iter().zip(orow.val) {
                     let q = q as usize;
+                    let old = z[q];
+                    z[q] = old - v * zp;
+                    if old == 0.0 {
+                        touch.push(q);
+                    }
+                }
+                for (t, &v) in orow.rval.iter().enumerate() {
+                    if v == 0.0 {
+                        continue;
+                    }
+                    let q = orow.rlo + t;
                     let old = z[q];
                     z[q] = old - v * zp;
                     if old == 0.0 {
@@ -4307,8 +4616,11 @@ impl FtLu {
                 }
             } else {
                 ok = false;
-                for (&q, &v) in oq.iter().zip(ov) {
+                for (&q, &v) in orow.idx.iter().zip(orow.val) {
                     z[q as usize] -= v * zp;
+                }
+                for (zq, &v) in z[orow.rlo..orow.rlo + orow.rval.len()].iter_mut().zip(orow.rval) {
+                    *zq -= v * zp;
                 }
             }
         }
@@ -4545,7 +4857,9 @@ impl FtLu {
         while head < u_list.len() {
             let p = u_list[head];
             head += 1;
-            let (oq, _) = self.row_owners.row(p);
+            let orow = self.row_owners.row(p);
+            debug_assert!(orow.rval.is_empty(), "密ブロックがあれば u_seq に密 eta があり、ここには来ない");
+            let oq = orow.idx;
             edges += oq.len();
             if edges > limit {
                 return false;
@@ -4565,7 +4879,8 @@ impl FtLu {
         for &p in u_list.iter() {
             let mut xp = x[p];
             tmp.clear();
-            let (oq, ov) = self.row_owners.row(p);
+            let orow = self.row_owners.row(p);
+            let (oq, ov) = (orow.idx, orow.val);
             tmp.extend(oq.iter().zip(ov).map(|(&q, &v)| (slot_pos[q as usize], q as usize, v)));
             tmp.sort_unstable_by_key(|e| Reverse(e.0));
             work += tmp.len() as u64;
@@ -6036,15 +6351,22 @@ impl FtLu {
             }
             let zp = zp / pivot;
             z[p] = zp;
-            let (oq, ov) = self.row_owners.row(p);
-            self.add_tick(oq.len() as u64);
-            for (&q, &v) in oq.iter().zip(ov) {
-                let q = q as usize;
+            let orow = self.row_owners.row(p);
+            self.add_tick(orow.len() as u64);
+            let mut visit = |q: usize, v: f64| {
                 z[q] -= v * zp;
                 if !marks.is_marked(q) {
                     marks.mark(q);
                     touch.push(q);
                     heap.push(Reverse(self.u_transpose_key(q) as u32));
+                }
+            };
+            for (&q, &v) in orow.idx.iter().zip(orow.val) {
+                visit(q as usize, v);
+            }
+            for (t, &v) in orow.rval.iter().enumerate() {
+                if v != 0.0 {
+                    visit(orow.rlo + t, v);
                 }
             }
             if touch.len() > limit {
@@ -6064,10 +6386,13 @@ impl FtLu {
                     }
                     let zp = zp / pivot;
                     z[p] = zp;
-                    let (oq, ov) = self.row_owners.row(p);
-                    self.add_tick(oq.len() as u64);
-                    for (&q, &v) in oq.iter().zip(ov) {
+                    let orow = self.row_owners.row(p);
+                    self.add_tick(orow.len() as u64);
+                    for (&q, &v) in orow.idx.iter().zip(orow.val) {
                         z[q as usize] -= v * zp;
+                    }
+                    for (zq, &v) in z[orow.rlo..orow.rlo + orow.rval.len()].iter_mut().zip(orow.rval) {
+                        *zq -= v * zp;
                     }
                 }
                 return false;
@@ -6143,14 +6468,18 @@ impl FtLu {
             if ws == 0.0 {
                 continue;
             }
-            for (k, mult) in base.l_row.seg(s) {
+            base.l_row.seg(s).for_each(|k, mult| {
+                if mult == 0.0 {
+                    // 密な区間の 0 (疎な形式には無い要素)
+                    return;
+                }
                 w[k] -= mult * ws;
                 if !marks.is_marked(k) {
                     marks.mark(k);
                     touch.push(k);
                     heap.push(k as u32);
                 }
-            }
+            });
             if touch.len() > abort {
                 // 残り (ステップ `s` 未満) は全走査のスキャッタで処理する。
                 heap.clear();
@@ -6159,9 +6488,9 @@ impl FtLu {
                     if ws == 0.0 {
                         continue;
                     }
-                    for (k, mult) in base.l_row.seg(s2) {
+                    base.l_row.seg(s2).for_each(|k, mult| {
                         w[k] -= mult * ws;
-                    }
+                    });
                 }
                 btran_full_out(&base.row_perm, w, out, cap);
                 return false;
