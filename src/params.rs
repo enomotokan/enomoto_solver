@@ -134,6 +134,13 @@ pub(crate) mod simplex {
 
 /// 傾き・切片二段解法 (src/simplex/slope_intercept_dual.rs)
 pub(crate) mod slope_intercept_dual {
+    /// cont1 策2: 仕上げ (`polish_with_true_bounds`) で主単体法へ引き継いだ後、非基底を境界に戻して
+    /// `x_B` を作り直し双対ループへ戻す回数の上限。引き継ぎは摂動を外したときの双対実行不能を
+    /// 直すためのもので、正常なら 1 回 (戻った後の双対ループは真の費用で双対実行可能な基底から
+    /// 始まるので再び引き継ぎは要らない)。2 回目以降は数値的な揺れの保険で、3 回を超えて
+    /// まだ引き継ぎが要るなら解を信用せず `NotSolved` にする。
+    pub(crate) const HANDOFF_MAX_ROUNDS: usize = 3;
+
     /// `x_B(M)` の増分維持値のドリフト検査(と eta フィル検査)を行う主ループの反復間隔。
     /// `fill_count` にかかわらず毎回検査し、古典法のように `RESIDUAL_CHECK_MULTIPLIER` で
     /// さらに間引くことはしない(比較の多くが傾き項で `LEX_REL_TOL = 1e-9` という厳しさで決まるため)。

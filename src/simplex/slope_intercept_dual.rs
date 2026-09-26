@@ -61,7 +61,7 @@ use crate::params::simplex::{FT_BUMP_LIMIT_FACTOR, FT_CHECK_INTERVAL, FT_MIN_PIV
 use crate::params::slope_intercept_dual::{CHUZC1_TOPK, CHUZC1_TOPK_MIN_CANDS, FLIP_TRACK_MIN_M, CHUZC1_FAST_PROBE, SYNTH_CLOCK_MID_REF_MULT, SYNTH_CLOCK_MID_TAU_FRACTION, PREFETCH_DIST, PREFETCH_MIN_COLS, PRICE_DENSE_RESULT_RATIO, SYNTH_CLOCK_DENSE_FRACTION, D_DRIFT_TOL, FT_BUMP_LU_RATIO, PLATEAU_OBJ_REL, D_GROSS_MISMATCH_REL_TOL, FT_MAX_UPDATES_FACTOR, FT_MAX_UPDATES_FLOOR, PARTIAL_TAU_MIN_M, PIVOT_ESCALATION_STEP, SLOPE_TOL, STUCK_ROW_MIN_PIVOT, SYNTH_CLOCK_FACTOR, SYNTH_CLOCK_LARGE_M, SYNTH_CLOCK_LARGE_REF_M, SYNTH_CLOCK_MIN_UPDATES, XB_CHECK_CADENCE, XB_CHECK_CADENCE_LARGE, XB_CHECK_CADENCE_LARGE_DIV, XB_CHECK_CADENCE_LARGE_M, XB_CHECK_INTERVAL, XB_DRIFT_ESCALATION_FACTOR, XB_DRIFT_ESCALATION_STEP, XB_DRIFT_REL_TOL, XB_DRIFT_TOL, XB_DRIFT_TOL_MAX, X_B_SLOPE_NOISE, Z_SLOPE_TOL};
 use crate::params::slope_intercept_dual::{
     CHUZR_SHORTLIST_AUTO_DIV, CHUZR_SHORTLIST_AUTO_K, CHUZR_SHORTLIST_AUTO_K_MAX, CHUZR_SHORTLIST_AUTO_MIN_M, CHUZR_SHORTLIST_K, CHUZR_SHORTLIST_MAX_LEN_FACTOR, CHUZR_SHORTLIST_MAX_LEN_SLACK, CHUZR_SHORTLIST_MIN_POOL_FACTOR, COMPACT_ROWS_BLOCK, FTRAN_U_HYPER_DENSITY, FTRAN_U_HYPER_TAU_DENSITY,
-    GREATEST_IMPROVEMENT_STALL_DIVISOR, GREATEST_IMPROVEMENT_STALL_MIN, GREATEST_IMPROVEMENT_TOP_K, GROSS_MISMATCH_SCALE_FLOOR, INFEASIBLE_PLATEAU_BUDGET_DIVISOR, INFEASIBLE_PLATEAU_STALL_MULT,
+    GREATEST_IMPROVEMENT_STALL_DIVISOR, GREATEST_IMPROVEMENT_STALL_MIN, GREATEST_IMPROVEMENT_TOP_K, GROSS_MISMATCH_SCALE_FLOOR, HANDOFF_MAX_ROUNDS, INFEASIBLE_PLATEAU_BUDGET_DIVISOR, INFEASIBLE_PLATEAU_STALL_MULT,
     LEX_REL_TOL, PRICE_COLUMN_DENSITY, PRICE_LIST_DENSITY, SCORE2_STALL_HALFLIFE, STALL_LIMIT_MIN, STALL_LIMIT_PER_ROW, STUCK_ROW_BOOST_FACTOR, STUCK_ROW_BOOST_THRESHOLD, XB_DRIFT_FRESH_FLOOR_FACTOR,
     XB_DRIFT_FRESH_FLOOR_FRAC, XB_DRIFT_MIN_UPDATES, XB_DRIFT_MIN_UPDATES_MULT, XB_DRIFT_REL_K, XB_DRIFT_SAMPLE_GUARD, XB_DRIFT_SAMPLE_K, XB_LIST_DENSITY,
 };
@@ -5031,6 +5031,8 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
     let handoff_flip = handoff_flip_mode != 0;
     // すでに S5 の再開を 1 回行ったか。
     let mut flip_restarted = false;
+    // 主単体法への引き継ぎから双対ループへ戻った回数 (cont1 策2)。
+    let mut handoff_rounds = 0usize;
 
     let max_iters = super::max_iters_for(m, n_total);
     for iter_idx in 0..max_iters {
@@ -5179,6 +5181,12 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
             // 双対実行可能でない。ここからは主単体法の不変条件が必要なので、
             // `super::run_phase` の phase 2 をそのまま再利用する(cleanup 後の非基底列は
             // すべて有限側にあるので特別扱いは不要)。`expand`/`se` は新規状態から始める。
+            if handoff_rounds >= HANDOFF_MAX_ROUNDS {
+                if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
+                    eprintln!("DEBUG_EXT: polish handoff limit ({HANDOFF_MAX_ROUNDS}) reached; still dual infeasible -> NotSolved");
+                }
+                return None;
+            }
             let mut stall = super::PrimalStallState::new();
             if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
                 eprintln!("DEBUG_EXT: polish DUAL->PRIMAL cleanup handoff at polish_iter={iter_idx}");
@@ -5203,6 +5211,50 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
                 let n_bad = (0..n_total).filter(|&j| is_dual_bad(j)).count();
                 let handoff_iters = super::prof_phases::RUN_PHASE_ITERS.load(std::sync::atomic::Ordering::Relaxed) - handoff_iters0;
                 eprintln!("DEBUG_EXT: primal_handoff_us={} dual_infeasible_cols={n_bad} primal_handoff_iters={handoff_iters}", handoff_t0.elapsed().as_micros());
+            }
+            // cont1 策1・策2: 主単体法は EXPAND で出る変数を上下限から外れた値のまま非基底にし、
+            // 比率テストの行き過ぎが `|alpha|` 倍に増幅されると (cont1 では 6.6e-3) その値のまま
+            // "optimal" を返していた。最終基底そのものは正しいので、非基底を `nb_status` の境界値に
+            // 戻し (`compute_rhs_plain` は非基底を境界値として読む)、新しい LU で `x_B` を作り直して
+            // この双対ループの先頭へ戻る。`x_B` が `PRIMAL_FEAS_TOL` (相対) で実行可能なら先頭の
+            // 「実行不能行なし」の分岐が真の費用で双対実行可能性を確かめて返し、実行不能なら
+            // 基底は真の費用で双対実行可能なので双対単体法 (真の被約費用) で直す。
+            // 引き継ぎは `HANDOFF_MAX_ROUNDS` 回までで、それを超えて再び引き継ぎが要るなら
+            // 実行不能・非最適な解を optimal と報告しないよう `NotSolved` (`None`) にする。
+            // `ENOMOTO_HANDOFF_RAW_RETURN=1` で旧動作 (主単体法の `x` をそのまま返す、A/B 用)。
+            if status == Status::Optimal && tunable!("ENOMOTO_HANDOFF_RAW_RETURN", 0u8, u8) == 0 {
+                handoff_rounds += 1;
+                basis.copy_from_slice(&t.basis);
+                basis_pos.copy_from_slice(&t.basis_pos);
+                nb_status.copy_from_slice(&t.nb_status);
+                // 主単体法の LU (残差検査つきで保守されている) でまず `x_B` を作り直し、実行可能なら
+                // そのまま先頭へ (通常はこちら。Netlib の引き継ぎ 13 問はすべて実行可能)。
+                let rhs = compute_rhs_plain(std, nb_status);
+                lu.solve_into(&rhs, &mut lu_scratch, &mut x_b);
+                noise_feasible.fill(false);
+                infeasible_rows.rebuild(m, |i| row_infeasible_plain(std, basis, &x_b, &noise_feasible, i));
+                if !infeasible_rows.rows.is_empty() {
+                    // 双対ループで直す: 新しい LU で `x_B` と真の費用の被約費用 `d` を作り直す。
+                    lu = refactorize(std, basis_pos, Some(&lu))?;
+                    lu.solve_into(&rhs, &mut lu_scratch, &mut x_b);
+                    infeasible_rows.rebuild(m, |i| row_infeasible_plain(std, basis, &x_b, &noise_feasible, i));
+                    let c_b: Vec<f64> = basis.iter().map(|&bv| std.c[bv]).collect();
+                    let mut y = vec![0.0f64; m];
+                    lu.solve_transpose_into(&c_b, &mut lu_scratch, &mut y);
+                    for j in 0..n_total {
+                        let mut dj = std.c[j];
+                        for &(i, v) in std.cols.col(j) {
+                            dj -= v * y[i];
+                        }
+                        d[j] = dj;
+                    }
+                    since_check = 0;
+                }
+                stall_count = 0;
+                if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
+                    eprintln!("DEBUG_EXT: handoff round {handoff_rounds} snapped; infeasible rows after x_B recompute = {}", infeasible_rows.rows.len());
+                }
+                continue;
             }
             return Some(SimplexResult {
                 status: status.clone(),

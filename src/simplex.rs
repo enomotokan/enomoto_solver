@@ -1172,6 +1172,8 @@ fn run_phase2_incremental(std: &StdForm, t: &mut Tableau, lu: &mut sparse_lu::Ft
     let harris = tunable!("ENOMOTO_T_PRIMAL_HARRIS_TOL", PRIMAL_HARRIS_TOL, f64);
     let bump_limit = tunable!("ENOMOTO_T_FT_BUMP_LIMIT_FACTOR", FT_BUMP_LIMIT_FACTOR, usize) * m.max(1);
     let use_devex = tunable!("ENOMOTO_HANDOFF_INC_DEVEX", 1u8, u8) != 0;
+    // cont1 策3 の比率テストを旧版に戻す (A/B 用)。
+    let ratio_old = tunable!("ENOMOTO_HANDOFF_RATIO_OLD", 0u8, u8) != 0;
     let mut expand = ExpandState::new();
 
     let mut gamma: Vec<f64> = if use_devex { vec![1.0; n] } else { SteepestEdgeState::new(std).gamma }; // 最急辺 (または Devex) 重み
@@ -1289,7 +1291,17 @@ fn run_phase2_incremental(std: &StdForm, t: &mut Tableau, lu: &mut sparse_lu::Ft
         t.column_into(enter, &mut a_enter);
         lu.solve_into(&a_enter, &mut scratch, &mut alpha);
 
-        // 比率テスト: `run_phase` の第 2 段階と同じ Harris/EXPAND 2 パス。
+        // 比率テスト: EXPAND 2 パス (Gill et al. 1989)。
+        //
+        // cont1 策3: 旧版 (`ENOMOTO_HANDOFF_RATIO_OLD=1`) は `run_phase` の第 2 段階と同じく
+        // パス 2 の窓を `exact <= alpha1 + PRIMAL_HARRIS_TOL` (ステップ長の絶対値) にしていたので、
+        // 窓の中の他の行の行き過ぎが `harris * |alpha_i|` になり、`B^-1` が密で `|alpha|` が 100 級の
+        // cont1 では 1e-5〜1e-3 の上下限違反を作って非基底化していた。EXPAND の緩め幅 `delta` が
+        // すでに変数空間の許容幅なので、パス 2 は `exact <= alpha1` (追加の窓なし) にする
+        // (他の行の行き過ぎは `delta` に収まる)。出る変数自身の行き過ぎは下の「出る変数を境界へ」で扱う。
+        // 報告の案にあった「すでに外れた基底変数は戻る向きだけブロックする」(`run_phase` の第 1 段階の
+        // 規則) も試したが、cont1 の引き継ぎが 2,213 → 4,123 反復に増えた (違反を深める向きで
+        // ブロックしないので外れた変数がさらに外れ、最後の双対ループの仕事も増える) ので採らない。
         let self_width = std.ub[enter] - std.lb[enter];
         let init_alpha1 = if self_width.is_finite() { self_width } else { f64::INFINITY };
         candidates.clear();
@@ -1310,7 +1322,8 @@ fn run_phase2_incremental(std: &StdForm, t: &mut Tableau, lu: &mut sparse_lu::Ft
             candidates.push(Candidate { row: i, exact, relaxed, pivot_abs: alpha[i].abs(), hits_upper: is_upper });
         }
         let alpha1 = candidates.iter().map(|c| c.relaxed).fold(init_alpha1, f64::min);
-        let admitted = candidates.iter().filter(|c| c.exact <= alpha1 + harris);
+        let window = if ratio_old { harris } else { 0.0 };
+        let admitted = candidates.iter().filter(|c| c.exact <= alpha1 + window);
         let leaving = if stall.bland_mode { admitted.min_by_key(|c| t.basis[c.row]) } else { admitted.max_by(|a, b| a.pivot_abs.total_cmp(&b.pivot_abs)) };
         let (leaving_row, leaving_hits_upper, alpha2, best_pivot_mag) = match leaving {
             Some(c) if c.pivot_abs > 0.0 => (Some(c.row), c.hits_upper, c.exact, c.pivot_abs),
@@ -1386,6 +1399,19 @@ fn run_phase2_incremental(std: &StdForm, t: &mut Tableau, lu: &mut sparse_lu::Ft
         t.basis[r] = enter;
         t.basis_pos[enter] = Some(r);
         t.nb_status[enter] = None;
+        // cont1 策3: 出る変数が EXPAND の許容幅 `delta` を超えて上下限を外れたまま非基底になる
+        // (すでに外れていた基底変数が出る場合や、最小ステップ `EXPAND_TAU / |pivot|` がピボットの
+        // 小さい行で大きくなる場合) なら、境界に置き直して次の反復の頭で `x_B` を作り直す
+        // (HiGHS の主単体法と同じく出る変数は境界に置く。`delta` 以内の外れは従来どおり
+        // `expand_reset_nonbasics` に任せるので、通常の反復は変わらない)。旧版はこの値のまま
+        // 非基底に残し、`expand_reset_nonbasics` も 1e-6 を超える外れは戻さないので、外れが残り続けた。
+        if !ratio_old {
+            let bound = if leaving_hits_upper { std.ub[leaving_var] } else { std.lb[leaving_var] };
+            if (t.x[leaving_var] - bound).abs() > expand.delta {
+                t.x[leaving_var] = bound;
+                need_fresh = true;
+            }
+        }
 
         for &j in &touched_cols {
             if t.nb_status[j].is_some() {
