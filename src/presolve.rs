@@ -46,7 +46,7 @@ use crate::sparse::{FaerCsr, CsrRowBuilder, csr_from_rows, csr_row_vec, csr_rows
 use crate::types::{ConstraintRow, RowSense, VariableData};
 use scaling::Scaling;
 use crate::params::presolve::{
-    DOUBLETON_STRIKES, DUALPROPAGATE_STRIKES, EQPROP_ROUNDS, EQPROP_SKIP_IDLE, FIXPOINT_RELTOL, PARALLELCOLS_STRIKES, PRESOLVE_SPLIT_G, REDEQ_MODE,
+    DOUBLETON_STRIKES, DUALPROPAGATE_STRIKES, EQPROP_ROUNDS, EQPROP_SKIP_IDLE, FIXPOINT_RELTOL, INEQ_SINGLETON_LARGE, LARGE_PRESOLVE_MIN_ROWS, PARALLELCOLS_STRIKES, PROPAGATION_PASSES_LARGE, PRESOLVE_SPLIT_G, REDEQ_MODE,
     ROUND_STRUCT_STOP,
 };
 
@@ -340,6 +340,16 @@ pub fn run_extended(
     // 狭める前の元の上下限を必要とする)。同じ抽出結果を最初のラウンドの伝播にも使う。
     let (first_lb, first_ub, first_rows, first_rhs) = propagate::extract_bounds(n, &g, &h);
     let (orig_lb, orig_ub) = (first_lb.clone(), first_ub.clone());
+    // 大きな問題向けの設定 (`LARGE_PRESOLVE_MIN_ROWS` 参照): 伝播パス数の下限と `ineqsingleton` の既定有効化。
+    let large = {
+        let min_rows = tunable!("ENOMOTO_T_LARGE_PRESOLVE_MIN_ROWS", LARGE_PRESOLVE_MIN_ROWS, usize);
+        min_rows != 0 && b.len() + first_rows.len() >= min_rows
+    };
+    let prop_passes = if large { prop_passes.max(tunable!("ENOMOTO_T_PROPAGATION_PASSES_LARGE", PROPAGATION_PASSES_LARGE, usize)) } else { prop_passes };
+    let ineq_singleton_on = match env_str!("ENOMOTO_INEQ_SINGLETON") {
+        Some(v) => v != "0",
+        None => large && tunable!("ENOMOTO_T_INEQ_SINGLETON_LARGE", INEQ_SINGLETON_LARGE, usize) != 0,
+    };
 
     // 全消去ステップの時系列ログ。
     let mut postsolve_log: Vec<PostsolveStep> = Vec::new();
@@ -485,9 +495,9 @@ pub fn run_extended(
             }
         }
 
-        // 不等式行の列シングルトン (`ineqsingleton`、`ENOMOTO_INEQ_SINGLETON` 設定時のみ):
+        // 不等式行の列シングルトン (`ineqsingleton`、大きな問題か `ENOMOTO_INEQ_SINGLETON` 設定時):
         // 列を上下限に固定するか、その行を等式に変えて後段の colsingleton に消去させる。
-        if env_str!("ENOMOTO_INEQ_SINGLETON").is_some() {
+        if ineq_singleton_on {
             let isr = timed_step!("ineqsingleton", ineqsingleton::resolve_inequality_singletons(n, &a, &cur_real_rows, &cur_real_rhs, &c, &lb, &ub));
             if env_str!("ENOMOTO_DEBUG_INEQ_SINGLETON").is_some() {
                 eprintln!("DEBUG_INEQ_SINGLETON: fixes={} implied_equalities={}", isr.fixes.len(), isr.implied_equalities.len());

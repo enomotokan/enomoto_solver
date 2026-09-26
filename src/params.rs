@@ -744,6 +744,27 @@ pub(crate) mod presolve {
     /// (`ENOMOTO_T_DUALPROPAGATE_STRIKES`)。
     pub(crate) const DUALPROPAGATE_STRIKES: usize = 1;
 
+    /// 大きな問題 (等式行 + 多変数の不等式行が [`LARGE_PRESOLVE_MIN_ROWS`] 以上) で 1 回の上下限伝播に許すパス数の下限
+    /// (`ENOMOTO_T_PROPAGATION_PASSES_LARGE`)。伝播は行も上下限も変わらなくなったパスで打ち切るので、上限を上げても
+    /// 収束済みの問題の手間は増えない。既定の 2 パスでは、時間方向に連なる制約 (irish-electricity のランプ制約) で
+    /// 上下限が 1 ラウンドに 2 段しか伝わらず、そこから決まる冗長行・双対固定 (毎ラウンド約 80 行・34 列) が外側ラウンドの
+    /// 上限 (20) まで続いて打ち切られていた (73,879 行)。20 パスなら 7 ラウンドで不動点 (67,470 行) に達し、前処理も
+    /// 1.6 s → 0.9 s。残った冗長な行は双対単体法の基底を悪条件にし (`|B^-T e_r|` が 1e7〜1e12)、反復 10 万を超えて
+    /// 特異基底で失敗していた (HiGHS に presolve なしで渡しても数値的に破綻する)。
+    pub(crate) const PROPAGATION_PASSES_LARGE: usize = 20;
+
+    /// 大きな問題向けの前処理の設定 ([`PROPAGATION_PASSES_LARGE`]、[`INEQ_SINGLETON_LARGE`]) を使う行数の下限
+    /// (等式行 + 多変数の不等式行、`ENOMOTO_T_LARGE_PRESOLVE_MIN_ROWS`、0 = 無効)。Netlib (最大 6,071 行) の経路を
+    /// 変えないよう、他の大問題向け経路と同じ 1 万行。
+    pub(crate) const LARGE_PRESOLVE_MIN_ROWS: usize = 10_000;
+
+    /// 大きな問題 ([`LARGE_PRESOLVE_MIN_ROWS`] 以上) では不等式行の列シングルトン (`ineqsingleton`) を既定で有効にする
+    /// (`ENOMOTO_T_INEQ_SINGLETON_LARGE`、0 = 無効)。`ENOMOTO_INEQ_SINGLETON` を設定すればこの判定より優先
+    /// (`0` で無効、それ以外で有効)。Netlib の A/B (seba_presolve_20260923.md) では recipe +40%・scfxm2 +15% と外側
+    /// ラウンドの周回が増える小さな問題で退行したので大きな問題だけ。irish-electricity では列 41K → 36.6K
+    /// (HiGHS の縮約後 36.5K とほぼ同じ) になり、完走時間が 263 s → 120 s (伝播パス 20 と併用、4 本並走)。
+    pub(crate) const INEQ_SINGLETON_LARGE: usize = 1;
+
     /// doubleton がこの回数連続で何も消去しなければ以降のラウンドで停止する
     /// (`ENOMOTO_T_DOUBLETON_STRIKES`)。
     pub(crate) const DOUBLETON_STRIKES: usize = 1;
