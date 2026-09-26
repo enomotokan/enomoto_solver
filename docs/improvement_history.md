@@ -7206,6 +7206,39 @@ irish-electricity (104,259 行 × 61,728 列、HiGHS 156 s / 86,602 反復) を�
 - 双対固定の連鎖をラウンド内で不動点まで回す (固定で冗長になった行・単一列になった行を除いてロックを外す): 上記のとおり
   連鎖は上下限伝播が運んでいて、この処理では 1 段も進まなかった。
 
+## cont1 報告 C 策5 前半: polish の費用摂動を主ループと揃える (2026-09-26)
+
+### 変更 (src/simplex/slope_intercept_dual.rs `dual_active_costs`)
+
+- 主ループは `perturb_costs` の後にスラック列 (`n_orig..n_total`) を真の費用に戻していたが、仕上げの
+  `polish_with_true_bounds` は `perturb_costs` を作り直すだけでスラックも摂動していた。両者を `dual_active_costs` に
+  まとめ、polish も主ループと同じ費用を使う。`ENOMOTO_POLISH_PERTURB_SLACK=1` で旧動作 (A/B 用)。
+- `ENOMOTO_DEBUG_EXT_ITERS` で polish 開始時の (この段の費用での) 双対実行不能列数 `polish_start_dual_infeasible_cols` を出す。
+- 摂動を作り直している箇所は他に無い (`perturb_costs` の呼び出しは主ループと polish の 2 箇所とテスト 1 件)。cleanup・
+  主単体法への引き継ぎ (`run_phase2_incremental` / `run_phase`)・引き継ぎ後の `d` の作り直しはすべて真の費用 `std.c` を使う。
+
+### 効果: 経路は変わらない
+
+| cont1 | 旧 (`ENOMOTO_POLISH_PERTURB_SLACK=1`) | 新 |
+|---|---:|---:|
+| polish 開始時の双対実行不能列 (摂動費用) | 3 | 0 |
+| polish の双対反復 | 0 | 0 |
+| 真の費用での双対実行不能列 (引き継ぎ時) | 788 | 788 |
+| 主単体法への引き継ぎ反復 | 1,819 | 1,819 |
+| 総時間 | 363.5 s | 355.1 s |
+
+- cont1 では cleanup 後の基底が主実行可能で polish は 0 反復で終わる (摂動費用での目的関数値 0.014930676906215376)。
+  polish の `d` は比率テストにしか使われないので、スラックの摂動の違い (3 列) は経路に効かない。788 列の双対実行不能は
+  主ループ自身の摂動 (真の最適値 0.00878 に対し 0.01493) から来ており、減らすには報告 C 策5 後半 (摂動量を真の費用の
+  尺度に比例させる) が要る。
+- Netlib 93 問: 全問で status・目的関数値のビット・`ENOMOTO_DEBUG_EXT_ITERS` の出力 (polish 反復数・引き継ぎ反復数) が
+  ベース (066660a) と一致 (経路が変わった問題なし)。新版の polish 開始時の双対実行不能列は全問 0。HiGHS との相対差は最大 9.8e-11。
+  `scripts/ab_bench.py --rounds 3`: 合計 −2.6%、幾何平均 −0.8%、10% 超の退行なし (最大 kb2 +7.6%、経路同一なので揺れ)。
+  `cargo test --release --lib` 248 件通過。
+- Mittelmann 11 問 (1 本ずつ、ベース → 新): 目的関数値のビットは全問ベースと同じ、すべて optimal。stormG2_1000 61.8 → 63.5、
+  square41 95.2 → 93.9、pds-100 114.1 → 115.6、ex10 94.2 → 92.0、s250r10 77.4 → 76.1、cont1 367.4 → 368.9、
+  nug08-3rd 539.6 → 519.7、irish-electricity 122.2 → 120.4、neos 528.8 → 538.1、fome13 15.7 → 15.4、supportcase10 116.6 → 116.7 s。
+
 ## 改名一覧 (整理時)
 
 本メモ中は旧名で書かれている。
