@@ -768,6 +768,13 @@ pub(crate) mod presolve {
     /// 疎な LP の行 (数〜数十要素) より十分大きい値。
     pub(crate) const REDEQ_MARKOWITZ_MAX_ROW_LEN: usize = 64;
 
+    /// nug08 報告 #5・#6: 見つかった従属等式が等式行のこの割合未満なら落とさない
+    /// (`ENOMOTO_T_REDEQ_MARKOWITZ_MIN_DROP_FRACTION`)。双対単体法では従属等式は基底に残るスラック 1 本で、
+    /// 数本なら反復への害はほぼ無い一方、行を落とすと反復経路が変わる (fome13 は 24,559 行中 104 行 (0.4%) を
+    /// 落として 14.7 → 17.5 s、pds-100 は 80,031 行中 11 行で 107 → 118 s)。nug08-3rd (14%) のように従属等式が
+    /// 退化の大きな原因になる規模だけで落とす。1% は両者の間の、桁で分かれる値。
+    pub(crate) const REDEQ_MARKOWITZ_MIN_DROP_FRACTION: f64 = 0.01;
+
     /// nug08 報告 #6: 従属等式の Markowitz 消去で、残りの活性部分 (残りの列 × 要素のある残りの行) がこの要素数
     /// 以下かつ密度が [`REDEQ_DENSE_FRACTION`] 以上になったら稠密な列ピボット付き QR に切り替える
     /// (`ENOMOTO_T_REDEQ_DENSE_LIMIT`、0 = 最後まで疎)。1,600 万要素 = 128 MB の稠密行列が上限。

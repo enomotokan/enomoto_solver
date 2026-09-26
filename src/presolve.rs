@@ -46,7 +46,7 @@ use crate::sparse::{FaerCsr, CsrRowBuilder, csr_from_rows, csr_row_vec, csr_rows
 use crate::types::{ConstraintRow, RowSense, VariableData};
 use scaling::Scaling;
 use crate::params::presolve::{
-    DOUBLETON_STRIKES, DUALPROPAGATE_STRIKES, EQPROP_ROUNDS, EQPROP_SKIP_IDLE, FIXPOINT_RELTOL, PARALLELCOLS_STRIKES, PRESOLVE_SPLIT_G, REDEQ_MARKOWITZ_MAX_ROW_LEN, REDEQ_MARKOWITZ_MIN_ROWS, REDEQ_MODE,
+    DOUBLETON_STRIKES, DUALPROPAGATE_STRIKES, EQPROP_ROUNDS, EQPROP_SKIP_IDLE, FIXPOINT_RELTOL, PARALLELCOLS_STRIKES, PRESOLVE_SPLIT_G, REDEQ_MARKOWITZ_MAX_ROW_LEN, REDEQ_MARKOWITZ_MIN_DROP_FRACTION, REDEQ_MARKOWITZ_MIN_ROWS, REDEQ_MODE,
     ROUND_STRUCT_STOP,
 };
 
@@ -869,8 +869,12 @@ pub fn run_extended(
         if env_str!("ENOMOTO_DEBUG_PRESOLVE_SIZE").is_some() {
             eprintln!("REDEQ_MARKOWITZ rows {rows_before} -> {}", na.nrows());
         }
-        a = na;
-        b = nb;
+        // 従属な等式が少ないなら落とさない (`REDEQ_MARKOWITZ_MIN_DROP_FRACTION` 参照)。
+        let dropped = rows_before - na.nrows();
+        if dropped as f64 >= tunable!("ENOMOTO_T_REDEQ_MARKOWITZ_MIN_DROP_FRACTION", REDEQ_MARKOWITZ_MIN_DROP_FRACTION, f64) * rows_before as f64 {
+            a = na;
+            b = nb;
+        }
     }
     if redeq_mode == 2 && a.nrows() > 0 {
         // 遅延した階数判定 (`REDEQ_MODE == 2`): 縮小済みの A に対して一次従属行を削除する。
