@@ -672,6 +672,12 @@ struct MarkowitzState {
     /// その場更新を使うか。`0` なら全行で単純な 2 ポインタマージ
     /// (因子はビット一致)。
     inplace_elim: bool,
+    /// 従属等式の検出 ([`markowitz_independent_columns`]) 専用: 列 `j` のピボットの絶対値の下限
+    /// (これ未満の要素は消去の丸め残りとみなしてピボットにしない)。空なら無効 (通常の分解)。
+    col_floor: Vec<f64>,
+    /// 同上: `find_best_pivot` が見つけた「全要素が `col_floor` 未満の列」(一次従属と確定した列)。
+    /// 呼び出し側がバケットから除く (以後の探索で毎回走査しないため)。
+    dead_cols: Vec<usize>,
 }
 
 thread_local! {
@@ -785,6 +791,8 @@ impl MarkowitzState {
             row_singleton_rel: env_str!("ENOMOTO_LU_ROW_SINGLETON").and_then(|v| v.parse::<f64>().ok()).unwrap_or(-1.0),
             row_search: tunable!("ENOMOTO_PIVOT_ROW_SEARCH", PIVOT_ROW_SEARCH_MAX_DEGREE, usize),
             lazy_colmax: !matches!(env_str!("ENOMOTO_LU_LAZY_COLMAX"), Some("0")),
+            col_floor: Vec::new(),
+            dead_cols: Vec::new(),
         }
     }
 
@@ -911,6 +919,14 @@ impl MarkowitzState {
     ///   ただしピボットが既に見つかっている場合のみなので `Some` を `None` に
     ///   することはない。
     fn find_best_pivot(&mut self, skip_dense: bool) -> Option<(usize, usize)> {
+        self.find_best_pivot_impl::<false>(skip_dense)
+    }
+
+    /// [`Self::find_best_pivot`] の本体。`FLOOR` は従属等式の検出 ([`markowitz_independent_columns`]) 用の
+    /// 列ごとのピボット下限 (`col_floor`) と従属列の記録 (`dead_cols`) を使うか (通常の分解は偽で、
+    /// その判定のコードを含まない実体を使う)。
+    #[inline(always)]
+    fn find_best_pivot_impl<const FLOOR: bool>(&mut self, skip_dense: bool) -> Option<(usize, usize)> {
         // プロファイル時のみ計測開始時刻を取る
         let prof_t0 = if self.prof_timing { Some(std::time::Instant::now()) } else { None };
         let mut best: Option<(usize, usize)> = None;
@@ -945,6 +961,8 @@ impl MarkowitzState {
         let threshold = self.threshold;
         let search_limit = self.search_limit;
         let lazy_colmax = self.lazy_colmax;
+        // 従属等式の検出用のピボット下限があるか (通常の分解では偽)。
+        let has_floor = FLOOR && !self.col_floor.is_empty();
         'scan: for deg_col in scan_from..col_buckets.len() {
             // バケットの中身はこの走査中は変わらない。
             for &j in &col_buckets[deg_col] {
@@ -1010,7 +1028,7 @@ impl MarkowitzState {
                     let v = if cached { self.col_value_cache[k] } else { mat.row_get(i, j) };
                     k += 1;
                     let Some(v) = v else { continue };
-                    if v == 0.0 || v.abs() < min_pivot {
+                    if v == 0.0 || v.abs() < min_pivot || (has_floor && v.abs() < self.col_floor[j]) {
                         continue;
                     }
                     if score < best_score || (score == best_score && v.abs() > best_pivot_abs) {
@@ -1018,6 +1036,10 @@ impl MarkowitzState {
                         best = Some((i, j));
                         best_pivot_abs = v.abs();
                     }
+                }
+                // 従属等式の検出: 列最大値が確定していて下限未満なら、この列はもうピボットを持たない。
+                if has_floor && !self.col_max_abs_dirty[j] && self.col_max_abs[j] < self.col_floor[j] {
+                    self.dead_cols.push(j);
                 }
                 if best_score == 0 {
                     exit = 0;
@@ -1061,7 +1083,7 @@ impl MarkowitzState {
                             self.col_max_abs[j] = mx;
                             self.col_max_abs_dirty[j] = false;
                         }
-                        if v.abs() < threshold * self.col_max_abs[j] {
+                        if v.abs() < threshold * self.col_max_abs[j] || (has_floor && v.abs() < self.col_floor[j]) {
                             continue;
                         }
                         if score < best_score || (score == best_score && v.abs() > best_pivot_abs) {
@@ -2220,6 +2242,107 @@ fn dense_switch_for(m: usize, prev: &FtLu) -> f64 {
     } else {
         0.0
     }
+}
+
+/// nug08 報告 #6: 従属等式の検出。`m x m` の疎行列 `rows_in` (行 `(列, 値)`) を通常の分解と同じ
+/// Markowitz 消去 (閾値ピボット・列シングルトンの前処理・探索上限も同じ) で消去し、ピボットが取れた
+/// 列の一覧 (昇順) を返す。特異 (ピボットが取れない列が残る) でも止まらず、取れた列だけを返す。
+/// 列 `j` の要素は絶対値が `col_floor[j]` 未満ならピボットにしない (消去で打ち消し合った丸め残りを
+/// 独立とみなさないため。呼び出し側が列の元のノルムに比例した値を渡す)。因子は作らない。
+///
+/// 消去の終盤で活性部分 (残りの列 × 要素のある残りの行) が `dense_limit` 要素以下かつ密度が
+/// `dense_fraction` 以上になったら、そこで止めて残りの活性部分を列ごとの疎ベクトル `(元の列, [(局所行, 値)])`
+/// として返す (呼び出し側が稠密な階数判定で仕上げる。疎な消去は密になった終盤で極端に遅くなるため)。
+/// `dense_limit == 0` なら最後まで疎に消去する。
+///
+/// 等式行を列、変数を行とした行列を渡すと、返る列の集合が一次独立な等式の極大集合になる
+/// (HiGHS の従属等式除去が `HFactor` の階数落ち情報を使うのと同じ考え方)。基底行列を渡すと、
+/// ピボットが取れない列 (数値的に従属な基底列) とピボットが取れない行 (2 番目の戻り値) が基底修復に使える。
+#[allow(clippy::type_complexity)]
+pub(crate) fn markowitz_independent_columns(m: usize, rows_in: &[Vec<(usize, f64)>], col_floor: &[f64], dense_limit: usize, dense_fraction: f64) -> (Vec<usize>, Vec<usize>, Vec<(usize, Vec<(usize, f64)>)>) {
+    assert_eq!(col_floor.len(), m, "col_floor must have one entry per column");
+    let mut state = MarkowitzState::new(m, rows_in);
+    state.col_floor = col_floor.to_vec();
+    let mut row_perm = vec![0usize; m];
+    let mut col_perm = vec![0usize; m];
+    // 前処理の出力 (`U` の要素) は使わないが、前処理の引数として要る。
+    let mut u_entries: Vec<(usize, usize, f64)> = Vec::new();
+    let peeled = state.peel_column_singletons(&mut row_perm, &mut col_perm, &mut u_entries);
+    let mut pivoted: Vec<usize> = col_perm[..peeled].to_vec();
+    let mut pivot_row_snapshot: Vec<(usize, f64)> = Vec::new();
+    let dbg_indep = env_str!("ENOMOTO_DEBUG_INDEP").is_some();
+    let t0 = std::time::Instant::now();
+    let mut remainder: Vec<(usize, Vec<(usize, f64)>)> = Vec::new();
+    let check_every = ((0..m).filter(|&j| state.mat.col_act[j] > 0).count() / 128).max(64);
+    for step in peeled..m {
+        let found = state.find_best_pivot_impl::<true>(true).or_else(|| state.find_best_pivot_impl::<true>(false));
+        // 全要素が下限未満になった列 (従属と確定) をバケットから除き、以後は消去の対象からも外す
+        // (使用済みの印を付けるとピボット行の写しに入らないので、値も更新されない)。
+        while let Some(j) = state.dead_cols.pop() {
+            if !state.col_used[j] {
+                state.remove_from_bucket_col(j);
+                state.col_used[j] = true;
+            }
+        }
+        let Some((pi, pj)) = found else { break };
+        // 稠密切替の判定は `O(m)` なので、要素のある列数の 1/128 (最低 64) ステップごとに行う
+        // (判定は高々 128 回程度で総手間 `O(128 m)`、終盤の密になる区間も同じ細かさで捉える)。
+        if dense_limit > 0 && step % check_every == 0 {
+            // 残りの列 (未使用で活性要素あり) と要素のある残りの行
+            let cols_left = (0..m).filter(|&j| !state.col_used[j] && state.mat.col_act[j] > 0).count();
+            let rows_left = (0..m).filter(|&i| !state.row_used[i] && state.mat.row_len[i] > 0).count();
+            let active: usize = (0..m).filter(|&i| !state.row_used[i]).map(|i| state.mat.row_len[i]).sum();
+            let size = cols_left.saturating_mul(rows_left);
+            if dbg_indep {
+                eprintln!("INDEP step={step} pivoted={} active={active} cols_left={cols_left} rows_left={rows_left} t={:.3}s", pivoted.len(), t0.elapsed().as_secs_f64());
+            }
+            if size > 0 && size <= dense_limit && active as f64 >= dense_fraction * size as f64 {
+                // 残りの活性部分を列ごとに書き出す (行は要素のある残りの行に詰め直す)。
+                let mut row_local = vec![usize::MAX; m];
+                let mut next = 0usize;
+                for i in 0..m {
+                    if !state.row_used[i] && state.mat.row_len[i] > 0 {
+                        row_local[i] = next;
+                        next += 1;
+                    }
+                }
+                let mut col_local = vec![usize::MAX; m];
+                for j in 0..m {
+                    if !state.col_used[j] && state.mat.col_act[j] > 0 {
+                        col_local[j] = remainder.len();
+                        remainder.push((j, Vec::new()));
+                    }
+                }
+                for i in 0..m {
+                    if row_local[i] == usize::MAX {
+                        continue;
+                    }
+                    for (j, v) in state.row(i) {
+                        if v != 0.0 && col_local[j] != usize::MAX {
+                            remainder[col_local[j]].1.push((row_local[i], v));
+                        }
+                    }
+                }
+                break;
+            }
+        }
+        state.row_used[pi] = true;
+        state.col_used[pj] = true;
+        state.remove_from_bucket_row(pi);
+        state.remove_from_bucket_col(pj);
+        let pivot_val = state.value_at(pi, pj).unwrap();
+        pivot_row_snapshot.clear();
+        pivot_row_snapshot.extend(state.row(pi).filter(|&(j, v)| v != 0.0 && (j == pj || !state.col_used[j])));
+        state.eliminate(pi, pj, pivot_val, &pivot_row_snapshot);
+        pivoted.push(pj);
+    }
+    if dbg_indep {
+        eprintln!("INDEP done pivoted={} remainder_cols={} t={:.3}s", pivoted.len(), remainder.len(), t0.elapsed().as_secs_f64());
+    }
+    pivoted.sort_unstable();
+    // ピボットが取れなかった行 (稠密な仕上げに回した場合はその行も含む)。
+    let free_rows: Vec<usize> = (0..m).filter(|&i| !state.row_used[i]).collect();
+    (pivoted, free_rows, remainder)
 }
 
 /// B3 診断: 残りを稠密分解に切り替えた分解の回数。
