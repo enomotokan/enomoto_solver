@@ -746,14 +746,9 @@ impl<'a> Tableau<'a> {
 
 }
 
-/// 双対法の退化対策としての費用摂動 (HiGHS `HEkk::initialiseCost` と同じ方式)。
-///
-/// 摂動の大きさは最大費用の絶対値に比例 (大きすぎれば 4 乗根で減衰、箱型列が
-/// ごく少なければ上限を設ける)。各列の摂動は `(1 + r) * (|c_j| + 1) * base`
-/// (`r` は列番号のハッシュによる [0, 1) の擬似乱数) で、双対実行可能側を変えない向きに加える:
-/// 固定列・自由列はそのまま、片側有限列は欠けている上下限から遠ざかる向き、
-/// 箱型列は元の費用の符号の向き。摂動後の費用ベクトルを返す。
-fn perturb_costs(std: &StdForm) -> Vec<f64> {
+/// [`perturb_costs`] の基準の大きさ `COST_PERTURB_BASE * (減衰・頭打ち後の最大費用)`。
+/// 双対単体法の費用シフト (作業 #8、`slope_intercept_dual`) も同じ大きさを使う。
+fn cost_perturb_base(std: &StdForm) -> f64 {
     let n = std.n_total;
     let mut max_abs_cost = std.c.iter().fold(0.0f64, |acc, &c| acc.max(c.abs()));
     if max_abs_cost > COST_PERTURB_LARGE_COST {
@@ -769,7 +764,28 @@ fn perturb_costs(std: &StdForm) -> Vec<f64> {
     if max_abs_cost == 0.0 {
         max_abs_cost = COST_PERTURB_ZERO_COST_SCALE;
     }
-    let base = COST_PERTURB_BASE * max_abs_cost; // 摂動の基準の大きさ
+    COST_PERTURB_BASE * max_abs_cost
+}
+
+/// 列番号 `j` の splitmix64 風ハッシュから作る [0, 1) の擬似乱数 (費用摂動・費用シフトの列ごとの揺らぎ)。
+fn perturb_random(j: usize) -> f64 {
+    let mut h = (j as u64).wrapping_add(0x9E37_79B9_7F4A_7C15);
+    h = (h ^ (h >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    h = (h ^ (h >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    h ^= h >> 31;
+    (h >> 40) as f64 / (1u64 << 24) as f64
+}
+
+/// 双対法の退化対策としての費用摂動 (HiGHS `HEkk::initialiseCost` と同じ方式)。
+///
+/// 摂動の大きさは最大費用の絶対値に比例 (大きすぎれば 4 乗根で減衰、箱型列が
+/// ごく少なければ上限を設ける)。各列の摂動は `(1 + r) * (|c_j| + 1) * base`
+/// (`r` は列番号のハッシュによる [0, 1) の擬似乱数) で、双対実行可能側を変えない向きに加える:
+/// 固定列・自由列はそのまま、片側有限列は欠けている上下限から遠ざかる向き、
+/// 箱型列は元の費用の符号の向き。摂動後の費用ベクトルを返す。
+fn perturb_costs(std: &StdForm) -> Vec<f64> {
+    let n = std.n_total;
+    let base = cost_perturb_base(std); // 摂動の基準の大きさ
 
     let mut pc = std.c.clone(); // 摂動後の費用
     for j in 0..n {
@@ -781,13 +797,7 @@ fn perturb_costs(std: &StdForm) -> Vec<f64> {
             continue;
         }
 
-        // 列番号 j の splitmix64 風ハッシュから [0, 1) の擬似乱数 r を作る。
-        let mut h = (j as u64).wrapping_add(0x9E37_79B9_7F4A_7C15);
-        h = (h ^ (h >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        h = (h ^ (h >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        h ^= h >> 31;
-        let r = (h >> 40) as f64 / (1u64 << 24) as f64;
-
+        let r = perturb_random(j);
         let mut xpert = (1.0 + r) * (pc[j].abs() + 1.0) * base; // この列の摂動量
         // 試験用 (作業 #8、既定は係数 1 = 無効): 摂動の大きさを変えて、摂動が小さい・無いときの正しさを試す
         // (`scripts/singular_stress.py` の z0/p0 などの設定)。`ENOMOTO_T_PERTURB_FACTOR`: 全列の摂動を係数倍

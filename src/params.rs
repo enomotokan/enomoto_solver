@@ -356,6 +356,18 @@ pub(crate) mod slope_intercept_dual {
     /// M3: 特異な再分解からの巻き戻しがこの回数を超えたら `NotSolved` で諦める (巻き戻しの無限の繰り返しを防ぐ)。
     pub(crate) const ROLLBACK_MAX: usize = 200;
 
+    /// 作業 #8 (`analysis/pilot87_false_infeasible_20260927_220123.md` の対処 3): 被約費用 `|d_q|` がこれ以下の入る列の
+    /// ピボットを厳密な退化ピボット (双対ステップ `theta_d = 0`) と数える。
+    pub(crate) const DEGEN_DJ_TOL: f64 = 1e-12;
+
+    /// 作業 #8 対処 3 (費用シフト、HiGHS `shift_cost` 流): 厳密な退化ピボットがこの回数だけ連続したら、`|d_j|` が
+    /// 摂動の大きさ `(1 + r_j)(|c_j| + 1) base` 未満の非基底列の費用 (`active_cost`) をその大きさだけ双対実行可能側へ
+    /// ずらし (`d_j` も同じだけ)、比率テストの全候補同点 (比 0) の連鎖を断つ。費用 0 の列の摂動が 0 だと
+    /// pilot87 で 4783 反復中 3629 回が厳密な退化ピボットになり、同点から極小ピボットを選び続けて基底が壊れ、
+    /// 誤った infeasible を返した。シフトは主ループだけで、polish は元の (摂動済み) 費用で被約費用を作り直す
+    /// (真の費用で双対実行不能なら主単体法への引き継ぎで直す)。`ENOMOTO_T_DEGEN_SHIFT_RUN` で上書き、0 で無効。
+    pub(crate) const DEGEN_SHIFT_RUN: usize = 0;
+
     /// `x_B(M)` の `M` 係数は厳密には 0 か 1 のオーダーなので、絶対値がこれ未満の係数は
     /// LU/更新の雑音とみなして 0 に丸める(`snap_slope`)。`ENOMOTO_T_X_B_SLOPE_NOISE` で上書き可。
     pub(crate) const X_B_SLOPE_NOISE: f64 = 1e-7;

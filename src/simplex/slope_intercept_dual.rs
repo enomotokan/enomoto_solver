@@ -65,7 +65,7 @@ use crate::params::slope_intercept_dual::{
     LEX_REL_TOL, PRICE_COLUMN_DENSITY, PRICE_LIST_DENSITY, SCORE2_STALL_HALFLIFE, STALL_LIMIT_MIN, STALL_LIMIT_PER_ROW, STUCK_ROW_BOOST_FACTOR, STUCK_ROW_BOOST_THRESHOLD, XB_DRIFT_FRESH_FLOOR_FACTOR,
     XB_DRIFT_FRESH_FLOOR_FRAC, XB_DRIFT_MIN_UPDATES, XB_DRIFT_MIN_UPDATES_MULT, XB_DRIFT_REL_K, XB_DRIFT_SAMPLE_GUARD, XB_DRIFT_SAMPLE_K, XB_LIST_DENSITY,
 };
-use crate::params::slope_intercept_dual::{INFEAS_GUARD_SQRT_W, NOISE_C, NOISE_MIN_SQRT_W, PIVOT_ESCALATE_BELOW_DEFAULT, PIVOT_ESCALATE_FEW_UPDATES, ROLLBACK_MAX, UNCERTIFIED_MAX};
+use crate::params::slope_intercept_dual::{DEGEN_DJ_TOL, DEGEN_SHIFT_RUN, INFEAS_GUARD_SQRT_W, NOISE_C, NOISE_MIN_SQRT_W, PIVOT_ESCALATE_BELOW_DEFAULT, PIVOT_ESCALATE_FEW_UPDATES, ROLLBACK_MAX, UNCERTIFIED_MAX};
 
 /// `ENOMOTO_PROF_PHASES_EXT` 診断用のフェーズ別計時カウンタ(`simplex::prof_phases` の拡張版)。
 /// [`solve_slope_intercept_dual`] の主ループの時間がどこで使われるかを測る。値はすべてナノ秒または
@@ -1030,6 +1030,31 @@ fn filter_banned_pivots(r: usize, bans: &[(usize, usize)], cands: &mut [Cand]) -
         }
     }
     w
+}
+
+/// 作業 #8 対処 3 (費用シフト): 非基底列 (固定列・`Zero` を除く) のうち、被約費用が双対実行可能側に摂動の大きさ
+/// `s_j = (1 + r_j)(|c_j| + 1) base` 未満しか離れていない列の費用 `active_cost[j]` と `d[j]` を `s_j` だけ双対実行可能側へ
+/// ずらす (`Lower` は `+`、`Upper` は `-`)。厳密な退化ピボットが続いたときだけ呼ぶ。ずらした列数を返す。
+#[inline(never)]
+fn shift_degenerate_costs(std: &StdForm, nb_status: &[Option<NbStatus>], base: f64, active_cost: &mut [f64], d: &mut [f64]) -> usize {
+    let mut n_shifted = 0usize;
+    for j in 0..std.n_total {
+        let sign = match nb_status[j] {
+            Some(NbStatus::Lower) => 1.0,
+            Some(NbStatus::Upper) => -1.0,
+            Some(NbStatus::Zero) | None => continue,
+        };
+        if std.lb[j] == std.ub[j] {
+            continue;
+        }
+        let s = (1.0 + super::perturb_random(j)) * (std.c[j].abs() + 1.0) * base;
+        if sign * d[j] < s {
+            active_cost[j] += sign * s;
+            d[j] += sign * s;
+            n_shifted += 1;
+        }
+    }
+    n_shifted
 }
 
 /// 作業 #5 M3: 再分解が特異(`refactorize` が `None`)だったとき、直近の成功した再分解以降に確定したピボット
@@ -2645,6 +2670,18 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         s * s
     };
     let noise_dry = tunable!("ENOMOTO_T_NOISE_DRY", 0u8, u8) != 0;
+    // 作業 #8 対処 2: M2 の Farkas 証明 (`infeas_check!`) を雑音判定 (`noise_on`) と独立に常に行う
+    // (`ENOMOTO_T_INFEAS_CERTIFY=0` で作業 #5 の動作 = `noise_on` のときだけ)。
+    let infeas_certify = tunable!("ENOMOTO_T_INFEAS_CERTIFY", 1u8, u8) != 0;
+    // 作業 #8 対処 3 (費用シフト、[`DEGEN_SHIFT_RUN`]): 連続した厳密な退化ピボットの数、シフトする連続回数 (0 = 無効)、
+    // シフトの基準の大きさ (摂動と同じ `super::cost_perturb_base`)。診断: 退化ピボットの総数・最長の連続・シフトの回数と列数。
+    let mut degen_run = 0usize;
+    let degen_shift_run: usize = tunable!("ENOMOTO_T_DEGEN_SHIFT_RUN", DEGEN_SHIFT_RUN, usize);
+    let degen_shift_base = if degen_shift_run > 0 { super::cost_perturb_base(std) } else { 0.0 };
+    let mut diag_degen = 0usize;
+    let mut diag_degen_max_run = 0usize;
+    let mut diag_shift_events = 0usize;
+    let mut diag_shift_cols = 0usize;
     // M1' 用の列の無限大ノルム `‖a_j‖∞`(初めて必要になったときに作る)。
     let mut col_inf_norm: Vec<f64> = Vec::new();
     // 診断(`ENOMOTO_DEBUG_EXT_ITERS`): 選んだ行の DSE 重みの最大、M1 で外した行数、M1' で候補を外した
@@ -3009,7 +3046,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         ($site:expr, $iter:expr, $r:expr, $w_r:expr) => {{
             let r: usize = $r;
             let w_r: Affine1 = $w_r;
-            if noise_on {
+            if noise_on || infeas_certify {
                 let guard = infeas_guard!(r, w_r);
                 let certified = !guard
                     && phase != Phase::A
@@ -3391,6 +3428,9 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
             }
             if profile_phases {
                 prof_phases::report(wall_t0.elapsed().as_nanos() as usize);
+            }
+            if noise_diag {
+                eprintln!("DEBUG_EXT: degenerate_pivots={diag_degen} max_run={diag_degen_max_run} cost_shifts={diag_shift_events} shifted_cols={diag_shift_cols}");
             }
             if noise_diag && noise_on {
                 eprintln!(
@@ -4926,6 +4966,14 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         // 双対値の増分更新(Huangfu & Hall §2.2.3): PRICE が触った全列で
         // `d[j] -= theta_d * a_p[j]`。BFRT フリップは `B`/`c_B` を変えないので `d` に影響しない。
         let theta_d = dj_q / alpha_q;
+        // 作業 #8 対処 3: 厳密な退化ピボットの連続を数える(シフトは下の `d` 更新の後)。
+        if dj_q.abs() <= DEGEN_DJ_TOL {
+            degen_run += 1;
+            diag_degen += 1;
+            diag_degen_max_run = diag_degen_max_run.max(degen_run);
+        } else {
+            degen_run = 0;
+        }
         if debug_d_drift_ext && theta_d.abs() > 1e3 {
             eprintln!(
                 "DEBUG_D_DRIFT: LARGE theta_d at iter={iter_idx}: q={q} dj_q={dj_q} alpha_q={alpha_q} theta_d={theta_d} touched_cols={} r={r}",
@@ -4961,6 +5009,11 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                 d[leaving_var] = -theta_d;
             }
         });
+        if degen_shift_run > 0 && degen_run >= degen_shift_run {
+            degen_run = 0;
+            diag_shift_events += 1;
+            diag_shift_cols += shift_degenerate_costs(std, &nb_status, degen_shift_base, &mut active_cost, &mut d);
+        }
 
         // Forrest-Tomlin 増分更新と再分解トリガ: (2) FT 更新がピボットを拒否、
         // (3) eta のフィルが大きすぎる(`XB_CHECK_INTERVAL` ごと)、(4) 更新回数上限、
@@ -5662,7 +5715,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
         ($r:expr, $needed:expr) => {{
             let r: usize = $r;
             let needed: f64 = $needed;
-            if polish_noise_c > 0.0 {
+            if polish_noise_c > 0.0 || tunable!("ENOMOTO_T_INFEAS_CERTIFY", 1u8, u8) != 0 {
                 let debug = env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some();
                 if lu.update_count() > 0 {
                     lu = polish_refactor!();
