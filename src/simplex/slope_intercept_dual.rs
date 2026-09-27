@@ -6517,4 +6517,65 @@ mod tests {
             "expected the BFRT walk to flip both x1 and x2 before reaching x0"
         );
     }
+
+    /// 作業 #5 M2: 真の Farkas 行(`x0 + s0 = 5`、`x0 ∈ [0, 1]`、`s0 = 0`)は証明済みになり、
+    /// 実行可能な右辺(`0.5`)では証明にならないことを確認する。
+    #[test]
+    fn infeasibility_certificate_accepts_a_farkas_row_and_rejects_a_feasible_one() {
+        for (b, expect) in [(5.0, true), (0.5, false), (-3.0, true)] {
+            let std = std_form(&[vec![(0, 1.0), (1, 1.0)]], vec![b], vec![1.0, 0.0], vec![0.0, 0.0], vec![1.0, 0.0]);
+            // スラック s0 が位置 0 の基底、x0 は非基底(下限)。`rho = B^-T e_0 = [1]`。
+            let basis_pos = vec![None, Some(0)];
+            let nb_status = vec![Some(NbStatus::Lower), None];
+            let got = infeasibility_certified(&std, &basis_pos, &nb_status, &[1.0], 0, |j| (std.lb[j], std.ub[j]));
+            assert_eq!(got, expect, "b={b}");
+        }
+        // 非基底列の境界が無限なら(`x0 >= 0` のみ)`b = 5` は実行可能で、証明にならない。
+        let std = std_form(&[vec![(0, 1.0), (1, 1.0)]], vec![5.0], vec![1.0, 0.0], vec![0.0, 0.0], vec![f64::INFINITY, 0.0]);
+        assert!(!infeasibility_certified(&std, &[None, Some(0)], &[Some(NbStatus::Lower), None], &[1.0], 0, |j| (std.lb[j], std.ub[j])));
+    }
+
+    /// 作業 #5 M1': 雑音水準 `thr ‖a_j‖∞` 以下の候補だけが外れ、順序が保たれることを確認する。
+    #[test]
+    fn noise_pivot_filter_drops_only_candidates_below_the_noise_level() {
+        let rows = vec![vec![(0, 2.0), (1, 1.0), (2, 1.0), (3, 1.0)]];
+        let std = std_form(&rows, vec![1.0], vec![0.0; 4], vec![0.0; 4], vec![1.0; 4]);
+        let mut norms = Vec::new();
+        let mut cands = vec![Cand { j: 0, hat_alpha: 1e-9, ratio: 0.0 }, Cand { j: 1, hat_alpha: -0.5, ratio: 1.0 }, Cand { j: 2, hat_alpha: 1.5e-3, ratio: 2.0 }];
+        // 列 0 は ‖a_0‖∞ = 2 なので閾値 2e-3、列 2 は 1e-3。
+        assert_eq!(filter_noise_pivots(&std, &mut norms, &mut cands, 1e-3, true), 2, "dry run only counts");
+        assert_eq!(cands[0].j, 0, "dry run must not reorder");
+        let k = filter_noise_pivots(&std, &mut norms, &mut cands, 1e-3, false);
+        assert_eq!(k, 2);
+        assert_eq!((cands[0].j, cands[1].j), (1, 2));
+    }
+
+    /// 作業 #5 M3: 記録したピボット 2 回とフリップ 1 回を `rollback_core` が戻せること(最後の 1 回を戻して
+    /// 分解が得られればそこで止まる)を確認する。
+    #[test]
+    fn rollback_undoes_the_last_pivot_and_its_trailing_flips() {
+        // 2 行: x0 + x1 + s0 = 1、x0 - x1 + s1 = 0(x ∈ [0, 1]、s ∈ [0, inf))。
+        let rows = vec![vec![(0, 1.0), (1, 1.0), (2, 1.0)], vec![(0, 1.0), (1, -1.0), (3, 1.0)]];
+        let std = std_form(&rows, vec![1.0, 0.0], vec![0.0; 4], vec![0.0; 4], vec![1.0, 1.0, f64::INFINITY, f64::INFINITY]);
+        // 全スラック基底から: x0 が位置 0 に入り s0 が下限へ(記録 1)、x1 が位置 1 に入り s1 が下限へ(記録 2)、
+        // その後(未確定の反復で)どの列もフリップしていないが、記録 1 の前に x1 を上限へフリップした扱いにする。
+        let mut basis = vec![0usize, 1usize];
+        let mut basis_pos = vec![Some(0), Some(1), None, None];
+        let mut nb_status = vec![None, None, Some(NbStatus::Lower), Some(NbStatus::Lower)];
+        let mut log = vec![
+            PivotRec { r: 0, q: 0, leaving: 2, old_status_q: NbStatus::Lower, flips_end: 1 },
+            PivotRec { r: 1, q: 1, leaving: 3, old_status_q: NbStatus::Upper, flips_end: 1 },
+        ];
+        let mut flips = vec![1usize];
+        let prev = refactorize(&std, &basis_pos, None).expect("basis {x0, x1} is nonsingular");
+        let mut undone = Vec::new();
+        let (_lu, r, q) = rollback_core(&std, &mut basis, &mut basis_pos, &mut nb_status, &mut log, &mut flips, &prev, &mut |rec, _| undone.push(rec.q)).expect("undoing one pivot gives a factorizable basis");
+        assert_eq!((r, q), (1, 1));
+        assert_eq!(undone, vec![1]);
+        assert_eq!(basis, vec![0, 3]);
+        assert_eq!(basis_pos, vec![Some(0), None, None, Some(1)]);
+        assert_eq!(nb_status, vec![None, Some(NbStatus::Upper), Some(NbStatus::Lower), None]);
+        assert_eq!(log.len(), 1, "only the last pivot is undone");
+        assert_eq!(flips, vec![1], "flips before the undone pivot are kept");
+    }
 }
