@@ -317,6 +317,27 @@ pub(crate) mod slope_intercept_dual {
     /// 安全モード(`safe_pivot`)でだけ行う(経路を変える範囲が広いため)。
     pub(crate) const STUCK_ROW_MIN_PIVOT: f64 = 1e-7;
 
+    /// 作業 #5 (特異基底への耐性、`analysis/singular_basis_20260927_114500.md` の M1/M1'/M2) の雑音判定の係数 `C`。
+    /// 行 `r` の主値 `x_B[r] = rho_r^T (b - N x_N)` の丸め誤差は `≈ eps · |rho_r| · ‖b‖` なので、
+    /// 逸脱が `C · eps · sqrt(w_r) · max(‖b‖∞, 1)` 以下の行は雑音として実行可能扱い (M1)、
+    /// 比率テストの候補 `alpha_j = rho_r^T a_j` のうち `|alpha_j| ≤ C · eps · sqrt(w_r) · ‖a_j‖∞` のものは
+    /// 雑音ピボットとして外す (M1')。`w_r` は DSE 重み (`|B^-T e_r|^2`)。`ENOMOTO_T_NOISE_C` で上書き、0 で M1/M1'/M2 を無効。
+    pub(crate) const NOISE_C: f64 = 100.0;
+
+    /// M1/M1' を適用する `sqrt(w_r)` の下限 (これ以下の行では判定を現行と同じにする)。
+    /// 通常の問題の経路を変えないためのゲート (Netlib 93 問の選択行の `sqrt(w_r)` の最大は改良履歴を参照)。
+    /// `ENOMOTO_T_NOISE_MIN_SQRT_W` で上書き可。
+    pub(crate) const NOISE_MIN_SQRT_W: f64 = 1e8;
+
+    /// M2: `Eligible = ∅`・BFRT の使い切りで実行不能を結論する直前に、行 `r` の `sqrt(w_r)` がこれを
+    /// 超えていれば (基底が数値的に従属で PRICE 行が雑音) 結論せずに行を一時的に外す。
+    /// `ENOMOTO_T_INFEAS_GUARD_SQRT_W` で上書き可。
+    pub(crate) const INFEAS_GUARD_SQRT_W: f64 = 1e10;
+
+    /// M2: Farkas の証明が成り立たない実行不能の結論(と `INFEAS_GUARD_SQRT_W` のガード)がこの回数を超えたら、
+    /// 誤った `Infeasible` を返す代わりに `NotSolved` で諦める。
+    pub(crate) const UNCERTIFIED_MAX: usize = 1000;
+
     /// `x_B(M)` の `M` 係数は厳密には 0 か 1 のオーダーなので、絶対値がこれ未満の係数は
     /// LU/更新の雑音とみなして 0 に丸める(`snap_slope`)。`ENOMOTO_T_X_B_SLOPE_NOISE` で上書き可。
     pub(crate) const X_B_SLOPE_NOISE: f64 = 1e-7;
