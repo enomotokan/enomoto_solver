@@ -1070,7 +1070,13 @@ impl<I: SpIdx> Compressed<I> {
     #[inline(always)]
     fn outer_slice(&self, k: usize) -> SpSlice<'_, I> {
         let (s, e) = (self.offsets[k], self.offsets[k + 1]);
-        SpSlice { idx: &self.idx[s..e], val: &self.val[s..e] }
+        let idx = &self.idx[s..e];
+        debug_assert_eq!(self.idx.len(), self.val.len());
+        // SAFETY: `idx` と `val` は常に同じ長さ (構築時に同時に作り、以後変更しない) なので、
+        // `idx[s..e]` が範囲内なら `val[s..e]` も範囲内。範囲検査を 1 回にして、この関数が
+        // インライン展開される各所 (単体法の主ループなど) のコードを小さく保つ。
+        let val = unsafe { self.val.get_unchecked(s..e) };
+        SpSlice { idx, val }
     }
 
     /// 全要素数。
