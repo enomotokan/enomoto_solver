@@ -1080,7 +1080,8 @@ fn rollback_core(
             // (1) 最後の 1 ピボット、(3) 全体を戻す。
             let stop = if stage == 0 { log.len().saturating_sub(1) } else { 0 };
             if stage == 2 && log.is_empty() {
-                return None;
+                // (1) で全部戻した(記録が 1 件だった)。(4) へ。
+                continue;
             }
             while log.len() > stop {
                 let rec = log.pop().unwrap();
@@ -2929,8 +2930,9 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         }
     };
     // 主ループ内の再分解。特異なら(作業 #5 M3)直近の成功した再分解以降のピボットを巻き戻して
-    // 前の基底を分解し直し([`rollback_pivots`])、最後に巻き戻したピボットの行・列を破棄済み候補と同じく
-    // 禁止する(`stuck_row`/`discard_row`)。巻き戻せなければ従来どおり `None`(`NotSolved`、安全モードで解き直し)。
+    // 前の基底を分解し直し([`rollback_pivots`])、戻したピボットの `(r, q)` を以後の比率テストで禁止する
+    // (`rb_bans`、`filter_banned_pivots`)。巻き戻せなければ(または `ROLLBACK_MAX` 回を超えたら)従来どおり
+    // `None`(`NotSolved`、安全モードで解き直し)。
     macro_rules! refactor_main {
         () => {{
             match refactorize(std, &basis_pos, Some(&lu)) {
