@@ -366,7 +366,7 @@ pub(crate) mod slope_intercept_dual {
     /// pilot87 で 4783 反復中 3629 回が厳密な退化ピボットになり、同点から極小ピボットを選び続けて基底が壊れ、
     /// 誤った infeasible を返した。シフトは主ループだけで、polish は元の (摂動済み) 費用で被約費用を作り直す
     /// (真の費用で双対実行不能なら主単体法への引き継ぎで直す)。`ENOMOTO_T_DEGEN_SHIFT_RUN` で上書き、0 で無効。
-    pub(crate) const DEGEN_SHIFT_RUN: usize = 0;
+    pub(crate) const DEGEN_SHIFT_RUN: usize = 10;
 
     /// `x_B(M)` の `M` 係数は厳密には 0 か 1 のオーダーなので、絶対値がこれ未満の係数は
     /// LU/更新の雑音とみなして 0 に丸める(`snap_slope`)。`ENOMOTO_T_X_B_SLOPE_NOISE` で上書き可。

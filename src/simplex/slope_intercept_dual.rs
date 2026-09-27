@@ -861,6 +861,8 @@ thread_local! {
     /// このスレッドの直近の求解で [`refactorize`] が特異基底を報告したか
     /// ([`solve_slope_intercept_dual`] が安全モードでの解き直しを判断するのに使う)。
     static SINGULAR_BAILOUT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// 作業 #8 対処 5: このスレッドの直近の求解が、Farkas の証明の立たない実行不能の結論 (壊れた基底) で `None` を返したか。
+    static UNCERTIFIED_BAILOUT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// 作業 #5 M3: 主ループで確定した 1 ピボットの記録(巻き戻し用、[`rollback_pivots`])。
@@ -2288,14 +2290,22 @@ impl ColCache {
 /// 経路は変わらず、数値的に破綻した求解だけを救済する。
 pub fn solve_slope_intercept_dual(std: &StdForm, opts: &crate::types::LpOptions) -> Option<SimplexResult> {
     SINGULAR_BAILOUT.with(|f| f.set(false));
+    UNCERTIFIED_BAILOUT.with(|f| f.set(false));
     let res = solve_slope_intercept_dual_with(std, opts, false);
-    if res.is_some() || !SINGULAR_BAILOUT.with(|f| f.get()) {
+    let singular = SINGULAR_BAILOUT.with(|f| f.get());
+    let uncertified = UNCERTIFIED_BAILOUT.with(|f| f.get());
+    if res.is_some() || !(singular || uncertified) {
         return res;
     }
     if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
-        eprintln!("DEBUG_EXT: singular-basis bailout, retrying with safe_pivot");
+        eprintln!("DEBUG_EXT: {} bailout, retrying with safe_pivot and full cost perturbation", if uncertified { "uncertified-infeasibility" } else { "singular-basis" });
     }
-    solve_slope_intercept_dual_with(std, opts, true)
+    // 作業 #8 対処 5: 解き直しでは費用摂動を既定の大きさに戻す (試験用の縮小 `ENOMOTO_T_PERTURB_*FACTOR` を無視する。
+    // 既定の設定では摂動は変わらない)。
+    super::set_full_cost_perturbation(true);
+    let res = solve_slope_intercept_dual_with(std, opts, true);
+    super::set_full_cost_perturbation(false);
+    res
 }
 
 /// [`solve_slope_intercept_dual`] の本体。`safe_pivot` が真なら、updateVerify で破棄された直後の行を
@@ -2673,15 +2683,20 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     // 作業 #8 対処 2: M2 の Farkas 証明 (`infeas_check!`) を雑音判定 (`noise_on`) と独立に常に行う
     // (`ENOMOTO_T_INFEAS_CERTIFY=0` で作業 #5 の動作 = `noise_on` のときだけ)。
     let infeas_certify = tunable!("ENOMOTO_T_INFEAS_CERTIFY", 1u8, u8) != 0;
+    // 作業 #8 対処 5: 証明できない実行不能の結論で (閾値を上げきったら) 解き直すか (`ENOMOTO_T_UNCERTIFIED_RESTART=0` で作業 #5 の動作)。
+    let uncertified_restart = tunable!("ENOMOTO_T_UNCERTIFIED_RESTART", 1u8, u8) != 0;
     // 作業 #8 対処 3 (費用シフト、[`DEGEN_SHIFT_RUN`]): 連続した厳密な退化ピボットの数、シフトする連続回数 (0 = 無効)、
     // シフトの基準の大きさ (摂動と同じ `super::cost_perturb_base`)。診断: 退化ピボットの総数・最長の連続・シフトの回数と列数。
     let mut degen_run = 0usize;
     let degen_shift_run: usize = tunable!("ENOMOTO_T_DEGEN_SHIFT_RUN", DEGEN_SHIFT_RUN, usize);
     let degen_shift_base = if degen_shift_run > 0 { super::cost_perturb_base(std) } else { 0.0 };
+    let degen_dj_tol: f64 = tunable!("ENOMOTO_T_DEGEN_DJ_TOL", DEGEN_DJ_TOL, f64);
     let mut diag_degen = 0usize;
     let mut diag_degen_max_run = 0usize;
     let mut diag_shift_events = 0usize;
     let mut diag_shift_cols = 0usize;
+    let mut diag_small_piv = [0usize; 3];
+    let (mut diag_near_degen, mut diag_near_run, mut diag_near_max_run) = ([0usize; 3], [0usize; 3], [0usize; 3]);
     // M1' 用の列の無限大ノルム `‖a_j‖∞`(初めて必要になったときに作る)。
     let mut col_inf_norm: Vec<f64> = Vec::new();
     // 診断(`ENOMOTO_DEBUG_EXT_ITERS`): 選んだ行の DSE 重みの最大、M1 で外した行数、M1' で候補を外した
@@ -3054,7 +3069,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                 if !certified {
                     diag_infeas_guard += 1;
                     if noise_diag {
-                        eprintln!("DEBUG_EXT: infeas_guard site={} iter={} r={r} sqrt_w={:.3e} dev=({:.3e},{:.3e}) guard={guard} count={diag_infeas_guard}", $site, $iter, dse.weight(r).sqrt(), w_r.base, w_r.slope);
+                        eprintln!("DEBUG_EXT: infeas_guard site={} iter={} r={r} sqrt_w={:.3e} dev=({:.3e},{:.3e}) guard={guard} count={diag_infeas_guard} degenerate_pivots={diag_degen} max_run={diag_degen_max_run} cost_shifts={diag_shift_events}", $site, $iter, dse.weight(r).sqrt(), w_r.base, w_r.slope);
                     }
                     if diag_infeas_guard > UNCERTIFIED_MAX {
                         return None;
@@ -3067,6 +3082,15 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                         rebuild_rows(&mut infeasible_rows, &mut row_dev, m, &row_bounds, &x_b_base, &x_b_slope);
                         fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fresh_d_cb, &mut lu_scratch, &mut fresh_d_y, &mut d);
                         continue;
+                    }
+                    // 作業 #8 対処 5: 閾値を上げきっても証明が立たない(基底が数値的に壊れている)なら、最初の求解では
+                    // 行を外して壊れた基底で続けず、摂動を掛け直して安全モードで最初から解き直す(`solve_slope_intercept_dual`)。
+                    if !guard && !safe_pivot && uncertified_restart {
+                        UNCERTIFIED_BAILOUT.with(|f| f.set(true));
+                        if noise_diag {
+                            eprintln!("DEBUG_EXT_BAILOUT: uncertified infeasibility at iter={} -> restart with re-perturbed costs", $iter);
+                        }
+                        return None;
                     }
                     infeasible_rows.set(r, false);
                     stuck_row_tabooed[r] = true;
@@ -3430,7 +3454,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                 prof_phases::report(wall_t0.elapsed().as_nanos() as usize);
             }
             if noise_diag {
-                eprintln!("DEBUG_EXT: degenerate_pivots={diag_degen} max_run={diag_degen_max_run} cost_shifts={diag_shift_events} shifted_cols={diag_shift_cols}");
+                eprintln!("DEBUG_EXT: degenerate_pivots={diag_degen} max_run={diag_degen_max_run} cost_shifts={diag_shift_events} shifted_cols={diag_shift_cols} small_pivots(1e-3,1e-5,1e-7)={diag_small_piv:?} near_degen(1e-10,1e-9,1e-8)={diag_near_degen:?} near_max_run={diag_near_max_run:?}");
             }
             if noise_diag && noise_on {
                 eprintln!(
@@ -4051,6 +4075,15 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                 if abs_a > best_abs {
                     best_abs = abs_a;
                     best_idx = idx;
+                }
+            }
+            if noise_diag {
+                let amax = sorted[..=k_star].iter().fold(0.0f64, |a, c| a.max(c.hat_alpha.abs()));
+                let rel = best_abs / amax;
+                for (k, t) in [1e-3, 1e-5, 1e-7].into_iter().enumerate() {
+                    if rel < t {
+                        diag_small_piv[k] += 1;
+                    }
                 }
             }
             // 診断: 窓の大きさと、窓内に(選ばれなかった)M 側候補があったかを数える。
@@ -4966,8 +4999,25 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         // 双対値の増分更新(Huangfu & Hall §2.2.3): PRICE が触った全列で
         // `d[j] -= theta_d * a_p[j]`。BFRT フリップは `B`/`c_B` を変えないので `d` に影響しない。
         let theta_d = dj_q / alpha_q;
+        if env_str!("ENOMOTO_W8_TRACE").is_some() {
+            let amax = touched_cols.iter().fold(0.0f64, |a, &j| if nb_status[j].is_some() || j == q { a.max(a_p[j].abs()) } else { a });
+            eprintln!("W8T it={iter_idx} r={r} q={q} aq={alpha_q:.3e} amax={amax:.3e} dq={dj_q:.3e} nc={n_candidates} ks={k_star} bi={best_idx} sw={:.3e} upd={}", dse.weight(r).sqrt(), lu.update_count());
+        }
         // 作業 #8 対処 3: 厳密な退化ピボットの連続を数える(シフトは下の `d` 更新の後)。
-        if dj_q.abs() <= DEGEN_DJ_TOL {
+        // `Zero` (自由列) の入基は比 0 が設計どおり (論文 3.1 節 (iii)) なので退化と数えない。
+        let q_was_zero = old_status_q == NbStatus::Zero;
+        if noise_diag {
+            for (k, t) in [1e-10, 1e-9, 1e-8].into_iter().enumerate() {
+                if dj_q.abs() <= t && !q_was_zero {
+                    diag_near_degen[k] += 1;
+                    diag_near_run[k] += 1;
+                    diag_near_max_run[k] = diag_near_max_run[k].max(diag_near_run[k]);
+                } else {
+                    diag_near_run[k] = 0;
+                }
+            }
+        }
+        if dj_q.abs() <= degen_dj_tol && !q_was_zero {
             degen_run += 1;
             diag_degen += 1;
             diag_degen_max_run = diag_degen_max_run.max(degen_run);
@@ -5730,6 +5780,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
                         eprintln!("DEBUG_EXT: polish infeas_guard: uncertified r={r} needed={needed:.3e} |rho|={rho_norm:.3e} count={polish_uncertified}");
                     }
                     if polish_uncertified > UNCERTIFIED_MAX || !sparse_lu::escalate_pivot_threshold() {
+                        UNCERTIFIED_BAILOUT.with(|f| f.set(true));
                         return None;
                     }
                     lu = polish_refactor!();

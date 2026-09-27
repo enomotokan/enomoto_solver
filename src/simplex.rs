@@ -776,6 +776,17 @@ fn perturb_random(j: usize) -> f64 {
     (h >> 40) as f64 / (1u64 << 24) as f64
 }
 
+thread_local! {
+    /// 作業 #8 対処 5: 真なら [`perturb_costs`] は試験用の縮小 (`ENOMOTO_T_PERTURB_*FACTOR`) を無視して既定の大きさで
+    /// 摂動する (双対単体法が壊れた基底から解き直すとき)。
+    static FULL_COST_PERTURBATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// [`FULL_COST_PERTURBATION`] を設定する。
+pub(crate) fn set_full_cost_perturbation(on: bool) {
+    FULL_COST_PERTURBATION.with(|f| f.set(on));
+}
+
 /// 双対法の退化対策としての費用摂動 (HiGHS `HEkk::initialiseCost` と同じ方式)。
 ///
 /// 摂動の大きさは最大費用の絶対値に比例 (大きすぎれば 4 乗根で減衰、箱型列が
@@ -786,6 +797,12 @@ fn perturb_random(j: usize) -> f64 {
 fn perturb_costs(std: &StdForm) -> Vec<f64> {
     let n = std.n_total;
     let base = cost_perturb_base(std); // 摂動の基準の大きさ
+    // 試験用の縮小係数 (下のループ参照)。解き直しでは使わない。
+    let (factor, zero_cost_factor) = if FULL_COST_PERTURBATION.with(|f| f.get()) {
+        (1.0, 1.0)
+    } else {
+        (tunable!("ENOMOTO_T_PERTURB_FACTOR", 1.0, f64), tunable!("ENOMOTO_T_PERTURB_ZERO_COST_FACTOR", 1.0, f64))
+    };
 
     let mut pc = std.c.clone(); // 摂動後の費用
     for j in 0..n {
@@ -799,12 +816,15 @@ fn perturb_costs(std: &StdForm) -> Vec<f64> {
 
         let r = perturb_random(j);
         let mut xpert = (1.0 + r) * (pc[j].abs() + 1.0) * base; // この列の摂動量
+        // 作業 #8 対処 1: 列ごとの摂動は基準の大きさを割らない (摂動を縮める変更をするときもこの下限を守る。
+        // 費用 0 の列の摂動を 0 にした案 E で pilot87 が誤って infeasible を返した)。
+        debug_assert!(xpert >= base, "cost perturbation of column {j} fell below the floor");
         // 試験用 (作業 #8、既定は係数 1 = 無効): 摂動の大きさを変えて、摂動が小さい・無いときの正しさを試す
         // (`scripts/singular_stress.py` の z0/p0 などの設定)。`ENOMOTO_T_PERTURB_FACTOR`: 全列の摂動を係数倍
         // (0 で摂動なし)。`ENOMOTO_T_PERTURB_ZERO_COST_FACTOR`: 費用 0 の列だけ係数倍。
-        xpert *= tunable!("ENOMOTO_T_PERTURB_FACTOR", 1.0, f64);
+        xpert *= factor;
         if pc[j] == 0.0 {
-            xpert *= tunable!("ENOMOTO_T_PERTURB_ZERO_COST_FACTOR", 1.0, f64);
+            xpert *= zero_cost_factor;
         }
         if !hi.is_finite() {
             pc[j] += xpert;
