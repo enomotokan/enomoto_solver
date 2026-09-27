@@ -46,7 +46,7 @@ use crate::sparse::{FaerCsr, CsrRowBuilder, csr_from_rows, csr_row_vec, csr_rows
 use crate::types::{ConstraintRow, RowSense, VariableData};
 use scaling::Scaling;
 use crate::params::presolve::{
-    DOUBLETON_STRIKES, DUALPROPAGATE_STRIKES, EQPROP_ROUNDS, EQPROP_SKIP_IDLE, FIXPOINT_RELTOL, INEQ_SINGLETON_LARGE, LARGE_PRESOLVE_MIN_ROWS, PARALLELCOLS_STRIKES, PRESOLVE_EXTRA_ROUNDS_LARGE, PROPAGATION_PASSES_LARGE, PRESOLVE_SPLIT_G, REDEQ_MODE,
+    DOUBLETON_STRIKES, DUALPROPAGATE_STRIKES, EQPROP_FIXPOINT, EQPROP_ROUNDS, PRESOLVE_FIXPOINT, PROPAGATION_FIXPOINT, PRESOLVE_WORK_BUDGET, EQPROP_SKIP_IDLE, FIXPOINT_RELTOL, INEQ_SINGLETON_LARGE, LARGE_PRESOLVE_MIN_ROWS, PARALLELCOLS_STRIKES, PRESOLVE_EXTRA_ROUNDS_LARGE, PROPAGATION_PASSES_LARGE, PRESOLVE_SPLIT_G, REDEQ_MODE,
     ROUND_STRUCT_STOP,
 };
 
@@ -345,9 +345,41 @@ pub fn run_extended(
         let min_rows = tunable!("ENOMOTO_T_LARGE_PRESOLVE_MIN_ROWS", LARGE_PRESOLVE_MIN_ROWS, usize);
         min_rows != 0 && b.len() + first_rows.len() >= min_rows
     };
-    // 延長ラウンドの数 (`PRESOLVE_EXTRA_ROUNDS_LARGE`)。大きな問題で `rounds` 回のラウンドを終えても不動点に達して
-    // いなければ、伝播パス数を `PROPAGATION_PASSES_LARGE` に上げてこの回数まで続ける。
-    let extra_rounds = if large { tunable!("ENOMOTO_T_PRESOLVE_EXTRA_ROUNDS_LARGE", PRESOLVE_EXTRA_ROUNDS_LARGE, usize) } else { 0 };
+    // 不動点まで回すか (`PRESOLVE_FIXPOINT`)。有効なら外側ラウンドの数に固定の上限を置かず、不動点か作業量の予算
+    // (`PRESOLVE_WORK_BUDGET` × 問題の大きさ) の消費で打ち切る。無効なら従来の `rounds` ラウンド (+ 大きな問題の延長)。
+    let fixpoint_mode = tunable!("ENOMOTO_T_PRESOLVE_FIXPOINT", PRESOLVE_FIXPOINT, usize) != 0;
+    // 1 回の上下限伝播も有意な変化がなくなるまで回すか (`PROPAGATION_FIXPOINT`、既定は無効で `prop_passes` パスごとに
+    // 他の段と交互に回す)。
+    let prop_fixpoint = fixpoint_mode && tunable!("ENOMOTO_T_PROPAGATION_FIXPOINT", PROPAGATION_FIXPOINT, usize) != 0;
+    // 作業量の予算 (読んだ非零の延べ数)。問題の大きさ (等式行と多変数の不等式行の非零数 + 列数 + 行数) に比例させる。
+    let work_budget = if fixpoint_mode {
+        let size = a.compute_nnz() + first_rows.iter().map(|r| r.len()).sum::<usize>() + n + b.len() + first_rows.len();
+        (tunable!("ENOMOTO_T_PRESOLVE_WORK_BUDGET", PRESOLVE_WORK_BUDGET, f64) * size as f64) as usize
+    } else {
+        usize::MAX
+    };
+    // これまでに使った作業量 (伝播で読んだ非零 + 各ラウンドの他の段の分として、ラウンド終了時の非零数 + 列数)。
+    let mut work_used = 0usize;
+    // 上下限伝播 (不等式・等式) のパスの打ち切り条件。既定は変化がある限り `prop_passes` パスまで。
+    // `prop_fixpoint` なら最初の `prop_passes` パスは同じく変化がある限り続け、その先は有意な変化
+    // (`FIXPOINT_RELTOL`、外側ループの不動点判定と同じ基準) がある限り、作業量の予算の残りまで続ける。
+    let pass_limit = |prop_passes: usize, work_used: usize| -> propagate::PassLimit {
+        if prop_fixpoint {
+            propagate::PassLimit {
+                min_passes: prop_passes,
+                max_passes: usize::MAX,
+                sig_reltol: tunable!("ENOMOTO_T_FIXPOINT_RELTOL", FIXPOINT_RELTOL, f64),
+                max_work: work_budget.saturating_sub(work_used),
+            }
+        } else {
+            propagate::PassLimit::fixed(prop_passes)
+        }
+    };
+    // 延長ラウンドの数 (`PRESOLVE_EXTRA_ROUNDS_LARGE`、従来モードのみ)。大きな問題で `rounds` 回のラウンドを終えても
+    // 不動点に達していなければ、伝播パス数を `PROPAGATION_PASSES_LARGE` に上げてこの回数まで続ける。
+    let extra_rounds = if large && !fixpoint_mode { tunable!("ENOMOTO_T_PRESOLVE_EXTRA_ROUNDS_LARGE", PRESOLVE_EXTRA_ROUNDS_LARGE, usize) } else { 0 };
+    // 外側ラウンド数の上限 (不動点モードでは作業量の予算だけで打ち切る)。
+    let max_rounds = if fixpoint_mode { usize::MAX } else { rounds.max(1) + extra_rounds };
     let mut prop_passes = prop_passes;
     // 延長の判定用 (大きな問題のみ): 直前のラウンド終了時の構造 (A の行数, G の多変数行数, 固定列数, ログ長) と、
     // 最後のラウンドで構造が変わったか。上下限だけが少しずつ締まり続ける問題 (neos) は延長しない。
@@ -398,9 +430,13 @@ pub fn run_extended(
     // 実行した外側ラウンド数 (表示用)。
     let mut rounds_done = 0usize;
     // 外側ラウンドループ。
-    for round_idx in 0..rounds.max(1) + extra_rounds {
+    for round_idx in 0..max_rounds {
+        if work_used >= work_budget {
+            stop_reason = "budget";
+            break;
+        }
         rounds_done = round_idx + 1;
-        if round_idx == rounds.max(1) {
+        if !fixpoint_mode && round_idx == rounds.max(1) {
             // 通常のラウンド数を使い切っても不動点に達していない (大きな問題のみここに来る)。最後のラウンドでも
             // 行・列の縮約が進んでいれば、上下限伝播が 1 ラウンドに数段しか進まない連鎖が残っているので、パス数を
             // 上げて延長する。上下限の変化だけなら従来どおりここで止める。
@@ -413,13 +449,14 @@ pub fn run_extended(
         let prop = timed_step!(
             "propagate",
             match carry.take() {
-                Some((rows, rhs, clb, cub)) => propagate::propagate_split(n, clb, cub, rows, rhs, prop_passes),
-                None => propagate::propagate_without_g_rebuild(n, &g, &h, prop_passes),
+                Some((rows, rhs, clb, cub)) => propagate::propagate_split(n, clb, cub, rows, rhs, pass_limit(prop_passes, work_used)),
+                None => propagate::propagate_without_g_rebuild(n, &g, &h, pass_limit(prop_passes, work_used)),
             }
         );
         if prop.infeasible {
             return extended_infeasible(sc, a, b, c, n);
         }
+        work_used = work_used.saturating_add(prop.work);
         // 表示用: この回の伝播のパス数と、変化のないパスで止まったか。
         let (dbg_prop_passes, dbg_prop_converged) = (prop.passes_used, prop.converged);
         // 表示用: 等式行伝播が変化のないパスで止まったか (実行しなければ `None`)。
@@ -461,10 +498,13 @@ pub fn run_extended(
         // `EQPROP_ROUNDS` ラウンドだけ実行する。`EQPROP_SKIP_IDLE` が有効なら、
         // 何も見つからなかった時点で以降のラウンドを省略する (結果が変わりうる)。
         if round_idx < tunable!("ENOMOTO_T_EQPROP_ROUNDS", EQPROP_ROUNDS, usize) && !eqprop_idle {
-            let eq = timed_step!("eqprop", propagate::propagate_equalities(&a, &b, &mut lb, &mut ub, prop_passes));
+            // 等式行伝播は不動点モードでも従来どおり `prop_passes` パスまで (`EQPROP_FIXPOINT` 参照)。
+            let eq_limit = if tunable!("ENOMOTO_T_EQPROP_FIXPOINT", EQPROP_FIXPOINT, usize) != 0 { pass_limit(prop_passes, work_used) } else { propagate::PassLimit::fixed(prop_passes) };
+            let eq = timed_step!("eqprop", propagate::propagate_equalities(&a, &b, &mut lb, &mut ub, eq_limit));
             if eq.infeasible {
                 return extended_infeasible(sc, a, b, c, n);
             }
+            work_used = work_used.saturating_add(eq.work);
             dbg_eq_converged = Some(eq.converged);
             if tunable!("ENOMOTO_T_EQPROP_SKIP_IDLE", EQPROP_SKIP_IDLE, usize) != 0 && eq.forcing_rows == 0 && eq.fixed_cols == 0 && eq.tightened == 0 {
                 eqprop_idle = true;
@@ -874,6 +914,9 @@ pub fn run_extended(
             ext_last_round_structural = ext_prev_struct.is_some_and(|p| p != st);
             ext_prev_struct = Some(st);
         }
+        // このラウンドの伝播以外の段の作業量 (各段はほぼ非零数に比例する)。
+        let round_nnz = a.compute_nnz() + if g_split { cur_real_rows.iter().map(|r| r.len()).sum::<usize>() } else { g.compute_nnz() } + n;
+        work_used = work_used.saturating_add(round_nnz);
         if debug_rounds {
             let g_multi = if g_split {
                 cur_real_rows.len()
@@ -883,7 +926,7 @@ pub fn run_extended(
             };
             let fixed = (0..n).filter(|&j| lb[j] == ub[j]).count();
             eprintln!(
-                "PRESOLVE_ROUND {} a_rows={} g_multi={} fixed={} log={} prop_passes={} prop_conv={} eq_conv={:?} t={:.1}ms",
+                "PRESOLVE_ROUND {} a_rows={} g_multi={} fixed={} log={} prop_passes={} prop_conv={} eq_conv={:?} work={} budget={} t={:.1}ms",
                 round_idx,
                 a.nrows(),
                 g_multi,
@@ -892,6 +935,8 @@ pub fn run_extended(
                 dbg_prop_passes,
                 dbg_prop_converged,
                 dbg_eq_converged,
+                work_used,
+                work_budget,
                 wall_t0.elapsed().as_secs_f64() * 1e3
             );
         }
@@ -936,8 +981,8 @@ pub fn run_extended(
     let prop = timed_step!(
         "final propagate",
         match carry.take() {
-            Some((rows, rhs, clb, cub)) => propagate::propagate_split(n, clb, cub, rows, rhs, prop_passes),
-            None => propagate::propagate_without_g_rebuild(n, &g, &h, prop_passes),
+            Some((rows, rhs, clb, cub)) => propagate::propagate_split(n, clb, cub, rows, rhs, pass_limit(prop_passes, work_used)),
+            None => propagate::propagate_without_g_rebuild(n, &g, &h, pass_limit(prop_passes, work_used)),
         }
     );
     if profile {

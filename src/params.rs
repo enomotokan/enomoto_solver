@@ -788,6 +788,39 @@ pub(crate) mod presolve {
     /// +15% になったので、延長時だけにする。
     pub(crate) const PROPAGATION_PASSES_LARGE: usize = 20;
 
+    /// 前処理を不動点まで回すか (`ENOMOTO_T_PRESOLVE_FIXPOINT`、0 = 従来の上限付き: 外側 `PRESOLVE_ROUNDS` ラウンド
+    /// + 大きな問題 ([`LARGE_PRESOLVE_MIN_ROWS`]) の延長 [`PRESOLVE_EXTRA_ROUNDS_LARGE`])。1 なら外側ラウンドの数に
+    /// 固定の上限を置かず、不動点 (行・列・消去ログが変わらず、上下限の変化が相対 [`FIXPOINT_RELTOL`] 以下) に
+    /// 達するか、作業量の予算 [`PRESOLVE_WORK_BUDGET`] を使い切るまで回す。問題の規模による場合分けはしない。
+    ///
+    /// 上下限伝播は 1 ラウンド `PROPAGATION_PASSES` パスのまま、他の段と交互に回す ([`PROPAGATION_FIXPOINT`] 参照)。
+    /// 伝播の上下限はラウンドをまたいで引き継ぐので、長い連鎖もラウンドを重ねれば最後まで進む
+    /// (irish-electricity: 45 ラウンドで不動点。従来は 20 ラウンドで打ち切られ、延長で 24 ラウンド)。
+    /// Netlib 93 問はすべて 20 ラウンド以内に不動点に達していたので、前処理の出力は従来とビット単位で同じ。
+    pub(crate) const PRESOLVE_FIXPOINT: usize = 1;
+
+    /// 不動点モードで 1 回の上下限伝播も不動点まで回すか (`ENOMOTO_T_PROPAGATION_FIXPOINT`、0 = 1 ラウンド
+    /// `PROPAGATION_PASSES` パス)。1 なら最初の `PROPAGATION_PASSES` パスの後も、有意な変化 (行の削除・固定・
+    /// 無限の境界が有限に・相対 [`FIXPOINT_RELTOL`] を超える境界の変化) がある限り続け、それを超えるパスでは
+    /// 有意な変化だけを適用する。irish-electricity は 4 ラウンドで不動点 (前処理 1.75 → 0.62 s) になるが、
+    /// 上下限を先に締めきるとその後の双対による縮約が効かなくなる: `dualpropagate` は無限の境界の列からしか
+    /// 双対の制約を作らない (履歴メモ「Infinite means literally +/-inf」) ので、etamacro では含意等式が
+    /// 30 → 6 本に減り前処理後が 421 → 445 列、Netlib 24 問で出力が変わり etamacro +19%。既定は無効。
+    pub(crate) const PROPAGATION_FIXPOINT: usize = 0;
+
+    /// 不動点モード ([`PRESOLVE_FIXPOINT`]) で等式行伝播 (`propagate_equalities`) も不動点まで回すか
+    /// (`ENOMOTO_T_EQPROP_FIXPOINT`、0 = 従来どおり `PROPAGATION_PASSES` パスまで)。等式行伝播は行を消さず、
+    /// 等式にしか現れない列に有限の境界を与えるだけの処理で、パスを増やして境界を与えると自由列 (implied free) の
+    /// 代入消去 (colsingleton・aggregator・freevar) が効かなくなり、前処理後の問題がかえって大きくなる
+    /// (Netlib で seba 121x226 → 124x232、maros・greenbea・greenbeb・dfl001・bnl2、fome13 70,839 → 70,863 列。
+    /// 増えるのは無限→有限の変化だけを続けても同じ)。縮約の不動点には寄与しないので、パス数は従来のまま。
+    pub(crate) const EQPROP_FIXPOINT: usize = 0;
+
+    /// 不動点モード ([`PRESOLVE_FIXPOINT`]) の作業量の予算: 問題の大きさ (等式行と多変数の不等式行の非零数 + 列数 +
+    /// 行数) の何倍までの非零を読むか (`ENOMOTO_T_PRESOLVE_WORK_BUDGET`)。作業量は上下限伝播で読んだ非零の延べ数と、
+    /// 外側ラウンドごとにその時点の非零数 + 列数 (伝播以外の段はどれもほぼ非零数に比例するので 1 ラウンド 1 回分と数える)。
+    pub(crate) const PRESOLVE_WORK_BUDGET: f64 = 200.0;
+
     /// 大きな問題向けの前処理の設定 ([`PRESOLVE_EXTRA_ROUNDS_LARGE`]、[`INEQ_SINGLETON_LARGE`]) を使う行数の下限
     /// (等式行 + 多変数の不等式行、`ENOMOTO_T_LARGE_PRESOLVE_MIN_ROWS`、0 = 無効)。Netlib (最大 6,071 行) の経路を
     /// 変えないよう、他の大問題向け経路と同じ 1 万行。

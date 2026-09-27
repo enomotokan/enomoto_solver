@@ -24,6 +24,49 @@
 use crate::sparse::{FaerCsr, CsrRowBuilder, csr_from_rows, csr_row_iter, csr_row_vec};
 use crate::params::presolve::{EQPROP_RELTOL, PROPAGATE_EPS, PROP_RELTOL};
 
+/// 伝播のパスの打ち切り条件 ([`propagate_split`]・[`propagate_equalities`])。
+///
+/// 行も上下限も変わらなくなったパスではいつも止まる。そのほかに:
+/// - `min_passes` パスまでは、変化があれば (どんなに小さくても) 続ける。
+/// - それを超えたパスでは有意な境界の変化 (無限の境界が有限になる・有限の境界が相対 `sig_reltol` を超えて動く)
+///   だけを適用し、直前のパスに有意な変化 (行の削除・強制行による固定を含む) があったときだけ続ける。
+///   巡回的な行構造では上下限が等比級数的に少しずつ削られ続けて変化が 0 にならないので、有意な変化で
+///   区切らないと不動点に達しない。小さな変化まで適用し続けると、上下限が少しずつ一点に寄って交差した
+///   ところで固定され、丸め誤差の溜まった値で固定された列だけの等式行が `foldfixed` の許容誤差を超えて
+///   偽の実行不能になる (bore3d、伝播 20 パス)。
+/// - 作業量 (読んだ行の非零の延べ数) が `max_work` 以上になったパスの後、または `max_passes` パスで打ち切る。
+#[derive(Clone, Copy, Debug)]
+pub struct PassLimit {
+    /// 小さな変化でも続けるパス数。
+    pub min_passes: usize,
+    /// パス数の上限。
+    pub max_passes: usize,
+    /// `min_passes` を超えたパスを続けるための、有限の境界の相対変化の閾値
+    /// (`|new - old| > sig_reltol * (1 + |old|)`)。
+    pub sig_reltol: f64,
+    /// 作業量 (読んだ非零の延べ数) の上限。
+    pub max_work: usize,
+}
+
+impl PassLimit {
+    /// 従来の打ち切り: 変化がある限り最大 `passes` パス。
+    pub fn fixed(passes: usize) -> Self {
+        PassLimit { min_passes: passes, max_passes: passes, sig_reltol: 0.0, max_work: usize::MAX }
+    }
+}
+
+impl From<usize> for PassLimit {
+    fn from(passes: usize) -> Self {
+        PassLimit::fixed(passes)
+    }
+}
+
+/// 有限の境界 `old` から `new` への変化が `sig_reltol` の意味で有意か (無限の境界からの変化は常に有意)。
+#[inline]
+fn significant_change(old: f64, new: f64, sig_reltol: f64) -> bool {
+    !old.is_finite() || (old - new).abs() > sig_reltol * (1.0 + old.abs())
+}
+
 /// [`propagate`] の結果 (境界を再度畳み込んだ `g`/`h` を含む完全版)。
 ///
 /// パイプライン本体は [`PropagateSplit`] を使う。こちらはテストと
@@ -131,14 +174,17 @@ pub struct PropagateSplit {
     pub infeasible: bool,
     /// 実行したパス数 (`ENOMOTO_DEBUG_PRESOLVE_ROUNDS` の表示用)。
     pub passes_used: usize,
-    /// 行も上下限も変わらないパスで止まったか (`false` = パス数の上限で打ち切り)。
+    /// 行も上下限も変わらないパス、または有意な変化のないパスで止まったか
+    /// (`false` = パス数か作業量の上限で打ち切り)。
     pub converged: bool,
+    /// 作業量 (読んだ行の非零の延べ数)。
+    pub work: usize,
 }
 
 impl PropagateSplit {
     /// 実行不能を表す空の結果を作る。
     fn infeasible() -> Self {
-        PropagateSplit { lb: Vec::new(), ub: Vec::new(), real_rows: Vec::new(), real_rhs: Vec::new(), infeasible: true, passes_used: 0, converged: true }
+        PropagateSplit { lb: Vec::new(), ub: Vec::new(), real_rows: Vec::new(), real_rhs: Vec::new(), infeasible: true, passes_used: 0, converged: true, work: 0 }
     }
 }
 
@@ -165,7 +211,7 @@ pub fn propagate(n: usize, g: &FaerCsr, h: &[f64], passes: usize) -> PropagateRe
 }
 
 /// [`propagate`] の `g`/`h` 再構築を省いた版 (`lb`/`ub`/多変数行はビット単位で同一)。
-pub fn propagate_without_g_rebuild(n: usize, g: &FaerCsr, h: &[f64], passes: usize) -> PropagateSplit {
+pub fn propagate_without_g_rebuild(n: usize, g: &FaerCsr, h: &[f64], passes: impl Into<PassLimit>) -> PropagateSplit {
     let (lb, ub, rows, rhs) = extract_bounds(n, g, h);
     propagate_split(n, lb, ub, rows, rhs, passes)
 }
@@ -174,9 +220,11 @@ pub fn propagate_without_g_rebuild(n: usize, g: &FaerCsr, h: &[f64], passes: usi
 /// の戻り値と同じ形) に対して制約伝播を行う本体。
 ///
 /// 各パスで各行について: 実行不能判定 → 冗長行削除 → 強制行の固定と削除 →
-/// 境界強化 (ZIB Report 16-44 §3.2)。行も境界も変化しなかったパスで打ち切る。
+/// 境界強化 (ZIB Report 16-44 §3.2)。パスの打ち切りは [`PassLimit`] を参照
+/// (`usize` を渡すと従来どおり、変化がある限り最大その数のパス)。
 /// 最後に境界の自己矛盾を再確認する。
-pub fn propagate_split(n: usize, mut lb: Vec<f64>, mut ub: Vec<f64>, mut rows: Vec<Vec<(usize, f64)>>, mut rhs: Vec<f64>, passes: usize) -> PropagateSplit {
+pub fn propagate_split(n: usize, mut lb: Vec<f64>, mut ub: Vec<f64>, mut rows: Vec<Vec<(usize, f64)>>, mut rhs: Vec<f64>, passes: impl Into<PassLimit>) -> PropagateSplit {
+    let limit: PassLimit = passes.into();
     // 相対改善閾値 (`ENOMOTO_T_PROP_RELTOL`、0 で無効)。有限境界は改善幅が
     // `reltol * (1 + |bound|)` を超えるときだけ更新する (HiGHS 流、巡回構造での
     // 境界の幾何級数的な削り込みを止める)。
@@ -189,17 +237,23 @@ pub fn propagate_split(n: usize, mut lb: Vec<f64>, mut ub: Vec<f64>, mut rows: V
     let mut infeasible = false;
     let mut passes_used = 0usize;
     let mut converged = false;
-    for _pass in 0..passes {
+    let mut work = 0usize;
+    for _pass in 0..limit.max_passes {
         if infeasible {
             break;
         }
         passes_used += 1;
+        // `min_passes` を超えたパスでは有意な境界の変化だけを適用する (`PassLimit` 参照)。
+        let strict = passes_used > limit.min_passes;
         // このパスで行削除または境界更新があったか (なければ以降のパスも同じなので打ち切る)
         let mut changed = false;
+        // このパスで有意な境界の変化があったか (`PassLimit` 参照。行の削除は下で別に数える)
+        let mut significant = false;
         let n_rows_before = rows.len();
         let mut kept_rows = Vec::with_capacity(rows.len());
         let mut kept_rhs = Vec::with_capacity(rhs.len());
         for (row, b) in std::mem::take(&mut rows).into_iter().zip(std::mem::take(&mut rhs)) {
+            work += row.len();
             // 有限な項だけの最小/最大活動度の和
             let mut finite_sum_inf = 0.0f64;
             let mut finite_sum_sup = 0.0f64;
@@ -290,14 +344,16 @@ pub fn propagate_split(n: usize, mut lb: Vec<f64>, mut ub: Vec<f64>, mut rows: V
                 if aik > 0.0 {
                     // 新しい上限候補
                     let candidate = (b - l_s) / aik;
-                    if candidate < ub[k] - PROPAGATE_EPS && (reltol == 0.0 || !ub[k].is_finite() || candidate < ub[k] - reltol * (1.0 + ub[k].abs())) {
+                    if candidate < ub[k] - PROPAGATE_EPS && (reltol == 0.0 || !ub[k].is_finite() || candidate < ub[k] - reltol * (1.0 + ub[k].abs())) && (!strict || significant_change(ub[k], candidate, limit.sig_reltol)) {
+                        significant |= significant_change(ub[k], candidate, limit.sig_reltol);
                         ub[k] = candidate;
                         changed = true;
                     }
                 } else if aik < 0.0 {
                     // 新しい下限候補
                     let candidate = (b - l_s) / aik;
-                    if candidate > lb[k] + PROPAGATE_EPS && (reltol == 0.0 || !lb[k].is_finite() || candidate > lb[k] + reltol * (1.0 + lb[k].abs())) {
+                    if candidate > lb[k] + PROPAGATE_EPS && (reltol == 0.0 || !lb[k].is_finite() || candidate > lb[k] + reltol * (1.0 + lb[k].abs())) && (!strict || significant_change(lb[k], candidate, limit.sig_reltol)) {
+                        significant |= significant_change(lb[k], candidate, limit.sig_reltol);
                         lb[k] = candidate;
                         changed = true;
                     }
@@ -310,11 +366,15 @@ pub fn propagate_split(n: usize, mut lb: Vec<f64>, mut ub: Vec<f64>, mut rows: V
 
         if kept_rows.len() != n_rows_before {
             changed = true;
+            significant = true;
         }
         rows = kept_rows;
         rhs = kept_rhs;
-        if !changed {
+        if !changed || (passes_used >= limit.min_passes && !significant) {
             converged = true;
+            break;
+        }
+        if work >= limit.max_work {
             break;
         }
     }
@@ -329,7 +389,7 @@ pub fn propagate_split(n: usize, mut lb: Vec<f64>, mut ub: Vec<f64>, mut rows: V
         return PropagateSplit::infeasible();
     }
 
-    PropagateSplit { lb, ub, real_rows: rows, real_rhs: rhs, infeasible: false, passes_used, converged }
+    PropagateSplit { lb, ub, real_rows: rows, real_rhs: rhs, infeasible: false, passes_used, converged, work }
 }
 
 /// 各パスが読む `G x <= h` の表現。CSR 実体か、分離形 `(rows, rhs, lb, ub)` のどちらか。
@@ -493,8 +553,12 @@ pub struct EqPropagateResult {
     pub fixed_cols: usize,
     /// 境界強化で更新された境界の延べ数。
     pub tightened: usize,
-    /// 変化のないパスで止まったか (`false` = パス数の上限で打ち切り。表示用)。
+    /// 変化のないパス、または有意な変化のないパスで止まったか (`false` = パス数か作業量の上限で打ち切り)。
     pub converged: bool,
+    /// 実行したパス数。
+    pub passes_used: usize,
+    /// 作業量 (読んだ行の非零の延べ数)。
+    pub work: usize,
 }
 
 /// 等式系 `A x = b` に対する活動度ベースの伝播 ([`propagate`] は不等式系しか見ない)。
@@ -504,8 +568,9 @@ pub struct EqPropagateResult {
 /// 強化を行う。書き換えるのは `lb`/`ub` だけで、行自体の縮約は `foldfixed` や
 /// rowsingleton/doubleton/colsingleton に任せる。等式にしか現れない無限境界の
 /// 列に有限境界を与え、傾き・切片二段解法の M 側処理を減らすのが目的。
-/// 最大 `passes` パス、変化がなければ打ち切り。
-pub fn propagate_equalities(a: &FaerCsr, b: &[f64], lb: &mut [f64], ub: &mut [f64], passes: usize) -> EqPropagateResult {
+/// パスの打ち切りは [`PassLimit`] を参照 (`usize` なら従来どおり最大その数のパス、変化がなければ打ち切り)。
+pub fn propagate_equalities(a: &FaerCsr, b: &[f64], lb: &mut [f64], ub: &mut [f64], passes: impl Into<PassLimit>) -> EqPropagateResult {
+    let limit: PassLimit = passes.into();
     let ar = a.as_ref();
     // 相対改善閾値 (`ENOMOTO_T_EQPROP_RELTOL`、0 で無効)。
     let reltol = tunable!("ENOMOTO_T_EQPROP_RELTOL", EQPROP_RELTOL, f64);
@@ -517,14 +582,20 @@ pub fn propagate_equalities(a: &FaerCsr, b: &[f64], lb: &mut [f64], ub: &mut [f6
         }
         (old - new).abs() > PROPAGATE_EPS && (reltol == 0.0 || (old - new).abs() > reltol * (1.0 + old.abs()))
     };
-    let mut res = EqPropagateResult { infeasible: false, forcing_rows: 0, fixed_cols: 0, tightened: 0, converged: false };
+    let mut res = EqPropagateResult { infeasible: false, forcing_rows: 0, fixed_cols: 0, tightened: 0, converged: false, passes_used: 0, work: 0 };
     // 行 i を既に強制行として数えたか (forcing_rows の重複カウント防止)
     let mut forcing_seen = vec![false; ar.nrows()];
-    for _pass in 0..passes {
+    for _pass in 0..limit.max_passes {
+        res.passes_used += 1;
+        // `min_passes` を超えたパスでは有意な境界の変化だけを適用する (`PassLimit` 参照)。
+        let strict = res.passes_used > limit.min_passes;
         // このパスでの変更回数
         let mut changed = 0usize;
+        // このパスで有意な変化 (`PassLimit` 参照) があったか
+        let mut significant = false;
         for i in 0..ar.nrows() {
             let bi = b[i];
+            res.work += ar.col_indices_of_row_raw(i).len();
             // 有限な項だけの最小/最大活動度の和
             let mut finite_sum_inf = 0.0f64;
             let mut finite_sum_sup = 0.0f64;
@@ -587,6 +658,7 @@ pub fn propagate_equalities(a: &FaerCsr, b: &[f64], lb: &mut [f64], ub: &mut [f6
                     if lb[j] < ub[j] {
                         res.fixed_cols += 1;
                         changed += 1;
+                        significant = true;
                     }
                     if v > 0.0 {
                         ub[j] = lb[j];
@@ -609,6 +681,7 @@ pub fn propagate_equalities(a: &FaerCsr, b: &[f64], lb: &mut [f64], ub: &mut [f6
                     if lb[j] < ub[j] {
                         res.fixed_cols += 1;
                         changed += 1;
+                        significant = true;
                     }
                     if v > 0.0 {
                         lb[j] = ub[j];
@@ -634,12 +707,14 @@ pub fn propagate_equalities(a: &FaerCsr, b: &[f64], lb: &mut [f64], ub: &mut [f6
                 if let Some(l_s) = l_s {
                     let candidate = (bi - l_s) / aik;
                     if aik > 0.0 {
-                        if candidate < ub[k] - PROPAGATE_EPS && improves(ub[k], candidate) {
+                        if candidate < ub[k] - PROPAGATE_EPS && improves(ub[k], candidate) && (!strict || significant_change(ub[k], candidate, limit.sig_reltol)) {
+                            significant |= significant_change(ub[k], candidate, limit.sig_reltol);
                             ub[k] = candidate;
                             changed += 1;
                             res.tightened += 1;
                         }
-                    } else if candidate > lb[k] + PROPAGATE_EPS && improves(lb[k], candidate) {
+                    } else if candidate > lb[k] + PROPAGATE_EPS && improves(lb[k], candidate) && (!strict || significant_change(lb[k], candidate, limit.sig_reltol)) {
+                        significant |= significant_change(lb[k], candidate, limit.sig_reltol);
                         lb[k] = candidate;
                         changed += 1;
                         res.tightened += 1;
@@ -657,12 +732,14 @@ pub fn propagate_equalities(a: &FaerCsr, b: &[f64], lb: &mut [f64], ub: &mut [f6
                 if let Some(u_s) = u_s {
                     let candidate = (bi - u_s) / aik;
                     if aik > 0.0 {
-                        if candidate > lb[k] + PROPAGATE_EPS && improves(lb[k], candidate) {
+                        if candidate > lb[k] + PROPAGATE_EPS && improves(lb[k], candidate) && (!strict || significant_change(lb[k], candidate, limit.sig_reltol)) {
+                            significant |= significant_change(lb[k], candidate, limit.sig_reltol);
                             lb[k] = candidate;
                             changed += 1;
                             res.tightened += 1;
                         }
-                    } else if candidate < ub[k] - PROPAGATE_EPS && improves(ub[k], candidate) {
+                    } else if candidate < ub[k] - PROPAGATE_EPS && improves(ub[k], candidate) && (!strict || significant_change(ub[k], candidate, limit.sig_reltol)) {
+                        significant |= significant_change(ub[k], candidate, limit.sig_reltol);
                         ub[k] = candidate;
                         changed += 1;
                         res.tightened += 1;
@@ -678,8 +755,11 @@ pub fn propagate_equalities(a: &FaerCsr, b: &[f64], lb: &mut [f64], ub: &mut [f6
                 }
             }
         }
-        if changed == 0 {
+        if changed == 0 || (res.passes_used >= limit.min_passes && !significant) {
             res.converged = true;
+            break;
+        }
+        if res.work >= limit.max_work {
             break;
         }
     }
