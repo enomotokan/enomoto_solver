@@ -129,12 +129,16 @@ pub struct PropagateSplit {
     pub real_rhs: Vec<f64>,
     /// 実行不能を検出したら `true` (このとき他のフィールドは空)。
     pub infeasible: bool,
+    /// 実行したパス数 (`ENOMOTO_DEBUG_PRESOLVE_ROUNDS` の表示用)。
+    pub passes_used: usize,
+    /// 行も上下限も変わらないパスで止まったか (`false` = パス数の上限で打ち切り)。
+    pub converged: bool,
 }
 
 impl PropagateSplit {
     /// 実行不能を表す空の結果を作る。
     fn infeasible() -> Self {
-        PropagateSplit { lb: Vec::new(), ub: Vec::new(), real_rows: Vec::new(), real_rhs: Vec::new(), infeasible: true }
+        PropagateSplit { lb: Vec::new(), ub: Vec::new(), real_rows: Vec::new(), real_rhs: Vec::new(), infeasible: true, passes_used: 0, converged: true }
     }
 }
 
@@ -183,10 +187,13 @@ pub fn propagate_split(n: usize, mut lb: Vec<f64>, mut ub: Vec<f64>, mut rows: V
     }
 
     let mut infeasible = false;
+    let mut passes_used = 0usize;
+    let mut converged = false;
     for _pass in 0..passes {
         if infeasible {
             break;
         }
+        passes_used += 1;
         // このパスで行削除または境界更新があったか (なければ以降のパスも同じなので打ち切る)
         let mut changed = false;
         let n_rows_before = rows.len();
@@ -307,6 +314,7 @@ pub fn propagate_split(n: usize, mut lb: Vec<f64>, mut ub: Vec<f64>, mut rows: V
         rows = kept_rows;
         rhs = kept_rhs;
         if !changed {
+            converged = true;
             break;
         }
     }
@@ -321,7 +329,7 @@ pub fn propagate_split(n: usize, mut lb: Vec<f64>, mut ub: Vec<f64>, mut rows: V
         return PropagateSplit::infeasible();
     }
 
-    PropagateSplit { lb, ub, real_rows: rows, real_rhs: rhs, infeasible: false }
+    PropagateSplit { lb, ub, real_rows: rows, real_rhs: rhs, infeasible: false, passes_used, converged }
 }
 
 /// 各パスが読む `G x <= h` の表現。CSR 実体か、分離形 `(rows, rhs, lb, ub)` のどちらか。
@@ -485,6 +493,8 @@ pub struct EqPropagateResult {
     pub fixed_cols: usize,
     /// 境界強化で更新された境界の延べ数。
     pub tightened: usize,
+    /// 変化のないパスで止まったか (`false` = パス数の上限で打ち切り。表示用)。
+    pub converged: bool,
 }
 
 /// 等式系 `A x = b` に対する活動度ベースの伝播 ([`propagate`] は不等式系しか見ない)。
@@ -507,7 +517,7 @@ pub fn propagate_equalities(a: &FaerCsr, b: &[f64], lb: &mut [f64], ub: &mut [f6
         }
         (old - new).abs() > PROPAGATE_EPS && (reltol == 0.0 || (old - new).abs() > reltol * (1.0 + old.abs()))
     };
-    let mut res = EqPropagateResult { infeasible: false, forcing_rows: 0, fixed_cols: 0, tightened: 0 };
+    let mut res = EqPropagateResult { infeasible: false, forcing_rows: 0, fixed_cols: 0, tightened: 0, converged: false };
     // 行 i を既に強制行として数えたか (forcing_rows の重複カウント防止)
     let mut forcing_seen = vec![false; ar.nrows()];
     for _pass in 0..passes {
@@ -669,6 +679,7 @@ pub fn propagate_equalities(a: &FaerCsr, b: &[f64], lb: &mut [f64], ub: &mut [f6
             }
         }
         if changed == 0 {
+            res.converged = true;
             break;
         }
     }

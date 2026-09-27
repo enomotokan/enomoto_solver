@@ -391,13 +391,21 @@ pub fn run_extended(
     let split_enabled = tunable!("ENOMOTO_T_PRESOLVE_SPLIT_G", PRESOLVE_SPLIT_G, usize) != 0;
     // 次ラウンドの伝播に渡す分離形式 G (多変数行, 右辺, lb, ub)。最初はループ前の抽出結果。
     let mut carry: Option<(Vec<Vec<(usize, f64)>>, Vec<f64>, Vec<f64>, Vec<f64>)> = Some((first_rows, first_rhs, first_lb, first_ub));
+    // `ENOMOTO_DEBUG_PRESOLVE_ROUNDS`: 外側ラウンドごとの縮約と伝播のパス数、打ち切り理由を stderr に出す。
+    let debug_rounds = env_str!("ENOMOTO_DEBUG_PRESOLVE_ROUNDS").is_some();
+    // 外側ループを抜けた理由 (表示用)。
+    let mut stop_reason = "cap";
+    // 実行した外側ラウンド数 (表示用)。
+    let mut rounds_done = 0usize;
     // 外側ラウンドループ。
     for round_idx in 0..rounds.max(1) + extra_rounds {
+        rounds_done = round_idx + 1;
         if round_idx == rounds.max(1) {
             // 通常のラウンド数を使い切っても不動点に達していない (大きな問題のみここに来る)。最後のラウンドでも
             // 行・列の縮約が進んでいれば、上下限伝播が 1 ラウンドに数段しか進まない連鎖が残っているので、パス数を
             // 上げて延長する。上下限の変化だけなら従来どおりここで止める。
             if !ext_last_round_structural {
+                stop_reason = "cap(bounds-only)";
                 break;
             }
             prop_passes = prop_passes.max(tunable!("ENOMOTO_T_PROPAGATION_PASSES_LARGE", PROPAGATION_PASSES_LARGE, usize));
@@ -412,6 +420,10 @@ pub fn run_extended(
         if prop.infeasible {
             return extended_infeasible(sc, a, b, c, n);
         }
+        // 表示用: この回の伝播のパス数と、変化のないパスで止まったか。
+        let (dbg_prop_passes, dbg_prop_converged) = (prop.passes_used, prop.converged);
+        // 表示用: 等式行伝播が変化のないパスで止まったか (実行しなければ `None`)。
+        let mut dbg_eq_converged: Option<bool> = None;
         let mut lb = prop.lb;
         let mut ub = prop.ub;
         // 現在の G の多変数行とその右辺。代入による行の書き換えを反映して随時更新する。
@@ -453,6 +465,7 @@ pub fn run_extended(
             if eq.infeasible {
                 return extended_infeasible(sc, a, b, c, n);
             }
+            dbg_eq_converged = Some(eq.converged);
             if tunable!("ENOMOTO_T_EQPROP_SKIP_IDLE", EQPROP_SKIP_IDLE, usize) != 0 && eq.forcing_rows == 0 && eq.fixed_cols == 0 && eq.tightened == 0 {
                 eqprop_idle = true;
             }
@@ -861,11 +874,33 @@ pub fn run_extended(
             ext_last_round_structural = ext_prev_struct.is_some_and(|p| p != st);
             ext_prev_struct = Some(st);
         }
+        if debug_rounds {
+            let g_multi = if g_split {
+                cur_real_rows.len()
+            } else {
+                let gr = g.as_ref();
+                (0..gr.nrows()).filter(|&i| gr.col_indices_of_row_raw(i).len() > 1).count()
+            };
+            let fixed = (0..n).filter(|&j| lb[j] == ub[j]).count();
+            eprintln!(
+                "PRESOLVE_ROUND {} a_rows={} g_multi={} fixed={} log={} prop_passes={} prop_conv={} eq_conv={:?} t={:.1}ms",
+                round_idx,
+                a.nrows(),
+                g_multi,
+                fixed,
+                postsolve_log.len(),
+                dbg_prop_passes,
+                dbg_prop_converged,
+                dbg_eq_converged,
+                wall_t0.elapsed().as_secs_f64() * 1e3
+            );
+        }
         let signature = (a.nrows(), g_view!().nrows(), lb.clone(), ub.clone());
         if g_split {
             carry = Some((cur_real_rows, cur_real_rhs, lb, ub));
         }
         if struct_stop {
+            stop_reason = "struct_stop";
             break;
         }
         // 相対 `FIXPOINT_RELTOL` 未満の上下限変化は進展とみなさない (巡回的な行構造で
@@ -879,6 +914,7 @@ pub fn run_extended(
             p.0 == signature.0 && p.1 == signature.1 && close(&p.2, &signature.2) && close(&p.3, &signature.3)
         };
         if prev_signature.as_ref().is_some_and(same) {
+            stop_reason = "fixpoint";
             break;
         }
         prev_signature = Some(signature);
@@ -906,6 +942,16 @@ pub fn run_extended(
     );
     if profile {
         eprintln!("PROF_PRESOLVE total {:.3}ms", wall_t0.elapsed().as_secs_f64() * 1e3);
+    }
+    if debug_rounds {
+        eprintln!(
+            "PRESOLVE_ROUNDS_END rounds={} reason={} final_prop_passes={} final_prop_conv={} t={:.1}ms",
+            rounds_done,
+            stop_reason,
+            prop.passes_used,
+            prop.converged,
+            wall_t0.elapsed().as_secs_f64() * 1e3
+        );
     }
     if prop.infeasible {
         return ExtendedPresolveResult {
