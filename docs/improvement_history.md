@@ -7645,6 +7645,100 @@ shell stair vtp.base)。残りは出力がビット単位で同じで、目的�
 判定の材料: 採用基準 (−2%) に届かない。目的の「引き継ぎを減らす」は達成 (cont1 1,819 → 761 反復) したが、cont1 の総時間は
 主ループの 1 反復の時間が系統的に増えて +2.7%。`ENOMOTO_PERTURB_OLD=1` で旧動作。
 
+## 特異・悪条件基底への耐性 (作業 #5、単体法側) (2026-09-27)
+
+調査レポート `analysis/singular_basis_20260927_114500.md` の対処法 M1〜M10 を推奨順に実装した。試験問題は
+irish-electricity を旧前処理で解くもの (`ENOMOTO_T_PRESOLVE_FIXPOINT=0 ENOMOTO_T_LARGE_PRESOLVE_MIN_ROWS=0 ENOMOTO_INEQ_SINGLETON=1`、
+base は特異基底 → 全スラックから解き直し → 再び特異で `NotSolved` 575 s) と pilot87 を `ENOMOTO_PIVOT_THRESHOLD=1e-3` で解くもの
+(base は `NotSolved` 12 s)、および Netlib 93 問のストレス 9 設定 (`scripts/singular_stress.py`)。
+
+### 採用 (src/simplex/slope_intercept_dual.rs、src/params.rs、src/simplex/lu.rs)
+
+- **M1 行の雑音判定** (`NOISE_C` = 1、`NOISE_MIN_SQRT_W` = 1e9): chuzr が選んだ行 `r` の DSE 重みが `sqrt(w_r) > 1e9` で、
+  逸脱が `C eps sqrt(w_r) max(‖b‖∞, 1)` 以下なら `noise_feasible` にして外す (主ループのみ。polish が真の境界で確かめ直す)。
+- **M1' ピボットの雑音判定**: 同じく `sqrt(w_r) > 1e9` の行だけ、比率テストの候補から `|alpha_j| <= C eps sqrt(w_r) ‖a_j‖∞` を外す
+  (`filter_noise_pivots`)。全滅したら行を一時的にプールから外す (`stuck_row_taboo` と同じ)。polish にも同じ判定 (`‖rho‖` は PRICE の
+  走査で求める) を入れたが、polish は行を外せないので、全滅したら判定なしで候補を作り直す。
+- **M2 誤った実行不能の防止** (`infeas_check!`、polish は `polish_infeas_check!`): `Eligible = ∅`・BFRT 使い切りで実行不能を結論する
+  直前 (`update_count == 0`) に、(1) 行が M1 の雑音水準か `sqrt(w_r) > INFEAS_GUARD_SQRT_W` (1e10) なら結論せず行を外し、(2) 段階 B では
+  `rho` を Farkas の証明として `g = rho^T A`・`t = rho^T b` の境界上の範囲が `t` を丸め誤差の見積もりを超えて外れることを確かめる
+  (`infeasibility_certified`。非基底列の `|g_j| <= TOL` は比率テストと同じく 0、基底列は後退安定な LU の残差の水準なら 0)。
+  証明できなければ LU の閾値を 1 段上げて再分解・再同期し、上限なら行を外す (polish は `None`)。`UNCERTIFIED_MAX` (1000) 回で `NotSolved`。
+  pilot87@1e-3 で壊れた状態から誤って `Infeasible` を返した (M3 だけのとき) のをこれで止めた。
+- **M3 特異な再分解からの巻き戻し** (`refactor_main!`・`polish_refactor!`、`rollback_core`): 直近の成功した再分解以降に確定した
+  ピボット (`PivotRec`) と BFRT フリップを記録し、再分解が特異なら (1) 最後の 1 ピボットを戻す、(2) 閾値を 1 段上げて同じ基底、
+  (3) 記録全体を戻す、(4) ピボット順を再利用せずに分解、の順に試す。PRICE 行列の分割・`row_bounds`・`n_zero_nonbasic` も戻し、
+  `x_B`・`d`・実行不能行を再同期する。戻したピボットの `(r, q)` は以後の比率テストで禁止する (`rb_bans`。(3) まで戻したら戻した全
+  ピボット)。巻き戻しは `ROLLBACK_MAX` (200) 回まで。全スラックからの解き直し (`safe_pivot`) は巻き戻せないときだけの最後の手段として残る。
+  `ENOMOTO_T_PIVOT_ROLLBACK=0` で旧動作。
+- **M5 閾値の引き上げ (既定未満のときだけ)** (`PIVOT_ESCALATE_BELOW_DEFAULT`、`sparse_lu::pivot_threshold_below_stability`):
+  ピボット閾値が既定の `STABILITY` (0.25) 未満なら、数値的原因の再分解 (`note_numeric_trouble!`) のたびに 1 段上げる
+  (HiGHS `reinvertOnNumericalTrouble` の前半)。既定の閾値では何もしないので経路不変。pilot87@1e-3 は `NotSolved` → 最適 3.5 s。
+- 無効化・A/B: `ENOMOTO_T_NOISE_C=0` (M1/M1'/M2)、`ENOMOTO_T_NOISE_MIN_SQRT_W`、`ENOMOTO_T_INFEAS_GUARD_SQRT_W`、
+  `ENOMOTO_T_NOISE_DRY=1` (M1/M1' を数えるだけ)、`ENOMOTO_T_PIVOT_ROLLBACK=0`、`ENOMOTO_T_PIVOT_ESCALATE_BELOW_DEFAULT=0`。
+  `ENOMOTO_DEBUG_EXT_ITERS` で `DEBUG_EXT: noise max_pick_sqrt_w=... noise_rows=... rollbacks=...` と各事象を出す。
+- ゲート `1e9` の根拠: 既定設定の Netlib 93 問で chuzr が選んだ行の `sqrt(w_r)` の最大は perold 2.9e8 (次いで pilot.ja 2.5e7、
+  dfl001 8.6e6、pilot 3.2e6)。ゲートなしで数えるだけ (`ENOMOTO_T_NOISE_MIN_SQRT_W=0 ENOMOTO_T_NOISE_DRY=1`、C=100 のとき) だと
+  M1' が 9 問で候補を外す (dfl001 357 反復、pilot.ja 50 反復など)。irish で特異化に至る行は 1e11〜1e18。
+
+### 試して取り下げたもの
+
+- **C = 100** (レポートの提案値): irish の polish が逸脱 74 (`‖rho‖` 8e11) の本物の違反行を雑音とみなして外し、主単体法への
+  引き継ぎが特異で失敗 → 解き直しで `NotSolved`。`eps sqrt(w) ‖b‖` 自体が悲観的な上界なので C = 1 にした (観測した致命ピボット・
+  雑音行は C = 1 でも雑音水準の 1e5 倍以上内側)。**polish で行を雑音として外すこと** も同じ理由でやめた (最終段で本物の違反を残す)。
+- **M5 の後半 (FT 更新 10 回未満の分解での引き上げ、HiGHS 流)** (`PIVOT_ESCALATE_FEW_UPDATES`、既定 0): Netlib では pilot87 だけ経路が
+  変わるが、irish (旧前処理) で閾値が早々に 0.5 になり、巻き戻しが 4 回 → 150 回超 (2 行を交互に巻き戻す繰り返しも出た) に増えて
+  1,800 s で終わらない。
+- **M7 従属行のスラックを基底へ** (`‖rho‖ > W` の行で `|rho_i|` 最大の行のスラックを比率テストなしで入れ、双対実行不能はフリップ・
+  費用シフトで直す): `W = 1e12` では M1 の後に残る行が無く一度も発火せず、`W = 1e7` では 78 回入れて巻き戻しが 51 回に増え、逸脱 6e9 の
+  壊れた状態になった。
+- **極小ピボットと雑音水準の逸脱の組を雑音扱い** (`|alpha_q| < 1e-7` かつ逸脱が `PRIMAL_FEAS_TOL max(|x|,1)` 以内なら行を外す。
+  Netlib では 0 回): irish で巻き戻しが 4 → 352 回。
+- 証明に M1' の雑音判定 (`|g_j| <= C eps ‖rho‖ ‖a_j‖∞` を 0) を使う版: `rho` の誤差の判定であって証明の正しさとは無関係 (取り下げ)。
+  証明が成り立たないとき `discard_row` の禁止を解く版: 下の pilot.ja の合成問題が 186 s の `NotSolved` になった。
+- 見送り: **M4 (階数落ちの修復 + 双対修正)** は M3 の巻き戻しが (4) まで失敗したときだけの保険で、試験した全設定で巻き戻しが失敗した
+  例が無く効果を確かめられないため。M6 (悪条件モード)・M8 (チェックポイント) も同じく M3 で不要になった。
+
+### 試験問題の結果 (90670ac)
+
+| 試験 | base (3177ed7) | new |
+|---|---|---|
+| irish-electricity (旧前処理) | 特異 → 解き直し → 特異、`NotSolved` 575 s | **optimal 380 s**、2546254.5633151024 (HiGHS 2546254.5633092 と相対 2.3e-12)。主ループ 94,649 反復 (M1 の雑音行 2,113、M1' 3 反復で 13,857 候補、巻き戻し 4 回 (いずれも最後の 1 ピボットで済む))、polish 26,456 反復 + 主単体法 7 反復 |
+| pilot87 (`ENOMOTO_PIVOT_THRESHOLD=1e-3`) | `NotSolved` 12 s | **optimal 3.5〜4.5 s**、301.7103473331112 (M5 だけで解ける。M1〜M3 だけでは不可) |
+| Netlib 93 問 × ストレス 9 設定 | s3 で pilot87 が `NotSolved` | **9 設定すべて 93 問 optimal**、HiGHS と相対 1e-6 以内 (最大 4.4e-10) |
+| 実行不能の合成問題 33 問 (Netlib 33 問に `c^T x <= z* - δ` を加える、δ = 1e-3\|z*\| 20 問・1e-5\|z*\| 13 問) | 33 問 infeasible | 32 問 infeasible (証明済み)、pilot.ja (δ = 1e-5) は `NotSolved` (HiGHS も `Unknown`、`rho` 1e16 の壊れた状態で証明が立たない) |
+
+- irish の元問題の最大違反は行 3.4e-7・列 5.7e-8。1e-7 を超える行は 10 本で、どれも `≤ 0` の 2〜5 項の行で各項が 1e-6 級
+  (ほぼ 0 の値の絶対誤差)。既定の前処理 (不動点) では 1.3e-9。
+- ストレス設定で M1〜M3 が働いたのは s2 の perold (M1' が 1 反復で 5 候補を外す) だけ。
+- `cargo test --release --lib` 253 件通過 (証明・雑音ピボットの除外・巻き戻しの単体テスト 3 件を追加)。
+
+### 既定設定での計測
+
+- Netlib 93 問: 反復数 (`ENOMOTO_DEBUG_EXT_ITERS` の各段) と目的関数値のビットが 93 問すべて base と同じ (経路不変。既定設定では
+  `sqrt(w_r) > 1e9` の行が選ばれず、閾値も既定なので M1/M1'/M5 は発火せず、M2/M3 は結論・特異時だけ)。
+  `ab_bench --rounds 3`: 合計 +0.86%、幾何平均 −0.10%。10% 超は blend・sc50a・shell・greenbeb・bore3d・finnis・fit1p・woodw
+  (経路同一。最小時間で測り直すと greenbeb 403/407 → 391/390 ms、fit1p 51.7/50.5 → 51.0/50.2 ms、woodw・shell・finnis も同等、
+  blend 632/711 → 697/706 µs、bore3d 783/827 → 844/825 µs で揺れの範囲)。
+- Mittelmann 11 問 (1 本ずつ、base と new を問題ごとに交互、600 s 打ち切り): 11 問すべて反復数 (各段) と目的関数値のビットが base と同じ
+  (経路不変)。時間差は揺れ (±3%)。
+
+| 問題 | base [s] | new [s] | 変化 | 主ループ反復 | 目的関数値 | 最大行違反 |
+|---|---:|---:|---:|---:|---|---:|
+| stormG2_1000 | 65.4 | 66.2 | +1.2% | 477,103 | 15802591.120880328 | 2.6e-13 |
+| square41 | 99.5 | 99.1 | −0.5% | 17,927 | 8.839612486544787 | 7.3e-14 |
+| pds-100 | 109.1 | 111.3 | +2.0% | 172,148 | 10928229968.0 | 7.3e-12 |
+| ex10 | 79.8 | 79.3 | −0.6% | 22,259 | 99.99999999999986 | 6.5e-14 |
+| s250r10 | 74.3 | 73.0 | −1.8% | 117,384 | −0.17267704190548075 | 8.3e-16 |
+| cont1 | 343.8 | 344.1 | +0.1% | 40,491 | 0.008782486003705103 | 7.1e-13 |
+| nug08-3rd | 245.8 | 238.5 | −3.0% | 45,362 | 214.00000000040208 | 1.4e-10 |
+| irish-electricity | 118.9 | 121.3 | +2.0% | 48,547 | 2546254.5633362364 | 1.3e-9 |
+| neos | 496.0 | 505.0 | +1.8% | 83,862 | 225425492.20475423 | 3.6e-12 |
+| fome13 | 16.1 | 15.7 | −2.5% | 20,182 (8 成分) | 90131168.37337178 | 1.9e-12 |
+| supportcase10 | 132.4 | 136.1 | +2.8% | 42,600 | 3.3839236661380045 | 1.0e-14 |
+
+判定の材料: 頑健さの修正として、試験問題 2 問とストレス 9 設定がすべて解け、既定設定の Netlib 93 問・Mittelmann 11 問は経路不変。
+
 ## 改名一覧 (整理時)
 
 本メモ中は旧名で書かれている。

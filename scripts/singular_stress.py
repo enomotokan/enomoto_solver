@@ -104,7 +104,7 @@ def main():
     files = sorted(glob.glob(str(args.cache_dir / "mps" / "*.mps")))
     ref = highs_ref(files, args.cache_dir)
     all_ok = True
-    for name in args.settings.split(","):
+    for name in [s for s in args.settings.split(",") if s]:
         env_extra = SETTINGS[name]
         with ThreadPoolExecutor(args.jobs) as ex:
             results = dict(zip(files, ex.map(lambda f: solve(f, env_extra), files)))
