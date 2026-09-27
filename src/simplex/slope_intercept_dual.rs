@@ -53,7 +53,7 @@
 //!   ([`hat_upper`] 参照)。
 
 use super::{sparse_lu, InfeasibleRows, NbStatus, SimplexResult, StdForm, Status};
-use crate::sparse::{SpBuf, SpIdx};
+use crate::sparse::sparse_axpy_dense;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::sync::OnceLock;
@@ -838,7 +838,7 @@ fn refactorize(
         if j == usize::MAX {
             continue;
         }
-        for (i, v) in std.cols.col(j) {
+        for &(i, v) in std.cols.col(j) {
             rows[i].push((col, v));
         }
     }
@@ -871,7 +871,7 @@ fn residual_norm(std: &StdForm, basis_pos: &[Option<usize>], x_b: &[f64], rhs: &
     let mut val = vec![0.0; std.n_rows];
     for j in 0..std.n_total {
         if let Some(pos) = basis_pos[j] {
-            std.cols.col(j).axpy_dense(x_b[pos], &mut val);
+            sparse_axpy_dense(x_b[pos], std.cols.col(j), &mut val);
         }
     }
     let mut resid_sq = 0.0f64;
@@ -988,7 +988,7 @@ fn residual_norm_affine(
         let mut resid_base_sq = 0.0f64;
         for (pos, &j) in basis.iter().enumerate() {
             let b = x_b_base[pos];
-            for (i, v) in std.cols.col(j) {
+            for &(i, v) in std.cols.col(j) {
                 scratch_base[i] += v * b;
             }
         }
@@ -1005,12 +1005,12 @@ fn residual_norm_affine(
         if s == 0.0 {
             // `compute_rhs_affine` の傾き省略と同じ理由で正確な no-op: `+0.0` から始めた和は
             // `-0.0` にならないので、`v * 0.0 = ±0.0` を足しても何も変わらない。
-            for (i, v) in std.cols.col(j) {
+            for &(i, v) in std.cols.col(j) {
                 scratch_base[i] += v * b;
             }
             continue;
         }
-        for (i, v) in std.cols.col(j) {
+        for &(i, v) in std.cols.col(j) {
             scratch_base[i] += v * b;
             scratch_slope[i] += v * s;
         }
@@ -1046,7 +1046,7 @@ fn residual_scale_affine(
     debug_assert!(scratch_base.iter().all(|&v| v == 0.0) && (!slope || scratch_slope.iter().all(|&v| v == 0.0)));
     for (pos, &j) in basis.iter().enumerate() {
         let (b, s) = (x_b_base[pos].abs(), if slope { x_b_slope[pos].abs() } else { 0.0 });
-        for (i, v) in std.cols.col(j) {
+        for &(i, v) in std.cols.col(j) {
             scratch_base[i] += v.abs() * b;
             if slope {
                 scratch_slope[i] += v.abs() * s;
@@ -1095,7 +1095,7 @@ fn sampled_residual_affine(
     while i < m {
         let mut sb = 0.0f64;
         let mut ss = 0.0f64;
-        for (j, v) in std.rows.row(i) {
+        for &(j, v) in std.rows.row(i) {
             if let Some(p) = basis_pos[j] {
                 sb += v * x_b_base[p];
                 ss += v * x_b_slope[p];
@@ -1140,7 +1140,7 @@ fn compute_rhs_affine(std: &StdForm, cache: &ColCache, nb_status: &[Option<NbSta
         if val.slope == 0.0 {
             // 有限側の列(大多数): 傾きチャネルへの寄与 `v * 0.0 = ±0.0` の減算は正確な no-op
             // (`+0.0` から始めた差分は丸めで `-0.0` にならない)なので省略してもビット同一。
-            for (i, v) in std.cols.col(j) {
+            for &(i, v) in std.cols.col(j) {
                 rhs_base[i] -= v * val.base;
             }
             continue;
@@ -1149,7 +1149,7 @@ fn compute_rhs_affine(std: &StdForm, cache: &ColCache, nb_status: &[Option<NbSta
         if rhs_slope.is_empty() {
             rhs_slope = vec![0.0; m];
         }
-        for (i, v) in std.cols.col(j) {
+        for &(i, v) in std.cols.col(j) {
             rhs_base[i] -= v * val.base;
             rhs_slope[i] -= v * val.slope;
         }
@@ -1204,7 +1204,7 @@ fn compute_rhs_slope_only(std: &StdForm, cache: &ColCache, nb_status: &[Option<N
         if rhs_slope.is_empty() {
             rhs_slope = vec![0.0; std.n_rows];
         }
-        for (i, v) in std.cols.col(j) {
+        for &(i, v) in std.cols.col(j) {
             rhs_slope[i] -= v * val.slope;
         }
     }
@@ -1261,7 +1261,7 @@ fn residual_norm_slope(std: &StdForm, basis: &[usize], x_b_slope: &[f64], rhs_sl
         if s == 0.0 {
             continue;
         }
-        for (i, v) in std.cols.col(j) {
+        for &(i, v) in std.cols.col(j) {
             scratch[i] += v * s;
         }
     }
@@ -1539,7 +1539,7 @@ fn compute_rhs_plain(std: &StdForm, nb_status: &[Option<NbStatus>]) -> Vec<f64> 
         if val == 0.0 {
             continue;
         }
-        for (i, v) in std.cols.col(j) {
+        for &(i, v) in std.cols.col(j) {
             rhs[i] -= v * val;
         }
     }
@@ -1588,7 +1588,7 @@ fn fresh_d_into(std: &StdForm, lu: &sparse_lu::FtLu, basis: &[usize], basis_pos:
             continue;
         }
         let mut dj = active_cost[j];
-        for (i, v) in std.cols.col(j) {
+        for &(i, v) in std.cols.col(j) {
             dj -= v * y_buf[i];
         }
         d[j] = dj;
@@ -1621,7 +1621,7 @@ fn fresh_d_into_zero_y(std: &StdForm, lu: &sparse_lu::FtLu, basis: &[usize], bas
         let cj = active_cost[j];
         if cj.to_bits() == NEG_ZERO {
             let mut dj = cj;
-            for (i, v) in std.cols.col(j) {
+            for &(i, v) in std.cols.col(j) {
                 dj -= v * y_buf[i];
             }
             d[j] = dj;
@@ -1684,7 +1684,7 @@ fn refine_zero_cost_placement(std: &StdForm, active_cost: &mut [f64], nb_status:
             Some(NbStatus::Zero) | None => continue,
         };
         if x != 0.0 {
-            for (i, a) in std.cols.col(j) {
+            for &(i, a) in std.cols.col(j) {
                 residual[i] -= a * x;
             }
         }
@@ -1710,7 +1710,7 @@ fn refine_zero_cost_placement(std: &StdForm, active_cost: &mut [f64], nb_status:
         for &j in &flexible {
             let lo = std.lb[j];
             if lo != 0.0 {
-                for (i, a) in std.cols.col(j) {
+                for &(i, a) in std.cols.col(j) {
                     baseline[i] -= a * lo;
                 }
             }
@@ -1728,7 +1728,7 @@ fn refine_zero_cost_placement(std: &StdForm, active_cost: &mut [f64], nb_status:
         let col = std.cols.col(j);
         let mut viol_lo = 0.0f64;
         let mut viol_hi = 0.0f64;
-        for (i, a) in col {
+        for &(i, a) in col {
             let bi_lo = std.lb[n_orig + i];
             let bi_hi = std.ub[n_orig + i];
             viol_lo += violation(residual[i] - a * lo, bi_lo, bi_hi);
@@ -1741,7 +1741,7 @@ fn refine_zero_cost_placement(std: &StdForm, active_cost: &mut [f64], nb_status:
         }
         nb_status[j] = Some(status);
         if x != 0.0 {
-            for (i, a) in col {
+            for &(i, a) in col {
                 residual[i] -= a * x;
             }
         }
@@ -1813,7 +1813,7 @@ fn trial_row_ratio(
         if rv.abs() <= TOL {
             continue;
         }
-        for (j, v) in std.rows.row(i) {
+        for &(j, v) in std.rows.row(i) {
             if std.lb[j] == std.ub[j] {
                 continue;
             }
@@ -2174,9 +2174,72 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     // (無限精度では同値だがビット同一ではない)。`price_nb_end[i]` は行 `i` の分割境界
     // (フラグオフなら単に行末)。
     let price_nonbasic_only = env_str!("ENOMOTO_PRICE_NONBASIC_ONLY").map_or(true, |v| v != "0");
-    // S12: 分割の入れ替え用の位置索引と PRICE 専用の `A` の行優先コピー ([`build_price_matrix`])。
-    let PriceMatrix { start: price_start, col: mut price_col, val: mut price_val, nb_end: mut price_nb_end, col_entry_start, price_pos_of_col_entry: mut price_pos_of_col_entry, col_entry_of_price: mut col_entry_of_price } =
-        build_price_matrix(std, &nb_status, price_nonbasic_only)?;
+    // S12: 分割の入れ替え用の位置索引。`col_entry_start[j]` は列 `j` の `std.cols` 要素順での開始位置、
+    // `price_pos_of_col_entry[col_entry_start[j] + k]` は `std.cols.col(j)[k]` の PRICE 行列内の位置(固定列は
+    // `u32::MAX`)、`col_entry_of_price[p]` はその逆写像(PRICE 要素 `p` の `std.cols` 要素番号)。
+    let mut col_entry_start: Vec<usize> = Vec::with_capacity(if price_nonbasic_only { n_total + 1 } else { 0 });
+    let mut price_pos_of_col_entry: Vec<u32> = Vec::new();
+    let mut col_entry_of_price: Vec<u32> = Vec::new();
+    // PRICE 専用の `A` の行優先コピー(一度だけ構築): `std.rows` から固定列 (`lb == ub`) を除き、
+    // 列添字 `u32` の SoA 形式(`price_start`/`price_col`/`price_val`)。各行は `std.rows.row(i)`
+    // の列順を(分割の各部分内で)保つので `a_p` の各ビットは不変。`price_nonbasic_only` の
+    // ときは各行を「非基底部 → 基底部」の順で書く。
+    let mut price_nb_end: Vec<usize> = Vec::with_capacity(m);
+    let (price_start, mut price_col, mut price_val) = {
+        let mut start: Vec<usize> = Vec::with_capacity(m + 1);
+        let mut col: Vec<u32> = Vec::with_capacity(std.rows.nnz());
+        let mut val: Vec<f64> = Vec::with_capacity(std.rows.nnz());
+        // 各 PRICE 要素の `std.cols` 要素番号を列ごとのカーソルで求める(行は昇順に訪れるので、
+        // 行ソート済みの列ではカーソルが常に一致位置にある)。
+        let mut cursor: Vec<u32> = Vec::new();
+        if price_nonbasic_only {
+            col_entry_start.push(0);
+            for j in 0..n_total {
+                col_entry_start.push(col_entry_start[j] + std.cols.col(j).len());
+            }
+            cursor = vec![0; n_total];
+            col_entry_of_price.reserve(std.rows.nnz());
+        }
+        start.push(0);
+        for i in 0..m {
+            if price_nonbasic_only {
+                for want_nonbasic in [true, false] {
+                    for &(j, v) in std.rows.row(i) {
+                        if std.lb[j] == std.ub[j] || nb_status[j].is_some() != want_nonbasic {
+                            continue;
+                        }
+                        col.push(u32::try_from(j).ok()?);
+                        val.push(v);
+                        let c = std.cols.col(j);
+                        let cur = cursor[j] as usize;
+                        let k = if cur < c.len() && c[cur].0 == i { cur } else { c.iter().position(|&(r, _)| r == i)? };
+                        cursor[j] = (k + 1) as u32;
+                        col_entry_of_price.push(u32::try_from(col_entry_start[j] + k).ok()?);
+                    }
+                    if want_nonbasic {
+                        price_nb_end.push(col.len());
+                    }
+                }
+            } else {
+                for &(j, v) in std.rows.row(i) {
+                    if std.lb[j] == std.ub[j] {
+                        continue;
+                    }
+                    col.push(u32::try_from(j).ok()?);
+                    val.push(v);
+                }
+                price_nb_end.push(col.len());
+            }
+            start.push(col.len());
+        }
+        (start, col, val)
+    };
+    if price_nonbasic_only {
+        price_pos_of_col_entry = vec![u32::MAX; col_entry_start[n_total]];
+        for (p, &e) in col_entry_of_price.iter().enumerate() {
+            price_pos_of_col_entry[e as usize] = p as u32;
+        }
+    }
     // S9(`ENOMOTO_PRICE_COLUMN=1`、既定オフ): `rho` が密(`ENOMOTO_PRICE_COLUMN_DENSITY`、
     // 既定 0.1 = HiGHS の切り替え点)なら列方向 PRICE を使う。`price_col_list` は非固定列の一覧。
     let price_by_column = tunable!("ENOMOTO_PRICE_COLUMN", 0u8, u8) != 0;
@@ -2204,8 +2267,8 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     let mut combined_touched_flag = vec![false; m];
     let mut combined_touched: Vec<usize> = Vec::new();
     // 疎ソルブ分岐の入力バッファ(毎反復再利用)。
-    let mut sparse_base_buf: SpBuf<u32> = SpBuf::with_capacity(m);
-    let mut sparse_slope_buf: SpBuf<u32> = SpBuf::with_capacity(m);
+    let mut sparse_base_buf: Vec<(usize, f64)> = Vec::with_capacity(m);
+    let mut sparse_slope_buf: Vec<(usize, f64)> = Vec::with_capacity(m);
     // 結合フリップの FTRAN 結果(`B^-1 × 累積右辺`、チャネルごと)。
     let mut combined_alpha_base = vec![0.0f64; m];
     let mut combined_alpha_slope = vec![0.0f64; m];
@@ -2895,7 +2958,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                         continue;
                     }
                     let mut acc = 0.0f64;
-                    for (i, v) in std.cols.col(j) {
+                    for &(i, v) in std.cols.col(j) {
                         acc += rho[i] * v;
                     }
                     if acc != 0.0 {
@@ -3465,7 +3528,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                 let delta_x = width.scale(sigma);
                 if delta_x.slope != 0.0 {
                     slope_nonzero = true;
-                    for (i, v) in std.cols.col(cand.j) {
+                    for &(i, v) in std.cols.col(cand.j) {
                         if !combined_touched_flag[i] {
                             combined_touched_flag[i] = true;
                             combined_touched.push(i);
@@ -3476,7 +3539,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                 } else if phase != Phase::A {
                     // (段階 A: 傾きを持たないフリップ(箱型列、`s_j = 0`)は段階 A が追跡しない
                     // 切片 `x^0` しか動かさないので、解くべき寄与は無い。)
-                    for (i, v) in std.cols.col(cand.j) {
+                    for &(i, v) in std.cols.col(cand.j) {
                         if !combined_touched_flag[i] {
                             combined_touched_flag[i] = true;
                             combined_touched.push(i);
@@ -3502,7 +3565,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                     } else {
                         sparse_slope_buf.clear();
                         sparse_slope_buf.extend(combined_touched.iter().map(|&i| (i, combined_slope[i])));
-                        lu.solve_sparse_into(sparse_slope_buf.as_slice(), &mut sparse_scratch, &mut gp_scratch, &mut combined_alpha_slope)
+                        lu.solve_sparse_into(&sparse_slope_buf, &mut sparse_scratch, &mut gp_scratch, &mut combined_alpha_slope)
                     };
                     cas_track.set_full();
                     density_bfrt.record(slope_nnz, m);
@@ -3541,22 +3604,22 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                     let u_hyper_gate = tunable!("ENOMOTO_FTRAN_U_HYPER", FTRAN_U_HYPER_DENSITY, f64);
                     gp_scratch.u_hyper = BIG && u_hyper_gate > 0.0 && density_bfrt.expected() < u_hyper_gate;
                     let base_nnz = if flip_track {
-                        lu.solve_sparse_into_hyper_tracked(sparse_base_buf.as_slice(), &mut sparse_scratch, &mut gp_scratch, &mut combined_alpha_base, &mut cab_track)
+                        lu.solve_sparse_into_hyper_tracked(&sparse_base_buf, &mut sparse_scratch, &mut gp_scratch, &mut combined_alpha_base, &mut cab_track)
                     } else if BIG {
                         cab_track.set_full();
-                        lu.solve_sparse_into_hyper(sparse_base_buf.as_slice(), &mut sparse_scratch, &mut gp_scratch, &mut combined_alpha_base)
+                        lu.solve_sparse_into_hyper(&sparse_base_buf, &mut sparse_scratch, &mut gp_scratch, &mut combined_alpha_base)
                     } else {
-                        lu.solve_sparse_into(sparse_base_buf.as_slice(), &mut sparse_scratch, &mut gp_scratch, &mut combined_alpha_base)
+                        lu.solve_sparse_into(&sparse_base_buf, &mut sparse_scratch, &mut gp_scratch, &mut combined_alpha_base)
                     };
                     let slope_nnz = if slope_nonzero {
                         sparse_slope_buf.extend(combined_touched.iter().map(|&i| (i, combined_slope[i])));
                         if flip_track {
-                            lu.solve_sparse_into_hyper_tracked(sparse_slope_buf.as_slice(), &mut sparse_scratch, &mut gp_scratch, &mut combined_alpha_slope, &mut cas_track)
+                            lu.solve_sparse_into_hyper_tracked(&sparse_slope_buf, &mut sparse_scratch, &mut gp_scratch, &mut combined_alpha_slope, &mut cas_track)
                         } else if BIG {
                             cas_track.set_full();
-                            lu.solve_sparse_into_hyper(sparse_slope_buf.as_slice(), &mut sparse_scratch, &mut gp_scratch, &mut combined_alpha_slope)
+                            lu.solve_sparse_into_hyper(&sparse_slope_buf, &mut sparse_scratch, &mut gp_scratch, &mut combined_alpha_slope)
                         } else {
-                            lu.solve_sparse_into(sparse_slope_buf.as_slice(), &mut sparse_scratch, &mut gp_scratch, &mut combined_alpha_slope)
+                            lu.solve_sparse_into(&sparse_slope_buf, &mut sparse_scratch, &mut gp_scratch, &mut combined_alpha_slope)
                         }
                     } else {
                         lu.add_zero_rhs_solve_ticks(true);
@@ -3635,7 +3698,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
             if lu.should_use_dense_solve_tracked(std.cols.col(q).len(), &density_col_aq) {
                 // `dense_q` は反復間で常に 0 に保ち、密分岐でだけ散布→求解→同じパターンを
                 // 0 に戻す(毎回 `O(m)` の `fill` をしない)。
-                for (i, v) in std.cols.col(q) {
+                for &(i, v) in std.cols.col(q) {
                     dense_q[i] = v;
                 }
                 let result_nnz = if combined_deferred {
@@ -3688,7 +3751,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                     }
                     lu.solve_into_capture(&dense_q, &mut lu_scratch, &mut alpha_full, &mut a_tilde_buf)
                 };
-                for (i, _) in std.cols.col(q) {
+                for &(i, _) in std.cols.col(q) {
                     dense_q[i] = 0.0;
                 }
                 alpha_nnz = result_nnz;
@@ -4227,7 +4290,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
             for (j, val, sign) in [(q, nb_val_q, 1.0f64), (leaving_var, val_l, -1.0f64)] {
                 if val.base != 0.0 {
                     let vb = sign * val.base;
-                    for (i, v) in std.cols.col(j) {
+                    for &(i, v) in std.cols.col(j) {
                         rhs_inc_base[i] += v * vb;
                     }
                 }
@@ -4236,7 +4299,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                     if rhs_inc_slope.is_empty() {
                         rhs_inc_slope.resize(m, 0.0);
                     }
-                    for (i, v) in std.cols.col(j) {
+                    for &(i, v) in std.cols.col(j) {
                         rhs_inc_slope[i] += v * vs;
                     }
                 }
@@ -4256,7 +4319,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                 price_pos_of_col_entry[entry_of_price[a] as usize] = a as u32;
                 price_pos_of_col_entry[entry_of_price[b] as usize] = b as u32;
             }
-            for (k, (i, _)) in std.cols.col(q).iter().enumerate() {
+            for (k, &(i, _)) in std.cols.col(q).iter().enumerate() {
                 let last = price_nb_end[i] - 1;
                 let pos = price_pos_of_col_entry[col_entry_start[q] + k] as usize;
                 debug_assert!(pos >= price_start[i] && pos <= last && price_col[pos] as usize == q, "entering column missing from its row's nonbasic PRICE partition");
@@ -4264,7 +4327,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                 price_nb_end[i] = last;
             }
             if std.lb[leaving_var] != std.ub[leaving_var] {
-                for (k, (i, _)) in std.cols.col(leaving_var).iter().enumerate() {
+                for (k, &(i, _)) in std.cols.col(leaving_var).iter().enumerate() {
                     let first = price_nb_end[i];
                     let pos = price_pos_of_col_entry[col_entry_start[leaving_var] + k] as usize;
                     debug_assert!(pos >= first && pos < price_start[i + 1] && price_col[pos] as usize == leaving_var, "leaving column missing from its row's basic PRICE partition");
@@ -4922,7 +4985,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
         lu.solve_transpose_into(&c_b, &mut lu_scratch, &mut y);
         for j in 0..n_total {
             let mut dj = active_cost[j];
-            for (i, v) in std.cols.col(j) {
+            for &(i, v) in std.cols.col(j) {
                 dj -= v * y[i];
             }
             d[j] = dj;
@@ -4976,7 +5039,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
     let mut combined_touched_flag = vec![false; m];
     let mut combined_touched: Vec<usize> = Vec::new();
     let mut combined_alpha = vec![0.0f64; m];
-    let mut sparse_buf: SpBuf<u32> = SpBuf::with_capacity(m);
+    let mut sparse_buf: Vec<(usize, f64)> = Vec::with_capacity(m);
 
     // 丸め誤差の範囲内でしか実行不能でないと判定された基底変数の印(変数番号で添字付け)。
     let mut noise_feasible = vec![false; n_total];
@@ -5060,7 +5123,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
                 lu.solve_transpose_into(&c_b, &mut lu_scratch, &mut y);
                 for j in 0..n_total {
                     let mut dj = std.c[j];
-                    for (i, v) in std.cols.col(j) {
+                    for &(i, v) in std.cols.col(j) {
                         dj -= v * y[i];
                     }
                     true_d[j] = dj;
@@ -5208,7 +5271,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
                     lu.solve_transpose_into(&c_b, &mut lu_scratch, &mut y);
                     for j in 0..n_total {
                         let mut dj = std.c[j];
-                        for (i, v) in std.cols.col(j) {
+                        for &(i, v) in std.cols.col(j) {
                             dj -= v * y[i];
                         }
                         d[j] = dj;
@@ -5238,7 +5301,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
             if rv.abs() <= TOL {
                 continue;
             }
-            for (j, v) in std.rows.row(i) {
+            for &(j, v) in std.rows.row(i) {
                 if std.lb[j] == std.ub[j] {
                     continue;
                 }
@@ -5357,7 +5420,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
             debug_assert_ne!(old, NbStatus::Zero, "a `Zero` column is never flipped");
             let sigma = if old == NbStatus::Lower { 1.0 } else { -1.0 };
             let delta_x = width * sigma;
-            for (i, v) in std.cols.col(cand.j) {
+            for &(i, v) in std.cols.col(cand.j) {
                 if !combined_touched_flag[i] {
                     combined_touched_flag[i] = true;
                     combined_touched.push(i);
@@ -5372,7 +5435,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
             } else {
                 sparse_buf.clear();
                 sparse_buf.extend(combined_touched.iter().map(|&i| (i, combined[i])));
-                let result_nnz = lu.solve_sparse_into(sparse_buf.as_slice(), &mut sparse_scratch, &mut gp_scratch, &mut combined_alpha);
+                let result_nnz = lu.solve_sparse_into(&sparse_buf, &mut sparse_scratch, &mut gp_scratch, &mut combined_alpha);
                 density_bfrt.record(result_nnz, m);
             }
             // FTRAN のフィルインで入力パターン外にも非ゼロが出るので `0..m` を走査する。
@@ -5406,7 +5469,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
         // FTRAN: `alpha_full = B^{-1}A_q`(密/疎を切り替え)。`try_update_precomputed` 用に
         // `a_tilde_buf` もキャプチャする。
         dense_q.fill(0.0);
-        for (i, v) in std.cols.col(q) {
+        for &(i, v) in std.cols.col(q) {
             dense_q[i] = v;
         }
         if lu.should_use_dense_solve_tracked(std.cols.col(q).len(), &density_col_aq) {
@@ -5647,100 +5710,6 @@ fn price_row_dense(a_p: &mut [f64], cols: &[u32], vals: &[f64], rv: f64) {
         let new = a_p[j] + rv * v;
         a_p[j] = if new == 0.0 { -0.0 } else { new };
     }
-}
-
-/// [`build_price_matrix`] の結果: PRICE 専用の `A` の行優先コピーと、分割 PRICE の位置索引。
-struct PriceMatrix {
-    /// 行 `i` の要素は `col/val[start[i]..start[i + 1]]`。
-    start: Vec<usize>,
-    /// 要素の列番号。
-    col: Vec<u32>,
-    /// 要素の値。
-    val: Vec<f64>,
-    /// 行 `i` の非基底部の終わり (`price_nonbasic_only` でなければ行末)。
-    nb_end: Vec<usize>,
-    /// 列 `j` の `std.cols` 要素順での開始位置 (`price_nonbasic_only` のときだけ)。
-    col_entry_start: Vec<usize>,
-    /// `std.cols` の要素番号 → PRICE 行列内の位置 (固定列は `u32::MAX`)。
-    price_pos_of_col_entry: Vec<u32>,
-    /// PRICE 要素 → `std.cols` の要素番号。
-    col_entry_of_price: Vec<u32>,
-}
-
-/// PRICE 専用の `A` の行優先コピーと分割 PRICE の位置索引を作る (主ループの前に一度だけ)。一度しか実行しない
-/// コードを主ループの関数の外に置くため別関数にしている (小さな問題の主ループの I1 ミスが減る。
-/// docs/improvement_history.md「疎行列の要素の添字型」)。添字が `u32` に収まらなければ `None`。
-#[inline(never)]
-fn build_price_matrix(std: &StdForm, nb_status: &[Option<NbStatus>], price_nonbasic_only: bool) -> Option<PriceMatrix> {
-    let m = std.n_rows;
-    let n_total = std.n_total;
-    // S12: 分割の入れ替え用の位置索引。`col_entry_start[j]` は列 `j` の `std.cols` 要素順での開始位置、
-    // `price_pos_of_col_entry[col_entry_start[j] + k]` は `std.cols.col(j)[k]` の PRICE 行列内の位置(固定列は
-    // `u32::MAX`)、`col_entry_of_price[p]` はその逆写像(PRICE 要素 `p` の `std.cols` 要素番号)。
-    let mut col_entry_start: Vec<usize> = Vec::with_capacity(if price_nonbasic_only { n_total + 1 } else { 0 });
-    let mut price_pos_of_col_entry: Vec<u32> = Vec::new();
-    let mut col_entry_of_price: Vec<u32> = Vec::new();
-    // PRICE 専用の `A` の行優先コピー(一度だけ構築): `std.rows` から固定列 (`lb == ub`) を除き、
-    // 列添字 `u32` の SoA 形式(`price_start`/`price_col`/`price_val`)。各行は `std.rows.row(i)`
-    // の列順を(分割の各部分内で)保つので `a_p` の各ビットは不変。`price_nonbasic_only` の
-    // ときは各行を「非基底部 → 基底部」の順で書く。
-    let mut price_nb_end: Vec<usize> = Vec::with_capacity(m);
-    let (price_start, price_col, price_val) = {
-        let mut start: Vec<usize> = Vec::with_capacity(m + 1);
-        let mut col: Vec<u32> = Vec::with_capacity(std.rows.nnz());
-        let mut val: Vec<f64> = Vec::with_capacity(std.rows.nnz());
-        // 各 PRICE 要素の `std.cols` 要素番号を列ごとのカーソルで求める(行は昇順に訪れるので、
-        // 行ソート済みの列ではカーソルが常に一致位置にある)。
-        let mut cursor: Vec<u32> = Vec::new();
-        if price_nonbasic_only {
-            col_entry_start.push(0);
-            for j in 0..n_total {
-                col_entry_start.push(col_entry_start[j] + std.cols.col(j).len());
-            }
-            cursor = vec![0; n_total];
-            col_entry_of_price.reserve(std.rows.nnz());
-        }
-        start.push(0);
-        for i in 0..m {
-            if price_nonbasic_only {
-                for want_nonbasic in [true, false] {
-                    for (j, v) in std.rows.row(i) {
-                        if std.lb[j] == std.ub[j] || nb_status[j].is_some() != want_nonbasic {
-                            continue;
-                        }
-                        col.push(u32::try_from(j).ok()?);
-                        val.push(v);
-                        let c = std.cols.col(j);
-                        let cur = cursor[j] as usize;
-                        let k = if cur < c.len() && c.idx[cur].ix() == i { cur } else { c.iter().position(|(r, _)| r == i)? };
-                        cursor[j] = (k + 1) as u32;
-                        col_entry_of_price.push(u32::try_from(col_entry_start[j] + k).ok()?);
-                    }
-                    if want_nonbasic {
-                        price_nb_end.push(col.len());
-                    }
-                }
-            } else {
-                for (j, v) in std.rows.row(i) {
-                    if std.lb[j] == std.ub[j] {
-                        continue;
-                    }
-                    col.push(u32::try_from(j).ok()?);
-                    val.push(v);
-                }
-                price_nb_end.push(col.len());
-            }
-            start.push(col.len());
-        }
-        (start, col, val)
-    };
-    if price_nonbasic_only {
-        price_pos_of_col_entry = vec![u32::MAX; col_entry_start[n_total]];
-        for (p, &e) in col_entry_of_price.iter().enumerate() {
-            price_pos_of_col_entry[e as usize] = p as u32;
-        }
-    }
-    Some(PriceMatrix { start: price_start, col: price_col, val: price_val, nb_end: price_nb_end, col_entry_start, price_pos_of_col_entry, col_entry_of_price })
 }
 
 /// 2 つの同長ベクトルの内積 `Σ a_i b_i`(先頭から順に加算)。

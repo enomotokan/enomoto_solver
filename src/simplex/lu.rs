@@ -22,7 +22,7 @@
 //!
 //! 開発経緯は `docs/improvement_history.md` を参照。
 
-use crate::sparse::{EpochMarks, SpSlice};
+use crate::sparse::EpochMarks;
 use std::cell::Cell;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -2899,10 +2899,10 @@ impl LuFactors {
     /// [`Self::l_solve_into_pair`] の `rhs_a` の非ゼロ `(元の行, 値)` が分かっている版: `za` は 0 で埋めて
     /// 非ゼロだけを置く (`O(m)` の間接読み出しの代わりに連続な 0 埋め)。`rhs_a` の他の位置は 0 なので
     /// `za` の初期値は同じ (同じ行が複数回あれば密な `rhs_a` と同じく最後の値)。以降はビット一致。
-    fn l_solve_into_pair_nz(&self, active: &[u32], rhs_a_nz: SpSlice<'_, u32>, rhs_b: &[f64], za: &mut [f64], zb: &mut [f64]) {
+    fn l_solve_into_pair_nz(&self, active: &[u32], rhs_a_nz: &[(usize, f64)], rhs_b: &[f64], za: &mut [f64], zb: &mut [f64]) {
         let m = self.m;
         za[..m].fill(0.0);
-        for (i, v) in rhs_a_nz {
+        for &(i, v) in rhs_a_nz {
             za[self.row_perm_inv[i]] = v;
         }
         for s in 0..m {
@@ -2912,10 +2912,10 @@ impl LuFactors {
     }
 
     /// [`Self::l_solve_into`] の `rhs` の非ゼロ `(元の行, 値)` が分かっている版 ([`Self::l_solve_into_pair_nz`] 参照)。
-    fn l_solve_into_nz(&self, active: &[u32], rhs_nz: SpSlice<'_, u32>, z: &mut [f64]) {
+    fn l_solve_into_nz(&self, active: &[u32], rhs_nz: &[(usize, f64)], z: &mut [f64]) {
         let m = self.m;
         z[..m].fill(0.0);
-        for (i, v) in rhs_nz {
+        for &(i, v) in rhs_nz {
             z[self.row_perm_inv[i]] = v;
         }
         self.l_active_loop(active, z);
@@ -2984,10 +2984,10 @@ impl LuFactors {
 
     /// [`Self::l_solve_into_triple`] の `rhs_a` の非ゼロが分かっている版 ([`Self::l_solve_into_pair_nz`] 参照)。
     #[allow(clippy::too_many_arguments)]
-    fn l_solve_into_triple_nz(&self, active: &[u32], rhs_a_nz: SpSlice<'_, u32>, rhs_b: &[f64], rhs_c: &[f64], za: &mut [f64], zb: &mut [f64], zc: &mut [f64]) {
+    fn l_solve_into_triple_nz(&self, active: &[u32], rhs_a_nz: &[(usize, f64)], rhs_b: &[f64], rhs_c: &[f64], za: &mut [f64], zb: &mut [f64], zc: &mut [f64]) {
         let m = self.m;
         za[..m].fill(0.0);
-        for (i, v) in rhs_a_nz {
+        for &(i, v) in rhs_a_nz {
             za[self.row_perm_inv[i]] = v;
         }
         for s in 0..m {
@@ -3110,9 +3110,9 @@ impl LuFactors {
     ///
     /// **前提条件**: 入口で `z` は全 0 であること (再ゼロ化は
     /// [`FtLu::solve_sparse_into`] が返却前に行う)。
-    fn l_solve_sparse_into(&self, rhs_sparse: SpSlice<'_, u32>, z: &mut [f64], scratch: &mut GpScratch) {
+    fn l_solve_sparse_into(&self, rhs_sparse: &[(usize, f64)], z: &mut [f64], scratch: &mut GpScratch) {
         scratch.seeds.clear();
-        for (orig_row, v) in rhs_sparse {
+        for &(orig_row, v) in rhs_sparse {
             if v == 0.0 {
                 continue;
             }
@@ -5200,7 +5200,7 @@ impl FtLu {
     #[allow(clippy::too_many_arguments)]
     pub fn solve_sparse_into_pair_capture(
         &self,
-        rhs_a: SpSlice<'_, u32>,
+        rhs_a: &[(usize, f64)],
         rhs_b: &[f64],
         scratch_a: &mut [f64],
         gp: &mut GpScratch,
@@ -5287,7 +5287,7 @@ impl FtLu {
     #[allow(clippy::too_many_arguments)]
     pub fn solve_sparse_into_triple_capture(
         &self,
-        rhs_a: SpSlice<'_, u32>,
+        rhs_a: &[(usize, f64)],
         rhs_b: &[f64],
         rhs_c: &[f64],
         scratch_a: &mut [f64],
@@ -5516,7 +5516,7 @@ impl FtLu {
         a_tilde_out: &mut [f64],
         rho_cap: Option<&mut StepCapture>,
         mut track: Option<&mut FtranTrack>,
-        rhs_a_nz: Option<SpSlice<'_, u32>>,
+        rhs_a_nz: Option<&[(usize, f64)]>,
     ) -> (usize, usize) {
         let rho_cap = StepCapture::take(rho_cap);
         if !self.u_zero_skip {
@@ -5566,7 +5566,7 @@ impl FtLu {
     #[inline(never)]
     pub fn solve_sparse_into_pair_capture_tracked(
         &self,
-        rhs_a: SpSlice<'_, u32>,
+        rhs_a: &[(usize, f64)],
         rhs_b: &[f64],
         scratch_a: &mut [f64],
         gp: &mut GpScratch,
@@ -5629,7 +5629,7 @@ impl FtLu {
         a_tilde_out: &mut [f64],
         rho_cap: Option<&mut StepCapture>,
         mut track: Option<&mut FtranTrack>,
-        rhs_a_nz: Option<SpSlice<'_, u32>>,
+        rhs_a_nz: Option<&[(usize, f64)]>,
     ) -> (usize, usize, usize) {
         let rho_cap = StepCapture::take(rho_cap);
         if !self.u_zero_skip {
@@ -5673,7 +5673,7 @@ impl FtLu {
     #[inline(never)]
     pub fn solve_sparse_into_triple_capture_tracked(
         &self,
-        rhs_a: SpSlice<'_, u32>,
+        rhs_a: &[(usize, f64)],
         rhs_b: &[f64],
         rhs_c: &[f64],
         scratch_a: &mut [f64],
@@ -6095,7 +6095,7 @@ impl FtLu {
     /// バッファと共有しない)。`l_solve_sparse_into` は入口で `scratch` が全 0 である
     /// ことを要求し、この関数は返却直前に `scratch` を全 0 に戻してその前提を
     /// 次回のために保つ。
-    pub fn solve_sparse_into(&self, rhs_sparse: SpSlice<'_, u32>, scratch: &mut [f64], gp: &mut GpScratch, out: &mut [f64]) -> usize {
+    pub fn solve_sparse_into(&self, rhs_sparse: &[(usize, f64)], scratch: &mut [f64], gp: &mut GpScratch, out: &mut [f64]) -> usize {
         self.base.l_solve_sparse_into(rhs_sparse, scratch, gp);
         // CLOCK トリガ用: 疎 `L` 段のコストは到達集合のサイズ。
         self.add_tick(gp.reach.len() as u64);
@@ -6121,7 +6121,7 @@ impl FtLu {
     /// ことを要求し、この関数は返却直前に `scratch` を全 0 に戻してその前提を
     /// 次回のために保つ。
     #[inline(never)]
-    pub fn solve_sparse_into_hyper(&self, rhs_sparse: SpSlice<'_, u32>, scratch: &mut [f64], gp: &mut GpScratch, out: &mut [f64]) -> usize {
+    pub fn solve_sparse_into_hyper(&self, rhs_sparse: &[(usize, f64)], scratch: &mut [f64], gp: &mut GpScratch, out: &mut [f64]) -> usize {
         self.base.l_solve_sparse_into(rhs_sparse, scratch, gp);
         // CLOCK トリガ用: 疎 `L` 段のコストは到達集合のサイズ。
         self.add_tick(gp.reach.len() as u64);
@@ -6169,7 +6169,7 @@ impl FtLu {
     /// ([`Self::permute_list_tracked`])、長さ `m` の `fill` を省く。それ以外は全体を書いて記録を無効化する。
     /// 値・tick はビット一致。
     #[inline(never)]
-    pub fn solve_sparse_into_hyper_tracked(&self, rhs_sparse: SpSlice<'_, u32>, scratch: &mut [f64], gp: &mut GpScratch, out: &mut [f64], track: &mut NzTrack) -> usize {
+    pub fn solve_sparse_into_hyper_tracked(&self, rhs_sparse: &[(usize, f64)], scratch: &mut [f64], gp: &mut GpScratch, out: &mut [f64], track: &mut NzTrack) -> usize {
         self.base.l_solve_sparse_into(rhs_sparse, scratch, gp);
         self.add_tick(gp.reach.len() as u64);
         if self.u_hyper_ok(gp) && self.r_sparse_ready() {
@@ -6238,7 +6238,7 @@ impl FtLu {
     /// `gp.u_hyper` が有効なら `U` 段を超疎に試みる。
     pub fn solve_sparse_into_capture(
         &self,
-        rhs_sparse: SpSlice<'_, u32>,
+        rhs_sparse: &[(usize, f64)],
         scratch: &mut [f64],
         gp: &mut GpScratch,
         out: &mut [f64],
@@ -7244,11 +7244,6 @@ mod tests {
     }
     use super::*;
 
-    /// `(添字, 値)` の組の列を LU の疎な右辺 (`u32` 添字) にする。
-    fn sp(pairs: &[(usize, f64)]) -> crate::sparse::SpBuf<u32> {
-        crate::sparse::SpBuf::from_pairs(pairs)
-    }
-
     /// 2 つのベクトルが要素ごとに `1e-8` 以内で一致するか。
     fn approx_vec(a: &[f64], b: &[f64]) -> bool {
         a.len() == b.len() && a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-8)
@@ -7765,7 +7760,7 @@ mod tests {
         let mut state_sparse = state.clone();
         let (mut sscratch, mut sout, mut sa_tilde) = (vec![0.0; m], vec![0.0; m], vec![0.0; m]);
         let mut gp = GpScratch::new(m);
-        state_sparse.solve_sparse_into_capture(sp(&to_sparse(&a_q)).as_slice(), &mut sscratch, &mut gp, &mut sout, &mut sa_tilde);
+        state_sparse.solve_sparse_into_capture(&to_sparse(&a_q), &mut sscratch, &mut gp, &mut sout, &mut sa_tilde);
         let (mut sscratch2, mut sout2, mut se_tilde) = (vec![0.0; m], vec![0.0; m], vec![0.0; m]);
         state_sparse.solve_transpose_into_capture(&e_p, &mut sscratch2, &mut sout2, &mut se_tilde);
         assert!(state_sparse.try_update_precomputed(basis_slot, &sa_tilde, &se_tilde, 1e-9));
@@ -8282,7 +8277,7 @@ mod tests {
                     sr.solve_transpose_unit_capture(r, &mut rs, &mut rr, &mut re);
                     let (mut za, mut zb, mut ra, mut rt, mut rat) = (vec![0.0; m], vec![0.0; m], vec![0.0; m], vec![0.0; m], vec![0.0; m]);
                     let mut gpr = GpScratch::new(m);
-                    let (rna, rnb) = sr.solve_sparse_into_pair_capture(sp(&a_sp).as_slice(), &rr, &mut za, &mut gpr, &mut zb, &mut ra, &mut rt, &mut rat, None);
+                    let (rna, rnb) = sr.solve_sparse_into_pair_capture(&a_sp, &rr, &mut za, &mut gpr, &mut zb, &mut ra, &mut rt, &mut rat, None);
                     let ref_cost = sr.synth_tick() - t0;
                     // 記録付き
                     let t0 = st.synth_tick();
@@ -8298,7 +8293,7 @@ mod tests {
                     cap.set_u_hyper(hyper);
                     // `partial` なら DSE `tau` を入る列の結果の非ゼロ行でだけ求める (策12)。
                     track.partial_tau = partial;
-                    let (na, nb) = st.solve_sparse_into_pair_capture_tracked(sp(&a_sp).as_slice(), &rho, &mut sa, &mut gp, &mut sb, &mut alpha, &mut tau, &mut a_t, Some(&mut cap), Some(&mut track));
+                    let (na, nb) = st.solve_sparse_into_pair_capture_tracked(&a_sp, &rho, &mut sa, &mut gp, &mut sb, &mut alpha, &mut tau, &mut a_t, Some(&mut cap), Some(&mut track));
                     assert_eq!(na, rna);
                     assert_eq!(alpha, ra, "m={m} seed={seed} it={it}: alpha");
                     for k in 0..m {
@@ -8335,10 +8330,10 @@ mod tests {
                         let (mut g1, mut g2) = (GpScratch::new(m), GpScratch::new(m));
                         g2.u_hyper = true;
                         let t1 = sr.synth_tick();
-                        let n1 = sr.solve_sparse_into(sp(&a_sp).as_slice(), &mut z1, &mut g1, &mut o1);
+                        let n1 = sr.solve_sparse_into(&a_sp, &mut z1, &mut g1, &mut o1);
                         let c1 = sr.synth_tick() - t1;
                         let t2 = st.synth_tick();
-                        let n2 = st.solve_sparse_into_hyper(sp(&a_sp).as_slice(), &mut z2, &mut g2, &mut o2);
+                        let n2 = st.solve_sparse_into_hyper(&a_sp, &mut z2, &mut g2, &mut o2);
                         assert_eq!(st.synth_tick() - t2, c1, "m={m} seed={seed} it={it}: solve_sparse_into tick");
                         assert_eq!(n1, n2);
                         assert!(o1.iter().zip(&o2).all(|(x, y)| x.to_bits() == y.to_bits()), "m={m} seed={seed} it={it}: solve_sparse_into");
@@ -8404,12 +8399,12 @@ mod tests {
                     let mut zs = vec![0.0; m];
                     let (mut ra, mut rt) = (vec![0.0; m], vec![0.0; m]);
                     let t0 = state.synth_tick();
-                    let rna = state.solve_sparse_into_capture(sp(&a_sp).as_slice(), &mut zs, &mut gp, &mut ra, &mut rt);
+                    let rna = state.solve_sparse_into_capture(&a_sp, &mut zs, &mut gp, &mut ra, &mut rt);
                     let rnb = state.solve_into(&b, &mut sb, &mut ob);
                     let sep_cost = state.synth_tick() - t0;
                     let (mut xa, mut xb, mut xt) = (vec![0.0; m], vec![0.0; m], vec![0.0; m]);
                     let t0 = state.synth_tick();
-                    let (xna, xnb) = state.solve_sparse_into_pair_capture(sp(&a_sp).as_slice(), &b, &mut zs, &mut gp, &mut pb, &mut xa, &mut xb, &mut xt, None);
+                    let (xna, xnb) = state.solve_sparse_into_pair_capture(&a_sp, &b, &mut zs, &mut gp, &mut pb, &mut xa, &mut xb, &mut xt, None);
                     assert_eq!(state.synth_tick() - t0, sep_cost, "seed={seed} round={round} v={variant}: sparse pair tick");
                     assert_eq!((xna, xnb), (rna, rnb));
                     assert_eq!(xa, ra, "seed={seed} round={round} v={variant}: sparse pair a");
@@ -8479,12 +8474,12 @@ mod tests {
                         let mut zs = vec![0.0; m];
                         let (mut o1, mut t1) = (vec![0.0; m], vec![0.0; m]);
                         let t0 = state.synth_tick();
-                        let n1 = state.solve_sparse_into_capture(sp(&a_sp).as_slice(), &mut zs, &mut gp, &mut o1, &mut t1);
+                        let n1 = state.solve_sparse_into_capture(&a_sp, &mut zs, &mut gp, &mut o1, &mut t1);
                         let (mut sb, mut sc) = (vec![0.0; m], vec![0.0; m]);
                         let (mut o2a, mut o2b, mut t2) = (vec![0.0; m], vec![0.0; m], vec![0.0; m]);
-                        let (n2, _) = state.solve_sparse_into_pair_capture(sp(&a_sp).as_slice(), &b, &mut zs, &mut gp, &mut sb, &mut o2a, &mut o2b, &mut t2, None);
+                        let (n2, _) = state.solve_sparse_into_pair_capture(&a_sp, &b, &mut zs, &mut gp, &mut sb, &mut o2a, &mut o2b, &mut t2, None);
                         let (mut o3a, mut o3b, mut o3c, mut t3) = (vec![0.0; m], vec![0.0; m], vec![0.0; m], vec![0.0; m]);
-                        let (n3, _, n3c) = state.solve_sparse_into_triple_capture(sp(&a_sp).as_slice(), &b, &c, &mut zs, &mut gp, &mut sb, &mut sc, &mut o3a, &mut o3b, &mut o3c, &mut t3, None);
+                        let (n3, _, n3c) = state.solve_sparse_into_triple_capture(&a_sp, &b, &c, &mut zs, &mut gp, &mut sb, &mut sc, &mut o3a, &mut o3b, &mut o3c, &mut t3, None);
                         // `tau` チャネルをステップ記録経由で (`b` の GP `L` 段)、要求時は超疎 `U` で。
                         let steps: Vec<usize> = (0..m).filter(|&s| b[state.base.row_perm[s]] != 0.0).collect();
                         let mk_cap = |steps: &Vec<usize>| {
@@ -8496,13 +8491,13 @@ mod tests {
                         };
                         let mut cap = mk_cap(&steps);
                         let (mut o4a, mut o4b, mut t4) = (vec![0.0; m], vec![0.0; m], vec![0.0; m]);
-                        let (n4a, n4b) = state.solve_sparse_into_pair_capture(sp(&a_sp).as_slice(), &b, &mut zs, &mut gp, &mut sb, &mut o4a, &mut o4b, &mut t4, Some(&mut cap));
+                        let (n4a, n4b) = state.solve_sparse_into_pair_capture(&a_sp, &b, &mut zs, &mut gp, &mut sb, &mut o4a, &mut o4b, &mut t4, Some(&mut cap));
                         let mut cap = mk_cap(&steps);
                         let (mut sa, mut o5a, mut o5b, mut t5) = (vec![0.0; m], vec![0.0; m], vec![0.0; m], vec![0.0; m]);
                         let (n5a, n5b) = state.solve_into_pair_capture(&a, &b, &mut sa, &mut sb, &mut o5a, &mut o5b, &mut t5, Some(&mut cap));
                         let mut cap = mk_cap(&steps);
                         let (mut o6a, mut o6b, mut o6c, mut t6) = (vec![0.0; m], vec![0.0; m], vec![0.0; m], vec![0.0; m]);
-                        let (n6a, n6b, n6c) = state.solve_sparse_into_triple_capture(sp(&a_sp).as_slice(), &b, &c, &mut zs, &mut gp, &mut sb, &mut sc, &mut o6a, &mut o6b, &mut o6c, &mut t6, Some(&mut cap));
+                        let (n6a, n6b, n6c) = state.solve_sparse_into_triple_capture(&a_sp, &b, &c, &mut zs, &mut gp, &mut sb, &mut sc, &mut o6a, &mut o6b, &mut o6c, &mut t6, Some(&mut cap));
                         let mut cap = mk_cap(&steps);
                         let (mut o7a, mut o7b, mut o7c, mut t7) = (vec![0.0; m], vec![0.0; m], vec![0.0; m], vec![0.0; m]);
                         let (n7a, n7b, n7c) = state.solve_into_triple_capture(&a, &b, &c, &mut sa, &mut sb, &mut sc, &mut o7a, &mut o7b, &mut o7c, &mut t7, Some(&mut cap));
@@ -8549,7 +8544,7 @@ mod tests {
     /// 少しでも違えば到達集合か呼び出し間のゼロ管理が誤っている)。
     fn assert_sparse_matches_dense(state: &FtLu, m: usize, rhs: &[f64], scratch: &mut [f64], gp: &mut GpScratch, out: &mut [f64]) {
         let expected = state.solve(rhs);
-        state.solve_sparse_into(sp(&to_sparse(rhs)).as_slice(), scratch, gp, out);
+        state.solve_sparse_into(&to_sparse(rhs), scratch, gp, out);
         assert_eq!(&out[..m], &expected[..], "rhs={rhs:?}");
     }
 
@@ -8733,7 +8728,7 @@ mod tests {
         let mut sparse_scratch = vec![0.0; m];
         let mut gp = GpScratch::new(m);
         let mut out_sparse = vec![0.0; m];
-        let sparse_nnz = lu.solve_sparse_into(sp(&[(0, 1.0)]).as_slice(), &mut sparse_scratch, &mut gp, &mut out_sparse);
+        let sparse_nnz = lu.solve_sparse_into(&[(0, 1.0)], &mut sparse_scratch, &mut gp, &mut out_sparse);
 
         assert_eq!(out_dense, out_sparse, "the two FTRAN paths must agree on the result itself");
         assert_eq!(dense_nnz, sparse_nnz, "...and on its nonzero count");
@@ -8805,7 +8800,7 @@ mod tests {
                 let mut scratch = vec![0.0; m];
                 let mut gp = GpScratch::new(m);
                 let mut out = vec![0.0; m];
-                state.solve_sparse_into(sp(&to_sparse(&rhs)).as_slice(), &mut scratch, &mut gp, &mut out);
+                state.solve_sparse_into(&to_sparse(&rhs), &mut scratch, &mut gp, &mut out);
                 let err = out.iter().zip(&x_full).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max);
                 assert!(err < 1e-8, "sparse ftran mismatch after {applied} updates: {err}");
                 for i in [0usize, m / 2, m - 1] {
@@ -8871,7 +8866,7 @@ mod tests {
         let mut scratch = vec![0.0; m];
         let mut gp = GpScratch::new(m);
         let mut out = vec![0.0; m];
-        state.solve_sparse_into(sp(&to_sparse(&rhs)).as_slice(), &mut scratch, &mut gp, &mut out);
+        state.solve_sparse_into(&to_sparse(&rhs), &mut scratch, &mut gp, &mut out);
         assert!(approx_vec(&out, &x_full), "sparse-rhs path ft={out:?} full={x_full:?}");
     }
 }

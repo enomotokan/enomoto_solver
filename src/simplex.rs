@@ -63,7 +63,7 @@
 //! 大幅に大きな問題を対象にする場合は再計測してから並列化すること。
 
 use crate::presolve::{self, scaling};
-use crate::sparse::{CscMat, CsrMat, SpIdx, SpSlice, csr_row_iter};
+use crate::sparse::{CscMat, CsrMat, csr_row_iter, sparse_axpy_dense, sparse_dot_dense};
 use crate::types::{ConstraintRow, Objective, RowSense, Sense, Status, VariableData};
 use crate::params::simplex::{COST_PERTURB_BASE, COST_PERTURB_BOXED_FRACTION, COST_PERTURB_ZERO_COST_SCALE, COST_PERTURB_FEW_BOXED_COST_CAP, COST_PERTURB_LARGE_COST, EXPAND_DELTA_0, EXPAND_DELTA_F, EXPAND_K, EXPAND_TAU, FT_BUMP_LIMIT_FACTOR, FT_CHECK_INTERVAL, FT_MAX_UPDATES, FT_MIN_PIVOT, FT_RESIDUAL_TOL, MAX_ITERS_CEILING, MAX_ITERS_FLOOR, MAX_ITERS_SCALE, PARALLEL_COMPONENT_MIN_VARS, PARTIAL_PRICING_GROUPS, PARTIAL_PRICING_THRESHOLD, PRESOLVE_ROUNDS, PRIMAL_HARRIS_TOL, PRIMAL_STALL_LIMIT_MIN, PRIMAL_STALL_LIMIT_PER_ROW, PROPAGATION_PASSES, RAYON_SIZE_THRESHOLD, ROWSINGLETON_COLSINGLETON_INNER_ROUNDS, RUIZ_ITERS, STALL_PROGRESS_EPS, STEEPEST_EDGE_FLOOR, TOL, UPDATE_VERIFY_TOL};
 
@@ -171,7 +171,7 @@ impl SteepestEdgeState {
         let mut gamma = vec![1.0; std.n_total];
         let n_orig = std.n_total - std.n_rows;
         for j in 0..n_orig {
-            let norm_sq: f64 = std.cols.col(j).iter().map(|(_, v)| v * v).sum();
+            let norm_sq: f64 = std.cols.col(j).iter().map(|&(_, v)| v * v).sum();
             gamma[j] = norm_sq.max(tunable!("ENOMOTO_T_STEEPEST_EDGE_FLOOR", STEEPEST_EDGE_FLOOR, f64));
         }
         SteepestEdgeState { gamma }
@@ -190,8 +190,8 @@ impl SteepestEdgeState {
                 continue;
             }
             let col = t.column_sparse(j);
-            let pivot_sj: f64 = col.iter().map(|(i, v)| v * rho[i]).sum(); // ピボット行の j 成分 (rho・A_j)
-            let tau_j: f64 = col.iter().map(|(i, v)| v * w[i]).sum();
+            let pivot_sj: f64 = col.iter().map(|&(i, v)| v * rho[i]).sum(); // ピボット行の j 成分 (rho・A_j)
+            let tau_j: f64 = col.iter().map(|&(i, v)| v * w[i]).sum();
             let beta_j = pivot_sj / pivot;
             *gamma_j = (*gamma_j + beta_j * beta_j * (1.0 + gamma_t_old) - 2.0 * beta_j * tau_j).max(tunable!("ENOMOTO_T_STEEPEST_EDGE_FLOOR", STEEPEST_EDGE_FLOOR, f64));
         }
@@ -220,15 +220,6 @@ pub struct SimplexResult {
     pub x: Option<Vec<f64>>,
 }
 
-/// [`StdForm`] の制約行列 (行形式・列形式) の要素の添字型。
-///
-/// 単体法の他の添字 (LU の `L`/`U`/`R` eta・行ミラー、PRICE 用の行優先コピー) と同じ `u32` にそろえる
-/// (値と別配列で 12 B/要素。旧版は `(usize, f64)` の組で 16 B)。次元 65,535 以下の問題で `u16`
-/// (10 B/要素) を選ぶ版も試したが、Netlib 93 問・Mittelmann の該当 5 問とも差が計測の揺れ (±2%) に
-/// 埋もれたので採らなかった (docs/improvement_history.md「疎行列の添字型」)。`u32` で表せない
-/// 大きさ (列数 `>= u32::MAX`) は [`build_std_form_presolved`] が `NotSolved` を返す。
-pub(crate) type AIdx = u32;
-
 /// 単体法が扱う標準形 `[A x + s = b]`, `lb <= z <= ub` (モジュール文書参照)。
 ///
 /// 列 `0..n_total - n_rows` が構造変数、残り `n_rows` 列が各行のスラック。
@@ -241,10 +232,10 @@ struct StdForm {
     n_rows: usize,
     /// 最小化形の目的関数係数 (長さ `n_total`、スラックは 0)。
     c: Vec<f64>,
-    /// 制約行列の行形式 (各行は列番号昇順)。添字は [`AIdx`] (`u32`) で値と別配列 (12 B/要素)。
-    rows: CsrMat<AIdx>,
+    /// 制約行列の行形式 (各行は列番号昇順)。
+    rows: CsrMat,
     /// `rows` の転置 (列形式)。`cols.col(j)` は列 `j` の `(行, 値)`。
-    cols: CscMat<AIdx>,
+    cols: CscMat,
     /// 右辺 `b`。
     b: Vec<f64>,
     /// 各列の下限。
@@ -258,7 +249,7 @@ struct StdForm {
 /// 前提: 各行は列番号の厳密な昇順 (`debug_assert` で確認)。列形式からの走査が
 /// 行形式と同じ要素順を再現し、LU のピボット順や残差の加算順がビット単位で
 /// 一致することがこれに依存している。
-fn freeze_std_matrices(rows: &[Vec<(usize, f64)>], n_total: usize) -> (CsrMat<AIdx>, CscMat<AIdx>) {
+fn freeze_std_matrices(rows: &[Vec<(usize, f64)>], n_total: usize) -> (CsrMat, CscMat) {
     debug_assert!(
         rows.iter().all(|r| r.windows(2).all(|w| w[0].0 < w[1].0)),
         "StdForm rows must be strictly column-ascending"
@@ -474,10 +465,6 @@ fn build_std_form_presolved(
     let n_le = g_rows.len(); // `<=` 行の数
     let n_rows = n_eq + n_le;
     let n_total = n_kept + n_rows;
-    if n_total >= AIdx::MAX_DIM {
-        // 制約行列・LU の添字 (`u32`) で表せない (単体法の作業ベクトルだけで数十 GB になる大きさ)。
-        return Err(Status::NotSolved);
-    }
 
     let mut c = vec![0.0; n_total];
     for (nj, &j) in orig_of_kept.iter().enumerate() {
@@ -538,7 +525,7 @@ fn build_std_form_presolved(
         offsets.windows(2).all(|w| entries[w[0]..w[1]].windows(2).all(|e| e[0].0 < e[1].0)),
         "StdForm rows must be strictly column-ascending"
     );
-    let rows = CsrMat::from_flat(n_total, offsets, &entries);
+    let rows = CsrMat::from_flat(n_total, offsets, entries);
     let cols = rows.to_csc();
     let shift_of_kept: Vec<f64> = orig_of_kept.iter().map(|&j| shift[j]).collect();
     Ok(PresolvedForm {
@@ -644,7 +631,7 @@ impl<'a> Tableau<'a> {
         // 基底列だけを列形式から走査する。j の昇順なので各行の要素順は行形式と一致する。
         for j in 0..self.std.n_total {
             if let Some(col) = self.basis_pos[j] {
-                for (i, v) in self.std.cols.col(j) {
+                for &(i, v) in self.std.cols.col(j) {
                     rows[i].push((col, v));
                 }
             }
@@ -666,13 +653,13 @@ impl<'a> Tableau<'a> {
         for v in out.iter_mut() {
             *v = 0.0;
         }
-        for (i, v) in self.std.cols.col(j) {
+        for &(i, v) in self.std.cols.col(j) {
             out[i] = v;
         }
     }
 
     /// 列 `j` の疎な `(行, 値)` 列をそのまま返す (内積だけ必要な走査用)。
-    fn column_sparse(&self, j: usize) -> SpSlice<'_, AIdx> {
+    fn column_sparse(&self, j: usize) -> &[(usize, f64)] {
         self.std.cols.col(j)
     }
 
@@ -696,7 +683,7 @@ impl<'a> Tableau<'a> {
             if xj == 0.0 {
                 continue;
             }
-            for (i, v) in self.std.cols.col(j) {
+            for &(i, v) in self.std.cols.col(j) {
                 rhs[i] -= v * xj;
             }
         }
@@ -721,7 +708,7 @@ impl<'a> Tableau<'a> {
             if self.nb_status[j].is_some() {
                 continue;
             }
-            self.std.cols.col(j).axpy_dense(self.x[j], &mut val);
+            sparse_axpy_dense(self.x[j], self.std.cols.col(j), &mut val);
         }
         let mut resid_sq = 0.0;
         for i in 0..m {
@@ -964,7 +951,7 @@ fn run_phase(
                 return None;
             }
             let cj = if phase1 { 0.0 } else { std.c[j] };
-            let dot = t.column_sparse(j).dot_dense(y);
+            let dot = sparse_dot_dense(t.column_sparse(j), y);
             let dj = cj - dot;
 
             let (eligible, dir) = match st {
@@ -1236,7 +1223,7 @@ fn run_phase2_incremental(std: &StdForm, t: &mut Tableau, lu: &mut sparse_lu::Ft
             }
             lu.solve_transpose_into(&cost_b, &mut scratch, &mut y);
             for j in 0..n {
-                d[j] = if t.nb_status[j].is_some() { std.c[j] - t.column_sparse(j).dot_dense(&y) } else { 0.0 };
+                d[j] = if t.nb_status[j].is_some() { std.c[j] - sparse_dot_dense(t.column_sparse(j), &y) } else { 0.0 };
             }
         }
 
@@ -1389,7 +1376,7 @@ fn run_phase2_incremental(std: &StdForm, t: &mut Tableau, lu: &mut sparse_lu::Ft
             if rv.abs() <= TOL && wv.abs() <= TOL {
                 continue;
             }
-            for (j, v) in std.rows.row(i) {
+            for &(j, v) in std.rows.row(i) {
                 if std.lb[j] == std.ub[j] {
                     continue;
                 }
@@ -1488,7 +1475,7 @@ fn connected_components_of_std_form(std: &StdForm) -> Option<(Vec<Vec<usize>>, V
 
     for i in 0..std.n_rows {
         let mut first: Option<usize> = None; // この行で最初に見た構造変数
-        for (j, _) in std.rows.row(i) {
+        for &(j, _) in std.rows.row(i) {
             if j >= n_orig {
                 continue; // この行のスラック列
             }
@@ -1545,13 +1532,13 @@ fn split_std_form(std: &StdForm, components: &[Vec<usize>]) -> Vec<StdForm> {
             .rows
             .row(i)
             .iter()
-            .find_map(|(j, _)| if j < n_orig { Some(comp_id[j]) } else { None })
+            .find_map(|&(j, _)| if j < n_orig { Some(comp_id[j]) } else { None })
             .expect("row with no structural members must have made connected_components_of_std_form bail out already");
         let local_n = components[cid].len();
         let slack_col = local_n + rows_acc[cid].len(); // この行の成分内でのスラック列番号
         let mut row: Vec<(usize, f64)> = Vec::with_capacity(std.rows.row(i).len());
         let (mut slack_lb, mut slack_ub) = (0.0, 0.0);
-        for (j, v) in std.rows.row(i) {
+        for &(j, v) in std.rows.row(i) {
             if j < n_orig {
                 debug_assert_eq!(comp_id[j], cid, "row split across two components");
                 row.push((local_idx[j], v));
