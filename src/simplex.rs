@@ -1676,6 +1676,11 @@ impl DseState {
         self.w[i]
     }
 
+    /// 行 `i` の重みを直接設定する (`slope_intercept_dual` の作業 #5 M7 の強制ピボット用)。
+    fn set_weight(&mut self, i: usize, w: f64) {
+        self.w[i] = w.max(tunable!("ENOMOTO_T_STEEPEST_EDGE_FLOOR", STEEPEST_EDGE_FLOOR, f64));
+    }
+
     /// 任意の (分解済みの) 基底に対する正確な重みを計算する。行 `i` ごとに BTRAN
     /// (`B^T z = e_i`) を 1 回行い `w[i] = ||z||^2` とする (計 m 回)。`lu` は重みを
     /// 求めたい基底の分解でなければならない (`slope_intercept_dual` は再分解の直後に呼ぶ)。

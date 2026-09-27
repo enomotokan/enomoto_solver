@@ -210,12 +210,17 @@ pub(crate) mod slope_intercept_dual {
     /// 合成クロック)は数えない。**0 = 無効(既定)**。`ENOMOTO_PIVOT_ESCALATION_STEP` で上書き可。
     pub(crate) const PIVOT_ESCALATION_STEP: usize = 0;
 
-    /// 作業 #5 M5 (HiGHS `reinvertOnNumericalTrouble` 流): 数値的原因による再分解 (上の `PIVOT_ESCALATION_STEP` と同じ
-    /// トリガ) のたびに、LU のピボット閾値が既定 (`STABILITY`) 未満なら、そうでなければ FT 更新がこの回数未満の分解で
-    /// 起きたときだけ、閾値を 1 段引き上げる。分解直後に数値的トラブルが出るのは分解自体が不安定な証拠
-    /// (pilot87 を閾値 1e-3 で解くと `NotSolved` → 3.6 s で最適)。Netlib 93 問で経路が変わるのは pilot87 だけ。
+    /// 作業 #5 M5 (HiGHS `reinvertOnNumericalTrouble` の前半): LU のピボット閾値が既定 (`STABILITY`) 未満
+    /// (`ENOMOTO_PIVOT_THRESHOLD` で下げた場合) なら、数値的原因による再分解 (上の `PIVOT_ESCALATION_STEP` と同じトリガ) の
+    /// たびに閾値を 1 段引き上げる。既定の閾値では何もしない (経路不変)。pilot87 を閾値 1e-3 で解くと `NotSolved` → 最適。
+    /// `ENOMOTO_T_PIVOT_ESCALATE_BELOW_DEFAULT` で上書き可、0 = 無効。
+    pub(crate) const PIVOT_ESCALATE_BELOW_DEFAULT: u8 = 1;
+
+    /// M5 の後半 (HiGHS 流、**既定オフ**): 既定以上の閾値でも、FT 更新がこの回数未満の分解で数値的トラブルが起きたら
+    /// 閾値を 1 段上げる (HiGHS は 10)。10 にすると Netlib では pilot87 だけ経路が変わるが、irish-electricity (旧前処理) で
+    /// 閾値が早々に 0.5 になり、特異化からの巻き戻しが 4 回 → 150 回超に増えて解けなくなった。
     /// `ENOMOTO_T_PIVOT_ESCALATE_FEW_UPDATES` で上書き可、0 = 無効。
-    pub(crate) const PIVOT_ESCALATE_FEW_UPDATES: usize = 10;
+    pub(crate) const PIVOT_ESCALATE_FEW_UPDATES: usize = 0;
 
     /// トリガ (4): FT 更新回数の上限を `m` に比例させる係数。上限は
     /// `max(FT_MAX_UPDATES_FACTOR * m, FT_MAX_UPDATES_FLOOR)`(`ft_max_updates`)。eta 連鎖の
@@ -347,6 +352,9 @@ pub(crate) mod slope_intercept_dual {
     /// M2: Farkas の証明が成り立たない実行不能の結論(と `INFEAS_GUARD_SQRT_W` のガード)がこの回数を超えたら、
     /// 誤った `Infeasible` を返す代わりに `NotSolved` で諦める。
     pub(crate) const UNCERTIFIED_MAX: usize = 1000;
+
+    /// M3: 特異な再分解からの巻き戻しがこの回数を超えたら `NotSolved` で諦める (巻き戻しの無限の繰り返しを防ぐ)。
+    pub(crate) const ROLLBACK_MAX: usize = 200;
 
     /// `x_B(M)` の `M` 係数は厳密には 0 か 1 のオーダーなので、絶対値がこれ未満の係数は
     /// LU/更新の雑音とみなして 0 に丸める(`snap_slope`)。`ENOMOTO_T_X_B_SLOPE_NOISE` で上書き可。
