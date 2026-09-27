@@ -2710,10 +2710,8 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     let mut diag_degen_max_run = 0usize;
     let mut diag_shift_events = 0usize;
     let mut diag_shift_cols = 0usize;
-    let mut diag_small_piv = [0usize; 3];
     let xb_consistency_tol: f64 = tunable!("ENOMOTO_T_XB_CONSISTENCY_TOL", XB_CONSISTENCY_TOL, f64);
     let mut diag_xb_mismatch = (0.0f64, 0usize);
-    let (mut diag_near_degen, mut diag_near_run, mut diag_near_max_run) = ([0usize; 3], [0usize; 3], [0usize; 3]);
     // M1' 用の列の無限大ノルム `‖a_j‖∞`(初めて必要になったときに作る)。
     let mut col_inf_norm: Vec<f64> = Vec::new();
     // 診断(`ENOMOTO_DEBUG_EXT_ITERS`): 選んだ行の DSE 重みの最大、M1 で外した行数、M1' で候補を外した
@@ -3471,7 +3469,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                 prof_phases::report(wall_t0.elapsed().as_nanos() as usize);
             }
             if noise_diag {
-                eprintln!("DEBUG_EXT: degenerate_pivots={diag_degen} max_run={diag_degen_max_run} cost_shifts={diag_shift_events} shifted_cols={diag_shift_cols} small_pivots(1e-3,1e-5,1e-7)={diag_small_piv:?} xb_mismatch={:.3e}@{} near_degen(1e-10,1e-9,1e-8)={diag_near_degen:?} near_max_run={diag_near_max_run:?}", diag_xb_mismatch.0, diag_xb_mismatch.1);
+                eprintln!("DEBUG_EXT: degenerate_pivots={diag_degen} max_run={diag_degen_max_run} cost_shifts={diag_shift_events} shifted_cols={diag_shift_cols} xb_mismatch={:.3e}@{}", diag_xb_mismatch.0, diag_xb_mismatch.1);
             }
             if noise_diag && noise_on {
                 eprintln!(
@@ -4108,15 +4106,6 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                 if abs_a > best_abs {
                     best_abs = abs_a;
                     best_idx = idx;
-                }
-            }
-            if noise_diag {
-                let amax = sorted[..=k_star].iter().fold(0.0f64, |a, c| a.max(c.hat_alpha.abs()));
-                let rel = best_abs / amax;
-                for (k, t) in [1e-3, 1e-5, 1e-7].into_iter().enumerate() {
-                    if rel < t {
-                        diag_small_piv[k] += 1;
-                    }
                 }
             }
             // 診断: 窓の大きさと、窓内に(選ばれなかった)M 側候補があったかを数える。
@@ -5032,24 +5021,9 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         // 双対値の増分更新(Huangfu & Hall §2.2.3): PRICE が触った全列で
         // `d[j] -= theta_d * a_p[j]`。BFRT フリップは `B`/`c_B` を変えないので `d` に影響しない。
         let theta_d = dj_q / alpha_q;
-        if env_str!("ENOMOTO_W8_TRACE").is_some() {
-            let amax = touched_cols.iter().fold(0.0f64, |a, &j| if nb_status[j].is_some() || j == q { a.max(a_p[j].abs()) } else { a });
-            eprintln!("W8T it={iter_idx} r={r} q={q} aq={alpha_q:.3e} amax={amax:.3e} dq={dj_q:.3e} nc={n_candidates} ks={k_star} bi={best_idx} sw={:.3e} upd={}", dse.weight(r).sqrt(), lu.update_count());
-        }
         // 作業 #8 対処 3: 厳密な退化ピボットの連続を数える(シフトは下の `d` 更新の後)。
         // `Zero` (自由列) の入基は比 0 が設計どおり (論文 3.1 節 (iii)) なので退化と数えない。
         let q_was_zero = old_status_q == NbStatus::Zero;
-        if noise_diag {
-            for (k, t) in [1e-10, 1e-9, 1e-8].into_iter().enumerate() {
-                if dj_q.abs() <= t && !q_was_zero {
-                    diag_near_degen[k] += 1;
-                    diag_near_run[k] += 1;
-                    diag_near_max_run[k] = diag_near_max_run[k].max(diag_near_run[k]);
-                } else {
-                    diag_near_run[k] = 0;
-                }
-            }
-        }
         if dj_q.abs() <= degen_dj_tol && !q_was_zero {
             degen_run += 1;
             diag_degen += 1;
@@ -6770,5 +6744,34 @@ mod tests {
         assert_eq!(nb_status, vec![None, Some(NbStatus::Upper), Some(NbStatus::Lower), None]);
         assert_eq!(log.len(), 1, "only the last pivot is undone");
         assert_eq!(flips, vec![1], "flips before the undone pivot are kept");
+    }
+
+    /// 作業 #8 対処 3: 費用シフトは被約費用が双対実行可能側に摂動の大きさ未満しか離れていない非基底列だけを、
+    /// 双対実行可能側へずらす(基底列・固定列・`Zero` 列と、すでに十分離れた列は変えない)。
+    #[test]
+    fn degenerate_cost_shift_moves_only_near_zero_nonbasic_duals_inward() {
+        let rows = vec![vec![(0, 1.0), (1, 1.0), (2, 1.0), (3, 1.0), (4, 1.0), (5, 1.0)]];
+        let inf = f64::INFINITY;
+        let std = std_form(&rows, vec![1.0], vec![0.0; 6], vec![0.0, 0.0, 0.0, 2.0, -inf, 0.0], vec![1.0, 1.0, 1.0, 2.0, inf, inf]);
+        let nb_status = vec![Some(NbStatus::Lower), Some(NbStatus::Upper), Some(NbStatus::Lower), Some(NbStatus::Lower), Some(NbStatus::Zero), None];
+        let base = 1e-6;
+        let mut cost = vec![0.0; 6];
+        let mut d = vec![0.0, 0.0, 1.0, 0.0, 0.0, 0.0];
+        let n = shift_degenerate_costs(&std, &nb_status, base, &mut cost, &mut d);
+        assert_eq!(n, 2);
+        assert!(d[0] >= base && d[0] < 2.0 * base + 1e-18 && cost[0] == d[0], "Lower column shifted up");
+        assert!(d[1] <= -base && cost[1] == d[1], "Upper column shifted down");
+        assert_eq!(&d[2..], &[1.0, 0.0, 0.0, 0.0], "far, fixed, Zero and basic columns are untouched");
+        assert_eq!(&cost[2..], &[0.0; 4]);
+    }
+
+    /// 作業 #8 対処 6: `x_B[r]` と `rho^T rhs` のずれは内積の項の大きさ(1 以上)に対する比で測る。
+    #[test]
+    fn xb_row_mismatch_is_relative_to_the_dot_product_terms() {
+        let rho = [2.0, 0.0, -1.0];
+        let rhs = [3.0, 100.0, 1.0];
+        assert_eq!(xb_row_mismatch(&rho, &rhs, 5.0), 0.0);
+        assert!((xb_row_mismatch(&rho, &rhs, 5.7) - 0.1).abs() < 1e-12);
+        assert!((xb_row_mismatch(&[0.0, 0.0, 0.0], &rhs, 0.5) - 0.5).abs() < 1e-12);
     }
 }
