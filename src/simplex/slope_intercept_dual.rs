@@ -65,7 +65,7 @@ use crate::params::slope_intercept_dual::{
     LEX_REL_TOL, PRICE_COLUMN_DENSITY, PRICE_LIST_DENSITY, SCORE2_STALL_HALFLIFE, STALL_LIMIT_MIN, STALL_LIMIT_PER_ROW, STUCK_ROW_BOOST_FACTOR, STUCK_ROW_BOOST_THRESHOLD, XB_DRIFT_FRESH_FLOOR_FACTOR,
     XB_DRIFT_FRESH_FLOOR_FRAC, XB_DRIFT_MIN_UPDATES, XB_DRIFT_MIN_UPDATES_MULT, XB_DRIFT_REL_K, XB_DRIFT_SAMPLE_GUARD, XB_DRIFT_SAMPLE_K, XB_LIST_DENSITY,
 };
-use crate::params::slope_intercept_dual::{INFEAS_GUARD_SQRT_W, NOISE_C, NOISE_MIN_SQRT_W, UNCERTIFIED_MAX};
+use crate::params::slope_intercept_dual::{INFEAS_GUARD_SQRT_W, NOISE_C, NOISE_MIN_SQRT_W, PIVOT_ESCALATE_FEW_UPDATES, UNCERTIFIED_MAX};
 
 /// `ENOMOTO_PROF_PHASES_EXT` 診断用のフェーズ別計時カウンタ(`simplex::prof_phases` の拡張版)。
 /// [`solve_slope_intercept_dual`] の主ループの時間がどこで使われるかを測る。値はすべてナノ秒または
@@ -2724,9 +2724,9 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         .unwrap_or(PIVOT_ESCALATION_STEP);
     // 数値的原因による再分解の回数。
     let mut numeric_trouble_count: usize = 0;
-    // 作業 #5 M5 の変種 (HiGHS `reinvertOnNumericalTrouble` 流): 数値的原因の再分解のたびに、閾値が既定 (`STABILITY`) 未満なら、
-    // そうでなければ FT 更新 `N` 回未満の分解で起きたときだけ、閾値を 1 段上げる (`ENOMOTO_T_PIVOT_ESCALATE_FEW_UPDATES=N`、0 = 無効)。
-    let pivot_escalation_few_updates: usize = tunable!("ENOMOTO_T_PIVOT_ESCALATE_FEW_UPDATES", 0usize, usize);
+    // 作業 #5 M5 ([`PIVOT_ESCALATE_FEW_UPDATES`]、HiGHS `reinvertOnNumericalTrouble` 流): 数値的原因の再分解のたびに、閾値が
+    // 既定 (`STABILITY`) 未満なら、そうでなければ FT 更新 `N` 回未満の分解で起きたときだけ、閾値を 1 段上げる (0 = 無効)。
+    let pivot_escalation_few_updates: usize = tunable!("ENOMOTO_T_PIVOT_ESCALATE_FEW_UPDATES", PIVOT_ESCALATE_FEW_UPDATES, usize);
     /// 数値的原因による再分解を 1 回記録し、[`PIVOT_ESCALATION_STEP`] 回ごとに LU の
     /// ピボット閾値を引き上げる。(ループ本体が多くの局所変数を可変借用しているため、
     /// クロージャではなくマクロにしている。)

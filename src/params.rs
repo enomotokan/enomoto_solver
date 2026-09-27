@@ -210,6 +210,13 @@ pub(crate) mod slope_intercept_dual {
     /// 合成クロック)は数えない。**0 = 無効(既定)**。`ENOMOTO_PIVOT_ESCALATION_STEP` で上書き可。
     pub(crate) const PIVOT_ESCALATION_STEP: usize = 0;
 
+    /// 作業 #5 M5 (HiGHS `reinvertOnNumericalTrouble` 流): 数値的原因による再分解 (上の `PIVOT_ESCALATION_STEP` と同じ
+    /// トリガ) のたびに、LU のピボット閾値が既定 (`STABILITY`) 未満なら、そうでなければ FT 更新がこの回数未満の分解で
+    /// 起きたときだけ、閾値を 1 段引き上げる。分解直後に数値的トラブルが出るのは分解自体が不安定な証拠
+    /// (pilot87 を閾値 1e-3 で解くと `NotSolved` → 3.6 s で最適)。Netlib 93 問で経路が変わるのは pilot87 だけ。
+    /// `ENOMOTO_T_PIVOT_ESCALATE_FEW_UPDATES` で上書き可、0 = 無効。
+    pub(crate) const PIVOT_ESCALATE_FEW_UPDATES: usize = 10;
+
     /// トリガ (4): FT 更新回数の上限を `m` に比例させる係数。上限は
     /// `max(FT_MAX_UPDATES_FACTOR * m, FT_MAX_UPDATES_FLOOR)`(`ft_max_updates`)。eta 連鎖の
     /// 無制限な伸長を防ぐめったに発火しない安全網。`ENOMOTO_T_FT_MAX_UPDATES_FACTOR` で上書き可。
@@ -327,9 +334,10 @@ pub(crate) mod slope_intercept_dual {
     pub(crate) const NOISE_C: f64 = 1.0;
 
     /// M1/M1' を適用する `sqrt(w_r)` の下限 (これ以下の行では判定を現行と同じにする)。
-    /// 通常の問題の経路を変えないためのゲート (Netlib 93 問の選択行の `sqrt(w_r)` の最大は改良履歴を参照)。
+    /// 通常の問題の経路を変えないためのゲート: Netlib 93 問 (既定設定) で chuzr が選んだ行の `sqrt(w_r)` の最大は
+    /// perold の 2.9e8 (次いで pilot.ja 2.5e7、dfl001 8.6e6)、irish (旧前処理) で特異化に至る行は 1e11〜1e18。
     /// `ENOMOTO_T_NOISE_MIN_SQRT_W` で上書き可。
-    pub(crate) const NOISE_MIN_SQRT_W: f64 = 1e8;
+    pub(crate) const NOISE_MIN_SQRT_W: f64 = 1e9;
 
     /// M2: `Eligible = ∅`・BFRT の使い切りで実行不能を結論する直前に、行 `r` の `sqrt(w_r)` がこれを
     /// 超えていれば (基底が数値的に従属で PRICE 行が雑音) 結論せずに行を一時的に外す。
