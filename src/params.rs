@@ -132,6 +132,15 @@ pub(crate) mod simplex {
     /// 費用摂動: 費用が全部 0 の問題で「最大費用」の代わりに使う値。0 のままだと摂動が消えて
     /// 双対退化で反復が大きく増える(klein2: 1740 → 214 反復)。
     pub(crate) const COST_PERTURB_ZERO_COST_SCALE: f64 = 1.0;
+
+    /// 費用摂動の総量の上限判定: 構造列の `Σ 摂動量 × 幅` が真の費用の尺度 `Σ |c_j| × 幅` の
+    /// この倍を超えたら摂動を縮める (`perturb_costs`)。104 問で超えるのは cont1 (0.27)・perold (0.77)・
+    /// pilot4 (0.42) だけ。pilot87 (0.08) は縮めると双対反復が増える (+13%) ので 0.1 で線を引く。
+    pub(crate) const COST_PERTURB_BUDGET_GATE: f64 = 0.1;
+
+    /// 費用摂動を縮めるときの総量の目標: 真の費用の尺度のこの倍。cont1 では 0.1 倍に縮めても
+    /// 摂動費用での最適基底が変わらず (真の目的関数値 0.0149)、0.037 倍 (この値) 以下で真の最適値の近くに来る。
+    pub(crate) const COST_PERTURB_BUDGET_TARGET: f64 = 1e-2;
 }
 
 /// 傾き・切片二段解法 (src/simplex/slope_intercept_dual.rs)

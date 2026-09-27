@@ -65,7 +65,7 @@
 use crate::presolve::{self, scaling};
 use crate::sparse::{CscMat, CsrMat, csr_row_iter, sparse_axpy_dense, sparse_dot_dense};
 use crate::types::{ConstraintRow, Objective, RowSense, Sense, Status, VariableData};
-use crate::params::simplex::{COST_PERTURB_BASE, COST_PERTURB_BOXED_FRACTION, COST_PERTURB_ZERO_COST_SCALE, COST_PERTURB_FEW_BOXED_COST_CAP, COST_PERTURB_LARGE_COST, EXPAND_DELTA_0, EXPAND_DELTA_F, EXPAND_K, EXPAND_TAU, FT_BUMP_LIMIT_FACTOR, FT_CHECK_INTERVAL, FT_MAX_UPDATES, FT_MIN_PIVOT, FT_RESIDUAL_TOL, MAX_ITERS_CEILING, MAX_ITERS_FLOOR, MAX_ITERS_SCALE, PARALLEL_COMPONENT_MIN_VARS, PARTIAL_PRICING_GROUPS, PARTIAL_PRICING_THRESHOLD, PRESOLVE_ROUNDS, PRIMAL_HARRIS_TOL, PRIMAL_STALL_LIMIT_MIN, PRIMAL_STALL_LIMIT_PER_ROW, PROPAGATION_PASSES, RAYON_SIZE_THRESHOLD, ROWSINGLETON_COLSINGLETON_INNER_ROUNDS, RUIZ_ITERS, STALL_PROGRESS_EPS, STEEPEST_EDGE_FLOOR, TOL, UPDATE_VERIFY_TOL};
+use crate::params::simplex::{COST_PERTURB_BASE, COST_PERTURB_BOXED_FRACTION, COST_PERTURB_BUDGET_GATE, COST_PERTURB_BUDGET_TARGET, COST_PERTURB_ZERO_COST_SCALE, COST_PERTURB_FEW_BOXED_COST_CAP, COST_PERTURB_LARGE_COST, EXPAND_DELTA_0, EXPAND_DELTA_F, EXPAND_K, EXPAND_TAU, FT_BUMP_LIMIT_FACTOR, FT_CHECK_INTERVAL, FT_MAX_UPDATES, FT_MIN_PIVOT, FT_RESIDUAL_TOL, MAX_ITERS_CEILING, MAX_ITERS_FLOOR, MAX_ITERS_SCALE, PARALLEL_COMPONENT_MIN_VARS, PARTIAL_PRICING_GROUPS, PARTIAL_PRICING_THRESHOLD, PRESOLVE_ROUNDS, PRIMAL_HARRIS_TOL, PRIMAL_STALL_LIMIT_MIN, PRIMAL_STALL_LIMIT_PER_ROW, PROPAGATION_PASSES, RAYON_SIZE_THRESHOLD, ROWSINGLETON_COLSINGLETON_INNER_ROUNDS, RUIZ_ITERS, STALL_PROGRESS_EPS, STEEPEST_EDGE_FLOOR, TOL, UPDATE_VERIFY_TOL};
 
 /// Markowitz ピボットの疎 LU と Forrest-Tomlin 更新。このファイル内では
 /// ローカル変数名 `lu` (FtLu インスタンス) との衝突を避けるため `sparse_lu` の別名で参照する。
@@ -753,6 +753,14 @@ impl<'a> Tableau<'a> {
 /// (`r` は列番号のハッシュによる [0, 1) の擬似乱数) で、双対実行可能側を変えない向きに加える:
 /// 固定列・自由列はそのまま、片側有限列は欠けている上下限から遠ざかる向き、
 /// 箱型列は元の費用の符号の向き。摂動後の費用ベクトルを返す。
+///
+/// 摂動の総量 `Σ 摂動量_j × 幅_j` (構造列、幅は箱型なら `ub - lb`、片側有限なら `max(|有限側|, 1)`) が
+/// 真の費用の尺度 `Σ |c_j| × 幅_j` の [`COST_PERTURB_BUDGET_GATE`] 倍を超えるときは、総量がちょうど
+/// [`COST_PERTURB_BUDGET_TARGET`] 倍になるよう全列の摂動を同じ比率で縮める (費用が全部 0 の問題は除く)。
+/// 費用の非零がごく少なく費用 0 の列が大半の問題 (cont1: 非零 1 個、費用 0 の箱型列 4 万本) では、
+/// `+1` の項だけで摂動の総量が真の費用の尺度に並び、摂動費用での最適基底が真の最適から大きく離れる
+/// (cont1: 真の目的関数値 0.0149 vs 最適 0.00878)。摂動を外した後の主単体法への引き継ぎがその差を
+/// 埋めることになる (1,819 反復 → 縮めると 761 反復)。`ENOMOTO_PERTURB_OLD=1` で縮めない (旧動作、A/B 用)。
 fn perturb_costs(std: &StdForm) -> Vec<f64> {
     let n = std.n_total;
     let mut max_abs_cost = std.c.iter().fold(0.0f64, |acc, &c| acc.max(c.abs()));
@@ -766,12 +774,14 @@ fn perturb_costs(std: &StdForm) -> Vec<f64> {
     // 費用が全部 0(実行可能性判定問題)だと基準が 0 になり摂動が消え、被約費用がすべて 0 のまま
     // 比率テストが全候補同点になって退化ピボットを重ねる(klein2: 1740 反復、99.9% 退化)。
     // その場合は単位費用と同じ大きさの基準を使う(klein2 は 214 反復)。
-    if max_abs_cost == 0.0 {
+    let all_zero = max_abs_cost == 0.0;
+    if all_zero {
         max_abs_cost = COST_PERTURB_ZERO_COST_SCALE;
     }
     let base = COST_PERTURB_BASE * max_abs_cost; // 摂動の基準の大きさ
 
-    let mut pc = std.c.clone(); // 摂動後の費用
+    // 各列の摂動量 (向きをつける前の大きさ)。自由列・固定列は 0。
+    let mut xpert = vec![0.0f64; n];
     for j in 0..n {
         let lo = std.lb[j];
         let hi = std.ub[j];
@@ -788,14 +798,52 @@ fn perturb_costs(std: &StdForm) -> Vec<f64> {
         h ^= h >> 31;
         let r = (h >> 40) as f64 / (1u64 << 24) as f64;
 
-        let xpert = (1.0 + r) * (pc[j].abs() + 1.0) * base; // この列の摂動量
-        if !hi.is_finite() {
-            pc[j] += xpert;
-        } else if !lo.is_finite() {
-            pc[j] -= xpert;
+        xpert[j] = (1.0 + r) * (std.c[j].abs() + 1.0) * base; // この列の摂動量
+    }
+
+    // 摂動の総量と真の費用の尺度 (構造列のみ。スラック列の摂動は呼び出し側 `dual_active_costs` が外す)。
+    let n_orig = n - std.n_rows;
+    let width = |j: usize| -> f64 {
+        let (lo, hi) = (std.lb[j], std.ub[j]);
+        if (hi - lo).is_finite() {
+            hi - lo
+        } else if lo.is_finite() {
+            lo.abs().max(1.0)
+        } else if hi.is_finite() {
+            hi.abs().max(1.0)
         } else {
-            pc[j] += if pc[j] >= 0.0 { xpert } else { -xpert };
+            0.0
         }
+    };
+    let mut budget = 0.0f64; // Σ 摂動量 × 幅
+    let mut cost_scale = 0.0f64; // Σ |c_j| × 幅
+    for j in 0..n_orig {
+        let w = width(j);
+        budget += xpert[j] * w;
+        cost_scale += std.c[j].abs() * w;
+    }
+    let gate = tunable!("ENOMOTO_T_COST_PERTURB_BUDGET_GATE", COST_PERTURB_BUDGET_GATE, f64);
+    let target = tunable!("ENOMOTO_T_COST_PERTURB_BUDGET_TARGET", COST_PERTURB_BUDGET_TARGET, f64);
+    let shrink = if env_str!("ENOMOTO_PERTURB_OLD").is_none() && !all_zero && cost_scale > 0.0 && budget > gate * cost_scale { target * cost_scale / budget } else { 1.0 };
+
+    let mut pc = std.c.clone(); // 摂動後の費用
+    for j in 0..n {
+        if xpert[j] == 0.0 {
+            continue;
+        }
+        let xp = xpert[j] * shrink;
+        if !std.ub[j].is_finite() {
+            pc[j] += xp;
+        } else if !std.lb[j].is_finite() {
+            pc[j] -= xp;
+        } else {
+            pc[j] += if pc[j] >= 0.0 { xp } else { -xp };
+        }
+    }
+    if env_str!("ENOMOTO_DEBUG_PERTURB").is_some() {
+        let n_pert = (0..n_orig).filter(|&j| xpert[j] != 0.0).count();
+        let n_pert_zero_cost = (0..n_orig).filter(|&j| xpert[j] != 0.0 && std.c[j] == 0.0).count();
+        eprintln!("PERTURB n_orig={n_orig} n_pert={n_pert} n_pert_zero_cost={n_pert_zero_cost} boxed={boxed} base={base:.3e} budget={budget:.3e} cost_scale={cost_scale:.3e} ratio={:.3e} shrink={shrink:.3e}", budget / cost_scale);
     }
     pc
 }

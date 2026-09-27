@@ -5239,6 +5239,16 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
                 let n_bad = (0..n_total).filter(|&j| is_dual_bad(j)).count();
                 let handoff_iters = super::prof_phases::RUN_PHASE_ITERS.load(std::sync::atomic::Ordering::Relaxed) - handoff_iters0;
                 eprintln!("DEBUG_EXT: primal_handoff_us={} dual_infeasible_cols={n_bad} primal_handoff_iters={handoff_iters}", handoff_t0.elapsed().as_micros());
+                if env_str!("ENOMOTO_DEBUG_PERTURB").is_some() {
+                    // 真の費用での双対実行不能の大きさの分布 (引き継ぎ前の基底)。
+                    let mut hist = [0usize; 6]; // >1e-4, >1e-5, >1e-6, >1e-7, >1e-8, <=1e-8
+                    for j in (0..n_total).filter(|&j| is_dual_bad(j)) {
+                        let v = true_d[j].abs();
+                        let k = if v > 1e-4 { 0 } else if v > 1e-5 { 1 } else if v > 1e-6 { 2 } else if v > 1e-7 { 3 } else if v > 1e-8 { 4 } else { 5 };
+                        hist[k] += 1;
+                    }
+                    eprintln!("PERTURB_HANDOFF bad_true_d_hist(>1e-4,>1e-5,>1e-6,>1e-7,>1e-8,<=1e-8)={hist:?}");
+                }
             }
             // cont1 策1・策2: 主単体法は EXPAND で出る変数を上下限から外れた値のまま非基底にし、
             // 比率テストの行き過ぎが `|alpha|` 倍に増幅されると (cont1 では 6.6e-3) その値のまま
