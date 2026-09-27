@@ -65,7 +65,7 @@ use crate::params::slope_intercept_dual::{
     LEX_REL_TOL, PRICE_COLUMN_DENSITY, PRICE_LIST_DENSITY, SCORE2_STALL_HALFLIFE, STALL_LIMIT_MIN, STALL_LIMIT_PER_ROW, STUCK_ROW_BOOST_FACTOR, STUCK_ROW_BOOST_THRESHOLD, XB_DRIFT_FRESH_FLOOR_FACTOR,
     XB_DRIFT_FRESH_FLOOR_FRAC, XB_DRIFT_MIN_UPDATES, XB_DRIFT_MIN_UPDATES_MULT, XB_DRIFT_REL_K, XB_DRIFT_SAMPLE_GUARD, XB_DRIFT_SAMPLE_K, XB_LIST_DENSITY,
 };
-use crate::params::slope_intercept_dual::{DEGEN_DJ_TOL, DEGEN_SHIFT_RUN, INFEAS_GUARD_SQRT_W, NOISE_C, NOISE_MIN_SQRT_W, PIVOT_ESCALATE_BELOW_DEFAULT, PIVOT_ESCALATE_FEW_UPDATES, ROLLBACK_MAX, UNCERTIFIED_MAX};
+use crate::params::slope_intercept_dual::{DEGEN_DJ_TOL, DEGEN_SHIFT_RUN, XB_CONSISTENCY_TOL, INFEAS_GUARD_SQRT_W, NOISE_C, NOISE_MIN_SQRT_W, PIVOT_ESCALATE_BELOW_DEFAULT, PIVOT_ESCALATE_FEW_UPDATES, ROLLBACK_MAX, UNCERTIFIED_MAX};
 
 /// `ENOMOTO_PROF_PHASES_EXT` 診断用のフェーズ別計時カウンタ(`simplex::prof_phases` の拡張版)。
 /// [`solve_slope_intercept_dual`] の主ループの時間がどこで使われるかを測る。値はすべてナノ秒または
@@ -861,8 +861,9 @@ thread_local! {
     /// このスレッドの直近の求解で [`refactorize`] が特異基底を報告したか
     /// ([`solve_slope_intercept_dual`] が安全モードでの解き直しを判断するのに使う)。
     static SINGULAR_BAILOUT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// 作業 #8 対処 5: このスレッドの直近の求解が、Farkas の証明の立たない実行不能の結論 (壊れた基底) で `None` を返したか。
-    static UNCERTIFIED_BAILOUT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// 作業 #8 対処 5: このスレッドの直近の求解が、壊れた基底 (Farkas の証明の立たない実行不能の結論、対処 6 の `x_B` の不整合) か
+    /// 反復上限で `None` を返したか (摂動を掛け直して解き直す)。
+    static RESTART_BAILOUT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// 作業 #5 M3: 主ループで確定した 1 ピボットの記録(巻き戻し用、[`rollback_pivots`])。
@@ -1057,6 +1058,20 @@ fn shift_degenerate_costs(std: &StdForm, nb_status: &[Option<NbStatus>], base: f
         }
     }
     n_shifted
+}
+
+/// 作業 #8 対処 6: `x_r`(FTRAN による `x_B[r]`)と `rho^T rhs`(`rho = B^-T e_r`、`rhs = b - N x_N`)のずれを、
+/// 内積の項の大きさの和 `max(1, Σ |rho_i rhs_i|)` に対する比で返す。
+#[inline(never)]
+fn xb_row_mismatch(rho: &[f64], rhs: &[f64], x_r: f64) -> f64 {
+    let (mut t, mut scale) = (0.0f64, 0.0f64);
+    for (&a, &b) in rho.iter().zip(rhs) {
+        if a != 0.0 {
+            t += a * b;
+            scale += (a * b).abs();
+        }
+    }
+    (x_r - t).abs() / scale.max(1.0)
 }
 
 /// 作業 #5 M3: 再分解が特異(`refactorize` が `None`)だったとき、直近の成功した再分解以降に確定したピボット
@@ -2290,15 +2305,15 @@ impl ColCache {
 /// 経路は変わらず、数値的に破綻した求解だけを救済する。
 pub fn solve_slope_intercept_dual(std: &StdForm, opts: &crate::types::LpOptions) -> Option<SimplexResult> {
     SINGULAR_BAILOUT.with(|f| f.set(false));
-    UNCERTIFIED_BAILOUT.with(|f| f.set(false));
+    RESTART_BAILOUT.with(|f| f.set(false));
     let res = solve_slope_intercept_dual_with(std, opts, false);
     let singular = SINGULAR_BAILOUT.with(|f| f.get());
-    let uncertified = UNCERTIFIED_BAILOUT.with(|f| f.get());
+    let uncertified = RESTART_BAILOUT.with(|f| f.get());
     if res.is_some() || !(singular || uncertified) {
         return res;
     }
     if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
-        eprintln!("DEBUG_EXT: {} bailout, retrying with safe_pivot and full cost perturbation", if uncertified { "uncertified-infeasibility" } else { "singular-basis" });
+        eprintln!("DEBUG_EXT: {} bailout, retrying with safe_pivot and full cost perturbation", if uncertified { "broken-basis/max-iters" } else { "singular-basis" });
     }
     // 作業 #8 対処 5: 解き直しでは費用摂動を既定の大きさに戻す (試験用の縮小 `ENOMOTO_T_PERTURB_*FACTOR` を無視する。
     // 既定の設定では摂動は変わらない)。
@@ -2696,6 +2711,8 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     let mut diag_shift_events = 0usize;
     let mut diag_shift_cols = 0usize;
     let mut diag_small_piv = [0usize; 3];
+    let xb_consistency_tol: f64 = tunable!("ENOMOTO_T_XB_CONSISTENCY_TOL", XB_CONSISTENCY_TOL, f64);
+    let mut diag_xb_mismatch = (0.0f64, 0usize);
     let (mut diag_near_degen, mut diag_near_run, mut diag_near_max_run) = ([0usize; 3], [0usize; 3], [0usize; 3]);
     // M1' 用の列の無限大ノルム `‖a_j‖∞`(初めて必要になったときに作る)。
     let mut col_inf_norm: Vec<f64> = Vec::new();
@@ -3086,7 +3103,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                     // 作業 #8 対処 5: 閾値を上げきっても証明が立たない(基底が数値的に壊れている)なら、最初の求解では
                     // 行を外して壊れた基底で続けず、摂動を掛け直して安全モードで最初から解き直す(`solve_slope_intercept_dual`)。
                     if !guard && !safe_pivot && uncertified_restart {
-                        UNCERTIFIED_BAILOUT.with(|f| f.set(true));
+                        RESTART_BAILOUT.with(|f| f.set(true));
                         if noise_diag {
                             eprintln!("DEBUG_EXT_BAILOUT: uncertified infeasibility at iter={} -> restart with re-perturbed costs", $iter);
                         }
@@ -3454,7 +3471,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                 prof_phases::report(wall_t0.elapsed().as_nanos() as usize);
             }
             if noise_diag {
-                eprintln!("DEBUG_EXT: degenerate_pivots={diag_degen} max_run={diag_degen_max_run} cost_shifts={diag_shift_events} shifted_cols={diag_shift_cols} small_pivots(1e-3,1e-5,1e-7)={diag_small_piv:?} near_degen(1e-10,1e-9,1e-8)={diag_near_degen:?} near_max_run={diag_near_max_run:?}");
+                eprintln!("DEBUG_EXT: degenerate_pivots={diag_degen} max_run={diag_degen_max_run} cost_shifts={diag_shift_events} shifted_cols={diag_shift_cols} small_pivots(1e-3,1e-5,1e-7)={diag_small_piv:?} xb_mismatch={:.3e}@{} near_degen(1e-10,1e-9,1e-8)={diag_near_degen:?} near_max_run={diag_near_max_run:?}", diag_xb_mismatch.0, diag_xb_mismatch.1);
             }
             if noise_diag && noise_on {
                 eprintln!(
@@ -3640,6 +3657,22 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
             prof_phases::STAT_TOUCHED_NONBASIC.fetch_add(touched_cols.iter().filter(|&&j| nb_status[j].is_some()).count(), Relaxed);
         }
 
+        // 作業 #8 対処 6: 再分解直後 (FT 更新 0 回) の段階 B の行 `r` で、LU の FTRAN による `x_B[r]` と BTRAN の `rho` による
+        // `rho^T (b - N x_N)` を照合する。両者が相対 `xb_consistency_tol` を超えてずれるなら基底は数値的に壊れている
+        // (pilot87 の誤 infeasible では -7.34 と +2.70)ので、最初の求解では摂動を掛け直して安全モードで解き直す。
+        if (xb_consistency_tol > 0.0 || noise_diag) && phase == Phase::B && lu.update_count() == 0 {
+            let rel = xb_row_mismatch(&rho, &rhs_inc_base, x_b_base[r]);
+            if rel > diag_xb_mismatch.0 {
+                diag_xb_mismatch = (rel, iter_idx);
+            }
+            if xb_consistency_tol > 0.0 && rel > xb_consistency_tol && !safe_pivot {
+                RESTART_BAILOUT.with(|f| f.set(true));
+                if noise_diag {
+                    eprintln!("DEBUG_EXT_BAILOUT: x_B[{r}] inconsistent with rho^T(b - N x_N) (rel {rel:.3e}) at iter={iter_idx} -> restart with re-perturbed costs");
+                }
+                return None;
+            }
+        }
         // Eligible 内の `Zero` 列(あれば BFRT を行わずこれにピボットする)。
         let mut zero_pick: Option<Cand>;
         // この反復で行 `r` を一時的にプールから外すか(`STUCK_ROW_MIN_PIVOT` 参照)。
@@ -5324,7 +5357,10 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     }
 
     // `max_iters` を使い切って後処理に達しなかった: 誤った `Infeasible` ではなく
-    // `None`(`NotSolved`)を返す。
+    // `None`(`NotSolved`)を返す。作業 #8 対処 5: 最初の求解なら摂動を掛け直して解き直す(退化の巡回など)。
+    if uncertified_restart && !safe_pivot {
+        RESTART_BAILOUT.with(|f| f.set(true));
+    }
     if profile_phases {
         prof_phases::report(wall_t0.elapsed().as_nanos() as usize);
     }
@@ -5780,7 +5816,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
                         eprintln!("DEBUG_EXT: polish infeas_guard: uncertified r={r} needed={needed:.3e} |rho|={rho_norm:.3e} count={polish_uncertified}");
                     }
                     if polish_uncertified > UNCERTIFIED_MAX || !sparse_lu::escalate_pivot_threshold() {
-                        UNCERTIFIED_BAILOUT.with(|f| f.set(true));
+                        RESTART_BAILOUT.with(|f| f.set(true));
                         return None;
                     }
                     lu = polish_refactor!();

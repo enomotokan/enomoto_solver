@@ -368,6 +368,12 @@ pub(crate) mod slope_intercept_dual {
     /// (真の費用で双対実行不能なら主単体法への引き継ぎで直す)。`ENOMOTO_T_DEGEN_SHIFT_RUN` で上書き、0 で無効。
     pub(crate) const DEGEN_SHIFT_RUN: usize = 10;
 
+    /// 作業 #8 対処 6: 再分解直後の行 `r` で FTRAN の `x_B[r]` と BTRAN の `rho^T (b - N x_N)` のずれが、内積の項の大きさの和
+    /// (1 以上) に対してこれを超えたら基底が数値的に壊れているとみなし、摂動を掛け直して解き直す (最初の求解のみ)。
+    /// 既定設定の Netlib 93 問での最大は pilotnov の 8.1e-13 (pilot87 の誤 infeasible の場面は -7.34 対 +2.70)。
+    /// `ENOMOTO_T_XB_CONSISTENCY_TOL` で上書き、0 で無効。
+    pub(crate) const XB_CONSISTENCY_TOL: f64 = 1e-6;
+
     /// `x_B(M)` の `M` 係数は厳密には 0 か 1 のオーダーなので、絶対値がこれ未満の係数は
     /// LU/更新の雑音とみなして 0 に丸める(`snap_slope`)。`ENOMOTO_T_X_B_SLOPE_NOISE` で上書き可。
     pub(crate) const X_B_SLOPE_NOISE: f64 = 1e-7;
