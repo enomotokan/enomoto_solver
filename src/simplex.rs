@@ -788,7 +788,14 @@ fn perturb_costs(std: &StdForm) -> Vec<f64> {
         h ^= h >> 31;
         let r = (h >> 40) as f64 / (1u64 << 24) as f64;
 
-        let xpert = (1.0 + r) * (pc[j].abs() + 1.0) * base; // この列の摂動量
+        let mut xpert = (1.0 + r) * (pc[j].abs() + 1.0) * base; // この列の摂動量
+        // 試験用 (作業 #8、既定は係数 1 = 無効): 摂動の大きさを変えて、摂動が小さい・無いときの正しさを試す
+        // (`scripts/singular_stress.py` の z0/p0 などの設定)。`ENOMOTO_T_PERTURB_FACTOR`: 全列の摂動を係数倍
+        // (0 で摂動なし)。`ENOMOTO_T_PERTURB_ZERO_COST_FACTOR`: 費用 0 の列だけ係数倍。
+        xpert *= tunable!("ENOMOTO_T_PERTURB_FACTOR", 1.0, f64);
+        if pc[j] == 0.0 {
+            xpert *= tunable!("ENOMOTO_T_PERTURB_ZERO_COST_FACTOR", 1.0, f64);
+        }
         if !hi.is_finite() {
             pc[j] += xpert;
         } else if !lo.is_finite() {

@@ -34,6 +34,20 @@ SETTINGS = {
     "s9": {"ENOMOTO_T_FT_MIN_PIVOT": "1e-13", "ENOMOTO_T_STUCK_ROW_MIN_PIVOT": "0", "ENOMOTO_DISABLE_UPDATE_VERIFY": "1", "ENOMOTO_PIVOT_THRESHOLD": "1e-3"},
 }
 
+# 作業 #8 (analysis/pilot87_false_infeasible_20260927_220123.md): 費用摂動を小さく・無くした設定。`n` 付きは作業 #5 の
+# 雑音判定 (M1/M1') も切る。摂動が無いと厳密な退化ピボットが続き、誤った infeasible を返していた。
+PERTURB_SETTINGS = {
+    "z0": {"ENOMOTO_T_PERTURB_ZERO_COST_FACTOR": "0"},
+    "z0n": {"ENOMOTO_T_PERTURB_ZERO_COST_FACTOR": "0", "ENOMOTO_T_NOISE_C": "0"},
+    "p0": {"ENOMOTO_T_PERTURB_FACTOR": "0"},
+    "p0n": {"ENOMOTO_T_PERTURB_FACTOR": "0", "ENOMOTO_T_NOISE_C": "0"},
+    "p01": {"ENOMOTO_T_PERTURB_FACTOR": "0.1"},
+    "p01n": {"ENOMOTO_T_PERTURB_FACTOR": "0.1", "ENOMOTO_T_NOISE_C": "0"},
+    "z01": {"ENOMOTO_T_PERTURB_ZERO_COST_FACTOR": "0.1"},
+    "basen": {"ENOMOTO_T_NOISE_C": "0"},
+}
+ALL_SETTINGS = {**SETTINGS, **PERTURB_SETTINGS}
+
 # 1 問を解いて状態・目的関数値・元問題の最大違反を出す子プロセス。
 WORKER = r"""
 import sys, json
@@ -94,18 +108,21 @@ def solve(mps, env_extra, timeout=300):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--settings", default=",".join(SETTINGS), help="カンマ区切りの設定名")
+    ap.add_argument("--settings", default=",".join(SETTINGS), help=f"カンマ区切りの設定名 (既定は作業 #5 の 9 設定。ほかに {','.join(PERTURB_SETTINGS)}、`perturb` で作業 #8 の全設定)")
     ap.add_argument("--jobs", type=int, default=3)
     ap.add_argument("--cache-dir", type=Path, default=REPO_ROOT / ".netlib_cache")
     ap.add_argument("--cases", action="store_true", help="irish-electricity (旧前処理) と pilot87 (閾値 1e-3) も解く")
     ap.add_argument("--mitt-dir", type=Path, default=Path("/home/user/mitt"))
+    ap.add_argument("--out", type=Path, help="各設定の問題ごとの結果 (状態・目的関数値・時間) を JSON で保存するファイル")
     args = ap.parse_args()
 
     files = sorted(glob.glob(str(args.cache_dir / "mps" / "*.mps")))
     ref = highs_ref(files, args.cache_dir)
     all_ok = True
-    for name in [s for s in args.settings.split(",") if s]:
-        env_extra = SETTINGS[name]
+    names = [s for s in args.settings.split(",") if s]
+    names = [n for s in names for n in (PERTURB_SETTINGS if s == "perturb" else [s])]
+    for name in names:
+        env_extra = ALL_SETTINGS[name]
         with ThreadPoolExecutor(args.jobs) as ex:
             results = dict(zip(files, ex.map(lambda f: solve(f, env_extra), files)))
         bad = []
@@ -115,6 +132,10 @@ def main():
             if not ok:
                 bad.append((os.path.basename(f), res["status"]))
         all_ok &= not bad
+        if args.out:
+            saved = json.loads(args.out.read_text()) if args.out.exists() else {}
+            saved[name] = {os.path.basename(f): res for f, res in results.items()}
+            args.out.write_text(json.dumps(saved, indent=1))
         print(f"{name:5s} {len(files) - len(bad)}/{len(files)} optimal & match HiGHS; bad={bad}", flush=True)
 
     if args.cases:
