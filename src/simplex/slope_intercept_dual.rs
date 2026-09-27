@@ -2174,72 +2174,9 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     // (無限精度では同値だがビット同一ではない)。`price_nb_end[i]` は行 `i` の分割境界
     // (フラグオフなら単に行末)。
     let price_nonbasic_only = env_str!("ENOMOTO_PRICE_NONBASIC_ONLY").map_or(true, |v| v != "0");
-    // S12: 分割の入れ替え用の位置索引。`col_entry_start[j]` は列 `j` の `std.cols` 要素順での開始位置、
-    // `price_pos_of_col_entry[col_entry_start[j] + k]` は `std.cols.col(j)[k]` の PRICE 行列内の位置(固定列は
-    // `u32::MAX`)、`col_entry_of_price[p]` はその逆写像(PRICE 要素 `p` の `std.cols` 要素番号)。
-    let mut col_entry_start: Vec<usize> = Vec::with_capacity(if price_nonbasic_only { n_total + 1 } else { 0 });
-    let mut price_pos_of_col_entry: Vec<u32> = Vec::new();
-    let mut col_entry_of_price: Vec<u32> = Vec::new();
-    // PRICE 専用の `A` の行優先コピー(一度だけ構築): `std.rows` から固定列 (`lb == ub`) を除き、
-    // 列添字 `u32` の SoA 形式(`price_start`/`price_col`/`price_val`)。各行は `std.rows.row(i)`
-    // の列順を(分割の各部分内で)保つので `a_p` の各ビットは不変。`price_nonbasic_only` の
-    // ときは各行を「非基底部 → 基底部」の順で書く。
-    let mut price_nb_end: Vec<usize> = Vec::with_capacity(m);
-    let (price_start, mut price_col, mut price_val) = {
-        let mut start: Vec<usize> = Vec::with_capacity(m + 1);
-        let mut col: Vec<u32> = Vec::with_capacity(std.rows.nnz());
-        let mut val: Vec<f64> = Vec::with_capacity(std.rows.nnz());
-        // 各 PRICE 要素の `std.cols` 要素番号を列ごとのカーソルで求める(行は昇順に訪れるので、
-        // 行ソート済みの列ではカーソルが常に一致位置にある)。
-        let mut cursor: Vec<u32> = Vec::new();
-        if price_nonbasic_only {
-            col_entry_start.push(0);
-            for j in 0..n_total {
-                col_entry_start.push(col_entry_start[j] + std.cols.col(j).len());
-            }
-            cursor = vec![0; n_total];
-            col_entry_of_price.reserve(std.rows.nnz());
-        }
-        start.push(0);
-        for i in 0..m {
-            if price_nonbasic_only {
-                for want_nonbasic in [true, false] {
-                    for (j, v) in std.rows.row(i) {
-                        if std.lb[j] == std.ub[j] || nb_status[j].is_some() != want_nonbasic {
-                            continue;
-                        }
-                        col.push(u32::try_from(j).ok()?);
-                        val.push(v);
-                        let c = std.cols.col(j);
-                        let cur = cursor[j] as usize;
-                        let k = if cur < c.len() && c.idx[cur].ix() == i { cur } else { c.iter().position(|(r, _)| r == i)? };
-                        cursor[j] = (k + 1) as u32;
-                        col_entry_of_price.push(u32::try_from(col_entry_start[j] + k).ok()?);
-                    }
-                    if want_nonbasic {
-                        price_nb_end.push(col.len());
-                    }
-                }
-            } else {
-                for (j, v) in std.rows.row(i) {
-                    if std.lb[j] == std.ub[j] {
-                        continue;
-                    }
-                    col.push(u32::try_from(j).ok()?);
-                    val.push(v);
-                }
-                price_nb_end.push(col.len());
-            }
-            start.push(col.len());
-        }
-        (start, col, val)
-    };
-    if price_nonbasic_only {
-        price_pos_of_col_entry = vec![u32::MAX; col_entry_start[n_total]];
-        for (p, &e) in col_entry_of_price.iter().enumerate() {
-            price_pos_of_col_entry[e as usize] = p as u32;
-        }
-    }
+    // S12: 分割の入れ替え用の位置索引と PRICE 専用の `A` の行優先コピー ([`build_price_matrix`])。
+    let PriceMatrix { start: price_start, col: mut price_col, val: mut price_val, nb_end: mut price_nb_end, col_entry_start, price_pos_of_col_entry: mut price_pos_of_col_entry, col_entry_of_price: mut col_entry_of_price } =
+        build_price_matrix(std, &nb_status, price_nonbasic_only)?;
     // S9(`ENOMOTO_PRICE_COLUMN=1`、既定オフ): `rho` が密(`ENOMOTO_PRICE_COLUMN_DENSITY`、
     // 既定 0.1 = HiGHS の切り替え点)なら列方向 PRICE を使う。`price_col_list` は非固定列の一覧。
     let price_by_column = tunable!("ENOMOTO_PRICE_COLUMN", 0u8, u8) != 0;
@@ -5710,6 +5647,99 @@ fn price_row_dense(a_p: &mut [f64], cols: &[u32], vals: &[f64], rv: f64) {
         let new = a_p[j] + rv * v;
         a_p[j] = if new == 0.0 { -0.0 } else { new };
     }
+}
+
+/// [`build_price_matrix`] の結果: PRICE 専用の `A` の行優先コピーと、分割 PRICE の位置索引。
+struct PriceMatrix {
+    /// 行 `i` の要素は `col/val[start[i]..start[i + 1]]`。
+    start: Vec<usize>,
+    /// 要素の列番号。
+    col: Vec<u32>,
+    /// 要素の値。
+    val: Vec<f64>,
+    /// 行 `i` の非基底部の終わり (`price_nonbasic_only` でなければ行末)。
+    nb_end: Vec<usize>,
+    /// 列 `j` の `std.cols` 要素順での開始位置 (`price_nonbasic_only` のときだけ)。
+    col_entry_start: Vec<usize>,
+    /// `std.cols` の要素番号 → PRICE 行列内の位置 (固定列は `u32::MAX`)。
+    price_pos_of_col_entry: Vec<u32>,
+    /// PRICE 要素 → `std.cols` の要素番号。
+    col_entry_of_price: Vec<u32>,
+}
+
+/// PRICE 専用の `A` の行優先コピーと分割 PRICE の位置索引を作る (主ループの前に一度だけ。主ループの関数の
+/// コードを小さく保つため別関数にしている)。添字が `u32` に収まらなければ `None`。
+#[inline(never)]
+fn build_price_matrix(std: &StdForm, nb_status: &[Option<NbStatus>], price_nonbasic_only: bool) -> Option<PriceMatrix> {
+    let m = std.n_rows;
+    let n_total = std.n_total;
+    // S12: 分割の入れ替え用の位置索引。`col_entry_start[j]` は列 `j` の `std.cols` 要素順での開始位置、
+    // `price_pos_of_col_entry[col_entry_start[j] + k]` は `std.cols.col(j)[k]` の PRICE 行列内の位置(固定列は
+    // `u32::MAX`)、`col_entry_of_price[p]` はその逆写像(PRICE 要素 `p` の `std.cols` 要素番号)。
+    let mut col_entry_start: Vec<usize> = Vec::with_capacity(if price_nonbasic_only { n_total + 1 } else { 0 });
+    let mut price_pos_of_col_entry: Vec<u32> = Vec::new();
+    let mut col_entry_of_price: Vec<u32> = Vec::new();
+    // PRICE 専用の `A` の行優先コピー(一度だけ構築): `std.rows` から固定列 (`lb == ub`) を除き、
+    // 列添字 `u32` の SoA 形式(`price_start`/`price_col`/`price_val`)。各行は `std.rows.row(i)`
+    // の列順を(分割の各部分内で)保つので `a_p` の各ビットは不変。`price_nonbasic_only` の
+    // ときは各行を「非基底部 → 基底部」の順で書く。
+    let mut price_nb_end: Vec<usize> = Vec::with_capacity(m);
+    let (price_start, price_col, price_val) = {
+        let mut start: Vec<usize> = Vec::with_capacity(m + 1);
+        let mut col: Vec<u32> = Vec::with_capacity(std.rows.nnz());
+        let mut val: Vec<f64> = Vec::with_capacity(std.rows.nnz());
+        // 各 PRICE 要素の `std.cols` 要素番号を列ごとのカーソルで求める(行は昇順に訪れるので、
+        // 行ソート済みの列ではカーソルが常に一致位置にある)。
+        let mut cursor: Vec<u32> = Vec::new();
+        if price_nonbasic_only {
+            col_entry_start.push(0);
+            for j in 0..n_total {
+                col_entry_start.push(col_entry_start[j] + std.cols.col(j).len());
+            }
+            cursor = vec![0; n_total];
+            col_entry_of_price.reserve(std.rows.nnz());
+        }
+        start.push(0);
+        for i in 0..m {
+            if price_nonbasic_only {
+                for want_nonbasic in [true, false] {
+                    for (j, v) in std.rows.row(i) {
+                        if std.lb[j] == std.ub[j] || nb_status[j].is_some() != want_nonbasic {
+                            continue;
+                        }
+                        col.push(u32::try_from(j).ok()?);
+                        val.push(v);
+                        let c = std.cols.col(j);
+                        let cur = cursor[j] as usize;
+                        let k = if cur < c.len() && c.idx[cur].ix() == i { cur } else { c.iter().position(|(r, _)| r == i)? };
+                        cursor[j] = (k + 1) as u32;
+                        col_entry_of_price.push(u32::try_from(col_entry_start[j] + k).ok()?);
+                    }
+                    if want_nonbasic {
+                        price_nb_end.push(col.len());
+                    }
+                }
+            } else {
+                for (j, v) in std.rows.row(i) {
+                    if std.lb[j] == std.ub[j] {
+                        continue;
+                    }
+                    col.push(u32::try_from(j).ok()?);
+                    val.push(v);
+                }
+                price_nb_end.push(col.len());
+            }
+            start.push(col.len());
+        }
+        (start, col, val)
+    };
+    if price_nonbasic_only {
+        price_pos_of_col_entry = vec![u32::MAX; col_entry_start[n_total]];
+        for (p, &e) in col_entry_of_price.iter().enumerate() {
+            price_pos_of_col_entry[e as usize] = p as u32;
+        }
+    }
+    Some(PriceMatrix { start: price_start, col: price_col, val: price_val, nb_end: price_nb_end, col_entry_start, price_pos_of_col_entry, col_entry_of_price })
 }
 
 /// 2 つの同長ベクトルの内積 `Σ a_i b_i`(先頭から順に加算)。
