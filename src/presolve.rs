@@ -46,7 +46,7 @@ use crate::sparse::{FaerCsr, CsrRowBuilder, csr_from_rows, csr_row_vec, csr_rows
 use crate::types::{ConstraintRow, RowSense, VariableData};
 use scaling::Scaling;
 use crate::params::presolve::{
-    DOUBLETON_STRIKES, DUALPROPAGATE_STRIKES, EQPROP_FIXPOINT, EQPROP_ROUNDS, PRESOLVE_FIXPOINT, PROPAGATION_FIXPOINT, PRESOLVE_WORK_BUDGET, EQPROP_SKIP_IDLE, FIXPOINT_RELTOL, INEQ_SINGLETON_LARGE, LARGE_PRESOLVE_MIN_ROWS, PARALLELCOLS_STRIKES, PRESOLVE_EXTRA_ROUNDS_LARGE, PROPAGATION_PASSES_LARGE, PRESOLVE_SPLIT_G, REDEQ_MODE,
+    DOUBLETON_STRIKES, DUALPROPAGATE_STRIKES, EQPROP_FIXPOINT, EQPROP_ROUNDS, OPPOSITE_PAIR_EQUALITY, PRESOLVE_FIXPOINT, PROPAGATION_FIXPOINT, PRESOLVE_WORK_BUDGET, EQPROP_SKIP_IDLE, FIXPOINT_RELTOL, INEQ_SINGLETON_LARGE, LARGE_PRESOLVE_MIN_ROWS, PARALLELCOLS_STRIKES, PRESOLVE_EXTRA_ROUNDS_LARGE, PROPAGATION_PASSES_LARGE, PRESOLVE_SPLIT_G, REDEQ_MODE,
     ROUND_STRUCT_STOP, ROUND_STRUCT_STOP_FIXPOINT,
 };
 
@@ -508,6 +508,37 @@ pub fn run_extended(
             dbg_eq_converged = Some(eq.converged);
             if tunable!("ENOMOTO_T_EQPROP_SKIP_IDLE", EQPROP_SKIP_IDLE, usize) != 0 && eq.forcing_rows == 0 && eq.fixed_cols == 0 && eq.tightened == 0 {
                 eqprop_idle = true;
+            }
+        }
+
+        // 符号を反転しただけで右辺が釣り合う不等式行の組 (等式を 2 本の `<=` で表したもの) を等式 1 本にして A へ移す
+        // (不動点モードのみ、`OPPOSITE_PAIR_EQUALITY`)。
+        if fixpoint_mode && tunable!("ENOMOTO_T_OPPOSITE_PAIR_EQUALITY", OPPOSITE_PAIR_EQUALITY, usize) != 0 {
+            let pairs = timed_step!("oppositepairs", redundancy::find_opposite_equality_pairs(&cur_real_rows, &cur_real_rhs, crate::params::presolve::PROPAGATE_EPS));
+            if debug_rounds && !pairs.is_empty() {
+                eprintln!("PRESOLVE_OPPOSITE_PAIRS round={} pairs={}", round_idx, pairs.len());
+            }
+            if !pairs.is_empty() {
+                let mut a_rows: Vec<Vec<(usize, f64)>> = csr_rows(&a);
+                // G から取り除く多変数行の印 (等式にした行とその相方)。
+                let mut drop = vec![false; cur_real_rows.len()];
+                for &(p, q) in &pairs {
+                    a_rows.push(cur_real_rows[p].clone());
+                    b.push(cur_real_rhs[p]);
+                    drop[p] = true;
+                    drop[q] = true;
+                }
+                a = csr_from_rows(&a_rows, n);
+                let mut kept_rows = Vec::with_capacity(cur_real_rows.len());
+                let mut kept_rhs = Vec::with_capacity(cur_real_rhs.len());
+                for (i, (row, rhs)) in cur_real_rows.into_iter().zip(cur_real_rhs.into_iter()).enumerate() {
+                    if !drop[i] {
+                        kept_rows.push(row);
+                        kept_rhs.push(rhs);
+                    }
+                }
+                cur_real_rows = kept_rows;
+                cur_real_rhs = kept_rhs;
             }
         }
 

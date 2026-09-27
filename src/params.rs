@@ -812,6 +812,14 @@ pub(crate) mod presolve {
     /// 30 → 6 本に減り前処理後が 421 → 445 列、Netlib 24 問で出力が変わり etamacro +19%。既定は無効。
     pub(crate) const PROPAGATION_FIXPOINT: usize = 0;
 
+    /// 不動点モードで、符号を反転しただけで右辺が釣り合う多変数の `<=` 行の組 (`a.x <= u` と `-a.x <= -u`) を
+    /// 等式 `a.x = u` 1 本にして等式系へ移すか (`ENOMOTO_T_OPPOSITE_PAIR_EQUALITY`、0 = しない)。
+    /// 各外側ラウンドの伝播の直後に、ハッシュで O(非零数) で探す (`redundancy::find_opposite_equality_pairs`)。
+    /// 等式を 2 本の不等式のまま残すと、標準形では 2 本のスラックが常に退化した組になる。irish-electricity では
+    /// 約 230 列の行 1 組がこの形で残り (従来の 20 ラウンド + 延長では途中の順序の違いで等式のまま残っていた)、
+    /// 72,104 行 → 72,105 行、116 s → 144 s になっていた。幅が正の組 (範囲制約) は対象外。
+    pub(crate) const OPPOSITE_PAIR_EQUALITY: usize = 1;
+
     /// 不動点モード ([`PRESOLVE_FIXPOINT`]) で等式行伝播 (`propagate_equalities`) も不動点まで回すか
     /// (`ENOMOTO_T_EQPROP_FIXPOINT`、0 = 従来どおり `PROPAGATION_PASSES` パスまで)。等式行伝播は行を消さず、
     /// 等式にしか現れない列に有限の境界を与えるだけの処理で、パスを増やして境界を与えると自由列 (implied free) の
