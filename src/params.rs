@@ -94,11 +94,13 @@ pub(crate) mod simplex {
     /// 前処理での Ruiz スケーリングの反復回数。
     pub(crate) const RUIZ_ITERS: usize = 10;
 
-    /// 前処理 1 ラウンドあたりの制約伝播 (上下限の強化) のパス数。
+    /// 前処理 1 ラウンドあたりの制約伝播 (上下限の強化) のパス数。伝播の上下限はラウンドをまたいで引き継ぐので、
+    /// 不動点モード (`presolve::PRESOLVE_FIXPOINT`) では伝播を他の段と交互に回す間隔であって、連鎖の長さの上限ではない。
     pub(crate) const PROPAGATION_PASSES: usize = 2;
 
     /// `presolve::run_extended` の外側ラウンド (propagate → dualfix → rowsingleton →
     /// doubleton → colsingleton) の最大回数。何も変化しなくなれば早く止まる。
+    /// 従来モード (`presolve::PRESOLVE_FIXPOINT = 0`) だけで使う (既定の不動点モードでは作業量の予算で打ち切る)。
     pub(crate) const PRESOLVE_ROUNDS: usize = 20;
 
     /// 外側ラウンド 1 回あたりの rowsingleton ⇔ colsingleton の内側反復の最大回数。
@@ -767,7 +769,7 @@ pub(crate) mod presolve {
     /// (`ENOMOTO_T_DUALPROPAGATE_STRIKES`)。
     pub(crate) const DUALPROPAGATE_STRIKES: usize = 1;
 
-    /// 大きな問題 (等式行 + 多変数の不等式行が [`LARGE_PRESOLVE_MIN_ROWS`] 以上) で、外側ラウンドを上限
+    /// 従来モード (`PRESOLVE_FIXPOINT = 0`) だけで使う。大きな問題 (等式行 + 多変数の不等式行が [`LARGE_PRESOLVE_MIN_ROWS`] 以上) で、外側ラウンドを上限
     /// (`PRESOLVE_ROUNDS`、20) まで回しても不動点に達しなかったときに続ける延長ラウンドの数
     /// (`ENOMOTO_T_PRESOLVE_EXTRA_ROUNDS_LARGE`、0 = 延長しない)。延長中は上下限伝播のパス数を
     /// [`PROPAGATION_PASSES_LARGE`] に上げる。最後のラウンドで行・列の縮約 (A の行数・G の多変数行数・固定列数・
@@ -782,7 +784,7 @@ pub(crate) mod presolve {
     /// 数値的に破綻する)。伝播 20 パスなら数ラウンドで不動点に達する。
     pub(crate) const PRESOLVE_EXTRA_ROUNDS_LARGE: usize = 20;
 
-    /// 延長ラウンド ([`PRESOLVE_EXTRA_ROUNDS_LARGE`]) で 1 回の上下限伝播に許すパス数の下限
+    /// 従来モードだけで使う。延長ラウンド ([`PRESOLVE_EXTRA_ROUNDS_LARGE`]) で 1 回の上下限伝播に許すパス数の下限
     /// (`ENOMOTO_T_PROPAGATION_PASSES_LARGE`)。伝播は行も上下限も変わらなくなったパスで打ち切るので、収束済みの
     /// 部分の手間は増えない。最初から全ラウンドで 20 パスにすると fome13 (18 ラウンドで収束) の経路が変わって
     /// +15% になったので、延長時だけにする。
@@ -790,13 +792,15 @@ pub(crate) mod presolve {
 
     /// 前処理を不動点まで回すか (`ENOMOTO_T_PRESOLVE_FIXPOINT`、0 = 従来の上限付き: 外側 `PRESOLVE_ROUNDS` ラウンド
     /// + 大きな問題 ([`LARGE_PRESOLVE_MIN_ROWS`]) の延長 [`PRESOLVE_EXTRA_ROUNDS_LARGE`])。1 なら外側ラウンドの数に
-    /// 固定の上限を置かず、不動点 (行・列・消去ログが変わらず、上下限の変化が相対 [`FIXPOINT_RELTOL`] 以下) に
-    /// 達するか、作業量の予算 [`PRESOLVE_WORK_BUDGET`] を使い切るまで回す。問題の規模による場合分けはしない。
+    /// 固定の上限を置かず、行・列の縮約の不動点 (A の行数・G の多変数行数・固定列数・消去ログ長が前ラウンドと同じ。
+    /// [`ROUND_STRUCT_STOP_FIXPOINT`]) か、作業量の予算 [`PRESOLVE_WORK_BUDGET`] を使い切るまで回す。上下限の値の
+    /// 変化だけでは続けない (従来どおりの相対 [`FIXPOINT_RELTOL`] 以下の判定も残る)。問題の規模による場合分けはしない。
     ///
     /// 上下限伝播は 1 ラウンド `PROPAGATION_PASSES` パスのまま、他の段と交互に回す ([`PROPAGATION_FIXPOINT`] 参照)。
     /// 伝播の上下限はラウンドをまたいで引き継ぐので、長い連鎖もラウンドを重ねれば最後まで進む
     /// (irish-electricity: 45 ラウンドで不動点。従来は 20 ラウンドで打ち切られ、延長で 24 ラウンド)。
-    /// Netlib 93 問はすべて 20 ラウンド以内に不動点に達していたので、前処理の出力は従来とビット単位で同じ。
+    /// Netlib 93 問はすべて 20 ラウンド以内に止まっていたので、ラウンド数の上限をなくしても出力は変わらない
+    /// (変わるのは上下限だけのラウンドを省く 15 問、[`ROUND_STRUCT_STOP_FIXPOINT`] 参照)。
     pub(crate) const PRESOLVE_FIXPOINT: usize = 1;
 
     /// 不動点モードで 1 回の上下限伝播も不動点まで回すか (`ENOMOTO_T_PROPAGATION_FIXPOINT`、0 = 1 ラウンド
@@ -823,7 +827,8 @@ pub(crate) mod presolve {
 
     /// 大きな問題向けの前処理の設定 ([`PRESOLVE_EXTRA_ROUNDS_LARGE`]、[`INEQ_SINGLETON_LARGE`]) を使う行数の下限
     /// (等式行 + 多変数の不等式行、`ENOMOTO_T_LARGE_PRESOLVE_MIN_ROWS`、0 = 無効)。Netlib (最大 6,071 行) の経路を
-    /// 変えないよう、他の大問題向け経路と同じ 1 万行。
+    /// 変えないよう、他の大問題向け経路と同じ 1 万行。不動点モード (既定) では外側ラウンドの延長には使わず、
+    /// [`INEQ_SINGLETON_LARGE`] の判定だけに使う。
     pub(crate) const LARGE_PRESOLVE_MIN_ROWS: usize = 10_000;
 
     /// 大きな問題 ([`LARGE_PRESOLVE_MIN_ROWS`] 以上) では不等式行の列シングルトン (`ineqsingleton`) を既定で有効にする
@@ -831,6 +836,9 @@ pub(crate) mod presolve {
     /// (`0` で無効、それ以外で有効)。Netlib の A/B (seba_presolve_20260923.md) では recipe +40%・scfxm2 +15% と外側
     /// ラウンドの周回が増える小さな問題で退行したので大きな問題だけ。irish-electricity では列 41K → 36.6K
     /// (HiGHS の縮約後 36.5K とほぼ同じ) になり、完走時間が 263 s → 120 s (伝播パス 20 と併用、4 本並走)。
+    /// 不動点モードで全問題に広げる A/B (2026-09-27) でも、Netlib 21 問で前処理後が小さくなる (seba 121x226 → 15x17、
+    /// ship 系で行 -8〜-22%) 一方、400 回の最小時間で recipe 437 → 482 µs (+10〜36%)・scfxm2 10.9 → 13.2 ms (+21%)、
+    /// `ab_bench` で nesm +11%、Netlib 幾何平均 +0.8% と退行したので、大きな問題だけのまま。
     pub(crate) const INEQ_SINGLETON_LARGE: usize = 1;
 
     /// doubleton がこの回数連続で何も消去しなければ以降のラウンドで停止する
@@ -844,6 +852,15 @@ pub(crate) mod presolve {
     /// 構造 (行数・固定列数・ログ長) が前ラウンドと同じなら上下限の変化を無視して
     /// ラウンドを打ち切るか (0 = しない。`ENOMOTO_T_ROUND_STRUCT_STOP`)。
     pub(crate) const ROUND_STRUCT_STOP: usize = 0;
+
+    /// 不動点モード (`PRESOLVE_FIXPOINT = 1`) での [`ROUND_STRUCT_STOP`] の既定値 (`ENOMOTO_T_ROUND_STRUCT_STOP` で
+    /// 両モードとも上書きできる)。1 = 行・列の縮約 (A の行数・G の多変数行数・固定列数・消去ログ長) が止まった
+    /// ラウンドで終了し、上下限の値の変化だけでは続けない。外側ラウンドの上限をなくすと、巡回的な行構造で上下限だけが
+    /// 少しずつ締まり続ける問題 (neos: 1 ラウンド目から構造不変のまま、FIXPOINT_RELTOL の判定では 33 ラウンド) で
+    /// 前処理が長引き、経路も変わる (neos 494 → 541 s。この打ち切りでは 2 ラウンドで終わり 517 s)。Netlib では
+    /// 上下限だけのラウンドを省いた 15 問の出力が変わる (agg が 1 行 1 列大きくなる以外はサイズ同一) が、
+    /// `ab_bench` で幾何平均 −1.05%、10% 超の退行なし (forplan −13.5%・agg −14.4%・pilotnov −8.5%)。
+    pub(crate) const ROUND_STRUCT_STOP_FIXPOINT: usize = 1;
 
     /// 外側ラウンドの不動点判定で、上下限の変化を進展とみなす相対閾値。
     /// `|u - v| <= この値 * (1 + max(|u|, |v|))` の変化は無視する (`ENOMOTO_T_FIXPOINT_RELTOL`)。

@@ -47,7 +47,7 @@ use crate::types::{ConstraintRow, RowSense, VariableData};
 use scaling::Scaling;
 use crate::params::presolve::{
     DOUBLETON_STRIKES, DUALPROPAGATE_STRIKES, EQPROP_FIXPOINT, EQPROP_ROUNDS, PRESOLVE_FIXPOINT, PROPAGATION_FIXPOINT, PRESOLVE_WORK_BUDGET, EQPROP_SKIP_IDLE, FIXPOINT_RELTOL, INEQ_SINGLETON_LARGE, LARGE_PRESOLVE_MIN_ROWS, PARALLELCOLS_STRIKES, PRESOLVE_EXTRA_ROUNDS_LARGE, PROPAGATION_PASSES_LARGE, PRESOLVE_SPLIT_G, REDEQ_MODE,
-    ROUND_STRUCT_STOP,
+    ROUND_STRUCT_STOP, ROUND_STRUCT_STOP_FIXPOINT,
 };
 
 /// モデルの変数・制約から `(A, b, G, h)` を組み立てる。
@@ -884,9 +884,10 @@ pub fn run_extended(
             h = rh;
         }
 
-        // `ROUND_STRUCT_STOP` 有効時 (既定オフ): 構造 (A の行数, G の多変数行数, 固定列数,
-        // ログ長) が前ラウンドと同じなら、上下限の値の変化を無視して打ち切る。
-        let struct_stop = if tunable!("ENOMOTO_T_ROUND_STRUCT_STOP", ROUND_STRUCT_STOP, usize) != 0 {
+        // 構造 (A の行数, G の多変数行数, 固定列数, ログ長) が前ラウンドと同じなら、上下限の値の変化を無視して
+        // 打ち切る (不動点モードでは既定で有効 `ROUND_STRUCT_STOP_FIXPOINT`、従来モードでは `ROUND_STRUCT_STOP`)。
+        let struct_stop_default = if fixpoint_mode { ROUND_STRUCT_STOP_FIXPOINT } else { ROUND_STRUCT_STOP };
+        let struct_stop = if tunable!("ENOMOTO_T_ROUND_STRUCT_STOP", struct_stop_default, usize) != 0 {
             let g_multi = if g_split {
                 cur_real_rows.len()
             } else {
