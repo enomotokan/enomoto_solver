@@ -109,7 +109,7 @@ pub fn merge_parallel_columns_if_any(n: usize, a: &FaerCsr, real_rows: &[Vec<(us
 
     // この呼び出し内だけの通し行番号: `a` の行が 0..n_a_rows、`real_rows` がその後。
     // 圧縮列形式へ直接流し込む。行順に出力するので各列は行番号昇順になる (署名計算の前提)。
-    let columns = CscMat::from_entry_stream(n_a_rows + real_rows.len(), n, |emit| {
+    let columns: CscMat = CscMat::from_entry_stream(n_a_rows + real_rows.len(), n, |emit| {
         for i in 0..n_a_rows {
             for (&j, &v) in ar.col_indices_of_row_raw(i).iter().zip(ar.values_of_row(i)) {
                 if v != 0.0 {
@@ -129,9 +129,9 @@ pub fn merge_parallel_columns_if_any(n: usize, a: &FaerCsr, real_rows: &[Vec<(us
     // 正規化した署名 (行番号, 係数/先頭係数 のビット列) で列を群に分ける。
     // 署名を実体化せず、安価な乗算ハッシュで候補群を引き、群の代表列の署名を再計算して要素ごとに厳密比較する。
     // sig_hash(col, inv): 列 col を inv (= 1/先頭係数) 倍した署名のハッシュ
-    let sig_hash = |col: &[(usize, f64)], inv: f64| -> u64 {
+    let sig_hash = |col: crate::sparse::SpSlice<'_>, inv: f64| -> u64 {
         let mut hash = col.len() as u64;
-        for &(row_id, v) in col {
+        for (row_id, v) in col {
             hash = (hash.rotate_left(5) ^ row_id as u64).wrapping_mul(0x517c_c1b7_2722_0a95);
             hash = (hash.rotate_left(5) ^ (v * inv).to_bits()).wrapping_mul(0x517c_c1b7_2722_0a95);
         }
@@ -150,15 +150,15 @@ pub fn merge_parallel_columns_if_any(n: usize, a: &FaerCsr, real_rows: &[Vec<(us
             continue;
         }
         // 先頭係数の逆数 (正規化用)
-        let inv = 1.0 / col[0].1;
+        let inv = 1.0 / col.val[0];
         let hash = sig_hash(col, inv);
         let head = heads.get(&hash).copied().unwrap_or(usize::MAX);
         let mut found = None;
         let mut gid = head;
         while gid != usize::MAX {
             let rep = columns.col(group_members[gid][0]);
-            let rep_inv = 1.0 / rep[0].1;
-            if rep.len() == col.len() && rep.iter().zip(col).all(|(&(ri, rv), &(ci, cv))| ri == ci && (rv * rep_inv).to_bits() == (cv * inv).to_bits()) {
+            let rep_inv = 1.0 / rep.val[0];
+            if rep.len() == col.len() && rep.iter().zip(col).all(|((ri, rv), (ci, cv))| ri == ci && (rv * rep_inv).to_bits() == (cv * inv).to_bits()) {
                 found = Some(gid);
                 break;
             }
@@ -198,7 +198,7 @@ pub fn merge_parallel_columns_if_any(n: usize, a: &FaerCsr, real_rows: &[Vec<(us
             continue;
         }
         // kept_lead: 併合先の先頭係数 / cur_lb, cur_ub: 併合を重ねた時点での z の範囲
-        let kept_lead = columns.col(kept)[0].1;
+        let kept_lead = columns.col(kept).val[0];
         let mut cur_lb = new_lb[kept];
         let mut cur_ub = new_ub[kept];
         let mut any_merged = false;
@@ -206,7 +206,7 @@ pub fn merge_parallel_columns_if_any(n: usize, a: &FaerCsr, real_rows: &[Vec<(us
             if used[var] {
                 continue;
             }
-            let var_lead = columns.col(var)[0].1;
+            let var_lead = columns.col(var).val[0];
             let s = var_lead / kept_lead;
             // 比例コスト条件 c_var == s * c_kept を相対許容誤差で判定
             let predicted_c_var = s * new_c[kept];

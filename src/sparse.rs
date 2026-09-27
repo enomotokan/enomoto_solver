@@ -6,18 +6,20 @@
 //!
 //! # 記憶形式
 //!
-//! 行列はどちらも古典的な「オフセット + 平坦な要素列」の圧縮形:
+//! 行列はどちらも古典的な「オフセット + 平坦な要素列」の圧縮形で、要素の添字と値を別配列 (SoA) に持つ:
 //!
 //! ```text
-//!   offsets: [0, o1, o2, ..., nnz]     (外側の長さ + 1 個)
-//!   entries: [(inner, value), ...]     (nnz 個)
+//!   offsets: [0, o1, o2, ..., nnz]     (外側の長さ + 1 個、usize)
+//!   idx:     [inner, ...]              (nnz 個、添字型 I = u16 / u32 / usize)
+//!   val:     [value, ...]              (nnz 個、f64)
 //! ```
 //!
-//! 外側の添字 `k` の非零は `entries[offsets[k]..offsets[k+1]]`。外側が行なら CSR
+//! 外側の添字 `k` の非零は `idx/val[offsets[k]..offsets[k+1]]`。外側が行なら CSR
 //! (`inner` は列番号)、列なら CSC (`inner` は行番号) で、違いはそれだけなので
-//! 両者は同じ [`Compressed`] 構造体を共有する。添字と値は並列配列ではなく
-//! `(inner, value)` の組で交互に持つ (利用側は常に両方を一緒に読むため)。
-//! `row()`/`col()` は `&[(usize, f64)]` をそのまま返す。
+//! 両者は同じ [`Compressed`] 構造体を共有する。添字の型 `I` ([`SpIdx`]) は型引数で、
+//! 既定は `usize` (1 要素 16 B)。単体法の標準形は `u32` (12 B) を使う。
+//! `row()`/`col()` は添字と値のスライスの組 [`SpSlice`] を返し、反復すると
+//! `(usize, f64)` を返す。
 //!
 //! どちらも構築後は不変 (挿入不可)。行列を書き換える前処理は
 //! `Vec<Vec<(usize, f64)>>` で作業し、最後に [`CsrMat`] に固める。
@@ -27,7 +29,7 @@
 //!   - [`FaerCsr`] は faer の `SparseRowMat` の別名。`presolve` の公開インターフェースと、
 //!     faer の Cholesky に渡す `interior_point::kkt` で使う。
 //!   - [`CsrMat`]/[`CscMat`] は自前の型。単体法の内側ループで行・列を
-//!     `&[(usize, f64)]` として直接読みたい場合や、同じ行列の CSR と CSC を並べて
+//!     添字と値のスライス ([`SpSlice`]) として直接読みたい場合や、同じ行列の CSR と CSC を並べて
 //!     持ちたい場合に使う。
 //!
 //! 両者の橋渡しは [`csr_rows`]、[`CsrMat::from_faer`]、[`CsrMat::to_faer`] など。
@@ -52,9 +54,8 @@ use rayon::prelude::*;
 
 /// 長さ `len` の疎ベクトル。非零を `(添字, 値)` の組で、作られた順のまま持つ。
 ///
-/// 中身はただの `Vec<(usize, f64)>` で、[`SparseVec::entries`] はそのスライスを返す
-/// (`CsrMat::row` / `CscMat::col` や `simplex::lu` の疎右辺 FTRAN と同じ形なので
-/// 変換が要らない)。この型が加えるのは、密バッファとの scatter/gather、密ベクトルとの
+/// 中身はただの `Vec<(usize, f64)>` で、[`SparseVec::entries`] はそのスライスを返す。
+/// この型が加えるのは、密バッファとの scatter/gather、密ベクトルとの
 /// 内積、刈り込み、疎/密の切り替え判定に使う密度などの演算。
 ///
 /// **並び順と重複は作り手の責任。** ここでは勝手にソートも重複除去もしない。
@@ -706,6 +707,13 @@ impl SparseAccum {
         }
     }
 
+    /// `self += alpha * entries` (`(添字, 値)` の反復子版。[`SpSlice`] 用)。
+    pub fn axpy_iter(&mut self, alpha: f64, entries: impl IntoIterator<Item = (usize, f64)>) {
+        for (i, v) in entries {
+            self.add(i, alpha * v);
+        }
+    }
+
     /// 累積結果を添字順の `(添字, 値)` 列として出力する。`|v| <= tol` は捨てる
     /// (`0.0` なら厳密な 0 だけ、`f64::NEG_INFINITY` なら全要素を残す)。
     /// その後は次の [`Self::load`] / [`Self::reset`] に使える。
@@ -750,33 +758,251 @@ pub fn axpy_row(accum: &mut SparseAccum, row: &[(usize, f64)], pivot: &[(usize, 
 }
 
 // ===========================================================================
+// 要素の添字型
+// ===========================================================================
+
+/// 疎行列の要素の添字 (行番号・列番号) の整数型 (`u16`/`u32`/`usize`)。添字と値は別配列に
+/// 持つので、1 要素は `u16` で 10 B、`u32` で 12 B、`usize` で 16 B。単体法の標準形は `u32`
+/// (`simplex::AIdx`)、前処理の作業用は既定の `usize`。
+///
+/// 添字の読み出し ([`Self::ix`]) は `as usize` の零拡張だけで、どの型でも
+/// 演算順序・結果は同じ (経路不変)。
+pub trait SpIdx: Copy + Default + Eq + Ord + Send + Sync + std::fmt::Debug + 'static {
+    /// この型で持てる次元の上限 (添字は `0..MAX_DIM`)。
+    const MAX_DIM: usize;
+    /// 添字を `usize` にする。
+    fn ix(self) -> usize;
+    /// `usize` の添字をこの型にする (`i < MAX_DIM` は呼び出し側の責任。デバッグビルドでのみ検査)。
+    fn from_ix(i: usize) -> Self;
+}
+
+impl SpIdx for u16 {
+    const MAX_DIM: usize = u16::MAX as usize;
+    #[inline(always)]
+    fn ix(self) -> usize {
+        self as usize
+    }
+    #[inline(always)]
+    fn from_ix(i: usize) -> Self {
+        debug_assert!(i < Self::MAX_DIM, "index {i} does not fit in u16");
+        i as u16
+    }
+}
+
+impl SpIdx for u32 {
+    const MAX_DIM: usize = u32::MAX as usize;
+    #[inline(always)]
+    fn ix(self) -> usize {
+        self as usize
+    }
+    #[inline(always)]
+    fn from_ix(i: usize) -> Self {
+        debug_assert!(i < Self::MAX_DIM, "index {i} does not fit in u32");
+        i as u32
+    }
+}
+
+impl SpIdx for usize {
+    const MAX_DIM: usize = usize::MAX;
+    #[inline(always)]
+    fn ix(self) -> usize {
+        self
+    }
+    #[inline(always)]
+    fn from_ix(i: usize) -> Self {
+        i
+    }
+}
+
+/// 圧縮行列の 1 本分 (行または列) の要素: 添字と値の同じ長さのスライス。
+/// 反復すると `(添字, 値)` を `usize` の添字で返す。
+#[derive(Clone, Copy, Debug)]
+pub struct SpSlice<'a, I: SpIdx = usize> {
+    /// 要素の添字。
+    pub idx: &'a [I],
+    /// 要素の値 (`idx` と同じ長さ)。
+    pub val: &'a [f64],
+}
+
+impl<'a, I: SpIdx> SpSlice<'a, I> {
+    /// 添字と値のスライスから作る (同じ長さであること)。
+    #[inline(always)]
+    pub fn new(idx: &'a [I], val: &'a [f64]) -> Self {
+        debug_assert_eq!(idx.len(), val.len());
+        SpSlice { idx, val }
+    }
+    /// 要素数。
+    #[inline(always)]
+    pub fn len(&self) -> usize {
+        self.idx.len()
+    }
+    /// 要素がないか。
+    #[inline(always)]
+    pub fn is_empty(&self) -> bool {
+        self.idx.is_empty()
+    }
+    /// `(添字, 値)` の反復子。
+    #[inline(always)]
+    pub fn iter(&self) -> SpIter<'a, I> {
+        SpIter { idx: self.idx.iter(), val: self.val.iter() }
+    }
+    /// `(添字, 値)` の `Vec`。
+    pub fn to_vec(&self) -> Vec<(usize, f64)> {
+        self.iter().collect()
+    }
+    /// 密ベクトルとの内積 (先頭から順に加算。[`sparse_dot_dense`] と同じ順序)。
+    #[inline]
+    pub fn dot_dense(&self, dense: &[f64]) -> f64 {
+        self.iter().map(|(i, v)| v * dense[i]).sum()
+    }
+    /// `dense += alpha * self` ([`sparse_axpy_dense`] と同じ)。
+    #[inline]
+    pub fn axpy_dense(&self, alpha: f64, dense: &mut [f64]) {
+        for (i, v) in self.iter() {
+            dense[i] += alpha * v;
+        }
+    }
+    /// `out` を 0 クリアしてから書き込み、密ベクトルにする ([`scatter_dense`] と同じ)。
+    #[inline]
+    pub fn scatter_dense(&self, out: &mut [f64]) {
+        out.iter_mut().for_each(|v| *v = 0.0);
+        for (i, v) in self.iter() {
+            out[i] = v;
+        }
+    }
+}
+
+/// [`SpSlice`] の反復子。
+#[derive(Clone)]
+pub struct SpIter<'a, I: SpIdx> {
+    idx: std::slice::Iter<'a, I>,
+    val: std::slice::Iter<'a, f64>,
+}
+
+impl<'a, I: SpIdx> Iterator for SpIter<'a, I> {
+    type Item = (usize, f64);
+    #[inline(always)]
+    fn next(&mut self) -> Option<(usize, f64)> {
+        let i = self.idx.next()?;
+        // `idx` と `val` は同じ長さ
+        let v = self.val.next()?;
+        Some((i.ix(), *v))
+    }
+    #[inline(always)]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.idx.size_hint()
+    }
+}
+
+impl<'a, I: SpIdx> ExactSizeIterator for SpIter<'a, I> {}
+
+impl<'a, I: SpIdx> IntoIterator for SpSlice<'a, I> {
+    type Item = (usize, f64);
+    type IntoIter = SpIter<'a, I>;
+    #[inline(always)]
+    fn into_iter(self) -> SpIter<'a, I> {
+        self.iter()
+    }
+}
+
+/// [`SpSlice`] の持ち主版: 添字と値の別配列に要素を積む作業バッファ (単体法の疎な右辺用)。
+#[derive(Clone, Debug, Default)]
+pub struct SpBuf<I: SpIdx = usize> {
+    /// 要素の添字。
+    idx: Vec<I>,
+    /// 要素の値。
+    val: Vec<f64>,
+}
+
+impl<I: SpIdx> SpBuf<I> {
+    /// 要素 `cap` 個分の領域を予約した空のバッファ。
+    pub fn with_capacity(cap: usize) -> Self {
+        SpBuf { idx: Vec::with_capacity(cap), val: Vec::with_capacity(cap) }
+    }
+    /// 全要素を捨てる (領域は残す)。
+    #[inline]
+    pub fn clear(&mut self) {
+        self.idx.clear();
+        self.val.clear();
+    }
+    /// 要素 `(i, v)` を末尾に追加する。
+    #[inline]
+    pub fn push(&mut self, i: usize, v: f64) {
+        self.idx.push(I::from_ix(i));
+        self.val.push(v);
+    }
+    /// `(添字, 値)` の反復子の要素を末尾に追加する。
+    #[inline]
+    pub fn extend(&mut self, it: impl IntoIterator<Item = (usize, f64)>) {
+        for (i, v) in it {
+            self.push(i, v);
+        }
+    }
+    /// 要素数。
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.idx.len()
+    }
+    /// 要素がないか。
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.idx.is_empty()
+    }
+    /// 借用した要素。
+    #[inline(always)]
+    pub fn as_slice(&self) -> SpSlice<'_, I> {
+        SpSlice { idx: &self.idx, val: &self.val }
+    }
+    /// `(添字, 値)` の組の列から作る (テスト用)。
+    pub fn from_pairs(pairs: &[(usize, f64)]) -> Self {
+        let mut b = SpBuf::with_capacity(pairs.len());
+        b.extend(pairs.iter().copied());
+        b
+    }
+}
+
+// ===========================================================================
 // CSR / CSC 行列
 // ===========================================================================
 
-/// [`CsrMat`] と [`CscMat`] に共通の物理形式: `(添字, 値)` の不揃い配列を
-/// 2 つの配列 (`offsets` と `entries`) だけで持つもの。構築後は変更しない。
-/// 構築・転置・切り出しは「外側/内側」の軸で一度だけ書き、行/列の名前や寸法、
+/// [`CsrMat`] と [`CscMat`] に共通の物理形式: 不揃い配列を `offsets` と、要素の添字 `idx`・
+/// 値 `val` の別配列 (SoA) で持つもの。添字の型 `I` は [`SpIdx`] (`u16`/`u32`/`usize`)。
+/// 構築後は変更しない。構築・転置・切り出しは「外側/内側」の軸で一度だけ書き、行/列の名前や寸法、
 /// 向きに依存する演算は 2 つのラッパー側に置く。
 #[derive(Clone, Debug, PartialEq)]
-pub struct Compressed {
-    /// 外側の添字 `k` の要素が `entries[offsets[k]..offsets[k+1]]` にある (長さ = 外側の数 + 1)。
+pub struct Compressed<I: SpIdx = usize> {
+    /// 外側の添字 `k` の要素が `idx/val[offsets[k]..offsets[k+1]]` にある (長さ = 外側の数 + 1)。
     offsets: Vec<usize>,
-    /// 全要素 `(内側の添字, 値)` を外側の順に並べたもの。
-    entries: Vec<(usize, f64)>,
+    /// 全要素の内側の添字を外側の順に並べたもの。
+    idx: Vec<I>,
+    /// 全要素の値 (`idx` と同じ並び)。
+    val: Vec<f64>,
 }
 
-impl Compressed {
+impl<I: SpIdx> Compressed<I> {
     /// 外側の添字ごとにまとめた `outers` を平坦化する。要素はそのままコピーする
     /// (ソート・マージ・0 除去はしない)。
     fn from_groups(outers: &[Vec<(usize, f64)>]) -> Self {
         let mut offsets = Vec::with_capacity(outers.len() + 1);
         offsets.push(0);
-        let mut entries = Vec::with_capacity(outers.iter().map(|r| r.len()).sum());
+        let nnz = outers.iter().map(|r| r.len()).sum();
+        let mut idx = Vec::with_capacity(nnz);
+        let mut val = Vec::with_capacity(nnz);
         for outer in outers {
-            entries.extend_from_slice(outer);
-            offsets.push(entries.len());
+            for &(i, v) in outer {
+                idx.push(I::from_ix(i));
+                val.push(v);
+            }
+            offsets.push(idx.len());
         }
-        Compressed { offsets, entries }
+        Compressed { offsets, idx, val }
+    }
+
+    /// 平坦な `(内側, 値)` の列と `offsets` から作る。
+    fn from_flat_pairs(offsets: Vec<usize>, entries: &[(usize, f64)]) -> Self {
+        let idx = entries.iter().map(|&(i, _)| I::from_ix(i)).collect();
+        let val = entries.iter().map(|&(_, v)| v).collect();
+        Compressed { offsets, idx, val }
     }
 
     /// `outers` の転置を計数ソートで直接平坦形式に作る (`n_inner` は内側の軸の大きさ =
@@ -792,38 +1018,50 @@ impl Compressed {
         for k in 0..n_inner {
             offsets[k + 1] += offsets[k];
         }
-        let mut entries = vec![(0usize, 0.0f64); offsets[n_inner]];
+        let nnz = offsets[n_inner];
+        let mut idx = vec![I::default(); nnz];
+        let mut val = vec![0.0f64; nnz];
         // 各出力スライスの次の書き込み位置
         let mut cursor = offsets.clone();
         for (i, outer) in outers.iter().enumerate() {
             for &(j, v) in outer {
-                entries[cursor[j]] = (i, v);
+                idx[cursor[j]] = I::from_ix(i);
+                val[cursor[j]] = v;
                 cursor[j] += 1;
             }
         }
-        Compressed { offsets, entries }
+        Compressed { offsets, idx, val }
     }
 
     /// 圧縮形式のまま転置する ([`Self::from_groups_transposed`] と同じ計数ソートを
     /// 平坦形式から行う)。CSR ⇔ CSC 変換を `O(nnz + n_inner)` で行うためのもの。
-    fn transposed(&self, n_inner: usize) -> Self {
+    /// 結果の添字型 `J` は元と違ってよい (結果の内側 = 元の外側の大きさを表せること)。
+    fn transposed<J: SpIdx>(&self, n_inner: usize) -> Compressed<J> {
         let mut offsets = vec![0usize; n_inner + 1];
-        for &(j, _) in &self.entries {
-            offsets[j + 1] += 1;
+        for &j in &self.idx {
+            offsets[j.ix() + 1] += 1;
         }
         for k in 0..n_inner {
             offsets[k + 1] += offsets[k];
         }
-        let mut entries = vec![(0usize, 0.0f64); offsets[n_inner]];
+        let nnz = offsets[n_inner];
+        let mut idx = vec![J::default(); nnz];
+        let mut val = vec![0.0f64; nnz];
         // 各出力スライスの次の書き込み位置
         let mut cursor = offsets.clone();
         for i in 0..self.outer_len() {
-            for &(j, v) in self.outer_slice(i) {
-                entries[cursor[j]] = (i, v);
+            for (j, v) in self.outer_slice(i) {
+                idx[cursor[j]] = J::from_ix(i);
+                val[cursor[j]] = v;
                 cursor[j] += 1;
             }
         }
-        Compressed { offsets, entries }
+        Compressed { offsets, idx, val }
+    }
+
+    /// 添字型だけを `J` に替えた同じ行列。
+    fn with_idx<J: SpIdx>(&self) -> Compressed<J> {
+        Compressed { offsets: self.offsets.clone(), idx: self.idx.iter().map(|&i| J::from_ix(i.ix())).collect(), val: self.val.clone() }
     }
 
     /// 外側の添字の数。
@@ -832,16 +1070,17 @@ impl Compressed {
         self.offsets.len() - 1
     }
 
-    /// 外側の添字 `k` の要素スライス。
-    #[inline]
-    fn outer_slice(&self, k: usize) -> &[(usize, f64)] {
-        &self.entries[self.offsets[k]..self.offsets[k + 1]]
+    /// 外側の添字 `k` の要素。
+    #[inline(always)]
+    fn outer_slice(&self, k: usize) -> SpSlice<'_, I> {
+        let (s, e) = (self.offsets[k], self.offsets[k + 1]);
+        SpSlice { idx: &self.idx[s..e], val: &self.val[s..e] }
     }
 
     /// 全要素数。
     #[inline]
     fn nnz(&self) -> usize {
-        self.entries.len()
+        self.idx.len()
     }
 
     /// 外側の添字ごとの `Vec<Vec<_>>` に戻す。
@@ -850,34 +1089,34 @@ impl Compressed {
     }
 }
 
-/// **圧縮行 (CSR)** 形式の行列。行 `i` の非零は `(列, 値)` の組として共有バッファに
+/// **圧縮行 (CSR)** 形式の行列。行 `i` の非零は列番号 (`I`) と値の別配列に
 /// 連続して並ぶ。制約行列を行ごとに走査する処理 (活動量の上下限、行シングルトン・
 /// ダブルトン検出、`y^T A` の累積、基底行の取り出しなど) 向け。
 #[derive(Clone, Debug, PartialEq)]
-pub struct CsrMat {
+pub struct CsrMat<I: SpIdx = usize> {
     /// 行数。
     n_rows: usize,
     /// 列数。
     n_cols: usize,
     /// 外側 = 行の圧縮データ。
-    inner: Compressed,
+    inner: Compressed<I>,
 }
 
-/// **圧縮列 (CSC)** 形式の行列。列 `j` の非零は `(行, 値)` の組として共有バッファに
+/// **圧縮列 (CSC)** 形式の行列。列 `j` の非零は行番号 (`I`) と値の別配列に
 /// 連続して並ぶ。列ごとに走査する処理 (単体法のプライシングの `a_j · y`、入る列の
 /// FTRAN 右辺、列シングルトン・優越列の検出、列の双対境界伝播など) 向け。
 /// 単体法は同じ行列の [`CsrMat`] と並べて持つ。
 #[derive(Clone, Debug, PartialEq)]
-pub struct CscMat {
+pub struct CscMat<I: SpIdx = usize> {
     /// 行数。
     n_rows: usize,
     /// 列数。
     n_cols: usize,
     /// 外側 = 列の圧縮データ。
-    inner: Compressed,
+    inner: Compressed<I>,
 }
 
-impl CsrMat {
+impl<I: SpIdx> CsrMat<I> {
     /// 疎な行 (`(列, 値)` の組の列) の並びから作る。要素はそのまま使う
     /// (ソート・重複マージ・0 除去をしない。必要なら [`Self::from_rows_canonical`])。
     pub fn from_rows(rows: &[Vec<(usize, f64)>], n_cols: usize) -> Self {
@@ -886,9 +1125,9 @@ impl CsrMat {
 
     /// 平坦化済みの形式から作る: 行 `i` は `entries[offsets[i]..offsets[i + 1]]`
     /// (`offsets[0] == 0`、`offsets` は行数 + 1 個)。
-    pub(crate) fn from_flat(n_cols: usize, offsets: Vec<usize>, entries: Vec<(usize, f64)>) -> Self {
+    pub(crate) fn from_flat(n_cols: usize, offsets: Vec<usize>, entries: &[(usize, f64)]) -> Self {
         debug_assert!(offsets.first() == Some(&0) && offsets.last() == Some(&entries.len()) && offsets.windows(2).all(|w| w[0] <= w[1]));
-        CsrMat { n_rows: offsets.len() - 1, n_cols, inner: Compressed { offsets, entries } }
+        CsrMat { n_rows: offsets.len() - 1, n_cols, inner: Compressed::from_flat_pairs(offsets, entries) }
     }
 
     /// [`Self::from_rows`] と同じだが、各行を先に正規化する (列順にソート、
@@ -943,9 +1182,9 @@ impl CsrMat {
         self.inner.nnz()
     }
 
-    /// 行 `i` の `(列, 値)` の組 (共有バッファのスライス。確保なし)。
-    #[inline]
-    pub fn row(&self, i: usize) -> &[(usize, f64)] {
+    /// 行 `i` の列番号と値 (共有バッファのスライス。確保なし)。
+    #[inline(always)]
+    pub fn row(&self, i: usize) -> SpSlice<'_, I> {
         self.inner.outer_slice(i)
     }
 
@@ -961,22 +1200,25 @@ impl CsrMat {
 
     /// 同じ行列を列優先形式にする (`O(nnz + n_cols)` の計数ソート)。
     /// 各列の要素は行の昇順に並ぶ。
-    pub fn to_csc(&self) -> CscMat {
+    pub fn to_csc(&self) -> CscMat<I> {
         CscMat { n_rows: self.n_rows, n_cols: self.n_cols, inner: self.inner.transposed(self.n_cols) }
     }
 
+    /// 添字型を `J` に替えた同じ行列 (`J` が列数を表せること)。
+    pub fn with_idx<J: SpIdx>(&self) -> CsrMat<J> {
+        CsrMat { n_rows: self.n_rows, n_cols: self.n_cols, inner: self.inner.with_idx() }
+    }
+
     /// 転置 `A^T` を [`CsrMat`] で返す (`A` の CSC と `A^T` の CSR は同じデータ)。
-    pub fn transpose(&self) -> CsrMat {
+    pub fn transpose(&self) -> CsrMat<I> {
         CsrMat { n_rows: self.n_cols, n_cols: self.n_rows, inner: self.inner.transposed(self.n_cols) }
     }
 
     /// 列ごとの非零数 (`O(nnz)`、転置を作らずに数える)。
     pub fn col_counts(&self) -> Vec<usize> {
         let mut counts = vec![0usize; self.n_cols];
-        for i in 0..self.n_rows {
-            for &(j, _) in self.row(i) {
-                counts[j] += 1;
-            }
+        for &j in &self.inner.idx {
+            counts[j.ix()] += 1;
         }
         counts
     }
@@ -986,7 +1228,7 @@ impl CsrMat {
         debug_assert_eq!(x.len(), self.n_cols);
         debug_assert_eq!(out.len(), self.n_rows);
         out.par_iter_mut().enumerate().for_each(|(i, o)| {
-            *o = sparse_dot_dense(self.row(i), x);
+            *o = self.row(i).dot_dense(x);
         });
     }
 
@@ -1007,7 +1249,7 @@ impl CsrMat {
             if yi == 0.0 {
                 continue;
             }
-            sparse_axpy_dense(yi, self.row(i), out);
+            self.row(i).axpy_dense(yi, out);
         }
     }
 
@@ -1026,13 +1268,13 @@ impl CsrMat {
             if yi == 0.0 {
                 continue;
             }
-            accum.axpy(yi, self.row(i));
+            accum.axpy_iter(yi, self.row(i));
         }
         SparseVec::from_entries(self.n_cols, accum.take_sorted(tol))
     }
 }
 
-impl CscMat {
+impl<I: SpIdx> CscMat<I> {
     /// 疎な列 (`(行, 値)` の組の列) の並びから、要素をそのまま使って作る。
     pub fn from_cols(cols: &[Vec<(usize, f64)>], n_rows: usize) -> Self {
         CscMat { n_rows, n_cols: cols.len(), inner: Compressed::from_groups(cols) }
@@ -1060,19 +1302,22 @@ impl CscMat {
         for k in 0..n_cols {
             offsets[k + 1] += offsets[k];
         }
-        let mut entries = vec![(0usize, 0.0f64); offsets[n_cols]];
+        let nnz = offsets[n_cols];
+        let mut idx = vec![I::default(); nnz];
+        let mut val = vec![0.0f64; nnz];
         // 2 回目: 各列の次の書き込み位置に埋める
         let mut cursor = offsets.clone();
         emit(&mut |i, j, v| {
-            entries[cursor[j]] = (i, v);
+            idx[cursor[j]] = I::from_ix(i);
+            val[cursor[j]] = v;
             cursor[j] += 1;
         });
-        CscMat { n_rows, n_cols, inner: Compressed { offsets, entries } }
+        CscMat { n_rows, n_cols, inner: Compressed { offsets, idx, val } }
     }
 
     /// `n_rows x n_cols` の零行列 (全列が存在し、すべて空)。
     pub fn empty(n_rows: usize, n_cols: usize) -> Self {
-        CscMat { n_rows, n_cols, inner: Compressed { offsets: vec![0; n_cols + 1], entries: Vec::new() } }
+        CscMat { n_rows, n_cols, inner: Compressed { offsets: vec![0; n_cols + 1], idx: Vec::new(), val: Vec::new() } }
     }
 
     /// faer の [`FaerCsr`] を直接列優先形式に読み込む。
@@ -1099,11 +1344,11 @@ impl CscMat {
         self.inner.nnz()
     }
 
-    /// 列 `j` の `(行, 値)` の組 (共有バッファのスライス。確保なし)。
+    /// 列 `j` の行番号と値 (共有バッファのスライス。確保なし)。
     /// 列との内積だけが必要なループ (入る変数の選択、`chuzc`、steepest-edge 重みの
     /// 更新など) は密にせずこれを使う。
-    #[inline]
-    pub fn col(&self, j: usize) -> &[(usize, f64)] {
+    #[inline(always)]
+    pub fn col(&self, j: usize) -> SpSlice<'_, I> {
         self.inner.outer_slice(j)
     }
 
@@ -1115,7 +1360,7 @@ impl CscMat {
     /// 列 `j` を密にして `out` (長さ `n_rows`、先に 0 クリア) に書く (`O(nnz_j + n_rows)`)。
     #[inline]
     pub fn col_into_dense(&self, j: usize, out: &mut [f64]) {
-        scatter_dense(self.col(j), out);
+        self.col(j).scatter_dense(out);
     }
 
     /// 列 `j` を新しい密な `Vec` で返す。
@@ -1131,17 +1376,20 @@ impl CscMat {
     }
 
     /// 行優先形式に戻す (`O(nnz + n_rows)` の計数ソート。[`CsrMat::to_csc`] の逆)。
-    pub fn to_csr(&self) -> CsrMat {
+    pub fn to_csr(&self) -> CsrMat<I> {
         CsrMat { n_rows: self.n_rows, n_cols: self.n_cols, inner: self.inner.transposed(self.n_rows) }
+    }
+
+    /// 添字型を `J` に替えた同じ行列 (`J` が行数を表せること)。
+    pub fn with_idx<J: SpIdx>(&self) -> CscMat<J> {
+        CscMat { n_rows: self.n_rows, n_cols: self.n_cols, inner: self.inner.with_idx() }
     }
 
     /// 行ごとの非零数 (`O(nnz)`)。
     pub fn row_counts(&self) -> Vec<usize> {
         let mut counts = vec![0usize; self.n_rows];
-        for j in 0..self.n_cols {
-            for &(i, _) in self.col(j) {
-                counts[i] += 1;
-            }
+        for &i in &self.inner.idx {
+            counts[i.ix()] += 1;
         }
         counts
     }
@@ -1157,7 +1405,7 @@ impl CscMat {
             if xj == 0.0 {
                 continue;
             }
-            sparse_axpy_dense(xj, self.col(j), out);
+            self.col(j).axpy_dense(xj, out);
         }
     }
 
@@ -1176,7 +1424,7 @@ impl CscMat {
             if xj == 0.0 {
                 continue;
             }
-            accum.axpy(xj, self.col(j));
+            accum.axpy_iter(xj, self.col(j));
         }
         SparseVec::from_entries(self.n_rows, accum.take_sorted(tol))
     }
@@ -1186,7 +1434,7 @@ impl CscMat {
         debug_assert_eq!(y.len(), self.n_rows);
         debug_assert_eq!(out.len(), self.n_cols);
         out.par_iter_mut().enumerate().for_each(|(j, o)| {
-            *o = sparse_dot_dense(self.col(j), y);
+            *o = self.col(j).dot_dense(y);
         });
     }
 
@@ -1210,39 +1458,42 @@ impl CscMat {
 ///     }
 ///     let mat = b.build();
 /// ```
-pub struct CscBuilder {
+pub struct CscBuilder<I: SpIdx = usize> {
     /// 行数。
     n_rows: usize,
     /// 閉じた列の境界 (`Compressed::offsets` と同じ意味。最初は `[0]`)。
     offsets: Vec<usize>,
-    /// これまでに追加した全要素。
-    entries: Vec<(usize, f64)>,
+    /// これまでに追加した全要素の行番号。
+    idx: Vec<I>,
+    /// これまでに追加した全要素の値。
+    val: Vec<f64>,
 }
 
-impl CscBuilder {
+impl<I: SpIdx> CscBuilder<I> {
     /// 行数 `n_rows`、列 0 本のビルダーを作る。
     pub fn new(n_rows: usize) -> Self {
-        CscBuilder { n_rows, offsets: vec![0], entries: Vec::new() }
+        CscBuilder { n_rows, offsets: vec![0], idx: Vec::new(), val: Vec::new() }
     }
 
     /// [`Self::new`] と同じだが、`n_cols` 列と `nnz` 要素分の領域を予約する。
     pub fn with_capacity(n_rows: usize, n_cols: usize, nnz: usize) -> Self {
         let mut offsets = Vec::with_capacity(n_cols + 1);
         offsets.push(0);
-        CscBuilder { n_rows, offsets, entries: Vec::with_capacity(nnz) }
+        CscBuilder { n_rows, offsets, idx: Vec::with_capacity(nnz), val: Vec::with_capacity(nnz) }
     }
 
     /// 構築中の列に要素を 1 つ追加する。
     #[inline]
     pub fn push(&mut self, row: usize, value: f64) {
         debug_assert!(row < self.n_rows, "row index out of range");
-        self.entries.push((row, value));
+        self.idx.push(I::from_ix(row));
+        self.val.push(value);
     }
 
     /// 現在の列を閉じて次の列を始める。要素のない列も含め、列ごとに 1 回呼ぶこと。
     #[inline]
     pub fn end_column(&mut self) {
-        self.offsets.push(self.entries.len());
+        self.offsets.push(self.idx.len());
     }
 
     /// これまでに閉じた列の数。
@@ -1252,8 +1503,8 @@ impl CscBuilder {
     }
 
     /// 行列を完成させる。列数は閉じた列の数。
-    pub fn build(self) -> CscMat {
-        CscMat { n_rows: self.n_rows, n_cols: self.offsets.len() - 1, inner: Compressed { offsets: self.offsets, entries: self.entries } }
+    pub fn build(self) -> CscMat<I> {
+        CscMat { n_rows: self.n_rows, n_cols: self.offsets.len() - 1, inner: Compressed { offsets: self.offsets, idx: self.idx, val: self.val } }
     }
 }
 
@@ -1500,6 +1751,11 @@ pub fn csr_mat_t_vec(mat: &FaerCsr, n_cols: usize, y: &[f64]) -> Vec<f64> {
 mod tests {
     use super::*;
 
+    // 既定の添字型 (`usize`) の別名。型推論で添字型が決まらない式のため。
+    type CsrMat = super::CsrMat<usize>;
+    type CscMat = super::CscMat<usize>;
+    type CscBuilder = super::CscBuilder<usize>;
+
     /// 2 つの値がほぼ等しいか (差が 1e-12 未満)。
     fn approx(a: f64, b: f64) -> bool {
         (a - b).abs() < 1e-12
@@ -1511,6 +1767,26 @@ mod tests {
         //  [ 0  3  0  0 ]
         //  [ 4  0  0  5 ]
         vec![vec![(0, 1.0), (2, 2.0)], vec![(1, 3.0)], vec![(0, 4.0), (3, 5.0)]]
+    }
+
+    /// 添字型 `u16`/`u32` の行列が `usize` 版と同じ要素・転置・積を持つこと。
+    #[test]
+    fn narrow_index_types_hold_the_same_matrix() {
+        let rows = sample_rows();
+        let wide = CsrMat::from_rows(&rows, 4);
+        let n16 = super::CsrMat::<u16>::from_rows(&rows, 4);
+        let n32 = super::CsrMat::<u32>::from_rows(&rows, 4);
+        assert_eq!(n16.to_rows(), rows);
+        assert_eq!(n32.to_rows(), rows);
+        assert_eq!(n16.to_csc().to_cols(), wide.to_csc().to_cols());
+        assert_eq!(super::CscMat::<u32>::from_rows(&rows, 4), n32.to_csc());
+        assert_eq!(wide.with_idx::<u16>(), n16);
+        assert_eq!(n16.with_idx::<usize>(), wide);
+        let x = [1.0, -2.0, 0.5, 3.0];
+        assert_eq!(n16.mat_vec(&x), wide.mat_vec(&x));
+        assert_eq!(n32.to_csc().mat_t_vec(&[1.0, 2.0, 3.0]), wide.to_csc().mat_t_vec(&[1.0, 2.0, 3.0]));
+        assert_eq!(n32.row(2).idx, &[0u32, 3]);
+        assert_eq!(n32.row(2).val, &[4.0, 5.0]);
     }
 
     /// CSR → CSC → CSR の往復で行列が変わらないこと。
@@ -1528,10 +1804,10 @@ mod tests {
         let csc = CsrMat::from_rows(&sample_rows(), 4).to_csc();
         assert_eq!(csc.n_rows(), 3);
         assert_eq!(csc.n_cols(), 4);
-        assert_eq!(csc.col(0), &[(0, 1.0), (2, 4.0)]);
-        assert_eq!(csc.col(1), &[(1, 3.0)]);
-        assert_eq!(csc.col(2), &[(0, 2.0)]);
-        assert_eq!(csc.col(3), &[(2, 5.0)]);
+        assert_eq!(csc.col(0).to_vec(), [(0, 1.0), (2, 4.0)]);
+        assert_eq!(csc.col(1).to_vec(), [(1, 3.0)]);
+        assert_eq!(csc.col(2).to_vec(), [(0, 2.0)]);
+        assert_eq!(csc.col(3).to_vec(), [(2, 5.0)]);
     }
 
     /// 行から直接作った CSC と CSR から変換した CSC が一致すること。
@@ -1619,7 +1895,7 @@ mod tests {
             entries.extend_from_slice(r);
             offsets.push(entries.len());
         }
-        let flat = CsrMat::from_flat(8, offsets, entries);
+        let flat = CsrMat::from_flat(8, offsets, &entries);
         assert_eq!(flat, CsrMat::from_rows(&rows, 8));
         assert_eq!(flat.to_csc(), CscMat::from_rows(&rows, 8));
     }
@@ -1769,7 +2045,7 @@ mod tests {
     #[test]
     fn from_rows_canonical_fixes_unsorted_duplicated_input() {
         let csr = CsrMat::from_rows_canonical(&[vec![(2, 1.0), (0, 2.0), (2, 3.0)]], 3, 0.0);
-        assert_eq!(csr.row(0), &[(0, 2.0), (2, 4.0)]);
+        assert_eq!(csr.row(0).to_vec(), [(0, 2.0), (2, 4.0)]);
     }
 
     /// 三つ組からの構築が行からの構築と一致すること。
@@ -1804,7 +2080,7 @@ mod tests {
             }
         });
         assert_eq!(got, expected);
-        assert_eq!(got.col(1), &[(1, 3.0), (3, 7.0)]);
+        assert_eq!(got.col(1).to_vec(), [(1, 3.0), (3, 7.0)]);
     }
 
     /// 列の密化が正しい密な列になること。
@@ -2062,7 +2338,7 @@ mod tests {
         let m = b.build();
         assert_eq!(m.n_cols(), 3);
         assert!(m.col(0).is_empty());
-        assert_eq!(m.col(1), &[(1, 7.0)]);
+        assert_eq!(m.col(1).to_vec(), [(1, 7.0)]);
         assert!(m.col(2).is_empty());
         assert_eq!(m.nnz(), 1);
     }

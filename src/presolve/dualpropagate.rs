@@ -68,7 +68,7 @@ pub fn propagate_dual_bounds(n: usize, a: &FaerCsr, real_g_rows: &[Vec<(usize, f
 
     // 転置: `col_terms.col(j)` は列 j に係数を持つ (双対変数番号, 係数) の組をすべて保持する。
     // 列ごとの Vec を作らず、圧縮列形式へ直接流し込む (`CscMat::from_entry_stream` 参照)。
-    let col_terms = CscMat::from_entry_stream(num_duals, n, |emit| {
+    let col_terms: CscMat = CscMat::from_entry_stream(num_duals, n, |emit| {
         for i in 0..num_a {
             for (j, v) in csr_row_iter(a, i) {
                 if v != 0.0 {
@@ -96,7 +96,7 @@ pub fn propagate_dual_bounds(n: usize, a: &FaerCsr, real_g_rows: &[Vec<(usize, f
         // `ub_j = +inf` なら `r_j >= 0` が強制される: `-sum d_i*M_ij <= c_j`。
         // (境界強化で `ub` が元より内側になっただけの場合は t 行を作らない。理由は履歴メモ参照。)
         if ub[j] == f64::INFINITY {
-            t_rows.push(col_terms.col(j).iter().map(|&(i, v)| (i, -v)).collect());
+            t_rows.push(col_terms.col(j).iter().map(|(i, v)| (i, -v)).collect());
             t_h.push(c[j]);
         }
         // 下側の対称な場合: `lb_j = -inf` なら `sum d_i*M_ij <= -c_j`。
@@ -143,7 +143,7 @@ pub fn propagate_dual_bounds(n: usize, a: &FaerCsr, real_g_rows: &[Vec<(usize, f
         }
         let mut rlo = c[j];
         let mut rhi = c[j];
-        for &(i, v) in terms {
+        for (i, v) in terms {
             let (dlo, dhi) = (result.lb[i], result.ub[i]);
             let (tlo, thi) = if v > 0.0 { (v * dlo, v * dhi) } else { (v * dhi, v * dlo) };
             rlo += tlo;
