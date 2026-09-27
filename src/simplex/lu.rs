@@ -338,6 +338,12 @@ pub fn reset_pivot_threshold() {
     PIVOT_THRESHOLD.with(|c| c.set(Some(pivot_threshold_base())));
 }
 
+/// 現在のピボット閾値が既定の [`STABILITY`] 未満か (`ENOMOTO_PIVOT_THRESHOLD` で下げた場合)。
+/// 作業 #5 M5 の変種 (HiGHS `reinvertOnNumericalTrouble` 流) が、既定未満なら数値的トラブルのたびに引き上げるのに使う。
+pub fn pivot_threshold_below_stability() -> bool {
+    pivot_threshold() < tunable!("ENOMOTO_T_STABILITY", STABILITY, f64)
+}
+
 /// ピボット閾値を [`PIVOT_THRESHOLD_FACTOR`] 倍に 1 段引き上げる
 /// (上限 [`PIVOT_THRESHOLD_MAX`])。実際に値が変わったら `true` を返す。
 ///

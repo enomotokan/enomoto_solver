@@ -899,11 +899,28 @@ fn filter_noise_pivots(std: &StdForm, col_inf_norm: &mut Vec<f64>, cands: &mut [
     w
 }
 
+/// polish 用: `active_cost` と分解 `lu` から被約費用 `d` を作り直す(`polish_with_true_bounds` の初期化と同じ計算)。
+#[inline(never)]
+fn polish_fresh_d(std: &StdForm, lu: &sparse_lu::FtLu, basis: &[usize], active_cost: &[f64], scratch: &mut [f64], d: &mut [f64]) {
+    let m = std.n_rows;
+    let c_b: Vec<f64> = basis.iter().map(|&bv| active_cost[bv]).collect();
+    let mut y = vec![0.0f64; m];
+    lu.solve_transpose_into(&c_b, scratch, &mut y);
+    for j in 0..std.n_total {
+        let mut dj = active_cost[j];
+        for &(i, v) in std.cols.col(j) {
+            dj -= v * y[i];
+        }
+        d[j] = dj;
+    }
+}
+
 /// 作業 #5 M2: 行 `r` の BTRAN `rho = B^-T e_r` を Farkas の証明として、`A x = b`・`bound(j)` の
 /// 境界で実行不能であることを確かめる(主ループの `Eligible = ∅`/BFRT 使い切り、polish の実行不能判定の直前)。
 /// `g = rho^T A` と `t = rho^T b` について、境界上の `g^T x` の範囲 `[lo, hi]` が `t` を
 /// 余裕 `1e-7 max(1, |t|, max_j |g_j x_j|)` を超えて外れていれば証明済み。基底列(`r` 以外)の `g_j` は
-/// 理論上 0 で、`|g_j| <= 1e-9 Σ_i |rho_i a_ij|`(後退安定な LU の残差の水準)なら 0 とみなす。
+/// 理論上 0 で、`|g_j| <= 1e-9 max(Σ_i |rho_i a_ij|, ‖rho‖∞ ‖a_j‖∞)`(後退安定な LU の残差の水準)なら 0 とみなし、
+/// 非基底列は比率テストと同じく `|g_j| <= TOL` を 0 とみなす。
 /// LU が不安定(pilot87 を閾値 1e-3 で解くとき)や `x_B` が壊れているときの誤った `Infeasible` を防ぐ。
 #[inline(never)]
 fn infeasibility_certified(std: &StdForm, basis_pos: &[Option<usize>], rho: &[f64], r: usize, bound: impl Fn(usize) -> (f64, f64)) -> bool {
@@ -926,16 +943,25 @@ fn infeasibility_certified(std: &StdForm, basis_pos: &[Option<usize>], rho: &[f6
         }
     }
     scale = scale.max(t.abs());
+    let rho_max = rho.iter().fold(0.0f64, |a, &v| a.max(v.abs()));
     let (mut lo, mut hi) = (0.0f64, 0.0f64);
+    // 診断: 無限の寄与をした列の数 (基底 / 非基底)。
+    let (mut inf_basic, mut inf_nonbasic) = (0usize, 0usize);
     for j in 0..n {
         let mut gj = g[j];
         if gj == 0.0 {
             continue;
         }
         if let Some(p) = basis_pos[j] {
-            if p != r && gj.abs() <= 1e-9 * g_abs[j] {
-                gj = 0.0;
+            if p != r {
+                let a_max = std.cols.col(j).iter().fold(0.0f64, |a, &(_, v)| a.max(v.abs()));
+                if gj.abs() <= 1e-9 * g_abs[j].max(rho_max * a_max) {
+                    gj = 0.0;
+                }
             }
+        } else if gj.abs() <= TOL {
+            // 非基底列: 比率テスト(`chuzc1_filter_one`)と同じく `|alpha_j| <= TOL` は 0 とみなす。
+            gj = 0.0;
         }
         if gj == 0.0 {
             continue;
@@ -944,6 +970,13 @@ fn infeasibility_certified(std: &StdForm, basis_pos: &[Option<usize>], rho: &[f6
         let (a, b) = if gj > 0.0 { (gj * l, gj * u) } else { (gj * u, gj * l) };
         lo += a;
         hi += b;
+        if !a.is_finite() || !b.is_finite() {
+            if basis_pos[j].is_some() {
+                inf_basic += 1;
+            } else {
+                inf_nonbasic += 1;
+            }
+        }
         if a.is_finite() {
             scale = scale.max(a.abs());
         }
@@ -954,7 +987,7 @@ fn infeasibility_certified(std: &StdForm, basis_pos: &[Option<usize>], rho: &[f6
     let margin = 1e-7 * scale;
     let ok = t > hi + margin || t < lo - margin;
     if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
-        eprintln!("DEBUG_EXT: infeasibility certificate r={r} t={t:.6e} range=[{lo:.6e}, {hi:.6e}] margin={margin:.3e} certified={ok}");
+        eprintln!("DEBUG_EXT: infeasibility certificate r={r} t={t:.6e} range=[{lo:.6e}, {hi:.6e}] margin={margin:.3e} inf_cols(basic={inf_basic}, nonbasic={inf_nonbasic}) certified={ok}");
     }
     ok
 }
@@ -968,12 +1001,86 @@ fn affine_bound_value(b: Option<Affine1>, missing: f64) -> f64 {
     }
 }
 
-/// 作業 #5 M3: 主ループの再分解が特異(`refactorize` が `None`)だったとき、直近の成功した再分解以降に
-/// 確定したピボット(`log`)と BFRT フリップ(`flips`)を巻き戻して前の基底に戻し、分解し直す。
-/// まず最後の 1 ピボット(と後続のフリップ)だけを戻して試し、まだ特異なら記録全体を戻す
-/// (記録の起点の基底は分解に成功している)。PRICE 行列の分割(非基底部/基底部)と `row_bounds`、
-/// `n_zero_nonbasic` も戻す。`x_B`・`d`・実行不能行の集合は呼び出し側が再同期する(DSE 重みは戻さない)。
-/// 成功すれば新しい分解と最後に戻したピボットの `(r, q)` を返す。記録が無いか戻しても特異なら `None`。
+/// 作業 #5 M3: 再分解が特異(`refactorize` が `None`)だったとき、直近の成功した再分解以降に確定したピボット
+/// (`log`)と BFRT フリップ(`flips`)を巻き戻して前の基底に戻し、分解し直す(主ループと polish で共有)。
+/// (1) 最後の 1 ピボット(と後続のフリップ)だけを戻して試し、(2) まだ特異なら LU のピボット閾値を 1 段上げて
+/// 同じ基底で試し(分解が不安定だった場合)、(3) それでもだめなら記録全体を戻す(記録の起点の基底は分解に
+/// 成功している)。1 ピボットを戻すたびに `on_undo` を呼ぶ(主ループの PRICE 行列の分割・`row_bounds` の復元用)。
+/// `x_B`・`d`・実行不能行の集合は呼び出し側が再同期する(DSE 重みは戻さない)。成功すれば新しい分解と
+/// 最後に戻したピボットの `(r, q)` を返す。記録が無いか戻しても特異なら `None`。
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn rollback_core(
+    std: &StdForm,
+    basis: &mut [usize],
+    basis_pos: &mut [Option<usize>],
+    nb_status: &mut [Option<NbStatus>],
+    log: &mut Vec<PivotRec>,
+    flips: &mut Vec<usize>,
+    prev: &sparse_lu::FtLu,
+    on_undo: &mut dyn FnMut(&PivotRec, &mut [Option<NbStatus>]),
+) -> Option<(sparse_lu::FtLu, usize, usize)> {
+    let last = *log.last()?;
+    let debug = env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some();
+    // フリップを `keep` 個まで戻す(新しい順)。
+    let undo_flips = |flips: &mut Vec<usize>, nb_status: &mut [Option<NbStatus>], keep: usize| {
+        while flips.len() > keep {
+            let j = flips.pop().unwrap();
+            nb_status[j] = match nb_status[j] {
+                Some(NbStatus::Lower) => Some(NbStatus::Upper),
+                Some(NbStatus::Upper) => Some(NbStatus::Lower),
+                s => s,
+            };
+        }
+    };
+    let mut n_undone = 0usize;
+    for stage in 0..3 {
+        if stage == 1 {
+            // (2) 閾値を上げて同じ基底を分解し直す。上限なら省く。
+            if !sparse_lu::escalate_pivot_threshold() {
+                continue;
+            }
+        } else {
+            // (1) 最後の 1 ピボット、(3) 全体を戻す。
+            let stop = if stage == 0 { log.len().saturating_sub(1) } else { 0 };
+            if stage == 2 && log.is_empty() {
+                return None;
+            }
+            while log.len() > stop {
+                let rec = log.pop().unwrap();
+                undo_flips(flips, nb_status, rec.flips_end);
+                // 基底交換を戻す: `leaving` が位置 `r` に戻り、`q` は元の非基底状態へ。
+                debug_assert_eq!(basis[rec.r], rec.q);
+                basis[rec.r] = rec.leaving;
+                basis_pos[rec.leaving] = Some(rec.r);
+                nb_status[rec.leaving] = None;
+                basis_pos[rec.q] = None;
+                nb_status[rec.q] = Some(rec.old_status_q);
+                on_undo(&rec, nb_status);
+                n_undone += 1;
+            }
+            if log.is_empty() {
+                undo_flips(flips, nb_status, 0);
+            }
+        }
+        let lu = refactorize(std, basis_pos, Some(prev));
+        if debug {
+            eprintln!(
+                "DEBUG_EXT: rollback stage={stage} undone={n_undone} threshold={:.3e} (last r={} q={}) refactor_ok={}",
+                sparse_lu::pivot_threshold(),
+                last.r,
+                last.q,
+                lu.is_some()
+            );
+        }
+        if let Some(lu) = lu {
+            return Some((lu, last.r, last.q));
+        }
+    }
+    None
+}
+
+/// 主ループ用の [`rollback_core`]: PRICE 行列の分割(非基底部/基底部)と `row_bounds`、`n_zero_nonbasic` も戻す。
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
 fn rollback_pivots(
@@ -997,30 +1104,6 @@ fn rollback_pivots(
     n_zero_nonbasic: &mut usize,
     prev: &sparse_lu::FtLu,
 ) -> Option<(sparse_lu::FtLu, usize, usize)> {
-    let last = *log.last()?;
-    let debug = env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some();
-    // まず LU のピボット閾値を 1 段上げて同じ基底を分解し直す(基底ではなく分解が不安定だった場合。
-    // pilot87 を閾値 1e-3 で解くときなど)。閾値が上限なら省く。
-    if sparse_lu::escalate_pivot_threshold() {
-        let lu = refactorize(std, basis_pos, Some(prev));
-        if debug {
-            eprintln!("DEBUG_EXT: rollback: escalated pivot threshold to {:.3e}, same basis refactor_ok={}", sparse_lu::pivot_threshold(), lu.is_some());
-        }
-        if let Some(lu) = lu {
-            return Some((lu, last.r, last.q));
-        }
-    }
-    // フリップを `keep` 個まで戻す(新しい順)。
-    let undo_flips = |flips: &mut Vec<usize>, nb_status: &mut [Option<NbStatus>], keep: usize| {
-        while flips.len() > keep {
-            let j = flips.pop().unwrap();
-            nb_status[j] = match nb_status[j] {
-                Some(NbStatus::Lower) => Some(NbStatus::Upper),
-                Some(NbStatus::Upper) => Some(NbStatus::Lower),
-                s => s,
-            };
-        }
-    };
     // PRICE 行列の 2 要素を入れ替える(主ループの `swap_entries` と同じ)。
     fn swap_entries(col: &mut [u32], val: &mut [f64], entry_of_price: &mut [u32], price_pos_of_col_entry: &mut [u32], a: usize, b: usize) {
         col.swap(a, b);
@@ -1029,61 +1112,32 @@ fn rollback_pivots(
         price_pos_of_col_entry[entry_of_price[a] as usize] = a as u32;
         price_pos_of_col_entry[entry_of_price[b] as usize] = b as u32;
     }
-    let mut n_undone = 0usize;
-    let mut undo_all = false;
-    loop {
-        // 巻き戻す範囲: まず最後の 1 ピボット、だめなら全体。
-        let stop = if undo_all { 0 } else { log.len() - 1 };
-        while log.len() > stop {
-            let rec = log.pop().unwrap();
-            undo_flips(flips, nb_status, rec.flips_end);
-            // 基底交換を戻す: `leaving` が位置 `r` に戻り、`q` は元の非基底状態へ。
-            debug_assert_eq!(basis[rec.r], rec.q);
-            basis[rec.r] = rec.leaving;
-            basis_pos[rec.leaving] = Some(rec.r);
-            nb_status[rec.leaving] = None;
-            basis_pos[rec.q] = None;
-            nb_status[rec.q] = Some(rec.old_status_q);
-            if rec.old_status_q == NbStatus::Zero {
-                *n_zero_nonbasic += 1;
-            }
-            row_bounds.assign(rec.r, rec.leaving, cache, noise_feasible);
-            if price_nonbasic_only {
-                // 確定時と逆順: `leaving` を非基底部から基底部へ、`q` を基底部から非基底部へ。
-                if std.lb[rec.leaving] != std.ub[rec.leaving] {
-                    for (k, &(i, _)) in std.cols.col(rec.leaving).iter().enumerate() {
-                        let last_nb = price_nb_end[i] - 1;
-                        let pos = price_pos_of_col_entry[col_entry_start[rec.leaving] + k] as usize;
-                        debug_assert!(pos >= price_start[i] && pos <= last_nb);
-                        swap_entries(price_col, price_val, col_entry_of_price, price_pos_of_col_entry, pos, last_nb);
-                        price_nb_end[i] = last_nb;
-                    }
-                }
-                for (k, &(i, _)) in std.cols.col(rec.q).iter().enumerate() {
-                    let first = price_nb_end[i];
-                    let pos = price_pos_of_col_entry[col_entry_start[rec.q] + k] as usize;
-                    debug_assert!(pos >= first && pos < price_start[i + 1]);
-                    swap_entries(price_col, price_val, col_entry_of_price, price_pos_of_col_entry, pos, first);
-                    price_nb_end[i] = first + 1;
+    let mut on_undo = |rec: &PivotRec, _nb: &mut [Option<NbStatus>]| {
+        if rec.old_status_q == NbStatus::Zero {
+            *n_zero_nonbasic += 1;
+        }
+        row_bounds.assign(rec.r, rec.leaving, cache, noise_feasible);
+        if price_nonbasic_only {
+            // 確定時と逆順: `leaving` を非基底部から基底部へ、`q` を基底部から非基底部へ。
+            if std.lb[rec.leaving] != std.ub[rec.leaving] {
+                for (k, &(i, _)) in std.cols.col(rec.leaving).iter().enumerate() {
+                    let last_nb = price_nb_end[i] - 1;
+                    let pos = price_pos_of_col_entry[col_entry_start[rec.leaving] + k] as usize;
+                    debug_assert!(pos >= price_start[i] && pos <= last_nb);
+                    swap_entries(price_col, price_val, col_entry_of_price, price_pos_of_col_entry, pos, last_nb);
+                    price_nb_end[i] = last_nb;
                 }
             }
-            n_undone += 1;
+            for (k, &(i, _)) in std.cols.col(rec.q).iter().enumerate() {
+                let first = price_nb_end[i];
+                let pos = price_pos_of_col_entry[col_entry_start[rec.q] + k] as usize;
+                debug_assert!(pos >= first && pos < price_start[i + 1]);
+                swap_entries(price_col, price_val, col_entry_of_price, price_pos_of_col_entry, pos, first);
+                price_nb_end[i] = first + 1;
+            }
         }
-        if log.is_empty() {
-            undo_flips(flips, nb_status, 0);
-        }
-        let lu = refactorize(std, basis_pos, Some(prev));
-        if debug {
-            eprintln!("DEBUG_EXT: rollback undone={n_undone} (last r={} q={}) refactor_ok={}", last.r, last.q, lu.is_some());
-        }
-        if let Some(lu) = lu {
-            return Some((lu, last.r, last.q));
-        }
-        if log.is_empty() {
-            return None;
-        }
-        undo_all = true;
-    }
+    };
+    rollback_core(std, basis, basis_pos, nb_status, log, flips, prev, &mut on_undo)
 }
 
 /// `‖A_B x_B - rhs‖`(真の基底行列 `std.cols` の基底列と、解いた `x_b` による残差)。
@@ -2650,6 +2704,9 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         .unwrap_or(PIVOT_ESCALATION_STEP);
     // 数値的原因による再分解の回数。
     let mut numeric_trouble_count: usize = 0;
+    // 作業 #5 M5 の変種 (HiGHS `reinvertOnNumericalTrouble` 流): 数値的原因の再分解のたびに、閾値が既定 (`STABILITY`) 未満なら、
+    // そうでなければ FT 更新 `N` 回未満の分解で起きたときだけ、閾値を 1 段上げる (`ENOMOTO_T_PIVOT_ESCALATE_FEW_UPDATES=N`、0 = 無効)。
+    let pivot_escalation_few_updates: usize = tunable!("ENOMOTO_T_PIVOT_ESCALATE_FEW_UPDATES", 0usize, usize);
     /// 数値的原因による再分解を 1 回記録し、[`PIVOT_ESCALATION_STEP`] 回ごとに LU の
     /// ピボット閾値を引き上げる。(ループ本体が多くの局所変数を可変借用しているため、
     /// クロージャではなくマクロにしている。)
@@ -2657,6 +2714,8 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         () => {{
             numeric_trouble_count += 1;
             if pivot_escalation_step != 0 && numeric_trouble_count % pivot_escalation_step == 0 {
+                sparse_lu::escalate_pivot_threshold();
+            } else if pivot_escalation_few_updates != 0 && (sparse_lu::pivot_threshold_below_stability() || lu.update_count() < pivot_escalation_few_updates) {
                 sparse_lu::escalate_pivot_threshold();
             }
         }};
@@ -5482,6 +5541,90 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
     // 主単体法への引き継ぎから双対ループへ戻った回数 (cont1 策2)。
     let mut handoff_rounds = 0usize;
 
+    // 作業 #5 M2 (主ループの `infeas_check!` と同じ考え): 実行不能を結論する直前に、(1) 更新済みの分解なら
+    // 再分解してやり直し、(2) 行の逸脱が `rho` の雑音水準 `C eps ‖rho‖ max(‖b‖∞, 1)` 以下なら雑音として外し、
+    // (3) Farkas の証明([`infeasibility_certified`]、真の境界)が成り立たなければ LU の閾値を 1 段上げて再分解し、
+    // 上げられなければ誤った `Infeasible` の代わりに `None`(`NotSolved`)を返す。
+    let polish_noise_c: f64 = tunable!("ENOMOTO_T_NOISE_C", NOISE_C, f64);
+    let polish_b_scale = std.b.iter().fold(0.0f64, |a, &v| a.max(v.abs())).max(1.0);
+    let mut polish_uncertified = 0usize;
+    // 作業 #5 M1/M1'(polish 版): `‖rho‖^2` が `NOISE_MIN_SQRT_W^2` を超える行だけ、逸脱と比率テストの候補に
+    // 主ループと同じ雑音判定を掛ける(`‖rho‖` は PRICE の走査で求める)。`polish_col_inf_norm` は `‖a_j‖∞`(遅延構築)。
+    let polish_noise_min_w: f64 = {
+        let s = tunable!("ENOMOTO_T_NOISE_MIN_SQRT_W", NOISE_MIN_SQRT_W, f64);
+        s * s
+    };
+    let mut polish_col_inf_norm: Vec<f64> = Vec::new();
+    // 作業 #5 M3(polish 版): 直近の成功した再分解以降のピボットとフリップの記録([`rollback_core`])と、
+    // 巻き戻したピボットの `(r, q)` の禁止(比率テストで行 `r` について列 `q` を外す、`usize::MAX` = なし)。
+    let pivot_rollback = tunable!("ENOMOTO_T_PIVOT_ROLLBACK", 1u8, u8) != 0;
+    let mut pivot_log: Vec<PivotRec> = Vec::new();
+    let mut pivot_flips: Vec<usize> = Vec::new();
+    let (mut ban_r, mut ban_q) = (usize::MAX, usize::MAX);
+    macro_rules! polish_refactor {
+        () => {{
+            match refactorize(std, basis_pos, Some(&lu)) {
+                Some(l) => {
+                    pivot_log.clear();
+                    pivot_flips.clear();
+                    l
+                }
+                None => {
+                    if !pivot_rollback {
+                        return None;
+                    }
+                    let (l, r0, q0) = rollback_core(std, basis, basis_pos, nb_status, &mut pivot_log, &mut pivot_flips, &lu, &mut |_, _| {})?;
+                    if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
+                        eprintln!("DEBUG_EXT: polish singular refactor -> rolled back pivots (last r={r0} q={q0})");
+                    }
+                    pivot_log.clear();
+                    pivot_flips.clear();
+                    ban_r = r0;
+                    ban_q = q0;
+                    // 巻き戻したピボットの双対ステップを捨てるため、被約費用を作り直す。
+                    polish_fresh_d(std, &l, basis, &active_cost, &mut lu_scratch, &mut d);
+                    l
+                }
+            }
+        }};
+    }
+    macro_rules! polish_infeas_check {
+        ($r:expr, $needed:expr) => {{
+            let r: usize = $r;
+            let needed: f64 = $needed;
+            if polish_noise_c > 0.0 {
+                let debug = env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some();
+                if lu.update_count() > 0 {
+                    lu = polish_refactor!();
+                    lu.solve_into(&compute_rhs_plain(std, nb_status), &mut lu_scratch, &mut x_b);
+                    infeasible_rows.rebuild(m, |i| row_infeasible_plain(std, basis, &x_b, &noise_feasible, i));
+                    continue;
+                }
+                let rho_norm = rho.iter().map(|v| v * v).sum::<f64>().sqrt();
+                if needed <= polish_noise_c * f64::EPSILON * rho_norm * polish_b_scale {
+                    if debug {
+                        eprintln!("DEBUG_EXT: polish infeas_guard: noise row r={r} needed={needed:.3e} |rho|={rho_norm:.3e}");
+                    }
+                    noise_feasible[basis[r]] = true;
+                    infeasible_rows.set(r, false);
+                    continue;
+                }
+                if !infeasibility_certified(std, basis_pos, &rho, r, |j| (std.lb[j], std.ub[j])) {
+                    polish_uncertified += 1;
+                    if debug {
+                        eprintln!("DEBUG_EXT: polish infeas_guard: uncertified r={r} needed={needed:.3e} |rho|={rho_norm:.3e} count={polish_uncertified}");
+                    }
+                    if polish_uncertified > UNCERTIFIED_MAX || !sparse_lu::escalate_pivot_threshold() {
+                        return None;
+                    }
+                    lu = polish_refactor!();
+                    lu.solve_into(&compute_rhs_plain(std, nb_status), &mut lu_scratch, &mut x_b);
+                    infeasible_rows.rebuild(m, |i| row_infeasible_plain(std, basis, &x_b, &noise_feasible, i));
+                    continue;
+                }
+            }
+        }};
+    }
     let max_iters = super::max_iters_for(m, n_total);
     for iter_idx in 0..max_iters {
         // chuzr: 重みなしの最大逸脱 (Dantzig) 規則。`infeasible_rows.rows` のみを走査する。
@@ -5617,6 +5760,8 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
                         });
                     }
                     d.copy_from_slice(&true_d);
+                    pivot_log.clear();
+                    pivot_flips.clear();
                     lu.solve_into(&compute_rhs_plain(std, nb_status), &mut lu_scratch, &mut x_b);
                     noise_feasible.fill(false);
                     infeasible_rows.rebuild(m, |i| row_infeasible_plain(std, basis, &x_b, &noise_feasible, i));
@@ -5636,6 +5781,9 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
                 return None;
             }
             let mut stall = super::PrimalStallState::new();
+            // 作業 #5 M3: 主単体法が基底を変えるので巻き戻しの記録を捨てる。
+            pivot_log.clear();
+            pivot_flips.clear();
             if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
                 eprintln!("DEBUG_EXT: polish DUAL->PRIMAL cleanup handoff at polish_iter={iter_idx}");
             }
@@ -5715,12 +5863,14 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
         lu.solve_transpose_unit_capture(r, &mut lu_scratch, &mut rho, &mut e_tilde_buf);
 
         // 行方向の疎 PRICE: `rho` の非ゼロ行だけを走査して `a_p = rho^T A` を作る
-        // (固定列は除外。基底列は除外しない)。
+        // (固定列は除外。基底列は除外しない)。`rho_sq` は作業 #5 の雑音判定用の `‖rho‖^2`(`|rho_i| > TOL` の行)。
+        let mut rho_sq = 0.0f64;
         for i in 0..m {
             let rv = rho[i];
             if rv.abs() <= TOL {
                 continue;
             }
+            rho_sq += rv * rv;
             for &(j, v) in std.rows.row(i) {
                 if std.lb[j] == std.ub[j] {
                     continue;
@@ -5733,6 +5883,27 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
             }
         }
 
+        // 作業 #5 M1/M1'(polish 版): 行が数値的に従属に近い(`‖rho‖ > NOISE_MIN_SQRT_W`)ときだけ、逸脱が雑音水準なら
+        // 行を雑音として外し、比率テストでは `|alpha_j| <= C eps ‖rho‖ ‖a_j‖∞` の候補を外す(`noise_thr`)。
+        let noise_thr = if polish_noise_c > 0.0 && rho_sq > polish_noise_min_w { polish_noise_c * f64::EPSILON * rho_sq.sqrt() } else { 0.0 };
+        if noise_thr > 0.0 {
+            if needed <= noise_thr * polish_b_scale {
+                if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
+                    eprintln!("DEBUG_EXT: polish noise row r={r} needed={needed:.3e} |rho|={:.3e}", rho_sq.sqrt());
+                }
+                for &j in &touched_cols {
+                    a_p[j] = 0.0;
+                    touched[j] = false;
+                }
+                touched_cols.clear();
+                noise_feasible[basis[r]] = true;
+                infeasible_rows.set(r, false);
+                continue;
+            }
+            if polish_col_inf_norm.is_empty() {
+                polish_col_inf_norm.extend((0..n_total).map(|j| std.cols.col(j).iter().fold(0.0f64, |a, &(_, v)| a.max(v.abs()))));
+            }
+        }
         // chuzc1: 比率テストの候補(Eligible 集合)を作る。
         candidates.clear();
         // Eligible に含まれる `Zero` 列(最小添字)。
@@ -5741,6 +5912,12 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
             let Some(status) = nb_status[j] else { continue };
             let alpha_j = a_p[j];
             if alpha_j.abs() <= TOL {
+                continue;
+            }
+            if noise_thr > 0.0 && alpha_j.abs() <= noise_thr * polish_col_inf_norm[j] {
+                continue;
+            }
+            if r == ban_r && j == ban_q {
                 continue;
             }
             let sigma = nb_sigma(status, d_dir as f64, alpha_j);
@@ -5777,6 +5954,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
                 infeasible_rows.set(r, false);
                 continue;
             }
+            polish_infeas_check!(r, needed);
             return Some(SimplexResult { status: Status::Infeasible, x: None });
         }
         // `bland_mode` かどうかにかかわらず `(ratio, j)` の昇順に並べる(BFRT の歩進は
@@ -5809,6 +5987,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
                 touched[j] = false;
             }
             touched_cols.clear();
+            polish_infeas_check!(r, needed);
             return Some(SimplexResult { status: Status::Infeasible, x: None });
         };
 
@@ -5879,6 +6058,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
                 NbStatus::Upper => NbStatus::Lower,
                 NbStatus::Zero => unreachable!("a `Zero` column is never flipped"),
             });
+            pivot_flips.push(cand.j);
         }
 
         // 入る列 `q`、その被約費用 `dj_q`、PRICE によるピボット要素 `alpha_q`。
@@ -5903,7 +6083,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
         // updateVerify: PRICE の値 `alpha_q` と FTRAN の値 `alpha_full[r]` を照合し、
         // 不一致なら再分解・再同期してこの反復をやり直す。
         if !update_verify_disabled && lu.update_count() > 0 && !super::pivot_values_agree(alpha_q, alpha_full[r]) {
-            lu = refactorize(std, basis_pos, Some(&lu))?;
+            lu = polish_refactor!();
             lu.solve_into(&compute_rhs_plain(std, nb_status), &mut lu_scratch, &mut x_b);
             infeasible_rows.rebuild(m, |i| row_infeasible_plain(std, basis, &x_b, &noise_feasible, i));
             for &j in &touched_cols {
@@ -5950,6 +6130,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
         basis[r] = q;
         basis_pos[q] = Some(r);
         nb_status[q] = None;
+        pivot_log.push(PivotRec { r, q, leaving: leaving_var, old_status_q, flips_end: pivot_flips.len() });
         // 行 `r` の基底変数が替わったので、新しい変数で実行可能性を判定し直す。
         infeasible_rows.set(r, row_infeasible_plain(std, basis, &x_b, &noise_feasible, r));
 
@@ -5994,7 +6175,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
             if profile_phases_polish {
                 polish_refactors += 1;
             }
-            lu = refactorize(std, basis_pos, Some(&lu))?;
+            lu = polish_refactor!();
             lu.solve_into(&compute_rhs_plain(std, nb_status), &mut lu_scratch, &mut x_b);
             infeasible_rows.rebuild(m, |i| row_infeasible_plain(std, basis, &x_b, &noise_feasible, i));
         }
