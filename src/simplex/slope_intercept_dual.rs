@@ -5667,8 +5667,9 @@ struct PriceMatrix {
     col_entry_of_price: Vec<u32>,
 }
 
-/// PRICE 専用の `A` の行優先コピーと分割 PRICE の位置索引を作る (主ループの前に一度だけ。主ループの関数の
-/// コードを小さく保つため別関数にしている)。添字が `u32` に収まらなければ `None`。
+/// PRICE 専用の `A` の行優先コピーと分割 PRICE の位置索引を作る (主ループの前に一度だけ)。一度しか実行しない
+/// コードを主ループの関数の外に置くため別関数にしている (小さな問題の主ループの I1 ミスが減る。
+/// docs/improvement_history.md「疎行列の要素の添字型」)。添字が `u32` に収まらなければ `None`。
 #[inline(never)]
 fn build_price_matrix(std: &StdForm, nb_status: &[Option<NbStatus>], price_nonbasic_only: bool) -> Option<PriceMatrix> {
     let m = std.n_rows;
