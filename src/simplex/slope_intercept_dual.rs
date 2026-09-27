@@ -918,76 +918,93 @@ fn polish_fresh_d(std: &StdForm, lu: &sparse_lu::FtLu, basis: &[usize], active_c
 /// 作業 #5 M2: 行 `r` の BTRAN `rho = B^-T e_r` を Farkas の証明として、`A x = b`・`bound(j)` の
 /// 境界で実行不能であることを確かめる(主ループの `Eligible = ∅`/BFRT 使い切り、polish の実行不能判定の直前)。
 /// `g = rho^T A` と `t = rho^T b` について、境界上の `g^T x` の範囲 `[lo, hi]` が `t` を
-/// 余裕 `1e-7 max(1, |t|, max_j |g_j x_j|)` を超えて外れていれば証明済み。基底列(`r` 以外)の `g_j` は
+/// 丸め誤差の見積もり(`100 eps` × 各項の大きさの和 + `1e-9 max(1, |t|)` + 0 とみなして捨てた項)を超えて外れていれば証明済み。基底列(`r` 以外)の `g_j` は
 /// 理論上 0 で、`|g_j| <= 1e-9 max(Σ_i |rho_i a_ij|, ‖rho‖∞ ‖a_j‖∞)`(後退安定な LU の残差の水準)なら 0 とみなし、
 /// 非基底列は比率テストと同じく `|g_j| <= TOL` を 0 とみなす。
 /// LU が不安定(pilot87 を閾値 1e-3 で解くとき)や `x_B` が壊れているときの誤った `Infeasible` を防ぐ。
 #[inline(never)]
-fn infeasibility_certified(std: &StdForm, basis_pos: &[Option<usize>], rho: &[f64], r: usize, bound: impl Fn(usize) -> (f64, f64)) -> bool {
+fn infeasibility_certified(std: &StdForm, basis_pos: &[Option<usize>], nb_status: &[Option<NbStatus>], rho: &[f64], r: usize, bound: impl Fn(usize) -> (f64, f64)) -> bool {
     let m = std.n_rows;
     let n = std.n_total;
     let mut g = vec![0.0f64; n];
     let mut g_abs = vec![0.0f64; n];
     let mut t = 0.0f64;
-    let mut scale = 1.0f64;
+    // `Σ_i |rho_i b_i|`(`t` の丸め誤差の尺度)。
+    let mut scale = 0.0f64;
     for i in 0..m {
         let ri = rho[i];
-        if ri == 0.0 {
+        // PRICE と同じく `|rho_i| <= TOL` の行は使わない(証明に使う `y` を `rho` から作り直すだけなので、
+        // `g` と `t` を同じ `y` から計算する限り証明としての正しさは変わらない)。
+        if ri.abs() <= TOL {
             continue;
         }
         t += ri * std.b[i];
-        scale = scale.max((ri * std.b[i]).abs());
+        scale += (ri * std.b[i]).abs();
         for &(j, v) in std.rows.row(i) {
             g[j] += ri * v;
             g_abs[j] += (ri * v).abs();
         }
     }
-    scale = scale.max(t.abs());
     let rho_max = rho.iter().fold(0.0f64, |a, &v| a.max(v.abs()));
+    let debug = env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some();
+    // `g^T x` の範囲 `[lo, hi]` と、それぞれの丸め誤差の見積もり(`err_lo`/`err_hi`): 計算した項の大きさの和の
+    // `100 eps` 倍(`g_j` 自体の誤差 `eps Σ_i |rho_i a_ij|` を含む)と、0 とみなして捨てた項の有限な大きさ。
     let (mut lo, mut hi) = (0.0f64, 0.0f64);
-    // 診断: 無限の寄与をした列の数 (基底 / 非基底)。
-    let (mut inf_basic, mut inf_nonbasic) = (0usize, 0usize);
+    let (mut err_lo, mut err_hi) = (scale, scale);
+    let mut drop_err = 0.0f64;
+    // 診断: 各側に無限の寄与をした列の数 (基底 / 非基底) と先頭の例。
+    let (mut inf_lo, mut inf_hi) = ([0usize; 2], [0usize; 2]);
+    let mut examples: Vec<(usize, f64, f64, f64, Option<NbStatus>, f64)> = Vec::new();
     for j in 0..n {
         let mut gj = g[j];
         if gj == 0.0 {
             continue;
         }
-        if let Some(p) = basis_pos[j] {
-            if p != r {
-                let a_max = std.cols.col(j).iter().fold(0.0f64, |a, &(_, v)| a.max(v.abs()));
-                if gj.abs() <= 1e-9 * g_abs[j].max(rho_max * a_max) {
-                    gj = 0.0;
-                }
-            }
-        } else if gj.abs() <= TOL {
-            // 非基底列: 比率テスト(`chuzc1_filter_one`)と同じく `|alpha_j| <= TOL` は 0 とみなす。
+        let (l, u) = bound(j);
+        let dropped = if let Some(p) = basis_pos[j] {
+            // 基底列(`r` 以外): 後退安定な LU の残差の水準なら 0 とみなす。
+            let a_max = std.cols.col(j).iter().fold(0.0f64, |a, &(_, v)| a.max(v.abs()));
+            p != r && gj.abs() <= 1e-9 * g_abs[j].max(rho_max * a_max)
+        } else {
+            // 非基底列: 比率テスト(`chuzc1_filter_one`)と同じく `|alpha_j| <= TOL` は 0 とみなす(M1' の雑音判定は
+            // `rho` の誤差についての判定で、この `y` による証明の正しさとは関係しないので使わない)。
+            gj.abs() <= TOL
+        };
+        if dropped {
+            let (ea, eb) = ((gj * l).abs(), (gj * u).abs());
+            let e = if ea.is_finite() && eb.is_finite() { ea.max(eb) } else if ea.is_finite() { ea } else if eb.is_finite() { eb } else { 0.0 };
+            drop_err += e;
             gj = 0.0;
         }
         if gj == 0.0 {
             continue;
         }
-        let (l, u) = bound(j);
         let (a, b) = if gj > 0.0 { (gj * l, gj * u) } else { (gj * u, gj * l) };
         lo += a;
         hi += b;
-        if !a.is_finite() || !b.is_finite() {
-            if basis_pos[j].is_some() {
-                inf_basic += 1;
-            } else {
-                inf_nonbasic += 1;
-            }
-        }
+        let basic = basis_pos[j].is_some() as usize;
         if a.is_finite() {
-            scale = scale.max(a.abs());
+            err_lo += g_abs[j] / gj.abs() * a.abs();
+        } else {
+            inf_lo[basic] += 1;
         }
         if b.is_finite() {
-            scale = scale.max(b.abs());
+            err_hi += g_abs[j] / gj.abs() * b.abs();
+        } else {
+            inf_hi[basic] += 1;
+        }
+        if debug && !a.is_finite() && examples.len() < 4 {
+            examples.push((j, gj, l, u, nb_status[j], g_abs[j]));
         }
     }
-    let margin = 1e-7 * scale;
-    let ok = t > hi + margin || t < lo - margin;
-    if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
-        eprintln!("DEBUG_EXT: infeasibility certificate r={r} t={t:.6e} range=[{lo:.6e}, {hi:.6e}] margin={margin:.3e} inf_cols(basic={inf_basic}, nonbasic={inf_nonbasic}) certified={ok}");
+    let base_tol = 1e-9 * t.abs().max(1.0) + drop_err;
+    let margin_lo = base_tol + 100.0 * f64::EPSILON * err_lo;
+    let margin_hi = base_tol + 100.0 * f64::EPSILON * err_hi;
+    let ok = t > hi + margin_hi || t < lo - margin_lo;
+    if debug {
+        eprintln!(
+            "DEBUG_EXT: infeasibility certificate r={r} t={t:.6e} range=[{lo:.6e}, {hi:.6e}] margin=({margin_lo:.3e}, {margin_hi:.3e}) inf_lo(nb,basic)={inf_lo:?} inf_hi(nb,basic)={inf_hi:?} lo_examples={examples:?} certified={ok}"
+        );
     }
     ok
 }
@@ -1005,7 +1022,7 @@ fn affine_bound_value(b: Option<Affine1>, missing: f64) -> f64 {
 /// (`log`)と BFRT フリップ(`flips`)を巻き戻して前の基底に戻し、分解し直す(主ループと polish で共有)。
 /// (1) 最後の 1 ピボット(と後続のフリップ)だけを戻して試し、(2) まだ特異なら LU のピボット閾値を 1 段上げて
 /// 同じ基底で試し(分解が不安定だった場合)、(3) それでもだめなら記録全体を戻す(記録の起点の基底は分解に
-/// 成功している)。1 ピボットを戻すたびに `on_undo` を呼ぶ(主ループの PRICE 行列の分割・`row_bounds` の復元用)。
+/// 成功している)、(4) 最後に前の分解のピボット順を使わずに分解し直す。1 ピボットを戻すたびに `on_undo` を呼ぶ(主ループの PRICE 行列の分割・`row_bounds` の復元用)。
 /// `x_B`・`d`・実行不能行の集合は呼び出し側が再同期する(DSE 重みは戻さない)。成功すれば新しい分解と
 /// 最後に戻したピボットの `(r, q)` を返す。記録が無いか戻しても特異なら `None`。
 #[inline(never)]
@@ -1034,12 +1051,15 @@ fn rollback_core(
         }
     };
     let mut n_undone = 0usize;
-    for stage in 0..3 {
+    for stage in 0..4 {
         if stage == 1 {
             // (2) 閾値を上げて同じ基底を分解し直す。上限なら省く。
             if !sparse_lu::escalate_pivot_threshold() {
                 continue;
             }
+        } else if stage == 3 {
+            // (4) 記録の起点の基底を、前の分解のピボット順を使わずに分解し直す(数値的に特異に近い基底では
+            // ピボット順で成否が分かれる)。
         } else {
             // (1) 最後の 1 ピボット、(3) 全体を戻す。
             let stop = if stage == 0 { log.len().saturating_sub(1) } else { 0 };
@@ -1063,7 +1083,7 @@ fn rollback_core(
                 undo_flips(flips, nb_status, 0);
             }
         }
-        let lu = refactorize(std, basis_pos, Some(prev));
+        let lu = refactorize(std, basis_pos, if stage == 3 { None } else { Some(prev) });
         if debug {
             eprintln!(
                 "DEBUG_EXT: rollback stage={stage} undone={n_undone} threshold={:.3e} (last r={} q={}) refactor_ok={}",
@@ -2956,7 +2976,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                 let guard = infeas_guard!(r, w_r);
                 let certified = !guard
                     && phase != Phase::A
-                    && infeasibility_certified(std, &basis_pos, &rho, r, |j| (affine_bound_value(cache.lower[j], f64::NEG_INFINITY), affine_bound_value(cache.upper[j], f64::INFINITY)));
+                    && infeasibility_certified(std, &basis_pos, &nb_status, &rho, r, |j| (affine_bound_value(cache.lower[j], f64::NEG_INFINITY), affine_bound_value(cache.upper[j], f64::INFINITY)));
                 if !certified {
                     diag_infeas_guard += 1;
                     if noise_diag {
@@ -2972,8 +2992,6 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                         rhs_inc_slope = fresh_slope;
                         rebuild_rows(&mut infeasible_rows, &mut row_dev, m, &row_bounds, &x_b_base, &x_b_slope);
                         fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fresh_d_cb, &mut lu_scratch, &mut fresh_d_y, &mut d);
-                        shortlist_valid = false;
-                        chuzr_heap_valid = false;
                         continue;
                     }
                     infeasible_rows.set(r, false);
@@ -5542,11 +5560,10 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
     let mut handoff_rounds = 0usize;
 
     // 作業 #5 M2 (主ループの `infeas_check!` と同じ考え): 実行不能を結論する直前に、(1) 更新済みの分解なら
-    // 再分解してやり直し、(2) 行の逸脱が `rho` の雑音水準 `C eps ‖rho‖ max(‖b‖∞, 1)` 以下なら雑音として外し、
-    // (3) Farkas の証明([`infeasibility_certified`]、真の境界)が成り立たなければ LU の閾値を 1 段上げて再分解し、
-    // 上げられなければ誤った `Infeasible` の代わりに `None`(`NotSolved`)を返す。
+    // 再分解してやり直し、(2) Farkas の証明([`infeasibility_certified`]、真の境界)が成り立たなければ LU の閾値を
+    // 1 段上げて再分解し、上げられなければ誤った `Infeasible` の代わりに `None`(`NotSolved`)を返す。
+    // (polish は最終段なので、主ループの M1 のように行を雑音として外すことはしない: 本物の違反を残した解を返しうるため。)
     let polish_noise_c: f64 = tunable!("ENOMOTO_T_NOISE_C", NOISE_C, f64);
-    let polish_b_scale = std.b.iter().fold(0.0f64, |a, &v| a.max(v.abs())).max(1.0);
     let mut polish_uncertified = 0usize;
     // 作業 #5 M1/M1'(polish 版): `‖rho‖^2` が `NOISE_MIN_SQRT_W^2` を超える行だけ、逸脱と比率テストの候補に
     // 主ループと同じ雑音判定を掛ける(`‖rho‖` は PRICE の走査で求める)。`polish_col_inf_norm` は `‖a_j‖∞`(遅延構築)。
@@ -5601,15 +5618,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
                     continue;
                 }
                 let rho_norm = rho.iter().map(|v| v * v).sum::<f64>().sqrt();
-                if needed <= polish_noise_c * f64::EPSILON * rho_norm * polish_b_scale {
-                    if debug {
-                        eprintln!("DEBUG_EXT: polish infeas_guard: noise row r={r} needed={needed:.3e} |rho|={rho_norm:.3e}");
-                    }
-                    noise_feasible[basis[r]] = true;
-                    infeasible_rows.set(r, false);
-                    continue;
-                }
-                if !infeasibility_certified(std, basis_pos, &rho, r, |j| (std.lb[j], std.ub[j])) {
+                if !infeasibility_certified(std, basis_pos, nb_status, &rho, r, |j| (std.lb[j], std.ub[j])) {
                     polish_uncertified += 1;
                     if debug {
                         eprintln!("DEBUG_EXT: polish infeas_guard: uncertified r={r} needed={needed:.3e} |rho|={rho_norm:.3e} count={polish_uncertified}");
@@ -5885,25 +5894,14 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
 
         // 作業 #5 M1/M1'(polish 版): 行が数値的に従属に近い(`‖rho‖ > NOISE_MIN_SQRT_W`)ときだけ、逸脱が雑音水準なら
         // 行を雑音として外し、比率テストでは `|alpha_j| <= C eps ‖rho‖ ‖a_j‖∞` の候補を外す(`noise_thr`)。
-        let noise_thr = if polish_noise_c > 0.0 && rho_sq > polish_noise_min_w { polish_noise_c * f64::EPSILON * rho_sq.sqrt() } else { 0.0 };
-        if noise_thr > 0.0 {
-            if needed <= noise_thr * polish_b_scale {
-                if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
-                    eprintln!("DEBUG_EXT: polish noise row r={r} needed={needed:.3e} |rho|={:.3e}", rho_sq.sqrt());
-                }
-                for &j in &touched_cols {
-                    a_p[j] = 0.0;
-                    touched[j] = false;
-                }
-                touched_cols.clear();
-                noise_feasible[basis[r]] = true;
-                infeasible_rows.set(r, false);
-                continue;
-            }
-            if polish_col_inf_norm.is_empty() {
-                polish_col_inf_norm.extend((0..n_total).map(|j| std.cols.col(j).iter().fold(0.0f64, |a, &(_, v)| a.max(v.abs()))));
-            }
+        let mut noise_thr = if polish_noise_c > 0.0 && rho_sq > polish_noise_min_w { polish_noise_c * f64::EPSILON * rho_sq.sqrt() } else { 0.0 };
+        if noise_thr > 0.0 && polish_col_inf_norm.is_empty() {
+            polish_col_inf_norm.extend((0..n_total).map(|j| std.cols.col(j).iter().fold(0.0f64, |a, &(_, v)| a.max(v.abs()))));
         }
+        // 雑音判定で外した候補があり、残りが空なら判定なしで作り直す(polish は行を外せないので、従来どおり
+        // 極小ピボットを使う。特異になれば巻き戻す)。
+        loop {
+        let mut noise_removed = 0usize;
         // chuzc1: 比率テストの候補(Eligible 集合)を作る。
         candidates.clear();
         // Eligible に含まれる `Zero` 列(最小添字)。
@@ -5915,6 +5913,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
                 continue;
             }
             if noise_thr > 0.0 && alpha_j.abs() <= noise_thr * polish_col_inf_norm[j] {
+                noise_removed += 1;
                 continue;
             }
             if r == ban_r && j == ban_q {
@@ -5940,6 +5939,12 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
         if let Some(zc) = zero_pick {
             candidates.clear();
             candidates.push(zc);
+        }
+        if candidates.is_empty() && noise_removed > 0 {
+            noise_thr = 0.0;
+            continue;
+        }
+        break;
         }
         if candidates.is_empty() {
             for &j in &touched_cols {

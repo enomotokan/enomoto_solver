@@ -322,7 +322,9 @@ pub(crate) mod slope_intercept_dual {
     /// 逸脱が `C · eps · sqrt(w_r) · max(‖b‖∞, 1)` 以下の行は雑音として実行可能扱い (M1)、
     /// 比率テストの候補 `alpha_j = rho_r^T a_j` のうち `|alpha_j| ≤ C · eps · sqrt(w_r) · ‖a_j‖∞` のものは
     /// 雑音ピボットとして外す (M1')。`w_r` は DSE 重み (`|B^-T e_r|^2`)。`ENOMOTO_T_NOISE_C` で上書き、0 で M1/M1'/M2 を無効。
-    pub(crate) const NOISE_C: f64 = 100.0;
+    /// `eps · sqrt(w_r) · ‖·‖` 自体がすでに悲観的な上界なので `C = 1`(100 では irish の polish が逸脱 74 の本物の違反行を
+    /// 雑音とみなした。観測した致命ピボット・雑音行はすべて `C = 1` でも雑音水準の 10^5 倍以上内側)。
+    pub(crate) const NOISE_C: f64 = 1.0;
 
     /// M1/M1' を適用する `sqrt(w_r)` の下限 (これ以下の行では判定を現行と同じにする)。
     /// 通常の問題の経路を変えないためのゲート (Netlib 93 問の選択行の `sqrt(w_r)` の最大は改良履歴を参照)。
