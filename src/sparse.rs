@@ -844,7 +844,7 @@ impl<'a, I: SpIdx> SpSlice<'a, I> {
     /// `(添字, 値)` の反復子。
     #[inline(always)]
     pub fn iter(&self) -> SpIter<'a, I> {
-        SpIter { idx: self.idx.iter(), val: self.val.iter() }
+        SpIter { inner: self.idx.iter().zip(self.val.iter()) }
     }
     /// `(添字, 値)` の `Vec`。
     pub fn to_vec(&self) -> Vec<(usize, f64)> {
@@ -872,25 +872,21 @@ impl<'a, I: SpIdx> SpSlice<'a, I> {
     }
 }
 
-/// [`SpSlice`] の反復子。
+/// [`SpSlice`] の反復子 (添字と値のスライスの `zip`。位置 1 つで両方を読む)。
 #[derive(Clone)]
 pub struct SpIter<'a, I: SpIdx> {
-    idx: std::slice::Iter<'a, I>,
-    val: std::slice::Iter<'a, f64>,
+    inner: std::iter::Zip<std::slice::Iter<'a, I>, std::slice::Iter<'a, f64>>,
 }
 
 impl<'a, I: SpIdx> Iterator for SpIter<'a, I> {
     type Item = (usize, f64);
     #[inline(always)]
     fn next(&mut self) -> Option<(usize, f64)> {
-        let i = self.idx.next()?;
-        // `idx` と `val` は同じ長さ
-        let v = self.val.next()?;
-        Some((i.ix(), *v))
+        self.inner.next().map(|(&i, &v)| (i.ix(), v))
     }
     #[inline(always)]
     fn size_hint(&self) -> (usize, Option<usize>) {
-        self.idx.size_hint()
+        self.inner.size_hint()
     }
 }
 
