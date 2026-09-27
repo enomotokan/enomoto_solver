@@ -1959,9 +1959,6 @@ fn solve_slope_intercept_dual_with(std: &StdForm, opts: &crate::types::LpOptions
     // コードだけの実体を使う (小さな問題のホット経路のコード量・配置を変えないため。
     // `sparse_lu::sparse_path_min_m` 参照)。どちらも結果はビット一致 (`m >= 10,000` でゲートした
     // 経路変更は `BIG` の中にある)。
-    if env_str!("ENOMOTO_PROF_PHASES_EXT").is_some() {
-        eprintln!("PROF_PHASES_EXT dims m={} n_total={} nnz={}", std.n_rows, std.n_total, std.rows.nnz());
-    }
     if std.n_rows >= sparse_lu::sparse_path_min_m() {
         solve_slope_intercept_dual_impl::<true>(std, opts, safe_pivot)
     } else {
