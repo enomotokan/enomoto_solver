@@ -7555,6 +7555,8 @@ shell stair vtp.base)。残りは出力がビット単位で同じで、目的�
 
 ## cont1 報告 C 策5 後半: 費用摂動の総量を真の費用の尺度に合わせる (2026-09-27)
 
+**取り消し (2026-09-27)**: cont1 の引き継ぎは 1,819 → 761 反復に減るが、小さい摂動で主ループが系統的に重くなり (1 反復 +8%) 総時間 +2.7%、104 問の shifted geomean −0.11% で、リポジトリ所有者の判断により不採用。src は 3177ed7 の状態に戻した (実装は 57cd940 の履歴に残る)。案 E (費用 0 の列だけ摂動を縮める) で pilot87 が誤って infeasible を返した件は、既存コードの別のバグとして別作業で調べる。以下は試した内容の記録。
+
 ### 変更 (src/simplex.rs `perturb_costs`、src/params.rs `COST_PERTURB_BUDGET_GATE` / `COST_PERTURB_BUDGET_TARGET`)
 
 - 各列の摂動量 `(1 + r)(|c_j| + 1) base` は従来どおり (HiGHS `HEkk::initialiseCost`)。そのうえで構造列の摂動の総量
