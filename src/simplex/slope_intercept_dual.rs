@@ -2682,6 +2682,11 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         let v = tunable!("ENOMOTO_T_FLIP_TRACK_MIN_M", FLIP_TRACK_MIN_M, usize);
         v > 0 && m >= v
     };
+    // 作業 #10 (M): BFRT 結合フリップ列の FTRAN の出力は、`m` によらず (`BIG` なら) 前回書いた位置だけを消す記録版で書く
+    // (記録なし版は毎回 `O(m)` の `fill`、ken-11 で全命令の 11.5%)。値・tick は同じ。行一覧の和集合で `x_B` を更新する
+    // 経路 (`flip_track`、下の `union_lists`) は従来どおり `m >= FLIP_TRACK_MIN_M` だけ (小さな問題では和集合のソートが高い)。
+    // `ENOMOTO_T_FLIP_SOLVE_TRACK=0` で旧版。
+    let flip_solve_track = flip_track || (BIG && tunable!("ENOMOTO_T_FLIP_SOLVE_TRACK", 1u8, u8) != 0);
     // 行一覧の和集合を作る作業領域。
     let mut xb_union: Vec<usize> = Vec::new();
 
@@ -4285,7 +4290,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                     // (大きな問題のみ。`solve_sparse_into_hyper`)
                     let u_hyper_gate = tunable!("ENOMOTO_FTRAN_U_HYPER", FTRAN_U_HYPER_DENSITY, f64);
                     gp_scratch.u_hyper = BIG && u_hyper_gate > 0.0 && density_bfrt.expected() < u_hyper_gate;
-                    let base_nnz = if flip_track {
+                    let base_nnz = if flip_solve_track {
                         lu.solve_sparse_into_hyper_tracked(&sparse_base_buf, &mut sparse_scratch, &mut gp_scratch, &mut combined_alpha_base, &mut cab_track)
                     } else if BIG {
                         cab_track.set_full();
@@ -4295,7 +4300,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                     };
                     let slope_nnz = if slope_nonzero {
                         sparse_slope_buf.extend(combined_touched.iter().map(|&i| (i, combined_slope[i])));
-                        if flip_track {
+                        if flip_solve_track {
                             lu.solve_sparse_into_hyper_tracked(&sparse_slope_buf, &mut sparse_scratch, &mut gp_scratch, &mut combined_alpha_slope, &mut cas_track)
                         } else if BIG {
                             cas_track.set_full();
