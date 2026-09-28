@@ -1749,13 +1749,16 @@ impl DseState {
     /// 計算し直す (保持値のドリフトが全行に伝播するのを防ぐ)。
     fn update_after_pivot(&mut self, p: usize, alpha: &[f64], tau: &[f64], rho_p: &[f64]) {
         let pivot = alpha[p];
-        let wp_old = rho_p.iter().map(|v| v * v).sum::<f64>().max(tunable!("ENOMOTO_T_STEEPEST_EDGE_FLOOR", STEEPEST_EDGE_FLOOR, f64));
+        // 作業 #10 (J): 下限は関数の入口で 1 回だけ読む (ループ内の `tunable!` は `OnceLock` の atomic 読み出しで、
+        // 毎要素の分岐とベクトル化の妨げになっていた)。値は同じ。
+        let floor = tunable!("ENOMOTO_T_STEEPEST_EDGE_FLOOR", STEEPEST_EDGE_FLOOR, f64);
+        let wp_old = rho_p.iter().map(|v| v * v).sum::<f64>().max(floor);
         let update_one = |i: usize, w_i: &mut f64| {
             if i == p {
                 return;
             }
             let ratio = alpha[i] / pivot;
-            *w_i = (*w_i - 2.0 * ratio * tau[i] + ratio * ratio * wp_old).max(tunable!("ENOMOTO_T_STEEPEST_EDGE_FLOOR", STEEPEST_EDGE_FLOOR, f64));
+            *w_i = (*w_i - 2.0 * ratio * tau[i] + ratio * ratio * wp_old).max(floor);
         };
         if self.use_parallel {
             use rayon::prelude::*;
@@ -1766,10 +1769,10 @@ impl DseState {
             let m = self.w.len();
             for ((w_i, &a_i), &t_i) in self.w.iter_mut().zip(&alpha[..m]).zip(&tau[..m]) {
                 let ratio = a_i / pivot;
-                *w_i = (*w_i - 2.0 * ratio * t_i + ratio * ratio * wp_old).max(tunable!("ENOMOTO_T_STEEPEST_EDGE_FLOOR", STEEPEST_EDGE_FLOOR, f64));
+                *w_i = (*w_i - 2.0 * ratio * t_i + ratio * ratio * wp_old).max(floor);
             }
         }
-        self.w[p] = (wp_old / (pivot * pivot)).max(tunable!("ENOMOTO_T_STEEPEST_EDGE_FLOOR", STEEPEST_EDGE_FLOOR, f64));
+        self.w[p] = (wp_old / (pivot * pivot)).max(floor);
     }
 
     /// [`Self::update_after_pivot`] を `rows` (alpha の非零行を含む任意順の行集合) に
