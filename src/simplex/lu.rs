@@ -1613,6 +1613,8 @@ pub struct GpScratch {
     u_pos: Vec<usize>,
     /// 超疎 `U` 段 (ヒープ版) の `u_seq` 位置の最大ヒープ。
     u_heap: BinaryHeap<u32>,
+    /// 作業 #10 (F): 超疎 `U` 段の位置の降順の待ち行列 ([`MonoMaxQueue`])。
+    u_queue: MonoMaxQueue,
     /// 到達した全スロット (= `U` 後に非ゼロになりうるスロット)。
     u_list: Vec<usize>,
     /// 直前の `R` eta 適用で値が変わった行 (超疎 `U` 段の起点の候補。`reach` と合わせて
@@ -1635,6 +1637,7 @@ impl GpScratch {
             u_stack: Vec::new(),
             u_pos: Vec::new(),
             u_heap: BinaryHeap::new(),
+            u_queue: MonoMaxQueue::default(),
             u_list: Vec::new(),
             r_seeds: Vec::new(),
             r_work: RSparseWork::default(),
@@ -4093,6 +4096,83 @@ fn clear_r_seeds(gp_a: &mut Option<&mut GpScratch>, gp_b: &mut Option<&mut GpScr
     }
 }
 
+/// 作業 #10 (F): 超疎 `U` 段の「位置の降順に取り出す」待ち行列を 2 段のビット集合で持つもの。
+/// 超疎 `U` 段では、取り出した位置 `k` の eta が書く行の位置はすべて `k` より小さい (後に積む要素は常に直前に
+/// 取り出した位置より小さい) ので、最大ヒープの代わりに、ビット集合の上から下へ 1 度だけ走査すれば同じ順序
+/// (位置の降順、各位置 1 回) で取り出せる。1 回の積み・取り出しは O(1) (語の中の最上位ビット) で、空の語は
+/// 64 語ずつまとめた上位のビット集合で飛ばす。取り出し順が同じなので値・tick は `BinaryHeap` 版とビット一致。
+#[derive(Clone, Debug, Default)]
+struct MonoMaxQueue {
+    /// 位置のビット集合 (語 `w` のビット `b` = 位置 `64 w + b`)。
+    words: Vec<u64>,
+    /// 非ゼロの語のビット集合 (語 `s` のビット `b` = `words[64 s + b] != 0`)。
+    summary: Vec<u64>,
+    /// 非ゼロでありうる最上位の語の番号 (空なら `None`)。
+    top: Option<usize>,
+}
+
+impl MonoMaxQueue {
+    /// 位置 `cap` 未満を扱えるようにする (中身は空のまま)。
+    fn ensure(&mut self, cap: usize) {
+        let nw = cap / 64 + 1;
+        if self.words.len() < nw {
+            self.words.resize(nw, 0);
+            self.summary.resize(nw / 64 + 1, 0);
+        }
+    }
+
+    /// 位置 `k` を積む。
+    #[inline(always)]
+    fn push(&mut self, k: usize) {
+        let w = k >> 6;
+        self.words[w] |= 1u64 << (k & 63);
+        self.summary[w >> 6] |= 1u64 << (w & 63);
+        if self.top.is_none_or(|t| w > t) {
+            self.top = Some(w);
+        }
+    }
+
+    /// 最大の位置を取り出す。
+    #[inline(always)]
+    fn pop(&mut self) -> Option<usize> {
+        let mut w = self.top?;
+        loop {
+            let x = self.words[w];
+            if x != 0 {
+                let b = 63 - x.leading_zeros() as usize;
+                let nx = x & !(1u64 << b);
+                self.words[w] = nx;
+                if nx == 0 {
+                    self.summary[w >> 6] &= !(1u64 << (w & 63));
+                }
+                self.top = Some(w);
+                return Some((w << 6) | b);
+            }
+            // 語 `w` は空: 上位のビット集合で `w` より下の非ゼロの語を探す。
+            let mut si = w >> 6;
+            let mut mask = if w & 63 == 0 { 0 } else { self.summary[si] & ((1u64 << (w & 63)) - 1) };
+            loop {
+                if mask != 0 {
+                    w = (si << 6) | (63 - mask.leading_zeros() as usize);
+                    break;
+                }
+                if si == 0 {
+                    self.top = None;
+                    return None;
+                }
+                si -= 1;
+                mask = self.summary[si];
+            }
+        }
+    }
+
+    /// 残りをすべて捨てる。
+    fn clear(&mut self) {
+        while self.pop().is_some() {}
+        self.top = None;
+    }
+}
+
 /// 疎 FTRAN の後始末: `U` 段を超疎に行った (`hyper`) なら非ゼロになりうるのは
 /// `gp.u_list` の位置だけなので、そこだけ 0 に戻す (策1)。そうでなければ全体を戻す。
 #[inline]
@@ -5001,6 +5081,9 @@ impl FtLu {
         }
         // 一覧の長さの上限
         let limit = (tunable!("ENOMOTO_T_U_HYPER_ABORT", U_HYPER_ABORT_FRACTION, f64) * m as f64) as usize;
+        if tunable!("ENOMOTO_T_U_HYPER_BITQUEUE", 1u8, u8) != 0 {
+            return self.u_solve_hyper_queue(x, gp, limit);
+        }
         let GpScratch { reach, r_seeds, u_marks, u_heap, u_list, .. } = gp;
         u_marks.begin();
         u_list.clear();
@@ -5044,6 +5127,63 @@ impl FtLu {
                 u_heap.clear();
                 for kk in (0..k).rev() {
                     // 死んだヘッダ (`EtaFile::kill`) はピボット 1・要素なしなので処理しても値・tick は変わらない。
+                    let p = self.u_seq.key[kk] as usize;
+                    if x[p] == 0.0 {
+                        continue;
+                    }
+                    x[p] /= self.u_seq.pivot[kk];
+                    let xp = x[p];
+                    self.add_tick(self.u_seq.nnz(kk) as u64);
+                    self.u_seq.axpy(kk, -xp, x);
+                }
+                return UHyper::Full;
+            }
+        }
+        UHyper::Hyper
+    }
+
+    /// 作業 #10 (F): [`Self::u_solve_hyper_heap`] の待ち行列を [`MonoMaxQueue`] にしたもの (取り出し順・演算は同じ)。
+    fn u_solve_hyper_queue(&self, x: &mut [f64], gp: &mut GpScratch, limit: usize) -> UHyper {
+        let GpScratch { reach, r_seeds, u_marks, u_queue, u_list, .. } = gp;
+        u_queue.ensure(self.u_seq.key.len());
+        u_marks.begin();
+        u_list.clear();
+        for &s in reach.iter().chain(r_seeds.iter()) {
+            if x[s] == 0.0 || u_marks.is_marked(s) {
+                continue;
+            }
+            u_marks.mark(s);
+            u_list.push(s);
+            let k = self.slot_pos[s];
+            if k != usize::MAX {
+                u_queue.push(k);
+            }
+        }
+        while let Some(k) = u_queue.pop() {
+            let p = self.u_seq.key[k] as usize;
+            if x[p] == 0.0 {
+                continue;
+            }
+            x[p] /= self.u_seq.pivot[k];
+            let alpha = -x[p];
+            self.add_tick(self.u_seq.nnz(k) as u64);
+            let (idx, val) = self.u_seq.seg(k);
+            for (&r, &v) in idx.iter().zip(val.iter()) {
+                let r = r as usize;
+                x[r] += alpha * v;
+                if !u_marks.is_marked(r) {
+                    u_marks.mark(r);
+                    u_list.push(r);
+                    let kr = self.slot_pos[r];
+                    if kr != usize::MAX {
+                        debug_assert!(kr < k, "超疎 U 段で積む位置は取り出した位置より小さい");
+                        u_queue.push(kr);
+                    }
+                }
+            }
+            if u_list.len() > limit {
+                u_queue.clear();
+                for kk in (0..k).rev() {
                     let p = self.u_seq.key[kk] as usize;
                     if x[p] == 0.0 {
                         continue;
