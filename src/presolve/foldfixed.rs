@@ -11,6 +11,7 @@
 
 use crate::types::RowSense;
 use crate::params::presolve::TOL;
+use super::infeas_tol;
 
 /// [`fold_fixed_columns`] の結果。
 pub struct FoldFixedResult {
@@ -26,8 +27,11 @@ pub struct FoldFixedResult {
 ///
 /// `A` の等式行にも `G` の実不等式行にも同じように使える。`sense` は項がすべて消えた行の
 /// 判定にのみ使う:
-/// - [`RowSense::Eq`]: 畳み込み後の右辺が `TOL` 以内で 0 であること
-/// - [`RowSense::Le`]: 畳み込み後の右辺が `-TOL` 以上 (余裕が非負) であること
+/// - [`RowSense::Eq`]: 畳み込み後の右辺が `tol` 以内で 0 であること
+/// - [`RowSense::Le`]: 畳み込み後の右辺が `-tol` 以上 (余裕が非負) であること
+///
+/// `tol` は既定で `TOL * (1 + max(|右辺|, max_j |係数 * 固定値|))` (相対形、作業 #9)、
+/// `ENOMOTO_T_PRESOLVE_REL_TOL=0` で従来の絶対 `TOL`。
 /// - [`RowSense::Ge`]: 実際には渡されない (`G` は常に `<=` 正規化済み) が、対称に扱う
 ///
 /// 判定を通った空行は削除し、通らなければ実行不能を返す。明示的な 0 係数は右辺に触れず捨てる。
@@ -39,21 +43,27 @@ pub fn fold_fixed_columns(rows: &[Vec<(usize, f64)>], rhs: &[f64], lb: &[f64], u
         let mut live = Vec::with_capacity(row.len());
         // 固定列の寄与を差し引いた右辺
         let mut folded = r;
+        // 畳み込んだ量の大きさ `max(|r|, max_j |v_j x_j|)` (空行の判定の許容誤差の基準。丸め誤差はこれに比例する)
+        let mut scale = r.abs();
         for &(j, v) in row {
             if v == 0.0 {
                 continue;
             }
             if lb[j] == ub[j] {
-                folded -= v * lb[j];
+                let t = v * lb[j];
+                folded -= t;
+                scale = scale.max(t.abs());
             } else {
                 live.push((j, v));
             }
         }
         if live.is_empty() {
+            // 既定は相対形 `TOL * (1 + scale)` (`ENOMOTO_T_PRESOLVE_REL_TOL=0` で従来の絶対 `TOL`)
+            let tol = infeas_tol(TOL, scale);
             let ok = match sense {
-                RowSense::Eq => folded.abs() <= TOL,
-                RowSense::Le => folded >= -TOL,
-                RowSense::Ge => folded <= TOL,
+                RowSense::Eq => folded.abs() <= tol,
+                RowSense::Le => folded >= -tol,
+                RowSense::Ge => folded <= tol,
             };
             if !ok {
                 return FoldFixedResult { rows: Vec::new(), rhs: Vec::new(), infeasible: true };
@@ -105,6 +115,21 @@ mod tests {
         let result = fold_fixed_columns(&rows, &rhs, &lb, &ub, RowSense::Eq);
         assert!(!result.infeasible);
         assert!(result.rows.is_empty());
+    }
+
+    /// 相対形の空行判定: 大きな量 (3e8) の畳み込みで残る丸め程度 (相対 1e-15) の残差は矛盾としない。
+    #[test]
+    fn a_row_reduced_to_zero_live_terms_tolerates_relative_rounding_at_large_scale() {
+        let rows = vec![vec![(0, 1.0), (1, 1.0)]];
+        let rhs = vec![3e8 + 3e-7];
+        let lb = vec![1e8, 2e8];
+        let ub = vec![1e8, 2e8];
+        let result = fold_fixed_columns(&rows, &rhs, &lb, &ub, RowSense::Eq);
+        assert!(!result.infeasible);
+        // 相対 1e-6 の残差は矛盾
+        let rhs = vec![3e8 * (1.0 + 1e-6)];
+        let result = fold_fixed_columns(&rows, &rhs, &lb, &ub, RowSense::Eq);
+        assert!(result.infeasible);
     }
 
     #[test]

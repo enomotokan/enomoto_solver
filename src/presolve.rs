@@ -50,6 +50,20 @@ use crate::params::presolve::{
     ROUND_STRUCT_STOP, ROUND_STRUCT_STOP_FIXPOINT,
 };
 
+/// 前処理の実行不能判定に使う許容誤差: `base * (1 + |scale|)` (相対形、既定) または `base` (従来の絶対形)。
+///
+/// `scale` は判定に関わる量の大きさ (固定値、行の活動度の項の絶対値の和、境界の絶対値など)。
+/// 丸め誤差はその大きさに比例するため (`params::presolve::PRESOLVE_REL_TOL` 参照)。
+/// `ENOMOTO_T_PRESOLVE_REL_TOL=0` で従来の絶対判定に戻る。`scale` が有限でなければ `base`。
+#[inline]
+pub(crate) fn infeas_tol(base: f64, scale: f64) -> f64 {
+    if tunable!("ENOMOTO_T_PRESOLVE_REL_TOL", crate::params::presolve::PRESOLVE_REL_TOL, usize) != 0 && scale.is_finite() {
+        base * (1.0 + scale.abs())
+    } else {
+        base
+    }
+}
+
 /// モデルの変数・制約から `(A, b, G, h)` を組み立てる。
 ///
 /// 等式行は A/b へ、`<=` 行はそのまま、`>=` 行は符号反転して G/h へ入れる。

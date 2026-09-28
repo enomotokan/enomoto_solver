@@ -22,7 +22,8 @@
 //! 開発経緯・並列化を見送った理由などは改良履歴メモを参照。
 
 use crate::sparse::{FaerCsr, CsrRowBuilder, csr_from_rows, csr_row_iter, csr_row_vec};
-use crate::params::presolve::{EQPROP_RELTOL, PROPAGATE_EPS, PROP_RELTOL};
+use crate::params::presolve::{EQPROP_RELTOL, PROPAGATE_EPS, PROP_CANCEL_RATIO, PROP_RELTOL};
+use super::infeas_tol;
 
 /// 伝播のパスの打ち切り条件 ([`propagate_split`]・[`propagate_equalities`])。
 ///
@@ -148,13 +149,53 @@ pub fn extract_bounds_only(n: usize, g: &FaerCsr, h: &[f64]) -> (Vec<f64>, Vec<f
     (lb, ub)
 }
 
-/// ある変数で `lb > ub + PROPAGATE_EPS` (境界が互いに矛盾) なら `true`。
+/// ある変数で `lb > ub + tol` (境界が互いに矛盾) なら `true` ([`crossing_tol`] 参照)。
 ///
 /// 単一変数制約と箱境界が矛盾する場合などの真の実行不能を検出する。
 /// `lb`/`ub` を他で使う前 (特に `dualfix` が片側に固定して矛盾を消して
 /// しまう前) に必ず確認すること。
 pub fn bounds_inconsistent(n: usize, lb: &[f64], ub: &[f64]) -> bool {
-    (0..n).any(|j| lb[j] > ub[j] + PROPAGATE_EPS)
+    (0..n).any(|j| lb[j] > ub[j] + PROPAGATE_EPS && lb[j] > ub[j] + crossing_tol(lb[j], ub[j]))
+}
+
+/// 境界の交差 `lb > ub` を実行不能とみなす閾値。既定は `PROPAGATE_EPS * (1 + max(|lb|, |ub|))`
+/// (有限な方だけ。相対形、作業 #9)、`ENOMOTO_T_PRESOLVE_REL_TOL=0` で従来の絶対 `PROPAGATE_EPS`。
+#[inline]
+fn crossing_tol(lb: f64, ub: f64) -> f64 {
+    let scale = match (lb.is_finite(), ub.is_finite()) {
+        (true, true) => lb.abs().max(ub.abs()),
+        (true, false) => lb.abs(),
+        (false, true) => ub.abs(),
+        (false, false) => 0.0,
+    };
+    infeas_tol(PROPAGATE_EPS, scale)
+}
+
+/// 行の項 `(j, v)` から列 `k` を除いた最小活動度 (`upper == false`) または最大活動度 (`upper == true`) を
+/// 直接足し合わせて求める (`k` 以外の読む境界はすべて有限であること)。
+/// `finite_sum - contrib_k` の桁落ち (k の寄与が行を支配するとき) を避けるのに使う ([`PROP_CANCEL_RATIO`] 参照)。
+#[inline]
+fn activity_excluding(row: impl Iterator<Item = (usize, f64)>, k: usize, lb: &[f64], ub: &[f64], upper: bool) -> f64 {
+    let mut s = 0.0f64;
+    for (j, v) in row {
+        if v == 0.0 || j == k {
+            continue;
+        }
+        s += if (v > 0.0) != upper { v * lb[j] } else { v * ub[j] };
+    }
+    s
+}
+
+/// `finite_sum` (項の絶対値の和 `abs_sum`) から列 k の寄与 `contrib` を除いた活動度。
+/// `|contrib|` が他の項の絶対値の和の `ratio` 倍を超える (桁落ちする) ときだけ `recompute` で直接計算し直し、
+/// それ以外は従来どおり引き算 (結果のビットは従来と同じ)。`ratio == 0` で常に引き算。
+#[inline]
+fn excluded_activity(finite_sum: f64, abs_sum: f64, contrib: f64, ratio: f64, recompute: impl FnOnce() -> f64) -> f64 {
+    if ratio > 0.0 && contrib.abs() > ratio * (abs_sum - contrib.abs()) {
+        recompute()
+    } else {
+        finite_sum - contrib
+    }
 }
 
 /// [`propagate`] の結果から再畳み込みした `g`/`h` を除いたもの。
@@ -229,6 +270,8 @@ pub fn propagate_split(n: usize, mut lb: Vec<f64>, mut ub: Vec<f64>, mut rows: V
     // `reltol * (1 + |bound|)` を超えるときだけ更新する (HiGHS 流、巡回構造での
     // 境界の幾何級数的な削り込みを止める)。
     let reltol = tunable!("ENOMOTO_T_PROP_RELTOL", PROP_RELTOL, f64);
+    // 桁落ち回避の閾値 (`ENOMOTO_T_PROP_CANCEL_RATIO`、0 で無効)
+    let cancel_ratio = tunable!("ENOMOTO_T_PROP_CANCEL_RATIO", PROP_CANCEL_RATIO, f64);
 
     if bounds_inconsistent(n, &lb, &ub) {
         return PropagateSplit::infeasible();
@@ -257,6 +300,8 @@ pub fn propagate_split(n: usize, mut lb: Vec<f64>, mut ub: Vec<f64>, mut rows: V
             // 有限な項だけの最小/最大活動度の和
             let mut finite_sum_inf = 0.0f64;
             let mut finite_sum_sup = 0.0f64;
+            // finite_sum_inf の各項の絶対値の和 (実行不能判定の許容誤差と桁落ちの判定に使う)
+            let mut finite_abs_inf = 0.0f64;
             // 最小活動度を -inf にする項の個数と、その最初の変数 (個数が 1 のときだけ使う)
             let mut inf_unbounded_count = 0usize;
             let mut inf_unbounded_first = usize::MAX;
@@ -267,6 +312,7 @@ pub fn propagate_split(n: usize, mut lb: Vec<f64>, mut ub: Vec<f64>, mut rows: V
                 if v > 0.0 {
                     if lb[j].is_finite() {
                         finite_sum_inf += v * lb[j];
+                        finite_abs_inf += (v * lb[j]).abs();
                     } else {
                         {
                             if inf_unbounded_count == 0 {
@@ -283,6 +329,7 @@ pub fn propagate_split(n: usize, mut lb: Vec<f64>, mut ub: Vec<f64>, mut rows: V
                 } else {
                     if ub[j].is_finite() {
                         finite_sum_inf += v * ub[j];
+                        finite_abs_inf += (v * ub[j]).abs();
                     } else {
                         {
                             if inf_unbounded_count == 0 {
@@ -303,7 +350,9 @@ pub fn propagate_split(n: usize, mut lb: Vec<f64>, mut ub: Vec<f64>, mut rows: V
             let min_activity = if inf_unbounded_count == 0 { finite_sum_inf } else { f64::NEG_INFINITY };
             let max_activity = if sup_unbounded_count == 0 { finite_sum_sup } else { f64::INFINITY };
 
-            if min_activity > b + PROPAGATE_EPS {
+            // 実行不能判定の許容誤差は既定で `PROPAGATE_EPS * (1 + max(Σ|項|, |b|))` (相対形、作業 #9)。
+            // 絶対 `PROPAGATE_EPS` を超えるがこの範囲に収まる違反は、下の強制行として扱う。
+            if min_activity > b + PROPAGATE_EPS && min_activity > b + infeas_tol(PROPAGATE_EPS, finite_abs_inf.max(b.abs())) {
                 infeasible = true;
                 break;
             }
@@ -315,8 +364,10 @@ pub fn propagate_split(n: usize, mut lb: Vec<f64>, mut ub: Vec<f64>, mut rows: V
             // 強制行 (HiGHS の rowPresolve と同じ): 最小活動度 (有限) が b に等しければ、
             // 全項を最小活動度を与える側の境界 (正係数は下限、負係数は上限) に固定でき、
             // 行自体は自明に満たされるので削除する。`inf_unbounded_count == 0` により
-            // 読む境界はすべて有限。
-            if inf_unbounded_count == 0 && (finite_sum_inf - b).abs() <= PROPAGATE_EPS {
+            // 読む境界はすべて有限。上の判定を通っているので `finite_sum_inf > b + PROPAGATE_EPS` は
+            // 許容誤差内の違反 (相対形のときだけ起こる) で、これも強制行とみなす (従来の `|finite_sum_inf - b| <= EPS` と、
+            // 絶対形のときは同値)。
+            if inf_unbounded_count == 0 && finite_sum_inf >= b - PROPAGATE_EPS {
                 for &(j, v) in &row {
                     if v > 0.0 {
                         ub[j] = lb[j];
@@ -332,7 +383,7 @@ pub fn propagate_split(n: usize, mut lb: Vec<f64>, mut ub: Vec<f64>, mut rows: V
             for &(k, aik) in &row {
                 let l_s = if inf_unbounded_count == 0 {
                     let contrib_k = if aik > 0.0 { aik * lb[k] } else { aik * ub[k] };
-                    finite_sum_inf - contrib_k
+                    excluded_activity(finite_sum_inf, finite_abs_inf, contrib_k, cancel_ratio, || activity_excluding(row.iter().copied(), k, &lb, &ub, false))
                 } else if inf_unbounded_count == 1 && inf_unbounded_first == k {
                     finite_sum_inf
                 } else {
@@ -383,6 +434,15 @@ pub fn propagate_split(n: usize, mut lb: Vec<f64>, mut ub: Vec<f64>, mut rows: V
     // 押して交差させることがあるので、全パス後にもう一度確認する。
     if !infeasible && bounds_inconsistent(n, &lb, &ub) {
         infeasible = true;
+    }
+    if !infeasible {
+        // 許容誤差内の交差のうち、従来の絶対 `PROPAGATE_EPS` を超えるもの (相対形のときだけ残る) は 1 点に揃える
+        // (`propagate_equalities` と同じ)。`PROPAGATE_EPS` 以内の交差は従来どおり残す (出力を変えないため)。
+        for j in 0..n {
+            if lb[j] > ub[j] + PROPAGATE_EPS {
+                lb[j] = ub[j];
+            }
+        }
     }
 
     if infeasible {
@@ -574,6 +634,8 @@ pub fn propagate_equalities(a: &FaerCsr, b: &[f64], lb: &mut [f64], ub: &mut [f6
     let ar = a.as_ref();
     // 相対改善閾値 (`ENOMOTO_T_EQPROP_RELTOL`、0 で無効)。
     let reltol = tunable!("ENOMOTO_T_EQPROP_RELTOL", EQPROP_RELTOL, f64);
+    // 桁落ち回避の閾値 (`ENOMOTO_T_PROP_CANCEL_RATIO`、0 で無効)
+    let cancel_ratio = tunable!("ENOMOTO_T_PROP_CANCEL_RATIO", PROP_CANCEL_RATIO, f64);
     // 境界 old を new に置き換えるべきか: 無限の境界は常に置き換え、有限なら
     // 変化量が PROPAGATE_EPS (と reltol * (1 + |old|)) を超えるときだけ。
     let improves = |old: f64, new: f64| -> bool {
@@ -599,6 +661,9 @@ pub fn propagate_equalities(a: &FaerCsr, b: &[f64], lb: &mut [f64], ub: &mut [f6
             // 有限な項だけの最小/最大活動度の和
             let mut finite_sum_inf = 0.0f64;
             let mut finite_sum_sup = 0.0f64;
+            // それぞれの項の絶対値の和 (実行不能判定の許容誤差と桁落ちの判定に使う)
+            let mut finite_abs_inf = 0.0f64;
+            let mut finite_abs_sup = 0.0f64;
             // 最小/最大活動度を無限にする変数の一覧
             let mut inf_unbounded: Vec<usize> = Vec::new();
             let mut sup_unbounded: Vec<usize> = Vec::new();
@@ -614,22 +679,26 @@ pub fn propagate_equalities(a: &FaerCsr, b: &[f64], lb: &mut [f64], ub: &mut [f6
                 if v > 0.0 {
                     if lb[j].is_finite() {
                         finite_sum_inf += v * lb[j];
+                        finite_abs_inf += (v * lb[j]).abs();
                     } else {
                         inf_unbounded.push(j);
                     }
                     if ub[j].is_finite() {
                         finite_sum_sup += v * ub[j];
+                        finite_abs_sup += (v * ub[j]).abs();
                     } else {
                         sup_unbounded.push(j);
                     }
                 } else {
                     if ub[j].is_finite() {
                         finite_sum_inf += v * ub[j];
+                        finite_abs_inf += (v * ub[j]).abs();
                     } else {
                         inf_unbounded.push(j);
                     }
                     if lb[j].is_finite() {
                         finite_sum_sup += v * lb[j];
+                        finite_abs_sup += (v * lb[j]).abs();
                     } else {
                         sup_unbounded.push(j);
                     }
@@ -641,12 +710,18 @@ pub fn propagate_equalities(a: &FaerCsr, b: &[f64], lb: &mut [f64], ub: &mut [f6
             // 行の真の最小/最大活動度
             let min_activity = if inf_unbounded.is_empty() { finite_sum_inf } else { f64::NEG_INFINITY };
             let max_activity = if sup_unbounded.is_empty() { finite_sum_sup } else { f64::INFINITY };
-            if min_activity > bi + PROPAGATE_EPS || max_activity < bi - PROPAGATE_EPS {
+            // 実行不能判定の許容誤差は既定で `PROPAGATE_EPS * (1 + max(Σ|項|, |b|))` (相対形、作業 #9)。
+            // 絶対 `PROPAGATE_EPS` を超えるがこの範囲に収まる違反は、下の強制行として扱う。
+            if (min_activity > bi + PROPAGATE_EPS && min_activity > bi + infeas_tol(PROPAGATE_EPS, finite_abs_inf.max(bi.abs())))
+                || (max_activity < bi - PROPAGATE_EPS && max_activity < bi - infeas_tol(PROPAGATE_EPS, finite_abs_sup.max(bi.abs())))
+            {
                 res.infeasible = true;
                 return res;
             }
-            // 下側の強制: 全項が最小活動度側の境界にあるときだけ b に届く。
-            if inf_unbounded.is_empty() && (finite_sum_inf - bi).abs() <= PROPAGATE_EPS {
+            // 下側の強制: 全項が最小活動度側の境界にあるときだけ b に届く。上の判定を通っているので
+            // `finite_sum_inf > bi + PROPAGATE_EPS` は許容誤差内の違反 (相対形のときだけ起こる) で、これも強制とみなす
+            // (絶対形のときは従来の `|finite_sum_inf - bi| <= EPS` と同値)。上側も対称。
+            if inf_unbounded.is_empty() && finite_sum_inf >= bi - PROPAGATE_EPS {
                 if !forcing_seen[i] {
                     forcing_seen[i] = true;
                     res.forcing_rows += 1;
@@ -669,7 +744,7 @@ pub fn propagate_equalities(a: &FaerCsr, b: &[f64], lb: &mut [f64], ub: &mut [f6
                 continue;
             }
             // 上側の強制: 対称に、全項が最大活動度側の境界。
-            if sup_unbounded.is_empty() && (finite_sum_sup - bi).abs() <= PROPAGATE_EPS {
+            if sup_unbounded.is_empty() && finite_sum_sup <= bi + PROPAGATE_EPS {
                 if !forcing_seen[i] {
                     forcing_seen[i] = true;
                     res.forcing_rows += 1;
@@ -696,9 +771,11 @@ pub fn propagate_equalities(a: &FaerCsr, b: &[f64], lb: &mut [f64], ub: &mut [f6
                     continue;
                 }
                 // `A_i x <= b` 側: k を除いた最小活動度 l_s から境界を得る。
+                // k の寄与が行を支配するときは、引き算の桁落ちを避けて k を除いた和を直接計算する
+                // (`PROP_CANCEL_RATIO` 参照。ken-18 の行 3749 で下限が相対 4e-14 ずれた原因)。
                 let l_s = if inf_unbounded.is_empty() {
                     let contrib = if aik > 0.0 { aik * lb[k] } else { aik * ub[k] };
-                    Some(finite_sum_inf - contrib)
+                    Some(excluded_activity(finite_sum_inf, finite_abs_inf, contrib, cancel_ratio, || activity_excluding(csr_row_iter(a, i), k, lb, ub, false)))
                 } else if inf_unbounded.len() == 1 && inf_unbounded[0] == k {
                     Some(finite_sum_inf)
                 } else {
@@ -723,7 +800,7 @@ pub fn propagate_equalities(a: &FaerCsr, b: &[f64], lb: &mut [f64], ub: &mut [f6
                 // `A_i x >= b` 側: k を除いた最大活動度 u_s から境界を得る。
                 let u_s = if sup_unbounded.is_empty() {
                     let contrib = if aik > 0.0 { aik * ub[k] } else { aik * lb[k] };
-                    Some(finite_sum_sup - contrib)
+                    Some(excluded_activity(finite_sum_sup, finite_abs_sup, contrib, cancel_ratio, || activity_excluding(csr_row_iter(a, i), k, lb, ub, true)))
                 } else if sup_unbounded.len() == 1 && sup_unbounded[0] == k {
                     Some(finite_sum_sup)
                 } else {
@@ -745,12 +822,12 @@ pub fn propagate_equalities(a: &FaerCsr, b: &[f64], lb: &mut [f64], ub: &mut [f6
                         res.tightened += 1;
                     }
                 }
-                if lb[k] > ub[k] + PROPAGATE_EPS {
+                if lb[k] > ub[k] + PROPAGATE_EPS && lb[k] > ub[k] + crossing_tol(lb[k], ub[k]) {
                     res.infeasible = true;
                     return res;
                 }
                 if lb[k] > ub[k] {
-                    // PROPAGATE_EPS 以内の交差: 1 点に揃える。
+                    // 許容誤差 (`crossing_tol`、既定は相対形) 以内の交差: 1 点に揃える。
                     lb[k] = ub[k];
                 }
             }
@@ -810,6 +887,49 @@ mod eqprop_tests {
         let b = vec![5.0];
         let mut lb = vec![0.0, 0.0];
         let mut ub = vec![1.0, 1.0];
+        let res = propagate_equalities(&a, &b, &mut lb, &mut ub, 1);
+        assert!(res.infeasible);
+    }
+
+    /// ken-18 型の桁落ち: 行 `a0 x0 + a1 x1 + a2 x2 + a3 x3 = 0` で x0 の寄与 (a0 * ub0 = -4.3e6) が行を支配する。
+    /// `finite_sum - contrib` の引き算では x0 の下限が真値から 1.3e-8 ずれるが、k を除いた和を直接計算すると
+    /// 後段 (foldfixed + rowsingleton) が計算する値 `-(Σ a_j x_j) / a0` とビット単位で一致する。
+    #[test]
+    fn dominant_term_bound_avoids_cancellation() {
+        let a0 = -1.888290021904761e-2;
+        let coeffs = [0.0227359, 0.0188518, 0.974715];
+        let lows = [186007.49845810703, 58521.23785042912, 1320.4890574193275];
+        let a = csr_from_rows(&[vec![(0, a0), (1, coeffs[0]), (2, coeffs[1]), (3, coeffs[2])]], 4);
+        let b = vec![0.0];
+        let mut lb = vec![0.0, lows[0], lows[1], lows[2]];
+        let mut ub = vec![2.2721390e8, 1e7, 1e7, 1e7];
+        let res = propagate_equalities(&a, &b, &mut lb, &mut ub, 1);
+        assert!(!res.infeasible);
+        let others = coeffs[0] * lows[0] + coeffs[1] * lows[1] + coeffs[2] * lows[2];
+        let exact = -others / a0;
+        // 旧式 (引き算) の値は 1e-9 を超えてずれる (この試験が桁落ちを実際に踏んでいることの確認)
+        let finite_sum = a0 * 2.2721390e8 + coeffs[0] * lows[0] + coeffs[1] * lows[1] + coeffs[2] * lows[2];
+        let naive = -(finite_sum - a0 * 2.2721390e8) / a0;
+        assert!((naive - exact).abs() > 1e-9, "naive={naive} exact={exact}");
+        assert_eq!(lb[0], exact);
+    }
+
+    /// 相対形の実行不能判定: スケール後の大きな量 (1e8) で、活動度が右辺を丸め程度 (相対 1e-15) だけ
+    /// 超える等式行は実行不能ではなく強制行として扱う。相対 1e-6 超えるものは従来どおり実行不能。
+    #[test]
+    fn relative_tolerance_in_equality_infeasibility() {
+        // x0 in [1e8, 2e8], x1 in [0, 1]: 行 x0 + x1 = 1e8 - 1e-7 (最小活動度が 1e-7 = 相対 1e-15 だけ超える)
+        let a = csr_from_rows(&[vec![(0, 1.0), (1, 1.0)]], 2);
+        let b = vec![1e8 - 1e-7];
+        let mut lb = vec![1e8, 0.0];
+        let mut ub = vec![2e8, 1.0];
+        let res = propagate_equalities(&a, &b, &mut lb, &mut ub, 1);
+        assert!(!res.infeasible);
+        assert_eq!((lb[0], ub[0], lb[1], ub[1]), (1e8, 1e8, 0.0, 0.0));
+        // 相対 1e-6 のはみ出しは実行不能
+        let b = vec![1e8 * (1.0 - 1e-6)];
+        let mut lb = vec![1e8, 0.0];
+        let mut ub = vec![2e8, 1.0];
         let res = propagate_equalities(&a, &b, &mut lb, &mut ub, 1);
         assert!(res.infeasible);
     }

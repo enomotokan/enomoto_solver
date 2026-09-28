@@ -747,6 +747,40 @@ pub(crate) mod presolve {
     /// 有限の境界は変化量が `reltol * (1 + |old|)` を超えるときだけ更新する。0 で無効。
     pub(crate) const EQPROP_RELTOL: f64 = 0.0;
 
+    // ---- 前処理の実行不能判定の許容誤差 (作業 #9、ken-18 の誤った infeasible) ----
+
+    /// 前処理の実行不能判定 (rowsingleton の境界外、foldfixed の空行の残差、propagate の
+    /// 活動度 > 右辺・境界の交差) を相対形 `TOL * (1 + |関わる量の大きさ|)` で行うか
+    /// (`ENOMOTO_T_PRESOLVE_REL_TOL`、1 = 相対 (既定)、0 = 従来の絶対 `TOL`/`PROPAGATE_EPS`)。
+    ///
+    /// 根拠: 浮動小数の丸め誤差は演算に関わる量の大きさに比例する (1 ulp = 2.2e-16 × |量|)。
+    /// Ruiz スケール後は境界が 1e5〜1e9 になる列があり (ken-18、pds-*、fome13、dfl001 など)、
+    /// そこでは 1 ulp が 1e-11〜1e-7 に達して、絶対 1e-9 は「桁落ちが 1 回起きれば誤判定」の
+    /// 距離になる。相対 1e-9 は倍精度の丸め (2.2e-16) より 7 桁緩く、単体法の実行可能性許容誤差
+    /// (`PRIMAL_FEAS_TOL` 1e-7、HiGHS の `primal_feasibility_tolerance` と同じ) より 2 桁厳しい。
+    /// 量が 1 以下なら従来の絶対判定とほぼ同じ。
+    pub(crate) const PRESOLVE_REL_TOL: usize = 1;
+
+    /// rowsingleton: 固定値 `b_i / a_ij` が境界 `[lb, ub]` から `ROWSINGLETON_CLAMP_TOL * (1 + |値|)`
+    /// 以内だけはみ出すときは、実行不能とせず境界へクランプして固定する
+    /// (`ENOMOTO_T_ROWSINGLETON_CLAMP_TOL`、0 で無効 = はみ出しは上の相対/絶対 `TOL` までだけ許す)。
+    /// HiGHS `HPresolve` の行シングルトンと同じ扱いで、値は単体法の実行可能性許容誤差
+    /// (`PRIMAL_FEAS_TOL` 1e-7 = HiGHS の `primal_feasibility_tolerance`) に合わせる。
+    /// 相対形にするのは、スケール後の値の大きさに依らず元の座標での相対違反を一定にするため
+    /// (列スケール `d_j` を掛けても相対値は変わらない)。はみ出しが `TOL * (1 + |値|)` 以内
+    /// (丸めの範囲) なら従来どおり値そのもの (行を厳密に満たす) で固定し、クランプはしない。
+    pub(crate) const ROWSINGLETON_CLAMP_TOL: f64 = 1e-7;
+
+    /// 伝播 (`propagate_split`・`propagate_equalities`) で「列 k を除いた最小/最大活動度」
+    /// `l_s = finite_sum - contrib_k` の桁落ちを避ける閾値 (`ENOMOTO_T_PROP_CANCEL_RATIO`、0 で無効)。
+    /// `|contrib_k|` が他の項の絶対値の和のこの倍を超える (k の寄与が行を支配する) ときは、
+    /// 引き算をやめて k を除いた和を直接計算し直す。引き算の誤差は `eps * |contrib_k|`、
+    /// 直接和の誤差は `項数 * eps * (他の項の絶対値の和)` 程度なので、支配が 16 倍 (4 ビット) を
+    /// 超えれば直接和の方が確実に正確になる (ken-18 の行 3749 は 650 倍、誤差 4e-14 相対)。
+    /// 1 行で支配する項は高々 1 つなので、再計算の費用は行あたり高々 1 回分の走査。
+    /// 支配されない行は従来と同じ式のままなので結果のビットは変わらない。
+    pub(crate) const PROP_CANCEL_RATIO: f64 = 16.0;
+
     // ---- redundancy (等式行の一次従属検出) ----
 
     /// 重複除去後の等式行の非零密度 `nnz / (p * n)` がこれを超えたら密 QR
