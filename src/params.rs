@@ -772,14 +772,15 @@ pub(crate) mod presolve {
     pub(crate) const ROWSINGLETON_CLAMP_TOL: f64 = 1e-7;
 
     /// 伝播 (`propagate_split`・`propagate_equalities`) で「列 k を除いた最小/最大活動度」
-    /// `l_s = finite_sum - contrib_k` の桁落ちを避ける閾値 (`ENOMOTO_T_PROP_CANCEL_GUARD`、0 で無効)。
-    /// 桁落ち誤差の見積もり `項数 * eps * |contrib_k|` を `|a_ik|` で割った境界候補の誤差が、後段の実行不能判定の
-    /// 許容誤差 `PROPAGATE_EPS * (1 + |候補|)` のこの割合 (1%) を超えうるときだけ、引き算をやめて k を除いた和を
-    /// 直接計算し直す (その行を 1 回余分に走査)。つまり伝播の丸めが相対形の判定 (`PRESOLVE_REL_TOL`) の余裕を
-    /// 食いつぶさないことを保証する安全網。k の寄与が大きく候補が小さい (|b - l_s| ≪ |contrib_k|) 行で効く。
+    /// `l_s = finite_sum - a_ik * bound_k` の桁落ちを避ける閾値 (`ENOMOTO_T_PROP_CANCEL_GUARD`、0 で無効)。
+    /// 桁落ち誤差の見積もり `項数 * eps * |a_ik * bound_k|` を `|a_ik|` で割った境界候補の誤差 `項数 * eps * |bound_k|` が、
+    /// 後段の実行不能判定の許容誤差 `PROPAGATE_EPS * (1 + |候補|)` のこの割合 (1%) を超えうるときだけ、引き算をやめて
+    /// k を除いた和を直接計算し直す (その行をもう 1 回走査)。候補が境界を実際に締めるときだけ判定する
+    /// (`propagate::refine_candidate`)。伝播の丸めが相対形の判定 (`PRESOLVE_REL_TOL`) の余裕を食いつぶさないことを
+    /// 保証する安全網で、k の寄与が大きく候補が小さい (|b - l_s| ≪ |a_ik * bound_k|) 行で効く。
     /// ken-18 の行 3749 の桁落ち (相対 4e-14) は相対判定で吸収される大きさなのでこの閾値にはかからない。
-    /// 発火して前処理の出力 (のビット) が変わるのは Netlib/Kennington/Mittelmann 120 問のうち 80bau3b, fffff800,
-    /// pilot, pilot.we, pilot87, pilotnov, stair, ken-07/11/13 (pilot/pilot87 は割合 100 でも発火する)。
+    /// Netlib/Kennington/Mittelmann 120 問で発火して前処理の出力 (のビット) が変わるのは 80bau3b, fffff800, pilot,
+    /// pilot.we, pilot87, pilotnov, stair の 7 問。
     pub(crate) const PROP_CANCEL_GUARD: f64 = 0.01;
 
     // ---- redundancy (等式行の一次従属検出) ----

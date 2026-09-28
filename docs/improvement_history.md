@@ -7840,6 +7840,95 @@ BFRT の使い切りで誤って infeasible を返していた (HEAD でも `ENO
 判定の材料: 正しさの修正として、摂動を変えた全設定 (費用 0 の列の摂動 0・摂動なし・0.1 倍、雑音判定の有無) で Netlib 93 問が
 optimal かつ HiGHS と相対 1e-6 以内、作業 #5 の試験も全合格。既定設定の Netlib 93 問・Mittelmann 11 問は経路不変。
 
+## 前処理の誤った infeasible の修正: 実行不能判定の相対化・行シングルトンのクランプ・伝播の桁落ち回避 (作業 #9、正しさのバグ) (2026-09-28)
+
+調査レポート `analysis/ken18_false_infeasible_20260928_031518.md` の対処 (A)(B)(C) を実装した。Kennington ken-18 (実行可能、
+HiGHS -52217025287.3968) が前処理のラウンド 0 で infeasible になっていた。Ruiz スケール後の座標 (列スケール ~1e-4 で値は 1e5〜1e9) で、
+`propagate_equalities` が `l_s = finite_sum_inf - contrib_k` の桁落ち (x_k の寄与 -4.29e6 を足して引く) × `1/|a_ik|` = 53 倍の増幅で
+下限を真値より 1.41e-8 (相対 4e-14) 大きく出し、`rowsingleton` が `b'/coeff` (= HiGHS の最適解 x = 36 とビット単位で一致) を
+**絶対 1e-9** の判定で「境界の外」として実行不能と判定していた。セッション開始時点から存在するバグ (退行ではない)。
+
+### 採用 (src/presolve.rs、src/presolve/{rowsingleton,foldfixed,propagate}.rs、src/params.rs)
+
+- **(A) 実行不能判定の許容誤差を相対形に** (`presolve::infeas_tol(base, scale) = base * (1 + |scale|)`、`PRESOLVE_REL_TOL`、
+  `ENOMOTO_T_PRESOLVE_REL_TOL=0` で従来の絶対形): 丸め誤差は関わる量の大きさに比例するため。相対 1e-9 は倍精度の丸め (2.2e-16) より 7 桁緩く、
+  単体法の実行可能性許容誤差 (1e-7) より 2 桁厳しい。対象と `scale`:
+  - `rowsingleton`: 固定値の境界からのはみ出し、`scale = |値|`。
+  - `foldfixed` (全項が固定された行の残差): `scale = max(|右辺|, max_j |a_j x_j|)`。
+  - `propagate_split` / `propagate_equalities` の「最小活動度 > 右辺」「最大活動度 < 右辺」: `scale = max(Σ|項|, |b|)`。Σ|項| は
+    絶対 `PROPAGATE_EPS` を超えたとき (まれ) だけ行を走査し直して求める (cold な別関数 `violation_exceeds_tol`。主ループで積算すると
+    fit2d で伝播が 4 割遅くなった)。絶対の判定は超えるが相対の範囲に収まる違反は強制行として扱う (強制の条件を
+    `|finite_sum - b| <= EPS` から `finite_sum >= b - EPS` に。絶対形のときは同値なので従来の出力は変わらない)。
+  - 境界の交差 `lb > ub` (`bounds_inconsistent`、`propagate_equalities` の締めた直後): `scale = max(|lb|, |ub|)` (有限な方)。
+    `propagate_split` では、相対の範囲で新たに許した交差 (`> PROPAGATE_EPS`) を最後に 1 点に揃える (`PROPAGATE_EPS` 以内の交差は従来どおり残す)。
+  - 既に相対形の `ineqsingleton`・`parallelrows`・`colsingleton` は変更なし。
+- **(C) 行シングルトンのクランプ** (`ROWSINGLETON_CLAMP_TOL` = 1e-7、`ENOMOTO_T_ROWSINGLETON_CLAMP_TOL=0` で無効): はみ出しが
+  (A) の丸めの範囲 `TOL * (1 + |値|)` なら従来どおり値そのもの (行を厳密に満たす) で固定、それを超えても `1e-7 * max(|値|, 1)` 以内なら
+  境界へクランプして固定 (HiGHS `HPresolve` の行シングルトンと同じ扱い)、さらに超えれば実行不能。幅の形は単体法が基底変数の境界違反を
+  判定する `row_deviation_plain` の `PRIMAL_FEAS_TOL * max(|x_i|, 1)` (同じスケール後の座標、HiGHS の `primal_feasibility_tolerance` 1e-7) に
+  揃えた: 前処理が単体法より厳しい基準で実行不能を宣言しないため。
+- **(B) 伝播の桁落ち回避** (`PROP_CANCEL_GUARD` = 0.01、`ENOMOTO_T_PROP_CANCEL_GUARD=0` で無効、`propagate::refine_candidate`):
+  `propagate_split`・`propagate_equalities` (下側 `l_s`・上側 `u_s`) で、引き算 `finite_sum - a_ik * bound_k` の桁落ち誤差の見積もり
+  `項数 * eps * |a_ik * bound_k|` を `|a_ik|` で割った境界候補の誤差 `項数 * eps * |bound_k|` が、(A) の許容誤差 `PROPAGATE_EPS * (1 + |候補|)` の
+  1% を超えうるときだけ、k を除いた和を直接計算し直す (その行をもう 1 回走査)。判定は候補が境界を実際に締めるときだけ行い、
+  精緻化した候補で締める条件を判定し直す (締めない候補の誤差は結果に影響しない。全候補で判定すると長い行で遅い)。
+  伝播の丸めが (A) の余裕を食いつぶさないことを保証する安全網。それ以外は従来と同じ式 (同じビット)。ken-18 の桁落ち (相対 4e-14) は
+  (A) で吸収される大きさなのでこの閾値にはかからない。
+- 単体テスト 6 件 (rowsingleton: ken-18 の数値そのもの・クランプ・大きなスケールの実行不能、foldfixed: 相対の空行判定、
+  propagate_equalities: 支配 1e12 倍の桁落ち (引き算だと相対 1e-5 ずれ、(C) の 1e-7 でも吸収できない)・相対の実行不能判定) と、
+  `tests/test_model.py` に大きなスケール (S = 1e8) の強制行の回帰試験 (base は infeasible) を追加。`cargo test --release --lib` 261 件通過。
+- 3 つとも切る (`ENOMOTO_T_PRESOLVE_REL_TOL=0 ENOMOTO_T_ROWSINGLETON_CLAMP_TOL=0 ENOMOTO_T_PROP_CANCEL_GUARD=0`) と、120 問すべてで
+  前処理の出力が base (90561a9) とビット単位で同じ (ken-18 も従来どおり infeasible)。
+
+### 試して取り下げたもの
+
+- **(B) を「k の寄与が他の項の絶対値の和の 16 倍を超えたら常に直接和」にする案** (最初の版、8864bc9): ken-18 の行 3749 (650 倍) も
+  直すが、Netlib/Kennington/Mittelmann 120 問のうち 27 問 (pds-20・pds-100・cont1 を含む) で前処理の出力のビットが変わる。
+  (A)+(C) だけで ken-18 は直り、ulp 級のずれを直しても判定には効かないので、発火条件を上の誤差見積もりに絞った。
+- **(B) の判定を全候補で行う版** (d6dc32d): 出力は同じ系統 (変わるのは 10 問) だが、fit2d (25 行 × 10,500 列) で伝播が 0.58 → 0.87 ms/回
+  (+50%) に遅くなった (callgrind で `propagate_split` の命令数 +30%)。締める候補だけに絞って +6% (0.58 → 0.61 ms/回)。
+- **(C) の幅を `1e-7 * (1 + |値|)`**: 実質同じだが単体法の判定の形 (`max(|x|, 1)`) に揃えた。絶対 1e-7 (HiGHS の値そのもの) は
+  スケール後の大きな値で (A) の相対 1e-9 より厳しくなり意味がないので採らない。
+- **(D) 含意境界と元の箱制約を分ける**: (A)+(B)+(C) で ken-18 と下の合成問題がすべて直り、変更範囲が広い (lb/ub を読む全段) ので見送り。
+
+### 結果 (最終版)
+
+- **ken-18**: optimal、-52217025287.39681 (HiGHS -52217025287.396805 と相対 1e-16)、8.8 s (HiGHS 10.1 s)。元問題の最大違反 行 1.7e-11
+  (相対 1.8e-13)・列 6.6e-12。(A) だけ・(C) だけでも optimal、(B) だけでは直らない (上のとおり ken-18 の誤差は (B) の閾値未満)。
+- **前処理の出力 (`ENOMOTO_DEBUG_PRESOLVE_HASH`) が base (90561a9) と変わった問題** (Netlib 93 + Kennington 16 + Mittelmann 11 の 120 問):
+  ken-18 (infeasible → 可) と、(B) が発火した Netlib 7 問 (80bau3b・fffff800・pilot・pilot.we・pilot87・pilotnov・stair)。
+  (A)+(C) だけ ((B) を切る) では ken-18 以外の 119 問はビット単位で同じ。Kennington の他 15 問・Mittelmann 11 問は同じ (経路不変)。
+  7 問のうち主ループの反復数が変わったのは pilot (3,139 → 3,428) と pilot87 (6,072 → 6,375) だけで、他の 5 問は反復数と目的関数値の
+  ビットが base と同じ。
+- **status と目的関数値** (HiGHS と相対 1e-7): Netlib 93 問すべて optimal で一致 (最大 9.8e-11、etamacro。元問題の行違反の相対最大 1.4e-10)。
+  Kennington 16 問すべて optimal で一致 (最大 3.1e-15。base は ken-18 だけ infeasible)。Mittelmann 11 問は前処理の出力が base と同じ
+  (作業 #8 で HiGHS と一致を確認済み)。
+- **実行不能の判定を緩めすぎていないか**:
+  - 合成問題 60 問 (輸送問題の需給不一致・行シングルトンの連鎖・強制行、それぞれ相対のずれ δ = 1e-2, 1e-4, 1e-6, 0, -1e-6 × 規模
+    S = 1, 1e3, 1e6, 1e8): new は 60 問すべて HiGHS と status が一致。base は S = 1e8・δ = 0 の強制行 (実行可能) を infeasible と誤判定
+    (同じ系統のバグ。(A) だけが直す)。HiGHS が実行不能とする 36 問は base・new とも infeasible。
+  - 作業 #5 と同型の実行不能の合成問題 33 問 (Netlib の先頭 33 問に `c^T x <= z* - δ`、δ = 1e-3|z*| 20 問・1e-5|z*| 13 問): base・new とも 33 問 infeasible。
+  - 既存の単体テストの infeasible 判定 (rowsingleton・foldfixed・propagate_equalities・simplex の矛盾する等式行など) は変更なしで通過。
+- **`scripts/singular_stress.py`**: `--settings perturb` の 8 設定すべて 93/93 (HiGHS と一致)、`--settings base --cases` 93/93、
+  irish-electricity (旧前処理) optimal 2546254.5633151024 (作業 #5・#8 と同じビット)、pilot87 (閾値 1e-3) optimal 301.71034733309364
+  (前処理の出力が変わったので作業 #8 の 301.7103473331112 とは下位の桁が違う。HiGHS と相対 4.6e-14)。
+
+### 既定設定での計測
+
+- Netlib `ab_bench --rounds 3` を 2 回: 合計 +0.92% / +1.49%、幾何平均 +0.11% / +0.19%。10% 超は 2 回とも pilot (+18.1% / +17.4%) だけ。
+  pilot は (B) で前処理の出力が変わり主ループの反復数が 3,139 → 3,428 (+9.2%) に増えた経路の変化 (`ENOMOTO_T_PROP_CANCEL_GUARD=0` で
+  反復数・時間とも base と同じ。前処理の各段は 1 ms 未満)。pilot87 は +1.0% / +3.3% (反復 +5.0%)。前処理の出力が同じ問題の最大は
+  greenbea +7.5% / sc50b +6.1% (経路同一の揺れ)。
+- 前処理の手間 (`ENOMOTO_PROF_PRESOLVE`、base と new を交互に 2 回): 伝播 (`propagate`) は pds-100 38〜39 → 47〜49 ms、
+  fome13 15 → 17〜20 ms と 2 割ほど増えるが、前処理全体 (6.6 s / 1.3 s) の 1% 未満で、合計は揺れの範囲 (pds-100 6.53〜6.62 → 6.61〜6.75 s)。
+  fit2d は 1 回あたり 0.58 → 0.61 ms。
+- Mittelmann 11 問・Kennington の ken-18 以外 15 問は前処理の出力が同じなので経路不変 (Mittelmann の計測は省略)。Kennington は
+  1 回ずつの実行で目的関数値のビットが base と同じ。1 回ずつの時間の差 (osa-14 +20%、osa-60 +15%、cre-c −32% など) は、base と new を
+  交互に 6 回測り直すと osa-60 1.638 → 1.646 s (+0.5%、前処理 +10 ms)、osa-14 −1% で揺れの範囲。
+
+判定の材料: 正しさの修正として、ken-18 が optimal で HiGHS と一致、120 問の status・目的関数値が HiGHS と一致、実行不能の合成問題の
+判定は不変 (base の誤判定 1 問を修正)、作業 #5・#8 の試験も全合格。既定設定の退行は pilot の経路の変化 (+17%) だけ。
+
 ## 改名一覧 (整理時)
 
 本メモ中は旧名で書かれている。
