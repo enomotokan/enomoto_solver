@@ -22,13 +22,272 @@
 //!
 //! 開発経緯は `docs/improvement_history.md` を参照。
 
-use crate::sparse::{CscBuilder, CscMat, CsrMat, EpochMarks};
+use crate::sparse::EpochMarks;
 use std::cell::Cell;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
-use crate::params::lu::{BORDER_MAX_COUNT, BORDER_MAX_FRACTION, BTRAN_L_SCATTER_FRACTION, BUCKET_POOL_MAX, DENSE_COL_FRACTION, DENSE_ETA_FRACTION, DENSE_INPUT_FRACTION, DENSE_RHS_FRACTION, DENSE_SWITCH_CHECK_INTERVAL, DENSE_SWITCH_FRACTION, DENSE_SWITCH_MIN_ROWS, DENSITY_AVERAGE_MULTIPLIER, EXPECTED_DENSE_FRACTION, KERNEL_LINEAR_SCAN_MAX, KERNEL_MIN_RUN_CAP, KERNEL_RESERVE_EXTRA, KERNEL_RESERVE_MULT, PIVOT_ROW_SEARCH_MAX_DEGREE, PIVOT_SEARCH_LIMIT, PIVOT_THRESHOLD_FACTOR, PIVOT_THRESHOLD_MAX, PIVOT_THRESHOLD_MIN, REBUILD_FILL_LIMIT, REBUILD_MIN_PIVOT, REUSE_BACKOFF_SHIFT_CAP, REUSE_MAX_BACKOFF, STABILITY, TAU_GP_FRACTION, TICK_BUILD_FLOP_COEF, TICK_BUILD_LU_COEF, TICK_BUILD_M_COEF, TICK_SOLVE_NNZ_COEF, TINY_DROP, U_HYPER_ABORT_FRACTION};
+use crate::params::lu::{BORDER_MAX_COUNT, BORDER_MAX_FRACTION, BTRAN_HYPER_FRACTION, BTRAN_L_SCATTER_FRACTION, BUCKET_POOL_MAX, DENSE_COL_FRACTION, DENSE_ETA_FRACTION, DENSE_INPUT_FRACTION, DENSE_RHS_FRACTION, DENSE_BLOCK_TICK_FRACTION, DENSE_SWITCH_AUTO_FRACTION, DENSE_SWITCH_AUTO_LU_PER_ROW, DENSE_SWITCH_AUTO_MIN_M, DENSE_SWITCH_CHECK_INTERVAL, DENSE_SWITCH_FRACTION, DENSE_SWITCH_MIN_ROWS, DENSITY_AVERAGE_MULTIPLIER, EXPECTED_DENSE_FRACTION, KERNEL_LINEAR_SCAN_MAX, KERNEL_MIN_RUN_CAP, KERNEL_RESERVE_EXTRA, KERNEL_RESERVE_MULT, PIVOT_ROW_SEARCH_MAX_DEGREE, PIVOT_SEARCH_LIMIT, PIVOT_THRESHOLD_FACTOR, PIVOT_THRESHOLD_MAX, PIVOT_THRESHOLD_MIN, R_SPARSE_MIN_ETAS, REBUILD_FILL_LIMIT, SPARSE_PATH_MIN_M, REBUILD_MIN_PIVOT, REUSE_BACKOFF_SHIFT_CAP, REUSE_MAX_BACKOFF, STABILITY, TAU_GP_FRACTION, TICK_BUILD_FLOP_COEF, TICK_BUILD_LU_COEF, TICK_BUILD_M_COEF, TICK_SOLVE_NNZ_COEF, TINY_DROP, U_HYPER_ABORT_FRACTION, PARTIAL_TAU_COST_EMA, PARTIAL_TAU_PROBE, PARTIAL_TAU_PROBE_MAX};
+
+/// `L` の列 (および行優先ミラー) の圧縮格納 (密行列の分解の調査 #3)。添字 `u32` と値 `f64` を
+/// 別配列に持つ (1 要素 12 B。旧 [`CscMat`] は `(usize, f64)` の 16 B)。FTRAN/BTRAN の `L` 段は
+/// `nnz(L)` に比例する帯域律速の走査なので、同じ演算順序のまま読む量を 3/4 にする (ビット一致)。
+#[derive(Clone, Default)]
+pub struct LPack {
+    /// 外側 (列または行) `i` の要素は `idx/val[start[i]..start[i + 1]]`。
+    start: Vec<usize>,
+    /// 要素の内側添字 (行ステップまたは列ステップ)。
+    idx: Vec<u32>,
+    /// 要素の値。
+    val: Vec<f64>,
+    /// 密ブロック (密行列の分解 #2): 外側 `i >= blk_s0` は上の疎な部分に加えて、内側添字の連続区間
+    /// `[rng_lo[i - blk_s0], rng_lo + 長さ)` の値を `rng_val[rng_off[i - blk_s0]..rng_off[i - blk_s0 + 1]]`
+    /// に密に持つ (値 0 も格納)。密ブロックが無ければ `blk_s0 = usize::MAX`。
+    blk_s0: usize,
+    /// 区間の開始 (内側添字)。
+    rng_lo: Vec<u32>,
+    /// 区間の値の位置 (長さ `外側数 - blk_s0 + 1`)。
+    rng_off: Vec<usize>,
+    /// 区間の値。
+    rng_val: Vec<f64>,
+}
+
+/// [`LPack::seg`] が返す 1 本分の要素 (添字と値のスライス、および密な区間)。
+#[derive(Clone, Copy)]
+pub struct LSeg<'a> {
+    idx: &'a [u32],
+    val: &'a [f64],
+    /// 密な区間の開始 (内側添字)。
+    rlo: usize,
+    /// 密な区間の値 (`rval[t]` が添字 `rlo + t`)。無ければ空。
+    rval: &'a [f64],
+}
+
+impl<'a> LSeg<'a> {
+    /// 格納要素数 (密な区間の 0 を含む)。
+    #[inline(always)]
+    pub fn len(&self) -> usize {
+        self.idx.len() + self.rval.len()
+    }
+    /// 要素がないか。
+    #[inline(always)]
+    pub fn is_empty(&self) -> bool {
+        self.idx.is_empty() && self.rval.is_empty()
+    }
+    /// `(添字, 値)` の組の `Vec` (テスト用。密な区間の 0 は除く)。
+    #[allow(dead_code)]
+    pub fn to_vec(&self) -> Vec<(usize, f64)> {
+        self.into_iter().filter(|&(_, v)| v != 0.0).collect()
+    }
+    /// 各要素に `f(添字, 値)` を呼ぶ (疎な部分、続いて密な区間。区間の 0 も呼ぶ)。
+    #[inline(always)]
+    pub fn for_each(&self, mut f: impl FnMut(usize, f64)) {
+        for (&i, &v) in self.idx.iter().zip(self.val.iter()) {
+            f(i as usize, v);
+        }
+        let lo = self.rlo;
+        for (t, &v) in self.rval.iter().enumerate() {
+            f(lo + t, v);
+        }
+    }
+}
+
+/// [`LSeg`] の要素の反復子 (疎な部分、続いて密な区間)。
+pub struct LSegIter<'a> {
+    idx: std::slice::Iter<'a, u32>,
+    val: std::slice::Iter<'a, f64>,
+    rlo: usize,
+    rval: std::iter::Enumerate<std::slice::Iter<'a, f64>>,
+}
+
+impl<'a> Iterator for LSegIter<'a> {
+    type Item = (usize, f64);
+    #[inline(always)]
+    fn next(&mut self) -> Option<(usize, f64)> {
+        if let Some(&i) = self.idx.next() {
+            return Some((i as usize, *self.val.next().unwrap()));
+        }
+        self.rval.next().map(|(t, &v)| (self.rlo + t, v))
+    }
+}
+
+impl<'a> IntoIterator for LSeg<'a> {
+    type Item = (usize, f64);
+    type IntoIter = LSegIter<'a>;
+    #[inline(always)]
+    fn into_iter(self) -> LSegIter<'a> {
+        LSegIter { idx: self.idx.iter(), val: self.val.iter(), rlo: self.rlo, rval: self.rval.iter().enumerate() }
+    }
+}
+
+impl LPack {
+    /// 外側 `n` 本の空の格納。
+    pub fn empty(n: usize) -> Self {
+        LPack { start: vec![0; n + 1], blk_s0: usize::MAX, ..Default::default() }
+    }
+    /// 外側 `i` の要素。
+    #[inline(always)]
+    pub fn seg(&self, i: usize) -> LSeg<'_> {
+        let (s, e) = (self.start[i], self.start[i + 1]);
+        if i >= self.blk_s0 {
+            let b = i - self.blk_s0;
+            return LSeg { idx: &self.idx[s..e], val: &self.val[s..e], rlo: self.rng_lo[b] as usize, rval: &self.rng_val[self.rng_off[b]..self.rng_off[b + 1]] };
+        }
+        LSeg { idx: &self.idx[s..e], val: &self.val[s..e], rlo: 0, rval: &[] }
+    }
+    /// 全格納要素数 (密な区間の 0 を含む)。
+    #[inline]
+    pub fn nnz(&self) -> usize {
+        self.idx.len() + self.rng_val.len()
+    }
+    /// 外側の本数。
+    #[inline]
+    pub fn n_outer(&self) -> usize {
+        self.start.len() - 1
+    }
+    /// 密ブロックを持つか。
+    #[inline]
+    pub fn has_block(&self) -> bool {
+        self.blk_s0 != usize::MAX
+    }
+    /// 転置 (内側の次数 `n_inner`、計数ソート。各外側の要素は元の外側番号の昇順)。
+    /// 密な区間は疎な要素として (0 を除いて) 転置する。
+    pub fn transposed(&self, n_inner: usize) -> LPack {
+        if !self.has_block() {
+            return self.transposed_flat(n_inner);
+        }
+        let mut count = vec![0usize; n_inner + 1];
+        for o in 0..self.n_outer() {
+            self.seg(o).for_each(|i, v| {
+                if v != 0.0 {
+                    count[i + 1] += 1;
+                }
+            });
+        }
+        for i in 0..n_inner {
+            count[i + 1] += count[i];
+        }
+        let start = count.clone();
+        let nnz = start[n_inner];
+        let mut idx = vec![0u32; nnz];
+        let mut val = vec![0.0f64; nnz];
+        let mut cursor = count;
+        for o in 0..self.n_outer() {
+            self.seg(o).for_each(|i, v| {
+                if v != 0.0 {
+                    let c = cursor[i];
+                    idx[c] = o as u32;
+                    val[c] = v;
+                    cursor[i] += 1;
+                }
+            });
+        }
+        LPack { start, idx, val, blk_s0: usize::MAX, ..Default::default() }
+    }
+    /// 密ブロックがないときの [`Self::transposed`] (要素の並びを直接走査する)。
+    fn transposed_flat(&self, n_inner: usize) -> LPack {
+        let nnz = self.idx.len();
+        let mut start = vec![0usize; n_inner + 1];
+        for &i in &self.idx {
+            start[i as usize + 1] += 1;
+        }
+        for i in 0..n_inner {
+            start[i + 1] += start[i];
+        }
+        let mut idx = vec![0u32; nnz];
+        let mut val = vec![0.0f64; nnz];
+        let mut cursor: Vec<usize> = start[..n_inner].to_vec();
+        for o in 0..self.n_outer() {
+            let (a, e) = (self.start[o], self.start[o + 1]);
+            for p in a..e {
+                let i = self.idx[p] as usize;
+                let c = cursor[i];
+                idx[c] = o as u32;
+                val[c] = self.val[p];
+                cursor[i] = c + 1;
+            }
+        }
+        LPack { start, idx, val, blk_s0: usize::MAX, ..Default::default() }
+    }
+
+    /// 外側 `s0` 以降の要素のうち内側添字が `lo(i)` 以上のものを密な区間 `[lo(i), hi(i))` に移す
+    /// (密行列の分解 #2)。`lo(i)` 未満の要素は疎なまま残る。区間外 (`>= hi(i)`) の要素があってはならない。
+    pub fn with_block(self, s0: usize, lo: impl Fn(usize) -> usize, hi: impl Fn(usize) -> usize) -> LPack {
+        let n = self.n_outer();
+        if s0 >= n {
+            return self;
+        }
+        let mut start = Vec::with_capacity(n + 1);
+        start.push(0);
+        let mut idx = Vec::with_capacity(self.idx.len());
+        let mut val = Vec::with_capacity(self.val.len());
+        let mut rng_lo = Vec::with_capacity(n - s0);
+        let mut rng_off = Vec::with_capacity(n - s0 + 1);
+        rng_off.push(0);
+        let mut rng_val: Vec<f64> = Vec::new();
+        for o in 0..n {
+            let (a, b) = (self.start[o], self.start[o + 1]);
+            if o < s0 {
+                idx.extend_from_slice(&self.idx[a..b]);
+                val.extend_from_slice(&self.val[a..b]);
+            } else {
+                let (l, h) = (lo(o), hi(o).max(lo(o)));
+                let base = rng_val.len();
+                rng_val.resize(base + (h - l), 0.0);
+                for p in a..b {
+                    let i = self.idx[p] as usize;
+                    if i >= l {
+                        debug_assert!(i < h);
+                        rng_val[base + i - l] = self.val[p];
+                    } else {
+                        idx.push(self.idx[p]);
+                        val.push(self.val[p]);
+                    }
+                }
+                rng_lo.push(l as u32);
+                rng_off.push(rng_val.len());
+            }
+            start.push(idx.len());
+        }
+        LPack { start, idx, val, blk_s0: s0, rng_lo, rng_off, rng_val }
+    }
+    /// 全外側を `Vec<Vec<_>>` にする (テスト用)。
+    #[allow(dead_code)]
+    pub fn to_cols(&self) -> Vec<Vec<(usize, f64)>> {
+        (0..self.n_outer()).map(|i| self.seg(i).to_vec()).collect()
+    }
+}
+
+/// 外側を昇順に 1 本ずつ出力して [`LPack`] を組み立てる ([`CscBuilder`] と同じ使い方)。
+pub struct LPackBuilder {
+    pack: LPack,
+}
+
+impl LPackBuilder {
+    /// 外側 `n` 本・要素 `nnz` 個分の領域を予約する。
+    pub fn with_capacity(n: usize, nnz: usize) -> Self {
+        let mut start = Vec::with_capacity(n + 1);
+        start.push(0);
+        LPackBuilder { pack: LPack { start, idx: Vec::with_capacity(nnz), val: Vec::with_capacity(nnz), blk_s0: usize::MAX, ..Default::default() } }
+    }
+    /// 構築中の外側に要素を 1 つ追加する。
+    #[inline]
+    pub fn push(&mut self, i: usize, v: f64) {
+        debug_assert!(i <= u32::MAX as usize);
+        self.pack.idx.push(i as u32);
+        self.pack.val.push(v);
+    }
+    /// 現在の外側を閉じる (空でも外側ごとに 1 回)。
+    #[inline]
+    pub fn end_column(&mut self) {
+        self.pack.start.push(self.pack.idx.len());
+    }
+    /// 完成させる。
+    pub fn build(self) -> LPack {
+        self.pack
+    }
+}
 
 thread_local! {
     /// このスレッドで現在実行中の求解に適用されるピボット閾値。
@@ -77,6 +336,12 @@ pub fn pivot_threshold() -> f64 {
 /// 前に呼ぶ (引き上げは求解内で単調なので、求解をまたいで漏らさないため)。
 pub fn reset_pivot_threshold() {
     PIVOT_THRESHOLD.with(|c| c.set(Some(pivot_threshold_base())));
+}
+
+/// 現在のピボット閾値が既定の [`STABILITY`] 未満か (`ENOMOTO_PIVOT_THRESHOLD` で下げた場合)。
+/// 作業 #5 M5 の変種 (HiGHS `reinvertOnNumericalTrouble` 流) が、既定未満なら数値的トラブルのたびに引き上げるのに使う。
+pub fn pivot_threshold_below_stability() -> bool {
+    pivot_threshold() < tunable!("ENOMOTO_T_STABILITY", STABILITY, f64)
 }
 
 /// ピボット閾値を [`PIVOT_THRESHOLD_FACTOR`] 倍に 1 段引き上げる
@@ -1340,14 +1605,23 @@ pub struct GpScratch {
     /// `_triple_capture`) の前に呼び出し側が設定し、その `U` 段を超疎に実行
     /// させる ([`FtLu::u_solve_hyper`])。既定 `false`。
     pub u_hyper: bool,
-    /// 超疎 `U` 段の DFS 用スロット印。
+    /// 超疎 `U` 段で一覧に入れたスロットの印。
     u_marks: EpochMarks,
-    /// 超疎 `U` 段の DFS スタック。
+    /// 超疎 `U` 段 (DFS 版) の DFS スタック。
     u_stack: Vec<usize>,
+    /// 超疎 `U` 段 (DFS 版) で適用すべき到達 `u_seq` 位置。
+    u_pos: Vec<usize>,
+    /// 超疎 `U` 段 (ヒープ版) の `u_seq` 位置の最大ヒープ。
+    u_heap: BinaryHeap<u32>,
+    /// 作業 #10 (F): 超疎 `U` 段の位置の降順の待ち行列 ([`MonoMaxQueue`])。
+    u_queue: MonoMaxQueue,
     /// 到達した全スロット (= `U` 後に非ゼロになりうるスロット)。
     u_list: Vec<usize>,
-    /// 適用すべき到達 `u_seq` 位置。
-    u_pos: Vec<usize>,
+    /// 直前の `R` eta 適用で値が変わった行 (超疎 `U` 段の起点の候補。`reach` と合わせて
+    /// `U` 段入力の非ゼロ位置をすべて含む)。`R` eta を適用する側が毎回作り直す。
+    r_seeds: Vec<usize>,
+    /// 疎な `R` eta 適用の作業領域 (追加策 R)。
+    r_work: RSparseWork,
 }
 
 impl GpScratch {
@@ -1361,8 +1635,199 @@ impl GpScratch {
             u_hyper: false,
             u_marks: EpochMarks::new(m),
             u_stack: Vec::new(),
-            u_list: Vec::new(),
             u_pos: Vec::new(),
+            u_heap: BinaryHeap::new(),
+            u_queue: MonoMaxQueue::default(),
+            u_list: Vec::new(),
+            r_seeds: Vec::new(),
+            r_work: RSparseWork::default(),
+        }
+    }
+}
+
+/// [`FtLu::apply_r_sparse`] の作業領域 (eta 番号の印と最小ヒープ)。[`GpScratch`] が持つ。
+#[derive(Default)]
+struct RSparseWork {
+    /// eta 番号ごとの印 (`stamp[k] == epoch` なら選択済み)。
+    stamp: Vec<u32>,
+    /// 現在のエポック。
+    epoch: u32,
+    /// 未処理の eta 番号の最小ヒープ。
+    heap: BinaryHeap<Reverse<u32>>,
+    /// 作業 #10 (F): 未処理の eta 番号の待ち行列 (ビット集合)。
+    q: MonoMaxQueue,
+}
+
+/// [`FtLu::u_solve_hyper`] の結果。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum UHyper {
+    /// 試さなかった (`x` は未変更。呼び出し側が全走査する)。
+    NotTried,
+    /// 超疎に解いた (非ゼロになりうる位置は `gp.u_list`)。
+    Hyper,
+    /// 途中から全走査に切り替えて解き終えた (非ゼロ位置は不明)。
+    Full,
+}
+
+/// `U` の行ミラー (`FtLu::row_owners`) の格納 (密行列の分解の調査 #3)。行ごとの `Vec<(usize, f64)>`
+/// (16 B/要素、行ごとのヒープ確保) をやめ、全行で共有するプールに添字 `u32` と値 `f64` を別配列で置く
+/// (12 B/要素)。行 `r` は `idx/val[start[r]..start[r] + len[r]]`、容量 `cap[r]`。容量を超える追加は
+/// その行をプール末尾へ倍の容量で移す (旧領域は再分解まで放置)。追加は末尾、削除は `swap_remove`
+/// なので、行内の要素の並びは旧 `Vec` 版と同じ (演算順序もビット一致)。
+#[derive(Clone, Default)]
+struct RowOwners {
+    start: Vec<usize>,
+    len: Vec<u32>,
+    cap: Vec<u32>,
+    idx: Vec<u32>,
+    val: Vec<f64>,
+    /// 密ブロック (密行列の分解 #2): 行 `r >= blk_s0` はスロットの連続区間 `[r + 1, m)` の値を
+    /// `rng_val[rng_off[r - blk_s0]..]` に密に持つ (値 0 = その区間のスロットは所有者でない)。
+    /// 密ブロックが無ければ `usize::MAX`。
+    blk_s0: usize,
+    /// 区間の値の位置 (長さ `m - blk_s0 + 1`)。
+    rng_off: Vec<usize>,
+    /// 区間の値。
+    rng_val: Vec<f64>,
+    /// 区間の非ゼロ数 (行ごと)。tick と追跡版の上限判定を疎な形式と同じ数で行うため。
+    rng_nz: Vec<u32>,
+}
+
+/// [`RowOwners::row`] が返す 1 行分 (疎な `(スロット, 値)` と密な区間)。
+#[derive(Clone, Copy)]
+struct OwnRow<'a> {
+    idx: &'a [u32],
+    val: &'a [f64],
+    /// 密な区間の先頭スロット。
+    rlo: usize,
+    /// 密な区間の値 (無ければ空)。
+    rval: &'a [f64],
+    /// 密な区間の非ゼロ数。
+    rnz: usize,
+}
+
+impl<'a> OwnRow<'a> {
+    /// 非ゼロ要素数 (密な区間の 0 を除く。疎な形式の要素数と同じ)。
+    #[inline(always)]
+    fn len(&self) -> usize {
+        self.idx.len() + self.rnz
+    }
+}
+
+impl RowOwners {
+    /// 行ごとの要素数 `count` で容量を確保した空の索引。
+    fn with_counts(count: &[usize]) -> Self {
+        let m = count.len();
+        let mut start = Vec::with_capacity(m);
+        let mut total = 0usize;
+        for &c in count {
+            start.push(total);
+            total += c;
+        }
+        RowOwners { start, len: vec![0; m], cap: count.iter().map(|&c| c as u32).collect(), idx: vec![0; total], val: vec![0.0; total], blk_s0: usize::MAX, rng_off: Vec::new(), rng_val: Vec::new(), rng_nz: Vec::new() }
+    }
+
+    /// 行 `r >= s0` に密な区間 `[r + 1, m)` を持たせる (密行列の分解 #2、要素を入れる前に呼ぶ)。
+    fn set_block(&mut self, s0: usize) {
+        let m = self.start.len();
+        if s0 >= m {
+            return;
+        }
+        self.blk_s0 = s0;
+        self.rng_off = Vec::with_capacity(m - s0 + 1);
+        let mut off = 0usize;
+        self.rng_off.push(0);
+        for r in s0..m {
+            off += m - r - 1;
+            self.rng_off.push(off);
+        }
+        self.rng_val = vec![0.0; off];
+        self.rng_nz = vec![0; m - s0];
+    }
+
+    /// 行 `r` の `(スロット, 値)`。
+    #[inline(always)]
+    fn row(&self, r: usize) -> OwnRow<'_> {
+        let s = self.start[r];
+        let e = s + self.len[r] as usize;
+        if r >= self.blk_s0 {
+            let b = r - self.blk_s0;
+            return OwnRow { idx: &self.idx[s..e], val: &self.val[s..e], rlo: r + 1, rval: &self.rng_val[self.rng_off[b]..self.rng_off[b + 1]], rnz: self.rng_nz[b] as usize };
+        }
+        OwnRow { idx: &self.idx[s..e], val: &self.val[s..e], rlo: 0, rval: &[], rnz: 0 }
+    }
+
+    /// 行 `r` の密な区間でのスロット `slot` の値の位置 (区間外なら `None`)。
+    #[inline(always)]
+    fn rng_pos(&self, r: usize, slot: usize) -> Option<usize> {
+        if r >= self.blk_s0 && slot > r {
+            Some(self.rng_off[r - self.blk_s0] + (slot - r - 1))
+        } else {
+            None
+        }
+    }
+
+    /// 行 `r` の末尾に `(slot, v)` を追加する。
+    #[inline]
+    fn push(&mut self, r: usize, slot: usize, v: f64) {
+        if let Some(at) = self.rng_pos(r, slot) {
+            debug_assert!(self.rng_val[at] == 0.0);
+            self.rng_val[at] = v;
+            self.rng_nz[r - self.blk_s0] += (v != 0.0) as u32;
+            return;
+        }
+        let l = self.len[r] as usize;
+        if l == self.cap[r] as usize {
+            let new_cap = (2 * l).max(4);
+            let new_start = self.idx.len();
+            let old = self.start[r];
+            self.idx.resize(new_start + new_cap, 0);
+            self.val.resize(new_start + new_cap, 0.0);
+            self.idx.copy_within(old..old + l, new_start);
+            self.val.copy_within(old..old + l, new_start);
+            self.start[r] = new_start;
+            self.cap[r] = new_cap as u32;
+        }
+        let at = self.start[r] + l;
+        self.idx[at] = slot as u32;
+        self.val[at] = v;
+        self.len[r] += 1;
+    }
+
+    /// 行 `r` からスロット `slot` の要素を `swap_remove` で除く (無ければ何もしない)。
+    #[inline]
+    fn remove_slot(&mut self, r: usize, slot: usize) {
+        if let Some(at) = self.rng_pos(r, slot) {
+            self.rng_nz[r - self.blk_s0] -= (self.rng_val[at] != 0.0) as u32;
+            self.rng_val[at] = 0.0;
+            return;
+        }
+        let s = self.start[r];
+        let l = self.len[r] as usize;
+        if let Some(pos) = self.idx[s..s + l].iter().position(|&q| q as usize == slot) {
+            self.idx[s + pos] = self.idx[s + l - 1];
+            self.val[s + pos] = self.val[s + l - 1];
+            self.len[r] -= 1;
+        }
+    }
+
+    /// 行 `r` のスロットを `out` に写して行を空にする (`std::mem::take` 相当)。
+    #[inline]
+    fn take_slots(&mut self, r: usize, out: &mut Vec<u32>) {
+        let s = self.start[r];
+        out.clear();
+        out.extend_from_slice(&self.idx[s..s + self.len[r] as usize]);
+        self.len[r] = 0;
+        if r >= self.blk_s0 {
+            let b = r - self.blk_s0;
+            let (a, e) = (self.rng_off[b], self.rng_off[b + 1]);
+            for (t, v) in self.rng_val[a..e].iter_mut().enumerate() {
+                if *v != 0.0 {
+                    out.push((r + 1 + t) as u32);
+                    *v = 0.0;
+                }
+            }
+            self.rng_nz[b] = 0;
         }
     }
 }
@@ -1377,7 +1842,7 @@ pub struct LuFactors {
     /// 分解後は不変で FTRAN/BTRAN の `L` 段で毎回読むため、フラットな
     /// [`crate::sparse::CscMat`] に [`crate::sparse::CscBuilder`] で直接追記して作る
     /// (各分解は `L` の列をステップ昇順に出力するので中間 `Vec<Vec>` もコピーも不要)。
-    pub l_col: crate::sparse::CscMat,
+    pub l_col: LPack,
     /// `u_row[s]`: `U` の行 `s` の要素 `(col_step, 値)` (`col_step >= s`、
     /// 対角 `col_step == s` を含む)。`FtLu::new` が `u_seq` を作るときに
     /// 1 回読むだけなので `Vec<Vec>` のまま。
@@ -1386,7 +1851,7 @@ pub struct LuFactors {
     /// `l_row.row(r)` は `L` の行 `r` の非ゼロ `(s, 乗数)` (すべて `s < r`)。
     /// BTRAN の `L^{-T}` をスキャッタ形式で解き、`w[s] == 0.0` のステップを
     /// 丸ごと飛ばすために使う。[`CscMat::to_csr`] の計数ソートで構築。
-    pub l_row: CsrMat,
+    pub l_row: LPack,
     /// `row_perm[s]` = ステップ `s` のピボット行 (元の行番号)。
     pub row_perm: Vec<usize>,
     /// `col_perm[s]` = ステップ `s` のピボット列 (元の基底スロット番号)。
@@ -1397,6 +1862,10 @@ pub struct LuFactors {
     /// [`l_solve_sparse_into`] の到達集合探索を `row_perm` の O(m) 走査なしで
     /// 始めるのに使う。
     pub row_perm_inv: Vec<usize>,
+    /// 密ブロック (密行列の分解 #2) の先頭ステップ。稠密切替で残り `m - dense_s0` 行を稠密分解した
+    /// 分解だけ `< m`。そのとき `l_col`/`l_row` はステップ `>= dense_s0` の部分を密な区間で持ち、
+    /// [`FtLu::new`] は `U` のブロック内の列・行も密な区間で持つ。それ以外は `usize::MAX`。
+    pub dense_s0: usize,
 }
 
 /// 入力の非ゼロ密度が `DENSE_INPUT_FRACTION * m^2` を超えるか
@@ -1445,7 +1914,7 @@ fn factorize_dense_faer(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuFac
         col_perm_inv[col_perm[step]] = step;
     }
 
-    let mut l_build = CscBuilder::new(m);
+    let mut l_build = LPackBuilder::with_capacity(m, 0);
     for step in 0..m {
         for row_step in (step + 1)..m {
             let v = l[(row_step, step)];
@@ -1467,7 +1936,7 @@ fn factorize_dense_faer(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuFac
     }
 
     let l_row = build_l_row(&l_col, m);
-    Some(LuFactors { m, l_col, l_row, u_row, row_perm, col_perm, col_perm_inv, row_perm_inv })
+    Some(LuFactors { m, l_col, l_row, u_row, row_perm, col_perm, col_perm_inv, row_perm_inv, dense_s0: usize::MAX })
 }
 
 /// 診断用 (`ENOMOTO_DEBUG_BLOCK_SIZES`、本番経路では未使用)。この基底行列を
@@ -1527,7 +1996,7 @@ pub fn factorize_diagonal(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuF
     let u_row: Vec<Vec<(usize, f64)>> = rows_in.iter().enumerate().map(|(i, row)| vec![(i, row[0].1)]).collect();
     let identity: Vec<usize> = (0..m).collect();
     // `L` は単位行列: `m` 列すべて空。
-    let l_col = CscMat::empty(m, m);
+    let l_col = LPack::empty(m);
     let l_row = build_l_row(&l_col, m);
     Some(LuFactors {
         m,
@@ -1538,6 +2007,7 @@ pub fn factorize_diagonal(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuF
         col_perm: identity.clone(),
         col_perm_inv: identity.clone(),
         row_perm_inv: identity,
+        dense_s0: usize::MAX,
     })
 }
 
@@ -1597,7 +2067,11 @@ pub fn factorize_reusing(m: usize, rows_in: &[Vec<(usize, f64)>], prev: Option<&
     let border = detect_border_columns(m, rows_in);
     let dense = is_dense_input(m, rows_in);
     // 再利用の対象になるか (有効かつ非稠密かつ境界付き経路でない)
-    let eligible = reuse_pivot_order_enabled() && m > 0 && !dense && !border_wanted(m, border.len());
+    // 密行列の分解 #2: 直前の分解が稠密切替した (密ブロックを持つ) なら、ピボット順の再利用は試さない
+    // (左視分解が密ブロックの k^2 要素を疎に扱うので高くつき、nug08-3rd では fill 超過で大半が棄却される。
+    // `ENOMOTO_LU_REUSE_AFTER_SWITCH=1` で従来どおり試す)。
+    let after_switch = prev.base.dense_s0 < m && !matches!(env_str!("ENOMOTO_LU_REUSE_AFTER_SWITCH"), Some("1"));
+    let eligible = reuse_pivot_order_enabled() && m > 0 && !dense && !border_wanted(m, border.len()) && !after_switch;
     if eligible && prev.reuse_skips_left == 0 {
         let t0 = std::time::Instant::now();
         PROF_REBUILD_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
@@ -1617,7 +2091,7 @@ pub fn factorize_reusing(m: usize, rows_in: &[Vec<(usize, f64)>], prev: Option<&
     }
     // 再利用が棄却されたかバックオフ中。通常の Markowitz 分解を行い、
     // その fill が新しい基準になる (`FtLu::new` が設定)。
-    let mut ft = FtLu::new(factorize_routed(m, rows_in, &border, dense)?);
+    let mut ft = FtLu::new(factorize_routed(m, rows_in, &border, dense, dense_switch_for(m, prev))?);
     PROF_FULL_NNZ.fetch_add(ft.fill_baseline, Ordering::Relaxed);
     PROF_FULL_COUNT.fetch_add(1, Ordering::Relaxed);
     if eligible {
@@ -1874,7 +2348,7 @@ fn factorize_reusing_order(
     for (s, &j) in pivot_col.iter().enumerate() {
         col_perm_inv[j] = s;
     }
-    let mut l_build = CscBuilder::with_capacity(m, m, l_entries.len());
+    let mut l_build = LPackBuilder::with_capacity(m, l_entries.len());
     for s in 0..m {
         for idx in l_offsets[s]..l_offsets[s + 1] {
             let (r, mult) = l_entries[idx];
@@ -1883,7 +2357,7 @@ fn factorize_reusing_order(
         l_build.end_column();
     }
     let l_col = l_build.build();
-    let l_row = l_col.to_csr();
+    let l_row = l_col.transposed(m);
 
     Some(LuFactors {
         m,
@@ -1894,6 +2368,7 @@ fn factorize_reusing_order(
         col_perm: pivot_col.to_vec(),
         col_perm_inv,
         row_perm_inv: row_step,
+        dense_s0: usize::MAX,
     })
 }
 
@@ -1903,12 +2378,12 @@ fn factorize_reusing_order(
 /// それ以外は Markowitz 消去に振り分ける。
 pub fn factorize(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuFactors> {
     let border = detect_border_columns(m, rows_in);
-    factorize_routed(m, rows_in, &border, is_dense_input(m, rows_in))
+    factorize_routed(m, rows_in, &border, is_dense_input(m, rows_in), explicit_dense_switch())
 }
 
 /// [`factorize`] の本体。振り分けに使う [`detect_border_columns`] の結果
 /// (`border`) と [`is_dense_input`] の結果 (`dense`) を呼び出し側が計算済みで渡す。
-fn factorize_routed(m: usize, rows_in: &[Vec<(usize, f64)>], border: &[usize], dense: bool) -> Option<LuFactors> {
+fn factorize_routed(m: usize, rows_in: &[Vec<(usize, f64)>], border: &[usize], dense: bool, dense_switch: f64) -> Option<LuFactors> {
     if env_str!("ENOMOTO_DEBUG_BLOCK_SIZES").is_some() {
         debug_print_block_sizes(m, rows_in);
     }
@@ -1920,7 +2395,7 @@ fn factorize_routed(m: usize, rows_in: &[Vec<(usize, f64)>], border: &[usize], d
             return Some(lu);
         }
     }
-    factorize_flat_markowitz_routed(m, rows_in, dense)
+    factorize_flat_markowitz_routed(m, rows_in, dense, dense_switch)
 }
 
 /// 解析専用: 分解の入力 1 件を `<dir>/lu_dump.bin` に追記する (`m`、続いて
@@ -1946,7 +2421,36 @@ fn dump_lu_input(dir: &std::path::Path, m: usize, rows_in: &[Vec<(usize, f64)>])
 /// 稠密判定を自分で行う [`factorize_flat_markowitz_routed`] (境界付き経路を通らない)。
 #[cfg_attr(not(test), allow(dead_code))]
 fn factorize_flat_markowitz(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuFactors> {
-    factorize_flat_markowitz_routed(m, rows_in, is_dense_input(m, rows_in))
+    factorize_flat_markowitz_routed(m, rows_in, is_dense_input(m, rows_in), explicit_dense_switch())
+}
+
+/// 密行列の分解 #2: 稠密切替したブロックを密な区間で持つか (`ENOMOTO_LU_DENSE_BLOCK=0` で無効、A/B 用)。
+fn dense_block_enabled() -> bool {
+    env_str!("ENOMOTO_LU_DENSE_BLOCK").map_or(true, |v| v != "0")
+}
+
+/// `ENOMOTO_LU_DENSE_SWITCH` で明示された稠密切替の閾値 (未設定なら [`DENSE_SWITCH_FRACTION`] = 0 = off)。
+fn explicit_dense_switch() -> f64 {
+    tunable!("ENOMOTO_LU_DENSE_SWITCH", DENSE_SWITCH_FRACTION, f64)
+}
+
+/// nug08 報告 #3: [`factorize_reusing`] の通常分解で使う稠密切替の閾値。
+/// `ENOMOTO_LU_DENSE_SWITCH` が設定されていればその値 (全分解で有効)。未設定なら、行数が
+/// [`DENSE_SWITCH_AUTO_MIN_M`] 以上で、直前の通常分解の `nnz(L+U)` が
+/// [`DENSE_SWITCH_AUTO_LU_PER_ROW`] `* m` 以上 (= LU が 1 行あたり数十要素まで密になった基底)
+/// のときだけ [`DENSE_SWITCH_AUTO_FRACTION`] を使う。それ以外は 0 (off) で経路は従来どおり。
+/// 疎な LU の問題 (Netlib 全問、stormG2・pds-100・cont1 など) はこの条件を満たさない。
+fn dense_switch_for(m: usize, prev: &FtLu) -> f64 {
+    if env_str!("ENOMOTO_LU_DENSE_SWITCH").is_some() {
+        return explicit_dense_switch();
+    }
+    let min_m = tunable!("ENOMOTO_T_LU_DENSE_SWITCH_AUTO_MIN_M", DENSE_SWITCH_AUTO_MIN_M, usize);
+    let per_row = tunable!("ENOMOTO_T_LU_DENSE_SWITCH_AUTO_LU_PER_ROW", DENSE_SWITCH_AUTO_LU_PER_ROW, usize);
+    if min_m != 0 && m >= min_m && prev.fill_baseline >= per_row.saturating_mul(m) {
+        tunable!("ENOMOTO_T_LU_DENSE_SWITCH_AUTO", DENSE_SWITCH_AUTO_FRACTION, f64)
+    } else {
+        0.0
+    }
 }
 
 /// B3 診断: 残りを稠密分解に切り替えた分解の回数。
@@ -1957,7 +2461,7 @@ pub(crate) static PROF_DENSE_SWITCH_ROWS: AtomicUsize = AtomicUsize::new(0);
 /// Markowitz 消去による分解本体 (`dense` なら [`factorize_dense_faer`] に回す)。
 /// 各ステップで稠密でないピボット列を優先し、無ければ制限なしで探す。
 /// ピボットが見つからなければ `None` (特異)。
-fn factorize_flat_markowitz_routed(m: usize, rows_in: &[Vec<(usize, f64)>], dense: bool) -> Option<LuFactors> {
+fn factorize_flat_markowitz_routed(m: usize, rows_in: &[Vec<(usize, f64)>], dense: bool, dense_switch: f64) -> Option<LuFactors> {
     if dense {
         return factorize_dense_faer(m, rows_in);
     }
@@ -1977,24 +2481,33 @@ fn factorize_flat_markowitz_routed(m: usize, rows_in: &[Vec<(usize, f64)>], dens
     let debug_eliminate_cost = env_str!("ENOMOTO_DEBUG_ELIMINATE_COST").is_some();
     let mut eliminate_ns: u128 = 0;
     let mut snapshot_ns: u128 = 0;
+    let mut dense_ns: u128 = 0;
+    let mut search_ns: u128 = 0;
 
     // ピボット行のコピー (分解全体で 1 つのバッファを再利用)
     let mut pivot_row_snapshot: Vec<(usize, f64)> = Vec::new();
-    // B3 (`ENOMOTO_LU_DENSE_SWITCH`、既定 `0` = off、経路が変わる): 活性部分行列の
-    // 密度が `k^2` のこの割合に達したら (`k` = 残り行数、`ENOMOTO_LU_DENSE_SWITCH_MIN`
-    // 以上)、残りの `k x k` ブロックを稠密分解する。
-    let dense_switch = tunable!("ENOMOTO_LU_DENSE_SWITCH", DENSE_SWITCH_FRACTION, f64);
+    // B3 (`ENOMOTO_LU_DENSE_SWITCH`、経路が変わる): 活性部分行列の密度が `k^2` のこの割合に
+    // 達したら (`k` = 残り行数、`ENOMOTO_LU_DENSE_SWITCH_MIN` 以上)、残りの `k x k` ブロックを
+    // 稠密分解する。閾値は呼び出し側が決める (`dense_switch_for`、既定は LU が密な大きい基底だけ)。
     let dense_switch_min = tunable!("ENOMOTO_LU_DENSE_SWITCH_MIN", DENSE_SWITCH_MIN_ROWS, usize);
-    // 先頭の列シングルトンをまとめて採る (経路は下のループと同一)。B3 が有効なら
-    // ステップ 0 の密度判定を先に行う必要があるので使わない。
-    let peeled = if dense_switch > 0.0 { 0 } else { state.peel_column_singletons(&mut row_perm, &mut col_perm, &mut u_entries) };
+    // 先頭の列シングルトンをまとめて採る (経路は下のループと同一)。列シングルトンは消去を
+    // 伴わず活性部分行列を密にしないので、密度判定はその後から始めてよい (nug08 報告 #3:
+    // 旧版は B3 有効時に前処理ごと止めていたので、切替の有無にかかわらず経路が変わっていた)。
+    let peeled = state.peel_column_singletons(&mut row_perm, &mut col_perm, &mut u_entries);
+    // 稠密切替したステップ (切替なしなら `usize::MAX`)
+    let mut switched_at = usize::MAX;
     for step in peeled..m {
         if dense_switch > 0.0 && step % DENSE_SWITCH_CHECK_INTERVAL == 0 && m - step >= dense_switch_min {
             // 残りの行数
             let k = m - step;
+            // 閾値となる非ゼロ数
+            let need = dense_switch * (k as f64) * (k as f64);
+            // 行バッファの長さ (死領域を含む) は活性非ゼロ数の上界。これが届かないうちは
+            // `O(m)` の数え上げを省く (大きな `m` で 16 ステップごとの全行走査を避ける)。
             // 活性部分行列の非ゼロ数
-            let active: usize = (0..m).filter(|&i| !state.row_used[i]).map(|i| state.mat.row_len[i]).sum();
-            if active as f64 >= dense_switch * (k as f64) * (k as f64) {
+            let active: usize = if (state.mat.row_idx.len() as f64) < need { 0 } else { (0..m).filter(|&i| !state.row_used[i]).map(|i| state.mat.row_len[i]).sum() };
+            if active > 0 && active as f64 >= need {
+                let dense_t0 = if debug_eliminate_cost { Some(std::time::Instant::now()) } else { None };
                 // 残りの行・列 (元の番号)
                 let rows_r: Vec<usize> = (0..m).filter(|&i| !state.row_used[i]).collect();
                 let cols_c: Vec<usize> = (0..m).filter(|&j| !state.col_used[j]).collect();
@@ -2017,18 +2530,23 @@ fn factorize_flat_markowitz_routed(m: usize, rows_in: &[Vec<(usize, f64)>], dens
                     for &(cs, val) in &dlu.u_row[s] {
                         u_entries.push((step + s, cols_c[cs], val));
                     }
-                    for &(rs, mult) in dlu.l_col.col(s) {
+                    for (rs, mult) in dlu.l_col.seg(s) {
                         l_entries.push((rows_r[dlu.row_perm[rs]], step + s, mult));
                     }
                 }
                 PROF_DENSE_SWITCH.fetch_add(1, Ordering::Relaxed);
                 PROF_DENSE_SWITCH_ROWS.fetch_add(k, Ordering::Relaxed);
+                switched_at = step;
+                if let Some(t0) = dense_t0 {
+                    dense_ns += t0.elapsed().as_nanos();
+                }
                 break;
             }
         }
         // 稠密でないピボット列があれば Markowitz 数に関係なくそれを優先し、
         // 残りがすべて `initially_dense` のときだけ制限なしで探す
         // (真に特異なら後者が `None` を返す)。
+        let search_t0 = if debug_eliminate_cost { Some(std::time::Instant::now()) } else { None };
         let (pi, pj) = match state.find_best_pivot(true) {
             Some(p) => p,
             None => {
@@ -2036,6 +2554,9 @@ fn factorize_flat_markowitz_routed(m: usize, rows_in: &[Vec<(usize, f64)>], dens
                 state.find_best_pivot(false)?
             }
         };
+        if let Some(t0) = search_t0 {
+            search_ns += t0.elapsed().as_nanos();
+        }
 
         state.row_used[pi] = true;
         state.col_used[pj] = true;
@@ -2069,9 +2590,11 @@ fn factorize_flat_markowitz_routed(m: usize, rows_in: &[Vec<(usize, f64)>], dens
     }
     if debug_eliminate_cost {
         eprintln!(
-            "ELIMINATE_COST m={m} eliminate_ms={:.3} snapshot_ms={:.3} l_nnz={} u_nnz={} avg_row_fill={:.1}",
+            "ELIMINATE_COST m={m} eliminate_ms={:.3} snapshot_ms={:.3} search_ms={:.3} dense_ms={:.3} switched_at={switched_at} l_nnz={} u_nnz={} avg_row_fill={:.1}",
             eliminate_ns as f64 / 1e6,
             snapshot_ns as f64 / 1e6,
+            search_ns as f64 / 1e6,
+            dense_ns as f64 / 1e6,
             l_entries.len(),
             u_entries.len(),
             u_entries.len() as f64 / m as f64,
@@ -2088,7 +2611,7 @@ fn factorize_flat_markowitz_routed(m: usize, rows_in: &[Vec<(usize, f64)>], dens
     // `l_entries` はピボットステップ昇順にまとまっているので、最終の圧縮
     // バッファへ直接追記できる。
     debug_assert!(l_entries.windows(2).all(|w| w[0].1 <= w[1].1), "L entries must be grouped by ascending pivot step");
-    let mut l_build = CscBuilder::with_capacity(m, m, l_entries.len());
+    let mut l_build = LPackBuilder::with_capacity(m, l_entries.len());
     let mut next = 0usize;
     for step in 0..m {
         while next < l_entries.len() && l_entries[next].1 == step {
@@ -2111,8 +2634,19 @@ fn factorize_flat_markowitz_routed(m: usize, rows_in: &[Vec<(usize, f64)>], dens
         u_row.push(u_entries[start..next].iter().map(|&(_, orig_col, val)| (col_perm_inv[orig_col], val)).collect());
     }
 
-    let l_row = build_l_row(&l_col, m);
-    Some(LuFactors { m, l_col, l_row, u_row, row_perm, col_perm, col_perm_inv, row_perm_inv })
+    // 密行列の分解 #2: 稠密切替した分解は、ブロック (ステップ `switched_at..m`) の `L` を密な区間で持つ
+    // (`ENOMOTO_LU_DENSE_BLOCK=0` で従来どおり疎な形式のまま)。
+    let block = switched_at < m && dense_block_enabled();
+    let (l_col, l_row, dense_s0) = if block {
+        let s0 = switched_at;
+        let l_row = build_l_row(&l_col, m);
+        let l_row = if l_row.nnz() > 0 { l_row.with_block(s0, |_| s0, |r| r) } else { l_row };
+        (l_col.with_block(s0, |s| s + 1, |_| m), l_row, s0)
+    } else {
+        let l_row = build_l_row(&l_col, m);
+        (l_col, l_row, usize::MAX)
+    };
+    Some(LuFactors { m, l_col, l_row, u_row, row_perm, col_perm, col_perm_inv, row_perm_inv, dense_s0 })
 }
 
 /// 境界付き (Schur 補行列) 分解。`border` 列 ([`detect_border_columns`]) を
@@ -2315,7 +2849,7 @@ fn factorize_bordered(m: usize, rows_in: &[Vec<(usize, f64)>], border: &[usize])
     // `l_entries` はステップ `0..n_sparse` を昇順に、境界ブロックの列は
     // `n_sparse..m` を昇順に続けるので、`L` 全体を列順のまま圧縮バッファへ直接書ける。
     debug_assert!(l_entries.windows(2).all(|w| w[0].1 <= w[1].1), "L entries must be grouped by ascending pivot step");
-    let mut l_build = CscBuilder::with_capacity(m, m, l_entries.len() + border_lu.l_col.nnz());
+    let mut l_build = LPackBuilder::with_capacity(m, l_entries.len() + border_lu.l_col.nnz());
     let mut next = 0usize;
     for step in 0..n_sparse {
         while next < l_entries.len() && l_entries[next].1 == step {
@@ -2326,7 +2860,7 @@ fn factorize_bordered(m: usize, rows_in: &[Vec<(usize, f64)>], border: &[usize])
         l_build.end_column();
     }
     for s in 0..k {
-        for &(row_step, mult) in border_lu.l_col.col(s) {
+        for (row_step, mult) in border_lu.l_col.seg(s) {
             l_build.push(n_sparse + row_step, mult);
         }
         l_build.end_column();
@@ -2343,7 +2877,7 @@ fn factorize_bordered(m: usize, rows_in: &[Vec<(usize, f64)>], border: &[usize])
     }
 
     let l_row = build_l_row(&l_col, m);
-    Some(LuFactors { m, l_col, l_row, u_row, row_perm, col_perm, col_perm_inv: col_perm_inv_full, row_perm_inv: row_perm_inv_full })
+    Some(LuFactors { m, l_col, l_row, u_row, row_perm, col_perm, col_perm_inv: col_perm_inv_full, row_perm_inv: row_perm_inv_full, dense_s0: usize::MAX })
 }
 
 impl LuFactors {
@@ -2370,6 +2904,37 @@ impl LuFactors {
             za[s] = rhs_a[r];
             zb[s] = rhs_b[r];
         }
+        self.l_pair_active(active, za, zb);
+    }
+
+    /// [`Self::l_solve_into_pair`] の `rhs_a` の非ゼロ `(元の行, 値)` が分かっている版: `za` は 0 で埋めて
+    /// 非ゼロだけを置く (`O(m)` の間接読み出しの代わりに連続な 0 埋め)。`rhs_a` の他の位置は 0 なので
+    /// `za` の初期値は同じ (同じ行が複数回あれば密な `rhs_a` と同じく最後の値)。以降はビット一致。
+    fn l_solve_into_pair_nz(&self, active: &[u32], rhs_a_nz: &[(usize, f64)], rhs_b: &[f64], za: &mut [f64], zb: &mut [f64]) {
+        let m = self.m;
+        za[..m].fill(0.0);
+        for &(i, v) in rhs_a_nz {
+            za[self.row_perm_inv[i]] = v;
+        }
+        for s in 0..m {
+            zb[s] = rhs_b[self.row_perm[s]];
+        }
+        self.l_pair_active(active, za, zb);
+    }
+
+    /// [`Self::l_solve_into`] の `rhs` の非ゼロ `(元の行, 値)` が分かっている版 ([`Self::l_solve_into_pair_nz`] 参照)。
+    fn l_solve_into_nz(&self, active: &[u32], rhs_nz: &[(usize, f64)], z: &mut [f64]) {
+        let m = self.m;
+        z[..m].fill(0.0);
+        for &(i, v) in rhs_nz {
+            z[self.row_perm_inv[i]] = v;
+        }
+        self.l_active_loop(active, z);
+    }
+
+    /// [`Self::l_solve_into_pair`] の消去部分 (入力置換の後)。
+    #[inline]
+    fn l_pair_active(&self, active: &[u32], za: &mut [f64], zb: &mut [f64]) {
         for &s in active {
             let s = s as usize;
             let xa = za[s];
@@ -2377,19 +2942,35 @@ impl LuFactors {
             match (xa != 0.0, xb != 0.0) {
                 (false, false) => {}
                 (true, true) => {
-                    for &(row_step, mult) in self.l_col.col(s) {
+                    let seg = self.l_col.seg(s);
+                    for (&row_step, &mult) in seg.idx.iter().zip(seg.val.iter()) {
+                        let row_step = row_step as usize;
                         za[row_step] -= mult * xa;
                         zb[row_step] -= mult * xb;
+                    }
+                    if !seg.rval.is_empty() {
+                        sub_scaled_range(&mut za[seg.rlo..seg.rlo + seg.rval.len()], seg.rval, xa);
+                        sub_scaled_range(&mut zb[seg.rlo..seg.rlo + seg.rval.len()], seg.rval, xb);
                     }
                 }
                 (true, false) => {
-                    for &(row_step, mult) in self.l_col.col(s) {
+                    let seg = self.l_col.seg(s);
+                    for (&row_step, &mult) in seg.idx.iter().zip(seg.val.iter()) {
+                        let row_step = row_step as usize;
                         za[row_step] -= mult * xa;
+                    }
+                    if !seg.rval.is_empty() {
+                        sub_scaled_range(&mut za[seg.rlo..seg.rlo + seg.rval.len()], seg.rval, xa);
                     }
                 }
                 (false, true) => {
-                    for &(row_step, mult) in self.l_col.col(s) {
+                    let seg = self.l_col.seg(s);
+                    for (&row_step, &mult) in seg.idx.iter().zip(seg.val.iter()) {
+                        let row_step = row_step as usize;
                         zb[row_step] -= mult * xb;
+                    }
+                    if !seg.rval.is_empty() {
+                        sub_scaled_range(&mut zb[seg.rlo..seg.rlo + seg.rval.len()], seg.rval, xb);
                     }
                 }
             }
@@ -2409,41 +2990,91 @@ impl LuFactors {
             zb[s] = rhs_b[r];
             zc[s] = rhs_c[r];
         }
+        self.l_triple_active(active, za, zb, zc);
+    }
+
+    /// [`Self::l_solve_into_triple`] の `rhs_a` の非ゼロが分かっている版 ([`Self::l_solve_into_pair_nz`] 参照)。
+    #[allow(clippy::too_many_arguments)]
+    fn l_solve_into_triple_nz(&self, active: &[u32], rhs_a_nz: &[(usize, f64)], rhs_b: &[f64], rhs_c: &[f64], za: &mut [f64], zb: &mut [f64], zc: &mut [f64]) {
+        let m = self.m;
+        za[..m].fill(0.0);
+        for &(i, v) in rhs_a_nz {
+            za[self.row_perm_inv[i]] = v;
+        }
+        for s in 0..m {
+            let r = self.row_perm[s];
+            zb[s] = rhs_b[r];
+            zc[s] = rhs_c[r];
+        }
+        self.l_triple_active(active, za, zb, zc);
+    }
+
+    /// [`Self::l_solve_into_triple`] の消去部分 (入力置換の後)。
+    #[inline]
+    fn l_triple_active(&self, active: &[u32], za: &mut [f64], zb: &mut [f64], zc: &mut [f64]) {
         for &s in active {
             let s = s as usize;
             let xa = za[s];
             let xb = zb[s];
             let xc = zc[s];
             if xa != 0.0 && xb != 0.0 && xc != 0.0 {
-                for &(row_step, mult) in self.l_col.col(s) {
+                let seg = self.l_col.seg(s);
+                for (&row_step, &mult) in seg.idx.iter().zip(seg.val.iter()) {
+                    let row_step = row_step as usize;
                     za[row_step] -= mult * xa;
                     zb[row_step] -= mult * xb;
                     zc[row_step] -= mult * xc;
+                }
+                if !seg.rval.is_empty() {
+                    sub_scaled_range(&mut za[seg.rlo..seg.rlo + seg.rval.len()], seg.rval, xa);
+                    sub_scaled_range(&mut zb[seg.rlo..seg.rlo + seg.rval.len()], seg.rval, xb);
+                    sub_scaled_range(&mut zc[seg.rlo..seg.rlo + seg.rval.len()], seg.rval, xc);
                 }
                 continue;
             }
             match (xa != 0.0, xb != 0.0) {
                 (false, false) => {}
                 (true, true) => {
-                    for &(row_step, mult) in self.l_col.col(s) {
+                    let seg = self.l_col.seg(s);
+                    for (&row_step, &mult) in seg.idx.iter().zip(seg.val.iter()) {
+                        let row_step = row_step as usize;
                         za[row_step] -= mult * xa;
                         zb[row_step] -= mult * xb;
+                    }
+                    if !seg.rval.is_empty() {
+                        sub_scaled_range(&mut za[seg.rlo..seg.rlo + seg.rval.len()], seg.rval, xa);
+                        sub_scaled_range(&mut zb[seg.rlo..seg.rlo + seg.rval.len()], seg.rval, xb);
                     }
                 }
                 (true, false) => {
-                    for &(row_step, mult) in self.l_col.col(s) {
+                    let seg = self.l_col.seg(s);
+                    for (&row_step, &mult) in seg.idx.iter().zip(seg.val.iter()) {
+                        let row_step = row_step as usize;
                         za[row_step] -= mult * xa;
+                    }
+                    if !seg.rval.is_empty() {
+                        sub_scaled_range(&mut za[seg.rlo..seg.rlo + seg.rval.len()], seg.rval, xa);
                     }
                 }
                 (false, true) => {
-                    for &(row_step, mult) in self.l_col.col(s) {
+                    let seg = self.l_col.seg(s);
+                    for (&row_step, &mult) in seg.idx.iter().zip(seg.val.iter()) {
+                        let row_step = row_step as usize;
                         zb[row_step] -= mult * xb;
+                    }
+                    if !seg.rval.is_empty() {
+                        sub_scaled_range(&mut zb[seg.rlo..seg.rlo + seg.rval.len()], seg.rval, xb);
                     }
                 }
             }
             if xc != 0.0 {
-                for &(row_step, mult) in self.l_col.col(s) {
+                let seg = self.l_col.seg(s);
+                for (&row_step, &mult) in seg.idx.iter().zip(seg.val.iter()) {
+                    let row_step = row_step as usize;
                     zc[row_step] -= mult * xc;
+                }
+                if !seg.rval.is_empty() {
+                    sub_scaled_range(&mut zc[seg.rlo..seg.rlo + seg.rval.len()], seg.rval, xc);
                 }
             }
         }
@@ -2458,13 +3089,24 @@ impl LuFactors {
         for s in 0..m {
             z[s] = rhs[self.row_perm[s]];
         }
+        self.l_active_loop(active, z);
+    }
+
+    /// [`Self::l_solve_into`] の消去部分 (入力置換の後)。
+    #[inline]
+    fn l_active_loop(&self, active: &[u32], z: &mut [f64]) {
         for &s in active {
             let s = s as usize;
             if z[s] == 0.0 {
                 continue;
             }
-            for &(row_step, mult) in self.l_col.col(s) {
-                z[row_step] -= mult * z[s];
+            let zs = z[s];
+            let seg = self.l_col.seg(s);
+            for (&row_step, &mult) in seg.idx.iter().zip(seg.val.iter()) {
+                z[row_step as usize] -= mult * zs;
+            }
+            if !seg.rval.is_empty() {
+                sub_scaled_range(&mut z[seg.rlo..seg.rlo + seg.rval.len()], seg.rval, zs);
             }
         }
     }
@@ -2494,10 +3136,29 @@ impl LuFactors {
 
     /// 非ゼロの *ステップ* (`rhs[row_perm[s]] != 0.0` となる `s`) が分かっている
     /// 密な `rhs` に対する [`Self::l_solve_into`]。`steps` はちょうどそれらを
-    /// (任意順で) 列挙すること。`z` は自分でクリアする。到達集合版の消去を行い、
+    /// (任意順で) 列挙すること。`z` は自分でクリアする (`clean` なら `z` は入口で全 0 と
+    /// 分かっているのでクリアを省く)。到達集合版の消去を行い、
     /// 結果は `l_solve_into` と (ゼロの符号を除き) ビット一致。
     fn l_solve_steps_into(&self, rhs: &[f64], steps: &[usize], z: &mut [f64], scratch: &mut GpScratch) {
         z.fill(0.0);
+        scratch.seeds.clear();
+        for &s in steps {
+            let v = rhs[self.row_perm[s]];
+            debug_assert!(v != 0.0);
+            z[s] = v;
+            scratch.seeds.push(s);
+        }
+        self.l_solve_gp_seeded(z, scratch);
+    }
+
+    /// `clean` (`z` が入口で全 0 と分かっている) ならクリアを省く [`Self::l_solve_steps_into`]
+    /// (融合 FTRAN の記録付き版用)。
+    fn l_solve_steps_into_clean(&self, rhs: &[f64], steps: &[usize], z: &mut [f64], scratch: &mut GpScratch, clean: bool) {
+        if clean {
+            debug_assert!(z.iter().all(|&v| v == 0.0));
+        } else {
+            z.fill(0.0);
+        }
         scratch.seeds.clear();
         for &s in steps {
             let v = rhs[self.row_perm[s]];
@@ -2522,8 +3183,18 @@ impl LuFactors {
             scratch.stack.push(seed);
             while let Some(node) = scratch.stack.pop() {
                 scratch.reach.push(node);
-                for &(next, _) in self.l_col.col(node) {
+                let seg = self.l_col.seg(node);
+                for &next in seg.idx {
+                    let next = next as usize;
                     if !scratch.visited.is_marked(next) {
+                        scratch.visited.mark(next);
+                        scratch.stack.push(next);
+                    }
+                }
+                for (t, &v) in seg.rval.iter().enumerate() {
+                    // 密な区間の 0 は辺でない (疎な形式と同じ到達集合にする)
+                    let next = seg.rlo + t;
+                    if v != 0.0 && !scratch.visited.is_marked(next) {
                         scratch.visited.mark(next);
                         scratch.stack.push(next);
                     }
@@ -2536,8 +3207,13 @@ impl LuFactors {
             if z[s] == 0.0 {
                 continue;
             }
-            for &(row_step, mult) in self.l_col.col(s) {
-                z[row_step] -= mult * z[s];
+            let zs = z[s];
+            let seg = self.l_col.seg(s);
+            for (&row_step, &mult) in seg.idx.iter().zip(seg.val.iter()) {
+                z[row_step as usize] -= mult * zs;
+            }
+            if !seg.rval.is_empty() {
+                sub_scaled_range(&mut z[seg.rlo..seg.rlo + seg.rval.len()], seg.rval, zs);
             }
         }
     }
@@ -2557,12 +3233,36 @@ impl LuFactors {
     #[inline]
     fn l_transpose_gather_core(&self, w: &mut [f64]) {
         let m = self.m;
+        if self.l_col.has_block() {
+            return self.l_transpose_gather_core_block(w);
+        }
         for s in (0..m).rev() {
-            for &(row_step, mult) in self.l_col.col(s) {
+            self.l_col.seg(s).for_each(|row_step, mult| {
                 if w[row_step] == 0.0 {
-                    continue;
+                    return;
                 }
                 w[s] -= mult * w[row_step];
+            });
+        }
+    }
+
+    /// 密ブロックがあるときの [`Self::l_transpose_gather_core`] (密行列の分解 #2)。ブロック内の列 (区間
+    /// `(s, m)`) は 0 判定なしの内積 ([`dot_lanes`]、4 本の部分和) で引く。疎な部分は従来どおり。
+    #[inline(never)]
+    fn l_transpose_gather_core_block(&self, w: &mut [f64]) {
+        let m = self.m;
+        for s in (0..m).rev() {
+            let seg = self.l_col.seg(s);
+            for (&r, &mult) in seg.idx.iter().zip(seg.val.iter()) {
+                let r = r as usize;
+                if w[r] == 0.0 {
+                    continue;
+                }
+                w[s] -= mult * w[r];
+            }
+            if !seg.rval.is_empty() {
+                let d = dot_lanes(seg.rval, &w[seg.rlo..seg.rlo + seg.rval.len()]);
+                w[s] -= d;
             }
         }
     }
@@ -2580,6 +3280,47 @@ impl LuFactors {
         permute_btran_out(&self.row_perm, w, y);
     }
 
+    /// [`Self::l_transpose_scatter_core`] を `L` の行が非空のステップ `rows` (昇順) だけで行う
+    /// ([`FtLu::l_row_active`]、空の行は何もしないのでビット一致。`O(m)` の 0 判定の走査を省く)。
+    #[inline]
+    fn l_transpose_scatter_rows(&self, w: &mut [f64], rows: &[u32]) {
+        for &s in rows.iter().rev() {
+            let s = s as usize;
+            let ws = w[s];
+            if ws == 0.0 {
+                continue;
+            }
+            let seg = self.l_row.seg(s);
+            for (&k, &mult) in seg.idx.iter().zip(seg.val.iter()) {
+                let k = k as usize;
+                w[k] -= mult * ws;
+            }
+            if !seg.rval.is_empty() {
+                sub_scaled_range(&mut w[seg.rlo..seg.rlo + seg.rval.len()], seg.rval, ws);
+            }
+        }
+    }
+
+    /// [`Self::l_transpose_gather_core`] を `L` の列が非空のステップ `cols` (昇順、[`FtLu::l_active`]) だけで
+    /// 行う (空の列は何もしないのでビット一致)。
+    #[inline]
+    fn l_transpose_gather_cols(&self, w: &mut [f64], cols: &[u32]) {
+        if self.l_col.has_block() {
+            return self.l_transpose_gather_core_block(w);
+        }
+        for &s in cols.iter().rev() {
+            let s = s as usize;
+            let seg = self.l_col.seg(s);
+            for (&r, &mult) in seg.idx.iter().zip(seg.val.iter()) {
+                let r = r as usize;
+                if w[r] == 0.0 {
+                    continue;
+                }
+                w[s] -= mult * w[r];
+            }
+        }
+    }
+
     /// [`Self::l_transpose_solve_scatter_into`] から最後の置換を除いたもの。
     #[inline]
     fn l_transpose_scatter_core(&self, w: &mut [f64]) {
@@ -2589,8 +3330,13 @@ impl LuFactors {
             if ws == 0.0 {
                 continue;
             }
-            for &(k, mult) in self.l_row.row(s) {
+            let seg = self.l_row.seg(s);
+            for (&k, &mult) in seg.idx.iter().zip(seg.val.iter()) {
+                let k = k as usize;
                 w[k] -= mult * ws;
+            }
+            if !seg.rval.is_empty() {
+                sub_scaled_range(&mut w[seg.rlo..seg.rlo + seg.rval.len()], seg.rval, ws);
             }
         }
     }
@@ -2603,7 +3349,7 @@ impl LuFactors {
         let mut z: Vec<f64> = (0..m).map(|s| rhs[self.row_perm[s]]).collect();
         // 前進代入: L z = rhs' (単位下三角、ステップ順)
         for s in 0..m {
-            for &(row_step, mult) in self.l_col.col(s) {
+            for (row_step, mult) in self.l_col.seg(s) {
                 z[row_step] -= mult * z[s];
             }
         }
@@ -2646,7 +3392,7 @@ impl LuFactors {
         // 後退代入: L^T w = z (ステップ順で単位上三角)
         let mut w = z;
         for s in (0..m).rev() {
-            for &(row_step, mult) in self.l_col.col(s) {
+            for (row_step, mult) in self.l_col.seg(s) {
                 w[s] -= mult * w[row_step];
             }
         }
@@ -2692,6 +3438,7 @@ struct SEta {
 /// eta が密形式で格納されていることを示す `len` の番兵値 ([`EtaFile::dense`] 参照)。
 const ETA_DENSE: u32 = u32::MAX;
 
+
 /// [`EtaFile::iter`] が返す、生きている eta 1 つへの参照。
 #[derive(Clone, Copy)]
 struct EtaRef {
@@ -2707,8 +3454,10 @@ struct EtaRef {
 /// `val: f64`) に置く。fill が `DENSE_ETA_FRACTION * m` を超えた eta は密形式
 /// (`len == ETA_DENSE`、`start` が `dense` の添字) で持つ。
 ///
-/// `U` eta の置換 (FT 更新) はヘッダを並列配列から削除する。要素はプールに
-/// ゴミとして残り、次の再分解で新しいファイルが作られるまで回収されない。
+/// `U` eta の置換 (FT 更新) はヘッダを並列配列から削除する ([`Self::remove`])。大きな問題では
+/// 削除の代わりに「死んだ」ヘッダにする ([`Self::kill`]、策4: 後続ヘッダの位置がずれないので
+/// `Vec::remove` の memmove と位置索引の付け直しが要らない)。要素と死んだヘッダはゴミとして残り、
+/// 次の再分解で新しいファイルが作られるまで回収されない。
 #[derive(Clone, Default)]
 struct EtaFile {
     /// eta ごとのキー (`U` ならスロット、`R` なら行 `p`)。
@@ -2721,8 +3470,25 @@ struct EtaFile {
     idx: Vec<u32>,
     /// 疎 eta の要素の値プール。
     val: Vec<f64>,
-    /// 密 eta の本体 (長さ `m` の配列, 非ゼロ数)。
-    dense: Vec<(Box<[f64]>, usize)>,
+    /// 密 eta の本体 ([`DenseEta`])。
+    dense: Vec<DenseEta>,
+}
+
+/// 密形式の eta ([`EtaFile::dense`])。通常は長さ `m` の配列 (`lo = 0`、疎な部分なし)。
+/// 密ブロック (密行列の分解 #2) の列 eta は、ブロック内の行 `[lo, lo + data.len())` を密に、
+/// ブロックより上の行 (`< lo`) を疎な部分 (`idx/val[sp_start..sp_start + sp_len]`) に持つ。
+#[derive(Clone)]
+struct DenseEta {
+    /// 行 `lo..` の値 (0 を含む)。
+    data: Box<[f64]>,
+    /// 非ゼロ数 (疎な部分を含む)。
+    nnz: usize,
+    /// `data[0]` の行。
+    lo: usize,
+    /// 疎な部分のプール内の開始位置。
+    sp_start: u32,
+    /// 疎な部分の長さ。
+    sp_len: u32,
 }
 
 impl EtaFile {
@@ -2744,7 +3510,8 @@ impl EtaFile {
         self.key.len()
     }
 
-    /// 生きている eta を作成順に返す (逆順は `.rev()`)。
+    /// eta を作成順に返す (逆順は `.rev()`)。死んだヘッダ ([`Self::kill`]) も返すが、ピボット 1・
+    /// 要素なしなので `U` 段の処理 (0 判定・除算・axpy・tick) では何もしないのと同じになる。
     #[inline(always)]
     fn iter(&self) -> impl DoubleEndedIterator<Item = EtaRef> + '_ {
         self.key.iter().enumerate().map(|(k, &s)| EtaRef { k, slot: s as usize })
@@ -2755,7 +3522,7 @@ impl EtaFile {
     fn nnz(&self, k: usize) -> usize {
         let (start, len) = self.span[k];
         if len == ETA_DENSE {
-            self.dense[start as usize].1
+            self.dense[start as usize].nnz
         } else {
             len as usize
         }
@@ -2775,8 +3542,15 @@ impl EtaFile {
     fn dot(&self, k: usize, dense: &[f64]) -> f64 {
         let (start, len) = self.span[k];
         if len == ETA_DENSE {
-            let data = &self.dense[start as usize].0;
-            return data.iter().zip(dense.iter()).map(|(&v, &d)| v * d).sum();
+            let de = &self.dense[start as usize];
+            let data = &de.data;
+            let dd: f64 = data.iter().zip(dense[de.lo..].iter()).map(|(&v, &d)| v * d).sum();
+            if de.sp_len == 0 {
+                return dd;
+            }
+            let (s, e) = (de.sp_start as usize, de.sp_start as usize + de.sp_len as usize);
+            let sp: f64 = self.idx[s..e].iter().zip(self.val[s..e].iter()).map(|(&i, &v)| v * dense[i as usize]).sum();
+            return sp + dd;
         }
         let (idx, val) = self.seg(k);
         idx.iter().zip(val.iter()).map(|(&i, &v)| v * dense[i as usize]).sum()
@@ -2787,8 +3561,14 @@ impl EtaFile {
     fn axpy(&self, k: usize, alpha: f64, dense: &mut [f64]) {
         let (start, len) = self.span[k];
         if len == ETA_DENSE {
-            let data = &self.dense[start as usize].0;
-            for (d, &v) in dense.iter_mut().zip(data.iter()) {
+            let de = &self.dense[start as usize];
+            if de.sp_len != 0 {
+                let (s, e) = (de.sp_start as usize, de.sp_start as usize + de.sp_len as usize);
+                for (&i, &v) in self.idx[s..e].iter().zip(self.val[s..e].iter()) {
+                    dense[i as usize] += alpha * v;
+                }
+            }
+            for (d, &v) in dense[de.lo..].iter_mut().zip(de.data.iter()) {
                 *d += alpha * v;
             }
             return;
@@ -2804,9 +3584,14 @@ impl EtaFile {
     fn for_each_entry(&self, k: usize, mut f: impl FnMut(usize, f64)) {
         let (start, len) = self.span[k];
         if len == ETA_DENSE {
-            for (i, &x) in self.dense[start as usize].0.iter().enumerate() {
+            let de = &self.dense[start as usize];
+            let (s, e) = (de.sp_start as usize, de.sp_start as usize + de.sp_len as usize);
+            for (&i, &v) in self.idx[s..e].iter().zip(self.val[s..e].iter()) {
+                f(i as usize, v);
+            }
+            for (i, &x) in de.data.iter().enumerate() {
                 if x != 0.0 {
-                    f(i, x);
+                    f(de.lo + i, x);
                 }
             }
             return;
@@ -2821,13 +3606,27 @@ impl EtaFile {
     fn remove_index(&mut self, k: usize, index: usize) -> bool {
         let (start, len) = self.span[k];
         if len == ETA_DENSE {
-            let (data, nnz) = &mut self.dense[start as usize];
-            if data[index] != 0.0 {
-                data[index] = 0.0;
-                *nnz -= 1;
-                return true;
+            let de = &mut self.dense[start as usize];
+            if index >= de.lo {
+                let t = index - de.lo;
+                if t < de.data.len() && de.data[t] != 0.0 {
+                    de.data[t] = 0.0;
+                    de.nnz -= 1;
+                    return true;
+                }
+                return false;
             }
-            return false;
+            let s = de.sp_start as usize;
+            let e = s + de.sp_len as usize;
+            let Some(pos) = self.idx[s..e].iter().position(|&i| i as usize == index) else {
+                return false;
+            };
+            let pos = s + pos;
+            self.idx.copy_within(pos + 1..e, pos);
+            self.val.copy_within(pos + 1..e, pos);
+            de.sp_len -= 1;
+            de.nnz -= 1;
+            return true;
         }
         let s = start as usize;
         let e = s + len as usize;
@@ -2841,11 +3640,25 @@ impl EtaFile {
         true
     }
 
+    /// eta `k` が密形式か。
+    #[inline(always)]
+    fn is_dense(&self, k: usize) -> bool {
+        self.span[k].1 == ETA_DENSE
+    }
+
     /// ヘッダ `k` を削除する (後続ヘッダは 1 つ前にずれる)。
     fn remove(&mut self, k: usize) {
         self.key.remove(k);
         self.pivot.remove(k);
         self.span.remove(k);
+    }
+
+    /// ヘッダ `k` を「死んだ」ヘッダにする (策4): キー (スロット) は残し、ピボットを 1・要素を空にする。
+    /// 後続ヘッダの位置は変わらない。`U` 段の走査はそのまま通してよい ([`Self::iter`])。`U^T` 段は
+    /// スロットの行を散布するので飛ばす必要がある (`FtLu::slot_pos[スロット] != k` で判定)。
+    fn kill(&mut self, k: usize) {
+        self.pivot[k] = 1.0;
+        self.span[k] = (0, 0);
     }
 
     /// 密ベクトル `src` から eta `{(i, scale * src[i]) : i != skip, 残すもの}` を
@@ -2890,7 +3703,7 @@ impl EtaFile {
                 data
             };
             self.span.push((self.dense.len() as u32, ETA_DENSE));
-            self.dense.push((data.into_boxed_slice(), nnz));
+            self.dense.push(DenseEta { data: data.into_boxed_slice(), nnz, lo: 0, sp_start: 0, sp_len: 0 });
         } else {
             let base = self.idx.len();
             self.idx.reserve(nnz);
@@ -2918,6 +3731,38 @@ impl EtaFile {
         k
     }
 
+    /// [`Self::push_scaled_dense`] の疎入力版 (策3): `src` の非ゼロになりうる位置の一覧
+    /// `list` (昇順・重複なし、`src` の非ゼロをすべて含む) だけを見て同じ eta を作る。
+    /// 非ゼロ数・疎/密の判定・要素の順序 (添字昇順) が密版と同じなのでビット一致。
+    /// 密形式になる場合だけ `src` 全体から作る。
+    #[allow(clippy::too_many_arguments)]
+    fn push_scaled_list(&mut self, key: usize, pivot: f64, src: &[f64], list: &[usize], skip: usize, scale: f64, dense_fraction: f64) -> usize {
+        debug_assert!(list.windows(2).all(|w| w[0] < w[1]));
+        let tiny = tiny_drop();
+        // 格納する値か (密版の判定と同じ)
+        let keep = |i: usize, v: f64| i != skip && if tiny > 0.0 { v.abs() >= tiny } else { v != 0.0 };
+        let nnz = list.iter().filter(|&&i| keep(i, scale * src[i])).count();
+        if nnz as f64 > dense_fraction * src.len() as f64 {
+            return self.push_scaled_dense(key, pivot, src, skip, scale, dense_fraction);
+        }
+        let k = self.key.len();
+        self.key.push(key as u32);
+        self.pivot.push(pivot);
+        let base = self.idx.len();
+        self.idx.reserve(nnz);
+        self.val.reserve(nnz);
+        for &i in list {
+            let v = scale * src[i];
+            if keep(i, v) {
+                self.idx.push(i as u32);
+                self.val.push(v);
+            }
+        }
+        debug_assert_eq!(self.idx.len() - base, nnz);
+        self.span.push((base as u32, nnz as u32));
+        k
+    }
+
     /// 最後に追加した eta を取り除く (棄却された更新の `R` 用)。
     fn pop(&mut self) {
         self.key.pop();
@@ -2932,6 +3777,12 @@ impl EtaFile {
     }
 }
 
+/// 新しい疎経路 (策1〜4・12、追加策 R) を使う最小行数 ([`SPARSE_PATH_MIN_M`]、
+/// `ENOMOTO_T_SPARSE_PATH_MIN_M` で上書き可)。これ未満の問題は元の経路のコードだけを通る。
+pub(crate) fn sparse_path_min_m() -> usize {
+    tunable!("ENOMOTO_T_SPARSE_PATH_MIN_M", SPARSE_PATH_MIN_M, usize)
+}
+
 /// 結果密度ゲートの閾値 ([`EXPECTED_DENSE_FRACTION`]、環境変数
 /// `ENOMOTO_EXPECTED_DENSITY_GATE` で上書き可。`>= 1.0` でゲート無効)。
 /// [`FtranDensity::new`] ごとに 1 回だけ読む。
@@ -2941,14 +3792,43 @@ fn expected_dense_gate() -> f64 {
         .unwrap_or(EXPECTED_DENSE_FRACTION)
 }
 
+/// `z[t] -= v[t] * x` (密行列の分解 #2 の密な区間の散布。各要素の演算は疎な形式と同じ)。
+#[inline(always)]
+fn sub_scaled_range(z: &mut [f64], v: &[f64], x: f64) {
+    for (zt, &vt) in z.iter_mut().zip(v.iter()) {
+        *zt -= vt * x;
+    }
+}
+
+/// 密な内積 (4 本の部分和で依存連鎖を切る。密行列の分解 #2 の密ブロック用)。
+#[inline]
+fn dot_lanes(a: &[f64], b: &[f64]) -> f64 {
+    debug_assert_eq!(a.len(), b.len());
+    let mut acc = [0.0f64; 4];
+    let ca = a.chunks_exact(4);
+    let cb = b.chunks_exact(4);
+    let (ra, rb) = (ca.remainder(), cb.remainder());
+    for (x, y) in ca.zip(cb) {
+        acc[0] += x[0] * y[0];
+        acc[1] += x[1] * y[1];
+        acc[2] += x[2] * y[2];
+        acc[3] += x[3] * y[3];
+    }
+    let mut tail = 0.0f64;
+    for (x, y) in ra.iter().zip(rb.iter()) {
+        tail += x * y;
+    }
+    (acc[0] + acc[1]) + (acc[2] + acc[3]) + tail
+}
+
 /// [`LuFactors::l_row`] を作る。スキャッタ形式が無効
 /// (`ENOMOTO_BTRAN_L_SCATTER=0`) なら、同じ `m` 行で要素なしの空行列を返す
 /// (無効時に構築コストも払わないため。空でも `row(i)` は常に有効)。
-fn build_l_row(l_col: &CscMat, m: usize) -> CsrMat {
+fn build_l_row(l_col: &LPack, m: usize) -> LPack {
     if btran_l_scatter_gate() <= 0.0 {
-        return CscMat::empty(m, m).to_csr();
+        return LPack::empty(m);
     }
-    l_col.to_csr()
+    l_col.transposed(m)
 }
 
 /// FTRAN/BTRAN の結果や新しい eta 要素を厳密な 0 とみなす絶対値の閾値
@@ -3025,6 +3905,376 @@ impl StepCapture {
     }
 }
 
+/// 呼び出し側が持つ長さ `m` の出力ベクトルの「非ゼロになりうる位置」の記録
+/// (stormG2 報告 §4 策1)。`full == false` の間、対応するベクトルは `idx` 以外の位置で
+/// 全 `+0.0` (`idx` は重複なし・順不同で、値 0 の位置を含みうる)。疎な書き出しは
+/// 前回の `idx` だけを 0 に戻してから書くので、`O(m)` の `fill` が要らない。
+///
+/// 記録の外でベクトル全体を書いた (密な置換出力など) ときは [`Self::set_full`] で
+/// 無効化すること。無効な記録の次の疎書き出しは 1 回だけ全体を `fill` する。
+#[derive(Clone, Debug)]
+pub struct NzTrack {
+    /// 非ゼロになりうる位置 (`full` の間は意味なし)。
+    idx: Vec<usize>,
+    /// 位置が分からない (ベクトル全体が非ゼロでありうる) か。
+    full: bool,
+}
+
+impl NzTrack {
+    /// 無効状態 (`full`) の記録を作る。
+    pub fn new() -> Self {
+        NzTrack { idx: Vec::new(), full: true }
+    }
+
+    /// 記録を無効化する (対応するベクトルを記録の外で書いた後に呼ぶ)。
+    #[inline]
+    pub fn set_full(&mut self) {
+        self.full = true;
+        self.idx.clear();
+    }
+
+    /// 有効なら非ゼロになりうる位置の一覧。
+    #[inline]
+    pub fn indices(&self) -> Option<&[usize]> {
+        if self.full {
+            None
+        } else {
+            Some(&self.idx)
+        }
+    }
+
+    /// 前回の位置 (無効なら全体) を 0 に戻し、空の有効な記録にする。
+    #[inline]
+    fn reset(&mut self, v: &mut [f64]) {
+        if self.full {
+            v.fill(0.0);
+        } else {
+            for &i in &self.idx {
+                v[i] = 0.0;
+            }
+        }
+        self.idx.clear();
+        self.full = false;
+    }
+}
+
+impl Default for NzTrack {
+    /// [`NzTrack::new`] と同じ。
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// 融合 FTRAN ([`FtLu::solve_sparse_into_pair_capture`] 等) の出力の疎書き出し用の記録
+/// (stormG2 報告 §4 策1・策6)。主ループが 1 つ持ち、毎反復同じものを渡す。
+///
+/// - `alpha`: 入る列の結果 (`out_a`)、`tau`: DSE の `tau` (`out_b`) の非ゼロ位置 (元の行番号)。
+/// - `a_tilde`: FT 更新用の `a_tilde` の非ゼロ位置 (ステップ番号)。
+/// - `b_scratch_clean`: `tau` 側スクラッチ (`scratch_b`) が全 0 か (真なら
+///   Gilbert-Peierls `L` 段の入口の `fill` を省く)。
+///
+/// どれも値・演算順は変えない (書き出す位置の集合が同じ) ので結果はビット一致。
+#[derive(Clone, Debug, Default)]
+pub struct FtranTrack {
+    /// 入る列の FTRAN 結果の記録。
+    pub alpha: NzTrack,
+    /// DSE `tau` の記録。
+    pub tau: NzTrack,
+    /// `a_tilde` の記録。
+    pub a_tilde: NzTrack,
+    /// `scratch_b` が全 0 か。
+    b_scratch_clean: bool,
+    /// 呼び出し側の要求: DSE `tau` を入る列の結果の非ゼロ行だけで求めてよい (部分 `tau`、策12)。
+    pub partial_tau: bool,
+    /// 直前の融合 FTRAN が `tau` を部分的に求めたか (真なら `tau` は入る列の結果の非ゼロ行でだけ正しい)。
+    tau_partial: bool,
+    /// 部分 `tau` の作業領域 (`(u_seq 位置, スロット, 値)`)。
+    owners_tmp: Vec<(usize, usize, f64)>,
+    /// 作業 #10 (B): 部分 `tau` の手間の移動平均 (未計測なら `None`)。
+    pt_cost_partial: Option<f64>,
+    /// 作業 #10 (B): 通常の `tau` の `U` 段 (と置換) の手間の移動平均 (未計測なら `None`)。
+    pt_cost_full: Option<f64>,
+    /// 作業 #10 (B): 前回の測り直しからの選択回数。
+    pt_since_probe: u32,
+    /// 作業 #10 (B): 手間で選ぶか (`ENOMOTO_T_PARTIAL_TAU_ADAPTIVE`、0 = 旧版の常に部分 `tau`)、移動平均の重み、測り直しの間隔。
+    pt_adaptive: bool,
+    pt_ema: f64,
+    pt_probe: u32,
+    /// 作業 #10 (B): 現在の測り直しの間隔と、直近の選択。
+    pt_interval: u32,
+    pt_last_pick: bool,
+    /// 作業 #10 (B): 部分 `tau` が安い間も通常の `tau` を試して測り直すか (`ENOMOTO_T_PARTIAL_TAU_PROBE_FULL`、既定 0)。
+    pt_probe_full: bool,
+}
+
+impl FtranTrack {
+    /// 全記録が無効な状態で作る。
+    pub fn new() -> Self {
+        Self {
+            // 既定 0 (取り下げ): 経路が変わり、irish-electricity (旧前処理、作業 #5 の試験) が特異基底の解き直しに入って
+            // 1800 s で終わらなくなった (ken-13 -26%、ken-18 -37% は `=1` で再現できる)。
+            pt_adaptive: tunable!("ENOMOTO_T_PARTIAL_TAU_ADAPTIVE", 0u8, u8) != 0,
+            pt_ema: tunable!("ENOMOTO_T_PARTIAL_TAU_COST_EMA", PARTIAL_TAU_COST_EMA, f64),
+            pt_probe: tunable!("ENOMOTO_T_PARTIAL_TAU_PROBE", PARTIAL_TAU_PROBE, u32),
+            pt_probe_full: tunable!("ENOMOTO_T_PARTIAL_TAU_PROBE_FULL", 0u8, u8) != 0,
+            ..Self::default()
+        }
+    }
+
+    /// 作業 #10 (B): この反復の `tau` を部分 `tau` で求めるか。手間の移動平均が小さいほうを選び、
+    /// `pt_probe` 回ごとにもう一方を選んで測り直す。部分 `tau` が未計測なら部分 `tau` (旧版と同じ出だし)、
+    /// 通常の `tau` が未計測なら通常の `tau` を選ぶ。
+    fn pt_choose_partial(&mut self) -> bool {
+        if !self.pt_adaptive {
+            return true;
+        }
+        let (Some(p), Some(f)) = (self.pt_cost_partial, self.pt_cost_full) else {
+            // 未計測なら部分 `tau` (旧版と同じ)。`pt_probe_full` なら通常の `tau` を 1 回試して測る。
+            return self.pt_cost_partial.is_none() || !self.pt_probe_full;
+        };
+        let pick = p <= f;
+        // 部分 `tau` が安い間は (`pt_probe_full` でなければ) 通常の `tau` を試さない: 通常の `tau` の手間は部分 `tau` を
+        // 選べない反復で測れるので、部分 `tau` が安い問題 (stormG2_1000・pds-100 など) の経路は旧版とほぼ同じに保つ
+        // (tick の数え方が違うので、通常の `tau` を試すと再分解の時期が変わる)。
+        if pick && !self.pt_probe_full {
+            return true;
+        }
+        // 測り直しの間隔: 選択が前回の測り直しの時と同じなら倍に (上限 `PARTIAL_TAU_PROBE_MAX`)、変わったら初期値に戻す。
+        if pick != self.pt_last_pick {
+            self.pt_last_pick = pick;
+            self.pt_interval = self.pt_probe;
+        }
+        self.pt_since_probe += 1;
+        if self.pt_probe > 0 && self.pt_since_probe >= self.pt_interval.max(self.pt_probe) {
+            self.pt_since_probe = 0;
+            self.pt_interval = (self.pt_interval.max(self.pt_probe) * 2).min(PARTIAL_TAU_PROBE_MAX);
+            return !pick;
+        }
+        pick
+    }
+
+    /// 作業 #10 (B): 手間の移動平均を更新する。
+    fn pt_record(slot: &mut Option<f64>, w: f64, cost: f64) {
+        *slot = Some(match *slot {
+            Some(old) => old + w * (cost - old),
+            None => cost,
+        });
+    }
+
+    /// 直前の融合 FTRAN が `tau` を部分的に求めたか ([`Self::partial_tau`])。
+    #[inline]
+    pub fn tau_is_partial(&self) -> bool {
+        self.tau_partial
+    }
+}
+
+/// `track` の `scratch_b` 全 0 フラグを読み、これから `scratch_b` を書くので偽に戻す
+/// (融合 FTRAN の `b` の `L` 段の入口で呼ぶ。部分 `tau` の結果フラグもここで偽に戻す)。
+#[inline]
+fn take_b_clean(track: &mut Option<&mut FtranTrack>) -> bool {
+    match track {
+        Some(t) => {
+            t.tau_partial = false;
+            std::mem::replace(&mut t.b_scratch_clean, false)
+        }
+        None => false,
+    }
+}
+
+/// `ceil(log2(n))` (`n <= 1` なら 1)。手間の見積り用。
+#[inline]
+fn ceil_log2(n: usize) -> usize {
+    (usize::BITS - n.max(2).saturating_sub(1).leading_zeros()) as usize
+}
+
+/// 融合 FTRAN の `R` eta 適用の前に、各ベクトルの `r_seeds` を空にする。
+#[inline]
+fn clear_r_seeds(gp_a: &mut Option<&mut GpScratch>, gp_b: &mut Option<&mut GpScratch>) {
+    if let Some(g) = gp_a.as_deref_mut() {
+        g.r_seeds.clear();
+    }
+    if let Some(g) = gp_b.as_deref_mut() {
+        g.r_seeds.clear();
+    }
+}
+
+/// 作業 #10 (F): 超疎 `U` 段の「位置の降順に取り出す」待ち行列を 2 段のビット集合で持つもの。
+/// 超疎 `U` 段では、取り出した位置 `k` の eta が書く行の位置はすべて `k` より小さい (後に積む要素は常に直前に
+/// 取り出した位置より小さい) ので、最大ヒープの代わりに、ビット集合の上から下へ 1 度だけ走査すれば同じ順序
+/// (位置の降順、各位置 1 回) で取り出せる。1 回の積み・取り出しは O(1) (語の中の最上位ビット) で、空の語は
+/// 64 語ずつまとめた上位のビット集合で飛ばす。取り出し順が同じなので値・tick は `BinaryHeap` 版とビット一致。
+#[derive(Clone, Debug, Default)]
+struct MonoMaxQueue {
+    /// 位置のビット集合 (語 `w` のビット `b` = 位置 `64 w + b`)。
+    words: Vec<u64>,
+    /// 非ゼロの語のビット集合 (語 `s` のビット `b` = `words[64 s + b] != 0`)。
+    summary: Vec<u64>,
+    /// 非ゼロでありうる最上位の語の番号 (空なら `None`)。
+    top: Option<usize>,
+}
+
+impl MonoMaxQueue {
+    /// 位置 `cap` 未満を扱えるようにする (中身は空のまま)。
+    fn ensure(&mut self, cap: usize) {
+        let nw = cap / 64 + 1;
+        if self.words.len() < nw {
+            self.words.resize(nw, 0);
+            self.summary.resize(nw / 64 + 1, 0);
+        }
+    }
+
+    /// 位置 `k` を積む。
+    #[inline(always)]
+    fn push(&mut self, k: usize) {
+        let w = k >> 6;
+        self.words[w] |= 1u64 << (k & 63);
+        self.summary[w >> 6] |= 1u64 << (w & 63);
+        if self.top.is_none_or(|t| w > t) {
+            self.top = Some(w);
+        }
+    }
+
+    /// 最大の位置を取り出す。
+    #[inline(always)]
+    fn pop(&mut self) -> Option<usize> {
+        let mut w = self.top?;
+        loop {
+            let x = self.words[w];
+            if x != 0 {
+                let b = 63 - x.leading_zeros() as usize;
+                let nx = x & !(1u64 << b);
+                self.words[w] = nx;
+                if nx == 0 {
+                    self.summary[w >> 6] &= !(1u64 << (w & 63));
+                }
+                self.top = Some(w);
+                return Some((w << 6) | b);
+            }
+            // 語 `w` は空: 上位のビット集合で `w` より下の非ゼロの語を探す。
+            let mut si = w >> 6;
+            let mut mask = if w & 63 == 0 { 0 } else { self.summary[si] & ((1u64 << (w & 63)) - 1) };
+            loop {
+                if mask != 0 {
+                    w = (si << 6) | (63 - mask.leading_zeros() as usize);
+                    break;
+                }
+                if si == 0 {
+                    self.top = None;
+                    return None;
+                }
+                si -= 1;
+                mask = self.summary[si];
+            }
+        }
+    }
+
+    /// 残りをすべて捨てる。
+    fn clear(&mut self) {
+        while self.pop().is_some() {}
+        self.top = None;
+    }
+}
+
+/// 作業 #10 (F): 超疎 BTRAN の待ち行列 (最小・最大) を `BinaryHeap` と [`MonoMaxQueue`] で差し替えるための共通の形。
+trait PosQueue {
+    fn qpush(&mut self, k: usize);
+    fn qpop(&mut self) -> Option<usize>;
+    fn qclear(&mut self);
+}
+
+impl PosQueue for BinaryHeap<u32> {
+    #[inline(always)]
+    fn qpush(&mut self, k: usize) {
+        self.push(k as u32);
+    }
+    #[inline(always)]
+    fn qpop(&mut self) -> Option<usize> {
+        self.pop().map(|k| k as usize)
+    }
+    fn qclear(&mut self) {
+        self.clear();
+    }
+}
+
+impl PosQueue for BinaryHeap<Reverse<u32>> {
+    #[inline(always)]
+    fn qpush(&mut self, k: usize) {
+        self.push(Reverse(k as u32));
+    }
+    #[inline(always)]
+    fn qpop(&mut self) -> Option<usize> {
+        self.pop().map(|Reverse(k)| k as usize)
+    }
+    fn qclear(&mut self) {
+        self.clear();
+    }
+}
+
+impl PosQueue for MonoMaxQueue {
+    #[inline(always)]
+    fn qpush(&mut self, k: usize) {
+        self.push(k);
+    }
+    #[inline(always)]
+    fn qpop(&mut self) -> Option<usize> {
+        self.pop()
+    }
+    fn qclear(&mut self) {
+        self.clear();
+    }
+}
+
+/// [`MonoMaxQueue`] を位置の昇順に取り出すもの (位置 `k` を `n - 1 - k` として積む)。積む位置は常に直前に
+/// 取り出した位置より大きいこと (超疎 `U^T` 段)。
+struct MonoMinQueue<'a> {
+    q: &'a mut MonoMaxQueue,
+    n: usize,
+}
+
+impl PosQueue for MonoMinQueue<'_> {
+    #[inline(always)]
+    fn qpush(&mut self, k: usize) {
+        self.q.push(self.n - 1 - k);
+    }
+    #[inline(always)]
+    fn qpop(&mut self) -> Option<usize> {
+        self.q.pop().map(|k| self.n - 1 - k)
+    }
+    fn qclear(&mut self) {
+        self.q.clear();
+    }
+}
+
+/// 疎 FTRAN の後始末: `U` 段を超疎に行った (`hyper`) なら非ゼロになりうるのは
+/// `gp.u_list` の位置だけなので、そこだけ 0 に戻す (策1)。そうでなければ全体を戻す。
+#[inline]
+fn clear_after_hyper(scratch: &mut [f64], hyper: bool, gp: &GpScratch) {
+    if hyper {
+        for &s in &gp.u_list {
+            scratch[s] = 0.0;
+        }
+    } else {
+        scratch.fill(0.0);
+    }
+}
+
+/// 融合 FTRAN の `tau` 側スクラッチの後始末: 超疎 `U` 段が成功した (`b_list`) なら
+/// その位置だけ 0 に戻して全 0 と記録する (次の Gilbert-Peierls `L` 段が `fill` を省く)。
+#[inline]
+fn finish_b_scratch(scratch_b: &mut [f64], b_list: Option<&[usize]>, track: Option<&mut FtranTrack>) {
+    if let Some(t) = track {
+        match b_list {
+            Some(list) => {
+                for &s in list {
+                    scratch_b[s] = 0.0;
+                }
+                t.b_scratch_clean = true;
+            }
+            None => t.b_scratch_clean = false,
+        }
+    }
+}
+
 /// `w` の非ゼロステップを `cap` に記録しつつ行う [`permute_btran_out`]。
 /// `ZERO_W` なら同じパスで `w` を全 0 に戻す ([`UnitBtranWork`] 用)。
 #[inline]
@@ -3053,6 +4303,15 @@ fn permute_btran_out_capture<const ZERO_W: bool>(row_perm: &[usize], w: &mut [f6
     cap.valid = !over;
 }
 
+/// `w` を全 0 に戻しながら行う出力置換 (`cap` があれば非ゼロステップも記録する)。
+#[inline]
+fn btran_full_out(row_perm: &[usize], w: &mut [f64], y: &mut [f64], cap: Option<&mut StepCapture>) {
+    match cap {
+        Some(c) => permute_btran_out_capture::<true>(row_perm, w, y, c),
+        None => permute_btran_out_zeroing(row_perm, w, y),
+    }
+}
+
 /// 同じパスで `w` を全 0 に戻す [`permute_btran_out`]。
 #[inline]
 fn permute_btran_out_zeroing(row_perm: &[usize], w: &mut [f64], y: &mut [f64]) {
@@ -3075,21 +4334,84 @@ fn permute_btran_out_zeroing(row_perm: &[usize], w: &mut [f64], y: &mut [f64]) {
 ///   したがって `e_tilde_out` を書くのはこのメソッドだけであること。
 /// - `touch.len()` + 次に適用する `R` eta の非ゼロ数は `L^T` 段入力の非ゼロ数の
 ///   上界なので、それがゲート内なら正確な数え上げを省く。
+///
+/// 超疎経路 (stormG2 報告 §4 策2、`ENOMOTO_SPARSE_BTRAN=0` で無効): `U^T`/`L^T` の両段を
+/// 非ゼロ位置の優先度付きキューで駆動し (全スロット・全ステップの走査をしない)、出力
+/// `out` も前回の非ゼロ位置だけを消して書く。処理するスロット・ステップの集合と順序は
+/// 全走査と同じ (値 0 の位置を飛ばすだけ) なので、`out`・`e_tilde_out`・記録・tick は
+/// ビット一致。非ゼロが [`BTRAN_HYPER_FRACTION`] `* m` を超えたらその位置から全走査に
+/// 切り替え、結果の非ゼロ率の移動平均がその半分以上なら最初から全走査にする。
 pub struct UnitBtranWork {
     /// ステップ空間の作業ベクトル (呼び出し間は全 0)。
     w: Vec<f64>,
-    /// 今回 `U^T` 掃引で非ゼロになった位置。
+    /// 今回 `U^T` 掃引で非ゼロになった位置 (超疎経路では `R`/`L^T` 段の分も追記する)。
     touch: Vec<usize>,
     /// 前回 `e_tilde_out` に書いた位置。
     e_touch: Vec<usize>,
     /// 前回 `e_tilde_out` を全体コピーした (位置記録が溢れた) か。
     e_full: bool,
+    /// 超疎経路を使うか (`ENOMOTO_SPARSE_BTRAN`)。
+    sparse: bool,
+    /// 結果 (`out`) の非ゼロ率の移動平均 ([`FtranDensity`] と同じ重み)。
+    /// [`BTRAN_HYPER_FRACTION`] の半分未満のときだけ超疎経路を試す (途中で全走査に落ちる無駄を避ける)。
+    density: f64,
+    /// 超疎経路の「一覧に入った」印 (`U^T` 段と `L^T` 段で別のエポックを使う)。
+    marks: EpochMarks,
+    /// `U^T` 段の最小ヒープ (キー = `U^T` 順の位置、[`FtLu::u_transpose_key`])。
+    uheap: BinaryHeap<Reverse<u32>>,
+    /// `L^T` 段の最大ヒープ (ステップ)。
+    lheap: BinaryHeap<u32>,
+    /// 作業 #10 (F): `U^T` 段・`L^T` 段のビット集合の待ち行列 (`ENOMOTO_T_BTRAN_BITQUEUE=0` でヒープ)。
+    uq: MonoMaxQueue,
+    lq: MonoMaxQueue,
+    bitqueue: bool,
+    /// `out` の非ゼロ位置の記録 (元の行番号)。
+    y: NzTrack,
+    /// 今回の `out` の非ゼロ行 (昇順)。`rows_valid` の間だけ有効。
+    rows: Vec<usize>,
+    /// `rows` が今回の `out` の非ゼロ行を正確に表しているか。
+    rows_valid: bool,
 }
 
 impl UnitBtranWork {
     /// 次数 `m` 用の作業領域を作る。
     pub fn new(m: usize) -> Self {
-        UnitBtranWork { w: vec![0.0; m], touch: Vec::with_capacity(m), e_touch: Vec::with_capacity(m), e_full: false }
+        UnitBtranWork {
+            w: vec![0.0; m],
+            touch: Vec::with_capacity(m),
+            e_touch: Vec::with_capacity(m),
+            e_full: false,
+            sparse: env_str!("ENOMOTO_SPARSE_BTRAN").map_or(true, |v| v != "0"),
+            density: 0.0,
+            marks: EpochMarks::new(m),
+            uheap: BinaryHeap::new(),
+            lheap: BinaryHeap::new(),
+            uq: MonoMaxQueue::default(),
+            lq: MonoMaxQueue::default(),
+            bitqueue: tunable!("ENOMOTO_T_BTRAN_BITQUEUE", 1u8, u8) != 0,
+            y: NzTrack::new(),
+            rows: Vec::new(),
+            rows_valid: false,
+        }
+    }
+
+    /// 直前の [`FtLu::solve_transpose_unit_work`] の `out` の非ゼロ行 (昇順)。超疎経路で
+    /// 求めたときだけ `Some` (全走査なら `None`、呼び出し側が自分で数えること)。
+    #[inline]
+    pub fn nonzero_rows(&self) -> Option<&[usize]> {
+        if self.rows_valid {
+            Some(&self.rows)
+        } else {
+            None
+        }
+    }
+
+    /// `out` に渡すベクトルを [`FtLu::solve_transpose_unit_work`] の外で書いた後に呼ぶ
+    /// (次回の超疎書き出しが全体を 0 に戻すようにする)。
+    #[inline]
+    pub fn invalidate_out(&mut self) {
+        self.y.set_full();
+        self.rows_valid = false;
     }
 }
 
@@ -3181,18 +4503,45 @@ pub struct FtLu {
     /// (ピボットは 0 にならない)。FTRAN の `U` 段のシングルトン除算を
     /// [`Self::permute_out`] の中で行うために使う。
     single_piv: Vec<f64>,
+    /// `L` の行 (`l_row`) が非空のステップ (昇順)。BTRAN の `L^T` スキャッタが訪れる必要があるのはこれだけ。
+    l_row_active: Vec<u32>,
     /// `L` の列が非空のステップ (昇順)。密 `L` 段が訪れる必要があるのはこれだけ
     /// ([`LuFactors::l_solve_into_pair`] 参照)。
     l_active: Vec<u32>,
+    /// 融合 FTRAN で入る列の非ゼロ一覧から `L` 段の入力を作るか (`ENOMOTO_L_NZ_ENTRY=0` で無効、A/B 用)。
+    l_nz_entry: bool,
     /// `slot_pos[slot]` = `slot` の `u_seq` 内の現在位置 (`singles` 側なら `usize::MAX`)。
     /// `try_update` が並べ替えと同じ範囲で同期させる。
     slot_pos: Vec<usize>,
     /// 逆引き索引: `row_owners[r]` = 行ステップ `r` に非ゼロを持つ eta のスロットと値。
     /// `try_update` が行 `p` を他の全 eta から消すとき、該当する eta だけに触れる
     /// ために使う (Tomlin 1974, eq. 12)。
-    row_owners: Vec<Vec<(usize, f64)>>,
+    row_owners: RowOwners,
+    /// [`RowOwners::take_slots`] の作業領域 (FT 更新の行 `p` 消去用)。
+    owner_scratch: Vec<u32>,
     /// `R` 行 eta (作成順、`key` = 行 `p`、`pivot` は未使用)。
     r_etas: EtaFile,
+    /// `R` eta の列方向索引 (追加策 R): `r_head[i]` は位置 `i` に要素を持つ `R` eta の要素 (プール位置) の
+    /// 連結リストの先頭 (`u32::MAX` で空)、`r_next[e]` は次の要素。新しい eta ほど前に入る。
+    /// 疎なベクトルに `R` eta を当てるとき、内積が 0 でありえない eta だけを選ぶのに使う
+    /// ([`Self::apply_r_sparse`])。密形式の `R` eta は載せず `r_dense` に番号を持つ。
+    r_head: Vec<u32>,
+    /// [`Self::r_head`] の次要素。
+    r_next: Vec<u32>,
+    /// 要素 (プール位置) → その要素を持つ `R` eta の番号。
+    r_owner: Vec<u32>,
+    /// 密形式の `R` eta の番号。
+    r_dense: Vec<u32>,
+    /// 全 `R` eta の非ゼロ数の和 (tick 用)。
+    r_nnz_total: usize,
+    /// 列方向索引に載っている `R` eta の数 (先頭から。全部載っているときだけ疎な `R` 段を使う)。
+    r_indexed: usize,
+    /// 置換された `U` eta を削除せず死んだヘッダにするか (策4、`m >= SPARSE_PATH_MIN_M`)。
+    lazy_remove: bool,
+    /// 死んだヘッダの数 (0 でなければ `U^T` 掃引は死んだヘッダを飛ばす版を使う)。
+    n_dead: usize,
+    /// 疎な `R` 段を使う `R` eta 数の下限 ([`R_SPARSE_MIN_ETAS`]、[`Self::new`] で 1 回だけ読む)。
+    r_sparse_min: usize,
     /// [`Self::try_update`] の再利用スクラッチ (`a_tilde` 用、長さ `m`、
     /// 返却前に必ず長さ `m` に戻す)。ピボットごとのヒープ確保を避ける。
     scratch_a_tilde: Vec<f64>,
@@ -3209,6 +4558,9 @@ pub struct FtLu {
     /// 最後の *通常* (Markowitz) 分解の `L`+`U` 非ゼロ数。[`factorize_reusing`] が
     /// 再利用分解の fill 上限の基準に使う ([`REBUILD_FILL_LIMIT`])。
     fill_baseline: usize,
+    /// この分解自体の `L`/`U` の格納要素数 (対角を含む。[`Self::fill_baseline`] と違い再利用時も
+    /// この分解の値)。FT 更新の fill 上限を分解の大きさに比例させるのに使う ([`Self::lu_nnz`])。
+    lu_nnz: usize,
     /// この分解までに連続して棄却されたピボット順再利用の回数
     /// ([`factorize_reusing`] のバックオフ)。
     reuse_fail_streak: u32,
@@ -3236,26 +4588,47 @@ impl FtLu {
         let mut owner_count = vec![0usize; m];
         // スロットごとの対角ピボット
         let mut pivots = vec![0.0; m];
+        // 密ブロック (密行列の分解 #2) の先頭ステップ (無ければ `m`)。ブロック内のスロット `q` の
+        // eta は行 `[s0, q)` を密な区間に、行 `< s0` を疎な部分に持ち、ブロック内の行 `r` の
+        // `row_owners` はスロット `(r, m)` を密な区間に持つ。
+        let s0 = base.dense_s0.min(m);
+        // ブロック内のスロットの疎な部分 (行 `< s0`) の要素数
+        let mut sp_count = vec![0usize; m];
         for row_step in 0..m {
             for &(col_step, v) in &base.u_row[row_step] {
                 if col_step != row_step {
                     off_count[col_step] += 1;
-                    owner_count[row_step] += 1;
+                    if row_step < s0 {
+                        owner_count[row_step] += 1;
+                        if col_step >= s0 {
+                            sp_count[col_step] += 1;
+                        }
+                    }
                 } else {
                     pivots[col_step] = v;
                 }
             }
         }
-        let l_nnz: u64 = base.l_col.nnz() as u64;
+        // `L` の非ゼロ数 (密な区間の 0 は数えない。ブロックの有無で fill 基準などが変わらないように)
+        let l_nnz: u64 = if base.l_col.has_block() { (0..m).map(|s| base.l_col.seg(s).into_iter().filter(|&(_, v)| v != 0.0).count() as u64).sum() } else { base.l_col.nnz() as u64 };
         // `U` の非対角非ゼロ数 (`u_row[s]` は対角を 1 個含むので長さ - 1。HiGHS の
         // `u_countX` と同じく非対角だけを数える)。
         let u_off: u64 = base.u_row.iter().map(|v| v.len().saturating_sub(1) as u64).sum();
         let mut build_tick = tunable!("ENOMOTO_T_TICK_BUILD_M_COEF", TICK_BUILD_M_COEF, u64) * m as u64 + tunable!("ENOMOTO_T_TICK_BUILD_LU_COEF", TICK_BUILD_LU_COEF, u64) * (l_nnz + u_off);
+        if s0 < m {
+            // 密行列の分解 #7: 密ブロック (k x k) の分解は稠密 LU で疎な消去より桁違いに安いので、構築 tick の
+            // ブロック分 (k^2 要素) を `DENSE_BLOCK_TICK_FRACTION` 倍に数える (再分解を早めて eta の蓄積を抑える)。
+            let frac = tunable!("ENOMOTO_T_DENSE_BLOCK_TICK_FRACTION", DENSE_BLOCK_TICK_FRACTION, f64);
+            let k = (m - s0) as f64;
+            let block = (k * k).min((l_nnz + u_off) as f64);
+            let cut = ((1.0 - frac.clamp(0.0, 1.0)) * block) as u64 * tunable!("ENOMOTO_T_TICK_BUILD_LU_COEF", TICK_BUILD_LU_COEF, u64);
+            build_tick = build_tick.saturating_sub(cut);
+        }
         // S16 (既定 off): 消去の積和回数 `Σ_s |L 列 s| · |U 行 s の非対角|`
         // (完成した因子から復元した古典的 LU 演算数) を構築 tick に加える。
         let flop_coef = tunable!("ENOMOTO_T_TICK_BUILD_FLOP_COEF", TICK_BUILD_FLOP_COEF, u64);
         if flop_coef > 0 {
-            let flops: u64 = (0..m).map(|s| base.l_col.col(s).len() as u64 * owner_count[s] as u64).sum();
+            let flops: u64 = (0..m).map(|s| base.l_col.seg(s).len() as u64 * owner_count[s] as u64).sum();
             build_tick += flop_coef * flops;
         }
         // fill 基準は対角も含めた全格納要素数 (`factorize_reusing_order` の数え方と一致)。
@@ -3264,7 +4637,8 @@ impl FtLu {
         let mut slot_pos = vec![usize::MAX; m];
         let mut singles_pos = vec![usize::MAX; m];
         let mut single_piv = vec![0.0f64; m];
-        let l_active: Vec<u32> = (0..m).filter(|&s| !base.l_col.col(s).is_empty()).map(|s| s as u32).collect();
+        let l_active: Vec<u32> = (0..m).filter(|&s| !base.l_col.seg(s).is_empty()).map(|s| s as u32).collect();
+        let l_row_active: Vec<u32> = (0..base.l_row.n_outer()).filter(|&s| !base.l_row.seg(s).is_empty()).map(|s| s as u32).collect();
         // `U` の eta をフラットファイルへ直接詰める: ヘッダはスロット順
         // (シングルトンは別)、疎 eta の要素は `row_step` 昇順。
         let dense_fraction = tunable!("ENOMOTO_T_DENSE_ETA_FRACTION", DENSE_ETA_FRACTION, f64);
@@ -3290,10 +4664,17 @@ impl FtLu {
             slot_pos[slot] = u_seq.key.len();
             u_seq.key.push(slot as u32);
             u_seq.pivot.push(pivots[slot]);
-            if c as f64 > dense_fraction * m as f64 {
+            if slot >= s0 {
+                // 密ブロックの列: 行 `[s0, slot)` を密に、行 `< s0` を疎な部分 (プール) に持つ。
                 dense_of[slot] = u_seq.dense.len() as u32;
                 u_seq.span.push((u_seq.dense.len() as u32, ETA_DENSE));
-                u_seq.dense.push((vec![0.0; m].into_boxed_slice(), c));
+                cursor[slot] = pool as u32;
+                u_seq.dense.push(DenseEta { data: vec![0.0; slot - s0].into_boxed_slice(), nnz: c, lo: s0, sp_start: pool as u32, sp_len: sp_count[slot] as u32 });
+                pool += sp_count[slot];
+            } else if c as f64 > dense_fraction * m as f64 {
+                dense_of[slot] = u_seq.dense.len() as u32;
+                u_seq.span.push((u_seq.dense.len() as u32, ETA_DENSE));
+                u_seq.dense.push(DenseEta { data: vec![0.0; m].into_boxed_slice(), nnz: c, lo: 0, sp_start: 0, sp_len: 0 });
             } else {
                 cursor[slot] = pool as u32;
                 u_seq.span.push((pool as u32, c as u32));
@@ -3308,8 +4689,9 @@ impl FtLu {
                     continue;
                 }
                 let d = dense_of[col_step];
-                if d != u32::MAX {
-                    u_seq.dense[d as usize].0[row_step] = v;
+                if d != u32::MAX && row_step >= u_seq.dense[d as usize].lo {
+                    let lo = u_seq.dense[d as usize].lo;
+                    u_seq.dense[d as usize].data[row_step - lo] = v;
                 } else {
                     let c = cursor[col_step] as usize;
                     u_seq.idx[c] = row_step as u32;
@@ -3318,10 +4700,11 @@ impl FtLu {
                 }
             }
         }
-        let mut row_owners: Vec<Vec<(usize, f64)>> = owner_count.iter().map(|&c| Vec::with_capacity(c)).collect();
+        let mut row_owners = RowOwners::with_counts(&owner_count);
+        row_owners.set_block(s0);
         for k in 0..u_seq.n_headers() {
             let slot = u_seq.key[k] as usize;
-            u_seq.for_each_entry(k, |row_step, v| row_owners[row_step].push((slot, v)));
+            u_seq.for_each_entry(k, |row_step, v| row_owners.push(row_step, slot, v));
         }
         let fill = total_off;
         FtLu {
@@ -3331,15 +4714,28 @@ impl FtLu {
             singles_pos,
             single_piv,
             l_active,
+            l_row_active,
+            l_nz_entry: !matches!(env_str!("ENOMOTO_L_NZ_ENTRY"), Some("0")),
             slot_pos,
             row_owners,
+            owner_scratch: Vec::new(),
             r_etas: EtaFile::default(),
+            r_head: vec![u32::MAX; m],
+            r_next: Vec::new(),
+            r_owner: Vec::new(),
+            r_dense: Vec::new(),
+            r_nnz_total: 0,
+            r_sparse_min: tunable!("ENOMOTO_T_R_SPARSE_MIN_ETAS", R_SPARSE_MIN_ETAS, usize),
+            r_indexed: 0,
+            lazy_remove: m >= sparse_path_min_m(),
+            n_dead: 0,
             scratch_a_tilde: vec![0.0; m],
             scratch_e_tilde: vec![0.0; m],
             fill,
             tick: Cell::new(0),
             build_tick,
             fill_baseline,
+            lu_nnz: fill_baseline,
             reuse_fail_streak: 0,
             reuse_skips_left: 0,
             btran_l_scatter: btran_l_scatter_gate(),
@@ -3378,16 +4774,30 @@ impl FtLu {
         }
         if sparse {
             PROF_BTRAN_L_SCATTER.fetch_add(1, Ordering::Relaxed);
-            self.base.l_transpose_scatter_core(w);
+            self.base.l_transpose_scatter_rows(w, &self.l_row_active);
         } else {
             PROF_BTRAN_L_GATHER.fetch_add(1, Ordering::Relaxed);
-            self.base.l_transpose_gather_core(w);
+            self.base.l_transpose_gather_cols(w, &self.l_active);
         }
         match cap {
             Some(c) => permute_btran_out_capture::<ZERO_W>(&self.base.row_perm, w, y, c),
             None if ZERO_W => permute_btran_out_zeroing(&self.base.row_perm, w, y),
             None => permute_btran_out(&self.base.row_perm, w, y),
         }
+    }
+
+    /// 疎な `R` 段 (追加策 R) を使えるか: `R` eta が [`R_SPARSE_MIN_ETAS`] 個以上あり、全部が列方向索引に
+    /// 載っている (すべて [`Self::try_update_tracked`] で追加された)。
+    #[inline]
+    fn r_sparse_ready(&self) -> bool {
+        let n = self.r_etas.n_headers();
+        n >= self.r_sparse_min && self.r_indexed == n
+    }
+
+    /// 行列の次数 `m`。
+    #[inline]
+    pub fn dim(&self) -> usize {
+        self.base.m
     }
 
     /// 決定的演算量カウンタ ([`Self::tick`]) の現在値。`slope_intercept_dual.rs` の
@@ -3440,6 +4850,9 @@ impl FtLu {
     /// と同様): スロット `p` の値が確定したらピボットで割り、それを読む全 eta
     /// (`row_owners[p]`) へ散布する。
     fn u_transpose_sweep(&self, z: &mut [f64]) {
+        if self.n_dead != 0 {
+            return self.u_transpose_sweep_live(z);
+        }
         // CLOCK トリガ用: 全スロット走査の `m` と、散布した各行の長さを tick に加える。
         self.add_tick(self.base.m as u64);
         // シングルトンが先 (そのスロットに書く eta は無いので値は掃引前に確定)。
@@ -3450,10 +4863,16 @@ impl FtLu {
             }
             let zp = zp / pivot;
             z[p] = zp;
-            let owners = &self.row_owners[p];
-            self.add_tick(owners.len() as u64);
-            for &(q, v) in owners {
-                z[q] -= v * zp;
+            let orow = self.row_owners.row(p);
+            self.add_tick(orow.len() as u64);
+            for (&q, &v) in orow.idx.iter().zip(orow.val) {
+                z[q as usize] -= v * zp;
+            }
+            if !orow.rval.is_empty() {
+                // 密ブロックの行 (密行列の分解 #2): スロット `rlo..` へ連続に散布する。
+                for (zq, &v) in z[orow.rlo..orow.rlo + orow.rval.len()].iter_mut().zip(orow.rval) {
+                    *zq -= v * zp;
+                }
             }
         }
     }
@@ -3469,6 +4888,9 @@ impl FtLu {
     /// `m` 個を超えそうなら記録を止めて `false` を返す (呼び出し側は全位置を
     /// 非ゼロの可能性ありと扱うこと)。演算と順序・tick は非追跡版と同じ。
     fn u_transpose_sweep_track(&self, z: &mut [f64], touch: &mut Vec<usize>) -> bool {
+        if self.n_dead != 0 {
+            return self.u_transpose_sweep_track_live(z, touch);
+        }
         // `touch` の上限
         let cap = self.base.m;
         // まだ記録を続けているか
@@ -3481,10 +4903,22 @@ impl FtLu {
             }
             let zp = zp / pivot;
             z[p] = zp;
-            let owners = &self.row_owners[p];
-            self.add_tick(owners.len() as u64);
-            if ok && touch.len() + owners.len() <= cap {
-                for &(q, v) in owners {
+            let orow = self.row_owners.row(p);
+            self.add_tick(orow.len() as u64);
+            if ok && touch.len() + orow.len() <= cap {
+                for (&q, &v) in orow.idx.iter().zip(orow.val) {
+                    let q = q as usize;
+                    let old = z[q];
+                    z[q] = old - v * zp;
+                    if old == 0.0 {
+                        touch.push(q);
+                    }
+                }
+                for (t, &v) in orow.rval.iter().enumerate() {
+                    if v == 0.0 {
+                        continue;
+                    }
+                    let q = orow.rlo + t;
                     let old = z[q];
                     z[q] = old - v * zp;
                     if old == 0.0 {
@@ -3493,8 +4927,93 @@ impl FtLu {
                 }
             } else {
                 ok = false;
-                for &(q, v) in owners {
-                    z[q] -= v * zp;
+                for (&q, &v) in orow.idx.iter().zip(orow.val) {
+                    z[q as usize] -= v * zp;
+                }
+                for (zq, &v) in z[orow.rlo..orow.rlo + orow.rval.len()].iter_mut().zip(orow.rval) {
+                    *zq -= v * zp;
+                }
+            }
+        }
+        ok
+    }
+
+    /// 死んだヘッダ ([`EtaFile::kill`]) を飛ばす `U^T` 順 (策4 の大きな問題用)。
+    #[inline(always)]
+    fn u_transpose_order_live(&self) -> impl Iterator<Item = (usize, f64)> + '_ {
+        let slot_pos = &self.slot_pos;
+        self.singles.iter().map(|e| (e.slot, e.pivot)).chain(
+            self.u_seq.key.iter().zip(self.u_seq.pivot.iter()).enumerate().filter(move |&(k, (&s, _))| slot_pos[s as usize] == k).map(|(_, (&s, &v))| (s as usize, v)),
+        )
+    }
+
+    /// 死んだヘッダがあるときの [`Self::u_transpose_sweep`] (演算・順序・tick は同じ)。
+    #[inline(never)]
+    fn u_transpose_sweep_live(&self, z: &mut [f64]) {
+        self.add_tick(self.base.m as u64);
+        for (p, pivot) in self.u_transpose_order_live() {
+            let zp = z[p];
+            if zp == 0.0 {
+                continue;
+            }
+            let zp = zp / pivot;
+            z[p] = zp;
+            let orow = self.row_owners.row(p);
+            self.add_tick(orow.len() as u64);
+            for (&q, &v) in orow.idx.iter().zip(orow.val) {
+                z[q as usize] -= v * zp;
+            }
+            if !orow.rval.is_empty() {
+                // 密ブロックの行 (密行列の分解 #2): スロット `rlo..` へ連続に散布する。
+                for (zq, &v) in z[orow.rlo..orow.rlo + orow.rval.len()].iter_mut().zip(orow.rval) {
+                    *zq -= v * zp;
+                }
+            }
+        }
+    }
+
+    /// 死んだヘッダがあるときの [`Self::u_transpose_sweep_track`] (演算・順序・tick は同じ)。
+    #[inline(never)]
+    fn u_transpose_sweep_track_live(&self, z: &mut [f64], touch: &mut Vec<usize>) -> bool {
+        let cap = self.base.m;
+        let mut ok = true;
+        self.add_tick(self.base.m as u64);
+        for (p, pivot) in self.u_transpose_order_live() {
+            let zp = z[p];
+            if zp == 0.0 {
+                continue;
+            }
+            let zp = zp / pivot;
+            z[p] = zp;
+            let orow = self.row_owners.row(p);
+            self.add_tick(orow.len() as u64);
+            if ok && touch.len() + orow.len() <= cap {
+                for (&q, &v) in orow.idx.iter().zip(orow.val) {
+                    let q = q as usize;
+                    let old = z[q];
+                    z[q] = old - v * zp;
+                    if old == 0.0 {
+                        touch.push(q);
+                    }
+                }
+                for (t, &v) in orow.rval.iter().enumerate() {
+                    if v == 0.0 {
+                        continue;
+                    }
+                    let q = orow.rlo + t;
+                    let old = z[q];
+                    z[q] = old - v * zp;
+                    if old == 0.0 {
+                        touch.push(q);
+                    }
+                }
+            } else {
+                ok = false;
+                for (&q, &v) in orow.idx.iter().zip(orow.val) {
+                    z[q as usize] -= v * zp;
+                }
+                for (zq, &v) in z[orow.rlo..orow.rlo + orow.rval.len()].iter_mut().zip(orow.rval) {
+                    *zq -= v * zp;
                 }
             }
         }
@@ -3622,6 +5141,256 @@ impl FtLu {
         true
     }
 
+    /// C5 (大きな問題の融合 FTRAN 用): FTRAN 1 本の `U` 段を、非ゼロになった eta だけに限って行う。
+    /// `x` は `L`/`R` 適用後のベクトルで、非ゼロは `gp.reach` (`L` 段の到達集合) と
+    /// `gp.r_seeds` (`R` eta で値が変わった行) に含まれる。非ゼロになったスロットの `u_seq`
+    /// 位置を最大ヒープに積み、**位置の降順** に取り出して適用する (スロット `p` に書く eta は
+    /// すべて `p` の eta より後ろの位置にあるので、取り出した時点で `x[p]` は確定している)。
+    /// 書いた行は `gp.u_list` に集める。[`Self::u_solve_into`] の逆順走査のうち `x[p] != 0` の
+    /// eta だけを同じ順に適用するので、値も tick もビット一致 (策12: 以前の「DFS で構造的な
+    /// 到達集合を集めてから位置をソートして適用」と同じ結果で、DFS・ソートを省く)。
+    ///
+    /// - 一覧が [`U_HYPER_ABORT_FRACTION`] `* m` を超えたら、残り (より前の位置) を全走査で
+    ///   仕上げて [`UHyper::Full`] を返す (`x` は解き終わっているが非ゼロ位置は不明)。
+    /// - `U` に密 eta がある場合は `x` に触れずに [`UHyper::NotTried`] を返す (呼び出し側が全走査する)。
+    fn u_solve_hyper_heap(&self, x: &mut [f64], gp: &mut GpScratch) -> UHyper {
+        let m = self.base.m;
+        if !self.u_seq.dense.is_empty() {
+            return UHyper::NotTried;
+        }
+        // 一覧の長さの上限
+        let limit = (tunable!("ENOMOTO_T_U_HYPER_ABORT", U_HYPER_ABORT_FRACTION, f64) * m as f64) as usize;
+        if tunable!("ENOMOTO_T_U_HYPER_BITQUEUE", 1u8, u8) != 0 {
+            return self.u_solve_hyper_queue(x, gp, limit);
+        }
+        let GpScratch { reach, r_seeds, u_marks, u_heap, u_list, .. } = gp;
+        u_marks.begin();
+        u_list.clear();
+        u_heap.clear();
+        for &s in reach.iter().chain(r_seeds.iter()) {
+            if x[s] == 0.0 || u_marks.is_marked(s) {
+                continue;
+            }
+            u_marks.mark(s);
+            u_list.push(s);
+            let k = self.slot_pos[s];
+            if k != usize::MAX {
+                u_heap.push(k as u32);
+            }
+        }
+        while let Some(k) = u_heap.pop() {
+            let k = k as usize;
+            let p = self.u_seq.key[k] as usize;
+            if x[p] == 0.0 {
+                continue;
+            }
+            x[p] /= self.u_seq.pivot[k];
+            let alpha = -x[p];
+            self.add_tick(self.u_seq.nnz(k) as u64);
+            // `EtaFile::axpy` と同じ演算に、書いた行の登録を加えたもの。
+            let (idx, val) = self.u_seq.seg(k);
+            for (&r, &v) in idx.iter().zip(val.iter()) {
+                let r = r as usize;
+                x[r] += alpha * v;
+                if !u_marks.is_marked(r) {
+                    u_marks.mark(r);
+                    u_list.push(r);
+                    let kr = self.slot_pos[r];
+                    if kr != usize::MAX {
+                        u_heap.push(kr as u32);
+                    }
+                }
+            }
+            if u_list.len() > limit {
+                // 残り (位置 `k` より前) は全走査で仕上げる (`u_solve_into` の `u_zero_skip` ループと同じ)。
+                u_heap.clear();
+                for kk in (0..k).rev() {
+                    // 死んだヘッダ (`EtaFile::kill`) はピボット 1・要素なしなので処理しても値・tick は変わらない。
+                    let p = self.u_seq.key[kk] as usize;
+                    if x[p] == 0.0 {
+                        continue;
+                    }
+                    x[p] /= self.u_seq.pivot[kk];
+                    let xp = x[p];
+                    self.add_tick(self.u_seq.nnz(kk) as u64);
+                    self.u_seq.axpy(kk, -xp, x);
+                }
+                return UHyper::Full;
+            }
+        }
+        UHyper::Hyper
+    }
+
+    /// 作業 #10 (F): [`Self::u_solve_hyper_heap`] の待ち行列を [`MonoMaxQueue`] にしたもの (取り出し順・演算は同じ)。
+    fn u_solve_hyper_queue(&self, x: &mut [f64], gp: &mut GpScratch, limit: usize) -> UHyper {
+        let GpScratch { reach, r_seeds, u_marks, u_queue, u_list, .. } = gp;
+        u_queue.ensure(self.u_seq.key.len());
+        u_marks.begin();
+        u_list.clear();
+        for &s in reach.iter().chain(r_seeds.iter()) {
+            if x[s] == 0.0 || u_marks.is_marked(s) {
+                continue;
+            }
+            u_marks.mark(s);
+            u_list.push(s);
+            let k = self.slot_pos[s];
+            if k != usize::MAX {
+                u_queue.push(k);
+            }
+        }
+        while let Some(k) = u_queue.pop() {
+            let p = self.u_seq.key[k] as usize;
+            if x[p] == 0.0 {
+                continue;
+            }
+            x[p] /= self.u_seq.pivot[k];
+            let alpha = -x[p];
+            self.add_tick(self.u_seq.nnz(k) as u64);
+            let (idx, val) = self.u_seq.seg(k);
+            for (&r, &v) in idx.iter().zip(val.iter()) {
+                let r = r as usize;
+                x[r] += alpha * v;
+                if !u_marks.is_marked(r) {
+                    u_marks.mark(r);
+                    u_list.push(r);
+                    let kr = self.slot_pos[r];
+                    if kr != usize::MAX {
+                        debug_assert!(kr < k, "超疎 U 段で積む位置は取り出した位置より小さい");
+                        u_queue.push(kr);
+                    }
+                }
+            }
+            if u_list.len() > limit {
+                u_queue.clear();
+                for kk in (0..k).rev() {
+                    let p = self.u_seq.key[kk] as usize;
+                    if x[p] == 0.0 {
+                        continue;
+                    }
+                    x[p] /= self.u_seq.pivot[kk];
+                    let xp = x[p];
+                    self.add_tick(self.u_seq.nnz(kk) as u64);
+                    self.u_seq.axpy(kk, -xp, x);
+                }
+                return UHyper::Full;
+            }
+        }
+        UHyper::Hyper
+    }
+
+    /// 策12 (部分 `tau`): `U` 段の結果 `x` のうち、`a_list` 中で `alpha_x` が非ゼロのスロット
+    /// (入る列の FTRAN 結果の非ゼロ = DSE 重み更新が `tau` を読む行) の値だけを求める。
+    /// `x` は `L`/`R` 適用後の値。必要なスロットの依存閉包 (スロット `p` は `row_owners[p]` の
+    /// 各 eta のスロットの最終値に依存する) を集め、`u_seq` 位置の降順 (シングルトンは最後) に、
+    /// 各スロットへの寄与を `row_owners` から位置の降順に集めて加える。全体の `U` 段
+    /// ([`Self::u_solve_into`]) が同じスロットに加える演算と同じ値・同じ順序なので、求めた位置の
+    /// 値はビット一致 (シングルトンの除算は出力時)。求めたスロットの閉包は `gp.u_list` に残る。
+    ///
+    /// 閉包の辺数が [`U_HYPER_ABORT_FRACTION`] `* m` を超える、または `U` に密 eta がある場合は
+    /// `x` に触れずに `false` を返す。CLOCK tick は集めた寄与の数だけ加える (全体の `U` 段とは違う)。
+    fn u_solve_partial(&self, x: &mut [f64], alpha_x: &[f64], a_list: &[usize], gp: &mut GpScratch, tmp: &mut Vec<(usize, usize, f64)>, work_out: &mut u64) -> bool {
+        let m = self.base.m;
+        *work_out = 0;
+        if !self.u_seq.dense.is_empty() {
+            return false;
+        }
+        // 閉包の辺数の上限
+        let limit = (tunable!("ENOMOTO_T_U_HYPER_ABORT", U_HYPER_ABORT_FRACTION, f64) * m as f64) as usize;
+        let GpScratch { u_marks, u_list, .. } = gp;
+        u_marks.begin();
+        u_list.clear();
+        for &s in a_list {
+            if alpha_x[s] != 0.0 && !u_marks.is_marked(s) {
+                u_marks.mark(s);
+                u_list.push(s);
+            }
+        }
+        // 依存閉包 (`u_list` を待ち行列として使う)
+        let mut head = 0usize;
+        let mut edges = 0usize;
+        while head < u_list.len() {
+            let p = u_list[head];
+            head += 1;
+            let orow = self.row_owners.row(p);
+            debug_assert!(orow.rval.is_empty(), "密ブロックがあれば u_seq に密 eta があり、ここには来ない");
+            let oq = orow.idx;
+            edges += oq.len();
+            if edges > limit {
+                *work_out = (edges + u_list.len()) as u64;
+                return false;
+            }
+            for &q in oq {
+                let q = q as usize;
+                if !u_marks.is_marked(q) {
+                    u_marks.mark(q);
+                    u_list.push(q);
+                }
+            }
+        }
+        // `u_seq` 位置の降順、シングルトン (位置なし) は最後。
+        let slot_pos = &self.slot_pos;
+        u_list.sort_unstable_by_key(|&p| Reverse(if slot_pos[p] == usize::MAX { 0 } else { slot_pos[p] + 1 }));
+        if tunable!("ENOMOTO_T_PARTIAL_TAU_PUSH", 1u8, u8) != 0 {
+            // 作業 #10 (B): 閉包のスロットを位置の降順に、各スロットの eta 列 (`u_seq` の列) を閉包内の行にだけ
+            // 散布する (全体の `U` 段と同じ列指向の演算を閉包に制限したもの)。スロット `p` への寄与は
+            // eta の位置の降順に届くので、行ごとに所有者をコピーして位置でソートする旧版 (下) と同じ値・同じ順序
+            // (`p` の所有者はすべて閉包に入っていて、`p` より前に処理が済んでいる)。値 0 のスロットの eta は飛ばす
+            // (全体の `U` 段・旧版の `xq != 0.0` と同じ)。tick は旧版と同じ「閉包の所有者の延べ数」。
+            let mut push_work = 0usize;
+            for &q in u_list.iter() {
+                let k = slot_pos[q];
+                if k == usize::MAX {
+                    continue;
+                }
+                let mut xq = x[q];
+                if xq == 0.0 {
+                    continue;
+                }
+                xq /= self.u_seq.pivot[k];
+                x[q] = xq;
+                let (idx, val) = self.u_seq.seg(k);
+                push_work += idx.len();
+                for (&r, &v) in idx.iter().zip(val.iter()) {
+                    let r = r as usize;
+                    if u_marks.is_marked(r) {
+                        // 全体の `U` 段の `x[r] += (-x[q]) * v` と同じ演算。
+                        x[r] += -xq * v;
+                    }
+                }
+            }
+            self.add_tick(edges as u64);
+            let n = u_list.len();
+            *work_out = (edges + push_work + n * ceil_log2(n)) as u64;
+            return true;
+        }
+        let mut work = 0u64;
+        for &p in u_list.iter() {
+            let mut xp = x[p];
+            tmp.clear();
+            let orow = self.row_owners.row(p);
+            let (oq, ov) = (orow.idx, orow.val);
+            tmp.extend(oq.iter().zip(ov).map(|(&q, &v)| (slot_pos[q as usize], q as usize, v)));
+            tmp.sort_unstable_by_key(|e| Reverse(e.0));
+            work += tmp.len() as u64;
+            for &(_, q, v) in tmp.iter() {
+                let xq = x[q];
+                if xq != 0.0 {
+                    // 全体の `U` 段の `x[p] += (-x[q]) * v` と同じ演算。
+                    xp += -xq * v;
+                }
+            }
+            let k = slot_pos[p];
+            if k != usize::MAX && xp != 0.0 {
+                xp /= self.u_seq.pivot[k];
+            }
+            x[p] = xp;
+        }
+        self.add_tick(work);
+        let n = u_list.len();
+        *work_out = 2 * work + (n * ceil_log2(n)) as u64;
+        true
+    }
+
     /// `list` のスロットだけを対象にした [`Self::permute_out`] (他のスロットの
     /// `scratch` は 0)。`out` を `fill` でクリアしてから、列挙した値をシングルトン除算
     /// 付きで散布する。非ゼロ数を返す。`u_zero_skip` on かつ微小値切捨てなしのときのみ使う。
@@ -3637,6 +5406,26 @@ impl FtLu {
                 v /= d;
             }
             out[col_perm[s]] = v;
+            nnz += (v != 0.0) as usize;
+        }
+        nnz
+    }
+
+    /// 前回の位置を消してから書き、書いた位置を `t` に記録する [`Self::permute_list`] (策1)。
+    fn permute_list_tracked(&self, scratch: &[f64], out: &mut [f64], list: &[usize], t: &mut NzTrack) -> usize {
+        t.reset(out);
+        let mut nnz = 0usize;
+        let col_perm = &self.base.col_perm;
+        let piv = &self.single_piv;
+        for &s in list {
+            let mut v = scratch[s];
+            let d = piv[s];
+            if d != 0.0 && v != 0.0 {
+                v /= d;
+            }
+            let i = col_perm[s];
+            out[i] = v;
+            t.idx.push(i);
             nnz += (v != 0.0) as usize;
         }
         nnz
@@ -4030,6 +5819,596 @@ impl FtLu {
         (na, nb)
     }
 
+    // ---- 以下、出力の非ゼロ位置の記録 (`FtranTrack`) 付きの融合 FTRAN (stormG2 報告 §4 策1・6・12、追加策 R) ----
+    // 大きな問題の主ループ専用。小さな問題のホット経路 (上の基底版) のコード配置を変えないよう、
+    // 別関数として `#[inline(never)]` にしている。
+
+    /// 同じ因子に対する 2 本の密 FTRAN を 1 回の走査で行う:
+    /// `out_a = B^-1 rhs_a` ([`Self::solve_into_capture`] と同じ、`a_tilde` 記録込み) と
+    /// `out_b = B^-1 rhs_b` ([`Self::solve_into`] と同じ)。入力列の FTRAN と DSE の
+    /// `tau = B^-1 rho_p` FTRAN 用。各段 (`L`, `R`, `U`) の因子データを 1 回だけ
+    /// 走査し、各ベクトルには単独求解と同じ演算列を適用するので、結果・非ゼロ数・
+    /// tick すべて 2 回の個別呼び出しとビット一致。
+    ///
+    /// - `rho_cap`: `rhs_b` の BTRAN 時に記録した非ゼロステップ ([`StepCapture`])。
+    ///   有効なら `rhs_b` の `L` 段を Gilbert-Peierls で行う。
+    /// - `track`: 出力の疎書き出し用の記録 ([`FtranTrack`])。`None` なら従来どおり。
+    /// - `ENOMOTO_FTRAN_U_ZERO_SKIP=0` のときは 2 回の個別呼び出しに落ちる。
+    #[allow(clippy::too_many_arguments)]
+    #[inline(never)]
+    pub fn solve_into_pair_capture_tracked(
+        &self,
+        rhs_a: &[f64],
+        rhs_b: &[f64],
+        scratch_a: &mut [f64],
+        scratch_b: &mut [f64],
+        out_a: &mut [f64],
+        out_b: &mut [f64],
+        a_tilde_out: &mut [f64],
+        rho_cap: Option<&mut StepCapture>,
+        mut track: Option<&mut FtranTrack>,
+        rhs_a_nz: Option<&[(usize, f64)]>,
+    ) -> (usize, usize) {
+        let rho_cap = StepCapture::take(rho_cap);
+        if !self.u_zero_skip {
+            if let Some(t) = track {
+                t.alpha.set_full();
+                t.tau.set_full();
+                t.a_tilde.set_full();
+                t.b_scratch_clean = false;
+                t.tau_partial = false;
+            }
+            let na = self.solve_into_capture(rhs_a, scratch_a, out_a, a_tilde_out);
+            let nb = self.solve_into(rhs_b, scratch_b, out_b);
+            return (na, nb);
+        }
+        let m = self.base.m as u64;
+        // `L` 段 (+ `ftran_through_l_and_r_into` と同じ一律 `m` の tick をベクトルごとに。
+        // `rhs_b` が GP 経路でも同じなので CLOCK トリガは変わらない)。
+        // `rhs_b` の `L` 段を GP で行った場合のスクラッチ
+        // `rhs_a` の非ゼロが分かっていれば `L` 段の入力置換をその位置だけにする (`ENOMOTO_L_NZ_ENTRY=0` で無効)
+        let rhs_a_nz = rhs_a_nz.filter(|_| self.l_nz_entry);
+        let gp_b = if let Some(c) = rho_cap {
+            match rhs_a_nz {
+                Some(nz) => self.base.l_solve_into_nz(&self.l_active, nz, scratch_a),
+                None => self.base.l_solve_into(&self.l_active, rhs_a, scratch_a),
+            }
+            self.base.l_solve_steps_into_clean(rhs_b, &c.steps, scratch_b, &mut c.gp, take_b_clean(&mut track));
+            Some(&mut c.gp)
+        } else {
+            match rhs_a_nz {
+                Some(nz) => self.base.l_solve_into_pair_nz(&self.l_active, nz, rhs_b, scratch_a, scratch_b),
+                None => self.base.l_solve_into_pair(&self.l_active, rhs_a, rhs_b, scratch_a, scratch_b),
+            }
+            take_b_clean(&mut track);
+            None
+        };
+        self.add_tick(2 * m);
+        let (na, nb, _) = self.pair_r_u_permute_tracked(scratch_a, scratch_b, out_a, out_b, a_tilde_out, None, gp_b, track);
+        (na, nb)
+    }
+
+    /// 入力列を疎で受け取る [`Self::solve_into_pair_capture`]。`rhs_a` は
+    /// [`Self::solve_sparse_into_capture`] と同じ Gilbert-Peierls `L` 段
+    /// (`scratch_a`/`gp` の前提・事後条件も同じ)、`rhs_b` は密 `L` 段、その後は
+    /// 共通の `R`/`U`/置換。`solve_sparse_into_capture(rhs_a, ..)` +
+    /// `solve_into(rhs_b, ..)` と tick 込みでビット一致。
+    #[allow(clippy::too_many_arguments)]
+    #[inline(never)]
+    pub fn solve_sparse_into_pair_capture_tracked(
+        &self,
+        rhs_a: &[(usize, f64)],
+        rhs_b: &[f64],
+        scratch_a: &mut [f64],
+        gp: &mut GpScratch,
+        scratch_b: &mut [f64],
+        out_a: &mut [f64],
+        out_b: &mut [f64],
+        a_tilde_out: &mut [f64],
+        rho_cap: Option<&mut StepCapture>,
+        mut track: Option<&mut FtranTrack>,
+    ) -> (usize, usize) {
+        let rho_cap = StepCapture::take(rho_cap);
+        if !self.u_zero_skip {
+            if let Some(t) = track {
+                t.alpha.set_full();
+                t.tau.set_full();
+                t.a_tilde.set_full();
+                t.b_scratch_clean = false;
+                t.tau_partial = false;
+            }
+            let na = self.solve_sparse_into_capture(rhs_a, scratch_a, gp, out_a, a_tilde_out);
+            let nb = self.solve_into(rhs_b, scratch_b, out_b);
+            return (na, nb);
+        }
+        self.base.l_solve_sparse_into(rhs_a, scratch_a, gp);
+        self.add_tick(gp.reach.len() as u64);
+        let gp_b = match rho_cap {
+            Some(c) => {
+                self.base.l_solve_steps_into_clean(rhs_b, &c.steps, scratch_b, &mut c.gp, take_b_clean(&mut track));
+                Some(&mut c.gp)
+            }
+            None => {
+                self.base.l_solve_into(&self.l_active, rhs_b, scratch_b);
+                take_b_clean(&mut track);
+                None
+            }
+        };
+        self.add_tick(self.base.m as u64);
+        let (na, nb, a_hyper) = self.pair_r_u_permute_tracked(scratch_a, scratch_b, out_a, out_b, a_tilde_out, Some(&mut *gp), gp_b, track);
+        clear_after_hyper(scratch_a, a_hyper, gp);
+        (na, nb)
+    }
+
+    /// [`Self::solve_into_pair_capture`] に 3 本目の密 FTRAN `out_c = B^-1 rhs_c`
+    /// (同じ反復の BFRT 合成フリップ列) を加え、`L`/`R`/`U` の同じ 1 回の走査を
+    /// 共有する。`solve_into_capture(a)` + `solve_into(b)` + `solve_into(c)` と
+    /// tick 込みでビット一致。3 つの結果の非ゼロ数を返す。
+    #[allow(clippy::too_many_arguments)]
+    #[inline(never)]
+    pub fn solve_into_triple_capture_tracked(
+        &self,
+        rhs_a: &[f64],
+        rhs_b: &[f64],
+        rhs_c: &[f64],
+        scratch_a: &mut [f64],
+        scratch_b: &mut [f64],
+        scratch_c: &mut [f64],
+        out_a: &mut [f64],
+        out_b: &mut [f64],
+        out_c: &mut [f64],
+        a_tilde_out: &mut [f64],
+        rho_cap: Option<&mut StepCapture>,
+        mut track: Option<&mut FtranTrack>,
+        rhs_a_nz: Option<&[(usize, f64)]>,
+    ) -> (usize, usize, usize) {
+        let rho_cap = StepCapture::take(rho_cap);
+        if !self.u_zero_skip {
+            if let Some(t) = track {
+                t.alpha.set_full();
+                t.tau.set_full();
+                t.a_tilde.set_full();
+                t.b_scratch_clean = false;
+                t.tau_partial = false;
+            }
+            let na = self.solve_into_capture(rhs_a, scratch_a, out_a, a_tilde_out);
+            let nb = self.solve_into(rhs_b, scratch_b, out_b);
+            let nc = self.solve_into(rhs_c, scratch_c, out_c);
+            return (na, nb, nc);
+        }
+        let m = self.base.m as u64;
+        let rhs_a_nz = rhs_a_nz.filter(|_| self.l_nz_entry);
+        let gp_b = if let Some(c) = rho_cap {
+            match rhs_a_nz {
+                Some(nz) => self.base.l_solve_into_pair_nz(&self.l_active, nz, rhs_c, scratch_a, scratch_c),
+                None => self.base.l_solve_into_pair(&self.l_active, rhs_a, rhs_c, scratch_a, scratch_c),
+            }
+            self.base.l_solve_steps_into_clean(rhs_b, &c.steps, scratch_b, &mut c.gp, take_b_clean(&mut track));
+            Some(&mut c.gp)
+        } else {
+            match rhs_a_nz {
+                Some(nz) => self.base.l_solve_into_triple_nz(&self.l_active, nz, rhs_b, rhs_c, scratch_a, scratch_b, scratch_c),
+                None => self.base.l_solve_into_triple(&self.l_active, rhs_a, rhs_b, rhs_c, scratch_a, scratch_b, scratch_c),
+            }
+            take_b_clean(&mut track);
+            None
+        };
+        self.add_tick(3 * m);
+        let (na, nb, nc, _) = self.triple_r_u_permute_tracked(scratch_a, scratch_b, scratch_c, out_a, out_b, out_c, a_tilde_out, None, gp_b, track);
+        (na, nb, nc)
+    }
+
+    /// [`Self::solve_sparse_into_pair_capture`] に [`Self::solve_into_triple_capture`] の
+    /// 密な 3 本目の右辺を加えたもの。`scratch_a`/`gp` の約束は pair 版と同じ。
+    #[allow(clippy::too_many_arguments)]
+    #[inline(never)]
+    pub fn solve_sparse_into_triple_capture_tracked(
+        &self,
+        rhs_a: &[(usize, f64)],
+        rhs_b: &[f64],
+        rhs_c: &[f64],
+        scratch_a: &mut [f64],
+        gp: &mut GpScratch,
+        scratch_b: &mut [f64],
+        scratch_c: &mut [f64],
+        out_a: &mut [f64],
+        out_b: &mut [f64],
+        out_c: &mut [f64],
+        a_tilde_out: &mut [f64],
+        rho_cap: Option<&mut StepCapture>,
+        mut track: Option<&mut FtranTrack>,
+    ) -> (usize, usize, usize) {
+        let rho_cap = StepCapture::take(rho_cap);
+        if !self.u_zero_skip {
+            if let Some(t) = track {
+                t.alpha.set_full();
+                t.tau.set_full();
+                t.a_tilde.set_full();
+                t.b_scratch_clean = false;
+                t.tau_partial = false;
+            }
+            let na = self.solve_sparse_into_capture(rhs_a, scratch_a, gp, out_a, a_tilde_out);
+            let nb = self.solve_into(rhs_b, scratch_b, out_b);
+            let nc = self.solve_into(rhs_c, scratch_c, out_c);
+            return (na, nb, nc);
+        }
+        self.base.l_solve_sparse_into(rhs_a, scratch_a, gp);
+        self.add_tick(gp.reach.len() as u64);
+        let gp_b = if let Some(c) = rho_cap {
+            self.base.l_solve_into(&self.l_active, rhs_c, scratch_c);
+            self.base.l_solve_steps_into_clean(rhs_b, &c.steps, scratch_b, &mut c.gp, take_b_clean(&mut track));
+            Some(&mut c.gp)
+        } else {
+            self.base.l_solve_into_pair(&self.l_active, rhs_b, rhs_c, scratch_b, scratch_c);
+            take_b_clean(&mut track);
+            None
+        };
+        self.add_tick(2 * self.base.m as u64);
+        let (na, nb, nc, a_hyper) = self.triple_r_u_permute_tracked(scratch_a, scratch_b, scratch_c, out_a, out_b, out_c, a_tilde_out, Some(&mut *gp), gp_b, track);
+        clear_after_hyper(scratch_a, a_hyper, gp);
+        (na, nb, nc)
+    }
+
+    /// 追加策 R: `R` eta (`x[p_k] -= r_k · x`、作成順) を、非ゼロになりうる位置が `seeds` に限られる
+    /// 疎なベクトル `x` に当てる。内積が 0 でありえない eta (非ゼロの位置に要素を持つもの) だけを
+    /// 列方向索引 ([`Self::r_head`]) で選び、作成順 (番号の小さい順) に最小ヒープで処理する。
+    /// eta `k` が `x[p_k]` を変えたら、`p_k` に要素を持つ `k` より新しい eta を加える。選ばれない
+    /// eta の内積は `±0` の和で `x` を変えないので、全 eta を当てるのと値はビット一致。
+    /// 内積が 0 でなかった eta の行を `r_seeds` に積む。tick は呼び出し側が全 eta 分を加える。
+    /// 選んだ eta が全体の半分を超えたら、残りは全 eta を順に当てる。
+    fn apply_r_sparse(&self, x: &mut [f64], seeds: &[usize], r_seeds: &mut Vec<usize>, work: &mut RSparseWork) {
+        #[cfg(test)]
+        tests::R_SPARSE_CALLS.with(|c| c.set(c.get() + 1));
+        let n_r = self.r_etas.n_headers();
+        r_seeds.clear();
+        if n_r == 0 {
+            return;
+        }
+        if work.stamp.len() < n_r {
+            work.stamp.resize(n_r, 0);
+        }
+        work.epoch = work.epoch.wrapping_add(1);
+        if work.epoch == 0 {
+            work.stamp.iter_mut().for_each(|v| *v = 0);
+            work.epoch = 1;
+        }
+        let epoch = work.epoch;
+        // 作業 #10 (F): 積む eta 番号は常に取り出した番号より大きいので、昇順のビット集合の待ち行列で同じ順に取り出せる
+        // (`ENOMOTO_T_R_BITQUEUE=0` で最小ヒープ)。
+        let bitq = tunable!("ENOMOTO_T_R_BITQUEUE", 1u8, u8) != 0;
+        if bitq {
+            work.q.ensure(n_r);
+        }
+        let RSparseWork { stamp, heap: bheap, q, .. } = work;
+        let mut mq = MonoMinQueue { q, n: n_r };
+        let heap: &mut dyn PosQueue = if bitq { &mut mq } else { bheap };
+        heap.qclear();
+        for &i in seeds {
+            let mut e = self.r_head[i];
+            while e != u32::MAX {
+                let k = self.r_owner[e as usize];
+                if stamp[k as usize] != epoch {
+                    stamp[k as usize] = epoch;
+                    heap.qpush(k as usize);
+                }
+                e = self.r_next[e as usize];
+            }
+        }
+        for &k in &self.r_dense {
+            if stamp[k as usize] != epoch {
+                stamp[k as usize] = epoch;
+                heap.qpush(k as usize);
+            }
+        }
+        // 処理した eta の数
+        let mut done = 0usize;
+        while let Some(k) = heap.qpop() {
+            let slot = self.r_etas.key[k] as usize;
+            let dot = self.r_etas.dot(k, x);
+            x[slot] -= dot;
+            done += 1;
+            if dot != 0.0 {
+                r_seeds.push(slot);
+                if 2 * done > n_r {
+                    // 残り (`k` より新しい eta) は全部順に当てる。
+                    heap.qclear();
+                    for k2 in k + 1..n_r {
+                        let slot = self.r_etas.key[k2] as usize;
+                        let dot = self.r_etas.dot(k2, x);
+                        x[slot] -= dot;
+                        if dot != 0.0 {
+                            r_seeds.push(slot);
+                        }
+                    }
+                    return;
+                }
+                let mut e = self.r_head[slot];
+                while e != u32::MAX {
+                    let k2 = self.r_owner[e as usize];
+                    if k2 as usize > k && stamp[k2 as usize] != epoch {
+                        stamp[k2 as usize] = epoch;
+                        heap.qpush(k2 as usize);
+                    }
+                    e = self.r_next[e as usize];
+                }
+            }
+        }
+    }
+
+    /// `R` eta 適用後の `scratch_a` を `a_tilde_out` に記録する (FT 更新用)。
+    /// `gp_a` (`a` の `L` 段が Gilbert-Peierls で、到達集合 `reach` が有効) と `track` が
+    /// あれば、非ゼロになりうる位置 (`reach` ∪ 値が非ゼロの `R` eta の行) だけを書いて
+    /// `track.a_tilde` に一覧を残す (策6: `O(m)` の `copy_from_slice` を省く)。
+    /// `gp_a.visited` に `R` eta の行の印を加える (重複除去用)。
+    fn capture_a_tilde(&self, scratch_a: &[f64], a_tilde_out: &mut [f64], gp_a: Option<&mut GpScratch>, track: Option<&mut FtranTrack>) {
+        match (gp_a, track) {
+            (Some(gp), Some(t)) => {
+                let at = &mut t.a_tilde;
+                at.reset(a_tilde_out);
+                for &s in &gp.reach {
+                    a_tilde_out[s] = scratch_a[s];
+                    at.idx.push(s);
+                }
+                // 到達集合外で値が変わりうるのは `R` eta で値が変わった行 (`r_seeds`) だけ。
+                for i in 0..gp.r_seeds.len() {
+                    let s = gp.r_seeds[i];
+                    if scratch_a[s] != 0.0 && !gp.visited.is_marked(s) {
+                        gp.visited.mark(s);
+                        a_tilde_out[s] = scratch_a[s];
+                        at.idx.push(s);
+                    }
+                }
+            }
+            (_, t) => {
+                a_tilde_out.copy_from_slice(scratch_a);
+                if let Some(t) = t {
+                    t.a_tilde.set_full();
+                }
+            }
+        }
+    }
+
+    /// `gp` があり [`Self::u_hyper_ok`] なら `x` の `U` 段を超疎に試みる ([`UHyper`])。
+    #[inline]
+    fn try_u_hyper(&self, x: &mut [f64], gp: Option<&mut GpScratch>) -> UHyper {
+        match gp {
+            Some(gp) if self.u_hyper_ok(gp) => self.u_solve_hyper_heap(x, gp),
+            _ => UHyper::NotTried,
+        }
+    }
+
+    /// `R` eta の適用で `x[slot]` から引いた値 `dot` が 0 でなければ、`slot` を超疎 `U` 段の
+    /// 起点候補 (`gp.r_seeds`) に加える。
+    #[inline(always)]
+    fn note_r_seed(gp: &mut Option<&mut GpScratch>, slot: usize, dot: f64) {
+        if dot != 0.0 {
+            if let Some(g) = gp.as_deref_mut() {
+                g.r_seeds.push(slot);
+            }
+        }
+    }
+
+    /// 融合 FTRAN の出力置換 1 本分: 超疎 `U` 段が成功した (`list` が `Some`) なら
+    /// 一覧の位置だけを書き (`track` があれば前回の位置を消してから書き、位置を記録)、
+    /// そうでなければ全体を書く (`track` は無効化)。
+    #[inline]
+    fn permute_fused_out(&self, scratch: &[f64], out: &mut [f64], list: Option<&[usize]>, track: Option<&mut NzTrack>) -> usize {
+        match (list, track) {
+            (Some(list), Some(t)) => self.permute_list_tracked(scratch, out, list, t),
+            (Some(list), None) => self.permute_list(scratch, out, list),
+            (None, t) => {
+                if let Some(t) = t {
+                    t.set_full();
+                }
+                self.permute_out(scratch, out)
+            }
+        }
+    }
+
+    /// 3 本目のベクトル `c` (記録なし) を加えた [`Self::pair_r_u_permute_tracked`]。
+    #[allow(clippy::too_many_arguments)]
+    fn triple_r_u_permute_tracked(
+        &self,
+        scratch_a: &mut [f64],
+        scratch_b: &mut [f64],
+        scratch_c: &mut [f64],
+        out_a: &mut [f64],
+        out_b: &mut [f64],
+        out_c: &mut [f64],
+        a_tilde_out: &mut [f64],
+        mut gp_a: Option<&mut GpScratch>,
+        mut gp_b: Option<&mut GpScratch>,
+        mut track: Option<&mut FtranTrack>,
+    ) -> (usize, usize, usize, bool) {
+        let m = self.base.m as u64;
+        clear_r_seeds(&mut gp_a, &mut gp_b);
+        for reta in self.r_etas.iter() {
+            let dot_a = self.r_etas.dot(reta.k, scratch_a);
+            let dot_b = self.r_etas.dot(reta.k, scratch_b);
+            let dot_c = self.r_etas.dot(reta.k, scratch_c);
+            self.add_tick(3 * self.r_etas.nnz(reta.k) as u64);
+            scratch_a[reta.slot] -= dot_a;
+            scratch_b[reta.slot] -= dot_b;
+            scratch_c[reta.slot] -= dot_c;
+            Self::note_r_seed(&mut gp_a, reta.slot, dot_a);
+            Self::note_r_seed(&mut gp_b, reta.slot, dot_b);
+        }
+        self.capture_a_tilde(scratch_a, a_tilde_out, gp_a.as_deref_mut(), track.as_deref_mut());
+        self.add_tick(3 * m);
+        // C5: ベクトル `a`/`b` の `U` 段を超疎に行う (ベクトルは独立なので、
+        // 融合走査から外しても他のベクトルの演算は変わらない)。
+        let a_u = self.try_u_hyper(scratch_a, gp_a.as_deref_mut());
+        let b_u = self.try_u_hyper(scratch_b, gp_b.as_deref_mut());
+        // 融合走査に含めるか (超疎段を試さなかったベクトルだけ)
+        let (a_scan, b_scan) = (a_u == UHyper::NotTried, b_u == UHyper::NotTried);
+        for eta in self.u_seq.iter().rev() {
+            let p = eta.slot;
+            if a_scan && scratch_a[p] != 0.0 {
+                scratch_a[p] /= self.u_seq.pivot[eta.k];
+                let xp = scratch_a[p];
+                self.add_tick(self.u_seq.nnz(eta.k) as u64);
+                self.u_seq.axpy(eta.k, -xp, scratch_a);
+            }
+            if b_scan && scratch_b[p] != 0.0 {
+                scratch_b[p] /= self.u_seq.pivot[eta.k];
+                let xp = scratch_b[p];
+                self.add_tick(self.u_seq.nnz(eta.k) as u64);
+                self.u_seq.axpy(eta.k, -xp, scratch_b);
+            }
+            if scratch_c[p] != 0.0 {
+                scratch_c[p] /= self.u_seq.pivot[eta.k];
+                let xp = scratch_c[p];
+                self.add_tick(self.u_seq.nnz(eta.k) as u64);
+                self.u_seq.axpy(eta.k, -xp, scratch_c);
+            }
+        }
+        // シングルトンの除算は `permute_out` が行う (`single_piv` 参照)。
+        let a_list = if a_u == UHyper::Hyper { gp_a.as_deref().map(|g| g.u_list.as_slice()) } else { None };
+        let b_list = if b_u == UHyper::Hyper { gp_b.as_deref().map(|g| g.u_list.as_slice()) } else { None };
+        let na = self.permute_fused_out(scratch_a, out_a, a_list, track.as_deref_mut().map(|t| &mut t.alpha));
+        let nb = self.permute_fused_out(scratch_b, out_b, b_list, track.as_deref_mut().map(|t| &mut t.tau));
+        let nc = self.permute_out(scratch_c, out_c);
+        finish_b_scratch(scratch_b, b_list, track);
+        (na, nb, nc, a_u == UHyper::Hyper)
+    }
+
+    /// 上の 2 つの pair 求解が共有する `L` 以降の処理: `R` eta、`a_tilde` 記録
+    /// (ベクトル `a` のみ)、`U` (`u_zero_skip` 形式、`gp_*` があり [`Self::u_hyper_ok`] なら
+    /// 超疎形式)、出力置換。各ベクトルに単独求解と同じ演算を適用する。
+    ///
+    /// - `gp_a`/`gp_b`: そのベクトルの `L` 段を Gilbert-Peierls で行った場合のスクラッチ
+    ///   (到達集合 `reach` が有効)。
+    /// - 戻り値の 3 つ目は `a` の `U` 段を超疎に行ったか (呼び出し側が `scratch_a` を
+    ///   `gp_a.u_list` の位置だけ 0 に戻せる)。
+    /// - 両ベクトルとも超疎 `U` 段なら `u_seq` の全 eta 走査自体を省く。
+    #[allow(clippy::too_many_arguments)]
+    fn pair_r_u_permute_tracked(
+        &self,
+        scratch_a: &mut [f64],
+        scratch_b: &mut [f64],
+        out_a: &mut [f64],
+        out_b: &mut [f64],
+        a_tilde_out: &mut [f64],
+        mut gp_a: Option<&mut GpScratch>,
+        mut gp_b: Option<&mut GpScratch>,
+        mut track: Option<&mut FtranTrack>,
+    ) -> (usize, usize, bool) {
+        let m = self.base.m as u64;
+        if let (true, Some(ga), Some(gb)) = (self.r_sparse_ready(), gp_a.as_deref_mut(), gp_b.as_deref_mut()) {
+            // 両ベクトルとも `L` 段が Gilbert-Peierls (非ゼロ位置が分かっている): 追加策 R の疎な `R` 段。
+            self.add_tick(2 * self.r_nnz_total as u64);
+            let GpScratch { reach, r_seeds, r_work, .. } = ga;
+            self.apply_r_sparse(scratch_a, reach, r_seeds, r_work);
+            let GpScratch { reach, r_seeds, r_work, .. } = gb;
+            self.apply_r_sparse(scratch_b, reach, r_seeds, r_work);
+        } else {
+            clear_r_seeds(&mut gp_a, &mut gp_b);
+            for reta in self.r_etas.iter() {
+                let dot_a = self.r_etas.dot(reta.k, scratch_a);
+                let dot_b = self.r_etas.dot(reta.k, scratch_b);
+                self.add_tick(2 * self.r_etas.nnz(reta.k) as u64);
+                scratch_a[reta.slot] -= dot_a;
+                scratch_b[reta.slot] -= dot_b;
+                Self::note_r_seed(&mut gp_a, reta.slot, dot_a);
+                Self::note_r_seed(&mut gp_b, reta.slot, dot_b);
+            }
+        }
+        self.capture_a_tilde(scratch_a, a_tilde_out, gp_a.as_deref_mut(), track.as_deref_mut());
+        // `U` 段: ベクトルごとに `u_solve_into` の `u_zero_skip` ループ
+        // (C5 なら超疎形式、`triple_r_u_permute` 参照)。
+        self.add_tick(2 * m);
+        let a_u = self.try_u_hyper(scratch_a, gp_a.as_deref_mut());
+        // 策12: 要求があり `a` が超疎に解けたら、`tau` は `a` の非ゼロのスロットでだけ求める。
+        // 作業 #10 (B): 部分 `tau` と通常の `tau` の手間 (決定的な作業量) の移動平均を比べて安いほうを選ぶ
+        // (`FtranTrack::pt_choose_partial`)。部分 `tau` の閉包は値によらず依存する `U` 行を全部たどるので、
+        // `tau` が疎な問題 (ken-13: 1.5%) では通常の超疎 `U` 段のほうが安く、密な問題では部分 `tau` が安い。
+        let partial_eligible = matches!((a_u, gp_a.as_deref(), gp_b.as_deref(), track.as_deref()), (UHyper::Hyper, Some(_), Some(gb), Some(t)) if t.partial_tau && self.u_hyper_ok(gb));
+        let mut b_partial = false;
+        if partial_eligible {
+            let (ga, gb, t) = (gp_a.as_deref().unwrap(), gp_b.as_deref_mut().unwrap(), track.as_deref_mut().unwrap());
+            if t.pt_choose_partial() {
+                let mut work = 0u64;
+                b_partial = self.u_solve_partial(scratch_b, scratch_a, &ga.u_list, gb, &mut t.owners_tmp, &mut work);
+                let w = t.pt_ema;
+                FtranTrack::pt_record(&mut t.pt_cost_partial, w, work as f64);
+            }
+        }
+        let tick_b0 = self.tick.get();
+        let b_u = if b_partial { UHyper::Hyper } else { self.try_u_hyper(scratch_b, gp_b.as_deref_mut()) };
+        // 融合走査に含めるか (超疎段を試さなかったベクトルだけ)
+        let (a_scan, b_scan) = (a_u == UHyper::NotTried, b_u == UHyper::NotTried);
+        // 作業 #10 (B): 全走査での `tau` 側の eta の非ゼロ数 (手間の計測用)。
+        let mut b_scan_work = 0usize;
+        if a_scan || b_scan {
+            for eta in self.u_seq.iter().rev() {
+                let p = eta.slot;
+                if a_scan && scratch_a[p] != 0.0 {
+                    scratch_a[p] /= self.u_seq.pivot[eta.k];
+                    let xp = scratch_a[p];
+                    self.add_tick(self.u_seq.nnz(eta.k) as u64);
+                    self.u_seq.axpy(eta.k, -xp, scratch_a);
+                }
+                if b_scan && scratch_b[p] != 0.0 {
+                    scratch_b[p] /= self.u_seq.pivot[eta.k];
+                    let xp = scratch_b[p];
+                    let nz = self.u_seq.nnz(eta.k);
+                    b_scan_work += nz;
+                    self.add_tick(nz as u64);
+                    self.u_seq.axpy(eta.k, -xp, scratch_b);
+                }
+            }
+        }
+        // 通常の `tau` の手間は、部分 `tau` を選べない反復 (入る列が超疎に解けない・フリップ結果の併合がある) でも測る。
+        if !b_partial && track.as_deref().is_some_and(|t| t.pt_adaptive) {
+            // 通常の `tau` の手間: 超疎なら触れた eta の非ゼロ数 + ヒープの比較 (一覧長 × log2)、
+            // 全走査 (超疎を諦めた場合を含む) なら `U` のヘッダ走査と置換の `2m` を加える。
+            let cost = match b_u {
+                UHyper::Hyper => {
+                    let n = gp_b.as_deref().map_or(0, |g| g.u_list.len());
+                    (self.tick.get() - tick_b0) as f64 / TICK_SOLVE_NNZ_COEF as f64 + (n * ceil_log2(n)) as f64
+                }
+                UHyper::Full => (self.tick.get() - tick_b0) as f64 / TICK_SOLVE_NNZ_COEF as f64 + 2.0 * m as f64,
+                UHyper::NotTried => b_scan_work as f64 + 2.0 * m as f64,
+            };
+            let t = track.as_deref_mut().unwrap();
+            let w = t.pt_ema;
+            FtranTrack::pt_record(&mut t.pt_cost_full, w, cost);
+        }
+        // シングルトンの除算は `permute_out` が行う (`single_piv` 参照)。
+        let a_list = if a_u == UHyper::Hyper { gp_a.as_deref().map(|g| g.u_list.as_slice()) } else { None };
+        let na = self.permute_fused_out(scratch_a, out_a, a_list, track.as_deref_mut().map(|t| &mut t.alpha));
+        if b_partial {
+            // 部分 `tau`: `a` の非ゼロのスロットだけを書き、`scratch_b` の触れた位置を 0 に戻す。
+            let (ga, gb, t) = (gp_a.as_deref().unwrap(), gp_b.as_deref().unwrap(), track.unwrap());
+            t.tau.reset(out_b);
+            let mut nb = 0usize;
+            for &s in &ga.u_list {
+                if scratch_a[s] == 0.0 {
+                    continue;
+                }
+                let mut v = scratch_b[s];
+                let d = self.single_piv[s];
+                if d != 0.0 && v != 0.0 {
+                    v /= d;
+                }
+                let i = self.base.col_perm[s];
+                out_b[i] = v;
+                t.tau.idx.push(i);
+                nb += (v != 0.0) as usize;
+            }
+            for &s in gb.reach.iter().chain(gb.r_seeds.iter()).chain(gb.u_list.iter()) {
+                scratch_b[s] = 0.0;
+            }
+            t.b_scratch_clean = true;
+            t.tau_partial = true;
+            return (na, nb, true);
+        }
+        let b_list = if b_u == UHyper::Hyper { gp_b.as_deref().map(|g| g.u_list.as_slice()) } else { None };
+        let nb = self.permute_fused_out(scratch_b, out_b, b_list, track.as_deref_mut().map(|t| &mut t.tau));
+        finish_b_scratch(scratch_b, b_list, track);
+        (na, nb, a_u == UHyper::Hyper)
+    }
+
     /// 全 FTRAN 経路共通の最終段: 完成したステップ空間ベクトルを元の順
     /// (`out[col_perm[s]] = scratch[s]`) に戻し、非ゼロ数を返す
     /// (カウントは分岐なしの加算)。`U` 段のシングルトン除算
@@ -4094,6 +6473,106 @@ impl FtLu {
             scratch[reta.slot] -= dot;
         }
         // `U` は通常の `u_solve_into` 走査のまま。
+        self.u_solve_into(scratch);
+        let nnz = self.permute_out(scratch, out);
+        scratch.fill(0.0);
+        nnz
+    }
+
+    /// [`Self::solve_sparse_into`] に、`gp.u_hyper` の要求で超疎 `U` 段・疎な `R` 段 (追加策 R) を加えたもの
+    /// (大きな問題の BFRT 合成フリップ列用、値・tick はビット一致)。以下は元の説明:
+    /// 疎な右辺版の [`Self::solve_into`]: `rhs` の非ゼロ `(元の行, 値)` を直接受け取り、
+    /// `L` 段を [`LuFactors::l_solve_sparse_into`] で行う。非ゼロ数を返す。
+    ///
+    /// **`scratch`/`gp` はこの呼び出し箇所専用にすること** ([`Self::solve_into`] の
+    /// バッファと共有しない)。`l_solve_sparse_into` は入口で `scratch` が全 0 である
+    /// ことを要求し、この関数は返却直前に `scratch` を全 0 に戻してその前提を
+    /// 次回のために保つ。
+    #[inline(never)]
+    pub fn solve_sparse_into_hyper(&self, rhs_sparse: &[(usize, f64)], scratch: &mut [f64], gp: &mut GpScratch, out: &mut [f64]) -> usize {
+        self.base.l_solve_sparse_into(rhs_sparse, scratch, gp);
+        // CLOCK トリガ用: 疎 `L` 段のコストは到達集合のサイズ。
+        self.add_tick(gp.reach.len() as u64);
+        if self.u_hyper_ok(gp) && self.r_sparse_ready() {
+            // 疎な `R` 段 (追加策 R、tick は全 eta 分を一括で)。
+            self.add_tick(self.r_nnz_total as u64);
+            let GpScratch { reach, r_seeds, r_work, .. } = &mut *gp;
+            self.apply_r_sparse(scratch, reach, r_seeds, r_work);
+        } else {
+            gp.r_seeds.clear();
+            for reta in self.r_etas.iter() {
+                let dot = self.r_etas.dot(reta.k, scratch);
+                self.add_tick(self.r_etas.nnz(reta.k) as u64);
+                scratch[reta.slot] -= dot;
+                if dot != 0.0 {
+                    gp.r_seeds.push(reta.slot);
+                }
+            }
+        }
+        if self.u_hyper_ok(gp) {
+            // `gp.u_hyper` の要求があれば `U` 段を超疎に試みる (BFRT の合成フリップ列など。値・tick はビット一致)。
+            self.add_tick(self.base.m as u64);
+            match self.u_solve_hyper_heap(scratch, gp) {
+                UHyper::Hyper => {
+                    let nnz = self.permute_list(scratch, out, &gp.u_list);
+                    clear_after_hyper(scratch, true, gp);
+                    return nnz;
+                }
+                UHyper::Full => {
+                    let nnz = self.permute_out(scratch, out);
+                    scratch.fill(0.0);
+                    return nnz;
+                }
+                UHyper::NotTried => self.tick.set(self.tick.get() - self.base.m as u64),
+            }
+        }
+        self.u_solve_into(scratch);
+        let nnz = self.permute_out(scratch, out);
+        scratch.fill(0.0);
+        nnz
+    }
+
+    /// 出力の非ゼロ位置の記録 `track` 付きの [`Self::solve_sparse_into_hyper`] (pds-100 報告の策13 の一部、
+    /// BFRT の合成フリップ列用)。超疎 `U` 段が成功したら前回の位置だけを 0 に戻してから一覧の位置を書き
+    /// ([`Self::permute_list_tracked`])、長さ `m` の `fill` を省く。それ以外は全体を書いて記録を無効化する。
+    /// 値・tick はビット一致。
+    #[inline(never)]
+    pub fn solve_sparse_into_hyper_tracked(&self, rhs_sparse: &[(usize, f64)], scratch: &mut [f64], gp: &mut GpScratch, out: &mut [f64], track: &mut NzTrack) -> usize {
+        self.base.l_solve_sparse_into(rhs_sparse, scratch, gp);
+        self.add_tick(gp.reach.len() as u64);
+        if self.u_hyper_ok(gp) && self.r_sparse_ready() {
+            self.add_tick(self.r_nnz_total as u64);
+            let GpScratch { reach, r_seeds, r_work, .. } = &mut *gp;
+            self.apply_r_sparse(scratch, reach, r_seeds, r_work);
+        } else {
+            gp.r_seeds.clear();
+            for reta in self.r_etas.iter() {
+                let dot = self.r_etas.dot(reta.k, scratch);
+                self.add_tick(self.r_etas.nnz(reta.k) as u64);
+                scratch[reta.slot] -= dot;
+                if dot != 0.0 {
+                    gp.r_seeds.push(reta.slot);
+                }
+            }
+        }
+        if self.u_hyper_ok(gp) {
+            self.add_tick(self.base.m as u64);
+            match self.u_solve_hyper_heap(scratch, gp) {
+                UHyper::Hyper => {
+                    let nnz = self.permute_list_tracked(scratch, out, &gp.u_list, track);
+                    clear_after_hyper(scratch, true, gp);
+                    return nnz;
+                }
+                UHyper::Full => {
+                    track.set_full();
+                    let nnz = self.permute_out(scratch, out);
+                    scratch.fill(0.0);
+                    return nnz;
+                }
+                UHyper::NotTried => self.tick.set(self.tick.get() - self.base.m as u64),
+            }
+        }
+        track.set_full();
         self.u_solve_into(scratch);
         let nnz = self.permute_out(scratch, out);
         scratch.fill(0.0);
@@ -4284,6 +6763,350 @@ impl FtLu {
         self.l_transpose_solve_into_ext::<true>(w, out, cap, bound);
     }
 
+    /// [`Self::solve_transpose_unit_work`] の超疎版 (策2、大きな問題の主ループ用。結果はビット一致):
+    /// `U^T`/`L^T` 段を非ゼロ位置のヒープで駆動し、出力も一覧の位置だけ書く ([`UnitBtranWork`] 参照)。
+    #[inline(never)]
+    pub fn solve_transpose_unit_work_sparse(&self, i: usize, out: &mut [f64], e_tilde_out: &mut [f64], work: &mut UnitBtranWork, mut cap: Option<&mut StepCapture>) {
+        let m = self.base.m;
+        if work.w.len() != m {
+            work.w = vec![0.0; m];
+            work.e_full = true;
+        }
+        if work.marks.len() != m {
+            work.marks = EpochMarks::new(m);
+        }
+        // 策2 の超疎経路を試すか (微小値切捨てがあるときは全走査の判定に任せる)。
+        let hyper = work.sparse && work.density < 0.5 * tunable!("ENOMOTO_T_BTRAN_HYPER_FRACTION", BTRAN_HYPER_FRACTION, f64) && tiny_drop() <= 0.0;
+        let UnitBtranWork { w, touch, e_touch, e_full, marks, uheap, lheap, uq, lq, bitqueue, y, rows, rows_valid, density, .. } = work;
+        // 結果の非ゼロ率を移動平均に畳み込む。
+        let mut record = |nnz_frac: f64| {
+            let a = tunable!("ENOMOTO_T_DENSITY_AVERAGE_MULTIPLIER", DENSITY_AVERAGE_MULTIPLIER, f64);
+            *density = (1.0 - a) * *density + a * nnz_frac;
+        };
+        *rows_valid = false;
+        debug_assert!(w.iter().all(|&v| v == 0.0));
+        let s0 = self.base.col_perm_inv[i];
+        w[s0] = 1.0;
+        touch.clear();
+        touch.push(s0);
+        // 非ゼロ位置の記録が溢れずに済んだか
+        let tracked = if hyper {
+            if *bitqueue {
+                // `U^T` 順の位置は `singles.len() + u_seq` のヘッダ数未満。
+                let n = self.singles.len() + self.u_seq.n_headers();
+                uq.ensure(n);
+                self.u_transpose_sweep_heap(w, touch, marks, &mut MonoMinQueue { q: uq, n })
+            } else {
+                self.u_transpose_sweep_heap(w, touch, marks, uheap)
+            }
+        } else {
+            self.u_transpose_sweep_track(w, touch)
+        };
+        // `e_tilde` の記録: 前回の位置を消してから今回の値を書く。
+        if *e_full {
+            e_tilde_out.fill(0.0);
+        } else {
+            for &q in e_touch.iter() {
+                e_tilde_out[q] = 0.0;
+            }
+        }
+        // `L^T` 段入力の非ゼロ数の上界
+        let mut bound;
+        if tracked {
+            for &q in touch.iter() {
+                e_tilde_out[q] = w[q];
+            }
+            bound = touch.len();
+            if hyper {
+                // 超疎経路は `touch` を続く段でも使うので写す。
+                e_touch.clear();
+                e_touch.extend_from_slice(touch);
+            } else {
+                std::mem::swap(touch, e_touch);
+            }
+            *e_full = false;
+        } else {
+            e_tilde_out.copy_from_slice(w);
+            bound = usize::MAX;
+            *e_full = true;
+        }
+        // `touch` が `L^T` 段入力の非ゼロ位置をすべて含むか (超疎経路のみ)
+        let mut list_ok = hyper && tracked;
+        // `btran_tail` と同じ処理を、非ゼロ数の上界を `R` eta 分増やしながら行う。
+        for reta in self.r_etas.iter().rev() {
+            let yp = w[reta.slot];
+            if yp == 0.0 {
+                continue;
+            }
+            let nnz = self.r_etas.nnz(reta.k);
+            self.add_tick(nnz as u64);
+            bound = bound.saturating_add(nnz);
+            self.r_etas.axpy(reta.k, -yp, w);
+            if list_ok {
+                if self.r_etas.is_dense(reta.k) {
+                    list_ok = false;
+                } else {
+                    // 超疎経路: `R` eta が書いた位置を `touch` に加える (印は `U^T` 段のもの)。
+                    for &q in self.r_etas.seg(reta.k).0 {
+                        let q = q as usize;
+                        if !marks.is_marked(q) {
+                            marks.mark(q);
+                            touch.push(q);
+                        }
+                    }
+                }
+            }
+        }
+        self.add_tick(m as u64);
+        if list_ok {
+            let ok = if *bitqueue {
+                lq.ensure(self.base.m);
+                self.l_transpose_hyper_out(w, out, cap.as_deref_mut(), touch, marks, lq, y, rows)
+            } else {
+                self.l_transpose_hyper_out(w, out, cap.as_deref_mut(), touch, marks, lheap, y, rows)
+            };
+            if ok {
+                *rows_valid = true;
+                record(rows.len() as f64 / m.max(1) as f64);
+                return;
+            }
+            // `L^T` 段で非ゼロが増えすぎた: 全走査で出力済み。
+            y.set_full();
+            record(tunable!("ENOMOTO_T_BTRAN_HYPER_FRACTION", BTRAN_HYPER_FRACTION, f64));
+            return;
+        }
+        y.set_full();
+        // 全走査の結果が疎だったら次回は超疎経路をまた試す (記録が有効 = 非ゼロが上限以下)。
+        self.l_transpose_solve_into_ext::<true>(w, out, cap.as_deref_mut(), bound);
+        // 全走査の結果の非ゼロ率: 記録が有効なら正確、溢れたら上限 (`limit_frac`) 以上。
+        match cap.as_ref() {
+            Some(c) if c.valid => record(c.steps.len() as f64 / m.max(1) as f64),
+            Some(c) => record(c.limit_frac),
+            None => {}
+        }
+    }
+
+    /// 策2: [`Self::u_transpose_sweep_track`] を非ゼロ位置の最小ヒープで駆動したもの。
+    /// `touch` (入口で非ゼロの位置) から始め、`U^T` 順のキー ([`Self::u_transpose_key`]) の
+    /// 小さい順に取り出して処理し、新たに書いた位置をヒープと `touch` に加える
+    /// (`marks` で重複除去)。スロット `p` に書く eta はすべて `p` よりキーが小さいので、
+    /// 取り出した時点で `z[p]` は確定しており、全走査と同じスロットを同じ順に処理する
+    /// (値・tick ともビット一致)。`touch` が [`BTRAN_HYPER_FRACTION`] `* m` を超えたら
+    /// 次のキーから全走査に切り替えて `false` を返す (`touch` は不完全になる)。
+    fn u_transpose_sweep_heap<Q: PosQueue>(&self, z: &mut [f64], touch: &mut Vec<usize>, marks: &mut EpochMarks, heap: &mut Q) -> bool {
+        let m = self.base.m;
+        self.add_tick(m as u64);
+        let limit = (tunable!("ENOMOTO_T_BTRAN_HYPER_FRACTION", BTRAN_HYPER_FRACTION, f64) * m as f64) as usize;
+        marks.begin();
+        heap.qclear();
+        for &p in touch.iter() {
+            marks.mark(p);
+            heap.qpush(self.u_transpose_key(p));
+        }
+        while let Some(k) = heap.qpop() {
+            let (p, pivot) = self.u_transpose_at(k);
+            let zp = z[p];
+            if zp == 0.0 {
+                continue;
+            }
+            let zp = zp / pivot;
+            z[p] = zp;
+            let orow = self.row_owners.row(p);
+            self.add_tick(orow.len() as u64);
+            let mut visit = |q: usize, v: f64| {
+                z[q] -= v * zp;
+                if !marks.is_marked(q) {
+                    marks.mark(q);
+                    touch.push(q);
+                    heap.qpush(self.u_transpose_key(q));
+                }
+            };
+            for (&q, &v) in orow.idx.iter().zip(orow.val) {
+                visit(q as usize, v);
+            }
+            for (t, &v) in orow.rval.iter().enumerate() {
+                if v != 0.0 {
+                    visit(orow.rlo + t, v);
+                }
+            }
+            if touch.len() > limit {
+                // 残り (キー `k` より後) は全走査で処理する。
+                heap.qclear();
+                let ns = self.singles.len();
+                let total = ns + self.u_seq.n_headers();
+                for kk in k + 1..total {
+                    if kk >= ns && self.slot_pos[self.u_seq.key[kk - ns] as usize] != kk - ns {
+                        // 死んだヘッダ (`EtaFile::kill`)
+                        continue;
+                    }
+                    let (p, pivot) = self.u_transpose_at(kk);
+                    let zp = z[p];
+                    if zp == 0.0 {
+                        continue;
+                    }
+                    let zp = zp / pivot;
+                    z[p] = zp;
+                    let orow = self.row_owners.row(p);
+                    self.add_tick(orow.len() as u64);
+                    for (&q, &v) in orow.idx.iter().zip(orow.val) {
+                        z[q as usize] -= v * zp;
+                    }
+                    for (zq, &v) in z[orow.rlo..orow.rlo + orow.rval.len()].iter_mut().zip(orow.rval) {
+                        *zq -= v * zp;
+                    }
+                }
+                return false;
+            }
+        }
+        true
+    }
+
+    /// スロット `p` の `U^T` 順 ([`Self::u_transpose_order`]) での位置。
+    #[inline(always)]
+    fn u_transpose_key(&self, p: usize) -> usize {
+        let sp = self.singles_pos[p];
+        if sp != usize::MAX {
+            sp
+        } else {
+            self.singles.len() + self.slot_pos[p]
+        }
+    }
+
+    /// `U^T` 順の位置 `k` の `(スロット, ピボット)`。
+    #[inline(always)]
+    fn u_transpose_at(&self, k: usize) -> (usize, f64) {
+        let ns = self.singles.len();
+        if k < ns {
+            let e = self.singles[k];
+            (e.slot, e.pivot)
+        } else {
+            (self.u_seq.key[k - ns] as usize, self.u_seq.pivot[k - ns])
+        }
+    }
+
+    /// 策2: 超疎 BTRAN の `L^{-T}` 段と出力置換。`touch` は `w` の非ゼロ位置をすべて含む
+    /// (重複なし、`marks` は使い終わり)。スキャッタ/ギャザーの選択は
+    /// [`Self::l_transpose_solve_into_ext`] と同じ。スキャッタなら非ゼロステップの最大ヒープで
+    /// 降順に処理し (全走査の部分列なのでビット一致)、出力は `touch` の位置だけを書き、
+    /// `w` をそこだけ 0 に戻す。`out` の前回の位置は `y` で消し、非ゼロ行を `rows` (昇順) に、
+    /// 非ゼロステップを `cap` (昇順) に書く。成功で `true`。ギャザーを選んだ、または
+    /// 非ゼロが増えすぎた場合は全走査で出力して `false` を返す (`y` は呼び出し側が無効化する)。
+    #[allow(clippy::too_many_arguments)]
+    fn l_transpose_hyper_out(
+        &self,
+        w: &mut [f64],
+        out: &mut [f64],
+        cap: Option<&mut StepCapture>,
+        touch: &mut Vec<usize>,
+        marks: &mut EpochMarks,
+        heap: &mut impl PosQueue,
+        y: &mut NzTrack,
+        rows: &mut Vec<usize>,
+    ) -> bool {
+        let m = self.base.m;
+        let base = &self.base;
+        // スキャッタ形式を使う非ゼロ数の上限 (`l_transpose_solve_into_ext` と同じ判定)
+        let limit = (self.btran_l_scatter * m as f64) as usize;
+        let nnz = touch.iter().filter(|&&s| w[s] != 0.0).count();
+        if nnz > limit {
+            PROF_BTRAN_L_GATHER.fetch_add(1, Ordering::Relaxed);
+            base.l_transpose_gather_cols(w, &self.l_active);
+            btran_full_out(&base.row_perm, w, out, cap);
+            return false;
+        }
+        PROF_BTRAN_L_SCATTER.fetch_add(1, Ordering::Relaxed);
+        let abort = (tunable!("ENOMOTO_T_BTRAN_HYPER_FRACTION", BTRAN_HYPER_FRACTION, f64) * m as f64) as usize;
+        marks.begin();
+        heap.qclear();
+        for &s in touch.iter() {
+            marks.mark(s);
+            heap.qpush(s);
+        }
+        while let Some(s) = heap.qpop() {
+            let ws = w[s];
+            if ws == 0.0 {
+                continue;
+            }
+            base.l_row.seg(s).for_each(|k, mult| {
+                if mult == 0.0 {
+                    // 密な区間の 0 (疎な形式には無い要素)
+                    return;
+                }
+                w[k] -= mult * ws;
+                if !marks.is_marked(k) {
+                    marks.mark(k);
+                    touch.push(k);
+                    heap.qpush(k);
+                }
+            });
+            if touch.len() > abort {
+                // 残り (ステップ `s` 未満) は全走査のスキャッタで処理する。
+                heap.qclear();
+                for s2 in (0..s).rev() {
+                    let ws = w[s2];
+                    if ws == 0.0 {
+                        continue;
+                    }
+                    let seg = base.l_row.seg(s2);
+                    for (&k, &mult) in seg.idx.iter().zip(seg.val.iter()) {
+                        let k = k as usize;
+                        w[k] -= mult * ws;
+                    }
+                    if !seg.rval.is_empty() {
+                        sub_scaled_range(&mut w[seg.rlo..seg.rlo + seg.rval.len()], seg.rval, ws);
+                    }
+                }
+                btran_full_out(&base.row_perm, w, out, cap);
+                return false;
+            }
+        }
+        // 出力: `touch` の位置だけを書き、`w` を 0 に戻す。
+        y.reset(out);
+        rows.clear();
+        let row_perm = &base.row_perm;
+        match cap {
+            Some(c) => {
+                // 記録できる非ゼロ数の上限 (`permute_btran_out_capture` と同じ)
+                let climit = (c.limit_frac * m as f64) as usize;
+                c.steps.clear();
+                let mut over = false;
+                for &s in touch.iter() {
+                    let v = w[s];
+                    w[s] = 0.0;
+                    let r = row_perm[s];
+                    out[r] = v;
+                    y.idx.push(r);
+                    if v != 0.0 {
+                        rows.push(r);
+                        if !over {
+                            if c.steps.len() < climit {
+                                c.steps.push(s);
+                            } else {
+                                over = true;
+                            }
+                        }
+                    }
+                }
+                c.valid = !over;
+                c.steps.sort_unstable();
+            }
+            None => {
+                for &s in touch.iter() {
+                    let v = w[s];
+                    w[s] = 0.0;
+                    let r = row_perm[s];
+                    out[r] = v;
+                    y.idx.push(r);
+                    if v != 0.0 {
+                        rows.push(r);
+                    }
+                }
+            }
+        }
+        rows.sort_unstable();
+        true
+    }
+
     /// [`Self::solve_transpose_unit_capture`] に加え、続く融合 `tau` FTRAN のために
     /// `out` の非ゼロステップを `cap` に記録する ([`StepCapture`])。`out` はビット一致。
     pub fn solve_transpose_unit_capture_steps(&self, i: usize, scratch: &mut [f64], out: &mut [f64], e_tilde_out: &mut [f64], cap: Option<&mut StepCapture>) {
@@ -4401,6 +7224,44 @@ impl FtLu {
         self.commit_update(basis_slot, a_tilde, e_tilde, min_pivot)
     }
 
+    /// [`Self::try_update_precomputed`] の疎入力版 (策3): `a_tilde` を書いた融合 FTRAN の記録
+    /// (`ftrack.a_tilde`) と `e_tilde` を書いた BTRAN の記録 (`bwork` の `e_touch`) が有効なら、
+    /// eta をその位置だけから作る (長さ `m` の走査を省く)。結果はビット一致。
+    pub fn try_update_tracked(&mut self, basis_slot: usize, a_tilde: &[f64], ftrack: &mut FtranTrack, e_tilde: &[f64], bwork: &mut UnitBtranWork, min_pivot: f64) -> bool {
+        let a_list = if ftrack.a_tilde.full {
+            None
+        } else {
+            let v = &mut ftrack.a_tilde.idx;
+            v.sort_unstable();
+            v.dedup();
+            Some(v.as_slice())
+        };
+        let e_list = if bwork.e_full {
+            None
+        } else {
+            let v = &mut bwork.e_touch;
+            v.sort_unstable();
+            v.dedup();
+            Some(v.as_slice())
+        };
+        self.commit_update_tracked(basis_slot, a_tilde, a_list, e_tilde, e_list, min_pivot)
+    }
+
+    /// `u_seq` の位置 `k` の eta を除く。小さな問題では並列配列から削除し、削除で後ろがずれる範囲
+    /// だけ `slot_pos` を直す。`lazy_remove` (大きな問題、策4) なら死んだヘッダにするだけ。
+    #[inline]
+    fn remove_u_eta(&mut self, k: usize) {
+        if self.lazy_remove {
+            self.u_seq.kill(k);
+            self.n_dead += 1;
+        } else {
+            self.u_seq.remove(k);
+            for pos in k..self.u_seq.n_headers() {
+                self.slot_pos[self.u_seq.key[pos] as usize] = pos;
+            }
+        }
+    }
+
     /// [`Self::try_update`] と [`Self::try_update_precomputed`] 共通の本体:
     /// `R` eta を作ってピボットを判定し、合格なら `U` のスロット `p` の eta を
     /// 除いて (行 `p` を他の eta からも消し) 新しい列 eta を末尾に追加する。
@@ -4443,21 +7304,16 @@ impl FtLu {
             // 上書き前に、スロット `p` の旧非対角要素を `row_owners` から登録解除する
             // (残すと他の行の所有者リストに無効な `p` が残る)。
             let row_owners = &mut self.row_owners;
-            self.u_seq.for_each_entry(k, |row_step, _| {
-                if let Some(idx) = row_owners[row_step].iter().position(|&(s, _)| s == p) {
-                    row_owners[row_step].swap_remove(idx);
-                }
-            });
-            self.u_seq.remove(k);
-            for pos in k..self.u_seq.n_headers() {
-                self.slot_pos[self.u_seq.key[pos] as usize] = pos;
-            }
+            self.u_seq.for_each_entry(k, |row_step, _| row_owners.remove_slot(row_step, p));
+            self.remove_u_eta(k);
         }
 
         // 行 `p` をまだ参照している eta からそれを消す (Tomlin 1974, eq. 12)。
         // 対象は `row_owners[p]` に載っている eta だけで、`slot_pos` で O(1) に引く。
-        for (slot, _) in std::mem::take(&mut self.row_owners[p]) {
-            let pos = self.slot_pos[slot];
+        let mut owners = std::mem::take(&mut self.owner_scratch);
+        self.row_owners.take_slots(p, &mut owners);
+        for &slot in &owners {
+            let pos = self.slot_pos[slot as usize];
             if self.u_seq.remove_index(pos, p) {
                 self.fill -= 1;
             }
@@ -4465,12 +7321,118 @@ impl FtLu {
 
         // 置換後の列 eta を `a_tilde` から直接作って末尾に追加する (scale `1.0`)。
         let k = self.u_seq.push_scaled_dense(p, new_pivot, a_tilde, p, 1.0, tunable!("ENOMOTO_T_DENSE_ETA_FRACTION", DENSE_ETA_FRACTION, f64));
+        self.owner_scratch = owners;
         let row_owners = &mut self.row_owners;
-        self.u_seq.for_each_entry(k, |row_step, v| row_owners[row_step].push((p, v)));
+        self.u_seq.for_each_entry(k, |row_step, v| row_owners.push(row_step, p, v));
         self.fill += self.u_seq.nnz(k);
         self.slot_pos[p] = k;
 
         self.fill += self.r_etas.nnz(rk);
+        self.r_nnz_total += self.r_etas.nnz(rk);
+
+        true
+    }
+
+    /// 記録付きの [`Self::commit_update`] (大きな問題の主ループ用、[`Self::try_update_tracked`]):
+    /// [`Self::try_update`] と [`Self::try_update_precomputed`] 共通の本体:
+    /// `R` eta を作ってピボットを判定し、合格なら `U` のスロット `p` の eta を
+    /// 除いて (行 `p` を他の eta からも消し) 新しい列 eta を末尾に追加する。
+    /// `row_owners`/`slot_pos`/`u_seq`/`fill` の整合を 1 か所で保つ。
+    ///
+    /// `a_list`/`e_list`: `a_tilde`/`e_tilde` の非ゼロになりうる位置 (昇順・重複なし)。
+    /// あれば eta をそこだけから作る ([`EtaFile::push_scaled_list`])。
+    #[inline(never)]
+    fn commit_update_tracked(&mut self, basis_slot: usize, a_tilde: &[f64], a_list: Option<&[usize]>, e_tilde: &[f64], e_list: Option<&[usize]>, min_pivot: f64) -> bool {
+        let m = self.base.m;
+        debug_assert_eq!(a_tilde.len(), m, "a_tilde must be the full dense column");
+        debug_assert_eq!(e_tilde.len(), m, "e_tilde must be the full dense row");
+        let p = self.base.col_perm_inv[basis_slot];
+
+        // スロット `p` の eta が `singles` にあればその位置 (無ければ `usize::MAX`)
+        let single_idx = self.singles_pos[p];
+        // 置換前の対角ピボット `u_pp`
+        let old_pivot = if single_idx != usize::MAX { self.singles[single_idx].pivot } else { self.u_seq.pivot[self.slot_pos[p]] };
+
+        // `R` eta (`r = -u_pp · ẽ_p`、第 `p` 成分除く) を `e_tilde` から直接作って
+        // `r_etas` に追加する。ピボット判定に要る `dot` はこの eta と `a_tilde` の
+        // 内積なので判定より先に作り、棄却なら pop する。
+        let dense_fraction = tunable!("ENOMOTO_T_DENSE_ETA_FRACTION", DENSE_ETA_FRACTION, f64);
+        let rk = match e_list {
+            Some(list) => self.r_etas.push_scaled_list(p, 0.0, e_tilde, list, p, -old_pivot, dense_fraction),
+            None => self.r_etas.push_scaled_dense(p, 0.0, e_tilde, p, -old_pivot, dense_fraction),
+        };
+        let dot = self.r_etas.dot(rk, a_tilde);
+        // 更新後の対角ピボット `ã_pq - r·ã_q`
+        let new_pivot = a_tilde[p] - dot;
+        if new_pivot.abs() < min_pivot {
+            self.r_etas.pop();
+            return false;
+        }
+
+        // 旧 eta を除く (`u_seq` 側は `remove_u_eta`)。
+        if single_idx != usize::MAX {
+            // シングルトンは `singles` から除く (順序は自由、要素なし)。
+            self.singles.swap_remove(single_idx);
+            if let Some(moved) = self.singles.get(single_idx) {
+                self.singles_pos[moved.slot] = single_idx;
+            }
+            self.singles_pos[p] = usize::MAX;
+            self.single_piv[p] = 0.0;
+        } else {
+            let k = self.slot_pos[p];
+            self.fill -= self.u_seq.nnz(k);
+            // 上書き前に、スロット `p` の旧非対角要素を `row_owners` から登録解除する
+            // (残すと他の行の所有者リストに無効な `p` が残る)。
+            let row_owners = &mut self.row_owners;
+            self.u_seq.for_each_entry(k, |row_step, _| row_owners.remove_slot(row_step, p));
+            self.remove_u_eta(k);
+        }
+
+        // 行 `p` をまだ参照している eta からそれを消す (Tomlin 1974, eq. 12)。
+        // 対象は `row_owners[p]` に載っている eta だけで、`slot_pos` で O(1) に引く。
+        let mut owners = std::mem::take(&mut self.owner_scratch);
+        self.row_owners.take_slots(p, &mut owners);
+        for &slot in &owners {
+            let pos = self.slot_pos[slot as usize];
+            if self.u_seq.remove_index(pos, p) {
+                self.fill -= 1;
+            }
+        }
+
+        // 置換後の列 eta を `a_tilde` から直接作って末尾に追加する (scale `1.0`)。
+        let k = match a_list {
+            Some(list) => self.u_seq.push_scaled_list(p, new_pivot, a_tilde, list, p, 1.0, dense_fraction),
+            None => self.u_seq.push_scaled_dense(p, new_pivot, a_tilde, p, 1.0, dense_fraction),
+        };
+        self.owner_scratch = owners;
+        let row_owners = &mut self.row_owners;
+        self.u_seq.for_each_entry(k, |row_step, v| row_owners.push(row_step, p, v));
+        self.fill += self.u_seq.nnz(k);
+        self.slot_pos[p] = k;
+
+        self.fill += self.r_etas.nnz(rk);
+        self.r_nnz_total += self.r_etas.nnz(rk);
+        // 採用した `R` eta を列方向索引に載せる (追加策 R)。索引は全 `R` eta がこの関数を通った
+        // ときだけ有効 (`r_indexed == r_etas.n_headers()`)。
+        if self.r_indexed == rk {
+            self.r_indexed += 1;
+        }
+        if self.r_etas.is_dense(rk) {
+            self.r_dense.push(rk as u32);
+        } else {
+            let (start, len) = self.r_etas.span[rk];
+            let (start, len) = (start as usize, len as usize);
+            if self.r_next.len() < start + len {
+                self.r_next.resize(start + len, u32::MAX);
+                self.r_owner.resize(start + len, u32::MAX);
+            }
+            for e in start..start + len {
+                let i = self.r_etas.idx[e] as usize;
+                self.r_next[e] = self.r_head[i];
+                self.r_head[i] = e as u32;
+                self.r_owner[e] = rk as u32;
+            }
+        }
 
         true
     }
@@ -4478,6 +7440,11 @@ impl FtLu {
     /// 最後の分解以降に成功した FT 更新の数 (= `R` eta の数)。
     pub fn update_count(&self) -> usize {
         self.r_etas.n_headers()
+    }
+
+    /// この分解の `L`/`U` の格納要素数 (対角を含む)。
+    pub fn lu_nnz(&self) -> usize {
+        self.lu_nnz
     }
 
     /// `U` の eta 列と `R` eta が保持する非対角 fill の合計 (真の非ゼロ数。密形式でも
@@ -4496,12 +7463,71 @@ impl FtLu {
 
 #[cfg(test)]
 mod tests {
+    thread_local! {
+        /// このスレッドで [`super::FtLu::apply_r_sparse`] が呼ばれた回数 (テストが経路を通ったかの確認用)。
+        pub(super) static R_SPARSE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
 
     /// 解析専用の再生ベンチマーク (`#[ignore]`):
     /// `ENOMOTO_LU_BENCH_FILE=<lu_dump.bin> cargo test --release lu_kernel_bench -- --ignored --nocapture`。
     /// ダンプされた全入力を `ENOMOTO_LU_BENCH_CONFIGS` (`;` 区切り、各々 `,` 区切りの
     /// `KEY=VAL`) の各設定で分解し、`ENOMOTO_LU_BENCH_REPS` 回交互に回して設定ごとの
     /// 最小合計時間を出し、因子が最初の設定とビット一致することを確認する。
+    /// 密行列の分解 #2 の計測用: `ENOMOTO_LU_BENCH_FILE` の `ENOMOTO_LU_BENCH_PICK` 番目の基底を
+    /// 稠密切替 (`ENOMOTO_LU_DENSE_SWITCH`、既定 0.3) で分解し、分解・`FtLu::new`・FTRAN/BTRAN の時間を出す。
+    #[test]
+    #[ignore]
+    fn dense_block_bench() {
+        let Some(path) = std::env::var_os("ENOMOTO_LU_BENCH_FILE") else { return };
+        let pick: usize = std::env::var("ENOMOTO_LU_BENCH_PICK").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+        let data = std::fs::read(path).expect("read dump");
+        let words: Vec<u64> = data.chunks_exact(8).map(|c| u64::from_le_bytes(c.try_into().unwrap())).collect();
+        let mut pos = 0usize;
+        let mut idx = 0usize;
+        let (m, rows) = loop {
+            let m = words[pos] as usize;
+            pos += 1;
+            let mut rows = Vec::with_capacity(m);
+            for _ in 0..m {
+                let len = words[pos] as usize;
+                pos += 1;
+                let r: Vec<(usize, f64)> = (0..len).map(|t| (words[pos + 2 * t] as usize, f64::from_bits(words[pos + 2 * t + 1]))).collect();
+                pos += 2 * len;
+                rows.push(r);
+            }
+            if idx == pick || pos >= words.len() {
+                break (m, rows);
+            }
+            idx += 1;
+        };
+        let sw: f64 = std::env::var("ENOMOTO_LU_DENSE_SWITCH").ok().and_then(|v| v.parse().ok()).unwrap_or(0.3);
+        for rep in 0..3 {
+            let t0 = std::time::Instant::now();
+            let lu = factorize_flat_markowitz_routed(m, &rows, false, sw).expect("nonsingular");
+            let t1 = std::time::Instant::now();
+            let ft = FtLu::new(lu);
+            let t2 = std::time::Instant::now();
+            let rhs: Vec<f64> = (0..m).map(|i| 1.0 + (i % 7) as f64).collect();
+            let mut scratch = vec![0.0; m];
+            let mut out = vec![0.0; m];
+            ft.solve_into(&rhs, &mut scratch, &mut out);
+            let t3 = std::time::Instant::now();
+            let mut out2 = vec![0.0; m];
+            ft.solve_transpose_into(&rhs, &mut scratch, &mut out2);
+            let t4 = std::time::Instant::now();
+            eprintln!(
+                "rep {rep}: m={m} s0={} factor={:.1}ms ftlu_new={:.1}ms ftran={:.2}ms btran={:.2}ms nnz(L)={} lu_nnz={}",
+                ft.base.dense_s0,
+                (t1 - t0).as_secs_f64() * 1e3,
+                (t2 - t1).as_secs_f64() * 1e3,
+                (t3 - t2).as_secs_f64() * 1e3,
+                (t4 - t3).as_secs_f64() * 1e3,
+                ft.base.l_col.nnz(),
+                ft.lu_nnz
+            );
+        }
+    }
+
     #[test]
     #[ignore]
     fn lu_kernel_bench() {
@@ -4586,7 +7612,7 @@ mod tests {
                 best[ci] = best[ci].min(el);
                 if rep == 0 {
                     prints[ci] = out.iter().map(|o| o.as_ref().map(|lu| fingerprint(lu)).unwrap_or(0)).collect();
-                    lu_nnz[ci] = out.iter().flatten().map(|lu| lu.u_row.iter().map(|r| r.len()).sum::<usize>() + (0..lu.m).map(|s| lu.l_col.col(s).len()).sum::<usize>()).sum();
+                    lu_nnz[ci] = out.iter().flatten().map(|lu| lu.u_row.iter().map(|r| r.len()).sum::<usize>() + (0..lu.m).map(|s| lu.l_col.seg(s).len()).sum::<usize>()).sum();
                 }
             }
         }
@@ -5178,14 +8204,14 @@ mod tests {
                 let lu = factorize(m, &rows).expect("nonsingular");
                 let mut from_col: Vec<(usize, usize, u64)> = Vec::new();
                 for s in 0..m {
-                    for &(row_step, mult) in lu.l_col.col(s) {
+                    for (row_step, mult) in lu.l_col.seg(s) {
                         assert!(row_step > s, "L must be strictly lower triangular in step space");
                         from_col.push((s, row_step, mult.to_bits()));
                     }
                 }
                 let mut from_row: Vec<(usize, usize, u64)> = Vec::new();
                 for r in 0..m {
-                    for &(s, mult) in lu.l_row.row(r) {
+                    for (s, mult) in lu.l_row.seg(r) {
                         assert!(s < r, "l_row.row(r) must only hold entries at s < r");
                         from_row.push((s, r, mult.to_bits()));
                     }
@@ -5327,14 +8353,14 @@ mod tests {
             // この経路でも `l_row` は `l_col` の転置であること (BTRAN のスキャッタ形式が読む)。
             let mut from_col: Vec<(usize, usize, u64)> = Vec::new();
             for s in 0..m {
-                for &(row_step, mult) in reused.l_col.col(s) {
+                for (row_step, mult) in reused.l_col.seg(s) {
                     assert!(row_step > s, "L must be strictly lower triangular in step space");
                     from_col.push((s, row_step, mult.to_bits()));
                 }
             }
             let mut from_row: Vec<(usize, usize, u64)> = Vec::new();
             for r in 0..m {
-                for &(s, mult) in reused.l_row.row(r) {
+                for (s, mult) in reused.l_row.seg(r) {
                     from_row.push((s, r, mult.to_bits()));
                 }
             }
@@ -5357,8 +8383,8 @@ mod tests {
         assert_eq!(again.row_perm, first.row_perm);
         assert_eq!(again.col_perm, first.col_perm);
         for s in 0..m {
-            let mut a: Vec<(usize, f64)> = first.l_col.col(s).to_vec();
-            let mut b: Vec<(usize, f64)> = again.l_col.col(s).iter().copied().filter(|&(_, v)| v != 0.0).collect();
+            let mut a: Vec<(usize, f64)> = first.l_col.seg(s).to_vec();
+            let mut b: Vec<(usize, f64)> = again.l_col.seg(s).into_iter().filter(|&(_, v)| v != 0.0).collect();
             a.sort_unstable_by_key(|&(r, _)| r);
             b.sort_unstable_by_key(|&(r, _)| r);
             assert_eq!(a.len(), b.len(), "L column {s} nonzero count");
@@ -5566,6 +8592,156 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// 主ループと同じ使い方 (出力・スクラッチを反復間で使い回し、`FtranTrack`/`UnitBtranWork`
+    /// の記録で疎に書き出し、`try_update_tracked` で更新) が、毎回新しいバッファで求めた
+    /// 参照 (記録なし・`try_update_precomputed`) と結果・tick までビット一致する (策1〜6)。
+    #[test]
+    fn tracked_iteration_matches_untracked_reference() {
+        let mut n_partial = 0usize;
+        for (m, partial) in [(40usize, false), (300, false), (300, true)] {
+            for seed in [1u64, 2, 3, 7] {
+                // 奇数 seed はランダムな疎行列 (結果が密になりやすく全走査への切り替えを通る)、
+                // 偶数 seed は 6 行ずつのブロック対角 (超疎経路を通る)。
+                let rows: Vec<Vec<(usize, f64)>> = if seed % 2 == 1 {
+                    random_sparse_diag_dominant(m, seed)
+                } else {
+                    let mut rs = seed;
+                    (0..m)
+                        .map(|i| {
+                            let b0 = i / 6 * 6;
+                            let mut row: Vec<(usize, f64)> = Vec::new();
+                            for j in b0..(b0 + 6).min(m) {
+                                if j != i && next_rand(&mut rs) > 0.0 {
+                                    row.push((j, next_rand(&mut rs)));
+                                }
+                            }
+                            row.push((i, 8.0 + next_rand(&mut rs).abs()));
+                            row.sort_unstable_by_key(|&(c, _)| c);
+                            row
+                        })
+                        .collect()
+                };
+                let mut st = FtLu::new(factorize(m, &rows).unwrap());
+                // 疎な `R` 段 (追加策 R) を少ない `R` eta でも通し、死んだ `U` eta ヘッダ (策4) を使う
+                // (参照側 `sr` は常に全 eta を順に当て、ヘッダを削除する)。
+                st.r_sparse_min = 0;
+                st.lazy_remove = true;
+                let mut sr = st.clone();
+                sr.r_sparse_min = usize::MAX;
+                sr.lazy_remove = false;
+                let mut work = UnitBtranWork::new(m);
+                let mut cap = StepCapture::new(m);
+                let mut gp = GpScratch::new(m);
+                let mut track = FtranTrack::new();
+                let (mut rho, mut e_t, mut alpha, mut tau, mut a_t) = (vec![0.0; m], vec![0.0; m], vec![0.0; m], vec![0.0; m], vec![0.0; m]);
+                let (mut sa, mut sb) = (vec![0.0; m], vec![0.0; m]);
+                let mut rng = seed * 7919 + 11;
+                // 疎な書き出し・超疎 BTRAN が実際に使われた回数
+                let (mut n_sparse_out, mut n_sparse_btran) = (0usize, 0usize);
+                for it in 0..3 * m {
+                    let r = ((next_rand(&mut rng).abs() * m as f64) as usize).min(m - 1);
+                    // 入る列: 1〜3 個の非ゼロ
+                    let a_sp: Vec<(usize, f64)> = {
+                        let mut v: Vec<(usize, f64)> = Vec::new();
+                        for _ in 0..1 + it % 3 {
+                            let k = ((next_rand(&mut rng).abs() * m as f64) as usize).min(m - 1);
+                            if !v.iter().any(|&(i, _)| i == k) {
+                                v.push((k, 1.0 + next_rand(&mut rng)));
+                            }
+                        }
+                        v.sort_unstable_by_key(|&(i, _)| i);
+                        v
+                    };
+                    // 参照
+                    let (mut rr, mut re, mut rs) = (vec![0.0; m], vec![0.0; m], vec![0.0; m]);
+                    let t0 = sr.synth_tick();
+                    sr.solve_transpose_unit_capture(r, &mut rs, &mut rr, &mut re);
+                    let (mut za, mut zb, mut ra, mut rt, mut rat) = (vec![0.0; m], vec![0.0; m], vec![0.0; m], vec![0.0; m], vec![0.0; m]);
+                    let mut gpr = GpScratch::new(m);
+                    let (rna, rnb) = sr.solve_sparse_into_pair_capture(&a_sp, &rr, &mut za, &mut gpr, &mut zb, &mut ra, &mut rt, &mut rat, None);
+                    let ref_cost = sr.synth_tick() - t0;
+                    // 記録付き
+                    let t0 = st.synth_tick();
+                    st.solve_transpose_unit_work_sparse(r, &mut rho, &mut e_t, &mut work, Some(&mut cap));
+                    assert_eq!(rho, rr, "m={m} seed={seed} it={it}: rho");
+                    assert_eq!(e_t, re, "m={m} seed={seed} it={it}: e_tilde");
+                    if let Some(nz) = work.nonzero_rows() {
+                        let want: Vec<usize> = (0..m).filter(|&i| rr[i] != 0.0).collect();
+                        assert_eq!(nz, want.as_slice(), "m={m} seed={seed} it={it}: rho rows");
+                    }
+                    let hyper = it % 4 != 0;
+                    gp.u_hyper = hyper;
+                    cap.set_u_hyper(hyper);
+                    // `partial` なら DSE `tau` を入る列の結果の非ゼロ行でだけ求める (策12)。
+                    track.partial_tau = partial;
+                    let (na, nb) = st.solve_sparse_into_pair_capture_tracked(&a_sp, &rho, &mut sa, &mut gp, &mut sb, &mut alpha, &mut tau, &mut a_t, Some(&mut cap), Some(&mut track));
+                    assert_eq!(na, rna);
+                    assert_eq!(alpha, ra, "m={m} seed={seed} it={it}: alpha");
+                    for k in 0..m {
+                        assert!(a_t[k] == rat[k], "m={m} seed={seed} it={it}: a_tilde[{k}]");
+                    }
+                    if track.tau_is_partial() {
+                        n_partial += 1;
+                        assert!(sb.iter().all(|&v| v == 0.0), "m={m} seed={seed} it={it}: tau scratch left dirty");
+                        for k in 0..m {
+                            if alpha[k] != 0.0 {
+                                assert!(tau[k].to_bits() == rt[k].to_bits(), "m={m} seed={seed} it={it}: partial tau[{k}] {} vs {}", tau[k], rt[k]);
+                            }
+                        }
+                        // CLOCK tick の数え方は違うので、以後の比較のために参照側に合わせる。
+                        let d = (st.synth_tick() - t0) as i64 - ref_cost as i64;
+                        sr.tick.set((sr.tick.get() as i64 + d) as u64);
+                    } else {
+                        assert_eq!(st.synth_tick() - t0, ref_cost, "m={m} seed={seed} it={it}: tick");
+                        assert_eq!(nb, rnb);
+                        for k in 0..m {
+                            assert!(tau[k] == rt[k], "m={m} seed={seed} it={it}: tau[{k}]");
+                        }
+                    }
+                    assert!(sa.iter().all(|&v| v == 0.0));
+                    if let Some(idx) = track.alpha.indices() {
+                        assert!((0..m).all(|i| alpha[i] == 0.0 || idx.contains(&i)));
+                        n_sparse_out += 1;
+                    }
+                    n_sparse_btran += work.nonzero_rows().is_some() as usize;
+                    // 単独の疎 FTRAN (BFRT の合成フリップ列の経路): 超疎 `U` 段・疎な `R` 段ありとなしで
+                    // 値・非ゼロ数・tick が一致する。
+                    {
+                        let (mut z1, mut z2, mut o1, mut o2) = (vec![0.0; m], vec![0.0; m], vec![0.0; m], vec![0.0; m]);
+                        let (mut g1, mut g2) = (GpScratch::new(m), GpScratch::new(m));
+                        g2.u_hyper = true;
+                        let t1 = sr.synth_tick();
+                        let n1 = sr.solve_sparse_into(&a_sp, &mut z1, &mut g1, &mut o1);
+                        let c1 = sr.synth_tick() - t1;
+                        let t2 = st.synth_tick();
+                        let n2 = st.solve_sparse_into_hyper(&a_sp, &mut z2, &mut g2, &mut o2);
+                        assert_eq!(st.synth_tick() - t2, c1, "m={m} seed={seed} it={it}: solve_sparse_into tick");
+                        assert_eq!(n1, n2);
+                        assert!(o1.iter().zip(&o2).all(|(x, y)| x.to_bits() == y.to_bits()), "m={m} seed={seed} it={it}: solve_sparse_into");
+                        assert!(z2.iter().all(|&v| v == 0.0));
+                    }
+                    let slot = st.base.col_perm[st.base.row_perm_inv[r].min(m - 1)];
+                    let ok_r = sr.try_update_precomputed(slot, &rat, &re, 1e-9);
+                    let ok_t = st.try_update_tracked(slot, &a_t, &mut track, &e_t, &mut work, 1e-9);
+                    assert_eq!(ok_r, ok_t);
+                    if !ok_r || st.update_count() > 3 * m / 2 {
+                        let rows2 = rows.clone();
+                        st = FtLu::new(factorize(m, &rows2).unwrap());
+                        st.r_sparse_min = 0;
+                        st.lazy_remove = true;
+                        sr = st.clone();
+                        sr.lazy_remove = false;
+                        sr.r_sparse_min = usize::MAX;
+                    }
+                    assert_eq!(st.fill_count(), sr.fill_count());
+                }
+                assert!(m < 100 || seed % 2 == 1 || (n_sparse_out > 0 && n_sparse_btran > 0), "m={m} seed={seed}: sparse paths never exercised ({n_sparse_out}, {n_sparse_btran})");
+            }
+        }
+        assert!(n_partial > 0, "partial tau never exercised");
+        assert!(R_SPARSE_CALLS.with(|c| c.get()) > 0, "sparse R stage never exercised");
     }
 
     /// `solve_into_pair_capture` / `solve_sparse_into_pair_capture` が、融合元の個別求解と
@@ -5946,6 +9122,92 @@ mod tests {
     /// 係数が稠密な基底 (FT 更新後に `DENSE_ETA_FRACTION` を超える) に稠密な入る列で
     /// 複数回 FT 更新し、最終基底の独立な完全再分解と FTRAN/BTRAN/疎 FTRAN で一致する
     /// (eta の密形式を通すため)。
+    /// 密行列の分解 #2: 稠密切替した分解 (密ブロックを密な区間で持つ) に FT 更新を重ねても、
+    /// 更新後の基底を分解し直した結果と FTRAN/BTRAN が一致する (ブロック内・外のスロットを置換)。
+    #[test]
+    fn ft_update_on_dense_block_matches_full_refactor() {
+        let m = 420;
+        let mut st = 12345u64;
+        // 疎な対角優位行列 + 末尾 120 行 x 120 列の密なブロック
+        let mut rows: Vec<Vec<(usize, f64)>> = random_sparse_diag_dominant(m, 7);
+        for i in (m - 120)..m {
+            for j in (m - 120)..m {
+                if i != j {
+                    rows[i].push((j, 0.5 + next_rand(&mut st)));
+                }
+            }
+        }
+        let base = factorize_flat_markowitz_routed(m, &rows, false, 0.3).expect("nonsingular");
+        assert!(base.dense_s0 < m, "dense switch must trigger (s0={})", base.dense_s0);
+        assert!(base.l_col.has_block());
+        let mut state = FtLu::new(base);
+        let mut cur = rows.clone();
+        let mut applied = 0;
+        for k in 0..40 {
+            // 半分はブロック内のスロット
+            let slot = if k % 2 == 0 { m - 120 + (k * 37) % 120 } else { (k * 97) % (m - 120) };
+            // 入る列: 元の列 + 乱数の摂動 (非特異を保つ)
+            let mut a_q = vec![0.0; m];
+            for i in 0..m {
+                for &(c, v) in &cur[i] {
+                    if c == slot {
+                        a_q[i] += v;
+                    }
+                }
+            }
+            for _ in 0..6 {
+                let i = (next_rand(&mut st) * m as f64) as usize % m;
+                a_q[i] += next_rand(&mut st) - 0.5;
+            }
+            if !state.try_update(slot, &a_q, 1e-9) {
+                continue;
+            }
+            applied += 1;
+            for i in 0..m {
+                cur[i].retain(|&(c, _)| c != slot);
+                if a_q[i] != 0.0 {
+                    cur[i].push((slot, a_q[i]));
+                }
+            }
+            if k % 10 == 9 {
+                let full = factorize(m, &cur).expect("updated basis must stay nonsingular");
+                let rhs: Vec<f64> = (0..m).map(|i| 1.0 + (i % 11) as f64 * 0.25).collect();
+                let x_ft = state.solve(&rhs);
+                let x_full = full.solve(&rhs);
+                let err = x_ft.iter().zip(&x_full).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max);
+                assert!(err < 1e-8, "ftran mismatch after {applied} updates: {err}");
+                let y_ft = state.solve_transpose(&rhs);
+                let y_full = full.solve_transpose(&rhs);
+                let err = y_ft.iter().zip(&y_full).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max);
+                assert!(err < 1e-8, "btran mismatch after {applied} updates: {err}");
+                let mut scratch = vec![0.0; m];
+                let mut gp = GpScratch::new(m);
+                let mut out = vec![0.0; m];
+                state.solve_sparse_into(&to_sparse(&rhs), &mut scratch, &mut gp, &mut out);
+                let err = out.iter().zip(&x_full).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max);
+                assert!(err < 1e-8, "sparse ftran mismatch after {applied} updates: {err}");
+                for i in [0usize, m / 2, m - 1] {
+                    let mut e = vec![0.0; m];
+                    e[i] = 1.0;
+                    let y_full = full.solve_transpose(&e);
+                    let mut scratch = vec![0.0; m];
+                    let mut out = vec![0.0; m];
+                    state.solve_transpose_unit(i, &mut scratch, &mut out);
+                    let err = out.iter().zip(&y_full).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max);
+                    assert!(err < 1e-8, "unit btran mismatch (row {i}) after {applied} updates: {err}");
+                    // 大きな問題の主ループの経路 (超疎 BTRAN の作業領域付き)
+                    let mut work = UnitBtranWork::new(m);
+                    let mut out2 = vec![0.0; m];
+                    let mut e_tilde = vec![0.0; m];
+                    state.solve_transpose_unit_work_sparse(i, &mut out2, &mut e_tilde, &mut work, None);
+                    let err = out2.iter().zip(&y_full).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max);
+                    assert!(err < 1e-8, "unit btran (work_sparse) mismatch (row {i}) after {applied} updates: {err}");
+                }
+            }
+        }
+        assert!(applied >= 30, "too many rejected updates ({applied})");
+    }
+
     #[test]
     fn ft_update_matches_full_refactor_on_dense_basis() {
         let m = 10;

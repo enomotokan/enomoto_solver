@@ -115,7 +115,7 @@ pub fn propagate_dual_bounds(n: usize, a: &FaerCsr, real_g_rows: &[Vec<(usize, f
         for gi in 0..num_g {
             lb[num_a + gi] = 0.0 / -1.0;
         }
-        propagate::PropagateSplit { lb, ub: vec![f64::INFINITY; num_duals], real_rows: Vec::new(), real_rhs: Vec::new(), infeasible: false }
+        propagate::PropagateSplit { lb, ub: vec![f64::INFINITY; num_duals], real_rows: Vec::new(), real_rhs: Vec::new(), infeasible: false, passes_used: 0, converged: true, work: 0 }
     } else {
         for gi in 0..num_g {
             t_rows.push(vec![(num_a + gi, -1.0)]);

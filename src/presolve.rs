@@ -46,9 +46,23 @@ use crate::sparse::{FaerCsr, CsrRowBuilder, csr_from_rows, csr_row_vec, csr_rows
 use crate::types::{ConstraintRow, RowSense, VariableData};
 use scaling::Scaling;
 use crate::params::presolve::{
-    DOUBLETON_STRIKES, DUALPROPAGATE_STRIKES, EQPROP_ROUNDS, EQPROP_SKIP_IDLE, FIXPOINT_RELTOL, PARALLELCOLS_STRIKES, PRESOLVE_SPLIT_G, REDEQ_MODE,
-    ROUND_STRUCT_STOP,
+    DOUBLETON_STRIKES, DUALPROPAGATE_STRIKES, EQPROP_FIXPOINT, EQPROP_ROUNDS, OPPOSITE_PAIR_EQUALITY, PRESOLVE_FIXPOINT, PROPAGATION_FIXPOINT, PRESOLVE_WORK_BUDGET, EQPROP_SKIP_IDLE, FIXPOINT_RELTOL, INEQ_SINGLETON_LARGE, LARGE_PRESOLVE_MIN_ROWS, PARALLELCOLS_STRIKES, PRESOLVE_EXTRA_ROUNDS_LARGE, PROPAGATION_PASSES_LARGE, PRESOLVE_SPLIT_G, REDEQ_MODE,
+    ROUND_STRUCT_STOP, ROUND_STRUCT_STOP_FIXPOINT,
 };
+
+/// 前処理の実行不能判定に使う許容誤差: `base * (1 + |scale|)` (相対形、既定) または `base` (従来の絶対形)。
+///
+/// `scale` は判定に関わる量の大きさ (固定値、行の活動度の項の絶対値の和、境界の絶対値など)。
+/// 丸め誤差はその大きさに比例するため (`params::presolve::PRESOLVE_REL_TOL` 参照)。
+/// `ENOMOTO_T_PRESOLVE_REL_TOL=0` で従来の絶対判定に戻る。`scale` が有限でなければ `base`。
+#[inline]
+pub(crate) fn infeas_tol(base: f64, scale: f64) -> f64 {
+    if tunable!("ENOMOTO_T_PRESOLVE_REL_TOL", crate::params::presolve::PRESOLVE_REL_TOL, usize) != 0 && scale.is_finite() {
+        base * (1.0 + scale.abs())
+    } else {
+        base
+    }
+}
 
 /// モデルの変数・制約から `(A, b, G, h)` を組み立てる。
 ///
@@ -340,6 +354,55 @@ pub fn run_extended(
     // 狭める前の元の上下限を必要とする)。同じ抽出結果を最初のラウンドの伝播にも使う。
     let (first_lb, first_ub, first_rows, first_rhs) = propagate::extract_bounds(n, &g, &h);
     let (orig_lb, orig_ub) = (first_lb.clone(), first_ub.clone());
+    // 大きな問題向けの設定 (`LARGE_PRESOLVE_MIN_ROWS` 参照): 外側ラウンドの延長と `ineqsingleton` の既定有効化。
+    let large = {
+        let min_rows = tunable!("ENOMOTO_T_LARGE_PRESOLVE_MIN_ROWS", LARGE_PRESOLVE_MIN_ROWS, usize);
+        min_rows != 0 && b.len() + first_rows.len() >= min_rows
+    };
+    // 不動点まで回すか (`PRESOLVE_FIXPOINT`)。有効なら外側ラウンドの数に固定の上限を置かず、不動点か作業量の予算
+    // (`PRESOLVE_WORK_BUDGET` × 問題の大きさ) の消費で打ち切る。無効なら従来の `rounds` ラウンド (+ 大きな問題の延長)。
+    let fixpoint_mode = tunable!("ENOMOTO_T_PRESOLVE_FIXPOINT", PRESOLVE_FIXPOINT, usize) != 0;
+    // 1 回の上下限伝播も有意な変化がなくなるまで回すか (`PROPAGATION_FIXPOINT`、既定は無効で `prop_passes` パスごとに
+    // 他の段と交互に回す)。
+    let prop_fixpoint = fixpoint_mode && tunable!("ENOMOTO_T_PROPAGATION_FIXPOINT", PROPAGATION_FIXPOINT, usize) != 0;
+    // 作業量の予算 (読んだ非零の延べ数)。問題の大きさ (等式行と多変数の不等式行の非零数 + 列数 + 行数) に比例させる。
+    let work_budget = if fixpoint_mode {
+        let size = a.compute_nnz() + first_rows.iter().map(|r| r.len()).sum::<usize>() + n + b.len() + first_rows.len();
+        (tunable!("ENOMOTO_T_PRESOLVE_WORK_BUDGET", PRESOLVE_WORK_BUDGET, f64) * size as f64) as usize
+    } else {
+        usize::MAX
+    };
+    // これまでに使った作業量 (伝播で読んだ非零 + 各ラウンドの他の段の分として、ラウンド終了時の非零数 + 列数)。
+    let mut work_used = 0usize;
+    // 上下限伝播 (不等式・等式) のパスの打ち切り条件。既定は変化がある限り `prop_passes` パスまで。
+    // `prop_fixpoint` なら最初の `prop_passes` パスは同じく変化がある限り続け、その先は有意な変化
+    // (`FIXPOINT_RELTOL`、外側ループの不動点判定と同じ基準) がある限り、作業量の予算の残りまで続ける。
+    let pass_limit = |prop_passes: usize, work_used: usize| -> propagate::PassLimit {
+        if prop_fixpoint {
+            propagate::PassLimit {
+                min_passes: prop_passes,
+                max_passes: usize::MAX,
+                sig_reltol: tunable!("ENOMOTO_T_FIXPOINT_RELTOL", FIXPOINT_RELTOL, f64),
+                max_work: work_budget.saturating_sub(work_used),
+            }
+        } else {
+            propagate::PassLimit::fixed(prop_passes)
+        }
+    };
+    // 延長ラウンドの数 (`PRESOLVE_EXTRA_ROUNDS_LARGE`、従来モードのみ)。大きな問題で `rounds` 回のラウンドを終えても
+    // 不動点に達していなければ、伝播パス数を `PROPAGATION_PASSES_LARGE` に上げてこの回数まで続ける。
+    let extra_rounds = if large && !fixpoint_mode { tunable!("ENOMOTO_T_PRESOLVE_EXTRA_ROUNDS_LARGE", PRESOLVE_EXTRA_ROUNDS_LARGE, usize) } else { 0 };
+    // 外側ラウンド数の上限 (不動点モードでは作業量の予算だけで打ち切る)。
+    let max_rounds = if fixpoint_mode { usize::MAX } else { rounds.max(1) + extra_rounds };
+    let mut prop_passes = prop_passes;
+    // 延長の判定用 (大きな問題のみ): 直前のラウンド終了時の構造 (A の行数, G の多変数行数, 固定列数, ログ長) と、
+    // 最後のラウンドで構造が変わったか。上下限だけが少しずつ締まり続ける問題 (neos) は延長しない。
+    let mut ext_prev_struct: Option<(usize, usize, usize, usize)> = None;
+    let mut ext_last_round_structural = false;
+    let ineq_singleton_on = match env_str!("ENOMOTO_INEQ_SINGLETON") {
+        Some(v) => v != "0",
+        None => large && tunable!("ENOMOTO_T_INEQ_SINGLETON_LARGE", INEQ_SINGLETON_LARGE, usize) != 0,
+    };
 
     // 全消去ステップの時系列ログ。
     let mut postsolve_log: Vec<PostsolveStep> = Vec::new();
@@ -374,18 +437,44 @@ pub fn run_extended(
     let split_enabled = tunable!("ENOMOTO_T_PRESOLVE_SPLIT_G", PRESOLVE_SPLIT_G, usize) != 0;
     // 次ラウンドの伝播に渡す分離形式 G (多変数行, 右辺, lb, ub)。最初はループ前の抽出結果。
     let mut carry: Option<(Vec<Vec<(usize, f64)>>, Vec<f64>, Vec<f64>, Vec<f64>)> = Some((first_rows, first_rhs, first_lb, first_ub));
+    // `ENOMOTO_DEBUG_PRESOLVE_ROUNDS`: 外側ラウンドごとの縮約と伝播のパス数、打ち切り理由を stderr に出す。
+    let debug_rounds = env_str!("ENOMOTO_DEBUG_PRESOLVE_ROUNDS").is_some();
+    // 外側ループを抜けた理由 (表示用)。
+    let mut stop_reason = "cap";
+    // 実行した外側ラウンド数 (表示用)。
+    let mut rounds_done = 0usize;
     // 外側ラウンドループ。
-    for round_idx in 0..rounds.max(1) {
+    for round_idx in 0..max_rounds {
+        if work_used >= work_budget {
+            stop_reason = "budget";
+            break;
+        }
+        rounds_done = round_idx + 1;
+        if !fixpoint_mode && round_idx == rounds.max(1) {
+            // 通常のラウンド数を使い切っても不動点に達していない (大きな問題のみここに来る)。最後のラウンドでも
+            // 行・列の縮約が進んでいれば、上下限伝播が 1 ラウンドに数段しか進まない連鎖が残っているので、パス数を
+            // 上げて延長する。上下限の変化だけなら従来どおりここで止める。
+            if !ext_last_round_structural {
+                stop_reason = "cap(bounds-only)";
+                break;
+            }
+            prop_passes = prop_passes.max(tunable!("ENOMOTO_T_PROPAGATION_PASSES_LARGE", PROPAGATION_PASSES_LARGE, usize));
+        }
         let prop = timed_step!(
             "propagate",
             match carry.take() {
-                Some((rows, rhs, clb, cub)) => propagate::propagate_split(n, clb, cub, rows, rhs, prop_passes),
-                None => propagate::propagate_without_g_rebuild(n, &g, &h, prop_passes),
+                Some((rows, rhs, clb, cub)) => propagate::propagate_split(n, clb, cub, rows, rhs, pass_limit(prop_passes, work_used)),
+                None => propagate::propagate_without_g_rebuild(n, &g, &h, pass_limit(prop_passes, work_used)),
             }
         );
         if prop.infeasible {
             return extended_infeasible(sc, a, b, c, n);
         }
+        work_used = work_used.saturating_add(prop.work);
+        // 表示用: この回の伝播のパス数と、変化のないパスで止まったか。
+        let (dbg_prop_passes, dbg_prop_converged) = (prop.passes_used, prop.converged);
+        // 表示用: 等式行伝播が変化のないパスで止まったか (実行しなければ `None`)。
+        let mut dbg_eq_converged: Option<bool> = None;
         let mut lb = prop.lb;
         let mut ub = prop.ub;
         // 現在の G の多変数行とその右辺。代入による行の書き換えを反映して随時更新する。
@@ -423,12 +512,47 @@ pub fn run_extended(
         // `EQPROP_ROUNDS` ラウンドだけ実行する。`EQPROP_SKIP_IDLE` が有効なら、
         // 何も見つからなかった時点で以降のラウンドを省略する (結果が変わりうる)。
         if round_idx < tunable!("ENOMOTO_T_EQPROP_ROUNDS", EQPROP_ROUNDS, usize) && !eqprop_idle {
-            let eq = timed_step!("eqprop", propagate::propagate_equalities(&a, &b, &mut lb, &mut ub, prop_passes));
+            // 等式行伝播は不動点モードでも従来どおり `prop_passes` パスまで (`EQPROP_FIXPOINT` 参照)。
+            let eq_limit = if tunable!("ENOMOTO_T_EQPROP_FIXPOINT", EQPROP_FIXPOINT, usize) != 0 { pass_limit(prop_passes, work_used) } else { propagate::PassLimit::fixed(prop_passes) };
+            let eq = timed_step!("eqprop", propagate::propagate_equalities(&a, &b, &mut lb, &mut ub, eq_limit));
             if eq.infeasible {
                 return extended_infeasible(sc, a, b, c, n);
             }
+            work_used = work_used.saturating_add(eq.work);
+            dbg_eq_converged = Some(eq.converged);
             if tunable!("ENOMOTO_T_EQPROP_SKIP_IDLE", EQPROP_SKIP_IDLE, usize) != 0 && eq.forcing_rows == 0 && eq.fixed_cols == 0 && eq.tightened == 0 {
                 eqprop_idle = true;
+            }
+        }
+
+        // 符号を反転しただけで右辺が釣り合う不等式行の組 (等式を 2 本の `<=` で表したもの) を等式 1 本にして A へ移す
+        // (不動点モードのみ、`OPPOSITE_PAIR_EQUALITY`)。
+        if fixpoint_mode && tunable!("ENOMOTO_T_OPPOSITE_PAIR_EQUALITY", OPPOSITE_PAIR_EQUALITY, usize) != 0 {
+            let pairs = timed_step!("oppositepairs", redundancy::find_opposite_equality_pairs(&cur_real_rows, &cur_real_rhs, crate::params::presolve::PROPAGATE_EPS));
+            if debug_rounds && !pairs.is_empty() {
+                eprintln!("PRESOLVE_OPPOSITE_PAIRS round={} pairs={}", round_idx, pairs.len());
+            }
+            if !pairs.is_empty() {
+                let mut a_rows: Vec<Vec<(usize, f64)>> = csr_rows(&a);
+                // G から取り除く多変数行の印 (等式にした行とその相方)。
+                let mut drop = vec![false; cur_real_rows.len()];
+                for &(p, q) in &pairs {
+                    a_rows.push(cur_real_rows[p].clone());
+                    b.push(cur_real_rhs[p]);
+                    drop[p] = true;
+                    drop[q] = true;
+                }
+                a = csr_from_rows(&a_rows, n);
+                let mut kept_rows = Vec::with_capacity(cur_real_rows.len());
+                let mut kept_rhs = Vec::with_capacity(cur_real_rhs.len());
+                for (i, (row, rhs)) in cur_real_rows.into_iter().zip(cur_real_rhs.into_iter()).enumerate() {
+                    if !drop[i] {
+                        kept_rows.push(row);
+                        kept_rhs.push(rhs);
+                    }
+                }
+                cur_real_rows = kept_rows;
+                cur_real_rhs = kept_rhs;
             }
         }
 
@@ -485,9 +609,9 @@ pub fn run_extended(
             }
         }
 
-        // 不等式行の列シングルトン (`ineqsingleton`、`ENOMOTO_INEQ_SINGLETON` 設定時のみ):
+        // 不等式行の列シングルトン (`ineqsingleton`、大きな問題か `ENOMOTO_INEQ_SINGLETON` 設定時):
         // 列を上下限に固定するか、その行を等式に変えて後段の colsingleton に消去させる。
-        if env_str!("ENOMOTO_INEQ_SINGLETON").is_some() {
+        if ineq_singleton_on {
             let isr = timed_step!("ineqsingleton", ineqsingleton::resolve_inequality_singletons(n, &a, &cur_real_rows, &cur_real_rhs, &c, &lb, &ub));
             if env_str!("ENOMOTO_DEBUG_INEQ_SINGLETON").is_some() {
                 eprintln!("DEBUG_INEQ_SINGLETON: fixes={} implied_equalities={}", isr.fixes.len(), isr.implied_equalities.len());
@@ -736,7 +860,9 @@ pub fn run_extended(
             timed_step!("aggregator", aggregator::eliminate_implied_free_columns_if_any(n, &a, &b, &c, &lb, &ub, &cur_real_rows, &cur_real_rhs))
         } else {
             // 既定の v2 実装。`None` = 候補なし (問題をコピーせずに判定)。
-            timed_step!("aggregator", aggregator::eliminate_implied_free_columns_v2_if_any(n, &a, &b, &c, &lb, &ub, &cur_real_rows, &cur_real_rhs, aggregator::AggOptions::from_env()))
+            // 作業 #10 (D): ピボット比は均衡化前の係数で判定する (`ENOMOTO_T_AGG_PIVOT_UNSCALED=0` で旧版)。
+            let col_scale: &[f64] = if tunable!("ENOMOTO_T_AGG_PIVOT_UNSCALED", 1u8, u8) != 0 { &sc.d } else { &[] };
+            timed_step!("aggregator", aggregator::eliminate_implied_free_columns_v2_if_any_scaled(n, &a, &b, &c, &lb, &ub, &cur_real_rows, &cur_real_rhs, aggregator::AggOptions::from_env(), col_scale))
         };
         if let Some(agg) = agg {
             if env_str!("ENOMOTO_DEBUG_AGGREGATOR").is_some() {
@@ -805,9 +931,10 @@ pub fn run_extended(
             h = rh;
         }
 
-        // `ROUND_STRUCT_STOP` 有効時 (既定オフ): 構造 (A の行数, G の多変数行数, 固定列数,
-        // ログ長) が前ラウンドと同じなら、上下限の値の変化を無視して打ち切る。
-        let struct_stop = if tunable!("ENOMOTO_T_ROUND_STRUCT_STOP", ROUND_STRUCT_STOP, usize) != 0 {
+        // 構造 (A の行数, G の多変数行数, 固定列数, ログ長) が前ラウンドと同じなら、上下限の値の変化を無視して
+        // 打ち切る (不動点モードでは既定で有効 `ROUND_STRUCT_STOP_FIXPOINT`、従来モードでは `ROUND_STRUCT_STOP`)。
+        let struct_stop_default = if fixpoint_mode { ROUND_STRUCT_STOP_FIXPOINT } else { ROUND_STRUCT_STOP };
+        let struct_stop = if tunable!("ENOMOTO_T_ROUND_STRUCT_STOP", struct_stop_default, usize) != 0 {
             let g_multi = if g_split {
                 cur_real_rows.len()
             } else {
@@ -824,11 +951,49 @@ pub fn run_extended(
         };
 
         // 外側ループの不動点判定用の状態。分離形式なら次ラウンドへ `carry` で渡す。
+        if extra_rounds > 0 {
+            let g_multi = if g_split {
+                cur_real_rows.len()
+            } else {
+                let gr = g.as_ref();
+                (0..gr.nrows()).filter(|&i| gr.col_indices_of_row_raw(i).len() > 1).count()
+            };
+            let st = (a.nrows(), g_multi, (0..n).filter(|&j| lb[j] == ub[j]).count(), postsolve_log.len());
+            ext_last_round_structural = ext_prev_struct.is_some_and(|p| p != st);
+            ext_prev_struct = Some(st);
+        }
+        // このラウンドの伝播以外の段の作業量 (各段はほぼ非零数に比例する)。
+        let round_nnz = a.compute_nnz() + if g_split { cur_real_rows.iter().map(|r| r.len()).sum::<usize>() } else { g.compute_nnz() } + n;
+        work_used = work_used.saturating_add(round_nnz);
+        if debug_rounds {
+            let g_multi = if g_split {
+                cur_real_rows.len()
+            } else {
+                let gr = g.as_ref();
+                (0..gr.nrows()).filter(|&i| gr.col_indices_of_row_raw(i).len() > 1).count()
+            };
+            let fixed = (0..n).filter(|&j| lb[j] == ub[j]).count();
+            eprintln!(
+                "PRESOLVE_ROUND {} a_rows={} g_multi={} fixed={} log={} prop_passes={} prop_conv={} eq_conv={:?} work={} budget={} t={:.1}ms",
+                round_idx,
+                a.nrows(),
+                g_multi,
+                fixed,
+                postsolve_log.len(),
+                dbg_prop_passes,
+                dbg_prop_converged,
+                dbg_eq_converged,
+                work_used,
+                work_budget,
+                wall_t0.elapsed().as_secs_f64() * 1e3
+            );
+        }
         let signature = (a.nrows(), g_view!().nrows(), lb.clone(), ub.clone());
         if g_split {
             carry = Some((cur_real_rows, cur_real_rhs, lb, ub));
         }
         if struct_stop {
+            stop_reason = "struct_stop";
             break;
         }
         // 相対 `FIXPOINT_RELTOL` 未満の上下限変化は進展とみなさない (巡回的な行構造で
@@ -842,6 +1007,7 @@ pub fn run_extended(
             p.0 == signature.0 && p.1 == signature.1 && close(&p.2, &signature.2) && close(&p.3, &signature.3)
         };
         if prev_signature.as_ref().is_some_and(same) {
+            stop_reason = "fixpoint";
             break;
         }
         prev_signature = Some(signature);
@@ -863,12 +1029,22 @@ pub fn run_extended(
     let prop = timed_step!(
         "final propagate",
         match carry.take() {
-            Some((rows, rhs, clb, cub)) => propagate::propagate_split(n, clb, cub, rows, rhs, prop_passes),
-            None => propagate::propagate_without_g_rebuild(n, &g, &h, prop_passes),
+            Some((rows, rhs, clb, cub)) => propagate::propagate_split(n, clb, cub, rows, rhs, pass_limit(prop_passes, work_used)),
+            None => propagate::propagate_without_g_rebuild(n, &g, &h, pass_limit(prop_passes, work_used)),
         }
     );
     if profile {
         eprintln!("PROF_PRESOLVE total {:.3}ms", wall_t0.elapsed().as_secs_f64() * 1e3);
+    }
+    if debug_rounds {
+        eprintln!(
+            "PRESOLVE_ROUNDS_END rounds={} reason={} final_prop_passes={} final_prop_conv={} t={:.1}ms",
+            rounds_done,
+            stop_reason,
+            prop.passes_used,
+            prop.converged,
+            wall_t0.elapsed().as_secs_f64() * 1e3
+        );
     }
     if prop.infeasible {
         return ExtendedPresolveResult {
@@ -942,7 +1118,10 @@ pub fn run_extended(
 
     if env_str!("ENOMOTO_DEBUG_PRESOLVE_HASH").is_some() {
         let (g, h) = propagate::rebuild_g_ref(n, &free.real_rows, &free.real_rhs, &lb, &ub);
-        eprintln!("PRESOLVE_HASH {:016x} m_eq={} m_le={} post={}", presolve_output_hash(&a, &b, &g, &h, &c, &lb, &ub), a.nrows(), g.nrows(), postsolve_log.len());
+        // 等式行の非零数・多変数の不等式行の本数と非零数 (前処理後の問題の形の比較用)。
+        let nnz_eq = a.compute_nnz();
+        let (n_multi, nnz_multi) = free.real_rows.iter().filter(|r| r.len() > 1).fold((0usize, 0usize), |(k, z), r| (k + 1, z + r.len()));
+        eprintln!("PRESOLVE_HASH {:016x} m_eq={} m_le={} post={} nnz_eq={nnz_eq} multi_le={n_multi} nnz_multi_le={nnz_multi}", presolve_output_hash(&a, &b, &g, &h, &c, &lb, &ub), a.nrows(), g.nrows(), postsolve_log.len());
     }
 
     ExtendedPresolveResult {

@@ -1396,3 +1396,69 @@ fn reduce_inequalities_reference(g: &FaerCsr, h: &[f64], n: usize) -> (FaerCsr, 
     }
     (csr_from_rows(&new_rows, n), new_h)
 }
+
+/// 互いに符号を反転しただけで右辺が釣り合う多変数の `<=` 行の組 (`a.x <= u` と `-a.x <= -u`、つまり等式
+/// `a.x = u` を 2 本の不等式で表したもの) を探す。
+///
+/// 各行を先頭係数 (符号付き) で割った正規化シグネチャがビット単位で一致し、先頭係数の符号が逆で、正規化後の
+/// 右辺 (`h / 先頭係数`。正の組では上限、負の組では下限になる) の差が `tol * (1 + |u|)` 以下の組を返す。
+/// 戻り値の各組 `(p, q)` は `p` が先頭係数正の行 (等式として残す側)、`q` がその相方。各行は高々 1 組にしか入らない。
+/// 幅が正の組 (範囲制約) は対象外 (範囲制約への併合は ex10 で経路が変わって大きく退行した。改良履歴メモ参照)。
+pub fn find_opposite_equality_pairs(rows: &[Vec<(usize, f64)>], rhs: &[f64], tol: f64) -> Vec<(usize, usize)> {
+    #[inline]
+    fn mix(hash: u64, x: u64) -> u64 {
+        (hash.rotate_left(5) ^ x).wrapping_mul(0x517c_c1b7_2722_0a95)
+    }
+    // 正規化シグネチャのハッシュ -> その値を持つ、まだ組になっていない行の添字
+    let mut buckets: HashMap<u64, Vec<usize>, std::hash::BuildHasherDefault<IdentityU64Hasher>> = HashMap::with_capacity_and_hasher(rows.len(), Default::default());
+    let mut pairs = Vec::new();
+    for (idx, row) in rows.iter().enumerate() {
+        if row.len() < 2 || row[0].1 == 0.0 {
+            continue;
+        }
+        let inv = 1.0 / row[0].1;
+        let mut hash = row.len() as u64;
+        for &(j, v) in row {
+            hash = mix(mix(hash, j as u64), (v * inv).to_bits());
+        }
+        let norm_h = rhs[idx] * inv;
+        let bucket = buckets.entry(hash).or_default();
+        // 同じシグネチャで先頭係数の符号が逆、右辺が釣り合う相方
+        let partner = bucket.iter().position(|&k| {
+            let other = &rows[k];
+            let kinv = 1.0 / other[0].1;
+            (other[0].1 > 0.0) != (row[0].1 > 0.0)
+                && other.len() == row.len()
+                && other.iter().zip(row).all(|(&(oj, ov), &(j, v))| oj == j && (ov * kinv).to_bits() == (v * inv).to_bits())
+                && (rhs[k] * kinv - norm_h).abs() <= tol * (1.0 + norm_h.abs())
+        });
+        match partner {
+            Some(pos) => {
+                let k = bucket.swap_remove(pos);
+                if row[0].1 > 0.0 { pairs.push((idx, k)) } else { pairs.push((k, idx)) }
+            }
+            None => bucket.push(idx),
+        }
+    }
+    pairs
+}
+
+#[cfg(test)]
+mod opposite_pair_tests {
+    use super::*;
+
+    /// `x0 + 2 x1 <= 3` と `-2 x0 - 4 x1 <= -6` は等式の組、幅のある組・同符号の組は対象外。
+    #[test]
+    fn finds_only_zero_width_opposite_pairs() {
+        let rows = vec![
+            vec![(0, 1.0), (1, 2.0)],
+            vec![(0, -2.0), (1, -4.0)],
+            vec![(0, 1.0), (2, 1.0)],
+            vec![(0, -1.0), (2, -1.0)],
+            vec![(1, 1.0), (2, 1.0)],
+            vec![(1, 2.0), (2, 2.0)],
+        ];
+        let rhs = vec![3.0, -6.0, 5.0, -4.0, 1.0, 2.0];
+        assert_eq!(find_opposite_equality_pairs(&rows, &rhs, 1e-9), vec![(0, 1)]);
+    }
+}

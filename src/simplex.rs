@@ -746,14 +746,9 @@ impl<'a> Tableau<'a> {
 
 }
 
-/// 双対法の退化対策としての費用摂動 (HiGHS `HEkk::initialiseCost` と同じ方式)。
-///
-/// 摂動の大きさは最大費用の絶対値に比例 (大きすぎれば 4 乗根で減衰、箱型列が
-/// ごく少なければ上限を設ける)。各列の摂動は `(1 + r) * (|c_j| + 1) * base`
-/// (`r` は列番号のハッシュによる [0, 1) の擬似乱数) で、双対実行可能側を変えない向きに加える:
-/// 固定列・自由列はそのまま、片側有限列は欠けている上下限から遠ざかる向き、
-/// 箱型列は元の費用の符号の向き。摂動後の費用ベクトルを返す。
-fn perturb_costs(std: &StdForm) -> Vec<f64> {
+/// [`perturb_costs`] の基準の大きさ `COST_PERTURB_BASE * (減衰・頭打ち後の最大費用)`。
+/// 双対単体法の費用シフト (作業 #8、`slope_intercept_dual`) も同じ大きさを使う。
+fn cost_perturb_base(std: &StdForm) -> f64 {
     let n = std.n_total;
     let mut max_abs_cost = std.c.iter().fold(0.0f64, |acc, &c| acc.max(c.abs()));
     if max_abs_cost > COST_PERTURB_LARGE_COST {
@@ -769,7 +764,45 @@ fn perturb_costs(std: &StdForm) -> Vec<f64> {
     if max_abs_cost == 0.0 {
         max_abs_cost = COST_PERTURB_ZERO_COST_SCALE;
     }
-    let base = COST_PERTURB_BASE * max_abs_cost; // 摂動の基準の大きさ
+    COST_PERTURB_BASE * max_abs_cost
+}
+
+/// 列番号 `j` の splitmix64 風ハッシュから作る [0, 1) の擬似乱数 (費用摂動・費用シフトの列ごとの揺らぎ)。
+fn perturb_random(j: usize) -> f64 {
+    let mut h = (j as u64).wrapping_add(0x9E37_79B9_7F4A_7C15);
+    h = (h ^ (h >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    h = (h ^ (h >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    h ^= h >> 31;
+    (h >> 40) as f64 / (1u64 << 24) as f64
+}
+
+thread_local! {
+    /// 作業 #8 対処 5: 真なら [`perturb_costs`] は試験用の縮小 (`ENOMOTO_T_PERTURB_*FACTOR`) を無視して既定の大きさで
+    /// 摂動する (双対単体法が壊れた基底から解き直すとき)。
+    static FULL_COST_PERTURBATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// [`FULL_COST_PERTURBATION`] を設定する。
+pub(crate) fn set_full_cost_perturbation(on: bool) {
+    FULL_COST_PERTURBATION.with(|f| f.set(on));
+}
+
+/// 双対法の退化対策としての費用摂動 (HiGHS `HEkk::initialiseCost` と同じ方式)。
+///
+/// 摂動の大きさは最大費用の絶対値に比例 (大きすぎれば 4 乗根で減衰、箱型列が
+/// ごく少なければ上限を設ける)。各列の摂動は `(1 + r) * (|c_j| + 1) * base`
+/// (`r` は列番号のハッシュによる [0, 1) の擬似乱数) で、双対実行可能側を変えない向きに加える:
+/// 固定列・自由列はそのまま、片側有限列は欠けている上下限から遠ざかる向き、
+/// 箱型列は元の費用の符号の向き。摂動後の費用ベクトルを返す。
+fn perturb_costs(std: &StdForm) -> Vec<f64> {
+    let n = std.n_total;
+    let base = cost_perturb_base(std); // 摂動の基準の大きさ
+    // 試験用の縮小係数 (下のループ参照)。解き直しでは使わない。
+    let (factor, zero_cost_factor) = if FULL_COST_PERTURBATION.with(|f| f.get()) {
+        (1.0, 1.0)
+    } else {
+        (tunable!("ENOMOTO_T_PERTURB_FACTOR", 1.0, f64), tunable!("ENOMOTO_T_PERTURB_ZERO_COST_FACTOR", 1.0, f64))
+    };
 
     let mut pc = std.c.clone(); // 摂動後の費用
     for j in 0..n {
@@ -781,14 +814,18 @@ fn perturb_costs(std: &StdForm) -> Vec<f64> {
             continue;
         }
 
-        // 列番号 j の splitmix64 風ハッシュから [0, 1) の擬似乱数 r を作る。
-        let mut h = (j as u64).wrapping_add(0x9E37_79B9_7F4A_7C15);
-        h = (h ^ (h >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        h = (h ^ (h >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        h ^= h >> 31;
-        let r = (h >> 40) as f64 / (1u64 << 24) as f64;
-
-        let xpert = (1.0 + r) * (pc[j].abs() + 1.0) * base; // この列の摂動量
+        let r = perturb_random(j);
+        let mut xpert = (1.0 + r) * (pc[j].abs() + 1.0) * base; // この列の摂動量
+        // 作業 #8 対処 1: 列ごとの摂動は基準の大きさを割らない (摂動を縮める変更をするときもこの下限を守る。
+        // 費用 0 の列の摂動を 0 にした案 E で pilot87 が誤って infeasible を返した)。
+        debug_assert!(xpert >= base, "cost perturbation of column {j} fell below the floor");
+        // 試験用 (作業 #8、既定は係数 1 = 無効): 摂動の大きさを変えて、摂動が小さい・無いときの正しさを試す
+        // (`scripts/singular_stress.py` の z0/p0 などの設定)。`ENOMOTO_T_PERTURB_FACTOR`: 全列の摂動を係数倍
+        // (0 で摂動なし)。`ENOMOTO_T_PERTURB_ZERO_COST_FACTOR`: 費用 0 の列だけ係数倍。
+        xpert *= factor;
+        if pc[j] == 0.0 {
+            xpert *= zero_cost_factor;
+        }
         if !hi.is_finite() {
             pc[j] += xpert;
         } else if !lo.is_finite() {
@@ -1172,6 +1209,8 @@ fn run_phase2_incremental(std: &StdForm, t: &mut Tableau, lu: &mut sparse_lu::Ft
     let harris = tunable!("ENOMOTO_T_PRIMAL_HARRIS_TOL", PRIMAL_HARRIS_TOL, f64);
     let bump_limit = tunable!("ENOMOTO_T_FT_BUMP_LIMIT_FACTOR", FT_BUMP_LIMIT_FACTOR, usize) * m.max(1);
     let use_devex = tunable!("ENOMOTO_HANDOFF_INC_DEVEX", 1u8, u8) != 0;
+    // cont1 策3 の比率テストを旧版に戻す (A/B 用)。
+    let ratio_old = tunable!("ENOMOTO_HANDOFF_RATIO_OLD", 0u8, u8) != 0;
     let mut expand = ExpandState::new();
 
     let mut gamma: Vec<f64> = if use_devex { vec![1.0; n] } else { SteepestEdgeState::new(std).gamma }; // 最急辺 (または Devex) 重み
@@ -1289,7 +1328,17 @@ fn run_phase2_incremental(std: &StdForm, t: &mut Tableau, lu: &mut sparse_lu::Ft
         t.column_into(enter, &mut a_enter);
         lu.solve_into(&a_enter, &mut scratch, &mut alpha);
 
-        // 比率テスト: `run_phase` の第 2 段階と同じ Harris/EXPAND 2 パス。
+        // 比率テスト: EXPAND 2 パス (Gill et al. 1989)。
+        //
+        // cont1 策3: 旧版 (`ENOMOTO_HANDOFF_RATIO_OLD=1`) は `run_phase` の第 2 段階と同じく
+        // パス 2 の窓を `exact <= alpha1 + PRIMAL_HARRIS_TOL` (ステップ長の絶対値) にしていたので、
+        // 窓の中の他の行の行き過ぎが `harris * |alpha_i|` になり、`B^-1` が密で `|alpha|` が 100 級の
+        // cont1 では 1e-5〜1e-3 の上下限違反を作って非基底化していた。EXPAND の緩め幅 `delta` が
+        // すでに変数空間の許容幅なので、パス 2 は `exact <= alpha1` (追加の窓なし) にする
+        // (他の行の行き過ぎは `delta` に収まる)。出る変数自身の行き過ぎは下の「出る変数を境界へ」で扱う。
+        // 報告の案にあった「すでに外れた基底変数は戻る向きだけブロックする」(`run_phase` の第 1 段階の
+        // 規則) も試したが、cont1 の引き継ぎが 2,213 → 4,123 反復に増えた (違反を深める向きで
+        // ブロックしないので外れた変数がさらに外れ、最後の双対ループの仕事も増える) ので採らない。
         let self_width = std.ub[enter] - std.lb[enter];
         let init_alpha1 = if self_width.is_finite() { self_width } else { f64::INFINITY };
         candidates.clear();
@@ -1310,7 +1359,8 @@ fn run_phase2_incremental(std: &StdForm, t: &mut Tableau, lu: &mut sparse_lu::Ft
             candidates.push(Candidate { row: i, exact, relaxed, pivot_abs: alpha[i].abs(), hits_upper: is_upper });
         }
         let alpha1 = candidates.iter().map(|c| c.relaxed).fold(init_alpha1, f64::min);
-        let admitted = candidates.iter().filter(|c| c.exact <= alpha1 + harris);
+        let window = if ratio_old { harris } else { 0.0 };
+        let admitted = candidates.iter().filter(|c| c.exact <= alpha1 + window);
         let leaving = if stall.bland_mode { admitted.min_by_key(|c| t.basis[c.row]) } else { admitted.max_by(|a, b| a.pivot_abs.total_cmp(&b.pivot_abs)) };
         let (leaving_row, leaving_hits_upper, alpha2, best_pivot_mag) = match leaving {
             Some(c) if c.pivot_abs > 0.0 => (Some(c.row), c.hits_upper, c.exact, c.pivot_abs),
@@ -1386,6 +1436,19 @@ fn run_phase2_incremental(std: &StdForm, t: &mut Tableau, lu: &mut sparse_lu::Ft
         t.basis[r] = enter;
         t.basis_pos[enter] = Some(r);
         t.nb_status[enter] = None;
+        // cont1 策3: 出る変数が EXPAND の許容幅 `delta` を超えて上下限を外れたまま非基底になる
+        // (すでに外れていた基底変数が出る場合や、最小ステップ `EXPAND_TAU / |pivot|` がピボットの
+        // 小さい行で大きくなる場合) なら、境界に置き直して次の反復の頭で `x_B` を作り直す
+        // (HiGHS の主単体法と同じく出る変数は境界に置く。`delta` 以内の外れは従来どおり
+        // `expand_reset_nonbasics` に任せるので、通常の反復は変わらない)。旧版はこの値のまま
+        // 非基底に残し、`expand_reset_nonbasics` も 1e-6 を超える外れは戻さないので、外れが残り続けた。
+        if !ratio_old {
+            let bound = if leaving_hits_upper { std.ub[leaving_var] } else { std.lb[leaving_var] };
+            if (t.x[leaving_var] - bound).abs() > expand.delta {
+                t.x[leaving_var] = bound;
+                need_fresh = true;
+            }
+        }
 
         for &j in &touched_cols {
             if t.nb_status[j].is_some() {
@@ -1686,13 +1749,16 @@ impl DseState {
     /// 計算し直す (保持値のドリフトが全行に伝播するのを防ぐ)。
     fn update_after_pivot(&mut self, p: usize, alpha: &[f64], tau: &[f64], rho_p: &[f64]) {
         let pivot = alpha[p];
-        let wp_old = rho_p.iter().map(|v| v * v).sum::<f64>().max(tunable!("ENOMOTO_T_STEEPEST_EDGE_FLOOR", STEEPEST_EDGE_FLOOR, f64));
+        // 作業 #10 (J): 下限は関数の入口で 1 回だけ読む (ループ内の `tunable!` は `OnceLock` の atomic 読み出しで、
+        // 毎要素の分岐とベクトル化の妨げになっていた)。値は同じ。
+        let floor = tunable!("ENOMOTO_T_STEEPEST_EDGE_FLOOR", STEEPEST_EDGE_FLOOR, f64);
+        let wp_old = rho_p.iter().map(|v| v * v).sum::<f64>().max(floor);
         let update_one = |i: usize, w_i: &mut f64| {
             if i == p {
                 return;
             }
             let ratio = alpha[i] / pivot;
-            *w_i = (*w_i - 2.0 * ratio * tau[i] + ratio * ratio * wp_old).max(tunable!("ENOMOTO_T_STEEPEST_EDGE_FLOOR", STEEPEST_EDGE_FLOOR, f64));
+            *w_i = (*w_i - 2.0 * ratio * tau[i] + ratio * ratio * wp_old).max(floor);
         };
         if self.use_parallel {
             use rayon::prelude::*;
@@ -1703,10 +1769,10 @@ impl DseState {
             let m = self.w.len();
             for ((w_i, &a_i), &t_i) in self.w.iter_mut().zip(&alpha[..m]).zip(&tau[..m]) {
                 let ratio = a_i / pivot;
-                *w_i = (*w_i - 2.0 * ratio * t_i + ratio * ratio * wp_old).max(tunable!("ENOMOTO_T_STEEPEST_EDGE_FLOOR", STEEPEST_EDGE_FLOOR, f64));
+                *w_i = (*w_i - 2.0 * ratio * t_i + ratio * ratio * wp_old).max(floor);
             }
         }
-        self.w[p] = (wp_old / (pivot * pivot)).max(tunable!("ENOMOTO_T_STEEPEST_EDGE_FLOOR", STEEPEST_EDGE_FLOOR, f64));
+        self.w[p] = (wp_old / (pivot * pivot)).max(floor);
     }
 
     /// [`Self::update_after_pivot`] を `rows` (alpha の非零行を含む任意順の行集合) に
@@ -1736,40 +1802,46 @@ impl DseState {
 pub(super) struct InfeasibleRows {
     /// 現在実行不能な行番号 (順不同)。
     pub(super) rows: Vec<usize>,
-    /// `pos[i] == Some(k)` ⇔ `rows[k] == i` (O(1) の所属判定と削除用)。
-    pos: Vec<Option<usize>>,
+    /// `pos[i] == k` ⇔ `rows[k] == i`、集合外なら [`INFEASIBLE_ROWS_NONE`] (O(1) の所属判定と削除用)。
+    /// `Option<usize>` (16 バイト) ではなく `u32` にして、`x_B` 更新で全行を走査する問題
+    /// (ex10: 1 反復 5 万行) のメモリ量を減らす。
+    pos: Vec<u32>,
 }
+
+/// [`InfeasibleRows::pos`] の「集合外」の印。
+const INFEASIBLE_ROWS_NONE: u32 = u32::MAX;
 
 impl InfeasibleRows {
     /// m 行分の空の集合を作る。
     pub(super) fn new(m: usize) -> Self {
-        InfeasibleRows { rows: Vec::new(), pos: vec![None; m] }
+        assert!(m < INFEASIBLE_ROWS_NONE as usize, "InfeasibleRows: too many rows for u32 positions");
+        InfeasibleRows { rows: Vec::new(), pos: vec![INFEASIBLE_ROWS_NONE; m] }
     }
 
     /// 行 `i` の所属を `infeasible` に設定する (既にその状態なら何もしない)。O(1)。
     pub(super) fn set(&mut self, i: usize, infeasible: bool) {
-        match (infeasible, self.pos[i]) {
-            (true, None) => {
-                self.pos[i] = Some(self.rows.len());
+        let p = self.pos[i];
+        if infeasible {
+            if p == INFEASIBLE_ROWS_NONE {
+                self.pos[i] = self.rows.len() as u32;
                 self.rows.push(i);
             }
-            (false, Some(idx)) => {
-                let last = self.rows.len() - 1;
-                self.rows.swap(idx, last);
-                self.rows.pop();
-                if idx < self.rows.len() {
-                    self.pos[self.rows[idx]] = Some(idx);
-                }
-                self.pos[i] = None;
+        } else if p != INFEASIBLE_ROWS_NONE {
+            let idx = p as usize;
+            let last = self.rows.len() - 1;
+            self.rows.swap(idx, last);
+            self.rows.pop();
+            if idx < self.rows.len() {
+                self.pos[self.rows[idx]] = idx as u32;
             }
-            _ => {}
+            self.pos[i] = INFEASIBLE_ROWS_NONE;
         }
     }
 
     /// 行 `i` が集合に含まれるか。
     #[inline]
     pub(super) fn contains(&self, i: usize) -> bool {
-        self.pos[i].is_some()
+        self.pos[i] != INFEASIBLE_ROWS_NONE
     }
 
     /// 述語 `pred(i)` (行 i が実行不能か) で集合を O(m) で作り直す。多数の行の `x_B` を
@@ -1778,10 +1850,10 @@ impl InfeasibleRows {
         self.rows.clear();
         for i in 0..m {
             if pred(i) {
-                self.pos[i] = Some(self.rows.len());
+                self.pos[i] = self.rows.len() as u32;
                 self.rows.push(i);
             } else {
-                self.pos[i] = None;
+                self.pos[i] = INFEASIBLE_ROWS_NONE;
             }
         }
     }

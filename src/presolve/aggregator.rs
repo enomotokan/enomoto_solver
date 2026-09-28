@@ -657,10 +657,15 @@ impl AggOptions {
 /// 前段判定は v2 の候補判定と同じ浮動小数点演算順序で行うので、
 /// `Some` の結果は v2 を直接呼んだ場合と同一で、`None` は v2 が何も消去しない場合に限る。
 pub fn eliminate_implied_free_columns_v2_if_any(n: usize, a: &FaerCsr, b: &[f64], c: &[f64], lb: &[f64], ub: &[f64], real_rows: &[Vec<(usize, f64)>], real_rhs: &[f64], opts: AggOptions) -> Option<AggregatorResult> {
+    eliminate_implied_free_columns_v2_if_any_scaled(n, a, b, c, lb, ub, real_rows, real_rhs, opts, &[])
+}
+
+/// [`eliminate_implied_free_columns_v2_if_any`] の列スケール付き版 ([`eliminate_implied_free_columns_v2_scaled`] 参照)。
+pub fn eliminate_implied_free_columns_v2_if_any_scaled(n: usize, a: &FaerCsr, b: &[f64], c: &[f64], lb: &[f64], ub: &[f64], real_rows: &[Vec<(usize, f64)>], real_rhs: &[f64], opts: AggOptions, col_scale: &[f64]) -> Option<AggregatorResult> {
     if !v2_has_candidate(n, a, b, lb, ub, real_rows, real_rhs, opts) {
         return None;
     }
-    Some(eliminate_implied_free_columns_v2(n, a, b, c, lb, ub, real_rows, real_rhs, opts))
+    Some(eliminate_implied_free_columns_v2_scaled(n, a, b, c, lb, ub, real_rows, real_rhs, opts, col_scale))
 }
 
 /// [`eliminate_implied_free_columns_v2`] の候補リストが空でないかを判定する。
@@ -771,6 +776,18 @@ pub fn v2_has_candidate(n: usize, a: &FaerCsr, b: &[f64], lb: &[f64], ub: &[f64]
 ///
 /// 引数は [`eliminate_implied_free_columns`] と同じ + `opts`。常に結果を返す。
 pub fn eliminate_implied_free_columns_v2(n: usize, a: &FaerCsr, b: &[f64], c: &[f64], lb: &[f64], ub: &[f64], real_rows: &[Vec<(usize, f64)>], real_rhs: &[f64], opts: AggOptions) -> AggregatorResult {
+    eliminate_implied_free_columns_v2_scaled(n, a, b, c, lb, ub, real_rows, real_rhs, opts, &[])
+}
+
+/// [`eliminate_implied_free_columns_v2`] の本体。`col_scale` (空でなければ長さ `n`) は前処理の均衡化の列スケール `d`
+/// (`x = d ∘ x'`、行列の要素は `a_ij e_i d_j`)。作業 #10 (D): ピボット比の判定 (`SUBSTITUTION_PIVOT_RATIO`) を
+/// 均衡化前の係数 `a_ij ∝ a'_ij / d_j` (行スケール `e_i` は同じ行の中で共通なので消える) で行う。HiGHS の
+/// `presolve_pivot_threshold` と同じく元の係数での比で、均衡化の列スケールのばらつきだけで良いピボットを
+/// 捨てないため (pds 系は元の係数がすべて 1 だが、均衡化後は同じ行の中で 1e-3 倍以上違い、implied-free 列の
+/// 約 2 割を消去できずにいた)。空なら均衡化後の係数で判定する (旧版)。
+pub fn eliminate_implied_free_columns_v2_scaled(n: usize, a: &FaerCsr, b: &[f64], c: &[f64], lb: &[f64], ub: &[f64], real_rows: &[Vec<(usize, f64)>], real_rhs: &[f64], opts: AggOptions, col_scale: &[f64]) -> AggregatorResult {
+    // 係数 `v` (列 `k`) のピボット比判定用の大きさ。
+    let piv_mag = |k: usize, v: f64| if col_scale.is_empty() { v.abs() } else { v.abs() / col_scale[k] };
     let mut a_rows: Vec<Vec<(usize, f64)>> = csr_rows(a);
     // 全ての行 fold で共有する疎アキュムレータ。
     let mut accum = SparseAccum::new(n);
@@ -857,7 +874,7 @@ pub fn eliminate_implied_free_columns_v2(n: usize, a: &FaerCsr, b: &[f64], c: &[
         }
     }
     // 等式行ごとの係数絶対値最大値のキャッシュ (fold で `None` に戻す)。
-    let mut row_max_a: Vec<Option<f64>> = vec![None; a_rows.len()];
+    let mut row_max_a: Vec<Option<(f64, f64)>> = vec![None; a_rows.len()];
     // fill-in 計数用のスタンプ配列: `stamp[k] == stamp_id` なら列 `k` は現在の対象行に既存。
     let mut stamp = vec![usize::MAX; n];
     let mut stamp_id = 0usize;
@@ -947,8 +964,13 @@ pub fn eliminate_implied_free_columns_v2(n: usize, a: &FaerCsr, b: &[f64], c: &[
         let mut by_len = la.clone();
         by_len.sort_by_key(|&(i, _)| a_rows[i].len());
         let Some((row_idx, coeff)) = by_len.into_iter().find(|&(i, coeff)| {
-            let row_max = *row_max_a[i].get_or_insert_with(|| a_rows[i].iter().map(|&(_, v)| v.abs()).fold(0.0f64, f64::max));
-            coeff.abs() >= tunable!("ENOMOTO_T_SUBSTITUTION_PIVOT_RATIO", SUBSTITUTION_PIVOT_RATIO, f64) * row_max
+            let ratio = tunable!("ENOMOTO_T_SUBSTITUTION_PIVOT_RATIO", SUBSTITUTION_PIVOT_RATIO, f64);
+            let (row_max, row_max_u) = *row_max_a[i].get_or_insert_with(|| {
+                let sc = a_rows[i].iter().map(|&(_, v)| v.abs()).fold(0.0f64, f64::max);
+                let un = if col_scale.is_empty() { sc } else { a_rows[i].iter().map(|&(k, v)| piv_mag(k, v)).fold(0.0f64, f64::max) };
+                (sc, un)
+            });
+            coeff.abs() >= ratio * row_max || (!col_scale.is_empty() && piv_mag(j, coeff) >= ratio * row_max_u)
         }) else {
             continue;
         };

@@ -22,7 +22,51 @@
 //! 開発経緯・並列化を見送った理由などは改良履歴メモを参照。
 
 use crate::sparse::{FaerCsr, CsrRowBuilder, csr_from_rows, csr_row_iter, csr_row_vec};
-use crate::params::presolve::{EQPROP_RELTOL, PROPAGATE_EPS, PROP_RELTOL};
+use crate::params::presolve::{EQPROP_RELTOL, PROPAGATE_EPS, PROP_CANCEL_GUARD, PROP_RELTOL};
+use super::infeas_tol;
+
+/// 伝播のパスの打ち切り条件 ([`propagate_split`]・[`propagate_equalities`])。
+///
+/// 行も上下限も変わらなくなったパスではいつも止まる。そのほかに:
+/// - `min_passes` パスまでは、変化があれば (どんなに小さくても) 続ける。
+/// - それを超えたパスでは有意な境界の変化 (無限の境界が有限になる・有限の境界が相対 `sig_reltol` を超えて動く)
+///   だけを適用し、直前のパスに有意な変化 (行の削除・強制行による固定を含む) があったときだけ続ける。
+///   巡回的な行構造では上下限が等比級数的に少しずつ削られ続けて変化が 0 にならないので、有意な変化で
+///   区切らないと不動点に達しない。小さな変化まで適用し続けると、上下限が少しずつ一点に寄って交差した
+///   ところで固定され、丸め誤差の溜まった値で固定された列だけの等式行が `foldfixed` の許容誤差を超えて
+///   偽の実行不能になる (bore3d、伝播 20 パス)。
+/// - 作業量 (読んだ行の非零の延べ数) が `max_work` 以上になったパスの後、または `max_passes` パスで打ち切る。
+#[derive(Clone, Copy, Debug)]
+pub struct PassLimit {
+    /// 小さな変化でも続けるパス数。
+    pub min_passes: usize,
+    /// パス数の上限。
+    pub max_passes: usize,
+    /// `min_passes` を超えたパスを続けるための、有限の境界の相対変化の閾値
+    /// (`|new - old| > sig_reltol * (1 + |old|)`)。
+    pub sig_reltol: f64,
+    /// 作業量 (読んだ非零の延べ数) の上限。
+    pub max_work: usize,
+}
+
+impl PassLimit {
+    /// 従来の打ち切り: 変化がある限り最大 `passes` パス。
+    pub fn fixed(passes: usize) -> Self {
+        PassLimit { min_passes: passes, max_passes: passes, sig_reltol: 0.0, max_work: usize::MAX }
+    }
+}
+
+impl From<usize> for PassLimit {
+    fn from(passes: usize) -> Self {
+        PassLimit::fixed(passes)
+    }
+}
+
+/// 有限の境界 `old` から `new` への変化が `sig_reltol` の意味で有意か (無限の境界からの変化は常に有意)。
+#[inline]
+fn significant_change(old: f64, new: f64, sig_reltol: f64) -> bool {
+    !old.is_finite() || (old - new).abs() > sig_reltol * (1.0 + old.abs())
+}
 
 /// [`propagate`] の結果 (境界を再度畳み込んだ `g`/`h` を含む完全版)。
 ///
@@ -105,13 +149,100 @@ pub fn extract_bounds_only(n: usize, g: &FaerCsr, h: &[f64]) -> (Vec<f64>, Vec<f
     (lb, ub)
 }
 
-/// ある変数で `lb > ub + PROPAGATE_EPS` (境界が互いに矛盾) なら `true`。
+/// ある変数で `lb > ub + tol` (境界が互いに矛盾) なら `true` ([`crossing_tol`] 参照)。
 ///
 /// 単一変数制約と箱境界が矛盾する場合などの真の実行不能を検出する。
 /// `lb`/`ub` を他で使う前 (特に `dualfix` が片側に固定して矛盾を消して
 /// しまう前) に必ず確認すること。
 pub fn bounds_inconsistent(n: usize, lb: &[f64], ub: &[f64]) -> bool {
-    (0..n).any(|j| lb[j] > ub[j] + PROPAGATE_EPS)
+    (0..n).any(|j| lb[j] > ub[j] + PROPAGATE_EPS && lb[j] > ub[j] + crossing_tol(lb[j], ub[j]))
+}
+
+/// 許容誤差内の交差のうち、従来の絶対 `PROPAGATE_EPS` を超えるもの (相対形のときだけ残る) は 1 点に揃える
+/// (`propagate_equalities` と同じ)。`PROPAGATE_EPS` 以内の交差は従来どおり残す (出力を変えないため)。
+/// 呼び出し側の主ループのコード生成を乱さないよう別関数にする。
+#[inline(never)]
+fn snap_tolerated_crossings(lb: &mut [f64], ub: &[f64]) {
+    for (l, &u) in lb.iter_mut().zip(ub) {
+        if *l > u + PROPAGATE_EPS {
+            *l = u;
+        }
+    }
+}
+
+/// 境界の交差 `lb > ub` を実行不能とみなす閾値。既定は `PROPAGATE_EPS * (1 + max(|lb|, |ub|))`
+/// (有限な方だけ。相対形、作業 #9)、`ENOMOTO_T_PRESOLVE_REL_TOL=0` で従来の絶対 `PROPAGATE_EPS`。
+#[cold]
+#[inline(never)]
+fn crossing_tol(lb: f64, ub: f64) -> f64 {
+    let scale = match (lb.is_finite(), ub.is_finite()) {
+        (true, true) => lb.abs().max(ub.abs()),
+        (true, false) => lb.abs(),
+        (false, true) => ub.abs(),
+        (false, false) => 0.0,
+    };
+    infeas_tol(PROPAGATE_EPS, scale)
+}
+
+/// 行の活動度が右辺を `violation` (> `PROPAGATE_EPS`) だけ破るとき、それが実行不能判定の許容誤差
+/// `infeas_tol(PROPAGATE_EPS, max(Σ|項|, |b|))` (既定は相対形) を超えるか。まれにしか呼ばれないので
+/// 呼び出し側の主ループのコード生成を乱さないよう別関数 (cold) にする (インライン化すると fit2d で伝播が 2 割遅くなった)。
+#[cold]
+#[inline(never)]
+fn violation_exceeds_tol(violation: f64, b: f64, row: impl Iterator<Item = (usize, f64)>, lb: &[f64], ub: &[f64], upper: bool) -> bool {
+    violation > infeas_tol(PROPAGATE_EPS, abs_activity(row, lb, ub, upper).max(b.abs()))
+}
+
+/// 行の最小活動度 (`upper == false`) または最大活動度 (`upper == true`) の各項の絶対値の和 `Σ|a_j x_j|`
+/// (読む境界はすべて有限であること)。実行不能判定の相対許容誤差の基準 ([`infeas_tol`])。
+#[cold]
+#[inline(never)]
+fn abs_activity(row: impl Iterator<Item = (usize, f64)>, lb: &[f64], ub: &[f64], upper: bool) -> f64 {
+    let mut s = 0.0f64;
+    for (j, v) in row {
+        if v == 0.0 {
+            continue;
+        }
+        s += (if (v > 0.0) != upper { v * lb[j] } else { v * ub[j] }).abs();
+    }
+    s
+}
+
+/// 行の項 `(j, v)` から列 `k` を除いた最小活動度 (`upper == false`) または最大活動度 (`upper == true`) を
+/// 直接足し合わせて求める (`k` 以外の読む境界はすべて有限であること)。
+/// `finite_sum - contrib_k` の桁落ち (k の寄与が行を支配するとき) を避けるのに使う ([`PROP_CANCEL_GUARD`] 参照)。
+#[cold]
+#[inline(never)]
+fn activity_excluding(row: impl Iterator<Item = (usize, f64)>, k: usize, lb: &[f64], ub: &[f64], upper: bool) -> f64 {
+    let mut s = 0.0f64;
+    for (j, v) in row {
+        if v == 0.0 || j == k {
+            continue;
+        }
+        s += if (v > 0.0) != upper { v * lb[j] } else { v * ub[j] };
+    }
+    s
+}
+
+/// 行 (項数 `len`) ごとの桁落ち判定の係数 `len * eps / (guard * PROPAGATE_EPS)` (`guard == 0` なら 0 = 判定しない)。
+/// [`refine_candidate`] 参照。
+#[inline]
+fn cancel_coeff(len: usize, guard: f64) -> f64 {
+    if guard > 0.0 { len as f64 * f64::EPSILON / (guard * PROPAGATE_EPS) } else { 0.0 }
+}
+
+/// 引き算で得た境界の候補 `raw = (rhs - l_s) / aik` の精緻化。`l_s` は通常、引き算 `finite_sum - aik * bound_k` で得た
+/// 「列 k を除いた活動度」(従来と同じ式、同じビット)。その桁落ち誤差の見積もり `len * eps * |aik * bound_k|`
+/// (finite_sum の部分和は |contrib_k| 級を通るので、以後の加算ごとに ulp(|contrib_k|) 程度の誤差が入る) を `|aik|` で割った
+/// 候補の誤差 `len * eps * |bound_k|` が、後段の実行不能判定の許容誤差 `PROPAGATE_EPS * (1 + |候補|)` の `guard` 倍を
+/// 超えうるとき (`|bound_k| * coeff > 1 + |raw|`、`coeff` は [`cancel_coeff`]) だけ、`recompute` (k を除いた直接和) で
+/// 計算し直す。引き算を使わなかった `l_s` (k 自身の寄与が無限の場合) では `bound_abs = 0` を渡す。
+///
+/// 呼び出し側は、`raw` が境界を実際に締めるときだけ呼び (締めない候補の誤差は結果に影響しない)、返った値で締める条件を
+/// 判定し直す。全候補で判定すると長い行の伝播 (fit2d) が目に見えて遅くなるため。
+#[inline]
+fn refine_candidate(raw: f64, rhs: f64, aik: f64, bound_abs: f64, coeff: f64, recompute: impl FnOnce() -> f64) -> f64 {
+    if bound_abs * coeff > 1.0 + raw.abs() { (rhs - recompute()) / aik } else { raw }
 }
 
 /// [`propagate`] の結果から再畳み込みした `g`/`h` を除いたもの。
@@ -129,12 +260,19 @@ pub struct PropagateSplit {
     pub real_rhs: Vec<f64>,
     /// 実行不能を検出したら `true` (このとき他のフィールドは空)。
     pub infeasible: bool,
+    /// 実行したパス数 (`ENOMOTO_DEBUG_PRESOLVE_ROUNDS` の表示用)。
+    pub passes_used: usize,
+    /// 行も上下限も変わらないパス、または有意な変化のないパスで止まったか
+    /// (`false` = パス数か作業量の上限で打ち切り)。
+    pub converged: bool,
+    /// 作業量 (読んだ行の非零の延べ数)。
+    pub work: usize,
 }
 
 impl PropagateSplit {
     /// 実行不能を表す空の結果を作る。
     fn infeasible() -> Self {
-        PropagateSplit { lb: Vec::new(), ub: Vec::new(), real_rows: Vec::new(), real_rhs: Vec::new(), infeasible: true }
+        PropagateSplit { lb: Vec::new(), ub: Vec::new(), real_rows: Vec::new(), real_rhs: Vec::new(), infeasible: true, passes_used: 0, converged: true, work: 0 }
     }
 }
 
@@ -161,7 +299,7 @@ pub fn propagate(n: usize, g: &FaerCsr, h: &[f64], passes: usize) -> PropagateRe
 }
 
 /// [`propagate`] の `g`/`h` 再構築を省いた版 (`lb`/`ub`/多変数行はビット単位で同一)。
-pub fn propagate_without_g_rebuild(n: usize, g: &FaerCsr, h: &[f64], passes: usize) -> PropagateSplit {
+pub fn propagate_without_g_rebuild(n: usize, g: &FaerCsr, h: &[f64], passes: impl Into<PassLimit>) -> PropagateSplit {
     let (lb, ub, rows, rhs) = extract_bounds(n, g, h);
     propagate_split(n, lb, ub, rows, rhs, passes)
 }
@@ -170,29 +308,42 @@ pub fn propagate_without_g_rebuild(n: usize, g: &FaerCsr, h: &[f64], passes: usi
 /// の戻り値と同じ形) に対して制約伝播を行う本体。
 ///
 /// 各パスで各行について: 実行不能判定 → 冗長行削除 → 強制行の固定と削除 →
-/// 境界強化 (ZIB Report 16-44 §3.2)。行も境界も変化しなかったパスで打ち切る。
+/// 境界強化 (ZIB Report 16-44 §3.2)。パスの打ち切りは [`PassLimit`] を参照
+/// (`usize` を渡すと従来どおり、変化がある限り最大その数のパス)。
 /// 最後に境界の自己矛盾を再確認する。
-pub fn propagate_split(n: usize, mut lb: Vec<f64>, mut ub: Vec<f64>, mut rows: Vec<Vec<(usize, f64)>>, mut rhs: Vec<f64>, passes: usize) -> PropagateSplit {
+pub fn propagate_split(n: usize, mut lb: Vec<f64>, mut ub: Vec<f64>, mut rows: Vec<Vec<(usize, f64)>>, mut rhs: Vec<f64>, passes: impl Into<PassLimit>) -> PropagateSplit {
+    let limit: PassLimit = passes.into();
     // 相対改善閾値 (`ENOMOTO_T_PROP_RELTOL`、0 で無効)。有限境界は改善幅が
     // `reltol * (1 + |bound|)` を超えるときだけ更新する (HiGHS 流、巡回構造での
     // 境界の幾何級数的な削り込みを止める)。
     let reltol = tunable!("ENOMOTO_T_PROP_RELTOL", PROP_RELTOL, f64);
+    // 桁落ち回避の閾値 (`ENOMOTO_T_PROP_CANCEL_GUARD`、0 で無効)
+    let cancel_guard = tunable!("ENOMOTO_T_PROP_CANCEL_GUARD", PROP_CANCEL_GUARD, f64);
 
     if bounds_inconsistent(n, &lb, &ub) {
         return PropagateSplit::infeasible();
     }
 
     let mut infeasible = false;
-    for _pass in 0..passes {
+    let mut passes_used = 0usize;
+    let mut converged = false;
+    let mut work = 0usize;
+    for _pass in 0..limit.max_passes {
         if infeasible {
             break;
         }
+        passes_used += 1;
+        // `min_passes` を超えたパスでは有意な境界の変化だけを適用する (`PassLimit` 参照)。
+        let strict = passes_used > limit.min_passes;
         // このパスで行削除または境界更新があったか (なければ以降のパスも同じなので打ち切る)
         let mut changed = false;
+        // このパスで有意な境界の変化があったか (`PassLimit` 参照。行の削除は下で別に数える)
+        let mut significant = false;
         let n_rows_before = rows.len();
         let mut kept_rows = Vec::with_capacity(rows.len());
         let mut kept_rhs = Vec::with_capacity(rhs.len());
         for (row, b) in std::mem::take(&mut rows).into_iter().zip(std::mem::take(&mut rhs)) {
+            work += row.len();
             // 有限な項だけの最小/最大活動度の和
             let mut finite_sum_inf = 0.0f64;
             let mut finite_sum_sup = 0.0f64;
@@ -242,7 +393,10 @@ pub fn propagate_split(n: usize, mut lb: Vec<f64>, mut ub: Vec<f64>, mut rows: V
             let min_activity = if inf_unbounded_count == 0 { finite_sum_inf } else { f64::NEG_INFINITY };
             let max_activity = if sup_unbounded_count == 0 { finite_sum_sup } else { f64::INFINITY };
 
-            if min_activity > b + PROPAGATE_EPS {
+            // 実行不能判定の許容誤差は既定で `PROPAGATE_EPS * (1 + max(Σ|項|, |b|))` (相対形、作業 #9)。
+            // 絶対 `PROPAGATE_EPS` を超えるがこの範囲に収まる違反は、下の強制行として扱う。
+            // Σ|項| は絶対の判定を超えたとき (まれ) だけ行を走査し直して求める (主ループの積算に足すと fit2d などの長い行で目に見えて遅い)。
+            if min_activity > b + PROPAGATE_EPS && violation_exceeds_tol(min_activity - b, b, row.iter().copied(), &lb, &ub, false) {
                 infeasible = true;
                 break;
             }
@@ -254,8 +408,10 @@ pub fn propagate_split(n: usize, mut lb: Vec<f64>, mut ub: Vec<f64>, mut rows: V
             // 強制行 (HiGHS の rowPresolve と同じ): 最小活動度 (有限) が b に等しければ、
             // 全項を最小活動度を与える側の境界 (正係数は下限、負係数は上限) に固定でき、
             // 行自体は自明に満たされるので削除する。`inf_unbounded_count == 0` により
-            // 読む境界はすべて有限。
-            if inf_unbounded_count == 0 && (finite_sum_inf - b).abs() <= PROPAGATE_EPS {
+            // 読む境界はすべて有限。上の判定を通っているので `finite_sum_inf > b + PROPAGATE_EPS` は
+            // 許容誤差内の違反 (相対形のときだけ起こる) で、これも強制行とみなす (従来の `|finite_sum_inf - b| <= EPS` と、
+            // 絶対形のときは同値)。
+            if inf_unbounded_count == 0 && finite_sum_inf >= b - PROPAGATE_EPS {
                 for &(j, v) in &row {
                     if v > 0.0 {
                         ub[j] = lb[j];
@@ -268,31 +424,44 @@ pub fn propagate_split(n: usize, mut lb: Vec<f64>, mut ub: Vec<f64>, mut rows: V
 
             // 境界強化 (ZIB Report 16-44 §3.2): l_s は x_k の寄与を除いた最小活動度。x_k 以外に
             // 無限の寄与がない場合だけ有限になる。
+            // 桁落ち判定の係数 (`refine_candidate` 参照)
+            let coeff = cancel_coeff(row.len(), cancel_guard);
             for &(k, aik) in &row {
-                let l_s = if inf_unbounded_count == 0 {
-                    let contrib_k = if aik > 0.0 { aik * lb[k] } else { aik * ub[k] };
-                    finite_sum_inf - contrib_k
+                // (l_s, 引き算に使った |bound_k|)
+                let (l_s, bound_abs) = if inf_unbounded_count == 0 {
+                    let bound_k = if aik > 0.0 { lb[k] } else { ub[k] };
+                    (finite_sum_inf - aik * bound_k, bound_k.abs())
                 } else if inf_unbounded_count == 1 && inf_unbounded_first == k {
-                    finite_sum_inf
+                    (finite_sum_inf, 0.0)
                 } else {
                     continue;
                 };
                 if !l_s.is_finite() {
                     continue;
                 }
+                let candidate = (b - l_s) / aik;
+                // 候補 c が境界 old を (有意に) 締めるか
+                let tightens_ub = |old: f64, c: f64| c < old - PROPAGATE_EPS && (reltol == 0.0 || !old.is_finite() || c < old - reltol * (1.0 + old.abs())) && (!strict || significant_change(old, c, limit.sig_reltol));
+                let tightens_lb = |old: f64, c: f64| c > old + PROPAGATE_EPS && (reltol == 0.0 || !old.is_finite() || c > old + reltol * (1.0 + old.abs())) && (!strict || significant_change(old, c, limit.sig_reltol));
                 if aik > 0.0 {
-                    // 新しい上限候補
-                    let candidate = (b - l_s) / aik;
-                    if candidate < ub[k] - PROPAGATE_EPS && (reltol == 0.0 || !ub[k].is_finite() || candidate < ub[k] - reltol * (1.0 + ub[k].abs())) {
-                        ub[k] = candidate;
-                        changed = true;
+                    // 新しい上限候補 (締めるときだけ桁落ちを見て精緻化し、判定し直す)
+                    if tightens_ub(ub[k], candidate) {
+                        let candidate = refine_candidate(candidate, b, aik, bound_abs, coeff, || activity_excluding(row.iter().copied(), k, &lb, &ub, false));
+                        if tightens_ub(ub[k], candidate) {
+                            significant |= significant_change(ub[k], candidate, limit.sig_reltol);
+                            ub[k] = candidate;
+                            changed = true;
+                        }
                     }
                 } else if aik < 0.0 {
                     // 新しい下限候補
-                    let candidate = (b - l_s) / aik;
-                    if candidate > lb[k] + PROPAGATE_EPS && (reltol == 0.0 || !lb[k].is_finite() || candidate > lb[k] + reltol * (1.0 + lb[k].abs())) {
-                        lb[k] = candidate;
-                        changed = true;
+                    if tightens_lb(lb[k], candidate) {
+                        let candidate = refine_candidate(candidate, b, aik, bound_abs, coeff, || activity_excluding(row.iter().copied(), k, &lb, &ub, false));
+                        if tightens_lb(lb[k], candidate) {
+                            significant |= significant_change(lb[k], candidate, limit.sig_reltol);
+                            lb[k] = candidate;
+                            changed = true;
+                        }
                     }
                 }
             }
@@ -303,10 +472,15 @@ pub fn propagate_split(n: usize, mut lb: Vec<f64>, mut ub: Vec<f64>, mut rows: V
 
         if kept_rows.len() != n_rows_before {
             changed = true;
+            significant = true;
         }
         rows = kept_rows;
         rhs = kept_rhs;
-        if !changed {
+        if !changed || (passes_used >= limit.min_passes && !significant) {
+            converged = true;
+            break;
+        }
+        if work >= limit.max_work {
             break;
         }
     }
@@ -316,12 +490,15 @@ pub fn propagate_split(n: usize, mut lb: Vec<f64>, mut ub: Vec<f64>, mut rows: V
     if !infeasible && bounds_inconsistent(n, &lb, &ub) {
         infeasible = true;
     }
+    if !infeasible {
+        snap_tolerated_crossings(&mut lb, &ub);
+    }
 
     if infeasible {
         return PropagateSplit::infeasible();
     }
 
-    PropagateSplit { lb, ub, real_rows: rows, real_rhs: rhs, infeasible: false }
+    PropagateSplit { lb, ub, real_rows: rows, real_rhs: rhs, infeasible: false, passes_used, converged, work }
 }
 
 /// 各パスが読む `G x <= h` の表現。CSR 実体か、分離形 `(rows, rhs, lb, ub)` のどちらか。
@@ -485,6 +662,12 @@ pub struct EqPropagateResult {
     pub fixed_cols: usize,
     /// 境界強化で更新された境界の延べ数。
     pub tightened: usize,
+    /// 変化のないパス、または有意な変化のないパスで止まったか (`false` = パス数か作業量の上限で打ち切り)。
+    pub converged: bool,
+    /// 実行したパス数。
+    pub passes_used: usize,
+    /// 作業量 (読んだ行の非零の延べ数)。
+    pub work: usize,
 }
 
 /// 等式系 `A x = b` に対する活動度ベースの伝播 ([`propagate`] は不等式系しか見ない)。
@@ -494,11 +677,14 @@ pub struct EqPropagateResult {
 /// 強化を行う。書き換えるのは `lb`/`ub` だけで、行自体の縮約は `foldfixed` や
 /// rowsingleton/doubleton/colsingleton に任せる。等式にしか現れない無限境界の
 /// 列に有限境界を与え、傾き・切片二段解法の M 側処理を減らすのが目的。
-/// 最大 `passes` パス、変化がなければ打ち切り。
-pub fn propagate_equalities(a: &FaerCsr, b: &[f64], lb: &mut [f64], ub: &mut [f64], passes: usize) -> EqPropagateResult {
+/// パスの打ち切りは [`PassLimit`] を参照 (`usize` なら従来どおり最大その数のパス、変化がなければ打ち切り)。
+pub fn propagate_equalities(a: &FaerCsr, b: &[f64], lb: &mut [f64], ub: &mut [f64], passes: impl Into<PassLimit>) -> EqPropagateResult {
+    let limit: PassLimit = passes.into();
     let ar = a.as_ref();
     // 相対改善閾値 (`ENOMOTO_T_EQPROP_RELTOL`、0 で無効)。
     let reltol = tunable!("ENOMOTO_T_EQPROP_RELTOL", EQPROP_RELTOL, f64);
+    // 桁落ち回避の閾値 (`ENOMOTO_T_PROP_CANCEL_GUARD`、0 で無効)
+    let cancel_guard = tunable!("ENOMOTO_T_PROP_CANCEL_GUARD", PROP_CANCEL_GUARD, f64);
     // 境界 old を new に置き換えるべきか: 無限の境界は常に置き換え、有限なら
     // 変化量が PROPAGATE_EPS (と reltol * (1 + |old|)) を超えるときだけ。
     let improves = |old: f64, new: f64| -> bool {
@@ -507,14 +693,21 @@ pub fn propagate_equalities(a: &FaerCsr, b: &[f64], lb: &mut [f64], ub: &mut [f6
         }
         (old - new).abs() > PROPAGATE_EPS && (reltol == 0.0 || (old - new).abs() > reltol * (1.0 + old.abs()))
     };
-    let mut res = EqPropagateResult { infeasible: false, forcing_rows: 0, fixed_cols: 0, tightened: 0 };
+    let mut res = EqPropagateResult { infeasible: false, forcing_rows: 0, fixed_cols: 0, tightened: 0, converged: false, passes_used: 0, work: 0 };
     // 行 i を既に強制行として数えたか (forcing_rows の重複カウント防止)
     let mut forcing_seen = vec![false; ar.nrows()];
-    for _pass in 0..passes {
+    for _pass in 0..limit.max_passes {
+        res.passes_used += 1;
+        // `min_passes` を超えたパスでは有意な境界の変化だけを適用する (`PassLimit` 参照)。
+        let strict = res.passes_used > limit.min_passes;
         // このパスでの変更回数
         let mut changed = 0usize;
+        // このパスで有意な変化 (`PassLimit` 参照) があったか
+        let mut significant = false;
         for i in 0..ar.nrows() {
             let bi = b[i];
+            let row_len = ar.col_indices_of_row_raw(i).len();
+            res.work += row_len;
             // 有限な項だけの最小/最大活動度の和
             let mut finite_sum_inf = 0.0f64;
             let mut finite_sum_sup = 0.0f64;
@@ -560,12 +753,19 @@ pub fn propagate_equalities(a: &FaerCsr, b: &[f64], lb: &mut [f64], ub: &mut [f6
             // 行の真の最小/最大活動度
             let min_activity = if inf_unbounded.is_empty() { finite_sum_inf } else { f64::NEG_INFINITY };
             let max_activity = if sup_unbounded.is_empty() { finite_sum_sup } else { f64::INFINITY };
-            if min_activity > bi + PROPAGATE_EPS || max_activity < bi - PROPAGATE_EPS {
+            // 実行不能判定の許容誤差は既定で `PROPAGATE_EPS * (1 + max(Σ|項|, |b|))` (相対形、作業 #9)。
+            // 絶対 `PROPAGATE_EPS` を超えるがこの範囲に収まる違反は、下の強制行として扱う。
+            // Σ|項| は絶対の判定を超えたとき (まれ) だけ行を走査し直して求める (主ループの積算に足すと fit2d などの長い行で目に見えて遅い)。
+            if (min_activity > bi + PROPAGATE_EPS && min_activity > bi + infeas_tol(PROPAGATE_EPS, abs_activity(csr_row_iter(a, i), lb, ub, false).max(bi.abs())))
+                || (max_activity < bi - PROPAGATE_EPS && max_activity < bi - infeas_tol(PROPAGATE_EPS, abs_activity(csr_row_iter(a, i), lb, ub, true).max(bi.abs())))
+            {
                 res.infeasible = true;
                 return res;
             }
-            // 下側の強制: 全項が最小活動度側の境界にあるときだけ b に届く。
-            if inf_unbounded.is_empty() && (finite_sum_inf - bi).abs() <= PROPAGATE_EPS {
+            // 下側の強制: 全項が最小活動度側の境界にあるときだけ b に届く。上の判定を通っているので
+            // `finite_sum_inf > bi + PROPAGATE_EPS` は許容誤差内の違反 (相対形のときだけ起こる) で、これも強制とみなす
+            // (絶対形のときは従来の `|finite_sum_inf - bi| <= EPS` と同値)。上側も対称。
+            if inf_unbounded.is_empty() && finite_sum_inf >= bi - PROPAGATE_EPS {
                 if !forcing_seen[i] {
                     forcing_seen[i] = true;
                     res.forcing_rows += 1;
@@ -577,6 +777,7 @@ pub fn propagate_equalities(a: &FaerCsr, b: &[f64], lb: &mut [f64], ub: &mut [f6
                     if lb[j] < ub[j] {
                         res.fixed_cols += 1;
                         changed += 1;
+                        significant = true;
                     }
                     if v > 0.0 {
                         ub[j] = lb[j];
@@ -587,7 +788,7 @@ pub fn propagate_equalities(a: &FaerCsr, b: &[f64], lb: &mut [f64], ub: &mut [f6
                 continue;
             }
             // 上側の強制: 対称に、全項が最大活動度側の境界。
-            if sup_unbounded.is_empty() && (finite_sum_sup - bi).abs() <= PROPAGATE_EPS {
+            if sup_unbounded.is_empty() && finite_sum_sup <= bi + PROPAGATE_EPS {
                 if !forcing_seen[i] {
                     forcing_seen[i] = true;
                     res.forcing_rows += 1;
@@ -599,6 +800,7 @@ pub fn propagate_equalities(a: &FaerCsr, b: &[f64], lb: &mut [f64], ub: &mut [f6
                     if lb[j] < ub[j] {
                         res.fixed_cols += 1;
                         changed += 1;
+                        significant = true;
                     }
                     if v > 0.0 {
                         lb[j] = ub[j];
@@ -608,67 +810,94 @@ pub fn propagate_equalities(a: &FaerCsr, b: &[f64], lb: &mut [f64], ub: &mut [f6
                 }
                 continue;
             }
+            // 桁落ち判定の係数 (`refine_candidate` 参照)
+            let coeff = cancel_coeff(row_len, cancel_guard);
             for (k, aik) in csr_row_iter(a, i) {
                 if aik == 0.0 || lb[k] == ub[k] {
                     continue;
                 }
                 // `A_i x <= b` 側: k を除いた最小活動度 l_s から境界を得る。
+                // k の寄与が行を支配するときは、引き算の桁落ちを避けて k を除いた和を直接計算する
+                // (`PROP_CANCEL_GUARD` 参照。ken-18 の行 3749 で下限が相対 4e-14 ずれたのと同じ機序)。
                 let l_s = if inf_unbounded.is_empty() {
-                    let contrib = if aik > 0.0 { aik * lb[k] } else { aik * ub[k] };
-                    Some(finite_sum_inf - contrib)
+                    let bound_k = if aik > 0.0 { lb[k] } else { ub[k] };
+                    Some((finite_sum_inf - aik * bound_k, bound_k.abs()))
                 } else if inf_unbounded.len() == 1 && inf_unbounded[0] == k {
-                    Some(finite_sum_inf)
+                    Some((finite_sum_inf, 0.0))
                 } else {
                     None
                 };
-                if let Some(l_s) = l_s {
+                // 候補 c が境界 old を (有意に) 締めるか。締めるときだけ桁落ちを見て精緻化し (`refine_candidate`)、判定し直す。
+                let tightens_ub = |old: f64, c: f64| c < old - PROPAGATE_EPS && improves(old, c) && (!strict || significant_change(old, c, limit.sig_reltol));
+                let tightens_lb = |old: f64, c: f64| c > old + PROPAGATE_EPS && improves(old, c) && (!strict || significant_change(old, c, limit.sig_reltol));
+                if let Some((l_s, bound_abs)) = l_s {
                     let candidate = (bi - l_s) / aik;
                     if aik > 0.0 {
-                        if candidate < ub[k] - PROPAGATE_EPS && improves(ub[k], candidate) {
-                            ub[k] = candidate;
-                            changed += 1;
-                            res.tightened += 1;
+                        if tightens_ub(ub[k], candidate) {
+                            let candidate = refine_candidate(candidate, bi, aik, bound_abs, coeff, || activity_excluding(csr_row_iter(a, i), k, lb, ub, false));
+                            if tightens_ub(ub[k], candidate) {
+                                significant |= significant_change(ub[k], candidate, limit.sig_reltol);
+                                ub[k] = candidate;
+                                changed += 1;
+                                res.tightened += 1;
+                            }
                         }
-                    } else if candidate > lb[k] + PROPAGATE_EPS && improves(lb[k], candidate) {
-                        lb[k] = candidate;
-                        changed += 1;
-                        res.tightened += 1;
-                    }
-                }
-                // `A_i x >= b` 側: k を除いた最大活動度 u_s から境界を得る。
-                let u_s = if sup_unbounded.is_empty() {
-                    let contrib = if aik > 0.0 { aik * ub[k] } else { aik * lb[k] };
-                    Some(finite_sum_sup - contrib)
-                } else if sup_unbounded.len() == 1 && sup_unbounded[0] == k {
-                    Some(finite_sum_sup)
-                } else {
-                    None
-                };
-                if let Some(u_s) = u_s {
-                    let candidate = (bi - u_s) / aik;
-                    if aik > 0.0 {
-                        if candidate > lb[k] + PROPAGATE_EPS && improves(lb[k], candidate) {
+                    } else if tightens_lb(lb[k], candidate) {
+                        let candidate = refine_candidate(candidate, bi, aik, bound_abs, coeff, || activity_excluding(csr_row_iter(a, i), k, lb, ub, false));
+                        if tightens_lb(lb[k], candidate) {
+                            significant |= significant_change(lb[k], candidate, limit.sig_reltol);
                             lb[k] = candidate;
                             changed += 1;
                             res.tightened += 1;
                         }
-                    } else if candidate < ub[k] - PROPAGATE_EPS && improves(ub[k], candidate) {
-                        ub[k] = candidate;
-                        changed += 1;
-                        res.tightened += 1;
                     }
                 }
-                if lb[k] > ub[k] + PROPAGATE_EPS {
+                // `A_i x >= b` 側: k を除いた最大活動度 u_s から境界を得る。
+                let u_s = if sup_unbounded.is_empty() {
+                    let bound_k = if aik > 0.0 { ub[k] } else { lb[k] };
+                    Some((finite_sum_sup - aik * bound_k, bound_k.abs()))
+                } else if sup_unbounded.len() == 1 && sup_unbounded[0] == k {
+                    Some((finite_sum_sup, 0.0))
+                } else {
+                    None
+                };
+                if let Some((u_s, bound_abs)) = u_s {
+                    let candidate = (bi - u_s) / aik;
+                    if aik > 0.0 {
+                        if tightens_lb(lb[k], candidate) {
+                            let candidate = refine_candidate(candidate, bi, aik, bound_abs, coeff, || activity_excluding(csr_row_iter(a, i), k, lb, ub, true));
+                            if tightens_lb(lb[k], candidate) {
+                                significant |= significant_change(lb[k], candidate, limit.sig_reltol);
+                                lb[k] = candidate;
+                                changed += 1;
+                                res.tightened += 1;
+                            }
+                        }
+                    } else if tightens_ub(ub[k], candidate) {
+                        let candidate = refine_candidate(candidate, bi, aik, bound_abs, coeff, || activity_excluding(csr_row_iter(a, i), k, lb, ub, true));
+                        if tightens_ub(ub[k], candidate) {
+                            significant |= significant_change(ub[k], candidate, limit.sig_reltol);
+                            ub[k] = candidate;
+                            changed += 1;
+                            res.tightened += 1;
+                        }
+                    }
+                }
+                if lb[k] > ub[k] + PROPAGATE_EPS && lb[k] > ub[k] + crossing_tol(lb[k], ub[k]) {
                     res.infeasible = true;
                     return res;
                 }
                 if lb[k] > ub[k] {
-                    // PROPAGATE_EPS 以内の交差: 1 点に揃える。
+                    // 許容誤差 (`crossing_tol`、既定は相対形) 以内の交差: 1 点に揃える。
                     lb[k] = ub[k];
                 }
             }
         }
-        if changed == 0 {
+        if changed == 0 || (res.passes_used >= limit.min_passes && !significant) {
+            res.converged = true;
+            break;
+        }
+        if res.work >= limit.max_work {
             break;
         }
     }
@@ -719,6 +948,49 @@ mod eqprop_tests {
         let b = vec![5.0];
         let mut lb = vec![0.0, 0.0];
         let mut ub = vec![1.0, 1.0];
+        let res = propagate_equalities(&a, &b, &mut lb, &mut ub, 1);
+        assert!(res.infeasible);
+    }
+
+    /// 桁落ちの安全網: 行 `a0 x0 + x1 + x2 + x3 = 0` で x0 の寄与 (a0 * ub0 = -1e12) が他の項 (~2) を 1e12 倍支配する。
+    /// `finite_sum - contrib` の引き算では x0 の下限が相対 1e-5 級ずれ (相対 1e-7 のクランプでも吸収できず、
+    /// 後段の rowsingleton が実行可能な問題を実行不能と誤判定しうる)、k を除いた和を直接計算すると
+    /// 後段が計算する値 `-(Σ x_j) / a0` とビット単位で一致する。ken-18 (支配 650 倍、誤差 4e-14) の極端な版。
+    #[test]
+    fn dominant_term_bound_avoids_cancellation() {
+        let a0 = -1e-3;
+        let ub0 = 1e15;
+        let lows = [0.3, 0.7, 1.1];
+        let a = csr_from_rows(&[vec![(0, a0), (1, 1.0), (2, 1.0), (3, 1.0)]], 4);
+        let b = vec![0.0];
+        let mut lb = vec![0.0, lows[0], lows[1], lows[2]];
+        let mut ub = vec![ub0, 10.0, 10.0, 10.0];
+        let res = propagate_equalities(&a, &b, &mut lb, &mut ub, 1);
+        assert!(!res.infeasible);
+        let exact = -(lows[0] + lows[1] + lows[2]) / a0;
+        // 旧式 (引き算) の値は相対 1e-7 を超えてずれる (この試験が桁落ちを実際に踏んでいることの確認)
+        let finite_sum = a0 * ub0 + lows[0] + lows[1] + lows[2];
+        let naive = -(finite_sum - a0 * ub0) / a0;
+        assert!((naive - exact).abs() > 1e-7 * exact.abs(), "naive={naive} exact={exact}");
+        assert_eq!(lb[0], exact);
+    }
+
+    /// 相対形の実行不能判定: スケール後の大きな量 (1e8) で、活動度が右辺を丸め程度 (相対 1e-15) だけ
+    /// 超える等式行は実行不能ではなく強制行として扱う。相対 1e-6 超えるものは従来どおり実行不能。
+    #[test]
+    fn relative_tolerance_in_equality_infeasibility() {
+        // x0 in [1e8, 2e8], x1 in [0, 1]: 行 x0 + x1 = 1e8 - 1e-7 (最小活動度が 1e-7 = 相対 1e-15 だけ超える)
+        let a = csr_from_rows(&[vec![(0, 1.0), (1, 1.0)]], 2);
+        let b = vec![1e8 - 1e-7];
+        let mut lb = vec![1e8, 0.0];
+        let mut ub = vec![2e8, 1.0];
+        let res = propagate_equalities(&a, &b, &mut lb, &mut ub, 1);
+        assert!(!res.infeasible);
+        assert_eq!((lb[0], ub[0], lb[1], ub[1]), (1e8, 1e8, 0.0, 0.0));
+        // 相対 1e-6 のはみ出しは実行不能
+        let b = vec![1e8 * (1.0 - 1e-6)];
+        let mut lb = vec![1e8, 0.0];
+        let mut ub = vec![2e8, 1.0];
         let res = propagate_equalities(&a, &b, &mut lb, &mut ub, 1);
         assert!(res.infeasible);
     }
