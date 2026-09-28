@@ -4006,7 +4006,9 @@ impl FtranTrack {
     /// 全記録が無効な状態で作る。
     pub fn new() -> Self {
         Self {
-            pt_adaptive: tunable!("ENOMOTO_T_PARTIAL_TAU_ADAPTIVE", 1u8, u8) != 0,
+            // 既定 0 (取り下げ): 経路が変わり、irish-electricity (旧前処理、作業 #5 の試験) が特異基底の解き直しに入って
+            // 1800 s で終わらなくなった (ken-13 -26%、ken-18 -37% は `=1` で再現できる)。
+            pt_adaptive: tunable!("ENOMOTO_T_PARTIAL_TAU_ADAPTIVE", 0u8, u8) != 0,
             pt_ema: tunable!("ENOMOTO_T_PARTIAL_TAU_COST_EMA", PARTIAL_TAU_COST_EMA, f64),
             pt_probe: tunable!("ENOMOTO_T_PARTIAL_TAU_PROBE", PARTIAL_TAU_PROBE, u32),
             pt_probe_full: tunable!("ENOMOTO_T_PARTIAL_TAU_PROBE_FULL", 0u8, u8) != 0,
