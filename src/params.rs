@@ -468,6 +468,19 @@ pub(crate) mod slope_intercept_dual {
     /// 0 = 無効)。Netlib(`m` ≤ 約 6K)には掛からないので経路は変わらない。
     pub(crate) const CHUZR_SHORTLIST_AUTO_MIN_M: usize = 10_000;
 
+    /// 作業 #10 (A): `CHUZR_HEAP_ADAPTIVE_MIN_M <= m < CHUZR_SHORTLIST_AUTO_MIN_M` の問題でも策7 の遅延ヒープを
+    /// 有効にし、反復ごとに全走査と安いほうを選ぶ (`ENOMOTO_T_CHUZR_HEAP_ADAPTIVE_MIN_M`、0 = 無効)。
+    /// 実行不能行プールの大きさは `m` では決まらない (ken-11 は m = 5,567 でプール平均 2,262 行、
+    /// cre-b は m = 5,110 で 248 行) ので、`m` ではなくプール長と更新行数の比で切り替える (下の係数)。
+    /// 下限は疎経路の実体 (`SPARSE_PATH_MIN_M` = 300 行以上、`BIG`) と同じにする (ヒープのコードは `BIG` の中だけ)。
+    pub(crate) const CHUZR_HEAP_ADAPTIVE_MIN_M: usize = 300;
+
+    /// 作業 #10 (A): 適応モードでヒープを使う条件 `プール >= 係数 * (前反復の x_B 更新一覧長 + 1) * log2(プール)` の
+    /// 係数 (`ENOMOTO_T_CHUZR_HEAP_ADAPTIVE_RATIO`)。ヒープは 1 反復に「一覧の行を積む (log2(プール) 回の比較)」
+    /// + 古い要素の破棄、全走査は「プールの各行でスコアを作って 1 回比較」なので、比較 1 回あたりの手間が
+    /// 同程度とみて 1 とする。
+    pub(crate) const CHUZR_HEAP_ADAPTIVE_RATIO: f64 = 1.0;
+
     /// 策7: 自動で有効にした短縮リストの長さ `K` の下限(`ENOMOTO_T_CHUZR_SHORTLIST_AUTO_K`)。
     /// 全走査のたびに `K = clamp(プール行数 / CHUZR_SHORTLIST_AUTO_DIV, この値, CHUZR_SHORTLIST_AUTO_K_MAX)`。
     pub(crate) const CHUZR_SHORTLIST_AUTO_K: usize = 64;

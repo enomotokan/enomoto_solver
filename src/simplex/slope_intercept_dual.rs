@@ -60,7 +60,7 @@ use std::sync::OnceLock;
 use crate::params::simplex::{FT_BUMP_LIMIT_FACTOR, FT_CHECK_INTERVAL, FT_MIN_PIVOT, FT_RESIDUAL_TOL, HARRIS_RATIO_TOL, MAX_ITERS_FLOOR, PRIMAL_FEAS_TOL, RESIDUAL_CHECK_MULTIPLIER, STALL_PROGRESS_EPS, STEEPEST_EDGE_FLOOR, TOL};
 use crate::params::slope_intercept_dual::{CHUZC1_TOPK, CHUZC1_TOPK_MIN_CANDS, FLIP_TRACK_MIN_M, CHUZC1_FAST_PROBE, SYNTH_CLOCK_MID_REF_MULT, SYNTH_CLOCK_MID_TAU_FRACTION, PREFETCH_DIST, PREFETCH_MIN_COLS, PRICE_DENSE_RESULT_RATIO, SYNTH_CLOCK_DENSE_FRACTION, D_DRIFT_TOL, FT_BUMP_LU_RATIO, PLATEAU_OBJ_REL, D_GROSS_MISMATCH_REL_TOL, FT_MAX_UPDATES_FACTOR, FT_MAX_UPDATES_FLOOR, PARTIAL_TAU_MIN_M, PIVOT_ESCALATION_STEP, SLOPE_TOL, STUCK_ROW_MIN_PIVOT, SYNTH_CLOCK_FACTOR, SYNTH_CLOCK_LARGE_M, SYNTH_CLOCK_LARGE_REF_M, SYNTH_CLOCK_MIN_UPDATES, XB_CHECK_CADENCE, XB_CHECK_CADENCE_LARGE, XB_CHECK_CADENCE_LARGE_DIV, XB_CHECK_CADENCE_LARGE_M, XB_CHECK_INTERVAL, XB_DRIFT_ESCALATION_FACTOR, XB_DRIFT_ESCALATION_STEP, XB_DRIFT_REL_TOL, XB_DRIFT_TOL, XB_DRIFT_TOL_MAX, X_B_SLOPE_NOISE, Z_SLOPE_TOL};
 use crate::params::slope_intercept_dual::{
-    CHUZR_SHORTLIST_AUTO_DIV, CHUZR_SHORTLIST_AUTO_K, CHUZR_SHORTLIST_AUTO_K_MAX, CHUZR_SHORTLIST_AUTO_MIN_M, CHUZR_SHORTLIST_K, CHUZR_SHORTLIST_MAX_LEN_FACTOR, CHUZR_SHORTLIST_MAX_LEN_SLACK, CHUZR_SHORTLIST_MIN_POOL_FACTOR, COMPACT_ROWS_BLOCK, FTRAN_U_HYPER_DENSITY, FTRAN_U_HYPER_TAU_DENSITY,
+    CHUZR_HEAP_ADAPTIVE_MIN_M, CHUZR_HEAP_ADAPTIVE_RATIO, CHUZR_SHORTLIST_AUTO_DIV, CHUZR_SHORTLIST_AUTO_K, CHUZR_SHORTLIST_AUTO_K_MAX, CHUZR_SHORTLIST_AUTO_MIN_M, CHUZR_SHORTLIST_K, CHUZR_SHORTLIST_MAX_LEN_FACTOR, CHUZR_SHORTLIST_MAX_LEN_SLACK, CHUZR_SHORTLIST_MIN_POOL_FACTOR, COMPACT_ROWS_BLOCK, FTRAN_U_HYPER_DENSITY, FTRAN_U_HYPER_TAU_DENSITY,
     GREATEST_IMPROVEMENT_STALL_DIVISOR, GREATEST_IMPROVEMENT_STALL_MIN, GREATEST_IMPROVEMENT_TOP_K, GROSS_MISMATCH_SCALE_FLOOR, HANDOFF_MAX_ROUNDS, INFEASIBLE_PLATEAU_BUDGET_DIVISOR, INFEASIBLE_PLATEAU_STALL_MULT,
     LEX_REL_TOL, PRICE_COLUMN_DENSITY, PRICE_LIST_DENSITY, SCORE2_STALL_HALFLIFE, STALL_LIMIT_MIN, STALL_LIMIT_PER_ROW, STUCK_ROW_BOOST_FACTOR, STUCK_ROW_BOOST_THRESHOLD, XB_DRIFT_FRESH_FLOOR_FACTOR,
     XB_DRIFT_FRESH_FLOOR_FRAC, XB_DRIFT_MIN_UPDATES, XB_DRIFT_MIN_UPDATES_MULT, XB_DRIFT_REL_K, XB_DRIFT_SAMPLE_GUARD, XB_DRIFT_SAMPLE_K, XB_LIST_DENSITY,
@@ -2979,13 +2979,19 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     // 策7: 未指定(0)でも `m >= CHUZR_SHORTLIST_AUTO_MIN_M` の大きな問題では長さ `CHUZR_SHORTLIST_AUTO_K` で
     // 有効にする(実行不能行プールが数万〜十数万行になり、毎反復の全走査が支配的になるため)。
     // 自動のときは全走査のたびにプールの大きさから `K` を決め直す(`shortlist_auto`)。
-    let (mut shortlist_k, shortlist_auto) = {
+    // 作業 #10 (A): `CHUZR_HEAP_ADAPTIVE_MIN_M <= m < CHUZR_SHORTLIST_AUTO_MIN_M` でも自動モード (遅延ヒープ) を
+    // 有効にし、反復ごとにヒープと全走査の安いほうを選ぶ (`chuzr_heap_adaptive`、下の主ループ参照)。
+    let adaptive_min_m = tunable!("ENOMOTO_T_CHUZR_HEAP_ADAPTIVE_MIN_M", CHUZR_HEAP_ADAPTIVE_MIN_M, usize);
+    let (mut shortlist_k, shortlist_auto, chuzr_heap_adaptive) = {
         let k = tunable!("ENOMOTO_T_CHUZR_SHORTLIST", CHUZR_SHORTLIST_K, usize);
         let auto_min_m = tunable!("ENOMOTO_T_CHUZR_SHORTLIST_AUTO_MIN_M", CHUZR_SHORTLIST_AUTO_MIN_M, usize);
+        let auto_k = tunable!("ENOMOTO_T_CHUZR_SHORTLIST_AUTO_K", CHUZR_SHORTLIST_AUTO_K, usize);
         if k == 0 && auto_min_m > 0 && m >= auto_min_m {
-            (tunable!("ENOMOTO_T_CHUZR_SHORTLIST_AUTO_K", CHUZR_SHORTLIST_AUTO_K, usize), true)
+            (auto_k, true, false)
+        } else if BIG && k == 0 && adaptive_min_m > 0 && m >= adaptive_min_m && tunable!("ENOMOTO_T_CHUZR_HEAP", 1u8, u8) != 0 {
+            (auto_k, true, true)
         } else {
-            (k, false)
+            (k, false, false)
         }
     };
     let shortlist_enabled = shortlist_k > 0 && merge_flip_xb && score2_max_tol == LEX_REL_TOL && stuck_row_boost_factor == 1.0;
@@ -3011,6 +3017,12 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     // 次に一覧のある反復が来たらヒープを作り直す。`ENOMOTO_T_CHUZR_DENSE_SCAN=0` で無効。
     let chuzr_dense_scan = chuzr_heap_mode && tunable!("ENOMOTO_T_CHUZR_DENSE_SCAN", 1u8, u8) != 0;
     let mut chuzr_scan_next = false;
+    // 作業 #10 (A): 適応モード (`chuzr_heap_adaptive`) で反復ごとにヒープを使うかの判定の係数と、
+    // 前反復の `x_B` 更新の一覧の長さ (ヒープに積む要素数の見積り)。ヒープの 1 反復の手間は
+    // 「積む要素数 × log2(プール)」、全走査は「プール行数」に比例するので、
+    // `プール >= CHUZR_HEAP_ADAPTIVE_RATIO * (一覧長 + 1) * log2(プール)` のときだけヒープを使う。
+    let chuzr_heap_ratio = if chuzr_heap_adaptive { tunable!("ENOMOTO_T_CHUZR_HEAP_ADAPTIVE_RATIO", CHUZR_HEAP_ADAPTIVE_RATIO, f64) } else { 0.0 };
+    let mut chuzr_prev_list_len: usize = usize::MAX;
     // `x_B(M)` のドリフト検査(と eta フィル検査)の反復間隔。策9: `m >= XB_CHECK_CADENCE_LARGE_M` の
     // 大きな問題では `max(XB_CHECK_CADENCE_LARGE, m / XB_CHECK_CADENCE_LARGE_DIV)` に伸ばす。
     let xb_check_cadence = {
@@ -3147,8 +3159,16 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         let chuzr_heap_was_valid = chuzr_heap_valid;
         chuzr_heap_valid = false;
         // 策7 (ex10): この反復は遅延ヒープではなく全走査で選ぶか。
-        let chuzr_scan_now = chuzr_scan_next && !chuzr_heap_was_valid;
+        let mut chuzr_scan_now = chuzr_scan_next && !chuzr_heap_was_valid;
         chuzr_scan_next = false;
+        // 作業 #10 (A): 適応モードでは、プールが小さい (または前反復の一覧が長い) 反復は全走査で選ぶ。
+        if BIG && chuzr_heap_adaptive && !chuzr_scan_now {
+            let pool = infeasible_rows.rows.len();
+            let heap_cost = chuzr_heap_ratio * (chuzr_prev_list_len.saturating_add(1)) as f64 * (pool.max(2) as f64).log2();
+            if (pool as f64) < heap_cost {
+                chuzr_scan_now = true;
+            }
+        }
         // この反復の chuzr を遅延ヒープで行ったか(反復の終わりに変わった行を積めば有効なまま保てる)。
         let mut chuzr_heap_ready = false;
         // この反復の chuzr 時点で `shortlist_rows`/`shortlist_cut` がプールを正しく表しているか
@@ -5033,6 +5053,9 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         }
         if chuzr_dense_scan && xb_list_len.is_none() {
             chuzr_scan_next = true;
+        }
+        if BIG && chuzr_heap_adaptive {
+            chuzr_prev_list_len = xb_list_len.unwrap_or(usize::MAX);
         }
 
         // 双対値の増分更新(Huangfu & Hall §2.2.3): PRICE が触った全列で
