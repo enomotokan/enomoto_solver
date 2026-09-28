@@ -22,7 +22,7 @@
 //! 開発経緯・並列化を見送った理由などは改良履歴メモを参照。
 
 use crate::sparse::{FaerCsr, CsrRowBuilder, csr_from_rows, csr_row_iter, csr_row_vec};
-use crate::params::presolve::{EQPROP_RELTOL, PROPAGATE_EPS, PROP_CANCEL_RATIO, PROP_RELTOL};
+use crate::params::presolve::{EQPROP_RELTOL, PROPAGATE_EPS, PROP_CANCEL_GUARD, PROP_RELTOL};
 use super::infeas_tol;
 
 /// 伝播のパスの打ち切り条件 ([`propagate_split`]・[`propagate_equalities`])。
@@ -173,7 +173,7 @@ fn crossing_tol(lb: f64, ub: f64) -> f64 {
 
 /// 行の項 `(j, v)` から列 `k` を除いた最小活動度 (`upper == false`) または最大活動度 (`upper == true`) を
 /// 直接足し合わせて求める (`k` 以外の読む境界はすべて有限であること)。
-/// `finite_sum - contrib_k` の桁落ち (k の寄与が行を支配するとき) を避けるのに使う ([`PROP_CANCEL_RATIO`] 参照)。
+/// `finite_sum - contrib_k` の桁落ち (k の寄与が行を支配するとき) を避けるのに使う ([`PROP_CANCEL_GUARD`] 参照)。
 #[inline]
 fn activity_excluding(row: impl Iterator<Item = (usize, f64)>, k: usize, lb: &[f64], ub: &[f64], upper: bool) -> f64 {
     let mut s = 0.0f64;
@@ -186,16 +186,23 @@ fn activity_excluding(row: impl Iterator<Item = (usize, f64)>, k: usize, lb: &[f
     s
 }
 
-/// `finite_sum` (項の絶対値の和 `abs_sum`) から列 k の寄与 `contrib` を除いた活動度。
-/// `|contrib|` が他の項の絶対値の和の `ratio` 倍を超える (桁落ちする) ときだけ `recompute` で直接計算し直し、
-/// それ以外は従来どおり引き算 (結果のビットは従来と同じ)。`ratio == 0` で常に引き算。
+/// 行 (項数 `len`) の活動度 `finite_sum` から列 k (係数 `aik`) の寄与 `contrib` を除いた活動度 `l_s`。
+///
+/// 通常は引き算 `finite_sum - contrib` (従来と同じ式、同じビット)。ただし、その桁落ち誤差の見積もり
+/// `len * eps * |contrib|` (finite_sum の部分和は |contrib| 級を通るので、以後の加算ごとに ulp(|contrib|) 程度の誤差が入る)
+/// から来る候補 `(rhs - l_s) / aik` の誤差 `err / |aik|` が、後段の実行不能判定の許容誤差
+/// `PROPAGATE_EPS * (1 + |候補|)` の `guard` 倍を超えうるときだけ、`recompute` (k を除いた直接和) に切り替える。
+/// `guard == 0` で常に引き算。
 #[inline]
-fn excluded_activity(finite_sum: f64, abs_sum: f64, contrib: f64, ratio: f64, recompute: impl FnOnce() -> f64) -> f64 {
-    if ratio > 0.0 && contrib.abs() > ratio * (abs_sum - contrib.abs()) {
-        recompute()
-    } else {
-        finite_sum - contrib
+fn excluded_activity(finite_sum: f64, contrib: f64, rhs: f64, aik: f64, len: usize, guard: f64, recompute: impl FnOnce() -> f64) -> f64 {
+    let l_s = finite_sum - contrib;
+    if guard > 0.0 {
+        let err = len as f64 * f64::EPSILON * contrib.abs();
+        if err > guard * PROPAGATE_EPS * (aik.abs() + (rhs - l_s).abs()) {
+            return recompute();
+        }
     }
+    l_s
 }
 
 /// [`propagate`] の結果から再畳み込みした `g`/`h` を除いたもの。
@@ -270,8 +277,8 @@ pub fn propagate_split(n: usize, mut lb: Vec<f64>, mut ub: Vec<f64>, mut rows: V
     // `reltol * (1 + |bound|)` を超えるときだけ更新する (HiGHS 流、巡回構造での
     // 境界の幾何級数的な削り込みを止める)。
     let reltol = tunable!("ENOMOTO_T_PROP_RELTOL", PROP_RELTOL, f64);
-    // 桁落ち回避の閾値 (`ENOMOTO_T_PROP_CANCEL_RATIO`、0 で無効)
-    let cancel_ratio = tunable!("ENOMOTO_T_PROP_CANCEL_RATIO", PROP_CANCEL_RATIO, f64);
+    // 桁落ち回避の閾値 (`ENOMOTO_T_PROP_CANCEL_GUARD`、0 で無効)
+    let cancel_guard = tunable!("ENOMOTO_T_PROP_CANCEL_GUARD", PROP_CANCEL_GUARD, f64);
 
     if bounds_inconsistent(n, &lb, &ub) {
         return PropagateSplit::infeasible();
@@ -383,7 +390,7 @@ pub fn propagate_split(n: usize, mut lb: Vec<f64>, mut ub: Vec<f64>, mut rows: V
             for &(k, aik) in &row {
                 let l_s = if inf_unbounded_count == 0 {
                     let contrib_k = if aik > 0.0 { aik * lb[k] } else { aik * ub[k] };
-                    excluded_activity(finite_sum_inf, finite_abs_inf, contrib_k, cancel_ratio, || activity_excluding(row.iter().copied(), k, &lb, &ub, false))
+                    excluded_activity(finite_sum_inf, contrib_k, b, aik, row.len(), cancel_guard, || activity_excluding(row.iter().copied(), k, &lb, &ub, false))
                 } else if inf_unbounded_count == 1 && inf_unbounded_first == k {
                     finite_sum_inf
                 } else {
@@ -634,8 +641,8 @@ pub fn propagate_equalities(a: &FaerCsr, b: &[f64], lb: &mut [f64], ub: &mut [f6
     let ar = a.as_ref();
     // 相対改善閾値 (`ENOMOTO_T_EQPROP_RELTOL`、0 で無効)。
     let reltol = tunable!("ENOMOTO_T_EQPROP_RELTOL", EQPROP_RELTOL, f64);
-    // 桁落ち回避の閾値 (`ENOMOTO_T_PROP_CANCEL_RATIO`、0 で無効)
-    let cancel_ratio = tunable!("ENOMOTO_T_PROP_CANCEL_RATIO", PROP_CANCEL_RATIO, f64);
+    // 桁落ち回避の閾値 (`ENOMOTO_T_PROP_CANCEL_GUARD`、0 で無効)
+    let cancel_guard = tunable!("ENOMOTO_T_PROP_CANCEL_GUARD", PROP_CANCEL_GUARD, f64);
     // 境界 old を new に置き換えるべきか: 無限の境界は常に置き換え、有限なら
     // 変化量が PROPAGATE_EPS (と reltol * (1 + |old|)) を超えるときだけ。
     let improves = |old: f64, new: f64| -> bool {
@@ -657,7 +664,8 @@ pub fn propagate_equalities(a: &FaerCsr, b: &[f64], lb: &mut [f64], ub: &mut [f6
         let mut significant = false;
         for i in 0..ar.nrows() {
             let bi = b[i];
-            res.work += ar.col_indices_of_row_raw(i).len();
+            let row_len = ar.col_indices_of_row_raw(i).len();
+            res.work += row_len;
             // 有限な項だけの最小/最大活動度の和
             let mut finite_sum_inf = 0.0f64;
             let mut finite_sum_sup = 0.0f64;
@@ -772,10 +780,10 @@ pub fn propagate_equalities(a: &FaerCsr, b: &[f64], lb: &mut [f64], ub: &mut [f6
                 }
                 // `A_i x <= b` 側: k を除いた最小活動度 l_s から境界を得る。
                 // k の寄与が行を支配するときは、引き算の桁落ちを避けて k を除いた和を直接計算する
-                // (`PROP_CANCEL_RATIO` 参照。ken-18 の行 3749 で下限が相対 4e-14 ずれた原因)。
+                // (`PROP_CANCEL_GUARD` 参照。ken-18 の行 3749 で下限が相対 4e-14 ずれたのと同じ機序)。
                 let l_s = if inf_unbounded.is_empty() {
                     let contrib = if aik > 0.0 { aik * lb[k] } else { aik * ub[k] };
-                    Some(excluded_activity(finite_sum_inf, finite_abs_inf, contrib, cancel_ratio, || activity_excluding(csr_row_iter(a, i), k, lb, ub, false)))
+                    Some(excluded_activity(finite_sum_inf, contrib, bi, aik, row_len, cancel_guard, || activity_excluding(csr_row_iter(a, i), k, lb, ub, false)))
                 } else if inf_unbounded.len() == 1 && inf_unbounded[0] == k {
                     Some(finite_sum_inf)
                 } else {
@@ -800,7 +808,7 @@ pub fn propagate_equalities(a: &FaerCsr, b: &[f64], lb: &mut [f64], ub: &mut [f6
                 // `A_i x >= b` 側: k を除いた最大活動度 u_s から境界を得る。
                 let u_s = if sup_unbounded.is_empty() {
                     let contrib = if aik > 0.0 { aik * ub[k] } else { aik * lb[k] };
-                    Some(excluded_activity(finite_sum_sup, finite_abs_sup, contrib, cancel_ratio, || activity_excluding(csr_row_iter(a, i), k, lb, ub, true)))
+                    Some(excluded_activity(finite_sum_sup, contrib, bi, aik, row_len, cancel_guard, || activity_excluding(csr_row_iter(a, i), k, lb, ub, true)))
                 } else if sup_unbounded.len() == 1 && sup_unbounded[0] == k {
                     Some(finite_sum_sup)
                 } else {
@@ -891,26 +899,26 @@ mod eqprop_tests {
         assert!(res.infeasible);
     }
 
-    /// ken-18 型の桁落ち: 行 `a0 x0 + a1 x1 + a2 x2 + a3 x3 = 0` で x0 の寄与 (a0 * ub0 = -4.3e6) が行を支配する。
-    /// `finite_sum - contrib` の引き算では x0 の下限が真値から 1.3e-8 ずれるが、k を除いた和を直接計算すると
-    /// 後段 (foldfixed + rowsingleton) が計算する値 `-(Σ a_j x_j) / a0` とビット単位で一致する。
+    /// 桁落ちの安全網: 行 `a0 x0 + x1 + x2 + x3 = 0` で x0 の寄与 (a0 * ub0 = -1e12) が他の項 (~2) を 1e12 倍支配する。
+    /// `finite_sum - contrib` の引き算では x0 の下限が相対 1e-5 級ずれ (相対 1e-7 のクランプでも吸収できず、
+    /// 後段の rowsingleton が実行可能な問題を実行不能と誤判定しうる)、k を除いた和を直接計算すると
+    /// 後段が計算する値 `-(Σ x_j) / a0` とビット単位で一致する。ken-18 (支配 650 倍、誤差 4e-14) の極端な版。
     #[test]
     fn dominant_term_bound_avoids_cancellation() {
-        let a0 = -1.888290021904761e-2;
-        let coeffs = [0.0227359, 0.0188518, 0.974715];
-        let lows = [186007.49845810703, 58521.23785042912, 1320.4890574193275];
-        let a = csr_from_rows(&[vec![(0, a0), (1, coeffs[0]), (2, coeffs[1]), (3, coeffs[2])]], 4);
+        let a0 = -1e-3;
+        let ub0 = 1e15;
+        let lows = [0.3, 0.7, 1.1];
+        let a = csr_from_rows(&[vec![(0, a0), (1, 1.0), (2, 1.0), (3, 1.0)]], 4);
         let b = vec![0.0];
         let mut lb = vec![0.0, lows[0], lows[1], lows[2]];
-        let mut ub = vec![2.2721390e8, 1e7, 1e7, 1e7];
+        let mut ub = vec![ub0, 10.0, 10.0, 10.0];
         let res = propagate_equalities(&a, &b, &mut lb, &mut ub, 1);
         assert!(!res.infeasible);
-        let others = coeffs[0] * lows[0] + coeffs[1] * lows[1] + coeffs[2] * lows[2];
-        let exact = -others / a0;
-        // 旧式 (引き算) の値は 1e-9 を超えてずれる (この試験が桁落ちを実際に踏んでいることの確認)
-        let finite_sum = a0 * 2.2721390e8 + coeffs[0] * lows[0] + coeffs[1] * lows[1] + coeffs[2] * lows[2];
-        let naive = -(finite_sum - a0 * 2.2721390e8) / a0;
-        assert!((naive - exact).abs() > 1e-9, "naive={naive} exact={exact}");
+        let exact = -(lows[0] + lows[1] + lows[2]) / a0;
+        // 旧式 (引き算) の値は相対 1e-7 を超えてずれる (この試験が桁落ちを実際に踏んでいることの確認)
+        let finite_sum = a0 * ub0 + lows[0] + lows[1] + lows[2];
+        let naive = -(finite_sum - a0 * ub0) / a0;
+        assert!((naive - exact).abs() > 1e-7 * exact.abs(), "naive={naive} exact={exact}");
         assert_eq!(lb[0], exact);
     }
 

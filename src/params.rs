@@ -761,25 +761,26 @@ pub(crate) mod presolve {
     /// 量が 1 以下なら従来の絶対判定とほぼ同じ。
     pub(crate) const PRESOLVE_REL_TOL: usize = 1;
 
-    /// rowsingleton: 固定値 `b_i / a_ij` が境界 `[lb, ub]` から `ROWSINGLETON_CLAMP_TOL * (1 + |値|)`
+    /// rowsingleton: 固定値 `b_i / a_ij` が境界 `[lb, ub]` から `ROWSINGLETON_CLAMP_TOL * max(|値|, 1)`
     /// 以内だけはみ出すときは、実行不能とせず境界へクランプして固定する
     /// (`ENOMOTO_T_ROWSINGLETON_CLAMP_TOL`、0 で無効 = はみ出しは上の相対/絶対 `TOL` までだけ許す)。
-    /// HiGHS `HPresolve` の行シングルトンと同じ扱いで、値は単体法の実行可能性許容誤差
-    /// (`PRIMAL_FEAS_TOL` 1e-7 = HiGHS の `primal_feasibility_tolerance`) に合わせる。
-    /// 相対形にするのは、スケール後の値の大きさに依らず元の座標での相対違反を一定にするため
-    /// (列スケール `d_j` を掛けても相対値は変わらない)。はみ出しが `TOL * (1 + |値|)` 以内
-    /// (丸めの範囲) なら従来どおり値そのもの (行を厳密に満たす) で固定し、クランプはしない。
+    /// HiGHS `HPresolve` の行シングルトン (はみ出しが `primal_feasibility_tolerance` 1e-7 以内なら境界へ寄せる) と
+    /// 同じ扱い。形は単体法が基底変数の境界違反を判定する式 (`slope_intercept_dual::row_deviation_plain` の
+    /// `PRIMAL_FEAS_TOL * max(|x_i|, 1)`、同じスケール後の座標) に揃える: 前処理が単体法より厳しい基準で
+    /// 実行不能を宣言しないため。相対形は列スケール `d_j` に依らない (元の座標でも相対 1e-7)。
+    /// はみ出しが `TOL * (1 + |値|)` 以内 (丸めの範囲) なら従来どおり値そのもの (行を厳密に満たす) で固定し、クランプはしない。
     pub(crate) const ROWSINGLETON_CLAMP_TOL: f64 = 1e-7;
 
     /// 伝播 (`propagate_split`・`propagate_equalities`) で「列 k を除いた最小/最大活動度」
-    /// `l_s = finite_sum - contrib_k` の桁落ちを避ける閾値 (`ENOMOTO_T_PROP_CANCEL_RATIO`、0 で無効)。
-    /// `|contrib_k|` が他の項の絶対値の和のこの倍を超える (k の寄与が行を支配する) ときは、
-    /// 引き算をやめて k を除いた和を直接計算し直す。引き算の誤差は `eps * |contrib_k|`、
-    /// 直接和の誤差は `項数 * eps * (他の項の絶対値の和)` 程度なので、支配が 16 倍 (4 ビット) を
-    /// 超えれば直接和の方が確実に正確になる (ken-18 の行 3749 は 650 倍、誤差 4e-14 相対)。
-    /// 1 行で支配する項は高々 1 つなので、再計算の費用は行あたり高々 1 回分の走査。
-    /// 支配されない行は従来と同じ式のままなので結果のビットは変わらない。
-    pub(crate) const PROP_CANCEL_RATIO: f64 = 16.0;
+    /// `l_s = finite_sum - contrib_k` の桁落ちを避ける閾値 (`ENOMOTO_T_PROP_CANCEL_GUARD`、0 で無効)。
+    /// 桁落ち誤差の見積もり `項数 * eps * |contrib_k|` を `|a_ik|` で割った境界候補の誤差が、後段の実行不能判定の
+    /// 許容誤差 `PROPAGATE_EPS * (1 + |候補|)` のこの割合 (1%) を超えうるときだけ、引き算をやめて k を除いた和を
+    /// 直接計算し直す (その行を 1 回余分に走査)。つまり伝播の丸めが相対形の判定 (`PRESOLVE_REL_TOL`) の余裕を
+    /// 食いつぶさないことを保証する安全網。k の寄与が大きく候補が小さい (|b - l_s| ≪ |contrib_k|) 行で効く。
+    /// ken-18 の行 3749 の桁落ち (相対 4e-14) は相対判定で吸収される大きさなのでこの閾値にはかからない。
+    /// 発火して前処理の出力 (のビット) が変わるのは Netlib/Kennington/Mittelmann 120 問のうち 80bau3b, fffff800,
+    /// pilot, pilot.we, pilot87, pilotnov, stair, ken-07/11/13 (pilot/pilot87 は割合 100 でも発火する)。
+    pub(crate) const PROP_CANCEL_GUARD: f64 = 0.01;
 
     // ---- redundancy (等式行の一次従属検出) ----
 

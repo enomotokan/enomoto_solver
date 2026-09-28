@@ -6,7 +6,7 @@
 //!   とは別物で、こちらは `A` の等式行だけを見る。
 //! - 固定値が変数の `[lb, ub]` の外にあれば、境界を黙って上書きせず実行不能として報告する。
 //!   ただし、はみ出しが丸めの範囲 (`TOL * (1 + |値|)`) なら値のまま、実行可能性許容誤差
-//!   (`ROWSINGLETON_CLAMP_TOL * (1 + |値|)`) 以内なら境界へクランプして固定する (作業 #9)。
+//!   (`ROWSINGLETON_CLAMP_TOL * max(|値|, 1)`) 以内なら境界へクランプして固定する (作業 #9)。
 
 use crate::sparse::{FaerCsr, csr_from_rows, csr_is_canonical, csr_row_iter};
 use crate::params::presolve::{ROWSINGLETON_CLAMP_TOL, TOL};
@@ -53,13 +53,13 @@ pub fn fix_singleton_equalities(n: usize, a: &FaerCsr, b: &[f64], lb: &[f64], ub
             let viol = (lb[j] - value).max(value - ub[j]);
             if viol > 0.0 {
                 // 丸めの範囲 (`TOL`、既定は値の大きさに対する相対形) なら値そのもの (行を厳密に満たす) で固定する。
-                // それを超えても実行可能性許容誤差 (`ROWSINGLETON_CLAMP_TOL`、相対 1e-7) 以内なら境界へクランプ
+                // それを超えても実行可能性許容誤差 (`ROWSINGLETON_CLAMP_TOL * max(|値|, 1)`、単体法の基底変数の判定と同じ形) 以内なら境界へクランプ
                 // (HiGHS の行シングルトンと同じ)。さらに超えれば実行不能。
                 // ken-18 では伝播で得た下限が桁落ちで真値より 1.4e-8 (相対 4e-14) 大きく、絶対 1e-9 では
                 // 実行可能解そのものを境界外と判定していた。
                 if viol > infeas_tol(TOL, value) {
                     let clamp_tol = tunable!("ENOMOTO_T_ROWSINGLETON_CLAMP_TOL", ROWSINGLETON_CLAMP_TOL, f64);
-                    if viol > clamp_tol * (1.0 + value.abs()) {
+                    if viol > clamp_tol * value.abs().max(1.0) {
                         return RowSingletonResult { a: csr_from_rows(&[], n), b: Vec::new(), fixes: Vec::new(), infeasible: true };
                     }
                     value = if value < lb[j] { lb[j] } else { ub[j] };
