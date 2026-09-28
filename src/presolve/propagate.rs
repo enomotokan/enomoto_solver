@@ -158,9 +158,22 @@ pub fn bounds_inconsistent(n: usize, lb: &[f64], ub: &[f64]) -> bool {
     (0..n).any(|j| lb[j] > ub[j] + PROPAGATE_EPS && lb[j] > ub[j] + crossing_tol(lb[j], ub[j]))
 }
 
+/// 許容誤差内の交差のうち、従来の絶対 `PROPAGATE_EPS` を超えるもの (相対形のときだけ残る) は 1 点に揃える
+/// (`propagate_equalities` と同じ)。`PROPAGATE_EPS` 以内の交差は従来どおり残す (出力を変えないため)。
+/// 呼び出し側の主ループのコード生成を乱さないよう別関数にする。
+#[inline(never)]
+fn snap_tolerated_crossings(lb: &mut [f64], ub: &[f64]) {
+    for (l, &u) in lb.iter_mut().zip(ub) {
+        if *l > u + PROPAGATE_EPS {
+            *l = u;
+        }
+    }
+}
+
 /// 境界の交差 `lb > ub` を実行不能とみなす閾値。既定は `PROPAGATE_EPS * (1 + max(|lb|, |ub|))`
 /// (有限な方だけ。相対形、作業 #9)、`ENOMOTO_T_PRESOLVE_REL_TOL=0` で従来の絶対 `PROPAGATE_EPS`。
-#[inline]
+#[cold]
+#[inline(never)]
 fn crossing_tol(lb: f64, ub: f64) -> f64 {
     let scale = match (lb.is_finite(), ub.is_finite()) {
         (true, true) => lb.abs().max(ub.abs()),
@@ -171,10 +184,35 @@ fn crossing_tol(lb: f64, ub: f64) -> f64 {
     infeas_tol(PROPAGATE_EPS, scale)
 }
 
+/// 行の活動度が右辺を `violation` (> `PROPAGATE_EPS`) だけ破るとき、それが実行不能判定の許容誤差
+/// `infeas_tol(PROPAGATE_EPS, max(Σ|項|, |b|))` (既定は相対形) を超えるか。まれにしか呼ばれないので
+/// 呼び出し側の主ループのコード生成を乱さないよう別関数 (cold) にする (インライン化すると fit2d で伝播が 2 割遅くなった)。
+#[cold]
+#[inline(never)]
+fn violation_exceeds_tol(violation: f64, b: f64, row: impl Iterator<Item = (usize, f64)>, lb: &[f64], ub: &[f64], upper: bool) -> bool {
+    violation > infeas_tol(PROPAGATE_EPS, abs_activity(row, lb, ub, upper).max(b.abs()))
+}
+
+/// 行の最小活動度 (`upper == false`) または最大活動度 (`upper == true`) の各項の絶対値の和 `Σ|a_j x_j|`
+/// (読む境界はすべて有限であること)。実行不能判定の相対許容誤差の基準 ([`infeas_tol`])。
+#[cold]
+#[inline(never)]
+fn abs_activity(row: impl Iterator<Item = (usize, f64)>, lb: &[f64], ub: &[f64], upper: bool) -> f64 {
+    let mut s = 0.0f64;
+    for (j, v) in row {
+        if v == 0.0 {
+            continue;
+        }
+        s += (if (v > 0.0) != upper { v * lb[j] } else { v * ub[j] }).abs();
+    }
+    s
+}
+
 /// 行の項 `(j, v)` から列 `k` を除いた最小活動度 (`upper == false`) または最大活動度 (`upper == true`) を
 /// 直接足し合わせて求める (`k` 以外の読む境界はすべて有限であること)。
 /// `finite_sum - contrib_k` の桁落ち (k の寄与が行を支配するとき) を避けるのに使う ([`PROP_CANCEL_GUARD`] 参照)。
-#[inline]
+#[cold]
+#[inline(never)]
 fn activity_excluding(row: impl Iterator<Item = (usize, f64)>, k: usize, lb: &[f64], ub: &[f64], upper: bool) -> f64 {
     let mut s = 0.0f64;
     for (j, v) in row {
@@ -186,23 +224,25 @@ fn activity_excluding(row: impl Iterator<Item = (usize, f64)>, k: usize, lb: &[f
     s
 }
 
-/// 行 (項数 `len`) の活動度 `finite_sum` から列 k (係数 `aik`) の寄与 `contrib` を除いた活動度 `l_s`。
-///
-/// 通常は引き算 `finite_sum - contrib` (従来と同じ式、同じビット)。ただし、その桁落ち誤差の見積もり
-/// `len * eps * |contrib|` (finite_sum の部分和は |contrib| 級を通るので、以後の加算ごとに ulp(|contrib|) 程度の誤差が入る)
-/// から来る候補 `(rhs - l_s) / aik` の誤差 `err / |aik|` が、後段の実行不能判定の許容誤差
-/// `PROPAGATE_EPS * (1 + |候補|)` の `guard` 倍を超えうるときだけ、`recompute` (k を除いた直接和) に切り替える。
-/// `guard == 0` で常に引き算。
+/// 行 (項数 `len`) ごとの桁落ち判定の係数 `len * eps / (guard * PROPAGATE_EPS)` (`guard == 0` なら 0 = 判定しない)。
+/// [`refine_candidate`] 参照。
 #[inline]
-fn excluded_activity(finite_sum: f64, contrib: f64, rhs: f64, aik: f64, len: usize, guard: f64, recompute: impl FnOnce() -> f64) -> f64 {
-    let l_s = finite_sum - contrib;
-    if guard > 0.0 {
-        let err = len as f64 * f64::EPSILON * contrib.abs();
-        if err > guard * PROPAGATE_EPS * (aik.abs() + (rhs - l_s).abs()) {
-            return recompute();
-        }
-    }
-    l_s
+fn cancel_coeff(len: usize, guard: f64) -> f64 {
+    if guard > 0.0 { len as f64 * f64::EPSILON / (guard * PROPAGATE_EPS) } else { 0.0 }
+}
+
+/// 引き算で得た境界の候補 `raw = (rhs - l_s) / aik` の精緻化。`l_s` は通常、引き算 `finite_sum - aik * bound_k` で得た
+/// 「列 k を除いた活動度」(従来と同じ式、同じビット)。その桁落ち誤差の見積もり `len * eps * |aik * bound_k|`
+/// (finite_sum の部分和は |contrib_k| 級を通るので、以後の加算ごとに ulp(|contrib_k|) 程度の誤差が入る) を `|aik|` で割った
+/// 候補の誤差 `len * eps * |bound_k|` が、後段の実行不能判定の許容誤差 `PROPAGATE_EPS * (1 + |候補|)` の `guard` 倍を
+/// 超えうるとき (`|bound_k| * coeff > 1 + |raw|`、`coeff` は [`cancel_coeff`]) だけ、`recompute` (k を除いた直接和) で
+/// 計算し直す。引き算を使わなかった `l_s` (k 自身の寄与が無限の場合) では `bound_abs = 0` を渡す。
+///
+/// 呼び出し側は、`raw` が境界を実際に締めるときだけ呼び (締めない候補の誤差は結果に影響しない)、返った値で締める条件を
+/// 判定し直す。全候補で判定すると長い行の伝播 (fit2d) が目に見えて遅くなるため。
+#[inline]
+fn refine_candidate(raw: f64, rhs: f64, aik: f64, bound_abs: f64, coeff: f64, recompute: impl FnOnce() -> f64) -> f64 {
+    if bound_abs * coeff > 1.0 + raw.abs() { (rhs - recompute()) / aik } else { raw }
 }
 
 /// [`propagate`] の結果から再畳み込みした `g`/`h` を除いたもの。
@@ -307,8 +347,6 @@ pub fn propagate_split(n: usize, mut lb: Vec<f64>, mut ub: Vec<f64>, mut rows: V
             // 有限な項だけの最小/最大活動度の和
             let mut finite_sum_inf = 0.0f64;
             let mut finite_sum_sup = 0.0f64;
-            // finite_sum_inf の各項の絶対値の和 (実行不能判定の許容誤差と桁落ちの判定に使う)
-            let mut finite_abs_inf = 0.0f64;
             // 最小活動度を -inf にする項の個数と、その最初の変数 (個数が 1 のときだけ使う)
             let mut inf_unbounded_count = 0usize;
             let mut inf_unbounded_first = usize::MAX;
@@ -319,7 +357,6 @@ pub fn propagate_split(n: usize, mut lb: Vec<f64>, mut ub: Vec<f64>, mut rows: V
                 if v > 0.0 {
                     if lb[j].is_finite() {
                         finite_sum_inf += v * lb[j];
-                        finite_abs_inf += (v * lb[j]).abs();
                     } else {
                         {
                             if inf_unbounded_count == 0 {
@@ -336,7 +373,6 @@ pub fn propagate_split(n: usize, mut lb: Vec<f64>, mut ub: Vec<f64>, mut rows: V
                 } else {
                     if ub[j].is_finite() {
                         finite_sum_inf += v * ub[j];
-                        finite_abs_inf += (v * ub[j]).abs();
                     } else {
                         {
                             if inf_unbounded_count == 0 {
@@ -359,7 +395,8 @@ pub fn propagate_split(n: usize, mut lb: Vec<f64>, mut ub: Vec<f64>, mut rows: V
 
             // 実行不能判定の許容誤差は既定で `PROPAGATE_EPS * (1 + max(Σ|項|, |b|))` (相対形、作業 #9)。
             // 絶対 `PROPAGATE_EPS` を超えるがこの範囲に収まる違反は、下の強制行として扱う。
-            if min_activity > b + PROPAGATE_EPS && min_activity > b + infeas_tol(PROPAGATE_EPS, finite_abs_inf.max(b.abs())) {
+            // Σ|項| は絶対の判定を超えたとき (まれ) だけ行を走査し直して求める (主ループの積算に足すと fit2d などの長い行で目に見えて遅い)。
+            if min_activity > b + PROPAGATE_EPS && violation_exceeds_tol(min_activity - b, b, row.iter().copied(), &lb, &ub, false) {
                 infeasible = true;
                 break;
             }
@@ -387,33 +424,44 @@ pub fn propagate_split(n: usize, mut lb: Vec<f64>, mut ub: Vec<f64>, mut rows: V
 
             // 境界強化 (ZIB Report 16-44 §3.2): l_s は x_k の寄与を除いた最小活動度。x_k 以外に
             // 無限の寄与がない場合だけ有限になる。
+            // 桁落ち判定の係数 (`refine_candidate` 参照)
+            let coeff = cancel_coeff(row.len(), cancel_guard);
             for &(k, aik) in &row {
-                let l_s = if inf_unbounded_count == 0 {
-                    let contrib_k = if aik > 0.0 { aik * lb[k] } else { aik * ub[k] };
-                    excluded_activity(finite_sum_inf, contrib_k, b, aik, row.len(), cancel_guard, || activity_excluding(row.iter().copied(), k, &lb, &ub, false))
+                // (l_s, 引き算に使った |bound_k|)
+                let (l_s, bound_abs) = if inf_unbounded_count == 0 {
+                    let bound_k = if aik > 0.0 { lb[k] } else { ub[k] };
+                    (finite_sum_inf - aik * bound_k, bound_k.abs())
                 } else if inf_unbounded_count == 1 && inf_unbounded_first == k {
-                    finite_sum_inf
+                    (finite_sum_inf, 0.0)
                 } else {
                     continue;
                 };
                 if !l_s.is_finite() {
                     continue;
                 }
+                let candidate = (b - l_s) / aik;
+                // 候補 c が境界 old を (有意に) 締めるか
+                let tightens_ub = |old: f64, c: f64| c < old - PROPAGATE_EPS && (reltol == 0.0 || !old.is_finite() || c < old - reltol * (1.0 + old.abs())) && (!strict || significant_change(old, c, limit.sig_reltol));
+                let tightens_lb = |old: f64, c: f64| c > old + PROPAGATE_EPS && (reltol == 0.0 || !old.is_finite() || c > old + reltol * (1.0 + old.abs())) && (!strict || significant_change(old, c, limit.sig_reltol));
                 if aik > 0.0 {
-                    // 新しい上限候補
-                    let candidate = (b - l_s) / aik;
-                    if candidate < ub[k] - PROPAGATE_EPS && (reltol == 0.0 || !ub[k].is_finite() || candidate < ub[k] - reltol * (1.0 + ub[k].abs())) && (!strict || significant_change(ub[k], candidate, limit.sig_reltol)) {
-                        significant |= significant_change(ub[k], candidate, limit.sig_reltol);
-                        ub[k] = candidate;
-                        changed = true;
+                    // 新しい上限候補 (締めるときだけ桁落ちを見て精緻化し、判定し直す)
+                    if tightens_ub(ub[k], candidate) {
+                        let candidate = refine_candidate(candidate, b, aik, bound_abs, coeff, || activity_excluding(row.iter().copied(), k, &lb, &ub, false));
+                        if tightens_ub(ub[k], candidate) {
+                            significant |= significant_change(ub[k], candidate, limit.sig_reltol);
+                            ub[k] = candidate;
+                            changed = true;
+                        }
                     }
                 } else if aik < 0.0 {
                     // 新しい下限候補
-                    let candidate = (b - l_s) / aik;
-                    if candidate > lb[k] + PROPAGATE_EPS && (reltol == 0.0 || !lb[k].is_finite() || candidate > lb[k] + reltol * (1.0 + lb[k].abs())) && (!strict || significant_change(lb[k], candidate, limit.sig_reltol)) {
-                        significant |= significant_change(lb[k], candidate, limit.sig_reltol);
-                        lb[k] = candidate;
-                        changed = true;
+                    if tightens_lb(lb[k], candidate) {
+                        let candidate = refine_candidate(candidate, b, aik, bound_abs, coeff, || activity_excluding(row.iter().copied(), k, &lb, &ub, false));
+                        if tightens_lb(lb[k], candidate) {
+                            significant |= significant_change(lb[k], candidate, limit.sig_reltol);
+                            lb[k] = candidate;
+                            changed = true;
+                        }
                     }
                 }
             }
@@ -443,13 +491,7 @@ pub fn propagate_split(n: usize, mut lb: Vec<f64>, mut ub: Vec<f64>, mut rows: V
         infeasible = true;
     }
     if !infeasible {
-        // 許容誤差内の交差のうち、従来の絶対 `PROPAGATE_EPS` を超えるもの (相対形のときだけ残る) は 1 点に揃える
-        // (`propagate_equalities` と同じ)。`PROPAGATE_EPS` 以内の交差は従来どおり残す (出力を変えないため)。
-        for j in 0..n {
-            if lb[j] > ub[j] + PROPAGATE_EPS {
-                lb[j] = ub[j];
-            }
-        }
+        snap_tolerated_crossings(&mut lb, &ub);
     }
 
     if infeasible {
@@ -669,9 +711,6 @@ pub fn propagate_equalities(a: &FaerCsr, b: &[f64], lb: &mut [f64], ub: &mut [f6
             // 有限な項だけの最小/最大活動度の和
             let mut finite_sum_inf = 0.0f64;
             let mut finite_sum_sup = 0.0f64;
-            // それぞれの項の絶対値の和 (実行不能判定の許容誤差と桁落ちの判定に使う)
-            let mut finite_abs_inf = 0.0f64;
-            let mut finite_abs_sup = 0.0f64;
             // 最小/最大活動度を無限にする変数の一覧
             let mut inf_unbounded: Vec<usize> = Vec::new();
             let mut sup_unbounded: Vec<usize> = Vec::new();
@@ -687,26 +726,22 @@ pub fn propagate_equalities(a: &FaerCsr, b: &[f64], lb: &mut [f64], ub: &mut [f6
                 if v > 0.0 {
                     if lb[j].is_finite() {
                         finite_sum_inf += v * lb[j];
-                        finite_abs_inf += (v * lb[j]).abs();
                     } else {
                         inf_unbounded.push(j);
                     }
                     if ub[j].is_finite() {
                         finite_sum_sup += v * ub[j];
-                        finite_abs_sup += (v * ub[j]).abs();
                     } else {
                         sup_unbounded.push(j);
                     }
                 } else {
                     if ub[j].is_finite() {
                         finite_sum_inf += v * ub[j];
-                        finite_abs_inf += (v * ub[j]).abs();
                     } else {
                         inf_unbounded.push(j);
                     }
                     if lb[j].is_finite() {
                         finite_sum_sup += v * lb[j];
-                        finite_abs_sup += (v * lb[j]).abs();
                     } else {
                         sup_unbounded.push(j);
                     }
@@ -720,8 +755,9 @@ pub fn propagate_equalities(a: &FaerCsr, b: &[f64], lb: &mut [f64], ub: &mut [f6
             let max_activity = if sup_unbounded.is_empty() { finite_sum_sup } else { f64::INFINITY };
             // 実行不能判定の許容誤差は既定で `PROPAGATE_EPS * (1 + max(Σ|項|, |b|))` (相対形、作業 #9)。
             // 絶対 `PROPAGATE_EPS` を超えるがこの範囲に収まる違反は、下の強制行として扱う。
-            if (min_activity > bi + PROPAGATE_EPS && min_activity > bi + infeas_tol(PROPAGATE_EPS, finite_abs_inf.max(bi.abs())))
-                || (max_activity < bi - PROPAGATE_EPS && max_activity < bi - infeas_tol(PROPAGATE_EPS, finite_abs_sup.max(bi.abs())))
+            // Σ|項| は絶対の判定を超えたとき (まれ) だけ行を走査し直して求める (主ループの積算に足すと fit2d などの長い行で目に見えて遅い)。
+            if (min_activity > bi + PROPAGATE_EPS && min_activity > bi + infeas_tol(PROPAGATE_EPS, abs_activity(csr_row_iter(a, i), lb, ub, false).max(bi.abs())))
+                || (max_activity < bi - PROPAGATE_EPS && max_activity < bi - infeas_tol(PROPAGATE_EPS, abs_activity(csr_row_iter(a, i), lb, ub, true).max(bi.abs())))
             {
                 res.infeasible = true;
                 return res;
@@ -774,6 +810,8 @@ pub fn propagate_equalities(a: &FaerCsr, b: &[f64], lb: &mut [f64], ub: &mut [f6
                 }
                 continue;
             }
+            // 桁落ち判定の係数 (`refine_candidate` 参照)
+            let coeff = cancel_coeff(row_len, cancel_guard);
             for (k, aik) in csr_row_iter(a, i) {
                 if aik == 0.0 || lb[k] == ub[k] {
                     continue;
@@ -782,52 +820,67 @@ pub fn propagate_equalities(a: &FaerCsr, b: &[f64], lb: &mut [f64], ub: &mut [f6
                 // k の寄与が行を支配するときは、引き算の桁落ちを避けて k を除いた和を直接計算する
                 // (`PROP_CANCEL_GUARD` 参照。ken-18 の行 3749 で下限が相対 4e-14 ずれたのと同じ機序)。
                 let l_s = if inf_unbounded.is_empty() {
-                    let contrib = if aik > 0.0 { aik * lb[k] } else { aik * ub[k] };
-                    Some(excluded_activity(finite_sum_inf, contrib, bi, aik, row_len, cancel_guard, || activity_excluding(csr_row_iter(a, i), k, lb, ub, false)))
+                    let bound_k = if aik > 0.0 { lb[k] } else { ub[k] };
+                    Some((finite_sum_inf - aik * bound_k, bound_k.abs()))
                 } else if inf_unbounded.len() == 1 && inf_unbounded[0] == k {
-                    Some(finite_sum_inf)
+                    Some((finite_sum_inf, 0.0))
                 } else {
                     None
                 };
-                if let Some(l_s) = l_s {
+                // 候補 c が境界 old を (有意に) 締めるか。締めるときだけ桁落ちを見て精緻化し (`refine_candidate`)、判定し直す。
+                let tightens_ub = |old: f64, c: f64| c < old - PROPAGATE_EPS && improves(old, c) && (!strict || significant_change(old, c, limit.sig_reltol));
+                let tightens_lb = |old: f64, c: f64| c > old + PROPAGATE_EPS && improves(old, c) && (!strict || significant_change(old, c, limit.sig_reltol));
+                if let Some((l_s, bound_abs)) = l_s {
                     let candidate = (bi - l_s) / aik;
                     if aik > 0.0 {
-                        if candidate < ub[k] - PROPAGATE_EPS && improves(ub[k], candidate) && (!strict || significant_change(ub[k], candidate, limit.sig_reltol)) {
-                            significant |= significant_change(ub[k], candidate, limit.sig_reltol);
-                            ub[k] = candidate;
-                            changed += 1;
-                            res.tightened += 1;
+                        if tightens_ub(ub[k], candidate) {
+                            let candidate = refine_candidate(candidate, bi, aik, bound_abs, coeff, || activity_excluding(csr_row_iter(a, i), k, lb, ub, false));
+                            if tightens_ub(ub[k], candidate) {
+                                significant |= significant_change(ub[k], candidate, limit.sig_reltol);
+                                ub[k] = candidate;
+                                changed += 1;
+                                res.tightened += 1;
+                            }
                         }
-                    } else if candidate > lb[k] + PROPAGATE_EPS && improves(lb[k], candidate) && (!strict || significant_change(lb[k], candidate, limit.sig_reltol)) {
-                        significant |= significant_change(lb[k], candidate, limit.sig_reltol);
-                        lb[k] = candidate;
-                        changed += 1;
-                        res.tightened += 1;
-                    }
-                }
-                // `A_i x >= b` 側: k を除いた最大活動度 u_s から境界を得る。
-                let u_s = if sup_unbounded.is_empty() {
-                    let contrib = if aik > 0.0 { aik * ub[k] } else { aik * lb[k] };
-                    Some(excluded_activity(finite_sum_sup, contrib, bi, aik, row_len, cancel_guard, || activity_excluding(csr_row_iter(a, i), k, lb, ub, true)))
-                } else if sup_unbounded.len() == 1 && sup_unbounded[0] == k {
-                    Some(finite_sum_sup)
-                } else {
-                    None
-                };
-                if let Some(u_s) = u_s {
-                    let candidate = (bi - u_s) / aik;
-                    if aik > 0.0 {
-                        if candidate > lb[k] + PROPAGATE_EPS && improves(lb[k], candidate) && (!strict || significant_change(lb[k], candidate, limit.sig_reltol)) {
+                    } else if tightens_lb(lb[k], candidate) {
+                        let candidate = refine_candidate(candidate, bi, aik, bound_abs, coeff, || activity_excluding(csr_row_iter(a, i), k, lb, ub, false));
+                        if tightens_lb(lb[k], candidate) {
                             significant |= significant_change(lb[k], candidate, limit.sig_reltol);
                             lb[k] = candidate;
                             changed += 1;
                             res.tightened += 1;
                         }
-                    } else if candidate < ub[k] - PROPAGATE_EPS && improves(ub[k], candidate) && (!strict || significant_change(ub[k], candidate, limit.sig_reltol)) {
-                        significant |= significant_change(ub[k], candidate, limit.sig_reltol);
-                        ub[k] = candidate;
-                        changed += 1;
-                        res.tightened += 1;
+                    }
+                }
+                // `A_i x >= b` 側: k を除いた最大活動度 u_s から境界を得る。
+                let u_s = if sup_unbounded.is_empty() {
+                    let bound_k = if aik > 0.0 { ub[k] } else { lb[k] };
+                    Some((finite_sum_sup - aik * bound_k, bound_k.abs()))
+                } else if sup_unbounded.len() == 1 && sup_unbounded[0] == k {
+                    Some((finite_sum_sup, 0.0))
+                } else {
+                    None
+                };
+                if let Some((u_s, bound_abs)) = u_s {
+                    let candidate = (bi - u_s) / aik;
+                    if aik > 0.0 {
+                        if tightens_lb(lb[k], candidate) {
+                            let candidate = refine_candidate(candidate, bi, aik, bound_abs, coeff, || activity_excluding(csr_row_iter(a, i), k, lb, ub, true));
+                            if tightens_lb(lb[k], candidate) {
+                                significant |= significant_change(lb[k], candidate, limit.sig_reltol);
+                                lb[k] = candidate;
+                                changed += 1;
+                                res.tightened += 1;
+                            }
+                        }
+                    } else if tightens_ub(ub[k], candidate) {
+                        let candidate = refine_candidate(candidate, bi, aik, bound_abs, coeff, || activity_excluding(csr_row_iter(a, i), k, lb, ub, true));
+                        if tightens_ub(ub[k], candidate) {
+                            significant |= significant_change(ub[k], candidate, limit.sig_reltol);
+                            ub[k] = candidate;
+                            changed += 1;
+                            res.tightened += 1;
+                        }
                     }
                 }
                 if lb[k] > ub[k] + PROPAGATE_EPS && lb[k] > ub[k] + crossing_tol(lb[k], ub[k]) {
