@@ -3998,6 +3998,8 @@ pub struct FtranTrack {
     /// 作業 #10 (B): 現在の測り直しの間隔と、直近の選択。
     pt_interval: u32,
     pt_last_pick: bool,
+    /// 作業 #10 (B): 部分 `tau` が安い間も通常の `tau` を試して測り直すか (`ENOMOTO_T_PARTIAL_TAU_PROBE_FULL`、既定 0)。
+    pt_probe_full: bool,
 }
 
 impl FtranTrack {
@@ -4007,6 +4009,7 @@ impl FtranTrack {
             pt_adaptive: tunable!("ENOMOTO_T_PARTIAL_TAU_ADAPTIVE", 1u8, u8) != 0,
             pt_ema: tunable!("ENOMOTO_T_PARTIAL_TAU_COST_EMA", PARTIAL_TAU_COST_EMA, f64),
             pt_probe: tunable!("ENOMOTO_T_PARTIAL_TAU_PROBE", PARTIAL_TAU_PROBE, u32),
+            pt_probe_full: tunable!("ENOMOTO_T_PARTIAL_TAU_PROBE_FULL", 0u8, u8) != 0,
             ..Self::default()
         }
     }
@@ -4019,9 +4022,16 @@ impl FtranTrack {
             return true;
         }
         let (Some(p), Some(f)) = (self.pt_cost_partial, self.pt_cost_full) else {
-            return self.pt_cost_partial.is_none();
+            // 未計測なら部分 `tau` (旧版と同じ)。`pt_probe_full` なら通常の `tau` を 1 回試して測る。
+            return self.pt_cost_partial.is_none() || !self.pt_probe_full;
         };
         let pick = p <= f;
+        // 部分 `tau` が安い間は (`pt_probe_full` でなければ) 通常の `tau` を試さない: 通常の `tau` の手間は部分 `tau` を
+        // 選べない反復で測れるので、部分 `tau` が安い問題 (stormG2_1000・pds-100 など) の経路は旧版とほぼ同じに保つ
+        // (tick の数え方が違うので、通常の `tau` を試すと再分解の時期が変わる)。
+        if pick && !self.pt_probe_full {
+            return true;
+        }
         // 測り直しの間隔: 選択が前回の測り直しの時と同じなら倍に (上限 `PARTIAL_TAU_PROBE_MAX`)、変わったら初期値に戻す。
         if pick != self.pt_last_pick {
             self.pt_last_pick = pick;
@@ -6121,7 +6131,8 @@ impl FtLu {
                 }
             }
         }
-        if partial_eligible && !b_partial {
+        // 通常の `tau` の手間は、部分 `tau` を選べない反復 (入る列が超疎に解けない・フリップ結果の併合がある) でも測る。
+        if !b_partial && track.as_deref().is_some_and(|t| t.pt_adaptive) {
             // 通常の `tau` の手間: 超疎なら触れた eta の非ゼロ数 + ヒープの比較 (一覧長 × log2)、
             // 全走査 (超疎を諦めた場合を含む) なら `U` のヘッダ走査と置換の `2m` を加える。
             let cost = match b_u {

@@ -2516,8 +2516,9 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     // `ENOMOTO_SPARSE_FTRAN_OUT=0` で従来の全体書き出し(A/B 用)。
     let sparse_ftran_out = BIG && env_str!("ENOMOTO_SPARSE_FTRAN_OUT").map_or(true, |v| v != "0");
     let mut ftran_track = sparse_lu::FtranTrack::new();
-    // 作業 #10 (B): 部分 `tau` の反復は `tau` の密度の移動平均に入れない (`ENOMOTO_T_PARTIAL_TAU_SKIP_DENSITY`、0 = 旧版)。
-    let partial_tau_skip_density = tunable!("ENOMOTO_T_PARTIAL_TAU_SKIP_DENSITY", 1u8, u8) != 0;
+    // 作業 #10 (B): 部分 `tau` の反復は `tau` の密度の移動平均に入れない (`ENOMOTO_T_PARTIAL_TAU_SKIP_DENSITY=1`、
+    // 既定 0 = 旧版。合成クロックの密度区分が変わり irish-electricity (旧前処理) の経路が特異基底に入ったので既定にしない)。
+    let partial_tau_skip_density = tunable!("ENOMOTO_T_PARTIAL_TAU_SKIP_DENSITY", 0u8, u8) != 0;
     // 策12: 大きな問題では DSE の `tau` を入る列の結果の非ゼロ行でだけ求める(`PARTIAL_TAU_MIN_M`)。
     let partial_tau = sparse_ftran_out && {
         let min_m = tunable!("ENOMOTO_T_PARTIAL_TAU_MIN_M", PARTIAL_TAU_MIN_M, usize);
