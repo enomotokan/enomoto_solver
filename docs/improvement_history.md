@@ -7739,6 +7739,83 @@ base は特異基底 → 全スラックから解き直し → 再び特異で `
 
 判定の材料: 頑健さの修正として、試験問題 2 問とストレス 9 設定がすべて解け、既定設定の Netlib 93 問・Mittelmann 11 問は経路不変。
 
+## 摂動なし・小さい摂動での誤った infeasible の修正 (作業 #8、正しさのバグ) (2026-09-28)
+
+調査レポート `analysis/pilot87_false_infeasible_20260927_220123.md` の対処 1〜6 を実装した。費用 0 の列の摂動が 0 (案 E) や
+摂動なしだと、段階 B の双対単体法で被約費用が厳密に 0 の列が比率テストの全候補同点 (比 0) を作り、厳密な退化ピボットが続く
+(pilot87 で 4783 反復中 3629 回)。同点から極小ピボットを選び続けて基底が壊れ (`‖B^-1 行‖∞` 1e21)、壊れた `x_B` から
+BFRT の使い切りで誤って infeasible を返していた (HEAD でも `ENOMOTO_T_NOISE_C=0` で再現。作業 #5 の雑音判定は症状を隠していただけ)。
+
+### 採用 (src/simplex/slope_intercept_dual.rs、src/simplex.rs、src/params.rs)
+
+- **対処 3 費用シフト (根本)** (`shift_degenerate_costs`、`DEGEN_SHIFT_RUN` = 10、`DEGEN_DJ_TOL` = 1e-12): 入る列の `|d_q| <= 1e-12` の
+  ピボット (自由列 `Zero` の入基は設計どおり比 0 なので数えない) が 10 回続いたら、非基底列 (固定列・`Zero` を除く) のうち被約費用が
+  双対実行可能側に摂動の大きさ `s_j = (1 + r_j)(|c_j| + 1) base` 未満しか離れていない列の `active_cost` と `d` を `s_j` だけ
+  双対実行可能側へずらす (HiGHS `shift_cost`・`correctDual` 流。`base`・`r_j` は `perturb_costs` と同じ `cost_perturb_base`・
+  `perturb_random`)。主ループだけで、polish は元の摂動済み費用で被約費用を作り直し、真の費用で双対実行不能なら従来どおり
+  主単体法への引き継ぎで直す。pilot87 (費用 0 の列の摂動 0) では 1 回のシフト (約 3,200 列) で退化の連鎖が止まり、
+  6,081 反復・5 s で最適 (HEAD 既定の雑音判定頼みでは 24,645 反復・13 s)。`ENOMOTO_T_DEGEN_SHIFT_RUN=0` で無効。
+  - 連続回数の選び方: 既定設定の Netlib 93 問での最長の連続は tuff の 2 (自由列を数えると pilot4 48・perold 43)、
+    Mittelmann 10 問 (neos 以外) は 4 以下。Z0N/P0N (下記) は 5・10・20・50 で 93/93、100 では P0N の scsd8 が壊れた基底で
+    `NotSolved` (遅すぎると壊れる)。余裕を見て 10。
+  - 近い退化 (`|d_q|` 5e-10、費用 0 の列の摂動 1e-3 倍) は連続の判定に掛からない。ここは下の対処 5・6 で拾う。
+- **対処 2 M2 の Farkas 証明を常時 on** (`ENOMOTO_T_INFEAS_CERTIFY`、既定 1): 作業 #5 では `noise_on` (`NOISE_C > 0`) のときだけ
+  だった `infeas_check!`・`polish_infeas_check!` の証明を雑音判定と独立にした (結論のときだけ `O(nnz)`)。
+- **対処 5 摂動を掛け直して解き直す** (`RESTART_BAILOUT`、`ENOMOTO_T_UNCERTIFIED_RESTART`、既定 1): 最初の求解で (a) 証明の立たない
+  実行不能の結論で LU の閾値をもう上げられないとき、(b) 対処 6 の不整合、(c) 反復上限に達したとき、(d) polish の証明不成立で
+  `None` を返し、`solve_slope_intercept_dual` が安全モード (`safe_pivot`) で最初から解き直す (特異基底の解き直しと同じ経路)。
+  解き直しでは費用摂動を既定の大きさに戻す (`set_full_cost_perturbation`: 試験用の縮小係数を無視する。既定設定では摂動は変わらない)。
+  作業 #5 の「行を外して壊れた基底で続ける」は解き直しの 2 回目 (安全モード) だけに残した。
+- **対処 6 `x_B` の整合検査** (`xb_row_mismatch`、`XB_CONSISTENCY_TOL` = 1e-6): 再分解直後 (FT 更新 0 回) の段階 B で、選んだ行 `r` の
+  FTRAN による `x_B[r]` と BTRAN の `rho^T (b - N x_N)` (右辺は増分維持の `rhs_inc_base`) のずれを `max(1, Σ|rho_i rhs_i|)` で割った比が
+  1e-6 を超えたら基底が壊れているとみなして対処 5 へ。再分解 1 回に `O(m)` 1 回。既定設定の Netlib 93 問の最大は pilotnov 8.1e-13
+  (壊れた pilot87 の場面は -7.34 対 +2.70)。`ENOMOTO_T_XB_CONSISTENCY_TOL=0` で無効。費用シフトなしの Z0N で pilotnov の解き直しが
+  4.9 s → 0.4 s に早まる (壊れた基底を早く見つける)。
+- **対処 1 摂動の下限** (`perturb_costs`): 列ごとの摂動が基準 `base` を割らないことを `debug_assert!` で守る (案 E のように 0 に張り付く
+  変更を禁止)。`perturb_costs` の基準と擬似乱数を `cost_perturb_base`・`perturb_random` に切り出した (値は同じ)。
+- 試験用 env (既定は無効): `ENOMOTO_T_PERTURB_FACTOR` (全列の摂動を係数倍、0 で摂動なし)、`ENOMOTO_T_PERTURB_ZERO_COST_FACTOR`
+  (費用 0 の列だけ係数倍)。`scripts/singular_stress.py` に設定 `z0/z0n/p0/p0n/p01/p01n/z01/basen` (`--settings perturb` で全部。
+  `n` 付きは `ENOMOTO_T_NOISE_C=0`) と `--out` を追加。
+- 診断 (`ENOMOTO_DEBUG_EXT_ITERS`): `DEBUG_EXT: degenerate_pivots=... max_run=... cost_shifts=... shifted_cols=... xb_mismatch=...@iter`、
+  解き直しは `DEBUG_EXT: broken-basis/max-iters bailout, retrying with safe_pivot and full cost perturbation`。
+
+### 試して取り下げたもの
+
+- **対処 4 小さいピボットを避ける (HiGHS `chooseFinal` の `finalCompare` 流)**: Harris パス 2 の選んだ `|alpha|` が `k_star` までの最大の
+  `rel` 倍未満なら、窓より前で最大の `min(0.1 倍, 1)` 以上の最後の候補にピボットする。費用シフトなし・解き直しなしの Z0N で
+  `rel` = 1e-6 は失敗 2 問 (pilot87 時間切れ・tuff) のまま、1e-4 は pilot87 が解けるが pilot が `NotSolved` に替わる。既定設定では
+  `|alpha_q| < 1e-5 × 最大` が d2q06c・grow22・pilot.ja・pilot・pilot87 で起き (1e-7 未満は 0)、経路を変えずに効かせる閾値が無い。
+  連鎖の元 (厳密な同点) は費用シフトで断てるので不要。
+- 退化の判定を `|d_q| <= 1e-9`・1e-8 に緩める案: 既定設定で perold 121 回・tuff 111 回・pilot 89 回 (1e-9) と多く、連続でも 43 回に
+  なるので、既定の経路を変えずに近い退化 (費用 0 の列の摂動 1e-3 倍) を拾う閾値が無い。近い退化は対処 5・6 に任せた。
+
+### 摂動を変えた設定での結果 (Netlib 93 問、HiGHS と相対 1e-6 で照合、`scripts/singular_stress.py --settings perturb`)
+
+| 設定 | HEAD (ab42697、レポート) | 作業 #8 | 費用シフトの発火 (問題数) | 解き直し |
+|---|---|---:|---:|---|
+| 既定 / `NOISE_C=0` (base / basen) | 93 / 93 | 93 / 93 | 0 | なし |
+| 費用 0 の列の摂動 0 (z0) | 88 (5 問 not_solved) | 93 | 26 | なし |
+| 同 + `NOISE_C=0` (z0n) | 86 (5 問が誤 infeasible、2 問 not_solved) | 93 | 26 | なし |
+| 摂動なし (p0) | 86 (7 問 not_solved) | 93 | 39 | なし |
+| 同 + `NOISE_C=0` (p0n) | 84 (4 問が誤 infeasible、5 問 not_solved) | 93 | 39 | なし |
+| 摂動 0.1 倍 (p01 / p01n)、費用 0 の列だけ 0.1 倍 (z01) | 93 | 93 | — | なし |
+| (追加) 費用 0 の列の摂動 1e-2 / 1e-3 / 1e-6 倍 + `NOISE_C=0` | — | 93 / 93 / 93 | 1 / 1 / 18 | 1e-3・1e-6 で pilot87 |
+| (追加) 全列の摂動 1e-2 / 1e-3 / 1e-6 倍 + `NOISE_C=0` | — | 93 / 93 / 93 | — | なし |
+| (多重防御) z0n / p0n で費用シフトなし | — | 93 / 93 | 0 | 7 問 / 9 問 (cycle・perold・pilot.ja・pilot・pilot87・pilotnov・tuff、p0n は grow22・scsd8 も) |
+| (多重防御) z0n / p0n で解き直し・整合検査なし | — | 93 / 93 | 26 / 39 | なし |
+
+- 費用シフトと解き直しのどちらか一方だけでも全設定で 93/93。費用シフトなしの解き直しは時間が増える (p0n の pilot 50 s、cycle 4.3 s)。
+- z0n の主な問題 (時間・主ループ反復・HiGHS との相対差): pilot87 5.1 s・6,081・4.4e-10、pilot 1.4 s・3,402・1.8e-11、pilot.ja 0.4 s・1,653、
+  pilotnov 0.3 s・1,095、perold 0.3 s・1,127、cycle 0.4 s・324、tuff 0.2 s・174 (既定は pilot87 5.3 s・6,072)。
+- 作業 #5 の試験: `scripts/singular_stress.py` の 9 設定すべて 93/93、`--cases` の irish-electricity (旧前処理) は optimal
+  2546254.5633151024 (作業 #5 と同じビット)、pilot87 (閾値 1e-3) は optimal 301.7103473331112。実行不能の合成問題 33 問は
+  作業 #5 と同じく 32 問 infeasible・pilot.ja (δ = 1e-5) だけ `NotSolved` (解き直しても証明が立たない)。
+- `cargo test --release --lib` 255 件通過 (費用シフトと整合検査の単体テスト 2 件を追加)。
+
+### 既定設定での計測
+
+MITT_PLACEHOLDER
+
 ## 改名一覧 (整理時)
 
 本メモ中は旧名で書かれている。
