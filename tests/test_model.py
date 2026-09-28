@@ -175,3 +175,20 @@ def test_distinguish_infeasible_unbounded_runs_stage_b():
     sol = _infeasible_z1_negative_model().solve(distinguish_infeasible_unbounded=True)
     assert sol.status == "infeasible"
     assert sol.objective is None
+
+
+def test_forcing_row_at_large_scale_is_not_reported_infeasible():
+    # 作業 #9 (ken-18 の誤った infeasible と同じ系統): 等式行 sum a_i x_i = 3S で全列が上限 S/a_i に張り付く
+    # (強制行) 問題。S = 1e8 ではスケール後の量が大きく、前処理の絶対 1e-9 の判定が丸め程度の差で
+    # 実行不能と誤判定していた。
+    S = 1e8
+    a = [0.0188829, 0.0227359, 0.974715]
+    M = Model()
+    xs = [Variable(float, 0, S / ai) for ai in a]
+    w = Variable(float, 0, S)
+    M.set_objective(w)
+    M.add_constraint(a[0] * xs[0] + a[1] * xs[1] + a[2] * xs[2] == 3 * S)
+    M.add_constraint(a[0] * xs[0] + w == 1.5 * S)
+    sol = M.solve()
+    assert sol.status == "optimal"
+    assert abs(sol.objective - 0.5 * S) <= 1e-7 * S
