@@ -63,7 +63,7 @@ use crate::params::slope_intercept_dual::{
     CHUZR_HEAP_ADAPTIVE_MIN_M, CHUZR_HEAP_ADAPTIVE_RATIO, CHUZR_SHORTLIST_AUTO_DIV, CHUZR_SHORTLIST_AUTO_K, CHUZR_SHORTLIST_AUTO_K_MAX, CHUZR_SHORTLIST_AUTO_MIN_M, CHUZR_SHORTLIST_K, CHUZR_SHORTLIST_MAX_LEN_FACTOR, CHUZR_SHORTLIST_MAX_LEN_SLACK, CHUZR_SHORTLIST_MIN_POOL_FACTOR, COMPACT_ROWS_BLOCK, FTRAN_U_HYPER_DENSITY, FTRAN_U_HYPER_TAU_DENSITY,
     GREATEST_IMPROVEMENT_STALL_DIVISOR, GREATEST_IMPROVEMENT_STALL_MIN, GREATEST_IMPROVEMENT_TOP_K, GROSS_MISMATCH_SCALE_FLOOR, HANDOFF_MAX_ROUNDS, INFEASIBLE_PLATEAU_BUDGET_DIVISOR, INFEASIBLE_PLATEAU_STALL_MULT,
     LEX_REL_TOL, PRICE_COLUMN_DENSITY, PRICE_LIST_DENSITY, SCORE2_STALL_HALFLIFE, STALL_LIMIT_MIN, STALL_LIMIT_PER_ROW, STUCK_ROW_BOOST_FACTOR, STUCK_ROW_BOOST_THRESHOLD, XB_DRIFT_FRESH_FLOOR_FACTOR,
-    XB_DRIFT_FRESH_FLOOR_FRAC, XB_DRIFT_MIN_UPDATES, XB_DRIFT_MIN_UPDATES_MULT, XB_DRIFT_REL_K, XB_DRIFT_SAMPLE_GUARD, XB_DRIFT_SAMPLE_K, XB_LIST_DENSITY,
+    XB_DRIFT_FRESH_FLOOR_FRAC, XB_DRIFT_MIN_UPDATES, XB_DRIFT_MIN_UPDATES_MULT, XB_DRIFT_REL_K, XB_DRIFT_SAMPLE_GUARD, XB_DRIFT_SAMPLE_K, XB_CHECK_FULL_EVERY, XB_LIST_DENSITY,
 };
 use crate::params::slope_intercept_dual::{DEGEN_DJ_TOL, DEGEN_SHIFT_RUN, XB_CONSISTENCY_TOL, INFEAS_GUARD_SQRT_W, NOISE_C, NOISE_MIN_SQRT_W, PIVOT_ESCALATE_BELOW_DEFAULT, PIVOT_ESCALATE_FEW_UPDATES, ROLLBACK_MAX, UNCERTIFIED_MAX};
 
@@ -2831,6 +2831,13 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     let xb_drift_sample: usize = tunable!("ENOMOTO_XB_DRIFT_SAMPLE", XB_DRIFT_SAMPLE_K, usize);
     let xb_drift_sample_guard: f64 = tunable!("ENOMOTO_XB_DRIFT_SAMPLE_GUARD", XB_DRIFT_SAMPLE_GUARD, f64);
     let mut drift_sample_offset: usize = 0;
+    // 作業 #10 (C): 標本検査 (S2) で全体の検査を省いてよい連続回数 (`XB_CHECK_FULL_EVERY - 1`)。
+    // `XB_CHECK_FULL_EVERY` 回に 1 回は標本によらず全体の検査を行う (標本に入らない行に偏ったドリフトの
+    // 見逃しを、旧来の検査間隔の `XB_CHECK_FULL_EVERY` 倍以内に抑える)。0 = 上限なし (旧 S2)。
+    let xb_check_full_every: usize = tunable!("ENOMOTO_T_XB_CHECK_FULL_EVERY", XB_CHECK_FULL_EVERY, usize);
+    let mut drift_checks_since_full: usize = 0;
+    // 作業 #10 (C): 直近に測った丸め誤差の尺度 (`residual_scale_affine`、基底・傾き)。未計測なら 0 (絶対許容誤差だけ)。
+    let mut drift_last_scale: (f64, f64) = (0.0, 0.0);
     // 新規残差の下限(`ENOMOTO_XB_DRIFT_FRESH_FLOOR`、既定オフ): 再分解直後の残差がすでに
     // 許容誤差の `frac` 倍を超えているなら(再分解しても下がらない)、次の再分解まで
     // `factor * 新規残差` を許容誤差の下限とする。`xb_fresh_floor` は現在の下限(0 なら無効)。
@@ -5242,17 +5249,28 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                 // S2 (`ENOMOTO_XB_DRIFT_SAMPLE = k >= 2`、既定オフ): まず `1/k` の巡回行サンプルで
                 // 残差を推定し、推定値が `guard * tol` を超えたときだけ全体の `O(nnz(A_B))` 検査を行う。
                 // 再分解後最初の検査は必ず全体で行う(`drift_resid_after_refactor` を記録するため)。
-                let sample_clear = xb_drift_sample >= 2 && updates > XB_CHECK_INTERVAL && {
+                let force_full = xb_check_full_every > 0 && drift_checks_since_full + 1 >= xb_check_full_every;
+                let sample_clear = xb_drift_sample >= 2 && updates > XB_CHECK_INTERVAL && !force_full && {
                     let (sb, ss) = sampled_residual_affine(std, &basis_pos, &x_b_base, &x_b_slope, check_rhs_base, check_rhs_slope, phase == Phase::A, xb_drift_sample, drift_sample_offset);
                     drift_sample_offset = (drift_sample_offset + 1) % xb_drift_sample;
                     if env_str!("ENOMOTO_DEBUG_XB_DRIFT_EXT").is_some() {
                         eprintln!("DEBUG_XB_DRIFT_SAMPLE: iter={iter_idx} est_base={sb:.3e} est_slope={ss:.3e} effective_tol={effective_drift_tol:.3e}");
                     }
-                    sb.max(ss) <= xb_drift_sample_guard * effective_drift_tol
+                    // 作業 #10 (C): 直近の全体検査で測った丸め誤差の尺度 (`XB_DRIFT_REL_TOL` の相対判定) も許容誤差に含める
+                    // (ken-11 は残差が絶対許容誤差を常に超え、相対判定で再分解しない状態が続くので、絶対許容誤差だけの
+                    // 比較では標本検査が全体の検査を 1 回も省けなかった)。
+                    let (tb, ts) = if xb_drift_rel_tol > 0.0 {
+                        (effective_drift_tol.max(xb_drift_rel_tol * drift_last_scale.0), effective_drift_tol.max(xb_drift_rel_tol * drift_last_scale.1))
+                    } else {
+                        (effective_drift_tol, effective_drift_tol)
+                    };
+                    sb <= xb_drift_sample_guard * tb && ss <= xb_drift_sample_guard * ts
                 };
                 if sample_clear {
                     need_refactor = false;
+                    drift_checks_since_full += 1;
                 } else {
+                    drift_checks_since_full = 0;
                     let (resid_base, resid_slope) = if phase == Phase::A {
                         (0.0, residual_norm_slope(std, &basis, &x_b_slope, check_rhs_slope, &mut resid_scratch_slope))
                     } else {
@@ -5278,6 +5296,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                             residual_scale_affine(std, &basis, &x_b_base, &x_b_slope, check_rhs_base, check_rhs_slope, &mut resid_scratch_base, &mut resid_scratch_slope)
                         };
                         need_refactor = resid_base > effective_drift_tol.max(xb_drift_rel_tol * scale_base) || resid_slope > effective_drift_tol.max(xb_drift_rel_tol * scale_slope);
+                        drift_last_scale = (scale_base, scale_slope);
                         if env_str!("ENOMOTO_DEBUG_XB_DRIFT_EXT").is_some() {
                             eprintln!("DEBUG_XB_DRIFT_REL: iter={iter_idx} scale_base={scale_base:.3e} scale_slope={scale_slope:.3e} refactor={need_refactor}");
                         }

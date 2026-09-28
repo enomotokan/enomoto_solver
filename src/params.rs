@@ -421,12 +421,20 @@ pub(crate) mod slope_intercept_dual {
     pub(crate) const INFEASIBLE_PLATEAU_BUDGET_DIVISOR: usize = 4;
 
     /// S2: ドリフト残差の事前検査で使う巡回行サンプルの間隔 `k`(`k >= 2` で有効、0 = オフ)。
-    /// `ENOMOTO_XB_DRIFT_SAMPLE` で上書き可。
-    pub(crate) const XB_DRIFT_SAMPLE_K: usize = 0;
+    /// `ENOMOTO_XB_DRIFT_SAMPLE` で上書き可。作業 #10 (C) で既定を 0 → 10 に: 標本 (1/10 の行) の推定残差が
+    /// 許容誤差 (直近の相対判定の尺度を含む) の `XB_DRIFT_SAMPLE_GUARD` 倍以下なら全体の検査を省き、
+    /// `XB_CHECK_FULL_EVERY` 回に 1 回は全体の検査を行う。全体の検査が再分解を決めない限り経路は変わらない
+    /// (標本が許容誤差の 1/10 以下と言い、かつ全体が許容誤差を超える場合だけ、再分解が最大
+    /// `XB_CHECK_FULL_EVERY - 1` 回の検査ぶん遅れる)。ken-11 -9%。
+    pub(crate) const XB_DRIFT_SAMPLE_K: usize = 10;
 
     /// S2: サンプル推定の残差が `XB_DRIFT_SAMPLE_GUARD * 許容誤差` 以下なら全体の検査を省く。
     /// `ENOMOTO_XB_DRIFT_SAMPLE_GUARD` で上書き可。
     pub(crate) const XB_DRIFT_SAMPLE_GUARD: f64 = 0.1;
+
+    /// 作業 #10 (C): S2 の標本検査で全体の検査を省いても、この回数の検査に 1 回は全体の検査を行う
+    /// (`ENOMOTO_T_XB_CHECK_FULL_EVERY`、0 = 上限なし)。
+    pub(crate) const XB_CHECK_FULL_EVERY: usize = 5;
 
     /// 新規残差の下限の係数(0 = オフ): 再分解直後の残差 `r` がすでに許容誤差の
     /// [`XB_DRIFT_FRESH_FLOOR_FRAC`] 倍を超えていれば、次の再分解まで `XB_DRIFT_FRESH_FLOOR_FACTOR * r`
