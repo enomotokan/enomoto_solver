@@ -4173,6 +4173,76 @@ impl MonoMaxQueue {
     }
 }
 
+/// 作業 #10 (F): 超疎 BTRAN の待ち行列 (最小・最大) を `BinaryHeap` と [`MonoMaxQueue`] で差し替えるための共通の形。
+trait PosQueue {
+    fn qpush(&mut self, k: usize);
+    fn qpop(&mut self) -> Option<usize>;
+    fn qclear(&mut self);
+}
+
+impl PosQueue for BinaryHeap<u32> {
+    #[inline(always)]
+    fn qpush(&mut self, k: usize) {
+        self.push(k as u32);
+    }
+    #[inline(always)]
+    fn qpop(&mut self) -> Option<usize> {
+        self.pop().map(|k| k as usize)
+    }
+    fn qclear(&mut self) {
+        self.clear();
+    }
+}
+
+impl PosQueue for BinaryHeap<Reverse<u32>> {
+    #[inline(always)]
+    fn qpush(&mut self, k: usize) {
+        self.push(Reverse(k as u32));
+    }
+    #[inline(always)]
+    fn qpop(&mut self) -> Option<usize> {
+        self.pop().map(|Reverse(k)| k as usize)
+    }
+    fn qclear(&mut self) {
+        self.clear();
+    }
+}
+
+impl PosQueue for MonoMaxQueue {
+    #[inline(always)]
+    fn qpush(&mut self, k: usize) {
+        self.push(k);
+    }
+    #[inline(always)]
+    fn qpop(&mut self) -> Option<usize> {
+        self.pop()
+    }
+    fn qclear(&mut self) {
+        self.clear();
+    }
+}
+
+/// [`MonoMaxQueue`] を位置の昇順に取り出すもの (位置 `k` を `n - 1 - k` として積む)。積む位置は常に直前に
+/// 取り出した位置より大きいこと (超疎 `U^T` 段)。
+struct MonoMinQueue<'a> {
+    q: &'a mut MonoMaxQueue,
+    n: usize,
+}
+
+impl PosQueue for MonoMinQueue<'_> {
+    #[inline(always)]
+    fn qpush(&mut self, k: usize) {
+        self.q.push(self.n - 1 - k);
+    }
+    #[inline(always)]
+    fn qpop(&mut self) -> Option<usize> {
+        self.q.pop().map(|k| self.n - 1 - k)
+    }
+    fn qclear(&mut self) {
+        self.q.clear();
+    }
+}
+
 /// 疎 FTRAN の後始末: `U` 段を超疎に行った (`hyper`) なら非ゼロになりうるのは
 /// `gp.u_list` の位置だけなので、そこだけ 0 に戻す (策1)。そうでなければ全体を戻す。
 #[inline]
@@ -4289,6 +4359,10 @@ pub struct UnitBtranWork {
     uheap: BinaryHeap<Reverse<u32>>,
     /// `L^T` 段の最大ヒープ (ステップ)。
     lheap: BinaryHeap<u32>,
+    /// 作業 #10 (F): `U^T` 段・`L^T` 段のビット集合の待ち行列 (`ENOMOTO_T_BTRAN_BITQUEUE=0` でヒープ)。
+    uq: MonoMaxQueue,
+    lq: MonoMaxQueue,
+    bitqueue: bool,
     /// `out` の非ゼロ位置の記録 (元の行番号)。
     y: NzTrack,
     /// 今回の `out` の非ゼロ行 (昇順)。`rows_valid` の間だけ有効。
@@ -4310,6 +4384,9 @@ impl UnitBtranWork {
             marks: EpochMarks::new(m),
             uheap: BinaryHeap::new(),
             lheap: BinaryHeap::new(),
+            uq: MonoMaxQueue::default(),
+            lq: MonoMaxQueue::default(),
+            bitqueue: tunable!("ENOMOTO_T_BTRAN_BITQUEUE", 1u8, u8) != 0,
             y: NzTrack::new(),
             rows: Vec::new(),
             rows_valid: false,
@@ -6692,7 +6769,7 @@ impl FtLu {
         }
         // 策2 の超疎経路を試すか (微小値切捨てがあるときは全走査の判定に任せる)。
         let hyper = work.sparse && work.density < 0.5 * tunable!("ENOMOTO_T_BTRAN_HYPER_FRACTION", BTRAN_HYPER_FRACTION, f64) && tiny_drop() <= 0.0;
-        let UnitBtranWork { w, touch, e_touch, e_full, marks, uheap, lheap, y, rows, rows_valid, density, .. } = work;
+        let UnitBtranWork { w, touch, e_touch, e_full, marks, uheap, lheap, uq, lq, bitqueue, y, rows, rows_valid, density, .. } = work;
         // 結果の非ゼロ率を移動平均に畳み込む。
         let mut record = |nnz_frac: f64| {
             let a = tunable!("ENOMOTO_T_DENSITY_AVERAGE_MULTIPLIER", DENSITY_AVERAGE_MULTIPLIER, f64);
@@ -6705,7 +6782,18 @@ impl FtLu {
         touch.clear();
         touch.push(s0);
         // 非ゼロ位置の記録が溢れずに済んだか
-        let tracked = if hyper { self.u_transpose_sweep_heap(w, touch, marks, uheap) } else { self.u_transpose_sweep_track(w, touch) };
+        let tracked = if hyper {
+            if *bitqueue {
+                // `U^T` 順の位置は `singles.len() + u_seq` のヘッダ数未満。
+                let n = self.singles.len() + self.u_seq.n_headers();
+                uq.ensure(n);
+                self.u_transpose_sweep_heap(w, touch, marks, &mut MonoMinQueue { q: uq, n })
+            } else {
+                self.u_transpose_sweep_heap(w, touch, marks, uheap)
+            }
+        } else {
+            self.u_transpose_sweep_track(w, touch)
+        };
         // `e_tilde` の記録: 前回の位置を消してから今回の値を書く。
         if *e_full {
             e_tilde_out.fill(0.0);
@@ -6763,7 +6851,13 @@ impl FtLu {
         }
         self.add_tick(m as u64);
         if list_ok {
-            if self.l_transpose_hyper_out(w, out, cap.as_deref_mut(), touch, marks, lheap, y, rows) {
+            let ok = if *bitqueue {
+                lq.ensure(self.base.m);
+                self.l_transpose_hyper_out(w, out, cap.as_deref_mut(), touch, marks, lq, y, rows)
+            } else {
+                self.l_transpose_hyper_out(w, out, cap.as_deref_mut(), touch, marks, lheap, y, rows)
+            };
+            if ok {
                 *rows_valid = true;
                 record(rows.len() as f64 / m.max(1) as f64);
                 return;
@@ -6791,18 +6885,17 @@ impl FtLu {
     /// 取り出した時点で `z[p]` は確定しており、全走査と同じスロットを同じ順に処理する
     /// (値・tick ともビット一致)。`touch` が [`BTRAN_HYPER_FRACTION`] `* m` を超えたら
     /// 次のキーから全走査に切り替えて `false` を返す (`touch` は不完全になる)。
-    fn u_transpose_sweep_heap(&self, z: &mut [f64], touch: &mut Vec<usize>, marks: &mut EpochMarks, heap: &mut BinaryHeap<Reverse<u32>>) -> bool {
+    fn u_transpose_sweep_heap<Q: PosQueue>(&self, z: &mut [f64], touch: &mut Vec<usize>, marks: &mut EpochMarks, heap: &mut Q) -> bool {
         let m = self.base.m;
         self.add_tick(m as u64);
         let limit = (tunable!("ENOMOTO_T_BTRAN_HYPER_FRACTION", BTRAN_HYPER_FRACTION, f64) * m as f64) as usize;
         marks.begin();
-        heap.clear();
+        heap.qclear();
         for &p in touch.iter() {
             marks.mark(p);
-            heap.push(Reverse(self.u_transpose_key(p) as u32));
+            heap.qpush(self.u_transpose_key(p));
         }
-        while let Some(Reverse(k)) = heap.pop() {
-            let k = k as usize;
+        while let Some(k) = heap.qpop() {
             let (p, pivot) = self.u_transpose_at(k);
             let zp = z[p];
             if zp == 0.0 {
@@ -6817,7 +6910,7 @@ impl FtLu {
                 if !marks.is_marked(q) {
                     marks.mark(q);
                     touch.push(q);
-                    heap.push(Reverse(self.u_transpose_key(q) as u32));
+                    heap.qpush(self.u_transpose_key(q));
                 }
             };
             for (&q, &v) in orow.idx.iter().zip(orow.val) {
@@ -6830,7 +6923,7 @@ impl FtLu {
             }
             if touch.len() > limit {
                 // 残り (キー `k` より後) は全走査で処理する。
-                heap.clear();
+                heap.qclear();
                 let ns = self.singles.len();
                 let total = ns + self.u_seq.n_headers();
                 for kk in k + 1..total {
@@ -6898,7 +6991,7 @@ impl FtLu {
         cap: Option<&mut StepCapture>,
         touch: &mut Vec<usize>,
         marks: &mut EpochMarks,
-        heap: &mut BinaryHeap<u32>,
+        heap: &mut impl PosQueue,
         y: &mut NzTrack,
         rows: &mut Vec<usize>,
     ) -> bool {
@@ -6916,13 +7009,12 @@ impl FtLu {
         PROF_BTRAN_L_SCATTER.fetch_add(1, Ordering::Relaxed);
         let abort = (tunable!("ENOMOTO_T_BTRAN_HYPER_FRACTION", BTRAN_HYPER_FRACTION, f64) * m as f64) as usize;
         marks.begin();
-        heap.clear();
+        heap.qclear();
         for &s in touch.iter() {
             marks.mark(s);
-            heap.push(s as u32);
+            heap.qpush(s);
         }
-        while let Some(s) = heap.pop() {
-            let s = s as usize;
+        while let Some(s) = heap.qpop() {
             let ws = w[s];
             if ws == 0.0 {
                 continue;
@@ -6936,12 +7028,12 @@ impl FtLu {
                 if !marks.is_marked(k) {
                     marks.mark(k);
                     touch.push(k);
-                    heap.push(k as u32);
+                    heap.qpush(k);
                 }
             });
             if touch.len() > abort {
                 // 残り (ステップ `s` 未満) は全走査のスキャッタで処理する。
-                heap.clear();
+                heap.qclear();
                 for s2 in (0..s).rev() {
                     let ws = w[s2];
                     if ws == 0.0 {
