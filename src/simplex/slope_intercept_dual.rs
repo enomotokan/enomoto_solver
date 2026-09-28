@@ -1060,16 +1060,41 @@ fn shift_degenerate_costs(std: &StdForm, nb_status: &[Option<NbStatus>], base: f
     n_shifted
 }
 
-/// 作業 #8 対処 6: `x_r`(FTRAN による `x_B[r]`)と `rho^T rhs`(`rho = B^-T e_r`、`rhs = b - N x_N`)のずれを、
-/// 内積の項の大きさの和 `max(1, Σ |rho_i rhs_i|)` に対する比で返す。
+/// 作業 #8 対処 6 の主ループ側 (異常時だけ働くので主ループのコード量を増やさないよう別関数): ずれを診断に記録し、
+/// 最初の求解 (`!safe_pivot`) で `tol` を超えたら解き直しを要求して真を返す。
 #[inline(never)]
-fn xb_row_mismatch(rho: &[f64], rhs: &[f64], x_r: f64) -> f64 {
-    let (mut t, mut scale) = (0.0f64, 0.0f64);
-    for (&a, &b) in rho.iter().zip(rhs) {
-        if a != 0.0 {
-            t += a * b;
-            scale += (a * b).abs();
+#[allow(clippy::too_many_arguments)]
+fn xb_consistency_bailout(rho: &[f64], rows: Option<&[u32]>, rhs: &[f64], x_r: f64, tol: f64, safe_pivot: bool, debug: bool, iter: usize, r: usize, diag: &mut (f64, usize)) -> bool {
+    let rel = xb_row_mismatch(rho, rows, rhs, x_r);
+    if rel > diag.0 {
+        *diag = (rel, iter);
+    }
+    if tol > 0.0 && rel > tol && !safe_pivot {
+        RESTART_BAILOUT.with(|f| f.set(true));
+        if debug {
+            eprintln!("DEBUG_EXT_BAILOUT: x_B[{r}] inconsistent with rho^T(b - N x_N) (rel {rel:.3e}) at iter={iter} -> restart with re-perturbed costs");
         }
+        return true;
+    }
+    false
+}
+
+/// 作業 #8 対処 6: `x_r`(FTRAN による `x_B[r]`)と `rho^T rhs`(`rho = B^-T e_r`、`rhs = b - N x_N`)のずれを、
+/// 内積の項の大きさの和 `max(1, Σ |rho_i rhs_i|)` に対する比で返す。`rows` は `rho` の非ゼロ行の一覧 (PRICE の `rho_rows`、
+/// `|rho_i| > TOL` の行) で、あればそれだけを走査する (大きな問題で再分解ごとの `O(m)` を避ける)。
+#[inline(never)]
+fn xb_row_mismatch(rho: &[f64], rows: Option<&[u32]>, rhs: &[f64], x_r: f64) -> f64 {
+    let (mut t, mut scale) = (0.0f64, 0.0f64);
+    let mut add = |i: usize| {
+        let a = rho[i];
+        if a != 0.0 {
+            t += a * rhs[i];
+            scale += (a * rhs[i]).abs();
+        }
+    };
+    match rows {
+        Some(rows) => rows.iter().for_each(|&i| add(i as usize)),
+        None => (0..rho.len()).for_each(add),
     }
     (x_r - t).abs() / scale.max(1.0)
 }
@@ -3658,18 +3683,10 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         // 作業 #8 対処 6: 再分解直後 (FT 更新 0 回) の段階 B の行 `r` で、LU の FTRAN による `x_B[r]` と BTRAN の `rho` による
         // `rho^T (b - N x_N)` を照合する。両者が相対 `xb_consistency_tol` を超えてずれるなら基底は数値的に壊れている
         // (pilot87 の誤 infeasible では -7.34 と +2.70)ので、最初の求解では摂動を掛け直して安全モードで解き直す。
-        if (xb_consistency_tol > 0.0 || noise_diag) && phase == Phase::B && lu.update_count() == 0 {
-            let rel = xb_row_mismatch(&rho, &rhs_inc_base, x_b_base[r]);
-            if rel > diag_xb_mismatch.0 {
-                diag_xb_mismatch = (rel, iter_idx);
-            }
-            if xb_consistency_tol > 0.0 && rel > xb_consistency_tol && !safe_pivot {
-                RESTART_BAILOUT.with(|f| f.set(true));
-                if noise_diag {
-                    eprintln!("DEBUG_EXT_BAILOUT: x_B[{r}] inconsistent with rho^T(b - N x_N) (rel {rel:.3e}) at iter={iter_idx} -> restart with re-perturbed costs");
-                }
-                return None;
-            }
+        if (xb_consistency_tol > 0.0 || noise_diag) && phase == Phase::B && lu.update_count() == 0
+            && xb_consistency_bailout(&rho, rho_list_len.map(|k| &rho_rows[..k]), &rhs_inc_base, x_b_base[r], xb_consistency_tol, safe_pivot, noise_diag, iter_idx, r, &mut diag_xb_mismatch)
+        {
+            return None;
         }
         // Eligible 内の `Zero` 列(あれば BFRT を行わずこれにピボットする)。
         let mut zero_pick: Option<Cand>;
@@ -6770,8 +6787,9 @@ mod tests {
     fn xb_row_mismatch_is_relative_to_the_dot_product_terms() {
         let rho = [2.0, 0.0, -1.0];
         let rhs = [3.0, 100.0, 1.0];
-        assert_eq!(xb_row_mismatch(&rho, &rhs, 5.0), 0.0);
-        assert!((xb_row_mismatch(&rho, &rhs, 5.7) - 0.1).abs() < 1e-12);
-        assert!((xb_row_mismatch(&[0.0, 0.0, 0.0], &rhs, 0.5) - 0.5).abs() < 1e-12);
+        assert_eq!(xb_row_mismatch(&rho, None, &rhs, 5.0), 0.0);
+        assert!((xb_row_mismatch(&rho, None, &rhs, 5.7) - 0.1).abs() < 1e-12);
+        assert!((xb_row_mismatch(&rho, Some(&[0, 2]), &rhs, 5.7) - 0.1).abs() < 1e-12);
+        assert!((xb_row_mismatch(&[0.0, 0.0, 0.0], None, &rhs, 0.5) - 0.5).abs() < 1e-12);
     }
 }
