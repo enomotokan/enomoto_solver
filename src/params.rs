@@ -679,6 +679,20 @@ pub(crate) mod lu {
     /// 全走査にする (HiGHS の `kHyperFtranU` は 0.10)。
     pub(crate) const U_HYPER_ABORT_FRACTION: f64 = 0.25;
 
+    /// 作業 #10 (B): 部分 `tau` (策12) と通常の `tau` (超疎 `U` 段か全走査) の手間の移動平均の重み
+    /// (`ENOMOTO_T_PARTIAL_TAU_COST_EMA`)。手間はどちらも「触れる非ゼロの数 + ヒープ・ソートの比較回数
+    /// (長さ × log2) + 全走査なら `m`」で数え、決定的 (時間は測らない) にして経路を再現可能に保つ。
+    pub(crate) const PARTIAL_TAU_COST_EMA: f64 = 0.2;
+
+    /// 作業 #10 (B): 安いほうを選び続けている間も、この反復数ごとに 1 回もう一方で解いて手間を測り直す
+    /// (`ENOMOTO_T_PARTIAL_TAU_PROBE`、0 = 測り直さない)。`tau` の密度は求解の途中で変わる (ken-13 は
+    /// 1.5%、pds-100 は約 9%) ので、固定の密度閾値ではなく実測の手間で選ぶ。測り直しの損は最大 1/この値。
+    pub(crate) const PARTIAL_TAU_PROBE: u32 = 32;
+
+    /// 作業 #10 (B): 測り直しの間隔の上限。選択が変わらない間は間隔を倍々に伸ばす (stormG2_1000 では通常の `tau` が
+    /// 部分 `tau` の数倍高く、32 反復ごとの測り直しだけで +14% だった)。
+    pub(crate) const PARTIAL_TAU_PROBE_MAX: u32 = 4096;
+
     /// BTRAN 結果の非ゼロステップ記録 (`StepCapture`) を諦める非ゼロ率 (`m` に対する割合、
     /// `ENOMOTO_T_TAU_GP_FRACTION`)。これ以下なら続く `tau` FTRAN の `L` 段を GP で行う。
     pub(crate) const TAU_GP_FRACTION: f64 = 0.1;

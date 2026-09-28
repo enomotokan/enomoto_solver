@@ -28,7 +28,7 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
-use crate::params::lu::{BORDER_MAX_COUNT, BORDER_MAX_FRACTION, BTRAN_HYPER_FRACTION, BTRAN_L_SCATTER_FRACTION, BUCKET_POOL_MAX, DENSE_COL_FRACTION, DENSE_ETA_FRACTION, DENSE_INPUT_FRACTION, DENSE_RHS_FRACTION, DENSE_BLOCK_TICK_FRACTION, DENSE_SWITCH_AUTO_FRACTION, DENSE_SWITCH_AUTO_LU_PER_ROW, DENSE_SWITCH_AUTO_MIN_M, DENSE_SWITCH_CHECK_INTERVAL, DENSE_SWITCH_FRACTION, DENSE_SWITCH_MIN_ROWS, DENSITY_AVERAGE_MULTIPLIER, EXPECTED_DENSE_FRACTION, KERNEL_LINEAR_SCAN_MAX, KERNEL_MIN_RUN_CAP, KERNEL_RESERVE_EXTRA, KERNEL_RESERVE_MULT, PIVOT_ROW_SEARCH_MAX_DEGREE, PIVOT_SEARCH_LIMIT, PIVOT_THRESHOLD_FACTOR, PIVOT_THRESHOLD_MAX, PIVOT_THRESHOLD_MIN, R_SPARSE_MIN_ETAS, REBUILD_FILL_LIMIT, SPARSE_PATH_MIN_M, REBUILD_MIN_PIVOT, REUSE_BACKOFF_SHIFT_CAP, REUSE_MAX_BACKOFF, STABILITY, TAU_GP_FRACTION, TICK_BUILD_FLOP_COEF, TICK_BUILD_LU_COEF, TICK_BUILD_M_COEF, TICK_SOLVE_NNZ_COEF, TINY_DROP, U_HYPER_ABORT_FRACTION};
+use crate::params::lu::{BORDER_MAX_COUNT, BORDER_MAX_FRACTION, BTRAN_HYPER_FRACTION, BTRAN_L_SCATTER_FRACTION, BUCKET_POOL_MAX, DENSE_COL_FRACTION, DENSE_ETA_FRACTION, DENSE_INPUT_FRACTION, DENSE_RHS_FRACTION, DENSE_BLOCK_TICK_FRACTION, DENSE_SWITCH_AUTO_FRACTION, DENSE_SWITCH_AUTO_LU_PER_ROW, DENSE_SWITCH_AUTO_MIN_M, DENSE_SWITCH_CHECK_INTERVAL, DENSE_SWITCH_FRACTION, DENSE_SWITCH_MIN_ROWS, DENSITY_AVERAGE_MULTIPLIER, EXPECTED_DENSE_FRACTION, KERNEL_LINEAR_SCAN_MAX, KERNEL_MIN_RUN_CAP, KERNEL_RESERVE_EXTRA, KERNEL_RESERVE_MULT, PIVOT_ROW_SEARCH_MAX_DEGREE, PIVOT_SEARCH_LIMIT, PIVOT_THRESHOLD_FACTOR, PIVOT_THRESHOLD_MAX, PIVOT_THRESHOLD_MIN, R_SPARSE_MIN_ETAS, REBUILD_FILL_LIMIT, SPARSE_PATH_MIN_M, REBUILD_MIN_PIVOT, REUSE_BACKOFF_SHIFT_CAP, REUSE_MAX_BACKOFF, STABILITY, TAU_GP_FRACTION, TICK_BUILD_FLOP_COEF, TICK_BUILD_LU_COEF, TICK_BUILD_M_COEF, TICK_SOLVE_NNZ_COEF, TINY_DROP, U_HYPER_ABORT_FRACTION, PARTIAL_TAU_COST_EMA, PARTIAL_TAU_PROBE, PARTIAL_TAU_PROBE_MAX};
 
 /// `L` の列 (および行優先ミラー) の圧縮格納 (密行列の分解の調査 #3)。添字 `u32` と値 `f64` を
 /// 別配列に持つ (1 要素 12 B。旧 [`CscMat`] は `(usize, f64)` の 16 B)。FTRAN/BTRAN の `L` 段は
@@ -3985,12 +3985,63 @@ pub struct FtranTrack {
     tau_partial: bool,
     /// 部分 `tau` の作業領域 (`(u_seq 位置, スロット, 値)`)。
     owners_tmp: Vec<(usize, usize, f64)>,
+    /// 作業 #10 (B): 部分 `tau` の手間の移動平均 (未計測なら `None`)。
+    pt_cost_partial: Option<f64>,
+    /// 作業 #10 (B): 通常の `tau` の `U` 段 (と置換) の手間の移動平均 (未計測なら `None`)。
+    pt_cost_full: Option<f64>,
+    /// 作業 #10 (B): 前回の測り直しからの選択回数。
+    pt_since_probe: u32,
+    /// 作業 #10 (B): 手間で選ぶか (`ENOMOTO_T_PARTIAL_TAU_ADAPTIVE`、0 = 旧版の常に部分 `tau`)、移動平均の重み、測り直しの間隔。
+    pt_adaptive: bool,
+    pt_ema: f64,
+    pt_probe: u32,
+    /// 作業 #10 (B): 現在の測り直しの間隔と、直近の選択。
+    pt_interval: u32,
+    pt_last_pick: bool,
 }
 
 impl FtranTrack {
     /// 全記録が無効な状態で作る。
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            pt_adaptive: tunable!("ENOMOTO_T_PARTIAL_TAU_ADAPTIVE", 1u8, u8) != 0,
+            pt_ema: tunable!("ENOMOTO_T_PARTIAL_TAU_COST_EMA", PARTIAL_TAU_COST_EMA, f64),
+            pt_probe: tunable!("ENOMOTO_T_PARTIAL_TAU_PROBE", PARTIAL_TAU_PROBE, u32),
+            ..Self::default()
+        }
+    }
+
+    /// 作業 #10 (B): この反復の `tau` を部分 `tau` で求めるか。手間の移動平均が小さいほうを選び、
+    /// `pt_probe` 回ごとにもう一方を選んで測り直す。部分 `tau` が未計測なら部分 `tau` (旧版と同じ出だし)、
+    /// 通常の `tau` が未計測なら通常の `tau` を選ぶ。
+    fn pt_choose_partial(&mut self) -> bool {
+        if !self.pt_adaptive {
+            return true;
+        }
+        let (Some(p), Some(f)) = (self.pt_cost_partial, self.pt_cost_full) else {
+            return self.pt_cost_partial.is_none();
+        };
+        let pick = p <= f;
+        // 測り直しの間隔: 選択が前回の測り直しの時と同じなら倍に (上限 `PARTIAL_TAU_PROBE_MAX`)、変わったら初期値に戻す。
+        if pick != self.pt_last_pick {
+            self.pt_last_pick = pick;
+            self.pt_interval = self.pt_probe;
+        }
+        self.pt_since_probe += 1;
+        if self.pt_probe > 0 && self.pt_since_probe >= self.pt_interval.max(self.pt_probe) {
+            self.pt_since_probe = 0;
+            self.pt_interval = (self.pt_interval.max(self.pt_probe) * 2).min(PARTIAL_TAU_PROBE_MAX);
+            return !pick;
+        }
+        pick
+    }
+
+    /// 作業 #10 (B): 手間の移動平均を更新する。
+    fn pt_record(slot: &mut Option<f64>, w: f64, cost: f64) {
+        *slot = Some(match *slot {
+            Some(old) => old + w * (cost - old),
+            None => cost,
+        });
     }
 
     /// 直前の融合 FTRAN が `tau` を部分的に求めたか ([`Self::partial_tau`])。
@@ -4011,6 +4062,12 @@ fn take_b_clean(track: &mut Option<&mut FtranTrack>) -> bool {
         }
         None => false,
     }
+}
+
+/// `ceil(log2(n))` (`n <= 1` なら 1)。手間の見積り用。
+#[inline]
+fn ceil_log2(n: usize) -> usize {
+    (usize::BITS - n.max(2).saturating_sub(1).leading_zeros()) as usize
 }
 
 /// 融合 FTRAN の `R` eta 適用の前に、各ベクトルの `r_seeds` を空にする。
@@ -5000,8 +5057,9 @@ impl FtLu {
     ///
     /// 閉包の辺数が [`U_HYPER_ABORT_FRACTION`] `* m` を超える、または `U` に密 eta がある場合は
     /// `x` に触れずに `false` を返す。CLOCK tick は集めた寄与の数だけ加える (全体の `U` 段とは違う)。
-    fn u_solve_partial(&self, x: &mut [f64], alpha_x: &[f64], a_list: &[usize], gp: &mut GpScratch, tmp: &mut Vec<(usize, usize, f64)>) -> bool {
+    fn u_solve_partial(&self, x: &mut [f64], alpha_x: &[f64], a_list: &[usize], gp: &mut GpScratch, tmp: &mut Vec<(usize, usize, f64)>, work_out: &mut u64) -> bool {
         let m = self.base.m;
+        *work_out = 0;
         if !self.u_seq.dense.is_empty() {
             return false;
         }
@@ -5027,6 +5085,7 @@ impl FtLu {
             let oq = orow.idx;
             edges += oq.len();
             if edges > limit {
+                *work_out = (edges + u_list.len()) as u64;
                 return false;
             }
             for &q in oq {
@@ -5040,6 +5099,39 @@ impl FtLu {
         // `u_seq` 位置の降順、シングルトン (位置なし) は最後。
         let slot_pos = &self.slot_pos;
         u_list.sort_unstable_by_key(|&p| Reverse(if slot_pos[p] == usize::MAX { 0 } else { slot_pos[p] + 1 }));
+        if tunable!("ENOMOTO_T_PARTIAL_TAU_PUSH", 1u8, u8) != 0 {
+            // 作業 #10 (B): 閉包のスロットを位置の降順に、各スロットの eta 列 (`u_seq` の列) を閉包内の行にだけ
+            // 散布する (全体の `U` 段と同じ列指向の演算を閉包に制限したもの)。スロット `p` への寄与は
+            // eta の位置の降順に届くので、行ごとに所有者をコピーして位置でソートする旧版 (下) と同じ値・同じ順序
+            // (`p` の所有者はすべて閉包に入っていて、`p` より前に処理が済んでいる)。値 0 のスロットの eta は飛ばす
+            // (全体の `U` 段・旧版の `xq != 0.0` と同じ)。tick は旧版と同じ「閉包の所有者の延べ数」。
+            let mut push_work = 0usize;
+            for &q in u_list.iter() {
+                let k = slot_pos[q];
+                if k == usize::MAX {
+                    continue;
+                }
+                let mut xq = x[q];
+                if xq == 0.0 {
+                    continue;
+                }
+                xq /= self.u_seq.pivot[k];
+                x[q] = xq;
+                let (idx, val) = self.u_seq.seg(k);
+                push_work += idx.len();
+                for (&r, &v) in idx.iter().zip(val.iter()) {
+                    let r = r as usize;
+                    if u_marks.is_marked(r) {
+                        // 全体の `U` 段の `x[r] += (-x[q]) * v` と同じ演算。
+                        x[r] += -xq * v;
+                    }
+                }
+            }
+            self.add_tick(edges as u64);
+            let n = u_list.len();
+            *work_out = (edges + push_work + n * ceil_log2(n)) as u64;
+            return true;
+        }
         let mut work = 0u64;
         for &p in u_list.iter() {
             let mut xp = x[p];
@@ -5063,6 +5155,8 @@ impl FtLu {
             x[p] = xp;
         }
         self.add_tick(work);
+        let n = u_list.len();
+        *work_out = 2 * work + (n * ceil_log2(n)) as u64;
         true
     }
 
@@ -5988,13 +6082,26 @@ impl FtLu {
         self.add_tick(2 * m);
         let a_u = self.try_u_hyper(scratch_a, gp_a.as_deref_mut());
         // 策12: 要求があり `a` が超疎に解けたら、`tau` は `a` の非ゼロのスロットでだけ求める。
-        let b_partial = match (a_u, gp_a.as_deref(), gp_b.as_deref_mut(), track.as_deref_mut()) {
-            (UHyper::Hyper, Some(ga), Some(gb), Some(t)) if t.partial_tau && self.u_hyper_ok(gb) => self.u_solve_partial(scratch_b, scratch_a, &ga.u_list, gb, &mut t.owners_tmp),
-            _ => false,
-        };
+        // 作業 #10 (B): 部分 `tau` と通常の `tau` の手間 (決定的な作業量) の移動平均を比べて安いほうを選ぶ
+        // (`FtranTrack::pt_choose_partial`)。部分 `tau` の閉包は値によらず依存する `U` 行を全部たどるので、
+        // `tau` が疎な問題 (ken-13: 1.5%) では通常の超疎 `U` 段のほうが安く、密な問題では部分 `tau` が安い。
+        let partial_eligible = matches!((a_u, gp_a.as_deref(), gp_b.as_deref(), track.as_deref()), (UHyper::Hyper, Some(_), Some(gb), Some(t)) if t.partial_tau && self.u_hyper_ok(gb));
+        let mut b_partial = false;
+        if partial_eligible {
+            let (ga, gb, t) = (gp_a.as_deref().unwrap(), gp_b.as_deref_mut().unwrap(), track.as_deref_mut().unwrap());
+            if t.pt_choose_partial() {
+                let mut work = 0u64;
+                b_partial = self.u_solve_partial(scratch_b, scratch_a, &ga.u_list, gb, &mut t.owners_tmp, &mut work);
+                let w = t.pt_ema;
+                FtranTrack::pt_record(&mut t.pt_cost_partial, w, work as f64);
+            }
+        }
+        let tick_b0 = self.tick.get();
         let b_u = if b_partial { UHyper::Hyper } else { self.try_u_hyper(scratch_b, gp_b.as_deref_mut()) };
         // 融合走査に含めるか (超疎段を試さなかったベクトルだけ)
         let (a_scan, b_scan) = (a_u == UHyper::NotTried, b_u == UHyper::NotTried);
+        // 作業 #10 (B): 全走査での `tau` 側の eta の非ゼロ数 (手間の計測用)。
+        let mut b_scan_work = 0usize;
         if a_scan || b_scan {
             for eta in self.u_seq.iter().rev() {
                 let p = eta.slot;
@@ -6007,10 +6114,27 @@ impl FtLu {
                 if b_scan && scratch_b[p] != 0.0 {
                     scratch_b[p] /= self.u_seq.pivot[eta.k];
                     let xp = scratch_b[p];
-                    self.add_tick(self.u_seq.nnz(eta.k) as u64);
+                    let nz = self.u_seq.nnz(eta.k);
+                    b_scan_work += nz;
+                    self.add_tick(nz as u64);
                     self.u_seq.axpy(eta.k, -xp, scratch_b);
                 }
             }
+        }
+        if partial_eligible && !b_partial {
+            // 通常の `tau` の手間: 超疎なら触れた eta の非ゼロ数 + ヒープの比較 (一覧長 × log2)、
+            // 全走査 (超疎を諦めた場合を含む) なら `U` のヘッダ走査と置換の `2m` を加える。
+            let cost = match b_u {
+                UHyper::Hyper => {
+                    let n = gp_b.as_deref().map_or(0, |g| g.u_list.len());
+                    (self.tick.get() - tick_b0) as f64 / TICK_SOLVE_NNZ_COEF as f64 + (n * ceil_log2(n)) as f64
+                }
+                UHyper::Full => (self.tick.get() - tick_b0) as f64 / TICK_SOLVE_NNZ_COEF as f64 + 2.0 * m as f64,
+                UHyper::NotTried => b_scan_work as f64 + 2.0 * m as f64,
+            };
+            let t = track.as_deref_mut().unwrap();
+            let w = t.pt_ema;
+            FtranTrack::pt_record(&mut t.pt_cost_full, w, cost);
         }
         // シングルトンの除算は `permute_out` が行う (`single_piv` 参照)。
         let a_list = if a_u == UHyper::Hyper { gp_a.as_deref().map(|g| g.u_list.as_slice()) } else { None };
