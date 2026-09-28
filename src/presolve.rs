@@ -860,7 +860,9 @@ pub fn run_extended(
             timed_step!("aggregator", aggregator::eliminate_implied_free_columns_if_any(n, &a, &b, &c, &lb, &ub, &cur_real_rows, &cur_real_rhs))
         } else {
             // 既定の v2 実装。`None` = 候補なし (問題をコピーせずに判定)。
-            timed_step!("aggregator", aggregator::eliminate_implied_free_columns_v2_if_any(n, &a, &b, &c, &lb, &ub, &cur_real_rows, &cur_real_rhs, aggregator::AggOptions::from_env()))
+            // 作業 #10 (D): ピボット比は均衡化前の係数で判定する (`ENOMOTO_T_AGG_PIVOT_UNSCALED=0` で旧版)。
+            let col_scale: &[f64] = if tunable!("ENOMOTO_T_AGG_PIVOT_UNSCALED", 1u8, u8) != 0 { &sc.d } else { &[] };
+            timed_step!("aggregator", aggregator::eliminate_implied_free_columns_v2_if_any_scaled(n, &a, &b, &c, &lb, &ub, &cur_real_rows, &cur_real_rhs, aggregator::AggOptions::from_env(), col_scale))
         };
         if let Some(agg) = agg {
             if env_str!("ENOMOTO_DEBUG_AGGREGATOR").is_some() {
