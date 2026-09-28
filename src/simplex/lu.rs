@@ -1654,6 +1654,8 @@ struct RSparseWork {
     epoch: u32,
     /// 未処理の eta 番号の最小ヒープ。
     heap: BinaryHeap<Reverse<u32>>,
+    /// 作業 #10 (F): 未処理の eta 番号の待ち行列 (ビット集合)。
+    q: MonoMaxQueue,
 }
 
 /// [`FtLu::u_solve_hyper`] の結果。
@@ -6071,16 +6073,23 @@ impl FtLu {
             work.epoch = 1;
         }
         let epoch = work.epoch;
-        let heap = &mut work.heap;
-        heap.clear();
-        let stamp = &mut work.stamp;
+        // 作業 #10 (F): 積む eta 番号は常に取り出した番号より大きいので、昇順のビット集合の待ち行列で同じ順に取り出せる
+        // (`ENOMOTO_T_R_BITQUEUE=0` で最小ヒープ)。
+        let bitq = tunable!("ENOMOTO_T_R_BITQUEUE", 1u8, u8) != 0;
+        if bitq {
+            work.q.ensure(n_r);
+        }
+        let RSparseWork { stamp, heap: bheap, q, .. } = work;
+        let mut mq = MonoMinQueue { q, n: n_r };
+        let heap: &mut dyn PosQueue = if bitq { &mut mq } else { bheap };
+        heap.qclear();
         for &i in seeds {
             let mut e = self.r_head[i];
             while e != u32::MAX {
                 let k = self.r_owner[e as usize];
                 if stamp[k as usize] != epoch {
                     stamp[k as usize] = epoch;
-                    heap.push(Reverse(k));
+                    heap.qpush(k as usize);
                 }
                 e = self.r_next[e as usize];
             }
@@ -6088,13 +6097,12 @@ impl FtLu {
         for &k in &self.r_dense {
             if stamp[k as usize] != epoch {
                 stamp[k as usize] = epoch;
-                heap.push(Reverse(k));
+                heap.qpush(k as usize);
             }
         }
         // 処理した eta の数
         let mut done = 0usize;
-        while let Some(Reverse(k)) = heap.pop() {
-            let k = k as usize;
+        while let Some(k) = heap.qpop() {
             let slot = self.r_etas.key[k] as usize;
             let dot = self.r_etas.dot(k, x);
             x[slot] -= dot;
@@ -6103,7 +6111,7 @@ impl FtLu {
                 r_seeds.push(slot);
                 if 2 * done > n_r {
                     // 残り (`k` より新しい eta) は全部順に当てる。
-                    heap.clear();
+                    heap.qclear();
                     for k2 in k + 1..n_r {
                         let slot = self.r_etas.key[k2] as usize;
                         let dot = self.r_etas.dot(k2, x);
@@ -6119,7 +6127,7 @@ impl FtLu {
                     let k2 = self.r_owner[e as usize];
                     if k2 as usize > k && stamp[k2 as usize] != epoch {
                         stamp[k2 as usize] = epoch;
-                        heap.push(Reverse(k2));
+                        heap.qpush(k2 as usize);
                     }
                     e = self.r_next[e as usize];
                 }
