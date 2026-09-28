@@ -1118,7 +1118,10 @@ pub fn run_extended(
 
     if env_str!("ENOMOTO_DEBUG_PRESOLVE_HASH").is_some() {
         let (g, h) = propagate::rebuild_g_ref(n, &free.real_rows, &free.real_rhs, &lb, &ub);
-        eprintln!("PRESOLVE_HASH {:016x} m_eq={} m_le={} post={}", presolve_output_hash(&a, &b, &g, &h, &c, &lb, &ub), a.nrows(), g.nrows(), postsolve_log.len());
+        // 等式行の非零数・多変数の不等式行の本数と非零数 (前処理後の問題の形の比較用)。
+        let nnz_eq = a.compute_nnz();
+        let (n_multi, nnz_multi) = free.real_rows.iter().filter(|r| r.len() > 1).fold((0usize, 0usize), |(k, z), r| (k + 1, z + r.len()));
+        eprintln!("PRESOLVE_HASH {:016x} m_eq={} m_le={} post={} nnz_eq={nnz_eq} multi_le={n_multi} nnz_multi_le={nnz_multi}", presolve_output_hash(&a, &b, &g, &h, &c, &lb, &ub), a.nrows(), g.nrows(), postsolve_log.len());
     }
 
     ExtendedPresolveResult {
