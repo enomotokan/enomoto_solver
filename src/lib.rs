@@ -15,6 +15,7 @@
 //!   - `sparse` — 疎行列 (CSR/CSC)・疎ベクトル・疎アキュムレータなど疎データ構造の一式。
 //!   - `graph` — 二部マッチング・強連結成分分解などのグラフアルゴリズム。
 //!   - `params` — 閾値・許容誤差・反復上限などの調整用定数をすべて集約したもの。
+//!   - `phase_timing` — 求解の節目 (前処理の終わり、段階 A/B の結論) の時刻の記録 (計測用)。
 //!
 //! `src/legacy/` は最初期の実装の残骸で、コンパイル対象外 (`mod` 宣言なし)。
 //! 開発経緯は `docs/improvement_history.md` などを参照。
@@ -48,6 +49,7 @@ mod interior_point;
 mod mip;
 mod model;
 mod params;
+mod phase_timing;
 mod presolve;
 mod simplex;
 mod solver;
@@ -124,9 +126,17 @@ static GLOBAL: SplitAlloc = SplitAlloc;
 
 use model::PyModel;
 
-/// Python 拡張モジュール `enomoto_solver._core` の初期化。`PyModel` クラスを登録する。
+/// 直近の LP 求解の節目の時刻 `[(名前, 開始からの秒), ...]` (`phase_timing` 参照)。
+#[pyfunction]
+fn last_solve_events() -> Vec<(&'static str, f64)> {
+    phase_timing::events()
+}
+
+/// Python 拡張モジュール `enomoto_solver._core` の初期化。`PyModel` クラスと
+/// `last_solve_events` を登録する。
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyModel>()?;
+    m.add_function(wrap_pyfunction!(last_solve_events, m)?)?;
     Ok(())
 }

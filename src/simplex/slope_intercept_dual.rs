@@ -2340,6 +2340,7 @@ pub fn solve_slope_intercept_dual(std: &StdForm, opts: &crate::types::LpOptions)
     if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
         eprintln!("DEBUG_EXT: {} bailout, retrying with safe_pivot and full cost perturbation", if uncertified { "broken-basis/max-iters" } else { "singular-basis" });
     }
+    crate::phase_timing::mark("retry");
     // 作業 #8 対処 5: 解き直しでは費用摂動を既定の大きさに戻す (試験用の縮小 `ENOMOTO_T_PERTURB_*FACTOR` を無視する。
     // 既定の設定では摂動は変わらない)。
     super::set_full_cost_perturbation(true);
@@ -2408,6 +2409,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
             let status = if active_cost[j] >= -TOL { NbStatus::Lower } else { NbStatus::Upper };
             let val = nb_value_affine(&cache_orig, status, j)?;
             if val.slope != 0.0 && active_cost[j].abs() > TOL {
+                crate::phase_timing::mark("trivial_unbounded");
                 return Some(SimplexResult { status: Status::Unbounded, x: None });
             }
             x[j] = val.base;
@@ -2442,6 +2444,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
             eprintln!("DEBUG_EXT: stage A skipped (S empty)");
         }
+        crate::phase_timing::mark("stage_a_skipped");
         ColCache::intercept_problem(&cache_orig, &nb_status, &basis, &vec![0.0; m])?
     } else {
         match phase {
@@ -3487,6 +3490,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                 if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
                     eprintln!("DEBUG_EXT: stage_a_iters={iter_idx} z1={z1}");
                 }
+                crate::phase_timing::mark(if z1 < -Z_SLOPE_TOL { "stage_a_no_finite_optimum" } else { "stage_a_end" });
                 // `z^1 < 0`: 実行不能か非有界で、有限最適は無い(論文の系 7.3 (i))。どちらかの
                 // 区別を呼び出し側が求めていなければここで `InfeasibleOrUnbounded` を返す。
                 // (`z^1 = 0` なら有限最適か実行不能で、どちらにせよ段階 B が必要。)
@@ -3947,6 +3951,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                 }
                 return None;
             }
+            crate::phase_timing::mark("stage_b_infeasible");
             return Some(SimplexResult { status: Status::Infeasible, x: None });
         }
         // chuzc1 + BFRT パス 1: `bland_mode` では候補全体を並べる必要があるが、通常は歩進が
@@ -4141,6 +4146,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                 }
                 return None;
             }
+            crate::phase_timing::mark("stage_b_infeasible");
             return Some(SimplexResult { status: Status::Infeasible, x: None });
         };
 
@@ -5472,6 +5478,7 @@ fn finish(std: &StdForm, basis: &mut [usize], basis_pos: &mut [Option<usize>], n
         eprintln!("DEBUG_EXT: z=({},{}) z0_base={}", z.base, z.slope, z_b.base);
     }
     if z.slope < -Z_SLOPE_TOL {
+        crate::phase_timing::mark("finish_unbounded");
         return Some(SimplexResult { status: Status::Unbounded, x: None });
     }
 
@@ -6128,6 +6135,11 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
                 }
                 continue;
             }
+            match status {
+                Status::Unbounded => crate::phase_timing::mark("polish_unbounded"),
+                Status::Infeasible => crate::phase_timing::mark("stage_b_infeasible"),
+                _ => {}
+            }
             return Some(SimplexResult {
                 status: status.clone(),
                 x: if status == Status::Optimal { Some(t.x[0..t.n_structural()].to_vec()) } else { None },
@@ -6227,6 +6239,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
                 continue;
             }
             polish_infeas_check!(r, needed);
+            crate::phase_timing::mark("stage_b_infeasible");
             return Some(SimplexResult { status: Status::Infeasible, x: None });
         }
         // `bland_mode` かどうかにかかわらず `(ratio, j)` の昇順に並べる(BFRT の歩進は
@@ -6260,6 +6273,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
             }
             touched_cols.clear();
             polish_infeas_check!(r, needed);
+            crate::phase_timing::mark("stage_b_infeasible");
             return Some(SimplexResult { status: Status::Infeasible, x: None });
         };
 

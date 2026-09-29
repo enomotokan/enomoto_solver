@@ -39,7 +39,6 @@ import csv
 import json
 import math
 import os
-import resource
 import shutil
 import subprocess
 import sys
@@ -263,6 +262,8 @@ def _build_our_model(lp):
 
 def _limit_memory(mem_gb: float):
     def _set() -> None:
+        import resource  # Linux 専用なので使うときだけ読む (問題一覧などは他の OS からも使える)
+
         lim = int(mem_gb * (1 << 30))
         resource.setrlimit(resource.RLIMIT_AS, (lim, lim))
     return _set
