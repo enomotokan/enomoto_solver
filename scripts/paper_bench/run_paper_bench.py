@@ -428,6 +428,38 @@ class Materialized:
             shutil.rmtree(self.workdir, ignore_errors=True)
 
 
+def rewrite_mps(mps: Path, out_dir: Path) -> Path:
+    """HiGHS で読み直し、行・列の名前を付け直した MPS を書く。固定形式の MPS で名前に空白を含む問題
+    (Netlib の forplan など) を CLP/SoPlex が読めないときに使う。問題そのものは変わらない。"""
+    import highspy
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out = out_dir / f"{mps.stem}.renamed.mps"
+    if out.exists():
+        return out
+    h = highspy.Highs()
+    h.setOptionValue("output_flag", False)
+    h.readModel(str(mps))
+    lp = h.getLp()
+    lp.col_names_ = [f"c{j}" for j in range(lp.num_col_)]
+    lp.row_names_ = [f"r{i}" for i in range(lp.num_row_)]
+    w = highspy.Highs()
+    w.setOptionValue("output_flag", False)
+    w.passModel(lp)
+    w.writeModel(str(out))
+    return out
+
+
+def run_solver(s: str, mps: Path, args, prob: Problem) -> dict:
+    """[`run_once`] に、CLP/SoPlex が MPS を読めなかったときの書き直し MPS での再試行を足したもの。"""
+    r = run_once(s, mps, args)
+    if r.get("status") == "read_error" and s in ("clp", "soplex"):
+        renamed = rewrite_mps(mps, args.out_dir / "renamed_mps" / prob.set)
+        r = run_once(s, renamed, args)
+        r["renamed_mps"] = True
+    return r
+
+
 def run_benchmark(args) -> None:
     out_json = args.out_dir / "results.json"
     data = _load(out_json)
@@ -444,6 +476,14 @@ def run_benchmark(args) -> None:
     if data["settings"] and any(data["settings"].get(k) != v for k, v in settings.items() if k != "obj_rtol"):
         raise SystemExit(f"{out_json} は別の設定で計測されている: {data['settings']} (別の --out-dir を使うこと)")
     data["settings"] = settings
+    if args.retry_statuses:
+        # 指定した状態で終わった回があるソルバーは、その問題を最初から測り直す。
+        for key, runs_of in data["runs"].items():
+            for s, runs in runs_of.items():
+                if any(r.get("status") in args.retry_statuses for r in runs):
+                    print(f"retry: {key} {s} ({[r.get('status') for r in runs]})", flush=True)
+                    runs.clear()
+                    data["warmup"].get(key, {}).pop(s, None)
     env = machine_info(args)
     data["environments"].append(env)
     models = {e.get("cpu_model") for e in data["environments"]}
@@ -475,12 +515,12 @@ def run_benchmark(args) -> None:
                     runs = runs_of.setdefault(s, [])
                     if len(runs) != rep or not _needs_more(runs, args.reps, args):
                         continue
-                    r = run_once(s, mps, args)
+                    r = run_solver(s, mps, args, prob)
                     warm = data["warmup"].setdefault(prob.key, {}).setdefault(s, [])
                     if rep == 0 and not warm and r.get("status") in DEFINITIVE and (r.get("time") or 0.0) < args.warmup_below:
                         # 短い問題の 1 回目は遅く出やすい (新しい問題の初回) ので、捨てて測り直す。
                         warm.append(r)
-                        r = run_once(s, mps, args)
+                        r = run_solver(s, mps, args, prob)
                     r["rep"] = rep
                     runs.append(r)
                     _save(data, out_json)
@@ -502,7 +542,7 @@ def run_benchmark(args) -> None:
                     runs = probe.setdefault(s, [])
                     if len(runs) > rep:
                         continue
-                    r = run_once(s, mps, args)
+                    r = run_solver(s, mps, args, prob)
                     r["rep"] = rep
                     runs.append(r)
                     _save(data, out_json)
@@ -683,6 +723,11 @@ def build_report(data: dict, out_dir: Path, exclude: list[str] | None = None) ->
     L.append(f"- 幾何平均・シフト付き幾何平均 (shift {SHIFT:.0f} 秒)・総時間")
     if excluded:
         L.append(f"- 集計から除いた問題: {', '.join(sorted(excluded))}")
+    renamed = sorted({f"{k.split('/', 1)[1]} ({SOLVER_LABEL[s]})" for k, runs_of in data["runs"].items()
+                      if k in cells for s, runs in runs_of.items() if any(r.get("renamed_mps") for r in runs)})
+    if renamed:
+        L.append("- MPS の名前に空白を含むなどで元のファイルを読めなかったため、HiGHS で読み直して名前を"
+                 f"付け直した MPS で解いたもの: {', '.join(renamed)}")
     L.append("")
 
     def agg_table(keys: list[str], title: str) -> None:
@@ -895,6 +940,8 @@ def main() -> None:
     ap.add_argument("--shard", help="i/n: 問題を n 台に分けたときの i 台目 (0 始まり)")
     ap.add_argument("--variability-probe", nargs="*", help="揺らぎの目安のために追加で繰り返し解く問題")
     ap.add_argument("--probe-reps", type=int, default=3)
+    ap.add_argument("--retry-statuses", nargs="*",
+                    help="この状態で終わった回がある問題 × ソルバーを測り直す (例: read_error crash)")
     ap.add_argument("--report-only", action="store_true", help="計測せず results.json から表を作り直す")
     ap.add_argument("--inputs", nargs="*", type=Path, help="--report-only で結合する results.json (複数台の結果)")
     ap.add_argument("--worker", nargs="+", help=argparse.SUPPRESS)
