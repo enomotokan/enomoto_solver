@@ -86,7 +86,27 @@ print(sol.objective, [round(v.value) for v, _, _ in items])   # 220.0 [0, 1, 1]
 
 整数変数を含むモデルは，上の LP 解法で緩和問題を解く深さ優先の分枝限定法で解きます．簡素な実装であり，専用の MIP ソルバーと競うことは想定していません．
 
-## HiGHS との比較(Netlib)
+## ベンチマーク結果
+
+HiGHS 1.15.1，CLP 1.17.11，SoPlex 8.1.0 と 207 問の LP で比較しました(2026年9月29〜30日に計測)．各欄は「解けた問題数 / 求解時間のずらした幾何平均(秒)」です(10 秒ずらし．解けなかった問題は制限時間の 600 秒として計算)．太字は各行で最良の値です．
+
+| 問題集合 | ENOMOTO | HiGHS | CLP | SoPlex |
+|---|---|---|---|---|
+| Netlib，有限の最適解あり(93問) | 93 / **0.152** | 93 / 0.166 | 93 / 0.164 | 92 / 0.741 |
+| Kennington(16問) | 16 / **0.964** | 16 / 1.68 | 16 / 1.16 | 16 / 5.76 |
+| Mittelmann LPopt(40問) | 12 / **377** | 11 / 405 | **18** / 393 | 7 / 503 |
+| Netlib 実行不可能(29問) | 29 / **0.00597** | 29 / 0.0154 | 29 / 0.0743 | 28 / 1.53 |
+| 実行不可能な問題の双対，非有界(29問) | 29 / 0.0588 | 29 / 0.335 | 28 / 2.01 | 29 / **0.0332** |
+| 全体(207問) | 179 / **10.6** | 178 / 11.0 | **184** / 11.3 | 172 / 13.4 |
+
+207問全体の幾何平均は，ENOMOTO 0.084 秒，HiGHS 0.183 秒，CLP 0.100 秒，SoPlex 0.146 秒です．ENOMOTO は誤った答えを1つも返しませんでした．局面Aで有限の最適解がないと検出した非有界な27問では，非有界か実行不可能かの区別に要した追加の時間は求解時間の2%程度でした．
+
+- 計算機：AMD Ryzen 7 5700U のノート PC(8コア16スレッド，メモリ 16 GB)，WSL2 の Ubuntu 22.04(メモリ上限 12 GB)．ENOMOTO と HiGHS は16スレッド，CLP と SoPlex は逐次．時間制限とスレッド数以外はすべて既定の設定です．
+- 時間は求解の呼び出しのみ(MPS ファイルの読み込みとモデルの構築は含まず，プリソルブとポストソルブは含む)で，3回の中央値です(300 秒以上かかった場合は1回)．1回ごとに新しいプロセスで解いています．
+- Mittelmann は，plato.asu.edu から取得できる公開 44 問から，この計算機のメモリに載らない最大の4問(thk_48，L2CTA3D，dlr2，Dual2_5000)を除いた40問です．
+- 全体の表，問題ごとの時間，生データは [benchmarks/paper/summary.md](benchmarks/paper/summary.md)，`per_problem.csv`，`results.json` にあります．再現の手順(Linux)は [scripts/paper_bench/README.md](scripts/paper_bench/README.md) を参照してください．
+
+### Netlib での HiGHS との手軽な比較
 
 Netlib の LP データには再配布を明示的に認めるライセンスがないため，このリポジトリには含めていません([docs/netlib-data.md](docs/netlib-data.md))．最初に一度だけ取得・展開します．
 
@@ -116,7 +136,8 @@ python -m enomoto_solver.benchmark_highs --max-vars 100000 --out netlib_results.
 | `src/params.rs` | 許容誤差と調整用パラメータ |
 | `docs/improvement_history.md` | 実装の変更とその計測結果の記録 |
 | `benchmarks/netlib_dev_results.csv` | 開発中に行った Netlib の計測結果(1行が1問・1回の計測．`source_file` 列が元の結果ファイル名) |
-| `benchmarks/mittelmann_results.*` | Mittelmann LPopt ベンチマークの HiGHS との比較(2026-09-24，公開 44 問，制限 600 秒．`scripts/run_mittelmann_benchmark.py`，Linux 専用) |
+| `benchmarks/paper/` | 論文に載せた HiGHS・CLP・SoPlex との比較(207 問，制限 600 秒．`scripts/paper_bench/`) |
+| `benchmarks/mittelmann_results.*` | 以前の Mittelmann LPopt ベンチマークの HiGHS との比較(2026-09-24，公開 44 問，制限 600 秒．`scripts/run_mittelmann_benchmark.py`，Linux 専用) |
 
 ## 論文
 

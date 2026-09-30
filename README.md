@@ -86,7 +86,27 @@ print(sol.objective, [round(v.value) for v, _, _ in items])   # 220.0 [0, 1, 1]
 
 Models with integer variables are solved by a depth-first branch-and-bound method whose LP relaxations use the LP engine above. It is a simple implementation and is not intended to compete with dedicated MIP solvers.
 
-## Benchmark against HiGHS (Netlib)
+## Benchmark results
+
+Comparison with HiGHS 1.15.1, CLP 1.17.11 and SoPlex 8.1.0 on 207 LPs (measured 2026-09-29/30). Each entry is *problems solved / shifted geometric mean of the solve time in seconds* (shift 10 s; unsolved problems counted at the 600 s time limit). Bold marks the best value in each row.
+
+| Test set | ENOMOTO | HiGHS | CLP | SoPlex |
+|---|---|---|---|---|
+| Netlib, finite optimum (93) | 93 / **0.152** | 93 / 0.166 | 93 / 0.164 | 92 / 0.741 |
+| Kennington (16) | 16 / **0.964** | 16 / 1.68 | 16 / 1.16 | 16 / 5.76 |
+| Mittelmann LPopt (40) | 12 / **377** | 11 / 405 | **18** / 393 | 7 / 503 |
+| Netlib infeasible (29) | 29 / **0.00597** | 29 / 0.0154 | 29 / 0.0743 | 28 / 1.53 |
+| Duals of the infeasible problems, unbounded (29) | 29 / 0.0588 | 29 / 0.335 | 28 / 2.01 | 29 / **0.0332** |
+| All (207) | 179 / **10.6** | 178 / 11.0 | **184** / 11.3 | 172 / 13.4 |
+
+Over all 207 problems the plain geometric mean is 0.084 s for ENOMOTO, 0.183 s for HiGHS, 0.100 s for CLP and 0.146 s for SoPlex. ENOMOTO returned no wrong answer; on the 27 unbounded problems where phase A detected that no finite optimum exists, telling unboundedness from infeasibility added about 2% to the solve time.
+
+- Machine: AMD Ryzen 7 5700U laptop (8 cores / 16 threads, 16 GB), WSL2 Ubuntu 22.04 with a 12 GB memory limit. ENOMOTO and HiGHS use 16 threads; CLP and SoPlex are serial. All solvers use default settings apart from the time limit and thread count.
+- Solve time only (reading the MPS file and building the model are excluded; presolve and postsolve are included), median of 3 runs (1 run for runs of 300 s or more), each run in a fresh process.
+- Mittelmann: the 44 public instances available from plato.asu.edu minus the four largest (thk_48, L2CTA3D, dlr2, Dual2_5000), which do not fit in this machine's memory.
+- Full tables, per-problem times and raw data: [benchmarks/paper/summary.md](benchmarks/paper/summary.md), `per_problem.csv`, `results.json`. To reproduce (Linux): [scripts/paper_bench/README.md](scripts/paper_bench/README.md).
+
+### Quick comparison with HiGHS on Netlib
 
 The Netlib LP data is not included in this repository because it carries no explicit redistribution licence (see [docs/netlib-data.md](docs/netlib-data.md)). Download and decompress it once:
 
@@ -116,7 +136,8 @@ Each problem is solved in its own subprocess. The reported times cover the solve
 | `src/params.rs` | Tolerances and tuning parameters |
 | `docs/improvement_history.md` | Record of implementation changes and their measured effects |
 | `benchmarks/netlib_dev_results.csv` | Netlib measurements taken during development (one row per problem and run; `source_file` names the original result file) |
-| `benchmarks/mittelmann_results.*` | Mittelmann LPopt benchmark against HiGHS (2026-09-24, 44 public instances, 600 s limit; `scripts/run_mittelmann_benchmark.py`, Linux only) |
+| `benchmarks/paper/` | Benchmark against HiGHS, CLP and SoPlex used in the paper (207 problems, 600 s limit; `scripts/paper_bench/`) |
+| `benchmarks/mittelmann_results.*` | Earlier Mittelmann LPopt benchmark against HiGHS (2026-09-24, 44 public instances, 600 s limit; `scripts/run_mittelmann_benchmark.py`, Linux only) |
 
 ## Paper
 
