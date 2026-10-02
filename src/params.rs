@@ -762,8 +762,10 @@ pub(crate) mod presolve {
     pub(crate) const TOL: f64 = 1e-9;
 
     /// 強制列の消去 (`presolve::forcingcol`、HiGHS の "Forcing col") を行うか (`ENOMOTO_T_FORCING_COL`、0 = 無効)。
-    /// Mittelmann ns1688926 で 8,192 行を消す (HiGHS・CLP と同じ縮約)。
-    pub(crate) const FORCING_COL: usize = 1;
+    /// Mittelmann ns1688926 で 8,192 行を消す (HiGHS・CLP と同じ縮約) が、それでも ns1688926 は 600 s で解けず
+    /// (双対単体法が退化で進まない。HiGHS も同じ)、Netlib では e226・finnis・lotfi の経路が変わって 18〜31% 遅くなった
+    /// ので既定では無効。
+    pub(crate) const FORCING_COL: usize = 0;
 
     /// 代入消去のピボット判定: 消去に使う係数が `|coeff| >= この値 * max|row|` を
     /// 満たさなければその行では消去しない (小さいピボットで割ると復元時の誤差が増幅される)。
