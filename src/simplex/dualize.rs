@@ -33,15 +33,6 @@ const DUALIZE_MAX_M_SIDE: f64 = 4.0;
 /// 戻した解の制約違反の許容誤差 (`|右辺|` に対する相対を足す)。
 const DUALIZE_FEAS_TOL: f64 = 1e-6;
 
-/// 双対列の種類 (元の行 `i` の双対 `y_i`、または両側有限な構造列の `μ_j`)。
-#[derive(Clone, Copy)]
-enum DualCol {
-    /// 行 `i` の `y_i` (分割した片方を含む)。
-    Y(usize),
-    /// 構造列 `j` の上限の双対 `μ_j`。
-    Mu(usize),
-}
-
 /// 双対化するか: 行数 `m >= DUALIZE_MIN_ROWS`、`m >= DUALIZE_MIN_RATIO * n` (構造列数)、構造列の平均非零数が
 /// `DUALIZE_MAX_COL_NNZ` 以下。
 fn applicable(std: &StdForm) -> bool {
@@ -97,7 +88,6 @@ pub(super) fn solve(std: &StdForm, opts: &crate::types::LpOptions) -> Option<Sim
         }
     }
     // 行 `i` のスラック (係数 σ、境界) から `y_i` の列 (符号の向き、費用) を作る。
-    let mut cols: Vec<DualCol> = Vec::with_capacity(m + n / 4);
     let mut d_cost: Vec<f64> = Vec::with_capacity(m + n / 4);
     let mut d_lb: Vec<f64> = Vec::with_capacity(m + n / 4);
     let mut d_ub: Vec<f64> = Vec::with_capacity(m + n / 4);
@@ -106,7 +96,7 @@ pub(super) fn solve(std: &StdForm, opts: &crate::types::LpOptions) -> Option<Sim
     // 初期配置で無限の側に置かれる双対列の数 (費用の符号が無限の境界を好む)。
     let mut n_m_side = 0usize;
     for i in 0..m {
-        y_start[i] = cols.len();
+        y_start[i] = d_cost.len();
         let Some(&(sj, sigma)) = std.rows.row(i).iter().find(|&&(j, _)| j >= n) else {
             return None;
         };
@@ -116,7 +106,6 @@ pub(super) fn solve(std: &StdForm, opts: &crate::types::LpOptions) -> Option<Sim
             // `σ y <= 0` ⇔ σ > 0 なら y <= 0。
             let y_nonpos = (sigma > 0.0) == le_zero;
             let cost = -bp[i] + bound * sigma;
-            cols.push(DualCol::Y(i));
             d_cost.push(cost);
             if y_nonpos {
                 d_lb.push(-inf);
@@ -134,7 +123,6 @@ pub(super) fn solve(std: &StdForm, opts: &crate::types::LpOptions) -> Option<Sim
         };
         if ls.is_finite() && us.is_finite() && ls == us {
             // 等式行: `y_i` は自由。
-            cols.push(DualCol::Y(i));
             d_cost.push(-bp[i] + ls * sigma);
             d_lb.push(-inf);
             d_ub.push(inf);
@@ -149,22 +137,21 @@ pub(super) fn solve(std: &StdForm, opts: &crate::types::LpOptions) -> Option<Sim
             // 両側無限 (自由な行) なら `y_i = 0` で列なし。
         }
     }
-    y_start[m] = cols.len();
-    let n_y = cols.len();
+    y_start[m] = d_cost.len();
+    let n_y = d_cost.len();
     // 双対 LP の行 = 固定でない構造列。
     let rows_of: Vec<usize> = (0..n).filter(|&j| kind[j] != 3).collect();
     let nd = rows_of.len();
     let mut mu_of = vec![usize::MAX; n];
     for &j in &rows_of {
         if kind[j] == 0 && width[j].is_finite() {
-            mu_of[j] = cols.len();
-            cols.push(DualCol::Mu(j));
+            mu_of[j] = d_cost.len();
             d_cost.push(width[j]);
             d_lb.push(0.0);
             d_ub.push(inf);
         }
     }
-    let n_dcols = cols.len();
+    let n_dcols = d_cost.len();
     let max_m_side = tunable!("ENOMOTO_T_DUALIZE_MAX_M_SIDE", DUALIZE_MAX_M_SIDE, f64);
     let nnz_struct: usize = (0..n).map(|j| std.cols.col(j).len()).sum();
     if debug {
