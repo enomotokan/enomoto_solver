@@ -22,8 +22,9 @@ use super::{slope_intercept_dual, SimplexResult, Status, StdForm};
 use crate::params::simplex::{SIFTING_MIN_COLS, SIFTING_MIN_RATIO};
 
 /// 部分問題の大きさの係数 (`max(SIFT_SIZE_FACTOR * m, SIFT_SIZE_MIN)`、`ENOMOTO_T_SIFT_SIZE_FACTOR`)。CLP は 3 だが、
-/// rail4284 では 2 / 3 / 5 で 150 / 176 / 262 s (2 は反復が軽い)。最小 3,000 は CLP と同じ。
-const SIFT_SIZE_FACTOR: f64 = 2.0;
+/// rail4284 では 0.5 / 1 / 1.5 / 2 / 3 / 5 で 600 s 超 / 124 / 134 / 150 / 176 / 262 s (総反復数はほぼ同じで、部分問題が
+/// 小さいほど 1 反復が軽い。行数より小さいと進まない)。最小 3,000 は CLP と同じ。
+const SIFT_SIZE_FACTOR: f64 = 1.0;
 const SIFT_SIZE_MIN: usize = 3000;
 /// 部分問題を解く回数の上限。
 const SIFT_MAX_PASSES: usize = 100;
