@@ -13,6 +13,10 @@ pub(crate) mod simplex {
     /// 篩い分け法 (`simplex::sifting`、CLP の Sprint) を使う最小の構造列数 (`ENOMOTO_T_SIFTING_MIN_COLS`、0 = 無効)。
     pub(crate) const SIFTING_MIN_COLS: usize = 100_000;
 
+    /// 結果が密な FTRAN (入る列の `alpha` と DSE の `tau`) を 2 スレッドで並列に解く最小の行数
+    /// (`ENOMOTO_T_PAR_FTRAN_MIN_M`、0 = 無効)。
+    pub(crate) const PAR_FTRAN_MIN_M: usize = 20_000;
+
     /// 篩い分け法を使う最小の「構造列数 / 行数」(`ENOMOTO_T_SIFTING_MIN_RATIO`)。CLP は大きな問題で 8。
     pub(crate) const SIFTING_MIN_RATIO: f64 = 8.0;
 
@@ -494,6 +498,11 @@ pub(crate) mod slope_intercept_dual {
     /// cre-b は m = 5,110 で 248 行) ので、`m` ではなくプール長と更新行数の比で切り替える (下の係数)。
     /// 下限は疎経路の実体 (`SPARSE_PATH_MIN_M` = 300 行以上、`BIG`) と同じにする (ヒープのコードは `BIG` の中だけ)。
     pub(crate) const CHUZR_HEAP_ADAPTIVE_MIN_M: usize = 300;
+
+    /// 入る列の FTRAN 結果と DSE の `tau` の非ゼロ率 (移動平均) がどちらもこれ以上のとき、結果が密な FTRAN の
+    /// 2〜3 本を並列に解く (`ENOMOTO_T_PAR_FTRAN_MIN_DENSITY`。行数の条件は `simplex::PAR_FTRAN_MIN_M`)。
+    /// ex10 は約 0.9 で FTRAN −23%、irish-electricity (`alpha` 約 0.25) や physiciansched3-3 の双対では並列のほうが遅かった。
+    pub(crate) const PAR_FTRAN_MIN_DENSITY: f64 = 0.5;
 
     /// 作業 #10 (A): 適応モードでヒープを使う条件 `プール >= 係数 * (前反復の x_B 更新一覧長 + 1) * log2(プール)` の
     /// 係数 (`ENOMOTO_T_CHUZR_HEAP_ADAPTIVE_RATIO`)。ヒープは 1 反復に「一覧の行を積む (log2(プール) 回の比較)」

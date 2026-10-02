@@ -4098,6 +4098,51 @@ fn clear_r_seeds(gp_a: &mut Option<&mut GpScratch>, gp_b: &mut Option<&mut GpScr
     }
 }
 
+/// 2 つの処理を並列に実行する (FTRAN の並列化用)。`ENOMOTO_T_PAR_FTRAN_SCOPED=1` (既定) では `std::thread::scope` で
+/// 1 本スレッドを起こして終わったら消す (rayon のワーカーは join の後もしばらく仕事を探して回り続け、主スレッドの
+/// 後続の段を遅くした)。`0` で `rayon::join`。
+fn par_join<A: FnOnce() -> RA + Send, B: FnOnce() -> RB + Send, RA: Send, RB: Send>(a: A, b: B) -> (RA, RB) {
+    if tunable!("ENOMOTO_T_PAR_FTRAN_SCOPED", 1u8, u8) != 0 {
+        std::thread::scope(|sc| {
+            let hb = sc.spawn(b);
+            let ra = a();
+            (ra, hb.join().expect("FTRAN worker panicked"))
+        })
+    } else {
+        rayon::join(a, b)
+    }
+}
+
+/// [`FtLu`] の演算量カウンタ。`Cell<u64>` と同じ `get`/`set` を持つが、`FtLu` を複数のスレッドから
+/// 読めるように (`Sync`) 中身は `AtomicU64` (順序の制約なし)。
+#[derive(Debug, Default)]
+pub(crate) struct TickCell(std::sync::atomic::AtomicU64);
+
+impl TickCell {
+    fn new(v: u64) -> Self {
+        TickCell(std::sync::atomic::AtomicU64::new(v))
+    }
+    #[inline(always)]
+    fn get(&self) -> u64 {
+        self.0.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    #[inline(always)]
+    fn set(&self, v: u64) {
+        self.0.store(v, std::sync::atomic::Ordering::Relaxed)
+    }
+    /// 不可分に加える (並列の FTRAN から同時に呼ばれても失われない)。
+    #[inline(always)]
+    fn add(&self, v: u64) {
+        self.0.fetch_add(v, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+impl Clone for TickCell {
+    fn clone(&self) -> Self {
+        TickCell::new(self.get())
+    }
+}
+
 /// 作業 #10 (F): 超疎 `U` 段の「位置の降順に取り出す」待ち行列を 2 段のビット集合で持つもの。
 /// 超疎 `U` 段では、取り出した位置 `k` の eta が書く行の位置はすべて `k` より小さい (後に積む要素は常に直前に
 /// 取り出した位置より小さい) ので、最大ヒープの代わりに、ビット集合の上から下へ 1 度だけ走査すれば同じ順序
@@ -4549,9 +4594,10 @@ pub struct FtLu {
     scratch_e_tilde: Vec<f64>,
     /// `CLOCK` 再分解トリガ用の決定的な演算量カウンタ (HiGHS の
     /// `total_synthetic_tick_` 相当)。非ゼロ数の加算だけで増えるので、同じ問題は
-    /// 常に同じ反復で再分解される。`&self` の求解段から加算するので `Cell`。
+    /// 常に同じ反復で再分解される。`&self` の求解段から加算するので内部可変 ([`TickCell`]、
+    /// 2 本の FTRAN を並列に解くときも整数の加算なので値は順序によらない)。
     /// 新しい `FtLu` を作る (= 再分解する) と 0 から始まる。
-    tick: Cell<u64>,
+    tick: TickCell,
     /// `u_seq` と `r_etas` が現在保持する非対角 fill の合計
     /// ([`Self::fill_count`] の値)。[`Self::commit_update`] が差分で更新する。
     fill: usize,
@@ -4732,7 +4778,7 @@ impl FtLu {
             scratch_a_tilde: vec![0.0; m],
             scratch_e_tilde: vec![0.0; m],
             fill,
-            tick: Cell::new(0),
+            tick: TickCell::new(0),
             build_tick,
             fill_baseline,
             lu_nnz: fill_baseline,
@@ -4814,7 +4860,7 @@ impl FtLu {
     /// 求解段の非ゼロ数 `n` を tick に加える (係数 [`TICK_SOLVE_NNZ_COEF`])。
     #[inline]
     fn add_tick(&self, n: u64) {
-        self.tick.set(self.tick.get() + TICK_SOLVE_NNZ_COEF * n);
+        self.tick.add(TICK_SOLVE_NNZ_COEF * n);
     }
 
     /// 非ゼロ `rhs_nnz` 個の FTRAN 右辺が十分密で、[`Self::solve_sparse_into`] でなく
@@ -5893,15 +5939,25 @@ impl FtLu {
         rho_cap: Option<&mut StepCapture>,
         mut track: Option<&mut FtranTrack>,
         rhs_a_nz: Option<&[(usize, f64)]>,
+        par_dense: bool,
     ) -> (usize, usize) {
         let rho_cap = StepCapture::take(rho_cap);
-        if !self.u_zero_skip {
+        // 2 本を並列に解くか: 呼び出し側が両方の結果が密と見込み (`par_dense`)、行数が `PAR_FTRAN_MIN_M` 以上で、
+        // rayon のスレッドが 2 本以上あるとき (`ENOMOTO_T_PAR_FTRAN_MIN_M`、0 = 無効)。1 本あたりの手間が `L`・`R`・`U` の
+        // 全非零 (ex10 で 1 本 0.8 ms 前後) なので、スレッドの起動の手間に比べて大きい。片方が疎なら融合版の疎な処理のほうが速い。
+        // 個別に解いた 2 本と値・tick はビット一致 (tick は不可分の加算)。
+        let par_min_m = tunable!("ENOMOTO_T_PAR_FTRAN_MIN_M", crate::params::simplex::PAR_FTRAN_MIN_M, usize);
+        let par = par_dense && par_min_m > 0 && self.base.m >= par_min_m && rayon::current_num_threads() > 1;
+        if !self.u_zero_skip || par {
             if let Some(t) = track {
                 t.alpha.set_full();
                 t.tau.set_full();
                 t.a_tilde.set_full();
                 t.b_scratch_clean = false;
                 t.tau_partial = false;
+            }
+            if par {
+                return par_join(|| self.solve_into_capture(rhs_a, scratch_a, out_a, a_tilde_out), || self.solve_into(rhs_b, scratch_b, out_b));
             }
             let na = self.solve_into_capture(rhs_a, scratch_a, out_a, a_tilde_out);
             let nb = self.solve_into(rhs_b, scratch_b, out_b);
@@ -6006,15 +6062,26 @@ impl FtLu {
         rho_cap: Option<&mut StepCapture>,
         mut track: Option<&mut FtranTrack>,
         rhs_a_nz: Option<&[(usize, f64)]>,
+        par_dense: bool,
     ) -> (usize, usize, usize) {
         let rho_cap = StepCapture::take(rho_cap);
-        if !self.u_zero_skip {
+        // 3 本を並列に解くか ([`Self::solve_into_pair_capture_tracked`] と同じ条件)。
+        let par_min_m = tunable!("ENOMOTO_T_PAR_FTRAN_MIN_M", crate::params::simplex::PAR_FTRAN_MIN_M, usize);
+        let par = par_dense && par_min_m > 0 && self.base.m >= par_min_m && rayon::current_num_threads() > 1;
+        if !self.u_zero_skip || par {
             if let Some(t) = track {
                 t.alpha.set_full();
                 t.tau.set_full();
                 t.a_tilde.set_full();
                 t.b_scratch_clean = false;
                 t.tau_partial = false;
+            }
+            if par {
+                let (na, (nb, nc)) = par_join(
+                    || self.solve_into_capture(rhs_a, scratch_a, out_a, a_tilde_out),
+                    || par_join(|| self.solve_into(rhs_b, scratch_b, out_b), || self.solve_into(rhs_c, scratch_c, out_c)),
+                );
+                return (na, nb, nc);
             }
             let na = self.solve_into_capture(rhs_a, scratch_a, out_a, a_tilde_out);
             let nb = self.solve_into(rhs_b, scratch_b, out_b);
@@ -7495,6 +7562,16 @@ impl FtLu {
     /// `U` の eta 列と `R` eta が保持する非対角 fill の合計 (真の非ゼロ数。密形式でも
     /// 格納長ではなく非ゼロ数)。再分解トリガ (3) の「バンプサイズ」指標。
     /// [`Self::commit_update`] が差分更新するので `O(1)`。
+    /// 診断用: `U` の eta 列 (分解時の列 + 更新のスパイク) と `R` の eta の非零数。
+    pub fn u_r_nnz(&self) -> (usize, usize) {
+        (self.u_seq.iter().map(|e| self.u_seq.nnz(e.k)).sum(), self.r_etas.iter().map(|e| self.r_etas.nnz(e.k)).sum())
+    }
+
+    /// 診断用: 分解直後の非零数 (`fill` の基準値)。
+    pub fn lu_nnz_baseline(&self) -> usize {
+        self.lu_nnz
+    }
+
     pub fn fill_count(&self) -> usize {
         debug_assert_eq!(
             self.fill,

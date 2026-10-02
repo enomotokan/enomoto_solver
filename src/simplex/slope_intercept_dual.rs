@@ -60,7 +60,7 @@ use std::sync::OnceLock;
 use crate::params::simplex::{FT_BUMP_LIMIT_FACTOR, FT_CHECK_INTERVAL, FT_MIN_PIVOT, FT_RESIDUAL_TOL, HARRIS_RATIO_TOL, MAX_ITERS_FLOOR, PRIMAL_FEAS_TOL, RESIDUAL_CHECK_MULTIPLIER, STALL_PROGRESS_EPS, STEEPEST_EDGE_FLOOR, TOL};
 use crate::params::slope_intercept_dual::{CHUZC1_TOPK, CHUZC1_TOPK_MIN_CANDS, FLIP_TRACK_MIN_M, CHUZC1_FAST_PROBE, SYNTH_CLOCK_MID_REF_MULT, SYNTH_CLOCK_MID_TAU_FRACTION, PREFETCH_DIST, PREFETCH_MIN_COLS, PRICE_DENSE_RESULT_RATIO, SYNTH_CLOCK_DENSE_FRACTION, D_DRIFT_TOL, FT_BUMP_LU_RATIO, PLATEAU_OBJ_REL, D_GROSS_MISMATCH_REL_TOL, FT_MAX_UPDATES_FACTOR, FT_MAX_UPDATES_FLOOR, PARTIAL_TAU_MIN_M, PIVOT_ESCALATION_STEP, SLOPE_TOL, STUCK_ROW_MIN_PIVOT, SYNTH_CLOCK_FACTOR, SYNTH_CLOCK_LARGE_M, SYNTH_CLOCK_LARGE_REF_M, SYNTH_CLOCK_MIN_UPDATES, XB_CHECK_CADENCE, XB_CHECK_CADENCE_LARGE, XB_CHECK_CADENCE_LARGE_DIV, XB_CHECK_CADENCE_LARGE_M, XB_CHECK_INTERVAL, XB_DRIFT_ESCALATION_FACTOR, XB_DRIFT_ESCALATION_STEP, XB_DRIFT_REL_TOL, XB_DRIFT_TOL, XB_DRIFT_TOL_MAX, X_B_SLOPE_NOISE, Z_SLOPE_TOL};
 use crate::params::slope_intercept_dual::{
-    CHUZR_HEAP_ADAPTIVE_MIN_M, CHUZR_HEAP_ADAPTIVE_RATIO, CHUZR_SHORTLIST_AUTO_DIV, CHUZR_SHORTLIST_AUTO_K, CHUZR_SHORTLIST_AUTO_K_MAX, CHUZR_SHORTLIST_AUTO_MIN_M, CHUZR_SHORTLIST_K, CHUZR_SHORTLIST_MAX_LEN_FACTOR, CHUZR_SHORTLIST_MAX_LEN_SLACK, CHUZR_SHORTLIST_MIN_POOL_FACTOR, COMPACT_ROWS_BLOCK, FTRAN_U_HYPER_DENSITY, FTRAN_U_HYPER_TAU_DENSITY,
+    CHUZR_HEAP_ADAPTIVE_MIN_M, CHUZR_HEAP_ADAPTIVE_RATIO, PAR_FTRAN_MIN_DENSITY, CHUZR_SHORTLIST_AUTO_DIV, CHUZR_SHORTLIST_AUTO_K, CHUZR_SHORTLIST_AUTO_K_MAX, CHUZR_SHORTLIST_AUTO_MIN_M, CHUZR_SHORTLIST_K, CHUZR_SHORTLIST_MAX_LEN_FACTOR, CHUZR_SHORTLIST_MAX_LEN_SLACK, CHUZR_SHORTLIST_MIN_POOL_FACTOR, COMPACT_ROWS_BLOCK, FTRAN_U_HYPER_DENSITY, FTRAN_U_HYPER_TAU_DENSITY,
     GREATEST_IMPROVEMENT_STALL_DIVISOR, GREATEST_IMPROVEMENT_STALL_MIN, GREATEST_IMPROVEMENT_TOP_K, GROSS_MISMATCH_SCALE_FLOOR, HANDOFF_MAX_ROUNDS, INFEASIBLE_PLATEAU_BUDGET_DIVISOR, INFEASIBLE_PLATEAU_STALL_MULT,
     LEX_REL_TOL, PRICE_COLUMN_DENSITY, PRICE_LIST_DENSITY, SCORE2_STALL_HALFLIFE, STALL_LIMIT_MIN, STALL_LIMIT_PER_ROW, STUCK_ROW_BOOST_FACTOR, STUCK_ROW_BOOST_THRESHOLD, XB_DRIFT_FRESH_FLOOR_FACTOR,
     XB_DRIFT_FRESH_FLOOR_FRAC, XB_DRIFT_MIN_UPDATES, XB_DRIFT_MIN_UPDATES_MULT, XB_DRIFT_REL_K, XB_DRIFT_SAMPLE_GUARD, XB_DRIFT_SAMPLE_K, XB_CHECK_FULL_EVERY, XB_LIST_DENSITY,
@@ -810,6 +810,12 @@ fn refactorize(
     prev: Option<&sparse_lu::FtLu>,
 ) -> Option<sparse_lu::FtLu> {
     let m = std.n_rows;
+    if let Some(p) = prev {
+        if env_str!("ENOMOTO_DEBUG_FT_FILL").is_some() {
+            let (u, r) = p.u_r_nnz();
+            eprintln!("FT_FILL m={m} updates={} lu_nnz_at_build={} u_nnz={u} r_nnz={r}", p.update_count(), p.lu_nnz_baseline());
+        }
+    }
     // 行リストはスレッドローカルに再利用する(再確保せずクリアするので各行の容量が残る)。
     // 中身と順序は新規作成と同一。
     thread_local! {
@@ -4441,6 +4447,12 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                 for &(i, v) in std.cols.col(q) {
                     dense_q[i] = v;
                 }
+                // 入る列と `tau` の結果がどちらも密と見込めるときだけ、2〜3 本の FTRAN を並列に解く
+                // (`FtLu::solve_into_pair_capture_tracked`)。片方が疎なら融合版のほうが速い (irish-electricity の `alpha` は 25%)。
+                let par_ftran_dense = {
+                    let th = tunable!("ENOMOTO_T_PAR_FTRAN_MIN_DENSITY", PAR_FTRAN_MIN_DENSITY, f64);
+                    density_col_aq.expected() >= th && density_tau.expected() >= th
+                };
                 let result_nnz = if combined_deferred {
                     let (a_nnz, b_nnz, c_nnz) = if BIG { lu.solve_into_triple_capture_tracked(
                         &dense_q,
@@ -4456,6 +4468,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                         Some(&mut rho_steps),
                         sparse_ftran_out.then_some(&mut ftran_track),
                         Some(std.cols.col(q)),
+                        par_ftran_dense,
                     ) } else { lu.solve_into_triple_capture(
                         &dense_q,
                         &rho,
@@ -4477,7 +4490,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                     // DSE の `tau = B^-1 rho_p` FTRAN を同じ走査に融合する
                     // (`solve_into_pair_capture` 参照)。
                     let (a_nnz, b_nnz) = if BIG {
-                        lu.solve_into_pair_capture_tracked(&dense_q, &rho, &mut lu_scratch, &mut tau_scratch, &mut alpha_full, &mut tau, &mut a_tilde_buf, Some(&mut rho_steps), sparse_ftran_out.then_some(&mut ftran_track), Some(std.cols.col(q)))
+                        lu.solve_into_pair_capture_tracked(&dense_q, &rho, &mut lu_scratch, &mut tau_scratch, &mut alpha_full, &mut tau, &mut a_tilde_buf, Some(&mut rho_steps), sparse_ftran_out.then_some(&mut ftran_track), Some(std.cols.col(q)), par_ftran_dense)
                     } else {
                         lu.solve_into_pair_capture(&dense_q, &rho, &mut lu_scratch, &mut tau_scratch, &mut alpha_full, &mut tau, &mut a_tilde_buf, Some(&mut rho_steps))
                     };
