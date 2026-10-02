@@ -5296,7 +5296,7 @@ impl FtLu {
         }
         // 閉包の辺数の上限
         let limit = (tunable!("ENOMOTO_T_U_HYPER_ABORT", U_HYPER_ABORT_FRACTION, f64) * m as f64) as usize;
-        let GpScratch { u_marks, u_list, .. } = gp;
+        let GpScratch { u_marks, u_list, u_queue, .. } = gp;
         u_marks.begin();
         u_list.clear();
         for &s in a_list {
@@ -5327,10 +5327,55 @@ impl FtLu {
                 }
             }
         }
-        // `u_seq` 位置の降順、シングルトン (位置なし) は最後。
         let slot_pos = &self.slot_pos;
+        let push_mode = tunable!("ENOMOTO_T_PARTIAL_TAU_PUSH", 1u8, u8) != 0;
+        if push_mode && tunable!("ENOMOTO_T_PARTIAL_TAU_BITQUEUE", 1u8, u8) != 0 {
+            // 閉包のスロットを位置のビット集合 ([`MonoMaxQueue`]) に積み、位置の降順に取り出す。閉包は積み終えて
+            // から取り出すので、取り出し順は下のソート版 (位置の降順) と同じで値はビット一致。ソート
+            // (O(n log n)) の代わりに O(n + m/64) で済む (ken-18 ではソートが全命令の 1 割強だった)。
+            // `u_list` は取り出した順 (位置の降順) にシングルトン (位置なし) を続けて並べ直す。
+            u_queue.ensure(self.u_seq.key.len());
+            tmp.clear();
+            for &q in u_list.iter() {
+                let k = slot_pos[q];
+                if k == usize::MAX {
+                    // シングルトンは `tmp` に退避 (演算には使わない)。
+                    tmp.push((q, 0, 0.0));
+                } else {
+                    u_queue.push(k);
+                }
+            }
+            u_list.clear();
+            let mut push_work = 0usize;
+            while let Some(k) = u_queue.pop() {
+                let q = self.u_seq.key[k] as usize;
+                u_list.push(q);
+                let mut xq = x[q];
+                if xq == 0.0 {
+                    continue;
+                }
+                xq /= self.u_seq.pivot[k];
+                x[q] = xq;
+                let (idx, val) = self.u_seq.seg(k);
+                push_work += idx.len();
+                for (&r, &v) in idx.iter().zip(val.iter()) {
+                    let r = r as usize;
+                    if u_marks.is_marked(r) {
+                        // 全体の `U` 段の `x[r] += (-x[q]) * v` と同じ演算。
+                        x[r] += -xq * v;
+                    }
+                }
+            }
+            u_list.extend(tmp.iter().map(|e| e.0));
+            self.add_tick(edges as u64);
+            let n = u_list.len();
+            // 作業量の見積もり (部分 `tau` と通常の `tau` の切り替え用) はソート版と同じ式のまま。
+            *work_out = (edges + push_work + n * ceil_log2(n)) as u64;
+            return true;
+        }
+        // `u_seq` 位置の降順、シングルトン (位置なし) は最後。
         u_list.sort_unstable_by_key(|&p| Reverse(if slot_pos[p] == usize::MAX { 0 } else { slot_pos[p] + 1 }));
-        if tunable!("ENOMOTO_T_PARTIAL_TAU_PUSH", 1u8, u8) != 0 {
+        if push_mode {
             // 作業 #10 (B): 閉包のスロットを位置の降順に、各スロットの eta 列 (`u_seq` の列) を閉包内の行にだけ
             // 散布する (全体の `U` 段と同じ列指向の演算を閉包に制限したもの)。スロット `p` への寄与は
             // eta の位置の降順に届くので、行ごとに所有者をコピーして位置でソートする旧版 (下) と同じ値・同じ順序

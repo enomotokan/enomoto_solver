@@ -858,6 +858,48 @@ fn refactorize(
 }
 
 thread_local! {
+    /// [`request_duals`] で有効にしたとき、このスレッドの直近の最適な求解の双対 `y = B^-T c_B` (行ごと)。
+    static LAST_DUALS: std::cell::RefCell<Option<(Vec<f64>, Vec<Option<usize>>)>> = const { std::cell::RefCell::new(None) };
+    /// 最適で返すときに双対を記録するか (篩い分け法 [`super::sifting`] だけが使う)。
+    static WANT_DUALS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// このスレッドの以後の求解で、最適で返すときに双対 `y` を記録するかを設定する (記録済みの値は捨てる)。
+pub(super) fn request_duals(on: bool) {
+    WANT_DUALS.with(|w| w.set(on));
+    LAST_DUALS.with(|d| *d.borrow_mut() = None);
+}
+
+/// [`request_duals`] で記録した直近の双対と、その基底 (`basis_pos`、列ごとの基底位置) を取り出す。
+pub(super) fn take_duals() -> Option<(Vec<f64>, Vec<Option<usize>>)> {
+    LAST_DUALS.with(|d| d.borrow_mut().take())
+}
+
+/// 最適で返す直前に呼ぶ: 双対の記録が要求されていれば、基底 `basis_pos` を分解し直して
+/// 真の費用 `std.c` での `y = B^-T c_B` を記録する (要求が無ければ何もしない)。
+fn record_duals(std: &StdForm, basis_pos: &[Option<usize>]) {
+    if !WANT_DUALS.with(|w| w.get()) {
+        return;
+    }
+    let m = std.n_rows;
+    let mut y = vec![0.0; m];
+    if m > 0 {
+        let Some(lu) = refactorize(std, basis_pos, None) else {
+            return;
+        };
+        let mut c_b = vec![0.0; m];
+        for j in 0..std.n_total {
+            if let Some(p) = basis_pos[j] {
+                c_b[p] = std.c[j];
+            }
+        }
+        let mut scratch = vec![0.0; m];
+        lu.solve_transpose_into(&c_b, &mut scratch, &mut y);
+    }
+    LAST_DUALS.with(|d| *d.borrow_mut() = Some((y, basis_pos.to_vec())));
+}
+
+thread_local! {
     /// このスレッドの直近の求解で [`refactorize`] が特異基底を報告したか
     /// ([`solve_slope_intercept_dual`] が安全モードでの解き直しを判断するのに使う)。
     static SINGULAR_BAILOUT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -2414,6 +2456,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
             }
             x[j] = val.base;
         }
+        record_duals(std, &[]);
         return Some(SimplexResult { status: Status::Optimal, x: Some(x) });
     }
 
@@ -6009,8 +6052,10 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
                     if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
                         eprintln!("DEBUG_EXT: polish handoff skipped (only fixed-column/sub-tolerance dual infeasibilities)");
                     }
+                    record_duals(std, &t.basis_pos);
                     return Some(SimplexResult { status: Status::Optimal, x: Some(t.x[0..t.n_structural()].to_vec()) });
                 }
+                record_duals(std, &t.basis_pos);
                 return Some(SimplexResult { status: Status::Optimal, x: Some(t.x) });
             }
             // S5 (`ENOMOTO_HANDOFF_FLIP=1`、既定オフ): 真のコストでの双対実行不能列が
@@ -6139,6 +6184,9 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
                 Status::Unbounded => crate::phase_timing::mark("polish_unbounded"),
                 Status::Infeasible => crate::phase_timing::mark("stage_b_infeasible"),
                 _ => {}
+            }
+            if status == Status::Optimal {
+                record_duals(std, &t.basis_pos);
             }
             return Some(SimplexResult {
                 status: status.clone(),

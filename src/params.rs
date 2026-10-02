@@ -10,6 +10,16 @@ pub(crate) mod simplex {
     /// 汎用のゼロ判定許容誤差 (係数・比率・被約費用が実質 0 かどうか)。
     pub(crate) const TOL: f64 = 1e-9;
 
+    /// 篩い分け法 (`simplex::sifting`、CLP の Sprint) を使う最小の構造列数 (`ENOMOTO_T_SIFTING_MIN_COLS`、0 = 無効)。
+    pub(crate) const SIFTING_MIN_COLS: usize = 100_000;
+
+    /// 篩い分け法を使う最小の「構造列数 / 行数」(`ENOMOTO_T_SIFTING_MIN_RATIO`)。CLP は大きな問題で 8。
+    pub(crate) const SIFTING_MIN_RATIO: f64 = 8.0;
+
+    /// 篩い分け法を使う 1 行の平均非零数 (構造列のみ) の下限 (`ENOMOTO_T_SIFTING_MIN_ROW_NNZ`)。rail4284 は 2,700、
+    /// osa-60 は 136 (osa-60 は全体を双対単体法で解くほうが速い)。
+    pub(crate) const SIFTING_MIN_ROW_NNZ: f64 = 1000.0;
+
     /// `max_iters_for` が返す反復上限の下限値。
     pub(crate) const MAX_ITERS_FLOOR: usize = 20_000;
 
@@ -750,6 +760,10 @@ pub(crate) mod presolve {
     /// foldfixed, freevar, ineqsingleton, parallelcols, parallelrows, rowdominance,
     /// rowsingleton, sparsify, stuffing の各 `TOL` を統合】
     pub(crate) const TOL: f64 = 1e-9;
+
+    /// 強制列の消去 (`presolve::forcingcol`、HiGHS の "Forcing col") を行うか (`ENOMOTO_T_FORCING_COL`、0 = 無効)。
+    /// Mittelmann ns1688926 で 8,192 行を消す (HiGHS・CLP と同じ縮約)。
+    pub(crate) const FORCING_COL: usize = 1;
 
     /// 代入消去のピボット判定: 消去に使う係数が `|coeff| >= この値 * max|row|` を
     /// 満たさなければその行では消去しない (小さいピボットで割ると復元時の誤差が増幅される)。
