@@ -19,8 +19,12 @@ use super::{slope_intercept_dual, SimplexResult, Status, StdForm};
 
 /// 双対化する最小の行数 (`ENOMOTO_T_DUALIZE_MIN_ROWS`、0 = 無効)。CLP と同じ 50,000。
 const DUALIZE_MIN_ROWS: usize = 50_000;
-/// 双対化する最小の「行数 / 構造列数」(`ENOMOTO_T_DUALIZE_MIN_RATIO`)。CLP と同じ 5。
-const DUALIZE_MIN_RATIO: f64 = 5.0;
+/// 双対化する最小の「行数 / 構造列数」(`ENOMOTO_T_DUALIZE_MIN_RATIO`)。CLP は 5。前処理後で physiciansched3-3 は 3.58
+/// (双対で 600 s 超 → 319 s)、neos-5251015 は 3.47、cont1 は 2.96 (双対でも 600 s で解けない)。
+const DUALIZE_MIN_RATIO: f64 = 3.5;
+/// 双対化する構造列の平均非零数の上限 (`ENOMOTO_T_DUALIZE_MAX_COL_NNZ`)。双対 LP の行がこれだけ密になる。
+/// ex10 は 65 で双対のほうが遅い (151 → 222 s、双対 LP の基底が密)。supportcase10 は 40、neos 26、physiciansched3-3 20。
+const DUALIZE_MAX_COL_NNZ: f64 = 45.0;
 /// 双対 LP で、初期配置で無限の側に置かれる (費用の符号が無限の境界を好む) 双対列の数の上限 (双対 LP の行数に対する比、
 /// `ENOMOTO_T_DUALIZE_MAX_M_SIDE`)。傾き・切片双対二段解法の段階 A はそれらの列を 1 本ずつ基底に入れるので、
 /// 多いと段階 A が長い (前処理なしで作った neos の双対は 45 万列が無限の側で、段階 A が 40 万反復を超えた。
@@ -38,13 +42,18 @@ enum DualCol {
     Mu(usize),
 }
 
-/// 双対化するか: 行数 `m >= DUALIZE_MIN_ROWS`、`m >= DUALIZE_MIN_RATIO * n` (構造列数)。
+/// 双対化するか: 行数 `m >= DUALIZE_MIN_ROWS`、`m >= DUALIZE_MIN_RATIO * n` (構造列数)、構造列の平均非零数が
+/// `DUALIZE_MAX_COL_NNZ` 以下。
 fn applicable(std: &StdForm) -> bool {
     let min_rows = tunable!("ENOMOTO_T_DUALIZE_MIN_ROWS", DUALIZE_MIN_ROWS, usize);
     let ratio = tunable!("ENOMOTO_T_DUALIZE_MIN_RATIO", DUALIZE_MIN_RATIO, f64);
     let m = std.n_rows;
     let n = std.n_total - m;
-    min_rows != 0 && m >= min_rows && (m as f64) >= ratio * n as f64
+    if min_rows == 0 || m < min_rows || (m as f64) < ratio * n as f64 {
+        return false;
+    }
+    let nnz: usize = (0..n).map(|j| std.cols.col(j).len()).sum();
+    (nnz as f64) <= tunable!("ENOMOTO_T_DUALIZE_MAX_COL_NNZ", DUALIZE_MAX_COL_NNZ, f64) * n.max(1) as f64
 }
 
 /// 双対化して解く。対象外、または途中で諦めたときは `None`。
@@ -157,8 +166,9 @@ pub(super) fn solve(std: &StdForm, opts: &crate::types::LpOptions) -> Option<Sim
     }
     let n_dcols = cols.len();
     let max_m_side = tunable!("ENOMOTO_T_DUALIZE_MAX_M_SIDE", DUALIZE_MAX_M_SIDE, f64);
+    let nnz_struct: usize = (0..n).map(|j| std.cols.col(j).len()).sum();
     if debug {
-        eprintln!("DUALIZE: primal m={m} n={n} -> dual rows={nd} cols={n_dcols} (y={n_y}) m_side={n_m_side}");
+        eprintln!("DUALIZE: primal m={m} n={n} nnz={nnz_struct} ({:.1}/col) -> dual rows={nd} cols={n_dcols} (y={n_y}) m_side={n_m_side}", nnz_struct as f64 / n.max(1) as f64);
     }
     if (n_m_side as f64) > max_m_side * nd as f64 {
         if debug {

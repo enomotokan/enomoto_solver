@@ -69,6 +69,11 @@ pub fn eliminate_forcing_columns(
     lb: &[f64],
     ub: &[f64],
 ) -> Vec<ForcingCol> {
+    // 費用 0、固定されていない、増やす (減らす) 側が無限の列がなければ何もしない (等式行の走査も省く)。
+    let cheap = |j: usize| c[j] == 0.0 && lb[j] < ub[j] && (ub[j] == f64::INFINITY || lb[j] == f64::NEG_INFINITY);
+    if !(0..n).any(cheap) {
+        return Vec::new();
+    }
     let mut in_equality = vec![false; n];
     let ar = a.as_ref();
     for i in 0..ar.nrows() {
@@ -78,8 +83,8 @@ pub fn eliminate_forcing_columns(
             }
         }
     }
-    // 候補になりうる列: 費用 0、等式行に現れない、固定されていない、増やす (減らす) 側が無限。
-    let maybe = |j: usize| !in_equality[j] && c[j] == 0.0 && lb[j] < ub[j] && (ub[j] == f64::INFINITY || lb[j] == f64::NEG_INFINITY);
+    // 候補になりうる列: 上の条件に加えて等式行に現れない。
+    let maybe = |j: usize| !in_equality[j] && cheap(j);
     if !(0..n).any(maybe) {
         return Vec::new();
     }
