@@ -60,7 +60,7 @@ use std::sync::OnceLock;
 use crate::params::simplex::{FT_BUMP_LIMIT_FACTOR, FT_CHECK_INTERVAL, FT_MIN_PIVOT, FT_RESIDUAL_TOL, HARRIS_RATIO_TOL, MAX_ITERS_FLOOR, PRIMAL_FEAS_TOL, RESIDUAL_CHECK_MULTIPLIER, STALL_PROGRESS_EPS, STEEPEST_EDGE_FLOOR, TOL};
 use crate::params::slope_intercept_dual::{CHUZC1_TOPK, CHUZC1_TOPK_MIN_CANDS, FLIP_TRACK_MIN_M, CHUZC1_FAST_PROBE, SYNTH_CLOCK_MID_REF_MULT, SYNTH_CLOCK_MID_TAU_FRACTION, PREFETCH_DIST, PREFETCH_MIN_COLS, PRICE_DENSE_RESULT_RATIO, SYNTH_CLOCK_DENSE_FRACTION, D_DRIFT_TOL, FT_BUMP_LU_RATIO, PLATEAU_OBJ_REL, D_GROSS_MISMATCH_REL_TOL, FT_MAX_UPDATES_FACTOR, FT_MAX_UPDATES_FLOOR, PARTIAL_TAU_MIN_M, PIVOT_ESCALATION_STEP, SLOPE_TOL, STUCK_ROW_MIN_PIVOT, SYNTH_CLOCK_FACTOR, SYNTH_CLOCK_LARGE_M, SYNTH_CLOCK_LARGE_REF_M, SYNTH_CLOCK_MIN_UPDATES, XB_CHECK_CADENCE, XB_CHECK_CADENCE_LARGE, XB_CHECK_CADENCE_LARGE_DIV, XB_CHECK_CADENCE_LARGE_M, XB_CHECK_INTERVAL, XB_DRIFT_ESCALATION_FACTOR, XB_DRIFT_ESCALATION_STEP, XB_DRIFT_REL_TOL, XB_DRIFT_TOL, XB_DRIFT_TOL_MAX, X_B_SLOPE_NOISE, Z_SLOPE_TOL};
 use crate::params::slope_intercept_dual::{
-    CHUZR_HEAP_ADAPTIVE_MIN_M, CHUZR_HEAP_ADAPTIVE_RATIO, PAR_FTRAN_MIN_DENSITY, CHUZR_SHORTLIST_AUTO_DIV, CHUZR_SHORTLIST_AUTO_K, CHUZR_SHORTLIST_AUTO_K_MAX, CHUZR_SHORTLIST_AUTO_MIN_M, CHUZR_SHORTLIST_K, CHUZR_SHORTLIST_MAX_LEN_FACTOR, CHUZR_SHORTLIST_MAX_LEN_SLACK, CHUZR_SHORTLIST_MIN_POOL_FACTOR, COMPACT_ROWS_BLOCK, FTRAN_U_HYPER_DENSITY, FTRAN_U_HYPER_TAU_DENSITY,
+    CHUZR_HEAP_ADAPTIVE_MIN_M, CHUZR_HEAP_ADAPTIVE_RATIO, PAR_FTRAN_MIN_DENSITY, PAR_XB_MIN_M, PAR_XB_MIN_ROWS, PAR_XB_THREADS, CHUZR_SHORTLIST_AUTO_DIV, CHUZR_SHORTLIST_AUTO_K, CHUZR_SHORTLIST_AUTO_K_MAX, CHUZR_SHORTLIST_AUTO_MIN_M, CHUZR_SHORTLIST_K, CHUZR_SHORTLIST_MAX_LEN_FACTOR, CHUZR_SHORTLIST_MAX_LEN_SLACK, CHUZR_SHORTLIST_MIN_POOL_FACTOR, COMPACT_ROWS_BLOCK, FTRAN_U_HYPER_DENSITY, FTRAN_U_HYPER_TAU_DENSITY,
     GREATEST_IMPROVEMENT_STALL_DIVISOR, GREATEST_IMPROVEMENT_STALL_MIN, GREATEST_IMPROVEMENT_TOP_K, GROSS_MISMATCH_SCALE_FLOOR, HANDOFF_MAX_ROUNDS, INFEASIBLE_PLATEAU_BUDGET_DIVISOR, INFEASIBLE_PLATEAU_STALL_MULT,
     LEX_REL_TOL, PRICE_COLUMN_DENSITY, PRICE_LIST_DENSITY, SCORE2_STALL_HALFLIFE, STALL_LIMIT_MIN, STALL_LIMIT_PER_ROW, STUCK_ROW_BOOST_FACTOR, STUCK_ROW_BOOST_THRESHOLD, XB_DRIFT_FRESH_FLOOR_FACTOR,
     XB_DRIFT_FRESH_FLOOR_FRAC, XB_DRIFT_MIN_UPDATES, XB_DRIFT_MIN_UPDATES_MULT, XB_DRIFT_REL_K, XB_DRIFT_SAMPLE_GUARD, XB_DRIFT_SAMPLE_K, XB_CHECK_FULL_EVERY, XB_LIST_DENSITY,
@@ -1858,12 +1858,17 @@ impl RowBounds {
     /// 行 `i` の逸脱([`row_deviation`] と同一)。傾きが 0 なら平坦経路 [`deviation_flat`] を使う。
     #[inline]
     fn deviation(&self, x_b_base: &[f64], x_b_slope: &[f64], i: usize) -> Option<(i32, Affine1)> {
-        let xs = x_b_slope[i];
+        self.deviation_at(x_b_base[i], x_b_slope[i], i)
+    }
+
+    /// [`Self::deviation`] の値渡し版 (基底値 `x`、傾き `xs`)。
+    #[inline]
+    fn deviation_at(&self, x: f64, xs: f64, i: usize) -> Option<(i32, Affine1)> {
         if xs == 0.0 {
             let [lo, hi] = self.flat[i];
-            deviation_flat(false, lo, hi, x_b_base[i], xs)
+            deviation_flat(false, lo, hi, x, xs)
         } else {
-            deviation_core(self.noise[i], self.lower[i], self.upper[i], x_b_base[i], xs)
+            deviation_core(self.noise[i], self.lower[i], self.upper[i], x, xs)
         }
     }
 }
@@ -1917,6 +1922,186 @@ fn refresh_row(rows: &mut InfeasibleRows, dev_cache: &mut RowDevCache, row_bound
             rows.set(i, true);
         }
         None => rows.set(i, false),
+    }
+}
+
+/// 並列の `x_B` 更新 ([`xb_update_par`]) の 1 行の演算の種類。主ループの逐次版の 3 つの経路と同じ演算をする。
+#[derive(Clone, Copy)]
+enum XbMode {
+    /// 傾きの更新なし (`theta_slope == 0`)。`check_a` なら `alpha` が 0 の行を飛ばす (全行走査の経路)。
+    Plain { check_a: bool },
+    /// 傾きも更新する。
+    Slope { check_a: bool },
+    /// BFRT のフリップ結果 (`combined_alpha_*`) と入る列のステップを 1 パスで (`slope_nz`: フリップの傾きが非ゼロ)。
+    Flip { slope_nz: bool },
+}
+
+/// `x_B` 更新とそれに伴う [`refresh_row`] を、行番号の連続した区間に分けて `nthreads` 本で並列に行う。
+/// `list` は更新する行 (昇順、`None` なら全行)。各スレッドは自分の区間の `x_B`・逸脱のキャッシュを書き、
+/// 実行不能集合の所属が変わる行だけを記録する。所属の変更は最後に行番号の昇順で適用するので、
+/// 逐次版 (各行で `refresh_row` を呼ぶ) と値も集合の並びもビット一致。
+#[allow(clippy::too_many_arguments)]
+fn xb_update_par(
+    list: Option<&[u32]>,
+    m: usize,
+    nthreads: usize,
+    mode: XbMode,
+    alpha: &[f64],
+    theta_base: f64,
+    theta_slope: f64,
+    cab: &[f64],
+    cas: &[f64],
+    x_b_base: &mut [f64],
+    x_b_slope: &mut [f64],
+    rows: &mut InfeasibleRows,
+    dev_cache: &mut RowDevCache,
+    rb: &RowBounds,
+) {
+    let n_items = list.map_or(m, |l| l.len());
+    let t = nthreads.max(1).min(n_items.max(1));
+    // 区間 `k` の項目 `[item_lo[k], item_lo[k+1])` と行番号の境界 `row_lo[k]`。
+    let item_lo: Vec<usize> = (0..=t).map(|k| k * n_items / t).collect();
+    let row_of = |item: usize| -> usize {
+        if item >= n_items {
+            m
+        } else {
+            list.map_or(item, |l| l[item] as usize)
+        }
+    };
+    let mut row_lo: Vec<usize> = (0..t).map(|k| row_of(item_lo[k])).collect();
+    row_lo[0] = 0;
+    row_lo.push(m);
+    // 配列を行の区間ごとに切り分ける。
+    let mut xb_parts = Vec::with_capacity(t);
+    let mut xs_parts = Vec::with_capacity(t);
+    let mut dir_parts = Vec::with_capacity(t);
+    let mut dev_parts = Vec::with_capacity(t);
+    {
+        let (mut xb, mut xs, mut dir, mut dev) = (&mut x_b_base[..m], &mut x_b_slope[..m], &mut dev_cache.dir[..m], &mut dev_cache.dev[..m]);
+        for k in 0..t {
+            let len = row_lo[k + 1] - row_lo[k];
+            let (a, b) = std::mem::take(&mut xb).split_at_mut(len);
+            xb_parts.push(a);
+            xb = b;
+            let (a, b) = std::mem::take(&mut xs).split_at_mut(len);
+            xs_parts.push(a);
+            xs = b;
+            let (a, b) = std::mem::take(&mut dir).split_at_mut(len);
+            dir_parts.push(a);
+            dir = b;
+            let (a, b) = std::mem::take(&mut dev).split_at_mut(len);
+            dev_parts.push(a);
+            dev = b;
+        }
+    }
+    let rows_ro: &InfeasibleRows = rows;
+    let work = |k: usize, xb: &mut [f64], xs: &mut [f64], dir: &mut [i32], dev: &mut [Affine1]| -> Vec<(u32, bool)> {
+        let off = row_lo[k];
+        let mut changes = Vec::new();
+        let mut one = |i: usize| {
+            let li = i - off;
+            let a = alpha[i];
+            let touched = match mode {
+                XbMode::Plain { check_a } => {
+                    if check_a && a == 0.0 {
+                        false
+                    } else {
+                        xb[li] -= a * theta_base;
+                        true
+                    }
+                }
+                XbMode::Slope { check_a } => {
+                    if check_a && a == 0.0 {
+                        false
+                    } else {
+                        xb[li] -= a * theta_base;
+                        xs[li] = snap_slope(xs[li] - a * theta_slope);
+                        true
+                    }
+                }
+                XbMode::Flip { slope_nz } => {
+                    let ca = cab[i];
+                    let cs = if slope_nz { cas[i] } else { 0.0 };
+                    let flip = ca != 0.0 || cs != 0.0;
+                    if flip || a != 0.0 {
+                        if flip {
+                            xb[li] -= ca;
+                            if slope_nz {
+                                xs[li] = snap_slope(xs[li] - cs);
+                            }
+                        }
+                        if a != 0.0 {
+                            xb[li] -= a * theta_base;
+                            if theta_slope != 0.0 {
+                                xs[li] = snap_slope(xs[li] - a * theta_slope);
+                            }
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                }
+            };
+            if !touched {
+                return;
+            }
+            // [`refresh_row`] と同じ判定。
+            let (x, s) = (xb[li], xs[li]);
+            let fast_feasible = s == 0.0 && {
+                let [lo, hi] = rb.flat[i];
+                let vm = lo - x;
+                let vp = x - hi;
+                !(vm > LEX_REL_TOL && vm < f64::INFINITY) && !(vp > LEX_REL_TOL && vp < f64::INFINITY)
+            };
+            let infeasible = if fast_feasible {
+                false
+            } else {
+                match rb.deviation_at(x, s, i) {
+                    Some((d, dv)) => {
+                        dir[li] = d;
+                        dev[li] = dv;
+                        true
+                    }
+                    None => false,
+                }
+            };
+            if infeasible != rows_ro.contains(i) {
+                changes.push((i as u32, infeasible));
+            }
+        };
+        match list {
+            Some(l) => {
+                for &i in &l[item_lo[k]..item_lo[k + 1]] {
+                    one(i as usize);
+                }
+            }
+            None => {
+                for i in item_lo[k]..item_lo[k + 1] {
+                    one(i);
+                }
+            }
+        }
+        changes
+    };
+    let all_changes: Vec<Vec<(u32, bool)>> = std::thread::scope(|sc| {
+        let mut parts: Vec<_> = xb_parts.into_iter().zip(xs_parts).zip(dir_parts).zip(dev_parts).enumerate().collect();
+        let first = parts.remove(0);
+        let handles: Vec<_> = parts
+            .into_iter()
+            .map(|(k, (((xb, xs), dir), dev))| {
+                let work = &work;
+                sc.spawn(move || work(k, xb, xs, dir, dev))
+            })
+            .collect();
+        let (k0, (((xb, xs), dir), dev)) = first;
+        let mut out = vec![work(k0, xb, xs, dir, dev)];
+        out.extend(handles.into_iter().map(|h| h.join().expect("x_B update worker panicked")));
+        out
+    });
+    for ch in all_changes {
+        for (i, f) in ch {
+            rows.set(i as usize, f);
+        }
     }
 }
 
@@ -4865,8 +5050,44 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                 None
             }
         };
+        // 結果が密なとき、`x_B` 更新を行の区間ごとに並列に行うか (`xb_update_par`、ビット一致)。
+        let xb_par_threads = {
+            let min_m = tunable!("ENOMOTO_T_PAR_XB_MIN_M", PAR_XB_MIN_M, usize);
+            let n_items = xb_list_len.unwrap_or(m);
+            let t = rayon::current_num_threads().min(tunable!("ENOMOTO_T_PAR_XB_THREADS", PAR_XB_THREADS, usize));
+            if BIG && min_m > 0 && m >= min_m && n_items >= tunable!("ENOMOTO_T_PAR_XB_MIN_ROWS", PAR_XB_MIN_ROWS, usize) && t > 1 {
+                t
+            } else {
+                0
+            }
+        };
         timed!(profile_phases, prof_phases::XB_UPDATE, {
-            if combined_pending {
+            if xb_par_threads > 0 {
+                let list = xb_list_len.map(|k| &xb_rows[..k]);
+                let mode = if combined_pending {
+                    XbMode::Flip { slope_nz: combined_slope_nonzero }
+                } else if theta_slope == 0.0 {
+                    XbMode::Plain { check_a: list.is_none() }
+                } else {
+                    XbMode::Slope { check_a: list.is_none() }
+                };
+                xb_update_par(list, m, xb_par_threads, mode, &alpha_full, theta_base, theta_slope, &combined_alpha_base, &combined_alpha_slope, &mut x_b_base, &mut x_b_slope, &mut infeasible_rows, &mut row_dev, &row_bounds);
+                if combined_pending {
+                    for &i in &combined_touched {
+                        rhs_inc_base[i] -= combined_base[i];
+                        if rhs_inc_slope.is_empty() && combined_slope[i] != 0.0 {
+                            rhs_inc_slope.resize(m, 0.0);
+                        }
+                        if !rhs_inc_slope.is_empty() {
+                            rhs_inc_slope[i] -= combined_slope[i];
+                        }
+                        combined_base[i] = 0.0;
+                        combined_slope[i] = 0.0;
+                        combined_touched_flag[i] = false;
+                    }
+                    combined_touched.clear();
+                }
+            } else if combined_pending {
                 // フリップ結果と入る列のステップを 1 パスで: 行ごとに、別パスのフリップ反映と
                 // 同じ演算の後に入る列の演算を行い、`refresh_row` を 1 回呼ぶ
                 // (両ループに展開するためマクロにしている)。

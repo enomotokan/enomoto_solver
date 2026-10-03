@@ -505,6 +505,15 @@ pub(crate) mod slope_intercept_dual {
     /// ex10 は約 0.9 で FTRAN −23%、irish-electricity (`alpha` 約 0.25) や physiciansched3-3 の双対では並列のほうが遅かった。
     pub(crate) const PAR_FTRAN_MIN_DENSITY: f64 = 0.5;
 
+    /// `x_B` 更新 (と実行不能集合の更新) を行の区間ごとに並列に行う最小の行数 (`ENOMOTO_T_PAR_XB_MIN_M`、0 = 無効)。
+    /// ex10 で `x_B` 更新は 946 → 729 µs/反復 (4 スレッド、メモリ帯域で頭打ち) だが、他のコアが書いた行を後続の段
+    /// (FTRAN など) が読み直すので全体は変わらない (86.3/91.1 → 87.8/91.8 s)。既定では無効。有効にするなら 20,000。
+    pub(crate) const PAR_XB_MIN_M: usize = 0;
+    /// 同じく、更新する行の最小数 (`ENOMOTO_T_PAR_XB_MIN_ROWS`)。スレッドの起動 (数十 µs) より仕事が大きいときだけ。
+    pub(crate) const PAR_XB_MIN_ROWS: usize = 8192;
+    /// 同じく、使うスレッド数の上限 (`ENOMOTO_T_PAR_XB_THREADS`、rayon のスレッド数とも比べて小さいほう)。
+    pub(crate) const PAR_XB_THREADS: usize = 4;
+
     /// 作業 #10 (A): 適応モードでヒープを使う条件 `プール >= 係数 * (前反復の x_B 更新一覧長 + 1) * log2(プール)` の
     /// 係数 (`ENOMOTO_T_CHUZR_HEAP_ADAPTIVE_RATIO`)。ヒープは 1 反復に「一覧の行を積む (log2(プール) 回の比較)」
     /// + 古い要素の破棄、全走査は「プールの各行でスコアを作って 1 回比較」なので、比較 1 回あたりの手間が
