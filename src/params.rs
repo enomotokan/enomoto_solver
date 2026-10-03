@@ -409,6 +409,21 @@ pub(crate) mod slope_intercept_dual {
     /// polish の BFRT 到達判定 `reach_tol` の相対部分にも使う。
     pub(crate) const LEX_REL_TOL: f64 = 1e-9;
 
+    /// 主ループで基底の行を主実行不能とみなす逸脱の下限 (傾き 0 の逸脱の定数項、スケール後の座標で絶対値、
+    /// `ENOMOTO_T_ROW_INFEAS_TOL`)。従来は [`LEX_REL_TOL`] (1e-9) と共用。
+    pub(crate) const ROW_INFEAS_TOL: f64 = 1e-9;
+
+    /// 行の実行不能判定の許容誤差に、`x_B` の再同期で測った増分更新の相対的なずれを足すときの倍率
+    /// (`ENOMOTO_T_ROW_ERR_MULT`、0 で無効)。polish の許容誤差もこれを下回らない。
+    pub(crate) const ROW_ERR_MULT: f64 = 1.0;
+
+    /// 上の加算分の上限 (`ENOMOTO_T_ROW_ERR_CAP`)。
+    pub(crate) const ROW_ERR_CAP: f64 = 1e-5;
+
+    /// 上の広げた許容誤差を使うのは、実行不能な行のうちこの割合以上がその許容誤差以下の逸脱しか持たない
+    /// (残りがほぼ雑音だけ) ときに限る (`ENOMOTO_T_ROW_ERR_POOL_FRAC`)。
+    pub(crate) const ROW_ERR_POOL_FRAC: f64 = 0.5;
+
     /// 停滞ピボット数の上限 `stall_limit = max(STALL_LIMIT_PER_ROW * m, STALL_LIMIT_MIN)` の
     /// 行数あたりの係数。超えたら Bland 規則(`bland_mode`)に切り替える。
     pub(crate) const STALL_LIMIT_PER_ROW: usize = 5;

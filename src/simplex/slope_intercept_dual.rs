@@ -60,7 +60,7 @@ use std::sync::OnceLock;
 use crate::params::simplex::{FT_BUMP_LIMIT_FACTOR, FT_CHECK_INTERVAL, FT_MIN_PIVOT, FT_RESIDUAL_TOL, HARRIS_RATIO_TOL, MAX_ITERS_FLOOR, PRIMAL_FEAS_TOL, RESIDUAL_CHECK_MULTIPLIER, STALL_PROGRESS_EPS, STEEPEST_EDGE_FLOOR, TOL};
 use crate::params::slope_intercept_dual::{CHUZC1_TOPK, CHUZC1_TOPK_MIN_CANDS, FLIP_TRACK_MIN_M, CHUZC1_FAST_PROBE, SYNTH_CLOCK_MID_REF_MULT, SYNTH_CLOCK_MID_TAU_FRACTION, PREFETCH_DIST, PREFETCH_MIN_COLS, PRICE_DENSE_RESULT_RATIO, SYNTH_CLOCK_DENSE_FRACTION, D_DRIFT_TOL, FT_BUMP_LU_RATIO, PLATEAU_OBJ_REL, D_GROSS_MISMATCH_REL_TOL, FT_MAX_UPDATES_FACTOR, FT_MAX_UPDATES_FLOOR, PARTIAL_TAU_MIN_M, PIVOT_ESCALATION_STEP, SLOPE_TOL, STUCK_ROW_MIN_PIVOT, SYNTH_CLOCK_FACTOR, SYNTH_CLOCK_LARGE_M, SYNTH_CLOCK_LARGE_REF_M, SYNTH_CLOCK_MIN_UPDATES, XB_CHECK_CADENCE, XB_CHECK_CADENCE_LARGE, XB_CHECK_CADENCE_LARGE_DIV, XB_CHECK_CADENCE_LARGE_M, XB_CHECK_INTERVAL, XB_DRIFT_ESCALATION_FACTOR, XB_DRIFT_ESCALATION_STEP, XB_DRIFT_REL_TOL, XB_DRIFT_TOL, XB_DRIFT_TOL_MAX, X_B_SLOPE_NOISE, Z_SLOPE_TOL};
 use crate::params::slope_intercept_dual::{
-    CHUZR_HEAP_ADAPTIVE_MIN_M, CHUZR_HEAP_ADAPTIVE_RATIO, PAR_FTRAN_MIN_DENSITY, PAR_XB_MIN_M, PAR_XB_MIN_ROWS, PAR_XB_THREADS, CHUZR_SHORTLIST_AUTO_DIV, CHUZR_SHORTLIST_AUTO_K, CHUZR_SHORTLIST_AUTO_K_MAX, CHUZR_SHORTLIST_AUTO_MIN_M, CHUZR_SHORTLIST_K, CHUZR_SHORTLIST_MAX_LEN_FACTOR, CHUZR_SHORTLIST_MAX_LEN_SLACK, CHUZR_SHORTLIST_MIN_POOL_FACTOR, COMPACT_ROWS_BLOCK, FTRAN_U_HYPER_DENSITY, FTRAN_U_HYPER_TAU_DENSITY,
+    CHUZR_HEAP_ADAPTIVE_MIN_M, CHUZR_HEAP_ADAPTIVE_RATIO, PAR_FTRAN_MIN_DENSITY, PAR_XB_MIN_M, PAR_XB_MIN_ROWS, PAR_XB_THREADS, ROW_ERR_CAP, ROW_ERR_MULT, ROW_ERR_POOL_FRAC, ROW_INFEAS_TOL, CHUZR_SHORTLIST_AUTO_DIV, CHUZR_SHORTLIST_AUTO_K, CHUZR_SHORTLIST_AUTO_K_MAX, CHUZR_SHORTLIST_AUTO_MIN_M, CHUZR_SHORTLIST_K, CHUZR_SHORTLIST_MAX_LEN_FACTOR, CHUZR_SHORTLIST_MAX_LEN_SLACK, CHUZR_SHORTLIST_MIN_POOL_FACTOR, COMPACT_ROWS_BLOCK, FTRAN_U_HYPER_DENSITY, FTRAN_U_HYPER_TAU_DENSITY,
     GREATEST_IMPROVEMENT_STALL_DIVISOR, GREATEST_IMPROVEMENT_STALL_MIN, GREATEST_IMPROVEMENT_TOP_K, GROSS_MISMATCH_SCALE_FLOOR, HANDOFF_MAX_ROUNDS, INFEASIBLE_PLATEAU_BUDGET_DIVISOR, INFEASIBLE_PLATEAU_STALL_MULT,
     LEX_REL_TOL, PRICE_COLUMN_DENSITY, PRICE_LIST_DENSITY, SCORE2_STALL_HALFLIFE, STALL_LIMIT_MIN, STALL_LIMIT_PER_ROW, STUCK_ROW_BOOST_FACTOR, STUCK_ROW_BOOST_THRESHOLD, XB_DRIFT_FRESH_FLOOR_FACTOR,
     XB_DRIFT_FRESH_FLOOR_FRAC, XB_DRIFT_MIN_UPDATES, XB_DRIFT_MIN_UPDATES_MULT, XB_DRIFT_REL_K, XB_DRIFT_SAMPLE_GUARD, XB_DRIFT_SAMPLE_K, XB_CHECK_FULL_EVERY, XB_LIST_DENSITY,
@@ -1664,6 +1664,8 @@ fn resolve_x_b_slope_only(lu: &sparse_lu::FtLu, rhs_slope: &[f64], scratch: &mut
 /// (ドリフト検査の `rhs_inc_*` の基準)を返し、`x_b_base`/`x_b_slope` に解を書く。
 /// 段階 A は傾きチャネルだけを解き、基底側は全 0 を返す。段階 B の境界は傾きを持たないので
 /// 傾きチャネルは空で返り、[`resolve_x_b_into`] 自身が求解を省く。`scratch` は作業領域。
+/// `measure_drift` が真なら、段階 B で上書き前の `x_B` との相対的なずれを測って行の実行不能判定の
+/// 許容誤差を広げる ([`set_row_primal_error`])。
 #[allow(clippy::too_many_arguments)]
 fn resync_x_b(
     std: &StdForm,
@@ -1671,6 +1673,7 @@ fn resync_x_b(
     nb_status: &[Option<NbStatus>],
     lu: &sparse_lu::FtLu,
     phase: Phase,
+    measure_drift: bool,
     scratch: &mut [f64],
     x_b_base: &mut [f64],
     x_b_slope: &mut [f64],
@@ -1681,7 +1684,22 @@ fn resync_x_b(
         Some((vec![0.0; std.n_rows], rhs_slope))
     } else {
         let (rhs_base, rhs_slope) = compute_rhs_affine(std, cache, nb_status)?;
+        let measure = measure_drift && row_err_mult() > 0.0;
+        if measure {
+            XB_PREV.with(|p| {
+                let mut p = p.borrow_mut();
+                p.clear();
+                p.extend_from_slice(x_b_base);
+            });
+        }
         resolve_x_b_into(lu, &rhs_base, &rhs_slope, scratch, x_b_base, x_b_slope);
+        if measure {
+            let drift = XB_PREV.with(|p| p.borrow().iter().zip(x_b_base.iter()).map(|(o, n)| (o - n).abs() / n.abs().max(1.0)).fold(0.0f64, f64::max));
+            if env_str!("ENOMOTO_DEBUG_ROW_ERR").is_some() {
+                eprintln!("DEBUG_ROW_ERR: drift={drift:.3e} tol_before={:.3e}", row_infeas_tol());
+            }
+            set_row_primal_error(drift);
+        }
         Some((rhs_base, rhs_slope))
     }
 }
@@ -1730,18 +1748,18 @@ fn solve_x_b(std: &StdForm, lu: &sparse_lu::FtLu, nb_status: &[Option<NbStatus>]
 /// `d_dir == 1`、上限超過(減らしたい)なら `-1`、実行可能なら `None`。chuzr の走査と
 /// [`row_infeasible_affine`] が同じ実装を共有するためにまとめてある。
 #[inline]
-fn row_deviation(cache: &ColCache, basis: &[usize], x_b_base: &[f64], x_b_slope: &[f64], noise_feasible: &[bool], i: usize) -> Option<(i32, Affine1)> {
+fn row_deviation(cache: &ColCache, basis: &[usize], x_b_base: &[f64], x_b_slope: &[f64], noise_feasible: &[bool], i: usize, tol: f64) -> Option<(i32, Affine1)> {
     let bv = basis[i];
     // Eligible 空の時点で「丸め誤差程度の実行不能」と判定済みの行(`noise_feasible`)は、
     // 以後実行可能として扱う(毎反復選び直して chuzc1 で失敗し続けないため)。
-    deviation_core(noise_feasible[bv], cache.lower[bv], cache.upper[bv], x_b_base[i], x_b_slope[i])
+    deviation_core(noise_feasible[bv], cache.lower[bv], cache.upper[bv], x_b_base[i], x_b_slope[i], tol)
 }
 
 /// [`row_deviation`] の計算本体。基底変数の `noise_feasible` フラグと境界 `lower`/`upper`、
 /// 値 `x_base + x_slope*M` を直接受け取る([`RowBounds::deviation`] と共有するため)。
 /// 両側で違反していれば辞書式に大きい方を返す。
 #[inline(always)]
-fn deviation_core(noise: bool, lower: Option<Affine1>, upper: Option<Affine1>, x_base: f64, x_slope: f64) -> Option<(i32, Affine1)> {
+fn deviation_core(noise: bool, lower: Option<Affine1>, upper: Option<Affine1>, x_base: f64, x_slope: f64, tol: f64) -> Option<(i32, Affine1)> {
     if noise {
         return None;
     }
@@ -1750,11 +1768,11 @@ fn deviation_core(noise: bool, lower: Option<Affine1>, upper: Option<Affine1>, x
     // `upper` も同様。
     let dev_minus = lower.and_then(|hat_l| {
         let v_minus = hat_l.sub(x_bi);
-        v_minus.gt_zero().then_some(v_minus)
+        dev_positive(v_minus, tol).then_some(v_minus)
     });
     let dev_plus = upper.and_then(|hat_u| {
         let v_plus = x_bi.sub(hat_u);
-        v_plus.gt_zero().then_some(v_plus)
+        dev_positive(v_plus, tol).then_some(v_plus)
     });
     match (dev_minus, dev_plus) {
         (Some(vm), Some(vp)) => Some(if vm.cmp_lex(&vp) == std::cmp::Ordering::Greater { (1i32, vm) } else { (-1i32, vp) }),
@@ -1768,7 +1786,7 @@ fn deviation_core(noise: bool, lower: Option<Affine1>, upper: Option<Affine1>, x
 #[inline]
 #[cfg_attr(not(debug_assertions), allow(dead_code))]
 fn row_infeasible_affine(cache: &ColCache, basis: &[usize], x_b_base: &[f64], x_b_slope: &[f64], noise_feasible: &[bool], i: usize) -> bool {
-    row_deviation(cache, basis, x_b_base, x_b_slope, noise_feasible, i).is_some()
+    row_deviation(cache, basis, x_b_base, x_b_slope, noise_feasible, i, row_infeas_tol()).is_some()
 }
 
 /// [`InfeasibleRows`] に現在含まれる各行について、そのメンバーシップを最後に判定した時点の
@@ -1807,6 +1825,9 @@ struct RowBounds {
     flat: Vec<[f64; 2]>,
     /// 行 `i` の基底変数が `noise_feasible` か。
     noise: Vec<bool>,
+    /// 行の実行不能判定の許容誤差 ([`row_infeas_tol`] の値を、変わるとき (作成時と周期的な再同期) にだけ写す。
+    /// 拡張モジュールでは `thread_local` の読み出しが関数呼び出しになるので、ホットループでは読まない)。
+    tol: f64,
 }
 
 /// [`RowBounds::flat`] の 1 行分を作る(`noise` なら `(-inf, +inf)`)。
@@ -1836,6 +1857,7 @@ impl RowBounds {
             upper: basis.iter().map(|&j| cache.upper[j]).collect(),
             flat: basis.iter().map(|&j| flat_pair(cache.lower[j], cache.upper[j], noise_feasible[j])).collect(),
             noise: basis.iter().map(|&j| noise_feasible[j]).collect(),
+            tol: row_infeas_tol(),
         }
     }
 
@@ -1866,11 +1888,96 @@ impl RowBounds {
     fn deviation_at(&self, x: f64, xs: f64, i: usize) -> Option<(i32, Affine1)> {
         if xs == 0.0 {
             let [lo, hi] = self.flat[i];
-            deviation_flat(false, lo, hi, x, xs)
+            deviation_flat(false, lo, hi, x, xs, self.tol)
         } else {
-            deviation_core(self.noise[i], self.lower[i], self.upper[i], x, xs)
+            deviation_core(self.noise[i], self.lower[i], self.upper[i], x, xs, self.tol)
         }
     }
+}
+
+/// 行の主実行不能の判定に使う許容誤差 (傾き 0 の逸脱の定数項がこれを超えたら実行不能、`ENOMOTO_T_ROW_INFEAS_TOL`)。
+/// [`ROW_INFEAS_TOL`] 参照。
+#[inline(always)]
+fn row_infeas_tol() -> f64 {
+    ROW_TOL_CUR.with(|c| c.get())
+}
+
+thread_local! {
+    /// [`resync_x_b`] が上書きする前の `x_B` の定数項 (再同期でのずれの測定用)。
+    static XB_PREV: std::cell::RefCell<Vec<f64>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// 現在の [`row_infeas_tol`]: 基準値 `ENOMOTO_T_ROW_INFEAS_TOL` に、直近の `x_B` 再同期で測った
+    /// 増分更新のずれ ([`set_row_primal_error`]) を足したもの。求解ごとに [`reset_row_infeas_tol`] で戻す。
+    static ROW_TOL_CUR: std::cell::Cell<f64> = const { std::cell::Cell::new(ROW_INFEAS_TOL) };
+}
+
+/// `x_B` のずれを行の実行不能判定の許容誤差に足すときの倍率 (`ENOMOTO_T_ROW_ERR_MULT`、0 で無効)。
+fn row_err_mult() -> f64 {
+    tunable!("ENOMOTO_T_ROW_ERR_MULT", ROW_ERR_MULT, f64)
+}
+
+/// [`row_infeas_tol`] を基準値に戻す (求解の開始時)。
+fn reset_row_infeas_tol() {
+    ROW_TOL_CUR.with(|c| c.set(tunable!("ENOMOTO_T_ROW_INFEAS_TOL", ROW_INFEAS_TOL, f64)));
+}
+
+/// 行の実行不能判定の許容誤差を `基準値 + min(ROW_ERR_CAP, ROW_ERR_MULT * err)` に広げる。`err` は
+/// [`resync_x_b`] で測った、増分更新で保った `x_B` と解き直した `x_B` の相対的なずれ
+/// `max_i |Δx_i| / max(1, |x_i|)`: `x_B` の値はこの程度しか信用できないので、これより小さい逸脱は
+/// 実行不能とみなさない (CLP の `ClpDualRowSteepest::pivotRow` が主残差 `largestPrimalError` を許容誤差に
+/// 足すのと同じ考え方)。ns1688926 では右辺が 5e8 程度に膨らみ、ずれ 1e-6〜1e-5 の雑音の逸脱が数千行に
+/// 現れては消えて主ループが終わらなかった。数値的に素直な問題ではずれが 1e-12 程度なので変わらない。
+fn set_row_primal_error(err: f64) {
+    let base = tunable!("ENOMOTO_T_ROW_INFEAS_TOL", ROW_INFEAS_TOL, f64);
+    let cap = tunable!("ENOMOTO_T_ROW_ERR_CAP", ROW_ERR_CAP, f64);
+    let extra = (row_err_mult() * err).min(cap);
+    ROW_TOL_CUR.with(|c| c.set(base + if extra.is_finite() { extra } else { 0.0 }));
+}
+
+/// [`resync_x_b`] がずれから求めた候補の許容誤差 ([`row_infeas_tol`]) を、実行不能な行 (傾き 0、基準値で判定) の
+/// 過半 (`ROW_ERR_POOL_FRAC` 以上) がその候補以下の逸脱しか持たない (残りの実行不能がほぼ雑音だけ) ときにだけ採る。
+/// そうでなければ基準値に戻す: 本物の実行不能が多く残る途中で許容誤差を広げても反復の経路が変わるだけで得がない
+/// (square41 は反復が 3 割増えた)。ns1688926 では最後の段階でプールの 97% が雑音水準になる。
+fn noise_gated_row_tol(row_bounds: &RowBounds, x_b_base: &[f64], x_b_slope: &[f64], iter_idx: usize) -> f64 {
+    let base = tunable!("ENOMOTO_T_ROW_INFEAS_TOL", ROW_INFEAS_TOL, f64);
+    let cand = row_infeas_tol();
+    if !(cand > base) {
+        return base;
+    }
+    let (mut pool, mut within) = (0usize, 0usize);
+    for i in 0..x_b_base.len() {
+        if x_b_slope[i] != 0.0 {
+            continue;
+        }
+        let [lo, hi] = row_bounds.flat[i];
+        let dv = (lo - x_b_base[i]).max(x_b_base[i] - hi);
+        if dv > base && dv < f64::INFINITY {
+            pool += 1;
+            within += (dv <= cand) as usize;
+        }
+    }
+    let frac = tunable!("ENOMOTO_T_ROW_ERR_POOL_FRAC", ROW_ERR_POOL_FRAC, f64);
+    let take = pool > 0 && within as f64 >= frac * pool as f64;
+    if env_str!("ENOMOTO_DEBUG_ROW_ERR").is_some() {
+        eprintln!("DEBUG_ROW_POOL: iter={iter_idx} cand={cand:.3e} pool={pool} within={within} take={take}");
+    }
+    if take {
+        cand
+    } else {
+        // polish へ引き継ぐ値も基準値に戻す。
+        reset_row_infeas_tol();
+        base
+    }
+}
+
+/// 逸脱 `v` が正 (実行不能) か: [`Affine1::gt_zero`] と同じだが、傾きが 0 のときの定数項の判定に
+/// 許容誤差 `tol` ([`RowBounds::tol`]) を使う。
+#[inline(always)]
+fn dev_positive(v: Affine1, tol: f64) -> bool {
+    let sa = v.slope.abs();
+    if sa > LEX_REL_TOL && sa < f64::INFINITY {
+        return v.slope > 0.0;
+    }
+    v.base > tol && v.base < f64::INFINITY
 }
 
 /// `x_B` の傾きがちょうど 0 の行についての [`deviation_core`](delta=0 以降のほぼ全行・全反復)。
@@ -1880,14 +1987,14 @@ impl RowBounds {
 /// (同じ `base` 計算・同じ `slope` 式・同じタイブレーク)で、`Affine1`/`Option` の手間だけを省く。
 /// `lower`/`upper` は [`RowBounds::flat`] の値、`x`/`xs` は基底値と傾き。
 #[inline(always)]
-fn deviation_flat(noise: bool, lower: f64, upper: f64, x: f64, xs: f64) -> Option<(i32, Affine1)> {
+fn deviation_flat(noise: bool, lower: f64, upper: f64, x: f64, xs: f64, tol: f64) -> Option<(i32, Affine1)> {
     if noise {
         return None;
     }
     let vm = lower - x;
     let vp = x - upper;
-    let m_ok = vm > LEX_REL_TOL && vm < f64::INFINITY;
-    let p_ok = vp > LEX_REL_TOL && vp < f64::INFINITY;
+    let m_ok = vm > tol && vm < f64::INFINITY;
+    let p_ok = vp > tol && vp < f64::INFINITY;
     let dev_minus = Affine1::new(vm, 0.0 - xs);
     let dev_plus = Affine1::new(vp, xs - 0.0);
     match (m_ok, p_ok) {
@@ -1910,7 +2017,8 @@ fn refresh_row(rows: &mut InfeasibleRows, dev_cache: &mut RowDevCache, row_bound
         let x = x_b_base[i];
         let vm = lo - x;
         let vp = x - hi;
-        if !(vm > LEX_REL_TOL && vm < f64::INFINITY) && !(vp > LEX_REL_TOL && vp < f64::INFINITY) {
+        let tol = row_bounds.tol;
+        if !(vm > tol && vm < f64::INFINITY) && !(vp > tol && vp < f64::INFINITY) {
             rows.set(i, false);
             return;
         }
@@ -2051,7 +2159,8 @@ fn xb_update_par(
                 let [lo, hi] = rb.flat[i];
                 let vm = lo - x;
                 let vp = x - hi;
-                !(vm > LEX_REL_TOL && vm < f64::INFINITY) && !(vp > LEX_REL_TOL && vp < f64::INFINITY)
+                let tol = rb.tol;
+                !(vm > tol && vm < f64::INFINITY) && !(vp > tol && vp < f64::INFINITY)
             };
             let infeasible = if fast_feasible {
                 false
@@ -2124,13 +2233,14 @@ fn rebuild_rows(rows: &mut InfeasibleRows, dev_cache: &mut RowDevCache, m: usize
 /// 基底位置 `i` の変数が下限未満なら `(1, lb - x)`、上限超過なら `(-1, x - ub)`、
 /// 実行可能(または `noise_feasible`)なら `None`。許容誤差は行の値で尺度付けした
 /// `PRIMAL_FEAS_TOL * max(|x_i|, 1)`。
-fn row_deviation_plain(std: &StdForm, basis: &[usize], x_b: &[f64], noise_feasible: &[bool], i: usize) -> Option<(i32, f64)> {
+fn row_deviation_plain(std: &StdForm, basis: &[usize], x_b: &[f64], noise_feasible: &[bool], i: usize, tol_floor: f64) -> Option<(i32, f64)> {
     let bv = basis[i];
     if noise_feasible[bv] {
         return None;
     }
     let xi = x_b[i];
-    let feas_tol = tunable!("ENOMOTO_T_PRIMAL_FEAS_TOL", PRIMAL_FEAS_TOL, f64) * xi.abs().max(1.0);
+    // 主ループで `x_B` のずれから広げた許容誤差 ([`set_row_primal_error`]) を下回らない。
+    let feas_tol = (tunable!("ENOMOTO_T_PRIMAL_FEAS_TOL", PRIMAL_FEAS_TOL, f64) * xi.abs().max(1.0)).max(tol_floor);
     if xi < std.lb[bv] - feas_tol {
         Some((1, std.lb[bv] - xi))
     } else if xi > std.ub[bv] + feas_tol {
@@ -2141,8 +2251,8 @@ fn row_deviation_plain(std: &StdForm, basis: &[usize], x_b: &[f64], noise_feasib
 }
 
 /// [`row_deviation_plain`] を [`InfeasibleRows`] 用の真偽値にしたもの(行 `i` が実行不能か)。
-fn row_infeasible_plain(std: &StdForm, basis: &[usize], x_b: &[f64], noise_feasible: &[bool], i: usize) -> bool {
-    row_deviation_plain(std, basis, x_b, noise_feasible, i).is_some()
+fn row_infeasible_plain(std: &StdForm, basis: &[usize], x_b: &[f64], noise_feasible: &[bool], i: usize, tol_floor: f64) -> bool {
+    row_deviation_plain(std, basis, x_b, noise_feasible, i, tol_floor).is_some()
 }
 
 /// `b - N x_N` の `f64` 版([`compute_rhs_affine`] の単一チャネル版)。
@@ -2932,7 +3042,9 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
 
     // `x_B(M)` の初期値(論文の補題 6.1 の `b - N x_N` を一度だけ解く)。以後は増分で維持し、
     // 周期的な再同期で同じ計算に合わせ直す。
-    let (seed_base, seed_slope) = resync_x_b(std, &cache, &nb_status, &lu, phase, &mut lu_scratch, &mut x_b_base, &mut x_b_slope)?;
+    let (seed_base, seed_slope) = resync_x_b(std, &cache, &nb_status, &lu, phase, false, &mut lu_scratch, &mut x_b_base, &mut x_b_slope)?;
+    // 許容誤差を基準値に戻す (前の求解で広げた値を持ち越さない)。
+    reset_row_infeas_tol();
     // `b - N x_N(M)` を増分維持するか(BFRT フリップと基底交換が自列の寄与を反映する)。
     // ドリフト検査のたびに `O(nnz(A))` で再計算しないため。完全な再同期のたびに
     // `compute_rhs_affine` の値に合わせ直す。`ENOMOTO_XB_RHS_INCREMENTAL=0` で毎回再計算。
@@ -3061,6 +3173,9 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     // 最後にプラトー計数をリセットしてからの累積、進展とみなす相対量 (`ENOMOTO_T_PLATEAU_OBJ_REL`、0 = 無効)。
     let mut plateau_obj_total = 0.0f64;
     let mut plateau_obj_acc = 0.0f64;
+    // 診断 (`ENOMOTO_DEBUG_EXT_TRACE`): 求解開始からの目的関数の増分の累積 (定数項・傾き) と、
+    // 入る列の比 `|theta|` が 0 だった (主の歩幅 0) ピボット数。
+    let (mut trace_obj_base, mut trace_obj_slope, mut trace_zero_step) = (0.0f64, 0.0f64, 0usize);
     let plateau_obj_rel: f64 = tunable!("ENOMOTO_T_PLATEAU_OBJ_REL", PLATEAU_OBJ_REL, f64);
     // これまでに見た最小の実行不能行数(前反復の値ではない)。
     let mut best_infeasible_len = infeasible_rows.rows.len();
@@ -3383,7 +3498,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                     }
                     if !guard && sparse_lu::escalate_pivot_threshold() {
                         lu = refactor_main!();
-                        let (fresh_base, fresh_slope) = resync_x_b(std, &cache, &nb_status, &lu, phase, &mut lu_scratch, &mut x_b_base, &mut x_b_slope)?;
+                        let (fresh_base, fresh_slope) = resync_x_b(std, &cache, &nb_status, &lu, phase, false, &mut lu_scratch, &mut x_b_base, &mut x_b_slope)?;
                         rhs_inc_base = fresh_base;
                         rhs_inc_slope = fresh_slope;
                         rebuild_rows(&mut infeasible_rows, &mut row_dev, m, &row_bounds, &x_b_base, &x_b_slope);
@@ -3432,8 +3547,13 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         iters_since_m_progress += 1;
         if debug_ext_iters_verbose && iter_idx % 2000 == 0 {
             eprintln!(
-                "DEBUG_EXT_TRACE: iter={iter_idx} infeasible_rows={} stall_count={stall_count} bland_mode={bland_mode} remaining_m_side={remaining_m_side}",
-                infeasible_rows.rows.len()
+                "DEBUG_EXT_TRACE: iter={iter_idx} infeasible_rows={} stall_count={stall_count} bland_mode={bland_mode} remaining_m_side={remaining_m_side} obj_inc=({trace_obj_base:.10e},{trace_obj_slope:.6e}) degenerate_pivots={diag_degen} zero_steps={trace_zero_step} dev_slope_nz={} dev_max={:.3e} dev_gt[1e-7,1e-5,1e-3]=[{},{},{}]",
+                infeasible_rows.rows.len(),
+                infeasible_rows.rows.iter().filter(|&&i| row_dev.dev[i].slope != 0.0).count(),
+                infeasible_rows.rows.iter().map(|&i| row_dev.dev[i].base).fold(0.0f64, f64::max),
+                infeasible_rows.rows.iter().filter(|&&i| row_dev.dev[i].slope == 0.0 && row_dev.dev[i].base > 1e-7).count(),
+                infeasible_rows.rows.iter().filter(|&&i| row_dev.dev[i].slope == 0.0 && row_dev.dev[i].base > 1e-5).count(),
+                infeasible_rows.rows.iter().filter(|&&i| row_dev.dev[i].slope == 0.0 && row_dev.dev[i].base > 1e-3).count()
             );
         }
         if profile_phases {
@@ -3632,7 +3752,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
             maintained.sort_unstable();
             debug_assert_eq!(fresh, maintained, "InfeasibleRows drifted from a fresh scan at iter {iter_idx}");
             for &i in &infeasible_rows.rows {
-                let (fd, fv) = row_deviation(&cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i).expect("pool row must be infeasible");
+                let (fd, fv) = row_deviation(&cache, &basis, &x_b_base, &x_b_slope, &noise_feasible, i, row_bounds.tol).expect("pool row must be infeasible");
                 let cv = row_dev.dev[i];
                 debug_assert!(
                     fd == row_dev.dir[i] && fv.base.to_bits() == cv.base.to_bits() && fv.slope.to_bits() == cv.slope.to_bits(),
@@ -3742,7 +3862,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                 pivot_log.clear();
                 pivot_flips.clear();
                 x_b_slope.fill(0.0);
-                let (fresh_base, fresh_slope) = resync_x_b(std, &cache, &nb_status, &lu, phase, &mut lu_scratch, &mut x_b_base, &mut x_b_slope)?;
+                let (fresh_base, fresh_slope) = resync_x_b(std, &cache, &nb_status, &lu, phase, false, &mut lu_scratch, &mut x_b_base, &mut x_b_slope)?;
                 rhs_inc_base = fresh_base;
                 rhs_inc_slope = fresh_slope;
                 rebuild_rows(&mut infeasible_rows, &mut row_dev, m, &row_bounds, &x_b_base, &x_b_slope);
@@ -4135,7 +4255,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                 }
                 timed!(profile_phases, prof_phases::REFACTOR, {
                     lu = refactor_main!();
-                    let (fresh_base, fresh_slope) = resync_x_b(std, &cache, &nb_status, &lu, phase, &mut lu_scratch, &mut x_b_base, &mut x_b_slope)?;
+                    let (fresh_base, fresh_slope) = resync_x_b(std, &cache, &nb_status, &lu, phase, false, &mut lu_scratch, &mut x_b_base, &mut x_b_slope)?;
                     rhs_inc_base = fresh_base;
                     rhs_inc_slope = fresh_slope;
                     rebuild_rows(&mut infeasible_rows, &mut row_dev, m, &row_bounds, &x_b_base, &x_b_slope);
@@ -4350,7 +4470,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                 }
                 timed!(profile_phases, prof_phases::REFACTOR, {
                     lu = refactor_main!();
-                    let (fresh_base, fresh_slope) = resync_x_b(std, &cache, &nb_status, &lu, phase, &mut lu_scratch, &mut x_b_base, &mut x_b_slope)?;
+                    let (fresh_base, fresh_slope) = resync_x_b(std, &cache, &nb_status, &lu, phase, false, &mut lu_scratch, &mut x_b_base, &mut x_b_slope)?;
                     rhs_inc_base = fresh_base;
                     rhs_inc_slope = fresh_slope;
                     rebuild_rows(&mut infeasible_rows, &mut row_dev, m, &row_bounds, &x_b_base, &x_b_slope);
@@ -4910,7 +5030,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
             }
             timed!(profile_phases, prof_phases::REFACTOR, {
                 lu = refactor_main!();
-                let (fresh_base, fresh_slope) = resync_x_b(std, &cache, &nb_status, &lu, phase, &mut lu_scratch, &mut x_b_base, &mut x_b_slope)?;
+                let (fresh_base, fresh_slope) = resync_x_b(std, &cache, &nb_status, &lu, phase, false, &mut lu_scratch, &mut x_b_base, &mut x_b_slope)?;
                 rhs_inc_base = fresh_base;
                 rhs_inc_slope = fresh_slope;
                 rebuild_rows(&mut infeasible_rows, &mut row_dev, m, &row_bounds, &x_b_base, &x_b_slope);
@@ -5185,6 +5305,11 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         // このピボットの目的関数への寄与 `theta_q(M) * dj_q`(`dj_q` は `M` に依存しない)。
         // 下の停滞判定で使う。
         let contribution_base = theta_base * dj_q;
+        if debug_ext_iters_verbose {
+            trace_obj_base += contribution_base;
+            trace_obj_slope += theta_slope * dj_q;
+            trace_zero_step += (theta_base == 0.0 && theta_slope == 0.0) as usize;
+        }
         let contribution_slope = theta_slope * dj_q;
 
         // 部分 `tau` は行一覧での DSE 更新にしか使えない(全行更新になるなら `tau` を全体で求め直す)。
@@ -5683,8 +5808,10 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
             timed!(profile_phases, prof_phases::REFACTOR, {
                 lu = refactor_main!();
                 // 完全な再同期: 新しい右辺から `x_B(M)` を解き直し、多数の行の実行可能性が
-                // 一度に変わりうるので `InfeasibleRows` も作り直す。
-                let (fresh_base, fresh_slope) = resync_x_b(std, &cache, &nb_status, &lu, phase, &mut lu_scratch, &mut x_b_base, &mut x_b_slope)?;
+                // 一度に変わりうるので `InfeasibleRows` も作り直す。増分更新のずれはここ (周期的・ドリフト検査の
+                // 再分解) でだけ測る: ピボットの不一致や段階の移行の後の再同期の差は雑音の大きさではない。
+                let (fresh_base, fresh_slope) = resync_x_b(std, &cache, &nb_status, &lu, phase, true, &mut lu_scratch, &mut x_b_base, &mut x_b_slope)?;
+                row_bounds.tol = noise_gated_row_tol(&row_bounds, &x_b_base, &x_b_slope, iter_idx);
                 rhs_inc_base = fresh_base;
                 rhs_inc_slope = fresh_slope;
                 // 新規残差の下限(`ENOMOTO_XB_DRIFT_FRESH_FLOOR`、既定オフ): 再分解ごとに
@@ -5993,6 +6120,8 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
     let m = std.n_rows;
     // 停滞(目的関数がほぼ進まないピボット)がこの回数を超えたら Bland 規則に切り替える。
     let stall_limit = (STALL_LIMIT_PER_ROW * m).max(STALL_LIMIT_MIN);
+    // 行の実行不能判定の許容誤差の下限: 主ループで `x_B` のずれから広げた値 ([`set_row_primal_error`])。
+    let tol_floor = row_infeas_tol();
     // 連続した停滞ピボットの数。
     let mut stall_count = 0usize;
     // Bland 規則(最小添字優先)による巡回防止モードか。
@@ -6089,7 +6218,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
     lu.solve_into(&compute_rhs_plain(std, nb_status), &mut lu_scratch, &mut x_b);
     // 主実行不能な基底行の集合(超疎 chuzr 用)。
     let mut infeasible_rows = InfeasibleRows::new(m);
-    infeasible_rows.rebuild(m, |i| row_infeasible_plain(std, basis, &x_b, &noise_feasible, i));
+    infeasible_rows.rebuild(m, |i| row_infeasible_plain(std, basis, &x_b, &noise_feasible, i, tol_floor));
 
     // S5 (`ENOMOTO_HANDOFF_FLIP=1`、既定オフ): 真のコストで双対実行不能な箱型列を
     // 境界フリップしてからこのループを最大 1 回だけ再開する(再開箇所を参照)。
@@ -6164,7 +6293,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
                 if lu.update_count() > 0 {
                     lu = polish_refactor!();
                     lu.solve_into(&compute_rhs_plain(std, nb_status), &mut lu_scratch, &mut x_b);
-                    infeasible_rows.rebuild(m, |i| row_infeasible_plain(std, basis, &x_b, &noise_feasible, i));
+                    infeasible_rows.rebuild(m, |i| row_infeasible_plain(std, basis, &x_b, &noise_feasible, i, tol_floor));
                     continue;
                 }
                 let rho_norm = rho.iter().map(|v| v * v).sum::<f64>().sqrt();
@@ -6179,7 +6308,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
                     }
                     lu = polish_refactor!();
                     lu.solve_into(&compute_rhs_plain(std, nb_status), &mut lu_scratch, &mut x_b);
-                    infeasible_rows.rebuild(m, |i| row_infeasible_plain(std, basis, &x_b, &noise_feasible, i));
+                    infeasible_rows.rebuild(m, |i| row_infeasible_plain(std, basis, &x_b, &noise_feasible, i, tol_floor));
                     continue;
                 }
             }
@@ -6191,7 +6320,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
         // 同値のときは小さい行番号、`bland_mode` では常に最小行番号を選ぶ。
         let mut best: Option<(usize, i32, f64)> = None;
         for &i in &infeasible_rows.rows {
-            let Some((d_dir, mag)) = row_deviation_plain(std, basis, &x_b, &noise_feasible, i) else { continue };
+            let Some((d_dir, mag)) = row_deviation_plain(std, basis, &x_b, &noise_feasible, i, tol_floor) else { continue };
             let better = match best {
                 None => true,
                 Some((br, _, bmag)) => {
@@ -6213,7 +6342,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
         #[cfg(debug_assertions)]
         {
             // `InfeasibleRows` が全行の新規走査結果と一致することを確認する。
-            let mut fresh: Vec<usize> = (0..m).filter(|&i| row_infeasible_plain(std, basis, &x_b, &noise_feasible, i)).collect();
+            let mut fresh: Vec<usize> = (0..m).filter(|&i| row_infeasible_plain(std, basis, &x_b, &noise_feasible, i, tol_floor)).collect();
             let mut maintained: Vec<usize> = infeasible_rows.rows.clone();
             fresh.sort_unstable();
             maintained.sort_unstable();
@@ -6326,7 +6455,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
                     pivot_flips.clear();
                     lu.solve_into(&compute_rhs_plain(std, nb_status), &mut lu_scratch, &mut x_b);
                     noise_feasible.fill(false);
-                    infeasible_rows.rebuild(m, |i| row_infeasible_plain(std, basis, &x_b, &noise_feasible, i));
+                    infeasible_rows.rebuild(m, |i| row_infeasible_plain(std, basis, &x_b, &noise_feasible, i, tol_floor));
                     stall_count = 0;
                     flip_restarted = true;
                     continue;
@@ -6390,12 +6519,12 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
                 let rhs = compute_rhs_plain(std, nb_status);
                 lu.solve_into(&rhs, &mut lu_scratch, &mut x_b);
                 noise_feasible.fill(false);
-                infeasible_rows.rebuild(m, |i| row_infeasible_plain(std, basis, &x_b, &noise_feasible, i));
+                infeasible_rows.rebuild(m, |i| row_infeasible_plain(std, basis, &x_b, &noise_feasible, i, tol_floor));
                 if !infeasible_rows.rows.is_empty() {
                     // 双対ループで直す: 新しい LU で `x_B` と真の費用の被約費用 `d` を作り直す。
                     lu = refactorize(std, basis_pos, Some(&lu))?;
                     lu.solve_into(&rhs, &mut lu_scratch, &mut x_b);
-                    infeasible_rows.rebuild(m, |i| row_infeasible_plain(std, basis, &x_b, &noise_feasible, i));
+                    infeasible_rows.rebuild(m, |i| row_infeasible_plain(std, basis, &x_b, &noise_feasible, i, tol_floor));
                     let c_b: Vec<f64> = basis.iter().map(|&bv| std.c[bv]).collect();
                     let mut y = vec![0.0f64; m];
                     lu.solve_transpose_into(&c_b, &mut lu_scratch, &mut y);
@@ -6609,7 +6738,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
             for i in 0..m {
                 if combined_alpha[i] != 0.0 {
                     x_b[i] -= combined_alpha[i];
-                    infeasible_rows.set(i, row_infeasible_plain(std, basis, &x_b, &noise_feasible, i));
+                    infeasible_rows.set(i, row_infeasible_plain(std, basis, &x_b, &noise_feasible, i, tol_floor));
                 }
             }
             for &i in &combined_touched {
@@ -6653,7 +6782,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
         if !update_verify_disabled && lu.update_count() > 0 && !super::pivot_values_agree(alpha_q, alpha_full[r]) {
             lu = polish_refactor!();
             lu.solve_into(&compute_rhs_plain(std, nb_status), &mut lu_scratch, &mut x_b);
-            infeasible_rows.rebuild(m, |i| row_infeasible_plain(std, basis, &x_b, &noise_feasible, i));
+            infeasible_rows.rebuild(m, |i| row_infeasible_plain(std, basis, &x_b, &noise_feasible, i, tol_floor));
             for &j in &touched_cols {
                 a_p[j] = 0.0;
                 touched[j] = false;
@@ -6675,7 +6804,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
             let a = alpha_full[i];
             if a != 0.0 {
                 x_b[i] -= a * theta;
-                infeasible_rows.set(i, row_infeasible_plain(std, basis, &x_b, &noise_feasible, i));
+                infeasible_rows.set(i, row_infeasible_plain(std, basis, &x_b, &noise_feasible, i, tol_floor));
             }
         }
         x_b[r] = nb_val_q + theta;
@@ -6700,7 +6829,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
         nb_status[q] = None;
         pivot_log.push(PivotRec { r, q, leaving: leaving_var, old_status_q, flips_end: pivot_flips.len() });
         // 行 `r` の基底変数が替わったので、新しい変数で実行可能性を判定し直す。
-        infeasible_rows.set(r, row_infeasible_plain(std, basis, &x_b, &noise_feasible, r));
+        infeasible_rows.set(r, row_infeasible_plain(std, basis, &x_b, &noise_feasible, r, tol_floor));
 
         // 双対値の増分更新: `d[j] -= theta_d * a_p[j]`。
         let theta_d = dj_q / alpha_q;
@@ -6745,7 +6874,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
             }
             lu = polish_refactor!();
             lu.solve_into(&compute_rhs_plain(std, nb_status), &mut lu_scratch, &mut x_b);
-            infeasible_rows.rebuild(m, |i| row_infeasible_plain(std, basis, &x_b, &noise_feasible, i));
+            infeasible_rows.rebuild(m, |i| row_infeasible_plain(std, basis, &x_b, &noise_feasible, i, tol_floor));
         }
     }
     if profile_phases_polish {
