@@ -14,8 +14,9 @@ pub(crate) mod simplex {
     pub(crate) const SIFTING_MIN_COLS: usize = 100_000;
 
     /// 結果が密な FTRAN (入る列の `alpha` と DSE の `tau`) を 2 スレッドで並列に解く最小の行数
-    /// (`ENOMOTO_T_PAR_FTRAN_MIN_M`、0 = 無効)。
-    pub(crate) const PAR_FTRAN_MIN_M: usize = 20_000;
+    /// (`ENOMOTO_T_PAR_FTRAN_MIN_M`、0 = 無効)。ex10 で FTRAN −21〜31%・全体 −6〜15% だが、131 問の 10 秒シフト付き
+    /// 幾何平均は −0.09% (neos-5052403-cygnet +14%) で採用基準に届かないので既定では無効。有効にするなら 20,000。
+    pub(crate) const PAR_FTRAN_MIN_M: usize = 0;
 
     /// 篩い分け法を使う最小の「構造列数 / 行数」(`ENOMOTO_T_SIFTING_MIN_RATIO`)。CLP は大きな問題で 8。
     pub(crate) const SIFTING_MIN_RATIO: f64 = 8.0;

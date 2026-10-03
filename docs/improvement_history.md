@@ -8166,6 +8166,25 @@ Netlib 93 問 (`ab_bench --rounds 3`): 合計 +2.6% (dfl001 など大きい問�
 +1.8%・−5.1%・+7.4%・−4.4%・−0.9%。Mittelmann で遅くなったのは pds-100 +6.0%、fome13 +4.3%、square41 +1.8% (1 回ずつ)。
 基準 (2% 以上の改善、各問題で 10% 以上の遅れなし) を満たすので採用。
 
+## 結果が密な FTRAN の並列化 (不採用、既定で無効) (2026-10-03)
+
+ex10・cont1・irish-electricity などで FTRAN が重い原因を調べた。
+
+- ex10 の再分解の入力 (`ENOMOTO_DUMP_LU_DIR`) を SuperLU (COLAMD) と比べると、自前の Markowitz 分解の L+U は 24〜37 万非零で
+  SuperLU の 147〜261 万より 1 桁小さい。再分解直前でも U は分解直後の 1.0〜1.2 倍、R は 14 万前後 (`ENOMOTO_DEBUG_FT_FILL`)。
+  FTRAN が重いのは結果 (`alpha`・`tau`) が行数の約 8 割と密で、毎回 U・R の全非零を処理するためで、1 要素あたり約 1.9 ns。
+- HiGHS は `tau` が他のベクトルの約 30 倍密なときだけ DSE から Devex に切り替える (`HEkk::switchToDevex`、密度比の 2 乗 > 1000)。
+  ex10 は `alpha` 0.9・`tau` 0.84 で当たらない。
+- 対処: 行数 2 万以上で `alpha`・`tau` の非ゼロ率の移動平均がどちらも 0.5 以上のとき、2〜3 本の FTRAN を `std::thread::scope` で
+  並列に解く (`FtLu::solve_into_pair_capture_tracked`・`triple`、値と tick はビット一致で反復経路は同じ。`FtLu` の tick を `AtomicU64` に)。
+  `rayon::join` も試したが、交互に回した比較では scope 版が少し速い (ex10: 並列なし 105.5/100.2 s、rayon 94.6/88.9 s、scope 91.4/85.5 s)。
+- 判定 (base `839038c`、new `e5a28f9`、131 問、`analysis/par_ftran_ab_20261003.json`): 10 秒シフト付き幾何平均 −0.09%
+  (Netlib +0.84%、Kennington −0.61%、Mittelmann −0.26%)。cont1 −7%、ex10 −6%、pds-100 −5%、rail4284 −4% だが、
+  neos-5052403-cygnet +14%、s250r10 +3%。FTRAN は密な問題でも全体の 25〜30% で、並列化で縮むのはその 2〜3 割なので、
+  1 問あたり最大約 7% にとどまる。採用基準 (2% 以上) に届かないので既定では無効 (`ENOMOTO_T_PAR_FTRAN_MIN_M=20000` で有効)。
+- 同じ問題では FTRAN の後の密な処理 (`x_B` 更新 1.0 ms/反復、chuzr 0.5〜0.6 ms/反復。alpha が密で遅延ヒープが効かず、
+  実行不能行のプール 2 万行を 1 行約 30 ns で全走査) も FTRAN と同程度に重い。
+
 ## 改名一覧 (整理時)
 
 本メモ中は旧名で書かれている。
