@@ -29,6 +29,7 @@ pub mod dominatedcol;
 pub mod dualfix;
 pub mod dualpropagate;
 pub mod foldfixed;
+pub mod forcingcol;
 pub mod freevar;
 pub mod ineqsingleton;
 pub mod parallelcols;
@@ -236,6 +237,19 @@ pub enum PostsolveStep {
     /// 平行列の併合 (残した列 `kept` の値を読み書きして 2 列に分配する。
     /// [`parallelcols::Substitution::apply`])。
     ParallelCol(parallelcols::Substitution),
+    /// 強制列の消去 (取り除いた行を満たす範囲の端に置く。[`forcingcol::ForcingCol::apply`])。
+    Forcing(forcingcol::ForcingCol),
+}
+
+impl PostsolveStep {
+    /// 後処理を 1 段適用する (ログを逆順に適用する呼び出し側が使う)。
+    pub fn apply(&self, x: &mut [f64]) {
+        match self {
+            PostsolveStep::Sub(sub) => x[sub.var] = sub.value(x),
+            PostsolveStep::ParallelCol(sub) => sub.apply(x),
+            PostsolveStep::Forcing(fc) => fc.apply(x),
+        }
+    }
 }
 
 /// 実行不能と判定したときの [`ExtendedPresolveResult`] を作る (`_n` は未使用)。
@@ -561,6 +575,20 @@ pub fn run_extended(
         for &(j, value) in &fixes {
             lb[j] = value;
             ub[j] = value;
+        }
+
+        // 強制列 (`forcingcol`): 費用 0 で、現れるすべての不等式行を緩める向きに無限に動ける列を、
+        // その行ごと取り除く (値は後処理で決める)。消去した列は `[0, 0]` に固定する。
+        if tunable!("ENOMOTO_T_FORCING_COL", crate::params::presolve::FORCING_COL, usize) != 0 {
+            let forced = timed_step!("forcingcol", forcingcol::eliminate_forcing_columns(n, &a, &mut cur_real_rows, &mut cur_real_rhs, &c, &lb, &ub));
+            if env_str!("ENOMOTO_DEBUG_FORCING_COL").is_some() && !forced.is_empty() {
+                eprintln!("DEBUG_FORCING_COL: round={round_idx} columns={} rows={}", forced.len(), forced.iter().map(|f| f.rows.len()).sum::<usize>());
+            }
+            for f in forced {
+                lb[f.var] = 0.0;
+                ub[f.var] = 0.0;
+                postsolve_log.push(PostsolveStep::Forcing(f));
+            }
         }
 
         // 双対実行可能性の伝播による 2 つの縮小 (`dualpropagate`):
