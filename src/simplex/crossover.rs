@@ -640,10 +640,11 @@ pub(super) fn solve_ipm_crossover(std: &StdForm) -> Option<SimplexResult> {
     let mut corr_buf = vec![0.0; dim];
     // 向きが見つからなかったとき、摂動を引き直して 1 回だけ分解し直したか。
     let mut retried = false;
+    // Megiddo 式の押し出し (既定で有効、`ENOMOTO_T_XO_MEGIDDO=0` で無効)。
     // 試験用: 残りの超基底が少なくなったら (`|B| <= m + megiddo_switch`)、射影の押し出しを打ち切って
     // 基底の選択 + Megiddo 式の押し出しに任せる (`ENOMOTO_T_XO_MEGIDDO_SWITCH`、0 で無効。
     // Megiddo 式の押し出しが有効なときだけ効く)。
-    let megiddo = tunable!("ENOMOTO_T_XO_MEGIDDO", 0u8, u8) != 0;
+    let megiddo = tunable!("ENOMOTO_T_XO_MEGIDDO", 1u8, u8) != 0;
     let megiddo_switch = if megiddo { tunable!("ENOMOTO_T_XO_MEGIDDO_SWITCH", 0usize, usize) } else { 0 };
     loop {
         if n_basic == 0 || (round >= 2 && n_basic <= m && n_basic >= n_basic_last) || round > max_primal {
