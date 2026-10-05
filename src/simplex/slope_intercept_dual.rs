@@ -53,7 +53,7 @@
 //!   ([`hat_upper`] 参照)。
 
 use super::{sparse_lu, InfeasibleRows, NbStatus, SimplexResult, StdForm, Status};
-use super::basis_kernel::{ft_max_updates, synth_clock_should_refactor, synth_clock_should_refactor_density, SynthDensity};
+use super::basis_kernel::{ft_max_updates, synth_clock_should_refactor_density, SynthDensity};
 use crate::sparse::sparse_axpy_dense;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -6061,8 +6061,8 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
     let active_cost = if tunable!("ENOMOTO_POLISH_PERTURB_SLACK", 0u8, u8) != 0 { super::perturb_costs(std) } else { dual_active_costs(std) };
 
     let mut lu = lu;
-    // 前回の FT 更新チェック/再分解からの反復数。
-    let mut since_check = 0usize;
+    // 入る列の FTRAN・ピボット行の BTRAN・FT 更新・再分解トリガ (主単体法と共有する部品)。
+    let mut kernel = super::basis_kernel::BasisKernel::new(m, ft_max_updates(m));
     // 前回の残差チェックからの FT チェック回数(`RESIDUAL_CHECK_MULTIPLIER` 回ごとに残差を測る)。
     let mut since_residual_check = 0usize;
     // LU 求解用の作業領域。
@@ -6106,27 +6106,22 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
     // 作業バッファ(ループ前に一度だけ確保し毎反復再利用)、行方向 PRICE、`d` の増分更新は
     // 主フェーズと同じ手法を単一の `f64` チャネルで使う。
     // `a_p`: ピボット行 `rho^T A`。`touched`/`touched_cols`: `a_p` の非ゼロ列の印と一覧。
-    // `x_b`: 基底変数の値(基底位置順)。`rho`: `B^-T e_r`。`dense_q`: 入る列の密ベクトル。
+    // `x_b`: 基底変数の値(基底位置順)。`rho`: `B^-T e_r`。
     // `alpha_full`: `B^-1 A_q`。`candidates`: 比率テストの候補。
     let mut a_p = vec![0.0f64; n_total];
     let mut touched = vec![false; n_total];
     let mut touched_cols: Vec<usize> = Vec::new();
     let mut x_b = vec![0.0f64; m];
     let mut rho = vec![0.0f64; m];
-    let mut dense_q = vec![0.0f64; m];
     let mut alpha_full = vec![0.0f64; m];
     let mut candidates: Vec<Cand> = Vec::new();
-    // `try_update_precomputed` 用のキャプチャバッファ(BTRAN/FTRAN の副産物)。
-    let mut a_tilde_buf = vec![0.0f64; m];
-    let mut e_tilde_buf = vec![0.0f64; m];
 
-    // `solve_sparse_into` 専用の作業領域(`lu_scratch` とは共有しない)。
+    // BFRT 結合フリップの `solve_sparse_into` 専用の作業領域(`lu_scratch` とは共有しない)。
     let mut sparse_scratch = vec![0.0f64; m];
     let mut gp_scratch = sparse_lu::GpScratch::new(m);
 
-    // FTRAN 結果密度の移動平均(入る列用と BFRT 結合フリップ用で別々)。
+    // BFRT 結合フリップの FTRAN 結果密度の移動平均(入る列の分は `kernel` が持つ)。
     // 入力の非ゼロ数と合わせて密/疎ソルブの切り替えに使う。再分解をまたいで保持する。
-    let mut density_col_aq = sparse_lu::FtranDensity::new();
     let mut density_bfrt = sparse_lu::FtranDensity::new();
 
     // BFRT 結合フリップ: 反転する全列の境界変化量をまとめた右辺 (`combined`)、その非ゼロ行の
@@ -6416,7 +6411,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
             } else {
                 let mut expand = super::ExpandState::new();
                 let mut se = super::SteepestEdgeState::new(std);
-                super::run_phase(std, &mut t, false, &mut lu, &mut since_check, &mut expand, &mut se, &mut stall)
+                super::run_phase(std, &mut t, false, &mut lu, kernel.periodic_counter_mut(), &mut expand, &mut se, &mut stall)
             };
             if profile_phases_polish {
                 eprintln!("PROF_HANDOFF run_phase={:.3}ms ok={}", handoff_t0.elapsed().as_secs_f64() * 1e3, status.is_some());
@@ -6463,7 +6458,7 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
                         }
                         d[j] = dj;
                     }
-                    since_check = 0;
+                    kernel.reset_periodic();
                 }
                 stall_count = 0;
                 if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
@@ -6485,9 +6480,8 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
             });
         };
 
-        // BTRAN: `rho = B^-T e_r`。この反復の `try_update_precomputed` 用に
-        // `e_tilde_buf` もキャプチャする。
-        lu.solve_transpose_unit_capture(r, &mut lu_scratch, &mut rho, &mut e_tilde_buf);
+        // BTRAN: `rho = B^-T e_r`。この反復の FT 更新用に `e_tilde` も `kernel` に記録する。
+        kernel.btran_row(&lu, r, &mut rho);
 
         // 行方向の疎 PRICE: `rho` の非ゼロ行だけを走査して `a_p = rho^T A` を作る
         // (固定列は除外。基底列は除外しない)。`rho_sq` は作業 #5 の雑音判定用の `‖rho‖^2`(`|rho_i| > TOL` の行)。
@@ -6691,19 +6685,8 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
         let dj_q = d[q];
         let alpha_q = a_p[q];
 
-        // FTRAN: `alpha_full = B^{-1}A_q`(密/疎を切り替え)。`try_update_precomputed` 用に
-        // `a_tilde_buf` もキャプチャする。
-        dense_q.fill(0.0);
-        for &(i, v) in std.cols.col(q) {
-            dense_q[i] = v;
-        }
-        if lu.should_use_dense_solve_tracked(std.cols.col(q).len(), &density_col_aq) {
-            let result_nnz = lu.solve_into_capture(&dense_q, &mut lu_scratch, &mut alpha_full, &mut a_tilde_buf);
-            density_col_aq.record(result_nnz, m);
-        } else {
-            let result_nnz = lu.solve_sparse_into_capture(std.cols.col(q), &mut sparse_scratch, &mut gp_scratch, &mut alpha_full, &mut a_tilde_buf);
-            density_col_aq.record(result_nnz, m);
-        }
+        // FTRAN: `alpha_full = B^{-1}A_q`(密/疎を切り替え)。FT 更新用に `a_tilde` も `kernel` に記録する。
+        kernel.ftran_col(&lu, std.cols.col(q), &mut alpha_full);
 
         // updateVerify: PRICE の値 `alpha_q` と FTRAN の値 `alpha_full[r]` を照合し、
         // 不一致なら再分解・再同期してこの反復をやり直す。
@@ -6770,27 +6753,16 @@ fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [
         }
         touched_cols.clear();
 
-        // Forrest-Tomlin 増分更新と再分解トリガ(主フェーズと同じ方式)。
-        since_check += 1;
-        let mut need_refactor = !lu.try_update_precomputed(r, &a_tilde_buf, &e_tilde_buf, tunable!("ENOMOTO_T_FT_MIN_PIVOT", FT_MIN_PIVOT, f64));
-        // トリガ (4): FT 更新回数の上限。
-        if !need_refactor && lu.update_count() > ft_max_updates(m) {
-            need_refactor = true;
+        // Forrest-Tomlin 増分更新と再分解トリガ (2)(4)(5)(3) (`kernel`、主単体法と同じ部品)。
+        let due = kernel.update_and_check(&mut lu, r);
+        let mut need_refactor = due.is_due();
+        if profile_phases_polish && due == super::basis_kernel::RefactorDue::Clock {
+            polish_clock_refactors += 1;
         }
-        // トリガ (5): 合成クロック。
-        if !need_refactor && synth_clock_should_refactor(&lu) {
-            need_refactor = true;
-            if profile_phases_polish {
-                polish_clock_refactors += 1;
-            }
-        }
-        if !need_refactor && since_check >= FT_CHECK_INTERVAL {
-            since_check = 0;
-            let bump_too_big = lu.fill_count() > tunable!("ENOMOTO_T_FT_BUMP_LIMIT_FACTOR", FT_BUMP_LIMIT_FACTOR, usize) * m.max(1);
+        // 周期検査の時点では、`RESIDUAL_CHECK_MULTIPLIER` 回に 1 回、fill で再分解しないときに残差も測る。
+        if due.is_periodic() {
             since_residual_check += 1;
-            if bump_too_big {
-                need_refactor = true;
-            } else if since_residual_check >= RESIDUAL_CHECK_MULTIPLIER {
+            if !need_refactor && since_residual_check >= RESIDUAL_CHECK_MULTIPLIER {
                 since_residual_check = 0;
                 let fresh_rhs = compute_rhs_plain(std, nb_status);
                 need_refactor = residual_norm(std, basis_pos, &x_b, &fresh_rhs) > FT_RESIDUAL_TOL;

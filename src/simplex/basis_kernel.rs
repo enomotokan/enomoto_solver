@@ -10,9 +10,9 @@
 //!   中間値 `a_tilde` を記録する。
 //! - [`BasisKernel::btran_row`]: ピボット行の BTRAN `B^-T e_r` ([`sparse_lu::UnitBtranWork`])。
 //!   FT 更新用の中間値 `e_tilde` を記録する。
-//! - [`BasisKernel::update`]: 記録した `a_tilde`/`e_tilde` で FT 更新する
-//!   ([`sparse_lu::FtLu::try_update`] のように同じ求解をやり直さない)。
-//! - [`BasisKernel::refactor_due`]: 再分解トリガ (更新回数の上限・合成クロック・eta の fill)。
+//! - [`BasisKernel::update_and_check`]: 記録した `a_tilde`/`e_tilde` で FT 更新し
+//!   ([`sparse_lu::FtLu::try_update`] のように同じ求解をやり直さない)、続けて再分解トリガ
+//!   (更新回数の上限・合成クロック・eta の fill) を判定する。
 //!
 //! 双対単体法の主ループの融合 FTRAN (入る列・DSE の `tau`・BFRT の合成フリップ列を
 //! 1 回の因子走査で解く pair/triple capture) と、大きな問題向けの疎経路 (`BIG`) は、
@@ -23,24 +23,45 @@ use crate::params::simplex::{FT_BUMP_LIMIT_FACTOR, FT_CHECK_INTERVAL, FT_MIN_PIV
 use crate::params::slope_intercept_dual::{FT_MAX_UPDATES_FACTOR, FT_MAX_UPDATES_FLOOR, SYNTH_CLOCK_FACTOR, SYNTH_CLOCK_LARGE_M, SYNTH_CLOCK_LARGE_REF_M, SYNTH_CLOCK_MID_REF_MULT, SYNTH_CLOCK_MIN_UPDATES};
 use std::sync::OnceLock;
 
-/// [`BasisKernel::refactor_due`] の判定結果。
+/// [`BasisKernel::update_and_check`] の判定結果 (どのトリガで再分解が要るか)。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum RefactorDue {
     /// 再分解は不要。
     No,
-    /// 再分解が必要 (更新回数の上限・合成クロック・eta の fill のいずれか)。
-    Yes,
     /// 周期検査 ([`FT_CHECK_INTERVAL`] 反復ごと) の時点で、fill では再分解不要だった。
     /// 呼び出し側は必要なら自分の残差検査をここで行う。
     Periodic,
+    /// トリガ (2): FT 更新が新しいピボットを小さすぎるとして退けた (更新は記録されていない)。
+    Rejected,
+    /// トリガ (4): FT 更新回数が上限を超えた。
+    MaxUpdates,
+    /// トリガ (5): 合成クロック。
+    Clock,
+    /// トリガ (3): 周期検査で eta の fill が上限を超えた (周期検査の時点なので、[`Self::Periodic`] と
+    /// 同じく呼び出し側の周期の数え上げを進めること)。
+    Fill,
+}
+
+impl RefactorDue {
+    /// 再分解が必要か。
+    #[inline]
+    pub(super) fn is_due(self) -> bool {
+        !matches!(self, RefactorDue::No | RefactorDue::Periodic)
+    }
+
+    /// 周期検査の時点だったか ([`Self::Periodic`] または [`Self::Fill`])。
+    #[inline]
+    pub(super) fn is_periodic(self) -> bool {
+        matches!(self, RefactorDue::Periodic | RefactorDue::Fill)
+    }
 }
 
 /// 1 回の求解ループが持つ、基底の求解の作業領域と再分解の方針 (モジュールの説明参照)。
 ///
 /// 使い方 (1 反復): `ftran_col(lu, 入る列)` → `btran_row(lu, r)` → (基底の入れ替え) →
-/// `update(lu, r)` が `false` か `refactor_due(lu) == Yes` なら再分解。`ftran_col` と
-/// `btran_row` は同じ因子 (間に FT 更新や再分解を挟まない) で、`update` に渡す `r` は
-/// `btran_row` と同じ行であること。順序は問わない。
+/// `update_and_check(lu, r).is_due()` なら再分解。`ftran_col` と `btran_row` は同じ因子
+/// (間に FT 更新や再分解を挟まない) で、`update_and_check` に渡す `r` は `btran_row` と
+/// 同じ行であること。`ftran_col` と `btran_row` の順序は問わない。
 pub(super) struct BasisKernel {
     /// 行数。
     m: usize,
@@ -124,30 +145,43 @@ impl BasisKernel {
         self.e_tilde_row = Some(r);
     }
 
-    /// 基底位置 `r` の列を直前の [`Self::ftran_col`] の入る列で置き換える FT 更新を、記録した
-    /// `a_tilde`/`e_tilde` で行う。新しいピボットが小さすぎる (または記録が揃っていない) なら
-    /// 何も記録せず `false` を返す (呼び出し側は再分解すること)。記録はこの呼び出しで使い切る。
-    pub(super) fn update(&mut self, lu: &mut sparse_lu::FtLu, r: usize) -> bool {
+    /// 基底位置 `r` の列を直前の [`Self::ftran_col`] の入る列で置き換える FT 更新を記録した
+    /// `a_tilde`/`e_tilde` で行い (記録はこの呼び出しで使い切る)、続けて再分解トリガを判定する。
+    /// 判定の順序 (どれかが当たったら残りは見ない): (2) 更新が退けられた (または記録が揃って
+    /// いない)、(4) 更新回数が `max_updates` ([`Self::new`]) を超えた、(5) 合成クロック
+    /// ([`synth_clock_should_refactor`])、(3) [`FT_CHECK_INTERVAL`] 反復ごとの周期検査で eta の
+    /// fill が `FT_BUMP_LIMIT_FACTOR * m` を超えた。周期の数え上げは更新の成否によらず毎回進め、
+    /// 周期検査に達したときだけ 0 に戻す。
+    pub(super) fn update_and_check(&mut self, lu: &mut sparse_lu::FtLu, r: usize) -> RefactorDue {
+        self.since_check += 1;
         let captured = self.a_tilde_ready && self.e_tilde_row == Some(r);
-        debug_assert!(captured, "BasisKernel::update without ftran_col/btran_row for row {r}");
+        debug_assert!(captured, "BasisKernel::update_and_check without ftran_col/btran_row for row {r}");
         self.a_tilde_ready = false;
         self.e_tilde_row = None;
-        captured && lu.try_update_precomputed(r, &self.a_tilde, &self.e_tilde, self.min_pivot)
-    }
-
-    /// FT 更新の後に呼ぶ再分解トリガ: (4) 更新回数が `max_updates` ([`Self::new`]) を超えた、(5) 合成クロック
-    /// ([`synth_clock_should_refactor`])、(3) [`FT_CHECK_INTERVAL`] 反復ごとの eta の fill が
-    /// `FT_BUMP_LIMIT_FACTOR * m` を超えた。
-    pub(super) fn refactor_due(&mut self, lu: &sparse_lu::FtLu) -> RefactorDue {
-        self.since_check += 1;
-        if lu.update_count() > self.max_updates || synth_clock_should_refactor(lu) {
-            return RefactorDue::Yes;
+        if !(captured && lu.try_update_precomputed(r, &self.a_tilde, &self.e_tilde, self.min_pivot)) {
+            return RefactorDue::Rejected;
+        }
+        if lu.update_count() > self.max_updates {
+            return RefactorDue::MaxUpdates;
+        }
+        if synth_clock_should_refactor(lu) {
+            return RefactorDue::Clock;
         }
         if self.since_check >= FT_CHECK_INTERVAL {
             self.since_check = 0;
-            return if lu.fill_count() > self.bump_limit { RefactorDue::Yes } else { RefactorDue::Periodic };
+            return if lu.fill_count() > self.bump_limit { RefactorDue::Fill } else { RefactorDue::Periodic };
         }
         RefactorDue::No
+    }
+
+    /// 周期検査の数え上げを 0 に戻す (呼び出し側が自分の都合で検査をやり直すとき)。
+    pub(super) fn reset_periodic(&mut self) {
+        self.since_check = 0;
+    }
+
+    /// 周期検査の数え上げそのもの (同じ数え上げを使う旧経路 `run_phase` に渡す用)。
+    pub(super) fn periodic_counter_mut(&mut self) -> &mut usize {
+        &mut self.since_check
     }
 
     /// eta の fill が上限を超えているか (呼び出し側の任意の時点の検査用)。
@@ -177,10 +211,11 @@ fn synth_clock_factor() -> f64 {
 
 /// トリガ (5): 合成クロックによる再分解判定。FT 更新回数が [`SYNTH_CLOCK_MIN_UPDATES`] 以上で、
 /// 前回の分解以降に蓄積した求解側の tick が `synth_clock_factor() * build_tick` 以上なら真
-/// (現在の分解に対する FTRAN/BTRAN の手間が再分解の手間に達したとみなす)。主ループと
-/// 仕上げ (`polish_with_true_bounds`)、主単体法 ([`BasisKernel::refactor_due`]) で共有する(毎ピボット呼べるほど安価)。
+/// (現在の分解に対する FTRAN/BTRAN の手間が再分解の手間に達したとみなす)。
+/// [`BasisKernel::update_and_check`] (双対単体法の仕上げ・主単体法) が使う。主ループは求解結果の密度の
+/// 区分を付けた [`synth_clock_should_refactor_density`] を使う (毎ピボット呼べるほど安価)。
 #[inline]
-pub(super) fn synth_clock_should_refactor(lu: &sparse_lu::FtLu) -> bool {
+fn synth_clock_should_refactor(lu: &sparse_lu::FtLu) -> bool {
     synth_clock_should_refactor_density(lu, SynthDensity::Sparse)
 }
 

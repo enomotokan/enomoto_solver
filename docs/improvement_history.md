@@ -8248,6 +8248,20 @@ FTRAN・BTRAN・FT 更新・再分解トリガを `simplex/basis_kernel.rs` の 
   目的関数は一致。Netlib 93 問: 全問最適・HiGHS と一致。主単体法へ引き継ぐ 13 問は引き継ぎ反復数がすべて同じ
   (pilot87 の引き継ぎ 76 → 69 ms)。
 
+## 基底の求解の心臓部の共通化 段階 2: 双対単体法の仕上げ (採用、経路不変) (2026-10-05)
+
+`polish_with_true_bounds` の入る列の FTRAN・ピボット行の BTRAN・FT 更新・再分解トリガを `BasisKernel` に載せ替えた
+(更新回数の上限は `ft_max_updates(m)` を渡す)。FT 更新と再分解トリガは `BasisKernel::update_and_check` に
+まとめ、仕上げの判定順 (周期の数え上げは更新の成否によらず毎回進める → 更新が退けられた → 更新回数の上限 →
+合成クロック → 周期検査の fill) をそのまま移した。結果の `RefactorDue` でどのトリガかを返す (合成クロック分の
+診断の数え上げと、周期検査の時点での残差検査は呼び出し側)。主単体法の `run_phase2_incremental` も同じメソッドに
+したので、主単体法では更新が退けられた反復でも周期の数え上げが進む (引き継ぎ 13 問の反復数は不変)。
+
+- BTRAN は `solve_transpose_unit_capture` → `solve_transpose_unit_work` (出力・`e_tilde`・tick はビット一致)。
+- Netlib 93 問: 主ループ・仕上げ・引き継ぎの反復数、再分解の回数 (トリガ別) と目的関数がすべて base (`750bf36`)
+  と同じ。etamacro だけ `PROF_PHASES_EXT` の集計が違うが、2 つの連結成分を並列に解くのでプロセス全体の計数が
+  競合しており、base 同士でも毎回変わる。
+
 ## 改名一覧 (整理時)
 
 本メモ中は旧名で書かれている。

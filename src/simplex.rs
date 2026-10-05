@@ -1458,7 +1458,7 @@ fn run_phase2_incremental(std: &StdForm, t: &mut Tableau, lu: &mut sparse_lu::Ft
         }
 
         // FT 更新 (FTRAN/BTRAN の途中値を使う) と再分解トリガ (3)(4)(5)。残差検査 (1) はリフレッシュ時点でのみ行う。
-        if !kernel.update(lu, r) || kernel.refactor_due(lu) == basis_kernel::RefactorDue::Yes {
+        if kernel.update_and_check(lu, r).is_due() {
             *lu = try_refactorize(std, t, Some(&*lu))?;
             need_fresh = true;
         }
