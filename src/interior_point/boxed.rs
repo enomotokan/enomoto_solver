@@ -352,9 +352,9 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
     // 真なら近接中心 (ξ, λ, ν) を残差の減り方によらず毎反復更新する。
     let prox_always = tunable!("ENOMOTO_T_IPM_PROX_ALWAYS", 0u8, u8) != 0;
     let delta_min = tunable!("ENOMOTO_T_IPM_DELTA_MIN", DELTA_MIN, f64);
-    // 正則化 ρ・δ の下げ方 (試験用、反復の終わりの説明参照)。0: PIQP、1: IP-PMM の著者の実装、
+    // 正則化 ρ・δ の下げ方 (反復の終わりの説明参照)。0: PIQP、1: IP-PMM の著者の実装 (既定、第 8 回の比較)、
     // 2: ρ = δ = κ μ、3: PIQP の規則を κ μ で頭打ち。
-    let reg_mode = tunable!("ENOMOTO_T_IPM_REG_MODE", 0u8, u8);
+    let reg_mode = tunable!("ENOMOTO_T_IPM_REG_MODE", 1u8, u8);
     let reg_kappa = tunable!("ENOMOTO_T_IPM_REG_KAPPA", 1.0f64, f64);
 
     // ---- 初期化: W = 1 + δ の正則化 KKT 系を 1 回解く ----
