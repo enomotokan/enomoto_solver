@@ -128,7 +128,7 @@ impl PyModel {
             None => RootSolver::Simplex,
         };
 
-        let opts = LpOptions { distinguish_infeasible_unbounded };
+        let opts = LpOptions { distinguish_infeasible_unbounded, ..Default::default() };
         let result = solve_mip(&self.variables, objective, &self.constraints, root_solver, opts);
 
         // Python に返す結果 dict

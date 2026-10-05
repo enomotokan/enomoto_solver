@@ -22,6 +22,10 @@ pub fn solve_lp(
             let result = simplex::solve_lp_dual_with(variables, objective, constraints, opts);
             (result.status, result.x)
         }
+        RootSolver::IpmCrossover => {
+            let result = simplex::solve_lp_dual_with(variables, objective, constraints, LpOptions { ipm_crossover: true, ..opts });
+            (result.status, result.x)
+        }
         RootSolver::Interior => {
             let result = interior_point::solve_lp(variables, objective, constraints);
             (result.status, result.x)

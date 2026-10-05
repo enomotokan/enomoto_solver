@@ -97,6 +97,9 @@ pub enum RootSolver {
     Simplex,
     /// IP-PMM 内点法。
     Interior,
+    /// 単体法と同じ前処理の後、箱型制約付き IP-PMM 内点法 + クロスオーバー
+    /// (Liu & Lu 2024 のらせん型) で最適基底解を求める。
+    IpmCrossover,
 }
 
 impl RootSolver {
@@ -105,8 +108,9 @@ impl RootSolver {
         match s {
             "simplex" => Ok(RootSolver::Simplex),
             "interior" => Ok(RootSolver::Interior),
+            "ipm_crossover" => Ok(RootSolver::IpmCrossover),
             other => Err(PyValueError::new_err(format!(
-                "unknown root_solver '{other}' (expected 'simplex' or 'interior')"
+                "unknown root_solver '{other}' (expected 'simplex', 'interior' or 'ipm_crossover')"
             ))),
         }
     }
@@ -191,6 +195,9 @@ pub struct LpOptions {
     /// このとき前処理の「改善方向レイによる非有界判定」の近道は使わない
     /// (問題の残りの実行可能性を確認できないため)。
     pub distinguish_infeasible_unbounded: bool,
+    /// 真なら単体法の経路で、前処理後の標準形を内点法 + クロスオーバーで解く
+    /// (`RootSolver::IpmCrossover`)。
+    pub ipm_crossover: bool,
 }
 
 impl Status {

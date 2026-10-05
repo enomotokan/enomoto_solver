@@ -804,7 +804,7 @@ fn nb_value_affine(cache: &ColCache, status: NbStatus, j: usize) -> Option<Affin
 /// (`sparse_lu::factorize_reusing`、HiGHS `HFactor::rebuild()` 相当)。再利用は各段で閾値
 /// ピボットとフィルを再確認し、だめなら自動で完全な Markowitz 探索に戻るので、`prev` を渡しても
 /// 分解が得られるかどうかは変わらず、手間だけが変わる。特異基底なら `None`。
-fn refactorize(
+pub(super) fn refactorize(
     std: &StdForm,
     basis_pos: &[Option<usize>],
     prev: Option<&sparse_lu::FtLu>,
@@ -5711,7 +5711,7 @@ fn finish(std: &StdForm, basis: &mut [usize], basis_pos: &mut [Option<usize>], n
 ///
 /// 引数 `basis`/`basis_pos`/`nb_status` は cleanup 後の基底状態(この関数で更新される)、
 /// `lu` はその基底の LU 分解。戻り値 `None` は数値的破綻(`NotSolved` として報告)。
-fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [Option<usize>], nb_status: &mut [Option<NbStatus>], lu: sparse_lu::FtLu) -> Option<SimplexResult> {
+pub(super) fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [Option<usize>], nb_status: &mut [Option<NbStatus>], lu: sparse_lu::FtLu) -> Option<SimplexResult> {
     let n_total = std.n_total;
     let m = std.n_rows;
     // 停滞(目的関数がほぼ進まないピボット)がこの回数を超えたら Bland 規則に切り替える。

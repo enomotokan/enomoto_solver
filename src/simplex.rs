@@ -77,6 +77,8 @@ use self::lu as sparse_lu;
 
 /// 傾き・切片二段解法 (実際の LP 求解本体)。
 mod slope_intercept_dual;
+/// 内点法 + クロスオーバー (Liu & Lu 2024) による求解 (`RootSolver::IpmCrossover`)。
+mod crossover;
 
 /// 単体法の各メインループの反復上限を問題サイズから決める。
 ///
@@ -1908,6 +1910,10 @@ fn solve_lp_dual_full_status(variables: &[VariableData], objective: &Objective, 
             std.n_rows
         );
     }
+    if env_str!("ENOMOTO_PRESOLVE_ONLY").is_some() {
+        // 前処理後の大きさだけを測る (ベンチマークの対象選び用、`ENOMOTO_DEBUG_PRESOLVE_SIZE` と併用)。
+        return SimplexResult { status: Status::NotSolved, x: None };
+    }
     if env_str!("ENOMOTO_DEBUG_EXT_COMPONENTS").is_some() {
         match connected_components_of_std_form(&std) {
             Some((components, _has_row)) => {
@@ -1918,7 +1924,15 @@ fn solve_lp_dual_full_status(variables: &[VariableData], objective: &Objective, 
             None => eprintln!("DEBUG_EXT_COMPONENTS: single component (no split found)"),
         }
     }
-    let result = solve_std_form_decomposed(&std, &opts);
+    let result = if opts.ipm_crossover {
+        // 内点法 + クロスオーバー。内点法が収束しない・基底が作れないときは傾き・切片二段解法で解き直す。
+        crossover::solve_ipm_crossover(&std).unwrap_or_else(|| {
+            crate::phase_timing::mark("crossover_fallback");
+            solve_std_form_decomposed(&std, &opts)
+        })
+    } else {
+        solve_std_form_decomposed(&std, &opts)
+    };
     crate::phase_timing::mark("simplex_end");
     if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
         eprintln!("DEBUG_EXT: solve_std_form_decomposed returned {:?}", result.status);
@@ -2213,7 +2227,7 @@ mod tests {
         let cons = vec![row(&[(1, 1.0)], RowSense::Le, 5.0)];
 
         assert_eq!(solve_lp_dual(&vars, &obj, &cons).status, Status::InfeasibleOrUnbounded);
-        let distinguish = crate::types::LpOptions { distinguish_infeasible_unbounded: true };
+        let distinguish = crate::types::LpOptions { distinguish_infeasible_unbounded: true, ..Default::default() };
         assert_eq!(solve_lp_dual_with(&vars, &obj, &cons, distinguish).status, Status::Unbounded);
     }
 
@@ -2230,7 +2244,7 @@ mod tests {
         ];
 
         assert_eq!(solve_lp_dual(&vars, &obj, &cons).status, Status::InfeasibleOrUnbounded);
-        let distinguish = crate::types::LpOptions { distinguish_infeasible_unbounded: true };
+        let distinguish = crate::types::LpOptions { distinguish_infeasible_unbounded: true, ..Default::default() };
         assert_eq!(solve_lp_dual_with(&vars, &obj, &cons, distinguish).status, Status::Infeasible);
     }
 
@@ -2371,7 +2385,7 @@ mod tests {
         let obj = Objective { expr: expr(&[(0, -1.0)]), sense: Sense::Minimize };
         let cons = vec![row(&[(1, 1.0)], RowSense::Le, 5.0)];
         assert_eq!(solve_lp_dual(&vars, &obj, &cons).status, Status::InfeasibleOrUnbounded);
-        let distinguish = crate::types::LpOptions { distinguish_infeasible_unbounded: true };
+        let distinguish = crate::types::LpOptions { distinguish_infeasible_unbounded: true, ..Default::default() };
         assert_eq!(solve_lp_dual_with(&vars, &obj, &cons, distinguish).status, Status::Unbounded);
     }
 
@@ -2801,5 +2815,63 @@ mod tests {
         let ipm_obj = ipm_res.objective.unwrap();
 
         assert!((obj_val - ipm_obj).abs() < 1e-4, "dual_obj={obj_val} ipm_obj={ipm_obj} x={x:?}");
+    }
+
+    /// 内点法 + クロスオーバー (`LpOptions::ipm_crossover`) が単体法と同じ最適値を返し、内点法が
+    /// 収束してクロスオーバーの全段 (`cleanup_end`) まで進むこと (単体法への解き直しでないこと)。
+    #[test]
+    fn ipm_crossover_matches_simplex() {
+        let n = 60;
+        let vars: Vec<VariableData> = (0..n).map(|_| var(0.0, 8.0)).collect();
+        let obj_terms: Vec<(usize, f64)> = (0..n).map(|i| (i, 1.0 + (i % 4) as f64)).collect();
+        let obj = Objective { expr: expr(&obj_terms), sense: Sense::Maximize };
+        let mut cons: Vec<ConstraintRow> = Vec::new();
+        for i in 0..(n - 1) {
+            cons.push(row(&[(i, 1.0), (i + 1, 1.0)], RowSense::Le, 10.0));
+        }
+        cons.push(row(&(0..n).map(|i| (i, 1.0)).collect::<Vec<_>>(), RowSense::Le, 220.0));
+        cons.push(row(&(0..n).map(|i| (i, 1.0)).collect::<Vec<_>>(), RowSense::Ge, 40.0));
+        let res = solve_lp_dual(&vars, &obj, &cons);
+        let x = res.x.unwrap();
+        let ref_obj: f64 = obj_terms.iter().map(|&(j, c)| c * x[j]).sum();
+
+        // クロスオーバーが (単体法への解き直しなしで) 結果を出すこと。
+        let pf = build_std_form_presolved(&vars, &obj, &cons, true).ok().unwrap();
+        assert!(crossover::solve_ipm_crossover(&pf.std).is_some_and(|r| r.status == Status::Optimal));
+        let opts = crate::types::LpOptions { ipm_crossover: true, ..Default::default() };
+        let res = solve_lp_dual_with(&vars, &obj, &cons, opts);
+        assert_eq!(res.status, Status::Optimal);
+        let x = res.x.unwrap();
+        let xo_obj: f64 = obj_terms.iter().map(|&(j, c)| c * x[j]).sum();
+        assert!((ref_obj - xo_obj).abs() < 1e-7 * ref_obj.abs().max(1.0), "simplex={ref_obj} crossover={xo_obj}");
+        for (i, c) in cons.iter().enumerate() {
+            let lhs: f64 = c.expr.coeffs.iter().map(|(&j, &a)| a * x[j]).sum();
+            let ok = match c.sense {
+                RowSense::Le => lhs <= c.rhs + 1e-7,
+                RowSense::Ge => lhs >= c.rhs - 1e-7,
+                RowSense::Eq => (lhs - c.rhs).abs() <= 1e-7,
+            };
+            assert!(ok, "row {i} violated: lhs={lhs} rhs={}", c.rhs);
+        }
+    }
+
+    /// 最適面が 1 点でない (主の最適解が一意でない) LP: 内点法は最適面の内部 (解析的中心) に収束するので、
+    /// クロスオーバーの主の押し出しが頂点まで動かす必要がある。結果は頂点 (各変数が 0 か上限) になる。
+    #[test]
+    fn ipm_crossover_reaches_vertex_on_degenerate_optimal_face() {
+        // max x0 + x1 + x2 + x3  s.t. x0 + x1 + x2 + x3 <= 2, 0 <= x <= 1 (最適値 2 の面は 4 次元の内部を持つ)
+        let n = 4;
+        let vars: Vec<VariableData> = (0..n).map(|_| var(0.0, 1.0)).collect();
+        let terms: Vec<(usize, f64)> = (0..n).map(|i| (i, 1.0)).collect();
+        let obj = Objective { expr: expr(&terms), sense: Sense::Maximize };
+        let cons = vec![row(&terms, RowSense::Le, 2.0), row(&[(0, 1.0), (1, -1.0)], RowSense::Le, 0.5)];
+        let opts = crate::types::LpOptions { ipm_crossover: true, ..Default::default() };
+        let res = solve_lp_dual_with(&vars, &obj, &cons, opts);
+        assert_eq!(res.status, Status::Optimal);
+        let x = res.x.unwrap();
+        assert!((x.iter().sum::<f64>() - 2.0).abs() < 1e-8, "x={x:?}");
+        // 頂点: 4 変数・2 行なので、境界にない変数は高々 2 個。
+        let interior = x.iter().filter(|&&v| v > 1e-8 && v < 1.0 - 1e-8).count();
+        assert!(interior <= 2, "not a vertex: x={x:?}");
     }
 }
