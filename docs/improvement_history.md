@@ -8232,6 +8232,56 @@ ex10 (4 CPU、速い時間帯で 1 反復約 4 ms) の段別では `x_B` 更新 
 - 取り下げ: 主残差連動の許容誤差 (CLP と同じ量。小さすぎて効かない)、伝播で付いた大きな暗黙の上下限を無限に戻す・
   箱型列を 0 に近い側へ寄せる (右辺は 5.7e8 → 1.5e7 に縮むが、それだけでは終わらない)。
 
+## 基底の求解の心臓部の共通化 段階 1: 主単体法 (採用) (2026-10-05)
+
+FTRAN・BTRAN・FT 更新・再分解トリガを `simplex/basis_kernel.rs` の `BasisKernel` にまとめ、まず主単体法
+(`run_phase2_incremental`: 仕上げからの引き継ぎと篩い分けの部分問題の温めた解き直し) をこれに載せ替えた。
+合成クロック (`synth_clock_should_refactor`) と `ft_max_updates` も同じモジュールへ移した (双対単体法の動作は不変)。
+
+- 入る列の FTRAN: 常に密の `solve_into` → 密/疎の切り替え (`FtranDensity`) と `a_tilde` の記録。
+- ピボット行の BTRAN: `solve_transpose_unit` → `solve_transpose_unit_work` と `e_tilde` の記録。
+- FT 更新: `try_update` (FTRAN の `L`/`R` 段と `U^T` の求解をやり直す) → 記録を使う `try_update_precomputed`。
+- 再分解トリガに合成クロックを追加。更新回数の上限は主単体法では固定の `FT_MAX_UPDATES` (300) のまま
+  (`BasisKernel::new` の引数)。双対単体法の `ft_max_updates(m)` (= max(3m, 300)) を使うと、rail4284 の篩い分けで
+  eta が伸びて 1 反復 ~302 → ~325 µs (+7%) になり、経路も変わって 1 パスが境界違反 1.9e-6 で冷えた双対単体法へ落ちた。
+- rail4284 (3 回交互、base `b5202f4`): 59.7 → 58.2 s (−2.5%)、篩い分け 88 → 81 パス、主単体法 157,810 → 153,881 反復、
+  目的関数は一致。Netlib 93 問: 全問最適・HiGHS と一致。主単体法へ引き継ぐ 13 問は引き継ぎ反復数がすべて同じ
+  (pilot87 の引き継ぎ 76 → 69 ms)。
+
+## 基底の求解の心臓部の共通化 段階 2: 双対単体法の仕上げ (採用、経路不変) (2026-10-05)
+
+`polish_with_true_bounds` の入る列の FTRAN・ピボット行の BTRAN・FT 更新・再分解トリガを `BasisKernel` に載せ替えた
+(更新回数の上限は `ft_max_updates(m)` を渡す)。FT 更新と再分解トリガは `BasisKernel::update_and_check` に
+まとめ、仕上げの判定順 (周期の数え上げは更新の成否によらず毎回進める → 更新が退けられた → 更新回数の上限 →
+合成クロック → 周期検査の fill) をそのまま移した。結果の `RefactorDue` でどのトリガかを返す (合成クロック分の
+診断の数え上げと、周期検査の時点での残差検査は呼び出し側)。主単体法の `run_phase2_incremental` も同じメソッドに
+したので、主単体法では更新が退けられた反復でも周期の数え上げが進む (引き継ぎ 13 問の反復数は不変)。
+
+- BTRAN は `solve_transpose_unit_capture` → `solve_transpose_unit_work` (出力・`e_tilde`・tick はビット一致)。
+- Netlib 93 問: 主ループ・仕上げ・引き継ぎの反復数、再分解の回数 (トリガ別) と目的関数がすべて base (`750bf36`)
+  と同じ。etamacro だけ `PROF_PHASES_EXT` の集計が違うが、2 つの連結成分を並列に解くのでプロセス全体の計数が
+  競合しており、base 同士でも毎回変わる。
+
+## 基底の求解の心臓部の共通化 段階 3: LU 再分解と双対単体法の主ループ (採用、経路不変) (2026-10-05)
+
+- LU 再分解: 双対単体法の `refactorize` の本体 (対角なら専用の分解、そうでなければ前回のピボット順を再利用する
+  Markowitz 分解、行リストのスレッドローカルな再利用) を `basis_kernel::factorize_basis` に移し、主単体法の
+  `try_refactorize` もこれを使う。特異のときの印 `SINGULAR_BAILOUT` は双対単体法の `refactorize` に残す。
+- 主ループのピボット行 BTRAN を `BasisKernel::btran_row_steps` (融合 `tau` FTRAN 用の非ゼロステップの記録付き、
+  `BIG` なら超疎版)、FT 更新と再分解トリガを `update_and_check_fused` (入る列の `a_tilde` は融合 FTRAN のものを
+  受け取る、`BIG` なら `try_update_tracked`) に載せ替えた。周期検査の間隔 (`xb_check_cadence`)、fill の上限の
+  `FT_BUMP_LU_RATIO` による拡大、合成クロックの密度の区分は `BasisKernel` の設定・引数にした。周期検査の時点の
+  `x_B(M)`・`d` のドリフト検査は主ループ側 (`RefactorDue::Periodic`)。融合 FTRAN は主ループ側に残す。
+- Netlib 93 問: 主ループ・仕上げ・引き継ぎの反復数、トリガ別の再分解回数、目的関数がすべて base (`d946217`) と同じ
+  (`BIG` 経路を含む)。
+- 速さ: 93 問を交互に 4 回ずつ 2 組で、問題ごとの中央値の比の幾何平均 +1.2〜1.3% (66/93 と 57/93 問が遅い)。
+  `ENOMOTO_PROF_PHASES_EXT` の処理別の時間では変えた BTRAN (1573 → 1436 ms) と FT 更新 (579 → 530 ms) はむしろ
+  速く、変えていない PRICE が一部の問題で +10〜15% だったので、主ループの機械語の配置の影響とみて採用した。
+  部品の関数への `#[inline]` では差は消えなかった。
+- rail4284: 主単体法の再分解が対角の専用分解を使うようになって経路が変わった (篩い分け 81 → 89 パス、
+  153,881 → 157,162 反復、1 パスが境界違反 2.6e-7 で冷えた双対単体法へ)。時間は同じ (55.2・55.1 s、
+  base 54.6・58.8 s)、目的関数は一致。
+
 ## 改名一覧 (整理時)
 
 本メモ中は旧名で書かれている。

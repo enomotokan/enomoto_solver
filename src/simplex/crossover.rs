@@ -38,7 +38,8 @@
 //! - 比率テストで同時に境界 (双対では 0) に達した列は許容誤差でまとめて移す。
 //! - 基底の選択は優先順の左から順の疎 LU で、スラック列 (単位列) は消去なしで受理できる。
 
-use super::slope_intercept_dual::{polish_with_true_bounds, refactorize};
+use super::basis_kernel::factorize_basis;
+use super::slope_intercept_dual::polish_with_true_bounds;
 use super::{perturb_random, NbStatus, SimplexResult, StdForm};
 use crate::interior_point::boxed::solve_box_lp;
 use crate::interior_point::kkt::AugKkt;
@@ -1000,7 +1001,7 @@ pub(super) fn solve_ipm_crossover(std: &StdForm) -> Option<SimplexResult> {
             }
         });
     }
-    let lu = refactorize(std, &basis_pos, None)?;
+    let lu = factorize_basis(std, &basis_pos, None)?;
     if debug {
         eprintln!("CROSSOVER stats {st:?}");
         // 仕上げ前の基底の主・双対実行不能の数と最大値。
