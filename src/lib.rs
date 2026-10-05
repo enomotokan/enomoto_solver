@@ -44,6 +44,7 @@ macro_rules! env_str {
     }};
 }
 
+mod cancel;
 mod graph;
 mod interior_point;
 mod mip;

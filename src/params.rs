@@ -84,6 +84,13 @@ pub(crate) mod simplex {
     /// スケーリングの列ノルム計算)。現実的な問題サイズでは常に逐次になる安全弁的な値。
     pub(crate) const RAYON_SIZE_THRESHOLD: usize = 100_000;
 
+    /// `RootSolver::Auto` で、前処理後の行数がこれ以上なら傾き・切片双対二段解法と内点法 + クロスオーバーを
+    /// 同時に解く (`simplex::race`)。未満なら二段解法だけ。`ENOMOTO_T_RACE_MIN_ROWS` で上書きできる。
+    pub(crate) const RACE_MIN_ROWS: usize = 5000;
+
+    /// 同時実行で二段解法に割り当てるスレッド数 (残りを内点法 + クロスオーバーに)。二段解法の反復の本体は逐次。
+    pub(crate) const RACE_SIMPLEX_THREADS: usize = 1;
+
     /// 全列数 (構造 + スラック) がこれ以上なら部分価格付けを使う (主単体法の入る変数選択と
     /// 双対法の chuzc1)。
     pub(crate) const PARTIAL_PRICING_THRESHOLD: usize = 300;

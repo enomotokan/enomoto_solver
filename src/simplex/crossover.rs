@@ -444,6 +444,9 @@ pub(super) fn solve_ipm_crossover(std: &StdForm) -> Option<SimplexResult> {
     let ipm = solve_box_lp(&a_j, &b_j, &c_j, &l_j, &u_j, max_iters);
     drop(a_j);
     st.ipm_iters = ipm.iters;
+    if crate::cancel::is_cancelled() {
+        return None;
+    }
     crate::phase_timing::mark("ipm_end");
     if debug {
         eprintln!("CROSSOVER ipm status={:?} iters={} rel_res={:?} t={:.3}s", ipm.status, ipm.iters, ipm.rel_res, t0.elapsed().as_secs_f64());
@@ -556,6 +559,9 @@ pub(super) fn solve_ipm_crossover(std: &StdForm) -> Option<SimplexResult> {
         }
         n_basic_last = n_basic;
         round += 1;
+        if crate::cancel::is_cancelled() {
+            return None;
+        }
         // 係数行列: 新たに非基底になった列を縁 (v_j = 0) に足すか、溜まっていれば分解し直す
         // (分解のたびに摂動費用 c̃ を引き直す。エポックの中では同じ c̃ を射影し続ける)。
         if need_factor || bk.should_refactor(newly.len()) {
@@ -776,6 +782,9 @@ pub(super) fn solve_ipm_crossover(std: &StdForm) -> Option<SimplexResult> {
         }
         n_active_last = n_active;
         round_d += 1;
+        if crate::cancel::is_cancelled() {
+            return None;
+        }
         if need_factor || bk.should_refactor(added.len()) {
             epoch += 1;
             for j in 0..n {

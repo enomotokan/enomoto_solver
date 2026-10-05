@@ -3174,6 +3174,9 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     }
     // ===== 主ループ(1 反復 = chuzr → BTRAN → PRICE → chuzc1/BFRT → FTRAN → 更新) =====
     for iter_idx in 0..max_iters {
+        if iter_idx & 63 == 0 && crate::cancel::is_cancelled() {
+            return None; // 同時実行の相手が先に結論を出した
+        }
         // 前反復終了時点で候補短縮リストが有効だったか(この反復では一旦無効にする)。
         let shortlist_was_valid = shortlist_valid;
         shortlist_valid = false;
@@ -5910,6 +5913,9 @@ pub(super) fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_
     }
     let max_iters = super::max_iters_for(m, n_total);
     for iter_idx in 0..max_iters {
+        if iter_idx & 63 == 0 && crate::cancel::is_cancelled() {
+            return None; // 同時実行の相手が先に結論を出した
+        }
         // chuzr: 重みなしの最大逸脱 (Dantzig) 規則。`infeasible_rows.rows` のみを走査する。
         // 同値のときは小さい行番号、`bland_mode` では常に最小行番号を選ぶ。
         let mut best: Option<(usize, i32, f64)> = None;

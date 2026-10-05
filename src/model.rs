@@ -111,7 +111,9 @@ impl PyModel {
     /// `"status"` (状態文字列)、`"objective"` と `"x"` (`"optimal"` のときだけ値、
     /// それ以外は `None`)、`"node_limit_hit"` (MIP がノード数上限で打ち切られたときだけ `True`)。
     ///
-    /// `root_solver`: 各 LP の解法。`"simplex"` (既定) か `"interior"`。
+    /// `root_solver`: 各 LP の解法。`"auto"` (既定: 前処理後の行数が 5000 以上なら傾き・切片双対二段解法と
+    /// 内点法 + クロスオーバーを同時に解き、先に結論を出した側を採る。未満なら二段解法)、`"simplex"`
+    /// (二段解法だけ)、`"ipm_crossover"` (内点法 + クロスオーバーだけ)、`"interior"` (独立の IP-PMM 内点法)。
     ///
     /// `distinguish_infeasible_unbounded` (既定 `false`): `false` なら、有限の最適値が
     /// ないと分かった時点で `"infeasible_or_unbounded"` を返す。`true` なら
@@ -125,7 +127,7 @@ impl PyModel {
         })?;
         let root_solver = match root_solver {
             Some(s) => RootSolver::parse(s)?,
-            None => RootSolver::Simplex,
+            None => RootSolver::Auto,
         };
 
         let opts = LpOptions { distinguish_infeasible_unbounded, ..Default::default() };

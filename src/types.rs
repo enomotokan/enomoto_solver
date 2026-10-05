@@ -100,6 +100,9 @@ pub enum RootSolver {
     /// 単体法と同じ前処理の後、箱型制約付き IP-PMM 内点法 + クロスオーバー
     /// (Liu & Lu 2024 のらせん型) で最適基底解を求める。
     IpmCrossover,
+    /// 既定。前処理後の行数が `RACE_MIN_ROWS` 以上なら傾き・切片双対二段解法と内点法 + クロスオーバーを
+    /// 同時に解いて先に結論を出した側を採り、未満なら傾き・切片双対二段解法だけで解く。
+    Auto,
 }
 
 impl RootSolver {
@@ -109,8 +112,9 @@ impl RootSolver {
             "simplex" => Ok(RootSolver::Simplex),
             "interior" => Ok(RootSolver::Interior),
             "ipm_crossover" => Ok(RootSolver::IpmCrossover),
+            "auto" => Ok(RootSolver::Auto),
             other => Err(PyValueError::new_err(format!(
-                "unknown root_solver '{other}' (expected 'simplex', 'interior' or 'ipm_crossover')"
+                "unknown root_solver '{other}' (expected 'auto', 'simplex', 'interior' or 'ipm_crossover')"
             ))),
         }
     }
@@ -198,6 +202,9 @@ pub struct LpOptions {
     /// 真なら単体法の経路で、前処理後の標準形を内点法 + クロスオーバーで解く
     /// (`RootSolver::IpmCrossover`)。
     pub ipm_crossover: bool,
+    /// 真なら (`RootSolver::Auto`)、前処理後の行数が `RACE_MIN_ROWS` 以上の問題を傾き・切片双対二段解法と
+    /// 内点法 + クロスオーバーで同時に解く。
+    pub auto_race: bool,
 }
 
 impl Status {

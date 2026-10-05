@@ -300,6 +300,9 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
 
     for it in 0..max_iters {
         iters = it;
+        if crate::cancel::is_cancelled() {
+            break; // 同時実行の相手が先に結論を出した (status は NotSolved のまま)
+        }
         csr_mat_vec_into(a, &x, &mut ax);
         csr_mat_t_vec_into(a, &y, &mut aty);
         let res = residuals(&ax, b, &x, &lo, &up, &lo.s, &up.s, c, &aty, &lo.z, &up.z, &mut dual_res);

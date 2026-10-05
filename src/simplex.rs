@@ -65,7 +65,7 @@
 use crate::presolve::{self, scaling};
 use crate::sparse::{CscMat, CsrMat, csr_row_iter, sparse_axpy_dense, sparse_dot_dense};
 use crate::types::{ConstraintRow, Objective, RowSense, Sense, Status, VariableData};
-use crate::params::simplex::{COST_PERTURB_BASE, COST_PERTURB_BOXED_FRACTION, COST_PERTURB_ZERO_COST_SCALE, COST_PERTURB_FEW_BOXED_COST_CAP, COST_PERTURB_LARGE_COST, EXPAND_DELTA_0, EXPAND_DELTA_F, EXPAND_K, EXPAND_TAU, FT_BUMP_LIMIT_FACTOR, FT_CHECK_INTERVAL, FT_MAX_UPDATES, FT_MIN_PIVOT, FT_RESIDUAL_TOL, MAX_ITERS_CEILING, MAX_ITERS_FLOOR, MAX_ITERS_SCALE, PARALLEL_COMPONENT_MIN_VARS, PARTIAL_PRICING_GROUPS, PARTIAL_PRICING_THRESHOLD, PRESOLVE_ROUNDS, PRIMAL_HARRIS_TOL, PRIMAL_STALL_LIMIT_MIN, PRIMAL_STALL_LIMIT_PER_ROW, PROPAGATION_PASSES, RAYON_SIZE_THRESHOLD, ROWSINGLETON_COLSINGLETON_INNER_ROUNDS, RUIZ_ITERS, STALL_PROGRESS_EPS, STEEPEST_EDGE_FLOOR, TOL, UPDATE_VERIFY_TOL};
+use crate::params::simplex::{COST_PERTURB_BASE, COST_PERTURB_BOXED_FRACTION, COST_PERTURB_ZERO_COST_SCALE, COST_PERTURB_FEW_BOXED_COST_CAP, COST_PERTURB_LARGE_COST, EXPAND_DELTA_0, EXPAND_DELTA_F, EXPAND_K, EXPAND_TAU, FT_BUMP_LIMIT_FACTOR, FT_CHECK_INTERVAL, FT_MAX_UPDATES, FT_MIN_PIVOT, FT_RESIDUAL_TOL, MAX_ITERS_CEILING, MAX_ITERS_FLOOR, MAX_ITERS_SCALE, PARALLEL_COMPONENT_MIN_VARS, PARTIAL_PRICING_GROUPS, PARTIAL_PRICING_THRESHOLD, PRESOLVE_ROUNDS, PRIMAL_HARRIS_TOL, PRIMAL_STALL_LIMIT_MIN, PRIMAL_STALL_LIMIT_PER_ROW, PROPAGATION_PASSES, RACE_MIN_ROWS, RAYON_SIZE_THRESHOLD, ROWSINGLETON_COLSINGLETON_INNER_ROUNDS, RUIZ_ITERS, STALL_PROGRESS_EPS, STEEPEST_EDGE_FLOOR, TOL, UPDATE_VERIFY_TOL};
 
 /// Markowitz ピボットの疎 LU と Forrest-Tomlin 更新。このファイル内では
 /// ローカル変数名 `lu` (FtLu インスタンス) との衝突を避けるため `sparse_lu` の別名で参照する。
@@ -79,6 +79,8 @@ use self::lu as sparse_lu;
 mod slope_intercept_dual;
 /// 内点法 + クロスオーバー (Liu & Lu 2024) による求解 (`RootSolver::IpmCrossover`)。
 mod crossover;
+/// 傾き・切片双対二段解法と内点法 + クロスオーバーの同時実行 (`RootSolver::Auto`)。
+mod race;
 
 /// 単体法の各メインループの反復上限を問題サイズから決める。
 ///
@@ -908,6 +910,9 @@ fn run_phase(
     let ratio_pivot_tol = if env_str!("ENOMOTO_PRIMAL_RATIO_PIVOT_TOL_OLD").is_some() { TOL } else { tunable!("ENOMOTO_T_FT_MIN_PIVOT", FT_MIN_PIVOT, f64) };
     let max_iters = max_iters_for(m, std.n_total);
     for iter_idx in 0..max_iters {
+        if iter_idx & 63 == 0 && crate::cancel::is_cancelled() {
+            return None; // 同時実行の相手が先に結論を出した
+        }
         prof_phases::RUN_PHASE_ITERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let rhs = t.recompute_basics(lu);
 
@@ -1248,6 +1253,9 @@ fn run_phase2_incremental(std: &StdForm, t: &mut Tableau, lu: &mut sparse_lu::Ft
     let mut since_check = 0usize;
     let max_iters = max_iters_for(m, n);
     for _iter in 0..max_iters {
+        if _iter & 63 == 0 && crate::cancel::is_cancelled() {
+            return None; // 同時実行の相手が先に結論を出した
+        }
         prof_phases::RUN_PHASE_ITERS.fetch_add(1, Relaxed);
         let fresh_now = need_fresh; // この反復の x_B/d が作り直したばかりの値か
         if need_fresh {
@@ -1641,7 +1649,9 @@ fn solve_std_form_decomposed(std: &StdForm, opts: &crate::types::LpOptions) -> S
     let use_parallel = components.iter().any(|c| c.len() >= PARALLEL_COMPONENT_MIN_VARS); // rayon で並列に解くか
     let results: Vec<SimplexResult> = if use_parallel {
         use rayon::prelude::*;
-        sub_std_forms.par_iter().map(solve_one).collect()
+        // 打ち切りのトークン (同時実行時) を各成分のタスクに引き継ぐ (`crate::cancel`)。
+        let token = crate::cancel::current();
+        sub_std_forms.par_iter().map(|s| crate::cancel::with_token(token.clone(), || solve_one(s))).collect()
     } else {
         sub_std_forms.iter().map(solve_one).collect()
     };
@@ -1924,20 +1934,33 @@ fn solve_lp_dual_full_status(variables: &[VariableData], objective: &Objective, 
             None => eprintln!("DEBUG_EXT_COMPONENTS: single component (no split found)"),
         }
     }
-    let result = if opts.ipm_crossover {
-        // 内点法 + クロスオーバー。内点法が収束しない・基底が作れないときは傾き・切片二段解法で解き直す。
-        crossover::solve_ipm_crossover(&std).unwrap_or_else(|| {
-            crate::phase_timing::mark("crossover_fallback");
-            solve_std_form_decomposed(&std, &opts)
-        })
+    let race_min_rows = tunable!("ENOMOTO_T_RACE_MIN_ROWS", RACE_MIN_ROWS, usize);
+    let (result, std) = if opts.auto_race && std.n_rows >= race_min_rows {
+        // 大きな問題: 傾き・切片双対二段解法と内点法 + クロスオーバーを同時に解き、先に結論を出した側を採る。
+        let std = std::sync::Arc::new(std);
+        (race::solve_race(std.clone(), opts), None)
     } else {
-        solve_std_form_decomposed(&std, &opts)
+        (solve_one_engine(&std, &opts), Some(std))
     };
+    drop(std);
     crate::phase_timing::mark("simplex_end");
     if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
         eprintln!("DEBUG_EXT: solve_std_form_decomposed returned {:?}", result.status);
     }
     unscale_result(result, &sc, &postsolve_log, &orig_of_kept, &sign, &fixed_values, &shift, variables.len())
+}
+
+/// 前処理後の標準形を、`opts` で選ばれた 1 つのエンジンで解く (同時実行しない場合)。
+fn solve_one_engine(std: &StdForm, opts: &crate::types::LpOptions) -> SimplexResult {
+    if opts.ipm_crossover {
+        // 内点法 + クロスオーバー。内点法が収束しない・基底が作れないときは傾き・切片二段解法で解き直す。
+        crossover::solve_ipm_crossover(std).unwrap_or_else(|| {
+            crate::phase_timing::mark("crossover_fallback");
+            solve_std_form_decomposed(std, opts)
+        })
+    } else {
+        solve_std_form_decomposed(std, opts)
+    }
 }
 
 /// 単体法モジュールのテスト。
@@ -2873,5 +2896,37 @@ mod tests {
         // 頂点: 4 変数・2 行なので、境界にない変数は高々 2 個。
         let interior = x.iter().filter(|&&v| v > 1e-8 && v < 1.0 - 1e-8).count();
         assert!(interior <= 2, "not a vertex: x={x:?}");
+    }
+
+    /// 同時実行 (`race::solve_race`) が単体法と同じ最適値を返すこと。実行不能な問題では、内点法 + クロスオーバー
+    /// 側は結論を出さず (`None`)、二段解法側の `Infeasible` が採られること。
+    #[test]
+    fn race_matches_simplex_and_keeps_infeasibility_verdict() {
+        let n = 60;
+        let vars: Vec<VariableData> = (0..n).map(|_| var(0.0, 8.0)).collect();
+        let obj_terms: Vec<(usize, f64)> = (0..n).map(|i| (i, 1.0 + (i % 4) as f64)).collect();
+        let obj = Objective { expr: expr(&obj_terms), sense: Sense::Maximize };
+        let mut cons: Vec<ConstraintRow> = Vec::new();
+        for i in 0..(n - 1) {
+            cons.push(row(&[(i, 1.0), (i + 1, 1.0)], RowSense::Le, 10.0));
+        }
+        cons.push(row(&(0..n).map(|i| (i, 1.0)).collect::<Vec<_>>(), RowSense::Ge, 40.0));
+        let x = solve_lp_dual(&vars, &obj, &cons).x.unwrap();
+        let ref_obj: f64 = obj_terms.iter().map(|&(j, c)| c * x[j]).sum();
+        let pf = build_std_form_presolved(&vars, &obj, &cons, false).ok().unwrap();
+        let res = race::solve_race(std::sync::Arc::new(pf.std), Default::default());
+        assert_eq!(res.status, Status::Optimal);
+        let res = unscale_result(res, &pf.scaling, &pf.postsolve_log, &pf.orig_of_kept, &pf.sign, &pf.fixed_values, &pf.shift, n);
+        let x = res.x.unwrap();
+        let got: f64 = obj_terms.iter().map(|&(j, c)| c * x[j]).sum();
+        assert!((got - ref_obj).abs() < 1e-7 * ref_obj.abs().max(1.0), "race={got} simplex={ref_obj}");
+
+        // 実行不能: 隣接 2 変数の和 <= 10 なのに全体の和 >= 400。
+        let mut bad = cons.clone();
+        bad.push(row(&(0..n).map(|i| (i, 1.0)).collect::<Vec<_>>(), RowSense::Ge, 400.0));
+        if let Ok(pf) = build_std_form_presolved(&vars, &obj, &bad, false) {
+            let res = race::solve_race(std::sync::Arc::new(pf.std), Default::default());
+            assert_eq!(res.status, Status::Infeasible);
+        }
     }
 }
