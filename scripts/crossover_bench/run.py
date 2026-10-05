@@ -35,7 +35,7 @@ CACHES = {
 }
 # この計算機のメモリ (15 GB) に載らない Mittelmann の 4 問 (論文用ベンチマークと同じ除外)。
 MITTELMANN_EXCLUDE = {"thk_48", "L2CTA3D", "dlr2", "Dual2_5000"}
-METHODS = {"slope_intercept": "simplex", "ipm_crossover": "ipm_crossover"}
+METHODS = {"slope_intercept": "simplex", "ipm_crossover": "ipm_crossover", "race": "auto"}
 
 
 def problems(set_name: str) -> list[str]:

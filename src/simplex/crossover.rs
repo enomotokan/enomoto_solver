@@ -90,6 +90,9 @@ mod prm {
     /// 内点法が収束しなかったとき、最良の反復点の相対残差 (許容値 1e-8 の倍率) がこれ以下なら
     /// クロスオーバーに進む (1e4 倍 = 相対 1e-4 程度)。
     pub const IPM_ACCEPT_REL: f64 = 1e4;
+    /// 同じく、ギャップだけはこの倍率まで受理する (主・双対の残差が小さければ、ギャップが残っていても
+    /// クロスオーバーと仕上げで直せる: greenbeb・perold。第 10 回の比較で 1e4 から緩めた)。
+    pub const IPM_ACCEPT_GAP_REL: f64 = 1e8;
     /// 基底の選択で列を受理する残差の相対閾値。
     pub const LI_TOL: f64 = 1e-9;
     /// 双対の押し出しの開始時に `|D| < DUAL_SKIP_FRAC · m` なら押し出しを飛ばす (欠けた階数が多すぎ、
@@ -590,9 +593,8 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     if xo.dual_feasible_known && ipm.status == Status::Infeasible {
         return Some(SimplexResult { status: Status::Infeasible, x: None });
     }
-    // 試験用 `ENOMOTO_T_XO_ACCEPT_GAP_REL`: ギャップだけは別の (緩い) 倍率で受理する (主・双対の残差が小さければ、
-    // ギャップが残っていてもクロスオーバーと仕上げで直せることが多い: greenbeb)。
-    let accept_gap = tunable!("ENOMOTO_T_XO_ACCEPT_GAP_REL", prm::IPM_ACCEPT_REL, f64);
+    // ギャップだけは別の (緩い) 倍率 `IPM_ACCEPT_GAP_REL` で受理する (`ENOMOTO_T_XO_ACCEPT_GAP_REL`)。
+    let accept_gap = tunable!("ENOMOTO_T_XO_ACCEPT_GAP_REL", prm::IPM_ACCEPT_GAP_REL, f64);
     let accepted = ipm.rel_res.0.max(ipm.rel_res.1) <= prm::IPM_ACCEPT_REL && ipm.rel_res.2 <= accept_gap;
     if ipm.status != Status::Optimal && !(matches!(ipm.status, Status::NotSolved) && accepted) {
         return None;
