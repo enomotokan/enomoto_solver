@@ -31,6 +31,9 @@ use crate::types::Status;
 /// 並列ループの 1 タスクあたりの最小の長さ (小さな問題で rayon の手間が計算を上回らないように)。
 const PAR_MIN_LEN: usize = 4096;
 
+/// 決定的な総和の塊の長さ ([`dot`])。
+const SUM_CHUNK: usize = 4096;
+
 /// Newton 系の求解ごとの反復改良の回数 (上限)。
 const REFINE_STEPS: usize = 3;
 
@@ -51,8 +54,26 @@ pub struct BoxIpmResult {
     pub rel_res: (f64, f64, f64),
 }
 
+/// 内積 `a · b`。固定長 [`SUM_CHUNK`] の塊ごとの部分和を順に足すので、並列でも加算順が実行ごとに
+/// 変わらない (rayon の `sum()` は分割が実行ごとに変わり、最終桁の違いが 50 反復を経てクロスオーバーの
+/// 経路と仕上げの時間を大きく揺らしていた: pilot87 で 0.9〜11 秒)。
 fn dot(a: &[f64], b: &[f64]) -> f64 {
-    a.par_iter().zip(b.par_iter()).with_min_len(PAR_MIN_LEN).map(|(x, y)| x * y).sum()
+    a.par_chunks(SUM_CHUNK)
+        .zip(b.par_chunks(SUM_CHUNK))
+        .map(|(x, y)| x.iter().zip(y).map(|(p, q)| p * q).sum::<f64>())
+        .collect::<Vec<f64>>()
+        .iter()
+        .sum()
+}
+
+/// `f(k)` (`k < len`) の和を [`dot`] と同じく決定的な順で取る。
+fn det_sum(len: usize, f: impl Fn(usize) -> f64 + Sync) -> f64 {
+    (0..len.div_ceil(SUM_CHUNK))
+        .into_par_iter()
+        .map(|c| (c * SUM_CHUNK..((c + 1) * SUM_CHUNK).min(len)).map(&f).sum::<f64>())
+        .collect::<Vec<f64>>()
+        .iter()
+        .sum()
 }
 
 fn norm_inf(v: &[f64]) -> f64 {
@@ -373,6 +394,8 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
     let mut status = Status::NotSolved;
     let mut iters = 0usize;
     let mut cached: Option<Res> = None;
+    let noimprove_k = tunable!("ENOMOTO_T_IPM_NOIMPROVE", 0usize, usize);
+    let mut noimprove = 0usize;
 
     for it in 0..max_iters {
         iters = it;
@@ -413,6 +436,21 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
         if !worst.is_finite() || !cx.is_finite() {
             // 数値的に破綻した (分解の失敗など): 最良の反復点に戻して打ち切る。
             break;
+        }
+        // 停滞の打ち切り (試験用 `ENOMOTO_T_IPM_NOIMPROVE=K`): 正則化が下限に達した後、最良点の `worst` が
+        // K 反復続けて 10% 以上改善しなければ打ち切る (greenbea は 45 反復目から同じ点を往復する)。
+        if noimprove_k > 0 && rho <= rho_min * REG_FLOOR_SLACK && delta <= delta_min * REG_FLOOR_SLACK {
+            if best.as_ref().map_or(true, |b| worst < 0.9 * b.0) {
+                noimprove = 0;
+            } else {
+                noimprove += 1;
+                if noimprove >= noimprove_k {
+                    if debug {
+                        eprintln!("IPM it={it} no improvement for {noimprove_k} iterations; stopping");
+                    }
+                    break;
+                }
+            }
         }
         if best.as_ref().map_or(true, |b| worst < b.0) {
             let mut rc = vec![0.0; n];
@@ -509,11 +547,7 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
         let mu = sz / n_bnd as f64;
         let mut sz_aff = 0.0;
         for side in [&lo, &up] {
-            sz_aff += (0..side.len())
-                .into_par_iter()
-                .with_min_len(PAR_MIN_LEN)
-                .map(|k| (side.s[k] + alpha_p_aff * side.ds_aff[k]) * (side.z[k] + alpha_d_aff * side.dz_aff[k]))
-                .sum::<f64>();
+            sz_aff += det_sum(side.len(), |k| (side.s[k] + alpha_p_aff * side.ds_aff[k]) * (side.z[k] + alpha_d_aff * side.dz_aff[k]));
         }
         let mu_aff = sz_aff / n_bnd as f64;
         let sigma = (mu_aff / mu.max(GAP_DIV_GUARD)).clamp(0.0, 1.0).powi(3);

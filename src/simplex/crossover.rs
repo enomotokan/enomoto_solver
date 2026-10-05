@@ -79,6 +79,9 @@ mod prm {
     pub const EPS_DUAL: f64 = 1e-12;
     /// 射影から外す列に置く上段対角 (実質的に列を消す)。
     pub const BIG: f64 = 1e12;
+    /// 分解 1 回の手間の見積もり `REFACTOR_WORK_FACTOR * (nnz(L) + dim)` (縁の処理の手間がこれを超えたら
+    /// 分解し直す。記号分解・AMD を含む分解は三角求解 1 回 (`2 nnz(L)`) のおよそ 10 倍強)。
+    pub const REFACTOR_WORK_FACTOR: f64 = 24.0;
     /// 縁取りの列数の上限 (これを超えたら数値分解し直す)。
     pub const MAX_BORDER: usize = 64;
     /// 縁取りの `K^{-1} U` に使ってよいメモリ (バイト)。
@@ -129,6 +132,13 @@ struct BorderedKkt {
     n_border_solves: usize,
     /// 数値分解 (記号分解を含む) の時間の累計 (統計)。
     total_factor_secs: f64,
+    /// 分解し直しの判断に使う手間の見積もり (決定的): 分解 1 回の手間 (`REFACTOR_WORK_FACTOR * nnz(L)`) と、
+    /// 分解し直した後の縁の処理の手間の累計 (三角求解 1 回 = `2 nnz(L)`、縁の補正 = `k * dim`)。
+    /// 以前は実測時間で判断していたため、計時の揺れで分解し直す時点 (と引き直す摂動) が実行ごとに変わり、
+    /// クロスオーバーの経路と仕上げの時間が大きくばらついた (pilot87 で 5〜800 秒)。
+    factor_work: f64,
+    border_work: f64,
+    nnz_l: f64,
 }
 
 impl BorderedKkt {
@@ -152,6 +162,9 @@ impl BorderedKkt {
             border_solve_secs: 0.0,
             n_border_solves: 0,
             total_factor_secs: 0.0,
+            factor_work: 0.0,
+            border_work: 0.0,
+            nnz_l: 0.0,
         }
     }
 
@@ -212,14 +225,17 @@ impl BorderedKkt {
         self.factor_secs = t.elapsed().as_secs_f64();
         self.total_factor_secs += self.factor_secs;
         self.border_secs = 0.0;
+        self.nnz_l = self.kkt.as_ref().map_or(0, |k| k.factor_nnz()) as f64;
+        self.factor_work = tunable!("ENOMOTO_T_XO_REFACTOR_WORK", prm::REFACTOR_WORK_FACTOR, f64) * (self.nnz_l + self.dim as f64);
+        self.border_work = 0.0;
     }
 
     /// 縁を `extra` 本足す前に分解し直すべきか: メモリの上限か、縁の手間 (これまでの累計 + これから足す
     /// `extra` 本の求解の見込み) が数値分解 1 回を上回るなら分解し直す (許容誤差の範囲で一度に多くの列が
     /// D に入る退化した問題 (cre-b) で、1 列ずつ縁を足すより速い)。
     fn should_refactor(&self, extra: usize) -> bool {
-        let solve_est = if self.n_border_solves > 0 { self.border_solve_secs / self.n_border_solves as f64 } else { 0.0 };
-        self.u.len() + extra > self.max_border() || self.border_secs + extra as f64 * solve_est > self.factor_secs
+        let solve_work = 2.0 * self.nnz_l + (self.u.len() + extra) as f64 * self.dim as f64;
+        self.u.len() + extra > self.max_border() || self.border_work + extra as f64 * solve_work > self.factor_work
     }
 
     /// 縁 `u` (全体の添字) と右下 `c` を加える。x 側の添字は分解に含まれる列でなければならない。
@@ -235,6 +251,7 @@ impl BorderedKkt {
         self.n_solve += 1;
         self.border_solve_secs += t.elapsed().as_secs_f64();
         self.n_border_solves += 1;
+        self.border_work += 2.0 * self.nnz_l + (self.u.len() + 1) as f64 * self.dim as f64;
         let k = self.u.len();
         let mut row = Vec::with_capacity(k + 1);
         for i in 0..k {
@@ -293,6 +310,7 @@ impl BorderedKkt {
         w[ns..].copy_from_slice(&r[n..]);
         self.kkt.as_mut().expect("factor first").solve_in_place(&mut w);
         self.n_solve += 1;
+        self.border_work += 2.0 * self.nnz_l + self.u.len() as f64 * self.dim as f64;
         self.border_correct(&mut w, rb);
         self.scatter(&w, r);
         self.work = w;
@@ -307,6 +325,7 @@ impl BorderedKkt {
         w.clear();
         w.extend_from_slice(&self.base);
         let zeros = vec![0.0; self.u.len()];
+        self.border_work += self.u.len() as f64 * self.dim as f64;
         self.border_correct(&mut w, &zeros);
         self.scatter(&w, out);
         self.work = w;
@@ -449,6 +468,7 @@ pub(super) fn solve_ipm_crossover(std: &StdForm) -> Option<SimplexResult> {
         return None;
     }
     crate::phase_timing::mark("ipm_end");
+    let ipm_secs = t0.elapsed().as_secs_f64();
     if debug {
         eprintln!("CROSSOVER ipm status={:?} iters={} rel_res={:?} t={:.3}s", ipm.status, ipm.iters, ipm.rel_res, t0.elapsed().as_secs_f64());
     }
@@ -826,10 +846,30 @@ pub(super) fn solve_ipm_crossover(std: &StdForm) -> Option<SimplexResult> {
         }
     };
     let mut border_cols: Vec<usize> = Vec::new();
+    // 試験用: |v_y| が初回の `vy_rel` 倍を下回ったら終える (`ENOMOTO_T_XO_VY_REL`、0 で無効)。終盤は射影の
+    // 雑音の向きで列を D に入れて基底の質を壊すことがある (ken-13)。
+    let vy_rel = tunable!("ENOMOTO_T_XO_VY_REL", 0.0f64, f64);
+    let mut vn_first = f64::NAN;
+    // 試験用: 開始時の |D|/m が `skip_frac` 未満なら双対の押し出しを飛ばし (`ENOMOTO_T_XO_DUAL_SKIP_FRAC`)、
+    // 押し出しの時間が内点法の時間の `time_factor` 倍を超えたら打ち切る (`ENOMOTO_T_XO_DUAL_TIME_FACTOR`)。
+    // どちらも 0 で無効。残りの階数は仕上げの単体法が埋める。
+    let skip_frac = tunable!("ENOMOTO_T_XO_DUAL_SKIP_FRAC", 0.0f64, f64);
+    let time_factor = tunable!("ENOMOTO_T_XO_DUAL_TIME_FACTOR", 0.0f64, f64);
+    let t_dual0 = Instant::now();
+    let skip_dual = (n_active as f64) < skip_frac * m as f64;
+    if skip_dual && debug {
+        eprintln!("CROSSOVER dual push skipped (|D|={n_active} < {skip_frac} m)");
+    }
     let drift_tol = tunable!("ENOMOTO_T_XO_DRIFT_TOL", prm::DRIFT_TOL, f64);
     let noise_factor = tunable!("ENOMOTO_T_XO_NOISE_FACTOR", prm::NOISE_FACTOR, f64);
     loop {
-        if (round_d >= 2 && n_active <= n_active_last) || round_d > max_dual {
+        if skip_dual || (round_d >= 2 && n_active <= n_active_last) || round_d > max_dual {
+            break;
+        }
+        if time_factor > 0.0 && t_dual0.elapsed().as_secs_f64() > time_factor * ipm_secs {
+            if debug {
+                eprintln!("CROSSOVER dual push: time cap ({time_factor} x ipm {ipm_secs:.2}s) reached");
+            }
             break;
         }
         n_active_last = n_active;
@@ -880,6 +920,14 @@ pub(super) fn solve_ipm_crossover(std: &StdForm) -> Option<SimplexResult> {
         }
         if vn <= 1e-9 {
             break; // A_D が行フルランク
+        }
+        if vn_first.is_nan() {
+            vn_first = vn;
+        } else if vy_rel > 0.0 && vn < vy_rel * vn_first {
+            if debug {
+                eprintln!("CROSSOVER dual push: |v_y|={vn:.2e} < {vy_rel} x first {vn_first:.2e}; stopping");
+            }
+            break;
         }
         at_y(std, &vy, &mut w);
         // 射影の誤差の目安: `D` の列での `|a_j^T v_y|` (厳密には 0)。これと同程度の `|w_j|` は

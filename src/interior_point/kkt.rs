@@ -27,6 +27,17 @@ use faer::{Conj, Side};
 pub use crate::sparse::{FaerCsr, csr_row_iter, csr_mat_t_vec, csr_mat_t_vec_into, csr_mat_vec, csr_mat_vec_into};
 use crate::params::interior_point::KKT_PARALLELISM;
 
+/// 数値分解に使う並列度。試験用 `ENOMOTO_T_FACTOR_SEQ=1` で逐次 (Fable の調査で、この大きさの疎 Cholesky では
+/// faer の並列分解の分割の手間が計算を上回り、逐次の方が 1.5〜2 倍速かった)。作業領域の見積もり (`_req`) にも
+/// 同じ値を使う。
+fn factor_par() -> faer::Parallelism<'static> {
+    if tunable!("ENOMOTO_T_FACTOR_SEQ", 0u8, u8) != 0 {
+        faer::Parallelism::None
+    } else {
+        KKT_PARALLELISM
+    }
+}
+
 /// `A`/`G` の非零パターンごとに一度だけ計算して使い回すもの一式:
 /// 記号 Cholesky 分解 (AMD 順序と消去構造。数値には依存しない) と、
 /// 数値分解・求解の作業バッファ (反復中に確保しないよう事前に確保)。
@@ -293,7 +304,7 @@ impl AugKkt {
         let chol_symbolic = factorize_symbolic_cholesky::<usize>(symbolic_base.as_ref(), Side::Upper, SymmetricOrdering::Amd, Default::default())
             .expect("symbolic factorization failed");
         let l_values = vec![0.0f64; chol_symbolic.len_values()];
-        let numeric_buf = GlobalPodBuffer::new(chol_symbolic.factorize_numeric_ldlt_req::<f64>(true, KKT_PARALLELISM).unwrap());
+        let numeric_buf = GlobalPodBuffer::new(chol_symbolic.factorize_numeric_ldlt_req::<f64>(true, factor_par()).unwrap());
         let solve_buf = GlobalPodBuffer::new(chol_symbolic.solve_in_place_req::<f64>(1).unwrap());
         AugKkt {
             n,
@@ -345,7 +356,7 @@ impl AugKkt {
             a_upper.as_ref(),
             Side::Upper,
             reg,
-            KKT_PARALLELISM,
+            factor_par(),
             PodStack::new(&mut self.numeric_buf),
         );
         self.factored = true;
@@ -567,7 +578,7 @@ impl NormalKkt {
             eprintln!("NormalKkt: symbolic (AMD) nnz(L)={} at {:.2}s", chol_symbolic.len_values(), t0.elapsed().as_secs_f64());
         }
         let l_values = vec![0.0f64; chol_symbolic.len_values()];
-        let numeric_buf = GlobalPodBuffer::new(chol_symbolic.factorize_numeric_llt_req::<f64>(KKT_PARALLELISM).ok()?);
+        let numeric_buf = GlobalPodBuffer::new(chol_symbolic.factorize_numeric_llt_req::<f64>(factor_par()).ok()?);
         let solve_buf = GlobalPodBuffer::new(chol_symbolic.solve_in_place_req::<f64>(1).ok()?);
         let nnz = symbolic_base.compute_nnz();
         let k = dense_cols.len();
@@ -638,7 +649,7 @@ impl NormalKkt {
         };
         let ok = self
             .chol_symbolic
-            .factorize_numeric_llt::<f64>(&mut self.l_values, m, Side::Upper, reg, KKT_PARALLELISM, PodStack::new(&mut self.numeric_buf))
+            .factorize_numeric_llt::<f64>(&mut self.l_values, m, Side::Upper, reg, factor_par(), PodStack::new(&mut self.numeric_buf))
             .is_ok();
         self.factored = ok;
         if !ok {
