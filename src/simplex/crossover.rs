@@ -483,28 +483,38 @@ pub(super) fn solve_ipm_crossover(std: &StdForm) -> Option<SimplexResult> {
     let mut ps = vec![PStat::Basic; n];
     let tol = prm::TOL_BOUND;
     // 非基底の検出。新たに非基底になった列を返す。
-    let detect = |ps: &mut [PStat], x: &mut [f64], s: &[f64], newly: &mut Vec<usize>| {
-        for j in 0..n {
-            if ps[j] != PStat::Basic {
-                continue;
+    // 列 `j` (基底候補) が境界に十分近ければ非基底にする (値を境界に置き、`newly` に積む)。
+    // 戻り値は `x_j` の変化量 (残差の増分更新用)。
+    let detect_one = |j: usize, ps: &mut [PStat], x: &mut [f64], s: &[f64], newly: &mut Vec<usize>| -> Option<f64> {
+        let (l, u) = (std.lb[j], std.ub[j]);
+        let stat = if l == u {
+            Some(if s[j] >= 0.0 { PStat::Lower } else { PStat::Upper })
+        } else {
+            let at_l = l.is_finite() && x[j] - l <= (prm::GAMMA * s[j]).max(tol);
+            let at_u = u.is_finite() && u - x[j] <= (-prm::GAMMA * s[j]).max(tol);
+            match (at_l, at_u) {
+                (true, true) => Some(if x[j] - l <= u - x[j] { PStat::Lower } else { PStat::Upper }),
+                (true, false) => Some(PStat::Lower),
+                (false, true) => Some(PStat::Upper),
+                _ => None,
             }
-            let (l, u) = (std.lb[j], std.ub[j]);
-            let stat = if l == u {
-                Some(if s[j] >= 0.0 { PStat::Lower } else { PStat::Upper })
-            } else {
-                let at_l = l.is_finite() && x[j] - l <= (prm::GAMMA * s[j]).max(tol);
-                let at_u = u.is_finite() && u - x[j] <= (-prm::GAMMA * s[j]).max(tol);
-                match (at_l, at_u) {
-                    (true, true) => Some(if x[j] - l <= u - x[j] { PStat::Lower } else { PStat::Upper }),
-                    (true, false) => Some(PStat::Lower),
-                    (false, true) => Some(PStat::Upper),
-                    _ => None,
+        };
+        stat.map(|stv| {
+            ps[j] = stv;
+            let old = x[j];
+            x[j] = if stv == PStat::Lower { l } else { u };
+            newly.push(j);
+            x[j] - old
+        })
+    };
+    // 残差 `r = b - A x` (主の押し出しの間は増分で保ち、分解し直すたびに一から計算する)。
+    let full_resid = |x: &[f64], r: &mut [f64]| {
+        r.copy_from_slice(&std.b);
+        for j in 0..n {
+            if x[j] != 0.0 {
+                for &(i, a) in col(std, j) {
+                    r[i] -= a * x[j];
                 }
-            };
-            if let Some(stv) = stat {
-                ps[j] = stv;
-                x[j] = if stv == PStat::Lower { l } else { u };
-                newly.push(j);
             }
         }
     };
@@ -512,11 +522,15 @@ pub(super) fn solve_ipm_crossover(std: &StdForm) -> Option<SimplexResult> {
         eprintln!("CROSSOVER resid after ipm={:.3e}", primal_resid(std, &x));
     }
     let mut newly = Vec::new();
-    detect(&mut ps, &mut x, &s, &mut newly);
+    for j in 0..n {
+        detect_one(j, &mut ps, &mut x, &s, &mut newly);
+    }
+    // 基底候補の一覧 (押し出しの間は減る一方。以後の走査はこれだけ)。
+    let mut basic_list: Vec<usize> = (0..n).filter(|&j| ps[j] == PStat::Basic).collect();
     if debug {
         eprintln!("CROSSOVER resid after detect={:.3e}", primal_resid(std, &x));
     }
-    let mut n_basic = ps.iter().filter(|&&p| p == PStat::Basic).count();
+    let mut n_basic = basic_list.len();
     st.basic_after_detect = n_basic;
     if debug {
         eprintln!("CROSSOVER m={m} n={n} basic_after_detect={n_basic} t={:.3}s", t0.elapsed().as_secs_f64());
@@ -531,29 +545,34 @@ pub(super) fn solve_ipm_crossover(std: &StdForm) -> Option<SimplexResult> {
     let mut v = vec![0.0; n];
     let max_primal = 10 * n + 10;
     let correct = tunable!("ENOMOTO_T_XO_CORRECT", 1u8, u8) != 0;
-    // 主の残差の補正: 基底候補の列だけで `A_B δ = b - A x` の最小ノルム解を足す (射影の正則化による
+    let drift_tol = tunable!("ENOMOTO_T_XO_DRIFT_TOL", prm::DRIFT_TOL, f64);
+    let mut resid = vec![0.0; m];
+    let mut av = vec![0.0f64; m];
+    // 主の残差の補正: 基底候補の列だけで `A_B δ = r` (`r = b - A x`) の最小ノルム解を足す (射影の正則化による
     // `A x = b` からのずれが歩を重ねて溜まり、最終基底で B^{-1} に増幅されるのを防ぐ)。
-    // 縁 (非基底になった列の `v_j = 0`) を含む今の分解で解く。
-    let primal_correct = |bk: &mut BorderedKkt, x: &mut [f64], ps: &[PStat], buf: &mut [f64]| {
+    // 縁 (非基底になった列の `v_j = 0`) を含む今の分解で解く。`r` は補正の分だけ更新する。
+    let primal_correct = |bk: &mut BorderedKkt, x: &mut [f64], basic_list: &[usize], buf: &mut [f64], r: &mut [f64]| {
         buf[..n].fill(0.0);
-        buf[n..].copy_from_slice(&std.b);
-        for j in 0..n {
-            if x[j] != 0.0 {
-                for &(i, a) in col(std, j) {
-                    buf[n + i] -= a * x[j];
-                }
-            }
-        }
+        buf[n..].copy_from_slice(r);
         // [D A^T; A -εI][v; y'] = [0; r] で A v ≈ r (D = 1 の列のみ動く)
         let zeros = vec![0.0; bk.u.len()];
         bk.solve_general(buf, &zeros);
-        for j in 0..n {
-            if ps[j] == PStat::Basic && buf[j] != 0.0 {
-                x[j] = (x[j] + buf[j]).clamp(std.lb[j], std.ub[j]);
+        for &j in basic_list {
+            if buf[j] != 0.0 {
+                let new = (x[j] + buf[j]).clamp(std.lb[j], std.ub[j]);
+                let d = new - x[j];
+                x[j] = new;
+                if d != 0.0 {
+                    for &(i, a) in col(std, j) {
+                        r[i] -= a * d;
+                    }
+                }
             }
         }
     };
     let mut corr_buf = vec![0.0; dim];
+    // 向きが見つからなかったとき、摂動を引き直して 1 回だけ分解し直したか。
+    let mut retried = false;
     loop {
         if n_basic == 0 || (round >= 2 && n_basic <= m && n_basic >= n_basic_last) || round > max_primal {
             break;
@@ -582,8 +601,9 @@ pub(super) fn solve_ipm_crossover(std: &StdForm) -> Option<SimplexResult> {
             rhs[n..].fill(0.0);
             bk.factor(std, &top, &mid_p, &rhs);
             need_factor = false;
+            full_resid(&x, &mut resid);
             if correct {
-                primal_correct(&mut bk, &mut x, &ps, &mut corr_buf);
+                primal_correct(&mut bk, &mut x, &basic_list, &mut corr_buf, &mut resid);
             }
         } else {
             for &j in &newly {
@@ -595,20 +615,21 @@ pub(super) fn solve_ipm_crossover(std: &StdForm) -> Option<SimplexResult> {
         // 射影の正則化 (ε) による雑音を向きとみなさないよう、摂動費用 (大きさ O(1)) に対する
         // 相対閾値 `V_REL_ZERO` 以下の成分は 0 にする (A_B が列フルランクなら v ≈ 0 で止まる)。
         let mut vnorm = 0.0f64;
-        for j in 0..n {
-            v[j] = if ps[j] == PStat::Basic && rhs[j].abs() > prm::V_REL_ZERO { rhs[j] } else { 0.0 };
+        let mut finite = true;
+        for &j in &basic_list {
+            let r = rhs[j];
+            finite &= r.is_finite();
+            v[j] = if r.abs() > prm::V_REL_ZERO { r } else { 0.0 };
             vnorm = vnorm.max(v[j].abs());
         }
-        if vnorm <= prm::V_REL_ZERO {
-            continue;
-        }
-        let avn;
         // 向きが本当に null(A_B) に入っているか: `‖A v‖ ≤ NULL_REL ‖v‖`。A_B が列フルランクになった後の
         // 射影は丸め誤差だけで (blend で |v| ≈ 4e-7、‖A v‖ ≈ |v|)、それを向きとみなすと比率テストが
-        // θ ≈ 1e7 で進んで `A x = b` を壊す。満たさなければ向きは無い (これ以上固定できない)。
-        {
-            let mut av = vec![0.0f64; m];
-            for j in 0..n {
+        // θ ≈ 1e7 で進んで `A x = b` を壊す。射影が非有限 (分解の破綻: pds-20) なら向きとみなさない
+        // (`inf > 1e-6·inf` は偽なので、有限性を先に確かめる)。
+        let mut avn = 0.0f64;
+        let has_dir = finite && vnorm > prm::V_REL_ZERO && {
+            av.fill(0.0);
+            for &j in &basic_list {
                 if v[j] != 0.0 {
                     for &(i, a) in col(std, j) {
                         av[i] += a * v[j];
@@ -616,21 +637,29 @@ pub(super) fn solve_ipm_crossover(std: &StdForm) -> Option<SimplexResult> {
                 }
             }
             avn = av.iter().fold(0.0f64, |mm, t| mm.max(t.abs()));
-            if avn > prm::NULL_REL * vnorm {
-                if debug {
-                    eprintln!("CROSSOVER primal push: |Av|={avn:.2e} > {:.0e}|v| (|v|={vnorm:.2e}); no null-space direction", prm::NULL_REL);
-                }
-                n_basic_last = n_basic;
-                if n_basic <= m {
-                    break;
-                }
+            avn <= prm::NULL_REL * vnorm
+        };
+        if !has_dir {
+            if debug {
+                eprintln!(
+                    "CROSSOVER primal push: no null-space direction (finite={finite} |v|={vnorm:.2e} |Av|={avn:.2e}, basic={n_basic}, m={m})"
+                );
+            }
+            // A_B が列フルランクなら正常な終わり。|B| > m なのに向きが無いのは射影の数値的な失敗なので、
+            // 摂動を引き直して 1 回だけ分解し直し、それでも駄目なら押し出しを終えて基底の選択に任せる
+            // (以前は分解し直しを 10n 回まで繰り返していた: pds-20)。
+            if n_basic > m && !retried {
+                retried = true;
                 need_factor = true;
+                n_basic_last = usize::MAX;
                 continue;
             }
+            break;
         }
+        retried = false;
         let ratio = |v: &[f64], x: &[f64], sign: f64| -> (f64, usize) {
             let mut best = (f64::INFINITY, usize::MAX);
-            for j in 0..n {
+            for &j in &basic_list {
                 let vj = sign * v[j];
                 if vj < -prm::EPS_ZERO && std.lb[j].is_finite() {
                     let t = (std.lb[j] - x[j]) / vj;
@@ -656,13 +685,19 @@ pub(super) fn solve_ipm_crossover(std: &StdForm) -> Option<SimplexResult> {
             break; // 両向きとも有界でない (自由列だけ): これ以上固定できない
         }
         let theta = theta.max(0.0);
-        for j in 0..n {
+        for &j in &basic_list {
             if v[j] != 0.0 {
                 x[j] += theta * sign * v[j];
             }
         }
+        // r -= θ·sign·A v
+        let ts = theta * sign;
+        for i in 0..m {
+            resid[i] -= ts * av[i];
+        }
         // ブロックした列は境界に置く
         let vj = sign * v[jb];
+        let old = x[jb];
         if vj < 0.0 {
             x[jb] = std.lb[jb];
             ps[jb] = PStat::Lower;
@@ -670,32 +705,44 @@ pub(super) fn solve_ipm_crossover(std: &StdForm) -> Option<SimplexResult> {
             x[jb] = std.ub[jb];
             ps[jb] = PStat::Upper;
         }
+        let d = x[jb] - old;
+        if d != 0.0 {
+            for &(i, a) in col(std, jb) {
+                resid[i] -= a * d;
+            }
+        }
         newly.push(jb);
-        if correct && theta * avn > tunable!("ENOMOTO_T_XO_DRIFT_TOL", prm::DRIFT_TOL, f64) {
+        basic_list.retain(|&j| ps[j] == PStat::Basic);
+        if correct && theta * avn > drift_tol {
             // この歩の `A x = b` からのずれを補正する (縁を足してから)。
             for &j in &newly {
                 bk.add_border(vec![(j, 1.0)], 0.0);
             }
             newly.clear();
-            primal_correct(&mut bk, &mut x, &ps, &mut corr_buf);
+            primal_correct(&mut bk, &mut x, &basic_list, &mut corr_buf, &mut resid);
             st.primal_corrections += 1;
         }
         let r_move = if debug { primal_resid(std, &x) } else { 0.0 };
         let nbefore = newly.len();
-        detect(&mut ps, &mut x, &s, &mut newly);
-        if debug {
-            let av = {
-                let mut r = vec![0.0; m];
-                for j in 0..n {
+        for k in 0..basic_list.len() {
+            let j = basic_list[k];
+            if let Some(d) = detect_one(j, &mut ps, &mut x, &s, &mut newly) {
+                if d != 0.0 {
                     for &(i, a) in col(std, j) {
-                        r[i] += a * v[j];
+                        resid[i] -= a * d;
                     }
                 }
-                r.iter().fold(0.0f64, |mm, t| mm.max(t.abs()))
-            };
-            eprintln!("CROSSOVER pstep theta={theta:.3e} |v|={vnorm:.3e} |Av|={av:.3e} resid_move={r_move:.3e} resid_detect={:.3e} snapped={}", primal_resid(std, &x), newly.len() - nbefore);
+            }
         }
-        n_basic = ps.iter().filter(|&&p| p == PStat::Basic).count();
+        basic_list.retain(|&j| ps[j] == PStat::Basic);
+        if debug {
+            eprintln!(
+                "CROSSOVER pstep theta={theta:.3e} |v|={vnorm:.3e} |Av|={avn:.3e} resid_move={r_move:.3e} resid_detect={:.3e} snapped={}",
+                primal_resid(std, &x),
+                newly.len() - nbefore
+            );
+        }
+        n_basic = basic_list.len();
         st.primal_steps += 1;
     }
     if correct && !need_factor {
@@ -703,7 +750,7 @@ pub(super) fn solve_ipm_crossover(std: &StdForm) -> Option<SimplexResult> {
             bk.add_border(vec![(j, 1.0)], 0.0);
         }
         newly.clear();
-        primal_correct(&mut bk, &mut x, &ps, &mut corr_buf);
+        primal_correct(&mut bk, &mut x, &basic_list, &mut corr_buf, &mut resid);
     }
     st.basic_after_push = n_basic;
     if debug {
@@ -717,35 +764,32 @@ pub(super) fn solve_ipm_crossover(std: &StdForm) -> Option<SimplexResult> {
     // ---- 3. 双対の押し出し ----
     // 固定列の非基底の向きは被約費用の符号で決める (値は変わらない)。
     let mut active = vec![false; n];
-    let update_active = |active: &mut [bool], ps: &mut [PStat], s: &[f64], added: &mut Vec<usize>| {
-        for j in 0..n {
-            if ps[j] != PStat::Basic && std.lb[j] == std.ub[j] {
-                ps[j] = if s[j] >= 0.0 { PStat::Lower } else { PStat::Upper };
-            }
-            if active[j] {
-                continue;
-            }
-            let (hl, hu) = (std.lb[j].is_finite(), std.ub[j].is_finite());
-            // 参照実装は下限だけの列を `s_j <= tol` で活性にする (負の s も入る) が、負に外れた列を D に
-            // 入れると `A_D^T y = c_D` が両立しなくなり押し出しの不変条件が崩れる (degen3) ので、
-            // 向きによらず `|s_j| <= tol` の列だけを加える (外れた列は仕上げの単体法が直す)。
-            let _ = (hl, hu);
-            let act = ps[j] == PStat::Basic || s[j].abs() <= tol;
-            if act {
-                active[j] = true;
-                added.push(j);
-            }
+    // 列 `j` (非活性) を必要なら活性にする (固定列の非基底の向きも被約費用の符号で付け直す)。
+    let activate_if = |j: usize, active: &mut [bool], ps: &mut [PStat], s: &[f64], added: &mut Vec<usize>| {
+        if ps[j] != PStat::Basic && std.lb[j] == std.ub[j] {
+            ps[j] = if s[j] >= 0.0 { PStat::Lower } else { PStat::Upper };
+        }
+        // 参照実装は下限だけの列を `s_j <= tol` で活性にする (負の s も入る) が、負に外れた列を D に
+        // 入れると `A_D^T y = c_D` が両立しなくなり押し出しの不変条件が崩れる (degen3) ので、
+        // 向きによらず `|s_j| <= tol` の列だけを加える (外れた列は仕上げの単体法が直す)。
+        if ps[j] == PStat::Basic || s[j].abs() <= tol {
+            active[j] = true;
+            added.push(j);
         }
     };
     let mut added = Vec::new();
-    update_active(&mut active, &mut ps, &s, &mut added);
+    for j in 0..n {
+        activate_if(j, &mut active, &mut ps, &s, &mut added);
+    }
+    // 非活性の列 (比率テスト・被約費用の更新・活性化の判定の対象。活性になれば外す)。
+    let mut cand: Vec<usize> = (0..n).filter(|&j| !active[j]).collect();
     // 各列が D に入った時点の被約費用 (押し出しは理論上これを保つ: A_D^T v_y = 0)。補正はこの値へ戻す
     // (0 へ戻すと、内点法の誤差で 0 でない基底候補の s があるとき D が m 列を超えた後に両立しない: ken-13)。
     let mut s_tgt = vec![0.0; n];
     for &j in &added {
         s_tgt[j] = s[j];
     }
-    let mut n_active = active.iter().filter(|&&a| a).count();
+    let mut n_active = added.len();
     st.dual_active_start = n_active;
     let bnorm = std.b.iter().fold(0.0f64, |a, v| a.max(v.abs()));
     let mid_d = vec![-1.0; m];
@@ -756,13 +800,19 @@ pub(super) fn solve_ipm_crossover(std: &StdForm) -> Option<SimplexResult> {
     let mut w = vec![0.0; n];
     let mut vy = vec![0.0; m];
     let max_dual = 10 * m + 10;
-    // 双対の補正: `A_D^T δ = s_D` の最小ノルム解 (`δ ∈ range(A_D)`) を `y` に足して `D` の被約費用を
-    // 0 に戻す (射影の誤差で `y` が `A_D^T y = c_D` からずれていくのを防ぐ)。縁の列 (後から `D` に
-    // 加えた列) の右辺も `s_j`。最後に `s = c - A^T y` を計算し直す。
-    let dual_correct = |bk: &mut BorderedKkt, y: &mut [f64], s: &mut [f64], s_tgt: &[f64], active: &[bool], buf: &mut [f64], border_cols: &[usize]| {
+    let mut is_border = vec![false; n];
+    // 双対の補正: `A_D^T δ = s_D - s_tgt` の最小ノルム解 (`δ ∈ range(A_D)`) を `y` に足して `D` の被約費用を
+    // 入った時点の値に戻す (射影の誤差で `y` がずれていくのを防ぐ)。縁の列 (後から `D` に加えた列) の
+    // 右辺も同じ。`D` の列の `s` は歩ごとには更新しないので、補正の前後で `s = c - A^T y` を計算し直す。
+    let dual_correct = |bk: &mut BorderedKkt, y: &mut [f64], s: &mut [f64], s_tgt: &[f64], active: &[bool], buf: &mut [f64], border_cols: &[usize], is_border: &[bool]| {
+        let mut aty = vec![0.0; n];
+        at_y(std, y, &mut aty);
+        for j in 0..n {
+            s[j] = std.c[j] - aty[j];
+        }
         // [diag(h) A^T; A -I][x; q] = [f; 0] → A_D^T q ≈ f、q = A x ∈ range(A_D)
         for j in 0..n {
-            buf[j] = if active[j] && !border_cols.contains(&j) { s[j] - s_tgt[j] } else { 0.0 };
+            buf[j] = if active[j] && !is_border[j] { s[j] - s_tgt[j] } else { 0.0 };
         }
         buf[n..].fill(0.0);
         let rb: Vec<f64> = border_cols.iter().map(|&j| s[j] - s_tgt[j]).collect();
@@ -770,13 +820,14 @@ pub(super) fn solve_ipm_crossover(std: &StdForm) -> Option<SimplexResult> {
         for i in 0..m {
             y[i] += buf[n + i];
         }
-        let mut aty = vec![0.0; n];
         at_y(std, y, &mut aty);
         for j in 0..n {
             s[j] = std.c[j] - aty[j];
         }
     };
     let mut border_cols: Vec<usize> = Vec::new();
+    let drift_tol = tunable!("ENOMOTO_T_XO_DRIFT_TOL", prm::DRIFT_TOL, f64);
+    let noise_factor = tunable!("ENOMOTO_T_XO_NOISE_FACTOR", prm::NOISE_FACTOR, f64);
     loop {
         if (round_d >= 2 && n_active <= n_active_last) || round_d > max_dual {
             break;
@@ -797,23 +848,35 @@ pub(super) fn solve_ipm_crossover(std: &StdForm) -> Option<SimplexResult> {
                 rhs[n + i] = rnd(i, epoch + 7919) + std.b[i] / (bnorm + 1.0);
             }
             bk.factor(std, &top, &mid_d, &rhs);
+            for &j in &border_cols {
+                is_border[j] = false;
+            }
             border_cols.clear();
             need_factor = false;
             if correct {
-                dual_correct(&mut bk, &mut y, &mut s, &s_tgt, &active, &mut corr_buf, &border_cols);
+                dual_correct(&mut bk, &mut y, &mut s, &s_tgt, &active, &mut corr_buf, &border_cols, &is_border);
             }
         } else {
             for &j in &added {
                 bk.add_border(col(std, j).iter().map(|&(i, v)| (n + i, v)).collect(), eps_dual);
                 border_cols.push(j);
+                is_border[j] = true;
             }
         }
         added.clear();
         bk.solve_base(&mut rhs);
         let mut vn = 0.0f64;
+        let mut finite = true;
         for i in 0..m {
             vy[i] = -rhs[n + i];
+            finite &= vy[i].is_finite();
             vn = vn.max(vy[i].abs());
+        }
+        if !finite {
+            if debug {
+                eprintln!("CROSSOVER dual push: non-finite direction; stopping");
+            }
+            break;
         }
         if vn <= 1e-9 {
             break; // A_D が行フルランク
@@ -821,8 +884,11 @@ pub(super) fn solve_ipm_crossover(std: &StdForm) -> Option<SimplexResult> {
         at_y(std, &vy, &mut w);
         // 射影の誤差の目安: `D` の列での `|a_j^T v_y|` (厳密には 0)。これと同程度の `|w_j|` は
         // `range(A_D)` の列と区別できない (加えても階数が増えない) ので比率テストで無視する。
-        let noise = (0..n).filter(|&j| active[j]).fold(0.0f64, |a, j| a.max(w[j].abs()));
-        let wtol = (tunable!("ENOMOTO_T_XO_NOISE_FACTOR", prm::NOISE_FACTOR, f64) * noise).max(prm::EPS_ZERO);
+        let noise = {
+            use rayon::prelude::*;
+            (0..n).into_par_iter().with_min_len(4096).filter(|&j| active[j]).map(|j| w[j].abs()).reduce(|| 0.0f64, f64::max)
+        };
+        let wtol = (noise_factor * noise).max(prm::EPS_ZERO);
         // 双対の向きも同様: `‖A_D^T v_y‖` が `|v_y|` に比べて小さくなければ (A_D が行フルランクで
         // 射影が丸め誤差だけ) 終わる。
         if noise > prm::NULL_REL_DUAL * vn {
@@ -832,15 +898,11 @@ pub(super) fn solve_ipm_crossover(std: &StdForm) -> Option<SimplexResult> {
             break;
         }
         if debug && (round_d % 50 == 1 || n_active + 5 >= m) {
-            let sd = (0..n).filter(|&j| active[j]).fold(0.0f64, |a, j| a.max((s[j] - s_tgt[j]).abs()));
-            eprintln!("CROSSOVER dual round={round_d} |v_y|={vn:.3e} max|A_D^T v_y|={noise:.3e} max|s_D|={sd:.2e} active={n_active} borders={}", bk.u.len());
+            eprintln!("CROSSOVER dual round={round_d} |v_y|={vn:.3e} max|A_D^T v_y|={noise:.3e} active={n_active} borders={}", bk.u.len());
         }
-        let ratio = |w: &[f64], s: &[f64], ps: &[PStat], active: &[bool], sign: f64| -> (f64, usize) {
+        let ratio = |w: &[f64], s: &[f64], ps: &[PStat], sign: f64| -> (f64, usize) {
             let mut best = (f64::INFINITY, usize::MAX);
-            for j in 0..n {
-                if active[j] || ps[j] == PStat::Basic {
-                    continue;
-                }
+            for &j in &cand {
                 let wj = sign * w[j];
                 // s_j(θ) = s_j - θ w_j が 0 を横切る列 (非基底の向きに対して双対実行可能な側から)
                 let t = match ps[j] {
@@ -855,10 +917,10 @@ pub(super) fn solve_ipm_crossover(std: &StdForm) -> Option<SimplexResult> {
             best
         };
         let mut sign = 1.0;
-        let (mut theta, mut jb) = ratio(&w, &s, &ps, &active, 1.0);
+        let (mut theta, mut jb) = ratio(&w, &s, &ps, 1.0);
         if !theta.is_finite() {
             sign = -1.0;
-            (theta, jb) = ratio(&w, &s, &ps, &active, -1.0);
+            (theta, jb) = ratio(&w, &s, &ps, -1.0);
         }
         if !theta.is_finite() {
             break;
@@ -867,7 +929,8 @@ pub(super) fn solve_ipm_crossover(std: &StdForm) -> Option<SimplexResult> {
         for i in 0..m {
             y[i] += theta * vy[i];
         }
-        for j in 0..n {
+        // 非活性の列の被約費用だけ更新する (D の列の s は補正の前に計算し直す)。
+        for &j in &cand {
             s[j] -= theta * w[j];
         }
         // この歩で D の被約費用がずれた量 |θ|·max|a_j^T v_y| (j ∈ D) が許容を超えたら、その場で補正する
@@ -877,31 +940,38 @@ pub(super) fn solve_ipm_crossover(std: &StdForm) -> Option<SimplexResult> {
         active[jb] = true;
         s_tgt[jb] = 0.0;
         added.push(jb);
-        if correct && drift > tunable!("ENOMOTO_T_XO_DRIFT_TOL", prm::DRIFT_TOL, f64) {
+        if correct && drift > drift_tol {
             for &j in &added {
                 bk.add_border(col(std, j).iter().map(|&(i, v)| (n + i, v)).collect(), eps_dual);
                 border_cols.push(j);
+                is_border[j] = true;
             }
             added.clear();
-            dual_correct(&mut bk, &mut y, &mut s, &s_tgt, &active, &mut corr_buf, &border_cols);
+            dual_correct(&mut bk, &mut y, &mut s, &s_tgt, &active, &mut corr_buf, &border_cols, &is_border);
             st.dual_corrections += 1;
         }
         s[jb] = 0.0;
         let before = added.len();
-        update_active(&mut active, &mut ps, &s, &mut added);
+        for &j in &cand {
+            if !active[j] {
+                activate_if(j, &mut active, &mut ps, &s, &mut added);
+            }
+        }
         for k in before..added.len() {
             s_tgt[added[k]] = s[added[k]];
         }
-        n_active = active.iter().filter(|&&a| a).count();
+        n_active += 1 + (added.len() - before);
+        cand.retain(|&j| !active[j]);
         st.dual_steps += 1;
     }
     if correct && !need_factor {
         for &j in &added {
             bk.add_border(col(std, j).iter().map(|&(i, v)| (n + i, v)).collect(), eps_dual);
             border_cols.push(j);
+            is_border[j] = true;
         }
         added.clear();
-        dual_correct(&mut bk, &mut y, &mut s, &s_tgt, &active, &mut corr_buf, &border_cols);
+        dual_correct(&mut bk, &mut y, &mut s, &s_tgt, &active, &mut corr_buf, &border_cols, &is_border);
     }
     st.dual_active_end = n_active;
     if debug {
