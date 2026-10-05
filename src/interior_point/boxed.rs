@@ -660,6 +660,22 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
                 break;
             }
         }
+        if debug {
+            // 歩幅と中心性 (相補積の最小・最大と平均の比)。
+            let (mut pmin, mut pmax) = (f64::INFINITY, 0.0f64);
+            for side in [&lo, &up] {
+                for k in 0..side.len() {
+                    let v = side.s[k] * side.z[k];
+                    pmin = pmin.min(v);
+                    pmax = pmax.max(v);
+                }
+            }
+            eprintln!(
+                "IPM it={it:3} alpha_p={alpha_p:.2e} alpha_d={alpha_d:.2e} mu={mu:.2e} sigma={sigma:.2e} min(sz)/mu={:.1e} max(sz)/mu={:.1e}",
+                pmin / mu.max(GAP_DIV_GUARD),
+                pmax / mu.max(GAP_DIV_GUARD)
+            );
+        }
         {
             let (dx, dy) = rhs.split_at(n);
             x_new.par_iter_mut().enumerate().with_min_len(PAR_MIN_LEN).for_each(|(j, v)| *v = x[j] + alpha_p * dx[j]);
@@ -775,7 +791,11 @@ fn primal_infeasibility_certificate(a: &FaerCsr, b: &[f64], y: &[f64], lo: &Side
             obj += side.sgn * side.bnd[k] * side.z[k];
         }
     }
-    norm_inf(buf) / scale < CERT_TOL && obj / scale > CERT_TOL
+    let ok = norm_inf(buf) / scale < CERT_TOL && obj / scale > CERT_TOL;
+    if env_str!("ENOMOTO_DEBUG_IPM").is_some() {
+        eprintln!("IPM farkas(primal) |A^T y + G^T z|/scale={:.2e} obj/scale={:.2e} scale={scale:.2e} -> {ok}", norm_inf(buf) / scale, obj / scale);
+    }
+    ok
 }
 
 /// 双対実行不能 (非有界) の証明: `A x ≈ 0`、`G x <= 0`、`c·x < 0` (正規化後)。
