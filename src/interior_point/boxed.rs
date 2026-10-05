@@ -777,7 +777,14 @@ fn newton(kkt: &mut IpmKkt, a: &FaerCsr, top: &[f64], delta: f64, r_x: &[f64], r
     up.set_dz_ds(&sol[..n]);
 }
 
-/// 主実行不能の Farkas 証明: `A^T y + G^T z ≈ 0` かつ `b·y + h·z > 0` (正規化後)。
+/// 主実行不能の Farkas 証明。内部の双対 (`c + A^T y + G^T z = 0`、`z >= 0`、`G x <= h`) で、実行可能な
+/// `x` があれば `r = A^T y + G^T z` について `x·r = b·y + z·(G x) <= b·y + h·z` なので、
+/// `min_{l <= x <= u} x·r > b·y + h·z` なら実行可能な `x` は無い。`r ≈ 0` の近似ではなく、残差 `r` を
+/// 箱の上での最小値として勘定に入れて判定する (境界が大きいと残差が増幅されるため)。無限の境界の向きに
+/// 有意な `r_j` があれば最小値は `-inf` なので証明にならない。余裕は `CERT_TOL * scale`。
+///
+/// (以前は `‖r‖/scale` が小さく `(b·y + h·z)/scale > CERT_TOL` なら証明としていたが、符号が逆で、
+/// 双対実行可能で乗数が大きく双対目的値が悪い収束途中の点を実行不能と誤判定した: dfl001。)
 fn primal_infeasibility_certificate(a: &FaerCsr, b: &[f64], y: &[f64], lo: &Side, up: &Side, buf: &mut [f64]) -> bool {
     let scale = norm_inf(y).max(norm_inf(&lo.z)).max(norm_inf(&up.z));
     if scale < CERT_SCALE_MIN {
@@ -785,15 +792,45 @@ fn primal_infeasibility_certificate(a: &FaerCsr, b: &[f64], y: &[f64], lo: &Side
     }
     csr_mat_t_vec_into(a, y, buf);
     let mut obj = dot(b, y);
+    let n = buf.len();
+    let mut lower = vec![f64::NEG_INFINITY; n];
+    let mut upper = vec![f64::INFINITY; n];
     for side in [lo, up] {
         for k in 0..side.len() {
-            buf[side.idx[k]] += side.sgn * side.z[k];
+            let j = side.idx[k];
+            buf[j] += side.sgn * side.z[k];
             obj += side.sgn * side.bnd[k] * side.z[k];
+            if side.sgn < 0.0 {
+                lower[j] = side.bnd[k];
+            } else {
+                upper[j] = side.bnd[k];
+            }
         }
     }
-    let ok = norm_inf(buf) / scale < CERT_TOL && obj / scale > CERT_TOL;
+    // 無限の境界の向きの成分で、これ以下は 0 とみなす (丸め誤差)。
+    let tiny = 1e-12 * scale;
+    let mut box_min = 0.0;
+    for j in 0..n {
+        let r = buf[j];
+        if r > 0.0 {
+            if lower[j].is_finite() {
+                box_min += lower[j] * r;
+            } else if r > tiny {
+                box_min = f64::NEG_INFINITY;
+                break;
+            }
+        } else if r < 0.0 {
+            if upper[j].is_finite() {
+                box_min += upper[j] * r;
+            } else if -r > tiny {
+                box_min = f64::NEG_INFINITY;
+                break;
+            }
+        }
+    }
+    let ok = box_min - obj > CERT_TOL * scale;
     if env_str!("ENOMOTO_DEBUG_IPM").is_some() {
-        eprintln!("IPM farkas(primal) |A^T y + G^T z|/scale={:.2e} obj/scale={:.2e} scale={scale:.2e} -> {ok}", norm_inf(buf) / scale, obj / scale);
+        eprintln!("IPM farkas(primal) min_box(x·r)={box_min:.3e} b·y+h·z={obj:.3e} scale={scale:.2e} -> {ok}");
     }
     ok
 }
@@ -808,4 +845,22 @@ fn dual_infeasibility_certificate(a: &FaerCsr, c: &[f64], x: &[f64], lo: &Side, 
     let eq_ok = norm_inf(buf) / scale < CERT_TOL;
     let ineq_ok = [lo, up].iter().all(|side| side.idx.iter().all(|&j| side.sgn * x[j] / scale <= CERT_TOL));
     eq_ok && ineq_ok && dot(c, x) / scale < -CERT_TOL
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sparse::csr_from_rows;
+
+    #[test]
+    fn box_ipm_detects_infeasible_and_solves_feasible() {
+        // x0 + x1 = 3、0 <= x <= 1: 実行不能。
+        let a = csr_from_rows(&[vec![(0, 1.0), (1, 1.0)]], 2);
+        let r = solve_box_lp(&a, &[3.0], &[1.0, 1.0], &[0.0, 0.0], &[1.0, 1.0], 200);
+        assert_eq!(r.status, Status::Infeasible);
+        // x0 + x1 = 1.5、0 <= x <= 1、min -x0 - 2 x1: 最適 (0.5, 1)、目的値 -2.5 (負の目的値で誤判定しない)。
+        let r = solve_box_lp(&a, &[1.5], &[-1.0, -2.0], &[0.0, 0.0], &[1.0, 1.0], 200);
+        assert_eq!(r.status, Status::Optimal);
+        assert!((r.x[0] - 0.5).abs() < 1e-6 && (r.x[1] - 1.0).abs() < 1e-6, "x = {:?}", r.x);
+    }
 }
