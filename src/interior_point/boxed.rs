@@ -184,9 +184,16 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
     let mut up = Side::new(1.0, up_idx.clone(), up_idx.iter().map(|&j| u[j]).collect());
     let n_bnd = lo.len() + up.len();
 
+    let t_kkt = std::time::Instant::now();
     let mut kkt = IpmKkt::new(a);
     if debug {
-        eprintln!("IPM kkt={} nnz(L)={}", if kkt.is_normal() { "normal" } else { "augmented" }, kkt.factor_nnz());
+        eprintln!(
+            "IPM kkt={} nnz(A)={} nnz(L)={} setup={:.2}s",
+            if kkt.is_normal() { "normal" } else { "augmented" },
+            a.compute_nnz(),
+            kkt.factor_nnz(),
+            t_kkt.elapsed().as_secs_f64()
+        );
     }
     let dim = n + p;
     let mut top = vec![0.0; n];
@@ -309,8 +316,8 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
         rel = (res.primal / bnd_p, res.dual / bnd_d, gap / bnd_g);
         if debug {
             eprintln!(
-                "IPM it={it:3} pobj={cx:.10e} pres={:.2e} dres={:.2e} gap={:.2e} rho={rho:.1e} delta={delta:.1e}",
-                res.primal, res.dual, gap
+                "IPM t={:.2}s it={it:3} pobj={cx:.10e} pres={:.2e} dres={:.2e} gap={:.2e} rho={rho:.1e} delta={delta:.1e}",
+                t_kkt.elapsed().as_secs_f64(), res.primal, res.dual, gap
             );
         }
         if res.primal <= bnd_p && res.dual <= bnd_d && gap <= bnd_g {

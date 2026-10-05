@@ -487,10 +487,18 @@ impl NormalKkt {
         for i in 0..p {
             positions.push((i, i));
         }
+        let dbg = env_str!("ENOMOTO_DEBUG_IPM").is_some();
+        let t0 = std::time::Instant::now();
         let (symbolic_base, order) = SymbolicSparseColMat::<usize>::try_new_from_indices(p, p, &positions).ok()?;
         drop(positions);
+        if dbg {
+            eprintln!("NormalKkt: triplets={n_trip} pattern nnz={} built in {:.2}s", symbolic_base.compute_nnz(), t0.elapsed().as_secs_f64());
+        }
         let chol_symbolic =
             factorize_symbolic_cholesky::<usize>(symbolic_base.as_ref(), Side::Upper, SymmetricOrdering::Amd, Default::default()).ok()?;
+        if dbg {
+            eprintln!("NormalKkt: symbolic (AMD) nnz(L)={} at {:.2}s", chol_symbolic.len_values(), t0.elapsed().as_secs_f64());
+        }
         let l_values = vec![0.0f64; chol_symbolic.len_values()];
         let numeric_buf = GlobalPodBuffer::new(chol_symbolic.factorize_numeric_llt_req::<f64>(KKT_PARALLELISM).ok()?);
         let solve_buf = GlobalPodBuffer::new(chol_symbolic.solve_in_place_req::<f64>(1).ok()?);
