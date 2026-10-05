@@ -349,6 +349,8 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
     let eps_rel = tunable!("ENOMOTO_T_IPM_EPS", EPS_REL, f64);
     // Gondzio の多重中心性補正子の最大回数 (0 で Mehrotra の予測子・修正子だけ)。
     let gondzio_max = tunable!("ENOMOTO_T_IPM_GONDZIO", 0usize, usize);
+    let gondzio_small_step = tunable!("ENOMOTO_T_IPM_GONDZIO_SMALL_STEP", 1.0f64, f64);
+    let mut nan_recover_left = tunable!("ENOMOTO_T_IPM_NAN_RECOVER", 0usize, usize);
     // 真なら近接中心 (ξ, λ, ν) を残差の減り方によらず毎反復更新する。
     let prox_always = tunable!("ENOMOTO_T_IPM_PROX_ALWAYS", 0u8, u8) != 0;
     let delta_min = tunable!("ENOMOTO_T_IPM_DELTA_MIN", DELTA_MIN, f64);
@@ -664,7 +666,8 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
             const BETA_MAX: f64 = 10.0;
             const ACCEPT: f64 = 0.01;
             let (ap0, ad0) = (alpha_p, alpha_d);
-            if ap0.min(ad0) >= 0.999 {
+            // 試験用 `ENOMOTO_T_IPM_GONDZIO_SMALL_STEP=t`: 歩幅が t 未満の反復 (中心性を失った反復) だけ補正する。
+            if ap0.min(ad0) >= 0.999 || ap0.min(ad0) >= gondzio_small_step {
                 break;
             }
             let (tp, td) = ((ap0 + DELTA_ALPHA).min(1.0), (ad0 + DELTA_ALPHA).min(1.0));
@@ -732,6 +735,18 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
         csr_mat_vec_into(a, &x_new, &mut ax_new);
         csr_mat_t_vec_into(a, &y_new, &mut aty_new);
         let res_new = residuals(&ax_new, b, &x_new, &lo, &up, &lo.s_new, &up.s_new, c, &aty_new, &lo.z_new, &up.z_new, &pos, &mut dual_new);
+        // 試験用 (`ENOMOTO_T_IPM_NAN_RECOVER=K`): 新しい点の残差が非有限 (分解の精度の破綻: dfl001) なら、その歩を
+        // 捨てて正則化を強め、今の点から解き直す (K 回まで)。既定は打ち切って最良の反復点を返す。
+        if nan_recover_left > 0 && !(res_new.primal.is_finite() && res_new.dual.is_finite()) {
+            nan_recover_left -= 1;
+            rho = (rho * 100.0).max(1e-8);
+            delta = (delta * 100.0).max(1e-8);
+            if debug {
+                eprintln!("IPM it={it} non-finite new point; raising regularization to rho={rho:.1e} delta={delta:.1e}");
+            }
+            cached = Some(res);
+            continue;
+        }
         // 残差が十分減らなかった反復の正則化の減らし方 `(1 - r/slow_div)`。既定は PIQP の 3、
         // 試験用 `ENOMOTO_T_IPM_REG_MODE=1` で IP-PMM の著者の実装の `(1 - 0.666 r)` (slow_div = 1/0.666)。
         let slow_div = if reg_mode == 1 { 1.0 / 0.666 } else { SLOW_DECREASE_DIVISOR };

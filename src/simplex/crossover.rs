@@ -576,8 +576,11 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     if xo.dual_feasible_known && ipm.status == Status::Infeasible {
         return Some(SimplexResult { status: Status::Infeasible, x: None });
     }
-    let worst = ipm.rel_res.0.max(ipm.rel_res.1).max(ipm.rel_res.2);
-    if ipm.status != Status::Optimal && !(matches!(ipm.status, Status::NotSolved) && worst <= prm::IPM_ACCEPT_REL) {
+    // 試験用 `ENOMOTO_T_XO_ACCEPT_GAP_REL`: ギャップだけは別の (緩い) 倍率で受理する (主・双対の残差が小さければ、
+    // ギャップが残っていてもクロスオーバーと仕上げで直せることが多い: greenbeb)。
+    let accept_gap = tunable!("ENOMOTO_T_XO_ACCEPT_GAP_REL", prm::IPM_ACCEPT_REL, f64);
+    let accepted = ipm.rel_res.0.max(ipm.rel_res.1) <= prm::IPM_ACCEPT_REL && ipm.rel_res.2 <= accept_gap;
+    if ipm.status != Status::Optimal && !(matches!(ipm.status, Status::NotSolved) && accepted) {
         return None;
     }
     let mut x = std.lb.clone(); // 固定列は lb
