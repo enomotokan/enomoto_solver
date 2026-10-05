@@ -435,7 +435,73 @@ fn rnd(j: usize, round: usize) -> f64 {
 
 /// 内点法 + クロスオーバーで `std` を解く。内点法が最適に収束しなければ `None`
 /// (呼び出し側が傾き・切片二段解法で解き直す)。
+/// [`solve_ipm_crossover_with`] の設定。
+#[derive(Default)]
+pub(super) struct XoOptions<'a> {
+    /// 内点法の双対の近接中心 (LP の符号。二段解法の段階 A の双対など)。
+    pub dual_center: Option<&'a [f64]>,
+    /// 真なら問題が双対実行可能だと分かっている (段階 A で `z^1 = 0`)。内点法は「最適」か「双対の発散
+    /// (主実行不能)」だけを結論し、主実行不能なら `Infeasible` を返す。
+    pub dual_feasible_known: bool,
+}
+
+/// 固定列 (`lb == ub`) を除いた問題 (内点法に渡す形)。
+struct Reduced {
+    free_cols: Vec<usize>,
+    a: crate::sparse::FaerCsr,
+    b: Vec<f64>,
+    l: Vec<f64>,
+    u: Vec<f64>,
+}
+
+fn reduce_fixed(std: &StdForm) -> Reduced {
+    let n = std.n_total;
+    let m = std.n_rows;
+    let free_cols: Vec<usize> = (0..n).filter(|&j| std.lb[j] < std.ub[j]).collect();
+    let mut new_idx = vec![usize::MAX; n];
+    for (k, &j) in free_cols.iter().enumerate() {
+        new_idx[j] = k;
+    }
+    let mut rows_j: Vec<Vec<(usize, f64)>> = Vec::with_capacity(m);
+    let mut b = std.b.clone();
+    for i in 0..m {
+        let mut r = Vec::with_capacity(std.rows.row(i).len());
+        for &(j, v) in std.rows.row(i) {
+            if new_idx[j] != usize::MAX {
+                r.push((new_idx[j], v));
+            } else {
+                b[i] -= v * std.lb[j];
+            }
+        }
+        rows_j.push(r);
+    }
+    let a = csr_from_rows(&rows_j, free_cols.len());
+    let l = free_cols.iter().map(|&j| std.lb[j]).collect();
+    let u = free_cols.iter().map(|&j| std.ub[j]).collect();
+    Reduced { free_cols, a, b, l, u }
+}
+
+/// 費用 0 の実行可能性問題を内点法で解く (`y = 0` が双対実行可能なので、結論は「実行可能」か「双対の発散
+/// = 実行不能」)。`Some(true)` は実行可能、`Some(false)` は実行不能 (Farkas の証明つき)、`None` は不明。
+pub(super) fn ipm_feasibility(std: &StdForm) -> Option<bool> {
+    let r = reduce_fixed(std);
+    let c0 = vec![0.0; r.free_cols.len()];
+    let warm = WarmStart { dual_feasible_known: true, ..Default::default() };
+    let max_iters = tunable!("ENOMOTO_T_IPM_MAX_ITERS", 200usize, usize);
+    let ipm = solve_box_lp_warm(&r.a, &r.b, &c0, &r.l, &r.u, max_iters, Some(&warm));
+    match ipm.status {
+        Status::Optimal => Some(true),
+        Status::Infeasible => Some(false),
+        _ => None,
+    }
+}
+
 pub(super) fn solve_ipm_crossover(std: &StdForm) -> Option<SimplexResult> {
+    solve_ipm_crossover_with(std, &XoOptions::default())
+}
+
+/// 内点法 + クロスオーバー ([`XoOptions`] 付き)。
+pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<SimplexResult> {
     let debug = env_str!("ENOMOTO_DEBUG_CROSSOVER").is_some();
     let t0 = Instant::now();
     let n = std.n_total;
@@ -443,35 +509,19 @@ pub(super) fn solve_ipm_crossover(std: &StdForm) -> Option<SimplexResult> {
     let mut st = Stats::default();
 
     // ---- 1. 内点法 (固定列 lb == ub を除いた問題) ----
-    let free_cols: Vec<usize> = (0..n).filter(|&j| std.lb[j] < std.ub[j]).collect();
-    let mut new_idx = vec![usize::MAX; n];
-    for (k, &j) in free_cols.iter().enumerate() {
-        new_idx[j] = k;
-    }
-    let mut rows_j: Vec<Vec<(usize, f64)>> = Vec::with_capacity(m);
-    let mut b_j = std.b.clone();
-    for i in 0..m {
-        let mut r = Vec::with_capacity(std.rows.row(i).len());
-        for &(j, v) in std.rows.row(i) {
-            if new_idx[j] != usize::MAX {
-                r.push((new_idx[j], v));
-            } else {
-                b_j[i] -= v * std.lb[j];
-            }
-        }
-        rows_j.push(r);
-    }
-    let a_j = csr_from_rows(&rows_j, free_cols.len());
-    drop(rows_j);
+    let Reduced { free_cols, a: a_j, b: b_j, l: l_j, u: u_j } = reduce_fixed(std);
     let c_j: Vec<f64> = free_cols.iter().map(|&j| std.c[j]).collect();
-    let l_j: Vec<f64> = free_cols.iter().map(|&j| std.lb[j]).collect();
-    let u_j: Vec<f64> = free_cols.iter().map(|&j| std.ub[j]).collect();
     let max_iters = tunable!("ENOMOTO_T_IPM_MAX_ITERS", 200usize, usize);
     // 試験用 (`ENOMOTO_T_XO_PDLP`): 先に PDLP で近似解を求め、
     //   1: 内点法の近接中心にする、2: 近接中心と初期点にする、3: 内点法を飛ばしてそのままクロスオーバーに渡す。
     let pdlp_mode = tunable!("ENOMOTO_T_XO_PDLP", 0u8, u8);
     let ipm = if pdlp_mode == 0 {
-        solve_box_lp(&a_j, &b_j, &c_j, &l_j, &u_j, max_iters)
+        if xo.dual_center.is_some() || xo.dual_feasible_known {
+            let warm = WarmStart { y: xo.dual_center, dual_feasible_known: xo.dual_feasible_known, ..Default::default() };
+            solve_box_lp_warm(&a_j, &b_j, &c_j, &l_j, &u_j, max_iters, Some(&warm))
+        } else {
+            solve_box_lp(&a_j, &b_j, &c_j, &l_j, &u_j, max_iters)
+        }
     } else {
         let opts = PdlpOptions {
             eps: tunable!("ENOMOTO_T_PDLP_EPS", if pdlp_mode == 3 { 1e-8 } else { 1e-4 }, f64),
@@ -500,11 +550,12 @@ pub(super) fn solve_ipm_crossover(std: &StdForm) -> Option<SimplexResult> {
             }
         } else {
             let warm = WarmStart {
-                x: &pd.x,
-                y: &pd.y,
+                x: Some(&pd.x),
+                y: Some(xo.dual_center.unwrap_or(&pd.y)),
                 point: pdlp_mode == 2,
                 theta: tunable!("ENOMOTO_T_PDLP_WARM_THETA", 1e-2, f64),
                 reg0: env_str!("ENOMOTO_T_PDLP_WARM_REG0").and_then(|v| v.parse().ok()),
+                dual_feasible_known: xo.dual_feasible_known,
             };
             solve_box_lp_warm(&a_j, &b_j, &c_j, &l_j, &u_j, max_iters, Some(&warm))
         }
@@ -521,6 +572,10 @@ pub(super) fn solve_ipm_crossover(std: &StdForm) -> Option<SimplexResult> {
     }
     // 収束しなかった場合も、最良の反復点が相対残差 `IPM_ACCEPT_REL` (各許容値の倍率) 以内なら
     // クロスオーバーに進む (最終段の単体法が残りの誤差を直す)。それ以外は呼び出し側で解き直す。
+    // 双対実行可能と分かっていれば、内点法の実行不能の結論 (双対の発散と Farkas の証明) をそのまま採る。
+    if xo.dual_feasible_known && ipm.status == Status::Infeasible {
+        return Some(SimplexResult { status: Status::Infeasible, x: None });
+    }
     let worst = ipm.rel_res.0.max(ipm.rel_res.1).max(ipm.rel_res.2);
     if ipm.status != Status::Optimal && !(matches!(ipm.status, Status::NotSolved) && worst <= prm::IPM_ACCEPT_REL) {
         return None;

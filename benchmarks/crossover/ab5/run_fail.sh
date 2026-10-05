@@ -9,6 +9,8 @@ run() {
     >> benchmarks/crossover/ab5/fail_$name.log 2>&1
 }
 run base X=0
+run staged ENOMOTO_T_IPM_STAGED=1
+run staged_nocenter ENOMOTO_T_IPM_STAGED=1 ENOMOTO_T_IPM_STAGED_CENTER=0
 run pdlp1_it500 ENOMOTO_T_XO_PDLP=1 ENOMOTO_T_PDLP_MAX_ITERS=500
 run pdlp1_it2000 ENOMOTO_T_XO_PDLP=1 ENOMOTO_T_PDLP_MAX_ITERS=2000
 run pdlp2_it2000 ENOMOTO_T_XO_PDLP=2 ENOMOTO_T_PDLP_MAX_ITERS=2000

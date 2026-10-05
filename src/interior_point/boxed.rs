@@ -234,18 +234,30 @@ pub fn solve_box_lp(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], max
     solve_box_lp_warm(a, b, c, l, u, max_iters, None)
 }
 
-/// 内点法のウォームスタートに使う近似解 (PDLP などの一次法の解。LP の符号: 被約費用は `c - A^T y`)。
+/// 内点法のウォームスタートに使う近似解 (PDLP などの一次法の解、二段解法の段階 A の双対など。
+/// LP の符号: 被約費用は `c - A^T y`) と、既知の情報。
+#[derive(Default)]
 pub struct WarmStart<'a> {
-    pub x: &'a [f64],
-    pub y: &'a [f64],
-    /// 真なら初期点もこの近似解から作る (境界からの距離・乗数を `theta` 以上に持ち上げる)。
-    /// 偽なら近接中心 `(ξ, λ, ν)` だけをこの近似解にして、初期点は通常どおり作る。
+    /// 主の近似解 (近接中心 `ξ` にする)。
+    pub x: Option<&'a [f64]>,
+    /// 双対の近似解 (近接中心 `λ`・`ν` にする)。
+    pub y: Option<&'a [f64]>,
+    /// 真なら初期点もこの近似解から作る (境界からの距離・乗数を `theta` 以上に持ち上げる。`x`・`y` の
+    /// 両方があるときだけ)。偽なら近接中心だけを近似解にして、初期点は通常どおり作る。
     pub point: bool,
     /// 初期点のスラック・乗数の下限 (大きさをそろえた後の単位)。
     pub theta: f64,
     /// 初期の正則化 `ρ`・`δ` (`None` なら通常の `RHO0`・`DELTA0`)。
     pub reg0: Option<f64>,
+    /// 真なら問題が双対実行可能だと分かっている (二段解法の段階 A で `z^1 = 0`、または費用 0 の
+    /// 実行可能性問題)。主の非有界は起こらないので双対実行不能の判定は行わず、結論は「最適」か
+    /// 「双対の発散 (主実行不能)」だけになる。乗数の大きさが初期の [`DIVERGE_FACTOR`] 倍を超えたら、
+    /// 正則化・停滞の条件を待たずに Farkas の証明を確かめる。
+    pub dual_feasible_known: bool,
 }
+
+/// 双対実行可能と分かっているとき、乗数の大きさがこの倍数を超えたら発散とみなして証明を確かめる。
+const DIVERGE_FACTOR: f64 = 1e6;
 
 /// [`solve_box_lp`] に近似解 `warm` からのウォームスタートを加えたもの。
 pub fn solve_box_lp_warm(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], max_iters: usize, warm: Option<&WarmStart>) -> BoxIpmResult {
@@ -261,10 +273,13 @@ pub fn solve_box_lp_warm(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64]
     let ls: Vec<f64> = l.iter().map(|v| v / beta).collect();
     let us: Vec<f64> = u.iter().map(|v| v / beta).collect();
     // 近似解も同じ大きさにそろえる (`x' = x/β`、`y' = y/γ`)。
-    let warm_s = warm.map(|w| {
-        let xs: Vec<f64> = w.x.iter().map(|v| v / beta).collect();
-        let ys: Vec<f64> = w.y.iter().map(|v| v / gamma).collect();
-        (xs, ys, w.point, w.theta, w.reg0)
+    let warm_s = warm.map(|w| WarmScaled {
+        x: w.x.map(|x| x.iter().map(|v| v / beta).collect()),
+        y: w.y.map(|y| y.iter().map(|v| v / gamma).collect()),
+        point: w.point,
+        theta: w.theta,
+        reg0: w.reg0,
+        dual_feasible_known: w.dual_feasible_known,
     });
     let mut r = solve_box_lp_scaled(a, &bs, &cs, &ls, &us, max_iters, warm_s.as_ref());
     for v in r.x.iter_mut() {
@@ -277,8 +292,17 @@ pub fn solve_box_lp_warm(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64]
 }
 
 /// [`solve_box_lp`] の本体 (大きさをそろえた後の問題を解く)。
-#[allow(clippy::type_complexity)]
-fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], max_iters: usize, warm: Option<&(Vec<f64>, Vec<f64>, bool, f64, Option<f64>)>) -> BoxIpmResult {
+/// [`WarmStart`] を大きさをそろえた後の単位にしたもの。
+struct WarmScaled {
+    x: Option<Vec<f64>>,
+    y: Option<Vec<f64>>,
+    point: bool,
+    theta: f64,
+    reg0: Option<f64>,
+    dual_feasible_known: bool,
+}
+
+fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], max_iters: usize, warm: Option<&WarmScaled>) -> BoxIpmResult {
     let n = a.ncols();
     let p = a.nrows();
     let debug = env_str!("ENOMOTO_DEBUG_IPM").is_some();
@@ -315,7 +339,8 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
     let mut rhs = vec![0.0; dim];
     let mut sol_aff = vec![0.0; dim];
 
-    let reg0 = warm.and_then(|w| w.4);
+    let reg0 = warm.and_then(|w| w.reg0);
+    let dual_feasible_known = warm.is_some_and(|w| w.dual_feasible_known);
     let mut rho = reg0.unwrap_or(RHO0);
     let mut delta = reg0.unwrap_or(DELTA0);
     let rho_min = tunable!("ENOMOTO_T_IPM_RHO_MIN", RHO_MIN, f64);
@@ -393,34 +418,40 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
     let mut lambda = y.clone();
     // ---- ウォームスタート: 近似解を近接中心に (指定があれば初期点にも) する ----
     // 内部の双対は LP の符号と逆 (`c + A^T y_int = z_l - z_u`)。
-    if let Some((wx, wy, point, theta, _)) = warm {
-        let y_int: Vec<f64> = wy.iter().map(|v| -v).collect();
-        let mut aty_w = vec![0.0; n];
-        csr_mat_t_vec_into(a, &y_int, &mut aty_w);
-        // 被約費用 rc = c + A^T y_int を下限側 (正) と上限側 (負) に分ける。
-        let rc: Vec<f64> = (0..n).map(|j| c[j] + aty_w[j]).collect();
-        xi.copy_from_slice(wx);
-        lambda.copy_from_slice(&y_int);
-        for side in [&mut lo, &mut up] {
-            for k in 0..side.len() {
-                let j = side.idx[k];
-                // 下限側 (sgn = -1) の乗数は rc⁺、上限側 (sgn = +1) は rc⁻。
-                side.nu[k] = (-side.sgn * rc[j]).max(0.0);
-            }
+    if let Some(w) = warm {
+        if let Some(wx) = &w.x {
+            xi.copy_from_slice(wx);
         }
-        if *point {
-            x.copy_from_slice(wx);
-            y.copy_from_slice(&y_int);
+        if let Some(wy) = &w.y {
+            let y_int: Vec<f64> = wy.iter().map(|v| -v).collect();
+            let mut aty_w = vec![0.0; n];
+            csr_mat_t_vec_into(a, &y_int, &mut aty_w);
+            // 被約費用 rc = c + A^T y_int を下限側 (正) と上限側 (負) に分ける。
+            let rc: Vec<f64> = (0..n).map(|j| c[j] + aty_w[j]).collect();
+            lambda.copy_from_slice(&y_int);
             for side in [&mut lo, &mut up] {
                 for k in 0..side.len() {
                     let j = side.idx[k];
-                    side.s[k] = (-side.sgn * (x[j] - side.bnd[k])).max(*theta);
-                    side.z[k] = side.nu[k].max(*theta);
+                    // 下限側 (sgn = -1) の乗数は rc⁺、上限側 (sgn = +1) は rc⁻。
+                    side.nu[k] = (-side.sgn * rc[j]).max(0.0);
                 }
-                side.nu.copy_from_slice(&side.z);
+            }
+            if let (true, Some(wx)) = (w.point, &w.x) {
+                x.copy_from_slice(wx);
+                y.copy_from_slice(&y_int);
+                for side in [&mut lo, &mut up] {
+                    for k in 0..side.len() {
+                        let j = side.idx[k];
+                        side.s[k] = (-side.sgn * (x[j] - side.bnd[k])).max(w.theta);
+                        side.z[k] = side.nu[k].max(w.theta);
+                    }
+                    side.nu.copy_from_slice(&side.z);
+                }
             }
         }
     }
+    // 乗数の大きさの基準 (発散の判定用)。
+    let mult_scale0 = norm_inf(&y).max(norm_inf(&lo.z)).max(norm_inf(&up.z)).max(1.0);
 
     // 作業領域
     let mut ax = vec![0.0; p];
@@ -527,12 +558,16 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
         }
         // Farkas 証明は正則化が下限に達し、しかも残差が改善しなくなってから試す (親モジュールは
         // 下限に達しただけで試すが、収束途中の大きな乗数で誤って成立することがある: pilot4)。
-        if at_floor && stall >= 2 {
+        // 双対実行可能と分かっていれば、乗数が初期の DIVERGE_FACTOR 倍を超えた (発散した) ときも主実行不能の
+        // 証明を確かめる。双対実行不能 (非有界) の判定はしない (起こらない)。
+        let diverged = dual_feasible_known
+            && norm_inf(&y).max(norm_inf(&lo.z)).max(norm_inf(&up.z)) > DIVERGE_FACTOR * mult_scale0;
+        if (at_floor && stall >= 2) || diverged {
             if primal_infeasibility_certificate(a, b, &y, &lo, &up, &mut aty_new) {
                 status = Status::Infeasible;
                 break;
             }
-            if dual_infeasibility_certificate(a, c, &x, &lo, &up, &mut ax_new) {
+            if !dual_feasible_known && dual_infeasibility_certificate(a, c, &x, &lo, &up, &mut ax_new) {
                 status = Status::Unbounded;
                 break;
             }

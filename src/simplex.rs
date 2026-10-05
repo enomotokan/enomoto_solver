@@ -1925,6 +1925,9 @@ fn solve_lp_dual_full_status(variables: &[VariableData], objective: &Objective, 
 
 /// 前処理後の標準形を、`opts` で選ばれた 1 つのエンジンで解く (同時実行しない場合)。
 fn solve_one_engine(std: &StdForm, opts: &crate::types::LpOptions) -> SimplexResult {
+    if opts.ipm_crossover && tunable!("ENOMOTO_T_IPM_STAGED", 0u8, u8) != 0 {
+        return solve_staged_ipm(std, opts);
+    }
     if opts.ipm_crossover {
         // 内点法 + クロスオーバー。内点法が収束しない・基底が作れないときは傾き・切片二段解法で解き直す。
         crossover::solve_ipm_crossover(std).unwrap_or_else(|| {
@@ -1933,6 +1936,40 @@ fn solve_one_engine(std: &StdForm, opts: &crate::types::LpOptions) -> SimplexRes
         })
     } else {
         solve_std_form_decomposed(std, opts)
+    }
+}
+
+/// 段階 A を傾き・切片二段解法 (双対単体法) で解き、段階 B に当たる部分を内点法で解く (試験用
+/// `ENOMOTO_T_IPM_STAGED=1`)。段階 A の結果で、内点法が結論すべきことは 2 択に絞られる:
+///
+/// - `z^1 = 0` (双対実行可能): 内点法 + クロスオーバーで元の問題を解く。段階 A の双対を近接中心にし
+///   (`ENOMOTO_T_IPM_STAGED_CENTER=0` で使わない)、内点法は「最適」か「双対の発散 (実行不能)」だけを結論する。
+/// - `z^1 < 0` (有限最適なし): 費用 0 の実行可能性問題を内点法で解き、実行可能なら非有界 (段階 A の傾き
+///   `x^1` が半直線)、双対が発散すれば実行不能。
+///
+/// 内点法が結論できなければ二段解法で一から解き直す。
+fn solve_staged_ipm(std: &StdForm, opts: &crate::types::LpOptions) -> SimplexResult {
+    let fallback = || {
+        crate::phase_timing::mark("crossover_fallback");
+        solve_std_form_decomposed(std, opts)
+    };
+    match slope_intercept_dual::solve_stage_a(std, opts) {
+        Some(slope_intercept_dual::StageA::Done(r)) if r.status != Status::NotSolved => r,
+        Some(slope_intercept_dual::StageA::DualFeasible { y }) => {
+            crate::phase_timing::mark("staged_stage_a_dual_feasible");
+            let center = tunable!("ENOMOTO_T_IPM_STAGED_CENTER", 1u8, u8) != 0;
+            let xo = crossover::XoOptions { dual_center: center.then_some(&y[..]), dual_feasible_known: true };
+            crossover::solve_ipm_crossover_with(std, &xo).unwrap_or_else(fallback)
+        }
+        Some(slope_intercept_dual::StageA::NoFiniteOptimum { .. }) => {
+            crate::phase_timing::mark("staged_stage_a_no_finite");
+            match crossover::ipm_feasibility(std) {
+                Some(true) => SimplexResult { status: Status::Unbounded, x: None },
+                Some(false) => SimplexResult { status: Status::Infeasible, x: None },
+                None => fallback(),
+            }
+        }
+        _ => fallback(),
     }
 }
 
@@ -2873,6 +2910,53 @@ mod tests {
 
     /// 同時実行 (`race::solve_race`) が単体法と同じ最適値を返すこと。実行不能な問題では、内点法 + クロスオーバー
     /// 側は結論を出さず (`None`)、二段解法側の `Infeasible` が採られること。
+    #[test]
+    fn staged_ipm_gives_the_same_verdicts_as_simplex() {
+        let opts = crate::types::LpOptions { distinguish_infeasible_unbounded: true, ipm_crossover: true, auto_race: false };
+        let n = 60;
+        let vars: Vec<VariableData> = (0..n).map(|_| var(0.0, 8.0)).collect();
+        let obj_terms: Vec<(usize, f64)> = (0..n).map(|i| (i, 1.0 + (i % 4) as f64)).collect();
+        let obj = Objective { expr: expr(&obj_terms), sense: Sense::Maximize };
+        let mut cons: Vec<ConstraintRow> = Vec::new();
+        for i in 0..(n - 1) {
+            cons.push(row(&[(i, 1.0), (i + 1, 1.0)], RowSense::Le, 10.0));
+        }
+        cons.push(row(&(0..n).map(|i| (i, 1.0)).collect::<Vec<_>>(), RowSense::Ge, 40.0));
+        let x = solve_lp_dual(&vars, &obj, &cons).x.unwrap();
+        let ref_obj: f64 = obj_terms.iter().map(|&(j, c)| c * x[j]).sum();
+        let pf = build_std_form_presolved(&vars, &obj, &cons, false).ok().unwrap();
+        let res = solve_staged_ipm(&pf.std, &opts);
+        assert_eq!(res.status, Status::Optimal);
+        let res = unscale_result(res, &pf.scaling, &pf.postsolve_log, &pf.orig_of_kept, &pf.sign, &pf.fixed_values, &pf.shift, n);
+        let x = res.x.unwrap();
+        let got: f64 = obj_terms.iter().map(|&(j, c)| c * x[j]).sum();
+        assert!((got - ref_obj).abs() < 1e-7 * ref_obj.abs().max(1.0), "staged={got} simplex={ref_obj}");
+
+        // 実行不能: 隣接 2 変数の和 <= 10 なのに全体の和 >= 400。
+        let mut bad = cons.clone();
+        bad.push(row(&(0..n).map(|i| (i, 1.0)).collect::<Vec<_>>(), RowSense::Ge, 400.0));
+        if let Ok(pf) = build_std_form_presolved(&vars, &obj, &bad, false) {
+            assert_eq!(solve_staged_ipm(&pf.std, &opts).status, Status::Infeasible);
+        }
+
+        // 非有界: 上限の無い変数を最大化 (隣接の和の制約を外し、x_k - x_{k+1} <= 1 の鎖にする)。
+        let uvars: Vec<VariableData> = (0..n).map(|_| var(0.0, f64::INFINITY)).collect();
+        let mut ucons: Vec<ConstraintRow> = Vec::new();
+        for i in 0..(n - 1) {
+            ucons.push(row(&[(i, 1.0), (i + 1, -1.0)], RowSense::Le, 1.0));
+        }
+        if let Ok(pf) = build_std_form_presolved(&uvars, &obj, &ucons, false) {
+            assert_eq!(solve_staged_ipm(&pf.std, &opts).status, Status::Unbounded);
+        }
+        // 実行不能かつ非有界の可能性がある形: 非有界な目的と矛盾する制約。
+        let mut ubad = ucons.clone();
+        ubad.push(row(&[(0, 1.0)], RowSense::Le, -1.0));
+        ubad.push(row(&[(1, 1.0), (2, 1.0)], RowSense::Ge, 3.0));
+        if let Ok(pf) = build_std_form_presolved(&uvars, &obj, &ubad, false) {
+            assert_eq!(solve_staged_ipm(&pf.std, &opts).status, Status::Infeasible);
+        }
+    }
+
     #[test]
     fn race_matches_simplex_and_keeps_infeasibility_verdict() {
         let n = 60;

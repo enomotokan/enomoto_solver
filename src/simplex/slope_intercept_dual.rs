@@ -791,6 +791,57 @@ thread_local! {
     /// 作業 #8 対処 5: このスレッドの直近の求解が、壊れた基底 (Farkas の証明の立たない実行不能の結論、対処 6 の `x_B` の不整合) か
     /// 反復上限で `None` を返したか (摂動を掛け直して解き直す)。
     static RESTART_BAILOUT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// 真なら段階 A の終わり (段階 B に移る直前) で求解を打ち切り、結果を [`STAGE_A_OUT`] に置く
+    /// ([`solve_stage_a`])。
+    static STOP_AFTER_STAGE_A: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// [`STOP_AFTER_STAGE_A`] で打ち切ったときの段階 A の結果。
+    static STAGE_A_OUT: std::cell::RefCell<Option<StageA>> = const { std::cell::RefCell::new(None) };
+}
+
+/// 段階 A (傾き問題) だけを解いた結果 ([`solve_stage_a`])。
+pub(super) enum StageA {
+    /// 段階 A だけで結論が出た (制約が無い、`z^1 < 0` で区別を求められていない、など)。
+    Done(SimplexResult),
+    /// `z^1 = 0`: 元の LP は双対実行可能 (傾き問題は「費用を下げる後退方向が無いか」を問う問題で、その
+    /// 最適値 0 は Farkas の補題で双対実行可能と同値)。有限最適か実行不能。`y` は段階 A の最終基底の
+    /// 双対 `B^{-T} c_B` (真の費用。LP の符号で被約費用は `c - A^T y`)。
+    DualFeasible { y: Vec<f64> },
+    /// `z^1 < 0`: 有限最適は無い (実行不能か非有界)。`x1` は主の半直線 (`A x^1 = 0`、境界の後退錐の中、
+    /// `c^T x^1 = z^1 < 0`)。実行可能なら非有界。
+    NoFiniteOptimum { x1: Vec<f64> },
+}
+
+/// 傾き・切片二段解法の段階 A だけを解く (段階 B を内点法などで解くため)。打ち切りの印を立てて
+/// [`solve_slope_intercept_dual`] を呼び、段階 B に移る直前で止める。`None` は二段解法が諦めた場合。
+pub(super) fn solve_stage_a(std: &StdForm, opts: &crate::types::LpOptions) -> Option<StageA> {
+    STOP_AFTER_STAGE_A.with(|f| f.set(true));
+    STAGE_A_OUT.with(|o| *o.borrow_mut() = None);
+    let res = solve_slope_intercept_dual(std, opts);
+    STOP_AFTER_STAGE_A.with(|f| f.set(false));
+    let out = STAGE_A_OUT.with(|o| o.borrow_mut().take());
+    match out {
+        Some(st) => Some(st),
+        None => res.map(StageA::Done),
+    }
+}
+
+/// 段階 A の終わりで打ち切るよう求められていれば、結果を置いて真を返す。
+fn stop_after_stage_a(std: &StdForm, z1: f64, x1: Vec<f64>, basis: &[usize], lu: &sparse_lu::FtLu) -> bool {
+    if !STOP_AFTER_STAGE_A.with(|f| f.get()) {
+        return false;
+    }
+    let out = if z1 < -Z_SLOPE_TOL {
+        StageA::NoFiniteOptimum { x1 }
+    } else {
+        let m = std.n_rows;
+        let cb: Vec<f64> = basis.iter().map(|&j| std.c[j]).collect();
+        let mut y = vec![0.0; m];
+        let mut scratch = vec![0.0; m];
+        lu.solve_transpose_into(&cb, &mut scratch, &mut y);
+        StageA::DualFeasible { y }
+    };
+    STAGE_A_OUT.with(|o| *o.borrow_mut() = Some(out));
+    true
 }
 
 /// 作業 #5 M3: 主ループで確定した 1 ピボットの記録(巻き戻し用、[`rollback_pivots`])。
@@ -2668,6 +2719,11 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
             eprintln!("DEBUG_EXT: stage A skipped (S empty)");
         }
         crate::phase_timing::mark("stage_a_skipped");
+        // 段階 A が空 (`x^1 = 0`、`z^1 = 0`): 全スラック基底の双対 `y = 0` が双対実行可能。
+        if STOP_AFTER_STAGE_A.with(|f| f.get()) {
+            STAGE_A_OUT.with(|o| *o.borrow_mut() = Some(StageA::DualFeasible { y: vec![0.0; m] }));
+            return Some(SimplexResult { status: Status::NotSolved, x: None });
+        }
         ColCache::intercept_problem(&cache_orig, &nb_status, &basis, &vec![0.0; m])?
     } else {
         match phase {
@@ -3735,6 +3791,20 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                         prof_phases::report(wall_t0.elapsed().as_nanos() as usize);
                     }
                     return Some(SimplexResult { status: Status::InfeasibleOrUnbounded, x: None });
+                }
+                {
+                    // 段階 A だけを求められていれば (`solve_stage_a`)、ここで打ち切る。
+                    let x1: Vec<f64> = (0..n_total)
+                        .map(|j| match (basis_pos[j], nb_status[j]) {
+                            (Some(pos), _) => x_b_slope[pos],
+                            (None, Some(NbStatus::Lower)) => cache.lower[j].map_or(0.0, |a| a.slope),
+                            (None, Some(NbStatus::Upper)) => cache.upper[j].map_or(0.0, |a| a.slope),
+                            _ => 0.0,
+                        })
+                        .collect();
+                    if stop_after_stage_a(std, z1, x1, &basis, &lu) {
+                        return Some(SimplexResult { status: Status::NotSolved, x: None });
+                    }
                 }
                 cache = ColCache::intercept_problem(&cache_orig, &nb_status, &basis, &x_b_slope)?;
                 width_inf = cache.width.iter().map(|w| w.is_none()).collect();
