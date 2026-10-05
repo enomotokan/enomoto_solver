@@ -103,7 +103,9 @@ def run_one(mps: Path, solver: str, timeout: float, mem_gb: float, sizes_only: b
         if line.startswith("PRESOLVE_SIZE"):
             res["presolve_size"] = {k: int(v) for k, v in (kv.split("=") for kv in line.split()[1:])}
     if "status" not in res:
+        # 異常終了 (メモリ上限の超過など): 解けなかったものとして制限時間で記録する。
         res["status"] = "crash"
+        res["time"] = timeout
         res["stderr"] = p.stderr[-2000:]
         if p.returncode < 0 or "MemoryError" in p.stderr or "memory allocation" in p.stderr:
             res["status"] = "crash_or_memory"
