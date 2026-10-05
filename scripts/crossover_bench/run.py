@@ -123,7 +123,7 @@ def main() -> None:
     ap.add_argument("--single-run-above", type=float, default=60.0, help="1 回目がこれ以上かかったら 1 回だけ")
     ap.add_argument("--mem-gb", type=float, default=13.5)
     ap.add_argument("--sizes", type=Path, help="前処理後の大きさの JSON (--min-presolved-rows で使う)")
-    ap.add_argument("--min-presolved-rows", type=int, default=0)
+    ap.add_argument("--min-presolved-rows", type=int, default=0, help="Kennington・Mittelmann だけ、前処理後の行数がこれ未満の問題を除く")
     args = ap.parse_args()
     if args.worker:
         worker(args.worker[0], args.worker[1], args.sizes_only)
@@ -143,7 +143,7 @@ def main() -> None:
             if args.only and name not in args.only:
                 continue
             key = f"{set_name}/{name}"
-            if args.min_presolved_rows and sizes.get(key, {}).get("n_rows_out", 0) < args.min_presolved_rows:
+            if args.min_presolved_rows and set_name != "netlib" and sizes.get(key, {}).get("n_rows_out", 0) < args.min_presolved_rows:
                 continue
             todo = [m for m in args.methods if (set_name, name, m) not in done]
             if not todo and not args.sizes_only:
