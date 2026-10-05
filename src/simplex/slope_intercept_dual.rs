@@ -53,11 +53,11 @@
 //!   ([`hat_upper`] 参照)。
 
 use super::{sparse_lu, InfeasibleRows, NbStatus, SimplexResult, StdForm, Status};
-use super::basis_kernel::{ft_max_updates, synth_clock_should_refactor_density, SynthDensity};
+use super::basis_kernel::{ft_max_updates, RefactorDue, SynthDensity};
 use crate::sparse::sparse_axpy_dense;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
-use crate::params::simplex::{FT_BUMP_LIMIT_FACTOR, FT_CHECK_INTERVAL, FT_MIN_PIVOT, FT_RESIDUAL_TOL, HARRIS_RATIO_TOL, MAX_ITERS_FLOOR, PRIMAL_FEAS_TOL, RESIDUAL_CHECK_MULTIPLIER, STALL_PROGRESS_EPS, STEEPEST_EDGE_FLOOR, TOL};
+use crate::params::simplex::{FT_CHECK_INTERVAL, FT_MIN_PIVOT, FT_RESIDUAL_TOL, HARRIS_RATIO_TOL, MAX_ITERS_FLOOR, PRIMAL_FEAS_TOL, RESIDUAL_CHECK_MULTIPLIER, STALL_PROGRESS_EPS, STEEPEST_EDGE_FLOOR, TOL};
 use crate::params::slope_intercept_dual::{CHUZC1_TOPK, CHUZC1_TOPK_MIN_CANDS, FLIP_TRACK_MIN_M, CHUZC1_FAST_PROBE, SYNTH_CLOCK_MID_TAU_FRACTION, PREFETCH_DIST, PREFETCH_MIN_COLS, PRICE_DENSE_RESULT_RATIO, SYNTH_CLOCK_DENSE_FRACTION, D_DRIFT_TOL, FT_BUMP_LU_RATIO, PLATEAU_OBJ_REL, D_GROSS_MISMATCH_REL_TOL, PARTIAL_TAU_MIN_M, PIVOT_ESCALATION_STEP, SLOPE_TOL, STUCK_ROW_MIN_PIVOT, XB_CHECK_CADENCE, XB_CHECK_CADENCE_LARGE, XB_CHECK_CADENCE_LARGE_DIV, XB_CHECK_CADENCE_LARGE_M, XB_CHECK_INTERVAL, XB_DRIFT_ESCALATION_FACTOR, XB_DRIFT_ESCALATION_STEP, XB_DRIFT_REL_TOL, XB_DRIFT_TOL, XB_DRIFT_TOL_MAX, X_B_SLOPE_NOISE, Z_SLOPE_TOL};
 use crate::params::slope_intercept_dual::{
     CHUZR_HEAP_ADAPTIVE_MIN_M, CHUZR_HEAP_ADAPTIVE_RATIO, PAR_FTRAN_MIN_DENSITY, PAR_XB_MIN_M, PAR_XB_MIN_ROWS, PAR_XB_THREADS, ROW_ERR_CAP, ROW_ERR_MULT, ROW_ERR_POOL_FRAC, ROW_INFEAS_TOL, CHUZR_SHORTLIST_AUTO_DIV, CHUZR_SHORTLIST_AUTO_K, CHUZR_SHORTLIST_AUTO_K_MAX, CHUZR_SHORTLIST_AUTO_MIN_M, CHUZR_SHORTLIST_K, CHUZR_SHORTLIST_MAX_LEN_FACTOR, CHUZR_SHORTLIST_MAX_LEN_SLACK, CHUZR_SHORTLIST_MIN_POOL_FACTOR, COMPACT_ROWS_BLOCK, FTRAN_U_HYPER_DENSITY, FTRAN_U_HYPER_TAU_DENSITY,
@@ -725,63 +725,14 @@ fn nb_value_affine(cache: &ColCache, status: NbStatus, j: usize) -> Option<Affin
     r
 }
 
-/// 現在の `basis_pos` から `B` を新たに LU 分解する(Forrest-Tomlin 更新ではない)。
-/// 対角行列ならその専用分解、そうでなければ Markowitz 分解を行う。
-///
-/// `prev` は置き換える前の分解(あれば): そのピボット順を再利用する
-/// (`sparse_lu::factorize_reusing`、HiGHS `HFactor::rebuild()` 相当)。再利用は各段で閾値
-/// ピボットとフィルを再確認し、だめなら自動で完全な Markowitz 探索に戻るので、`prev` を渡しても
-/// 分解が得られるかどうかは変わらず、手間だけが変わる。特異基底なら `None`。
+/// [`super::basis_kernel::factorize_basis`] で `B` を分解し直す。特異基底なら、この求解の残りを
+/// 安全モードで解き直すための印 `SINGULAR_BAILOUT` を立てて `None` を返す。
 fn refactorize(
     std: &StdForm,
     basis_pos: &[Option<usize>],
     prev: Option<&sparse_lu::FtLu>,
 ) -> Option<sparse_lu::FtLu> {
-    let m = std.n_rows;
-    if let Some(p) = prev {
-        if env_str!("ENOMOTO_DEBUG_FT_FILL").is_some() {
-            let (u, r) = p.u_r_nnz();
-            eprintln!("FT_FILL m={m} updates={} lu_nnz_at_build={} u_nnz={u} r_nnz={r}", p.update_count(), p.lu_nnz_baseline());
-        }
-    }
-    // 行リストはスレッドローカルに再利用する(再確保せずクリアするので各行の容量が残る)。
-    // 中身と順序は新規作成と同一。
-    thread_local! {
-        static ROWS: std::cell::RefCell<Vec<Vec<(usize, f64)>>> = const { std::cell::RefCell::new(Vec::new()) };
-        /// 基底位置 → 変数番号の作業配列(同じくスレッドローカルに再利用)。
-        static BASIS_OF: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) };
-    }
-    let mut rows = ROWS.with(|r| std::mem::take(&mut *r.borrow_mut()));
-    rows.truncate(m);
-    for row in rows.iter_mut() {
-        row.clear();
-    }
-    rows.resize_with(m, Vec::new);
-    // 基底位置 → 変数番号の逆引き(基底位置を持つ変数はちょうど `m` 個)。
-    let mut basis_of = BASIS_OF.with(|b| std::mem::take(&mut *b.borrow_mut()));
-    basis_of.clear();
-    basis_of.resize(m, usize::MAX);
-    for j in 0..std.n_total {
-        if let Some(col) = basis_pos[j] {
-            basis_of[col] = j;
-        }
-    }
-    // `std.cols` による列駆動の構築(`nnz(A_B)` の手間)。基底位置 `col` の昇順に訪れるので
-    // 各行の要素は列番号順に並び、`KernelMatrix::new` の安定ソートが並べ替えなしで済む
-    // (整列済み入力なので分解結果は変数番号順に積んだ場合と同一)。
-    for (col, &j) in basis_of.iter().enumerate() {
-        if j == usize::MAX {
-            continue;
-        }
-        for &(i, v) in std.cols.col(j) {
-            rows[i].push((col, v));
-        }
-    }
-    BASIS_OF.with(|b| *b.borrow_mut() = basis_of);
-    let r = sparse_lu::factorize_diagonal(m, &rows)
-        .map(sparse_lu::FtLu::new)
-        .or_else(|| sparse_lu::factorize_reusing(m, &rows, prev));
-    ROWS.with(|r| *r.borrow_mut() = rows);
+    let r = super::basis_kernel::factorize_basis(std, basis_pos, prev);
     if r.is_none() {
         SINGULAR_BAILOUT.with(|f| f.set(true));
         if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
@@ -2732,8 +2683,6 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     sparse_lu::reset_pivot_threshold();
     // 現基底の LU 分解(Forrest-Tomlin 更新付き)。
     let mut lu = refactorize(std, &basis_pos, None)?;
-    // 前回の FT チェック(`XB_CHECK_INTERVAL` 周期)からの反復数。
-    let mut since_check = 0usize;
 
     // 被約費用 `d`(Huangfu & Hall §2.2.3 の update-dual で増分維持)。列のコストは `M` に
     // 依存しない(依存するのは境界だけ)ので `d` は通常の `f64` 配列。全スラック基底では
@@ -2802,8 +2751,6 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         let min_m = tunable!("ENOMOTO_T_PARTIAL_TAU_MIN_M", PARTIAL_TAU_MIN_M, usize);
         min_m > 0 && m >= min_m
     };
-    // ピボット行 BTRAN 専用の 0 維持作業領域と触れた位置の一覧([`sparse_lu::UnitBtranWork`])。
-    let mut btran_work = sparse_lu::UnitBtranWork::new(m);
     // DSE の `tau` FTRAN を入る列の FTRAN と融合するか(`ENOMOTO_FUSED_DSE_FTRAN=0` で別々。ビット同一)。
     let fused_dse_ftran = env_str!("ENOMOTO_FUSED_DSE_FTRAN").map_or(true, |v| v != "0");
     // BFRT 結合フリップの(密分岐の)FTRAN を第 3 のベクトルとして同じ走査に融合するか
@@ -2814,11 +2761,10 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     // `refresh_row`)。`ENOMOTO_MERGE_FLIP_XB=0` で別パス。行ごとの演算は同じで、
     // `InfeasibleRows` のメンバーシップ変更の順序だけが変わりうる。
     let merge_flip_xb = env_str!("ENOMOTO_MERGE_FLIP_XB").map_or(true, |v| v != "0");
-    // `try_update_precomputed` 用のキャプチャバッファ: `e_tilde_buf` は `rho` の BTRAN、
-    // `a_tilde_buf` は入る列の FTRAN の副産物として埋まる。キャプチャから使用までの間に
-    // 他の何もこれらに書き込んではならない。
+    // FT 更新用のキャプチャバッファ: `a_tilde_buf` は入る列の (融合) FTRAN の副産物として埋まる
+    // (`rho` の BTRAN の `e_tilde` は `kernel` が持つ)。キャプチャから使用までの間に他の何もこれに
+    // 書き込んではならない。
     let mut a_tilde_buf = vec![0.0f64; m];
-    let mut e_tilde_buf = vec![0.0f64; m];
     // 比率テストの候補(chuzc1 の出力)。
     let mut candidates: Vec<Cand> = Vec::new();
     // chuzc1 のヒープ用領域(反復をまたいで再利用)。
@@ -3331,6 +3277,11 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
             tunable!("ENOMOTO_T_XB_CHECK_INTERVAL", XB_CHECK_CADENCE, usize)
         }
     };
+    // ピボット行の BTRAN・FT 更新・再分解トリガ (主単体法・仕上げと共有する部品)。周期検査は `x_B(M)` の
+    // ドリフト検査と同じ `xb_check_cadence` ごとで、eta の fill の上限は分解が大きいとき `FT_BUMP_LU_RATIO · nnz(LU)`
+    // まで広げる。入る列の FTRAN は DSE の `tau` などと融合してこのループで解く。
+    let mut kernel = super::basis_kernel::BasisKernel::new(m, ft_max_updates(m))
+        .with_periodic_check(xb_check_cadence, tunable!("ENOMOTO_T_FT_BUMP_LU_RATIO", FT_BUMP_LU_RATIO, f64));
     // 主ループ内の再分解。特異なら(作業 #5 M3)直近の成功した再分解以降のピボットを巻き戻して
     // 前の基底を分解し直し([`rollback_pivots`])、戻したピボットの `(r, q)` を以後の比率テストで禁止する
     // (`rb_bans`、`filter_banned_pivots`)。巻き戻せなければ(または `ROLLBACK_MAX` 回を超えたら)従来どおり
@@ -3720,7 +3671,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                 for &(i, d_dir_i, dev_i, _) in &greatest_improvement_cands {
                     // `rho` を全体で書くので、超疎 BTRAN の出力位置の記録を無効化する。
                     if BIG {
-                        btran_work.invalidate_out();
+                        kernel.btran_invalidate_out();
                     }
                     let Some(ratio) = trial_row_ratio(std, &lu, &nb_status, &d, d_dir_i, &mut lu_scratch, &mut rho, &mut a_p, &mut touched, &mut touched_cols, i) else {
                         continue;
@@ -3849,15 +3800,9 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         }
 
         // (c): ピボット行の BTRAN `rho = B^-T e_r`(`M` に依存しないので `rho`/`a_p`/`d` は
-        // 通常の `f64`)。この反復の `try_update_precomputed` 用に `e_tilde_buf`
-        // (U^-T 後・R 逆適用前の中間値)を副産物としてキャプチャする。
-        timed!(profile_phases, prof_phases::BTRAN, {
-            if BIG {
-                lu.solve_transpose_unit_work_sparse(r, &mut rho, &mut e_tilde_buf, &mut btran_work, Some(&mut rho_steps))
-            } else {
-                lu.solve_transpose_unit_work(r, &mut rho, &mut e_tilde_buf, &mut btran_work, Some(&mut rho_steps))
-            }
-        });
+        // 通常の `f64`)。この反復の FT 更新用に `e_tilde` (U^-T 後・R 逆適用前の中間値) を `kernel` に、
+        // 融合 `tau` FTRAN 用に非ゼロステップを `rho_steps` に記録する (大きな問題では超疎版)。
+        timed!(profile_phases, prof_phases::BTRAN, kernel.btran_row_steps(&lu, r, &mut rho, &mut rho_steps, BIG));
         // 診断: 維持している DSE 重みと `‖rho‖^2`(真の値)の相対誤差を区間別に数える
         // (`O(m)` なので作業量集計 `ENOMOTO_PROF_PHASES_EXT_WORK` のときだけ。策8)。
         if profile_work {
@@ -3954,7 +3899,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
             }
             if price_by_col_now {
                 n_priced = rho_count_for_col;
-            } else if let Some(rows) = if BIG { btran_work.nonzero_rows() } else { None } {
+            } else if let Some(rows) = if BIG { kernel.btran_nonzero_rows() } else { None } {
                 // 策5: 超疎 BTRAN が返した非ゼロ行(昇順)をそのまま使う(`compact_rows` と同じ行・順序)。
                 for (dst, &i) in rho_rows.iter_mut().zip(rows) {
                     *dst = i as u32;
@@ -5496,42 +5441,13 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
             diag_shift_cols += shift_degenerate_costs(std, &nb_status, degen_shift_base, &mut active_cost, &mut d);
         }
 
-        // Forrest-Tomlin 増分更新と再分解トリガ: (2) FT 更新がピボットを拒否、
-        // (3) eta のフィルが大きすぎる(`XB_CHECK_INTERVAL` ごと)、(4) 更新回数上限、
-        // (5) 合成クロック、および `XB_CHECK_INTERVAL` ごとの `x_B(M)` 残差ドリフトと
-        // `d` のドリフト。どれかが問題を見つけたときだけ再分解する。
+        // Forrest-Tomlin 増分更新と再分解トリガ (`kernel.update_and_check_fused`): (2) FT 更新がピボットを拒否、
+        // (4) 更新回数上限 (`ft_max_updates`)、(5) 合成クロック、(3) eta のフィルが大きすぎる
+        // (`xb_check_cadence` ごとの周期検査)。周期検査の時点でフィルが問題なければ、`x_B(M)` の残差ドリフトと
+        // `d` のドリフトをここで検査する。どれかが問題を見つけたときだけ再分解する。
         // `x_B(M)` の残差は両チャネル(基底と傾き)を検査する(比較の多くは傾きで決まるため)。
-        // `try_update_precomputed` は同じ反復の BTRAN/FTRAN でキャプチャ済みの
-        // `a_tilde_buf`/`e_tilde_buf` を使う。
-        since_check += 1;
-        let mut need_refactor = timed!(
-            profile_phases,
-            prof_phases::FT_UPDATE,
-            !(if BIG {
-                lu.try_update_tracked(r, &a_tilde_buf, &mut ftran_track, &e_tilde_buf, &mut btran_work, tunable!("ENOMOTO_T_FT_MIN_PIVOT", FT_MIN_PIVOT, f64))
-            } else {
-                lu.try_update_precomputed(r, &a_tilde_buf, &e_tilde_buf, tunable!("ENOMOTO_T_FT_MIN_PIVOT", FT_MIN_PIVOT, f64))
-            })
-        );
-        if need_refactor {
-            // トリガ (2): FT 更新が自らピボットを拒否した(分解が緩すぎる直接の証拠、`docs/lu_comparison_enomoto_vs_highs.md` §2.4)。
-            note_numeric_trouble!();
-            if profile_phases {
-                prof_phases::REFACTOR_CAUSE_TRY_UPDATE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            }
-        }
-        // トリガ (4)(`ft_max_updates` 参照): 毎反復の無条件チェック。
-        if profile_phases {
-            prof_phases::MAX_UPDATE_STREAK.fetch_max(lu.update_count(), std::sync::atomic::Ordering::Relaxed);
-        }
-        if !need_refactor && lu.update_count() > ft_max_updates(m) {
-            need_refactor = true;
-            if profile_phases {
-                prof_phases::REFACTOR_CAUSE_MAX_UPDATES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            }
-        }
-        // トリガ (5)(`synth_clock_should_refactor` 参照): 毎反復の無条件チェック。
-        // 策11 / 報告 P 策5(b): 求解結果の密度で合成クロックの係数を選ぶ ([`SynthDensity`])。入る列の FTRAN 結果の
+        // FT 更新は同じ反復の BTRAN/FTRAN でキャプチャ済みの `e_tilde` (`kernel`) と `a_tilde_buf` を使う。
+        // 合成クロックの係数は求解結果の密度で選ぶ (策11 / 報告 P 策5(b)、[`SynthDensity`]): 入る列の FTRAN 結果の
         // 非ゼロ率の移動平均が `SYNTH_CLOCK_DENSE_FRACTION` 以上なら密、DSE `tau` の非ゼロ率の移動平均が
         // `SYNTH_CLOCK_MID_TAU_FRACTION` 以上なら中程度 (それぞれ `ENOMOTO_T_...`、0 = 無効)。
         let synth_density = {
@@ -5545,184 +5461,186 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                 SynthDensity::Sparse
             }
         };
-        if !need_refactor && synth_clock_should_refactor_density(&lu, synth_density) {
-            need_refactor = true;
-            if profile_phases {
+        let due = timed!(
+            profile_phases,
+            prof_phases::FT_UPDATE,
+            kernel.update_and_check_fused(&mut lu, r, &a_tilde_buf, if BIG { Some(&mut ftran_track) } else { None }, synth_density)
+        );
+        let mut need_refactor = due.is_due();
+        match due {
+            // トリガ (2): FT 更新が自らピボットを拒否した(分解が緩すぎる直接の証拠、`docs/lu_comparison_enomoto_vs_highs.md` §2.4)。
+            RefactorDue::Rejected => {
+                note_numeric_trouble!();
+                if profile_phases {
+                    prof_phases::REFACTOR_CAUSE_TRY_UPDATE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            RefactorDue::MaxUpdates if profile_phases => {
+                prof_phases::REFACTOR_CAUSE_MAX_UPDATES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            RefactorDue::Clock if profile_phases => {
                 prof_phases::REFACTOR_CAUSE_CLOCK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
+            RefactorDue::Fill if profile_phases => {
+                prof_phases::REFACTOR_CAUSE_BUMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            _ => {}
         }
-        if !need_refactor && since_check >= xb_check_cadence {
-            since_check = 0;
-            // square41 報告の策2: 分解自体が従来の上限 `FT_BUMP_LIMIT_FACTOR · m` より大きい (基底が密な)
-            // 場合は、上限を `FT_BUMP_LU_RATIO · nnz(LU)` にする。そうした問題では FT 更新 1 回の eta が
-            // 数千要素になり、`64·m` だと数十反復ごとに再分解していた (square41: 20 反復に 1 回、1 回 179 ms)。
-            // Netlib (`nnz(LU)` は最大でも `~35·m`) には掛からない。
-            let bump_base_limit = tunable!("ENOMOTO_T_FT_BUMP_LIMIT_FACTOR", FT_BUMP_LIMIT_FACTOR, usize) * m.max(1);
-            let bump_lu_ratio = tunable!("ENOMOTO_T_FT_BUMP_LU_RATIO", FT_BUMP_LU_RATIO, f64);
-            let bump_limit = if bump_lu_ratio > 0.0 && lu.lu_nnz() >= bump_base_limit {
-                bump_base_limit.max((bump_lu_ratio * lu.lu_nnz() as f64) as usize)
+        if profile_phases {
+            prof_phases::MAX_UPDATE_STREAK.fetch_max(lu.update_count(), std::sync::atomic::Ordering::Relaxed);
+        }
+        if due == RefactorDue::Periodic {
+            // `x_B(M)` の残差ドリフト検査(`XB_CHECK_INTERVAL` ごと。古典法のように
+            // `RESIDUAL_CHECK_MULTIPLIER` でさらに間引かない)。`rhs_incremental` なら増分維持した
+            // 右辺、そうでなければ新たに計算した右辺と比較する。
+            let fresh;
+            let (check_rhs_base, check_rhs_slope): (&[f64], &[f64]) = if rhs_incremental {
+                (&rhs_inc_base, &rhs_inc_slope)
             } else {
-                bump_base_limit
+                fresh = if phase == Phase::A {
+                    (Vec::new(), compute_rhs_slope_only(std, &cache, &nb_status)?)
+                } else {
+                    compute_rhs_affine(std, &cache, &nb_status)?
+                };
+                (&fresh.0, &fresh.1)
             };
-            let bump_too_big = lu.fill_count() > bump_limit;
-            if bump_too_big {
-                need_refactor = true;
-                if profile_phases {
-                    prof_phases::REFACTOR_CAUSE_BUMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            // 空の `check_rhs_slope` は `delta = 0` の合図で、そのとき維持中の `x_b_slope` も正確に 0
+            // (以後の更新は `theta_slope == 0.0` で省略され、解消ピボットの残りかすは
+            // `snap_slope` で消えている)。よって傾きチャネルの残差は正確に 0 で、
+            // `residual_norm_affine` はそのチャネルの計算を省いて 0 を返す。
+            debug_assert!(
+                !check_rhs_slope.is_empty() || x_b_slope.iter().all(|v| *v == 0.0),
+                "delta = 0 must leave the maintained slope channel at exact zero (iter {iter_idx})"
+            );
+            // 段階 A では基底チャネルが両辺とも恒等的に 0 なので傾きの残差だけを測る。
+            // 1 回の求解内でのエスカレーション(`XB_DRIFT_TOL` 参照): ドリフト起因の再分解が
+            // `XB_DRIFT_ESCALATION_STEP` 回起きるごとに許容誤差を `XB_DRIFT_ESCALATION_FACTOR`
+            // 倍にする(上限 `XB_DRIFT_TOL_MAX`)。
+            let escalation_steps = (drift_trigger_count / tunable!("ENOMOTO_T_XB_DRIFT_ESCALATION_STEP", XB_DRIFT_ESCALATION_STEP, usize)) as i32;
+            let mut effective_drift_tol = (xb_drift_tol * XB_DRIFT_ESCALATION_FACTOR.powi(escalation_steps)).min(XB_DRIFT_TOL_MAX);
+            let updates = lu.update_count();
+            if updates > XB_CHECK_INTERVAL {
+                // 相対下限(`ENOMOTO_XB_DRIFT_REL_K`、既定オフ): 再分解直後の残差 `drift_resid_after_refactor` より
+                // 下には再分解しても下がらない。
+                let rel_k: f64 = tunable!("ENOMOTO_XB_DRIFT_REL_K", XB_DRIFT_REL_K, f64);
+                effective_drift_tol = effective_drift_tol.max((rel_k * drift_resid_after_refactor).min(XB_DRIFT_TOL_MAX));
+            }
+            // 更新回数の少ない eta ファイルでは、再分解が割に合うまで中程度のドリフトを許す
+            // (`ENOMOTO_XB_DRIFT_MIN_UPDATES`、既定オフ)。
+            let min_updates: usize = tunable!("ENOMOTO_XB_DRIFT_MIN_UPDATES", XB_DRIFT_MIN_UPDATES, usize);
+            if updates < min_updates {
+                let mult: f64 = tunable!("ENOMOTO_XB_DRIFT_MIN_UPDATES_MULT", XB_DRIFT_MIN_UPDATES_MULT, f64);
+                effective_drift_tol = effective_drift_tol.max((mult * effective_drift_tol).min(XB_DRIFT_TOL_MAX));
+            }
+            // 新規残差の下限(`xb_fresh_floor` の宣言参照)。オフのときは 0 で何もしない。
+            if xb_fresh_floor > 0.0 {
+                effective_drift_tol = effective_drift_tol.max(xb_fresh_floor);
+            }
+            // S2 (`ENOMOTO_XB_DRIFT_SAMPLE = k >= 2`、既定オフ): まず `1/k` の巡回行サンプルで
+            // 残差を推定し、推定値が `guard * tol` を超えたときだけ全体の `O(nnz(A_B))` 検査を行う。
+            // 再分解後最初の検査は必ず全体で行う(`drift_resid_after_refactor` を記録するため)。
+            let force_full = xb_check_full_every > 0 && drift_checks_since_full + 1 >= xb_check_full_every;
+            let sample_clear = xb_drift_sample >= 2 && updates > XB_CHECK_INTERVAL && !force_full && {
+                let (sb, ss) = sampled_residual_affine(std, &basis_pos, &x_b_base, &x_b_slope, check_rhs_base, check_rhs_slope, phase == Phase::A, xb_drift_sample, drift_sample_offset);
+                drift_sample_offset = (drift_sample_offset + 1) % xb_drift_sample;
+                if env_str!("ENOMOTO_DEBUG_XB_DRIFT_EXT").is_some() {
+                    eprintln!("DEBUG_XB_DRIFT_SAMPLE: iter={iter_idx} est_base={sb:.3e} est_slope={ss:.3e} effective_tol={effective_drift_tol:.3e}");
                 }
+                // 作業 #10 (C): 直近の全体検査で測った丸め誤差の尺度 (`XB_DRIFT_REL_TOL` の相対判定) も許容誤差に含める
+                // (ken-11 は残差が絶対許容誤差を常に超え、相対判定で再分解しない状態が続くので、絶対許容誤差だけの
+                // 比較では標本検査が全体の検査を 1 回も省けなかった)。
+                let (tb, ts) = if xb_drift_rel_tol > 0.0 {
+                    (effective_drift_tol.max(xb_drift_rel_tol * drift_last_scale.0), effective_drift_tol.max(xb_drift_rel_tol * drift_last_scale.1))
+                } else {
+                    (effective_drift_tol, effective_drift_tol)
+                };
+                sb <= xb_drift_sample_guard * tb && ss <= xb_drift_sample_guard * ts
+            };
+            if sample_clear {
+                need_refactor = false;
+                drift_checks_since_full += 1;
             } else {
-                // `x_B(M)` の残差ドリフト検査(`XB_CHECK_INTERVAL` ごと。古典法のように
-                // `RESIDUAL_CHECK_MULTIPLIER` でさらに間引かない)。`rhs_incremental` なら増分維持した
-                // 右辺、そうでなければ新たに計算した右辺と比較する。
-                let fresh;
-                let (check_rhs_base, check_rhs_slope): (&[f64], &[f64]) = if rhs_incremental {
-                    (&rhs_inc_base, &rhs_inc_slope)
+                drift_checks_since_full = 0;
+                let (resid_base, resid_slope) = if phase == Phase::A {
+                    (0.0, residual_norm_slope(std, &basis, &x_b_slope, check_rhs_slope, &mut resid_scratch_slope))
                 } else {
-                    fresh = if phase == Phase::A {
-                        (Vec::new(), compute_rhs_slope_only(std, &cache, &nb_status)?)
-                    } else {
-                        compute_rhs_affine(std, &cache, &nb_status)?
-                    };
-                    (&fresh.0, &fresh.1)
+                    residual_norm_affine(std, &basis, &x_b_base, &x_b_slope, check_rhs_base, check_rhs_slope, &mut resid_scratch_base, &mut resid_scratch_slope)
                 };
-                // 空の `check_rhs_slope` は `delta = 0` の合図で、そのとき維持中の `x_b_slope` も正確に 0
-                // (以後の更新は `theta_slope == 0.0` で省略され、解消ピボットの残りかすは
-                // `snap_slope` で消えている)。よって傾きチャネルの残差は正確に 0 で、
-                // `residual_norm_affine` はそのチャネルの計算を省いて 0 を返す。
-                debug_assert!(
-                    !check_rhs_slope.is_empty() || x_b_slope.iter().all(|v| *v == 0.0),
-                    "delta = 0 must leave the maintained slope channel at exact zero (iter {iter_idx})"
-                );
-                // 段階 A では基底チャネルが両辺とも恒等的に 0 なので傾きの残差だけを測る。
-                // 1 回の求解内でのエスカレーション(`XB_DRIFT_TOL` 参照): ドリフト起因の再分解が
-                // `XB_DRIFT_ESCALATION_STEP` 回起きるごとに許容誤差を `XB_DRIFT_ESCALATION_FACTOR`
-                // 倍にする(上限 `XB_DRIFT_TOL_MAX`)。
-                let escalation_steps = (drift_trigger_count / tunable!("ENOMOTO_T_XB_DRIFT_ESCALATION_STEP", XB_DRIFT_ESCALATION_STEP, usize)) as i32;
-                let mut effective_drift_tol = (xb_drift_tol * XB_DRIFT_ESCALATION_FACTOR.powi(escalation_steps)).min(XB_DRIFT_TOL_MAX);
-                let updates = lu.update_count();
-                if updates > XB_CHECK_INTERVAL {
-                    // 相対下限(`ENOMOTO_XB_DRIFT_REL_K`、既定オフ): 再分解直後の残差 `drift_resid_after_refactor` より
-                    // 下には再分解しても下がらない。
-                    let rel_k: f64 = tunable!("ENOMOTO_XB_DRIFT_REL_K", XB_DRIFT_REL_K, f64);
-                    effective_drift_tol = effective_drift_tol.max((rel_k * drift_resid_after_refactor).min(XB_DRIFT_TOL_MAX));
+                let resid_max = resid_base.max(resid_slope);
+                if updates <= XB_CHECK_INTERVAL {
+                    drift_resid_after_refactor = resid_max;
                 }
-                // 更新回数の少ない eta ファイルでは、再分解が割に合うまで中程度のドリフトを許す
-                // (`ENOMOTO_XB_DRIFT_MIN_UPDATES`、既定オフ)。
-                let min_updates: usize = tunable!("ENOMOTO_XB_DRIFT_MIN_UPDATES", XB_DRIFT_MIN_UPDATES, usize);
-                if updates < min_updates {
-                    let mult: f64 = tunable!("ENOMOTO_XB_DRIFT_MIN_UPDATES_MULT", XB_DRIFT_MIN_UPDATES_MULT, f64);
-                    effective_drift_tol = effective_drift_tol.max((mult * effective_drift_tol).min(XB_DRIFT_TOL_MAX));
+                if env_str!("ENOMOTO_DEBUG_XB_DRIFT_EXT").is_some() {
+                    eprintln!(
+                        "DEBUG_XB_DRIFT: iter={iter_idx} resid_base={resid_base:.3e} resid_slope={resid_slope:.3e} drift_trigger_count={drift_trigger_count} effective_tol={effective_drift_tol:.3e}"
+                    );
                 }
-                // 新規残差の下限(`xb_fresh_floor` の宣言参照)。オフのときは 0 で何もしない。
-                if xb_fresh_floor > 0.0 {
-                    effective_drift_tol = effective_drift_tol.max(xb_fresh_floor);
-                }
-                // S2 (`ENOMOTO_XB_DRIFT_SAMPLE = k >= 2`、既定オフ): まず `1/k` の巡回行サンプルで
-                // 残差を推定し、推定値が `guard * tol` を超えたときだけ全体の `O(nnz(A_B))` 検査を行う。
-                // 再分解後最初の検査は必ず全体で行う(`drift_resid_after_refactor` を記録するため)。
-                let force_full = xb_check_full_every > 0 && drift_checks_since_full + 1 >= xb_check_full_every;
-                let sample_clear = xb_drift_sample >= 2 && updates > XB_CHECK_INTERVAL && !force_full && {
-                    let (sb, ss) = sampled_residual_affine(std, &basis_pos, &x_b_base, &x_b_slope, check_rhs_base, check_rhs_slope, phase == Phase::A, xb_drift_sample, drift_sample_offset);
-                    drift_sample_offset = (drift_sample_offset + 1) % xb_drift_sample;
+                need_refactor = resid_max > effective_drift_tol;
+                // 丸め誤差の尺度に対する相対判定(`XB_DRIFT_REL_TOL` 参照): 絶対許容誤差を超えても、
+                // 残差が `A_B x_B` の丸めだけで出る大きさ以下なら再分解しても下がらないので再分解しない。
+                // 尺度は絶対判定で発火しそうなときだけ計算する(発火しない限り経路と手間は従来どおり)。
+                if need_refactor && xb_drift_rel_tol > 0.0 {
+                    let (scale_base, scale_slope) = if phase == Phase::A {
+                        (0.0, residual_scale_affine(std, &basis, &x_b_slope, &[], check_rhs_slope, &[], &mut resid_scratch_slope, &mut resid_scratch_base).0)
+                    } else {
+                        residual_scale_affine(std, &basis, &x_b_base, &x_b_slope, check_rhs_base, check_rhs_slope, &mut resid_scratch_base, &mut resid_scratch_slope)
+                    };
+                    need_refactor = resid_base > effective_drift_tol.max(xb_drift_rel_tol * scale_base) || resid_slope > effective_drift_tol.max(xb_drift_rel_tol * scale_slope);
+                    drift_last_scale = (scale_base, scale_slope);
                     if env_str!("ENOMOTO_DEBUG_XB_DRIFT_EXT").is_some() {
-                        eprintln!("DEBUG_XB_DRIFT_SAMPLE: iter={iter_idx} est_base={sb:.3e} est_slope={ss:.3e} effective_tol={effective_drift_tol:.3e}");
+                        eprintln!("DEBUG_XB_DRIFT_REL: iter={iter_idx} scale_base={scale_base:.3e} scale_slope={scale_slope:.3e} refactor={need_refactor}");
                     }
-                    // 作業 #10 (C): 直近の全体検査で測った丸め誤差の尺度 (`XB_DRIFT_REL_TOL` の相対判定) も許容誤差に含める
-                    // (ken-11 は残差が絶対許容誤差を常に超え、相対判定で再分解しない状態が続くので、絶対許容誤差だけの
-                    // 比較では標本検査が全体の検査を 1 回も省けなかった)。
-                    let (tb, ts) = if xb_drift_rel_tol > 0.0 {
-                        (effective_drift_tol.max(xb_drift_rel_tol * drift_last_scale.0), effective_drift_tol.max(xb_drift_rel_tol * drift_last_scale.1))
-                    } else {
-                        (effective_drift_tol, effective_drift_tol)
-                    };
-                    sb <= xb_drift_sample_guard * tb && ss <= xb_drift_sample_guard * ts
-                };
-                if sample_clear {
-                    need_refactor = false;
-                    drift_checks_since_full += 1;
-                } else {
-                    drift_checks_since_full = 0;
-                    let (resid_base, resid_slope) = if phase == Phase::A {
-                        (0.0, residual_norm_slope(std, &basis, &x_b_slope, check_rhs_slope, &mut resid_scratch_slope))
-                    } else {
-                        residual_norm_affine(std, &basis, &x_b_base, &x_b_slope, check_rhs_base, check_rhs_slope, &mut resid_scratch_base, &mut resid_scratch_slope)
-                    };
-                    let resid_max = resid_base.max(resid_slope);
+                }
+                if need_refactor {
+                    drift_trigger_count += 1;
+                    // 再分解後最初の検査(FT 更新 `XB_CHECK_INTERVAL` 回以内)で既に超えているなら、
+                    // 分解し直しても残差はこの許容誤差まで下がらない(分解自体の誤差が許容誤差と
+                    // 同程度)。`XB_DRIFT_ESCALATION_STEP` 回の無駄な再分解を待たず、次の段へ
+                    // すぐ緩める(klein3: 再分解 22 → 15 回)。緩め方は既存の段と上限
+                    // `XB_DRIFT_TOL_MAX` の範囲に収まる。分解直後の残差を基準にした相対許容誤差
+                    // (`ENOMOTO_XB_DRIFT_FRESH_FLOOR`)も試したが、係数 10 で Netlib 93 問 +1.7%、
+                    // 100 では pilot87 の目的関数値が狂った。
                     if updates <= XB_CHECK_INTERVAL {
-                        drift_resid_after_refactor = resid_max;
+                        let step = tunable!("ENOMOTO_T_XB_DRIFT_ESCALATION_STEP", XB_DRIFT_ESCALATION_STEP, usize);
+                        drift_trigger_count = drift_trigger_count.div_ceil(step) * step;
                     }
-                    if env_str!("ENOMOTO_DEBUG_XB_DRIFT_EXT").is_some() {
-                        eprintln!(
-                            "DEBUG_XB_DRIFT: iter={iter_idx} resid_base={resid_base:.3e} resid_slope={resid_slope:.3e} drift_trigger_count={drift_trigger_count} effective_tol={effective_drift_tol:.3e}"
-                        );
-                    }
-                    need_refactor = resid_max > effective_drift_tol;
-                    // 丸め誤差の尺度に対する相対判定(`XB_DRIFT_REL_TOL` 参照): 絶対許容誤差を超えても、
-                    // 残差が `A_B x_B` の丸めだけで出る大きさ以下なら再分解しても下がらないので再分解しない。
-                    // 尺度は絶対判定で発火しそうなときだけ計算する(発火しない限り経路と手間は従来どおり)。
-                    if need_refactor && xb_drift_rel_tol > 0.0 {
-                        let (scale_base, scale_slope) = if phase == Phase::A {
-                            (0.0, residual_scale_affine(std, &basis, &x_b_slope, &[], check_rhs_slope, &[], &mut resid_scratch_slope, &mut resid_scratch_base).0)
-                        } else {
-                            residual_scale_affine(std, &basis, &x_b_base, &x_b_slope, check_rhs_base, check_rhs_slope, &mut resid_scratch_base, &mut resid_scratch_slope)
-                        };
-                        need_refactor = resid_base > effective_drift_tol.max(xb_drift_rel_tol * scale_base) || resid_slope > effective_drift_tol.max(xb_drift_rel_tol * scale_slope);
-                        drift_last_scale = (scale_base, scale_slope);
-                        if env_str!("ENOMOTO_DEBUG_XB_DRIFT_EXT").is_some() {
-                            eprintln!("DEBUG_XB_DRIFT_REL: iter={iter_idx} scale_base={scale_base:.3e} scale_slope={scale_slope:.3e} refactor={need_refactor}");
-                        }
-                    }
-                    if need_refactor {
-                        drift_trigger_count += 1;
-                        // 再分解後最初の検査(FT 更新 `XB_CHECK_INTERVAL` 回以内)で既に超えているなら、
-                        // 分解し直しても残差はこの許容誤差まで下がらない(分解自体の誤差が許容誤差と
-                        // 同程度)。`XB_DRIFT_ESCALATION_STEP` 回の無駄な再分解を待たず、次の段へ
-                        // すぐ緩める(klein3: 再分解 22 → 15 回)。緩め方は既存の段と上限
-                        // `XB_DRIFT_TOL_MAX` の範囲に収まる。分解直後の残差を基準にした相対許容誤差
-                        // (`ENOMOTO_XB_DRIFT_FRESH_FLOOR`)も試したが、係数 10 で Netlib 93 問 +1.7%、
-                        // 100 では pilot87 の目的関数値が狂った。
-                        if updates <= XB_CHECK_INTERVAL {
-                            let step = tunable!("ENOMOTO_T_XB_DRIFT_ESCALATION_STEP", XB_DRIFT_ESCALATION_STEP, usize);
-                            drift_trigger_count = drift_trigger_count.div_ceil(step) * step;
-                        }
-                        note_numeric_trouble!();
-                        if profile_phases {
-                            prof_phases::REFACTOR_CAUSE_DRIFT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        }
+                    note_numeric_trouble!();
+                    if profile_phases {
+                        prof_phases::REFACTOR_CAUSE_DRIFT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
                 }
-                // `d` 自身の独立なドリフト検査(`D_DRIFT_TOL` 参照): `x_B(M)` 検査が再分解を
-                // 決めていない場合だけ、`since_d_drift_check` の粗い周期で行う。固定列
-                // (`lb == ub`、PRICE が `d` を更新しない)は残差から除外する。
-                if !need_refactor {
-                    since_d_drift_check += 1;
+            }
+            // `d` 自身の独立なドリフト検査(`D_DRIFT_TOL` 参照): `x_B(M)` 検査が再分解を
+            // 決めていない場合だけ、`since_d_drift_check` の粗い周期で行う。固定列
+            // (`lb == ub`、PRICE が `d` を更新しない)は残差から除外する。
+            if !need_refactor {
+                since_d_drift_check += 1;
+            }
+            // `ENOMOTO_D_DRIFT_REFACTOR_ONLY=1`(S18、既定オフ): この周期検査をやめ、`d` の
+            // 再同期を再分解時の `fresh_d_into` だけに任せる。
+            if !need_refactor && since_d_drift_check >= RESIDUAL_CHECK_MULTIPLIER && tunable!("ENOMOTO_D_DRIFT_REFACTOR_ONLY", 0u8, u8) == 0 {
+                since_d_drift_check = 0;
+                fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fresh_d_cb, &mut lu_scratch, &mut fresh_d_y, &mut fresh_d_buf);
+                let mut resid_sq = 0.0f64;
+                let mut scale_sq = 0.0f64;
+                for j in 0..std.n_total {
+                    if std.lb[j] == std.ub[j] {
+                        continue;
+                    }
+                    let diff = d[j] - fresh_d_buf[j];
+                    resid_sq += diff * diff;
+                    scale_sq += fresh_d_buf[j] * fresh_d_buf[j];
                 }
-                // `ENOMOTO_D_DRIFT_REFACTOR_ONLY=1`(S18、既定オフ): この周期検査をやめ、`d` の
-                // 再同期を再分解時の `fresh_d_into` だけに任せる。
-                if !need_refactor && since_d_drift_check >= RESIDUAL_CHECK_MULTIPLIER && tunable!("ENOMOTO_D_DRIFT_REFACTOR_ONLY", 0u8, u8) == 0 {
-                    since_d_drift_check = 0;
-                    fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fresh_d_cb, &mut lu_scratch, &mut fresh_d_y, &mut fresh_d_buf);
-                    let mut resid_sq = 0.0f64;
-                    let mut scale_sq = 0.0f64;
-                    for j in 0..std.n_total {
-                        if std.lb[j] == std.ub[j] {
-                            continue;
-                        }
-                        let diff = d[j] - fresh_d_buf[j];
-                        resid_sq += diff * diff;
-                        scale_sq += fresh_d_buf[j] * fresh_d_buf[j];
-                    }
-                    let resid_d = resid_sq.sqrt();
-                    let scale_d = scale_sq.sqrt().max(1.0);
-                    if env_str!("ENOMOTO_DEBUG_D_DRIFT_EXT").is_some() {
-                        eprintln!("DEBUG_D_DRIFT: iter={iter_idx} resid_d={resid_d:.3e} scale_d={scale_d:.3e} rel={:.3e}", resid_d / scale_d);
-                    }
-                    if resid_d > D_DRIFT_TOL * scale_d {
-                        need_refactor = true;
-                        note_numeric_trouble!();
-                        if profile_phases {
-                            prof_phases::REFACTOR_CAUSE_D_DRIFT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        }
+                let resid_d = resid_sq.sqrt();
+                let scale_d = scale_sq.sqrt().max(1.0);
+                if env_str!("ENOMOTO_DEBUG_D_DRIFT_EXT").is_some() {
+                    eprintln!("DEBUG_D_DRIFT: iter={iter_idx} resid_d={resid_d:.3e} scale_d={scale_d:.3e} rel={:.3e}", resid_d / scale_d);
+                }
+                if resid_d > D_DRIFT_TOL * scale_d {
+                    need_refactor = true;
+                    note_numeric_trouble!();
+                    if profile_phases {
+                        prof_phases::REFACTOR_CAUSE_D_DRIFT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
                 }
             }

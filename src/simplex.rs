@@ -625,21 +625,6 @@ impl<'a> Tableau<'a> {
         self.std.n_total - self.std.n_rows
     }
 
-    /// 現在の基底行列 `B` を疎な行リストで返す。列番号は基底内の位置 (`0..n_rows`)。
-    fn basis_rows_sparse(&self) -> Vec<Vec<(usize, f64)>> {
-        let m = self.std.n_rows;
-        let mut rows = vec![Vec::new(); m];
-        // 基底列だけを列形式から走査する。j の昇順なので各行の要素順は行形式と一致する。
-        for j in 0..self.std.n_total {
-            if let Some(col) = self.basis_pos[j] {
-                for &(i, v) in self.std.cols.col(j) {
-                    rows[i].push((col, v));
-                }
-            }
-        }
-        rows
-    }
-
     /// 制約行列の列 `j` を密ベクトルで返す (テスト用、実運用は [`Self::column_into`])。
     #[cfg(test)]
     fn column(&self, j: usize) -> Vec<f64> {
@@ -848,8 +833,7 @@ fn refactorize(std: &StdForm, t: &Tableau, prev: Option<&sparse_lu::FtLu>) -> sp
 /// 経路を諦めて `NotSolved` 等で終える)。`prev` は置き換える前の分解で、あれば
 /// そのピボット順を再利用する (検査に通らなければ自動で通常の Markowitz 探索に戻る)。
 fn try_refactorize(std: &StdForm, t: &Tableau, prev: Option<&sparse_lu::FtLu>) -> Option<sparse_lu::FtLu> {
-    let rows = t.basis_rows_sparse();
-    sparse_lu::factorize_reusing(std.n_rows, &rows, prev)
+    basis_kernel::factorize_basis(std, &t.basis_pos, prev)
 }
 
 /// 有界変数主単体法の 1 段階 (第 1 段階または第 2 段階) を実行する。

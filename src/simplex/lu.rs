@@ -6817,6 +6817,10 @@ impl FtLu {
 
     /// [`Self::solve_transpose_unit`] に `e_tilde` の記録
     /// ([`Self::solve_transpose_into_capture`] と同じ) を加えたもの。
+    ///
+    /// 本番の呼び出し箇所はもう無い ([`Self::solve_transpose_unit_work`] を使う) が、それと
+    /// ビット一致することを確認するテストの参照実装として残している。
+    #[allow(dead_code)]
     pub fn solve_transpose_unit_capture(&self, i: usize, scratch: &mut [f64], out: &mut [f64], e_tilde_out: &mut [f64]) {
         self.solve_transpose_unit_capture_steps(i, scratch, out, e_tilde_out, None)
     }
@@ -7221,6 +7225,8 @@ impl FtLu {
 
     /// [`Self::solve_transpose_unit_capture`] に加え、続く融合 `tau` FTRAN のために
     /// `out` の非ゼロステップを `cap` に記録する ([`StepCapture`])。`out` はビット一致。
+    /// (テストの参照実装、[`Self::solve_transpose_unit_capture`] 参照。)
+    #[allow(dead_code)]
     pub fn solve_transpose_unit_capture_steps(&self, i: usize, scratch: &mut [f64], out: &mut [f64], e_tilde_out: &mut [f64], cap: Option<&mut StepCapture>) {
         let s0 = self.seed_unit_rhs(i, scratch);
         self.u_transpose_solve_seeded(scratch, s0);

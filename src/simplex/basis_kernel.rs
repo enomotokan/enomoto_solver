@@ -18,7 +18,7 @@
 //! 1 回の因子走査で解く pair/triple capture) と、大きな問題向けの疎経路 (`BIG`) は、
 //! DSE・BFRT と結びついているので `slope_intercept_dual` 側に置く。
 
-use super::sparse_lu;
+use super::{sparse_lu, StdForm};
 use crate::params::simplex::{FT_BUMP_LIMIT_FACTOR, FT_CHECK_INTERVAL, FT_MIN_PIVOT};
 use crate::params::slope_intercept_dual::{FT_MAX_UPDATES_FACTOR, FT_MAX_UPDATES_FLOOR, SYNTH_CLOCK_FACTOR, SYNTH_CLOCK_LARGE_M, SYNTH_CLOCK_LARGE_REF_M, SYNTH_CLOCK_MID_REF_MULT, SYNTH_CLOCK_MIN_UPDATES};
 use std::sync::OnceLock;
@@ -62,6 +62,10 @@ impl RefactorDue {
 /// `update_and_check(lu, r).is_due()` なら再分解。`ftran_col` と `btran_row` は同じ因子
 /// (間に FT 更新や再分解を挟まない) で、`update_and_check` に渡す `r` は `btran_row` と
 /// 同じ行であること。`ftran_col` と `btran_row` の順序は問わない。
+///
+/// 双対単体法の主ループは入る列の FTRAN を DSE の `tau` などと融合して自分で解くので、
+/// `ftran_col` の代わりにその `a_tilde` を [`Self::update_and_check_fused`] に渡す。BTRAN は
+/// 融合 FTRAN 用の非ゼロステップの記録付きの [`Self::btran_row_steps`] を使う。
 pub(super) struct BasisKernel {
     /// 行数。
     m: usize,
@@ -86,7 +90,12 @@ pub(super) struct BasisKernel {
     e_tilde_row: Option<usize>,
     /// 周期検査までの反復数。
     since_check: usize,
-    /// eta の fill の上限 (`FT_BUMP_LIMIT_FACTOR * m`)。
+    /// 周期検査の間隔 (既定 [`FT_CHECK_INTERVAL`]、[`Self::with_periodic_check`])。
+    check_interval: usize,
+    /// 分解自体が `bump_limit` より大きいとき、fill の上限を `bump_lu_ratio * nnz(LU)` まで広げる
+    /// (0 なら広げない。既定 0、[`Self::with_periodic_check`])。
+    bump_lu_ratio: f64,
+    /// eta の fill の上限の基準 (`FT_BUMP_LIMIT_FACTOR * m`)。
     bump_limit: usize,
     /// FT 更新で受け入れるピボットの絶対値の下限。
     min_pivot: f64,
@@ -112,15 +121,26 @@ impl BasisKernel {
             a_tilde_ready: false,
             e_tilde_row: None,
             since_check: 0,
+            check_interval: FT_CHECK_INTERVAL,
+            bump_lu_ratio: 0.0,
             bump_limit: tunable!("ENOMOTO_T_FT_BUMP_LIMIT_FACTOR", FT_BUMP_LIMIT_FACTOR, usize) * m.max(1),
             min_pivot: tunable!("ENOMOTO_T_FT_MIN_PIVOT", FT_MIN_PIVOT, f64),
             max_updates,
         }
     }
 
+    /// 周期検査の間隔 `interval` と、fill の上限を分解の大きさで広げる係数 `bump_lu_ratio`
+    /// (0 で広げない) を設定する (双対単体法の主ループ用。`x_B` のずれの検査と同じ周期にする)。
+    pub(super) fn with_periodic_check(mut self, interval: usize, bump_lu_ratio: f64) -> Self {
+        self.check_interval = interval;
+        self.bump_lu_ratio = bump_lu_ratio;
+        self
+    }
+
     /// 入る列 `col` (`(行, 値)` の疎な列) の FTRAN `out = B^-1 col` (`out` は長さ `m`、全体を書く)。
     /// 右辺が密か最近の結果が密なら密経路、それ以外は疎経路。FT 更新用に `a_tilde` を記録する。
     /// 結果の非ゼロ数を返す。
+    #[inline]
     pub(super) fn ftran_col(&mut self, lu: &sparse_lu::FtLu, col: &[(usize, f64)], out: &mut [f64]) -> usize {
         let nnz = if lu.should_use_dense_solve_tracked(col.len(), &self.density_col) {
             for &(i, v) in col {
@@ -140,36 +160,91 @@ impl BasisKernel {
     }
 
     /// ピボット行の BTRAN `out = B^-T e_r` (`out` は長さ `m`、全体を書く)。FT 更新用に `e_tilde` を記録する。
+    #[inline]
     pub(super) fn btran_row(&mut self, lu: &sparse_lu::FtLu, r: usize, out: &mut [f64]) {
         lu.solve_transpose_unit_work(r, out, &mut self.e_tilde, &mut self.btran_work, None);
         self.e_tilde_row = Some(r);
+    }
+
+    /// [`Self::btran_row`] に、続く融合 FTRAN (DSE の `tau = B^-1 rho`) のための非ゼロステップの
+    /// 記録 `steps` を加えたもの。`sparse` なら超疎版
+    /// ([`sparse_lu::FtLu::solve_transpose_unit_work_sparse`]、大きな問題用。`out` は前回の非ゼロ位置
+    /// だけを消して書くので、`out` を外で書いたら [`Self::btran_invalidate_out`] を呼ぶこと)。
+    /// 結果はどちらもビット一致。
+    #[inline]
+    pub(super) fn btran_row_steps(&mut self, lu: &sparse_lu::FtLu, r: usize, out: &mut [f64], steps: &mut sparse_lu::StepCapture, sparse: bool) {
+        if sparse {
+            lu.solve_transpose_unit_work_sparse(r, out, &mut self.e_tilde, &mut self.btran_work, Some(steps));
+        } else {
+            lu.solve_transpose_unit_work(r, out, &mut self.e_tilde, &mut self.btran_work, Some(steps));
+        }
+        self.e_tilde_row = Some(r);
+    }
+
+    /// 直前のピボット行 BTRAN の結果の非ゼロ行 (昇順)。超疎版で求めたときだけ `Some`。
+    #[inline]
+    pub(super) fn btran_nonzero_rows(&self) -> Option<&[usize]> {
+        self.btran_work.nonzero_rows()
+    }
+
+    /// ピボット行 BTRAN の出力ベクトルを外で書いた後に呼ぶ ([`Self::btran_row_steps`] 参照)。
+    #[inline]
+    pub(super) fn btran_invalidate_out(&mut self) {
+        self.btran_work.invalidate_out();
     }
 
     /// 基底位置 `r` の列を直前の [`Self::ftran_col`] の入る列で置き換える FT 更新を記録した
     /// `a_tilde`/`e_tilde` で行い (記録はこの呼び出しで使い切る)、続けて再分解トリガを判定する。
     /// 判定の順序 (どれかが当たったら残りは見ない): (2) 更新が退けられた (または記録が揃って
     /// いない)、(4) 更新回数が `max_updates` ([`Self::new`]) を超えた、(5) 合成クロック
-    /// ([`synth_clock_should_refactor`])、(3) [`FT_CHECK_INTERVAL`] 反復ごとの周期検査で eta の
-    /// fill が `FT_BUMP_LIMIT_FACTOR * m` を超えた。周期の数え上げは更新の成否によらず毎回進め、
-    /// 周期検査に達したときだけ 0 に戻す。
+    /// ([`synth_clock_should_refactor_density`]、[`SynthDensity::Sparse`])、(3) 周期検査
+    /// (既定 [`FT_CHECK_INTERVAL`] 反復ごと) で eta の fill が上限を超えた ([`Self::fill_too_big`])。
+    /// 周期の数え上げは更新の成否によらず毎回進め、周期検査に達したときだけ 0 に戻す。
+    #[inline]
     pub(super) fn update_and_check(&mut self, lu: &mut sparse_lu::FtLu, r: usize) -> RefactorDue {
         self.since_check += 1;
         let captured = self.a_tilde_ready && self.e_tilde_row == Some(r);
         debug_assert!(captured, "BasisKernel::update_and_check without ftran_col/btran_row for row {r}");
         self.a_tilde_ready = false;
         self.e_tilde_row = None;
-        if !(captured && lu.try_update_precomputed(r, &self.a_tilde, &self.e_tilde, self.min_pivot)) {
+        let updated = captured && lu.try_update_precomputed(r, &self.a_tilde, &self.e_tilde, self.min_pivot);
+        self.check_after_update(lu, updated, SynthDensity::Sparse)
+    }
+
+    /// [`Self::update_and_check`] の、入る列の FTRAN を呼び出し側が解いた版 (双対単体法の主ループの
+    /// 融合 FTRAN)。`a_tilde` はその FTRAN が同じ因子で記録した中間値。`ftrack` があれば、その FTRAN と
+    /// 直前の [`Self::btran_row_steps`] の非ゼロ位置の記録から eta を作る
+    /// ([`sparse_lu::FtLu::try_update_tracked`]、結果はビット一致)。`density` は合成クロックの係数の区分。
+    #[inline]
+    pub(super) fn update_and_check_fused(&mut self, lu: &mut sparse_lu::FtLu, r: usize, a_tilde: &[f64], ftrack: Option<&mut sparse_lu::FtranTrack>, density: SynthDensity) -> RefactorDue {
+        self.since_check += 1;
+        let captured = self.e_tilde_row == Some(r);
+        debug_assert!(captured, "BasisKernel::update_and_check_fused without btran_row_steps for row {r}");
+        self.a_tilde_ready = false;
+        self.e_tilde_row = None;
+        let updated = captured
+            && match ftrack {
+                Some(track) => lu.try_update_tracked(r, a_tilde, track, &self.e_tilde, &mut self.btran_work, self.min_pivot),
+                None => lu.try_update_precomputed(r, a_tilde, &self.e_tilde, self.min_pivot),
+            };
+        self.check_after_update(lu, updated, density)
+    }
+
+    /// FT 更新の後の再分解トリガ (2)(4)(5)(3) ([`Self::update_and_check`] の説明の順)。
+    #[inline]
+    fn check_after_update(&mut self, lu: &sparse_lu::FtLu, updated: bool, density: SynthDensity) -> RefactorDue {
+        if !updated {
             return RefactorDue::Rejected;
         }
         if lu.update_count() > self.max_updates {
             return RefactorDue::MaxUpdates;
         }
-        if synth_clock_should_refactor(lu) {
+        if synth_clock_should_refactor_density(lu, density) {
             return RefactorDue::Clock;
         }
-        if self.since_check >= FT_CHECK_INTERVAL {
+        if self.since_check >= self.check_interval {
             self.since_check = 0;
-            return if lu.fill_count() > self.bump_limit { RefactorDue::Fill } else { RefactorDue::Periodic };
+            return if self.fill_too_big(lu) { RefactorDue::Fill } else { RefactorDue::Periodic };
         }
         RefactorDue::No
     }
@@ -184,10 +259,81 @@ impl BasisKernel {
         &mut self.since_check
     }
 
-    /// eta の fill が上限を超えているか (呼び出し側の任意の時点の検査用)。
+    /// eta の fill が上限を超えているか (周期検査と、呼び出し側の任意の時点の検査用)。上限は
+    /// `FT_BUMP_LIMIT_FACTOR * m`。ただし `bump_lu_ratio > 0` で分解自体がそれ以上に大きい (基底が密な)
+    /// ときは `bump_lu_ratio * nnz(LU)` まで広げる (square41 報告の策2: FT 更新 1 回の eta が数千要素に
+    /// なり、`64·m` だと数十反復ごとに再分解していた。Netlib (`nnz(LU)` は最大でも `~35·m`) には掛からない)。
+    #[inline]
     pub(super) fn fill_too_big(&self, lu: &sparse_lu::FtLu) -> bool {
-        lu.fill_count() > self.bump_limit
+        let limit = if self.bump_lu_ratio > 0.0 && lu.lu_nnz() >= self.bump_limit {
+            self.bump_limit.max((self.bump_lu_ratio * lu.lu_nnz() as f64) as usize)
+        } else {
+            self.bump_limit
+        };
+        lu.fill_count() > limit
     }
+}
+
+/// 現在の `basis_pos` から `B` を新たに LU 分解する(Forrest-Tomlin 更新ではない)。
+/// 対角行列ならその専用分解、そうでなければ Markowitz 分解を行う。
+///
+/// `prev` は置き換える前の分解(あれば): そのピボット順を再利用する
+/// (`sparse_lu::factorize_reusing`、HiGHS `HFactor::rebuild()` 相当)。再利用は各段で閾値
+/// ピボットとフィルを再確認し、だめなら自動で完全な Markowitz 探索に戻るので、`prev` を渡しても
+/// 分解が得られるかどうかは変わらず、手間だけが変わる。特異基底なら `None`。
+/// 主単体法・双対単体法の再分解はすべてこれを通る (双対単体法は特異のときの印を
+/// `slope_intercept_dual::refactorize` で付け足す)。
+pub(super) fn factorize_basis(
+    std: &StdForm,
+    basis_pos: &[Option<usize>],
+    prev: Option<&sparse_lu::FtLu>,
+) -> Option<sparse_lu::FtLu> {
+    let m = std.n_rows;
+    if let Some(p) = prev {
+        if env_str!("ENOMOTO_DEBUG_FT_FILL").is_some() {
+            let (u, r) = p.u_r_nnz();
+            eprintln!("FT_FILL m={m} updates={} lu_nnz_at_build={} u_nnz={u} r_nnz={r}", p.update_count(), p.lu_nnz_baseline());
+        }
+    }
+    // 行リストはスレッドローカルに再利用する(再確保せずクリアするので各行の容量が残る)。
+    // 中身と順序は新規作成と同一。
+    thread_local! {
+        static ROWS: std::cell::RefCell<Vec<Vec<(usize, f64)>>> = const { std::cell::RefCell::new(Vec::new()) };
+        /// 基底位置 → 変数番号の作業配列(同じくスレッドローカルに再利用)。
+        static BASIS_OF: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+    let mut rows = ROWS.with(|r| std::mem::take(&mut *r.borrow_mut()));
+    rows.truncate(m);
+    for row in rows.iter_mut() {
+        row.clear();
+    }
+    rows.resize_with(m, Vec::new);
+    // 基底位置 → 変数番号の逆引き(基底位置を持つ変数はちょうど `m` 個)。
+    let mut basis_of = BASIS_OF.with(|b| std::mem::take(&mut *b.borrow_mut()));
+    basis_of.clear();
+    basis_of.resize(m, usize::MAX);
+    for j in 0..std.n_total {
+        if let Some(col) = basis_pos[j] {
+            basis_of[col] = j;
+        }
+    }
+    // `std.cols` による列駆動の構築(`nnz(A_B)` の手間)。基底位置 `col` の昇順に訪れるので
+    // 各行の要素は列番号順に並び、`KernelMatrix::new` の安定ソートが並べ替えなしで済む
+    // (整列済み入力なので分解結果は変数番号順に積んだ場合と同一)。
+    for (col, &j) in basis_of.iter().enumerate() {
+        if j == usize::MAX {
+            continue;
+        }
+        for &(i, v) in std.cols.col(j) {
+            rows[i].push((col, v));
+        }
+    }
+    BASIS_OF.with(|b| *b.borrow_mut() = basis_of);
+    let r = sparse_lu::factorize_diagonal(m, &rows)
+        .map(sparse_lu::FtLu::new)
+        .or_else(|| sparse_lu::factorize_reusing(m, &rows, prev));
+    ROWS.with(|r| *r.borrow_mut() = rows);
+    r
 }
 
 /// トリガ (4) の閾値: FT 更新回数の上限 `max(FT_MAX_UPDATES_FACTOR * m, FT_MAX_UPDATES_FLOOR)`
@@ -209,16 +355,6 @@ fn synth_clock_factor() -> f64 {
     })
 }
 
-/// トリガ (5): 合成クロックによる再分解判定。FT 更新回数が [`SYNTH_CLOCK_MIN_UPDATES`] 以上で、
-/// 前回の分解以降に蓄積した求解側の tick が `synth_clock_factor() * build_tick` 以上なら真
-/// (現在の分解に対する FTRAN/BTRAN の手間が再分解の手間に達したとみなす)。
-/// [`BasisKernel::update_and_check`] (双対単体法の仕上げ・主単体法) が使う。主ループは求解結果の密度の
-/// 区分を付けた [`synth_clock_should_refactor_density`] を使う (毎ピボット呼べるほど安価)。
-#[inline]
-fn synth_clock_should_refactor(lu: &sparse_lu::FtLu) -> bool {
-    synth_clock_should_refactor_density(lu, SynthDensity::Sparse)
-}
-
 /// 合成クロックの係数を選ぶための求解結果の密度の区分 (square41 / ex10 報告の策11 と pds-100 報告の策5(b))。
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum SynthDensity {
@@ -230,7 +366,10 @@ pub(super) enum SynthDensity {
     Dense,
 }
 
-/// [`synth_clock_should_refactor`] に求解結果の密度の区分を加えたもの。策10 の `sqrt(m)` 倍は「求解の `O(m)`
+/// トリガ (5): 合成クロックによる再分解判定。FT 更新回数が [`SYNTH_CLOCK_MIN_UPDATES`] 以上で、
+/// 前回の分解以降に蓄積した求解側の tick が係数 `* build_tick` 以上なら真 (現在の分解に対する
+/// FTRAN/BTRAN の手間が再分解の手間に達したとみなす。毎ピボット呼べるほど安価)。係数は求解結果の
+/// 密度の区分 `density` で選ぶ ([`SynthDensity::Sparse`] が従来の判定)。策10 の `sqrt(m)` 倍は「求解の `O(m)`
 /// パスを消したので実際の求解の手間は `m` によらない」ことが前提で、結果が密になるほど前提が崩れる:
 /// 密なら掛けず (策11)、中程度なら基準行数を大きくして倍率を下げる (pds-100 は FT 更新が積もるにつれて
 /// `R` 段と `tau` の密な反復が重くなり、2,270 反復ごとの再分解では遅すぎた)。
