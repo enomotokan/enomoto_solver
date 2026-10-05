@@ -253,6 +253,9 @@ pub struct AugKkt {
     pub n_regularized: usize,
 }
 
+/// 反復改良を打ち切る残差 (右辺の無限大ノルム (1 以上) に対する相対値)。
+const REFINE_TOL: f64 = 1e-13;
+
 /// [`AugKkt`] の動的正則化: 期待符号側の値がこれ以下のピボットを置き換える。
 const PIVOT_EPS: f64 = 1e-13;
 /// [`AugKkt`] の動的正則化で置き換える値の大きさ。
@@ -408,35 +411,59 @@ impl AugKkt {
 ///
 /// 正規方程式の行列は正定値なので、疎 Cholesky (`L Lᵀ`、AMD 順序) で分解する。準定値の
 /// 拡大系の LDLᵀ は正則化 δ が小さい (1e-10) と順序によってはピボットが崩れる (greenbea、
-/// pilot4 で NaN) が、こちらは列を先に消去する順序に固定されるので安定。非零パターン
-/// (`A A^T` の上三角) と、各列の要素の組 `(i, k)` が値の配列のどこへ足されるかを一度だけ作り、
-/// 毎回は組ごとの積を書き込んで数値分解するだけ。稠密な列があると組の数が爆発するので、
-/// その場合は [`NormalKkt::new`] が `None` を返し、呼び出し側は [`AugKkt`] を使う。
+/// pilot4 で NaN) が、こちらは列を先に消去する順序に固定されるので安定。
+///
+/// - **稠密な列**: 非零の多い列 (`dense_threshold` 超) が 1 本でもあると `A A^T` は密になる (fit2p は
+///   3000 行に対し 25 本の列で L が完全に密)。そうした列 `A_d` は正規方程式から外し、
+///   `M = M_s + U U^T` (`U = A_d D_d^{-1/2}`) を Sherman–Morrison–Woodbury で解く:
+///   `M^{-1} r = M_s^{-1} r - W (I + U^T W)^{-1} U^T M_s^{-1} r`、`W = M_s^{-1} U` (分解ごとに k 回の求解)。
+/// - **組み立て**: 疎な列の要素の組 `(i, k)` が CSC の値の配列のどこへ足されるか (`dest`) を最初に一度だけ
+///   求め、毎回は値の配列に直接足し込む (並べ替えや非零パターンの複製をしない)。
+/// - 組の数が多すぎる (稠密な列を外しても) なら [`NormalKkt::new`] は `None` を返し、呼び出し側は
+///   [`AugKkt`] を使う。
 pub struct NormalKkt {
     n: usize,
     p: usize,
     /// 列 `j` の要素 (行, 値) (CSC)。
     col_ptr: Vec<usize>,
     col_ent: Vec<(usize, f64)>,
-    /// 三つ組の値 (列ごとの組の積 + 対角の δ)。並びは構築時の三つ組の順。
-    trip_values: Vec<f64>,
-    /// 三つ組のうち対角 (δ を足す) の開始位置。
-    diag_start: usize,
+    /// 正規方程式に入れる (疎な) 列と、外して Woodbury で扱う稠密な列。
+    sparse_cols: Vec<usize>,
+    dense_cols: Vec<usize>,
+    /// 疎な列の組 (列ごとに連続、列 `sparse_cols[c]` の組は `dest[trip_start[c]..trip_start[c+1]]`) の行き先。
+    trip_start: Vec<usize>,
+    dest: Vec<u32>,
+    /// 対角 `(i, i)` の行き先。
+    diag_dest: Vec<u32>,
+    /// CSC の値 (上三角)。
+    values: Vec<f64>,
     symbolic_base: SymbolicSparseColMat<usize>,
-    order: ValuesOrder<usize>,
     chol_symbolic: SymbolicCholesky<usize>,
     l_values: Vec<f64>,
     numeric_buf: GlobalPodBuffer,
     solve_buf: GlobalPodBuffer,
     /// 直近の分解の `d` の逆数。
     dinv: Vec<f64>,
-    /// 作業領域 (長さ n)。
+    /// Woodbury: `W = M_s^{-1} U` (列優先 `p x k`) と `C = I + U^T W` の Cholesky 因子 (下三角、行優先 `k x k`)。
+    w_mat: Vec<f64>,
+    c_chol: Vec<f64>,
+    /// 作業領域。
     tmp_n: Vec<f64>,
+    tmp_p: Vec<f64>,
     factored: bool,
 }
 
-/// [`NormalKkt`] を使う三つ組の数の上限 (これを超えるなら稠密な列があるとみなし拡大系を使う)。
+/// [`NormalKkt`] を使う三つ組の数の上限 (これを超えるなら拡大系を使う)。
 const NORMAL_MAX_TRIPLETS: usize = 40_000_000;
+/// 稠密な列とみなす非零数: `max(DENSE_COL_MIN, DENSE_COL_AVG_FACTOR * 平均)` を超える列。
+const DENSE_COL_MIN: usize = 50;
+const DENSE_COL_AVG_FACTOR: f64 = 10.0;
+/// Woodbury で扱う稠密な列の数の上限 (`W` の大きさ `p * k` とも比べる)。
+const DENSE_COL_MAX: usize = 1000;
+/// 稠密な列を外すのは行数がこれ以上で、稠密な列の組の数が他の列の組の数のこの倍以上のときだけ。
+const DENSE_COL_MIN_ROWS: usize = 1000;
+const DENSE_PAIR_RATIO: usize = 4;
+const DENSE_W_MAX_ENTRIES: usize = 50_000_000;
 
 impl NormalKkt {
     /// `A` (`p x n`) から作る。組の数が多すぎれば `None`。
@@ -465,16 +492,43 @@ impl NormalKkt {
                 }
             }
         }
-        let mut n_trip = p;
-        for j in 0..n {
+        // 稠密な列の判定
+        let avg = col_ptr[n] as f64 / n.max(1) as f64;
+        let thr = (DENSE_COL_MIN as f64).max(DENSE_COL_AVG_FACTOR * avg);
+        let mut dense_cols: Vec<usize> = (0..n).filter(|&j| (col_ptr[j + 1] - col_ptr[j]) as f64 > thr).collect();
+        // 外すのは、行数が大きく (密な分解が重い) しかも稠密な列が組の大半を占めるときだけ。小さな問題
+        // (fit1p、627 行) では密な分解でも安く、外すと残りの M_s の条件が悪くなって Woodbury の精度が落ちる。
+        let pairs = |j: usize| {
+            let k = col_ptr[j + 1] - col_ptr[j];
+            k * (k + 1) / 2
+        };
+        let dense_pairs: usize = dense_cols.iter().map(|&j| pairs(j)).sum();
+        let all_pairs: usize = (0..n).map(pairs).sum();
+        if p < DENSE_COL_MIN_ROWS
+            || dense_pairs < DENSE_PAIR_RATIO * (all_pairs - dense_pairs)
+            || dense_cols.len() > DENSE_COL_MAX
+            || dense_cols.len() * p > DENSE_W_MAX_ENTRIES
+        {
+            dense_cols.clear();
+        }
+        let mut is_dense = vec![false; n];
+        for &j in &dense_cols {
+            is_dense[j] = true;
+        }
+        let sparse_cols: Vec<usize> = (0..n).filter(|&j| !is_dense[j]).collect();
+        let mut n_trip = 0usize;
+        let mut trip_start = Vec::with_capacity(sparse_cols.len() + 1);
+        for &j in &sparse_cols {
+            trip_start.push(n_trip);
             let k = col_ptr[j + 1] - col_ptr[j];
             n_trip += k * (k + 1) / 2;
-            if n_trip > NORMAL_MAX_TRIPLETS {
+            if n_trip + p > NORMAL_MAX_TRIPLETS {
                 return None;
             }
         }
-        let mut positions: Vec<(usize, usize)> = Vec::with_capacity(n_trip);
-        for j in 0..n {
+        trip_start.push(n_trip);
+        let mut positions: Vec<(usize, usize)> = Vec::with_capacity(n_trip + p);
+        for &j in &sparse_cols {
             let e = &col_ent[col_ptr[j]..col_ptr[j + 1]];
             for a_ in 0..e.len() {
                 for b_ in a_..e.len() {
@@ -483,16 +537,29 @@ impl NormalKkt {
                 }
             }
         }
-        let diag_start = positions.len();
         for i in 0..p {
             positions.push((i, i));
         }
         let dbg = env_str!("ENOMOTO_DEBUG_IPM").is_some();
         let t0 = std::time::Instant::now();
-        let (symbolic_base, order) = SymbolicSparseColMat::<usize>::try_new_from_indices(p, p, &positions).ok()?;
+        let (symbolic_base, _order) = SymbolicSparseColMat::<usize>::try_new_from_indices(p, p, &positions).ok()?;
+        // 各組の行き先 (CSC の値の位置) を列内の二分探索で求める。
+        let col_ptrs = symbolic_base.col_ptrs();
+        let row_idx = symbolic_base.row_indices();
+        let find = |r: usize, c: usize| -> u32 {
+            let seg = &row_idx[col_ptrs[c]..col_ptrs[c + 1]];
+            (col_ptrs[c] + seg.binary_search(&r).expect("entry in pattern")) as u32
+        };
+        let dest: Vec<u32> = positions[..n_trip].iter().map(|&(r, c)| find(r, c)).collect();
+        let diag_dest: Vec<u32> = (0..p).map(|i| find(i, i)).collect();
         drop(positions);
         if dbg {
-            eprintln!("NormalKkt: triplets={n_trip} pattern nnz={} built in {:.2}s", symbolic_base.compute_nnz(), t0.elapsed().as_secs_f64());
+            eprintln!(
+                "NormalKkt: dense_cols={} (threshold {thr:.0}) triplets={n_trip} pattern nnz={} built in {:.2}s",
+                dense_cols.len(),
+                symbolic_base.compute_nnz(),
+                t0.elapsed().as_secs_f64()
+            );
         }
         let chol_symbolic =
             factorize_symbolic_cholesky::<usize>(symbolic_base.as_ref(), Side::Upper, SymmetricOrdering::Amd, Default::default()).ok()?;
@@ -502,21 +569,29 @@ impl NormalKkt {
         let l_values = vec![0.0f64; chol_symbolic.len_values()];
         let numeric_buf = GlobalPodBuffer::new(chol_symbolic.factorize_numeric_llt_req::<f64>(KKT_PARALLELISM).ok()?);
         let solve_buf = GlobalPodBuffer::new(chol_symbolic.solve_in_place_req::<f64>(1).ok()?);
+        let nnz = symbolic_base.compute_nnz();
+        let k = dense_cols.len();
         Some(NormalKkt {
             n,
             p,
             col_ptr,
             col_ent,
-            trip_values: vec![0.0; n_trip],
-            diag_start,
+            sparse_cols,
+            dense_cols,
+            trip_start,
+            dest,
+            diag_dest,
+            values: vec![0.0; nnz],
             symbolic_base,
-            order,
             chol_symbolic,
             l_values,
             numeric_buf,
             solve_buf,
             dinv: vec![0.0; n],
+            w_mat: vec![0.0; p * k],
+            c_chol: vec![0.0; k * k],
             tmp_n: vec![0.0; n],
+            tmp_p: vec![0.0; p],
             factored: false,
         })
     }
@@ -526,82 +601,156 @@ impl NormalKkt {
         self.chol_symbolic.len_values()
     }
 
+    /// `M_s` (疎な列だけの正規方程式) の Cholesky で `rhs` を上書きして解く。
+    fn solve_ms(&mut self, rhs: &mut [f64]) {
+        let llt = faer::sparse::linalg::cholesky::LltRef::<usize, f64>::new(&self.chol_symbolic, &self.l_values);
+        llt.solve_in_place_with_conj(Conj::No, from_column_major_slice_mut(rhs, self.p, 1), KKT_PARALLELISM, PodStack::new(&mut self.solve_buf));
+    }
+
     /// `d` (上段対角、正) と `δ` で分解する。分解に失敗すれば `false`。
     pub fn factor(&mut self, d: &[f64], delta: f64) -> bool {
         use rayon::prelude::*;
-        for j in 0..self.n {
-            self.dinv[j] = 1.0 / d[j];
-        }
-        // 列ごとの組の値。列ごとに三つ組の位置が連続なので、列の開始位置を数えて並列に書く。
-        let mut starts = Vec::with_capacity(self.n + 1);
-        let mut acc = 0usize;
-        for j in 0..self.n {
-            starts.push(acc);
-            let k = self.col_ptr[j + 1] - self.col_ptr[j];
-            acc += k * (k + 1) / 2;
-        }
-        let (tv, _) = self.trip_values.split_at_mut(self.diag_start);
-        let col_ptr = &self.col_ptr;
-        let col_ent = &self.col_ent;
-        let dinv = &self.dinv;
-        // 列を塊に分けて、各塊が自分の範囲の三つ組だけを書く。
-        let chunk = 4096usize;
-        let n = self.n;
-        let tv_ptr = tv.as_mut_ptr() as usize;
-        (0..n.div_ceil(chunk)).into_par_iter().for_each(|c| {
-            let tvp = tv_ptr as *mut f64;
-            for j in c * chunk..((c + 1) * chunk).min(n) {
-                let e = &col_ent[col_ptr[j]..col_ptr[j + 1]];
-                let mut t = starts[j];
-                let di = dinv[j];
-                for a_ in 0..e.len() {
-                    let va = e[a_].1 * di;
-                    for b_ in a_..e.len() {
-                        // SAFETY: 各列の三つ組の範囲 [starts[j], starts[j+1]) は互いに交わらない。
-                        unsafe { *tvp.add(t) = va * e[b_].1 };
-                        t += 1;
-                    }
+        let (n, p) = (self.n, self.p);
+        self.dinv.par_iter_mut().zip(d.par_iter()).for_each(|(o, &v)| *o = 1.0 / v);
+        // 疎な列の組の値を CSC の値の配列に直接足し込む。
+        self.values.fill(0.0);
+        let vals = &mut self.values;
+        for (c, &j) in self.sparse_cols.iter().enumerate() {
+            let e = &self.col_ent[self.col_ptr[j]..self.col_ptr[j + 1]];
+            let dst = &self.dest[self.trip_start[c]..self.trip_start[c + 1]];
+            let di = self.dinv[j];
+            let mut t = 0usize;
+            for a_ in 0..e.len() {
+                let va = e[a_].1 * di;
+                for b_ in a_..e.len() {
+                    vals[dst[t] as usize] += va * e[b_].1;
+                    t += 1;
                 }
             }
-        });
-        for v in &mut self.trip_values[self.diag_start..] {
-            *v = delta;
         }
-        let m = SparseColMat::<usize, f64>::new_from_order_and_values(self.symbolic_base.clone(), &self.order, &self.trip_values)
-            .expect("value reorder failed");
+        for &q in &self.diag_dest {
+            vals[q as usize] += delta;
+        }
+        let m = faer::sparse::SparseColMatRef::<usize, f64>::new(self.symbolic_base.as_ref(), &self.values);
         let reg = faer::sparse::linalg::cholesky::LltRegularization {
             dynamic_regularization_delta: tunable!("ENOMOTO_T_NORMAL_PIVOT_DELTA", 1e-8, f64),
             dynamic_regularization_epsilon: tunable!("ENOMOTO_T_NORMAL_PIVOT_EPS", 1e-14, f64),
         };
         let ok = self
             .chol_symbolic
-            .factorize_numeric_llt::<f64>(&mut self.l_values, m.as_ref(), Side::Upper, reg, KKT_PARALLELISM, PodStack::new(&mut self.numeric_buf))
+            .factorize_numeric_llt::<f64>(&mut self.l_values, m, Side::Upper, reg, KKT_PARALLELISM, PodStack::new(&mut self.numeric_buf))
             .is_ok();
         self.factored = ok;
-        ok
+        if !ok {
+            return false;
+        }
+        // Woodbury: W = M_s^{-1} U (U の列 q = a_q * sqrt(dinv_q))、C = I + U^T W の Cholesky。
+        let k = self.dense_cols.len();
+        if k > 0 {
+            let mut w = std::mem::take(&mut self.w_mat);
+            for q in 0..k {
+                let j = self.dense_cols[q];
+                let col = &mut w[q * p..(q + 1) * p];
+                col.fill(0.0);
+                let sq = self.dinv[j].sqrt();
+                for &(i, v) in &self.col_ent[self.col_ptr[j]..self.col_ptr[j + 1]] {
+                    col[i] = v * sq;
+                }
+                self.solve_ms(col);
+            }
+            self.w_mat = w;
+            let mut cm = vec![0.0f64; k * k];
+            for r in 0..k {
+                let jr = self.dense_cols[r];
+                let sq = self.dinv[jr].sqrt();
+                for c in 0..k {
+                    let wc = &self.w_mat[c * p..(c + 1) * p];
+                    let mut acc = 0.0;
+                    for &(i, v) in &self.col_ent[self.col_ptr[jr]..self.col_ptr[jr + 1]] {
+                        acc += v * wc[i];
+                    }
+                    cm[r * k + c] = sq * acc + if r == c { 1.0 } else { 0.0 };
+                }
+            }
+            // 対称化してから密 Cholesky (行優先の下三角)
+            for r in 0..k {
+                for c in 0..r {
+                    let v = 0.5 * (cm[r * k + c] + cm[c * k + r]);
+                    cm[r * k + c] = v;
+                    cm[c * k + r] = v;
+                }
+            }
+            for c in 0..k {
+                let mut dg = cm[c * k + c];
+                for t in 0..c {
+                    dg -= cm[c * k + t] * cm[c * k + t];
+                }
+                if !(dg > 0.0) {
+                    self.factored = false;
+                    return false;
+                }
+                let dg = dg.sqrt();
+                cm[c * k + c] = dg;
+                for r in c + 1..k {
+                    let mut v = cm[r * k + c];
+                    for t in 0..c {
+                        v -= cm[r * k + t] * cm[c * k + t];
+                    }
+                    cm[r * k + c] = v / dg;
+                }
+            }
+            self.c_chol = cm;
+        }
+        let _ = n;
+        true
     }
 
     /// `[dx; dy]` を `rhs = [r_x; r_y]` に上書きする (`δ` は直近の分解のもの)。
     pub fn solve_in_place(&mut self, a: &FaerCsr, rhs: &mut [f64]) {
+        use rayon::prelude::*;
         assert!(self.factored, "NormalKkt::solve_in_place before factor");
         let (n, p) = (self.n, self.p);
         let (rx, ry) = rhs.split_at_mut(n);
         // dy の右辺 = A D^{-1} r_x - r_y
-        for j in 0..n {
-            self.tmp_n[j] = rx[j] * self.dinv[j];
+        self.tmp_n.par_iter_mut().zip(rx.par_iter()).zip(self.dinv.par_iter()).for_each(|((t, &r), &di)| *t = r * di);
+        csr_mat_vec_into(a, &self.tmp_n, &mut self.tmp_p);
+        ry.par_iter_mut().zip(self.tmp_p.par_iter()).for_each(|(y, &t)| *y = t - *y);
+        self.solve_ms(ry);
+        // Woodbury の補正: dy -= W C^{-1} U^T dy0
+        let k = self.dense_cols.len();
+        if k > 0 {
+            let mut g = vec![0.0f64; k];
+            for (q, &j) in self.dense_cols.iter().enumerate() {
+                let sq = self.dinv[j].sqrt();
+                g[q] = sq * self.col_ent[self.col_ptr[j]..self.col_ptr[j + 1]].iter().map(|&(i, v)| v * ry[i]).sum::<f64>();
+            }
+            // C t = g (C = L L^T)
+            let l = &self.c_chol;
+            for r in 0..k {
+                let mut v = g[r];
+                for t in 0..r {
+                    v -= l[r * k + t] * g[t];
+                }
+                g[r] = v / l[r * k + r];
+            }
+            for r in (0..k).rev() {
+                let mut v = g[r];
+                for t in r + 1..k {
+                    v -= l[t * k + r] * g[t];
+                }
+                g[r] = v / l[r * k + r];
+            }
+            for q in 0..k {
+                let gq = g[q];
+                if gq != 0.0 {
+                    let wq = &self.w_mat[q * p..(q + 1) * p];
+                    ry.par_iter_mut().zip(wq.par_iter()).for_each(|(y, &w)| *y -= gq * w);
+                }
+            }
         }
-        let mut t = vec![0.0; p];
-        csr_mat_vec_into(a, &self.tmp_n, &mut t);
-        for i in 0..p {
-            ry[i] = t[i] - ry[i];
-        }
-        let llt = faer::sparse::linalg::cholesky::LltRef::<usize, f64>::new(&self.chol_symbolic, &self.l_values);
-        llt.solve_in_place_with_conj(Conj::No, from_column_major_slice_mut(ry, p, 1), KKT_PARALLELISM, PodStack::new(&mut self.solve_buf));
         // dx = D^{-1} (r_x - A^T dy)
         csr_mat_t_vec_into(a, ry, &mut self.tmp_n);
-        for j in 0..n {
-            rx[j] = (rx[j] - self.tmp_n[j]) * self.dinv[j];
-        }
+        rx.par_iter_mut().zip(self.tmp_n.par_iter()).zip(self.dinv.par_iter()).for_each(|((x, &t), &di)| *x = (*x - t) * di);
     }
 }
 
@@ -654,6 +803,7 @@ impl IpmKkt {
         let (b, rest) = work.split_at_mut(dim);
         let (r, kx) = rest.split_at_mut(dim);
         b.copy_from_slice(rhs);
+        let bnorm = b.iter().fold(1.0f64, |m, v| m.max(v.abs()));
         self.solve_plain(a, rhs);
         let mut prev = f64::INFINITY;
         for _ in 0..refine {
@@ -675,7 +825,8 @@ impl IpmKkt {
                 r[i] = b[i] - kx[i];
                 nrm = nrm.max(r[i].abs());
             }
-            if !(nrm < prev * 0.5) || nrm == 0.0 {
+            // 残差が十分小さければ追加の求解をしない (以前は 1 回目に必ず解き直していた)。
+            if !(nrm < prev * 0.5) || nrm <= REFINE_TOL * bnorm {
                 break;
             }
             prev = nrm;

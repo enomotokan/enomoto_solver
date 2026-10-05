@@ -602,7 +602,7 @@ pub(super) fn solve_ipm_crossover(std: &StdForm) -> Option<SimplexResult> {
         if vnorm <= prm::V_REL_ZERO {
             continue;
         }
-        let mut avn = 0.0f64;
+        let avn;
         // 向きが本当に null(A_B) に入っているか: `‖A v‖ ≤ NULL_REL ‖v‖`。A_B が列フルランクになった後の
         // 射影は丸め誤差だけで (blend で |v| ≈ 4e-7、‖A v‖ ≈ |v|)、それを向きとみなすと比率テストが
         // θ ≈ 1e7 で進んで `A x = b` を壊す。満たさなければ向きは無い (これ以上固定できない)。

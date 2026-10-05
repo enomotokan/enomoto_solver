@@ -28,6 +28,9 @@ use crate::params::interior_point::{
 };
 use crate::types::Status;
 
+/// 並列ループの 1 タスクあたりの最小の長さ (小さな問題で rayon の手間が計算を上回らないように)。
+const PAR_MIN_LEN: usize = 4096;
+
 /// Newton 系の求解ごとの反復改良の回数 (上限)。
 const REFINE_STEPS: usize = 3;
 
@@ -49,11 +52,11 @@ pub struct BoxIpmResult {
 }
 
 fn dot(a: &[f64], b: &[f64]) -> f64 {
-    a.par_iter().zip(b.par_iter()).map(|(x, y)| x * y).sum()
+    a.par_iter().zip(b.par_iter()).with_min_len(PAR_MIN_LEN).map(|(x, y)| x * y).sum()
 }
 
 fn norm_inf(v: &[f64]) -> f64 {
-    v.par_iter().map(|x| x.abs()).reduce(|| 0.0_f64, f64::max)
+    v.par_iter().with_min_len(PAR_MIN_LEN).map(|x| x.abs()).reduce(|| 0.0_f64, f64::max)
 }
 
 /// `v + alpha dv > 0` を保つ最大ステップの `TAU` 倍 (1 で頭打ち)。
@@ -61,6 +64,7 @@ fn fraction_to_boundary(v: &[f64], dv: &[f64]) -> f64 {
     let a = v
         .par_iter()
         .zip(dv.par_iter())
+        .with_min_len(PAR_MIN_LEN)
         .map(|(&vi, &dvi)| if dvi < 0.0 { TAU * vi / (-dvi) } else { f64::INFINITY })
         .reduce(|| f64::INFINITY, f64::min);
     a.clamp(0.0, 1.0)
@@ -117,6 +121,48 @@ impl Side {
         self.idx.len()
     }
 
+    /// `r_z = -(sgn (x - bnd) + δ(ν - z) + s)`、`W = s/z + δ` (並列)。
+    fn update_rz_w(&mut self, x: &[f64], delta: f64) {
+        let (sgn, idx, bnd, s, z, nu) = (self.sgn, &self.idx, &self.bnd, &self.s, &self.z, &self.nu);
+        self.r_z.par_iter_mut().zip(self.w.par_iter_mut()).enumerate().with_min_len(PAR_MIN_LEN).for_each(|(k, (rz, w))| {
+            *rz = -(sgn * (x[idx[k]] - bnd[k]) + delta * (nu[k] - z[k]) + s[k]);
+            *w = s[k] / z[k] + delta;
+        });
+    }
+
+    /// 相補性の右辺 `r_s = -s z - ds_aff dz_aff + σμ` (`corr = false` なら予測子の `-s z`)。
+    fn set_rs(&mut self, corr: bool, sigma_mu: f64) {
+        let (s, z, dsa, dza) = (&self.s, &self.z, &self.ds_aff, &self.dz_aff);
+        self.r_s.par_iter_mut().enumerate().with_min_len(PAR_MIN_LEN).for_each(|(k, r)| {
+            *r = if corr { -s[k] * z[k] - dsa[k] * dza[k] + sigma_mu } else { -s[k] * z[k] };
+        });
+    }
+
+    /// `rz' = r_z - r_s / z` (並列)。
+    fn set_rzp(&mut self) {
+        let (rz, rs, z) = (&self.r_z, &self.r_s, &self.z);
+        self.rzp.par_iter_mut().enumerate().with_min_len(PAR_MIN_LEN).for_each(|(k, o)| *o = rz[k] - rs[k] / z[k]);
+    }
+
+    /// 解いた `dx` から `dz = (sgn dx - rz') / W`、`ds = (r_s - s dz) / z` (並列)。
+    fn set_dz_ds(&mut self, dx: &[f64]) {
+        let (sgn, idx, rzp, w, rs, s, z) = (self.sgn, &self.idx, &self.rzp, &self.w, &self.r_s, &self.s, &self.z);
+        self.dz.par_iter_mut().zip(self.ds.par_iter_mut()).enumerate().with_min_len(PAR_MIN_LEN).for_each(|(k, (dzk, dsk))| {
+            let d = (sgn * dx[idx[k]] - rzp[k]) / w[k];
+            *dzk = d;
+            *dsk = (rs[k] - s[k] * d) / z[k];
+        });
+    }
+
+    /// 試行点 `s_new = s + αp ds`、`z_new = z + αd dz` (並列)。
+    fn set_new(&mut self, ap: f64, ad: f64) {
+        let (s, ds, z, dz) = (&self.s, &self.ds, &self.z, &self.dz);
+        self.s_new.par_iter_mut().zip(self.z_new.par_iter_mut()).enumerate().with_min_len(PAR_MIN_LEN).for_each(|(k, (sn, zn))| {
+            *sn = s[k] + ap * ds[k];
+            *zn = z[k] + ad * dz[k];
+        });
+    }
+
     /// 主残差 `G x - h + s` の成分 (`sgn x_j - sgn bnd + s`)。
     #[inline]
     fn primal_res(&self, k: usize, x: &[f64], s: &[f64]) -> f64 {
@@ -125,28 +171,40 @@ impl Side {
 }
 
 /// [`solve_box_lp`] の停止判定・近接中心更新に使う残差の無限大ノルム群。
+#[derive(Clone, Copy)]
 struct Res {
     primal: f64,
     dual: f64,
 }
 
-/// 現在の点の主残差・双対残差の無限大ノルム (`ax`, `aty` は計算済み)。
-fn residuals(ax: &[f64], b: &[f64], x: &[f64], lo: &Side, up: &Side, s_lo: &[f64], s_up: &[f64], c: &[f64], aty: &[f64], z_lo: &[f64], z_up: &[f64], dual_buf: &mut [f64]) -> Res {
+/// 現在の点の主残差・双対残差の無限大ノルム (`ax`, `aty` は計算済み)。`pos_lo[j]`/`pos_up[j]` は列 `j` の
+/// 下限側・上限側の番号 (無ければ `usize::MAX`)。双対残差 `c + A^T y - z_l + z_u` を `dual_buf` に書く。
+#[allow(clippy::too_many_arguments)]
+fn residuals(ax: &[f64], b: &[f64], x: &[f64], lo: &Side, up: &Side, s_lo: &[f64], s_up: &[f64], c: &[f64], aty: &[f64], z_lo: &[f64], z_up: &[f64], pos: &Pos, dual_buf: &mut [f64]) -> Res {
     let mut p = ax.par_iter().zip(b.par_iter()).map(|(a, b)| (a - b).abs()).reduce(|| 0.0, f64::max);
-    for k in 0..lo.len() {
-        p = p.max(lo.primal_res(k, x, s_lo).abs());
+    for (side, sv) in [(lo, s_lo), (up, s_up)] {
+        let m = (0..side.len()).into_par_iter().with_min_len(PAR_MIN_LEN).map(|k| side.primal_res(k, x, sv).abs()).reduce(|| 0.0, f64::max);
+        p = p.max(m);
     }
-    for k in 0..up.len() {
-        p = p.max(up.primal_res(k, x, s_up).abs());
-    }
-    dual_buf.par_iter_mut().zip(c.par_iter()).zip(aty.par_iter()).for_each(|((d, &c), &a)| *d = c + a);
-    for k in 0..lo.len() {
-        dual_buf[lo.idx[k]] -= z_lo[k];
-    }
-    for k in 0..up.len() {
-        dual_buf[up.idx[k]] += z_up[k];
-    }
+    dual_buf.par_iter_mut().enumerate().with_min_len(PAR_MIN_LEN).for_each(|(j, d)| {
+        let mut v = c[j] + aty[j];
+        let kl = pos.lo[j];
+        if kl != usize::MAX {
+            v -= z_lo[kl];
+        }
+        let ku = pos.up[j];
+        if ku != usize::MAX {
+            v += z_up[ku];
+        }
+        *d = v;
+    });
     Res { primal: p, dual: norm_inf(dual_buf) }
+}
+
+/// 列 `j` → 下限側・上限側の番号 (無ければ `usize::MAX`)。列ごとの処理を並列に書くために使う。
+struct Pos {
+    lo: Vec<usize>,
+    up: Vec<usize>,
 }
 
 /// `min c^T x, A x = b, l <= x <= u` を IP-PMM で解く (`l[j] < u[j]` を仮定)。
@@ -183,6 +241,14 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
     let mut lo = Side::new(-1.0, lo_idx.clone(), lo_idx.iter().map(|&j| l[j]).collect());
     let mut up = Side::new(1.0, up_idx.clone(), up_idx.iter().map(|&j| u[j]).collect());
     let n_bnd = lo.len() + up.len();
+    let mut pos = Pos { lo: vec![usize::MAX; n], up: vec![usize::MAX; n] };
+    for (k, &j) in lo.idx.iter().enumerate() {
+        pos.lo[j] = k;
+    }
+    for (k, &j) in up.idx.iter().enumerate() {
+        pos.up[j] = k;
+    }
+    let pos = pos;
 
     let t_kkt = std::time::Instant::now();
     // 診断用 (ENOMOTO_DEBUG_IPM): 数値分解・Newton 系の求解 (反復改良を含む) の累計時間。
@@ -299,20 +365,27 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
     let mut rel = (f64::INFINITY, f64::INFINITY, f64::INFINITY);
     let mut status = Status::NotSolved;
     let mut iters = 0usize;
+    let mut cached: Option<Res> = None;
 
     for it in 0..max_iters {
         iters = it;
         if crate::cancel::is_cancelled() {
             break; // 同時実行の相手が先に結論を出した (status は NotSolved のまま)
         }
-        csr_mat_vec_into(a, &x, &mut ax);
-        csr_mat_t_vec_into(a, &y, &mut aty);
-        let res = residuals(&ax, b, &x, &lo, &up, &lo.s, &up.s, c, &aty, &lo.z, &up.z, &mut dual_res);
+        // 前の反復の終わりに同じ点で計算した残差 (`ax`・`aty`・`dual_res` も) があれば使い回す。
+        let res = match cached.take() {
+            Some(r) => r,
+            None => {
+                csr_mat_vec_into(a, &x, &mut ax);
+                csr_mat_t_vec_into(a, &y, &mut aty);
+                residuals(&ax, b, &x, &lo, &up, &lo.s, &up.s, c, &aty, &lo.z, &up.z, &pos, &mut dual_res)
+            }
+        };
         let cx = dot(c, &x);
         let by = dot(b, &y);
-        let hz: f64 = (0..lo.len()).map(|k| -lo.bnd[k] * lo.z[k]).sum::<f64>() + (0..up.len()).map(|k| up.bnd[k] * up.z[k]).sum::<f64>();
+        let hz: f64 = -dot(&lo.bnd, &lo.z) + dot(&up.bnd, &up.z);
         let gap = (cx + by + hz).abs();
-        let gx = lo.idx.iter().chain(up.idx.iter()).fold(0.0f64, |m, &j| m.max(x[j].abs()));
+        let gx = x.par_iter().enumerate().with_min_len(PAR_MIN_LEN).filter(|&(j, _)| pos.lo[j] != usize::MAX || pos.up[j] != usize::MAX).map(|(_, v)| v.abs()).reduce(|| 0.0, f64::max);
         let s_inf = norm_inf(&lo.s).max(norm_inf(&up.s));
         let z_inf = norm_inf(&lo.z).max(norm_inf(&up.z));
         let bnd_p = EPS_ABS + EPS_REL * norm_inf(&ax).max(norm_b).max(gx).max(norm_h).max(s_inf);
@@ -371,22 +444,24 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
 
         // ---- 右辺 ----
         // r_x = -(c + ρ(x - ξ) + A^T y - z_l + z_u) = -(dual_res + ρ(x - ξ))
-        r_x.par_iter_mut().enumerate().for_each(|(j, r)| *r = -(dual_res[j] + rho * (x[j] - xi[j])));
+        r_x.par_iter_mut().enumerate().with_min_len(PAR_MIN_LEN).for_each(|(j, r)| *r = -(dual_res[j] + rho * (x[j] - xi[j])));
         // r_y = -(A x + δ(λ - y) - b)
-        r_y.par_iter_mut().enumerate().for_each(|(i, r)| *r = -(ax[i] + delta * (lambda[i] - y[i]) - b[i]));
-        for side in [&mut lo, &mut up] {
-            for k in 0..side.len() {
-                let j = side.idx[k];
-                side.r_z[k] = -(side.sgn * (x[j] - side.bnd[k]) + delta * (side.nu[k] - side.z[k]) + side.s[k]);
-                side.w[k] = side.s[k] / side.z[k] + delta;
-            }
-        }
+        r_y.par_iter_mut().enumerate().with_min_len(PAR_MIN_LEN).for_each(|(i, r)| *r = -(ax[i] + delta * (lambda[i] - y[i]) - b[i]));
+        lo.update_rz_w(&x, delta);
+        up.update_rz_w(&x, delta);
         // ---- 行列 (予測子・修正子で共通) ----
-        top.fill(rho);
-        for side in [&lo, &up] {
-            for k in 0..side.len() {
-                top[side.idx[k]] += 1.0 / side.w[k];
-            }
+        {
+            let (wl, wu) = (&lo.w, &up.w);
+            top.par_iter_mut().enumerate().with_min_len(PAR_MIN_LEN).for_each(|(j, t)| {
+                let mut v = rho;
+                if pos.lo[j] != usize::MAX {
+                    v += 1.0 / wl[pos.lo[j]];
+                }
+                if pos.up[j] != usize::MAX {
+                    v += 1.0 / wu[pos.up[j]];
+                }
+                *t = v;
+            });
         }
         let t_f = std::time::Instant::now();
         let fac_ok = kkt.factor(&top, delta, &mut mid);
@@ -397,17 +472,15 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
             if debug {
                 eprintln!("IPM it={it} factorization failed; raising regularization");
             }
+            cached = Some(res);
             continue;
         }
 
         // 1) 予測子: r_s = -S z
-        for side in [&mut lo, &mut up] {
-            for k in 0..side.len() {
-                side.r_s[k] = -side.s[k] * side.z[k];
-            }
-        }
+        lo.set_rs(false, 0.0);
+        up.set_rs(false, 0.0);
         let t_s = std::time::Instant::now();
-        newton(&mut kkt, a, &top, delta, &r_x, &r_y, &mut lo, &mut up, &mut sol_aff, n, &mut refine_work);
+        newton(&mut kkt, a, &top, delta, &r_x, &r_y, &mut lo, &mut up, &pos, &mut sol_aff, n, &mut refine_work);
         prof.1 += t_s.elapsed().as_secs_f64();
         if !sol_aff.iter().all(|v| v.is_finite()) {
             // 分解が破綻した: 正則化を強めて次の反復で分解し直す。
@@ -416,13 +489,12 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
             if debug {
                 eprintln!("IPM it={it} non-finite Newton direction; raising regularization to rho={rho:.1e} delta={delta:.1e}");
             }
+            cached = Some(res);
             continue;
         }
         for side in [&mut lo, &mut up] {
-            for k in 0..side.len() {
-                side.dz_aff[k] = side.dz[k];
-                side.ds_aff[k] = side.ds[k];
-            }
+            side.dz_aff.copy_from_slice(&side.dz);
+            side.ds_aff.copy_from_slice(&side.ds);
         }
         let alpha_p_aff = fraction_to_boundary(&lo.s, &lo.ds_aff).min(fraction_to_boundary(&up.s, &up.ds_aff));
         let alpha_d_aff = fraction_to_boundary(&lo.z, &lo.dz_aff).min(fraction_to_boundary(&up.z, &up.dz_aff));
@@ -430,35 +502,30 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
         let mu = sz / n_bnd as f64;
         let mut sz_aff = 0.0;
         for side in [&lo, &up] {
-            for k in 0..side.len() {
-                sz_aff += (side.s[k] + alpha_p_aff * side.ds_aff[k]) * (side.z[k] + alpha_d_aff * side.dz_aff[k]);
-            }
+            sz_aff += (0..side.len())
+                .into_par_iter()
+                .with_min_len(PAR_MIN_LEN)
+                .map(|k| (side.s[k] + alpha_p_aff * side.ds_aff[k]) * (side.z[k] + alpha_d_aff * side.dz_aff[k]))
+                .sum::<f64>();
         }
         let mu_aff = sz_aff / n_bnd as f64;
         let sigma = (mu_aff / mu.max(GAP_DIV_GUARD)).clamp(0.0, 1.0).powi(3);
 
         // 2) 修正子 + 中心化
-        for side in [&mut lo, &mut up] {
-            for k in 0..side.len() {
-                side.r_s[k] = -side.s[k] * side.z[k] - side.ds_aff[k] * side.dz_aff[k] + sigma * mu;
-            }
-        }
+        lo.set_rs(true, sigma * mu);
+        up.set_rs(true, sigma * mu);
         let t_s = std::time::Instant::now();
-        newton(&mut kkt, a, &top, delta, &r_x, &r_y, &mut lo, &mut up, &mut rhs, n, &mut refine_work);
+        newton(&mut kkt, a, &top, delta, &r_x, &r_y, &mut lo, &mut up, &pos, &mut rhs, n, &mut refine_work);
         prof.1 += t_s.elapsed().as_secs_f64();
         let alpha_p = fraction_to_boundary(&lo.s, &lo.ds).min(fraction_to_boundary(&up.s, &up.ds));
         let alpha_d = fraction_to_boundary(&lo.z, &lo.dz).min(fraction_to_boundary(&up.z, &up.dz));
         {
             let (dx, dy) = rhs.split_at(n);
-            x_new.par_iter_mut().enumerate().for_each(|(j, v)| *v = x[j] + alpha_p * dx[j]);
-            y_new.par_iter_mut().enumerate().for_each(|(i, v)| *v = y[i] + alpha_d * dy[i]);
+            x_new.par_iter_mut().enumerate().with_min_len(PAR_MIN_LEN).for_each(|(j, v)| *v = x[j] + alpha_p * dx[j]);
+            y_new.par_iter_mut().enumerate().with_min_len(PAR_MIN_LEN).for_each(|(i, v)| *v = y[i] + alpha_d * dy[i]);
         }
-        for side in [&mut lo, &mut up] {
-            for k in 0..side.len() {
-                side.s_new[k] = side.s[k] + alpha_p * side.ds[k];
-                side.z_new[k] = side.z[k] + alpha_d * side.dz[k];
-            }
-        }
+        lo.set_new(alpha_p, alpha_d);
+        up.set_new(alpha_p, alpha_d);
 
         // ---- Algorithm 2: 正則化と近接中心の更新 ----
         let gap_before = sz.max(GAP_DIV_GUARD);
@@ -468,7 +535,7 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
         let r = ((gap_before - gap_after) / gap_before).clamp(0.0, 0.999);
         csr_mat_vec_into(a, &x_new, &mut ax_new);
         csr_mat_t_vec_into(a, &y_new, &mut aty_new);
-        let res_new = residuals(&ax_new, b, &x_new, &lo, &up, &lo.s_new, &up.s_new, c, &aty_new, &lo.z_new, &up.z_new, &mut dual_new);
+        let res_new = residuals(&ax_new, b, &x_new, &lo, &up, &lo.s_new, &up.s_new, c, &aty_new, &lo.z_new, &up.z_new, &pos, &mut dual_new);
         if res_new.primal <= RES_DECREASE_RATIO * res.primal {
             lambda.copy_from_slice(&y_new);
             lo.nu.copy_from_slice(&lo.z_new);
@@ -488,6 +555,11 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
 
         std::mem::swap(&mut x, &mut x_new);
         std::mem::swap(&mut y, &mut y_new);
+        // 新しい点の残差は計算済みなので次の反復の先頭で使い回す。
+        std::mem::swap(&mut ax, &mut ax_new);
+        std::mem::swap(&mut aty, &mut aty_new);
+        std::mem::swap(&mut dual_res, &mut dual_new);
+        cached = Some(res_new);
         for side in [&mut lo, &mut up] {
             std::mem::swap(&mut side.s, &mut side.s_new);
             std::mem::swap(&mut side.z, &mut side.z_new);
@@ -520,27 +592,32 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
 
 /// 予測子/修正子の Newton 方向: 各 `Side` の `r_z`・`r_s`・`w` から縮約系の右辺を作って解き、
 /// `sol[..n] = dx`、`sol[n..] = dy`、各 `Side` の `dz`・`ds` を書く。行列は分解済み。
-fn newton(kkt: &mut IpmKkt, a: &FaerCsr, top: &[f64], delta: f64, r_x: &[f64], r_y: &[f64], lo: &mut Side, up: &mut Side, sol: &mut [f64], n: usize, work: &mut Vec<f64>) {
-    sol[..n].copy_from_slice(r_x);
+#[allow(clippy::too_many_arguments)]
+fn newton(kkt: &mut IpmKkt, a: &FaerCsr, top: &[f64], delta: f64, r_x: &[f64], r_y: &[f64], lo: &mut Side, up: &mut Side, pos: &Pos, sol: &mut [f64], n: usize, work: &mut Vec<f64>) {
+    lo.set_rzp();
+    up.set_rzp();
+    {
+        // sol_x = r_x + G^T W^{-1} rz' (列ごとに並列)
+        let (sl, su) = (&*lo, &*up);
+        sol[..n].par_iter_mut().enumerate().with_min_len(PAR_MIN_LEN).for_each(|(j, o)| {
+            let mut v = r_x[j];
+            let kl = pos.lo[j];
+            if kl != usize::MAX {
+                v += sl.sgn * sl.rzp[kl] / sl.w[kl];
+            }
+            let ku = pos.up[j];
+            if ku != usize::MAX {
+                v += su.sgn * su.rzp[ku] / su.w[ku];
+            }
+            *o = v;
+        });
+    }
     sol[n..].copy_from_slice(r_y);
-    for side in [&mut *lo, &mut *up] {
-        for k in 0..side.len() {
-            // rz' = r_z - r_s / z
-            side.rzp[k] = side.r_z[k] - side.r_s[k] / side.z[k];
-            // + G^T W^{-1} rz'
-            sol[side.idx[k]] += side.sgn * side.rzp[k] / side.w[k];
-        }
-    }
-    // 正則化が小さくなると LDLᵀ の精度が落ちるので反復改良する (動的正則化で置き換えた
-    // ピボットの誤差もここで取り戻す)。
+    // 正則化が小さくなると分解の精度が落ちるので反復改良する (動的正則化で置き換えた
+    // ピボットの誤差もここで取り戻す)。残差が十分小さければ追加の求解はしない。
     kkt.solve_refined(a, top, delta, sol, REFINE_STEPS, work);
-    for side in [&mut *lo, &mut *up] {
-        for k in 0..side.len() {
-            let dx = sol[side.idx[k]];
-            side.dz[k] = (side.sgn * dx - side.rzp[k]) / side.w[k];
-            side.ds[k] = (side.r_s[k] - side.s[k] * side.dz[k]) / side.z[k];
-        }
-    }
+    lo.set_dz_ds(&sol[..n]);
+    up.set_dz_ds(&sol[..n]);
 }
 
 /// 主実行不能の Farkas 証明: `A^T y + G^T z ≈ 0` かつ `b·y + h·z > 0` (正規化後)。
