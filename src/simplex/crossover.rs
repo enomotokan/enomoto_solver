@@ -515,9 +515,22 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     // 試験用 (`ENOMOTO_T_XO_PDLP`): 先に PDLP で近似解を求め、
     //   1: 内点法の近接中心にする、2: 近接中心と初期点にする、3: 内点法を飛ばしてそのままクロスオーバーに渡す。
     let pdlp_mode = tunable!("ENOMOTO_T_XO_PDLP", 0u8, u8);
+    // 同時実行の二段解法が共有する下界 (元の問題の単位) を、固定列の分を引いて内点法の問題の単位にする
+    // (試験用 `ENOMOTO_T_XO_BOUND_GAP`、0 で使わない)。
+    let bound_gap = tunable!("ENOMOTO_T_XO_BOUND_GAP", 0.0f64, f64);
+    let shared = crate::cancel::bound().filter(|sb| bound_gap > 0.0 && sb.n_total == std.n_total && sb.n_rows == std.n_rows);
+    let fixed_obj: f64 = (0..std.n_total).filter(|&j| !(std.lb[j] < std.ub[j])).map(|j| std.c[j] * std.lb[j]).sum();
+    let lb_fn = move || shared.as_ref().map_or(f64::NEG_INFINITY, |sb| sb.get() - fixed_obj);
     let ipm = if pdlp_mode == 0 {
-        if xo.dual_center.is_some() || xo.dual_feasible_known {
-            let warm = WarmStart { y: xo.dual_center, dual_feasible_known: xo.dual_feasible_known, ..Default::default() };
+        if xo.dual_center.is_some() || xo.dual_feasible_known || bound_gap > 0.0 {
+            let warm = WarmStart {
+                y: xo.dual_center,
+                dual_feasible_known: xo.dual_feasible_known,
+                lower_bound: if bound_gap > 0.0 { Some(&lb_fn) } else { None },
+                bound_gap,
+                bound_pres: tunable!("ENOMOTO_T_XO_BOUND_PRES", prm::IPM_ACCEPT_REL, f64),
+                ..Default::default()
+            };
             solve_box_lp_warm(&a_j, &b_j, &c_j, &l_j, &u_j, max_iters, Some(&warm))
         } else {
             solve_box_lp(&a_j, &b_j, &c_j, &l_j, &u_j, max_iters)
@@ -556,6 +569,7 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
                 theta: tunable!("ENOMOTO_T_PDLP_WARM_THETA", 1e-2, f64),
                 reg0: env_str!("ENOMOTO_T_PDLP_WARM_REG0").and_then(|v| v.parse().ok()),
                 dual_feasible_known: xo.dual_feasible_known,
+                ..Default::default()
             };
             solve_box_lp_warm(&a_j, &b_j, &c_j, &l_j, &u_j, max_iters, Some(&warm))
         }

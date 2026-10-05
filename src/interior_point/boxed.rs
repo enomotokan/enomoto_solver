@@ -254,6 +254,12 @@ pub struct WarmStart<'a> {
     /// 「双対の発散 (主実行不能)」だけになる。乗数の大きさが初期の [`DIVERGE_FACTOR`] 倍を超えたら、
     /// 正則化・停滞の条件を待たずに Farkas の証明を確かめる。
     pub dual_feasible_known: bool,
+    /// 元の問題 (この関数に渡した `c`・`x` の単位) の最適値の下界を返す関数 (同時実行の二段解法が共有する。
+    /// 未設定なら `-inf`)。主目的値との差の相対値が `bound_gap` 以下で、主残差が許容値の `bound_pres` 倍以下
+    /// なら、収束を待たずに `Optimal` として返す (クロスオーバーに渡す)。
+    pub lower_bound: Option<&'a (dyn Fn() -> f64 + Sync)>,
+    pub bound_gap: f64,
+    pub bound_pres: f64,
 }
 
 /// 双対実行可能と分かっているとき、乗数の大きさがこの倍数を超えたら発散とみなして証明を確かめる。
@@ -280,6 +286,10 @@ pub fn solve_box_lp_warm(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64]
         theta: w.theta,
         reg0: w.reg0,
         dual_feasible_known: w.dual_feasible_known,
+        lower_bound: w.lower_bound,
+        bound_gap: w.bound_gap,
+        bound_pres: w.bound_pres,
+        obj_scale: beta * gamma,
     });
     let mut r = solve_box_lp_scaled(a, &bs, &cs, &ls, &us, max_iters, warm_s.as_ref());
     for v in r.x.iter_mut() {
@@ -293,13 +303,18 @@ pub fn solve_box_lp_warm(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64]
 
 /// [`solve_box_lp`] の本体 (大きさをそろえた後の問題を解く)。
 /// [`WarmStart`] を大きさをそろえた後の単位にしたもの。
-struct WarmScaled {
+struct WarmScaled<'a> {
     x: Option<Vec<f64>>,
     y: Option<Vec<f64>>,
     point: bool,
     theta: f64,
     reg0: Option<f64>,
     dual_feasible_known: bool,
+    lower_bound: Option<&'a (dyn Fn() -> f64 + Sync)>,
+    bound_gap: f64,
+    bound_pres: f64,
+    /// 目的値の縮尺 `β γ` (内部の目的値 = 元の目的値 / (β γ))。
+    obj_scale: f64,
 }
 
 fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], max_iters: usize, warm: Option<&WarmScaled>) -> BoxIpmResult {
@@ -524,6 +539,25 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
         if res.primal <= bnd_p && res.dual <= bnd_d && gap <= bnd_g {
             status = Status::Optimal;
             break;
+        }
+        // 同時実行の二段解法の下界との差 (真の双対ギャップの上界) で、クロスオーバーに渡す。
+        if let Some(w) = warm {
+            if let Some(lbf) = w.lower_bound {
+                let lb = lbf() / w.obj_scale;
+                if lb.is_finite() {
+                    let ext = (cx - lb) / cx.abs().max(lb.abs()).max(1e-300);
+                    if debug {
+                        eprintln!("IPM it={it} external lower bound={lb:.10e} rel_gap={ext:.2e}");
+                    }
+                    if ext <= w.bound_gap && rel.0 <= w.bound_pres {
+                        if debug {
+                            eprintln!("IPM it={it} stopping: gap to the shared lower bound {ext:.2e} <= {:.1e}", w.bound_gap);
+                        }
+                        status = Status::Optimal;
+                        break;
+                    }
+                }
+            }
         }
         let worst = rel.0.max(rel.1).max(rel.2);
         if !worst.is_finite() || !cx.is_finite() {

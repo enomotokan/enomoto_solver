@@ -47,18 +47,24 @@ pub(super) fn solve_race(std: Arc<StdForm>, opts: crate::types::LpOptions) -> Si
     let t0 = std::time::Instant::now();
     let cancel = Arc::new(AtomicBool::new(false));
     let (tx, rx) = mpsc::channel::<(Engine, Option<SimplexResult>)>();
+    // 二段解法 (段階 B) が書き、内点法が読む元の問題の最適値の下界。
+    let bound = crate::cancel::SharedBound::new(std.n_total, std.n_rows);
 
     {
-        let (std, cancel, tx) = (std.clone(), cancel.clone(), tx.clone());
+        let (std, cancel, tx, bound) = (std.clone(), cancel.clone(), tx.clone(), bound.clone());
         std::thread::spawn(move || {
-            let r = pool_s.install(|| crate::cancel::with_token(Some(cancel), || solve_std_form_decomposed(&std, &opts)));
+            let r = pool_s.install(|| {
+                crate::cancel::with_token(Some(cancel), || crate::cancel::with_bound(Some(bound), || solve_std_form_decomposed(&std, &opts)))
+            });
             let _ = tx.send((Engine::Simplex, Some(r)));
         });
     }
     {
-        let (std, cancel, tx) = (std.clone(), cancel.clone(), tx.clone());
+        let (std, cancel, tx, bound) = (std.clone(), cancel.clone(), tx.clone(), bound.clone());
         std::thread::spawn(move || {
-            let r = pool_i.install(|| crate::cancel::with_token(Some(cancel), || crossover::solve_ipm_crossover(&std)));
+            let r = pool_i.install(|| {
+                crate::cancel::with_token(Some(cancel), || crate::cancel::with_bound(Some(bound), || crossover::solve_ipm_crossover(&std)))
+            });
             let _ = tx.send((Engine::IpmCrossover, r));
         });
     }

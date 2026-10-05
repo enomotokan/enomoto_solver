@@ -825,6 +825,40 @@ pub(super) fn solve_stage_a(std: &StdForm, opts: &crate::types::LpOptions) -> Op
     }
 }
 
+/// 今の基底の双対 `y = B^{-T} c_B` (真の費用) から、元の問題の最適値の下界
+/// `L(y) = b·y + Σ_j min_{l_j <= x_j <= u_j} (c - A^T y)_j x_j` を計算する。どの `y` でも正しい下界で、
+/// 無限の境界の向きに有意な被約費用がある列があれば `-inf` (使えない)。
+fn lower_bound_from_basis(std: &StdForm, basis: &[usize], lu: &sparse_lu::FtLu) -> f64 {
+    let m = std.n_rows;
+    let cb: Vec<f64> = basis.iter().map(|&j| std.c[j]).collect();
+    let mut y = vec![0.0; m];
+    let mut scratch = vec![0.0; m];
+    lu.solve_transpose_into(&cb, &mut scratch, &mut y);
+    let ymax = y.iter().fold(0.0f64, |a, v| a.max(v.abs()));
+    let tiny = 1e-9 * (1.0 + ymax);
+    let mut lb: f64 = std.b.iter().zip(&y).map(|(b, y)| b * y).sum();
+    for j in 0..std.n_total {
+        let mut d = std.c[j];
+        for &(i, a) in std.cols.col(j) {
+            d -= a * y[i];
+        }
+        if d > 0.0 {
+            if std.lb[j].is_finite() {
+                lb += d * std.lb[j];
+            } else if d > tiny {
+                return f64::NEG_INFINITY;
+            }
+        } else if d < 0.0 {
+            if std.ub[j].is_finite() {
+                lb += d * std.ub[j];
+            } else if -d > tiny {
+                return f64::NEG_INFINITY;
+            }
+        }
+    }
+    lb
+}
+
 /// 段階 A の終わりで打ち切るよう求められていれば、結果を置いて真を返す。
 fn stop_after_stage_a(std: &StdForm, z1: f64, x1: Vec<f64>, basis: &[usize], lu: &sparse_lu::FtLu) -> bool {
     if !STOP_AFTER_STAGE_A.with(|f| f.get()) {
@@ -3457,9 +3491,17 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         }};
     }
     // ===== 主ループ(1 反復 = chuzr → BTRAN → PRICE → chuzc1/BFRT → FTRAN → 更新) =====
+    // 同時実行で内点法に渡す下界 (同じ形の問題を解いているときだけ、段階 B の間に書く)。
+    let shared_bound = crate::cancel::bound().filter(|b| b.n_total == n_total && b.n_rows == m);
+    let bound_every = tunable!("ENOMOTO_T_RACE_BOUND_EVERY", 100usize, usize).max(1);
     for iter_idx in 0..max_iters {
         if iter_idx & 63 == 0 && crate::cancel::is_cancelled() {
             return None; // 同時実行の相手が先に結論を出した
+        }
+        if let Some(sb) = &shared_bound {
+            if phase == Phase::B && iter_idx % bound_every == 0 {
+                sb.raise(lower_bound_from_basis(std, &basis, &lu));
+            }
         }
         // 前反復終了時点で候補短縮リストが有効だったか(この反復では一旦無効にする)。
         let shortlist_was_valid = shortlist_valid;
