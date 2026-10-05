@@ -352,6 +352,10 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
     // 真なら近接中心 (ξ, λ, ν) を残差の減り方によらず毎反復更新する。
     let prox_always = tunable!("ENOMOTO_T_IPM_PROX_ALWAYS", 0u8, u8) != 0;
     let delta_min = tunable!("ENOMOTO_T_IPM_DELTA_MIN", DELTA_MIN, f64);
+    // 正則化 ρ・δ の下げ方 (試験用、反復の終わりの説明参照)。0: PIQP、1: IP-PMM の著者の実装、
+    // 2: ρ = δ = κ μ、3: PIQP の規則を κ μ で頭打ち。
+    let reg_mode = tunable!("ENOMOTO_T_IPM_REG_MODE", 0u8, u8);
+    let reg_kappa = tunable!("ENOMOTO_T_IPM_REG_KAPPA", 1.0f64, f64);
 
     // ---- 初期化: W = 1 + δ の正則化 KKT 系を 1 回解く ----
     let w0 = 1.0 + delta;
@@ -728,21 +732,37 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
         csr_mat_vec_into(a, &x_new, &mut ax_new);
         csr_mat_t_vec_into(a, &y_new, &mut aty_new);
         let res_new = residuals(&ax_new, b, &x_new, &lo, &up, &lo.s_new, &up.s_new, c, &aty_new, &lo.z_new, &up.z_new, &pos, &mut dual_new);
+        // 残差が十分減らなかった反復の正則化の減らし方 `(1 - r/slow_div)`。既定は PIQP の 3、
+        // 試験用 `ENOMOTO_T_IPM_REG_MODE=1` で IP-PMM の著者の実装の `(1 - 0.666 r)` (slow_div = 1/0.666)。
+        let slow_div = if reg_mode == 1 { 1.0 / 0.666 } else { SLOW_DECREASE_DIVISOR };
         if prox_always || res_new.primal <= RES_DECREASE_RATIO * res.primal {
             lambda.copy_from_slice(&y_new);
             lo.nu.copy_from_slice(&lo.z_new);
             up.nu.copy_from_slice(&up.z_new);
             delta *= 1.0 - r;
         } else {
-            delta *= 1.0 - r / SLOW_DECREASE_DIVISOR;
+            delta *= 1.0 - r / slow_div;
         }
-        delta = delta.max(delta_min);
         if prox_always || res_new.dual <= RES_DECREASE_RATIO * res.dual {
             xi.copy_from_slice(&x_new);
             rho *= 1.0 - r;
         } else {
-            rho *= 1.0 - r / SLOW_DECREASE_DIVISOR;
+            rho *= 1.0 - r / slow_div;
         }
+        // 正則化を μ に連動させる (Pougkakiotis–Gondzio の理論の版は ρ_k = δ_k = μ_k):
+        //   2: ρ = δ = κ μ (近接中心の更新の条件は上のまま)、3: 上の規則の値を κ μ で頭打ちにする。
+        if reg_mode == 2 || reg_mode == 3 {
+            let mu_new = gap_after / n_bnd as f64;
+            let target = reg_kappa * mu_new;
+            if reg_mode == 2 {
+                rho = target;
+                delta = target;
+            } else {
+                rho = rho.min(target);
+                delta = delta.min(target);
+            }
+        }
+        delta = delta.max(delta_min);
         rho = rho.max(rho_min);
 
         std::mem::swap(&mut x, &mut x_new);
