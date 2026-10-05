@@ -91,6 +91,11 @@ mod prm {
     pub const IPM_ACCEPT_REL: f64 = 1e4;
     /// 基底の選択で列を受理する残差の相対閾値。
     pub const LI_TOL: f64 = 1e-9;
+    /// 双対の押し出しの開始時に `|D| < DUAL_SKIP_FRAC · m` なら押し出しを飛ばす (欠けた階数が多すぎ、
+    /// 押し出しの歩数 ≈ `m - rank(A_D)` が仕上げの単体法より高くつく: cre-*, ken-*)。
+    pub const DUAL_SKIP_FRAC: f64 = 0.7;
+    /// 双対の押し出しの時間が内点法の時間のこの倍数を超えたら打ち切る。
+    pub const DUAL_TIME_FACTOR: f64 = 2.0;
 }
 
 /// 拡大系 `K = [diag(t) A^T; A diag(m)]` の分解と、分解後に足した縁取り
@@ -859,11 +864,12 @@ pub(super) fn solve_ipm_crossover(std: &StdForm) -> Option<SimplexResult> {
     // 雑音の向きで列を D に入れて基底の質を壊すことがある (ken-13)。
     let vy_rel = tunable!("ENOMOTO_T_XO_VY_REL", 0.0f64, f64);
     let mut vn_first = f64::NAN;
-    // 試験用: 開始時の |D|/m が `skip_frac` 未満なら双対の押し出しを飛ばし (`ENOMOTO_T_XO_DUAL_SKIP_FRAC`)、
+    // 開始時の |D|/m が `skip_frac` 未満なら双対の押し出しを飛ばし (`ENOMOTO_T_XO_DUAL_SKIP_FRAC`)、
     // 押し出しの時間が内点法の時間の `time_factor` 倍を超えたら打ち切る (`ENOMOTO_T_XO_DUAL_TIME_FACTOR`)。
-    // どちらも 0 で無効。残りの階数は仕上げの単体法が埋める。
-    let skip_frac = tunable!("ENOMOTO_T_XO_DUAL_SKIP_FRAC", 0.0f64, f64);
-    let time_factor = tunable!("ENOMOTO_T_XO_DUAL_TIME_FACTOR", 0.0f64, f64);
+    // どちらも 0 で無効。残りの階数は仕上げの単体法が埋める (既定値は Netlib + Kennington の比較で
+    // 決めた: docs/crossover.md)。
+    let skip_frac = tunable!("ENOMOTO_T_XO_DUAL_SKIP_FRAC", prm::DUAL_SKIP_FRAC, f64);
+    let time_factor = tunable!("ENOMOTO_T_XO_DUAL_TIME_FACTOR", prm::DUAL_TIME_FACTOR, f64);
     let t_dual0 = Instant::now();
     let skip_dual = (n_active as f64) < skip_frac * m as f64;
     if skip_dual && debug {

@@ -27,11 +27,11 @@ use faer::{Conj, Side};
 pub use crate::sparse::{FaerCsr, csr_row_iter, csr_mat_t_vec, csr_mat_t_vec_into, csr_mat_vec, csr_mat_vec_into};
 use crate::params::interior_point::KKT_PARALLELISM;
 
-/// 数値分解に使う並列度。試験用 `ENOMOTO_T_FACTOR_SEQ=1` で逐次 (Fable の調査で、この大きさの疎 Cholesky では
-/// faer の並列分解の分割の手間が計算を上回り、逐次の方が 1.5〜2 倍速かった)。作業領域の見積もり (`_req`) にも
-/// 同じ値を使う。
+/// 数値分解に使う並列度。既定は逐次 (Fable の調査と Netlib + Kennington の比較で、この大きさの疎 Cholesky
+/// では faer の並列分解の分割の手間が計算を上回り、逐次の方が速かった)。試験用 `ENOMOTO_T_FACTOR_SEQ=0` で
+/// 並列。作業領域の見積もり (`_req`) にも同じ値を使う。
 fn factor_par() -> faer::Parallelism<'static> {
-    if tunable!("ENOMOTO_T_FACTOR_SEQ", 0u8, u8) != 0 {
+    if tunable!("ENOMOTO_T_FACTOR_SEQ", 1u8, u8) != 0 {
         faer::Parallelism::None
     } else {
         KKT_PARALLELISM
