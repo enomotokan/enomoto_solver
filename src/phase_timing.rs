@@ -20,6 +20,14 @@
 //!   - `trivial_unbounded`: 制約の無い成分で非有界を結論した。
 //!   - `retry`: 数値的破綻から安全モードで最初から解き直した (以後の記録は解き直しのもの)。
 //!   - `simplex_end`: 単体法 (全成分) が終わり、後処理の直前。
+//!   - `ipm_end` / `primal_push_end` / `dual_push_end` / `basis_end` / `megiddo_end` / `cleanup_end`:
+//!     内点法 + クロスオーバーの各段の終わり (`simplex::crossover`)。
+//!
+//! 時刻ではない数値 ([`record`]、名前が `xo_` で始まる。クロスオーバーの統計):
+//!   - `xo_excess`: 主の押し出しの終わりの `|B| - m` (負もありうる)。
+//!   - `xo_leftover`: 基底に選ばれず、境界から離れたまま残った基底候補 (超基底変数) の数。
+//!   - `xo_megiddo_pivots` / `xo_megiddo_bound` / `xo_megiddo_unresolved`: Megiddo 式の押し出しで、
+//!     基底と入れ替えた数・自身の境界に達した数・押し出せず境界へ移した数。
 
 use std::sync::Mutex;
 use std::time::Instant;
@@ -39,6 +47,16 @@ pub fn mark(name: &'static str) {
     if let Ok(mut s) = STATE.lock() {
         if let Some((t0, events)) = s.as_mut() {
             events.push((name, t0.elapsed().as_secs_f64()));
+        }
+    }
+}
+
+/// 節目の時刻ではなく、数値 `value` を `name` の名前で記録する (クロスオーバーの統計など。
+/// 計測スクリプトは名前で区別する)。[`start`] 前なら何もしない。
+pub fn record(name: &'static str, value: f64) {
+    if let Ok(mut s) = STATE.lock() {
+        if let Some((_, events)) = s.as_mut() {
+            events.push((name, value));
         }
     }
 }

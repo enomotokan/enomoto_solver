@@ -38,9 +38,9 @@
 //! - 比率テストで同時に境界 (双対では 0) に達した列は許容誤差でまとめて移す。
 //! - 基底の選択は優先順の左から順の疎 LU で、スラック列 (単位列) は消去なしで受理できる。
 
-use super::basis_kernel::factorize_basis;
+use super::basis_kernel::{factorize_basis, ft_max_updates, BasisKernel};
 use super::slope_intercept_dual::polish_with_true_bounds;
-use super::{perturb_random, NbStatus, SimplexResult, StdForm};
+use super::{perturb_random, sparse_lu, NbStatus, SimplexResult, StdForm};
 use crate::interior_point::boxed::solve_box_lp;
 use crate::interior_point::kkt::AugKkt;
 use crate::sparse::{csr_from_rows, sparse_dot_dense};
@@ -593,8 +593,16 @@ pub(super) fn solve_ipm_crossover(std: &StdForm) -> Option<SimplexResult> {
     let mut corr_buf = vec![0.0; dim];
     // 向きが見つからなかったとき、摂動を引き直して 1 回だけ分解し直したか。
     let mut retried = false;
+    // 試験用: 残りの超基底が少なくなったら (`|B| <= m + megiddo_switch`)、射影の押し出しを打ち切って
+    // 基底の選択 + Megiddo 式の押し出しに任せる (`ENOMOTO_T_XO_MEGIDDO_SWITCH`、0 で無効。
+    // Megiddo 式の押し出しが有効なときだけ効く)。
+    let megiddo = tunable!("ENOMOTO_T_XO_MEGIDDO", 0u8, u8) != 0;
+    let megiddo_switch = if megiddo { tunable!("ENOMOTO_T_XO_MEGIDDO_SWITCH", 0usize, usize) } else { 0 };
     loop {
         if n_basic == 0 || (round >= 2 && n_basic <= m && n_basic >= n_basic_last) || round > max_primal {
+            break;
+        }
+        if megiddo_switch > 0 && n_basic <= m + megiddo_switch {
             break;
         }
         n_basic_last = n_basic;
@@ -773,6 +781,7 @@ pub(super) fn solve_ipm_crossover(std: &StdForm) -> Option<SimplexResult> {
         primal_correct(&mut bk, &mut x, &basic_list, &mut corr_buf, &mut resid);
     }
     st.basic_after_push = n_basic;
+    crate::phase_timing::record("xo_excess", n_basic as f64 - m as f64);
     if debug {
         eprintln!("CROSSOVER resid after primal push={:.3e}", primal_resid(std, &x));
     }
@@ -1119,7 +1128,44 @@ pub(super) fn solve_ipm_crossover(std: &StdForm) -> Option<SimplexResult> {
             }
         });
     }
-    let lu = factorize_basis(std, &basis_pos, None)?;
+    let mut lu = factorize_basis(std, &basis_pos, None)?;
+    // 基底に選ばれず、境界から離れたまま残った基底候補 (超基底変数)。今は上で近い方の境界へ移した
+    // 扱いにしてあり、Megiddo 式の押し出しが有効なら、そこから主実行可能性を保って境界へ押し出す。
+    let leftover: Vec<usize> = (0..n)
+        .filter(|&j| {
+            ps[j] == PStat::Basic
+                && basis_pos[j].is_none()
+                && match nb_status[j] {
+                    Some(NbStatus::Lower) => x[j] - std.lb[j] > tol,
+                    Some(NbStatus::Upper) => std.ub[j] - x[j] > tol,
+                    _ => x[j].abs() > tol,
+                }
+        })
+        .collect();
+    crate::phase_timing::record("xo_leftover", leftover.len() as f64);
+    if debug {
+        eprintln!("CROSSOVER leftover superbasics={} (|B|-m after primal push={})", leftover.len(), st.basic_after_push as i64 - m as i64);
+    }
+    if megiddo && !leftover.is_empty() {
+        let ms = megiddo_push(std, &x, &leftover, &mut basis, &mut basis_pos, &mut nb_status, lu)?;
+        lu = ms.lu;
+        crate::phase_timing::record("xo_megiddo_pivots", ms.pivots as f64);
+        crate::phase_timing::record("xo_megiddo_bound", ms.to_bound as f64);
+        crate::phase_timing::record("xo_megiddo_unresolved", ms.unresolved as f64);
+        crate::phase_timing::mark("megiddo_end");
+        if debug {
+            eprintln!(
+                "CROSSOVER megiddo pivots={} to_bound={} unresolved={} t={:.3}s",
+                ms.pivots,
+                ms.to_bound,
+                ms.unresolved,
+                t0.elapsed().as_secs_f64()
+            );
+        }
+        if crate::cancel::is_cancelled() {
+            return None;
+        }
+    }
     if debug {
         eprintln!("CROSSOVER stats {st:?}");
         // 仕上げ前の基底の主・双対実行不能の数と最大値。
@@ -1175,6 +1221,229 @@ pub(super) fn solve_ipm_crossover(std: &StdForm) -> Option<SimplexResult> {
         eprintln!("CROSSOVER cleanup status={:?} total t={:.3}s", res.as_ref().map(|r| r.status.clone()), t0.elapsed().as_secs_f64());
     }
     res
+}
+
+/// [`megiddo_push`] の結果。
+struct MegiddoResult {
+    /// 最後の基底の分解 (押し出しの後で分解し直したもの)。
+    lu: sparse_lu::FtLu,
+    /// 超基底変数を基底に入れ、塞いだ基底変数を境界へ出した回数。
+    pivots: usize,
+    /// 超基底変数自身が境界に達した数。
+    to_bound: usize,
+    /// どちら向きにも塞がれず押し出せなかった数 (呼び出し側が先に決めた境界に置いたまま)。
+    unresolved: usize,
+}
+
+/// Megiddo (1991) 式の超基底変数の押し出し。
+///
+/// 正則な基底 `B` (`basis`/`basis_pos`、分解 `lu`) と、基底に選ばれず境界から離れたまま残った
+/// 列 `sup` (値は `x`) を受け取り、主実行可能性を保ったまま `sup` を 1 本ずつ消す。`j ∈ sup` を
+/// 向き `σ` に動かすと `x_B` は `-σ B^{-1} a_j` の向きに動く (`A x = b` は厳密に保たれる)。
+/// 比率テストで
+///
+/// - `x_j` 自身が先に境界に達したら、`j` はその境界の非基底になる。
+/// - 基底変数 `x_r` が先に境界に達したら、`j` を基底位置 `r` に入れ、`x_r` をその境界の非基底に出す。
+///
+/// どちらでも超基底変数は 1 本減るので、`|sup|` 回で終わる。`σ` は被約費用 `d_j` が目的を
+/// 悪化させない向き (`d_j ≈ 0` なら近い方の境界の向き) を選ぶ。比率テストは Harris の 2 段で、
+/// 既に僅かに外れている基底変数は外向きには動かさない (歩幅 0 で塞ぐ)。両向きとも塞がれない列
+/// (自由列だけの向き) は、`nb_status` に入っている境界 (呼び出し側が決めた近い方) のまま残す。
+///
+/// 呼び出し側の `nb_status` は、`sup` の列も含めて全非基底列に入っていること。終わりに分解し
+/// 直した `lu` を返す。基底が特異になったら `None` (呼び出し側は解き直す)。
+fn megiddo_push(
+    std: &StdForm,
+    x: &[f64],
+    sup: &[usize],
+    basis: &mut [usize],
+    basis_pos: &mut [Option<usize>],
+    nb_status: &mut [Option<NbStatus>],
+    mut lu: sparse_lu::FtLu,
+) -> Option<MegiddoResult> {
+    let m = std.n_rows;
+    let n = std.n_total;
+    let tol_p = tunable!("ENOMOTO_T_XO_MEGIDDO_TOL", 1e-9f64, f64);
+    let piv_rel = tunable!("ENOMOTO_T_XO_MEGIDDO_PIV", 1e-7f64, f64);
+    // 非基底の値: `sup` は `x` の値、それ以外は `nb_status` の境界 (自由列は 0)。
+    let mut is_sup = vec![false; n];
+    for &j in sup {
+        is_sup[j] = true;
+    }
+    let mut xs: Vec<f64> = sup.iter().map(|&j| x[j]).collect();
+    let nb_value = |j: usize, st: Option<NbStatus>| match st {
+        Some(NbStatus::Lower) => std.lb[j],
+        Some(NbStatus::Upper) => std.ub[j],
+        _ => 0.0,
+    };
+    // `x_B = B^{-1} (b - Σ_{非基底} a_j x_j)`。`sup` の値は `vals` (添字は `sup` の位置) から取る。
+    let recompute_xb = |lu: &sparse_lu::FtLu, basis_pos: &[Option<usize>], nb_status: &[Option<NbStatus>], is_sup: &[bool], sup_val: &dyn Fn(usize) -> f64, xb: &mut [f64]| {
+        let mut rhs = std.b.clone();
+        for j in 0..n {
+            if basis_pos[j].is_some() {
+                continue;
+            }
+            let v = if is_sup[j] { sup_val(j) } else { nb_value(j, nb_status[j]) };
+            if v != 0.0 {
+                for &(i, a) in col(std, j) {
+                    rhs[i] -= a * v;
+                }
+            }
+        }
+        let mut scratch = vec![0.0; m];
+        lu.solve_into(&rhs, &mut scratch, xb);
+    };
+    let mut sup_idx = vec![usize::MAX; n];
+    for (k, &j) in sup.iter().enumerate() {
+        sup_idx[j] = k;
+    }
+    let mut xb = vec![0.0; m];
+    {
+        let xs_ref = &xs;
+        let sv = |j: usize| xs_ref[sup_idx[j]];
+        recompute_xb(&lu, basis_pos, nb_status, &is_sup, &sv, &mut xb);
+    }
+    let mut cb: Vec<f64> = basis.iter().map(|&j| std.c[j]).collect();
+    let mut kernel = BasisKernel::new(m, ft_max_updates(m));
+    let mut d = vec![0.0; m];
+    let mut rho = vec![0.0; m];
+    let (mut pivots, mut to_bound, mut unresolved) = (0usize, 0usize, 0usize);
+    // 向き `σ` での比率テスト。(歩幅, 塞ぐ基底位置 (自身なら None), 塞いだ境界は上限か)。
+    let ratio = |sigma: f64, j: usize, xj: f64, d: &[f64], xb: &[f64], basis: &[usize]| -> (f64, Option<usize>, bool) {
+        let own = if sigma > 0.0 { std.ub[j] - xj } else { xj - std.lb[j] };
+        let dmax = d.iter().fold(0.0f64, |a, v| a.max(v.abs()));
+        let piv_tol = (piv_rel * dmax).max(1e-11);
+        // 1 段目: 許容誤差 tol_p だけ緩めた歩幅の上限。
+        let mut tmax = own.max(0.0) + tol_p;
+        for k in 0..m {
+            let dk = -sigma * d[k];
+            if dk.abs() <= piv_tol {
+                continue;
+            }
+            let q = basis[k];
+            let t = if dk < 0.0 {
+                if !std.lb[q].is_finite() {
+                    continue;
+                }
+                (xb[k] - std.lb[q] + tol_p).max(0.0) / -dk
+            } else {
+                if !std.ub[q].is_finite() {
+                    continue;
+                }
+                (std.ub[q] - xb[k] + tol_p).max(0.0) / dk
+            };
+            tmax = tmax.min(t);
+        }
+        if !tmax.is_finite() {
+            return (f64::INFINITY, None, false);
+        }
+        // 2 段目: 上限以内で塞ぐ候補のうち |d_k| が最大の基底変数 (自身の境界は上限以内なら優先しない)。
+        let mut best: Option<(usize, f64, bool)> = None;
+        let mut best_piv = 0.0;
+        for k in 0..m {
+            let dk = -sigma * d[k];
+            if dk.abs() <= piv_tol {
+                continue;
+            }
+            let q = basis[k];
+            let (t, up) = if dk < 0.0 {
+                if !std.lb[q].is_finite() {
+                    continue;
+                }
+                ((xb[k] - std.lb[q]).max(0.0) / -dk, false)
+            } else {
+                if !std.ub[q].is_finite() {
+                    continue;
+                }
+                ((std.ub[q] - xb[k]).max(0.0) / dk, true)
+            };
+            if t <= tmax && dk.abs() > best_piv {
+                best_piv = dk.abs();
+                best = Some((k, t, up));
+            }
+        }
+        match best {
+            // 自身の境界が基底変数より手前 (または同じ) なら自身を境界へ。
+            Some((k, t, up)) if t < own => (t, Some(k), up),
+            _ if own.is_finite() => (own.max(0.0), None, sigma > 0.0),
+            Some((k, t, up)) => (t, Some(k), up),
+            None => (f64::INFINITY, None, false),
+        }
+    };
+    for (si, &j) in sup.iter().enumerate() {
+        if si % 64 == 0 && crate::cancel::is_cancelled() {
+            break;
+        }
+        let xj = xs[si];
+        kernel.ftran_col(&lu, col(std, j), &mut d);
+        let mut dj = std.c[j];
+        for k in 0..m {
+            if d[k] != 0.0 {
+                dj -= cb[k] * d[k];
+            }
+        }
+        let dtol = 1e-9 * (1.0 + std.c[j].abs());
+        // 目的を悪化させない向き。d_j ≈ 0 なら近い方の有限の境界の向き。
+        let pref = if dj > dtol {
+            -1.0
+        } else if dj < -dtol {
+            1.0
+        } else {
+            let dl = xj - std.lb[j];
+            let du = std.ub[j] - xj;
+            if dl <= du { -1.0 } else { 1.0 }
+        };
+        let mut sigma = pref;
+        let (mut t, mut blk, mut up) = ratio(sigma, j, xj, &d, &xb, basis);
+        if !t.is_finite() && dj.abs() <= dtol {
+            sigma = -pref;
+            (t, blk, up) = ratio(sigma, j, xj, &d, &xb, basis);
+        }
+        if !t.is_finite() {
+            // 押し出せない (自由列だけの向き、または目的が下がり続ける向き): 呼び出し側の境界のまま。
+            unresolved += 1;
+            is_sup[j] = false;
+            continue;
+        }
+        // x_B ← x_B - t σ d
+        let ts = t * sigma;
+        if ts != 0.0 {
+            for k in 0..m {
+                if d[k] != 0.0 {
+                    xb[k] -= ts * d[k];
+                }
+            }
+        }
+        is_sup[j] = false;
+        match blk {
+            None => {
+                nb_status[j] = Some(if up { NbStatus::Upper } else { NbStatus::Lower });
+                to_bound += 1;
+            }
+            Some(r) => {
+                let q = basis[r];
+                kernel.btran_row(&lu, r, &mut rho);
+                basis[r] = j;
+                basis_pos[j] = Some(r);
+                basis_pos[q] = None;
+                nb_status[j] = None;
+                nb_status[q] = Some(if up { NbStatus::Upper } else { NbStatus::Lower });
+                xb[r] = xj + ts;
+                cb[r] = std.c[j];
+                pivots += 1;
+                if kernel.update_and_check(&mut lu, r).is_due() {
+                    lu = factorize_basis(std, basis_pos, Some(&lu))?;
+                    kernel = BasisKernel::new(m, ft_max_updates(m));
+                    let xs_ref = &xs;
+                    let sv = |jj: usize| xs_ref[sup_idx[jj]];
+                    recompute_xb(&lu, basis_pos, nb_status, &is_sup, &sv, &mut xb);
+                }
+            }
+        }
+        xs[si] = f64::NAN; // 使い終わり (is_sup が偽なので読まれない)
+    }
+    let lu = factorize_basis(std, basis_pos, Some(&lu))?;
+    Some(MegiddoResult { lu, pivots, to_bound, unresolved })
 }
 
 /// 優先順に列を受け取り、一次独立なら基底に加える左から順の疎 LU (Gilbert–Peierls)。
