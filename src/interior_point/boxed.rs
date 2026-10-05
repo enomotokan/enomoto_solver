@@ -272,6 +272,13 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
     let mut rho = RHO0;
     let mut delta = DELTA0;
     let rho_min = tunable!("ENOMOTO_T_IPM_RHO_MIN", RHO_MIN, f64);
+    // 停止の許容誤差 (絶対・相対とも。既定は PIQP の 1e-8)。
+    let eps_abs = tunable!("ENOMOTO_T_IPM_EPS", EPS_ABS, f64);
+    let eps_rel = tunable!("ENOMOTO_T_IPM_EPS", EPS_REL, f64);
+    // Gondzio の多重中心性補正子の最大回数 (0 で Mehrotra の予測子・修正子だけ)。
+    let gondzio_max = tunable!("ENOMOTO_T_IPM_GONDZIO", 0usize, usize);
+    // 真なら近接中心 (ξ, λ, ν) を残差の減り方によらず毎反復更新する。
+    let prox_always = tunable!("ENOMOTO_T_IPM_PROX_ALWAYS", 0u8, u8) != 0;
     let delta_min = tunable!("ENOMOTO_T_IPM_DELTA_MIN", DELTA_MIN, f64);
 
     // ---- 初期化: W = 1 + δ の正則化 KKT 系を 1 回解く ----
@@ -388,9 +395,9 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
         let gx = x.par_iter().enumerate().with_min_len(PAR_MIN_LEN).filter(|&(j, _)| pos.lo[j] != usize::MAX || pos.up[j] != usize::MAX).map(|(_, v)| v.abs()).reduce(|| 0.0, f64::max);
         let s_inf = norm_inf(&lo.s).max(norm_inf(&up.s));
         let z_inf = norm_inf(&lo.z).max(norm_inf(&up.z));
-        let bnd_p = EPS_ABS + EPS_REL * norm_inf(&ax).max(norm_b).max(gx).max(norm_h).max(s_inf);
-        let bnd_d = EPS_ABS + EPS_REL * norm_inf(&aty).max(z_inf).max(norm_c);
-        let bnd_g = EPS_ABS + EPS_REL * cx.abs().max(by.abs()).max(hz.abs());
+        let bnd_p = eps_abs + eps_rel * norm_inf(&ax).max(norm_b).max(gx).max(norm_h).max(s_inf);
+        let bnd_d = eps_abs + eps_rel * norm_inf(&aty).max(z_inf).max(norm_c);
+        let bnd_g = eps_abs + eps_rel * cx.abs().max(by.abs()).max(hz.abs());
         rel = (res.primal / bnd_p, res.dual / bnd_d, gap / bnd_g);
         if debug {
             eprintln!(
@@ -517,8 +524,52 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
         let t_s = std::time::Instant::now();
         newton(&mut kkt, a, &top, delta, &r_x, &r_y, &mut lo, &mut up, &pos, &mut rhs, n, &mut refine_work);
         prof.1 += t_s.elapsed().as_secs_f64();
-        let alpha_p = fraction_to_boundary(&lo.s, &lo.ds).min(fraction_to_boundary(&up.s, &up.ds));
-        let alpha_d = fraction_to_boundary(&lo.z, &lo.dz).min(fraction_to_boundary(&up.z, &up.dz));
+        let mut alpha_p = fraction_to_boundary(&lo.s, &lo.ds).min(fraction_to_boundary(&up.s, &up.ds));
+        let mut alpha_d = fraction_to_boundary(&lo.z, &lo.dz).min(fraction_to_boundary(&up.z, &up.dz));
+        // 3) Gondzio の多重中心性補正子 (Gondzio 1996、Colombo & Gondzio 2008): ステップ幅を伸ばした試行点の
+        //    相補積 v を [β_min σμ, β_max σμ] に寄せる補正を相補性の右辺に足し、同じ分解で解き直す。
+        //    ステップ幅が十分伸びたときだけ採る。
+        for _ in 0..gondzio_max {
+            const DELTA_ALPHA: f64 = 0.1;
+            const BETA_MIN: f64 = 0.1;
+            const BETA_MAX: f64 = 10.0;
+            const ACCEPT: f64 = 0.01;
+            let (ap0, ad0) = (alpha_p, alpha_d);
+            if ap0.min(ad0) >= 0.999 {
+                break;
+            }
+            let (tp, td) = ((ap0 + DELTA_ALPHA).min(1.0), (ad0 + DELTA_ALPHA).min(1.0));
+            let target = sigma * mu;
+            let saved_rhs = rhs.clone();
+            let saved: Vec<(Vec<f64>, Vec<f64>, Vec<f64>)> =
+                [&lo, &up].iter().map(|sd| (sd.r_s.clone(), sd.dz.clone(), sd.ds.clone())).collect();
+            for side in [&mut lo, &mut up] {
+                let (sv, zv, dsv, dzv) = (&side.s, &side.z, &side.ds, &side.dz);
+                side.r_s.par_iter_mut().enumerate().with_min_len(PAR_MIN_LEN).for_each(|(k, r)| {
+                    let v = (sv[k] + tp * dsv[k]) * (zv[k] + td * dzv[k]);
+                    let t = v.clamp(BETA_MIN * target, BETA_MAX * target);
+                    // 大きすぎる積を下げる補正は -β_max σμ までに抑える。
+                    *r += (t - v).max(-BETA_MAX * target);
+                });
+            }
+            let t_s = std::time::Instant::now();
+            newton(&mut kkt, a, &top, delta, &r_x, &r_y, &mut lo, &mut up, &pos, &mut rhs, n, &mut refine_work);
+            prof.1 += t_s.elapsed().as_secs_f64();
+            let ap1 = fraction_to_boundary(&lo.s, &lo.ds).min(fraction_to_boundary(&up.s, &up.ds));
+            let ad1 = fraction_to_boundary(&lo.z, &lo.dz).min(fraction_to_boundary(&up.z, &up.dz));
+            if rhs.iter().all(|v| v.is_finite()) && ap1 + ad1 >= ap0 + ad0 + ACCEPT * DELTA_ALPHA {
+                alpha_p = ap1;
+                alpha_d = ad1;
+            } else {
+                rhs.copy_from_slice(&saved_rhs);
+                for (side, (rs, dz, ds)) in [&mut lo, &mut up].into_iter().zip(saved) {
+                    side.r_s = rs;
+                    side.dz = dz;
+                    side.ds = ds;
+                }
+                break;
+            }
+        }
         {
             let (dx, dy) = rhs.split_at(n);
             x_new.par_iter_mut().enumerate().with_min_len(PAR_MIN_LEN).for_each(|(j, v)| *v = x[j] + alpha_p * dx[j]);
@@ -536,7 +587,7 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
         csr_mat_vec_into(a, &x_new, &mut ax_new);
         csr_mat_t_vec_into(a, &y_new, &mut aty_new);
         let res_new = residuals(&ax_new, b, &x_new, &lo, &up, &lo.s_new, &up.s_new, c, &aty_new, &lo.z_new, &up.z_new, &pos, &mut dual_new);
-        if res_new.primal <= RES_DECREASE_RATIO * res.primal {
+        if prox_always || res_new.primal <= RES_DECREASE_RATIO * res.primal {
             lambda.copy_from_slice(&y_new);
             lo.nu.copy_from_slice(&lo.z_new);
             up.nu.copy_from_slice(&up.z_new);
@@ -545,7 +596,7 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
             delta *= 1.0 - r / SLOW_DECREASE_DIVISOR;
         }
         delta = delta.max(delta_min);
-        if res_new.dual <= RES_DECREASE_RATIO * res.dual {
+        if prox_always || res_new.dual <= RES_DECREASE_RATIO * res.dual {
             xi.copy_from_slice(&x_new);
             rho *= 1.0 - r;
         } else {
