@@ -41,7 +41,7 @@
 use super::slope_intercept_dual::{polish_with_true_bounds, refactorize};
 use super::{perturb_random, NbStatus, SimplexResult, StdForm};
 use crate::interior_point::boxed::solve_box_lp;
-use crate::interior_point::kkt::{AugKkt, FaerCsr};
+use crate::interior_point::kkt::AugKkt;
 use crate::sparse::{csr_from_rows, sparse_dot_dense};
 use crate::types::Status;
 use std::time::Instant;
@@ -97,75 +97,143 @@ mod prm {
 /// `w = K^{-1} r - (K^{-1} U) S^{-1} (-(U^T K^{-1} r))` で、新しい縁 1 本の求解と `O(k·dim)` だけで済む。
 /// 縁の手間の累計が数値分解 1 回の時間を超えたら ([`Self::should_refactor`]) 分解し直す。
 struct BorderedKkt {
-    kkt: AugKkt,
+    /// 直近の分解の拡大系 (列の部分集合 `cols` だけ)。
+    kkt: Option<AugKkt>,
+    /// 全体の列数 `n` と行数 `m` (呼び出し側の添字は全体の `n + m`)。
+    n: usize,
+    m: usize,
+    /// 分解に含めた列 (`top_j < BIG`) とその局所添字 (`local[j]`、含まない列は `usize::MAX`)。
+    cols: Vec<usize>,
+    local: Vec<usize>,
+    /// 局所系の次元 `|cols| + m`。
     dim: usize,
-    /// 縁の列 (拡大系の添字での疎ベクトル)。
+    /// 縁の列 (局所系の添字での疎ベクトル)。
     u: Vec<Vec<(usize, f64)>>,
-    /// `K^{-1} u_i` (密)。
+    /// `K^{-1} u_i` (密、局所系)。
     kinv_u: Vec<Vec<f64>>,
     /// Schur 補行列 `S = C - U^T K^{-1} U` (行優先、`k x k`、縁を足すたびに広げる)。
     schur: Vec<Vec<f64>>,
-    /// `K^{-1} r` (このエポックの右辺)。
+    /// `K^{-1} r` (このエポックの右辺、局所系)。
     base: Vec<f64>,
-    /// 縁の上限 (メモリ)。
-    max_border: usize,
+    /// 局所系の作業領域。
+    work: Vec<f64>,
     /// 直近の数値分解にかかった時間と、それ以降の縁の処理の累計時間 (秒)。
     factor_secs: f64,
     border_secs: f64,
     /// 数値分解の回数と三角求解の回数 (統計)。
     n_factor: usize,
     n_solve: usize,
+    /// 縁 1 本の求解の時間の累計と回数 (見込みの計算用)。
+    border_solve_secs: f64,
+    n_border_solves: usize,
+    /// 数値分解 (記号分解を含む) の時間の累計 (統計)。
+    total_factor_secs: f64,
 }
 
 impl BorderedKkt {
-    fn new(a: &FaerCsr) -> Self {
-        let kkt = AugKkt::new(a);
-        let dim = kkt.dim();
-        let max_border = (prm::BORDER_MEM / (8 * dim.max(1))).clamp(4, prm::MAX_BORDER);
+    fn new(n: usize, m: usize) -> Self {
         BorderedKkt {
-            kkt,
-            dim,
+            kkt: None,
+            n,
+            m,
+            cols: Vec::new(),
+            local: vec![usize::MAX; n],
+            dim: 0,
             u: Vec::new(),
             kinv_u: Vec::new(),
             schur: Vec::new(),
-            base: vec![0.0; dim],
-            max_border,
+            base: Vec::new(),
+            work: Vec::new(),
             factor_secs: 0.0,
             border_secs: 0.0,
             n_factor: 0,
             n_solve: 0,
+            border_solve_secs: 0.0,
+            n_border_solves: 0,
+            total_factor_secs: 0.0,
         }
     }
 
-    /// 対角を与えて数値分解し、右辺 `r` で新しいエポックを始める。
-    fn factor(&mut self, top: &[f64], mid: &[f64], r: &[f64]) {
+    /// 縁の数の上限 (`K^{-1} U` のメモリ)。
+    fn max_border(&self) -> usize {
+        (prm::BORDER_MEM / (8 * self.dim.max(1))).clamp(4, prm::MAX_BORDER)
+    }
+
+    /// 全体の添字 → 局所系の添字 (x 側は `local[j]`、行側は `|cols| + i`)。
+    #[inline]
+    fn to_local(&self, g: usize) -> usize {
+        if g < self.n {
+            self.local[g]
+        } else {
+            self.cols.len() + (g - self.n)
+        }
+    }
+
+    /// 対角 (全体の添字、`top_j >= BIG` の列は系から除く) で拡大系を作り直して数値分解し、
+    /// 右辺 `r` (全体の添字) で新しいエポックを始める。非零パターンが変わるので記号分解もやり直す
+    /// (除いた列の `A_j A_j^T` 由来の fill-in を持ち込まないため。全列で 1 回だけ記号分解して大きな
+    /// 対角で列を消す方法より、cre-b で分解・求解とも軽い)。
+    fn factor(&mut self, std: &StdForm, top: &[f64], mid: &[f64], r: &[f64]) {
         let t = Instant::now();
-        self.kkt.factor(top, mid);
+        let (n, m) = (self.n, self.m);
+        for &j in &self.cols {
+            self.local[j] = usize::MAX;
+        }
+        self.cols.clear();
+        for j in 0..n {
+            if top[j] < prm::BIG {
+                self.local[j] = self.cols.len();
+                self.cols.push(j);
+            }
+        }
+        let ns = self.cols.len();
+        let rows: Vec<Vec<(usize, f64)>> = (0..m)
+            .map(|i| std.rows.row(i).iter().filter(|&&(j, _)| self.local[j] != usize::MAX).map(|&(j, v)| (self.local[j], v)).collect())
+            .collect();
+        let a_sub = csr_from_rows(&rows, ns);
+        drop(rows);
+        let mut kkt = AugKkt::new(&a_sub);
+        let top_l: Vec<f64> = self.cols.iter().map(|&j| top[j]).collect();
+        kkt.factor(&top_l, mid);
+        self.dim = ns + m;
+        self.base = vec![0.0; self.dim];
+        for (k, &j) in self.cols.iter().enumerate() {
+            self.base[k] = r[j];
+        }
+        self.base[ns..].copy_from_slice(&r[n..]);
+        kkt.solve_in_place(&mut self.base);
+        self.kkt = Some(kkt);
         self.u.clear();
         self.kinv_u.clear();
         self.schur.clear();
-        self.base.copy_from_slice(r);
-        self.kkt.solve_in_place(&mut self.base);
         self.n_factor += 1;
         self.n_solve += 1;
         self.factor_secs = t.elapsed().as_secs_f64();
+        self.total_factor_secs += self.factor_secs;
         self.border_secs = 0.0;
     }
 
-    /// 縁を `extra` 本足す前に分解し直すべきか (メモリの上限か、縁の手間が分解を上回った)。
+    /// 縁を `extra` 本足す前に分解し直すべきか: メモリの上限か、縁の手間 (これまでの累計 + これから足す
+    /// `extra` 本の求解の見込み) が数値分解 1 回を上回るなら分解し直す (許容誤差の範囲で一度に多くの列が
+    /// D に入る退化した問題 (cre-b) で、1 列ずつ縁を足すより速い)。
     fn should_refactor(&self, extra: usize) -> bool {
-        self.u.len() + extra > self.max_border || self.border_secs > self.factor_secs
+        let solve_est = if self.n_border_solves > 0 { self.border_solve_secs / self.n_border_solves as f64 } else { 0.0 };
+        self.u.len() + extra > self.max_border() || self.border_secs + extra as f64 * solve_est > self.factor_secs
     }
 
-    /// 縁 `u` (右下 `c`) を加える。
+    /// 縁 `u` (全体の添字) と右下 `c` を加える。x 側の添字は分解に含まれる列でなければならない。
     fn add_border(&mut self, u: Vec<(usize, f64)>, c: f64) {
         let t = Instant::now();
+        let u: Vec<(usize, f64)> = u.into_iter().map(|(g, v)| (self.to_local(g), v)).collect();
+        debug_assert!(u.iter().all(|&(i, _)| i < self.dim));
         let mut w = vec![0.0; self.dim];
         for &(i, v) in &u {
             w[i] = v;
         }
-        self.kkt.solve_in_place(&mut w);
+        self.kkt.as_mut().expect("factor first").solve_in_place(&mut w);
         self.n_solve += 1;
+        self.border_solve_secs += t.elapsed().as_secs_f64();
+        self.n_border_solves += 1;
         let k = self.u.len();
         let mut row = Vec::with_capacity(k + 1);
         for i in 0..k {
@@ -180,48 +248,67 @@ impl BorderedKkt {
         self.border_secs += t.elapsed().as_secs_f64();
     }
 
-    /// 縁取り系 `[K U; U^T C] [w; λ] = [r; rb]` の `w` を `r` に上書きする (任意の右辺)。
-    fn solve_general(&mut self, r: &mut [f64], rb: &[f64]) {
-        let t = Instant::now();
-        self.kkt.solve_in_place(r);
-        self.n_solve += 1;
+    /// 局所系の解 `w` に縁の補正 `w -= (K^{-1} U) S^{-1} (U^T w - rb)` を施す。
+    fn border_correct(&self, w: &mut [f64], rb: &[f64]) {
         let k = self.u.len();
-        if k > 0 {
-            // S λ = rb - U^T K^{-1} r、w = K^{-1} r - (K^{-1} U) λ
-            let g: Vec<f64> = (0..k).map(|i| rb[i] - sparse_dot_dense(&self.u[i], r)).collect();
-            let mut sflat: Vec<f64> = self.schur.iter().flatten().copied().collect();
-            let lam = dense_solve(k, &mut sflat, g);
-            for j in 0..k {
-                let l = lam[j];
-                if l != 0.0 {
-                    for (o, wi) in r.iter_mut().zip(&self.kinv_u[j]) {
-                        *o -= l * wi;
-                    }
+        if k == 0 {
+            return;
+        }
+        // S λ = rb - U^T K^{-1} r、w = K^{-1} r - (K^{-1} U) λ
+        let g: Vec<f64> = (0..k).map(|i| rb[i] - sparse_dot_dense(&self.u[i], w)).collect();
+        let mut sflat: Vec<f64> = self.schur.iter().flatten().copied().collect();
+        let lam = dense_solve(k, &mut sflat, g);
+        for j in 0..k {
+            let l = lam[j];
+            if l != 0.0 {
+                for (o, wi) in w.iter_mut().zip(&self.kinv_u[j]) {
+                    *o -= l * wi;
                 }
             }
         }
+    }
+
+    /// 局所系の解を全体の添字 (長さ `n + m`、系に含まない列は 0) に書く。
+    fn scatter(&self, w: &[f64], out: &mut [f64]) {
+        let (n, ns) = (self.n, self.cols.len());
+        out[..n].fill(0.0);
+        for (k, &j) in self.cols.iter().enumerate() {
+            out[j] = w[k];
+        }
+        out[n..].copy_from_slice(&w[ns..]);
+    }
+
+    /// 縁取り系 `[K U; U^T C] [w; λ] = [r; rb]` の `w` を `r` (全体の添字) に上書きする (任意の右辺)。
+    /// 系に含まない列の右辺は無視する。
+    fn solve_general(&mut self, r: &mut [f64], rb: &[f64]) {
+        let t = Instant::now();
+        let (n, ns) = (self.n, self.cols.len());
+        let mut w = std::mem::take(&mut self.work);
+        w.clear();
+        w.resize(self.dim, 0.0);
+        for (k, &j) in self.cols.iter().enumerate() {
+            w[k] = r[j];
+        }
+        w[ns..].copy_from_slice(&r[n..]);
+        self.kkt.as_mut().expect("factor first").solve_in_place(&mut w);
+        self.n_solve += 1;
+        self.border_correct(&mut w, rb);
+        self.scatter(&w, r);
+        self.work = w;
         self.border_secs += t.elapsed().as_secs_f64();
     }
 
-    /// 現在の縁取り系での `[K U; U^T C]^{-1} [r; 0]` の上段 (`r` はこのエポックの右辺) を `out` に書く。
+    /// 現在の縁取り系での `[K U; U^T C]^{-1} [r; 0]` の上段 (`r` はこのエポックの右辺) を `out`
+    /// (全体の添字) に書く。
     fn solve_base(&mut self, out: &mut [f64]) {
         let t = Instant::now();
-        out.copy_from_slice(&self.base);
-        let k = self.u.len();
-        if k > 0 {
-            // S λ = -U^T K^{-1} r、w = K^{-1} r - (K^{-1} U) λ
-            let g: Vec<f64> = (0..k).map(|i| -sparse_dot_dense(&self.u[i], &self.base)).collect();
-            let mut sflat: Vec<f64> = self.schur.iter().flatten().copied().collect();
-            let lam = dense_solve(k, &mut sflat, g);
-            for j in 0..k {
-                let l = lam[j];
-                if l != 0.0 {
-                    for (o, wi) in out.iter_mut().zip(&self.kinv_u[j]) {
-                        *o -= l * wi;
-                    }
-                }
-            }
-        }
+        let mut w = std::mem::take(&mut self.work);
+        w.clear();
+        w.extend_from_slice(&self.base);
+        let zeros = vec![0.0; self.u.len()];
+        self.border_correct(&mut w, &zeros);
+        self.scatter(&w, out);
+        self.work = w;
         self.border_secs += t.elapsed().as_secs_f64();
     }
 }
@@ -288,6 +375,7 @@ struct Stats {
     li_slack: usize,
     factors: usize,
     solves: usize,
+    factor_secs: f64,
 }
 
 /// `‖A x - b‖∞` (診断用)。
@@ -383,8 +471,7 @@ pub(super) fn solve_ipm_crossover(std: &StdForm) -> Option<SimplexResult> {
     }
 
     // ---- 拡大系 (全列の A) ----
-    let a_full: FaerCsr = std.rows.to_faer();
-    let mut bk = BorderedKkt::new(&a_full);
+    let mut bk = BorderedKkt::new(n, m);
     let dim = n + m;
     let mut rhs = vec![0.0; dim];
 
@@ -486,7 +573,7 @@ pub(super) fn solve_ipm_crossover(std: &StdForm) -> Option<SimplexResult> {
                 };
             }
             rhs[n..].fill(0.0);
-            bk.factor(&top, &mid_p, &rhs);
+            bk.factor(std, &top, &mid_p, &rhs);
             need_factor = false;
             if correct {
                 primal_correct(&mut bk, &mut x, &ps, &mut corr_buf);
@@ -645,6 +732,12 @@ pub(super) fn solve_ipm_crossover(std: &StdForm) -> Option<SimplexResult> {
     };
     let mut added = Vec::new();
     update_active(&mut active, &mut ps, &s, &mut added);
+    // 各列が D に入った時点の被約費用 (押し出しは理論上これを保つ: A_D^T v_y = 0)。補正はこの値へ戻す
+    // (0 へ戻すと、内点法の誤差で 0 でない基底候補の s があるとき D が m 列を超えた後に両立しない: ken-13)。
+    let mut s_tgt = vec![0.0; n];
+    for &j in &added {
+        s_tgt[j] = s[j];
+    }
     let mut n_active = active.iter().filter(|&&a| a).count();
     st.dual_active_start = n_active;
     let bnorm = std.b.iter().fold(0.0f64, |a, v| a.max(v.abs()));
@@ -659,13 +752,13 @@ pub(super) fn solve_ipm_crossover(std: &StdForm) -> Option<SimplexResult> {
     // 双対の補正: `A_D^T δ = s_D` の最小ノルム解 (`δ ∈ range(A_D)`) を `y` に足して `D` の被約費用を
     // 0 に戻す (射影の誤差で `y` が `A_D^T y = c_D` からずれていくのを防ぐ)。縁の列 (後から `D` に
     // 加えた列) の右辺も `s_j`。最後に `s = c - A^T y` を計算し直す。
-    let dual_correct = |bk: &mut BorderedKkt, y: &mut [f64], s: &mut [f64], active: &[bool], buf: &mut [f64], border_cols: &[usize]| {
+    let dual_correct = |bk: &mut BorderedKkt, y: &mut [f64], s: &mut [f64], s_tgt: &[f64], active: &[bool], buf: &mut [f64], border_cols: &[usize]| {
         // [diag(h) A^T; A -I][x; q] = [f; 0] → A_D^T q ≈ f、q = A x ∈ range(A_D)
         for j in 0..n {
-            buf[j] = if active[j] && !border_cols.contains(&j) { s[j] } else { 0.0 };
+            buf[j] = if active[j] && !border_cols.contains(&j) { s[j] - s_tgt[j] } else { 0.0 };
         }
         buf[n..].fill(0.0);
-        let rb: Vec<f64> = border_cols.iter().map(|&j| s[j]).collect();
+        let rb: Vec<f64> = border_cols.iter().map(|&j| s[j] - s_tgt[j]).collect();
         bk.solve_general(buf, &rb);
         for i in 0..m {
             y[i] += buf[n + i];
@@ -693,11 +786,11 @@ pub(super) fn solve_ipm_crossover(std: &StdForm) -> Option<SimplexResult> {
             for i in 0..m {
                 rhs[n + i] = rnd(i, epoch + 7919) + std.b[i] / (bnorm + 1.0);
             }
-            bk.factor(&top, &mid_d, &rhs);
+            bk.factor(std, &top, &mid_d, &rhs);
             border_cols.clear();
             need_factor = false;
             if correct {
-                dual_correct(&mut bk, &mut y, &mut s, &active, &mut corr_buf, &border_cols);
+                dual_correct(&mut bk, &mut y, &mut s, &s_tgt, &active, &mut corr_buf, &border_cols);
             }
         } else {
             for &j in &added {
@@ -729,7 +822,7 @@ pub(super) fn solve_ipm_crossover(std: &StdForm) -> Option<SimplexResult> {
             break;
         }
         if debug && (round_d % 50 == 1 || n_active + 5 >= m) {
-            let sd = (0..n).filter(|&j| active[j]).fold(0.0f64, |a, j| a.max(s[j].abs()));
+            let sd = (0..n).filter(|&j| active[j]).fold(0.0f64, |a, j| a.max((s[j] - s_tgt[j]).abs()));
             eprintln!("CROSSOVER dual round={round_d} |v_y|={vn:.3e} max|A_D^T v_y|={noise:.3e} max|s_D|={sd:.2e} active={n_active} borders={}", bk.u.len());
         }
         let ratio = |w: &[f64], s: &[f64], ps: &[PStat], active: &[bool], sign: f64| -> (f64, usize) {
@@ -772,6 +865,7 @@ pub(super) fn solve_ipm_crossover(std: &StdForm) -> Option<SimplexResult> {
         // 1e7 にもなり、放っておくと A_D^T y = c_D が両立しなくなる。
         let drift = theta.abs() * noise;
         active[jb] = true;
+        s_tgt[jb] = 0.0;
         added.push(jb);
         if correct && drift > tunable!("ENOMOTO_T_XO_DRIFT_TOL", prm::DRIFT_TOL, f64) {
             for &j in &added {
@@ -779,11 +873,15 @@ pub(super) fn solve_ipm_crossover(std: &StdForm) -> Option<SimplexResult> {
                 border_cols.push(j);
             }
             added.clear();
-            dual_correct(&mut bk, &mut y, &mut s, &active, &mut corr_buf, &border_cols);
+            dual_correct(&mut bk, &mut y, &mut s, &s_tgt, &active, &mut corr_buf, &border_cols);
             st.dual_corrections += 1;
         }
         s[jb] = 0.0;
+        let before = added.len();
         update_active(&mut active, &mut ps, &s, &mut added);
+        for k in before..added.len() {
+            s_tgt[added[k]] = s[added[k]];
+        }
         n_active = active.iter().filter(|&&a| a).count();
         st.dual_steps += 1;
     }
@@ -793,7 +891,7 @@ pub(super) fn solve_ipm_crossover(std: &StdForm) -> Option<SimplexResult> {
             border_cols.push(j);
         }
         added.clear();
-        dual_correct(&mut bk, &mut y, &mut s, &active, &mut corr_buf, &border_cols);
+        dual_correct(&mut bk, &mut y, &mut s, &s_tgt, &active, &mut corr_buf, &border_cols);
     }
     st.dual_active_end = n_active;
     if debug {
@@ -814,6 +912,7 @@ pub(super) fn solve_ipm_crossover(std: &StdForm) -> Option<SimplexResult> {
     }
     st.factors = bk.n_factor;
     st.solves = bk.n_solve;
+    st.factor_secs = bk.total_factor_secs;
     drop(bk);
     crate::phase_timing::mark("dual_push_end");
     if debug {
