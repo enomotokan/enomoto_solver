@@ -185,6 +185,8 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
     let n_bnd = lo.len() + up.len();
 
     let t_kkt = std::time::Instant::now();
+    // 診断用 (ENOMOTO_DEBUG_IPM): 数値分解・Newton 系の求解 (反復改良を含む) の累計時間。
+    let mut prof = (0.0f64, 0.0f64);
     let mut kkt = IpmKkt::new(a);
     if debug {
         eprintln!(
@@ -386,7 +388,10 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
                 top[side.idx[k]] += 1.0 / side.w[k];
             }
         }
-        if !kkt.factor(&top, delta, &mut mid) {
+        let t_f = std::time::Instant::now();
+        let fac_ok = kkt.factor(&top, delta, &mut mid);
+        prof.0 += t_f.elapsed().as_secs_f64();
+        if !fac_ok {
             rho = (rho * 100.0).max(1e-8);
             delta = (delta * 100.0).max(1e-8);
             if debug {
@@ -401,7 +406,9 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
                 side.r_s[k] = -side.s[k] * side.z[k];
             }
         }
+        let t_s = std::time::Instant::now();
         newton(&mut kkt, a, &top, delta, &r_x, &r_y, &mut lo, &mut up, &mut sol_aff, n, &mut refine_work);
+        prof.1 += t_s.elapsed().as_secs_f64();
         if !sol_aff.iter().all(|v| v.is_finite()) {
             // 分解が破綻した: 正則化を強めて次の反復で分解し直す。
             rho = (rho * 100.0).max(1e-8);
@@ -436,7 +443,9 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
                 side.r_s[k] = -side.s[k] * side.z[k] - side.ds_aff[k] * side.dz_aff[k] + sigma * mu;
             }
         }
+        let t_s = std::time::Instant::now();
         newton(&mut kkt, a, &top, delta, &r_x, &r_y, &mut lo, &mut up, &mut rhs, n, &mut refine_work);
+        prof.1 += t_s.elapsed().as_secs_f64();
         let alpha_p = fraction_to_boundary(&lo.s, &lo.ds).min(fraction_to_boundary(&up.s, &up.ds));
         let alpha_d = fraction_to_boundary(&lo.z, &lo.dz).min(fraction_to_boundary(&up.z, &up.dz));
         {
@@ -490,6 +499,7 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
         if let Some((_, bx, by, brc, brel)) = best {
             if debug {
                 eprintln!("IPM end status={status:?} iters={iters}; returning best iterate rel_res={brel:?}");
+        eprintln!("IPM profile total={:.3}s factor={:.3}s solve={:.3}s other={:.3}s", t_kkt.elapsed().as_secs_f64(), prof.0, prof.1, t_kkt.elapsed().as_secs_f64() - prof.0 - prof.1);
             }
             return BoxIpmResult { status, x: bx, y: by.iter().map(|v| -v).collect(), rc: brc, iters, rel_res: brel };
         }
@@ -503,6 +513,7 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
     }
     if debug {
         eprintln!("IPM end status={status:?} iters={iters} rel_res={rel:?}");
+        eprintln!("IPM profile total={:.3}s factor={:.3}s solve={:.3}s other={:.3}s", t_kkt.elapsed().as_secs_f64(), prof.0, prof.1, t_kkt.elapsed().as_secs_f64() - prof.0 - prof.1);
     }
     BoxIpmResult { status, x, y: y.iter().map(|v| -v).collect(), rc, iters, rel_res: rel }
 }
