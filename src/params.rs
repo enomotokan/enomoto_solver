@@ -10,6 +10,21 @@ pub(crate) mod simplex {
     /// 汎用のゼロ判定許容誤差 (係数・比率・被約費用が実質 0 かどうか)。
     pub(crate) const TOL: f64 = 1e-9;
 
+    /// 篩い分け法 (`simplex::sifting`、CLP の Sprint) を使う最小の構造列数 (`ENOMOTO_T_SIFTING_MIN_COLS`、0 = 無効)。
+    pub(crate) const SIFTING_MIN_COLS: usize = 100_000;
+
+    /// 結果が密な FTRAN (入る列の `alpha` と DSE の `tau`) を 2 スレッドで並列に解く最小の行数
+    /// (`ENOMOTO_T_PAR_FTRAN_MIN_M`、0 = 無効)。ex10 で FTRAN −21〜31%・全体 −6〜15% だが、131 問の 10 秒シフト付き
+    /// 幾何平均は −0.09% (neos-5052403-cygnet +14%) で採用基準に届かないので既定では無効。有効にするなら 20,000。
+    pub(crate) const PAR_FTRAN_MIN_M: usize = 0;
+
+    /// 篩い分け法を使う最小の「構造列数 / 行数」(`ENOMOTO_T_SIFTING_MIN_RATIO`)。CLP は大きな問題で 8。
+    pub(crate) const SIFTING_MIN_RATIO: f64 = 8.0;
+
+    /// 篩い分け法を使う 1 行の平均非零数 (構造列のみ) の下限 (`ENOMOTO_T_SIFTING_MIN_ROW_NNZ`)。rail4284 は 2,700、
+    /// osa-60 は 136 (osa-60 は全体を双対単体法で解くほうが速い)。
+    pub(crate) const SIFTING_MIN_ROW_NNZ: f64 = 1000.0;
+
     /// `max_iters_for` が返す反復上限の下限値。
     pub(crate) const MAX_ITERS_FLOOR: usize = 20_000;
 
@@ -401,6 +416,21 @@ pub(crate) mod slope_intercept_dual {
     /// polish の BFRT 到達判定 `reach_tol` の相対部分にも使う。
     pub(crate) const LEX_REL_TOL: f64 = 1e-9;
 
+    /// 主ループで基底の行を主実行不能とみなす逸脱の下限 (傾き 0 の逸脱の定数項、スケール後の座標で絶対値、
+    /// `ENOMOTO_T_ROW_INFEAS_TOL`)。従来は [`LEX_REL_TOL`] (1e-9) と共用。
+    pub(crate) const ROW_INFEAS_TOL: f64 = 1e-9;
+
+    /// 行の実行不能判定の許容誤差に、`x_B` の再同期で測った増分更新の相対的なずれを足すときの倍率
+    /// (`ENOMOTO_T_ROW_ERR_MULT`、0 で無効)。polish の許容誤差もこれを下回らない。
+    pub(crate) const ROW_ERR_MULT: f64 = 1.0;
+
+    /// 上の加算分の上限 (`ENOMOTO_T_ROW_ERR_CAP`)。
+    pub(crate) const ROW_ERR_CAP: f64 = 1e-5;
+
+    /// 上の広げた許容誤差を使うのは、実行不能な行のうちこの割合以上がその許容誤差以下の逸脱しか持たない
+    /// (残りがほぼ雑音だけ) ときに限る (`ENOMOTO_T_ROW_ERR_POOL_FRAC`)。
+    pub(crate) const ROW_ERR_POOL_FRAC: f64 = 0.5;
+
     /// 停滞ピボット数の上限 `stall_limit = max(STALL_LIMIT_PER_ROW * m, STALL_LIMIT_MIN)` の
     /// 行数あたりの係数。超えたら Bland 規則(`bland_mode`)に切り替える。
     pub(crate) const STALL_LIMIT_PER_ROW: usize = 5;
@@ -491,6 +521,20 @@ pub(crate) mod slope_intercept_dual {
     /// cre-b は m = 5,110 で 248 行) ので、`m` ではなくプール長と更新行数の比で切り替える (下の係数)。
     /// 下限は疎経路の実体 (`SPARSE_PATH_MIN_M` = 300 行以上、`BIG`) と同じにする (ヒープのコードは `BIG` の中だけ)。
     pub(crate) const CHUZR_HEAP_ADAPTIVE_MIN_M: usize = 300;
+
+    /// 入る列の FTRAN 結果と DSE の `tau` の非ゼロ率 (移動平均) がどちらもこれ以上のとき、結果が密な FTRAN の
+    /// 2〜3 本を並列に解く (`ENOMOTO_T_PAR_FTRAN_MIN_DENSITY`。行数の条件は `simplex::PAR_FTRAN_MIN_M`)。
+    /// ex10 は約 0.9 で FTRAN −23%、irish-electricity (`alpha` 約 0.25) や physiciansched3-3 の双対では並列のほうが遅かった。
+    pub(crate) const PAR_FTRAN_MIN_DENSITY: f64 = 0.5;
+
+    /// `x_B` 更新 (と実行不能集合の更新) を行の区間ごとに並列に行う最小の行数 (`ENOMOTO_T_PAR_XB_MIN_M`、0 = 無効)。
+    /// ex10 で `x_B` 更新は 946 → 729 µs/反復 (4 スレッド、メモリ帯域で頭打ち) だが、他のコアが書いた行を後続の段
+    /// (FTRAN など) が読み直すので全体は変わらない (86.3/91.1 → 87.8/91.8 s)。既定では無効。有効にするなら 20,000。
+    pub(crate) const PAR_XB_MIN_M: usize = 0;
+    /// 同じく、更新する行の最小数 (`ENOMOTO_T_PAR_XB_MIN_ROWS`)。スレッドの起動 (数十 µs) より仕事が大きいときだけ。
+    pub(crate) const PAR_XB_MIN_ROWS: usize = 8192;
+    /// 同じく、使うスレッド数の上限 (`ENOMOTO_T_PAR_XB_THREADS`、rayon のスレッド数とも比べて小さいほう)。
+    pub(crate) const PAR_XB_THREADS: usize = 4;
 
     /// 作業 #10 (A): 適応モードでヒープを使う条件 `プール >= 係数 * (前反復の x_B 更新一覧長 + 1) * log2(プール)` の
     /// 係数 (`ENOMOTO_T_CHUZR_HEAP_ADAPTIVE_RATIO`)。ヒープは 1 反復に「一覧の行を積む (log2(プール) 回の比較)」
@@ -757,6 +801,12 @@ pub(crate) mod presolve {
     /// foldfixed, freevar, ineqsingleton, parallelcols, parallelrows, rowdominance,
     /// rowsingleton, sparsify, stuffing の各 `TOL` を統合】
     pub(crate) const TOL: f64 = 1e-9;
+
+    /// 強制列の消去 (`presolve::forcingcol`、HiGHS の "Forcing col") を行うか (`ENOMOTO_T_FORCING_COL`、0 = 無効)。
+    /// Mittelmann ns1688926 で 8,192 行を消す (HiGHS・CLP と同じ縮約) が、それでも ns1688926 は 600 s で解けず
+    /// (双対単体法が退化で進まない。HiGHS も同じ)、Netlib では e226・finnis・lotfi の経路が変わって 18〜31% 遅くなった
+    /// ので既定では無効。
+    pub(crate) const FORCING_COL: usize = 0;
 
     /// 代入消去のピボット判定: 消去に使う係数が `|coeff| >= この値 * max|row|` を
     /// 満たさなければその行では消去しない (小さいピボットで割ると復元時の誤差が増幅される)。

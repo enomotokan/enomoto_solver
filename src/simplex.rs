@@ -81,6 +81,8 @@ mod slope_intercept_dual;
 mod crossover;
 /// 傾き・切片双対二段解法と内点法 + クロスオーバーの同時実行 (`RootSolver::Auto`)。
 mod race;
+mod sifting;
+mod dualize;
 
 /// 単体法の各メインループの反復上限を問題サイズから決める。
 ///
@@ -573,10 +575,7 @@ fn unscale_result(
             }
             // 共通の時系列ログを逆順に 1 回だけ適用する (種類別に分けると順序依存が壊れる)。
             for step in postsolve_log.iter().rev() {
-                match step {
-                    presolve::PostsolveStep::Sub(sub) => x[sub.var] = sub.value(&x),
-                    presolve::PostsolveStep::ParallelCol(sub) => sub.apply(&mut x),
-                }
+                step.apply(&mut x)
             }
             let x = scaling::unscale_x(sc, &x);
             SimplexResult { status: Status::Optimal, x: Some(x) }
@@ -1634,7 +1633,12 @@ fn split_std_form(std: &StdForm, components: &[Vec<usize>]) -> Vec<StdForm> {
 /// [`Status::NotSolved`] とする。
 fn solve_std_form_decomposed(std: &StdForm, opts: &crate::types::LpOptions) -> SimplexResult {
     // 1 つの標準形を傾き・切片二段解法で解く (諦めたら NotSolved)。
-    let solve_one = |s: &StdForm| slope_intercept_dual::solve_slope_intercept_dual(s, opts).unwrap_or(SimplexResult { status: Status::NotSolved, x: None });
+    let solve_one = |s: &StdForm| {
+        dualize::solve(s, opts)
+            .or_else(|| sifting::solve(s, opts))
+            .or_else(|| slope_intercept_dual::solve_slope_intercept_dual(s, opts))
+            .unwrap_or(SimplexResult { status: Status::NotSolved, x: None })
+    };
 
     let Some((components, has_row)) = connected_components_of_std_form(std) else {
         return solve_one(std);

@@ -273,10 +273,7 @@ fn unscale_with_substitutions(x: &[f64], sc: &scaling::Scaling, postsolve_log: &
     // 共有の時系列ログを 1 回だけ逆順に走査する (種類ごとに分けて処理してはいけない。
     // 後の置換が前の置換で決まる値を参照しうるため)。
     for step in postsolve_log.iter().rev() {
-        match step {
-            presolve::PostsolveStep::Sub(sub) => x[sub.var] = sub.value(&x),
-            presolve::PostsolveStep::ParallelCol(sub) => sub.apply(&mut x),
-        }
+        step.apply(&mut x)
     }
     scaling::unscale_x(sc, &x)
 }
