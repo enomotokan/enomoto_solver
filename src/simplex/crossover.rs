@@ -41,7 +41,8 @@
 use super::basis_kernel::{factorize_basis, ft_max_updates, BasisKernel};
 use super::slope_intercept_dual::polish_with_true_bounds;
 use super::{perturb_random, sparse_lu, NbStatus, SimplexResult, StdForm};
-use crate::interior_point::boxed::solve_box_lp;
+use crate::interior_point::boxed::{solve_box_lp, solve_box_lp_warm, BoxIpmResult, WarmStart};
+use crate::interior_point::pdlp::{solve_pdlp, PdlpOptions};
 use crate::interior_point::kkt::AugKkt;
 use crate::sparse::{csr_from_rows, sparse_dot_dense};
 use crate::types::Status;
@@ -466,7 +467,48 @@ pub(super) fn solve_ipm_crossover(std: &StdForm) -> Option<SimplexResult> {
     let l_j: Vec<f64> = free_cols.iter().map(|&j| std.lb[j]).collect();
     let u_j: Vec<f64> = free_cols.iter().map(|&j| std.ub[j]).collect();
     let max_iters = tunable!("ENOMOTO_T_IPM_MAX_ITERS", 200usize, usize);
-    let ipm = solve_box_lp(&a_j, &b_j, &c_j, &l_j, &u_j, max_iters);
+    // 試験用 (`ENOMOTO_T_XO_PDLP`): 先に PDLP で近似解を求め、
+    //   1: 内点法の近接中心にする、2: 近接中心と初期点にする、3: 内点法を飛ばしてそのままクロスオーバーに渡す。
+    let pdlp_mode = tunable!("ENOMOTO_T_XO_PDLP", 0u8, u8);
+    let ipm = if pdlp_mode == 0 {
+        solve_box_lp(&a_j, &b_j, &c_j, &l_j, &u_j, max_iters)
+    } else {
+        let opts = PdlpOptions {
+            eps: tunable!("ENOMOTO_T_PDLP_EPS", if pdlp_mode == 3 { 1e-8 } else { 1e-4 }, f64),
+            max_iters: tunable!("ENOMOTO_T_PDLP_MAX_ITERS", if pdlp_mode == 3 { 1_000_000 } else { 20_000 }, usize),
+            time_limit: tunable!("ENOMOTO_T_PDLP_TIME", 1e9, f64),
+        };
+        let pd = solve_pdlp(&a_j, &b_j, &c_j, &l_j, &u_j, &opts);
+        crate::phase_timing::mark("pdlp_end");
+        crate::phase_timing::record("xo_pdlp_iters", pd.iters as f64);
+        crate::phase_timing::record("xo_pdlp_rel", pd.rel.0.max(pd.rel.1).max(pd.rel.2));
+        if debug {
+            eprintln!("CROSSOVER pdlp status={:?} iters={} rel={:?} t={:.3}s", pd.status, pd.iters, pd.rel, t0.elapsed().as_secs_f64());
+        }
+        if pdlp_mode == 3 {
+            // PDLP の解をそのまま使う (収束しなければ呼び出し側で解き直す)。
+            let mut aty = vec![0.0; free_cols.len()];
+            crate::sparse::csr_mat_t_vec_into(&a_j, &pd.y, &mut aty);
+            let rc: Vec<f64> = (0..free_cols.len()).map(|k| c_j[k] - aty[k]).collect();
+            BoxIpmResult {
+                status: if pd.status == Status::Optimal { Status::Optimal } else { Status::NotSolved },
+                x: pd.x,
+                y: pd.y,
+                rc,
+                iters: 0,
+                rel_res: if pd.status == Status::Optimal { (0.0, 0.0, 0.0) } else { (f64::INFINITY, 0.0, 0.0) },
+            }
+        } else {
+            let warm = WarmStart {
+                x: &pd.x,
+                y: &pd.y,
+                point: pdlp_mode == 2,
+                theta: tunable!("ENOMOTO_T_PDLP_WARM_THETA", 1e-2, f64),
+                reg0: env_str!("ENOMOTO_T_PDLP_WARM_REG0").and_then(|v| v.parse().ok()),
+            };
+            solve_box_lp_warm(&a_j, &b_j, &c_j, &l_j, &u_j, max_iters, Some(&warm))
+        }
+    };
     drop(a_j);
     st.ipm_iters = ipm.iters;
     if crate::cancel::is_cancelled() {

@@ -22,6 +22,7 @@
 pub mod qp;
 pub mod kkt;
 pub mod boxed;
+pub mod pdlp;
 
 use rayon::prelude::*;
 

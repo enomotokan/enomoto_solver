@@ -231,6 +231,24 @@ struct Pos {
 /// `min c^T x, A x = b, l <= x <= u` を IP-PMM で解く (`l[j] < u[j]` を仮定)。
 /// `max_iters` は Newton 反復の上限。
 pub fn solve_box_lp(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], max_iters: usize) -> BoxIpmResult {
+    solve_box_lp_warm(a, b, c, l, u, max_iters, None)
+}
+
+/// 内点法のウォームスタートに使う近似解 (PDLP などの一次法の解。LP の符号: 被約費用は `c - A^T y`)。
+pub struct WarmStart<'a> {
+    pub x: &'a [f64],
+    pub y: &'a [f64],
+    /// 真なら初期点もこの近似解から作る (境界からの距離・乗数を `theta` 以上に持ち上げる)。
+    /// 偽なら近接中心 `(ξ, λ, ν)` だけをこの近似解にして、初期点は通常どおり作る。
+    pub point: bool,
+    /// 初期点のスラック・乗数の下限 (大きさをそろえた後の単位)。
+    pub theta: f64,
+    /// 初期の正則化 `ρ`・`δ` (`None` なら通常の `RHO0`・`DELTA0`)。
+    pub reg0: Option<f64>,
+}
+
+/// [`solve_box_lp`] に近似解 `warm` からのウォームスタートを加えたもの。
+pub fn solve_box_lp_warm(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], max_iters: usize, warm: Option<&WarmStart>) -> BoxIpmResult {
     // 主変数と費用の大きさをそろえる: `x = β x'`、`c = γ c'` (β = max(1, ‖b‖∞)、γ = ‖c‖∞)。
     // 単体法向けの前処理 (Ruiz) は行列の要素をそろえるが、右辺・境界 (伝播で付いた暗黙の
     // 境界を含む) と費用の大きさの差は残り (pilot4 で ‖b‖ ≈ 3e4、‖c‖ ≈ 0.05)、PIQP の初期点の
@@ -242,7 +260,13 @@ pub fn solve_box_lp(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], max
     let cs: Vec<f64> = c.iter().map(|v| v / gamma).collect();
     let ls: Vec<f64> = l.iter().map(|v| v / beta).collect();
     let us: Vec<f64> = u.iter().map(|v| v / beta).collect();
-    let mut r = solve_box_lp_scaled(a, &bs, &cs, &ls, &us, max_iters);
+    // 近似解も同じ大きさにそろえる (`x' = x/β`、`y' = y/γ`)。
+    let warm_s = warm.map(|w| {
+        let xs: Vec<f64> = w.x.iter().map(|v| v / beta).collect();
+        let ys: Vec<f64> = w.y.iter().map(|v| v / gamma).collect();
+        (xs, ys, w.point, w.theta, w.reg0)
+    });
+    let mut r = solve_box_lp_scaled(a, &bs, &cs, &ls, &us, max_iters, warm_s.as_ref());
     for v in r.x.iter_mut() {
         *v *= beta;
     }
@@ -253,7 +277,8 @@ pub fn solve_box_lp(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], max
 }
 
 /// [`solve_box_lp`] の本体 (大きさをそろえた後の問題を解く)。
-fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], max_iters: usize) -> BoxIpmResult {
+#[allow(clippy::type_complexity)]
+fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], max_iters: usize, warm: Option<&(Vec<f64>, Vec<f64>, bool, f64, Option<f64>)>) -> BoxIpmResult {
     let n = a.ncols();
     let p = a.nrows();
     let debug = env_str!("ENOMOTO_DEBUG_IPM").is_some();
@@ -290,8 +315,9 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
     let mut rhs = vec![0.0; dim];
     let mut sol_aff = vec![0.0; dim];
 
-    let mut rho = RHO0;
-    let mut delta = DELTA0;
+    let reg0 = warm.and_then(|w| w.4);
+    let mut rho = reg0.unwrap_or(RHO0);
+    let mut delta = reg0.unwrap_or(DELTA0);
     let rho_min = tunable!("ENOMOTO_T_IPM_RHO_MIN", RHO_MIN, f64);
     // 停止の許容誤差 (絶対・相対とも。既定は PIQP の 1e-8)。
     let eps_abs = tunable!("ENOMOTO_T_IPM_EPS", EPS_ABS, f64);
@@ -365,6 +391,36 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
         up.nu.copy_from_slice(&up.z);
     }
     let mut lambda = y.clone();
+    // ---- ウォームスタート: 近似解を近接中心に (指定があれば初期点にも) する ----
+    // 内部の双対は LP の符号と逆 (`c + A^T y_int = z_l - z_u`)。
+    if let Some((wx, wy, point, theta, _)) = warm {
+        let y_int: Vec<f64> = wy.iter().map(|v| -v).collect();
+        let mut aty_w = vec![0.0; n];
+        csr_mat_t_vec_into(a, &y_int, &mut aty_w);
+        // 被約費用 rc = c + A^T y_int を下限側 (正) と上限側 (負) に分ける。
+        let rc: Vec<f64> = (0..n).map(|j| c[j] + aty_w[j]).collect();
+        xi.copy_from_slice(wx);
+        lambda.copy_from_slice(&y_int);
+        for side in [&mut lo, &mut up] {
+            for k in 0..side.len() {
+                let j = side.idx[k];
+                // 下限側 (sgn = -1) の乗数は rc⁺、上限側 (sgn = +1) は rc⁻。
+                side.nu[k] = (-side.sgn * rc[j]).max(0.0);
+            }
+        }
+        if *point {
+            x.copy_from_slice(wx);
+            y.copy_from_slice(&y_int);
+            for side in [&mut lo, &mut up] {
+                for k in 0..side.len() {
+                    let j = side.idx[k];
+                    side.s[k] = (-side.sgn * (x[j] - side.bnd[k])).max(*theta);
+                    side.z[k] = side.nu[k].max(*theta);
+                }
+                side.nu.copy_from_slice(&side.z);
+            }
+        }
+    }
 
     // 作業領域
     let mut ax = vec![0.0; p];
