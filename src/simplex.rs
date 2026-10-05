@@ -75,6 +75,8 @@ pub(crate) use lu::tiny_drop;
 /// `lu` モジュールの別名 (ローカル変数 `lu` との衝突回避)。
 use self::lu as sparse_lu;
 
+/// 基底の求解の心臓部 (FTRAN・BTRAN・FT 更新・再分解の判定)。主単体法と双対単体法で共有する。
+mod basis_kernel;
 /// 傾き・切片二段解法 (実際の LP 求解本体)。
 mod slope_intercept_dual;
 mod sifting;
@@ -1206,7 +1208,8 @@ fn run_phase2_incremental(std: &StdForm, t: &mut Tableau, lu: &mut sparse_lu::Ft
     let floor = tunable!("ENOMOTO_T_STEEPEST_EDGE_FLOOR", STEEPEST_EDGE_FLOOR, f64);
     let min_pivot = tunable!("ENOMOTO_T_FT_MIN_PIVOT", FT_MIN_PIVOT, f64);
     let harris = tunable!("ENOMOTO_T_PRIMAL_HARRIS_TOL", PRIMAL_HARRIS_TOL, f64);
-    let bump_limit = tunable!("ENOMOTO_T_FT_BUMP_LIMIT_FACTOR", FT_BUMP_LIMIT_FACTOR, usize) * m.max(1);
+    // FTRAN・BTRAN・FT 更新・再分解トリガ (双対単体法と共有する部品)。
+    let mut kernel = basis_kernel::BasisKernel::new(m, FT_MAX_UPDATES);
     let use_devex = tunable!("ENOMOTO_HANDOFF_INC_DEVEX", 1u8, u8) != 0;
     // cont1 策3 の比率テストを旧版に戻す (A/B 用)。
     let ratio_old = tunable!("ENOMOTO_HANDOFF_RATIO_OLD", 0u8, u8) != 0;
@@ -1217,7 +1220,6 @@ fn run_phase2_incremental(std: &StdForm, t: &mut Tableau, lu: &mut sparse_lu::Ft
     let mut y = vec![0.0; m]; // y = B^-T c_B
     let mut scratch = vec![0.0; m];
     let mut d = vec![0.0; n]; // 差分更新する被約費用
-    let mut a_enter = vec![0.0; m]; // 入る列 A_q (密)
     let mut alpha = vec![0.0; m]; // B^-1 A_q
     let mut rho = vec![0.0; m]; // B^-T e_r
     let mut w = vec![0.0; m]; // B^-T alpha (最急辺のみ)
@@ -1242,7 +1244,6 @@ fn run_phase2_incremental(std: &StdForm, t: &mut Tableau, lu: &mut sparse_lu::Ft
     let mut candidates: Vec<Candidate> = Vec::with_capacity(m);
 
     let mut need_fresh = true; // 次の反復の頭で x_B と d を作り直すか
-    let mut since_check = 0usize;
     let max_iters = max_iters_for(m, n);
     for _iter in 0..max_iters {
         prof_phases::RUN_PHASE_ITERS.fetch_add(1, Relaxed);
@@ -1250,7 +1251,7 @@ fn run_phase2_incremental(std: &StdForm, t: &mut Tableau, lu: &mut sparse_lu::Ft
         if need_fresh {
             need_fresh = false;
             let rhs = t.recompute_basics(lu);
-            if lu.fill_count() > bump_limit || t.basis_residual_norm(&rhs) > FT_RESIDUAL_TOL {
+            if kernel.fill_too_big(lu) || t.basis_residual_norm(&rhs) > FT_RESIDUAL_TOL {
                 *lu = try_refactorize(std, t, Some(&*lu))?;
                 t.recompute_basics(lu);
             }
@@ -1261,22 +1262,6 @@ fn run_phase2_incremental(std: &StdForm, t: &mut Tableau, lu: &mut sparse_lu::Ft
             for j in 0..n {
                 d[j] = if t.nb_status[j].is_some() { std.c[j] - sparse_dot_dense(t.column_sparse(j), &y) } else { 0.0 };
             }
-        }
-
-        // 再分解トリガ (3)(4)。残差検査 (1) はリフレッシュ時点でのみ行う。
-        since_check += 1;
-        if since_check >= FT_CHECK_INTERVAL {
-            since_check = 0;
-            if lu.fill_count() > bump_limit {
-                *lu = try_refactorize(std, t, Some(&*lu))?;
-                need_fresh = true;
-                continue;
-            }
-        }
-        if lu.update_count() > FT_MAX_UPDATES {
-            *lu = try_refactorize(std, t, Some(&*lu))?;
-            need_fresh = true;
-            continue;
         }
 
         expand.delta += EXPAND_TAU;
@@ -1324,8 +1309,7 @@ fn run_phase2_incremental(std: &StdForm, t: &mut Tableau, lu: &mut sparse_lu::Ft
             continue;
         };
 
-        t.column_into(enter, &mut a_enter);
-        lu.solve_into(&a_enter, &mut scratch, &mut alpha);
+        kernel.ftran_col(lu, t.column_sparse(enter), &mut alpha);
 
         // 比率テスト: EXPAND 2 パス (Gill et al. 1989)。
         //
@@ -1402,7 +1386,7 @@ fn run_phase2_incremental(std: &StdForm, t: &mut Tableau, lu: &mut sparse_lu::Ft
         };
 
         // 入れ替え前の基底でピボット行 (と最急辺なら `w^T A`) を行方向に集める。
-        lu.solve_transpose_unit(r, &mut scratch, &mut rho);
+        kernel.btran_row(lu, r, &mut rho);
         if !use_devex {
             lu.solve_transpose_into(&alpha, &mut scratch, &mut w);
         }
@@ -1473,7 +1457,8 @@ fn run_phase2_incremental(std: &StdForm, t: &mut Tableau, lu: &mut sparse_lu::Ft
             gamma[leaving_var] = (gamma_q / (pivot * pivot)).max(1.0);
         }
 
-        if !lu.try_update(r, &a_enter, min_pivot) {
+        // FT 更新 (FTRAN/BTRAN の途中値を使う) と再分解トリガ (3)(4)(5)。残差検査 (1) はリフレッシュ時点でのみ行う。
+        if !kernel.update(lu, r) || kernel.refactor_due(lu) == basis_kernel::RefactorDue::Yes {
             *lu = try_refactorize(std, t, Some(&*lu))?;
             need_fresh = true;
         }

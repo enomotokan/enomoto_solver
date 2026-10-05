@@ -8232,6 +8232,22 @@ ex10 (4 CPU、速い時間帯で 1 反復約 4 ms) の段別では `x_B` 更新 
 - 取り下げ: 主残差連動の許容誤差 (CLP と同じ量。小さすぎて効かない)、伝播で付いた大きな暗黙の上下限を無限に戻す・
   箱型列を 0 に近い側へ寄せる (右辺は 5.7e8 → 1.5e7 に縮むが、それだけでは終わらない)。
 
+## 基底の求解の心臓部の共通化 段階 1: 主単体法 (採用) (2026-10-05)
+
+FTRAN・BTRAN・FT 更新・再分解トリガを `simplex/basis_kernel.rs` の `BasisKernel` にまとめ、まず主単体法
+(`run_phase2_incremental`: 仕上げからの引き継ぎと篩い分けの部分問題の温めた解き直し) をこれに載せ替えた。
+合成クロック (`synth_clock_should_refactor`) と `ft_max_updates` も同じモジュールへ移した (双対単体法の動作は不変)。
+
+- 入る列の FTRAN: 常に密の `solve_into` → 密/疎の切り替え (`FtranDensity`) と `a_tilde` の記録。
+- ピボット行の BTRAN: `solve_transpose_unit` → `solve_transpose_unit_work` と `e_tilde` の記録。
+- FT 更新: `try_update` (FTRAN の `L`/`R` 段と `U^T` の求解をやり直す) → 記録を使う `try_update_precomputed`。
+- 再分解トリガに合成クロックを追加。更新回数の上限は主単体法では固定の `FT_MAX_UPDATES` (300) のまま
+  (`BasisKernel::new` の引数)。双対単体法の `ft_max_updates(m)` (= max(3m, 300)) を使うと、rail4284 の篩い分けで
+  eta が伸びて 1 反復 ~302 → ~325 µs (+7%) になり、経路も変わって 1 パスが境界違反 1.9e-6 で冷えた双対単体法へ落ちた。
+- rail4284 (3 回交互、base `b5202f4`): 59.7 → 58.2 s (−2.5%)、篩い分け 88 → 81 パス、主単体法 157,810 → 153,881 反復、
+  目的関数は一致。Netlib 93 問: 全問最適・HiGHS と一致。主単体法へ引き継ぐ 13 問は引き継ぎ反復数がすべて同じ
+  (pilot87 の引き継ぎ 76 → 69 ms)。
+
 ## 改名一覧 (整理時)
 
 本メモ中は旧名で書かれている。
