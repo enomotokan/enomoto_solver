@@ -54,6 +54,12 @@ pub fn solve_mip(
     let r = match presolved {
         Some(Presolved::Infeasible) => solver::MipResult { status: MipStatus::Infeasible, x: None, objective: None, best_bound: f64::INFINITY, nodes: 0, lp_iterations: 0 },
         Some(Presolved::Reduced { prob, postsolve, scaling }) => {
+            if let Some(f) = env_str!("ENOMOTO_MIP_DEBUG_SOL") {
+                let x0: Vec<f64> = std::fs::read_to_string(f).unwrap().lines().map(|l| l.trim().parse().unwrap()).collect();
+                let xd: Vec<f64> = (0..prob.n).map(|j| if prob.col_lo[j] == prob.col_up[j] { prob.col_lo[j] } else { x0[j] }).collect();
+                eprintln!("MIP_DEBUG_SOL: reduced objective {} feasible {}", prob.objective(&xd), prob.is_feasible(&xd, 1e-6));
+                solver::DEBUG_SOL.with(|d| *d.borrow_mut() = Some(xd));
+            }
             let mut r = solver::solve(&prob, params);
             let mut ok = true;
             if let Some(xr) = r.x.take() {
@@ -160,6 +166,53 @@ fn presolve_mip(variables: &[VariableData], p: &MipProblem) -> Option<Presolved>
     if env_str!("ENOMOTO_MIP_LOG").is_some() {
         eprintln!("MIP: presolve: rows {} -> {}, free columns {} -> {}, postsolve steps {}", p.m, rows.len(), (0..n).filter(|&j| p.col_lo[j] < p.col_up[j]).count(), n - fixed, pre.postsolve_log.len());
     }
-    let prob = MipProblem::from_rows(pre.lb.clone(), pre.ub.clone(), pre.c.clone(), p.offset, p.sense_sign, p.is_int.clone(), rows, row_lo, row_up);
+    // 代入消去で目的関数に生じた定数を offset に入れる (後処理は縮約後の点について
+    // アフィンなので、任意の 1 点で元の目的値との差を測ればよい)。定数が抜けていると
+    // 相対ギャップによる終了判定や目的値の刻みによる打ち切りが誤ったスケールで働く。
+    let x_red: Vec<f64> = (0..n).map(|j| 0.0f64.clamp(pre.lb[j].min(pre.ub[j]), pre.ub[j].max(pre.lb[j]))).collect();
+    let mut x_orig = x_red.clone();
+    for step in pre.postsolve_log.iter().rev() {
+        step.apply(&mut x_orig);
+    }
+    let x_orig = crate::presolve::scaling::unscale_x(&pre.scaling, &x_orig);
+    let shift = p.objective(&x_orig) - (pre.c.iter().zip(&x_red).map(|(c, x)| c * x).sum::<f64>() + p.offset);
+    let offset = if shift.is_finite() { p.offset + shift } else { p.offset };
+    let prob = MipProblem::from_rows(pre.lb.clone(), pre.ub.clone(), pre.c.clone(), offset, p.sense_sign, p.is_int.clone(), rows, row_lo, row_up);
     Some(Presolved::Reduced { prob, postsolve: pre.postsolve_log, scaling: pre.scaling })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 代入消去で生じる目的関数の定数が縮約後の offset に入ること (binkar10_1 の誤答の回帰テスト:
+    /// 定数が抜けると相対ギャップの判定が誤ったスケールで働き、最適でない解で終了していた)。
+    #[test]
+    fn presolve_keeps_objective_constant() {
+        // y + x1 + x2 = 1000 (y は連続で 1 行にしか現れないので消去される)、x1 + x2 <= 15、
+        // min 1000 y + x1 + 2 x2 (y を消去すると定数 1e6 が生じる)
+        let variables = vec![
+            VariableData { vtype: VarType::Continuous, lb: 0.0, ub: f64::INFINITY },
+            VariableData { vtype: VarType::Integer, lb: 0.0, ub: 10.0 },
+            VariableData { vtype: VarType::Integer, lb: 0.0, ub: 10.0 },
+        ];
+        let rows = vec![vec![(0, 1.0), (1, 1.0), (2, 1.0)], vec![(1, 1.0), (2, 1.0)]];
+        let p = MipProblem::from_rows(vec![0.0, 0.0, 0.0], vec![f64::INFINITY, 10.0, 10.0], vec![1000.0, 1.0, 2.0], 0.0, 1.0, vec![false, true, true], rows, vec![1000.0, f64::NEG_INFINITY], vec![1000.0, 15.0]);
+        let Some(Presolved::Reduced { prob, postsolve, scaling }) = presolve_mip(&variables, &p) else { panic!("expected a reduced problem") };
+        for (x1, x2) in [(3.0, 4.0), (10.0, 5.0), (0.0, 0.0)] {
+            let mut xr: Vec<f64> = (0..prob.n).map(|j| prob.col_lo[j].max(0.0).min(prob.col_up[j])).collect();
+            for (j, v) in [(1, x1), (2, x2)] {
+                if prob.col_lo[j] < prob.col_up[j] {
+                    xr[j] = v;
+                }
+            }
+            let mut x = xr.clone();
+            for step in postsolve.iter().rev() {
+                step.apply(&mut x);
+            }
+            let x = crate::presolve::scaling::unscale_x(&scaling, &x);
+            let (zr, z) = (prob.objective(&xr), p.objective(&x));
+            assert!((zr - z).abs() <= 1e-6 * z.abs().max(1.0), "reduced objective {zr} != original {z}");
+        }
+    }
 }

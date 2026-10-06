@@ -65,6 +65,12 @@ pub struct MipResult {
     pub lp_iterations: u64,
 }
 
+thread_local! {
+    /// 診断用: 既知の最適解 (縮約後の空間、`ENOMOTO_MIP_DEBUG_SOL`)。この解を含むノードが
+    /// 枝刈りされたら理由を表示する (SCIP の debug solution と同様)。
+    pub(crate) static DEBUG_SOL: std::cell::RefCell<Option<Vec<f64>>> = const { std::cell::RefCell::new(None) };
+}
+
 /// 分枝の決定。
 enum BranchAction {
     /// 列 `col` を `value` (LP 値) で分枝する。
@@ -156,6 +162,55 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
 }
 
 impl<'a, L: MipLp> Solver<'a, L> {
+    /// 診断用: 現在の定義域がデバッグ解を含み、かつその目的値が打ち切り値未満なら `why` を表示する。
+    pub(super) fn dbg_lost(&self, why: &str, contained: bool) {
+        if self.params.submip || !contained {
+            return;
+        }
+        DEBUG_SOL.with(|d| {
+            if let Some(x) = d.borrow().as_ref() {
+                let z = self.p.objective(x);
+                if z < self.prune_limit() - 1e-6 {
+                    eprintln!("MIP_DEBUG_SOL lost at node {}: {why} (debug obj {z}, prune limit {})", self.nodes, self.prune_limit());
+                }
+            }
+        });
+    }
+
+    /// 診断用: ノードの分枝がデバッグ解を含むか。
+    fn dbg_changes(&self, changes: &[BoundChange]) -> bool {
+        if self.params.submip {
+            return false;
+        }
+        DEBUG_SOL.with(|d| d.borrow().as_ref().is_some_and(|x| changes.iter().all(|c| if c.upper { x[c.col] <= c.value + 1e-6 } else { x[c.col] >= c.value - 1e-6 })))
+    }
+
+    /// 診断用: 現在の定義域がデバッグ解を含むか (デバッグ解がなければ偽)。
+    pub(super) fn dbg_contains(&self) -> bool {
+        if self.params.submip {
+            return false;
+        }
+        DEBUG_SOL.with(|d| d.borrow().as_ref().is_some_and(|x| (0..self.p.n).all(|j| x[j] >= self.dom.lo[j] - 1e-6 && x[j] <= self.dom.up[j] + 1e-6)))
+    }
+
+    /// 診断用: LP の行 (カットを含む) がデバッグ解で満たされているか調べる。
+    pub(super) fn dbg_check_rows(&self, label: &str) {
+        if self.params.submip {
+            return;
+        }
+        DEBUG_SOL.with(|d| {
+            if let Some(x) = d.borrow().as_ref() {
+                for i in 0..self.lp.num_rows() {
+                    let act: f64 = self.lp.row(i).iter().map(|&(j, v)| v * x[j]).sum();
+                    let (lo, up) = self.lp.row_bounds(i);
+                    if act < lo - 1e-6 * (1.0 + lo.abs()) || act > up + 1e-6 * (1.0 + up.abs()) {
+                        eprintln!("MIP_DEBUG_SOL {label}: LP row {i} violated: {lo} <= {act} <= {up} (orig rows {})", self.p.m);
+                    }
+                }
+            }
+        });
+    }
+
     pub(super) fn time_up(&self) -> bool {
         self.deadline.is_some_and(|d| Instant::now() >= d)
     }
@@ -315,8 +370,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
         }
+        self.dbg_check_rows("after root cuts");
+        self.dbg_lost("root domain (before redcost fixing)", !self.dbg_contains());
+        let dbg_root = self.dbg_contains();
         self.store_root_redcost(root_obj);
         self.root_redcost_fixing();
+        if dbg_root && !self.dbg_contains() {
+            self.dbg_lost("root redcost fixing", true);
+        }
         self.queue.push(OpenNode { changes: Vec::new(), lower_bound: root_obj, estimate: root_obj, depth: 0, basis: Some(Rc::new(self.lp.basis())), branch: None });
         // 根のノードは LP を解いた状態のままなので、最初の取り出しでは定義域・LP を作り直さない。
         let mut first = true;
@@ -366,6 +427,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             }
                         }
                         if !ok {
+                            self.dbg_lost("propagation while replaying branches", self.dbg_changes(&n.changes));
                             self.nodes += 1;
                             continue;
                         }
@@ -376,10 +438,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
             first = false;
             self.nodes += 1;
             self.log(false);
+            let dn = self.dbg_changes(&node.changes);
             if node.lower_bound >= self.prune_limit() {
+                self.dbg_lost(&format!("node lower bound {}", node.lower_bound), dn);
                 continue;
             }
+            if dn && !self.dbg_contains() {
+                self.dbg_lost("domain excludes the debug solution before node propagation", dn);
+            }
             if !self.dom.propagate(self.p) {
+                self.dbg_lost("node propagation", dn);
                 if let Some((j, up, _, _)) = node.branch {
                     self.pc.add_cutoff(j, up);
                 }
@@ -405,6 +473,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 match st {
                     LpStatus::Optimal => {}
                     LpStatus::Infeasible | LpStatus::ObjectiveBound => {
+                        self.dbg_lost(&format!("node LP {st:?}"), dn && self.dbg_contains());
                         if let Some((j, up, _, _)) = node.branch {
                             self.pc.add_cutoff(j, up);
                         }
@@ -425,6 +494,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                 }
                 if node_obj >= self.prune_limit() {
+                    self.dbg_lost(&format!("node LP objective {node_obj}"), dn && self.dbg_contains());
                     break None;
                 }
                 let x = self.lp.col_values();
@@ -435,7 +505,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 // 被約費用による局所的な固定。LP 解が新しい境界から外れたら解き直す。
                 if self.incumbent.is_some() && self.local_redcost_fixing(node_obj) {
+                    if dn && !self.dbg_contains() {
+                        self.dbg_lost("local redcost fixing", true);
+                    }
                     if !self.dom.propagate(self.p) {
+                        self.dbg_lost("propagation after local redcost fixing", dn && self.dbg_contains());
                         break None;
                     }
                     self.sync_lp();
@@ -468,7 +542,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     resolves += 1;
                     continue;
                 }
-                match self.select_branch(&frac, node_obj) {
+                let before_sb = dn && self.dbg_contains();
+                let sel = self.select_branch(&frac, node_obj);
+                if before_sb && !self.dbg_contains() {
+                    self.dbg_lost("strong branching tightened bounds", true);
+                }
+                if before_sb && matches!(sel, BranchAction::Prune) {
+                    self.dbg_lost("strong branching pruned the node", true);
+                }
+                match sel {
                     BranchAction::Resolve => {
                         resolves += 1;
                         if !self.dom.propagate(self.p) {

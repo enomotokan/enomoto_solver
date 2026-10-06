@@ -56,7 +56,7 @@ def ours(lp):
         else:
             if l>-inf: M.add_constraint(e>=l)
             if u<inf: M.add_constraint(e<=u)
-    s=M.solve()
+    s=M.solve(mip_rel_gap=1e-9)
     return s.status, s.objective, [x.value for x in xs] if s.status=="optimal" else None
 N=int(sys.argv[1]); start=int(sys.argv[2]) if len(sys.argv)>2 else 0
 bad=0; t0=time.time()
