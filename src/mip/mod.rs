@@ -48,13 +48,42 @@ pub fn solve_mip(
         node_limit: settings.node_limit.or(env_f64(env_str!("ENOMOTO_MIP_NODE_LIMIT")).map(|v| v as u64)).unwrap_or(d.node_limit),
         ..d
     };
-    // 前処理 (整数を考慮した縮約) をかけて解き、解を元の空間に戻す。戻した解が元の問題で
-    // 実行可能でなければ (前処理の誤りの安全網)、前処理なしで解き直す。
-    let presolved = if env_str!("ENOMOTO_MIP_NO_PRESOLVE").is_some() { None } else { presolve_mip(variables, &p) };
-    let r = match presolved {
+    let r = solve_problem(&p, params, env_str!("ENOMOTO_MIP_NO_PRESOLVE").is_none());
+    if env_str!("ENOMOTO_MIP_XPROF").is_some() {
+        crate::simplex::slope_intercept_dual::xprof("tail");
+        for (l, ns) in crate::simplex::slope_intercept_dual::xprof_take() {
+            eprintln!("XPROF {l:10} {:10.1} ms", ns as f64 / 1e6);
+        }
+    }
+    let s = p.sense_sign;
+    let objective_value = r.objective.map(|z| s * z);
+    let gap = match r.objective {
+        Some(z) if r.best_bound.is_finite() => ((z - r.best_bound).max(0.0)) / z.abs().max(1.0),
+        Some(_) if r.status == MipStatus::Optimal => 0.0,
+        _ => f64::INFINITY,
+    };
+    let summary = MipSummary { best_bound: s * r.best_bound, gap, nodes: r.nodes, lp_iterations: r.lp_iterations };
+    let status = match r.status {
+        MipStatus::Optimal => Status::Optimal,
+        MipStatus::Infeasible => Status::Infeasible,
+        MipStatus::Unbounded => Status::Unbounded,
+        MipStatus::InfeasibleOrUnbounded => Status::InfeasibleOrUnbounded,
+        MipStatus::TimeLimit => Status::TimeLimit,
+        MipStatus::NodeLimit => Status::NodeLimit,
+        MipStatus::NotSolved => Status::NotSolved,
+    };
+    SolveResult { status, objective: objective_value, x: r.x, node_limit_hit: r.status == MipStatus::NodeLimit, mip: Some(summary) }
+}
+
+/// `p` を (`use_presolve` なら MIP 前処理をかけてから) 分枝限定法で解き、解を `p` の空間に戻す。
+/// 戻した解が `p` で実行可能でなければ (前処理の誤りの安全網)、前処理なしで解き直す。
+/// サブ MIP (RENS/RINS) もこれで解く。
+pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: bool) -> solver::MipResult {
+    let presolved = if use_presolve { presolve_mip(p, params.verbose) } else { None };
+    match presolved {
         Some(Presolved::Infeasible) => solver::MipResult { status: MipStatus::Infeasible, x: None, objective: None, best_bound: f64::INFINITY, nodes: 0, lp_iterations: 0 },
         Some(Presolved::Reduced { prob, postsolve, scaling }) => {
-            if let Some(f) = env_str!("ENOMOTO_MIP_DEBUG_SOL") {
+            if let Some(f) = env_str!("ENOMOTO_MIP_DEBUG_SOL").filter(|_| !params.submip) {
                 let x0: Vec<f64> = std::fs::read_to_string(f).unwrap().lines().map(|l| l.trim().parse().unwrap()).collect();
                 let xd: Vec<f64> = (0..prob.n).map(|j| if prob.col_lo[j] == prob.col_up[j] { prob.col_lo[j] } else { x0[j] }).collect();
                 eprintln!("MIP_DEBUG_SOL: reduced objective {} feasible {}", prob.objective(&xd), prob.is_feasible(&xd, 1e-6));
@@ -84,34 +113,10 @@ pub fn solve_mip(
                 // 暫定解がないと目的値の定数のずれが分からないので下界は報告しない
                 r.best_bound = f64::NEG_INFINITY;
             }
-            if ok { r } else { solver::solve(&p, params) }
+            if ok { r } else { solver::solve(p, params) }
         }
-        None => solver::solve(&p, params),
-    };
-    if env_str!("ENOMOTO_MIP_XPROF").is_some() {
-        crate::simplex::slope_intercept_dual::xprof("tail");
-        for (l, ns) in crate::simplex::slope_intercept_dual::xprof_take() {
-            eprintln!("XPROF {l:10} {:10.1} ms", ns as f64 / 1e6);
-        }
+        None => solver::solve(p, params),
     }
-    let s = p.sense_sign;
-    let objective_value = r.objective.map(|z| s * z);
-    let gap = match r.objective {
-        Some(z) if r.best_bound.is_finite() => ((z - r.best_bound).max(0.0)) / z.abs().max(1.0),
-        Some(_) if r.status == MipStatus::Optimal => 0.0,
-        _ => f64::INFINITY,
-    };
-    let summary = MipSummary { best_bound: s * r.best_bound, gap, nodes: r.nodes, lp_iterations: r.lp_iterations };
-    let status = match r.status {
-        MipStatus::Optimal => Status::Optimal,
-        MipStatus::Infeasible => Status::Infeasible,
-        MipStatus::Unbounded => Status::Unbounded,
-        MipStatus::InfeasibleOrUnbounded => Status::InfeasibleOrUnbounded,
-        MipStatus::TimeLimit => Status::TimeLimit,
-        MipStatus::NodeLimit => Status::NodeLimit,
-        MipStatus::NotSolved => Status::NotSolved,
-    };
-    SolveResult { status, objective: objective_value, x: r.x, node_limit_hit: r.status == MipStatus::NodeLimit, mip: Some(summary) }
 }
 
 /// 前処理の結果。
@@ -121,11 +126,11 @@ enum Presolved {
 }
 
 /// 整数を考慮した前処理をかけた問題を作る。前処理が何も減らさなければ `None` (元の問題で解く)。
-fn presolve_mip(variables: &[VariableData], p: &MipProblem) -> Option<Presolved> {
+fn presolve_mip(p: &MipProblem, verbose: bool) -> Option<Presolved> {
     use crate::params::simplex::{PRESOLVE_ROUNDS, PROPAGATION_PASSES, ROWSINGLETON_COLSINGLETON_INNER_ROUNDS};
     let n = p.n;
     // 元の制約 (境界は丸め済みの MipProblem の値を使う)
-    let vars: Vec<VariableData> = (0..n).map(|j| VariableData { vtype: variables[j].vtype, lb: p.col_lo[j], ub: p.col_up[j] }).collect();
+    let vars: Vec<VariableData> = (0..n).map(|j| VariableData { vtype: if p.is_int[j] { VarType::Integer } else { VarType::Continuous }, lb: p.col_lo[j], ub: p.col_up[j] }).collect();
     let mut cons: Vec<ConstraintRow> = Vec::with_capacity(p.m);
     for i in 0..p.m {
         let expr = crate::types::LinearExpr { coeffs: p.rows[i].iter().cloned().collect(), constant: 0.0 };
@@ -169,7 +174,7 @@ fn presolve_mip(variables: &[VariableData], p: &MipProblem) -> Option<Presolved>
         row_up.push(rhs);
     }
     let fixed = (0..n).filter(|&j| pre.lb[j] == pre.ub[j]).count();
-    if env_str!("ENOMOTO_MIP_LOG").is_some() {
+    if verbose {
         eprintln!("MIP: presolve: rows {} -> {}, free columns {} -> {}, postsolve steps {}", p.m, rows.len(), (0..n).filter(|&j| p.col_lo[j] < p.col_up[j]).count(), n - fixed, pre.postsolve_log.len());
     }
     // 代入消去で目的関数に生じた定数を offset に入れる (後処理は縮約後の点について
@@ -204,7 +209,7 @@ mod tests {
         ];
         let rows = vec![vec![(0, 1.0), (1, 1.0), (2, 1.0)], vec![(1, 1.0), (2, 1.0)]];
         let p = MipProblem::from_rows(vec![0.0, 0.0, 0.0], vec![f64::INFINITY, 10.0, 10.0], vec![1000.0, 1.0, 2.0], 0.0, 1.0, vec![false, true, true], rows, vec![1000.0, f64::NEG_INFINITY], vec![1000.0, 15.0]);
-        let Some(Presolved::Reduced { prob, postsolve, scaling }) = presolve_mip(&variables, &p) else { panic!("expected a reduced problem") };
+        let Some(Presolved::Reduced { prob, postsolve, scaling }) = presolve_mip(&p, false) else { panic!("expected a reduced problem") };
         for (x1, x2) in [(3.0, 4.0), (10.0, 5.0), (0.0, 0.0)] {
             let mut xr: Vec<f64> = (0..prob.n).map(|j| prob.col_lo[j].max(0.0).min(prob.col_up[j])).collect();
             for (j, v) in [(1, x1), (2, x2)] {

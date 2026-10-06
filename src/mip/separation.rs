@@ -5,7 +5,7 @@
 //! 除いて LP に加えて解き直す。目的値がほとんど動かなくなったら止める。最後に効いていない (論理変数が
 //! 基底にある) カット行を LP から外す。カットは大域的な境界から作るので、木全体で有効。
 
-use super::cuts::{cmir, extended_cover, CutVars, RawCut};
+use super::cuts::{cmir, extended_cover, CutVars, RawCut, VarBounds};
 use super::domain::FEASTOL;
 use super::lp::{LpStatus, SolveLimits, VarStatus};
 use super::solver::Solver;
@@ -176,7 +176,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             is_int.push(integral);
             xv.push(act[i]);
         }
-        let vars = CutVars { lo: &lo, up: &up, is_int: &is_int, x: &xv };
+        if self.vbounds.is_none() {
+            self.vbounds = Some(std::rc::Rc::new(VarBounds::from_rows(n, &p.is_int, &p.rows, &p.row_lo, &p.row_up)));
+        }
+        let vb = self.vbounds.clone();
+        let vars = CutVars { lo: &lo, up: &up, is_int: &is_int, x: &xv, vb: if env_str!("ENOMOTO_MIP_NO_VB").is_some() { None } else { vb.as_deref() } };
         let mut cands: Vec<Candidate> = Vec::new();
         let mut push = |raw: Option<RawCut>, cands: &mut Vec<Candidate>, s: &Solver<L>| {
             if let Some(raw) = raw {

@@ -16,6 +16,62 @@ pub struct CutVars<'a> {
     pub is_int: &'a [bool],
     /// 現在の LP 解での値。
     pub x: &'a [f64],
+    /// 連続変数の変数上下限 (なければ空)。
+    pub vb: Option<&'a VarBounds>,
+}
+
+/// 連続変数 `x_k` の変数上下限 `x_k <= d y + e` (VUB) / `x_k >= d y + e` (VLB) (`y` は整数変数)。
+/// 2 変数の行から集める。CMIR の置き換えで単純な上下限より近ければこちらを使う (HiGHS の
+/// `HighsTransformedLp` と同じ)。
+#[derive(Default)]
+pub struct VarBounds {
+    pub vub: Vec<Vec<(usize, f64, f64)>>,
+    pub vlb: Vec<Vec<(usize, f64, f64)>>,
+}
+
+impl VarBounds {
+    /// 行 `row_lo <= sum a_j x_j <= row_up` のうち、連続変数 1 つと整数変数 1 つからなるものを集める。
+    pub fn from_rows(n: usize, is_int: &[bool], rows: &[Vec<(usize, f64)>], row_lo: &[f64], row_up: &[f64]) -> Self {
+        let mut vb = VarBounds { vub: vec![Vec::new(); n], vlb: vec![Vec::new(); n] };
+        for (i, r) in rows.iter().enumerate() {
+            if r.len() != 2 {
+                continue;
+            }
+            let ((xk, a), (y, b)) = match (is_int[r[0].0], is_int[r[1].0]) {
+                (false, true) => (r[0], r[1]),
+                (true, false) => (r[1], r[0]),
+                _ => continue,
+            };
+            if a.abs() < 1e-9 || b.abs() < 1e-9 {
+                continue;
+            }
+            // a x + b y <= up  /  a x + b y >= lo
+            for (rhs, le) in [(row_up[i], true), (row_lo[i], false)] {
+                if !rhs.is_finite() {
+                    continue;
+                }
+                let (d, e) = (-b / a, rhs / a);
+                // a > 0 かつ <= なら上限、a < 0 なら向きが反転
+                let upper = le == (a > 0.0);
+                let list = if upper { &mut vb.vub[xk] } else { &mut vb.vlb[xk] };
+                if list.len() < 4 {
+                    list.push((y, d, e));
+                }
+            }
+        }
+        vb
+    }
+}
+
+/// 連続変数の項の置き換え方。
+#[derive(Clone, Copy, PartialEq)]
+enum Sub {
+    /// 単純な上下限 (`comp` で向き)。
+    Simple,
+    /// `x = d y + e - s` (VUB)。項の変数は `s`。
+    Vub(usize, f64, f64),
+    /// `x = d y + e + s` (VLB)。項の変数は `s`。
+    Vlb(usize, f64, f64),
 }
 
 /// 生成した切除平面 `sum coef_k v_k <= rhs` と、その効き目 (違反量 / 係数のノルム)。
@@ -38,12 +94,21 @@ struct Term {
     yv: f64,
     /// y の上限 (u - l)。
     yu: f64,
+    /// 連続変数を変数上下限で置き換えたか。
+    sub: Sub,
 }
 
 /// 境界の代入 (補変数化) をした項と右辺。連続変数の正の係数の項は捨ててある。
+/// 連続変数は単純な上下限と変数上下限のうち LP 値に近いものを使う (変数上下限なら整数変数の係数が増える)。
 fn substitute(vars: &CutVars, base: &[(usize, f64)], rhs: f64) -> Option<(Vec<Term>, f64)> {
     let mut terms: Vec<Term> = Vec::with_capacity(base.len());
     let mut beta = rhs;
+    // 整数変数の係数 (変数上下限の置き換えで増える分を含む)。base の順を保つ。
+    let mut int_coef: Vec<(usize, f64)> = Vec::new();
+    let add_int = |k: usize, a: f64, int_coef: &mut Vec<(usize, f64)>| match int_coef.iter_mut().find(|(j, _)| *j == k) {
+        Some(e) => e.1 += a,
+        None => int_coef.push((k, a)),
+    };
     for &(k, a) in base {
         if a.abs() < 1e-12 {
             continue;
@@ -53,7 +118,84 @@ fn substitute(vars: &CutVars, base: &[(usize, f64)], rhs: f64) -> Option<(Vec<Te
             beta -= a * l;
             continue;
         }
-        let int = vars.is_int[k];
+        if vars.is_int[k] {
+            add_int(k, a, &mut int_coef);
+            continue;
+        }
+        // 連続変数: 近い方の有限の境界 (単純な上下限) と、変数上下限の余裕を比べる
+        let mut best: (f64, Sub, bool) = (f64::INFINITY, Sub::Simple, false); // (余裕, 置き換え, 上側か)
+        if l.is_finite() {
+            best = (x - l, Sub::Simple, false);
+        }
+        if u.is_finite() && u - x < best.0 {
+            best = (u - x, Sub::Simple, true);
+        }
+        if let Some(vb) = vars.vb {
+            if k < vb.vub.len() {
+                for &(y, d, e) in &vb.vub[k] {
+                    let slack = d * vars.x[y] + e - x;
+                    if slack >= -1e-9 && slack < best.0 - 1e-9 {
+                        best = (slack, Sub::Vub(y, d, e), true);
+                    }
+                }
+                for &(y, d, e) in &vb.vlb[k] {
+                    let slack = x - d * vars.x[y] - e;
+                    if slack >= -1e-9 && slack < best.0 - 1e-9 {
+                        best = (slack, Sub::Vlb(y, d, e), false);
+                    }
+                }
+            }
+        }
+        if !best.0.is_finite() {
+            return None;
+        }
+        match best.1 {
+            Sub::Simple => {
+                if !best.2 {
+                    // v = l + y
+                    beta -= a * l;
+                    if a > 0.0 {
+                        continue; // 正の係数の連続変数は捨てる
+                    }
+                    terms.push(Term { k, a, comp: false, int: false, yv: (x - l).max(0.0), yu: u - l, sub: Sub::Simple });
+                } else {
+                    // v = u - y
+                    beta -= a * u;
+                    if a < 0.0 {
+                        continue;
+                    }
+                    terms.push(Term { k, a: -a, comp: true, int: false, yv: (u - x).max(0.0), yu: u - l, sub: Sub::Simple });
+                }
+            }
+            Sub::Vub(y, d, e) => {
+                // x = d y + e - s: a x = a d y + a e - a s
+                beta -= a * e;
+                add_int(y, a * d, &mut int_coef);
+                if a < 0.0 {
+                    continue; // s の係数 -a > 0: 捨てる
+                }
+                terms.push(Term { k, a: -a, comp: false, int: false, yv: best.0.max(0.0), yu: f64::INFINITY, sub: best.1 });
+            }
+            Sub::Vlb(y, d, e) => {
+                // x = d y + e + s: a x = a d y + a e + a s
+                beta -= a * e;
+                add_int(y, a * d, &mut int_coef);
+                if a > 0.0 {
+                    continue;
+                }
+                terms.push(Term { k, a, comp: false, int: false, yv: best.0.max(0.0), yu: f64::INFINITY, sub: best.1 });
+            }
+        }
+    }
+    for (k, a) in int_coef {
+        if a.abs() < 1e-12 {
+            continue;
+        }
+        let (l, u, x) = (vars.lo[k], vars.up[k], vars.x[k]);
+        if l == u {
+            beta -= a * l;
+            continue;
+        }
         // 近い方の有限の境界を選ぶ
         let use_lower = match (l.is_finite(), u.is_finite()) {
             (true, true) => (x - l) <= (u - x),
@@ -64,22 +206,45 @@ fn substitute(vars: &CutVars, base: &[(usize, f64)], rhs: f64) -> Option<(Vec<Te
         if use_lower {
             // v = l + y
             beta -= a * l;
-            let yv = (x - l).max(0.0);
-            if !int && a > 0.0 {
-                continue; // 正の係数の連続変数は捨てる
-            }
-            terms.push(Term { k, a, comp: false, int, yv, yu: u - l });
+            terms.push(Term { k, a, comp: false, int: true, yv: (x - l).max(0.0), yu: u - l, sub: Sub::Simple });
         } else {
             // v = u - y
             beta -= a * u;
-            let yv = (u - x).max(0.0);
-            if !int && -a > 0.0 {
-                continue;
-            }
-            terms.push(Term { k, a: -a, comp: true, int, yv, yu: u - l });
+            terms.push(Term { k, a: -a, comp: true, int: true, yv: (u - x).max(0.0), yu: u - l, sub: Sub::Simple });
         }
     }
     Some((terms, beta))
+}
+
+/// 置き換えた項 `c * (項の変数)` を元の変数の式に戻して `coefs` に足し、右辺の変化を返す
+/// (戻り値を右辺に足す)。
+fn unsubstitute(vars: &CutVars, t: &Term, c: f64, coefs: &mut Vec<(usize, f64)>) -> f64 {
+    match t.sub {
+        Sub::Simple => {
+            let (l, u) = (vars.lo[t.k], vars.up[t.k]);
+            if t.comp {
+                // y = u - v
+                coefs.push((t.k, -c));
+                -c * u
+            } else {
+                // y = v - l
+                coefs.push((t.k, c));
+                c * l
+            }
+        }
+        Sub::Vub(y, d, e) => {
+            // s = d y + e - x
+            coefs.push((t.k, -c));
+            coefs.push((y, c * d));
+            -c * e
+        }
+        Sub::Vlb(y, d, e) => {
+            // s = x - d y - e
+            coefs.push((t.k, c));
+            coefs.push((y, -c * d));
+            c * e
+        }
+    }
 }
 
 /// CMIR で切除平面を作る。作れなければ `None`。
@@ -156,16 +321,7 @@ pub fn cmir(vars: &CutVars, base: &[(usize, f64)], rhs: f64) -> Option<RawCut> {
         if c == 0.0 {
             continue;
         }
-        let (l, u) = (vars.lo[t.k], vars.up[t.k]);
-        if t.comp {
-            // y = u - v
-            r -= c * u;
-            coefs.push((t.k, -c));
-        } else {
-            // y = v - l
-            r += c * l;
-            coefs.push((t.k, c));
-        }
+        r += unsubstitute(vars, t, c, &mut coefs);
     }
     if coefs.is_empty() {
         return None;
@@ -221,7 +377,7 @@ mod tests {
         let up = [1.0; 3];
         let is_int = [true; 3];
         let x = [0.9, 0.9, 0.2];
-        let vars = CutVars { lo: &lo, up: &up, is_int: &is_int, x: &x };
+        let vars = CutVars { lo: &lo, up: &up, is_int: &is_int, x: &x, vb: None };
         let cut = extended_cover(&vars, &[(0, 3.0), (1, 4.0), (2, 5.0)], 6.0).expect("cover");
         let act: f64 = cut.coefs.iter().map(|&(k, c)| c * x[k]).sum();
         assert!(act > cut.rhs + 1e-6);
@@ -232,13 +388,36 @@ mod tests {
     }
 
     #[test]
+    fn mir_with_variable_upper_bound() {
+        // x continuous in [0, 100], y binary, x <= 10 y (VUB), base row x >= 3. LP point (3, 0.3)
+        // → with the VUB substitution the cut is y >= 1
+        let lo = [0.0, 0.0];
+        let up = [100.0, 1.0];
+        let is_int = [false, true];
+        let x = [3.0, 0.3];
+        let vb = VarBounds::from_rows(2, &is_int, &[vec![(0, 1.0), (1, -10.0)]], &[f64::NEG_INFINITY], &[0.0]);
+        assert_eq!(vb.vub[0], vec![(1, 10.0, 0.0)]);
+        let vars = CutVars { lo: &lo, up: &up, is_int: &is_int, x: &x, vb: Some(&vb) };
+        let cut = cmir(&vars, &[(0, -1.0)], -3.0).expect("cut");
+        let act: f64 = cut.coefs.iter().map(|&(k, c)| c * x[k]).sum();
+        assert!(act > cut.rhs + 1e-6, "LP point must be cut off");
+        for pt in [[3.0, 1.0], [10.0, 1.0], [5.0, 1.0]] {
+            let a: f64 = cut.coefs.iter().map(|&(k, c)| c * pt[k]).sum();
+            assert!(a <= cut.rhs + 1e-9, "valid point {pt:?} cut off: {a} > {}", cut.rhs);
+        }
+        // without the VUB no cut exists (the row has no integer variable)
+        let vars = CutVars { lo: &lo, up: &up, is_int: &is_int, x: &x, vb: None };
+        assert!(cmir(&vars, &[(0, -1.0)], -3.0).is_none());
+    }
+
+    #[test]
     fn mir_on_simple_row() {
         // x integer in [0, 10], y continuous >= 0: x - y <= 2.5, LP point (2.5, 0) → cut x - 2y <= 2
         let lo = [0.0, 0.0];
         let up = [10.0, f64::INFINITY];
         let is_int = [true, false];
         let x = [2.5, 0.0];
-        let vars = CutVars { lo: &lo, up: &up, is_int: &is_int, x: &x };
+        let vars = CutVars { lo: &lo, up: &up, is_int: &is_int, x: &x, vb: None };
         let cut = cmir(&vars, &[(0, 1.0), (1, -1.0)], 2.5).expect("cut");
         let act: f64 = cut.coefs.iter().map(|&(k, c)| c * x[k]).sum();
         assert!(act > cut.rhs + 1e-6, "LP point must be cut off");
@@ -308,15 +487,7 @@ pub fn extended_cover(vars: &CutVars, base: &[(usize, f64)], rhs: f64) -> Option
         // z = y (flip なし) または 1 - y
         let (cy, c0) = if flip { (-1.0, 1.0) } else { (1.0, 0.0) };
         r -= c0;
-        let (l, u) = (vars.lo[t.k], vars.up[t.k]);
-        if t.comp {
-            // y = u - v
-            r -= cy * u;
-            coefs.push((t.k, -cy));
-        } else {
-            r += cy * l;
-            coefs.push((t.k, cy));
-        }
+        r += unsubstitute(vars, &t, cy, &mut coefs);
     }
     Some(RawCut { coefs, rhs: r })
 }

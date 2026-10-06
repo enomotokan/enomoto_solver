@@ -68,6 +68,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 矛盾したら 1 つ隣の値を試す。全部固定できたら、連続変数があれば LP で解いて試す。
     /// 定義域と LP は呼ぶ前の状態に戻す。
     pub(super) fn fix_and_propagate(&mut self, target: &[f64], order: &[usize]) -> bool {
+        self.propagate_rounding(target, order, None)
+    }
+
+    /// [`Self::fix_and_propagate`] の本体。`rounded` を渡すと、伝播を使った丸め点 (Feasibility Pump 2.0
+    /// の丸め) を書き込む: 固定できた列はその値、矛盾が出た後の列は (そこで伝播を止めて) その時点の
+    /// 定義域に収めた `target` の丸め。
+    pub(super) fn propagate_rounding(&mut self, target: &[f64], order: &[usize], mut rounded: Option<&mut Vec<f64>>) -> bool {
         let p = self.p;
         let pos = self.dom.stack_len();
         let mut ok = true;
@@ -79,28 +86,51 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         all.extend((0..p.n).filter(|&j| p.is_int[j] && !in_order[j]));
         for &j in &all {
-            if !p.is_int[j] || self.dom.is_fixed(j) {
+            if !p.is_int[j] {
                 continue;
             }
             let t = target[j];
             let v = t.round().clamp(self.dom.lo[j], self.dom.up[j]);
+            if !ok {
+                // 矛盾の後: 伝播せずに今の定義域で丸めるだけ
+                if let Some(r) = rounded.as_deref_mut() {
+                    r[j] = v;
+                }
+                continue;
+            }
+            if self.dom.is_fixed(j) {
+                if let Some(r) = rounded.as_deref_mut() {
+                    r[j] = self.dom.lo[j];
+                }
+                continue;
+            }
             let before = self.dom.stack_len();
             self.dom.tighten_lower(p, j, v);
             self.dom.tighten_upper(p, j, v);
             if self.dom.propagate(p) {
+                if let Some(r) = rounded.as_deref_mut() {
+                    r[j] = v;
+                }
                 continue;
             }
             // 隣の値を試す
             self.dom.backtrack_to(p, before);
             let v2 = if t > v { v + 1.0 } else { v - 1.0 };
-            if v2 < self.dom.lo[j] || v2 > self.dom.up[j] {
-                ok = false;
-                break;
+            if v2 >= self.dom.lo[j] && v2 <= self.dom.up[j] {
+                self.dom.tighten_lower(p, j, v2);
+                self.dom.tighten_upper(p, j, v2);
+                if self.dom.propagate(p) {
+                    if let Some(r) = rounded.as_deref_mut() {
+                        r[j] = v2;
+                    }
+                    continue;
+                }
+                self.dom.backtrack_to(p, before);
             }
-            self.dom.tighten_lower(p, j, v2);
-            self.dom.tighten_upper(p, j, v2);
-            if !self.dom.propagate(p) {
-                ok = false;
+            ok = false;
+            if let Some(r) = rounded.as_deref_mut() {
+                r[j] = v.clamp(self.dom.lo[j], self.dom.up[j]);
+            } else {
                 break;
             }
         }
@@ -157,6 +187,79 @@ impl<'a, L: MipLp> Solver<'a, L> {
         false
     }
 
+    /// 分数ダイビング: LP 解で整数に最も近い分数の列をその側に丸めて固定し、伝播して LP を解き直す、を
+    /// 整数解になるまで繰り返す。固定で実行不能になったら 1 回だけ反対側を試す。`budget` は LP 反復の上限。
+    /// 定義域と LP は呼ぶ前の状態に戻す。
+    pub(super) fn fractional_dive(&mut self, budget: u64) -> bool {
+        let p = self.p;
+        let saved = self.lp.save_state();
+        let pos = self.dom.stack_len();
+        let it_start = self.lp.total_iterations();
+        let mut found = false;
+        for _depth in 0..(2 * p.n) {
+            if self.time_up() || self.lp.total_iterations() - it_start > budget {
+                if self.params.verbose {
+                    eprintln!("MIP:   dive ran out of budget at depth {_depth} ({} iterations)", self.lp.total_iterations() - it_start);
+                }
+                break;
+            }
+            let x = self.lp.col_values();
+            let frac = self.fractional(&x);
+            if frac.is_empty() {
+                found = self.try_lp_solution();
+                if self.params.verbose {
+                    eprintln!("MIP:   dive reached an integral LP at depth {_depth} (accepted {found}, objective {})", self.lp.objective() + p.offset);
+                }
+                break;
+            }
+            // 整数に最も近い列 (同点は lock の少ない側に丸めやすい列)
+            let &(j, v) = frac
+                .iter()
+                .min_by(|a, b| {
+                    let fa = (a.1 - a.1.round()).abs();
+                    let fb = (b.1 - b.1.round()).abs();
+                    fa.total_cmp(&fb)
+                })
+                .unwrap();
+            let up_first = v - v.floor() >= 0.5;
+            let mut ok = false;
+            for up in [up_first, !up_first] {
+                let before = self.dom.stack_len();
+                if up {
+                    self.dom.tighten_lower(p, j, v.ceil());
+                } else {
+                    self.dom.tighten_upper(p, j, v.floor());
+                }
+                if self.dom.propagate(p) {
+                    self.sync_lp();
+                    let it0 = self.lp.total_iterations();
+                    let lim = budget.saturating_sub(self.lp.total_iterations() - it_start).max(1000);
+                    let st = self.lp.solve(&self.limits(lim));
+                    self.heur_iters += self.lp.total_iterations() - it0;
+                    if st == LpStatus::Optimal {
+                        ok = true;
+                        break;
+                    }
+                    if self.params.verbose {
+                        eprintln!("MIP:   dive LP {st:?} after {} iterations (col {j}, up {up})", self.lp.total_iterations() - it0);
+                    }
+                }
+                self.dom.backtrack_to(p, before);
+                self.sync_lp();
+            }
+            if !ok {
+                if self.params.verbose {
+                    eprintln!("MIP:   dive stopped at depth {_depth} with {} fractional", frac.len());
+                }
+                break;
+            }
+        }
+        self.dom.backtrack_to(p, pos);
+        self.sync_lp();
+        self.lp.restore_state(&saved);
+        found
+    }
+
     /// Feasibility Pump (根で暫定解がないときに使う)。LP は根の最適解の状態から始め、最後に戻す。
     pub(super) fn feasibility_pump(&mut self, root_iters: u64) -> bool {
         let p = self.p;
@@ -170,6 +273,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut seen: HashSet<Vec<i64>> = HashSet::new();
         let ints: Vec<usize> = (0..n).filter(|&j| p.is_int[j]).collect();
         let mut found = false;
+        // Objective Feasibility Pump: 距離関数に元の目的関数を重み alpha で混ぜ、反復ごとに減衰させる。
+        let cnorm = p.cost.iter().map(|c| c * c).sum::<f64>().sqrt();
+        let mut alpha = if cnorm > 0.0 { 1.0f64 } else { 0.0 };
         for _pass in 0..100 {
             if self.time_up() || self.lp.total_iterations() - it_start > budget {
                 break;
@@ -203,12 +309,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             seen.insert(key);
             // 丸めた点の固定と伝播で実行可能解になるか
+            // 伝播を使った丸め (Feasibility Pump 2.0): 整数に近い列から固定して伝播し、後の列は締まった
+            // 定義域の中で丸める。矛盾したらそこで伝播を止める。得た点を距離の目標にする。
             let mut order = ints.clone();
             order.sort_by(|&a, &b| (x[a] - r[a]).abs().total_cmp(&(x[b] - r[b]).abs()));
-            if self.fix_and_propagate(&r, &order) {
+            let mut rp = r.clone();
+            if self.propagate_rounding(&r, &order, Some(&mut rp)) {
                 found = true;
                 break;
             }
+            r = rp;
             // 距離の目的
             let mut c = vec![0.0; n];
             for &j in &ints {
@@ -227,6 +337,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     -1.0
                 } + noise;
             }
+            if alpha > 1e-3 {
+                // 距離の項の大きさ (||Δ||) に目的関数の大きさを合わせて混ぜる
+                let dnorm = c.iter().map(|v| v * v).sum::<f64>().sqrt();
+                let w = alpha * dnorm.max(1.0) / cnorm;
+                for j in 0..n {
+                    c[j] = (1.0 - alpha) * c[j] + w * p.cost[j];
+                }
+            }
+            alpha *= 0.9;
             self.lp.set_costs(&c);
             let it0 = self.lp.total_iterations();
             let lim = budget.saturating_sub(self.lp.total_iterations() - it_start).max(10);
@@ -395,7 +514,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             submip: true,
             cutoff: self.prune_limit(),
         };
-        let r = super::solver::solve(&sub, params);
+        let r = super::solve_problem(&sub, params, env_str!("ENOMOTO_MIP_SUBMIP_NO_PRESOLVE").is_none());
+        if self.params.verbose {
+            let nfree = (0..p.n).filter(|&j| sub.col_lo[j] < sub.col_up[j]).count();
+            eprintln!("MIP:   sub-MIP: {nfree} free columns of {}, status {:?}, nodes {}, objective {:?}", p.n, r.status, r.nodes, r.objective);
+        }
         self.heur_iters += r.lp_iterations;
         match r.x {
             Some(x) => self.try_incumbent(x),

@@ -955,6 +955,17 @@ pub(crate) fn take_last_lu() -> Option<sparse_lu::FtLu> {
 }
 
 thread_local! {
+    /// 次の warm start で、非基底列を置く側の希望 (列ごとに -1: 下限、+1: 上限、0: 指定なし)。
+    static WARM_NB: std::cell::RefCell<Option<Vec<i8>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// 次の warm start で非基底列を置く側の希望を渡す (前回の解での位置。分枝限定法の LP が使う)。
+/// 被約費用の符号が希望と合わなくても、ずれが小さければ (費用摂動の大きさ程度) 費用をずらして希望の側に置く。
+pub(crate) fn set_warm_nb(nb: Option<Vec<i8>>) {
+    WARM_NB.with(|w| *w.borrow_mut() = nb);
+}
+
+thread_local! {
     /// 次の [`solve_slope_intercept_dual`] の 1 回だけ、全スラック基底の代わりに使う基底 (列番号、長さ `m`)。
     static WARM_BASIS: std::cell::RefCell<Option<Vec<usize>>> = const { std::cell::RefCell::new(None) };
 }
@@ -1010,6 +1021,17 @@ fn warm_start_basis(
     lu.solve_transpose_into(&cb, &mut scratch, &mut y);
     let mut st = vec![None; n_total];
     let mut shifted = 0usize;
+    let hint = WARM_NB.with(|w| w.borrow_mut().take()).filter(|h| h.len() == n_total);
+    // 真の費用での双対 (希望の側が真の費用で双対実行可能かの判定用)
+    let y_true: Vec<f64> = if hint.is_some() {
+        let cb_true: Vec<f64> = wb.iter().map(|&j| std.c[j]).collect();
+        let mut yt = vec![0.0; m];
+        lu.solve_transpose_into(&cb_true, &mut scratch, &mut yt);
+        yt
+    } else {
+        Vec::new()
+    };
+    let hint_tol = tunable!("ENOMOTO_T_WARM_NB_TOL", 1e-7, f64);
     for j in 0..n_total {
         if pos[j].is_some() {
             continue;
@@ -1020,6 +1042,33 @@ fn warm_start_basis(
         }
         let (lo, hi) = (std.lb[j], std.ub[j]);
         let free = lo == f64::NEG_INFINITY && hi == f64::INFINITY;
+        // 前回の位置の希望: 有限の境界の側で、被約費用のずれが小さければ費用をずらしてそちらに置く
+        // (双対退化した列が反対側に置き直されて主実行不能が大量に生じるのを防ぐ)
+        if let Some(h) = &hint {
+            // 真の費用での被約費用。希望の側でこれが双対実行可能なら、摂動済み費用での符号のずれは摂動による
+            // ものなので、費用をずらして希望の側に置く (双対退化した列で特に多い)
+            let mut dt = std.c[j];
+            for &(i, a) in std.cols.col(j) {
+                dt -= a * y_true[i];
+            }
+            let small = hint_tol * (1.0 + std.c[j].abs());
+            if h[j] < 0 && lo.is_finite() && dt >= -small {
+                if d < -TOL {
+                    active_cost[j] -= d;
+                    shifted += 1;
+                }
+                st[j] = Some(NbStatus::Lower);
+                continue;
+            }
+            if h[j] > 0 && hi.is_finite() && dt <= small {
+                if d > TOL {
+                    active_cost[j] -= d;
+                    shifted += 1;
+                }
+                st[j] = Some(NbStatus::Upper);
+                continue;
+            }
+        }
         // 構造列の無限の側は `M` で置ける。スラック列の無限の側には置けない。
         let can_lower = lo.is_finite() || j < n_orig;
         let can_upper = hi.is_finite() || j < n_orig;
@@ -1042,7 +1091,36 @@ fn warm_start_basis(
         });
     }
     if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
-        eprintln!("DEBUG_EXT: warm start from a given basis (cost shifts {shifted})");
+        let (mut agree, mut differ, mut unknown) = (0, 0, 0);
+        if let Some(h) = &hint {
+            for j in 0..n_total {
+                match (st[j], h[j]) {
+                    (None, _) => {}
+                    (_, 0) => unknown += 1,
+                    (Some(NbStatus::Lower), -1) | (Some(NbStatus::Upper), 1) => agree += 1,
+                    _ => differ += 1,
+                }
+            }
+        }
+        // 主実行不能な基底変数の数 (非基底列を選んだ側に置いたときの x_B)
+        let mut rhs = std.b.clone();
+        for j in 0..n_total {
+            let v = match st[j] {
+                Some(NbStatus::Lower) if std.lb[j].is_finite() => std.lb[j],
+                Some(NbStatus::Upper) if std.ub[j].is_finite() => std.ub[j],
+                _ => 0.0,
+            };
+            if v != 0.0 {
+                for &(i, a) in std.cols.col(j) {
+                    rhs[i] -= a * v;
+                }
+            }
+        }
+        let mut xb = vec![0.0; m];
+        let mut scratch2 = vec![0.0; m];
+        lu.solve_into(&rhs, &mut scratch2, &mut xb);
+        let infeas = wb.iter().zip(&xb).filter(|&(&j, &v)| v < std.lb[j] - 1e-7 || v > std.ub[j] + 1e-7).count();
+        eprintln!("DEBUG_EXT: warm start from a given basis (cost shifts {shifted}, hint agree {agree} differ {differ} unknown {unknown}, primal infeasible basics {infeas})");
     }
     *basis = wb.to_vec();
     *basis_pos = pos;

@@ -112,6 +112,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 解けなかったノード (LP が失敗し、分枝もできなかった)。最適性を主張できなくなる。
     unresolved: bool,
     last_log: Instant,
+    /// カット生成に使う変数上下限 (最初の分離で作る)。
+    pub(super) vbounds: Option<Rc<super::cuts::VarBounds>>,
 }
 
 /// 分枝限定法で解く。
@@ -157,6 +159,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
         node_lps: 0,
         unresolved: false,
         last_log: start,
+        vbounds: None,
     };
     s.run()
 }
@@ -342,6 +345,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.params.verbose {
             eprintln!("MIP: root LP {:.10e} ({} iters, {:.2}s)", root_obj, self.lp.total_iterations(), self.start.elapsed().as_secs_f64());
         }
+        // カットを加える前の根の LP 解 (RENS の 2 つ目の近傍に使う)
+        let x_root0 = self.lp.col_values();
         // 根の切除平面
         {
             let x = self.lp.col_values();
@@ -359,11 +364,30 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if self.fractional(&x).is_empty() {
                 self.try_lp_solution();
             } else {
-                self.simple_rounding(&x);
-                self.randomized_rounding(&x, 3);
-                self.rens(&x);
+                macro_rules! heur {
+                    ($name:expr, $e:expr) => {{
+                        let t = Instant::now();
+                        let found = $e;
+                        if self.params.verbose {
+                            eprintln!("MIP: root heuristic {}: {} ({:.2}s)", $name, if found { "found" } else { "none" }, t.elapsed().as_secs_f64());
+                        }
+                    }};
+                }
+                heur!("simple rounding", self.simple_rounding(&x));
+                heur!("randomized rounding", self.randomized_rounding(&x, 3));
+                heur!("RENS", self.rens(&x));
+                if self.incumbent.is_none() && !self.fractional(&x_root0).is_empty() {
+                    heur!("RENS (LP before cuts)", self.rens(&x_root0));
+                }
                 if self.incumbent.is_none() {
-                    self.feasibility_pump(root_iters);
+                    heur!("feasibility pump", self.feasibility_pump(root_iters));
+                }
+                if self.incumbent.is_none() {
+                    heur!("fractional diving", self.fractional_dive(2 * root_iters + 1000));
+                }
+                // 暫定解 (Feasibility Jump・pump・丸めなどで得たもの) を根の LP 解との RINS で磨く
+                if self.incumbent.is_some() && env_str!("ENOMOTO_MIP_NO_ROOT_RINS").is_none() {
+                    heur!("RINS", self.rins(&x));
                 }
                 if self.params.verbose {
                     eprintln!("MIP: after root heuristics: incumbent {:?} ({:.2}s)", self.incumbent.as_ref().map(|(z, _)| *z), self.start.elapsed().as_secs_f64());
@@ -732,7 +756,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut best: Option<(usize, f64, f64)> = None; // (列, 値, スコア)
         let mut no_improve = 0;
         let sb_cap = tunable!("ENOMOTO_T_MIP_SB_ITER_CAP", 2_000u64, u64);
-        let sb_iter_limit = (2 * self.avg_node_iters()).clamp(50, sb_cap.max(50));
+        let sb_floor = tunable!("ENOMOTO_T_MIP_SB_ITER_FLOOR", 200u64, u64);
+        let sb_iter_limit = (2 * self.avg_node_iters()).clamp(sb_floor, sb_cap.max(sb_floor));
         let lookahead = tunable!("ENOMOTO_T_MIP_SB_LOOKAHEAD", 8usize, usize);
         for &(j, v, pscore) in &cands {
             let reliable = self.pc.is_reliable(j);

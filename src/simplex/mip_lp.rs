@@ -443,12 +443,16 @@ impl TwoStageLp {
                     Some((cb, lu)) if cb == b && lu.update_count() < 64 => sid::set_warm_lu(Some(lu)),
                     _ => sid::set_warm_lu(None),
                 }
+                if env_str!("ENOMOTO_MIP_NO_NB_HINT").is_none() {
+                    sid::set_warm_nb(Some(self.nb_hint()));
+                }
                 sid::solve_slope_intercept_dual_from_basis(&self.std, &opts, b)
             }
             _ => sid::solve_slope_intercept_dual(&self.std, &opts),
         };
         sid::xprof("wrapper");
         sid::set_warm_lu(None);
+        sid::set_warm_nb(None);
         let stop = sid::ext_stop();
         sid::set_ext_control(None);
         let duals = sid::take_duals();
@@ -496,6 +500,27 @@ impl TwoStageLp {
                 ExtStop::None => LpStatus::Error,
             },
         }
+    }
+
+    /// 前回の解での非基底列の位置 (標準形の列ごと: -1 下限、+1 上限、0 不明)。
+    fn nb_hint(&self) -> Vec<i8> {
+        let n = self.n;
+        let m = self.rows.len();
+        let mut h = vec![0i8; n + m];
+        let at = |v: f64, b: f64| b.is_finite() && (v - b).abs() <= 1e-9 * (1.0 + b.abs());
+        for j in 0..n {
+            let (v, lo, up) = (self.x[j], self.lo[j], self.up[j]);
+            h[j] = if at(v, lo) { -1 } else if at(v, up) { 1 } else { 0 };
+        }
+        // スラック s_i = b_i - σ_i a_i x (元の空間で): 0 なら下限、上限 (範囲行の幅) なら上限
+        for i in 0..m {
+            let act: f64 = self.rows[i].iter().map(|&(j, a)| a * self.x[j]).sum();
+            let (l, u) = (self.row_lo[i], self.row_up[i]);
+            let sl = if self.sigma[i] > 0.0 { u - act } else { act - l };
+            let su = self.std.ub[n + i];
+            h[n + i] = if sl.abs() <= 1e-9 * (1.0 + act.abs()) { -1 } else if su.is_finite() && (sl - su).abs() <= 1e-9 * (1.0 + su.abs()) { 1 } else { 0 };
+        }
+        h
     }
 
     pub fn objective(&self) -> f64 {
