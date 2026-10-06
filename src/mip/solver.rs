@@ -354,8 +354,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         }
                         if ok {
                             if let Some(b) = &n.basis {
-                                if b.row.len() == self.lp.num_rows() {
+                                let mr = self.lp.num_rows();
+                                if b.row.len() == mr {
                                     self.lp.set_basis(b);
+                                } else if b.row.len() < mr {
+                                    // 後から加えたカットの行は論理変数を基底にする
+                                    let mut b2 = (**b).clone();
+                                    b2.row.resize(mr, VarStatus::Basic);
+                                    self.lp.set_basis(&b2);
                                 }
                             }
                         }
@@ -455,6 +461,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if node_obj >= self.prune_limit() {
                         break None;
                     }
+                }
+                // ノードでの切除平面 (待ち行列から取り出したノードで 1 回)。カットを足すたびに LP を作り直すので
+                // 今は遅くなる問題が多く、既定では行わない (ENOMOTO_MIP_NODE_CUTS=1 で有効)。
+                if resolves == 0 && node.depth > 0 && plunge_depth == 0 && env_str!("ENOMOTO_MIP_NODE_CUTS").is_some() && self.node_cut_round(&x) {
+                    resolves += 1;
+                    continue;
                 }
                 match self.select_branch(&frac, node_obj) {
                     BranchAction::Resolve => {

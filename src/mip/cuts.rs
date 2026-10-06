@@ -40,9 +40,8 @@ struct Term {
     yu: f64,
 }
 
-/// CMIR で切除平面を作る。作れなければ `None`。
-pub fn cmir(vars: &CutVars, base: &[(usize, f64)], rhs: f64) -> Option<RawCut> {
-    // 1. 境界の代入
+/// 境界の代入 (補変数化) をした項と右辺。連続変数の正の係数の項は捨ててある。
+fn substitute(vars: &CutVars, base: &[(usize, f64)], rhs: f64) -> Option<(Vec<Term>, f64)> {
     let mut terms: Vec<Term> = Vec::with_capacity(base.len());
     let mut beta = rhs;
     for &(k, a) in base {
@@ -80,6 +79,12 @@ pub fn cmir(vars: &CutVars, base: &[(usize, f64)], rhs: f64) -> Option<RawCut> {
             terms.push(Term { k, a: -a, comp: true, int, yv, yu: u - l });
         }
     }
+    Some((terms, beta))
+}
+
+/// CMIR で切除平面を作る。作れなければ `None`。
+pub fn cmir(vars: &CutVars, base: &[(usize, f64)], rhs: f64) -> Option<RawCut> {
+    let (terms, beta) = substitute(vars, base, rhs)?;
     if !terms.iter().any(|t| t.int) {
         return None;
     }
@@ -210,6 +215,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cover_on_knapsack() {
+        // 3x0 + 4x1 + 5x2 <= 7 (0-1)、LP 点 (1, 1, 0) は違反しない; (0.8, 0.8, 0.2) なら cover {0,1}: x0 + x1 <= 1 ... 拡張で x2 も
+        let lo = [0.0; 3];
+        let up = [1.0; 3];
+        let is_int = [true; 3];
+        let x = [0.9, 0.9, 0.2];
+        let vars = CutVars { lo: &lo, up: &up, is_int: &is_int, x: &x };
+        let cut = extended_cover(&vars, &[(0, 3.0), (1, 4.0), (2, 5.0)], 6.0).expect("cover");
+        let act: f64 = cut.coefs.iter().map(|&(k, c)| c * x[k]).sum();
+        assert!(act > cut.rhs + 1e-6);
+        for pt in [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.0, 0.0, 0.0]] {
+            let a: f64 = cut.coefs.iter().map(|&(k, c)| c * pt[k]).sum();
+            assert!(a <= cut.rhs + 1e-9);
+        }
+    }
+
+    #[test]
     fn mir_on_simple_row() {
         // x integer in [0, 10], y continuous >= 0: x - y <= 2.5, LP point (2.5, 0) → cut x - 2y <= 2
         let lo = [0.0, 0.0];
@@ -226,4 +248,75 @@ mod tests {
             assert!(a <= cut.rhs + 1e-9, "valid point {pt:?} cut off: {a} > {}", cut.rhs);
         }
     }
+}
+
+/// 拡張カバー不等式 (lifted cover の簡略版): 置き換え後の式が 0-1 変数だけのナップサック
+/// `sum a_k y_k <= beta` なら、LP 値の大きい順にカバー C (`sum_C a_k > beta`) を作り、
+/// `sum_{E(C)} y_k <= |C| - 1` (`E(C)` は C と、C の最大係数以上の係数の変数) を作る。
+pub fn extended_cover(vars: &CutVars, base: &[(usize, f64)], rhs: f64) -> Option<RawCut> {
+    let (terms, beta) = substitute(vars, base, rhs)?;
+    // 0-1 変数だけ (連続変数の項が残っていればナップサックではない)
+    if terms.is_empty() || terms.iter().any(|t| !t.int || t.yu != 1.0) {
+        return None;
+    }
+    // 係数を正にそろえる (負の係数の y は 1 - y に置き換える)
+    let mut items: Vec<(usize, f64, bool, f64)> = Vec::with_capacity(terms.len()); // (項の番号, 係数, 反転, y の LP 値)
+    let mut b = beta;
+    for (idx, t) in terms.iter().enumerate() {
+        if t.a > 0.0 {
+            items.push((idx, t.a, false, t.yv));
+        } else if t.a < 0.0 {
+            b -= t.a;
+            items.push((idx, -t.a, true, 1.0 - t.yv));
+        }
+    }
+    if b < 0.0 {
+        return None;
+    }
+    // カバー: LP 値の大きい順 (同点は係数の大きい順)
+    let mut order: Vec<usize> = (0..items.len()).collect();
+    order.sort_by(|&x, &y| items[y].3.total_cmp(&items[x].3).then(items[y].1.total_cmp(&items[x].1)));
+    let mut sum = 0.0;
+    let mut cover: Vec<usize> = Vec::new();
+    for &k in &order {
+        cover.push(k);
+        sum += items[k].1;
+        if sum > b + 1e-9 * (1.0 + b.abs()) {
+            break;
+        }
+    }
+    if sum <= b + 1e-9 * (1.0 + b.abs()) {
+        return None;
+    }
+    let amax = cover.iter().map(|&k| items[k].1).fold(0.0, f64::max);
+    let mut in_cover = vec![false; items.len()];
+    for &k in &cover {
+        in_cover[k] = true;
+    }
+    let ext: Vec<usize> = (0..items.len()).filter(|&k| in_cover[k] || items[k].1 >= amax).collect();
+    let rhs_y = cover.len() as f64 - 1.0;
+    let act: f64 = ext.iter().map(|&k| items[k].3).sum();
+    if act <= rhs_y + 1e-6 {
+        return None;
+    }
+    // 元の変数に戻す: z (反転後の 0-1) = y または 1 - y、y = v - l または u - v
+    let mut coefs: Vec<(usize, f64)> = Vec::with_capacity(ext.len());
+    let mut r = rhs_y;
+    for &k in &ext {
+        let (idx, _, flip, _) = items[k];
+        let t = terms[idx];
+        // z = y (flip なし) または 1 - y
+        let (cy, c0) = if flip { (-1.0, 1.0) } else { (1.0, 0.0) };
+        r -= c0;
+        let (l, u) = (vars.lo[t.k], vars.up[t.k]);
+        if t.comp {
+            // y = u - v
+            r -= cy * u;
+            coefs.push((t.k, -cy));
+        } else {
+            r += cy * l;
+            coefs.push((t.k, cy));
+        }
+    }
+    Some(RawCut { coefs, rhs: r })
 }

@@ -5,7 +5,7 @@
 //! 除いて LP に加えて解き直す。目的値がほとんど動かなくなったら止める。最後に効いていない (論理変数が
 //! 基底にある) カット行を LP から外す。カットは大域的な境界から作るので、木全体で有効。
 
-use super::cuts::{cmir, CutVars, RawCut};
+use super::cuts::{cmir, extended_cover, CutVars, RawCut};
 use super::domain::FEASTOL;
 use super::lp::{LpStatus, SolveLimits, VarStatus};
 use super::solver::Solver;
@@ -108,6 +108,27 @@ impl<'a, L: MipLp> Solver<'a, L> {
         st == LpStatus::Optimal
     }
 
+    /// ノードでの分離 (1 ラウンド)。カットを加えたら LP を解き直し、真を返す。LP の行数の上限を超えたら何もしない。
+    pub(super) fn node_cut_round(&mut self, x: &[f64]) -> bool {
+        let p = self.p;
+        let max_rows = p.m + (2 * p.m).max(500);
+        if self.lp.num_rows() >= max_rows {
+            return false;
+        }
+        let cands = self.separate(x);
+        if cands.is_empty() {
+            return false;
+        }
+        let room = max_rows - self.lp.num_rows();
+        let chosen = select_cuts(cands, room.min(50));
+        if chosen.is_empty() {
+            return false;
+        }
+        let rows: Vec<(Vec<(usize, f64)>, f64, f64)> = chosen.into_iter().map(|c| (c.coefs, f64::NEG_INFINITY, c.rhs)).collect();
+        self.lp.add_rows(&rows);
+        true
+    }
+
     /// LP の行のうち、元の行より後ろ (カット) で論理変数が基底にあるものを外す。
     pub(super) fn remove_inactive_cuts(&mut self) {
         let m0 = self.p.m;
@@ -141,8 +162,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 変数: 構造変数 0..n と、LP 行の活動量 n..n+mr
         let lp_rows: Vec<Vec<(usize, f64)>> = (0..mr).map(|i| self.lp.row(i)).collect();
         let act = self.lp.row_activities();
-        let mut lo = self.dom.lo.clone();
-        let mut up = self.dom.up.clone();
+        // カットは木全体で有効にするため、大域的な境界から作る
+        let mut lo = self.dom.global_lo.clone();
+        let mut up = self.dom.global_up.clone();
         let mut is_int = p.is_int.clone();
         let mut xv = x.to_vec();
         for i in 0..mr {
@@ -158,7 +180,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut cands: Vec<Candidate> = Vec::new();
         let mut push = |raw: Option<RawCut>, cands: &mut Vec<Candidate>, s: &Solver<L>| {
             if let Some(raw) = raw {
-                if let Some(c) = finish_cut(raw, n, &lp_rows, &s.dom.lo, &s.dom.up, x, s.incumbent.as_ref().map(|(_, v)| v.as_slice())) {
+                if let Some(c) = finish_cut(raw, n, &lp_rows, &s.dom.global_lo, &s.dom.global_up, x, s.incumbent.as_ref().map(|(_, v)| v.as_slice())) {
                     cands.push(c);
                 }
             }
@@ -172,10 +194,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if p.row_up[i].is_finite() {
                 let r = cmir(&vars, row, p.row_up[i]);
                 push(r, &mut cands, self);
+                let r = extended_cover(&vars, row, p.row_up[i]);
+                push(r, &mut cands, self);
             }
             if p.row_lo[i].is_finite() {
                 let neg: Vec<(usize, f64)> = row.iter().map(|&(j, a)| (j, -a)).collect();
                 let r = cmir(&vars, &neg, -p.row_lo[i]);
+                push(r, &mut cands, self);
+                let r = extended_cover(&vars, &neg, -p.row_lo[i]);
                 push(r, &mut cands, self);
             }
         }

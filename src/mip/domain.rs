@@ -44,6 +44,9 @@ pub struct Domain {
     pending_global: Vec<(usize, bool, f64)>,
     /// 根に戻った回数 (活動量の誤差の蓄積を防ぐための定期的な再計算に使う)。
     resets: u64,
+    /// 大域的な境界 (根で確定したものと、その後の大域的な締め付けを反映したもの)。
+    pub global_lo: Vec<f64>,
+    pub global_up: Vec<f64>,
 }
 
 impl Domain {
@@ -64,6 +67,8 @@ impl Domain {
             infeasible: false,
             pending_global: Vec::new(),
             resets: 0,
+            global_lo: p.col_lo.clone(),
+            global_up: p.col_up.clone(),
         };
         d.recompute_activities(p);
         for i in 0..p.m {
@@ -251,6 +256,11 @@ impl Domain {
         } else {
             v
         };
+        if upper {
+            self.global_up[j] = self.global_up[j].min(v);
+        } else {
+            self.global_lo[j] = self.global_lo[j].max(v);
+        }
         if self.stack.is_empty() {
             let tighter = if upper { v < self.up[j] } else { v > self.lo[j] };
             if tighter {
@@ -264,6 +274,8 @@ impl Domain {
     /// 根にいる間に積んだ変更を大域的なもの (巻き戻されないもの) にする。
     pub fn commit_root(&mut self) {
         self.stack.clear();
+        self.global_lo.clone_from(&self.lo);
+        self.global_up.clone_from(&self.up);
     }
 
     /// 伝播を待っている行をすべて処理する。矛盾がなければ真。
