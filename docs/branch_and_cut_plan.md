@@ -66,7 +66,7 @@ src/mip/
   node_queue.rs     NodeQueue: BTreeSet × 2 (lb 順、hybrid 順) + suboptimal 集合
   pseudocost.rs     Pseudocost: 上下別の平均、reliability、inference、cutoff
   branching.rs      reliability 分岐 + 強分岐
-  heuristics/       trivial.rs, rounding.rs, fj.rs (Feasibility Jump), rens_rins.rs
+  heuristics/       trivial.rs, rounding.rs, fj.rs (Feasibility Jump), fpump.rs (Feasibility Pump), rens_rins.rs
   cuts/             pool.rs, generation.rs (lifted cover / CMIR), transformed_lp.rs,
                     tableau.rs (Gomory 相当), aggregator.rs
   redcost.rs        被約費用固定
@@ -89,6 +89,8 @@ impl DualSimplexState {
     fn add_rows(&mut self, rows: &[SparseRow]);          // slack を基底に入れ、LU を拡張または再分解
     fn delete_rows(&mut self, mask: &[bool]);            // basic な slack を持つ行だけ削除し、基底を詰める
     fn solve(&mut self, lim: &SolveLimits) -> LpStatus;  // Optimal | Infeasible | ObjectiveBound | IterLimit | TimeLimit | Unbounded
+    fn change_costs(&mut self, c: &[f64]);                // Feasibility Pump 用 (目的の差し替えと復元)
+    fn solve_primal(&mut self, lim: &SolveLimits) -> LpStatus; // 費用変更後は主実行可能性が保たれるので primal simplex で解き直す
     fn get_basis(&self) -> Basis;  fn set_basis(&mut self, b: &Basis);   // 列・行ごとの status
     fn snapshot(&self) -> Iterate; fn restore(&mut self, it: Iterate);   // 強分岐用 (LU を含めて保存と復元)
     fn col_value / row_value / col_dual(=被約費用) / row_dual / objective;
@@ -104,6 +106,21 @@ impl DualSimplexState {
 - **cutoff には真の費用で計算した下界を使う**: 双対単体法は費用を摂動して解くため、`lower_bound_from_basis` (真の `c` を使う) が cutoff を超えた時点で `ObjectiveBound` を返す。
 - **境界変更後は primal の不可能性だけが生じる**: その状態から dual simplex の stage B を再開すればよい。変更前に非基底だった変数は新しい境界に移す。
 - **ベンチマークで退行がないことを確認する**: 既存の LP ベンチマーク (Netlib / Mittelmann) を回し、LP 経路に退行がないことを見る。新しい構造体は既存の関数から呼ぶだけの形にし、ロジックを二重に持たない。
+
+### 4.1 Feasibility Pump (段階 4)
+
+HiGHS (`HighsPrimalHeuristics::feasibilityPump`、約 120 行) と同じ形で実装する。
+
+- **呼ぶ時点**: root のカットループと root ヒューリスティクスが終わった時点で、暫定解がまだ無ければ 1 回呼ぶ。木の探索中には呼ばない。CBC は root の最初に呼ぶが、カット後の LP 解の方が丸めやすいので HiGHS の順序に従う。
+- **反復** (LP 解に分数の整数変数が残っている間):
+  1. 整数変数を丸める。しきい値は 0.4〜0.6 の乱数にする。
+  2. 固定した値を局所 `Domain` に入れて伝播する (段階 2)。
+  3. 丸めた点が以前と同じなら循環とみなし、ランダムに 10 変数を反転する (最大 2 回)。それでも循環すれば終了する。
+  4. LP 解と丸めた点を結ぶ線分上で実行可能な点を探す丸め (line search rounding) を試す。成功すれば暫定解にして終了する。
+  5. 目的関数を丸めた点への L1 距離 (係数 ±1 に微小な乱数を加えたもの) に差し替え、`solve_primal` で解き直す。lock が片側 0 の変数は係数を 0 にする。
+- **作業量の上限**: LP 反復の合計を `1000 + 5 × root LP の平均反復数` までにする。LP が 0 反復で終わったら打ち切る。
+- **LP の扱い**: LP は `DualSimplexState` を複製して使う。本体の基底と費用を壊さないため。
+- **後の改良候補**: 目的値をある程度保つ変種 (objective FP) と、終了時に整数を固定して小さな MIP で仕上げる処理 (CBC の `smallBranchAndBound` に相当、RENS の部品で実現できる)。
 
 ---
 
@@ -121,7 +138,7 @@ impl DualSimplexState {
 | **1** | 木探索の骨格: `Domain` (変更スタックと backtrack のみ)、`Search` (dive + backtrack、基底の継承)、`NodeQueue` (best-bound / hybrid)、cutoff、gap、上限 (時間 / ノード / gap)、状態の正しい分類、暫定解の実行可能性確認。この時点の分岐は pseudocost のみ | HighsSearch、HighsNodeQueue | 1,500 |
 | **2** | 境界伝播: 行活動量の差分更新、整数境界の丸め、連続変数は改善 30% 以上の場合だけ採用、`capacityThreshold` | HighsDomain | 1,200 |
 | **3** | reliability 分岐: 強分岐 (`snapshot` / `restore`、全体反復予算)、product score、inference / cutoff の副スコア、片側が不可能なら反対側に固定 | HighsPseudocost、`selectBranchingCandidate`、CbcNode | 800 |
-| **4** | 安価な主ヒューリスティクス: trivial、simple / randomized rounding、Feasibility Jump。目的が整数値をとる場合の cutoff 増分 | HighsPrimalHeuristics、HighsFeasibilityJump、CbcModel::analyzeObjective | 900 |
+| **4** | 安価な主ヒューリスティクス: trivial、simple / randomized rounding、Feasibility Jump、**Feasibility Pump** (§4.1)。目的が整数値をとる場合の cutoff 増分 | HighsPrimalHeuristics (`feasibilityPump`)、HighsFeasibilityJump、CbcHeuristicFPump、CbcModel::analyzeObjective | 1,100 |
 | **5** | root のカットループとカットプール: `generateCut` (lifted cover / CMIR)、TransformedLp (境界と VUB の代入)、tableau 分離器 (Gomory 相当)、age / efficacy / 並列度、stall 判定、basic なカット行の削除 | HighsCutGeneration、HighsTableauSeparator、HighsCutPool、HighsSeparation、CglGomory (安全策) | 2,500 |
 | **6** | 被約費用固定 (root の lurking bound とノード)、RENS / RINS (再帰 MIP)、MIP 専用の縮約 (§7.3) | HighsRedcostFixing、HPresolve | 1,500 |
 | **7** | conflict analysis (dual proof)、clique table、probing、path / mod-k 分離器、restart、対称性 | ConflictSet、HighsCliqueTable、HighsImplications | 4,000 以上 |
