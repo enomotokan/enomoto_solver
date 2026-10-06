@@ -35,7 +35,7 @@ CACHES = {
 }
 # この計算機のメモリ (15 GB) に載らない Mittelmann の 4 問 (論文用ベンチマークと同じ除外)。
 MITTELMANN_EXCLUDE = {"thk_48", "L2CTA3D", "dlr2", "Dual2_5000"}
-METHODS = {"slope_intercept": "simplex", "ipm_crossover": "ipm_crossover", "race": "auto"}
+METHODS = {"slope_intercept": "simplex", "ipm_crossover": "ipm_crossover", "race": "auto", "highs_ipm": "highs_ipm"}
 
 
 def problems(set_name: str) -> list[str]:
@@ -62,6 +62,21 @@ def worker(mps: str, solver: str, sizes_only: bool) -> None:
     h = highspy.Highs()
     h.setOptionValue("output_flag", False)
     h.readModel(mps)
+    if solver == "highs_ipm":
+        # HiGHS の内点法 (IPX) + クロスオーバー (前処理を含む `run` の実時間)。
+        h.setOptionValue("solver", "ipm")
+        h.setOptionValue("run_crossover", "on")
+        t0 = time.perf_counter()
+        h.run()
+        t = time.perf_counter() - t0
+        st = h.getModelStatus()
+        info = h.getInfo()
+        status = {highspy.HighsModelStatus.kOptimal: "optimal", highspy.HighsModelStatus.kInfeasible: "infeasible",
+                  highspy.HighsModelStatus.kUnbounded: "unbounded"}.get(st, str(st))
+        print("RESULT " + json.dumps({"time": t, "status": status, "obj": info.objective_function_value if status == "optimal" else None,
+                                      "events": [["ipm_iters", info.ipm_iteration_count], ["crossover_iters", info.crossover_iteration_count],
+                                                 ["simplex_iters", info.simplex_iteration_count]]}), flush=True)
+        return
     lp = h.getLp()
     model, _, _ = _build_our_model(lp)
     del h, lp
