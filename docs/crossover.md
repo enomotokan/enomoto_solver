@@ -241,6 +241,20 @@ Netlib・Kennington・scpm1 など内点法が勝つ問題の因子はこれよ�
 分け合うことによる揺れの範囲。内点法を ex10 で効かせるには HiGHS のような双対化 (p ≫ n で 16K 次元の系にする)
 が要る (報告の策 2、未実装)。
 
+### 内点法の双対化
+
+単体法が双対化する問題 (`src/simplex/dualize.rs` の判定: 前処理後の行数 5 万以上、行数 ≥ 3.5 × 構造列数、構造列の平均非零数 45 以下、
+双対 LP の初期配置で無限の側に置かれる列が行数の 4 倍以下) は、内点法 + クロスオーバーでも双対 LP を解く
+(`crossover::solve_ipm_crossover`、節目 `xo_dualized`)。Newton 系の次元が行数から構造列数に減る (supportcase10: 105,209 → 8,955、
+nnz(L) 1,614 万・設定 2.2 秒)。仕上げの単体法の最適基底の行の双対 `π` から `x'_j = -π_j` で元の解を戻し、元の問題の制約を
+満たさなければ元の問題を内点法で解く (`xo_dualized_failed`)。`ENOMOTO_T_XO_DUALIZE=0` で双対化しない。
+
+| 内点法 + クロスオーバー単独 (600 秒、`benchmarks/crossover/ab14/`) | 双対化なし | 双対化 |
+|---|---|---|
+| supportcase10 | 時間切れ | **193.4 秒** (最適、3.3839236661380037) |
+| neos | 時間切れ | **339.2 秒** (最適、225425492.2047545) |
+| graph40-40・neos3・neos-5251015・physiciansched3-3・rmine15 | 時間切れ | 時間切れ |
+
 ## 計測
 
 `scripts/crossover_bench/run.py` (計測) と `report.py` (集計)。結果は `benchmarks/crossover/`。
