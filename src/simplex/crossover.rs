@@ -604,7 +604,8 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     // `x⁺ = proj(x - τ s)` で境界に張り付く列と一致する。
     //   1: PDLP の前処理 (Ruiz + Pock–Chambolle) と初期の η, ω、
     //   2: PDLP を 0 から最初の再始動まで回した η, ω、
-    //   3: 1 の歩幅で内点法の点から PDHG を文字どおり 1 歩進め (x⁺, y⁺)、その点で検出する。
+    //   3: 1 の歩幅で内点法の点から PDHG を文字どおり 1 歩進め (x⁺, y⁺)、その点で検出する、
+    //   4: 2 の歩幅で 3 と同じく 1 歩進める。
     // `ENOMOTO_T_XO_GAMMA_MULT` は γ (既定の 1 も含む) に掛ける倍率。
     let gamma_mode = tunable!("ENOMOTO_T_XO_GAMMA_PDHG", 0u8, u8);
     let gamma_mult = tunable!("ENOMOTO_T_XO_GAMMA_MULT", 1.0f64, f64);
@@ -613,7 +614,7 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     if gamma_mode != 0 {
         let opts = PdlpOptions {
             eps: 0.0,
-            max_iters: if gamma_mode == 2 { 100_000 } else { 0 },
+            max_iters: if gamma_mode == 2 || gamma_mode == 4 { 100_000 } else { 0 },
             time_limit: 1e9,
             max_restarts: 1,
         };
@@ -622,7 +623,7 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
         for (k, &j) in free_cols.iter().enumerate() {
             gamma[j] = tau * pd.dc[k] * pd.dc[k] * gamma_mult;
         }
-        if gamma_mode == 3 {
+        if gamma_mode >= 3 {
             pdhg_sigma = Some(pd.dr.iter().map(|d| pd.eta * pd.w * d * d).collect());
         }
         let mut d2: Vec<f64> = pd.dc.iter().map(|d| d * d).collect();
