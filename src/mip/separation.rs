@@ -5,7 +5,7 @@
 //! 除いて LP に加えて解き直す。目的値がほとんど動かなくなったら止める。最後に効いていない (論理変数が
 //! 基底にある) カット行を LP から外す。カットは大域的な境界から作るので、木全体で有効。
 
-use super::cuts::{cmir, extended_cover, CutVars, RawCut, VarBounds};
+use super::cuts::{cmir, extended_cover, lifted_flow_cover, CutVars, RawCut, VarBounds};
 use super::problem::MipProblem;
 use super::domain::FEASTOL;
 use super::lp::{LpStatus, SolveLimits, VarStatus};
@@ -13,6 +13,11 @@ use super::solver::Solver;
 use super::lp_api::MipLp;
 
 /// LP に加える前のカット (構造変数の係数、右辺、効き目)。
+/// lifted flow cover を使うか (`ENOMOTO_MIP_NO_FLOWCOVER` で無効)。
+fn use_flow_cover() -> bool {
+    env_str!("ENOMOTO_MIP_NO_FLOWCOVER").is_none()
+}
+
 struct Candidate {
     coefs: Vec<(usize, f64)>,
     rhs: f64,
@@ -73,6 +78,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 return st2 == LpStatus::Optimal;
             }
             let obj = self.lp.objective();
+            if env_str!("ENOMOTO_MIP_DEBUG_FC").is_some() && !self.params.submip {
+                super::cuts::FC_STATS.with(|s| eprintln!("FC stats (calls, cuts, no SNF): {:?}", s.borrow()));
+            }
             if self.params.verbose {
                 eprintln!(
                     "MIP: cut round {round}: {} cuts, LP rows {}, obj {:.10e} ({:.2}s)",
@@ -265,6 +273,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     push(cmir(vars, &base, 0.0), cands, self);
                     let neg: Vec<(usize, f64)> = base.iter().map(|&(k, a)| (k, -a)).collect();
                     push(cmir(vars, &neg, 0.0), cands, self);
+                    if use_flow_cover() {
+                        push(lifted_flow_cover(vars, &base, 0.0), cands, self);
+                        push(lifted_flow_cover(vars, &neg, 0.0), cands, self);
+                    }
                 }
                 // 打ち消す連続変数: 境界から最も離れたもの
                 let amax = touched.iter().fold(0.0f64, |mx, &j| mx.max(agg[j].abs()));
@@ -361,6 +373,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 continue;
             }
             if p.row_up[i].is_finite() {
+                if use_flow_cover() {
+                    push(lifted_flow_cover(&vars, row, p.row_up[i]), &mut cands, self);
+                }
                 let r = cmir(&vars, row, p.row_up[i]);
                 push(r, &mut cands, self);
                 let r = extended_cover(&vars, row, p.row_up[i]);
@@ -368,6 +383,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             if p.row_lo[i].is_finite() {
                 let neg: Vec<(usize, f64)> = row.iter().map(|&(j, a)| (j, -a)).collect();
+                if use_flow_cover() {
+                    push(lifted_flow_cover(&vars, &neg, -p.row_lo[i]), &mut cands, self);
+                }
                 let r = cmir(&vars, &neg, -p.row_lo[i]);
                 push(r, &mut cands, self);
                 let r = extended_cover(&vars, &neg, -p.row_lo[i]);

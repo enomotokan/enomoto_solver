@@ -411,6 +411,149 @@ mod tests {
     }
 
     #[test]
+    fn flow_cover_textbook_example() {
+        // x1 <= 3 y1, x2 <= 5 y2, x1 + x2 <= 6、LP 点 (3, 3, 1, 0.6) → x1 + x2 - y1 - 3 y2 <= 2 相当
+        let lo = [0.0, 0.0, 0.0, 0.0];
+        let up = [3.0, 5.0, 1.0, 1.0];
+        let is_int = [false, false, true, true];
+        let x = [3.0, 3.0, 1.0, 0.6];
+        let vb = VarBounds::from_rows(4, &is_int, &[vec![(0, 1.0), (2, -3.0)], vec![(1, 1.0), (3, -5.0)]], &[f64::NEG_INFINITY; 2], &[0.0; 2]);
+        let vars = CutVars { lo: &lo, up: &up, is_int: &is_int, x: &x, vb: Some(&vb) };
+        let cut = lifted_flow_cover(&vars, &[(0, 1.0), (1, 1.0)], 6.0).expect("flow cover");
+        let act: f64 = cut.coefs.iter().map(|&(k, c)| c * x[k]).sum();
+        assert!(act > cut.rhs + 0.5, "violation {} too small", act - cut.rhs);
+        for pt in [[3.0, 3.0, 1.0, 1.0], [1.0, 5.0, 1.0, 1.0], [3.0, 0.0, 1.0, 0.0], [0.0, 5.0, 0.0, 1.0], [0.0, 0.0, 0.0, 0.0]] {
+            let a: f64 = cut.coefs.iter().map(|&(k, c)| c * pt[k]).sum();
+            assert!(a <= cut.rhs + 1e-9, "valid point {pt:?} cut off");
+        }
+    }
+
+    /// 乱数の単一行 (変数上限つきフロー・0-1 変数・有界な連続変数) で、lifted flow cover が全ての混合整数
+    /// 実行可能点で成り立つことを総当たりで確かめる。
+    #[test]
+    fn flow_cover_random_validity() {
+        let mut seed = 12345u64;
+        let mut rnd = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let mut cuts_found = 0;
+        for _case in 0..3000 {
+            // 変数: 0-1 変数 nb 個、連続変数 nc 個 (うち一部は 0-1 変数の変数上限つき)
+            let nb = 1 + (rnd() * 4.0) as usize;
+            let nc = (rnd() * 4.0) as usize;
+            let n = nb + nc;
+            let mut lo = vec![0.0; n];
+            let mut up = vec![1.0; n];
+            let mut is_int = vec![true; n];
+            let mut vub_rows: Vec<Vec<(usize, f64)>> = Vec::new();
+            let mut vub_of: Vec<Option<(usize, f64)>> = vec![None; n];
+            let mut used = vec![false; nb];
+            for k in nb..n {
+                is_int[k] = false;
+                let cap = (1.0 + (rnd() * 8.0).floor()).max(1.0);
+                // 変数上限に使う 0-1 変数 (行には入れない)
+                let y = (rnd() * nb as f64) as usize % nb;
+                if rnd() < 0.7 && !used[y] {
+                    used[y] = true;
+                    lo[k] = 0.0;
+                    up[k] = cap;
+                    vub_rows.push(vec![(k, 1.0), (y, -cap)]);
+                    vub_of[k] = Some((y, cap));
+                } else {
+                    lo[k] = -(rnd() * 3.0).floor();
+                    up[k] = lo[k] + cap;
+                }
+            }
+            // 行: 変数上限に使われない 0-1 変数と、全ての連続変数
+            let mut base: Vec<(usize, f64)> = Vec::new();
+            for k in 0..n {
+                if k < nb && used[k] {
+                    continue;
+                }
+                if rnd() < 0.85 {
+                    let a = ((rnd() - 0.35) * 10.0).round();
+                    if a != 0.0 {
+                        base.push((k, a));
+                    }
+                }
+            }
+            if base.is_empty() {
+                continue;
+            }
+            let rhs = ((rnd() - 0.2) * 12.0).round();
+            // LP 点: 範囲内の乱数 (変数上限も満たす)
+            let mut x = vec![0.0; n];
+            for k in 0..n {
+                x[k] = lo[k] + rnd() * (up[k] - lo[k]);
+            }
+            for k in nb..n {
+                if let Some((y, d)) = vub_of[k] {
+                    x[k] = x[k].min(d * x[y]);
+                }
+            }
+            let vb = VarBounds::from_rows(n, &is_int, &vub_rows, &vec![f64::NEG_INFINITY; vub_rows.len()], &vec![0.0; vub_rows.len()]);
+            let vars = CutVars { lo: &lo, up: &up, is_int: &is_int, x: &x, vb: Some(&vb) };
+            let Some(cut) = lifted_flow_cover(&vars, &base, rhs) else { continue };
+            cuts_found += 1;
+            let ccoef = |k: usize| cut.coefs.iter().filter(|&&(j, _)| j == k).map(|&(_, c)| c).sum::<f64>();
+            // 0-1 変数を全て列挙し、連続変数は箱 ∩ 行 の頂点 (高々 1 つが境界の内側) を列挙して最大違反を調べる
+            let conts: Vec<usize> = (nb..n).collect();
+            for mask in 0..(1u32 << nb) {
+                let yv: Vec<f64> = (0..nb).map(|i| ((mask >> i) & 1) as f64).collect();
+                let box_of = |k: usize| -> (f64, f64) {
+                    match vub_of[k] {
+                        Some((y, d)) => (0.0, d * yv[y]),
+                        None => (lo[k], up[k]),
+                    }
+                };
+                let a_of = |k: usize| base.iter().filter(|&&(j, _)| j == k).map(|&(_, a)| a).sum::<f64>();
+                let row_bin: f64 = (0..nb).map(|k| a_of(k) * yv[k]).sum();
+                let cut_bin: f64 = (0..nb).map(|k| ccoef(k) * yv[k]).sum();
+                let nc = conts.len();
+                for free in 0..=nc {
+                    for bmask in 0..(1u32 << nc) {
+                        let mut xc = vec![0.0; nc];
+                        for (t, &k) in conts.iter().enumerate() {
+                            let (l, u) = box_of(k);
+                            xc[t] = if (bmask >> t) & 1 == 1 { u } else { l };
+                        }
+                        if free < nc {
+                            // 自由な 1 変数で行を等号にする
+                            let k = conts[free];
+                            let a = a_of(k);
+                            if a == 0.0 {
+                                continue;
+                            }
+                            let rest: f64 = conts.iter().enumerate().filter(|&(t, _)| t != free).map(|(t, &j)| a_of(j) * xc[t]).sum();
+                            let v = (rhs - row_bin - rest) / a;
+                            let (l, u) = box_of(k);
+                            if v < l - 1e-9 || v > u + 1e-9 {
+                                continue;
+                            }
+                            xc[free] = v;
+                        }
+                        let row: f64 = row_bin + conts.iter().enumerate().map(|(t, &k)| a_of(k) * xc[t]).sum::<f64>();
+                        if row > rhs + 1e-9 {
+                            continue;
+                        }
+                        let lhs = cut_bin + conts.iter().enumerate().map(|(t, &k)| ccoef(k) * xc[t]).sum::<f64>();
+                        assert!(
+                            lhs <= cut.rhs + 1e-6,
+                            "invalid flow cover: base {base:?} <= {rhs}, vubs {vub_of:?}, bounds {lo:?} {up:?}, x* {x:?}\n cut {:?} <= {}\n point y {yv:?} x {xc:?}: {lhs}",
+                            cut.coefs,
+                            cut.rhs
+                        );
+                    }
+                }
+            }
+        }
+        assert!(cuts_found > 100, "only {cuts_found} cuts generated");
+    }
+
+    #[test]
     fn mir_on_simple_row() {
         // x integer in [0, 10], y continuous >= 0: x - y <= 2.5, LP point (2.5, 0) → cut x - 2y <= 2
         let lo = [0.0, 0.0];
@@ -490,4 +633,341 @@ pub fn extended_cover(vars: &CutVars, base: &[(usize, f64)], rhs: f64) -> Option
         r += unsubstitute(vars, &t, cy, &mut coefs);
     }
     Some(RawCut { coefs, rhs: r })
+}
+
+/// 0-1 単一節点フロー集合の 1 項 (lifted flow cover 用)。`sign` が +1 なら N1、-1 なら N2。
+/// フロー `f = sum flow + flow_const` (元の変数の式) は `0 <= f <= u * x` を満たす (`x` は 0-1 変数 `bin`、
+/// `None` なら定数 1)。
+struct SnfItem {
+    sign: f64,
+    u: f64,
+    bin: Option<usize>,
+    /// x の LP 値 (`bin` が `None` なら 1)。
+    xv: f64,
+    flow: Vec<(usize, f64)>,
+    flow_const: f64,
+}
+
+/// 2 値 (大域的な境界が [0, 1] の整数) か。
+fn is_binary(vars: &CutVars, k: usize) -> bool {
+    vars.is_int[k] && vars.lo[k] == 0.0 && vars.up[k] == 1.0
+}
+
+/// 不等式 `sum a_k v_k <= rhs` を 0-1 単一節点フロー緩和 `sum_{N1} f - sum_{N2} f <= b`、`0 <= f_i <= u_i x_i` に
+/// 直す (SCIP `cuts.c` の `constructSNFRelaxation` の簡略版)。
+/// - 連続変数 x (係数 a) は、0-1 変数 y の変数上限 `x <= d y` (y がこの行に現れないもの) があり下限が 0 で、
+///   LP 値で単純な上限より近ければ `|a| x <= |a| d y` の項にする。
+/// - それ以外の連続変数と一般整数・行の活動量は、下限 l (有限) で `x = l + x'` として `|a| x' <= |a| (u - l) * 1`
+///   (0-1 変数は定数 1) の項にする。係数が正で上限が無限なら (外しても成り立つので) 下限に固定して外す。
+/// - 0-1 変数 y (変数上限に使われないもの) は `|a| y <= |a| y` の項にする。
+fn snf_relaxation(vars: &CutVars, base: &[(usize, f64)], rhs: f64) -> Option<(Vec<SnfItem>, f64)> {
+    let mut b = rhs;
+    // 行に現れる変数の係数
+    let in_row = |k: usize| base.iter().any(|&(j, a)| j == k && a != 0.0);
+    let mut used_bin: Vec<usize> = Vec::new();
+    let mut items: Vec<SnfItem> = Vec::with_capacity(base.len());
+    // 先に連続変数 (変数上限で 0-1 変数を使うかを決める)
+    let mut pending_bin: Vec<(usize, f64)> = Vec::new();
+    for &(k, a) in base {
+        if a == 0.0 {
+            continue;
+        }
+        let (l, u, x) = (vars.lo[k], vars.up[k], vars.x[k]);
+        if l == u {
+            b -= a * l;
+            continue;
+        }
+        if is_binary(vars, k) {
+            pending_bin.push((k, a));
+            continue;
+        }
+        let sign = if a > 0.0 { 1.0 } else { -1.0 };
+        // 変数上限 x <= d y (e = 0、下限 0、y は行に現れない 0-1 変数)
+        let mut vub: Option<(usize, f64)> = None;
+        if !vars.is_int[k] && l == 0.0 {
+            if let Some(vb) = vars.vb {
+                if k < vb.vub.len() {
+                    let simple_slack = if u.is_finite() { u - x } else { f64::INFINITY };
+                    for &(y, d, e) in &vb.vub[k] {
+                        if e == 0.0 && d > 0.0 && is_binary(vars, y) && !in_row(y) && !used_bin.contains(&y) {
+                            let slack = d * vars.x[y] - x;
+                            if slack <= simple_slack && vub.is_none_or(|(y0, d0)| slack < d0 * vars.x[y0] - x) {
+                                vub = Some((y, d));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if let Some((y, d)) = vub {
+            used_bin.push(y);
+            items.push(SnfItem { sign, u: a.abs() * d, bin: Some(y), xv: vars.x[y], flow: vec![(k, a.abs())], flow_const: 0.0 });
+            continue;
+        }
+        // 単純な上下限 (LP 値に近い有限の側) で置き換える
+        let use_lower = l.is_finite() && (!u.is_finite() || x - l <= u - x);
+        if !use_lower && !u.is_finite() {
+            return None;
+        }
+        let cap = a.abs() * (u - l);
+        if use_lower {
+            // x = l + x': a x = a l + a x'
+            b -= a * l;
+            if a > 0.0 && !cap.is_finite() {
+                continue; // a x' >= 0 を外す (緩和)
+            }
+            if !cap.is_finite() {
+                return None; // N2 の容量が無限だと被覆を作れない
+            }
+            items.push(SnfItem { sign, u: cap, bin: None, xv: 1.0, flow: vec![(k, a.abs())], flow_const: -a.abs() * l });
+        } else {
+            // x = u - x': a x = a u - a x' (向きが反転する)
+            b -= a * u;
+            if a < 0.0 && !cap.is_finite() {
+                continue; // -a x' >= 0 を外す (緩和)
+            }
+            if !cap.is_finite() {
+                return None;
+            }
+            items.push(SnfItem { sign: -sign, u: cap, bin: None, xv: 1.0, flow: vec![(k, -a.abs())], flow_const: a.abs() * u });
+        }
+    }
+    for (k, a) in pending_bin {
+        if used_bin.contains(&k) {
+            return None; // 行に現れる 0-1 変数は変数上限に使わないので来ないはず
+        }
+        let sign = if a > 0.0 { 1.0 } else { -1.0 };
+        items.push(SnfItem { sign, u: a.abs(), bin: Some(k), xv: vars.x[k], flow: vec![(k, a.abs())], flow_const: 0.0 });
+    }
+    if !items.iter().any(|it| it.bin.is_some()) {
+        return None;
+    }
+    Some((items, b))
+}
+
+/// lifted simple generalized flow cover 不等式 (Gu, Nemhauser & Savelsbergh 1999) を作る。SCIP `cuts.c` の
+/// `getFlowCover` (被覆はナップサックの貪欲解) と `generateLiftedFlowCoverCut` (順序に依らない持ち上げ) の移植。
+pub fn lifted_flow_cover(vars: &CutVars, base: &[(usize, f64)], rhs: f64) -> Option<RawCut> {
+    let r = lifted_flow_cover_impl(vars, base, rhs);
+    if env_str!("ENOMOTO_MIP_DEBUG_FC").is_some() {
+        FC_STATS.with(|s| {
+            let mut s = s.borrow_mut();
+            s.0 += 1;
+            if r.is_some() {
+                s.1 += 1;
+            }
+        });
+    }
+    r
+}
+
+thread_local! {
+    /// 診断用: lifted flow cover の (呼び出し, 生成) 回数。
+    pub(crate) static FC_STATS: std::cell::RefCell<(u64, u64, u64)> = const { std::cell::RefCell::new((0, 0, 0)) };
+}
+
+fn lifted_flow_cover_impl(vars: &CutVars, base: &[(usize, f64)], rhs: f64) -> Option<RawCut> {
+    const FEAS: f64 = 1e-6;
+    let Some((items, b)) = snf_relaxation(vars, base, rhs) else {
+        if env_str!("ENOMOTO_MIP_DEBUG_FC").is_some() {
+            FC_STATS.with(|s| s.borrow_mut().2 += 1);
+        }
+        return None;
+    };
+    let n = items.len();
+    // 1. 被覆 (C1 ⊆ N1, C2 ⊆ N2): x* が整数の項は先に決め、残りをナップサックの貪欲解で決める
+    let mut in_cover = vec![false; n];
+    let mut cover_w = 0.0; // sum_{C1} u - sum_{C2} u
+    let mut free: Vec<usize> = Vec::new();
+    let mut n1_free_w = 0.0;
+    for (i, it) in items.iter().enumerate() {
+        if it.u <= FEAS {
+            continue;
+        }
+        let frac = it.xv > FEAS && it.xv < 1.0 - FEAS;
+        if frac {
+            free.push(i);
+            if it.sign > 0.0 {
+                n1_free_w += it.u;
+            }
+        } else if it.xv > 0.5 {
+            in_cover[i] = true;
+            cover_w += it.sign * it.u;
+        }
+    }
+    let cap = -b + cover_w + n1_free_w;
+    if cap / 10.0 <= FEAS {
+        return None;
+    }
+    if !free.is_empty() {
+        // KP: N1 は補変数 z° (利益 1 - x*)、N2 は z (利益 x*)、重み u、容量 cap 未満
+        let profit = |i: usize| if items[i].sign > 0.0 { 1.0 - items[i].xv } else { items[i].xv };
+        free.sort_by(|&p, &q| (profit(q) / items[q].u).total_cmp(&(profit(p) / items[p].u)));
+        let mut w = 0.0;
+        for &i in &free {
+            // 貪欲に詰める (入らない項は飛ばして続ける)
+            let take = w + items[i].u < cap - FEAS * cap.abs().max(1.0);
+            // 解に入った N1 の項は被覆の外、入らなかった N1 の項は被覆、N2 はその逆
+            if take {
+                w += items[i].u;
+                if items[i].sign < 0.0 {
+                    in_cover[i] = true;
+                    cover_w -= items[i].u;
+                }
+            } else if items[i].sign > 0.0 {
+                in_cover[i] = true;
+                cover_w += items[i].u;
+            }
+        }
+    }
+    let lambda = cover_w - b;
+    if lambda <= FEAS {
+        return None;
+    }
+    // 2. 持ち上げ関数のデータ (computeLiftingData)
+    let mut m: Vec<f64> = Vec::new();
+    let (mut sum_n2mc2_le, mut sum_n2mc2_gt, mut sum_c1_le, mut sum_c2) = (0.0, 0.0, 0.0, 0.0);
+    let mut mp = f64::INFINITY;
+    for (i, it) in items.iter().enumerate() {
+        match (it.sign > 0.0, in_cover[i]) {
+            (false, false) => {
+                if it.u > lambda + FEAS {
+                    sum_n2mc2_gt += it.u;
+                    m.push(it.u);
+                } else {
+                    sum_n2mc2_le += it.u;
+                }
+            }
+            (false, true) => sum_c2 += it.u,
+            (true, true) => {
+                if it.u > lambda + FEAS {
+                    m.push(it.u);
+                    mp = mp.min(it.u);
+                } else {
+                    sum_c1_le += it.u;
+                }
+            }
+            (true, false) => {}
+        }
+    }
+    if !mp.is_finite() {
+        return None;
+    }
+    let _ = sum_n2mc2_gt;
+    let ml = lambda.min(sum_c1_le + sum_n2mc2_le);
+    let d1 = sum_c2 + b;
+    m.sort_by(|a, b| b.total_cmp(a));
+    let r = m.len();
+    let mut mm = vec![0.0; r + 1];
+    for i in 0..r {
+        mm[i + 1] = mm[i] + m[i];
+    }
+    // t: m[t-1] == mp となる最大の t (1 始まり)
+    let mut t = m.iter().position(|&v| v == mp).map_or(r, |p| p + 1);
+    while t < r && m[t] == mp {
+        t += 1;
+    }
+    let eps = 1e-9;
+    let lift = |x: f64| -> f64 {
+        let xl = x + lambda;
+        let mut i = 0;
+        while i < r && xl > mm[i + 1] + eps {
+            i += 1;
+        }
+        if i < t {
+            if mm[i] <= x + eps {
+                return i as f64 * lambda;
+            }
+            return i as f64 * lambda + x - mm[i];
+        }
+        if i < r {
+            let p = (m[i] - mp - ml + lambda).max(0.0);
+            if mm[i] + ml + p < xl - eps {
+                return i as f64 * lambda;
+            }
+            return i as f64 * lambda + x - mm[i];
+        }
+        r as f64 * lambda + x - mm[r]
+    };
+    let alpha_beta = |u: f64| -> (bool, f64) {
+        let ul = u + lambda;
+        let mut i = 0;
+        while i < r && ul > mm[i + 1] + eps {
+            i += 1;
+        }
+        if u < mm[i] - eps {
+            (true, mm[i] - i as f64 * lambda)
+        } else {
+            (false, 0.0)
+        }
+    };
+    // 3. 切除平面 (generateLiftedFlowCoverCut)
+    let mut coefs: Vec<(usize, f64)> = Vec::new();
+    let mut r_hs = d1;
+    for (i, it) in items.iter().enumerate() {
+        match (it.sign > 0.0, in_cover[i]) {
+            (false, false) => {
+                if it.u > lambda + FEAS {
+                    // L-: -λ x
+                    match it.bin {
+                        Some(y) => coefs.push((y, -lambda)),
+                        None => r_hs += lambda,
+                    }
+                } else {
+                    // L--: -f
+                    for &(k, c) in &it.flow {
+                        coefs.push((k, -c));
+                    }
+                    r_hs += it.flow_const;
+                }
+            }
+            (false, true) => {
+                // C2: -g(u) x と右辺 -g(u)
+                if let Some(y) = it.bin {
+                    let g = lift(it.u);
+                    if g != 0.0 {
+                        coefs.push((y, -g));
+                        r_hs -= g;
+                    }
+                }
+            }
+            (true, false) => {
+                // N1 \ C1: α = 1 なら f - β x
+                let (alpha, beta) = alpha_beta(it.u);
+                if alpha {
+                    for &(k, c) in &it.flow {
+                        coefs.push((k, c));
+                    }
+                    match it.bin {
+                        Some(y) => coefs.push((y, -beta)),
+                        None => r_hs += beta,
+                    }
+                    r_hs -= it.flow_const;
+                }
+            }
+            (true, true) => {
+                // C1: f + (u - λ)^+ (1 - x)
+                for &(k, c) in &it.flow {
+                    coefs.push((k, c));
+                }
+                let mut constant = it.flow_const;
+                if let Some(y) = it.bin {
+                    if it.u > lambda + FEAS {
+                        constant += it.u - lambda;
+                        coefs.push((y, -(it.u - lambda)));
+                    }
+                }
+                r_hs -= constant;
+            }
+        }
+    }
+    if coefs.is_empty() {
+        return None;
+    }
+    // 違反しているか (finish_cut でも確かめるが、ここで早めに捨てる)
+    let act: f64 = coefs.iter().map(|&(k, c)| c * vars.x[k]).sum();
+    if act <= r_hs + 1e-6 {
+        return None;
+    }
+    Some(RawCut { coefs, rhs: r_hs })
 }
