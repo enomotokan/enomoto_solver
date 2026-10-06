@@ -9,6 +9,7 @@
 
 /// 分枝切除法のための、状態を保持する LP エンジン。
 pub(crate) mod lp;
+pub(crate) mod lp_api;
 pub(crate) mod problem;
 pub(crate) mod domain;
 pub(crate) mod queue;

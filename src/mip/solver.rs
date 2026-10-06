@@ -10,6 +10,7 @@
 
 use super::domain::{Domain, FEASTOL};
 use super::lp::{LpEngine, LpStatus, SolveLimits, VarStatus};
+use super::lp_api::MipLp;
 use super::problem::MipProblem;
 use super::pseudocost::Pseudocost;
 use super::queue::{BoundChange, NodeQueue, OpenNode};
@@ -74,11 +75,11 @@ enum BranchAction {
     Prune,
 }
 
-pub(super) struct Solver<'a> {
+pub(super) struct Solver<'a, L: MipLp> {
     pub(super) p: &'a MipProblem,
     pub(super) params: MipParams,
     pub(super) dom: Domain,
-    pub(super) lp: LpEngine,
+    pub(super) lp: L,
     pub(super) queue: NodeQueue,
     pub(super) pc: Pseudocost,
     pub(super) incumbent: Option<(f64, Vec<f64>)>,
@@ -109,6 +110,15 @@ pub(super) struct Solver<'a> {
 
 /// 分枝限定法で解く。
 pub fn solve(p: &MipProblem, params: MipParams) -> MipResult {
+    // LP の実装: 既定は傾き・切片二段解法 (`ENOMOTO_MIP_LP=own` で分枝限定法専用の単体法)。
+    if env_str!("ENOMOTO_MIP_LP").is_some_and(|v| v == "own") {
+        solve_with::<LpEngine>(p, params)
+    } else {
+        solve_with::<crate::simplex::mip_lp::TwoStageLp>(p, params)
+    }
+}
+
+fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
     let start = Instant::now();
     let deadline = if params.time_limit.is_finite() { Some(start + Duration::from_secs_f64(params.time_limit.max(0.0))) } else { None };
     let mut dom = Domain::new(p);
@@ -118,8 +128,8 @@ pub fn solve(p: &MipProblem, params: MipParams) -> MipResult {
     }
     dom.commit_root();
     dom.take_changed();
-    let lp = LpEngine::new(&dom.lo, &dom.up, &p.cost, &p.rows, &p.row_lo, &p.row_up);
-    let mut s = Solver {
+    let lp = L::new(&dom.lo, &dom.up, &p.cost, &p.rows, &p.row_lo, &p.row_up);
+    let mut s: Solver<L> = Solver {
         p,
         params,
         dom,
@@ -145,7 +155,7 @@ pub fn solve(p: &MipProblem, params: MipParams) -> MipResult {
     s.run()
 }
 
-impl<'a> Solver<'a> {
+impl<'a, L: MipLp> Solver<'a, L> {
     pub(super) fn time_up(&self) -> bool {
         self.deadline.is_some_and(|d| Instant::now() >= d)
     }

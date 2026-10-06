@@ -763,14 +763,33 @@ pub(super) fn take_duals() -> Option<(Vec<f64>, Vec<Option<usize>>)> {
 /// 最適で返す直前に呼ぶ: 双対の記録が要求されていれば、基底 `basis_pos` を分解し直して
 /// 真の費用 `std.c` での `y = B^-T c_B` を記録する (要求が無ければ何もしない)。
 fn record_duals(std: &StdForm, basis_pos: &[Option<usize>]) {
+    record_duals_with(std, basis_pos, None)
+}
+
+/// [`record_duals`] の、基底の LU が手元にある場合の版 (分解し直さない)。分枝限定法の LP 用に
+/// 求められていれば LU も [`take_last_lu`] で取り出せるよう保存する。
+fn record_duals_with(std: &StdForm, basis_pos: &[Option<usize>], lu_in: Option<&sparse_lu::FtLu>) {
+    if let Some(lu) = lu_in {
+        if WANT_LU.with(|w| w.get()) {
+            LAST_LU.with(|l| *l.borrow_mut() = Some(Box::new(lu.clone())));
+        }
+    }
     if !WANT_DUALS.with(|w| w.get()) {
         return;
     }
     let m = std.n_rows;
     let mut y = vec![0.0; m];
     if m > 0 {
-        let Some(lu) = refactorize(std, basis_pos, None) else {
-            return;
+        let owned;
+        let lu = match lu_in {
+            Some(l) => l,
+            None => {
+                let Some(l) = refactorize(std, basis_pos, None) else {
+                    return;
+                };
+                owned = l;
+                &owned
+            }
         };
         let mut c_b = vec![0.0; m];
         for j in 0..std.n_total {
@@ -796,6 +815,98 @@ thread_local! {
     static STOP_AFTER_STAGE_A: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// [`STOP_AFTER_STAGE_A`] で打ち切ったときの段階 A の結果。
     static STAGE_A_OUT: std::cell::RefCell<Option<StageA>> = const { std::cell::RefCell::new(None) };
+}
+
+/// 外部 (分枝限定法の LP、`super::mip_lp`) から与える打ち切り条件。設定中のスレッドの求解だけに効く。
+#[derive(Clone, Copy)]
+pub(crate) struct ExtControl {
+    /// 主ループと仕上げの反復の上限。
+    pub iteration_limit: usize,
+    /// 段階 B で、今の基底の双対から得た下界 (真の費用) がこれを超えたら打ち切る。
+    pub cutoff: f64,
+    /// 時刻の上限。
+    pub deadline: Option<std::time::Instant>,
+}
+
+/// [`ExtControl`] による打ち切りの理由。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ExtStop {
+    None,
+    IterationLimit,
+    ObjectiveBound,
+    TimeLimit,
+}
+
+thread_local! {
+    static EXT_CTRL: std::cell::Cell<Option<ExtControl>> = const { std::cell::Cell::new(None) };
+    static EXT_STOP: std::cell::Cell<ExtStop> = const { std::cell::Cell::new(ExtStop::None) };
+    /// このスレッドで数えた反復の累計 (主ループと仕上げ)。
+    static EXT_ITERS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// 打ち切り条件を設定する (`None` で解除)。打ち切りの理由を消す。
+pub(crate) fn set_ext_control(c: Option<ExtControl>) {
+    EXT_CTRL.with(|x| x.set(c));
+    EXT_STOP.with(|x| x.set(ExtStop::None));
+}
+
+/// 直近の求解が [`ExtControl`] で打ち切られた理由。
+pub(crate) fn ext_stop() -> ExtStop {
+    EXT_STOP.with(|x| x.get())
+}
+
+/// このスレッドの反復の累計。
+pub(crate) fn ext_iterations() -> u64 {
+    EXT_ITERS.with(|x| x.get())
+}
+
+/// 主ループ・仕上げの 1 反復ごとに呼ぶ。打ち切るべきなら真 (理由を記録する)。
+#[inline]
+fn ext_check(iter_idx: usize, stage_b: bool, bound: impl FnOnce() -> f64) -> bool {
+    EXT_ITERS.with(|x| x.set(x.get() + 1));
+    let Some(c) = EXT_CTRL.with(|x| x.get()) else { return false };
+    if iter_idx >= c.iteration_limit {
+        EXT_STOP.with(|x| x.set(ExtStop::IterationLimit));
+        return true;
+    }
+    if iter_idx & 31 == 0 {
+        if let Some(d) = c.deadline {
+            if std::time::Instant::now() >= d {
+                EXT_STOP.with(|x| x.set(ExtStop::TimeLimit));
+                return true;
+            }
+        }
+    }
+    if stage_b && c.cutoff.is_finite() && iter_idx % 8 == 0 && bound() > c.cutoff {
+        EXT_STOP.with(|x| x.set(ExtStop::ObjectiveBound));
+        return true;
+    }
+    false
+}
+
+thread_local! {
+    /// 次の warm start で使う、その基底の LU (分解を省く。分枝限定法の LP が直前の求解の LU を渡す)。
+    static WARM_LU: std::cell::RefCell<Option<Box<sparse_lu::FtLu>>> = const { std::cell::RefCell::new(None) };
+    /// 最適で返るときの基底の LU を保存するか。
+    static WANT_LU: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// 保存した LU。
+    static LAST_LU: std::cell::RefCell<Option<Box<sparse_lu::FtLu>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// 次の warm start に使う LU を渡す (基底と同じ並びのもの)。
+pub(crate) fn set_warm_lu(lu: Option<sparse_lu::FtLu>) {
+    WARM_LU.with(|w| *w.borrow_mut() = lu.map(Box::new));
+}
+
+/// 最適で返るときに基底の LU を保存するかを設定する (保存済みのものは捨てる)。
+pub(crate) fn request_lu(on: bool) {
+    WANT_LU.with(|w| w.set(on));
+    LAST_LU.with(|l| *l.borrow_mut() = None);
+}
+
+/// 保存した LU を取り出す。
+pub(crate) fn take_last_lu() -> Option<sparse_lu::FtLu> {
+    LAST_LU.with(|l| l.borrow_mut().take()).map(|b| *b)
 }
 
 thread_local! {
@@ -839,8 +950,14 @@ fn warm_start_basis(
         }
         pos[j] = Some(k);
     }
-    let Some(lu) = refactorize(std, &pos, None) else {
-        return false;
+    let lu = match WARM_LU.with(|w| w.borrow_mut().take()) {
+        Some(l) if l.dim() == m => *l,
+        _ => {
+            let Some(l) = refactorize(std, &pos, None) else {
+                return false;
+            };
+            l
+        }
     };
     let cb: Vec<f64> = wb.iter().map(|&j| active_cost[j]).collect();
     let mut y = vec![0.0; m];
@@ -885,6 +1002,8 @@ fn warm_start_basis(
     *basis = wb.to_vec();
     *basis_pos = pos;
     *nb_status = st;
+    // 主ループの最初の分解に使えるよう戻しておく
+    WARM_LU.with(|w| *w.borrow_mut() = Some(Box::new(lu)));
     true
 }
 
@@ -2828,7 +2947,6 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     let warm_started = WARM_BASIS.with(|w| w.borrow_mut().take()).is_some_and(|wb| {
         warm_start_basis(std, n_orig, &wb, &mut active_cost, &mut basis, &mut basis_pos, &mut nb_status)
     });
-    let _ = warm_started;
     // 実験的機能(既定オフ、`refine_zero_cost_placement` 参照)。
     if env_str!("ENOMOTO_CRASH_ZERO_COST_PLACEMENT").is_some_and(|v| v != "0") {
         refine_zero_cost_placement(std, &mut active_cost, &mut nb_status, n_orig);
@@ -2867,7 +2985,10 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     // 前の求解が上げた閾値を引き継がないようリセットする)。
     sparse_lu::reset_pivot_threshold();
     // 現基底の LU 分解(Forrest-Tomlin 更新付き)。
-    let mut lu = refactorize(std, &basis_pos, None)?;
+    let mut lu = match WARM_LU.with(|w| w.borrow_mut().take()) {
+        Some(l) if warm_started && l.dim() == m => *l,
+        _ => refactorize(std, &basis_pos, None)?,
+    };
 
     // 被約費用 `d`(Huangfu & Hall §2.2.3 の update-dual で増分維持)。列のコストは `M` に
     // 依存しない(依存するのは境界だけ)ので `d` は通常の `f64` 配列。全スラック基底では
@@ -3592,6 +3713,9 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     for iter_idx in 0..max_iters {
         if iter_idx & 63 == 0 && crate::cancel::is_cancelled() {
             return None; // 同時実行の相手が先に結論を出した
+        }
+        if ext_check(iter_idx, phase == Phase::B, || lower_bound_from_basis(std, &basis, &lu)) {
+            return None; // 外部の打ち切り条件 (分枝限定法の LP)
         }
         if let Some(sb) = &shared_bound {
             if phase == Phase::B && iter_idx % bound_every == 0 {
@@ -6370,6 +6494,9 @@ pub(super) fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_
         if iter_idx & 63 == 0 && crate::cancel::is_cancelled() {
             return None; // 同時実行の相手が先に結論を出した
         }
+        if ext_check(iter_idx, false, || f64::NEG_INFINITY) {
+            return None; // 外部の打ち切り条件 (分枝限定法の LP)
+        }
         // chuzr: 重みなしの最大逸脱 (Dantzig) 規則。`infeasible_rows.rows` のみを走査する。
         // 同値のときは小さい行番号、`bland_mode` では常に最小行番号を選ぶ。
         let mut best: Option<(usize, i32, f64)> = None;
@@ -6469,10 +6596,10 @@ pub(super) fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_
                     if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
                         eprintln!("DEBUG_EXT: polish handoff skipped (only fixed-column/sub-tolerance dual infeasibilities)");
                     }
-                    record_duals(std, &t.basis_pos);
+                    record_duals_with(std, &t.basis_pos, Some(&lu));
                     return Some(SimplexResult { status: Status::Optimal, x: Some(t.x[0..t.n_structural()].to_vec()) });
                 }
-                record_duals(std, &t.basis_pos);
+                record_duals_with(std, &t.basis_pos, Some(&lu));
                 return Some(SimplexResult { status: Status::Optimal, x: Some(t.x) });
             }
             // S5 (`ENOMOTO_HANDOFF_FLIP=1`、既定オフ): 真のコストでの双対実行不能列が

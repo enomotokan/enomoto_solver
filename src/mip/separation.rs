@@ -9,6 +9,7 @@ use super::cuts::{cmir, CutVars, RawCut};
 use super::domain::FEASTOL;
 use super::lp::{LpStatus, SolveLimits, VarStatus};
 use super::solver::Solver;
+use super::lp_api::MipLp;
 
 /// LP に加える前のカット (構造変数の係数、右辺、効き目)。
 struct Candidate {
@@ -17,7 +18,7 @@ struct Candidate {
     efficacy: f64,
 }
 
-impl<'a> Solver<'a> {
+impl<'a, L: MipLp> Solver<'a, L> {
     /// 根の切除平面ループ。LP は根の最適解の状態で呼ぶこと。終わったときも LP は最適 (でなければ偽)。
     pub(super) fn root_cut_loop(&mut self, root_iters: u64) -> bool {
         let p = self.p;
@@ -155,7 +156,7 @@ impl<'a> Solver<'a> {
         }
         let vars = CutVars { lo: &lo, up: &up, is_int: &is_int, x: &xv };
         let mut cands: Vec<Candidate> = Vec::new();
-        let mut push = |raw: Option<RawCut>, cands: &mut Vec<Candidate>, s: &Solver| {
+        let mut push = |raw: Option<RawCut>, cands: &mut Vec<Candidate>, s: &Solver<L>| {
             if let Some(raw) = raw {
                 if let Some(c) = finish_cut(raw, n, &lp_rows, &s.dom.lo, &s.dom.up, x, s.incumbent.as_ref().map(|(_, v)| v.as_slice())) {
                     cands.push(c);

@@ -11,6 +11,7 @@ use super::domain::FEASTOL;
 use super::lp::{LpStatus, SolveLimits};
 use super::problem::MipProblem;
 use super::solver::Solver;
+use super::lp_api::MipLp;
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
@@ -29,7 +30,7 @@ pub fn compute_locks(p: &MipProblem) -> Vec<(u32, u32)> {
     locks
 }
 
-impl<'a> Solver<'a> {
+impl<'a, L: MipLp> Solver<'a, L> {
     pub(super) fn rand(&mut self) -> f64 {
         let mut x = self.rng;
         x ^= x >> 12;
@@ -373,7 +374,7 @@ impl<'a> Solver<'a> {
     }
 }
 
-impl<'a> Solver<'a> {
+impl<'a, L: MipLp> Solver<'a, L> {
     /// 一部の整数列を固定した (境界を締めた) サブ MIP を、ノード数を制限して解く。
     /// 見つかった解は暫定解の候補にする。`lo`/`up` はサブ MIP の列の境界。
     fn solve_submip(&mut self, lo: Vec<f64>, up: Vec<f64>, node_limit: u64) -> bool {

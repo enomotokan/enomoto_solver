@@ -85,6 +85,8 @@ mod crossover;
 mod race;
 mod sifting;
 mod dualize;
+/// 分枝限定法から二段解法を使うためのラッパー (前処理なしの標準形を保持し、warm start で解く)。
+pub(crate) mod mip_lp;
 #[cfg(test)]
 mod lp_bug_debug;
 
@@ -235,6 +237,7 @@ pub struct SimplexResult {
 /// 列 `0..n_total - n_rows` が構造変数、残り `n_rows` 列が各行のスラック。
 /// 求解中は変更されない (変わるのは [`Tableau`] の基底状態と `x` だけ) ので、
 /// 行形式 `rows` と列形式 `cols` がずれることはない。
+#[derive(Clone)]
 struct StdForm {
     /// 全列数 (構造変数 + スラック)。
     n_total: usize,
