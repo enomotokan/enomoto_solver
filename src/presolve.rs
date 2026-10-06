@@ -602,7 +602,7 @@ pub fn run_extended(
 
         // 双対実行可能性の伝播による 2 つの縮小 (`dualpropagate`):
         // 全最適解で等号成立する不等式行を等式系へ昇格し、被約費用の符号が確定する列を固定する。
-        if dualpropagate_active && !dbg_skip("dualpropagate") {
+        if dualpropagate_active && tunable!("ENOMOTO_T_DUALPROPAGATE", crate::params::presolve::DUALPROPAGATE, usize) != 0 && !dbg_skip("dualpropagate") {
             let dual_red = timed_step!("dualpropagate", dualpropagate::propagate_dual_bounds(n, &a, &cur_real_rows, &c, &lb, &ub, &orig_lb, &orig_ub, prop_passes));
             if dual_red.implied_equalities.is_empty() && dual_red.fixed_columns.is_empty() {
                 dualpropagate_empty_streak += 1;

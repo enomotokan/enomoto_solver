@@ -108,3 +108,14 @@ fn doubleton_keeps_contradictory_bounds_infeasible() {
     let r = crate::solver::solve_lp(&vars, &obj, &cons, crate::types::RootSolver::Simplex, opts);
     assert_eq!(r.status, Status::Infeasible);
 }
+
+/// 回帰テスト: dualpropagate が非有界な LP を「最適」「実行不能」に変えていた (既定で無効化)。
+#[test]
+fn unbounded_cases_reported_unbounded() {
+    for f in ["tests/data/lp_bugs/unbounded_reported_optimal.txt", "tests/data/lp_bugs/unbounded_reported_infeasible.txt"] {
+        let (vars, obj, cons) = load(f);
+        let opts = LpOptions { distinguish_infeasible_unbounded: true, ..Default::default() };
+        let r = crate::solver::solve_lp(&vars, &obj, &cons, crate::types::RootSolver::Simplex, opts);
+        assert_eq!(r.status, Status::Unbounded, "{f}");
+    }
+}

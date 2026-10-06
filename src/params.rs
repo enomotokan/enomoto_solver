@@ -956,6 +956,12 @@ pub(crate) mod presolve {
     /// (`ENOMOTO_T_DUALPROPAGATE_STRIKES`)。
     pub(crate) const DUALPROPAGATE_STRIKES: usize = 1;
 
+    /// `dualpropagate` (双対側の境界伝播による行の等式化・列の固定) を行うか (`ENOMOTO_T_DUALPROPAGATE`)。
+    /// 既定は 0 (無効)。この縮約は「最適解が存在する」ことを前提にしており、非有界な LP
+    /// (双対実行不能) に適用すると「最適」や「実行不能」に変えてしまう (tests/data/lp_bugs/)。
+    /// 双対値の後処理で結果を検証できるようになるまで無効にしておく。
+    pub(crate) const DUALPROPAGATE: usize = 0;
+
     /// 従来モード (`PRESOLVE_FIXPOINT = 0`) だけで使う。大きな問題 (等式行 + 多変数の不等式行が [`LARGE_PRESOLVE_MIN_ROWS`] 以上) で、外側ラウンドを上限
     /// (`PRESOLVE_ROUNDS`、20) まで回しても不動点に達しなかったときに続ける延長ラウンドの数
     /// (`ENOMOTO_T_PRESOLVE_EXTRA_ROUNDS_LARGE`、0 = 延長しない)。延長中は上下限伝播のパス数を
