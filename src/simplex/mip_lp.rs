@@ -434,7 +434,8 @@ impl TwoStageLp {
             Some(b) if b.len() == self.rows.len() => {
                 // 同じ基底の LU が手元にあれば渡す (分解を省く)
                 match self.lu_cache.take() {
-                    Some((cb, lu)) if cb == b => sid::set_warm_lu(Some(lu)),
+                    // Forrest-Tomlin の更新が積み重なった LU は FTRAN/BTRAN が遅いので、分解し直させる
+                    Some((cb, lu)) if cb == b && lu.update_count() < 64 => sid::set_warm_lu(Some(lu)),
                     _ => sid::set_warm_lu(None),
                 }
                 sid::solve_slope_intercept_dual_from_basis(&self.std, &opts, b)
