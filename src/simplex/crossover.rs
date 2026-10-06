@@ -543,6 +543,7 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
             eps: tunable!("ENOMOTO_T_PDLP_EPS", if pdlp_mode == 3 { 1e-8 } else { 1e-4 }, f64),
             max_iters: tunable!("ENOMOTO_T_PDLP_MAX_ITERS", if pdlp_mode == 3 { 1_000_000 } else { 20_000 }, usize),
             time_limit: tunable!("ENOMOTO_T_PDLP_TIME", 1e9, f64),
+            max_restarts: usize::MAX,
         };
         let pd = solve_pdlp(&a_j, &b_j, &c_j, &l_j, &u_j, &opts);
         crate::phase_timing::mark("pdlp_end");
@@ -577,7 +578,6 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
             solve_box_lp_warm(&a_j, &b_j, &c_j, &l_j, &u_j, max_iters, Some(&warm))
         }
     };
-    drop(a_j);
     st.ipm_iters = ipm.iters;
     if crate::cancel::is_cancelled() {
         return None;
@@ -599,11 +599,85 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     if ipm.status != Status::Optimal && !(matches!(ipm.status, Status::NotSolved) && accepted) {
         return None;
     }
+    // 試験用 (`ENOMOTO_T_XO_GAMMA_PDHG`): 非基底の検出の比 γ を、PDLP の 1 歩の主の歩幅
+    // `τ_j = (η/ω) dc_j²` (元の変数の単位) にする。検出規則 `x_j - l_j <= γ s_j` は、PDHG の 1 歩
+    // `x⁺ = proj(x - τ s)` で境界に張り付く列と一致する。
+    //   1: PDLP の前処理 (Ruiz + Pock–Chambolle) と初期の η, ω、
+    //   2: PDLP を 0 から最初の再始動まで回した η, ω、
+    //   3: 1 の歩幅で内点法の点から PDHG を文字どおり 1 歩進め (x⁺, y⁺)、その点で検出する。
+    // `ENOMOTO_T_XO_GAMMA_MULT` は γ (既定の 1 も含む) に掛ける倍率。
+    let gamma_mode = tunable!("ENOMOTO_T_XO_GAMMA_PDHG", 0u8, u8);
+    let gamma_mult = tunable!("ENOMOTO_T_XO_GAMMA_MULT", 1.0f64, f64);
+    let mut gamma = vec![prm::GAMMA * gamma_mult; n];
+    let mut pdhg_sigma: Option<Vec<f64>> = None;
+    if gamma_mode != 0 {
+        let opts = PdlpOptions {
+            eps: 0.0,
+            max_iters: if gamma_mode == 2 { 100_000 } else { 0 },
+            time_limit: 1e9,
+            max_restarts: 1,
+        };
+        let pd = solve_pdlp(&a_j, &b_j, &c_j, &l_j, &u_j, &opts);
+        let tau = pd.eta / pd.w;
+        for (k, &j) in free_cols.iter().enumerate() {
+            gamma[j] = tau * pd.dc[k] * pd.dc[k] * gamma_mult;
+        }
+        if gamma_mode == 3 {
+            pdhg_sigma = Some(pd.dr.iter().map(|d| pd.eta * pd.w * d * d).collect());
+        }
+        let mut d2: Vec<f64> = pd.dc.iter().map(|d| d * d).collect();
+        d2.sort_by(|a, b| a.total_cmp(b));
+        crate::phase_timing::record("xo_gamma_tau", tau);
+        crate::phase_timing::record("xo_gamma_eta", pd.eta);
+        crate::phase_timing::record("xo_gamma_w", pd.w);
+        crate::phase_timing::record("xo_gamma_pdlp_iters", pd.iters as f64);
+        if !d2.is_empty() {
+            crate::phase_timing::record("xo_gamma_dc2_min", d2[0]);
+            crate::phase_timing::record("xo_gamma_dc2_med", d2[d2.len() / 2]);
+            crate::phase_timing::record("xo_gamma_dc2_max", d2[d2.len() - 1]);
+        }
+        if debug {
+            eprintln!(
+                "CROSSOVER gamma mode={gamma_mode} eta={:.3e} w={:.3e} tau={tau:.3e} dc2=[{:.2e}, {:.2e}, {:.2e}] pdlp_iters={}",
+                pd.eta,
+                pd.w,
+                d2.first().copied().unwrap_or(0.0),
+                d2.get(d2.len() / 2).copied().unwrap_or(0.0),
+                d2.last().copied().unwrap_or(0.0),
+                pd.iters
+            );
+        }
+    }
+    drop(a_j);
     let mut x = std.lb.clone(); // 固定列は lb
     for (k, &j) in free_cols.iter().enumerate() {
         x[j] = ipm.x[k].clamp(std.lb[j], std.ub[j]);
     }
     let mut y = ipm.y;
+    if let Some(sig) = &pdhg_sigma {
+        // PDHG の 1 歩: x⁺ = proj(x - τ_j s)、y⁺ = y + σ_i (b - A(2x⁺ - x))。
+        let mut aty = vec![0.0; n];
+        at_y(std, &y, &mut aty);
+        let mut x_new = x.clone();
+        for j in 0..n {
+            if std.lb[j] < std.ub[j] {
+                x_new[j] = (x[j] - gamma[j] * (std.c[j] - aty[j])).clamp(std.lb[j], std.ub[j]);
+            }
+        }
+        let mut r = std.b.clone();
+        for j in 0..n {
+            let e = 2.0 * x_new[j] - x[j];
+            if e != 0.0 {
+                for &(i, a) in col(std, j) {
+                    r[i] -= a * e;
+                }
+            }
+        }
+        for i in 0..m {
+            y[i] += sig[i] * r[i];
+        }
+        x = x_new;
+    }
     drop(ipm.x);
     drop(ipm.rc);
     let mut s = vec![0.0; n];
@@ -631,8 +705,8 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
         let stat = if l == u {
             Some(if s[j] >= 0.0 { PStat::Lower } else { PStat::Upper })
         } else {
-            let at_l = l.is_finite() && x[j] - l <= (prm::GAMMA * s[j]).max(tol);
-            let at_u = u.is_finite() && u - x[j] <= (-prm::GAMMA * s[j]).max(tol);
+            let at_l = l.is_finite() && x[j] - l <= (gamma[j] * s[j]).max(tol);
+            let at_u = u.is_finite() && u - x[j] <= (-gamma[j] * s[j]).max(tol);
             match (at_l, at_u) {
                 (true, true) => Some(if x[j] - l <= u - x[j] { PStat::Lower } else { PStat::Upper }),
                 (true, false) => Some(PStat::Lower),
@@ -1303,8 +1377,12 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
             return None;
         }
     }
-    if debug {
-        eprintln!("CROSSOVER stats {st:?}");
+    crate::phase_timing::record("xo_basic_after_detect", st.basic_after_detect as f64);
+    // 仕上げ前の基底の主・双対実行不能の数を記録する (`ENOMOTO_T_XO_QUALITY=1`、計測用)。
+    if debug || tunable!("ENOMOTO_T_XO_QUALITY", 0u8, u8) != 0 {
+        if debug {
+            eprintln!("CROSSOVER stats {st:?}");
+        }
         // 仕上げ前の基底の主・双対実行不能の数と最大値。
         let mut xb = vec![0.0; m];
         let mut rhs_b = std.b.clone();
@@ -1350,7 +1428,11 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
                 md = md.max(viol);
             }
         }
-        eprintln!("CROSSOVER basis quality: primal_infeas={np} (max {mp:.2e}) dual_infeas={nd} (max {md:.2e})");
+        crate::phase_timing::record("xo_primal_infeas", np as f64);
+        crate::phase_timing::record("xo_dual_infeas", nd as f64);
+        if debug {
+            eprintln!("CROSSOVER basis quality: primal_infeas={np} (max {mp:.2e}) dual_infeas={nd} (max {md:.2e})");
+        }
     }
     // 仕上げは polish ではなく二段解法の主ループ (DSE・BFRT・超疎の経路) で行う (既定、第 13 回の比較。`ENOMOTO_T_XO_CLEANUP_MAIN=0` で polish)
     // でこの基底から始める (内点法の解が強く退化していて、基底の多くをスラックで埋めた問題: ns1688926)。
