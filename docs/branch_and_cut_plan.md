@@ -100,7 +100,7 @@ impl DualSimplexState {
 
 設計上の注意:
 
-- **MIP 用 LP では LP presolve を切る**: `dualize`、`sifting`、連結成分分解、IPM との競争 (race) も使わない。使うのはスケーリングだけとし、元の空間との写像を固定する。presolve は MIP 全体に対して root で 1 回だけ行う (フェーズ 6)。
+- **ノード LP では presolve を走らせない**: `dualize`、`sifting`、連結成分分解、IPM との競争 (race) も使わない。presolve は MIP 全体に対して root で 1 回だけ行い (§7)、以後のノード LP はその縮約後の空間で解く。これで写像が固定される。
 - **cutoff には真の費用で計算した下界を使う**: 双対単体法は費用を摂動して解くため、`lower_bound_from_basis` (真の `c` を使う) が cutoff を超えた時点で `ObjectiveBound` を返す。
 - **境界変更後は primal の不可能性だけが生じる**: その状態から dual simplex の stage B を再開すればよい。変更前に非基底だった変数は新しい境界に移す。
 - **ベンチマークで退行がないことを確認する**: 既存の LP ベンチマーク (Netlib / Mittelmann) を回し、LP 経路に退行がないことを見る。新しい構造体は既存の関数から呼ぶだけの形にし、ロジックを二重に持たない。
@@ -116,13 +116,14 @@ impl DualSimplexState {
 
 | フェーズ | 内容 | 主な参照元 | 見積もり (Rust 行数) |
 |---|---|---|---|
+| **0'** | MIP presolve: 既存の LP presolve に整数変数用の分岐を追加する (§7)。段階 0 と並行して進められる | Achterberg et al. 2020、PaPILO | 600–900 |
 | **0** | `DualSimplexState` (§4)。単体テストでは、境界を変更して warm start した結果がコールドスタートと一致することを確かめる | HighsLpRelaxation、Osi の hot start | 1,000–1,500 |
 | **1** | 木探索の骨格: `Domain` (変更スタックと backtrack のみ)、`Search` (dive + backtrack、基底の継承)、`NodeQueue` (best-bound / hybrid)、cutoff、gap、上限 (時間 / ノード / gap)、状態の正しい分類、暫定解の実行可能性確認。この時点の分岐は pseudocost のみ | HighsSearch、HighsNodeQueue | 1,500 |
 | **2** | 境界伝播: 行活動量の差分更新、整数境界の丸め、連続変数は改善 30% 以上の場合だけ採用、`capacityThreshold` | HighsDomain | 1,200 |
 | **3** | reliability 分岐: 強分岐 (`snapshot` / `restore`、全体反復予算)、product score、inference / cutoff の副スコア、片側が不可能なら反対側に固定 | HighsPseudocost、`selectBranchingCandidate`、CbcNode | 800 |
 | **4** | 安価な主ヒューリスティクス: trivial、simple / randomized rounding、Feasibility Jump。目的が整数値をとる場合の cutoff 増分 | HighsPrimalHeuristics、HighsFeasibilityJump、CbcModel::analyzeObjective | 900 |
 | **5** | root のカットループとカットプール: `generateCut` (lifted cover / CMIR)、TransformedLp (境界と VUB の代入)、tableau 分離器 (Gomory 相当)、age / efficacy / 並列度、stall 判定、basic なカット行の削除 | HighsCutGeneration、HighsTableauSeparator、HighsCutPool、HighsSeparation、CglGomory (安全策) | 2,500 |
-| **6** | 被約費用固定 (root の lurking bound とノード)、整数を考慮した MIP presolve (既存 presolve に整数の扱いを追加して postsolve を整える)、RENS / RINS (再帰 MIP) | HighsRedcostFixing、HPresolve | 2,000 |
+| **6** | 被約費用固定 (root の lurking bound とノード)、RENS / RINS (再帰 MIP)、MIP 専用の縮約 (§7.3) | HighsRedcostFixing、HPresolve | 1,500 |
 | **7** | conflict analysis (dual proof)、clique table、probing、path / mod-k 分離器、restart、対称性 | ConflictSet、HighsCliqueTable、HighsImplications | 4,000 以上 |
 
 期待される効果は概ね **0 ≫ 2 ≈ 5 > 3 > 1 > 4 > 6 > 7** の順。ただし 1 は他のすべての前提になる。
@@ -131,7 +132,41 @@ impl DualSimplexState {
 
 ## 6. 先に決めておきたいこと
 
-1. **MIP では LP presolve を使わない方針でよいか**: 写像を固定するため。代わりに整数を考慮した MIP presolve を root で 1 回行う。
+1. ~~MIP の presolve をどうするか~~ → **既存の LP presolve に整数変数用の分岐を追加する形に決定** (§7)。
 2. **並列化**: 最初は単一スレッドで作る。HiGHS の並列 worker は後から追加された機能で、骨格には不要。
 3. **ベンチマーク集合**: MIPLIB 2017 の benchmark / easy から 30 問程度を `benchmarks/miplib/` に置く。容量が大きいのでリポジトリには置かず、取得スクリプトだけにする案。
 4. **Python API の拡張**: `SolveResult` に `best_bound`、`mip_gap`、`node_count`、`TimeLimit` / `NodeLimit` の状態を追加し、`solve()` に `time_limit`、`mip_rel_gap`、`node_limit` を渡せるようにする。
+
+---
+
+## 7. MIP presolve: 既存 LP presolve への整数分岐の追加
+
+方針: 新しい presolve を作らず、`presolve::run_extended` に整数性の情報 `is_int: &[bool]` を渡す。各縮約の中に「整数変数の場合」の分岐を足す。MIP の root で 1 回だけ実行し、ノード LP はその縮約後の空間で解く。
+
+### 7.1 共通の変更
+
+- **整数性を引き継ぐ**: `build_a_g` から縮約後の列まで `is_int` を伝える。列の削除・置換・併合のたびに更新し、`ExtendedPresolveResult` に縮約後の `is_int` を持たせる。
+- **境界を丸める**: 整数列の境界を更新するときは必ず `lb ← ceil(lb − feastol)`、`ub ← floor(ub + feastol)` で丸める。共通関数を 1 つ用意し、全縮約から呼ぶ。丸めた結果が `lb > ub` なら実行不能とする。
+- **スケーリング**: 整数列には列スケーリングを掛けない (係数 1 に固定)。行スケーリングはそのまま使ってよい。列スケールを掛けると、縮約後の空間で「x が整数」という条件が「x' が 1/s の倍数」に変わってしまうため。LP ソルバー内部のスケーリングは別の層なので問題ない。
+- **postsolve**: 主の値の復元だけで十分 (MIP では元の空間の双対値は不要)。ただし整数列を置換で消した場合、復元した値が整数になることを縮約の時点で保証しておく (§7.2 の条件)。
+- **MIP モードの切り替え**: `is_int` がすべて false なら、今の LP の挙動と完全に一致させる。既存の LP ベンチマークで出力のハッシュ (`presolve_output_hash`) が変わらないことで確かめる。
+
+### 7.2 縮約ごとの扱い
+
+| 縮約 (ファイル) | 整数変数の場合 |
+|---|---|
+| propagate / ineqsingleton / rowsingleton / foldfixed | そのまま使える。導いた境界と固定値を丸めるだけ。`rowsingleton` の固定値が整数でなければ実行不能 |
+| dualfix / dualpropagate / forcingcol | 境界への固定はそのまま有効 (丸め済みの境界なので整数)。dualpropagate の「含意自由」判定を列の消去に使う場合は、下の freevar と同じ制約に従う |
+| redundancy / smallcoeff | 行だけの操作なので有効。smallcoeff で右辺を調整した結果、整数行の右辺の性質が変わる点だけ注意する |
+| colsingleton / aggregator / freevar (列を置換で消すもの) | **消す列が連続変数のときだけ**適用する。整数列を消せるのは、残りの列がすべて整数で、係数比と右辺がすべて整数 (例: 係数 ±1) になり、復元値が自動的に整数になる場合に限る |
+| doubleton (`a·x + b·y = c` で x を消す) | x が連続なら従来どおり。x が整数なら、y も整数で `b/a` と `c/a` が整数の場合だけ適用する。どちらも整数で条件を満たさない場合は、x と y の境界を (一次不定方程式の解の構造から) 強める処理だけにする |
+| parallelcols (平行な列の併合) | 同じ型の列どうしで、係数比が ±1 の場合だけ併合する (併合後の列も整数になり、postsolve で整数に分割できる)。整数と連続が混ざる場合や比が ±1 以外の場合は、併合せずに支配関係による固定だけ行う |
+| scaling | §7.1 のとおり、整数列は列スケール 1 |
+| 現在未使用のもの (dominatedcol / parallelrows / rowdominance / sparsify / stuffing) | 有効化する際に同じ規則で分岐を入れる。stuffing は連続列だけを対象にする |
+
+### 7.3 MIP にしかない縮約 (段階 6 以降で追加)
+
+- **係数の強化 (coefficient tightening)**: `a_j > maxact − rhs` を満たす 0-1 変数の係数を下げる。LP 緩和が強くなり、効果が大きい。
+- **整数行の右辺の丸め**: 係数と変数がすべて整数の行で、`rhs ← floor(rhs + feastol)` とする。gcd でも割る。
+- **暗黙整数の検出**: 等式行の残り 1 つの連続変数が、他が整数なら整数値しかとらない場合に整数扱いにする。分岐対象にはしないが、カット生成に使う。
+- **probing / clique 抽出**: 段階 7 で domain 伝播の部品を使って実装する。
