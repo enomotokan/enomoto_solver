@@ -632,7 +632,9 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     //   1: PDLP の前処理 (Ruiz + Pock–Chambolle) と初期の η, ω、
     //   2: PDLP を 0 から最初の再始動まで回した η, ω、
     //   3 (既定、第 16・17 回の比較): 1 の歩幅で内点法の点から PDHG を文字どおり 1 歩進め (x⁺, y⁺)、その点で検出する、
-    //   4: 2 の歩幅で 3 と同じく 1 歩進める。
+    //   4: 2 の歩幅で 3 と同じく 1 歩進める、
+    //   5: 3 と同じだが、境界に切られなかった列は内点法の値のまま (x⁺ は張り付けだけ。歩幅 τ が大きいと
+    //      基底の列が `τ s_j` だけ動いて `A x = b` が崩れる: pilot.ja)。
     //   0: 参照実装と同じ γ = 1 (`ENOMOTO_T_XO_GAMMA_PDHG` で選ぶ)。
     // `ENOMOTO_T_XO_GAMMA_MULT` は γ に掛ける倍率。
     let gamma_mode = tunable!("ENOMOTO_T_XO_GAMMA_PDHG", 3u8, u8);
@@ -690,7 +692,8 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
         let mut x_new = x.clone();
         for j in 0..n {
             if std.lb[j] < std.ub[j] {
-                x_new[j] = (x[j] - gamma[j] * (std.c[j] - aty[j])).clamp(std.lb[j], std.ub[j]);
+                let v = x[j] - gamma[j] * (std.c[j] - aty[j]);
+                x_new[j] = if gamma_mode == 5 && std.lb[j] < v && v < std.ub[j] { x[j] } else { v.clamp(std.lb[j], std.ub[j]) };
             }
         }
         let mut r = std.b.clone();
