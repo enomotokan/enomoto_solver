@@ -1069,6 +1069,13 @@ pub(crate) mod presolve {
 /// 内点法 IP-PMM (src/interior_point.rs と interior_point/kkt.rs)。
 /// 既定のエンジンではなく、`Model.solve(root_solver="interior")` のときだけ使われる。
 pub(crate) mod interior_point {
+    /// Newton 系の分解 (正規方程式の Cholesky・拡大系の LDLᵀ) の因子の非零数の上限。記号分解の結果が
+    /// これを超えたら内点法を諦める (`NotSolved` を返し、呼び出し側は二段解法で解く)。ex10 は正規方程式で
+    /// 7.5 億 (因子だけで 6 GB、分解 1 回 400 s)、拡大系で 1.02 億になり、同時実行 (`auto`) の内点法側が
+    /// 常駐 10 GB に達してメモリ上限のある環境ではプロセスごと落ちていた。Netlib・Kennington・scpm1 などの
+    /// 内点法が勝つ問題はこれより桁違いに小さい。試験用 `ENOMOTO_T_IPM_MAX_FACTOR_NNZ`。
+    pub(crate) const MAX_FACTOR_NNZ: usize = 100_000_000;
+
     /// fraction-to-boundary 則の係数 τ。スラック `s` と双対 `z` が 0 に達しないよう、
     /// 境界までの最大ステップの τ 倍までしか進まない。
     pub(crate) const TAU: f64 = 0.995;

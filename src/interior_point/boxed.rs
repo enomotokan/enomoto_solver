@@ -338,7 +338,21 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
     let t_kkt = std::time::Instant::now();
     // 診断用 (ENOMOTO_DEBUG_IPM): 数値分解・Newton 系の求解 (反復改良を含む) の累計時間。
     let mut prof = (0.0f64, 0.0f64);
-    let mut kkt = IpmKkt::new(a);
+    let Some(mut kkt) = IpmKkt::new(a) else {
+        // 因子が大きすぎる (`MAX_FACTOR_NNZ`): 内点法を諦める。
+        if debug {
+            eprintln!("IPM factor too large; giving up (setup {:.2}s)", t_kkt.elapsed().as_secs_f64());
+        }
+        crate::phase_timing::mark("ipm_factor_too_large");
+        return BoxIpmResult {
+            status: Status::NotSolved,
+            x: vec![0.0; n],
+            y: vec![0.0; p],
+            rc: vec![0.0; n],
+            iters: 0,
+            rel_res: (f64::INFINITY, f64::INFINITY, f64::INFINITY),
+        };
+    };
     if debug {
         eprintln!(
             "IPM kkt={} nnz(A)={} nnz(L)={} setup={:.2}s",
