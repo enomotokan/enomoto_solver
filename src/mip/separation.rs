@@ -6,6 +6,7 @@
 //! 基底にある) カット行を LP から外す。カットは大域的な境界から作るので、木全体で有効。
 
 use super::cuts::{cmir, extended_cover, CutVars, RawCut, VarBounds};
+use super::problem::MipProblem;
 use super::domain::FEASTOL;
 use super::lp::{LpStatus, SolveLimits, VarStatus};
 use super::solver::Solver;
@@ -25,6 +26,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let n = p.n;
         let mut stall = 0;
         let mut prev_obj = self.lp.objective();
+        let mut prev_nfrac = self.fractional(&self.lp.col_values()).len();
         let first_obj = prev_obj;
         // サブ MIP (RENS/RINS) では分離に時間をかけない
         let max_rounds = if self.params.submip { 5 } else { 25 };
@@ -44,7 +46,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             // 効き目の大きい順に、平行なものを除いて選ぶ
             let max_cuts = (p.m.max(50)).min(500);
-            let chosen = select_cuts(cands, max_cuts);
+            let chosen = select_cuts(cands, max_cuts, p);
             if chosen.is_empty() {
                 break;
             }
@@ -80,16 +82,32 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.start.elapsed().as_secs_f64()
                 );
             }
-            // 停滞判定: 改善が初回からの改善量のわずかな割合なら停滞
-            let gain = obj - prev_obj;
-            let scale = (obj - first_obj).abs().max(1e-6 * obj.abs().max(1.0));
-            if gain <= 1e-3 * scale || gain <= 1e-9 * obj.abs().max(1.0) {
-                stall += 1;
-                if stall >= 3 {
-                    break;
+            if env_str!("ENOMOTO_MIP_STALL_OLD").is_some() {
+                // 停滞判定: 改善が初回からの改善量のわずかな割合なら停滞
+                let gain = obj - prev_obj;
+                let scale = (obj - first_obj).abs().max(1e-6 * obj.abs().max(1.0));
+                if gain <= 1e-3 * scale || gain <= 1e-9 * obj.abs().max(1.0) {
+                    stall += 1;
+                    if stall >= 3 {
+                        break;
+                    }
+                } else {
+                    stall = 0;
                 }
             } else {
-                stall = 0;
+                // SCIP の停滞判定 (solve.c): 目的値の相対変化が 1e-4 以下で、分数の列の数も十分に減っていなければ
+                // 停滞。根では 10 回連続で止める (サブ MIP では 3 回)。
+                let nfrac = self.fractional(&self.lp.col_values()).len();
+                let reldiff = (obj - prev_obj) / obj.abs().max(prev_obj.abs()).max(1.0);
+                if reldiff <= 1e-4 && nfrac as f64 >= (0.9 - 0.1 * stall as f64) * prev_nfrac as f64 {
+                    stall += 1;
+                    if stall >= if self.params.submip { 3 } else { 10 } {
+                        break;
+                    }
+                } else {
+                    stall = 0;
+                }
+                prev_nfrac = nfrac;
             }
             prev_obj = obj;
             // 効いていないカットを外す (論理変数が基底にあり、行が緩んでいるもの)
@@ -121,7 +139,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return false;
         }
         let room = max_rows - self.lp.num_rows();
-        let chosen = select_cuts(cands, room.min(50));
+        let chosen = select_cuts(cands, room.min(50), p);
         if chosen.is_empty() {
             return false;
         }
@@ -506,7 +524,63 @@ fn finish_cut(
 }
 
 /// 効き目の大きい順に、既に選んだものとほぼ平行 (|cos| > 0.99) なものを除いて選ぶ。
-fn select_cuts(mut cands: Vec<Candidate>, max_cuts: usize) -> Vec<Candidate> {
+fn select_cuts(cands: Vec<Candidate>, max_cuts: usize, p: &MipProblem) -> Vec<Candidate> {
+    if env_str!("ENOMOTO_MIP_CUTSEL_OLD").is_some() {
+        return select_cuts_old(cands, max_cuts);
+    }
+    select_cuts_hybrid(cands, max_cuts, p)
+}
+
+/// 疎なベクトル (列番号の昇順) の内積。
+fn sparse_dot(a: &[(usize, f64)], b: &[(usize, f64)]) -> f64 {
+    let (mut i, mut k, mut dot) = (0, 0, 0.0);
+    while i < a.len() && k < b.len() {
+        let (x, y) = (a[i].0, b[k].0);
+        if x == y {
+            dot += a[i].1 * b[k].1;
+            i += 1;
+            k += 1;
+        } else if x < y {
+            i += 1;
+        } else {
+            k += 1;
+        }
+    }
+    dot
+}
+
+/// SCIP の `cutsel_hybrid` に倣ったカット選択: スコア = 効き目 + 0.1 × 目的関数との平行度 + 0.1 × 整数列の割合。
+/// スコアの高い順に採り、採ったカットとの平行度 (|cos|) が 0.1 を超えるものは捨てる。ただしスコアが最良の
+/// 0.9 倍以上の「良い」カットは平行度 0.5 まで許す。
+fn select_cuts_hybrid(cands: Vec<Candidate>, max_cuts: usize, p: &MipProblem) -> Vec<Candidate> {
+    let cnorm = p.cost.iter().map(|c| c * c).sum::<f64>().sqrt();
+    let mut scored: Vec<(f64, f64, Candidate)> = cands
+        .into_iter()
+        .map(|c| {
+            let nc = c.coefs.iter().map(|&(_, v)| v * v).sum::<f64>().sqrt();
+            let objpar = if cnorm > 0.0 && nc > 0.0 { c.coefs.iter().map(|&(j, v)| v * p.cost[j]).sum::<f64>().abs() / (cnorm * nc) } else { 0.0 };
+            let intsup = c.coefs.iter().filter(|&&(j, _)| p.is_int[j]).count() as f64 / c.coefs.len().max(1) as f64;
+            (c.efficacy + 0.1 * objpar + 0.1 * intsup, nc, c)
+        })
+        .collect();
+    scored.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let Some(best_score) = scored.first().map(|s| s.0) else { return Vec::new() };
+    let (maxpar, goodmaxpar, good) = (0.1, 0.5, 0.9 * best_score);
+    let mut chosen: Vec<(f64, Candidate)> = Vec::new();
+    for (score, nc, c) in scored {
+        if chosen.len() >= max_cuts {
+            break;
+        }
+        let limit = if score >= good { goodmaxpar } else { maxpar };
+        let parallel = chosen.iter().any(|(nd, d)| sparse_dot(&c.coefs, &d.coefs).abs() > limit * nc * nd);
+        if !parallel {
+            chosen.push((nc, c));
+        }
+    }
+    chosen.into_iter().map(|(_, c)| c).collect()
+}
+
+fn select_cuts_old(mut cands: Vec<Candidate>, max_cuts: usize) -> Vec<Candidate> {
     cands.sort_by(|a, b| b.efficacy.total_cmp(&a.efficacy));
     let mut chosen: Vec<Candidate> = Vec::new();
     let mut norms: Vec<f64> = Vec::new();

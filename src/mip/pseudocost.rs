@@ -17,6 +17,14 @@ pub struct Pseudocost {
     cutoff_down: Vec<u32>,
     /// これ以上観測があれば信頼する。
     pub min_reliable: u32,
+    /// 分枝後の伝播で締まった境界の数 (推論) の和と回数 (列・向きごと)。
+    inf_sum: [Vec<f64>; 2],
+    inf_n: [Vec<u32>; 2],
+    inf_total: f64,
+    inf_total_n: u64,
+    /// 実行不能で終わった葉と、目的値で打ち切った葉の数 (スコアの動的な重み)。
+    pub infeasible_leaves: u64,
+    pub objlim_leaves: u64,
 }
 
 impl Pseudocost {
@@ -33,6 +41,12 @@ impl Pseudocost {
             cutoff_up: vec![0; n],
             cutoff_down: vec![0; n],
             min_reliable: tunable!("ENOMOTO_T_MIP_MINREL", 8u32, u32),
+            inf_sum: [vec![0.0; n], vec![0.0; n]],
+            inf_n: [vec![0; n], vec![0; n]],
+            inf_total: 0.0,
+            inf_total_n: 0,
+            infeasible_leaves: 0,
+            objlim_leaves: 0,
         }
     }
 
@@ -114,6 +128,53 @@ impl Pseudocost {
         // 片側が打ち切りになりやすい列を少し優先する。
         let cut = (self.cutoff_up[j] + self.cutoff_down[j]) as f64;
         cost * (1.0 + 1e-2 * cut.min(100.0))
+    }
+
+    /// 分枝 (列 `j`、向き `up`) の後の伝播で締まった境界の数を記録する。
+    pub fn add_inference(&mut self, j: usize, up: bool, count: f64) {
+        let d = up as usize;
+        self.inf_sum[d][j] += count;
+        self.inf_n[d][j] += 1;
+        self.inf_total += count;
+        self.inf_total_n += 1;
+    }
+
+    fn inference(&self, j: usize, up: bool) -> f64 {
+        let d = up as usize;
+        let avg = if self.inf_total_n > 0 { self.inf_total / self.inf_total_n as f64 } else { 0.0 };
+        if self.inf_n[d][j] > 0 { self.inf_sum[d][j] / self.inf_n[d][j] as f64 } else { avg }
+    }
+
+    /// 打ち切り率 (分枝した子が実行不能/打ち切りになった割合)。
+    fn cutoff_rate(&self, j: usize, up: bool) -> f64 {
+        let (c, n) = if up { (self.cutoff_up[j], self.n_up[j]) } else { (self.cutoff_down[j], self.n_down[j]) };
+        c as f64 / (c + n + 1) as f64
+    }
+
+    /// SCIP の relpscost のスコア (branch_relpscost.c `calcScore`):
+    /// `dyn * (1e-4 s(推論) + 1e-4 s(打ち切り)) + s(pseudocost) / dyn`。`s(v, avg) = 1 - 1/(1 + v/max(avg, 0.1))`、
+    /// `dyn = (実行不能の葉 + 1) / (打ち切りの葉 + 1)` (暫定解がない間は推論・打ち切りの比重が大きくなる)。
+    /// `down`/`up` は両側の目的値の増加の見積り (pseudocost × 小数部、または強分岐の実測値)。
+    fn hybrid(&self, j: usize, down: f64, up: f64) -> f64 {
+        let s = |v: f64, avg: f64| 1.0 - 1.0 / (1.0 + v / avg.max(0.1));
+        let eps = 1e-6;
+        let ps = down.max(eps) * up.max(eps);
+        let ps_avg = self.avg_down().max(eps) * self.avg_up().max(eps) * 0.25;
+        let inf = self.inference(j, false).max(eps) * self.inference(j, true).max(eps);
+        let inf_avg = if self.inf_total_n > 0 { (self.inf_total / self.inf_total_n as f64).max(eps).powi(2) } else { 1.0 };
+        let cut = self.cutoff_rate(j, false).max(eps) * self.cutoff_rate(j, true).max(eps);
+        let dynw = (self.infeasible_leaves + 1) as f64 / (self.objlim_leaves + 1) as f64;
+        dynw * (1e-4 * s(inf, inf_avg) + 1e-4 * s(cut, 0.01)) + s(ps, ps_avg) / dynw
+    }
+
+    /// pseudocost による [`Self::hybrid`] スコア (小数部 `frac`)。
+    pub fn hybrid_score(&self, j: usize, frac: f64) -> f64 {
+        self.hybrid(j, self.cost_down(j) * frac, self.cost_up(j) * (1.0 - frac))
+    }
+
+    /// 強分岐の実測値による [`Self::hybrid`] スコア。
+    pub fn hybrid_score_with_gains(&self, j: usize, down: f64, up: f64) -> f64 {
+        self.hybrid(j, down, up)
     }
 
     /// 推定値への寄与 (両側のうち小さい方の増加)。

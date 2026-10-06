@@ -114,6 +114,12 @@ pub(super) struct Solver<'a, L: MipLp> {
     last_log: Instant,
     /// カット生成に使う変数上下限 (最初の分離で作る)。
     pub(super) vbounds: Option<Rc<super::cuts::VarBounds>>,
+    /// 列ごとの (行, 係数) (oneopt 用、最初に使うときに作る)。
+    pub(super) col_rows: Option<Rc<Vec<Vec<(usize, f64)>>>>,
+    /// ノードでのダイビングの LP 反復数・呼び出し回数・解を見つけた回数。
+    dive_iters: u64,
+    dive_calls: u64,
+    dive_succ: u64,
 }
 
 /// 分枝限定法で解く。
@@ -160,6 +166,10 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
         unresolved: false,
         last_log: start,
         vbounds: None,
+        col_rows: None,
+        dive_iters: 0,
+        dive_calls: 0,
+        dive_succ: 0,
     };
     s.run()
 }
@@ -256,6 +266,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let z = self.p.objective(&x);
         let better = self.incumbent.as_ref().is_none_or(|(inc, _)| z < *inc - 1e-9 * inc.abs().max(1.0));
         if better {
+            // oneopt (SCIP の heur_oneopt): 整数列を 1 つずつ目的値の良くなる向きに、行を破らない範囲で動かす
+            let mut x = x;
+            let mut z = z;
+            if env_str!("ENOMOTO_MIP_NO_ONEOPT").is_none() && self.one_opt(&mut x) {
+                let z2 = self.p.objective(&x);
+                if z2 < z && self.p.is_feasible(&x, FEASTOL) {
+                    if self.params.verbose {
+                        eprintln!("MIP: oneopt improved {z:.10e} -> {z2:.10e}");
+                    }
+                    z = z2;
+                }
+            }
             self.incumbent = Some((z, x));
             self.root_redcost_fixing();
             let lim = self.prune_limit();
@@ -385,6 +407,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if self.incumbent.is_none() {
                     heur!("fractional diving", self.fractional_dive(2 * root_iters + 1000));
                 }
+                if self.incumbent.is_none() {
+                    heur!("vector length diving", self.dive(super::heuristics::DiveKind::VectorLength, 2 * root_iters + 1000, f64::INFINITY));
+                }
                 // 暫定解 (Feasibility Jump・pump・丸めなどで得たもの) を根の LP 解との RINS で磨く
                 if self.incumbent.is_some() && env_str!("ENOMOTO_MIP_NO_ROOT_RINS").is_none() {
                     heur!("RINS", self.rins(&x));
@@ -465,12 +490,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let dn = self.dbg_changes(&node.changes);
             if node.lower_bound >= self.prune_limit() {
                 self.dbg_lost(&format!("node lower bound {}", node.lower_bound), dn);
+                self.pc.objlim_leaves += 1;
                 continue;
             }
+            let stack_before_prop = self.dom.stack_len();
             if dn && !self.dbg_contains() {
                 self.dbg_lost("domain excludes the debug solution before node propagation", dn);
             }
-            if !self.dom.propagate(self.p) {
+            let prop_ok = self.dom.propagate(self.p);
+            if let Some((j, up, _, _)) = node.branch {
+                self.pc.add_inference(j, up, self.dom.stack_len().saturating_sub(stack_before_prop) as f64);
+            }
+            if !prop_ok {
+                self.pc.infeasible_leaves += 1;
                 self.dbg_lost("node propagation", dn);
                 if let Some((j, up, _, _)) = node.branch {
                     self.pc.add_cutoff(j, up);
@@ -497,6 +529,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 match st {
                     LpStatus::Optimal => {}
                     LpStatus::Infeasible | LpStatus::ObjectiveBound => {
+                        if st == LpStatus::Infeasible {
+                            self.pc.infeasible_leaves += 1;
+                        } else {
+                            self.pc.objlim_leaves += 1;
+                        }
                         self.dbg_lost(&format!("node LP {st:?}"), dn && self.dbg_contains());
                         if let Some((j, up, _, _)) = node.branch {
                             self.pc.add_cutoff(j, up);
@@ -518,6 +555,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                 }
                 if node_obj >= self.prune_limit() {
+                    self.pc.objlim_leaves += 1;
                     self.dbg_lost(&format!("node LP objective {node_obj}"), dn && self.dbg_contains());
                     break None;
                 }
@@ -556,6 +594,25 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             self.randomized_rounding(&x, 1);
                         }
                     }
+                    // ダイビング (SCIP の fracdiving / veclendiving: 深さ 10 ごと、ずらし 3 / 7)
+                    if node.depth % 10 == 3 || node.depth % 10 == 7 {
+                        let quota = (0.05 * (self.dive_succ + 1) as f64 / (self.dive_calls + 1) as f64 * self.node_iters as f64) as u64 + 1000;
+                        if self.dive_iters < quota && env_str!("ENOMOTO_MIP_NO_NODE_DIVE").is_none() {
+                            let kind = if node.depth % 10 == 3 { super::heuristics::DiveKind::Fractional } else { super::heuristics::DiveKind::VectorLength };
+                            let lb = self.queue.best_lower_bound().min(node_obj);
+                            let cutoff = self.prune_limit();
+                            let quot = if self.incumbent.is_some() { 0.8 } else { 0.1 };
+                            let bound = if cutoff.is_finite() { lb + quot * (cutoff - lb) } else { f64::INFINITY };
+                            let it0 = self.lp.total_iterations();
+                            self.dive_calls += 1;
+                            if self.dive(kind, quota - self.dive_iters, bound) {
+                                self.dive_succ += 1;
+                            }
+                            let used = self.lp.total_iterations() - it0;
+                            self.dive_iters += used;
+                            self.heur_iters += used;
+                        }
+                    }
                     if node_obj >= self.prune_limit() {
                         break None;
                     }
@@ -567,7 +624,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     continue;
                 }
                 let before_sb = dn && self.dbg_contains();
-                let sel = self.select_branch(&frac, node_obj);
+                let sel = self.select_branch(&frac, node_obj, node.depth);
                 if before_sb && !self.dbg_contains() {
                     self.dbg_lost("strong branching tightened bounds", true);
                 }
@@ -748,7 +805,149 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     /// reliability 分岐: 信頼できない候補は強分岐で評価し、スコア最大の列を選ぶ。
-    fn select_branch(&mut self, frac: &[(usize, f64)], node_obj: f64) -> BranchAction {
+    /// 双対退化の度合い (SCIP の `SCIPgetLPDualDegeneracy` の簡略版): 非基底の構造列のうち被約費用が 0 の
+    /// 割合と、(基底列 + 被約費用 0 の非基底列) / 行数。
+    fn dual_degeneracy(&self) -> (f64, f64) {
+        let b = self.lp.basis();
+        let d = self.lp.reduced_costs();
+        let (mut nb, mut zero, mut basic) = (0usize, 0usize, 0usize);
+        for j in 0..self.p.n {
+            if self.dom.lo[j] == self.dom.up[j] {
+                continue;
+            }
+            if b.col[j] == VarStatus::Basic {
+                basic += 1;
+            } else {
+                nb += 1;
+                if d[j].abs() <= 1e-9 * (1.0 + self.p.cost[j].abs()) {
+                    zero += 1;
+                }
+            }
+        }
+        let deg = if nb == 0 { 0.0 } else { zero as f64 / nb as f64 };
+        let ratio = (basic + zero) as f64 / self.lp.num_rows().max(1) as f64;
+        (deg, ratio)
+    }
+
+    fn select_branch(&mut self, frac: &[(usize, f64)], node_obj: f64, depth: usize) -> BranchAction {
+        if env_str!("ENOMOTO_MIP_SB_OLD").is_some() {
+            return self.select_branch_old(frac, node_obj);
+        }
+        // SCIP の relpscost に倣った強分岐 (branch_relpscost.c `branchExecRelpscost`)。
+        let hybrid = env_str!("ENOMOTO_MIP_NO_HYBRID_SCORE").is_none();
+        let score_of = |s: &Self, j: usize, v: f64| if hybrid { s.pc.hybrid_score(j, v - v.floor()) } else { s.pc.score(j, v - v.floor()) };
+        let mut cands: Vec<(usize, f64, f64)> = frac.iter().map(|&(j, v)| (j, v, score_of(self, j, v))).collect();
+        cands.sort_by(|a, b| b.2.total_cmp(&a.2));
+        // 予算: ノード LP の反復数 (強分岐を除く) の 0.125 倍 + 25000
+        let quot = 0.125 * self.node_iters as f64;
+        let maxsb = quot + 25_000.0;
+        let sb = self.sb_iters as f64;
+        // 双対退化の強いノードでは強分岐をしない (根以外)
+        let degenerate = depth > 0 && {
+            let (deg, ratio) = self.dual_degeneracy();
+            deg >= 0.8 || ratio >= 2.0
+        };
+        let allow_sb = sb <= maxsb && !degenerate;
+        // 信頼度のしきい値: 予算の残りに応じて 1..5
+        let mut prio = ((maxsb - sb) / (sb + 1.0)).min(1.0);
+        prio = prio.max((quot - sb) / (sb + 1.0)).max(0.0);
+        let reliable_thr = (1.0 - prio) * 1.0 + prio * 5.0;
+        // 強分岐 LP の反復上限
+        let sb_iter_limit = ((2.0 * self.avg_node_iters() as f64 * (1.0 + 20.0 / self.nodes.max(1) as f64)) as u64).clamp(10, 500);
+        let unreliable: usize = cands.iter().filter(|&&(j, _, _)| (self.pc.min_observations(j) as f64) < reliable_thr).count();
+        let lookahead = (9.0 * (1.0 + unreliable as f64 / cands.len().max(1) as f64)) as usize;
+        let mut best: Option<(usize, f64, f64)> = None; // (列, 値, スコア)
+        let mut no_improve = 0.0f64;
+        let mut tried = 0usize;
+        let mut bound_changes = 0usize;
+        for &(j, v, pscore) in &cands {
+            let is_reliable = (self.pc.min_observations(j) as f64) >= reliable_thr;
+            if is_reliable || !allow_sb || tried >= 100 || no_improve >= lookahead as f64 || self.time_up() || (self.sb_iters as f64) > maxsb {
+                if best.is_none_or(|(_, _, s)| pscore > s) {
+                    best = Some((j, v, pscore));
+                }
+                continue;
+            }
+            tried += 1;
+            // 強分岐
+            let saved = self.lp.save_state();
+            let (lo, up) = (self.dom.lo[j], self.dom.up[j]);
+            let mut gains = [0.0f64; 2];
+            let mut cut = [false; 2];
+            for (side, is_up) in [(0usize, false), (1usize, true)] {
+                if is_up {
+                    self.lp.set_col_bounds(j, v.ceil(), up);
+                } else {
+                    self.lp.set_col_bounds(j, lo, v.floor());
+                }
+                let it0 = self.lp.total_iterations();
+                let st = self.lp.solve(&self.limits(sb_iter_limit));
+                self.sb_iters += self.lp.total_iterations() - it0;
+                match st {
+                    LpStatus::Optimal => {
+                        let o = self.lp.objective() + self.p.offset;
+                        gains[side] = (o - node_obj).max(0.0);
+                        let delta = if is_up { v.ceil() - v } else { v - v.floor() };
+                        self.pc.add_observation(j, is_up, delta, gains[side]);
+                        if o >= self.prune_limit() {
+                            cut[side] = true;
+                        } else {
+                            let x = self.lp.col_values();
+                            if self.fractional(&x).is_empty() {
+                                self.try_lp_solution();
+                            }
+                        }
+                    }
+                    LpStatus::Infeasible | LpStatus::ObjectiveBound => {
+                        cut[side] = true;
+                        self.pc.add_cutoff(j, is_up);
+                    }
+                    _ => {
+                        // 反復上限: 途中の目的値 (双対単体法なので下界) を弱い観測として使う
+                        gains[side] = (self.lp.objective() + self.p.offset - node_obj).max(0.0);
+                    }
+                }
+                self.lp.restore_state(&saved);
+            }
+            match (cut[0], cut[1]) {
+                (true, true) => return BranchAction::Prune,
+                (true, false) => {
+                    self.dom.tighten_lower(self.p, j, v.ceil());
+                    bound_changes += 1;
+                }
+                (false, true) => {
+                    self.dom.tighten_upper(self.p, j, v.floor());
+                    bound_changes += 1;
+                }
+                _ => {}
+            }
+            // 境界の変更は最大 5 個まとめてから解き直す
+            if bound_changes >= 5 {
+                return BranchAction::Resolve;
+            }
+            if cut[0] || cut[1] {
+                continue;
+            }
+            let score = if hybrid { self.pc.hybrid_score_with_gains(j, gains[0], gains[1]) } else { gains[0].max(1e-6) * gains[1].max(1e-6) };
+            if best.is_none_or(|(_, _, s)| score > s) {
+                best = Some((j, v, score));
+                no_improve = 0.0;
+            } else if best.is_some_and(|(_, _, s)| score >= s * (1.0 - 1e-9)) {
+                no_improve += 0.5;
+            } else {
+                no_improve += 1.0;
+            }
+        }
+        if bound_changes > 0 {
+            return BranchAction::Resolve;
+        }
+        match best {
+            Some((col, value, _)) => BranchAction::Branch { col, value },
+            None => BranchAction::Prune,
+        }
+    }
+
+    fn select_branch_old(&mut self, frac: &[(usize, f64)], node_obj: f64) -> BranchAction {
         let mut cands: Vec<(usize, f64, f64)> = frac.iter().map(|&(j, v)| (j, v, self.pc.score(j, v - v.floor()))).collect();
         cands.sort_by(|a, b| b.2.total_cmp(&a.2));
         let total = self.lp.total_iterations();

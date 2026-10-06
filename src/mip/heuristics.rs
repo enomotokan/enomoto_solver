@@ -187,18 +187,108 @@ impl<'a, L: MipLp> Solver<'a, L> {
         false
     }
 
+    /// oneopt (SCIP の `heur_oneopt`): 実行可能解 `x` の整数列を 1 つずつ、目的値が良くなる向きに、どの行も
+    /// 破らない最大の整数幅だけ動かす。改善の大きい列から順に適用し、何も動かなくなるまで繰り返す。
+    /// 連続列は動かさないので、結果も実行可能。動かしたら真。
+    pub(super) fn one_opt(&mut self, x: &mut [f64]) -> bool {
+        let p = self.p;
+        if self.params.submip || !p.is_int.iter().any(|&b| b) {
+            return false;
+        }
+        let cols = self.ensure_col_rows();
+        let mut act: Vec<f64> = p.rows.iter().map(|r| r.iter().map(|&(j, a)| a * x[j]).sum()).collect();
+        // 列 j を向き dir (+1/-1) に動かせる最大の整数幅
+        let max_shift = |j: usize, dir: f64, x: &[f64], act: &[f64], lo: &[f64], up: &[f64]| -> f64 {
+            let mut sh = if dir > 0.0 { up[j] - x[j] } else { x[j] - lo[j] };
+            if !sh.is_finite() {
+                return 0.0;
+            }
+            for &(i, a) in &cols[j] {
+                let da = a * dir; // 1 単位動かしたときの活動量の変化
+                if da > 0.0 {
+                    sh = sh.min((p.row_up[i] - act[i] + 1e-9) / da);
+                } else if da < 0.0 {
+                    sh = sh.min((act[i] - p.row_lo[i] + 1e-9) / -da);
+                }
+                if sh < 1.0 {
+                    return 0.0;
+                }
+            }
+            sh.floor().max(0.0)
+        };
+        let (lo, up) = (self.dom.global_lo.clone(), self.dom.global_up.clone());
+        let mut improved = false;
+        for _pass in 0..10 {
+            let mut cands: Vec<(usize, f64, f64)> = Vec::new(); // (列, 向き, 改善量)
+            for j in 0..p.n {
+                if !p.is_int[j] || p.cost[j] == 0.0 {
+                    continue;
+                }
+                let dir = if p.cost[j] > 0.0 { -1.0 } else { 1.0 };
+                let sh = max_shift(j, dir, x, &act, &lo, &up);
+                if sh >= 1.0 {
+                    cands.push((j, dir, p.cost[j].abs() * sh));
+                }
+            }
+            if cands.is_empty() {
+                break;
+            }
+            cands.sort_by(|a, b| b.2.total_cmp(&a.2));
+            let mut moved = false;
+            for (j, dir, _) in cands {
+                let sh = max_shift(j, dir, x, &act, &lo, &up);
+                if sh < 1.0 {
+                    continue;
+                }
+                x[j] += dir * sh;
+                for &(i, a) in &cols[j] {
+                    act[i] += a * dir * sh;
+                }
+                moved = true;
+            }
+            if !moved {
+                break;
+            }
+            improved = true;
+        }
+        improved
+    }
+
     /// 分数ダイビング: LP 解で整数に最も近い分数の列をその側に丸めて固定し、伝播して LP を解き直す、を
     /// 整数解になるまで繰り返す。固定で実行不能になったら 1 回だけ反対側を試す。`budget` は LP 反復の上限。
     /// 定義域と LP は呼ぶ前の状態に戻す。
     pub(super) fn fractional_dive(&mut self, budget: u64) -> bool {
+        self.dive(DiveKind::Fractional, budget, f64::INFINITY)
+    }
+
+    /// 列ごとの (行, 係数) を (なければ) 作る。
+    pub(super) fn ensure_col_rows(&mut self) -> std::rc::Rc<Vec<Vec<(usize, f64)>>> {
+        if self.col_rows.is_none() {
+            let mut cols: Vec<Vec<(usize, f64)>> = vec![Vec::new(); self.p.n];
+            for (i, r) in self.p.rows.iter().enumerate() {
+                for &(j, a) in r {
+                    cols[j].push((i, a));
+                }
+            }
+            self.col_rows = Some(std::rc::Rc::new(cols));
+        }
+        self.col_rows.clone().unwrap()
+    }
+
+    /// ダイビング (SCIP の `SCIPperformGenericDivingAlgorithm` の簡略版)。`kind` で丸める列と向きを選び、
+    /// 固定 → 伝播 → LP の解き直しを整数解になるまで続ける。固定で実行不能になったら 1 回だけ反対側を試す。
+    /// LP の目的値が `search_bound` 以上になったら止める。`budget` は LP 反復の上限。定義域と LP は戻す。
+    pub(super) fn dive(&mut self, kind: DiveKind, budget: u64, search_bound: f64) -> bool {
         let p = self.p;
+        let verbose = self.params.verbose && self.nodes <= 1;
+        let cols = self.ensure_col_rows();
         let saved = self.lp.save_state();
         let pos = self.dom.stack_len();
         let it_start = self.lp.total_iterations();
         let mut found = false;
         for _depth in 0..(2 * p.n) {
-            if self.time_up() || self.lp.total_iterations() - it_start > budget {
-                if self.params.verbose {
+            if self.time_up() || self.lp.total_iterations() - it_start > budget || self.lp.objective() + p.offset >= search_bound.min(self.prune_limit()) {
+                if verbose {
                     eprintln!("MIP:   dive ran out of budget at depth {_depth} ({} iterations)", self.lp.total_iterations() - it_start);
                 }
                 break;
@@ -207,21 +297,46 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let frac = self.fractional(&x);
             if frac.is_empty() {
                 found = self.try_lp_solution();
-                if self.params.verbose {
+                if verbose {
                     eprintln!("MIP:   dive reached an integral LP at depth {_depth} (accepted {found}, objective {})", self.lp.objective() + p.offset);
                 }
                 break;
             }
-            // 整数に最も近い列 (同点は lock の少ない側に丸めやすい列)
-            let &(j, v) = frac
-                .iter()
-                .min_by(|a, b| {
-                    let fa = (a.1 - a.1.round()).abs();
-                    let fb = (b.1 - b.1.round()).abs();
-                    fa.total_cmp(&fb)
-                })
-                .unwrap();
-            let up_first = v - v.floor() >= 0.5;
+            // 丸める列と最初に試す向きを選ぶ (スコアの小さいもの)
+            let mut pick: Option<(usize, f64, bool, f64)> = None; // (列, 値, 上へ, スコア)
+            for &(j, v) in &frac {
+                let f = v - v.floor();
+                let (dl, ul) = self.locks[j];
+                let binary = self.dom.global_lo[j] == 0.0 && self.dom.global_up[j] == 1.0;
+                let (up, score) = match kind {
+                    DiveKind::Fractional => {
+                        // SCIP の fracdiving: 片側に自明に丸められる列は反対側へ (自明な側は後でいつでも選べる)。
+                        // それ以外は近い整数へ。自明に丸められる列・2 値でない列は後回し。
+                        let (may_down, may_up) = (dl == 0, ul == 0);
+                        let up = if may_down && !may_up {
+                            true
+                        } else if may_up && !may_down {
+                            false
+                        } else {
+                            f >= 0.5
+                        };
+                        let dist = if up { 1.0 - f } else { f };
+                        (up, dist + if may_down || may_up { 1.0 } else { 0.0 } + if binary { 0.0 } else { 0.5 })
+                    }
+                    DiveKind::VectorLength => {
+                        // SCIP の veclendiving: 目的値の悪くなる向きに丸め、(目的値の悪化) / (列の長さ + 1) の小さい列から
+                        // (長い列を 1 にすると多くの行が満たされる。集合被覆・分割向け)
+                        let up = p.cost[j] >= 0.0;
+                        let dist = if up { 1.0 - f } else { f };
+                        let delta = p.cost[j].abs() * dist + 1e-6 * dist;
+                        (up, delta / (cols[j].len() as f64 + 1.0))
+                    }
+                };
+                if pick.is_none_or(|(_, _, _, s)| score < s) {
+                    pick = Some((j, v, up, score));
+                }
+            }
+            let (j, v, up_first, _) = pick.unwrap();
             let mut ok = false;
             for up in [up_first, !up_first] {
                 let before = self.dom.stack_len();
@@ -240,7 +355,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         ok = true;
                         break;
                     }
-                    if self.params.verbose {
+                    if verbose {
                         eprintln!("MIP:   dive LP {st:?} after {} iterations (col {j}, up {up})", self.lp.total_iterations() - it0);
                     }
                 }
@@ -248,7 +363,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 self.sync_lp();
             }
             if !ok {
-                if self.params.verbose {
+                if verbose {
                     eprintln!("MIP:   dive stopped at depth {_depth} with {} fractional", frac.len());
                 }
                 break;
@@ -491,6 +606,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         false
     }
+}
+
+/// ダイビングの種類。
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum DiveKind {
+    /// 分数ダイビング (整数に近い列を近い側へ)。
+    Fractional,
+    /// ベクトル長ダイビング (目的値の悪化が列の長さの割に小さい列を、悪化する側へ)。
+    VectorLength,
 }
 
 impl<'a, L: MipLp> Solver<'a, L> {
