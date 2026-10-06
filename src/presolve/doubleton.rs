@@ -179,6 +179,9 @@ fn eliminate_doubleton_equalities_full(n: usize, a: &FaerCsr, b: &[f64], gv: GVi
     let mut claimed: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
     let mut eliminated_a_row = vec![false; a_rows.len()];
 
+    // 整数計画の前処理中は整数列を消さない (連続列の側を消す。両方整数なら見送る)。
+    let int_mask = crate::presolve::int_mask();
+    let is_int = |j: usize| int_mask.as_ref().is_some_and(|m| m[j]);
     for (i, row) in a_rows.iter().enumerate() {
         if row.len() != 2 {
             continue;
@@ -186,6 +189,12 @@ fn eliminate_doubleton_equalities_full(n: usize, a: &FaerCsr, b: &[f64], gv: GVi
         // 絶対値の大きい方を消去側 (term_elim)、小さい方を残す側 (term_keep) に並べる
         let (mut term_elim, mut term_keep) = (row[0], row[1]);
         if term_elim.1.abs() < term_keep.1.abs() {
+            std::mem::swap(&mut term_elim, &mut term_keep);
+        }
+        if is_int(term_elim.0) {
+            if is_int(term_keep.0) || term_keep.1.abs() < 1e-3 * term_elim.1.abs() {
+                continue;
+            }
             std::mem::swap(&mut term_elim, &mut term_keep);
         }
         let (var_elim, coeff_elim) = term_elim;

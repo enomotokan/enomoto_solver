@@ -140,8 +140,10 @@ pub fn eliminate_singleton_equalities_view(n: usize, a: &FaerCsr, b: &[f64], gv:
     let mut extra_h = Vec::new();
     let mut new_c = c.to_vec();
 
+    // 整数計画の前処理中は整数列を消さない (復元値が整数になる保証がないため)。
+    let int_mask = crate::presolve::int_mask();
     for j in 0..n {
-        if appearances[j] != 1 {
+        if appearances[j] != 1 || int_mask.as_ref().is_some_and(|m| m[j]) {
             continue;
         }
         let Some(i) = owning_a_row[j] else { continue }; // 唯一の出現が G 側

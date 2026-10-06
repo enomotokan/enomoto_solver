@@ -146,7 +146,7 @@ pub fn merge_parallel_columns_if_any(n: usize, a: &FaerCsr, real_rows: &[Vec<(us
     for j in 0..n {
         let col = columns.col(j);
         // 候補条件: 実制約行に現れる、下限が有限 (上限は `+inf` でもよい)、固定されていない。
-        if col.is_empty() || !lb[j].is_finite() || (ub[j] - lb[j]).abs() < TOL {
+        if col.is_empty() || !lb[j].is_finite() || (ub[j] - lb[j]).abs() < TOL || crate::presolve::is_int_col(j) {
             continue;
         }
         // 先頭係数の逆数 (正規化用)

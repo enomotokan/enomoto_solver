@@ -57,6 +57,53 @@ use crate::params::presolve::{
 /// 丸め誤差はその大きさに比例するため (`params::presolve::PRESOLVE_REL_TOL` 参照)。
 /// `ENOMOTO_T_PRESOLVE_REL_TOL=0` で従来の絶対判定に戻る。`scale` が有限でなければ `base`。
 #[inline]
+/// 整数計画の前処理で、整数列を示す印 (スレッドローカル)。設定中は、列を代入で消す縮約が整数列を
+/// 消さず、境界の伝播で得た整数列の境界を丸める (計画書 §7)。
+thread_local! {
+    static INT_MASK: std::cell::RefCell<Option<std::rc::Rc<Vec<bool>>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// 現在の整数列の印 (整数計画の前処理中でなければ `None`)。
+pub(crate) fn int_mask() -> Option<std::rc::Rc<Vec<bool>>> {
+    INT_MASK.with(|m| m.borrow().clone())
+}
+
+/// 列 `j` が整数列か (整数計画の前処理中でなければ常に偽)。ループ内では [`int_mask`] を先に取り出して使うこと。
+pub(crate) fn is_int_col(j: usize) -> bool {
+    INT_MASK.with(|m| m.borrow().as_ref().is_some_and(|v| v.get(j).copied().unwrap_or(false)))
+}
+
+/// 整数列の境界を丸める。矛盾 (下限 > 上限) が生じたら真。
+fn round_int_bounds(lb: &mut [f64], ub: &mut [f64]) -> bool {
+    let Some(mask) = int_mask() else { return false };
+    let mut bad = false;
+    for j in 0..lb.len().min(mask.len()) {
+        if mask[j] {
+            if lb[j].is_finite() {
+                lb[j] = (lb[j] - 1e-6).ceil();
+            }
+            if ub[j].is_finite() {
+                ub[j] = (ub[j] + 1e-6).floor();
+            }
+            if lb[j] > ub[j] {
+                bad = true;
+            }
+        }
+    }
+    bad
+}
+
+/// 整数計画用の前処理: 整数列の印 `is_int` を付けて [`run_extended`] を実行する。スケーリングはしない
+/// (整数列の列スケールは 1 でなければならないため)。双対の議論に基づく縮約 (dualpropagate、
+/// ineqsingleton、forcingcol) は整数計画では正しくないので行わない。
+#[allow(clippy::too_many_arguments)]
+pub fn run_extended_mip(n: usize, a: &FaerCsr, b: &[f64], g: &FaerCsr, h: &[f64], c: &[f64], is_int: &[bool], prop_passes: usize, rounds: usize, inner_rounds: usize) -> ExtendedPresolveResult {
+    INT_MASK.with(|m| *m.borrow_mut() = Some(std::rc::Rc::new(is_int.to_vec())));
+    let r = run_extended(n, a, b, g, h, c, 0, prop_passes, rounds, inner_rounds, false);
+    INT_MASK.with(|m| *m.borrow_mut() = None);
+    r
+}
+
 /// 診断用: `ENOMOTO_DBG_SKIP` (カンマ区切り) に名前があればその縮約を飛ばす。
 /// (原因の切り分け用。既定では何も飛ばさない)
 fn dbg_skip(name: &str) -> bool {
@@ -500,6 +547,9 @@ pub fn run_extended(
         let mut dbg_eq_converged: Option<bool> = None;
         let mut lb = prop.lb;
         let mut ub = prop.ub;
+        if round_int_bounds(&mut lb, &mut ub) {
+            return extended_infeasible(sc, a, b, c, n);
+        }
         // 現在の G の多変数行とその右辺。代入による行の書き換えを反映して随時更新する。
         let mut cur_real_rows = prop.real_rows;
         let mut cur_real_rhs = prop.real_rhs;
@@ -538,7 +588,7 @@ pub fn run_extended(
             // 等式行伝播は不動点モードでも従来どおり `prop_passes` パスまで (`EQPROP_FIXPOINT` 参照)。
             let eq_limit = if tunable!("ENOMOTO_T_EQPROP_FIXPOINT", EQPROP_FIXPOINT, usize) != 0 { pass_limit(prop_passes, work_used) } else { propagate::PassLimit::fixed(prop_passes) };
             let eq = timed_step!("eqprop", propagate::propagate_equalities(&a, &b, &mut lb, &mut ub, eq_limit));
-            if eq.infeasible {
+            if eq.infeasible || round_int_bounds(&mut lb, &mut ub) {
                 return extended_infeasible(sc, a, b, c, n);
             }
             work_used = work_used.saturating_add(eq.work);
@@ -588,7 +638,7 @@ pub fn run_extended(
 
         // 強制列 (`forcingcol`): 費用 0 で、現れるすべての不等式行を緩める向きに無限に動ける列を、
         // その行ごと取り除く (値は後処理で決める)。消去した列は `[0, 0]` に固定する。
-        if tunable!("ENOMOTO_T_FORCING_COL", crate::params::presolve::FORCING_COL, usize) != 0 && !dbg_skip("forcingcol") {
+        if tunable!("ENOMOTO_T_FORCING_COL", crate::params::presolve::FORCING_COL, usize) != 0 && int_mask().is_none() && !dbg_skip("forcingcol") {
             let forced = timed_step!("forcingcol", forcingcol::eliminate_forcing_columns(n, &a, &mut cur_real_rows, &mut cur_real_rhs, &c, &lb, &ub));
             if env_str!("ENOMOTO_DEBUG_FORCING_COL").is_some() && !forced.is_empty() {
                 eprintln!("DEBUG_FORCING_COL: round={round_idx} columns={} rows={}", forced.len(), forced.iter().map(|f| f.rows.len()).sum::<usize>());
@@ -602,7 +652,7 @@ pub fn run_extended(
 
         // 双対実行可能性の伝播による 2 つの縮小 (`dualpropagate`):
         // 全最適解で等号成立する不等式行を等式系へ昇格し、被約費用の符号が確定する列を固定する。
-        if dualpropagate_active && tunable!("ENOMOTO_T_DUALPROPAGATE", crate::params::presolve::DUALPROPAGATE, usize) != 0 && !dbg_skip("dualpropagate") {
+        if dualpropagate_active && int_mask().is_none() && tunable!("ENOMOTO_T_DUALPROPAGATE", crate::params::presolve::DUALPROPAGATE, usize) != 0 && !dbg_skip("dualpropagate") {
             let dual_red = timed_step!("dualpropagate", dualpropagate::propagate_dual_bounds(n, &a, &cur_real_rows, &c, &lb, &ub, &orig_lb, &orig_ub, prop_passes));
             if dual_red.implied_equalities.is_empty() && dual_red.fixed_columns.is_empty() {
                 dualpropagate_empty_streak += 1;
@@ -648,7 +698,7 @@ pub fn run_extended(
 
         // 不等式行の列シングルトン (`ineqsingleton`、大きな問題か `ENOMOTO_INEQ_SINGLETON` 設定時):
         // 列を上下限に固定するか、その行を等式に変えて後段の colsingleton に消去させる。
-        if ineq_singleton_on {
+        if ineq_singleton_on && int_mask().is_none() {
             let isr = timed_step!("ineqsingleton", ineqsingleton::resolve_inequality_singletons(n, &a, &cur_real_rows, &cur_real_rhs, &c, &lb, &ub));
             if env_str!("ENOMOTO_DEBUG_INEQ_SINGLETON").is_some() {
                 eprintln!("DEBUG_INEQ_SINGLETON: fixes={} implied_equalities={}", isr.fixes.len(), isr.implied_equalities.len());
@@ -727,6 +777,9 @@ pub fn run_extended(
             for &(j, value) in &rs.fixes {
                 lb[j] = value;
                 ub[j] = value;
+            }
+            if round_int_bounds(&mut lb, &mut ub) {
+                return extended_infeasible(sc, a, b, c, n);
             }
             a = rs.a;
             b = rs.b;

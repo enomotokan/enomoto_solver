@@ -200,7 +200,9 @@ pub fn eliminate_implied_free_columns_if_any(n: usize, a: &FaerCsr, b: &[f64], c
     // 候補 (行, 列) 対: その行単独で列の箱が冗長 (`row_implies_own_bound`) かつ
     // 列が等式行 2 本以上に現れるもの。活動量は行ごとに 1 回だけ計算する (全体 O(nnz))。
     // 完全な自由列はどの行でも自明に真になるが、`freevar` に任せるため除外する。
-    let is_free = |j: usize| lb[j] == f64::NEG_INFINITY && ub[j] == f64::INFINITY;
+    // 自由列は freevar の担当なので候補から外す。整数計画の前処理中は整数列も外す (消さない)。
+    let int_mask = crate::presolve::int_mask();
+    let is_free = |j: usize| (lb[j] == f64::NEG_INFINITY && ub[j] == f64::INFINITY) || int_mask.as_ref().is_some_and(|m| m[j]);
     let mut candidates: Vec<(usize, usize)> = Vec::new();
     // 行 `i` の (列, 係数) を詰め直す再利用バッファ。
     let mut row: Vec<(usize, f64)> = Vec::new();
@@ -424,7 +426,9 @@ pub fn eliminate_implied_free_columns_xrow(n: usize, a: &FaerCsr, b: &[f64], c: 
             }
         }
     }
-    let is_free = |j: usize| lb[j] == f64::NEG_INFINITY && ub[j] == f64::INFINITY;
+    // 自由列は freevar の担当なので候補から外す。整数計画の前処理中は整数列も外す (消さない)。
+    let int_mask = crate::presolve::int_mask();
+    let is_free = |j: usize| (lb[j] == f64::NEG_INFINITY && ub[j] == f64::INFINITY) || int_mask.as_ref().is_some_and(|m| m[j]);
 
     // 行ごとの `RowActivity` のキャッシュ (遅延計算)。`None` は未計算または無効。
     // 行が fold で書き換わった瞬間に `None` に戻すので、ヒットは常に現在の内容を反映する。
@@ -676,7 +680,9 @@ pub fn v2_has_candidate(n: usize, a: &FaerCsr, b: &[f64], lb: &[f64], ub: &[f64]
     let ar = a.as_ref();
     // 等式行の本数。
     let p = ar.nrows();
-    let is_free = |j: usize| lb[j] == f64::NEG_INFINITY && ub[j] == f64::INFINITY;
+    // 自由列は freevar の担当なので候補から外す。整数計画の前処理中は整数列も外す (消さない)。
+    let int_mask = crate::presolve::int_mask();
+    let is_free = |j: usize| (lb[j] == f64::NEG_INFINITY && ub[j] == f64::INFINITY) || int_mask.as_ref().is_some_and(|m| m[j]);
     // 各列が現れる等式行 / 実不等式行の本数。
     let mut col_a_count = vec![0usize; n];
     let mut col_g_count = vec![0usize; n];
@@ -795,7 +801,9 @@ pub fn eliminate_implied_free_columns_v2_scaled(n: usize, a: &FaerCsr, b: &[f64]
     let mut c: Vec<f64> = c.to_vec();
     let mut real_rows: Vec<Vec<(usize, f64)>> = real_rows.to_vec();
     let mut real_rhs: Vec<f64> = real_rhs.to_vec();
-    let is_free = |j: usize| lb[j] == f64::NEG_INFINITY && ub[j] == f64::INFINITY;
+    // 自由列は freevar の担当なので候補から外す。整数計画の前処理中は整数列も外す (消さない)。
+    let int_mask = crate::presolve::int_mask();
+    let is_free = |j: usize| (lb[j] == f64::NEG_INFINITY && ub[j] == f64::INFINITY) || int_mask.as_ref().is_some_and(|m| m[j]);
     // 係数参照を二分探索にするため、全行を列番号順にソートしておく (密な行で二乗時間になるのを防ぐ)。
     for row in a_rows.iter_mut().chain(real_rows.iter_mut()) {
         if !row.windows(2).all(|w| w[0].0 < w[1].0) {

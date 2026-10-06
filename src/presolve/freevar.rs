@@ -64,7 +64,8 @@ fn appears_in(real_rows: &[Vec<(usize, f64)>], j: usize) -> bool {
 /// 自由変数がなければ入力のコピーをそのまま返す。
 pub fn eliminate_free_variables(n: usize, a: &FaerCsr, b: &[f64], c: &[f64], lb: &[f64], ub: &[f64], real_rows: &[Vec<(usize, f64)>], real_rhs: &[f64]) -> FreeVarResult {
     // 変数ごとの「真の自由変数か」
-    let is_free: Vec<bool> = (0..n).map(|j| lb[j] == f64::NEG_INFINITY && ub[j] == f64::INFINITY).collect();
+    // 整数計画の前処理中は整数列を消さない。
+    let is_free: Vec<bool> = (0..n).map(|j| lb[j] == f64::NEG_INFINITY && ub[j] == f64::INFINITY && !crate::presolve::is_int_col(j)).collect();
     if !is_free.iter().any(|&f| f) {
         return FreeVarResult {
             a: a.clone(),
