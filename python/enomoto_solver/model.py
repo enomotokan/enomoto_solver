@@ -28,13 +28,20 @@ class Solution:
     属性:
         status: ``"optimal"`` / ``"infeasible"`` / ``"unbounded"`` /
             ``"infeasible_or_unbounded"`` / ``"not_solved"`` のいずれか。
-        objective: 最適値 (``"optimal"`` 以外では None)。
+            整数計画ではさらに ``"time_limit"`` / ``"node_limit"`` (上限で打ち切り。暫定解があれば値が読める)。
+        objective: 解の目的値 (``"optimal"``、または打ち切り時に暫定解があるとき。それ以外は None)。
         node_limit_hit: 整数計画でノード数上限により打ち切られたか (最適性は未証明)。
+        best_bound: 整数計画で証明済みの最良の限界 (最小化なら下界)。LP では None。
+        mip_gap: 整数計画の相対ギャップ。LP では None。
+        nodes: 整数計画で処理したノード数。LP では None。
     """
 
     status: str
     objective: Optional[float]
     node_limit_hit: bool
+    best_bound: Optional[float] = None
+    mip_gap: Optional[float] = None
+    nodes: Optional[int] = None
 
 
 class Model:
@@ -78,9 +85,9 @@ class Model:
         self._variables.append(var)
 
     def _variable_value(self, index: int) -> float:
-        """変数番号 ``index`` の最適解の値。最適解がなければ RuntimeError。"""
-        if self._solution is None or self._solution.status != "optimal":
-            raise RuntimeError("Model has not been solved to optimality yet — call Model.solve() first")
+        """変数番号 ``index`` の解の値。解がなければ RuntimeError。"""
+        if self._solution is None or self._solution_x is None:
+            raise RuntimeError("Model has no solution yet — call Model.solve() first (no solution is available unless it found one)")
         return self._solution_x[index]
 
     # -- 問題の定義 --------------------------------------------------------
@@ -106,6 +113,9 @@ class Model:
         self,
         root_solver: Optional[str] = None,
         distinguish_infeasible_unbounded: bool = False,
+        time_limit: Optional[float] = None,
+        mip_rel_gap: Optional[float] = None,
+        node_limit: Optional[int] = None,
     ) -> Solution:
         """Rust コアで前処理と最適化を実行し、結果を Solution で返す。
 
@@ -130,10 +140,17 @@ class Model:
         ``z^1 = 0`` なら非有界ではなく、段階 B で最適解を求めるか実行不能を証明する。
         True を渡すと前者も ``"infeasible"`` と ``"unbounded"`` に分ける。
         ``"not_solved"`` はソルバーが判定に至らずに諦めたことを表す。
+
+        整数計画の打ち切り条件: ``time_limit`` (秒)、``mip_rel_gap`` (相対ギャップ、既定 1e-4)、
+        ``node_limit`` (ノード数)。上限で止まると status は ``"time_limit"`` / ``"node_limit"`` になり、
+        暫定解があれば ``objective`` と各 Variable の ``.value`` が読める。
         """
         result = self._core.solve(
             root_solver=root_solver,
             distinguish_infeasible_unbounded=distinguish_infeasible_unbounded,
+            time_limit=time_limit,
+            mip_rel_gap=mip_rel_gap,
+            node_limit=node_limit,
         )
         status = result["status"]
         self._solution_x = result["x"]
@@ -141,6 +158,9 @@ class Model:
             status=status,
             objective=result["objective"],
             node_limit_hit=result["node_limit_hit"],
+            best_bound=result["best_bound"],
+            mip_gap=result["mip_gap"],
+            nodes=result["nodes"],
         )
         return self._solution
 

@@ -16,7 +16,7 @@ pub(crate) mod pseudocost;
 pub(crate) mod solver;
 
 use crate::solver::solve_lp;
-use crate::types::{ConstraintRow, LpOptions, Objective, RootSolver, SolveResult, Status, VarType, VariableData};
+use crate::types::{ConstraintRow, LpOptions, MipSettings, MipSummary, Objective, RootSolver, SolveResult, Status, VarType, VariableData};
 use problem::MipProblem;
 use solver::{MipParams, MipStatus};
 
@@ -27,33 +27,40 @@ pub fn solve_mip(
     constraints: &[ConstraintRow],
     root_solver: RootSolver,
     opts: LpOptions,
+    settings: MipSettings,
 ) -> SolveResult {
     let has_discrete = variables.iter().any(|v| v.vtype != VarType::Continuous);
     if !has_discrete {
         return solve_lp(variables, objective, constraints, root_solver, opts);
     }
     let p = MipProblem::from_model(variables, objective, constraints);
+    // 既定値 < 環境変数 < 引数の順に優先する。
     let env_f64 = |v: Option<&str>| v.and_then(|s| s.parse::<f64>().ok());
     let d = MipParams::default();
     let params = MipParams {
         verbose: env_str!("ENOMOTO_MIP_LOG").is_some(),
-        rel_gap: env_f64(env_str!("ENOMOTO_MIP_REL_GAP")).unwrap_or(d.rel_gap),
-        time_limit: env_f64(env_str!("ENOMOTO_MIP_TIME_LIMIT")).unwrap_or(d.time_limit),
-        node_limit: env_f64(env_str!("ENOMOTO_MIP_NODE_LIMIT")).map(|v| v as u64).unwrap_or(d.node_limit),
+        rel_gap: settings.rel_gap.or(env_f64(env_str!("ENOMOTO_MIP_REL_GAP"))).unwrap_or(d.rel_gap),
+        time_limit: settings.time_limit.or(env_f64(env_str!("ENOMOTO_MIP_TIME_LIMIT"))).unwrap_or(d.time_limit),
+        node_limit: settings.node_limit.or(env_f64(env_str!("ENOMOTO_MIP_NODE_LIMIT")).map(|v| v as u64)).unwrap_or(d.node_limit),
         ..d
     };
     let r = solver::solve(&p, params);
-    let objective_value = r.objective.map(|z| p.sense_sign * z);
-    match r.status {
-        MipStatus::Optimal => SolveResult { status: Status::Optimal, objective: objective_value, x: r.x, node_limit_hit: false },
-        MipStatus::NodeLimit | MipStatus::TimeLimit if r.x.is_some() => {
-            SolveResult { status: Status::Optimal, objective: objective_value, x: r.x, node_limit_hit: true }
-        }
-        MipStatus::Infeasible => SolveResult { status: Status::Infeasible, objective: None, x: None, node_limit_hit: false },
-        MipStatus::Unbounded => SolveResult { status: Status::Unbounded, objective: None, x: None, node_limit_hit: false },
-        MipStatus::InfeasibleOrUnbounded => {
-            SolveResult { status: Status::InfeasibleOrUnbounded, objective: None, x: None, node_limit_hit: false }
-        }
-        _ => SolveResult { status: Status::NotSolved, objective: None, x: None, node_limit_hit: matches!(r.status, MipStatus::NodeLimit) },
-    }
+    let s = p.sense_sign;
+    let objective_value = r.objective.map(|z| s * z);
+    let gap = match r.objective {
+        Some(z) if r.best_bound.is_finite() => ((z - r.best_bound).max(0.0)) / z.abs().max(1.0),
+        Some(_) if r.status == MipStatus::Optimal => 0.0,
+        _ => f64::INFINITY,
+    };
+    let summary = MipSummary { best_bound: s * r.best_bound, gap, nodes: r.nodes, lp_iterations: r.lp_iterations };
+    let status = match r.status {
+        MipStatus::Optimal => Status::Optimal,
+        MipStatus::Infeasible => Status::Infeasible,
+        MipStatus::Unbounded => Status::Unbounded,
+        MipStatus::InfeasibleOrUnbounded => Status::InfeasibleOrUnbounded,
+        MipStatus::TimeLimit => Status::TimeLimit,
+        MipStatus::NodeLimit => Status::NodeLimit,
+        MipStatus::NotSolved => Status::NotSolved,
+    };
+    SolveResult { status, objective: objective_value, x: r.x, node_limit_hit: r.status == MipStatus::NodeLimit, mip: Some(summary) }
 }

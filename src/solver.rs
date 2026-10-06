@@ -43,24 +43,28 @@ pub fn solve_lp(
             objective: None,
             x: None,
             node_limit_hit: false,
+            mip: None,
         },
         Status::Unbounded => SolveResult {
             status: Status::Unbounded,
             objective: None,
             x: None,
             node_limit_hit: false,
+            mip: None,
         },
         Status::InfeasibleOrUnbounded => SolveResult {
             status: Status::InfeasibleOrUnbounded,
             objective: None,
             x: None,
             node_limit_hit: false,
+            mip: None,
         },
-        Status::NotSolved => SolveResult {
+        Status::NotSolved | Status::TimeLimit | Status::NodeLimit => SolveResult {
             status: Status::NotSolved,
             objective: None,
             x: None,
             node_limit_hit: false,
+            mip: None,
         },
         Status::Optimal => {
             let x = x.unwrap();
@@ -77,6 +81,7 @@ pub fn solve_lp(
                 objective: Some(obj_val),
                 x: Some(x),
                 node_limit_hit: false,
+                mip: None,
             }
         }
     }

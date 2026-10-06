@@ -186,6 +186,10 @@ pub enum Status {
     /// どの判定にも至らずに諦めた (回復できない特異な基底や反復上限など)。
     /// 問題自体については何も主張しない。
     NotSolved,
+    /// 整数計画が時間上限で打ち切られた (暫定解があれば `x` と `objective` に入る)。
+    TimeLimit,
+    /// 整数計画がノード数上限で打ち切られた (暫定解があれば `x` と `objective` に入る)。
+    NodeLimit,
 }
 
 /// 求解ごとのオプション (モデルの中身ではなく、何を報告するかを変えるもの)。
@@ -217,6 +221,8 @@ impl Status {
             Status::Unbounded => "unbounded",
             Status::InfeasibleOrUnbounded => "infeasible_or_unbounded",
             Status::NotSolved => "not_solved",
+            Status::TimeLimit => "time_limit",
+            Status::NodeLimit => "node_limit",
         }
     }
 }
@@ -233,4 +239,30 @@ pub struct SolveResult {
     /// MIP がノード数上限で打ち切られたか (最良暫定解を返しており、最適性は未証明)。
     /// 通常の LP では常に `false`。
     pub node_limit_hit: bool,
+    /// 整数計画の探索の要約 (LP では `None`)。
+    pub mip: Option<MipSummary>,
+}
+
+/// 整数計画の探索の要約 (目的値は元の向き)。
+#[derive(Debug, Clone, Copy)]
+pub struct MipSummary {
+    /// 証明済みの最良の限界 (最小化なら下界、最大化なら上界)。
+    pub best_bound: f64,
+    /// 相対ギャップ `|暫定解 - 限界| / max(|暫定解|, 1)` (暫定解がなければ +inf)。
+    pub gap: f64,
+    /// 処理したノード数。
+    pub nodes: u64,
+    /// 単体法の反復数の合計。
+    pub lp_iterations: u64,
+}
+
+/// 整数計画の求解設定 (`None` なら既定値または環境変数の値)。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MipSettings {
+    /// 時間上限 [秒]。
+    pub time_limit: Option<f64>,
+    /// 相対ギャップの許容値 (既定 1e-4)。
+    pub rel_gap: Option<f64>,
+    /// ノード数上限。
+    pub node_limit: Option<u64>,
 }

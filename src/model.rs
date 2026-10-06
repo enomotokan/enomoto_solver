@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 
 use crate::mip::solve_mip;
 
-use crate::types::{ConstraintRow, LinearExpr, LpOptions, Objective, RootSolver, RowSense, Sense, Status, VarType, VariableData};
+use crate::types::{ConstraintRow, LinearExpr, LpOptions, Objective, RootSolver, RowSense, Sense, VarType, VariableData, MipSettings};
 
 /// モデルの蓄積状態: 登録済みの全変数、(1 つだけの) 目的関数、全制約。
 /// `add_variable` / `set_objective` / `add_constraint` で追加・更新され、
@@ -107,21 +107,36 @@ impl PyModel {
     }
 
     /// モデルを解き、結果を dict で返す。整数変数があれば分枝限定法、なければ LP を
-    /// 1 回解く (判断は `mip::solve_mip`)。dict のキーは常に次の 4 つ:
-    /// `"status"` (状態文字列)、`"objective"` と `"x"` (`"optimal"` のときだけ値、
-    /// それ以外は `None`)、`"node_limit_hit"` (MIP がノード数上限で打ち切られたときだけ `True`)。
+    /// 1 回解く (判断は `mip::solve_mip`)。dict のキー:
+    /// - `"status"`: 状態文字列 (`"optimal"` / `"infeasible"` / `"unbounded"` /
+    ///   `"infeasible_or_unbounded"` / `"not_solved"`、整数計画ではさらに `"time_limit"` / `"node_limit"`)。
+    /// - `"objective"` と `"x"`: 解があるとき (`"optimal"`、または上限で打ち切られたが暫定解があるとき) の値。
+    ///   それ以外は `None`。
+    /// - `"node_limit_hit"`: 整数計画がノード数上限で打ち切られたか。
+    /// - `"best_bound"` / `"mip_gap"` / `"nodes"` / `"lp_iterations"`: 整数計画の探索の要約 (LP では `None`)。
     ///
     /// `root_solver`: 各 LP の解法。`"auto"` (既定: 前処理後の行数が 5000 以上なら傾き・切片双対二段解法と
     /// 内点法 + クロスオーバーを同時に解き、先に結論を出した側を採る。未満なら二段解法)、`"simplex"`
     /// (二段解法だけ)、`"ipm_crossover"` (内点法 + クロスオーバーだけ)、`"interior"` (独立の IP-PMM 内点法)。
+    /// 整数計画では根と各ノードの LP は分枝限定法専用の LP エンジンで解く (この指定は LP のときだけ効く)。
     ///
     /// `distinguish_infeasible_unbounded` (既定 `false`): `false` なら、有限の最適値が
     /// ないと分かった時点で `"infeasible_or_unbounded"` を返す。`true` なら
     /// `"infeasible"` と `"unbounded"` を区別する (`types::LpOptions` 参照)。
     ///
+    /// `time_limit` [秒] / `mip_rel_gap` (既定 1e-4) / `node_limit`: 整数計画の打ち切り条件。
+    ///
     /// 目的関数が未設定なら `ValueError`。
-    #[pyo3(signature = (root_solver=None, distinguish_infeasible_unbounded=false))]
-    fn solve<'py>(&self, py: Python<'py>, root_solver: Option<&str>, distinguish_infeasible_unbounded: bool) -> PyResult<Bound<'py, PyDict>> {
+    #[pyo3(signature = (root_solver=None, distinguish_infeasible_unbounded=false, time_limit=None, mip_rel_gap=None, node_limit=None))]
+    fn solve<'py>(
+        &self,
+        py: Python<'py>,
+        root_solver: Option<&str>,
+        distinguish_infeasible_unbounded: bool,
+        time_limit: Option<f64>,
+        mip_rel_gap: Option<f64>,
+        node_limit: Option<u64>,
+    ) -> PyResult<Bound<'py, PyDict>> {
         let objective = self.objective.as_ref().ok_or_else(|| {
             PyValueError::new_err("no objective set: call Model.set_objective(...) before solve()")
         })?;
@@ -131,19 +146,30 @@ impl PyModel {
         };
 
         let opts = LpOptions { distinguish_infeasible_unbounded, ..Default::default() };
-        let result = solve_mip(&self.variables, objective, &self.constraints, root_solver, opts);
+        let settings = MipSettings { time_limit, rel_gap: mip_rel_gap, node_limit };
+        let result = py.allow_threads(|| solve_mip(&self.variables, objective, &self.constraints, root_solver, opts, settings));
 
         // Python に返す結果 dict
         let dict = PyDict::new_bound(py);
         dict.set_item(pyo3::intern!(py, "status"), result.status.as_str())?;
-        match result.status {
-            Status::Optimal => {
-                dict.set_item(pyo3::intern!(py, "objective"), result.objective)?;
-                dict.set_item(pyo3::intern!(py, "x"), result.x)?;
+        if result.x.is_some() {
+            dict.set_item(pyo3::intern!(py, "objective"), result.objective)?;
+            dict.set_item(pyo3::intern!(py, "x"), result.x)?;
+        } else {
+            dict.set_item(pyo3::intern!(py, "objective"), py.None())?;
+            dict.set_item(pyo3::intern!(py, "x"), py.None())?;
+        }
+        match result.mip {
+            Some(m) => {
+                dict.set_item(pyo3::intern!(py, "best_bound"), m.best_bound)?;
+                dict.set_item(pyo3::intern!(py, "mip_gap"), m.gap)?;
+                dict.set_item(pyo3::intern!(py, "nodes"), m.nodes)?;
+                dict.set_item(pyo3::intern!(py, "lp_iterations"), m.lp_iterations)?;
             }
-            Status::Infeasible | Status::Unbounded | Status::InfeasibleOrUnbounded | Status::NotSolved => {
-                dict.set_item(pyo3::intern!(py, "objective"), py.None())?;
-                dict.set_item(pyo3::intern!(py, "x"), py.None())?;
+            None => {
+                for k in ["best_bound", "mip_gap", "nodes", "lp_iterations"] {
+                    dict.set_item(k, py.None())?;
+                }
             }
         }
         dict.set_item(pyo3::intern!(py, "node_limit_hit"), result.node_limit_hit)?;

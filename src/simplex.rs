@@ -1659,7 +1659,7 @@ fn combine_component_statuses<'a>(statuses: impl Iterator<Item = &'a Status>) ->
             Status::Infeasible => infeasible = true,
             Status::InfeasibleOrUnbounded => infeasible_or_unbounded = true,
             Status::Unbounded => unbounded = true,
-            Status::NotSolved => not_solved = true,
+            Status::NotSolved | Status::TimeLimit | Status::NodeLimit => not_solved = true,
             Status::Optimal => {}
         }
     }
