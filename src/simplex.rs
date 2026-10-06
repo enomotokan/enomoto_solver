@@ -69,7 +69,7 @@ use crate::params::simplex::{COST_PERTURB_BASE, COST_PERTURB_BOXED_FRACTION, COS
 
 /// Markowitz ピボットの疎 LU と Forrest-Tomlin 更新。このファイル内では
 /// ローカル変数名 `lu` (FtLu インスタンス) との衝突を避けるため `sparse_lu` の別名で参照する。
-mod lu;
+pub(crate) mod lu;
 /// FTRAN/BTRAN の結果や eta 要素を 0 とみなす絶対値の閾値 (他モジュール向けの再公開)。
 pub(crate) use lu::tiny_drop;
 /// `lu` モジュールの別名 (ローカル変数 `lu` との衝突回避)。

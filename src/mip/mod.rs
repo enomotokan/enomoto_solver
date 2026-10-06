@@ -1,6 +1,9 @@
 //! 整数変数を含むモデルのための、単純な深さ優先の分枝限定法。
 //! 各ノードでは変数境界を締めた LP 緩和問題を最初から解き直す (ウォームスタートなし)。
 
+
+/// 分枝切除法のための、状態を保持する LP エンジン。
+pub(crate) mod lp;
 use crate::solver::solve_lp;
 use crate::types::{ConstraintRow, LpOptions, Objective, RootSolver, Sense, SolveResult, Status, VarType, VariableData};
 use std::collections::HashMap;
