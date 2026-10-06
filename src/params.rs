@@ -1092,6 +1092,20 @@ pub(crate) mod interior_point {
     /// δ の初期値。
     pub(crate) const DELTA0: f64 = 1e-1;
 
+    /// 箱型制約版の内点法 (`interior_point::boxed`) の ρ・δ の初期値 (試験用 `ENOMOTO_T_IPM_REG0`)。`RHO0`・`DELTA0` (0.1) は
+    /// PIQP の既定 (ρ 1e-6、δ 1e-4) より 3〜5 桁大きく、序盤〜中盤で Newton 方向を近接項が歪めて中心性を失い、歩幅 0.05〜0.2 の
+    /// 反復が続いていた (ship04s 58 反復 → 15、`analysis/fable_ipm_vs_clarabel_20261006.md` §3)。
+    pub(crate) const BOX_REG0: f64 = 1e-4;
+
+    /// 箱型制約版の内点法の ρ・δ の下限 (試験用 `ENOMOTO_T_IPM_RHO_MIN`・`ENOMOTO_T_IPM_DELTA_MIN`)。PIQP の
+    /// `reg_finetune_lower_limit`。1e-10 では近接項による主残差の床 `δ‖λ − y‖` が目的値のギャップに乗って 1e-7 で止まる
+    /// (stair・bnl1。初期値を小さくするとこれが表に出る)。
+    pub(crate) const BOX_REG_MIN: f64 = 1e-13;
+
+    /// 箱型制約版の内点法の Gondzio の多重中心性補正子の最大回数 (試験用 `ENOMOTO_T_IPM_GONDZIO`、0 で Mehrotra の
+    /// 予測子・修正子だけ)。
+    pub(crate) const BOX_GONDZIO: usize = 2;
+
     /// 停止判定 (主・双対残差と双対ギャップ) の絶対許容誤差。
     pub(crate) const EPS_ABS: f64 = 1e-8;
 
