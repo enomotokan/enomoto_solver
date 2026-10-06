@@ -550,8 +550,9 @@ fn sparse_dot(a: &[(usize, f64)], b: &[(usize, f64)]) -> f64 {
 }
 
 /// SCIP の `cutsel_hybrid` に倣ったカット選択: スコア = 効き目 + 0.1 × 目的関数との平行度 + 0.1 × 整数列の割合。
-/// スコアの高い順に採り、採ったカットとの平行度 (|cos|) が 0.1 を超えるものは捨てる。ただしスコアが最良の
-/// 0.9 倍以上の「良い」カットは平行度 0.5 まで許す。
+/// スコアの高い順に採り、採ったカットとの平行度 (|cos|) が 0.3 を超えるものは捨てる。ただしスコアが最良の
+/// 0.9 倍以上の「良い」カットは平行度 0.7 まで許す (SCIP の既定は 0.1 / 0.5 だが、こちらはカットのラウンド数が
+/// 少ないので緩めにした方が良かった)。
 fn select_cuts_hybrid(cands: Vec<Candidate>, max_cuts: usize, p: &MipProblem) -> Vec<Candidate> {
     let cnorm = p.cost.iter().map(|c| c * c).sum::<f64>().sqrt();
     let mut scored: Vec<(f64, f64, Candidate)> = cands
@@ -565,7 +566,7 @@ fn select_cuts_hybrid(cands: Vec<Candidate>, max_cuts: usize, p: &MipProblem) ->
         .collect();
     scored.sort_by(|a, b| b.0.total_cmp(&a.0));
     let Some(best_score) = scored.first().map(|s| s.0) else { return Vec::new() };
-    let (maxpar, goodmaxpar, good) = (0.1, 0.5, 0.9 * best_score);
+    let (maxpar, goodmaxpar, good) = (tunable!("ENOMOTO_T_CUTSEL_MAXPAR", 0.3, f64), tunable!("ENOMOTO_T_CUTSEL_GOODMAXPAR", 0.7, f64), 0.9 * best_score);
     let mut chosen: Vec<(f64, Candidate)> = Vec::new();
     for (score, nc, c) in scored {
         if chosen.len() >= max_cuts {
