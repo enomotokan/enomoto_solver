@@ -392,6 +392,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 push(r, &mut cands, self);
             }
         }
+        // zerohalf ({0, 1/2}-CG) カット (元の行から)
+        if env_str!("ENOMOTO_MIP_NO_ZEROHALF").is_none() {
+            let zh = super::zerohalf::zerohalf_cuts(&p.rows, &p.row_lo, &p.row_up, &p.is_int, &self.dom.global_lo, &self.dom.global_up, x, 100);
+            for raw in zh {
+                push(Some(raw), &mut cands, self);
+            }
+        }
         // 経路集約 (path aggregation、HiGHS の `HighsPathSeparator`)
         if env_str!("ENOMOTO_MIP_NO_PATH_AGG").is_none() {
             self.path_aggregation(&vars, &lp_rows, &mut cands, &mut push);

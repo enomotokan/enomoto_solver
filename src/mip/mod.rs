@@ -18,6 +18,7 @@ pub(crate) mod solver;
 pub(crate) mod heuristics;
 pub(crate) mod cuts;
 pub(crate) mod separation;
+pub(crate) mod zerohalf;
 
 use crate::solver::solve_lp;
 use crate::types::{ConstraintRow, LpOptions, MipSettings, MipSummary, Objective, RootSolver, SolveResult, Status, VarType, VariableData};
