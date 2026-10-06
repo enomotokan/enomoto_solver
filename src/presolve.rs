@@ -57,6 +57,15 @@ use crate::params::presolve::{
 /// 丸め誤差はその大きさに比例するため (`params::presolve::PRESOLVE_REL_TOL` 参照)。
 /// `ENOMOTO_T_PRESOLVE_REL_TOL=0` で従来の絶対判定に戻る。`scale` が有限でなければ `base`。
 #[inline]
+/// 診断用: `ENOMOTO_DBG_SKIP` (カンマ区切り) に名前があればその縮約を飛ばす。
+/// (原因の切り分け用。既定では何も飛ばさない)
+fn dbg_skip(name: &str) -> bool {
+    match env_str!("ENOMOTO_DBG_SKIP") {
+        Some(v) => v.split(',').any(|t| t == name),
+        None => false,
+    }
+}
+
 pub(crate) fn infeas_tol(base: f64, scale: f64) -> f64 {
     if tunable!("ENOMOTO_T_PRESOLVE_REL_TOL", crate::params::presolve::PRESOLVE_REL_TOL, usize) != 0 && scale.is_finite() {
         base * (1.0 + scale.abs())
@@ -525,7 +534,7 @@ pub fn run_extended(
         // 等式行による上下限伝播 (`propagate::propagate_equalities`)。最初の
         // `EQPROP_ROUNDS` ラウンドだけ実行する。`EQPROP_SKIP_IDLE` が有効なら、
         // 何も見つからなかった時点で以降のラウンドを省略する (結果が変わりうる)。
-        if round_idx < tunable!("ENOMOTO_T_EQPROP_ROUNDS", EQPROP_ROUNDS, usize) && !eqprop_idle {
+        if round_idx < tunable!("ENOMOTO_T_EQPROP_ROUNDS", EQPROP_ROUNDS, usize) && !eqprop_idle && !dbg_skip("eqprop") {
             // 等式行伝播は不動点モードでも従来どおり `prop_passes` パスまで (`EQPROP_FIXPOINT` 参照)。
             let eq_limit = if tunable!("ENOMOTO_T_EQPROP_FIXPOINT", EQPROP_FIXPOINT, usize) != 0 { pass_limit(prop_passes, work_used) } else { propagate::PassLimit::fixed(prop_passes) };
             let eq = timed_step!("eqprop", propagate::propagate_equalities(&a, &b, &mut lb, &mut ub, eq_limit));
@@ -541,7 +550,7 @@ pub fn run_extended(
 
         // 符号を反転しただけで右辺が釣り合う不等式行の組 (等式を 2 本の `<=` で表したもの) を等式 1 本にして A へ移す
         // (不動点モードのみ、`OPPOSITE_PAIR_EQUALITY`)。
-        if fixpoint_mode && tunable!("ENOMOTO_T_OPPOSITE_PAIR_EQUALITY", OPPOSITE_PAIR_EQUALITY, usize) != 0 {
+        if fixpoint_mode && tunable!("ENOMOTO_T_OPPOSITE_PAIR_EQUALITY", OPPOSITE_PAIR_EQUALITY, usize) != 0 && !dbg_skip("oppositepairs") {
             let pairs = timed_step!("oppositepairs", redundancy::find_opposite_equality_pairs(&cur_real_rows, &cur_real_rhs, crate::params::presolve::PROPAGATE_EPS));
             if debug_rounds && !pairs.is_empty() {
                 eprintln!("PRESOLVE_OPPOSITE_PAIRS round={} pairs={}", round_idx, pairs.len());
@@ -571,7 +580,7 @@ pub fn run_extended(
         }
 
         // 双対による固定: 目的係数の向きを妨げる行がない変数を上下限に固定する。
-        let fixes = timed_step!("dualfix", dualfix::fix_by_lock_count(n, &a, &cur_real_rows, &c, &lb, &ub));
+        let fixes = if dbg_skip("dualfix") { Vec::new() } else { timed_step!("dualfix", dualfix::fix_by_lock_count(n, &a, &cur_real_rows, &c, &lb, &ub)) };
         for &(j, value) in &fixes {
             lb[j] = value;
             ub[j] = value;
@@ -579,7 +588,7 @@ pub fn run_extended(
 
         // 強制列 (`forcingcol`): 費用 0 で、現れるすべての不等式行を緩める向きに無限に動ける列を、
         // その行ごと取り除く (値は後処理で決める)。消去した列は `[0, 0]` に固定する。
-        if tunable!("ENOMOTO_T_FORCING_COL", crate::params::presolve::FORCING_COL, usize) != 0 {
+        if tunable!("ENOMOTO_T_FORCING_COL", crate::params::presolve::FORCING_COL, usize) != 0 && !dbg_skip("forcingcol") {
             let forced = timed_step!("forcingcol", forcingcol::eliminate_forcing_columns(n, &a, &mut cur_real_rows, &mut cur_real_rhs, &c, &lb, &ub));
             if env_str!("ENOMOTO_DEBUG_FORCING_COL").is_some() && !forced.is_empty() {
                 eprintln!("DEBUG_FORCING_COL: round={round_idx} columns={} rows={}", forced.len(), forced.iter().map(|f| f.rows.len()).sum::<usize>());
@@ -593,7 +602,7 @@ pub fn run_extended(
 
         // 双対実行可能性の伝播による 2 つの縮小 (`dualpropagate`):
         // 全最適解で等号成立する不等式行を等式系へ昇格し、被約費用の符号が確定する列を固定する。
-        if dualpropagate_active {
+        if dualpropagate_active && !dbg_skip("dualpropagate") {
             let dual_red = timed_step!("dualpropagate", dualpropagate::propagate_dual_bounds(n, &a, &cur_real_rows, &c, &lb, &ub, &orig_lb, &orig_ub, prop_passes));
             if dual_red.implied_equalities.is_empty() && dual_red.fixed_columns.is_empty() {
                 dualpropagate_empty_streak += 1;
@@ -727,7 +736,7 @@ pub fn run_extended(
             // (下の `extract_bounds(inner)` を省略できるかの判定に使う)。
             let mut g_is_rebuilt = true;
 
-            if inner_idx == 0 && doubleton_active {
+            if inner_idx == 0 && doubleton_active && !dbg_skip("doubleton") {
                 // doubleton 等式の代入消去。`None` は何も変化なし。
                 let dbl = timed_step!("doubleton", doubleton::eliminate_doubleton_equalities_view(n, &a, &b, g_view!(), &c));
                 if dbl.as_ref().is_none_or(|d| d.substitutions.is_empty()) {

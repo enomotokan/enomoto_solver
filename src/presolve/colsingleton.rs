@@ -178,10 +178,10 @@ pub fn eliminate_singleton_equalities_view(n: usize, a: &FaerCsr, b: &[f64], gv:
         // lb_j <= (rhs - r)/coeff <= ub_j  <=>  rhs-hi <= r <= rhs-lo
         // (lo/hi = min/max(coeff*lb_j, coeff*ub_j) で coeff の符号を吸収)。
         // 無限の側は自明な制約になるので出力しない。
-        let a_lb = coeff * lb[j];
-        let a_ub = coeff * ub[j];
-        let lo = a_lb.min(a_ub);
-        let hi = a_lb.max(a_ub);
+        // 符号で向きを決める (min/max で並べ替えると、矛盾した境界 lb_j > ub_j が
+        // 正常な区間に化けて実行不能性が失われる。矛盾したまま lo > hi で出せば、
+        // 出力される 2 本の行が互いに矛盾し、後段が実行不能を検出する)。
+        let (lo, hi) = if coeff >= 0.0 { (coeff * lb[j], coeff * ub[j]) } else { (coeff * ub[j], coeff * lb[j]) };
         // 残りの項の箱から既に含意される側は冗長なので省略する。
         // r_lo/r_hi: 項の箱から得られる r の値域。
         let (r_lo, r_hi) = if skip_implied_bound_rows() { terms_range(&terms, &lb, &ub) } else { (f64::NEG_INFINITY, f64::INFINITY) };

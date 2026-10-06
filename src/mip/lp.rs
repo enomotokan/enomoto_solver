@@ -2249,6 +2249,13 @@ mod debug_tests {
             let act: f64 = r.iter().map(|&(j, v)| v * x[j]).sum();
             eprintln!("row {i}: {:?} act {act} in [{}, {}]", r, rlo[i], rup[i]);
         }
+        if let Ok(path) = std::env::var("DUMP_TXT") {
+            let f = |v: f64| if v.is_finite() { format!("{v:?}") } else if v > 0.0 { "inf".into() } else { "-inf".into() };
+            let mut s = format!("{} {}\n", n, rows.len());
+            for j in 0..n { s += &format!("{} {} {:?}\n", f(lo[j]), f(up[j]), c[j]); }
+            for (i, r) in rows.iter().enumerate() { s += &format!("{} {} {} {}\n", f(rlo[i]), f(rup[i]), r.len(), r.iter().map(|&(j, v)| format!("{j} {v:?}")).collect::<Vec<_>>().join(" ")); }
+            std::fs::write(path, s).unwrap();
+        }
         let (rs, ro) = super::tests::reference_pub(&lo, &up, &c, &rows, &rlo, &rup);
         eprintln!("reference {:?} {:?}", rs, ro);
     }

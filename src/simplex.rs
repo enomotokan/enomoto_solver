@@ -85,6 +85,8 @@ mod crossover;
 mod race;
 mod sifting;
 mod dualize;
+#[cfg(test)]
+mod lp_bug_debug;
 
 /// 単体法の各メインループの反復上限を問題サイズから決める。
 ///

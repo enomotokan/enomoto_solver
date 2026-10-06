@@ -214,10 +214,9 @@ pub fn merge_parallel_columns_if_any(n: usize, a: &FaerCsr, real_rows: &[Vec<(us
             if (new_c[var] - predicted_c_var).abs() > tol {
                 continue;
             }
-            let s_lb = s * new_lb[var];
-            let s_ub = s * new_ub[var];
-            // s * x_var の取りうる範囲 (z の範囲の増分)
-            let (lo, hi) = (s_lb.min(s_ub), s_lb.max(s_ub));
+            // s * x_var の取りうる範囲 (z の範囲の増分)。符号で向きを決める (min/max で並べ替えると
+            // 矛盾した境界 lb > ub が正常な区間に化けて実行不能性が失われる)。
+            let (lo, hi) = if s >= 0.0 { (s * new_lb[var], s * new_ub[var]) } else { (s * new_ub[var], s * new_lb[var]) };
             // 負の s と `var` の上限 `+inf` の組では lo = -inf となり、併合先が自由列になってしまう。
             // その形は下流で非常に退化しやすいため、この併合は行わず `var` を未併合のまま残す (経緯は履歴メモ参照)。
             if lo == f64::NEG_INFINITY {

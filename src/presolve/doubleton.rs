@@ -209,10 +209,9 @@ fn eliminate_doubleton_equalities_full(n: usize, a: &FaerCsr, b: &[f64], gv: GVi
     for sub in &subs {
         let (var_keep, coeff_keep) = sub.terms[0];
         // coeff_elim * x_elim の取りうる範囲 [lo, hi]
-        let a_lb = sub.coeff * lb[sub.var];
-        let a_ub = sub.coeff * ub[sub.var];
-        let lo = a_lb.min(a_ub);
-        let hi = a_lb.max(a_ub);
+        // 符号で向きを決める (colsingleton と同じ理由: min/max で並べ替えると矛盾した境界
+        // lb > ub が正常な区間に化けて実行不能性が失われる)。
+        let (lo, hi) = if sub.coeff >= 0.0 { (sub.coeff * lb[sub.var], sub.coeff * ub[sub.var]) } else { (sub.coeff * ub[sub.var], sub.coeff * lb[sub.var]) };
         // 相手変数自身の箱が既に含意する側は省く。相手変数がこのパスで消去されて
         // いない (その箱が引き続き有効な) ときだけ。
         let (r_lo, r_hi) = if colsingleton::skip_implied_bound_rows() && by_var[var_keep].is_none() {
