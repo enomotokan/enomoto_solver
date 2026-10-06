@@ -291,6 +291,9 @@ Mittelmann の 9 問 (300 秒、1 回):
 fome13 は内点法が収束するようになったことで、従来は表に出なかったクロスオーバーの遅さが出た。基底の双対実行不能の本数
 (fome13 17,637、成功した s250r10 は 21 万) では見分けられず、二段解法へ戻す条件はまだ作っていない。
 
+既定の同時実行 (`auto`) では、解けた問題は変わらない (Kennington 16 問の比 0.990、Mittelmann 9 問 (300 秒) の解けた 5 問の比 1.044、
+勝ったのはいずれも二段解法。`benchmarks/crossover/ab15/race_*.jsonl`・`mitt_race_*.jsonl`)。
+
 ## 計測
 
 `scripts/crossover_bench/run.py` (計測) と `report.py` (集計)。結果は `benchmarks/crossover/`。
