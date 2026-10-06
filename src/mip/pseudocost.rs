@@ -32,7 +32,7 @@ impl Pseudocost {
             total_n_down: 0,
             cutoff_up: vec![0; n],
             cutoff_down: vec![0; n],
-            min_reliable: 8,
+            min_reliable: tunable!("ENOMOTO_T_MIP_MINREL", 8u32, u32),
         }
     }
 

@@ -649,10 +649,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let budget = total / 2 + 100_000;
         let mut best: Option<(usize, f64, f64)> = None; // (列, 値, スコア)
         let mut no_improve = 0;
-        let sb_iter_limit = (2 * self.avg_node_iters()).clamp(50, 2_000);
+        let sb_cap = tunable!("ENOMOTO_T_MIP_SB_ITER_CAP", 2_000u64, u64);
+        let sb_iter_limit = (2 * self.avg_node_iters()).clamp(50, sb_cap.max(50));
+        let lookahead = tunable!("ENOMOTO_T_MIP_SB_LOOKAHEAD", 8usize, usize);
         for &(j, v, pscore) in &cands {
             let reliable = self.pc.is_reliable(j);
-            if reliable || self.sb_iters > budget || no_improve >= 8 || self.time_up() {
+            if reliable || self.sb_iters > budget || no_improve >= lookahead || self.time_up() {
                 if best.is_none_or(|(_, _, s)| pscore > s) {
                     best = Some((j, v, pscore));
                 }
