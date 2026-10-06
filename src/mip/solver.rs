@@ -29,11 +29,15 @@ pub struct MipParams {
     pub abs_gap: f64,
     /// 進捗を標準エラーに出す。
     pub verbose: bool,
+    /// サブ MIP (RENS/RINS の中) として解いているか (サブ MIP の中ではサブ MIP を作らない)。
+    pub submip: bool,
+    /// 目的値の打ち切り値 (これ以上の解は要らない。最小化形、定数項込み)。
+    pub cutoff: f64,
 }
 
 impl Default for MipParams {
     fn default() -> Self {
-        MipParams { time_limit: f64::INFINITY, node_limit: u64::MAX, rel_gap: 1e-4, abs_gap: 1e-6, verbose: false }
+        MipParams { time_limit: f64::INFINITY, node_limit: u64::MAX, rel_gap: 1e-4, abs_gap: 1e-6, verbose: false, submip: false, cutoff: f64::INFINITY }
     }
 }
 
@@ -93,6 +97,8 @@ pub(super) struct Solver<'a> {
     /// 根の LP の目的値と、非基底の構造変数の (列, 下限側か, 被約費用)。暫定解が良くなるたびに
     /// 大域的な被約費用固定に使う。
     pub(super) root_redcost: Option<(f64, Vec<(usize, bool, f64, f64)>)>,
+    /// 最後に RINS を試したノード番号。
+    pub(super) last_rins: u64,
     /// ノードの LP (強分岐以外) に使った反復数と回数。
     node_iters: u64,
     node_lps: u64,
@@ -130,6 +136,7 @@ pub fn solve(p: &MipProblem, params: MipParams) -> MipResult {
         locks: super::heuristics::compute_locks(p),
         rng: 0x2545_F491_4F6C_DD1D,
         root_redcost: None,
+        last_rins: 0,
         node_iters: 0,
         node_lps: 0,
         unresolved: false,
@@ -150,14 +157,14 @@ impl<'a> Solver<'a> {
     /// この値以上の下界のノードは捨ててよい (最小化形、定数項込み)。
     pub(super) fn prune_limit(&self) -> f64 {
         match &self.incumbent {
-            None => f64::INFINITY,
+            None => self.params.cutoff,
             Some((z, _)) => {
                 let strict = match self.obj_step {
                     Some(step) => z - step + (1e-6 * z.abs().max(1.0)).min(0.5 * step),
                     None => z - 1e-9 * z.abs().max(1.0),
                 };
                 let gap = z - (self.params.rel_gap * z.abs().max(1.0)).max(self.params.abs_gap);
-                strict.min(gap)
+                strict.min(gap).min(self.params.cutoff)
             }
         }
     }
@@ -252,7 +259,7 @@ impl<'a> Solver<'a> {
         {
             let nnz: usize = self.p.rows.iter().map(|r| r.len()).sum();
             let cap = if self.params.time_limit.is_finite() { (0.05 * self.params.time_limit).min(5.0) } else { 5.0 };
-            if self.feasibility_jump((50 * nnz as u64).clamp(100_000, 50_000_000), cap) && self.params.verbose {
+            if !self.params.submip && self.feasibility_jump((50 * nnz as u64).clamp(100_000, 50_000_000), cap) && self.params.verbose {
                 eprintln!("MIP: feasibility jump found a solution ({:.2}s)", self.start.elapsed().as_secs_f64());
             }
         }
@@ -289,6 +296,7 @@ impl<'a> Solver<'a> {
             } else {
                 self.simple_rounding(&x);
                 self.randomized_rounding(&x, 3);
+                self.rens(&x);
                 if self.incumbent.is_none() {
                     self.feasibility_pump(root_iters);
                 }
@@ -427,7 +435,12 @@ impl<'a> Solver<'a> {
                     self.simple_rounding(&x);
                     let budget = self.lp.total_iterations() / 20 + 10_000;
                     if node.depth > 0 && plunge_depth == 0 && self.heur_iters < budget {
-                        self.randomized_rounding(&x, 1);
+                        if self.incumbent.is_some() && self.nodes >= self.last_rins + 100 {
+                            self.last_rins = self.nodes;
+                            self.rins(&x);
+                        } else {
+                            self.randomized_rounding(&x, 1);
+                        }
                     }
                     if node_obj >= self.prune_limit() {
                         break None;

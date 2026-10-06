@@ -372,3 +372,91 @@ impl<'a> Solver<'a> {
         false
     }
 }
+
+impl<'a> Solver<'a> {
+    /// 一部の整数列を固定した (境界を締めた) サブ MIP を、ノード数を制限して解く。
+    /// 見つかった解は暫定解の候補にする。`lo`/`up` はサブ MIP の列の境界。
+    fn solve_submip(&mut self, lo: Vec<f64>, up: Vec<f64>, node_limit: u64) -> bool {
+        let p = self.p;
+        let mut sub = p.clone();
+        sub.col_lo = lo;
+        sub.col_up = up;
+        let remaining = match self.deadline {
+            Some(d) => d.saturating_duration_since(Instant::now()).as_secs_f64(),
+            None => f64::INFINITY,
+        };
+        let params = super::solver::MipParams {
+            time_limit: (0.1 * remaining).min(10.0),
+            node_limit,
+            rel_gap: self.params.rel_gap,
+            abs_gap: self.params.abs_gap,
+            verbose: false,
+            submip: true,
+            cutoff: self.prune_limit(),
+        };
+        let r = super::solver::solve(&sub, params);
+        self.heur_iters += r.lp_iterations;
+        match r.x {
+            Some(x) => self.try_incumbent(x),
+            None => false,
+        }
+    }
+
+    /// RENS: LP 解で整数値の整数列をその値に固定し、他の整数列を LP 値の前後の整数に制限したサブ MIP を解く。
+    pub(super) fn rens(&mut self, x: &[f64]) -> bool {
+        let p = self.p;
+        if self.params.submip {
+            return false;
+        }
+        let mut lo = self.dom.lo.clone();
+        let mut up = self.dom.up.clone();
+        let (mut nint, mut nfix) = (0usize, 0usize);
+        for j in 0..p.n {
+            if !p.is_int[j] {
+                continue;
+            }
+            nint += 1;
+            let v = x[j];
+            if (v - v.round()).abs() <= FEASTOL {
+                lo[j] = v.round();
+                up[j] = v.round();
+                nfix += 1;
+            } else {
+                lo[j] = lo[j].max(v.floor());
+                up[j] = up[j].min(v.ceil());
+            }
+        }
+        if nint == 0 || (nfix as f64) < 0.5 * nint as f64 {
+            return false;
+        }
+        self.solve_submip(lo, up, 500)
+    }
+
+    /// RINS: 暫定解と LP 解で値が一致する整数列を固定したサブ MIP を解く。
+    pub(super) fn rins(&mut self, x: &[f64]) -> bool {
+        let p = self.p;
+        if self.params.submip {
+            return false;
+        }
+        let Some((_, inc)) = self.incumbent.as_ref() else { return false };
+        let inc = inc.clone();
+        let mut lo = self.dom.lo.clone();
+        let mut up = self.dom.up.clone();
+        let (mut nint, mut nfix) = (0usize, 0usize);
+        for j in 0..p.n {
+            if !p.is_int[j] {
+                continue;
+            }
+            nint += 1;
+            if (x[j] - inc[j]).abs() <= FEASTOL && inc[j] >= self.dom.lo[j] && inc[j] <= self.dom.up[j] {
+                lo[j] = inc[j];
+                up[j] = inc[j];
+                nfix += 1;
+            }
+        }
+        if nint == 0 || (nfix as f64) < 0.5 * nint as f64 {
+            return false;
+        }
+        self.solve_submip(lo, up, 500)
+    }
+}
