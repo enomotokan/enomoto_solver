@@ -187,6 +187,9 @@ pub struct LpEngine {
     work_m3: Vec<f64>,
     scratch: Vec<f64>,
     alpha_row: Vec<f64>,
+    /// 価格付けで触れた変数の一覧と、構造変数の印。
+    touched: Vec<usize>,
+    touched_mark: Vec<bool>,
 }
 
 /// 2 のべき乗に丸める (丸め誤差を生まないスケール係数にするため)。
@@ -264,6 +267,8 @@ impl LpEngine {
             work_m3: Vec::new(),
             scratch: Vec::new(),
             alpha_row: Vec::new(),
+            touched: Vec::new(),
+            touched_mark: Vec::new(),
         };
         e.rebuild_cols();
         for i in 0..m {
@@ -375,6 +380,7 @@ impl LpEngine {
         self.work_m3.resize(m, 0.0);
         self.scratch.resize(m.max(1), 0.0);
         self.alpha_row.resize(nt, 0.0);
+        self.touched_mark.resize(self.n, false);
     }
 
     // ------------------------------------------------------------------
@@ -1417,36 +1423,44 @@ impl LpEngine {
                 }
             }
             let mut alpha_row = std::mem::take(&mut self.alpha_row);
+            let mut touched = std::mem::take(&mut self.touched);
+            touched.clear();
             if nz_rows.len() * 10 < m {
-                for &k in self.basic_var.iter() {
-                    alpha_row[k] = 0.0;
-                }
-                for v in alpha_row[..n].iter_mut() {
-                    *v = 0.0;
-                }
+                // 行方向: rho の非零の行だけを走査し、触れた列を記録する
                 for &i in &nz_rows {
                     let ri = rho[i];
                     for &(j, v) in &self.rows[i] {
+                        if !self.touched_mark[j] {
+                            self.touched_mark[j] = true;
+                            touched.push(j);
+                            alpha_row[j] = 0.0;
+                        }
                         alpha_row[j] += ri * v;
                     }
                 }
-                for i in 0..m {
+                for &j in &touched {
+                    self.touched_mark[j] = false;
+                }
+                for &i in &nz_rows {
                     alpha_row[n + i] = -rho[i];
+                    touched.push(n + i);
                 }
             } else {
                 for k in 0..nt {
-                    alpha_row[k] = if self.status[k] == VarStatus::Basic { 0.0 } else { self.col_dot(k, &rho) };
+                    if self.status[k] != VarStatus::Basic {
+                        alpha_row[k] = self.col_dot(k, &rho);
+                        touched.push(k);
+                    }
                 }
             }
             // CHUZC: 境界反転付き Harris 比率判定
             cands.clear();
-            for k in 0..nt {
+            for &k in &touched {
                 if self.status[k] == VarStatus::Basic {
                     continue;
                 }
                 let a = sigma * alpha_row[k];
-                if let Some(dk) = self.dual_ratio_candidate(k, a) {
-                    let _ = dk;
+                if self.dual_ratio_candidate(k, a).is_some() {
                     cands.push((k, 0.0, a.abs()));
                 }
             }
@@ -1536,6 +1550,7 @@ impl LpEngine {
             if q == usize::MAX {
                 // 主実行不能の候補: 行 rho で確かめる。
                 self.alpha_row = alpha_row;
+                self.touched = touched;
                 if self.verify_infeasible_row(r, &rho) {
                     self.ray = Some(rho.clone());
                     return LpStatus::Infeasible;
@@ -1560,6 +1575,7 @@ impl LpEngine {
             let alpha_rq = aq[r];
             if alpha_rq.abs() < PIVOT_TOL || (alpha_rq - alpha_rq_row).abs() > 1e-6 * (1.0 + alpha_rq.abs()) {
                 self.alpha_row = alpha_row;
+                self.touched = touched;
                 if env_str!("ENOMOTO_DEBUG_MIPLP").is_some() {
                     eprintln!("MIPLP: pivot mismatch {alpha_rq} vs {alpha_rq_row} updates={}", self.updates);
                 }
@@ -1614,7 +1630,7 @@ impl LpEngine {
             self.x[p] = bound;
             // 双対の更新
             let theta_d = self.d[q] / alpha_rq;
-            for k in 0..nt {
+            for &k in &touched {
                 if self.status[k] != VarStatus::Basic {
                     let a = alpha_row[k];
                     if a != 0.0 {
@@ -1646,6 +1662,7 @@ impl LpEngine {
             }
             self.basic_var[r] = q;
             self.alpha_row = alpha_row;
+            self.touched = touched;
             // LU 更新
             let ok = {
                 let lu = self.lu.as_mut().unwrap();

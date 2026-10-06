@@ -650,6 +650,9 @@ impl<'a> Solver<'a> {
                 let it0 = self.lp.total_iterations();
                 let st = self.lp.solve(&self.limits(sb_iter_limit));
                 self.sb_iters += self.lp.total_iterations() - it0;
+                if env_str!("ENOMOTO_MIP_DEBUG_SB").is_some() {
+                    eprintln!("SB j={j} up={is_up} st={st:?} iters={} limit={sb_iter_limit}", self.lp.total_iterations() - it0);
+                }
                 match st {
                     LpStatus::Optimal => {
                         let o = self.lp.objective() + self.p.offset;
