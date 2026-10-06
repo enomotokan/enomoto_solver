@@ -1352,9 +1352,9 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
         }
         eprintln!("CROSSOVER basis quality: primal_infeas={np} (max {mp:.2e}) dual_infeas={nd} (max {md:.2e})");
     }
-    // 試験用 (`ENOMOTO_T_XO_CLEANUP_MAIN=1`): 仕上げを polish ではなく二段解法の主ループ (DSE・BFRT・超疎の経路)
+    // 仕上げは polish ではなく二段解法の主ループ (DSE・BFRT・超疎の経路) で行う (既定、第 13 回の比較。`ENOMOTO_T_XO_CLEANUP_MAIN=0` で polish)
     // でこの基底から始める (内点法の解が強く退化していて、基底の多くをスラックで埋めた問題: ns1688926)。
-    let res = if tunable!("ENOMOTO_T_XO_CLEANUP_MAIN", 0u8, u8) != 0 {
+    let res = if tunable!("ENOMOTO_T_XO_CLEANUP_MAIN", 1u8, u8) != 0 {
         drop(lu);
         super::slope_intercept_dual::solve_slope_intercept_dual_from_basis(std, &Default::default(), basis.clone())
     } else {
