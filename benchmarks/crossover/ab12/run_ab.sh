@@ -16,7 +16,11 @@ run() {
 }
 mitt switch10 ENOMOTO_T_IPM_SWITCH_AUG=10
 mitt aug ENOMOTO_IPM_AUGMENTED=1
+mitt switch10_eps1e-10 ENOMOTO_T_IPM_SWITCH_AUG=10 ENOMOTO_T_IPM_EPS=1e-10
 run base X=0
 run switch10 ENOMOTO_T_IPM_SWITCH_AUG=10
 run switch20 ENOMOTO_T_IPM_SWITCH_AUG=20
+# 内点法をより高い精度まで解くとクロスオーバーの手間が減るか (停止の許容誤差 1e-8 → 1e-10)。
+run switch10_eps1e-10 ENOMOTO_T_IPM_SWITCH_AUG=10 ENOMOTO_T_IPM_EPS=1e-10
+run eps1e-10 ENOMOTO_T_IPM_EPS=1e-10
 echo ALL_DONE >> benchmarks/crossover/ab12/done.txt
