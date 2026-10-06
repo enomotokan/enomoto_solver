@@ -47,13 +47,37 @@ fn applicable(std: &StdForm) -> bool {
     (nnz as f64) <= tunable!("ENOMOTO_T_DUALIZE_MAX_COL_NNZ", DUALIZE_MAX_COL_NNZ, f64) * n.max(1) as f64
 }
 
+/// 双対 LP と、その解から元の解を戻すための情報。
+pub(super) struct Dualized {
+    /// 双対 LP (行 = 固定でない構造列)。
+    pub(super) dual: StdForm,
+    /// 構造列の平行移動。
+    x0: Vec<f64>,
+    /// 列の種類 (0 = 下限側, 1 = 上限側, 2 = 自由, 3 = 固定)。
+    kind: Vec<u8>,
+    /// 平行移動後の幅。
+    width: Vec<f64>,
+    /// 双対 LP の行 `r` に対応する構造列。
+    rows_of: Vec<usize>,
+}
+
 /// 双対化して解く。対象外、または途中で諦めたときは `None`。
 pub(super) fn solve(std: &StdForm, opts: &crate::types::LpOptions) -> Option<SimplexResult> {
+    let t0 = std::time::Instant::now();
+    let d = build(std)?;
+    slope_intercept_dual::request_duals(true);
+    let res = slope_intercept_dual::solve_slope_intercept_dual(&d.dual, opts);
+    let duals = slope_intercept_dual::take_duals();
+    slope_intercept_dual::request_duals(false);
+    d.finish(std, res, duals.map(|(pi, _)| pi), t0)
+}
+
+/// 双対化の対象なら双対 LP を作る (単体法・内点法で共通の判定)。対象外なら `None`。
+pub(super) fn build(std: &StdForm) -> Option<Dualized> {
     if !applicable(std) {
         return None;
     }
     let debug = env_str!("ENOMOTO_DEBUG_DUALIZE").is_some();
-    let t0 = std::time::Instant::now();
     let m = std.n_rows;
     let n = std.n_total - m;
     let inf = f64::INFINITY;
@@ -206,60 +230,68 @@ pub(super) fn solve(std: &StdForm, opts: &crate::types::LpOptions) -> Option<Sim
     let (rmat, cmat) = super::freeze_std_matrices(&rows, n_total);
     drop(rows);
     let dual = StdForm { n_total, n_rows: nd, c: cost, rows: rmat, cols: cmat, b: c_rhs, lb, ub };
+    Some(Dualized { dual, x0, kind, width, rows_of })
+}
 
-    slope_intercept_dual::request_duals(true);
-    let res = slope_intercept_dual::solve_slope_intercept_dual(&dual, opts);
-    let duals = slope_intercept_dual::take_duals();
-    slope_intercept_dual::request_duals(false);
-    let (Some(res), Some((pi, _))) = (res, duals) else {
-        if debug {
-            eprintln!("DUALIZE: dual solve gave no optimal basis -> primal solve");
-        }
-        return None;
-    };
-    if res.status != Status::Optimal {
-        if debug {
-            eprintln!("DUALIZE: dual status {:?} -> primal solve", res.status);
-        }
-        return None;
-    }
-    // `x'_j = -π_j` を元の範囲に収めて戻す。
-    let mut x = x0;
-    for (r, &j) in rows_of.iter().enumerate() {
-        let xp = -pi[r];
-        let (lo, hi) = match kind[j] {
-            0 => (0.0, width[j]),
-            1 => (-inf, 0.0),
-            _ => (-inf, inf),
+impl Dualized {
+    /// 双対 LP の結果 `res` と行の双対 `pi` (`B^-T c_B`) から元の解を戻す。双対 LP が最適でない、
+    /// または戻した解が元の問題の制約を許容誤差で満たさないときは `None`。
+    pub(super) fn finish(self, std: &StdForm, res: Option<SimplexResult>, pi: Option<Vec<f64>>, t0: std::time::Instant) -> Option<SimplexResult> {
+        let debug = env_str!("ENOMOTO_DEBUG_DUALIZE").is_some();
+        let m = std.n_rows;
+        let n = std.n_total - m;
+        let inf = f64::INFINITY;
+        let Dualized { x0, kind, width, rows_of, .. } = self;
+        let (Some(res), Some(pi)) = (res, pi) else {
+            if debug {
+                eprintln!("DUALIZE: dual solve gave no optimal basis -> primal solve");
+            }
+            return None;
         };
-        x[j] += xp.clamp(lo, hi);
-    }
-    // 元の行の活動度がスラックの範囲に収まるか (`a_i x + σ s = b`、`s = (b - a_i x) / σ`)。
-    let mut act = vec![0.0; m];
-    for j in 0..n {
-        if x[j] != 0.0 {
-            for &(i, v) in std.cols.col(j) {
-                act[i] += v * x[j];
+        if res.status != Status::Optimal {
+            if debug {
+                eprintln!("DUALIZE: dual status {:?} -> primal solve", res.status);
+            }
+            return None;
+        }
+        // `x'_j = -π_j` を元の範囲に収めて戻す。
+        let mut x = x0;
+        for (r, &j) in rows_of.iter().enumerate() {
+            let xp = -pi[r];
+            let (lo, hi) = match kind[j] {
+                0 => (0.0, width[j]),
+                1 => (-inf, 0.0),
+                _ => (-inf, inf),
+            };
+            x[j] += xp.clamp(lo, hi);
+        }
+        // 元の行の活動度がスラックの範囲に収まるか (`a_i x + σ s = b`、`s = (b - a_i x) / σ`)。
+        let mut act = vec![0.0; m];
+        for j in 0..n {
+            if x[j] != 0.0 {
+                for &(i, v) in std.cols.col(j) {
+                    act[i] += v * x[j];
+                }
             }
         }
-    }
-    let mut worst = 0.0f64;
-    for i in 0..m {
-        let Some(&(sj, sigma)) = std.rows.row(i).iter().find(|&&(j, _)| j >= n) else {
-            continue;
-        };
-        let s = (std.b[i] - act[i]) / sigma;
-        let tol = DUALIZE_FEAS_TOL * (1.0 + std.b[i].abs());
-        let viol = (std.lb[sj] - s).max(s - std.ub[sj]).max(0.0);
-        if viol > tol {
-            worst = worst.max(viol / tol);
+        let mut worst = 0.0f64;
+        for i in 0..m {
+            let Some(&(sj, sigma)) = std.rows.row(i).iter().find(|&&(j, _)| j >= n) else {
+                continue;
+            };
+            let s = (std.b[i] - act[i]) / sigma;
+            let tol = DUALIZE_FEAS_TOL * (1.0 + std.b[i].abs());
+            let viol = (std.lb[sj] - s).max(s - std.ub[sj]).max(0.0);
+            if viol > tol {
+                worst = worst.max(viol / tol);
+            }
         }
+        if debug {
+            eprintln!("DUALIZE: solved dual in {:.2}s, worst row violation / tol = {worst:.3e}", t0.elapsed().as_secs_f64());
+        }
+        if worst > 1.0 {
+            return None;
+        }
+        Some(SimplexResult { status: Status::Optimal, x: Some(x) })
     }
-    if debug {
-        eprintln!("DUALIZE: solved dual in {:.2}s, worst row violation / tol = {worst:.3e}", t0.elapsed().as_secs_f64());
-    }
-    if worst > 1.0 {
-        return None;
-    }
-    Some(SimplexResult { status: Status::Optimal, x: Some(x) })
 }

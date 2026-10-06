@@ -499,8 +499,35 @@ pub(super) fn ipm_feasibility(std: &StdForm) -> Option<bool> {
     }
 }
 
+/// 内点法 + クロスオーバー。単体法が双対化する問題 ([`super::dualize::build`] の判定、行数 ≫ 構造列数) は、
+/// 内点法でも双対 LP を解き (Newton 系の次元が行数から構造列数に減る)、仕上げの単体法の最適基底の行の双対から
+/// 元の解を戻す。双対 LP で解けなかったら元の問題で解く (`ENOMOTO_T_XO_DUALIZE=0` で双対化しない)。
 pub(super) fn solve_ipm_crossover(std: &StdForm) -> Option<SimplexResult> {
+    if tunable!("ENOMOTO_T_XO_DUALIZE", 1u8, u8) != 0 {
+        if let Some(r) = solve_ipm_crossover_dualized(std) {
+            return Some(r);
+        }
+        if crate::cancel::is_cancelled() {
+            return None;
+        }
+    }
     solve_ipm_crossover_with(std, &XoOptions::default())
+}
+
+/// 双対 LP を内点法 + クロスオーバーで解いて元の解を戻す。対象外・諦めたときは `None`。
+fn solve_ipm_crossover_dualized(std: &StdForm) -> Option<SimplexResult> {
+    let t0 = Instant::now();
+    let d = super::dualize::build(std)?;
+    crate::phase_timing::mark("xo_dualized");
+    super::slope_intercept_dual::request_duals(true);
+    let res = solve_ipm_crossover_with(&d.dual, &XoOptions::default());
+    let duals = super::slope_intercept_dual::take_duals();
+    super::slope_intercept_dual::request_duals(false);
+    let r = d.finish(std, res, duals.map(|(pi, _)| pi), t0);
+    if r.is_none() {
+        crate::phase_timing::mark("xo_dualized_failed");
+    }
+    r
 }
 
 /// 内点法 + クロスオーバー ([`XoOptions`] 付き)。

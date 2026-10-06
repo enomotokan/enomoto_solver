@@ -25,7 +25,12 @@ use faer::sparse::{SparseColMat, SymbolicSparseColMat, ValuesOrder};
 use faer::{Conj, Side};
 
 pub use crate::sparse::{FaerCsr, csr_row_iter, csr_mat_t_vec, csr_mat_t_vec_into, csr_mat_vec, csr_mat_vec_into};
-use crate::params::interior_point::KKT_PARALLELISM;
+use crate::params::interior_point::{KKT_PARALLELISM, MAX_FACTOR_NNZ};
+
+/// 因子の非零数の上限 ([`MAX_FACTOR_NNZ`]、試験用 `ENOMOTO_T_IPM_MAX_FACTOR_NNZ`)。
+fn max_factor_nnz() -> usize {
+    tunable!("ENOMOTO_T_IPM_MAX_FACTOR_NNZ", MAX_FACTOR_NNZ, usize)
+}
 
 /// 数値分解に使う並列度。既定は逐次 (Fable の調査と Netlib + Kennington の比較で、この大きさの疎 Cholesky
 /// では faer の並列分解の分割の手間が計算を上回り、逐次の方が速かった)。試験用 `ENOMOTO_T_FACTOR_SEQ=0` で
@@ -275,6 +280,15 @@ const PIVOT_DELTA: f64 = 1e-9;
 impl AugKkt {
     /// `A` の非零パターンから記号分解までを作る (数値はまだ分解しない)。
     pub fn new(a: &FaerCsr) -> Self {
+        Self::build(a, usize::MAX).expect("symbolic factorization failed")
+    }
+
+    /// [`AugKkt::new`] と同じだが、因子の非零数が `max_nnz` を超えたら `None`。
+    pub fn try_new(a: &FaerCsr, max_nnz: usize) -> Option<Self> {
+        Self::build(a, max_nnz)
+    }
+
+    fn build(a: &FaerCsr, max_nnz: usize) -> Option<Self> {
         let p = a.nrows();
         let n = a.ncols();
         let dim = n + p;
@@ -302,11 +316,17 @@ impl AugKkt {
         let (symbolic_base, order) =
             SymbolicSparseColMat::<usize>::try_new_from_indices(dim, dim, &positions).expect("valid KKT sparsity pattern");
         let chol_symbolic = factorize_symbolic_cholesky::<usize>(symbolic_base.as_ref(), Side::Upper, SymmetricOrdering::Amd, Default::default())
-            .expect("symbolic factorization failed");
+            .ok()?;
+        if chol_symbolic.len_values() > max_nnz {
+            if env_str!("ENOMOTO_DEBUG_IPM").is_some() {
+                eprintln!("AugKkt: nnz(L)={} exceeds {max_nnz}; giving up", chol_symbolic.len_values());
+            }
+            return None;
+        }
         let l_values = vec![0.0f64; chol_symbolic.len_values()];
         let numeric_buf = GlobalPodBuffer::new(chol_symbolic.factorize_numeric_ldlt_req::<f64>(true, factor_par()).unwrap());
         let solve_buf = GlobalPodBuffer::new(chol_symbolic.solve_in_place_req::<f64>(1).unwrap());
-        AugKkt {
+        Some(AugKkt {
             n,
             p,
             top_range,
@@ -323,7 +343,7 @@ impl AugKkt {
             factored: false,
             signs: (0..dim).map(|i| if i < n { 1i8 } else { -1i8 }).collect(),
             n_regularized: 0,
-        }
+        })
     }
 
     /// 系の次元 `n + p`。
@@ -430,7 +450,8 @@ impl AugKkt {
 ///   `M^{-1} r = M_s^{-1} r - W (I + U^T W)^{-1} U^T M_s^{-1} r`、`W = M_s^{-1} U` (分解ごとに k 回の求解)。
 /// - **組み立て**: 疎な列の要素の組 `(i, k)` が CSC の値の配列のどこへ足されるか (`dest`) を最初に一度だけ
 ///   求め、毎回は値の配列に直接足し込む (並べ替えや非零パターンの複製をしない)。
-/// - 組の数が多すぎる (稠密な列を外しても) なら [`NormalKkt::new`] は `None` を返し、呼び出し側は
+/// - 組の数が多すぎる (稠密な列を外しても)、または因子の非零数が [`MAX_FACTOR_NNZ`] を超えるなら
+///   [`NormalKkt::new`] は `None` を返し、呼び出し側は
 ///   [`AugKkt`] を使う。
 pub struct NormalKkt {
     n: usize,
@@ -576,6 +597,9 @@ impl NormalKkt {
             factorize_symbolic_cholesky::<usize>(symbolic_base.as_ref(), Side::Upper, SymmetricOrdering::Amd, Default::default()).ok()?;
         if dbg {
             eprintln!("NormalKkt: symbolic (AMD) nnz(L)={} at {:.2}s", chol_symbolic.len_values(), t0.elapsed().as_secs_f64());
+        }
+        if chol_symbolic.len_values() > max_factor_nnz() {
+            return None;
         }
         let l_values = vec![0.0f64; chol_symbolic.len_values()];
         let numeric_buf = GlobalPodBuffer::new(chol_symbolic.factorize_numeric_llt_req::<f64>(factor_par()).ok()?);
@@ -772,15 +796,16 @@ pub enum IpmKkt {
 }
 
 impl IpmKkt {
-    /// 正規方程式を作れればそれを、だめ (稠密な列) なら拡大系を使う。
-    /// `ENOMOTO_IPM_AUGMENTED=1` で常に拡大系。
-    pub fn new(a: &FaerCsr) -> Self {
+    /// 正規方程式を作れればそれを、だめ (稠密な列・因子が大きすぎる) なら拡大系を使う。
+    /// `ENOMOTO_IPM_AUGMENTED=1` で常に拡大系。どちらも因子の非零数が [`MAX_FACTOR_NNZ`] を超えるなら
+    /// `None` (内点法を諦める)。
+    pub fn new(a: &FaerCsr) -> Option<Self> {
         if env_str!("ENOMOTO_IPM_AUGMENTED").is_none() {
             if let Some(nk) = NormalKkt::new(a) {
-                return IpmKkt::Normal(nk);
+                return Some(IpmKkt::Normal(nk));
             }
         }
-        IpmKkt::Aug(AugKkt::new(a))
+        AugKkt::try_new(a, max_factor_nnz()).map(IpmKkt::Aug)
     }
 
     /// 拡大系 (`A` から新たに作る。正規方程式が停滞したときの切り替え用)。
