@@ -5,8 +5,8 @@ cd "$(dirname "$0")/../../.."
 run() {
   name=$1; shift
   env ENOMOTO_T_XO_QUALITY=1 "$@" .venv/bin/python scripts/crossover_bench/run.py --set netlib kennington --methods ipm_crossover \
-    --reps 3 --single-run-above 60 --time-limit 600 --out benchmarks/crossover/ab14/$name.jsonl \
-    >> benchmarks/crossover/ab14/$name.log 2>&1
+    --reps 3 --single-run-above 60 --time-limit 600 --out benchmarks/crossover/ab16/$name.jsonl \
+    >> benchmarks/crossover/ab16/$name.log 2>&1
 }
 run base X=0
 run pdhg1 ENOMOTO_T_XO_GAMMA_PDHG=1
@@ -16,4 +16,4 @@ run base_x0.01 ENOMOTO_T_XO_GAMMA_MULT=0.01
 run base_x100 ENOMOTO_T_XO_GAMMA_MULT=100
 run pdhg1_x0.01 ENOMOTO_T_XO_GAMMA_PDHG=1 ENOMOTO_T_XO_GAMMA_MULT=0.01
 run pdhg1_x100 ENOMOTO_T_XO_GAMMA_PDHG=1 ENOMOTO_T_XO_GAMMA_MULT=100
-echo ALL_DONE >> benchmarks/crossover/ab14/done.txt
+echo ALL_DONE >> benchmarks/crossover/ab16/done.txt
