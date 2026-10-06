@@ -22,7 +22,7 @@ use rayon::prelude::*;
 
 use super::kkt::{csr_mat_t_vec_into, csr_mat_vec_into, FaerCsr, IpmKkt};
 use crate::params::interior_point::{
-    BOX_GONDZIO, BOX_REG0, BOX_REG_MIN, CERT_SCALE_MIN, CERT_TOL, EPS_ABS, EPS_REL, GAP_DIV_GUARD, INIT_DIV_GUARD, INIT_POSITIVE_FLOOR,
+    BOX_BLOWUP, BOX_BLOWUP_NEAR, BOX_GONDZIO, BOX_REG0, BOX_REG_MIN, CERT_SCALE_MIN, CERT_TOL, EPS_ABS, EPS_REL, GAP_DIV_GUARD, INIT_DIV_GUARD, INIT_POSITIVE_FLOOR,
     INIT_SHIFT_MULTIPLIER, REG_FLOOR_SLACK, RES_DECREASE_RATIO, SLOW_DECREASE_DIVISOR, STALL_ITERS,
     STALL_PROGRESS_RATIO, TAU,
 };
@@ -522,6 +522,7 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
     let mut iters = 0usize;
     let mut cached: Option<Res> = None;
     let noimprove_k = tunable!("ENOMOTO_T_IPM_NOIMPROVE", 0usize, usize);
+    let blowup = tunable!("ENOMOTO_T_IPM_BLOWUP", BOX_BLOWUP, f64);
     let mut noimprove = 0usize;
 
     for it in 0..max_iters {
@@ -582,6 +583,19 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
         if !worst.is_finite() || !cx.is_finite() {
             // 数値的に破綻した (分解の失敗など): 最良の反復点に戻して打ち切る。
             break;
+        }
+        // 発散の打ち切り (`BOX_BLOWUP`): 正則化が下限に達した後、ほぼ収束した最良点からいまの点が大きく離れたら
+        // 最良点に戻して打ち切る (呼び出し側は最良点の残差で受理するか決める)。
+        if blowup > 0.0 && rho <= rho_min * REG_FLOOR_SLACK && delta <= delta_min * REG_FLOOR_SLACK {
+            if let Some(b) = best.as_ref() {
+                if b.0 <= BOX_BLOWUP_NEAR && worst > blowup * b.0 {
+                    if debug {
+                        eprintln!("IPM it={it} residual blew up ({worst:.3e} vs best {:.3e}); returning the best iterate", b.0);
+                    }
+                    crate::phase_timing::mark("ipm_blowup");
+                    break;
+                }
+            }
         }
         // 停滞の打ち切り (試験用 `ENOMOTO_T_IPM_NOIMPROVE=K`): 正則化が下限に達した後、最良点の `worst` が
         // K 反復続けて 10% 以上改善しなければ打ち切る (greenbea は 45 反復目から同じ点を往復する)。

@@ -1103,8 +1103,16 @@ pub(crate) mod interior_point {
     pub(crate) const BOX_REG_MIN: f64 = 1e-13;
 
     /// 箱型制約版の内点法の Gondzio の多重中心性補正子の最大回数 (試験用 `ENOMOTO_T_IPM_GONDZIO`、0 で Mehrotra の
-    /// 予測子・修正子だけ)。
-    pub(crate) const BOX_GONDZIO: usize = 2;
+    /// 予測子・修正子だけ)。第 15 回の比較で 2 回は反復数を減らすが、クロスオーバー後の仕上げが長引く問題が出た
+    /// (perold 1.2 → 57 秒、pilot87 15 → 442 秒) ので使わない。
+    pub(crate) const BOX_GONDZIO: usize = 0;
+
+    /// 箱型制約版の内点法の発散の打ち切り (試験用 `ENOMOTO_T_IPM_BLOWUP`、0 で無効)。正則化が下限に達した後、最良の
+    /// 反復点の相対残差の最悪値が `BOX_BLOWUP_NEAR` 以下 (ほぼ収束) なのに、いまの点の最悪値がその `BOX_BLOWUP` 倍を
+    /// 超えたら、最良点に戻して打ち切る。正則化 1e-13 では正規方程式の精度が落ちて、収束間際から主残差が跳ね上がり
+    /// 戻らないことがある (wood1p: 29 反復目で主残差 2e-10 → 30 反復目 1.7e-2、以後 200 反復まで回る)。
+    pub(crate) const BOX_BLOWUP: f64 = 1e3;
+    pub(crate) const BOX_BLOWUP_NEAR: f64 = 1e3;
 
     /// 停止判定 (主・双対残差と双対ギャップ) の絶対許容誤差。
     pub(crate) const EPS_ABS: f64 = 1e-8;
