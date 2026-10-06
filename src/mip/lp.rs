@@ -1701,7 +1701,8 @@ impl LpEngine {
                 scale = scale.max(b.abs());
             }
         }
-        let tol = 1e-7 * (1.0 + scale);
+        // 丸め誤差 (相対 1e-9) を超えて符号が確かなら証明とみなす。
+        let tol = 1e-9 * (1.0 + scale);
         lo_sum > tol || up_sum < -tol
     }
 

@@ -90,6 +90,9 @@ pub(super) struct Solver<'a> {
     pub(super) locks: Vec<(u32, u32)>,
     /// 擬似乱数の状態。
     pub(super) rng: u64,
+    /// 根の LP の目的値と、非基底の構造変数の (列, 下限側か, 被約費用)。暫定解が良くなるたびに
+    /// 大域的な被約費用固定に使う。
+    pub(super) root_redcost: Option<(f64, Vec<(usize, bool, f64, f64)>)>,
     /// ノードの LP (強分岐以外) に使った反復数と回数。
     node_iters: u64,
     node_lps: u64,
@@ -126,6 +129,7 @@ pub fn solve(p: &MipProblem, params: MipParams) -> MipResult {
         heur_iters: 0,
         locks: super::heuristics::compute_locks(p),
         rng: 0x2545_F491_4F6C_DD1D,
+        root_redcost: None,
         node_iters: 0,
         node_lps: 0,
         unresolved: false,
@@ -178,6 +182,7 @@ impl<'a> Solver<'a> {
         let better = self.incumbent.as_ref().is_none_or(|(inc, _)| z < *inc - 1e-9 * inc.abs().max(1.0));
         if better {
             self.incumbent = Some((z, x));
+            self.root_redcost_fixing();
             let lim = self.prune_limit();
             self.queue.prune(lim);
             if self.params.verbose {
@@ -292,6 +297,8 @@ impl<'a> Solver<'a> {
                 }
             }
         }
+        self.store_root_redcost(root_obj);
+        self.root_redcost_fixing();
         self.queue.push(OpenNode { changes: Vec::new(), lower_bound: root_obj, estimate: root_obj, depth: 0, basis: Some(Rc::new(self.lp.basis())), branch: None });
         // 根のノードは LP を解いた状態のままなので、最初の取り出しでは定義域・LP を作り直さない。
         let mut first = true;
@@ -402,6 +409,19 @@ impl<'a> Solver<'a> {
                     self.try_lp_solution();
                     break None;
                 }
+                // 被約費用による局所的な固定。LP 解が新しい境界から外れたら解き直す。
+                if self.incumbent.is_some() && self.local_redcost_fixing(node_obj) {
+                    if !self.dom.propagate(self.p) {
+                        break None;
+                    }
+                    self.sync_lp();
+                    let x2 = self.lp.col_values();
+                    let moved = (0..self.p.n).any(|j| x2[j] < self.dom.lo[j] - FEASTOL || x2[j] > self.dom.up[j] + FEASTOL);
+                    if moved {
+                        resolves += 1;
+                        continue;
+                    }
+                }
                 // ノードのヒューリスティクス (安価な単純丸めは毎回、ランダム丸めは予算内で待ち行列から取り出したノードのみ)
                 if resolves == 0 {
                     self.simple_rounding(&x);
@@ -486,6 +506,69 @@ impl<'a> Solver<'a> {
             }
             None => self.finish(MipStatus::Infeasible, f64::INFINITY),
         }
+    }
+
+    /// 根の LP の被約費用を保存する。
+    fn store_root_redcost(&mut self, root_obj: f64) {
+        let b = self.lp.basis();
+        let d = self.lp.reduced_costs();
+        let mut v = Vec::new();
+        for j in 0..self.p.n {
+            if !self.p.is_int[j] {
+                continue;
+            }
+            match b.col[j] {
+                VarStatus::Lower if d[j] > 1e-7 => v.push((j, true, d[j], self.dom.lo[j])),
+                VarStatus::Upper if d[j] < -1e-7 => v.push((j, false, d[j], self.dom.up[j])),
+                _ => {}
+            }
+        }
+        self.root_redcost = Some((root_obj, v));
+    }
+
+    /// 根の被約費用と現在の打ち切り値から、大域的に境界を締める。
+    fn root_redcost_fixing(&mut self) {
+        let Some((z, list)) = self.root_redcost.take() else { return };
+        let gap = self.prune_limit() - z;
+        if gap.is_finite() && gap >= 0.0 {
+            for &(j, at_lower, d, bound) in &list {
+                // 根の LP で変数がいた境界 `bound` を基準にする: z(x_j) >= z + d (x_j - bound)
+                if at_lower {
+                    self.dom.tighten_global(self.p, j, true, bound + gap / d);
+                } else {
+                    self.dom.tighten_global(self.p, j, false, bound - gap / (-d));
+                }
+            }
+        }
+        self.root_redcost = Some((z, list));
+    }
+
+    /// 現在の LP の被約費用で、このノード以下で有効な境界を締める。締めたら真。
+    fn local_redcost_fixing(&mut self, node_obj: f64) -> bool {
+        let gap = self.prune_limit() - node_obj;
+        if !(gap.is_finite() && gap >= 0.0) {
+            return false;
+        }
+        let b = self.lp.basis();
+        let d = self.lp.reduced_costs();
+        let mut changed = false;
+        for j in 0..self.p.n {
+            if self.dom.is_fixed(j) {
+                continue;
+            }
+            match b.col[j] {
+                VarStatus::Lower if d[j] > 1e-7 => {
+                    let lo = self.dom.lo[j];
+                    changed |= self.dom.tighten_upper(self.p, j, lo + gap / d[j]);
+                }
+                VarStatus::Upper if d[j] < -1e-7 => {
+                    let up = self.dom.up[j];
+                    changed |= self.dom.tighten_lower(self.p, j, up - gap / (-d[j]));
+                }
+                _ => {}
+            }
+        }
+        changed
     }
 
     pub(super) fn avg_node_iters(&self) -> u64 {
