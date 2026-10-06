@@ -678,7 +678,10 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     }
     let cnorm = std.c.iter().fold(0.0f64, |a, v| a.max(v.abs()));
     let mut top = vec![0.0; n];
-    let mid_p = vec![-tunable!("ENOMOTO_T_XO_EPS_PRIMAL", prm::EPS_PRIMAL, f64); m];
+    let mut mid_p = vec![-tunable!("ENOMOTO_T_XO_EPS_PRIMAL", prm::EPS_PRIMAL, f64); m];
+    // 試験用 (`ENOMOTO_T_XO_EPS_ESCALATE=K`): 射影が非有限 (分解の破綻: ns1688926) なら、正則化 ε を 1e3 倍に
+    // 強めて分解し直す (K 回まで、ε は 1e-4 まで)。既定は摂動を引き直して 1 回だけ分解し直す。
+    let mut eps_escalate_left = tunable!("ENOMOTO_T_XO_EPS_ESCALATE", 0usize, usize);
     let mut need_factor = true;
     let mut n_basic_last = usize::MAX;
     let mut round = 0usize;
@@ -798,6 +801,17 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
             // A_B が列フルランクなら正常な終わり。|B| > m なのに向きが無いのは射影の数値的な失敗なので、
             // 摂動を引き直して 1 回だけ分解し直し、それでも駄目なら押し出しを終えて基底の選択に任せる
             // (以前は分解し直しを 10n 回まで繰り返していた: pds-20)。
+            if !finite && eps_escalate_left > 0 && -mid_p[0] < 1e-4 {
+                eps_escalate_left -= 1;
+                let eps = (-mid_p[0] * 1e3).min(1e-4);
+                mid_p.fill(-eps);
+                if debug {
+                    eprintln!("CROSSOVER primal push: non-finite projection; raising eps to {eps:.1e}");
+                }
+                need_factor = true;
+                n_basic_last = usize::MAX;
+                continue;
+            }
             if n_basic > m && !retried {
                 retried = true;
                 need_factor = true;
