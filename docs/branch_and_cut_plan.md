@@ -187,3 +187,26 @@ HiGHS (`HighsPrimalHeuristics::feasibilityPump`、約 120 行) と同じ形で�
 - **整数行の右辺の丸め**: 係数と変数がすべて整数の行で、`rhs ← floor(rhs + feastol)` とする。gcd でも割る。
 - **暗黙整数の検出**: 等式行の残り 1 つの連続変数が、他が整数なら整数値しかとらない場合に整数扱いにする。分岐対象にはしないが、カット生成に使う。
 - **probing / clique 抽出**: 段階 7 で domain 伝播の部品を使って実装する。
+
+---
+
+## 9. 実装の状況 (2026-10-06)
+
+| 段階 | 状況 | 実装 |
+|---|---|---|
+| 0 | 一部完了 | MIP の LP は既存の傾き・切片二段解法を使う (`simplex/mip_lp.rs`)。前処理なしの標準形を保持し、境界の変更は平行移動と右辺の差分更新で反映、直前の最適基底から warm start。二段解法本体には外部からの打ち切り条件 (反復上限・目的値・時刻) と、最適基底の LU の受け渡しを追加。分枝限定法専用に書いた単体法 (`mip/lp.rs`) も `ENOMOTO_MIP_LP=own` で選べるが、blend2 / qnet1 で誤答するので既定にしない。残り: 求解ごとの準備処理 (PRICE 用の行列など) の持ち越し |
+| 0' | 完了 | `presolve::run_extended_mip`。列を消す縮約は連続列だけ、整数列の境界は丸める、双対の議論に基づく縮約とスケーリングは行わない。後処理した解を元の問題で検査し、だめなら前処理なしで解き直す |
+| 1 | 完了 | `mip/solver.rs`、`mip/queue.rs`。plunge、下界順と hybrid estimate 順の待ち行列、打ち切り、時間・ノード・ギャップの上限 |
+| 2 | 完了 | `mip/domain.rs`。活動量の差分更新、整数の丸め、連続変数は 30% 以上の改善のときだけ |
+| 3 | 完了 | pseudocost + 強分岐 (reliability 8、全体の反復予算、片側が打ち切りなら固定) |
+| 4 | 完了 | 単純丸め、固定と伝播による丸め、Feasibility Pump、Feasibility Jump |
+| 5 | 一部完了 | 根の切除平面ループ (CMIR、拡張カバー、元の行と tableau 行)。ノードでの分離は実装したが遅くなる問題が多く既定では無効 (`ENOMOTO_MIP_NODE_CUTS=1`) |
+| 6 | 完了 | 被約費用固定 (根の情報で大域的に、各ノードで局所的に)、RENS / RINS (サブ MIP) |
+| 7 | 未着手 | conflict analysis、clique、probing、path / mod-k、restart、対称性 |
+
+検証: 乱数 MIP (`scripts/mip_fuzz_vs_highs.py`) で HiGHS と最適値が一致することを各変更で確認。
+MIPLIB 2017 の 40 問の比較は `scripts/run_miplib_benchmark.py`。
+
+既知の課題:
+- 強分岐の LP 反復が多い (10teams など退化の強い問題で、1 回の LP が 100〜500 反復)
+- 退化の強い問題で暫定解が見つかるのが遅い (10teams など)
