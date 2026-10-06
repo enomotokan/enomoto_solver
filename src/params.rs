@@ -113,6 +113,10 @@ pub(crate) mod simplex {
     /// 部分価格付けのグループ数: まず約 `1/PARTIAL_PRICING_GROUPS` の列を標本として調べる。
     pub(crate) const PARTIAL_PRICING_GROUPS: u64 = 10;
 
+    /// 内点法 + クロスオーバーを独立な成分ごとに分けて行うときの、1 つで解く成分の変数の数の下限
+    /// (`ENOMOTO_T_XO_SPLIT_MIN_VARS`、0 で分けない)。これより小さい成分はまとめて解く。
+    pub(crate) const XO_SPLIT_MIN_VARS: usize = 1000;
+
     /// 前処理での Ruiz スケーリングの反復回数。
     pub(crate) const RUIZ_ITERS: usize = 10;
 
