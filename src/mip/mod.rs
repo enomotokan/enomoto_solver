@@ -14,6 +14,7 @@ pub(crate) mod domain;
 pub(crate) mod queue;
 pub(crate) mod pseudocost;
 pub(crate) mod solver;
+pub(crate) mod heuristics;
 
 use crate::solver::solve_lp;
 use crate::types::{ConstraintRow, LpOptions, MipSettings, MipSummary, Objective, RootSolver, SolveResult, Status, VarType, VariableData};

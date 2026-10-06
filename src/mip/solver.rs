@@ -70,20 +70,26 @@ enum BranchAction {
     Prune,
 }
 
-struct Solver<'a> {
-    p: &'a MipProblem,
-    params: MipParams,
-    dom: Domain,
-    lp: LpEngine,
-    queue: NodeQueue,
-    pc: Pseudocost,
-    incumbent: Option<(f64, Vec<f64>)>,
-    obj_step: Option<f64>,
-    start: Instant,
-    deadline: Option<Instant>,
-    nodes: u64,
+pub(super) struct Solver<'a> {
+    pub(super) p: &'a MipProblem,
+    pub(super) params: MipParams,
+    pub(super) dom: Domain,
+    pub(super) lp: LpEngine,
+    pub(super) queue: NodeQueue,
+    pub(super) pc: Pseudocost,
+    pub(super) incumbent: Option<(f64, Vec<f64>)>,
+    pub(super) obj_step: Option<f64>,
+    pub(super) start: Instant,
+    pub(super) deadline: Option<Instant>,
+    pub(super) nodes: u64,
     /// 強分岐に使った LP 反復数。
-    sb_iters: u64,
+    pub(super) sb_iters: u64,
+    /// ヒューリスティクスに使った LP 反復数。
+    pub(super) heur_iters: u64,
+    /// 列ごとの lock 数 (下げると違反しうる行の数, 上げると違反しうる行の数)。
+    pub(super) locks: Vec<(u32, u32)>,
+    /// 擬似乱数の状態。
+    pub(super) rng: u64,
     /// ノードの LP (強分岐以外) に使った反復数と回数。
     node_iters: u64,
     node_lps: u64,
@@ -117,6 +123,9 @@ pub fn solve(p: &MipProblem, params: MipParams) -> MipResult {
         deadline,
         nodes: 0,
         sb_iters: 0,
+        heur_iters: 0,
+        locks: super::heuristics::compute_locks(p),
+        rng: 0x2545_F491_4F6C_DD1D,
         node_iters: 0,
         node_lps: 0,
         unresolved: false,
@@ -126,16 +135,16 @@ pub fn solve(p: &MipProblem, params: MipParams) -> MipResult {
 }
 
 impl<'a> Solver<'a> {
-    fn time_up(&self) -> bool {
+    pub(super) fn time_up(&self) -> bool {
         self.deadline.is_some_and(|d| Instant::now() >= d)
     }
 
-    fn limits(&self, iteration_limit: u64) -> SolveLimits {
+    pub(super) fn limits(&self, iteration_limit: u64) -> SolveLimits {
         SolveLimits { iteration_limit, cutoff: self.prune_limit() - self.p.offset, deadline: self.deadline }
     }
 
     /// この値以上の下界のノードは捨ててよい (最小化形、定数項込み)。
-    fn prune_limit(&self) -> f64 {
+    pub(super) fn prune_limit(&self) -> f64 {
         match &self.incumbent {
             None => f64::INFINITY,
             Some((z, _)) => {
@@ -149,14 +158,14 @@ impl<'a> Solver<'a> {
         }
     }
 
-    fn sync_lp(&mut self) {
+    pub(super) fn sync_lp(&mut self) {
         for j in self.dom.take_changed() {
             self.lp.set_col_bounds(j, self.dom.lo[j], self.dom.up[j]);
         }
     }
 
     /// 解 `x` (整数列は丸める) を暫定解として試す。採用したら真。
-    fn try_incumbent(&mut self, mut x: Vec<f64>) -> bool {
+    pub(super) fn try_incumbent(&mut self, mut x: Vec<f64>) -> bool {
         for j in 0..self.p.n {
             if self.p.is_int[j] {
                 x[j] = x[j].round();
@@ -179,7 +188,7 @@ impl<'a> Solver<'a> {
     }
 
     /// LP 解の整数列を丸めた点を試し、行で少しはみ出るなら整数を固定して連続部分を LP で解き直す。
-    fn try_lp_solution(&mut self) -> bool {
+    pub(super) fn try_lp_solution(&mut self) -> bool {
         let x = self.lp.col_values();
         if self.try_incumbent(x.clone()) {
             return true;
@@ -205,7 +214,7 @@ impl<'a> Solver<'a> {
     }
 
     /// 現在の LP 解で整数でない整数列の (列, 値) の一覧。
-    fn fractional(&self, x: &[f64]) -> Vec<(usize, f64)> {
+    pub(super) fn fractional(&self, x: &[f64]) -> Vec<(usize, f64)> {
         (0..self.p.n)
             .filter(|&j| self.p.is_int[j] && (x[j] - x[j].round()).abs() > FEASTOL && self.dom.lo[j] < self.dom.up[j])
             .map(|j| (j, x[j]))
@@ -234,6 +243,14 @@ impl<'a> Solver<'a> {
     }
 
     fn run(&mut self) -> MipResult {
+        // LP を使わない局所探索 (Feasibility Jump) で最初の実行可能解を探す。
+        {
+            let nnz: usize = self.p.rows.iter().map(|r| r.len()).sum();
+            let cap = if self.params.time_limit.is_finite() { (0.05 * self.params.time_limit).min(5.0) } else { 5.0 };
+            if self.feasibility_jump((50 * nnz as u64).clamp(100_000, 50_000_000), cap) && self.params.verbose {
+                eprintln!("MIP: feasibility jump found a solution ({:.2}s)", self.start.elapsed().as_secs_f64());
+            }
+        }
         // 根の LP
         let root_st = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
         match root_st {
@@ -244,8 +261,25 @@ impl<'a> Solver<'a> {
             _ => return self.finish(MipStatus::NotSolved, f64::NEG_INFINITY),
         }
         let root_obj = self.lp.objective() + self.p.offset;
+        let root_iters = self.lp.total_iterations();
         if self.params.verbose {
             eprintln!("MIP: root LP {:.10e} ({} iters, {:.2}s)", root_obj, self.lp.total_iterations(), self.start.elapsed().as_secs_f64());
+        }
+        // 根のヒューリスティクス
+        {
+            let x = self.lp.col_values();
+            if self.fractional(&x).is_empty() {
+                self.try_lp_solution();
+            } else {
+                self.simple_rounding(&x);
+                self.randomized_rounding(&x, 3);
+                if self.incumbent.is_none() {
+                    self.feasibility_pump(root_iters);
+                }
+                if self.params.verbose {
+                    eprintln!("MIP: after root heuristics: incumbent {:?} ({:.2}s)", self.incumbent.as_ref().map(|(z, _)| *z), self.start.elapsed().as_secs_f64());
+                }
+            }
         }
         self.queue.push(OpenNode { changes: Vec::new(), lower_bound: root_obj, estimate: root_obj, depth: 0, basis: Some(Rc::new(self.lp.basis())), branch: None });
         // 根のノードは LP を解いた状態のままなので、最初の取り出しでは定義域・LP を作り直さない。
@@ -357,6 +391,17 @@ impl<'a> Solver<'a> {
                     self.try_lp_solution();
                     break None;
                 }
+                // ノードのヒューリスティクス (安価な単純丸めは毎回、ランダム丸めは予算内で待ち行列から取り出したノードのみ)
+                if resolves == 0 {
+                    self.simple_rounding(&x);
+                    let budget = self.lp.total_iterations() / 20 + 10_000;
+                    if node.depth > 0 && plunge_depth == 0 && self.heur_iters < budget {
+                        self.randomized_rounding(&x, 1);
+                    }
+                    if node_obj >= self.prune_limit() {
+                        break None;
+                    }
+                }
                 match self.select_branch(&frac, node_obj) {
                     BranchAction::Resolve => {
                         resolves += 1;
@@ -432,7 +477,7 @@ impl<'a> Solver<'a> {
         }
     }
 
-    fn avg_node_iters(&self) -> u64 {
+    pub(super) fn avg_node_iters(&self) -> u64 {
         if self.node_lps == 0 { 1000 } else { self.node_iters / self.node_lps + 1 }
     }
 

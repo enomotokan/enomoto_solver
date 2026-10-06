@@ -105,14 +105,15 @@ impl MipProblem {
         self.offset + (0..self.n).map(|j| self.cost[j] * x[j]).sum::<f64>()
     }
 
-    /// 点 `x` が許容誤差 `tol` (相対) で実行可能か (整数性も確かめる)。
+    /// 点 `x` が許容誤差 `tol` で実行可能か (整数性も確かめる)。行・境界の許容誤差は
+    /// 絶対値 `tol` に、右辺の大きさに比例する丸め誤差分 (`1e-9 |rhs|`) を足したもの。
     pub fn is_feasible(&self, x: &[f64], tol: f64) -> bool {
         for j in 0..self.n {
             let v = x[j];
             if !v.is_finite() {
                 return false;
             }
-            if v < self.col_lo[j] - tol * (1.0 + self.col_lo[j].abs()) || v > self.col_up[j] + tol * (1.0 + self.col_up[j].abs()) {
+            if v < self.col_lo[j] - feas_tol(tol, self.col_lo[j]) || v > self.col_up[j] + feas_tol(tol, self.col_up[j]) {
                 return false;
             }
             if self.is_int[j] && (v - v.round()).abs() > tol {
@@ -121,7 +122,7 @@ impl MipProblem {
         }
         for i in 0..self.m {
             let act: f64 = self.rows[i].iter().map(|&(j, a)| a * x[j]).sum();
-            if act < self.row_lo[i] - tol * (1.0 + self.row_lo[i].abs()) || act > self.row_up[i] + tol * (1.0 + self.row_up[i].abs()) {
+            if act < self.row_lo[i] - feas_tol(tol, self.row_lo[i]) || act > self.row_up[i] + feas_tol(tol, self.row_up[i]) {
                 return false;
             }
         }
@@ -172,4 +173,10 @@ fn gcd(a: i64, b: i64) -> i64 {
         b = t;
     }
     a
+}
+
+/// 境界 `b` に対する実行可能性の許容誤差 (絶対 `tol` + 相対 1e-9)。
+#[inline]
+fn feas_tol(tol: f64, b: f64) -> f64 {
+    tol + 1e-9 * b.abs()
 }

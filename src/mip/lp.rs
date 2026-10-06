@@ -1507,7 +1507,7 @@ impl LpEngine {
                     }
                     slope_drop += remaining[idx].2 * range;
                 }
-                if can_flip && slope - slope_drop > 0.0 && group.len() < remaining.len() {
+                if can_flip && slope - slope_drop > PRIMAL_TOL && group.len() < remaining.len() {
                     slope -= slope_drop;
                     let mut keep = Vec::with_capacity(remaining.len() - group.len());
                     let mut gi = 0;
@@ -1522,7 +1522,7 @@ impl LpEngine {
                     remaining = keep;
                     continue;
                 }
-                if can_flip && slope - slope_drop > 0.0 {
+                if can_flip && slope - slope_drop > PRIMAL_TOL {
                     // すべて反転しても傾きが残る = 双対非有界 (主実行不能)
                     for &idx in &group {
                         flips.push(remaining[idx].0);
