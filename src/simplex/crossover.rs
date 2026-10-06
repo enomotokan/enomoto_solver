@@ -626,15 +626,16 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     if ipm.status != Status::Optimal && !(matches!(ipm.status, Status::NotSolved) && accepted) {
         return None;
     }
-    // 試験用 (`ENOMOTO_T_XO_GAMMA_PDHG`): 非基底の検出の比 γ を、PDLP の 1 歩の主の歩幅
+    // 非基底の検出の比 γ を、PDLP の 1 歩の主の歩幅
     // `τ_j = (η/ω) dc_j²` (元の変数の単位) にする。検出規則 `x_j - l_j <= γ s_j` は、PDHG の 1 歩
     // `x⁺ = proj(x - τ s)` で境界に張り付く列と一致する。
     //   1: PDLP の前処理 (Ruiz + Pock–Chambolle) と初期の η, ω、
     //   2: PDLP を 0 から最初の再始動まで回した η, ω、
-    //   3: 1 の歩幅で内点法の点から PDHG を文字どおり 1 歩進め (x⁺, y⁺)、その点で検出する、
+    //   3 (既定、第 16・17 回の比較): 1 の歩幅で内点法の点から PDHG を文字どおり 1 歩進め (x⁺, y⁺)、その点で検出する、
     //   4: 2 の歩幅で 3 と同じく 1 歩進める。
-    // `ENOMOTO_T_XO_GAMMA_MULT` は γ (既定の 1 も含む) に掛ける倍率。
-    let gamma_mode = tunable!("ENOMOTO_T_XO_GAMMA_PDHG", 0u8, u8);
+    //   0: 参照実装と同じ γ = 1 (`ENOMOTO_T_XO_GAMMA_PDHG` で選ぶ)。
+    // `ENOMOTO_T_XO_GAMMA_MULT` は γ に掛ける倍率。
+    let gamma_mode = tunable!("ENOMOTO_T_XO_GAMMA_PDHG", 3u8, u8);
     let gamma_mult = tunable!("ENOMOTO_T_XO_GAMMA_MULT", 1.0f64, f64);
     let mut gamma = vec![prm::GAMMA * gamma_mult; n];
     let mut pdhg_sigma: Option<Vec<f64>> = None;
