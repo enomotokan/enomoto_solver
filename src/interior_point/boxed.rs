@@ -366,6 +366,9 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
     let gondzio_max = tunable!("ENOMOTO_T_IPM_GONDZIO", 0usize, usize);
     let gondzio_small_step = tunable!("ENOMOTO_T_IPM_GONDZIO_SMALL_STEP", 1.0f64, f64);
     let mut nan_recover_left = tunable!("ENOMOTO_T_IPM_NAN_RECOVER", 0usize, usize);
+    let switch_aug_k = tunable!("ENOMOTO_T_IPM_SWITCH_AUG", 0usize, usize);
+    let mut sw_best = f64::INFINITY;
+    let mut sw_count = 0usize;
     // 真なら近接中心 (ξ, λ, ν) を残差の減り方によらず毎反復更新する。
     let prox_always = tunable!("ENOMOTO_T_IPM_PROX_ALWAYS", 0u8, u8) != 0;
     let delta_min = tunable!("ENOMOTO_T_IPM_DELTA_MIN", DELTA_MIN, f64);
@@ -590,6 +593,24 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
             best = Some((worst, x.clone(), y.clone(), rc, rel));
         }
 
+        // 試験用 (`ENOMOTO_T_IPM_SWITCH_AUG=K`): 正規方程式で、相対残差の最悪値が K 反復続けて最良値の 0.9 倍を
+        // 下回らなければ拡大系に切り替える (稠密な列を分離した正規方程式は、残りの疎な部分がほぼ特異だと
+        // 桁落ちで方向の精度が出ず停滞する: ns1688926)。
+        if switch_aug_k > 0 && kkt.is_normal() {
+            if worst < 0.9 * sw_best {
+                sw_best = worst;
+                sw_count = 0;
+            } else {
+                sw_count += 1;
+                if sw_count >= switch_aug_k {
+                    if debug {
+                        eprintln!("IPM it={it} normal equations stalled for {switch_aug_k} iterations; switching to the augmented system");
+                    }
+                    kkt = IpmKkt::augmented(a);
+                    crate::phase_timing::mark("ipm_switch_augmented");
+                }
+            }
+        }
         let at_floor = rho <= rho_min * REG_FLOOR_SLACK && delta <= delta_min * REG_FLOOR_SLACK;
         if res.primal >= prev_p * STALL_PROGRESS_RATIO && res.dual >= prev_d * STALL_PROGRESS_RATIO && at_floor {
             stall += 1;
@@ -659,6 +680,11 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
         newton(&mut kkt, a, &top, delta, &r_x, &r_y, &mut lo, &mut up, &pos, &mut sol_aff, n, &mut refine_work);
         prof.1 += t_s.elapsed().as_secs_f64();
         if !sol_aff.iter().all(|v| v.is_finite()) {
+            // 正規方程式の破綻は、切り替えが有効なら拡大系に切り替える。
+            if switch_aug_k > 0 && kkt.is_normal() {
+                kkt = IpmKkt::augmented(a);
+                crate::phase_timing::mark("ipm_switch_augmented");
+            }
             // 分解が破綻した: 正則化を強めて次の反復で分解し直す。
             rho = (rho * 100.0).max(1e-8);
             delta = (delta * 100.0).max(1e-8);

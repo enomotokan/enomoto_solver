@@ -783,6 +783,11 @@ impl IpmKkt {
         IpmKkt::Aug(AugKkt::new(a))
     }
 
+    /// 拡大系 (`A` から新たに作る。正規方程式が停滞したときの切り替え用)。
+    pub fn augmented(a: &FaerCsr) -> Self {
+        IpmKkt::Aug(AugKkt::new(a))
+    }
+
     pub fn is_normal(&self) -> bool {
         matches!(self, IpmKkt::Normal(_))
     }
