@@ -2278,3 +2278,33 @@ mod debug_tests {
         eprintln!("reference {:?} {:?}", rs, ro);
     }
 }
+
+#[cfg(test)]
+mod twostage_warm_tests {
+    use super::tests::random_lp_pub;
+    use crate::simplex::mip_lp::TwoStageLp;
+    use super::{LpStatus, SolveLimits};
+
+    #[test]
+    #[ignore]
+    fn warm_resolve_iterations() {
+        let mut tot = (0u64, 0u64, 0u64);
+        for seed in 0..30u64 {
+            let (lo, up, c, rows, rlo, rup) = random_lp_pub(seed + 77, 60, 40);
+            let mut lp = TwoStageLp::new(&lo, &up, &c, &rows, &rlo, &rup);
+            if lp.solve(&SolveLimits::default()) != LpStatus::Optimal { continue; }
+            let i0 = lp.total_iterations();
+            lp.solve(&SolveLimits::default());
+            let i1 = lp.total_iterations();
+            // 1 つの境界を締める
+            let x = lp.col_values();
+            let j = (0..60).find(|&j| up[j].is_finite() && x[j] > lo[j] + 0.5).unwrap_or(0);
+            lp.set_col_bounds(j, lo[j], (x[j] - 0.5).floor().max(lo[j]));
+            lp.solve(&SolveLimits::default());
+            let i2 = lp.total_iterations();
+            tot.0 += i0; tot.1 += i1 - i0; tot.2 += i2 - i1;
+            eprintln!("seed {seed}: cold {i0} resolve {} branch {}", i1 - i0, i2 - i1);
+        }
+        eprintln!("total cold {} resolve {} branch {}", tot.0, tot.1, tot.2);
+    }
+}

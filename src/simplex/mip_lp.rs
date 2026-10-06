@@ -404,9 +404,10 @@ impl TwoStageLp {
     pub fn solve(&mut self, lim: &SolveLimits) -> LpStatus {
         let t0 = std::time::Instant::now();
         let it0 = self.iters;
+        let pol0 = sid::ext_polish_iterations();
         let st = self.solve_inner(lim);
         if env_str!("ENOMOTO_MIP_DEBUG_LP").is_some() {
-            eprintln!("TSLP solve st={st:?} iters={} us={} warm={}", self.iters - it0, t0.elapsed().as_micros(), self.basis.is_some());
+            eprintln!("TSLP solve st={st:?} iters={} polish={} us={} warm={}", self.iters - it0, sid::ext_polish_iterations() - pol0, t0.elapsed().as_micros(), self.basis.is_some());
         }
         self.status = Some(st);
         st

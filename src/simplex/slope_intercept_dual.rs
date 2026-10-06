@@ -842,6 +842,8 @@ thread_local! {
     static EXT_STOP: std::cell::Cell<ExtStop> = const { std::cell::Cell::new(ExtStop::None) };
     /// このスレッドで数えた反復の累計 (主ループと仕上げ)。
     static EXT_ITERS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// そのうち仕上げ (`polish_with_true_bounds`) の反復。
+    static EXT_POLISH_ITERS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// 打ち切り条件を設定する (`None` で解除)。打ち切りの理由を消す。
@@ -858,6 +860,11 @@ pub(crate) fn ext_stop() -> ExtStop {
 /// このスレッドの反復の累計。
 pub(crate) fn ext_iterations() -> u64 {
     EXT_ITERS.with(|x| x.get())
+}
+
+/// このスレッドの仕上げの反復の累計。
+pub(crate) fn ext_polish_iterations() -> u64 {
+    EXT_POLISH_ITERS.with(|x| x.get())
 }
 
 /// 主ループ・仕上げの 1 反復ごとに呼ぶ。打ち切るべきなら真 (理由を記録する)。
@@ -6494,6 +6501,7 @@ pub(super) fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_
         if iter_idx & 63 == 0 && crate::cancel::is_cancelled() {
             return None; // 同時実行の相手が先に結論を出した
         }
+        EXT_POLISH_ITERS.with(|x| x.set(x.get() + 1));
         if ext_check(iter_idx, false, || f64::NEG_INFINITY) {
             return None; // 外部の打ち切り条件 (分枝限定法の LP)
         }
