@@ -376,6 +376,7 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
     // 2: ρ = δ = κ μ、3: PIQP の規則を κ μ で頭打ち。
     let reg_mode = tunable!("ENOMOTO_T_IPM_REG_MODE", 1u8, u8);
     let reg_kappa = tunable!("ENOMOTO_T_IPM_REG_KAPPA", 1.0f64, f64);
+    let reg_gap_floor = tunable!("ENOMOTO_T_IPM_REG_GAP_FLOOR", 0.0f64, f64);
 
     // ---- 初期化: W = 1 + δ の正則化 KKT 系を 1 回解く ----
     let w0 = 1.0 + delta;
@@ -835,6 +836,16 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
             } else {
                 rho = rho.min(target);
                 delta = delta.min(target);
+            }
+        }
+        // 試験用 (`ENOMOTO_T_IPM_REG_GAP_FLOOR=κ`): 正則化を相対双対ギャップに比例する値より下げない
+        // (ρ, δ >= κ · min(1, gap / (1 + |c·x| + |b·y + h·z|)))。ギャップが大きいまま正則化が下限に落ちて停滞する
+        // 問題 (dfl001, fome13) 用。相対ギャップは 1 で頭打ちにする (序盤の巨大なギャップで正則化が跳ね上がらないように)。
+        if reg_gap_floor > 0.0 {
+            let floor = reg_gap_floor * (gap / (1.0 + cx.abs() + (by + hz).abs())).min(1.0);
+            if floor.is_finite() {
+                rho = rho.max(floor);
+                delta = delta.max(floor);
             }
         }
         delta = delta.max(delta_min);
