@@ -88,6 +88,12 @@ pub fn solve_mip(
         }
         None => solver::solve(&p, params),
     };
+    if env_str!("ENOMOTO_MIP_XPROF").is_some() {
+        crate::simplex::slope_intercept_dual::xprof("tail");
+        for (l, ns) in crate::simplex::slope_intercept_dual::xprof_take() {
+            eprintln!("XPROF {l:10} {:10.1} ms", ns as f64 / 1e6);
+        }
+    }
     let s = p.sense_sign;
     let objective_value = r.objective.map(|z| s * z);
     let gap = match r.objective {

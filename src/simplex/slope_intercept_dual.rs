@@ -769,6 +769,14 @@ fn record_duals(std: &StdForm, basis_pos: &[Option<usize>]) {
 /// [`record_duals`] の、基底の LU が手元にある場合の版 (分解し直さない)。分枝限定法の LP 用に
 /// 求められていれば LU も [`take_last_lu`] で取り出せるよう保存する。
 fn record_duals_with(std: &StdForm, basis_pos: &[Option<usize>], lu_in: Option<&sparse_lu::FtLu>) {
+    xprof("polish");
+    struct Done;
+    impl Drop for Done {
+        fn drop(&mut self) {
+            xprof("duals");
+        }
+    }
+    let _done = Done;
     if let Some(lu) = lu_in {
         if WANT_LU.with(|w| w.get()) {
             LAST_LU.with(|l| *l.borrow_mut() = Some(Box::new(lu.clone())));
@@ -889,6 +897,36 @@ fn ext_check(iter_idx: usize, stage_b: bool, bound: impl FnOnce() -> f64) -> boo
         return true;
     }
     false
+}
+
+thread_local! {
+    /// 診断用の区間計時 (`xprof`)。有効なら (前回の印の時刻, 区間名ごとの累計 ns)。
+    static XPROF: std::cell::RefCell<Option<(std::time::Instant, Vec<(&'static str, u128)>)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// 診断用: 区間計時を有効/無効にする (有効にすると累計を消す)。
+pub(crate) fn xprof_enable(on: bool) {
+    XPROF.with(|x| *x.borrow_mut() = if on { Some((std::time::Instant::now(), Vec::new())) } else { None });
+}
+
+/// 診断用: 前回の印からここまでの時間を区間 `label` に足す。
+pub(crate) fn xprof(label: &'static str) {
+    XPROF.with(|x| {
+        if let Some((t, acc)) = x.borrow_mut().as_mut() {
+            let now = std::time::Instant::now();
+            let ns = now.duration_since(*t).as_nanos();
+            *t = now;
+            match acc.iter_mut().find(|(l, _)| *l == label) {
+                Some(e) => e.1 += ns,
+                None => acc.push((label, ns)),
+            }
+        }
+    });
+}
+
+/// 診断用: 累計を取り出す。
+pub(crate) fn xprof_take() -> Vec<(&'static str, u128)> {
+    XPROF.with(|x| x.borrow().as_ref().map(|(_, a)| a.clone()).unwrap_or_default())
 }
 
 thread_local! {
@@ -2907,6 +2945,14 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     // 試し分解がピボットを特異として却下したら、この求解の残りは安全モードにする(下の
     // `pivot_makes_singular` 参照)。
     let mut safe_pivot = safe_pivot;
+    xprof("outside");
+    struct ImplDone;
+    impl Drop for ImplDone {
+        fn drop(&mut self) {
+            xprof("impl_drop");
+        }
+    }
+    let _impl_done = ImplDone;
     // 全列数(構造列+スラック列)、行数、構造列数。スラック列は `n_orig..n_total`。
     let n_total = std.n_total;
     let m = std.n_rows;
@@ -2992,10 +3038,12 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     // 前の求解が上げた閾値を引き継がないようリセットする)。
     sparse_lu::reset_pivot_threshold();
     // 現基底の LU 分解(Forrest-Tomlin 更新付き)。
+    xprof("setup1");
     let mut lu = match WARM_LU.with(|w| w.borrow_mut().take()) {
         Some(l) if warm_started && l.dim() == m => *l,
         _ => refactorize(std, &basis_pos, None)?,
     };
+    xprof("setup_lu");
 
     // 被約費用 `d`(Huangfu & Hall §2.2.3 の update-dual で増分維持)。列のコストは `M` に
     // 依存しない(依存するのは境界だけ)ので `d` は通常の `f64` 配列。全スラック基底では
@@ -6053,6 +6101,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
 /// `delta` は各列の `M` 追跡側、`cache` は元問題の `M`-アフィン境界
 /// (`ColCache::build`)、`lu` は現基底の LU 分解(再分解せずに受け取る)。
 fn finish(std: &StdForm, basis: &mut [usize], basis_pos: &mut [Option<usize>], nb_status: &mut [Option<NbStatus>], delta: &[MSide], cache: &ColCache, n_orig: usize, lu: sparse_lu::FtLu) -> Option<SimplexResult> {
+    xprof("main");
     // `lu` は主ループ最終反復の分解(現基底に対して正確)をそのまま使う。
     // 現基底での `x_B(M)` と目的関数値 `z(M) = z_B + z_N` を求める。
     let (x_b_base, x_b_slope) = solve_x_b(std, &lu, nb_status, cache)?;
@@ -6303,6 +6352,7 @@ fn finish(std: &StdForm, basis: &mut [usize], basis_pos: &mut [Option<usize>], n
 /// 引数 `basis`/`basis_pos`/`nb_status` は cleanup 後の基底状態(この関数で更新される)、
 /// `lu` はその基底の LU 分解。戻り値 `None` は数値的破綻(`NotSolved` として報告)。
 pub(super) fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [Option<usize>], nb_status: &mut [Option<NbStatus>], lu: sparse_lu::FtLu) -> Option<SimplexResult> {
+    xprof("finish");
     let n_total = std.n_total;
     let m = std.n_rows;
     // 停滞(目的関数がほぼ進まないピボット)がこの回数を超えたら Bland 規則に切り替える。

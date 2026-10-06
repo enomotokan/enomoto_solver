@@ -78,7 +78,7 @@ use self::lu as sparse_lu;
 /// 基底の求解の心臓部 (FTRAN・BTRAN・FT 更新・再分解の判定)。主単体法と双対単体法で共有する。
 mod basis_kernel;
 /// 傾き・切片二段解法 (実際の LP 求解本体)。
-mod slope_intercept_dual;
+pub(crate) mod slope_intercept_dual;
 /// 内点法 + クロスオーバー (Liu & Lu 2024) による求解 (`RootSolver::IpmCrossover`)。
 mod crossover;
 /// 傾き・切片双対二段解法と内点法 + クロスオーバーの同時実行 (`RootSolver::Auto`)。

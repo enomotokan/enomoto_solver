@@ -402,6 +402,9 @@ impl TwoStageLp {
     }
 
     pub fn solve(&mut self, lim: &SolveLimits) -> LpStatus {
+        if self.iters == 0 && env_str!("ENOMOTO_MIP_XPROF").is_some() {
+            sid::xprof_enable(true);
+        }
         let t0 = std::time::Instant::now();
         let it0 = self.iters;
         let pol0 = sid::ext_polish_iterations();
@@ -428,6 +431,7 @@ impl TwoStageLp {
         };
         let opts = LpOptions { distinguish_infeasible_unbounded: true, ..Default::default() };
         let it0 = sid::ext_iterations();
+        sid::xprof("between");
         sid::set_ext_control(Some(ctrl));
         sid::request_duals(true);
         sid::request_lu(true);
@@ -443,6 +447,7 @@ impl TwoStageLp {
             }
             _ => sid::solve_slope_intercept_dual(&self.std, &opts),
         };
+        sid::xprof("wrapper");
         sid::set_warm_lu(None);
         let stop = sid::ext_stop();
         sid::set_ext_control(None);
@@ -453,6 +458,7 @@ impl TwoStageLp {
         self.lu_cache = None;
         self.iters += sid::ext_iterations() - it0;
         self.lu = None;
+        sid::xprof("after");
         match r {
             Some(res) => match res.status {
                 Status::Optimal => {
