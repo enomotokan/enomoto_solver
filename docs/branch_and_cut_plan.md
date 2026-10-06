@@ -66,8 +66,7 @@ src/mip/
   node_queue.rs     NodeQueue: BTreeSet × 2 (lb 順、hybrid 順) + suboptimal 集合
   pseudocost.rs     Pseudocost: 上下別の平均、reliability、inference、cutoff
   branching.rs      reliability 分岐 + 強分岐
-  heuristics/       trivial.rs, rounding.rs, rens_rins.rs
-  tabu/             並列タブー探索ワーカー (§8): model.rs, moves.rs, penalty.rs, search.rs, exchange.rs
+  heuristics/       trivial.rs, rounding.rs, fj.rs (Feasibility Jump), rens_rins.rs
   cuts/             pool.rs, generation.rs (lifted cover / CMIR), transformed_lp.rs,
                     tableau.rs (Gomory 相当), aggregator.rs
   redcost.rs        被約費用固定
@@ -122,7 +121,7 @@ impl DualSimplexState {
 | **1** | 木探索の骨格: `Domain` (変更スタックと backtrack のみ)、`Search` (dive + backtrack、基底の継承)、`NodeQueue` (best-bound / hybrid)、cutoff、gap、上限 (時間 / ノード / gap)、状態の正しい分類、暫定解の実行可能性確認。この時点の分岐は pseudocost のみ | HighsSearch、HighsNodeQueue | 1,500 |
 | **2** | 境界伝播: 行活動量の差分更新、整数境界の丸め、連続変数は改善 30% 以上の場合だけ採用、`capacityThreshold` | HighsDomain | 1,200 |
 | **3** | reliability 分岐: 強分岐 (`snapshot` / `restore`、全体反復予算)、product score、inference / cutoff の副スコア、片側が不可能なら反対側に固定 | HighsPseudocost、`selectBranchingCandidate`、CbcNode | 800 |
-| **4** | 安価な主ヒューリスティクス: trivial、simple / randomized rounding。目的が整数値をとる場合の cutoff 増分。**分枝限定と並列に走るタブー探索ワーカー (§8)** | HighsPrimalHeuristics、CbcModel::analyzeObjective、Koguma 2024 (PRINTEMPS) | 900 + 2,500 |
+| **4** | 安価な主ヒューリスティクス: trivial、simple / randomized rounding、Feasibility Jump。目的が整数値をとる場合の cutoff 増分 | HighsPrimalHeuristics、HighsFeasibilityJump、CbcModel::analyzeObjective | 900 |
 | **5** | root のカットループとカットプール: `generateCut` (lifted cover / CMIR)、TransformedLp (境界と VUB の代入)、tableau 分離器 (Gomory 相当)、age / efficacy / 並列度、stall 判定、basic なカット行の削除 | HighsCutGeneration、HighsTableauSeparator、HighsCutPool、HighsSeparation、CglGomory (安全策) | 2,500 |
 | **6** | 被約費用固定 (root の lurking bound とノード)、RENS / RINS (再帰 MIP)、MIP 専用の縮約 (§7.3) | HighsRedcostFixing、HPresolve | 1,500 |
 | **7** | conflict analysis (dual proof)、clique table、probing、path / mod-k 分離器、restart、対称性 | ConflictSet、HighsCliqueTable、HighsImplications | 4,000 以上 |
@@ -171,84 +170,3 @@ impl DualSimplexState {
 - **整数行の右辺の丸め**: 係数と変数がすべて整数の行で、`rhs ← floor(rhs + feastol)` とする。gcd でも割る。
 - **暗黙整数の検出**: 等式行の残り 1 つの連続変数が、他が整数なら整数値しかとらない場合に整数扱いにする。分岐対象にはしないが、カット生成に使う。
 - **probing / clique 抽出**: 段階 7 で domain 伝播の部品を使って実装する。
-
----
-
-## 8. 分枝限定と並列に走るタブー探索ワーカー
-
-参考: Y. Koguma, "Tabu Search-Based Heuristic Solver for General Integer Linear Programming Problems", IEEE Access 12 (2024) 19059–19076、および実装 PRINTEMPS (C++、MIT ライセンス)。
-
-### 8.1 論文の要点
-
-- **対象**: 純整数 LP。連続変数は扱わない (PRINTEMPS は MPS 中の連続変数を整数とみなすか、エラーにする)。
-- **評価関数**: 制約違反に重みを掛けて目的関数に足した `f(x; w) = cᵀx + Σ w_i p_i(x)`。初期重みは `w0 = 1e7`。
-- **重みの調整**: 局所的な重み `v` を K = 200 反復の小ループごとに調整する。
-  - 解が改善した場合や停滞した場合は、満たされている制約の重みを `r = 0.9` 倍に下げる。
-  - それ以外は、違反している制約の重みを上げる。上げ幅は、局所最良解での評価値が大域最良値と一致するように選ぶ (最小ノルムの閉形式解)。
-- **近傍**:
-  - flip (0-1 変数を反転)
-  - shift (整数変数を ±1)
-  - jump (境界までの幅の半分だけ動かす)
-  - selection (`Σx = 1` を満たしたまま 1 の位置を入れ替える)
-- **高速化**:
-  - 近傍の絞り込み: 実行可能なら目的を改善する変数だけ、実行不能なら違反している行を改善する変数だけを評価する。
-  - 違反量の差分評価: 1 手の評価は、その手で値が変わる列の非零の数に比例する計算量で済む。
-- **その他の工夫**:
-  - タブー期間 T = 10。同点のときは更新回数の少ない変数を優先する (α = 1e-4)。
-  - 探索中に `cᵀx ≤ z*` を使って問題を縮小する。
-  - 従属変数 (`y = Σ a x + b`) を消去する。
-- **結果**: MIPLIB 2017 Benchmark の純整数 82 問を 120 秒で解き、SCIP / HiGHS / CBC のうち各問で最良のものと比べた。
-  - 17 問で上回った。内訳は、自分だけが実行可能解を見つけたものが 6 問、より良い解を見つけたものが 11 問。
-  - 逆に分枝限定の方が良かった問題は 35 問あり、**相補的**な性能だと言える。
-- **アブレーション**: 効果が大きいのは、どの問題にも効く汎用の 3 技法 (重み調整、近傍の絞り込み、差分評価) だった。
-- **弱点**: 実行可能解どうしが離れている問題 (例: `Σ_{j∈J'} x_j = |J'|·x'`。1 変数ずつ動かすと実行可能解の間を移れない) では解を見つけられない。
-
-### 8.2 並列化の構成
-
-```
- スレッド 0: 分枝限定 (Search / NodeQueue / LpRelaxation)
- スレッド 1: タブー探索ワーカー (presolve 後の MIP を対象)
-        ▲                      │
-        │  SharedState         ▼
-   ┌──────────────────────────────────────────┐
-   │ incumbent: (obj: AtomicU64(f64 のビット列), x: Mutex<Vec<f64>>, version) │
-   │ global_bounds: 大域的に固定・強化された境界 (version 付きのスナップショット) │
-   │ root_lp: root LP の解 x と双対値 y (1 回だけ公開)                           │
-   │ stop: AtomicBool (終了と時間上限)                                        │
-   └──────────────────────────────────────────┘
-```
-
-- **同期の頻度**: 分枝限定側はノードを処理するたびに `incumbent.version` を見る。新しい解があれば cutoff を更新し、ノードキューを刈り込む。タブー側は小ループ (K 反復) の切れ目で共有状態を読む。
-- **スレッド数**: 1 のときは分離せず、HiGHS のヒューリスティクス予算と同じく、LP 反復のおよそ 5–10% に当たる作業量の分だけ交互に実行する。
-- **決定的モード**: 時刻ではなく作業量 (タブーの手数と LP 反復数) で同期する時点を決め、同じ入力から同じ結果が出るようにする。既定は決定的モードとし、非決定的モードは速度優先の選択肢にする。
-- **既存部品の流用**: IPM と単体法の競争に使っている `cancel::SharedBound` / `cancel::with_token` の仕組みをそのまま使う。
-
-### 8.3 PRINTEMPS からの改良点
-
-1. **分枝限定からタブー探索へ情報を渡す** (論文の単体ソルバーにはできないこと)
-   - 初期解: 論文は境界内で 0 に最も近い値から始める。代わりに root LP の解を丸めた点から始める。
-   - 定義域: 分枝限定の大域的な境界変更 (伝播、被約費用固定、probing) を小ループの切れ目で反映する。論文の「探索中の縮小」より強い。
-   - 再出発: 分枝限定や他のヒューリスティクスが見つけた暫定解から探索を再開する。
-   - 初期重み: root LP の双対値 `|y_i|` に比例させて `v` を初期化する (実験して効果を確かめる)。
-2. **タブー探索から分枝限定へ情報を渡す**
-   - 暫定解を渡し、cutoff の更新、被約費用固定、RINS (LP 解とタブー解が一致する変数を固定して小さな MIP を解く) に使う。
-3. **連続変数への対応 (MIP 化)**
-   - タブー探索は整数変数だけを動かす。連続変数を含む行の違反量は、連続変数の項を境界内で最も有利な値にとって計算する (連続変数を射影で消したことに相当)。
-   - 整数部分の違反がゼロになったら、整数を固定して連続変数だけの LP を解き、補修する。LP は段階 0 の `DualSimplexState` を別インスタンスで使い、warm start する。成功すれば実行可能解になる。
-   - 後の段階で、Local-MIP (Lin et al., CP 2024) のように連続変数を直接動かす手も検討する。
-4. **論文が挙げた弱点への対処**
-   - `Σ_{j∈J'} x_j = |J'|·x'` 型の行を検出し、「その集合を一括で 0 または 1 にする」複合手を加える (論文の今後の課題に挙がっている)。
-5. **数値の安全性**
-   - 差分評価には誤差が蓄積する (論文でも結果が食い違う例が報告されている)。数千手ごとに違反量を最初から計算し直す。
-   - 分枝限定へ渡す前に、元の空間で postsolve した解の実行可能性を厳密に確かめる。
-
-### 8.4 実装の段階
-
-| 段階 | 内容 | 判定基準 |
-|---|---|---|
-| 4a | 純整数版の移植: flip / shift / jump / selection、重み調整 (Alg. 2)、近傍の絞り込み、差分評価、タブー期間と同点処理。単独でも動かせるようにする | 論文の 82 問で、PRINTEMPS の原版 (表 6) と同程度の解の質が出ること |
-| 4b | 共有状態と双方向の情報交換、決定的モード | MIPLIB 2017 Benchmark で、最初の実行可能解までの時間と primal integral が、ワーカーなしより改善すること |
-| 4c | 連続変数の射影評価と LP による補修 | 混合整数の問題でも、実行可能解の発見数が増えること |
-| 4d | 従属変数の消去、一括 0/1 の複合手、近傍評価の並列化 (rayon) | 論文の弱点の例 (highschool1-aigio など) で実行可能解が見つかること |
-
-注意: タブー探索は上界 (実行可能解) を良くするだけで、下界の証明には寄与しない。そのため段階 0〜3 (下界の側) の優先度は変わらない。4a は段階 0 と独立に書けるので、並行して開発できる。
