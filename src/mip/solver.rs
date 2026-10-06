@@ -34,11 +34,13 @@ pub struct MipParams {
     pub submip: bool,
     /// 目的値の打ち切り値 (これ以上の解は要らない。最小化形、定数項込み)。
     pub cutoff: f64,
+    /// これまでに根で再スタートした回数。
+    pub restarts: u32,
 }
 
 impl Default for MipParams {
     fn default() -> Self {
-        MipParams { time_limit: f64::INFINITY, node_limit: u64::MAX, rel_gap: 1e-4, abs_gap: 1e-6, verbose: false, submip: false, cutoff: f64::INFINITY }
+        MipParams { time_limit: f64::INFINITY, node_limit: u64::MAX, rel_gap: 1e-4, abs_gap: 1e-6, verbose: false, submip: false, cutoff: f64::INFINITY, restarts: 0 }
     }
 }
 
@@ -116,6 +118,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) vbounds: Option<Rc<super::cuts::VarBounds>>,
     /// 列ごとの (行, 係数) (oneopt 用、最初に使うときに作る)。
     pub(super) col_rows: Option<Rc<Vec<Vec<(usize, f64)>>>>,
+    /// 求解の開始時 (根の伝播の後) に固定されていた整数列の数 (再スタートの判定用)。
+    root_fixed0: usize,
     /// ノードでのダイビングの LP 反復数・呼び出し回数・解を見つけた回数。
     dive_iters: u64,
     dive_calls: u64,
@@ -167,6 +171,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
         last_log: start,
         vbounds: None,
         col_rows: None,
+        root_fixed0: 0,
         dive_iters: 0,
         dive_calls: 0,
         dive_succ: 0,
@@ -354,6 +359,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         // 根の LP
+        self.root_fixed0 = (0..self.p.n).filter(|&j| self.p.is_int[j] && self.dom.global_lo[j] == self.dom.global_up[j]).count();
         let root_st = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
         match root_st {
             LpStatus::Optimal => {}
@@ -426,6 +432,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.root_redcost_fixing();
         if dbg_root && !self.dbg_contains() {
             self.dbg_lost("root redcost fixing", true);
+        }
+        if let Some(r) = self.maybe_restart() {
+            return r;
         }
         self.queue.push(OpenNode { changes: Vec::new(), lower_bound: root_obj, estimate: root_obj, depth: 0, basis: Some(Rc::new(self.lp.basis())), branch: None });
         // 根のノードは LP を解いた状態のままなので、最初の取り出しでは定義域・LP を作り直さない。
@@ -1046,6 +1055,89 @@ impl<'a, L: MipLp> Solver<'a, L> {
             lb = lb.min(*z);
         }
         self.finish(status, lb)
+    }
+
+    /// 根での再スタート (SCIP の `restartfac`): 根の処理で新たに大域固定された整数列が全体の 2.5% を超えたら、
+    /// 大域的な境界と LP に残ったカットを持って前処理からやり直す。暫定解は打ち切り値として渡し、
+    /// やり直しで良い解が見つからなければそれを返す。最大 2 回。
+    fn maybe_restart(&mut self) -> Option<MipResult> {
+        let p = self.p;
+        if self.params.submip || self.params.restarts >= 2 || env_str!("ENOMOTO_MIP_NO_RESTART").is_some() || self.time_up() {
+            return None;
+        }
+        let nint = p.is_int.iter().filter(|&&b| b).count();
+        let fixed = (0..p.n).filter(|&j| p.is_int[j] && self.dom.global_lo[j] == self.dom.global_up[j]).count();
+        let newly = fixed.saturating_sub(self.root_fixed0);
+        if nint == 0 || (newly as f64) <= tunable!("ENOMOTO_T_MIP_RESTART_FAC", 0.025, f64) * nint as f64 {
+            return None;
+        }
+        // 新しい問題: 大域的な境界 + 元の行 + LP に残ったカット (どれも大域的に成り立つ)
+        let mut rows = p.rows.clone();
+        let mut row_lo = p.row_lo.clone();
+        let mut row_up = p.row_up.clone();
+        for i in p.m..self.lp.num_rows() {
+            let (l, u) = self.lp.row_bounds(i);
+            rows.push(self.lp.row(i));
+            row_lo.push(l);
+            row_up.push(u);
+        }
+        // 伝播の丸め誤差で下限 > 上限 (ごくわずか) になった列は 1 点に固定する
+        let mut glo = self.dom.global_lo.clone();
+        let mut gup = self.dom.global_up.clone();
+        for j in 0..p.n {
+            if glo[j] > gup[j] {
+                let v = if p.is_int[j] { glo[j].round() } else { 0.5 * (glo[j] + gup[j]) };
+                glo[j] = v;
+                gup[j] = v;
+            }
+        }
+        let newp = MipProblem::from_rows(glo, gup, p.cost.clone(), p.offset, p.sense_sign, p.is_int.clone(), rows, row_lo, row_up);
+        let remaining = match self.deadline {
+            Some(d) => d.saturating_duration_since(Instant::now()).as_secs_f64(),
+            None => f64::INFINITY,
+        };
+        let params = MipParams {
+            time_limit: remaining,
+            node_limit: self.params.node_limit.saturating_sub(self.nodes),
+            cutoff: self.prune_limit().min(self.params.cutoff),
+            restarts: self.params.restarts + 1,
+            ..self.params
+        };
+        if self.params.verbose {
+            eprintln!(
+                "MIP: restart {} ({} of {} integer columns newly fixed at the root, {} cuts kept) ({:.2}s)",
+                params.restarts,
+                newly,
+                nint,
+                self.lp.num_rows() - p.m,
+                self.start.elapsed().as_secs_f64()
+            );
+        }
+        let r = super::solve_problem(&newp, params, true);
+        let nodes = self.nodes + r.nodes;
+        let iters = self.lp.total_iterations() + r.lp_iterations;
+        // 良い方の解を採る
+        let (x, objective) = match (&r.x, r.objective, &self.incumbent) {
+            (Some(x2), Some(z2), Some((z, x))) => {
+                if z2 < *z {
+                    (Some(x2.clone()), Some(z2))
+                } else {
+                    (Some(x.clone()), Some(*z))
+                }
+            }
+            (Some(x2), Some(z2), None) => (Some(x2.clone()), Some(z2)),
+            (_, _, Some((z, x))) => (Some(x.clone()), Some(*z)),
+            _ => (None, None),
+        };
+        let (status, best_bound) = match r.status {
+            // 打ち切り値より良い解が無い/最適: 暫定解があれば最適
+            MipStatus::Optimal | MipStatus::Infeasible => match objective {
+                Some(z) => (MipStatus::Optimal, z),
+                None => (MipStatus::Infeasible, f64::INFINITY),
+            },
+            s => (s, r.best_bound.min(objective.unwrap_or(f64::INFINITY))),
+        };
+        Some(MipResult { status, x, objective, best_bound, nodes, lp_iterations: iters })
     }
 
     fn finish(&mut self, status: MipStatus, best_bound: f64) -> MipResult {

@@ -488,7 +488,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 初期点: 0 に最も近い境界内の値
         let mut x: Vec<f64> = (0..n)
             .map(|j| {
-                let v = 0.0f64.clamp(lo[j], up[j]);
+                let v = 0.0f64.max(lo[j]).min(up[j].max(lo[j]));
                 if v.is_finite() { v } else { 0.0 }
             })
             .collect();
@@ -552,7 +552,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let cur: f64 = p.cols[j].iter().map(|&(r, _)| w[r] * viol(r, act[r])).sum();
                 let nc = cand.len();
                 for k in 0..nc {
-                    let v0 = cand[k].clamp(lo[j], up[j]);
+                    let v0 = cand[k].max(lo[j]).min(up[j].max(lo[j]));
                     let vals: [f64; 2] = if p.is_int[j] { [v0.floor().max(lo[j]), v0.ceil().min(up[j])] } else { [v0, v0] };
                     for (q, &v) in vals.iter().enumerate() {
                         if q == 1 && vals[1] == vals[0] {
@@ -637,6 +637,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             verbose: false,
             submip: true,
             cutoff: self.prune_limit(),
+            restarts: 0,
         };
         let r = super::solve_problem(&sub, params, env_str!("ENOMOTO_MIP_SUBMIP_NO_PRESOLVE").is_none());
         if self.params.verbose {
