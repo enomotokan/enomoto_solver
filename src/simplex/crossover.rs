@@ -1437,15 +1437,119 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     }
     // 仕上げは polish ではなく二段解法の主ループ (DSE・BFRT・超疎の経路) で行う (既定、第 13 回の比較。`ENOMOTO_T_XO_CLEANUP_MAIN=0` で polish)
     // でこの基底から始める (内点法の解が強く退化していて、基底の多くをスラックで埋めた問題: ns1688926)。
+    let mut final_basis_pos: Option<Vec<Option<usize>>> = None;
     let res = if tunable!("ENOMOTO_T_XO_CLEANUP_MAIN", 1u8, u8) != 0 {
         drop(lu);
-        super::slope_intercept_dual::solve_slope_intercept_dual_from_basis(std, &Default::default(), basis.clone())
+        if debug {
+            super::slope_intercept_dual::request_duals(true);
+        }
+        let r = super::slope_intercept_dual::solve_slope_intercept_dual_from_basis(std, &Default::default(), basis.clone());
+        if debug {
+            final_basis_pos = super::slope_intercept_dual::take_duals().map(|(_, bp)| bp);
+            super::slope_intercept_dual::request_duals(false);
+        }
+        r
     } else {
         polish_with_true_bounds(std, &mut basis, &mut basis_pos, &mut nb_status, lu)
     };
     crate::phase_timing::mark("cleanup_end");
     if debug {
         eprintln!("CROSSOVER cleanup status={:?} total t={:.3}s", res.as_ref().map(|r| r.status.clone()), t0.elapsed().as_secs_f64());
+        // 仕上げの解 (構造変数だけ) の前処理後の問題での実行可能性: 各行のスラックを `b - A x` から求め、
+        // その境界の違反 (行の違反) と構造変数の境界の違反を見る。
+        if let Some(xr) = res.as_ref().and_then(|r| r.x.as_ref()) {
+            let ns = n - m;
+            let mut act = vec![0.0; m];
+            let (mut cviol, mut nc) = (0.0f64, 0usize);
+            for j in 0..ns.min(xr.len()) {
+                for &(i, a) in col(std, j) {
+                    act[i] += a * xr[j];
+                }
+                let v = (std.lb[j] - xr[j]).max(xr[j] - std.ub[j]);
+                nc += (v > 1e-9) as usize;
+                cviol = cviol.max(v);
+            }
+            let (mut rviol, mut nr) = (0.0f64, 0usize);
+            for i in 0..m {
+                let k = ns + i;
+                let Some(&(_, a)) = col(std, k).first() else { continue };
+                let sv = (std.b[i] - act[i]) / a;
+                let v = (std.lb[k] - sv).max(sv - std.ub[k]);
+                nr += (v > 1e-9) as usize;
+                rviol = rviol.max(v);
+            }
+            eprintln!(
+                "CROSSOVER final x (presolved): len={} n_struct={ns} row viol max={rviol:.3e} (#>1e-9: {nr}) col viol max={cviol:.3e} (#>1e-9: {nc})",
+                xr.len()
+            );
+            // 最後の基底で x_B を解き直す (非基底は返した値、非基底のスラックは近い方の境界)。反復改良つき。
+            if let Some(bp) = &final_basis_pos {
+                if let Some(lu) = super::basis_kernel::factorize_basis(std, bp, None) {
+                    let mut z = vec![0.0; n];
+                    for j in 0..ns {
+                        z[j] = xr[j];
+                    }
+                    for i in 0..m {
+                        let k = ns + i;
+                        let a = col(std, k).first().map_or(1.0, |e| e.1);
+                        let sv = (std.b[i] - act[i]) / a;
+                        z[k] = if bp[k].is_some() { sv } else if (sv - std.lb[k]).abs() <= (sv - std.ub[k]).abs() { std.lb[k] } else { std.ub[k] };
+                    }
+                    let mut basic = vec![usize::MAX; m];
+                    for j in 0..n {
+                        if let Some(p) = bp[j] {
+                            basic[p] = j;
+                        }
+                    }
+                    // 非基底の構造列が境界から離れていないか。
+                    let nb_off = (0..ns).filter(|&j| bp[j].is_none() && xr[j] != std.lb[j] && xr[j] != std.ub[j]).count();
+                    let mut rhs = std.b.clone();
+                    for j in 0..n {
+                        if bp[j].is_none() && z[j] != 0.0 {
+                            for &(i, a) in col(std, j) {
+                                rhs[i] -= a * z[j];
+                            }
+                        }
+                    }
+                    let mut scratch = vec![0.0; m];
+                    let mut xb = vec![0.0; m];
+                    lu.solve_into(&rhs, &mut scratch, &mut xb);
+                    let report = |tag: &str, xb: &[f64]| {
+                        let mut r = rhs.clone();
+                        for p in 0..m {
+                            for &(i, a) in col(std, basic[p]) {
+                                r[i] -= a * xb[p];
+                            }
+                        }
+                        let res = r.iter().fold(0.0f64, |a, v| a.max(v.abs()));
+                        let (mut bv, mut nv) = (0.0f64, 0usize);
+                        let mut diff = 0.0f64;
+                        for p in 0..m {
+                            let j = basic[p];
+                            let v = (std.lb[j] - xb[p]).max(xb[p] - std.ub[j]);
+                            nv += (v > 1e-9) as usize;
+                            bv = bv.max(v);
+                            diff = diff.max((xb[p] - z[j]).abs());
+                        }
+                        let mut obj = 0.0;
+                        for j in 0..n {
+                            obj += std.c[j] * if let Some(p) = bp[j] { xb[p] } else { z[j] };
+                        }
+                        eprintln!("CROSSOVER final basis {tag}: |rhs - B x_B|={res:.3e} x_B bound viol max={bv:.3e} (#>1e-9: {nv}) max|x_B - returned|={diff:.3e} obj(presolved)={obj:.12e} nonbasic off-bound={nb_off}");
+                        r
+                    };
+                    let mut r = report("LU", &xb);
+                    for it in 0..3 {
+                        let mut d = vec![0.0; m];
+                        lu.solve_into(&r, &mut scratch, &mut d);
+                        for p in 0..m {
+                            xb[p] += d[p];
+                        }
+                        r = report(&format!("refine{it}"), &xb);
+                    }
+                }
+            }
+        }
     }
     res
 }
