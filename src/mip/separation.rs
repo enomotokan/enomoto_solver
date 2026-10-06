@@ -26,7 +26,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut stall = 0;
         let mut prev_obj = self.lp.objective();
         let first_obj = prev_obj;
-        let max_rounds = 25;
+        // サブ MIP (RENS/RINS) では分離に時間をかけない
+        let max_rounds = if self.params.submip { 5 } else { 25 };
         let time_cap = if self.params.time_limit.is_finite() { 0.2 * self.params.time_limit } else { f64::INFINITY };
         let mut total_added = 0usize;
         for round in 0..max_rounds {
