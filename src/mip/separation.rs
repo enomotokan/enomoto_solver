@@ -154,6 +154,152 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
     }
 
+    /// 経路集約: 元の行を 1 本選び、集約行に残った連続変数のうち LP 値が境界 (変数上下限を含む) から
+    /// 最も離れたものを、それを含む別の元の行で打ち消す、を最大 `PATH_MAX_LEN` 段繰り返し、各段で CMIR を試す
+    /// (Marchand & Wolsey の集約ヒューリスティクス)。行 i の活動量を変数 `n + i` として
+    /// `sum_i w_i (a_i x - r_i) = 0` の形で集約するので、等式・不等式・範囲行を区別せずに扱える
+    /// (`r_i` の置き換えは CMIR が行の上下限で行う)。
+    fn path_aggregation<F>(&mut self, vars: &CutVars, lp_rows: &[Vec<(usize, f64)>], cands: &mut Vec<Candidate>, push: &mut F)
+    where
+        F: FnMut(Option<RawCut>, &mut Vec<Candidate>, &Solver<L>),
+    {
+        const PATH_MAX_LEN: usize = 6;
+        const MAX_ROW_LEN: usize = 500;
+        let p = self.p;
+        let n = p.n;
+        let m = p.m;
+        // 連続変数の LP 値の、最も近い境界 (単純な上下限・変数上下限) までの距離
+        let bound_dist = |j: usize| -> f64 {
+            let xj = vars.x[j];
+            let mut d = (xj - vars.lo[j]).min(vars.up[j] - xj);
+            if let Some(vb) = vars.vb {
+                for &(y, a, e) in &vb.vub[j] {
+                    d = d.min(a * vars.x[y] + e - xj);
+                }
+                for &(y, a, e) in &vb.vlb[j] {
+                    d = d.min(xj - a * vars.x[y] - e);
+                }
+            }
+            d.max(0.0)
+        };
+        // 列 → 元の行 (短い行だけ)
+        let mut col_rows: Vec<Vec<usize>> = vec![Vec::new(); n];
+        for i in 0..m {
+            if lp_rows[i].len() <= MAX_ROW_LEN {
+                for &(j, _) in &lp_rows[i] {
+                    if !p.is_int[j] {
+                        col_rows[j].push(i);
+                    }
+                }
+            }
+        }
+        // 行が LP で効いているか (活動量が上下限に近い)
+        let tight = |i: usize| -> bool {
+            let r = vars.x[n + i];
+            let (l, u) = (vars.lo[n + i], vars.up[n + i]);
+            (r - l).abs() <= 1e-6 * (1.0 + l.abs()) || (u - r).abs() <= 1e-6 * (1.0 + u.abs())
+        };
+        let mut agg = vec![0.0f64; n];
+        let mut in_agg = vec![false; n];
+        let mut touched: Vec<usize> = Vec::new();
+        let mut used_row = vec![false; m];
+        let mut starts = 0usize;
+        for start in 0..m {
+            if starts >= 1000 {
+                break;
+            }
+            let row = &lp_rows[start];
+            if row.len() < 2 || row.len() > MAX_ROW_LEN {
+                continue;
+            }
+            // 境界から離れた連続変数がなければ 1 行の CMIR と同じなので飛ばす
+            if !row.iter().any(|&(j, _)| !p.is_int[j] && bound_dist(j) > 1e-6) {
+                continue;
+            }
+            starts += 1;
+            for &j in &touched {
+                agg[j] = 0.0;
+                in_agg[j] = false;
+            }
+            touched.clear();
+            let mut weights: Vec<(usize, f64)> = vec![(start, 1.0)];
+            used_row[start] = true;
+            for &(j, a) in row {
+                if !in_agg[j] {
+                    in_agg[j] = true;
+                    touched.push(j);
+                }
+                agg[j] += a;
+            }
+            for step in 0..PATH_MAX_LEN {
+                if step > 0 {
+                    let mut base: Vec<(usize, f64)> = Vec::with_capacity(touched.len() + weights.len());
+                    let amax = touched.iter().fold(0.0f64, |mx, &j| mx.max(agg[j].abs()));
+                    for &j in &touched {
+                        if agg[j].abs() > 1e-9 * amax.max(1.0) {
+                            base.push((j, agg[j]));
+                        }
+                    }
+                    for &(i, w) in &weights {
+                        base.push((n + i, -w));
+                    }
+                    push(cmir(vars, &base, 0.0), cands, self);
+                    let neg: Vec<(usize, f64)> = base.iter().map(|&(k, a)| (k, -a)).collect();
+                    push(cmir(vars, &neg, 0.0), cands, self);
+                }
+                // 打ち消す連続変数: 境界から最も離れたもの
+                let amax = touched.iter().fold(0.0f64, |mx, &j| mx.max(agg[j].abs()));
+                let mut best: Option<(usize, f64)> = None;
+                for &j in &touched {
+                    if p.is_int[j] || agg[j].abs() <= 1e-9 * amax.max(1.0) {
+                        continue;
+                    }
+                    let d = bound_dist(j);
+                    if d > 1e-6 && best.is_none_or(|(_, bd)| d > bd) {
+                        best = Some((j, d));
+                    }
+                }
+                let Some((j, _)) = best else { break };
+                // 相手の行: 未使用で j を含むもの。効いている行を優先し、同じ組では乱数で選ぶ
+                let mut pick: Option<(usize, f64)> = None;
+                for &i in &col_rows[j] {
+                    if used_row[i] {
+                        continue;
+                    }
+                    let score = if tight(i) { 2.0 } else { 1.0 } + 0.5 * self.rand();
+                    if pick.is_none_or(|(_, sc)| score > sc) {
+                        pick = Some((i, score));
+                    }
+                }
+                let Some((r, _)) = pick else { break };
+                let arj = lp_rows[r].iter().find(|&&(k, _)| k == j).map_or(0.0, |&(_, a)| a);
+                if arj.abs() < 1e-9 {
+                    break;
+                }
+                let w = -agg[j] / arj;
+                // 重みの比が大きすぎる集約は数値的に危ないので止める
+                let wmax = weights.iter().fold(w.abs(), |mx, &(_, v)| mx.max(v.abs()));
+                let wmin = weights.iter().fold(w.abs(), |mn, &(_, v)| mn.min(v.abs()));
+                if wmax / wmin > 1e4 {
+                    break;
+                }
+                used_row[r] = true;
+                weights.push((r, w));
+                for &(k, a) in &lp_rows[r] {
+                    if !in_agg[k] {
+                        in_agg[k] = true;
+                        touched.push(k);
+                    }
+                    agg[k] += w * a;
+                }
+                agg[j] = 0.0;
+            }
+            for &(i, _) in &weights {
+                used_row[i] = false;
+            }
+        }
+    }
+
     /// 現在の LP 解 `x` を切る候補を作る。
     fn separate(&mut self, x: &[f64]) -> Vec<Candidate> {
         let p = self.p;
@@ -208,6 +354,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let r = extended_cover(&vars, &neg, -p.row_lo[i]);
                 push(r, &mut cands, self);
             }
+        }
+        // 経路集約 (path aggregation、HiGHS の `HighsPathSeparator`)
+        if env_str!("ENOMOTO_MIP_NO_PATH_AGG").is_none() {
+            self.path_aggregation(&vars, &lp_rows, &mut cands, &mut push);
         }
         // tableau 行
         let mut basics: Vec<(usize, f64)> = Vec::new();
