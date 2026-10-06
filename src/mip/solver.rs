@@ -260,10 +260,21 @@ impl<'a> Solver<'a> {
             LpStatus::TimeLimit => return self.finish(MipStatus::TimeLimit, f64::NEG_INFINITY),
             _ => return self.finish(MipStatus::NotSolved, f64::NEG_INFINITY),
         }
-        let root_obj = self.lp.objective() + self.p.offset;
+        let mut root_obj = self.lp.objective() + self.p.offset;
         let root_iters = self.lp.total_iterations();
         if self.params.verbose {
             eprintln!("MIP: root LP {:.10e} ({} iters, {:.2}s)", root_obj, self.lp.total_iterations(), self.start.elapsed().as_secs_f64());
+        }
+        // 根の切除平面
+        {
+            let x = self.lp.col_values();
+            if !self.fractional(&x).is_empty() {
+                self.simple_rounding(&x);
+                if env_str!("ENOMOTO_MIP_NO_CUTS").is_none() && !self.root_cut_loop(root_iters) {
+                    return self.finish(MipStatus::NotSolved, root_obj);
+                }
+                root_obj = self.lp.objective() + self.p.offset;
+            }
         }
         // 根のヒューリスティクス
         {
