@@ -798,6 +798,96 @@ thread_local! {
     static STAGE_A_OUT: std::cell::RefCell<Option<StageA>> = const { std::cell::RefCell::new(None) };
 }
 
+thread_local! {
+    /// 次の [`solve_slope_intercept_dual`] の 1 回だけ、全スラック基底の代わりに使う基底 (列番号、長さ `m`)。
+    static WARM_BASIS: std::cell::RefCell<Option<Vec<usize>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// 基底 `basis` (列番号、長さ `m`) から傾き・切片二段解法の主ループを始める (クロスオーバーの仕上げ用)。
+///
+/// 全スラック基底の crash と同じ考えで、非基底列は被約費用 `d = c - A^T B^{-T} c_B` (摂動済みの費用) の
+/// 符号が好む側に置く (無限の側は記号的な `M`)。こうすると開始時の基底は (`M` 切り詰め問題で) 双対実行可能に
+/// なり、主ループの段階 A・B と仕上げがそのまま使える (DSE・BFRT・超疎の経路を含む)。`M` で置けない列
+/// (スラック列の無限の上限) で `d` の符号が逆なら、その列の費用を `d` の分だけずらして 0 にする (最後の
+/// polish が真の費用で直す)。基底が特異なら全スラック基底から始める。DSE の重みは単位で始める。
+pub(super) fn solve_slope_intercept_dual_from_basis(std: &StdForm, opts: &crate::types::LpOptions, basis: Vec<usize>) -> Option<SimplexResult> {
+    WARM_BASIS.with(|w| *w.borrow_mut() = Some(basis));
+    let r = solve_slope_intercept_dual(std, opts);
+    WARM_BASIS.with(|w| *w.borrow_mut() = None);
+    r
+}
+
+/// [`solve_slope_intercept_dual_from_basis`] の開始状態を作る。成功したら真。
+fn warm_start_basis(
+    std: &StdForm,
+    n_orig: usize,
+    wb: &[usize],
+    active_cost: &mut [f64],
+    basis: &mut Vec<usize>,
+    basis_pos: &mut Vec<Option<usize>>,
+    nb_status: &mut Vec<Option<NbStatus>>,
+) -> bool {
+    let m = std.n_rows;
+    let n_total = std.n_total;
+    if wb.len() != m {
+        return false;
+    }
+    let mut pos: Vec<Option<usize>> = vec![None; n_total];
+    for (k, &j) in wb.iter().enumerate() {
+        if j >= n_total || pos[j].is_some() {
+            return false;
+        }
+        pos[j] = Some(k);
+    }
+    let Some(lu) = refactorize(std, &pos, None) else {
+        return false;
+    };
+    let cb: Vec<f64> = wb.iter().map(|&j| active_cost[j]).collect();
+    let mut y = vec![0.0; m];
+    let mut scratch = vec![0.0; m];
+    lu.solve_transpose_into(&cb, &mut scratch, &mut y);
+    let mut st = vec![None; n_total];
+    let mut shifted = 0usize;
+    for j in 0..n_total {
+        if pos[j].is_some() {
+            continue;
+        }
+        let mut d = active_cost[j];
+        for &(i, a) in std.cols.col(j) {
+            d -= a * y[i];
+        }
+        let (lo, hi) = (std.lb[j], std.ub[j]);
+        let free = lo == f64::NEG_INFINITY && hi == f64::INFINITY;
+        // 構造列の無限の側は `M` で置ける。スラック列の無限の側には置けない。
+        let can_lower = lo.is_finite() || j < n_orig;
+        let can_upper = hi.is_finite() || j < n_orig;
+        st[j] = Some(if free && j < n_orig && d.abs() <= TOL {
+            NbStatus::Zero
+        } else if d >= -TOL {
+            if can_lower {
+                NbStatus::Lower
+            } else {
+                active_cost[j] -= d;
+                shifted += 1;
+                NbStatus::Upper
+            }
+        } else if can_upper {
+            NbStatus::Upper
+        } else {
+            active_cost[j] -= d;
+            shifted += 1;
+            NbStatus::Lower
+        });
+    }
+    if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
+        eprintln!("DEBUG_EXT: warm start from a given basis (cost shifts {shifted})");
+    }
+    *basis = wb.to_vec();
+    *basis_pos = pos;
+    *nb_status = st;
+    true
+}
+
 /// 段階 A (傾き問題) だけを解いた結果 ([`solve_stage_a`])。
 pub(super) enum StageA {
     /// 段階 A だけで結論が出た (制約が無い、`z^1 < 0` で区別を求められていない、など)。
@@ -2734,6 +2824,11 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     }
     // 非基底変数の状態(`Lower`/`Upper`/`Zero`、基底変数は `None`)。コスト符号による crash で初期化。
     let mut nb_status = crash(std, &active_cost, n_orig);
+    // 与えられた基底からの開始 ([`solve_slope_intercept_dual_from_basis`]、クロスオーバーの仕上げ)。
+    let warm_started = WARM_BASIS.with(|w| w.borrow_mut().take()).is_some_and(|wb| {
+        warm_start_basis(std, n_orig, &wb, &mut active_cost, &mut basis, &mut basis_pos, &mut nb_status)
+    });
+    let _ = warm_started;
     // 実験的機能(既定オフ、`refine_zero_cost_placement` 参照)。
     if env_str!("ENOMOTO_CRASH_ZERO_COST_PLACEMENT").is_some_and(|v| v != "0") {
         refine_zero_cost_placement(std, &mut active_cost, &mut nb_status, n_orig);

@@ -1352,7 +1352,14 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
         }
         eprintln!("CROSSOVER basis quality: primal_infeas={np} (max {mp:.2e}) dual_infeas={nd} (max {md:.2e})");
     }
-    let res = polish_with_true_bounds(std, &mut basis, &mut basis_pos, &mut nb_status, lu);
+    // 試験用 (`ENOMOTO_T_XO_CLEANUP_MAIN=1`): 仕上げを polish ではなく二段解法の主ループ (DSE・BFRT・超疎の経路)
+    // でこの基底から始める (内点法の解が強く退化していて、基底の多くをスラックで埋めた問題: ns1688926)。
+    let res = if tunable!("ENOMOTO_T_XO_CLEANUP_MAIN", 0u8, u8) != 0 {
+        drop(lu);
+        super::slope_intercept_dual::solve_slope_intercept_dual_from_basis(std, &Default::default(), basis.clone())
+    } else {
+        polish_with_true_bounds(std, &mut basis, &mut basis_pos, &mut nb_status, lu)
+    };
     crate::phase_timing::mark("cleanup_end");
     if debug {
         eprintln!("CROSSOVER cleanup status={:?} total t={:.3}s", res.as_ref().map(|r| r.status.clone()), t0.elapsed().as_secs_f64());
