@@ -141,6 +141,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) alns_count: [u32; 4],
     /// 大近傍探索 (サブ MIP) に使った時間の合計 (秒)。
     pub(super) lns_secs: f64,
+    /// サブ MIP の時間の上限 (残り時間に対する割合)。
+    pub(super) submip_time_frac: f64,
     /// RENS の固定率の記録 (成功したときの固定率の合計と回数、サブ MIP が実行不能だったときの合計と回数)。
     pub(super) rens_succ: (f64, u32),
     pub(super) rens_infeas: (f64, u32),
@@ -246,6 +248,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
         alns_reward: [0.0; 4],
         alns_count: [0; 4],
         lns_secs: 0.0,
+        submip_time_frac: 0.07,
         rens_succ: (0.0, 0),
         rens_infeas: (0.0, 0),
         node_iters: 0,

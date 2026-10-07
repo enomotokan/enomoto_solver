@@ -901,7 +901,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             None => f64::INFINITY,
         };
         let params = super::solver::MipParams {
-            time_limit: (0.07 * remaining).min(6.0),
+            time_limit: (self.submip_time_frac * remaining).min(6.0),
             node_limit,
             rel_gap: self.params.rel_gap,
             abs_gap: self.params.abs_gap,
@@ -1405,6 +1405,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if fr < tunable!("ENOMOTO_T_MIP_RRC_MIN_RATE", 0.3, f64) {
             return false;
         }
-        self.solve_submip(lo, up, 500)
+        // サブ MIP の時間の上限 (既定は通常と同じ残りの 7%。3% では 10teams のサブ MIP が解を見つける前に止まった)
+        let keep = self.submip_time_frac;
+        self.submip_time_frac = tunable!("ENOMOTO_T_MIP_RRC_TIME_FRAC", 0.07, f64);
+        let r = self.solve_submip(lo, up, 500);
+        self.submip_time_frac = keep;
+        r
     }
 }
