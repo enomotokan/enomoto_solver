@@ -34,7 +34,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut prev_nfrac = self.fractional(&self.lp.col_values()).len();
         let first_obj = prev_obj;
         // サブ MIP (RENS/RINS) では分離に時間をかけない
-        let max_rounds = if self.params.submip { 5 } else { 25 };
+        let max_rounds = if self.params.submip { 5 } else { tunable!("ENOMOTO_T_MIP_CUT_ROUNDS", 25usize, usize) };
         let time_cap = if self.params.time_limit.is_finite() { tunable!("ENOMOTO_T_MIP_CUT_TIME_FRAC", 0.1, f64) * self.params.time_limit } else { f64::INFINITY };
         let mut total_added = 0usize;
         for round in 0..max_rounds {
@@ -73,7 +73,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.lp.add_rows(&rows);
             let it0 = self.lp.total_iterations();
             let lim = 10 * root_iters.max(100) + 10_000;
-            let st = self.lp.solve(&SolveLimits { iteration_limit: lim, cutoff: f64::INFINITY, deadline: self.deadline });
+            // 1 回の LP の時間の上限 (全体の 2%、最低 1 秒): 数値的に悪条件の LP が残り時間を使い切るのを防ぐ
+            let cap = if self.params.time_limit.is_finite() { (tunable!("ENOMOTO_T_MIP_CUT_LP_TIME_FRAC", 0.02, f64) * self.params.time_limit).max(1.0) } else { f64::INFINITY };
+            let lp_deadline = if cap.is_finite() {
+                let d = std::time::Instant::now() + std::time::Duration::from_secs_f64(cap);
+                Some(self.deadline.map_or(d, |g| g.min(d)))
+            } else {
+                self.deadline
+            };
+            let st = self.lp.solve(&SolveLimits { iteration_limit: lim, cutoff: f64::INFINITY, deadline: lp_deadline });
             self.sb_iters += 0;
             let _ = it0;
             if st != LpStatus::Optimal {
