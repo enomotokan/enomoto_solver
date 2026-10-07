@@ -1406,6 +1406,15 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     let mut cand_d: Vec<usize> = (0..n).filter(|&j| ps[j] != PStat::Basic && active[j]).collect();
     cand_b.sort_by_key(|&j| col(std, j).len());
     cand_d.sort_by_key(|&j| col(std, j).len());
+    // 試験用 (`ENOMOTO_T_XO_LI_ORDER=1`): 基底の候補 B を、内点法の点で基底らしい順 (境界からの距離 / |s_j| の大きい順) に
+    // 並べる (既定は非零の少ない順)。
+    if tunable!("ENOMOTO_T_XO_LI_ORDER", 0u8, u8) != 0 {
+        let score = |j: usize| -> f64 {
+            let dist = (x[j] - std.lb[j]).min(std.ub[j] - x[j]);
+            dist / s[j].abs().max(1e-12)
+        };
+        cand_b.sort_by(|&a, &b| score(b).partial_cmp(&score(a)).unwrap_or(std::cmp::Ordering::Equal));
+    }
     let mut sel = BasisSelector::new(m, n);
     if tunable!("ENOMOTO_T_XO_LI_MARKOWITZ", 1u8, u8) != 0 {
         // 行の非零の数は、基底の候補 (B と D) の列だけで数える (行列全体で数えると、候補にない列の非零で目安が
@@ -2341,7 +2350,7 @@ impl BasisSelector {
             // 最大成分の行だけでは qap15 で基底の選択に 26 秒かかった)。
             let mut p = best.1;
             if !self.row_cnt.is_empty() {
-                let thr = prm::LI_PIV_REL * best.0;
+                let thr = tunable!("ENOMOTO_T_XO_LI_PIV_REL", prm::LI_PIV_REL, f64) * best.0;
                 let mut bc = self.row_cnt[p];
                 for &i in &self.nz_rows {
                     if self.pivot_of_row[i] == usize::MAX && self.xw[i].abs() >= thr && self.row_cnt[i] < bc {
