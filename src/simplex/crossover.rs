@@ -1491,10 +1491,11 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
         eprintln!("CROSSOVER leftover superbasics={} (|B|-m after primal push={})", leftover.len(), st.basic_after_push as i64 - m as i64);
     }
     if megiddo && !leftover.is_empty() {
-        // 押し出しの時間の上限: 内点法の時間の `ENOMOTO_T_XO_MEGIDDO_TIME_FACTOR` 倍 (既定 1)。超えたら残りは近い方の
+        // 押し出しの時間の上限: 内点法の時間の `ENOMOTO_T_XO_MEGIDDO_TIME_FACTOR` 倍 (既定 1) + 1 秒。超えたら残りは近い方の
         // 境界に置いたまま仕上げに任せる (qap15: 超基底 2,317 本、基底の LU の fill が多く 1 本ごとの FTRAN が重い)。
         let mfac = tunable!("ENOMOTO_T_XO_MEGIDDO_TIME_FACTOR", 1.0f64, f64);
-        let deadline = Instant::now() + std::time::Duration::from_secs_f64((mfac * ipm_secs).clamp(0.0, 1e6));
+        // 小さな問題で打ち切らないよう 1 秒の下駄をはかせる (第 32 回: 下駄なしでは Netlib が 1.05 倍遅かった)。
+        let deadline = Instant::now() + std::time::Duration::from_secs_f64((mfac * ipm_secs + if mfac > 0.0 { 1.0 } else { 0.0 }).clamp(0.0, 1e6));
         let ms = megiddo_push(std, &x, &leftover, &mut basis, &mut basis_pos, &mut nb_status, lu, deadline)?;
         lu = ms.lu;
         crate::phase_timing::record("xo_megiddo_pivots", ms.pivots as f64);
