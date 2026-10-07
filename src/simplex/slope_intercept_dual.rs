@@ -877,6 +877,11 @@ pub(crate) fn ext_polish_iterations() -> u64 {
 
 /// 主ループ・仕上げの 1 反復ごとに呼ぶ。打ち切るべきなら真 (理由を記録する)。
 #[inline]
+/// 今の打ち切り値 (`ExtControl::cutoff`、なければ +inf)。
+fn ext_cutoff() -> f64 {
+    EXT_CTRL.with(|x| x.get()).map_or(f64::INFINITY, |c| c.cutoff)
+}
+
 fn ext_check(iter_idx: usize, stage_b: bool, bound: impl FnOnce() -> f64) -> bool {
     EXT_ITERS.with(|x| x.set(x.get() + 1));
     let Some(c) = EXT_CTRL.with(|x| x.get()) else { return false };
@@ -912,11 +917,11 @@ pub(crate) fn set_fast_reopt(on: bool) {
 
 /// 再最適化の近道の終わり: 主ループが真の費用 (摂動・ずらしなし) で最適になった基底から、そのまま解を作る。
 /// `M` 側に置かれた列があるか、基底解が真の境界から外れていれば `None` (通常の `finish` に任せる)。
-fn fast_finish(std: &StdForm, basis_pos: &[Option<usize>], nb_status: &[Option<NbStatus>], cache: &ColCache, n_orig: usize, lu: &sparse_lu::FtLu) -> Option<SimplexResult> {
+fn fast_finish(std: &StdForm, basis_pos: &[Option<usize>], nb_status: &[Option<NbStatus>], cache: &ColCache, n_orig: usize, lu: sparse_lu::FtLu) -> Result<SimplexResult, sparse_lu::FtLu> {
     xprof("main");
-    let (x_b_base, x_b_slope) = solve_x_b(std, lu, nb_status, cache)?;
+    let Some((x_b_base, x_b_slope)) = solve_x_b(std, &lu, nb_status, cache) else { return Err(lu) };
     if x_b_slope.iter().any(|&v| v != 0.0) {
-        return None;
+        return Err(lu);
     }
     let mut x = vec![0.0; std.n_total];
     for j in 0..std.n_total {
@@ -926,24 +931,40 @@ fn fast_finish(std: &StdForm, basis_pos: &[Option<usize>], nb_status: &[Option<N
                 let (lo, hi) = (std.lb[j], std.ub[j]);
                 let tol = 1e-7 * (1.0 + v.abs());
                 if v < lo - tol || v > hi + tol {
-                    return None;
+                    return Err(lu);
                 }
                 x[j] = v;
             }
-            (None, Some(st)) => {
-                let a = nb_value_affine(cache, st, j)?;
-                if a.slope != 0.0 {
-                    return None;
-                }
-                x[j] = a.base;
-            }
-            (None, None) => return None,
+            (None, Some(st)) => match nb_value_affine(cache, st, j) {
+                Some(a) if a.slope == 0.0 => x[j] = a.base,
+                _ => return Err(lu),
+            },
+            (None, None) => return Err(lu),
         }
     }
     xprof("finish");
-    record_duals_with(std, basis_pos, Some(lu));
+    // 双対 (record_duals_with と同じ) を記録し、LU は複製せずに次の warm start 用に渡す
+    if WANT_DUALS.with(|w| w.get()) {
+        let m = std.n_rows;
+        let mut y = vec![0.0; m];
+        if m > 0 {
+            let mut c_b = vec![0.0; m];
+            for j in 0..std.n_total {
+                if let Some(p) = basis_pos[j] {
+                    c_b[p] = std.c[j];
+                }
+            }
+            let mut scratch = vec![0.0; m];
+            lu.solve_transpose_into(&c_b, &mut scratch, &mut y);
+        }
+        LAST_DUALS.with(|d| *d.borrow_mut() = Some((y, basis_pos.to_vec())));
+    }
+    if WANT_LU.with(|w| w.get()) {
+        LAST_LU.with(|l| *l.borrow_mut() = Some(Box::new(lu)));
+    }
+    xprof("duals");
     x.truncate(n_orig);
-    Some(SimplexResult { status: Status::Optimal, x: Some(x) })
+    Ok(SimplexResult { status: Status::Optimal, x: Some(x) })
 }
 
 thread_local! {
@@ -1080,7 +1101,11 @@ fn warm_start_basis(
     let mut shifted = 0usize;
     let hint = WARM_NB.with(|w| w.borrow_mut().take()).filter(|h| h.len() == n_total);
     // 真の費用での双対 (希望の側が真の費用で双対実行可能かの判定用)
-    let y_true: Vec<f64> = if hint.is_some() {
+    // 費用が真の費用と同じ (再最適化の近道) なら y と同じなので計算し直さない
+    let same_cost = active_cost.iter().zip(&std.c).all(|(a, c)| a == c);
+    let y_true: Vec<f64> = if hint.is_some() && same_cost {
+        y.clone()
+    } else if hint.is_some() {
         let cb_true: Vec<f64> = wb.iter().map(|&j| std.c[j]).collect();
         let mut yt = vec![0.0; m];
         lu.solve_transpose_into(&cb_true, &mut scratch, &mut yt);
@@ -1104,10 +1129,15 @@ fn warm_start_basis(
         if let Some(h) = &hint {
             // 真の費用での被約費用。希望の側でこれが双対実行可能なら、摂動済み費用での符号のずれは摂動による
             // ものなので、費用をずらして希望の側に置く (双対退化した列で特に多い)
-            let mut dt = std.c[j];
-            for &(i, a) in std.cols.col(j) {
-                dt -= a * y_true[i];
-            }
+            let dt = if same_cost {
+                d
+            } else {
+                let mut dt = std.c[j];
+                for &(i, a) in std.cols.col(j) {
+                    dt -= a * y_true[i];
+                }
+                dt
+            };
             let small = hint_tol * (1.0 + std.c[j].abs());
             if h[j] < 0 && lo.is_finite() && dt >= -small {
                 if d < -TOL {
@@ -3104,14 +3134,19 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     let n_orig = n_total - m;
 
     // コスト摂動([`dual_active_costs`])。`d` の増分維持と `crash` はこの摂動済みコストに基づく。
-    let mut active_cost = dual_active_costs(std);
+    // 再最適化の近道 (`FAST_REOPT`) では摂動しない (下で真の費用に置き換えるので計算も省く)
+    let fast_reopt_req = FAST_REOPT.with(|f| f.get()) && WARM_BASIS.with(|w| w.borrow().is_some());
+    let mut active_cost = if fast_reopt_req { std.c.clone() } else { dual_active_costs(std) };
 
     // `delta[j]`: 列 `j` の `M` 追跡側([`delta_of`] 参照。現在は S 制限なしで、片側非有界・
     // 自由な構造列をすべてフラグする)。スラック列は常に `MSide::None`。
+    xprof("s_cost");
     let delta: Vec<MSide> = (0..n_total).map(|j| if j < n_orig { delta_of(std, j) } else { MSide::None }).collect();
+    xprof("s_delta");
     // `cache_orig`: 真の `M`-アフィン境界(`hat_l`, `hat_u`)。`finish` の cleanup と `m == 0`
     // の近道で使う。主ループ自体は現在の段階が解く問題の境界 `cache` で動く([`Phase`] 参照)。
     let cache_orig = ColCache::build(std, n_orig);
+    xprof("s_cache");
     // 現在の段階。既定は段階 A から始める(`ENOMOTO_LEX_EXTENDED=1` で旧来の単一ループ `Lex`)。
     let mut phase = if env_str!("ENOMOTO_LEX_EXTENDED").is_some_and(|v| v != "0") { Phase::Lex } else { Phase::A };
 
@@ -3140,17 +3175,21 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         basis_pos[v] = Some(col);
     }
     // 非基底変数の状態(`Lower`/`Upper`/`Zero`、基底変数は `None`)。コスト符号による crash で初期化。
-    let mut nb_status = crash(std, &active_cost, n_orig);
+    // 近道では基底と非基底の位置を warm start が決めるので crash を省く (warm start に失敗したら作る)
+    let mut nb_status = if fast_reopt_req { vec![None; n_total] } else { crash(std, &active_cost, n_orig) };
     // 与えられた基底からの開始 ([`solve_slope_intercept_dual_from_basis`]、クロスオーバーの仕上げ)。
     // 再最適化の近道 (分枝限定法の warm start): 費用を摂動せず真の費用で局面 B だけを回し、最適になったら
     // cleanup と polish を通さずにその基底の解を返す (費用のずらしが起きなかった場合だけ、`fast_finish`)。
-    let fast_reopt = FAST_REOPT.with(|f| f.get()) && WARM_BASIS.with(|w| w.borrow().is_some());
-    if fast_reopt {
-        active_cost.copy_from_slice(&std.c);
-    }
+    xprof("s_crash");
+    let fast_reopt = fast_reopt_req;
     let warm_started = WARM_BASIS.with(|w| w.borrow_mut().take()).is_some_and(|wb| {
         warm_start_basis(std, n_orig, &wb, &mut active_cost, &mut basis, &mut basis_pos, &mut nb_status)
     });
+    if fast_reopt && !warm_started {
+        // warm start に失敗: 通常の開始 (摂動した費用と crash) に戻す
+        active_cost = dual_active_costs(std);
+        nb_status = crash(std, &active_cost, n_orig);
+    }
     // 実験的機能(既定オフ、`refine_zero_cost_placement` 参照)。
     if env_str!("ENOMOTO_CRASH_ZERO_COST_PLACEMENT").is_some_and(|v| v != "0") {
         refine_zero_cost_placement(std, &mut active_cost, &mut nb_status, n_orig);
@@ -3158,6 +3197,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     // 段階 A が空になる場合: crash がどの非基底列も `M` 側に置かなければ(`S = empty`)、
     // 全スラック基底で `x^1 = 0` がすでに傾き問題の最適なので、段階 A を飛ばして元の境界で
     // 段階 B から始める。`cache`: 現在の段階が解く問題の列境界。
+    xprof("s_warm");
     let mut cache = if phase == Phase::A
         && nb_status.iter().enumerate().all(|(j, s)| match s {
             Some(NbStatus::Lower) => cache_orig.lower[j].map_or(true, |a| a.slope == 0.0),
@@ -3920,7 +3960,32 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         if iter_idx & 63 == 0 && crate::cancel::is_cancelled() {
             return None; // 同時実行の相手が先に結論を出した
         }
-        if ext_check(iter_idx, phase == Phase::B, || lower_bound_from_basis(std, &basis, &lu)) {
+        if ext_check(iter_idx, phase == Phase::B, || {
+            // 近道 (真の費用、双対実行可能な基底、M 側の列なし) では今の基底解の目的値が双対目的値 (下界) に
+            // 等しいので、まずそれで比べる。超えたときだけ厳密な L(y) を計算し直す (双対証明用の y も残る)。
+            if fast_reopt && warm_started && active_cost.iter().zip(&std.c).all(|(a, c)| a == c) {
+                let mut z = 0.0;
+                for j in 0..n_orig {
+                    let cj = std.c[j];
+                    if cj == 0.0 {
+                        continue;
+                    }
+                    let v = match (basis_pos[j], nb_status[j]) {
+                        (Some(r), _) => x_b_base[r],
+                        (None, Some(st)) => match nb_value_affine(&cache, st, j) {
+                            Some(a) if a.slope == 0.0 => a.base,
+                            _ => return lower_bound_from_basis(std, &basis, &lu),
+                        },
+                        (None, None) => return lower_bound_from_basis(std, &basis, &lu),
+                    };
+                    z += cj * v;
+                }
+                if z <= ext_cutoff() {
+                    return z;
+                }
+            }
+            lower_bound_from_basis(std, &basis, &lu)
+        }) {
             return None; // 外部の打ち切り条件 (分枝限定法の LP)
         }
         if let Some(sb) = &shared_bound {
@@ -4318,8 +4383,9 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                 );
             }
             if fast_reopt && warm_started && active_cost.iter().zip(&std.c).all(|(a, c)| a == c) {
-                if let Some(r) = fast_finish(std, &basis_pos, &nb_status, &cache_orig, n_orig, &lu) {
-                    return Some(r);
+                match fast_finish(std, &basis_pos, &nb_status, &cache_orig, n_orig, lu) {
+                    Ok(r) => return Some(r),
+                    Err(l) => return finish(std, &mut basis, &mut basis_pos, &mut nb_status, &delta, &cache_orig, n_orig, l),
                 }
             }
             return finish(std, &mut basis, &mut basis_pos, &mut nb_status, &delta, &cache_orig, n_orig, lu);
