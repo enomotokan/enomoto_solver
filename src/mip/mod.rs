@@ -176,6 +176,12 @@ fn presolve_mip(p: &MipProblem, verbose: bool) -> Option<Presolved> {
         row_lo.push(f64::NEG_INFINITY);
         row_up.push(rhs);
     }
+    // 係数が定数倍の関係にある行をまとめる (上限側と下限側の組は範囲制約 1 本に、同じ向きはきつい方に)。
+    // 前処理は範囲制約を 2 本の不等式で表すので、そのままだと LP の行が倍になる
+    let merged = if env_str!("ENOMOTO_MIP_NO_ROW_MERGE").is_none() { merge_parallel_rows(&mut rows, &mut row_lo, &mut row_up) } else { 0 };
+    if verbose && merged > 0 {
+        eprintln!("MIP: presolve: merged {merged} parallel rows");
+    }
     let fixed = (0..n).filter(|&j| pre.lb[j] == pre.ub[j]).count();
     if verbose {
         eprintln!("MIP: presolve: rows {} -> {}, free columns {} -> {}, postsolve steps {}", p.m, rows.len(), (0..n).filter(|&j| p.col_lo[j] < p.col_up[j]).count(), n - fixed, pre.postsolve_log.len());
@@ -195,9 +201,85 @@ fn presolve_mip(p: &MipProblem, verbose: bool) -> Option<Presolved> {
     Some(Presolved::Reduced { prob, postsolve: pre.postsolve_log, scaling: pre.scaling })
 }
 
+/// 係数が定数倍の関係にある行をまとめる。各行を最初の係数で割った形で分類し、同じ形の行の
+/// `base x` の範囲の共通部分を、最初の行 (元の倍率) の範囲制約 1 本にする。共通部分が空 (実行不能) なら
+/// その組はまとめない (伝播・LP が検出する)。まとめた (消した) 行の数を返す。
+fn merge_parallel_rows(rows: &mut Vec<Vec<(usize, f64)>>, row_lo: &mut Vec<f64>, row_up: &mut Vec<f64>) -> usize {
+    use std::collections::HashMap;
+    let m = rows.len();
+    let key_of = |r: &[(usize, f64)]| -> Option<(Vec<(usize, i64)>, f64)> {
+        let s = r.first()?.1;
+        if s == 0.0 {
+            return None;
+        }
+        let mut k: Vec<(usize, i64)> = r.iter().map(|&(j, a)| (j, ((a / s) * 1e12).round() as i64)).collect();
+        k.sort_unstable();
+        Some((k, s))
+    };
+    // 形 -> (最初の行, その倍率, base x の下限, 上限)
+    let mut groups: HashMap<Vec<(usize, i64)>, (usize, f64, f64, f64)> = HashMap::new();
+    let mut keep = vec![true; m];
+    let mut merged = 0usize;
+    for i in 0..m {
+        let Some((k, s)) = key_of(&rows[i]) else { continue };
+        // row_lo <= s (base x) <= row_up -> base x の範囲
+        let (bl, bu) = if s > 0.0 { (row_lo[i] / s, row_up[i] / s) } else { (row_up[i] / s, row_lo[i] / s) };
+        match groups.get_mut(&k) {
+            None => {
+                groups.insert(k, (i, s, bl, bu));
+            }
+            Some(g) => {
+                let (nl, nu) = (g.2.max(bl), g.3.min(bu));
+                if nl > nu + 1e-9 * (1.0 + nl.abs().max(nu.abs())) {
+                    continue; // 実行不能な組はまとめない
+                }
+                g.2 = nl;
+                g.3 = nu;
+                keep[i] = false;
+                merged += 1;
+            }
+        }
+    }
+    if merged == 0 {
+        return 0;
+    }
+    for (_, (i, s, bl, bu)) in groups {
+        let (lo, up) = if s > 0.0 { (bl * s, bu * s) } else { (bu * s, bl * s) };
+        row_lo[i] = lo;
+        row_up[i] = up;
+    }
+    let mut k = 0;
+    for i in 0..m {
+        if keep[i] {
+            rows.swap(k, i);
+            row_lo.swap(k, i);
+            row_up.swap(k, i);
+            k += 1;
+        }
+    }
+    rows.truncate(k);
+    row_lo.truncate(k);
+    row_up.truncate(k);
+    merged
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 上限側と下限側 (符号の逆の倍) の行が範囲制約 1 本にまとまること
+    #[test]
+    fn merge_parallel_rows_makes_ranged_row() {
+        let mut rows = vec![vec![(0, 1.0), (1, 2.0)], vec![(0, -2.0), (1, -4.0)], vec![(0, 1.0), (1, 1.0)]];
+        let mut lo = vec![f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY];
+        let mut up = vec![5.0, -2.0, 3.0];
+        // x0 + 2 x1 <= 5 と -2 x0 - 4 x1 <= -2 (x0 + 2 x1 >= 1)
+        let k = merge_parallel_rows(&mut rows, &mut lo, &mut up);
+        assert_eq!(k, 1);
+        assert_eq!(rows.len(), 2);
+        let i = rows.iter().position(|r| r[1].1 == 2.0).unwrap();
+        assert!((lo[i] - 1.0).abs() < 1e-12 && (up[i] - 5.0).abs() < 1e-12);
+    }
 
     /// 整数列の整数でない境界は問題を作るときに丸められること (伝播の走査省略やカットは整数の境界を前提にする。
     /// 丸めないと不正なカットが出て最適解を切っていた)。
