@@ -479,6 +479,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 heur!("simple rounding", self.simple_rounding(&x));
                 heur!("randomized rounding", self.randomized_rounding(&x, 3));
+                if self.incumbent.is_none() && env_str!("ENOMOTO_MIP_NO_SHIFTPROP").is_none() {
+                    heur!("shift-and-propagate", self.shift_and_propagate());
+                }
                 heur!("RENS", self.rens(&x));
                 if self.incumbent.is_none() && !self.fractional(&x_root0).is_empty() {
                     heur!("RENS (LP before cuts)", self.rens(&x_root0));
@@ -486,11 +489,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if self.incumbent.is_none() {
                     heur!("feasibility pump", self.feasibility_pump(root_iters));
                 }
+                // ダイビングの予算: 最初の根の LP の 2 倍に、カットのループを含めた根全体の反復数の一定割合を足す
+                let dive_budget = 2 * root_iters + 1000 + (tunable!("ENOMOTO_T_MIP_ROOT_DIVE_FRAC", 0.0, f64) * self.lp.total_iterations() as f64) as u64;
                 if self.incumbent.is_none() {
-                    heur!("fractional diving", self.fractional_dive(2 * root_iters + 1000));
+                    heur!("fractional diving", self.fractional_dive(dive_budget));
                 }
                 if self.incumbent.is_none() {
-                    heur!("vector length diving", self.dive(super::heuristics::DiveKind::VectorLength, 2 * root_iters + 1000, f64::INFINITY));
+                    heur!("vector length diving", self.dive(super::heuristics::DiveKind::VectorLength, dive_budget, f64::INFINITY));
+                }
+                if self.incumbent.is_none() && env_str!("ENOMOTO_MIP_NO_COEF_DIVE").is_none() {
+                    heur!("coefficient diving", self.dive(super::heuristics::DiveKind::Coefficient, dive_budget, f64::INFINITY));
                 }
                 // 暫定解 (Feasibility Jump・pump・丸めなどで得たもの) を根の LP 解との RINS で磨く
                 if self.incumbent.is_some() && env_str!("ENOMOTO_MIP_NO_ROOT_RINS").is_none() {
@@ -733,7 +741,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if node.depth % 10 == 3 || node.depth % 10 == 7 {
                         let quota = (0.05 * (self.dive_succ + 1) as f64 / (self.dive_calls + 1) as f64 * self.node_iters as f64) as u64 + 1000;
                         if self.dive_iters < quota && env_str!("ENOMOTO_MIP_NO_NODE_DIVE").is_none() {
-                            let kind = if node.depth % 10 == 3 { super::heuristics::DiveKind::Fractional } else { super::heuristics::DiveKind::VectorLength };
+                            // 種類を順に回す (SCIP の各ダイビングに相当。誘導は暫定解があるときだけ)
+                            use super::heuristics::DiveKind as K;
+                            let kinds: &[K] = if env_str!("ENOMOTO_MIP_DIVE_OLD_KINDS").is_some() {
+                                &[K::Fractional, K::VectorLength]
+                            } else if self.incumbent.is_some() {
+                                &[K::Fractional, K::VectorLength, K::Coefficient, K::Pseudocost, K::Guided]
+                            } else {
+                                &[K::Fractional, K::VectorLength, K::Coefficient, K::Pseudocost]
+                            };
+                            let kind = kinds[self.dive_calls as usize % kinds.len()];
                             let lb = self.queue.best_lower_bound().min(node_obj);
                             let cutoff = self.prune_limit();
                             let quot = if self.incumbent.is_some() { 0.8 } else { 0.1 };

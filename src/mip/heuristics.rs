@@ -171,6 +171,165 @@ impl<'a, L: MipLp> Solver<'a, L> {
         found
     }
 
+    /// Shift-and-Propagate (SCIP の `heur_shiftandpropagate` の簡略版)。LP を使わず、各列を定義域の端の点
+    /// (下限、なければ上限、なければ 0) に置いた点から始め、違反している行の整数列のうち、その列の行の違反数を
+    /// 最も減らす値 (行を満たすのに要るずらし量から候補を作る) に固定して伝播する、を繰り返す。違反行が
+    /// なくなったら残りの整数列を今の値に固定する。行き詰まったら直前の固定の次の候補に戻る (上限あり)。
+    /// 全部固定できたら連続部分を LP で解いて試す。定義域と LP は戻す。
+    pub(super) fn shift_and_propagate(&mut self) -> bool {
+        let p = self.p;
+        let n = p.n;
+        if !p.is_int.iter().any(|&b| b) {
+            return false;
+        }
+        self.sync_lp();
+        let pos = self.dom.stack_len();
+        // 点は定義域の関数: 下限、なければ上限、なければ 0 (固定された列はその値)
+        let val = |lo: f64, up: f64| if lo.is_finite() { lo } else if up.is_finite() { up } else { 0.0 };
+        let mut x: Vec<f64> = (0..n).map(|j| val(self.dom.lo[j], self.dom.up[j])).collect();
+        let mut act = vec![0.0f64; p.m];
+        for (i, r) in p.rows.iter().enumerate() {
+            act[i] = r.iter().map(|&(j, a)| a * x[j]).sum();
+        }
+        let tol = |b: f64| 1e-6 * (1.0 + b.abs());
+        let viol = |i: usize, a: f64| (a < p.row_lo[i] - tol(p.row_lo[i])) as u32 + (a > p.row_up[i] + tol(p.row_up[i])) as u32;
+        let work0 = self.dom.debug_work();
+        let work_cap = 20 * p.rows.iter().map(|r| r.len() as u64).sum::<u64>() + 1_000_000;
+        let max_bt = tunable!("ENOMOTO_T_MIP_SHIFTPROP_BACKTRACKS", 20usize, usize);
+        let _ = self.dom.take_changed();
+        // 決定の記録: (列, 残りの候補, 決定前の定義域の記録位置)
+        let mut decisions: Vec<(usize, Vec<f64>, usize)> = Vec::new();
+        let mut backtracks = 0usize;
+        let mut row_ptr = 0usize;
+        let mut ok = true;
+        let mut steps = 0usize;
+        // 次に固定する列と候補 (違反数の少ない順) を選ぶ
+        let pick = |s: &Self, x: &[f64], act: &[f64], row_ptr: &mut usize| -> Option<(usize, Vec<f64>)> {
+            let cands_of = |j: usize| -> Vec<(u32, f64, f64)> {
+                let (lo, up) = (s.dom.lo[j], s.dom.up[j]);
+                let mut cands: Vec<f64> = vec![x[j].clamp(lo, up).round()];
+                if lo.is_finite() {
+                    cands.push(lo);
+                }
+                if up.is_finite() {
+                    cands.push(up);
+                }
+                for &(i, a) in &p.cols[j] {
+                    let need = if act[i] < p.row_lo[i] - tol(p.row_lo[i]) {
+                        p.row_lo[i] - act[i]
+                    } else if act[i] > p.row_up[i] + tol(p.row_up[i]) {
+                        p.row_up[i] - act[i]
+                    } else {
+                        continue;
+                    };
+                    let d = need / a;
+                    let v = x[j] + if (need > 0.0) == (a > 0.0) { (d - 1e-9).ceil() } else { (d + 1e-9).floor() };
+                    if v.is_finite() {
+                        cands.push(v.round().clamp(lo, up));
+                    }
+                }
+                cands.sort_by(|a, b| a.total_cmp(b));
+                cands.dedup();
+                let mut scored: Vec<(u32, f64, f64)> = cands
+                    .iter()
+                    .map(|&v| {
+                        let dv = v - x[j];
+                        let nv: u32 = p.cols[j].iter().map(|&(i, a)| viol(i, act[i] + a * dv)).sum();
+                        (nv, p.cost[j] * v, v)
+                    })
+                    .collect();
+                scored.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
+                scored
+            };
+            // 違反している行 (前回の位置から巡回) の未固定の整数列のうち、違反数を最も減らすもの
+            for k in 0..p.m {
+                let i = (*row_ptr + k) % p.m;
+                if viol(i, act[i]) == 0 {
+                    continue;
+                }
+                let mut best: Option<(i64, usize, Vec<(u32, f64, f64)>)> = None;
+                for &(j, _) in &p.rows[i] {
+                    if !p.is_int[j] || s.dom.is_fixed(j) {
+                        continue;
+                    }
+                    let sc = cands_of(j);
+                    let now: u32 = p.cols[j].iter().map(|&(i2, _)| viol(i2, act[i2])).sum();
+                    let gain = now as i64 - sc[0].0 as i64;
+                    if best.as_ref().is_none_or(|b| gain > b.0) {
+                        best = Some((gain, j, sc));
+                    }
+                }
+                if let Some((_, j, sc)) = best {
+                    *row_ptr = i;
+                    return Some((j, sc.iter().take(4).map(|t| t.2).collect()));
+                }
+            }
+            // 違反行に未固定の整数列がない: 残りの整数列を今の値に
+            (0..n).find(|&j| p.is_int[j] && !s.dom.is_fixed(j)).map(|j| (j, cands_of(j).iter().take(4).map(|t| t.2).collect()))
+        };
+        'outer: loop {
+            steps += 1;
+            if steps % 64 == 0 && (self.time_up() || self.dom.debug_work() - work0 > work_cap) {
+                ok = false;
+                break;
+            }
+            let Some((j, cands)) = pick(self, &x, &act, &mut row_ptr) else { break };
+            let mut pending: Option<(usize, Vec<f64>, usize)> = Some((j, cands, self.dom.stack_len()));
+            // 候補を順に試す。全部駄目なら前の決定の次の候補へ戻る
+            loop {
+                let (dj, mut rest, dpos) = pending.take().unwrap();
+                let mut fixed = false;
+                while !rest.is_empty() {
+                    let v = rest.remove(0);
+                    self.dom.tighten_lower(p, dj, v);
+                    self.dom.tighten_upper(p, dj, v);
+                    if self.dom.propagate(p) {
+                        fixed = true;
+                        break;
+                    }
+                    self.dom.backtrack_to(p, dpos);
+                }
+                if fixed {
+                    decisions.push((dj, rest, dpos));
+                    break;
+                }
+                if backtracks >= max_bt {
+                    ok = false;
+                    break 'outer;
+                }
+                let Some(d) = decisions.pop() else {
+                    ok = false;
+                    break 'outer;
+                };
+                backtracks += 1;
+                self.dom.backtrack_to(p, d.2);
+                pending = Some(d);
+            }
+            // 境界の変わった列の点と行の活動量を更新する
+            for c in self.dom.take_changed() {
+                let nv = val(self.dom.lo[c], self.dom.up[c]);
+                if nv != x[c] {
+                    let dv = nv - x[c];
+                    for &(i, a) in &p.cols[c] {
+                        act[i] += a * dv;
+                    }
+                    x[c] = nv;
+                }
+            }
+        }
+        if self.params.verbose && self.nodes <= 1 {
+            let nviol = (0..p.m).filter(|&i| viol(i, act[i]) > 0).count();
+            eprintln!("MIP:   shift-and-propagate: {} ({} decisions, {backtracks} backtracks, {nviol} rows violated before the LP)", if ok { "all integer columns fixed" } else { "gave up" }, decisions.len());
+        }
+        let target: Vec<f64> = (0..n).map(|j| if self.dom.is_fixed(j) { self.dom.lo[j] } else { x[j] }).collect();
+        self.dom.backtrack_to(p, pos);
+        if !ok {
+            return false;
+        }
+        let ints: Vec<usize> = decisions.iter().map(|d| d.0).collect();
+        self.fix_and_propagate(&target, &ints)
+    }
+
     /// ランダム丸め: しきい値を乱数にして丸めた点を fix_and_propagate で試す (整数に近い列から固定)。
     pub(super) fn randomized_rounding(&mut self, x: &[f64], tries: usize) -> bool {
         let p = self.p;
@@ -290,8 +449,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     /// ダイビング (SCIP の `SCIPperformGenericDivingAlgorithm` の簡略版)。`kind` で丸める列と向きを選び、
-    /// 固定 → 伝播 → LP の解き直しを整数解になるまで続ける。固定で実行不能になったら 1 回だけ反対側を試す。
-    /// LP の目的値が `search_bound` 以上になったら止める。`budget` は LP 反復の上限。定義域と LP は戻す。
+    /// 固定 → 伝播 → LP の解き直しを整数解になるまで続ける。固定で実行不能 (または目的値が `search_bound` 以上)
+    /// になったら反対側を試し、両側とも駄目なら前の決定に戻って反対側に変える (後戻り、最大
+    /// `ENOMOTO_T_MIP_DIVE_BACKTRACKS` 回)。`budget` は LP 反復の上限。定義域と LP は戻す。
     pub(super) fn dive(&mut self, kind: DiveKind, budget: u64, search_bound: f64) -> bool {
         let p = self.p;
         let verbose = self.params.verbose && self.nodes <= 1;
@@ -299,11 +459,21 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let saved = self.lp.save_state();
         let pos = self.dom.stack_len();
         let it_start = self.lp.total_iterations();
+        let max_bt = tunable!("ENOMOTO_T_MIP_DIVE_BACKTRACKS", 10usize, usize);
+        let guide = if kind == DiveKind::Guided { self.incumbent.as_ref().map(|(_, x)| x.clone()) } else { None };
+        if kind == DiveKind::Guided && guide.is_none() {
+            return false;
+        }
+        // 決定の記録: (列, 値, 上へ, 決定前の定義域の記録位置, 反対側を試し済みか)
+        let mut decisions: Vec<(usize, f64, bool, usize, bool)> = Vec::new();
+        let mut backtracks = 0usize;
         let mut found = false;
-        for _depth in 0..(2 * p.n) {
-            if self.time_up() || self.lp.total_iterations() - it_start > budget || self.lp.objective() + p.offset >= search_bound.min(self.prune_limit()) {
+        let mut steps = 0usize;
+        'dive: while steps < 4 * p.n + 10 {
+            steps += 1;
+            if self.time_up() || self.lp.total_iterations() - it_start > budget {
                 if verbose {
-                    eprintln!("MIP:   dive ran out of budget at depth {_depth} ({} iterations)", self.lp.total_iterations() - it_start);
+                    eprintln!("MIP:   dive ran out of budget at depth {} ({} iterations, {backtracks} backtracks)", decisions.len(), self.lp.total_iterations() - it_start);
                 }
                 break;
             }
@@ -312,7 +482,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if frac.is_empty() {
                 found = self.try_lp_solution();
                 if verbose {
-                    eprintln!("MIP:   dive reached an integral LP at depth {_depth} (accepted {found}, objective {})", self.lp.objective() + p.offset);
+                    eprintln!("MIP:   dive reached an integral LP at depth {} (accepted {found}, objective {}, {backtracks} backtracks)", decisions.len(), self.lp.objective() + p.offset);
                 }
                 break;
             }
@@ -345,48 +515,105 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         let delta = p.cost[j].abs() * dist + 1e-6 * dist;
                         (up, delta / (cols[j].len() as f64 + 1.0))
                     }
+                    DiveKind::Coefficient => {
+                        // SCIP の coefdiving: lock の少ない向きへ丸め、その lock 数の少ない列から (同数なら近いもの)。
+                        // 自明に丸められる列 (lock 0) は後回し
+                        let up = if dl != ul { ul < dl } else { f >= 0.5 };
+                        let lk = if up { ul } else { dl };
+                        let dist = if up { 1.0 - f } else { f };
+                        let trivial = if dl == 0 || ul == 0 { 1e6 } else { 0.0 };
+                        (up, trivial + lk as f64 + dist + if binary { 0.0 } else { 0.5 })
+                    }
+                    DiveKind::Pseudocost => {
+                        // SCIP の pscostdiving: 端に近ければその側、そうでなければ擬費用の小さい側へ。
+                        // (この側の費用) / (反対側の費用) の小さい、向きのはっきりした列から
+                        let (cu, cd) = (self.pc.cost_up(j) * (1.0 - f), self.pc.cost_down(j) * f);
+                        let up = if f < 0.3 {
+                            false
+                        } else if f > 0.7 {
+                            true
+                        } else {
+                            cu < cd
+                        };
+                        let (this, other) = if up { (cu, cd) } else { (cd, cu) };
+                        (up, (this + 1e-6) / (other + 1e-6) + if binary { 0.0 } else { 1.0 })
+                    }
+                    DiveKind::Guided => {
+                        // SCIP の guideddiving: 暫定解の値の側へ、暫定解との差の小さい列から
+                        let g = guide.as_ref().unwrap()[j];
+                        let up = g >= v;
+                        ((up), (g - v).abs() + if binary { 0.0 } else { 0.5 })
+                    }
                 };
                 if pick.is_none_or(|(_, _, _, s)| score < s) {
                     pick = Some((j, v, up, score));
                 }
             }
             let (j, v, up_first, _) = pick.unwrap();
-            let mut ok = false;
-            for up in [up_first, !up_first] {
-                let before = self.dom.stack_len();
-                if up {
-                    self.dom.tighten_lower(p, j, v.ceil());
-                } else {
-                    self.dom.tighten_upper(p, j, v.floor());
-                }
-                if self.dom.propagate(p) {
-                    self.sync_lp();
-                    let it0 = self.lp.total_iterations();
-                    let lim = budget.saturating_sub(self.lp.total_iterations() - it_start).max(1000);
-                    let st = self.lp.solve(&self.limits(lim));
-                    self.heur_iters += self.lp.total_iterations() - it0;
-                    if st == LpStatus::Optimal {
-                        ok = true;
-                        break;
-                    }
-                    if verbose {
-                        eprintln!("MIP:   dive LP {st:?} after {} iterations (col {j}, up {up})", self.lp.total_iterations() - it0);
-                    }
-                }
-                self.dom.backtrack_to(p, before);
-                self.sync_lp();
+            let before = self.dom.stack_len();
+            if self.dive_try(j, v, up_first, budget, it_start, search_bound) {
+                decisions.push((j, v, up_first, before, false));
+                continue;
             }
-            if !ok {
-                if verbose {
-                    eprintln!("MIP:   dive stopped at depth {_depth} with {} fractional", frac.len());
+            if self.dive_try(j, v, !up_first, budget, it_start, search_bound) {
+                decisions.push((j, v, !up_first, before, true));
+                continue;
+            }
+            // 両側とも駄目: 反対側を試していない決定まで戻ってそちらに変える
+            loop {
+                if backtracks >= max_bt {
+                    if verbose {
+                        eprintln!("MIP:   dive stopped at depth {} with {} fractional ({backtracks} backtracks)", decisions.len(), frac.len());
+                    }
+                    break 'dive;
                 }
-                break;
+                let Some((dj, dv, dup, dpos, tried)) = decisions.pop() else {
+                    if verbose {
+                        eprintln!("MIP:   dive exhausted ({backtracks} backtracks)");
+                    }
+                    break 'dive;
+                };
+                self.dom.backtrack_to(p, dpos);
+                self.sync_lp();
+                if tried {
+                    continue;
+                }
+                backtracks += 1;
+                if self.dive_try(dj, dv, !dup, budget, it_start, search_bound) {
+                    decisions.push((dj, dv, !dup, dpos, true));
+                    break;
+                }
             }
         }
         self.dom.backtrack_to(p, pos);
         self.sync_lp();
         self.lp.restore_state(&saved);
         found
+    }
+
+    /// ダイビングの 1 つの決定: 列 `j` を `v` の上 (下) の整数に締め、伝播して LP を解く。LP が最適で目的値が
+    /// `search_bound` と打ち切り値より小さければ真。駄目なら定義域を戻して偽。
+    fn dive_try(&mut self, j: usize, v: f64, up: bool, budget: u64, it_start: u64, search_bound: f64) -> bool {
+        let p = self.p;
+        let before = self.dom.stack_len();
+        if up {
+            self.dom.tighten_lower(p, j, v.ceil());
+        } else {
+            self.dom.tighten_upper(p, j, v.floor());
+        }
+        if self.dom.propagate(p) {
+            self.sync_lp();
+            let it0 = self.lp.total_iterations();
+            let lim = budget.saturating_sub(self.lp.total_iterations() - it_start).max(1000);
+            let st = self.lp.solve(&self.limits(lim));
+            self.heur_iters += self.lp.total_iterations() - it0;
+            if st == LpStatus::Optimal && self.lp.objective() + p.offset < search_bound.min(self.prune_limit()) {
+                return true;
+            }
+        }
+        self.dom.backtrack_to(p, before);
+        self.sync_lp();
+        false
     }
 
     /// Feasibility Pump (根で暫定解がないときに使う)。LP は根の最適解の状態から始め、最後に戻す。
@@ -629,6 +856,12 @@ pub enum DiveKind {
     Fractional,
     /// ベクトル長ダイビング (目的値の悪化が列の長さの割に小さい列を、悪化する側へ)。
     VectorLength,
+    /// 係数ダイビング (lock の少ない向きへ、lock の少ない列から)。
+    Coefficient,
+    /// 擬費用ダイビング (擬費用の小さい向きへ、向きのはっきりした列から)。
+    Pseudocost,
+    /// 誘導ダイビング (暫定解の値の側へ。暫定解があるときだけ)。
+    Guided,
 }
 
 impl<'a, L: MipLp> Solver<'a, L> {
