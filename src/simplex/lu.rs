@@ -7589,6 +7589,66 @@ impl FtLu {
 
 }
 
+/// 計測用 (`cargo test --release --lib lu_dump_bench -- --ignored --nocapture`、`ENOMOTO_LU_BENCH_FILE` に
+/// `ENOMOTO_DUMP_LU_DIR` で書き出した `lu_dump.bin`)。書き出した分解の入力をそれぞれ通常の経路で分解し、時間と `L`+`U` の
+/// 非ゼロ数を表示する (`ENOMOTO_LU_BENCH_MAX` で先頭から何件まで)。
+#[cfg(test)]
+mod lu_dump_bench {
+    use super::*;
+
+    fn read_dump(path: &str) -> Vec<(usize, Vec<Vec<(usize, f64)>>)> {
+        let buf = std::fs::read(path).expect("dump file");
+        let mut out = Vec::new();
+        let mut p = 0usize;
+        let rd = |p: &mut usize| -> u64 {
+            let v = u64::from_le_bytes(buf[*p..*p + 8].try_into().unwrap());
+            *p += 8;
+            v
+        };
+        while p + 8 <= buf.len() {
+            let m = rd(&mut p) as usize;
+            let mut rows = Vec::with_capacity(m);
+            for _ in 0..m {
+                let len = rd(&mut p) as usize;
+                let mut r = Vec::with_capacity(len);
+                for _ in 0..len {
+                    let j = rd(&mut p) as usize;
+                    let v = f64::from_bits(rd(&mut p));
+                    r.push((j, v));
+                }
+                rows.push(r);
+            }
+            out.push((m, rows));
+        }
+        out
+    }
+
+    #[test]
+    #[ignore]
+    fn lu_dump_bench() {
+        let Ok(path) = std::env::var("ENOMOTO_LU_BENCH_FILE") else { return };
+        let max: usize = std::env::var("ENOMOTO_LU_BENCH_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(usize::MAX);
+        let entries = read_dump(&path);
+        let mut total = 0.0;
+        for (k, (m, rows)) in entries.iter().take(max).enumerate() {
+            let nnz: usize = rows.iter().map(|r| r.len()).sum();
+            let border = detect_border_columns(*m, rows);
+            let dense = is_dense_input(*m, rows);
+            let t0 = std::time::Instant::now();
+            let lu = factorize_routed(*m, rows, &border, dense, explicit_dense_switch());
+            let dt = t0.elapsed().as_secs_f64();
+            total += dt;
+            let ft = lu.map(FtLu::new);
+            println!(
+                "LU_BENCH k={k} m={m} nnz(B)={nnz} dense={dense} border={} time={dt:.4}s nnz(LU)={}",
+                border.len(),
+                ft.as_ref().map_or(0, |f| f.fill_baseline)
+            );
+        }
+        println!("LU_BENCH total={total:.3}s");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     thread_local! {

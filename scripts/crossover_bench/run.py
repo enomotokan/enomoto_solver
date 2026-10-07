@@ -189,8 +189,9 @@ def main() -> None:
                     for method in todo:
                         if method in stop:
                             continue
-                        # 案の名前が METHODS の名前 (highs_ipm など) ならその解法、それ以外は ipm_crossover。
-                        solver = METHODS.get(method, "ipm_crossover")
+                        # 案の名前が METHODS の名前 (highs_ipm など) ならその解法。`名前:解法` (例 `base:slope_intercept`)
+                        # ならその解法。それ以外は ipm_crossover。
+                        solver = METHODS.get(method) or METHODS.get(method.partition(":")[2], "ipm_crossover")
                         r = run_one(mps, solver, args.time_limit, args.mem_gb, extra_env=variants.get(method))
                         all_runs[method].append(r)
                         if r["status"] != "optimal" or r["time"] >= args.single_run_above:
