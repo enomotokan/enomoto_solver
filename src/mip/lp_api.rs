@@ -3,7 +3,7 @@
 //! [`crate::simplex::mip_lp::TwoStageLp`] (既存の傾き・切片二段解法を warm start で使うもの)。
 
 use super::lp::{Basis, LpEngine, LpState, LpStatus, SolveLimits};
-use crate::simplex::mip_lp::{TwoStageLp, TwoStageState};
+use crate::simplex::mip_lp::{InteriorPoint, TwoStageLp, TwoStageState};
 
 /// 分枝限定法が使う LP の操作。
 pub trait MipLp: Clone {
@@ -35,11 +35,19 @@ pub trait MipLp: Clone {
     /// 直前の求解が実行不能だったときの双対射線 (元の行の向き、行の重み)。なければ `None`。
     fn farkas_ray(&self) -> Option<Vec<f64>>;
     fn basis_inverse_row(&mut self, s: usize) -> Vec<f64>;
+    /// 今の LP を内点法で解いた点と、クロスオーバーの押し出しの頂点・基底 ([`TwoStageLp::interior_point`])。
+    /// 基底は双対実行可能とは限らない。対応しない実装は `None`。
+    fn interior_point(&self, _zero_cost: bool, _want_vertex: bool, _deadline: std::time::Instant) -> Option<InteriorPoint> {
+        None
+    }
+    /// 基底を列番号 (構造列 j < n、行 n + i) で与える ([`TwoStageLp::set_basis_cols`])。対応しない実装は何もしない。
+    fn set_basis_cols(&mut self, _b: &[usize], _x: Option<&[f64]>) {}
 }
 
 macro_rules! forward_impl {
-    ($t:ty, $st:ty) => {
+    ($t:ty, $st:ty $(, $extra:item)*) => {
         impl MipLp for $t {
+            $($extra)*
             type State = $st;
             fn new(col_lo: &[f64], col_up: &[f64], cost: &[f64], rows: &[Vec<(usize, f64)>], row_lo: &[f64], row_up: &[f64]) -> Self {
                 <$t>::new(col_lo, col_up, cost, rows, row_lo, row_up)
@@ -74,4 +82,13 @@ macro_rules! forward_impl {
 }
 
 forward_impl!(LpEngine, LpState);
-forward_impl!(TwoStageLp, TwoStageState);
+forward_impl!(
+    TwoStageLp,
+    TwoStageState,
+    fn interior_point(&self, zero_cost: bool, want_vertex: bool, deadline: std::time::Instant) -> Option<InteriorPoint> {
+        TwoStageLp::interior_point(self, zero_cost, want_vertex, deadline)
+    },
+    fn set_basis_cols(&mut self, b: &[usize], x: Option<&[f64]>) {
+        TwoStageLp::set_basis_cols(self, b, x)
+    }
+);

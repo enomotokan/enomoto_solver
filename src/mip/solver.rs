@@ -564,6 +564,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     heur!("trivial", self.trivial());
                 }
                 heur!("randomized rounding", self.randomized_rounding(&x, 3));
+                if env_str!("ENOMOTO_MIP_NO_IPM_HEUR").is_none() {
+                    heur!("interior rounding", self.interior_rounding(&x));
+                }
                 if env_str!("ENOMOTO_MIP_NO_ROOT_REDCOST_HEUR").is_none() {
                     heur!("root reduced cost", self.root_reduced_cost());
                 }

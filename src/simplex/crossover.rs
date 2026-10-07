@@ -452,6 +452,15 @@ pub(super) struct XoOptions<'a> {
     /// 内点法を飛ばして使う点 `(x (全列), y, 内点法の時間)`。境界にある列を固定した小さな問題で、元の問題の内点法の
     /// 点からクロスオーバーを続けるときに使う ([`fix_and_resolve`])。
     pub given_point: Option<(&'a [f64], &'a [f64], f64)>,
+    /// 真なら押し出し (主の押し出し・基底の選択・Megiddo 式の押し出し) で作った基底と、その基底解 (頂点) を
+    /// [`XO_VERTEX`] に残して、仕上げの単体法を走らせずに `None` を返す (分枝限定法のヒューリスティクス用)。
+    /// この基底は主実行可能な頂点を与えるが、**双対実行可能とは限らない** (最適基底ではない)。
+    pub vertex_only: bool,
+}
+
+thread_local! {
+    /// `vertex_only` で止めたときの (基底 (列番号、長さ m), 基底解 (全列。主実行可能でなければ `None`))。
+    static XO_VERTEX: std::cell::RefCell<Option<(Vec<usize>, Option<Vec<f64>>)>> = const { std::cell::RefCell::new(None) };
 }
 
 thread_local! {
@@ -493,6 +502,46 @@ fn reduce_fixed(std: &StdForm) -> Reduced {
     let l = free_cols.iter().map(|&j| std.lb[j]).collect();
     let u = free_cols.iter().map(|&j| std.ub[j]).collect();
     Reduced { free_cols, a, b, l, u }
+}
+
+/// 分枝限定法のヒューリスティクス用の内点法の結果 ([`interior_point`])。
+pub(crate) struct InteriorResult {
+    /// 内点法の解 (標準形の全列。固定列はその値)。
+    pub x: Vec<f64>,
+    /// クロスオーバーの押し出しで作った (基底 (列番号、長さ m), 頂点 (全列、主実行可能でなければ `None`))。
+    /// 基底は双対実行可能とは限らない (仕上げの単体法を走らせていない) ので、最適基底として扱わないこと。
+    pub vertex: Option<(Vec<usize>, Option<Vec<f64>>)>,
+}
+
+/// `std` を内点法で解き (`zero_cost` なら費用 0、つまり実行可能領域の中心付近の点)、`want_vertex` なら
+/// その点からクロスオーバーの押し出しだけを行って頂点と基底も返す。内点法が最適 (または受理できる残差) に
+/// 達しなければ `None`。時間の上限は呼び出し側が打ち切りトークン ([`crate::cancel`]) で掛ける。
+pub(crate) fn interior_point(std: &StdForm, zero_cost: bool, want_vertex: bool) -> Option<InteriorResult> {
+    let t0 = Instant::now();
+    let r = reduce_fixed(std);
+    let c: Vec<f64> = if zero_cost { vec![0.0; r.free_cols.len()] } else { r.free_cols.iter().map(|&j| std.c[j]).collect() };
+    let max_iters = tunable!("ENOMOTO_T_IPM_MAX_ITERS", 200usize, usize);
+    let warm = WarmStart { dual_feasible_known: zero_cost, ..Default::default() };
+    let ipm = solve_box_lp_warm(&r.a, &r.b, &c, &r.l, &r.u, max_iters, Some(&warm));
+    if crate::cancel::is_cancelled() {
+        return None;
+    }
+    let accepted = ipm.rel_res.0.max(ipm.rel_res.1) <= prm::IPM_ACCEPT_REL;
+    if !(ipm.status == Status::Optimal || (ipm.status == Status::NotSolved && accepted)) {
+        return None;
+    }
+    let mut x = std.lb.clone();
+    for (k, &j) in r.free_cols.iter().enumerate() {
+        x[j] = ipm.x[k].clamp(std.lb[j], std.ub[j]);
+    }
+    let mut vertex = None;
+    if want_vertex && !zero_cost {
+        XO_VERTEX.with(|v| *v.borrow_mut() = None);
+        let secs = t0.elapsed().as_secs_f64();
+        let _ = solve_ipm_crossover_with(std, &XoOptions { given_point: Some((&x, &ipm.y, secs)), vertex_only: true, ..Default::default() });
+        vertex = XO_VERTEX.with(|v| v.borrow_mut().take());
+    }
+    Some(InteriorResult { x, vertex })
 }
 
 /// 費用 0 の実行可能性問題を内点法で解く (`y = 0` が双対実行可能なので、結論は「実行可能」か「双対の発散
@@ -1565,6 +1614,11 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
         if crate::cancel::is_cancelled() {
             return None;
         }
+    }
+    if xo.vertex_only {
+        let xv = vertex_solution(std, &basis_pos, &nb_status, &lu);
+        XO_VERTEX.with(|v| *v.borrow_mut() = Some((basis.clone(), xv)));
+        return None;
     }
     // Megiddo 式の押し出しの後の基底解 (主実行可能な頂点) の目的値が、内点法の双対 `y` による弱双対の下界
     // `L(y) = b·y + Σ_j min_{l_j<=x_j<=u_j} (c - A^T y)_j x_j` から相対 `ENOMOTO_T_XO_ACCEPT_GAP` 以内なら、この頂点を

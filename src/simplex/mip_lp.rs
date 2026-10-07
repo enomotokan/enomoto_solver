@@ -56,6 +56,15 @@ fn new_price_key() -> u64 {
     NEXT_PRICE_KEY.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
+/// [`TwoStageLp::interior_point`] の結果 (元の空間の構造列の値)。
+pub struct InteriorPoint {
+    /// 内点法の解。
+    pub x: Vec<f64>,
+    /// クロスオーバーの押し出しで作った (基底 (標準形の列番号), 頂点 (主実行可能でなければ `None`))。
+    /// 基底は双対実行可能とは限らない。
+    pub vertex: Option<(Vec<usize>, Option<Vec<f64>>)>,
+}
+
 /// 状態の保存 (強分岐用)。
 #[derive(Clone)]
 pub struct TwoStageState {
@@ -381,6 +390,59 @@ impl TwoStageLp {
         self.status = None;
     }
 
+    /// 今の LP (行・列の境界・費用) を内点法で解いた点 (元の空間の構造列の値) を返す。`zero_cost` なら費用 0
+    /// (実行可能領域の中心付近の点)。`want_vertex` なら、その点からクロスオーバーの押し出しだけで作った頂点と
+    /// 基底 (標準形の列番号: 構造列 j < n、スラック n + i) も返す。この基底は**双対実行可能とは限らない**ので、
+    /// warm start ([`Self::set_basis_cols`]) にだけ使い、最適基底 (下界・被約費用) として使ってはいけない。
+    /// `deadline` を過ぎたら打ち切って `None`。
+    pub fn interior_point(&self, zero_cost: bool, want_vertex: bool, deadline: std::time::Instant) -> Option<InteriorPoint> {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        let token = Arc::new(AtomicBool::new(false));
+        let done = Arc::new(AtomicBool::new(false));
+        // 時間切れでトークンを立てる見張り (内点法・クロスオーバーはトークンを見て止まる)
+        let watch = {
+            let (token, done) = (token.clone(), done.clone());
+            std::thread::spawn(move || {
+                while !done.load(Ordering::Relaxed) {
+                    if std::time::Instant::now() >= deadline {
+                        token.store(true, Ordering::Relaxed);
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            })
+        };
+        let r = crate::cancel::with_token(Some(token.clone()), || super::crossover::interior_point(&self.std, zero_cost, want_vertex));
+        done.store(true, Ordering::Relaxed);
+        let _ = watch.join();
+        if token.load(Ordering::Relaxed) {
+            return None;
+        }
+        let r = r?;
+        let n = self.n;
+        let to_orig = |z: &[f64]| -> Vec<f64> { (0..n).map(|j| z[j] + self.shift[j]).collect() };
+        let x = to_orig(&r.x);
+        let vertex = r.vertex.map(|(b, xv)| (b, xv.map(|v| to_orig(&v))));
+        Some(InteriorPoint { x, vertex })
+    }
+
+    /// 基底を標準形の列番号 (長さ m) で直接与える (特異なら修復する)。`x` を渡すと、次の求解の非基底列の
+    /// 置き場所の希望 ([`Self::nb_hint`]) をその点から作る。基底は双対実行可能でなくてよい (二段解法の warm start は
+    /// 非基底列を被約費用の符号の側 (無限なら記号的な M) に置くか費用をずらして始め、最後に真の費用で仕上げる)。
+    pub fn set_basis_cols(&mut self, b: &[usize], x: Option<&[f64]>) {
+        if b.len() != self.rows.len() {
+            return;
+        }
+        self.basis = Some(b.to_vec());
+        self.repair_basis();
+        if let Some(x) = x {
+            self.x.copy_from_slice(&x[..self.n]);
+        }
+        self.lu = None;
+        self.status = None;
+    }
+
     pub fn basic_var(&self, s: usize) -> usize {
         match &self.basis {
             Some(b) => b[s],
@@ -670,5 +732,33 @@ mod tests {
         assert!((lp.objective() - (-2.5)).abs() < 1e-9, "{}", lp.objective());
         lp.set_col_bounds(0, 3.0, 10.0);
         assert_eq!(lp.solve(&SolveLimits::default()), LpStatus::Infeasible);
+    }
+
+    #[test]
+    fn interior_point_and_crossover_vertex() {
+        // min -x - y  s.t. x + y <= 4, x, y in [0, 3]: 最適面は (1, 3)-(3, 1) の線分。内点法の点はその内側、
+        // 押し出しの頂点は実行可能な頂点
+        let lp = TwoStageLp::new(&[0.0, 0.0], &[3.0, 3.0], &[-1.0, -1.0], &[vec![(0, 1.0), (1, 1.0)]], &[f64::NEG_INFINITY], &[4.0]);
+        let far = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let ip = lp.interior_point(false, true, far).expect("interior point");
+        assert!((ip.x[0] + ip.x[1] - 4.0).abs() < 1e-5, "{:?}", ip.x);
+        assert!(ip.x[0] > 1.0 + 1e-3 && ip.x[0] < 3.0 - 1e-3, "not interior to the optimal face: {:?}", ip.x);
+        let (b, xv) = ip.vertex.expect("vertex");
+        assert_eq!(b.len(), 1);
+        let xv = xv.expect("primal feasible vertex");
+        assert!(xv[0] + xv[1] <= 4.0 + 1e-9 && xv.iter().all(|&v| (-1e-9..=3.0 + 1e-9).contains(&v)), "{xv:?}");
+        // 費用 0: 実行可能領域の中心付近
+        let ac = lp.interior_point(true, false, far).expect("analytic center");
+        assert!(ac.x[0] + ac.x[1] < 4.0 - 1e-3 && ac.x.iter().all(|&v| v > 1e-3 && v < 3.0 - 1e-3), "{:?}", ac.x);
+    }
+
+    #[test]
+    fn warm_start_from_dual_infeasible_basis() {
+        // min -x - 2y  s.t. x + y <= 4, x, y in [0, 3]。基底 {x} (y、スラックは非基底) は被約費用
+        // d_y = -2 - (-1) = -1 < 0 で双対実行可能でない。そこから始めても最適値 -7 (x = 1, y = 3) に達する
+        let mut lp = TwoStageLp::new(&[0.0, 0.0], &[3.0, 3.0], &[-1.0, -2.0], &[vec![(0, 1.0), (1, 1.0)]], &[f64::NEG_INFINITY], &[4.0]);
+        lp.set_basis_cols(&[0], Some(&[3.0, 0.0]));
+        assert_eq!(lp.solve(&SolveLimits::default()), LpStatus::Optimal);
+        assert!((lp.objective() - (-7.0)).abs() < 1e-9, "{}", lp.objective());
     }
 }

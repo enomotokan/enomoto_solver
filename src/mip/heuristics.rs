@@ -74,7 +74,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// [`Self::fix_and_propagate`] の本体。`rounded` を渡すと、伝播を使った丸め点 (Feasibility Pump 2.0
     /// の丸め) を書き込む: 固定できた列はその値、矛盾が出た後の列は (そこで伝播を止めて) その時点の
     /// 定義域に収めた `target` の丸め。
-    pub(super) fn propagate_rounding(&mut self, target: &[f64], order: &[usize], mut rounded: Option<&mut Vec<f64>>) -> bool {
+    pub(super) fn propagate_rounding(&mut self, target: &[f64], order: &[usize], rounded: Option<&mut Vec<f64>>) -> bool {
+        self.propagate_rounding_from(target, order, rounded, None)
+    }
+
+    /// [`Self::propagate_rounding`] で、連続部分の LP を基底 `start` (列番号, その基底の点) から始めるもの
+    /// (クロスオーバーの頂点の丸めで、その基底を使う。基底は双対実行可能でなくてよい)。
+    pub(super) fn propagate_rounding_from(&mut self, target: &[f64], order: &[usize], mut rounded: Option<&mut Vec<f64>>, start: Option<(&[usize], &[f64])>) -> bool {
         let p = self.p;
         let pos = self.dom.stack_len();
         let mut ok = true;
@@ -155,6 +161,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if l != self.dom.lo[j] || u != self.dom.up[j] {
                         self.lp.set_col_bounds(j, self.dom.lo[j], self.dom.up[j]);
                     }
+                }
+                if let Some((b, xb)) = start {
+                    self.lp.set_basis_cols(b, Some(xb));
                 }
                 let it0 = self.lp.total_iterations();
                 let lim = (2 * self.avg_node_iters()).max(1000);
