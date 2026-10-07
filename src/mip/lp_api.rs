@@ -31,6 +31,7 @@ pub trait MipLp: Clone {
     fn col_value(&self, j: usize) -> f64;
     fn row_activities(&self) -> Vec<f64>;
     fn reduced_costs(&self) -> Vec<f64>;
+    fn row_duals(&self) -> Vec<f64>;
     fn basis_inverse_row(&mut self, s: usize) -> Vec<f64>;
 }
 
@@ -63,6 +64,7 @@ macro_rules! forward_impl {
             fn col_value(&self, j: usize) -> f64 { <$t>::col_value(self, j) }
             fn row_activities(&self) -> Vec<f64> { <$t>::row_activities(self) }
             fn reduced_costs(&self) -> Vec<f64> { <$t>::reduced_costs(self) }
+            fn row_duals(&self) -> Vec<f64> { <$t>::row_duals(self) }
             fn basis_inverse_row(&mut self, s: usize) -> Vec<f64> { <$t>::basis_inverse_row(self, s) }
         }
     };

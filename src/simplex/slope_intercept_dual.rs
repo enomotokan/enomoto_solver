@@ -900,6 +900,16 @@ fn ext_check(iter_idx: usize, stage_b: bool, bound: impl FnOnce() -> f64) -> boo
 }
 
 thread_local! {
+    /// 直近に [`lower_bound_from_basis`] で使った双対 (目的値による打ち切りで止めたときの双対証明用)。
+    static BOUND_DUALS: std::cell::RefCell<Vec<f64>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// 目的値による打ち切り (`ExtStop::ObjectiveBound`) で止めたときの双対 (標準形の行、真の費用)。
+pub(crate) fn take_bound_duals() -> Vec<f64> {
+    BOUND_DUALS.with(|b| std::mem::take(&mut *b.borrow_mut()))
+}
+
+thread_local! {
     /// 診断用の区間計時 (`xprof`)。有効なら (前回の印の時刻, 区間名ごとの累計 ns)。
     static XPROF: std::cell::RefCell<Option<(std::time::Instant, Vec<(&'static str, u128)>)>> = const { std::cell::RefCell::new(None) };
 }
@@ -1166,6 +1176,8 @@ fn lower_bound_from_basis(std: &StdForm, basis: &[usize], lu: &sparse_lu::FtLu) 
     let mut y = vec![0.0; m];
     let mut scratch = vec![0.0; m];
     lu.solve_transpose_into(&cb, &mut scratch, &mut y);
+    // 打ち切りで止めたときに双対証明に使えるよう、この双対を残す
+    BOUND_DUALS.with(|b| b.borrow_mut().clone_from(&y));
     let ymax = y.iter().fold(0.0f64, |a, v| a.max(v.abs()));
     let tiny = 1e-9 * (1.0 + ymax);
     let mut lb: f64 = std.b.iter().zip(&y).map(|(b, y)| b * y).sum();

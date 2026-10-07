@@ -495,7 +495,14 @@ impl TwoStageLp {
             },
             None => match stop {
                 ExtStop::IterationLimit => LpStatus::IterationLimit,
-                ExtStop::ObjectiveBound => LpStatus::ObjectiveBound,
+                ExtStop::ObjectiveBound => {
+                    // 打ち切ったときの双対 (双対証明に使う)
+                    let yb = sid::take_bound_duals();
+                    if yb.len() == self.rows.len() {
+                        self.y = yb;
+                    }
+                    LpStatus::ObjectiveBound
+                }
                 ExtStop::TimeLimit => LpStatus::TimeLimit,
                 ExtStop::None => LpStatus::Error,
             },
