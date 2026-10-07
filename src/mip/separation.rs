@@ -287,7 +287,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         for i in 0..m {
             if lp_rows[i].len() <= MAX_ROW_LEN {
                 for &(j, _) in &lp_rows[i] {
-                    if !p.is_int[j] {
+                    if !vars.is_int[j] {
                         col_rows[j].push(i);
                     }
                 }
@@ -313,7 +313,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 continue;
             }
             // 境界から離れた連続変数がなければ 1 行の CMIR と同じなので飛ばす
-            if !row.iter().any(|&(j, _)| !p.is_int[j] && bound_dist(j) > 1e-6) {
+            if !row.iter().any(|&(j, _)| !vars.is_int[j] && bound_dist(j) > 1e-6) {
                 continue;
             }
             starts += 1;
@@ -355,7 +355,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let amax = touched.iter().fold(0.0f64, |mx, &j| mx.max(agg[j].abs()));
                 let mut best: Option<(usize, f64)> = None;
                 for &j in &touched {
-                    if p.is_int[j] || agg[j].abs() <= 1e-9 * amax.max(1.0) {
+                    if vars.is_int[j] || agg[j].abs() <= 1e-9 * amax.max(1.0) {
                         continue;
                     }
                     let d = bound_dist(j);
@@ -415,11 +415,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // カットは木全体で有効にするため、大域的な境界から作る
         let mut lo = self.dom.global_lo.clone();
         let mut up = self.dom.global_up.clone();
-        let mut is_int = p.is_int.clone();
+        let mut is_int = self.cut_int.clone();
+        // 暗黙の整数列の境界も整数に丸める (整数列は丸め済み)
+        for j in 0..n {
+            if is_int[j] && !p.is_int[j] {
+                lo[j] = (lo[j] - FEASTOL).ceil();
+                up[j] = (up[j] + FEASTOL).floor();
+            }
+        }
         let mut xv = x.to_vec();
         for i in 0..mr {
             let (l, u) = self.lp.row_bounds(i);
-            let integral = lp_rows[i].iter().all(|&(j, a)| p.is_int[j] && (a - a.round()).abs() <= 1e-9);
+            let integral = lp_rows[i].iter().all(|&(j, a)| self.cut_int[j] && (a - a.round()).abs() <= 1e-9);
             let (l, u) = if integral { ((l - FEASTOL).ceil(), (u + FEASTOL).floor()) } else { (l, u) };
             lo.push(l);
             up.push(u);
@@ -475,7 +482,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // zerohalf ({0, 1/2}-CG) カット (元の行から)
         if env_str!("ENOMOTO_MIP_NO_ZEROHALF").is_none() {
-            let zh = super::zerohalf::zerohalf_cuts(&p.rows, &p.row_lo, &p.row_up, &p.is_int, &self.dom.global_lo, &self.dom.global_up, x, 100);
+            let zh = super::zerohalf::zerohalf_cuts(&p.rows, &p.row_lo, &p.row_up, &self.cut_int, &self.dom.global_lo, &self.dom.global_up, x, 100);
             for raw in zh {
                 push(Some(raw), &mut cands, self);
             }
@@ -514,7 +521,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut basics: Vec<(usize, f64)> = Vec::new();
         for s in 0..mr {
             let k = self.lp.basic_var(s);
-            if k < n && p.is_int[k] {
+            if k < n && self.cut_int[k] {
                 let v = x[k];
                 let f = v - v.floor();
                 if f > 1e-3 && f < 1.0 - 1e-3 {
@@ -527,6 +534,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let limit = 200 + (0.1 * (mr.min(nint)) as f64) as usize;
         basics.truncate(limit);
         let mut agg = vec![0.0; n];
+        let tab_fc = use_flow_cover() && env_str!("ENOMOTO_MIP_TAB_FC").is_some();
         for &(s, _) in &basics {
             if self.time_up() {
                 break;
@@ -578,6 +586,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let neg: Vec<(usize, f64)> = base.iter().map(|&(k, a)| (k, -a)).collect();
             let r = cmir(&vars, &neg, 0.0);
             push(r, &mut cands, self);
+            if tab_fc {
+                push(lifted_flow_cover(&vars, &base, 0.0), &mut cands, self);
+                push(lifted_flow_cover(&vars, &neg, 0.0), &mut cands, self);
+            }
         }
         if dbg_sep {
             eprintln!("SEP tableau {:.3}s cands {}", sep_t0.elapsed().as_secs_f64(), cands.len());

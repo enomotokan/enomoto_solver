@@ -113,6 +113,35 @@ impl MipProblem {
         MipProblem { n, m, col_lo, col_up, cost, offset, sense_sign, is_int, rows, row_lo, row_up, cols }
     }
 
+    /// 整数列と暗黙の整数列 (連続列だが、整数解では必ず整数値になるもの) の印。カット生成で整数として扱う
+    /// (分枝はしない)。等式行 `a_j x_j + sum_k a_k x_k = b` で、他の列がすべて (暗黙の) 整数、
+    /// `a_k / a_j` と `b / a_j` がすべて整数なら `x_j` は暗黙の整数 (HiGHS の implied integer の主側の判定)。
+    /// 新しく印のついた列から更に判定が進むので、変化がなくなるまで繰り返す。
+    pub fn implied_integers(&self) -> Vec<bool> {
+        let integral = |v: f64| (v - v.round()).abs() <= 1e-9 * v.abs().max(1.0);
+        let mut mark = self.is_int.clone();
+        loop {
+            let mut changed = false;
+            for j in 0..self.n {
+                if mark[j] {
+                    continue;
+                }
+                let ok = self.cols[j].iter().any(|&(i, a)| {
+                    self.row_lo[i] == self.row_up[i]
+                        && integral(self.row_lo[i] / a)
+                        && self.rows[i].iter().all(|&(k, b)| k == j || (mark[k] && integral(b / a)))
+                });
+                if ok {
+                    mark[j] = true;
+                    changed = true;
+                }
+            }
+            if !changed {
+                return mark;
+            }
+        }
+    }
+
     /// 点 `x` の目的値 (最小化形、定数項込み)。
     pub fn objective(&self, x: &[f64]) -> f64 {
         self.offset + (0..self.n).map(|j| self.cost[j] * x[j]).sum::<f64>()
@@ -192,4 +221,28 @@ fn gcd(a: i64, b: i64) -> i64 {
 #[inline]
 fn feas_tol(tol: f64, b: f64) -> f64 {
     tol + 1e-9 * b.abs()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn implied_integers_chain_through_equalities() {
+        // x0, x1 整数。s2: 2 x0 + 3 x1 + s2 = 7 → s2 は暗黙の整数。
+        // s3: 2 s3 - s2 = 4 は係数比 1/2 なので整数にならない。s4: s4 + x0 - s2 = 1 → 暗黙の整数 (連鎖)。
+        let inf = f64::INFINITY;
+        let p = MipProblem::from_rows(
+            vec![0.0; 5],
+            vec![10.0, 10.0, inf, inf, inf],
+            vec![0.0; 5],
+            0.0,
+            1.0,
+            vec![true, true, false, false, false],
+            vec![vec![(0, 2.0), (1, 3.0), (2, 1.0)], vec![(2, -1.0), (3, 2.0)], vec![(0, 1.0), (2, -1.0), (4, 1.0)]],
+            vec![7.0, 4.0, 1.0],
+            vec![7.0, 4.0, 1.0],
+        );
+        assert_eq!(p.implied_integers(), vec![true, true, true, false, true]);
+    }
 }

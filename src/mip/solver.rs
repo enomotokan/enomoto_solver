@@ -170,6 +170,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     last_log: Instant,
     /// カット生成に使う変数上下限 (最初の分離で作る)。
     pub(super) vbounds: Option<Rc<super::cuts::VarBounds>>,
+    /// カット生成で整数として扱う列 (整数列と暗黙の整数列、[`MipProblem::implied_integers`])。
+    pub(super) cut_int: Vec<bool>,
     /// 根で作ったカット (係数, 右辺, ノルム)。大域的に成り立つ。ノードで違反していれば LP に戻す。
     pub(super) cut_pool: Vec<(Vec<(usize, f64)>, f64, f64)>,
     /// 双対証明 (衝突分析): `sum coefs x <= U - konst` (U は打ち切り値から定数項を引いたもの、最新の値を使う)。
@@ -283,6 +285,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
         unresolved: false,
         last_log: start,
         vbounds: None,
+        cut_int: if env_str!("ENOMOTO_MIP_NO_IMPLINT").is_some() { p.is_int.clone() } else { p.implied_integers() },
         cut_pool: Vec::new(),
         dual_proofs: std::collections::VecDeque::new(),
         dual_proof_nnz: 0,
