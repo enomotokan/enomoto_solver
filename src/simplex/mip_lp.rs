@@ -457,7 +457,11 @@ impl TwoStageLp {
                     // (主ループの上限 3m に任せると、再分解は減るがノードの処理数はかえって減った)
                     Some((cb, lu, d)) if cb == b && lu.update_count() < tunable!("ENOMOTO_T_MIP_LU_MAX_UPD", 64usize, usize) => {
                         sid::set_warm_lu(Some(lu));
-                        sid::set_warm_d(d);
+                        // 前回の求解の最終の被約費用は使わない: 主ループが増分で保つ値は求解をまたぐと誤差が積もり
+                        // (相対 1e-4 程度)、価格付けしない固定列の値は更新されないので、双対実行可能性の判定を誤る
+                        if env_str!("ENOMOTO_MIP_WARM_D").is_some() {
+                            sid::set_warm_d(d);
+                        }
                     }
                     Some((cb, _, _)) if cb == b => {
                         sid::xcount("n_upd64");

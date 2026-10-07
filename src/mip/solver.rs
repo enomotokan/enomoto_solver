@@ -15,6 +15,27 @@ use super::problem::MipProblem;
 use super::pseudocost::Pseudocost;
 use super::queue::{BoundChange, NodeQueue, OpenNode};
 use std::rc::Rc;
+
+/// 証明 `sum a_j x_j` の境界 `lo`/`up` での最小活動量 (有限部分, 無限の項の数) と `max_j |a_j| (u_j - l_j)`
+/// (余裕がこれ以上ならどの境界も締まらない。境界は締まるだけなので以後も上界)。
+fn proof_min_activity(coefs: &[(usize, f64)], lo: &[f64], up: &[f64]) -> (f64, u32, f64) {
+    let (mut m, mut ninf, mut cap) = (0.0f64, 0u32, 0.0f64);
+    for &(j, a) in coefs {
+        let v = if a > 0.0 { a * lo[j] } else { a * up[j] };
+        if v.is_finite() {
+            m += v;
+        } else {
+            ninf += 1;
+        }
+        cap = cap.max(a.abs() * (up[j] - lo[j]));
+    }
+    (m, ninf, cap)
+}
+
+/// 診断用の区間計時 (`ENOMOTO_MIP_XPROF`)。
+fn xp(label: &'static str) {
+    crate::simplex::slope_intercept_dual::xprof(label);
+}
 use std::time::{Duration, Instant};
 
 /// 求解の設定。
@@ -121,6 +142,20 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 双対証明 (衝突分析): `sum coefs x <= U - konst` (U は打ち切り値から定数項を引いたもの、最新の値を使う)。
     pub(super) dual_proofs: std::collections::VecDeque<(Vec<(usize, f64)>, f64)>,
     pub(super) dual_proof_nnz: usize,
+    /// 双対証明の差分評価用 ([`Self::apply_dual_proofs`]): 先頭の証明の通し番号、各証明の基準の最小活動量
+    /// (`proof_snap` の境界での有限部分と無限の項の数)、列から (証明の通し番号, 係数) への索引、基準の境界
+    /// (根の状態) とそれを取ったノード数、作業領域。
+    proof_first_id: u64,
+    proof_base: std::collections::VecDeque<(f64, u32, f64)>,
+    proof_col_index: Vec<Vec<(u64, f64)>>,
+    proof_snap: Option<(Vec<f64>, Vec<f64>)>,
+    proof_snap_nodes: u64,
+    proof_delta: Vec<(f64, i32)>,
+    proof_touched: Vec<usize>,
+    proof_in_touched: Vec<bool>,
+    /// `proof_delta` が記録のこの位置までを反映しているか。`proof_dirty` なら作り直す。
+    proof_stack_pos: usize,
+    proof_dirty: bool,
     /// 双対証明で枝刈りしたノード数と、締めた境界の数 (表示用)。
     pub(super) proof_prunes: u64,
     pub(super) proof_tightenings: u64,
@@ -184,6 +219,16 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
         cut_pool: Vec::new(),
         dual_proofs: std::collections::VecDeque::new(),
         dual_proof_nnz: 0,
+        proof_first_id: 0,
+        proof_base: std::collections::VecDeque::new(),
+        proof_col_index: Vec::new(),
+        proof_snap: None,
+        proof_snap_nodes: 0,
+        proof_delta: Vec::new(),
+        proof_touched: Vec::new(),
+        proof_in_touched: Vec::new(),
+        proof_stack_pos: 0,
+        proof_dirty: true,
         proof_prunes: 0,
         proof_tightenings: 0,
         cut_pool_keys: std::collections::HashSet::new(),
@@ -520,6 +565,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     n
                 }
             };
+            xp("m_pop");
             first = false;
             self.nodes += 1;
             self.log(false);
@@ -537,6 +583,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if let Some((j, up, _, _)) = node.branch {
                 self.pc.add_inference(j, up, self.dom.stack_len().saturating_sub(stack_before_prop) as f64);
             }
+            xp("m_prop");
             // 双対証明による枝刈りと境界の締め付け
             let prop_ok = prop_ok && {
                 let ok = self.apply_dual_proofs();
@@ -546,6 +593,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 ok
             };
+            xp("m_proof");
             if !prop_ok {
                 self.pc.infeasible_leaves += 1;
                 self.dbg_lost("node propagation", dn);
@@ -555,6 +603,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 continue;
             }
             self.sync_lp();
+            xp("m_sync");
             // ノードの LP を解く (強分岐で境界が締まったら解き直す)。
             let mut node_obj;
             let mut resolves = 0;
@@ -592,6 +641,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         break Some(self.branch_without_lp());
                     }
                 }
+                xp("m_lpstat");
                 node_obj = self.lp.objective() + self.p.offset;
                 if resolves == 0 {
                     if let Some((j, up, parent_val, parent_obj)) = node.branch {
@@ -612,6 +662,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.try_lp_solution();
                     break None;
                 }
+                xp("m_frac");
                 // 被約費用による局所的な固定。LP 解が新しい境界から外れたら解き直す。
                 if self.incumbent.is_some() && self.local_redcost_fixing(node_obj) {
                     if dn && !self.dbg_contains() {
@@ -629,6 +680,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         continue;
                     }
                 }
+                xp("m_redcost");
                 // ノードのヒューリスティクス (安価な単純丸めは毎回、ランダム丸めは予算内で待ち行列から取り出したノードのみ)
                 if resolves == 0 {
                     self.simple_rounding(&x);
@@ -641,6 +693,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             self.randomized_rounding(&x, 1);
                         }
                     }
+                    xp("m_heur");
                     // ダイビング (SCIP の fracdiving / veclendiving: 深さ 10 ごと、ずらし 3 / 7)
                     if node.depth % 10 == 3 || node.depth % 10 == 7 {
                         let quota = (0.05 * (self.dive_succ + 1) as f64 / (self.dive_calls + 1) as f64 * self.node_iters as f64) as u64 + 1000;
@@ -664,6 +717,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         break None;
                     }
                 }
+                xp("m_dive");
                 // ノードでの切除平面 (待ち行列から取り出したノードで 1 回)。カットを足すたびに LP を作り直すので
                 // 今は遅くなる問題が多く、既定では行わない (ENOMOTO_MIP_NODE_CUTS=1 で有効)。
                 // カットプールからのカット (待ち行列から取り出したノードで最大 2 回、各 10 本まで)
@@ -675,6 +729,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     resolves += 1;
                     continue;
                 }
+                xp("m_pool");
                 let before_sb = dn && self.dbg_contains();
                 let sel = self.select_branch(&frac, node_obj, node.depth);
                 if before_sb && !self.dbg_contains() {
@@ -683,6 +738,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if before_sb && matches!(sel, BranchAction::Prune) {
                     self.dbg_lost("strong branching pruned the node", true);
                 }
+                xp("m_sb");
                 match sel {
                     BranchAction::Resolve => {
                         resolves += 1;
@@ -696,6 +752,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     BranchAction::Branch { col, value } => break Some(Some((col, value, node_obj, frac))),
                 }
             };
+            xp("m_endlp");
             let Some(branch) = action else { continue };
             let Some((col, value, node_obj, frac)) = branch else {
                 // LP なしの分枝 (branch_without_lp が子ノードを積んだ)
@@ -740,6 +797,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             } else {
                 self.queue.push(child);
             }
+            xp("m_child");
             if self.queue.len() > 200_000 {
                 self.queue.drop_bases();
             }
@@ -1192,8 +1250,24 @@ impl<'a, L: MipLp> Solver<'a, L> {
         while !self.dual_proofs.is_empty() && (self.dual_proofs.len() >= 2000 || self.dual_proof_nnz + coefs.len() > nnz_cap) {
             let (c, _) = self.dual_proofs.pop_front().unwrap();
             self.dual_proof_nnz -= c.len();
+            self.proof_base.pop_front();
+            self.proof_first_id += 1;
+            self.proof_dirty = true;
         }
         self.dual_proof_nnz += coefs.len();
+        let id = self.proof_first_id + self.dual_proofs.len() as u64;
+        if self.proof_col_index.len() != p.n {
+            self.proof_col_index = vec![Vec::new(); p.n];
+        }
+        for &(j, a) in &coefs {
+            self.proof_col_index[j].push((id, a));
+        }
+        let base = match &self.proof_snap {
+            Some((lo, up)) => proof_min_activity(&coefs, lo, up),
+            None => (0.0, 0, f64::INFINITY),
+        };
+        self.proof_base.push_back(base);
+        self.proof_dirty = true;
         self.dual_proofs.push_back((coefs, konst));
     }
 
@@ -1209,23 +1283,122 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return true;
         }
         let mut tightened = false;
-        for k in 0..self.dual_proofs.len() {
-            let rhs = u - self.dual_proofs[k].1;
-            let (mut minact, mut ninf) = (0.0f64, 0usize);
-            for &(j, a) in &self.dual_proofs[k].0 {
-                let v = if a > 0.0 { a * self.dom.lo[j] } else { a * self.dom.up[j] };
-                if v.is_finite() {
-                    minact += v;
-                } else {
-                    ninf += 1;
+        // 基準 (根の状態の境界での最小活動量) を取り直す: 最初と、ノード 200 個ごと (根の境界は締まるだけなので
+        // 古い基準でも見積もりは真の最小活動量以下で正しい。取り直すと見積もりが強くなる)
+        if self.proof_snap.is_none() || self.nodes >= self.proof_snap_nodes + 200 || env_str!("ENOMOTO_MIP_PROOF_FULL_SCAN").is_some() {
+            let (lo, up) = self.dom.root_bounds();
+            self.proof_base = self.dual_proofs.iter().map(|(c, _)| proof_min_activity(c, &lo, &up)).collect();
+            self.proof_col_index = vec![Vec::new(); p.n];
+            for (k, (c, _)) in self.dual_proofs.iter().enumerate() {
+                let id = self.proof_first_id + k as u64;
+                for &(j, a) in c {
+                    self.proof_col_index[j].push((id, a));
                 }
             }
+            self.proof_snap = Some((lo, up));
+            self.proof_snap_nodes = self.nodes;
+            self.proof_dirty = true;
+        }
+        xp("p_refresh");
+        // 根から変えた列に関わる証明だけを調べる: 最小活動量 = 基準 + (変えた列の寄与の差)。他の証明の最小活動量は
+        // 根の状態の境界でのもの (基準以上) で、根で破れない限りこのノードでも破れない
+        let full = env_str!("ENOMOTO_MIP_PROOF_FULL_SCAN").is_some();
+        let npool = self.dual_proofs.len();
+        // 差分は記録の `proof_stack_pos` までを反映している。それより前の記録が巻き戻されたか、証明や基準が
+        // 変わったら作り直す (潜っている間は新しい記録だけを足す)
+        let low_water = self.dom.take_low_water();
+        let start = if self.proof_dirty || low_water < self.proof_stack_pos || self.proof_delta.len() != npool {
+            self.proof_delta.clear();
+            self.proof_delta.resize(npool, (0.0, 0));
+            for &k in &self.proof_touched {
+                if k < self.proof_in_touched.len() {
+                    self.proof_in_touched[k] = false;
+                }
+            }
+            self.proof_touched.clear();
+            self.proof_in_touched.clear();
+            self.proof_in_touched.resize(npool, false);
+            self.proof_dirty = false;
+            0
+        } else {
+            self.proof_stack_pos
+        };
+        if full {
+            self.proof_touched.clear();
+            self.proof_touched.extend(0..npool);
+        } else {
+            let (slo, sup) = self.proof_snap.as_ref().unwrap();
+            // 新しい記録の (列, 側) ごとに最初の「変える前の値」(前回の評価のときの値) と今の値の差を足す
+            let mut firsts: Vec<(usize, bool, f64)> = Vec::new();
+            let mut seen: std::collections::HashSet<(usize, bool)> = std::collections::HashSet::new();
+            for (j, upper, old) in self.dom.stack_from(start) {
+                if seen.insert((j, upper)) {
+                    // 作り直しのときは根の状態の値の代わりに基準の値から数える (根の状態は基準以上に締まって
+                    // いるので、見積もりは真の最小活動量以下のまま)
+                    let old = if start == 0 { if upper { sup[j] } else { slo[j] } } else { old };
+                    firsts.push((j, upper, old));
+                }
+            }
+            for (j, upper, old_v) in firsts {
+                let new_v = if upper { self.dom.up[j] } else { self.dom.lo[j] };
+                if old_v == new_v {
+                    continue;
+                }
+                for &(id, a) in &self.proof_col_index[j] {
+                    if id < self.proof_first_id || (a > 0.0) == upper {
+                        continue; // 古い証明、またはこの側は最小活動量に効かない
+                    }
+                    let k = (id - self.proof_first_id) as usize;
+                    let (old, new) = (a * old_v, a * new_v);
+                    if !self.proof_in_touched[k] {
+                        self.proof_in_touched[k] = true;
+                        self.proof_touched.push(k);
+                    }
+                    let e = &mut self.proof_delta[k];
+                    if old.is_finite() {
+                        e.0 -= old;
+                    } else {
+                        e.1 -= 1;
+                    }
+                    if new.is_finite() {
+                        e.0 += new;
+                    } else {
+                        e.1 += 1;
+                    }
+                }
+            }
+        }
+        self.proof_stack_pos = self.dom.stack_len();
+        xp("p_delta");
+        let touched = std::mem::take(&mut self.proof_touched);
+        for &k in &touched {
+            let rhs = u - self.dual_proofs[k].1;
+            let (minact, ninf) = if full {
+                let (mut minact, mut ninf) = (0.0f64, 0usize);
+                for &(j, a) in &self.dual_proofs[k].0 {
+                    let v = if a > 0.0 { a * self.dom.lo[j] } else { a * self.dom.up[j] };
+                    if v.is_finite() {
+                        minact += v;
+                    } else {
+                        ninf += 1;
+                    }
+                }
+                (minact, ninf)
+            } else {
+                let (bm, bi, _) = self.proof_base[k];
+                let (dm, di) = self.proof_delta[k];
+                (bm + dm, (bi as i64 + di as i64).max(0) as usize)
+            };
             if ninf > 0 {
                 continue;
             }
             let slack = rhs - minact;
             if slack < -1e-6 * (1.0 + rhs.abs()) {
+                self.proof_touched = touched;
                 return false;
+            }
+            if !full && slack >= self.proof_base[k].2 {
+                continue; // どの境界も締まらない
             }
             // 整数列の境界を締める: a > 0 なら x_j <= l_j + slack / a
             let mut changes: Vec<(usize, bool, f64)> = Vec::new();
@@ -1254,6 +1427,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
         }
+        xp("p_scan");
+        self.proof_touched = touched;
         if tightened {
             return self.dom.propagate(p);
         }
