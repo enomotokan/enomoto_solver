@@ -129,6 +129,10 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) root_redcost: Option<(f64, Vec<(usize, bool, f64, f64)>)>,
     /// 最後に RINS を試したノード番号。
     pub(super) last_rins: u64,
+    /// Local Branching の近傍の大きさ (結果で調整する)。
+    pub(super) lb_k: f64,
+    /// ノードで回す改善ヒューリスティクスの順番。
+    pub(super) improve_turn: u64,
     /// ノードの LP (強分岐以外) に使った反復数と回数。
     node_iters: u64,
     node_lps: u64,
@@ -220,6 +224,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
         rng: 0x2545_F491_4F6C_DD1D,
         root_redcost: None,
         last_rins: 0,
+        lb_k: 18.0,
+        improve_turn: 0,
         node_iters: 0,
         node_lps: 0,
         node_lp_secs: 0.0,
@@ -731,7 +737,20 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if node.depth > 0 && plunge_depth == 0 && self.heur_iters < budget {
                         if self.incumbent.is_some() && self.nodes >= self.last_rins + 100 {
                             self.last_rins = self.nodes;
-                            self.rins(&x);
+                            // 改善ヒューリスティクスを順に回す (RINS → Local Branching → Proximity Search)
+                            let turn = if env_str!("ENOMOTO_MIP_ONLY_RINS").is_some() { 0 } else { self.improve_turn % 3 };
+                            self.improve_turn += 1;
+                            match turn {
+                                0 => {
+                                    self.rins(&x);
+                                }
+                                1 => {
+                                    self.local_branching();
+                                }
+                                _ => {
+                                    self.proximity_search();
+                                }
+                            }
                         } else {
                             self.randomized_rounding(&x, 1);
                         }

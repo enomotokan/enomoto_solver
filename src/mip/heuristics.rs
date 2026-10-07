@@ -868,8 +868,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 一部の整数列を固定した (境界を締めた) サブ MIP を、ノード数を制限して解く。
     /// 見つかった解は暫定解の候補にする。`lo`/`up` はサブ MIP の列の境界。
     fn solve_submip(&mut self, lo: Vec<f64>, up: Vec<f64>, node_limit: u64) -> bool {
+        let mut sub = self.p.clone();
+        sub.col_lo = lo;
+        sub.col_up = up;
+        self.solve_submip_problem(sub, node_limit, None).is_some_and(|r| r.1)
+    }
+
+    /// 加工したサブ MIP (`sub`: 列は元と同じ並び) を解き、見つかった解を元の問題の暫定解の候補にする。
+    /// `cutoff` はサブ MIP の目的値の打ち切り値 (`None` なら元の打ち切り値。目的関数を変えたサブ MIP では指定する)。
+    /// 戻り値は (サブ MIP の状態, 解を受け入れたか)。
+    fn solve_submip_problem(&mut self, mut sub: super::problem::MipProblem, node_limit: u64, cutoff: Option<f64>) -> Option<(super::solver::MipStatus, bool)> {
         let p = self.p;
-        let mut sub = p.clone();
+        let (lo, up) = (std::mem::take(&mut sub.col_lo), std::mem::take(&mut sub.col_up));
         // 伝播の丸め誤差で下限 > 上限 (ごくわずか) になった列は 1 点に固定する
         let (mut lo, mut up) = (lo, up);
         for j in 0..p.n {
@@ -892,7 +902,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             abs_gap: self.params.abs_gap,
             verbose: false,
             submip: true,
-            cutoff: self.prune_limit(),
+            cutoff: cutoff.unwrap_or_else(|| self.prune_limit()),
             restarts: 0,
         };
         let r = super::solve_problem(&sub, params, env_str!("ENOMOTO_MIP_SUBMIP_NO_PRESOLVE").is_none());
@@ -901,10 +911,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             eprintln!("MIP:   sub-MIP: {nfree} free columns of {}, status {:?}, nodes {}, objective {:?}", p.n, r.status, r.nodes, r.objective);
         }
         self.heur_iters += r.lp_iterations;
-        match r.x {
+        let acc = match r.x {
             Some(x) => self.try_incumbent(x),
             None => false,
-        }
+        };
+        Some((r.status, acc))
     }
 
     /// RENS: LP 解で整数値の整数列をその値に固定し、他の整数列を LP 値の前後の整数に制限したサブ MIP を解く。
@@ -963,5 +974,96 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return false;
         }
         self.solve_submip(lo, up, 500)
+    }
+
+    /// 暫定解の 2 値列を何個変えたか (Hamming 距離) の行: `sum_{inc=0} x_j - sum_{inc=1} x_j` と、その定数
+    /// (`|{inc=1}|`)。距離 = 行の値 + 定数。2 値列 (大域的な境界が [0, 1]) だけを数える。
+    fn hamming_row(&self, inc: &[f64]) -> (Vec<(usize, f64)>, f64) {
+        let p = self.p;
+        let mut row = Vec::new();
+        let mut ones = 0.0;
+        for j in 0..p.n {
+            if !p.is_int[j] || self.dom.global_lo[j] != 0.0 || self.dom.global_up[j] != 1.0 {
+                continue;
+            }
+            if inc[j] > 0.5 {
+                row.push((j, -1.0));
+                ones += 1.0;
+            } else {
+                row.push((j, 1.0));
+            }
+        }
+        (row, ones)
+    }
+
+    /// Local Branching (Fischetti & Lodi 2003): 暫定解から 2 値列を `k` 個以内しか変えない、という制約を足した
+    /// サブ MIP を、暫定解より良い解だけを探して解く。`k` は結果で調整する (改善なしで解き切ったら広げ、時間切れで
+    /// 解がなければ狭める)。
+    pub(super) fn local_branching(&mut self) -> bool {
+        if self.params.submip {
+            return false;
+        }
+        let Some((_, inc)) = self.incumbent.as_ref() else { return false };
+        let inc = inc.clone();
+        let (row, ones) = self.hamming_row(&inc);
+        if row.len() < 10 {
+            return false;
+        }
+        let k = self.lb_k.clamp(2.0, row.len() as f64 / 2.0).round();
+        let mut rows = self.p.rows.clone();
+        let mut row_lo = self.p.row_lo.clone();
+        let mut row_up = self.p.row_up.clone();
+        rows.push(row);
+        row_lo.push(f64::NEG_INFINITY);
+        row_up.push(k - ones);
+        let p = self.p;
+        let sub = super::problem::MipProblem::from_rows(self.dom.global_lo.clone(), self.dom.global_up.clone(), p.cost.clone(), p.offset, p.sense_sign, p.is_int.clone(), rows, row_lo, row_up);
+        let Some((st, acc)) = self.solve_submip_problem(sub, 1000, None) else { return false };
+        if self.params.verbose {
+            eprintln!("MIP:   local branching k={k}: {st:?}, improved {acc}");
+        }
+        match (st, acc) {
+            (_, true) => {}
+            (super::solver::MipStatus::Optimal | super::solver::MipStatus::Infeasible, false) => self.lb_k *= 1.5,
+            _ => self.lb_k /= 1.5,
+        }
+        self.lb_k = self.lb_k.clamp(2.0, 1000.0);
+        acc
+    }
+
+    /// Proximity Search (Fischetti & Monaci 2014): 目的関数を暫定解からの Hamming 距離に置き換え、元の目的値を
+    /// 暫定解より `theta` 以上良くする制約を足したサブ MIP を解く (どの実行可能解も暫定解の改善)。
+    pub(super) fn proximity_search(&mut self) -> bool {
+        if self.params.submip {
+            return false;
+        }
+        let Some((z, inc)) = self.incumbent.as_ref() else { return false };
+        let (z, inc) = (*z, inc.clone());
+        let (row, ones) = self.hamming_row(&inc);
+        if row.len() < 10 {
+            return false;
+        }
+        let p = self.p;
+        // 元の目的値の改善の幅: 目的値が整数刻みならその刻み、そうでなければ相対 1e-4
+        let theta = match self.obj_step {
+            Some(step) => step,
+            None => 1e-4 * z.abs().max(1.0),
+        };
+        let mut cost = vec![0.0; p.n];
+        for &(j, c) in &row {
+            cost[j] = c;
+        }
+        let mut rows = p.rows.clone();
+        let mut row_lo = p.row_lo.clone();
+        let mut row_up = p.row_up.clone();
+        rows.push((0..p.n).filter(|&j| p.cost[j] != 0.0).map(|j| (j, p.cost[j])).collect());
+        row_lo.push(f64::NEG_INFINITY);
+        row_up.push(z - theta - p.offset);
+        let sub = super::problem::MipProblem::from_rows(self.dom.global_lo.clone(), self.dom.global_up.clone(), cost, ones, p.sense_sign, p.is_int.clone(), rows, row_lo, row_up);
+        let Some((st, acc)) = self.solve_submip_problem(sub, 500, Some(f64::INFINITY)) else { return false };
+        if self.params.verbose {
+            eprintln!("MIP:   proximity search: {st:?}, improved {acc}");
+        }
+        acc
     }
 }
