@@ -82,8 +82,29 @@ pub fn solve_mip(
 /// `p` を (`use_presolve` なら MIP 前処理をかけてから) 分枝限定法で解き、解を `p` の空間に戻す。
 /// 戻した解が `p` で実行可能でなければ (前処理の誤りの安全網)、前処理なしで解き直す。
 /// サブ MIP (RENS/RINS) もこれで解く。
+thread_local! {
+    /// 次の [`solve_problem`] に渡す最初の暫定解 (`p` の空間)。開始時に取り出し、前処理後の空間に移して
+    /// [`solver::START_SOL`] に置く (再スタートで暫定解を引き継ぐ)。
+    pub(crate) static RESTART_SOL: std::cell::RefCell<Option<Vec<f64>>> = const { std::cell::RefCell::new(None) };
+}
+
 pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: bool) -> solver::MipResult {
+    let start = RESTART_SOL.with(|s| s.borrow_mut().take());
     let presolved = if use_presolve { presolve_mip(p, params.verbose) } else { None };
+    // 前処理は列の番号を保ち、列の尺度 d を掛ける (x = d x')。前処理後の空間に移して実行可能なら渡す
+    // (代入で消えた列などで合わなければ渡さない)
+    match (&presolved, start) {
+        (Some(Presolved::Reduced { prob, scaling, .. }), Some(x)) if x.len() == prob.n => {
+            let xr: Vec<f64> = x.iter().zip(&scaling.d).map(|(v, d)| v / d).collect();
+            if prob.is_feasible(&xr, 1e-6) {
+                solver::START_SOL.with(|s| *s.borrow_mut() = Some(xr));
+            } else if params.verbose {
+                eprintln!("MIP: the start solution is not feasible in the presolved problem; dropped");
+            }
+        }
+        (None, Some(x)) if x.len() == p.n => solver::START_SOL.with(|s| *s.borrow_mut() = Some(x)),
+        _ => {}
+    }
     match presolved {
         Some(Presolved::Infeasible) => solver::MipResult { status: MipStatus::Infeasible, x: None, objective: None, best_bound: f64::INFINITY, nodes: 0, lp_iterations: 0 },
         Some(Presolved::Reduced { prob, postsolve, scaling }) => {

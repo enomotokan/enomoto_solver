@@ -1170,6 +1170,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             submip: true,
             cutoff: cutoff.unwrap_or_else(|| self.prune_limit()),
             restarts: 0,
+            skip_heurs: 0,
         };
         // 並列モード (根のヒューリスティクスの間): 別スレッドで解き始め、結果は後で受け取る
         if self.parallel_submips {

@@ -57,11 +57,25 @@ pub struct MipParams {
     pub cutoff: f64,
     /// これまでに根で再スタートした回数。
     pub restarts: u32,
+    /// 根で呼ばないヒューリスティクス ([`heur_bit`] のビット)。再スタート前の根で解を見つけなかったもの
+    /// (問題は固定が増えただけでほぼ同じなので、同じ結果になりやすく時間だけかかる)。
+    pub skip_heurs: u64,
+}
+
+/// 根のヒューリスティクスの名前に対応するビット (再スタートで飛ばすものの印)。暫定解に依る RINS と、
+/// 一覧にないものは 0 (飛ばさない)。
+pub(super) fn heur_bit(name: &str) -> u64 {
+    const NAMES: [&str; 20] = [
+        "simple rounding", "ZI round", "trivial", "randomized rounding", "interior rounding", "root reduced cost", "LP face", "RENS",
+        "RENS (LP before cuts)", "feasibility pump", "fractional diving", "vector length diving", "coefficient diving", "shift-and-propagate",
+        "locks", "clique", "vbounds (loose)", "vbounds (tight)", "min relaxation", "repair",
+    ];
+    NAMES.iter().position(|&n| n == name).map_or(0, |k| 1u64 << k)
 }
 
 impl Default for MipParams {
     fn default() -> Self {
-        MipParams { time_limit: f64::INFINITY, node_limit: u64::MAX, rel_gap: 1e-4, abs_gap: 1e-6, verbose: false, submip: false, cutoff: f64::INFINITY, restarts: 0 }
+        MipParams { time_limit: f64::INFINITY, node_limit: u64::MAX, rel_gap: 1e-4, abs_gap: 1e-6, verbose: false, submip: false, cutoff: f64::INFINITY, restarts: 0, skip_heurs: 0 }
     }
 }
 
@@ -92,6 +106,9 @@ thread_local! {
     /// 診断用: 既知の最適解 (縮約後の空間、`ENOMOTO_MIP_DEBUG_SOL`)。この解を含むノードが
     /// 枝刈りされたら理由を表示する (SCIP の debug solution と同様)。
     pub(crate) static DEBUG_SOL: std::cell::RefCell<Option<Vec<f64>>> = const { std::cell::RefCell::new(None) };
+    /// 次に始める求解 ([`solve`]) の最初の暫定解 (その問題の空間)。再スタートで前の暫定解を引き継ぐのに使う。
+    /// 求解の開始時に取り出す (同じスレッドで後から始まるサブ MIP には渡らない)。
+    pub(crate) static START_SOL: std::cell::RefCell<Option<Vec<f64>>> = const { std::cell::RefCell::new(None) };
 }
 
 /// 分枝の決定。
@@ -170,6 +187,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     last_log: Instant,
     /// カット生成に使う変数上下限 (最初の分離で作る)。
     pub(super) vbounds: Option<Rc<super::cuts::VarBounds>>,
+    /// 根で解を見つけなかったヒューリスティクス ([`heur_bit`] のビット)。再スタートで引き継ぐ。
+    failed_heurs: u64,
     /// カット生成で整数として扱う列 (整数列と暗黙の整数列、[`MipProblem::implied_integers`])。
     pub(super) cut_int: Vec<bool>,
     /// 根で作ったカット (係数, 右辺, ノルム)。大域的に成り立つ。ノードで違反していれば LP に戻す。
@@ -285,6 +304,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
         unresolved: false,
         last_log: start,
         vbounds: None,
+        failed_heurs: 0,
         cut_int: if env_str!("ENOMOTO_MIP_NO_IMPLINT").is_some() { p.is_int.clone() } else { p.implied_integers() },
         cut_pool: Vec::new(),
         dual_proofs: std::collections::VecDeque::new(),
@@ -492,6 +512,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     fn run(&mut self) -> MipResult {
+        // 再スタート前の暫定解 (実行可能性は try_incumbent が確かめる)
+        if let Some(x) = START_SOL.with(|s| s.borrow_mut().take()) {
+            if x.len() == self.p.n {
+                let ok = self.try_incumbent(x);
+                if self.params.verbose {
+                    eprintln!("MIP: start solution from before the restart: accepted {ok}");
+                }
+            }
+        }
         // LP を使わない局所探索 (Feasibility Jump) で最初の実行可能解を探す。
         {
             let nnz: usize = self.p.rows.iter().map(|r| r.len()).sum();
@@ -549,10 +578,20 @@ impl<'a, L: MipLp> Solver<'a, L> {
             } else {
                 macro_rules! heur {
                     ($name:expr, $e:expr) => {{
-                        let t = Instant::now();
-                        let found = $e;
-                        if self.params.verbose {
-                            eprintln!("MIP: root heuristic {}: {} ({:.2}s)", $name, if found { "found" } else { "none" }, t.elapsed().as_secs_f64());
+                        let bit = heur_bit($name);
+                        if self.params.skip_heurs & bit != 0 && env_str!("ENOMOTO_MIP_RESTART_ALL_HEURS").is_none() {
+                            if self.params.verbose {
+                                eprintln!("MIP: root heuristic {}: skipped (no solution before the restart)", $name);
+                            }
+                        } else {
+                            let t = Instant::now();
+                            let found = $e;
+                            if !found {
+                                self.failed_heurs |= bit;
+                            }
+                            if self.params.verbose {
+                                eprintln!("MIP: root heuristic {}: {} ({:.2}s)", $name, if found { "found" } else { "none" }, t.elapsed().as_secs_f64());
+                            }
                         }
                     }};
                 }
@@ -1901,6 +1940,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             node_limit: self.params.node_limit.saturating_sub(self.nodes),
             cutoff: self.prune_limit().min(self.params.cutoff),
             restarts: self.params.restarts + 1,
+            skip_heurs: self.params.skip_heurs | self.failed_heurs,
             ..self.params
         };
         if self.params.verbose {
@@ -1913,7 +1953,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 self.start.elapsed().as_secs_f64()
             );
         }
+        // 暫定解を引き継ぐ (新しい問題は列が同じ)
+        if env_str!("ENOMOTO_MIP_RESTART_NO_INCUMBENT").is_none() {
+            super::RESTART_SOL.with(|s| *s.borrow_mut() = self.incumbent.as_ref().map(|(_, x)| x.clone()));
+        }
         let r = super::solve_problem(&newp, params, true);
+        super::RESTART_SOL.with(|s| *s.borrow_mut() = None);
         let nodes = self.nodes + r.nodes;
         let iters = self.lp.total_iterations() + r.lp_iterations;
         // 良い方の解を採る
