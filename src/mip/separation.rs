@@ -49,6 +49,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if cands.is_empty() {
                 break;
             }
+            // 候補はすべてカットプールに入れる (選択で落ちたものも、ノードで違反すれば使う)
+            if !self.params.submip && env_str!("ENOMOTO_MIP_POOL_SELECTED_ONLY").is_none() {
+                for c in &cands {
+                    self.add_to_pool(&c.coefs, c.rhs);
+                }
+            }
             // 効き目の大きい順に、平行なものを除いて選ぶ
             let max_cuts = (p.m.max(50)).min(500);
             let chosen = select_cuts(cands, max_cuts, p);
@@ -57,11 +63,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             let rows: Vec<(Vec<(usize, f64)>, f64, f64)> = chosen.into_iter().map(|c| (c.coefs, f64::NEG_INFINITY, c.rhs)).collect();
             total_added += rows.len();
-            // カットプールに残す (ノードで違反していれば LP に戻す)
+            // カットプールに残す (ノードで違反していれば LP に戻す。候補として入れ済みなら重複は除かれる)
             if !self.params.submip {
                 for (c, _, r) in &rows {
-                    let norm = c.iter().map(|&(_, v)| v * v).sum::<f64>().sqrt();
-                    self.cut_pool.push((c.clone(), *r, norm));
+                    self.add_to_pool(c, *r);
                 }
             }
             let saved_rows = self.lp.num_rows();
@@ -111,12 +116,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             } else {
                 // SCIP の停滞判定 (solve.c): 目的値の相対変化が 1e-4 以下で、分数の列の数も十分に減っていなければ
-                // 停滞。根では 10 回連続で止める (サブ MIP では 3 回)。
+                // 停滞。根では 10 回分で止める (サブ MIP では 3 回)。目的値も分数の列の数もまったく減らない
+                // ラウンドは 2 回分と数える (何も進まない問題で長く回さない。分数の列が減っている間は続ける)。
                 let nfrac = self.fractional(&self.lp.col_values()).len();
                 let reldiff = (obj - prev_obj) / obj.abs().max(prev_obj.abs()).max(1.0);
                 if reldiff <= 1e-4 && nfrac as f64 >= (0.9 - 0.1 * stall as f64) * prev_nfrac as f64 {
-                    stall += 1;
-                    if stall >= if self.params.submip { 3 } else { tunable!("ENOMOTO_T_MIP_CUT_STALL", 5usize, usize) } {
+                    stall += if nfrac >= prev_nfrac { 2 } else { 1 };
+                    if stall >= if self.params.submip { 3 } else { tunable!("ENOMOTO_T_MIP_CUT_STALL", 10usize, usize) } {
                         break;
                     }
                 } else {
@@ -140,6 +146,30 @@ impl<'a, L: MipLp> Solver<'a, L> {
             );
         }
         st == LpStatus::Optimal
+    }
+
+    /// カットをプールに加える。係数と右辺が (丸めて) 同じものは加えない。プールの非零数は問題の非零数の
+    /// 20 倍 (最低 20 万) までにする。
+    pub(super) fn add_to_pool(&mut self, coefs: &[(usize, f64)], rhs: f64) {
+        let nnz_cap = (20 * self.p.rows.iter().map(|r| r.len()).sum::<usize>()).max(200_000);
+        if self.cut_pool_nnz + coefs.len() > nnz_cap {
+            return;
+        }
+        // 最大係数 1 に揃えて 1e-9 の格子で丸めたもののハッシュ
+        use std::hash::{Hash, Hasher};
+        let cmax = coefs.iter().fold(0.0f64, |m, &(_, v)| m.max(v.abs())).max(1e-300);
+        let mut hs = std::collections::hash_map::DefaultHasher::new();
+        for &(j, v) in coefs {
+            j.hash(&mut hs);
+            ((v / cmax) * 1e9).round().to_bits().hash(&mut hs);
+        }
+        ((rhs / cmax) * 1e9).round().to_bits().hash(&mut hs);
+        if !self.cut_pool_keys.insert(hs.finish()) {
+            return;
+        }
+        let norm = coefs.iter().map(|&(_, v)| v * v).sum::<f64>().sqrt();
+        self.cut_pool_nnz += coefs.len();
+        self.cut_pool.push((coefs.to_vec(), rhs, norm));
     }
 
     /// カットプールから、LP 解 `x` が違反するカットを効き目の大きい順に最大 `max_cuts` 本 LP に加える

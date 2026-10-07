@@ -118,6 +118,9 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) vbounds: Option<Rc<super::cuts::VarBounds>>,
     /// 根で作ったカット (係数, 右辺, ノルム)。大域的に成り立つ。ノードで違反していれば LP に戻す。
     pub(super) cut_pool: Vec<(Vec<(usize, f64)>, f64, f64)>,
+    /// カットプールの重複判定用のハッシュと、プールの非零数。
+    pub(super) cut_pool_keys: std::collections::HashSet<u64>,
+    pub(super) cut_pool_nnz: usize,
     /// 列ごとの (行, 係数) (oneopt 用、最初に使うときに作る)。
     pub(super) col_rows: Option<Rc<Vec<Vec<(usize, f64)>>>>,
     /// 求解の開始時 (根の伝播の後) に固定されていた整数列の数 (再スタートの判定用)。
@@ -173,6 +176,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
         last_log: start,
         vbounds: None,
         cut_pool: Vec::new(),
+        cut_pool_keys: std::collections::HashSet::new(),
+        cut_pool_nnz: 0,
         col_rows: None,
         root_fixed0: 0,
         dive_iters: 0,
