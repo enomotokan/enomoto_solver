@@ -967,7 +967,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.params.submip {
             return false;
         }
-        if env_str!("ENOMOTO_MIP_RENS_OLD").is_some() {
+        // 既定は旧来の全部固定 (ダイビング式は簡単な問題でサブ MIP に時間を取られ、40 問の幾何平均が
+        // 29.91 -> 30.41 に悪化した)。ENOMOTO_MIP_RENS_DIVE でダイビング式
+        if env_str!("ENOMOTO_MIP_RENS_DIVE").is_none() {
             return self.rens_old(_x);
         }
         let ints: Vec<usize> = (0..p.n).filter(|&j| p.is_int[j] && self.dom.lo[j] < self.dom.up[j]).collect();
@@ -1116,7 +1118,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
     }
 
-    /// 旧来の RENS (LP 解で整数値の列を全部固定する。ENOMOTO_MIP_RENS_OLD)。
+    /// 旧来の RENS (LP 解で整数値の列を全部固定する。既定)。
     fn rens_old(&mut self, x: &[f64]) -> bool {
         let p = self.p;
         let mut lo = self.dom.lo.clone();
@@ -1166,6 +1168,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return false;
         }
         fixes.sort_by_key(|&(_, v, _)| (v == 0.0) as u8);
+        if env_str!("ENOMOTO_MIP_RINS_PROP").is_none() {
+            // 既定は旧来どおり (伝播せずに固定する)
+            let (mut lo, mut up) = (self.dom.lo.clone(), self.dom.up.clone());
+            for &(j, l, u) in &fixes {
+                lo[j] = l;
+                up[j] = u;
+            }
+            return self.solve_submip(lo, up, 500);
+        }
         let (lo, up, _) = self.propagated_fixings(&fixes);
         self.solve_submip(lo, up, 500)
     }
