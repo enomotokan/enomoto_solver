@@ -2444,6 +2444,10 @@ fn dense_switch_for(m: usize, prev: &FtLu) -> f64 {
     if env_str!("ENOMOTO_LU_DENSE_SWITCH").is_some() {
         return explicit_dense_switch();
     }
+    // 呼び出し側が一時的に上書きした自動切替の条件 ([`with_dense_switch_override`]: クロスオーバーの Megiddo 式の押し出し)。
+    if let Some((min_m, per_row, frac)) = DENSE_SWITCH_OVERRIDE.with(|o| o.get()) {
+        return if m >= min_m && prev.fill_baseline >= per_row.saturating_mul(m) { frac } else { 0.0 };
+    }
     let min_m = tunable!("ENOMOTO_T_LU_DENSE_SWITCH_AUTO_MIN_M", DENSE_SWITCH_AUTO_MIN_M, usize);
     let per_row = tunable!("ENOMOTO_T_LU_DENSE_SWITCH_AUTO_LU_PER_ROW", DENSE_SWITCH_AUTO_LU_PER_ROW, usize);
     if min_m != 0 && m >= min_m && prev.fill_baseline >= per_row.saturating_mul(m) {
@@ -2451,6 +2455,19 @@ fn dense_switch_for(m: usize, prev: &FtLu) -> f64 {
     } else {
         0.0
     }
+}
+
+thread_local! {
+    /// [`dense_switch_for`] の自動切替の条件 `(行数の下限, 直前の LU の 1 行あたりの非ゼロ数の下限, 閾値)` の一時的な上書き。
+    static DENSE_SWITCH_OVERRIDE: std::cell::Cell<Option<(usize, usize, f64)>> = const { std::cell::Cell::new(None) };
+}
+
+/// `f` の間だけ稠密切替の自動の条件を `(min_m, per_row, frac)` に上書きする (`ENOMOTO_LU_DENSE_SWITCH` があればそちらが優先)。
+pub fn with_dense_switch_override<R>(cond: (usize, usize, f64), f: impl FnOnce() -> R) -> R {
+    let prev = DENSE_SWITCH_OVERRIDE.with(|o| o.replace(Some(cond)));
+    let r = f();
+    DENSE_SWITCH_OVERRIDE.with(|o| o.set(prev));
+    r
 }
 
 /// B3 診断: 残りを稠密分解に切り替えた分解の回数。

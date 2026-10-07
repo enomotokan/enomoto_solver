@@ -1236,9 +1236,24 @@ fn run_phase2_incremental(std: &StdForm, t: &mut Tableau, lu: &mut sparse_lu::Ft
 
     let mut need_fresh = true; // 次の反復の頭で x_B と d を作り直すか
     let max_iters = max_iters_for(m, n);
+    // 計測用 (`ENOMOTO_DEBUG_PROGRESS=1`): 1000 反復ごとに経過時間・目的値・双対実行不能の列数を出す。
+    let progress = env_str!("ENOMOTO_DEBUG_PROGRESS").is_some();
+    let progress_t0 = std::time::Instant::now();
     for _iter in 0..max_iters {
         if _iter & 63 == 0 && crate::cancel::is_cancelled() {
             return None; // 同時実行の相手が先に結論を出した
+        }
+        if progress && _iter % 1000 == 0 {
+            let obj: f64 = (0..n).map(|j| std.c[j] * t.x[j]).sum();
+            let ndi = (0..n)
+                .filter(|&j| match t.nb_status[j] {
+                    Some(NbStatus::Lower) => d[j] < -TOL && std.lb[j] < std.ub[j],
+                    Some(NbStatus::Upper) => d[j] > TOL && std.lb[j] < std.ub[j],
+                    Some(NbStatus::Zero) => d[j].abs() > TOL,
+                    None => false,
+                })
+                .count();
+            eprintln!("PROGRESS primal iter={_iter} t={:.1}s obj={obj:.10e} dual_infeas={ndi} bland={}", progress_t0.elapsed().as_secs_f64(), stall.bland_mode);
         }
         prof_phases::RUN_PHASE_ITERS.fetch_add(1, Relaxed);
         let fresh_now = need_fresh; // この反復の x_B/d が作り直したばかりの値か

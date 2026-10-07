@@ -765,6 +765,9 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
         x[j] = ipm.x[k].clamp(std.lb[j], std.ub[j]);
     }
     let mut y = ipm.y;
+    // 頂点を内点法の双対の下界で確かめるとき (`ENOMOTO_T_XO_ACCEPT_GAP`) に使う内点法の双対 (PDHG の 1 歩の前)。
+    let accept_gap = tunable!("ENOMOTO_T_XO_ACCEPT_GAP", 0.0f64, f64);
+    let y_ipm = (accept_gap > 0.0 || debug).then(|| y.clone());
     // 境界にある列を固定して解き直すとき (`ENOMOTO_T_XO_FIX`) に使う内点法の点 (PDHG の 1 歩の前)。
     let fix_frac = tunable!("ENOMOTO_T_XO_FIX", 0.0f64, f64);
     let ipm_point = (fix_frac > 0.0 && xo.given_point.is_none()).then(|| (x.clone(), y.clone()));
@@ -1534,7 +1537,14 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
         let mfac = tunable!("ENOMOTO_T_XO_MEGIDDO_TIME_FACTOR", 1.0f64, f64);
         // 小さな問題で打ち切らないよう 1 秒の下駄をはかせる (第 32 回: 下駄なしでは Netlib が 1.05 倍遅かった)。
         let deadline = Instant::now() + std::time::Duration::from_secs_f64((mfac * ipm_secs + if mfac > 0.0 { 1.0 } else { 0.0 }).clamp(0.0, 1e6));
-        let ms = megiddo_push(std, &x, &leftover, &mut basis, &mut basis_pos, &mut nb_status, lu, deadline)?;
+        // 押し出しの間の再分解は、LU が密になった基底で稠密切替を早めに使う (行数 2000 以上・直前の LU が 1 行 16 要素以上・
+        // 密度 0.1。qap15 で押し出しが 1,000 秒超 → 6 秒。二段解法全体に広げると maros-r7 が 25% 遅くなったのでここだけ。
+        // `ENOMOTO_T_XO_MEGIDDO_DENSE=0` で使わない)。
+        let ms = if tunable!("ENOMOTO_T_XO_MEGIDDO_DENSE", 1u8, u8) != 0 {
+            sparse_lu::with_dense_switch_override((2000, 16, 0.1), || megiddo_push(std, &x, &leftover, &mut basis, &mut basis_pos, &mut nb_status, lu, deadline))
+        } else {
+            megiddo_push(std, &x, &leftover, &mut basis, &mut basis_pos, &mut nb_status, lu, deadline)
+        }?;
         lu = ms.lu;
         crate::phase_timing::record("xo_megiddo_pivots", ms.pivots as f64);
         crate::phase_timing::record("xo_megiddo_bound", ms.to_bound as f64);
@@ -1551,6 +1561,26 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
         }
         if crate::cancel::is_cancelled() {
             return None;
+        }
+    }
+    // Megiddo 式の押し出しの後の基底解 (主実行可能な頂点) の目的値が、内点法の双対 `y` による弱双対の下界
+    // `L(y) = b·y + Σ_j min_{l_j<=x_j<=u_j} (c - A^T y)_j x_j` から相対 `ENOMOTO_T_XO_ACCEPT_GAP` 以内なら、この頂点を
+    // 最適解として返す (仕上げで最適な基底を探さない。qap15 は頂点の目的値が最適値と一致し、残りは退化した双対実行不能
+    // だけだった)。
+    if let Some(yi) = &y_ipm {
+        if let Some(xv) = vertex_solution(std, &basis_pos, &nb_status, &lu) {
+            let obj: f64 = (0..n).map(|j| std.c[j] * xv[j]).sum();
+            let lbv = lagrangian_lower_bound(std, yi);
+            let gap = (obj - lbv) / (1.0 + obj.abs());
+            crate::phase_timing::record("xo_vertex_gap", gap);
+            if debug {
+                eprintln!("CROSSOVER vertex obj={obj:.12e} L(y_ipm)={lbv:.12e} rel gap={gap:.3e}");
+            }
+            if accept_gap > 0.0 && gap <= accept_gap {
+                crate::phase_timing::mark("xo_vertex_accepted");
+                let n_orig = n - m;
+                return Some(SimplexResult { status: Status::Optimal, x: Some(xv[..n_orig].to_vec()) });
+            }
         }
     }
     crate::phase_timing::record("xo_basic_after_detect", st.basic_after_detect as f64);
@@ -1807,6 +1837,74 @@ fn fix_and_resolve(std: &StdForm, ps: &[PStat], x: &[f64], x0: &[f64], y0: &[f64
     }
     // 固定を外して元の問題で仕上げ直す。
     super::slope_intercept_dual::solve_slope_intercept_dual_from_basis(std, &Default::default(), basis)
+}
+
+/// 基底 (`basis_pos`、分解 `lu`) と非基底の状態 `nb_status` の基底解。基底変数が境界を `1e-9 (1 + |境界|)` より
+/// 外れれば `None` (主実行可能でない)。
+fn vertex_solution(std: &StdForm, basis_pos: &[Option<usize>], nb_status: &[Option<NbStatus>], lu: &sparse_lu::FtLu) -> Option<Vec<f64>> {
+    let n = std.n_total;
+    let m = std.n_rows;
+    let mut x = vec![0.0; n];
+    let mut rhs = std.b.clone();
+    for j in 0..n {
+        if basis_pos[j].is_some() {
+            continue;
+        }
+        let v = match nb_status[j] {
+            Some(NbStatus::Lower) => std.lb[j],
+            Some(NbStatus::Upper) => std.ub[j],
+            _ => 0.0,
+        };
+        x[j] = v;
+        if v != 0.0 {
+            for &(i, a) in col(std, j) {
+                rhs[i] -= a * v;
+            }
+        }
+    }
+    let mut xb = vec![0.0; m];
+    let mut scratch = vec![0.0; m];
+    lu.solve_into(&rhs, &mut scratch, &mut xb);
+    for j in 0..n {
+        if let Some(p) = basis_pos[j] {
+            let v = xb[p];
+            let tl = 1e-9 * (1.0 + std.lb[j].abs().min(1e12));
+            let tu = 1e-9 * (1.0 + std.ub[j].abs().min(1e12));
+            if !v.is_finite() || v < std.lb[j] - tl || v > std.ub[j] + tu {
+                return None;
+            }
+            x[j] = v.clamp(std.lb[j], std.ub[j]);
+        }
+    }
+    Some(x)
+}
+
+/// 双対 `y` による弱双対の下界 `L(y) = b·y + Σ_j min_{l_j<=x_j<=u_j} (c - A^T y)_j x_j` (被約費用が無限の境界の向きに
+/// 小さく (`1e-9 (1 + max|y|)` 以下) はみ出すのは 0 とみなす。それより大きければ `-inf`)。
+fn lagrangian_lower_bound(std: &StdForm, y: &[f64]) -> f64 {
+    let ymax = y.iter().fold(0.0f64, |a, v| a.max(v.abs()));
+    let tiny = 1e-9 * (1.0 + ymax);
+    let mut lb: f64 = std.b.iter().zip(y).map(|(b, y)| b * y).sum();
+    for j in 0..std.n_total {
+        let mut d = std.c[j];
+        for &(i, a) in col(std, j) {
+            d -= a * y[i];
+        }
+        if d > 0.0 {
+            if std.lb[j].is_finite() {
+                lb += d * std.lb[j];
+            } else if d > tiny {
+                return f64::NEG_INFINITY;
+            }
+        } else if d < 0.0 {
+            if std.ub[j].is_finite() {
+                lb += d * std.ub[j];
+            } else if -d > tiny {
+                return f64::NEG_INFINITY;
+            }
+        }
+    }
+    lb
 }
 
 /// 検出の分類 `cls` (列ごとに 0: 基底候補、-1: 下限、+1: 上限) を、仕上げの後の最適基底 `bp` と解 `xr` (構造変数) と
