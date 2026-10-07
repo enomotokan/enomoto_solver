@@ -60,7 +60,7 @@ impl Substitution {
     pub fn apply(&self, x: &mut [f64]) {
         let z = x[self.kept];
         let raw = (z - self.kept_lb) / self.s;
-        let xj = raw.clamp(self.var_lb, self.var_ub);
+        let xj = raw.max(self.var_lb).min(self.var_ub.max(self.var_lb));
         x[self.var] = xj;
         x[self.kept] = z - self.s * xj;
     }

@@ -637,6 +637,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
     fn solve_submip(&mut self, lo: Vec<f64>, up: Vec<f64>, node_limit: u64) -> bool {
         let p = self.p;
         let mut sub = p.clone();
+        // 伝播の丸め誤差で下限 > 上限 (ごくわずか) になった列は 1 点に固定する
+        let (mut lo, mut up) = (lo, up);
+        for j in 0..p.n {
+            if lo[j] > up[j] {
+                let v = if p.is_int[j] { lo[j].round() } else { 0.5 * (lo[j] + up[j]) };
+                lo[j] = v;
+                up[j] = v;
+            }
+        }
         sub.col_lo = lo;
         sub.col_up = up;
         let remaining = match self.deadline {
