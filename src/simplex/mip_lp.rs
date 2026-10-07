@@ -433,6 +433,7 @@ impl TwoStageLp {
         let it0 = sid::ext_iterations();
         sid::xprof("between");
         sid::set_ext_control(Some(ctrl));
+        sid::set_fast_reopt(env_str!("ENOMOTO_MIP_NO_FAST_REOPT").is_none());
         sid::request_duals(true);
         sid::request_lu(true);
         let r = match self.basis.clone() {
@@ -455,6 +456,7 @@ impl TwoStageLp {
         sid::set_warm_nb(None);
         let stop = sid::ext_stop();
         sid::set_ext_control(None);
+        sid::set_fast_reopt(false);
         let duals = sid::take_duals();
         sid::request_duals(false);
         let last_lu = sid::take_last_lu();
