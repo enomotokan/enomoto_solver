@@ -239,4 +239,72 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         self.fix_then_submip(&fixes, 1.0, 0.3, if loose { "vbounds (loose)" } else { "vbounds (tight)" })
     }
+
+    /// minimum relaxation (違反量を最小にする補助 MIP、Gurobi の feasRelax と同じ考え): 各行に違反量の非負の列
+    /// (下限側・上限側) を足し、行の係数の大きさで割った違反量の合計を最小にするサブ MIP を解く。違反量 0 の点が
+    /// 見つかれば実行可能解。0 にならなければ、その点の整数列の値を目標に固定・伝播し、連続部分を LP で解いて試す。
+    pub(super) fn min_relaxation(&mut self) -> bool {
+        let p = self.p;
+        if self.params.submip || p.m == 0 {
+            return false;
+        }
+        let n = p.n;
+        let mut rows = p.rows.clone();
+        let mut col_lo = self.dom.global_lo.clone();
+        let mut col_up = self.dom.global_up.clone();
+        let mut cost = vec![0.0; n];
+        let mut is_int = p.is_int.clone();
+        for (i, r) in rows.iter_mut().enumerate() {
+            let scale = r.iter().fold(0.0f64, |m, &(_, a)| m.max(a.abs())).max(1e-9);
+            // 下限側の違反 s_lo (a x + s_lo >= lo)、上限側の違反 s_up (a x - s_up <= up)
+            if p.row_lo[i].is_finite() {
+                r.push((col_lo.len(), scale));
+                col_lo.push(0.0);
+                col_up.push(f64::INFINITY);
+                cost.push(1.0);
+                is_int.push(false);
+            }
+            if p.row_up[i].is_finite() {
+                r.push((col_lo.len(), -scale));
+                col_lo.push(0.0);
+                col_up.push(f64::INFINITY);
+                cost.push(1.0);
+                is_int.push(false);
+            }
+        }
+        let sub = super::problem::MipProblem::from_rows(col_lo, col_up, cost, 0.0, 1.0, is_int, rows, p.row_lo.clone(), p.row_up.clone());
+        let remaining = match self.deadline {
+            Some(d) => d.saturating_duration_since(std::time::Instant::now()).as_secs_f64(),
+            None => f64::INFINITY,
+        };
+        let params = super::solver::MipParams {
+            time_limit: (tunable!("ENOMOTO_T_MIP_MINREL_TIME_FRAC", 0.1, f64) * remaining).min(10.0),
+            node_limit: 1000,
+            rel_gap: 0.0,
+            abs_gap: 1e-9,
+            verbose: false,
+            submip: true,
+            cutoff: f64::INFINITY,
+            restarts: 0,
+        };
+        let r = super::solve_problem(&sub, params, env_str!("ENOMOTO_MIP_SUBMIP_NO_PRESOLVE").is_none());
+        self.heur_iters += r.lp_iterations;
+        let Some(xs) = r.x else {
+            if self.params.verbose {
+                eprintln!("MIP:   min relaxation: no point ({:?})", r.status);
+            }
+            return false;
+        };
+        let viol: f64 = xs[n..].iter().sum();
+        let x: Vec<f64> = xs[..n].to_vec();
+        if self.params.verbose {
+            eprintln!("MIP:   min relaxation: status {:?}, nodes {}, total violation {viol:.3e}", r.status, r.nodes);
+        }
+        if self.try_incumbent(x.clone()) {
+            return true;
+        }
+        // 違反が残った: 整数列の値を目標に固定・伝播し、連続部分を LP で解いて直す
+        let ints: Vec<usize> = (0..n).filter(|&j| p.is_int[j]).collect();
+        self.fix_and_propagate(&x, &ints)
+    }
 }

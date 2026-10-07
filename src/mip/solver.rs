@@ -594,6 +594,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 並列モード: 別スレッドのサブ MIP の結果を出した順に受け取る
                 self.parallel_submips = false;
                 self.join_submips(0);
+                // 違反量を最小にする補助 MIP (最後の手段、既定では使わない: 30n20b8・neos-1456979 で違反 0 の点が
+                // 見つからず根の時間を 3-5 s 使うだけだった。ENOMOTO_MIP_MINREL=1 で使う)
+                if self.incumbent.is_none() && env_str!("ENOMOTO_MIP_MINREL").is_some() {
+                    heur!("min relaxation", self.min_relaxation());
+                }
                 // 暫定解 (Feasibility Jump・pump・丸めなどで得たもの) を根の LP 解との RINS で磨く
                 if self.incumbent.is_some() && env_str!("ENOMOTO_MIP_NO_ROOT_RINS").is_none() {
                     heur!("RINS", self.rins(&x));
