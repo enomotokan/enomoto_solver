@@ -4168,6 +4168,9 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
             lower_bound_from_basis(std, &basis, &lu)
         }) {
             xprof("main_ext");
+            if profile_phases {
+                prof_phases::report(wall_t0.elapsed().as_nanos() as usize);
+            }
             return None; // 外部の打ち切り条件 (分枝限定法の LP)
         }
         if let Some(sb) = &shared_bound {

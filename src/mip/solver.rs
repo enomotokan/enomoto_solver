@@ -132,6 +132,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// ノードの LP (強分岐以外) に使った反復数と回数。
     node_iters: u64,
     node_lps: u64,
+    /// ノードの LP にかかった時間の合計 (秒)。1 回の LP の時間の上限に使う。
+    node_lp_secs: f64,
     /// 解けなかったノード (LP が失敗し、分枝もできなかった)。最適性を主張できなくなる。
     unresolved: bool,
     last_log: Instant,
@@ -218,6 +220,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
         last_rins: 0,
         node_iters: 0,
         node_lps: 0,
+        node_lp_secs: 0.0,
         unresolved: false,
         last_log: start,
         vbounds: None,
@@ -617,14 +620,33 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let action = loop {
                 let it0 = self.lp.total_iterations();
                 let iter_limit = (10 * self.avg_node_iters()).max(20_000);
-                let mut st = self.lp.solve(&self.limits(iter_limit));
+                // 1 回の LP の時間の上限 (平均の 50 倍、最低 0.5 秒): 数値的に悪条件の LP が再分解を繰り返して
+                // 残り時間を使い切るのを防ぐ。超えたら全論理変数基底から解き直し、それも超えたら LP なしで分枝する
+                let t_lp = Instant::now();
+                let cap = Duration::from_secs_f64((50.0 * self.node_lp_secs / self.node_lps.max(1) as f64).max(0.5));
+                let capped = |s: &Self, it: u64| {
+                    let mut l = s.limits(it);
+                    l.deadline = Some(match l.deadline {
+                        Some(d) => d.min(Instant::now() + cap),
+                        None => Instant::now() + cap,
+                    });
+                    l
+                };
+                let mut st = self.lp.solve(&capped(self, iter_limit));
+                if st == LpStatus::TimeLimit && !self.time_up() {
+                    st = LpStatus::IterationLimit;
+                }
                 if matches!(st, LpStatus::Error | LpStatus::IterationLimit) {
                     // 全論理変数基底から解き直してみる
                     let b = self.lp.basis();
                     let slack = super::lp::Basis { col: b.col.iter().map(|_| VarStatus::Lower).collect(), row: vec![VarStatus::Basic; b.row.len()] };
                     self.lp.set_basis(&slack);
-                    st = self.lp.solve(&self.limits(u64::MAX));
+                    st = self.lp.solve(&capped(self, u64::MAX));
+                    if st == LpStatus::TimeLimit && !self.time_up() {
+                        st = LpStatus::Error;
+                    }
                 }
+                self.node_lp_secs += t_lp.elapsed().as_secs_f64();
                 self.node_iters += self.lp.total_iterations() - it0;
                 self.node_lps += 1;
                 match st {
