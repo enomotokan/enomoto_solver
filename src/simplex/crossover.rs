@@ -681,6 +681,62 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
             );
         }
     }
+    // 計測用 (`ENOMOTO_T_XO_DETECT_EVAL=1`): 検出の方式 (γ = 1、γ = τ_j、PDHG の 1 歩 + γ = τ_j) ごとに、同じ内点法の
+    // 点での分類を作っておき、仕上げの後の最適基底と突き合わせる ([`record_detect_eval`])。
+    let detect_eval = tunable!("ENOMOTO_T_XO_DETECT_EVAL", 0u8, u8) != 0;
+    let mut eval_cls: Vec<Vec<i8>> = Vec::new();
+    if detect_eval {
+        let pd = solve_pdlp(&a_j, &b_j, &c_j, &l_j, &u_j, &PdlpOptions { eps: 0.0, max_iters: 0, time_limit: 1e9, max_restarts: 1 });
+        let mut tau = vec![1.0; n];
+        for (k, &j) in free_cols.iter().enumerate() {
+            tau[j] = pd.eta / pd.w * pd.dc[k] * pd.dc[k];
+        }
+        let sig: Vec<f64> = pd.dr.iter().map(|d| pd.eta * pd.w * d * d).collect();
+        let mut x0 = std.lb.clone();
+        for (k, &j) in free_cols.iter().enumerate() {
+            x0[j] = ipm.x[k].clamp(std.lb[j], std.ub[j]);
+        }
+        let s_of = |y: &[f64]| -> Vec<f64> {
+            let mut aty = vec![0.0; n];
+            at_y(std, y, &mut aty);
+            (0..n).map(|j| std.c[j] - aty[j]).collect()
+        };
+        let s0 = s_of(&ipm.y);
+        let classify = |x: &[f64], s: &[f64], g: &dyn Fn(usize) -> f64| -> Vec<i8> {
+            (0..n)
+                .map(|j| {
+                    let (l, u) = (std.lb[j], std.ub[j]);
+                    let at_l = l.is_finite() && x[j] - l <= (g(j) * s[j]).max(prm::TOL_BOUND);
+                    let at_u = u.is_finite() && u - x[j] <= (-g(j) * s[j]).max(prm::TOL_BOUND);
+                    match (at_l, at_u) {
+                        (true, true) => if x[j] - l <= u - x[j] { -1 } else { 1 },
+                        (true, false) => -1,
+                        (false, true) => 1,
+                        _ => 0,
+                    }
+                })
+                .collect()
+        };
+        eval_cls.push(classify(&x0, &s0, &|_| 1.0));
+        eval_cls.push(classify(&x0, &s0, &|j| tau[j]));
+        let mut xp = x0.clone();
+        for j in 0..n {
+            if std.lb[j] < std.ub[j] {
+                xp[j] = (x0[j] - tau[j] * s0[j]).clamp(std.lb[j], std.ub[j]);
+            }
+        }
+        let mut r = std.b.clone();
+        for j in 0..n {
+            let e = 2.0 * xp[j] - x0[j];
+            if e != 0.0 {
+                for &(i, a) in col(std, j) {
+                    r[i] -= a * e;
+                }
+            }
+        }
+        let yp: Vec<f64> = (0..m).map(|i| ipm.y[i] + sig[i] * r[i]).collect();
+        eval_cls.push(classify(&xp, &s_of(&yp), &|j| tau[j]));
+    }
     drop(a_j);
     let mut x = std.lb.clone(); // 固定列は lb
     for (k, &j) in free_cols.iter().enumerate() {
@@ -1499,11 +1555,11 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     let mut final_basis_pos: Option<Vec<Option<usize>>> = None;
     let res = if tunable!("ENOMOTO_T_XO_CLEANUP_MAIN", 1u8, u8) != 0 {
         drop(lu);
-        if debug {
+        if debug || detect_eval {
             super::slope_intercept_dual::request_duals(true);
         }
         let r = super::slope_intercept_dual::solve_slope_intercept_dual_from_basis(std, &Default::default(), basis.clone());
-        if debug {
+        if debug || detect_eval {
             final_basis_pos = super::slope_intercept_dual::take_duals().map(|(_, bp)| bp);
             super::slope_intercept_dual::request_duals(false);
         }
@@ -1512,6 +1568,11 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
         polish_with_true_bounds(std, &mut basis, &mut basis_pos, &mut nb_status, lu)
     };
     crate::phase_timing::mark("cleanup_end");
+    if detect_eval {
+        if let (Some(bp), Some(xr)) = (&final_basis_pos, res.as_ref().and_then(|r| r.x.as_ref())) {
+            record_detect_eval(std, bp, xr, &eval_cls);
+        }
+    }
     if debug {
         eprintln!("CROSSOVER cleanup status={:?} total t={:.3}s", res.as_ref().map(|r| r.status.clone()), t0.elapsed().as_secs_f64());
         // 仕上げの解 (構造変数だけ) の前処理後の問題での実行可能性: 各行のスラックを `b - A x` から求め、
@@ -1611,6 +1672,69 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
         }
     }
     res
+}
+
+/// 検出の分類 `cls` (列ごとに 0: 基底候補、-1: 下限、+1: 上限) を、仕上げの後の最適基底 `bp` と解 `xr` (構造変数) と
+/// 突き合わせて記録する (`xo_eval{k}_*`、k は 0: γ = 1、1: γ = τ_j、2: PDHG の 1 歩 + γ = τ_j)。固定列は数えない。
+/// - `bdet`: 基底候補にした列の数、`bhit`: そのうち最適基底で基底の列、
+/// - `nbdet`: 非基底にした列の数、`nbwrong`: そのうち最適基底で基底の列 (取りこぼし)、`side`: 最適基底でも非基底だが境界が逆。
+/// `opt_basic` は最適基底の (固定でない) 基底の列の数。
+fn record_detect_eval(std: &StdForm, bp: &[Option<usize>], xr: &[f64], cls: &[Vec<i8>]) {
+    let n = std.n_total;
+    let m = std.n_rows;
+    let ns = n - m;
+    let mut act = vec![0.0; m];
+    for j in 0..ns.min(xr.len()) {
+        for &(i, a) in col(std, j) {
+            act[i] += a * xr[j];
+        }
+    }
+    let val = |j: usize| -> f64 {
+        if j < ns {
+            xr[j]
+        } else {
+            let i = j - ns;
+            let a = col(std, j).first().map_or(1.0, |e| e.1);
+            (std.b[i] - act[i]) / a
+        }
+    };
+    // 最適基底での状態。
+    let fin: Vec<i8> = (0..n)
+        .map(|j| {
+            if bp[j].is_some() {
+                0
+            } else {
+                let v = val(j);
+                if (v - std.lb[j]).abs() <= (v - std.ub[j]).abs() { -1 } else { 1 }
+            }
+        })
+        .collect();
+    let free = |j: usize| std.lb[j] < std.ub[j];
+    crate::phase_timing::record("xo_eval_opt_basic", (0..n).filter(|&j| free(j) && fin[j] == 0).count() as f64);
+    const NAMES: [[&str; 5]; 3] = [
+        ["xo_eval0_bdet", "xo_eval0_bhit", "xo_eval0_nbdet", "xo_eval0_nbwrong", "xo_eval0_side"],
+        ["xo_eval1_bdet", "xo_eval1_bhit", "xo_eval1_nbdet", "xo_eval1_nbwrong", "xo_eval1_side"],
+        ["xo_eval2_bdet", "xo_eval2_bhit", "xo_eval2_nbdet", "xo_eval2_nbwrong", "xo_eval2_side"],
+    ];
+    for (k, c) in cls.iter().enumerate().take(3) {
+        let (mut bdet, mut bhit, mut nbdet, mut nbwrong, mut side) = (0usize, 0usize, 0usize, 0usize, 0usize);
+        for j in (0..n).filter(|&j| free(j)) {
+            if c[j] == 0 {
+                bdet += 1;
+                bhit += (fin[j] == 0) as usize;
+            } else {
+                nbdet += 1;
+                if fin[j] == 0 {
+                    nbwrong += 1;
+                } else if fin[j] != c[j] {
+                    side += 1;
+                }
+            }
+        }
+        for (name, v) in NAMES[k].iter().zip([bdet, bhit, nbdet, nbwrong, side]) {
+            crate::phase_timing::record(name, v as f64);
+        }
+    }
 }
 
 /// [`megiddo_push`] の結果。
