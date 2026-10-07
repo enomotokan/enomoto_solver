@@ -465,6 +465,26 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if kind == DiveKind::Guided && guide.is_none() {
             return false;
         }
+        let cmax = p.cost.iter().fold(0.0f64, |m, c| m.max(c.abs()));
+        // 衝突制約 (目的値に依存しない行 sum a x <= rhs) による lock: a > 0 なら上げると破れうる
+        let clocks: Vec<(u32, u32)> = if kind == DiveKind::Conflict {
+            let mut l = vec![(0u32, 0u32); p.n];
+            for (c, _, obj) in &self.dual_proofs {
+                if *obj {
+                    continue;
+                }
+                for &(j, a) in c {
+                    if a > 0.0 {
+                        l[j].1 += 1;
+                    } else {
+                        l[j].0 += 1;
+                    }
+                }
+            }
+            l
+        } else {
+            Vec::new()
+        };
         // 決定の記録: (列, 値, 上へ, 決定前の定義域の記録位置, 反対側を試し済みか)
         let mut decisions: Vec<(usize, f64, bool, usize, bool)> = Vec::new();
         let mut backtracks = 0usize;
@@ -544,6 +564,21 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         let g = guide.as_ref().unwrap()[j];
                         let up = g >= v;
                         ((up), (g - v).abs() + if binary { 0.0 } else { 0.5 })
+                    }
+                    DiveKind::Farkas => {
+                        // 目的値の良くなる向き (費用 0 なら近い側) へ、費用の絶対値の大きい列から
+                        let c = p.cost[j];
+                        let up = if c != 0.0 { c < 0.0 } else { f >= 0.5 };
+                        let dist = if up { 1.0 - f } else { f };
+                        (up, -c.abs() / (1.0 + cmax) + 0.01 * dist + if binary { 0.0 } else { 0.5 })
+                    }
+                    DiveKind::Conflict => {
+                        // 衝突制約の lock の少ない向きへ (同数なら通常の lock、それも同数なら近い側)
+                        let (cdl, cul) = clocks[j];
+                        let up = if cdl != cul { cul < cdl } else if dl != ul { ul < dl } else { f >= 0.5 };
+                        let lk = if up { cul } else { cdl };
+                        let dist = if up { 1.0 - f } else { f };
+                        (up, lk as f64 + dist + if binary { 0.0 } else { 0.5 })
                     }
                 };
                 if pick.is_none_or(|(_, _, _, s)| score < s) {
@@ -867,12 +902,16 @@ pub enum DiveKind {
     Pseudocost,
     /// 誘導ダイビング (暫定解の値の側へ。暫定解があるときだけ)。
     Guided,
+    /// Farkas ダイビング (SCIP の farkasdiving の簡略版: 目的値の良くなる向きへ、費用の絶対値の大きい列から)。
+    Farkas,
+    /// 衝突ダイビング (SCIP の conflictdiving の簡略版: 衝突制約の lock の少ない向きへ、その lock の少ない列から)。
+    Conflict,
 }
 
 impl<'a, L: MipLp> Solver<'a, L> {
     /// 一部の整数列を固定した (境界を締めた) サブ MIP を、ノード数を制限して解く。
     /// 見つかった解は暫定解の候補にする。`lo`/`up` はサブ MIP の列の境界。
-    fn solve_submip(&mut self, lo: Vec<f64>, up: Vec<f64>, node_limit: u64) -> bool {
+    pub(super) fn solve_submip(&mut self, lo: Vec<f64>, up: Vec<f64>, node_limit: u64) -> bool {
         let mut sub = self.p.clone();
         sub.col_lo = lo;
         sub.col_up = up;
@@ -1308,13 +1347,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         r.is_some_and(|r| r.1)
     }
 
-    /// 適応的な大近傍探索 (SCIP の ALNS の簡略版): RINS・Local Branching・Proximity Search・Mutation から、
+    /// 適応的な大近傍探索 (SCIP の ALNS の簡略版): RINS・Local Branching・Proximity Search・Mutation・Crossover・DINS から、
     /// 改善できた割合と試した回数で UCB1 により 1 つ選んで使う。`x` は今のノードの LP 解 (RINS 用)。
     pub(super) fn alns(&mut self, x: &[f64]) -> bool {
         if self.incumbent.is_none() {
             return false;
         }
-        const ARMS: usize = 4;
+        const ARMS: usize = 6;
         let total: f64 = self.alns_count.iter().sum::<u32>() as f64;
         let arm = match (0..ARMS).find(|&a| self.alns_count[a] == 0) {
             Some(a) => a,
@@ -1330,7 +1369,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             0 => self.rins(x),
             1 => self.local_branching(),
             2 => self.proximity_search(),
-            _ => self.mutation(),
+            3 => self.mutation(),
+            4 => self.crossover(),
+            _ => self.dins(x),
         };
         // 報酬: 改善できたら 1 (改善の相対的な大きさで少し上乗せ)
         let z1 = self.incumbent.as_ref().map(|(z, _)| *z).unwrap();

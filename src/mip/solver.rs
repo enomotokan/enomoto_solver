@@ -137,8 +137,10 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// ノードで回す改善ヒューリスティクスの順番。
     pub(super) improve_turn: u64,
     /// ALNS の腕ごとの報酬の合計と試した回数。
-    pub(super) alns_reward: [f64; 4],
-    pub(super) alns_count: [u32; 4],
+    pub(super) alns_reward: [f64; 6],
+    pub(super) alns_count: [u32; 6],
+    /// 実行可能解のプール (目的値の良い順、Crossover 用)。
+    pub(super) sol_pool: Vec<(f64, Vec<f64>)>,
     /// 大近傍探索 (サブ MIP) に使った時間の合計 (秒)。
     pub(super) lns_secs: f64,
     /// サブ MIP の時間の上限 (残り時間に対する割合)。
@@ -245,8 +247,9 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
         last_rins: 0,
         lb_k: 18.0,
         improve_turn: 0,
-        alns_reward: [0.0; 4],
-        alns_count: [0; 4],
+        alns_reward: [0.0; 6],
+        alns_count: [0; 6],
+        sol_pool: Vec::new(),
         lns_secs: 0.0,
         submip_time_frac: 0.07,
         rens_succ: (0.0, 0),
@@ -378,6 +381,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return false;
         }
         let z = self.p.objective(&x);
+        self.pool_add(z, &x);
         let better = self.incumbent.as_ref().is_none_or(|(inc, _)| z < *inc - 1e-9 * inc.abs().max(1.0));
         if better {
             // oneopt (SCIP の heur_oneopt): 整数列を 1 つずつ目的値の良くなる向きに、行を破らない範囲で動かす
@@ -392,6 +396,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     z = z2;
                 }
             }
+            self.pool_add(z, &x);
             self.incumbent = Some((z, x));
             self.root_redcost_fixing();
             let lim = self.prune_limit();
@@ -544,6 +549,20 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // LP を使わない最後の手段 (先に使うと質の悪い解で他の暫定解探しを止めてしまう)
                 if self.incumbent.is_none() && env_str!("ENOMOTO_MIP_NO_SHIFTPROP").is_none() {
                     heur!("shift-and-propagate", self.shift_and_propagate());
+                }
+                // SCIP 由来 (locks・clique・vbounds)。暫定解がないか、根の LP との差が 1% 以上なら使う
+                let scip_heur_ok = |s: &Self| s.incumbent.as_ref().is_none_or(|(z, _)| *z - root_obj > 0.01 * root_obj.abs().max(1.0));
+                if scip_heur_ok(self) && env_str!("ENOMOTO_MIP_NO_LOCKS_HEUR").is_none() {
+                    heur!("locks", self.locks_heur());
+                }
+                if scip_heur_ok(self) && env_str!("ENOMOTO_MIP_NO_CLIQUE_HEUR").is_none() {
+                    heur!("clique", self.clique_heur(&x));
+                }
+                if scip_heur_ok(self) && env_str!("ENOMOTO_MIP_NO_VBOUNDS_HEUR").is_none() {
+                    heur!("vbounds (loose)", self.vbounds_heur(true));
+                    if scip_heur_ok(self) {
+                        heur!("vbounds (tight)", self.vbounds_heur(false));
+                    }
                 }
                 // 暫定解 (Feasibility Jump・pump・丸めなどで得たもの) を根の LP 解との RINS で磨く
                 if self.incumbent.is_some() && env_str!("ENOMOTO_MIP_NO_ROOT_RINS").is_none() {
@@ -833,10 +852,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             use super::heuristics::DiveKind as K;
                             let kinds: &[K] = if env_str!("ENOMOTO_MIP_DIVE_OLD_KINDS").is_some() {
                                 &[K::Fractional, K::VectorLength]
+                            } else if env_str!("ENOMOTO_MIP_NO_SCIP_DIVES").is_some() {
+                                if self.incumbent.is_some() {
+                                    &[K::Fractional, K::VectorLength, K::Coefficient, K::Pseudocost, K::Guided]
+                                } else {
+                                    &[K::Fractional, K::VectorLength, K::Coefficient, K::Pseudocost]
+                                }
                             } else if self.incumbent.is_some() {
-                                &[K::Fractional, K::VectorLength, K::Coefficient, K::Pseudocost, K::Guided]
+                                &[K::Fractional, K::VectorLength, K::Coefficient, K::Pseudocost, K::Guided, K::Farkas, K::Conflict]
                             } else {
-                                &[K::Fractional, K::VectorLength, K::Coefficient, K::Pseudocost]
+                                &[K::Fractional, K::VectorLength, K::Coefficient, K::Pseudocost, K::Farkas, K::Conflict]
                             };
                             let kind = kinds[self.dive_calls as usize % kinds.len()];
                             let lb = self.queue.best_lower_bound().min(node_obj);

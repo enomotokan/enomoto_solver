@@ -16,6 +16,7 @@ pub(crate) mod queue;
 pub(crate) mod pseudocost;
 pub(crate) mod solver;
 pub(crate) mod heuristics;
+pub(crate) mod heur_scip;
 pub(crate) mod cuts;
 pub(crate) mod separation;
 pub(crate) mod zerohalf;
