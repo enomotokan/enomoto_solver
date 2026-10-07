@@ -121,6 +121,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 強分岐に使った時間 (秒) と、強分岐で解いた LP の数。
     pub(super) sb_secs: f64,
     pub(super) sb_lps: u64,
+    /// 直前の分枝の選択で、選んだ列の強分岐の子の LP 値 (列, 下の子, 上の子)。最適まで解けなかった側は -inf。
+    pub(super) last_sb: Option<(usize, f64, f64)>,
     /// ヒューリスティクスに使った LP 反復数。
     pub(super) heur_iters: u64,
     /// 列ごとの lock 数 (下げると違反しうる行の数, 上げると違反しうる行の数)。
@@ -253,6 +255,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
         sb_iters: 0,
         sb_secs: 0.0,
         sb_lps: 0,
+        last_sb: None,
         heur_iters: 0,
         locks: super::heuristics::compute_locks(p),
         rng: 0x2545_F491_4F6C_DD1D,
@@ -663,7 +666,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     plunge_depth = 0;
                     let lim = self.prune_limit();
                     self.queue.prune(lim);
-                    let Some(n) = self.queue.pop() else { break };
+                    // 下界最小のノードを選ぶ頻度: 暫定解があれば上げる (下界を押し上げる)
+                    let bb_every = if self.incumbent.is_some() { tunable!("ENOMOTO_T_MIP_BB_EVERY_INC", 4u64, u64) } else { tunable!("ENOMOTO_T_MIP_BB_EVERY", 10u64, u64) };
+                    let Some(n) = self.queue.pop(bb_every) else { break };
                     if !first {
                         // 根まで戻してノードの分枝を積み直す。
                         self.dom.reset_to_root(self.p);
@@ -988,12 +993,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
             };
             let (first_c, second_c) = if prefer_up { (up, down) } else { (down, up) };
             let basis = Rc::new(self.lp.basis());
+            // 強分岐で子の LP が最適まで解けていれば、その値を子の下界にする
+            let sb_bounds = self.last_sb.filter(|&(j, _, _)| j == col && env_str!("ENOMOTO_MIP_NO_SB_CHILD_BOUND").is_none());
             let mk = |c: BoundChange| {
                 let mut ch = node.changes.clone();
                 ch.push(c);
+                let child_lb = match sb_bounds {
+                    Some((_, dn, upb)) => node_obj.max(if c.upper { dn } else { upb }),
+                    None => node_obj,
+                };
                 OpenNode {
                     changes: ch,
-                    lower_bound: node_obj,
+                    lower_bound: child_lb,
                     estimate,
                     depth: node.depth + 1,
                     basis: Some(basis.clone()),
@@ -1003,7 +1014,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.queue.push(mk(second_c));
             let child = mk(first_c);
             plunge_depth += 1;
-            if plunge_depth <= 200 {
+            // 潜りの打ち切り (SCIP の maxplungequot): 子の下界が 全体の下界 + q (打ち切り値 - 全体の下界) を超えたら
+            // 潜らずに待ち行列から選び直す
+            let plunge_ok = {
+                let cutoff = self.prune_limit();
+                if cutoff.is_finite() && env_str!("ENOMOTO_MIP_NO_PLUNGE_ABORT").is_none() {
+                    let glb = self.queue.best_lower_bound().min(node_obj);
+                    child.lower_bound <= glb + tunable!("ENOMOTO_T_MIP_PLUNGE_QUOT", 0.25, f64) * (cutoff - glb)
+                } else {
+                    true
+                }
+            };
+            if plunge_depth <= 200 && plunge_ok {
                 // 潜る: 定義域に分枝を積む (LP は今の基底から続ける)
                 if first_c.upper {
                     self.dom.tighten_upper(self.p, first_c.col, first_c.value);
@@ -1171,6 +1193,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     fn select_branch(&mut self, frac: &[(usize, f64)], node_obj: f64, depth: usize) -> BranchAction {
         let t0 = Instant::now();
+        self.last_sb = None;
         let r = self.select_branch_inner(frac, node_obj, depth);
         self.sb_secs += t0.elapsed().as_secs_f64();
         r
@@ -1205,6 +1228,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let lookahead = (tunable!("ENOMOTO_T_MIP_SB_LOOKAHEAD", 9.0, f64) * (1.0 + unreliable as f64 / cands.len().max(1) as f64)) as usize;
         let max_tried = tunable!("ENOMOTO_T_MIP_SB_MAXCAND", 100usize, usize);
         let mut best: Option<(usize, f64, f64)> = None; // (列, 値, スコア)
+        self.last_sb = None;
+        let mut best_sb: Option<(usize, f64, f64)> = None; // best が強分岐で評価した列なら (列, 下の子の値, 上の子の値)
         let mut no_improve = 0.0f64;
         let mut tried = 0usize;
         let mut bound_changes = 0usize;
@@ -1213,6 +1238,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if is_reliable || !allow_sb || tried >= max_tried || no_improve >= lookahead as f64 || self.time_up() || (self.sb_iters as f64) > maxsb {
                 if best.is_none_or(|(_, _, s)| pscore > s) {
                     best = Some((j, v, pscore));
+                    best_sb = None;
                 }
                 continue;
             }
@@ -1221,6 +1247,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let saved = self.lp.save_state();
             let (lo, up) = (self.dom.lo[j], self.dom.up[j]);
             let mut gains = [0.0f64; 2];
+            let mut child_obj = [f64::NEG_INFINITY; 2];
             let mut cut = [false; 2];
             for (side, is_up) in [(0usize, false), (1usize, true)] {
                 if is_up {
@@ -1236,6 +1263,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     LpStatus::Optimal => {
                         let o = self.lp.objective() + self.p.offset;
                         gains[side] = (o - node_obj).max(0.0);
+                        child_obj[side] = o;
                         let delta = if is_up { v.ceil() - v } else { v - v.floor() };
                         self.pc.add_observation(j, is_up, delta, gains[side]);
                         if o >= self.prune_limit() {
@@ -1284,6 +1312,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let score = if hybrid { self.pc.hybrid_score_with_gains(j, gains[0], gains[1]) } else { gains[0].max(1e-6) * gains[1].max(1e-6) };
             if best.is_none_or(|(_, _, s)| score > s) {
                 best = Some((j, v, score));
+                best_sb = Some((j, child_obj[0], child_obj[1]));
                 no_improve = 0.0;
             } else if best.is_some_and(|(_, _, s)| score >= s * (1.0 - 1e-9)) {
                 no_improve += 0.5;
@@ -1295,7 +1324,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return BranchAction::Resolve;
         }
         match best {
-            Some((col, value, _)) => BranchAction::Branch { col, value },
+            Some((col, value, _)) => {
+                self.last_sb = best_sb.filter(|&(j, _, _)| j == col);
+                BranchAction::Branch { col, value }
+            }
             None => BranchAction::Prune,
         }
     }

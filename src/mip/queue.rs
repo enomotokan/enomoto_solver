@@ -97,10 +97,10 @@ impl NodeQueue {
         self.by_lb.iter().next().map(|&(k, _)| k.0).unwrap_or(f64::INFINITY)
     }
 
-    /// 次のノードを取り出す。10 回に 1 回は下界最小、それ以外は hybrid estimate 最小。
-    pub fn pop(&mut self) -> Option<OpenNode> {
+    /// 次のノードを取り出す。`bb_every` 回に 1 回は下界最小、それ以外は hybrid estimate 最小。
+    pub fn pop(&mut self, bb_every: u64) -> Option<OpenNode> {
         self.pops += 1;
-        let id = if self.pops % 10 == 0 {
+        let id = if self.pops % bb_every.max(1) == 0 {
             self.by_lb.iter().next().map(|&(_, id)| id)
         } else {
             self.by_est.iter().next().map(|&(_, _, id)| id)
