@@ -745,7 +745,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let budget = self.lp.total_iterations() / 20 + 10_000;
                     // 大近傍探索 (サブ MIP) は反復の予算とは別に、経過時間の一定割合までの時間の予算で呼ぶ
                     // (サブ MIP の反復を共通の予算に数えると、1 回で使い切ってしばらく呼べなくなる)
-                    let lns_ok = self.lns_secs < tunable!("ENOMOTO_T_MIP_LNS_TIME_FRAC", 0.1, f64) * self.start.elapsed().as_secs_f64();
+                    // 割合は改善できた割合に連動させる (改善しない問題では 2%、改善するほど最大 10%)
+                    // (成功 1 回の報酬は 1-2 なので、報酬の合計の半分を成功回数の目安にする)
+                    let lns_calls: f64 = self.alns_count.iter().sum::<u32>() as f64;
+                    let succ_rate = (0.5 * self.alns_reward.iter().sum::<f64>() + 1.0) / (lns_calls + 2.0);
+                    let frac = tunable!("ENOMOTO_T_MIP_LNS_TIME_MIN", 0.02, f64) + tunable!("ENOMOTO_T_MIP_LNS_TIME_FRAC", 0.08, f64) * succ_rate;
+                    let lns_ok = self.lns_secs < frac * self.start.elapsed().as_secs_f64();
                     let lns_freq = tunable!("ENOMOTO_T_MIP_LNS_FREQ", 50u64, u64);
                     if node.depth > 0 && plunge_depth == 0 && self.incumbent.is_some() && self.nodes >= self.last_rins + lns_freq && lns_ok {
                         self.last_rins = self.nodes;
