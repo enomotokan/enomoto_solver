@@ -511,6 +511,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 heur!("simple rounding", self.simple_rounding(&x));
                 heur!("randomized rounding", self.randomized_rounding(&x, 3));
+                if env_str!("ENOMOTO_MIP_NO_ROOT_REDCOST_HEUR").is_none() {
+                    heur!("root reduced cost", self.root_reduced_cost());
+                }
                 heur!("RENS", self.rens(&x));
                 if self.incumbent.is_none() && !self.fractional(&x_root0).is_empty() {
                     heur!("RENS (LP before cuts)", self.rens(&x_root0));

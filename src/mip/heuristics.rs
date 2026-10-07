@@ -1342,4 +1342,69 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         ok
     }
+
+    /// 根の被約費用による固定 (HiGHS の `HighsPrimalHeuristics::rootReducedCost`): 根の LP で境界にいる整数列を、
+    /// 被約費用の大きい順に (打ち切り値がそれ以下なら被約費用固定で固定できる列から) その境界に固定して伝播する
+    /// (矛盾する固定は飛ばす)。整数列の固定率が 5 割に達したら止め、3 割に届かなければ何もしない。残った問題を
+    /// サブ MIP として解く。LP は根の最適解の状態で呼ぶ。
+    pub(super) fn root_reduced_cost(&mut self) -> bool {
+        let p = self.p;
+        if self.params.submip {
+            return false;
+        }
+        let b = self.lp.basis();
+        let d = self.lp.reduced_costs();
+        let ints: Vec<usize> = (0..p.n).filter(|&j| p.is_int[j] && self.dom.lo[j] < self.dom.up[j]).collect();
+        if ints.is_empty() {
+            return false;
+        }
+        // (|被約費用|, 列, 上限を締めるか (下限にいる列), 値)
+        let mut lurking: Vec<(f64, usize, bool, f64)> = Vec::new();
+        for &j in &ints {
+            match b.col[j] {
+                super::lp::VarStatus::Lower if d[j] > 1e-7 => lurking.push((d[j], j, true, self.dom.lo[j])),
+                super::lp::VarStatus::Upper if d[j] < -1e-7 => lurking.push((-d[j], j, false, self.dom.up[j])),
+                _ => {}
+            }
+        }
+        // HiGHS は lurking bound が整数列の 1 割未満なら使わない
+        if 10 * lurking.len() < ints.len() {
+            return false;
+        }
+        lurking.sort_by(|a, b| b.0.total_cmp(&a.0));
+        let pos = self.dom.stack_len();
+        let nint = ints.len() as f64;
+        let rate = |s: &Self| ints.iter().filter(|&&j| s.dom.lo[j] == s.dom.up[j]).count() as f64 / nint;
+        let work0 = self.dom.debug_work();
+        let work_cap = 20 * p.rows.iter().map(|r| r.len() as u64).sum::<u64>() + 1_000_000;
+        let max_rate = tunable!("ENOMOTO_T_MIP_RRC_RATE", 0.5, f64);
+        for (k, &(_, j, upper, v)) in lurking.iter().enumerate() {
+            if k % 64 == 0 && (self.time_up() || self.dom.debug_work() - work0 > work_cap) {
+                break;
+            }
+            let before = self.dom.stack_len();
+            if upper {
+                self.dom.tighten_upper(p, j, v);
+            } else {
+                self.dom.tighten_lower(p, j, v);
+            }
+            if !self.dom.propagate(p) {
+                self.dom.backtrack_to(p, before);
+                continue;
+            }
+            if k % 16 == 0 && rate(self) >= max_rate {
+                break;
+            }
+        }
+        let fr = rate(self);
+        let (lo, up) = (self.dom.lo.clone(), self.dom.up.clone());
+        self.dom.backtrack_to(p, pos);
+        if self.params.verbose && self.nodes <= 1 {
+            eprintln!("MIP:   root reduced cost: {} lurking bounds, fixing rate {fr:.2}", lurking.len());
+        }
+        if fr < tunable!("ENOMOTO_T_MIP_RRC_MIN_RATE", 0.3, f64) {
+            return false;
+        }
+        self.solve_submip(lo, up, 500)
+    }
 }
