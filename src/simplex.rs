@@ -1963,6 +1963,12 @@ fn solve_lp_dual_full_status(variables: &[VariableData], objective: &Objective, 
             None => eprintln!("DEBUG_EXT_COMPONENTS: single component (no split found)"),
         }
     }
+    // 試験用 (`ENOMOTO_T_POST_SCALE`): 前処理 (行・列の削除) の後でもう一度行・列をそろえる
+    // (1: Ruiz、2: Ruiz + Pock–Chambolle、3: Pock–Chambolle)。双対二段解法と内点法 + クロスオーバーの両方に効く。
+    let (std, post_dc) = match post_scale(&std, tunable!("ENOMOTO_T_POST_SCALE", 0u8, u8)) {
+        Some((s2, dc)) => (s2, Some(dc)),
+        None => (std, None),
+    };
     let race_min_rows = tunable!("ENOMOTO_T_RACE_MIN_ROWS", RACE_MIN_ROWS, usize);
     let (result, std) = if opts.auto_race && std.n_rows >= race_min_rows {
         // 大きな問題: 傾き・切片双対二段解法と内点法 + クロスオーバーを同時に解き、先に結論を出した側を採る。
@@ -1976,7 +1982,87 @@ fn solve_lp_dual_full_status(variables: &[VariableData], objective: &Objective, 
     if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
         eprintln!("DEBUG_EXT: solve_std_form_decomposed returned {:?}", result.status);
     }
+    let mut result = result;
+    if let (Some(dc), Some(x)) = (&post_dc, result.x.as_mut()) {
+        for (v, d) in x.iter_mut().zip(dc) {
+            *v *= d;
+        }
+    }
     unscale_result(result, &sc, &postsolve_log, &orig_of_kept, &sign, &fixed_values, &shift, variables.len())
+}
+
+/// 前処理後の標準形の行・列をそろえ直す (`mode` 1: Ruiz、2: Ruiz + Pock–Chambolle、3: Pock–Chambolle、0: しない)。
+/// 縮尺は構造列だけで求め、スラック列は `1 / r_i` 倍して単位列のまま保つ (境界は `r_i` 倍)。
+/// 戻り値はそろえた標準形と構造列の縮尺 `dc` (`x = dc ∘ x'`)。
+fn post_scale(std: &StdForm, mode: u8) -> Option<(StdForm, Vec<f64>)> {
+    if mode == 0 {
+        return None;
+    }
+    let m = std.n_rows;
+    let n = std.n_total;
+    let ns = n - m;
+    let mut rows: Vec<Vec<(usize, f64)>> = (0..m).map(|i| std.rows.row(i).iter().copied().filter(|&(j, _)| j < ns).collect()).collect();
+    let mut dr = vec![1.0f64; m];
+    let mut dc = vec![1.0f64; ns];
+    let mut apply = |rows: &mut Vec<Vec<(usize, f64)>>, rs: &[f64], cs: &[f64], dr: &mut [f64], dc: &mut [f64]| {
+        for (i, r) in rows.iter_mut().enumerate() {
+            for e in r.iter_mut() {
+                e.1 *= rs[i] * cs[e.0];
+            }
+            dr[i] *= rs[i];
+        }
+        for j in 0..ns {
+            dc[j] *= cs[j];
+        }
+    };
+    let inv_sqrt = |v: f64| if v > 0.0 && v.is_finite() { 1.0 / v.sqrt() } else { 1.0 };
+    if mode == 1 || mode == 2 {
+        for _ in 0..tunable!("ENOMOTO_T_POST_SCALE_RUIZ_ITERS", 10usize, usize) {
+            let mut rmax = vec![0.0f64; m];
+            let mut cmax = vec![0.0f64; ns];
+            for (i, r) in rows.iter().enumerate() {
+                for &(j, v) in r {
+                    rmax[i] = rmax[i].max(v.abs());
+                    cmax[j] = cmax[j].max(v.abs());
+                }
+            }
+            let rs: Vec<f64> = rmax.iter().map(|&v| inv_sqrt(v)).collect();
+            let cs: Vec<f64> = cmax.iter().map(|&v| inv_sqrt(v)).collect();
+            apply(&mut rows, &rs, &cs, &mut dr, &mut dc);
+        }
+    }
+    if mode == 2 || mode == 3 {
+        let mut rsum = vec![0.0f64; m];
+        let mut csum = vec![0.0f64; ns];
+        for (i, r) in rows.iter().enumerate() {
+            for &(j, v) in r {
+                rsum[i] += v.abs();
+                csum[j] += v.abs();
+            }
+        }
+        let rs: Vec<f64> = rsum.iter().map(|&v| inv_sqrt(v)).collect();
+        let cs: Vec<f64> = csum.iter().map(|&v| inv_sqrt(v)).collect();
+        apply(&mut rows, &rs, &cs, &mut dr, &mut dc);
+    }
+    for (i, r) in rows.iter_mut().enumerate() {
+        r.push((ns + i, 1.0));
+    }
+    let (rows_m, cols_m) = freeze_std_matrices(&rows, n);
+    let mut c = std.c.clone();
+    let mut lb = std.lb.clone();
+    let mut ub = std.ub.clone();
+    for j in 0..ns {
+        c[j] *= dc[j];
+        lb[j] /= dc[j];
+        ub[j] /= dc[j];
+    }
+    for i in 0..m {
+        // スラック: 元の行 i の `a x + s = b` を r_i 倍すると `a' x' + r_i s = r_i b`、`s' = r_i s`。
+        lb[ns + i] *= dr[i];
+        ub[ns + i] *= dr[i];
+    }
+    let b = (0..m).map(|i| std.b[i] * dr[i]).collect();
+    Some((StdForm { n_total: n, n_rows: m, c, rows: rows_m, cols: cols_m, b, lb, ub }, dc))
 }
 
 /// 前処理後の標準形を、`opts` で選ばれた 1 つのエンジンで解く (同時実行しない場合)。
