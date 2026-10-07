@@ -45,7 +45,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if self.fractional(&x).is_empty() {
                 break;
             }
+            let t_sep = std::time::Instant::now();
             let cands = self.separate(&x);
+            let ncands = cands.len();
             if cands.is_empty() {
                 break;
             }
@@ -58,6 +60,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 効き目の大きい順に、平行なものを除いて選ぶ
             let max_cuts = (p.m.max(50)).min(500);
             let chosen = select_cuts(cands, max_cuts, p);
+            let sep_secs = t_sep.elapsed().as_secs_f64();
             if chosen.is_empty() {
                 break;
             }
@@ -103,8 +106,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             if self.params.verbose {
                 eprintln!(
-                    "MIP: cut round {round}: {} cuts, LP rows {}, obj {:.10e} ({:.2}s)",
+                    "MIP: cut round {round}: {} cuts (of {ncands}, sep {sep_secs:.2}s, LP {} iters), LP rows {}, obj {:.10e} ({:.2}s)",
                     rows.len(),
+                    self.lp.total_iterations() - it0,
                     self.lp.num_rows(),
                     obj + p.offset,
                     self.start.elapsed().as_secs_f64()
@@ -267,7 +271,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         const MAX_ROW_LEN: usize = 500;
         let p = self.p;
         let n = p.n;
-        let m = p.m;
+        // 元の行だけでなく LP に入っているカットの行も集約に使う (HiGHS と同じ)。再スタート後はカットが元の行になり
+        // 経路の候補が大きく増えて根の下界が伸びたので、再スタートを待たずに使う
+        let m = if env_str!("ENOMOTO_MIP_PATH_ORIG_ONLY").is_some() { p.m } else { lp_rows.len() };
         // 連続変数の LP 値の、最も近い境界 (単純な上下限・変数上下限) までの距離
         let bound_dist = |j: usize| -> f64 {
             let xj = vars.x[j];
