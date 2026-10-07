@@ -168,7 +168,7 @@ fn scale(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64]) -> Scaled {
         }
     };
     // Ruiz: 行・列の最大絶対値を 1 に近づける。
-    for _ in 0..RUIZ_ITERS {
+    for _ in 0..tunable!("ENOMOTO_T_PDLP_RUIZ_ITERS", RUIZ_ITERS, usize) {
         let mut rmax = vec![0.0f64; m];
         let mut cmax = vec![0.0f64; n];
         for i in 0..m {
