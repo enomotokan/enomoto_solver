@@ -1404,7 +1404,20 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     cand_d.sort_by_key(|&j| col(std, j).len());
     let mut sel = BasisSelector::new(m, n);
     if tunable!("ENOMOTO_T_XO_LI_MARKOWITZ", 1u8, u8) != 0 {
-        sel.row_cnt = (0..m).map(|i| std.rows.row(i).len() as u32).collect();
+        // 行の非零の数は、基底の候補 (B と D) の列だけで数える (行列全体で数えると、候補にない列の非零で目安が
+        // ずれてフィルが増える: qap15 で基底の選択が 22.7 秒、候補の列だけの小さな問題では 0.17 秒)。
+        // (`ENOMOTO_T_XO_LI_ROWCNT_ALL=1` で従来どおり行列全体で数える。比較用)。
+        sel.row_cnt = if tunable!("ENOMOTO_T_XO_LI_ROWCNT_ALL", 0u8, u8) != 0 {
+            (0..m).map(|i| std.rows.row(i).len() as u32).collect()
+        } else {
+            let mut cnt = vec![0u32; m];
+            for &j in cand_b.iter().chain(cand_d.iter()) {
+                for &(i, _) in col(std, j) {
+                    cnt[i] += 1;
+                }
+            }
+            cnt
+        };
     }
     for &j in &cand_b {
         if sel.full() {
