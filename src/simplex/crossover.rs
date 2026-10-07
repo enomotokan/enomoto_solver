@@ -765,8 +765,9 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
         x[j] = ipm.x[k].clamp(std.lb[j], std.ub[j]);
     }
     let mut y = ipm.y;
-    // 頂点を内点法の双対の下界で確かめるとき (`ENOMOTO_T_XO_ACCEPT_GAP`) に使う内点法の双対 (PDHG の 1 歩の前)。
-    let accept_gap = tunable!("ENOMOTO_T_XO_ACCEPT_GAP", 0.0f64, f64);
+    // 頂点を内点法の双対の下界で確かめるとき (`ENOMOTO_T_XO_ACCEPT_GAP`、既定 1e-8 は第 37 回の比較で決めた。
+    // 0 で使わない) に使う内点法の双対 (PDHG の 1 歩の前)。
+    let accept_gap = tunable!("ENOMOTO_T_XO_ACCEPT_GAP", 1e-8f64, f64);
     let y_ipm = (accept_gap > 0.0 || debug).then(|| y.clone());
     // 境界にある列を固定して解き直すとき (`ENOMOTO_T_XO_FIX`) に使う内点法の点 (PDHG の 1 歩の前)。
     let fix_frac = tunable!("ENOMOTO_T_XO_FIX", 0.0f64, f64);
