@@ -700,11 +700,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if dn && !self.dbg_contains() {
                         self.dbg_lost("local redcost fixing", true);
                     }
+                    xp("r_fix");
                     if !self.dom.propagate(self.p) {
                         self.dbg_lost("propagation after local redcost fixing", dn && self.dbg_contains());
                         break None;
                     }
+                    xp("r_prop");
                     self.sync_lp();
+                    xp("r_sync");
                     let x2 = self.lp.col_values();
                     let moved = (0..self.p.n).any(|j| x2[j] < self.dom.lo[j] - FEASTOL || x2[j] > self.dom.up[j] + FEASTOL);
                     if moved {
@@ -889,21 +892,34 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if !(gap.is_finite() && gap >= 0.0) {
             return false;
         }
+        xp("r_pre");
         let b = self.lp.basis();
+        xp("r_basis");
         let d = self.lp.reduced_costs();
+        xp("r_d");
+        let cont_frac = tunable!("ENOMOTO_T_MIP_REDCOST_CONT_FRAC", 0.1, f64);
         let mut changed = false;
         for j in 0..self.p.n {
             if self.dom.is_fixed(j) {
                 continue;
             }
+            // 連続列はわずかな締め付けでも活動量の更新と伝播が走るので、幅を一定割合以上縮めるときだけ締める
+            let (lo, up) = (self.dom.lo[j], self.dom.up[j]);
+            let min_cut = if self.p.is_int[j] { 0.0 } else { cont_frac * (up - lo) };
             match b.col[j] {
                 VarStatus::Lower if d[j] > 1e-7 => {
-                    let lo = self.dom.lo[j];
-                    changed |= self.dom.tighten_upper(self.p, j, lo + gap / d[j]);
+                    let v = lo + gap / d[j];
+                    if !(up - v >= min_cut) {
+                        continue;
+                    }
+                    changed |= self.dom.tighten_upper(self.p, j, v);
                 }
                 VarStatus::Upper if d[j] < -1e-7 => {
-                    let up = self.dom.up[j];
-                    changed |= self.dom.tighten_lower(self.p, j, up - gap / (-d[j]));
+                    let v = up - gap / (-d[j]);
+                    if !(v - lo >= min_cut) {
+                        continue;
+                    }
+                    changed |= self.dom.tighten_lower(self.p, j, v);
                 }
                 _ => {}
             }
