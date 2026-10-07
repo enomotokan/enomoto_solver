@@ -1447,7 +1447,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return;
         }
         let p = self.p;
-        let max_len = tunable!("ENOMOTO_T_MIP_CONFLICT_LEN", 0.1, f64).mul_add(p.n as f64, 10.0) as usize;
+        // 長い衝突は弱いわりに評価が重い (eil33-2: 上限 460 で 678 本作ると 1 ノードの処理が重くなり解けなくなった)
+        let max_len = (tunable!("ENOMOTO_T_MIP_CONFLICT_LEN", 0.1, f64).mul_add(p.n as f64, 10.0) as usize).min(tunable!("ENOMOTO_T_MIP_CONFLICT_MAXLEN", 50usize, usize));
         let Some(lits) = self.dom.analyze_conflict(p, max_len) else { return };
         let mut coefs: Vec<(usize, f64)> = Vec::with_capacity(lits.len());
         let mut ones = 0.0;
