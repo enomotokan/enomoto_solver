@@ -32,8 +32,9 @@ pub struct Domain {
     max_inf: Vec<u32>,
     /// 変更の記録 (巻き戻し用)。
     stack: Vec<Change>,
-    /// 前回 [`Self::take_low_water`] からの記録の長さの最小値 (それより前の記録は変わっていない)。
-    low_water: usize,
+    /// 前回 [`Self::take_changed_for_proofs`] から境界が変わった列 (双対証明の差分評価用、`changed` とは別に数える)。
+    changed_p: Vec<usize>,
+    changed_p_mark: Vec<bool>,
     /// 前回 [`Self::take_changed`] から境界が変わった列。
     changed: Vec<usize>,
     changed_mark: Vec<bool>,
@@ -74,7 +75,8 @@ impl Domain {
             max_act: vec![0.0; p.m],
             max_inf: vec![0; p.m],
             stack: Vec::new(),
-            low_water: 0,
+            changed_p: Vec::new(),
+            changed_p_mark: vec![false; p.n],
             changed: Vec::new(),
             changed_mark: vec![false; p.n],
             queue: Vec::new(),
@@ -139,18 +141,6 @@ impl Domain {
         (lo, up)
     }
 
-    /// 記録の `pos` 番目以降 (列, 上限か, 変える前の値)。
-    pub fn stack_from(&self, pos: usize) -> impl Iterator<Item = (usize, bool, f64)> + '_ {
-        self.stack[pos.min(self.stack.len())..].iter().map(|c| (c.col, c.upper, c.old))
-    }
-
-    /// 前回呼んでからの記録の長さの最小値を返し、数え直しを始める (その位置より前の記録は変わっていない)。
-    pub fn take_low_water(&mut self) -> usize {
-        let lw = self.low_water;
-        self.low_water = self.stack.len();
-        lw
-    }
-
     /// 前回呼んでから境界が変わった列を取り出す (LP への反映用)。
     pub fn take_changed(&mut self) -> Vec<usize> {
         for &j in &self.changed {
@@ -164,6 +154,18 @@ impl Domain {
             self.changed_mark[j] = true;
             self.changed.push(j);
         }
+        if !self.changed_p_mark[j] {
+            self.changed_p_mark[j] = true;
+            self.changed_p.push(j);
+        }
+    }
+
+    /// 前回呼んでから境界が変わった列を取り出す (双対証明の差分評価用)。
+    pub fn take_changed_for_proofs(&mut self) -> Vec<usize> {
+        for &j in &self.changed_p {
+            self.changed_p_mark[j] = false;
+        }
+        std::mem::take(&mut self.changed_p)
     }
 
     fn mark_row(&mut self, i: usize) {
@@ -261,7 +263,6 @@ impl Domain {
             self.update_activity(p, c.col, c.upper, cur, c.old);
             self.mark_changed(c.col);
         }
-        self.low_water = self.low_water.min(self.stack.len());
         self.infeasible = false;
         for &i in &self.queue {
             self.in_queue[i] = false;
@@ -316,7 +317,6 @@ impl Domain {
     /// 根にいる間に積んだ変更を大域的なもの (巻き戻されないもの) にする。
     pub fn commit_root(&mut self) {
         self.stack.clear();
-        self.low_water = 0;
         self.global_lo.clone_from(&self.lo);
         self.global_up.clone_from(&self.up);
     }

@@ -161,7 +161,9 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 変えた列を含まなくても毎回調べる。
     proof_always: Vec<u64>,
     /// `proof_delta` が記録のこの位置までを反映しているか。`proof_dirty` なら作り直す。
-    proof_stack_pos: usize,
+    /// `proof_delta` が反映している各列の境界 (この値から今の境界への差を次に足す)。
+    proof_val_lo: Vec<f64>,
+    proof_val_up: Vec<f64>,
     proof_dirty: bool,
     /// 双対証明で枝刈りしたノード数と、締めた境界の数 (表示用)。
     pub(super) proof_prunes: u64,
@@ -237,7 +239,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
         proof_touched: Vec::new(),
         proof_in_touched: Vec::new(),
         proof_always: Vec::new(),
-        proof_stack_pos: 0,
+        proof_val_lo: Vec::new(),
+        proof_val_up: Vec::new(),
         proof_dirty: true,
         proof_prunes: 0,
         proof_tightenings: 0,
@@ -1353,10 +1356,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 根の状態の境界でのもの (基準以上) で、根で破れない限りこのノードでも破れない
         let full = env_str!("ENOMOTO_MIP_PROOF_FULL_SCAN").is_some();
         let npool = self.dual_proofs.len();
-        // 差分は記録の `proof_stack_pos` までを反映している。それより前の記録が巻き戻されたか、証明や基準が
-        // 変わったら作り直す (潜っている間は新しい記録だけを足す)
-        let low_water = self.dom.take_low_water();
-        let start = if self.proof_dirty || low_water < self.proof_stack_pos || self.proof_delta.len() != npool {
+        // 差分は各列の境界 `proof_val_*` までを反映している。前回から境界が変わった列だけを足す (ノードを移っても
+        // 戻した列・積み直した列だけで済む)。証明や基準が変わったら作り直す
+        let cols: Vec<usize> = if self.proof_dirty || self.proof_delta.len() != npool {
             self.proof_delta.clear();
             self.proof_delta.resize(npool, (0.0, 0));
             for &k in &self.proof_touched {
@@ -1368,17 +1370,20 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.proof_in_touched.clear();
             self.proof_in_touched.resize(npool, false);
             self.proof_dirty = false;
-            0
+            let (slo, sup) = self.proof_snap.as_ref().unwrap();
+            self.proof_val_lo.clone_from(slo);
+            self.proof_val_up.clone_from(sup);
+            let _ = self.dom.take_changed_for_proofs();
+            (0..p.n).filter(|&j| self.dom.lo[j] != slo[j] || self.dom.up[j] != sup[j]).collect()
         } else {
-            self.proof_stack_pos
+            self.dom.take_changed_for_proofs()
         };
         if full {
             self.proof_touched.clear();
             self.proof_touched.extend(0..npool);
         } else {
-            self.proof_absorb(start);
+            self.proof_absorb(&cols);
         }
-        self.proof_stack_pos = self.dom.stack_len();
         if !full {
             let first = self.proof_first_id;
             self.proof_always.retain(|&id| id >= first);
@@ -1455,9 +1460,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if full || !tightened_now || pass == 7 {
                 break;
             }
-            let start = self.proof_stack_pos;
-            scan = self.proof_absorb(start);
-            self.proof_stack_pos = self.dom.stack_len();
+            let cols = self.dom.take_changed_for_proofs();
+            scan = self.proof_absorb(&cols);
             if scan.is_empty() {
                 break;
             }
@@ -1469,50 +1473,47 @@ impl<'a, L: MipLp> Solver<'a, L> {
         true
     }
 
-    /// 記録の `start` 番目以降の変更を証明の差分 (`proof_delta`) に足し、差分が変わった証明を返す
-    /// (`proof_touched` にも加える)。`start == 0` なら各列の変更前の値として基準の境界を使う (根の状態は基準
-    /// 以上に締まっているので、見積もりは真の最小活動量以下のまま)。
-    fn proof_absorb(&mut self, start: usize) -> Vec<usize> {
+    /// 列 `cols` の境界の変化 (`proof_val_*` から今の境界へ) を証明の差分 (`proof_delta`) に足し、差分が変わった
+    /// 証明を返す (`proof_touched` にも加える)。基準の境界より根の状態が締まっている列は作り直しのときにその差も
+    /// 入るので、見積もりは真の最小活動量以下のまま。
+    fn proof_absorb(&mut self, cols: &[usize]) -> Vec<usize> {
         let mut changed: Vec<usize> = Vec::new();
-        let Some((slo, sup)) = self.proof_snap.as_ref() else { return changed };
-        // 新しい記録の (列, 側) ごとに最初の「変える前の値」(前回の評価のときの値) と今の値の差を足す
-        let mut firsts: Vec<(usize, bool, f64)> = Vec::new();
-        let mut seen: std::collections::HashSet<(usize, bool)> = std::collections::HashSet::new();
-        for (j, upper, old) in self.dom.stack_from(start) {
-            if seen.insert((j, upper)) {
-                let old = if start == 0 { if upper { sup[j] } else { slo[j] } } else { old };
-                firsts.push((j, upper, old));
-            }
-        }
         let mut in_changed: std::collections::HashSet<usize> = std::collections::HashSet::new();
-        for (j, upper, old_v) in firsts {
-            let new_v = if upper { self.dom.up[j] } else { self.dom.lo[j] };
-            if old_v == new_v {
-                continue;
-            }
-            for &(id, a) in &self.proof_col_index[j] {
-                if id < self.proof_first_id || (a > 0.0) == upper {
-                    continue; // 古い証明、またはこの側は最小活動量に効かない
+        for &j in cols {
+            for upper in [false, true] {
+                let (old_v, new_v) = if upper { (self.proof_val_up[j], self.dom.up[j]) } else { (self.proof_val_lo[j], self.dom.lo[j]) };
+                if old_v == new_v {
+                    continue;
                 }
-                let k = (id - self.proof_first_id) as usize;
-                let (old, new) = (a * old_v, a * new_v);
-                if !self.proof_in_touched[k] {
-                    self.proof_in_touched[k] = true;
-                    self.proof_touched.push(k);
-                }
-                if in_changed.insert(k) {
-                    changed.push(k);
-                }
-                let e = &mut self.proof_delta[k];
-                if old.is_finite() {
-                    e.0 -= old;
+                if upper {
+                    self.proof_val_up[j] = new_v;
                 } else {
-                    e.1 -= 1;
+                    self.proof_val_lo[j] = new_v;
                 }
-                if new.is_finite() {
-                    e.0 += new;
-                } else {
-                    e.1 += 1;
+                for &(id, a) in &self.proof_col_index[j] {
+                    if id < self.proof_first_id || (a > 0.0) == upper {
+                        continue; // 古い証明、またはこの側は最小活動量に効かない
+                    }
+                    let k = (id - self.proof_first_id) as usize;
+                    let (old, new) = (a * old_v, a * new_v);
+                    if !self.proof_in_touched[k] {
+                        self.proof_in_touched[k] = true;
+                        self.proof_touched.push(k);
+                    }
+                    if in_changed.insert(k) {
+                        changed.push(k);
+                    }
+                    let e = &mut self.proof_delta[k];
+                    if old.is_finite() {
+                        e.0 -= old;
+                    } else {
+                        e.1 -= 1;
+                    }
+                    if new.is_finite() {
+                        e.0 += new;
+                    } else {
+                        e.1 += 1;
+                    }
                 }
             }
         }
