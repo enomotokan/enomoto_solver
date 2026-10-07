@@ -602,7 +602,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         } else {
             self.dom.tighten_upper(p, j, v.floor());
         }
-        if self.dom.propagate(p) {
+        let prop_ok = self.dom.propagate(p);
+        if !prop_ok && env_str!("ENOMOTO_MIP_DIVE_CONFLICTS").is_some() {
+            self.add_conflict();
+        }
+        if prop_ok {
             self.sync_lp();
             let it0 = self.lp.total_iterations();
             let lim = budget.saturating_sub(self.lp.total_iterations() - it_start).max(1000);

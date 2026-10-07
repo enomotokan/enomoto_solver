@@ -45,6 +45,8 @@ pub struct TwoStageLp {
     iters: u64,
     /// 制約行列の識別子 (作り直すたびに新しい値。PRICE 用の行列の使い回しに使う)。
     price_key: u64,
+    /// 直前の求解が実行不能だったときの双対射線 (元の行の向き)。
+    ray: Option<Vec<f64>>,
 }
 
 /// [`TwoStageLp::price_key`] の発行元。
@@ -117,6 +119,7 @@ impl TwoStageLp {
             lu_cache: None,
             iters: 0,
             price_key: new_price_key(),
+            ray: None,
         }
     }
 
@@ -495,6 +498,8 @@ impl TwoStageLp {
         sid::request_duals(false);
         let last_lu = sid::take_last_lu();
         let last_d = sid::take_last_d();
+        let ray = sid::take_last_ray();
+        self.ray = None;
         sid::request_lu(false);
         self.lu_cache = None;
         self.iters += sid::ext_iterations() - it0;
@@ -526,7 +531,11 @@ impl TwoStageLp {
                     }
                     LpStatus::Optimal
                 }
-                Status::Infeasible => LpStatus::Infeasible,
+                Status::Infeasible => {
+                    // 標準形の行は元の行に符号 σ を掛けたもの
+                    self.ray = ray.filter(|r| r.len() >= self.rows.len()).map(|r| (0..self.rows.len()).map(|i| r[i] * self.sigma[i]).collect());
+                    LpStatus::Infeasible
+                }
                 Status::Unbounded | Status::InfeasibleOrUnbounded => LpStatus::Unbounded,
                 _ => LpStatus::Error,
             },
@@ -598,6 +607,10 @@ impl TwoStageLp {
     }
 
     /// 行の双対値 (元の行の向き)。
+    pub fn farkas_ray(&self) -> Option<Vec<f64>> {
+        self.ray.clone()
+    }
+
     pub fn row_duals(&self) -> Vec<f64> {
         (0..self.rows.len()).map(|i| self.y.get(i).copied().unwrap_or(0.0) * self.sigma[i]).collect()
     }

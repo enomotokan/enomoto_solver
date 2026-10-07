@@ -16,6 +16,19 @@ struct Change {
     col: usize,
     upper: bool,
     old: f64,
+    /// 変更後の値。
+    new: f64,
+    /// 理由: 伝播した行 (`>= 0`)、または決定 (分枝・ヒューリスティクス・被約費用固定など、`-1`)。
+    reason: i32,
+}
+
+/// 伝播で見つかった矛盾の出どころ (衝突解析用)。
+#[derive(Clone, Copy, Debug)]
+pub enum ConflictSrc {
+    /// 行 `i` の最小活動量が上限を超えた (`true`) / 最大活動量が下限を下回った (`false`)。
+    Row(usize, bool),
+    /// 列 `j` の下限が上限を超えた。
+    Col(usize),
 }
 
 /// 変数の定義域。
@@ -43,6 +56,10 @@ pub struct Domain {
     in_queue: Vec<bool>,
     /// 矛盾が見つかったか。
     pub infeasible: bool,
+    /// 矛盾の出どころ (衝突解析用、巻き戻すと消える)。
+    pub conflict: Option<ConflictSrc>,
+    /// 今伝播している行 (境界の変更の理由として記録する。伝播の外では `-1`)。
+    cur_reason: i32,
     /// 根に戻ったときに適用する大域的な境界の締め付け (列, 上限か, 値)。
     pending_global: Vec<(usize, bool, f64)>,
     /// 根に戻った回数 (活動量の誤差の蓄積を防ぐための定期的な再計算に使う)。
@@ -82,6 +99,8 @@ impl Domain {
             queue: Vec::new(),
             in_queue: vec![false; p.m],
             infeasible: false,
+            conflict: None,
+            cur_reason: -1,
             pending_global: Vec::new(),
             resets: 0,
             global_lo: p.col_lo.clone(),
@@ -219,11 +238,14 @@ impl Domain {
             self.lo[j] = v;
         }
         if record {
-            self.stack.push(Change { col: j, upper, old });
+            self.stack.push(Change { col: j, upper, old, new: v, reason: self.cur_reason });
         }
         self.update_activity(p, j, upper, old, v);
         self.mark_changed(j);
         if self.lo[j] > self.up[j] + bound_tol(self.lo[j]) {
+            if !self.infeasible {
+                self.conflict = Some(ConflictSrc::Col(j));
+            }
             self.infeasible = true;
         }
     }
@@ -264,6 +286,7 @@ impl Domain {
             self.mark_changed(c.col);
         }
         self.infeasible = false;
+        self.conflict = None;
         for &i in &self.queue {
             self.in_queue[i] = false;
         }
@@ -336,7 +359,10 @@ impl Domain {
                 work += p.rows[i].len();
                 DEBUG_WORK.with(|w| w.set(w.get() + p.rows[i].len() as u64));
             }
-            if !self.propagate_row(p, i) {
+            self.cur_reason = i as i32;
+            let ok = self.propagate_row(p, i);
+            self.cur_reason = -1;
+            if !ok {
                 self.infeasible = true;
                 break;
             }
@@ -364,9 +390,15 @@ impl Domain {
         let lo_r = p.row_lo[i];
         let up_r = p.row_up[i];
         if up_r.is_finite() && self.min_inf[i] == 0 && self.min_act[i] > up_r + row_tol(up_r, self.min_act[i]) {
+            if self.conflict.is_none() {
+                self.conflict = Some(ConflictSrc::Row(i, true));
+            }
             return false;
         }
         if lo_r.is_finite() && self.max_inf[i] == 0 && self.max_act[i] < lo_r - row_tol(lo_r, self.max_act[i]) {
+            if self.conflict.is_none() {
+                self.conflict = Some(ConflictSrc::Row(i, false));
+            }
             return false;
         }
         // 余裕が行の最大の幅以上なら、その側からはどの境界も締まらない
@@ -480,6 +512,76 @@ impl Domain {
         if nv > cur {
             self.set_bound(p, j, false, nv, true);
         }
+    }
+
+    /// 衝突解析 (含意グラフ、1-UIP): 直前の伝播の矛盾 (`conflict`) を、その原因になった境界の変更に戻し、
+    /// 伝播で生じた変更をその理由 (伝播した行の、その時点の他の列の境界) で置き換える、を最後の決定のレベルで
+    /// 変更が 1 つになるまで (または置き換えられない変更に当たるまで) 続ける。戻り値は、同時には成り立たない
+    /// 境界の組 (列, 上限か, 値) (下限なら `x_j >= 値`、上限なら `x_j <= 値`)。根の境界 (記録にない) は大域的に
+    /// 成り立つので含めない。矛盾がない、決定がない (根で矛盾)、大きすぎる場合は `None`。
+    pub fn analyze_conflict(&self, p: &MipProblem, max_len: usize) -> Option<Vec<(usize, bool, f64)>> {
+        let src = self.conflict?;
+        let last_dec = self.stack.iter().rposition(|c| c.reason < 0)?;
+        // (列, 側) ごとの記録の位置 (昇順)
+        let mut hist: std::collections::HashMap<(usize, bool), Vec<usize>> = std::collections::HashMap::new();
+        for (k, c) in self.stack.iter().enumerate() {
+            hist.entry((c.col, c.upper)).or_default().push(k);
+        }
+        // 位置 `before` より前で (列, 側) を最後に変えた記録
+        let latest_before = |j: usize, upper: bool, before: usize| -> Option<usize> {
+            let v = hist.get(&(j, upper))?;
+            let idx = v.partition_point(|&k| k < before);
+            if idx == 0 { None } else { Some(v[idx - 1]) }
+        };
+        // 行 `i` の最小活動量 (`min_side`) または最大活動量に効く、位置 `before` より前の記録 (列 `skip` を除く)
+        let explain_row = |i: usize, min_side: bool, before: usize, skip: usize, out: &mut Vec<usize>| {
+            for &(j, a) in &p.rows[i] {
+                if j == skip {
+                    continue;
+                }
+                // 最小活動量: a > 0 なら下限、a < 0 なら上限。最大活動量はその逆
+                let upper = if min_side { a < 0.0 } else { a > 0.0 };
+                if let Some(k) = latest_before(j, upper, before) {
+                    out.push(k);
+                }
+            }
+        };
+        let mut set: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
+        let mut tmp: Vec<usize> = Vec::new();
+        let end = self.stack.len();
+        match src {
+            ConflictSrc::Row(i, min_side) => explain_row(i, min_side, end, usize::MAX, &mut tmp),
+            ConflictSrc::Col(j) => {
+                tmp.extend(latest_before(j, false, end));
+                tmp.extend(latest_before(j, true, end));
+            }
+        }
+        set.extend(tmp.drain(..));
+        for _ in 0..10_000 {
+            if set.len() > 4 * max_len + 100 {
+                return None;
+            }
+            let cur: Vec<usize> = set.range(last_dec..).copied().collect();
+            if cur.len() <= 1 {
+                break;
+            }
+            let k = *cur.last().unwrap();
+            let c = &self.stack[k];
+            if c.reason < 0 {
+                break; // 置き換えられない (決定に相当する) 変更
+            }
+            let r = c.reason as usize;
+            let a = p.rows[r].iter().find(|&&(j, _)| j == c.col).map(|&(_, a)| a)?;
+            // 上限を締めたのは a > 0 なら行の上限 (最小活動量) から、a < 0 なら下限 (最大活動量) から
+            let min_side = (a > 0.0) == c.upper;
+            set.remove(&k);
+            explain_row(r, min_side, k, c.col, &mut tmp);
+            set.extend(tmp.drain(..));
+        }
+        if set.is_empty() || set.len() > max_len {
+            return None;
+        }
+        Some(set.iter().map(|&k| (self.stack[k].col, self.stack[k].upper, self.stack[k].new)).collect())
     }
 
     /// 列 `j` が固定されているか。

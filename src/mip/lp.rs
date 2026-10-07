@@ -702,6 +702,10 @@ impl LpEngine {
     }
 
     /// 行の双対値 `y` (元のスケール。`c - A^T y` が被約費用になる符号)。
+    pub fn farkas_ray(&self) -> Option<Vec<f64>> {
+        None
+    }
+
     pub fn row_duals(&self) -> Vec<f64> {
         (0..self.m).map(|i| self.d[self.n + i] * self.rs[i]).collect()
     }

@@ -154,7 +154,7 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 根で作ったカット (係数, 右辺, ノルム)。大域的に成り立つ。ノードで違反していれば LP に戻す。
     pub(super) cut_pool: Vec<(Vec<(usize, f64)>, f64, f64)>,
     /// 双対証明 (衝突分析): `sum coefs x <= U - konst` (U は打ち切り値から定数項を引いたもの、最新の値を使う)。
-    pub(super) dual_proofs: std::collections::VecDeque<(Vec<(usize, f64)>, f64)>,
+    pub(super) dual_proofs: std::collections::VecDeque<(Vec<(usize, f64)>, f64, bool)>,
     pub(super) dual_proof_nnz: usize,
     /// 双対証明の差分評価用 ([`Self::apply_dual_proofs`]): 先頭の証明の通し番号、各証明の基準の最小活動量
     /// (`proof_snap` の境界での有限部分と無限の項の数)、列から (証明の通し番号, 係数) への索引、基準の境界
@@ -177,6 +177,10 @@ pub(super) struct Solver<'a, L: MipLp> {
     proof_val_lo: Vec<f64>,
     proof_val_up: Vec<f64>,
     proof_dirty: bool,
+    /// 作った衝突制約の数。
+    conflicts_added: u64,
+    /// 作った実行不能の証明の数。
+    farkas_added: u64,
     /// 双対証明で枝刈りしたノード数と、締めた境界の数 (表示用)。
     pub(super) proof_prunes: u64,
     pub(super) proof_tightenings: u64,
@@ -261,6 +265,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
         proof_val_lo: Vec::new(),
         proof_val_up: Vec::new(),
         proof_dirty: true,
+        conflicts_added: 0,
+        farkas_added: 0,
         proof_prunes: 0,
         proof_tightenings: 0,
         cut_pool_keys: std::collections::HashSet::new(),
@@ -621,6 +627,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 self.dbg_lost("domain excludes the debug solution before node propagation", dn);
             }
             let prop_ok = self.dom.propagate(self.p);
+            if !prop_ok {
+                self.add_conflict();
+            }
             if let Some((j, up, _, _)) = node.branch {
                 self.pc.add_inference(j, up, self.dom.stack_len().saturating_sub(stack_before_prop) as f64);
             }
@@ -685,6 +694,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     LpStatus::Infeasible | LpStatus::ObjectiveBound => {
                         if st == LpStatus::Infeasible {
                             self.pc.infeasible_leaves += 1;
+                            self.add_farkas_proof();
                         } else {
                             self.pc.objlim_leaves += 1;
                             self.add_dual_proof();
@@ -730,6 +740,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                     xp("r_fix");
                     if !self.dom.propagate(self.p) {
+                        self.add_conflict();
                         self.dbg_lost("propagation after local redcost fixing", dn && self.dbg_contains());
                         break None;
                     }
@@ -850,6 +861,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     BranchAction::Resolve => {
                         resolves += 1;
                         if !self.dom.propagate(self.p) {
+                            self.add_conflict();
                             break None;
                         }
                         self.sync_lp();
@@ -1291,9 +1303,30 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.params.submip || env_str!("ENOMOTO_MIP_NO_DUAL_PROOF").is_some() {
             return;
         }
-        let p = self.p;
         let y = self.lp.row_duals();
-        let mut d = p.cost.clone();
+        self.add_proof_from(&y, true);
+    }
+
+    /// LP が実行不能だったときの双対射線 `y` から実行不能の証明 (Farkas) を作ってプールに入れる。
+    /// 行を `y` で足した `y^T A x >= sum_i y_i b_i` (`b_i` は y_i > 0 なら行の下限、y_i < 0 なら上限) はどの `y` でも
+    /// 成り立つので、射線の数値誤差は正しさに影響しない (今のノードで破れていなければ捨てる)。符号は両方試す。
+    pub(super) fn add_farkas_proof(&mut self) {
+        if self.params.submip || env_str!("ENOMOTO_MIP_NO_FARKAS").is_some() {
+            return;
+        }
+        let Some(ray) = self.lp.farkas_ray() else { return };
+        if !self.add_proof_from(&ray, false) {
+            let neg: Vec<f64> = ray.iter().map(|v| -v).collect();
+            self.add_proof_from(&neg, false);
+        }
+    }
+
+    /// 行の重み `y` から証明 `d x <= rhs` を作り、今のノードで破れていればプールに入れる (入れたら真)。
+    /// `obj` なら双対証明 (`d = c - y^T A`、`rhs = U - konst`)、そうでなければ実行不能の証明 (`d = -y^T A`、
+    /// `rhs = -konst`)。
+    fn add_proof_from(&mut self, y: &[f64], obj: bool) -> bool {
+        let p = self.p;
+        let mut d = if obj { p.cost.clone() } else { vec![0.0; p.n] };
         let mut konst = 0.0;
         for (i, &yi) in y.iter().enumerate().take(self.lp.num_rows()) {
             if yi.abs() <= 1e-12 {
@@ -1311,7 +1344,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         let dmax = d.iter().fold(0.0f64, |m, v| m.max(v.abs()));
         if dmax <= 1e-9 {
-            return;
+            return false;
         }
         let mut coefs: Vec<(usize, f64)> = Vec::new();
         for (j, &dj) in d.iter().enumerate() {
@@ -1343,21 +1376,21 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if dbg {
                 eprintln!("PROOF reject dense {} of {}", coefs.len(), p.n);
             }
-            return;
+            return false;
         }
         // 今のノードで破れていることを確かめる (数値誤差で破れていない証明は使わない)
-        let rhs = self.prune_limit() - p.offset - konst;
+        let rhs = if obj { self.prune_limit() - p.offset - konst } else { -konst };
         let minact: f64 = coefs.iter().map(|&(j, a)| if a > 0.0 { a * self.dom.lo[j] } else { a * self.dom.up[j] }).sum();
         if !minact.is_finite() || minact <= rhs + 1e-6 * (1.0 + rhs.abs()) {
             if dbg {
                 eprintln!("PROOF reject not violated: minact {minact} rhs {rhs}");
             }
-            return;
+            return false;
         }
         // 診断用: デバッグ解を切っていないか
         DEBUG_SOL.with(|dd| {
             if let Some(x) = dd.borrow().as_ref() {
-                if self.p.objective(x) < self.prune_limit() - 1e-6 {
+                if !obj || self.p.objective(x) < self.prune_limit() - 1e-6 {
                     let act: f64 = coefs.iter().map(|&(j, a)| a * x[j]).sum();
                     if act > rhs + 1e-6 * (1.0 + rhs.abs()) {
                         eprintln!("MIP_DEBUG_SOL: dual proof cuts off the debug solution ({act} > {rhs})");
@@ -1365,10 +1398,22 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
         });
-        // プールの上限 (古いものから捨てる)
+        if obj {
+            self.push_pool_row(coefs, konst, true);
+        } else {
+            self.farkas_added += 1;
+            self.push_pool_row(coefs, -konst, false);
+        }
+        true
+    }
+
+    /// 双対証明・衝突制約のプールに行 `sum coefs x <= rhs` を加える (`obj` なら `rhs = U - konst`、そうでなければ
+    /// `rhs = konst`)。上限を超えたら古いものから捨てる。
+    pub(super) fn push_pool_row(&mut self, coefs: Vec<(usize, f64)>, konst: f64, obj: bool) {
+        let p = self.p;
         let nnz_cap = 10 * p.rows.iter().map(|r| r.len()).sum::<usize>() + 100_000;
         while !self.dual_proofs.is_empty() && (self.dual_proofs.len() >= 2000 || self.dual_proof_nnz + coefs.len() > nnz_cap) {
-            let (c, _) = self.dual_proofs.pop_front().unwrap();
+            let (c, _, _) = self.dual_proofs.pop_front().unwrap();
             self.dual_proof_nnz -= c.len();
             self.proof_base.pop_front();
             self.proof_first_id += 1;
@@ -1386,43 +1431,89 @@ impl<'a, L: MipLp> Solver<'a, L> {
             Some((lo, up)) => proof_min_activity(&coefs, lo, up),
             None => (0.0, 0, f64::INFINITY),
         };
-        if self.proof_snap.is_some() && self.proof_root_tight(base, konst) {
-            self.proof_always.push(id);
-        }
         self.proof_base.push_back(base);
         self.proof_dirty = true;
-        self.dual_proofs.push_back((coefs, konst));
-    }
-
-    /// 双対証明で今の定義域を調べる: どれかの証明が破れていれば偽 (枝刈り)。そうでなければ証明から整数列の
-    /// 境界を締め、締めたら伝播し直す (その結果矛盾すれば偽)。
-    /// 根の状態の境界 (基準) で、証明が破れているか締め付けが起こりうるか。
-    fn proof_root_tight(&self, base: (f64, u32, f64), konst: f64) -> bool {
-        let (m, ninf, cap) = base;
-        if ninf > 0 {
-            return false;
+        self.dual_proofs.push_back((coefs, konst, obj));
+        let k = self.dual_proofs.len() - 1;
+        if self.proof_snap.is_some() && self.proof_root_tight(base, self.proof_rhs(k)) {
+            self.proof_always.push(id);
         }
-        let u = self.prune_limit() - self.p.offset;
-        !u.is_finite() || u - konst - m < cap
     }
 
+    /// 直前の伝播の矛盾から衝突制約を作ってプールに入れる (定義域を巻き戻す前に呼ぶ)。衝突が 2 値列の固定だけで
+    /// できていれば `sum_{x_j=1 の固定} x_j - sum_{x_j=0 の固定} x_j <= |{x_j=1}| - 1` (どれか 1 つは逆の値)。
+    pub(super) fn add_conflict(&mut self) {
+        if self.params.submip && env_str!("ENOMOTO_MIP_SUBMIP_CONFLICTS").is_none() || env_str!("ENOMOTO_MIP_NO_CONFLICTS").is_some() {
+            return;
+        }
+        let p = self.p;
+        let max_len = tunable!("ENOMOTO_T_MIP_CONFLICT_LEN", 0.1, f64).mul_add(p.n as f64, 10.0) as usize;
+        let Some(lits) = self.dom.analyze_conflict(p, max_len) else { return };
+        let mut coefs: Vec<(usize, f64)> = Vec::with_capacity(lits.len());
+        let mut ones = 0.0;
+        for &(j, upper, v) in &lits {
+            if !p.is_int[j] || self.dom.global_lo[j] != 0.0 || self.dom.global_up[j] != 1.0 {
+                return;
+            }
+            if !upper && v == 1.0 {
+                coefs.push((j, 1.0));
+                ones += 1.0;
+            } else if upper && v == 0.0 {
+                coefs.push((j, -1.0));
+            } else {
+                return;
+            }
+        }
+        coefs.sort_by_key(|&(j, _)| j);
+        coefs.dedup_by_key(|&mut (j, _)| j);
+        if coefs.len() != lits.len() {
+            return; // 同じ列の両側 (それ自体で矛盾) は使わない
+        }
+        // 診断用: デバッグ解を切っていないか
+        DEBUG_SOL.with(|dd| {
+            if let Some(x) = dd.borrow().as_ref() {
+                let act: f64 = coefs.iter().map(|&(j, a)| a * x[j]).sum();
+                if act > ones - 1.0 + 1e-6 {
+                    eprintln!("MIP_DEBUG_SOL: conflict cuts off the debug solution ({act} > {})", ones - 1.0);
+                }
+            }
+        });
+        self.conflicts_added += 1;
+        self.push_pool_row(coefs, ones - 1.0, false);
+    }
+
+    /// プールの `k` 番目の行の右辺: 双対証明 (`obj`) は `U - konst` (`U` は打ち切り値、暫定解がなければ無限)、
+    /// 衝突制約は `konst`。
+    fn proof_rhs(&self, k: usize) -> f64 {
+        let (_, konst, obj) = &self.dual_proofs[k];
+        if *obj {
+            self.prune_limit() - self.p.offset - konst
+        } else {
+            *konst
+        }
+    }
+
+    /// 根の状態の境界 (基準) で、証明が破れているか締め付けが起こりうるか。
+    fn proof_root_tight(&self, base: (f64, u32, f64), rhs: f64) -> bool {
+        let (m, ninf, cap) = base;
+        ninf == 0 && rhs.is_finite() && rhs - m < cap
+    }
+
+    /// 双対証明と衝突制約で今の定義域を調べる: どれかが破れていれば偽 (枝刈り)。そうでなければ整数列の
+    /// 境界を締め、締めたら伝播し直す (その結果矛盾すれば偽)。
     pub(super) fn apply_dual_proofs(&mut self) -> bool {
-        if self.dual_proofs.is_empty() || self.incumbent.is_none() && !self.params.cutoff.is_finite() {
+        if self.dual_proofs.is_empty() {
             return true;
         }
         let p = self.p;
-        let u = self.prune_limit() - p.offset;
-        if !u.is_finite() {
-            return true;
-        }
         let mut tightened = false;
         // 基準 (根の状態の境界での最小活動量) を取り直す: 最初と、ノード 200 個ごと (根の境界は締まるだけなので
         // 古い基準でも見積もりは真の最小活動量以下で正しい。取り直すと見積もりが強くなる)
         if self.proof_snap.is_none() || self.nodes >= self.proof_snap_nodes + 200 || self.prune_limit() < self.proof_snap_limit || env_str!("ENOMOTO_MIP_PROOF_FULL_SCAN").is_some() {
             let (lo, up) = self.dom.root_bounds();
-            self.proof_base = self.dual_proofs.iter().map(|(c, _)| proof_min_activity(c, &lo, &up)).collect();
+            self.proof_base = self.dual_proofs.iter().map(|(c, _, _)| proof_min_activity(c, &lo, &up)).collect();
             self.proof_col_index = vec![Vec::new(); p.n];
-            for (k, (c, _)) in self.dual_proofs.iter().enumerate() {
+            for (k, (c, _, _)) in self.dual_proofs.iter().enumerate() {
                 let id = self.proof_first_id + k as u64;
                 for &(j, a) in c {
                     self.proof_col_index[j].push((id, a));
@@ -1434,7 +1525,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.proof_dirty = true;
             self.proof_always.clear();
             for k in 0..self.dual_proofs.len() {
-                if self.proof_root_tight(self.proof_base[k], self.dual_proofs[k].1) {
+                if self.proof_root_tight(self.proof_base[k], self.proof_rhs(k)) {
                     self.proof_always.push(self.proof_first_id + k as u64);
                 }
             }
@@ -1490,7 +1581,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         for pass in 0..8 {
             let mut tightened_now = false;
             for &k in &scan {
-                let rhs = u - self.dual_proofs[k].1;
+                let rhs = self.proof_rhs(k);
+                if !rhs.is_finite() {
+                    continue;
+                }
                 let (minact, ninf) = if full {
                     let (mut minact, mut ninf) = (0.0f64, 0usize);
                     for &(j, a) in &self.dual_proofs[k].0 {
@@ -1694,7 +1788,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     fn finish(&mut self, status: MipStatus, best_bound: f64) -> MipResult {
         self.log(true);
         if self.params.verbose {
-            eprintln!("MIP: dual proofs {} (pruned {} nodes, tightened {} bounds)", self.dual_proofs.len(), self.proof_prunes, self.proof_tightenings);
+            eprintln!("MIP: dual proofs and conflicts {} (conflicts added {}, Farkas {}, pruned {} nodes, tightened {} bounds)", self.dual_proofs.len(), self.conflicts_added, self.farkas_added, self.proof_prunes, self.proof_tightenings);
         }
         let (x, objective) = match &self.incumbent {
             Some((z, x)) => (Some(x.clone()), Some(*z)),

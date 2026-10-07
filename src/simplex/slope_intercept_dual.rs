@@ -1032,6 +1032,8 @@ thread_local! {
     static WANT_LU: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// 保存した LU。
     static LAST_LU: std::cell::RefCell<Option<Box<sparse_lu::FtLu>>> = const { std::cell::RefCell::new(None) };
+    /// 段階 B が実行不能で終わったときの離基行の `B^-T e_r` (標準形の行、実行不能の証明用)。
+    static LAST_RAY: std::cell::RefCell<Option<Vec<f64>>> = const { std::cell::RefCell::new(None) };
     /// 次の warm start で使う、その基底の被約費用 (真の費用、長さ `n_total`。前回の近道の求解の最終値)。
     static WARM_D: std::cell::RefCell<Option<Vec<f64>>> = const { std::cell::RefCell::new(None) };
     /// 近道で最適になったときの被約費用 (LU と同時に保存する)。
@@ -1041,6 +1043,11 @@ thread_local! {
 /// 次の warm start に使う被約費用を渡す ([`set_warm_lu`] と同じ基底のもの)。
 pub(crate) fn set_warm_d(d: Option<Vec<f64>>) {
     WARM_D.with(|w| *w.borrow_mut() = d);
+}
+
+/// 段階 B が実行不能で終わったときの双対射線 (標準形の行) を取り出す。
+pub(crate) fn take_last_ray() -> Option<Vec<f64>> {
+    LAST_RAY.with(|l| l.borrow_mut().take())
 }
 
 /// 近道で最適になったときに保存した被約費用を取り出す。
@@ -4976,6 +4983,10 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
             }
             crate::phase_timing::mark("stage_b_infeasible");
             xprof("main_inf");
+            // 実行不能の証明 (Farkas の双対射線、標準形の行): 離基行の BTRAN `rho = B^-T e_r`
+            if WANT_DUALS.with(|w| w.get()) {
+                LAST_RAY.with(|l| *l.borrow_mut() = Some(rho.to_vec()));
+            }
             return Some(SimplexResult { status: Status::Infeasible, x: None });
         }
         // chuzc1 + BFRT パス 1: `bland_mode` では候補全体を並べる必要があるが、通常は歩進が
@@ -5172,6 +5183,10 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
             }
             crate::phase_timing::mark("stage_b_infeasible");
             xprof("main_inf");
+            // 実行不能の証明 (Farkas の双対射線、標準形の行): 離基行の BTRAN `rho = B^-T e_r`
+            if WANT_DUALS.with(|w| w.get()) {
+                LAST_RAY.with(|l| *l.borrow_mut() = Some(rho.to_vec()));
+            }
             return Some(SimplexResult { status: Status::Infeasible, x: None });
         };
 
