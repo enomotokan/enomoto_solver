@@ -750,8 +750,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let lns_calls: f64 = self.alns_count.iter().sum::<u32>() as f64;
                     let succ_rate = (0.5 * self.alns_reward.iter().sum::<f64>() + 1.0) / (lns_calls + 2.0);
                     let frac = tunable!("ENOMOTO_T_MIP_LNS_TIME_MIN", 0.02, f64) + tunable!("ENOMOTO_T_MIP_LNS_TIME_FRAC", 0.08, f64) * succ_rate;
-                    let lns_ok = self.lns_secs < frac * self.start.elapsed().as_secs_f64();
-                    let lns_freq = tunable!("ENOMOTO_T_MIP_LNS_FREQ", 50u64, u64);
+                    // 既定はヒューリスティクス共通の反復の予算の中で 100 ノードおき (時間の予算を与えると、改善しない
+                    // 問題で解ける問題を遅くした: 40 問で 15 -> 14 問)。ENOMOTO_MIP_LNS_TIME で時間の予算にする
+                    let lns_time = env_str!("ENOMOTO_MIP_LNS_TIME").is_some();
+                    let lns_ok = if lns_time { self.lns_secs < frac * self.start.elapsed().as_secs_f64() } else { self.heur_iters < budget };
+                    let lns_freq = if lns_time { tunable!("ENOMOTO_T_MIP_LNS_FREQ", 50u64, u64) } else { 100 };
                     if node.depth > 0 && plunge_depth == 0 && self.incumbent.is_some() && self.nodes >= self.last_rins + lns_freq && lns_ok {
                         self.last_rins = self.nodes;
                         let t_lns = Instant::now();
