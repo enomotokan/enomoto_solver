@@ -767,6 +767,197 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 }
 
+/// 局所探索 (Local-MIP・ViolationLS 系、Feasibility Jump の発展): 違反している行を重み付きで減らす手を選ぶ。
+/// FJ との違い: 行の重みの平滑化 (重みは確率的に増やし、満たされた行の重みは減らす)、逆戻りの禁止 (タブー)、
+/// 改善する手がなければランダムな手、何度かの再出発、実行可能解が見つかったら目的値をそれより良くする行を
+/// 足して続ける。戻り値は (最良の実行可能解, 違反の合計が最小だった点とその違反)。
+pub(super) fn local_search(p: &MipProblem, lo: &[f64], up: &[f64], time_cap: f64, max_steps: u64, seed: u64) -> (Option<Vec<f64>>, Option<(Vec<f64>, f64)>) {
+    let (n, m) = (p.n, p.m);
+    let mut rng = seed | 1;
+    let mut rand = move || {
+        rng ^= rng >> 12;
+        rng ^= rng << 25;
+        rng ^= rng >> 27;
+        ((rng.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 11) as f64) / ((1u64 << 53) as f64)
+    };
+    let t_end = Instant::now() + Duration::from_secs_f64(time_cap);
+    if n == 0 {
+        return (None, None);
+    }
+    // 目的値の行 (index m): c x <= obj_bound (実行可能解が見つかってから有効)
+    let mut obj_bound = f64::INFINITY;
+    let row_lo = |i: usize| if i < m { p.row_lo[i] } else { f64::NEG_INFINITY };
+    let row_up = |i: usize, ob: f64| if i < m { p.row_up[i] } else { ob };
+    let viol = |i: usize, a: f64, ob: f64| -> f64 {
+        let (rl, ru) = (row_lo(i), row_up(i, ob));
+        let tol = FEASTOL * (1.0 + a.abs().min(1e6));
+        if a > ru + tol {
+            a - ru
+        } else if a < rl - tol {
+            rl - a
+        } else {
+            0.0
+        }
+    };
+    // 列ごとの (行, 係数)。目的値の行を含める
+    let cols: Vec<Vec<(usize, f64)>> = (0..n)
+        .map(|j| {
+            let mut c = p.cols[j].clone();
+            if p.cost[j] != 0.0 {
+                c.push((m, p.cost[j]));
+            }
+            c
+        })
+        .collect();
+    let start = |rand: &mut dyn FnMut() -> f64| -> Vec<f64> {
+        (0..n)
+            .map(|j| {
+                let (l, u) = (lo[j], up[j]);
+                let v = if rand() < 0.5 { 0.0f64.max(l).min(u.max(l)) } else if l.is_finite() && u.is_finite() && p.is_int[j] { (l + ((u - l + 1.0) * rand()).floor()).min(u) } else { 0.0f64.max(l).min(u.max(l)) };
+                if v.is_finite() { v } else { 0.0 }
+            })
+            .collect()
+    };
+    let mut best_feas: Option<Vec<f64>> = None;
+    let mut best_inf: Option<(Vec<f64>, f64)> = None;
+    let mut steps_total = 0u64;
+    'restart: for round in 0..1000 {
+        let mut x = if round == 0 { (0..n).map(|j| { let v = 0.0f64.max(lo[j]).min(up[j].max(lo[j])); if v.is_finite() { v } else { 0.0 } }).collect() } else { start(&mut rand) };
+        if let Some(b) = &best_feas {
+            if rand() < 0.5 {
+                x = b.clone();
+            }
+        }
+        let mut act: Vec<f64> = (0..m).map(|i| p.rows[i].iter().map(|&(j, a)| a * x[j]).sum()).collect();
+        act.push((0..n).map(|j| p.cost[j] * x[j]).sum());
+        let mut w = vec![1.0f64; m + 1];
+        let mut tabu_until = vec![0u64; n];
+        let mut vset: Vec<usize> = Vec::new();
+        let mut vpos = vec![usize::MAX; m + 1];
+        for i in 0..=m {
+            if viol(i, act[i], obj_bound) > 0.0 {
+                vpos[i] = vset.len();
+                vset.push(i);
+            }
+        }
+        let mut stall = 0u64;
+        let mut best_round = f64::INFINITY;
+        let mut step = 0u64;
+        loop {
+            step += 1;
+            steps_total += 1;
+            if steps_total >= max_steps || (step % 128 == 0 && Instant::now() >= t_end) {
+                break 'restart;
+            }
+            if vset.is_empty() {
+                // 実行可能: 記録し、目的値をそれより良くする行を有効にして続ける
+                let z = act[m];
+                best_feas = Some(x.clone());
+                let step_obj = 1e-6 * z.abs().max(1.0);
+                obj_bound = z - step_obj;
+                if viol(m, act[m], obj_bound) > 0.0 && vpos[m] == usize::MAX {
+                    vpos[m] = vset.len();
+                    vset.push(m);
+                }
+                if vset.is_empty() {
+                    break 'restart;
+                }
+            }
+            // 違反の合計 (目的値の行を除く) で最良の非実行可能点を記録
+            let tv: f64 = vset.iter().filter(|&&i| i < m).map(|&i| viol(i, act[i], obj_bound)).sum();
+            if tv < best_round - 1e-9 {
+                best_round = tv;
+                stall = 0;
+                if best_inf.as_ref().is_none_or(|(_, v)| tv < *v) && tv > 0.0 {
+                    best_inf = Some((x.clone(), tv));
+                }
+            } else {
+                stall += 1;
+                if stall > 20_000 {
+                    continue 'restart;
+                }
+            }
+            // 違反している行をいくつか標本にとり、その変数の「行を満たす値」への手を評価する
+            let mut best: Option<(usize, f64, f64)> = None;
+            for _ in 0..3.min(vset.len()) {
+                let i = vset[(rand() * vset.len() as f64) as usize % vset.len()];
+                let row: &[(usize, f64)] = if i < m { &p.rows[i] } else { &[] };
+                let obj_row: Vec<(usize, f64)>;
+                let row = if i == m {
+                    obj_row = (0..n).filter(|&j| p.cost[j] != 0.0).map(|j| (j, p.cost[j])).collect();
+                    &obj_row[..]
+                } else {
+                    row
+                };
+                for &(j, a) in row {
+                    if lo[j] == up[j] || tabu_until[j] > step {
+                        continue;
+                    }
+                    let (rl, ru) = (row_lo(i), row_up(i, obj_bound));
+                    let need = if act[i] > ru { ru - act[i] } else { rl - act[i] };
+                    let mut v = x[j] + need / a;
+                    if p.is_int[j] {
+                        v = if (need / a) > 0.0 { (v - 1e-9).ceil() } else { (v + 1e-9).floor() };
+                    }
+                    let v = v.clamp(lo[j], up[j]);
+                    if v == x[j] || !v.is_finite() {
+                        continue;
+                    }
+                    let d = v - x[j];
+                    let mut gain = 0.0;
+                    for &(r, b) in &cols[j] {
+                        let before = viol(r, act[r], obj_bound);
+                        let after = viol(r, act[r] + b * d, obj_bound);
+                        gain += w[r] * (before - after);
+                    }
+                    if best.is_none_or(|(_, _, g)| gain > g) {
+                        best = Some((j, v, gain));
+                    }
+                }
+            }
+            let mv = match best {
+                Some((j, v, g)) if g > 1e-12 => Some((j, v)),
+                _ => {
+                    // 改善する手がない: 重みを更新し (平滑化: 確率 0.3 で満たされた行の重みを減らす)、ランダムな手
+                    if rand() < 0.3 {
+                        for r in 0..=m {
+                            if vpos[r] == usize::MAX && w[r] > 1.0 {
+                                w[r] -= 1.0;
+                            }
+                        }
+                    } else {
+                        for &r in &vset {
+                            w[r] += 1.0;
+                        }
+                    }
+                    best.map(|(j, v, _)| (j, v)).filter(|_| rand() < 0.5)
+                }
+            };
+            let Some((j, v)) = mv else { continue };
+            let d = v - x[j];
+            x[j] = v;
+            tabu_until[j] = step + 3 + (rand() * 10.0) as u64;
+            for &(r, b) in &cols[j] {
+                act[r] += b * d;
+                let is_v = viol(r, act[r], obj_bound) > 0.0;
+                if is_v && vpos[r] == usize::MAX {
+                    vpos[r] = vset.len();
+                    vset.push(r);
+                } else if !is_v && vpos[r] != usize::MAX {
+                    let k = vpos[r];
+                    let last = *vset.last().unwrap();
+                    vset.swap_remove(k);
+                    if last != r {
+                        vpos[last] = k;
+                    }
+                    vpos[r] = usize::MAX;
+                }
+            }
+        }
+    }
+    (best_feas, best_inf)
+}
+
 /// Feasibility Jump の探索本体 (Solver の状態に依らないので別スレッドでも動かせる)。`lo`/`up` は列の境界、
 /// `seed` は乱数の種、`stop` が立ったら止める。実行可能な点が見つかれば返す。
 pub(super) fn fj_search(p: &MipProblem, lo: &[f64], up: &[f64], effort: u64, time_cap: f64, seed: u64, stop: Option<&std::sync::atomic::AtomicBool>) -> Option<Vec<f64>> {

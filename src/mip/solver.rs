@@ -141,6 +141,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) alns_count: [u32; 6],
     /// 実行可能解のプール (目的値の良い順、Crossover 用)。
     pub(super) sol_pool: Vec<(f64, Vec<f64>)>,
+    /// Repair の出発点 (局所探索で違反の合計が最小だった点)。
+    pub(super) repair_start: Option<Vec<f64>>,
     /// 大近傍探索 (サブ MIP) に使った時間の合計 (秒)。
     pub(super) lns_secs: f64,
     /// サブ MIP の時間の上限 (残り時間に対する割合)。
@@ -261,6 +263,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
         alns_reward: [0.0; 6],
         alns_count: [0; 6],
         sol_pool: Vec::new(),
+        repair_start: None,
         lns_secs: 0.0,
         submip_time_frac: 0.07,
         parallel_submips: false,
@@ -555,6 +558,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if env_str!("ENOMOTO_MIP_NO_ROOT_REDCOST_HEUR").is_none() {
                     heur!("root reduced cost", self.root_reduced_cost());
                 }
+                if env_str!("ENOMOTO_MIP_NO_LPFACE").is_none() {
+                    heur!("LP face", self.lp_face());
+                }
                 heur!("RENS", self.rens(&x));
                 if self.incumbent.is_none() && !self.fractional(&x_root0).is_empty() {
                     heur!("RENS (LP before cuts)", self.rens(&x_root0));
@@ -594,6 +600,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 並列モード: 別スレッドのサブ MIP の結果を出した順に受け取る
                 self.parallel_submips = false;
                 self.join_submips(0);
+                // 局所探索と Repair (暫定解がなければ)
+                if self.incumbent.is_none() && env_str!("ENOMOTO_MIP_NO_LOCAL_SEARCH").is_none() {
+                    heur!("local search", self.local_search_heur());
+                }
+                if self.incumbent.is_none() && env_str!("ENOMOTO_MIP_NO_REPAIR").is_none() {
+                    heur!("repair", self.repair(&x));
+                }
                 // 違反量を最小にする補助 MIP (最後の手段、既定では使わない: 30n20b8・neos-1456979 で違反 0 の点が
                 // 見つからず根の時間を 3-5 s 使うだけだった。ENOMOTO_MIP_MINREL=1 で使う)
                 if self.incumbent.is_none() && env_str!("ENOMOTO_MIP_MINREL").is_some() {

@@ -307,4 +307,163 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let ints: Vec<usize> = (0..n).filter(|&j| p.is_int[j]).collect();
         self.fix_and_propagate(&x, &ints)
     }
+
+    /// LP face (SCIP の heur_lpface): 根の LP で被約費用が 0 でない非基底の列 (整数・連続とも) をその境界に固定し、
+    /// LP の最適面に限ったサブ MIP を解く (そこで見つかる整数解は根の LP 値と同じ目的値なので最適)。
+    /// LP は根の最適解の状態で呼ぶ。
+    pub(super) fn lp_face(&mut self) -> bool {
+        let p = self.p;
+        if self.params.submip {
+            return false;
+        }
+        let b = self.lp.basis();
+        let d = self.lp.reduced_costs();
+        let dmax = d.iter().fold(0.0f64, |m, v| m.max(v.abs())).max(1.0);
+        let mut lo = self.dom.lo.clone();
+        let mut up = self.dom.up.clone();
+        let (mut nint, mut nfix) = (0usize, 0usize);
+        for j in 0..p.n {
+            if p.is_int[j] && lo[j] < up[j] {
+                nint += 1;
+            }
+            let fixv = match b.col[j] {
+                super::lp::VarStatus::Lower if d[j] > 1e-7 * dmax => lo[j],
+                super::lp::VarStatus::Upper if d[j] < -1e-7 * dmax => up[j],
+                _ => continue,
+            };
+            if !fixv.is_finite() {
+                continue;
+            }
+            if p.is_int[j] && lo[j] < up[j] {
+                nfix += 1;
+            }
+            lo[j] = fixv;
+            up[j] = fixv;
+        }
+        if nint == 0 || (nfix as f64) < tunable!("ENOMOTO_T_MIP_LPFACE_RATE", 0.3, f64) * nint as f64 {
+            if self.params.verbose && self.nodes <= 1 {
+                eprintln!("MIP:   LP face: only {nfix} of {nint} integer columns fixed");
+            }
+            return false;
+        }
+        let r = self.solve_submip(lo, up, 500);
+        if self.params.verbose && self.nodes <= 1 {
+            eprintln!("MIP:   LP face: {nfix} of {nint} integer columns fixed, found {r}");
+        }
+        r
+    }
+
+    /// 局所探索 ([`super::heuristics::local_search`]) を根で回す。見つからなければ、違反の最小だった点を
+    /// `self.repair_start` に残す (Repair の出発点)。
+    pub(super) fn local_search_heur(&mut self) -> bool {
+        let p = self.p;
+        if self.params.submip {
+            return false;
+        }
+        let cap = if self.params.time_limit.is_finite() { (tunable!("ENOMOTO_T_MIP_LS_TIME_FRAC", 0.05, f64) * self.params.time_limit).min(5.0) } else { 5.0 };
+        let nnz: u64 = p.rows.iter().map(|r| r.len() as u64).sum();
+        let seed = self.rng ^ 0xD1B5_4A32_D192_ED03;
+        self.rand();
+        let (feas, inf) = super::heuristics::local_search(p, &self.dom.lo, &self.dom.up, cap, (200 * nnz).clamp(200_000, 100_000_000), seed);
+        if let Some((x, v)) = inf {
+            if self.params.verbose && self.nodes <= 1 {
+                eprintln!("MIP:   local search: least violation {v:.3e}");
+            }
+            self.repair_start = Some(x);
+        }
+        match feas {
+            Some(x) => self.try_incumbent(x),
+            None => false,
+        }
+    }
+
+    /// Repair (SCIP の heur_repair): 実行不能な点 `x0` (局所探索の違反最小の点、なければ丸めた LP 解) から、違反している
+    /// 行にだけ違反量の列を足し、その行に現れない整数列を `x0` の値に固定した補助 MIP で違反量の合計を最小にする。
+    /// 違反 0 なら実行可能解、残れば整数列の値を目標に固定・伝播して連続部分を LP で直す。
+    pub(super) fn repair(&mut self, xlp: &[f64]) -> bool {
+        let p = self.p;
+        if self.params.submip || p.m == 0 {
+            return false;
+        }
+        let x0: Vec<f64> = match self.repair_start.take() {
+            Some(x) => x,
+            None => (0..p.n).map(|j| if p.is_int[j] { xlp[j].round().clamp(self.dom.lo[j], self.dom.up[j]) } else { xlp[j] }).collect(),
+        };
+        let tol = |b: f64| 1e-6 * (1.0 + b.abs());
+        let act: Vec<f64> = p.rows.iter().map(|r| r.iter().map(|&(j, a)| a * x0[j]).sum()).collect();
+        let violated: Vec<bool> = (0..p.m).map(|i| act[i] < p.row_lo[i] - tol(p.row_lo[i]) || act[i] > p.row_up[i] + tol(p.row_up[i])).collect();
+        let nviol = violated.iter().filter(|&&v| v).count();
+        if nviol == 0 {
+            return self.try_incumbent(x0);
+        }
+        // 違反行に現れる列は自由にし、それ以外の整数列は x0 に固定する
+        let mut free = vec![false; p.n];
+        for i in 0..p.m {
+            if violated[i] {
+                for &(j, _) in &p.rows[i] {
+                    free[j] = true;
+                }
+            }
+        }
+        let n = p.n;
+        let mut col_lo = self.dom.global_lo.clone();
+        let mut col_up = self.dom.global_up.clone();
+        for j in 0..n {
+            if p.is_int[j] && !free[j] && x0[j] >= col_lo[j] && x0[j] <= col_up[j] {
+                col_lo[j] = x0[j];
+                col_up[j] = x0[j];
+            }
+        }
+        let mut rows = p.rows.clone();
+        let mut cost = vec![0.0; n];
+        let mut is_int = p.is_int.clone();
+        for (i, r) in rows.iter_mut().enumerate() {
+            if !violated[i] {
+                continue;
+            }
+            let scale = r.iter().fold(0.0f64, |m, &(_, a)| m.max(a.abs())).max(1e-9);
+            for (bound, sign) in [(p.row_lo[i], 1.0), (p.row_up[i], -1.0)] {
+                if bound.is_finite() {
+                    r.push((col_lo.len(), sign * scale));
+                    col_lo.push(0.0);
+                    col_up.push(f64::INFINITY);
+                    cost.push(1.0);
+                    is_int.push(false);
+                }
+            }
+        }
+        let sub = super::problem::MipProblem::from_rows(col_lo, col_up, cost, 0.0, 1.0, is_int, rows, p.row_lo.clone(), p.row_up.clone());
+        let remaining = match self.deadline {
+            Some(d) => d.saturating_duration_since(std::time::Instant::now()).as_secs_f64(),
+            None => f64::INFINITY,
+        };
+        let params = super::solver::MipParams {
+            time_limit: (0.07 * remaining).min(6.0),
+            node_limit: 500,
+            rel_gap: 0.0,
+            abs_gap: 1e-9,
+            verbose: false,
+            submip: true,
+            cutoff: f64::INFINITY,
+            restarts: 0,
+        };
+        let r = super::solve_problem(&sub, params, env_str!("ENOMOTO_MIP_SUBMIP_NO_PRESOLVE").is_none());
+        self.heur_iters += r.lp_iterations;
+        let Some(xs) = r.x else {
+            if self.params.verbose && self.nodes <= 1 {
+                eprintln!("MIP:   repair: {nviol} violated rows, no point ({:?})", r.status);
+            }
+            return false;
+        };
+        let v: f64 = xs[n..].iter().sum();
+        if self.params.verbose && self.nodes <= 1 {
+            eprintln!("MIP:   repair: {nviol} violated rows, {} free columns, remaining violation {v:.3e}", free.iter().filter(|&&f| f).count());
+        }
+        let x: Vec<f64> = xs[..n].to_vec();
+        if self.try_incumbent(x.clone()) {
+            return true;
+        }
+        let ints: Vec<usize> = (0..n).filter(|&j| p.is_int[j]).collect();
+        self.fix_and_propagate(&x, &ints)
+    }
 }
