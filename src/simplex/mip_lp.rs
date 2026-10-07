@@ -159,6 +159,7 @@ impl TwoStageLp {
     }
 
     fn rebuild(&mut self) {
+        sid::xcount("n_rebuild");
         self.lu_cache = None;
         let (std, sigma) = Self::build_std(self.n, &self.rows, &self.row_lo, &self.row_up, &self.cost, &self.lo, &self.up, &self.shift);
         self.std = std;
@@ -440,9 +441,21 @@ impl TwoStageLp {
             Some(b) if b.len() == self.rows.len() => {
                 // 同じ基底の LU が手元にあれば渡す (分解を省く)
                 match self.lu_cache.take() {
-                    // Forrest-Tomlin の更新が積み重なった LU は FTRAN/BTRAN が遅いので、分解し直させる
-                    Some((cb, lu)) if cb == b && lu.update_count() < 64 => sid::set_warm_lu(Some(lu)),
-                    _ => sid::set_warm_lu(None),
+                    // Forrest-Tomlin の更新が積み重なっていても渡す (再分解の要否は主ループの判定 (更新回数の上限・
+                    // 合成クロック・fill) に任せる。ここで捨てると、ほぼ毎回の求解で分解し直すことになる)
+                    Some((cb, lu)) if cb == b && lu.update_count() < tunable!("ENOMOTO_T_MIP_LU_MAX_UPD", usize::MAX, usize) => sid::set_warm_lu(Some(lu)),
+                    Some((cb, _)) if cb == b => {
+                        sid::xcount("n_upd64");
+                        sid::set_warm_lu(None)
+                    }
+                    Some(_) => {
+                        sid::xcount("n_diffb");
+                        sid::set_warm_lu(None)
+                    }
+                    None => {
+                        sid::xcount("n_nocache");
+                        sid::set_warm_lu(None)
+                    }
                 }
                 if env_str!("ENOMOTO_MIP_NO_NB_HINT").is_none() {
                     sid::set_warm_nb(Some(self.nb_hint()));

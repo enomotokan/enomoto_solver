@@ -1002,6 +1002,18 @@ pub(crate) fn xprof(label: &'static str) {
     });
 }
 
+/// 診断用: 回数を数える (表示では 1 回 = 1 ms)。
+pub(crate) fn xcount(label: &'static str) {
+    XPROF.with(|x| {
+        if let Some((_, acc)) = x.borrow_mut().as_mut() {
+            match acc.iter_mut().find(|(l, _)| *l == label) {
+                Some(e) => e.1 += 1_000_000,
+                None => acc.push((label, 1_000_000)),
+            }
+        }
+    });
+}
+
 /// 診断用: 累計を取り出す。
 pub(crate) fn xprof_take() -> Vec<(&'static str, u128)> {
     XPROF.with(|x| x.borrow().as_ref().map(|(_, a)| a.clone()).unwrap_or_default())
@@ -1093,6 +1105,7 @@ fn warm_start_basis(
             l
         }
     };
+    xprof("w_lu");
     let cb: Vec<f64> = wb.iter().map(|&j| active_cost[j]).collect();
     let mut y = vec![0.0; m];
     let mut scratch = vec![0.0; m];
@@ -1177,6 +1190,7 @@ fn warm_start_basis(
             NbStatus::Lower
         });
     }
+    xprof("w_d");
     if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
         let (mut agree, mut differ, mut unknown) = (0, 0, 0);
         if let Some(h) = &hint {
@@ -3986,6 +4000,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
             }
             lower_bound_from_basis(std, &basis, &lu)
         }) {
+            xprof("main_ext");
             return None; // 外部の打ち切り条件 (分枝限定法の LP)
         }
         if let Some(sb) = &shared_bound {
@@ -4790,6 +4805,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                 return None;
             }
             crate::phase_timing::mark("stage_b_infeasible");
+            xprof("main_inf");
             return Some(SimplexResult { status: Status::Infeasible, x: None });
         }
         // chuzc1 + BFRT パス 1: `bland_mode` では候補全体を並べる必要があるが、通常は歩進が
@@ -4985,6 +5001,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                 return None;
             }
             crate::phase_timing::mark("stage_b_infeasible");
+            xprof("main_inf");
             return Some(SimplexResult { status: Status::Infeasible, x: None });
         };
 
@@ -6297,6 +6314,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
 
     }
 
+    xprof("main_lim");
     // `max_iters` を使い切って後処理に達しなかった: 誤った `Infeasible` ではなく
     // `None`(`NotSolved`)を返す。作業 #8 対処 5: 最初の求解なら摂動を掛け直して解き直す(退化の巡回など)。
     if uncertified_restart && !safe_pivot {
@@ -6775,6 +6793,7 @@ pub(super) fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_
         }
         EXT_POLISH_ITERS.with(|x| x.set(x.get() + 1));
         if ext_check(iter_idx, false, || f64::NEG_INFINITY) {
+            xprof("main_ext");
             return None; // 外部の打ち切り条件 (分枝限定法の LP)
         }
         // chuzr: 重みなしの最大逸脱 (Dantzig) 規則。`infeasible_rows.rows` のみを走査する。
@@ -7111,6 +7130,7 @@ pub(super) fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_
             }
             polish_infeas_check!(r, needed);
             crate::phase_timing::mark("stage_b_infeasible");
+            xprof("main_inf");
             return Some(SimplexResult { status: Status::Infeasible, x: None });
         }
         // `bland_mode` かどうかにかかわらず `(ratio, j)` の昇順に並べる(BFRT の歩進は
@@ -7145,6 +7165,7 @@ pub(super) fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_
             touched_cols.clear();
             polish_infeas_check!(r, needed);
             crate::phase_timing::mark("stage_b_infeasible");
+            xprof("main_inf");
             return Some(SimplexResult { status: Status::Infeasible, x: None });
         };
 
