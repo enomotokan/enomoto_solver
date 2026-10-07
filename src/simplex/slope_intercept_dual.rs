@@ -3435,6 +3435,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     let price_column_density = tunable!("ENOMOTO_PRICE_COLUMN_DENSITY", PRICE_COLUMN_DENSITY, f64);
     let price_col_list: Vec<u32> = if price_by_column { (0..std.n_total).filter(|&j| std.lb[j] != std.ub[j]).map(|j| j as u32).collect() } else { Vec::new() };
 
+    xprof("s_price");
     // `solve_sparse_into` 専用の作業領域(前提条件により `lu_scratch` とは共有しない)と
     // Gilbert-Peierls 用の作業領域。
     let mut sparse_scratch = vec![0.0f64; m];
@@ -3576,6 +3577,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         fresh_d_into(std, &lu, &basis, &basis_pos, &active_cost, &mut fresh_d_cb, &mut lu_scratch, &mut fresh_d_y, &mut d);
     }
 
+    xprof("s_fresh_d");
     // 離基行の重み(論文 5.4 節 Step 2(b) の `γ_i`、注意 7.7): `super::DseState` をそのまま使う(重みは `M` に依存しない
     // 表の行の量。`M` に依存するのはそれを使うスコア `Score2` だけ)。最初のピボットから
     // 厳密 DSE を使う。全スラックの `B0` は符号付き単位行列なので `DseState::new` の単位重みは正確。
@@ -3966,6 +3968,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
             }
         }};
     }
+    xprof("s_rest");
     // ===== 主ループ(1 反復 = chuzr → BTRAN → PRICE → chuzc1/BFRT → FTRAN → 更新) =====
     // 同時実行で内点法に渡す下界 (同じ形の問題を解いているときだけ、段階 B の間に書く)。
     let shared_bound = crate::cancel::bound().filter(|b| b.n_total == n_total && b.n_rows == m);
