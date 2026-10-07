@@ -513,6 +513,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }};
                 }
                 heur!("simple rounding", self.simple_rounding(&x));
+                if env_str!("ENOMOTO_MIP_NO_ZIROUND").is_none() {
+                    heur!("ZI round", self.zi_round(&x));
+                }
+                if self.incumbent.is_none() && env_str!("ENOMOTO_MIP_NO_TRIVIAL").is_none() {
+                    heur!("trivial", self.trivial());
+                }
                 heur!("randomized rounding", self.randomized_rounding(&x, 3));
                 if env_str!("ENOMOTO_MIP_NO_ROOT_REDCOST_HEUR").is_none() {
                     heur!("root reduced cost", self.root_reduced_cost());
@@ -771,6 +777,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // ノードのヒューリスティクス (安価な単純丸めは毎回、ランダム丸めは予算内で待ち行列から取り出したノードのみ)
                 if resolves == 0 {
                     self.simple_rounding(&x);
+                    if env_str!("ENOMOTO_MIP_NO_ZIROUND").is_none() {
+                        self.zi_round(&x);
+                    }
                     let budget = self.lp.total_iterations() / 20 + 10_000;
                     // 大近傍探索 (サブ MIP) は反復の予算とは別に、経過時間の一定割合までの時間の予算で呼ぶ
                     // (サブ MIP の反復を共通の予算に数えると、1 回で使い切ってしばらく呼べなくなる)

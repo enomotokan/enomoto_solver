@@ -1412,4 +1412,106 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.submip_time_frac = keep;
         r
     }
+
+    /// 自明な点 (HiGHS の trivial、SCIP の trivial・locks): 全部 0、全部下限、全部上限、lock の少ない側に寄せた点を
+    /// 整数列の目標値にして固定・伝播し、連続部分は LP で解いて試す ([`Self::fix_and_propagate`])。
+    pub(super) fn trivial(&mut self) -> bool {
+        let p = self.p;
+        let ints: Vec<usize> = (0..p.n).filter(|&j| p.is_int[j]).collect();
+        if ints.is_empty() {
+            return false;
+        }
+        let clamp0 = |lo: f64, up: f64, v: f64| v.clamp(lo, up);
+        for kind in 0..4 {
+            if self.time_up() {
+                break;
+            }
+            let target: Vec<f64> = (0..p.n)
+                .map(|j| {
+                    let (lo, up) = (self.dom.lo[j], self.dom.up[j]);
+                    let finite = |v: f64, alt: f64| if v.is_finite() { v } else { alt };
+                    match kind {
+                        0 => clamp0(lo, up, 0.0),
+                        1 => finite(lo, clamp0(lo, up, 0.0)),
+                        2 => finite(up, clamp0(lo, up, 0.0)),
+                        _ => {
+                            let (dl, ul) = self.locks[j];
+                            if dl <= ul { finite(lo, clamp0(lo, up, 0.0)) } else { finite(up, clamp0(lo, up, 0.0)) }
+                        }
+                    }
+                })
+                .collect();
+            if self.fix_and_propagate(&target, &ints) {
+                if self.params.verbose && self.nodes <= 1 {
+                    eprintln!("MIP:   trivial heuristic found a solution (kind {kind})");
+                }
+                return true;
+            }
+        }
+        false
+    }
+
+    /// ZI round (Wallace 2010、HiGHS の ziRound の簡略版): LP 解の小数の整数列を、どの行も (今の点で) 破らない
+    /// 範囲で動かせるなら、近い整数 (両方動かせれば目的値の良い方) へ動かす、を変化がなくなるまで繰り返す。
+    /// 連続列は動かさない。全部整数になったら試す。
+    pub(super) fn zi_round(&mut self, x: &[f64]) -> bool {
+        let p = self.p;
+        let mut x = x.to_vec();
+        let mut act = vec![0.0f64; p.m];
+        for (i, r) in p.rows.iter().enumerate() {
+            act[i] = r.iter().map(|&(j, a)| a * x[j]).sum();
+        }
+        let tol = |b: f64| 1e-9 * (1.0 + b.abs());
+        for _pass in 0..10 {
+            let mut changed = false;
+            let mut nfrac = 0usize;
+            for j in 0..p.n {
+                if !p.is_int[j] {
+                    continue;
+                }
+                let v = x[j];
+                let (fl, ce) = ((v + FEASTOL).floor(), (v - FEASTOL).ceil());
+                if fl >= ce {
+                    continue; // 整数
+                }
+                nfrac += 1;
+                // 上へ・下へ動かせる最大の幅 (列の境界と各行の余裕)
+                let (mut up_max, mut down_max) = (self.dom.up[j] - v, v - self.dom.lo[j]);
+                for &(i, a) in &p.cols[j] {
+                    let (rl, ru) = (p.row_lo[i], p.row_up[i]);
+                    if a > 0.0 {
+                        up_max = up_max.min((ru - act[i] + tol(ru)) / a);
+                        down_max = down_max.min((act[i] - rl + tol(rl)) / a);
+                    } else {
+                        up_max = up_max.min((act[i] - rl + tol(rl)) / (-a));
+                        down_max = down_max.min((ru - act[i] + tol(ru)) / (-a));
+                    }
+                }
+                let can_up = up_max >= ce - v - 1e-12;
+                let can_down = down_max >= v - fl - 1e-12;
+                let nv = match (can_up, can_down) {
+                    (true, true) => {
+                        if p.cost[j] * (ce - v) <= p.cost[j] * (fl - v) { ce } else { fl }
+                    }
+                    (true, false) => ce,
+                    (false, true) => fl,
+                    _ => continue,
+                };
+                let dv = nv - v;
+                for &(i, a) in &p.cols[j] {
+                    act[i] += a * dv;
+                }
+                x[j] = nv;
+                nfrac -= 1;
+                changed = true;
+            }
+            if nfrac == 0 {
+                return self.try_incumbent(x);
+            }
+            if !changed {
+                break;
+            }
+        }
+        false
+    }
 }
