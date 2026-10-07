@@ -607,6 +607,7 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
         }
     };
     st.ipm_iters = ipm.iters;
+    crate::phase_timing::record("xo_ipm_iters", ipm.iters as f64);
     if crate::cancel::is_cancelled() {
         return None;
     }

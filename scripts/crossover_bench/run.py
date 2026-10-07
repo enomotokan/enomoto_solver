@@ -99,9 +99,10 @@ def reference_objs() -> dict:
     return ref
 
 
-def run_one(mps: Path, solver: str, timeout: float, mem_gb: float, sizes_only: bool = False) -> dict:
+def run_one(mps: Path, solver: str, timeout: float, mem_gb: float, sizes_only: bool = False, extra_env: dict | None = None) -> dict:
     cmd = [sys.executable, __file__, "--worker", str(mps), solver] + (["--sizes-only"] if sizes_only else [])
     env = dict(os.environ)
+    env.update(extra_env or {})
     lim = int(mem_gb * (1 << 30))
     pre = (lambda: __import__("resource").setrlimit(__import__("resource").RLIMIT_AS, (lim, lim)))
     t0 = time.perf_counter()
@@ -134,6 +135,9 @@ def main() -> None:
     ap.add_argument("--set", nargs="+", default=["netlib"])
     ap.add_argument("--only", nargs="*")
     ap.add_argument("--methods", nargs="+", default=list(METHODS))
+    ap.add_argument("--variants", nargs="+", default=[],
+                    help="名前=ENV1=v1,ENV2=v2 (ipm_crossover を環境変数つきで解く案。各問題で案を交互に計測する。"
+                         "環境変数なしは 名前=)")
     ap.add_argument("--out", type=Path)
     ap.add_argument("--time-limit", type=float, default=600.0)
     ap.add_argument("--reps", type=int, default=3)
@@ -142,6 +146,12 @@ def main() -> None:
     ap.add_argument("--sizes", type=Path, help="前処理後の大きさの JSON (--min-presolved-rows で使う)")
     ap.add_argument("--min-presolved-rows", type=int, default=0, help="Kennington・Mittelmann だけ、前処理後の行数がこれ未満の問題を除く")
     args = ap.parse_args()
+    variants = {}
+    for v in args.variants:
+        name, _, envs = v.partition("=")
+        variants[name] = dict(e.split("=", 1) for e in envs.split(",") if e)
+    if variants:
+        args.methods = list(variants)
     if args.worker:
         worker(args.worker[0], args.worker[1], args.sizes_only)
         return
@@ -172,13 +182,20 @@ def main() -> None:
                     r = run_one(mps, "simplex", args.time_limit, args.mem_gb, sizes_only=True)
                     print(json.dumps({"key": key, **r.get("presolve_size", {})}), flush=True)
                     continue
-                for method in todo:
-                    runs = []
-                    for rep in range(args.reps):
-                        r = run_one(mps, METHODS[method], args.time_limit, args.mem_gb)
-                        runs.append(r)
+                # 案ごとの計測を回 (rep) ごとに交互に行う (計算機の速さの揺れが案の比較に入らないように)。
+                all_runs = {m: [] for m in todo}
+                stop = set()
+                for rep in range(args.reps):
+                    for method in todo:
+                        if method in stop:
+                            continue
+                        solver = "ipm_crossover" if method in variants else METHODS[method]
+                        r = run_one(mps, solver, args.time_limit, args.mem_gb, extra_env=variants.get(method))
+                        all_runs[method].append(r)
                         if r["status"] != "optimal" or r["time"] >= args.single_run_above:
-                            break
+                            stop.add(method)
+                for method in todo:
+                    runs = all_runs[method]
                     times = sorted(r["time"] for r in runs)
                     med = runs[[r["time"] for r in runs].index(times[len(times) // 2])]
                     rv = ref.get((set_name, name))
