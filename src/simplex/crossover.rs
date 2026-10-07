@@ -652,8 +652,11 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
         };
         let pd = solve_pdlp(&a_j, &b_j, &c_j, &l_j, &u_j, &opts);
         let tau = pd.eta / pd.w;
+        // 試験用 (`ENOMOTO_T_XO_GAMMA_CAP`): 列ごとの歩幅 τ_j の上限 (大きすぎる τ_j は境界から離れた基底変数まで
+        // 非基底にする: 80bau3b・pilot.ja。第 26 回)。
+        let cap = tunable!("ENOMOTO_T_XO_GAMMA_CAP", f64::INFINITY, f64);
         for (k, &j) in free_cols.iter().enumerate() {
-            gamma[j] = tau * pd.dc[k] * pd.dc[k] * gamma_mult;
+            gamma[j] = (tau * pd.dc[k] * pd.dc[k]).min(cap) * gamma_mult;
         }
         if gamma_mode >= 3 {
             pdhg_sigma = Some(pd.dr.iter().map(|d| pd.eta * pd.w * d * d).collect());
@@ -886,7 +889,16 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     // 基底の選択 + Megiddo 式の押し出しに任せる (`ENOMOTO_T_XO_MEGIDDO_SWITCH`、0 で無効。
     // Megiddo 式の押し出しが有効なときだけ効く)。
     let megiddo = tunable!("ENOMOTO_T_XO_MEGIDDO", 1u8, u8) != 0;
-    let megiddo_switch = if megiddo { tunable!("ENOMOTO_T_XO_MEGIDDO_SWITCH", 0usize, usize) } else { 0 };
+    // 射影による主・双対の押し出し (論文の `move_x_to_vertex!`・`move_y_to_vertex!`) は既定では行わず、基底の選択と
+    // Megiddo 式の押し出しに任せる (`ENOMOTO_T_XO_PROJ_PUSH=1` で行う。第 25 回: 109 問で 0.739 倍、退行なし)。
+    let proj_push = !megiddo || tunable!("ENOMOTO_T_XO_PROJ_PUSH", 0u8, u8) != 0;
+    let megiddo_switch = if !proj_push {
+        usize::MAX / 2
+    } else if megiddo {
+        tunable!("ENOMOTO_T_XO_MEGIDDO_SWITCH", 0usize, usize)
+    } else {
+        0
+    };
     loop {
         if n_basic == 0 || (round >= 2 && n_basic <= m && n_basic >= n_basic_last) || round > max_primal {
             break;
@@ -1166,7 +1178,7 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     let skip_frac = tunable!("ENOMOTO_T_XO_DUAL_SKIP_FRAC", prm::DUAL_SKIP_FRAC, f64);
     let time_factor = tunable!("ENOMOTO_T_XO_DUAL_TIME_FACTOR", prm::DUAL_TIME_FACTOR, f64);
     let t_dual0 = Instant::now();
-    let skip_dual = (n_active as f64) < skip_frac * m as f64;
+    let skip_dual = !proj_push || (n_active as f64) < skip_frac * m as f64;
     if skip_dual && debug {
         eprintln!("CROSSOVER dual push skipped (|D|={n_active} < {skip_frac} m)");
     }
