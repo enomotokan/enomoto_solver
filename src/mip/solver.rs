@@ -150,9 +150,14 @@ pub(super) struct Solver<'a, L: MipLp> {
     proof_col_index: Vec<Vec<(u64, f64)>>,
     proof_snap: Option<(Vec<f64>, Vec<f64>)>,
     proof_snap_nodes: u64,
+    /// 基準を取ったときの打ち切り値 (暫定解が良くなったら取り直す)。
+    proof_snap_limit: f64,
     proof_delta: Vec<(f64, i32)>,
     proof_touched: Vec<usize>,
     proof_in_touched: Vec<bool>,
+    /// 根の状態の境界でも締め付けが起こりうる (余裕が `max |a_j| (u_j - l_j)` 未満の) 証明の通し番号。
+    /// 変えた列を含まなくても毎回調べる。
+    proof_always: Vec<u64>,
     /// `proof_delta` が記録のこの位置までを反映しているか。`proof_dirty` なら作り直す。
     proof_stack_pos: usize,
     proof_dirty: bool,
@@ -224,9 +229,11 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
         proof_col_index: Vec::new(),
         proof_snap: None,
         proof_snap_nodes: 0,
+        proof_snap_limit: f64::INFINITY,
         proof_delta: Vec::new(),
         proof_touched: Vec::new(),
         proof_in_touched: Vec::new(),
+        proof_always: Vec::new(),
         proof_stack_pos: 0,
         proof_dirty: true,
         proof_prunes: 0,
@@ -1266,6 +1273,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             Some((lo, up)) => proof_min_activity(&coefs, lo, up),
             None => (0.0, 0, f64::INFINITY),
         };
+        if self.proof_snap.is_some() && self.proof_root_tight(base, konst) {
+            self.proof_always.push(id);
+        }
         self.proof_base.push_back(base);
         self.proof_dirty = true;
         self.dual_proofs.push_back((coefs, konst));
@@ -1273,6 +1283,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// 双対証明で今の定義域を調べる: どれかの証明が破れていれば偽 (枝刈り)。そうでなければ証明から整数列の
     /// 境界を締め、締めたら伝播し直す (その結果矛盾すれば偽)。
+    /// 根の状態の境界 (基準) で、証明が破れているか締め付けが起こりうるか。
+    fn proof_root_tight(&self, base: (f64, u32, f64), konst: f64) -> bool {
+        let (m, ninf, cap) = base;
+        if ninf > 0 {
+            return false;
+        }
+        let u = self.prune_limit() - self.p.offset;
+        !u.is_finite() || u - konst - m < cap
+    }
+
     pub(super) fn apply_dual_proofs(&mut self) -> bool {
         if self.dual_proofs.is_empty() || self.incumbent.is_none() && !self.params.cutoff.is_finite() {
             return true;
@@ -1285,7 +1305,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut tightened = false;
         // 基準 (根の状態の境界での最小活動量) を取り直す: 最初と、ノード 200 個ごと (根の境界は締まるだけなので
         // 古い基準でも見積もりは真の最小活動量以下で正しい。取り直すと見積もりが強くなる)
-        if self.proof_snap.is_none() || self.nodes >= self.proof_snap_nodes + 200 || env_str!("ENOMOTO_MIP_PROOF_FULL_SCAN").is_some() {
+        if self.proof_snap.is_none() || self.nodes >= self.proof_snap_nodes + 200 || self.prune_limit() < self.proof_snap_limit || env_str!("ENOMOTO_MIP_PROOF_FULL_SCAN").is_some() {
             let (lo, up) = self.dom.root_bounds();
             self.proof_base = self.dual_proofs.iter().map(|(c, _)| proof_min_activity(c, &lo, &up)).collect();
             self.proof_col_index = vec![Vec::new(); p.n];
@@ -1297,7 +1317,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             self.proof_snap = Some((lo, up));
             self.proof_snap_nodes = self.nodes;
+            self.proof_snap_limit = self.prune_limit();
             self.proof_dirty = true;
+            self.proof_always.clear();
+            for k in 0..self.dual_proofs.len() {
+                if self.proof_root_tight(self.proof_base[k], self.dual_proofs[k].1) {
+                    self.proof_always.push(self.proof_first_id + k as u64);
+                }
+            }
         }
         xp("p_refresh");
         // 根から変えた列に関わる証明だけを調べる: 最小活動量 = 基準 + (変えた列の寄与の差)。他の証明の最小活動量は
@@ -1327,112 +1354,147 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.proof_touched.clear();
             self.proof_touched.extend(0..npool);
         } else {
-            let (slo, sup) = self.proof_snap.as_ref().unwrap();
-            // 新しい記録の (列, 側) ごとに最初の「変える前の値」(前回の評価のときの値) と今の値の差を足す
-            let mut firsts: Vec<(usize, bool, f64)> = Vec::new();
-            let mut seen: std::collections::HashSet<(usize, bool)> = std::collections::HashSet::new();
-            for (j, upper, old) in self.dom.stack_from(start) {
-                if seen.insert((j, upper)) {
-                    // 作り直しのときは根の状態の値の代わりに基準の値から数える (根の状態は基準以上に締まって
-                    // いるので、見積もりは真の最小活動量以下のまま)
-                    let old = if start == 0 { if upper { sup[j] } else { slo[j] } } else { old };
-                    firsts.push((j, upper, old));
-                }
-            }
-            for (j, upper, old_v) in firsts {
-                let new_v = if upper { self.dom.up[j] } else { self.dom.lo[j] };
-                if old_v == new_v {
-                    continue;
-                }
-                for &(id, a) in &self.proof_col_index[j] {
-                    if id < self.proof_first_id || (a > 0.0) == upper {
-                        continue; // 古い証明、またはこの側は最小活動量に効かない
-                    }
-                    let k = (id - self.proof_first_id) as usize;
-                    let (old, new) = (a * old_v, a * new_v);
-                    if !self.proof_in_touched[k] {
-                        self.proof_in_touched[k] = true;
-                        self.proof_touched.push(k);
-                    }
-                    let e = &mut self.proof_delta[k];
-                    if old.is_finite() {
-                        e.0 -= old;
-                    } else {
-                        e.1 -= 1;
-                    }
-                    if new.is_finite() {
-                        e.0 += new;
-                    } else {
-                        e.1 += 1;
-                    }
+            self.proof_absorb(start);
+        }
+        self.proof_stack_pos = self.dom.stack_len();
+        if !full {
+            let first = self.proof_first_id;
+            self.proof_always.retain(|&id| id >= first);
+            for &id in &self.proof_always {
+                let k = (id - first) as usize;
+                if k < npool && !self.proof_in_touched[k] {
+                    self.proof_in_touched[k] = true;
+                    self.proof_touched.push(k);
                 }
             }
         }
-        self.proof_stack_pos = self.dom.stack_len();
         xp("p_delta");
-        let touched = std::mem::take(&mut self.proof_touched);
-        for &k in &touched {
-            let rhs = u - self.dual_proofs[k].1;
-            let (minact, ninf) = if full {
-                let (mut minact, mut ninf) = (0.0f64, 0usize);
-                for &(j, a) in &self.dual_proofs[k].0 {
-                    let v = if a > 0.0 { a * self.dom.lo[j] } else { a * self.dom.up[j] };
-                    if v.is_finite() {
-                        minact += v;
-                    } else {
-                        ninf += 1;
+        // 調べる証明: 最初は差分のある証明すべて。締め付けが起きたら、その記録を差分に取り込んで影響を受けた
+        // 証明だけを調べ直す (締め付けの連鎖。全走査の旧方式で先の証明の締め付けが後の証明に効いていたのと同じ)
+        let mut scan: Vec<usize> = self.proof_touched.clone();
+        for pass in 0..8 {
+            let mut tightened_now = false;
+            for &k in &scan {
+                let rhs = u - self.dual_proofs[k].1;
+                let (minact, ninf) = if full {
+                    let (mut minact, mut ninf) = (0.0f64, 0usize);
+                    for &(j, a) in &self.dual_proofs[k].0 {
+                        let v = if a > 0.0 { a * self.dom.lo[j] } else { a * self.dom.up[j] };
+                        if v.is_finite() {
+                            minact += v;
+                        } else {
+                            ninf += 1;
+                        }
                     }
-                }
-                (minact, ninf)
-            } else {
-                let (bm, bi, _) = self.proof_base[k];
-                let (dm, di) = self.proof_delta[k];
-                (bm + dm, (bi as i64 + di as i64).max(0) as usize)
-            };
-            if ninf > 0 {
-                continue;
-            }
-            let slack = rhs - minact;
-            if slack < -1e-6 * (1.0 + rhs.abs()) {
-                self.proof_touched = touched;
-                return false;
-            }
-            if !full && slack >= self.proof_base[k].2 {
-                continue; // どの境界も締まらない
-            }
-            // 整数列の境界を締める: a > 0 なら x_j <= l_j + slack / a
-            let mut changes: Vec<(usize, bool, f64)> = Vec::new();
-            for &(j, a) in &self.dual_proofs[k].0 {
-                if !p.is_int[j] || self.dom.lo[j] == self.dom.up[j] {
-                    continue;
-                }
-                let range = self.dom.up[j] - self.dom.lo[j];
-                if a.abs() * range <= slack + 1e-9 {
-                    continue;
-                }
-                if a > 0.0 {
-                    changes.push((j, true, self.dom.lo[j] + slack / a + 1e-6));
+                    (minact, ninf)
                 } else {
-                    changes.push((j, false, self.dom.up[j] + slack / a - 1e-6));
+                    let (bm, bi, _) = self.proof_base[k];
+                    let (dm, di) = self.proof_delta[k];
+                    (bm + dm, (bi as i64 + di as i64).max(0) as usize)
+                };
+                if ninf > 0 {
+                    continue;
                 }
-            }
-            for (j, upper, v) in changes {
-                let ch = if upper { self.dom.tighten_upper(p, j, v) } else { self.dom.tighten_lower(p, j, v) };
-                if ch {
-                    tightened = true;
-                    self.proof_tightenings += 1;
-                }
-                if self.dom.infeasible {
+                let slack = rhs - minact;
+                if slack < -1e-6 * (1.0 + rhs.abs()) {
                     return false;
                 }
+                if !full && slack >= self.proof_base[k].2 {
+                    continue; // どの境界も締まらない
+                }
+                // 整数列の境界を締める: a > 0 なら x_j <= l_j + slack / a
+                let mut changes: Vec<(usize, bool, f64)> = Vec::new();
+                for &(j, a) in &self.dual_proofs[k].0 {
+                    if !p.is_int[j] || self.dom.lo[j] == self.dom.up[j] {
+                        continue;
+                    }
+                    let range = self.dom.up[j] - self.dom.lo[j];
+                    if a.abs() * range <= slack + 1e-9 {
+                        continue;
+                    }
+                    if a > 0.0 {
+                        changes.push((j, true, self.dom.lo[j] + slack / a + 1e-6));
+                    } else {
+                        changes.push((j, false, self.dom.up[j] + slack / a - 1e-6));
+                    }
+                }
+                for (j, upper, v) in changes {
+                    let ch = if upper { self.dom.tighten_upper(p, j, v) } else { self.dom.tighten_lower(p, j, v) };
+                    if ch {
+                        tightened = true;
+                        tightened_now = true;
+                        self.proof_tightenings += 1;
+                    }
+                    if self.dom.infeasible {
+                        return false;
+                    }
+                }
+            }
+            if full || !tightened_now || pass == 7 {
+                break;
+            }
+            let start = self.proof_stack_pos;
+            scan = self.proof_absorb(start);
+            self.proof_stack_pos = self.dom.stack_len();
+            if scan.is_empty() {
+                break;
             }
         }
         xp("p_scan");
-        self.proof_touched = touched;
         if tightened {
             return self.dom.propagate(p);
         }
         true
+    }
+
+    /// 記録の `start` 番目以降の変更を証明の差分 (`proof_delta`) に足し、差分が変わった証明を返す
+    /// (`proof_touched` にも加える)。`start == 0` なら各列の変更前の値として基準の境界を使う (根の状態は基準
+    /// 以上に締まっているので、見積もりは真の最小活動量以下のまま)。
+    fn proof_absorb(&mut self, start: usize) -> Vec<usize> {
+        let mut changed: Vec<usize> = Vec::new();
+        let Some((slo, sup)) = self.proof_snap.as_ref() else { return changed };
+        // 新しい記録の (列, 側) ごとに最初の「変える前の値」(前回の評価のときの値) と今の値の差を足す
+        let mut firsts: Vec<(usize, bool, f64)> = Vec::new();
+        let mut seen: std::collections::HashSet<(usize, bool)> = std::collections::HashSet::new();
+        for (j, upper, old) in self.dom.stack_from(start) {
+            if seen.insert((j, upper)) {
+                let old = if start == 0 { if upper { sup[j] } else { slo[j] } } else { old };
+                firsts.push((j, upper, old));
+            }
+        }
+        let mut in_changed: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        for (j, upper, old_v) in firsts {
+            let new_v = if upper { self.dom.up[j] } else { self.dom.lo[j] };
+            if old_v == new_v {
+                continue;
+            }
+            for &(id, a) in &self.proof_col_index[j] {
+                if id < self.proof_first_id || (a > 0.0) == upper {
+                    continue; // 古い証明、またはこの側は最小活動量に効かない
+                }
+                let k = (id - self.proof_first_id) as usize;
+                let (old, new) = (a * old_v, a * new_v);
+                if !self.proof_in_touched[k] {
+                    self.proof_in_touched[k] = true;
+                    self.proof_touched.push(k);
+                }
+                if in_changed.insert(k) {
+                    changed.push(k);
+                }
+                let e = &mut self.proof_delta[k];
+                if old.is_finite() {
+                    e.0 -= old;
+                } else {
+                    e.1 -= 1;
+                }
+                if new.is_finite() {
+                    e.0 += new;
+                } else {
+                    e.1 += 1;
+                }
+            }
+        }
+        changed
     }
 
     /// 根での再スタート (SCIP の `restartfac`): 根の処理で新たに大域固定された整数列が全体の 2.5% を超えたら、
