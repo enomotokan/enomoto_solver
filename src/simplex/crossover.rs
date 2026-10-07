@@ -449,6 +449,14 @@ pub(super) struct XoOptions<'a> {
     /// 真なら問題が双対実行可能だと分かっている (段階 A で `z^1 = 0`)。内点法は「最適」か「双対の発散
     /// (主実行不能)」だけを結論し、主実行不能なら `Infeasible` を返す。
     pub dual_feasible_known: bool,
+    /// 内点法を飛ばして使う点 `(x (全列), y, 内点法の時間)`。境界にある列を固定した小さな問題で、元の問題の内点法の
+    /// 点からクロスオーバーを続けるときに使う ([`fix_and_resolve`])。
+    pub given_point: Option<(&'a [f64], &'a [f64], f64)>,
+}
+
+thread_local! {
+    /// `given_point` で解いたクロスオーバーの最後の基底 (`basis_pos`)。呼び出し側が元の問題の基底に戻すのに使う。
+    static GIVEN_LAST_BASIS: std::cell::RefCell<Option<Vec<Option<usize>>>> = const { std::cell::RefCell::new(None) };
 }
 
 /// 固定列 (`lb == ub`) を除いた問題 (内点法に渡す形)。
@@ -554,7 +562,16 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     let shared = crate::cancel::bound().filter(|sb| bound_gap > 0.0 && sb.n_total == std.n_total && sb.n_rows == std.n_rows);
     let fixed_obj: f64 = (0..std.n_total).filter(|&j| !(std.lb[j] < std.ub[j])).map(|j| std.c[j] * std.lb[j]).sum();
     let lb_fn = move || shared.as_ref().map_or(f64::NEG_INFINITY, |sb| sb.get() - fixed_obj);
-    let ipm = if pdlp_mode == 0 {
+    let ipm = if let Some((gx, gy, _)) = xo.given_point {
+        BoxIpmResult {
+            status: Status::Optimal,
+            x: free_cols.iter().map(|&j| gx[j]).collect(),
+            y: gy.to_vec(),
+            rc: Vec::new(),
+            iters: 0,
+            rel_res: (0.0, 0.0, 0.0),
+        }
+    } else if pdlp_mode == 0 {
         if xo.dual_center.is_some() || xo.dual_feasible_known || bound_gap > 0.0 {
             let warm = WarmStart {
                 y: xo.dual_center,
@@ -614,7 +631,7 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
         return None;
     }
     crate::phase_timing::mark("ipm_end");
-    let ipm_secs = t0.elapsed().as_secs_f64();
+    let ipm_secs = xo.given_point.map_or(t0.elapsed().as_secs_f64(), |g| g.2);
     if debug {
         eprintln!("CROSSOVER ipm status={:?} iters={} rel_res={:?} t={:.3}s", ipm.status, ipm.iters, ipm.rel_res, t0.elapsed().as_secs_f64());
     }
@@ -748,6 +765,9 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
         x[j] = ipm.x[k].clamp(std.lb[j], std.ub[j]);
     }
     let mut y = ipm.y;
+    // 境界にある列を固定して解き直すとき (`ENOMOTO_T_XO_FIX`) に使う内点法の点 (PDHG の 1 歩の前)。
+    let fix_frac = tunable!("ENOMOTO_T_XO_FIX", 0.0f64, f64);
+    let ipm_point = (fix_frac > 0.0 && xo.given_point.is_none()).then(|| (x.clone(), y.clone()));
     if let Some(sig) = &pdhg_sigma {
         // PDHG の 1 歩: x⁺ = proj(x - τ_j s)、y⁺ = y + σ_i (b - A(2x⁺ - x))。
         let mut aty = vec![0.0; n];
@@ -842,6 +862,11 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     }
     let mut n_basic = basic_list.len();
     st.basic_after_detect = n_basic;
+    if let Some((x0, y0)) = &ipm_point {
+        if let Some(r) = fix_and_resolve(std, &ps, &x, x0, y0, ipm_secs, fix_frac, debug) {
+            return Some(r);
+        }
+    }
     if debug {
         eprintln!("CROSSOVER m={m} n={n} basic_after_detect={n_basic} t={:.3}s", t0.elapsed().as_secs_f64());
     }
@@ -1577,11 +1602,11 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     let mut final_basis_pos: Option<Vec<Option<usize>>> = None;
     let res = if tunable!("ENOMOTO_T_XO_CLEANUP_MAIN", 1u8, u8) != 0 {
         drop(lu);
-        if debug || detect_eval {
+        if debug || detect_eval || xo.given_point.is_some() {
             super::slope_intercept_dual::request_duals(true);
         }
         let r = super::slope_intercept_dual::solve_slope_intercept_dual_from_basis(std, &Default::default(), basis.clone());
-        if debug || detect_eval {
+        if debug || detect_eval || xo.given_point.is_some() {
             final_basis_pos = super::slope_intercept_dual::take_duals().map(|(_, bp)| bp);
             super::slope_intercept_dual::request_duals(false);
         }
@@ -1590,6 +1615,9 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
         polish_with_true_bounds(std, &mut basis, &mut basis_pos, &mut nb_status, lu)
     };
     crate::phase_timing::mark("cleanup_end");
+    if xo.given_point.is_some() {
+        GIVEN_LAST_BASIS.with(|b| *b.borrow_mut() = final_basis_pos.clone());
+    }
     if detect_eval {
         if let (Some(bp), Some(xr)) = (&final_basis_pos, res.as_ref().and_then(|r| r.x.as_ref())) {
             record_detect_eval(std, bp, xr, &eval_cls);
@@ -1694,6 +1722,78 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
         }
     }
     res
+}
+
+/// CLP の Idiot クラッシュの後処理にならい、非基底と検出した構造列 (`ps`) を境界の値 (`x`) に固定して問題から除き、
+/// 小さな問題で内点法の点 `(x0, y0)` からクロスオーバーを続け、その最後の基底を元の問題の基底として二段解法の主ループで
+/// 仕上げ直す (固定が正しければ反復なしで終わる)。固定する列が構造列の `fix_frac` 未満、または小さな問題で失敗したら
+/// `None` (呼び出し側は元の問題でそのまま続ける)。
+#[allow(clippy::too_many_arguments)]
+fn fix_and_resolve(std: &StdForm, ps: &[PStat], x: &[f64], x0: &[f64], y0: &[f64], ipm_secs: f64, fix_frac: f64, debug: bool) -> Option<SimplexResult> {
+    let n = std.n_total;
+    let m = std.n_rows;
+    let n_orig = n - m;
+    let nfix = (0..n_orig).filter(|&j| ps[j] != PStat::Basic).count();
+    if nfix == 0 || (nfix as f64) < fix_frac * n_orig as f64 {
+        return None;
+    }
+    let mut new_idx = vec![usize::MAX; n];
+    let mut keep = Vec::with_capacity(n - nfix);
+    for j in 0..n {
+        if j >= n_orig || ps[j] == PStat::Basic {
+            new_idx[j] = keep.len();
+            keep.push(j);
+        }
+    }
+    let nn = keep.len();
+    let mut rows_r: Vec<Vec<(usize, f64)>> = Vec::with_capacity(m);
+    let mut b_r = std.b.clone();
+    for i in 0..m {
+        let mut r = Vec::new();
+        for &(j, v) in std.rows.row(i) {
+            if new_idx[j] != usize::MAX {
+                r.push((new_idx[j], v));
+            } else {
+                b_r[i] -= v * x[j];
+            }
+        }
+        rows_r.push(r);
+    }
+    let (rows, cols) = super::freeze_std_matrices(&rows_r, nn);
+    let rs = StdForm {
+        n_total: nn,
+        n_rows: m,
+        c: keep.iter().map(|&j| std.c[j]).collect(),
+        rows,
+        cols,
+        b: b_r,
+        lb: keep.iter().map(|&j| std.lb[j]).collect(),
+        ub: keep.iter().map(|&j| std.ub[j]).collect(),
+    };
+    let xr: Vec<f64> = keep.iter().map(|&j| x0[j]).collect();
+    crate::phase_timing::record("xo_fix_cols", nfix as f64);
+    if debug {
+        eprintln!("CROSSOVER fix: {nfix} of {n_orig} structural columns fixed at bounds, reduced n={nn}");
+    }
+    GIVEN_LAST_BASIS.with(|b| *b.borrow_mut() = None);
+    let inner = solve_ipm_crossover_with(&rs, &XoOptions { given_point: Some((&xr, y0, ipm_secs)), ..Default::default() });
+    let bp = GIVEN_LAST_BASIS.with(|b| b.borrow_mut().take());
+    crate::phase_timing::mark("xo_fix_inner_end");
+    let (Some(r), Some(bp)) = (inner, bp) else { return None };
+    if r.status != Status::Optimal {
+        return None;
+    }
+    let mut basis = vec![usize::MAX; m];
+    for (jr, p) in bp.iter().enumerate() {
+        if let Some(p) = *p {
+            basis[p] = keep[jr];
+        }
+    }
+    if basis.iter().any(|&j| j == usize::MAX) {
+        return None;
+    }
+    // 固定を外して元の問題で仕上げ直す。
+    super::slope_intercept_dual::solve_slope_intercept_dual_from_basis(std, &Default::default(), basis)
 }
 
 /// 検出の分類 `cls` (列ごとに 0: 基底候補、-1: 下限、+1: 上限) を、仕上げの後の最適基底 `bp` と解 `xr` (構造変数) と

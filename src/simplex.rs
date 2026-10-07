@@ -2020,7 +2020,7 @@ fn solve_staged_ipm(std: &StdForm, opts: &crate::types::LpOptions) -> SimplexRes
         Some(slope_intercept_dual::StageA::DualFeasible { y }) => {
             crate::phase_timing::mark("staged_stage_a_dual_feasible");
             let center = tunable!("ENOMOTO_T_IPM_STAGED_CENTER", 1u8, u8) != 0;
-            let xo = crossover::XoOptions { dual_center: center.then_some(&y[..]), dual_feasible_known: true };
+            let xo = crossover::XoOptions { dual_center: center.then_some(&y[..]), dual_feasible_known: true, ..Default::default() };
             crossover::solve_ipm_crossover_with(std, &xo).unwrap_or_else(fallback)
         }
         Some(slope_intercept_dual::StageA::NoFiniteOptimum { .. }) => {
