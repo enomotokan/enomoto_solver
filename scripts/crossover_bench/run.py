@@ -189,7 +189,8 @@ def main() -> None:
                     for method in todo:
                         if method in stop:
                             continue
-                        solver = "ipm_crossover" if method in variants else METHODS[method]
+                        # 案の名前が METHODS の名前 (highs_ipm など) ならその解法、それ以外は ipm_crossover。
+                        solver = METHODS.get(method, "ipm_crossover")
                         r = run_one(mps, solver, args.time_limit, args.mem_gb, extra_env=variants.get(method))
                         all_runs[method].append(r)
                         if r["status"] != "optimal" or r["time"] >= args.single_run_above:
