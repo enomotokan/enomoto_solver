@@ -85,12 +85,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
             in_order[j] = true;
         }
         all.extend((0..p.n).filter(|&j| p.is_int[j] && !in_order[j]));
+        let work0 = self.dom.debug_work();
+        let work_cap = 20 * p.rows.iter().map(|r| r.len() as u64).sum::<u64>() + 1_000_000;
         for (cnt, &j) in all.iter().enumerate() {
             if !p.is_int[j] {
                 continue;
             }
-            // 時間切れなら諦める (長い行の多い大きな問題では 1 列ごとの伝播が重い)
-            if cnt % 64 == 0 && self.time_up() {
+            // 時間切れ、または伝播の手間 (非零数の 20 倍) を使い切ったら諦める
+            if cnt % 64 == 0 && (self.time_up() || self.dom.debug_work() - work0 > work_cap) {
                 ok = false;
                 if rounded.is_none() {
                     break;
@@ -642,7 +644,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             None => f64::INFINITY,
         };
         let params = super::solver::MipParams {
-            time_limit: (0.1 * remaining).min(10.0),
+            time_limit: (0.07 * remaining).min(6.0),
             node_limit,
             rel_gap: self.params.rel_gap,
             abs_gap: self.params.abs_gap,

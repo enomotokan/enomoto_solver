@@ -116,6 +116,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     last_log: Instant,
     /// カット生成に使う変数上下限 (最初の分離で作る)。
     pub(super) vbounds: Option<Rc<super::cuts::VarBounds>>,
+    /// 根で作ったカット (係数, 右辺, ノルム)。大域的に成り立つ。ノードで違反していれば LP に戻す。
+    pub(super) cut_pool: Vec<(Vec<(usize, f64)>, f64, f64)>,
     /// 列ごとの (行, 係数) (oneopt 用、最初に使うときに作る)。
     pub(super) col_rows: Option<Rc<Vec<Vec<(usize, f64)>>>>,
     /// 求解の開始時 (根の伝播の後) に固定されていた整数列の数 (再スタートの判定用)。
@@ -170,6 +172,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
         unresolved: false,
         last_log: start,
         vbounds: None,
+        cut_pool: Vec::new(),
         col_rows: None,
         root_fixed0: 0,
         dive_iters: 0,
@@ -637,6 +640,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 // ノードでの切除平面 (待ち行列から取り出したノードで 1 回)。カットを足すたびに LP を作り直すので
                 // 今は遅くなる問題が多く、既定では行わない (ENOMOTO_MIP_NODE_CUTS=1 で有効)。
+                // カットプールからのカット (待ち行列から取り出したノードで最大 2 回、各 10 本まで)
+                if resolves < 2 && node.depth > 0 && plunge_depth == 0 && env_str!("ENOMOTO_MIP_NO_POOL_CUTS").is_none() && self.pool_cut_round(&x, 10) {
+                    resolves += 1;
+                    continue;
+                }
                 if resolves == 0 && node.depth > 0 && plunge_depth == 0 && env_str!("ENOMOTO_MIP_NODE_CUTS").is_some() && self.node_cut_round(&x) {
                     resolves += 1;
                     continue;

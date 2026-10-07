@@ -57,7 +57,7 @@ thread_local! {
 }
 
 impl Domain {
-    /// 診断用: これまでに伝播で走査した行の長さの合計。
+    /// これまでに伝播で走査した行の長さの合計 (スレッドごと。ヒューリスティクスの手間の上限に使う)。
     pub fn debug_work(&self) -> u64 {
         DEBUG_WORK.with(|w| w.get())
     }

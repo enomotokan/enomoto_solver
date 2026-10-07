@@ -35,7 +35,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let first_obj = prev_obj;
         // サブ MIP (RENS/RINS) では分離に時間をかけない
         let max_rounds = if self.params.submip { 5 } else { 25 };
-        let time_cap = if self.params.time_limit.is_finite() { 0.2 * self.params.time_limit } else { f64::INFINITY };
+        let time_cap = if self.params.time_limit.is_finite() { tunable!("ENOMOTO_T_MIP_CUT_TIME_FRAC", 0.1, f64) * self.params.time_limit } else { f64::INFINITY };
         let mut total_added = 0usize;
         for round in 0..max_rounds {
             if self.time_up() || self.start.elapsed().as_secs_f64() > time_cap {
@@ -57,6 +57,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             let rows: Vec<(Vec<(usize, f64)>, f64, f64)> = chosen.into_iter().map(|c| (c.coefs, f64::NEG_INFINITY, c.rhs)).collect();
             total_added += rows.len();
+            // カットプールに残す (ノードで違反していれば LP に戻す)
+            if !self.params.submip {
+                for (c, _, r) in &rows {
+                    let norm = c.iter().map(|&(_, v)| v * v).sum::<f64>().sqrt();
+                    self.cut_pool.push((c.clone(), *r, norm));
+                }
+            }
             let saved_rows = self.lp.num_rows();
             self.lp.add_rows(&rows);
             let it0 = self.lp.total_iterations();
@@ -109,7 +116,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let reldiff = (obj - prev_obj) / obj.abs().max(prev_obj.abs()).max(1.0);
                 if reldiff <= 1e-4 && nfrac as f64 >= (0.9 - 0.1 * stall as f64) * prev_nfrac as f64 {
                     stall += 1;
-                    if stall >= if self.params.submip { 3 } else { 10 } {
+                    if stall >= if self.params.submip { 3 } else { tunable!("ENOMOTO_T_MIP_CUT_STALL", 5usize, usize) } {
                         break;
                     }
                 } else {
@@ -133,6 +140,34 @@ impl<'a, L: MipLp> Solver<'a, L> {
             );
         }
         st == LpStatus::Optimal
+    }
+
+    /// カットプールから、LP 解 `x` が違反するカットを効き目の大きい順に最大 `max_cuts` 本 LP に加える
+    /// (違反しているので今の LP にはないカット)。LP の行が増えすぎていれば先に効いていないカットを外す。加えたら真。
+    pub(super) fn pool_cut_round(&mut self, x: &[f64], max_cuts: usize) -> bool {
+        if self.cut_pool.is_empty() {
+            return false;
+        }
+        let mut viol: Vec<(f64, usize)> = Vec::new();
+        for (k, (c, r, norm)) in self.cut_pool.iter().enumerate() {
+            let act: f64 = c.iter().map(|&(j, v)| v * x[j]).sum();
+            let eff = (act - r) / norm.max(1e-12);
+            if eff > 1e-4 && act - r > 1e-6 * (1.0 + r.abs()) {
+                viol.push((eff, k));
+            }
+        }
+        if viol.is_empty() {
+            return false;
+        }
+        viol.sort_by(|a, b| b.0.total_cmp(&a.0));
+        viol.truncate(max_cuts);
+        let cap = self.p.m + (2 * self.cut_pool.len()).clamp(100, 2000);
+        if self.lp.num_rows() + viol.len() > cap {
+            self.remove_inactive_cuts();
+        }
+        let rows: Vec<(Vec<(usize, f64)>, f64, f64)> = viol.iter().map(|&(_, k)| (self.cut_pool[k].0.clone(), f64::NEG_INFINITY, self.cut_pool[k].1)).collect();
+        self.lp.add_rows(&rows);
+        true
     }
 
     /// ノードでの分離 (1 ラウンド)。カットを加えたら LP を解き直し、真を返す。LP の行数の上限を超えたら何もしない。
