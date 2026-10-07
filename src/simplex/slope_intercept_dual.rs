@@ -917,7 +917,7 @@ pub(crate) fn set_fast_reopt(on: bool) {
 
 /// 再最適化の近道の終わり: 主ループが真の費用 (摂動・ずらしなし) で最適になった基底から、そのまま解を作る。
 /// `M` 側に置かれた列があるか、基底解が真の境界から外れていれば `None` (通常の `finish` に任せる)。
-fn fast_finish(std: &StdForm, basis_pos: &[Option<usize>], nb_status: &[Option<NbStatus>], cache: &ColCache, n_orig: usize, lu: sparse_lu::FtLu) -> Result<SimplexResult, sparse_lu::FtLu> {
+fn fast_finish(std: &StdForm, basis_pos: &[Option<usize>], nb_status: &[Option<NbStatus>], cache: &ColCache, n_orig: usize, lu: sparse_lu::FtLu, d: &[f64]) -> Result<SimplexResult, sparse_lu::FtLu> {
     xprof("main");
     let Some((x_b_base, x_b_slope)) = solve_x_b(std, &lu, nb_status, cache) else { return Err(lu) };
     if x_b_slope.iter().any(|&v| v != 0.0) {
@@ -961,6 +961,12 @@ fn fast_finish(std: &StdForm, basis_pos: &[Option<usize>], nb_status: &[Option<N
     }
     if WANT_LU.with(|w| w.get()) {
         LAST_LU.with(|l| *l.borrow_mut() = Some(Box::new(lu)));
+        LAST_D.with(|l| {
+            let mut l = l.borrow_mut();
+            let v = l.get_or_insert_with(Vec::new);
+            v.clear();
+            v.extend_from_slice(d);
+        });
     }
     xprof("duals");
     x.truncate(n_orig);
@@ -1026,6 +1032,20 @@ thread_local! {
     static WANT_LU: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// 保存した LU。
     static LAST_LU: std::cell::RefCell<Option<Box<sparse_lu::FtLu>>> = const { std::cell::RefCell::new(None) };
+    /// 次の warm start で使う、その基底の被約費用 (真の費用、長さ `n_total`。前回の近道の求解の最終値)。
+    static WARM_D: std::cell::RefCell<Option<Vec<f64>>> = const { std::cell::RefCell::new(None) };
+    /// 近道で最適になったときの被約費用 (LU と同時に保存する)。
+    static LAST_D: std::cell::RefCell<Option<Vec<f64>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// 次の warm start に使う被約費用を渡す ([`set_warm_lu`] と同じ基底のもの)。
+pub(crate) fn set_warm_d(d: Option<Vec<f64>>) {
+    WARM_D.with(|w| *w.borrow_mut() = d);
+}
+
+/// 近道で最適になったときに保存した被約費用を取り出す。
+pub(crate) fn take_last_d() -> Option<Vec<f64>> {
+    LAST_D.with(|l| l.borrow_mut().take())
 }
 
 /// 次の warm start に使う LU を渡す (基底と同じ並びのもの)。
@@ -1037,6 +1057,7 @@ pub(crate) fn set_warm_lu(lu: Option<sparse_lu::FtLu>) {
 pub(crate) fn request_lu(on: bool) {
     WANT_LU.with(|w| w.set(on));
     LAST_LU.with(|l| *l.borrow_mut() = None);
+    LAST_D.with(|l| *l.borrow_mut() = None);
 }
 
 /// 保存した LU を取り出す。
@@ -1083,9 +1104,11 @@ fn warm_start_basis(
     basis: &mut Vec<usize>,
     basis_pos: &mut Vec<Option<usize>>,
     nb_status: &mut Vec<Option<NbStatus>>,
+    d_out: &mut Vec<f64>,
 ) -> bool {
     let m = std.n_rows;
     let n_total = std.n_total;
+    let warm_d = WARM_D.with(|w| w.borrow_mut().take()).filter(|d| d.len() == n_total);
     if wb.len() != m {
         return false;
     }
@@ -1106,16 +1129,23 @@ fn warm_start_basis(
         }
     };
     xprof("w_lu");
-    let cb: Vec<f64> = wb.iter().map(|&j| active_cost[j]).collect();
+    // 費用が真の費用と同じ (再最適化の近道) で、前回の求解の最終の被約費用が渡されていればそれを使う
+    // (同じ基底・同じ費用なので d は同じ。BTRAN と O(nnz) の計算を省く)
+    let same_cost = active_cost.iter().zip(&std.c).all(|(a, c)| a == c);
+    let warm_d = warm_d.filter(|_| same_cost);
     let mut y = vec![0.0; m];
     let mut scratch = vec![0.0; m];
-    lu.solve_transpose_into(&cb, &mut scratch, &mut y);
+    if warm_d.is_none() {
+        let cb: Vec<f64> = wb.iter().map(|&j| active_cost[j]).collect();
+        lu.solve_transpose_into(&cb, &mut scratch, &mut y);
+    }
     let mut st = vec![None; n_total];
+    d_out.clear();
+    d_out.resize(n_total, 0.0);
     let mut shifted = 0usize;
     let hint = WARM_NB.with(|w| w.borrow_mut().take()).filter(|h| h.len() == n_total);
     // 真の費用での双対 (希望の側が真の費用で双対実行可能かの判定用)
     // 費用が真の費用と同じ (再最適化の近道) なら y と同じなので計算し直さない
-    let same_cost = active_cost.iter().zip(&std.c).all(|(a, c)| a == c);
     let y_true: Vec<f64> = if hint.is_some() && same_cost {
         y.clone()
     } else if hint.is_some() {
@@ -1131,10 +1161,17 @@ fn warm_start_basis(
         if pos[j].is_some() {
             continue;
         }
-        let mut d = active_cost[j];
-        for &(i, a) in std.cols.col(j) {
-            d -= a * y[i];
-        }
+        let d = match &warm_d {
+            Some(wd) => wd[j],
+            None => {
+                let mut d = active_cost[j];
+                for &(i, a) in std.cols.col(j) {
+                    d -= a * y[i];
+                }
+                d
+            }
+        };
+        d_out[j] = d;
         let (lo, hi) = (std.lb[j], std.ub[j]);
         let free = lo == f64::NEG_INFINITY && hi == f64::INFINITY;
         // 前回の位置の希望: 有限の境界の側で、被約費用のずれが小さければ費用をずらしてそちらに置く
@@ -1155,6 +1192,7 @@ fn warm_start_basis(
             if h[j] < 0 && lo.is_finite() && dt >= -small {
                 if d < -TOL {
                     active_cost[j] -= d;
+                    d_out[j] = 0.0;
                     shifted += 1;
                 }
                 st[j] = Some(NbStatus::Lower);
@@ -1163,6 +1201,7 @@ fn warm_start_basis(
             if h[j] > 0 && hi.is_finite() && dt <= small {
                 if d > TOL {
                     active_cost[j] -= d;
+                    d_out[j] = 0.0;
                     shifted += 1;
                 }
                 st[j] = Some(NbStatus::Upper);
@@ -1179,6 +1218,7 @@ fn warm_start_basis(
                 NbStatus::Lower
             } else {
                 active_cost[j] -= d;
+                d_out[j] = 0.0;
                 shifted += 1;
                 NbStatus::Upper
             }
@@ -1186,6 +1226,7 @@ fn warm_start_basis(
             NbStatus::Upper
         } else {
             active_cost[j] -= d;
+            d_out[j] = 0.0;
             shifted += 1;
             NbStatus::Lower
         });
@@ -3129,6 +3170,159 @@ fn dual_active_costs(std: &StdForm) -> Vec<f64> {
     active_cost
 }
 
+/// PRICE 専用の `A` の行優先コピー (列添字 `u32` の SoA 形式)。
+///
+/// HiGHS の行方向分割 PRICE 行列と同じく、各行の価格付けする要素 (非基底で固定でない列) を
+/// `[start[i], nb_end[i])` に、残り (基底列と固定列) をその後ろに置き、基底交換のたびに境界をまたいで入れ替える。
+/// `price_nonbasic_only` でない旧経路では固定列を除いた行全体を置き、`nb_end` は行末 (索引は空)。
+/// 索引: `col_entry_start[j]` は列 `j` の `std.cols` 要素順での開始位置、`pos_of_col_entry[col_entry_start[j] + k]`
+/// は `std.cols.col(j)[k]` の行列内の位置、`entry_of_price[p]` はその逆写像。
+struct PriceMat {
+    start: Vec<usize>,
+    col: Vec<u32>,
+    val: Vec<f64>,
+    nb_end: Vec<usize>,
+    col_entry_start: Vec<usize>,
+    pos_of_col_entry: Vec<u32>,
+    entry_of_price: Vec<u32>,
+}
+
+impl PriceMat {
+    /// 列 `j` を価格付けするか (非基底で固定でない)。
+    fn priced(std: &StdForm, nb_status: &[Option<NbStatus>], j: usize) -> bool {
+        nb_status[j].is_some() && std.lb[j] != std.ub[j]
+    }
+
+    fn build(std: &StdForm, nb_status: &[Option<NbStatus>], nonbasic_only: bool) -> Option<PriceMat> {
+        let m = std.n_rows;
+        let n_total = std.n_total;
+        let mut start: Vec<usize> = Vec::with_capacity(m + 1);
+        let mut col: Vec<u32> = Vec::with_capacity(std.rows.nnz());
+        let mut val: Vec<f64> = Vec::with_capacity(std.rows.nnz());
+        let mut nb_end: Vec<usize> = Vec::with_capacity(m);
+        let mut col_entry_start: Vec<usize> = Vec::new();
+        let mut entry_of_price: Vec<u32> = Vec::new();
+        // 各要素の `std.cols` 要素番号を列ごとのカーソルで求める (行は昇順に訪れるので、行ソート済みの列では
+        // カーソルが常に一致位置にある)。
+        let mut cursor: Vec<u32> = Vec::new();
+        if nonbasic_only {
+            col_entry_start.reserve(n_total + 1);
+            col_entry_start.push(0);
+            for j in 0..n_total {
+                col_entry_start.push(col_entry_start[j] + std.cols.col(j).len());
+            }
+            cursor = vec![0; n_total];
+            entry_of_price.reserve(std.rows.nnz());
+        }
+        start.push(0);
+        for i in 0..m {
+            if nonbasic_only {
+                for want_priced in [true, false] {
+                    for &(j, v) in std.rows.row(i) {
+                        if Self::priced(std, nb_status, j) != want_priced {
+                            continue;
+                        }
+                        col.push(u32::try_from(j).ok()?);
+                        val.push(v);
+                        let c = std.cols.col(j);
+                        let cur = cursor[j] as usize;
+                        let k = if cur < c.len() && c[cur].0 == i { cur } else { c.iter().position(|&(r, _)| r == i)? };
+                        cursor[j] = (k + 1) as u32;
+                        entry_of_price.push(u32::try_from(col_entry_start[j] + k).ok()?);
+                    }
+                    if want_priced {
+                        nb_end.push(col.len());
+                    }
+                }
+            } else {
+                for &(j, v) in std.rows.row(i) {
+                    if std.lb[j] == std.ub[j] {
+                        continue;
+                    }
+                    col.push(u32::try_from(j).ok()?);
+                    val.push(v);
+                }
+                nb_end.push(col.len());
+            }
+            start.push(col.len());
+        }
+        let mut pos_of_col_entry: Vec<u32> = Vec::new();
+        if nonbasic_only {
+            pos_of_col_entry = vec![u32::MAX; col_entry_start[n_total]];
+            for (p, &e) in entry_of_price.iter().enumerate() {
+                pos_of_col_entry[e as usize] = p as u32;
+            }
+        }
+        Some(PriceMat { start, col, val, nb_end, col_entry_start, pos_of_col_entry, entry_of_price })
+    }
+
+    /// 前回の求解の行列がこの標準形 (同じ行列) に使える形か。
+    fn fits(&self, std: &StdForm) -> bool {
+        let nnz = std.rows.nnz();
+        self.start.len() == std.n_rows + 1
+            && self.nb_end.len() == std.n_rows
+            && self.col.len() == nnz
+            && self.col_entry_start.len() == std.n_total + 1
+            && self.col_entry_start[std.n_total] == nnz
+            && self.pos_of_col_entry.len() == nnz
+    }
+
+    /// 価格付けする列の集合を `nb_status` と今の境界に合わせる (変わった列の要素だけを境界をまたいで入れ替える)。
+    fn repartition(&mut self, std: &StdForm, nb_status: &[Option<NbStatus>]) {
+        for j in 0..std.n_total {
+            let c = std.cols.col(j);
+            let Some(&(i0, _)) = c.first() else { continue };
+            let cur = (self.pos_of_col_entry[self.col_entry_start[j]] as usize) < self.nb_end[i0];
+            let want = Self::priced(std, nb_status, j);
+            if cur == want {
+                continue;
+            }
+            for (k, &(i, _)) in c.iter().enumerate() {
+                let pos = self.pos_of_col_entry[self.col_entry_start[j] + k] as usize;
+                let to = if want { self.nb_end[i] } else { self.nb_end[i] - 1 };
+                self.col.swap(pos, to);
+                self.val.swap(pos, to);
+                self.entry_of_price.swap(pos, to);
+                self.pos_of_col_entry[self.entry_of_price[pos] as usize] = pos as u32;
+                self.pos_of_col_entry[self.entry_of_price[to] as usize] = to as u32;
+                if want {
+                    self.nb_end[i] += 1;
+                } else {
+                    self.nb_end[i] -= 1;
+                }
+            }
+        }
+    }
+}
+
+/// 求解の終わりに (どの出口でも) PRICE 行列を次の求解のために残す。
+struct PriceGuard {
+    key: Option<u64>,
+    pm: PriceMat,
+}
+
+impl Drop for PriceGuard {
+    fn drop(&mut self) {
+        if let Some(k) = self.key {
+            let pm = std::mem::replace(&mut self.pm, PriceMat { start: Vec::new(), col: Vec::new(), val: Vec::new(), nb_end: Vec::new(), col_entry_start: Vec::new(), pos_of_col_entry: Vec::new(), entry_of_price: Vec::new() });
+            PRICE_CACHE.with(|c| *c.borrow_mut() = Some((k, pm)));
+        }
+    }
+}
+
+thread_local! {
+    /// 次からの求解の行列の識別子 ([`set_price_key`])。
+    static PRICE_KEY: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+    /// 前回の求解の終わりの PRICE 行列 (識別子つき)。
+    static PRICE_CACHE: std::cell::RefCell<Option<(u64, PriceMat)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// 次からの求解の制約行列の識別子を設定する (分枝限定法の LP が行列を作り直すたびに新しい値を渡す)。
+/// 同じ識別子の求解の間では PRICE 用の行優先コピーを使い回す。`None` で使い回さない。
+pub(crate) fn set_price_key(key: Option<u64>) {
+    PRICE_KEY.with(|k| k.set(key));
+}
+
 /// [`solve_slope_intercept_dual_with`] の本体。`BIG` は新しい疎経路 (stormG2 報告 §4 の策) を使うか。
 fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate::types::LpOptions, safe_pivot: bool) -> Option<SimplexResult> {
     // 試し分解がピボットを特異として却下したら、この求解の残りは安全モードにする(下の
@@ -3196,8 +3390,10 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     // cleanup と polish を通さずにその基底の解を返す (費用のずらしが起きなかった場合だけ、`fast_finish`)。
     xprof("s_crash");
     let fast_reopt = fast_reopt_req;
+    // warm start が計算した被約費用 (ずらした列は 0)。主ループの最初の `fresh_d_into` を省くのに使う。
+    let mut warm_d: Vec<f64> = Vec::new();
     let warm_started = WARM_BASIS.with(|w| w.borrow_mut().take()).is_some_and(|wb| {
-        warm_start_basis(std, n_orig, &wb, &mut active_cost, &mut basis, &mut basis_pos, &mut nb_status)
+        warm_start_basis(std, n_orig, &wb, &mut active_cost, &mut basis, &mut basis_pos, &mut nb_status, &mut warm_d)
     });
     if fast_reopt && !warm_started {
         // warm start に失敗: 通常の開始 (摂動した費用と crash) に戻す
@@ -3362,73 +3558,34 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     // 基底列を一切訪れない。離基列の `d` は HiGHS `HEkkDual::updateDual` と同様に直接設定する
     // (無限精度では同値だがビット同一ではない)。`price_nb_end[i]` は行 `i` の分割境界
     // (フラグオフなら単に行末)。
+    xprof("s_alloc");
     let price_nonbasic_only = env_str!("ENOMOTO_PRICE_NONBASIC_ONLY").map_or(true, |v| v != "0");
-    // S12: 分割の入れ替え用の位置索引。`col_entry_start[j]` は列 `j` の `std.cols` 要素順での開始位置、
-    // `price_pos_of_col_entry[col_entry_start[j] + k]` は `std.cols.col(j)[k]` の PRICE 行列内の位置(固定列は
-    // `u32::MAX`)、`col_entry_of_price[p]` はその逆写像(PRICE 要素 `p` の `std.cols` 要素番号)。
-    let mut col_entry_start: Vec<usize> = Vec::with_capacity(if price_nonbasic_only { n_total + 1 } else { 0 });
-    let mut price_pos_of_col_entry: Vec<u32> = Vec::new();
-    let mut col_entry_of_price: Vec<u32> = Vec::new();
-    // PRICE 専用の `A` の行優先コピー(一度だけ構築): `std.rows` から固定列 (`lb == ub`) を除き、
-    // 列添字 `u32` の SoA 形式(`price_start`/`price_col`/`price_val`)。各行は `std.rows.row(i)`
-    // の列順を(分割の各部分内で)保つので `a_p` の各ビットは不変。`price_nonbasic_only` の
-    // ときは各行を「非基底部 → 基底部」の順で書く。
-    let mut price_nb_end: Vec<usize> = Vec::with_capacity(m);
-    let (price_start, mut price_col, mut price_val) = {
-        let mut start: Vec<usize> = Vec::with_capacity(m + 1);
-        let mut col: Vec<u32> = Vec::with_capacity(std.rows.nnz());
-        let mut val: Vec<f64> = Vec::with_capacity(std.rows.nnz());
-        // 各 PRICE 要素の `std.cols` 要素番号を列ごとのカーソルで求める(行は昇順に訪れるので、
-        // 行ソート済みの列ではカーソルが常に一致位置にある)。
-        let mut cursor: Vec<u32> = Vec::new();
-        if price_nonbasic_only {
-            col_entry_start.push(0);
-            for j in 0..n_total {
-                col_entry_start.push(col_entry_start[j] + std.cols.col(j).len());
-            }
-            cursor = vec![0; n_total];
-            col_entry_of_price.reserve(std.rows.nnz());
+    // PRICE 専用の `A` の行優先コピー ([`PriceMat`])。分枝限定法の LP が行列の識別子を渡していれば
+    // ([`set_price_key`])、前回の求解の終わりの行列を受け取り、価格付けする列の集合が変わった列だけ入れ替える
+    // (毎回の構築の O(nnz) を省く)。
+    let price_key = if price_nonbasic_only { PRICE_KEY.with(|k| k.get()) } else { None };
+    let cached_pm = price_key.and_then(|key| PRICE_CACHE.with(|c| c.borrow_mut().take()).filter(|(k, pm)| *k == key && pm.fits(std)).map(|(_, pm)| pm));
+    let pm = match cached_pm {
+        Some(mut pm) => {
+            pm.repartition(std, &nb_status);
+            pm
         }
-        start.push(0);
-        for i in 0..m {
-            if price_nonbasic_only {
-                for want_nonbasic in [true, false] {
-                    for &(j, v) in std.rows.row(i) {
-                        if std.lb[j] == std.ub[j] || nb_status[j].is_some() != want_nonbasic {
-                            continue;
-                        }
-                        col.push(u32::try_from(j).ok()?);
-                        val.push(v);
-                        let c = std.cols.col(j);
-                        let cur = cursor[j] as usize;
-                        let k = if cur < c.len() && c[cur].0 == i { cur } else { c.iter().position(|&(r, _)| r == i)? };
-                        cursor[j] = (k + 1) as u32;
-                        col_entry_of_price.push(u32::try_from(col_entry_start[j] + k).ok()?);
-                    }
-                    if want_nonbasic {
-                        price_nb_end.push(col.len());
-                    }
-                }
-            } else {
-                for &(j, v) in std.rows.row(i) {
-                    if std.lb[j] == std.ub[j] {
-                        continue;
-                    }
-                    col.push(u32::try_from(j).ok()?);
-                    val.push(v);
-                }
-                price_nb_end.push(col.len());
-            }
-            start.push(col.len());
-        }
-        (start, col, val)
+        None => PriceMat::build(std, &nb_status, price_nonbasic_only)?,
     };
-    if price_nonbasic_only {
-        price_pos_of_col_entry = vec![u32::MAX; col_entry_start[n_total]];
-        for (p, &e) in col_entry_of_price.iter().enumerate() {
-            price_pos_of_col_entry[e as usize] = p as u32;
-        }
-    }
+    let mut price_guard = PriceGuard { key: price_key, pm };
+    let PriceGuard {
+        pm:
+            PriceMat {
+                start: ref price_start,
+                col: ref mut price_col,
+                val: ref mut price_val,
+                nb_end: ref mut price_nb_end,
+                col_entry_start: ref col_entry_start,
+                pos_of_col_entry: ref mut price_pos_of_col_entry,
+                entry_of_price: ref mut col_entry_of_price,
+            },
+        ..
+    } = price_guard;
     // S9(`ENOMOTO_PRICE_COLUMN=1`、既定オフ): `rho` が密(`ENOMOTO_PRICE_COLUMN_DENSITY`、
     // 既定 0.1 = HiGHS の切り替え点)なら列方向 PRICE を使う。`price_col_list` は非固定列の一覧。
     let price_by_column = tunable!("ENOMOTO_PRICE_COLUMN", 0u8, u8) != 0;
@@ -3483,6 +3640,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
 
     // `x_B(M)` の初期値(論文の補題 6.1 の `b - N x_N` を一度だけ解く)。以後は増分で維持し、
     // 周期的な再同期で同じ計算に合わせ直す。
+    xprof("s_pre_xb");
     let (seed_base, seed_slope) = resync_x_b(std, &cache, &nb_status, &lu, phase, false, &mut lu_scratch, &mut x_b_base, &mut x_b_slope)?;
     // 許容誤差を基準値に戻す (前の求解で広げた値を持ち越さない)。
     reset_row_infeas_tol();
@@ -3563,13 +3721,19 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     let mut infeasible_rows = InfeasibleRows::new(m);
     // プール内の各行の逸脱のキャッシュ([`RowDevCache`])。
     let mut row_dev = RowDevCache::new(m);
+    xprof("s_xb");
     // 基底行ごとの境界のキャッシュ([`RowBounds`])。
     let mut row_bounds = RowBounds::new(&cache, &basis, &noise_feasible);
     rebuild_rows(&mut infeasible_rows, &mut row_dev, m, &row_bounds, &x_b_base, &x_b_slope);
     // S14: 全スラック開始では基底コストがすべて `+0.0` なので `y = B^-T c_B` も正確に `+0.0` で、
     // `fresh_d_into` は `d = active_cost` を再現する。[`fresh_d_into_zero_y`] はそれを直接書き、
     // BTRAN の合成クロック tick だけを再現する(CLOCK トリガとピボット経路はビット単位で不変)。
-    if fresh_d_into_zero_y(std, &lu, &basis, &basis_pos, &active_cost, &mut fresh_d_cb, &mut lu_scratch, &mut fresh_d_y, &mut d) {
+    if warm_started && warm_d.len() == n_total && env_str!("ENOMOTO_NO_WARM_D").is_none() {
+        // warm start がこの基底・この費用で計算済み (基底列は 0)
+        for j in 0..n_total {
+            d[j] = if basis_pos[j].is_some() { 0.0 } else { warm_d[j] };
+        }
+    } else if fresh_d_into_zero_y(std, &lu, &basis, &basis_pos, &active_cost, &mut fresh_d_cb, &mut lu_scratch, &mut fresh_d_y, &mut d) {
         if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
             eprintln!("DEBUG_EXT: initial fresh_d skipped (c_B = 0)");
         }
@@ -3877,11 +4041,11 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                         &mut pivot_log,
                         &mut pivot_flips,
                         price_nonbasic_only,
-                        &mut price_col,
-                        &mut price_val,
-                        &mut col_entry_of_price,
-                        &mut price_pos_of_col_entry,
-                        &mut price_nb_end,
+                        &mut *price_col,
+                        &mut *price_val,
+                        &mut *col_entry_of_price,
+                        &mut *price_pos_of_col_entry,
+                        &mut *price_nb_end,
                         &col_entry_start,
                         &price_start,
                         &mut n_zero_nonbasic,
@@ -4401,7 +4565,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                 );
             }
             if fast_reopt && warm_started && active_cost.iter().zip(&std.c).all(|(a, c)| a == c) {
-                match fast_finish(std, &basis_pos, &nb_status, &cache_orig, n_orig, lu) {
+                match fast_finish(std, &basis_pos, &nb_status, &cache_orig, n_orig, lu, &d) {
                     Ok(r) => return Some(r),
                     Err(l) => return finish(std, &mut basis, &mut basis_pos, &mut nb_status, &delta, &cache_orig, n_orig, l),
                 }
@@ -5957,7 +6121,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                 let last = price_nb_end[i] - 1;
                 let pos = price_pos_of_col_entry[col_entry_start[q] + k] as usize;
                 debug_assert!(pos >= price_start[i] && pos <= last && price_col[pos] as usize == q, "entering column missing from its row's nonbasic PRICE partition");
-                swap_entries(&mut price_col, &mut price_val, &mut col_entry_of_price, &mut price_pos_of_col_entry, pos, last);
+                swap_entries(&mut *price_col, &mut *price_val, &mut *col_entry_of_price, &mut *price_pos_of_col_entry, pos, last);
                 price_nb_end[i] = last;
             }
             if std.lb[leaving_var] != std.ub[leaving_var] {
@@ -5965,7 +6129,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                     let first = price_nb_end[i];
                     let pos = price_pos_of_col_entry[col_entry_start[leaving_var] + k] as usize;
                     debug_assert!(pos >= first && pos < price_start[i + 1] && price_col[pos] as usize == leaving_var, "leaving column missing from its row's basic PRICE partition");
-                    swap_entries(&mut price_col, &mut price_val, &mut col_entry_of_price, &mut price_pos_of_col_entry, pos, first);
+                    swap_entries(&mut *price_col, &mut *price_val, &mut *col_entry_of_price, &mut *price_pos_of_col_entry, pos, first);
                     price_nb_end[i] = first + 1;
                 }
             }

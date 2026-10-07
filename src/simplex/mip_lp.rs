@@ -41,8 +41,17 @@ pub struct TwoStageLp {
     /// 直近に分解した基底の LU (tableau 行用、基底が変わったら捨てる)。
     lu: Option<super::lu::FtLu>,
     /// 直近の最適基底とその LU (次の warm start で分解を省く)。
-    lu_cache: Option<(Vec<usize>, super::lu::FtLu)>,
+    lu_cache: Option<(Vec<usize>, super::lu::FtLu, Option<Vec<f64>>)>,
     iters: u64,
+    /// 制約行列の識別子 (作り直すたびに新しい値。PRICE 用の行列の使い回しに使う)。
+    price_key: u64,
+}
+
+/// [`TwoStageLp::price_key`] の発行元。
+static NEXT_PRICE_KEY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn new_price_key() -> u64 {
+    NEXT_PRICE_KEY.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// 状態の保存 (強分岐用)。
@@ -54,7 +63,7 @@ pub struct TwoStageState {
     x: Vec<f64>,
     y: Vec<f64>,
     status: Option<LpStatus>,
-    lu_cache: Option<(Vec<usize>, super::lu::FtLu)>,
+    lu_cache: Option<(Vec<usize>, super::lu::FtLu, Option<Vec<f64>>)>,
 }
 
 fn shift_of(lo: f64, up: f64) -> f64 {
@@ -107,6 +116,7 @@ impl TwoStageLp {
             lu: None,
             lu_cache: None,
             iters: 0,
+            price_key: new_price_key(),
         }
     }
 
@@ -164,6 +174,7 @@ impl TwoStageLp {
         let (std, sigma) = Self::build_std(self.n, &self.rows, &self.row_lo, &self.row_up, &self.cost, &self.lo, &self.up, &self.shift);
         self.std = std;
         self.sigma = sigma;
+        self.price_key = new_price_key();
         self.lu = None;
     }
 
@@ -437,14 +448,18 @@ impl TwoStageLp {
         sid::set_fast_reopt(env_str!("ENOMOTO_MIP_NO_FAST_REOPT").is_none());
         sid::request_duals(true);
         sid::request_lu(true);
+        sid::set_price_key(Some(self.price_key));
         let r = match self.basis.clone() {
             Some(b) if b.len() == self.rows.len() => {
                 // 同じ基底の LU が手元にあれば渡す (分解を省く)
                 match self.lu_cache.take() {
                     // Forrest-Tomlin の更新が積み重なった LU は FTRAN/BTRAN が遅いので、分解し直させる
                     // (主ループの上限 3m に任せると、再分解は減るがノードの処理数はかえって減った)
-                    Some((cb, lu)) if cb == b && lu.update_count() < tunable!("ENOMOTO_T_MIP_LU_MAX_UPD", 64usize, usize) => sid::set_warm_lu(Some(lu)),
-                    Some((cb, _)) if cb == b => {
+                    Some((cb, lu, d)) if cb == b && lu.update_count() < tunable!("ENOMOTO_T_MIP_LU_MAX_UPD", 64usize, usize) => {
+                        sid::set_warm_lu(Some(lu));
+                        sid::set_warm_d(d);
+                    }
+                    Some((cb, _, _)) if cb == b => {
                         sid::xcount("n_upd64");
                         sid::set_warm_lu(None)
                     }
@@ -466,13 +481,16 @@ impl TwoStageLp {
         };
         sid::xprof("wrapper");
         sid::set_warm_lu(None);
+        sid::set_warm_d(None);
         sid::set_warm_nb(None);
+        sid::set_price_key(None);
         let stop = sid::ext_stop();
         sid::set_ext_control(None);
         sid::set_fast_reopt(false);
         let duals = sid::take_duals();
         sid::request_duals(false);
         let last_lu = sid::take_last_lu();
+        let last_d = sid::take_last_d();
         sid::request_lu(false);
         self.lu_cache = None;
         self.iters += sid::ext_iterations() - it0;
@@ -497,7 +515,7 @@ impl TwoStageLp {
                         }
                         if b.iter().all(|&v| v != usize::MAX) {
                             if let Some(lu) = last_lu {
-                                self.lu_cache = Some((b.clone(), lu));
+                                self.lu_cache = Some((b.clone(), lu, last_d));
                             }
                             self.basis = Some(b);
                         }
@@ -585,7 +603,7 @@ impl TwoStageLp {
     pub fn basis_inverse_row(&mut self, s: usize) -> Vec<f64> {
         let m = self.rows.len();
         if self.lu.is_none() {
-            if let (Some((cb, lu)), Some(b)) = (&self.lu_cache, &self.basis) {
+            if let (Some((cb, lu, _)), Some(b)) = (&self.lu_cache, &self.basis) {
                 if cb == b {
                     self.lu = Some(lu.clone());
                 }
