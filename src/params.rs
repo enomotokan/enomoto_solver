@@ -117,6 +117,10 @@ pub(crate) mod simplex {
     /// (`ENOMOTO_T_XO_SPLIT_MIN_VARS`、0 で分けない)。これより小さい成分はまとめて解く。
     pub(crate) const XO_SPLIT_MIN_VARS: usize = 1000;
 
+    /// 内点法 + クロスオーバーを 1 スレッドのプールで解く問題の、前処理後の非零の数の上限
+    /// (`ENOMOTO_T_XO_SERIAL_NNZ`、0 で使わない)。小さな問題では並列ループのスレッドを起こす待ちが計算より長い。
+    pub(crate) const XO_SERIAL_NNZ: usize = 20_000;
+
     /// 前処理での Ruiz スケーリングの反復回数。
     pub(crate) const RUIZ_ITERS: usize = 10;
 

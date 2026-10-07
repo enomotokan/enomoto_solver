@@ -65,7 +65,7 @@
 use crate::presolve::{self, scaling};
 use crate::sparse::{CscMat, CsrMat, csr_row_iter, sparse_axpy_dense, sparse_dot_dense};
 use crate::types::{ConstraintRow, Objective, RowSense, Sense, Status, VariableData};
-use crate::params::simplex::{COST_PERTURB_BASE, COST_PERTURB_BOXED_FRACTION, COST_PERTURB_ZERO_COST_SCALE, COST_PERTURB_FEW_BOXED_COST_CAP, COST_PERTURB_LARGE_COST, EXPAND_DELTA_0, EXPAND_DELTA_F, EXPAND_K, EXPAND_TAU, FT_BUMP_LIMIT_FACTOR, FT_CHECK_INTERVAL, FT_MAX_UPDATES, FT_MIN_PIVOT, FT_RESIDUAL_TOL, MAX_ITERS_CEILING, MAX_ITERS_FLOOR, MAX_ITERS_SCALE, PARALLEL_COMPONENT_MIN_VARS, PARTIAL_PRICING_GROUPS, PARTIAL_PRICING_THRESHOLD, PRESOLVE_ROUNDS, PRIMAL_HARRIS_TOL, PRIMAL_STALL_LIMIT_MIN, PRIMAL_STALL_LIMIT_PER_ROW, PROPAGATION_PASSES, RACE_MIN_ROWS, RAYON_SIZE_THRESHOLD, XO_SPLIT_MIN_VARS, ROWSINGLETON_COLSINGLETON_INNER_ROUNDS, RUIZ_ITERS, STALL_PROGRESS_EPS, STEEPEST_EDGE_FLOOR, TOL, UPDATE_VERIFY_TOL};
+use crate::params::simplex::{COST_PERTURB_BASE, COST_PERTURB_BOXED_FRACTION, COST_PERTURB_ZERO_COST_SCALE, COST_PERTURB_FEW_BOXED_COST_CAP, COST_PERTURB_LARGE_COST, EXPAND_DELTA_0, EXPAND_DELTA_F, EXPAND_K, EXPAND_TAU, FT_BUMP_LIMIT_FACTOR, FT_CHECK_INTERVAL, FT_MAX_UPDATES, FT_MIN_PIVOT, FT_RESIDUAL_TOL, MAX_ITERS_CEILING, MAX_ITERS_FLOOR, MAX_ITERS_SCALE, PARALLEL_COMPONENT_MIN_VARS, PARTIAL_PRICING_GROUPS, PARTIAL_PRICING_THRESHOLD, PRESOLVE_ROUNDS, PRIMAL_HARRIS_TOL, PRIMAL_STALL_LIMIT_MIN, PRIMAL_STALL_LIMIT_PER_ROW, PROPAGATION_PASSES, RACE_MIN_ROWS, RAYON_SIZE_THRESHOLD, XO_SERIAL_NNZ, XO_SPLIT_MIN_VARS, ROWSINGLETON_COLSINGLETON_INNER_ROUNDS, RUIZ_ITERS, STALL_PROGRESS_EPS, STEEPEST_EDGE_FLOOR, TOL, UPDATE_VERIFY_TOL};
 
 /// Markowitz ピボットの疎 LU と Forrest-Tomlin 更新。このファイル内では
 /// ローカル変数名 `lu` (FtLu インスタンス) との衝突を避けるため `sparse_lu` の別名で参照する。
@@ -1970,6 +1970,25 @@ fn solve_one_engine(std: &StdForm, opts: &crate::types::LpOptions) -> SimplexRes
         return solve_staged_ipm(std, opts);
     }
     if opts.ipm_crossover {
+        // 小さな問題 (非零の数が `ENOMOTO_T_XO_SERIAL_NNZ` 未満) は 1 スレッドのプールで解く: 内点法は 1 反復に何十回も
+        // 並列ループを呼び、小さな問題では眠ったスレッドを起こす待ちが計算より長い (blend: 1 反復 1.6 ミリ秒、
+        // 計測ごとに 4〜34 ミリ秒とばらつく)。
+        let serial_nnz = tunable!("ENOMOTO_T_XO_SERIAL_NNZ", XO_SERIAL_NNZ, usize);
+        if std.cols.nnz() < serial_nnz && rayon::current_num_threads() > 1 {
+            static POOL: std::sync::OnceLock<Option<rayon::ThreadPool>> = std::sync::OnceLock::new();
+            if let Some(pool) = POOL.get_or_init(|| rayon::ThreadPoolBuilder::new().num_threads(1).build().ok()) {
+                return pool.install(|| solve_ipm_crossover_engine(std, opts));
+            }
+        }
+        solve_ipm_crossover_engine(std, opts)
+    } else {
+        solve_std_form_decomposed(std, opts)
+    }
+}
+
+/// 内点法 + クロスオーバー ([`solve_one_engine`] の本体)。
+fn solve_ipm_crossover_engine(std: &StdForm, opts: &crate::types::LpOptions) -> SimplexResult {
+    {
         // 内点法 + クロスオーバー。内点法が収束しない・基底が作れないときは傾き・切片二段解法で解き直す。
         // 大きな独立成分が 2 つ以上あれば成分ごとに分けて解く。
         if let Some(r) = solve_ipm_crossover_split(std, opts) {
@@ -1979,8 +1998,6 @@ fn solve_one_engine(std: &StdForm, opts: &crate::types::LpOptions) -> SimplexRes
             crate::phase_timing::mark("crossover_fallback");
             solve_std_form_decomposed(std, opts)
         })
-    } else {
-        solve_std_form_decomposed(std, opts)
     }
 }
 
