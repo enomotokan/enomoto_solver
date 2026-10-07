@@ -559,32 +559,52 @@ impl NormalKkt {
             }
         }
         trip_start.push(n_trip);
-        let mut positions: Vec<(usize, usize)> = Vec::with_capacity(n_trip + p);
-        for &j in &sparse_cols {
-            let e = &col_ent[col_ptr[j]..col_ptr[j + 1]];
-            for a_ in 0..e.len() {
-                for b_ in a_..e.len() {
-                    let (r1, r2) = (e[a_].0, e[b_].0);
-                    positions.push((r1.min(r2), r1.max(r2)));
-                }
-            }
-        }
-        for i in 0..p {
-            positions.push((i, i));
-        }
         let dbg = env_str!("ENOMOTO_DEBUG_IPM").is_some();
         let t0 = std::time::Instant::now();
-        let (symbolic_base, _order) = SymbolicSparseColMat::<usize>::try_new_from_indices(p, p, &positions).ok()?;
-        // 各組の行き先 (CSC の値の位置) を列内の二分探索で求める。
+        // `M = Σ_j a_j a_j^T + I` (疎な列だけ) の上三角のパターンを、組を並べ替えずに列ごとに作る (Gustavson)。
+        // 列 `c` の行 `r <= c` は、行 `c` に非零を持つ疎な列 `j` の非零の行のうち `c` 以下のもの。
+        let mut m_ptr = vec![0usize; p + 1];
+        let mut m_rows: Vec<usize> = Vec::new();
+        {
+            let mut mark = vec![usize::MAX; p];
+            for c in 0..p {
+                let start = m_rows.len();
+                mark[c] = c;
+                m_rows.push(c);
+                for (j, v) in csr_row_iter(a, c) {
+                    if v == 0.0 || is_dense[j] {
+                        continue;
+                    }
+                    for &(r, _) in &col_ent[col_ptr[j]..col_ptr[j + 1]] {
+                        if r <= c && mark[r] != c {
+                            mark[r] = c;
+                            m_rows.push(r);
+                        }
+                    }
+                }
+                m_rows[start..].sort_unstable();
+                m_ptr[c + 1] = m_rows.len();
+            }
+        }
+        let symbolic_base = SymbolicSparseColMat::<usize>::new_checked(p, p, m_ptr, None, m_rows);
+        // 各組の行き先 (CSC の値の位置) を列内の二分探索で求める (組の順は `trip_start` と同じ)。
         let col_ptrs = symbolic_base.col_ptrs();
         let row_idx = symbolic_base.row_indices();
         let find = |r: usize, c: usize| -> u32 {
             let seg = &row_idx[col_ptrs[c]..col_ptrs[c + 1]];
             (col_ptrs[c] + seg.binary_search(&r).expect("entry in pattern")) as u32
         };
-        let dest: Vec<u32> = positions[..n_trip].iter().map(|&(r, c)| find(r, c)).collect();
+        let mut dest: Vec<u32> = Vec::with_capacity(n_trip);
+        for &j in &sparse_cols {
+            let e = &col_ent[col_ptr[j]..col_ptr[j + 1]];
+            for a_ in 0..e.len() {
+                for b_ in a_..e.len() {
+                    let (r1, r2) = (e[a_].0, e[b_].0);
+                    dest.push(find(r1.min(r2), r1.max(r2)));
+                }
+            }
+        }
         let diag_dest: Vec<u32> = (0..p).map(|i| find(i, i)).collect();
-        drop(positions);
         if dbg {
             eprintln!(
                 "NormalKkt: dense_cols={} (threshold {thr:.0}) triplets={n_trip} pattern nnz={} built in {:.2}s",
