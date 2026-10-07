@@ -814,7 +814,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 xp("m_lpstat");
                 node_obj = self.lp.objective() + self.p.offset;
                 if resolves == 0 {
-                    if let Some((j, up, parent_val, parent_obj)) = node.branch {
+                    if let Some((j, up, parent_val, parent_obj)) = node.branch.filter(|b| b.3.is_finite()) {
                         let x = self.lp.col_value(j);
                         let delta = (x - parent_val).abs().max(if up { parent_val.ceil() - parent_val } else { parent_val - parent_val.floor() });
                         self.pc.add_observation(j, up, delta, node_obj - parent_obj);
@@ -987,6 +987,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 continue;
             };
             // 子ノードを作る
+            // LP が解けずに分けたノード (node_obj = -inf) でも、親の下界は子でも成り立つ
+            let lp_obj = node_obj;
+            let node_obj = node_obj.max(node.lower_bound);
             let est_gain: f64 = frac.iter().map(|&(j, v)| self.pc.estimate_gain(j, v - v.floor())).sum();
             let estimate = node_obj + est_gain;
             let f = value - value.floor();
@@ -1014,7 +1017,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     estimate,
                     depth: node.depth + 1,
                     basis: Some(basis.clone()),
-                    branch: Some((col, !c.upper, value, node_obj)),
+                    branch: Some((col, !c.upper, value, lp_obj)),
                 }
             };
             self.queue.push(mk(second_c));
