@@ -46,7 +46,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 break;
             }
             let t_sep = std::time::Instant::now();
-            let cands = self.separate(&x);
+            let cands = self.separate(&x, false);
             let ncands = cands.len();
             if cands.is_empty() {
                 break;
@@ -219,16 +219,25 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.lp.num_rows() >= max_rows {
             return false;
         }
-        let cands = self.separate(x);
+        // ノードでは軽い分離 (経路集約の始点・tableau 行を減らす) で、追加するカットも少なくする
+        let cands = self.separate(x, true);
         if cands.is_empty() {
             return false;
         }
         let room = max_rows - self.lp.num_rows();
-        let chosen = select_cuts(cands, room.min(50), p);
+        let chosen = select_cuts(cands, room.min(tunable!("ENOMOTO_T_MIP_NODE_MAX_CUTS", 20usize, usize)), p);
         if chosen.is_empty() {
             return false;
         }
         let rows: Vec<(Vec<(usize, f64)>, f64, f64)> = chosen.into_iter().map(|c| (c.coefs, f64::NEG_INFINITY, c.rhs)).collect();
+        // カットはプールにも入れ (他のノードで違反すれば戻る)、このノードで効いていないカットは外してから加える
+        // (HiGHS の aging と同じく LP を小さく保つ。外したカットもプールにあれば戻せる)
+        if env_str!("ENOMOTO_MIP_NODE_CUTS_KEEP").is_none() {
+            for (c, _, r) in &rows {
+                self.add_to_pool(c, *r);
+            }
+            self.remove_inactive_cuts();
+        }
         self.lp.add_rows(&rows);
         true
     }
@@ -263,7 +272,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// (Marchand & Wolsey の集約ヒューリスティクス)。行 i の活動量を変数 `n + i` として
     /// `sum_i w_i (a_i x - r_i) = 0` の形で集約するので、等式・不等式・範囲行を区別せずに扱える
     /// (`r_i` の置き換えは CMIR が行の上下限で行う)。
-    fn path_aggregation<F>(&mut self, vars: &CutVars, lp_rows: &[Vec<(usize, f64)>], cands: &mut Vec<Candidate>, push: &mut F)
+    fn path_aggregation<F>(&mut self, vars: &CutVars, lp_rows: &[Vec<(usize, f64)>], cands: &mut Vec<Candidate>, push: &mut F, max_starts: usize)
     where
         F: FnMut(Option<RawCut>, &mut Vec<Candidate>, &Solver<L>),
     {
@@ -313,7 +322,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 始点の行 (既定は元の行だけ。カットの行は相手としてだけ使う)
         let m_start = if env_str!("ENOMOTO_MIP_PATH_START_CUTS").is_some() { m } else { p.m.min(m) };
         for start in 0..m_start {
-            if starts >= 1000 || (start % 64 == 0 && self.time_up()) {
+            if starts >= max_starts || (start % 64 == 0 && self.time_up()) {
                 break;
             }
             let row = &lp_rows[start];
@@ -413,7 +422,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     /// 現在の LP 解 `x` を切る候補を作る。
-    fn separate(&mut self, x: &[f64]) -> Vec<Candidate> {
+    /// `light` (ノード用) なら経路集約の始点と tableau 行の数を絞る。
+    fn separate(&mut self, x: &[f64], light: bool) -> Vec<Candidate> {
         let p = self.p;
         let n = p.n;
         let mr = self.lp.num_rows();
@@ -520,7 +530,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // 経路集約 (path aggregation、HiGHS の `HighsPathSeparator`)
         if env_str!("ENOMOTO_MIP_NO_PATH_AGG").is_none() {
-            self.path_aggregation(&vars, &lp_rows, &mut cands, &mut push);
+            let max_starts = if light { tunable!("ENOMOTO_T_MIP_NODE_PATH_STARTS", 50usize, usize) } else { 1000 };
+            self.path_aggregation(&vars, &lp_rows, &mut cands, &mut push, max_starts);
         }
         if dbg_sep {
             eprintln!("SEP path {:.3}s cands {}", sep_t0.elapsed().as_secs_f64(), cands.len());
@@ -539,7 +550,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         basics.sort_by(|a, b| b.1.total_cmp(&a.1));
         let nint = p.is_int.iter().filter(|&&b| b).count();
-        let limit = 200 + (0.1 * (mr.min(nint)) as f64) as usize;
+        let limit = if light { tunable!("ENOMOTO_T_MIP_NODE_TAB_ROWS", 50usize, usize) } else { 200 + (0.1 * (mr.min(nint)) as f64) as usize };
         basics.truncate(limit);
         let mut agg = vec![0.0; n];
         let tab_fc = use_flow_cover() && env_str!("ENOMOTO_MIP_TAB_FC").is_some();

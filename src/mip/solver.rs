@@ -396,6 +396,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     /// この値以上の下界のノードは捨ててよい (最小化形、定数項込み)。
+    /// このノードで新しいカットを分離するか (SCIP の separator の freq と同じく、深さが `freq` の倍数のノードだけ。
+    /// `ENOMOTO_T_MIP_NODE_CUT_FREQ`、0 なら分離しない。`ENOMOTO_MIP_NODE_CUTS` なら毎回)。
+    fn node_cuts_due(&self, depth: usize) -> bool {
+        if env_str!("ENOMOTO_MIP_NODE_CUTS").is_some() {
+            return true;
+        }
+        let freq = tunable!("ENOMOTO_T_MIP_NODE_CUT_FREQ", 0usize, usize);
+        freq > 0 && depth % freq == 0
+    }
+
     pub(super) fn prune_limit(&self) -> f64 {
         match &self.incumbent {
             None => self.params.cutoff,
@@ -994,7 +1004,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     resolves += 1;
                     continue;
                 }
-                if resolves == 0 && node.depth > 0 && plunge_depth == 0 && env_str!("ENOMOTO_MIP_NODE_CUTS").is_some() && self.node_cut_round(&x) {
+                if resolves == 0 && node.depth > 0 && plunge_depth == 0 && self.node_cuts_due(node.depth) && self.node_cut_round(&x) {
                     resolves += 1;
                     continue;
                 }
