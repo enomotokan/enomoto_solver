@@ -118,6 +118,9 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) nodes: u64,
     /// 強分岐に使った LP 反復数。
     pub(super) sb_iters: u64,
+    /// 強分岐に使った時間 (秒) と、強分岐で解いた LP の数。
+    pub(super) sb_secs: f64,
+    pub(super) sb_lps: u64,
     /// ヒューリスティクスに使った LP 反復数。
     pub(super) heur_iters: u64,
     /// 列ごとの lock 数 (下げると違反しうる行の数, 上げると違反しうる行の数)。
@@ -231,6 +234,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
         deadline,
         nodes: 0,
         sb_iters: 0,
+        sb_secs: 0.0,
+        sb_lps: 0,
         heur_iters: 0,
         locks: super::heuristics::compute_locks(p),
         rng: 0x2545_F491_4F6C_DD1D,
@@ -439,14 +444,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.last_log = Instant::now();
         let ub = self.incumbent.as_ref().map(|(z, _)| *z).unwrap_or(f64::INFINITY);
         eprintln!(
-            "MIP: {:8.2}s nodes {:8} open {:7} lb {:.8e} ub {:.8e} lp_iters {} sb_iters {}",
+            "MIP: {:8.2}s nodes {:8} open {:7} lb {:.8e} ub {:.8e} lp_iters {} sb_iters {} sb_lps {} sb_secs {:.2}",
             self.start.elapsed().as_secs_f64(),
             self.nodes,
             self.queue.len(),
             self.queue.best_lower_bound(),
             ub,
             self.lp.total_iterations(),
-            self.sb_iters
+            self.sb_iters,
+            self.sb_lps,
+            self.sb_secs
         );
     }
 
@@ -1072,6 +1079,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     fn select_branch(&mut self, frac: &[(usize, f64)], node_obj: f64, depth: usize) -> BranchAction {
+        let t0 = Instant::now();
+        let r = self.select_branch_inner(frac, node_obj, depth);
+        self.sb_secs += t0.elapsed().as_secs_f64();
+        r
+    }
+
+    fn select_branch_inner(&mut self, frac: &[(usize, f64)], node_obj: f64, depth: usize) -> BranchAction {
         if env_str!("ENOMOTO_MIP_SB_OLD").is_some() {
             return self.select_branch_old(frac, node_obj);
         }
@@ -1081,7 +1095,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut cands: Vec<(usize, f64, f64)> = frac.iter().map(|&(j, v)| (j, v, score_of(self, j, v))).collect();
         cands.sort_by(|a, b| b.2.total_cmp(&a.2));
         // 予算: ノード LP の反復数 (強分岐を除く) の 0.125 倍 + 25000
-        let quot = 0.125 * self.node_iters as f64;
+        let quot = tunable!("ENOMOTO_T_MIP_SB_QUOT", 0.125, f64) * self.node_iters as f64;
         let maxsb = quot + 25_000.0;
         let sb = self.sb_iters as f64;
         // 双対退化の強いノードでは強分岐をしない (根以外)
@@ -1095,16 +1109,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
         prio = prio.max((quot - sb) / (sb + 1.0)).max(0.0);
         let reliable_thr = (1.0 - prio) * 1.0 + prio * 5.0;
         // 強分岐 LP の反復上限
-        let sb_iter_limit = ((2.0 * self.avg_node_iters() as f64 * (1.0 + 20.0 / self.nodes.max(1) as f64)) as u64).clamp(10, 500);
+        let sb_iter_limit = ((tunable!("ENOMOTO_T_MIP_SB_ITERMULT", 2.0, f64) * self.avg_node_iters() as f64 * (1.0 + 20.0 / self.nodes.max(1) as f64)) as u64).clamp(10, 500);
         let unreliable: usize = cands.iter().filter(|&&(j, _, _)| (self.pc.min_observations(j) as f64) < reliable_thr).count();
-        let lookahead = (9.0 * (1.0 + unreliable as f64 / cands.len().max(1) as f64)) as usize;
+        let lookahead = (tunable!("ENOMOTO_T_MIP_SB_LOOKAHEAD", 9.0, f64) * (1.0 + unreliable as f64 / cands.len().max(1) as f64)) as usize;
+        let max_tried = tunable!("ENOMOTO_T_MIP_SB_MAXCAND", 100usize, usize);
         let mut best: Option<(usize, f64, f64)> = None; // (列, 値, スコア)
         let mut no_improve = 0.0f64;
         let mut tried = 0usize;
         let mut bound_changes = 0usize;
         for &(j, v, pscore) in &cands {
             let is_reliable = (self.pc.min_observations(j) as f64) >= reliable_thr;
-            if is_reliable || !allow_sb || tried >= 100 || no_improve >= lookahead as f64 || self.time_up() || (self.sb_iters as f64) > maxsb {
+            if is_reliable || !allow_sb || tried >= max_tried || no_improve >= lookahead as f64 || self.time_up() || (self.sb_iters as f64) > maxsb {
                 if best.is_none_or(|(_, _, s)| pscore > s) {
                     best = Some((j, v, pscore));
                 }
@@ -1125,6 +1140,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let it0 = self.lp.total_iterations();
                 let st = self.lp.solve(&self.limits(sb_iter_limit));
                 self.sb_iters += self.lp.total_iterations() - it0;
+                self.sb_lps += 1;
                 match st {
                     LpStatus::Optimal => {
                         let o = self.lp.objective() + self.p.offset;
@@ -1226,6 +1242,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let it0 = self.lp.total_iterations();
                 let st = self.lp.solve(&self.limits(sb_iter_limit));
                 self.sb_iters += self.lp.total_iterations() - it0;
+                self.sb_lps += 1;
                 if env_str!("ENOMOTO_MIP_DEBUG_SB").is_some() {
                     eprintln!("SB j={j} up={is_up} st={st:?} iters={} limit={sb_iter_limit}", self.lp.total_iterations() - it0);
                 }
