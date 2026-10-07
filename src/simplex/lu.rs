@@ -2444,6 +2444,10 @@ fn dense_switch_for(m: usize, prev: &FtLu) -> f64 {
     if env_str!("ENOMOTO_LU_DENSE_SWITCH").is_some() {
         return explicit_dense_switch();
     }
+    // 呼び出し側が一時的に上書きした自動切替の条件 ([`with_dense_switch_override`]: クロスオーバーの Megiddo 式の押し出し)。
+    if let Some((min_m, per_row, frac)) = DENSE_SWITCH_OVERRIDE.with(|o| o.get()) {
+        return if m >= min_m && prev.fill_baseline >= per_row.saturating_mul(m) { frac } else { 0.0 };
+    }
     let min_m = tunable!("ENOMOTO_T_LU_DENSE_SWITCH_AUTO_MIN_M", DENSE_SWITCH_AUTO_MIN_M, usize);
     let per_row = tunable!("ENOMOTO_T_LU_DENSE_SWITCH_AUTO_LU_PER_ROW", DENSE_SWITCH_AUTO_LU_PER_ROW, usize);
     if min_m != 0 && m >= min_m && prev.fill_baseline >= per_row.saturating_mul(m) {
@@ -2451,6 +2455,19 @@ fn dense_switch_for(m: usize, prev: &FtLu) -> f64 {
     } else {
         0.0
     }
+}
+
+thread_local! {
+    /// [`dense_switch_for`] の自動切替の条件 `(行数の下限, 直前の LU の 1 行あたりの非ゼロ数の下限, 閾値)` の一時的な上書き。
+    static DENSE_SWITCH_OVERRIDE: std::cell::Cell<Option<(usize, usize, f64)>> = const { std::cell::Cell::new(None) };
+}
+
+/// `f` の間だけ稠密切替の自動の条件を `(min_m, per_row, frac)` に上書きする (`ENOMOTO_LU_DENSE_SWITCH` があればそちらが優先)。
+pub fn with_dense_switch_override<R>(cond: (usize, usize, f64), f: impl FnOnce() -> R) -> R {
+    let prev = DENSE_SWITCH_OVERRIDE.with(|o| o.replace(Some(cond)));
+    let r = f();
+    DENSE_SWITCH_OVERRIDE.with(|o| o.set(prev));
+    r
 }
 
 /// B3 診断: 残りを稠密分解に切り替えた分解の回数。
@@ -7587,6 +7604,66 @@ impl FtLu {
         self.fill
     }
 
+}
+
+/// 計測用 (`cargo test --release --lib lu_dump_bench -- --ignored --nocapture`、`ENOMOTO_LU_BENCH_FILE` に
+/// `ENOMOTO_DUMP_LU_DIR` で書き出した `lu_dump.bin`)。書き出した分解の入力をそれぞれ通常の経路で分解し、時間と `L`+`U` の
+/// 非ゼロ数を表示する (`ENOMOTO_LU_BENCH_MAX` で先頭から何件まで)。
+#[cfg(test)]
+mod lu_dump_bench {
+    use super::*;
+
+    fn read_dump(path: &str) -> Vec<(usize, Vec<Vec<(usize, f64)>>)> {
+        let buf = std::fs::read(path).expect("dump file");
+        let mut out = Vec::new();
+        let mut p = 0usize;
+        let rd = |p: &mut usize| -> u64 {
+            let v = u64::from_le_bytes(buf[*p..*p + 8].try_into().unwrap());
+            *p += 8;
+            v
+        };
+        while p + 8 <= buf.len() {
+            let m = rd(&mut p) as usize;
+            let mut rows = Vec::with_capacity(m);
+            for _ in 0..m {
+                let len = rd(&mut p) as usize;
+                let mut r = Vec::with_capacity(len);
+                for _ in 0..len {
+                    let j = rd(&mut p) as usize;
+                    let v = f64::from_bits(rd(&mut p));
+                    r.push((j, v));
+                }
+                rows.push(r);
+            }
+            out.push((m, rows));
+        }
+        out
+    }
+
+    #[test]
+    #[ignore]
+    fn lu_dump_bench() {
+        let Ok(path) = std::env::var("ENOMOTO_LU_BENCH_FILE") else { return };
+        let max: usize = std::env::var("ENOMOTO_LU_BENCH_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(usize::MAX);
+        let entries = read_dump(&path);
+        let mut total = 0.0;
+        for (k, (m, rows)) in entries.iter().take(max).enumerate() {
+            let nnz: usize = rows.iter().map(|r| r.len()).sum();
+            let border = detect_border_columns(*m, rows);
+            let dense = is_dense_input(*m, rows);
+            let t0 = std::time::Instant::now();
+            let lu = factorize_routed(*m, rows, &border, dense, explicit_dense_switch());
+            let dt = t0.elapsed().as_secs_f64();
+            total += dt;
+            let ft = lu.map(FtLu::new);
+            println!(
+                "LU_BENCH k={k} m={m} nnz(B)={nnz} dense={dense} border={} time={dt:.4}s nnz(LU)={}",
+                border.len(),
+                ft.as_ref().map_or(0, |f| f.fill_baseline)
+            );
+        }
+        println!("LU_BENCH total={total:.3}s");
+    }
 }
 
 #[cfg(test)]

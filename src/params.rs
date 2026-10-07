@@ -113,6 +113,14 @@ pub(crate) mod simplex {
     /// 部分価格付けのグループ数: まず約 `1/PARTIAL_PRICING_GROUPS` の列を標本として調べる。
     pub(crate) const PARTIAL_PRICING_GROUPS: u64 = 10;
 
+    /// 内点法 + クロスオーバーを独立な成分ごとに分けて行うときの、1 つで解く成分の変数の数の下限
+    /// (`ENOMOTO_T_XO_SPLIT_MIN_VARS`、0 で分けない)。これより小さい成分はまとめて解く。
+    pub(crate) const XO_SPLIT_MIN_VARS: usize = 1000;
+
+    /// 内点法 + クロスオーバーを 1 スレッドのプールで解く問題の、前処理後の非零の数の上限
+    /// (`ENOMOTO_T_XO_SERIAL_NNZ`、0 で使わない)。小さな問題では並列ループのスレッドを起こす待ちが計算より長い。
+    pub(crate) const XO_SERIAL_NNZ: usize = 20_000;
+
     /// 前処理での Ruiz スケーリングの反復回数。
     pub(crate) const RUIZ_ITERS: usize = 10;
 
@@ -1075,6 +1083,13 @@ pub(crate) mod presolve {
 /// 内点法 IP-PMM (src/interior_point.rs と interior_point/kkt.rs)。
 /// 既定のエンジンではなく、`Model.solve(root_solver="interior")` のときだけ使われる。
 pub(crate) mod interior_point {
+    /// Newton 系の分解 (正規方程式の Cholesky・拡大系の LDLᵀ) の因子の非零数の上限。記号分解の結果が
+    /// これを超えたら内点法を諦める (`NotSolved` を返し、呼び出し側は二段解法で解く)。ex10 は正規方程式で
+    /// 7.5 億 (因子だけで 6 GB、分解 1 回 400 s)、拡大系で 1.02 億になり、同時実行 (`auto`) の内点法側が
+    /// 常駐 10 GB に達してメモリ上限のある環境ではプロセスごと落ちていた。Netlib・Kennington・scpm1 などの
+    /// 内点法が勝つ問題はこれより桁違いに小さい。試験用 `ENOMOTO_T_IPM_MAX_FACTOR_NNZ`。
+    pub(crate) const MAX_FACTOR_NNZ: usize = 100_000_000;
+
     /// fraction-to-boundary 則の係数 τ。スラック `s` と双対 `z` が 0 に達しないよう、
     /// 境界までの最大ステップの τ 倍までしか進まない。
     pub(crate) const TAU: f64 = 0.995;
@@ -1090,6 +1105,28 @@ pub(crate) mod interior_point {
 
     /// δ の初期値。
     pub(crate) const DELTA0: f64 = 1e-1;
+
+    /// 箱型制約版の内点法 (`interior_point::boxed`) の ρ・δ の初期値 (試験用 `ENOMOTO_T_IPM_REG0`)。`RHO0`・`DELTA0` (0.1) は
+    /// PIQP の既定 (ρ 1e-6、δ 1e-4) より 3〜5 桁大きく、序盤〜中盤で Newton 方向を近接項が歪めて中心性を失い、歩幅 0.05〜0.2 の
+    /// 反復が続いていた (ship04s 58 反復 → 15、`analysis/fable_ipm_vs_clarabel_20261006.md` §3)。
+    pub(crate) const BOX_REG0: f64 = 1e-4;
+
+    /// 箱型制約版の内点法の ρ・δ の下限 (試験用 `ENOMOTO_T_IPM_RHO_MIN`・`ENOMOTO_T_IPM_DELTA_MIN`)。PIQP の
+    /// `reg_finetune_lower_limit`。1e-10 では近接項による主残差の床 `δ‖λ − y‖` が目的値のギャップに乗って 1e-7 で止まる
+    /// (stair・bnl1。初期値を小さくするとこれが表に出る)。
+    pub(crate) const BOX_REG_MIN: f64 = 1e-13;
+
+    /// 箱型制約版の内点法の Gondzio の多重中心性補正子の最大回数 (試験用 `ENOMOTO_T_IPM_GONDZIO`、0 で Mehrotra の
+    /// 予測子・修正子だけ)。第 15 回の比較で 2 回は反復数を減らすが、クロスオーバー後の仕上げが長引く問題が出た
+    /// (perold 1.2 → 57 秒、pilot87 15 → 442 秒) ので使わない。
+    pub(crate) const BOX_GONDZIO: usize = 0;
+
+    /// 箱型制約版の内点法の発散の打ち切り (試験用 `ENOMOTO_T_IPM_BLOWUP`、0 で無効)。正則化が下限に達した後、最良の
+    /// 反復点の相対残差の最悪値が `BOX_BLOWUP_NEAR` 以下 (ほぼ収束) なのに、いまの点の最悪値がその `BOX_BLOWUP` 倍を
+    /// 超えたら、最良点に戻して打ち切る。正則化 1e-13 では正規方程式の精度が落ちて、収束間際から主残差が跳ね上がり
+    /// 戻らないことがある (wood1p: 29 反復目で主残差 2e-10 → 30 反復目 1.7e-2、以後 200 反復まで回る)。
+    pub(crate) const BOX_BLOWUP: f64 = 1e3;
+    pub(crate) const BOX_BLOWUP_NEAR: f64 = 1e3;
 
     /// 停止判定 (主・双対残差と双対ギャップ) の絶対許容誤差。
     pub(crate) const EPS_ABS: f64 = 1e-8;
@@ -1160,6 +1197,8 @@ pub(crate) mod interior_point {
     /// `Rayon(0)` は rayon のスレッド数をそのまま使う指定。
     /// スクラッチ量の見積もり (`_req`) と実際の呼び出しで同じ値を使う必要がある。
     pub(crate) const KKT_PARALLELISM: faer::Parallelism = faer::Parallelism::Rayon(0);
+    /// 内点法の数値分解を並列にする因子の非零数の下限 (`ENOMOTO_T_FACTOR_PAR_NNZ`、0 で常に逐次)。
+    pub(crate) const FACTOR_PAR_NNZ: usize = 2_000_000;
 }
 
 /// 分枝限定法 (src/mip.rs)

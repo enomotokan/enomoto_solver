@@ -4144,9 +4144,15 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     // 同時実行で内点法に渡す下界 (同じ形の問題を解いているときだけ、段階 B の間に書く)。
     let shared_bound = crate::cancel::bound().filter(|b| b.n_total == n_total && b.n_rows == m);
     let bound_every = tunable!("ENOMOTO_T_RACE_BOUND_EVERY", 100usize, usize).max(1);
+    // 計測用 (`ENOMOTO_DEBUG_PROGRESS=1`): 1000 反復ごとに経過時間と主実行不能の行数を出す (解けない問題の進み具合の比較)。
+    let progress = env_str!("ENOMOTO_DEBUG_PROGRESS").is_some();
+    let progress_t0 = std::time::Instant::now();
     for iter_idx in 0..max_iters {
         if iter_idx & 63 == 0 && crate::cancel::is_cancelled() {
             return None; // 同時実行の相手が先に結論を出した
+        }
+        if progress && iter_idx % 1000 == 0 {
+            eprintln!("PROGRESS main iter={iter_idx} t={:.1}s phase={phase:?} infeasible_rows={}", progress_t0.elapsed().as_secs_f64(), infeasible_rows.rows.len());
         }
         if ext_check(iter_idx, phase == Phase::B, || {
             // 近道 (真の費用、双対実行可能な基底、M 側の列なし) では今の基底解の目的値が双対目的値 (下界) に

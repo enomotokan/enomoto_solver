@@ -45,6 +45,8 @@ pub struct PdlpOptions {
     pub max_iters: usize,
     /// 時間の上限 (秒)。
     pub time_limit: f64,
+    /// 再始動の回数の上限 (達したらその場で止める。`usize::MAX` で無制限)。
+    pub max_restarts: usize,
 }
 
 /// PDLP の結果。
@@ -59,6 +61,13 @@ pub struct PdlpResult {
     pub iters: usize,
     /// 相対的な主残差・双対残差・ギャップ (`ε` の分母で割ったもの)。
     pub rel: (f64, f64, f64),
+    /// 終了時の歩幅 `η` と主の重み `ω` (前処理後の問題の。主の歩幅は `η/ω`、双対は `ηω`)。
+    pub eta: f64,
+    pub w: f64,
+    /// 前処理の列・行の縮尺 (`x = dc ∘ x̂`、`y = dr ∘ ŷ`)。元の変数での主の歩幅は `(η/ω) dc_j²`、
+    /// 双対は `ηω dr_i²`。
+    pub dc: Vec<f64>,
+    pub dr: Vec<f64>,
 }
 
 /// 行圧縮の疎行列 (自前の配列で持ち、行ごとの積を決まった順で足す)。
@@ -432,6 +441,9 @@ pub fn solve_pdlp(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], opts:
             w_sum = 0.0;
             since_restart = 0;
             restarts += 1;
+            if restarts >= opts.max_restarts {
+                break;
+            }
         }
     }
     let (_, bx, by, rel) = best;
@@ -450,6 +462,10 @@ pub fn solve_pdlp(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], opts:
         y: (0..m).map(|i| by[i] * s.dr[i]).collect(),
         iters: total,
         rel,
+        eta,
+        w,
+        dc: s.dc,
+        dr: s.dr,
     }
 }
 
@@ -467,7 +483,7 @@ mod tests {
         let c = [-1.0, -2.0, 0.0, 0.0];
         let l = [0.0; 4];
         let u = [f64::INFINITY; 4];
-        let r = solve_pdlp(&a, &b, &c, &l, &u, &PdlpOptions { eps: 1e-8, max_iters: 100_000, time_limit: 10.0 });
+        let r = solve_pdlp(&a, &b, &c, &l, &u, &PdlpOptions { eps: 1e-8, max_iters: 100_000, time_limit: 10.0, max_restarts: usize::MAX });
         assert_eq!(r.status, Status::Optimal);
         assert!((r.x[0] - 3.0).abs() < 1e-5 && (r.x[1] - 1.0).abs() < 1e-5, "x = {:?}", r.x);
         // 双対: c - A^T y >= 0、y = (-0.5, -0.5)。

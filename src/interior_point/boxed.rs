@@ -22,8 +22,8 @@ use rayon::prelude::*;
 
 use super::kkt::{csr_mat_t_vec_into, csr_mat_vec_into, FaerCsr, IpmKkt};
 use crate::params::interior_point::{
-    CERT_SCALE_MIN, CERT_TOL, DELTA0, DELTA_MIN, EPS_ABS, EPS_REL, GAP_DIV_GUARD, INIT_DIV_GUARD, INIT_POSITIVE_FLOOR,
-    INIT_SHIFT_MULTIPLIER, REG_FLOOR_SLACK, RES_DECREASE_RATIO, RHO0, RHO_MIN, SLOW_DECREASE_DIVISOR, STALL_ITERS,
+    BOX_BLOWUP, BOX_BLOWUP_NEAR, BOX_GONDZIO, BOX_REG0, BOX_REG_MIN, CERT_SCALE_MIN, CERT_TOL, EPS_ABS, EPS_REL, GAP_DIV_GUARD, INIT_DIV_GUARD, INIT_POSITIVE_FLOOR,
+    INIT_SHIFT_MULTIPLIER, REG_FLOOR_SLACK, RES_DECREASE_RATIO, SLOW_DECREASE_DIVISOR, STALL_ITERS,
     STALL_PROGRESS_RATIO, TAU,
 };
 use crate::types::Status;
@@ -247,7 +247,7 @@ pub struct WarmStart<'a> {
     pub point: bool,
     /// 初期点のスラック・乗数の下限 (大きさをそろえた後の単位)。
     pub theta: f64,
-    /// 初期の正則化 `ρ`・`δ` (`None` なら通常の `RHO0`・`DELTA0`)。
+    /// 初期の正則化 `ρ`・`δ` (`None` なら通常の `BOX_REG0`)。
     pub reg0: Option<f64>,
     /// 真なら問題が双対実行可能だと分かっている (二段解法の段階 A で `z^1 = 0`、または費用 0 の
     /// 実行可能性問題)。主の非有界は起こらないので双対実行不能の判定は行わず、結論は「最適」か
@@ -338,7 +338,21 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
     let t_kkt = std::time::Instant::now();
     // 診断用 (ENOMOTO_DEBUG_IPM): 数値分解・Newton 系の求解 (反復改良を含む) の累計時間。
     let mut prof = (0.0f64, 0.0f64);
-    let mut kkt = IpmKkt::new(a);
+    let Some(mut kkt) = IpmKkt::new(a) else {
+        // 因子が大きすぎる (`MAX_FACTOR_NNZ`): 内点法を諦める。
+        if debug {
+            eprintln!("IPM factor too large; giving up (setup {:.2}s)", t_kkt.elapsed().as_secs_f64());
+        }
+        crate::phase_timing::mark("ipm_factor_too_large");
+        return BoxIpmResult {
+            status: Status::NotSolved,
+            x: vec![0.0; n],
+            y: vec![0.0; p],
+            rc: vec![0.0; n],
+            iters: 0,
+            rel_res: (f64::INFINITY, f64::INFINITY, f64::INFINITY),
+        };
+    };
     if debug {
         eprintln!(
             "IPM kkt={} nnz(A)={} nnz(L)={} setup={:.2}s",
@@ -356,14 +370,15 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
 
     let reg0 = warm.and_then(|w| w.reg0);
     let dual_feasible_known = warm.is_some_and(|w| w.dual_feasible_known);
-    let mut rho = reg0.unwrap_or(RHO0);
-    let mut delta = reg0.unwrap_or(DELTA0);
-    let rho_min = tunable!("ENOMOTO_T_IPM_RHO_MIN", RHO_MIN, f64);
+    let reg_init = tunable!("ENOMOTO_T_IPM_REG0", BOX_REG0, f64);
+    let mut rho = reg0.unwrap_or(reg_init);
+    let mut delta = reg0.unwrap_or(reg_init);
+    let rho_min = tunable!("ENOMOTO_T_IPM_RHO_MIN", BOX_REG_MIN, f64);
     // 停止の許容誤差 (絶対・相対とも。既定は PIQP の 1e-8)。
     let eps_abs = tunable!("ENOMOTO_T_IPM_EPS", EPS_ABS, f64);
     let eps_rel = tunable!("ENOMOTO_T_IPM_EPS", EPS_REL, f64);
     // Gondzio の多重中心性補正子の最大回数 (0 で Mehrotra の予測子・修正子だけ)。
-    let gondzio_max = tunable!("ENOMOTO_T_IPM_GONDZIO", 0usize, usize);
+    let gondzio_max = tunable!("ENOMOTO_T_IPM_GONDZIO", BOX_GONDZIO, usize);
     let gondzio_small_step = tunable!("ENOMOTO_T_IPM_GONDZIO_SMALL_STEP", 1.0f64, f64);
     let mut nan_recover_left = tunable!("ENOMOTO_T_IPM_NAN_RECOVER", 0usize, usize);
     let switch_aug_k = tunable!("ENOMOTO_T_IPM_SWITCH_AUG", 0usize, usize);
@@ -371,7 +386,7 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
     let mut sw_count = 0usize;
     // 真なら近接中心 (ξ, λ, ν) を残差の減り方によらず毎反復更新する。
     let prox_always = tunable!("ENOMOTO_T_IPM_PROX_ALWAYS", 0u8, u8) != 0;
-    let delta_min = tunable!("ENOMOTO_T_IPM_DELTA_MIN", DELTA_MIN, f64);
+    let delta_min = tunable!("ENOMOTO_T_IPM_DELTA_MIN", BOX_REG_MIN, f64);
     // 正則化 ρ・δ の下げ方 (反復の終わりの説明参照)。0: PIQP、1: IP-PMM の著者の実装 (既定、第 8 回の比較)、
     // 2: ρ = δ = κ μ、3: PIQP の規則を κ μ で頭打ち。
     let reg_mode = tunable!("ENOMOTO_T_IPM_REG_MODE", 1u8, u8);
@@ -507,6 +522,7 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
     let mut iters = 0usize;
     let mut cached: Option<Res> = None;
     let noimprove_k = tunable!("ENOMOTO_T_IPM_NOIMPROVE", 0usize, usize);
+    let blowup = tunable!("ENOMOTO_T_IPM_BLOWUP", BOX_BLOWUP, f64);
     let mut noimprove = 0usize;
 
     for it in 0..max_iters {
@@ -567,6 +583,19 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
         if !worst.is_finite() || !cx.is_finite() {
             // 数値的に破綻した (分解の失敗など): 最良の反復点に戻して打ち切る。
             break;
+        }
+        // 発散の打ち切り (`BOX_BLOWUP`): 正則化が下限に達した後、ほぼ収束した最良点からいまの点が大きく離れたら
+        // 最良点に戻して打ち切る (呼び出し側は最良点の残差で受理するか決める)。
+        if blowup > 0.0 && rho <= rho_min * REG_FLOOR_SLACK && delta <= delta_min * REG_FLOOR_SLACK {
+            if let Some(b) = best.as_ref() {
+                if b.0 <= BOX_BLOWUP_NEAR && worst > blowup * b.0 {
+                    if debug {
+                        eprintln!("IPM it={it} residual blew up ({worst:.3e} vs best {:.3e}); returning the best iterate", b.0);
+                    }
+                    crate::phase_timing::mark("ipm_blowup");
+                    break;
+                }
+            }
         }
         // 停滞の打ち切り (試験用 `ENOMOTO_T_IPM_NOIMPROVE=K`): 正則化が下限に達した後、最良点の `worst` が
         // K 反復続けて 10% 以上改善しなければ打ち切る (greenbea は 45 反復目から同じ点を往復する)。

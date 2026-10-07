@@ -25,16 +25,23 @@ use faer::sparse::{SparseColMat, SymbolicSparseColMat, ValuesOrder};
 use faer::{Conj, Side};
 
 pub use crate::sparse::{FaerCsr, csr_row_iter, csr_mat_t_vec, csr_mat_t_vec_into, csr_mat_vec, csr_mat_vec_into};
-use crate::params::interior_point::KKT_PARALLELISM;
+use crate::params::interior_point::{FACTOR_PAR_NNZ, KKT_PARALLELISM, MAX_FACTOR_NNZ};
 
-/// 数値分解に使う並列度。既定は逐次 (Fable の調査と Netlib + Kennington の比較で、この大きさの疎 Cholesky
-/// では faer の並列分解の分割の手間が計算を上回り、逐次の方が速かった)。試験用 `ENOMOTO_T_FACTOR_SEQ=0` で
-/// 並列。作業領域の見積もり (`_req`) にも同じ値を使う。
-fn factor_par() -> faer::Parallelism<'static> {
-    if tunable!("ENOMOTO_T_FACTOR_SEQ", 1u8, u8) != 0 {
-        faer::Parallelism::None
-    } else {
+/// 因子の非零数の上限 ([`MAX_FACTOR_NNZ`]、試験用 `ENOMOTO_T_IPM_MAX_FACTOR_NNZ`)。
+fn max_factor_nnz() -> usize {
+    tunable!("ENOMOTO_T_IPM_MAX_FACTOR_NNZ", MAX_FACTOR_NNZ, usize)
+}
+
+/// 数値分解に使う並列度。因子の非零数 `nnz_l` が `ENOMOTO_T_FACTOR_PAR_NNZ` (既定 [`FACTOR_PAR_NNZ`]、0 で使わない) 以上なら
+/// 並列、それ未満は逐次 (Fable の調査と Netlib + Kennington の比較で、小さな疎 Cholesky では faer の並列分解の分割の手間が
+/// 計算を上回った。一方 qap15 (nnz(L) 1,770 万) では 1 回の分解が 1.3 秒かかり、逐次では内点法の 9 割を占める)。
+/// 試験用 `ENOMOTO_T_FACTOR_SEQ=0` で常に並列。作業領域の見積もり (`_req`) にも同じ値を使う。
+fn factor_par(nnz_l: usize) -> faer::Parallelism<'static> {
+    let par_nnz = tunable!("ENOMOTO_T_FACTOR_PAR_NNZ", FACTOR_PAR_NNZ, usize);
+    if tunable!("ENOMOTO_T_FACTOR_SEQ", 1u8, u8) == 0 || (par_nnz > 0 && nnz_l >= par_nnz) {
         KKT_PARALLELISM
+    } else {
+        faer::Parallelism::None
     }
 }
 
@@ -275,6 +282,15 @@ const PIVOT_DELTA: f64 = 1e-9;
 impl AugKkt {
     /// `A` の非零パターンから記号分解までを作る (数値はまだ分解しない)。
     pub fn new(a: &FaerCsr) -> Self {
+        Self::build(a, usize::MAX).expect("symbolic factorization failed")
+    }
+
+    /// [`AugKkt::new`] と同じだが、因子の非零数が `max_nnz` を超えたら `None`。
+    pub fn try_new(a: &FaerCsr, max_nnz: usize) -> Option<Self> {
+        Self::build(a, max_nnz)
+    }
+
+    fn build(a: &FaerCsr, max_nnz: usize) -> Option<Self> {
         let p = a.nrows();
         let n = a.ncols();
         let dim = n + p;
@@ -302,11 +318,17 @@ impl AugKkt {
         let (symbolic_base, order) =
             SymbolicSparseColMat::<usize>::try_new_from_indices(dim, dim, &positions).expect("valid KKT sparsity pattern");
         let chol_symbolic = factorize_symbolic_cholesky::<usize>(symbolic_base.as_ref(), Side::Upper, SymmetricOrdering::Amd, Default::default())
-            .expect("symbolic factorization failed");
+            .ok()?;
+        if chol_symbolic.len_values() > max_nnz {
+            if env_str!("ENOMOTO_DEBUG_IPM").is_some() {
+                eprintln!("AugKkt: nnz(L)={} exceeds {max_nnz}; giving up", chol_symbolic.len_values());
+            }
+            return None;
+        }
         let l_values = vec![0.0f64; chol_symbolic.len_values()];
-        let numeric_buf = GlobalPodBuffer::new(chol_symbolic.factorize_numeric_ldlt_req::<f64>(true, factor_par()).unwrap());
+        let numeric_buf = GlobalPodBuffer::new(chol_symbolic.factorize_numeric_ldlt_req::<f64>(true, factor_par(chol_symbolic.len_values())).unwrap());
         let solve_buf = GlobalPodBuffer::new(chol_symbolic.solve_in_place_req::<f64>(1).unwrap());
-        AugKkt {
+        Some(AugKkt {
             n,
             p,
             top_range,
@@ -323,7 +345,7 @@ impl AugKkt {
             factored: false,
             signs: (0..dim).map(|i| if i < n { 1i8 } else { -1i8 }).collect(),
             n_regularized: 0,
-        }
+        })
     }
 
     /// 系の次元 `n + p`。
@@ -356,7 +378,7 @@ impl AugKkt {
             a_upper.as_ref(),
             Side::Upper,
             reg,
-            factor_par(),
+            factor_par(self.chol_symbolic.len_values()),
             PodStack::new(&mut self.numeric_buf),
         );
         self.factored = true;
@@ -430,7 +452,8 @@ impl AugKkt {
 ///   `M^{-1} r = M_s^{-1} r - W (I + U^T W)^{-1} U^T M_s^{-1} r`、`W = M_s^{-1} U` (分解ごとに k 回の求解)。
 /// - **組み立て**: 疎な列の要素の組 `(i, k)` が CSC の値の配列のどこへ足されるか (`dest`) を最初に一度だけ
 ///   求め、毎回は値の配列に直接足し込む (並べ替えや非零パターンの複製をしない)。
-/// - 組の数が多すぎる (稠密な列を外しても) なら [`NormalKkt::new`] は `None` を返し、呼び出し側は
+/// - 組の数が多すぎる (稠密な列を外しても)、または因子の非零数が [`MAX_FACTOR_NNZ`] を超えるなら
+///   [`NormalKkt::new`] は `None` を返し、呼び出し側は
 ///   [`AugKkt`] を使う。
 pub struct NormalKkt {
     n: usize,
@@ -465,7 +488,11 @@ pub struct NormalKkt {
 }
 
 /// [`NormalKkt`] を使う三つ組の数の上限 (これを超えるなら拡大系を使う)。
-const NORMAL_MAX_TRIPLETS: usize = 40_000_000;
+/// (組 1 つにつき行き先の `u32` 4 バイト。1.5 億で 600 MB。scpm1 は 5000 行・50 万列で約 4,200 万組だが、正規方程式は
+/// 5000 x 5000 で済み、拡大系 (記号分解 105 秒、数値分解 1 回 3.6 秒) よりはるかに軽い。試験用 `ENOMOTO_T_NORMAL_MAX_TRIPLETS`)。
+const NORMAL_MAX_TRIPLETS: usize = 150_000_000;
+/// 正規方程式の三つ組の行き先を p x p の位置表で引く行数の上限 (p^2 の要素数、`u32` で 128 MB)。
+const DENSE_POS_MAX: usize = 32_000_000;
 /// 稠密な列とみなす非零数: `max(DENSE_COL_MIN, DENSE_COL_AVG_FACTOR * 平均)` を超える列。
 const DENSE_COL_MIN: usize = 50;
 const DENSE_COL_AVG_FACTOR: f64 = 10.0;
@@ -533,37 +560,70 @@ impl NormalKkt {
             trip_start.push(n_trip);
             let k = col_ptr[j + 1] - col_ptr[j];
             n_trip += k * (k + 1) / 2;
-            if n_trip + p > NORMAL_MAX_TRIPLETS {
+            if n_trip + p > tunable!("ENOMOTO_T_NORMAL_MAX_TRIPLETS", NORMAL_MAX_TRIPLETS, usize) {
                 return None;
             }
         }
         trip_start.push(n_trip);
-        let mut positions: Vec<(usize, usize)> = Vec::with_capacity(n_trip + p);
+        let dbg = env_str!("ENOMOTO_DEBUG_IPM").is_some();
+        let t0 = std::time::Instant::now();
+        // `M = Σ_j a_j a_j^T + I` (疎な列だけ) の上三角のパターンを、組を並べ替えずに列ごとに作る (Gustavson)。
+        // 列 `c` の行 `r <= c` は、行 `c` に非零を持つ疎な列 `j` の非零の行のうち `c` 以下のもの。
+        let mut m_ptr = vec![0usize; p + 1];
+        let mut m_rows: Vec<usize> = Vec::new();
+        {
+            let mut mark = vec![usize::MAX; p];
+            for c in 0..p {
+                let start = m_rows.len();
+                mark[c] = c;
+                m_rows.push(c);
+                for (j, v) in csr_row_iter(a, c) {
+                    if v == 0.0 || is_dense[j] {
+                        continue;
+                    }
+                    for &(r, _) in &col_ent[col_ptr[j]..col_ptr[j + 1]] {
+                        if r <= c && mark[r] != c {
+                            mark[r] = c;
+                            m_rows.push(r);
+                        }
+                    }
+                }
+                m_rows[start..].sort_unstable();
+                m_ptr[c + 1] = m_rows.len();
+            }
+        }
+        let symbolic_base = SymbolicSparseColMat::<usize>::new_checked(p, p, m_ptr, None, m_rows);
+        // 各組の行き先 (CSC の値の位置) を列内の二分探索で求める (組の順は `trip_start` と同じ)。
+        let col_ptrs = symbolic_base.col_ptrs();
+        let row_idx = symbolic_base.row_indices();
+        // 行数が小さい (p^2 <= DENSE_POS_MAX) なら p x p の位置表を引く (scpm1: 4,500 万組の二分探索に 18 秒かかっていた)。
+        let pos_table: Option<Vec<u32>> = (p.checked_mul(p).is_some_and(|pp| pp <= DENSE_POS_MAX)).then(|| {
+            let mut t = vec![u32::MAX; p * p];
+            for c in 0..p {
+                for k in col_ptrs[c]..col_ptrs[c + 1] {
+                    t[c * p + row_idx[k]] = k as u32;
+                }
+            }
+            t
+        });
+        let find = |r: usize, c: usize| -> u32 {
+            if let Some(t) = &pos_table {
+                return t[c * p + r];
+            }
+            let seg = &row_idx[col_ptrs[c]..col_ptrs[c + 1]];
+            (col_ptrs[c] + seg.binary_search(&r).expect("entry in pattern")) as u32
+        };
+        let mut dest: Vec<u32> = Vec::with_capacity(n_trip);
         for &j in &sparse_cols {
             let e = &col_ent[col_ptr[j]..col_ptr[j + 1]];
             for a_ in 0..e.len() {
                 for b_ in a_..e.len() {
                     let (r1, r2) = (e[a_].0, e[b_].0);
-                    positions.push((r1.min(r2), r1.max(r2)));
+                    dest.push(find(r1.min(r2), r1.max(r2)));
                 }
             }
         }
-        for i in 0..p {
-            positions.push((i, i));
-        }
-        let dbg = env_str!("ENOMOTO_DEBUG_IPM").is_some();
-        let t0 = std::time::Instant::now();
-        let (symbolic_base, _order) = SymbolicSparseColMat::<usize>::try_new_from_indices(p, p, &positions).ok()?;
-        // 各組の行き先 (CSC の値の位置) を列内の二分探索で求める。
-        let col_ptrs = symbolic_base.col_ptrs();
-        let row_idx = symbolic_base.row_indices();
-        let find = |r: usize, c: usize| -> u32 {
-            let seg = &row_idx[col_ptrs[c]..col_ptrs[c + 1]];
-            (col_ptrs[c] + seg.binary_search(&r).expect("entry in pattern")) as u32
-        };
-        let dest: Vec<u32> = positions[..n_trip].iter().map(|&(r, c)| find(r, c)).collect();
         let diag_dest: Vec<u32> = (0..p).map(|i| find(i, i)).collect();
-        drop(positions);
         if dbg {
             eprintln!(
                 "NormalKkt: dense_cols={} (threshold {thr:.0}) triplets={n_trip} pattern nnz={} built in {:.2}s",
@@ -577,8 +637,11 @@ impl NormalKkt {
         if dbg {
             eprintln!("NormalKkt: symbolic (AMD) nnz(L)={} at {:.2}s", chol_symbolic.len_values(), t0.elapsed().as_secs_f64());
         }
+        if chol_symbolic.len_values() > max_factor_nnz() {
+            return None;
+        }
         let l_values = vec![0.0f64; chol_symbolic.len_values()];
-        let numeric_buf = GlobalPodBuffer::new(chol_symbolic.factorize_numeric_llt_req::<f64>(factor_par()).ok()?);
+        let numeric_buf = GlobalPodBuffer::new(chol_symbolic.factorize_numeric_llt_req::<f64>(factor_par(chol_symbolic.len_values())).ok()?);
         let solve_buf = GlobalPodBuffer::new(chol_symbolic.solve_in_place_req::<f64>(1).ok()?);
         let nnz = symbolic_base.compute_nnz();
         let k = dense_cols.len();
@@ -649,7 +712,7 @@ impl NormalKkt {
         };
         let ok = self
             .chol_symbolic
-            .factorize_numeric_llt::<f64>(&mut self.l_values, m, Side::Upper, reg, factor_par(), PodStack::new(&mut self.numeric_buf))
+            .factorize_numeric_llt::<f64>(&mut self.l_values, m, Side::Upper, reg, factor_par(self.chol_symbolic.len_values()), PodStack::new(&mut self.numeric_buf))
             .is_ok();
         self.factored = ok;
         if !ok {
@@ -772,15 +835,16 @@ pub enum IpmKkt {
 }
 
 impl IpmKkt {
-    /// 正規方程式を作れればそれを、だめ (稠密な列) なら拡大系を使う。
-    /// `ENOMOTO_IPM_AUGMENTED=1` で常に拡大系。
-    pub fn new(a: &FaerCsr) -> Self {
+    /// 正規方程式を作れればそれを、だめ (稠密な列・因子が大きすぎる) なら拡大系を使う。
+    /// `ENOMOTO_IPM_AUGMENTED=1` で常に拡大系。どちらも因子の非零数が [`MAX_FACTOR_NNZ`] を超えるなら
+    /// `None` (内点法を諦める)。
+    pub fn new(a: &FaerCsr) -> Option<Self> {
         if env_str!("ENOMOTO_IPM_AUGMENTED").is_none() {
             if let Some(nk) = NormalKkt::new(a) {
-                return IpmKkt::Normal(nk);
+                return Some(IpmKkt::Normal(nk));
             }
         }
-        IpmKkt::Aug(AugKkt::new(a))
+        AugKkt::try_new(a, max_factor_nnz()).map(IpmKkt::Aug)
     }
 
     /// 拡大系 (`A` から新たに作る。正規方程式が停滞したときの切り替え用)。

@@ -65,7 +65,7 @@
 use crate::presolve::{self, scaling};
 use crate::sparse::{CscMat, CsrMat, csr_row_iter, sparse_axpy_dense, sparse_dot_dense};
 use crate::types::{ConstraintRow, Objective, RowSense, Sense, Status, VariableData};
-use crate::params::simplex::{COST_PERTURB_BASE, COST_PERTURB_BOXED_FRACTION, COST_PERTURB_ZERO_COST_SCALE, COST_PERTURB_FEW_BOXED_COST_CAP, COST_PERTURB_LARGE_COST, EXPAND_DELTA_0, EXPAND_DELTA_F, EXPAND_K, EXPAND_TAU, FT_BUMP_LIMIT_FACTOR, FT_CHECK_INTERVAL, FT_MAX_UPDATES, FT_MIN_PIVOT, FT_RESIDUAL_TOL, MAX_ITERS_CEILING, MAX_ITERS_FLOOR, MAX_ITERS_SCALE, PARALLEL_COMPONENT_MIN_VARS, PARTIAL_PRICING_GROUPS, PARTIAL_PRICING_THRESHOLD, PRESOLVE_ROUNDS, PRIMAL_HARRIS_TOL, PRIMAL_STALL_LIMIT_MIN, PRIMAL_STALL_LIMIT_PER_ROW, PROPAGATION_PASSES, RACE_MIN_ROWS, RAYON_SIZE_THRESHOLD, ROWSINGLETON_COLSINGLETON_INNER_ROUNDS, RUIZ_ITERS, STALL_PROGRESS_EPS, STEEPEST_EDGE_FLOOR, TOL, UPDATE_VERIFY_TOL};
+use crate::params::simplex::{COST_PERTURB_BASE, COST_PERTURB_BOXED_FRACTION, COST_PERTURB_ZERO_COST_SCALE, COST_PERTURB_FEW_BOXED_COST_CAP, COST_PERTURB_LARGE_COST, EXPAND_DELTA_0, EXPAND_DELTA_F, EXPAND_K, EXPAND_TAU, FT_BUMP_LIMIT_FACTOR, FT_CHECK_INTERVAL, FT_MAX_UPDATES, FT_MIN_PIVOT, FT_RESIDUAL_TOL, MAX_ITERS_CEILING, MAX_ITERS_FLOOR, MAX_ITERS_SCALE, PARALLEL_COMPONENT_MIN_VARS, PARTIAL_PRICING_GROUPS, PARTIAL_PRICING_THRESHOLD, PRESOLVE_ROUNDS, PRIMAL_HARRIS_TOL, PRIMAL_STALL_LIMIT_MIN, PRIMAL_STALL_LIMIT_PER_ROW, PROPAGATION_PASSES, RACE_MIN_ROWS, RAYON_SIZE_THRESHOLD, XO_SERIAL_NNZ, XO_SPLIT_MIN_VARS, ROWSINGLETON_COLSINGLETON_INNER_ROUNDS, RUIZ_ITERS, STALL_PROGRESS_EPS, STEEPEST_EDGE_FLOOR, TOL, UPDATE_VERIFY_TOL};
 
 /// Markowitz ピボットの疎 LU と Forrest-Tomlin 更新。このファイル内では
 /// ローカル変数名 `lu` (FtLu インスタンス) との衝突を避けるため `sparse_lu` の別名で参照する。
@@ -1241,9 +1241,24 @@ fn run_phase2_incremental(std: &StdForm, t: &mut Tableau, lu: &mut sparse_lu::Ft
 
     let mut need_fresh = true; // 次の反復の頭で x_B と d を作り直すか
     let max_iters = max_iters_for(m, n);
+    // 計測用 (`ENOMOTO_DEBUG_PROGRESS=1`): 1000 反復ごとに経過時間・目的値・双対実行不能の列数を出す。
+    let progress = env_str!("ENOMOTO_DEBUG_PROGRESS").is_some();
+    let progress_t0 = std::time::Instant::now();
     for _iter in 0..max_iters {
         if _iter & 63 == 0 && crate::cancel::is_cancelled() {
             return None; // 同時実行の相手が先に結論を出した
+        }
+        if progress && _iter % 1000 == 0 {
+            let obj: f64 = (0..n).map(|j| std.c[j] * t.x[j]).sum();
+            let ndi = (0..n)
+                .filter(|&j| match t.nb_status[j] {
+                    Some(NbStatus::Lower) => d[j] < -TOL && std.lb[j] < std.ub[j],
+                    Some(NbStatus::Upper) => d[j] > TOL && std.lb[j] < std.ub[j],
+                    Some(NbStatus::Zero) => d[j].abs() > TOL,
+                    None => false,
+                })
+                .count();
+            eprintln!("PROGRESS primal iter={_iter} t={:.1}s obj={obj:.10e} dual_infeas={ndi} bland={}", progress_t0.elapsed().as_secs_f64(), stall.bland_mode);
         }
         prof_phases::RUN_PHASE_ITERS.fetch_add(1, Relaxed);
         let fresh_now = need_fresh; // この反復の x_B/d が作り直したばかりの値か
@@ -1623,15 +1638,21 @@ fn solve_std_form_decomposed(std: &StdForm, opts: &crate::types::LpOptions) -> S
         return solve_one(std);
     }
 
-    let sub_std_forms = split_std_form(std, &components);
-    let use_parallel = components.iter().any(|c| c.len() >= PARALLEL_COMPONENT_MIN_VARS); // rayon で並列に解くか
+    solve_split(std, &components, solve_one)
+}
+
+/// 変数の組 `groups` (互いに行を共有しない) ごとに `std` を分けて `solve_one` で解き、元の変数番号で
+/// 1 つの [`SimplexResult`] に組み立てる。どれかの組が [`PARALLEL_COMPONENT_MIN_VARS`] 以上なら rayon で並列に解く。
+fn solve_split(std: &StdForm, groups: &[Vec<usize>], solve_one: impl Fn(&StdForm) -> SimplexResult + Sync) -> SimplexResult {
+    let sub_std_forms = split_std_form(std, groups);
+    let use_parallel = groups.iter().any(|c| c.len() >= PARALLEL_COMPONENT_MIN_VARS); // rayon で並列に解くか
     let results: Vec<SimplexResult> = if use_parallel {
         use rayon::prelude::*;
         // 打ち切りのトークン (同時実行時) を各成分のタスクに引き継ぐ (`crate::cancel`)。
         let token = crate::cancel::current();
         sub_std_forms.par_iter().map(|s| crate::cancel::with_token(token.clone(), || solve_one(s))).collect()
     } else {
-        sub_std_forms.iter().map(solve_one).collect()
+        sub_std_forms.iter().map(&solve_one).collect()
     };
 
     let status = combine_component_statuses(results.iter().map(|r| &r.status));
@@ -1640,13 +1661,48 @@ fn solve_std_form_decomposed(std: &StdForm, opts: &crate::types::LpOptions) -> S
     }
     let n_orig = std.n_total - std.n_rows;
     let mut x = vec![0.0; n_orig];
-    for (result, component) in results.iter().zip(components.iter()) {
+    for (result, component) in results.iter().zip(groups.iter()) {
         let sub_x = result.x.as_ref().expect("Optimal result must carry x");
         for (local_j, &orig_j) in component.iter().enumerate() {
             x[orig_j] = sub_x[local_j];
         }
     }
     SimplexResult { status: Status::Optimal, x: Some(x) }
+}
+
+/// 内点法 + クロスオーバーを、独立な成分ごとに分けて行う (fome13 = dfl001 の 8 個の直和など)。
+/// 変数が `ENOMOTO_T_XO_SPLIT_MIN_VARS` (既定 [`XO_SPLIT_MIN_VARS`]) 以上の成分は 1 つずつ、それより小さい成分は
+/// まとめて 1 つの問題として解く。分けられる組が 2 つ未満なら `None` (呼び出し側が一括で解く)。
+/// 各組で内点法が収束しない・基底が作れないときは、その組だけ傾き・切片二段解法で解き直す。
+fn solve_ipm_crossover_split(std: &StdForm, opts: &crate::types::LpOptions) -> Option<SimplexResult> {
+    let min_vars = tunable!("ENOMOTO_T_XO_SPLIT_MIN_VARS", XO_SPLIT_MIN_VARS, usize);
+    if min_vars == 0 {
+        return None;
+    }
+    let (components, _) = connected_components_of_std_form(std)?;
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    let mut rest: Vec<usize> = Vec::new();
+    for c in components {
+        if c.len() >= min_vars {
+            groups.push(c);
+        } else {
+            rest.extend(c);
+        }
+    }
+    if groups.is_empty() || (groups.len() == 1 && rest.is_empty()) {
+        return None;
+    }
+    if !rest.is_empty() {
+        rest.sort_unstable();
+        groups.push(rest);
+    }
+    crate::phase_timing::record("xo_split_groups", groups.len() as f64);
+    Some(solve_split(std, &groups, |s| {
+        crossover::solve_ipm_crossover(s).unwrap_or_else(|| {
+            crate::phase_timing::mark("crossover_fallback");
+            solve_std_form_decomposed(s, opts)
+        })
+    }))
 }
 
 /// 独立な成分それぞれの状態から問題全体の状態を決める。
@@ -1934,13 +1990,34 @@ fn solve_one_engine(std: &StdForm, opts: &crate::types::LpOptions) -> SimplexRes
         return solve_staged_ipm(std, opts);
     }
     if opts.ipm_crossover {
+        // 小さな問題 (非零の数が `ENOMOTO_T_XO_SERIAL_NNZ` 未満) は 1 スレッドのプールで解く: 内点法は 1 反復に何十回も
+        // 並列ループを呼び、小さな問題では眠ったスレッドを起こす待ちが計算より長い (blend: 1 反復 1.6 ミリ秒、
+        // 計測ごとに 4〜34 ミリ秒とばらつく)。
+        let serial_nnz = tunable!("ENOMOTO_T_XO_SERIAL_NNZ", XO_SERIAL_NNZ, usize);
+        if std.cols.nnz() < serial_nnz && rayon::current_num_threads() > 1 {
+            static POOL: std::sync::OnceLock<Option<rayon::ThreadPool>> = std::sync::OnceLock::new();
+            if let Some(pool) = POOL.get_or_init(|| rayon::ThreadPoolBuilder::new().num_threads(1).build().ok()) {
+                return pool.install(|| solve_ipm_crossover_engine(std, opts));
+            }
+        }
+        solve_ipm_crossover_engine(std, opts)
+    } else {
+        solve_std_form_decomposed(std, opts)
+    }
+}
+
+/// 内点法 + クロスオーバー ([`solve_one_engine`] の本体)。
+fn solve_ipm_crossover_engine(std: &StdForm, opts: &crate::types::LpOptions) -> SimplexResult {
+    {
         // 内点法 + クロスオーバー。内点法が収束しない・基底が作れないときは傾き・切片二段解法で解き直す。
+        // 大きな独立成分が 2 つ以上あれば成分ごとに分けて解く。
+        if let Some(r) = solve_ipm_crossover_split(std, opts) {
+            return r;
+        }
         crossover::solve_ipm_crossover(std).unwrap_or_else(|| {
             crate::phase_timing::mark("crossover_fallback");
             solve_std_form_decomposed(std, opts)
         })
-    } else {
-        solve_std_form_decomposed(std, opts)
     }
 }
 
@@ -1963,7 +2040,7 @@ fn solve_staged_ipm(std: &StdForm, opts: &crate::types::LpOptions) -> SimplexRes
         Some(slope_intercept_dual::StageA::DualFeasible { y }) => {
             crate::phase_timing::mark("staged_stage_a_dual_feasible");
             let center = tunable!("ENOMOTO_T_IPM_STAGED_CENTER", 1u8, u8) != 0;
-            let xo = crossover::XoOptions { dual_center: center.then_some(&y[..]), dual_feasible_known: true };
+            let xo = crossover::XoOptions { dual_center: center.then_some(&y[..]), dual_feasible_known: true, ..Default::default() };
             crossover::solve_ipm_crossover_with(std, &xo).unwrap_or_else(fallback)
         }
         Some(slope_intercept_dual::StageA::NoFiniteOptimum { .. }) => {
