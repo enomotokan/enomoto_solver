@@ -1323,6 +1323,32 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
             st.li_from_d += 1;
         }
     }
+    // 試験用 (`ENOMOTO_T_XO_FILL_BY_S=K`): 足りない列を、スラックで埋める前に、内点法の被約費用 |s_j| の小さい列
+    // (スラックを含む) から試して埋める (足りない数の K 倍まで試す)。スラックを基底に入れるとその行の双対が 0 に
+    // 固定され、内点法の y から離れて双対実行不能が増える (ken-18・pds-20)。
+    let fill_k = tunable!("ENOMOTO_T_XO_FILL_BY_S", 0usize, usize);
+    if fill_k > 0 && !sel.full() {
+        let missing = m - sel.chosen.len();
+        let mut cand_s: Vec<usize> = (0..n).filter(|&j| !sel.is_chosen[j] && std.lb[j] < std.ub[j]).collect();
+        let take = (fill_k * missing).min(cand_s.len());
+        if take < cand_s.len() {
+            cand_s.select_nth_unstable_by(take, |&a, &b| s[a].abs().total_cmp(&s[b].abs()));
+            cand_s.truncate(take);
+        }
+        cand_s.sort_by(|&a, &b| s[a].abs().total_cmp(&s[b].abs()));
+        for &j in &cand_s {
+            if sel.full() {
+                break;
+            }
+            if sel.try_add(j, col(std, j)) {
+                if j >= n_orig {
+                    st.li_slack += 1;
+                } else {
+                    st.li_from_d += 1;
+                }
+            }
+        }
+    }
     for i in 0..m {
         if sel.full() {
             break;
