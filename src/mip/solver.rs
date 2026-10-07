@@ -136,6 +136,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// ALNS の腕ごとの報酬の合計と試した回数。
     pub(super) alns_reward: [f64; 4],
     pub(super) alns_count: [u32; 4],
+    /// 大近傍探索 (サブ MIP) に使った時間の合計 (秒)。
+    pub(super) lns_secs: f64,
     /// ノードの LP (強分岐以外) に使った反復数と回数。
     node_iters: u64,
     node_lps: u64,
@@ -231,6 +233,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
         improve_turn: 0,
         alns_reward: [0.0; 4],
         alns_count: [0; 4],
+        lns_secs: 0.0,
         node_iters: 0,
         node_lps: 0,
         node_lp_secs: 0.0,
@@ -740,36 +743,40 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if resolves == 0 {
                     self.simple_rounding(&x);
                     let budget = self.lp.total_iterations() / 20 + 10_000;
-                    if node.depth > 0 && plunge_depth == 0 && self.heur_iters < budget {
-                        if self.incumbent.is_some() && self.nodes >= self.last_rins + 100 {
-                            self.last_rins = self.nodes;
-                            // 改善ヒューリスティクス: ALNS で選ぶ (ENOMOTO_MIP_NO_ALNS なら RINS → Local Branching →
-                            // Proximity Search を順に回す)
-                            let turn = if env_str!("ENOMOTO_MIP_ONLY_RINS").is_some() {
-                                0
-                            } else if env_str!("ENOMOTO_MIP_NO_ALNS").is_none() {
-                                3
-                            } else {
-                                self.improve_turn % 3
-                            };
-                            self.improve_turn += 1;
-                            match turn {
-                                0 => {
-                                    self.rins(&x);
-                                }
-                                1 => {
-                                    self.local_branching();
-                                }
-                                2 => {
-                                    self.proximity_search();
-                                }
-                                _ => {
-                                    self.alns(&x);
-                                }
-                            }
+                    // 大近傍探索 (サブ MIP) は反復の予算とは別に、経過時間の一定割合までの時間の予算で呼ぶ
+                    // (サブ MIP の反復を共通の予算に数えると、1 回で使い切ってしばらく呼べなくなる)
+                    let lns_ok = self.lns_secs < tunable!("ENOMOTO_T_MIP_LNS_TIME_FRAC", 0.1, f64) * self.start.elapsed().as_secs_f64();
+                    let lns_freq = tunable!("ENOMOTO_T_MIP_LNS_FREQ", 50u64, u64);
+                    if node.depth > 0 && plunge_depth == 0 && self.incumbent.is_some() && self.nodes >= self.last_rins + lns_freq && lns_ok {
+                        self.last_rins = self.nodes;
+                        let t_lns = Instant::now();
+                        // 改善ヒューリスティクス: ALNS で選ぶ (ENOMOTO_MIP_NO_ALNS なら RINS → Local Branching →
+                        // Proximity Search を順に回す)
+                        let turn = if env_str!("ENOMOTO_MIP_ONLY_RINS").is_some() {
+                            0
+                        } else if env_str!("ENOMOTO_MIP_NO_ALNS").is_none() {
+                            3
                         } else {
-                            self.randomized_rounding(&x, 1);
+                            self.improve_turn % 3
+                        };
+                        self.improve_turn += 1;
+                        match turn {
+                            0 => {
+                                self.rins(&x);
+                            }
+                            1 => {
+                                self.local_branching();
+                            }
+                            2 => {
+                                self.proximity_search();
+                            }
+                            _ => {
+                                self.alns(&x);
+                            }
                         }
+                        self.lns_secs += t_lns.elapsed().as_secs_f64();
+                    } else if node.depth > 0 && plunge_depth == 0 && self.heur_iters < budget {
+                        self.randomized_rounding(&x, 1);
                     }
                     xp("m_heur");
                     // ダイビング (SCIP の fracdiving / veclendiving: 深さ 10 ごと、ずらし 3 / 7)
