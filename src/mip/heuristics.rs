@@ -758,14 +758,33 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// Feasibility Jump (重み付きの局所探索、LP 不要)。`effort` は列の評価回数の目安。
     pub(super) fn feasibility_jump(&mut self, effort: u64, time_cap: f64) -> bool {
-        let p = self.p;
+        let seed = self.rng ^ 0x9E37_79B9_7F4A_7C15;
+        self.rand();
+        match fj_search(self.p, &self.dom.lo, &self.dom.up, effort, time_cap, seed, None) {
+            Some(x) => self.try_incumbent(x),
+            None => false,
+        }
+    }
+}
+
+/// Feasibility Jump の探索本体 (Solver の状態に依らないので別スレッドでも動かせる)。`lo`/`up` は列の境界、
+/// `seed` は乱数の種、`stop` が立ったら止める。実行可能な点が見つかれば返す。
+pub(super) fn fj_search(p: &MipProblem, lo: &[f64], up: &[f64], effort: u64, time_cap: f64, seed: u64, stop: Option<&std::sync::atomic::AtomicBool>) -> Option<Vec<f64>> {
+    let mut rng = seed | 1;
+    let mut rand = move || {
+        rng ^= rng >> 12;
+        rng ^= rng << 25;
+        rng ^= rng >> 27;
+        ((rng.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 11) as f64) / ((1u64 << 53) as f64)
+    };
+    {
         let (n, m) = (p.n, p.m);
         if n == 0 {
-            return false;
+            return None;
         }
         let t_end = Instant::now() + Duration::from_secs_f64(time_cap);
-        let lo = self.dom.lo.clone();
-        let up = self.dom.up.clone();
+        let lo = lo.to_vec();
+        let up = up.to_vec();
         // 初期点: 0 に最も近い境界内の値
         let mut x: Vec<f64> = (0..n)
             .map(|j| {
@@ -800,13 +819,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut cand: Vec<f64> = Vec::new();
         while work < effort {
             step += 1;
-            if step % 256 == 0 && Instant::now() >= t_end {
+            if step % 256 == 0 && (Instant::now() >= t_end || stop.is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed))) {
                 break;
             }
             if vset.is_empty() {
-                return self.try_incumbent(x);
+                return Some(x);
             }
-            let i = vset[(self.rand() * vset.len() as f64) as usize % vset.len()];
+            let i = vset[(rand() * vset.len() as f64) as usize % vset.len()];
             // 行 i の各変数について、列の行の重み付き違反を最小にする値を探す
             let mut best: Option<(usize, f64, f64)> = None; // (列, 値, 改善量)
             for &(j, _) in &p.rows[i] {
@@ -885,8 +904,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
         }
-        false
+        None
     }
+}
+
+impl<'a, L: MipLp> Solver<'a, L> {
 }
 
 /// ダイビングの種類。
@@ -949,6 +971,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             cutoff: cutoff.unwrap_or_else(|| self.prune_limit()),
             restarts: 0,
         };
+        // 並列モード (根のヒューリスティクスの間): 別スレッドで解き始め、結果は後で受け取る
+        if self.parallel_submips {
+            self.spawn_submip(sub, params);
+            return Some((super::solver::MipStatus::NotSolved, false));
+        }
         let r = super::solve_problem(&sub, params, env_str!("ENOMOTO_MIP_SUBMIP_NO_PRESOLVE").is_none());
         if self.params.verbose {
             let nfree = (0..p.n).filter(|&j| sub.col_lo[j] < sub.col_up[j]).count();

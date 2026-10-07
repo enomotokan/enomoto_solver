@@ -145,6 +145,12 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) lns_secs: f64,
     /// サブ MIP の時間の上限 (残り時間に対する割合)。
     pub(super) submip_time_frac: f64,
+    /// 並列モードで、サブ MIP を別スレッドで解くか (根のヒューリスティクスの間だけ真)。
+    pub(super) parallel_submips: bool,
+    /// 別スレッドで解いているサブ MIP (出した順)。
+    pub(super) pending_submips: std::collections::VecDeque<std::thread::JoinHandle<MipResult>>,
+    /// 別スレッドの Feasibility Jump とその停止の印。
+    fj_thread: Option<(std::thread::JoinHandle<Option<Vec<f64>>>, std::sync::Arc<std::sync::atomic::AtomicBool>)>,
     /// RENS の固定率の記録 (成功したときの固定率の合計と回数、サブ MIP が実行不能だったときの合計と回数)。
     pub(super) rens_succ: (f64, u32),
     pub(super) rens_infeas: (f64, u32),
@@ -205,6 +211,11 @@ pub(super) struct Solver<'a, L: MipLp> {
 }
 
 /// 分枝限定法で解く。
+/// 並列モードのスレッド数 (`ENOMOTO_MIP_THREADS`、既定 1 = 並列にしない)。
+pub(crate) fn mip_threads() -> usize {
+    tunable!("ENOMOTO_MIP_THREADS", 1usize, usize).max(1)
+}
+
 pub fn solve(p: &MipProblem, params: MipParams) -> MipResult {
     // LP の実装: 既定は傾き・切片二段解法 (`ENOMOTO_MIP_LP=own` で分枝限定法専用の単体法)。
     if env_str!("ENOMOTO_MIP_LP").is_some_and(|v| v == "own") {
@@ -252,6 +263,9 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
         sol_pool: Vec::new(),
         lns_secs: 0.0,
         submip_time_frac: 0.07,
+        parallel_submips: false,
+        pending_submips: std::collections::VecDeque::new(),
+        fj_thread: None,
         rens_succ: (0.0, 0),
         rens_infeas: (0.0, 0),
         node_iters: 0,
@@ -470,7 +484,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
         {
             let nnz: usize = self.p.rows.iter().map(|r| r.len()).sum();
             let cap = if self.params.time_limit.is_finite() { (0.05 * self.params.time_limit).min(5.0) } else { 5.0 };
-            if !self.params.submip && self.feasibility_jump((50 * nnz as u64).clamp(100_000, 50_000_000), cap) && self.params.verbose {
+            let effort = (50 * nnz as u64).clamp(100_000, 50_000_000);
+            if !self.params.submip && mip_threads() > 1 {
+                // 並列モード: 別スレッドで根の LP・切除平面と同時に回す (根のヒューリスティクスの前に受け取る)
+                let pc = std::sync::Arc::new(self.p.clone());
+                let (lo, up) = (self.dom.lo.clone(), self.dom.up.clone());
+                let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let stop2 = stop.clone();
+                let seed = self.rng ^ 0x9E37_79B9_7F4A_7C15;
+                let h = std::thread::spawn(move || super::heuristics::fj_search(&pc, &lo, &up, effort, cap, seed, Some(&stop2)));
+                self.fj_thread = Some((h, stop));
+            } else if !self.params.submip && self.feasibility_jump(effort, cap) && self.params.verbose {
                 eprintln!("MIP: feasibility jump found a solution ({:.2}s)", self.start.elapsed().as_secs_f64());
             }
         }
@@ -502,9 +526,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 root_obj = self.lp.objective() + self.p.offset;
             }
         }
+        self.join_fj_thread();
         // 根のヒューリスティクス
         {
             let x = self.lp.col_values();
+            // 並列モード: サブ MIP を使うヒューリスティクスは別スレッドで解かせる
+            self.parallel_submips = mip_threads() > 1 && !self.params.submip;
             if self.fractional(&x).is_empty() {
                 self.try_lp_solution();
             } else {
@@ -564,6 +591,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         heur!("vbounds (tight)", self.vbounds_heur(false));
                     }
                 }
+                // 並列モード: 別スレッドのサブ MIP の結果を出した順に受け取る
+                self.parallel_submips = false;
+                self.join_submips(0);
                 // 暫定解 (Feasibility Jump・pump・丸めなどで得たもの) を根の LP 解との RINS で磨く
                 if self.incumbent.is_some() && env_str!("ENOMOTO_MIP_NO_ROOT_RINS").is_none() {
                     heur!("RINS", self.rins(&x));
@@ -573,6 +603,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
         }
+        // 並列モードは根のヒューリスティクスの間だけ (LP 解が整数で途中を飛ばした場合も戻す)
+        self.parallel_submips = false;
+        self.join_submips(0);
         if env_str!("ENOMOTO_MIP_DEBUG_BOUNDS").is_some() {
             DEBUG_SOL.with(|d| {
                 if let Some(x) = d.borrow().as_ref() {
@@ -1843,7 +1876,51 @@ impl<'a, L: MipLp> Solver<'a, L> {
         Some(MipResult { status, x, objective, best_bound, nodes, lp_iterations: iters })
     }
 
+    /// 別スレッドでサブ MIP を解き始める (同時に走らせるのはスレッド数 - 1 本まで。超えたら古いものを待つ)。
+    pub(super) fn spawn_submip(&mut self, sub: MipProblem, params: MipParams) {
+        let lim = mip_threads().saturating_sub(1).max(1);
+        if self.pending_submips.len() >= lim {
+            self.join_submips(lim - 1);
+        }
+        let presolve = env_str!("ENOMOTO_MIP_SUBMIP_NO_PRESOLVE").is_none();
+        self.pending_submips.push_back(std::thread::spawn(move || super::solve_problem(&sub, params, presolve)));
+    }
+
+    /// 別スレッドのサブ MIP を、残りが `keep` 本になるまで出した順に待って結果を受け取る。
+    pub(super) fn join_submips(&mut self, keep: usize) {
+        while self.pending_submips.len() > keep {
+            let h = self.pending_submips.pop_front().unwrap();
+            if let Ok(r) = h.join() {
+                self.heur_iters += r.lp_iterations;
+                if self.params.verbose {
+                    eprintln!("MIP:   parallel sub-MIP: status {:?}, nodes {}, objective {:?}", r.status, r.nodes, r.objective);
+                }
+                if let Some(x) = r.x {
+                    self.try_incumbent(x);
+                }
+            }
+        }
+    }
+
+    /// 別スレッドの Feasibility Jump を止めて結果を受け取る。
+    fn join_fj_thread(&mut self) {
+        if let Some((h, stop)) = self.fj_thread.take() {
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            if let Ok(Some(x)) = h.join() {
+                if self.try_incumbent(x) && self.params.verbose {
+                    eprintln!("MIP: feasibility jump (parallel) found a solution ({:.2}s)", self.start.elapsed().as_secs_f64());
+                }
+            }
+        }
+    }
+
     fn finish(&mut self, status: MipStatus, best_bound: f64) -> MipResult {
+        // 並列モードの別スレッドを止める・待つ
+        if let Some((_, stop)) = &self.fj_thread {
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.parallel_submips = false;
+        self.join_submips(0);
         self.log(true);
         if self.params.verbose {
             eprintln!("MIP: dual proofs and conflicts {} (conflicts added {}, Farkas {}, pruned {} nodes, tightened {} bounds)", self.dual_proofs.len(), self.conflicts_added, self.farkas_added, self.proof_prunes, self.proof_tightenings);
