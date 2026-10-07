@@ -310,7 +310,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut touched: Vec<usize> = Vec::new();
         let mut used_row = vec![false; m];
         let mut starts = 0usize;
-        for start in 0..m {
+        // 始点の行 (既定は元の行だけ。カットの行は相手としてだけ使う)
+        let m_start = if env_str!("ENOMOTO_MIP_PATH_START_CUTS").is_some() { m } else { p.m.min(m) };
+        for start in 0..m_start {
             if starts >= 1000 || (start % 64 == 0 && self.time_up()) {
                 break;
             }
