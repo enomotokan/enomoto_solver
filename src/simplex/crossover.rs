@@ -1678,7 +1678,8 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
 /// 突き合わせて記録する (`xo_eval{k}_*`、k は 0: γ = 1、1: γ = τ_j、2: PDHG の 1 歩 + γ = τ_j)。固定列は数えない。
 /// - `bdet`: 基底候補にした列の数、`bhit`: そのうち最適基底で基底の列、
 /// - `nbdet`: 非基底にした列の数、`nbwrong`: そのうち最適基底で基底の列 (取りこぼし)、`side`: 最適基底でも非基底だが境界が逆。
-/// `opt_basic` は最適基底の (固定でない) 基底の列の数。
+/// - `nbinner`: 取りこぼしのうち、最適解で値が境界から離れている列 (退化した基底変数を除いた、本当の誤り)。
+/// `opt_basic` は最適基底の (固定でない) 基底の列の数、`opt_inner` はそのうち値が境界から離れている列の数。
 fn record_detect_eval(std: &StdForm, bp: &[Option<usize>], xr: &[f64], cls: &[Vec<i8>]) {
     let n = std.n_total;
     let m = std.n_rows;
@@ -1711,13 +1712,22 @@ fn record_detect_eval(std: &StdForm, bp: &[Option<usize>], xr: &[f64], cls: &[Ve
         .collect();
     let free = |j: usize| std.lb[j] < std.ub[j];
     crate::phase_timing::record("xo_eval_opt_basic", (0..n).filter(|&j| free(j) && fin[j] == 0).count() as f64);
-    const NAMES: [[&str; 5]; 3] = [
-        ["xo_eval0_bdet", "xo_eval0_bhit", "xo_eval0_nbdet", "xo_eval0_nbwrong", "xo_eval0_side"],
-        ["xo_eval1_bdet", "xo_eval1_bhit", "xo_eval1_nbdet", "xo_eval1_nbwrong", "xo_eval1_side"],
-        ["xo_eval2_bdet", "xo_eval2_bhit", "xo_eval2_nbdet", "xo_eval2_nbwrong", "xo_eval2_side"],
+    // 最適基底で基底かつ値が境界から離れている (退化していない) 列。
+    let inner: Vec<bool> = (0..n)
+        .map(|j| {
+            let v = val(j);
+            let t = 1e-7 * (1.0 + v.abs());
+            fin[j] == 0 && v - std.lb[j] > t && std.ub[j] - v > t
+        })
+        .collect();
+    crate::phase_timing::record("xo_eval_opt_inner", (0..n).filter(|&j| free(j) && inner[j]).count() as f64);
+    const NAMES: [[&str; 6]; 3] = [
+        ["xo_eval0_bdet", "xo_eval0_bhit", "xo_eval0_nbdet", "xo_eval0_nbwrong", "xo_eval0_side", "xo_eval0_nbinner"],
+        ["xo_eval1_bdet", "xo_eval1_bhit", "xo_eval1_nbdet", "xo_eval1_nbwrong", "xo_eval1_side", "xo_eval1_nbinner"],
+        ["xo_eval2_bdet", "xo_eval2_bhit", "xo_eval2_nbdet", "xo_eval2_nbwrong", "xo_eval2_side", "xo_eval2_nbinner"],
     ];
     for (k, c) in cls.iter().enumerate().take(3) {
-        let (mut bdet, mut bhit, mut nbdet, mut nbwrong, mut side) = (0usize, 0usize, 0usize, 0usize, 0usize);
+        let (mut bdet, mut bhit, mut nbdet, mut nbwrong, mut side, mut nbinner) = (0usize, 0usize, 0usize, 0usize, 0usize, 0usize);
         for j in (0..n).filter(|&j| free(j)) {
             if c[j] == 0 {
                 bdet += 1;
@@ -1726,12 +1736,13 @@ fn record_detect_eval(std: &StdForm, bp: &[Option<usize>], xr: &[f64], cls: &[Ve
                 nbdet += 1;
                 if fin[j] == 0 {
                     nbwrong += 1;
+                    nbinner += inner[j] as usize;
                 } else if fin[j] != c[j] {
                     side += 1;
                 }
             }
         }
-        for (name, v) in NAMES[k].iter().zip([bdet, bhit, nbdet, nbwrong, side]) {
+        for (name, v) in NAMES[k].iter().zip([bdet, bhit, nbdet, nbwrong, side, nbinner]) {
             crate::phase_timing::record(name, v as f64);
         }
     }
