@@ -44,7 +44,7 @@ use super::{perturb_random, sparse_lu, NbStatus, SimplexResult, StdForm};
 use crate::interior_point::boxed::{solve_box_lp, solve_box_lp_warm, BoxIpmResult, WarmStart};
 use crate::interior_point::pdlp::{solve_pdlp, PdlpOptions};
 use crate::interior_point::kkt::AugKkt;
-use crate::sparse::{csr_from_rows, sparse_dot_dense};
+use crate::sparse::{csr_from_rows, csr_row_iter, sparse_dot_dense, FaerCsr};
 use crate::types::Status;
 use std::time::Instant;
 
@@ -468,6 +468,31 @@ struct Reduced {
     u: Vec<f64>,
 }
 
+/// Pock–Chambolle (α = 1) で行・列をそろえた問題 `(R A C, R b, C c, l/C, u/C)` と縮尺 `(dr, dc)`
+/// (`x = dc ∘ x'`、`y = dr ∘ y'`)。
+#[allow(clippy::type_complexity)]
+fn pock_chambolle_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64]) -> (FaerCsr, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
+    let m = a.nrows();
+    let n = a.ncols();
+    let mut rsum = vec![0.0f64; m];
+    let mut csum = vec![0.0f64; n];
+    for i in 0..m {
+        for (j, v) in csr_row_iter(a, i) {
+            rsum[i] += v.abs();
+            csum[j] += v.abs();
+        }
+    }
+    let dr: Vec<f64> = rsum.iter().map(|&v| if v > 0.0 { 1.0 / v.sqrt() } else { 1.0 }).collect();
+    let dc: Vec<f64> = csum.iter().map(|&v| if v > 0.0 { 1.0 / v.sqrt() } else { 1.0 }).collect();
+    let rows: Vec<Vec<(usize, f64)>> = (0..m).map(|i| csr_row_iter(a, i).map(|(j, v)| (j, v * dr[i] * dc[j])).collect()).collect();
+    let a_s = csr_from_rows(&rows, n);
+    let b_s = (0..m).map(|i| b[i] * dr[i]).collect();
+    let c_s = (0..n).map(|j| c[j] * dc[j]).collect();
+    let l_s = (0..n).map(|j| l[j] / dc[j]).collect();
+    let u_s = (0..n).map(|j| u[j] / dc[j]).collect();
+    (a_s, b_s, c_s, l_s, u_s, dr, dc)
+}
+
 fn reduce_fixed(std: &StdForm) -> Reduced {
     let n = std.n_total;
     let m = std.n_rows;
@@ -562,6 +587,8 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     let shared = crate::cancel::bound().filter(|sb| bound_gap > 0.0 && sb.n_total == std.n_total && sb.n_rows == std.n_rows);
     let fixed_obj: f64 = (0..std.n_total).filter(|&j| !(std.lb[j] < std.ub[j])).map(|j| std.c[j] * std.lb[j]).sum();
     let lb_fn = move || shared.as_ref().map_or(f64::NEG_INFINITY, |sb| sb.get() - fixed_obj);
+    let ipm_pc = tunable!("ENOMOTO_T_XO_IPM_PC", 0u8, u8) != 0;
+    let pc = (ipm_pc && xo.given_point.is_none()).then(|| pock_chambolle_scaled(&a_j, &b_j, &c_j, &l_j, &u_j));
     let ipm = if let Some((gx, gy, _)) = xo.given_point {
         BoxIpmResult {
             status: Status::Optimal,
@@ -571,6 +598,29 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
             iters: 0,
             rel_res: (0.0, 0.0, 0.0),
         }
+    } else if pdlp_mode == 0 && pc.is_some() {
+        // 試験用 (`ENOMOTO_T_XO_IPM_PC=1`): Pock–Chambolle で行・列をそろえた問題を内点法で解き、元の単位に戻す。
+        let (a_s, b_s, c_s, l_s, u_s, dr, dc) = pc.as_ref().unwrap();
+        let yc: Option<Vec<f64>> = xo.dual_center.map(|y| y.iter().zip(dr).map(|(v, d)| v / d).collect());
+        let warm = WarmStart {
+            y: yc.as_deref(),
+            dual_feasible_known: xo.dual_feasible_known,
+            lower_bound: if bound_gap > 0.0 { Some(&lb_fn) } else { None },
+            bound_gap,
+            bound_pres: tunable!("ENOMOTO_T_XO_BOUND_PRES", prm::IPM_ACCEPT_REL, f64),
+            ..Default::default()
+        };
+        let mut r = solve_box_lp_warm(a_s, b_s, c_s, l_s, u_s, max_iters, Some(&warm));
+        for (v, d) in r.x.iter_mut().zip(dc) {
+            *v *= d;
+        }
+        for (v, d) in r.y.iter_mut().zip(dr) {
+            *v *= d;
+        }
+        for (v, d) in r.rc.iter_mut().zip(dc) {
+            *v /= d;
+        }
+        r
     } else if pdlp_mode == 0 {
         if xo.dual_center.is_some() || xo.dual_feasible_known || bound_gap > 0.0 {
             let warm = WarmStart {
@@ -662,7 +712,27 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     let gamma_mult = tunable!("ENOMOTO_T_XO_GAMMA_MULT", 1.0f64, f64);
     let mut gamma = vec![prm::GAMMA * gamma_mult; n];
     let mut pdhg_sigma: Option<Vec<f64>> = None;
-    if gamma_mode != 0 {
+    if gamma_mode == 6 {
+        // 試験用: Pock–Chambolle でそろえた空間 (内点法の内部の `x' = x/β`、`s' = s/γ` も含む) で γ = 1 にする:
+        // `γ_j = dc_j² β / γ_c` (β = max(1, ‖b'‖∞)、γ_c = ‖c'‖∞)。
+        let owned;
+        let (_, b_s, c_s, _, _, _, dc) = match &pc {
+            Some(p) => p,
+            None => {
+                owned = pock_chambolle_scaled(&a_j, &b_j, &c_j, &l_j, &u_j);
+                &owned
+            }
+        };
+        let beta = b_s.iter().fold(1.0f64, |m, v| m.max(v.abs()));
+        let cmax = c_s.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+        let ratio = beta / if cmax > 0.0 { cmax } else { 1.0 };
+        for (k, &j) in free_cols.iter().enumerate() {
+            gamma[j] = dc[k] * dc[k] * ratio * gamma_mult;
+        }
+        if debug {
+            eprintln!("CROSSOVER gamma mode=6 beta/gamma={ratio:.3e}");
+        }
+    } else if gamma_mode != 0 {
         let opts = PdlpOptions {
             eps: 0.0,
             max_iters: if gamma_mode == 2 || gamma_mode == 4 { 100_000 } else { 0 },
