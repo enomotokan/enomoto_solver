@@ -381,6 +381,30 @@ ns1688926 の最後の基底で x_B を反復改良つきで解き直しても�
 比べると、取り込み後は 0.807 倍 (Netlib 0.828、Kennington 0.695、1 回、`ab18/check/`) で、取り込みの効果は出ている。
 ns1688926 は γ = 1 でも目的値が判定を外れるようになった (第 17 回の数値誤差の議論を参照)。
 
+### 第 20 回 (HiGHS の内点法 + クロスオーバーとの比較)
+
+HiGHS (IPX) の内点法 + クロスオーバー (`solver=ipm`、`run_crossover=on`、前処理を含む `run` の時間) と比べた
+(`benchmarks/crossover/ab20/`、`scripts/crossover_bench/run.py --methods highs_ipm`)。109 問はすべて両方で解けたが、
+幾何平均は Netlib で 2.29 倍、Kennington で 1.66 倍遅かった (速いのは osa-14・ken-11・osa-07 など 11 問)。Mittelmann では
+qap15 (HiGHS 26 秒)・scpm1 (83 秒) が時間切れ、ex10 は 54 → 172 秒、s250r10 は 117 → 178 秒、fome13 は同等 (43 秒)。
+
+差の大きい問題の内訳: 仕上げの単体法が長い (pilot87 22 秒・pilot.ja 17 秒・dfl001 12 秒。HiGHS のクロスオーバーは pilot87 で
+4 反復)、双対の押し出しが重い (pds-10・osa-30・osa-60)、内点法が遅い (pds-20 17 秒・ken-18 12 秒・fit1p 0.9 秒)。
+
+### 第 21 回 (基底の選択の閾値)
+
+一次独立な列を選ぶとき、消去後の未ピボット行の最大成分が列の最大成分の `LI_TOL` 倍を超えれば受理していた。1e-9 では
+ほぼ一次従属な列も通り、仕上げに渡す基底が悪条件になっていた (pilot87 の主実行不能 650 本、最大 8.5e7)
+(`ENOMOTO_T_XO_LI_TOL`、`benchmarks/crossover/ab21/`)。
+
+| 閾値 | Netlib | Kennington | 109 問の比 | 退行 |
+|---|---|---|---|---|
+| 1e-9 (従来) | 1.000 | 1.000 | 1.000 | ― |
+| 1e-4 | 1.000 | 1.008 | 1.001 | pilot.ja (二段解法へ戻る) |
+| **1e-2 (採用)** | **0.793** | **0.897** | **0.807** | なし |
+
+pilot87 25.3 → 6.7 秒、pilot.ja 17.5 → 0.8 秒、perold 0.85 → 0.37 秒。
+
 ## 計測
 
 `scripts/crossover_bench/run.py` (計測) と `report.py` (集計)。結果は `benchmarks/crossover/`。
