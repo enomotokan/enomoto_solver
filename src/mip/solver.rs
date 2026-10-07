@@ -425,6 +425,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
         }
+        if env_str!("ENOMOTO_MIP_DEBUG_BOUNDS").is_some() {
+            DEBUG_SOL.with(|d| {
+                if let Some(x) = d.borrow().as_ref() {
+                    for j in 0..self.p.n {
+                        eprintln!("BND x{j} = {} global [{}, {}] local [{}, {}]", x[j], self.dom.global_lo[j], self.dom.global_up[j], self.dom.lo[j], self.dom.up[j]);
+                    }
+                }
+            });
+        }
         self.dbg_check_rows("after root cuts");
         self.dbg_lost("root domain (before redcost fixing)", !self.dbg_contains());
         let dbg_root = self.dbg_contains();

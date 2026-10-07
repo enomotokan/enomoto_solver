@@ -47,9 +47,21 @@ pub struct Domain {
     /// 大域的な境界 (根で確定したものと、その後の大域的な締め付けを反映したもの)。
     pub global_lo: Vec<f64>,
     pub global_up: Vec<f64>,
+    /// 行ごとの `max_j |a_ij| (u_j - l_j)` (作ったときの境界で。境界は締まるだけなので以後も上界)。
+    /// 行の余裕がこれ以上なら、その行からはどの境界も締まらないので走査を省く (HiGHS の capacity threshold)。
+    row_cap: Vec<f64>,
+}
+
+thread_local! {
+    static DEBUG_WORK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 impl Domain {
+    /// 診断用: これまでに伝播で走査した行の長さの合計。
+    pub fn debug_work(&self) -> u64 {
+        DEBUG_WORK.with(|w| w.get())
+    }
+
     /// 問題の境界から作る (伝播はしない)。
     pub fn new(p: &MipProblem) -> Self {
         let mut d = Domain {
@@ -69,6 +81,7 @@ impl Domain {
             resets: 0,
             global_lo: p.col_lo.clone(),
             global_up: p.col_up.clone(),
+            row_cap: if env_str!("ENOMOTO_MIP_NO_ROWCAP").is_some() { vec![f64::INFINITY; p.m] } else { p.rows.iter().map(|r| r.iter().map(|&(j, a)| a.abs() * (p.col_up[j] - p.col_lo[j])).fold(0.0f64, f64::max)).collect() },
         };
         d.recompute_activities(p);
         for i in 0..p.m {
@@ -287,7 +300,12 @@ impl Domain {
         let mut work = 0usize;
         while let Some(i) = self.queue.pop() {
             self.in_queue[i] = false;
-            work += p.rows[i].len();
+            // 走査を省いた行は数えない
+            let scanned = self.row_can_tighten(p, i);
+            if scanned {
+                work += p.rows[i].len();
+                DEBUG_WORK.with(|w| w.set(w.get() + p.rows[i].len() as u64));
+            }
             if !self.propagate_row(p, i) {
                 self.infeasible = true;
                 break;
@@ -303,6 +321,15 @@ impl Domain {
         !self.infeasible
     }
 
+    /// 行 `i` からどれかの境界が締まりうるか (走査が必要か)。
+    fn row_can_tighten(&self, p: &MipProblem, i: usize) -> bool {
+        let cap = self.row_cap[i];
+        let (lo_r, up_r) = (p.row_lo[i], p.row_up[i]);
+        let up_side = up_r.is_finite() && self.min_inf[i] <= 1 && !(self.min_inf[i] == 0 && up_r - self.min_act[i] >= cap - 1e-9 * (1.0 + cap));
+        let lo_side = lo_r.is_finite() && self.max_inf[i] <= 1 && !(self.max_inf[i] == 0 && self.max_act[i] - lo_r >= cap - 1e-9 * (1.0 + cap));
+        up_side || lo_side
+    }
+
     fn propagate_row(&mut self, p: &MipProblem, i: usize) -> bool {
         let lo_r = p.row_lo[i];
         let up_r = p.row_up[i];
@@ -312,8 +339,10 @@ impl Domain {
         if lo_r.is_finite() && self.max_inf[i] == 0 && self.max_act[i] < lo_r - row_tol(lo_r, self.max_act[i]) {
             return false;
         }
-        let use_up = up_r.is_finite() && self.min_inf[i] <= 1;
-        let use_lo = lo_r.is_finite() && self.max_inf[i] <= 1;
+        // 余裕が行の最大の幅以上なら、その側からはどの境界も締まらない
+        let cap = self.row_cap[i];
+        let use_up = up_r.is_finite() && self.min_inf[i] <= 1 && !(self.min_inf[i] == 0 && up_r - self.min_act[i] >= cap - 1e-9 * (1.0 + cap));
+        let use_lo = lo_r.is_finite() && self.max_inf[i] <= 1 && !(self.max_inf[i] == 0 && self.max_act[i] - lo_r >= cap - 1e-9 * (1.0 + cap));
         if !use_up && !use_lo {
             return true;
         }

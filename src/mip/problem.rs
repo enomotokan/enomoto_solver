@@ -91,6 +91,19 @@ impl MipProblem {
     ) -> Self {
         let n = col_lo.len();
         let m = rows.len();
+        // 整数列の境界は整数に丸める (伝播・カットは整数列の境界が整数であることを前提にする。前処理の伝播は
+        // 整数でない境界を返しうる)。丸めて下限 > 上限になれば実行不能で、定義域が検出する。
+        let (mut col_lo, mut col_up) = (col_lo, col_up);
+        for j in 0..n {
+            if is_int[j] {
+                if col_lo[j].is_finite() {
+                    col_lo[j] = (col_lo[j] - 1e-6).ceil();
+                }
+                if col_up[j].is_finite() {
+                    col_up[j] = (col_up[j] + 1e-6).floor();
+                }
+            }
+        }
         let mut cols: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
         for (i, r) in rows.iter().enumerate() {
             for &(j, v) in r {

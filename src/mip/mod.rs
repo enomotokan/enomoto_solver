@@ -197,6 +197,15 @@ fn presolve_mip(p: &MipProblem, verbose: bool) -> Option<Presolved> {
 mod tests {
     use super::*;
 
+    /// 整数列の整数でない境界は問題を作るときに丸められること (伝播の走査省略やカットは整数の境界を前提にする。
+    /// 丸めないと不正なカットが出て最適解を切っていた)。
+    #[test]
+    fn integer_bounds_are_rounded() {
+        let p = MipProblem::from_rows(vec![-0.5, 0.0], vec![1.9665, 2.5], vec![1.0, 1.0], 0.0, 1.0, vec![true, false], vec![vec![(0, 1.0), (1, 1.0)]], vec![f64::NEG_INFINITY], vec![3.0]);
+        assert_eq!((p.col_lo[0], p.col_up[0]), (0.0, 1.0));
+        assert_eq!((p.col_lo[1], p.col_up[1]), (0.0, 2.5));
+    }
+
     /// 代入消去で生じる目的関数の定数が縮約後の offset に入ること (binkar10_1 の誤答の回帰テスト:
     /// 定数が抜けると相対ギャップの判定が誤ったスケールで働き、最適でない解で終了していた)。
     #[test]

@@ -232,7 +232,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut used_row = vec![false; m];
         let mut starts = 0usize;
         for start in 0..m {
-            if starts >= 1000 {
+            if starts >= 1000 || (start % 64 == 0 && self.time_up()) {
                 break;
             }
             let row = &lp_rows[start];
@@ -366,8 +366,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
         };
+        let sep_t0 = std::time::Instant::now();
+        let dbg_sep = env_str!("ENOMOTO_MIP_DEBUG_SEP").is_some();
         // 元の行 1 本ずつ
         for i in 0..p.m {
+            if i % 64 == 0 && self.time_up() {
+                return cands;
+            }
             let row = &p.rows[i];
             if row.len() < 2 {
                 continue;
@@ -392,6 +397,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 push(r, &mut cands, self);
             }
         }
+        if dbg_sep {
+            eprintln!("SEP rows {:.3}s cands {}", sep_t0.elapsed().as_secs_f64(), cands.len());
+        }
         // zerohalf ({0, 1/2}-CG) カット (元の行から)
         if env_str!("ENOMOTO_MIP_NO_ZEROHALF").is_none() {
             let zh = super::zerohalf::zerohalf_cuts(&p.rows, &p.row_lo, &p.row_up, &p.is_int, &self.dom.global_lo, &self.dom.global_up, x, 100);
@@ -399,9 +407,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 push(Some(raw), &mut cands, self);
             }
         }
+        if dbg_sep {
+            eprintln!("SEP zerohalf {:.3}s cands {}", sep_t0.elapsed().as_secs_f64(), cands.len());
+        }
         // 経路集約 (path aggregation、HiGHS の `HighsPathSeparator`)
         if env_str!("ENOMOTO_MIP_NO_PATH_AGG").is_none() {
             self.path_aggregation(&vars, &lp_rows, &mut cands, &mut push);
+        }
+        if dbg_sep {
+            eprintln!("SEP path {:.3}s cands {}", sep_t0.elapsed().as_secs_f64(), cands.len());
         }
         // tableau 行
         let mut basics: Vec<(usize, f64)> = Vec::new();
@@ -421,6 +435,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         basics.truncate(limit);
         let mut agg = vec![0.0; n];
         for &(s, _) in &basics {
+            if self.time_up() {
+                break;
+            }
             let w = self.lp.basis_inverse_row(s);
             let wmax = w.iter().fold(0.0f64, |m, v| m.max(v.abs()));
             if wmax == 0.0 {
@@ -468,6 +485,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let neg: Vec<(usize, f64)> = base.iter().map(|&(k, a)| (k, -a)).collect();
             let r = cmir(&vars, &neg, 0.0);
             push(r, &mut cands, self);
+        }
+        if dbg_sep {
+            eprintln!("SEP tableau {:.3}s cands {}", sep_t0.elapsed().as_secs_f64(), cands.len());
         }
         cands
     }

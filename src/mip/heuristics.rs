@@ -85,9 +85,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
             in_order[j] = true;
         }
         all.extend((0..p.n).filter(|&j| p.is_int[j] && !in_order[j]));
-        for &j in &all {
+        for (cnt, &j) in all.iter().enumerate() {
             if !p.is_int[j] {
                 continue;
+            }
+            // 時間切れなら諦める (長い行の多い大きな問題では 1 列ごとの伝播が重い)
+            if cnt % 64 == 0 && self.time_up() {
+                ok = false;
+                if rounded.is_none() {
+                    break;
+                }
             }
             let t = target[j];
             let v = t.round().clamp(self.dom.lo[j], self.dom.up[j]);
@@ -172,12 +179,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
             fa.total_cmp(&fb)
         });
         for t in 0..tries {
+            let t0 = std::time::Instant::now();
             let mut target = x.to_vec();
             for &j in &order {
                 let th = if t == 0 { 0.5 } else { 0.1 + 0.8 * self.rand() };
                 target[j] = (x[j] + 1.0 - th).floor();
             }
-            if self.fix_and_propagate(&target, &order) {
+            let found = self.fix_and_propagate(&target, &order);
+            if env_str!("ENOMOTO_MIP_DEBUG_RR").is_some() {
+                eprintln!("RR try {t}: {:.3}s found {found} prop_work {}", t0.elapsed().as_secs_f64(), self.dom.debug_work());
+            }
+            if found {
                 return true;
             }
             if self.time_up() {

@@ -105,9 +105,14 @@ fn substitute(vars: &CutVars, base: &[(usize, f64)], rhs: f64) -> Option<(Vec<Te
     let mut beta = rhs;
     // 整数変数の係数 (変数上下限の置き換えで増える分を含む)。base の順を保つ。
     let mut int_coef: Vec<(usize, f64)> = Vec::new();
-    let add_int = |k: usize, a: f64, int_coef: &mut Vec<(usize, f64)>| match int_coef.iter_mut().find(|(j, _)| *j == k) {
-        Some(e) => e.1 += a,
-        None => int_coef.push((k, a)),
+    // 列 → int_coef の位置 (同じ列が何度現れても線形時間で足し込む)
+    let mut int_pos: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+    let add_int = |k: usize, a: f64, int_coef: &mut Vec<(usize, f64)>, int_pos: &mut std::collections::HashMap<usize, usize>| match int_pos.get(&k) {
+        Some(&p) => int_coef[p].1 += a,
+        None => {
+            int_pos.insert(k, int_coef.len());
+            int_coef.push((k, a));
+        }
     };
     for &(k, a) in base {
         if a.abs() < 1e-12 {
@@ -119,7 +124,7 @@ fn substitute(vars: &CutVars, base: &[(usize, f64)], rhs: f64) -> Option<(Vec<Te
             continue;
         }
         if vars.is_int[k] {
-            add_int(k, a, &mut int_coef);
+            add_int(k, a, &mut int_coef, &mut int_pos);
             continue;
         }
         // 連続変数: 近い方の有限の境界 (単純な上下限) と、変数上下限の余裕を比べる
@@ -170,7 +175,7 @@ fn substitute(vars: &CutVars, base: &[(usize, f64)], rhs: f64) -> Option<(Vec<Te
             Sub::Vub(y, d, e) => {
                 // x = d y + e - s: a x = a d y + a e - a s
                 beta -= a * e;
-                add_int(y, a * d, &mut int_coef);
+                add_int(y, a * d, &mut int_coef, &mut int_pos);
                 if a < 0.0 {
                     continue; // s の係数 -a > 0: 捨てる
                 }
@@ -179,7 +184,7 @@ fn substitute(vars: &CutVars, base: &[(usize, f64)], rhs: f64) -> Option<(Vec<Te
             Sub::Vlb(y, d, e) => {
                 // x = d y + e + s: a x = a d y + a e + a s
                 beta -= a * e;
-                add_int(y, a * d, &mut int_coef);
+                add_int(y, a * d, &mut int_coef, &mut int_pos);
                 if a > 0.0 {
                     continue;
                 }
@@ -292,10 +297,16 @@ pub fn cmir(vars: &CutVars, base: &[(usize, f64)], rhs: f64) -> Option<RawCut> {
     // 4. 補変数化の向きを 1 つずつ反転して改善するか試す (両側有限の整数変数のみ)
     let mut terms = terms;
     let mut beta = beta;
+    let mut flips_tried = 0;
     for idx in 0..terms.len() {
         let t = terms[idx];
         if !t.int || !t.yu.is_finite() || t.yv <= 1e-6 {
             continue;
+        }
+        // 長い行で手間が 2 乗にならないよう、試す数を制限する
+        flips_tried += 1;
+        if flips_tried > 50 {
+            break;
         }
         // y' = yu - y: a y = a yu - a y'
         let mut t2 = t;
@@ -663,8 +674,9 @@ fn is_binary(vars: &CutVars, k: usize) -> bool {
 fn snf_relaxation(vars: &CutVars, base: &[(usize, f64)], rhs: f64) -> Option<(Vec<SnfItem>, f64)> {
     let mut b = rhs;
     // 行に現れる変数の係数
-    let in_row = |k: usize| base.iter().any(|&(j, a)| j == k && a != 0.0);
-    let mut used_bin: Vec<usize> = Vec::new();
+    let row_set: std::collections::HashSet<usize> = base.iter().filter(|&&(_, a)| a != 0.0).map(|&(j, _)| j).collect();
+    let in_row = |k: usize| row_set.contains(&k);
+    let mut used_bin: std::collections::HashSet<usize> = std::collections::HashSet::new();
     let mut items: Vec<SnfItem> = Vec::with_capacity(base.len());
     // 先に連続変数 (変数上限で 0-1 変数を使うかを決める)
     let mut pending_bin: Vec<(usize, f64)> = Vec::new();
@@ -700,7 +712,7 @@ fn snf_relaxation(vars: &CutVars, base: &[(usize, f64)], rhs: f64) -> Option<(Ve
             }
         }
         if let Some((y, d)) = vub {
-            used_bin.push(y);
+            used_bin.insert(y);
             items.push(SnfItem { sign, u: a.abs() * d, bin: Some(y), xv: vars.x[y], flow: vec![(k, a.abs())], flow_const: 0.0 });
             continue;
         }
