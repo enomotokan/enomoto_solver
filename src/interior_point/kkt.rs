@@ -25,21 +25,23 @@ use faer::sparse::{SparseColMat, SymbolicSparseColMat, ValuesOrder};
 use faer::{Conj, Side};
 
 pub use crate::sparse::{FaerCsr, csr_row_iter, csr_mat_t_vec, csr_mat_t_vec_into, csr_mat_vec, csr_mat_vec_into};
-use crate::params::interior_point::{KKT_PARALLELISM, MAX_FACTOR_NNZ};
+use crate::params::interior_point::{FACTOR_PAR_NNZ, KKT_PARALLELISM, MAX_FACTOR_NNZ};
 
 /// 因子の非零数の上限 ([`MAX_FACTOR_NNZ`]、試験用 `ENOMOTO_T_IPM_MAX_FACTOR_NNZ`)。
 fn max_factor_nnz() -> usize {
     tunable!("ENOMOTO_T_IPM_MAX_FACTOR_NNZ", MAX_FACTOR_NNZ, usize)
 }
 
-/// 数値分解に使う並列度。既定は逐次 (Fable の調査と Netlib + Kennington の比較で、この大きさの疎 Cholesky
-/// では faer の並列分解の分割の手間が計算を上回り、逐次の方が速かった)。試験用 `ENOMOTO_T_FACTOR_SEQ=0` で
-/// 並列。作業領域の見積もり (`_req`) にも同じ値を使う。
-fn factor_par() -> faer::Parallelism<'static> {
-    if tunable!("ENOMOTO_T_FACTOR_SEQ", 1u8, u8) != 0 {
-        faer::Parallelism::None
-    } else {
+/// 数値分解に使う並列度。因子の非零数 `nnz_l` が `ENOMOTO_T_FACTOR_PAR_NNZ` (既定 [`FACTOR_PAR_NNZ`]、0 で使わない) 以上なら
+/// 並列、それ未満は逐次 (Fable の調査と Netlib + Kennington の比較で、小さな疎 Cholesky では faer の並列分解の分割の手間が
+/// 計算を上回った。一方 qap15 (nnz(L) 1,770 万) では 1 回の分解が 1.3 秒かかり、逐次では内点法の 9 割を占める)。
+/// 試験用 `ENOMOTO_T_FACTOR_SEQ=0` で常に並列。作業領域の見積もり (`_req`) にも同じ値を使う。
+fn factor_par(nnz_l: usize) -> faer::Parallelism<'static> {
+    let par_nnz = tunable!("ENOMOTO_T_FACTOR_PAR_NNZ", FACTOR_PAR_NNZ, usize);
+    if tunable!("ENOMOTO_T_FACTOR_SEQ", 1u8, u8) == 0 || (par_nnz > 0 && nnz_l >= par_nnz) {
         KKT_PARALLELISM
+    } else {
+        faer::Parallelism::None
     }
 }
 
@@ -324,7 +326,7 @@ impl AugKkt {
             return None;
         }
         let l_values = vec![0.0f64; chol_symbolic.len_values()];
-        let numeric_buf = GlobalPodBuffer::new(chol_symbolic.factorize_numeric_ldlt_req::<f64>(true, factor_par()).unwrap());
+        let numeric_buf = GlobalPodBuffer::new(chol_symbolic.factorize_numeric_ldlt_req::<f64>(true, factor_par(chol_symbolic.len_values())).unwrap());
         let solve_buf = GlobalPodBuffer::new(chol_symbolic.solve_in_place_req::<f64>(1).unwrap());
         Some(AugKkt {
             n,
@@ -376,7 +378,7 @@ impl AugKkt {
             a_upper.as_ref(),
             Side::Upper,
             reg,
-            factor_par(),
+            factor_par(self.chol_symbolic.len_values()),
             PodStack::new(&mut self.numeric_buf),
         );
         self.factored = true;
@@ -486,7 +488,11 @@ pub struct NormalKkt {
 }
 
 /// [`NormalKkt`] を使う三つ組の数の上限 (これを超えるなら拡大系を使う)。
-const NORMAL_MAX_TRIPLETS: usize = 40_000_000;
+/// (組 1 つにつき行き先の `u32` 4 バイト。1.5 億で 600 MB。scpm1 は 5000 行・50 万列で約 4,200 万組だが、正規方程式は
+/// 5000 x 5000 で済み、拡大系 (記号分解 105 秒、数値分解 1 回 3.6 秒) よりはるかに軽い。試験用 `ENOMOTO_T_NORMAL_MAX_TRIPLETS`)。
+const NORMAL_MAX_TRIPLETS: usize = 150_000_000;
+/// 正規方程式の三つ組の行き先を p x p の位置表で引く行数の上限 (p^2 の要素数、`u32` で 128 MB)。
+const DENSE_POS_MAX: usize = 32_000_000;
 /// 稠密な列とみなす非零数: `max(DENSE_COL_MIN, DENSE_COL_AVG_FACTOR * 平均)` を超える列。
 const DENSE_COL_MIN: usize = 50;
 const DENSE_COL_AVG_FACTOR: f64 = 10.0;
@@ -554,7 +560,7 @@ impl NormalKkt {
             trip_start.push(n_trip);
             let k = col_ptr[j + 1] - col_ptr[j];
             n_trip += k * (k + 1) / 2;
-            if n_trip + p > NORMAL_MAX_TRIPLETS {
+            if n_trip + p > tunable!("ENOMOTO_T_NORMAL_MAX_TRIPLETS", NORMAL_MAX_TRIPLETS, usize) {
                 return None;
             }
         }
@@ -590,7 +596,20 @@ impl NormalKkt {
         // 各組の行き先 (CSC の値の位置) を列内の二分探索で求める (組の順は `trip_start` と同じ)。
         let col_ptrs = symbolic_base.col_ptrs();
         let row_idx = symbolic_base.row_indices();
+        // 行数が小さい (p^2 <= DENSE_POS_MAX) なら p x p の位置表を引く (scpm1: 4,500 万組の二分探索に 18 秒かかっていた)。
+        let pos_table: Option<Vec<u32>> = (p.checked_mul(p).is_some_and(|pp| pp <= DENSE_POS_MAX)).then(|| {
+            let mut t = vec![u32::MAX; p * p];
+            for c in 0..p {
+                for k in col_ptrs[c]..col_ptrs[c + 1] {
+                    t[c * p + row_idx[k]] = k as u32;
+                }
+            }
+            t
+        });
         let find = |r: usize, c: usize| -> u32 {
+            if let Some(t) = &pos_table {
+                return t[c * p + r];
+            }
             let seg = &row_idx[col_ptrs[c]..col_ptrs[c + 1]];
             (col_ptrs[c] + seg.binary_search(&r).expect("entry in pattern")) as u32
         };
@@ -622,7 +641,7 @@ impl NormalKkt {
             return None;
         }
         let l_values = vec![0.0f64; chol_symbolic.len_values()];
-        let numeric_buf = GlobalPodBuffer::new(chol_symbolic.factorize_numeric_llt_req::<f64>(factor_par()).ok()?);
+        let numeric_buf = GlobalPodBuffer::new(chol_symbolic.factorize_numeric_llt_req::<f64>(factor_par(chol_symbolic.len_values())).ok()?);
         let solve_buf = GlobalPodBuffer::new(chol_symbolic.solve_in_place_req::<f64>(1).ok()?);
         let nnz = symbolic_base.compute_nnz();
         let k = dense_cols.len();
@@ -693,7 +712,7 @@ impl NormalKkt {
         };
         let ok = self
             .chol_symbolic
-            .factorize_numeric_llt::<f64>(&mut self.l_values, m, Side::Upper, reg, factor_par(), PodStack::new(&mut self.numeric_buf))
+            .factorize_numeric_llt::<f64>(&mut self.l_values, m, Side::Upper, reg, factor_par(self.chol_symbolic.len_values()), PodStack::new(&mut self.numeric_buf))
             .is_ok();
         self.factored = ok;
         if !ok {

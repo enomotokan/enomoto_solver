@@ -93,6 +93,8 @@ mod prm {
     /// 同じく、ギャップだけはこの倍率まで受理する (主・双対の残差が小さければ、ギャップが残っていても
     /// クロスオーバーと仕上げで直せる: greenbeb・perold。第 10 回の比較で 1e4 から緩めた)。
     pub const IPM_ACCEPT_GAP_REL: f64 = 1e8;
+    /// 基底の選択のピボット行の候補にする成分の、未ピボット行の最大成分に対する比。
+    pub const LI_PIV_REL: f64 = 0.1;
     /// 基底の選択で列を受理する残差の相対閾値 (消去後の未ピボット行の最大成分 / 列の最大成分)。1e-9 では
     /// ほぼ一次従属な列も通り、悪条件な基底で仕上げが長引いた (pilot87 25 → 7 秒、pilot.ja 18 → 0.8 秒。第 21 回)。
     pub const LI_TOL: f64 = 1e-2;
@@ -1376,6 +1378,9 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     cand_b.sort_by_key(|&j| col(std, j).len());
     cand_d.sort_by_key(|&j| col(std, j).len());
     let mut sel = BasisSelector::new(m, n);
+    if tunable!("ENOMOTO_T_XO_LI_MARKOWITZ", 1u8, u8) != 0 {
+        sel.row_cnt = (0..m).map(|i| std.rows.row(i).len() as u32).collect();
+    }
     for &j in &cand_b {
         if sel.full() {
             break;
@@ -1486,7 +1491,11 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
         eprintln!("CROSSOVER leftover superbasics={} (|B|-m after primal push={})", leftover.len(), st.basic_after_push as i64 - m as i64);
     }
     if megiddo && !leftover.is_empty() {
-        let ms = megiddo_push(std, &x, &leftover, &mut basis, &mut basis_pos, &mut nb_status, lu)?;
+        // 押し出しの時間の上限: 内点法の時間の `ENOMOTO_T_XO_MEGIDDO_TIME_FACTOR` 倍 (既定 1)。超えたら残りは近い方の
+        // 境界に置いたまま仕上げに任せる (qap15: 超基底 2,317 本、基底の LU の fill が多く 1 本ごとの FTRAN が重い)。
+        let mfac = tunable!("ENOMOTO_T_XO_MEGIDDO_TIME_FACTOR", 1.0f64, f64);
+        let deadline = Instant::now() + std::time::Duration::from_secs_f64((mfac * ipm_secs).clamp(0.0, 1e6));
+        let ms = megiddo_push(std, &x, &leftover, &mut basis, &mut basis_pos, &mut nb_status, lu, deadline)?;
         lu = ms.lu;
         crate::phase_timing::record("xo_megiddo_pivots", ms.pivots as f64);
         crate::phase_timing::record("xo_megiddo_bound", ms.to_bound as f64);
@@ -1797,6 +1806,7 @@ fn megiddo_push(
     basis_pos: &mut [Option<usize>],
     nb_status: &mut [Option<NbStatus>],
     mut lu: sparse_lu::FtLu,
+    deadline: Instant,
 ) -> Option<MegiddoResult> {
     let m = std.n_rows;
     let n = std.n_total;
@@ -1911,6 +1921,14 @@ fn megiddo_push(
         if si % 64 == 0 && crate::cancel::is_cancelled() {
             break;
         }
+        if si % 16 == 0 && Instant::now() > deadline {
+            // 時間切れ: 残りは呼び出し側が置いた境界のまま (仕上げが直す)。
+            unresolved += sup.len() - si;
+            for &jr in &sup[si..] {
+                is_sup[jr] = false;
+            }
+            break;
+        }
         let xj = xs[si];
         kernel.ftran_col(&lu, col(std, j), &mut d);
         let mut dj = std.c[j];
@@ -1998,6 +2016,8 @@ struct BasisSelector {
     nz_rows: Vec<usize>,
     visited: Vec<u32>,
     epoch: u32,
+    /// 行の非零の数 (ピボット行の選択でフィルを抑える目安。空なら最大成分の行を選ぶ)。
+    row_cnt: Vec<u32>,
     topo: Vec<usize>,
     stack: Vec<(usize, usize)>,
 }
@@ -2016,6 +2036,7 @@ impl BasisSelector {
             nz_rows: Vec::new(),
             visited: Vec::new(),
             epoch: 0,
+            row_cnt: Vec::new(),
             topo: Vec::new(),
             stack: Vec::new(),
         }
@@ -2100,7 +2121,19 @@ impl BasisSelector {
         }
         let ok = best.1 != usize::MAX && best.0 > tunable!("ENOMOTO_T_XO_LI_TOL", prm::LI_TOL, f64) * amax.max(1.0);
         if ok {
-            let p = best.1;
+            // しきい値つきの部分ピボット: 最大成分の `LI_PIV_REL` 倍以上の行のうち、非零の少ない行を選ぶ (フィルを抑える。
+            // 最大成分の行だけでは qap15 で基底の選択に 26 秒かかった)。
+            let mut p = best.1;
+            if !self.row_cnt.is_empty() {
+                let thr = prm::LI_PIV_REL * best.0;
+                let mut bc = self.row_cnt[p];
+                for &i in &self.nz_rows {
+                    if self.pivot_of_row[i] == usize::MAX && self.xw[i].abs() >= thr && self.row_cnt[i] < bc {
+                        bc = self.row_cnt[i];
+                        p = i;
+                    }
+                }
+            }
             let pv = self.xw[p];
             let mut lc = Vec::new();
             for &i in &self.nz_rows {

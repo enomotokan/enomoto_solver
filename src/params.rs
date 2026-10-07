@@ -1191,6 +1191,8 @@ pub(crate) mod interior_point {
     /// `Rayon(0)` は rayon のスレッド数をそのまま使う指定。
     /// スクラッチ量の見積もり (`_req`) と実際の呼び出しで同じ値を使う必要がある。
     pub(crate) const KKT_PARALLELISM: faer::Parallelism = faer::Parallelism::Rayon(0);
+    /// 内点法の数値分解を並列にする因子の非零数の下限 (`ENOMOTO_T_FACTOR_PAR_NNZ`、0 で常に逐次)。
+    pub(crate) const FACTOR_PAR_NNZ: usize = 2_000_000;
 }
 
 /// 分枝限定法 (src/mip.rs)
