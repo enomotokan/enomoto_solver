@@ -1851,13 +1851,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// やり直しで良い解が見つからなければそれを返す。最大 2 回。
     fn maybe_restart(&mut self) -> Option<MipResult> {
         let p = self.p;
-        if self.params.submip || self.params.restarts >= 2 || env_str!("ENOMOTO_MIP_NO_RESTART").is_some() || self.time_up() {
+        if self.params.submip || self.params.restarts >= tunable!("ENOMOTO_T_MIP_MAX_RESTARTS", 4u32, u32) || env_str!("ENOMOTO_MIP_NO_RESTART").is_some() || self.time_up() {
             return None;
         }
         let nint = p.is_int.iter().filter(|&&b| b).count();
         let fixed = (0..p.n).filter(|&j| p.is_int[j] && self.dom.global_lo[j] == self.dom.global_up[j]).count();
         let newly = fixed.saturating_sub(self.root_fixed0);
-        if nint == 0 || (newly as f64) <= tunable!("ENOMOTO_T_MIP_RESTART_FAC", 0.025, f64) * nint as f64 {
+        // HiGHS と同じく、初回は固定された整数列が 1 本でもあれば、2 回目以降は 2.5% 以上で再スタートする
+        let fac = if self.params.restarts == 0 { tunable!("ENOMOTO_T_MIP_RESTART_FIRST_FAC", 0.0, f64) } else { tunable!("ENOMOTO_T_MIP_RESTART_FAC", 0.025, f64) };
+        if nint == 0 || newly == 0 || (newly as f64) < fac * nint as f64 {
             return None;
         }
         // 新しい問題: 大域的な境界 + 元の行 + LP に残ったカット (どれも大域的に成り立つ)
