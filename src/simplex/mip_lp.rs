@@ -441,9 +441,9 @@ impl TwoStageLp {
             Some(b) if b.len() == self.rows.len() => {
                 // 同じ基底の LU が手元にあれば渡す (分解を省く)
                 match self.lu_cache.take() {
-                    // Forrest-Tomlin の更新が積み重なっていても渡す (再分解の要否は主ループの判定 (更新回数の上限・
-                    // 合成クロック・fill) に任せる。ここで捨てると、ほぼ毎回の求解で分解し直すことになる)
-                    Some((cb, lu)) if cb == b && lu.update_count() < tunable!("ENOMOTO_T_MIP_LU_MAX_UPD", usize::MAX, usize) => sid::set_warm_lu(Some(lu)),
+                    // Forrest-Tomlin の更新が積み重なった LU は FTRAN/BTRAN が遅いので、分解し直させる
+                    // (主ループの上限 3m に任せると、再分解は減るがノードの処理数はかえって減った)
+                    Some((cb, lu)) if cb == b && lu.update_count() < tunable!("ENOMOTO_T_MIP_LU_MAX_UPD", 64usize, usize) => sid::set_warm_lu(Some(lu)),
                     Some((cb, _)) if cb == b => {
                         sid::xcount("n_upd64");
                         sid::set_warm_lu(None)
