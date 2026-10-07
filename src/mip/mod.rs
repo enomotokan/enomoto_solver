@@ -20,6 +20,7 @@ pub(crate) mod heur_scip;
 pub(crate) mod cuts;
 pub(crate) mod separation;
 pub(crate) mod zerohalf;
+pub(crate) mod clique;
 
 use crate::solver::solve_lp;
 use crate::types::{ConstraintRow, LpOptions, MipSettings, MipSummary, Objective, RootSolver, SolveResult, Status, VarType, VariableData};

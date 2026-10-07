@@ -123,6 +123,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) sb_lps: u64,
     /// 直前の分枝の選択で、選んだ列の強分岐の子の LP 値 (列, 下の子, 上の子)。最適まで解けなかった側は -inf。
     pub(super) last_sb: Option<(usize, f64, f64)>,
+    /// clique カット用の 2 値列の衝突グラフ (根で作る)。
+    pub(super) clique_graph: Option<std::rc::Rc<super::clique::CliqueGraph>>,
     /// ヒューリスティクスに使った LP 反復数。
     pub(super) heur_iters: u64,
     /// 列ごとの lock 数 (下げると違反しうる行の数, 上げると違反しうる行の数)。
@@ -256,6 +258,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
         sb_secs: 0.0,
         sb_lps: 0,
         last_sb: None,
+        clique_graph: None,
         heur_iters: 0,
         locks: super::heuristics::compute_locks(p),
         rng: 0x2545_F491_4F6C_DD1D,

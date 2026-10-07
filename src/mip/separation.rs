@@ -475,6 +475,24 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if dbg_sep {
             eprintln!("SEP zerohalf {:.3}s cands {}", sep_t0.elapsed().as_secs_f64(), cands.len());
         }
+        // clique カット (2 値列の衝突グラフ。根で一度だけ作って使い回す)
+        if env_str!("ENOMOTO_MIP_NO_CLIQUE_CUTS").is_none() {
+            if self.clique_graph.is_none() {
+                let binary: Vec<bool> = (0..p.n).map(|j| p.is_int[j] && self.dom.global_lo[j] >= 0.0 && self.dom.global_up[j] <= 1.0).collect();
+                let g = super::clique::CliqueGraph::build(p.n, &p.rows, &p.row_lo, &p.row_up, &binary, &self.dom.global_lo, &self.dom.global_up);
+                if self.params.verbose && !self.params.submip {
+                    eprintln!("MIP: clique graph: {} edges", g.num_edges());
+                }
+                self.clique_graph = Some(std::rc::Rc::new(g));
+            }
+            let g = self.clique_graph.clone().unwrap();
+            for raw in g.separate(x, 100) {
+                push(Some(raw), &mut cands, self);
+            }
+        }
+        if dbg_sep {
+            eprintln!("SEP clique {:.3}s cands {}", sep_t0.elapsed().as_secs_f64(), cands.len());
+        }
         // 経路集約 (path aggregation、HiGHS の `HighsPathSeparator`)
         if env_str!("ENOMOTO_MIP_NO_PATH_AGG").is_none() {
             self.path_aggregation(&vars, &lp_rows, &mut cands, &mut push);
