@@ -1067,4 +1067,71 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         acc
     }
+
+    /// Mutation (SCIP): 暫定解の値で整数列の一定割合 (乱数で選ぶ) を固定したサブ MIP を解く。
+    pub(super) fn mutation(&mut self) -> bool {
+        if self.params.submip {
+            return false;
+        }
+        let Some((_, inc)) = self.incumbent.as_ref() else { return false };
+        let inc = inc.clone();
+        let p = self.p;
+        let mut lo = self.dom.global_lo.clone();
+        let mut up = self.dom.global_up.clone();
+        let rate = tunable!("ENOMOTO_T_MIP_MUTATION_RATE", 0.7, f64);
+        let mut nfix = 0usize;
+        for j in 0..p.n {
+            if p.is_int[j] && self.rand() < rate && inc[j] >= lo[j] && inc[j] <= up[j] {
+                lo[j] = inc[j];
+                up[j] = inc[j];
+                nfix += 1;
+            }
+        }
+        if nfix == 0 {
+            return false;
+        }
+        let mut sub = p.clone();
+        sub.col_lo = lo;
+        sub.col_up = up;
+        let r = self.solve_submip_problem(sub, 500, None);
+        if self.params.verbose {
+            eprintln!("MIP:   mutation ({nfix} fixed): {:?}", r);
+        }
+        r.is_some_and(|r| r.1)
+    }
+
+    /// 適応的な大近傍探索 (SCIP の ALNS の簡略版): RINS・Local Branching・Proximity Search・Mutation から、
+    /// 改善できた割合と試した回数で UCB1 により 1 つ選んで使う。`x` は今のノードの LP 解 (RINS 用)。
+    pub(super) fn alns(&mut self, x: &[f64]) -> bool {
+        if self.incumbent.is_none() {
+            return false;
+        }
+        const ARMS: usize = 4;
+        let total: f64 = self.alns_count.iter().sum::<u32>() as f64;
+        let arm = match (0..ARMS).find(|&a| self.alns_count[a] == 0) {
+            Some(a) => a,
+            None => (0..ARMS)
+                .max_by(|&a, &b| {
+                    let ucb = |k: usize| self.alns_reward[k] / self.alns_count[k] as f64 + (2.0 * total.ln() / self.alns_count[k] as f64).sqrt() * 0.5;
+                    ucb(a).total_cmp(&ucb(b))
+                })
+                .unwrap(),
+        };
+        let z0 = self.incumbent.as_ref().map(|(z, _)| *z).unwrap();
+        let ok = match arm {
+            0 => self.rins(x),
+            1 => self.local_branching(),
+            2 => self.proximity_search(),
+            _ => self.mutation(),
+        };
+        // 報酬: 改善できたら 1 (改善の相対的な大きさで少し上乗せ)
+        let z1 = self.incumbent.as_ref().map(|(z, _)| *z).unwrap();
+        let reward = if ok && z1 < z0 { 1.0 + ((z0 - z1) / z0.abs().max(1.0)).min(1.0) } else { 0.0 };
+        self.alns_count[arm] += 1;
+        self.alns_reward[arm] += reward;
+        if self.params.verbose {
+            eprintln!("MIP:   ALNS arm {arm} reward {reward:.3} (counts {:?})", self.alns_count);
+        }
+        ok
+    }
 }

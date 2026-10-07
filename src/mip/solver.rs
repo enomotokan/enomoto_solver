@@ -133,6 +133,9 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) lb_k: f64,
     /// ノードで回す改善ヒューリスティクスの順番。
     pub(super) improve_turn: u64,
+    /// ALNS の腕ごとの報酬の合計と試した回数。
+    pub(super) alns_reward: [f64; 4],
+    pub(super) alns_count: [u32; 4],
     /// ノードの LP (強分岐以外) に使った反復数と回数。
     node_iters: u64,
     node_lps: u64,
@@ -226,6 +229,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
         last_rins: 0,
         lb_k: 18.0,
         improve_turn: 0,
+        alns_reward: [0.0; 4],
+        alns_count: [0; 4],
         node_iters: 0,
         node_lps: 0,
         node_lp_secs: 0.0,
@@ -738,8 +743,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if node.depth > 0 && plunge_depth == 0 && self.heur_iters < budget {
                         if self.incumbent.is_some() && self.nodes >= self.last_rins + 100 {
                             self.last_rins = self.nodes;
-                            // 改善ヒューリスティクスを順に回す (RINS → Local Branching → Proximity Search)
-                            let turn = if env_str!("ENOMOTO_MIP_ONLY_RINS").is_some() { 0 } else { self.improve_turn % 3 };
+                            // 改善ヒューリスティクス: ALNS で選ぶ (ENOMOTO_MIP_NO_ALNS なら RINS → Local Branching →
+                            // Proximity Search を順に回す)
+                            let turn = if env_str!("ENOMOTO_MIP_ONLY_RINS").is_some() {
+                                0
+                            } else if env_str!("ENOMOTO_MIP_NO_ALNS").is_none() {
+                                3
+                            } else {
+                                self.improve_turn % 3
+                            };
                             self.improve_turn += 1;
                             match turn {
                                 0 => {
@@ -748,8 +760,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                                 1 => {
                                     self.local_branching();
                                 }
-                                _ => {
+                                2 => {
                                     self.proximity_search();
+                                }
+                                _ => {
+                                    self.alns(&x);
                                 }
                             }
                         } else {
