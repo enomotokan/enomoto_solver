@@ -485,9 +485,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 heur!("simple rounding", self.simple_rounding(&x));
                 heur!("randomized rounding", self.randomized_rounding(&x, 3));
-                if self.incumbent.is_none() && env_str!("ENOMOTO_MIP_NO_SHIFTPROP").is_none() {
-                    heur!("shift-and-propagate", self.shift_and_propagate());
-                }
                 heur!("RENS", self.rens(&x));
                 if self.incumbent.is_none() && !self.fractional(&x_root0).is_empty() {
                     heur!("RENS (LP before cuts)", self.rens(&x_root0));
@@ -505,6 +502,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 if self.incumbent.is_none() && env_str!("ENOMOTO_MIP_NO_COEF_DIVE").is_none() {
                     heur!("coefficient diving", self.dive(super::heuristics::DiveKind::Coefficient, dive_budget, f64::INFINITY));
+                }
+                // LP を使わない最後の手段 (先に使うと質の悪い解で他の暫定解探しを止めてしまう)
+                if self.incumbent.is_none() && env_str!("ENOMOTO_MIP_NO_SHIFTPROP").is_none() {
+                    heur!("shift-and-propagate", self.shift_and_propagate());
                 }
                 // 暫定解 (Feasibility Jump・pump・丸めなどで得たもの) を根の LP 解との RINS で磨く
                 if self.incumbent.is_some() && env_str!("ENOMOTO_MIP_NO_ROOT_RINS").is_none() {

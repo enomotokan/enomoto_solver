@@ -459,7 +459,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let saved = self.lp.save_state();
         let pos = self.dom.stack_len();
         let it_start = self.lp.total_iterations();
-        let max_bt = tunable!("ENOMOTO_T_MIP_DIVE_BACKTRACKS", 10usize, usize);
+        // 後戻りは根でだけ (ノードのダイビングは数が多く、後戻りの反復が探索の時間を食う)
+        let max_bt = if self.nodes <= 1 { tunable!("ENOMOTO_T_MIP_DIVE_BACKTRACKS", 10usize, usize) } else { tunable!("ENOMOTO_T_MIP_NODE_DIVE_BACKTRACKS", 0usize, usize) };
         let guide = if kind == DiveKind::Guided { self.incumbent.as_ref().map(|(_, x)| x.clone()) } else { None };
         if kind == DiveKind::Guided && guide.is_none() {
             return false;
