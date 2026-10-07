@@ -1409,8 +1409,11 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     if tunable!("ENOMOTO_T_XO_LI_MARKOWITZ", 1u8, u8) != 0 {
         // 行の非零の数は、基底の候補 (B と D) の列だけで数える (行列全体で数えると、候補にない列の非零で目安が
         // ずれてフィルが増える: qap15 で基底の選択が 22.7 秒、候補の列だけの小さな問題では 0.17 秒)。
-        // (`ENOMOTO_T_XO_LI_ROWCNT_ALL=1` で従来どおり行列全体で数える。比較用)。
-        sel.row_cnt = if tunable!("ENOMOTO_T_XO_LI_ROWCNT_ALL", 0u8, u8) != 0 {
+        // 候補の列だけで数えるのは行数が `ENOMOTO_T_XO_LI_ROWCNT_CAND_MIN_M` (既定 5000) 以上のときだけ (小さな問題では
+        // 行列全体で数える方が良い基底になった: dfl001 13 対 16 秒、pilot.ja 0.3 対 0.5 秒。第 36 回)。
+        // (`ENOMOTO_T_XO_LI_ROWCNT_ALL=1` で常に行列全体で数える。比較用)。
+        let cand_min_m = tunable!("ENOMOTO_T_XO_LI_ROWCNT_CAND_MIN_M", 5000usize, usize);
+        sel.row_cnt = if tunable!("ENOMOTO_T_XO_LI_ROWCNT_ALL", 0u8, u8) != 0 || m < cand_min_m {
             (0..m).map(|i| std.rows.row(i).len() as u32).collect()
         } else {
             let mut cnt = vec![0u32; m];
