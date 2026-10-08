@@ -31,15 +31,31 @@ fn gen_old() -> bool {
     env_str!("ENOMOTO_MIP_GEN_OLD").is_some()
 }
 
-/// `cands[n0..]` のうち効き目の最も大きい 1 本だけ残す。
-fn keep_best(cands: &mut Vec<Candidate>, n0: usize) {
+/// カットの質 (Wesselmann・Suhl "Implementing cutting plane management and selection techniques" (2012) で最も良かった
+/// 重み付き和): 距離 (効き目) + 0.1 × 目的関数との平行度 + 0.1 × 整数台の割合 (カットの非零のうち整数列の割合)。
+/// カット選択 (`select_cuts_hybrid`) と、集約行 1 本から作った候補のうち 1 本を残すとき (`keep_best`) に使う。
+fn cut_quality(c: &Candidate, p: &MipProblem, cnorm: f64) -> f64 {
+    let nc = c.coefs.iter().map(|&(_, v)| v * v).sum::<f64>().sqrt();
+    let objpar = if cnorm > 0.0 && nc > 0.0 { c.coefs.iter().map(|&(j, v)| v * p.cost[j]).sum::<f64>().abs() / (cnorm * nc) } else { 0.0 };
+    let intsup = c.coefs.iter().filter(|&&(j, _)| p.is_int[j]).count() as f64 / c.coefs.len().max(1) as f64;
+    c.efficacy + 0.1 * objpar + 0.1 * intsup
+}
+
+/// `cands[n0..]` のうち質 ([`cut_quality`]、`ENOMOTO_MIP_KEEP_BEST_EFF` なら効き目だけ) の最も大きい 1 本だけ残す。
+fn keep_best(cands: &mut Vec<Candidate>, n0: usize, p: &MipProblem) {
     if cands.len() <= n0 + 1 {
         return;
     }
+    let eff_only = env_str!("ENOMOTO_MIP_KEEP_BEST_EFF").is_some();
+    let cnorm = p.cost.iter().map(|c| c * c).sum::<f64>().sqrt();
+    let q = |c: &Candidate| if eff_only { c.efficacy } else { cut_quality(c, p, cnorm) };
     let mut bi = n0;
+    let mut bq = q(&cands[n0]);
     for i in n0 + 1..cands.len() {
-        if cands[i].efficacy > cands[bi].efficacy {
+        let qi = q(&cands[i]);
+        if qi > bq {
             bi = i;
+            bq = qi;
         }
     }
     cands.swap(n0, bi);
@@ -685,7 +701,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             for r in generate_cuts(vars, b, 0.0, use_flow_cover(), false) {
                                 push(Some(r), cands, self);
                             }
-                            keep_best(cands, n0);
+                            keep_best(cands, n0, self.p);
                         }
                     }
                     success = cands.len() > n_before;
@@ -853,7 +869,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             for r in generate_cuts(vars, b, 0.0, use_flow_cover(), false) {
                                 push(Some(r), cands, self);
                             }
-                            keep_best(cands, n0);
+                            keep_best(cands, n0, self.p);
                         }
                     }
                     // HiGHS と同じく、カットが出たら経路を伸ばさない (`ENOMOTO_MIP_PATH_STOP_ON_CUT`)
@@ -1019,7 +1035,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         for c in generate_cuts(&vars, b, r, use_flow_cover(), true) {
                             push(Some(c), &mut cands, self);
                         }
-                        keep_best(&mut cands, n0);
+                        keep_best(&mut cands, n0, self.p);
                     }
                 }
                 continue;
@@ -1172,7 +1188,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     for c in generate_cuts(&vars, b, 0.0, tab_fc, false) {
                         push(Some(c), &mut cands, self);
                     }
-                    keep_best(&mut cands, n0);
+                    keep_best(&mut cands, n0, self.p);
                 }
                 continue;
             }
@@ -1340,11 +1356,9 @@ fn select_cuts_hybrid(cands: Vec<Candidate>, max_cuts: usize, p: &MipProblem) ->
         .into_iter()
         .map(|c| {
             let nc = c.coefs.iter().map(|&(_, v)| v * v).sum::<f64>().sqrt();
-            let objpar = if cnorm > 0.0 && nc > 0.0 { c.coefs.iter().map(|&(j, v)| v * p.cost[j]).sum::<f64>().abs() / (cnorm * nc) } else { 0.0 };
-            let intsup = c.coefs.iter().filter(|&&(j, _)| p.is_int[j]).count() as f64 / c.coefs.len().max(1) as f64;
             // 密なカットを避ける (`ENOMOTO_T_CUTSEL_DENSITY_EXP` = α: スコアを 非零の数^α で割る。HiGHS は効いている
             // 非零の数で割る (α = 1 相当)。密なカットは LP の反復が増え、カットの行から作る次のカットも密になる)
-            let score = (c.efficacy + 0.1 * objpar + 0.1 * intsup) / (c.coefs.len().max(1) as f64).powf(density_exp);
+            let score = cut_quality(&c, p, cnorm) / (c.coefs.len().max(1) as f64).powf(density_exp);
             (score, nc, c)
         })
         .collect();

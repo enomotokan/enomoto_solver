@@ -298,7 +298,13 @@ fn cmir_terms(vars: &CutVars, terms: Vec<Term>, beta: f64) -> Option<RawCut> {
             }
         }
     }
-    let (delta, mut eff) = best?;
+    let (delta, eff) = best?;
+    cmir_build(vars, terms, beta, delta, eff)
+}
+
+/// δ を決めた後の CMIR: 補変数化の向きを 1 つずつ反転して効き目が上がるか試し、切除平面を作って元の変数に戻す。
+fn cmir_build(vars: &CutVars, terms: Vec<Term>, beta: f64, delta: f64, eff: f64) -> Option<RawCut> {
+    let mut eff = eff;
     // 4. 補変数化の向きを 1 つずつ反転して改善するか試す (両側有限の整数変数のみ)
     let mut terms = terms;
     let mut beta = beta;
@@ -1604,12 +1610,98 @@ pub fn generate_cuts(vars: &CutVars, base: &[(usize, f64)], rhs: f64, flow_cover
     if env_str!("ENOMOTO_MIP_LIFTED_COVER").is_some() {
         out.extend(lifted_cover_terms(vars, terms.clone(), beta));
     }
-    out.extend(cmir_terms(vars, terms, beta));
+    if env_str!("ENOMOTO_MIP_CMIR_OLD").is_some() {
+        out.extend(cmir_terms(vars, terms, beta));
+    } else {
+        out.extend(cmir_terms_multi(vars, terms, beta, tunable!("ENOMOTO_T_CMIR_K", 3usize, usize)));
+    }
     if ext_cover && !has_cont {
         out.extend(extended_cover(vars, base, rhs));
     }
     if has_cont && flow_cover {
         out.extend(lifted_flow_cover(vars, base, rhs));
+    }
+    out
+}
+
+/// δ を探索して効き目の上位 `k` 本の CMIR を返す (`generate_cuts` から。どれを残すかは呼び出し側がカットの質で決める)。
+///
+/// δ を変数とみた 1 次元の探索: 初期点は LP 値が境界の内側にある整数変数の係数 a を 1..=`ENOMOTO_T_CMIR_MAXDIV` (既定 8)
+/// で割ったもの (従来は 1, 2, 4, 8 だけ)。効き目 (置き換え後の空間の違反量 / ノルム) の上位から、log δ 上の
+/// パターン探索 (歩幅 0.1 から、改善しなければ半分、`ENOMOTO_T_CMIR_LOCAL_ITERS` 回まで) で局所的に改善する。
+/// 床関数で効き目は区分的だが、区分の中では δ について連続なので局所探索が効く。
+/// 上位 `k` 個の δ (互いに 1e-6 以上離れたもの) それぞれで補変数化の向きの反転を試してカットを作る。
+fn cmir_terms_multi(vars: &CutVars, terms: Vec<Term>, beta: f64, k: usize) -> Vec<RawCut> {
+    let mut out = Vec::new();
+    if !terms.iter().any(|t| t.int) {
+        return out;
+    }
+    let maxdiv = tunable!("ENOMOTO_T_CMIR_MAXDIV", 8usize, usize).max(1);
+    let iters = tunable!("ENOMOTO_T_CMIR_LOCAL_ITERS", 12usize, usize);
+    let mut base: Vec<f64> = Vec::new();
+    for t in &terms {
+        if t.int && t.yv > 1e-6 && t.yv < t.yu - 1e-6 && t.a.abs() > 1e-6 {
+            let d = t.a.abs();
+            if !base.iter().any(|&e| (e - d).abs() <= 1e-9 * d) {
+                base.push(d);
+            }
+        }
+        if base.len() >= 8 {
+            break;
+        }
+    }
+    if base.is_empty() {
+        let m = terms.iter().filter(|t| t.int).map(|t| t.a.abs()).fold(0.0, f64::max);
+        if m > 0.0 {
+            base.push(m);
+        }
+    }
+    let mut cands: Vec<(f64, f64)> = Vec::new(); // (delta, efficacy)
+    for &d in &base {
+        for div in 1..=maxdiv {
+            let delta = d / div as f64;
+            if let Some(e) = mir_efficacy(&terms, beta, delta) {
+                cands.push((delta, e));
+            }
+        }
+    }
+    cands.sort_by(|a, b| b.1.total_cmp(&a.1));
+    // 局所探索 (上位 2k 個の初期点から)
+    let mut found: Vec<(f64, f64)> = Vec::new();
+    for &(d0, e0) in cands.iter().take(2 * k.max(1)) {
+        let (mut ld, mut e) = (d0.ln(), e0);
+        let mut step = 0.1;
+        for _ in 0..iters {
+            let mut moved = false;
+            for s in [step, -step] {
+                if let Some(e2) = mir_efficacy(&terms, beta, (ld + s).exp()) {
+                    if e2 > e + 1e-12 {
+                        ld += s;
+                        e = e2;
+                        moved = true;
+                        break;
+                    }
+                }
+            }
+            if !moved {
+                step *= 0.5;
+            }
+        }
+        found.push((ld.exp(), e));
+        found.push((d0, e0));
+    }
+    found.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let mut chosen: Vec<(f64, f64)> = Vec::new();
+    for (d, e) in found {
+        if chosen.len() >= k {
+            break;
+        }
+        if chosen.iter().all(|&(c, _)| (c - d).abs() > 1e-6 * c) {
+            chosen.push((d, e));
+        }
+    }
+    for (d, e) in chosen {
+        out.extend(cmir_build(vars, terms.clone(), beta, d, e));
     }
     out
 }
