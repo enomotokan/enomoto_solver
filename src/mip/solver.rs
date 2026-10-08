@@ -204,6 +204,11 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) cut_age: Vec<u32>,
     /// 証明から作った衝突の数。
     proof_conflicts: u64,
+    /// 完全オービトープ (orbitopal fixing に使う。サブ MIP では空)。
+    orbitopes: Rc<Vec<super::symmetry::Orbitope>>,
+    /// orbitopal fixing で固定した数と、それで枝刈りしたノードの数。
+    orbitope_fixings: u64,
+    orbitope_prunes: u64,
     /// カット生成で整数として扱う列 (整数列と暗黙の整数列、[`MipProblem::implied_integers`])。
     pub(super) cut_int: Vec<bool>,
     /// 根で作ったカット (係数, 右辺, ノルム)。大域的に成り立つ。ノードで違反していれば LP に戻す。
@@ -322,6 +327,9 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
         failed_heurs: 0,
         cut_age: Vec::new(),
         proof_conflicts: 0,
+        orbitopes: if params.submip { Rc::new(Vec::new()) } else { super::ORBITOPES.with(|t| t.borrow().clone()).unwrap_or_default() },
+        orbitope_fixings: 0,
+        orbitope_prunes: 0,
         row_log: Vec::new(),
         cut_int: if env_str!("ENOMOTO_MIP_NO_IMPLINT").is_some() { p.is_int.clone() } else { p.implied_integers() },
         cut_pool: Vec::new(),
@@ -834,6 +842,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 ok
             };
             xp("m_proof");
+            // 完全オービトープの固定 (列を辞書式で減少に並べた解だけを残す)
+            let prop_ok = prop_ok && {
+                let ok = self.orbitope_propagate();
+                if !ok {
+                    self.orbitope_prunes += 1;
+                }
+                ok
+            };
             if !prop_ok {
                 self.pc.infeasible_leaves += 1;
                 self.dbg_lost("node propagation", dn);
@@ -1553,6 +1569,35 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.add_proof_from(&y, true);
     }
 
+    /// 完全オービトープの固定と伝播を、固定が出なくなるまで (最大 10 回) 繰り返す。矛盾したら偽。
+    fn orbitope_propagate(&mut self) -> bool {
+        if self.orbitopes.is_empty() {
+            return true;
+        }
+        let orbs = self.orbitopes.clone();
+        for _ in 0..10 {
+            let mut fixes: Vec<(usize, f64)> = Vec::new();
+            for o in orbs.iter() {
+                match super::symmetry::orbitopal_fixing(o, &self.dom.lo, &self.dom.up) {
+                    None => return false,
+                    Some(f) => fixes.extend(f),
+                }
+            }
+            if fixes.is_empty() {
+                return true;
+            }
+            self.orbitope_fixings += fixes.len() as u64;
+            for (j, v) in fixes {
+                self.dom.tighten_lower(self.p, j, v);
+                self.dom.tighten_upper(self.p, j, v);
+            }
+            if self.dom.infeasible || !self.dom.propagate(self.p) {
+                return false;
+            }
+        }
+        true
+    }
+
     /// 強分岐の子 (列 `j` を `v` の上/下に分けた側) が打ち切られたときの証明 (`infeasible` なら Farkas、そうでなければ
     /// 双対証明)。強分岐は子の境界を LP にだけ置くので、証明が今の定義域で破れているかを正しく調べ、衝突解析がその
     /// 境界を決定として使えるよう、その間だけ定義域にも置く (伝播はしない)。
@@ -2209,6 +2254,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.log(true);
         if self.params.verbose {
             eprintln!("MIP: dual proofs and conflicts {} (conflicts added {} (from proofs {}), Farkas {}, pruned {} nodes, tightened {} bounds)", self.dual_proofs.len(), self.conflicts_added, self.proof_conflicts, self.farkas_added, self.proof_prunes, self.proof_tightenings);
+            if !self.orbitopes.is_empty() {
+                eprintln!("MIP: orbitopes {}: fixed {} bounds, pruned {} nodes", self.orbitopes.len(), self.orbitope_fixings, self.orbitope_prunes);
+            }
         }
         let (x, objective) = match &self.incumbent {
             Some((z, x)) => (Some(x.clone()), Some(*z)),

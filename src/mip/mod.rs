@@ -18,6 +18,7 @@ pub(crate) mod solver;
 pub(crate) mod heuristics;
 pub(crate) mod heur_scip;
 pub(crate) mod heur_ipm;
+pub(crate) mod symmetry;
 pub(crate) mod cuts;
 pub(crate) mod separation;
 pub(crate) mod zerohalf;
@@ -89,6 +90,18 @@ thread_local! {
 }
 
 pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: bool) -> solver::MipResult {
+    let outer = !params.submip && params.restarts == 0;
+    if outer {
+        ORBITOPES.with(|t| *t.borrow_mut() = None);
+    }
+    let r = solve_problem_inner(p, params, use_presolve);
+    if outer {
+        ORBITOPES.with(|t| *t.borrow_mut() = None);
+    }
+    r
+}
+
+fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) -> solver::MipResult {
     let start = RESTART_SOL.with(|s| s.borrow_mut().take());
     let presolved = if use_presolve { presolve_mip(p, params.verbose) } else { None };
     // 前処理は列の番号を保ち、列の尺度 d を掛ける (x = d x')。前処理後の空間に移して実行可能なら渡す
@@ -108,6 +121,7 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
     match presolved {
         Some(Presolved::Infeasible) => solver::MipResult { status: MipStatus::Infeasible, x: None, objective: None, best_bound: f64::INFINITY, nodes: 0, lp_iterations: 0 },
         Some(Presolved::Reduced { prob, postsolve, scaling }) => {
+            let prob = if !params.submip && params.restarts == 0 && env_str!("ENOMOTO_MIP_NO_SYMMETRY").is_none() { add_symmetry_rows(prob, params.verbose) } else { prob };
             if let Some(f) = env_str!("ENOMOTO_MIP_DEBUG_SOL").filter(|_| !params.submip) {
                 let x0: Vec<f64> = std::fs::read_to_string(f).unwrap().lines().map(|l| l.trim().parse().unwrap()).collect();
                 let xd: Vec<f64> = (0..prob.n).map(|j| if prob.col_lo[j] == prob.col_up[j] { prob.col_lo[j] } else { x0[j] }).collect();
@@ -142,6 +156,125 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
         }
         None => solver::solve(p, params),
     }
+}
+
+thread_local! {
+    /// 今の求解 (再スタートを含む) で使う完全オービトープ ([`add_symmetry_rows`] が置き、外側の求解の終わりに消す)。
+    pub(crate) static ORBITOPES: std::cell::RefCell<Option<std::rc::Rc<Vec<symmetry::Orbitope>>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// 対称性を探し、対称性を崩す不等式 `x_i - x_k >= 0` ([`symmetry::lex_leader_pairs`]) を行として加えた問題を返す。
+fn add_symmetry_rows(prob: MipProblem, verbose: bool) -> MipProblem {
+    let t0 = std::time::Instant::now();
+    let time_cap = tunable!("ENOMOTO_T_MIP_SYM_TIME", 0.3, f64);
+    let Some(sym) = symmetry::detect(&prob, time_cap, tunable!("ENOMOTO_T_MIP_SYM_TRIES", 2000usize, usize)) else {
+        if verbose {
+            eprintln!("MIP: symmetry: none ({:.2}s)", t0.elapsed().as_secs_f64());
+        }
+        return prob;
+    };
+    // 完全オービトープは探索中の固定 (orbitopal fixing) で扱い、残りの生成元だけ lex-leader の行にする
+    let (orbs, used) = if env_str!("ENOMOTO_MIP_NO_ORBITOPE").is_none() { symmetry::find_orbitopes(&prob, &sym) } else { (Vec::new(), vec![false; sym.generators.len()]) };
+    let mut in_orb = vec![false; prob.n];
+    for o in &orbs {
+        for line in &o.vars {
+            for &j in line {
+                in_orb[j] = true;
+            }
+        }
+    }
+    let pairs = symmetry::lex_leader_pairs_except(&sym, &used, &in_orb);
+    // パッキング・分割の行 (係数が全て 1、右辺 <= 1) に含まれるオービトープの行だけで作ったオービトープに置き換える
+    // (列の入れ替えは全体の対称性なので、その部分行列の列を辞書式に並べた解が必ずある)。パッキングの行が半分以上の
+    // ときだけ。すると列 c の最初の 1 は行 c 以降なので、x_{i,c} = 0 (c > i) を根で固定できる
+    let mut orbs = orbs;
+    let mut prob = prob;
+    let mut static_fix = 0usize;
+    if env_str!("ENOMOTO_MIP_NO_PACKING_ORBITOPE").is_none() {
+        for o in orbs.iter_mut() {
+            let packing_rows: Vec<Vec<usize>> = o
+                .vars
+                .iter()
+                .filter(|line| {
+                    let set: std::collections::HashSet<usize> = line.iter().copied().collect();
+                    let j0 = line[0];
+                    prob.cols[j0].iter().any(|&(i, _)| {
+                        let r = &prob.rows[i];
+                        prob.row_up[i] <= 1.0 + 1e-9 && r.iter().all(|&(k, a)| a == 1.0 && prob.col_lo[k] >= 0.0) && r.iter().filter(|&&(k, _)| set.contains(&k)).count() == line.len()
+                    })
+                })
+                .cloned()
+                .collect();
+            if 2 * packing_rows.len() >= o.vars.len() && !packing_rows.is_empty() {
+                for (i, line) in packing_rows.iter().enumerate() {
+                    for (c, &j) in line.iter().enumerate() {
+                        if c > i && prob.col_up[j] > 0.0 {
+                            prob.col_up[j] = 0.0;
+                            static_fix += 1;
+                        }
+                    }
+                }
+                o.vars = packing_rows;
+                o.packing = true;
+            }
+        }
+    }
+    if verbose && static_fix > 0 {
+        eprintln!("MIP: symmetry: packing orbitopes fixed {static_fix} columns to 0");
+    }
+    if env_str!("ENOMOTO_MIP_SYM_DEBUG").is_some() {
+        // オービトープの各行に、その行の列だけからなる (他の列も含んでよい) 集合分割・パッキング行があるか
+        for o in &orbs {
+            let mut packing = 0;
+            for line in &o.vars {
+                let set: std::collections::HashSet<usize> = line.iter().copied().collect();
+                let has = prob.rows.iter().enumerate().any(|(i, r)| prob.row_up[i] == 1.0 && r.iter().all(|&(_, a)| a == 1.0) && line.iter().all(|j| r.iter().any(|&(k, _)| k == *j)) && r.iter().filter(|&&(k, _)| set.contains(&k)).count() == line.len());
+                packing += has as usize;
+            }
+            eprintln!("SYM orbitope {}x{}: {} of {} rows lie in a packing/partitioning row", o.vars.len(), o.vars[0].len(), packing, o.vars.len());
+        }
+    }
+    if verbose && !orbs.is_empty() {
+        let dims: Vec<String> = orbs.iter().map(|o| format!("{}x{}{}", o.vars.len(), o.vars[0].len(), if o.packing { " packing" } else { "" })).collect();
+        eprintln!("MIP: symmetry: {} full orbitopes ({})", orbs.len(), dims.join(", "));
+    }
+    ORBITOPES.with(|t| *t.borrow_mut() = Some(std::rc::Rc::new(orbs)));
+    if env_str!("ENOMOTO_MIP_SYM_DEBUG").is_some() {
+        for (k, g) in sym.generators.iter().enumerate() {
+            // 巡回の長さの分布
+            let mut seen = vec![false; g.len()];
+            let mut lens: std::collections::BTreeMap<usize, usize> = std::collections::BTreeMap::new();
+            for j in 0..g.len() {
+                if seen[j] || g[j] == j {
+                    continue;
+                }
+                let mut l = 0;
+                let mut x = j;
+                while !seen[x] {
+                    seen[x] = true;
+                    x = g[x];
+                    l += 1;
+                }
+                *lens.entry(l).or_insert(0) += 1;
+            }
+            let moved: Vec<usize> = (0..g.len()).filter(|&j| g[j] != j).take(12).collect();
+            eprintln!("SYM gen {k}: cycles {lens:?} first moved {moved:?} -> {:?}", moved.iter().map(|&j| g[j]).collect::<Vec<_>>());
+        }
+    }
+    if verbose {
+        let moved = sym.orbit.iter().filter(|&&o| o != usize::MAX).count();
+        eprintln!("MIP: symmetry: {} generators, {} orbits on {moved} columns, {} lex-leader rows ({:.2}s)", sym.generators.len(), sym.num_orbits, pairs.len(), t0.elapsed().as_secs_f64());
+    }
+    if pairs.is_empty() || env_str!("ENOMOTO_MIP_SYM_DETECT_ONLY").is_some() {
+        return prob;
+    }
+    let MipProblem { col_lo, col_up, cost, offset, sense_sign, is_int, mut rows, mut row_lo, mut row_up, .. } = prob;
+    for (i, k) in pairs {
+        rows.push(vec![(i.min(k), if i < k { 1.0 } else { -1.0 }), (i.max(k), if i < k { -1.0 } else { 1.0 })]);
+        row_lo.push(0.0);
+        row_up.push(f64::INFINITY);
+    }
+    MipProblem::from_rows(col_lo, col_up, cost, offset, sense_sign, is_int, rows, row_lo, row_up)
 }
 
 /// 前処理の結果。
