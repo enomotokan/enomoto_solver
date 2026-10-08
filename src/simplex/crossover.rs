@@ -907,6 +907,8 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     for (k, &j) in free_cols.iter().enumerate() {
         x[j] = ipm.x[k].clamp(std.lb[j], std.ub[j]);
     }
+    // 頂点の採用判定の射影 (`ENOMOTO_T_XO_ACCEPT_PROJ`) で最適分割を推定するのに使う内点法の主の点 (押し出しの前)。
+    let x_ipm_saved = (tunable!("ENOMOTO_T_XO_ACCEPT_PROJ", 0u8, u8) != 0).then(|| x.clone());
     let mut y = ipm.y;
     // 頂点を内点法の双対の下界で確かめるとき (`ENOMOTO_T_XO_ACCEPT_GAP`、既定 1e-8 は第 37 回の比較で決めた。
     // 0 で使わない) に使う内点法の双対 (PDHG の 1 歩の前)。
@@ -1744,7 +1746,10 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
             //   このときは基底の双対 y_B も試す。
             let yfix = tunable!("ENOMOTO_T_XO_ACCEPT_YFIX", 0u8, u8) != 0;
             let implied = tunable!("ENOMOTO_T_XO_ACCEPT_IMPLIED", 0u8, u8) != 0;
-            if accept_gap > 0.0 && gap > accept_gap && (yfix || implied) {
+            // - 試験用 `ENOMOTO_T_XO_ACCEPT_PROJ=1`: 最適面への射影 (Mehrotra–Ye)。内点法の点から上下限の間にあると推定した
+            //   変数と、頂点で上下限の間にある基底変数の集合 S について、`A_Sᵀ (y_ipm + Δ) = c_S` を満たす最小ノルムの Δ
+            //   (正則化した `(A_S A_Sᵀ + εI) Δ = A_S d_S`) で y を射影する。
+            if accept_gap > 0.0 && gap > accept_gap && (yfix || implied || x_ipm_saved.is_some()) {
                 let bnds = implied.then(|| implied_bounds(std, 3));
                 let (lbs, ubs): (&[f64], &[f64]) = match &bnds {
                     Some((l, u)) => (l, u),
@@ -1786,6 +1791,23 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
                         }
                         if gap <= accept_gap {
                             break;
+                        }
+                    }
+                }
+                if let (Some(xi), true) = (&x_ipm_saved, gap > accept_gap) {
+                    if let Some(dy) = dual_face_projection(std, yi, xi, &xv, &basis_pos, debug) {
+                        let mut yt = vec![0.0; m];
+                        for th in [1.0, 0.5] {
+                            for i in 0..m {
+                                yt[i] = yi[i] + th * dy[i];
+                            }
+                            try_y(&format!("y_ipm + {th} projection"), &yt, &mut gap);
+                            if debug && th == 1.0 {
+                                eprintln!("CROSSOVER vertex gap breakdown y_proj: {:?}", vertex_gap_breakdown(std, &yt, &xv, &basis_pos));
+                            }
+                            if gap <= accept_gap {
+                                break;
+                            }
                         }
                     }
                 }
@@ -2153,6 +2175,108 @@ fn lagrangian_lower_bound_with(std: &StdForm, y: &[f64], lbs: &[f64], ubs: &[f64
         }
     }
     lb
+}
+
+/// 双対の最適面への射影の補正量 Δ を返す (`ENOMOTO_T_XO_ACCEPT_PROJ`)。S は、内点法の点 `xi` で境界までの距離が
+/// 被約費用 `|d_j(y)|` 以上の変数 (上下限の間にあると推定した変数) と、頂点 `xv` で上下限の間にある基底変数 (固定列は除く)。
+/// `(A_S A_Sᵀ + εI) Δ = A_S d_S` を疎 Cholesky で解き、反復改良を 2 回する。
+fn dual_face_projection(std: &StdForm, y: &[f64], xi: &[f64], xv: &[f64], basis_pos: &[Option<usize>], debug: bool) -> Option<Vec<f64>> {
+    use faer::prelude::SpSolver;
+    let m = std.n_rows;
+    let n = std.n_total;
+    let mut s_cols = Vec::new();
+    let mut d_s = Vec::new();
+    for j in 0..n {
+        if !(std.lb[j] < std.ub[j]) {
+            continue;
+        }
+        let d = std.c[j] - sparse_dot_dense(col(std, j), y);
+        let dist = (xi[j] - std.lb[j]).min(std.ub[j] - xi[j]);
+        let v = xv[j];
+        let tol = 1e-9 * (1.0 + v.abs());
+        let vertex_inner = basis_pos[j].is_some() && v > std.lb[j] + tol && v < std.ub[j] - tol;
+        if dist >= d.abs() || vertex_inner {
+            s_cols.push(j);
+            d_s.push(d);
+        }
+    }
+    // M = A_S A_Sᵀ (上三角) と右辺 A_S d_S。
+    let mut trip: Vec<(usize, usize, f64)> = Vec::new();
+    let mut rhs = vec![0.0; m];
+    let mut diag_max = 0.0f64;
+    for (k, &j) in s_cols.iter().enumerate() {
+        let c = col(std, j);
+        for &(i1, a1) in c {
+            rhs[i1] += a1 * d_s[k];
+            for &(i2, a2) in c {
+                if i1 <= i2 {
+                    trip.push((i1, i2, a1 * a2));
+                }
+            }
+        }
+    }
+    for i in 0..m {
+        trip.push((i, i, 0.0));
+    }
+    let mut mat = faer::sparse::SparseColMat::<usize, f64>::try_new_from_triplets(m, m, &trip).ok()?;
+    {
+        let cp = mat.col_ptrs().to_vec();
+        let ri = mat.row_indices().to_vec();
+        let vals = mat.values_mut();
+        for c in 0..m {
+            for k in cp[c]..cp[c + 1] {
+                if ri[k] == c {
+                    diag_max = diag_max.max(vals[k]);
+                }
+            }
+        }
+        let eps = 1e-12 * diag_max.max(1.0);
+        for c in 0..m {
+            for k in cp[c]..cp[c + 1] {
+                if ri[k] == c {
+                    vals[k] += eps;
+                }
+            }
+        }
+    }
+    let chol = mat.as_ref().sp_cholesky(faer::Side::Upper).ok()?;
+    // 対称に掛ける。
+    let mul = |x: &[f64], out: &mut [f64]| {
+        out.fill(0.0);
+        let (cp, ri, vals) = (mat.col_ptrs(), mat.row_indices(), mat.values());
+        for c in 0..m {
+            for k in cp[c]..cp[c + 1] {
+                let r = ri[k];
+                out[r] += vals[k] * x[c];
+                if r != c {
+                    out[c] += vals[k] * x[r];
+                }
+            }
+        }
+    };
+    let mut dy = rhs.clone();
+    chol.solve_in_place(faer::mat::from_column_major_slice_mut::<f64, usize, usize>(&mut dy, m, 1));
+    let mut r = vec![0.0; m];
+    for _ in 0..2 {
+        mul(&dy, &mut r);
+        for i in 0..m {
+            r[i] = rhs[i] - r[i];
+        }
+        chol.solve_in_place(faer::mat::from_column_major_slice_mut::<f64, usize, usize>(&mut r, m, 1));
+        for i in 0..m {
+            dy[i] += r[i];
+        }
+    }
+    if debug {
+        // A_Sᵀ Δ − d_S の大きさ (射影がどれだけ等式を満たしたか)。
+        let mut worst = 0.0f64;
+        for (k, &j) in s_cols.iter().enumerate() {
+            worst = worst.max((sparse_dot_dense(col(std, j), &dy) - d_s[k]).abs());
+        }
+        let dmax = d_s.iter().fold(0.0f64, |a, v| a.max(v.abs()));
+        eprintln!("CROSSOVER projection |S|={} m={m} max|d_S|={dmax:.2e} max|A_S^T dy - d_S|={worst:.2e} |dy|max={:.2e}", s_cols.len(), dy.iter().fold(0.0f64, |a, v| a.max(v.abs())));
+    }
+    dy.iter().all(|v| v.is_finite()).then_some(dy)
 }
 
 /// 上下限が無限の変数に、行 `Σ_j a_ij x_j = b_i` と他の変数の範囲から導いた有限の範囲を与える (`passes` 回くり返す)。
