@@ -1,0 +1,235 @@
+diff --git a/highs/mip/HighsConflictPool.cpp b/highs/mip/HighsConflictPool.cpp
+index b4c37d1..6da70f2 100644
+--- a/highs/mip/HighsConflictPool.cpp
++++ b/highs/mip/HighsConflictPool.cpp
+@@ -10,6 +10,21 @@
+ 
+ #include "mip/HighsDomain.h"
+ 
++#include <cstdio>
++static void hconfDump(const HighsDomain& domain, const char* kind,
++                      const std::set<HighsDomain::ConflictSet::LocalDomChg>& f,
++                      int extra) {
++  int nb = 0, ni = 0, nc = 0;
++  for (const auto& d : f) {
++    HighsInt c = d.domchg.column;
++    if (domain.variableType(c) == HighsVarType::kContinuous) ++nc;
++    else if ((d.domchg.boundtype == HighsBoundType::kLower && d.domchg.boundval == 1.0) ||
++             (d.domchg.boundtype == HighsBoundType::kUpper && d.domchg.boundval == 0.0)) ++nb;
++    else ++ni;
++  }
++  fprintf(stderr, "HCONF %s %d %d %d %d\n", kind, (int)f.size() + extra, nb, ni, nc);
++}
++
+ void HighsConflictPool::addConflictCut(
+     const HighsDomain& domain,
+     const std::set<HighsDomain::ConflictSet::LocalDomChg>& reasonSideFrontier) {
+@@ -17,6 +32,7 @@ void HighsConflictPool::addConflictCut(
+   HighsInt start;
+   HighsInt end;
+   HighsInt conflictLen = reasonSideFrontier.size();
++  hconfDump(domain, "c", reasonSideFrontier, 0);
+   std::set<std::pair<HighsInt, HighsInt>>::iterator it;
+   if (freeSpaces_.empty() ||
+       (it = freeSpaces_.lower_bound(
+@@ -91,6 +107,7 @@ void HighsConflictPool::addReconvergenceCut(
+   HighsInt start;
+   HighsInt end;
+   HighsInt conflictLen = reconvergenceFrontier.size() + 1;
++  hconfDump(domain, "r", reconvergenceFrontier, 1);
+   std::set<std::pair<HighsInt, HighsInt>>::iterator it;
+   if (freeSpaces_.empty() ||
+       (it = freeSpaces_.lower_bound(
+diff --git a/highs/mip/HighsDomain.cpp b/highs/mip/HighsDomain.cpp
+index f09d0f5..bf2f514 100644
+--- a/highs/mip/HighsDomain.cpp
++++ b/highs/mip/HighsDomain.cpp
+@@ -1,3 +1,4 @@
++#include <cstdio>
+ /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+ /*                                                                       */
+ /*    This file is part of the HiGHS linear optimization suite           */
+@@ -2020,7 +2021,30 @@ double HighsDomain::doChangeBound(const HighsDomainChange& boundchg) {
+   return oldbound;
+ }
+ 
++
++#include <cstdlib>
++#include <atomic>
++static long long g_chg[16];
++static long long g_inf[16];
++static int reasonCat(const HighsDomain::Reason& r, size_t ncut) {
++  // 0 branching 1 unknown 2 modelrow 3 clique 4 conflicting 5 objective 6 cutpool 7 conflictpool
++  switch (r.type) {
++    case -1: return 0; case -2: return 1; case -3: case -4: return 2; case -5: return 3;
++    case -6: return 4; case -7: return 5;
++  }
++  return r.type < (HighsInt)ncut ? 6 : 7;
++}
++static void dumpChg() {
++  const char* nm[8] = {"branching","unknown","modelrow","clique","conflictingbounds","objective","cutpool","conflictpool"};
++  fprintf(stderr, "HCHG");
++  for (int i = 0; i < 8; ++i) fprintf(stderr, " %s=%lld", nm[i], g_chg[i]);
++  fprintf(stderr, "\nHINF");
++  for (int i = 0; i < 8; ++i) fprintf(stderr, " %s=%lld", nm[i], g_inf[i]);
++  fprintf(stderr, "\n");
++}
++static bool g_reg = (atexit(dumpChg), true);
+ void HighsDomain::changeBound(HighsDomainChange boundchg, Reason reason) {
++  ++g_chg[reasonCat(reason, cutpoolpropagation.size())];
+   assert(boundchg.column >= 0);
+   assert(boundchg.column < (HighsInt)col_upper_.size());
+   // assert(infeasible_ == 0);
+@@ -3828,7 +3852,9 @@ void HighsDomain::ConflictSet::conflictAnalysis(HighsConflictPool& conflictPool,
+                                                 HighsPseudocost& pseudocost) {
+   resolvedDomainChanges.reserve(localdom.domchgstack_.size());
+ 
+-  if (!explainInfeasibility()) return;
++  ++g_inf[reasonCat(localdom.infeasible_reason, localdom.cutpoolpropagation.size())];
++  if (!explainInfeasibility()) { fprintf(stderr, "HCA prop explainfail\n"); return; }
++  fprintf(stderr, "HCA prop len %d limit %d\n", (int)resolvedDomainChanges.size(), (int)((1000 + 3 * localdom.mipsolver->mipdata_->integral_cols.size()) / 10));
+ 
+   pseudocost.increaseConflictWeight();
+ 
+@@ -3904,8 +3930,11 @@ void HighsDomain::ConflictSet::conflictAnalysis(const HighsInt* proofinds,
+   if (ninfmin != 0) return;
+ 
+   if (!explainInfeasibilityLeq(proofinds, proofvals, prooflen, proofrhs,
+-                               double(activitymin)))
++                               double(activitymin))) {
++    fprintf(stderr, "HCA proof explainfail prooflen %d\n", (int)prooflen);
+     return;
++  }
++  fprintf(stderr, "HCA proof len %d prooflen %d\n", (int)resolvedDomainChanges.size(), (int)prooflen);
+ 
+   pseudocost.increaseConflictWeight();
+   for (const LocalDomChg& locdomchg : resolvedDomainChanges) {
+diff --git a/highs/mip/HighsPathSeparator.cpp b/highs/mip/HighsPathSeparator.cpp
+index d4fa7ad..edd8acd 100644
+--- a/highs/mip/HighsPathSeparator.cpp
++++ b/highs/mip/HighsPathSeparator.cpp
+@@ -1,3 +1,5 @@
++#include <cstdlib>
++#include <cstdio>
+ /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+ /*                                                                       */
+ /*    This file is part of the HiGHS linear optimization suite           */
+@@ -30,6 +32,39 @@ void HighsPathSeparator::separateLpSolution(HighsLpRelaxation& lpRelaxation,
+   const HighsMipSolver& mip = lpRelaxation.getMipSolver();
+   const HighsLp& lp = lpRelaxation.getLp();
+   const HighsSolution& lpSolution = lpRelaxation.getSolution();
++  static int dumpCalls = 0;
++  static FILE* dumpf = nullptr;
++  ++dumpCalls;
++  if (dumpCalls == 1 && getenv("HIGHS_CUT_DUMP")) {
++    dumpf = fopen(getenv("HIGHS_CUT_DUMP"), "w");
++    const HighsDomain& gd = transLp.getGlobaldom();
++    fprintf(dumpf, "N %d %d\n", (int)lp.num_col_, (int)lp.num_row_);
++    for (HighsInt j = 0; j < lp.num_col_; ++j)
++      fprintf(dumpf, "C %.17g %.17g %d %.17g\n", gd.col_lower_[j], gd.col_upper_[j], (int)lpRelaxation.isColIntegral(j), lpSolution.col_value[j]);
++    for (HighsInt i = 0; i < lp.num_row_; ++i) {
++      HighsInt len; const HighsInt* ri; const double* rv;
++      lpRelaxation.getRow(i, len, ri, rv);
++      fprintf(dumpf, "R %.17g %.17g %.17g %d", lp.row_lower_[i], lp.row_upper_[i], lpSolution.row_value[i], (int)len);
++      for (HighsInt k = 0; k < len; ++k) fprintf(dumpf, " %d %.17g", (int)ri[k], rv[k]);
++      fprintf(dumpf, "\n");
++    }
++  } else if (dumpCalls == 2 && dumpf) {
++    fclose(dumpf);
++    dumpf = nullptr;
++  }
++  auto dumpBase = [&](const std::vector<HighsInt>& bi, const std::vector<double>& bv) {
++    if (!dumpf) return;
++    fprintf(dumpf, "B %d", (int)bi.size());
++    for (size_t k = 0; k < bi.size(); ++k) fprintf(dumpf, " %d %.17g", (int)bi[k], bv[k]);
++    fprintf(dumpf, "\n");
++  };
++  auto dumpRes = [&](bool ok, const std::vector<HighsInt>& ci, const std::vector<double>& cv, double crhs) {
++    if (!dumpf) return;
++    if (!ok) { fprintf(dumpf, "X 0\n"); return; }
++    fprintf(dumpf, "X 1 %.17g %d", crhs, (int)ci.size());
++    for (size_t k = 0; k < ci.size(); ++k) fprintf(dumpf, " %d %.17g", (int)ci[k], cv[k]);
++    fprintf(dumpf, "\n");
++  };
+ 
+   std::vector<RowType> rowtype;
+   rowtype.resize(lp.num_row_);
+@@ -350,7 +385,9 @@ void HighsPathSeparator::separateLpSolution(HighsLpRelaxation& lpRelaxation,
+ 
+         // generate cut
+         double rhs = 0;
++        dumpBase(baseRowInds, baseRowVals);
+         success = cutGen.generateCut(transLp, baseRowInds, baseRowVals, rhs);
++        dumpRes(success, baseRowInds, baseRowVals, rhs);
+ 
+         lpAggregator.getCurrentAggregation(baseRowInds, baseRowVals, true);
+         if (!aggregatedPath.empty() || bestOutArcCol != -1 ||
+@@ -359,7 +396,12 @@ void HighsPathSeparator::separateLpSolution(HighsLpRelaxation& lpRelaxation,
+ 
+         // generate reverse cut
+         rhs = 0;
+-        success |= cutGen.generateCut(transLp, baseRowInds, baseRowVals, rhs);
++        dumpBase(baseRowInds, baseRowVals);
++        {
++          bool ok2 = cutGen.generateCut(transLp, baseRowInds, baseRowVals, rhs);
++          dumpRes(ok2, baseRowInds, baseRowVals, rhs);
++          success |= ok2;
++        }
+ 
+         if (success || (bestOutArcCol == -1 && bestInArcCol == -1)) break;
+ 
+@@ -393,7 +435,8 @@ void HighsPathSeparator::separateLpSolution(HighsLpRelaxation& lpRelaxation,
+ 
+       // if the path has length at least 2 try to separate a path mixing cut
+       HighsInt pathLen = aggregatedPath.size();
+-      if (pathLen > 1) {
++      static const bool noMix = getenv("HIGHS_NO_MIX") != nullptr;
++      if (pathLen > 1 && !noMix) {
+         // generate path mixing cut
+         HighsHashTable<HighsInt, HighsInt> indexPos;
+ 
+@@ -529,9 +572,12 @@ void HighsPathSeparator::separateLpSolution(HighsLpRelaxation& lpRelaxation,
+                 cutVals.resize(numInds);
+                 inds.resize(numInds);
+ 
+-                if (transLp.untransform(cutVals, inds, rhs))
+-                  success |= cutGen.finalizeAndAddCut(transLp.getGlobaldom(),
++                if (transLp.untransform(cutVals, inds, rhs)) {
++                  bool ok = cutGen.finalizeAndAddCut(transLp.getGlobaldom(),
+                                                       inds, cutVals, rhs);
++                  success |= ok;
++                  fprintf(stderr, "HMIX %d len %d k %d\n", (int)ok, (int)inds.size(), (int)k);
++                }
+ 
+                 // printf("cut is violated for k = %d\n", k);
+                 break;
+diff --git a/highs/mip/HighsSeparation.cpp b/highs/mip/HighsSeparation.cpp
+index a2c144c..ddfc773 100644
+--- a/highs/mip/HighsSeparation.cpp
++++ b/highs/mip/HighsSeparation.cpp
+@@ -1,3 +1,4 @@
++#include <cstdio>
+ /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+ /*                                                                       */
+ /*    This file is part of the HiGHS linear optimization suite           */
+@@ -137,14 +138,20 @@ HighsInt HighsSeparation::separationRound(HighsDomain& propdomain,
+   }
+   HighsLpAggregator lpAggregator(*lp);
+ 
++  static int roundNo = 0;
++  ++roundNo;
++  fprintf(stderr, "HSEP round %d obj %.6f", roundNo, lp->getObjective());
+   for (const std::unique_ptr<HighsSeparator>& separator : separators) {
++    HighsInt before = mipworker_.getCutPool().getNumCuts();
+     separator->run(*lp, lpAggregator, transLp, mipworker_.getCutPool());
++    fprintf(stderr, " sep%d=%d", (int)(&separator - &separators[0]), (int)(mipworker_.getCutPool().getNumCuts() - before));
+     if (mipworker_.getGlobalDomain().infeasible()) {
+       status = HighsLpRelaxation::Status::kInfeasible;
+       return 0;
+     }
+   }
+ 
++  fprintf(stderr, "\n");
+   numboundchgs = propagateAndResolve();
+   if (numboundchgs == -1)
+     return 0;

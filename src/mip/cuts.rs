@@ -983,3 +983,132 @@ fn lifted_flow_cover_impl(vars: &CutVars, base: &[(usize, f64)], rhs: f64) -> Op
     }
     Some(RawCut { coefs, rhs: r_hs })
 }
+
+/// 診断用: HiGHS の経路集約が `generateCut` に渡した集約行 (HiGHS をソースから計測して書き出したもの) を、こちらの
+/// CMIR・lifted flow cover に通し、できたカットの効き目を HiGHS のカットと比べる
+/// (`HIGHS_CUT_DUMP=ファイル cargo test --release highs_cut_dump -- --ignored --nocapture`)。
+#[cfg(test)]
+mod highs_dump {
+    use super::*;
+
+    #[test]
+    #[ignore]
+    fn highs_cut_dump() {
+        let Ok(path) = std::env::var("HIGHS_CUT_DUMP") else { return };
+        let text = std::fs::read_to_string(path).unwrap();
+        let (mut n, mut m) = (0usize, 0usize);
+        let (mut lo, mut up, mut isint, mut x) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let mut rows: Vec<Vec<(usize, f64)>> = Vec::new();
+        let (mut rlo, mut rup) = (Vec::new(), Vec::new());
+        let mut bases: Vec<Vec<(usize, f64)>> = Vec::new();
+        let mut res: Vec<Option<(Vec<(usize, f64)>, f64)>> = Vec::new();
+        let num = |s: &str| -> f64 {
+            match s {
+                "inf" => f64::INFINITY,
+                "-inf" => f64::NEG_INFINITY,
+                _ => s.parse().unwrap(),
+            }
+        };
+        for line in text.lines() {
+            let w: Vec<&str> = line.split_whitespace().collect();
+            match w[0] {
+                "N" => {
+                    n = w[1].parse().unwrap();
+                    m = w[2].parse().unwrap();
+                }
+                "C" => {
+                    lo.push(num(w[1]));
+                    up.push(num(w[2]));
+                    isint.push(w[3] == "1");
+                    x.push(num(w[4]));
+                }
+                "R" => {
+                    rlo.push(num(w[1]));
+                    rup.push(num(w[2]));
+                    let act = num(w[3]);
+                    let len: usize = w[4].parse().unwrap();
+                    rows.push((0..len).map(|k| (w[5 + 2 * k].parse().unwrap(), num(w[6 + 2 * k]))).collect());
+                    let _ = act;
+                }
+                "B" => {
+                    let len: usize = w[1].parse().unwrap();
+                    bases.push((0..len).map(|k| (w[2 + 2 * k].parse().unwrap(), num(w[3 + 2 * k]))).collect());
+                }
+                "X" => {
+                    if w[1] == "1" {
+                        let rhs = num(w[2]);
+                        let len: usize = w[3].parse().unwrap();
+                        res.push(Some(((0..len).map(|k| (w[4 + 2 * k].parse().unwrap(), num(w[5 + 2 * k]))).collect(), rhs)));
+                    } else {
+                        res.push(None);
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(bases.len(), res.len());
+        // 行の活動量 (論理変数) も変数として並べる
+        let mut vlo = lo.clone();
+        let mut vup = up.clone();
+        let mut vx = x.clone();
+        let mut vint = isint.clone();
+        for i in 0..m {
+            vlo.push(rlo[i]);
+            vup.push(rup[i]);
+            vx.push(rows[i].iter().map(|&(j, a)| a * x[j]).sum());
+            vint.push(false);
+        }
+        let vb = VarBounds::from_rows(n, &isint, &rows, &rlo, &rup);
+        let vars = CutVars { lo: &vlo, up: &vup, is_int: &vint, x: &vx, vb: Some(&vb) };
+        // 論理変数を行の式に展開して、効き目 (違反量 / ノルム) を測る
+        let eff = |coefs: &[(usize, f64)], rhs: f64| -> f64 {
+            let mut d: std::collections::BTreeMap<usize, f64> = std::collections::BTreeMap::new();
+            for &(k, a) in coefs {
+                if k < n {
+                    *d.entry(k).or_default() += a;
+                } else {
+                    for &(j, b) in &rows[k - n] {
+                        *d.entry(j).or_default() += a * b;
+                    }
+                }
+            }
+            let act: f64 = d.iter().map(|(&j, &a)| a * x[j]).sum();
+            let norm = d.values().map(|a| a * a).sum::<f64>().sqrt();
+            if norm < 1e-12 { 0.0 } else { (act - rhs) / norm }
+        };
+        let (mut both, mut only_h, mut only_o, mut none) = (0, 0, 0, 0);
+        let (mut sum_h, mut sum_o) = (0.0, 0.0);
+        let mut shown = 0;
+        for (b, r) in bases.iter().zip(&res) {
+            let mut best_o: Option<f64> = None;
+            for c in [cmir(&vars, b, 0.0), lifted_flow_cover(&vars, b, 0.0)].into_iter().flatten() {
+                let e = eff(&c.coefs, c.rhs);
+                if e > 1e-6 {
+                    best_o = Some(best_o.map_or(e, |v: f64| v.max(e)));
+                }
+            }
+            let h = r.as_ref().map(|(c, rhs)| eff(c, *rhs));
+            match (h, best_o) {
+                (Some(eh), Some(eo)) => {
+                    both += 1;
+                    sum_h += eh;
+                    sum_o += eo;
+                    if shown < 15 {
+                        shown += 1;
+                        println!("both: highs {eh:.4} ours {eo:.4} base len {}", b.len());
+                    }
+                }
+                (Some(eh), None) => {
+                    only_h += 1;
+                    if shown < 15 {
+                        shown += 1;
+                        println!("only highs: {eh:.4} base len {}: {:?}", b.len(), &b[..b.len().min(12)]);
+                    }
+                }
+                (None, Some(_)) => only_o += 1,
+                (None, None) => none += 1,
+            }
+        }
+        println!("bases {} both {both} only_highs {only_h} only_ours {only_o} none {none}; mean eff on both: highs {:.4} ours {:.4}", bases.len(), sum_h / both.max(1) as f64, sum_o / both.max(1) as f64);
+    }
+}
