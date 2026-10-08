@@ -289,11 +289,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
     }
 
-    /// 年齢が上限 (`ENOMOTO_T_MIP_CUT_AGE_LIMIT`、HiGHS の `mip_lp_age_limit` と同じ 10) を超えたカットを LP から外す
+    /// 年齢が上限 (`ENOMOTO_T_MIP_CUT_AGE_LIMIT`、既定 30。HiGHS の `mip_lp_age_limit` は 10 だが、10 では binkar10_1 で効くカットまで外れた) を超えたカットを LP から外す
     /// (プールにあるカットは、違反すればまた戻る)。外した数を返す。
     pub(super) fn remove_aged_cuts(&mut self) -> usize {
         self.sync_cut_age();
-        let limit = tunable!("ENOMOTO_T_MIP_CUT_AGE_LIMIT", 10u32, u32);
+        let limit = tunable!("ENOMOTO_T_MIP_CUT_AGE_LIMIT", 30u32, u32);
         let m0 = self.p.m;
         let mut remove = vec![false; self.lp.num_rows()];
         let mut cnt = 0;
@@ -597,7 +597,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // 経路集約 (path aggregation、HiGHS の `HighsPathSeparator`)
         if env_str!("ENOMOTO_MIP_NO_PATH_AGG").is_none() {
-            let max_starts = if light { tunable!("ENOMOTO_T_MIP_NODE_PATH_STARTS", 50usize, usize) } else { 1000 };
+            let max_starts = if light { tunable!("ENOMOTO_T_MIP_NODE_PATH_STARTS", 0usize, usize) } else { 1000 };
             self.path_aggregation(&vars, &lp_rows, &mut cands, &mut push, max_starts);
         }
         if dbg_sep {

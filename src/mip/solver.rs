@@ -400,12 +400,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// この値以上の下界のノードは捨ててよい (最小化形、定数項込み)。
     /// このノードで新しいカットを分離するか (SCIP の separator の freq と同じく、深さが `freq` の倍数のノードだけ。
-    /// `ENOMOTO_T_MIP_NODE_CUT_FREQ`、0 なら分離しない。`ENOMOTO_MIP_NODE_CUTS` なら毎回)。
+    /// `ENOMOTO_T_MIP_NODE_CUT_FREQ`、既定 10、0 なら分離しない。`ENOMOTO_MIP_NODE_CUTS` なら毎回)。
     fn node_cuts_due(&self, depth: usize) -> bool {
         if env_str!("ENOMOTO_MIP_NODE_CUTS").is_some() {
             return true;
         }
-        let freq = tunable!("ENOMOTO_T_MIP_NODE_CUT_FREQ", 0usize, usize);
+        let freq = tunable!("ENOMOTO_T_MIP_NODE_CUT_FREQ", 10usize, usize);
         freq > 0 && depth % freq == 0
     }
 
