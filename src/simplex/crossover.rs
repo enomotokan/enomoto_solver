@@ -2081,10 +2081,12 @@ fn vertex_solution(std: &StdForm, basis_pos: &[Option<usize>], nb_status: &[Opti
 /// 境界にある (退化した) 基底変数・非基底変数に分けて返す (`ENOMOTO_DEBUG_CROSSOVER`)。
 fn vertex_gap_breakdown(std: &StdForm, y: &[f64], xv: &[f64], basis_pos: &[Option<usize>]) -> [f64; 3] {
     let mut out = [0.0; 3];
+    // 無限の境界の側の小さな d は [`lagrangian_lower_bound`] と同じく 0 とみなす。
+    let tiny = 1e-9 * (1.0 + y.iter().fold(0.0f64, |a, v| a.max(v.abs())));
     for j in 0..std.n_total {
         let d = std.c[j] - sparse_dot_dense(col(std, j), y);
         let bound = if d > 0.0 { std.lb[j] } else { std.ub[j] };
-        let t = if d == 0.0 { 0.0 } else if bound.is_finite() { d * (xv[j] - bound) } else { f64::INFINITY };
+        let t = if d == 0.0 { 0.0 } else if bound.is_finite() { d * (xv[j] - bound) } else if d.abs() <= tiny { 0.0 } else { f64::INFINITY };
         let v = xv[j];
         let tol = 1e-9 * (1.0 + v.abs());
         let k = match basis_pos[j] {
