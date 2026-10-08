@@ -1734,11 +1734,11 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
                 eprintln!("CROSSOVER vertex gap breakdown y_ipm (interior basic, degenerate basic, nonbasic): {:?}", vertex_gap_breakdown(std, yi, &xv, &basis_pos));
             }
             // y_ipm では足りないとき、頂点で上下限の間にある (退化していない) 基底変数の被約費用を 0 にするように y を
-            // 補正して下界を測り直す (`ENOMOTO_T_XO_ACCEPT_YFIX`、0 で行わない): `Bᵀ Δ = ρ` (ρ は、そのような基底変数の行で
+            // 補正して下界を測り直す (試験用 `ENOMOTO_T_XO_ACCEPT_YFIX=1`): `Bᵀ Δ = ρ` (ρ は、そのような基底変数の行で
             // `d_j(y_ipm)`、退化した基底の行で 0)、`y' = y_ipm + θ Δ`。下界 `L` はどの y でも成り立つので、判定は厳密なまま。
             // 頂点の目的値と L の差は変数ごとの `d_j x_j − min(d_j l_j, d_j u_j)` の和で、上下限の間にある変数は d_j が
             // 0 でない限り `|d_j| ×` 境界までの距離だけ効く (箱の広い fome13 で y_ipm の小さな d_j が積み上がる)。
-            if accept_gap > 0.0 && gap > accept_gap && tunable!("ENOMOTO_T_XO_ACCEPT_YFIX", 1u8, u8) != 0 {
+            if accept_gap > 0.0 && gap > accept_gap && tunable!("ENOMOTO_T_XO_ACCEPT_YFIX", 0u8, u8) != 0 {
                 let mut rho = vec![0.0; m];
                 for (k, &j) in basis.iter().enumerate() {
                     let v = xv[j];
