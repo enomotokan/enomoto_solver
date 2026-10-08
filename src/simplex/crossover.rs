@@ -1727,10 +1727,50 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
         if let Some(xv) = vertex_solution(std, &basis_pos, &nb_status, &lu) {
             let obj: f64 = (0..n).map(|j| std.c[j] * xv[j]).sum();
             let lbv = lagrangian_lower_bound(std, yi);
-            let gap = (obj - lbv) / (1.0 + obj.abs());
+            let mut gap = (obj - lbv) / (1.0 + obj.abs());
             crate::phase_timing::record("xo_vertex_gap", gap);
             if debug {
                 eprintln!("CROSSOVER vertex obj={obj:.12e} L(y_ipm)={lbv:.12e} rel gap={gap:.3e}");
+                eprintln!("CROSSOVER vertex gap breakdown y_ipm (interior basic, degenerate basic, nonbasic): {:?}", vertex_gap_breakdown(std, yi, &xv, &basis_pos));
+            }
+            // y_ipm では足りないとき、頂点で上下限の間にある (退化していない) 基底変数の被約費用を 0 にするように y を
+            // 補正して下界を測り直す (`ENOMOTO_T_XO_ACCEPT_YFIX`、0 で行わない): `Bᵀ Δ = ρ` (ρ は、そのような基底変数の行で
+            // `d_j(y_ipm)`、退化した基底の行で 0)、`y' = y_ipm + θ Δ`。下界 `L` はどの y でも成り立つので、判定は厳密なまま。
+            // 頂点の目的値と L の差は変数ごとの `d_j x_j − min(d_j l_j, d_j u_j)` の和で、上下限の間にある変数は d_j が
+            // 0 でない限り `|d_j| ×` 境界までの距離だけ効く (箱の広い fome13 で y_ipm の小さな d_j が積み上がる)。
+            if accept_gap > 0.0 && gap > accept_gap && tunable!("ENOMOTO_T_XO_ACCEPT_YFIX", 1u8, u8) != 0 {
+                let mut rho = vec![0.0; m];
+                for (k, &j) in basis.iter().enumerate() {
+                    let v = xv[j];
+                    let tol = 1e-9 * (1.0 + v.abs());
+                    if v > std.lb[j] + tol && v < std.ub[j] - tol {
+                        rho[k] = std.c[j] - sparse_dot_dense(col(std, j), yi);
+                    }
+                }
+                let mut dy = vec![0.0; m];
+                let mut scratch = vec![0.0; m];
+                lu.solve_transpose_into(&rho, &mut scratch, &mut dy);
+                let mut yt = vec![0.0; m];
+                for th in [1.0, 0.5, 0.1] {
+                    for i in 0..m {
+                        yt[i] = yi[i] + th * dy[i];
+                    }
+                    let l = lagrangian_lower_bound(std, &yt);
+                    let g = (obj - l) / (1.0 + obj.abs());
+                    if debug {
+                        eprintln!("CROSSOVER vertex L(y_ipm + {th} dy)={l:.12e} rel gap={g:.3e}");
+                        if th == 1.0 {
+                            eprintln!("CROSSOVER vertex gap breakdown y_fix: {:?}", vertex_gap_breakdown(std, &yt, &xv, &basis_pos));
+                        }
+                    }
+                    if g < gap {
+                        gap = g;
+                    }
+                    if gap <= accept_gap {
+                        break;
+                    }
+                }
+                crate::phase_timing::record("xo_vertex_gap_fix", gap);
             }
             if accept_gap > 0.0 && gap <= accept_gap {
                 crate::phase_timing::mark("xo_vertex_accepted");
@@ -2037,6 +2077,26 @@ fn vertex_solution(std: &StdForm, basis_pos: &[Option<usize>], nb_status: &[Opti
 
 /// 双対 `y` による弱双対の下界 `L(y) = b·y + Σ_j min_{l_j<=x_j<=u_j} (c - A^T y)_j x_j` (被約費用が無限の境界の向きに
 /// 小さく (`1e-9 (1 + max|y|)` 以下) はみ出すのは 0 とみなす。それより大きければ `-inf`)。
+/// 計測用: 頂点 `xv` の目的値と `L(y)` の差 (`Σ_j d_j x_j − min(d_j l_j, d_j u_j)`) を、上下限の間にある基底変数・
+/// 境界にある (退化した) 基底変数・非基底変数に分けて返す (`ENOMOTO_DEBUG_CROSSOVER`)。
+fn vertex_gap_breakdown(std: &StdForm, y: &[f64], xv: &[f64], basis_pos: &[Option<usize>]) -> [f64; 3] {
+    let mut out = [0.0; 3];
+    for j in 0..std.n_total {
+        let d = std.c[j] - sparse_dot_dense(col(std, j), y);
+        let bound = if d > 0.0 { std.lb[j] } else { std.ub[j] };
+        let t = if d == 0.0 { 0.0 } else if bound.is_finite() { d * (xv[j] - bound) } else { f64::INFINITY };
+        let v = xv[j];
+        let tol = 1e-9 * (1.0 + v.abs());
+        let k = match basis_pos[j] {
+            Some(_) if v > std.lb[j] + tol && v < std.ub[j] - tol => 0,
+            Some(_) => 1,
+            None => 2,
+        };
+        out[k] += t;
+    }
+    out
+}
+
 fn lagrangian_lower_bound(std: &StdForm, y: &[f64]) -> f64 {
     let ymax = y.iter().fold(0.0f64, |a, v| a.max(v.abs()));
     let tiny = 1e-9 * (1.0 + ymax);
