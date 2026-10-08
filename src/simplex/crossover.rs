@@ -907,6 +907,21 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     for (k, &j) in free_cols.iter().enumerate() {
         x[j] = ipm.x[k].clamp(std.lb[j], std.ub[j]);
     }
+    if debug {
+        // 丸める前の内点法の点の残差と、上下限の違反 (丸めで増えた残差の目安)。
+        let mut xr = std.lb.clone();
+        let mut bviol = 0.0f64;
+        for (k, &j) in free_cols.iter().enumerate() {
+            xr[j] = ipm.x[k];
+            bviol = bviol.max((std.lb[j] - ipm.x[k]).max(ipm.x[k] - std.ub[j]));
+        }
+        let bmax = std.b.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+        eprintln!(
+            "CROSSOVER resid after ipm={:.3e} (before clamping {:.3e}, max bound violation {bviol:.3e}, |b|max={bmax:.3e})",
+            primal_resid(std, &x),
+            primal_resid(std, &xr)
+        );
+    }
     // 頂点の採用判定の射影 (`ENOMOTO_T_XO_ACCEPT_PROJ`) で最適分割を推定するのに使う内点法の主の点 (押し出しの前)。
     let x_ipm_saved = (tunable!("ENOMOTO_T_XO_ACCEPT_PROJ", 0u8, u8) != 0).then(|| x.clone());
     let mut y = ipm.y;
@@ -1818,7 +1833,9 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
                 }
                 crate::phase_timing::record("xo_vertex_gap_fix", gap);
             }
-            if accept_gap > 0.0 && gap <= accept_gap {
+            // ギャップが -accept_gap より小さい (頂点の目的値が正しい下界を下回る) なら、頂点は許容の範囲を超えて実行不能
+            // なので採用しない (目的値の誤った解を返さない)。
+            if accept_gap > 0.0 && gap <= accept_gap && gap >= -accept_gap {
                 crate::phase_timing::mark("xo_vertex_accepted");
                 let n_orig = n - m;
                 return Some(SimplexResult { status: Status::Optimal, x: Some(xv[..n_orig].to_vec()) });
@@ -1874,6 +1891,40 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
             if viol > 1e-9 {
                 nd += 1;
                 md = md.max(viol);
+            }
+        }
+        // 違反を行の大きさ (基底解での `Σ_j |a_ij x_j|`) に対する比で測る (スラックの列なら、その行の大きさ)。
+        {
+            let mut x_full = vec![0.0; n];
+            for j in 0..n {
+                x_full[j] = match nb_status[j] {
+                    Some(NbStatus::Lower) => std.lb[j],
+                    Some(NbStatus::Upper) => std.ub[j],
+                    Some(NbStatus::Zero) => 0.0,
+                    None => 0.0,
+                };
+            }
+            for (k, &j) in basis.iter().enumerate() {
+                x_full[j] = xb[k];
+            }
+            let mut act = vec![0.0f64; m];
+            for j in 0..n {
+                for &(i, a) in col(std, j) {
+                    act[i] += (a * x_full[j]).abs();
+                }
+            }
+            let (mut worst_rel, mut n_rel) = (0.0f64, 0usize);
+            for (k, &j) in basis.iter().enumerate() {
+                let viol = (std.lb[j] - xb[k]).max(xb[k] - std.ub[j]);
+                if viol > 1e-9 {
+                    let scale = col(std, j).iter().map(|&(i, _)| act[i]).fold(1.0 + xb[k].abs(), f64::max);
+                    let rel = viol / scale;
+                    worst_rel = worst_rel.max(rel);
+                    n_rel += (rel > 1e-9) as usize;
+                }
+            }
+            if debug {
+                eprintln!("CROSSOVER basis quality: primal violations relative to row size: max {worst_rel:.2e}, #>1e-9: {n_rel}");
             }
         }
         crate::phase_timing::record("xo_primal_infeas", np as f64);
@@ -2305,7 +2356,7 @@ fn repair_vertex(
             t0.elapsed().as_secs_f64()
         );
     }
-    (gap <= accept_gap).then_some(res)
+    (gap <= accept_gap && gap >= -accept_gap).then_some(res)
 }
 
 /// 双対の最適面への射影の補正量 Δ を返す (`ENOMOTO_T_XO_ACCEPT_PROJ`)。S は、内点法の点 `xi` で境界までの距離が
