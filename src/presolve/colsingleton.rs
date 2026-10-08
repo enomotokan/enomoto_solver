@@ -160,7 +160,10 @@ pub fn eliminate_singleton_equalities_view(n: usize, a: &FaerCsr, b: &[f64], gv:
         // Markowitz 型のピボット判定: 行の最大絶対値に比べて小さすぎる係数で割ると、
         // 復元時に誤差が `max|row|/|coeff|` 倍に増幅されるので消去しない。
         let row_max = row.iter().map(|&(_, v)| v.abs()).fold(0.0f64, f64::max);
-        if coeff.abs() < tunable!("ENOMOTO_T_CS_SUBSTITUTION_PIVOT_RATIO", SUBSTITUTION_PIVOT_RATIO, f64) * row_max {
+        // ただし整数計画の前処理で、行の他の列がすべて整数列なら、復元に使う値は整数 (丸め済み) なので誤差は
+        // 増幅されない。この場合は判定しない (qnet1: 目的値を定義する連続列 `s = 132.55 y1 + 934.75 y2` を消せる)
+        let others_int = int_mask.as_ref().is_some_and(|m| row.iter().all(|&(k, _)| k == j || m[k])) && env_str!("ENOMOTO_MIP_CS_PIVOT_ALWAYS").is_none();
+        if !others_int && coeff.abs() < tunable!("ENOMOTO_T_CS_SUBSTITUTION_PIVOT_RATIO", SUBSTITUTION_PIVOT_RATIO, f64) * row_max {
             continue;
         }
         // x_j 以外の項。
