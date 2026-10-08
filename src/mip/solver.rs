@@ -1376,7 +1376,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         self.pc.add_observation(j, is_up, delta, gains[side]);
                         if o >= self.prune_limit() {
                             cut[side] = true;
-                            self.add_dual_proof();
+                            self.sb_child_proof(j, is_up, v, false);
                         } else {
                             let x = self.lp.col_values();
                             if self.fractional(&x).is_empty() {
@@ -1387,9 +1387,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     LpStatus::Infeasible | LpStatus::ObjectiveBound => {
                         cut[side] = true;
                         self.pc.add_cutoff(j, is_up);
-                        if st == LpStatus::ObjectiveBound {
-                            self.add_dual_proof();
-                        }
+                        self.sb_child_proof(j, is_up, v, st == LpStatus::Infeasible);
                     }
                     _ => {
                         // 反復上限: 途中の目的値 (双対単体法なので下界) を弱い観測として使う
@@ -1553,6 +1551,32 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         let y = self.lp.row_duals();
         self.add_proof_from(&y, true);
+    }
+
+    /// 強分岐の子 (列 `j` を `v` の上/下に分けた側) が打ち切られたときの証明 (`infeasible` なら Farkas、そうでなければ
+    /// 双対証明)。強分岐は子の境界を LP にだけ置くので、証明が今の定義域で破れているかを正しく調べ、衝突解析がその
+    /// 境界を決定として使えるよう、その間だけ定義域にも置く (伝播はしない)。
+    fn sb_child_proof(&mut self, j: usize, is_up: bool, v: f64, infeasible: bool) {
+        if env_str!("ENOMOTO_MIP_SB_PROOF_OLD").is_some() {
+            if !infeasible {
+                self.add_dual_proof();
+            }
+            return;
+        }
+        let pos = self.dom.stack_len();
+        if is_up {
+            self.dom.tighten_lower(self.p, j, v.ceil());
+        } else {
+            self.dom.tighten_upper(self.p, j, v.floor());
+        }
+        if !self.dom.infeasible {
+            if infeasible {
+                self.add_farkas_proof();
+            } else {
+                self.add_dual_proof();
+            }
+        }
+        self.dom.backtrack_to(self.p, pos);
     }
 
     /// LP が実行不能だったときの双対射線 `y` から実行不能の証明 (Farkas) を作ってプールに入れる。
@@ -1731,6 +1755,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if ok {
             self.proof_conflicts += 1;
         }
+        if env_str!("ENOMOTO_MIP_DEBUG_PROOF").is_some() {
+            let p = self.p;
+            let r = self.dom.analyze_proof_conflict(p, coefs, usize::MAX, true);
+            match r {
+                None => eprintln!("PCONF none (proof len {})", coefs.len()),
+                Some(l) => {
+                    let bin = l.iter().filter(|&&(j, _, _)| p.is_int[j] && self.dom.global_lo[j] == 0.0 && self.dom.global_up[j] == 1.0).count();
+                    let int = l.iter().filter(|&&(j, _, _)| p.is_int[j]).count();
+                    eprintln!("PCONF ok {ok} len {} bin {bin} genint {} cont {} (proof len {})", l.len(), int - bin, l.len() - int, coefs.len());
+                }
+            }
+        }
     }
 
     /// 衝突 (同時には成り立たない境界の組) が 0-1 列だけなら、`sum_{x_j >= 1} x_j - sum_{x_j <= 0} x_j <= |{x_j >= 1}| - 1`
@@ -1738,20 +1774,52 @@ impl<'a, L: MipLp> Solver<'a, L> {
     fn add_conflict_lits(&mut self, lits: &[(usize, bool, f64)]) -> bool {
         let p = self.p;
         let mut coefs: Vec<(usize, f64)> = Vec::with_capacity(lits.len());
-        let mut ones = 0.0;
+        // 各リテラルの「真の度合い」s (偽なら <= 0、真なら > 0、常に <= 1) の和 <= k - 1 (k はリテラルの数) にする。
+        // 0-1 列は s = x (x >= 1) / 1 - x (x <= 0)。一般整数列 (大域的な境界 [L, U]) は x >= v なら
+        // s = (x - v + 1) / (U - v + 1)、x <= v なら s = (v + 1 - x) / (v + 1 - L)。真のとき s は 1 未満になりうるので、
+        // 全部真の点を切るには一般整数のリテラルは 1 つまで (2 つあると、1 つ偽でも和が k - 1 を超えうる)。
+        let mut ones = lits.len() as f64 - 1.0; // 右辺 (定数項を移していく)
+        let mut general = 0usize;
         for &(j, upper, v) in lits {
-            if !p.is_int[j] || self.dom.global_lo[j] != 0.0 || self.dom.global_up[j] != 1.0 {
+            if !p.is_int[j] {
                 return false;
             }
-            if !upper && v == 1.0 {
-                coefs.push((j, 1.0));
-                ones += 1.0;
-            } else if upper && v == 0.0 {
-                coefs.push((j, -1.0));
-            } else {
+            let (gl, gu) = (self.dom.global_lo[j], self.dom.global_up[j]);
+            if gl == 0.0 && gu == 1.0 {
+                if !upper && v == 1.0 {
+                    coefs.push((j, 1.0));
+                } else if upper && v == 0.0 {
+                    // s = 1 - x
+                    coefs.push((j, -1.0));
+                    ones -= 1.0;
+                } else {
+                    return false;
+                }
+                continue;
+            }
+            general += 1;
+            if general > 1 || env_str!("ENOMOTO_MIP_NO_GENINT_CONFLICTS").is_some() {
                 return false;
+            }
+            if !upper {
+                // x >= v (v > L)
+                if !gu.is_finite() || v <= gl || v > gu {
+                    return false;
+                }
+                let w = gu - v + 1.0;
+                coefs.push((j, 1.0 / w));
+                ones += (v - 1.0) / w;
+            } else {
+                // x <= v (v < U)
+                if !gl.is_finite() || v >= gu || v < gl {
+                    return false;
+                }
+                let w = v + 1.0 - gl;
+                coefs.push((j, -1.0 / w));
+                ones -= (v + 1.0) / w;
             }
         }
+        let ones = ones + 1.0; // 下で `ones - 1.0` を右辺にする
         coefs.sort_by_key(|&(j, _)| j);
         coefs.dedup_by_key(|&mut (j, _)| j);
         if coefs.len() != lits.len() {
