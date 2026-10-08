@@ -546,7 +546,10 @@ impl Domain {
 
     /// 衝突解析の本体。`start` は矛盾の出どころ (`Err`) か、破れている証明の係数 (`Ok`)。
     fn resolve_conflict(&self, p: &MipProblem, start: Result<&[(usize, f64)], ConflictSrc>, max_len: usize, decisions: bool) -> Option<Vec<(usize, bool, f64)>> {
-        let last_dec = self.stack.iter().rposition(|c| c.reason < 0)?;
+        let Some(last_dec) = self.stack.iter().rposition(|c| c.reason < 0) else {
+            CONFLICT_FAIL[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return None;
+        };
         // (列, 側) ごとの記録の位置 (昇順)
         let mut hist: std::collections::HashMap<(usize, bool), Vec<usize>> = std::collections::HashMap::new();
         for (k, c) in self.stack.iter().enumerate() {
@@ -589,6 +592,7 @@ impl Domain {
         set.extend(tmp.drain(..));
         for _ in 0..10_000 {
             if set.len() > 4 * max_len + 100 {
+                CONFLICT_FAIL[1].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 return None;
             }
             let k = if decisions {
@@ -609,7 +613,10 @@ impl Domain {
                 break; // 置き換えられない (決定に相当する) 変更
             }
             let r = c.reason as usize;
-            let a = p.rows[r].iter().find(|&&(j, _)| j == c.col).map(|&(_, a)| a)?;
+            let Some(a) = p.rows[r].iter().find(|&&(j, _)| j == c.col).map(|&(_, a)| a) else {
+                CONFLICT_FAIL[2].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return None;
+            };
             // 上限を締めたのは a > 0 なら行の上限 (最小活動量) から、a < 0 なら下限 (最大活動量) から
             let min_side = (a > 0.0) == c.upper;
             set.remove(&k);
@@ -617,6 +624,10 @@ impl Domain {
             set.extend(tmp.drain(..));
         }
         if set.is_empty() || set.len() > max_len {
+            CONFLICT_FAIL[if set.is_empty() { 3 } else { 4 }].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if set.len() > max_len {
+                CONFLICT_FAIL[5].fetch_add(set.len() as u64, std::sync::atomic::Ordering::Relaxed);
+            }
             return None;
         }
         Some(set.iter().map(|&k| (self.stack[k].col, self.stack[k].upper, self.stack[k].new)).collect())
@@ -627,6 +638,9 @@ impl Domain {
         self.lo[j] == self.up[j]
     }
 }
+
+/// 診断用: 衝突解析が失敗した理由の回数 [決定なし, 途中で長すぎ, 理由の行に列がない, 空, 最後に長すぎ, その長さの和]
+pub static CONFLICT_FAIL: [std::sync::atomic::AtomicU64; 6] = [const { std::sync::atomic::AtomicU64::new(0) }; 6];
 
 #[inline]
 fn bound_tol(v: f64) -> f64 {

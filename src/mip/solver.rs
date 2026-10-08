@@ -253,6 +253,9 @@ pub(super) struct Solver<'a, L: MipLp> {
     proof_dirty: bool,
     /// 作った衝突制約の数。
     conflicts_added: u64,
+    /// 診断用: 伝播の矛盾での衝突解析 [呼び出し, 1-UIP なし, 1-UIP を行にできない, 決定の組なし, 決定の組も行にできない]、
+    /// 行にできなかった理由 [連続列, 一般整数 2 つ以上・範囲外, 同じ列の両側]
+    conf_stats: [u64; 8],
     /// 作った実行不能の証明の数。
     farkas_added: u64,
     /// 双対証明で枝刈りしたノード数と、締めた境界の数 (表示用)。
@@ -371,6 +374,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
         proof_val_up: Vec::new(),
         proof_dirty: true,
         conflicts_added: 0,
+        conf_stats: [0; 8],
         farkas_added: 0,
         proof_prunes: 0,
         proof_tightenings: 0,
@@ -1984,11 +1988,30 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         let p = self.p;
         let max_len = self.conflict_max_len();
-        let Some(lits) = self.dom.analyze_conflict(p, max_len) else { return };
-        if !self.add_conflict_lits(&lits) && env_str!("ENOMOTO_MIP_NO_DECISION_CONFLICTS").is_none() {
-            // 0-1 列以外の境界を含む: 決定だけの組にして試す
-            if let Some(lits) = self.dom.analyze_conflict_decisions(p, max_len) {
-                self.add_conflict_lits(&lits);
+        self.conf_stats[0] += 1;
+        let first = self.dom.analyze_conflict(p, max_len);
+        let ok = match &first {
+            None => {
+                self.conf_stats[1] += 1;
+                false
+            }
+            Some(lits) => {
+                let ok = self.add_conflict_lits(lits);
+                if !ok {
+                    self.conf_stats[2] += 1;
+                }
+                ok
+            }
+        };
+        if !ok && env_str!("ENOMOTO_MIP_NO_DECISION_CONFLICTS").is_none() {
+            // 0-1 列以外の境界を含む (または 1-UIP が長すぎる): 決定だけの組にして試す
+            match self.dom.analyze_conflict_decisions(p, max_len) {
+                None => self.conf_stats[3] += 1,
+                Some(lits) => {
+                    if !self.add_conflict_lits(&lits) {
+                        self.conf_stats[4] += 1;
+                    }
+                }
             }
         }
     }
@@ -2046,6 +2069,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut general = 0usize;
         for &(j, upper, v) in lits {
             if !p.is_int[j] {
+                self.conf_stats[5] += 1;
                 return false;
             }
             let (gl, gu) = (self.dom.global_lo[j], self.dom.global_up[j]);
@@ -2063,6 +2087,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             general += 1;
             if general > 1 || env_str!("ENOMOTO_MIP_NO_GENINT_CONFLICTS").is_some() {
+                self.conf_stats[6] += 1;
                 return false;
             }
             if !upper {
@@ -2087,6 +2112,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         coefs.sort_by_key(|&(j, _)| j);
         coefs.dedup_by_key(|&mut (j, _)| j);
         if coefs.len() != lits.len() {
+            self.conf_stats[7] += 1;
             return false; // 同じ列の両側 (それ自体で矛盾) は使わない
         }
         // 診断用: デバッグ解を切っていないか
@@ -2490,6 +2516,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.log(true);
         if self.params.verbose {
             eprintln!("MIP: dual proofs and conflicts {} (conflicts added {} (from proofs {}), Farkas {}, pruned {} nodes, tightened {} bounds)", self.dual_proofs.len(), self.conflicts_added, self.proof_conflicts, self.farkas_added, self.proof_prunes, self.proof_tightenings);
+            eprintln!("MIP: propagation conflicts: analysed {}, no 1-UIP {}, 1-UIP not a row {}, no decision set {}, decision set not a row {}; not a row because continuous {}, general integer {}, both sides {}", self.conf_stats[0], self.conf_stats[1], self.conf_stats[2], self.conf_stats[3], self.conf_stats[4], self.conf_stats[5], self.conf_stats[6], self.conf_stats[7]);
+            let cf: Vec<u64> = super::domain::CONFLICT_FAIL.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();
+            eprintln!("MIP: conflict analysis failures (all calls): no decision {}, too long midway {}, reason row lacks column {}, empty {}, too long at the end {} (total length {}), max length {}", cf[0], cf[1], cf[2], cf[3], cf[4], cf[5], self.conflict_max_len());
             eprintln!("MIP: sibling backtracks {}; basis restores {} (basic count mismatch {}), first LP iterations after a restore {}", self.sibling_backtracks, self.restore_stats.0, self.restore_stats.1, self.restore_stats.2);
             if !self.orbitopes.is_empty() {
                 eprintln!("MIP: orbitopes {}: fixed {} bounds, pruned {} nodes", self.orbitopes.len(), self.orbitope_fixings, self.orbitope_prunes);
