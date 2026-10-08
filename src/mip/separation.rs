@@ -217,7 +217,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             prev_obj = obj;
             // 効いていないカットを外す (論理変数が基底にあり、行が緩んでいるもの)。`ENOMOTO_T_MIP_CUT_REMOVE_EVERY` ラウンドごと
-            if (round + 1) % tunable!("ENOMOTO_T_MIP_CUT_REMOVE_EVERY", 1usize, usize).max(1) == 0 {
+            // `ENOMOTO_T_MIP_ROOT_CUT_AGE` > 0: HiGHS と同じく、効いていないラウンドが続いたカットだけを外す
+            // (HiGHS の mip_lp_age_limit = 10)
+            let root_age = tunable!("ENOMOTO_T_MIP_ROOT_CUT_AGE", 0u32, u32);
+            if root_age > 0 {
+                self.age_cuts();
+                self.remove_cuts_older_than(root_age);
+            } else if (round + 1) % tunable!("ENOMOTO_T_MIP_CUT_REMOVE_EVERY", 1usize, usize).max(1) == 0 {
                 self.remove_inactive_cuts();
             }
         }
@@ -225,9 +231,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let st = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
         if self.params.verbose {
             eprintln!(
-                "MIP: cut loop done: {} cuts added, {} in LP, obj {:.10e} -> {:.10e}",
+                "MIP: cut loop done: {} cuts added, {} in LP, pool {} cuts ({} nonzeros), obj {:.10e} -> {:.10e}",
                 total_added,
                 self.lp.num_rows() - p.m,
+                self.cut_pool.len(),
+                self.cut_pool_nnz,
                 first_obj + p.offset,
                 self.lp.objective() + p.offset
             );
@@ -238,7 +246,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// カットをプールに加える。係数と右辺が (丸めて) 同じものは加えない。プールの非零数は問題の非零数の
     /// 20 倍 (最低 20 万) までにする。
     pub(super) fn add_to_pool(&mut self, coefs: &[(usize, f64)], rhs: f64) {
-        let nnz_cap = (20 * self.p.rows.iter().map(|r| r.len()).sum::<usize>()).max(200_000);
+        let nnz_cap = (tunable!("ENOMOTO_T_MIP_CUT_POOL_NNZ_MULT", 20usize, usize) * self.p.rows.iter().map(|r| r.len()).sum::<usize>()).max(200_000);
         if self.cut_pool_nnz + coefs.len() > nnz_cap {
             return;
         }
@@ -369,8 +377,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 年齢が上限 (`ENOMOTO_T_MIP_CUT_AGE_LIMIT`、既定 30。HiGHS の `mip_lp_age_limit` は 10 だが、10 では binkar10_1 で効くカットまで外れた) を超えたカットを LP から外す
     /// (プールにあるカットは、違反すればまた戻る)。外した数を返す。
     pub(super) fn remove_aged_cuts(&mut self) -> usize {
+        self.remove_cuts_older_than(tunable!("ENOMOTO_T_MIP_CUT_AGE_LIMIT", 30u32, u32))
+    }
+
+    /// 年齢が `limit` を超えたカットを LP から外す。外した数を返す。
+    pub(super) fn remove_cuts_older_than(&mut self, limit: u32) -> usize {
         self.sync_cut_age();
-        let limit = tunable!("ENOMOTO_T_MIP_CUT_AGE_LIMIT", 30u32, u32);
         let m0 = self.p.m;
         let mut remove = vec![false; self.lp.num_rows()];
         let mut cnt = 0;
@@ -471,6 +483,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let tight_only = env_str!("ENOMOTO_MIP_PATH_TIGHT_STARTS").is_some();
         let offset = if m_start > 0 && env_str!("ENOMOTO_MIP_PATH_ROTATE").is_some() { self.path_offset % m_start } else { 0 };
         let both_signs = env_str!("ENOMOTO_MIP_PATH_BOTH_SIGNS").is_some();
+        let stop_on_cut = env_str!("ENOMOTO_MIP_PATH_STOP_ON_CUT").is_some();
         let mut last = offset;
         for sidx in 0..m_start * if both_signs { 2 } else { 1 } {
             let start = (offset + sidx / if both_signs { 2 } else { 1 }) % m_start;
@@ -507,6 +520,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             for step in 0..PATH_MAX_LEN {
                 if step > 0 {
+                    let n_before = cands.len();
                     let mut base: Vec<(usize, f64)> = Vec::with_capacity(touched.len() + weights.len());
                     let amax = touched.iter().fold(0.0f64, |mx, &j| mx.max(agg[j].abs()));
                     for &j in &touched {
@@ -523,6 +537,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if use_flow_cover() {
                         push(lifted_flow_cover(vars, &base, 0.0), cands, self);
                         push(lifted_flow_cover(vars, &neg, 0.0), cands, self);
+                    }
+                    // HiGHS と同じく、カットが出たら経路を伸ばさない (`ENOMOTO_MIP_PATH_STOP_ON_CUT`)
+                    if cands.len() > n_before && stop_on_cut {
+                        break;
                     }
                 }
                 // 打ち消す連続変数: 境界から最も離れたもの
