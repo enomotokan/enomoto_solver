@@ -2082,8 +2082,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut rows = p.rows.clone();
         let mut row_lo = p.row_lo.clone();
         let mut row_up = p.row_up.clone();
+        // カットは根の LP で効いている (活動量が上限にある) ものだけ残す。全部残すと再スタートのたびに行が増え続け
+        // (neos-911970: 4 回で 107 行 -> 約 415 行)、ノードの LP が重くなる
+        let keep_all = env_str!("ENOMOTO_MIP_RESTART_KEEP_ALL_CUTS").is_some();
+        let act = self.lp.row_activities();
         for i in p.m..self.lp.num_rows() {
             let (l, u) = self.lp.row_bounds(i);
+            let tight = (u.is_finite() && act[i] >= u - 1e-6 * (1.0 + u.abs())) || (l.is_finite() && act[i] <= l + 1e-6 * (1.0 + l.abs()));
+            if !keep_all && !tight {
+                continue;
+            }
             rows.push(self.lp.row(i));
             row_lo.push(l);
             row_up.push(u);
@@ -2117,7 +2125,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 params.restarts,
                 newly,
                 nint,
-                self.lp.num_rows() - p.m,
+                newp.m - p.m,
                 self.start.elapsed().as_secs_f64()
             );
         }
