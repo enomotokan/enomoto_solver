@@ -532,6 +532,13 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
     let solve_acc_bump = tunable!("ENOMOTO_T_IPM_SOLVE_ACC_BUMP", 100.0f64, f64);
     let solve_acc_min = tunable!("ENOMOTO_T_IPM_SOLVE_ACC_MIN", 1e-11f64, f64);
     let mut acc_retries = 0usize;
+    let solve_acc2 = tunable!("ENOMOTO_T_IPM_SOLVE_ACC2", 0.0f64, f64);
+    let solve_acc2_reg = tunable!("ENOMOTO_T_IPM_SOLVE_ACC2_REG", 1e-10f64, f64);
+    let mut prev_solve_rel = 0.0f64;
+    let mut prev_worst_acc = f64::INFINITY;
+    let mut temp_reg = 0.0f64;
+    let solve_acc2_k = tunable!("ENOMOTO_T_IPM_SOLVE_ACC2_K", 1usize, usize);
+    let mut stuck_count = 0usize;
     let stall_bump = tunable!("ENOMOTO_T_IPM_STALL_BUMP", 0.0f64, f64);
     let stall_bump_k = tunable!("ENOMOTO_T_IPM_STALL_BUMP_K", 2usize, usize);
     let stall_floor = tunable!("ENOMOTO_T_IPM_STALL_FLOOR", 0u8, u8) != 0;
@@ -784,6 +791,29 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
             bump_best = worst;
         }
 
+        // 試験用 (`ENOMOTO_T_IPM_SOLVE_ACC2=t`): 前の反復の予測子の Newton 系の相対残差が t を超え (分解の精度が足りない)、
+        // しかも相対残差の最悪値が 0.95 倍未満に減らなかった (実際に進まなかった) ときだけ、この反復は ρ・δ を一時的に
+        // `temp_reg` (初回 `ENOMOTO_T_IPM_SOLVE_ACC2_REG`、続けて失敗したら 100 倍ずつ) に強めて解き、反復の終わりに
+        // 元の値に戻す。不正確でも進んでいる反復 (pilotnov) は乱さない。
+        let mut temp_saved: Option<(f64, f64)> = None;
+        if solve_acc2 > 0.0 {
+            let stuck_now = prev_solve_rel > solve_acc2 && worst >= 0.95 * prev_worst_acc;
+            stuck_count = if stuck_now { stuck_count + 1 } else { 0 };
+            if stuck_count >= solve_acc2_k {
+                temp_reg = if temp_reg > 0.0 { (temp_reg * 100.0).min(1e-4) } else { solve_acc2_reg };
+                temp_saved = Some((rho, delta));
+                rho = rho.max(temp_reg);
+                delta = delta.max(temp_reg);
+                crate::phase_timing::mark("ipm_solve_inaccurate");
+                if debug {
+                    eprintln!("IPM it={it} inaccurate solve ({prev_solve_rel:.2e}) without progress; regularization {temp_reg:.1e} for this iteration");
+                }
+            } else if worst < 0.95 * prev_worst_acc {
+                temp_reg = 0.0;
+            }
+            prev_worst_acc = worst;
+        }
+
         // ---- 右辺 ----
         // r_x = -(c + ρ(x - ξ) + A^T y - z_l + z_u) = -(dual_res + ρ(x - ξ))
         r_x.par_iter_mut().enumerate().with_min_len(PAR_MIN_LEN).for_each(|(j, r)| *r = -(dual_res[j] + rho * (x[j] - xi[j])));
@@ -825,6 +855,7 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
         let t_s = std::time::Instant::now();
         let solve_rel = newton(&mut kkt, a, &top, delta, &r_x, &r_y, &mut lo, &mut up, &pos, &mut sol_aff, n, &mut refine_work);
         prof.1 += t_s.elapsed().as_secs_f64();
+        prev_solve_rel = solve_rel;
         // 試験用 (`ENOMOTO_T_IPM_SOLVE_ACC=t`): 予測子の Newton 系の (反復改良後の) 相対残差が t を超えたら (分解の精度が
         // 足りない: ken-18 は 30 反復目から 1e-5〜1e2 になり、方向が意味をなさず 35 反復空回りした)、この反復を捨てて
         // ρ・δ を `ENOMOTO_T_IPM_SOLVE_ACC_BUMP` 倍 (下限 `ENOMOTO_T_IPM_SOLVE_ACC_MIN`) に強めて同じ点で解き直す。
@@ -979,6 +1010,10 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
         }
         // 残差が十分減らなかった反復の正則化の減らし方 `(1 - r/slow_div)`。既定は PIQP の 3、
         // 試験用 `ENOMOTO_T_IPM_REG_MODE=1` で IP-PMM の著者の実装の `(1 - 0.666 r)` (slow_div = 1/0.666)。
+        if let Some((r0, d0)) = temp_saved {
+            rho = r0;
+            delta = d0;
+        }
         let slow_div = if reg_mode == 1 { 1.0 / 0.666 } else { SLOW_DECREASE_DIVISOR };
         if prox_always || res_new.primal <= RES_DECREASE_RATIO * res.primal {
             lambda.copy_from_slice(&y_new);
