@@ -1610,7 +1610,10 @@ pub fn generate_cuts(vars: &CutVars, base: &[(usize, f64)], rhs: f64, flow_cover
     if env_str!("ENOMOTO_MIP_LIFTED_COVER").is_some() {
         out.extend(lifted_cover_terms(vars, terms.clone(), beta));
     }
-    if env_str!("ENOMOTO_MIP_CMIR_OLD").is_some() {
+    // δ の探索 (`cmir_terms_multi`) は `ENOMOTO_MIP_CMIR_SEARCH` のときだけ。40 問で、従来 18 問 (sgeomean 28.12) に対し
+    // 探索 + 上位 3 本は 16 問 (29.95)、割る数 1..8 だけ (局所探索なし・1 本) は 18 問 (28.86) と悪化した
+    // (分離が遅くなり、カットが密になり、根の下界も下がった)。
+    if env_str!("ENOMOTO_MIP_CMIR_SEARCH").is_none() {
         out.extend(cmir_terms(vars, terms, beta));
     } else {
         out.extend(cmir_terms_multi(vars, terms, beta, tunable!("ENOMOTO_T_CMIR_K", 3usize, usize)));
