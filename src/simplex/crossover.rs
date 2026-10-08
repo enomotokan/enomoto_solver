@@ -1726,6 +1726,14 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     // 最適解として返す (仕上げで最適な基底を探さない。qap15 は頂点の目的値が最適値と一致し、残りは退化した双対実行不能
     // だけだった)。
     if let Some(yi) = &y_ipm {
+        // 頂点が主実行不能 (少数) なら、費用をずらして基底を双対実行可能にしてから双対単体法で主実行不能だけを直し、
+        // 直した頂点を元の費用で判定する (`ENOMOTO_T_XO_REPAIR`、試験用。[`repair_vertex`])。
+        if accept_gap > 0.0 && tunable!("ENOMOTO_T_XO_REPAIR", 0u8, u8) != 0 && vertex_solution(std, &basis_pos, &nb_status, &lu).is_none() {
+            if let Some(r) = repair_vertex(std, yi, &basis, &basis_pos, &nb_status, &lu, accept_gap, debug) {
+                crate::phase_timing::mark("xo_vertex_repaired");
+                return Some(r);
+            }
+        }
         if let Some(xv) = vertex_solution(std, &basis_pos, &nb_status, &lu) {
             let obj: f64 = (0..n).map(|j| std.c[j] * xv[j]).sum();
             let lbv = lagrangian_lower_bound(std, yi);
@@ -1770,16 +1778,7 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
                 }
                 let mut scratch = vec![0.0; m];
                 if yfix && gap > accept_gap {
-                    let mut rho = vec![0.0; m];
-                    for (k, &j) in basis.iter().enumerate() {
-                        let v = xv[j];
-                        let tol = 1e-9 * (1.0 + v.abs());
-                        if v > std.lb[j] + tol && v < std.ub[j] - tol {
-                            rho[k] = std.c[j] - sparse_dot_dense(col(std, j), yi);
-                        }
-                    }
-                    let mut dy = vec![0.0; m];
-                    lu.solve_transpose_into(&rho, &mut scratch, &mut dy);
+                    let dy = yfix_delta(std, yi, &xv, &basis, &lu);
                     let mut yt = vec![0.0; m];
                     for th in [1.0, 0.5, 0.1] {
                         for i in 0..m {
@@ -2175,6 +2174,134 @@ fn lagrangian_lower_bound_with(std: &StdForm, y: &[f64], lbs: &[f64], ubs: &[f64
         }
     }
     lb
+}
+
+/// 頂点の採用判定の y の補正量 Δ (`Bᵀ Δ = ρ`、ρ は頂点 `xv` で上下限の間にある基底変数の行で `d_j(y)`、他は 0)。
+fn yfix_delta(std: &StdForm, y: &[f64], xv: &[f64], basis: &[usize], lu: &sparse_lu::FtLu) -> Vec<f64> {
+    let m = std.n_rows;
+    let mut rho = vec![0.0; m];
+    for (k, &j) in basis.iter().enumerate() {
+        let v = xv[j];
+        let tol = 1e-9 * (1.0 + v.abs());
+        if v > std.lb[j] + tol && v < std.ub[j] - tol {
+            rho[k] = std.c[j] - sparse_dot_dense(col(std, j), y);
+        }
+    }
+    let mut dy = vec![0.0; m];
+    let mut scratch = vec![0.0; m];
+    lu.solve_transpose_into(&rho, &mut scratch, &mut dy);
+    dy
+}
+
+/// 主実行不能が少ない頂点を直す (`ENOMOTO_T_XO_REPAIR`): 基底の双対 `y_B` での被約費用の符号が非基底の位置と合わない
+/// 列の費用をずらして基底を双対実行可能にし (仕上げの単体法が非基底を反対の境界へ置き換えて主実行不能を大量に作るのを
+/// 防ぐ)、双対単体法で主実行不能だけを直す。直した頂点の元の費用での目的値が、`y_ipm` と補正した y による下界から
+/// 相対 `accept_gap` 以内なら返す。主実行不能が `ENOMOTO_T_XO_REPAIR_MAX` (既定 m/50 と 20 の大きい方) を超えれば行わない。
+#[allow(clippy::too_many_arguments)]
+fn repair_vertex(
+    std: &StdForm,
+    yi: &[f64],
+    basis: &[usize],
+    basis_pos: &[Option<usize>],
+    nb_status: &[Option<NbStatus>],
+    lu: &sparse_lu::FtLu,
+    accept_gap: f64,
+    debug: bool,
+) -> Option<SimplexResult> {
+    let n = std.n_total;
+    let m = std.n_rows;
+    let n_orig = n - m;
+    let t0 = std::time::Instant::now();
+    // 頂点の値 (基底は丸めない) と主実行不能の数。
+    let mut xv = vec![0.0; n];
+    let mut rhs = std.b.clone();
+    for j in 0..n {
+        if basis_pos[j].is_some() {
+            continue;
+        }
+        let v = match nb_status[j] {
+            Some(NbStatus::Lower) => std.lb[j],
+            Some(NbStatus::Upper) => std.ub[j],
+            _ => 0.0,
+        };
+        xv[j] = v;
+        if v != 0.0 {
+            for &(i, a) in col(std, j) {
+                rhs[i] -= a * v;
+            }
+        }
+    }
+    let mut xb = vec![0.0; m];
+    let mut scratch = vec![0.0; m];
+    lu.solve_into(&rhs, &mut scratch, &mut xb);
+    let mut np = 0usize;
+    for (k, &j) in basis.iter().enumerate() {
+        xv[j] = xb[k];
+        let tl = 1e-9 * (1.0 + std.lb[j].abs().min(1e12));
+        let tu = 1e-9 * (1.0 + std.ub[j].abs().min(1e12));
+        if !xb[k].is_finite() {
+            return None;
+        }
+        if xb[k] < std.lb[j] - tl || xb[k] > std.ub[j] + tu {
+            np += 1;
+        }
+    }
+    let max_np = tunable!("ENOMOTO_T_XO_REPAIR_MAX", (m / 50).max(20), usize);
+    if np == 0 || np > max_np {
+        return None;
+    }
+    // 費用をずらす: 非基底の被約費用を、下限なら >= 0、上限なら <= -10 TOL、0 に置いた自由列なら 0 にする。
+    let cb: Vec<f64> = basis.iter().map(|&j| std.c[j]).collect();
+    let mut yb = vec![0.0; m];
+    lu.solve_transpose_into(&cb, &mut scratch, &mut yb);
+    let tol = crate::params::simplex::TOL;
+    let mut c2 = std.c.clone();
+    let mut shifted = 0usize;
+    for j in 0..n {
+        if basis_pos[j].is_some() {
+            continue;
+        }
+        let d = std.c[j] - sparse_dot_dense(col(std, j), &yb);
+        let target = match nb_status[j] {
+            Some(NbStatus::Lower) => d.max(0.0),
+            Some(NbStatus::Upper) => d.min(-10.0 * tol),
+            _ => 0.0,
+        };
+        if target != d {
+            c2[j] += target - d;
+            shifted += 1;
+        }
+    }
+    let std2 = StdForm {
+        n_total: n,
+        n_rows: m,
+        c: c2,
+        rows: std.rows.clone(),
+        cols: std.cols.clone(),
+        b: std.b.clone(),
+        lb: std.lb.clone(),
+        ub: std.ub.clone(),
+    };
+    let res = super::slope_intercept_dual::solve_slope_intercept_dual_from_basis(&std2, &Default::default(), basis.to_vec())?;
+    if res.status != Status::Optimal {
+        return None;
+    }
+    let x = res.x.as_ref()?;
+    let obj: f64 = (0..n_orig.min(x.len())).map(|j| std.c[j] * x[j]).sum();
+    // 下界: y_ipm と、元の頂点の基底で補正した y。
+    let mut best = lagrangian_lower_bound(std, yi);
+    let dy = yfix_delta(std, yi, &xv, basis, lu);
+    let yt: Vec<f64> = (0..m).map(|i| yi[i] + dy[i]).collect();
+    best = best.max(lagrangian_lower_bound(std, &yt));
+    let gap = (obj - best) / (1.0 + obj.abs());
+    crate::phase_timing::record("xo_repair_gap", gap);
+    if debug {
+        eprintln!(
+            "CROSSOVER repair: primal_infeas={np} cost shifts={shifted} obj={obj:.12e} lower bound={best:.12e} rel gap={gap:.3e} t={:.3}s",
+            t0.elapsed().as_secs_f64()
+        );
+    }
+    (gap <= accept_gap).then_some(res)
 }
 
 /// 双対の最適面への射影の補正量 Δ を返す (`ENOMOTO_T_XO_ACCEPT_PROJ`)。S は、内点法の点 `xi` で境界までの距離が

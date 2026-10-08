@@ -903,6 +903,14 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
             let break_reg = tunable!("ENOMOTO_T_IPM_BREAK_REG", 1e-8f64, f64);
             rho = (rho * 100.0).max(break_reg);
             delta = (delta * 100.0).max(break_reg);
+            // 試験用 `ENOMOTO_T_IPM_BREAK_RECENTER=1`: 近接中心を今の点に置き直す (終盤は残差が減らず中心が古いままで、
+            // 強めた正則化の近接項が点を古い中心へ引き戻す: fome13)。
+            if tunable!("ENOMOTO_T_IPM_BREAK_RECENTER", 0u8, u8) != 0 {
+                xi.copy_from_slice(&x);
+                lambda.copy_from_slice(&y);
+                lo.nu.copy_from_slice(&lo.z);
+                up.nu.copy_from_slice(&up.z);
+            }
             if debug {
                 eprintln!("IPM it={it} non-finite Newton direction; raising regularization to rho={rho:.1e} delta={delta:.1e}");
             }
