@@ -246,15 +246,15 @@ fn presolve_mip(p: &MipProblem, verbose: bool) -> Option<Presolved> {
 ///   (どちらの値でも成り立つので、大域的に成り立つ)。
 ///
 /// 列の値は変えない (境界を締めるだけ) ので後処理は要らない。手間は伝播で走査した行の長さの合計
-/// (非零数の `ENOMOTO_T_MIP_PROBE_WORK` 倍、既定 200 倍) と時間 (`ENOMOTO_T_MIP_PROBE_TIME` 秒、既定 2 秒) で打ち切る。
+/// (非零数の `ENOMOTO_T_MIP_PROBE_WORK` 倍、既定 20 倍) と時間 (`ENOMOTO_T_MIP_PROBE_TIME` 秒、既定 0.5 秒。長い行の多い問題 (nw04・air03) で 2 秒かけて何も得られなかった) で打ち切る。
 /// 締めた境界があれば `Some(true)`、何もなければ `None`。
 fn probe(prob: &mut MipProblem, verbose: bool) -> Option<bool> {
     use domain::Domain;
     let t0 = std::time::Instant::now();
     let n = prob.n;
     let nnz: usize = prob.rows.iter().map(|r| r.len()).sum();
-    let work_cap = (tunable!("ENOMOTO_T_MIP_PROBE_WORK", 200.0, f64) * nnz as f64) as u64 + 100_000;
-    let time_cap = tunable!("ENOMOTO_T_MIP_PROBE_TIME", 2.0, f64);
+    let work_cap = (tunable!("ENOMOTO_T_MIP_PROBE_WORK", 20.0, f64) * nnz as f64) as u64 + 100_000;
+    let time_cap = tunable!("ENOMOTO_T_MIP_PROBE_TIME", 0.5, f64);
     let mut dom = Domain::new(prob);
     if !dom.propagate(prob) {
         return Some(false);
@@ -273,15 +273,15 @@ fn probe(prob: &mut MipProblem, verbose: bool) -> Option<bool> {
         }
         probed += 1;
         let pos = dom.stack_len();
-        // x_j = 0
+        // x_j = 0 (変わった境界だけ覚える: 全列の境界を写すと列の多い問題で重い)
         dom.tighten_upper(prob, j, 0.0);
         let ok0 = dom.propagate(prob);
-        let (lo0, up0) = if ok0 { (dom.lo.clone(), dom.up.clone()) } else { (Vec::new(), Vec::new()) };
+        let ch0 = if ok0 { dom.changes_since(pos) } else { Vec::new() };
         dom.backtrack_to(prob, pos);
         // x_j = 1
         dom.tighten_lower(prob, j, 1.0);
         let ok1 = dom.propagate(prob);
-        let (lo1, up1) = if ok1 { (dom.lo.clone(), dom.up.clone()) } else { (Vec::new(), Vec::new()) };
+        let ch1 = if ok1 { dom.changes_since(pos) } else { Vec::new() };
         dom.backtrack_to(prob, pos);
         match (ok0, ok1) {
             (false, false) => return Some(false),
@@ -295,19 +295,35 @@ fn probe(prob: &mut MipProblem, verbose: bool) -> Option<bool> {
                 fixed += 1;
             }
             (true, true) => {
+                // 両方の結果で変わった (列, 側) だけが締まりうる。値は両方の弱い方
+                let mut first: std::collections::HashMap<(usize, bool), f64> = std::collections::HashMap::new();
+                for &(k, upper, v) in &ch0 {
+                    first.insert((k, upper), v);
+                }
+                let mut last1: std::collections::HashMap<(usize, bool), f64> = std::collections::HashMap::new();
+                for &(k, upper, v) in &ch1 {
+                    last1.insert((k, upper), v);
+                }
                 let mut any = false;
-                for k in 0..n {
-                    let l = lo0[k].min(lo1[k]);
-                    let u = up0[k].max(up1[k]);
-                    if l > dom.lo[k] + 1e-9 * (1.0 + l.abs()) {
-                        dom.tighten_lower(prob, k, l);
-                        any = true;
-                        tightened += 1;
+                for (&(k, upper), &v0) in &first {
+                    if k == j {
+                        continue;
                     }
-                    if u < dom.up[k] - 1e-9 * (1.0 + u.abs()) {
-                        dom.tighten_upper(prob, k, u);
-                        any = true;
-                        tightened += 1;
+                    let Some(&v1) = last1.get(&(k, upper)) else { continue };
+                    if upper {
+                        let u = v0.max(v1);
+                        if u < dom.up[k] - 1e-9 * (1.0 + u.abs()) {
+                            dom.tighten_upper(prob, k, u);
+                            any = true;
+                            tightened += 1;
+                        }
+                    } else {
+                        let l = v0.min(v1);
+                        if l > dom.lo[k] + 1e-9 * (1.0 + l.abs()) {
+                            dom.tighten_lower(prob, k, l);
+                            any = true;
+                            tightened += 1;
+                        }
                     }
                 }
                 if any && !dom.propagate(prob) {

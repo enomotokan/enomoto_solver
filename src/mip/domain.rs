@@ -143,6 +143,11 @@ impl Domain {
     }
 
     /// 変更の記録の長さ (巻き戻し位置として使う)。
+    /// 記録の位置 `pos` より後の境界の変更 (列, 上限か, 変更後の値)。同じ列・側が何度も変わったら最後のものが後に来る。
+    pub fn changes_since(&self, pos: usize) -> Vec<(usize, bool, f64)> {
+        self.stack[pos.min(self.stack.len())..].iter().map(|c| (c.col, c.upper, c.new)).collect()
+    }
+
     pub fn stack_len(&self) -> usize {
         self.stack.len()
     }
