@@ -216,66 +216,65 @@ impl Multifrontal {
         }
     }
 
-    /// supernode `s` の前線を作って部分分解し、L のかたまりを書き、更新行列を返す。
+    /// supernode `s` の前線を作って部分分解し、L のかたまりを書き、更新行列を返す。前線の左の `nc` 列 (L のかたまり、
+    /// `f x nc`) は因子の配列の中でそのまま組み立てて分解し、右下の `r x r` (更新行列) は別の配列で組み立てる
+    /// (前線全体の確保・0 埋めと、分解後の写しをしない)。
     fn factor_node(&self, s: usize, values: &[f64], ups: Vec<(usize, Vec<f64>)>, reg: LltRegularization<f64>, lp: SyncPtr, ok: &std::sync::atomic::AtomicBool) -> Vec<f64> {
         let nc = self.end[s] - self.begin[s];
         let r = self.pat_ptr[s + 1] - self.pat_ptr[s];
         let f = nc + r;
-        let mut front = vec![0.0f64; f * f];
+        // SAFETY: supernode ごとに `l_ptr` の範囲は重ならず、各 supernode はちょうど 1 回だけ処理される。
+        let lsl: &mut [f64] = unsafe { std::slice::from_raw_parts_mut(lp.0.add(self.l_ptr[s]), f * nc) };
+        lsl.fill(0.0);
+        let mut u = vec![0.0f64; r * r];
         for &(k, lr, lc) in &self.asm[s] {
-            front[lc as usize * f + lr as usize] += values[k as usize];
+            lsl[lc as usize * f + lr as usize] += values[k as usize];
         }
-        for (c, u) in ups {
+        for (c, uc) in ups {
             let map = &self.child_map[c];
             let rc = map.len();
             for j in 0..rc {
                 let mj = map[j] as usize;
-                let col = &u[j * rc..(j + 1) * rc];
-                let dst = mj * f;
-                for i in j..rc {
-                    front[dst + map[i] as usize] += col[i];
+                let col = &uc[j * rc + j..(j + 1) * rc];
+                let mi = &map[j..];
+                if mj < nc {
+                    let dst = &mut lsl[mj * f..(mj + 1) * f];
+                    for (t, &v) in col.iter().enumerate() {
+                        dst[mi[t] as usize] += v;
+                    }
+                } else {
+                    let base = (mj - nc) * r;
+                    let dst = &mut u[base..base + r];
+                    for (t, &v) in col.iter().enumerate() {
+                        dst[mi[t] as usize - nc] += v;
+                    }
                 }
             }
         }
         let big = (nc as f64) * (f as f64) * (f as f64) > tunable!("ENOMOTO_T_MF_PAR_FLOPS", 5e7f64, f64);
         let par = if big { Parallelism::Rayon(0) } else { Parallelism::None };
-        {
-            let fm = from_column_major_slice_mut::<f64, usize, usize>(&mut front, f, f);
-            let (mut f11, _f12, mut f21, mut f22) = fm.split_at_mut(nc, nc);
-            let mut buf = GlobalPodBuffer::new(cholesky_in_place_req::<f64>(nc, par, LltParams::default()).unwrap());
-            if cholesky_in_place(f11.rb_mut(), reg, par, PodStack::new(&mut buf), LltParams::default()).is_err() {
-                ok.store(false, std::sync::atomic::Ordering::Relaxed);
-            }
-            if r > 0 {
-                // L21 = F21 L11^{-T}: L11 L21ᵀ = F21ᵀ を解く。
-                faer::linalg::triangular_solve::solve_lower_triangular_in_place(f11.rb(), f21.rb_mut().transpose_mut(), par);
-                // U = F22 - L21 L21ᵀ (下三角だけ)。
-                faer::linalg::matmul::triangular::matmul(
-                    f22.rb_mut(),
-                    BlockStructure::TriangularLower,
-                    f21.rb(),
-                    BlockStructure::Rectangular,
-                    f21.rb().transpose(),
-                    BlockStructure::Rectangular,
-                    Some(1.0),
-                    -1.0,
-                    par,
-                );
-            }
+        let lm = from_column_major_slice_mut::<f64, usize, usize>(lsl, f, nc);
+        let (mut l11, mut l21) = lm.split_at_row_mut(nc);
+        let mut buf = GlobalPodBuffer::new(cholesky_in_place_req::<f64>(nc, par, LltParams::default()).unwrap());
+        if cholesky_in_place(l11.rb_mut(), reg, par, PodStack::new(&mut buf), LltParams::default()).is_err() {
+            ok.store(false, std::sync::atomic::Ordering::Relaxed);
         }
-        // L のかたまり (前線の最初の nc 列) を書く。
-        // SAFETY: supernode ごとに `l_ptr` の範囲は重ならず、各 supernode はちょうど 1 回だけ処理される。
-        unsafe {
-            let dst = lp.0.add(self.l_ptr[s]);
-            for j in 0..nc {
-                std::ptr::copy_nonoverlapping(front.as_ptr().add(j * f), dst.add(j * f), f);
-            }
-        }
-        // 更新行列 (前線の右下 r x r)。
-        let mut u = vec![0.0f64; r * r];
-        for j in 0..r {
-            let src = &front[(nc + j) * f + nc..(nc + j) * f + f];
-            u[j * r..(j + 1) * r].copy_from_slice(src);
+        if r > 0 {
+            // L21 = F21 L11^{-T}: L11 L21ᵀ = F21ᵀ を解く。
+            faer::linalg::triangular_solve::solve_lower_triangular_in_place(l11.rb(), l21.rb_mut().transpose_mut(), par);
+            // U = F22 - L21 L21ᵀ (下三角だけ)。
+            let um = from_column_major_slice_mut::<f64, usize, usize>(&mut u, r, r);
+            faer::linalg::matmul::triangular::matmul(
+                um,
+                BlockStructure::TriangularLower,
+                l21.rb(),
+                BlockStructure::Rectangular,
+                l21.rb().transpose(),
+                BlockStructure::Rectangular,
+                Some(1.0),
+                -1.0,
+                par,
+            );
         }
         u
     }
@@ -292,18 +291,20 @@ impl Multifrontal {
             let r = self.pat_ptr[s + 1] - self.pat_ptr[s];
             let f = nc + r;
             let lmat = from_column_major_slice::<f64, usize, usize>(&self.l[self.l_ptr[s]..self.l_ptr[s + 1]], f, nc);
-            let (l11, l21) = lmat.split_at_row(nc);
+            let (l11, _l21) = lmat.split_at_row(nc);
             {
                 let xs = from_column_major_slice_mut::<f64, usize, usize>(&mut x[b..e], nc, 1);
                 faer::linalg::triangular_solve::solve_lower_triangular_in_place(l11, xs, Parallelism::None);
             }
             if r > 0 {
                 let pat = &self.pat[self.pat_ptr[s]..self.pat_ptr[s + 1]];
+                let ls = &self.l[self.l_ptr[s]..self.l_ptr[s + 1]];
                 for j in 0..nc {
                     let yj = x[b + j];
                     if yj != 0.0 {
+                        let col = &ls[j * f + nc..(j + 1) * f];
                         for (t, &i) in pat.iter().enumerate() {
-                            x[i] -= l21.read(t, j) * yj;
+                            x[i] -= col[t] * yj;
                         }
                     }
                 }
@@ -316,13 +317,15 @@ impl Multifrontal {
             let r = self.pat_ptr[s + 1] - self.pat_ptr[s];
             let f = nc + r;
             let lmat = from_column_major_slice::<f64, usize, usize>(&self.l[self.l_ptr[s]..self.l_ptr[s + 1]], f, nc);
-            let (l11, l21) = lmat.split_at_row(nc);
+            let (l11, _l21) = lmat.split_at_row(nc);
             if r > 0 {
                 let pat = &self.pat[self.pat_ptr[s]..self.pat_ptr[s + 1]];
+                let ls = &self.l[self.l_ptr[s]..self.l_ptr[s + 1]];
                 for j in 0..nc {
+                    let col = &ls[j * f + nc..(j + 1) * f];
                     let mut acc = 0.0;
                     for (t, &i) in pat.iter().enumerate() {
-                        acc += l21.read(t, j) * x[i];
+                        acc += col[t] * x[i];
                     }
                     x[b + j] -= acc;
                 }
