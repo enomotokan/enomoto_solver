@@ -255,6 +255,11 @@ fn unsubstitute(vars: &CutVars, t: &Term, c: f64, coefs: &mut Vec<(usize, f64)>)
 /// CMIR で切除平面を作る。作れなければ `None`。
 pub fn cmir(vars: &CutVars, base: &[(usize, f64)], rhs: f64) -> Option<RawCut> {
     let (terms, beta) = substitute(vars, base, rhs)?;
+    cmir_terms(vars, terms, beta)
+}
+
+/// [`cmir`] の本体 (置き換え済みの項と右辺から)。
+fn cmir_terms(vars: &CutVars, terms: Vec<Term>, beta: f64) -> Option<RawCut> {
     if !terms.iter().any(|t| t.int) {
         return None;
     }
@@ -1148,9 +1153,15 @@ mod highs_dump {
 /// カバーを作り (`determineCover`、LP 解を使う版)、0-1 変数だけなら lifted knapsack cover、一般整数を含めば
 /// lifted mixed integer cover、連続変数を含めば lifted mixed binary cover を作る。
 pub fn lifted_cover(vars: &CutVars, base: &[(usize, f64)], rhs: f64) -> Option<RawCut> {
+    let (terms, beta) = substitute(vars, base, rhs)?;
+    lifted_cover_terms(vars, terms, beta)
+}
+
+/// [`lifted_cover`] の本体 (置き換え済みの項と右辺から)。
+fn lifted_cover_terms(vars: &CutVars, terms: Vec<Term>, beta: f64) -> Option<RawCut> {
     const FEAS: f64 = 1e-6;
     const EPS: f64 = 1e-9;
-    let (mut terms, mut beta) = substitute(vars, base, rhs)?;
+    let (mut terms, mut beta) = (terms, beta);
     // 整数変数の係数を正にそろえる (負なら補変数 y' = yu - y)。上限のない整数変数があれば使わない (HiGHS も CMIR だけ)
     for t in terms.iter_mut() {
         if !t.int {
@@ -1574,4 +1585,30 @@ mod lifted_cover_tests {
         }
         assert!(found > 100, "only {found} cuts");
     }
+}
+
+
+/// HiGHS の `HighsCutGeneration::generateCut` と同じ流れのカット生成の入口: 集約行 `sum a_k v_k <= rhs` を
+/// 1 回だけ境界の置き換え・補変数化し、行の種類 (0-1 だけ・一般整数・連続変数の有無) に合ったカットを作る:
+/// lifted cover (0-1 だけなら knapsack、一般整数なら mixed integer、連続を含めば mixed binary)、CMIR、
+/// (`ext_cover` なら) extended cover、(連続変数を含み `flow_cover` なら) lifted flow cover。
+/// 候補を全て返す (どれが一番強いかは呼び出し側が構造変数の式に直してから効き目で比べ、1 本だけ残す)。
+/// `ENOMOTO_MIP_GEN_NO_COVER` で lifted cover を試さない。
+pub fn generate_cuts(vars: &CutVars, base: &[(usize, f64)], rhs: f64, flow_cover: bool, ext_cover: bool) -> Vec<RawCut> {
+    let mut out = Vec::new();
+    let Some((terms, beta)) = substitute(vars, base, rhs) else {
+        return out;
+    };
+    let has_cont = base.iter().any(|&(k, a)| a != 0.0 && !vars.is_int[k] && vars.lo[k] < vars.up[k]);
+    if env_str!("ENOMOTO_MIP_GEN_NO_COVER").is_none() {
+        out.extend(lifted_cover_terms(vars, terms.clone(), beta));
+    }
+    out.extend(cmir_terms(vars, terms, beta));
+    if ext_cover && !has_cont {
+        out.extend(extended_cover(vars, base, rhs));
+    }
+    if has_cont && flow_cover {
+        out.extend(lifted_flow_cover(vars, base, rhs));
+    }
+    out
 }

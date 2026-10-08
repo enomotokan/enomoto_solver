@@ -5,7 +5,7 @@
 //! 除いて LP に加えて解き直す。目的値がほとんど動かなくなったら止める。最後に効いていない (論理変数が
 //! 基底にある) カット行を LP から外す。カットは大域的な境界から作るので、木全体で有効。
 
-use super::cuts::{cmir, extended_cover, lifted_cover, lifted_flow_cover, CutVars, RawCut, VarBounds};
+use super::cuts::{cmir, extended_cover, generate_cuts, lifted_cover, lifted_flow_cover, CutVars, RawCut, VarBounds};
 use super::problem::MipProblem;
 use super::domain::FEASTOL;
 use super::lp::{LpStatus, SolveLimits, VarStatus};
@@ -23,6 +23,27 @@ fn use_lifted_cover() -> bool {
 
 fn use_flow_cover() -> bool {
     env_str!("ENOMOTO_MIP_NO_FLOWCOVER").is_none()
+}
+
+/// 旧来の生成 (CMIR・flow cover・cover を別々に作って全て候補に入れる) に戻す (`ENOMOTO_MIP_GEN_OLD`)。
+/// 既定は HiGHS と同じく、集約行 1 本 (の向き 1 つ) ごとに `generate_cuts` の候補から効き目の最も大きい 1 本だけ残す。
+fn gen_old() -> bool {
+    env_str!("ENOMOTO_MIP_GEN_OLD").is_some()
+}
+
+/// `cands[n0..]` のうち効き目の最も大きい 1 本だけ残す。
+fn keep_best(cands: &mut Vec<Candidate>, n0: usize) {
+    if cands.len() <= n0 + 1 {
+        return;
+    }
+    let mut bi = n0;
+    for i in n0 + 1..cands.len() {
+        if cands[i].efficacy > cands[bi].efficacy {
+            bi = i;
+        }
+    }
+    cands.swap(n0, bi);
+    cands.truncate(n0 + 1);
 }
 
 struct Candidate {
@@ -642,20 +663,30 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let n_before = cands.len();
                     let amax = touched.iter().fold(0.0f64, |mx, &k| mx.max(agg[k].abs()));
                     let base: Vec<(usize, f64)> = touched.iter().filter(|&&k| agg[k].abs() > 1e-9 * amax.max(1.0) || k >= n && agg[k] != 0.0).map(|&k| (k, agg[k])).collect();
-                    push(cmir(vars, &base, 0.0), cands, self);
-                    if use_lifted_cover() {
-                        push(lifted_cover(vars, &base, 0.0), cands, self);
-                    }
-                    if use_flow_cover() {
-                        push(lifted_flow_cover(vars, &base, 0.0), cands, self);
-                    }
                     let neg: Vec<(usize, f64)> = base.iter().map(|&(k, a)| (k, -a)).collect();
-                    push(cmir(vars, &neg, 0.0), cands, self);
-                    if use_lifted_cover() {
-                        push(lifted_cover(vars, &neg, 0.0), cands, self);
-                    }
-                    if use_flow_cover() {
-                        push(lifted_flow_cover(vars, &neg, 0.0), cands, self);
+                    if gen_old() {
+                        push(cmir(vars, &base, 0.0), cands, self);
+                        if use_lifted_cover() {
+                            push(lifted_cover(vars, &base, 0.0), cands, self);
+                        }
+                        if use_flow_cover() {
+                            push(lifted_flow_cover(vars, &base, 0.0), cands, self);
+                        }
+                        push(cmir(vars, &neg, 0.0), cands, self);
+                        if use_lifted_cover() {
+                            push(lifted_cover(vars, &neg, 0.0), cands, self);
+                        }
+                        if use_flow_cover() {
+                            push(lifted_flow_cover(vars, &neg, 0.0), cands, self);
+                        }
+                    } else {
+                        for b in [&base, &neg] {
+                            let n0 = cands.len();
+                            for r in generate_cuts(vars, b, 0.0, use_flow_cover(), false) {
+                                push(Some(r), cands, self);
+                            }
+                            keep_best(cands, n0);
+                        }
                     }
                     success = cands.len() > n_before;
                     if success || (best_out.is_none() && best_in.is_none()) {
@@ -802,18 +833,28 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     for &(i, w) in &weights {
                         base.push((n + i, -w));
                     }
-                    push(cmir(vars, &base, 0.0), cands, self);
-                    if use_lifted_cover() {
-                        push(lifted_cover(vars, &base, 0.0), cands, self);
-                    }
                     let neg: Vec<(usize, f64)> = base.iter().map(|&(k, a)| (k, -a)).collect();
-                    push(cmir(vars, &neg, 0.0), cands, self);
-                    if use_lifted_cover() {
-                        push(lifted_cover(vars, &neg, 0.0), cands, self);
-                    }
-                    if use_flow_cover() {
-                        push(lifted_flow_cover(vars, &base, 0.0), cands, self);
-                        push(lifted_flow_cover(vars, &neg, 0.0), cands, self);
+                    if gen_old() {
+                        push(cmir(vars, &base, 0.0), cands, self);
+                        if use_lifted_cover() {
+                            push(lifted_cover(vars, &base, 0.0), cands, self);
+                        }
+                        push(cmir(vars, &neg, 0.0), cands, self);
+                        if use_lifted_cover() {
+                            push(lifted_cover(vars, &neg, 0.0), cands, self);
+                        }
+                        if use_flow_cover() {
+                            push(lifted_flow_cover(vars, &base, 0.0), cands, self);
+                            push(lifted_flow_cover(vars, &neg, 0.0), cands, self);
+                        }
+                    } else {
+                        for b in [&base, &neg] {
+                            let n0 = cands.len();
+                            for r in generate_cuts(vars, b, 0.0, use_flow_cover(), false) {
+                                push(Some(r), cands, self);
+                            }
+                            keep_best(cands, n0);
+                        }
                     }
                     // HiGHS と同じく、カットが出たら経路を伸ばさない (`ENOMOTO_MIP_PATH_STOP_ON_CUT`)
                     if cands.len() > n_before && stop_on_cut {
@@ -924,7 +965,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let mut ch: Vec<Candidate> = Vec::new();
                     let mut push_h = |raw: Option<RawCut>, cands: &mut Vec<Candidate>, s: &Solver<L>| {
                         if let Some(raw) = raw {
-                            if let Some(c) = finish_cut(raw, n, &lp_rows, &s.dom.global_lo, &s.dom.global_up, &xh, None) {
+                            if let Some(c) = finish_cut(raw, n, &lp_rows, &s.cut_int, &s.dom.global_lo, &s.dom.global_up, &xh, None) {
                                 cands.push(c);
                             }
                         }
@@ -954,7 +995,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut cands: Vec<Candidate> = Vec::new();
         let mut push = |raw: Option<RawCut>, cands: &mut Vec<Candidate>, s: &Solver<L>| {
             if let Some(raw) = raw {
-                if let Some(c) = finish_cut(raw, n, &lp_rows, &s.dom.global_lo, &s.dom.global_up, x, s.incumbent.as_ref().map(|(_, v)| v.as_slice())) {
+                if let Some(c) = finish_cut(raw, n, &lp_rows, &s.cut_int, &s.dom.global_lo, &s.dom.global_up, x, s.incumbent.as_ref().map(|(_, v)| v.as_slice())) {
                     cands.push(c);
                 }
             }
@@ -968,6 +1009,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             let row = &p.rows[i];
             if row.len() < 2 {
+                continue;
+            }
+            if !gen_old() {
+                let neg: Vec<(usize, f64)> = row.iter().map(|&(j, a)| (j, -a)).collect();
+                for (b, r) in [(row.as_slice(), p.row_up[i]), (neg.as_slice(), -p.row_lo[i])] {
+                    if r.is_finite() {
+                        let n0 = cands.len();
+                        for c in generate_cuts(&vars, b, r, use_flow_cover(), true) {
+                            push(Some(c), &mut cands, self);
+                        }
+                        keep_best(&mut cands, n0);
+                    }
+                }
                 continue;
             }
             if p.row_up[i].is_finite() {
@@ -1111,6 +1165,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if !ok {
                 continue;
             }
+            if !gen_old() {
+                let neg: Vec<(usize, f64)> = base.iter().map(|&(k, a)| (k, -a)).collect();
+                for b in [&base, &neg] {
+                    let n0 = cands.len();
+                    for c in generate_cuts(&vars, b, 0.0, tab_fc, false) {
+                        push(Some(c), &mut cands, self);
+                    }
+                    keep_best(&mut cands, n0);
+                }
+                continue;
+            }
             let r = cmir(&vars, &base, 0.0);
             push(r, &mut cands, self);
             let neg: Vec<(usize, f64)> = base.iter().map(|&(k, a)| (k, -a)).collect();
@@ -1137,6 +1202,7 @@ fn finish_cut(
     raw: RawCut,
     n: usize,
     lp_rows: &[Vec<(usize, f64)>],
+    is_int: &[bool],
     lo: &[f64],
     up: &[f64],
     x: &[f64],
@@ -1174,6 +1240,36 @@ fn finish_cut(
     if coefs.is_empty() {
         return None;
     }
+    // 係数の締め付け (HiGHS の `HighsDomain::tightenCoefficients`): 最大活動量が右辺を delta 超えるなら、
+    // 係数の絶対値が delta を超える整数列の係数を delta に下げる (x がその境界から 1 以上離れれば、残りの項の
+    // 最大活動量だけで成り立つので、右辺も同じだけ動かしてよい)。`ENOMOTO_MIP_NO_CUT_TIGHTEN` で無効。
+    if env_str!("ENOMOTO_MIP_NO_CUT_TIGHTEN").is_none() {
+        let mut maxact = 0.0;
+        let mut fin = true;
+        for &(j, c) in &coefs {
+            let m = if c > 0.0 { c * up[j] } else { c * lo[j] };
+            if !m.is_finite() {
+                fin = false;
+                break;
+            }
+            maxact += m;
+        }
+        let delta = maxact - rhs;
+        if fin && delta > 1e-6 * (1.0 + rhs.abs()) {
+            for (j, c) in coefs.iter_mut() {
+                if is_int[*j] && c.abs() > delta + 1e-9 {
+                    if *c > 0.0 {
+                        rhs -= (*c - delta) * up[*j];
+                        *c = delta;
+                    } else {
+                        rhs += (-*c - delta) * lo[*j];
+                        *c = -delta;
+                    }
+                }
+            }
+        }
+    }
+    let cmax = coefs.iter().fold(0.0f64, |m, &(_, c)| m.max(c.abs()));
     let cmin = coefs.iter().fold(f64::INFINITY, |m, &(_, c)| m.min(c.abs()));
     if cmax / cmin > 1e6 {
         return None;
