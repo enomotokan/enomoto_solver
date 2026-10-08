@@ -1593,14 +1593,15 @@ mod lifted_cover_tests {
 /// lifted cover (0-1 だけなら knapsack、一般整数なら mixed integer、連続を含めば mixed binary)、CMIR、
 /// (`ext_cover` なら) extended cover、(連続変数を含み `flow_cover` なら) lifted flow cover。
 /// 候補を全て返す (どれが一番強いかは呼び出し側が構造変数の式に直してから効き目で比べ、1 本だけ残す)。
-/// `ENOMOTO_MIP_GEN_NO_COVER` で lifted cover を試さない。
+/// lifted cover は `ENOMOTO_MIP_LIFTED_COVER` のときだけ試す (40 問で入れると 18 -> 16 問 (sgeomean 28.34 -> 29.15)
+/// と悪化した: neos-860300・neos5・neos-911970 が遅くなる)。
 pub fn generate_cuts(vars: &CutVars, base: &[(usize, f64)], rhs: f64, flow_cover: bool, ext_cover: bool) -> Vec<RawCut> {
     let mut out = Vec::new();
     let Some((terms, beta)) = substitute(vars, base, rhs) else {
         return out;
     };
     let has_cont = base.iter().any(|&(k, a)| a != 0.0 && !vars.is_int[k] && vars.lo[k] < vars.up[k]);
-    if env_str!("ENOMOTO_MIP_GEN_NO_COVER").is_none() {
+    if env_str!("ENOMOTO_MIP_LIFTED_COVER").is_some() {
         out.extend(lifted_cover_terms(vars, terms.clone(), beta));
     }
     out.extend(cmir_terms(vars, terms, beta));
