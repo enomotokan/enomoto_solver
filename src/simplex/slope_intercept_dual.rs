@@ -1038,6 +1038,10 @@ thread_local! {
     static WARM_D: std::cell::RefCell<Option<Vec<f64>>> = const { std::cell::RefCell::new(None) };
     /// 近道で最適になったときの被約費用 (LU と同時に保存する)。
     static LAST_D: std::cell::RefCell<Option<Vec<f64>>> = const { std::cell::RefCell::new(None) };
+    /// 次の [`solve_slope_intercept_dual_from_basis`] で使う DSE 重み (基底位置順、前回の求解の最後の重みを引き継ぐ)。
+    static WARM_DSE: std::cell::RefCell<Option<Vec<f64>>> = const { std::cell::RefCell::new(None) };
+    /// 直近の求解の最後の DSE 重み (`request_lu` のとき)。
+    static LAST_DSE: std::cell::RefCell<Option<Vec<f64>>> = const { std::cell::RefCell::new(None) };
 }
 
 /// 次の warm start に使う被約費用を渡す ([`set_warm_lu`] と同じ基底のもの)。
@@ -1051,6 +1055,16 @@ pub(crate) fn take_last_ray() -> Option<Vec<f64>> {
 }
 
 /// 近道で最適になったときに保存した被約費用を取り出す。
+/// 次の求解の最初の DSE 重みを渡す (基底位置順。長さが行数と違えば使わない)。
+pub(crate) fn set_warm_dse(w: Option<Vec<f64>>) {
+    WARM_DSE.with(|x| *x.borrow_mut() = w);
+}
+
+/// 直近の求解の最後の DSE 重みを取り出す。
+pub(crate) fn take_last_dse() -> Option<Vec<f64>> {
+    LAST_DSE.with(|l| l.borrow_mut().take())
+}
+
 pub(crate) fn take_last_d() -> Option<Vec<f64>> {
     LAST_D.with(|l| l.borrow_mut().take())
 }
@@ -3312,7 +3326,7 @@ impl Drop for PriceGuard {
     fn drop(&mut self) {
         if let Some(k) = self.key {
             let pm = std::mem::replace(&mut self.pm, PriceMat { start: Vec::new(), col: Vec::new(), val: Vec::new(), nb_end: Vec::new(), col_entry_start: Vec::new(), pos_of_col_entry: Vec::new(), entry_of_price: Vec::new() });
-            PRICE_CACHE.with(|c| *c.borrow_mut() = Some((k, pm)));
+            PRICE_CACHE.with(|c| *c.borrow_mut() = Some(Box::new((k, pm))));
         }
     }
 }
@@ -3321,7 +3335,7 @@ thread_local! {
     /// 次からの求解の行列の識別子 ([`set_price_key`])。
     static PRICE_KEY: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
     /// 前回の求解の終わりの PRICE 行列 (識別子つき)。
-    static PRICE_CACHE: std::cell::RefCell<Option<(u64, PriceMat)>> = const { std::cell::RefCell::new(None) };
+    static PRICE_CACHE: std::cell::RefCell<Option<Box<(u64, PriceMat)>>> = const { std::cell::RefCell::new(None) };
 }
 
 /// 次からの求解の制約行列の識別子を設定する (分枝限定法の LP が行列を作り直すたびに新しい値を渡す)。
@@ -3571,7 +3585,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     // ([`set_price_key`])、前回の求解の終わりの行列を受け取り、価格付けする列の集合が変わった列だけ入れ替える
     // (毎回の構築の O(nnz) を省く)。
     let price_key = if price_nonbasic_only { PRICE_KEY.with(|k| k.get()) } else { None };
-    let cached_pm = price_key.and_then(|key| PRICE_CACHE.with(|c| c.borrow_mut().take()).filter(|(k, pm)| *k == key && pm.fits(std)).map(|(_, pm)| pm));
+    let cached_pm = price_key.and_then(|key| PRICE_CACHE.with(|c| c.borrow_mut().take()).filter(|b| b.0 == key && b.1.fits(std)).map(|b| b.1));
     let pm = match cached_pm {
         Some(mut pm) => {
             pm.repartition(std, &nb_status);
@@ -3752,7 +3766,10 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     // 離基行の重み(論文 5.4 節 Step 2(b) の `γ_i`、注意 7.7): `super::DseState` をそのまま使う(重みは `M` に依存しない
     // 表の行の量。`M` に依存するのはそれを使うスコア `Score2` だけ)。最初のピボットから
     // 厳密 DSE を使う。全スラックの `B0` は符号付き単位行列なので `DseState::new` の単位重みは正確。
-    let mut dse = super::DseState::new(m);
+    let mut dse = match WARM_DSE.with(|w| w.borrow_mut().take()) {
+        Some(w) if warm_started && w.len() == m && env_str!("ENOMOTO_NO_WARM_DSE").is_none() => super::DseState::from_weights(w),
+        _ => super::DseState::new(m),
+    };
 
     // 停滞(目的関数への寄与がほぼ 0 のピボット)がこの回数を超えたら Bland 規則に切り替える。
     let stall_limit = (STALL_LIMIT_PER_ROW * m).max(STALL_LIMIT_MIN);
@@ -4579,6 +4596,9 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                     "DEBUG_EXT: noise max_pick_sqrt_w={:.3e} noise_rows={diag_noise_rows} noise_pivot_iters={diag_noise_pivot_iters} noise_pivot_cands={diag_noise_pivot_cands} noise_taboo={diag_noise_taboo} infeas_guard={diag_infeas_guard} rollbacks={diag_rollbacks}",
                     diag_max_pick_w.sqrt()
                 );
+            }
+            if WANT_LU.with(|w| w.get()) {
+                LAST_DSE.with(|l| *l.borrow_mut() = Some(dse.w.clone()));
             }
             if fast_reopt && warm_started && active_cost.iter().zip(&std.c).all(|(a, c)| a == c) {
                 match fast_finish(std, &basis_pos, &nb_status, &cache_orig, n_orig, lu, &d) {

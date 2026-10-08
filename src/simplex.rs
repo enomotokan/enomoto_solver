@@ -1753,6 +1753,12 @@ impl DseState {
         DseState { w: vec![1.0; m], use_parallel: m > RAYON_SIZE_THRESHOLD }
     }
 
+    /// 与えた重みで作る (前回の求解の最後の重みを引き継ぐとき)。
+    fn from_weights(w: Vec<f64>) -> Self {
+        let m = w.len();
+        DseState { w, use_parallel: m > RAYON_SIZE_THRESHOLD }
+    }
+
     /// 基底の行 `i` の現在の重み。
     #[inline]
     fn weight(&self, i: usize) -> f64 {

@@ -18,6 +18,9 @@ use crate::types::{LpOptions, Status};
 /// 二段解法を使う MIP 用の LP。
 #[derive(Clone)]
 pub struct TwoStageLp {
+    /// 直近の求解の最後の DSE 重み (基底位置順) と、そのときの基底。次の求解の基底が同じなら引き継ぐ
+    /// (行を加えたら新しい行の重みを 1 で足す)。
+    dse_cache: Option<(Vec<usize>, Vec<f64>)>,
     n: usize,
     /// 元の行 (列番号の昇順) と行の境界。
     rows: Vec<Vec<(usize, f64)>>,
@@ -75,6 +78,7 @@ pub struct TwoStageState {
     y: Vec<f64>,
     status: Option<LpStatus>,
     lu_cache: Option<(Vec<usize>, super::lu::FtLu, Option<Vec<f64>>)>,
+    dse_cache: Option<(Vec<usize>, Vec<f64>)>,
 }
 
 fn shift_of(lo: f64, up: f64) -> f64 {
@@ -126,6 +130,7 @@ impl TwoStageLp {
             status: None,
             lu: None,
             lu_cache: None,
+            dse_cache: None,
             iters: 0,
             price_key: new_price_key(),
             ray: None,
@@ -261,10 +266,20 @@ impl TwoStageLp {
         }
         self.rebuild();
         // 新しい行のスラックを基底に入れる (スラックの番号は n + i なので、既存の基底は番号が変わらない)
+        let same = matches!((&self.basis, &self.dse_cache), (Some(b), Some((cb, _))) if b == cb);
         if let Some(b) = self.basis.as_mut() {
             for i in m0..self.rows.len() {
                 b.push(self.n + i);
             }
+        }
+        // DSE 重みも引き継ぎ、新しい行の重みは 1 (スラックが基底の行)
+        if same {
+            if let (Some(b), Some((cb, w))) = (&self.basis, self.dse_cache.as_mut()) {
+                cb.clone_from(b);
+                w.resize(b.len(), 1.0);
+            }
+        } else {
+            self.dse_cache = None;
         }
         self.y.resize(self.rows.len(), 0.0);
         self.status = None;
@@ -296,19 +311,31 @@ impl TwoStageLp {
             !remove[i - 1]
         });
         let n = self.n;
+        let cache = self.dse_cache.take();
         if let Some(b) = self.basis.take() {
+            let same = matches!(&cache, Some((cb, w)) if *cb == b && w.len() == b.len());
             let mut nb: Vec<usize> = Vec::with_capacity(k);
-            for &v in &b {
-                if v < n {
-                    nb.push(v);
-                } else if !remove[v - n] {
-                    nb.push(n + new_index[v - n]);
+            let mut nw: Vec<f64> = Vec::with_capacity(k);
+            for (p, &v) in b.iter().enumerate() {
+                let keep = v < n || !remove[v - n];
+                if keep {
+                    nb.push(if v < n { v } else { n + new_index[v - n] });
+                    if same {
+                        nw.push(cache.as_ref().unwrap().1[p]);
+                    }
                 }
+            }
+            if same {
+                self.dse_cache = Some((nb.clone(), nw));
             }
             self.basis = Some(nb);
         }
         self.rebuild();
         self.repair_basis();
+        // 基底を直したら重みは使わない
+        if !matches!((&self.basis, &self.dse_cache), (Some(b), Some((cb, _))) if b == cb) {
+            self.dse_cache = None;
+        }
         self.status = None;
     }
 
@@ -459,7 +486,7 @@ impl TwoStageLp {
     }
 
     pub fn save_state(&self) -> TwoStageState {
-        TwoStageState { lo: self.lo.clone(), up: self.up.clone(), basis: self.basis.clone(), x: self.x.clone(), y: self.y.clone(), status: self.status, lu_cache: self.lu_cache.clone() }
+        TwoStageState { lo: self.lo.clone(), up: self.up.clone(), basis: self.basis.clone(), x: self.x.clone(), y: self.y.clone(), status: self.status, lu_cache: self.lu_cache.clone(), dse_cache: self.dse_cache.clone() }
     }
 
     pub fn restore_state(&mut self, s: &TwoStageState) {
@@ -473,6 +500,7 @@ impl TwoStageLp {
         }
         self.basis = s.basis.clone();
         self.lu_cache = s.lu_cache.clone();
+        self.dse_cache = s.dse_cache.clone();
         self.x.clone_from(&s.x);
         self.y.clone_from(&s.y);
         self.status = s.status;
@@ -544,6 +572,12 @@ impl TwoStageLp {
                 if env_str!("ENOMOTO_MIP_NO_NB_HINT").is_none() {
                     sid::set_warm_nb(Some(self.nb_hint()));
                 }
+                // 前回の最後の DSE 重み (同じ基底のとき)
+                if let Some((cb, w)) = &self.dse_cache {
+                    if *cb == b && w.len() == b.len() {
+                        sid::set_warm_dse(Some(w.clone()));
+                    }
+                }
                 sid::solve_slope_intercept_dual_from_basis(&self.std, &opts, b)
             }
             _ => sid::solve_slope_intercept_dual(&self.std, &opts),
@@ -552,6 +586,9 @@ impl TwoStageLp {
         sid::set_warm_lu(None);
         sid::set_warm_d(None);
         sid::set_warm_nb(None);
+        sid::set_warm_dse(None);
+        let last_dse = sid::take_last_dse();
+        self.dse_cache = None;
         sid::set_price_key(None);
         let stop = sid::ext_stop();
         sid::set_ext_control(None);
@@ -587,6 +624,9 @@ impl TwoStageLp {
                         if b.iter().all(|&v| v != usize::MAX) {
                             if let Some(lu) = last_lu {
                                 self.lu_cache = Some((b.clone(), lu, last_d));
+                            }
+                            if let Some(w) = last_dse.filter(|w| w.len() == b.len()) {
+                                self.dse_cache = Some((b.clone(), w));
                             }
                             self.basis = Some(b);
                         }

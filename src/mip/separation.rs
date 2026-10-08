@@ -1005,9 +1005,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if env_str!("ENOMOTO_MIP_NO_PATH_AGG").is_none() {
             let max_starts = if light { tunable!("ENOMOTO_T_MIP_NODE_PATH_STARTS", 0usize, usize) } else { tunable!("ENOMOTO_T_MIP_PATH_STARTS", 1000usize, usize) };
             // 既定は HiGHS の経路集約の移植 (`ENOMOTO_MIP_PATH_OLD` で従来の経路集約)
-            if env_str!("ENOMOTO_MIP_PATH_OLD").is_none() && !light {
+            // 経路集約: 従来のもの (`ENOMOTO_MIP_PATH_OLD`)、HiGHS の移植 (`ENOMOTO_MIP_PATH_HIGHS_ONLY`)、既定は両方
+            // (h80x6320d・rout は移植で根の下界が上がり、mik-250 は従来のものの方が強い)
+            let old_only = env_str!("ENOMOTO_MIP_PATH_OLD").is_some() || light;
+            let highs_only = env_str!("ENOMOTO_MIP_PATH_HIGHS_ONLY").is_some();
+            if !old_only {
                 self.path_aggregation_highs(&vars, &lp_rows, &mut cands, &mut push);
-            } else {
+            }
+            if !highs_only || old_only {
                 self.path_aggregation(&vars, &lp_rows, &mut cands, &mut push, max_starts);
             }
         }
