@@ -524,6 +524,11 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
     let noimprove_k = tunable!("ENOMOTO_T_IPM_NOIMPROVE", 0usize, usize);
     let blowup = tunable!("ENOMOTO_T_IPM_BLOWUP", BOX_BLOWUP, f64);
     let mut noimprove = 0usize;
+    let push_f = tunable!("ENOMOTO_T_IPM_PUSH", 0.0f64, f64);
+    let push_max = tunable!("ENOMOTO_T_IPM_PUSH_ITERS", 15usize, usize);
+    let mut pushing = false;
+    let mut push_it = 0usize;
+    let mut push_stall = 0usize;
 
     for it in 0..max_iters {
         iters = it;
@@ -557,8 +562,38 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
             );
         }
         if res.primal <= bnd_p && res.dual <= bnd_d && gap <= bnd_g {
-            status = Status::Optimal;
-            break;
+            // 試験用 (`ENOMOTO_T_IPM_PUSH=f`): 停止基準を満たした後も、相対残差の最悪値が f (停止基準の倍率) に
+            // 下がるか、伸びなくなる・数値が破綻する・`ENOMOTO_T_IPM_PUSH_ITERS` 反復に達するまで続け、最良の点を返す。
+            let worst_now = rel.0.max(rel.1).max(rel.2);
+            if push_f <= 0.0 || worst_now <= push_f {
+                status = Status::Optimal;
+                break;
+            }
+            if !pushing {
+                pushing = true;
+                if debug {
+                    eprintln!("IPM it={it} reached the tolerance; pushing for higher accuracy (target {push_f:.1e})");
+                }
+            }
+        }
+        if pushing {
+            let worst_now = rel.0.max(rel.1).max(rel.2);
+            push_it += 1;
+            let bw = best.as_ref().map_or(f64::INFINITY, |b| b.0);
+            if worst_now.is_finite() && worst_now < 0.5 * bw {
+                push_stall = 0;
+            } else {
+                push_stall += 1;
+            }
+            if push_it > push_max || push_stall >= 2 || !worst_now.is_finite() {
+                if debug {
+                    eprintln!("IPM it={it} stop pushing (iters {push_it}, stall {push_stall}, worst {worst_now:.2e}, best {bw:.2e})");
+                }
+                if worst_now.is_finite() && worst_now < bw {
+                    status = Status::Optimal;
+                }
+                break;
+            }
         }
         // 同時実行の二段解法の下界との差 (真の双対ギャップの上界) で、クロスオーバーに渡す。
         if let Some(w) = warm {
@@ -894,6 +929,14 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
         iters = it + 1;
     }
 
+    if pushing && status != Status::Optimal {
+        // 高精度化の途中で止めた: 停止基準を満たした最良の点を最適として返す。
+        status = Status::Optimal;
+        if let Some((_, bx, by, brc, brel)) = best {
+            crate::phase_timing::record("ipm_push_best", brel.0.max(brel.1).max(brel.2));
+            return BoxIpmResult { status, x: bx, y: by.iter().map(|v| -v).collect(), rc: brc, iters, rel_res: brel };
+        }
+    }
     if status != Status::Optimal {
         if let Some((_, bx, by, brc, brel)) = best {
             if debug {
