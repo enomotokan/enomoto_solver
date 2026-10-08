@@ -196,7 +196,25 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool) -> MipProblem {
     let mut orbs = orbs;
     let mut prob = prob;
     let mut static_fix = 0usize;
-    if env_str!("ENOMOTO_MIP_NO_PACKING_ORBITOPE").is_none() {
+    // 既定は動的な orbitopal fixing (分枝した行をその順に使う、HiGHS と同じ): 行ごとのパッキングの印だけ付ける。
+    // 根での固定 (x_{i,c} = 0, c > i) は行の固定の順に依るので、動的な固定とは混ぜられない
+    let static_orbitope = env_str!("ENOMOTO_MIP_ORBITOPE_STATIC").is_some();
+    for o in orbs.iter_mut() {
+        let flags: Vec<bool> = o
+            .vars
+            .iter()
+            .map(|line| {
+                let set: std::collections::HashSet<usize> = line.iter().copied().collect();
+                prob.cols[line[0]].iter().any(|&(i, _)| {
+                    let r = &prob.rows[i];
+                    prob.row_up[i] <= 1.0 + 1e-9 && r.iter().all(|&(k, a)| a == 1.0 && prob.col_lo[k] >= 0.0) && r.iter().filter(|&&(k, _)| set.contains(&k)).count() == line.len()
+                })
+            })
+            .collect();
+        o.row_packing = flags;
+        o.packing = o.row_packing.iter().all(|&b| b);
+    }
+    if static_orbitope && env_str!("ENOMOTO_MIP_NO_PACKING_ORBITOPE").is_none() {
         for o in orbs.iter_mut() {
             let packing_rows: Vec<Vec<usize>> = o
                 .vars
@@ -220,8 +238,10 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool) -> MipProblem {
                         }
                     }
                 }
+                let k = packing_rows.len();
                 o.vars = packing_rows;
                 o.packing = true;
+                o.row_packing = vec![true; k];
             }
         }
     }

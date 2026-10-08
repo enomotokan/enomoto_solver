@@ -208,6 +208,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     orbitopes: Rc<Vec<super::symmetry::Orbitope>>,
     /// 対称性の行・固定を加える前の問題 (なければ `None`)。ヒューリスティクスの解の判定・局所探索に使う。
     pub(super) orig: Option<Rc<MipProblem>>,
+    /// オービトープの列 -> (オービトープの番号, 行)。
+    orb_col: std::collections::HashMap<usize, (usize, usize)>,
     /// 元の問題では実行可能で、オービトープの列の並べ替えで使えるようにした解の数と、それでも使えなかった数。
     sym_canon: (u64, u64),
     /// orbitopal fixing で固定した数と、それで枝刈りしたノードの数。
@@ -335,6 +337,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
         orbitope_fixings: 0,
         orig: if params.submip || env_str!("ENOMOTO_MIP_SYM_NO_ORIG").is_some() { None } else { super::SYM_ORIG.with(|t| t.borrow().clone()) },
         sym_canon: (0, 0),
+        orb_col: std::collections::HashMap::new(),
         orbitope_prunes: 0,
         row_log: Vec::new(),
         cut_int: if env_str!("ENOMOTO_MIP_NO_IMPLINT").is_some() { p.is_int.clone() } else { p.implied_integers() },
@@ -866,7 +869,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             xp("m_proof");
             // 完全オービトープの固定 (列を辞書式で減少に並べた解だけを残す)
             let prop_ok = prop_ok && {
-                let ok = self.orbitope_propagate();
+                let ok = self.orbitope_propagate(&node.changes);
                 if !ok {
                     self.orbitope_prunes += 1;
                 }
@@ -1112,7 +1115,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         continue;
                     }
                     BranchAction::Prune => break None,
-                    BranchAction::Branch { col, value } => break Some(Some((col, value, node_obj, frac))),
+                    BranchAction::Branch { col, value } => {
+                        let (col, value) = self.orbitope_branching_column(col, value);
+                        break Some(Some((col, value, node_obj, frac)));
+                    }
                 }
             };
             xp("m_endlp");
@@ -1592,14 +1598,78 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     /// 完全オービトープの固定と伝播を、固定が出なくなるまで (最大 10 回) 繰り返す。矛盾したら偽。
-    fn orbitope_propagate(&mut self) -> bool {
+    /// 分枝する列がパッキング・オービトープの行にあれば、その行で最も左の固定されていない列で分枝する
+    /// (HiGHS の `getBranchingColumn`。動的な orbitopal fixing の行の順が早く決まり、固定がよく効く)。
+    /// 0-1 列なので分枝の値は 0.5 (LP 値が整数でも子の境界が変わるように)。
+    fn orbitope_branching_column(&mut self, col: usize, value: f64) -> (usize, f64) {
+        if self.orbitopes.is_empty() || env_str!("ENOMOTO_MIP_ORBITOPE_STATIC").is_some() || env_str!("ENOMOTO_MIP_NO_ORBITOPE_BRANCH").is_some() {
+            return (col, value);
+        }
+        if self.orb_col.is_empty() {
+            for (k, o) in self.orbitopes.iter().enumerate() {
+                for (i, line) in o.vars.iter().enumerate() {
+                    for &j in line {
+                        self.orb_col.insert(j, (k, i));
+                    }
+                }
+            }
+        }
+        let Some(&(k, i)) = self.orb_col.get(&col) else { return (col, value) };
+        let o = &self.orbitopes[k];
+        if !o.row_packing[i] {
+            return (col, value);
+        }
+        for &j in &o.vars[i] {
+            if j == col {
+                break;
+            }
+            if self.dom.lo[j] < self.dom.up[j] {
+                let v = self.lp.col_value(j);
+                let v = if (v - v.round()).abs() <= 1e-6 { 0.5 } else { v };
+                return (j, v);
+            }
+        }
+        (col, value)
+    }
+
+    /// `changes` はこのノードまでの分枝 (根から順)。動的な固定 (既定) では、分枝した列を含むオービトープの行を
+    /// 分枝した順に並べた行列で固定する (HiGHS・Bendotti らの dynamic orbitopal fixing。順は道ごとに決まるので道の上で
+    /// 一貫している)。`ENOMOTO_MIP_ORBITOPE_STATIC` なら全ての行を固定の順で使う。
+    fn orbitope_propagate(&mut self, changes: &[BoundChange]) -> bool {
         if self.orbitopes.is_empty() {
             return true;
         }
         let orbs = self.orbitopes.clone();
+        let dynamic = env_str!("ENOMOTO_MIP_ORBITOPE_STATIC").is_none();
+        if dynamic && self.orb_col.is_empty() {
+            for (k, o) in orbs.iter().enumerate() {
+                for (i, line) in o.vars.iter().enumerate() {
+                    for &j in line {
+                        self.orb_col.insert(j, (k, i));
+                    }
+                }
+            }
+        }
+        // オービトープごとの分枝した行 (分枝した順)
+        let subs: Vec<super::symmetry::Orbitope> = if dynamic {
+            let mut rows: Vec<Vec<usize>> = vec![Vec::new(); orbs.len()];
+            for c in changes {
+                if let Some(&(k, i)) = self.orb_col.get(&c.col) {
+                    if !rows[k].contains(&i) {
+                        rows[k].push(i);
+                    }
+                }
+            }
+            rows.iter().enumerate().filter(|(_, r)| !r.is_empty()).map(|(k, r)| orbs[k].sub_rows(r)).collect()
+        } else {
+            orbs.iter().cloned().collect()
+        };
+        if subs.is_empty() {
+            return true;
+        }
         for _ in 0..10 {
             let mut fixes: Vec<(usize, f64)> = Vec::new();
-            for o in orbs.iter() {
+            for o in subs.iter() {
                 match super::symmetry::orbitopal_fixing(o, &self.dom.lo, &self.dom.up) {
                     None => return false,
                     Some(f) => fixes.extend(f),

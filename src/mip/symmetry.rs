@@ -245,8 +245,10 @@ fn search(p: &MipProblem, col0: &[u64], row0: &[u64], a: usize, b: usize, t0: st
 #[derive(Clone, Debug)]
 pub struct Orbitope {
     pub vars: Vec<Vec<usize>>,
-    /// 各行がパッキング・分割の行に含まれる (行の和 <= 1)。
+    /// 全ての行がパッキング・分割の行に含まれる (行の和 <= 1)。
     pub packing: bool,
+    /// 行ごとに、パッキング・分割の行に含まれるか (動的な固定で、分枝した行が全てパッキングならパッキング用の固定を使う)。
+    pub row_packing: Vec<bool>,
     /// 列の入れ替えの生成元 (列 a, 列 b, 問題全体の置換 `perm[j] = σ(j)`。0-1 でない列も一緒に動かす)。
     pub swaps: Vec<(usize, usize, std::rc::Rc<Vec<usize>>)>,
 }
@@ -260,6 +262,17 @@ fn apply_perm(perm: &[usize], x: &mut [f64]) {
 }
 
 impl Orbitope {
+    /// 行 `rows` (この順) だけからなるオービトープ (動的な orbitopal fixing 用。行の部分集合でも列の入れ替えは
+    /// 対称性なので、その順の辞書式で列を並べた解が必ずある)。
+    pub fn sub_rows(&self, rows: &[usize]) -> Orbitope {
+        Orbitope {
+            vars: rows.iter().map(|&i| self.vars[i].clone()).collect(),
+            packing: rows.iter().all(|&i| self.row_packing[i]),
+            row_packing: rows.iter().map(|&i| self.row_packing[i]).collect(),
+            swaps: Vec::new(),
+        }
+    }
+
     /// 列 `a` と `b` を入れ替える置換 (問題全体)。生成元の列の入れ替えをたどった道 `a = c0 - c1 - ... - ck = b` から、
     /// `(c0 ck) = (c0 c1)(c1 ... ck)(c0 c1)` (共役) で作る。道がなければ `None`。
     fn transposition(&self, a: usize, b: usize) -> Option<Vec<usize>> {
@@ -473,7 +486,8 @@ pub fn find_orbitopes(p: &MipProblem, sym: &Symmetry) -> (Vec<Orbitope>, Vec<boo
             let cols: Vec<usize> = (0..s).filter(|&c| g[mat[0][c]] != mat[0][c]).collect();
             swaps.push((cols[0], cols[1], std::rc::Rc::new(g.clone())));
         }
-        out.push(Orbitope { vars: mat, packing: false, swaps });
+        let nrows = mat.len();
+        out.push(Orbitope { vars: mat, packing: false, row_packing: vec![false; nrows], swaps });
     }
     (out, used)
 }
@@ -746,7 +760,7 @@ mod tests {
     #[test]
     fn orbitopal_fixing_small_cases() {
         // 2 行 3 列。何も固定がなければ: 最大 [11,11,11]、最小 [00,00,00] で固定なし
-        let orb = Orbitope { vars: vec![vec![0, 1, 2], vec![3, 4, 5]], packing: false, swaps: Vec::new() };
+        let orb = Orbitope { vars: vec![vec![0, 1, 2], vec![3, 4, 5]], packing: false, row_packing: vec![false; 2], swaps: Vec::new() };
         let (lo, up) = (vec![0.0; 6], vec![1.0; 6]);
         assert_eq!(orbitopal_fixing(&orb, &lo, &up), Some(vec![]));
         // x_{0,1} = 1 (列 1 の 1 行目): 列 0 >=_lex 列 1 なので x_{0,0} = 1 に固定される
@@ -775,7 +789,7 @@ mod tests {
             let r = 1 + (rnd() * 3.0) as usize;
             let s = 2 + (rnd() * 2.0) as usize;
             let vars: Vec<Vec<usize>> = (0..r).map(|i| (0..s).map(|c| i * s + c).collect()).collect();
-            let orb = Orbitope { vars: vars.clone(), packing: false, swaps: Vec::new() };
+            let orb = Orbitope { vars: vars.clone(), packing: false, row_packing: vec![false; r], swaps: Vec::new() };
             let nv = r * s;
             let mut lo = vec![0.0; nv];
             let mut up = vec![1.0; nv];
@@ -829,7 +843,7 @@ mod tests {
             let r = 1 + (rnd() * 4.0) as usize;
             let s = 2 + (rnd() * 2.0) as usize;
             let vars: Vec<Vec<usize>> = (0..r).map(|i| (0..s).map(|c| i * s + c).collect()).collect();
-            let orb = Orbitope { vars: vars.clone(), packing: true, swaps: Vec::new() };
+            let orb = Orbitope { vars: vars.clone(), packing: true, row_packing: vec![true; r], swaps: Vec::new() };
             let nv = r * s;
             let mut lo = vec![0.0; nv];
             let mut up = vec![1.0; nv];

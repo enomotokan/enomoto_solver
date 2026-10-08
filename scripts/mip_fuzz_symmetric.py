@@ -1,5 +1,6 @@
 """対称性 (同じ機械の入れ替え) をもつ乱数の割り当て問題で、HiGHS と最適値を突き合わせる
-(python scripts/mip_fuzz_symmetric.py 問題数 [開始seed])。対称性の検出・オービトープの固定・lex-leader の行の
+(python scripts/mip_fuzz_symmetric.py 問題数 [開始seed] [大きさの倍率])。倍率 2 以上で仕事・機械を増やし、木の探索
+(動的な orbitopal fixing) まで届く問題にする。対称性の検出・オービトープの固定・lex-leader の行の
 正しさを確かめる用 (mip_fuzz_vs_highs.py の乱数問題はほとんど対称性をもたない)。
 
 仕事 i (重さ w_i、利益 p_i) を同じ機械 m (容量 cap) に割り当てる。各仕事は高々 1 台 (確率 1/2 でちょうど 1 台)。
@@ -11,10 +12,13 @@ from enomoto_solver import Model, Variable
 inf = float('inf')
 
 
+SCALE = int(sys.argv[3]) if len(sys.argv) > 3 else 1
+
+
 def gen(seed):
     g = random.Random(seed)
-    ni = g.randint(2, 8)
-    nm = g.randint(2, 4)
+    ni = g.randint(2, 8) * SCALE
+    nm = g.randint(2, 4) + (SCALE - 1)
     w = [g.randint(1, 9) for _ in range(ni)]
     p = [g.randint(1, 20) for _ in range(ni)]
     cap = [g.randint(5, 20)] * nm
