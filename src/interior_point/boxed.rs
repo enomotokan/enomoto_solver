@@ -526,6 +526,8 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
     let mut noimprove = 0usize;
     let push_f = tunable!("ENOMOTO_T_IPM_PUSH", 0.0f64, f64);
     let push_max = tunable!("ENOMOTO_T_IPM_PUSH_ITERS", 15usize, usize);
+    // 残差の最悪値が最良の半分を下回らない反復がこの回数続いたら高精度化をやめる。
+    let push_stall_max = tunable!("ENOMOTO_T_IPM_PUSH_STALL", 2usize, usize);
     let mut pushing = false;
     let mut push_it = 0usize;
     let mut push_stall = 0usize;
@@ -585,7 +587,7 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
             } else {
                 push_stall += 1;
             }
-            if push_it > push_max || push_stall >= 2 || !worst_now.is_finite() {
+            if push_it > push_max || push_stall >= push_stall_max || !worst_now.is_finite() {
                 if debug {
                     eprintln!("IPM it={it} stop pushing (iters {push_it}, stall {push_stall}, worst {worst_now:.2e}, best {bw:.2e})");
                 }
