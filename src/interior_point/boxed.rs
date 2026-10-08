@@ -534,6 +534,8 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
     let stall_jump = tunable!("ENOMOTO_T_IPM_STALL_JUMP", 0.0f64, f64);
     let mut min_primal = f64::INFINITY;
     let mut jumped = false;
+    let stall_jump_k = tunable!("ENOMOTO_T_IPM_STALL_JUMP_K", 1usize, usize);
+    let mut jump_count = 0usize;
     let (rho_min0, delta_min0) = (rho_min, delta_min);
     let mut bump_best = f64::INFINITY;
     let mut bump_count = 0usize;
@@ -733,7 +735,13 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
         // `ENOMOTO_T_IPM_STALL_JUMP=f` (f > 0): 停滞の代わりに、下限にある間に主残差がそれまでの最小の f 倍以上に跳ね上がった
         // 反復で一度だけ上げる (ken-18: 1e-10 → 3e-6。序盤のゆっくりした収束 (dfl001) では上げない)。
         if stall_jump > 0.0 {
-            if stall_bump > 0.0 && at_floor && res.primal > stall_jump * min_primal && !jumped {
+            // 跳ね上がりが `ENOMOTO_T_IPM_STALL_JUMP_K` 反復続いたときだけ (一時的な跳ね上がりは次の反復で戻る: pilotnov)。
+            if at_floor && res.primal > stall_jump * min_primal {
+                jump_count += 1;
+            } else {
+                jump_count = 0;
+            }
+            if stall_bump > 0.0 && jump_count >= stall_jump_k && !jumped {
                 rho = rho.max(stall_bump);
                 delta = delta.max(stall_bump);
                 jumped = true;
