@@ -256,6 +256,11 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// HiGHS 式の衝突解析 [呼び出し, 作った衝突, 入れた衝突, 長さの和]
     multi_stats: [u64; 4],
     multi_secs: f64,
+    /// 目的関数の非零の係数 (目的関数の伝播用、最初に使うときに作る)
+    obj_cols: Option<std::rc::Rc<Vec<(usize, f64)>>>,
+    /// 目的関数の伝播 [刈ったノード, 締めた境界]、強分岐の子の伝播 [矛盾した子, 子の LP に渡した境界]
+    obj_prop_stats: [u64; 2],
+    sb_prop_stats: [u64; 2],
     /// 行にできない衝突 (連続列・一般整数列を含む) を境界リテラルのまま持つプール
     lit_conflicts: super::conflict_pool::LitConflictPool,
     /// [加えた数, 刈ったノード, 締めた境界]
@@ -383,6 +388,9 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
         conflicts_added: 0,
         multi_stats: [0; 4],
         multi_secs: 0.0,
+        obj_cols: None,
+        obj_prop_stats: [0; 2],
+        sb_prop_stats: [0; 2],
         lit_conflicts: super::conflict_pool::LitConflictPool::new(p.n, tunable!("ENOMOTO_T_MIP_LIT_CONFLICT_POOL", 5000usize, usize)),
         lit_stats: [0; 3],
         conf_stats: [0; 8],
@@ -926,6 +934,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 self.pc.add_inference(j, up, self.dom.stack_len().saturating_sub(stack_before_prop) as f64);
             }
             xp("m_prop");
+            // 目的関数の伝播 (目的値 <= 打ち切り値)
+            let prop_ok = prop_ok && self.propagate_objective();
             // 双対証明による枝刈りと境界の締め付け
             let prop_ok = prop_ok && {
                 let ok = self.apply_dual_proofs();
@@ -1505,6 +1515,41 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let mut child_obj = [f64::NEG_INFINITY; 2];
             let mut cut = [false; 2];
             for (side, is_up) in [(0usize, false), (1usize, true)] {
+                // 子の定義域を LP の前に伝播する (HiGHS): 矛盾すれば LP を解かずに切る (衝突解析もする)。矛盾しなければ
+                // 伝播で締まった境界も子の LP に渡す
+                // 既定では無効 (`ENOMOTO_MIP_SB_PROP` で有効): neos-911970 では最適解が見つかったが、misc07・binkar10_1 で
+                // 子の LP を省いた分の評価の違いなどから大きく悪化した
+                let sb_prop = env_str!("ENOMOTO_MIP_SB_PROP").is_some();
+                let pos = self.dom.stack_len();
+                if sb_prop {
+                    if is_up {
+                        self.dom.tighten_lower(self.p, j, v.ceil());
+                    } else {
+                        self.dom.tighten_upper(self.p, j, v.floor());
+                    }
+                    let ok = !self.dom.infeasible && self.dom.propagate(self.p) && self.propagate_objective() && {
+                        match self.lit_conflicts.propagate(self.p, &mut self.dom, pos) {
+                            Ok(_) => true,
+                            Err(()) => false,
+                        }
+                    };
+                    if !ok {
+                        if self.dom.conflict.is_some() {
+                            self.add_conflict();
+                        }
+                        self.dom.backtrack_to(self.p, pos);
+                        cut[side] = true;
+                        self.pc.add_cutoff(j, is_up);
+                        self.sb_prop_stats[0] += 1;
+                        continue;
+                    }
+                    if env_str!("ENOMOTO_MIP_SB_PROP_NO_LP").is_none() {
+                        for (c, _, _) in self.dom.changes_since(pos) {
+                            self.lp.set_col_bounds(c, self.dom.lo[c], self.dom.up[c]);
+                            self.sb_prop_stats[1] += 1;
+                        }
+                    }
+                }
                 if is_up {
                     self.lp.set_col_bounds(j, v.ceil(), up);
                 } else {
@@ -1542,6 +1587,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                 }
                 self.lp.restore_state(&saved);
+                if sb_prop {
+                    self.dom.backtrack_to(self.p, pos);
+                }
             }
             match (cut[0], cut[1]) {
                 (true, true) => return BranchAction::Prune,
@@ -2158,6 +2206,101 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// 衝突 (同時には成り立たない境界の組) が 0-1 列だけなら、`sum_{x_j >= 1} x_j - sum_{x_j <= 0} x_j <= |{x_j >= 1}| - 1`
     /// の行にしてプールに入れる (入れたら真)。
+    /// 目的関数の伝播 (HiGHS の objective propagation): `sum c_j x_j <= U - 定数項` (`U` は打ち切り値) を 1 本の行として
+    /// 伝播する。最小活動量が右辺を超えれば矛盾 (この行を証明として衝突解析する)。そうでなければ各列の境界を
+    /// 余裕の分だけ締める (締めた境界は外から来た変更として記録)。矛盾なら偽。`ENOMOTO_MIP_NO_OBJ_PROP` で無効。
+    pub(super) fn propagate_objective(&mut self) -> bool {
+        if env_str!("ENOMOTO_MIP_NO_OBJ_PROP").is_some() || self.dom.infeasible {
+            return !self.dom.infeasible;
+        }
+        let p = self.p;
+        let u = self.prune_limit() - p.offset;
+        if !u.is_finite() {
+            return true;
+        }
+        let obj = match &self.obj_cols {
+            Some(o) => o.clone(),
+            None => {
+                let o = std::rc::Rc::new((0..p.n).filter(|&j| p.cost[j] != 0.0).map(|j| (j, p.cost[j])).collect::<Vec<_>>());
+                self.obj_cols = Some(o.clone());
+                o
+            }
+        };
+        if obj.is_empty() {
+            return true;
+        }
+        for _ in 0..3 {
+            let mut minact = 0.0f64;
+            let mut ninf = 0usize;
+            let mut infj = usize::MAX;
+            for &(j, c) in obj.iter() {
+                let b = if c > 0.0 { self.dom.lo[j] } else { self.dom.up[j] };
+                if b.is_finite() {
+                    minact += c * b;
+                } else {
+                    ninf += 1;
+                    infj = j;
+                }
+            }
+            if ninf >= 2 {
+                return true;
+            }
+            if ninf == 0 && minact > u + 1e-6 * (1.0 + u.abs()) {
+                self.obj_prop_stats[0] += 1;
+                if env_str!("ENOMOTO_MIP_NO_EXTRA_CONFLICTS").is_none() && !self.params.submip {
+                    self.add_conflicts_multi(super::domain::ConflictStart::Proof(&obj, u));
+                }
+                return false;
+            }
+            let gap = u - minact;
+            let mut changed = false;
+            self.dom.set_external(true);
+            for &(j, c) in obj.iter() {
+                let (lo, up) = (self.dom.lo[j], self.dom.up[j]);
+                let rest_gap = if ninf == 0 {
+                    // c x_j <= gap + c * (x_j の最小の側の境界)
+                    if c.abs() * (up - lo) <= gap + 1e-9 * (1.0 + gap.abs()) {
+                        continue;
+                    }
+                    gap
+                } else if j == infj {
+                    u - minact
+                } else {
+                    continue;
+                };
+                let tight = if c > 0.0 {
+                    let v = if ninf == 0 { lo + rest_gap / c } else { rest_gap / c };
+                    v < up - 1e-6 * (1.0 + up.abs().min(1e6)) && self.dom.tighten_upper(p, j, v)
+                } else {
+                    let v = if ninf == 0 { up + rest_gap / c } else { rest_gap / c };
+                    v > lo + 1e-6 * (1.0 + lo.abs().min(1e6)) && self.dom.tighten_lower(p, j, v)
+                };
+                if tight {
+                    changed = true;
+                    self.obj_prop_stats[1] += 1;
+                }
+                if self.dom.infeasible {
+                    break;
+                }
+            }
+            self.dom.set_external(false);
+            if self.dom.infeasible {
+                if self.dom.conflict.is_some() && env_str!("ENOMOTO_MIP_NO_EXTRA_CONFLICTS").is_none() {
+                    self.add_conflict();
+                }
+                return false;
+            }
+            if !changed {
+                break;
+            }
+            if !self.dom.propagate(p) {
+                self.add_conflict();
+                return false;
+            }
+        }
+        true
+    }
+
     /// 行にできない衝突を境界リテラルのまま衝突プールに入れる (`ENOMOTO_MIP_NO_LIT_CONFLICTS` で無効)。入れたら真。
     fn add_lit_conflict(&mut self, lits: &[(usize, bool, f64)]) -> bool {
         if env_str!("ENOMOTO_MIP_NO_LIT_CONFLICTS").is_some() {
@@ -2644,6 +2787,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.params.verbose {
             eprintln!("MIP: dual proofs and conflicts {} (conflicts added {} (from proofs {}), Farkas {}, pruned {} nodes, tightened {} bounds)", self.dual_proofs.len(), self.conflicts_added, self.proof_conflicts, self.farkas_added, self.proof_prunes, self.proof_tightenings);
             eprintln!("MIP: propagation conflicts: analysed {}, no 1-UIP {}, 1-UIP not a row {}, no decision set {}, decision set not a row {}; not a row because continuous {}, general integer {}, both sides {}", self.conf_stats[0], self.conf_stats[1], self.conf_stats[2], self.conf_stats[3], self.conf_stats[4], self.conf_stats[5], self.conf_stats[6], self.conf_stats[7]);
+            eprintln!("MIP: objective propagation: pruned {} nodes, tightened {} bounds; strong branching children infeasible by propagation {}, propagated bounds passed to child LPs {}", self.obj_prop_stats[0], self.obj_prop_stats[1], self.sb_prop_stats[0], self.sb_prop_stats[1]);
             eprintln!("MIP: literal conflicts: added {}, in pool {}, pruned {} nodes, tightened {} bounds", self.lit_stats[0], self.lit_conflicts.len(), self.lit_stats[1], self.lit_stats[2]);
             eprintln!("MIP: conflict analysis (HiGHS style): calls {}, conflicts {}, added {}, mean length {:.1}, max length {}, {:.2}s", self.multi_stats[0], self.multi_stats[1], self.multi_stats[2], self.multi_stats[3] as f64 / self.multi_stats[1].max(1) as f64, self.conflict_max_len_multi(), self.multi_secs);
             let cf: Vec<u64> = super::domain::CONFLICT_FAIL.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();
