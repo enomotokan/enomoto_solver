@@ -1738,13 +1738,13 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
             // y_ipm では足りないとき、下界を測り直す (下界 `L` はどの y・どの「実行可能領域を含む箱」でも成り立つので、
             // 判定は厳密なまま)。頂点の目的値と L の差は変数ごとの `d_j x_j − min(d_j l_j, d_j u_j)` の和で、上下限の間に
             // ある変数は d_j が 0 でない限り `|d_j| ×` 境界までの距離だけ効く (箱の広い fome13 で y_ipm の小さな d_j が積み上がる)。
-            // - 試験用 `ENOMOTO_T_XO_ACCEPT_YFIX=1`: 頂点で上下限の間にある (退化していない) 基底変数の被約費用を 0 にする
+            // - `ENOMOTO_T_XO_ACCEPT_YFIX` (既定 1、第 59 回の比較で決めた。0 で行わない): 頂点で上下限の間にある (退化していない) 基底変数の被約費用を 0 にする
             //   ように y を補正する: `Bᵀ Δ = ρ` (ρ は、そのような基底変数の行で `d_j(y_ipm)`、退化した基底の行で 0)、
             //   `y' = y_ipm + θ Δ`。
             // - 試験用 `ENOMOTO_T_XO_ACCEPT_IMPLIED=1`: 上下限が無限の変数に、行 `Ax = b` から導いた有限の範囲を与えて
             //   下界を測る (Neumaier–Shcherbina の安全な下界の考え方。無限の側の d の符号違いで L = −∞ になるのを防ぐ)。
             //   このときは基底の双対 y_B も試す。
-            let yfix = tunable!("ENOMOTO_T_XO_ACCEPT_YFIX", 0u8, u8) != 0;
+            let yfix = tunable!("ENOMOTO_T_XO_ACCEPT_YFIX", 1u8, u8) != 0;
             let implied = tunable!("ENOMOTO_T_XO_ACCEPT_IMPLIED", 0u8, u8) != 0;
             // - 試験用 `ENOMOTO_T_XO_ACCEPT_PROJ=1`: 最適面への射影 (Mehrotra–Ye)。内点法の点から上下限の間にあると推定した
             //   変数と、頂点で上下限の間にある基底変数の集合 S について、`A_Sᵀ (y_ipm + Δ) = c_S` を満たす最小ノルムの Δ

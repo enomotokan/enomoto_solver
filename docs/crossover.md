@@ -626,6 +626,21 @@ ken-18 8.65 → 5.37 秒、fit2p 0.42 → 0.36 秒、ns1688926 73.2 → 59.6 秒
 
 判定: 両方を採用 (既定 `ENOMOTO_T_IPM_AUG_ON_INACCURATE=1e-6`、`ENOMOTO_T_IPM_SOLVE_ACC2=1e-6`、`ENOMOTO_T_IPM_SOLVE_ACC2_K=3`)。
 
+### 第 56〜59 回 (自前の並列マルチフロンタル法と、頂点の採用判定の y の補正)
+
+- 第 56 回: faer の分解に METIS の並べ替えを使う (fome13・pds-10 が退行、不採用)。
+- 第 57・58 回: 正規方程式を自前の並列マルチフロンタル法で分解する (`ENOMOTO_T_CHOL_BACKEND=2`、`interior_point/multifrontal.rs`)。
+  extend-add を列ごとに並列にし、更新行列の配列を使い回すと qap15 の分解 1 回は 1.15 → 0.42 秒 (faer 0.57 秒)。
+  109 問題の合計 51.9 → 41.3 秒だが、fome13 が反復の経過の違いで頂点が採用されず 11 → 31 秒 (不採用、試験用のまま)。
+- fome13 の頂点の判定ギャップ (頂点の目的値 − L(y_ipm)) の 98% は、頂点で上下限の間にある基底変数の被約費用 d_j が
+  0 になりきらない分 (`|d_j| ×` 境界までの距離、箱が広い) だった。y を `Bᵀ Δ = ρ` (ρ は、そのような基底変数の行で d_j、
+  退化した基底の行で 0) で補正して下界を測り直すと 1.68e-8 → 2.6e-9 で採用される。
+  第 59 回: 109 問題で既定 50.3 秒 / 補正 49.5 秒 (10% を超える退行なし)、Mittelmann も同等 → 既定化
+  (`ENOMOTO_T_XO_ACCEPT_YFIX`)。
+- 効かなかったもの (試験用のまま): 上下限が無限の変数に行から導いた範囲を与える (`ENOMOTO_T_XO_ACCEPT_IMPLIED`、y_B は
+  −∞ のまま)、双対の最適面への最小ノルムの射影 (`ENOMOTO_T_XO_ACCEPT_PROJ`、退化した基底・非基底の d まで動かして悪化)、
+  独立な成分を並列に解くときに成分の中の分解を逐次にする (`ENOMOTO_T_SPLIT_INNER_SEQ`、差なし)。
+
 ## 計測
 
 `scripts/crossover_bench/run.py` (計測) と `report.py` (集計)。結果は `benchmarks/crossover/`。
