@@ -832,7 +832,7 @@ impl NormalKkt {
         let chol_symbolic = symbolic_with_ordering(&symbolic_base, dbg)?;
         // 2: faer が supernodal を選び、演算量の見積もりが `ENOMOTO_T_MF_MIN_FLOPS` 以上なら自前のマルチフロンタル法で
         // 分解する (小さな・simplicial 向きの因子は faer のまま: osa-60 は因子が 3.2 万で、supernodal にすると遅い)。
-        let mf = if backend == 2 && chol_flops(&chol_symbolic) >= tunable!("ENOMOTO_T_MF_MIN_FLOPS", 1e7f64, f64) {
+        let mf = if backend == 2 && chol_flops(&chol_symbolic) >= tunable!("ENOMOTO_T_MF_MIN_FLOPS", 2e7f64, f64) {
             super::multifrontal::Multifrontal::new(&symbolic_base, &chol_symbolic)
         } else {
             None
@@ -850,7 +850,7 @@ impl NormalKkt {
             None
         };
         if dbg {
-            eprintln!("NormalKkt: backend={}", if pardiso.is_some() { "pardiso" } else if mf.is_some() { "multifrontal" } else { "faer" });
+            eprintln!("NormalKkt: backend={} flops={:.2e}", if pardiso.is_some() { "pardiso" } else if mf.is_some() { "multifrontal" } else { "faer" }, chol_flops(&chol_symbolic));
         }
         let l_values = if pardiso.is_some() || mf.is_some() { Vec::new() } else { vec![0.0f64; chol_symbolic.len_values()] };
         let numeric_buf = if pardiso.is_some() || mf.is_some() {

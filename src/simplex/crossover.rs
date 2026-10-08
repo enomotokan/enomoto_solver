@@ -2107,11 +2107,13 @@ fn vertex_solution(std: &StdForm, basis_pos: &[Option<usize>], nb_status: &[Opti
     let mut xb = vec![0.0; m];
     let mut scratch = vec![0.0; m];
     lu.solve_into(&rhs, &mut scratch, &mut xb);
+    // 主実行可能とみなす境界の違反 (試験用 `ENOMOTO_T_XO_VERTEX_FEAS_TOL`、既定 1e-9、境界の大きさに比例)。
+    let ftol = tunable!("ENOMOTO_T_XO_VERTEX_FEAS_TOL", 1e-9f64, f64);
     for j in 0..n {
         if let Some(p) = basis_pos[j] {
             let v = xb[p];
-            let tl = 1e-9 * (1.0 + std.lb[j].abs().min(1e12));
-            let tu = 1e-9 * (1.0 + std.ub[j].abs().min(1e12));
+            let tl = ftol * (1.0 + std.lb[j].abs().min(1e12));
+            let tu = ftol * (1.0 + std.ub[j].abs().min(1e12));
             if !v.is_finite() || v < std.lb[j] - tl || v > std.ub[j] + tu {
                 return None;
             }
@@ -2237,8 +2239,9 @@ fn repair_vertex(
     let mut np = 0usize;
     for (k, &j) in basis.iter().enumerate() {
         xv[j] = xb[k];
-        let tl = 1e-9 * (1.0 + std.lb[j].abs().min(1e12));
-        let tu = 1e-9 * (1.0 + std.ub[j].abs().min(1e12));
+        let ftol = tunable!("ENOMOTO_T_XO_VERTEX_FEAS_TOL", 1e-9f64, f64);
+        let tl = ftol * (1.0 + std.lb[j].abs().min(1e12));
+        let tu = ftol * (1.0 + std.ub[j].abs().min(1e12));
         if !xb[k].is_finite() {
             return None;
         }
