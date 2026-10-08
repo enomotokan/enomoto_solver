@@ -942,3 +942,65 @@ impl IpmKkt {
         }
     }
 }
+
+#[cfg(test)]
+mod chol_bench {
+    use faer::dyn_stack::{GlobalPodBuffer, PodStack};
+    use faer::sparse::linalg::cholesky::{factorize_symbolic_cholesky, LltRegularization, SymmetricOrdering};
+    use faer::sparse::SymbolicSparseColMat;
+    use faer::{Parallelism, Side};
+
+    /// 計測用 (`cargo test --release chol_bench -- --ignored --nocapture`): `ENOMOTO_CHOL_BENCH_FILE` の対称行列
+    /// (Matrix Market、下三角) を faer の疎 Cholesky (AMD、既定の設定) で分解し、記号分解と数値分解の時間を出す
+    /// (他の実装との比較用)。
+    #[test]
+    #[ignore]
+    fn chol_bench() {
+        let Ok(path) = std::env::var("ENOMOTO_CHOL_BENCH_FILE") else { return };
+        let text = std::fs::read_to_string(&path).unwrap();
+        let mut lines = text.lines().filter(|l| !l.starts_with('%'));
+        let hdr: Vec<usize> = lines.next().unwrap().split_whitespace().map(|v| v.parse().unwrap()).collect();
+        let n = hdr[0];
+        // 上三角 (列優先) にする: 下三角の (i, j) (i >= j) を (j, i) に。
+        let mut cols: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
+        for l in lines {
+            let mut it = l.split_whitespace();
+            let i: usize = it.next().unwrap().parse::<usize>().unwrap() - 1;
+            let j: usize = it.next().unwrap().parse::<usize>().unwrap() - 1;
+            let v: f64 = it.next().unwrap().parse().unwrap();
+            let (r, c) = if i <= j { (i, j) } else { (j, i) };
+            cols[c].push((r, v));
+        }
+        let mut ptr = vec![0usize; n + 1];
+        let mut idx = Vec::new();
+        let mut val = Vec::new();
+        for c in 0..n {
+            cols[c].sort_by_key(|e| e.0);
+            for &(r, v) in &cols[c] {
+                idx.push(r);
+                val.push(v);
+            }
+            ptr[c + 1] = idx.len();
+        }
+        let sym = SymbolicSparseColMat::<usize>::new_checked(n, n, ptr, None, idx);
+        let t0 = std::time::Instant::now();
+        let chol = factorize_symbolic_cholesky::<usize>(sym.as_ref(), Side::Upper, SymmetricOrdering::Amd, Default::default()).unwrap();
+        let t_sym = t0.elapsed().as_secs_f64();
+        let mat = faer::sparse::SparseColMatRef::<usize, f64>::new(sym.as_ref(), &val);
+        for (name, par) in [("seq", Parallelism::None), ("par", Parallelism::Rayon(0))] {
+            let mut l_values = vec![0.0f64; chol.len_values()];
+            let mut buf = GlobalPodBuffer::new(chol.factorize_numeric_llt_req::<f64>(par).unwrap());
+            let mut best = f64::INFINITY;
+            for _ in 0..3 {
+                let t = std::time::Instant::now();
+                chol.factorize_numeric_llt::<f64>(&mut l_values, mat, Side::Upper, LltRegularization::default(), par, PodStack::new(&mut buf)).unwrap();
+                best = best.min(t.elapsed().as_secs_f64());
+            }
+            let kind = match chol.raw() {
+                faer::sparse::linalg::cholesky::SymbolicCholeskyRaw::Supernodal(_) => "supernodal",
+                _ => "simplicial",
+            };
+            println!("CHOLBENCH faer {name} n={n} nnz(L)={} kind={kind} symbolic={t_sym:.3}s numeric={best:.3}s", chol.len_values());
+        }
+    }
+}
