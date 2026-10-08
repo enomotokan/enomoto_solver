@@ -47,8 +47,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             let t_sep = std::time::Instant::now();
             let mut cands = self.separate(&x, false);
-            // カットプール (再スタート前のカットなど) で違反しているものも候補にする
-            if self.params.restarts > 0 && round < tunable!("ENOMOTO_T_MIP_ROOT_POOL_ROUNDS", 5usize, usize) && env_str!("ENOMOTO_MIP_NO_ROOT_POOL").is_none() {
+            // 再スタート前のカットをプールで引き継いだとき (`ENOMOTO_MIP_RESTART_CUTS_TO_POOL`): プールで違反しているものも候補にする
+            if self.params.restarts > 0 && env_str!("ENOMOTO_MIP_RESTART_CUTS_TO_POOL").is_some() && round < tunable!("ENOMOTO_T_MIP_ROOT_POOL_ROUNDS", 5usize, usize) && env_str!("ENOMOTO_MIP_NO_ROOT_POOL").is_none() {
                 for (c, r, norm) in &self.cut_pool {
                     let act: f64 = c.iter().map(|&(j, v)| v * x[j]).sum();
                     let eff = (act - r) / norm.max(1e-12);
