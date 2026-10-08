@@ -469,6 +469,9 @@ pub fn orbitopal_fixing(orb: &Orbitope, lo: &[f64], up: &[f64]) -> Option<Vec<(u
         minv[c] = lexmin_ge(w, &fixes[c])?;
     }
     let mut out = Vec::new();
+    if orb.packing && env_str!("ENOMOTO_MIP_NO_PACKING_FIXING").is_none() {
+        out.extend(packing_fixing(orb, &fixes)?);
+    }
     for c in 0..s {
         if minv[c] > maxv[c] {
             return None;
@@ -477,6 +480,67 @@ pub fn orbitopal_fixing(orb: &Orbitope, lo: &[f64], up: &[f64]) -> Option<Vec<(u
         for i in 0..first {
             if fixes[c][i].is_none() {
                 out.push((orb.vars[i][c], minv[c][i] as f64));
+            }
+        }
+    }
+    Some(out)
+}
+
+/// パッキング・オービトープ (各行の和 <= 1) の固定: 列が辞書式で広義減少なら、0 でない列の最初の 1 の行は列ごとに
+/// 真に増え、0 の列は最後に来る。列 c の最初の 1 の行の範囲 `[L_c, U_c]` を、L は左から (前の列の L より後で 0 に
+/// 固定されていない最初の行)、U は右から (1 に固定された最初の行、次の列の U - 1) 求める。L > U なら実行不能、L より上は
+/// 0、L = U ならその行を 1 に固定する。1 を置ける行がない列は 0 の列なので、それ以降の列も全て 0 にする。
+fn packing_fixing(orb: &Orbitope, fixes: &[Vec<Option<u8>>]) -> Option<Vec<(usize, f64)>> {
+    let r = orb.vars.len();
+    let s = orb.vars[0].len();
+    const NONE: usize = usize::MAX;
+    let mut lo = vec![NONE; s];
+    let mut prev: Option<usize> = None;
+    for c in 0..s {
+        let start = prev.map_or(0, |p| p + 1);
+        lo[c] = (start..r).find(|&i| fixes[c][i] != Some(0)).unwrap_or(NONE);
+        if lo[c] == NONE {
+            break;
+        }
+        prev = Some(lo[c]);
+    }
+    let mut upb = vec![NONE; s];
+    for c in (0..s).rev() {
+        let own = (0..r).find(|&i| fixes[c][i] == Some(1)).unwrap_or(NONE);
+        let next = if c + 1 < s && upb[c + 1] != NONE { upb[c + 1].checked_sub(1)? } else { NONE };
+        upb[c] = own.min(next);
+    }
+    let mut out = Vec::new();
+    let mut zero_from = s;
+    for c in 0..s {
+        if lo[c] == NONE {
+            // この列に 1 は置けない: この列と後の列は全て 0。1 に固定された列があれば矛盾
+            if upb[c] != NONE {
+                return None;
+            }
+            zero_from = c;
+            break;
+        }
+        if upb[c] != NONE && lo[c] > upb[c] {
+            return None;
+        }
+        for i in 0..lo[c] {
+            match fixes[c][i] {
+                Some(1) => return None,
+                Some(_) => {}
+                None => out.push((orb.vars[i][c], 0.0)),
+            }
+        }
+        if upb[c] != NONE && lo[c] == upb[c] && fixes[c][lo[c]].is_none() {
+            out.push((orb.vars[lo[c]][c], 1.0));
+        }
+    }
+    for c in zero_from..s {
+        for i in 0..r {
+            match fixes[c][i] {
+                Some(1) => return None,
+                Some(_) => {}
+                None => out.push((orb.vars[i][c], 0.0)),
             }
         }
     }
@@ -648,6 +712,63 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// パッキング・オービトープ (行の和 <= 1) でも、固定が「行の和 <= 1、列が辞書式で広義減少、固定を満たす」行列を
+    /// 切らないことを総当たりで確かめる。
+    #[test]
+    fn packing_orbitopal_fixing_brute_force() {
+        let mut seed = 11u64;
+        let mut rnd = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let mut fixed_total = 0;
+        for _ in 0..3000 {
+            let r = 1 + (rnd() * 4.0) as usize;
+            let s = 2 + (rnd() * 2.0) as usize;
+            let vars: Vec<Vec<usize>> = (0..r).map(|i| (0..s).map(|c| i * s + c).collect()).collect();
+            let orb = Orbitope { vars: vars.clone(), packing: true };
+            let nv = r * s;
+            let mut lo = vec![0.0; nv];
+            let mut up = vec![1.0; nv];
+            for j in 0..nv {
+                let t = rnd();
+                if t < 0.1 {
+                    lo[j] = 1.0;
+                } else if t < 0.3 {
+                    up[j] = 0.0;
+                }
+            }
+            let mut sols: Vec<Vec<u8>> = Vec::new();
+            for mask in 0..(1u32 << nv) {
+                let x: Vec<u8> = (0..nv).map(|j| ((mask >> j) & 1) as u8).collect();
+                if (0..nv).any(|j| (x[j] as f64) < lo[j] || (x[j] as f64) > up[j]) {
+                    continue;
+                }
+                if (0..r).any(|i| (0..s).map(|c| x[vars[i][c]] as u32).sum::<u32>() > 1) {
+                    continue;
+                }
+                let col = |c: usize| -> Vec<u8> { (0..r).map(|i| x[vars[i][c]]).collect() };
+                if (0..s - 1).all(|c| col(c) >= col(c + 1)) {
+                    sols.push(x);
+                }
+            }
+            match orbitopal_fixing(&orb, &lo, &up) {
+                None => assert!(sols.is_empty(), "declared infeasible but {} solutions exist (lo {lo:?} up {up:?})", sols.len()),
+                Some(fixes) => {
+                    fixed_total += fixes.len();
+                    for x in &sols {
+                        for &(j, v) in &fixes {
+                            assert_eq!(x[j] as f64, v, "fixing x{j}={v} cuts off a valid matrix (r {r} s {s} lo {lo:?} up {up:?})");
+                        }
+                    }
+                }
+            }
+        }
+        assert!(fixed_total > 100);
     }
 
     #[test]
