@@ -25,6 +25,11 @@ pub struct Pseudocost {
     /// 実行不能で終わった葉と、目的値で打ち切った葉の数 (スコアの動的な重み)。
     pub infeasible_leaves: u64,
     pub objlim_leaves: u64,
+    /// 衝突スコア (VSIDS と同じ): 衝突に現れた列・向きに `conflict_inc` を足し、`conflict_inc` を衝突ごとに 2% 増やす
+    /// (古い衝突の重みが相対的に下がる)。`[0]` は下向き (`x <= v` のリテラル)、`[1]` は上向き (`x >= v`)。
+    conflict: [Vec<f64>; 2],
+    conflict_inc: f64,
+    conflict_total: f64,
 }
 
 impl Pseudocost {
@@ -47,6 +52,28 @@ impl Pseudocost {
             inf_total_n: 0,
             infeasible_leaves: 0,
             objlim_leaves: 0,
+            conflict: [vec![0.0; n], vec![0.0; n]],
+            conflict_inc: 1.0,
+            conflict_total: 0.0,
+        }
+    }
+
+    /// 衝突 (リテラル (列, 上限か) の組) を衝突スコアに加える。
+    pub fn add_conflict(&mut self, lits: &[(usize, bool, f64)]) {
+        for &(j, upper, _) in lits {
+            let d = (!upper) as usize;
+            self.conflict[d][j] += self.conflict_inc;
+            self.conflict_total += self.conflict_inc;
+        }
+        self.conflict_inc *= 1.02;
+        // 桁あふれを防ぐため、大きくなったら全体を縮める (比だけが意味を持つ)
+        if self.conflict_inc > 1e100 {
+            let f = 1e-100;
+            for v in self.conflict.iter_mut().flat_map(|c| c.iter_mut()) {
+                *v *= f;
+            }
+            self.conflict_inc *= f;
+            self.conflict_total *= f;
         }
     }
 
@@ -164,7 +191,13 @@ impl Pseudocost {
         let inf_avg = if self.inf_total_n > 0 { (self.inf_total / self.inf_total_n as f64).max(eps).powi(2) } else { 1.0 };
         let cut = self.cutoff_rate(j, false).max(eps) * self.cutoff_rate(j, true).max(eps);
         let dynw = (self.infeasible_leaves + 1) as f64 / (self.objlim_leaves + 1) as f64;
-        dynw * (1e-4 * s(inf, inf_avg) + 1e-4 * s(cut, 0.01)) + s(ps, ps_avg) / dynw
+        // 衝突スコア (SCIP の conflictweight は 0.01。ここでは既定 0: misc07・rout で下界の伸びが悪くなった): 両側の積を、全列の平均の 2 乗で正規化する
+        let n = self.conflict[0].len().max(1) as f64;
+        let conf_avg = (self.conflict_total / (2.0 * n)).max(eps);
+        let conf = self.conflict[0][j].max(eps * conf_avg) * self.conflict[1][j].max(eps * conf_avg);
+        let wc = tunable!("ENOMOTO_T_MIP_CONFLICT_WEIGHT", 0.0, f64);
+        let conf_term = if self.conflict_total > 0.0 { wc * s(conf, conf_avg * conf_avg) } else { 0.0 };
+        dynw * (1e-4 * s(inf, inf_avg) + 1e-4 * s(cut, 0.01) + conf_term) + s(ps, ps_avg) / dynw
     }
 
     /// pseudocost による [`Self::hybrid`] スコア (小数部 `frac`)。

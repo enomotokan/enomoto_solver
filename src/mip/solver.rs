@@ -1686,7 +1686,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
     pub(super) fn push_pool_row(&mut self, coefs: Vec<(usize, f64)>, konst: f64, obj: bool) {
         let p = self.p;
         let nnz_cap = 10 * p.rows.iter().map(|r| r.len()).sum::<usize>() + 100_000;
-        while !self.dual_proofs.is_empty() && (self.dual_proofs.len() >= 2000 || self.dual_proof_nnz + coefs.len() > nnz_cap) {
+        let max_rows = tunable!("ENOMOTO_T_MIP_PROOF_POOL", 2000usize, usize);
+        while !self.dual_proofs.is_empty() && (self.dual_proofs.len() >= max_rows || self.dual_proof_nnz + coefs.len() > nnz_cap) {
             let (c, _, _) = self.dual_proofs.pop_front().unwrap();
             self.dual_proof_nnz -= c.len();
             self.proof_base.pop_front();
@@ -1773,6 +1774,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// の行にしてプールに入れる (入れたら真)。
     fn add_conflict_lits(&mut self, lits: &[(usize, bool, f64)]) -> bool {
         let p = self.p;
+        // 行にできなくても、衝突に現れた列は分枝の衝突スコアに数える
+        self.pc.add_conflict(lits);
         let mut coefs: Vec<(usize, f64)> = Vec::with_capacity(lits.len());
         // 各リテラルの「真の度合い」s (偽なら <= 0、真なら > 0、常に <= 1) の和 <= k - 1 (k はリテラルの数) にする。
         // 0-1 列は s = x (x >= 1) / 1 - x (x <= 0)。一般整数列 (大域的な境界 [L, U]) は x >= v なら
