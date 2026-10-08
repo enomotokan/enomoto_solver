@@ -1141,7 +1141,7 @@ impl IpmKkt {
 #[cfg(test)]
 mod chol_bench {
     use faer::dyn_stack::{GlobalPodBuffer, PodStack};
-    use faer::sparse::linalg::cholesky::{factorize_symbolic_cholesky, LltRegularization, SymmetricOrdering};
+    use faer::sparse::linalg::cholesky::LltRegularization;
     use faer::sparse::SymbolicSparseColMat;
     use faer::{Parallelism, Side};
 
@@ -1179,7 +1179,7 @@ mod chol_bench {
         }
         let sym = SymbolicSparseColMat::<usize>::new_checked(n, n, ptr, None, idx);
         let t0 = std::time::Instant::now();
-        let chol = factorize_symbolic_cholesky::<usize>(sym.as_ref(), Side::Upper, SymmetricOrdering::Amd, Default::default()).unwrap();
+        let chol = super::symbolic_with_ordering(&sym, false).unwrap();
         let t_sym = t0.elapsed().as_secs_f64();
         let mat = faer::sparse::SparseColMatRef::<usize, f64>::new(sym.as_ref(), &val);
         for (name, par) in [("seq", Parallelism::None), ("par", Parallelism::Rayon(0))] {
