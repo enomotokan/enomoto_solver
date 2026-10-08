@@ -463,13 +463,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// `ENOMOTO_T_MIP_DIVE_BACKTRACKS` 回)。`budget` は LP 反復の上限。定義域と LP は戻す。
     pub(super) fn dive(&mut self, kind: DiveKind, budget: u64, search_bound: f64) -> bool {
         let p = self.p;
-        let verbose = self.params.verbose && self.nodes <= 1;
+        let verbose = self.params.verbose && (self.nodes <= 1 || env_str!("ENOMOTO_MIP_DEBUG_DIVE").is_some());
         let cols = self.ensure_col_rows();
         let saved = self.lp.save_state();
         let pos = self.dom.stack_len();
         let it_start = self.lp.total_iterations();
         // 後戻りは根でだけ (ノードのダイビングは数が多く、後戻りの反復が探索の時間を食う)
-        let max_bt = if self.nodes <= 1 { tunable!("ENOMOTO_T_MIP_DIVE_BACKTRACKS", 10usize, usize) } else { tunable!("ENOMOTO_T_MIP_NODE_DIVE_BACKTRACKS", 0usize, usize) };
+        // 暫定解がない間は木の中でも根と同じだけ後戻りする
+        let noinc = self.incumbent.is_none() && env_str!("ENOMOTO_MIP_NOINC_HEUR").is_some();
+        let max_bt = if self.nodes <= 1 || noinc { tunable!("ENOMOTO_T_MIP_DIVE_BACKTRACKS", 10usize, usize) } else { tunable!("ENOMOTO_T_MIP_NODE_DIVE_BACKTRACKS", 0usize, usize) };
         let guide = if kind == DiveKind::Guided { self.incumbent.as_ref().map(|(_, x)| x.clone()) } else { None };
         if kind == DiveKind::Guided && guide.is_none() {
             return false;
@@ -1246,6 +1248,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 29.91 -> 30.41 に悪化した)。ENOMOTO_MIP_RENS_DIVE でダイビング式
         if env_str!("ENOMOTO_MIP_RENS_DIVE").is_none() {
             return self.rens_old(_x);
+        }
+        self.rens_dive()
+    }
+
+    /// ダイビング式の RENS ([`Self::rens`] の説明を参照。固定率を成功・失敗から調整する)。暫定解がない間の木の中でも使う。
+    pub(super) fn rens_dive(&mut self) -> bool {
+        let p = self.p;
+        if self.params.submip {
+            return false;
         }
         let ints: Vec<usize> = (0..p.n).filter(|&j| p.is_int[j] && self.dom.lo[j] < self.dom.up[j]).collect();
         if ints.is_empty() {

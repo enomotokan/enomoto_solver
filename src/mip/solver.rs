@@ -175,6 +175,9 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) repair_start: Option<Vec<f64>>,
     /// 大近傍探索 (サブ MIP) に使った時間の合計 (秒)。
     pub(super) lns_secs: f64,
+    /// 暫定解がない間の木の中のヒューリスティクス (RENS・Feasibility Pump) に使った時間 (秒) と呼んだ回数。
+    pub(super) noinc_secs: f64,
+    pub(super) noinc_calls: u64,
     /// サブ MIP の時間の上限 (残り時間に対する割合)。
     pub(super) submip_time_frac: f64,
     /// 並列モードで、サブ MIP を別スレッドで解くか (根のヒューリスティクスの間だけ真)。
@@ -349,6 +352,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
         sol_pool: Vec::new(),
         repair_start: None,
         lns_secs: 0.0,
+        noinc_secs: 0.0,
+        noinc_calls: 0,
         submip_time_frac: 0.07,
         parallel_submips: false,
         pending_submips: std::collections::VecDeque::new(),
@@ -1171,9 +1176,45 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     } else if node.depth > 0 && plunge_depth == 0 && self.heur_iters < budget {
                         self.randomized_rounding(&x, 1);
                     }
+                    // 暫定解がない間は木の中でも解探しを強める (`ENOMOTO_MIP_NOINC_HEUR` で有効。根で暫定解のない 2 問
+                    // (neos-1456979・30n20b8) でも解は見つからなかった: HiGHS はどちらも根のカットで下界を大きく上げた後の
+                    // 根のサブ MIP で最初の解を得ている。木の中のダイビングは深く潜っても行き詰まる): 待ち行列から取り出した
+                    // ノードで、経過時間の `ENOMOTO_T_MIP_NOINC_TIME_FRAC` (既定 0.3) 倍までの時間を使い、ノードの定義域と
+                    // LP 解から RENS (固定率を調整する版)・Feasibility Pump・ダイビング (1 回 `ENOMOTO_T_MIP_NOINC_DIVE_ITERS`
+                    // 反復まで、根と同じく後戻りあり) を順に回す (RENS・pump は根だけで使っていたもの。深いノードでは固定が
+                    // 進み部分問題が小さい)。
+                    let noinc = self.incumbent.is_none() && node.depth > 0 && plunge_depth == 0 && env_str!("ENOMOTO_MIP_NOINC_HEUR").is_some();
+                    if noinc && self.noinc_secs < tunable!("ENOMOTO_T_MIP_NOINC_TIME_FRAC", 0.3, f64) * self.start.elapsed().as_secs_f64() {
+                        let t0 = Instant::now();
+                        let it0 = self.lp.total_iterations();
+                        // RENS (固定率を調整する版) → Feasibility Pump → ダイビング (種類を順に) を回す
+                        match self.noinc_calls % 3 {
+                            0 => {
+                                self.rens_dive();
+                            }
+                            1 => {
+                                let r = 4 * self.avg_node_iters();
+                                self.feasibility_pump(r);
+                            }
+                            _ => {
+                                use super::heuristics::DiveKind as K;
+                                let kinds = [K::Fractional, K::VectorLength, K::Coefficient, K::Pseudocost, K::Farkas, K::Conflict];
+                                let kind = kinds[(self.noinc_calls / 3) as usize % kinds.len()];
+                                let it = self.lp.total_iterations();
+                                self.dive_calls += 1;
+                                if self.dive(kind, tunable!("ENOMOTO_T_MIP_NOINC_DIVE_ITERS", 50_000u64, u64), f64::INFINITY) {
+                                    self.dive_succ += 1;
+                                }
+                                self.dive_iters += self.lp.total_iterations() - it;
+                            }
+                        }
+                        self.noinc_calls += 1;
+                        self.heur_iters += self.lp.total_iterations() - it0;
+                        self.noinc_secs += t0.elapsed().as_secs_f64();
+                    }
                     xp("m_heur");
                     // ダイビング (SCIP の fracdiving / veclendiving: 深さ 10 ごと、ずらし 3 / 7)
-                    if node.depth % 10 == 3 || node.depth % 10 == 7 {
+                    if !noinc && (node.depth % 10 == 3 || node.depth % 10 == 7) {
                         let quota = (0.05 * (self.dive_succ + 1) as f64 / (self.dive_calls + 1) as f64 * self.node_iters as f64) as u64 + 1000;
                         if self.dive_iters < quota && env_str!("ENOMOTO_MIP_NO_NODE_DIVE").is_none() {
                             // 種類を順に回す (SCIP の各ダイビングに相当。誘導は暫定解があるときだけ)
