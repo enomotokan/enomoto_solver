@@ -126,7 +126,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
             // 効き目の大きい順に、平行なものを除いて選ぶ
-            let max_cuts = (p.m.max(50)).min(500);
+            let max_cuts = tunable!("ENOMOTO_T_MIP_ROOT_MAX_CUTS", 500usize, usize).min(p.m.max(50));
             let chosen = if env_str!("ENOMOTO_MIP_CUTSEL_HIGHS").is_some() { self.select_cuts_highs(cands, max_cuts, &x) } else { select_cuts(cands, max_cuts, p) };
             let sep_secs = t_sep.elapsed().as_secs_f64();
             if chosen.is_empty() {
@@ -178,11 +178,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 super::cuts::FC_STATS.with(|s| eprintln!("FC stats (calls, cuts, no SNF): {:?}", s.borrow()));
             }
             if self.params.verbose {
+                let cut_nnz: usize = (p.m..self.lp.num_rows()).map(|i| self.lp.row(i).len()).sum();
+                let ncut_rows = self.lp.num_rows() - p.m;
                 eprintln!(
-                    "MIP: cut round {round}: {} cuts (of {ncands}, sep {sep_secs:.2}s, LP {} iters), LP rows {}, obj {:.10e} ({:.2}s)",
+                    "MIP: cut round {round}: {} cuts (of {ncands}, sep {sep_secs:.2}s, LP {} iters), LP rows {} (cut rows mean nnz {:.0}), obj {:.10e} ({:.2}s)",
                     rows.len(),
                     self.lp.total_iterations() - it0,
                     self.lp.num_rows(),
+                    cut_nnz as f64 / ncut_rows.max(1) as f64,
                     obj + p.offset,
                     self.start.elapsed().as_secs_f64()
                 );
