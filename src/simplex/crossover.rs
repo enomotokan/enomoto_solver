@@ -42,7 +42,7 @@ use super::basis_kernel::{factorize_basis, ft_max_updates, BasisKernel};
 use super::slope_intercept_dual::polish_with_true_bounds;
 use super::{perturb_random, sparse_lu, NbStatus, SimplexResult, StdForm};
 use crate::interior_point::boxed::{solve_box_lp, solve_box_lp_warm, BoxIpmResult, WarmStart};
-use crate::interior_point::pdlp::{solve_pdlp, PdlpOptions};
+use crate::interior_point::pdlp::{solve_pdlp, PdlpOptions, PdlpResult};
 use crate::interior_point::kkt::AugKkt;
 use crate::sparse::{csr_from_rows, csr_row_iter, sparse_dot_dense, FaerCsr};
 use crate::types::Status;
@@ -799,7 +799,13 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
             time_limit: 1e9,
             max_restarts: 1,
         };
-        let pd = solve_pdlp(&a_j, &b_j, &c_j, &l_j, &u_j, &opts);
+        // 0 反復なら PDLP を呼ばず、歩幅と縮尺だけ求める (転置や反復用の配列を作らない)。
+        let pd = if opts.max_iters == 0 {
+            let (eta, w, dr, dc) = crate::interior_point::pdlp::initial_step_params(&a_j, &b_j, &c_j);
+            PdlpResult { status: Status::NotSolved, x: Vec::new(), y: Vec::new(), iters: 0, rel: (0.0, 0.0, 0.0), eta, w, dc, dr }
+        } else {
+            solve_pdlp(&a_j, &b_j, &c_j, &l_j, &u_j, &opts)
+        };
         let tau = pd.eta / pd.w;
         // 試験用 (`ENOMOTO_T_XO_GAMMA_CAP`): 列ごとの歩幅 τ_j の上限 (大きすぎる τ_j は境界から離れた基底変数まで
         // 非基底にする: 80bau3b・pilot.ja。第 26 回)。
