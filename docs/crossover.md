@@ -599,6 +599,33 @@ ken-18・pds-20 が遅く pilot87 が失敗したが、内点法の高精度化�
 
 判定: γ = 1 を採用 (既定 `ENOMOTO_T_XO_GAMMA_PDHG=0`。検出に PDLP の前処理と PDHG の 1 歩を使わない)。
 
+### 第 49〜55 回 (内点法の終盤の数値の破綻)
+
+- 内点法の前の Pock–Chambolle (第 49・50 回、`ENOMOTO_T_XO_IPM_PC=1`、`ENOMOTO_T_XO_GAMMA_PDHG=6`、非零 10 万以上だけ
+  `ENOMOTO_T_XO_IPM_PC_MIN_NNZ`): pds-20・ken-18・osa・s250r10 で効くが ns1688926 が 72 → 85 秒。採らない。
+- 反復の記録から、Pock–Chambolle が効くのは内点法の終盤の停滞が消えるためと分かった。ken-18 は 30 反復目から Newton 系の
+  (反復改良後の) 相対残差が 1e-11 から 1e-5〜1e2 に悪化し、方向が意味をなさず 35 反復空回りしていた。反復改良の回数を
+  増やしても直らない (分解の精度そのものが足りない)。
+- 主残差の跳ね上がりで正則化を上げる (第 51・52 回、`ENOMOTO_T_IPM_STALL_*`) は d6cube が悪化。
+- 正規方程式の Cholesky の並べ替えに METIS (第 53 回、`ENOMOTO_T_CHOL_ORDER`、metis-sys): 因子の非零は pds-20・dfl001 で 3〜4 割
+  減り pds-20 19.6 → 12.1 秒だが、supernode が細かくなる・並べ替えの時間・数値の振る舞いの変化で fome13 9 → 28 秒など。採らない。
+  faer の数値分解は同じ AMD 順序の CHOLMOD (OpenBLAS) より 3〜10 倍速かった (`chol_bench`)。
+- 正規方程式の対角スケーリング (`ENOMOTO_T_NORMAL_DIAG_SCALE`): 問題ごとに反復数が大きく変わる。採らない。
+- ns1688926 は稠密な列 117 本を Woodbury で扱う正規方程式で、外した後の疎な部分がほぼ特異になり 44 反復目から相対残差
+  1e3〜1e12 で 200 反復空回りしていた (内点法が収束しない原因)。拡大系なら 30 反復で収束する。
+
+第 55 回 (各問題で交互に 3 回、Mittelmann は 1 回、`benchmarks/crossover/ab55/`):
+
+| 案 | 合計 | 10 秒ずらした幾何平均 | 10% 以上の退行 |
+|---|---|---|---|
+| 従来 | 51.8 秒 | 0.372 | ― |
+| 稠密な列を Woodbury で扱う正規方程式で予測子の相対残差 > 1e-6 なら拡大系に切り替える | 52.6 秒 | 0.375 | pilotnov (手当てが働いておらず揺れ) |
+| 上 + 相対残差 > 1e-6 で進まない反復が 3 回続いたらその反復だけ ρ・δ を一時的に 1e-10 (続けば 100 倍ずつ) | 49.3 秒 | 0.357 | osa-60 (働いておらず揺れ) |
+
+ken-18 8.65 → 5.37 秒、fit2p 0.42 → 0.36 秒、ns1688926 73.2 → 59.6 秒、Mittelmann の他は 10% 以内。
+
+判定: 両方を採用 (既定 `ENOMOTO_T_IPM_AUG_ON_INACCURATE=1e-6`、`ENOMOTO_T_IPM_SOLVE_ACC2=1e-6`、`ENOMOTO_T_IPM_SOLVE_ACC2_K=3`)。
+
 ## 計測
 
 `scripts/crossover_bench/run.py` (計測) と `report.py` (集計)。結果は `benchmarks/crossover/`。

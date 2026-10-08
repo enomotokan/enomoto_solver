@@ -532,14 +532,14 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
     let solve_acc_bump = tunable!("ENOMOTO_T_IPM_SOLVE_ACC_BUMP", 100.0f64, f64);
     let solve_acc_min = tunable!("ENOMOTO_T_IPM_SOLVE_ACC_MIN", 1e-11f64, f64);
     let mut acc_retries = 0usize;
-    let aug_on_inacc = tunable!("ENOMOTO_T_IPM_AUG_ON_INACCURATE", 0.0f64, f64);
+    let aug_on_inacc = tunable!("ENOMOTO_T_IPM_AUG_ON_INACCURATE", 1e-6f64, f64);
     let aug_on_inacc_any = tunable!("ENOMOTO_T_IPM_AUG_ON_INACCURATE_ANY", 0u8, u8) != 0;
-    let solve_acc2 = tunable!("ENOMOTO_T_IPM_SOLVE_ACC2", 0.0f64, f64);
+    let solve_acc2 = tunable!("ENOMOTO_T_IPM_SOLVE_ACC2", 1e-6f64, f64);
     let solve_acc2_reg = tunable!("ENOMOTO_T_IPM_SOLVE_ACC2_REG", 1e-10f64, f64);
     let mut prev_solve_rel = 0.0f64;
     let mut prev_worst_acc = f64::INFINITY;
     let mut temp_reg = 0.0f64;
-    let solve_acc2_k = tunable!("ENOMOTO_T_IPM_SOLVE_ACC2_K", 1usize, usize);
+    let solve_acc2_k = tunable!("ENOMOTO_T_IPM_SOLVE_ACC2_K", 3usize, usize);
     let mut stuck_count = 0usize;
     let stall_bump = tunable!("ENOMOTO_T_IPM_STALL_BUMP", 0.0f64, f64);
     let stall_bump_k = tunable!("ENOMOTO_T_IPM_STALL_BUMP_K", 2usize, usize);
@@ -793,7 +793,7 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
             bump_best = worst;
         }
 
-        // 試験用 (`ENOMOTO_T_IPM_SOLVE_ACC2=t`): 前の反復の予測子の Newton 系の相対残差が t を超え (分解の精度が足りない)、
+        // 既定 t = 1e-6、K = 3 (第 55 回、0 で使わない) (`ENOMOTO_T_IPM_SOLVE_ACC2=t`、続く回数 `ENOMOTO_T_IPM_SOLVE_ACC2_K`): 前の反復の予測子の Newton 系の相対残差が t を超え (分解の精度が足りない)、
         // しかも相対残差の最悪値が 0.95 倍未満に減らなかった (実際に進まなかった) ときだけ、この反復は ρ・δ を一時的に
         // `temp_reg` (初回 `ENOMOTO_T_IPM_SOLVE_ACC2_REG`、続けて失敗したら 100 倍ずつ) に強めて解き、反復の終わりに
         // 元の値に戻す。不正確でも進んでいる反復 (pilotnov) は乱さない。
@@ -858,7 +858,7 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
         let solve_rel = newton(&mut kkt, a, &top, delta, &r_x, &r_y, &mut lo, &mut up, &pos, &mut sol_aff, n, &mut refine_work);
         prof.1 += t_s.elapsed().as_secs_f64();
         prev_solve_rel = solve_rel;
-        // 試験用 (`ENOMOTO_T_IPM_AUG_ON_INACCURATE=t`): 正規方程式の予測子の Newton 系の相対残差が t を超えたら拡大系に切り替えて
+        // 既定 t = 1e-6 (第 55 回、0 で使わない) (`ENOMOTO_T_IPM_AUG_ON_INACCURATE=t`): 正規方程式の予測子の Newton 系の相対残差が t を超えたら拡大系に切り替えて
         // 同じ点で解き直す (`ENOMOTO_T_IPM_AUG_ON_INACCURATE_ANY=1` でなければ、稠密な列を Woodbury で扱っているときだけ。
         // ns1688926: 外した後の疎な部分がほぼ特異になり、44 反復目から相対残差 1e3〜1e12 で 200 反復空回りした)。
         if aug_on_inacc > 0.0
