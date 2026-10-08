@@ -528,6 +528,10 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
     let mut noimprove = 0usize;
     // 停止基準の後の高精度化の目標 (停止基準の倍率、既定 1e-3 は第 43〜46 回の比較で決めた。0 で行わない)。
     let push_f = tunable!("ENOMOTO_T_IPM_PUSH", 1e-3f64, f64);
+    let solve_acc = tunable!("ENOMOTO_T_IPM_SOLVE_ACC", 0.0f64, f64);
+    let solve_acc_bump = tunable!("ENOMOTO_T_IPM_SOLVE_ACC_BUMP", 100.0f64, f64);
+    let solve_acc_min = tunable!("ENOMOTO_T_IPM_SOLVE_ACC_MIN", 1e-11f64, f64);
+    let mut acc_retries = 0usize;
     let stall_bump = tunable!("ENOMOTO_T_IPM_STALL_BUMP", 0.0f64, f64);
     let stall_bump_k = tunable!("ENOMOTO_T_IPM_STALL_BUMP_K", 2usize, usize);
     let stall_floor = tunable!("ENOMOTO_T_IPM_STALL_FLOOR", 0u8, u8) != 0;
@@ -819,8 +823,23 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
         lo.set_rs(false, 0.0);
         up.set_rs(false, 0.0);
         let t_s = std::time::Instant::now();
-        newton(&mut kkt, a, &top, delta, &r_x, &r_y, &mut lo, &mut up, &pos, &mut sol_aff, n, &mut refine_work);
+        let solve_rel = newton(&mut kkt, a, &top, delta, &r_x, &r_y, &mut lo, &mut up, &pos, &mut sol_aff, n, &mut refine_work);
         prof.1 += t_s.elapsed().as_secs_f64();
+        // 試験用 (`ENOMOTO_T_IPM_SOLVE_ACC=t`): 予測子の Newton 系の (反復改良後の) 相対残差が t を超えたら (分解の精度が
+        // 足りない: ken-18 は 30 反復目から 1e-5〜1e2 になり、方向が意味をなさず 35 反復空回りした)、この反復を捨てて
+        // ρ・δ を `ENOMOTO_T_IPM_SOLVE_ACC_BUMP` 倍 (下限 `ENOMOTO_T_IPM_SOLVE_ACC_MIN`) に強めて同じ点で解き直す。
+        if solve_acc > 0.0 && solve_rel > solve_acc && acc_retries < 5 && sol_aff.iter().all(|v| v.is_finite()) {
+            acc_retries += 1;
+            rho = (rho * solve_acc_bump).max(solve_acc_min);
+            delta = (delta * solve_acc_bump).max(solve_acc_min);
+            crate::phase_timing::mark("ipm_solve_inaccurate");
+            if debug {
+                eprintln!("IPM it={it} inaccurate Newton solve (rel residual {solve_rel:.2e}); raising regularization to rho={rho:.1e} delta={delta:.1e}");
+            }
+            cached = Some(res);
+            continue;
+        }
+        acc_retries = 0;
         if !sol_aff.iter().all(|v| v.is_finite()) {
             // 正規方程式の破綻は、切り替えが有効なら拡大系に切り替える。
             if switch_aug_k > 0 && kkt.is_normal() {
@@ -1049,7 +1068,7 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
 /// 予測子/修正子の Newton 方向: 各 `Side` の `r_z`・`r_s`・`w` から縮約系の右辺を作って解き、
 /// `sol[..n] = dx`、`sol[n..] = dy`、各 `Side` の `dz`・`ds` を書く。行列は分解済み。
 #[allow(clippy::too_many_arguments)]
-fn newton(kkt: &mut IpmKkt, a: &FaerCsr, top: &[f64], delta: f64, r_x: &[f64], r_y: &[f64], lo: &mut Side, up: &mut Side, pos: &Pos, sol: &mut [f64], n: usize, work: &mut Vec<f64>) {
+fn newton(kkt: &mut IpmKkt, a: &FaerCsr, top: &[f64], delta: f64, r_x: &[f64], r_y: &[f64], lo: &mut Side, up: &mut Side, pos: &Pos, sol: &mut [f64], n: usize, work: &mut Vec<f64>) -> f64 {
     lo.set_rzp();
     up.set_rzp();
     {
@@ -1071,9 +1090,10 @@ fn newton(kkt: &mut IpmKkt, a: &FaerCsr, top: &[f64], delta: f64, r_x: &[f64], r
     sol[n..].copy_from_slice(r_y);
     // 正則化が小さくなると分解の精度が落ちるので反復改良する (動的正則化で置き換えた
     // ピボットの誤差もここで取り戻す)。残差が十分小さければ追加の求解はしない。
-    kkt.solve_refined(a, top, delta, sol, REFINE_STEPS, work);
+    let rel = kkt.solve_refined(a, top, delta, sol, REFINE_STEPS, work);
     lo.set_dz_ds(&sol[..n]);
     up.set_dz_ds(&sol[..n]);
+    rel
 }
 
 /// 主実行不能の Farkas 証明。内部の双対 (`c + A^T y + G^T z = 0`、`z >= 0`、`G x <= h`) で、実行可能な

@@ -1021,7 +1021,8 @@ impl IpmKkt {
     }
 
     /// 反復改良付きで解く (`top`, `delta` は直近の分解のもの)。
-    pub fn solve_refined(&mut self, a: &FaerCsr, top: &[f64], delta: f64, rhs: &mut [f64], refine: usize, work: &mut Vec<f64>) {
+    /// 戻り値は最後の (改良後の) 相対残差の目安 `‖b - K x‖∞ / max(1, ‖b‖∞)`。
+    pub fn solve_refined(&mut self, a: &FaerCsr, top: &[f64], delta: f64, rhs: &mut [f64], refine: usize, work: &mut Vec<f64>) -> f64 {
         let n = top.len();
         let dim = rhs.len();
         work.resize(3 * dim, 0.0);
@@ -1031,6 +1032,8 @@ impl IpmKkt {
         let bnorm = b.iter().fold(1.0f64, |m, v| m.max(v.abs()));
         self.solve_plain(a, rhs);
         let mut prev = f64::INFINITY;
+        let mut last_rel = 0.0f64;
+        let refine = tunable!("ENOMOTO_T_IPM_REFINE_STEPS", refine, usize);
         for _ in 0..refine {
             // kx = K rhs
             {
@@ -1051,7 +1054,9 @@ impl IpmKkt {
                 nrm = nrm.max(r[i].abs());
             }
             // 残差が十分小さければ追加の求解をしない (以前は 1 回目に必ず解き直していた)。
-            if !(nrm < prev * 0.5) || nrm <= REFINE_TOL * bnorm {
+            // 試験用 `ENOMOTO_T_IPM_REFINE_RATIO`: 前回からこの倍率以下に減らなければやめる (既定 0.5)。
+            last_rel = nrm / bnorm;
+            if !(nrm < prev * tunable!("ENOMOTO_T_IPM_REFINE_RATIO", 0.5f64, f64)) || nrm <= REFINE_TOL * bnorm {
                 break;
             }
             prev = nrm;
@@ -1060,6 +1065,10 @@ impl IpmKkt {
                 rhs[i] += r[i];
             }
         }
+        if env_str!("ENOMOTO_DEBUG_REFINE").is_some() {
+            eprintln!("REFINE rel_residual={last_rel:.2e}");
+        }
+        last_rel
     }
 
     fn solve_plain(&mut self, a: &FaerCsr, rhs: &mut [f64]) {
