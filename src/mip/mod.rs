@@ -198,6 +198,15 @@ fn presolve_mip(p: &MipProblem, verbose: bool) -> Option<Presolved> {
         row_lo.push(f64::NEG_INFINITY);
         row_up.push(rhs);
     }
+    // 係数の強化 (片側の行の 0-1 列の係数を、整数解を変えずに LP の緩和が締まる値に縮める)
+    if env_str!("ENOMOTO_MIP_NO_COEF_TIGHTEN").is_none() {
+        let is_int_now: Vec<bool> = p.is_int.clone();
+        let tightened = tighten_coefficients(&mut rows, &mut row_lo, &mut row_up, &pre.lb, &pre.ub, &is_int_now);
+        let normalized = normalize_integer_rows(&mut rows, &mut row_lo, &mut row_up, &is_int_now);
+        if verbose && (tightened > 0 || normalized > 0) {
+            eprintln!("MIP: presolve: tightened {tightened} coefficients, normalized {normalized} integer rows");
+        }
+    }
     // 係数が定数倍の関係にある行をまとめる (上限側と下限側の組は範囲制約 1 本に、同じ向きはきつい方に)。
     // 前処理は範囲制約を 2 本の不等式で表すので、そのままだと LP の行が倍になる
     let merged = if env_str!("ENOMOTO_MIP_NO_ROW_MERGE").is_none() { merge_parallel_rows(&mut rows, &mut row_lo, &mut row_up) } else { 0 };
@@ -221,6 +230,122 @@ fn presolve_mip(p: &MipProblem, verbose: bool) -> Option<Presolved> {
     let offset = if shift.is_finite() { p.offset + shift } else { p.offset };
     let prob = MipProblem::from_rows(pre.lb.clone(), pre.ub.clone(), pre.c.clone(), offset, p.sense_sign, p.is_int.clone(), rows, row_lo, row_up);
     Some(Presolved::Reduced { prob, postsolve: pre.postsolve_log, scaling: pre.scaling })
+}
+
+/// 係数の強化 (coefficient tightening、SCIP・HiGHS の前処理と同じ): 片側の行 `sum a_j x_j <= b` (`>=` の行は符号を
+/// 反転して扱う) の最大活動量 `M` (有限のとき) について、幅 1 の整数列 `x_j` (`[l, l + 1]`) の係数を縮める。
+///
+/// - `a_j > 0` で `M - a_j < b` (x_j が下限なら行は常に満たされる): `δ = b - (M - a_j)` だけ `a_j` と `b` を減らす。
+///   x_j が上限なら他の列への制約は変わらず、下限なら行は `M - a_j <= b - δ` で常に満たされる。
+/// - `a_j < 0` で `M + a_j < b` (x_j が上限なら常に満たされる): `δ = b - (M + a_j)` だけ `a_j` を増やす (`b` はそのまま)。
+///
+/// どちらも整数解の集合を変えず、LP の緩和だけを締める (例: 0-1 列の `sum 21 y >= 2` は `sum 2 y >= 2`)。
+/// 列の値は変えないので後処理は要らない。縮めた係数の数を返す。
+fn tighten_coefficients(rows: &mut [Vec<(usize, f64)>], row_lo: &mut [f64], row_up: &mut [f64], lo: &[f64], up: &[f64], is_int: &[bool]) -> usize {
+    let unit = |j: usize| is_int[j] && lo[j].is_finite() && up[j].is_finite() && (up[j] - lo[j] - 1.0).abs() <= 1e-9 && (lo[j] - lo[j].round()).abs() <= 1e-9;
+    let mut count = 0;
+    for i in 0..rows.len() {
+        let (l, u) = (row_lo[i], row_up[i]);
+        // 片側の行だけ (等式・範囲制約は両側の条件が絡むので扱わない)
+        let sg = if u.is_finite() && !l.is_finite() {
+            1.0
+        } else if l.is_finite() && !u.is_finite() {
+            -1.0
+        } else {
+            continue;
+        };
+        if !rows[i].iter().any(|&(j, _)| unit(j)) {
+            continue;
+        }
+        // sg * row <= b
+        let mut b = if sg > 0.0 { u } else { -l };
+        let mut maxact = 0.0;
+        let mut finite = true;
+        for &(j, a) in &rows[i] {
+            let a = sg * a;
+            let v = if a > 0.0 { up[j] } else { lo[j] };
+            if !v.is_finite() {
+                finite = false;
+                break;
+            }
+            maxact += a * v;
+        }
+        if !finite {
+            continue;
+        }
+        let tol = 1e-9 * (1.0 + b.abs()).max(maxact.abs());
+        let mut changed = false;
+        for e in rows[i].iter_mut() {
+            let j = e.0;
+            if !unit(j) {
+                continue;
+            }
+            let a = sg * e.1;
+            if a > 0.0 {
+                let d = b - (maxact - a);
+                if d > tol && d < a {
+                    e.1 = sg * (a - d);
+                    b -= d;
+                    // x_j の上限の寄与 a (u_j) が (a - d) (u_j) になり、右辺も d 減る。下限の分の移動は l_j が 0 でなければ
+                    // 係数の変化 d に l_j を掛けた分だけ活動量が動くので、最大活動量は d * u_j 減る
+                    maxact -= d * up[j];
+                    b -= d * lo[j];
+                    count += 1;
+                    changed = true;
+                }
+            } else if a < 0.0 {
+                let d = b - (maxact + a);
+                if d > tol && d < -a {
+                    e.1 = sg * (a + d);
+                    // 最大活動量は x_j の下限での寄与 a l_j が (a + d) l_j になる
+                    maxact += d * lo[j];
+                    b += d * lo[j];
+                    count += 1;
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            if sg > 0.0 {
+                row_up[i] = b;
+            } else {
+                row_lo[i] = -b;
+            }
+        }
+    }
+    count
+}
+
+/// 整数列だけで係数が整数の片側の行を係数の最大公約数で割り、右辺を整数に丸める (`<=` は切り下げ、`>=` は切り上げ。
+/// 整数解では左辺が整数なので成り立つ)。例: `2 y0 + 2 y1 >= 2` -> `y0 + y1 >= 1`。割った (または丸めた) 行の数を返す。
+fn normalize_integer_rows(rows: &mut [Vec<(usize, f64)>], row_lo: &mut [f64], row_up: &mut [f64], is_int: &[bool]) -> usize {
+    fn gcd(a: u64, b: u64) -> u64 {
+        if b == 0 { a } else { gcd(b, a % b) }
+    }
+    let mut count = 0;
+    for i in 0..rows.len() {
+        let (l, u) = (row_lo[i], row_up[i]);
+        if l.is_finite() == u.is_finite() || rows[i].is_empty() {
+            continue;
+        }
+        if !rows[i].iter().all(|&(j, a)| is_int[j] && (a - a.round()).abs() <= 1e-9 && a.abs() < 1e9) {
+            continue;
+        }
+        let g = rows[i].iter().fold(0u64, |g, &(_, a)| gcd(g, a.round().abs() as u64)) as f64;
+        if g < 1.0 {
+            continue;
+        }
+        let (nl, nu) = if u.is_finite() { (l, (u / g + 1e-9).floor()) } else { ((l / g - 1e-9).ceil(), u) };
+        if g > 1.0 || (u.is_finite() && nu != u) || (l.is_finite() && nl != l) {
+            for e in rows[i].iter_mut() {
+                e.1 = (e.1 / g).round();
+            }
+            row_lo[i] = nl;
+            row_up[i] = nu;
+            count += 1;
+        }
+    }
+    count
 }
 
 /// 係数が定数倍の関係にある行をまとめる。各行を最初の係数で割った形で分類し、同じ形の行の
@@ -290,6 +415,85 @@ mod tests {
     use super::*;
 
     /// 上限側と下限側 (符号の逆の倍) の行が範囲制約 1 本にまとまること
+    #[test]
+    fn tighten_coefficients_saturates_cover_row() {
+        // sum 21 y >= 2 (0-1) -> 2 y0 + 2 y1 + 2 y2 >= 2
+        let mut rows = vec![vec![(0, 21.0), (1, 21.0), (2, 21.0)]];
+        let (mut lo, mut up) = (vec![2.0], vec![f64::INFINITY]);
+        let n = tighten_coefficients(&mut rows, &mut lo, &mut up, &[0.0; 3], &[1.0; 3], &[true; 3]);
+        assert_eq!(n, 3);
+        assert_eq!(rows[0], vec![(0, 2.0), (1, 2.0), (2, 2.0)]);
+        assert_eq!(lo[0], 2.0);
+        // 最大公約数で割って y0 + y1 + y2 >= 1
+        assert_eq!(normalize_integer_rows(&mut rows, &mut lo, &mut up, &[true; 3]), 1);
+        assert_eq!(rows[0], vec![(0, 1.0), (1, 1.0), (2, 1.0)]);
+        assert_eq!(lo[0], 1.0);
+        // 3 x0 + 6 x1 <= 7 -> x0 + 2 x1 <= 2
+        let mut r2 = vec![vec![(0, 3.0), (1, 6.0)]];
+        let (mut l2, mut u2) = (vec![f64::NEG_INFINITY], vec![7.0]);
+        assert_eq!(normalize_integer_rows(&mut r2, &mut l2, &mut u2, &[true; 2]), 1);
+        assert_eq!(r2[0], vec![(0, 1.0), (1, 2.0)]);
+        assert_eq!(u2[0], 2.0);
+    }
+
+    /// 乱数の片側の行 (幅 1 の整数列と有界な連続列 1 本) で、係数の強化の前後で整数列の値の組ごとの
+    /// 実行可能性 (連続列を最も有利な値に置いたとき) が変わらないことを総当たりで確かめる。
+    #[test]
+    fn tighten_coefficients_keeps_integer_feasible_set() {
+        let mut seed = 99u64;
+        let mut rnd = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let mut total = 0;
+        for _ in 0..3000 {
+            let nb = 1 + (rnd() * 5.0) as usize;
+            let n = nb + 1;
+            let mut lo = vec![0.0; n];
+            let mut up = vec![1.0; n];
+            let mut is_int = vec![true; n];
+            for j in 0..nb {
+                lo[j] = (rnd() * 3.0).floor() - 1.0;
+                up[j] = lo[j] + 1.0;
+            }
+            is_int[nb] = false;
+            lo[nb] = -2.0 * rnd();
+            up[nb] = lo[nb] + 3.0 * rnd();
+            let row: Vec<(usize, f64)> = (0..n).map(|j| (j, ((rnd() - 0.4) * 20.0).round())).filter(|&(_, a)| a != 0.0).collect();
+            if row.is_empty() {
+                continue;
+            }
+            let ge = rnd() < 0.5;
+            let rhs = ((rnd() - 0.5) * 30.0).round();
+            let (rl, ru) = if ge { (rhs, f64::INFINITY) } else { (f64::NEG_INFINITY, rhs) };
+            let mut rows = vec![row.clone()];
+            let (mut rlo, mut rup) = (vec![rl], vec![ru]);
+            total += tighten_coefficients(&mut rows, &mut rlo, &mut rup, &lo, &up, &is_int);
+            let feasible = |r: &[(usize, f64)], l: f64, u: f64, y: &[f64]| -> bool {
+                // 連続列は [lo, up] の好きな値を取れる: 活動量の取りうる範囲が [l, u] と交わるか
+                let mut a0 = 0.0;
+                let mut ac = 0.0;
+                for &(j, a) in r {
+                    if j < nb {
+                        a0 += a * y[j];
+                    } else {
+                        ac = a;
+                    }
+                }
+                let (c1, c2) = (a0 + ac * lo[nb], a0 + ac * up[nb]);
+                let (mn, mx) = (c1.min(c2), c1.max(c2));
+                mx >= l - 1e-9 && mn <= u + 1e-9
+            };
+            for mask in 0..(1u32 << nb) {
+                let y: Vec<f64> = (0..nb).map(|j| lo[j] + ((mask >> j) & 1) as f64).collect();
+                assert_eq!(feasible(&row, rl, ru, &y), feasible(&rows[0], rlo[0], rup[0], &y), "row {row:?} [{rl}, {ru}] -> {:?} [{}, {}], y {y:?}", rows[0], rlo[0], rup[0]);
+            }
+        }
+        assert!(total > 100, "only {total} coefficients tightened");
+    }
+
     #[test]
     fn merge_parallel_rows_makes_ranged_row() {
         let mut rows = vec![vec![(0, 1.0), (1, 2.0)], vec![(0, -2.0), (1, -4.0)], vec![(0, 1.0), (1, 1.0)]];
