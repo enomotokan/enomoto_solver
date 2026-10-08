@@ -210,6 +210,9 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) orig: Option<Rc<MipProblem>>,
     /// オービトープの列 -> (オービトープの番号, 行)。
     orb_col: std::collections::HashMap<usize, (usize, usize)>,
+    /// 今の潜りで待ち行列に入れた兄弟ノード ((枠, 世代)、古い順)。潜りが枝刈りで終わったらここから戻る。
+    dive_stack: Vec<(usize, u64)>,
+    sibling_backtracks: u64,
     /// 元の問題では実行可能で、オービトープの列の並べ替えで使えるようにした解の数と、それでも使えなかった数。
     sym_canon: (u64, u64),
     /// orbitopal fixing で固定した数と、それで枝刈りしたノードの数。
@@ -338,6 +341,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
         orig: if params.submip || env_str!("ENOMOTO_MIP_SYM_NO_ORIG").is_some() { None } else { super::SYM_ORIG.with(|t| t.borrow().clone()) },
         sym_canon: (0, 0),
         orb_col: std::collections::HashMap::new(),
+        dive_stack: Vec::new(),
+        sibling_backtracks: 0,
         orbitope_prunes: 0,
         row_log: Vec::new(),
         cut_int: if env_str!("ENOMOTO_MIP_NO_IMPLINT").is_some() { p.is_int.clone() } else { p.implied_integers() },
@@ -773,10 +778,54 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if self.nodes >= self.params.node_limit {
                 return self.finish_limit(MipStatus::NodeLimit, plunge.as_ref());
             }
-            let node = match plunge.take() {
-                Some(n) => n,
+            // 潜りが枝刈りで終わったら、潜った道の兄弟ノード (新しいものから) に戻る (HiGHS の backtrackPlunge)。
+            // 潜りの打ち切りの条件 (下界が 全体の下界 + q (打ち切り値 - 全体の下界) 以下) を満たすものだけ
+            let sibling = if plunge.is_none() && !first && env_str!("ENOMOTO_MIP_NO_SIBLING_BACKTRACK").is_none() {
+                let cutoff = self.prune_limit();
+                let glb = self.queue.best_lower_bound();
+                let limit = if cutoff.is_finite() { glb + tunable!("ENOMOTO_T_MIP_PLUNGE_QUOT", 0.25, f64) * (cutoff - glb) } else { f64::INFINITY };
+                let mut got = None;
+                while let Some((id, gen)) = self.dive_stack.pop() {
+                    if let Some(n) = self.queue.take(id, gen, limit.min(cutoff)) {
+                        got = Some(n);
+                        break;
+                    }
+                }
+                got
+            } else {
+                None
+            };
+            let from_sibling = sibling.is_some();
+            let node = match plunge.take().or(sibling) {
+                Some(n) if !from_sibling => n,
+                Some(n) => {
+                    // 兄弟ノード: 定義域を根から積み直す (下の共通の処理と同じ)
+                    self.sibling_backtracks += 1;
+                    self.dom.reset_to_root(self.p);
+                    let mut ok = true;
+                    for c in &n.changes {
+                        if c.upper {
+                            self.dom.tighten_upper(self.p, c.col, c.value);
+                        } else {
+                            self.dom.tighten_lower(self.p, c.col, c.value);
+                        }
+                        if self.dom.infeasible {
+                            ok = false;
+                            break;
+                        }
+                    }
+                    if !ok {
+                        self.nodes += 1;
+                        continue;
+                    }
+                    if let Some(b) = &n.basis {
+                        self.restore_node_basis(b, n.basis_epoch);
+                    }
+                    n
+                }
                 None => {
                     plunge_depth = 0;
+                    self.dive_stack.clear();
                     let lim = self.prune_limit();
                     self.queue.prune(lim);
                     // 下界最小のノードを選ぶ頻度: 暫定解があれば上げる (下界を押し上げる)
@@ -799,6 +848,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         }
                         if ok {
                             if let Some(b) = &n.basis {
+                                self.restore_node_basis(b, n.basis_epoch);
+                            }
+                            if false {
+                                let b = n.basis.as_ref().unwrap();
                                 let mr = self.lp.num_rows();
                                 if n.basis_epoch == self.row_log.len() && b.row.len() == mr {
                                     self.lp.set_basis(b);
@@ -1163,7 +1216,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     branch: Some((col, !c.upper, value, lp_obj)),
                 }
             };
-            self.queue.push(mk(second_c));
+            let sib = self.queue.push(mk(second_c));
+            self.dive_stack.push(sib);
             let child = mk(first_c);
             plunge_depth += 1;
             // 潜りの打ち切り (SCIP の maxplungequot): 子の下界が 全体の下界 + q (打ち切り値 - 全体の下界) を超えたら
@@ -1598,6 +1652,33 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     /// 完全オービトープの固定と伝播を、固定が出なくなるまで (最大 10 回) 繰り返す。矛盾したら偽。
+    /// 待ち行列のノードの基底を LP に置く (保存した後の行の追加・削除を当てはめる)。
+    fn restore_node_basis(&mut self, b: &super::lp::Basis, epoch: usize) {
+        let mr = self.lp.num_rows();
+        if epoch == self.row_log.len() && b.row.len() == mr {
+            self.lp.set_basis(b);
+            return;
+        }
+        let mut b2 = b.clone();
+        if epoch <= self.row_log.len() && env_str!("ENOMOTO_MIP_NO_ROW_LOG").is_none() {
+            for e in &self.row_log[epoch..] {
+                match e {
+                    RowEdit::Add(k) => b2.row.extend(std::iter::repeat_n(VarStatus::Basic, *k)),
+                    RowEdit::Delete(mask) => {
+                        let mut i = 0;
+                        b2.row.retain(|_| {
+                            let keep = !mask.get(i).copied().unwrap_or(false);
+                            i += 1;
+                            keep
+                        });
+                    }
+                }
+            }
+        }
+        b2.row.resize(mr, VarStatus::Basic);
+        self.lp.set_basis(&b2);
+    }
+
     /// 分枝する列がパッキング・オービトープの行にあれば、その行で最も左の固定されていない列で分枝する
     /// (HiGHS の `getBranchingColumn`。動的な orbitopal fixing の行の順が早く決まり、固定がよく効く)。
     /// 0-1 列なので分枝の値は 0.5 (LP 値が整数でも子の境界が変わるように)。

@@ -56,11 +56,13 @@ pub struct NodeQueue {
     by_lb: BTreeSet<(Key, usize)>,
     by_est: BTreeSet<(Key, Key, usize)>,
     pops: u64,
+    /// 枠ごとの世代 (push のたびに増やす。取り出した枠が使い回されても、古い (枠, 世代) では取り出せない)。
+    gen: Vec<u64>,
 }
 
 impl NodeQueue {
     pub fn new() -> Self {
-        NodeQueue { nodes: Vec::new(), free: Vec::new(), by_lb: BTreeSet::new(), by_est: BTreeSet::new(), pops: 0 }
+        NodeQueue { nodes: Vec::new(), free: Vec::new(), by_lb: BTreeSet::new(), by_est: BTreeSet::new(), pops: 0, gen: Vec::new() }
     }
 
     pub fn len(&self) -> usize {
@@ -71,7 +73,8 @@ impl NodeQueue {
         self.by_lb.is_empty()
     }
 
-    pub fn push(&mut self, node: OpenNode) {
+    /// ノードを入れ、その (枠, 世代) を返す ([`Self::take`] で取り出すのに使う)。
+    pub fn push(&mut self, node: OpenNode) -> (usize, u64) {
         let lb = node.lower_bound;
         let est = 0.5 * node.lower_bound + 0.5 * node.estimate;
         let depth = node.depth as f64;
@@ -80,10 +83,25 @@ impl NodeQueue {
             id
         } else {
             self.nodes.push(Some(node));
+            self.gen.push(0);
             self.nodes.len() - 1
         };
+        self.gen[id] += 1;
         self.by_lb.insert((Key(lb), id));
         self.by_est.insert((Key(est), Key(-depth), id));
+        (id, self.gen[id])
+    }
+
+    /// `push` が返した (枠, 世代) のノードがまだあり、下界が `limit` 以下なら取り出す。
+    pub fn take(&mut self, id: usize, gen: u64, limit: f64) -> Option<OpenNode> {
+        if id >= self.nodes.len() || self.gen[id] != gen {
+            return None;
+        }
+        let n = self.nodes[id].as_ref()?;
+        if n.lower_bound > limit {
+            return None;
+        }
+        Some(self.remove(id))
     }
 
     fn remove(&mut self, id: usize) -> OpenNode {
