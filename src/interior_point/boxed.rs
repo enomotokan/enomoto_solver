@@ -1113,6 +1113,8 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
         rc[up.idx[k]] -= up.z[k];
     }
     if debug {
+        let (asm, num) = crate::interior_point::kkt::take_factor_prof();
+        eprintln!("IPM factor breakdown: assemble={asm:.3}s numeric={num:.3}s");
         eprintln!("IPM end status={status:?} iters={iters} rel_res={rel:?}");
         eprintln!("IPM profile total={:.3}s factor={:.3}s solve={:.3}s other={:.3}s", t_kkt.elapsed().as_secs_f64(), prof.0, prof.1, t_kkt.elapsed().as_secs_f64() - prof.0 - prof.1);
     }

@@ -143,6 +143,16 @@ fn symbolic_with_ordering(pat: &SymbolicSparseColMat<usize>, dbg: bool) -> Optio
     }
 }
 
+thread_local! {
+    /// 計測用: 正規方程式の組み立てと数値分解の累計時間 (秒)。[`take_factor_prof`] で取り出して 0 に戻す。
+    static FACTOR_PROF: std::cell::Cell<(f64, f64)> = const { std::cell::Cell::new((0.0, 0.0)) };
+}
+
+/// 正規方程式の組み立てと数値分解の累計時間 (秒) を取り出して 0 に戻す (計測用)。
+pub fn take_factor_prof() -> (f64, f64) {
+    FACTOR_PROF.with(|c| c.replace((0.0, 0.0)))
+}
+
 /// 数値分解に使う並列度。因子の非零数 `nnz_l` が `ENOMOTO_T_FACTOR_PAR_NNZ` (既定 [`FACTOR_PAR_NNZ`]、0 で使わない) 以上なら
 /// 並列、それ未満は逐次 (Fable の調査と Netlib + Kennington の比較で、小さな疎 Cholesky では faer の並列分解の分割の手間が
 /// 計算を上回った。一方 qap15 (nnz(L) 1,770 万) では 1 回の分解が 1.3 秒かかり、逐次では内点法の 9 割を占める)。
@@ -810,6 +820,7 @@ impl NormalKkt {
     pub fn factor(&mut self, d: &[f64], delta: f64) -> bool {
         use rayon::prelude::*;
         let (n, p) = (self.n, self.p);
+        let t_asm = std::time::Instant::now();
         self.dinv.par_iter_mut().zip(d.par_iter()).for_each(|(o, &v)| *o = 1.0 / v);
         // 疎な列の組の値を CSC の値の配列に直接足し込む。
         self.values.fill(0.0);
@@ -850,6 +861,11 @@ impl NormalKkt {
         } else {
             self.dscale.clear();
         }
+        let t_num = std::time::Instant::now();
+        FACTOR_PROF.with(|c| {
+            let (a, n_) = c.get();
+            c.set((a + t_asm.elapsed().as_secs_f64(), n_));
+        });
         let m = faer::sparse::SparseColMatRef::<usize, f64>::new(self.symbolic_base.as_ref(), &self.values);
         let reg = faer::sparse::linalg::cholesky::LltRegularization {
             dynamic_regularization_delta: tunable!("ENOMOTO_T_NORMAL_PIVOT_DELTA", 1e-8, f64),
@@ -860,6 +876,10 @@ impl NormalKkt {
             .factorize_numeric_llt::<f64>(&mut self.l_values, m, Side::Upper, reg, factor_par(self.chol_symbolic.len_values()), PodStack::new(&mut self.numeric_buf))
             .is_ok();
         self.factored = ok;
+        FACTOR_PROF.with(|c| {
+            let (a, n_) = c.get();
+            c.set((a, n_ + t_num.elapsed().as_secs_f64()));
+        });
         if !ok {
             return false;
         }
