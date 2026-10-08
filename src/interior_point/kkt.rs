@@ -32,6 +32,25 @@ fn max_factor_nnz() -> usize {
     tunable!("ENOMOTO_T_IPM_MAX_FACTOR_NNZ", MAX_FACTOR_NNZ, usize)
 }
 
+/// 正規方程式の記号分解の設定 (試験用)。`ENOMOTO_T_CHOL_RELAX`: 0 = faer の既定 (小さな supernode を、明示的な 0 を許して
+/// 併合する: 4 列以下は 100%、16 列以下は 80%、48 列以下は 10%、それ以上は 5% まで)、1 = 併合しない (因子は最も疎)、
+/// 2 = 控えめに併合 (4 列以下 50%、16 列以下 20%、それ以上 2%)。`ENOMOTO_T_CHOL_AMD_DENSE`: AMD が密な行とみなす
+/// 次数の倍率 (既定 10、次数 > 倍率 √n)。`ENOMOTO_T_CHOL_SUPERNODAL`: supernodal を選ぶ閾値 (既定 1)。
+fn chol_symbolic_params() -> faer::sparse::linalg::cholesky::CholeskySymbolicParams<'static> {
+    use faer::sparse::linalg::{amd::Control, cholesky::CholeskySymbolicParams, SupernodalThreshold, SymbolicSupernodalParams};
+    static RELAX_TIGHT: [(usize, f64); 3] = [(4, 0.5), (16, 0.2), (usize::MAX, 0.02)];
+    let relax: Option<&'static [(usize, f64)]> = match tunable!("ENOMOTO_T_CHOL_RELAX", 0u8, u8) {
+        1 => None,
+        2 => Some(&RELAX_TIGHT),
+        _ => SymbolicSupernodalParams::default().relax,
+    };
+    CholeskySymbolicParams {
+        amd_params: Control { dense: tunable!("ENOMOTO_T_CHOL_AMD_DENSE", 10.0f64, f64), ..Default::default() },
+        supernodal_flop_ratio_threshold: SupernodalThreshold(tunable!("ENOMOTO_T_CHOL_SUPERNODAL", 1.0f64, f64)),
+        supernodal_params: SymbolicSupernodalParams { relax },
+    }
+}
+
 /// 数値分解に使う並列度。因子の非零数 `nnz_l` が `ENOMOTO_T_FACTOR_PAR_NNZ` (既定 [`FACTOR_PAR_NNZ`]、0 で使わない) 以上なら
 /// 並列、それ未満は逐次 (Fable の調査と Netlib + Kennington の比較で、小さな疎 Cholesky では faer の並列分解の分割の手間が
 /// 計算を上回った。一方 qap15 (nnz(L) 1,770 万) では 1 回の分解が 1.3 秒かかり、逐次では内点法の 9 割を占める)。
@@ -632,8 +651,7 @@ impl NormalKkt {
                 t0.elapsed().as_secs_f64()
             );
         }
-        let chol_symbolic =
-            factorize_symbolic_cholesky::<usize>(symbolic_base.as_ref(), Side::Upper, SymmetricOrdering::Amd, Default::default()).ok()?;
+        let chol_symbolic = factorize_symbolic_cholesky::<usize>(symbolic_base.as_ref(), Side::Upper, SymmetricOrdering::Amd, chol_symbolic_params()).ok()?;
         if dbg {
             eprintln!("NormalKkt: symbolic (AMD) nnz(L)={} at {:.2}s", chol_symbolic.len_values(), t0.elapsed().as_secs_f64());
         }
