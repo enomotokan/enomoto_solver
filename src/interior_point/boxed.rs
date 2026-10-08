@@ -556,8 +556,8 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
     let mut bump_best = f64::INFINITY;
     let mut bump_count = 0usize;
     let push_max = tunable!("ENOMOTO_T_IPM_PUSH_ITERS", 15usize, usize);
-    // 残差の最悪値が最良の半分を下回らない反復がこの回数続いたら高精度化をやめる。
-    let push_stall_max = tunable!("ENOMOTO_T_IPM_PUSH_STALL", 1usize, usize);
+    // 残差の最悪値が最良の半分を下回らない反復がこの回数続いたら高精度化をやめる (既定 2 は第 61 回の比較で決めた。第 46 回は 1)。
+    let push_stall_max = tunable!("ENOMOTO_T_IPM_PUSH_STALL", 2usize, usize);
     let mut pushing = false;
     let mut push_it = 0usize;
     let mut push_stall = 0usize;
@@ -903,9 +903,9 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
             let break_reg = tunable!("ENOMOTO_T_IPM_BREAK_REG", 1e-8f64, f64);
             rho = (rho * 100.0).max(break_reg);
             delta = (delta * 100.0).max(break_reg);
-            // 試験用 `ENOMOTO_T_IPM_BREAK_RECENTER=1`: 近接中心を今の点に置き直す (終盤は残差が減らず中心が古いままで、
+            // `ENOMOTO_T_IPM_BREAK_RECENTER` (既定 1、第 61 回の比較で決めた。0 で行わない): 近接中心を今の点に置き直す (終盤は残差が減らず中心が古いままで、
             // 強めた正則化の近接項が点を古い中心へ引き戻す: fome13)。
-            if tunable!("ENOMOTO_T_IPM_BREAK_RECENTER", 0u8, u8) != 0 {
+            if tunable!("ENOMOTO_T_IPM_BREAK_RECENTER", 1u8, u8) != 0 {
                 xi.copy_from_slice(&x);
                 lambda.copy_from_slice(&y);
                 lo.nu.copy_from_slice(&lo.z);

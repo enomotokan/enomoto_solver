@@ -1727,8 +1727,8 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     // だけだった)。
     if let Some(yi) = &y_ipm {
         // 頂点が主実行不能 (少数) なら、費用をずらして基底を双対実行可能にしてから双対単体法で主実行不能だけを直し、
-        // 直した頂点を元の費用で判定する (`ENOMOTO_T_XO_REPAIR`、試験用。[`repair_vertex`])。
-        if accept_gap > 0.0 && tunable!("ENOMOTO_T_XO_REPAIR", 0u8, u8) != 0 && vertex_solution(std, &basis_pos, &nb_status, &lu).is_none() {
+        // 直した頂点を元の費用で判定する (`ENOMOTO_T_XO_REPAIR`、既定 1 は第 61 回の比較で決めた。[`repair_vertex`])。
+        if accept_gap > 0.0 && tunable!("ENOMOTO_T_XO_REPAIR", 1u8, u8) != 0 && vertex_solution(std, &basis_pos, &nb_status, &lu).is_none() {
             if let Some(r) = repair_vertex(std, yi, &basis, &basis_pos, &nb_status, &lu, accept_gap, debug) {
                 crate::phase_timing::mark("xo_vertex_repaired");
                 return Some(r);
@@ -2107,8 +2107,9 @@ fn vertex_solution(std: &StdForm, basis_pos: &[Option<usize>], nb_status: &[Opti
     let mut xb = vec![0.0; m];
     let mut scratch = vec![0.0; m];
     lu.solve_into(&rhs, &mut scratch, &mut xb);
-    // 主実行可能とみなす境界の違反 (試験用 `ENOMOTO_T_XO_VERTEX_FEAS_TOL`、既定 1e-9、境界の大きさに比例)。
-    let ftol = tunable!("ENOMOTO_T_XO_VERTEX_FEAS_TOL", 1e-9f64, f64);
+    // 主実行可能とみなす境界の違反 (`ENOMOTO_T_XO_VERTEX_FEAS_TOL`、既定 1e-8 は第 61 回の比較で決めた (pds-20 は違反 1.1e-9 の
+    // 1 個で修復・仕上げに回っていた)、境界の大きさに比例)。
+    let ftol = tunable!("ENOMOTO_T_XO_VERTEX_FEAS_TOL", 1e-8f64, f64);
     for j in 0..n {
         if let Some(p) = basis_pos[j] {
             let v = xb[p];
@@ -2239,7 +2240,7 @@ fn repair_vertex(
     let mut np = 0usize;
     for (k, &j) in basis.iter().enumerate() {
         xv[j] = xb[k];
-        let ftol = tunable!("ENOMOTO_T_XO_VERTEX_FEAS_TOL", 1e-9f64, f64);
+        let ftol = tunable!("ENOMOTO_T_XO_VERTEX_FEAS_TOL", 1e-8f64, f64);
         let tl = ftol * (1.0 + std.lb[j].abs().min(1e12));
         let tu = ftol * (1.0 + std.ub[j].abs().min(1e12));
         if !xb[k].is_finite() {
