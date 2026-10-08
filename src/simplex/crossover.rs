@@ -468,22 +468,76 @@ struct Reduced {
     u: Vec<f64>,
 }
 
-/// Pock–Chambolle (α = 1) で行・列をそろえた問題 `(R A C, R b, C c, l/C, u/C)` と縮尺 `(dr, dc)`
-/// (`x = dc ∘ x'`、`y = dr ∘ y'`)。
+/// 内点法の前に行・列をそろえた問題 `(R A C, R b, C c, l/C, u/C)` と縮尺 `(dr, dc)` (`x = dc ∘ x'`、`y = dr ∘ y'`)。
+/// `mode` 1: Pock–Chambolle (α = 1、行・列の絶対値の和の平方根で割る)、2: 幾何平均 (行・列の最大と最小の非零の
+/// 絶対値の積の平方根で割る、`ENOMOTO_T_XO_IPM_GEO_PASSES` 回)、3: 幾何平均の後に平衡化 (行・列の最大絶対値を 1 に)、
+/// 4: 平衡化だけ。
 #[allow(clippy::type_complexity)]
-fn pock_chambolle_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64]) -> (FaerCsr, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
+fn ipm_prescaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], mode: u8) -> (FaerCsr, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
     let m = a.nrows();
     let n = a.ncols();
-    let mut rsum = vec![0.0f64; m];
-    let mut csum = vec![0.0f64; n];
-    for i in 0..m {
-        for (j, v) in csr_row_iter(a, i) {
-            rsum[i] += v.abs();
-            csum[j] += v.abs();
+    let mut rows: Vec<Vec<(usize, f64)>> = (0..m).map(|i| csr_row_iter(a, i).filter(|&(_, v)| v != 0.0).collect()).collect();
+    let mut dr = vec![1.0f64; m];
+    let mut dc = vec![1.0f64; n];
+    let fin = |v: f64| if v > 0.0 && v.is_finite() { v } else { 1.0 };
+    // 行の縮尺を掛けてから列の縮尺を求めて掛ける (行 → 列の順)。`row_f`/`col_f` は非零の絶対値の列から縮尺を返す。
+    let pass = |rows: &mut Vec<Vec<(usize, f64)>>, dr: &mut [f64], dc: &mut [f64], f: &dyn Fn(f64, f64, f64) -> f64| {
+        let mut st = vec![(0.0f64, f64::INFINITY, 0.0f64); m];
+        for (i, r) in rows.iter().enumerate() {
+            for &(_, v) in r {
+                let a = v.abs();
+                st[i] = (st[i].0.max(a), st[i].1.min(a), st[i].2 + a);
+            }
+        }
+        let rs: Vec<f64> = st.iter().map(|&(mx, mn, sm)| if mx > 0.0 { f(mx, mn, sm) } else { 1.0 }).collect();
+        for (i, r) in rows.iter_mut().enumerate() {
+            for e in r.iter_mut() {
+                e.1 *= rs[i];
+            }
+            dr[i] *= rs[i];
+        }
+        let mut st = vec![(0.0f64, f64::INFINITY, 0.0f64); n];
+        for r in rows.iter() {
+            for &(j, v) in r {
+                let a = v.abs();
+                st[j] = (st[j].0.max(a), st[j].1.min(a), st[j].2 + a);
+            }
+        }
+        let cs: Vec<f64> = st.iter().map(|&(mx, mn, sm)| if mx > 0.0 { f(mx, mn, sm) } else { 1.0 }).collect();
+        for r in rows.iter_mut() {
+            for e in r.iter_mut() {
+                e.1 *= cs[e.0];
+            }
+        }
+        for j in 0..n {
+            dc[j] *= cs[j];
+        }
+    };
+    match mode {
+        1 => {
+            // Pock–Chambolle は行・列とも元の行列の和で同時に求める。
+            let mut rsum = vec![0.0f64; m];
+            let mut csum = vec![0.0f64; n];
+            for (i, r) in rows.iter().enumerate() {
+                for &(j, v) in r {
+                    rsum[i] += v.abs();
+                    csum[j] += v.abs();
+                }
+            }
+            dr = rsum.iter().map(|&v| 1.0 / fin(v).sqrt()).collect();
+            dc = csum.iter().map(|&v| 1.0 / fin(v).sqrt()).collect();
+        }
+        _ => {
+            if mode == 2 || mode == 3 {
+                for _ in 0..tunable!("ENOMOTO_T_XO_IPM_GEO_PASSES", 4usize, usize) {
+                    pass(&mut rows, &mut dr, &mut dc, &|mx, mn, _| 1.0 / fin(mx * mn).sqrt());
+                }
+            }
+            if mode == 3 || mode == 4 {
+                pass(&mut rows, &mut dr, &mut dc, &|mx, _, _| 1.0 / fin(mx));
+            }
         }
     }
-    let dr: Vec<f64> = rsum.iter().map(|&v| if v > 0.0 { 1.0 / v.sqrt() } else { 1.0 }).collect();
-    let dc: Vec<f64> = csum.iter().map(|&v| if v > 0.0 { 1.0 / v.sqrt() } else { 1.0 }).collect();
     let rows: Vec<Vec<(usize, f64)>> = (0..m).map(|i| csr_row_iter(a, i).map(|(j, v)| (j, v * dr[i] * dc[j])).collect()).collect();
     let a_s = csr_from_rows(&rows, n);
     let b_s = (0..m).map(|i| b[i] * dr[i]).collect();
@@ -587,8 +641,9 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     let shared = crate::cancel::bound().filter(|sb| bound_gap > 0.0 && sb.n_total == std.n_total && sb.n_rows == std.n_rows);
     let fixed_obj: f64 = (0..std.n_total).filter(|&j| !(std.lb[j] < std.ub[j])).map(|j| std.c[j] * std.lb[j]).sum();
     let lb_fn = move || shared.as_ref().map_or(f64::NEG_INFINITY, |sb| sb.get() - fixed_obj);
-    let ipm_pc = tunable!("ENOMOTO_T_XO_IPM_PC", 0u8, u8) != 0;
-    let pc = (ipm_pc && xo.given_point.is_none()).then(|| pock_chambolle_scaled(&a_j, &b_j, &c_j, &l_j, &u_j));
+    // 試験用 (`ENOMOTO_T_XO_IPM_PC`): 内点法の前に行・列をそろえる ([`ipm_prescaled`] の `mode`、0 でしない)。
+    let ipm_pc = tunable!("ENOMOTO_T_XO_IPM_PC", 0u8, u8);
+    let pc = (ipm_pc != 0 && xo.given_point.is_none()).then(|| ipm_prescaled(&a_j, &b_j, &c_j, &l_j, &u_j, ipm_pc));
     let ipm = if let Some((gx, gy, _)) = xo.given_point {
         BoxIpmResult {
             status: Status::Optimal,
@@ -599,7 +654,7 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
             rel_res: (0.0, 0.0, 0.0),
         }
     } else if pdlp_mode == 0 && pc.is_some() {
-        // 試験用 (`ENOMOTO_T_XO_IPM_PC=1`): Pock–Chambolle で行・列をそろえた問題を内点法で解き、元の単位に戻す。
+        // 試験用 (`ENOMOTO_T_XO_IPM_PC`): 行・列をそろえた問題を内点法で解き、元の単位に戻す。
         let (a_s, b_s, c_s, l_s, u_s, dr, dc) = pc.as_ref().unwrap();
         let yc: Option<Vec<f64>> = xo.dual_center.map(|y| y.iter().zip(dr).map(|(v, d)| v / d).collect());
         let warm = WarmStart {
@@ -719,7 +774,7 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
         let (_, b_s, c_s, _, _, _, dc) = match &pc {
             Some(p) => p,
             None => {
-                owned = pock_chambolle_scaled(&a_j, &b_j, &c_j, &l_j, &u_j);
+                owned = ipm_prescaled(&a_j, &b_j, &c_j, &l_j, &u_j, 1);
                 &owned
             }
         };

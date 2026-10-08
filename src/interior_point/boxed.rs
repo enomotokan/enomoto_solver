@@ -531,6 +531,7 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
     let mut pushing = false;
     let mut push_it = 0usize;
     let mut push_stall = 0usize;
+    let mut push_prev = f64::NAN;
 
     for it in 0..max_iters {
         iters = it;
@@ -582,11 +583,15 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
             let worst_now = rel.0.max(rel.1).max(rel.2);
             push_it += 1;
             let bw = best.as_ref().map_or(f64::INFINITY, |b| b.0);
-            if worst_now.is_finite() && worst_now < 0.5 * bw {
+            // 停止基準に達した反復そのもの (push_it == 1) と、正則化を強めて同じ点で解き直した反復
+            // (点が動かず残差がまったく同じ) は数えない。
+            if push_it == 1 || worst_now == push_prev {
+            } else if worst_now.is_finite() && worst_now < 0.5 * bw {
                 push_stall = 0;
             } else {
                 push_stall += 1;
             }
+            push_prev = worst_now;
             if push_it > push_max || push_stall >= push_stall_max || !worst_now.is_finite() {
                 if debug {
                     eprintln!("IPM it={it} stop pushing (iters {push_it}, stall {push_stall}, worst {worst_now:.2e}, best {bw:.2e})");
