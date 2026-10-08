@@ -24,7 +24,7 @@ use faer::sparse::linalg::cholesky::{factorize_symbolic_cholesky, LdltRegulariza
 use faer::sparse::{SparseColMat, SymbolicSparseColMat, ValuesOrder};
 use faer::{Conj, Side};
 
-pub use crate::sparse::{FaerCsr, csr_row_iter, csr_mat_t_vec, csr_mat_t_vec_into, csr_mat_vec, csr_mat_vec_into};
+pub use crate::sparse::{FaerCsr, csr_row_iter, csr_mat_t_vec, csr_mat_t_vec_into, csr_mat_vec, csr_mat_vec_into, csr_transpose};
 use crate::params::interior_point::{FACTOR_PAR_NNZ, KKT_PARALLELISM, MAX_FACTOR_NNZ};
 
 /// 因子の非零数の上限 ([`MAX_FACTOR_NNZ`]、試験用 `ENOMOTO_T_IPM_MAX_FACTOR_NNZ`)。
@@ -32,11 +32,201 @@ fn max_factor_nnz() -> usize {
     tunable!("ENOMOTO_T_IPM_MAX_FACTOR_NNZ", MAX_FACTOR_NNZ, usize)
 }
 
+/// 正規方程式の記号分解の設定 (試験用)。`ENOMOTO_T_CHOL_RELAX`: 0 = faer の既定 (小さな supernode を、明示的な 0 を許して
+/// 併合する: 4 列以下は 100%、16 列以下は 80%、48 列以下は 10%、それ以上は 5% まで)、1 = 併合しない (因子は最も疎)、
+/// 2 = 控えめに併合 (4 列以下 50%、16 列以下 20%、それ以上 2%)。`ENOMOTO_T_CHOL_AMD_DENSE`: AMD が密な行とみなす
+/// 次数の倍率 (既定 10、次数 > 倍率 √n)。`ENOMOTO_T_CHOL_SUPERNODAL`: supernodal を選ぶ閾値 (既定 1)。
+fn chol_symbolic_params() -> faer::sparse::linalg::cholesky::CholeskySymbolicParams<'static> {
+    chol_symbolic_params_with(FORCE_SUPERNODAL.with(|c| c.get()))
+}
+
+thread_local! {
+    /// 記号分解で必ず supernodal にする (マルチフロンタル法の分解のため)。
+    static FORCE_SUPERNODAL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn chol_symbolic_params_with(force_supernodal: bool) -> faer::sparse::linalg::cholesky::CholeskySymbolicParams<'static> {
+    use faer::sparse::linalg::{amd::Control, cholesky::CholeskySymbolicParams, SupernodalThreshold, SymbolicSupernodalParams};
+    static RELAX_TIGHT: [(usize, f64); 3] = [(4, 0.5), (16, 0.2), (usize::MAX, 0.02)];
+    let relax: Option<&'static [(usize, f64)]> = match tunable!("ENOMOTO_T_CHOL_RELAX", 0u8, u8) {
+        1 => None,
+        2 => Some(&RELAX_TIGHT),
+        _ => SymbolicSupernodalParams::default().relax,
+    };
+    CholeskySymbolicParams {
+        amd_params: Control { dense: tunable!("ENOMOTO_T_CHOL_AMD_DENSE", 10.0f64, f64), ..Default::default() },
+        supernodal_flop_ratio_threshold: SupernodalThreshold(if force_supernodal { 0.0 } else { tunable!("ENOMOTO_T_CHOL_SUPERNODAL", 1.0f64, f64) }),
+        supernodal_params: SymbolicSupernodalParams { relax },
+    }
+}
+
+/// METIS の nested dissection による並べ替え (上三角の非零の形 `pat` から隣接グラフを作る)。`(perm, perm_inv)` を返す
+/// (`perm[新] = 旧`)。失敗したら `None`。
+fn metis_ordering(pat: &SymbolicSparseColMat<usize>) -> Option<(Vec<usize>, Vec<usize>)> {
+    let n = pat.nrows();
+    if n == 0 || n > i32::MAX as usize {
+        return None;
+    }
+    let cp = pat.col_ptrs();
+    let ri = pat.row_indices();
+    let mut deg = vec![0usize; n];
+    for c in 0..n {
+        for &r in &ri[cp[c]..cp[c + 1]] {
+            if r != c {
+                deg[r] += 1;
+                deg[c] += 1;
+            }
+        }
+    }
+    let mut xadj = vec![0i32; n + 1];
+    for v in 0..n {
+        xadj[v + 1] = xadj[v] + deg[v] as i32;
+    }
+    let mut fill: Vec<usize> = xadj[..n].iter().map(|&v| v as usize).collect();
+    let mut adj = vec![0i32; xadj[n] as usize];
+    for c in 0..n {
+        for &r in &ri[cp[c]..cp[c + 1]] {
+            if r != c {
+                adj[fill[r]] = c as i32;
+                fill[r] += 1;
+                adj[fill[c]] = r as i32;
+                fill[c] += 1;
+            }
+        }
+    }
+    let mut nv = n as i32;
+    let mut perm = vec![0i32; n];
+    let mut iperm = vec![0i32; n];
+    let mut options = [0i32; metis_sys::METIS_NOPTIONS as usize];
+    // SAFETY: 配列の長さは METIS の要求どおり (xadj は n+1、adjncy は xadj[n]、perm・iperm は n、options は METIS_NOPTIONS)。
+    unsafe {
+        metis_sys::METIS_SetDefaultOptions(options.as_mut_ptr());
+        let st = metis_sys::METIS_NodeND(
+            &mut nv,
+            xadj.as_mut_ptr(),
+            adj.as_mut_ptr(),
+            std::ptr::null_mut(),
+            options.as_mut_ptr(),
+            perm.as_mut_ptr(),
+            iperm.as_mut_ptr(),
+        );
+        if st != metis_sys::rstatus_et_METIS_OK as i32 {
+            return None;
+        }
+    }
+    Some((perm.into_iter().map(|v| v as usize).collect(), iperm.into_iter().map(|v| v as usize).collect()))
+}
+
+/// 正規方程式の記号分解。並べ替えは `ENOMOTO_T_CHOL_ORDER`: 0 = AMD (既定)、1 = METIS (nested dissection)、
+/// 2 = AMD の演算量が大きいときだけ METIS も試し、演算量の少ない方 (行数 `ENOMOTO_T_CHOL_ORDER_MIN_N` 以上のときだけ)。
+fn symbolic_with_ordering(pat: &SymbolicSparseColMat<usize>, dbg: bool) -> Option<SymbolicCholesky<usize>> {
+    let mode = tunable!("ENOMOTO_T_CHOL_ORDER", 0u8, u8);
+    let min_n = tunable!("ENOMOTO_T_CHOL_ORDER_MIN_N", 1000usize, usize);
+    let amd = || factorize_symbolic_cholesky::<usize>(pat.as_ref(), Side::Upper, SymmetricOrdering::Amd, chol_symbolic_params()).ok();
+    if mode == 0 || pat.nrows() < min_n {
+        return amd();
+    }
+    // 2: まず AMD。演算量の見積もりが `ENOMOTO_T_CHOL_ORDER_MIN_FLOPS` 未満なら METIS は試さない (並べ替えの時間が割に合わない)。
+    let a = if mode == 2 { amd() } else { None };
+    let a_flops = a.as_ref().map_or(f64::INFINITY, chol_flops);
+    if mode == 2 && a_flops < tunable!("ENOMOTO_T_CHOL_ORDER_MIN_FLOPS", 1e8f64, f64) {
+        return a;
+    }
+    let t0 = std::time::Instant::now();
+    let nd = metis_ordering(pat).and_then(|(perm, perm_inv)| {
+        let p = faer::perm::PermRef::<usize>::new_checked(&perm, &perm_inv, pat.nrows());
+        factorize_symbolic_cholesky::<usize>(pat.as_ref(), Side::Upper, SymmetricOrdering::Custom(p), chol_symbolic_params()).ok()
+    });
+    let t_nd = t0.elapsed().as_secs_f64();
+    if mode == 1 {
+        if dbg {
+            eprintln!("NormalKkt: METIS nnz(L)={:?} in {t_nd:.2}s", nd.as_ref().map(|c| c.len_values()));
+        }
+        return nd.or_else(amd);
+    }
+    let nd_flops = nd.as_ref().map_or(f64::INFINITY, chol_flops);
+    if dbg {
+        eprintln!(
+            "NormalKkt: AMD nnz(L)={:?} flops={a_flops:.3e}, METIS nnz(L)={:?} flops={nd_flops:.3e} (METIS {t_nd:.2}s)",
+            a.as_ref().map(|c| c.len_values()),
+            nd.as_ref().map(|c| c.len_values())
+        );
+    }
+    // 演算量の少ない方 (METIS は 0.8 倍未満のときだけ)。
+    match (a, nd) {
+        (Some(a), Some(nd)) => Some(if nd_flops < 0.8 * a_flops { nd } else { a }),
+        (a, nd) => a.or(nd),
+    }
+}
+
+/// 記号分解から数値分解の演算量を見積もる (各列の非零の数の 2 乗の和)。
+fn chol_flops(c: &SymbolicCholesky<usize>) -> f64 {
+    use faer::sparse::linalg::cholesky::SymbolicCholeskyRaw;
+    match c.raw() {
+        SymbolicCholeskyRaw::Simplicial(s) => {
+            let cp = s.col_ptrs();
+            (0..s.ncols()).map(|j| ((cp[j + 1] - cp[j]) as f64).powi(2)).sum()
+        }
+        SymbolicCholeskyRaw::Supernodal(s) => {
+            let mut f = 0.0;
+            for k in 0..s.n_supernodes() {
+                let nc = s.supernode_end()[k] - s.supernode_begin()[k];
+                let r = s.supernode(k).pattern().len();
+                for j in 0..nc {
+                    f += ((nc - j + r) as f64).powi(2);
+                }
+            }
+            f
+        }
+    }
+}
+
+thread_local! {
+    /// 計測用: 正規方程式の組み立てと数値分解の累計時間 (秒)。[`take_factor_prof`] で取り出して 0 に戻す。
+    static FACTOR_PROF: std::cell::Cell<(f64, f64)> = const { std::cell::Cell::new((0.0, 0.0)) };
+}
+
+/// 正規方程式の組み立てと数値分解の累計時間 (秒) を取り出して 0 に戻す (計測用)。
+pub fn take_factor_prof() -> (f64, f64) {
+    FACTOR_PROF.with(|c| c.replace((0.0, 0.0)))
+}
+
+/// `Aᵀ y` を `out` に書く。試験用 `ENOMOTO_T_IPM_AT_PAR=1` で `Aᵀ` の行圧縮 `at` を使い行ごとに並列に計算する (既定は従来の
+/// `A` の行圧縮のまま逐次に足し込む。比較用)。
+pub fn at_mul(a: &FaerCsr, at: &FaerCsr, y: &[f64], out: &mut [f64]) {
+    if tunable!("ENOMOTO_T_IPM_AT_PAR", 0u8, u8) != 0 {
+        csr_mat_vec_into(at, y, out);
+    } else {
+        csr_mat_t_vec_into(a, y, out);
+    }
+}
+
+thread_local! {
+    /// このスレッドで分解を並列にしない ([`with_inner_seq`])。
+    static INNER_SEQ: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// `seq` なら `f` の間、このスレッドの分解 (faer・マルチフロンタル法) を並列にしない (独立な成分を外側で並列に解くとき)。
+pub fn with_inner_seq<R>(seq: bool, f: impl FnOnce() -> R) -> R {
+    let prev = INNER_SEQ.with(|c| c.replace(seq));
+    let r = f();
+    INNER_SEQ.with(|c| c.set(prev));
+    r
+}
+
+/// このスレッドで分解を並列にしないか。
+pub fn inner_seq() -> bool {
+    INNER_SEQ.with(|c| c.get())
+}
+
 /// 数値分解に使う並列度。因子の非零数 `nnz_l` が `ENOMOTO_T_FACTOR_PAR_NNZ` (既定 [`FACTOR_PAR_NNZ`]、0 で使わない) 以上なら
 /// 並列、それ未満は逐次 (Fable の調査と Netlib + Kennington の比較で、小さな疎 Cholesky では faer の並列分解の分割の手間が
 /// 計算を上回った。一方 qap15 (nnz(L) 1,770 万) では 1 回の分解が 1.3 秒かかり、逐次では内点法の 9 割を占める)。
 /// 試験用 `ENOMOTO_T_FACTOR_SEQ=0` で常に並列。作業領域の見積もり (`_req`) にも同じ値を使う。
 fn factor_par(nnz_l: usize) -> faer::Parallelism<'static> {
+    if inner_seq() {
+        return faer::Parallelism::None;
+    }
     let par_nnz = tunable!("ENOMOTO_T_FACTOR_PAR_NNZ", FACTOR_PAR_NNZ, usize);
     if tunable!("ENOMOTO_T_FACTOR_SEQ", 1u8, u8) == 0 || (par_nnz > 0 && nnz_l >= par_nnz) {
         KKT_PARALLELISM
@@ -269,6 +459,9 @@ pub struct AugKkt {
     signs: Vec<i8>,
     /// 直近の分解で置き換えたピボットの数。
     pub n_regularized: usize,
+    /// 自前のマルチフロンタル法 (LDLᵀ) で分解するとき (`ENOMOTO_T_AUG_BACKEND=2`、faer が supernodal を選び演算量の見積もりが
+    /// `ENOMOTO_T_MF_MIN_FLOPS` 以上のとき)。
+    mf: Option<super::multifrontal::Multifrontal>,
 }
 
 /// 反復改良を打ち切る残差 (右辺の無限大ノルム (1 以上) に対する相対値)。
@@ -325,8 +518,22 @@ impl AugKkt {
             }
             return None;
         }
-        let l_values = vec![0.0f64; chol_symbolic.len_values()];
-        let numeric_buf = GlobalPodBuffer::new(chol_symbolic.factorize_numeric_ldlt_req::<f64>(true, factor_par(chol_symbolic.len_values())).unwrap());
+        let signs: Vec<i8> = (0..dim).map(|i| if i < n { 1i8 } else { -1i8 }).collect();
+        // 試験用 `ENOMOTO_T_AUG_BACKEND=2`: 自前のマルチフロンタル法 (LDLᵀ) で分解する。
+        let mf = if tunable!("ENOMOTO_T_AUG_BACKEND", 0u8, u8) == 2 && chol_flops(&chol_symbolic) >= tunable!("ENOMOTO_T_MF_MIN_FLOPS", 2e7f64, f64) {
+            super::multifrontal::Multifrontal::new_ldlt(&symbolic_base, &chol_symbolic, &signs)
+        } else {
+            None
+        };
+        if env_str!("ENOMOTO_DEBUG_IPM").is_some() {
+            eprintln!("AugKkt: backend={} nnz(L)={} flops={:.2e}", if mf.is_some() { "multifrontal" } else { "faer" }, chol_symbolic.len_values(), chol_flops(&chol_symbolic));
+        }
+        let l_values = if mf.is_some() { Vec::new() } else { vec![0.0f64; chol_symbolic.len_values()] };
+        let numeric_buf = if mf.is_some() {
+            GlobalPodBuffer::new(faer::dyn_stack::StackReq::empty())
+        } else {
+            GlobalPodBuffer::new(chol_symbolic.factorize_numeric_ldlt_req::<f64>(true, factor_par(chol_symbolic.len_values())).unwrap())
+        };
         let solve_buf = GlobalPodBuffer::new(chol_symbolic.solve_in_place_req::<f64>(1).unwrap());
         Some(AugKkt {
             n,
@@ -343,8 +550,9 @@ impl AugKkt {
             top: vec![1.0; n],
             mid: vec![-1.0; p],
             factored: false,
-            signs: (0..dim).map(|i| if i < n { 1i8 } else { -1i8 }).collect(),
+            signs,
             n_regularized: 0,
+            mf,
         })
     }
 
@@ -373,6 +581,18 @@ impl AugKkt {
             dynamic_regularization_delta: tunable!("ENOMOTO_T_KKT_PIVOT_DELTA", PIVOT_DELTA, f64),
             dynamic_regularization_epsilon: tunable!("ENOMOTO_T_KKT_PIVOT_EPS", PIVOT_EPS, f64),
         };
+        if let Some(mf) = self.mf.as_mut() {
+            let ok = mf.factor(a_upper.values(), reg.dynamic_regularization_delta, reg.dynamic_regularization_epsilon);
+            self.n_regularized = super::multifrontal::DYNREG.swap(0, std::sync::atomic::Ordering::Relaxed);
+            if env_str!("ENOMOTO_DEBUG_REFINE").is_some() {
+                let vmax = a_upper.values().iter().fold(0.0f64, |m, v| m.max(v.abs()));
+                eprintln!("FACTOR aug mf ok={ok} dynreg={} max|value|={vmax:.2e} top[min,max]=[{:.2e},{:.2e}] mid[min,max]=[{:.2e},{:.2e}]", self.n_regularized,
+                    top.iter().cloned().fold(f64::INFINITY, f64::min), top.iter().cloned().fold(0.0, f64::max),
+                    mid.iter().cloned().fold(f64::INFINITY, f64::min), mid.iter().cloned().fold(f64::NEG_INFINITY, f64::max));
+            }
+            self.factored = true;
+            return;
+        }
         let _ = self.chol_symbolic.factorize_numeric_ldlt::<f64>(
             &mut self.l_values,
             a_upper.as_ref(),
@@ -387,6 +607,10 @@ impl AugKkt {
     /// 直近の分解で `K x = rhs` を解き、`rhs` を解で上書きする。
     pub fn solve_in_place(&mut self, rhs: &mut [f64]) {
         assert!(self.factored, "AugKkt::solve_in_place before factor");
+        if let Some(mf) = self.mf.as_ref() {
+            mf.solve_in_place(rhs);
+            return;
+        }
         let dim = self.dim();
         let ldlt = faer::sparse::linalg::cholesky::LdltRef::<usize, f64>::new(&self.chol_symbolic, &self.l_values);
         ldlt.solve_in_place_with_conj(Conj::No, from_column_major_slice_mut(rhs, dim, 1), KKT_PARALLELISM, PodStack::new(&mut self.solve_buf));
@@ -485,6 +709,12 @@ pub struct NormalKkt {
     tmp_n: Vec<f64>,
     tmp_p: Vec<f64>,
     factored: bool,
+    /// 対角スケーリングの係数 `S = diag(M)^{-1/2}` (使わないなら空)。
+    dscale: Vec<f64>,
+    /// MKL PARDISO で分解するとき (試験用 `ENOMOTO_T_CHOL_BACKEND=1`、MKL を読み込めたとき)。
+    pardiso: Option<super::pardiso::Pardiso>,
+    /// 自前のマルチフロンタル法で分解するとき (既定の `ENOMOTO_T_CHOL_BACKEND=2`、演算量の見積もりが下限以上のとき)。
+    mf: Option<super::multifrontal::Multifrontal>,
 }
 
 /// [`NormalKkt`] を使う三つ組の数の上限 (これを超えるなら拡大系を使う)。
@@ -632,16 +862,37 @@ impl NormalKkt {
                 t0.elapsed().as_secs_f64()
             );
         }
-        let chol_symbolic =
-            factorize_symbolic_cholesky::<usize>(symbolic_base.as_ref(), Side::Upper, SymmetricOrdering::Amd, Default::default()).ok()?;
+        // 0: faer、1: MKL PARDISO (試験用)、2: 自前のマルチフロンタル法 (既定、第 61 回の比較で決めた)。
+        let backend = tunable!("ENOMOTO_T_CHOL_BACKEND", 2u8, u8);
+        let chol_symbolic = symbolic_with_ordering(&symbolic_base, dbg)?;
+        // 2: faer が supernodal を選び、演算量の見積もりが `ENOMOTO_T_MF_MIN_FLOPS` 以上なら自前のマルチフロンタル法で
+        // 分解する (小さな・simplicial 向きの因子は faer のまま: osa-60 は因子が 3.2 万で、supernodal にすると遅い)。
+        let mf = if backend == 2 && chol_flops(&chol_symbolic) >= tunable!("ENOMOTO_T_MF_MIN_FLOPS", 2e7f64, f64) {
+            super::multifrontal::Multifrontal::new(&symbolic_base, &chol_symbolic)
+        } else {
+            None
+        };
         if dbg {
             eprintln!("NormalKkt: symbolic (AMD) nnz(L)={} at {:.2}s", chol_symbolic.len_values(), t0.elapsed().as_secs_f64());
         }
         if chol_symbolic.len_values() > max_factor_nnz() {
             return None;
         }
-        let l_values = vec![0.0f64; chol_symbolic.len_values()];
-        let numeric_buf = GlobalPodBuffer::new(chol_symbolic.factorize_numeric_llt_req::<f64>(factor_par(chol_symbolic.len_values())).ok()?);
+        // 試験用 (`ENOMOTO_T_CHOL_BACKEND=1`): MKL PARDISO で分解する (読み込めなければ faer)。faer の因子の配列は作らない。
+        let pardiso = if backend == 1 {
+            super::pardiso::Pardiso::new(p, symbolic_base.col_ptrs(), symbolic_base.row_indices())
+        } else {
+            None
+        };
+        if dbg {
+            eprintln!("NormalKkt: backend={} flops={:.2e}", if pardiso.is_some() { "pardiso" } else if mf.is_some() { "multifrontal" } else { "faer" }, chol_flops(&chol_symbolic));
+        }
+        let l_values = if pardiso.is_some() || mf.is_some() { Vec::new() } else { vec![0.0f64; chol_symbolic.len_values()] };
+        let numeric_buf = if pardiso.is_some() || mf.is_some() {
+            GlobalPodBuffer::new(faer::dyn_stack::StackReq::empty())
+        } else {
+            GlobalPodBuffer::new(chol_symbolic.factorize_numeric_llt_req::<f64>(factor_par(chol_symbolic.len_values())).ok()?)
+        };
         let solve_buf = GlobalPodBuffer::new(chol_symbolic.solve_in_place_req::<f64>(1).ok()?);
         let nnz = symbolic_base.compute_nnz();
         let k = dense_cols.len();
@@ -667,6 +918,9 @@ impl NormalKkt {
             tmp_n: vec![0.0; n],
             tmp_p: vec![0.0; p],
             factored: false,
+            dscale: Vec::new(),
+            pardiso,
+            mf,
         })
     }
 
@@ -677,14 +931,33 @@ impl NormalKkt {
 
     /// `M_s` (疎な列だけの正規方程式) の Cholesky で `rhs` を上書きして解く。
     fn solve_ms(&mut self, rhs: &mut [f64]) {
-        let llt = faer::sparse::linalg::cholesky::LltRef::<usize, f64>::new(&self.chol_symbolic, &self.l_values);
-        llt.solve_in_place_with_conj(Conj::No, from_column_major_slice_mut(rhs, self.p, 1), KKT_PARALLELISM, PodStack::new(&mut self.solve_buf));
+        // 対角スケーリングして分解したなら M^{-1} r = S (S M S)^{-1} S r。
+        let scaled = !self.dscale.is_empty();
+        if scaled {
+            for (v, s) in rhs.iter_mut().zip(&self.dscale) {
+                *v *= s;
+            }
+        }
+        if let Some(pd) = self.pardiso.as_mut() {
+            pd.solve_in_place(rhs);
+        } else if let Some(mf) = self.mf.as_ref() {
+            mf.solve_in_place(rhs);
+        } else {
+            let llt = faer::sparse::linalg::cholesky::LltRef::<usize, f64>::new(&self.chol_symbolic, &self.l_values);
+            llt.solve_in_place_with_conj(Conj::No, from_column_major_slice_mut(rhs, self.p, 1), KKT_PARALLELISM, PodStack::new(&mut self.solve_buf));
+        }
+        if scaled {
+            for (v, s) in rhs.iter_mut().zip(&self.dscale) {
+                *v *= s;
+            }
+        }
     }
 
     /// `d` (上段対角、正) と `δ` で分解する。分解に失敗すれば `false`。
     pub fn factor(&mut self, d: &[f64], delta: f64) -> bool {
         use rayon::prelude::*;
         let (n, p) = (self.n, self.p);
+        let t_asm = std::time::Instant::now();
         self.dinv.par_iter_mut().zip(d.par_iter()).for_each(|(o, &v)| *o = 1.0 / v);
         // 疎な列の組の値を CSC の値の配列に直接足し込む。
         self.values.fill(0.0);
@@ -705,16 +978,62 @@ impl NormalKkt {
         for &q in &self.diag_dest {
             vals[q as usize] += delta;
         }
+        // 試験用 (`ENOMOTO_T_NORMAL_DIAG_SCALE=1`): 対角が 1 になるよう S M S (S = diag(M)^{-1/2}) にしてから分解する
+        // (動的正則化の閾値は絶対値なので、終盤に対角の幅が広がると、どのピボットを置き換えるかが行の尺度に左右される)。
+        if tunable!("ENOMOTO_T_NORMAL_DIAG_SCALE", 0u8, u8) != 0 {
+            let p_ = self.p;
+            self.dscale.resize(p_, 1.0);
+            for i in 0..p_ {
+                let dg = vals[self.diag_dest[i] as usize];
+                self.dscale[i] = if dg > 0.0 && dg.is_finite() { 1.0 / dg.sqrt() } else { 1.0 };
+            }
+            let cp = self.symbolic_base.col_ptrs();
+            let ri = self.symbolic_base.row_indices();
+            for c in 0..p_ {
+                let sc = self.dscale[c];
+                for k in cp[c]..cp[c + 1] {
+                    vals[k] *= sc * self.dscale[ri[k]];
+                }
+            }
+        } else {
+            self.dscale.clear();
+        }
+        let t_num = std::time::Instant::now();
+        FACTOR_PROF.with(|c| {
+            let (a, n_) = c.get();
+            c.set((a + t_asm.elapsed().as_secs_f64(), n_));
+        });
         let m = faer::sparse::SparseColMatRef::<usize, f64>::new(self.symbolic_base.as_ref(), &self.values);
         let reg = faer::sparse::linalg::cholesky::LltRegularization {
             dynamic_regularization_delta: tunable!("ENOMOTO_T_NORMAL_PIVOT_DELTA", 1e-8, f64),
             dynamic_regularization_epsilon: tunable!("ENOMOTO_T_NORMAL_PIVOT_EPS", 1e-14, f64),
         };
-        let ok = self
-            .chol_symbolic
-            .factorize_numeric_llt::<f64>(&mut self.l_values, m, Side::Upper, reg, factor_par(self.chol_symbolic.len_values()), PodStack::new(&mut self.numeric_buf))
-            .is_ok();
+        let ok = if let Some(pd) = self.pardiso.as_mut() {
+            let _ = (m, reg);
+            pd.factor(&self.values)
+        } else if let Some(mf) = self.mf.as_mut() {
+            let _ = m;
+            let ok = mf.factor(&self.values, reg.dynamic_regularization_delta, reg.dynamic_regularization_epsilon);
+            if env_str!("ENOMOTO_DEBUG_REFINE").is_some() {
+                eprintln!("FACTOR mf ok={ok} dynreg={}", super::multifrontal::DYNREG.swap(0, std::sync::atomic::Ordering::Relaxed));
+            }
+            ok
+        } else {
+            let r = self.chol_symbolic
+                .factorize_numeric_llt::<f64>(&mut self.l_values, m, Side::Upper, reg, factor_par(self.chol_symbolic.len_values()), PodStack::new(&mut self.numeric_buf));
+            if env_str!("ENOMOTO_DEBUG_REFINE").is_some() {
+                match &r {
+                    Ok(_) => eprintln!("FACTOR faer ok"),
+                    Err(e) => eprintln!("FACTOR faer err minor={} nan_in_values={}", e.non_positive_definite_minor, self.values.iter().any(|v| !v.is_finite())),
+                }
+            }
+            r.is_ok()
+        };
         self.factored = ok;
+        FACTOR_PROF.with(|c| {
+            let (a, n_) = c.get();
+            c.set((a, n_ + t_num.elapsed().as_secs_f64()));
+        });
         if !ok {
             return false;
         }
@@ -780,7 +1099,7 @@ impl NormalKkt {
     }
 
     /// `[dx; dy]` を `rhs = [r_x; r_y]` に上書きする (`δ` は直近の分解のもの)。
-    pub fn solve_in_place(&mut self, a: &FaerCsr, rhs: &mut [f64]) {
+    pub fn solve_in_place(&mut self, a: &FaerCsr, at: &FaerCsr, rhs: &mut [f64]) {
         use rayon::prelude::*;
         assert!(self.factored, "NormalKkt::solve_in_place before factor");
         let (n, p) = (self.n, self.p);
@@ -823,7 +1142,7 @@ impl NormalKkt {
             }
         }
         // dx = D^{-1} (r_x - A^T dy)
-        csr_mat_t_vec_into(a, ry, &mut self.tmp_n);
+        at_mul(a, at, ry, &mut self.tmp_n);
         rx.par_iter_mut().zip(self.tmp_n.par_iter()).zip(self.dinv.par_iter()).for_each(|((x, &t), &di)| *x = (*x - t) * di);
     }
 }
@@ -856,6 +1175,11 @@ impl IpmKkt {
         matches!(self, IpmKkt::Normal(_))
     }
 
+    /// 正規方程式で、稠密な列を外して Woodbury で扱っているか。
+    pub fn has_dense_cols(&self) -> bool {
+        matches!(self, IpmKkt::Normal(k) if !k.dense_cols.is_empty())
+    }
+
     pub fn factor_nnz(&self) -> usize {
         match self {
             IpmKkt::Normal(k) => k.factor_nnz(),
@@ -876,7 +1200,8 @@ impl IpmKkt {
     }
 
     /// 反復改良付きで解く (`top`, `delta` は直近の分解のもの)。
-    pub fn solve_refined(&mut self, a: &FaerCsr, top: &[f64], delta: f64, rhs: &mut [f64], refine: usize, work: &mut Vec<f64>) {
+    /// 戻り値は最後の (改良後の) 相対残差の目安 `‖b - K x‖∞ / max(1, ‖b‖∞)`。
+    pub fn solve_refined(&mut self, a: &FaerCsr, at: &FaerCsr, top: &[f64], delta: f64, rhs: &mut [f64], refine: usize, work: &mut Vec<f64>) -> f64 {
         let n = top.len();
         let dim = rhs.len();
         work.resize(3 * dim, 0.0);
@@ -884,14 +1209,16 @@ impl IpmKkt {
         let (r, kx) = rest.split_at_mut(dim);
         b.copy_from_slice(rhs);
         let bnorm = b.iter().fold(1.0f64, |m, v| m.max(v.abs()));
-        self.solve_plain(a, rhs);
+        self.solve_plain(a, at, rhs);
         let mut prev = f64::INFINITY;
+        let mut last_rel = 0.0f64;
+        let refine = tunable!("ENOMOTO_T_IPM_REFINE_STEPS", refine, usize);
         for _ in 0..refine {
             // kx = K rhs
             {
                 let (vx, vy) = rhs.split_at(n);
                 let (ox, oy) = kx.split_at_mut(n);
-                csr_mat_t_vec_into(a, vy, ox);
+                at_mul(a, at, vy, ox);
                 for j in 0..n {
                     ox[j] += top[j] * vx[j];
                 }
@@ -906,21 +1233,125 @@ impl IpmKkt {
                 nrm = nrm.max(r[i].abs());
             }
             // 残差が十分小さければ追加の求解をしない (以前は 1 回目に必ず解き直していた)。
-            if !(nrm < prev * 0.5) || nrm <= REFINE_TOL * bnorm {
+            // 試験用 `ENOMOTO_T_IPM_REFINE_RATIO`: 前回からこの倍率以下に減らなければやめる (既定 0.5)。
+            last_rel = nrm / bnorm;
+            if !(nrm < prev * tunable!("ENOMOTO_T_IPM_REFINE_RATIO", 0.5f64, f64)) || nrm <= REFINE_TOL * bnorm {
                 break;
             }
             prev = nrm;
-            self.solve_plain(a, r);
+            self.solve_plain(a, at, r);
             for i in 0..dim {
                 rhs[i] += r[i];
             }
         }
+        if env_str!("ENOMOTO_DEBUG_REFINE").is_some() {
+            eprintln!("REFINE rel_residual={last_rel:.2e}");
+        }
+        last_rel
     }
 
-    fn solve_plain(&mut self, a: &FaerCsr, rhs: &mut [f64]) {
+    fn solve_plain(&mut self, a: &FaerCsr, at: &FaerCsr, rhs: &mut [f64]) {
         match self {
-            IpmKkt::Normal(k) => k.solve_in_place(a, rhs),
+            IpmKkt::Normal(k) => k.solve_in_place(a, at, rhs),
             IpmKkt::Aug(k) => k.solve_in_place(rhs),
+        }
+    }
+}
+
+#[cfg(test)]
+mod chol_bench {
+    use faer::dyn_stack::{GlobalPodBuffer, PodStack};
+    use faer::sparse::linalg::cholesky::LltRegularization;
+    use faer::sparse::SymbolicSparseColMat;
+    use faer::{Parallelism, Side};
+
+    /// 計測用 (`cargo test --release chol_bench -- --ignored --nocapture`): `ENOMOTO_CHOL_BENCH_FILE` の対称行列
+    /// (Matrix Market、下三角) を faer の疎 Cholesky (AMD、既定の設定) で分解し、記号分解と数値分解の時間を出す
+    /// (他の実装との比較用)。
+    #[test]
+    #[ignore]
+    fn chol_bench() {
+        let Ok(path) = std::env::var("ENOMOTO_CHOL_BENCH_FILE") else { return };
+        let text = std::fs::read_to_string(&path).unwrap();
+        let mut lines = text.lines().filter(|l| !l.starts_with('%'));
+        let hdr: Vec<usize> = lines.next().unwrap().split_whitespace().map(|v| v.parse().unwrap()).collect();
+        let n = hdr[0];
+        // 上三角 (列優先) にする: 下三角の (i, j) (i >= j) を (j, i) に。
+        let mut cols: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
+        for l in lines {
+            let mut it = l.split_whitespace();
+            let i: usize = it.next().unwrap().parse::<usize>().unwrap() - 1;
+            let j: usize = it.next().unwrap().parse::<usize>().unwrap() - 1;
+            let v: f64 = it.next().unwrap().parse().unwrap();
+            let (r, c) = if i <= j { (i, j) } else { (j, i) };
+            cols[c].push((r, v));
+        }
+        let mut ptr = vec![0usize; n + 1];
+        let mut idx = Vec::new();
+        let mut val = Vec::new();
+        for c in 0..n {
+            cols[c].sort_by_key(|e| e.0);
+            for &(r, v) in &cols[c] {
+                idx.push(r);
+                val.push(v);
+            }
+            ptr[c + 1] = idx.len();
+        }
+        let sym = SymbolicSparseColMat::<usize>::new_checked(n, n, ptr, None, idx);
+        let t0 = std::time::Instant::now();
+        let mf_mode = std::env::var("ENOMOTO_T_CHOL_BACKEND").map_or(false, |v| v == "2");
+        super::FORCE_SUPERNODAL.with(|c| c.set(mf_mode));
+        let chol = super::symbolic_with_ordering(&sym, false).unwrap();
+        super::FORCE_SUPERNODAL.with(|c| c.set(false));
+        if mf_mode {
+            let t0 = std::time::Instant::now();
+            let mut mf = super::super::multifrontal::Multifrontal::new(&sym, &chol).unwrap();
+            let t_sym = t0.elapsed().as_secs_f64();
+            let mut best = f64::INFINITY;
+            for _ in 0..3 {
+                let t = std::time::Instant::now();
+                assert!(mf.factor(&val, 1e-8, 1e-14));
+                best = best.min(t.elapsed().as_secs_f64());
+            }
+            // 残差: M x = 1 (上三角の列圧縮から対称に掛ける)。
+            let b = vec![1.0f64; n];
+            let mut x = b.clone();
+            mf.solve_in_place(&mut x);
+            let mut mx = vec![0.0f64; n];
+            let (cp, ri) = (sym.col_ptrs(), sym.row_indices());
+            for c in 0..n {
+                for k in cp[c]..cp[c + 1] {
+                    let r = ri[k];
+                    mx[r] += val[k] * x[c];
+                    if r != c {
+                        mx[c] += val[k] * x[r];
+                    }
+                }
+            }
+            let res = mx.iter().zip(&b).map(|(a, b)| (a - b).abs()).fold(0.0f64, f64::max);
+            let _ = super::super::multifrontal::take_prof();
+            let t = std::time::Instant::now();
+            mf.factor(&val, 1e-8, 1e-14);
+            println!("one={:.3}s prof(asm+ea, chol, trsm, syrk)={:?}", t.elapsed().as_secs_f64(), super::super::multifrontal::take_prof());
+            println!("CHOLBENCH multifrontal threads={} n={n} ns={} nnz(L)={} setup={t_sym:.3}s numeric={best:.3}s resid={res:.2e}", rayon::current_num_threads(), mf.n_supernodes(), mf.len_values());
+            return;
+        }
+        let t_sym = t0.elapsed().as_secs_f64();
+        let mat = faer::sparse::SparseColMatRef::<usize, f64>::new(sym.as_ref(), &val);
+        for (name, par) in [("seq", Parallelism::None), ("par", Parallelism::Rayon(0))] {
+            let mut l_values = vec![0.0f64; chol.len_values()];
+            let mut buf = GlobalPodBuffer::new(chol.factorize_numeric_llt_req::<f64>(par).unwrap());
+            let mut best = f64::INFINITY;
+            for _ in 0..3 {
+                let t = std::time::Instant::now();
+                chol.factorize_numeric_llt::<f64>(&mut l_values, mat, Side::Upper, LltRegularization::default(), par, PodStack::new(&mut buf)).unwrap();
+                best = best.min(t.elapsed().as_secs_f64());
+            }
+            let kind = match chol.raw() {
+                faer::sparse::linalg::cholesky::SymbolicCholeskyRaw::Supernodal(_) => "supernodal",
+                _ => "simplicial",
+            };
+            println!("CHOLBENCH faer {name} n={n} nnz(L)={} kind={kind} symbolic={t_sym:.3}s numeric={best:.3}s", chol.len_values());
         }
     }
 }

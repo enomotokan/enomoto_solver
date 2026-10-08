@@ -101,7 +101,9 @@ pub(crate) mod simplex {
 
     /// `RootSolver::Auto` で、前処理後の行数がこれ以上なら傾き・切片双対二段解法と内点法 + クロスオーバーを
     /// 同時に解く (`simplex::race`)。未満なら二段解法だけ。`ENOMOTO_T_RACE_MIN_ROWS` で上書きできる。
-    pub(crate) const RACE_MIN_ROWS: usize = 5000;
+    /// 第 47 回の比較で 5000 → 1000 (109 問の幾何平均 0.932 倍、合計 29.6 → 20.9 秒。200 や 0 では小さな問題で
+    /// スレッドの手間が目立ち幾何平均が 1.07〜1.12 倍)。
+    pub(crate) const RACE_MIN_ROWS: usize = 1000;
 
     /// 同時実行で二段解法に割り当てるスレッド数 (残りを内点法 + クロスオーバーに)。二段解法の反復の本体は逐次。
     pub(crate) const RACE_SIMPLEX_THREADS: usize = 1;

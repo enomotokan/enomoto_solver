@@ -42,9 +42,9 @@ use super::basis_kernel::{factorize_basis, ft_max_updates, BasisKernel};
 use super::slope_intercept_dual::polish_with_true_bounds;
 use super::{perturb_random, sparse_lu, NbStatus, SimplexResult, StdForm};
 use crate::interior_point::boxed::{solve_box_lp, solve_box_lp_warm, BoxIpmResult, WarmStart};
-use crate::interior_point::pdlp::{solve_pdlp, PdlpOptions};
+use crate::interior_point::pdlp::{solve_pdlp, PdlpOptions, PdlpResult};
 use crate::interior_point::kkt::AugKkt;
-use crate::sparse::{csr_from_rows, sparse_dot_dense};
+use crate::sparse::{csr_from_rows, csr_row_iter, sparse_dot_dense, FaerCsr};
 use crate::types::Status;
 use std::time::Instant;
 
@@ -477,6 +477,113 @@ struct Reduced {
     u: Vec<f64>,
 }
 
+/// 内点法の前に行・列をそろえた問題 `(R A C, R b, C c, l/C, u/C)` と縮尺 `(dr, dc)` (`x = dc ∘ x'`、`y = dr ∘ y'`)。
+/// `mode` 1: Pock–Chambolle (α = 1、行・列の絶対値の和の平方根で割る)、2: 幾何平均 (行・列の最大と最小の非零の
+/// 絶対値の積の平方根で割る、`ENOMOTO_T_XO_IPM_GEO_PASSES` 回)、3: 幾何平均の後に平衡化 (行・列の最大絶対値を 1 に)、
+/// 4: 平衡化だけ、5: Pock–Chambolle の行だけ、6: Pock–Chambolle の列だけ、7: 変数の値の大きさの見積もりで列を割り、行の最大を 1 に。
+#[allow(clippy::type_complexity)]
+fn ipm_prescaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], mode: u8) -> (FaerCsr, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
+    let m = a.nrows();
+    let n = a.ncols();
+    let mut rows: Vec<Vec<(usize, f64)>> = (0..m).map(|i| csr_row_iter(a, i).filter(|&(_, v)| v != 0.0).collect()).collect();
+    let mut dr = vec![1.0f64; m];
+    let mut dc = vec![1.0f64; n];
+    let fin = |v: f64| if v > 0.0 && v.is_finite() { v } else { 1.0 };
+    // 行の縮尺を掛けてから列の縮尺を求めて掛ける (行 → 列の順)。`row_f`/`col_f` は非零の絶対値の列から縮尺を返す。
+    let pass = |rows: &mut Vec<Vec<(usize, f64)>>, dr: &mut [f64], dc: &mut [f64], f: &dyn Fn(f64, f64, f64) -> f64| {
+        let mut st = vec![(0.0f64, f64::INFINITY, 0.0f64); m];
+        for (i, r) in rows.iter().enumerate() {
+            for &(_, v) in r {
+                let a = v.abs();
+                st[i] = (st[i].0.max(a), st[i].1.min(a), st[i].2 + a);
+            }
+        }
+        let rs: Vec<f64> = st.iter().map(|&(mx, mn, sm)| if mx > 0.0 { f(mx, mn, sm) } else { 1.0 }).collect();
+        for (i, r) in rows.iter_mut().enumerate() {
+            for e in r.iter_mut() {
+                e.1 *= rs[i];
+            }
+            dr[i] *= rs[i];
+        }
+        let mut st = vec![(0.0f64, f64::INFINITY, 0.0f64); n];
+        for r in rows.iter() {
+            for &(j, v) in r {
+                let a = v.abs();
+                st[j] = (st[j].0.max(a), st[j].1.min(a), st[j].2 + a);
+            }
+        }
+        let cs: Vec<f64> = st.iter().map(|&(mx, mn, sm)| if mx > 0.0 { f(mx, mn, sm) } else { 1.0 }).collect();
+        for r in rows.iter_mut() {
+            for e in r.iter_mut() {
+                e.1 *= cs[e.0];
+            }
+        }
+        for j in 0..n {
+            dc[j] *= cs[j];
+        }
+    };
+    match mode {
+        1 | 5 | 6 => {
+            // Pock–Chambolle は行・列とも元の行列の和で同時に求める (5: 行だけ、6: 列だけ)。
+            let mut rsum = vec![0.0f64; m];
+            let mut csum = vec![0.0f64; n];
+            for (i, r) in rows.iter().enumerate() {
+                for &(j, v) in r {
+                    rsum[i] += v.abs();
+                    csum[j] += v.abs();
+                }
+            }
+            if mode != 6 {
+                dr = rsum.iter().map(|&v| 1.0 / fin(v).sqrt()).collect();
+            }
+            if mode != 5 {
+                dc = csum.iter().map(|&v| 1.0 / fin(v).sqrt()).collect();
+            }
+        }
+        7 => {
+            // 変数の値の大きさでそろえる: s_j = max(1, min(有限の上下限の大きさ, min_i |b_i| / |a_ij|)) で列を割り
+            // (x = s ∘ x')、行の最大の絶対値を 1 にする (右辺が 5.7e8 に達する ns1688926 は、内点法の許容 (|b| などに対する
+            // 相対値) では絶対値で 1 程度の残差が残り、終点から作った頂点の目的値が最適値から 18% ずれていた)。
+            let mut est = vec![f64::INFINITY; n];
+            for (i, r) in rows.iter().enumerate() {
+                let bi = b[i].abs();
+                if bi > 0.0 {
+                    for &(j, v) in r {
+                        est[j] = est[j].min(bi / v.abs());
+                    }
+                }
+            }
+            let cap = tunable!("ENOMOTO_T_XO_IPM_MAG_CAP", 1e8f64, f64);
+            for j in 0..n {
+                let bnd = [l[j], u[j]].iter().filter(|v| v.is_finite()).fold(0.0f64, |m, v| m.max(v.abs()));
+                let e = if bnd > 0.0 { est[j].min(bnd) } else { est[j] };
+                dc[j] = if e.is_finite() { e.clamp(1.0, cap) } else { 1.0 };
+            }
+            for (i, r) in rows.iter().enumerate() {
+                let mx = r.iter().fold(0.0f64, |m, &(j, v)| m.max((v * dc[j]).abs()));
+                dr[i] = 1.0 / fin(mx);
+            }
+        }
+        _ => {
+            if mode == 2 || mode == 3 {
+                for _ in 0..tunable!("ENOMOTO_T_XO_IPM_GEO_PASSES", 4usize, usize) {
+                    pass(&mut rows, &mut dr, &mut dc, &|mx, mn, _| 1.0 / fin(mx * mn).sqrt());
+                }
+            }
+            if mode == 3 || mode == 4 {
+                pass(&mut rows, &mut dr, &mut dc, &|mx, _, _| 1.0 / fin(mx));
+            }
+        }
+    }
+    let rows: Vec<Vec<(usize, f64)>> = (0..m).map(|i| csr_row_iter(a, i).map(|(j, v)| (j, v * dr[i] * dc[j])).collect()).collect();
+    let a_s = csr_from_rows(&rows, n);
+    let b_s = (0..m).map(|i| b[i] * dr[i]).collect();
+    let c_s = (0..n).map(|j| c[j] * dc[j]).collect();
+    let l_s = (0..n).map(|j| l[j] / dc[j]).collect();
+    let u_s = (0..n).map(|j| u[j] / dc[j]).collect();
+    (a_s, b_s, c_s, l_s, u_s, dr, dc)
+}
+
 fn reduce_fixed(std: &StdForm) -> Reduced {
     let n = std.n_total;
     let m = std.n_rows;
@@ -611,6 +718,14 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     let shared = crate::cancel::bound().filter(|sb| bound_gap > 0.0 && sb.n_total == std.n_total && sb.n_rows == std.n_rows);
     let fixed_obj: f64 = (0..std.n_total).filter(|&j| !(std.lb[j] < std.ub[j])).map(|j| std.c[j] * std.lb[j]).sum();
     let lb_fn = move || shared.as_ref().map_or(f64::NEG_INFINITY, |sb| sb.get() - fixed_obj);
+    // 試験用 (`ENOMOTO_T_XO_IPM_PC`): 内点法の前に行・列をそろえる ([`ipm_prescaled`] の `mode`、0 でしない)。
+    // 試験用 (`ENOMOTO_T_XO_IPM_PC_MIN_NNZ`): 内点法に渡す行列の非零の数がこれ未満ならそろえない (小さな問題では
+    // 反復が増える・手間が目立つ: degen3・greenbea・ken-13。第 49 回)。
+    let pc_min_nnz = tunable!("ENOMOTO_T_XO_IPM_PC_MIN_NNZ", 0usize, usize);
+    let ipm_pc_requested = tunable!("ENOMOTO_T_XO_IPM_PC", 0u8, u8) != 0;
+    let ipm_pc = if a_j.compute_nnz() >= pc_min_nnz { tunable!("ENOMOTO_T_XO_IPM_PC", 0u8, u8) } else { 0 };
+    let pc = (ipm_pc != 0 && xo.given_point.is_none()).then(|| ipm_prescaled(&a_j, &b_j, &c_j, &l_j, &u_j, ipm_pc));
+    crate::phase_timing::mark("xo_ipm_start");
     let ipm = if let Some((gx, gy, _)) = xo.given_point {
         BoxIpmResult {
             status: Status::Optimal,
@@ -620,6 +735,29 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
             iters: 0,
             rel_res: (0.0, 0.0, 0.0),
         }
+    } else if pdlp_mode == 0 && pc.is_some() {
+        // 試験用 (`ENOMOTO_T_XO_IPM_PC`): 行・列をそろえた問題を内点法で解き、元の単位に戻す。
+        let (a_s, b_s, c_s, l_s, u_s, dr, dc) = pc.as_ref().unwrap();
+        let yc: Option<Vec<f64>> = xo.dual_center.map(|y| y.iter().zip(dr).map(|(v, d)| v / d).collect());
+        let warm = WarmStart {
+            y: yc.as_deref(),
+            dual_feasible_known: xo.dual_feasible_known,
+            lower_bound: if bound_gap > 0.0 { Some(&lb_fn) } else { None },
+            bound_gap,
+            bound_pres: tunable!("ENOMOTO_T_XO_BOUND_PRES", prm::IPM_ACCEPT_REL, f64),
+            ..Default::default()
+        };
+        let mut r = solve_box_lp_warm(a_s, b_s, c_s, l_s, u_s, max_iters, Some(&warm));
+        for (v, d) in r.x.iter_mut().zip(dc) {
+            *v *= d;
+        }
+        for (v, d) in r.y.iter_mut().zip(dr) {
+            *v *= d;
+        }
+        for (v, d) in r.rc.iter_mut().zip(dc) {
+            *v /= d;
+        }
+        r
     } else if pdlp_mode == 0 {
         if xo.dual_center.is_some() || xo.dual_feasible_known || bound_gap > 0.0 {
             let warm = WarmStart {
@@ -701,24 +839,53 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     // `x⁺ = proj(x - τ s)` で境界に張り付く列と一致する。
     //   1: PDLP の前処理 (Ruiz + Pock–Chambolle) と初期の η, ω、
     //   2: PDLP を 0 から最初の再始動まで回した η, ω、
-    //   3 (既定、第 16・17 回の比較): 1 の歩幅で内点法の点から PDHG を文字どおり 1 歩進め (x⁺, y⁺)、その点で検出する、
+    //   3 (第 16・17 回〜第 47 回の既定): 1 の歩幅で内点法の点から PDHG を文字どおり 1 歩進め (x⁺, y⁺)、その点で検出する、
     //   4: 2 の歩幅で 3 と同じく 1 歩進める、
     //   5: 3 と同じだが、境界に切られなかった列は内点法の値のまま (x⁺ は張り付けだけ。歩幅 τ が大きいと
     //      基底の列が `τ s_j` だけ動いて `A x = b` が崩れる: pilot.ja)。
-    //   0: 参照実装と同じ γ = 1 (`ENOMOTO_T_XO_GAMMA_PDHG` で選ぶ)。
+    //   0 (既定、第 48 回の比較。内点法の高精度化で終点が正確になり、尺度の補正が要らなくなった): 参照実装と同じ γ = 1
+    //      (`ENOMOTO_T_XO_GAMMA_PDHG` で選ぶ)。
     // `ENOMOTO_T_XO_GAMMA_MULT` は γ に掛ける倍率。
-    let gamma_mode = tunable!("ENOMOTO_T_XO_GAMMA_PDHG", 3u8, u8);
+    let gamma_mode = tunable!("ENOMOTO_T_XO_GAMMA_PDHG", 0u8, u8);
+    // 6 (そろえた空間で γ = 1) は内点法の前にそろえなかった問題 (`ENOMOTO_T_XO_IPM_PC_MIN_NNZ` 未満) では元の単位の γ = 1。
+    let gamma_mode = if gamma_mode == 6 && pc.is_none() && ipm_pc_requested { 0 } else { gamma_mode };
     let gamma_mult = tunable!("ENOMOTO_T_XO_GAMMA_MULT", 1.0f64, f64);
     let mut gamma = vec![prm::GAMMA * gamma_mult; n];
     let mut pdhg_sigma: Option<Vec<f64>> = None;
-    if gamma_mode != 0 {
+    if gamma_mode == 6 {
+        // 試験用: Pock–Chambolle でそろえた空間 (内点法の内部の `x' = x/β`、`s' = s/γ` も含む) で γ = 1 にする:
+        // `γ_j = dc_j² β / γ_c` (β = max(1, ‖b'‖∞)、γ_c = ‖c'‖∞)。
+        let owned;
+        let (_, b_s, c_s, _, _, _, dc) = match &pc {
+            Some(p) => p,
+            None => {
+                owned = ipm_prescaled(&a_j, &b_j, &c_j, &l_j, &u_j, 1);
+                &owned
+            }
+        };
+        let beta = b_s.iter().fold(1.0f64, |m, v| m.max(v.abs()));
+        let cmax = c_s.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+        let ratio = beta / if cmax > 0.0 { cmax } else { 1.0 };
+        for (k, &j) in free_cols.iter().enumerate() {
+            gamma[j] = dc[k] * dc[k] * ratio * gamma_mult;
+        }
+        if debug {
+            eprintln!("CROSSOVER gamma mode=6 beta/gamma={ratio:.3e}");
+        }
+    } else if gamma_mode != 0 {
         let opts = PdlpOptions {
             eps: 0.0,
             max_iters: if gamma_mode == 2 || gamma_mode == 4 { 100_000 } else { 0 },
             time_limit: 1e9,
             max_restarts: 1,
         };
-        let pd = solve_pdlp(&a_j, &b_j, &c_j, &l_j, &u_j, &opts);
+        // 0 反復なら PDLP を呼ばず、歩幅と縮尺だけ求める (転置や反復用の配列を作らない)。
+        let pd = if opts.max_iters == 0 {
+            let (eta, w, dr, dc) = crate::interior_point::pdlp::initial_step_params(&a_j, &b_j, &c_j);
+            PdlpResult { status: Status::NotSolved, x: Vec::new(), y: Vec::new(), iters: 0, rel: (0.0, 0.0, 0.0), eta, w, dc, dr }
+        } else {
+            solve_pdlp(&a_j, &b_j, &c_j, &l_j, &u_j, &opts)
+        };
         let tau = pd.eta / pd.w;
         // 試験用 (`ENOMOTO_T_XO_GAMMA_CAP`): 列ごとの歩幅 τ_j の上限 (大きすぎる τ_j は境界から離れた基底変数まで
         // 非基底にする: 80bau3b・pilot.ja。第 26 回)。
@@ -813,9 +980,27 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     for (k, &j) in free_cols.iter().enumerate() {
         x[j] = ipm.x[k].clamp(std.lb[j], std.ub[j]);
     }
+    if debug {
+        // 丸める前の内点法の点の残差と、上下限の違反 (丸めで増えた残差の目安)。
+        let mut xr = std.lb.clone();
+        let mut bviol = 0.0f64;
+        for (k, &j) in free_cols.iter().enumerate() {
+            xr[j] = ipm.x[k];
+            bviol = bviol.max((std.lb[j] - ipm.x[k]).max(ipm.x[k] - std.ub[j]));
+        }
+        let bmax = std.b.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+        eprintln!(
+            "CROSSOVER resid after ipm={:.3e} (before clamping {:.3e}, max bound violation {bviol:.3e}, |b|max={bmax:.3e})",
+            primal_resid(std, &x),
+            primal_resid(std, &xr)
+        );
+    }
+    // 頂点の採用判定の射影 (`ENOMOTO_T_XO_ACCEPT_PROJ`) で最適分割を推定するのに使う内点法の主の点 (押し出しの前)。
+    let x_ipm_saved = (tunable!("ENOMOTO_T_XO_ACCEPT_PROJ", 0u8, u8) != 0).then(|| x.clone());
     let mut y = ipm.y;
-    // 頂点を内点法の双対の下界で確かめるとき (`ENOMOTO_T_XO_ACCEPT_GAP`) に使う内点法の双対 (PDHG の 1 歩の前)。
-    let accept_gap = tunable!("ENOMOTO_T_XO_ACCEPT_GAP", 0.0f64, f64);
+    // 頂点を内点法の双対の下界で確かめるとき (`ENOMOTO_T_XO_ACCEPT_GAP`、既定 1e-8 は第 37 回の比較で決めた。
+    // 0 で使わない) に使う内点法の双対 (PDHG の 1 歩の前)。
+    let accept_gap = tunable!("ENOMOTO_T_XO_ACCEPT_GAP", 1e-8f64, f64);
     let y_ipm = (accept_gap > 0.0 || debug).then(|| y.clone());
     // 境界にある列を固定して解き直すとき (`ENOMOTO_T_XO_FIX`) に使う内点法の点 (PDHG の 1 歩の前)。
     let fix_frac = tunable!("ENOMOTO_T_XO_FIX", 0.0f64, f64);
@@ -1454,6 +1639,15 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     let mut cand_d: Vec<usize> = (0..n).filter(|&j| ps[j] != PStat::Basic && active[j]).collect();
     cand_b.sort_by_key(|&j| col(std, j).len());
     cand_d.sort_by_key(|&j| col(std, j).len());
+    // 試験用 (`ENOMOTO_T_XO_LI_ORDER=1`): 基底の候補 B を、内点法の点で基底らしい順 (境界からの距離 / |s_j| の大きい順) に
+    // 並べる (既定は非零の少ない順)。
+    if tunable!("ENOMOTO_T_XO_LI_ORDER", 0u8, u8) != 0 {
+        let score = |j: usize| -> f64 {
+            let dist = (x[j] - std.lb[j]).min(std.ub[j] - x[j]);
+            dist / s[j].abs().max(1e-12)
+        };
+        cand_b.sort_by(|&a, &b| score(b).partial_cmp(&score(a)).unwrap_or(std::cmp::Ordering::Equal));
+    }
     let mut sel = BasisSelector::new(m, n);
     if tunable!("ENOMOTO_T_XO_LI_MARKOWITZ", 1u8, u8) != 0 {
         // 行の非零の数は、基底の候補 (B と D) の列だけで数える (行列全体で数えると、候補にない列の非零で目安が
@@ -1625,15 +1819,101 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     // 最適解として返す (仕上げで最適な基底を探さない。qap15 は頂点の目的値が最適値と一致し、残りは退化した双対実行不能
     // だけだった)。
     if let Some(yi) = &y_ipm {
+        // 頂点が主実行不能 (少数) なら、費用をずらして基底を双対実行可能にしてから双対単体法で主実行不能だけを直し、
+        // 直した頂点を元の費用で判定する (`ENOMOTO_T_XO_REPAIR`、既定 1 は第 61 回の比較で決めた。[`repair_vertex`])。
+        if accept_gap > 0.0 && tunable!("ENOMOTO_T_XO_REPAIR", 1u8, u8) != 0 && vertex_solution(std, &basis_pos, &nb_status, &lu).is_none() {
+            if let Some(r) = repair_vertex(std, yi, &basis, &basis_pos, &nb_status, &lu, accept_gap, debug) {
+                crate::phase_timing::mark("xo_vertex_repaired");
+                return Some(r);
+            }
+        }
         if let Some(xv) = vertex_solution(std, &basis_pos, &nb_status, &lu) {
             let obj: f64 = (0..n).map(|j| std.c[j] * xv[j]).sum();
             let lbv = lagrangian_lower_bound(std, yi);
-            let gap = (obj - lbv) / (1.0 + obj.abs());
+            let mut gap = (obj - lbv) / (1.0 + obj.abs());
             crate::phase_timing::record("xo_vertex_gap", gap);
             if debug {
                 eprintln!("CROSSOVER vertex obj={obj:.12e} L(y_ipm)={lbv:.12e} rel gap={gap:.3e}");
+                eprintln!("CROSSOVER vertex gap breakdown y_ipm (interior basic, degenerate basic, nonbasic): {:?}", vertex_gap_breakdown(std, yi, &xv, &basis_pos));
             }
-            if accept_gap > 0.0 && gap <= accept_gap {
+            // y_ipm では足りないとき、下界を測り直す (下界 `L` はどの y・どの「実行可能領域を含む箱」でも成り立つので、
+            // 判定は厳密なまま)。頂点の目的値と L の差は変数ごとの `d_j x_j − min(d_j l_j, d_j u_j)` の和で、上下限の間に
+            // ある変数は d_j が 0 でない限り `|d_j| ×` 境界までの距離だけ効く (箱の広い fome13 で y_ipm の小さな d_j が積み上がる)。
+            // - `ENOMOTO_T_XO_ACCEPT_YFIX` (既定 1、第 59 回の比較で決めた。0 で行わない): 頂点で上下限の間にある (退化していない) 基底変数の被約費用を 0 にする
+            //   ように y を補正する: `Bᵀ Δ = ρ` (ρ は、そのような基底変数の行で `d_j(y_ipm)`、退化した基底の行で 0)、
+            //   `y' = y_ipm + θ Δ`。
+            // - 試験用 `ENOMOTO_T_XO_ACCEPT_IMPLIED=1`: 上下限が無限の変数に、行 `Ax = b` から導いた有限の範囲を与えて
+            //   下界を測る (Neumaier–Shcherbina の安全な下界の考え方。無限の側の d の符号違いで L = −∞ になるのを防ぐ)。
+            //   このときは基底の双対 y_B も試す。
+            let yfix = tunable!("ENOMOTO_T_XO_ACCEPT_YFIX", 1u8, u8) != 0;
+            let implied = tunable!("ENOMOTO_T_XO_ACCEPT_IMPLIED", 0u8, u8) != 0;
+            // - 試験用 `ENOMOTO_T_XO_ACCEPT_PROJ=1`: 最適面への射影 (Mehrotra–Ye)。内点法の点から上下限の間にあると推定した
+            //   変数と、頂点で上下限の間にある基底変数の集合 S について、`A_Sᵀ (y_ipm + Δ) = c_S` を満たす最小ノルムの Δ
+            //   (`Δ = A_S w`、`(A_Sᵀ A_S + εI) w = d_S`) で y を射影する。
+            if accept_gap > 0.0 && gap > accept_gap && (yfix || implied || x_ipm_saved.is_some()) {
+                let bnds = implied.then(|| implied_bounds(std, 3));
+                let (lbs, ubs): (&[f64], &[f64]) = match &bnds {
+                    Some((l, u)) => (l, u),
+                    None => (&std.lb, &std.ub),
+                };
+                let try_y = |name: &str, y: &[f64], gap: &mut f64| {
+                    let l = lagrangian_lower_bound_with(std, y, lbs, ubs);
+                    let g = (obj - l) / (1.0 + obj.abs());
+                    if debug {
+                        eprintln!("CROSSOVER vertex L({name})={l:.12e} rel gap={g:.3e}");
+                    }
+                    if g < *gap {
+                        *gap = g;
+                    }
+                };
+                if implied {
+                    try_y("y_ipm, implied bounds", yi, &mut gap);
+                }
+                let mut scratch = vec![0.0; m];
+                if yfix && gap > accept_gap {
+                    let dy = yfix_delta(std, yi, &xv, &basis, &lu);
+                    let mut yt = vec![0.0; m];
+                    for th in [1.0, 0.5, 0.1] {
+                        for i in 0..m {
+                            yt[i] = yi[i] + th * dy[i];
+                        }
+                        try_y(&format!("y_ipm + {th} dy"), &yt, &mut gap);
+                        if debug && th == 1.0 {
+                            eprintln!("CROSSOVER vertex gap breakdown y_fix: {:?}", vertex_gap_breakdown(std, &yt, &xv, &basis_pos));
+                        }
+                        if gap <= accept_gap {
+                            break;
+                        }
+                    }
+                }
+                if let (Some(xi), true) = (&x_ipm_saved, gap > accept_gap) {
+                    if let Some(dy) = dual_face_projection(std, yi, xi, &xv, &basis_pos, debug) {
+                        let mut yt = vec![0.0; m];
+                        for th in [1.0, 0.5] {
+                            for i in 0..m {
+                                yt[i] = yi[i] + th * dy[i];
+                            }
+                            try_y(&format!("y_ipm + {th} projection"), &yt, &mut gap);
+                            if debug && th == 1.0 {
+                                eprintln!("CROSSOVER vertex gap breakdown y_proj: {:?}", vertex_gap_breakdown(std, &yt, &xv, &basis_pos));
+                            }
+                            if gap <= accept_gap {
+                                break;
+                            }
+                        }
+                    }
+                }
+                if implied && gap > accept_gap {
+                    let cb: Vec<f64> = basis.iter().map(|&j| std.c[j]).collect();
+                    let mut yb = vec![0.0; m];
+                    lu.solve_transpose_into(&cb, &mut scratch, &mut yb);
+                    try_y("y_B, implied bounds", &yb, &mut gap);
+                }
+                crate::phase_timing::record("xo_vertex_gap_fix", gap);
+            }
+            // ギャップが -accept_gap より小さい (頂点の目的値が正しい下界を下回る) なら、頂点は許容の範囲を超えて実行不能
+            // なので採用しない (目的値の誤った解を返さない)。
+            if accept_gap > 0.0 && gap <= accept_gap && gap >= -accept_gap {
                 crate::phase_timing::mark("xo_vertex_accepted");
                 let n_orig = n - m;
                 return Some(SimplexResult { status: Status::Optimal, x: Some(xv[..n_orig].to_vec()) });
@@ -1689,6 +1969,40 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
             if viol > 1e-9 {
                 nd += 1;
                 md = md.max(viol);
+            }
+        }
+        // 違反を行の大きさ (基底解での `Σ_j |a_ij x_j|`) に対する比で測る (スラックの列なら、その行の大きさ)。
+        {
+            let mut x_full = vec![0.0; n];
+            for j in 0..n {
+                x_full[j] = match nb_status[j] {
+                    Some(NbStatus::Lower) => std.lb[j],
+                    Some(NbStatus::Upper) => std.ub[j],
+                    Some(NbStatus::Zero) => 0.0,
+                    None => 0.0,
+                };
+            }
+            for (k, &j) in basis.iter().enumerate() {
+                x_full[j] = xb[k];
+            }
+            let mut act = vec![0.0f64; m];
+            for j in 0..n {
+                for &(i, a) in col(std, j) {
+                    act[i] += (a * x_full[j]).abs();
+                }
+            }
+            let (mut worst_rel, mut n_rel) = (0.0f64, 0usize);
+            for (k, &j) in basis.iter().enumerate() {
+                let viol = (std.lb[j] - xb[k]).max(xb[k] - std.ub[j]);
+                if viol > 1e-9 {
+                    let scale = col(std, j).iter().map(|&(i, _)| act[i]).fold(1.0 + xb[k].abs(), f64::max);
+                    let rel = viol / scale;
+                    worst_rel = worst_rel.max(rel);
+                    n_rel += (rel > 1e-9) as usize;
+                }
+            }
+            if debug {
+                eprintln!("CROSSOVER basis quality: primal violations relative to row size: max {worst_rel:.2e}, #>1e-9: {n_rel}");
             }
         }
         crate::phase_timing::record("xo_primal_infeas", np as f64);
@@ -1922,11 +2236,14 @@ fn vertex_solution(std: &StdForm, basis_pos: &[Option<usize>], nb_status: &[Opti
     let mut xb = vec![0.0; m];
     let mut scratch = vec![0.0; m];
     lu.solve_into(&rhs, &mut scratch, &mut xb);
+    // 主実行可能とみなす境界の違反 (`ENOMOTO_T_XO_VERTEX_FEAS_TOL`、既定 1e-8 は第 61 回の比較で決めた (pds-20 は違反 1.1e-9 の
+    // 1 個で修復・仕上げに回っていた)、境界の大きさに比例)。
+    let ftol = tunable!("ENOMOTO_T_XO_VERTEX_FEAS_TOL", 1e-8f64, f64);
     for j in 0..n {
         if let Some(p) = basis_pos[j] {
             let v = xb[p];
-            let tl = 1e-9 * (1.0 + std.lb[j].abs().min(1e12));
-            let tu = 1e-9 * (1.0 + std.ub[j].abs().min(1e12));
+            let tl = ftol * (1.0 + std.lb[j].abs().min(1e12));
+            let tu = ftol * (1.0 + std.ub[j].abs().min(1e12));
             if !v.is_finite() || v < std.lb[j] - tl || v > std.ub[j] + tu {
                 return None;
             }
@@ -1938,7 +2255,34 @@ fn vertex_solution(std: &StdForm, basis_pos: &[Option<usize>], nb_status: &[Opti
 
 /// 双対 `y` による弱双対の下界 `L(y) = b·y + Σ_j min_{l_j<=x_j<=u_j} (c - A^T y)_j x_j` (被約費用が無限の境界の向きに
 /// 小さく (`1e-9 (1 + max|y|)` 以下) はみ出すのは 0 とみなす。それより大きければ `-inf`)。
+/// 計測用: 頂点 `xv` の目的値と `L(y)` の差 (`Σ_j d_j x_j − min(d_j l_j, d_j u_j)`) を、上下限の間にある基底変数・
+/// 境界にある (退化した) 基底変数・非基底変数に分けて返す (`ENOMOTO_DEBUG_CROSSOVER`)。
+fn vertex_gap_breakdown(std: &StdForm, y: &[f64], xv: &[f64], basis_pos: &[Option<usize>]) -> [f64; 3] {
+    let mut out = [0.0; 3];
+    // 無限の境界の側の小さな d は [`lagrangian_lower_bound`] と同じく 0 とみなす。
+    let tiny = 1e-9 * (1.0 + y.iter().fold(0.0f64, |a, v| a.max(v.abs())));
+    for j in 0..std.n_total {
+        let d = std.c[j] - sparse_dot_dense(col(std, j), y);
+        let bound = if d > 0.0 { std.lb[j] } else { std.ub[j] };
+        let t = if d == 0.0 { 0.0 } else if bound.is_finite() { d * (xv[j] - bound) } else if d.abs() <= tiny { 0.0 } else { f64::INFINITY };
+        let v = xv[j];
+        let tol = 1e-9 * (1.0 + v.abs());
+        let k = match basis_pos[j] {
+            Some(_) if v > std.lb[j] + tol && v < std.ub[j] - tol => 0,
+            Some(_) => 1,
+            None => 2,
+        };
+        out[k] += t;
+    }
+    out
+}
+
 fn lagrangian_lower_bound(std: &StdForm, y: &[f64]) -> f64 {
+    lagrangian_lower_bound_with(std, y, &std.lb, &std.ub)
+}
+
+/// [`lagrangian_lower_bound`] を、実行可能領域 (`Ax = b` かつ元の上下限) を含む箱 `[lb, ub]` で測る。
+fn lagrangian_lower_bound_with(std: &StdForm, y: &[f64], lbs: &[f64], ubs: &[f64]) -> f64 {
     let ymax = y.iter().fold(0.0f64, |a, v| a.max(v.abs()));
     let tiny = 1e-9 * (1.0 + ymax);
     let mut lb: f64 = std.b.iter().zip(y).map(|(b, y)| b * y).sum();
@@ -1948,20 +2292,325 @@ fn lagrangian_lower_bound(std: &StdForm, y: &[f64]) -> f64 {
             d -= a * y[i];
         }
         if d > 0.0 {
-            if std.lb[j].is_finite() {
-                lb += d * std.lb[j];
+            if lbs[j].is_finite() {
+                lb += d * lbs[j];
             } else if d > tiny {
                 return f64::NEG_INFINITY;
             }
         } else if d < 0.0 {
-            if std.ub[j].is_finite() {
-                lb += d * std.ub[j];
+            if ubs[j].is_finite() {
+                lb += d * ubs[j];
             } else if -d > tiny {
                 return f64::NEG_INFINITY;
             }
         }
     }
     lb
+}
+
+/// 頂点の採用判定の y の補正量 Δ (`Bᵀ Δ = ρ`、ρ は頂点 `xv` で上下限の間にある基底変数の行で `d_j(y)`、他は 0)。
+fn yfix_delta(std: &StdForm, y: &[f64], xv: &[f64], basis: &[usize], lu: &sparse_lu::FtLu) -> Vec<f64> {
+    let m = std.n_rows;
+    let mut rho = vec![0.0; m];
+    for (k, &j) in basis.iter().enumerate() {
+        let v = xv[j];
+        let tol = 1e-9 * (1.0 + v.abs());
+        if v > std.lb[j] + tol && v < std.ub[j] - tol {
+            rho[k] = std.c[j] - sparse_dot_dense(col(std, j), y);
+        }
+    }
+    let mut dy = vec![0.0; m];
+    let mut scratch = vec![0.0; m];
+    lu.solve_transpose_into(&rho, &mut scratch, &mut dy);
+    dy
+}
+
+/// 主実行不能が少ない頂点を直す (`ENOMOTO_T_XO_REPAIR`): 基底の双対 `y_B` での被約費用の符号が非基底の位置と合わない
+/// 列の費用をずらして基底を双対実行可能にし (仕上げの単体法が非基底を反対の境界へ置き換えて主実行不能を大量に作るのを
+/// 防ぐ)、双対単体法で主実行不能だけを直す。直した頂点の元の費用での目的値が、`y_ipm` と補正した y による下界から
+/// 相対 `accept_gap` 以内なら返す。主実行不能が `ENOMOTO_T_XO_REPAIR_MAX` (既定 m/50 と 20 の大きい方) を超えれば行わない。
+#[allow(clippy::too_many_arguments)]
+fn repair_vertex(
+    std: &StdForm,
+    yi: &[f64],
+    basis: &[usize],
+    basis_pos: &[Option<usize>],
+    nb_status: &[Option<NbStatus>],
+    lu: &sparse_lu::FtLu,
+    accept_gap: f64,
+    debug: bool,
+) -> Option<SimplexResult> {
+    let n = std.n_total;
+    let m = std.n_rows;
+    let n_orig = n - m;
+    let t0 = std::time::Instant::now();
+    // 頂点の値 (基底は丸めない) と主実行不能の数。
+    let mut xv = vec![0.0; n];
+    let mut rhs = std.b.clone();
+    for j in 0..n {
+        if basis_pos[j].is_some() {
+            continue;
+        }
+        let v = match nb_status[j] {
+            Some(NbStatus::Lower) => std.lb[j],
+            Some(NbStatus::Upper) => std.ub[j],
+            _ => 0.0,
+        };
+        xv[j] = v;
+        if v != 0.0 {
+            for &(i, a) in col(std, j) {
+                rhs[i] -= a * v;
+            }
+        }
+    }
+    let mut xb = vec![0.0; m];
+    let mut scratch = vec![0.0; m];
+    lu.solve_into(&rhs, &mut scratch, &mut xb);
+    let mut np = 0usize;
+    for (k, &j) in basis.iter().enumerate() {
+        xv[j] = xb[k];
+        let ftol = tunable!("ENOMOTO_T_XO_VERTEX_FEAS_TOL", 1e-8f64, f64);
+        let tl = ftol * (1.0 + std.lb[j].abs().min(1e12));
+        let tu = ftol * (1.0 + std.ub[j].abs().min(1e12));
+        if !xb[k].is_finite() {
+            return None;
+        }
+        if xb[k] < std.lb[j] - tl || xb[k] > std.ub[j] + tu {
+            np += 1;
+        }
+    }
+    let max_np = tunable!("ENOMOTO_T_XO_REPAIR_MAX", (m / 50).max(20), usize);
+    if np == 0 || np > max_np {
+        return None;
+    }
+    // 費用をずらす: 非基底の被約費用を、下限なら >= 0、上限なら <= -10 TOL、0 に置いた自由列なら 0 にする。
+    let cb: Vec<f64> = basis.iter().map(|&j| std.c[j]).collect();
+    let mut yb = vec![0.0; m];
+    lu.solve_transpose_into(&cb, &mut scratch, &mut yb);
+    let tol = crate::params::simplex::TOL;
+    let mut c2 = std.c.clone();
+    let mut shifted = 0usize;
+    for j in 0..n {
+        if basis_pos[j].is_some() {
+            continue;
+        }
+        let d = std.c[j] - sparse_dot_dense(col(std, j), &yb);
+        let target = match nb_status[j] {
+            Some(NbStatus::Lower) => d.max(0.0),
+            Some(NbStatus::Upper) => d.min(-10.0 * tol),
+            _ => 0.0,
+        };
+        if target != d {
+            c2[j] += target - d;
+            shifted += 1;
+        }
+    }
+    let std2 = StdForm {
+        n_total: n,
+        n_rows: m,
+        c: c2,
+        rows: std.rows.clone(),
+        cols: std.cols.clone(),
+        b: std.b.clone(),
+        lb: std.lb.clone(),
+        ub: std.ub.clone(),
+    };
+    let res = super::slope_intercept_dual::solve_slope_intercept_dual_from_basis(&std2, &Default::default(), basis.to_vec())?;
+    if res.status != Status::Optimal {
+        return None;
+    }
+    let x = res.x.as_ref()?;
+    let obj: f64 = (0..n_orig.min(x.len())).map(|j| std.c[j] * x[j]).sum();
+    // 下界: y_ipm と、元の頂点の基底で補正した y。
+    let mut best = lagrangian_lower_bound(std, yi);
+    let dy = yfix_delta(std, yi, &xv, basis, lu);
+    let yt: Vec<f64> = (0..m).map(|i| yi[i] + dy[i]).collect();
+    best = best.max(lagrangian_lower_bound(std, &yt));
+    let gap = (obj - best) / (1.0 + obj.abs());
+    crate::phase_timing::record("xo_repair_gap", gap);
+    if debug {
+        eprintln!(
+            "CROSSOVER repair: primal_infeas={np} cost shifts={shifted} obj={obj:.12e} lower bound={best:.12e} rel gap={gap:.3e} t={:.3}s",
+            t0.elapsed().as_secs_f64()
+        );
+    }
+    (gap <= accept_gap && gap >= -accept_gap).then_some(res)
+}
+
+/// 双対の最適面への射影の補正量 Δ を返す (`ENOMOTO_T_XO_ACCEPT_PROJ`)。S は、内点法の点 `xi` で境界までの距離が
+/// 被約費用 `|d_j(y)|` 以上の変数 (上下限の間にあると推定した変数) と、頂点 `xv` で上下限の間にある基底変数 (固定列は除く)。
+/// `(A_Sᵀ A_S + εI) w = d_S` を疎 Cholesky で解き (反復改良 3 回)、`Δ = A_S w` とする。
+fn dual_face_projection(std: &StdForm, y: &[f64], xi: &[f64], xv: &[f64], basis_pos: &[Option<usize>], debug: bool) -> Option<Vec<f64>> {
+    use faer::prelude::SpSolver;
+    let m = std.n_rows;
+    let n = std.n_total;
+    let mut s_cols = Vec::new();
+    let mut d_s = Vec::new();
+    let proj_set = tunable!("ENOMOTO_T_XO_PROJ_SET", 0u8, u8);
+    for j in 0..n {
+        if !(std.lb[j] < std.ub[j]) {
+            continue;
+        }
+        let d = std.c[j] - sparse_dot_dense(col(std, j), y);
+        let dist = (xi[j] - std.lb[j]).min(std.ub[j] - xi[j]);
+        let v = xv[j];
+        let tol = 1e-9 * (1.0 + v.abs());
+        let vertex_inner = basis_pos[j].is_some() && v > std.lb[j] + tol && v < std.ub[j] - tol;
+        // 試験用 `ENOMOTO_T_XO_PROJ_SET=1`: 頂点で上下限の間にある基底変数だけにする (内点法の推定は頂点と食い違うと
+        // 方程式が矛盾する)。
+        let from_ipm = proj_set == 0 && dist >= d.abs();
+        if from_ipm || vertex_inner {
+            s_cols.push(j);
+            d_s.push(d);
+        }
+    }
+    // S の側で解く: (A_Sᵀ A_S + εI) w = d_S、Δ = A_S w (A_S A_Sᵀ は階数が |S| 以下で特異になりうる)。
+    let ns = s_cols.len();
+    let mut local = vec![usize::MAX; n];
+    for (k, &j) in s_cols.iter().enumerate() {
+        local[j] = k;
+    }
+    let mut trip: Vec<(usize, usize, f64)> = Vec::new();
+    for i in 0..m {
+        let row: Vec<(usize, f64)> = std.rows.row(i).iter().filter(|&&(j, _)| local[j] != usize::MAX).map(|&(j, a)| (local[j], a)).collect();
+        for &(k1, a1) in &row {
+            for &(k2, a2) in &row {
+                if k1 <= k2 {
+                    trip.push((k1, k2, a1 * a2));
+                }
+            }
+        }
+    }
+    for k in 0..ns {
+        trip.push((k, k, 0.0));
+    }
+    let mut mat = faer::sparse::SparseColMat::<usize, f64>::try_new_from_triplets(ns, ns, &trip).ok()?;
+    {
+        let cp = mat.col_ptrs().to_vec();
+        let ri = mat.row_indices().to_vec();
+        let vals = mat.values_mut();
+        let mut diag_max = 0.0f64;
+        for c in 0..ns {
+            for k in cp[c]..cp[c + 1] {
+                if ri[k] == c {
+                    diag_max = diag_max.max(vals[k]);
+                }
+            }
+        }
+        let eps = tunable!("ENOMOTO_T_XO_PROJ_EPS", 1e-14f64, f64) * diag_max.max(1.0);
+        for c in 0..ns {
+            for k in cp[c]..cp[c + 1] {
+                if ri[k] == c {
+                    vals[k] += eps;
+                }
+            }
+        }
+    }
+    let chol = mat.as_ref().sp_cholesky(faer::Side::Upper).ok()?;
+    let mul = |x: &[f64], out: &mut [f64]| {
+        out.fill(0.0);
+        let (cp, ri, vals) = (mat.col_ptrs(), mat.row_indices(), mat.values());
+        for c in 0..ns {
+            for k in cp[c]..cp[c + 1] {
+                let r = ri[k];
+                out[r] += vals[k] * x[c];
+                if r != c {
+                    out[c] += vals[k] * x[r];
+                }
+            }
+        }
+    };
+    let mut w = d_s.clone();
+    chol.solve_in_place(faer::mat::from_column_major_slice_mut::<f64, usize, usize>(&mut w, ns, 1));
+    let mut r = vec![0.0; ns];
+    for _ in 0..3 {
+        mul(&w, &mut r);
+        for k in 0..ns {
+            r[k] = d_s[k] - r[k];
+        }
+        chol.solve_in_place(faer::mat::from_column_major_slice_mut::<f64, usize, usize>(&mut r, ns, 1));
+        for k in 0..ns {
+            w[k] += r[k];
+        }
+    }
+    let mut dy = vec![0.0; m];
+    for (k, &j) in s_cols.iter().enumerate() {
+        for &(i, a) in col(std, j) {
+            dy[i] += a * w[k];
+        }
+    }
+    if debug {
+        // A_Sᵀ Δ − d_S の大きさ (射影がどれだけ等式を満たしたか)。
+        let mut worst = 0.0f64;
+        for (k, &j) in s_cols.iter().enumerate() {
+            worst = worst.max((sparse_dot_dense(col(std, j), &dy) - d_s[k]).abs());
+        }
+        let dmax = d_s.iter().fold(0.0f64, |a, v| a.max(v.abs()));
+        eprintln!("CROSSOVER projection |S|={} m={m} max|d_S|={dmax:.2e} max|A_S^T dy - d_S|={worst:.2e} |dy|max={:.2e}", s_cols.len(), dy.iter().fold(0.0f64, |a, v| a.max(v.abs())));
+    }
+    dy.iter().all(|v| v.is_finite()).then_some(dy)
+}
+
+/// 上下限が無限の変数に、行 `Σ_j a_ij x_j = b_i` と他の変数の範囲から導いた有限の範囲を与える (`passes` 回くり返す)。
+/// 有限の上下限は変えない。導いた範囲は丸め誤差の分だけ外側に広げる (広げても下界の正しさは崩れない)。
+fn implied_bounds(std: &StdForm, passes: usize) -> (Vec<f64>, Vec<f64>) {
+    let mut lb = std.lb.clone();
+    let mut ub = std.ub.clone();
+    let widen = |v: f64| 1e-9 * (1.0 + v.abs());
+    for _ in 0..passes {
+        let mut changed = false;
+        for i in 0..std.n_rows {
+            let row = std.rows.row(i);
+            // 行の活動量の最小・最大 (有限の項の和と、無限の項の数)。
+            let (mut smin, mut nmin, mut smax, mut nmax) = (0.0f64, 0usize, 0.0f64, 0usize);
+            let lo = |a: f64, j: usize| if a > 0.0 { a * lb[j] } else { a * ub[j] };
+            let hi = |a: f64, j: usize| if a > 0.0 { a * ub[j] } else { a * lb[j] };
+            for &(j, a) in row {
+                let (l, h) = (lo(a, j), hi(a, j));
+                if l.is_finite() { smin += l } else { nmin += 1 }
+                if h.is_finite() { smax += h } else { nmax += 1 }
+            }
+            if nmin > 1 && nmax > 1 {
+                continue;
+            }
+            let bi = std.b[i];
+            let mut upd: Vec<(usize, f64, f64)> = Vec::new();
+            for &(j, a) in row {
+                if lb[j].is_finite() && ub[j].is_finite() {
+                    continue;
+                }
+                let (l, h) = (lo(a, j), hi(a, j));
+                // 他の変数の活動量の最小・最大。
+                let rest_min = if l.is_finite() { (nmin == 0).then(|| smin - l) } else { (nmin == 1).then_some(smin) };
+                let rest_max = if h.is_finite() { (nmax == 0).then(|| smax - h) } else { (nmax == 1).then_some(smax) };
+                // a x_j = b − (他) なので a x_j ∈ [b − rest_max, b − rest_min]。
+                let (mut nl, mut nu) = (f64::NEG_INFINITY, f64::INFINITY);
+                if let Some(rm) = rest_min {
+                    let v = (bi - rm) / a;
+                    if a > 0.0 { nu = v + widen(v) } else { nl = v - widen(v) }
+                }
+                if let Some(rx) = rest_max {
+                    let v = (bi - rx) / a;
+                    if a > 0.0 { nl = v - widen(v) } else { nu = v + widen(v) }
+                }
+                upd.push((j, nl, nu));
+            }
+            for (j, nl, nu) in upd {
+                if !lb[j].is_finite() && nl.is_finite() && nl.abs() < 1e15 {
+                    lb[j] = nl;
+                    changed = true;
+                }
+                if !ub[j].is_finite() && nu.is_finite() && nu.abs() < 1e15 {
+                    ub[j] = nu;
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    (lb, ub)
 }
 
 /// 検出の分類 `cls` (列ごとに 0: 基底候補、-1: 下限、+1: 上限) を、仕上げの後の最適基底 `bp` と解 `xr` (構造変数) と
@@ -2394,7 +3043,7 @@ impl BasisSelector {
             // 最大成分の行だけでは qap15 で基底の選択に 26 秒かかった)。
             let mut p = best.1;
             if !self.row_cnt.is_empty() {
-                let thr = prm::LI_PIV_REL * best.0;
+                let thr = tunable!("ENOMOTO_T_XO_LI_PIV_REL", prm::LI_PIV_REL, f64) * best.0;
                 let mut bc = self.row_cnt[p];
                 for &i in &self.nz_rows {
                     if self.pivot_of_row[i] == usize::MAX && self.xw[i].abs() >= thr && self.row_cnt[i] < bc {

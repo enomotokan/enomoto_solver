@@ -20,7 +20,7 @@
 
 use rayon::prelude::*;
 
-use super::kkt::{csr_mat_t_vec_into, csr_mat_vec_into, FaerCsr, IpmKkt};
+use super::kkt::{at_mul, csr_mat_t_vec_into, csr_mat_vec_into, csr_transpose, FaerCsr, IpmKkt};
 use crate::params::interior_point::{
     BOX_BLOWUP, BOX_BLOWUP_NEAR, BOX_GONDZIO, BOX_REG0, BOX_REG_MIN, CERT_SCALE_MIN, CERT_TOL, EPS_ABS, EPS_REL, GAP_DIV_GUARD, INIT_DIV_GUARD, INIT_POSITIVE_FLOOR,
     INIT_SHIFT_MULTIPLIER, REG_FLOOR_SLACK, RES_DECREASE_RATIO, SLOW_DECREASE_DIVISOR, STALL_ITERS,
@@ -338,6 +338,9 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
     let t_kkt = std::time::Instant::now();
     // 診断用 (ENOMOTO_DEBUG_IPM): 数値分解・Newton 系の求解 (反復改良を含む) の累計時間。
     let mut prof = (0.0f64, 0.0f64);
+    // `Aᵀ` を行圧縮で持ち、`Aᵀ y` を行ごとに並列に計算する (`A` の行圧縮のまま足し込むと逐次: osa-60 は列が 24 万本で
+    // `Aᵀ y` が反復の時間の多くを占めた)。
+    let at = csr_transpose(a);
     let Some(mut kkt) = IpmKkt::new(a) else {
         // 因子が大きすぎる (`MAX_FACTOR_NNZ`): 内点法を諦める。
         if debug {
@@ -373,20 +376,22 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
     let reg_init = tunable!("ENOMOTO_T_IPM_REG0", BOX_REG0, f64);
     let mut rho = reg0.unwrap_or(reg_init);
     let mut delta = reg0.unwrap_or(reg_init);
-    let rho_min = tunable!("ENOMOTO_T_IPM_RHO_MIN", BOX_REG_MIN, f64);
+    let mut rho_min = tunable!("ENOMOTO_T_IPM_RHO_MIN", BOX_REG_MIN, f64);
     // 停止の許容誤差 (絶対・相対とも。既定は PIQP の 1e-8)。
     let eps_abs = tunable!("ENOMOTO_T_IPM_EPS", EPS_ABS, f64);
     let eps_rel = tunable!("ENOMOTO_T_IPM_EPS", EPS_REL, f64);
     // Gondzio の多重中心性補正子の最大回数 (0 で Mehrotra の予測子・修正子だけ)。
     let gondzio_max = tunable!("ENOMOTO_T_IPM_GONDZIO", BOX_GONDZIO, usize);
     let gondzio_small_step = tunable!("ENOMOTO_T_IPM_GONDZIO_SMALL_STEP", 1.0f64, f64);
+    let gondzio_auto = tunable!("ENOMOTO_T_IPM_GONDZIO_AUTO", 0.0f64, f64);
+    let gondzio_auto_max = tunable!("ENOMOTO_T_IPM_GONDZIO_AUTO_MAX", 2usize, usize);
     let mut nan_recover_left = tunable!("ENOMOTO_T_IPM_NAN_RECOVER", 0usize, usize);
     let switch_aug_k = tunable!("ENOMOTO_T_IPM_SWITCH_AUG", 0usize, usize);
     let mut sw_best = f64::INFINITY;
     let mut sw_count = 0usize;
     // 真なら近接中心 (ξ, λ, ν) を残差の減り方によらず毎反復更新する。
     let prox_always = tunable!("ENOMOTO_T_IPM_PROX_ALWAYS", 0u8, u8) != 0;
-    let delta_min = tunable!("ENOMOTO_T_IPM_DELTA_MIN", BOX_REG_MIN, f64);
+    let mut delta_min = tunable!("ENOMOTO_T_IPM_DELTA_MIN", BOX_REG_MIN, f64);
     // 正則化 ρ・δ の下げ方 (反復の終わりの説明参照)。0: PIQP、1: IP-PMM の著者の実装 (既定、第 8 回の比較)、
     // 2: ρ = δ = κ μ、3: PIQP の規則を κ μ で頭打ち。
     let reg_mode = tunable!("ENOMOTO_T_IPM_REG_MODE", 1u8, u8);
@@ -412,14 +417,14 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
     }
     rhs[n..].copy_from_slice(b);
     let mut refine_work: Vec<f64> = Vec::new();
-    kkt.solve_refined(a, &top, delta, &mut rhs, REFINE_STEPS, &mut refine_work);
+    kkt.solve_refined(a, &at, &top, delta, &mut rhs, REFINE_STEPS, &mut refine_work);
     let mut xi = rhs[..n].to_vec();
     let mut y = rhs[n..].to_vec();
     let mut x = xi.clone();
 
     if n_bnd == 0 {
         let mut aty = vec![0.0; n];
-        csr_mat_t_vec_into(a, &y, &mut aty);
+        at_mul(a, &at, &y, &mut aty);
         let rc: Vec<f64> = (0..n).map(|j| c[j] + aty[j]).collect();
         let st = if norm_inf(&rc) > 1e-4 { Status::Unbounded } else { Status::Optimal };
         return BoxIpmResult { status: st, x, y: y.iter().map(|v| -v).collect(), rc, iters: 0, rel_res: (0.0, 0.0, 0.0) };
@@ -465,7 +470,7 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
         if let Some(wy) = &w.y {
             let y_int: Vec<f64> = wy.iter().map(|v| -v).collect();
             let mut aty_w = vec![0.0; n];
-            csr_mat_t_vec_into(a, &y_int, &mut aty_w);
+            at_mul(a, &at, &y_int, &mut aty_w);
             // 被約費用 rc = c + A^T y_int を下限側 (正) と上限側 (負) に分ける。
             let rc: Vec<f64> = (0..n).map(|j| c[j] + aty_w[j]).collect();
             lambda.copy_from_slice(&y_int);
@@ -524,6 +529,40 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
     let noimprove_k = tunable!("ENOMOTO_T_IPM_NOIMPROVE", 0usize, usize);
     let blowup = tunable!("ENOMOTO_T_IPM_BLOWUP", BOX_BLOWUP, f64);
     let mut noimprove = 0usize;
+    // 停止基準の後の高精度化の目標 (停止基準の倍率、既定 1e-3 は第 43〜46 回の比較で決めた。0 で行わない)。
+    let push_f = tunable!("ENOMOTO_T_IPM_PUSH", 1e-3f64, f64);
+    let gap_obj = tunable!("ENOMOTO_T_IPM_GAP_OBJ", 0u8, u8) != 0;
+    let solve_acc = tunable!("ENOMOTO_T_IPM_SOLVE_ACC", 0.0f64, f64);
+    let solve_acc_bump = tunable!("ENOMOTO_T_IPM_SOLVE_ACC_BUMP", 100.0f64, f64);
+    let solve_acc_min = tunable!("ENOMOTO_T_IPM_SOLVE_ACC_MIN", 1e-11f64, f64);
+    let mut acc_retries = 0usize;
+    let aug_on_inacc = tunable!("ENOMOTO_T_IPM_AUG_ON_INACCURATE", 1e-6f64, f64);
+    let aug_on_inacc_any = tunable!("ENOMOTO_T_IPM_AUG_ON_INACCURATE_ANY", 0u8, u8) != 0;
+    let solve_acc2 = tunable!("ENOMOTO_T_IPM_SOLVE_ACC2", 1e-6f64, f64);
+    let solve_acc2_reg = tunable!("ENOMOTO_T_IPM_SOLVE_ACC2_REG", 1e-10f64, f64);
+    let mut prev_solve_rel = 0.0f64;
+    let mut prev_worst_acc = f64::INFINITY;
+    let mut temp_reg = 0.0f64;
+    let solve_acc2_k = tunable!("ENOMOTO_T_IPM_SOLVE_ACC2_K", 3usize, usize);
+    let mut stuck_count = 0usize;
+    let stall_bump = tunable!("ENOMOTO_T_IPM_STALL_BUMP", 0.0f64, f64);
+    let stall_bump_k = tunable!("ENOMOTO_T_IPM_STALL_BUMP_K", 2usize, usize);
+    let stall_floor = tunable!("ENOMOTO_T_IPM_STALL_FLOOR", 0u8, u8) != 0;
+    let stall_jump = tunable!("ENOMOTO_T_IPM_STALL_JUMP", 0.0f64, f64);
+    let mut min_primal = f64::INFINITY;
+    let mut jumped = false;
+    let stall_jump_k = tunable!("ENOMOTO_T_IPM_STALL_JUMP_K", 1usize, usize);
+    let mut jump_count = 0usize;
+    let (rho_min0, delta_min0) = (rho_min, delta_min);
+    let mut bump_best = f64::INFINITY;
+    let mut bump_count = 0usize;
+    let push_max = tunable!("ENOMOTO_T_IPM_PUSH_ITERS", 15usize, usize);
+    // 残差の最悪値が最良の半分を下回らない反復がこの回数続いたら高精度化をやめる (既定 2 は第 61 回の比較で決めた。第 46 回は 1)。
+    let push_stall_max = tunable!("ENOMOTO_T_IPM_PUSH_STALL", 2usize, usize);
+    let mut pushing = false;
+    let mut push_it = 0usize;
+    let mut push_stall = 0usize;
+    let mut push_prev = f64::NAN;
 
     for it in 0..max_iters {
         iters = it;
@@ -535,7 +574,7 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
             Some(r) => r,
             None => {
                 csr_mat_vec_into(a, &x, &mut ax);
-                csr_mat_t_vec_into(a, &y, &mut aty);
+                at_mul(a, &at, &y, &mut aty);
                 residuals(&ax, b, &x, &lo, &up, &lo.s, &up.s, c, &aty, &lo.z, &up.z, &pos, &mut dual_res)
             }
         };
@@ -548,7 +587,9 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
         let z_inf = norm_inf(&lo.z).max(norm_inf(&up.z));
         let bnd_p = eps_abs + eps_rel * norm_inf(&ax).max(norm_b).max(gx).max(norm_h).max(s_inf);
         let bnd_d = eps_abs + eps_rel * norm_inf(&aty).max(z_inf).max(norm_c);
-        let bnd_g = eps_abs + eps_rel * cx.abs().max(by.abs()).max(hz.abs());
+        // 試験用 `ENOMOTO_T_IPM_GAP_OBJ=1`: ギャップの許容を目的値の大きさに比例させる (`eps_rel |c·x|`。内部の正規化で目的値が
+        // 小さくなり絶対項 `eps_abs` が支配すると、目的値に対する相対誤差が大きいまま止まる: ns1688926 は 2.5e-5)。
+        let bnd_g = if gap_obj { eps_rel * cx.abs().max(1e-300) } else { eps_abs + eps_rel * cx.abs().max(by.abs()).max(hz.abs()) };
         rel = (res.primal / bnd_p, res.dual / bnd_d, gap / bnd_g);
         if debug {
             eprintln!(
@@ -557,8 +598,47 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
             );
         }
         if res.primal <= bnd_p && res.dual <= bnd_d && gap <= bnd_g {
-            status = Status::Optimal;
-            break;
+            // 高精度化 (`ENOMOTO_T_IPM_PUSH=f`): 停止基準を満たした後も、相対残差の最悪値が f (停止基準の倍率) に
+            // 下がるか、伸びなくなる・数値が破綻する・`ENOMOTO_T_IPM_PUSH_ITERS` 反復に達するまで続け、最良の点を返す。
+            let worst_now = rel.0.max(rel.1).max(rel.2);
+            if push_f <= 0.0 || worst_now <= push_f {
+                status = Status::Optimal;
+                break;
+            }
+            if !pushing {
+                pushing = true;
+                // 停滞で引き上げた正則化の下限は、高精度化の段では元に戻す (下限が高いままでは精度が出ない)。
+                if stall_floor {
+                    rho_min = rho_min0;
+                    delta_min = delta_min0;
+                }
+                if debug {
+                    eprintln!("IPM it={it} reached the tolerance; pushing for higher accuracy (target {push_f:.1e})");
+                }
+            }
+        }
+        if pushing {
+            let worst_now = rel.0.max(rel.1).max(rel.2);
+            push_it += 1;
+            let bw = best.as_ref().map_or(f64::INFINITY, |b| b.0);
+            // 停止基準に達した反復そのもの (push_it == 1) と、正則化を強めて同じ点で解き直した反復
+            // (点が動かず残差がまったく同じ) は数えない。
+            if push_it == 1 || worst_now == push_prev {
+            } else if worst_now.is_finite() && worst_now < 0.5 * bw {
+                push_stall = 0;
+            } else {
+                push_stall += 1;
+            }
+            push_prev = worst_now;
+            if push_it > push_max || push_stall >= push_stall_max || !worst_now.is_finite() {
+                if debug {
+                    eprintln!("IPM it={it} stop pushing (iters {push_it}, stall {push_stall}, worst {worst_now:.2e}, best {bw:.2e})");
+                }
+                if worst_now.is_finite() && worst_now < bw {
+                    status = Status::Optimal;
+                }
+                break;
+            }
         }
         // 同時実行の二段解法の下界との差 (真の双対ギャップの上界) で、クロスオーバーに渡す。
         if let Some(w) = warm {
@@ -668,6 +748,79 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
         if stall >= STALL_ITERS {
             break;
         }
+        // 試験用 (`ENOMOTO_T_IPM_STALL_BUMP=v`): 正則化が下限にある間に、相対残差の最悪値が最良の 0.5 倍を下回らない反復が
+        // `ENOMOTO_T_IPM_STALL_BUMP_K` 回続いたら (終盤に Newton 系の精度が足りず空回りしている: ken-18 は 28 反復目から
+        // 主残差が 3e-6 で 35 反復止まり、方向が非有限になって正則化が上がるまで続いた)、正則化を v に上げて解き直す。
+        // `ENOMOTO_T_IPM_STALL_JUMP=f` (f > 0): 停滞の代わりに、下限にある間に主残差がそれまでの最小の f 倍以上に跳ね上がった
+        // 反復で一度だけ上げる (ken-18: 1e-10 → 3e-6。序盤のゆっくりした収束 (dfl001) では上げない)。
+        if stall_jump > 0.0 {
+            // 跳ね上がりが `ENOMOTO_T_IPM_STALL_JUMP_K` 反復続いたときだけ (一時的な跳ね上がりは次の反復で戻る: pilotnov)。
+            if at_floor && res.primal > stall_jump * min_primal {
+                jump_count += 1;
+            } else {
+                jump_count = 0;
+            }
+            if stall_bump > 0.0 && jump_count >= stall_jump_k && !jumped {
+                rho = rho.max(stall_bump);
+                delta = delta.max(stall_bump);
+                jumped = true;
+                crate::phase_timing::mark("ipm_stall_bump");
+                if debug {
+                    eprintln!("IPM it={it} primal residual jumped ({:.2e} vs min {min_primal:.2e}); raising the regularization to {stall_bump:.1e}", res.primal);
+                }
+            }
+            min_primal = min_primal.min(res.primal);
+        } else if stall_bump > 0.0 && at_floor {
+            if worst < 0.5 * bump_best {
+                bump_best = worst;
+                bump_count = 0;
+            } else {
+                bump_count += 1;
+                if bump_count >= stall_bump_k {
+                    // `ENOMOTO_T_IPM_STALL_FLOOR=1`: 一度だけ上げる代わりに、下限そのものを 100 倍 (v まで) に上げる。
+                    if stall_floor {
+                        rho_min = (rho_min * 100.0).min(stall_bump);
+                        delta_min = (delta_min * 100.0).min(stall_bump);
+                        rho = rho.max(rho_min);
+                        delta = delta.max(delta_min);
+                    } else {
+                        rho = rho.max(stall_bump);
+                        delta = delta.max(stall_bump);
+                    }
+                    bump_count = 0;
+                    bump_best = worst;
+                    crate::phase_timing::mark("ipm_stall_bump");
+                    if debug {
+                        eprintln!("IPM it={it} stalled at the regularization floor; raising it to {stall_bump:.1e}");
+                    }
+                }
+            }
+        } else if worst < bump_best {
+            bump_best = worst;
+        }
+
+        // 既定 t = 1e-6、K = 3 (第 55 回、0 で使わない) (`ENOMOTO_T_IPM_SOLVE_ACC2=t`、続く回数 `ENOMOTO_T_IPM_SOLVE_ACC2_K`): 前の反復の予測子の Newton 系の相対残差が t を超え (分解の精度が足りない)、
+        // しかも相対残差の最悪値が 0.95 倍未満に減らなかった (実際に進まなかった) ときだけ、この反復は ρ・δ を一時的に
+        // `temp_reg` (初回 `ENOMOTO_T_IPM_SOLVE_ACC2_REG`、続けて失敗したら 100 倍ずつ) に強めて解き、反復の終わりに
+        // 元の値に戻す。不正確でも進んでいる反復 (pilotnov) は乱さない。
+        let mut temp_saved: Option<(f64, f64)> = None;
+        if solve_acc2 > 0.0 {
+            let stuck_now = prev_solve_rel > solve_acc2 && worst >= 0.95 * prev_worst_acc;
+            stuck_count = if stuck_now { stuck_count + 1 } else { 0 };
+            if stuck_count >= solve_acc2_k {
+                temp_reg = if temp_reg > 0.0 { (temp_reg * 100.0).min(1e-4) } else { solve_acc2_reg };
+                temp_saved = Some((rho, delta));
+                rho = rho.max(temp_reg);
+                delta = delta.max(temp_reg);
+                crate::phase_timing::mark("ipm_solve_inaccurate");
+                if debug {
+                    eprintln!("IPM it={it} inaccurate solve ({prev_solve_rel:.2e}) without progress; regularization {temp_reg:.1e} for this iteration");
+                }
+            } else if worst < 0.95 * prev_worst_acc {
+                temp_reg = 0.0;
+            }
+            prev_worst_acc = worst;
+        }
 
         // ---- 右辺 ----
         // r_x = -(c + ρ(x - ξ) + A^T y - z_l + z_u) = -(dual_res + ρ(x - ξ))
@@ -692,7 +845,8 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
         }
         let t_f = std::time::Instant::now();
         let fac_ok = kkt.factor(&top, delta, &mut mid);
-        prof.0 += t_f.elapsed().as_secs_f64();
+        let last_tf = t_f.elapsed().as_secs_f64();
+        prof.0 += last_tf;
         if !fac_ok {
             rho = (rho * 100.0).max(1e-8);
             delta = (delta * 100.0).max(1e-8);
@@ -707,17 +861,59 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
         lo.set_rs(false, 0.0);
         up.set_rs(false, 0.0);
         let t_s = std::time::Instant::now();
-        newton(&mut kkt, a, &top, delta, &r_x, &r_y, &mut lo, &mut up, &pos, &mut sol_aff, n, &mut refine_work);
+        let solve_rel = newton(&mut kkt, a, &at, &top, delta, &r_x, &r_y, &mut lo, &mut up, &pos, &mut sol_aff, n, &mut refine_work);
         prof.1 += t_s.elapsed().as_secs_f64();
+        prev_solve_rel = solve_rel;
+        // 既定 t = 1e-6 (第 55 回、0 で使わない) (`ENOMOTO_T_IPM_AUG_ON_INACCURATE=t`): 正規方程式の予測子の Newton 系の相対残差が t を超えたら拡大系に切り替えて
+        // 同じ点で解き直す (`ENOMOTO_T_IPM_AUG_ON_INACCURATE_ANY=1` でなければ、稠密な列を Woodbury で扱っているときだけ。
+        // ns1688926: 外した後の疎な部分がほぼ特異になり、44 反復目から相対残差 1e3〜1e12 で 200 反復空回りした)。
+        if aug_on_inacc > 0.0
+            && solve_rel > aug_on_inacc
+            && kkt.is_normal()
+            && (aug_on_inacc_any || kkt.has_dense_cols())
+            && sol_aff.iter().all(|v| v.is_finite())
+        {
+            kkt = IpmKkt::augmented(a);
+            crate::phase_timing::mark("ipm_switch_augmented");
+            if debug {
+                eprintln!("IPM it={it} inaccurate normal-equations solve ({solve_rel:.2e}); switching to the augmented system");
+            }
+            cached = Some(res);
+            continue;
+        }
+        // 試験用 (`ENOMOTO_T_IPM_SOLVE_ACC=t`): 予測子の Newton 系の (反復改良後の) 相対残差が t を超えたら (分解の精度が
+        // 足りない: ken-18 は 30 反復目から 1e-5〜1e2 になり、方向が意味をなさず 35 反復空回りした)、この反復を捨てて
+        // ρ・δ を `ENOMOTO_T_IPM_SOLVE_ACC_BUMP` 倍 (下限 `ENOMOTO_T_IPM_SOLVE_ACC_MIN`) に強めて同じ点で解き直す。
+        if solve_acc > 0.0 && solve_rel > solve_acc && acc_retries < 5 && sol_aff.iter().all(|v| v.is_finite()) {
+            acc_retries += 1;
+            rho = (rho * solve_acc_bump).max(solve_acc_min);
+            delta = (delta * solve_acc_bump).max(solve_acc_min);
+            crate::phase_timing::mark("ipm_solve_inaccurate");
+            if debug {
+                eprintln!("IPM it={it} inaccurate Newton solve (rel residual {solve_rel:.2e}); raising regularization to rho={rho:.1e} delta={delta:.1e}");
+            }
+            cached = Some(res);
+            continue;
+        }
+        acc_retries = 0;
         if !sol_aff.iter().all(|v| v.is_finite()) {
             // 正規方程式の破綻は、切り替えが有効なら拡大系に切り替える。
             if switch_aug_k > 0 && kkt.is_normal() {
                 kkt = IpmKkt::augmented(a);
                 crate::phase_timing::mark("ipm_switch_augmented");
             }
-            // 分解が破綻した: 正則化を強めて次の反復で分解し直す。
-            rho = (rho * 100.0).max(1e-8);
-            delta = (delta * 100.0).max(1e-8);
+            // 分解が破綻した: 正則化を強めて次の反復で分解し直す (試験用 `ENOMOTO_T_IPM_BREAK_REG`: 引き上げる下限、既定 1e-8)。
+            let break_reg = tunable!("ENOMOTO_T_IPM_BREAK_REG", 1e-8f64, f64);
+            rho = (rho * 100.0).max(break_reg);
+            delta = (delta * 100.0).max(break_reg);
+            // `ENOMOTO_T_IPM_BREAK_RECENTER` (既定 1、第 61 回の比較で決めた。0 で行わない): 近接中心を今の点に置き直す (終盤は残差が減らず中心が古いままで、
+            // 強めた正則化の近接項が点を古い中心へ引き戻す: fome13)。
+            if tunable!("ENOMOTO_T_IPM_BREAK_RECENTER", 1u8, u8) != 0 {
+                xi.copy_from_slice(&x);
+                lambda.copy_from_slice(&y);
+                lo.nu.copy_from_slice(&lo.z);
+                up.nu.copy_from_slice(&up.z);
+            }
             if debug {
                 eprintln!("IPM it={it} non-finite Newton direction; raising regularization to rho={rho:.1e} delta={delta:.1e}");
             }
@@ -743,14 +939,23 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
         lo.set_rs(true, sigma * mu);
         up.set_rs(true, sigma * mu);
         let t_s = std::time::Instant::now();
-        newton(&mut kkt, a, &top, delta, &r_x, &r_y, &mut lo, &mut up, &pos, &mut rhs, n, &mut refine_work);
-        prof.1 += t_s.elapsed().as_secs_f64();
+        newton(&mut kkt, a, &at, &top, delta, &r_x, &r_y, &mut lo, &mut up, &pos, &mut rhs, n, &mut refine_work);
+        let last_ts = t_s.elapsed().as_secs_f64();
+        prof.1 += last_ts;
+        // 試験用 (`ENOMOTO_T_IPM_GONDZIO_AUTO=C`): 補正子の回数を、この反復の分解の時間が Newton 系 1 回の求解の
+        // 時間の何倍かで決める (`floor(t_分解 / (C t_求解))`、上限 `ENOMOTO_T_IPM_GONDZIO_AUTO_MAX`)。分解が重く求解が
+        // 軽い問題 (dfl001・pds-20・ken-18) だけ補正子で反復を減らし、求解が重い問題 (osa-60) では使わない。
+        let gondzio_k = if gondzio_auto > 0.0 && last_ts > 0.0 {
+            gondzio_max.max(((last_tf / (gondzio_auto * last_ts)) as usize).min(gondzio_auto_max))
+        } else {
+            gondzio_max
+        };
         let mut alpha_p = fraction_to_boundary(&lo.s, &lo.ds).min(fraction_to_boundary(&up.s, &up.ds));
         let mut alpha_d = fraction_to_boundary(&lo.z, &lo.dz).min(fraction_to_boundary(&up.z, &up.dz));
         // 3) Gondzio の多重中心性補正子 (Gondzio 1996、Colombo & Gondzio 2008): ステップ幅を伸ばした試行点の
         //    相補積 v を [β_min σμ, β_max σμ] に寄せる補正を相補性の右辺に足し、同じ分解で解き直す。
         //    ステップ幅が十分伸びたときだけ採る。
-        for _ in 0..gondzio_max {
+        for _ in 0..gondzio_k {
             const DELTA_ALPHA: f64 = 0.1;
             const BETA_MIN: f64 = 0.1;
             const BETA_MAX: f64 = 10.0;
@@ -775,7 +980,7 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
                 });
             }
             let t_s = std::time::Instant::now();
-            newton(&mut kkt, a, &top, delta, &r_x, &r_y, &mut lo, &mut up, &pos, &mut rhs, n, &mut refine_work);
+            newton(&mut kkt, a, &at, &top, delta, &r_x, &r_y, &mut lo, &mut up, &pos, &mut rhs, n, &mut refine_work);
             prof.1 += t_s.elapsed().as_secs_f64();
             let ap1 = fraction_to_boundary(&lo.s, &lo.ds).min(fraction_to_boundary(&up.s, &up.ds));
             let ad1 = fraction_to_boundary(&lo.z, &lo.dz).min(fraction_to_boundary(&up.z, &up.dz));
@@ -823,7 +1028,7 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
         // ρ, δ が一気に下限へ落ちて (adlittle で 3 反復目) 早すぎる Farkas 判定を招くので、[0, 0.999] に収める。
         let r = ((gap_before - gap_after) / gap_before).clamp(0.0, 0.999);
         csr_mat_vec_into(a, &x_new, &mut ax_new);
-        csr_mat_t_vec_into(a, &y_new, &mut aty_new);
+        at_mul(a, &at, &y_new, &mut aty_new);
         let res_new = residuals(&ax_new, b, &x_new, &lo, &up, &lo.s_new, &up.s_new, c, &aty_new, &lo.z_new, &up.z_new, &pos, &mut dual_new);
         // 試験用 (`ENOMOTO_T_IPM_NAN_RECOVER=K`): 新しい点の残差が非有限 (分解の精度の破綻: dfl001) なら、その歩を
         // 捨てて正則化を強め、今の点から解き直す (K 回まで)。既定は打ち切って最良の反復点を返す。
@@ -839,6 +1044,10 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
         }
         // 残差が十分減らなかった反復の正則化の減らし方 `(1 - r/slow_div)`。既定は PIQP の 3、
         // 試験用 `ENOMOTO_T_IPM_REG_MODE=1` で IP-PMM の著者の実装の `(1 - 0.666 r)` (slow_div = 1/0.666)。
+        if let Some((r0, d0)) = temp_saved {
+            rho = r0;
+            delta = d0;
+        }
         let slow_div = if reg_mode == 1 { 1.0 / 0.666 } else { SLOW_DECREASE_DIVISOR };
         if prox_always || res_new.primal <= RES_DECREASE_RATIO * res.primal {
             lambda.copy_from_slice(&y_new);
@@ -894,6 +1103,14 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
         iters = it + 1;
     }
 
+    if pushing && status != Status::Optimal {
+        // 高精度化の途中で止めた: 停止基準を満たした最良の点を最適として返す。
+        status = Status::Optimal;
+        if let Some((_, bx, by, brc, brel)) = best {
+            crate::phase_timing::record("ipm_push_best", brel.0.max(brel.1).max(brel.2));
+            return BoxIpmResult { status, x: bx, y: by.iter().map(|v| -v).collect(), rc: brc, iters, rel_res: brel };
+        }
+    }
     if status != Status::Optimal {
         if let Some((_, bx, by, brc, brel)) = best {
             if debug {
@@ -911,6 +1128,8 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
         rc[up.idx[k]] -= up.z[k];
     }
     if debug {
+        let (asm, num) = crate::interior_point::kkt::take_factor_prof();
+        eprintln!("IPM factor breakdown: assemble={asm:.3}s numeric={num:.3}s");
         eprintln!("IPM end status={status:?} iters={iters} rel_res={rel:?}");
         eprintln!("IPM profile total={:.3}s factor={:.3}s solve={:.3}s other={:.3}s", t_kkt.elapsed().as_secs_f64(), prof.0, prof.1, t_kkt.elapsed().as_secs_f64() - prof.0 - prof.1);
     }
@@ -920,7 +1139,7 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
 /// 予測子/修正子の Newton 方向: 各 `Side` の `r_z`・`r_s`・`w` から縮約系の右辺を作って解き、
 /// `sol[..n] = dx`、`sol[n..] = dy`、各 `Side` の `dz`・`ds` を書く。行列は分解済み。
 #[allow(clippy::too_many_arguments)]
-fn newton(kkt: &mut IpmKkt, a: &FaerCsr, top: &[f64], delta: f64, r_x: &[f64], r_y: &[f64], lo: &mut Side, up: &mut Side, pos: &Pos, sol: &mut [f64], n: usize, work: &mut Vec<f64>) {
+fn newton(kkt: &mut IpmKkt, a: &FaerCsr, at: &FaerCsr, top: &[f64], delta: f64, r_x: &[f64], r_y: &[f64], lo: &mut Side, up: &mut Side, pos: &Pos, sol: &mut [f64], n: usize, work: &mut Vec<f64>) -> f64 {
     lo.set_rzp();
     up.set_rzp();
     {
@@ -942,9 +1161,10 @@ fn newton(kkt: &mut IpmKkt, a: &FaerCsr, top: &[f64], delta: f64, r_x: &[f64], r
     sol[n..].copy_from_slice(r_y);
     // 正則化が小さくなると分解の精度が落ちるので反復改良する (動的正則化で置き換えた
     // ピボットの誤差もここで取り戻す)。残差が十分小さければ追加の求解はしない。
-    kkt.solve_refined(a, top, delta, sol, REFINE_STEPS, work);
+    let rel = kkt.solve_refined(a, at, top, delta, sol, REFINE_STEPS, work);
     lo.set_dz_ds(&sol[..n]);
     up.set_dz_ds(&sol[..n]);
+    rel
 }
 
 /// 主実行不能の Farkas 証明。内部の双対 (`c + A^T y + G^T z = 0`、`z >= 0`、`G x <= h`) で、実行可能な

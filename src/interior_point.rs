@@ -21,6 +21,8 @@
 
 pub mod qp;
 pub mod kkt;
+pub mod pardiso;
+pub mod multifrontal;
 pub mod boxed;
 pub mod pdlp;
 

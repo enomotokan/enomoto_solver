@@ -141,7 +141,37 @@ struct Scaled {
     dc: Vec<f64>,
 }
 
+/// PDLP の最初の歩幅 `η`・主の重み `ω` と前処理の縮尺 `(dr, dc)` だけを求める ([`solve_pdlp`] を 0 反復で呼んだのと同じ値。
+/// 転置や反復用の配列を作らない。クロスオーバーの検出の歩幅に使う)。
+pub fn initial_step_params(a: &FaerCsr, b: &[f64], c: &[f64]) -> (f64, f64, Vec<f64>, Vec<f64>) {
+    let (mat, dr, dc) = scale_matrix(a);
+    let amax = mat.val.iter().fold(0.0f64, |mm, v| mm.max(v.abs()));
+    let eta = if amax > 0.0 { 1.0 / amax } else { 1.0 };
+    let nbs = b.iter().zip(&dr).map(|(v, d)| (v * d) * (v * d)).sum::<f64>().sqrt();
+    let ncs = c.iter().zip(&dc).map(|(v, d)| (v * d) * (v * d)).sum::<f64>().sqrt();
+    let w = if nbs > 1e-10 && ncs > 1e-10 { ncs / nbs } else { 1.0 };
+    (eta, w, dr, dc)
+}
+
 fn scale(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64]) -> Scaled {
+    let m = a.nrows();
+    let n = a.ncols();
+    let (mat, dr, dc) = scale_matrix(a);
+    let at = mat.transpose();
+    Scaled {
+        b: (0..m).map(|i| b[i] * dr[i]).collect(),
+        c: (0..n).map(|j| c[j] * dc[j]).collect(),
+        l: (0..n).map(|j| l[j] / dc[j]).collect(),
+        u: (0..n).map(|j| u[j] / dc[j]).collect(),
+        a: mat,
+        at,
+        dr,
+        dc,
+    }
+}
+
+/// Ruiz と Pock–Chambolle で行・列をそろえた行列と縮尺 `(dr, dc)`。
+fn scale_matrix(a: &FaerCsr) -> (Csr, Vec<f64>, Vec<f64>) {
     let m = a.nrows();
     let n = a.ncols();
     let ar = a.as_ref();
@@ -168,7 +198,7 @@ fn scale(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64]) -> Scaled {
         }
     };
     // Ruiz: 行・列の最大絶対値を 1 に近づける。
-    for _ in 0..RUIZ_ITERS {
+    for _ in 0..tunable!("ENOMOTO_T_PDLP_RUIZ_ITERS", RUIZ_ITERS, usize) {
         let mut rmax = vec![0.0f64; m];
         let mut cmax = vec![0.0f64; n];
         for i in 0..m {
@@ -209,17 +239,7 @@ fn scale(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64]) -> Scaled {
             dc[j] *= cs[j];
         }
     }
-    let at = mat.transpose();
-    Scaled {
-        b: (0..m).map(|i| b[i] * dr[i]).collect(),
-        c: (0..n).map(|j| c[j] * dc[j]).collect(),
-        l: (0..n).map(|j| l[j] / dc[j]).collect(),
-        u: (0..n).map(|j| u[j] / dc[j]).collect(),
-        a: mat,
-        at,
-        dr,
-        dc,
-    }
+    (mat, dr, dc)
 }
 
 /// 点 `(x, y)` (前処理後) の誤差。`ax = Âx`、`aty = Âᵀy`。

@@ -1482,6 +1482,19 @@ pub fn csr_mat_t_vec_into(mat: &FaerCsr, y: &[f64], out: &mut [f64]) {
     }
 }
 
+/// `mat` (`m x n`) の転置 `matᵀ` (`n x m`) を行圧縮で作る (内点法で `Aᵀ y` を行ごとに並列に計算するため。
+/// 行圧縮のまま `Aᵀ y` を足し込むと逐次になる)。
+pub fn csr_transpose(mat: &FaerCsr) -> FaerCsr {
+    let r = mat.as_ref();
+    let mut rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); r.ncols()];
+    for i in 0..r.nrows() {
+        for (j, &v) in r.col_indices_of_row(i).zip(r.values_of_row(i)) {
+            rows[j].push((i, v));
+        }
+    }
+    csr_from_rows(&rows, r.nrows())
+}
+
 /// `mat * x` を新しい `Vec` で返す (`mat_vec_into` の確保版)。
 pub fn csr_mat_vec(mat: &FaerCsr, x: &[f64]) -> Vec<f64> {
     let mut out = vec![0.0; mat.nrows()];
