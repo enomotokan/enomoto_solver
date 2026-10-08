@@ -780,7 +780,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             // 潜りが枝刈りで終わったら、潜った道の兄弟ノード (新しいものから) に戻る (HiGHS の backtrackPlunge)。
             // 潜りの打ち切りの条件 (下界が 全体の下界 + q (打ち切り値 - 全体の下界) 以下) を満たすものだけ
-            let sibling = if plunge.is_none() && !first && env_str!("ENOMOTO_MIP_NO_SIBLING_BACKTRACK").is_none() {
+            let sibling = if plunge.is_none()
+                && !first
+                && env_str!("ENOMOTO_MIP_NO_SIBLING_BACKTRACK").is_none()
+                && !(self.params.submip && env_str!("ENOMOTO_MIP_NO_SIBLING_BACKTRACK_SUB").is_some())
+            {
                 let cutoff = self.prune_limit();
                 let glb = self.queue.best_lower_bound();
                 let limit = if cutoff.is_finite() { glb + tunable!("ENOMOTO_T_MIP_PLUNGE_QUOT", 0.25, f64) * (cutoff - glb) } else { f64::INFINITY };
@@ -849,34 +853,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         if ok {
                             if let Some(b) = &n.basis {
                                 self.restore_node_basis(b, n.basis_epoch);
-                            }
-                            if false {
-                                let b = n.basis.as_ref().unwrap();
-                                let mr = self.lp.num_rows();
-                                if n.basis_epoch == self.row_log.len() && b.row.len() == mr {
-                                    self.lp.set_basis(b);
-                                } else {
-                                    // 基底を保存した後の行の削除・追加を当てはめる (消えた行の状態は捨て、加わったカットの行は
-                                    // 論理変数を基底にする)。記録がなければ (古い形) 長さだけ合わせる
-                                    let mut b2 = (**b).clone();
-                                    if n.basis_epoch <= self.row_log.len() && env_str!("ENOMOTO_MIP_NO_ROW_LOG").is_none() {
-                                        for e in &self.row_log[n.basis_epoch..] {
-                                            match e {
-                                                RowEdit::Add(k) => b2.row.extend(std::iter::repeat_n(VarStatus::Basic, *k)),
-                                                RowEdit::Delete(mask) => {
-                                                    let mut i = 0;
-                                                    b2.row.retain(|_| {
-                                                        let keep = !mask.get(i).copied().unwrap_or(false);
-                                                        i += 1;
-                                                        keep
-                                                    });
-                                                }
-                                            }
-                                        }
-                                    }
-                                    b2.row.resize(mr, VarStatus::Basic);
-                                    self.lp.set_basis(&b2);
-                                }
                             }
                         }
                         if !ok {
@@ -2427,6 +2403,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.log(true);
         if self.params.verbose {
             eprintln!("MIP: dual proofs and conflicts {} (conflicts added {} (from proofs {}), Farkas {}, pruned {} nodes, tightened {} bounds)", self.dual_proofs.len(), self.conflicts_added, self.proof_conflicts, self.farkas_added, self.proof_prunes, self.proof_tightenings);
+            eprintln!("MIP: sibling backtracks {}", self.sibling_backtracks);
             if !self.orbitopes.is_empty() {
                 eprintln!("MIP: orbitopes {}: fixed {} bounds, pruned {} nodes", self.orbitopes.len(), self.orbitope_fixings, self.orbitope_prunes);
             }
