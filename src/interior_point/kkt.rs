@@ -618,6 +618,8 @@ pub struct NormalKkt {
     factored: bool,
     /// 対角スケーリングの係数 `S = diag(M)^{-1/2}` (使わないなら空)。
     dscale: Vec<f64>,
+    /// MKL PARDISO で分解するとき (試験用 `ENOMOTO_T_CHOL_BACKEND=1`、MKL を読み込めたとき)。
+    pardiso: Option<super::pardiso::Pardiso>,
 }
 
 /// [`NormalKkt`] を使う三つ組の数の上限 (これを超えるなら拡大系を使う)。
@@ -772,8 +774,21 @@ impl NormalKkt {
         if chol_symbolic.len_values() > max_factor_nnz() {
             return None;
         }
-        let l_values = vec![0.0f64; chol_symbolic.len_values()];
-        let numeric_buf = GlobalPodBuffer::new(chol_symbolic.factorize_numeric_llt_req::<f64>(factor_par(chol_symbolic.len_values())).ok()?);
+        // 試験用 (`ENOMOTO_T_CHOL_BACKEND=1`): MKL PARDISO で分解する (読み込めなければ faer)。faer の因子の配列は作らない。
+        let pardiso = if tunable!("ENOMOTO_T_CHOL_BACKEND", 0u8, u8) == 1 {
+            super::pardiso::Pardiso::new(p, symbolic_base.col_ptrs(), symbolic_base.row_indices())
+        } else {
+            None
+        };
+        if dbg {
+            eprintln!("NormalKkt: backend={}", if pardiso.is_some() { "pardiso" } else { "faer" });
+        }
+        let l_values = if pardiso.is_some() { Vec::new() } else { vec![0.0f64; chol_symbolic.len_values()] };
+        let numeric_buf = if pardiso.is_some() {
+            GlobalPodBuffer::new(faer::dyn_stack::StackReq::empty())
+        } else {
+            GlobalPodBuffer::new(chol_symbolic.factorize_numeric_llt_req::<f64>(factor_par(chol_symbolic.len_values())).ok()?)
+        };
         let solve_buf = GlobalPodBuffer::new(chol_symbolic.solve_in_place_req::<f64>(1).ok()?);
         let nnz = symbolic_base.compute_nnz();
         let k = dense_cols.len();
@@ -800,6 +815,7 @@ impl NormalKkt {
             tmp_p: vec![0.0; p],
             factored: false,
             dscale: Vec::new(),
+            pardiso,
         })
     }
 
@@ -817,8 +833,12 @@ impl NormalKkt {
                 *v *= s;
             }
         }
-        let llt = faer::sparse::linalg::cholesky::LltRef::<usize, f64>::new(&self.chol_symbolic, &self.l_values);
-        llt.solve_in_place_with_conj(Conj::No, from_column_major_slice_mut(rhs, self.p, 1), KKT_PARALLELISM, PodStack::new(&mut self.solve_buf));
+        if let Some(pd) = self.pardiso.as_mut() {
+            pd.solve_in_place(rhs);
+        } else {
+            let llt = faer::sparse::linalg::cholesky::LltRef::<usize, f64>::new(&self.chol_symbolic, &self.l_values);
+            llt.solve_in_place_with_conj(Conj::No, from_column_major_slice_mut(rhs, self.p, 1), KKT_PARALLELISM, PodStack::new(&mut self.solve_buf));
+        }
         if scaled {
             for (v, s) in rhs.iter_mut().zip(&self.dscale) {
                 *v *= s;
@@ -881,10 +901,14 @@ impl NormalKkt {
             dynamic_regularization_delta: tunable!("ENOMOTO_T_NORMAL_PIVOT_DELTA", 1e-8, f64),
             dynamic_regularization_epsilon: tunable!("ENOMOTO_T_NORMAL_PIVOT_EPS", 1e-14, f64),
         };
-        let ok = self
-            .chol_symbolic
-            .factorize_numeric_llt::<f64>(&mut self.l_values, m, Side::Upper, reg, factor_par(self.chol_symbolic.len_values()), PodStack::new(&mut self.numeric_buf))
-            .is_ok();
+        let ok = if let Some(pd) = self.pardiso.as_mut() {
+            let _ = (m, reg);
+            pd.factor(&self.values)
+        } else {
+            self.chol_symbolic
+                .factorize_numeric_llt::<f64>(&mut self.l_values, m, Side::Upper, reg, factor_par(self.chol_symbolic.len_values()), PodStack::new(&mut self.numeric_buf))
+                .is_ok()
+        };
         self.factored = ok;
         FACTOR_PROF.with(|c| {
             let (a, n_) = c.get();
