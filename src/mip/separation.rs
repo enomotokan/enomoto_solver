@@ -73,7 +73,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
             let saved_rows = self.lp.num_rows();
-            self.lp.add_rows(&rows);
+            self.add_cut_rows(&rows);
             let it0 = self.lp.total_iterations();
             let lim = 10 * root_iters.max(100) + 10_000;
             // 1 回の LP の時間の上限 (全体の 2%、最低 1 秒): 数値的に悪条件の LP が残り時間を使い切るのを防ぐ
@@ -93,7 +93,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 for r in remove.iter_mut().skip(saved_rows) {
                     *r = true;
                 }
-                self.lp.delete_rows(&remove);
+                self.delete_lp_rows(&remove);
                 let st2 = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
                 if self.params.verbose {
                     eprintln!("MIP: cut round {round}: LP status {st:?}, removed the cuts ({st2:?})");
@@ -208,7 +208,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.remove_inactive_cuts();
         }
         let rows: Vec<(Vec<(usize, f64)>, f64, f64)> = viol.iter().map(|&(_, k)| (self.cut_pool[k].0.clone(), f64::NEG_INFINITY, self.cut_pool[k].1)).collect();
-        self.lp.add_rows(&rows);
+        self.add_cut_rows(&rows);
         true
     }
 
@@ -236,10 +236,77 @@ impl<'a, L: MipLp> Solver<'a, L> {
             for (c, _, r) in &rows {
                 self.add_to_pool(c, *r);
             }
-            self.remove_inactive_cuts();
+            self.remove_aged_cuts();
         }
-        self.lp.add_rows(&rows);
+        self.add_cut_rows(&rows);
         true
+    }
+
+    /// LP にカットの行を加える (年齢 0)。
+    pub(super) fn add_cut_rows(&mut self, rows: &[(Vec<(usize, f64)>, f64, f64)]) {
+        self.sync_cut_age();
+        self.lp.add_rows(rows);
+        self.cut_age.extend(std::iter::repeat_n(0, rows.len()));
+    }
+
+    /// LP の行を消す (カットの年齢も合わせて消す)。
+    pub(super) fn delete_lp_rows(&mut self, remove: &[bool]) {
+        self.sync_cut_age();
+        let m0 = self.p.m;
+        let mut k = m0;
+        self.cut_age.retain(|_| {
+            let keep = !remove[k];
+            k += 1;
+            keep
+        });
+        self.lp.delete_rows(remove);
+    }
+
+    /// カットの年齢の長さを LP のカットの行の数に合わせる (足りなければ 0 で埋める)。
+    fn sync_cut_age(&mut self) {
+        let want = self.lp.num_rows().saturating_sub(self.p.m);
+        self.cut_age.resize(want, 0);
+    }
+
+    /// ノードの LP の後に呼ぶ (HiGHS の LP の aging): 効いていない (論理変数が基底で行に余裕がある) カットの年齢を
+    /// 1 増やし、効いているカットは 0 に戻す。
+    pub(super) fn age_cuts(&mut self) {
+        self.sync_cut_age();
+        if self.cut_age.is_empty() {
+            return;
+        }
+        let m0 = self.p.m;
+        let b = self.lp.basis();
+        let act = self.lp.row_activities();
+        for (k, age) in self.cut_age.iter_mut().enumerate() {
+            let i = m0 + k;
+            let (_, up) = self.lp.row_bounds(i);
+            if b.row[i] == VarStatus::Basic && act[i] < up - 1e-6 * (1.0 + up.abs()) {
+                *age = age.saturating_add(1);
+            } else {
+                *age = 0;
+            }
+        }
+    }
+
+    /// 年齢が上限 (`ENOMOTO_T_MIP_CUT_AGE_LIMIT`、HiGHS の `mip_lp_age_limit` と同じ 10) を超えたカットを LP から外す
+    /// (プールにあるカットは、違反すればまた戻る)。外した数を返す。
+    pub(super) fn remove_aged_cuts(&mut self) -> usize {
+        self.sync_cut_age();
+        let limit = tunable!("ENOMOTO_T_MIP_CUT_AGE_LIMIT", 10u32, u32);
+        let m0 = self.p.m;
+        let mut remove = vec![false; self.lp.num_rows()];
+        let mut cnt = 0;
+        for (k, &age) in self.cut_age.iter().enumerate() {
+            if age > limit {
+                remove[m0 + k] = true;
+                cnt += 1;
+            }
+        }
+        if cnt > 0 {
+            self.delete_lp_rows(&remove);
+        }
+        cnt
     }
 
     /// LP の行のうち、元の行より後ろ (カット) で論理変数が基底にあるものを外す。
@@ -263,7 +330,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         if any {
-            self.lp.delete_rows(&remove);
+            self.delete_lp_rows(&remove);
         }
     }
 

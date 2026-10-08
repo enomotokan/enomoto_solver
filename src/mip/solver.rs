@@ -189,6 +189,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) vbounds: Option<Rc<super::cuts::VarBounds>>,
     /// 根で解を見つけなかったヒューリスティクス ([`heur_bit`] のビット)。再スタートで引き継ぐ。
     failed_heurs: u64,
+    /// LP のカットの行 (元の行より後ろ) の年齢: 続けて効いていなかったノードの LP の数 ([`Self::age_cuts`])。
+    pub(super) cut_age: Vec<u32>,
     /// カット生成で整数として扱う列 (整数列と暗黙の整数列、[`MipProblem::implied_integers`])。
     pub(super) cut_int: Vec<bool>,
     /// 根で作ったカット (係数, 右辺, ノルム)。大域的に成り立つ。ノードで違反していれば LP に戻す。
@@ -305,6 +307,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
         last_log: start,
         vbounds: None,
         failed_heurs: 0,
+        cut_age: Vec::new(),
         cut_int: if env_str!("ENOMOTO_MIP_NO_IMPLINT").is_some() { p.is_int.clone() } else { p.implied_integers() },
         cut_pool: Vec::new(),
         dual_proofs: std::collections::VecDeque::new(),
@@ -865,6 +868,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 xp("m_lpstat");
                 node_obj = self.lp.objective() + self.p.offset;
+                if !self.params.submip && env_str!("ENOMOTO_MIP_NO_CUT_AGING").is_none() {
+                    self.age_cuts();
+                    // 年齢の上限を超えたカットを外す (行の削除は LP を作り直すので、ある程度まとめて)
+                    if self.nodes % tunable!("ENOMOTO_T_MIP_CUT_AGING_EVERY", 20u64, u64) == 0 {
+                        self.remove_aged_cuts();
+                    }
+                }
                 if resolves == 0 {
                     if let Some((j, up, parent_val, parent_obj)) = node.branch.filter(|b| b.3.is_finite()) {
                         let x = self.lp.col_value(j);
