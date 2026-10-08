@@ -25,6 +25,14 @@ pub struct LitConflictPool {
     /// 評価済みの印 (呼び出しごとに `stamp` を進める)。
     seen: Vec<u32>,
     stamp: u32,
+    /// 衝突ごとの年齢 (伝播・矛盾に使われずに調べられた回数。上限を超えたら消す: HiGHS の conflict aging)
+    ages: Vec<u32>,
+    max_age: u32,
+    pub removed: u64,
+    /// 年齢で消して空いた枠
+    free: Vec<usize>,
+    /// 前回の伝播の後に衝突を加えたか (加えたら次は記録の最初から調べる)
+    pub dirty: bool,
 }
 
 #[inline]
@@ -49,6 +57,11 @@ impl LitConflictPool {
             slot_key: Vec::new(),
             seen: Vec::new(),
             stamp: 0,
+            dirty: false,
+            ages: Vec::new(),
+            max_age: tunable!("ENOMOTO_T_MIP_LIT_CONFLICT_AGE", 1000u32, u32),
+            removed: 0,
+            free: Vec::new(),
         }
     }
 
@@ -72,10 +85,13 @@ impl LitConflictPool {
         if !self.keys.insert(key) {
             return false;
         }
-        let slot = if self.slots.len() < self.cap {
+        let slot = if let Some(f) = self.free.pop() {
+            f
+        } else if self.slots.len() < self.cap {
             self.slots.push(None);
             self.slot_key.push(0);
             self.seen.push(0);
+            self.ages.push(0);
             self.slots.len() - 1
         } else {
             let s = self.next % self.cap;
@@ -93,6 +109,8 @@ impl LitConflictPool {
         self.live_lits += l.len();
         self.slot_key[slot] = key;
         self.slots[slot] = Some(l);
+        self.ages[slot] = 0;
+        self.dirty = true;
         // 古い索引の項目が増えたら作り直す
         if self.index_len > 4 * self.live_lits + 1000 {
             for v in self.col_index.iter_mut() {
@@ -151,8 +169,12 @@ impl LitConflictPool {
                         }
                     }
                     match (nopen, open) {
-                        (0, _) => return Err(()),
+                        (0, _) => {
+                            self.ages[s] = 0;
+                            return Err(());
+                        }
                         (1, Some(&(k, upper, v))) => {
+                            self.ages[s] = 0;
                             // 否定: x <= v の否定は x >= v + 1 (整数) / x >= v (連続、緩めたもの)
                             let int = p.is_int[k];
                             if upper {
@@ -161,7 +183,17 @@ impl LitConflictPool {
                                 fixes.push((k, true, if int { v.ceil() - 1.0 } else { v }));
                             }
                         }
-                        _ => {}
+                        _ => {
+                            self.ages[s] += 1;
+                            if self.ages[s] > self.max_age {
+                                if let Some(old) = self.slots[s].take() {
+                                    self.live_lits -= old.len();
+                                    self.keys.remove(&self.slot_key[s]);
+                                    self.removed += 1;
+                                    self.free.push(s);
+                                }
+                            }
+                        }
                     }
                 }
             }

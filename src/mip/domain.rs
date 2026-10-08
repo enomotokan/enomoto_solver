@@ -66,6 +66,8 @@ pub struct Domain {
     pub conflict: Option<ConflictSrc>,
     /// 今伝播している行 (境界の変更の理由として記録する。伝播の外では `-1`)。
     cur_reason: i32,
+    /// [`Self::take_low_water`] から後に変更の記録が最も短くなったときの長さ (巻き戻しで下がる)。
+    low_water: usize,
     /// 根に戻ったときに適用する大域的な境界の締め付け (列, 上限か, 値)。
     pending_global: Vec<(usize, bool, f64)>,
     /// 根に戻った回数 (活動量の誤差の蓄積を防ぐための定期的な再計算に使う)。
@@ -107,6 +109,7 @@ impl Domain {
             infeasible: false,
             conflict: None,
             cur_reason: -1,
+            low_water: 0,
             pending_global: Vec::new(),
             resets: 0,
             global_lo: p.col_lo.clone(),
@@ -152,6 +155,13 @@ impl Domain {
     /// 記録の位置 `pos` より後の境界の変更 (列, 上限か, 変更後の値)。同じ列・側が何度も変わったら最後のものが後に来る。
     pub fn changes_since(&self, pos: usize) -> Vec<(usize, bool, f64)> {
         self.stack[pos.min(self.stack.len())..].iter().map(|c| (c.col, c.upper, c.new)).collect()
+    }
+
+    /// 前回呼んでから記録が最も短くなったときの長さを返し、今の長さから数え直す。
+    pub fn take_low_water(&mut self) -> usize {
+        let l = self.low_water.min(self.stack.len());
+        self.low_water = self.stack.len();
+        l
     }
 
     pub fn stack_len(&self) -> usize {
@@ -285,6 +295,7 @@ impl Domain {
 
     /// 記録を `pos` まで巻き戻す (境界と活動量を戻し、矛盾の印を消す)。
     pub fn backtrack_to(&mut self, p: &MipProblem, pos: usize) {
+        self.low_water = self.low_water.min(pos);
         while self.stack.len() > pos {
             let c = self.stack.pop().unwrap();
             let cur = if c.upper { self.up[c.col] } else { self.lo[c.col] };
@@ -351,6 +362,7 @@ impl Domain {
     /// 根にいる間に積んだ変更を大域的なもの (巻き戻されないもの) にする。
     pub fn commit_root(&mut self) {
         self.stack.clear();
+        self.low_water = 0;
         self.global_lo.clone_from(&self.lo);
         self.global_up.clone_from(&self.up);
     }

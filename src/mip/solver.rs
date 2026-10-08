@@ -265,6 +265,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     lit_conflicts: super::conflict_pool::LitConflictPool,
     /// [加えた数, 刈ったノード, 締めた境界]
     lit_stats: [u64; 3],
+    /// リテラルの衝突で前回調べたときの定義域の記録の長さ
+    lit_pos: usize,
     /// 診断用: 伝播の矛盾での衝突解析 [呼び出し, 1-UIP なし, 1-UIP を行にできない, 決定の組なし, 決定の組も行にできない]、
     /// 行にできなかった理由 [連続列, 一般整数 2 つ以上・範囲外, 同じ列の両側]
     conf_stats: [u64; 8],
@@ -393,6 +395,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
         sb_prop_stats: [0; 2],
         lit_conflicts: super::conflict_pool::LitConflictPool::new(p.n, tunable!("ENOMOTO_T_MIP_LIT_CONFLICT_POOL", 5000usize, usize)),
         lit_stats: [0; 3],
+        lit_pos: 0,
         conf_stats: [0; 8],
         farkas_added: 0,
         proof_prunes: 0,
@@ -950,7 +953,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
             };
             // 境界リテラルの衝突による伝播
             let prop_ok = prop_ok && {
-                match self.lit_conflicts.propagate(self.p, &mut self.dom, 0) {
+                // 前回調べた後の変更だけを調べる (巻き戻しでそれより短くなっていればそこから、衝突が増えていれば最初から)
+                let lw = self.dom.take_low_water();
+                let start = if self.lit_conflicts.dirty || env_str!("ENOMOTO_MIP_LIT_FULL_SCAN").is_some() { 0 } else { self.lit_pos.min(lw) };
+                self.lit_conflicts.dirty = false;
+                let r = self.lit_conflicts.propagate(self.p, &mut self.dom, start);
+                self.lit_pos = self.dom.stack_len();
+                self.dom.take_low_water();
+                match r {
                     Ok(k) => {
                         self.lit_stats[2] += k as u64;
                         true
@@ -2788,7 +2798,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             eprintln!("MIP: dual proofs and conflicts {} (conflicts added {} (from proofs {}), Farkas {}, pruned {} nodes, tightened {} bounds)", self.dual_proofs.len(), self.conflicts_added, self.proof_conflicts, self.farkas_added, self.proof_prunes, self.proof_tightenings);
             eprintln!("MIP: propagation conflicts: analysed {}, no 1-UIP {}, 1-UIP not a row {}, no decision set {}, decision set not a row {}; not a row because continuous {}, general integer {}, both sides {}", self.conf_stats[0], self.conf_stats[1], self.conf_stats[2], self.conf_stats[3], self.conf_stats[4], self.conf_stats[5], self.conf_stats[6], self.conf_stats[7]);
             eprintln!("MIP: objective propagation: pruned {} nodes, tightened {} bounds; strong branching children infeasible by propagation {}, propagated bounds passed to child LPs {}", self.obj_prop_stats[0], self.obj_prop_stats[1], self.sb_prop_stats[0], self.sb_prop_stats[1]);
-            eprintln!("MIP: literal conflicts: added {}, in pool {}, pruned {} nodes, tightened {} bounds", self.lit_stats[0], self.lit_conflicts.len(), self.lit_stats[1], self.lit_stats[2]);
+            eprintln!("MIP: literal conflicts: added {}, in pool {} (aged out {}), pruned {} nodes, tightened {} bounds", self.lit_stats[0], self.lit_conflicts.len(), self.lit_conflicts.removed, self.lit_stats[1], self.lit_stats[2]);
             eprintln!("MIP: conflict analysis (HiGHS style): calls {}, conflicts {}, added {}, mean length {:.1}, max length {}, {:.2}s", self.multi_stats[0], self.multi_stats[1], self.multi_stats[2], self.multi_stats[3] as f64 / self.multi_stats[1].max(1) as f64, self.conflict_max_len_multi(), self.multi_secs);
             let cf: Vec<u64> = super::domain::CONFLICT_FAIL.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();
             eprintln!("MIP: conflict analysis failures (all calls): no decision {}, too long midway {}, reason row lacks column {}, empty {}, too long at the end {} (total length {}), max length {}", cf[0], cf[1], cf[2], cf[3], cf[4], cf[5], self.conflict_max_len());
