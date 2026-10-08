@@ -1,0 +1,5 @@
+# METIS (metis-sys の同梱ソース) をコンパイルする C のフラグ。GKlib のスレッド局所変数を共有ライブラリ向けの
+# 置き方 (global-dynamic) にしないと、Python から拡張モジュールを読み込むときに
+# "cannot allocate memory in static TLS block" で失敗する。
+[env]
+CFLAGS = "-fPIC -ftls-model=global-dynamic"

@@ -51,6 +51,98 @@ fn chol_symbolic_params() -> faer::sparse::linalg::cholesky::CholeskySymbolicPar
     }
 }
 
+/// METIS の nested dissection による並べ替え (上三角の非零の形 `pat` から隣接グラフを作る)。`(perm, perm_inv)` を返す
+/// (`perm[新] = 旧`)。失敗したら `None`。
+fn metis_ordering(pat: &SymbolicSparseColMat<usize>) -> Option<(Vec<usize>, Vec<usize>)> {
+    let n = pat.nrows();
+    if n == 0 || n > i32::MAX as usize {
+        return None;
+    }
+    let cp = pat.col_ptrs();
+    let ri = pat.row_indices();
+    let mut deg = vec![0usize; n];
+    for c in 0..n {
+        for &r in &ri[cp[c]..cp[c + 1]] {
+            if r != c {
+                deg[r] += 1;
+                deg[c] += 1;
+            }
+        }
+    }
+    let mut xadj = vec![0i32; n + 1];
+    for v in 0..n {
+        xadj[v + 1] = xadj[v] + deg[v] as i32;
+    }
+    let mut fill: Vec<usize> = xadj[..n].iter().map(|&v| v as usize).collect();
+    let mut adj = vec![0i32; xadj[n] as usize];
+    for c in 0..n {
+        for &r in &ri[cp[c]..cp[c + 1]] {
+            if r != c {
+                adj[fill[r]] = c as i32;
+                fill[r] += 1;
+                adj[fill[c]] = r as i32;
+                fill[c] += 1;
+            }
+        }
+    }
+    let mut nv = n as i32;
+    let mut perm = vec![0i32; n];
+    let mut iperm = vec![0i32; n];
+    let mut options = [0i32; metis_sys::METIS_NOPTIONS as usize];
+    // SAFETY: 配列の長さは METIS の要求どおり (xadj は n+1、adjncy は xadj[n]、perm・iperm は n、options は METIS_NOPTIONS)。
+    unsafe {
+        metis_sys::METIS_SetDefaultOptions(options.as_mut_ptr());
+        let st = metis_sys::METIS_NodeND(
+            &mut nv,
+            xadj.as_mut_ptr(),
+            adj.as_mut_ptr(),
+            std::ptr::null_mut(),
+            options.as_mut_ptr(),
+            perm.as_mut_ptr(),
+            iperm.as_mut_ptr(),
+        );
+        if st != metis_sys::rstatus_et_METIS_OK as i32 {
+            return None;
+        }
+    }
+    Some((perm.into_iter().map(|v| v as usize).collect(), iperm.into_iter().map(|v| v as usize).collect()))
+}
+
+/// 正規方程式の記号分解。並べ替えは `ENOMOTO_T_CHOL_ORDER`: 0 = AMD (既定)、1 = METIS (nested dissection)、
+/// 2 = 両方を試して因子の非零の少ない方 (行数 `ENOMOTO_T_CHOL_ORDER_MIN_N` 以上のときだけ METIS も試す)。
+fn symbolic_with_ordering(pat: &SymbolicSparseColMat<usize>, dbg: bool) -> Option<SymbolicCholesky<usize>> {
+    let mode = tunable!("ENOMOTO_T_CHOL_ORDER", 0u8, u8);
+    let min_n = tunable!("ENOMOTO_T_CHOL_ORDER_MIN_N", 1000usize, usize);
+    let amd = || factorize_symbolic_cholesky::<usize>(pat.as_ref(), Side::Upper, SymmetricOrdering::Amd, chol_symbolic_params()).ok();
+    if mode == 0 || pat.nrows() < min_n {
+        return amd();
+    }
+    let t0 = std::time::Instant::now();
+    let nd = metis_ordering(pat).and_then(|(perm, perm_inv)| {
+        let p = faer::perm::PermRef::<usize>::new_checked(&perm, &perm_inv, pat.nrows());
+        factorize_symbolic_cholesky::<usize>(pat.as_ref(), Side::Upper, SymmetricOrdering::Custom(p), chol_symbolic_params()).ok()
+    });
+    let t_nd = t0.elapsed().as_secs_f64();
+    if mode == 1 {
+        if dbg {
+            eprintln!("NormalKkt: METIS nnz(L)={:?} in {t_nd:.2}s", nd.as_ref().map(|c| c.len_values()));
+        }
+        return nd.or_else(amd);
+    }
+    let a = amd();
+    if dbg {
+        eprintln!(
+            "NormalKkt: AMD nnz(L)={:?}, METIS nnz(L)={:?} (METIS {t_nd:.2}s)",
+            a.as_ref().map(|c| c.len_values()),
+            nd.as_ref().map(|c| c.len_values())
+        );
+    }
+    match (a, nd) {
+        (Some(a), Some(nd)) => Some(if nd.len_values() < a.len_values() { nd } else { a }),
+        (a, nd) => a.or(nd),
+    }
+}
+
 /// 数値分解に使う並列度。因子の非零数 `nnz_l` が `ENOMOTO_T_FACTOR_PAR_NNZ` (既定 [`FACTOR_PAR_NNZ`]、0 で使わない) 以上なら
 /// 並列、それ未満は逐次 (Fable の調査と Netlib + Kennington の比較で、小さな疎 Cholesky では faer の並列分解の分割の手間が
 /// 計算を上回った。一方 qap15 (nnz(L) 1,770 万) では 1 回の分解が 1.3 秒かかり、逐次では内点法の 9 割を占める)。
@@ -651,7 +743,7 @@ impl NormalKkt {
                 t0.elapsed().as_secs_f64()
             );
         }
-        let chol_symbolic = factorize_symbolic_cholesky::<usize>(symbolic_base.as_ref(), Side::Upper, SymmetricOrdering::Amd, chol_symbolic_params()).ok()?;
+        let chol_symbolic = symbolic_with_ordering(&symbolic_base, dbg)?;
         if dbg {
             eprintln!("NormalKkt: symbolic (AMD) nnz(L)={} at {:.2}s", chol_symbolic.len_values(), t0.elapsed().as_secs_f64());
         }
