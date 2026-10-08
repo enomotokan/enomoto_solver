@@ -2218,9 +2218,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// の行にしてプールに入れる (入れたら真)。
     /// 目的関数の伝播 (HiGHS の objective propagation): `sum c_j x_j <= U - 定数項` (`U` は打ち切り値) を 1 本の行として
     /// 伝播する。最小活動量が右辺を超えれば矛盾 (この行を証明として衝突解析する)。そうでなければ各列の境界を
-    /// 余裕の分だけ締める (締めた境界は外から来た変更として記録)。矛盾なら偽。`ENOMOTO_MIP_NO_OBJ_PROP` で無効。
+    /// 余裕の分だけ締める (締めた境界は外から来た変更として記録)。矛盾なら偽。
     pub(super) fn propagate_objective(&mut self) -> bool {
-        if env_str!("ENOMOTO_MIP_NO_OBJ_PROP").is_some() || self.dom.infeasible {
+        // 既定では無効 (`ENOMOTO_MIP_OBJ_PROP` で有効): neos-911970 の下界・暫定解は良くなるが、40 問では 2 回の比較とも
+        // わずかに悪化した (sgeomean +0.2〜0.3)
+        if env_str!("ENOMOTO_MIP_OBJ_PROP").is_none() || self.dom.infeasible {
             return !self.dom.infeasible;
         }
         let p = self.p;
