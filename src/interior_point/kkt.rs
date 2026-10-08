@@ -679,7 +679,7 @@ pub struct NormalKkt {
     dscale: Vec<f64>,
     /// MKL PARDISO で分解するとき (試験用 `ENOMOTO_T_CHOL_BACKEND=1`、MKL を読み込めたとき)。
     pardiso: Option<super::pardiso::Pardiso>,
-    /// 自前のマルチフロンタル法で分解するとき (試験用 `ENOMOTO_T_CHOL_BACKEND=2`)。
+    /// 自前のマルチフロンタル法で分解するとき (既定の `ENOMOTO_T_CHOL_BACKEND=2`、演算量の見積もりが下限以上のとき)。
     mf: Option<super::multifrontal::Multifrontal>,
 }
 
@@ -828,7 +828,8 @@ impl NormalKkt {
                 t0.elapsed().as_secs_f64()
             );
         }
-        let backend = tunable!("ENOMOTO_T_CHOL_BACKEND", 0u8, u8);
+        // 0: faer、1: MKL PARDISO (試験用)、2: 自前のマルチフロンタル法 (既定、第 61 回の比較で決めた)。
+        let backend = tunable!("ENOMOTO_T_CHOL_BACKEND", 2u8, u8);
         let chol_symbolic = symbolic_with_ordering(&symbolic_base, dbg)?;
         // 2: faer が supernodal を選び、演算量の見積もりが `ENOMOTO_T_MF_MIN_FLOPS` 以上なら自前のマルチフロンタル法で
         // 分解する (小さな・simplicial 向きの因子は faer のまま: osa-60 は因子が 3.2 万で、supernodal にすると遅い)。

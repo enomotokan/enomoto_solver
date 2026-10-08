@@ -1,4 +1,4 @@
-//! 消去木の枝ごとに並列に分解するマルチフロンタル法の疎 Cholesky 分解 (試験用、`ENOMOTO_T_CHOL_BACKEND=2`)。
+//! 消去木の枝ごとに並列に分解するマルチフロンタル法の疎 Cholesky 分解 (内点法の正規方程式の既定。`ENOMOTO_T_CHOL_BACKEND=0` で faer)。
 //!
 //! faer の記号分解 (並べ替えと supernode の区切り・行の形) をそのまま使い、数値分解だけを自前で行う。
 //! supernode `s` (列 `[b, e)`、その下の行の形 `pattern`) ごとに、前線行列 `F` (大きさ `nc + r`) に元の行列の値と
