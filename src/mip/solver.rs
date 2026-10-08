@@ -1689,10 +1689,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.restore_stats.0 += 1;
         if nb != mr {
             self.restore_stats.1 += 1;
-            // 保存した基底で非基底だった (効いていた) カットの行が削除されていると基底変数が多すぎる。
-            // set_basis の修復 (構造変数を後ろから外す) は双対実行可能性を壊し、数百反復かかる
-            // (neos-911970: 復元の 9 割)。今の LP の基底 (直前のノードの最適基底、双対実行可能) のまま解く
-            if env_str!("ENOMOTO_MIP_RESTORE_MISMATCHED_BASIS").is_none() {
+            // 保存した基底で非基底だった (効いていた) カットの行が削除されていると基底変数が多すぎる。既定では
+            // set_basis の修復 (構造変数を後ろから外す) に任せる。`ENOMOTO_MIP_RESTORE_KEEP_CURRENT` なら今の LP の
+            // 基底 (直前のノードの最適基底) のまま解く (HiGHS と同じ。neos-911970 では 1 ノードの反復が大きく減るが、
+            // misc07 などでは遠いノードの基底から解くことになり悪化した: 40 問で 19 -> 18 問)
+            if env_str!("ENOMOTO_MIP_RESTORE_KEEP_CURRENT").is_some() {
                 return;
             }
         }
