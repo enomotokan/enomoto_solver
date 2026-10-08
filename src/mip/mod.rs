@@ -228,8 +228,110 @@ fn presolve_mip(p: &MipProblem, verbose: bool) -> Option<Presolved> {
     let x_orig = crate::presolve::scaling::unscale_x(&pre.scaling, &x_orig);
     let shift = p.objective(&x_orig) - (pre.c.iter().zip(&x_red).map(|(c, x)| c * x).sum::<f64>() + p.offset);
     let offset = if shift.is_finite() { p.offset + shift } else { p.offset };
-    let prob = MipProblem::from_rows(pre.lb.clone(), pre.ub.clone(), pre.c.clone(), offset, p.sense_sign, p.is_int.clone(), rows, row_lo, row_up);
+    let mut prob = MipProblem::from_rows(pre.lb.clone(), pre.ub.clone(), pre.c.clone(), offset, p.sense_sign, p.is_int.clone(), rows, row_lo, row_up);
+    if env_str!("ENOMOTO_MIP_NO_PROBING").is_none() {
+        match probe(&mut prob, verbose) {
+            Some(false) => return Some(Presolved::Infeasible),
+            _ => {}
+        }
+    }
     Some(Presolved::Reduced { prob, postsolve: pre.postsolve_log, scaling: pre.scaling })
+}
+
+/// プロービング (SCIP・HiGHS の前処理と同じ): 0-1 列 `x_j` を 0 にして伝播した結果と 1 にして伝播した結果を比べる。
+///
+/// - 両方矛盾すれば問題は実行不能 (`Some(false)` を返す)。
+/// - 片方だけ矛盾すれば、もう片方の値に固定する。
+/// - どちらも矛盾しなければ、各列の境界を両方の結果の弱い方 (下限は小さい方、上限は大きい方) まで締める
+///   (どちらの値でも成り立つので、大域的に成り立つ)。
+///
+/// 列の値は変えない (境界を締めるだけ) ので後処理は要らない。手間は伝播で走査した行の長さの合計
+/// (非零数の `ENOMOTO_T_MIP_PROBE_WORK` 倍、既定 200 倍) と時間 (`ENOMOTO_T_MIP_PROBE_TIME` 秒、既定 2 秒) で打ち切る。
+/// 締めた境界があれば `Some(true)`、何もなければ `None`。
+fn probe(prob: &mut MipProblem, verbose: bool) -> Option<bool> {
+    use domain::Domain;
+    let t0 = std::time::Instant::now();
+    let n = prob.n;
+    let nnz: usize = prob.rows.iter().map(|r| r.len()).sum();
+    let work_cap = (tunable!("ENOMOTO_T_MIP_PROBE_WORK", 200.0, f64) * nnz as f64) as u64 + 100_000;
+    let time_cap = tunable!("ENOMOTO_T_MIP_PROBE_TIME", 2.0, f64);
+    let mut dom = Domain::new(prob);
+    if !dom.propagate(prob) {
+        return Some(false);
+    }
+    // 行の多い列から
+    let mut cands: Vec<usize> = (0..n).filter(|&j| prob.is_int[j] && dom.lo[j] == 0.0 && dom.up[j] == 1.0).collect();
+    cands.sort_by_key(|&j| std::cmp::Reverse(prob.cols[j].len()));
+    let work0 = dom.debug_work();
+    let (mut probed, mut fixed, mut tightened) = (0usize, 0usize, 0usize);
+    for (cnt, &j) in cands.iter().enumerate() {
+        if cnt % 16 == 0 && (dom.debug_work() - work0 > work_cap || t0.elapsed().as_secs_f64() > time_cap) {
+            break;
+        }
+        if dom.lo[j] == dom.up[j] {
+            continue;
+        }
+        probed += 1;
+        let pos = dom.stack_len();
+        // x_j = 0
+        dom.tighten_upper(prob, j, 0.0);
+        let ok0 = dom.propagate(prob);
+        let (lo0, up0) = if ok0 { (dom.lo.clone(), dom.up.clone()) } else { (Vec::new(), Vec::new()) };
+        dom.backtrack_to(prob, pos);
+        // x_j = 1
+        dom.tighten_lower(prob, j, 1.0);
+        let ok1 = dom.propagate(prob);
+        let (lo1, up1) = if ok1 { (dom.lo.clone(), dom.up.clone()) } else { (Vec::new(), Vec::new()) };
+        dom.backtrack_to(prob, pos);
+        match (ok0, ok1) {
+            (false, false) => return Some(false),
+            (false, true) | (true, false) => {
+                let v = if ok1 { 1.0 } else { 0.0 };
+                dom.tighten_lower(prob, j, v);
+                dom.tighten_upper(prob, j, v);
+                if !dom.propagate(prob) {
+                    return Some(false);
+                }
+                fixed += 1;
+            }
+            (true, true) => {
+                let mut any = false;
+                for k in 0..n {
+                    let l = lo0[k].min(lo1[k]);
+                    let u = up0[k].max(up1[k]);
+                    if l > dom.lo[k] + 1e-9 * (1.0 + l.abs()) {
+                        dom.tighten_lower(prob, k, l);
+                        any = true;
+                        tightened += 1;
+                    }
+                    if u < dom.up[k] - 1e-9 * (1.0 + u.abs()) {
+                        dom.tighten_upper(prob, k, u);
+                        any = true;
+                        tightened += 1;
+                    }
+                }
+                if any && !dom.propagate(prob) {
+                    return Some(false);
+                }
+            }
+        }
+    }
+    if verbose {
+        eprintln!("MIP: probing: {probed} of {} binaries probed, {fixed} fixed, {tightened} bounds tightened ({:.2}s)", cands.len(), t0.elapsed().as_secs_f64());
+    }
+    if fixed == 0 && tightened == 0 {
+        return None;
+    }
+    // 締めた境界を問題に入れる (連続列の境界は伝播の誤差の分だけ緩めてある)
+    for k in 0..n {
+        if dom.lo[k] > prob.col_lo[k] {
+            prob.col_lo[k] = dom.lo[k];
+        }
+        if dom.up[k] < prob.col_up[k] {
+            prob.col_up[k] = dom.up[k];
+        }
+    }
+    Some(true)
 }
 
 /// 係数の強化 (coefficient tightening、SCIP・HiGHS の前処理と同じ): 片側の行 `sum a_j x_j <= b` (`>=` の行は符号を
