@@ -188,6 +188,11 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) rens_infeas: (f64, u32),
     /// ノードの LP (強分岐以外) に使った反復数と回数。
     node_iters: u64,
+    /// ノードの最初の LP (カット・強分岐後の解き直しを除く) の反復数
+    node_iters_first: u64,
+    /// 基底の復元の回数、そのうち基底の数が行数と合わなかった回数、復元後の最初の LP の反復数 (診断用)
+    restore_stats: (u64, u64, u64),
+    restored_now: bool,
     node_lps: u64,
     /// ノードの LP にかかった時間の合計 (秒)。1 回の LP の時間の上限に使う。
     node_lp_secs: f64,
@@ -328,6 +333,9 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
         rens_succ: (0.0, 0),
         rens_infeas: (0.0, 0),
         node_iters: 0,
+        node_iters_first: 0,
+        restore_stats: (0, 0, 0),
+        restored_now: false,
         node_lps: 0,
         node_lp_secs: 0.0,
         unresolved: false,
@@ -561,7 +569,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.last_log = Instant::now();
         let ub = self.incumbent.as_ref().map(|(z, _)| *z).unwrap_or(f64::INFINITY);
         eprintln!(
-            "MIP: {:8.2}s nodes {:8} open {:7} lb {:.8e} ub {:.8e} lp_iters {} sb_iters {} sb_lps {} sb_secs {:.2} node_iters {} heur_iters {} dive_iters {} lp_rows {}",
+            "MIP: {:8.2}s nodes {:8} open {:7} lb {:.8e} ub {:.8e} lp_iters {} sb_iters {} sb_lps {} sb_secs {:.2} node_iters {} (first {}, lps {}) heur_iters {} dive_iters {} lp_rows {}",
             self.start.elapsed().as_secs_f64(),
             self.nodes,
             self.queue.len(),
@@ -572,6 +580,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.sb_lps,
             self.sb_secs,
             self.node_iters,
+            self.node_iters_first,
+            self.node_lps,
             self.heur_iters,
             self.dive_iters,
             self.lp.num_rows()
@@ -580,6 +590,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     fn run(&mut self) -> MipResult {
         // 再スタート前の暫定解 (実行可能性は try_incumbent が確かめる)
+        if let Some(cuts) = super::RESTART_CUTS.with(|s| s.borrow_mut().take()) {
+            let n0 = self.cut_pool.len();
+            for (c, r) in &cuts {
+                if c.iter().all(|&(j, _)| j < self.p.n) {
+                    self.add_to_pool(c, *r);
+                }
+            }
+            if self.params.verbose {
+                eprintln!("MIP: {} cuts from before the restart put in the cut pool", self.cut_pool.len() - n0);
+            }
+        }
         if let Some(x) = START_SOL.with(|s| s.borrow_mut().take()) {
             if x.len() == self.p.n {
                 let ok = self.try_incumbent(x);
@@ -952,6 +973,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 self.node_lp_secs += t_lp.elapsed().as_secs_f64();
                 self.node_iters += self.lp.total_iterations() - it0;
+                if resolves == 0 {
+                    self.node_iters_first += self.lp.total_iterations() - it0;
+                    if std::mem::take(&mut self.restored_now) {
+                        self.restore_stats.2 += self.lp.total_iterations() - it0;
+                    }
+                }
                 self.node_lps += 1;
                 match st {
                     LpStatus::Optimal => {}
@@ -1636,6 +1663,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
     fn restore_node_basis(&mut self, b: &super::lp::Basis, epoch: usize) {
         let mr = self.lp.num_rows();
         if epoch == self.row_log.len() && b.row.len() == mr {
+            self.restore_stats.0 += 1;
+            self.restored_now = true;
             self.lp.set_basis(b);
             return;
         }
@@ -1656,6 +1685,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         b2.row.resize(mr, VarStatus::Basic);
+        let nb = b2.col.iter().chain(b2.row.iter()).filter(|&&s| s == VarStatus::Basic).count();
+        self.restore_stats.0 += 1;
+        if nb != mr {
+            self.restore_stats.1 += 1;
+            // 保存した基底で非基底だった (効いていた) カットの行が削除されていると基底変数が多すぎる。
+            // set_basis の修復 (構造変数を後ろから外す) は双対実行可能性を壊し、数百反復かかる
+            // (neos-911970: 復元の 9 割)。今の LP の基底 (直前のノードの最適基底、双対実行可能) のまま解く
+            if env_str!("ENOMOTO_MIP_RESTORE_MISMATCHED_BASIS").is_none() {
+                return;
+            }
+        }
+        self.restored_now = true;
         self.lp.set_basis(&b2);
     }
 
@@ -2283,9 +2324,24 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // カットは根の LP で効いている (活動量が上限にある) ものだけ残す。全部残すと再スタートのたびに行が増え続け
         // (neos-911970: 4 回で 107 行 -> 約 415 行)、ノードの LP が重くなる
         let keep_all = env_str!("ENOMOTO_MIP_RESTART_KEEP_ALL_CUTS").is_some();
+        // `ENOMOTO_MIP_RESTART_CUTS_TO_POOL`: カットを問題の行にせず、新しい求解のカットプールに渡す (HiGHS と同じ。
+        // 行が増えずノードの LP は軽いが、こちらの分離はカットの行の上にカットを作れなくなるので弱くなる:
+        // 対称性の乱数問題で根の下界が閉じず木が数万ノードになる)
+        let cuts_as_rows = env_str!("ENOMOTO_MIP_RESTART_CUTS_TO_POOL").is_none() || keep_all;
+        let mut carry: Vec<(Vec<(usize, f64)>, f64)> = Vec::new();
         let act = self.lp.row_activities();
         for i in p.m..self.lp.num_rows() {
             let (l, u) = self.lp.row_bounds(i);
+            if !cuts_as_rows {
+                let r = self.lp.row(i);
+                if u.is_finite() {
+                    carry.push((r.clone(), u));
+                }
+                if l.is_finite() {
+                    carry.push((r.iter().map(|&(j, v)| (j, -v)).collect(), -l));
+                }
+                continue;
+            }
             let tight = (u.is_finite() && act[i] >= u - 1e-6 * (1.0 + u.abs())) || (l.is_finite() && act[i] <= l + 1e-6 * (1.0 + l.abs()));
             if !keep_all && !tight {
                 continue;
@@ -2327,12 +2383,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 self.start.elapsed().as_secs_f64()
             );
         }
+        if !cuts_as_rows {
+            carry.extend(self.cut_pool.iter().map(|(c, r, _)| (c.clone(), *r)));
+            super::RESTART_CUTS.with(|s| *s.borrow_mut() = Some(carry));
+        }
         // 暫定解を引き継ぐ (新しい問題は列が同じ)
         if env_str!("ENOMOTO_MIP_RESTART_NO_INCUMBENT").is_none() {
             super::RESTART_SOL.with(|s| *s.borrow_mut() = self.incumbent.as_ref().map(|(_, x)| x.clone()));
         }
         let r = super::solve_problem(&newp, params, true);
         super::RESTART_SOL.with(|s| *s.borrow_mut() = None);
+        super::RESTART_CUTS.with(|s| *s.borrow_mut() = None);
         let nodes = self.nodes + r.nodes;
         let iters = self.lp.total_iterations() + r.lp_iterations;
         // 良い方の解を採る
@@ -2407,7 +2468,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.log(true);
         if self.params.verbose {
             eprintln!("MIP: dual proofs and conflicts {} (conflicts added {} (from proofs {}), Farkas {}, pruned {} nodes, tightened {} bounds)", self.dual_proofs.len(), self.conflicts_added, self.proof_conflicts, self.farkas_added, self.proof_prunes, self.proof_tightenings);
-            eprintln!("MIP: sibling backtracks {}", self.sibling_backtracks);
+            eprintln!("MIP: sibling backtracks {}; basis restores {} (basic count mismatch {}), first LP iterations after a restore {}", self.sibling_backtracks, self.restore_stats.0, self.restore_stats.1, self.restore_stats.2);
             if !self.orbitopes.is_empty() {
                 eprintln!("MIP: orbitopes {}: fixed {} bounds, pruned {} nodes", self.orbitopes.len(), self.orbitope_fixings, self.orbitope_prunes);
             }

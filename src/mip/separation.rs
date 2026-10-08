@@ -46,7 +46,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 break;
             }
             let t_sep = std::time::Instant::now();
-            let cands = self.separate(&x, false);
+            let mut cands = self.separate(&x, false);
+            // カットプール (再スタート前のカットなど) で違反しているものも候補にする
+            if self.params.restarts > 0 && round < tunable!("ENOMOTO_T_MIP_ROOT_POOL_ROUNDS", 5usize, usize) && env_str!("ENOMOTO_MIP_NO_ROOT_POOL").is_none() {
+                for (c, r, norm) in &self.cut_pool {
+                    let act: f64 = c.iter().map(|&(j, v)| v * x[j]).sum();
+                    let eff = (act - r) / norm.max(1e-12);
+                    if eff > 1e-4 && act - r > 1e-6 * (1.0 + r.abs()) {
+                        cands.push(Candidate { coefs: c.clone(), rhs: *r, efficacy: eff });
+                    }
+                }
+            }
             let ncands = cands.len();
             if cands.is_empty() {
                 break;
