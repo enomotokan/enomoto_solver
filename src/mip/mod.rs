@@ -12,6 +12,7 @@ pub(crate) mod lp;
 pub(crate) mod lp_api;
 pub(crate) mod problem;
 pub(crate) mod domain;
+pub(crate) mod conflict_pool;
 pub(crate) mod queue;
 pub(crate) mod pseudocost;
 pub(crate) mod solver;
