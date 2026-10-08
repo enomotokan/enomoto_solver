@@ -769,7 +769,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
     pub(super) fn feasibility_jump(&mut self, effort: u64, time_cap: f64) -> bool {
         let seed = self.rng ^ 0x9E37_79B9_7F4A_7C15;
         self.rand();
-        match fj_search(self.p, &self.dom.lo, &self.dom.up, effort, time_cap, seed, None) {
+        let found = match self.orig.clone() {
+            Some(o) => fj_search(&o, &o.col_lo, &o.col_up, effort, time_cap, seed, None),
+            None => fj_search(self.p, &self.dom.lo, &self.dom.up, effort, time_cap, seed, None),
+        };
+        match found {
             Some(x) => self.try_incumbent(x),
             None => false,
         }

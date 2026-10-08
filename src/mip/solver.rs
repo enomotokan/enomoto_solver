@@ -206,6 +206,10 @@ pub(super) struct Solver<'a, L: MipLp> {
     proof_conflicts: u64,
     /// 完全オービトープ (orbitopal fixing に使う。サブ MIP では空)。
     orbitopes: Rc<Vec<super::symmetry::Orbitope>>,
+    /// 対称性の行・固定を加える前の問題 (なければ `None`)。ヒューリスティクスの解の判定・局所探索に使う。
+    pub(super) orig: Option<Rc<MipProblem>>,
+    /// 元の問題では実行可能で、オービトープの列の並べ替えで使えるようにした解の数と、それでも使えなかった数。
+    sym_canon: (u64, u64),
     /// orbitopal fixing で固定した数と、それで枝刈りしたノードの数。
     orbitope_fixings: u64,
     orbitope_prunes: u64,
@@ -329,6 +333,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
         proof_conflicts: 0,
         orbitopes: if params.submip { Rc::new(Vec::new()) } else { super::ORBITOPES.with(|t| t.borrow().clone()).unwrap_or_default() },
         orbitope_fixings: 0,
+        orig: if params.submip || env_str!("ENOMOTO_MIP_SYM_NO_ORIG").is_some() { None } else { super::SYM_ORIG.with(|t| t.borrow().clone()) },
+        sym_canon: (0, 0),
         orbitope_prunes: 0,
         row_log: Vec::new(),
         cut_int: if env_str!("ENOMOTO_MIP_NO_IMPLINT").is_some() { p.is_int.clone() } else { p.implied_integers() },
@@ -460,7 +466,20 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         if !self.p.is_feasible(&x, FEASTOL) {
-            return false;
+            // 対称性の行・固定だけに反する解: 元の問題で実行可能なら、オービトープの列を辞書式の順に並べ替える
+            // (対称性で写すので実行可能性と目的値は変わらない)
+            let Some(orig) = self.orig.clone() else { return false };
+            if !orig.is_feasible(&x, FEASTOL) {
+                return false;
+            }
+            for o in self.orbitopes.iter() {
+                o.canonicalize(&mut x);
+            }
+            if !self.p.is_feasible(&x, FEASTOL) {
+                self.sym_canon.1 += 1;
+                return false;
+            }
+            self.sym_canon.0 += 1;
         }
         let z = self.p.objective(&x);
         self.pool_add(z, &x);
@@ -568,8 +587,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let effort = (50 * nnz as u64).clamp(100_000, 50_000_000);
             if !self.params.submip && mip_threads() > 1 {
                 // 並列モード: 別スレッドで根の LP・切除平面と同時に回す (根のヒューリスティクスの前に受け取る)
-                let pc = std::sync::Arc::new(self.p.clone());
-                let (lo, up) = (self.dom.lo.clone(), self.dom.up.clone());
+                // 対称性の行・固定を加える前の問題で探す (見つけた解は try_incumbent で並べ替える)
+                let (pc, lo, up) = match &self.orig {
+                    Some(o) => (std::sync::Arc::new((**o).clone()), o.col_lo.clone(), o.col_up.clone()),
+                    None => (std::sync::Arc::new(self.p.clone()), self.dom.lo.clone(), self.dom.up.clone()),
+                };
                 let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let stop2 = stop.clone();
                 let seed = self.rng ^ 0x9E37_79B9_7F4A_7C15;
@@ -2256,6 +2278,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             eprintln!("MIP: dual proofs and conflicts {} (conflicts added {} (from proofs {}), Farkas {}, pruned {} nodes, tightened {} bounds)", self.dual_proofs.len(), self.conflicts_added, self.proof_conflicts, self.farkas_added, self.proof_prunes, self.proof_tightenings);
             if !self.orbitopes.is_empty() {
                 eprintln!("MIP: orbitopes {}: fixed {} bounds, pruned {} nodes", self.orbitopes.len(), self.orbitope_fixings, self.orbitope_prunes);
+            }
+            if self.sym_canon != (0, 0) {
+                eprintln!("MIP: symmetry: {} heuristic solutions mapped to the symmetry-reduced problem, {} could not be", self.sym_canon.0, self.sym_canon.1);
             }
         }
         let (x, objective) = match &self.incumbent {

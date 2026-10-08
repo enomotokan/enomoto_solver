@@ -365,7 +365,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let nnz: u64 = p.rows.iter().map(|r| r.len() as u64).sum();
         let seed = self.rng ^ 0xD1B5_4A32_D192_ED03;
         self.rand();
-        let (feas, inf) = super::heuristics::local_search(p, &self.dom.lo, &self.dom.up, cap, (200 * nnz).clamp(200_000, 100_000_000), seed);
+        let (feas, inf) = match self.orig.clone() {
+            Some(o) => super::heuristics::local_search(&o, &o.col_lo, &o.col_up, cap, (200 * nnz).clamp(200_000, 100_000_000), seed),
+            None => super::heuristics::local_search(p, &self.dom.lo, &self.dom.up, cap, (200 * nnz).clamp(200_000, 100_000_000), seed),
+        };
         if let Some((x, v)) = inf {
             if self.params.verbose && self.nodes <= 1 {
                 eprintln!("MIP:   local search: least violation {v:.3e}");

@@ -93,10 +93,12 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
     let outer = !params.submip && params.restarts == 0;
     if outer {
         ORBITOPES.with(|t| *t.borrow_mut() = None);
+        SYM_ORIG.with(|t| *t.borrow_mut() = None);
     }
     let r = solve_problem_inner(p, params, use_presolve);
     if outer {
         ORBITOPES.with(|t| *t.borrow_mut() = None);
+        SYM_ORIG.with(|t| *t.borrow_mut() = None);
     }
     r
 }
@@ -161,11 +163,15 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
 thread_local! {
     /// 今の求解 (再スタートを含む) で使う完全オービトープ ([`add_symmetry_rows`] が置き、外側の求解の終わりに消す)。
     pub(crate) static ORBITOPES: std::cell::RefCell<Option<std::rc::Rc<Vec<symmetry::Orbitope>>>> = const { std::cell::RefCell::new(None) };
+    /// 対称性の行・固定を加える前の問題 (同じく外側の求解の終わりに消す)。
+    pub(crate) static SYM_ORIG: std::cell::RefCell<Option<std::rc::Rc<MipProblem>>> = const { std::cell::RefCell::new(None) };
 }
 
 /// 対称性を探し、対称性を崩す不等式 `x_i - x_k >= 0` ([`symmetry::lex_leader_pairs`]) を行として加えた問題を返す。
 fn add_symmetry_rows(prob: MipProblem, verbose: bool) -> MipProblem {
     let t0 = std::time::Instant::now();
+    // 対称性の行・固定を加える前の問題 (ヒューリスティクスはこちらで解を探し、並べ替えてから使う)
+    SYM_ORIG.with(|t| *t.borrow_mut() = Some(std::rc::Rc::new(prob.clone())));
     let time_cap = tunable!("ENOMOTO_T_MIP_SYM_TIME", 0.3, f64);
     let Some(sym) = symmetry::detect(&prob, time_cap, tunable!("ENOMOTO_T_MIP_SYM_TRIES", 2000usize, usize)) else {
         if verbose {

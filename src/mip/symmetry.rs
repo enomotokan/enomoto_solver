@@ -247,6 +247,82 @@ pub struct Orbitope {
     pub vars: Vec<Vec<usize>>,
     /// 各行がパッキング・分割の行に含まれる (行の和 <= 1)。
     pub packing: bool,
+    /// 列の入れ替えの生成元 (列 a, 列 b, 問題全体の置換 `perm[j] = σ(j)`。0-1 でない列も一緒に動かす)。
+    pub swaps: Vec<(usize, usize, std::rc::Rc<Vec<usize>>)>,
+}
+
+/// 置換 `perm` (`perm[j] = σ(j)`) で解を写す: `y[σ(j)] = x[j]`。
+fn apply_perm(perm: &[usize], x: &mut [f64]) {
+    let old = x.to_vec();
+    for (j, &k) in perm.iter().enumerate() {
+        x[k] = old[j];
+    }
+}
+
+impl Orbitope {
+    /// 列 `a` と `b` を入れ替える置換 (問題全体)。生成元の列の入れ替えをたどった道 `a = c0 - c1 - ... - ck = b` から、
+    /// `(c0 ck) = (c0 c1)(c1 ... ck)(c0 c1)` (共役) で作る。道がなければ `None`。
+    fn transposition(&self, a: usize, b: usize) -> Option<Vec<usize>> {
+        let s = self.vars[0].len();
+        // 列のグラフで幅優先探索 (辺: 生成元の番号)
+        let mut prev: Vec<Option<(usize, usize)>> = vec![None; s];
+        let mut seen = vec![false; s];
+        seen[a] = true;
+        let mut queue = std::collections::VecDeque::from([a]);
+        while let Some(c) = queue.pop_front() {
+            if c == b {
+                break;
+            }
+            for (e, &(x, y, _)) in self.swaps.iter().enumerate() {
+                let d = if x == c { y } else if y == c { x } else { continue };
+                if !seen[d] {
+                    seen[d] = true;
+                    prev[d] = Some((c, e));
+                    queue.push_back(d);
+                }
+            }
+        }
+        if !seen[b] {
+            return None;
+        }
+        // b から a への辺の列 (a に近い順)
+        let mut edges: Vec<usize> = Vec::new();
+        let mut c = b;
+        while c != a {
+            let (p, e) = prev[c]?;
+            edges.push(e);
+            c = p;
+        }
+        edges.reverse();
+        // 最後の辺の入れ替えを、手前の辺で順に共役する: T = g_0 g_1 ... g_{k-1} ... g_1 g_0
+        let compose = |f: &[usize], g: &[usize]| -> Vec<usize> { (0..f.len()).map(|j| f[g[j]]).collect() };
+        let mut t: Vec<usize> = (*self.swaps[*edges.last()?].2).clone();
+        for &e in edges.iter().rev().skip(1) {
+            let g = &self.swaps[e].2;
+            t = compose(g, &compose(&t, g));
+        }
+        Some(t)
+    }
+
+    /// 解 `x` の列を、オービトープの行で見て辞書式で広義減少に並べ替える (列の入れ替えは対称性なので、得た解も
+    /// 実行可能で目的値も同じ)。並べ替えられなければ偽。
+    pub fn canonicalize(&self, x: &mut [f64]) -> bool {
+        let s = self.vars[0].len();
+        let key = |x: &[f64], c: usize| -> Vec<i64> { self.vars.iter().map(|line| x[line[c]].round() as i64).collect() };
+        for pos in 0..s {
+            let mut best = pos;
+            for c in pos + 1..s {
+                if key(x, c) > key(x, best) {
+                    best = c;
+                }
+            }
+            if best != pos {
+                let Some(t) = self.transposition(pos, best) else { return false };
+                apply_perm(&t, x);
+            }
+        }
+        true
+    }
 }
 
 /// 生成元のうち、0-1 列の 2-巡回だけからなるもの (列の入れ替え) をまとめて完全オービトープを作る。
@@ -390,10 +466,14 @@ pub fn find_orbitopes(p: &MipProblem, sym: &Symmetry) -> (Vec<Orbitope>, Vec<boo
                 continue 'cl;
             }
         }
+        let mut swaps = Vec::with_capacity(gens.len());
         for &k in gens {
             used[k] = true;
+            let g = &sym.generators[k];
+            let cols: Vec<usize> = (0..s).filter(|&c| g[mat[0][c]] != mat[0][c]).collect();
+            swaps.push((cols[0], cols[1], std::rc::Rc::new(g.clone())));
         }
-        out.push(Orbitope { vars: mat, packing: false });
+        out.push(Orbitope { vars: mat, packing: false, swaps });
     }
     (out, used)
 }
@@ -645,9 +725,28 @@ mod tests {
     }
 
     #[test]
+    fn canonicalize_sorts_columns_with_star_generators() {
+        // 3 台の同じ機械 (前のテストと同じ問題)。生成元は (列0 列1) と (列0 列2) の形 (星形)
+        let mut rows = vec![vec![(0, 1.0), (1, 1.0), (2, 1.0)], vec![(3, 1.0), (4, 1.0), (5, 1.0)]];
+        for m in 0..3 {
+            rows.push(vec![(m, 3.0), (3 + m, 2.0)]);
+        }
+        let p = MipProblem::from_rows(vec![0.0; 6], vec![1.0; 6], vec![1.0, 1.0, 1.0, 2.0, 2.0, 2.0], 0.0, 1.0, vec![true; 6], rows, vec![1.0, 1.0, -inf(), -inf(), -inf()], vec![1.0, 1.0, 4.0, 4.0, 4.0]);
+        let sym = detect(&p, 10.0, 100).unwrap();
+        let (orbs, _) = find_orbitopes(&p, &sym);
+        // 仕事 0 を機械 2、仕事 1 を機械 1 に: 列 (0,0) (0,1) (1,0)
+        let mut x = vec![0.0, 0.0, 1.0, 0.0, 1.0, 0.0];
+        assert!(p.is_feasible(&x, 1e-9));
+        assert!(orbs[0].canonicalize(&mut x));
+        // 並べ替え後: 列 0 = (1,0)、列 1 = (0,1)、列 2 = (0,0)
+        assert_eq!(x, vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
+        assert!(p.is_feasible(&x, 1e-9));
+    }
+
+    #[test]
     fn orbitopal_fixing_small_cases() {
         // 2 行 3 列。何も固定がなければ: 最大 [11,11,11]、最小 [00,00,00] で固定なし
-        let orb = Orbitope { vars: vec![vec![0, 1, 2], vec![3, 4, 5]], packing: false };
+        let orb = Orbitope { vars: vec![vec![0, 1, 2], vec![3, 4, 5]], packing: false, swaps: Vec::new() };
         let (lo, up) = (vec![0.0; 6], vec![1.0; 6]);
         assert_eq!(orbitopal_fixing(&orb, &lo, &up), Some(vec![]));
         // x_{0,1} = 1 (列 1 の 1 行目): 列 0 >=_lex 列 1 なので x_{0,0} = 1 に固定される
@@ -676,7 +775,7 @@ mod tests {
             let r = 1 + (rnd() * 3.0) as usize;
             let s = 2 + (rnd() * 2.0) as usize;
             let vars: Vec<Vec<usize>> = (0..r).map(|i| (0..s).map(|c| i * s + c).collect()).collect();
-            let orb = Orbitope { vars: vars.clone(), packing: false };
+            let orb = Orbitope { vars: vars.clone(), packing: false, swaps: Vec::new() };
             let nv = r * s;
             let mut lo = vec![0.0; nv];
             let mut up = vec![1.0; nv];
@@ -730,7 +829,7 @@ mod tests {
             let r = 1 + (rnd() * 4.0) as usize;
             let s = 2 + (rnd() * 2.0) as usize;
             let vars: Vec<Vec<usize>> = (0..r).map(|i| (0..s).map(|c| i * s + c).collect()).collect();
-            let orb = Orbitope { vars: vars.clone(), packing: true };
+            let orb = Orbitope { vars: vars.clone(), packing: true, swaps: Vec::new() };
             let nv = r * s;
             let mut lo = vec![0.0; nv];
             let mut up = vec![1.0; nv];
