@@ -24,7 +24,7 @@ use faer::sparse::linalg::cholesky::{factorize_symbolic_cholesky, LdltRegulariza
 use faer::sparse::{SparseColMat, SymbolicSparseColMat, ValuesOrder};
 use faer::{Conj, Side};
 
-pub use crate::sparse::{FaerCsr, csr_row_iter, csr_mat_t_vec, csr_mat_t_vec_into, csr_mat_vec, csr_mat_vec_into};
+pub use crate::sparse::{FaerCsr, csr_row_iter, csr_mat_t_vec, csr_mat_t_vec_into, csr_mat_vec, csr_mat_vec_into, csr_transpose};
 use crate::params::interior_point::{FACTOR_PAR_NNZ, KKT_PARALLELISM, MAX_FACTOR_NNZ};
 
 /// 因子の非零数の上限 ([`MAX_FACTOR_NNZ`]、試験用 `ENOMOTO_T_IPM_MAX_FACTOR_NNZ`)。
@@ -151,6 +151,16 @@ thread_local! {
 /// 正規方程式の組み立てと数値分解の累計時間 (秒) を取り出して 0 に戻す (計測用)。
 pub fn take_factor_prof() -> (f64, f64) {
     FACTOR_PROF.with(|c| c.replace((0.0, 0.0)))
+}
+
+/// `Aᵀ y` を `out` に書く。試験用 `ENOMOTO_T_IPM_AT_PAR=1` で `Aᵀ` の行圧縮 `at` を使い行ごとに並列に計算する (既定は従来の
+/// `A` の行圧縮のまま逐次に足し込む。比較用)。
+pub fn at_mul(a: &FaerCsr, at: &FaerCsr, y: &[f64], out: &mut [f64]) {
+    if tunable!("ENOMOTO_T_IPM_AT_PAR", 0u8, u8) != 0 {
+        csr_mat_vec_into(at, y, out);
+    } else {
+        csr_mat_t_vec_into(a, y, out);
+    }
 }
 
 /// 数値分解に使う並列度。因子の非零数 `nnz_l` が `ENOMOTO_T_FACTOR_PAR_NNZ` (既定 [`FACTOR_PAR_NNZ`]、0 で使わない) 以上なら
@@ -945,7 +955,7 @@ impl NormalKkt {
     }
 
     /// `[dx; dy]` を `rhs = [r_x; r_y]` に上書きする (`δ` は直近の分解のもの)。
-    pub fn solve_in_place(&mut self, a: &FaerCsr, rhs: &mut [f64]) {
+    pub fn solve_in_place(&mut self, a: &FaerCsr, at: &FaerCsr, rhs: &mut [f64]) {
         use rayon::prelude::*;
         assert!(self.factored, "NormalKkt::solve_in_place before factor");
         let (n, p) = (self.n, self.p);
@@ -988,7 +998,7 @@ impl NormalKkt {
             }
         }
         // dx = D^{-1} (r_x - A^T dy)
-        csr_mat_t_vec_into(a, ry, &mut self.tmp_n);
+        at_mul(a, at, ry, &mut self.tmp_n);
         rx.par_iter_mut().zip(self.tmp_n.par_iter()).zip(self.dinv.par_iter()).for_each(|((x, &t), &di)| *x = (*x - t) * di);
     }
 }
@@ -1047,7 +1057,7 @@ impl IpmKkt {
 
     /// 反復改良付きで解く (`top`, `delta` は直近の分解のもの)。
     /// 戻り値は最後の (改良後の) 相対残差の目安 `‖b - K x‖∞ / max(1, ‖b‖∞)`。
-    pub fn solve_refined(&mut self, a: &FaerCsr, top: &[f64], delta: f64, rhs: &mut [f64], refine: usize, work: &mut Vec<f64>) -> f64 {
+    pub fn solve_refined(&mut self, a: &FaerCsr, at: &FaerCsr, top: &[f64], delta: f64, rhs: &mut [f64], refine: usize, work: &mut Vec<f64>) -> f64 {
         let n = top.len();
         let dim = rhs.len();
         work.resize(3 * dim, 0.0);
@@ -1055,7 +1065,7 @@ impl IpmKkt {
         let (r, kx) = rest.split_at_mut(dim);
         b.copy_from_slice(rhs);
         let bnorm = b.iter().fold(1.0f64, |m, v| m.max(v.abs()));
-        self.solve_plain(a, rhs);
+        self.solve_plain(a, at, rhs);
         let mut prev = f64::INFINITY;
         let mut last_rel = 0.0f64;
         let refine = tunable!("ENOMOTO_T_IPM_REFINE_STEPS", refine, usize);
@@ -1064,7 +1074,7 @@ impl IpmKkt {
             {
                 let (vx, vy) = rhs.split_at(n);
                 let (ox, oy) = kx.split_at_mut(n);
-                csr_mat_t_vec_into(a, vy, ox);
+                at_mul(a, at, vy, ox);
                 for j in 0..n {
                     ox[j] += top[j] * vx[j];
                 }
@@ -1085,7 +1095,7 @@ impl IpmKkt {
                 break;
             }
             prev = nrm;
-            self.solve_plain(a, r);
+            self.solve_plain(a, at, r);
             for i in 0..dim {
                 rhs[i] += r[i];
             }
@@ -1096,9 +1106,9 @@ impl IpmKkt {
         last_rel
     }
 
-    fn solve_plain(&mut self, a: &FaerCsr, rhs: &mut [f64]) {
+    fn solve_plain(&mut self, a: &FaerCsr, at: &FaerCsr, rhs: &mut [f64]) {
         match self {
-            IpmKkt::Normal(k) => k.solve_in_place(a, rhs),
+            IpmKkt::Normal(k) => k.solve_in_place(a, at, rhs),
             IpmKkt::Aug(k) => k.solve_in_place(rhs),
         }
     }

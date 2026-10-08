@@ -20,7 +20,7 @@
 
 use rayon::prelude::*;
 
-use super::kkt::{csr_mat_t_vec_into, csr_mat_vec_into, FaerCsr, IpmKkt};
+use super::kkt::{at_mul, csr_mat_t_vec_into, csr_mat_vec_into, csr_transpose, FaerCsr, IpmKkt};
 use crate::params::interior_point::{
     BOX_BLOWUP, BOX_BLOWUP_NEAR, BOX_GONDZIO, BOX_REG0, BOX_REG_MIN, CERT_SCALE_MIN, CERT_TOL, EPS_ABS, EPS_REL, GAP_DIV_GUARD, INIT_DIV_GUARD, INIT_POSITIVE_FLOOR,
     INIT_SHIFT_MULTIPLIER, REG_FLOOR_SLACK, RES_DECREASE_RATIO, SLOW_DECREASE_DIVISOR, STALL_ITERS,
@@ -338,6 +338,9 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
     let t_kkt = std::time::Instant::now();
     // 診断用 (ENOMOTO_DEBUG_IPM): 数値分解・Newton 系の求解 (反復改良を含む) の累計時間。
     let mut prof = (0.0f64, 0.0f64);
+    // `Aᵀ` を行圧縮で持ち、`Aᵀ y` を行ごとに並列に計算する (`A` の行圧縮のまま足し込むと逐次: osa-60 は列が 24 万本で
+    // `Aᵀ y` が反復の時間の多くを占めた)。
+    let at = csr_transpose(a);
     let Some(mut kkt) = IpmKkt::new(a) else {
         // 因子が大きすぎる (`MAX_FACTOR_NNZ`): 内点法を諦める。
         if debug {
@@ -414,14 +417,14 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
     }
     rhs[n..].copy_from_slice(b);
     let mut refine_work: Vec<f64> = Vec::new();
-    kkt.solve_refined(a, &top, delta, &mut rhs, REFINE_STEPS, &mut refine_work);
+    kkt.solve_refined(a, &at, &top, delta, &mut rhs, REFINE_STEPS, &mut refine_work);
     let mut xi = rhs[..n].to_vec();
     let mut y = rhs[n..].to_vec();
     let mut x = xi.clone();
 
     if n_bnd == 0 {
         let mut aty = vec![0.0; n];
-        csr_mat_t_vec_into(a, &y, &mut aty);
+        at_mul(a, &at, &y, &mut aty);
         let rc: Vec<f64> = (0..n).map(|j| c[j] + aty[j]).collect();
         let st = if norm_inf(&rc) > 1e-4 { Status::Unbounded } else { Status::Optimal };
         return BoxIpmResult { status: st, x, y: y.iter().map(|v| -v).collect(), rc, iters: 0, rel_res: (0.0, 0.0, 0.0) };
@@ -467,7 +470,7 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
         if let Some(wy) = &w.y {
             let y_int: Vec<f64> = wy.iter().map(|v| -v).collect();
             let mut aty_w = vec![0.0; n];
-            csr_mat_t_vec_into(a, &y_int, &mut aty_w);
+            at_mul(a, &at, &y_int, &mut aty_w);
             // 被約費用 rc = c + A^T y_int を下限側 (正) と上限側 (負) に分ける。
             let rc: Vec<f64> = (0..n).map(|j| c[j] + aty_w[j]).collect();
             lambda.copy_from_slice(&y_int);
@@ -570,7 +573,7 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
             Some(r) => r,
             None => {
                 csr_mat_vec_into(a, &x, &mut ax);
-                csr_mat_t_vec_into(a, &y, &mut aty);
+                at_mul(a, &at, &y, &mut aty);
                 residuals(&ax, b, &x, &lo, &up, &lo.s, &up.s, c, &aty, &lo.z, &up.z, &pos, &mut dual_res)
             }
         };
@@ -855,7 +858,7 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
         lo.set_rs(false, 0.0);
         up.set_rs(false, 0.0);
         let t_s = std::time::Instant::now();
-        let solve_rel = newton(&mut kkt, a, &top, delta, &r_x, &r_y, &mut lo, &mut up, &pos, &mut sol_aff, n, &mut refine_work);
+        let solve_rel = newton(&mut kkt, a, &at, &top, delta, &r_x, &r_y, &mut lo, &mut up, &pos, &mut sol_aff, n, &mut refine_work);
         prof.1 += t_s.elapsed().as_secs_f64();
         prev_solve_rel = solve_rel;
         // 既定 t = 1e-6 (第 55 回、0 で使わない) (`ENOMOTO_T_IPM_AUG_ON_INACCURATE=t`): 正規方程式の予測子の Newton 系の相対残差が t を超えたら拡大系に切り替えて
@@ -924,7 +927,7 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
         lo.set_rs(true, sigma * mu);
         up.set_rs(true, sigma * mu);
         let t_s = std::time::Instant::now();
-        newton(&mut kkt, a, &top, delta, &r_x, &r_y, &mut lo, &mut up, &pos, &mut rhs, n, &mut refine_work);
+        newton(&mut kkt, a, &at, &top, delta, &r_x, &r_y, &mut lo, &mut up, &pos, &mut rhs, n, &mut refine_work);
         let last_ts = t_s.elapsed().as_secs_f64();
         prof.1 += last_ts;
         // 試験用 (`ENOMOTO_T_IPM_GONDZIO_AUTO=C`): 補正子の回数を、この反復の分解の時間が Newton 系 1 回の求解の
@@ -965,7 +968,7 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
                 });
             }
             let t_s = std::time::Instant::now();
-            newton(&mut kkt, a, &top, delta, &r_x, &r_y, &mut lo, &mut up, &pos, &mut rhs, n, &mut refine_work);
+            newton(&mut kkt, a, &at, &top, delta, &r_x, &r_y, &mut lo, &mut up, &pos, &mut rhs, n, &mut refine_work);
             prof.1 += t_s.elapsed().as_secs_f64();
             let ap1 = fraction_to_boundary(&lo.s, &lo.ds).min(fraction_to_boundary(&up.s, &up.ds));
             let ad1 = fraction_to_boundary(&lo.z, &lo.dz).min(fraction_to_boundary(&up.z, &up.dz));
@@ -1013,7 +1016,7 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
         // ρ, δ が一気に下限へ落ちて (adlittle で 3 反復目) 早すぎる Farkas 判定を招くので、[0, 0.999] に収める。
         let r = ((gap_before - gap_after) / gap_before).clamp(0.0, 0.999);
         csr_mat_vec_into(a, &x_new, &mut ax_new);
-        csr_mat_t_vec_into(a, &y_new, &mut aty_new);
+        at_mul(a, &at, &y_new, &mut aty_new);
         let res_new = residuals(&ax_new, b, &x_new, &lo, &up, &lo.s_new, &up.s_new, c, &aty_new, &lo.z_new, &up.z_new, &pos, &mut dual_new);
         // 試験用 (`ENOMOTO_T_IPM_NAN_RECOVER=K`): 新しい点の残差が非有限 (分解の精度の破綻: dfl001) なら、その歩を
         // 捨てて正則化を強め、今の点から解き直す (K 回まで)。既定は打ち切って最良の反復点を返す。
@@ -1124,7 +1127,7 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
 /// 予測子/修正子の Newton 方向: 各 `Side` の `r_z`・`r_s`・`w` から縮約系の右辺を作って解き、
 /// `sol[..n] = dx`、`sol[n..] = dy`、各 `Side` の `dz`・`ds` を書く。行列は分解済み。
 #[allow(clippy::too_many_arguments)]
-fn newton(kkt: &mut IpmKkt, a: &FaerCsr, top: &[f64], delta: f64, r_x: &[f64], r_y: &[f64], lo: &mut Side, up: &mut Side, pos: &Pos, sol: &mut [f64], n: usize, work: &mut Vec<f64>) -> f64 {
+fn newton(kkt: &mut IpmKkt, a: &FaerCsr, at: &FaerCsr, top: &[f64], delta: f64, r_x: &[f64], r_y: &[f64], lo: &mut Side, up: &mut Side, pos: &Pos, sol: &mut [f64], n: usize, work: &mut Vec<f64>) -> f64 {
     lo.set_rzp();
     up.set_rzp();
     {
@@ -1146,7 +1149,7 @@ fn newton(kkt: &mut IpmKkt, a: &FaerCsr, top: &[f64], delta: f64, r_x: &[f64], r
     sol[n..].copy_from_slice(r_y);
     // 正則化が小さくなると分解の精度が落ちるので反復改良する (動的正則化で置き換えた
     // ピボットの誤差もここで取り戻す)。残差が十分小さければ追加の求解はしない。
-    let rel = kkt.solve_refined(a, top, delta, sol, REFINE_STEPS, work);
+    let rel = kkt.solve_refined(a, at, top, delta, sol, REFINE_STEPS, work);
     lo.set_dz_ds(&sol[..n]);
     up.set_dz_ds(&sol[..n]);
     rel
