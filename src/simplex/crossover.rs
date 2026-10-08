@@ -1733,42 +1733,67 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
                 eprintln!("CROSSOVER vertex obj={obj:.12e} L(y_ipm)={lbv:.12e} rel gap={gap:.3e}");
                 eprintln!("CROSSOVER vertex gap breakdown y_ipm (interior basic, degenerate basic, nonbasic): {:?}", vertex_gap_breakdown(std, yi, &xv, &basis_pos));
             }
-            // y_ipm では足りないとき、頂点で上下限の間にある (退化していない) 基底変数の被約費用を 0 にするように y を
-            // 補正して下界を測り直す (試験用 `ENOMOTO_T_XO_ACCEPT_YFIX=1`): `Bᵀ Δ = ρ` (ρ は、そのような基底変数の行で
-            // `d_j(y_ipm)`、退化した基底の行で 0)、`y' = y_ipm + θ Δ`。下界 `L` はどの y でも成り立つので、判定は厳密なまま。
-            // 頂点の目的値と L の差は変数ごとの `d_j x_j − min(d_j l_j, d_j u_j)` の和で、上下限の間にある変数は d_j が
-            // 0 でない限り `|d_j| ×` 境界までの距離だけ効く (箱の広い fome13 で y_ipm の小さな d_j が積み上がる)。
-            if accept_gap > 0.0 && gap > accept_gap && tunable!("ENOMOTO_T_XO_ACCEPT_YFIX", 0u8, u8) != 0 {
-                let mut rho = vec![0.0; m];
-                for (k, &j) in basis.iter().enumerate() {
-                    let v = xv[j];
-                    let tol = 1e-9 * (1.0 + v.abs());
-                    if v > std.lb[j] + tol && v < std.ub[j] - tol {
-                        rho[k] = std.c[j] - sparse_dot_dense(col(std, j), yi);
-                    }
-                }
-                let mut dy = vec![0.0; m];
-                let mut scratch = vec![0.0; m];
-                lu.solve_transpose_into(&rho, &mut scratch, &mut dy);
-                let mut yt = vec![0.0; m];
-                for th in [1.0, 0.5, 0.1] {
-                    for i in 0..m {
-                        yt[i] = yi[i] + th * dy[i];
-                    }
-                    let l = lagrangian_lower_bound(std, &yt);
+            // y_ipm では足りないとき、下界を測り直す (下界 `L` はどの y・どの「実行可能領域を含む箱」でも成り立つので、
+            // 判定は厳密なまま)。頂点の目的値と L の差は変数ごとの `d_j x_j − min(d_j l_j, d_j u_j)` の和で、上下限の間に
+            // ある変数は d_j が 0 でない限り `|d_j| ×` 境界までの距離だけ効く (箱の広い fome13 で y_ipm の小さな d_j が積み上がる)。
+            // - 試験用 `ENOMOTO_T_XO_ACCEPT_YFIX=1`: 頂点で上下限の間にある (退化していない) 基底変数の被約費用を 0 にする
+            //   ように y を補正する: `Bᵀ Δ = ρ` (ρ は、そのような基底変数の行で `d_j(y_ipm)`、退化した基底の行で 0)、
+            //   `y' = y_ipm + θ Δ`。
+            // - 試験用 `ENOMOTO_T_XO_ACCEPT_IMPLIED=1`: 上下限が無限の変数に、行 `Ax = b` から導いた有限の範囲を与えて
+            //   下界を測る (Neumaier–Shcherbina の安全な下界の考え方。無限の側の d の符号違いで L = −∞ になるのを防ぐ)。
+            //   このときは基底の双対 y_B も試す。
+            let yfix = tunable!("ENOMOTO_T_XO_ACCEPT_YFIX", 0u8, u8) != 0;
+            let implied = tunable!("ENOMOTO_T_XO_ACCEPT_IMPLIED", 0u8, u8) != 0;
+            if accept_gap > 0.0 && gap > accept_gap && (yfix || implied) {
+                let bnds = implied.then(|| implied_bounds(std, 3));
+                let (lbs, ubs): (&[f64], &[f64]) = match &bnds {
+                    Some((l, u)) => (l, u),
+                    None => (&std.lb, &std.ub),
+                };
+                let mut try_y = |name: &str, y: &[f64], gap: &mut f64| {
+                    let l = lagrangian_lower_bound_with(std, y, lbs, ubs);
                     let g = (obj - l) / (1.0 + obj.abs());
                     if debug {
-                        eprintln!("CROSSOVER vertex L(y_ipm + {th} dy)={l:.12e} rel gap={g:.3e}");
-                        if th == 1.0 {
-                            eprintln!("CROSSOVER vertex gap breakdown y_fix: {:?}", vertex_gap_breakdown(std, &yt, &xv, &basis_pos));
+                        eprintln!("CROSSOVER vertex L({name})={l:.12e} rel gap={g:.3e}");
+                    }
+                    if g < *gap {
+                        *gap = g;
+                    }
+                };
+                if implied {
+                    try_y("y_ipm, implied bounds", yi, &mut gap);
+                }
+                let mut scratch = vec![0.0; m];
+                if yfix && gap > accept_gap {
+                    let mut rho = vec![0.0; m];
+                    for (k, &j) in basis.iter().enumerate() {
+                        let v = xv[j];
+                        let tol = 1e-9 * (1.0 + v.abs());
+                        if v > std.lb[j] + tol && v < std.ub[j] - tol {
+                            rho[k] = std.c[j] - sparse_dot_dense(col(std, j), yi);
                         }
                     }
-                    if g < gap {
-                        gap = g;
+                    let mut dy = vec![0.0; m];
+                    lu.solve_transpose_into(&rho, &mut scratch, &mut dy);
+                    let mut yt = vec![0.0; m];
+                    for th in [1.0, 0.5, 0.1] {
+                        for i in 0..m {
+                            yt[i] = yi[i] + th * dy[i];
+                        }
+                        try_y(&format!("y_ipm + {th} dy"), &yt, &mut gap);
+                        if debug && th == 1.0 {
+                            eprintln!("CROSSOVER vertex gap breakdown y_fix: {:?}", vertex_gap_breakdown(std, &yt, &xv, &basis_pos));
+                        }
+                        if gap <= accept_gap {
+                            break;
+                        }
                     }
-                    if gap <= accept_gap {
-                        break;
-                    }
+                }
+                if implied && gap > accept_gap {
+                    let cb: Vec<f64> = basis.iter().map(|&j| std.c[j]).collect();
+                    let mut yb = vec![0.0; m];
+                    lu.solve_transpose_into(&cb, &mut scratch, &mut yb);
+                    try_y("y_B, implied bounds", &yb, &mut gap);
                 }
                 crate::phase_timing::record("xo_vertex_gap_fix", gap);
             }
@@ -2100,6 +2125,11 @@ fn vertex_gap_breakdown(std: &StdForm, y: &[f64], xv: &[f64], basis_pos: &[Optio
 }
 
 fn lagrangian_lower_bound(std: &StdForm, y: &[f64]) -> f64 {
+    lagrangian_lower_bound_with(std, y, &std.lb, &std.ub)
+}
+
+/// [`lagrangian_lower_bound`] を、実行可能領域 (`Ax = b` かつ元の上下限) を含む箱 `[lb, ub]` で測る。
+fn lagrangian_lower_bound_with(std: &StdForm, y: &[f64], lbs: &[f64], ubs: &[f64]) -> f64 {
     let ymax = y.iter().fold(0.0f64, |a, v| a.max(v.abs()));
     let tiny = 1e-9 * (1.0 + ymax);
     let mut lb: f64 = std.b.iter().zip(y).map(|(b, y)| b * y).sum();
@@ -2109,20 +2139,82 @@ fn lagrangian_lower_bound(std: &StdForm, y: &[f64]) -> f64 {
             d -= a * y[i];
         }
         if d > 0.0 {
-            if std.lb[j].is_finite() {
-                lb += d * std.lb[j];
+            if lbs[j].is_finite() {
+                lb += d * lbs[j];
             } else if d > tiny {
                 return f64::NEG_INFINITY;
             }
         } else if d < 0.0 {
-            if std.ub[j].is_finite() {
-                lb += d * std.ub[j];
+            if ubs[j].is_finite() {
+                lb += d * ubs[j];
             } else if -d > tiny {
                 return f64::NEG_INFINITY;
             }
         }
     }
     lb
+}
+
+/// 上下限が無限の変数に、行 `Σ_j a_ij x_j = b_i` と他の変数の範囲から導いた有限の範囲を与える (`passes` 回くり返す)。
+/// 有限の上下限は変えない。導いた範囲は丸め誤差の分だけ外側に広げる (広げても下界の正しさは崩れない)。
+fn implied_bounds(std: &StdForm, passes: usize) -> (Vec<f64>, Vec<f64>) {
+    let mut lb = std.lb.clone();
+    let mut ub = std.ub.clone();
+    let widen = |v: f64| 1e-9 * (1.0 + v.abs());
+    for _ in 0..passes {
+        let mut changed = false;
+        for i in 0..std.n_rows {
+            let row = std.rows.row(i);
+            // 行の活動量の最小・最大 (有限の項の和と、無限の項の数)。
+            let (mut smin, mut nmin, mut smax, mut nmax) = (0.0f64, 0usize, 0.0f64, 0usize);
+            let lo = |a: f64, j: usize| if a > 0.0 { a * lb[j] } else { a * ub[j] };
+            let hi = |a: f64, j: usize| if a > 0.0 { a * ub[j] } else { a * lb[j] };
+            for &(j, a) in row {
+                let (l, h) = (lo(a, j), hi(a, j));
+                if l.is_finite() { smin += l } else { nmin += 1 }
+                if h.is_finite() { smax += h } else { nmax += 1 }
+            }
+            if nmin > 1 && nmax > 1 {
+                continue;
+            }
+            let bi = std.b[i];
+            let mut upd: Vec<(usize, f64, f64)> = Vec::new();
+            for &(j, a) in row {
+                if lb[j].is_finite() && ub[j].is_finite() {
+                    continue;
+                }
+                let (l, h) = (lo(a, j), hi(a, j));
+                // 他の変数の活動量の最小・最大。
+                let rest_min = if l.is_finite() { (nmin == 0).then(|| smin - l) } else { (nmin == 1).then_some(smin) };
+                let rest_max = if h.is_finite() { (nmax == 0).then(|| smax - h) } else { (nmax == 1).then_some(smax) };
+                // a x_j = b − (他) なので a x_j ∈ [b − rest_max, b − rest_min]。
+                let (mut nl, mut nu) = (f64::NEG_INFINITY, f64::INFINITY);
+                if let Some(rm) = rest_min {
+                    let v = (bi - rm) / a;
+                    if a > 0.0 { nu = v + widen(v) } else { nl = v - widen(v) }
+                }
+                if let Some(rx) = rest_max {
+                    let v = (bi - rx) / a;
+                    if a > 0.0 { nl = v - widen(v) } else { nu = v + widen(v) }
+                }
+                upd.push((j, nl, nu));
+            }
+            for (j, nl, nu) in upd {
+                if !lb[j].is_finite() && nl.is_finite() && nl.abs() < 1e15 {
+                    lb[j] = nl;
+                    changed = true;
+                }
+                if !ub[j].is_finite() && nu.is_finite() && nu.abs() < 1e15 {
+                    ub[j] = nu;
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    (lb, ub)
 }
 
 /// 検出の分類 `cls` (列ごとに 0: 基底候補、-1: 下限、+1: 上限) を、仕上げの後の最適基底 `bp` と解 `xr` (構造変数) と
