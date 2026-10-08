@@ -42,6 +42,9 @@ pub struct OpenNode {
     pub depth: usize,
     /// 親の LP の最適基底 (あれば warm start に使う)。
     pub basis: Option<Rc<Basis>>,
+    /// `basis` を保存したときの LP の行の変更の記録の位置 (`Solver::row_log` の長さ)。戻すときにその後の行の追加・削除を
+    /// 基底に当てはめる。
+    pub basis_epoch: usize,
     /// このノードを作った分枝 (列, 上向きか, 親の LP 値, 親の LP 目的値)。pseudocost の更新に使う。
     pub branch: Option<(usize, bool, f64, f64)>,
 }

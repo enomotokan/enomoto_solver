@@ -79,6 +79,15 @@ impl Default for MipParams {
     }
 }
 
+/// LP の行の変更 ([`Solver::row_log`])。
+#[derive(Debug, Clone)]
+pub(super) enum RowEdit {
+    /// 末尾に k 行加えた。
+    Add(usize),
+    /// 印のついた行を消した (長さは消す前の行数)。
+    Delete(Vec<bool>),
+}
+
 /// 求解の結果の状態。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MipStatus {
@@ -189,6 +198,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) vbounds: Option<Rc<super::cuts::VarBounds>>,
     /// 根で解を見つけなかったヒューリスティクス ([`heur_bit`] のビット)。再スタートで引き継ぐ。
     failed_heurs: u64,
+    /// LP の行の追加・削除の記録 (待ち行列のノードの基底を、保存した後の行の変化に合わせるのに使う)。
+    pub(super) row_log: Vec<RowEdit>,
     /// LP のカットの行 (元の行より後ろ) の年齢: 続けて効いていなかったノードの LP の数 ([`Self::age_cuts`])。
     pub(super) cut_age: Vec<u32>,
     /// カット生成で整数として扱う列 (整数列と暗黙の整数列、[`MipProblem::implied_integers`])。
@@ -308,6 +319,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
         vbounds: None,
         failed_heurs: 0,
         cut_age: Vec::new(),
+        row_log: Vec::new(),
         cut_int: if env_str!("ENOMOTO_MIP_NO_IMPLINT").is_some() { p.is_int.clone() } else { p.implied_integers() },
         cut_pool: Vec::new(),
         dual_proofs: std::collections::VecDeque::new(),
@@ -511,7 +523,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.last_log = Instant::now();
         let ub = self.incumbent.as_ref().map(|(z, _)| *z).unwrap_or(f64::INFINITY);
         eprintln!(
-            "MIP: {:8.2}s nodes {:8} open {:7} lb {:.8e} ub {:.8e} lp_iters {} sb_iters {} sb_lps {} sb_secs {:.2}",
+            "MIP: {:8.2}s nodes {:8} open {:7} lb {:.8e} ub {:.8e} lp_iters {} sb_iters {} sb_lps {} sb_secs {:.2} node_iters {} heur_iters {} dive_iters {} lp_rows {}",
             self.start.elapsed().as_secs_f64(),
             self.nodes,
             self.queue.len(),
@@ -520,7 +532,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.lp.total_iterations(),
             self.sb_iters,
             self.sb_lps,
-            self.sb_secs
+            self.sb_secs,
+            self.node_iters,
+            self.heur_iters,
+            self.dive_iters,
+            self.lp.num_rows()
         );
     }
 
@@ -708,7 +724,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if let Some(r) = self.maybe_restart() {
             return r;
         }
-        self.queue.push(OpenNode { changes: Vec::new(), lower_bound: root_obj, estimate: root_obj, depth: 0, basis: Some(Rc::new(self.lp.basis())), branch: None });
+        self.queue.push(OpenNode { changes: Vec::new(), lower_bound: root_obj, estimate: root_obj, depth: 0, basis: Some(Rc::new(self.lp.basis())), basis_epoch: self.row_log.len(), branch: None });
         // 根のノードは LP を解いた状態のままなので、最初の取り出しでは定義域・LP を作り直さない。
         let mut first = true;
         // 潜っている子ノード (定義域に分枝を積んだ状態で次に処理する)。
@@ -748,11 +764,27 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         if ok {
                             if let Some(b) = &n.basis {
                                 let mr = self.lp.num_rows();
-                                if b.row.len() == mr {
+                                if n.basis_epoch == self.row_log.len() && b.row.len() == mr {
                                     self.lp.set_basis(b);
-                                } else if b.row.len() < mr {
-                                    // 後から加えたカットの行は論理変数を基底にする
+                                } else {
+                                    // 基底を保存した後の行の削除・追加を当てはめる (消えた行の状態は捨て、加わったカットの行は
+                                    // 論理変数を基底にする)。記録がなければ (古い形) 長さだけ合わせる
                                     let mut b2 = (**b).clone();
+                                    if n.basis_epoch <= self.row_log.len() && env_str!("ENOMOTO_MIP_NO_ROW_LOG").is_none() {
+                                        for e in &self.row_log[n.basis_epoch..] {
+                                            match e {
+                                                RowEdit::Add(k) => b2.row.extend(std::iter::repeat_n(VarStatus::Basic, *k)),
+                                                RowEdit::Delete(mask) => {
+                                                    let mut i = 0;
+                                                    b2.row.retain(|_| {
+                                                        let keep = !mask.get(i).copied().unwrap_or(false);
+                                                        i += 1;
+                                                        keep
+                                                    });
+                                                }
+                                            }
+                                        }
+                                    }
                                     b2.row.resize(mr, VarStatus::Basic);
                                     self.lp.set_basis(&b2);
                                 }
@@ -1064,6 +1096,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             };
             let (first_c, second_c) = if prefer_up { (up, down) } else { (down, up) };
             let basis = Rc::new(self.lp.basis());
+            let basis_epoch = self.row_log.len();
             // 強分岐で子の LP が最適まで解けていれば、その値を子の下界にする
             let sb_bounds = self.last_sb.filter(|&(j, _, _)| j == col && env_str!("ENOMOTO_MIP_NO_SB_CHILD_BOUND").is_none());
             let mk = |c: BoundChange| {
@@ -1079,6 +1112,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     estimate,
                     depth: node.depth + 1,
                     basis: Some(basis.clone()),
+                    basis_epoch,
                     branch: Some((col, !c.upper, value, lp_obj)),
                 }
             };
