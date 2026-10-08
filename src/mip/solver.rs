@@ -253,6 +253,9 @@ pub(super) struct Solver<'a, L: MipLp> {
     proof_dirty: bool,
     /// 作った衝突制約の数。
     conflicts_added: u64,
+    /// HiGHS 式の衝突解析 [呼び出し, 作った衝突, 入れた衝突, 長さの和]
+    multi_stats: [u64; 4],
+    multi_secs: f64,
     /// 行にできない衝突 (連続列・一般整数列を含む) を境界リテラルのまま持つプール
     lit_conflicts: super::conflict_pool::LitConflictPool,
     /// [加えた数, 刈ったノード, 締めた境界]
@@ -378,6 +381,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
         proof_val_up: Vec::new(),
         proof_dirty: true,
         conflicts_added: 0,
+        multi_stats: [0; 4],
+        multi_secs: 0.0,
         lit_conflicts: super::conflict_pool::LitConflictPool::new(p.n, tunable!("ENOMOTO_T_MIP_LIT_CONFLICT_POOL", 5000usize, usize)),
         lit_stats: [0; 3],
         conf_stats: [0; 8],
@@ -925,6 +930,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let prop_ok = prop_ok && {
                 let ok = self.apply_dual_proofs();
                 if !ok {
+                    if self.dom.conflict.is_some() && env_str!("ENOMOTO_MIP_NO_EXTRA_CONFLICTS").is_none() {
+                        self.add_conflict();
+                    }
                     self.proof_prunes += 1;
                     self.dbg_lost("dual proof", dn && self.dbg_contains());
                 }
@@ -938,6 +946,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         true
                     }
                     Err(()) => {
+                        if self.dom.conflict.is_some() && env_str!("ENOMOTO_MIP_NO_EXTRA_CONFLICTS").is_none() {
+                            self.add_conflict();
+                        }
                         self.lit_stats[1] += 1;
                         self.dbg_lost("literal conflict", dn && self.dbg_contains());
                         false
@@ -949,6 +960,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let prop_ok = prop_ok && {
                 let ok = self.orbitope_propagate(&node.changes);
                 if !ok {
+                    if self.dom.conflict.is_some() && env_str!("ENOMOTO_MIP_NO_EXTRA_CONFLICTS").is_none() {
+                        self.add_conflict();
+                    }
                     self.orbitope_prunes += 1;
                 }
                 ok
@@ -1353,14 +1367,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if !(up - v >= min_cut) {
                         continue;
                     }
+                    self.dom.set_external(true);
                     changed |= self.dom.tighten_upper(self.p, j, v);
+                    self.dom.set_external(false);
                 }
                 VarStatus::Upper if d[j] < -1e-7 => {
                     let v = up - gap / (-d[j]);
                     if !(v - lo >= min_cut) {
                         continue;
                     }
+                    self.dom.set_external(true);
                     changed |= self.dom.tighten_lower(self.p, j, v);
+                    self.dom.set_external(false);
                 }
                 _ => {}
             }
@@ -1528,11 +1546,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
             match (cut[0], cut[1]) {
                 (true, true) => return BranchAction::Prune,
                 (true, false) => {
+                    self.dom.set_external(true);
                     self.dom.tighten_lower(self.p, j, v.ceil());
+                    self.dom.set_external(false);
                     bound_changes += 1;
                 }
                 (false, true) => {
+                    self.dom.set_external(true);
                     self.dom.tighten_upper(self.p, j, v.floor());
+                    self.dom.set_external(false);
                     bound_changes += 1;
                 }
                 _ => {}
@@ -1635,11 +1657,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 (true, true) => return BranchAction::Prune,
                 (true, false) => {
                     // 下側が打ち切り → 上側に固定
+                    self.dom.set_external(true);
                     self.dom.tighten_lower(self.p, j, v.ceil());
+                    self.dom.set_external(false);
                     return BranchAction::Resolve;
                 }
                 (false, true) => {
+                    self.dom.set_external(true);
                     self.dom.tighten_upper(self.p, j, v.floor());
+                    self.dom.set_external(false);
                     return BranchAction::Resolve;
                 }
                 _ => {}
@@ -1807,8 +1833,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             self.orbitope_fixings += fixes.len() as u64;
             for (j, v) in fixes {
+                self.dom.set_external(true);
                 self.dom.tighten_lower(self.p, j, v);
+                self.dom.set_external(false);
+                self.dom.set_external(true);
                 self.dom.tighten_upper(self.p, j, v);
+                self.dom.set_external(false);
             }
             if self.dom.infeasible || !self.dom.propagate(self.p) {
                 return false;
@@ -1949,7 +1979,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         });
         // 証明を作った境界の変更を分枝の決定まで辿った短い衝突も作る (証明そのものは長いことが多い)
-        self.add_proof_conflict(&coefs);
+        self.add_proof_conflict(&coefs, rhs);
         // 密な証明はプールに入れない (伝播が重い)。衝突だけ使う
         if dense {
             if dbg {
@@ -2007,8 +2037,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return;
         }
         let p = self.p;
-        let max_len = self.conflict_max_len();
         self.conf_stats[0] += 1;
+        if let Some(src) = self.dom.conflict {
+            if self.add_conflicts_multi(super::domain::ConflictStart::Src(src)) > 0 {
+                return;
+            }
+        }
+        let max_len = self.conflict_max_len();
         let first = self.dom.analyze_conflict(p, max_len);
         let ok = match &first {
             None => {
@@ -2037,14 +2072,61 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     /// 衝突解析の上限の長さ。
+    /// HiGHS 式の衝突解析での衝突の長さの上限 (HiGHS: 10 長さ > 1000 + 3 整数列数 なら捨てる)。
+    fn conflict_max_len_multi(&self) -> usize {
+        let nint = self.p.is_int.iter().filter(|&&b| b).count();
+        (tunable!("ENOMOTO_T_MIP_CONFLICT_LEN_INT", 0.3, f64).mul_add(nint as f64, tunable!("ENOMOTO_T_MIP_CONFLICT_LEN_BASE", 100.0, f64)) as usize).max(1)
+    }
+
+    /// HiGHS 式の衝突解析で衝突を作って入れる (入れた数)。`ENOMOTO_MIP_CONFLICT_OLD` なら使わない (0)。
+    fn add_conflicts_multi(&mut self, start: super::domain::ConflictStart) -> usize {
+        if env_str!("ENOMOTO_MIP_CONFLICT_OLD").is_some() {
+            return 0;
+        }
+        // 解析の時間が経過時間の 1 割を超えたら休む
+        if self.multi_secs > tunable!("ENOMOTO_T_MIP_CONFLICT_TIME_FRAC", 0.1, f64) * self.start.elapsed().as_secs_f64() + 0.05 {
+            self.multi_stats[0] += 1;
+            return 1;
+        }
+        let max_len = self.conflict_max_len_multi();
+        let reconv = env_str!("ENOMOTO_MIP_NO_RECONV_CONFLICTS").is_none();
+        let t0 = Instant::now();
+        let confs = self.dom.analyze_multi(self.p, start, max_len, reconv);
+        self.multi_secs += t0.elapsed().as_secs_f64();
+        let mut n = 0;
+        // 既定ではリテラルの衝突プールに入れる (行にして証明のプールに入れると、数が多いので双対証明を追い出す)
+        let rows = env_str!("ENOMOTO_MIP_MULTI_CONFLICT_ROWS").is_some();
+        for c in &confs {
+            let ok = if rows {
+                self.add_conflict_lits(c)
+            } else {
+                self.pc.add_conflict(c);
+                self.add_lit_conflict(c)
+            };
+            if ok {
+                n += 1;
+            }
+        }
+        self.multi_stats[0] += 1;
+        self.multi_stats[1] += confs.len() as u64;
+        self.multi_stats[2] += n as u64;
+        self.multi_stats[3] += confs.iter().map(|c| c.len() as u64).sum::<u64>();
+        // 何も作れなければ従来の解析も試す (呼び出し側)
+        if confs.is_empty() { 0 } else { n.max(1) }
+    }
+
     fn conflict_max_len(&self) -> usize {
         // 長い衝突は弱いわりに評価が重い (eil33-2: 上限 460 で 678 本作ると 1 ノードの処理が重くなり解けなくなった)
         (tunable!("ENOMOTO_T_MIP_CONFLICT_LEN", 0.1, f64).mul_add(self.p.n as f64, 10.0) as usize).min(tunable!("ENOMOTO_T_MIP_CONFLICT_MAXLEN", 50usize, usize))
     }
 
     /// 破れている証明 (`coefs`、今のノードの境界で最小活動量が右辺を超える) から衝突を作ってプールに入れる。
-    fn add_proof_conflict(&mut self, coefs: &[(usize, f64)]) {
+    fn add_proof_conflict(&mut self, coefs: &[(usize, f64)], rhs: f64) {
         if env_str!("ENOMOTO_MIP_NO_PROOF_CONFLICTS").is_some() {
+            return;
+        }
+        if self.add_conflicts_multi(super::domain::ConflictStart::Proof(coefs, rhs)) > 0 {
+            self.proof_conflicts += 1;
             return;
         }
         let max_len = self.conflict_max_len();
@@ -2099,6 +2181,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let p = self.p;
         // 行にできなくても、衝突に現れた列は分枝の衝突スコアに数える
         self.pc.add_conflict(lits);
+        // 長い衝突は行 (証明のプール、活動量で伝播) にせずリテラルのまま持つ
+        if lits.len() > tunable!("ENOMOTO_T_MIP_CONFLICT_ROW_MAXLEN", 50usize, usize) {
+            return self.add_lit_conflict(lits);
+        }
         let mut coefs: Vec<(usize, f64)> = Vec::with_capacity(lits.len());
         // 各リテラルの「真の度合い」s (偽なら <= 0、真なら > 0、常に <= 1) の和 <= k - 1 (k はリテラルの数) にする。
         // 0-1 列は s = x (x >= 1) / 1 - x (x <= 0)。一般整数列 (大域的な境界 [L, U]) は x >= v なら
@@ -2314,7 +2400,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                 }
                 for (j, upper, v) in changes {
+                    self.dom.set_external(true);
                     let ch = if upper { self.dom.tighten_upper(p, j, v) } else { self.dom.tighten_lower(p, j, v) };
+                    self.dom.set_external(false);
                     if ch {
                         tightened = true;
                         tightened_now = true;
@@ -2557,6 +2645,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             eprintln!("MIP: dual proofs and conflicts {} (conflicts added {} (from proofs {}), Farkas {}, pruned {} nodes, tightened {} bounds)", self.dual_proofs.len(), self.conflicts_added, self.proof_conflicts, self.farkas_added, self.proof_prunes, self.proof_tightenings);
             eprintln!("MIP: propagation conflicts: analysed {}, no 1-UIP {}, 1-UIP not a row {}, no decision set {}, decision set not a row {}; not a row because continuous {}, general integer {}, both sides {}", self.conf_stats[0], self.conf_stats[1], self.conf_stats[2], self.conf_stats[3], self.conf_stats[4], self.conf_stats[5], self.conf_stats[6], self.conf_stats[7]);
             eprintln!("MIP: literal conflicts: added {}, in pool {}, pruned {} nodes, tightened {} bounds", self.lit_stats[0], self.lit_conflicts.len(), self.lit_stats[1], self.lit_stats[2]);
+            eprintln!("MIP: conflict analysis (HiGHS style): calls {}, conflicts {}, added {}, mean length {:.1}, max length {}, {:.2}s", self.multi_stats[0], self.multi_stats[1], self.multi_stats[2], self.multi_stats[3] as f64 / self.multi_stats[1].max(1) as f64, self.conflict_max_len_multi(), self.multi_secs);
             let cf: Vec<u64> = super::domain::CONFLICT_FAIL.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();
             eprintln!("MIP: conflict analysis failures (all calls): no decision {}, too long midway {}, reason row lacks column {}, empty {}, too long at the end {} (total length {}), max length {}", cf[0], cf[1], cf[2], cf[3], cf[4], cf[5], self.conflict_max_len());
             eprintln!("MIP: sibling backtracks {}; basis restores {} (basic count mismatch {}), first LP iterations after a restore {}", self.sibling_backtracks, self.restore_stats.0, self.restore_stats.1, self.restore_stats.2);

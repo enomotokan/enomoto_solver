@@ -168,6 +168,7 @@ impl LitConflictPool {
             if fixes.is_empty() {
                 break;
             }
+            dom.set_external(true);
             for (k, upper, v) in fixes {
                 let ch = if upper {
                     v < dom.up[k] && { dom.tighten_upper(p, k, v); true }
@@ -178,9 +179,11 @@ impl LitConflictPool {
                     tightened += 1;
                 }
                 if dom.infeasible {
+                    dom.set_external(false);
                     return Err(());
                 }
             }
+            dom.set_external(false);
             if !dom.propagate(p) {
                 return Err(());
             }

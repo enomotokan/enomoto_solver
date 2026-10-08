@@ -31,6 +31,12 @@ pub enum ConflictSrc {
     Col(usize),
 }
 
+/// [`Domain::analyze_multi`] の始点: 伝播の矛盾、または破れている証明 `sum coefs x <= rhs`。
+pub enum ConflictStart<'a> {
+    Src(ConflictSrc),
+    Proof(&'a [(usize, f64)], f64),
+}
+
 /// 変数の定義域。
 #[derive(Clone)]
 pub struct Domain {
@@ -542,6 +548,255 @@ impl Domain {
     /// `decisions` なら [`Self::analyze_conflict_decisions`] と同じく決定だけの組にする。
     pub fn analyze_proof_conflict(&self, p: &MipProblem, coefs: &[(usize, f64)], max_len: usize, decisions: bool) -> Option<Vec<(usize, bool, f64)>> {
         self.resolve_conflict(p, Ok(coefs), max_len, decisions)
+    }
+
+    /// 以後の境界の変更を「外から来た変更」(双対証明・衝突プール・オービトープの固定など、理由で置き換えられないが
+    /// 分枝の決定でもないもの、理由 `-2`) として記録する (`false` で分枝の決定 `-1` に戻す)。衝突解析の深さの
+    /// 段は分枝の決定だけで区切る。
+    pub fn set_external(&mut self, on: bool) {
+        self.cur_reason = if on { -2 } else { -1 };
+    }
+
+    /// HiGHS 式の衝突解析 (`HighsDomain::ConflictSet::conflictAnalysis`)。矛盾 (`start`) を、
+    /// (1) 必要な分だけの境界の変更で説明し (`resolveLinearLeq`: 大域的な境界からの寄与の大きい変更から、矛盾を示すのに
+    /// 足りるまで選ぶ)、(2) 分枝の深さの段ごとに、その段の変更が 1 つ (UIP) になるまで理由で置き換えて衝突を作り
+    /// (最後の段から、衝突が出る限り、少なくとも 5 段)、(3) その UIP が伝播による変更なら、UIP を同じ段の理由で
+    /// 置き換えた組と UIP の否定から「再収束」の衝突も作る。各衝突は同時には成り立たない境界のリテラルの組
+    /// (列, 上限か, 値)。長さ `max_len` を超える衝突は作らない。
+    pub fn analyze_multi(&self, p: &MipProblem, start: ConflictStart, max_len: usize, reconv: bool) -> Vec<Vec<(usize, bool, f64)>> {
+        let end = self.stack.len();
+        let dec: Vec<usize> = (0..end).filter(|&k| self.stack[k].reason == -1).collect();
+        if dec.is_empty() {
+            return Vec::new();
+        }
+        let (rlo, rup) = self.root_bounds();
+        let glo = |j: usize| rlo[j].max(self.global_lo[j]);
+        let gup = |j: usize| rup[j].min(self.global_up[j]);
+        // (列, 側) ごとの最後の変更と、各変更の 1 つ前の同じ (列, 側) の変更 (前に辿って `before` より前のものを探す)
+        const NONE: usize = usize::MAX;
+        let mut last_lo = vec![NONE; p.n];
+        let mut last_up = vec![NONE; p.n];
+        let mut prev = vec![NONE; end];
+        for (k, c) in self.stack.iter().enumerate() {
+            let l = if c.upper { &mut last_up[c.col] } else { &mut last_lo[c.col] };
+            prev[k] = *l;
+            *l = k;
+        }
+        let latest_before = |j: usize, upper: bool, before: usize| -> Option<usize> {
+            let mut k = if upper { last_up[j] } else { last_lo[j] };
+            while k != NONE && k >= before {
+                k = prev[k];
+            }
+            if k == NONE { None } else { Some(k) }
+        };
+        // 1 回の解析で調べる行の項の数の上限 (長い行の問題で解析が重くなりすぎないように)
+        let budget = std::cell::Cell::new(tunable!("ENOMOTO_T_MIP_CONFLICT_WORK", 200_000usize, usize));
+        // `sum_j a_j x_j >= m_req` (x_j は a_j > 0 なら下限、a_j < 0 なら上限) を示す、位置 `before` より前の変更の組。
+        // 大域的な境界で足りない分を、寄与の大きい変更から選ぶ。足りなければ関わる変更を全部返す (従来の説明)
+        let explain = |terms: &mut dyn Iterator<Item = (usize, f64)>, m_req: f64, before: usize, skip: usize| -> Option<Vec<usize>> {
+            let mut base = 0.0f64;
+            let mut cands: Vec<(f64, usize)> = Vec::new();
+            let (lo_n, hi_n) = terms.size_hint();
+            let n_terms = hi_n.unwrap_or(lo_n);
+            if budget.get() < n_terms {
+                return None;
+            }
+            budget.set(budget.get() - n_terms);
+            let mut chosen: Vec<usize> = Vec::new();
+            let mut all: Vec<usize> = Vec::new();
+            for (j, a) in terms {
+                if j == skip || a == 0.0 {
+                    continue;
+                }
+                let upper = a < 0.0;
+                let g = if upper { gup(j) } else { glo(j) };
+                match latest_before(j, upper, before) {
+                    Some(k) => {
+                        let l = self.stack[k].new;
+                        all.push(k);
+                        if g.is_finite() {
+                            base += a * g;
+                            let d = a * (l - g);
+                            if d > 0.0 {
+                                cands.push((d, k));
+                            }
+                        } else {
+                            base += a * l;
+                            chosen.push(k);
+                        }
+                    }
+                    None => {
+                        if !g.is_finite() {
+                            return None;
+                        }
+                        base += a * g;
+                    }
+                }
+            }
+            if !base.is_finite() {
+                return Some(all);
+            }
+            let tol = 1e-9 * (1.0 + m_req.abs());
+            if base < m_req - tol {
+                cands.sort_by(|x, y| y.0.total_cmp(&x.0));
+                for (d, k) in cands {
+                    base += d;
+                    chosen.push(k);
+                    if base >= m_req - tol {
+                        break;
+                    }
+                }
+            }
+            if base >= m_req - tol { Some(chosen) } else { Some(all) }
+        };
+        // 伝播による変更 `k` の説明
+        let explain_change = |k: usize| -> Option<Vec<usize>> {
+            let c = &self.stack[k];
+            if c.reason < 0 {
+                return None;
+            }
+            let r = c.reason as usize;
+            let a_c = p.rows[r].iter().find(|&&(j, _)| j == c.col).map(|&(_, a)| a)?;
+            let v = c.new;
+            // 整数列の境界は丸めてある: 上限 v は (rhs - rest)/a < v + 1 - FEASTOL から、下限 v は > v - 1 + FEASTOL から
+            let w = if p.is_int[c.col] { if c.upper { v + 1.0 - FEASTOL } else { v - 1.0 + FEASTOL } } else { v };
+            let min_side = (a_c > 0.0) == c.upper;
+            if min_side {
+                let u = p.row_up[r];
+                explain(&mut p.rows[r].iter().copied(), u - a_c * w, k, c.col)
+            } else {
+                let l = p.row_lo[r];
+                explain(&mut p.rows[r].iter().map(|&(j, a)| (j, -a)), -l + a_c * w, k, c.col)
+            }
+        };
+        let init: Vec<usize> = match start {
+            ConflictStart::Src(ConflictSrc::Row(i, true)) => {
+                let u = p.row_up[i];
+                match explain(&mut p.rows[i].iter().copied(), u + row_tol(u, u), end, usize::MAX) {
+                    Some(v) => v,
+                    None => return Vec::new(),
+                }
+            }
+            ConflictStart::Src(ConflictSrc::Row(i, false)) => {
+                let l = p.row_lo[i];
+                match explain(&mut p.rows[i].iter().map(|&(j, a)| (j, -a)), -l + row_tol(l, l), end, usize::MAX) {
+                    Some(v) => v,
+                    None => return Vec::new(),
+                }
+            }
+            ConflictStart::Src(ConflictSrc::Col(j)) => latest_before(j, false, end).into_iter().chain(latest_before(j, true, end)).collect(),
+            ConflictStart::Proof(coefs, rhs) => {
+                // 証明 `sum coefs x <= rhs` が破れている: 最小活動量 > rhs
+                match explain(&mut coefs.iter().copied(), rhs + 1e-6 * (1.0 + rhs.abs()), end, usize::MAX) {
+                    Some(v) => v,
+                    None => return Vec::new(),
+                }
+            }
+        };
+        if init.is_empty() || init.len() > max_len {
+            return Vec::new();
+        }
+        let to_lits = |set: &std::collections::BTreeSet<usize>| -> Vec<(usize, bool, f64)> {
+            // 同じ列・側は最も新しい (きつい) ものだけ
+            let mut m: std::collections::BTreeMap<(usize, bool), usize> = std::collections::BTreeMap::new();
+            for &k in set {
+                let c = &self.stack[k];
+                let e = m.entry((c.col, c.upper)).or_insert(k);
+                if k > *e {
+                    *e = k;
+                }
+            }
+            m.values().map(|&k| (self.stack[k].col, self.stack[k].upper, self.stack[k].new)).collect()
+        };
+        let cap = 4 * max_len + 100;
+        let mut set: std::collections::BTreeSet<usize> = init.into_iter().collect();
+        let mut out: Vec<Vec<(usize, bool, f64)>> = Vec::new();
+        let mut lev = dec.len();
+        let mut done = 0usize;
+        while lev >= 1 {
+            let lo = dec[lev - 1];
+            let hi = if lev < dec.len() { dec[lev] } else { end };
+            // この段の変更が 1 つになるまで、最も新しい伝播による変更を理由で置き換える
+            let mut resolved = 0usize;
+            let mut cnt = set.range(lo..hi).count();
+            while cnt > 1 {
+                if set.len() > cap {
+                    return out;
+                }
+                let Some(&k) = set.range(lo..hi).rev().find(|&&k| self.stack[k].reason >= 0) else { break };
+                let Some(ex) = explain_change(k) else { return out };
+                set.remove(&k);
+                cnt -= 1;
+                for e in ex {
+                    if set.insert(e) && e >= lo && e < hi {
+                        cnt += 1;
+                    }
+                }
+                resolved += 1;
+            }
+            let inlev: Vec<usize> = set.range(lo..hi).copied().collect();
+            if inlev.is_empty() {
+                lev -= 1;
+                continue;
+            }
+            done += 1;
+            let before = out.len();
+            // HiGHS と同じく、この段で置き換えが起きたときだけ衝突にする (最初の段で置き換えがなければ今の組を 1 つ作って
+            // 止める: 矛盾は最後の分枝そのものから来ている)
+            if resolved == 0 && done == 1 {
+                let lits = to_lits(&set);
+                if !lits.is_empty() && lits.len() <= max_len {
+                    out.push(lits);
+                }
+                break;
+            }
+            let lits = to_lits(&set);
+            if resolved > 0 && !lits.is_empty() && lits.len() <= max_len {
+                out.push(lits);
+            }
+            // 再収束: UIP u (伝播による変更) を同じ段の理由で置き換えた組 R は u を導く。R かつ (u の否定) は矛盾
+            if reconv && inlev.len() == 1 && self.stack[inlev[0]].reason >= 0 {
+                let u = inlev[0];
+                let mut r: std::collections::BTreeSet<usize> = std::iter::once(u).collect();
+                let mut ok = true;
+                loop {
+                    if r.len() > cap {
+                        ok = false;
+                        break;
+                    }
+                    let Some(&k) = r.range(lo..hi).rev().find(|&&k| self.stack[k].reason >= 0) else { break };
+                    let Some(ex) = explain_change(k) else {
+                        ok = false;
+                        break;
+                    };
+                    r.remove(&k);
+                    r.extend(ex);
+                }
+                if ok && !r.contains(&u) && !r.is_empty() {
+                    let mut lits = to_lits(&r);
+                    let c = &self.stack[u];
+                    let neg = if p.is_int[c.col] {
+                        if c.upper { c.new + 1.0 } else { c.new - 1.0 }
+                    } else if c.upper {
+                        c.new + FEASTOL * (1.0 + c.new.abs())
+                    } else {
+                        c.new - FEASTOL * (1.0 + c.new.abs())
+                    };
+                    lits.retain(|&(j, up, _)| !(j == c.col && up != c.upper));
+                    lits.push((c.col, !c.upper, neg));
+                    if lits.len() <= max_len {
+                        out.push(lits);
+                    }
+                }
+            }
+            let new_here = out.len() - before;
+            // HiGHS と同じ打ち切り: 最初の段で衝突が出なければ止める。5 段以上調べて新しい衝突がなければ止める
+            if out.is_empty() || (done >= 5 && new_here == 0) {
+                break;
+            }
+            lev -= 1;
+        }
+        out
     }
 
     /// 衝突解析の本体。`start` は矛盾の出どころ (`Err`) か、破れている証明の係数 (`Ok`)。
