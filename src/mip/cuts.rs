@@ -1110,5 +1110,16 @@ mod highs_dump {
             }
         }
         println!("bases {} both {both} only_highs {only_h} only_ours {only_o} none {none}; mean eff on both: highs {:.4} ours {:.4}", bases.len(), sum_h / both.max(1) as f64, sum_o / both.max(1) as f64);
+        let mut eh: Vec<f64> = res.iter().flatten().map(|(c, r)| eff(c, *r)).collect();
+        eh.sort_by(|a, b| b.total_cmp(a));
+        println!(
+            "HiGHS path cuts {} mean eff {:.4} max {:.4} top10 {:?} >0.1: {} >0.01: {}",
+            eh.len(),
+            eh.iter().sum::<f64>() / eh.len().max(1) as f64,
+            eh.first().copied().unwrap_or(0.0),
+            eh.iter().take(10).map(|v| (v * 1e4).round() / 1e4).collect::<Vec<_>>(),
+            eh.iter().filter(|&&v| v > 0.1).count(),
+            eh.iter().filter(|&&v| v > 0.01).count()
+        );
     }
 }

@@ -423,6 +423,261 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
     }
 
+    /// HiGHS の `HighsPathSeparator` (path mixing cut を除く) の移植。
+    /// - 行の型: 等式 / LP で効いている側 (`<=` か `>=`) / 効いていない (使わない)
+    /// - 連続変数 (境界から離れているもの) ごとに、係数の符号で「入る」行と「出る」行に分ける (`<=` の行で負なら入る、
+    ///   `>=` の行で正なら入る、等式は両方)。集約に残った連続変数を消すときは、係数が負なら入る行、正なら出る行から選ぶ
+    /// - 連続変数がそれ 1 つだけの等式は代入用にとっておき、始点・相手には使わない
+    /// - 効いている行それぞれを始点に、最大 6 段。各段で集約行とその符号を反転したものから CMIR / flow cover を作り、
+    ///   カットが出たら伸ばさない
+    fn path_aggregation_highs<F>(&mut self, vars: &CutVars, lp_rows: &[Vec<(usize, f64)>], cands: &mut Vec<Candidate>, push: &mut F)
+    where
+        F: FnMut(Option<RawCut>, &mut Vec<Candidate>, &Solver<L>),
+    {
+        const MAX_PATH_LEN: usize = 6;
+        let n = self.p.n;
+        let m = lp_rows.len();
+        let feastol = 1e-6;
+        let bound_dist = |j: usize| -> f64 {
+            let xj = vars.x[j];
+            let mut blo = vars.lo[j];
+            let mut bup = vars.up[j];
+            if let Some(vb) = vars.vb {
+                for &(y, a, e) in &vb.vub[j] {
+                    bup = bup.min(a * vars.x[y] + e);
+                }
+                for &(y, a, e) in &vb.vlb[j] {
+                    blo = blo.max(a * vars.x[y] + e);
+                }
+            }
+            let mut dl = xj - blo;
+            let mut du = bup - xj;
+            if dl <= feastol {
+                dl = 0.0;
+            }
+            if du <= feastol {
+                du = 0.0;
+            }
+            dl.min(du)
+        };
+        // 行の型: 0 使わない, 1 <=, -1 >=, 2 等式
+        let mut rtype = vec![0i8; m];
+        for i in 0..m {
+            let (l, u) = (vars.lo[n + i], vars.up[n + i]);
+            if l == u {
+                rtype[i] = 2;
+                continue;
+            }
+            let r = vars.x[n + i];
+            let ls = if l.is_finite() { r - l } else { f64::INFINITY };
+            let us = if u.is_finite() { u - r } else { f64::INFINITY };
+            rtype[i] = if ls > feastol && us > feastol {
+                0
+            } else if ls < us {
+                -1
+            } else {
+                1
+            };
+        }
+        let cont: Vec<bool> = (0..n).map(|j| !vars.is_int[j] && bound_dist(j) > 0.0).collect();
+        let mut num_cont = vec![0usize; m];
+        let mut col_rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
+        for i in 0..m {
+            for &(j, a) in &lp_rows[i] {
+                if cont[j] {
+                    num_cont[i] += 1;
+                    col_rows[j].push((i, a));
+                }
+            }
+        }
+        // 代入用の等式 (連続変数が 1 つだけ)
+        let mut subst: Vec<Option<(usize, f64)>> = vec![None; n];
+        for i in 0..m {
+            if rtype[i] != 2 || num_cont[i] != 1 {
+                continue;
+            }
+            let Some(&(j, a)) = lp_rows[i].iter().find(|&&(j, _)| cont[j]) else { continue };
+            if subst[j].is_some() {
+                continue;
+            }
+            subst[j] = Some((i, a));
+            rtype[i] = 0;
+        }
+        // 連続変数ごとの入る行・出る行
+        let mut in_arcs: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
+        let mut out_arcs: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
+        for j in 0..n {
+            if !cont[j] || subst[j].is_some() {
+                continue;
+            }
+            for &(i, a) in &col_rows[j] {
+                match rtype[i] {
+                    0 => {}
+                    1 => {
+                        if a < 0.0 { in_arcs[j].push((i, a)) } else { out_arcs[j].push((i, a)) }
+                    }
+                    -1 => {
+                        if a > 0.0 { in_arcs[j].push((i, a)) } else { out_arcs[j].push((i, a)) }
+                    }
+                    _ => {
+                        in_arcs[j].push((i, a));
+                        out_arcs[j].push((i, a));
+                    }
+                }
+            }
+        }
+        let mut agg = vec![0.0f64; n + m];
+        let mut touched: Vec<usize> = Vec::new();
+        let mut in_t = vec![false; n + m];
+        let add_row = |i: usize, w: f64, agg: &mut Vec<f64>, touched: &mut Vec<usize>, in_t: &mut Vec<bool>| {
+            for &(j, a) in &lp_rows[i] {
+                if !in_t[j] {
+                    in_t[j] = true;
+                    touched.push(j);
+                }
+                agg[j] += w * a;
+            }
+            let k = n + i;
+            if !in_t[k] {
+                in_t[k] = true;
+                touched.push(k);
+            }
+            agg[k] -= w;
+        };
+        for start in 0..m {
+            if start % 64 == 0 && self.time_up() {
+                return;
+            }
+            let scales: [f64; 2] = match rtype[start] {
+                0 => continue,
+                1 | 2 => [1.0, -1.0],
+                _ => [-1.0, 1.0],
+            };
+            for &scale in &scales {
+                for &k in &touched {
+                    agg[k] = 0.0;
+                    in_t[k] = false;
+                }
+                touched.clear();
+                add_row(start, scale, &mut agg, &mut touched, &mut in_t);
+                let mut path: Vec<usize> = vec![start];
+                let mut try_neg = false;
+                let mut success = false;
+                let mut guard = 0;
+                while path.len() < MAX_PATH_LEN {
+                    guard += 1;
+                    if guard > 50 {
+                        break;
+                    }
+                    let in_path = |r: usize, path: &Vec<usize>| path.contains(&r);
+                    // 代入できる連続変数があれば先に代入して数え直す
+                    let mut substituted = false;
+                    let snapshot: Vec<(usize, f64)> = touched.iter().filter(|&&k| k < n && agg[k].abs() > 1e-9).map(|&k| (k, agg[k])).collect();
+                    for &(j, v) in &snapshot {
+                        if !cont[j] {
+                            continue;
+                        }
+                        if let Some((r, a)) = subst[j] {
+                            add_row(r, -v / a, &mut agg, &mut touched, &mut in_t);
+                            agg[j] = 0.0;
+                            substituted = true;
+                        }
+                    }
+                    if substituted {
+                        continue;
+                    }
+                    let plen = path.len();
+                    let mut skip_col = |j: usize, arcs: &Vec<Vec<(usize, f64)>>, other: &Vec<Vec<(usize, f64)>>, try_neg: &mut bool, path: &Vec<usize>| -> bool {
+                        if plen == 1 && !*try_neg {
+                            if arcs[j].len() <= plen {
+                                if arcs[j].iter().any(|&(r, _)| r != start) {
+                                    *try_neg = true;
+                                }
+                            } else {
+                                *try_neg = true;
+                            }
+                        }
+                        if other[j].is_empty() {
+                            return true;
+                        }
+                        if other[j].len() <= plen {
+                            return other[j].iter().all(|&(r, _)| in_path(r, path));
+                        }
+                        false
+                    };
+                    let mut best_out: Option<(usize, f64, f64)> = None;
+                    let mut best_in: Option<(usize, f64, f64)> = None;
+                    for &(j, v) in &snapshot {
+                        if !cont[j] {
+                            continue;
+                        }
+                        let d = bound_dist(j);
+                        if v < 0.0 {
+                            if skip_col(j, &out_arcs, &in_arcs, &mut try_neg, &path) {
+                                continue;
+                            }
+                            if best_out.is_none_or(|(_, _, bd)| d > bd) {
+                                best_out = Some((j, v, d));
+                            }
+                        } else {
+                            if skip_col(j, &in_arcs, &out_arcs, &mut try_neg, &path) {
+                                continue;
+                            }
+                            if best_in.is_none_or(|(_, _, bd)| d > bd) {
+                                best_in = Some((j, v, d));
+                            }
+                        }
+                    }
+                    // カットを作る (集約行と、その符号を反転したもの)
+                    let n_before = cands.len();
+                    let amax = touched.iter().fold(0.0f64, |mx, &k| mx.max(agg[k].abs()));
+                    let base: Vec<(usize, f64)> = touched.iter().filter(|&&k| agg[k].abs() > 1e-9 * amax.max(1.0) || k >= n && agg[k] != 0.0).map(|&k| (k, agg[k])).collect();
+                    push(cmir(vars, &base, 0.0), cands, self);
+                    if use_flow_cover() {
+                        push(lifted_flow_cover(vars, &base, 0.0), cands, self);
+                    }
+                    let neg: Vec<(usize, f64)> = base.iter().map(|&(k, a)| (k, -a)).collect();
+                    push(cmir(vars, &neg, 0.0), cands, self);
+                    if use_flow_cover() {
+                        push(lifted_flow_cover(vars, &neg, 0.0), cands, self);
+                    }
+                    success = cands.len() > n_before;
+                    if success || (best_out.is_none() && best_in.is_none()) {
+                        break;
+                    }
+                    // 消す連続変数と相手の行 (乱数の位置から、経路にない行で重みが範囲内のもの)
+                    let find_row = |j: usize, v: f64, arcs: &Vec<(usize, f64)>, s: &mut Self, path: &Vec<usize>| -> Option<(usize, f64)> {
+                        if arcs.is_empty() {
+                            return None;
+                        }
+                        let k0 = ((s.rand() * arcs.len() as f64) as usize).min(arcs.len() - 1);
+                        for t in 0..arcs.len() {
+                            let (r, a) = arcs[(k0 + t) % arcs.len()];
+                            let w = -v / a;
+                            if !in_path(r, path) && w.abs() <= 1.0 / feastol && w.abs() >= feastol {
+                                let _ = j;
+                                return Some((r, w));
+                            }
+                        }
+                        None
+                    };
+                    let pick = match (best_out, best_in) {
+                        (Some(o), i) if i.is_none_or(|i| o.2 >= i.2 - feastol) => find_row(o.0, o.1, &in_arcs[o.0], self, &path).or_else(|| i.and_then(|i| find_row(i.0, i.1, &out_arcs[i.0], self, &path))),
+                        (_, Some(i)) => find_row(i.0, i.1, &out_arcs[i.0], self, &path),
+                        _ => None,
+                    };
+                    let Some((r, w)) = pick else { break };
+                    add_row(r, w, &mut agg, &mut touched, &mut in_t);
+                    path.push(r);
+                }
+                let _ = success;
+                if !try_neg {
+                    break;
+                }
+            }
+        }
+    }
+
     /// 経路集約: 元の行を 1 本選び、集約行に残った連続変数のうち LP 値が境界 (変数上下限を含む) から
     /// 最も離れたものを、それを含む別の元の行で打ち消す、を最大 `PATH_MAX_LEN` 段繰り返し、各段で CMIR を試す
     /// (Marchand & Wolsey の集約ヒューリスティクス)。行 i の活動量を変数 `n + i` として
@@ -632,6 +887,48 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         let vb = self.vbounds.clone();
         let vars = CutVars { lo: &lo, up: &up, is_int: &is_int, x: &xv, vb: if env_str!("ENOMOTO_MIP_NO_VB").is_some() { None } else { vb.as_deref() } };
+        // 診断用 (`ENOMOTO_MIP_DEBUG_XFILE`): HiGHS の書き出し (`HIGHS_CUT_DUMP`) の LP 解で経路集約だけを試し、カットの数と
+        // 効き目を表示する (前処理なし `ENOMOTO_MIP_NO_PRESOLVE` で、列の並びを HiGHS と揃えて使う)
+        if let Some(f) = env_str!("ENOMOTO_MIP_DEBUG_XFILE") {
+            if !self.debug_x_done && !self.params.submip {
+                self.debug_x_done = true;
+                let xh: Vec<f64> = std::fs::read_to_string(&f).unwrap().lines().filter(|l| l.starts_with("C ")).map(|l| l.split_whitespace().nth(4).unwrap().parse().unwrap()).collect();
+                if xh.len() == n {
+                    let mut xvh = xh.clone();
+                    for row in &lp_rows {
+                        xvh.push(row.iter().map(|&(j, a)| a * xh[j]).sum());
+                    }
+                    let vars_h = CutVars { lo: &lo, up: &up, is_int: &is_int, x: &xvh, vb: vb.as_deref() };
+                    let mut ch: Vec<Candidate> = Vec::new();
+                    let mut push_h = |raw: Option<RawCut>, cands: &mut Vec<Candidate>, s: &Solver<L>| {
+                        if let Some(raw) = raw {
+                            if let Some(c) = finish_cut(raw, n, &lp_rows, &s.dom.global_lo, &s.dom.global_up, &xh, None) {
+                                cands.push(c);
+                            }
+                        }
+                    };
+                    if env_str!("ENOMOTO_MIP_PATH_HIGHS").is_some() {
+                        self.path_aggregation_highs(&vars_h, &lp_rows, &mut ch, &mut push_h);
+                    } else {
+                        self.path_aggregation(&vars_h, &lp_rows, &mut ch, &mut push_h, usize::MAX);
+                    }
+                    let mut e: Vec<f64> = ch.iter().map(|c| c.efficacy).collect();
+                    e.sort_by(|a, b| b.total_cmp(a));
+                    let mean = e.iter().sum::<f64>() / e.len().max(1) as f64;
+                    eprintln!(
+                        "DEBUG_XFILE path cuts {} mean eff {:.4} max {:.4} top10 {:?} >0.1: {} >0.01: {}",
+                        e.len(),
+                        mean,
+                        e.first().copied().unwrap_or(0.0),
+                        e.iter().take(10).map(|v| (v * 1e4).round() / 1e4).collect::<Vec<_>>(),
+                        e.iter().filter(|&&v| v > 0.1).count(),
+                        e.iter().filter(|&&v| v > 0.01).count()
+                    );
+                } else {
+                    eprintln!("DEBUG_XFILE: {} columns in the file, {} in the problem", xh.len(), n);
+                }
+            }
+        }
         let mut cands: Vec<Candidate> = Vec::new();
         let mut push = |raw: Option<RawCut>, cands: &mut Vec<Candidate>, s: &Solver<L>| {
             if let Some(raw) = raw {
@@ -707,7 +1004,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 経路集約 (path aggregation、HiGHS の `HighsPathSeparator`)
         if env_str!("ENOMOTO_MIP_NO_PATH_AGG").is_none() {
             let max_starts = if light { tunable!("ENOMOTO_T_MIP_NODE_PATH_STARTS", 0usize, usize) } else { tunable!("ENOMOTO_T_MIP_PATH_STARTS", 1000usize, usize) };
-            self.path_aggregation(&vars, &lp_rows, &mut cands, &mut push, max_starts);
+            if env_str!("ENOMOTO_MIP_PATH_HIGHS").is_some() && !light {
+                self.path_aggregation_highs(&vars, &lp_rows, &mut cands, &mut push);
+            } else {
+                self.path_aggregation(&vars, &lp_rows, &mut cands, &mut push, max_starts);
+            }
         }
         if dbg_sep {
             eprintln!("SEP path {:.3}s cands {}", sep_t0.elapsed().as_secs_f64(), cands.len());
