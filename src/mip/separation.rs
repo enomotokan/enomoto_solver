@@ -14,8 +14,11 @@ use super::lp_api::MipLp;
 
 /// LP に加える前のカット (構造変数の係数、右辺、効き目)。
 /// lifted flow cover を使うか (`ENOMOTO_MIP_NO_FLOWCOVER` で無効)。
+/// HiGHS の lifted cover を CMIR と並べて試すか (`ENOMOTO_MIP_LIFTED_COVER` で有効)。qnet1 では根の下界が
+/// 15627 -> 15924 (HiGHS 16022) と上がったが、40 問では 19 -> 17 問 (sgeomean 27.91 -> 29.06) と悪化した
+/// (misc07・neos5・binkar10_1・neos-860300 が遅くなった) ので既定では使わない。
 fn use_lifted_cover() -> bool {
-    env_str!("ENOMOTO_MIP_NO_LIFTED_COVER").is_none()
+    env_str!("ENOMOTO_MIP_LIFTED_COVER").is_some()
 }
 
 fn use_flow_cover() -> bool {
