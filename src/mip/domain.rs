@@ -521,6 +521,26 @@ impl Domain {
     /// 成り立つので含めない。矛盾がない、決定がない (根で矛盾)、大きすぎる場合は `None`。
     pub fn analyze_conflict(&self, p: &MipProblem, max_len: usize) -> Option<Vec<(usize, bool, f64)>> {
         let src = self.conflict?;
+        self.resolve_conflict(p, Err(src), max_len, false)
+    }
+
+    /// [`Self::analyze_conflict`] で、最後の決定のレベルだけでなく全てのレベルの伝播による変更を理由で置き換え、
+    /// 決定 (分枝など) だけの組にする (1-UIP の組が 0-1 列以外の境界を含んで線形の行にできないときの代わり)。
+    pub fn analyze_conflict_decisions(&self, p: &MipProblem, max_len: usize) -> Option<Vec<(usize, bool, f64)>> {
+        let src = self.conflict?;
+        self.resolve_conflict(p, Err(src), max_len, true)
+    }
+
+    /// 今のノードで破れている証明 `sum coefs x <= rhs` (双対証明・Farkas の証明) から衝突を作る (HiGHS の
+    /// `conflictAnalysis` と同じ): 証明の最小活動量を上げている境界の変更 (係数が正なら下限、負なら上限) から始めて、
+    /// [`Self::analyze_conflict`] と同じく 1-UIP まで理由で置き換える。
+    /// `decisions` なら [`Self::analyze_conflict_decisions`] と同じく決定だけの組にする。
+    pub fn analyze_proof_conflict(&self, p: &MipProblem, coefs: &[(usize, f64)], max_len: usize, decisions: bool) -> Option<Vec<(usize, bool, f64)>> {
+        self.resolve_conflict(p, Ok(coefs), max_len, decisions)
+    }
+
+    /// 衝突解析の本体。`start` は矛盾の出どころ (`Err`) か、破れている証明の係数 (`Ok`)。
+    fn resolve_conflict(&self, p: &MipProblem, start: Result<&[(usize, f64)], ConflictSrc>, max_len: usize, decisions: bool) -> Option<Vec<(usize, bool, f64)>> {
         let last_dec = self.stack.iter().rposition(|c| c.reason < 0)?;
         // (列, 側) ごとの記録の位置 (昇順)
         let mut hist: std::collections::HashMap<(usize, bool), Vec<usize>> = std::collections::HashMap::new();
@@ -549,11 +569,16 @@ impl Domain {
         let mut set: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
         let mut tmp: Vec<usize> = Vec::new();
         let end = self.stack.len();
-        match src {
-            ConflictSrc::Row(i, min_side) => explain_row(i, min_side, end, usize::MAX, &mut tmp),
-            ConflictSrc::Col(j) => {
+        match start {
+            Err(ConflictSrc::Row(i, min_side)) => explain_row(i, min_side, end, usize::MAX, &mut tmp),
+            Err(ConflictSrc::Col(j)) => {
                 tmp.extend(latest_before(j, false, end));
                 tmp.extend(latest_before(j, true, end));
+            }
+            Ok(coefs) => {
+                for &(j, a) in coefs {
+                    tmp.extend(latest_before(j, a < 0.0, end));
+                }
             }
         }
         set.extend(tmp.drain(..));
@@ -561,11 +586,19 @@ impl Domain {
             if set.len() > 4 * max_len + 100 {
                 return None;
             }
-            let cur: Vec<usize> = set.range(last_dec..).copied().collect();
-            if cur.len() <= 1 {
-                break;
-            }
-            let k = *cur.last().unwrap();
+            let k = if decisions {
+                // 全てのレベルで、伝播による変更のうち最も新しいもの
+                match set.iter().rev().find(|&&k| self.stack[k].reason >= 0) {
+                    Some(&k) => k,
+                    None => break,
+                }
+            } else {
+                let cur: Vec<usize> = set.range(last_dec..).copied().collect();
+                if cur.len() <= 1 {
+                    break;
+                }
+                *cur.last().unwrap()
+            };
             let c = &self.stack[k];
             if c.reason < 0 {
                 break; // 置き換えられない (決定に相当する) 変更

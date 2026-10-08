@@ -202,6 +202,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) row_log: Vec<RowEdit>,
     /// LP のカットの行 (元の行より後ろ) の年齢: 続けて効いていなかったノードの LP の数 ([`Self::age_cuts`])。
     pub(super) cut_age: Vec<u32>,
+    /// 証明から作った衝突の数。
+    proof_conflicts: u64,
     /// カット生成で整数として扱う列 (整数列と暗黙の整数列、[`MipProblem::implied_integers`])。
     pub(super) cut_int: Vec<bool>,
     /// 根で作ったカット (係数, 右辺, ノルム)。大域的に成り立つ。ノードで違反していれば LP に戻す。
@@ -319,6 +321,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
         vbounds: None,
         failed_heurs: 0,
         cut_age: Vec::new(),
+        proof_conflicts: 0,
         row_log: Vec::new(),
         cut_int: if env_str!("ENOMOTO_MIP_NO_IMPLINT").is_some() { p.is_int.clone() } else { p.implied_integers() },
         cut_pool: Vec::new(),
@@ -1643,6 +1646,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
         });
+        // 証明を作った境界の変更を分枝の決定まで辿った短い衝突も作る (証明そのものは長いことが多い)
+        self.add_proof_conflict(&coefs);
         if obj {
             self.push_pool_row(coefs, konst, true);
         } else {
@@ -1692,14 +1697,51 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return;
         }
         let p = self.p;
-        // 長い衝突は弱いわりに評価が重い (eil33-2: 上限 460 で 678 本作ると 1 ノードの処理が重くなり解けなくなった)
-        let max_len = (tunable!("ENOMOTO_T_MIP_CONFLICT_LEN", 0.1, f64).mul_add(p.n as f64, 10.0) as usize).min(tunable!("ENOMOTO_T_MIP_CONFLICT_MAXLEN", 50usize, usize));
+        let max_len = self.conflict_max_len();
         let Some(lits) = self.dom.analyze_conflict(p, max_len) else { return };
+        if !self.add_conflict_lits(&lits) && env_str!("ENOMOTO_MIP_NO_DECISION_CONFLICTS").is_none() {
+            // 0-1 列以外の境界を含む: 決定だけの組にして試す
+            if let Some(lits) = self.dom.analyze_conflict_decisions(p, max_len) {
+                self.add_conflict_lits(&lits);
+            }
+        }
+    }
+
+    /// 衝突解析の上限の長さ。
+    fn conflict_max_len(&self) -> usize {
+        // 長い衝突は弱いわりに評価が重い (eil33-2: 上限 460 で 678 本作ると 1 ノードの処理が重くなり解けなくなった)
+        (tunable!("ENOMOTO_T_MIP_CONFLICT_LEN", 0.1, f64).mul_add(self.p.n as f64, 10.0) as usize).min(tunable!("ENOMOTO_T_MIP_CONFLICT_MAXLEN", 50usize, usize))
+    }
+
+    /// 破れている証明 (`coefs`、今のノードの境界で最小活動量が右辺を超える) から衝突を作ってプールに入れる。
+    fn add_proof_conflict(&mut self, coefs: &[(usize, f64)]) {
+        if env_str!("ENOMOTO_MIP_NO_PROOF_CONFLICTS").is_some() {
+            return;
+        }
+        let max_len = self.conflict_max_len();
+        let mut ok = false;
+        if let Some(lits) = self.dom.analyze_proof_conflict(self.p, coefs, max_len, false) {
+            ok = self.add_conflict_lits(&lits);
+        }
+        if !ok && env_str!("ENOMOTO_MIP_NO_DECISION_CONFLICTS").is_none() {
+            if let Some(lits) = self.dom.analyze_proof_conflict(self.p, coefs, max_len, true) {
+                ok = self.add_conflict_lits(&lits);
+            }
+        }
+        if ok {
+            self.proof_conflicts += 1;
+        }
+    }
+
+    /// 衝突 (同時には成り立たない境界の組) が 0-1 列だけなら、`sum_{x_j >= 1} x_j - sum_{x_j <= 0} x_j <= |{x_j >= 1}| - 1`
+    /// の行にしてプールに入れる (入れたら真)。
+    fn add_conflict_lits(&mut self, lits: &[(usize, bool, f64)]) -> bool {
+        let p = self.p;
         let mut coefs: Vec<(usize, f64)> = Vec::with_capacity(lits.len());
         let mut ones = 0.0;
-        for &(j, upper, v) in &lits {
+        for &(j, upper, v) in lits {
             if !p.is_int[j] || self.dom.global_lo[j] != 0.0 || self.dom.global_up[j] != 1.0 {
-                return;
+                return false;
             }
             if !upper && v == 1.0 {
                 coefs.push((j, 1.0));
@@ -1707,13 +1749,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             } else if upper && v == 0.0 {
                 coefs.push((j, -1.0));
             } else {
-                return;
+                return false;
             }
         }
         coefs.sort_by_key(|&(j, _)| j);
         coefs.dedup_by_key(|&mut (j, _)| j);
         if coefs.len() != lits.len() {
-            return; // 同じ列の両側 (それ自体で矛盾) は使わない
+            return false; // 同じ列の両側 (それ自体で矛盾) は使わない
         }
         // 診断用: デバッグ解を切っていないか
         DEBUG_SOL.with(|dd| {
@@ -1726,6 +1768,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         });
         self.conflicts_added += 1;
         self.push_pool_row(coefs, ones - 1.0, false);
+        true
     }
 
     /// プールの `k` 番目の行の右辺: 双対証明 (`obj`) は `U - konst` (`U` は打ち切り値、暫定解がなければ無限)、
@@ -2086,7 +2129,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.join_submips(0);
         self.log(true);
         if self.params.verbose {
-            eprintln!("MIP: dual proofs and conflicts {} (conflicts added {}, Farkas {}, pruned {} nodes, tightened {} bounds)", self.dual_proofs.len(), self.conflicts_added, self.farkas_added, self.proof_prunes, self.proof_tightenings);
+            eprintln!("MIP: dual proofs and conflicts {} (conflicts added {} (from proofs {}), Farkas {}, pruned {} nodes, tightened {} bounds)", self.dual_proofs.len(), self.conflicts_added, self.proof_conflicts, self.farkas_added, self.proof_prunes, self.proof_tightenings);
         }
         let (x, objective) = match &self.incumbent {
             Some((z, x)) => (Some(x.clone()), Some(*z)),
