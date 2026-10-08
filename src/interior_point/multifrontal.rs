@@ -492,6 +492,7 @@ impl Multifrontal {
         let n = self.n;
         let mut x: Vec<f64> = (0..n).map(|i| rhs[self.perm_fwd[i]]).collect();
         let ns = self.begin.len();
+        let mut tmp: Vec<f64> = Vec::new();
         // 前進: L y = x (supernode の番号の順は子が先)。
         for s in 0..ns {
             let (b, e) = (self.begin[s], self.end[s]);
@@ -505,16 +506,21 @@ impl Multifrontal {
                 faer::linalg::triangular_solve::solve_lower_triangular_in_place(l11, xs, Parallelism::None);
             }
             if r > 0 {
+                // tmp = L21 x_s (密な行列ベクトル積) を下の行に引く。
                 let pat = &self.pat[self.pat_ptr[s]..self.pat_ptr[s + 1]];
-                let ls = &self.l[self.l_ptr[s]..self.l_ptr[s + 1]];
-                for j in 0..nc {
-                    let yj = x[b + j];
-                    if yj != 0.0 {
-                        let col = &ls[j * f + nc..(j + 1) * f];
-                        for (t, &i) in pat.iter().enumerate() {
-                            x[i] -= col[t] * yj;
-                        }
-                    }
+                tmp.clear();
+                tmp.resize(r, 0.0);
+                let xs = from_column_major_slice::<f64, usize, usize>(&x[b..e], nc, 1);
+                faer::linalg::matmul::matmul(
+                    from_column_major_slice_mut::<f64, usize, usize>(&mut tmp, r, 1),
+                    _l21,
+                    xs,
+                    None,
+                    1.0,
+                    Parallelism::None,
+                );
+                for (t, &i) in pat.iter().enumerate() {
+                    x[i] -= tmp[t];
                 }
             }
         }
@@ -527,16 +533,18 @@ impl Multifrontal {
             let lmat = from_column_major_slice::<f64, usize, usize>(&self.l[self.l_ptr[s]..self.l_ptr[s + 1]], f, nc);
             let (l11, _l21) = lmat.split_at_row(nc);
             if r > 0 {
+                // x_s -= L21ᵀ x[pat] (下の行を集めてから密な行列ベクトル積)。
                 let pat = &self.pat[self.pat_ptr[s]..self.pat_ptr[s + 1]];
-                let ls = &self.l[self.l_ptr[s]..self.l_ptr[s + 1]];
-                for j in 0..nc {
-                    let col = &ls[j * f + nc..(j + 1) * f];
-                    let mut acc = 0.0;
-                    for (t, &i) in pat.iter().enumerate() {
-                        acc += col[t] * x[i];
-                    }
-                    x[b + j] -= acc;
-                }
+                tmp.clear();
+                tmp.extend(pat.iter().map(|&i| x[i]));
+                faer::linalg::matmul::matmul(
+                    from_column_major_slice_mut::<f64, usize, usize>(&mut x[b..e], nc, 1),
+                    _l21.transpose(),
+                    from_column_major_slice::<f64, usize, usize>(&tmp, r, 1),
+                    Some(1.0),
+                    -1.0,
+                    Parallelism::None,
+                );
             }
             let xs = from_column_major_slice_mut::<f64, usize, usize>(&mut x[b..e], nc, 1);
             faer::linalg::triangular_solve::solve_upper_triangular_in_place(l11.transpose(), xs, Parallelism::None);

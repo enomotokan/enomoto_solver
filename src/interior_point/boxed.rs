@@ -899,9 +899,10 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
                 kkt = IpmKkt::augmented(a);
                 crate::phase_timing::mark("ipm_switch_augmented");
             }
-            // 分解が破綻した: 正則化を強めて次の反復で分解し直す。
-            rho = (rho * 100.0).max(1e-8);
-            delta = (delta * 100.0).max(1e-8);
+            // 分解が破綻した: 正則化を強めて次の反復で分解し直す (試験用 `ENOMOTO_T_IPM_BREAK_REG`: 引き上げる下限、既定 1e-8)。
+            let break_reg = tunable!("ENOMOTO_T_IPM_BREAK_REG", 1e-8f64, f64);
+            rho = (rho * 100.0).max(break_reg);
+            delta = (delta * 100.0).max(break_reg);
             if debug {
                 eprintln!("IPM it={it} non-finite Newton direction; raising regularization to rho={rho:.1e} delta={delta:.1e}");
             }

@@ -1755,7 +1755,7 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
                     Some((l, u)) => (l, u),
                     None => (&std.lb, &std.ub),
                 };
-                let mut try_y = |name: &str, y: &[f64], gap: &mut f64| {
+                let try_y = |name: &str, y: &[f64], gap: &mut f64| {
                     let l = lagrangian_lower_bound_with(std, y, lbs, ubs);
                     let g = (obj - l) / (1.0 + obj.abs());
                     if debug {

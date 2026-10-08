@@ -201,10 +201,6 @@ pub fn at_mul(a: &FaerCsr, at: &FaerCsr, y: &[f64], out: &mut [f64]) {
     }
 }
 
-/// 数値分解に使う並列度。因子の非零数 `nnz_l` が `ENOMOTO_T_FACTOR_PAR_NNZ` (既定 [`FACTOR_PAR_NNZ`]、0 で使わない) 以上なら
-/// 並列、それ未満は逐次 (Fable の調査と Netlib + Kennington の比較で、小さな疎 Cholesky では faer の並列分解の分割の手間が
-/// 計算を上回った。一方 qap15 (nnz(L) 1,770 万) では 1 回の分解が 1.3 秒かかり、逐次では内点法の 9 割を占める)。
-/// 試験用 `ENOMOTO_T_FACTOR_SEQ=0` で常に並列。作業領域の見積もり (`_req`) にも同じ値を使う。
 thread_local! {
     /// このスレッドで分解を並列にしない ([`with_inner_seq`])。
     static INNER_SEQ: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -223,6 +219,10 @@ pub fn inner_seq() -> bool {
     INNER_SEQ.with(|c| c.get())
 }
 
+/// 数値分解に使う並列度。因子の非零数 `nnz_l` が `ENOMOTO_T_FACTOR_PAR_NNZ` (既定 [`FACTOR_PAR_NNZ`]、0 で使わない) 以上なら
+/// 並列、それ未満は逐次 (Fable の調査と Netlib + Kennington の比較で、小さな疎 Cholesky では faer の並列分解の分割の手間が
+/// 計算を上回った。一方 qap15 (nnz(L) 1,770 万) では 1 回の分解が 1.3 秒かかり、逐次では内点法の 9 割を占める)。
+/// 試験用 `ENOMOTO_T_FACTOR_SEQ=0` で常に並列。作業領域の見積もり (`_req`) にも同じ値を使う。
 fn factor_par(nnz_l: usize) -> faer::Parallelism<'static> {
     if inner_seq() {
         return faer::Parallelism::None;
