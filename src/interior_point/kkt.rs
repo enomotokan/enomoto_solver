@@ -957,11 +957,21 @@ impl NormalKkt {
             pd.factor(&self.values)
         } else if let Some(mf) = self.mf.as_mut() {
             let _ = m;
-            mf.factor(&self.values, reg.dynamic_regularization_delta, reg.dynamic_regularization_epsilon)
+            let ok = mf.factor(&self.values, reg.dynamic_regularization_delta, reg.dynamic_regularization_epsilon);
+            if env_str!("ENOMOTO_DEBUG_REFINE").is_some() {
+                eprintln!("FACTOR mf ok={ok} dynreg={}", super::multifrontal::DYNREG.swap(0, std::sync::atomic::Ordering::Relaxed));
+            }
+            ok
         } else {
-            self.chol_symbolic
-                .factorize_numeric_llt::<f64>(&mut self.l_values, m, Side::Upper, reg, factor_par(self.chol_symbolic.len_values()), PodStack::new(&mut self.numeric_buf))
-                .is_ok()
+            let r = self.chol_symbolic
+                .factorize_numeric_llt::<f64>(&mut self.l_values, m, Side::Upper, reg, factor_par(self.chol_symbolic.len_values()), PodStack::new(&mut self.numeric_buf));
+            if env_str!("ENOMOTO_DEBUG_REFINE").is_some() {
+                match &r {
+                    Ok(_) => eprintln!("FACTOR faer ok"),
+                    Err(e) => eprintln!("FACTOR faer err minor={} nan_in_values={}", e.non_positive_definite_minor, self.values.iter().any(|v| !v.is_finite())),
+                }
+            }
+            r.is_ok()
         };
         self.factored = ok;
         FACTOR_PROF.with(|c| {
@@ -1263,7 +1273,11 @@ mod chol_bench {
                 }
             }
             let res = mx.iter().zip(&b).map(|(a, b)| (a - b).abs()).fold(0.0f64, f64::max);
-            println!("CHOLBENCH multifrontal threads={} n={n} nnz(L)={} setup={t_sym:.3}s numeric={best:.3}s resid={res:.2e}", rayon::current_num_threads(), mf.len_values());
+            let _ = super::super::multifrontal::take_prof();
+            let t = std::time::Instant::now();
+            mf.factor(&val, 1e-8, 1e-14);
+            println!("one={:.3}s prof(asm+ea, chol, trsm, syrk)={:?}", t.elapsed().as_secs_f64(), super::super::multifrontal::take_prof());
+            println!("CHOLBENCH multifrontal threads={} n={n} ns={} nnz(L)={} setup={t_sym:.3}s numeric={best:.3}s resid={res:.2e}", rayon::current_num_threads(), mf.n_supernodes(), mf.len_values());
             return;
         }
         let t_sym = t0.elapsed().as_secs_f64();
