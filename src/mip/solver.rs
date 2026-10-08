@@ -771,6 +771,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 潜っている子ノード (定義域に分枝を積んだ状態で次に処理する)。
         let mut plunge: Option<OpenNode> = None;
         let mut plunge_depth = 0usize;
+        let mut plunge_start = 0u64;
         loop {
             if self.time_up() {
                 return self.finish_limit(MipStatus::TimeLimit, plunge.as_ref());
@@ -784,10 +785,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 && !first
                 && env_str!("ENOMOTO_MIP_NO_SIBLING_BACKTRACK").is_none()
                 && !(self.params.submip && env_str!("ENOMOTO_MIP_NO_SIBLING_BACKTRACK_SUB").is_some())
+                // 1 回の潜り (兄弟への戻りを含む) のノード数の上限 (HiGHS: min(1000, ノード数 / 10))
+                && self.nodes - plunge_start < (self.nodes / tunable!("ENOMOTO_T_MIP_PLUNGE_NODES_DIV", 10u64, u64)).min(1000)
             {
                 let cutoff = self.prune_limit();
                 let glb = self.queue.best_lower_bound();
-                let limit = if cutoff.is_finite() { glb + tunable!("ENOMOTO_T_MIP_PLUNGE_QUOT", 0.25, f64) * (cutoff - glb) } else { f64::INFINITY };
+                let limit = if cutoff.is_finite() { glb + tunable!("ENOMOTO_T_MIP_SIBLING_QUOT", 0.25, f64) * (cutoff - glb) } else { f64::INFINITY };
                 let mut got = None;
                 while let Some((id, gen)) = self.dive_stack.pop() {
                     if let Some(n) = self.queue.take(id, gen, limit.min(cutoff)) {
@@ -829,6 +832,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 None => {
                     plunge_depth = 0;
+                    plunge_start = self.nodes;
                     self.dive_stack.clear();
                     let lim = self.prune_limit();
                     self.queue.prune(lim);
