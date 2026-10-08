@@ -762,13 +762,14 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     // `x⁺ = proj(x - τ s)` で境界に張り付く列と一致する。
     //   1: PDLP の前処理 (Ruiz + Pock–Chambolle) と初期の η, ω、
     //   2: PDLP を 0 から最初の再始動まで回した η, ω、
-    //   3 (既定、第 16・17 回の比較): 1 の歩幅で内点法の点から PDHG を文字どおり 1 歩進め (x⁺, y⁺)、その点で検出する、
+    //   3 (第 16・17 回〜第 47 回の既定): 1 の歩幅で内点法の点から PDHG を文字どおり 1 歩進め (x⁺, y⁺)、その点で検出する、
     //   4: 2 の歩幅で 3 と同じく 1 歩進める、
     //   5: 3 と同じだが、境界に切られなかった列は内点法の値のまま (x⁺ は張り付けだけ。歩幅 τ が大きいと
     //      基底の列が `τ s_j` だけ動いて `A x = b` が崩れる: pilot.ja)。
-    //   0: 参照実装と同じ γ = 1 (`ENOMOTO_T_XO_GAMMA_PDHG` で選ぶ)。
+    //   0 (既定、第 48 回の比較。内点法の高精度化で終点が正確になり、尺度の補正が要らなくなった): 参照実装と同じ γ = 1
+    //      (`ENOMOTO_T_XO_GAMMA_PDHG` で選ぶ)。
     // `ENOMOTO_T_XO_GAMMA_MULT` は γ に掛ける倍率。
-    let gamma_mode = tunable!("ENOMOTO_T_XO_GAMMA_PDHG", 3u8, u8);
+    let gamma_mode = tunable!("ENOMOTO_T_XO_GAMMA_PDHG", 0u8, u8);
     let gamma_mult = tunable!("ENOMOTO_T_XO_GAMMA_MULT", 1.0f64, f64);
     let mut gamma = vec![prm::GAMMA * gamma_mult; n];
     let mut pdhg_sigma: Option<Vec<f64>> = None;
