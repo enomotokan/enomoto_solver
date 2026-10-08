@@ -1840,6 +1840,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let p = self.p;
         let mut d = if obj { p.cost.clone() } else { vec![0.0; p.n] };
         let mut konst = 0.0;
+        let mut skipped = 0usize;
         for (i, &yi) in y.iter().enumerate().take(self.lp.num_rows()) {
             if yi.abs() <= 1e-12 {
                 continue;
@@ -1847,6 +1848,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let (lo, up) = self.lp.row_bounds(i);
             let b = if yi > 0.0 { lo } else { up };
             if !b.is_finite() {
+                skipped += 1;
                 continue; // その行は使わない (y_i = 0 とみなす。d もそれに合わせて作る)
             }
             konst += yi * b;
@@ -1872,7 +1874,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // d_j x_j >= d_j * (下の側の大域的な境界) で右辺に移す: sum_{他} <= U - konst - d_j x_j <= U - (konst + min)
                 let m = if dj > 0.0 { dj * gl } else { dj * gu };
                 if !m.is_finite() {
-                    if fixed {
+                    // 無限の境界の側に向く極小の係数 (行を足した丸め誤差、neos-911970 で 1e-15 程度) は 0 とみなす
+                    // (残すと最小活動量が -inf になり証明全体が捨てられる。HiGHS も極小の値は無視する)
+                    if fixed || (dj.abs() <= 1e-9 * dmax && env_str!("ENOMOTO_MIP_PROOF_KEEP_TINY").is_none()) {
                         continue;
                     }
                     coefs.push((j, dj));
@@ -1884,7 +1888,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             coefs.push((j, dj));
         }
         let dbg = env_str!("ENOMOTO_MIP_DEBUG_PROOF").is_some();
-        if coefs.is_empty() || coefs.len() > tunable!("ENOMOTO_T_MIP_PROOF_DENSITY", 0.5, f64).mul_add(p.n as f64, 20.0) as usize {
+        if coefs.is_empty() {
+            return false;
+        }
+        let dense = coefs.len() > tunable!("ENOMOTO_T_MIP_PROOF_DENSITY", 0.5, f64).mul_add(p.n as f64, 20.0) as usize;
+        if dense && env_str!("ENOMOTO_MIP_DENSE_PROOF_NO_CONFLICT").is_some() {
             if dbg {
                 eprintln!("PROOF reject dense {} of {}", coefs.len(), p.n);
             }
@@ -1895,7 +1903,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let minact: f64 = coefs.iter().map(|&(j, a)| if a > 0.0 { a * self.dom.lo[j] } else { a * self.dom.up[j] }).sum();
         if !minact.is_finite() || minact <= rhs + 1e-6 * (1.0 + rhs.abs()) {
             if dbg {
-                eprintln!("PROOF reject not violated: minact {minact} rhs {rhs}");
+                eprintln!("PROOF reject not violated: minact {minact} rhs {rhs} obj {obj} lp_obj {} limit {} len {} rows_skipped {}", self.lp.objective() + p.offset, self.prune_limit(), coefs.len(), skipped);
+                for &(j, a) in &coefs {
+                    let b = if a > 0.0 { self.dom.lo[j] } else { self.dom.up[j] };
+                    if !b.is_finite() {
+                        eprintln!("PROOF   inf col {j} coef {a:e} int {} dmax {dmax:e} lp lo/up {:?}", p.is_int[j], self.lp.col_bounds(j));
+                    }
+                }
             }
             return false;
         }
@@ -1912,6 +1926,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         });
         // 証明を作った境界の変更を分枝の決定まで辿った短い衝突も作る (証明そのものは長いことが多い)
         self.add_proof_conflict(&coefs);
+        // 密な証明はプールに入れない (伝播が重い)。衝突だけ使う
+        if dense {
+            if dbg {
+                eprintln!("PROOF dense {} of {}: conflict only", coefs.len(), p.n);
+            }
+            return false;
+        }
         if obj {
             self.push_pool_row(coefs, konst, true);
         } else {
