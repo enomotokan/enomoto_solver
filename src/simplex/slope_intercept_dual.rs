@@ -3767,7 +3767,9 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     // 表の行の量。`M` に依存するのはそれを使うスコア `Score2` だけ)。最初のピボットから
     // 厳密 DSE を使う。全スラックの `B0` は符号付き単位行列なので `DseState::new` の単位重みは正確。
     let mut dse = match WARM_DSE.with(|w| w.borrow_mut().take()) {
-        Some(w) if warm_started && w.len() == m && env_str!("ENOMOTO_NO_WARM_DSE").is_none() => super::DseState::from_weights(w),
+        // 既定では使わない (`ENOMOTO_WARM_DSE` で有効): 反復は少し減るが、退化した LP で着く頂点が変わり、misc07・mik-250 で
+        // 木が大きくなった (40 問: 18 -> 17 問)
+        Some(w) if warm_started && w.len() == m && env_str!("ENOMOTO_WARM_DSE").is_some() => super::DseState::from_weights(w),
         _ => super::DseState::new(m),
     };
 
