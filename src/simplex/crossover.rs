@@ -471,7 +471,7 @@ struct Reduced {
 /// 内点法の前に行・列をそろえた問題 `(R A C, R b, C c, l/C, u/C)` と縮尺 `(dr, dc)` (`x = dc ∘ x'`、`y = dr ∘ y'`)。
 /// `mode` 1: Pock–Chambolle (α = 1、行・列の絶対値の和の平方根で割る)、2: 幾何平均 (行・列の最大と最小の非零の
 /// 絶対値の積の平方根で割る、`ENOMOTO_T_XO_IPM_GEO_PASSES` 回)、3: 幾何平均の後に平衡化 (行・列の最大絶対値を 1 に)、
-/// 4: 平衡化だけ。
+/// 4: 平衡化だけ、5: Pock–Chambolle の行だけ、6: Pock–Chambolle の列だけ。
 #[allow(clippy::type_complexity)]
 fn ipm_prescaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], mode: u8) -> (FaerCsr, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
     let m = a.nrows();
@@ -514,8 +514,8 @@ fn ipm_prescaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], mode: 
         }
     };
     match mode {
-        1 => {
-            // Pock–Chambolle は行・列とも元の行列の和で同時に求める。
+        1 | 5 | 6 => {
+            // Pock–Chambolle は行・列とも元の行列の和で同時に求める (5: 行だけ、6: 列だけ)。
             let mut rsum = vec![0.0f64; m];
             let mut csum = vec![0.0f64; n];
             for (i, r) in rows.iter().enumerate() {
@@ -524,8 +524,12 @@ fn ipm_prescaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], mode: 
                     csum[j] += v.abs();
                 }
             }
-            dr = rsum.iter().map(|&v| 1.0 / fin(v).sqrt()).collect();
-            dc = csum.iter().map(|&v| 1.0 / fin(v).sqrt()).collect();
+            if mode != 6 {
+                dr = rsum.iter().map(|&v| 1.0 / fin(v).sqrt()).collect();
+            }
+            if mode != 5 {
+                dc = csum.iter().map(|&v| 1.0 / fin(v).sqrt()).collect();
+            }
         }
         _ => {
             if mode == 2 || mode == 3 {
@@ -644,6 +648,7 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     // 試験用 (`ENOMOTO_T_XO_IPM_PC`): 内点法の前に行・列をそろえる ([`ipm_prescaled`] の `mode`、0 でしない)。
     let ipm_pc = tunable!("ENOMOTO_T_XO_IPM_PC", 0u8, u8);
     let pc = (ipm_pc != 0 && xo.given_point.is_none()).then(|| ipm_prescaled(&a_j, &b_j, &c_j, &l_j, &u_j, ipm_pc));
+    crate::phase_timing::mark("xo_ipm_start");
     let ipm = if let Some((gx, gy, _)) = xo.given_point {
         BoxIpmResult {
             status: Status::Optimal,

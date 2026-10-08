@@ -2089,6 +2089,7 @@ fn solve_one_engine(std: &StdForm, opts: &crate::types::LpOptions) -> SimplexRes
 
 /// 内点法 + クロスオーバー ([`solve_one_engine`] の本体)。
 fn solve_ipm_crossover_engine(std: &StdForm, opts: &crate::types::LpOptions) -> SimplexResult {
+    crate::phase_timing::mark("xo_engine_start");
     {
         // 内点法 + クロスオーバー。内点法が収束しない・基底が作れないときは傾き・切片二段解法で解き直す。
         // 大きな独立成分が 2 つ以上あれば成分ごとに分けて解く。

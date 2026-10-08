@@ -380,6 +380,8 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
     // Gondzio の多重中心性補正子の最大回数 (0 で Mehrotra の予測子・修正子だけ)。
     let gondzio_max = tunable!("ENOMOTO_T_IPM_GONDZIO", BOX_GONDZIO, usize);
     let gondzio_small_step = tunable!("ENOMOTO_T_IPM_GONDZIO_SMALL_STEP", 1.0f64, f64);
+    let gondzio_auto = tunable!("ENOMOTO_T_IPM_GONDZIO_AUTO", 0.0f64, f64);
+    let gondzio_auto_max = tunable!("ENOMOTO_T_IPM_GONDZIO_AUTO_MAX", 2usize, usize);
     let mut nan_recover_left = tunable!("ENOMOTO_T_IPM_NAN_RECOVER", 0usize, usize);
     let switch_aug_k = tunable!("ENOMOTO_T_IPM_SWITCH_AUG", 0usize, usize);
     let mut sw_best = f64::INFINITY;
@@ -735,7 +737,8 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
         }
         let t_f = std::time::Instant::now();
         let fac_ok = kkt.factor(&top, delta, &mut mid);
-        prof.0 += t_f.elapsed().as_secs_f64();
+        let last_tf = t_f.elapsed().as_secs_f64();
+        prof.0 += last_tf;
         if !fac_ok {
             rho = (rho * 100.0).max(1e-8);
             delta = (delta * 100.0).max(1e-8);
@@ -787,13 +790,22 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
         up.set_rs(true, sigma * mu);
         let t_s = std::time::Instant::now();
         newton(&mut kkt, a, &top, delta, &r_x, &r_y, &mut lo, &mut up, &pos, &mut rhs, n, &mut refine_work);
-        prof.1 += t_s.elapsed().as_secs_f64();
+        let last_ts = t_s.elapsed().as_secs_f64();
+        prof.1 += last_ts;
+        // 試験用 (`ENOMOTO_T_IPM_GONDZIO_AUTO=C`): 補正子の回数を、この反復の分解の時間が Newton 系 1 回の求解の
+        // 時間の何倍かで決める (`floor(t_分解 / (C t_求解))`、上限 `ENOMOTO_T_IPM_GONDZIO_AUTO_MAX`)。分解が重く求解が
+        // 軽い問題 (dfl001・pds-20・ken-18) だけ補正子で反復を減らし、求解が重い問題 (osa-60) では使わない。
+        let gondzio_k = if gondzio_auto > 0.0 && last_ts > 0.0 {
+            gondzio_max.max(((last_tf / (gondzio_auto * last_ts)) as usize).min(gondzio_auto_max))
+        } else {
+            gondzio_max
+        };
         let mut alpha_p = fraction_to_boundary(&lo.s, &lo.ds).min(fraction_to_boundary(&up.s, &up.ds));
         let mut alpha_d = fraction_to_boundary(&lo.z, &lo.dz).min(fraction_to_boundary(&up.z, &up.dz));
         // 3) Gondzio の多重中心性補正子 (Gondzio 1996、Colombo & Gondzio 2008): ステップ幅を伸ばした試行点の
         //    相補積 v を [β_min σμ, β_max σμ] に寄せる補正を相補性の右辺に足し、同じ分解で解き直す。
         //    ステップ幅が十分伸びたときだけ採る。
-        for _ in 0..gondzio_max {
+        for _ in 0..gondzio_k {
             const DELTA_ALPHA: f64 = 0.1;
             const BETA_MIN: f64 = 0.1;
             const BETA_MAX: f64 = 10.0;
