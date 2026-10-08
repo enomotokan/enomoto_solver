@@ -596,6 +596,8 @@ pub struct NormalKkt {
     tmp_n: Vec<f64>,
     tmp_p: Vec<f64>,
     factored: bool,
+    /// 対角スケーリングの係数 `S = diag(M)^{-1/2}` (使わないなら空)。
+    dscale: Vec<f64>,
 }
 
 /// [`NormalKkt`] を使う三つ組の数の上限 (これを超えるなら拡大系を使う)。
@@ -777,6 +779,7 @@ impl NormalKkt {
             tmp_n: vec![0.0; n],
             tmp_p: vec![0.0; p],
             factored: false,
+            dscale: Vec::new(),
         })
     }
 
@@ -787,8 +790,20 @@ impl NormalKkt {
 
     /// `M_s` (疎な列だけの正規方程式) の Cholesky で `rhs` を上書きして解く。
     fn solve_ms(&mut self, rhs: &mut [f64]) {
+        // 対角スケーリングして分解したなら M^{-1} r = S (S M S)^{-1} S r。
+        let scaled = !self.dscale.is_empty();
+        if scaled {
+            for (v, s) in rhs.iter_mut().zip(&self.dscale) {
+                *v *= s;
+            }
+        }
         let llt = faer::sparse::linalg::cholesky::LltRef::<usize, f64>::new(&self.chol_symbolic, &self.l_values);
         llt.solve_in_place_with_conj(Conj::No, from_column_major_slice_mut(rhs, self.p, 1), KKT_PARALLELISM, PodStack::new(&mut self.solve_buf));
+        if scaled {
+            for (v, s) in rhs.iter_mut().zip(&self.dscale) {
+                *v *= s;
+            }
+        }
     }
 
     /// `d` (上段対角、正) と `δ` で分解する。分解に失敗すれば `false`。
@@ -814,6 +829,26 @@ impl NormalKkt {
         }
         for &q in &self.diag_dest {
             vals[q as usize] += delta;
+        }
+        // 試験用 (`ENOMOTO_T_NORMAL_DIAG_SCALE=1`): 対角が 1 になるよう S M S (S = diag(M)^{-1/2}) にしてから分解する
+        // (動的正則化の閾値は絶対値なので、終盤に対角の幅が広がると、どのピボットを置き換えるかが行の尺度に左右される)。
+        if tunable!("ENOMOTO_T_NORMAL_DIAG_SCALE", 0u8, u8) != 0 {
+            let p_ = self.p;
+            self.dscale.resize(p_, 1.0);
+            for i in 0..p_ {
+                let dg = vals[self.diag_dest[i] as usize];
+                self.dscale[i] = if dg > 0.0 && dg.is_finite() { 1.0 / dg.sqrt() } else { 1.0 };
+            }
+            let cp = self.symbolic_base.col_ptrs();
+            let ri = self.symbolic_base.row_indices();
+            for c in 0..p_ {
+                let sc = self.dscale[c];
+                for k in cp[c]..cp[c + 1] {
+                    vals[k] *= sc * self.dscale[ri[k]];
+                }
+            }
+        } else {
+            self.dscale.clear();
         }
         let m = faer::sparse::SparseColMatRef::<usize, f64>::new(self.symbolic_base.as_ref(), &self.values);
         let reg = faer::sparse::linalg::cholesky::LltRegularization {
