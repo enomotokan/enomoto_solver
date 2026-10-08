@@ -524,10 +524,11 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
     let noimprove_k = tunable!("ENOMOTO_T_IPM_NOIMPROVE", 0usize, usize);
     let blowup = tunable!("ENOMOTO_T_IPM_BLOWUP", BOX_BLOWUP, f64);
     let mut noimprove = 0usize;
-    let push_f = tunable!("ENOMOTO_T_IPM_PUSH", 0.0f64, f64);
+    // 停止基準の後の高精度化の目標 (停止基準の倍率、既定 1e-3 は第 43〜46 回の比較で決めた。0 で行わない)。
+    let push_f = tunable!("ENOMOTO_T_IPM_PUSH", 1e-3f64, f64);
     let push_max = tunable!("ENOMOTO_T_IPM_PUSH_ITERS", 15usize, usize);
     // 残差の最悪値が最良の半分を下回らない反復がこの回数続いたら高精度化をやめる。
-    let push_stall_max = tunable!("ENOMOTO_T_IPM_PUSH_STALL", 2usize, usize);
+    let push_stall_max = tunable!("ENOMOTO_T_IPM_PUSH_STALL", 1usize, usize);
     let mut pushing = false;
     let mut push_it = 0usize;
     let mut push_stall = 0usize;
@@ -565,7 +566,7 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
             );
         }
         if res.primal <= bnd_p && res.dual <= bnd_d && gap <= bnd_g {
-            // 試験用 (`ENOMOTO_T_IPM_PUSH=f`): 停止基準を満たした後も、相対残差の最悪値が f (停止基準の倍率) に
+            // 高精度化 (`ENOMOTO_T_IPM_PUSH=f`): 停止基準を満たした後も、相対残差の最悪値が f (停止基準の倍率) に
             // 下がるか、伸びなくなる・数値が破綻する・`ENOMOTO_T_IPM_PUSH_ITERS` 反復に達するまで続け、最良の点を返す。
             let worst_now = rel.0.max(rel.1).max(rel.2);
             if push_f <= 0.0 || worst_now <= push_f {
