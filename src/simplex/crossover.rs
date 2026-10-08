@@ -471,7 +471,7 @@ struct Reduced {
 /// 内点法の前に行・列をそろえた問題 `(R A C, R b, C c, l/C, u/C)` と縮尺 `(dr, dc)` (`x = dc ∘ x'`、`y = dr ∘ y'`)。
 /// `mode` 1: Pock–Chambolle (α = 1、行・列の絶対値の和の平方根で割る)、2: 幾何平均 (行・列の最大と最小の非零の
 /// 絶対値の積の平方根で割る、`ENOMOTO_T_XO_IPM_GEO_PASSES` 回)、3: 幾何平均の後に平衡化 (行・列の最大絶対値を 1 に)、
-/// 4: 平衡化だけ、5: Pock–Chambolle の行だけ、6: Pock–Chambolle の列だけ。
+/// 4: 平衡化だけ、5: Pock–Chambolle の行だけ、6: Pock–Chambolle の列だけ、7: 変数の値の大きさの見積もりで列を割り、行の最大を 1 に。
 #[allow(clippy::type_complexity)]
 fn ipm_prescaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], mode: u8) -> (FaerCsr, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
     let m = a.nrows();
@@ -529,6 +529,30 @@ fn ipm_prescaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], mode: 
             }
             if mode != 5 {
                 dc = csum.iter().map(|&v| 1.0 / fin(v).sqrt()).collect();
+            }
+        }
+        7 => {
+            // 変数の値の大きさでそろえる: s_j = max(1, min(有限の上下限の大きさ, min_i |b_i| / |a_ij|)) で列を割り
+            // (x = s ∘ x')、行の最大の絶対値を 1 にする (右辺が 5.7e8 に達する ns1688926 は、内点法の許容 (|b| などに対する
+            // 相対値) では絶対値で 1 程度の残差が残り、終点から作った頂点の目的値が最適値から 18% ずれていた)。
+            let mut est = vec![f64::INFINITY; n];
+            for (i, r) in rows.iter().enumerate() {
+                let bi = b[i].abs();
+                if bi > 0.0 {
+                    for &(j, v) in r {
+                        est[j] = est[j].min(bi / v.abs());
+                    }
+                }
+            }
+            let cap = tunable!("ENOMOTO_T_XO_IPM_MAG_CAP", 1e8f64, f64);
+            for j in 0..n {
+                let bnd = [l[j], u[j]].iter().filter(|v| v.is_finite()).fold(0.0f64, |m, v| m.max(v.abs()));
+                let e = if bnd > 0.0 { est[j].min(bnd) } else { est[j] };
+                dc[j] = if e.is_finite() { e.clamp(1.0, cap) } else { 1.0 };
+            }
+            for (i, r) in rows.iter().enumerate() {
+                let mx = r.iter().fold(0.0f64, |m, &(j, v)| m.max((v * dc[j]).abs()));
+                dr[i] = 1.0 / fin(mx);
             }
         }
         _ => {

@@ -531,6 +531,7 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
     let mut noimprove = 0usize;
     // 停止基準の後の高精度化の目標 (停止基準の倍率、既定 1e-3 は第 43〜46 回の比較で決めた。0 で行わない)。
     let push_f = tunable!("ENOMOTO_T_IPM_PUSH", 1e-3f64, f64);
+    let gap_obj = tunable!("ENOMOTO_T_IPM_GAP_OBJ", 0u8, u8) != 0;
     let solve_acc = tunable!("ENOMOTO_T_IPM_SOLVE_ACC", 0.0f64, f64);
     let solve_acc_bump = tunable!("ENOMOTO_T_IPM_SOLVE_ACC_BUMP", 100.0f64, f64);
     let solve_acc_min = tunable!("ENOMOTO_T_IPM_SOLVE_ACC_MIN", 1e-11f64, f64);
@@ -586,7 +587,9 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
         let z_inf = norm_inf(&lo.z).max(norm_inf(&up.z));
         let bnd_p = eps_abs + eps_rel * norm_inf(&ax).max(norm_b).max(gx).max(norm_h).max(s_inf);
         let bnd_d = eps_abs + eps_rel * norm_inf(&aty).max(z_inf).max(norm_c);
-        let bnd_g = eps_abs + eps_rel * cx.abs().max(by.abs()).max(hz.abs());
+        // 試験用 `ENOMOTO_T_IPM_GAP_OBJ=1`: ギャップの許容を目的値の大きさに比例させる (`eps_rel |c·x|`。内部の正規化で目的値が
+        // 小さくなり絶対項 `eps_abs` が支配すると、目的値に対する相対誤差が大きいまま止まる: ns1688926 は 2.5e-5)。
+        let bnd_g = if gap_obj { eps_rel * cx.abs().max(1e-300) } else { eps_abs + eps_rel * cx.abs().max(by.abs()).max(hz.abs()) };
         rel = (res.primal / bnd_p, res.dual / bnd_d, gap / bnd_g);
         if debug {
             eprintln!(
