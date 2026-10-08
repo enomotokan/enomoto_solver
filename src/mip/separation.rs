@@ -907,7 +907,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             }
                         }
                     };
-                    if env_str!("ENOMOTO_MIP_PATH_HIGHS").is_some() {
+                    if env_str!("ENOMOTO_MIP_PATH_OLD").is_none() {
                         self.path_aggregation_highs(&vars_h, &lp_rows, &mut ch, &mut push_h);
                     } else {
                         self.path_aggregation(&vars_h, &lp_rows, &mut ch, &mut push_h, usize::MAX);
@@ -1004,7 +1004,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 経路集約 (path aggregation、HiGHS の `HighsPathSeparator`)
         if env_str!("ENOMOTO_MIP_NO_PATH_AGG").is_none() {
             let max_starts = if light { tunable!("ENOMOTO_T_MIP_NODE_PATH_STARTS", 0usize, usize) } else { tunable!("ENOMOTO_T_MIP_PATH_STARTS", 1000usize, usize) };
-            if env_str!("ENOMOTO_MIP_PATH_HIGHS").is_some() && !light {
+            // 既定は HiGHS の経路集約の移植 (`ENOMOTO_MIP_PATH_OLD` で従来の経路集約)
+            if env_str!("ENOMOTO_MIP_PATH_OLD").is_none() && !light {
                 self.path_aggregation_highs(&vars, &lp_rows, &mut cands, &mut push);
             } else {
                 self.path_aggregation(&vars, &lp_rows, &mut cands, &mut push, max_starts);

@@ -169,6 +169,9 @@ pub struct LpEngine {
     d: Vec<f64>,
     /// 基底位置ごとの DSE 重み。
     dse: Vec<f64>,
+    /// 行を加えた後、次の分解で DSE 重みを正確に計算する基底の位置 (加えた行の論理変数。重み 1 のままだと
+    /// 密なカットの行が過大に選ばれる)。
+    dse_pending: Vec<usize>,
     lu: Option<sparse_lu::FtLu>,
     /// 最後の分解からの更新回数。
     updates: usize,
@@ -255,6 +258,7 @@ impl LpEngine {
             x: vec![0.0; nt],
             d: vec![0.0; nt],
             dse: vec![1.0; m],
+            dse_pending: Vec::new(),
             lu: None,
             updates: 0,
             fresh: Fresh { lu: false, primal: false, dual: false },
@@ -507,6 +511,7 @@ impl LpEngine {
             self.d.push(0.0);
             self.basic_var.push(n + self.m);
             self.dse.push(1.0);
+            self.dse_pending.push(self.m);
             self.m += 1;
         }
         self.rebuild_cols();
@@ -524,6 +529,7 @@ impl LpEngine {
             return;
         }
         let n = self.n;
+        self.dse_pending.clear();
         let old_basis = self.basis();
         let mut new_index = vec![usize::MAX; self.m];
         let mut cnt = 0;
@@ -1022,6 +1028,20 @@ impl LpEngine {
         if !self.fresh.lu || (self.lu.is_none() && self.m > 0) {
             if !self.factor() {
                 return false;
+            }
+        }
+        // 加えた行の DSE 重み: 基底逆行列のその行のノルムの 2 乗 (`ENOMOTO_LP_NO_NEW_ROW_DSE` で 1 のまま)
+        if !self.dse_pending.is_empty() {
+            let pending = std::mem::take(&mut self.dse_pending);
+            if env_str!("ENOMOTO_LP_NO_NEW_ROW_DSE").is_none() && self.lu.is_some() {
+                let mut out = vec![0.0; self.m];
+                for s in pending {
+                    if s < self.m {
+                        self.btran_unit(s, &mut out);
+                        let w: f64 = out.iter().map(|v| v * v).sum();
+                        self.dse[s] = w.max(DSE_FLOOR);
+                    }
+                }
             }
         }
         true
