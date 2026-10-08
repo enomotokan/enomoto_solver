@@ -373,7 +373,7 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
     let reg_init = tunable!("ENOMOTO_T_IPM_REG0", BOX_REG0, f64);
     let mut rho = reg0.unwrap_or(reg_init);
     let mut delta = reg0.unwrap_or(reg_init);
-    let rho_min = tunable!("ENOMOTO_T_IPM_RHO_MIN", BOX_REG_MIN, f64);
+    let mut rho_min = tunable!("ENOMOTO_T_IPM_RHO_MIN", BOX_REG_MIN, f64);
     // 停止の許容誤差 (絶対・相対とも。既定は PIQP の 1e-8)。
     let eps_abs = tunable!("ENOMOTO_T_IPM_EPS", EPS_ABS, f64);
     let eps_rel = tunable!("ENOMOTO_T_IPM_EPS", EPS_REL, f64);
@@ -388,7 +388,7 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
     let mut sw_count = 0usize;
     // 真なら近接中心 (ξ, λ, ν) を残差の減り方によらず毎反復更新する。
     let prox_always = tunable!("ENOMOTO_T_IPM_PROX_ALWAYS", 0u8, u8) != 0;
-    let delta_min = tunable!("ENOMOTO_T_IPM_DELTA_MIN", BOX_REG_MIN, f64);
+    let mut delta_min = tunable!("ENOMOTO_T_IPM_DELTA_MIN", BOX_REG_MIN, f64);
     // 正則化 ρ・δ の下げ方 (反復の終わりの説明参照)。0: PIQP、1: IP-PMM の著者の実装 (既定、第 8 回の比較)、
     // 2: ρ = δ = κ μ、3: PIQP の規則を κ μ で頭打ち。
     let reg_mode = tunable!("ENOMOTO_T_IPM_REG_MODE", 1u8, u8);
@@ -528,6 +528,15 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
     let mut noimprove = 0usize;
     // 停止基準の後の高精度化の目標 (停止基準の倍率、既定 1e-3 は第 43〜46 回の比較で決めた。0 で行わない)。
     let push_f = tunable!("ENOMOTO_T_IPM_PUSH", 1e-3f64, f64);
+    let stall_bump = tunable!("ENOMOTO_T_IPM_STALL_BUMP", 0.0f64, f64);
+    let stall_bump_k = tunable!("ENOMOTO_T_IPM_STALL_BUMP_K", 2usize, usize);
+    let stall_floor = tunable!("ENOMOTO_T_IPM_STALL_FLOOR", 0u8, u8) != 0;
+    let stall_jump = tunable!("ENOMOTO_T_IPM_STALL_JUMP", 0.0f64, f64);
+    let mut min_primal = f64::INFINITY;
+    let mut jumped = false;
+    let (rho_min0, delta_min0) = (rho_min, delta_min);
+    let mut bump_best = f64::INFINITY;
+    let mut bump_count = 0usize;
     let push_max = tunable!("ENOMOTO_T_IPM_PUSH_ITERS", 15usize, usize);
     // 残差の最悪値が最良の半分を下回らない反復がこの回数続いたら高精度化をやめる。
     let push_stall_max = tunable!("ENOMOTO_T_IPM_PUSH_STALL", 1usize, usize);
@@ -577,6 +586,11 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
             }
             if !pushing {
                 pushing = true;
+                // 停滞で引き上げた正則化の下限は、高精度化の段では元に戻す (下限が高いままでは精度が出ない)。
+                if stall_floor {
+                    rho_min = rho_min0;
+                    delta_min = delta_min0;
+                }
                 if debug {
                     eprintln!("IPM it={it} reached the tolerance; pushing for higher accuracy (target {push_f:.1e})");
                 }
@@ -712,6 +726,50 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
         prev_d = res.dual;
         if stall >= STALL_ITERS {
             break;
+        }
+        // 試験用 (`ENOMOTO_T_IPM_STALL_BUMP=v`): 正則化が下限にある間に、相対残差の最悪値が最良の 0.5 倍を下回らない反復が
+        // `ENOMOTO_T_IPM_STALL_BUMP_K` 回続いたら (終盤に Newton 系の精度が足りず空回りしている: ken-18 は 28 反復目から
+        // 主残差が 3e-6 で 35 反復止まり、方向が非有限になって正則化が上がるまで続いた)、正則化を v に上げて解き直す。
+        // `ENOMOTO_T_IPM_STALL_JUMP=f` (f > 0): 停滞の代わりに、下限にある間に主残差がそれまでの最小の f 倍以上に跳ね上がった
+        // 反復で一度だけ上げる (ken-18: 1e-10 → 3e-6。序盤のゆっくりした収束 (dfl001) では上げない)。
+        if stall_jump > 0.0 {
+            if stall_bump > 0.0 && at_floor && res.primal > stall_jump * min_primal && !jumped {
+                rho = rho.max(stall_bump);
+                delta = delta.max(stall_bump);
+                jumped = true;
+                crate::phase_timing::mark("ipm_stall_bump");
+                if debug {
+                    eprintln!("IPM it={it} primal residual jumped ({:.2e} vs min {min_primal:.2e}); raising the regularization to {stall_bump:.1e}", res.primal);
+                }
+            }
+            min_primal = min_primal.min(res.primal);
+        } else if stall_bump > 0.0 && at_floor {
+            if worst < 0.5 * bump_best {
+                bump_best = worst;
+                bump_count = 0;
+            } else {
+                bump_count += 1;
+                if bump_count >= stall_bump_k {
+                    // `ENOMOTO_T_IPM_STALL_FLOOR=1`: 一度だけ上げる代わりに、下限そのものを 100 倍 (v まで) に上げる。
+                    if stall_floor {
+                        rho_min = (rho_min * 100.0).min(stall_bump);
+                        delta_min = (delta_min * 100.0).min(stall_bump);
+                        rho = rho.max(rho_min);
+                        delta = delta.max(delta_min);
+                    } else {
+                        rho = rho.max(stall_bump);
+                        delta = delta.max(stall_bump);
+                    }
+                    bump_count = 0;
+                    bump_best = worst;
+                    crate::phase_timing::mark("ipm_stall_bump");
+                    if debug {
+                        eprintln!("IPM it={it} stalled at the regularization floor; raising it to {stall_bump:.1e}");
+                    }
+                }
+            }
+        } else if worst < bump_best {
+            bump_best = worst;
         }
 
         // ---- 右辺 ----
