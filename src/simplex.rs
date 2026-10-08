@@ -1645,7 +1645,15 @@ fn solve_split(std: &StdForm, groups: &[Vec<usize>], solve_one: impl Fn(&StdForm
         use rayon::prelude::*;
         // 打ち切りのトークン (同時実行時) を各成分のタスクに引き継ぐ (`crate::cancel`)。
         let token = crate::cancel::current();
-        sub_std_forms.par_iter().map(|s| crate::cancel::with_token(token.clone(), || solve_one(s))).collect()
+        // 試験用 `ENOMOTO_T_SPLIT_INNER_SEQ=1`: 大きな組の数がスレッド数以上なら、外側の並列でスレッドが埋まるので、
+        // 組の中の分解 (内点法の正規方程式) は並列にしない (入れ子の並列の分割・同期の手間と、待ち合わせ中に別の組の
+        // 仕事を盗んで組の進み方がばらつくのを避ける)。
+        let n_big = groups.iter().filter(|c| c.len() >= PARALLEL_COMPONENT_MIN_VARS).count();
+        let inner_seq = tunable!("ENOMOTO_T_SPLIT_INNER_SEQ", 0u8, u8) != 0 && n_big >= rayon::current_num_threads();
+        sub_std_forms
+            .par_iter()
+            .map(|s| crate::cancel::with_token(token.clone(), || crate::interior_point::kkt::with_inner_seq(inner_seq, || solve_one(s))))
+            .collect()
     } else {
         sub_std_forms.iter().map(&solve_one).collect()
     };

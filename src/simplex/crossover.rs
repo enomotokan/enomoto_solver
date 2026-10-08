@@ -1748,7 +1748,7 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
             let implied = tunable!("ENOMOTO_T_XO_ACCEPT_IMPLIED", 0u8, u8) != 0;
             // - 試験用 `ENOMOTO_T_XO_ACCEPT_PROJ=1`: 最適面への射影 (Mehrotra–Ye)。内点法の点から上下限の間にあると推定した
             //   変数と、頂点で上下限の間にある基底変数の集合 S について、`A_Sᵀ (y_ipm + Δ) = c_S` を満たす最小ノルムの Δ
-            //   (正則化した `(A_S A_Sᵀ + εI) Δ = A_S d_S`) で y を射影する。
+            //   (`Δ = A_S w`、`(A_Sᵀ A_S + εI) w = d_S`) で y を射影する。
             if accept_gap > 0.0 && gap > accept_gap && (yfix || implied || x_ipm_saved.is_some()) {
                 let bnds = implied.then(|| implied_bounds(std, 3));
                 let (lbs, ubs): (&[f64], &[f64]) = match &bnds {
@@ -2179,13 +2179,14 @@ fn lagrangian_lower_bound_with(std: &StdForm, y: &[f64], lbs: &[f64], ubs: &[f64
 
 /// 双対の最適面への射影の補正量 Δ を返す (`ENOMOTO_T_XO_ACCEPT_PROJ`)。S は、内点法の点 `xi` で境界までの距離が
 /// 被約費用 `|d_j(y)|` 以上の変数 (上下限の間にあると推定した変数) と、頂点 `xv` で上下限の間にある基底変数 (固定列は除く)。
-/// `(A_S A_Sᵀ + εI) Δ = A_S d_S` を疎 Cholesky で解き、反復改良を 2 回する。
+/// `(A_Sᵀ A_S + εI) w = d_S` を疎 Cholesky で解き (反復改良 3 回)、`Δ = A_S w` とする。
 fn dual_face_projection(std: &StdForm, y: &[f64], xi: &[f64], xv: &[f64], basis_pos: &[Option<usize>], debug: bool) -> Option<Vec<f64>> {
     use faer::prelude::SpSolver;
     let m = std.n_rows;
     let n = std.n_total;
     let mut s_cols = Vec::new();
     let mut d_s = Vec::new();
+    let proj_set = tunable!("ENOMOTO_T_XO_PROJ_SET", 0u8, u8);
     for j in 0..n {
         if !(std.lb[j] < std.ub[j]) {
             continue;
@@ -2195,43 +2196,49 @@ fn dual_face_projection(std: &StdForm, y: &[f64], xi: &[f64], xv: &[f64], basis_
         let v = xv[j];
         let tol = 1e-9 * (1.0 + v.abs());
         let vertex_inner = basis_pos[j].is_some() && v > std.lb[j] + tol && v < std.ub[j] - tol;
-        if dist >= d.abs() || vertex_inner {
+        // 試験用 `ENOMOTO_T_XO_PROJ_SET=1`: 頂点で上下限の間にある基底変数だけにする (内点法の推定は頂点と食い違うと
+        // 方程式が矛盾する)。
+        let from_ipm = proj_set == 0 && dist >= d.abs();
+        if from_ipm || vertex_inner {
             s_cols.push(j);
             d_s.push(d);
         }
     }
-    // M = A_S A_Sᵀ (上三角) と右辺 A_S d_S。
-    let mut trip: Vec<(usize, usize, f64)> = Vec::new();
-    let mut rhs = vec![0.0; m];
-    let mut diag_max = 0.0f64;
+    // S の側で解く: (A_Sᵀ A_S + εI) w = d_S、Δ = A_S w (A_S A_Sᵀ は階数が |S| 以下で特異になりうる)。
+    let ns = s_cols.len();
+    let mut local = vec![usize::MAX; n];
     for (k, &j) in s_cols.iter().enumerate() {
-        let c = col(std, j);
-        for &(i1, a1) in c {
-            rhs[i1] += a1 * d_s[k];
-            for &(i2, a2) in c {
-                if i1 <= i2 {
-                    trip.push((i1, i2, a1 * a2));
+        local[j] = k;
+    }
+    let mut trip: Vec<(usize, usize, f64)> = Vec::new();
+    for i in 0..m {
+        let row: Vec<(usize, f64)> = std.rows.row(i).iter().filter(|&&(j, _)| local[j] != usize::MAX).map(|&(j, a)| (local[j], a)).collect();
+        for &(k1, a1) in &row {
+            for &(k2, a2) in &row {
+                if k1 <= k2 {
+                    trip.push((k1, k2, a1 * a2));
                 }
             }
         }
     }
-    for i in 0..m {
-        trip.push((i, i, 0.0));
+    for k in 0..ns {
+        trip.push((k, k, 0.0));
     }
-    let mut mat = faer::sparse::SparseColMat::<usize, f64>::try_new_from_triplets(m, m, &trip).ok()?;
+    let mut mat = faer::sparse::SparseColMat::<usize, f64>::try_new_from_triplets(ns, ns, &trip).ok()?;
     {
         let cp = mat.col_ptrs().to_vec();
         let ri = mat.row_indices().to_vec();
         let vals = mat.values_mut();
-        for c in 0..m {
+        let mut diag_max = 0.0f64;
+        for c in 0..ns {
             for k in cp[c]..cp[c + 1] {
                 if ri[k] == c {
                     diag_max = diag_max.max(vals[k]);
                 }
             }
         }
-        let eps = 1e-12 * diag_max.max(1.0);
-        for c in 0..m {
+        let eps = tunable!("ENOMOTO_T_XO_PROJ_EPS", 1e-14f64, f64) * diag_max.max(1.0);
+        for c in 0..ns {
             for k in cp[c]..cp[c + 1] {
                 if ri[k] == c {
                     vals[k] += eps;
@@ -2240,11 +2247,10 @@ fn dual_face_projection(std: &StdForm, y: &[f64], xi: &[f64], xv: &[f64], basis_
         }
     }
     let chol = mat.as_ref().sp_cholesky(faer::Side::Upper).ok()?;
-    // 対称に掛ける。
     let mul = |x: &[f64], out: &mut [f64]| {
         out.fill(0.0);
         let (cp, ri, vals) = (mat.col_ptrs(), mat.row_indices(), mat.values());
-        for c in 0..m {
+        for c in 0..ns {
             for k in cp[c]..cp[c + 1] {
                 let r = ri[k];
                 out[r] += vals[k] * x[c];
@@ -2254,17 +2260,23 @@ fn dual_face_projection(std: &StdForm, y: &[f64], xi: &[f64], xv: &[f64], basis_
             }
         }
     };
-    let mut dy = rhs.clone();
-    chol.solve_in_place(faer::mat::from_column_major_slice_mut::<f64, usize, usize>(&mut dy, m, 1));
-    let mut r = vec![0.0; m];
-    for _ in 0..2 {
-        mul(&dy, &mut r);
-        for i in 0..m {
-            r[i] = rhs[i] - r[i];
+    let mut w = d_s.clone();
+    chol.solve_in_place(faer::mat::from_column_major_slice_mut::<f64, usize, usize>(&mut w, ns, 1));
+    let mut r = vec![0.0; ns];
+    for _ in 0..3 {
+        mul(&w, &mut r);
+        for k in 0..ns {
+            r[k] = d_s[k] - r[k];
         }
-        chol.solve_in_place(faer::mat::from_column_major_slice_mut::<f64, usize, usize>(&mut r, m, 1));
-        for i in 0..m {
-            dy[i] += r[i];
+        chol.solve_in_place(faer::mat::from_column_major_slice_mut::<f64, usize, usize>(&mut r, ns, 1));
+        for k in 0..ns {
+            w[k] += r[k];
+        }
+    }
+    let mut dy = vec![0.0; m];
+    for (k, &j) in s_cols.iter().enumerate() {
+        for &(i, a) in col(std, j) {
+            dy[i] += a * w[k];
         }
     }
     if debug {

@@ -323,9 +323,16 @@ impl Multifrontal {
         let this = &*self;
         let reg = LltRegularization { dynamic_regularization_delta: delta, dynamic_regularization_epsilon: eps };
         let ok = std::sync::atomic::AtomicBool::new(true);
-        this.roots.par_iter().for_each(|&r| {
-            let _ = this.run(r, values, reg, lp, &ok);
-        });
+        if super::kkt::inner_seq() {
+            // 外側で独立な成分を並列に解いているとき: rayon を使わず逐次に分解する。
+            for &r in &this.roots {
+                let _ = this.run_seq(r, values, reg, lp, &ok);
+            }
+        } else {
+            this.roots.par_iter().for_each(|&r| {
+                let _ = this.run(r, values, reg, lp, &ok);
+            });
+        }
         ok.load(std::sync::atomic::Ordering::Relaxed)
     }
 
@@ -423,7 +430,7 @@ impl Multifrontal {
                     }
                 }
             };
-            if (rc as f64) * (rc as f64) > self.ea_par {
+            if (rc as f64) * (rc as f64) > self.ea_par && !super::kkt::inner_seq() {
                 (0..rc).into_par_iter().with_min_len(16).for_each(add_col);
             } else {
                 (0..rc).for_each(add_col);
@@ -432,7 +439,7 @@ impl Multifrontal {
         }
         let tp1 = std::time::Instant::now();
         let big = (nc as f64) * (f as f64) * (f as f64) > tunable!("ENOMOTO_T_MF_PAR_FLOPS", 5e7f64, f64);
-        let par = if big { Parallelism::Rayon(0) } else { Parallelism::None };
+        let par = if big && !super::kkt::inner_seq() { Parallelism::Rayon(0) } else { Parallelism::None };
         let lm = from_column_major_slice_mut::<f64, usize, usize>(lsl, f, nc);
         let (mut l11, mut l21) = lm.split_at_row_mut(nc);
         let mut buf = GlobalPodBuffer::new(cholesky_in_place_req::<f64>(nc, par, LltParams::default()).unwrap());
