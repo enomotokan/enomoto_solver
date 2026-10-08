@@ -42,6 +42,8 @@ pub struct Multifrontal {
     seq_flops: f64,
     /// extend-add を並列にする子の更新行列の大きさ (要素数) の下限。
     ea_par: f64,
+    /// LDLᵀ で分解するときのピボットの期待する符号 (新しい番号、上段 +1・下段 -1)。`None` なら LLᵀ。
+    signs: Option<Vec<i8>>,
     /// 更新行列の配列の使い回し (確保と初めて触るときのページフォールトを減らす)。
     pool: std::sync::Mutex<Vec<Vec<f64>>>,
 }
@@ -282,6 +284,7 @@ impl Multifrontal {
             seq_flops: tunable!("ENOMOTO_T_MF_SEQ_FLOPS", 2e6f64, f64),
             ea_par: tunable!("ENOMOTO_T_MF_EA_PAR", 1e6f64, f64),
             pool: std::sync::Mutex::new(Vec::new()),
+            signs: None,
         })
     }
 
@@ -305,6 +308,14 @@ impl Multifrontal {
         if b.capacity() >= POOL_MIN {
             self.pool.lock().unwrap().push(b);
         }
+    }
+
+    /// [`Multifrontal::new`] と同じだが、準定値の行列を LDLᵀ で分解する。`signs_orig` は元の番号でのピボットの期待する
+    /// 符号 (動的正則化で、符号が合わない・小さいピボットを `±delta` に置き換える)。
+    pub fn new_ldlt(pat_in: &SymbolicSparseColMat<usize>, sym: &SymbolicCholesky<usize>, signs_orig: &[i8]) -> Option<Self> {
+        let mut mf = Self::new(pat_in, sym)?;
+        mf.signs = Some(mf.perm_fwd.iter().map(|&o| signs_orig[o]).collect());
+        Some(mf)
     }
 
     /// supernode の数。
@@ -442,6 +453,55 @@ impl Multifrontal {
         let par = if big && !super::kkt::inner_seq() { Parallelism::Rayon(0) } else { Parallelism::None };
         let lm = from_column_major_slice_mut::<f64, usize, usize>(lsl, f, nc);
         let (mut l11, mut l21) = lm.split_at_row_mut(nc);
+        let tp2;
+        let mut tp3;
+        if let Some(signs) = &self.signs {
+            // LDLᵀ (準定値の拡大系): F11 = L11 D11 L11ᵀ (期待する符号と合わない・小さいピボットは置き換える)、
+            // W = F21 L11^{-T} (= L21 D11)、L21 = W D11^{-1}、U = F22 - W L21ᵀ。
+            use faer::linalg::cholesky::ldlt_diagonal::compute::{raw_cholesky_in_place, raw_cholesky_in_place_req, LdltRegularization};
+            let mut buf = GlobalPodBuffer::new(raw_cholesky_in_place_req::<f64>(nc, par, Default::default()).unwrap());
+            let lreg = LdltRegularization {
+                dynamic_regularization_signs: Some(&signs[self.begin[s]..self.end[s]]),
+                dynamic_regularization_delta: reg.dynamic_regularization_delta,
+                dynamic_regularization_epsilon: reg.dynamic_regularization_epsilon,
+            };
+            let info = raw_cholesky_in_place(l11.rb_mut(), lreg, par, PodStack::new(&mut buf), Default::default());
+            if info.dynamic_regularization_count > 0 {
+                DYNREG.fetch_add(info.dynamic_regularization_count, std::sync::atomic::Ordering::Relaxed);
+            }
+            if !(0..nc).all(|j| l11.read(j, j).is_finite() && l11.read(j, j) != 0.0) {
+                ok.store(false, std::sync::atomic::Ordering::Relaxed);
+            }
+            tp2 = std::time::Instant::now();
+            tp3 = tp2;
+            if r > 0 {
+                faer::linalg::triangular_solve::solve_unit_lower_triangular_in_place(l11.rb(), l21.rb_mut().transpose_mut(), par);
+                // W (= L21 D) を写してから L21 = W D^{-1}。
+                let mut w = self.take_buf(r * nc);
+                for j in 0..nc {
+                    let dinv = 1.0 / l11.read(j, j);
+                    for i in 0..r {
+                        let v = l21.read(i, j);
+                        w[j * r + i] = v;
+                        l21.write(i, j, v * dinv);
+                    }
+                }
+                tp3 = std::time::Instant::now();
+                let um = from_column_major_slice_mut::<f64, usize, usize>(&mut u, r, r);
+                faer::linalg::matmul::triangular::matmul(
+                    um,
+                    BlockStructure::TriangularLower,
+                    from_column_major_slice::<f64, usize, usize>(&w, r, nc),
+                    BlockStructure::Rectangular,
+                    l21.rb().transpose(),
+                    BlockStructure::Rectangular,
+                    Some(1.0),
+                    -1.0,
+                    par,
+                );
+                self.give_back(w);
+            }
+        } else {
         let mut buf = GlobalPodBuffer::new(cholesky_in_place_req::<f64>(nc, par, LltParams::default()).unwrap());
         match cholesky_in_place(l11.rb_mut(), reg, par, PodStack::new(&mut buf), LltParams::default()) {
             Ok(info) => {
@@ -451,8 +511,8 @@ impl Multifrontal {
             }
             Err(_) => ok.store(false, std::sync::atomic::Ordering::Relaxed),
         }
-        let tp2 = std::time::Instant::now();
-        let mut tp3 = tp2;
+        tp2 = std::time::Instant::now();
+        tp3 = tp2;
         if r > 0 {
             // L21 = F21 L11^{-T}: L11 L21ᵀ = F21ᵀ を解く。
             faer::linalg::triangular_solve::solve_lower_triangular_in_place(l11.rb(), l21.rb_mut().transpose_mut(), par);
@@ -470,6 +530,7 @@ impl Multifrontal {
                 -1.0,
                 par,
             );
+        }
         }
         if prof_on() {
             let tp4 = std::time::Instant::now();
@@ -503,7 +564,11 @@ impl Multifrontal {
             let (l11, _l21) = lmat.split_at_row(nc);
             {
                 let xs = from_column_major_slice_mut::<f64, usize, usize>(&mut x[b..e], nc, 1);
-                faer::linalg::triangular_solve::solve_lower_triangular_in_place(l11, xs, Parallelism::None);
+                if self.signs.is_some() {
+                    faer::linalg::triangular_solve::solve_unit_lower_triangular_in_place(l11, xs, Parallelism::None);
+                } else {
+                    faer::linalg::triangular_solve::solve_lower_triangular_in_place(l11, xs, Parallelism::None);
+                }
             }
             if r > 0 {
                 // tmp = L21 x_s (密な行列ベクトル積) を下の行に引く。
@@ -521,6 +586,17 @@ impl Multifrontal {
                 );
                 for (t, &i) in pat.iter().enumerate() {
                     x[i] -= tmp[t];
+                }
+            }
+        }
+        // LDLᵀ: 対角 D で割る。
+        if self.signs.is_some() {
+            for s in 0..ns {
+                let (b, e) = (self.begin[s], self.end[s]);
+                let f = e - b + self.pat_ptr[s + 1] - self.pat_ptr[s];
+                let ls = &self.l[self.l_ptr[s]..self.l_ptr[s + 1]];
+                for j in 0..e - b {
+                    x[b + j] /= ls[j * f + j];
                 }
             }
         }
@@ -547,7 +623,11 @@ impl Multifrontal {
                 );
             }
             let xs = from_column_major_slice_mut::<f64, usize, usize>(&mut x[b..e], nc, 1);
-            faer::linalg::triangular_solve::solve_upper_triangular_in_place(l11.transpose(), xs, Parallelism::None);
+            if self.signs.is_some() {
+                faer::linalg::triangular_solve::solve_unit_upper_triangular_in_place(l11.transpose(), xs, Parallelism::None);
+            } else {
+                faer::linalg::triangular_solve::solve_upper_triangular_in_place(l11.transpose(), xs, Parallelism::None);
+            }
         }
         for i in 0..n {
             rhs[self.perm_fwd[i]] = x[i];

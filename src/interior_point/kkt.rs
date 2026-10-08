@@ -459,6 +459,9 @@ pub struct AugKkt {
     signs: Vec<i8>,
     /// 直近の分解で置き換えたピボットの数。
     pub n_regularized: usize,
+    /// 自前のマルチフロンタル法 (LDLᵀ) で分解するとき (`ENOMOTO_T_AUG_BACKEND=2`、faer が supernodal を選び演算量の見積もりが
+    /// `ENOMOTO_T_MF_MIN_FLOPS` 以上のとき)。
+    mf: Option<super::multifrontal::Multifrontal>,
 }
 
 /// 反復改良を打ち切る残差 (右辺の無限大ノルム (1 以上) に対する相対値)。
@@ -515,8 +518,22 @@ impl AugKkt {
             }
             return None;
         }
-        let l_values = vec![0.0f64; chol_symbolic.len_values()];
-        let numeric_buf = GlobalPodBuffer::new(chol_symbolic.factorize_numeric_ldlt_req::<f64>(true, factor_par(chol_symbolic.len_values())).unwrap());
+        let signs: Vec<i8> = (0..dim).map(|i| if i < n { 1i8 } else { -1i8 }).collect();
+        // 試験用 `ENOMOTO_T_AUG_BACKEND=2`: 自前のマルチフロンタル法 (LDLᵀ) で分解する。
+        let mf = if tunable!("ENOMOTO_T_AUG_BACKEND", 0u8, u8) == 2 && chol_flops(&chol_symbolic) >= tunable!("ENOMOTO_T_MF_MIN_FLOPS", 2e7f64, f64) {
+            super::multifrontal::Multifrontal::new_ldlt(&symbolic_base, &chol_symbolic, &signs)
+        } else {
+            None
+        };
+        if env_str!("ENOMOTO_DEBUG_IPM").is_some() {
+            eprintln!("AugKkt: backend={} nnz(L)={} flops={:.2e}", if mf.is_some() { "multifrontal" } else { "faer" }, chol_symbolic.len_values(), chol_flops(&chol_symbolic));
+        }
+        let l_values = if mf.is_some() { Vec::new() } else { vec![0.0f64; chol_symbolic.len_values()] };
+        let numeric_buf = if mf.is_some() {
+            GlobalPodBuffer::new(faer::dyn_stack::StackReq::empty())
+        } else {
+            GlobalPodBuffer::new(chol_symbolic.factorize_numeric_ldlt_req::<f64>(true, factor_par(chol_symbolic.len_values())).unwrap())
+        };
         let solve_buf = GlobalPodBuffer::new(chol_symbolic.solve_in_place_req::<f64>(1).unwrap());
         Some(AugKkt {
             n,
@@ -533,8 +550,9 @@ impl AugKkt {
             top: vec![1.0; n],
             mid: vec![-1.0; p],
             factored: false,
-            signs: (0..dim).map(|i| if i < n { 1i8 } else { -1i8 }).collect(),
+            signs,
             n_regularized: 0,
+            mf,
         })
     }
 
@@ -563,6 +581,18 @@ impl AugKkt {
             dynamic_regularization_delta: tunable!("ENOMOTO_T_KKT_PIVOT_DELTA", PIVOT_DELTA, f64),
             dynamic_regularization_epsilon: tunable!("ENOMOTO_T_KKT_PIVOT_EPS", PIVOT_EPS, f64),
         };
+        if let Some(mf) = self.mf.as_mut() {
+            let ok = mf.factor(a_upper.values(), reg.dynamic_regularization_delta, reg.dynamic_regularization_epsilon);
+            self.n_regularized = super::multifrontal::DYNREG.swap(0, std::sync::atomic::Ordering::Relaxed);
+            if env_str!("ENOMOTO_DEBUG_REFINE").is_some() {
+                let vmax = a_upper.values().iter().fold(0.0f64, |m, v| m.max(v.abs()));
+                eprintln!("FACTOR aug mf ok={ok} dynreg={} max|value|={vmax:.2e} top[min,max]=[{:.2e},{:.2e}] mid[min,max]=[{:.2e},{:.2e}]", self.n_regularized,
+                    top.iter().cloned().fold(f64::INFINITY, f64::min), top.iter().cloned().fold(0.0, f64::max),
+                    mid.iter().cloned().fold(f64::INFINITY, f64::min), mid.iter().cloned().fold(f64::NEG_INFINITY, f64::max));
+            }
+            self.factored = true;
+            return;
+        }
         let _ = self.chol_symbolic.factorize_numeric_ldlt::<f64>(
             &mut self.l_values,
             a_upper.as_ref(),
@@ -577,6 +607,10 @@ impl AugKkt {
     /// 直近の分解で `K x = rhs` を解き、`rhs` を解で上書きする。
     pub fn solve_in_place(&mut self, rhs: &mut [f64]) {
         assert!(self.factored, "AugKkt::solve_in_place before factor");
+        if let Some(mf) = self.mf.as_ref() {
+            mf.solve_in_place(rhs);
+            return;
+        }
         let dim = self.dim();
         let ldlt = faer::sparse::linalg::cholesky::LdltRef::<usize, f64>::new(&self.chol_symbolic, &self.l_values);
         ldlt.solve_in_place_with_conj(Conj::No, from_column_major_slice_mut(rhs, dim, 1), KKT_PARALLELISM, PodStack::new(&mut self.solve_buf));
