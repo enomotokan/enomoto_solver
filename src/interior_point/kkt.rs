@@ -109,13 +109,19 @@ fn metis_ordering(pat: &SymbolicSparseColMat<usize>) -> Option<(Vec<usize>, Vec<
 }
 
 /// 正規方程式の記号分解。並べ替えは `ENOMOTO_T_CHOL_ORDER`: 0 = AMD (既定)、1 = METIS (nested dissection)、
-/// 2 = 両方を試して因子の非零の少ない方 (行数 `ENOMOTO_T_CHOL_ORDER_MIN_N` 以上のときだけ METIS も試す)。
+/// 2 = AMD の演算量が大きいときだけ METIS も試し、演算量の少ない方 (行数 `ENOMOTO_T_CHOL_ORDER_MIN_N` 以上のときだけ)。
 fn symbolic_with_ordering(pat: &SymbolicSparseColMat<usize>, dbg: bool) -> Option<SymbolicCholesky<usize>> {
     let mode = tunable!("ENOMOTO_T_CHOL_ORDER", 0u8, u8);
     let min_n = tunable!("ENOMOTO_T_CHOL_ORDER_MIN_N", 1000usize, usize);
     let amd = || factorize_symbolic_cholesky::<usize>(pat.as_ref(), Side::Upper, SymmetricOrdering::Amd, chol_symbolic_params()).ok();
     if mode == 0 || pat.nrows() < min_n {
         return amd();
+    }
+    // 2: まず AMD。演算量の見積もりが `ENOMOTO_T_CHOL_ORDER_MIN_FLOPS` 未満なら METIS は試さない (並べ替えの時間が割に合わない)。
+    let a = if mode == 2 { amd() } else { None };
+    let a_flops = a.as_ref().map_or(f64::INFINITY, chol_flops);
+    if mode == 2 && a_flops < tunable!("ENOMOTO_T_CHOL_ORDER_MIN_FLOPS", 1e8f64, f64) {
+        return a;
     }
     let t0 = std::time::Instant::now();
     let nd = metis_ordering(pat).and_then(|(perm, perm_inv)| {
@@ -129,17 +135,40 @@ fn symbolic_with_ordering(pat: &SymbolicSparseColMat<usize>, dbg: bool) -> Optio
         }
         return nd.or_else(amd);
     }
-    let a = amd();
+    let nd_flops = nd.as_ref().map_or(f64::INFINITY, chol_flops);
     if dbg {
         eprintln!(
-            "NormalKkt: AMD nnz(L)={:?}, METIS nnz(L)={:?} (METIS {t_nd:.2}s)",
+            "NormalKkt: AMD nnz(L)={:?} flops={a_flops:.3e}, METIS nnz(L)={:?} flops={nd_flops:.3e} (METIS {t_nd:.2}s)",
             a.as_ref().map(|c| c.len_values()),
             nd.as_ref().map(|c| c.len_values())
         );
     }
+    // 演算量の少ない方 (METIS は 0.8 倍未満のときだけ)。
     match (a, nd) {
-        (Some(a), Some(nd)) => Some(if nd.len_values() < a.len_values() { nd } else { a }),
+        (Some(a), Some(nd)) => Some(if nd_flops < 0.8 * a_flops { nd } else { a }),
         (a, nd) => a.or(nd),
+    }
+}
+
+/// 記号分解から数値分解の演算量を見積もる (各列の非零の数の 2 乗の和)。
+fn chol_flops(c: &SymbolicCholesky<usize>) -> f64 {
+    use faer::sparse::linalg::cholesky::SymbolicCholeskyRaw;
+    match c.raw() {
+        SymbolicCholeskyRaw::Simplicial(s) => {
+            let cp = s.col_ptrs();
+            (0..s.ncols()).map(|j| ((cp[j + 1] - cp[j]) as f64).powi(2)).sum()
+        }
+        SymbolicCholeskyRaw::Supernodal(s) => {
+            let mut f = 0.0;
+            for k in 0..s.n_supernodes() {
+                let nc = s.supernode_end()[k] - s.supernode_begin()[k];
+                let r = s.supernode(k).pattern().len();
+                for j in 0..nc {
+                    f += ((nc - j + r) as f64).powi(2);
+                }
+            }
+            f
+        }
     }
 }
 
