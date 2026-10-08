@@ -1210,13 +1210,17 @@ fn sparse_dot(a: &[(usize, f64)], b: &[(usize, f64)]) -> f64 {
 /// 少ないので緩めにした方が良かった)。
 fn select_cuts_hybrid(cands: Vec<Candidate>, max_cuts: usize, p: &MipProblem) -> Vec<Candidate> {
     let cnorm = p.cost.iter().map(|c| c * c).sum::<f64>().sqrt();
+    let density_exp = tunable!("ENOMOTO_T_CUTSEL_DENSITY_EXP", 0.0, f64);
     let mut scored: Vec<(f64, f64, Candidate)> = cands
         .into_iter()
         .map(|c| {
             let nc = c.coefs.iter().map(|&(_, v)| v * v).sum::<f64>().sqrt();
             let objpar = if cnorm > 0.0 && nc > 0.0 { c.coefs.iter().map(|&(j, v)| v * p.cost[j]).sum::<f64>().abs() / (cnorm * nc) } else { 0.0 };
             let intsup = c.coefs.iter().filter(|&&(j, _)| p.is_int[j]).count() as f64 / c.coefs.len().max(1) as f64;
-            (c.efficacy + 0.1 * objpar + 0.1 * intsup, nc, c)
+            // 密なカットを避ける (`ENOMOTO_T_CUTSEL_DENSITY_EXP` = α: スコアを 非零の数^α で割る。HiGHS は効いている
+            // 非零の数で割る (α = 1 相当)。密なカットは LP の反復が増え、カットの行から作る次のカットも密になる)
+            let score = (c.efficacy + 0.1 * objpar + 0.1 * intsup) / (c.coefs.len().max(1) as f64).powf(density_exp);
+            (score, nc, c)
         })
         .collect();
     scored.sort_by(|a, b| b.0.total_cmp(&a.0));
