@@ -126,7 +126,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
             // 効き目の大きい順に、平行なものを除いて選ぶ
-            let max_cuts = tunable!("ENOMOTO_T_MIP_ROOT_MAX_CUTS", 500usize, usize).min(p.m.max(50));
+            let max_cuts = tunable!("ENOMOTO_T_MIP_ROOT_MAX_CUTS", 50usize, usize).min(p.m.max(50));
             let chosen = if env_str!("ENOMOTO_MIP_CUTSEL_HIGHS").is_some() { self.select_cuts_highs(cands, max_cuts, &x) } else { select_cuts(cands, max_cuts, p) };
             let sep_secs = t_sep.elapsed().as_secs_f64();
             if chosen.is_empty() {
