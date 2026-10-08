@@ -5,7 +5,7 @@
 //! 除いて LP に加えて解き直す。目的値がほとんど動かなくなったら止める。最後に効いていない (論理変数が
 //! 基底にある) カット行を LP から外す。カットは大域的な境界から作るので、木全体で有効。
 
-use super::cuts::{cmir, extended_cover, lifted_flow_cover, CutVars, RawCut, VarBounds};
+use super::cuts::{cmir, extended_cover, lifted_cover, lifted_flow_cover, CutVars, RawCut, VarBounds};
 use super::problem::MipProblem;
 use super::domain::FEASTOL;
 use super::lp::{LpStatus, SolveLimits, VarStatus};
@@ -14,6 +14,10 @@ use super::lp_api::MipLp;
 
 /// LP に加える前のカット (構造変数の係数、右辺、効き目)。
 /// lifted flow cover を使うか (`ENOMOTO_MIP_NO_FLOWCOVER` で無効)。
+fn use_lifted_cover() -> bool {
+    env_str!("ENOMOTO_MIP_NO_LIFTED_COVER").is_none()
+}
+
 fn use_flow_cover() -> bool {
     env_str!("ENOMOTO_MIP_NO_FLOWCOVER").is_none()
 }
@@ -636,11 +640,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let amax = touched.iter().fold(0.0f64, |mx, &k| mx.max(agg[k].abs()));
                     let base: Vec<(usize, f64)> = touched.iter().filter(|&&k| agg[k].abs() > 1e-9 * amax.max(1.0) || k >= n && agg[k] != 0.0).map(|&k| (k, agg[k])).collect();
                     push(cmir(vars, &base, 0.0), cands, self);
+                    if use_lifted_cover() {
+                        push(lifted_cover(vars, &base, 0.0), cands, self);
+                    }
                     if use_flow_cover() {
                         push(lifted_flow_cover(vars, &base, 0.0), cands, self);
                     }
                     let neg: Vec<(usize, f64)> = base.iter().map(|&(k, a)| (k, -a)).collect();
                     push(cmir(vars, &neg, 0.0), cands, self);
+                    if use_lifted_cover() {
+                        push(lifted_cover(vars, &neg, 0.0), cands, self);
+                    }
                     if use_flow_cover() {
                         push(lifted_flow_cover(vars, &neg, 0.0), cands, self);
                     }
@@ -790,8 +800,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         base.push((n + i, -w));
                     }
                     push(cmir(vars, &base, 0.0), cands, self);
+                    if use_lifted_cover() {
+                        push(lifted_cover(vars, &base, 0.0), cands, self);
+                    }
                     let neg: Vec<(usize, f64)> = base.iter().map(|&(k, a)| (k, -a)).collect();
                     push(cmir(vars, &neg, 0.0), cands, self);
+                    if use_lifted_cover() {
+                        push(lifted_cover(vars, &neg, 0.0), cands, self);
+                    }
                     if use_flow_cover() {
                         push(lifted_flow_cover(vars, &base, 0.0), cands, self);
                         push(lifted_flow_cover(vars, &neg, 0.0), cands, self);
@@ -955,6 +971,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if use_flow_cover() {
                     push(lifted_flow_cover(&vars, row, p.row_up[i]), &mut cands, self);
                 }
+                if use_lifted_cover() {
+                    push(lifted_cover(&vars, row, p.row_up[i]), &mut cands, self);
+                }
                 let r = cmir(&vars, row, p.row_up[i]);
                 push(r, &mut cands, self);
                 let r = extended_cover(&vars, row, p.row_up[i]);
@@ -964,6 +983,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let neg: Vec<(usize, f64)> = row.iter().map(|&(j, a)| (j, -a)).collect();
                 if use_flow_cover() {
                     push(lifted_flow_cover(&vars, &neg, -p.row_lo[i]), &mut cands, self);
+                }
+                if use_lifted_cover() {
+                    push(lifted_cover(&vars, &neg, -p.row_lo[i]), &mut cands, self);
                 }
                 let r = cmir(&vars, &neg, -p.row_lo[i]);
                 push(r, &mut cands, self);
@@ -1091,6 +1113,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let neg: Vec<(usize, f64)> = base.iter().map(|&(k, a)| (k, -a)).collect();
             let r = cmir(&vars, &neg, 0.0);
             push(r, &mut cands, self);
+            if use_lifted_cover() {
+                push(lifted_cover(&vars, &base, 0.0), &mut cands, self);
+                push(lifted_cover(&vars, &neg, 0.0), &mut cands, self);
+            }
             if tab_fc {
                 push(lifted_flow_cover(&vars, &base, 0.0), &mut cands, self);
                 push(lifted_flow_cover(&vars, &neg, 0.0), &mut cands, self);

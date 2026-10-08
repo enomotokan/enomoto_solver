@@ -1081,7 +1081,7 @@ mod highs_dump {
         let mut shown = 0;
         for (b, r) in bases.iter().zip(&res) {
             let mut best_o: Option<f64> = None;
-            for c in [cmir(&vars, b, 0.0), lifted_flow_cover(&vars, b, 0.0)].into_iter().flatten() {
+            for c in [cmir(&vars, b, 0.0), lifted_flow_cover(&vars, b, 0.0), lifted_cover(&vars, b, 0.0)].into_iter().flatten() {
                 let e = eff(&c.coefs, c.rhs);
                 if e > 1e-6 {
                     best_o = Some(best_o.map_or(e, |v: f64| v.max(e)));
@@ -1093,6 +1093,25 @@ mod highs_dump {
                     both += 1;
                     sum_h += eh;
                     sum_o += eo;
+                    if eo < 0.9 * eh && std::env::var("HIGHS_CUT_DUMP_WEAK").is_ok() {
+                        let ni = b.iter().filter(|&&(k, _)| k < n && isint[k] && !(lo[k] == 0.0 && up[k] == 1.0)).count();
+                        let nb = b.iter().filter(|&&(k, _)| k < n && isint[k] && lo[k] == 0.0 && up[k] == 1.0).count();
+                        let nc = b.iter().filter(|&&(k, _)| k < n && !isint[k]).count();
+                        let ns = b.iter().filter(|&&(k, _)| k >= n).count();
+                        println!("weak: highs {eh:.4} ours {eo:.4} base len {} (bin {nb} genint {ni} cont {nc} slack {ns})", b.len());
+                        if let Some((c, r)) = r {
+                            let c2: Vec<String> = c.iter().map(|&(k, a)| format!("{k}:{a:.4}{}{}", if isint[k] { "i" } else { "c" }, if lo[k] == 0.0 && up[k] == 1.0 { "b" } else { "" })).collect();
+                            println!("   highs cut rhs {r:.4}: {}", c2.join(" "));
+                        }
+                        for (nm, cc) in [("cmir", cmir(&vars, b, 0.0)), ("lfc", lifted_flow_cover(&vars, b, 0.0))] {
+                            if let Some(cc) = cc {
+                                let c2: Vec<String> = cc.coefs.iter().map(|&(k, a)| format!("{k}:{a:.4}")).collect();
+                                println!("   ours {nm} rhs {:.4} eff {:.4}: {}", cc.rhs, eff(&cc.coefs, cc.rhs), c2.join(" "));
+                            }
+                        }
+                        let bb: Vec<String> = b.iter().map(|&(k, a)| format!("{k}:{a}[{},{}]x={:.3}", vlo[k], vup[k], vx[k])).collect();
+                        println!("   base: {}", bb.join(" "));
+                    }
                     if shown < 15 {
                         shown += 1;
                         println!("both: highs {eh:.4} ours {eo:.4} base len {}", b.len());
@@ -1121,5 +1140,438 @@ mod highs_dump {
             eh.iter().filter(|&&v| v > 0.1).count(),
             eh.iter().filter(|&&v| v > 0.01).count()
         );
+    }
+}
+
+/// HiGHS の lifted cover (`HighsCutGeneration::tryGenerateCut` の前半) の移植: 置き換え後の式
+/// `sum a_k y_k + sum g_k s_k <= beta` (整数変数 y の係数は正にそろえる、連続変数 s は負の係数だけ) から
+/// カバーを作り (`determineCover`、LP 解を使う版)、0-1 変数だけなら lifted knapsack cover、一般整数を含めば
+/// lifted mixed integer cover、連続変数を含めば lifted mixed binary cover を作る。
+pub fn lifted_cover(vars: &CutVars, base: &[(usize, f64)], rhs: f64) -> Option<RawCut> {
+    const FEAS: f64 = 1e-6;
+    const EPS: f64 = 1e-9;
+    let (mut terms, mut beta) = substitute(vars, base, rhs)?;
+    // 整数変数の係数を正にそろえる (負なら補変数 y' = yu - y)。上限のない整数変数があれば使わない (HiGHS も CMIR だけ)
+    for t in terms.iter_mut() {
+        if !t.int {
+            continue;
+        }
+        if !t.yu.is_finite() {
+            return None;
+        }
+        if t.a < 0.0 {
+            beta -= t.a * t.yu;
+            t.a = -t.a;
+            t.comp = !t.comp;
+            t.yv = t.yu - t.yv;
+        }
+    }
+    let n = terms.len();
+    let isint: Vec<bool> = terms.iter().map(|t| t.int && t.a.abs() > 10.0 * FEAS).collect();
+    // 係数の小さい整数変数は連続変数として扱う: 正の係数なら捨てる (緩める)
+    let mut vals: Vec<f64> = terms.iter().map(|t| t.a).collect();
+    for k in 0..n {
+        if !isint[k] && vals[k] > 0.0 {
+            vals[k] = 0.0;
+        }
+    }
+    let upper: Vec<f64> = terms.iter().map(|t| t.yu).collect();
+    let solval: Vec<f64> = terms.iter().map(|t| t.yv).collect();
+    let has_cont = (0..n).any(|k| !isint[k] && vals[k] < 0.0);
+    let has_gen = (0..n).any(|k| isint[k] && upper[k] != 1.0);
+    // determineCover
+    if beta <= 10.0 * FEAS {
+        return None;
+    }
+    let mut cover: Vec<usize> = (0..n).filter(|&k| isint[k] && vals[k] > 0.0 && solval[k] > FEAS).collect();
+    let (mut at_up, mut rest): (Vec<usize>, Vec<usize>) = cover.drain(..).partition(|&k| solval[k] >= upper[k] - FEAS);
+    let mut weight: f64 = at_up.iter().map(|&k| vals[k] * upper[k]).sum();
+    rest.sort_by(|&i, &j| {
+        let (bi, bj) = (upper[i] < 1.5, upper[j] < 1.5);
+        if bi != bj {
+            return bj.cmp(&bi);
+        }
+        let (ca, cb) = (solval[i] * vals[i], solval[j] * vals[j]);
+        if ca > cb + FEAS {
+            return std::cmp::Ordering::Less;
+        }
+        if ca < cb - FEAS {
+            return std::cmp::Ordering::Greater;
+        }
+        vals[j].total_cmp(&vals[i])
+    });
+    let minlambda = (10.0 * FEAS).max(FEAS * beta.abs());
+    let mut it = rest.into_iter();
+    while weight - beta <= minlambda {
+        match it.next() {
+            Some(k) => {
+                weight += vals[k] * upper[k];
+                at_up.push(k);
+            }
+            None => break,
+        }
+    }
+    let mut cover = at_up;
+    let lambda = weight - beta;
+    if cover.is_empty() || lambda <= minlambda {
+        return None;
+    }
+    let mut cvals = vals.clone();
+    let mut crhs;
+    if !has_cont && !has_gen {
+        // lifted knapsack cover
+        cover.sort_by(|&a, &b| vals[b].total_cmp(&vals[a]));
+        let cs = cover.len();
+        let mut abar = vals[cover[0]];
+        let mut sigma = lambda;
+        for i in 1..cs {
+            let delta = abar - vals[cover[i]];
+            let kdelta = i as f64 * delta;
+            if kdelta < sigma {
+                abar = vals[cover[i]];
+                sigma -= kdelta;
+            } else {
+                abar -= sigma / i as f64;
+                sigma = 0.0;
+                break;
+            }
+        }
+        if sigma > 0.0 {
+            abar = beta / cs as f64;
+        }
+        let mut s = vec![0.0; cs];
+        let mut sum = 0.0;
+        let mut cplus = 0usize;
+        let mut flag = vec![0i8; n];
+        for i in 0..cs {
+            sum += abar.min(vals[cover[i]]);
+            s[i] = sum;
+            if vals[cover[i]] > abar + FEAS {
+                cplus += 1;
+                flag[cover[i]] = 1;
+            } else {
+                flag[cover[i]] = -1;
+            }
+        }
+        let mut halfint = false;
+        let mut g = |z: f64| -> f64 {
+            let hfrac = z / abar;
+            let mut coef = 0.0;
+            let h0 = (hfrac + 0.5).floor() as i64;
+            if h0 != 0 && (hfrac - h0 as f64).abs() * abar.max(1.0) <= EPS && h0 <= cplus as i64 - 1 {
+                halfint = true;
+                coef = 0.5;
+            }
+            let mut h = (h0 - 1).max(0) as usize;
+            while h < cs {
+                if z <= s[h] + FEAS {
+                    break;
+                }
+                h += 1;
+            }
+            coef + h as f64
+        };
+        crhs = cs as f64 - 1.0;
+        for k in 0..n {
+            if cvals[k] == 0.0 {
+                continue;
+            }
+            cvals[k] = if flag[k] == -1 { 1.0 } else { g(cvals[k]) };
+        }
+        if halfint {
+            crhs *= 2.0;
+            for v in cvals.iter_mut() {
+                *v *= 2.0;
+            }
+        }
+    } else if has_gen {
+        // lifted mixed integer cover
+        cover.sort_by(|&a, &b| vals[b].total_cmp(&vals[a]));
+        let cs = cover.len();
+        let mut coverflag = vec![false; n];
+        for &k in &cover {
+            coverflag[k] = true;
+        }
+        let mut a: Vec<f64> = Vec::with_capacity(cs);
+        let mut u = vec![0.0; cs + 1];
+        let mut m = vec![0.0; cs + 1];
+        let (mut usum, mut msum) = (0.0, 0.0);
+        for c in 0..cs {
+            let i = cover[c];
+            u[c] = usum;
+            m[c] = msum;
+            a.push(vals[i]);
+            usum += upper[i];
+            msum += upper[i] * vals[i];
+        }
+        u[cs] = usum;
+        m[cs] = msum;
+        let mut lpos: Option<usize> = None;
+        let mut best_cplusend = 0usize;
+        let mut best_val = 0.0;
+        let mut best_at_upper = true;
+        for i in 0..cs {
+            let j = cover[i];
+            let ub = upper[j];
+            let at_upper = solval[j] >= ub - FEAS;
+            if at_upper && !best_at_upper {
+                continue;
+            }
+            let mju = ub * vals[j];
+            let mu = mju - lambda;
+            if mu <= 10.0 * FEAS || vals[j].abs() < 1000.0 * FEAS {
+                continue;
+            }
+            let mudival = mu / vals[j];
+            if (mudival - mudival.round()).abs() <= FEAS {
+                continue;
+            }
+            let eta = mudival.ceil();
+            let thr = (ub - eta + 1.0) * vals[j];
+            let cplusend = cover.partition_point(|&k| vals[k] >= thr);
+            let mut mcplus = m[cplusend];
+            if i < cplusend {
+                mcplus -= mju;
+            }
+            let jl = mcplus + eta * vals[j];
+            if jl > best_val || (!at_upper && best_at_upper) {
+                lpos = Some(i);
+                best_cplusend = cplusend;
+                best_val = jl;
+                best_at_upper = at_upper;
+            }
+        }
+        let lpos = lpos?;
+        let l = cover[lpos];
+        let al = vals[l];
+        let upperl = upper[l];
+        let mlu = upperl * al;
+        let mu = mlu - lambda;
+        a.truncate(best_cplusend);
+        let mut cov2: Vec<usize> = cover[..best_cplusend].to_vec();
+        u.truncate(best_cplusend + 1);
+        m.truncate(best_cplusend + 1);
+        if lpos < best_cplusend {
+            a.remove(lpos);
+            cov2.remove(lpos);
+            u.remove(lpos + 1);
+            m.remove(lpos + 1);
+            for i in (lpos + 1)..best_cplusend {
+                u[i] -= upperl;
+                m[i] -= mlu;
+            }
+        }
+        let cplussize = a.len();
+        let mudival = mu / al;
+        let eta = mudival.ceil();
+        let r = (mu - mudival.floor() * al).max(0.0);
+        let ulme1 = upperl - eta + 1.0;
+        let cthr = ulme1 * al;
+        let kmin = (eta - upperl - 0.5).floor() as i64;
+        let phi_l = |av: f64| -> f64 {
+            let mut k = ((av / al) as i64).min(-1);
+            while k >= kmin {
+                let kf = k as f64;
+                if av >= kf * al + r {
+                    return av - (kf + 1.0) * r;
+                }
+                if av >= kf * al {
+                    return kf * (al - r);
+                }
+                k -= 1;
+            }
+            kmin as f64 * (al - r)
+        };
+        let kmax = (upperl - eta + 0.5).floor() as i64;
+        let gamma_l = |z: f64| -> Option<f64> {
+            for i in 0..cplussize {
+                let upperi = upper[cov2[i]] as i64;
+                for h in 0..=upperi {
+                    let hf = h as f64;
+                    let mih = m[i] + hf * a[i];
+                    let uih = u[i] + hf;
+                    let md = mih + a[i] - cthr;
+                    if z <= md {
+                        return Some(uih * ulme1 * (al - r));
+                    }
+                    let mut k = ((z - md) / al) as i64 - 1;
+                    while k <= kmax {
+                        let kf = k as f64;
+                        if z <= md + kf * al + r {
+                            return Some((uih * ulme1 + kf) * (al - r));
+                        }
+                        if z <= md + (kf + 1.0) * al {
+                            return Some(uih * ulme1 * (al - r) + z - mih - a[i] + cthr - (kf + 1.0) * r);
+                        }
+                        k += 1;
+                    }
+                }
+            }
+            let mut p = ((z - m[cplussize]) / al) as i64 - 1;
+            for _ in 0..1_000_000 {
+                let pf = p as f64;
+                if z <= m[cplussize] + pf * al + r {
+                    return Some((u[cplussize] * ulme1 + pf) * (al - r));
+                }
+                if z <= m[cplussize] + (pf + 1.0) * al {
+                    return Some(u[cplussize] * ulme1 * (al - r) + z - m[cplussize] - (pf + 1.0) * r);
+                }
+                p += 1;
+            }
+            None
+        };
+        crhs = (upperl - eta) * r - lambda;
+        for k in 0..n {
+            if cvals[k] == 0.0 {
+                continue;
+            }
+            if !isint[k] {
+                if cvals[k] > 0.0 {
+                    cvals[k] = 0.0;
+                }
+                continue;
+            }
+            if coverflag[k] {
+                cvals[k] = -phi_l(-cvals[k]);
+                crhs += cvals[k] * upper[k];
+            } else {
+                cvals[k] = gamma_l(cvals[k])?;
+            }
+        }
+    } else {
+        // lifted mixed binary cover
+        cover.sort_by(|&a, &b| vals[b].total_cmp(&vals[a]));
+        let cs = cover.len();
+        let mut coverflag = vec![false; n];
+        for &k in &cover {
+            coverflag[k] = true;
+        }
+        let mut s = vec![0.0; cs];
+        let mut sum = 0.0;
+        let mut p = cs;
+        for i in 0..cs {
+            if vals[cover[i]] - lambda <= EPS {
+                p = i;
+                break;
+            }
+            sum += vals[cover[i]];
+            s[i] = sum;
+        }
+        if p == 0 {
+            return None;
+        }
+        let phi = |av: f64| -> f64 {
+            for i in 0..p {
+                if av <= s[i] - lambda {
+                    return i as f64 * lambda;
+                }
+                if av <= s[i] {
+                    return (i as f64 + 1.0) * lambda + (av - s[i]);
+                }
+            }
+            p as f64 * lambda + (av - s[p - 1])
+        };
+        crhs = -lambda;
+        for k in 0..n {
+            if !isint[k] {
+                if cvals[k] > 0.0 {
+                    cvals[k] = 0.0;
+                }
+                continue;
+            }
+            if coverflag[k] {
+                cvals[k] = cvals[k].min(lambda);
+                crhs += cvals[k];
+            } else {
+                cvals[k] = phi(cvals[k]);
+            }
+        }
+    }
+    // y の式から元の変数に戻す
+    let mut coefs: Vec<(usize, f64)> = Vec::with_capacity(n);
+    let mut r = crhs;
+    for (t, &c) in terms.iter().zip(&cvals) {
+        if c == 0.0 || !c.is_finite() {
+            continue;
+        }
+        r += unsubstitute(vars, t, c, &mut coefs);
+    }
+    if coefs.is_empty() || !r.is_finite() {
+        return None;
+    }
+    Some(RawCut { coefs, rhs: r })
+}
+
+#[cfg(test)]
+mod lifted_cover_tests {
+    use super::*;
+
+    /// 小さな乱数の行 `sum a_j x_j + g s <= b` (x は 0-1 / 一般整数、s >= 0 は連続) に対し、lifted cover が
+    /// 全ての整数点 (s は最小の実行可能な値) を満たすことを確かめる。
+    #[test]
+    fn lifted_cover_is_valid() {
+        let mut seed: u64 = 12345;
+        let mut rnd = |m: u64| {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 33) % m
+        };
+        let mut found = 0;
+        for _ in 0..4000 {
+            let nint = 2 + rnd(4) as usize;
+            let cont = rnd(3) == 0;
+            let n = nint + cont as usize;
+            let mut lo = vec![0.0; n];
+            let mut up = vec![1.0; n];
+            let mut is_int = vec![true; n];
+            let mut base: Vec<(usize, f64)> = Vec::new();
+            for j in 0..nint {
+                up[j] = if rnd(3) == 0 { (1 + rnd(4)) as f64 } else { 1.0 };
+                let a = (1 + rnd(20)) as f64 * if rnd(5) == 0 { -1.0 } else { 1.0 };
+                base.push((j, a));
+                lo[j] = 0.0;
+            }
+            if cont {
+                is_int[nint] = false;
+                up[nint] = f64::INFINITY;
+                base.push((nint, -((1 + rnd(5)) as f64)));
+            }
+            let b = (1 + rnd(30)) as f64;
+            // LP 点: 乱数 (実行可能でなくてもよい。カットの妥当性だけを調べる)
+            let x: Vec<f64> = (0..n).map(|j| if is_int[j] { rnd(100) as f64 / 100.0 * up[j] } else { rnd(100) as f64 / 50.0 }).collect();
+            let vars = CutVars { lo: &lo, up: &up, is_int: &is_int, x: &x, vb: None };
+            let Some(cut) = lifted_cover(&vars, &base, b) else { continue };
+            found += 1;
+            // 整数点の列挙
+            let mut pt = vec![0i64; nint];
+            loop {
+                let lhs: f64 = (0..nint).map(|j| base[j].1 * pt[j] as f64).sum();
+                let mut xs: Vec<f64> = pt.iter().map(|&v| v as f64).collect();
+                let feasible = if cont {
+                    let g = base[nint].1;
+                    let s = ((lhs - b) / -g).max(0.0);
+                    xs.push(s);
+                    true
+                } else {
+                    lhs <= b + 1e-9
+                };
+                if feasible {
+                    let act: f64 = cut.coefs.iter().map(|&(k, c)| c * xs[k]).sum();
+                    assert!(act <= cut.rhs + 1e-6, "invalid lifted cover: base {base:?} <= {b}, ub {up:?}, cut {:?} <= {}, point {xs:?} act {act}", cut.coefs, cut.rhs);
+                }
+                let mut j = 0;
+                while j < nint {
+                    pt[j] += 1;
+                    if pt[j] as f64 <= up[j] {
+                        break;
+                    }
+                    pt[j] = 0;
+                    j += 1;
+                }
+                if j == nint {
+                    break;
+                }
+            }
+        }
+        assert!(found > 100, "only {found} cuts");
     }
 }
