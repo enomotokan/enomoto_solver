@@ -256,6 +256,11 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// HiGHS 式の衝突解析 [呼び出し, 作った衝突, 入れた衝突, 長さの和]
     multi_stats: [u64; 4],
     multi_secs: f64,
+    /// HiGHS 式のカット選択の状態 (これまでの最良のスコア、残す下限の係数)
+    pub(super) cutsel_best: f64,
+    pub(super) cutsel_factor: f64,
+    /// 経路集約の始点の行の開始位置 (ラウンドごとにずらす)
+    pub(super) path_offset: usize,
     /// 目的関数の非零の係数 (目的関数の伝播用、最初に使うときに作る)
     obj_cols: Option<std::rc::Rc<Vec<(usize, f64)>>>,
     /// 目的関数の伝播 [刈ったノード, 締めた境界]、強分岐の子の伝播 [矛盾した子, 子の LP に渡した境界]
@@ -390,6 +395,9 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
         conflicts_added: 0,
         multi_stats: [0; 4],
         multi_secs: 0.0,
+        cutsel_best: 0.0,
+        cutsel_factor: 0.9,
+        path_offset: 0,
         obj_cols: None,
         obj_prop_stats: [0; 2],
         sb_prop_stats: [0; 2],

@@ -25,6 +25,63 @@ struct Candidate {
 }
 
 impl<'a, L: MipLp> Solver<'a, L> {
+    /// HiGHS のカット選択 (`HighsCutPool::separate`): スコア = 違反量 / (効いている非零の数 x 効いている列だけのノルム)
+    /// (効いている = LP 解が境界から離れている列)。これまでに見た最良のスコアの `min_factor` 倍以上を残し
+    /// (残りが少なすぎれば上位半分、全部残れば係数を下げる)、採ったカットとの平行度が 0.1 を超えるものは捨てる。
+    fn select_cuts_highs(&mut self, cands: Vec<Candidate>, max_cuts: usize, x: &[f64]) -> Vec<Candidate> {
+        let tol = FEASTOL;
+        let mut sc: Vec<(f64, Candidate)> = Vec::new();
+        for c in cands {
+            let act: f64 = c.coefs.iter().map(|&(j, a)| a * x[j]).sum();
+            let viol = act - c.rhs;
+            if viol <= tol {
+                continue;
+            }
+            let mut norm = 0.0;
+            let mut nact = 0usize;
+            for &(j, a) in &c.coefs {
+                let active = if a > 0.0 { x[j] > self.dom.global_lo[j] + tol } else { x[j] < self.dom.global_up[j] - tol };
+                if active {
+                    norm += a * a;
+                    nact += 1;
+                }
+            }
+            if nact == 0 {
+                continue;
+            }
+            sc.push((viol / (nact as f64 * norm.sqrt()), c));
+        }
+        if sc.is_empty() {
+            return Vec::new();
+        }
+        sc.sort_by(|a, b| b.0.total_cmp(&a.0));
+        self.cutsel_best = self.cutsel_best.max(sc[0].0);
+        let min_score = self.cutsel_factor * self.cutsel_best;
+        let mut keep = sc.partition_point(|s| s.0 >= min_score);
+        let lower = sc.len() / 20;
+        let upper = sc.len() - 1;
+        if keep <= lower {
+            keep = (sc.len() / 2).max(1);
+            self.cutsel_factor = sc[keep - 1].0 / self.cutsel_best;
+        } else if keep > upper {
+            self.cutsel_factor = sc[upper].0 / self.cutsel_best;
+        }
+        sc.truncate(keep);
+        let maxpar = tunable!("ENOMOTO_T_CUTSEL_HIGHS_MAXPAR", 0.1, f64);
+        let mut chosen: Vec<(f64, Candidate)> = Vec::new();
+        for (_, c) in sc {
+            if chosen.len() >= max_cuts {
+                break;
+            }
+            let nc = c.coefs.iter().map(|&(_, v)| v * v).sum::<f64>().sqrt();
+            if chosen.iter().any(|(nd, d)| sparse_dot(&c.coefs, &d.coefs).abs() > maxpar * nc * nd) {
+                continue;
+            }
+            chosen.push((nc, c));
+        }
+        chosen.into_iter().map(|(_, c)| c).collect()
+    }
+
     /// 根の切除平面ループ。LP は根の最適解の状態で呼ぶこと。終わったときも LP は最適 (でなければ偽)。
     pub(super) fn root_cut_loop(&mut self, root_iters: u64) -> bool {
         let p = self.p;
@@ -37,6 +94,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let max_rounds = if self.params.submip { 5 } else { tunable!("ENOMOTO_T_MIP_CUT_ROUNDS", 25usize, usize) };
         let time_cap = if self.params.time_limit.is_finite() { tunable!("ENOMOTO_T_MIP_CUT_TIME_FRAC", 0.1, f64) * self.params.time_limit } else { f64::INFINITY };
         let mut total_added = 0usize;
+        let mut lp_failures = 0usize;
         for round in 0..max_rounds {
             if self.time_up() || self.start.elapsed().as_secs_f64() > time_cap {
                 break;
@@ -48,7 +106,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let t_sep = std::time::Instant::now();
             let mut cands = self.separate(&x, false);
             // 再スタート前のカットをプールで引き継いだとき (`ENOMOTO_MIP_RESTART_CUTS_TO_POOL`): プールで違反しているものも候補にする
-            if self.params.restarts > 0 && env_str!("ENOMOTO_MIP_RESTART_CUTS_TO_POOL").is_some() && round < tunable!("ENOMOTO_T_MIP_ROOT_POOL_ROUNDS", 5usize, usize) && env_str!("ENOMOTO_MIP_NO_ROOT_POOL").is_none() {
+            if ((self.params.restarts > 0 && env_str!("ENOMOTO_MIP_RESTART_CUTS_TO_POOL").is_some()) || env_str!("ENOMOTO_MIP_CUTSEL_HIGHS_POOL").is_some()) && round < tunable!("ENOMOTO_T_MIP_ROOT_POOL_ROUNDS", 5usize, usize) && env_str!("ENOMOTO_MIP_NO_ROOT_POOL").is_none() {
                 for (c, r, norm) in &self.cut_pool {
                     let act: f64 = c.iter().map(|&(j, v)| v * x[j]).sum();
                     let eff = (act - r) / norm.max(1e-12);
@@ -69,7 +127,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             // 効き目の大きい順に、平行なものを除いて選ぶ
             let max_cuts = (p.m.max(50)).min(500);
-            let chosen = select_cuts(cands, max_cuts, p);
+            let chosen = if env_str!("ENOMOTO_MIP_CUTSEL_HIGHS").is_some() { self.select_cuts_highs(cands, max_cuts, &x) } else { select_cuts(cands, max_cuts, p) };
             let sep_secs = t_sep.elapsed().as_secs_f64();
             if chosen.is_empty() {
                 break;
@@ -108,7 +166,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if self.params.verbose {
                     eprintln!("MIP: cut round {round}: LP status {st:?}, removed the cuts ({st2:?})");
                 }
-                return st2 == LpStatus::Optimal;
+                // 1 回の失敗ではやめない (そのラウンドのカットだけ捨てて続ける。2 回目でやめる)
+                lp_failures += 1;
+                if st2 != LpStatus::Optimal || lp_failures >= 2 || env_str!("ENOMOTO_MIP_CUT_LP_FAIL_STOP").is_some() {
+                    return st2 == LpStatus::Optimal;
+                }
+                continue;
             }
             let obj = self.lp.objective();
             if env_str!("ENOMOTO_MIP_DEBUG_FC").is_some() && !self.params.submip {
@@ -153,8 +216,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 prev_nfrac = nfrac;
             }
             prev_obj = obj;
-            // 効いていないカットを外す (論理変数が基底にあり、行が緩んでいるもの)
-            self.remove_inactive_cuts();
+            // 効いていないカットを外す (論理変数が基底にあり、行が緩んでいるもの)。`ENOMOTO_T_MIP_CUT_REMOVE_EVERY` ラウンドごと
+            if (round + 1) % tunable!("ENOMOTO_T_MIP_CUT_REMOVE_EVERY", 1usize, usize).max(1) == 0 {
+                self.remove_inactive_cuts();
+            }
         }
         self.remove_inactive_cuts();
         let st = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
@@ -400,12 +465,25 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut starts = 0usize;
         // 始点の行 (既定は元の行だけ。カットの行は相手としてだけ使う)
         let m_start = if env_str!("ENOMOTO_MIP_PATH_START_CUTS").is_some() { m } else { p.m.min(m) };
-        for start in 0..m_start {
-            if starts >= max_starts || (start % 64 == 0 && self.time_up()) {
+        // `ENOMOTO_MIP_PATH_TIGHT_STARTS`: 始点は効いている行だけ (HiGHS)。`ENOMOTO_MIP_PATH_ROTATE`: 始点の行の順を
+        // 毎回ずらす。`ENOMOTO_MIP_PATH_BOTH_SIGNS`: 始点の行を両方の向きで使う (HiGHS)。h80x6320d ではどれも根の
+        // 下界を上げず (両方の向きは候補が増えすぎて LP が詰まり悪化)、既定では使わない
+        let tight_only = env_str!("ENOMOTO_MIP_PATH_TIGHT_STARTS").is_some();
+        let offset = if m_start > 0 && env_str!("ENOMOTO_MIP_PATH_ROTATE").is_some() { self.path_offset % m_start } else { 0 };
+        let both_signs = env_str!("ENOMOTO_MIP_PATH_BOTH_SIGNS").is_some();
+        let mut last = offset;
+        for sidx in 0..m_start * if both_signs { 2 } else { 1 } {
+            let start = (offset + sidx / if both_signs { 2 } else { 1 }) % m_start;
+            let sign = if both_signs && sidx % 2 == 1 { -1.0 } else { 1.0 };
+            if starts >= max_starts || (sidx % 64 == 0 && self.time_up()) {
                 break;
             }
+            last = start;
             let row = &lp_rows[start];
             if row.len() < 2 || row.len() > MAX_ROW_LEN {
+                continue;
+            }
+            if tight_only && !tight(start) {
                 continue;
             }
             // 境界から離れた連続変数がなければ 1 行の CMIR と同じなので飛ばす
@@ -418,14 +496,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 in_agg[j] = false;
             }
             touched.clear();
-            let mut weights: Vec<(usize, f64)> = vec![(start, 1.0)];
+            let mut weights: Vec<(usize, f64)> = vec![(start, sign)];
             used_row[start] = true;
             for &(j, a) in row {
                 if !in_agg[j] {
                     in_agg[j] = true;
                     touched.push(j);
                 }
-                agg[j] += a;
+                agg[j] += sign * a;
             }
             for step in 0..PATH_MAX_LEN {
                 if step > 0 {
@@ -498,6 +576,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 used_row[i] = false;
             }
         }
+        self.path_offset = last + 1;
     }
 
     /// 現在の LP 解 `x` を切る候補を作る。
@@ -609,7 +688,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // 経路集約 (path aggregation、HiGHS の `HighsPathSeparator`)
         if env_str!("ENOMOTO_MIP_NO_PATH_AGG").is_none() {
-            let max_starts = if light { tunable!("ENOMOTO_T_MIP_NODE_PATH_STARTS", 0usize, usize) } else { 1000 };
+            let max_starts = if light { tunable!("ENOMOTO_T_MIP_NODE_PATH_STARTS", 0usize, usize) } else { tunable!("ENOMOTO_T_MIP_PATH_STARTS", 1000usize, usize) };
             self.path_aggregation(&vars, &lp_rows, &mut cands, &mut push, max_starts);
         }
         if dbg_sep {
