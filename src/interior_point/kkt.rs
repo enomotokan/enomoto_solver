@@ -1001,6 +1001,11 @@ impl IpmKkt {
         matches!(self, IpmKkt::Normal(_))
     }
 
+    /// 正規方程式で、稠密な列を外して Woodbury で扱っているか。
+    pub fn has_dense_cols(&self) -> bool {
+        matches!(self, IpmKkt::Normal(k) if !k.dense_cols.is_empty())
+    }
+
     pub fn factor_nnz(&self) -> usize {
         match self {
             IpmKkt::Normal(k) => k.factor_nnz(),

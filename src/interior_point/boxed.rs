@@ -532,6 +532,8 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
     let solve_acc_bump = tunable!("ENOMOTO_T_IPM_SOLVE_ACC_BUMP", 100.0f64, f64);
     let solve_acc_min = tunable!("ENOMOTO_T_IPM_SOLVE_ACC_MIN", 1e-11f64, f64);
     let mut acc_retries = 0usize;
+    let aug_on_inacc = tunable!("ENOMOTO_T_IPM_AUG_ON_INACCURATE", 0.0f64, f64);
+    let aug_on_inacc_any = tunable!("ENOMOTO_T_IPM_AUG_ON_INACCURATE_ANY", 0u8, u8) != 0;
     let solve_acc2 = tunable!("ENOMOTO_T_IPM_SOLVE_ACC2", 0.0f64, f64);
     let solve_acc2_reg = tunable!("ENOMOTO_T_IPM_SOLVE_ACC2_REG", 1e-10f64, f64);
     let mut prev_solve_rel = 0.0f64;
@@ -856,6 +858,23 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
         let solve_rel = newton(&mut kkt, a, &top, delta, &r_x, &r_y, &mut lo, &mut up, &pos, &mut sol_aff, n, &mut refine_work);
         prof.1 += t_s.elapsed().as_secs_f64();
         prev_solve_rel = solve_rel;
+        // 試験用 (`ENOMOTO_T_IPM_AUG_ON_INACCURATE=t`): 正規方程式の予測子の Newton 系の相対残差が t を超えたら拡大系に切り替えて
+        // 同じ点で解き直す (`ENOMOTO_T_IPM_AUG_ON_INACCURATE_ANY=1` でなければ、稠密な列を Woodbury で扱っているときだけ。
+        // ns1688926: 外した後の疎な部分がほぼ特異になり、44 反復目から相対残差 1e3〜1e12 で 200 反復空回りした)。
+        if aug_on_inacc > 0.0
+            && solve_rel > aug_on_inacc
+            && kkt.is_normal()
+            && (aug_on_inacc_any || kkt.has_dense_cols())
+            && sol_aff.iter().all(|v| v.is_finite())
+        {
+            kkt = IpmKkt::augmented(a);
+            crate::phase_timing::mark("ipm_switch_augmented");
+            if debug {
+                eprintln!("IPM it={it} inaccurate normal-equations solve ({solve_rel:.2e}); switching to the augmented system");
+            }
+            cached = Some(res);
+            continue;
+        }
         // 試験用 (`ENOMOTO_T_IPM_SOLVE_ACC=t`): 予測子の Newton 系の (反復改良後の) 相対残差が t を超えたら (分解の精度が
         // 足りない: ken-18 は 30 反復目から 1e-5〜1e2 になり、方向が意味をなさず 35 反復空回りした)、この反復を捨てて
         // ρ・δ を `ENOMOTO_T_IPM_SOLVE_ACC_BUMP` 倍 (下限 `ENOMOTO_T_IPM_SOLVE_ACC_MIN`) に強めて同じ点で解き直す。
