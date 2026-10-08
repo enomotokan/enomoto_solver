@@ -646,7 +646,11 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     let fixed_obj: f64 = (0..std.n_total).filter(|&j| !(std.lb[j] < std.ub[j])).map(|j| std.c[j] * std.lb[j]).sum();
     let lb_fn = move || shared.as_ref().map_or(f64::NEG_INFINITY, |sb| sb.get() - fixed_obj);
     // 試験用 (`ENOMOTO_T_XO_IPM_PC`): 内点法の前に行・列をそろえる ([`ipm_prescaled`] の `mode`、0 でしない)。
-    let ipm_pc = tunable!("ENOMOTO_T_XO_IPM_PC", 0u8, u8);
+    // 試験用 (`ENOMOTO_T_XO_IPM_PC_MIN_NNZ`): 内点法に渡す行列の非零の数がこれ未満ならそろえない (小さな問題では
+    // 反復が増える・手間が目立つ: degen3・greenbea・ken-13。第 49 回)。
+    let pc_min_nnz = tunable!("ENOMOTO_T_XO_IPM_PC_MIN_NNZ", 0usize, usize);
+    let ipm_pc_requested = tunable!("ENOMOTO_T_XO_IPM_PC", 0u8, u8) != 0;
+    let ipm_pc = if a_j.compute_nnz() >= pc_min_nnz { tunable!("ENOMOTO_T_XO_IPM_PC", 0u8, u8) } else { 0 };
     let pc = (ipm_pc != 0 && xo.given_point.is_none()).then(|| ipm_prescaled(&a_j, &b_j, &c_j, &l_j, &u_j, ipm_pc));
     crate::phase_timing::mark("xo_ipm_start");
     let ipm = if let Some((gx, gy, _)) = xo.given_point {
@@ -770,6 +774,8 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     //      (`ENOMOTO_T_XO_GAMMA_PDHG` で選ぶ)。
     // `ENOMOTO_T_XO_GAMMA_MULT` は γ に掛ける倍率。
     let gamma_mode = tunable!("ENOMOTO_T_XO_GAMMA_PDHG", 0u8, u8);
+    // 6 (そろえた空間で γ = 1) は内点法の前にそろえなかった問題 (`ENOMOTO_T_XO_IPM_PC_MIN_NNZ` 未満) では元の単位の γ = 1。
+    let gamma_mode = if gamma_mode == 6 && pc.is_none() && ipm_pc_requested { 0 } else { gamma_mode };
     let gamma_mult = tunable!("ENOMOTO_T_XO_GAMMA_MULT", 1.0f64, f64);
     let mut gamma = vec![prm::GAMMA * gamma_mult; n];
     let mut pdhg_sigma: Option<Vec<f64>> = None;
