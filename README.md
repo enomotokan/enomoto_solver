@@ -70,12 +70,12 @@ print(x.value, y.value)             # 3.0 7.0
 By default, the solver stops as soon as it proves that there is no finite optimum (at the end of phase A) and reports `"infeasible_or_unbounded"`. Pass `distinguish_infeasible_unbounded=True` to continue with phase B and tell the two cases apart:
 
 ```python
-U = Model()
+M = Model()
 z = Variable(float, -math.inf, math.inf)
-U.set_objective(z)                  # minimize z
-U.add_constraint(z <= 5)
+M.set_objective(z)                  # minimize z
+M.add_constraint(z <= 5)
 
-sol = U.solve(distinguish_infeasible_unbounded=True)
+sol = M.solve(distinguish_infeasible_unbounded=True)
 print(sol.status)                   # unbounded
 ```
 
@@ -95,11 +95,11 @@ Whatever the method, infeasibility and unboundedness are decided by the two-phas
 ### Integer variables
 
 ```python
-K = Model()
+M = Model()
 items = [(Variable(int, 0, 1), value, weight) for value, weight in [(60, 10), (100, 20), (120, 30)]]
-K.set_objective(sum(v * value for v, value, _ in items), sense="maximize")
-K.add_constraint(sum(v * weight for v, _, weight in items) <= 50)
-sol = K.solve(time_limit=60)
+M.set_objective(sum(v * value for v, value, _ in items), sense="maximize")
+M.add_constraint(sum(v * weight for v, _, weight in items) <= 50)
+sol = M.solve(time_limit=60)
 print(sol.objective, [round(v.value) for v, _, _ in items])   # 220.0 [0, 1, 1]
 print(sol.best_bound, sol.mip_gap, sol.nodes)                 # 220.0 0.0 0
 ```

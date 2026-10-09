@@ -14,7 +14,7 @@ LP の解法には**傾き・切片双対二段解法**を実装しています�
 
 このほか，次も実装しています．
 
-- **近接内点法 + クロスオーバー**：PIQP 型の近接内点法(IP-PMM，Mehrotra の予測子・修正子法)で内点の最適解を求め，Liu & Lu(2024)の方式のクロスオーバー(主・双対の押し出しと基底の選択)で最適基底解に直します．仕上げは単体法で行います．
+- **近接内点法 + クロスオーバー**：PIQP 型の近接内点法(IP-PMM，Mehrotra の予測子・修正子法)で内点の最適解を求め，クロスオーバー(主・双対の押し出しと基底の選択)で最適基底解に直します．仕上げは単体法で行います．
 - **二つの解法の並列実行**：既定では，プリソルブ後の行数が 1000 以上の LP を，傾き・切片双対二段解法と近接内点法 + クロスオーバーで別々のスレッドで同時に解き，先に結論を出した側を採ります(もう一方は打ち切ります)．
 - **混合整数線型計画(MIP)**：分枝切除法(制約伝播，切除平面，主ヒューリスティクス，対称性の処理など)で解きます．
 
@@ -70,12 +70,12 @@ print(x.value, y.value)             # 3.0 7.0
 既定では，有限な最適値がないと分かった時点(局面Aの終了時)で止まり，`"infeasible_or_unbounded"` を返します．`distinguish_infeasible_unbounded=True` を渡すと局面Bまで進み，両者を区別します．
 
 ```python
-U = Model()
+M = Model()
 z = Variable(float, -math.inf, math.inf)
-U.set_objective(z)                  # z を最小化
-U.add_constraint(z <= 5)
+M.set_objective(z)                  # z を最小化
+M.add_constraint(z <= 5)
 
-sol = U.solve(distinguish_infeasible_unbounded=True)
+sol = M.solve(distinguish_infeasible_unbounded=True)
 print(sol.status)                   # unbounded
 ```
 
@@ -95,11 +95,11 @@ print(sol.status)                   # unbounded
 ### 整数変数
 
 ```python
-K = Model()
+M = Model()
 items = [(Variable(int, 0, 1), value, weight) for value, weight in [(60, 10), (100, 20), (120, 30)]]
-K.set_objective(sum(v * value for v, value, _ in items), sense="maximize")
-K.add_constraint(sum(v * weight for v, _, weight in items) <= 50)
-sol = K.solve(time_limit=60)
+M.set_objective(sum(v * value for v, value, _ in items), sense="maximize")
+M.add_constraint(sum(v * weight for v, _, weight in items) <= 50)
+sol = M.solve(time_limit=60)
 print(sol.objective, [round(v.value) for v, _, _ in items])   # 220.0 [0, 1, 1]
 print(sol.best_bound, sol.mip_gap, sol.nodes)                 # 220.0 0.0 0
 ```
