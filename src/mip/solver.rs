@@ -220,6 +220,9 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) row_log: Vec<RowEdit>,
     /// LP のカットの行 (元の行より後ろ) の年齢: 続けて効いていなかったノードの LP の数 ([`Self::age_cuts`])。
     pub(super) cut_age: Vec<u32>,
+    /// LP のカットの行の番号 (追加順に振る、行を消しても変わらない)。`cut_age` と同じ並び。
+    pub(super) cut_ids: Vec<u64>,
+    pub(super) next_cut_id: u64,
     /// 証明から作った衝突の数。
     proof_conflicts: u64,
     /// 完全オービトープ (orbitopal fixing に使う。サブ MIP では空)。
@@ -386,6 +389,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
         vbounds: None,
         failed_heurs: 0,
         cut_age: Vec::new(),
+        cut_ids: Vec::new(),
+        next_cut_id: 0,
         proof_conflicts: 0,
         orbitopes: if params.submip { Rc::new(Vec::new()) } else { super::ORBITOPES.with(|t| t.borrow().clone()).unwrap_or_default() },
         orbitope_fixings: 0,
@@ -874,7 +879,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if let Some(r) = self.maybe_restart() {
             return r;
         }
-        self.queue.push(OpenNode { changes: Vec::new(), lower_bound: root_obj, estimate: root_obj, depth: 0, basis: Some(Rc::new(self.lp.basis())), basis_epoch: self.row_log.len(), branch: None });
+        let prot = self.basis_protected_cuts();
+        self.queue.push(OpenNode { changes: Vec::new(), lower_bound: root_obj, estimate: root_obj, depth: 0, basis: Some(Rc::new(self.lp.basis())), basis_epoch: self.row_log.len(), branch: None, prot });
         // 根のノードは LP を解いた状態のままなので、最初の取り出しでは定義域・LP を作り直さない。
         let mut first = true;
         // 潜っている子ノード (定義域に分枝を積んだ状態で次に処理する)。
@@ -1360,6 +1366,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let (first_c, second_c) = if prefer_up { (up, down) } else { (down, up) };
             let basis = Rc::new(self.lp.basis());
             let basis_epoch = self.row_log.len();
+            let prot = self.basis_protected_cuts();
             // 強分岐で子の LP が最適まで解けていれば、その値を子の下界にする
             let sb_bounds = self.last_sb.filter(|&(j, _, _)| j == col && env_str!("ENOMOTO_MIP_NO_SB_CHILD_BOUND").is_none());
             let mk = |c: BoundChange| {
@@ -1377,6 +1384,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     basis: Some(basis.clone()),
                     basis_epoch,
                     branch: Some((col, !c.upper, value, lp_obj)),
+                    prot: prot.clone(),
                 }
             };
             let sib = self.queue.push(mk(second_c));

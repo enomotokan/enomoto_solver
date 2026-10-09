@@ -417,6 +417,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.sync_cut_age();
         self.lp.add_rows(rows);
         self.cut_age.extend(std::iter::repeat_n(0, rows.len()));
+        for _ in 0..rows.len() {
+            self.cut_ids.push(self.next_cut_id);
+            self.next_cut_id += 1;
+        }
         self.row_log.push(super::solver::RowEdit::Add(rows.len()));
     }
 
@@ -430,6 +434,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
             k += 1;
             keep
         });
+        let mut k = m0;
+        self.cut_ids.retain(|_| {
+            let keep = !remove[k];
+            k += 1;
+            keep
+        });
         self.lp.delete_rows(remove);
         self.row_log.push(super::solver::RowEdit::Delete(remove.to_vec()));
     }
@@ -438,6 +448,30 @@ impl<'a, L: MipLp> Solver<'a, L> {
     fn sync_cut_age(&mut self) {
         let want = self.lp.num_rows().saturating_sub(self.p.m);
         self.cut_age.resize(want, 0);
+        if self.cut_ids.len() > want {
+            self.cut_ids.truncate(want);
+        }
+        while self.cut_ids.len() < want {
+            self.cut_ids.push(self.next_cut_id);
+            self.next_cut_id += 1;
+        }
+    }
+
+    /// 今の LP の基底で効いている (論理変数が非基底の) カットの番号 (`ENOMOTO_MIP_PROTECT_QUEUE_CUTS` のときだけ。
+    /// 待ち行列に入れるノードに持たせ、その間は年齢で外さない)。
+    pub(super) fn basis_protected_cuts(&mut self) -> Option<std::rc::Rc<Vec<u64>>> {
+        if env_str!("ENOMOTO_MIP_PROTECT_QUEUE_CUTS").is_none() || self.params.submip {
+            return None;
+        }
+        self.sync_cut_age();
+        let m0 = self.p.m;
+        let mr = self.lp.num_rows();
+        if mr <= m0 {
+            return None;
+        }
+        let b = self.lp.basis();
+        let v: Vec<u64> = (m0..mr).filter(|&i| b.row[i] != VarStatus::Basic).map(|i| self.cut_ids[i - m0]).collect();
+        if v.is_empty() { None } else { Some(std::rc::Rc::new(v)) }
     }
 
     /// ノードの LP の後に呼ぶ (HiGHS の LP の aging): 効いていない (論理変数が基底で行に余裕がある) カットの年齢を
@@ -494,7 +528,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let m0 = self.p.m;
                 let mut remove = vec![false; self.lp.num_rows()];
                 let mut cnt = 0;
-                for &(_, k) in order.iter().take(ncut - cap) {
+                for &(_, k) in order.iter().filter(|&&(_, k)| !self.queue.is_protected(self.cut_ids[k])).take(ncut - cap) {
                     remove[m0 + k] = true;
                     cnt += 1;
                 }
@@ -514,7 +548,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut remove = vec![false; self.lp.num_rows()];
         let mut cnt = 0;
         for (k, &age) in self.cut_age.iter().enumerate() {
-            if age > limit {
+            if age > limit && !self.queue.is_protected(self.cut_ids[k]) {
                 remove[m0 + k] = true;
                 cnt += 1;
             }

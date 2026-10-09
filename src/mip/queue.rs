@@ -4,7 +4,7 @@
 //! 通常は後者 (hybrid estimate) で選び、一定回数ごとに下界最小のノードを選ぶ。
 
 use super::lp::Basis;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
 
 /// 全順序つきの f64 (BTreeSet のキー用)。
@@ -47,6 +47,9 @@ pub struct OpenNode {
     pub basis_epoch: usize,
     /// このノードを作った分枝 (列, 上向きか, 親の LP 値, 親の LP 目的値)。pseudocost の更新に使う。
     pub branch: Option<(usize, bool, f64, f64)>,
+    /// `basis` で効いている (論理変数が非基底の) カットの番号 (`Solver::cut_ids`)。待ち行列にある間、このカットは
+    /// 年齢で外さない (外すと取り出したときに基底が合わず LP がほぼ解き直しになる)。
+    pub prot: Option<Rc<Vec<u64>>>,
 }
 
 /// 待ち行列。
@@ -58,11 +61,13 @@ pub struct NodeQueue {
     pops: u64,
     /// 枠ごとの世代 (push のたびに増やす。取り出した枠が使い回されても、古い (枠, 世代) では取り出せない)。
     gen: Vec<u64>,
+    /// カットの番号ごとの、そのカットが効いている基底を持つ待ち行列のノードの数。
+    protect: HashMap<u64, u32>,
 }
 
 impl NodeQueue {
     pub fn new() -> Self {
-        NodeQueue { nodes: Vec::new(), free: Vec::new(), by_lb: BTreeSet::new(), by_est: BTreeSet::new(), pops: 0, gen: Vec::new() }
+        NodeQueue { nodes: Vec::new(), free: Vec::new(), by_lb: BTreeSet::new(), by_est: BTreeSet::new(), pops: 0, gen: Vec::new(), protect: HashMap::new() }
     }
 
     pub fn len(&self) -> usize {
@@ -78,6 +83,11 @@ impl NodeQueue {
         let lb = node.lower_bound;
         let est = 0.5 * node.lower_bound + 0.5 * node.estimate;
         let depth = node.depth as f64;
+        if let Some(pr) = &node.prot {
+            for &c in pr.iter() {
+                *self.protect.entry(c).or_insert(0) += 1;
+            }
+        }
         let id = if let Some(id) = self.free.pop() {
             self.nodes[id] = Some(node);
             id
@@ -105,7 +115,10 @@ impl NodeQueue {
     }
 
     fn remove(&mut self, id: usize) -> OpenNode {
-        let node = self.nodes[id].take().unwrap();
+        let mut node = self.nodes[id].take().unwrap();
+        if let Some(pr) = node.prot.take() {
+            self.unprotect(&pr);
+        }
         let est = 0.5 * node.lower_bound + 0.5 * node.estimate;
         self.by_lb.remove(&(Key(node.lower_bound), id));
         self.by_est.remove(&(Key(est), Key(-(node.depth as f64)), id));
@@ -137,8 +150,31 @@ impl NodeQueue {
 
     /// 保存している基底を捨てる (メモリ節約)。
     pub fn drop_bases(&mut self) {
+        let mut prs = Vec::new();
         for n in self.nodes.iter_mut().flatten() {
             n.basis = None;
+            if let Some(pr) = n.prot.take() {
+                prs.push(pr);
+            }
         }
+        for pr in prs {
+            self.unprotect(&pr);
+        }
+    }
+
+    fn unprotect(&mut self, pr: &[u64]) {
+        for c in pr {
+            if let Some(k) = self.protect.get_mut(c) {
+                *k -= 1;
+                if *k == 0 {
+                    self.protect.remove(c);
+                }
+            }
+        }
+    }
+
+    /// カット `c` が待ち行列のノードの基底で効いているか。
+    pub fn is_protected(&self, c: u64) -> bool {
+        self.protect.contains_key(&c)
     }
 }
