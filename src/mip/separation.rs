@@ -461,10 +461,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
     }
 
-    /// 年齢が上限 (`ENOMOTO_T_MIP_CUT_AGE_LIMIT`、既定 30。HiGHS の `mip_lp_age_limit` は 10 だが、10 では binkar10_1 で効くカットまで外れた) を超えたカットを LP から外す
+    /// 年齢が上限 (`ENOMOTO_T_MIP_CUT_AGE_LIMIT`、既定 300。HiGHS の `mip_lp_age_limit` は 10 だが、10 では binkar10_1 で効くカットまで外れた) を超えたカットを LP から外す
     /// (プールにあるカットは、違反すればまた戻る)。外した数を返す。
+    /// 年齢は今のノードで効いていない回数なので、待ち行列のノードで効いているカットまで外れうる。そのノードを取り出すと
+    /// 保存した基底が合わず LP がほぼ解き直しになる (binkar10_1: 上限 30 で 1 ノード平均 272 反復、外さなければ 37)。
+    /// 40 問: 上限 30 は 17 問 27.21、100 は 19 問 27.05、300 は 19 問 26.64 (外さないと neos5 で LP が重くなる)
     pub(super) fn remove_aged_cuts(&mut self) -> usize {
-        self.remove_cuts_older_than(tunable!("ENOMOTO_T_MIP_CUT_AGE_LIMIT", 30u32, u32))
+        self.remove_cuts_older_than(tunable!("ENOMOTO_T_MIP_CUT_AGE_LIMIT", 300u32, u32))
     }
 
     /// 年齢が `limit` を超えたカットを LP から外す。外した数を返す。
