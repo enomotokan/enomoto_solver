@@ -186,6 +186,10 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) submip_time_max: f64,
     /// 暫定解がない根の RENS (ダイビング式・長めのサブ MIP) を行ったか。
     pub(super) noinc_rens_done: bool,
+    /// サブ MIP のノード上限の倍率 (根の RENS のやり直しで一時的に上げる)。
+    pub(super) submip_node_mult: f64,
+    /// 直近の (旧来の) RENS のサブ MIP がノード上限で止まったか。
+    pub(super) rens_node_limited: bool,
     /// 並列モードで、サブ MIP を別スレッドで解くか (根のヒューリスティクスの間だけ真)。
     pub(super) parallel_submips: bool,
     /// 別スレッドで解いているサブ MIP (出した順)。
@@ -364,6 +368,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
         submip_time_frac: tunable!("ENOMOTO_T_MIP_SUBMIP_TIME_FRAC", 0.07, f64),
         submip_time_max: tunable!("ENOMOTO_T_MIP_SUBMIP_TIME_MAX", 6.0, f64),
         noinc_rens_done: false,
+        submip_node_mult: 1.0,
+        rens_node_limited: false,
         parallel_submips: false,
         pending_submips: std::collections::VecDeque::new(),
         fj_thread: None,
@@ -814,6 +820,20 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 見つからず根の時間を 3-5 s 使うだけだった。ENOMOTO_MIP_MINREL=1 で使う)
                 if self.incumbent.is_none() && env_str!("ENOMOTO_MIP_MINREL").is_some() {
                     heur!("min relaxation", self.min_relaxation());
+                }
+                // 根の RENS のサブ MIP がノード上限で止まり、根のヒューリスティクスの後も差が大きい (既定 0.5% 超) なら、
+                // ノード上限を 4 倍にして RENS をやり直す (`ENOMOTO_MIP_NO_RENS_MORE_NODES` で無効)。binkar10_1 は 500 ノードの
+                // RENS が 7182 で止まり、根の暫定解 6822.81 から木が 60 秒進まない (被約費用固定が効かず再スタートもしない)。
+                // 約 1600 ノードで RENS が 6754.85 を見つけ、再スタートして最適値 6742.2 に届く
+                if self.rens_node_limited && env_str!("ENOMOTO_MIP_NO_RENS_MORE_NODES").is_none() {
+                    let gap = self.incumbent.as_ref().map(|(z, _)| (z - (self.lp.objective() + self.p.offset)) / z.abs().max(1.0));
+                    if let Some(gap) = gap {
+                        if gap > tunable!("ENOMOTO_T_MIP_RENS_MORE_NODES_GAP", 0.005, f64) {
+                            self.submip_node_mult = tunable!("ENOMOTO_T_MIP_RENS_MORE_NODES_MULT", 4.0, f64);
+                            heur!("RENS (more nodes)", self.rens(&x));
+                            self.submip_node_mult = 1.0;
+                        }
+                    }
                 }
                 // 暫定解 (Feasibility Jump・pump・丸めなどで得たもの) を根の LP 解との RINS で磨く
                 if self.incumbent.is_some() && env_str!("ENOMOTO_MIP_NO_ROOT_RINS").is_none() {

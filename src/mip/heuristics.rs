@@ -1179,7 +1179,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let params = super::solver::MipParams {
             time_limit: (self.submip_time_frac * remaining).min(self.submip_time_max),
             // `ENOMOTO_T_MIP_SUBMIP_NODES_MULT`: サブ MIP のノード上限 (多くは 500) の倍率 (既定 1)
-            node_limit: ((node_limit as f64) * tunable!("ENOMOTO_T_MIP_SUBMIP_NODES_MULT", 1.0, f64)) as u64,
+            node_limit: ((node_limit as f64) * tunable!("ENOMOTO_T_MIP_SUBMIP_NODES_MULT", 1.0, f64) * self.submip_node_mult) as u64,
             rel_gap: self.params.rel_gap,
             abs_gap: self.params.abs_gap,
             // 診断用: `ENOMOTO_MIP_SUBMIP_VERBOSE` ならサブ MIP の経過も出す
@@ -1506,7 +1506,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             return self.solve_submip(lo2, up2, 500);
         }
-        self.solve_submip(lo, up, 500)
+        let mut sub = p.clone();
+        sub.col_lo = lo;
+        sub.col_up = up;
+        let r = self.solve_submip_problem(sub, 500, None);
+        self.rens_node_limited = matches!(r, Some((super::solver::MipStatus::NodeLimit, _)));
+        r.is_some_and(|r| r.1)
     }
 
     /// RINS: 暫定解と LP 解で値が一致する整数列を固定したサブ MIP を解く。固定は伝播しながら積み、矛盾するものは飛ばす。
