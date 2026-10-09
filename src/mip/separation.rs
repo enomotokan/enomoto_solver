@@ -1425,7 +1425,21 @@ impl<'a, L: MipLp> Solver<'a, L> {
             w_cache = scored.into_iter().map(|(_, _, w)| w).collect();
         } else {
             basics.sort_by(|a, b| b.1.total_cmp(&a.1));
-            basics.truncate(limit);
+        }
+        // `ENOMOTO_T_MIP_TAB_NNZ_BUDGET` = B (>0 で有効): 1 ラウンドの集約の手間 (w の非零の行の長さの合計) の上限を
+        // B * (列数 + LP の非零) にする。BTRAN の直後に手間が分かるので、上限を超える (密な) 行は集約せずに飛ばし、
+        // 後ろの疎な行で埋める (候補は limit の 3 倍まで見て、使う行は limit まで)。既定では使わない (0):
+        // 30n20b8 は w の非零が平均 5 しかなく、LP の行そのものが密 (集約行 4400-7700 非零) で、根の最初のラウンドの
+        // 下界 43 -> 81 は密な行からの 1 本のカットによる。予算をかけると分離は 0.3 -> 0.1 秒/ラウンドになるが、
+        // 根の下界が 151 -> 92 (B=2), 109 (B=5), 105 (B=20) に下がる。neos-911970 は B=2,5 で根のラウンドが減り
+        // 木の下界 53.1 -> 51 に悪化、qnet1 は 4.5 -> 3.0 秒と速くなり、neos-1456979・h80x6320d はほぼ変わらない
+        let lp_nnz: usize = lp_rows.iter().map(|r| r.len()).sum();
+        let nnz_budget_mult = tunable!("ENOMOTO_T_MIP_TAB_NNZ_BUDGET", 0.0, f64);
+        let nnz_budget = if nnz_budget_mult > 0.0 { nnz_budget_mult * (n + lp_nnz) as f64 } else { f64::INFINITY };
+        let mut work_used = 0.0f64;
+        let mut n_budget_skip = 0usize;
+        if !tab_rules {
+            basics.truncate(if nnz_budget.is_finite() { 3 * limit } else { limit });
         }
         let mut agg = vec![0.0; n];
         let tab_fc = use_flow_cover() && env_str!("ENOMOTO_MIP_TAB_FC").is_some();
@@ -1445,6 +1459,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     break;
                 }
             }
+            if n_rows_used >= limit {
+                break;
+            }
             let t0 = std::time::Instant::now();
             let w = if tab_rules { std::mem::take(&mut w_cache[bi]) } else { self.lp.basis_inverse_row(s) };
             if dbg_sep {
@@ -1456,6 +1473,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 continue;
             }
             let wmin_keep = 1e-9 * wmax;
+            if nnz_budget.is_finite() {
+                let work: usize = (0..mr).filter(|&i| w[i].abs() > wmin_keep).map(|i| lp_rows[i].len() + 1).sum();
+                if work_used + work as f64 > nnz_budget {
+                    n_budget_skip += 1;
+                    continue;
+                }
+                work_used += work as f64;
+            }
             // 集約: sum_i w_i (a_i x - r_i) = 0
             let mut touched: Vec<usize> = Vec::new();
             let mut base: Vec<(usize, f64)> = Vec::new();
@@ -1542,12 +1567,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         if dbg_sep {
             eprintln!(
-                "SEP tableau {:.3}s cands {} (rows {} of {} candidates, fill-skipped {}, btran {:.3}s agg {:.3}s gen+finish {:.3}s (finish total this call {:.3}s), mean w nnz {:.0}, mean agg nnz {:.0}, LP rows {} nnz {})",
+                "SEP tableau {:.3}s cands {} (rows {} of {} candidates, fill-skipped {}, budget-skipped {} (work {:.0} / {:.0}), btran {:.3}s agg {:.3}s gen+finish {:.3}s (finish total this call {:.3}s), mean w nnz {:.0}, mean agg nnz {:.0}, LP rows {} nnz {})",
                 sep_t0.elapsed().as_secs_f64(),
                 cands.len(),
                 n_rows_used,
                 basics.len(),
                 n_fill_skip,
+                n_budget_skip,
+                work_used,
+                nnz_budget,
                 t_btran,
                 t_agg,
                 t_gen,
