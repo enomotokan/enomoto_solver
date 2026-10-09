@@ -1258,7 +1258,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 暫定解がない根 (`ENOMOTO_MIP_NO_NOINC_RENS` で無効): ダイビング式で目標の固定率 0.8、サブ MIP に残り時間の 4 割
         // (最大 20 秒) を与える。neos-1456979 はこれで 12 秒で 216 を見つける (HiGHS は 13 秒で 206。以前は 60 秒で解なし)。
         // 全部まとめて固定する旧来の RENS は、この問題でサブ MIP が 0 ノードで実行不能になる
-        if self.incumbent.is_none() && self.nodes <= 1 && !self.noinc_rens_done && env_str!("ENOMOTO_MIP_NO_NOINC_RENS").is_none() {
+        // (再スタート後の根は暫定解を打ち切り値としてだけ持つので、打ち切り値が有限なら対象外)
+        if self.incumbent.is_none() && self.prune_limit().is_infinite() && self.nodes <= 1 && !self.noinc_rens_done && env_str!("ENOMOTO_MIP_NO_NOINC_RENS").is_none() {
             // 根の 2 回目の呼び出し (カット前の LP 解) はダイビング式では同じ LP から始めるので、この形は 1 回だけ
             self.noinc_rens_done = true;
             let keep = (self.submip_time_frac, self.submip_time_max);
