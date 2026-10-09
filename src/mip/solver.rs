@@ -180,6 +180,10 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) noinc_calls: u64,
     /// サブ MIP の時間の上限 (残り時間に対する割合)。
     pub(super) submip_time_frac: f64,
+    /// サブ MIP の時間の上限 (秒)。
+    pub(super) submip_time_max: f64,
+    /// 暫定解がない根の RENS (ダイビング式・長めのサブ MIP) を行ったか。
+    pub(super) noinc_rens_done: bool,
     /// 並列モードで、サブ MIP を別スレッドで解くか (根のヒューリスティクスの間だけ真)。
     pub(super) parallel_submips: bool,
     /// 別スレッドで解いているサブ MIP (出した順)。
@@ -354,7 +358,9 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
         lns_secs: 0.0,
         noinc_secs: 0.0,
         noinc_calls: 0,
-        submip_time_frac: 0.07,
+        submip_time_frac: tunable!("ENOMOTO_T_MIP_SUBMIP_TIME_FRAC", 0.07, f64),
+        submip_time_max: tunable!("ENOMOTO_T_MIP_SUBMIP_TIME_MAX", 6.0, f64),
+        noinc_rens_done: false,
         parallel_submips: false,
         pending_submips: std::collections::VecDeque::new(),
         fj_thread: None,

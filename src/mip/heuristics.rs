@@ -1177,7 +1177,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             None => f64::INFINITY,
         };
         let params = super::solver::MipParams {
-            time_limit: (self.submip_time_frac * remaining).min(6.0),
+            time_limit: (self.submip_time_frac * remaining).min(self.submip_time_max),
             node_limit,
             rel_gap: self.params.rel_gap,
             abs_gap: self.params.abs_gap,
@@ -1255,6 +1255,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // 既定は旧来の全部固定 (ダイビング式は簡単な問題でサブ MIP に時間を取られ、40 問の幾何平均が
         // 29.91 -> 30.41 に悪化した)。ENOMOTO_MIP_RENS_DIVE でダイビング式
+        // 暫定解がない根 (`ENOMOTO_MIP_NO_NOINC_RENS` で無効): ダイビング式で目標の固定率 0.8、サブ MIP に残り時間の 4 割
+        // (最大 20 秒) を与える。neos-1456979 はこれで 12 秒で 216 を見つける (HiGHS は 13 秒で 206。以前は 60 秒で解なし)。
+        // 全部まとめて固定する旧来の RENS は、この問題でサブ MIP が 0 ノードで実行不能になる
+        if self.incumbent.is_none() && self.nodes <= 1 && !self.noinc_rens_done && env_str!("ENOMOTO_MIP_NO_NOINC_RENS").is_none() {
+            // 根の 2 回目の呼び出し (カット前の LP 解) はダイビング式では同じ LP から始めるので、この形は 1 回だけ
+            self.noinc_rens_done = true;
+            let keep = (self.submip_time_frac, self.submip_time_max);
+            self.submip_time_frac = tunable!("ENOMOTO_T_MIP_NOINC_SUBMIP_FRAC", 0.4, f64);
+            self.submip_time_max = tunable!("ENOMOTO_T_MIP_NOINC_SUBMIP_MAX", 20.0, f64);
+            let found = self.rens_dive_with(Some(tunable!("ENOMOTO_T_MIP_NOINC_RENS_RATE", 0.8, f64)));
+            (self.submip_time_frac, self.submip_time_max) = keep;
+            return found;
+        }
         if env_str!("ENOMOTO_MIP_RENS_DIVE").is_none() {
             return self.rens_old(_x);
         }
@@ -1263,6 +1276,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// ダイビング式の RENS ([`Self::rens`] の説明を参照。固定率を成功・失敗から調整する)。暫定解がない間の木の中でも使う。
     pub(super) fn rens_dive(&mut self) -> bool {
+        self.rens_dive_with(None)
+    }
+
+    /// [`Self::rens_dive`] で、目標の固定率を `target` に固定するもの (`None` なら成功・失敗から決める)。
+    fn rens_dive_with(&mut self, target_fixed: Option<f64>) -> bool {
         let p = self.p;
         if self.params.submip {
             return false;
@@ -1283,7 +1301,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             low = low.min(0.9 * r);
             high = high.max(1.1 * r);
         }
-        let target = (low + (high - low) * self.rand()).clamp(0.05, 0.95);
+        let target = target_fixed.unwrap_or_else(|| (low + (high - low) * self.rand()).clamp(0.05, 0.95));
         let saved = self.lp.save_state();
         let pos = self.dom.stack_len();
         let it_start = self.lp.total_iterations();
@@ -1436,6 +1454,27 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         if nint == 0 || (nfix as f64) < 0.5 * nint as f64 {
             return false;
+        }
+        // `ENOMOTO_MIP_RENS_PROP`: HiGHS の RENS と同じく、固定を 1 つずつ伝播しながら積み、矛盾する固定は飛ばす
+        // (全部まとめて固定すると、30n20b8・neos-1456979 ではサブ MIP が 0 ノードで実行不能になる)。
+        // 分数の列の切り上げ・切り下げの範囲を先に、整数値の固定は LP 値の整数に近い順 (どれも同じ) に積む
+        if env_str!("ENOMOTO_MIP_RENS_PROP").is_some() {
+            let mut fixes: Vec<(usize, f64, f64)> = Vec::new();
+            for j in 0..p.n {
+                if p.is_int[j] && lo[j] < up[j] {
+                    fixes.push((j, lo[j], up[j]));
+                }
+            }
+            for j in 0..p.n {
+                if p.is_int[j] && lo[j] == up[j] && self.dom.lo[j] < self.dom.up[j] {
+                    fixes.push((j, lo[j], up[j]));
+                }
+            }
+            let (lo2, up2, applied) = self.propagated_fixings(&fixes);
+            if self.params.verbose {
+                eprintln!("MIP:   RENS (propagated): {applied} of {} fixings applied", fixes.len());
+            }
+            return self.solve_submip(lo2, up2, 500);
         }
         self.solve_submip(lo, up, 500)
     }
