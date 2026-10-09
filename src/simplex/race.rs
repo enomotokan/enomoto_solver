@@ -43,7 +43,11 @@ pub(super) fn solve_race(std: Arc<StdForm>, opts: crate::types::LpOptions) -> Si
     }
     let total = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2).max(2);
     let s_threads = tunable!("ENOMOTO_T_RACE_SIMPLEX_THREADS", RACE_SIMPLEX_THREADS, usize).clamp(1, total - 1);
-    let i_threads = total - s_threads;
+    // 試験用 (`ENOMOTO_T_RACE_IPM_THREADS=k`、0 = 残り全部): 内点法側のスレッド数。論理 CPU が多い計算機で、内点法が
+    // 残りのスレッドを埋めると、1 スレッドの二段解法がメモリ帯域や同じ物理コア (SMT) の取り合いで遅くなる
+    // (pds-100: 16 論理 CPU のノートで二段解法だけなら 107 秒、auto では 304 秒)。
+    let i_req = tunable!("ENOMOTO_T_RACE_IPM_THREADS", 0usize, usize);
+    let i_threads = if i_req == 0 { total - s_threads } else { i_req.min(total - s_threads) };
     let build = |k: usize, name: &'static str| {
         rayon::ThreadPoolBuilder::new().num_threads(k).thread_name(move |i| format!("enomoto-{name}-{i}")).build()
     };
