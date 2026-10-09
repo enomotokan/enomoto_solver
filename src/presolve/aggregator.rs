@@ -20,7 +20,8 @@
 //! 共通の設計:
 //! - 候補は安い順 (行長か列長が 2 の対を最優先、次に `行長 * 列長` 昇順) に処理し、
 //!   ピボット比ガード (`SUBSTITUTION_PIVOT_RATIO`) と fill-in 上限 (`MAX_FILLIN`) を課す。
-//!   fill-in 超過が `MAX_CONSECUTIVE_FILLIN_FAILURES` 回連続したら残り候補を打ち切る。
+//!   fill-in 超過が続いたら残り候補を打ち切る (旧版は `MAX_CONSECUTIVE_FILLIN_FAILURES` 回、v2 は
+//!   `AGG_V2_MAX_CONSECUTIVE_FILLIN_FAILURES` 回)。
 //! - 行横断判定では、消去を確定する直前に「生きている行・現在の内容」から
 //!   含意範囲を必ず再計算する (先に別列のピボットとして消費された行を
 //!   根拠に使ってしまう誤りを防ぐため)。
@@ -34,7 +35,7 @@
 
 use crate::presolve::colsingleton::Substitution;
 use crate::sparse::{FaerCsr, SparseAccum, axpy_row, csr_from_rows, csr_is_canonical, csr_rows};
-use crate::params::presolve::{MAX_CONSECUTIVE_FILLIN_FAILURES, MAX_FILLIN, SUBSTITUTION_PIVOT_RATIO, TOL};
+use crate::params::presolve::{AGG_V2_MAX_CONSECUTIVE_FILLIN_FAILURES, MAX_CONSECUTIVE_FILLIN_FAILURES, MAX_FILLIN, SUBSTITUTION_PIVOT_RATIO, TOL};
 
 /// Aggregator の 1 回の呼び出し結果 (縮小後の問題と、事後復元用の代入列)。
 pub struct AggregatorResult {
@@ -637,7 +638,8 @@ pub struct AggOptions {
     /// HiGHS 流の正味 fill-in (`新規非零 - (行長 + 列長 - 1)`) を使い、
     /// ピボット行長か列長が 2 のときは fill-in 判定自体を省くか。false なら総 fill-in。
     pub net_fillin: bool,
-    /// fill-in 超過が `MAX_CONSECUTIVE_FILLIN_FAILURES` 回連続したら残り候補を打ち切るか。
+    /// fill-in 超過が続いたら残り候補を打ち切るか (旧版は `MAX_CONSECUTIVE_FILLIN_FAILURES` 回、v2 は
+    /// `AGG_V2_MAX_CONSECUTIVE_FILLIN_FAILURES` 回)。
     pub fillin_break: bool,
 }
 
@@ -945,6 +947,8 @@ pub fn eliminate_implied_free_columns_v2_scaled(n: usize, a: &FaerCsr, b: &[f64]
     let mut substitutions = Vec::new();
     // fill-in 上限超過の連続回数。
     let mut consecutive_fillin_failures = 0usize;
+    // 打ち切る連続回数 (`AGG_V2_MAX_CONSECUTIVE_FILLIN_FAILURES`。旧版の `MAX_CONSECUTIVE_FILLIN_FAILURES` = 3 より大きい)。
+    let max_failures = tunable!("ENOMOTO_T_AGG_V2_MAX_FAILURES", AGG_V2_MAX_CONSECUTIVE_FILLIN_FAILURES, usize);
     for j in candidates {
         // `j` を含む生きている行を、現在の内容で確認し直して集める。
         if a_dirty[j] {
@@ -1008,7 +1012,7 @@ pub fn eliminate_implied_free_columns_v2_scaled(n: usize, a: &FaerCsr, b: &[f64]
             let fillin = if opts.net_fillin { gross - (pivot_row.len() + n_other) as i64 } else { gross };
             if fillin > tunable!("ENOMOTO_T_MAX_FILLIN", MAX_FILLIN, usize) as i64 {
                 consecutive_fillin_failures += 1;
-                if opts.fillin_break && consecutive_fillin_failures >= tunable!("ENOMOTO_T_MAX_CONSECUTIVE_FILLIN_FAILURES", MAX_CONSECUTIVE_FILLIN_FAILURES, usize) {
+                if opts.fillin_break && consecutive_fillin_failures >= max_failures {
                     break;
                 }
                 continue;

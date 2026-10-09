@@ -837,6 +837,13 @@ pub(crate) mod presolve {
     /// 打ち切る (HiGHS の `nfail == 3`)。
     pub(crate) const MAX_CONSECUTIVE_FILLIN_FAILURES: usize = 3;
 
+    /// aggregator (v2、既定): fill-in 超過による却下がこの回数連続したら、その呼び出しの残り候補を打ち切る
+    /// (`ENOMOTO_T_AGG_V2_MAX_FAILURES`)。HiGHS の `nfail == 3` (`MAX_CONSECUTIVE_FILLIN_FAILURES`) は、少しずつ更新しながら
+    /// aggregator を何度も呼ぶ HiGHS では安いが、ここでは打ち切った残りが前処理の外側のラウンドに持ち越され、ラウンドごとに
+    /// 行列を作り直す: pds-100 は 1 ラウンド 22〜44 本しか消せず 146 ラウンド 50.6 秒 (100 回なら 3 ラウンド 3.2 秒、縮み方は
+    /// 同じ)。打ち切りなしでは、消せない同じ候補を毎ラウンド判定し直す irish-electricity が 7.9 → 10.4 秒 (100 回なら 7.7 秒)。
+    pub(crate) const AGG_V2_MAX_CONSECUTIVE_FILLIN_FAILURES: usize = 100;
+
     // ---- propagate ----
 
     /// 上下限伝播の絶対許容誤差 (上下限の更新幅・矛盾判定・行の冗長判定に使う)。
