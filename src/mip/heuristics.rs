@@ -128,9 +128,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 continue;
             }
-            // 丸めの固定 (決定) で伝播が矛盾したら衝突解析をする (`ENOMOTO_MIP_HEUR_CONFLICTS`。Feasibility Pump・
-            // 丸め系のヒューリスティクスの失敗から、全体で成り立つ衝突を学ぶ。ダイビングの `ENOMOTO_MIP_DIVE_CONFLICTS` と同じ)
-            if env_str!("ENOMOTO_MIP_HEUR_CONFLICTS").is_some() {
+            // 丸めの固定 (決定) で伝播が矛盾したら衝突解析をする (`ENOMOTO_MIP_NO_HEUR_CONFLICTS` で無効。Feasibility Pump・
+            // 丸め系のヒューリスティクスの失敗から、全体で成り立つ衝突を学ぶ。ダイビングの `ENOMOTO_MIP_DIVE_CONFLICTS` と同じ。
+            // 40 問: 19 問 sgeomean 27.99 -> 19 問 27.83)
+            if env_str!("ENOMOTO_MIP_NO_HEUR_CONFLICTS").is_none() {
                 self.add_conflict();
             }
             // 隣の値を試す
@@ -145,7 +146,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                     continue;
                 }
-                if env_str!("ENOMOTO_MIP_HEUR_CONFLICTS").is_some() {
+                if env_str!("ENOMOTO_MIP_NO_HEUR_CONFLICTS").is_none() {
                     self.add_conflict();
                 }
                 self.dom.backtrack_to(p, before);
