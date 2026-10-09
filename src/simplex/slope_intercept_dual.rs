@@ -755,6 +755,16 @@ pub(super) fn request_duals(on: bool) {
     LAST_DUALS.with(|d| *d.borrow_mut() = None);
 }
 
+/// このスレッドで双対の記録が要求されているか ([`request_duals`])。
+pub(super) fn duals_requested() -> bool {
+    WANT_DUALS.with(|w| w.get())
+}
+
+/// 記録済みの双対の基底 (`basis_pos`) の複製 (記録は残す)。
+pub(super) fn last_duals_basis() -> Option<Vec<Option<usize>>> {
+    LAST_DUALS.with(|d| d.borrow().as_ref().map(|(_, bp)| bp.clone()))
+}
+
 /// [`request_duals`] で記録した直近の双対と、その基底 (`basis_pos`、列ごとの基底位置) を取り出す。
 pub(super) fn take_duals() -> Option<(Vec<f64>, Vec<Option<usize>>)> {
     LAST_DUALS.with(|d| d.borrow_mut().take())

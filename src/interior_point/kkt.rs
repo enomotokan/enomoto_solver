@@ -865,6 +865,14 @@ impl NormalKkt {
         // 0: faer、1: MKL PARDISO (試験用)、2: 自前のマルチフロンタル法 (既定、第 61 回の比較で決めた)。
         let backend = tunable!("ENOMOTO_T_CHOL_BACKEND", 2u8, u8);
         let chol_symbolic = symbolic_with_ordering(&symbolic_base, dbg)?;
+        if dbg {
+            eprintln!("NormalKkt: symbolic (AMD) nnz(L)={} at {:.2}s", chol_symbolic.len_values(), t0.elapsed().as_secs_f64());
+        }
+        // 因子の大きさの判定はマルチフロンタル法の準備 (因子の値の配列 `nnz(L)` 個を確保する) より前に行う
+        // (後で判定していたので、rmine15 の元の問題で 61 億個 = 48.8 GB を確保しようとして落ちた)。
+        if chol_symbolic.len_values() > max_factor_nnz() {
+            return None;
+        }
         // 2: faer が supernodal を選び、演算量の見積もりが `ENOMOTO_T_MF_MIN_FLOPS` 以上なら自前のマルチフロンタル法で
         // 分解する (小さな・simplicial 向きの因子は faer のまま: osa-60 は因子が 3.2 万で、supernodal にすると遅い)。
         let mf = if backend == 2 && chol_flops(&chol_symbolic) >= tunable!("ENOMOTO_T_MF_MIN_FLOPS", 2e7f64, f64) {
@@ -872,12 +880,6 @@ impl NormalKkt {
         } else {
             None
         };
-        if dbg {
-            eprintln!("NormalKkt: symbolic (AMD) nnz(L)={} at {:.2}s", chol_symbolic.len_values(), t0.elapsed().as_secs_f64());
-        }
-        if chol_symbolic.len_values() > max_factor_nnz() {
-            return None;
-        }
         // 試験用 (`ENOMOTO_T_CHOL_BACKEND=1`): MKL PARDISO で分解する (読み込めなければ faer)。faer の因子の配列は作らない。
         let pardiso = if backend == 1 {
             super::pardiso::Pardiso::new(p, symbolic_base.col_ptrs(), symbolic_base.row_indices())

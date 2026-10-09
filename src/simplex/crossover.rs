@@ -1818,7 +1818,11 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     // `L(y) = b·y + Σ_j min_{l_j<=x_j<=u_j} (c - A^T y)_j x_j` から相対 `ENOMOTO_T_XO_ACCEPT_GAP` 以内なら、この頂点を
     // 最適解として返す (仕上げで最適な基底を探さない。qap15 は頂点の目的値が最適値と一致し、残りは退化した双対実行不能
     // だけだった)。
-    if let Some(yi) = &y_ipm {
+    // 双対の記録が要求されているとき (双対化した問題、[`solve_ipm_crossover_dualized`]) は使わない: 元の解は仕上げの
+    // 単体法の最適基底の双対から戻すので、双対を記録しない近道で返すと、正しい頂点でも `Dualized::finish` が捨てて
+    // 元の (行数の多い) 問題を解き直していた (rmine15・graph40-40 で正規方程式の因子が数十 GB になり落ちた)。
+    // 頂点の基底は双対実行可能とは限らず、修復は費用をずらした問題を解くので、どちらの双対も記録には使えない。
+    if let (Some(yi), false) = (&y_ipm, super::slope_intercept_dual::duals_requested()) {
         // 頂点が主実行不能 (少数) なら、費用をずらして基底を双対実行可能にしてから双対単体法で主実行不能だけを直し、
         // 直した頂点を元の費用で判定する (`ENOMOTO_T_XO_REPAIR`、既定 1 は第 61 回の比較で決めた。[`repair_vertex`])。
         if accept_gap > 0.0 && tunable!("ENOMOTO_T_XO_REPAIR", 1u8, u8) != 0 && vertex_solution(std, &basis_pos, &nb_status, &lu).is_none() {
@@ -2016,13 +2020,21 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     let mut final_basis_pos: Option<Vec<Option<usize>>> = None;
     let res = if tunable!("ENOMOTO_T_XO_CLEANUP_MAIN", 1u8, u8) != 0 {
         drop(lu);
-        if debug || detect_eval || xo.given_point.is_some() {
+        // 呼び出し側 (双対化した問題) が双対の記録を要求しているなら、それを取り出したり要求を消したりしない
+        // (`Dualized::finish` が使う)。最終の基底は覗くだけにする。
+        let outer = super::slope_intercept_dual::duals_requested();
+        let want_basis = debug || detect_eval || xo.given_point.is_some();
+        if want_basis && !outer {
             super::slope_intercept_dual::request_duals(true);
         }
         let r = super::slope_intercept_dual::solve_slope_intercept_dual_from_basis(std, &Default::default(), basis.clone());
-        if debug || detect_eval || xo.given_point.is_some() {
-            final_basis_pos = super::slope_intercept_dual::take_duals().map(|(_, bp)| bp);
-            super::slope_intercept_dual::request_duals(false);
+        if want_basis {
+            if outer {
+                final_basis_pos = super::slope_intercept_dual::last_duals_basis();
+            } else {
+                final_basis_pos = super::slope_intercept_dual::take_duals().map(|(_, bp)| bp);
+                super::slope_intercept_dual::request_duals(false);
+            }
         }
         r
     } else {
