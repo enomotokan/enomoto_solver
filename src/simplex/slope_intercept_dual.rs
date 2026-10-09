@@ -3777,7 +3777,10 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         // `ENOMOTO_DSE_EXACT_INIT`: warm start (構造列を含む基底) では、単位重みではなくその基底の厳密な DSE 重みから
         // 始める (HiGHS の HEkkDual::initialiseInstance と同じ。行ごとに BTRAN 1 回、計 m 回)。単位重みは全スラック基底で
         // しか正確でなく、分枝限定法で待ち行列から取り出したノード (保存した基底を復元、重みの引き継ぎなし) の最初の LP は
-        // neos-911970 で 1 回平均 265 反復 (潜りの子ノードは 97 反復) かかっていた
+        // neos-911970 で 1 回平均 265 反復 (潜りの子ノードは 97 反復) かかっていた。復元後の最初の LP は 1 回平均 125 反復に
+        // 減るが、着く頂点が変わって根のカットのループが 23.26 で止まり (既定は 47.26)、40 問では 14 問 30.87 (同時に測った
+        // 既定 19 問 27.81): misc07・binkar10_1・neos-860300・mik-250・neos5 が時間切れ、beavma 0.8 -> 8.7 秒 (m 回の BTRAN
+        // の分だけ LP 1 回が重くなる)。既定では使わない
         _ if warm_started && env_str!("ENOMOTO_DSE_EXACT_INIT").is_some() => super::DseState::from_basis(m, &lu),
         _ => super::DseState::new(m),
     };
