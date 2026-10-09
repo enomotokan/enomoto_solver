@@ -693,7 +693,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let x = self.lp.col_values();
             if !self.fractional(&x).is_empty() {
                 self.simple_rounding(&x);
-                if env_str!("ENOMOTO_MIP_NO_CUTS").is_none() && !self.root_cut_loop(root_iters) {
+                // `ENOMOTO_MIP_ROOT_WARM_DSE`: 根のカットのループの間だけ DSE 重みを引き継ぐ (カットを足した後の LP の反復を減らす)
+                let root_warm_dse = env_str!("ENOMOTO_MIP_ROOT_WARM_DSE").is_some() && !self.params.submip;
+                if root_warm_dse {
+                    crate::simplex::slope_intercept_dual::WARM_DSE_ON.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                let cut_ok = env_str!("ENOMOTO_MIP_NO_CUTS").is_some() || self.root_cut_loop(root_iters);
+                if root_warm_dse {
+                    crate::simplex::slope_intercept_dual::WARM_DSE_ON.store(false, std::sync::atomic::Ordering::Relaxed);
+                }
+                if !cut_ok {
                     return self.finish(MipStatus::NotSolved, root_obj);
                 }
                 root_obj = self.lp.objective() + self.p.offset;

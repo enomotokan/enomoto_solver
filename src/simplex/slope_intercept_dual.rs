@@ -1056,6 +1056,10 @@ pub(crate) fn take_last_ray() -> Option<Vec<f64>> {
 
 /// 近道で最適になったときに保存した被約費用を取り出す。
 /// 次の求解の最初の DSE 重みを渡す (基底位置順。長さが行数と違えば使わない)。
+/// 引き継いだ DSE 重みを使うか (`ENOMOTO_WARM_DSE` とは別に、呼び出し側が場面を限って有効にする。例: MIP の根のカットのループ)。
+/// スレッド局所の領域を増やさないよう、プロセス全体の値にしている。
+pub(crate) static WARM_DSE_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub(crate) fn set_warm_dse(w: Option<Vec<f64>>) {
     WARM_DSE.with(|x| *x.borrow_mut() = w);
 }
@@ -3769,7 +3773,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     let mut dse = match WARM_DSE.with(|w| w.borrow_mut().take()) {
         // 既定では使わない (`ENOMOTO_WARM_DSE` で有効): 反復は少し減るが、退化した LP で着く頂点が変わり、misc07・mik-250 で
         // 木が大きくなった (40 問: 18 -> 17 問)
-        Some(w) if warm_started && w.len() == m && env_str!("ENOMOTO_WARM_DSE").is_some() => super::DseState::from_weights(w),
+        Some(w) if warm_started && w.len() == m && (env_str!("ENOMOTO_WARM_DSE").is_some() || WARM_DSE_ON.load(std::sync::atomic::Ordering::Relaxed)) => super::DseState::from_weights(w),
         _ => super::DseState::new(m),
     };
 
