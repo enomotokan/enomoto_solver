@@ -8543,6 +8543,32 @@ fome13 は成分ごとの競争の勝ち方で 17 秒前後と 25〜32 秒前後
 rmine15 の内点法で残る時間: 正規方程式の反復 (1 反復 2.3 秒) の歩幅が多くの反復で 1e-3〜1e-1 と小さく 51 反復、その後
 正規方程式の解の精度が落ちて拡大系に切り替え (AMD で nnz(L) 1.17 億、1 反復約 10 秒 × 9 反復)。
 
+## 拡大系の並べ替えに METIS を使い、自前の multifrontal (LDLᵀ) で分解する (採用、rmine15) (2026-10-09)
+
+計測は 4 CPU (Intel Xeon @ 2.80GHz、SMT なし)・メモリ 16 GB。
+
+- 原因: rmine15 は内点法の 50 反復目で正規方程式の解の精度が落ちて拡大系に切り替える。拡大系の記号分解は AMD だけで
+  nnz(L) 1.17 億・分解 1 回 4.21e11 flop (faer、1 反復約 10 秒 × 9 反復)。
+- 変更 (`kkt.rs`、`AugKkt::build`): 正規方程式と同じ並べ替えの選び方 (`symbolic_with_ordering`、AMD と METIS の演算量の少ない方)
+  を使う (`ENOMOTO_T_AUG_ORDER`、既定 1、0 で AMD だけ)。分解は試験用だった自前の multifrontal の LDLᵀ を既定にする
+  (`ENOMOTO_T_AUG_BACKEND`、既定 2、0 で faer)。rmine15: METIS で nnz(L) 6,125 万・1.11e11 flop (METIS 6 秒)。
+  ipm_crossover 単独: 変更前 231 秒 → METIS だけ 183 秒 → METIS + multifrontal 168 秒 (AMD のまま multifrontal は 252 秒で悪化)。
+
+変更前 (`ENOMOTO_T_AUG_ORDER=0,ENOMOTO_T_AUG_BACKEND=0`) との比較 (auto、1 回ずつ、目的値はすべて一致):
+
+| 集合 | 1 秒ずらした幾何平均 (new/base) | 合計 |
+|---|---|---|
+| Netlib + Kennington (109 問) | 0.998 | 44.7 → 44.1 秒 |
+| Mittelmann (11 問) | 0.956 | 1019.6 → 942.5 秒 |
+
+| 問題 | 変更前 | 変更後 |
+|---|---|---|
+| rmine15 | 260.6 秒 | 193.5 秒 |
+| qap15 | 29.8 秒 | 26.4 秒 |
+| pds-100 | 111.2 秒 | 104.9 秒 |
+| irish-electricity | 110.8 秒 | 114.2 秒 |
+| 他 | | ±4% 以内 |
+
 ## 改名一覧 (整理時)
 
 本メモ中は旧名で書かれている。

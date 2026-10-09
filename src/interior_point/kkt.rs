@@ -513,8 +513,12 @@ impl AugKkt {
         let mid_range = mid_start..positions.len();
         let (symbolic_base, order) =
             SymbolicSparseColMat::<usize>::try_new_from_indices(dim, dim, &positions).expect("valid KKT sparsity pattern");
-        let chol_symbolic = factorize_symbolic_cholesky::<usize>(symbolic_base.as_ref(), Side::Upper, SymmetricOrdering::Amd, Default::default())
-            .ok()?;
+        // `ENOMOTO_T_AUG_ORDER=1` (既定): 正規方程式と同じ並べ替えの選び方 (AMD と METIS の演算量の少ない方)。0 は AMD だけ。
+        let chol_symbolic = if tunable!("ENOMOTO_T_AUG_ORDER", 1u8, u8) == 1 {
+            symbolic_with_ordering(&symbolic_base, env_str!("ENOMOTO_DEBUG_IPM").is_some())?
+        } else {
+            factorize_symbolic_cholesky::<usize>(symbolic_base.as_ref(), Side::Upper, SymmetricOrdering::Amd, Default::default()).ok()?
+        };
         if chol_symbolic.len_values() > max_nnz {
             if env_str!("ENOMOTO_DEBUG_IPM").is_some() {
                 eprintln!("AugKkt: nnz(L)={} exceeds {max_nnz}; giving up", chol_symbolic.len_values());
@@ -522,8 +526,8 @@ impl AugKkt {
             return None;
         }
         let signs: Vec<i8> = (0..dim).map(|i| if i < n { 1i8 } else { -1i8 }).collect();
-        // 試験用 `ENOMOTO_T_AUG_BACKEND=2`: 自前のマルチフロンタル法 (LDLᵀ) で分解する。
-        let mf = if tunable!("ENOMOTO_T_AUG_BACKEND", 0u8, u8) == 2 && chol_flops(&chol_symbolic) >= tunable!("ENOMOTO_T_MF_MIN_FLOPS", 2e7f64, f64) {
+        // `ENOMOTO_T_AUG_BACKEND=2` (既定): 自前のマルチフロンタル法 (LDLᵀ) で分解する。0 は faer。
+        let mf = if tunable!("ENOMOTO_T_AUG_BACKEND", 2u8, u8) == 2 && chol_flops(&chol_symbolic) >= tunable!("ENOMOTO_T_MF_MIN_FLOPS", 2e7f64, f64) {
             super::multifrontal::Multifrontal::new_ldlt(&symbolic_base, &chol_symbolic, &signs)
         } else {
             None
