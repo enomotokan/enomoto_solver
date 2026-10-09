@@ -466,8 +466,43 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 年齢は今のノードで効いていない回数なので、待ち行列のノードで効いているカットまで外れうる。そのノードを取り出すと
     /// 保存した基底が合わず LP がほぼ解き直しになる (binkar10_1: 上限 30 で 1 ノード平均 272 反復、外さなければ 37)。
     /// 40 問: 上限 30 は 17 問 27.21、100 は 19 問 27.05、300 は 19 問 26.64 (外さないと neos5 で LP が重くなる)
+    ///
+    /// `ENOMOTO_T_MIP_CUT_AGE_PER_ROW` = f (> 0): 上限を f × (元の行の数) にして [`ENOMOTO_T_MIP_CUT_AGE_MIN`, 上の上限] に収める
+    /// (行の少ない問題ではカットが LP を何倍にもする: markshare_4_0 は 4 行で、上限 300 だと遅くなった)。
+    /// `ENOMOTO_T_MIP_CUT_ROWS_CAP` = r (> 0): カットの行が max(r × 元の行の数, 200) を超えたら、年齢の高い順に外して収める。
     pub(super) fn remove_aged_cuts(&mut self) -> usize {
-        self.remove_cuts_older_than(tunable!("ENOMOTO_T_MIP_CUT_AGE_LIMIT", 300u32, u32))
+        let base = tunable!("ENOMOTO_T_MIP_CUT_AGE_LIMIT", 300u32, u32);
+        let f = tunable!("ENOMOTO_T_MIP_CUT_AGE_PER_ROW", 0.0, f64);
+        let limit = if f > 0.0 {
+            let lo = tunable!("ENOMOTO_T_MIP_CUT_AGE_MIN", 30u32, u32);
+            ((f * self.p.m as f64) as u32).clamp(lo.min(base), base)
+        } else {
+            base
+        };
+        let mut removed = self.remove_cuts_older_than(limit);
+        let r = tunable!("ENOMOTO_T_MIP_CUT_ROWS_CAP", 0.0, f64);
+        if r > 0.0 {
+            self.sync_cut_age();
+            let cap = ((r * self.p.m as f64) as usize).max(200);
+            let ncut = self.cut_age.len();
+            if ncut > cap {
+                // 年齢の高い順に (ncut - cap) 本外す (年齢 0 = 今効いているものは外さない)
+                let mut order: Vec<(u32, usize)> = self.cut_age.iter().enumerate().filter(|&(_, &a)| a > 0).map(|(k, &a)| (a, k)).collect();
+                order.sort_by(|a, b| b.cmp(a));
+                let m0 = self.p.m;
+                let mut remove = vec![false; self.lp.num_rows()];
+                let mut cnt = 0;
+                for &(_, k) in order.iter().take(ncut - cap) {
+                    remove[m0 + k] = true;
+                    cnt += 1;
+                }
+                if cnt > 0 {
+                    self.delete_lp_rows(&remove);
+                    removed += cnt;
+                }
+            }
+        }
+        removed
     }
 
     /// 年齢が `limit` を超えたカットを LP から外す。外した数を返す。
