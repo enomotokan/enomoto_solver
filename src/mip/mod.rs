@@ -544,7 +544,20 @@ fn probe(prob: &mut MipProblem, verbose: bool) -> Option<bool> {
 /// どちらも整数解の集合を変えず、LP の緩和だけを締める (例: 0-1 列の `sum 21 y >= 2` は `sum 2 y >= 2`)。
 /// 列の値は変えないので後処理は要らない。縮めた係数の数を返す。
 fn tighten_coefficients(rows: &mut [Vec<(usize, f64)>], row_lo: &mut [f64], row_up: &mut [f64], lo: &[f64], up: &[f64], is_int: &[bool]) -> usize {
-    let unit = |j: usize| is_int[j] && lo[j].is_finite() && up[j].is_finite() && (up[j] - lo[j] - 1.0).abs() <= 1e-9 && (lo[j] - lo[j].round()).abs() <= 1e-9;
+    // 対象の列: 既定は両側の境界が有限な整数列すべて (一般整数も。`ENOMOTO_MIP_COEF_TIGHTEN_BIN_ONLY` なら幅 1 の列だけ)。
+    // x_j ∈ [l, u] (整数) で a > 0 なら、x_j <= u - 1 で行が冗長 (M - a <= b) のとき d = b - (M - a) だけ縮め、
+    // 右辺を d u 減らす (x_j = u では元と同じ、x_j <= u - 1 では残りの最大活動量で成り立つ)。a < 0 なら右辺を d l 増やす。
+    // 幅 1 (0-1 列) はその特別な場合。gt2 (一般整数) は前処理後の LP が 13460 -> HiGHS は 20147
+    let bin_only = env_str!("ENOMOTO_MIP_COEF_TIGHTEN_BIN_ONLY").is_some();
+    let unit = |j: usize| {
+        is_int[j]
+            && lo[j].is_finite()
+            && up[j].is_finite()
+            && up[j] - lo[j] >= 1.0 - 1e-9
+            && (lo[j] - lo[j].round()).abs() <= 1e-9
+            && (up[j] - up[j].round()).abs() <= 1e-9
+            && (!bin_only || (up[j] - lo[j] - 1.0).abs() <= 1e-9)
+    };
     let mut count = 0;
     for i in 0..rows.len() {
         let (l, u) = (row_lo[i], row_up[i]);
@@ -587,11 +600,9 @@ fn tighten_coefficients(rows: &mut [Vec<(usize, f64)>], row_lo: &mut [f64], row_
                 let d = b - (maxact - a);
                 if d > tol && d < a {
                     e.1 = sg * (a - d);
-                    b -= d;
-                    // x_j の上限の寄与 a (u_j) が (a - d) (u_j) になり、右辺も d 減る。下限の分の移動は l_j が 0 でなければ
-                    // 係数の変化 d に l_j を掛けた分だけ活動量が動くので、最大活動量は d * u_j 減る
+                    // 右辺は d u_j 減る (0-1 型なら u_j = l_j + 1)。最大活動量も x_j の上限での寄与の分 d u_j 減る
+                    b -= d * up[j];
                     maxact -= d * up[j];
-                    b -= d * lo[j];
                     count += 1;
                     changed = true;
                 }
@@ -756,9 +767,10 @@ mod tests {
             let mut lo = vec![0.0; n];
             let mut up = vec![1.0; n];
             let mut is_int = vec![true; n];
+            // 整数列の幅は 1-3 (0-1 型と一般整数)
             for j in 0..nb {
                 lo[j] = (rnd() * 3.0).floor() - 1.0;
-                up[j] = lo[j] + 1.0;
+                up[j] = lo[j] + 1.0 + (rnd() * 3.0).floor();
             }
             is_int[nb] = false;
             lo[nb] = -2.0 * rnd();
@@ -788,8 +800,17 @@ mod tests {
                 let (mn, mx) = (c1.min(c2), c1.max(c2));
                 mx >= l - 1e-9 && mn <= u + 1e-9
             };
-            for mask in 0..(1u32 << nb) {
-                let y: Vec<f64> = (0..nb).map(|j| lo[j] + ((mask >> j) & 1) as f64).collect();
+            // 整数列のすべての値の組 (各列 up - lo + 1 通り) を数え上げる
+            let widths: Vec<usize> = (0..nb).map(|j| (up[j] - lo[j]) as usize + 1).collect();
+            let combos: usize = widths.iter().product();
+            for mut code in 0..combos {
+                let y: Vec<f64> = (0..nb)
+                    .map(|j| {
+                        let v = lo[j] + (code % widths[j]) as f64;
+                        code /= widths[j];
+                        v
+                    })
+                    .collect();
                 assert_eq!(feasible(&row, rl, ru, &y), feasible(&rows[0], rlo[0], rup[0], &y), "row {row:?} [{rl}, {ru}] -> {:?} [{}, {}], y {y:?}", rows[0], rlo[0], rup[0]);
             }
         }
