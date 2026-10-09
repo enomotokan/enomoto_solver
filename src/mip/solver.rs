@@ -177,6 +177,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) repair_start: Option<Vec<f64>>,
     /// 大近傍探索 (サブ MIP) に使った時間の合計 (秒)。
     pub(super) lns_secs: f64,
+    /// ノードでの分離 (カットを加えた後の LP の解き直しを含む) に使った時間 [秒]。
+    pub(super) node_cut_secs: f64,
     /// 暫定解がない間の木の中のヒューリスティクス (RENS・Feasibility Pump) に使った時間 (秒) と呼んだ回数。
     pub(super) noinc_secs: f64,
     pub(super) noinc_calls: u64,
@@ -366,6 +368,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
         sol_pool: Vec::new(),
         repair_start: None,
         lns_secs: 0.0,
+        node_cut_secs: 0.0,
         noinc_secs: 0.0,
         noinc_calls: 0,
         submip_time_frac: tunable!("ENOMOTO_T_MIP_SUBMIP_TIME_FRAC", 0.07, f64),
@@ -509,6 +512,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// `ENOMOTO_T_MIP_NODE_CUT_FREQ`、既定 10、0 なら分離しない。`ENOMOTO_MIP_NODE_CUTS` なら毎回)。
     fn node_cuts_due(&self, depth: usize) -> bool {
         if env_str!("ENOMOTO_MIP_NODE_CUTS").is_some() {
+            return true;
+        }
+        // `ENOMOTO_T_MIP_NODE_CUT_TIME_FRAC` = f (> 0): HiGHS と同じく待ち行列から取り出したノードでは毎回分離するが、
+        // ノードの分離 (LP の解き直しを含む) に使った時間が経過時間の f 倍を超えている間は深さの規則に戻す。
+        // neos-911970 では毎回分離すると木の下界が 60 秒で 53.69 -> 54.68 (最適値 54.76) と大きく上がるが、
+        // 無制限 (`ENOMOTO_MIP_NODE_CUTS`) では neos5 (63 行、6 万ノード) が時間切れになり misc07 も 12 -> 21 秒
+        let f = tunable!("ENOMOTO_T_MIP_NODE_CUT_TIME_FRAC", 0.0, f64);
+        if f > 0.0 && self.node_cut_secs < f * self.start.elapsed().as_secs_f64() {
             return true;
         }
         let freq = tunable!("ENOMOTO_T_MIP_NODE_CUT_FREQ", 10usize, usize);
@@ -658,7 +669,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.add_to_pool(c, *r);
                 }
             }
-            if self.params.verbose {
+            // `ENOMOTO_MIP_RESTART_CUTS_READD`: 再スタート前に効いていたカットを、根の LP を解く前にカットの行として加える
+            // (問題の行ではないので木の中で年齢により外せる。プールにもあるので外れても違反すれば戻る)
+            if env_str!("ENOMOTO_MIP_RESTART_CUTS_READD").is_some() && !self.params.submip {
+                let rows: Vec<(Vec<(usize, f64)>, f64, f64)> = cuts.iter().filter(|(c, _)| c.iter().all(|&(j, _)| j < self.p.n)).map(|(c, r)| (c.clone(), f64::NEG_INFINITY, *r)).collect();
+                if !rows.is_empty() {
+                    self.add_cut_rows(&rows);
+                }
+                if self.params.verbose {
+                    eprintln!("MIP: {} cuts from before the restart added back to the LP as cut rows", rows.len());
+                }
+            } else if self.params.verbose {
                 eprintln!("MIP: {} cuts from before the restart put in the cut pool", self.cut_pool.len() - n0);
             }
         }
@@ -1068,6 +1089,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // ノードの LP を解く (強分岐で境界が締まったら解き直す)。
             let mut node_obj;
             let mut resolves = 0;
+            // ノードの分離でカットを加えた後の解き直しか (その LP の時間を `node_cut_secs` に足す)
+            let mut node_cut_resolve: Option<Instant> = None;
             let action = loop {
                 let it0 = self.lp.total_iterations();
                 let iter_limit = (10 * self.avg_node_iters()).max(20_000);
@@ -1098,6 +1121,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                 }
                 self.node_lp_secs += t_lp.elapsed().as_secs_f64();
+                if let Some(t) = node_cut_resolve.take() {
+                    self.node_cut_secs += t.elapsed().as_secs_f64();
+                }
                 self.node_iters += self.lp.total_iterations() - it0;
                 if resolves == 0 {
                     self.node_iters_first += self.lp.total_iterations() - it0;
@@ -1312,9 +1338,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     resolves += 1;
                     continue;
                 }
-                if resolves == 0 && node.depth > 0 && plunge_depth == 0 && self.node_cuts_due(node.depth) && self.node_cut_round(&x) {
-                    resolves += 1;
-                    continue;
+                if resolves == 0 && node.depth > 0 && plunge_depth == 0 && self.node_cuts_due(node.depth) {
+                    let t_nc = Instant::now();
+                    let added = self.node_cut_round(&x);
+                    self.node_cut_secs += t_nc.elapsed().as_secs_f64();
+                    if added {
+                        resolves += 1;
+                        // 解き直しの時間もノードの分離の時間に数える
+                        node_cut_resolve = Some(Instant::now());
+                        continue;
+                    }
                 }
                 xp("m_pool");
                 let before_sb = dn && self.dbg_contains();
@@ -2789,12 +2822,21 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // `ENOMOTO_MIP_RESTART_CUTS_TO_POOL`: カットを問題の行にせず、新しい求解のカットプールに渡す (HiGHS と同じ。
         // 行が増えずノードの LP は軽いが、こちらの分離はカットの行の上にカットを作れなくなるので弱くなる:
         // 対称性の乱数問題で根の下界が閉じず木が数万ノードになる)
-        let cuts_as_rows = env_str!("ENOMOTO_MIP_RESTART_CUTS_TO_POOL").is_none() || keep_all;
+        // `ENOMOTO_MIP_RESTART_CUTS_READD`: 効いているカットを問題の行にはせず、新しい求解の最初に (根の LP を解く前に)
+        // カットの行として加え直す (HiGHS の `separateLpCutsAfterRestart`)。根の LP の下界は行にしたときと同じだが、
+        // 木の中では年齢で外せる普通のカットになる。行にすると neos-911970 では 4 回の再スタートで 107 行 -> 358 行になり
+        // (効いているものだけ残しても)、木の LP は 405 -> 822 行、ノードの LP は 1 回平均 187 反復 (行が 190 程度なら 47)
+        let readd = env_str!("ENOMOTO_MIP_RESTART_CUTS_READD").is_some() && !keep_all;
+        let cuts_as_rows = (env_str!("ENOMOTO_MIP_RESTART_CUTS_TO_POOL").is_none() && !readd) || keep_all;
         let mut carry: Vec<(Vec<(usize, f64)>, f64)> = Vec::new();
         let act = self.lp.row_activities();
         for i in p.m..self.lp.num_rows() {
             let (l, u) = self.lp.row_bounds(i);
+            let tight = (u.is_finite() && act[i] >= u - 1e-6 * (1.0 + u.abs())) || (l.is_finite() && act[i] <= l + 1e-6 * (1.0 + l.abs()));
             if !cuts_as_rows {
+                if readd && !tight {
+                    continue;
+                }
                 let r = self.lp.row(i);
                 if u.is_finite() {
                     carry.push((r.clone(), u));
@@ -2804,7 +2846,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 continue;
             }
-            let tight = (u.is_finite() && act[i] >= u - 1e-6 * (1.0 + u.abs())) || (l.is_finite() && act[i] <= l + 1e-6 * (1.0 + l.abs()));
             if !keep_all && !tight {
                 continue;
             }
@@ -2841,12 +2882,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 params.restarts,
                 newly,
                 nint,
-                newp.m - p.m,
+                if readd { carry.len() } else { newp.m - p.m },
                 self.start.elapsed().as_secs_f64()
             );
         }
         if !cuts_as_rows {
-            carry.extend(self.cut_pool.iter().map(|(c, r, _)| (c.clone(), *r)));
+            if !readd {
+                carry.extend(self.cut_pool.iter().map(|(c, r, _)| (c.clone(), *r)));
+            }
             super::RESTART_CUTS.with(|s| *s.borrow_mut() = Some(carry));
         }
         // 暫定解を引き継ぐ (新しい問題は列が同じ)

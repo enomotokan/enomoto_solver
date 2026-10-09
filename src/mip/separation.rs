@@ -72,7 +72,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// HiGHS のカット選択 (`HighsCutPool::separate`): スコア = 違反量 / (効いている非零の数 x 効いている列だけのノルム)
     /// (効いている = LP 解が境界から離れている列)。これまでに見た最良のスコアの `min_factor` 倍以上を残し
     /// (残りが少なすぎれば上位半分、全部残れば係数を下げる)、採ったカットとの平行度が 0.1 を超えるものは捨てる。
-    fn select_cuts_highs(&mut self, cands: Vec<Candidate>, max_cuts: usize, x: &[f64]) -> Vec<Candidate> {
+    fn select_cuts_highs(&mut self, cands: Vec<Candidate>, max_cuts: usize, x: &[f64], maxpar: f64) -> Vec<Candidate> {
         let tol = FEASTOL;
         let mut sc: Vec<(f64, Candidate)> = Vec::new();
         for c in cands {
@@ -111,7 +111,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.cutsel_factor = sc[upper].0 / self.cutsel_best;
         }
         sc.truncate(keep);
-        let maxpar = tunable!("ENOMOTO_T_CUTSEL_HIGHS_MAXPAR", 0.1, f64);
         let mut chosen: Vec<(f64, Candidate)> = Vec::new();
         for (_, c) in sc {
             if chosen.len() >= max_cuts {
@@ -146,12 +145,31 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut hstall = 0usize;
         let mut hrounds = 0usize;
         // サブ MIP (RENS/RINS) では分離に時間をかけない
-        let max_rounds = if self.params.submip { 5 } else { tunable!("ENOMOTO_T_MIP_CUT_ROUNDS", 25usize, usize) };
+        let mut max_rounds = if self.params.submip { 5 } else { tunable!("ENOMOTO_T_MIP_CUT_ROUNDS", 25usize, usize) };
         let time_cap = if self.params.time_limit.is_finite() { tunable!("ENOMOTO_T_MIP_CUT_TIME_FRAC", 0.1, f64) * self.params.time_limit } else { f64::INFINITY };
         let mut total_added = 0usize;
         let mut lp_failures = 0usize;
-        for round in 0..max_rounds {
-            if self.time_up() || self.start.elapsed().as_secs_f64() > time_cap {
+        // `ENOMOTO_MIP_CUT_PHASE2`: 既定の選択 (`select_cuts_hybrid`: 質が最良の 50% 未満のカットは採らない) で停滞して
+        // 止まるところで、HiGHS のスコア (違反量 / (効いている非零の数 x そのノルム)、疎なカットを好む。ラウンドをまたいで
+        // 最良スコアを覚え、その一定割合以上を採る) に切り替えてもう一度続ける第 2 段階。neos-911970 では既定の選択は根の
+        // 下界 47.26 で止まり (100 ラウンド回しても動かない)、HiGHS のスコアなら 51.8 まで上がる (HiGHS は 38 ラウンドで
+        // 52.1)。最初から HiGHS のスコアを使うと misc07・mik-250・neos5 が 60 秒で解けなくなった (木が数倍になる) ので、
+        // 既定の選択が止まった後にだけ使う。第 2 段階は目的値が `ENOMOTO_T_MIP_CUT_PHASE2_STALL` ラウンド続けて
+        // 動かなければ止め、ラウンド数は `ENOMOTO_T_MIP_CUT_PHASE2_ROUNDS` まで (根のカットの時間上限はそのまま)
+        let phase2_on = env_str!("ENOMOTO_MIP_CUT_PHASE2").is_some() && !self.params.submip;
+        let mut phase2 = false;
+        // 第 2 段階の時間の上限 (第 1 段階に使った時間の `ENOMOTO_T_MIP_CUT_PHASE2_TIME_MULT` 倍。qnet1 では再スタート後の
+        // 第 2 段階が 88 ラウンド回って根が 6 秒伸び、9.2 秒 -> 17.2 秒になった)
+        let t_loop0 = std::time::Instant::now();
+        let mut phase2_deadline = f64::INFINITY;
+        let mut round_ctr = 0usize;
+        loop {
+            if round_ctr >= max_rounds {
+                break;
+            }
+            let round = round_ctr;
+            round_ctr += 1;
+            if self.time_up() || self.start.elapsed().as_secs_f64() > time_cap || (phase2 && t_loop0.elapsed().as_secs_f64() > phase2_deadline) {
                 break;
             }
             let x = self.lp.col_values();
@@ -182,7 +200,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             // 効き目の大きい順に、平行なものを除いて選ぶ
             let max_cuts = tunable!("ENOMOTO_T_MIP_ROOT_MAX_CUTS", 50usize, usize).min(p.m.max(50));
-            let chosen = if env_str!("ENOMOTO_MIP_CUTSEL_HIGHS").is_some() { self.select_cuts_highs(cands, max_cuts, &x) } else { select_cuts(cands, max_cuts, p) };
+            let chosen = if phase2 {
+                let maxpar = tunable!("ENOMOTO_T_MIP_CUT_PHASE2_MAXPAR", 0.3, f64);
+                self.select_cuts_highs(cands, max_cuts, &x, maxpar)
+            } else if env_str!("ENOMOTO_MIP_CUTSEL_HIGHS").is_some() {
+                let maxpar = tunable!("ENOMOTO_T_CUTSEL_HIGHS_MAXPAR", 0.1, f64);
+                self.select_cuts_highs(cands, max_cuts, &x, maxpar)
+            } else {
+                select_cuts(cands, max_cuts, p)
+            };
             let sep_secs = t_sep.elapsed().as_secs_f64();
             if chosen.is_empty() {
                 break;
@@ -290,15 +316,38 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // ラウンドは 2 回分と数える (何も進まない問題で長く回さない。分数の列が減っている間は続ける)。
                 let nfrac = self.fractional(&self.lp.col_values()).len();
                 let reldiff = (obj - prev_obj) / obj.abs().max(prev_obj.abs()).max(1.0);
-                // `ENOMOTO_MIP_CUT_STALL_ONE`: まったく進まないラウンドも 1 回分と数える (neos-1456979 では最初の
-                // 4 ラウンドは下界が動かず、続ければ上がる。HiGHS も止めずに 66 ラウンド回して 154 -> 171)
-                if reldiff <= 1e-4 && nfrac as f64 >= (0.9 - 0.1 * stall as f64) * prev_nfrac as f64 {
-                    stall += if nfrac >= prev_nfrac && env_str!("ENOMOTO_MIP_CUT_STALL_ONE").is_none() { 2 } else { 1 };
-                    if stall >= if self.params.submip { 3 } else { tunable!("ENOMOTO_T_MIP_CUT_STALL", 10usize, usize) } {
-                        break;
+                if phase2 {
+                    // 第 2 段階: 目的値だけで停滞を数える
+                    if reldiff <= 1e-4 {
+                        stall += 1;
+                        if stall >= tunable!("ENOMOTO_T_MIP_CUT_PHASE2_STALL", 10usize, usize) {
+                            break;
+                        }
+                    } else {
+                        stall = 0;
                     }
                 } else {
-                    stall = 0;
+                    // `ENOMOTO_MIP_CUT_STALL_ONE`: まったく進まないラウンドも 1 回分と数える (neos-1456979 では最初の
+                    // 4 ラウンドは下界が動かず、続ければ上がる。HiGHS も止めずに 66 ラウンド回して 154 -> 171)
+                    if reldiff <= 1e-4 && nfrac as f64 >= (0.9 - 0.1 * stall as f64) * prev_nfrac as f64 {
+                        stall += if nfrac >= prev_nfrac && env_str!("ENOMOTO_MIP_CUT_STALL_ONE").is_none() { 2 } else { 1 };
+                        if stall >= if self.params.submip { 3 } else { tunable!("ENOMOTO_T_MIP_CUT_STALL", 10usize, usize) } {
+                            if !phase2_on {
+                                break;
+                            }
+                            // 第 2 段階へ (ラウンド数の上限を延ばす)
+                            phase2 = true;
+                            stall = 0;
+                            max_rounds = round_ctr + tunable!("ENOMOTO_T_MIP_CUT_PHASE2_ROUNDS", 60usize, usize);
+                            let t1 = t_loop0.elapsed().as_secs_f64();
+                            phase2_deadline = t1 + (tunable!("ENOMOTO_T_MIP_CUT_PHASE2_TIME_MULT", 3.0, f64) * t1).max(0.2);
+                            if self.params.verbose {
+                                eprintln!("MIP: cut loop phase 2 (HiGHS cut score) from round {} ({:.2}s)", round + 1, self.start.elapsed().as_secs_f64());
+                            }
+                        }
+                    } else {
+                        stall = 0;
+                    }
                 }
                 prev_nfrac = nfrac;
             }

@@ -3774,6 +3774,11 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         // 既定では使わない (`ENOMOTO_WARM_DSE` で有効): 反復は少し減るが、退化した LP で着く頂点が変わり、misc07・mik-250 で
         // 木が大きくなった (40 問: 18 -> 17 問)
         Some(w) if warm_started && w.len() == m && (env_str!("ENOMOTO_WARM_DSE").is_some() || WARM_DSE_ON.load(std::sync::atomic::Ordering::Relaxed)) => super::DseState::from_weights(w),
+        // `ENOMOTO_DSE_EXACT_INIT`: warm start (構造列を含む基底) では、単位重みではなくその基底の厳密な DSE 重みから
+        // 始める (HiGHS の HEkkDual::initialiseInstance と同じ。行ごとに BTRAN 1 回、計 m 回)。単位重みは全スラック基底で
+        // しか正確でなく、分枝限定法で待ち行列から取り出したノード (保存した基底を復元、重みの引き継ぎなし) の最初の LP は
+        // neos-911970 で 1 回平均 265 反復 (潜りの子ノードは 97 反復) かかっていた
+        _ if warm_started && env_str!("ENOMOTO_DSE_EXACT_INIT").is_some() => super::DseState::from_basis(m, &lu),
         _ => super::DseState::new(m),
     };
 
