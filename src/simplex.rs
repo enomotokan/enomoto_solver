@@ -1651,6 +1651,82 @@ fn solve_std_form_decomposed(std: &StdForm, opts: &crate::types::LpOptions) -> S
     solve_split(std, &components, solve_one)
 }
 
+/// 前処理後の標準形を解く入口。独立な成分への分割はここで 1 回だけ行い ([`presolved_groups`])、組ごとに解き方を
+/// 割り振る ([`solve_block`]): auto で行数が `ENOMOTO_T_RACE_MIN_ROWS` 以上の組は傾き・切片双対二段解法と内点法 +
+/// クロスオーバーの同時実行、それ以外は選ばれた 1 つのエンジン。各エンジンの中では分割し直さない。
+///
+/// 同時実行する組が 2 つ以上なら、二段解法と内点法の 2 つの側が組の一覧を手分けして解き、組ごとに先着を採る
+/// ([`race::solve_race_groups`]。組ごとに全スレッドのプールを作って並べると CPU 数を超える)。同時実行しない組は、
+/// どれかが [`PARALLEL_COMPONENT_MIN_VARS`] 以上なら rayon で並列に解く。
+fn solve_presolved(std: StdForm, opts: &crate::types::LpOptions) -> SimplexResult {
+    let Some(groups) = presolved_groups(&std, opts) else {
+        return solve_block(std, opts);
+    };
+    let n_orig = std.n_total - std.n_rows;
+    let subs = split_std_form(&std, &groups);
+    drop(std);
+    let races: Vec<bool> = subs.iter().map(|s| block_races(s, opts)).collect();
+    let mut results: Vec<Option<SimplexResult>> = (0..subs.len()).map(|_| None).collect();
+    // 同時実行しない組 (並列に解く)。
+    let plain: Vec<(usize, &StdForm)> = subs.iter().enumerate().filter(|&(k, _)| !races[k]).collect();
+    let use_parallel = plain.iter().any(|&(k, _)| groups[k].len() >= PARALLEL_COMPONENT_MIN_VARS);
+    let plain_results: Vec<(usize, SimplexResult)> = if use_parallel {
+        use rayon::prelude::*;
+        let token = crate::cancel::current();
+        plain.par_iter().map(|&(k, s)| (k, crate::cancel::with_token(token.clone(), || solve_one_engine(s, opts)))).collect()
+    } else {
+        plain.iter().map(|&(k, s)| (k, solve_one_engine(s, opts))).collect()
+    };
+    for (k, r) in plain_results {
+        results[k] = Some(r);
+    }
+    // 同時実行する組: 1 組なら普通の同時実行、2 組以上なら 2 つの側が組の一覧を手分けして解く ([`race::solve_race_groups`])。
+    let race_idx: Vec<usize> = (0..subs.len()).filter(|&k| races[k]).collect();
+    if race_idx.len() == 1 {
+        let k = race_idx[0];
+        let s = subs.into_iter().nth(k).expect("racing group exists");
+        results[k] = Some(solve_block(s, opts));
+    } else if race_idx.len() > 1 {
+        let mut subs: Vec<Option<StdForm>> = subs.into_iter().map(Some).collect();
+        let racing: Vec<std::sync::Arc<StdForm>> = race_idx.iter().map(|&k| std::sync::Arc::new(subs[k].take().expect("racing group exists"))).collect();
+        for (k, r) in race_idx.iter().zip(race::solve_race_groups(racing, *opts)) {
+            results[*k] = Some(r);
+        }
+    }
+    let results: Vec<SimplexResult> = results.into_iter().map(|r| r.expect("every group is solved")).collect();
+    assemble_split(n_orig, &groups, results)
+}
+
+/// 前処理後の標準形を分ける組。分けないなら `None`。二段解法 (auto を含む) は実質的な成分 (2 変数以上か、行に現れる
+/// 1 変数) が 2 つ以上なら成分ごと ([`solve_std_form_decomposed`] と同じ)、内点法 + クロスオーバーは
+/// [`ipm_crossover_split_groups`] の組 (大きな成分は 1 つずつ、小さな成分はまとめる)。
+fn presolved_groups(std: &StdForm, opts: &crate::types::LpOptions) -> Option<Vec<Vec<usize>>> {
+    if opts.ipm_crossover && !opts.auto_race {
+        if tunable!("ENOMOTO_T_IPM_STAGED", 0u8, u8) != 0 {
+            return None;
+        }
+        return ipm_crossover_split_groups(std);
+    }
+    let (components, has_row) = connected_components_of_std_form(std)?;
+    let real_components = components.iter().filter(|c| c.len() > 1 || has_row[c[0]]).count();
+    (real_components > 1).then_some(components)
+}
+
+/// 組 `std` を同時実行で解くか (auto かつ行数が `ENOMOTO_T_RACE_MIN_ROWS` 以上)。
+fn block_races(std: &StdForm, opts: &crate::types::LpOptions) -> bool {
+    opts.auto_race && std.n_rows >= tunable!("ENOMOTO_T_RACE_MIN_ROWS", RACE_MIN_ROWS, usize)
+}
+
+/// 1 つの組 (分けない問題全体を含む) を、[`block_races`] なら同時実行で、そうでなければ選ばれたエンジンで解く。
+fn solve_block(std: StdForm, opts: &crate::types::LpOptions) -> SimplexResult {
+    if block_races(&std, opts) {
+        // 大きな組: 傾き・切片双対二段解法と内点法 + クロスオーバーを同時に解き、先に結論を出した側を採る。
+        race::solve_race(std::sync::Arc::new(std), *opts)
+    } else {
+        solve_one_engine(&std, opts)
+    }
+}
+
 /// 変数の組 `groups` (互いに行を共有しない) ごとに `std` を分けて `solve_one` で解き、元の変数番号で
 /// 1 つの [`SimplexResult`] に組み立てる。どれかの組が [`PARALLEL_COMPONENT_MIN_VARS`] 以上なら rayon で並列に解く。
 fn solve_split(std: &StdForm, groups: &[Vec<usize>], solve_one: impl Fn(&StdForm) -> SimplexResult + Sync) -> SimplexResult {
@@ -1672,12 +1748,15 @@ fn solve_split(std: &StdForm, groups: &[Vec<usize>], solve_one: impl Fn(&StdForm
     } else {
         sub_std_forms.iter().map(&solve_one).collect()
     };
+    assemble_split(std.n_total - std.n_rows, groups, results)
+}
 
+/// 組ごとの結果 `results` (`groups` と同じ順) を、元の変数番号 (`n_orig` 個) の 1 つの [`SimplexResult`] にまとめる。
+fn assemble_split(n_orig: usize, groups: &[Vec<usize>], results: Vec<SimplexResult>) -> SimplexResult {
     let status = combine_component_statuses(results.iter().map(|r| &r.status));
     if status != Status::Optimal {
         return SimplexResult { status, x: None };
     }
-    let n_orig = std.n_total - std.n_rows;
     let mut x = vec![0.0; n_orig];
     for (result, component) in results.iter().zip(groups.iter()) {
         let sub_x = result.x.as_ref().expect("Optimal result must carry x");
@@ -1688,37 +1767,9 @@ fn solve_split(std: &StdForm, groups: &[Vec<usize>], solve_one: impl Fn(&StdForm
     SimplexResult { status: Status::Optimal, x: Some(x) }
 }
 
-/// 内点法 + クロスオーバーを、独立な成分ごとに分けて行う (fome13 = dfl001 の 8 個の直和など)。
-/// 変数が `ENOMOTO_T_XO_SPLIT_MIN_VARS` (既定 [`XO_SPLIT_MIN_VARS`]) 以上の成分は 1 つずつ、それより小さい成分は
-/// まとめて 1 つの問題として解く。分けられる組が 2 つ未満なら `None` (呼び出し側が一括で解く)。
-/// 各組で内点法が収束しない・基底が作れないときは、その組だけ傾き・切片二段解法で解き直す。
-fn solve_ipm_crossover_split(std: &StdForm, opts: &crate::types::LpOptions) -> Option<SimplexResult> {
-    let groups = ipm_crossover_split_groups(std)?;
-    Some(solve_split(std, &groups, |s| {
-        crossover::solve_ipm_crossover(s).unwrap_or_else(|| {
-            crate::phase_timing::mark("crossover_fallback");
-            solve_std_form_decomposed(s, opts)
-        })
-    }))
-}
-
-/// 同時実行 ([`race`]) の内点法 + クロスオーバー側: [`solve_ipm_crossover_split`] と同じく独立な成分ごとに分けて解く
-/// (fome13 は 8 成分をまとめて 1 つの内点法で解くと終盤の精度が出ず、頂点が採用されないことがある)。
-/// どれかの組で内点法が収束しなければ、その組を二段解法で解き直さずに `None` を返す (二段解法は同時に走っている)。
-/// 分けられなければ問題全体を解く。
-pub(super) fn solve_ipm_crossover_race(std: &StdForm) -> Option<SimplexResult> {
-    if tunable!("ENOMOTO_T_RACE_XO_SPLIT", 1u8, u8) == 0 {
-        return crossover::solve_ipm_crossover(std);
-    }
-    let Some(groups) = ipm_crossover_split_groups(std) else {
-        return crossover::solve_ipm_crossover(std);
-    };
-    let r = solve_split(std, &groups, |s| crossover::solve_ipm_crossover(s).unwrap_or(SimplexResult { status: Status::NotSolved, x: None }));
-    (r.status != Status::NotSolved).then_some(r)
-}
-
-/// [`solve_ipm_crossover_split`] の組: 変数が `ENOMOTO_T_XO_SPLIT_MIN_VARS` (既定 [`XO_SPLIT_MIN_VARS`]) 以上の成分は 1 つずつ、
-/// それより小さい成分はまとめて 1 つ。分けられる組が 2 つ未満なら `None`。
+/// 内点法 + クロスオーバーで解くときの組 (fome13 = dfl001 の 8 個の直和など): 変数が `ENOMOTO_T_XO_SPLIT_MIN_VARS`
+/// (既定 [`XO_SPLIT_MIN_VARS`]) 以上の成分は 1 つずつ、それより小さい成分はまとめて 1 つ (小さな内点法を数多く解く
+/// 手間を避ける)。分けられる組が 2 つ未満なら `None`。
 fn ipm_crossover_split_groups(std: &StdForm) -> Option<Vec<Vec<usize>>> {
     let min_vars = tunable!("ENOMOTO_T_XO_SPLIT_MIN_VARS", XO_SPLIT_MIN_VARS, usize);
     if min_vars == 0 {
@@ -2020,15 +2071,7 @@ fn solve_lp_dual_full_status(variables: &[VariableData], objective: &Objective, 
         Some((s2, dc)) => (s2, Some(dc)),
         None => (std, None),
     };
-    let race_min_rows = tunable!("ENOMOTO_T_RACE_MIN_ROWS", RACE_MIN_ROWS, usize);
-    let (result, std) = if opts.auto_race && std.n_rows >= race_min_rows {
-        // 大きな問題: 傾き・切片双対二段解法と内点法 + クロスオーバーを同時に解き、先に結論を出した側を採る。
-        let std = std::sync::Arc::new(std);
-        (race::solve_race(std.clone(), opts), None)
-    } else {
-        (solve_one_engine(&std, &opts), Some(std))
-    };
-    drop(std);
+    let result = solve_presolved(std, &opts);
     crate::phase_timing::mark("simplex_end");
     if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
         eprintln!("DEBUG_EXT: solve_std_form_decomposed returned {:?}", result.status);
@@ -2134,22 +2177,28 @@ fn solve_one_engine(std: &StdForm, opts: &crate::types::LpOptions) -> SimplexRes
         }
         solve_ipm_crossover_engine(std, opts)
     } else {
-        solve_std_form_decomposed(std, opts)
+        solve_simplex_block(std, opts)
     }
+}
+
+/// 1 つの組を傾き・切片二段解法で解く (双対化・篩い分け・本体の順に試す。分割は呼び出し側 ([`solve_presolved`]) で
+/// 済んでいるので、ここでは分けない)。諦めたら `NotSolved`。
+pub(super) fn solve_simplex_block(std: &StdForm, opts: &crate::types::LpOptions) -> SimplexResult {
+    dualize::solve(std, opts)
+        .or_else(|| sifting::solve(std, opts))
+        .or_else(|| slope_intercept_dual::solve_slope_intercept_dual(std, opts))
+        .unwrap_or(SimplexResult { status: Status::NotSolved, x: None })
 }
 
 /// 内点法 + クロスオーバー ([`solve_one_engine`] の本体)。
 fn solve_ipm_crossover_engine(std: &StdForm, opts: &crate::types::LpOptions) -> SimplexResult {
     crate::phase_timing::mark("xo_engine_start");
     {
-        // 内点法 + クロスオーバー。内点法が収束しない・基底が作れないときは傾き・切片二段解法で解き直す。
-        // 大きな独立成分が 2 つ以上あれば成分ごとに分けて解く。
-        if let Some(r) = solve_ipm_crossover_split(std, opts) {
-            return r;
-        }
+        // 内点法 + クロスオーバー。内点法が収束しない・基底が作れないときは傾き・切片二段解法で解き直す
+        // (独立な成分への分割は呼び出し側 ([`solve_presolved`]) で済んでいる)。
         crossover::solve_ipm_crossover(std).unwrap_or_else(|| {
             crate::phase_timing::mark("crossover_fallback");
-            solve_std_form_decomposed(std, opts)
+            solve_simplex_block(std, opts)
         })
     }
 }
