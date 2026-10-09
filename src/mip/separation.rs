@@ -1405,9 +1405,12 @@ fn select_cuts_hybrid(cands: Vec<Candidate>, max_cuts: usize, p: &MipProblem) ->
     scored.sort_by(|a, b| b.0.total_cmp(&a.0));
     let Some(best_score) = scored.first().map(|s| s.0) else { return Vec::new() };
     let (maxpar, goodmaxpar, good) = (tunable!("ENOMOTO_T_CUTSEL_MAXPAR", 0.3, f64), tunable!("ENOMOTO_T_CUTSEL_GOODMAXPAR", 0.7, f64), 0.9 * best_score);
+    // `ENOMOTO_T_CUTSEL_MIN_REL` (既定 0 = 使わない): 質が最良の何倍未満のカットは採らない (Wesselmann・Suhl の
+    // MOPS は最良の 50%)。弱いカットを LP に入れず、1 ラウンドの LP を軽くする
+    let min_score = tunable!("ENOMOTO_T_CUTSEL_MIN_REL", 0.0, f64) * best_score;
     let mut chosen: Vec<(f64, Candidate)> = Vec::new();
     for (score, nc, c) in scored {
-        if chosen.len() >= max_cuts {
+        if chosen.len() >= max_cuts || score < min_score {
             break;
         }
         let limit = if score >= good { goodmaxpar } else { maxpar };
