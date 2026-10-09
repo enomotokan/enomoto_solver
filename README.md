@@ -12,6 +12,12 @@ Its LP engine implements the **slope–intercept dual two-phase method**, which 
 
 The method decides, **using the dual simplex method only and without choosing a numerical value for M**, whether an LP has a finite optimum, is unbounded, or is infeasible, and returns an optimal basic solution in the first case.
 
+The solver also includes:
+
+- **Proximal interior-point method + crossover:** a PIQP-style proximal interior-point method (IP-PMM with Mehrotra's predictor–corrector) computes an interior optimal solution, and a crossover following Liu & Lu (2024) (primal and dual push phases plus basis selection) turns it into an optimal basic solution, finished off by the simplex method.
+- **Running both methods in parallel:** by default, an LP with at least 1000 rows after presolve is solved by the slope–intercept dual two-phase method and by the interior-point method + crossover at the same time on separate threads; the first to reach a conclusion wins and the other is stopped.
+- **Mixed-integer linear programming (MIP):** branch and cut with propagation, cutting planes, primal heuristics and symmetry handling.
+
 ## Requirements
 
 - Python 3.9 or later
@@ -59,7 +65,7 @@ print(x.value, y.value)             # 3.0 7.0
 
 ### Result status and infeasible or unbounded problems
 
-`solve()` returns a `Solution` with `status`, `objective` and `node_limit_hit`. The status is one of `"optimal"`, `"infeasible"`, `"unbounded"`, `"infeasible_or_unbounded"` or `"not_solved"`.
+`solve()` returns a `Solution` with `status`, `objective` and `node_limit_hit`. The status is one of `"optimal"`, `"infeasible"`, `"unbounded"`, `"infeasible_or_unbounded"` or `"not_solved"` (models with integer variables can also return `"time_limit"` or `"node_limit"`).
 
 By default, the solver stops as soon as it proves that there is no finite optimum (at the end of phase A) and reports `"infeasible_or_unbounded"`. Pass `distinguish_infeasible_unbounded=True` to continue with phase B and tell the two cases apart:
 
@@ -73,6 +79,19 @@ sol = U.solve(distinguish_infeasible_unbounded=True)
 print(sol.status)                   # unbounded
 ```
 
+### Choosing the LP method
+
+`solve(root_solver=...)` selects the LP method (for models with integer variables, the method used for each relaxation).
+
+| `root_solver` | Method |
+|---|---|
+| `"auto"` (default; `None` is the same) | If the presolved LP has at least 1000 rows, run the slope–intercept dual two-phase method and the interior-point method + crossover in parallel and take whichever concludes first; otherwise use the two-phase method alone. |
+| `"simplex"` | The slope–intercept dual two-phase method only. |
+| `"ipm_crossover"` | The interior-point method + crossover only; falls back to the two-phase method if the interior-point method does not converge. |
+| `"interior"` | A standalone proximal interior-point method (IP-PMM) with its own presolve. Returns a non-basic solution; intended for cross-checking. |
+
+Whatever the method, infeasibility and unboundedness are decided by the two-phase method. With `"auto"`, the interior-point + crossover result is used only when it yields a basic solution whose optimality has been verified by the simplex method.
+
 ### Integer variables
 
 ```python
@@ -80,11 +99,19 @@ K = Model()
 items = [(Variable(int, 0, 1), value, weight) for value, weight in [(60, 10), (100, 20), (120, 30)]]
 K.set_objective(sum(v * value for v, value, _ in items), sense="maximize")
 K.add_constraint(sum(v * weight for v, _, weight in items) <= 50)
-sol = K.solve()
+sol = K.solve(time_limit=60)
 print(sol.objective, [round(v.value) for v, _, _ in items])   # 220.0 [0, 1, 1]
+print(sol.best_bound, sol.mip_gap, sol.nodes)                 # 220.0 0.0 0
 ```
 
-Models with integer variables are solved by a depth-first branch-and-bound method whose LP relaxations use the LP engine above. It is a simple implementation and is not intended to compete with dedicated MIP solvers.
+Models with integer variables are solved by branch and cut, with LP relaxations solved by the LP methods above (a simplified implementation of techniques from HiGHS and SCIP):
+
+- **Presolve and propagation:** merging parallel rows, probing, activity-based bound tightening, conflict analysis and dual proofs.
+- **Cutting planes:** CMIR (including tableau rows, i.e. Gomory-like cuts), lifted flow covers, {0, 1/2}-Chvátal–Gomory (zero-half) cuts.
+- **Primal heuristics:** rounding, fix-and-propagate, Feasibility Pump, Feasibility Jump, diving, rounding from the interior-point solution, and sub-MIP improvement (RINS, RENS, DINS, Crossover, etc.).
+- **Search:** reliability branching on pseudocosts, plunging (diving into a child with a warm start), restarts, symmetry detection with symmetry-breaking inequalities (including orbitopes).
+
+Limits are set with `time_limit` (seconds), `mip_rel_gap` (relative gap, default 1e-4) and `node_limit` (number of nodes). When a limit stops the search, `status` is `"time_limit"` or `"node_limit"`, and if an incumbent exists, `objective` and each variable's `.value` can be read. `Solution` also reports `best_bound` (the proven bound), `mip_gap` (relative gap) and `nodes` (nodes processed).
 
 ## Benchmark results
 
@@ -132,7 +159,11 @@ Each problem is solved in its own subprocess. The reported times cover the solve
 | `src/simplex.rs` | Standard-form construction, component decomposition, primal simplex |
 | `src/simplex/slope_intercept_dual.rs` | Slope–intercept dual two-phase method |
 | `src/simplex/lu.rs` | Sparse LU factorization and Forrest–Tomlin update |
-| `src/mip.rs` | Branch and bound |
+| `src/simplex/crossover.rs` | Proximal interior-point method + crossover |
+| `src/simplex/race.rs` | Parallel run of the two-phase method and interior-point + crossover |
+| `src/interior_point.rs`, `src/interior_point/` | Proximal interior-point method (IP-PMM) and KKT factorization |
+| `src/solver.rs` | Dispatch to the LP method (`root_solver`) |
+| `src/mip/` | Branch and cut (propagation, cutting planes, heuristics, symmetry) |
 | `src/params.rs` | Tolerances and tuning parameters |
 | `docs/improvement_history.md` | Record of implementation changes and their measured effects |
 | `benchmarks/netlib_dev_results.csv` | Netlib measurements taken during development (one row per problem and run; `source_file` names the original result file) |
