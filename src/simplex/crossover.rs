@@ -1757,6 +1757,7 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
             "CROSSOVER basis from_B={} from_D={} slack={} (m={m}) t={:.3}s",
             st.li_from_b, st.li_from_d, st.li_slack, t0.elapsed().as_secs_f64()
         );
+        eprintln!("CROSSOVER basis selector: reach={} elim={} nnz(L)={} scanned={}", sel.stat[0], sel.stat[1], sel.stat[2], sel.stat[3]);
     }
     if !sel.full() {
         return None;
@@ -2965,6 +2966,9 @@ fn megiddo_push(
 /// `L` の列 `k` はピボット行 `piv[k]` と、受理時点の未ピボット行での乗数を持つ。
 struct BasisSelector {
     m: usize,
+    /// 診断用の数え上げ (`ENOMOTO_DEBUG_CROSSOVER`): 三角求解でたどった L の列の数、消去で触れた L の非零の数、
+    /// 作った L の非零の数、未ピボット行の走査の長さ。
+    stat: [u64; 4],
     chosen: Vec<usize>,
     is_chosen: Vec<bool>,
     piv: Vec<usize>,
@@ -2986,6 +2990,7 @@ impl BasisSelector {
     fn new(m: usize, n: usize) -> Self {
         BasisSelector {
             m,
+            stat: [0; 4],
             chosen: Vec::with_capacity(m),
             is_chosen: vec![false; n],
             piv: Vec::with_capacity(m),
@@ -3059,6 +3064,7 @@ impl BasisSelector {
             self.touch(i);
             amax = amax.max(v.abs());
         }
+        self.stat[0] += self.topo.len() as u64;
         // 位相順 (逆後順) に消去
         for t in (0..self.topo.len()).rev() {
             let k = self.topo[t];
@@ -3066,12 +3072,14 @@ impl BasisSelector {
             if xp == 0.0 {
                 continue;
             }
+            self.stat[1] += self.lcols[k].len() as u64;
             for idx in 0..self.lcols[k].len() {
                 let (r, l) = self.lcols[k][idx];
                 self.xw[r] -= l * xp;
                 self.touch(r);
             }
         }
+        self.stat[3] += self.nz_rows.len() as u64;
         // 未ピボット行での最大成分
         let mut best = (0.0f64, usize::MAX);
         for &i in &self.nz_rows {
@@ -3105,6 +3113,7 @@ impl BasisSelector {
                 }
             }
             let k = self.lcols.len();
+            self.stat[2] += lc.len() as u64;
             self.lcols.push(lc);
             self.piv.push(p);
             self.pivot_of_row[p] = k;
