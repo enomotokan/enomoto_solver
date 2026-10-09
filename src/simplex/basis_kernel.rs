@@ -211,6 +211,20 @@ impl BasisKernel {
         self.check_after_update(lu, updated, SynthDensity::Sparse)
     }
 
+    /// [`Self::update_and_check`] の、ピボット行の BTRAN を [`Self::btran_row_steps`] (超疎版) で解いたときの版:
+    /// R eta を BTRAN の非ゼロ位置の記録から作る ([`sparse_lu::FtLu::try_update_e_tracked`]、結果はビット一致)。
+    /// 行数が多く基底のほとんどがスラックの問題 (クロスオーバーの Megiddo 式の押し出し) で長さ `m` の走査を省く。
+    #[inline]
+    pub(super) fn update_and_check_e_tracked(&mut self, lu: &mut sparse_lu::FtLu, r: usize) -> RefactorDue {
+        self.since_check += 1;
+        let captured = self.a_tilde_ready && self.e_tilde_row == Some(r);
+        debug_assert!(captured, "BasisKernel::update_and_check_e_tracked without ftran_col/btran_row_steps for row {r}");
+        self.a_tilde_ready = false;
+        self.e_tilde_row = None;
+        let updated = captured && lu.try_update_e_tracked(r, &self.a_tilde, &self.e_tilde, &mut self.btran_work, self.min_pivot);
+        self.check_after_update(lu, updated, SynthDensity::Sparse)
+    }
+
     /// [`Self::update_and_check`] の、入る列の FTRAN を呼び出し側が解いた版 (双対単体法の主ループの
     /// 融合 FTRAN)。`a_tilde` はその FTRAN が同じ因子で記録した中間値。`ftrack` があれば、その FTRAN と
     /// 直前の [`Self::btran_row_steps`] の非ゼロ位置の記録から eta を作る

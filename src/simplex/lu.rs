@@ -7382,6 +7382,21 @@ impl FtLu {
         self.commit_update_tracked(basis_slot, a_tilde, a_list, e_tilde, e_list, min_pivot)
     }
 
+    /// [`Self::try_update_precomputed`] の、`e_tilde` だけ位置の記録を使う版: `e_tilde` を書いた BTRAN の記録
+    /// (`bwork` の `e_touch`、[`Self::solve_transpose_unit_work_sparse`] など) が有効なら R eta をその位置だけから作る
+    /// (`a_tilde` は全体を見る)。結果はビット一致 ([`Self::try_update_tracked`] と同じ)。
+    pub fn try_update_e_tracked(&mut self, basis_slot: usize, a_tilde: &[f64], e_tilde: &[f64], bwork: &mut UnitBtranWork, min_pivot: f64) -> bool {
+        let e_list = if bwork.e_full {
+            None
+        } else {
+            let v = &mut bwork.e_touch;
+            v.sort_unstable();
+            v.dedup();
+            Some(v.as_slice())
+        };
+        self.commit_update_tracked(basis_slot, a_tilde, None, e_tilde, e_list, min_pivot)
+    }
+
     /// `u_seq` の位置 `k` の eta を除く。小さな問題では並列配列から削除し、削除で後ろがずれる範囲
     /// だけ `slot_pos` を直す。`lazy_remove` (大きな問題、策4) なら死んだヘッダにするだけ。
     #[inline]

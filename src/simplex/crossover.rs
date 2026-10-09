@@ -456,11 +456,19 @@ pub(super) struct XoOptions<'a> {
     /// [`XO_VERTEX`] に残して、仕上げの単体法を走らせずに `None` を返す (分枝限定法のヒューリスティクス用)。
     /// この基底は主実行可能な頂点を与えるが、**双対実行可能とは限らない** (最適基底ではない)。
     pub vertex_only: bool,
+    /// 真なら内点法の点 (全列の `x` (上下限に収めたもの)、`y`、内点法の時間) を [`XO_IPM_POINT`] に残して、
+    /// クロスオーバーに進まずに `None` を返す (双対化した問題の点から元の問題の点を作る、[`solve_ipm_crossover_dualized`])。
+    pub ipm_point_only: bool,
 }
 
 thread_local! {
     /// `vertex_only` で止めたときの (基底 (列番号、長さ m), 基底解 (全列。主実行可能でなければ `None`))。
     static XO_VERTEX: std::cell::RefCell<Option<(Vec<usize>, Option<Vec<f64>>)>> = const { std::cell::RefCell::new(None) };
+}
+
+thread_local! {
+    /// `ipm_point_only` で止めたときの内点法の点 `(x, y, 内点法の時間)`。
+    static XO_IPM_POINT: std::cell::RefCell<Option<(Vec<f64>, Vec<f64>, f64)>> = const { std::cell::RefCell::new(None) };
 }
 
 thread_local! {
@@ -682,10 +690,28 @@ pub(super) fn solve_ipm_crossover(std: &StdForm) -> Option<SimplexResult> {
 }
 
 /// 双対 LP を内点法 + クロスオーバーで解いて元の解を戻す。対象外・諦めたときは `None`。
+///
+/// 既定 (`ENOMOTO_T_XO_DUALIZE_BACK=1`) では、双対 LP の内点法の点から元の問題の主双対の点を戻し
+/// ([`super::dualize::Dualized::primal_point`])、元の問題で内点法を飛ばしてクロスオーバーを続ける。双対 LP の頂点は
+/// 内点法の解の退化 (双対 LP では元の問題の主の退化) で双対実行不能が多く、仕上げの単体法が長い (supportcase10:
+/// 双対実行不能 13,339 本、仕上げ 75 秒以上)。元の問題では頂点を下界で確かめる判定が使える (双対の記録が要らない)。
+/// 0 で従来どおり双対 LP でクロスオーバーと仕上げを行い、最適基底の双対から元の解を戻す。
 fn solve_ipm_crossover_dualized(std: &StdForm) -> Option<SimplexResult> {
     let t0 = Instant::now();
     let d = super::dualize::build(std)?;
     crate::phase_timing::mark("xo_dualized");
+    if tunable!("ENOMOTO_T_XO_DUALIZE_BACK", 1u8, u8) != 0 {
+        let _ = solve_ipm_crossover_with(&d.dual, &XoOptions { ipm_point_only: true, ..Default::default() });
+        let Some((xd, yd, secs)) = XO_IPM_POINT.with(|p| p.borrow_mut().take()) else {
+            // 内点法が収束しなかった (または打ち切られた): 従来の経路も同じ内点法で諦めるので、ここで諦める。
+            crate::phase_timing::mark("xo_dualized_failed");
+            return None;
+        };
+        let (x, y) = d.primal_point(std, &xd, &yd);
+        drop(d);
+        crate::phase_timing::mark("xo_dualized_back");
+        return solve_ipm_crossover_with(std, &XoOptions { given_point: Some((&x, &y, secs)), ..Default::default() });
+    }
     super::slope_intercept_dual::request_duals(true);
     let res = solve_ipm_crossover_with(&d.dual, &XoOptions::default());
     let duals = super::slope_intercept_dual::take_duals();
@@ -998,6 +1024,10 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     // 頂点の採用判定の射影 (`ENOMOTO_T_XO_ACCEPT_PROJ`) で最適分割を推定するのに使う内点法の主の点 (押し出しの前)。
     let x_ipm_saved = (tunable!("ENOMOTO_T_XO_ACCEPT_PROJ", 0u8, u8) != 0).then(|| x.clone());
     let mut y = ipm.y;
+    if xo.ipm_point_only {
+        XO_IPM_POINT.with(|p| *p.borrow_mut() = Some((x, y, ipm_secs)));
+        return None;
+    }
     // 頂点を内点法の双対の下界で確かめるとき (`ENOMOTO_T_XO_ACCEPT_GAP`、既定 1e-8 は第 37 回の比較で決めた。
     // 0 で使わない) に使う内点法の双対 (PDHG の 1 歩の前)。
     let accept_gap = tunable!("ENOMOTO_T_XO_ACCEPT_GAP", 1e-8f64, f64);
@@ -2784,15 +2814,18 @@ fn megiddo_push(
     let mut kernel = BasisKernel::new(m, ft_max_updates(m));
     let mut d = vec![0.0; m];
     let mut rho = vec![0.0; m];
+    let mut nz: Vec<usize> = Vec::new();
+    let mut rho_steps = sparse_lu::StepCapture::new(m);
     let (mut pivots, mut to_bound, mut unresolved) = (0usize, 0usize, 0usize);
     // 向き `σ` での比率テスト。(歩幅, 塞ぐ基底位置 (自身なら None), 塞いだ境界は上限か)。
-    let ratio = |sigma: f64, j: usize, xj: f64, d: &[f64], xb: &[f64], basis: &[usize]| -> (f64, Option<usize>, bool) {
+    // `nz` は `d` の非零の位置 (基底のほとんどがスラックの問題では `d` が疎で、長さ `m` の走査が手間の大半になる)。
+    let ratio = |sigma: f64, j: usize, xj: f64, d: &[f64], nz: &[usize], xb: &[f64], basis: &[usize]| -> (f64, Option<usize>, bool) {
         let own = if sigma > 0.0 { std.ub[j] - xj } else { xj - std.lb[j] };
-        let dmax = d.iter().fold(0.0f64, |a, v| a.max(v.abs()));
+        let dmax = nz.iter().fold(0.0f64, |a, &k| a.max(d[k].abs()));
         let piv_tol = (piv_rel * dmax).max(1e-11);
         // 1 段目: 許容誤差 tol_p だけ緩めた歩幅の上限。
         let mut tmax = own.max(0.0) + tol_p;
-        for k in 0..m {
+        for &k in nz {
             let dk = -sigma * d[k];
             if dk.abs() <= piv_tol {
                 continue;
@@ -2817,7 +2850,7 @@ fn megiddo_push(
         // 2 段目: 上限以内で塞ぐ候補のうち |d_k| が最大の基底変数 (自身の境界は上限以内なら優先しない)。
         let mut best: Option<(usize, f64, bool)> = None;
         let mut best_piv = 0.0;
-        for k in 0..m {
+        for &k in nz {
             let dk = -sigma * d[k];
             if dk.abs() <= piv_tol {
                 continue;
@@ -2861,11 +2894,11 @@ fn megiddo_push(
         }
         let xj = xs[si];
         kernel.ftran_col(&lu, col(std, j), &mut d);
+        nz.clear();
+        nz.extend((0..m).filter(|&k| d[k] != 0.0));
         let mut dj = std.c[j];
-        for k in 0..m {
-            if d[k] != 0.0 {
-                dj -= cb[k] * d[k];
-            }
+        for &k in &nz {
+            dj -= cb[k] * d[k];
         }
         let dtol = 1e-9 * (1.0 + std.c[j].abs());
         // 目的を悪化させない向き。d_j ≈ 0 なら近い方の有限の境界の向き。
@@ -2879,10 +2912,10 @@ fn megiddo_push(
             if dl <= du { -1.0 } else { 1.0 }
         };
         let mut sigma = pref;
-        let (mut t, mut blk, mut up) = ratio(sigma, j, xj, &d, &xb, basis);
+        let (mut t, mut blk, mut up) = ratio(sigma, j, xj, &d, &nz, &xb, basis);
         if !t.is_finite() && dj.abs() <= dtol {
             sigma = -pref;
-            (t, blk, up) = ratio(sigma, j, xj, &d, &xb, basis);
+            (t, blk, up) = ratio(sigma, j, xj, &d, &nz, &xb, basis);
         }
         if !t.is_finite() {
             // 押し出せない (自由列だけの向き、または目的が下がり続ける向き): 呼び出し側の境界のまま。
@@ -2893,10 +2926,8 @@ fn megiddo_push(
         // x_B ← x_B - t σ d
         let ts = t * sigma;
         if ts != 0.0 {
-            for k in 0..m {
-                if d[k] != 0.0 {
-                    xb[k] -= ts * d[k];
-                }
+            for &k in &nz {
+                xb[k] -= ts * d[k];
             }
         }
         is_sup[j] = false;
@@ -2907,7 +2938,8 @@ fn megiddo_push(
             }
             Some(r) => {
                 let q = basis[r];
-                kernel.btran_row(&lu, r, &mut rho);
+                // `rho` は使わない (FT 更新の `e_tilde` を記録するため)。超疎版で解き、更新も非零の位置だけで行う。
+                kernel.btran_row_steps(&lu, r, &mut rho, &mut rho_steps, true);
                 basis[r] = j;
                 basis_pos[j] = Some(r);
                 basis_pos[q] = None;
@@ -2916,7 +2948,7 @@ fn megiddo_push(
                 xb[r] = xj + ts;
                 cb[r] = std.c[j];
                 pivots += 1;
-                if kernel.update_and_check(&mut lu, r).is_due() {
+                if kernel.update_and_check_e_tracked(&mut lu, r).is_due() {
                     lu = factorize_basis(std, basis_pos, Some(&lu))?;
                     kernel = BasisKernel::new(m, ft_max_updates(m));
                     let xs_ref = &xs;

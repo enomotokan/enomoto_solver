@@ -59,6 +59,8 @@ pub(super) struct Dualized {
     width: Vec<f64>,
     /// 双対 LP の行 `r` に対応する構造列。
     rows_of: Vec<usize>,
+    /// 元の行 `i` の `y` 列の範囲 `[y_start[i], y_start[i+1])` (双対 LP の列番号)。
+    y_start: Vec<usize>,
 }
 
 /// 双対化して解く。対象外、または途中で諦めたときは `None`。
@@ -230,10 +232,44 @@ pub(super) fn build(std: &StdForm) -> Option<Dualized> {
     let (rmat, cmat) = super::freeze_std_matrices(&rows, n_total);
     drop(rows);
     let dual = StdForm { n_total, n_rows: nd, c: cost, rows: rmat, cols: cmat, b: c_rhs, lb, ub };
-    Some(Dualized { dual, x0, kind, width, rows_of })
+    Some(Dualized { dual, x0, kind, width, rows_of, y_start })
 }
 
 impl Dualized {
+    /// 双対 LP の主双対の点 (`xd`: 双対 LP の全列、`pi`: 双対 LP の行の双対、LP の符号) から、元の問題の主双対の点
+    /// `(x (全列。スラックは行の活動度から決め、どの列も上下限に収める), y)` を戻す (内点法の近似解の受け渡し用)。
+    /// 主は `x'_j = -π_j`、双対は行 `i` の `y` 列の値の和 (範囲行の 2 列は符号の向きが逆で、和が `y_i`)。
+    pub(super) fn primal_point(&self, std: &StdForm, xd: &[f64], pi: &[f64]) -> (Vec<f64>, Vec<f64>) {
+        let m = std.n_rows;
+        let n = std.n_total - m;
+        let inf = f64::INFINITY;
+        let mut x = vec![0.0; std.n_total];
+        x[..n].copy_from_slice(&self.x0);
+        for (r, &j) in self.rows_of.iter().enumerate() {
+            let (lo, hi) = match self.kind[j] {
+                0 => (0.0, self.width[j]),
+                1 => (-inf, 0.0),
+                _ => (-inf, inf),
+            };
+            x[j] += (-pi[r]).clamp(lo, hi);
+        }
+        let mut act = vec![0.0; m];
+        for j in 0..n {
+            if x[j] != 0.0 {
+                for &(i, v) in std.cols.col(j) {
+                    act[i] += v * x[j];
+                }
+            }
+        }
+        for i in 0..m {
+            if let Some(&(sj, sigma)) = std.rows.row(i).iter().find(|&&(j, _)| j >= n) {
+                x[sj] = ((std.b[i] - act[i]) / sigma).clamp(std.lb[sj], std.ub[sj]);
+            }
+        }
+        let y: Vec<f64> = (0..m).map(|i| xd[self.y_start[i]..self.y_start[i + 1]].iter().sum()).collect();
+        (x, y)
+    }
+
     /// 双対 LP の結果 `res` と行の双対 `pi` (`B^-T c_B`) から元の解を戻す。双対 LP が最適でない、
     /// または戻した解が元の問題の制約を許容誤差で満たさないときは `None`。
     pub(super) fn finish(self, std: &StdForm, res: Option<SimplexResult>, pi: Option<Vec<f64>>, t0: std::time::Instant) -> Option<SimplexResult> {
