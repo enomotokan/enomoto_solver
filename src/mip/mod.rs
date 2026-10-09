@@ -383,7 +383,7 @@ fn presolve_mip(p: &MipProblem, verbose: bool) -> Option<Presolved> {
     // 係数の強化 (片側の行の 0-1 列の係数を、整数解を変えずに LP の緩和が締まる値に縮める)
     if env_str!("ENOMOTO_MIP_NO_COEF_TIGHTEN").is_none() {
         let is_int_now: Vec<bool> = p.is_int.clone();
-        let tightened = tighten_coefficients(&mut rows, &mut row_lo, &mut row_up, &pre.lb, &pre.ub, &is_int_now);
+        let tightened = tighten_coefficients(&mut rows, &mut row_lo, &mut row_up, &pre.lb, &pre.ub, &is_int_now, env_str!("ENOMOTO_MIP_COEF_TIGHTEN_GENERAL").is_some());
         let normalized = normalize_integer_rows(&mut rows, &mut row_lo, &mut row_up, &is_int_now);
         if verbose && (tightened > 0 || normalized > 0) {
             eprintln!("MIP: presolve: tightened {tightened} coefficients, normalized {normalized} integer rows");
@@ -430,20 +430,21 @@ fn presolve_mip(p: &MipProblem, verbose: bool) -> Option<Presolved> {
 ///   (どちらの値でも成り立つので、大域的に成り立つ)。
 ///
 /// 列の値は変えない (境界を締めるだけ) ので後処理は要らない。手間は伝播で走査した行の長さの合計
-/// (非零数の `ENOMOTO_T_MIP_PROBE_WORK` 倍、既定 2000 倍) と時間 (`ENOMOTO_T_MIP_PROBE_TIME` 秒、既定 1 秒。固定・締め付けが
-/// 出ていれば `ENOMOTO_T_MIP_PROBE_TIME_FOUND` 秒、既定 3 秒。長い行の多い問題 (nw04・air03) は 1 回が重く何も得られない) で打ち切る。
+/// (非零数の `ENOMOTO_T_MIP_PROBE_WORK` 倍、既定 20 倍) と時間 (`ENOMOTO_T_MIP_PROBE_TIME` 秒、既定 0.5 秒。固定・締め付けが
+/// 出ていれば `ENOMOTO_T_MIP_PROBE_TIME_FOUND` 秒、既定 0.5 秒。長い行の多い問題 (nw04・air03) は 1 回が重く何も得られない) で打ち切る。
 /// 締めた境界があれば `Some(true)`、何もなければ `None`。
 fn probe(prob: &mut MipProblem, verbose: bool) -> Option<bool> {
     use domain::Domain;
     let t0 = std::time::Instant::now();
     let n = prob.n;
     let nnz: usize = prob.rows.iter().map(|r| r.len()).sum();
-    // 手間の上限は非零数の 2000 倍 (以前の 20 倍では 30n20b8 で 7971 列中 160 列しか試せず、全部試すと 0.55 秒で
-    // 3241 列が固定されて根の LP が 43.3 -> 122.8 (HiGHS 123.0) になる。neos-860300 も 2035 -> 2210)。時間の上限は
-    // 1 秒、固定・締め付けが出ていれば 3 秒 (air03・eil33-2・nw04 は列が長く 1 回が重いのに何も出ない)
-    let work_cap = (tunable!("ENOMOTO_T_MIP_PROBE_WORK", 2000.0, f64) * nnz as f64) as u64 + 100_000;
-    let time_cap = tunable!("ENOMOTO_T_MIP_PROBE_TIME", 1.0, f64);
-    let time_cap_found = tunable!("ENOMOTO_T_MIP_PROBE_TIME_FOUND", 3.0, f64);
+    // 手間の上限は非零数の 20 倍、時間は 0.5 秒 (固定・締め付けが出ていれば `ENOMOTO_T_MIP_PROBE_TIME_FOUND` 秒)。
+    // 大きくすると (2000 倍・1 秒・3 秒) 30n20b8 は 7971 列を全部試して 3241 列を固定し根の LP が 43.3 -> 122.8
+    // (HiGHS 123.0)、neos-860300 も 2035 -> 2210 になるが、40 問では 19 問 28.14 -> 18 問 28.08 (neos-860300 が
+    // 2 回とも時間切れ、30n20b8 はそれでも解が見つからない) で既定にはしない
+    let work_cap = (tunable!("ENOMOTO_T_MIP_PROBE_WORK", 20.0, f64) * nnz as f64) as u64 + 100_000;
+    let time_cap = tunable!("ENOMOTO_T_MIP_PROBE_TIME", 0.5, f64);
+    let time_cap_found = tunable!("ENOMOTO_T_MIP_PROBE_TIME_FOUND", 0.5, f64);
     let mut dom = Domain::new(prob);
     if !dom.propagate(prob) {
         return Some(false);
@@ -549,12 +550,13 @@ fn probe(prob: &mut MipProblem, verbose: bool) -> Option<bool> {
 ///
 /// どちらも整数解の集合を変えず、LP の緩和だけを締める (例: 0-1 列の `sum 21 y >= 2` は `sum 2 y >= 2`)。
 /// 列の値は変えないので後処理は要らない。縮めた係数の数を返す。
-fn tighten_coefficients(rows: &mut [Vec<(usize, f64)>], row_lo: &mut [f64], row_up: &mut [f64], lo: &[f64], up: &[f64], is_int: &[bool]) -> usize {
-    // 対象の列: 既定は両側の境界が有限な整数列すべて (一般整数も。`ENOMOTO_MIP_COEF_TIGHTEN_BIN_ONLY` なら幅 1 の列だけ)。
+fn tighten_coefficients(rows: &mut [Vec<(usize, f64)>], row_lo: &mut [f64], row_up: &mut [f64], lo: &[f64], up: &[f64], is_int: &[bool], general: bool) -> usize {
+    // 対象の列: 既定は幅 1 の整数列 (0-1 型)。`ENOMOTO_MIP_COEF_TIGHTEN_GENERAL` なら両側の境界が有限な整数列すべて。
     // x_j ∈ [l, u] (整数) で a > 0 なら、x_j <= u - 1 で行が冗長 (M - a <= b) のとき d = b - (M - a) だけ縮め、
     // 右辺を d u 減らす (x_j = u では元と同じ、x_j <= u - 1 では残りの最大活動量で成り立つ)。a < 0 なら右辺を d l 増やす。
-    // 幅 1 (0-1 列) はその特別な場合。gt2 (一般整数) は前処理後の LP が 13460 -> HiGHS は 20147
-    let bin_only = env_str!("ENOMOTO_MIP_COEF_TIGHTEN_BIN_ONLY").is_some();
+    // 幅 1 (0-1 列) はその特別な場合。一般整数まで広げる (`ENOMOTO_MIP_COEF_TIGHTEN_GENERAL`) と gt2 の前処理後の LP が
+    // 13460 -> 20146.8 (HiGHS と同じ) になるが、40 問では mik-250-20-75-4 が 2 回とも遅くなり (31.7 -> 56-60 秒) 既定にはしない
+    let bin_only = !general;
     let unit = |j: usize| {
         is_int[j]
             && lo[j].is_finite()
@@ -739,7 +741,7 @@ mod tests {
         // sum 21 y >= 2 (0-1) -> 2 y0 + 2 y1 + 2 y2 >= 2
         let mut rows = vec![vec![(0, 21.0), (1, 21.0), (2, 21.0)]];
         let (mut lo, mut up) = (vec![2.0], vec![f64::INFINITY]);
-        let n = tighten_coefficients(&mut rows, &mut lo, &mut up, &[0.0; 3], &[1.0; 3], &[true; 3]);
+        let n = tighten_coefficients(&mut rows, &mut lo, &mut up, &[0.0; 3], &[1.0; 3], &[true; 3], false);
         assert_eq!(n, 3);
         assert_eq!(rows[0], vec![(0, 2.0), (1, 2.0), (2, 2.0)]);
         assert_eq!(lo[0], 2.0);
@@ -790,7 +792,7 @@ mod tests {
             let (rl, ru) = if ge { (rhs, f64::INFINITY) } else { (f64::NEG_INFINITY, rhs) };
             let mut rows = vec![row.clone()];
             let (mut rlo, mut rup) = (vec![rl], vec![ru]);
-            total += tighten_coefficients(&mut rows, &mut rlo, &mut rup, &lo, &up, &is_int);
+            total += tighten_coefficients(&mut rows, &mut rlo, &mut rup, &lo, &up, &is_int, true);
             let feasible = |r: &[(usize, f64)], l: f64, u: f64, y: &[f64]| -> bool {
                 // 連続列は [lo, up] の好きな値を取れる: 活動量の取りうる範囲が [l, u] と交わるか
                 let mut a0 = 0.0;
