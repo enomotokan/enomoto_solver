@@ -701,6 +701,13 @@ fn solve_ipm_crossover_dualized(std: &StdForm) -> Option<SimplexResult> {
     let d = super::dualize::build(std)?;
     crate::phase_timing::mark("xo_dualized");
     if tunable!("ENOMOTO_T_XO_DUALIZE_BACK", 1u8, u8) != 0 {
+        // 診断用 (`ENOMOTO_DEBUG_XO_POINT_LOAD=ファイル`): 前に書き出した元の問題の点を読み、内点法を飛ばす (同じ問題に限る)。
+        if let Some((x, y)) = env_str!("ENOMOTO_DEBUG_XO_POINT_LOAD").and_then(|f| load_point(&f, std.n_total, std.n_rows)) {
+            drop(d);
+            // 内点法の時間は Megiddo 式の押し出しの締切に効くので、`ENOMOTO_DEBUG_XO_POINT_SECS` (既定 1e6 = 締切なし) で与える。
+            let secs = env_str!("ENOMOTO_DEBUG_XO_POINT_SECS").and_then(|v| v.parse().ok()).unwrap_or(1e6);
+            return solve_ipm_crossover_with(std, &XoOptions { given_point: Some((&x, &y, secs)), ..Default::default() });
+        }
         let _ = solve_ipm_crossover_with(&d.dual, &XoOptions { ipm_point_only: true, ..Default::default() });
         let Some((xd, yd, secs)) = XO_IPM_POINT.with(|p| p.borrow_mut().take()) else {
             // 内点法が収束しなかった (または打ち切られた): 従来の経路も同じ内点法で諦めるので、ここで諦める。
@@ -708,6 +715,11 @@ fn solve_ipm_crossover_dualized(std: &StdForm) -> Option<SimplexResult> {
             return None;
         };
         let (x, y) = d.primal_point(std, &xd, &yd);
+        // 診断用 (`ENOMOTO_DEBUG_XO_POINT_SAVE=ファイル`): 元の問題の点を書き出す (クロスオーバーだけを繰り返し試すため)。
+        if let Some(f) = env_str!("ENOMOTO_DEBUG_XO_POINT_SAVE") {
+            let bytes: Vec<u8> = x.iter().chain(y.iter()).flat_map(|v| v.to_le_bytes()).collect();
+            let _ = std::fs::write(f, bytes);
+        }
         drop(d);
         crate::phase_timing::mark("xo_dualized_back");
         return solve_ipm_crossover_with(std, &XoOptions { given_point: Some((&x, &y, secs)), ..Default::default() });
@@ -721,6 +733,16 @@ fn solve_ipm_crossover_dualized(std: &StdForm) -> Option<SimplexResult> {
         crate::phase_timing::mark("xo_dualized_failed");
     }
     r
+}
+
+/// 診断用: [`solve_ipm_crossover_dualized`] が書き出した点 (`x` が `n` 個、`y` が `m` 個の f64、リトルエンディアン) を読む。
+fn load_point(f: &str, n: usize, m: usize) -> Option<(Vec<f64>, Vec<f64>)> {
+    let bytes = std::fs::read(f).ok()?;
+    if bytes.len() != 8 * (n + m) {
+        return None;
+    }
+    let v: Vec<f64> = bytes.chunks_exact(8).map(|c| f64::from_le_bytes(c.try_into().unwrap())).collect();
+    Some((v[..n].to_vec(), v[n..].to_vec()))
 }
 
 /// 内点法 + クロスオーバー ([`XoOptions`] 付き)。
@@ -1678,6 +1700,39 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
         };
         cand_b.sort_by(|&a, &b| score(b).partial_cmp(&score(a)).unwrap_or(std::cmp::Ordering::Equal));
     }
+    // 基底の候補 B の列と行の二部マッチングから、B をブロック上三角に並べる順 (各列の非零の行にマッチした列を先に。強連結成分は
+    // 1 かたまり) と、優先するピボット行 (マッチした行) を作る。三角の部分では消去もフィルも起きない。従来の順 (非零の少ない順)
+    // で消去の手間が予算を超えたときだけ、この順で選び直す (下の `ENOMOTO_T_XO_LI_ELIM_BUDGET`)。
+    let matching_order = || -> Vec<(usize, Option<usize>)> {
+        let adj: Vec<Vec<usize>> = cand_b.iter().map(|&j| col(std, j).iter().filter(|&&(_, v)| v != 0.0).map(|&(i, _)| i).collect()).collect();
+        let mt = crate::graph::max_bipartite_matching(&adj, m);
+        // 行 → その行にマッチした候補 (の位置)。
+        let mut owner = vec![usize::MAX; m];
+        for (c, r) in mt.iter().enumerate() {
+            if let Some(r) = *r {
+                owner[r] = c;
+            }
+        }
+        // 候補 c → c' (c が c' のマッチした行に非零を持つ = c' を先に足したい)。
+        let g: Vec<Vec<usize>> = adj.iter().enumerate().map(|(c, rows)| rows.iter().map(|&r| owner[r]).filter(|&o| o != usize::MAX && o != c).collect()).collect();
+        // Tarjan 法は到達先の成分を先に出すので、そのまま「先に足したい列が先」の順。
+        let comps = crate::graph::tarjan_scc(&g);
+        let mut ord: Vec<(usize, Option<usize>)> = Vec::with_capacity(cand_b.len());
+        for comp in &comps {
+            for &c in comp {
+                if mt[c].is_some() {
+                    ord.push((cand_b[c], mt[c]));
+                }
+            }
+        }
+        // マッチしなかった (構造的に従属な) 候補は最後に (従来の判定で落ちるか、空いた行で受理される)。
+        ord.extend(cand_b.iter().zip(&mt).filter(|(_, r)| r.is_none()).map(|(&j, _)| (j, None)));
+        if debug {
+            let big = comps.iter().map(|c| c.len()).max().unwrap_or(0);
+            eprintln!("CROSSOVER basis order by matching: matched {} / {}, blocks {} (largest {big}) t={:.3}s", mt.iter().filter(|r| r.is_some()).count(), cand_b.len(), comps.len(), t0.elapsed().as_secs_f64());
+        }
+        ord
+    };
     let mut sel = BasisSelector::new(m, n);
     if tunable!("ENOMOTO_T_XO_LI_MARKOWITZ", 1u8, u8) != 0 {
         // 行の非零の数は、基底の候補 (B と D) の列だけで数える (行列全体で数えると、候補にない列の非零で目安が
@@ -1698,21 +1753,43 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
             cnt
         };
     }
+    // 大きな問題 (`ENOMOTO_T_XO_LI_MATCH_MIN_M`、既定 5 万行以上、0 で使わない) で D が空なら、従来の順で消去の手間 (触れた L の非零の数) が
+    // 候補の列の非零数の `ENOMOTO_T_XO_LI_ELIM_BUDGET` 倍 (既定 50) を超えた時点で、マッチングの順で選び直す。従来の順は列の順番が固定なので、
+    // 早く足した列の L が長くなり、後の列がそれを何度もたどって消去する (rmine15: 358,395 行・候補 92,060 列で消去 153 億回・140〜500 秒、
+    // マッチングの順なら 4 億回・4.6 秒)。マッチングの順を常に使うと、三角に近くない問題で基底が悪条件になる (physiciansched3-3: 候補の
+    // 12% がマッチせず、頂点の値が 1.5e17 に達して採用されず、auto 171 → 300 秒)。従来の順で安く済む問題は経路を変えない。
+    let match_min_m = tunable!("ENOMOTO_T_XO_LI_MATCH_MIN_M", 50_000usize, usize);
+    let li_match_ok = match_min_m > 0 && m >= match_min_m && cand_d.is_empty();
+    let elim_budget = tunable!("ENOMOTO_T_XO_LI_ELIM_BUDGET", 50.0f64, f64) * cand_b.iter().map(|&j| col(std, j).len()).sum::<usize>() as f64;
+    let mut switched = false;
     for &j in &cand_b {
         if sel.full() {
+            break;
+        }
+        if li_match_ok && sel.stat[1] as f64 > elim_budget {
+            switched = true;
             break;
         }
         if sel.try_add(j, col(std, j)) {
             st.li_from_b += 1;
         }
     }
-    for &j in &cand_d {
-        if sel.full() {
-            break;
+    if switched {
+        let row_cnt = std::mem::take(&mut sel.row_cnt);
+        sel = BasisSelector::new(m, n);
+        sel.row_cnt = row_cnt;
+        st.li_from_b = 0;
+        let ord = matching_order();
+        for &(j, pref) in &ord {
+            if sel.full() {
+                break;
+            }
+            sel.pref_row = pref;
+            if sel.try_add(j, col(std, j)) {
+                st.li_from_b += 1;
+            }
         }
-        if sel.try_add(j, col(std, j)) {
-            st.li_from_d += 1;
-        }
+        sel.pref_row = None;
     }
     // 試験用 (`ENOMOTO_T_XO_FILL_BY_S=K`): 足りない列を、スラックで埋める前に、内点法の被約費用 |s_j| の小さい列
     // (スラックを含む) から試して埋める (足りない数の K 倍まで試す)。スラックを基底に入れるとその行の双対が 0 に
@@ -1762,9 +1839,9 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     if !sel.full() {
         return None;
     }
+    let mut basis = sel.chosen.clone();
 
     // ---- 5. 基底状態を作って仕上げ ----
-    let mut basis = sel.chosen.clone();
     let mut basis_pos: Vec<Option<usize>> = vec![None; n];
     for (k, &j) in basis.iter().enumerate() {
         basis_pos[j] = Some(k);
@@ -2966,6 +3043,8 @@ fn megiddo_push(
 /// `L` の列 `k` はピボット行 `piv[k]` と、受理時点の未ピボット行での乗数を持つ。
 struct BasisSelector {
     m: usize,
+    /// 次の [`Self::try_add`] で優先するピボット行 (数値的に十分大きいとき。マッチングで決めた行)。
+    pref_row: Option<usize>,
     /// 診断用の数え上げ (`ENOMOTO_DEBUG_CROSSOVER`): 三角求解でたどった L の列の数、消去で触れた L の非零の数、
     /// 作った L の非零の数、未ピボット行の走査の長さ。
     stat: [u64; 4],
@@ -2990,6 +3069,7 @@ impl BasisSelector {
     fn new(m: usize, n: usize) -> Self {
         BasisSelector {
             m,
+            pref_row: None,
             stat: [0; 4],
             chosen: Vec::with_capacity(m),
             is_chosen: vec![false; n],
@@ -3092,7 +3172,10 @@ impl BasisSelector {
             // しきい値つきの部分ピボット: 最大成分の `LI_PIV_REL` 倍以上の行のうち、非零の少ない行を選ぶ (フィルを抑える。
             // 最大成分の行だけでは qap15 で基底の選択に 26 秒かかった)。
             let mut p = best.1;
-            if !self.row_cnt.is_empty() {
+            let thr_pref = tunable!("ENOMOTO_T_XO_LI_PIV_REL", prm::LI_PIV_REL, f64) * best.0;
+            if let Some(r) = self.pref_row.filter(|&r| self.pivot_of_row[r] == usize::MAX && self.xw[r].abs() >= thr_pref && self.mark_row[r]) {
+                p = r;
+            } else if !self.row_cnt.is_empty() {
                 let thr = tunable!("ENOMOTO_T_XO_LI_PIV_REL", prm::LI_PIV_REL, f64) * best.0;
                 let mut bc = self.row_cnt[p];
                 for &i in &self.nz_rows {
