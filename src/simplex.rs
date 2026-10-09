@@ -1693,6 +1693,33 @@ fn solve_split(std: &StdForm, groups: &[Vec<usize>], solve_one: impl Fn(&StdForm
 /// まとめて 1 つの問題として解く。分けられる組が 2 つ未満なら `None` (呼び出し側が一括で解く)。
 /// 各組で内点法が収束しない・基底が作れないときは、その組だけ傾き・切片二段解法で解き直す。
 fn solve_ipm_crossover_split(std: &StdForm, opts: &crate::types::LpOptions) -> Option<SimplexResult> {
+    let groups = ipm_crossover_split_groups(std)?;
+    Some(solve_split(std, &groups, |s| {
+        crossover::solve_ipm_crossover(s).unwrap_or_else(|| {
+            crate::phase_timing::mark("crossover_fallback");
+            solve_std_form_decomposed(s, opts)
+        })
+    }))
+}
+
+/// 同時実行 ([`race`]) の内点法 + クロスオーバー側: [`solve_ipm_crossover_split`] と同じく独立な成分ごとに分けて解く
+/// (fome13 は 8 成分をまとめて 1 つの内点法で解くと終盤の精度が出ず、頂点が採用されないことがある)。
+/// どれかの組で内点法が収束しなければ、その組を二段解法で解き直さずに `None` を返す (二段解法は同時に走っている)。
+/// 分けられなければ問題全体を解く。
+pub(super) fn solve_ipm_crossover_race(std: &StdForm) -> Option<SimplexResult> {
+    if tunable!("ENOMOTO_T_RACE_XO_SPLIT", 1u8, u8) == 0 {
+        return crossover::solve_ipm_crossover(std);
+    }
+    let Some(groups) = ipm_crossover_split_groups(std) else {
+        return crossover::solve_ipm_crossover(std);
+    };
+    let r = solve_split(std, &groups, |s| crossover::solve_ipm_crossover(s).unwrap_or(SimplexResult { status: Status::NotSolved, x: None }));
+    (r.status != Status::NotSolved).then_some(r)
+}
+
+/// [`solve_ipm_crossover_split`] の組: 変数が `ENOMOTO_T_XO_SPLIT_MIN_VARS` (既定 [`XO_SPLIT_MIN_VARS`]) 以上の成分は 1 つずつ、
+/// それより小さい成分はまとめて 1 つ。分けられる組が 2 つ未満なら `None`。
+fn ipm_crossover_split_groups(std: &StdForm) -> Option<Vec<Vec<usize>>> {
     let min_vars = tunable!("ENOMOTO_T_XO_SPLIT_MIN_VARS", XO_SPLIT_MIN_VARS, usize);
     if min_vars == 0 {
         return None;
@@ -1715,12 +1742,7 @@ fn solve_ipm_crossover_split(std: &StdForm, opts: &crate::types::LpOptions) -> O
         groups.push(rest);
     }
     crate::phase_timing::record("xo_split_groups", groups.len() as f64);
-    Some(solve_split(std, &groups, |s| {
-        crossover::solve_ipm_crossover(s).unwrap_or_else(|| {
-            crate::phase_timing::mark("crossover_fallback");
-            solve_std_form_decomposed(s, opts)
-        })
-    }))
+    Some(groups)
 }
 
 /// 独立な成分それぞれの状態から問題全体の状態を決める。

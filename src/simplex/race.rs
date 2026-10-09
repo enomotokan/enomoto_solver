@@ -12,6 +12,8 @@
 //!   戻る。勝った結果はすぐ返し、負けた側のスレッドは待たない (内点法の 1 反復が長い問題で、打ち切りの
 //!   確認点までの時間を待たないため)。負けた側はトークンを見て間もなく止まり、そのプールも破棄される。
 //! - **解き直しなし**: 内点法が収束しなくても二段解法で解き直さない (二段解法が既に走っている)。
+//! - **成分ごと**: 内点法 + クロスオーバーは独立な成分ごとに分けて解く ([`super::solve_ipm_crossover_race`]、
+//!   `ENOMOTO_T_RACE_XO_SPLIT=0` で問題全体を 1 つで)。
 //! - **状態**: 1 回の求解ごとの状態 (LU のピボット閾値、解き直しの印、費用摂動の切り替え) はスレッドローカル
 //!   なので混ざらない。節目の時刻の記録 (`phase_timing`) は両方の節目が混ざって入る (名前で区別できる)。
 //!   勝った側を `race_simplex_won` / `race_ipm_crossover_won` で記録する。
@@ -20,7 +22,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 
-use super::{crossover, solve_std_form_decomposed, SimplexResult, StdForm};
+use super::{solve_std_form_decomposed, SimplexResult, StdForm};
 use crate::params::simplex::RACE_SIMPLEX_THREADS;
 use crate::types::Status;
 
@@ -69,7 +71,7 @@ pub(super) fn solve_race(std: Arc<StdForm>, opts: crate::types::LpOptions) -> Si
         let (std, cancel, tx, bound) = (std.clone(), cancel.clone(), tx.clone(), bound.clone());
         std::thread::spawn(move || {
             let r = pool_i.install(|| {
-                crate::cancel::with_token(Some(cancel), || crate::cancel::with_bound(Some(bound), || crossover::solve_ipm_crossover(&std)))
+                crate::cancel::with_token(Some(cancel), || crate::cancel::with_bound(Some(bound), || super::solve_ipm_crossover_race(&std)))
             });
             let _ = tx.send((Engine::IpmCrossover, r));
         });
@@ -116,7 +118,7 @@ fn solve_race_small(std: Arc<StdForm>, opts: crate::types::LpOptions) -> Simplex
     {
         let (std, cancel, bound) = (std.clone(), cancel.clone(), bound.clone());
         pool.spawn(move || {
-            let r = crate::cancel::with_token(Some(cancel.clone()), || crate::cancel::with_bound(Some(bound), || crossover::solve_ipm_crossover(&std)));
+            let r = crate::cancel::with_token(Some(cancel.clone()), || crate::cancel::with_bound(Some(bound), || super::solve_ipm_crossover_race(&std)));
             // 結論が出たら先に立てて二段解法を止める (二段解法が先なら立っている)。
             let won = r.as_ref().is_some_and(|r| r.status != Status::NotSolved) && !cancel.swap(true, Ordering::SeqCst);
             let _ = tx.send(if won { r } else { None });
