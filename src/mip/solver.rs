@@ -824,10 +824,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
         }
-        // 木の中のヒューリスティクスの予算は根で使った分を除いて数える (`ENOMOTO_MIP_HEUR_BUDGET_OLD` なら含める)。
-        // 含めると、根のサブ MIP の反復 (neos-1456979 で約 10 万) が木の予算 (LP 反復の 1/20 + 1 万) を超え、
-        // 木の中の RINS・ALNS・ランダム丸めが 60 秒の間ほとんど動かなかった
-        if env_str!("ENOMOTO_MIP_HEUR_BUDGET_OLD").is_none() {
+        // `ENOMOTO_MIP_HEUR_BUDGET_TREE`: 木の中のヒューリスティクスの予算を、根で使った分を除いて数える。既定は含める:
+        // 含めると根のサブ MIP の反復 (neos-1456979 で約 10 万) が木の予算 (LP 反復の 1/20 + 1 万) を超えて木の中の
+        // RINS・ALNS・ランダム丸めがほとんど動かないが、除くと 40 問で 19 -> 17 問 (sgeomean 27.82 -> 28.39。
+        // binkar10_1・neos-860300 が時間切れ) と悪化し、neos-1456979 も改善しなかった (285 が近傍で局所最適)
+        if env_str!("ENOMOTO_MIP_HEUR_BUDGET_TREE").is_some() {
             self.heur_iters_root = self.heur_iters;
         }
         // 並列モードは根のヒューリスティクスの間だけ (LP 解が整数で途中を飛ばした場合も戻す)
