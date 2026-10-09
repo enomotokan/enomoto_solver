@@ -1810,7 +1810,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 改善解で成り立つ (行は大域的に成り立つ元の行かカット)。今のノードの境界ではこれが破れている。
     /// 係数の小さい列と大域的に固定された列は大域的な境界で右辺に移す。密すぎるものは捨てる。
     pub(super) fn add_dual_proof(&mut self) {
-        if self.params.submip || env_str!("ENOMOTO_MIP_NO_DUAL_PROOF").is_some() {
+        // サブ MIP では既定で使わない (`ENOMOTO_MIP_SUBMIP_PROOFS` で使う。HiGHS のサブ MIP は本体と同じく使う)
+        if self.params.submip && env_str!("ENOMOTO_MIP_SUBMIP_PROOFS").is_none() || env_str!("ENOMOTO_MIP_NO_DUAL_PROOF").is_some() {
             return;
         }
         let y = self.lp.row_duals();
@@ -1986,7 +1987,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 行を `y` で足した `y^T A x >= sum_i y_i b_i` (`b_i` は y_i > 0 なら行の下限、y_i < 0 なら上限) はどの `y` でも
     /// 成り立つので、射線の数値誤差は正しさに影響しない (今のノードで破れていなければ捨てる)。符号は両方試す。
     pub(super) fn add_farkas_proof(&mut self) {
-        if self.params.submip || env_str!("ENOMOTO_MIP_NO_FARKAS").is_some() {
+        if self.params.submip && env_str!("ENOMOTO_MIP_SUBMIP_PROOFS").is_none() || env_str!("ENOMOTO_MIP_NO_FARKAS").is_some() {
             return;
         }
         let Some(ray) = self.lp.farkas_ray() else { return };
@@ -2142,7 +2143,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 直前の伝播の矛盾から衝突制約を作ってプールに入れる (定義域を巻き戻す前に呼ぶ)。衝突が 2 値列の固定だけで
     /// できていれば `sum_{x_j=1 の固定} x_j - sum_{x_j=0 の固定} x_j <= |{x_j=1}| - 1` (どれか 1 つは逆の値)。
     pub(super) fn add_conflict(&mut self) {
-        if self.params.submip && env_str!("ENOMOTO_MIP_SUBMIP_CONFLICTS").is_none() || env_str!("ENOMOTO_MIP_NO_CONFLICTS").is_some() {
+        if self.params.submip && env_str!("ENOMOTO_MIP_SUBMIP_CONFLICTS").is_none() && env_str!("ENOMOTO_MIP_SUBMIP_PROOFS").is_none() || env_str!("ENOMOTO_MIP_NO_CONFLICTS").is_some() {
             return;
         }
         let p = self.p;

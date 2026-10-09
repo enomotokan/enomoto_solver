@@ -252,8 +252,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // ラウンドは 2 回分と数える (何も進まない問題で長く回さない。分数の列が減っている間は続ける)。
                 let nfrac = self.fractional(&self.lp.col_values()).len();
                 let reldiff = (obj - prev_obj) / obj.abs().max(prev_obj.abs()).max(1.0);
+                // `ENOMOTO_MIP_CUT_STALL_ONE`: まったく進まないラウンドも 1 回分と数える (neos-1456979 では最初の
+                // 4 ラウンドは下界が動かず、続ければ上がる。HiGHS も止めずに 66 ラウンド回して 154 -> 171)
                 if reldiff <= 1e-4 && nfrac as f64 >= (0.9 - 0.1 * stall as f64) * prev_nfrac as f64 {
-                    stall += if nfrac >= prev_nfrac { 2 } else { 1 };
+                    stall += if nfrac >= prev_nfrac && env_str!("ENOMOTO_MIP_CUT_STALL_ONE").is_none() { 2 } else { 1 };
                     if stall >= if self.params.submip { 3 } else { tunable!("ENOMOTO_T_MIP_CUT_STALL", 10usize, usize) } {
                         break;
                     }
