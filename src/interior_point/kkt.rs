@@ -1024,7 +1024,7 @@ impl NormalKkt {
             let _ = m;
             let ok = mf.factor(&self.values, reg.dynamic_regularization_delta, reg.dynamic_regularization_epsilon);
             if env_str!("ENOMOTO_DEBUG_REFINE").is_some() {
-                eprintln!("FACTOR mf ok={ok} dynreg={}", super::multifrontal::DYNREG.swap(0, std::sync::atomic::Ordering::Relaxed));
+                eprintln!("FACTOR mf ok={ok} t={:.3}s prof={:?} dynreg={}", t_num.elapsed().as_secs_f64(), super::multifrontal::take_prof(), super::multifrontal::DYNREG.swap(0, std::sync::atomic::Ordering::Relaxed));
             }
             ok
         } else {
