@@ -430,15 +430,20 @@ fn presolve_mip(p: &MipProblem, verbose: bool) -> Option<Presolved> {
 ///   (どちらの値でも成り立つので、大域的に成り立つ)。
 ///
 /// 列の値は変えない (境界を締めるだけ) ので後処理は要らない。手間は伝播で走査した行の長さの合計
-/// (非零数の `ENOMOTO_T_MIP_PROBE_WORK` 倍、既定 20 倍) と時間 (`ENOMOTO_T_MIP_PROBE_TIME` 秒、既定 0.5 秒。長い行の多い問題 (nw04・air03) で 2 秒かけて何も得られなかった) で打ち切る。
+/// (非零数の `ENOMOTO_T_MIP_PROBE_WORK` 倍、既定 2000 倍) と時間 (`ENOMOTO_T_MIP_PROBE_TIME` 秒、既定 1 秒。固定・締め付けが
+/// 出ていれば `ENOMOTO_T_MIP_PROBE_TIME_FOUND` 秒、既定 3 秒。長い行の多い問題 (nw04・air03) は 1 回が重く何も得られない) で打ち切る。
 /// 締めた境界があれば `Some(true)`、何もなければ `None`。
 fn probe(prob: &mut MipProblem, verbose: bool) -> Option<bool> {
     use domain::Domain;
     let t0 = std::time::Instant::now();
     let n = prob.n;
     let nnz: usize = prob.rows.iter().map(|r| r.len()).sum();
-    let work_cap = (tunable!("ENOMOTO_T_MIP_PROBE_WORK", 20.0, f64) * nnz as f64) as u64 + 100_000;
-    let time_cap = tunable!("ENOMOTO_T_MIP_PROBE_TIME", 0.5, f64);
+    // 手間の上限は非零数の 2000 倍 (以前の 20 倍では 30n20b8 で 7971 列中 160 列しか試せず、全部試すと 0.55 秒で
+    // 3241 列が固定されて根の LP が 43.3 -> 122.8 (HiGHS 123.0) になる。neos-860300 も 2035 -> 2210)。時間の上限は
+    // 1 秒、固定・締め付けが出ていれば 3 秒 (air03・eil33-2・nw04 は列が長く 1 回が重いのに何も出ない)
+    let work_cap = (tunable!("ENOMOTO_T_MIP_PROBE_WORK", 2000.0, f64) * nnz as f64) as u64 + 100_000;
+    let time_cap = tunable!("ENOMOTO_T_MIP_PROBE_TIME", 1.0, f64);
+    let time_cap_found = tunable!("ENOMOTO_T_MIP_PROBE_TIME_FOUND", 3.0, f64);
     let mut dom = Domain::new(prob);
     if !dom.propagate(prob) {
         return Some(false);
@@ -449,7 +454,8 @@ fn probe(prob: &mut MipProblem, verbose: bool) -> Option<bool> {
     let work0 = dom.debug_work();
     let (mut probed, mut fixed, mut tightened) = (0usize, 0usize, 0usize);
     for (cnt, &j) in cands.iter().enumerate() {
-        if cnt % 16 == 0 && (dom.debug_work() - work0 > work_cap || t0.elapsed().as_secs_f64() > time_cap) {
+        let cap = if fixed + tightened > 0 { time_cap_found } else { time_cap };
+        if cnt % 16 == 0 && (dom.debug_work() - work0 > work_cap || t0.elapsed().as_secs_f64() > cap) {
             break;
         }
         if dom.lo[j] == dom.up[j] {
