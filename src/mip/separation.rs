@@ -472,7 +472,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// `ENOMOTO_T_MIP_CUT_ROWS_CAP` = r (> 0): カットの行が max(r × 元の行の数, 200) を超えたら、年齢の高い順に外して収める。
     pub(super) fn remove_aged_cuts(&mut self) -> usize {
         let base = tunable!("ENOMOTO_T_MIP_CUT_AGE_LIMIT", 300u32, u32);
-        let f = tunable!("ENOMOTO_T_MIP_CUT_AGE_PER_ROW", 0.0, f64);
+        // 既定は f = 0.5 (40 問: 一律 300 の 19 問 26.72 に対し 19 問 26.41。markshare_4_0 (4 行) 25 -> 14 秒、
+        // neos5 (63 行) は 42 -> 48 秒。カットの行の総数で抑える形 (`ENOMOTO_T_MIP_CUT_ROWS_CAP=2`) は 26.61)
+        let f = tunable!("ENOMOTO_T_MIP_CUT_AGE_PER_ROW", 0.5, f64);
         let limit = if f > 0.0 {
             let lo = tunable!("ENOMOTO_T_MIP_CUT_AGE_MIN", 30u32, u32);
             ((f * self.p.m as f64) as u32).clamp(lo.min(base), base)
