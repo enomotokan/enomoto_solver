@@ -305,6 +305,11 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// カットプールの重複判定用のハッシュと、プールの非零数。
     pub(super) cut_pool_keys: std::collections::HashSet<u64>,
     pub(super) cut_pool_nnz: usize,
+    /// カットプールの平坦な (CSR) 複製: 列番号・係数・各カットの開始位置 (長さ プール数 + 1)。違反の走査を 1 本の配列の
+    /// 走査にする (`Vec<Vec<..>>` を辿る走査は mik-250 で 40 秒中 1.4-1.9 秒かかっていた)。`add_to_pool` が同期する。
+    pub(super) pool_idx: Vec<u32>,
+    pub(super) pool_val: Vec<f64>,
+    pub(super) pool_start: Vec<u32>,
     /// 列ごとの (行, 係数) (oneopt 用、最初に使うときに作る)。
     pub(super) col_rows: Option<Rc<Vec<Vec<(usize, f64)>>>>,
     /// 求解の開始時 (根の伝播の後) に固定されていた整数列の数 (再スタートの判定用)。
@@ -444,6 +449,9 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
         proof_tightenings: 0,
         cut_pool_keys: std::collections::HashSet::new(),
         cut_pool_nnz: 0,
+        pool_idx: Vec::new(),
+        pool_val: Vec::new(),
+        pool_start: vec![0],
         col_rows: None,
         root_fixed0: 0,
         dive_iters: 0,
@@ -519,7 +527,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 証明できた (ただし根のヒューリスティクスの暫定解が 60-68 と悪く、実行ごとのばらつきが大きい)。
     /// 40 問 (3 並列、同時に測った既定 18 問 26.92 に対し) 17 問 28.56: neos-860300 は解けるようになる (58 秒) が neos5・mik-250 が
     /// 時間切れ (年齢で外れたカットが戻りきらずノードの LP が弱くなる)、misc07 11.0 -> 18.7 秒、qnet1 7.9 -> 11.7 秒、
-    /// binkar10_1 26.3 -> 38.8 秒。既定では使わない
+    /// binkar10_1 26.3 -> 38.8 秒。既定では使わない。
+    /// 基底の扱いを変えても mik-250 は解けない (60 秒): 保護あり (`ENOMOTO_MIP_HCM_PROTECT`) 下界 -52500、保存基底の修復
+    /// (`ENOMOTO_MIP_HCM_REPAIR`) -52656、どちらもなし -52483 (既定の設定は 31-35 秒で最適)。neos5 は修復版だけ 56.6 秒で解けた。
+    /// mik-250 で HiGHS 流にすると LP の反復が 193k -> 390k (同じ 4517 ノード) に増え、単体法の主ループが 7.2 -> 16.4 秒。
+    /// 行の追加・削除そのもの (標準形の作り直し + 次の求解での再分解) は 40 秒中 0.9 + 0.7 秒 (3192 回)、再分解は 0.1 秒未満、
+    /// プールの違反の走査は 1.4-1.9 秒だった (走査は平坦な複製 `pool_idx` で安くした)
     pub(super) fn highs_cutmgmt(&self) -> bool {
         env_str!("ENOMOTO_MIP_HIGHS_CUTMGMT").is_some() && !self.params.submip
     }
@@ -1418,7 +1431,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             }
                         }
                     }
-                } else if resolves < 2 && node.depth > 0 && plunge_depth == 0 && env_str!("ENOMOTO_MIP_NO_POOL_CUTS").is_none() && self.pool_cut_round(&x, 10) {
+                // `ENOMOTO_T_MIP_POOL_CUTS_PER_NODE`: 待ち行列から取り出したノードで 1 ラウンドにプールから戻すカットの本数。
+                // 10 本ずつだと、年齢で外れた (または他の部分木で入った) 根のカットが戻りきらず、ノードの LP が根より弱くなる。
+                // 100 本 (HiGHS はプールの違反カットを平行度だけで絞って全部戻す) にすると mik-250 35 -> 25 秒、nw04 34 -> 19 秒、
+                // binkar10_1 31 -> 28 秒、misc07 14 -> 12 秒、neos-860300 60 -> 50 秒 (単独)。1000 本は 100 本と同等かやや遅い。
+                // 40 問 (同時測定) 1 回目: 既定 10 本 18 問 27.75 に対し 100 本 18 問 26.86、2 回目: 19 問 27.19 に対し 18 問 27.63
+                // (neos-860300 が 58.7 秒 -> 時間切れ、nw04 17.7 -> 36.1 秒 (経路の揺れ)、misc07 11.3 -> 14.5 秒。mik-250・binkar10_1 は
+                // 2 回とも速い)。2 回の合計で解けた数が 37 -> 36 と減るので既定は 10 本のまま
+                } else if resolves < 2 && node.depth > 0 && plunge_depth == 0 && env_str!("ENOMOTO_MIP_NO_POOL_CUTS").is_none() && self.pool_cut_round(&x, tunable!("ENOMOTO_T_MIP_POOL_CUTS_PER_NODE", 10usize, usize)) {
                     resolves += 1;
                     continue;
                 }
@@ -2019,7 +2039,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         b2.row.resize(mr, VarStatus::Basic);
         let nb = b2.col.iter().chain(b2.row.iter()).filter(|&&s| s == VarStatus::Basic).count();
         self.restore_stats.0 += 1;
-        if nb > mr && env_str!("ENOMOTO_MIP_RESTORE_SMART_REPAIR").is_some() {
+        // `ENOMOTO_MIP_HCM_REPAIR`: HiGHS 流のカット管理でも今の基底のままにせず、この修復で保存した基底を使う
+        let hcm_repair = self.highs_cutmgmt() && env_str!("ENOMOTO_MIP_HCM_REPAIR").is_some();
+        if nb > mr && (env_str!("ENOMOTO_MIP_RESTORE_SMART_REPAIR").is_some() || hcm_repair) {
             // 基底変数が多すぎる (保存した基底で効いていたカットの行が消えた): 余分を、今の LP の基底 (直前のノードの
             // 最適基底) で非基底のもの (境界の近くにありそう) から、今の LP と同じ側の境界で非基底にして減らす
             let cur = self.lp.basis();
@@ -2052,7 +2074,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // misc07 などでは遠いノードの基底から解くことになり悪化した: 40 問で 19 -> 18 問)
             // HiGHS 流のカット管理 (`highs_cutmgmt`) でも今の基底のまま解く (neos-911970: 保存した基底を修復して使うと
             // ノードの LP は 1 回 75 反復で木の下界が根から動かず、今の基底なら 36 反復で 17000 ノード、下界 54.05・最適解 54.76 を発見)
-            if env_str!("ENOMOTO_MIP_RESTORE_KEEP_CURRENT").is_some() || self.highs_cutmgmt() {
+            if env_str!("ENOMOTO_MIP_RESTORE_KEEP_CURRENT").is_some() || (self.highs_cutmgmt() && !hcm_repair) {
                 return;
             }
         }

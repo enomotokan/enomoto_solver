@@ -183,12 +183,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let mut cands = self.separate(&x, false);
             // 再スタート前のカットをプールで引き継いだとき (`ENOMOTO_MIP_RESTART_CUTS_TO_POOL`): プールで違反しているものも候補にする
             if ((self.params.restarts > 0 && env_str!("ENOMOTO_MIP_RESTART_CUTS_TO_POOL").is_some()) || env_str!("ENOMOTO_MIP_CUTSEL_HIGHS_POOL").is_some()) && round < tunable!("ENOMOTO_T_MIP_ROOT_POOL_ROUNDS", 5usize, usize) && env_str!("ENOMOTO_MIP_NO_ROOT_POOL").is_none() {
-                for (c, r, norm) in &self.cut_pool {
-                    let act: f64 = c.iter().map(|&(j, v)| v * x[j]).sum();
-                    let eff = (act - r) / norm.max(1e-12);
-                    if eff > 1e-4 && act - r > 1e-6 * (1.0 + r.abs()) {
-                        cands.push(Candidate { coefs: c.clone(), rhs: *r, efficacy: eff });
-                    }
+                for (eff, k) in self.pool_violated(&x) {
+                    let (c, r, _) = &self.cut_pool[k];
+                    cands.push(Candidate { coefs: c.clone(), rhs: *r, efficacy: eff });
                 }
             }
             let ncands = cands.len();
@@ -404,6 +401,29 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let norm = coefs.iter().map(|&(_, v)| v * v).sum::<f64>().sqrt();
         self.cut_pool_nnz += coefs.len();
         self.cut_pool.push((coefs.to_vec(), rhs, norm));
+        for &(j, v) in coefs {
+            self.pool_idx.push(j as u32);
+            self.pool_val.push(v);
+        }
+        self.pool_start.push(self.pool_idx.len() as u32);
+    }
+
+    /// カットプールのうち LP 解 `x` が違反するカットの (効き目, 番号)。平坦な複製 (`pool_idx` など) を走査する。
+    pub(super) fn pool_violated(&self, x: &[f64]) -> Vec<(f64, usize)> {
+        let mut viol: Vec<(f64, usize)> = Vec::new();
+        for k in 0..self.cut_pool.len() {
+            let (s, e) = (self.pool_start[k] as usize, self.pool_start[k + 1] as usize);
+            let mut act = 0.0;
+            for t in s..e {
+                act += self.pool_val[t] * x[self.pool_idx[t] as usize];
+            }
+            let r = self.cut_pool[k].1;
+            let eff = (act - r) / self.cut_pool[k].2.max(1e-12);
+            if eff > 1e-4 && act - r > 1e-6 * (1.0 + r.abs()) {
+                viol.push((eff, k));
+            }
+        }
+        viol
     }
 
     /// カットプールから、LP 解 `x` が違反するカットを効き目の大きい順に最大 `max_cuts` 本 LP に加える
@@ -412,14 +432,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.cut_pool.is_empty() {
             return false;
         }
-        let mut viol: Vec<(f64, usize)> = Vec::new();
-        for (k, (c, r, norm)) in self.cut_pool.iter().enumerate() {
-            let act: f64 = c.iter().map(|&(j, v)| v * x[j]).sum();
-            let eff = (act - r) / norm.max(1e-12);
-            if eff > 1e-4 && act - r > 1e-6 * (1.0 + r.abs()) {
-                viol.push((eff, k));
-            }
-        }
+        let mut viol = self.pool_violated(x);
         if viol.is_empty() {
             return false;
         }
@@ -474,14 +487,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return false;
         }
         // `fresh` でなければプールのカットだけ (安価。年齢で外れた根のカットを戻すのが主な役目)
+        crate::simplex::slope_intercept_dual::xprof("hcm_pre");
         let mut cands = if fresh { self.separate(x, true) } else { Vec::new() };
-        for (c, r, norm) in &self.cut_pool {
-            let act: f64 = c.iter().map(|&(j, v)| v * x[j]).sum();
-            let eff = (act - r) / norm.max(1e-12);
-            if eff > 1e-4 && act - r > 1e-6 * (1.0 + r.abs()) {
-                cands.push(Candidate { coefs: c.clone(), rhs: *r, efficacy: eff });
-            }
+        crate::simplex::slope_intercept_dual::xprof("hcm_sep");
+        for (eff, k) in self.pool_violated(x) {
+            let (c, r, _) = &self.cut_pool[k];
+            cands.push(Candidate { coefs: c.clone(), rhs: *r, efficacy: eff });
         }
+        crate::simplex::slope_intercept_dual::xprof("hcm_pool");
         if cands.is_empty() {
             return false;
         }
@@ -552,7 +565,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     pub(super) fn basis_protected_cuts(&mut self) -> Option<std::rc::Rc<Vec<u64>>> {
         // HiGHS 流のカット管理では保護しない (HiGHS と同じく、取り出したノードの基底が LP の行と合わなければ今の基底から解く。
         // 保護すると待ち行列のノードが数千あるときほぼ全てのカットが外せず、neos-911970 では LP が行数の上限 607 に張り付いた)
-        if env_str!("ENOMOTO_MIP_NO_PROTECT_QUEUE_CUTS").is_some() || self.params.submip || self.highs_cutmgmt() {
+        if env_str!("ENOMOTO_MIP_NO_PROTECT_QUEUE_CUTS").is_some() || self.params.submip || (self.highs_cutmgmt() && env_str!("ENOMOTO_MIP_HCM_PROTECT").is_none()) {
             return None;
         }
         self.sync_cut_age();

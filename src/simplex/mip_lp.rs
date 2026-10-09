@@ -255,7 +255,13 @@ impl TwoStageLp {
         self.status = None;
     }
 
+    /// 行を加える。標準形を作り直し (`rebuild`: 凍結した行列を作り直し、PRICE 用の行列の識別子を変え、最適基底の LU の
+    /// キャッシュを捨てる)、新しい行のスラックを基底に入れる。次の求解は基底を分解し直す (HiGHS は
+    /// `kExtendInvertWhenAddingRows` で INVERT を拡張する)。コストの実測 (mik-250、HiGHS 流のカット管理で 40 秒、3192 回の
+    /// 追加 + 削除): この関数 0.9 秒、`delete_rows` 0.7 秒、再分解 0.1 秒未満。LP の反復 (16 秒) に比べ小さいので、
+    /// LU の拡張は実装していない (`ENOMOTO_MIP_XPROF` の `lp_add_rows` / `lp_del_rows` で測れる)。
     pub fn add_rows(&mut self, new_rows: &[(Vec<(usize, f64)>, f64, f64)]) {
+        sid::xprof("lp_pre_add");
         let m0 = self.rows.len();
         for (r, l, u) in new_rows {
             let mut r: Vec<(usize, f64)> = r.iter().filter(|&&(_, v)| v != 0.0).cloned().collect();
@@ -283,9 +289,11 @@ impl TwoStageLp {
         }
         self.y.resize(self.rows.len(), 0.0);
         self.status = None;
+        sid::xprof("lp_add_rows");
     }
 
     pub fn delete_rows(&mut self, remove: &[bool]) {
+        sid::xprof("lp_pre_del");
         let m = self.rows.len();
         let mut new_index = vec![usize::MAX; m];
         let mut k = 0;
@@ -337,6 +345,7 @@ impl TwoStageLp {
             self.dse_cache = None;
         }
         self.status = None;
+        sid::xprof("lp_del_rows");
     }
 
     /// 基底列の数を行数に合わせる (多ければ構造列を外し、足りなければ非基底の行のスラックを入れる)。
