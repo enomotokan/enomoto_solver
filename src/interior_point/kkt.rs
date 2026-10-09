@@ -117,10 +117,13 @@ fn metis_ordering(pat: &SymbolicSparseColMat<usize>) -> Option<(Vec<usize>, Vec<
     Some((perm.into_iter().map(|v| v as usize).collect(), iperm.into_iter().map(|v| v as usize).collect()))
 }
 
-/// 正規方程式の記号分解。並べ替えは `ENOMOTO_T_CHOL_ORDER`: 0 = AMD (既定)、1 = METIS (nested dissection)、
-/// 2 = AMD の演算量が大きいときだけ METIS も試し、演算量の少ない方 (行数 `ENOMOTO_T_CHOL_ORDER_MIN_N` 以上のときだけ)。
+/// 正規方程式の記号分解。並べ替えは `ENOMOTO_T_CHOL_ORDER`: 0 = AMD、1 = METIS (nested dissection)、
+/// 2 (既定) = AMD の演算量が大きいときだけ METIS も試し、演算量の少ない方 (行数 `ENOMOTO_T_CHOL_ORDER_MIN_N` 以上のときだけ)。
+/// 2 は 2026-10-09 の比較 (auto の内点法を成分ごとに解くのと合わせて) で既定にした: Mittelmann 9 問のシフト付き幾何平均
+/// 0.818 倍 (nug08-3rd 425 → 160 秒、supportcase10 26 → 18 秒)、Netlib + Kennington 0.998 倍。以前 METIS で悪化した
+/// fome13 は、auto で 8 成分をまとめて 1 つの内点法で解いていたのが原因で、成分ごとに解けば悪化しない。
 fn symbolic_with_ordering(pat: &SymbolicSparseColMat<usize>, dbg: bool) -> Option<SymbolicCholesky<usize>> {
-    let mode = tunable!("ENOMOTO_T_CHOL_ORDER", 0u8, u8);
+    let mode = tunable!("ENOMOTO_T_CHOL_ORDER", 2u8, u8);
     let min_n = tunable!("ENOMOTO_T_CHOL_ORDER_MIN_N", 1000usize, usize);
     let amd = || factorize_symbolic_cholesky::<usize>(pat.as_ref(), Side::Upper, SymmetricOrdering::Amd, chol_symbolic_params()).ok();
     if mode == 0 || pat.nrows() < min_n {
