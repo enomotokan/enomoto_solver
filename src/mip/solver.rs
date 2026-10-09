@@ -1894,6 +1894,31 @@ impl<'a, L: MipLp> Solver<'a, L> {
         b2.row.resize(mr, VarStatus::Basic);
         let nb = b2.col.iter().chain(b2.row.iter()).filter(|&&s| s == VarStatus::Basic).count();
         self.restore_stats.0 += 1;
+        if nb > mr && env_str!("ENOMOTO_MIP_RESTORE_SMART_REPAIR").is_some() {
+            // 基底変数が多すぎる (保存した基底で効いていたカットの行が消えた): 余分を、今の LP の基底 (直前のノードの
+            // 最適基底) で非基底のもの (境界の近くにありそう) から、今の LP と同じ側の境界で非基底にして減らす
+            let cur = self.lp.basis();
+            let mut excess = nb - mr;
+            for j in 0..b2.col.len().min(cur.col.len()) {
+                if excess == 0 {
+                    break;
+                }
+                if b2.col[j] == VarStatus::Basic && cur.col[j] != VarStatus::Basic {
+                    b2.col[j] = cur.col[j];
+                    excess -= 1;
+                }
+            }
+            for i in 0..b2.row.len().min(cur.row.len()) {
+                if excess == 0 {
+                    break;
+                }
+                if b2.row[i] == VarStatus::Basic && cur.row[i] != VarStatus::Basic {
+                    b2.row[i] = cur.row[i];
+                    excess -= 1;
+                }
+            }
+        }
+        let nb = b2.col.iter().chain(b2.row.iter()).filter(|&&s| s == VarStatus::Basic).count();
         if nb != mr {
             self.restore_stats.1 += 1;
             // 保存した基底で非基底だった (効いていた) カットの行が削除されていると基底変数が多すぎる。既定では
