@@ -3960,6 +3960,19 @@ impl NzTrack {
         }
     }
 
+    /// 有効なら非ゼロになりうる位置の一覧を昇順にそろえて返す (重複も除く。一覧を位置の集合として使う
+    /// [`Self::reset`] などの意味は変わらない)。
+    #[inline]
+    pub fn sorted_indices(&mut self) -> Option<&[usize]> {
+        if self.full {
+            None
+        } else {
+            self.idx.sort_unstable();
+            self.idx.dedup();
+            Some(&self.idx)
+        }
+    }
+
     /// 前回の位置 (無効なら全体) を 0 に戻し、空の有効な記録にする。
     #[inline]
     fn reset(&mut self, v: &mut [f64]) {
@@ -6760,6 +6773,63 @@ impl FtLu {
             self.tick.set(self.tick.get() - self.base.m as u64);
         }
         self.u_solve_into(scratch);
+        let nnz = self.permute_out(scratch, out);
+        scratch.fill(0.0);
+        nnz
+    }
+
+    /// [`Self::solve_sparse_into_capture`] の、書き出す位置を記録する版 (単体法系の共通部品
+    /// [`super::basis_kernel::BasisKernel::ftran_col`] 用、大きな問題)。値・演算順・tick は同じで、違いは書き出しと後始末だけ:
+    ///
+    /// - `a_tilde_out` は非ゼロになりうる位置 (`L` 段の到達集合と `R` eta で値が変わった行) だけを書き、`track.a_tilde`
+    ///   に残す ([`Self::try_update_tracked`] がその位置だけから eta を作る)。
+    /// - `U` 段を超疎に解けたら、`out` は前回の位置を消して今回の位置だけを書き、`track.alpha` に残す。`scratch` も
+    ///   その位置だけ 0 に戻す。超疎に解けなければ全体を書き、`track.alpha` は無効 (全体) にする。
+    /// - `R` eta がすべて列方向索引に載っていれば (`try_update_tracked` で更新した因子)、`R` 段も疎に当てる
+    ///   ([`Self::apply_r_sparse`]、値はビット一致)。
+    ///
+    /// `out`・`a_tilde_out` は前回この関数で書いたものを外で書き換えないこと (書き換えたら `track` の該当する記録を
+    /// [`NzTrack::set_full`] で無効にする)。
+    pub fn solve_sparse_into_capture_tracked(
+        &self,
+        rhs_sparse: &[(usize, f64)],
+        scratch: &mut [f64],
+        gp: &mut GpScratch,
+        out: &mut [f64],
+        a_tilde_out: &mut [f64],
+        track: &mut FtranTrack,
+    ) -> usize {
+        self.base.l_solve_sparse_into(rhs_sparse, scratch, gp);
+        self.add_tick(gp.reach.len() as u64);
+        if self.r_sparse_ready() {
+            // tick は全 eta を当てたときと同じ (`r_nnz_total` は全 `R` eta の非ゼロ数の和)。
+            self.add_tick(self.r_nnz_total as u64);
+            let GpScratch { reach, r_seeds, r_work, .. } = &mut *gp;
+            self.apply_r_sparse(scratch, reach, r_seeds, r_work);
+        } else {
+            gp.r_seeds.clear();
+            for reta in self.r_etas.iter() {
+                let dot = self.r_etas.dot(reta.k, scratch);
+                self.add_tick(self.r_etas.nnz(reta.k) as u64);
+                scratch[reta.slot] -= dot;
+                if dot != 0.0 {
+                    gp.r_seeds.push(reta.slot);
+                }
+            }
+        }
+        self.capture_a_tilde(scratch, a_tilde_out, Some(&mut *gp), Some(&mut *track));
+        if self.u_hyper_ok(gp) {
+            self.add_tick(self.base.m as u64);
+            if self.u_solve_hyper(scratch, gp) {
+                let nnz = self.permute_list_tracked(scratch, out, &gp.u_list, &mut track.alpha);
+                clear_after_hyper(scratch, true, gp);
+                return nnz;
+            }
+            // `scratch` に触れる前に中断した: 既に加えた一律 tick を戻して全走査する。
+            self.tick.set(self.tick.get() - self.base.m as u64);
+        }
+        self.u_solve_into(scratch);
+        track.alpha.set_full();
         let nnz = self.permute_out(scratch, out);
         scratch.fill(0.0);
         nnz

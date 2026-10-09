@@ -53,7 +53,7 @@
 //!   ([`hat_upper`] 参照)。
 
 use super::{sparse_lu, InfeasibleRows, NbStatus, SimplexResult, StdForm, Status};
-use super::basis_kernel::{ft_max_updates, RefactorDue, SynthDensity};
+use super::basis_kernel::{ft_max_updates, FtranFuse, RefactorDue, SparsePaths, SynthDensity};
 use crate::sparse::sparse_axpy_dense;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -3518,24 +3518,19 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     };
     // 先読み距離 (要素数、`ENOMOTO_T_PREFETCH_DIST`)。
     let prefetch_dist = tunable!("ENOMOTO_T_PREFETCH_DIST", PREFETCH_DIST, usize);
-    // 入る列 `A_q` の密ベクトル(密 FTRAN の右辺。反復間は常に 0)。
-    let mut dense_q = vec![0.0f64; m];
     // `alpha_full = B^-1 A_q`(入る列の FTRAN 結果)。
     let mut alpha_full = vec![0.0f64; m];
     // `alpha_full`(とフリップ結果)の非ゼロ行一覧(昇順)。`x_B` の疎更新用。
     let mut xb_rows = vec![0u32; m];
     // DSE の `tau = B^-1 rho`。
     let mut tau = vec![0.0f64; m];
-    // 入る列/`tau` 融合 FTRAN の `tau` 側作業領域(入る列側は `lu_scratch`)。
-    let mut tau_scratch = vec![0.0f64; m];
     // この反復の `rho` の BTRAN が記録した非ゼロステップ。融合 `tau` FTRAN の `L` 段を
     // Gilbert-Peierls 経路にするために使う([`sparse_lu::StepCapture`]、密 `L` 段とビット同一)。
     let mut rho_steps = sparse_lu::StepCapture::new(m);
-    // 融合 FTRAN の出力(`alpha_full`/`tau`/`a_tilde_buf`)の非ゼロ位置の記録([`sparse_lu::FtranTrack`])。
+    // 融合 FTRAN の出力(`alpha_full`/`tau`/`a_tilde`)の非ゼロ位置を記録するか([`sparse_lu::FtranTrack`]、kernel が持つ)。
     // 超疎経路では前回の位置だけを消して書くので、長さ `m` の `fill`/`copy` を省ける(ビット同一)。
     // `ENOMOTO_SPARSE_FTRAN_OUT=0` で従来の全体書き出し(A/B 用)。
     let sparse_ftran_out = BIG && env_str!("ENOMOTO_SPARSE_FTRAN_OUT").map_or(true, |v| v != "0");
-    let mut ftran_track = sparse_lu::FtranTrack::new();
     // 作業 #10 (B): 部分 `tau` の反復は `tau` の密度の移動平均に入れない (`ENOMOTO_T_PARTIAL_TAU_SKIP_DENSITY=1`、
     // 既定 0 = 旧版。合成クロックの密度区分が変わり irish-electricity (旧前処理) の経路が特異基底に入ったので既定にしない)。
     let partial_tau_skip_density = tunable!("ENOMOTO_T_PARTIAL_TAU_SKIP_DENSITY", 0u8, u8) != 0;
@@ -3547,17 +3542,12 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     // DSE の `tau` FTRAN を入る列の FTRAN と融合するか(`ENOMOTO_FUSED_DSE_FTRAN=0` で別々。ビット同一)。
     let fused_dse_ftran = env_str!("ENOMOTO_FUSED_DSE_FTRAN").map_or(true, |v| v != "0");
     // BFRT 結合フリップの(密分岐の)FTRAN を第 3 のベクトルとして同じ走査に融合するか
-    // (`ENOMOTO_FUSED_BFRT_FTRAN=0` で別々。ビット同一)。`combined_scratch` はその作業領域。
+    // (`ENOMOTO_FUSED_BFRT_FTRAN=0` で別々。ビット同一)。
     let fused_bfrt_ftran = env_str!("ENOMOTO_FUSED_BFRT_FTRAN").map_or(true, |v| v != "0");
-    let mut combined_scratch = vec![0.0f64; m];
     // BFRT 結合フリップの結果を入る列の `x_B` 更新ループ内で反映するか(1 パス・1 行 1 回の
     // `refresh_row`)。`ENOMOTO_MERGE_FLIP_XB=0` で別パス。行ごとの演算は同じで、
     // `InfeasibleRows` のメンバーシップ変更の順序だけが変わりうる。
     let merge_flip_xb = env_str!("ENOMOTO_MERGE_FLIP_XB").map_or(true, |v| v != "0");
-    // FT 更新用のキャプチャバッファ: `a_tilde_buf` は入る列の (融合) FTRAN の副産物として埋まる
-    // (`rho` の BTRAN の `e_tilde` は `kernel` が持つ)。キャプチャから使用までの間に他の何もこれに
-    // 書き込んではならない。
-    let mut a_tilde_buf = vec![0.0f64; m];
     // 比率テストの候補(chuzc1 の出力)。
     let mut candidates: Vec<Cand> = Vec::new();
     // chuzc1 のヒープ用領域(反復をまたいで再利用)。
@@ -3630,10 +3620,9 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     let mut gp_scratch = sparse_lu::GpScratch::new(m);
 
     // 呼び出し箇所ごとの FTRAN **結果**密度の移動平均。入力の非ゼロ数と合わせて密/疎ソルブを
-    // 切り替える(入力が疎でも `L` のフィルインで結果が密になりうるため)。入る列の FTRAN と
-    // BFRT 結合フリップの FTRAN は右辺の性質が違うので別々に持つ。求解全体の性質なので
+    // 切り替える(入力が疎でも `L` のフィルインで結果が密になりうるため)。入る列の FTRAN の分は kernel が持ち
+    // (`kernel.density_col()`)、ここは右辺の性質が違う BFRT 結合フリップの FTRAN の分。求解全体の性質なので
     // 再分解をまたいで保持する(HiGHS も `HEkk` で同様)。
-    let mut density_col_aq = sparse_lu::FtranDensity::new();
     let mut density_bfrt = sparse_lu::FtranDensity::new();
     // C5: 融合 DSE `tau` FTRAN の結果密度(その `U` 段を超疎にするかの判定用)。
     let mut density_tau = sparse_lu::FtranDensity::new();
@@ -4047,8 +4036,10 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     };
     // ピボット行の BTRAN・FT 更新・再分解トリガ (主単体法・仕上げと共有する部品)。周期検査は `x_B(M)` の
     // ドリフト検査と同じ `xb_check_cadence` ごとで、eta の fill の上限は分解が大きいとき `FT_BUMP_LU_RATIO · nnz(LU)`
-    // まで広げる。入る列の FTRAN は DSE の `tau` などと融合してこのループで解く。
+    // まで広げる。入る列の FTRAN も DSE の `tau` などと融合して kernel で解く (`ftran_fused`)。演算経路は `BIG` (疎経路) と
+    // `sparse_ftran_out` (出力の位置の記録) で選ぶ (超疎 `U` 段のしきい値などは既定)。
     let mut kernel = super::basis_kernel::BasisKernel::new(m, ft_max_updates(m))
+        .with_paths(SparsePaths { sparse: BIG, track_out: sparse_ftran_out, ..SparsePaths::for_m(m) })
         .with_periodic_check(xb_check_cadence, tunable!("ENOMOTO_T_FT_BUMP_LU_RATIO", FT_BUMP_LU_RATIO, f64));
     // 主ループ内の再分解。特異なら(作業 #5 M3)直近の成功した再分解以降のピボットを巻き戻して
     // 前の基底を分解し直し([`rollback_pivots`])、戻したピボットの `(r, q)` を以後の比率テストで禁止する
@@ -4643,7 +4634,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         // (c): ピボット行の BTRAN `rho = B^-T e_r`(`M` に依存しないので `rho`/`a_p`/`d` は
         // 通常の `f64`)。この反復の FT 更新用に `e_tilde` (U^-T 後・R 逆適用前の中間値) を `kernel` に、
         // 融合 `tau` FTRAN 用に非ゼロステップを `rho_steps` に記録する (大きな問題では超疎版)。
-        timed!(profile_phases, prof_phases::BTRAN, kernel.btran_row_steps(&lu, r, &mut rho, &mut rho_steps, BIG));
+        timed!(profile_phases, prof_phases::BTRAN, kernel.btran_row_steps(&lu, r, &mut rho, &mut rho_steps));
         // 診断: 維持している DSE 重みと `‖rho‖^2`(真の値)の相対誤差を区間別に数える
         // (`O(m)` なので作業量集計 `ENOMOTO_PROF_PHASES_EXT_WORK` のときだけ。策8)。
         if profile_work {
@@ -5450,9 +5441,8 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         // FTRAN: `alpha_full = B^-1 A_q`(ピボット前の `lu` に対して)。DSE 重み更新、
         // `x_B(M)` の増分更新、下の updateVerify で使う。`alpha_q` と `alpha_full[r]` は
         // 同じピボット要素を別経路(BTRAN+内積 と FTRAN)で求めたもの。
-        // 列の非ゼロ数と結果密度履歴で密/疎ソルブを切り替える。密分岐では生の列を
-        // `dense_q` に散布して右辺とする。どちらの分岐も `try_update_precomputed` 用に
-        // `a_tilde_buf`(L/R 後・U 前の中間値)をキャプチャする。
+        // 列の非ゼロ数と結果密度履歴で密/疎ソルブを切り替え、FT 更新用に `a_tilde`(L/R 後・U 前の中間値)を
+        // kernel に記録する。
         // DSE の `tau = B^-1 rho` が融合 FTRAN で求まったか。
         let mut tau_ready = false;
         // 遅延した結合フリップ基底チャネルの FTRAN 結果の非ゼロ数。
@@ -5465,163 +5455,45 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         let u_hyper_tau_gate = tunable!("ENOMOTO_FTRAN_U_HYPER_TAU", FTRAN_U_HYPER_TAU_DENSITY, f64);
         rho_steps.set_u_hyper(u_hyper_tau_gate > 0.0 && density_tau.expected() < u_hyper_tau_gate);
         // 部分 `tau` は DSE 重み更新が入る列の非ゼロ行だけを読む場合(フリップ結果の併合なし)に限る。
-        ftran_track.partial_tau = partial_tau && !combined_pending;
+        kernel.ftran_track().partial_tau = partial_tau && !combined_pending;
         timed!(profile_phases, prof_phases::FTRAN, {
-            if profile_phases && density_col_aq.predicts_dense() && !lu.should_use_dense_solve(std.cols.col(q).len()) {
+            if profile_phases && kernel.density_col().predicts_dense() && !lu.should_use_dense_solve(std.cols.col(q).len()) {
                 prof_phases::DENSITY_GATE_FTRANS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
-            if lu.should_use_dense_solve_tracked(std.cols.col(q).len(), &density_col_aq) {
-                // `dense_q` は反復間で常に 0 に保ち、密分岐でだけ散布→求解→同じパターンを
-                // 0 に戻す(毎回 `O(m)` の `fill` をしない)。
-                for &(i, v) in std.cols.col(q) {
-                    dense_q[i] = v;
-                }
-                // 入る列と `tau` の結果がどちらも密と見込めるときだけ、2〜3 本の FTRAN を並列に解く
-                // (`FtLu::solve_into_pair_capture_tracked`)。片方が疎なら融合版のほうが速い (irish-electricity の `alpha` は 25%)。
-                let par_ftran_dense = {
-                    let th = tunable!("ENOMOTO_T_PAR_FTRAN_MIN_DENSITY", PAR_FTRAN_MIN_DENSITY, f64);
-                    density_col_aq.expected() >= th && density_tau.expected() >= th
-                };
-                let result_nnz = if combined_deferred {
-                    let (a_nnz, b_nnz, c_nnz) = if BIG { lu.solve_into_triple_capture_tracked(
-                        &dense_q,
-                        &rho,
-                        &combined_base,
-                        &mut lu_scratch,
-                        &mut tau_scratch,
-                        &mut combined_scratch,
-                        &mut alpha_full,
-                        &mut tau,
-                        &mut combined_alpha_base,
-                        &mut a_tilde_buf,
-                        Some(&mut rho_steps),
-                        sparse_ftran_out.then_some(&mut ftran_track),
-                        Some(std.cols.col(q)),
-                        par_ftran_dense,
-                    ) } else { lu.solve_into_triple_capture(
-                        &dense_q,
-                        &rho,
-                        &combined_base,
-                        &mut lu_scratch,
-                        &mut tau_scratch,
-                        &mut combined_scratch,
-                        &mut alpha_full,
-                        &mut tau,
-                        &mut combined_alpha_base,
-                        &mut a_tilde_buf,
-                        Some(&mut rho_steps),
-                    ) };
-                    combined_base_nnz = c_nnz;
-                    tau_ready = true;
-                    tau_nnz = Some(b_nnz);
-                    a_nnz
-                } else if fused_dse_ftran {
-                    // DSE の `tau = B^-1 rho_p` FTRAN を同じ走査に融合する
-                    // (`solve_into_pair_capture` 参照)。
-                    let (a_nnz, b_nnz) = if BIG {
-                        lu.solve_into_pair_capture_tracked(&dense_q, &rho, &mut lu_scratch, &mut tau_scratch, &mut alpha_full, &mut tau, &mut a_tilde_buf, Some(&mut rho_steps), sparse_ftran_out.then_some(&mut ftran_track), Some(std.cols.col(q)), par_ftran_dense)
-                    } else {
-                        lu.solve_into_pair_capture(&dense_q, &rho, &mut lu_scratch, &mut tau_scratch, &mut alpha_full, &mut tau, &mut a_tilde_buf, Some(&mut rho_steps))
-                    };
-                    tau_ready = true;
-                    tau_nnz = Some(b_nnz);
-                    a_nnz
-                } else {
-                    if BIG {
-                        ftran_track.alpha.set_full();
-                        ftran_track.a_tilde.set_full();
-                    }
-                    lu.solve_into_capture(&dense_q, &mut lu_scratch, &mut alpha_full, &mut a_tilde_buf)
-                };
-                for &(i, _) in std.cols.col(q) {
-                    dense_q[i] = 0.0;
-                }
-                alpha_nnz = result_nnz;
-                density_col_aq.record(result_nnz, m);
+            // 入る列と `tau` の結果がどちらも密と見込めるときだけ、密経路で 2〜3 本の FTRAN を並列に解く
+            // (`FtLu::solve_into_pair_capture_tracked`)。片方が疎なら融合版のほうが速い (irish-electricity の `alpha` は 25%)。
+            let par_ftran_dense = {
+                let th = tunable!("ENOMOTO_T_PAR_FTRAN_MIN_DENSITY", PAR_FTRAN_MIN_DENSITY, f64);
+                kernel.density_col().expected() >= th && density_tau.expected() >= th
+            };
+            // DSE の `tau = B^-1 rho_p` (と遅延した BFRT 結合フリップの基底チャネル) を入る列の FTRAN と同じ走査に融合する
+            // (単体法系の共通部品 `kernel.ftran_fused`。密/疎の切り替え・超疎 `U` 段・`a_tilde` の記録もそこで行う)。
+            let fuse = if combined_deferred {
+                FtranFuse::TauFlip(&rho, &combined_base)
+            } else if fused_dse_ftran {
+                FtranFuse::Tau(&rho)
             } else {
-                // C5 (`ENOMOTO_FTRAN_U_HYPER=<gate>`、既定 0.1、0 でオフ): 入る列の結果密度が
-                // `gate` 未満の間は `U` 段を超疎で解く(ビット同一)。
-                let u_hyper_gate = tunable!("ENOMOTO_FTRAN_U_HYPER", FTRAN_U_HYPER_DENSITY, f64);
-                gp_scratch.u_hyper = u_hyper_gate > 0.0 && density_col_aq.expected() < u_hyper_gate;
-                let result_nnz = if combined_deferred {
-                    let (a_nnz, b_nnz, c_nnz) = if BIG { lu.solve_sparse_into_triple_capture_tracked(
-                        std.cols.col(q),
-                        &rho,
-                        &combined_base,
-                        &mut sparse_scratch,
-                        &mut gp_scratch,
-                        &mut tau_scratch,
-                        &mut combined_scratch,
-                        &mut alpha_full,
-                        &mut tau,
-                        &mut combined_alpha_base,
-                        &mut a_tilde_buf,
-                        Some(&mut rho_steps),
-                        sparse_ftran_out.then_some(&mut ftran_track),
-                    ) } else { lu.solve_sparse_into_triple_capture(
-                        std.cols.col(q),
-                        &rho,
-                        &combined_base,
-                        &mut sparse_scratch,
-                        &mut gp_scratch,
-                        &mut tau_scratch,
-                        &mut combined_scratch,
-                        &mut alpha_full,
-                        &mut tau,
-                        &mut combined_alpha_base,
-                        &mut a_tilde_buf,
-                        Some(&mut rho_steps),
-                    ) };
-                    combined_base_nnz = c_nnz;
-                    tau_ready = true;
-                    tau_nnz = Some(b_nnz);
-                    a_nnz
-                } else if fused_dse_ftran {
-                    let (a_nnz, b_nnz) = if BIG { lu.solve_sparse_into_pair_capture_tracked(
-                        std.cols.col(q),
-                        &rho,
-                        &mut sparse_scratch,
-                        &mut gp_scratch,
-                        &mut tau_scratch,
-                        &mut alpha_full,
-                        &mut tau,
-                        &mut a_tilde_buf,
-                        Some(&mut rho_steps),
-                        sparse_ftran_out.then_some(&mut ftran_track),
-                    ) } else { lu.solve_sparse_into_pair_capture(
-                        std.cols.col(q),
-                        &rho,
-                        &mut sparse_scratch,
-                        &mut gp_scratch,
-                        &mut tau_scratch,
-                        &mut alpha_full,
-                        &mut tau,
-                        &mut a_tilde_buf,
-                        Some(&mut rho_steps),
-                    ) };
-                    tau_ready = true;
-                    tau_nnz = Some(b_nnz);
-                    a_nnz
-                } else {
-                    if BIG {
-                        ftran_track.alpha.set_full();
-                        ftran_track.a_tilde.set_full();
-                    }
-                    lu.solve_sparse_into_capture(std.cols.col(q), &mut sparse_scratch, &mut gp_scratch, &mut alpha_full, &mut a_tilde_buf)
-                };
-                gp_scratch.u_hyper = false;
-                alpha_nnz = result_nnz;
-                density_col_aq.record(result_nnz, m);
+                FtranFuse::None
+            };
+            let (a_nnz, b_nnz, c_nnz) =
+                kernel.ftran_fused::<BIG>(&lu, std.cols.col(q), fuse, &mut alpha_full, &mut tau, &mut combined_alpha_base, Some(&mut rho_steps), par_ftran_dense);
+            if let Some(c) = c_nnz {
+                combined_base_nnz = c;
             }
+            if b_nnz.is_some() {
+                tau_ready = true;
+                tau_nnz = b_nnz;
+            }
+            alpha_nnz = a_nnz;
             if let Some(n) = tau_nnz {
                 // 作業 #10 (B): 部分 `tau` の非ゼロ数は入る列の非ゼロ行の分だけで `tau` の密度ではないので、
                 // 密度の移動平均 (超疎 `U` 段の選択と合成クロックが読む) には入れない。
-                if !(BIG && partial_tau_skip_density && ftran_track.tau_is_partial()) {
+                if !(BIG && partial_tau_skip_density && kernel.ftran_track().tau_is_partial()) {
                     density_tau.record(n, m);
                 }
             }
             if profile_phases {
-                prof_phases::DENSITY_COL_AQ_PPT.store((density_col_aq.expected() * 1000.0) as usize, std::sync::atomic::Ordering::Relaxed);
+                prof_phases::DENSITY_COL_AQ_PPT.store((kernel.density_col().expected() * 1000.0) as usize, std::sync::atomic::Ordering::Relaxed);
             }
         });
         if combined_deferred {
@@ -5850,7 +5722,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                 // 策13 の一部: フリップ結果と入る列の結果の非ゼロ位置がすべて記録されていれば、その和集合から
                 // 非ゼロ行を昇順に集める (`compact_rows` と同じ行の集合・順序)。
                 let union_lists = if flip_track && combined_pending {
-                    match (ftran_track.alpha.indices(), cab_track.indices(), if combined_slope_nonzero { cas_track.indices() } else { Some(&[][..]) }) {
+                    match (kernel.ftran_track().alpha.indices(), cab_track.indices(), if combined_slope_nonzero { cas_track.indices() } else { Some(&[][..]) }) {
                         (Some(a), Some(b), Some(c)) => Some((a, b, c)),
                         _ => None,
                     }
@@ -5875,7 +5747,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                     compact_rows(m, &mut xb_rows, |i| (alpha_full[i].to_bits() | combined_alpha_base[i].to_bits() | combined_alpha_slope[i].to_bits()) << 1)
                 } else if combined_pending {
                     compact_rows(m, &mut xb_rows, |i| (alpha_full[i].to_bits() | combined_alpha_base[i].to_bits()) << 1)
-                } else if let Some(idx) = if BIG { ftran_track.alpha.indices() } else { None } {
+                } else if let Some(idx) = if BIG { kernel.ftran_track().alpha.indices() } else { None } {
                     // 策5: 融合 FTRAN が記録した位置(超疎経路)から非ゼロ行を昇順に集める
                     // (`compact_rows` の `O(m)` 走査の代わり。同じ行の集合・順序)。
                     let mut k = 0usize;
@@ -6037,13 +5909,13 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         let contribution_slope = theta_slope * dj_q;
 
         // 部分 `tau` は行一覧での DSE 更新にしか使えない(全行更新になるなら `tau` を全体で求め直す)。
-        if BIG && ftran_track.tau_is_partial() && xb_list_len.is_none() {
+        if BIG && kernel.ftran_track().tau_is_partial() && xb_list_len.is_none() {
             tau_ready = false;
         }
         timed!(profile_phases, prof_phases::DSE_UPDATE, {
             if !tau_ready {
                 if BIG {
-                    ftran_track.tau.set_full();
+                    kernel.ftran_track().tau.set_full();
                 }
                 timed!(profile_phases, prof_phases::DSE_FTRAN, lu.solve_into(&rho, &mut lu_scratch, &mut tau));
             }
@@ -6292,19 +6164,19 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
             diag_shift_cols += shift_degenerate_costs(std, &nb_status, degen_shift_base, &mut active_cost, &mut d);
         }
 
-        // Forrest-Tomlin 増分更新と再分解トリガ (`kernel.update_and_check_fused`): (2) FT 更新がピボットを拒否、
+        // Forrest-Tomlin 増分更新と再分解トリガ (`kernel.update_and_check_with`): (2) FT 更新がピボットを拒否、
         // (4) 更新回数上限 (`ft_max_updates`)、(5) 合成クロック、(3) eta のフィルが大きすぎる
         // (`xb_check_cadence` ごとの周期検査)。周期検査の時点でフィルが問題なければ、`x_B(M)` の残差ドリフトと
         // `d` のドリフトをここで検査する。どれかが問題を見つけたときだけ再分解する。
         // `x_B(M)` の残差は両チャネル(基底と傾き)を検査する(比較の多くは傾きで決まるため)。
-        // FT 更新は同じ反復の BTRAN/FTRAN でキャプチャ済みの `e_tilde` (`kernel`) と `a_tilde_buf` を使う。
+        // FT 更新は同じ反復の BTRAN/FTRAN でキャプチャ済みの `e_tilde`・`a_tilde` (どちらも `kernel`) を使う。
         // 合成クロックの係数は求解結果の密度で選ぶ (策11 / 報告 P 策5(b)、[`SynthDensity`]): 入る列の FTRAN 結果の
         // 非ゼロ率の移動平均が `SYNTH_CLOCK_DENSE_FRACTION` 以上なら密、DSE `tau` の非ゼロ率の移動平均が
         // `SYNTH_CLOCK_MID_TAU_FRACTION` 以上なら中程度 (それぞれ `ENOMOTO_T_...`、0 = 無効)。
         let synth_density = {
             let fd = tunable!("ENOMOTO_T_SYNTH_CLOCK_DENSE_FRACTION", SYNTH_CLOCK_DENSE_FRACTION, f64);
             let fm = tunable!("ENOMOTO_T_SYNTH_CLOCK_MID_TAU_FRACTION", SYNTH_CLOCK_MID_TAU_FRACTION, f64);
-            if fd > 0.0 && density_col_aq.expected() >= fd {
+            if fd > 0.0 && kernel.density_col().expected() >= fd {
                 SynthDensity::Dense
             } else if fm > 0.0 && density_tau.expected() >= fm {
                 SynthDensity::Mid
@@ -6315,7 +6187,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         let due = timed!(
             profile_phases,
             prof_phases::FT_UPDATE,
-            kernel.update_and_check_fused(&mut lu, r, &a_tilde_buf, if BIG { Some(&mut ftran_track) } else { None }, synth_density)
+            kernel.update_and_check_with(&mut lu, r, synth_density)
         );
         let mut need_refactor = due.is_due();
         match due {
@@ -6835,6 +6707,9 @@ pub(super) fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_
     let mut lu = lu;
     // 入る列の FTRAN・ピボット行の BTRAN・FT 更新・再分解トリガ (主単体法と共有する部品)。
     let mut kernel = super::basis_kernel::BasisKernel::new(m, ft_max_updates(m));
+    // ピボット行の BTRAN・入る列の FTRAN の結果の非ゼロ行 (昇順、`kernel` から)。
+    let mut rho_rows: Vec<usize> = Vec::with_capacity(m);
+    let mut alpha_rows: Vec<usize> = Vec::with_capacity(m);
     // 前回の残差チェックからの FT チェック回数(`RESIDUAL_CHECK_MULTIPLIER` 回ごとに残差を測る)。
     let mut since_residual_check = 0usize;
     // LU 求解用の作業領域。
@@ -7262,11 +7137,12 @@ pub(super) fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_
 
         // BTRAN: `rho = B^-T e_r`。この反復の FT 更新用に `e_tilde` も `kernel` に記録する。
         kernel.btran_row(&lu, r, &mut rho);
+        kernel.btran_rows_into(&rho, &mut rho_rows);
 
         // 行方向の疎 PRICE: `rho` の非ゼロ行だけを走査して `a_p = rho^T A` を作る
         // (固定列は除外。基底列は除外しない)。`rho_sq` は作業 #5 の雑音判定用の `‖rho‖^2`(`|rho_i| > TOL` の行)。
         let mut rho_sq = 0.0f64;
-        for i in 0..m {
+        for &i in &rho_rows {
             let rv = rho[i];
             if rv.abs() <= TOL {
                 continue;
@@ -7469,6 +7345,7 @@ pub(super) fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_
 
         // FTRAN: `alpha_full = B^{-1}A_q`(密/疎を切り替え)。FT 更新用に `a_tilde` も `kernel` に記録する。
         kernel.ftran_col(&lu, std.cols.col(q), &mut alpha_full);
+        kernel.ftran_rows_into(&alpha_full, &mut alpha_rows);
 
         // updateVerify: PRICE の値 `alpha_q` と FTRAN の値 `alpha_full[r]` を照合し、
         // 不一致なら再分解・再同期してこの反復をやり直す。
@@ -7493,7 +7370,7 @@ pub(super) fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_
         };
         let target = if d_dir > 0 { std.lb[basis[r]] } else { std.ub[basis[r]] };
         let theta = (x_b[r] - target) / alpha_q;
-        for i in 0..m {
+        for &i in &alpha_rows {
             let a = alpha_full[i];
             if a != 0.0 {
                 x_b[i] -= a * theta;

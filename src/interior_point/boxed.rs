@@ -649,7 +649,9 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
                     if debug {
                         eprintln!("IPM it={it} external lower bound={lb:.10e} rel_gap={ext:.2e}");
                     }
-                    if ext <= w.bound_gap && rel.0 <= w.bound_pres {
+                    // 差が負に大きい (主目的値が厳密な下界を下回る) 点は主実行可能から遠いので渡さない
+                    // (pds-20 は 5 反復目に主残差 5e-3、差 -0.61 で渡し、壊れた点からクロスオーバーと仕上げを走らせていた)。
+                    if ext.abs() <= w.bound_gap && rel.0 <= w.bound_pres {
                         if debug {
                             eprintln!("IPM it={it} stopping: gap to the shared lower bound {ext:.2e} <= {:.1e}", w.bound_gap);
                         }
