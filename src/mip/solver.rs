@@ -153,6 +153,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) clique_graph: Option<std::rc::Rc<super::clique::CliqueGraph>>,
     /// ヒューリスティクスに使った LP 反復数。
     pub(super) heur_iters: u64,
+    /// 根のヒューリスティクスを終えた時点の `heur_iters` (木の中の予算は、これを引いた分で数える)。
+    pub(super) heur_iters_root: u64,
     /// 列ごとの lock 数 (下げると違反しうる行の数, 上げると違反しうる行の数)。
     pub(super) locks: Vec<(u32, u32)>,
     /// 擬似乱数の状態。
@@ -345,6 +347,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
         last_sb: None,
         clique_graph: None,
         heur_iters: 0,
+        heur_iters_root: 0,
         locks: super::heuristics::compute_locks(p),
         rng: 0x2545_F491_4F6C_DD1D,
         root_redcost: None,
@@ -821,6 +824,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
         }
+        // 木の中のヒューリスティクスの予算は根で使った分を除いて数える (`ENOMOTO_MIP_HEUR_BUDGET_OLD` なら含める)。
+        // 含めると、根のサブ MIP の反復 (neos-1456979 で約 10 万) が木の予算 (LP 反復の 1/20 + 1 万) を超え、
+        // 木の中の RINS・ALNS・ランダム丸めが 60 秒の間ほとんど動かなかった
+        if env_str!("ENOMOTO_MIP_HEUR_BUDGET_OLD").is_none() {
+            self.heur_iters_root = self.heur_iters;
+        }
         // 並列モードは根のヒューリスティクスの間だけ (LP 解が整数で途中を飛ばした場合も戻す)
         self.parallel_submips = false;
         self.join_submips(0);
@@ -1160,7 +1169,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     // 既定はヒューリスティクス共通の反復の予算の中で 100 ノードおき (時間の予算を与えると、改善しない
                     // 問題で解ける問題を遅くした: 40 問で 15 -> 14 問)。ENOMOTO_MIP_LNS_TIME で時間の予算にする
                     let lns_time = env_str!("ENOMOTO_MIP_LNS_TIME").is_some();
-                    let lns_ok = if lns_time { self.lns_secs < frac * self.start.elapsed().as_secs_f64() } else { self.heur_iters < budget };
+                    let lns_ok = if lns_time { self.lns_secs < frac * self.start.elapsed().as_secs_f64() } else { self.heur_iters - self.heur_iters_root < budget };
                     let lns_freq = if lns_time { tunable!("ENOMOTO_T_MIP_LNS_FREQ", 50u64, u64) } else { 100 };
                     if node.depth > 0 && plunge_depth == 0 && self.incumbent.is_some() && self.nodes >= self.last_rins + lns_freq && lns_ok {
                         self.last_rins = self.nodes;
@@ -1190,7 +1199,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             }
                         }
                         self.lns_secs += t_lns.elapsed().as_secs_f64();
-                    } else if node.depth > 0 && plunge_depth == 0 && self.heur_iters < budget {
+                    } else if node.depth > 0 && plunge_depth == 0 && self.heur_iters - self.heur_iters_root < budget {
                         self.randomized_rounding(&x, 1);
                     }
                     // 暫定解がない間は木の中でも解探しを強める (`ENOMOTO_MIP_NOINC_HEUR` で有効。根で暫定解のない 2 問
