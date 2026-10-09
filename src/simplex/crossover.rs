@@ -2815,7 +2815,6 @@ fn megiddo_push(
     let mut d = vec![0.0; m];
     let mut rho = vec![0.0; m];
     let mut nz: Vec<usize> = Vec::new();
-    let mut rho_steps = sparse_lu::StepCapture::new(m);
     let (mut pivots, mut to_bound, mut unresolved) = (0usize, 0usize, 0usize);
     // 向き `σ` での比率テスト。(歩幅, 塞ぐ基底位置 (自身なら None), 塞いだ境界は上限か)。
     // `nz` は `d` の非零の位置 (基底のほとんどがスラックの問題では `d` が疎で、長さ `m` の走査が手間の大半になる)。
@@ -2894,8 +2893,7 @@ fn megiddo_push(
         }
         let xj = xs[si];
         kernel.ftran_col(&lu, col(std, j), &mut d);
-        nz.clear();
-        nz.extend((0..m).filter(|&k| d[k] != 0.0));
+        kernel.ftran_rows_into(&d, &mut nz);
         let mut dj = std.c[j];
         for &k in &nz {
             dj -= cb[k] * d[k];
@@ -2938,8 +2936,8 @@ fn megiddo_push(
             }
             Some(r) => {
                 let q = basis[r];
-                // `rho` は使わない (FT 更新の `e_tilde` を記録するため)。超疎版で解き、更新も非零の位置だけで行う。
-                kernel.btran_row_steps(&lu, r, &mut rho, &mut rho_steps, true);
+                // `rho` は使わない (FT 更新の `e_tilde` を記録するため)。
+                kernel.btran_row(&lu, r, &mut rho);
                 basis[r] = j;
                 basis_pos[j] = Some(r);
                 basis_pos[q] = None;
@@ -2948,7 +2946,7 @@ fn megiddo_push(
                 xb[r] = xj + ts;
                 cb[r] = std.c[j];
                 pivots += 1;
-                if kernel.update_and_check_e_tracked(&mut lu, r).is_due() {
+                if kernel.update_and_check(&mut lu, r).is_due() {
                     lu = factorize_basis(std, basis_pos, Some(&lu))?;
                     kernel = BasisKernel::new(m, ft_max_updates(m));
                     let xs_ref = &xs;

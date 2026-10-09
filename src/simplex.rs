@@ -1238,6 +1238,9 @@ fn run_phase2_incremental(std: &StdForm, t: &mut Tableau, lu: &mut sparse_lu::Ft
         hits_upper: bool,
     }
     let mut candidates: Vec<Candidate> = Vec::with_capacity(m);
+    // 入る列の FTRAN・ピボット行の BTRAN の結果の非ゼロ行 (昇順、`kernel` から)。
+    let mut alpha_rows: Vec<usize> = Vec::with_capacity(m);
+    let mut rho_rows: Vec<usize> = Vec::with_capacity(m);
 
     let mut need_fresh = true; // 次の反復の頭で x_B と d を作り直すか
     let max_iters = max_iters_for(m, n);
@@ -1324,6 +1327,8 @@ fn run_phase2_incremental(std: &StdForm, t: &mut Tableau, lu: &mut sparse_lu::Ft
         };
 
         kernel.ftran_col(lu, t.column_sparse(enter), &mut alpha);
+        // 結果の非ゼロ行 (昇順。大きな問題では FTRAN の記録から、長さ `m` の走査をしない)。
+        kernel.ftran_rows_into(&alpha, &mut alpha_rows);
 
         // 比率テスト: EXPAND 2 パス (Gill et al. 1989)。
         //
@@ -1339,7 +1344,7 @@ fn run_phase2_incremental(std: &StdForm, t: &mut Tableau, lu: &mut sparse_lu::Ft
         let self_width = std.ub[enter] - std.lb[enter];
         let init_alpha1 = if self_width.is_finite() { self_width } else { f64::INFINITY };
         candidates.clear();
-        for i in 0..m {
+        for &i in &alpha_rows {
             let rate = -best_dir * alpha[i];
             if rate.abs() <= min_pivot {
                 continue;
@@ -1386,7 +1391,7 @@ fn run_phase2_incremental(std: &StdForm, t: &mut Tableau, lu: &mut sparse_lu::Ft
             stall.stall_count = 0;
         }
 
-        for i in 0..m {
+        for &i in &alpha_rows {
             let var = t.basis[i];
             t.x[var] -= best_dir * alpha[i] * theta;
         }
@@ -1401,10 +1406,15 @@ fn run_phase2_incremental(std: &StdForm, t: &mut Tableau, lu: &mut sparse_lu::Ft
 
         // 入れ替え前の基底でピボット行 (と最急辺なら `w^T A`) を行方向に集める。
         kernel.btran_row(lu, r, &mut rho);
-        if !use_devex {
+        if use_devex {
+            kernel.btran_rows_into(&rho, &mut rho_rows);
+        } else {
+            // 最急辺の `w = B^-T alpha` は密なので全行を見る。
             lu.solve_transpose_into(&alpha, &mut scratch, &mut w);
+            rho_rows.clear();
+            rho_rows.extend(0..m);
         }
-        for i in 0..m {
+        for &i in &rho_rows {
             let rv = rho[i];
             let wv = if use_devex { 0.0 } else { w[i] };
             if rv.abs() <= TOL && wv.abs() <= TOL {
