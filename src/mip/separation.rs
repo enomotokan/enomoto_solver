@@ -457,10 +457,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
     }
 
-    /// 今の LP の基底で効いている (論理変数が非基底の) カットの番号 (`ENOMOTO_MIP_PROTECT_QUEUE_CUTS` のときだけ。
-    /// 待ち行列に入れるノードに持たせ、その間は年齢で外さない)。
+    /// 今の LP の基底で効いている (論理変数が非基底の) カットの番号 (待ち行列に入れるノードに持たせ、その間は年齢で
+    /// 外さない。取り出したときに保存した基底が必ず合う)。`ENOMOTO_MIP_NO_PROTECT_QUEUE_CUTS` で無効。
+    /// 40 問: 19 問 27.04 -> 19 問 26.89 (保護して年齢の上限を一律 30 にすると 17 問 27.55)
     pub(super) fn basis_protected_cuts(&mut self) -> Option<std::rc::Rc<Vec<u64>>> {
-        if env_str!("ENOMOTO_MIP_PROTECT_QUEUE_CUTS").is_none() || self.params.submip {
+        if env_str!("ENOMOTO_MIP_NO_PROTECT_QUEUE_CUTS").is_some() || self.params.submip {
             return None;
         }
         self.sync_cut_age();
