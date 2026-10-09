@@ -1267,7 +1267,31 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let keep = (self.submip_time_frac, self.submip_time_max);
             self.submip_time_frac = tunable!("ENOMOTO_T_MIP_NOINC_SUBMIP_FRAC", 0.4, f64);
             self.submip_time_max = tunable!("ENOMOTO_T_MIP_NOINC_SUBMIP_MAX", 20.0, f64);
-            let found = self.rens_dive_with(Some(tunable!("ENOMOTO_T_MIP_NOINC_RENS_RATE", 0.8, f64)));
+            // HiGHS の RENS と同じく、解が見つからなければ達した固定率の半分を目標にしてやり直す
+            // (`ENOMOTO_T_MIP_NOINC_RENS_TRIES` 回まで。固定率が 0.1 未満になるか時間切れでやめる)。
+            // やり直しのサブ MIP には残り時間の `ENOMOTO_T_MIP_NOINC_SUBMIP_FRAC2` (既定 0.25) を与える。
+            // 既定は 1 回 (やり直さない): 30n20b8 では固定率 0.8 -> 0.4 -> 0.2 とサブ MIP が大きくなるほど進まず
+            // (1601 列で 275 ノード、4817 列で 31 ノード、6417 列で 0 ノード、どれも時間切れ)、時間を使うだけだった
+            let mut target = tunable!("ENOMOTO_T_MIP_NOINC_RENS_RATE", 0.8, f64);
+            let tries = tunable!("ENOMOTO_T_MIP_NOINC_RENS_TRIES", 1usize, usize).max(1);
+            let mut found = false;
+            for t in 0..tries {
+                if t > 0 {
+                    self.submip_time_frac = tunable!("ENOMOTO_T_MIP_NOINC_SUBMIP_FRAC2", 0.25, f64);
+                }
+                let (ok, fr) = self.rens_dive_with(Some(target));
+                if self.params.verbose {
+                    eprintln!("MIP:   no-incumbent RENS try {}: target {target:.2}, fixing rate {fr:.2}, found {ok}", t + 1);
+                }
+                if ok || self.incumbent.is_some() {
+                    found = ok;
+                    break;
+                }
+                target = 0.5 * if fr > 0.0 { fr } else { target };
+                if target < 0.1 || self.time_up() {
+                    break;
+                }
+            }
             (self.submip_time_frac, self.submip_time_max) = keep;
             return found;
         }
@@ -1279,18 +1303,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// ダイビング式の RENS ([`Self::rens`] の説明を参照。固定率を成功・失敗から調整する)。暫定解がない間の木の中でも使う。
     pub(super) fn rens_dive(&mut self) -> bool {
-        self.rens_dive_with(None)
+        self.rens_dive_with(None).0
     }
 
     /// [`Self::rens_dive`] で、目標の固定率を `target` に固定するもの (`None` なら成功・失敗から決める)。
-    fn rens_dive_with(&mut self, target_fixed: Option<f64>) -> bool {
+    /// 戻り値は (解を受け入れたか, 達した固定率)。
+    fn rens_dive_with(&mut self, target_fixed: Option<f64>) -> (bool, f64) {
         let p = self.p;
         if self.params.submip {
-            return false;
+            return (false, 0.0);
         }
         let ints: Vec<usize> = (0..p.n).filter(|&j| p.is_int[j] && self.dom.lo[j] < self.dom.up[j]).collect();
         if ints.is_empty() {
-            return false;
+            return (false, 0.0);
         }
         // 目標の固定率
         let r0 = tunable!("ENOMOTO_T_MIP_RENS_RATE", 0.6, f64);
@@ -1413,7 +1438,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             eprintln!("MIP:   RENS: fixing rate {fr:.2} (target {target:.2}, {backtracks} backtracks)");
         }
         if fr < 0.1 {
-            return false;
+            return (false, fr);
         }
         let mut sub = p.clone();
         sub.col_lo = lo;
@@ -1423,14 +1448,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
             Some((_, true)) => {
                 self.rens_succ.0 += fr;
                 self.rens_succ.1 += 1;
-                true
+                (true, fr)
             }
             Some((super::solver::MipStatus::Infeasible, false)) => {
                 self.rens_infeas.0 += fr;
                 self.rens_infeas.1 += 1;
-                false
+                (false, fr)
             }
-            _ => false,
+            _ => (false, fr),
         }
     }
 
