@@ -1178,7 +1178,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         };
         let params = super::solver::MipParams {
             time_limit: (self.submip_time_frac * remaining).min(self.submip_time_max),
-            node_limit,
+            // `ENOMOTO_T_MIP_SUBMIP_NODES_MULT`: サブ MIP のノード上限 (多くは 500) の倍率 (既定 1)
+            node_limit: ((node_limit as f64) * tunable!("ENOMOTO_T_MIP_SUBMIP_NODES_MULT", 1.0, f64)) as u64,
             rel_gap: self.params.rel_gap,
             abs_gap: self.params.abs_gap,
             // 診断用: `ENOMOTO_MIP_SUBMIP_VERBOSE` ならサブ MIP の経過も出す
