@@ -1045,6 +1045,7 @@ impl NormalKkt {
         // Woodbury: W = M_s^{-1} U (U の列 q = a_q * sqrt(dinv_q))、C = I + U^T W の Cholesky。
         let k = self.dense_cols.len();
         if k > 0 {
+            let t_w = std::time::Instant::now();
             let mut w = std::mem::take(&mut self.w_mat);
             for q in 0..k {
                 let j = self.dense_cols[q];
@@ -1054,9 +1055,41 @@ impl NormalKkt {
                 for &(i, v) in &self.col_ent[self.col_ptr[j]..self.col_ptr[j + 1]] {
                     col[i] = v * sq;
                 }
-                self.solve_ms(col);
+            }
+            // multifrontal なら列を束ねて行列積で解き、束どうしは並列に回す。束の大きさは列をスレッドに
+            // 等分した数 (4 本以上、`ENOMOTO_T_WOODBURY_BLOCK` (既定 64) 本以下、0 なら 1 本ずつ)。
+            let block_max = tunable!("ENOMOTO_T_WOODBURY_BLOCK", 64usize, usize);
+            let block = k.div_ceil(rayon::current_num_threads().max(1)).max(4).min(block_max);
+            if block > 0 && self.pardiso.is_none() && self.mf.is_some() {
+                use rayon::prelude::*;
+                let mf = self.mf.as_ref().unwrap();
+                let dscale = &self.dscale;
+                w.par_chunks_mut(p * block).for_each(|cols| {
+                    if !dscale.is_empty() {
+                        for col in cols.chunks_mut(p) {
+                            for (v, s) in col.iter_mut().zip(dscale) {
+                                *v *= s;
+                            }
+                        }
+                    }
+                    mf.solve_multi_in_place(cols, cols.len() / p);
+                    if !dscale.is_empty() {
+                        for col in cols.chunks_mut(p) {
+                            for (v, s) in col.iter_mut().zip(dscale) {
+                                *v *= s;
+                            }
+                        }
+                    }
+                });
+            } else {
+                for q in 0..k {
+                    self.solve_ms(&mut w[q * p..(q + 1) * p]);
+                }
             }
             self.w_mat = w;
+            if env_str!("ENOMOTO_DEBUG_WOODBURY").is_some() {
+                eprintln!("WOODBURY p={p} k={k} block={block} solve={:.3}s", t_w.elapsed().as_secs_f64());
+            }
             let mut cm = vec![0.0f64; k * k];
             for r in 0..k {
                 let jr = self.dense_cols[r];

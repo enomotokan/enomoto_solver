@@ -9,7 +9,7 @@
 
 use faer::linalg::cholesky::llt::compute::{cholesky_in_place, cholesky_in_place_req, LltParams, LltRegularization};
 use faer::linalg::matmul::triangular::BlockStructure;
-use faer::mat::{from_column_major_slice, from_column_major_slice_mut};
+use faer::mat::{from_column_major_slice, from_column_major_slice_mut, from_row_major_slice, from_row_major_slice_mut};
 use faer::sparse::linalg::cholesky::{SymbolicCholesky, SymbolicCholeskyRaw};
 use faer::sparse::SymbolicSparseColMat;
 use faer::{Parallelism, dyn_stack::{GlobalPodBuffer, PodStack}};
@@ -633,5 +633,104 @@ impl Multifrontal {
             rhs[self.perm_fwd[i]] = x[i];
         }
         let _ = &self.perm_inv;
+    }
+
+    /// `k` 本の右辺 (`rhs` は列優先の `n x k`) をまとめて解く。中身は `solve_in_place` と同じで、
+    /// 密な演算が行列ベクトル積から行列積になる。作業域は行優先の `n x k` (supernode の行がひと続き)。
+    pub fn solve_multi_in_place(&self, rhs: &mut [f64], k: usize) {
+        let n = self.n;
+        debug_assert_eq!(rhs.len(), n * k);
+        let mut x = vec![0.0f64; n * k];
+        for c in 0..k {
+            let col = &rhs[c * n..(c + 1) * n];
+            for i in 0..n {
+                x[i * k + c] = col[self.perm_fwd[i]];
+            }
+        }
+        let ns = self.begin.len();
+        let mut tmp: Vec<f64> = Vec::new();
+        for s in 0..ns {
+            let (b, e) = (self.begin[s], self.end[s]);
+            let nc = e - b;
+            let r = self.pat_ptr[s + 1] - self.pat_ptr[s];
+            let f = nc + r;
+            let lmat = from_column_major_slice::<f64, usize, usize>(&self.l[self.l_ptr[s]..self.l_ptr[s + 1]], f, nc);
+            let (l11, l21) = lmat.split_at_row(nc);
+            {
+                let xs = from_row_major_slice_mut::<f64, usize, usize>(&mut x[b * k..e * k], nc, k);
+                if self.signs.is_some() {
+                    faer::linalg::triangular_solve::solve_unit_lower_triangular_in_place(l11, xs, Parallelism::None);
+                } else {
+                    faer::linalg::triangular_solve::solve_lower_triangular_in_place(l11, xs, Parallelism::None);
+                }
+            }
+            if r > 0 {
+                let pat = &self.pat[self.pat_ptr[s]..self.pat_ptr[s + 1]];
+                tmp.clear();
+                tmp.resize(r * k, 0.0);
+                let xs = from_row_major_slice::<f64, usize, usize>(&x[b * k..e * k], nc, k);
+                faer::linalg::matmul::matmul(
+                    from_row_major_slice_mut::<f64, usize, usize>(&mut tmp, r, k),
+                    l21,
+                    xs,
+                    None,
+                    1.0,
+                    Parallelism::None,
+                );
+                for (t, &i) in pat.iter().enumerate() {
+                    for (xv, tv) in x[i * k..(i + 1) * k].iter_mut().zip(&tmp[t * k..(t + 1) * k]) {
+                        *xv -= tv;
+                    }
+                }
+            }
+        }
+        if self.signs.is_some() {
+            for s in 0..ns {
+                let (b, e) = (self.begin[s], self.end[s]);
+                let f = e - b + self.pat_ptr[s + 1] - self.pat_ptr[s];
+                let ls = &self.l[self.l_ptr[s]..self.l_ptr[s + 1]];
+                for j in 0..e - b {
+                    let d = ls[j * f + j];
+                    for xv in &mut x[(b + j) * k..(b + j + 1) * k] {
+                        *xv /= d;
+                    }
+                }
+            }
+        }
+        for s in (0..ns).rev() {
+            let (b, e) = (self.begin[s], self.end[s]);
+            let nc = e - b;
+            let r = self.pat_ptr[s + 1] - self.pat_ptr[s];
+            let f = nc + r;
+            let lmat = from_column_major_slice::<f64, usize, usize>(&self.l[self.l_ptr[s]..self.l_ptr[s + 1]], f, nc);
+            let (l11, l21) = lmat.split_at_row(nc);
+            if r > 0 {
+                let pat = &self.pat[self.pat_ptr[s]..self.pat_ptr[s + 1]];
+                tmp.clear();
+                for &i in pat {
+                    tmp.extend_from_slice(&x[i * k..(i + 1) * k]);
+                }
+                faer::linalg::matmul::matmul(
+                    from_row_major_slice_mut::<f64, usize, usize>(&mut x[b * k..e * k], nc, k),
+                    l21.transpose(),
+                    from_row_major_slice::<f64, usize, usize>(&tmp, r, k),
+                    Some(1.0),
+                    -1.0,
+                    Parallelism::None,
+                );
+            }
+            let xs = from_row_major_slice_mut::<f64, usize, usize>(&mut x[b * k..e * k], nc, k);
+            if self.signs.is_some() {
+                faer::linalg::triangular_solve::solve_unit_upper_triangular_in_place(l11.transpose(), xs, Parallelism::None);
+            } else {
+                faer::linalg::triangular_solve::solve_upper_triangular_in_place(l11.transpose(), xs, Parallelism::None);
+            }
+        }
+        for c in 0..k {
+            let col = &mut rhs[c * n..(c + 1) * n];
+            for i in 0..n {
+                col[self.perm_fwd[i]] = x[i * k + c];
+            }
+        }
     }
 }
