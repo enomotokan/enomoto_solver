@@ -147,24 +147,26 @@ def main():
     ap.add_argument("--single-run-above", type=float, default=30.0)
     ap.add_argument("--time-limit", type=float, default=600.0)
     ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument("--only", nargs="*", help="この名前の問題だけ")
+    ap.add_argument("--solvers", nargs="+", default=["enomoto", "highs"], choices=["enomoto", "highs"])
     a = ap.parse_args()
     done = set()
     if a.out.exists():
         for l in a.out.read_text().splitlines():
             r = json.loads(l); done.add((r["set"], r["problem"]))
     for s, name in problem_list(a.sets):
-        if (s, name) in done: continue
+        if (s, name) in done or (a.only and name not in a.only): continue
         (REPO / ".mittelmann_cache/tmp").mkdir(parents=True, exist_ok=True)
         wd = Path(tempfile.mkdtemp(dir=REPO / ".mittelmann_cache/tmp" if s == "mittelmann" else None))
         try:
             mps = materialize(s, name, wd)
-            runs = {"enomoto": [], "highs": []}
+            runs = {k: [] for k in a.solvers}
             for rep in range(a.reps):
-                order = ["enomoto", "highs"] if rep % 2 == 0 else ["highs", "enomoto"]
+                order = a.solvers if rep % 2 == 0 else a.solvers[::-1]
                 for solver in order:
                     r = run_enomoto(mps, a.time_limit) if solver == "enomoto" else run_highs_race(mps, a.time_limit)
                     runs[solver].append(r)
-                if rep == 0 and (max(runs["enomoto"][0]["time"], runs["highs"][0]["time"]) >= a.single_run_above
+                if rep == 0 and (max(runs[k][0]["time"] for k in runs) >= a.single_run_above
                                  or any(runs[k][0]["status"] not in CONCLUSIVE for k in runs)):
                     break
             rec = {"set": s, "problem": name, "runs": runs,
@@ -173,9 +175,8 @@ def main():
             shutil.rmtree(wd, ignore_errors=True)
         with open(a.out, "a") as f:
             f.write(json.dumps(rec) + "\n")
-        e, h = runs["enomoto"][0], runs["highs"][0]
-        print(f"{s:10s} {name:20s} enomoto {rec['median']['enomoto']:9.4f}s {e['status']:10s} "
-              f"highs {rec['median']['highs']:9.4f}s {h['status']:10s} ({h.get('winner')})", flush=True)
+        print(f"{s:10s} {name:20s} " + " ".join(f"{k} {rec['median'][k]:9.4f}s {runs[k][0]['status']:10s}" for k in runs)
+              + (f" ({runs['highs'][0].get('winner')})" if "highs" in runs else ""), flush=True)
 
 
 if __name__ == "__main__":
