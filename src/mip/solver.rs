@@ -2827,7 +2827,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // `ENOMOTO_MIP_RESTART_CUTS_READD`: 効いているカットを問題の行にはせず、新しい求解の最初に (根の LP を解く前に)
         // カットの行として加え直す (HiGHS の `separateLpCutsAfterRestart`)。根の LP の下界は行にしたときと同じだが、
         // 木の中では年齢で外せる普通のカットになる。行にすると neos-911970 では 4 回の再スタートで 107 行 -> 358 行になり
-        // (効いているものだけ残しても)、木の LP は 405 -> 822 行、ノードの LP は 1 回平均 187 反復 (行が 190 程度なら 47)
+        // (効いているものだけ残しても)、木の LP は 405 -> 822 行、ノードの LP は 1 回平均 187 反復 (行が 190 程度なら 47)。
+        // neos-911970 (60 秒) では暫定解 56.23 -> 54.83 (最適値 54.76)・下界 53.69 -> 53.62 で解けるには至らず、再スタート後の
+        // カットのループが進まなくなる (47.26 のまま。カットの行の上に作る次のカットが変わる) ので既定では使わない
         let readd = env_str!("ENOMOTO_MIP_RESTART_CUTS_READD").is_some() && !keep_all;
         let cuts_as_rows = (env_str!("ENOMOTO_MIP_RESTART_CUTS_TO_POOL").is_none() && !readd) || keep_all;
         let mut carry: Vec<(Vec<(usize, f64)>, f64)> = Vec::new();
