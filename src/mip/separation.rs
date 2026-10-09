@@ -134,6 +134,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut prev_obj = self.lp.objective();
         let mut prev_nfrac = self.fractional(&self.lp.col_values()).len();
         let first_obj = prev_obj;
+        // HiGHS の停滞判定 (`ENOMOTO_MIP_CUT_STALL_HIGHS`, HighsMipSolverData::evaluateRootNode): 最初の LP 解からの
+        // 移動方向の平均と今の移動の内積 (進み具合) を平滑化し、それが 1% 以上伸びず、かつ目的値の伸びが前のラウンドまでの
+        // 伸びの 0.1% 以下なら停滞。3 回続けて停滞したら止める (目的値が動かなくても LP 解が動いている間は続ける)
+        let highs_stall = env_str!("ENOMOTO_MIP_CUT_STALL_HIGHS").is_some() && !self.params.submip;
+        let first_x = self.lp.col_values();
+        let mut avgdir = vec![0.0f64; n];
+        let mut smooth = 0.0f64;
+        let mut hstall = 0usize;
+        let mut hrounds = 0usize;
         // サブ MIP (RENS/RINS) では分離に時間をかけない
         let max_rounds = if self.params.submip { 5 } else { tunable!("ENOMOTO_T_MIP_CUT_ROUNDS", 25usize, usize) };
         let time_cap = if self.params.time_limit.is_finite() { tunable!("ENOMOTO_T_MIP_CUT_TIME_FRAC", 0.1, f64) * self.params.time_limit } else { f64::INFINITY };
@@ -234,7 +243,34 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.start.elapsed().as_secs_f64()
                 );
             }
-            if env_str!("ENOMOTO_MIP_STALL_OLD").is_some() {
+            if highs_stall {
+                hrounds += 1;
+                let xs = self.lp.col_values();
+                let cur: Vec<f64> = (0..n).map(|j| first_x[j] - xs[j]).collect();
+                let nrm = cur.iter().map(|v| v * v).sum::<f64>().sqrt();
+                let scale = if nrm > 0.0 { 1.0 / nrm } else { 0.0 };
+                let (mut sq, mut dot) = (0.0, 0.0);
+                for j in 0..n {
+                    avgdir[j] = (scale * cur[j] - avgdir[j]) / hrounds as f64;
+                    sq += avgdir[j] * avgdir[j];
+                    dot += avgdir[j] * cur[j];
+                }
+                let progress = if sq > 0.0 { dot / sq.sqrt() } else { 0.0 };
+                if hrounds == 1 {
+                    smooth = progress;
+                } else {
+                    let next = (2.0 / 3.0) * smooth + progress / 3.0;
+                    if next < smooth * 1.01 && obj - first_obj <= (prev_obj - first_obj) * 1.001 {
+                        hstall += 1;
+                        if hstall >= 3 {
+                            break;
+                        }
+                    } else {
+                        hstall = 0;
+                    }
+                    smooth = next;
+                }
+            } else if env_str!("ENOMOTO_MIP_STALL_OLD").is_some() {
                 // 停滞判定: 改善が初回からの改善量のわずかな割合なら停滞
                 let gain = obj - prev_obj;
                 let scale = (obj - first_obj).abs().max(1e-6 * obj.abs().max(1.0));
