@@ -159,7 +159,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 40 問 (同時に測った既定 19 問 27.81 に対し) 18 問 28.64: nw04 33 -> 21 秒、h80x6320d の上界は良くなるが、
         // neos5 が時間切れ、10teams 4.2 -> 9.1 秒、qnet1 9.4 -> 14.7 秒、misc07 13.7 -> 18.8 秒 (根の LP 解が変わって木が
         // 変わる)。neos-911970 も 60 秒では解けない (根は 52.1 になるが暫定解が悪くなる) ので既定では使わない
-        let phase2_on = env_str!("ENOMOTO_MIP_CUT_PHASE2").is_some() && !self.params.submip;
+        let phase2_on = (env_str!("ENOMOTO_MIP_CUT_PHASE2").is_some() || (self.highs_cutmgmt() && env_str!("ENOMOTO_MIP_HCM_NO_PHASE2").is_none())) && !self.params.submip;
         let mut phase2 = false;
         // 第 2 段階の時間の上限 (第 1 段階に使った時間の `ENOMOTO_T_MIP_CUT_PHASE2_TIME_MULT` 倍。qnet1 では再スタート後の
         // 第 2 段階が 88 ラウンド回って根が 6 秒伸び、9.2 秒 -> 17.2 秒になった)
@@ -464,6 +464,43 @@ impl<'a, L: MipLp> Solver<'a, L> {
         true
     }
 
+    /// HiGHS 流のカット管理 (`Solver::highs_cutmgmt`) でのノードでの分離 1 ラウンド: プールで違反しているカットと、
+    /// 新しく分離したカット (軽い分離) を合わせて選び (最大 `ENOMOTO_T_MIP_HCM_NODE_MAX_CUTS` 本)、年齢の上限を超えたカットを
+    /// 外してから加える。加えたら真 (呼び出し側が LP を解き直す)。LP の行数の上限を超えていれば何もしない。
+    pub(super) fn hcm_node_sep_round(&mut self, x: &[f64], fresh: bool) -> bool {
+        let p = self.p;
+        let max_rows = p.m + (2 * p.m).max(500);
+        if self.lp.num_rows() >= max_rows {
+            return false;
+        }
+        // `fresh` でなければプールのカットだけ (安価。年齢で外れた根のカットを戻すのが主な役目)
+        let mut cands = if fresh { self.separate(x, true) } else { Vec::new() };
+        for (c, r, norm) in &self.cut_pool {
+            let act: f64 = c.iter().map(|&(j, v)| v * x[j]).sum();
+            let eff = (act - r) / norm.max(1e-12);
+            if eff > 1e-4 && act - r > 1e-6 * (1.0 + r.abs()) {
+                cands.push(Candidate { coefs: c.clone(), rhs: *r, efficacy: eff });
+            }
+        }
+        if cands.is_empty() {
+            return false;
+        }
+        let room = max_rows - self.lp.num_rows();
+        // 1 ラウンドの本数は根と同じ程度まで許す (HiGHS はプールの違反カットを平行度だけで絞る)。年齢で外れたカットが多い
+        // ノードでは、20 本ずつでは根で効いていたカットが戻りきらず、ノードの LP が根より弱くなって木の下界が動かなかった
+        let chosen = select_cuts(cands, room.min(tunable!("ENOMOTO_T_MIP_HCM_NODE_MAX_CUTS", 100usize, usize)), p);
+        if chosen.is_empty() {
+            return false;
+        }
+        let rows: Vec<(Vec<(usize, f64)>, f64, f64)> = chosen.into_iter().map(|c| (c.coefs, f64::NEG_INFINITY, c.rhs)).collect();
+        for (c, _, r) in &rows {
+            self.add_to_pool(c, *r);
+        }
+        self.remove_aged_cuts();
+        self.add_cut_rows(&rows);
+        true
+    }
+
     /// LP にカットの行を加える (年齢 0)。
     pub(super) fn add_cut_rows(&mut self, rows: &[(Vec<(usize, f64)>, f64, f64)]) {
         self.sync_cut_age();
@@ -513,7 +550,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 外さない。取り出したときに保存した基底が必ず合う)。`ENOMOTO_MIP_NO_PROTECT_QUEUE_CUTS` で無効。
     /// 40 問: 19 問 27.04 -> 19 問 26.89 (保護して年齢の上限を一律 30 にすると 17 問 27.55)
     pub(super) fn basis_protected_cuts(&mut self) -> Option<std::rc::Rc<Vec<u64>>> {
-        if env_str!("ENOMOTO_MIP_NO_PROTECT_QUEUE_CUTS").is_some() || self.params.submip {
+        // HiGHS 流のカット管理では保護しない (HiGHS と同じく、取り出したノードの基底が LP の行と合わなければ今の基底から解く。
+        // 保護すると待ち行列のノードが数千あるときほぼ全てのカットが外せず、neos-911970 では LP が行数の上限 607 に張り付いた)
+        if env_str!("ENOMOTO_MIP_NO_PROTECT_QUEUE_CUTS").is_some() || self.params.submip || self.highs_cutmgmt() {
             return None;
         }
         self.sync_cut_age();
@@ -562,7 +601,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 既定は f = 0.5 (40 問: 一律 300 の 19 問 26.72 に対し 19 問 26.41。markshare_4_0 (4 行) 25 -> 14 秒、
         // neos5 (63 行) は 42 -> 48 秒。カットの行の総数で抑える形 (`ENOMOTO_T_MIP_CUT_ROWS_CAP=2`) は 26.61)
         let f = tunable!("ENOMOTO_T_MIP_CUT_AGE_PER_ROW", 0.5, f64);
-        let limit = if f > 0.0 {
+        // HiGHS 流のカット管理では上限を `ENOMOTO_T_MIP_HCM_AGE_LIMIT` (HiGHS の mip_lp_age_limit は 10) にする。
+        // 30 では neos-911970 の木の下界が根から動かず (潜りの間に根で効いていたカットが外れ、ノードの LP が根より弱くなる)、
+        // 100 で下界 54.70 / 上界 54.76 (最適値)。mik-250 は 30 でも 100 でも 60 秒で解けない (既定は 35 秒)
+        let limit = if self.highs_cutmgmt() {
+            tunable!("ENOMOTO_T_MIP_HCM_AGE_LIMIT", 100u32, u32)
+        } else if f > 0.0 {
             let lo = tunable!("ENOMOTO_T_MIP_CUT_AGE_MIN", 30u32, u32);
             ((f * self.p.m as f64) as u32).clamp(lo.min(base), base)
         } else {

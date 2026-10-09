@@ -179,6 +179,9 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) lns_secs: f64,
     /// ノードでの分離 (カットを加えた後の LP の解き直しを含む) に使った時間 [秒]。
     pub(super) node_cut_secs: f64,
+    /// HiGHS 流のカット管理 (`ENOMOTO_MIP_HIGHS_CUTMGMT`) でのノードの分離の進み具合の基準にする根の LP の目的値
+    /// (カットのループの後、定数項込み。HiGHS の `rootlpsolobj`)。
+    pub(super) hcm_root_obj: f64,
     /// 暫定解がない間の木の中のヒューリスティクス (RENS・Feasibility Pump) に使った時間 (秒) と呼んだ回数。
     pub(super) noinc_secs: f64,
     pub(super) noinc_calls: u64,
@@ -369,6 +372,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
         repair_start: None,
         lns_secs: 0.0,
         node_cut_secs: 0.0,
+        hcm_root_obj: f64::NEG_INFINITY,
         noinc_secs: 0.0,
         noinc_calls: 0,
         submip_time_frac: tunable!("ENOMOTO_T_MIP_SUBMIP_TIME_FRAC", 0.07, f64),
@@ -497,6 +501,27 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
         });
+    }
+
+    /// HiGHS 流のカット管理をまとめて有効にする (`ENOMOTO_MIP_HIGHS_CUTMGMT`、サブ MIP では使わない):
+    /// - 再スタートで効いているカットを問題の行にせず、外せるカットの行として戻す (`maybe_restart` / `run`)
+    /// - 木の中のカットの年齢の上限を `ENOMOTO_T_MIP_HCM_AGE_LIMIT` にする (`remove_aged_cuts`)
+    /// - 待ち行列から取り出したノードでは、プールと新しい分離を合わせたラウンドを、ノードの下界が伸びる間
+    ///   (HiGHS の `HighsSeparation::separate` と同じ基準) 繰り返す。時間の予算 `ENOMOTO_T_MIP_HCM_NODE_SEP_FRAC` 付き
+    /// - 根のカットのループの第 2 段階 (`ENOMOTO_MIP_CUT_PHASE2` と同じ。`ENOMOTO_MIP_HCM_NO_PHASE2` で外す)
+    ///
+    /// - 待ち行列のノードの基底によるカットの保護はせず、取り出したノードの基底が LP の行と合わなければ今の基底から解く
+    /// - 1 回の潜り (兄弟への戻りを含む) は `ENOMOTO_T_MIP_HCM_PLUNGE_NODES` (既定 100) ノードまで
+    ///
+    /// neos-911970 では、既定の再スタートはカットを恒久的な行にして 107 行 -> 358 行 (木の LP は 405 -> 822 行、ノードの LP は
+    /// 1 回平均 187 反復) になり、根のカットのループは 47.26 で止まり (HiGHS 52.1)、木での分離は深さ 10 ごとだけだった。
+    /// この選択肢では根 52.1、木の LP は 200-430 行、ノードの LP は 1 回 36-75 反復で、単独実行では 51.5 秒で最適値 54.76 を
+    /// 証明できた (ただし根のヒューリスティクスの暫定解が 60-68 と悪く、実行ごとのばらつきが大きい)。
+    /// 40 問 (3 並列、同時に測った既定 18 問 26.92 に対し) 17 問 28.56: neos-860300 は解けるようになる (58 秒) が neos5・mik-250 が
+    /// 時間切れ (年齢で外れたカットが戻りきらずノードの LP が弱くなる)、misc07 11.0 -> 18.7 秒、qnet1 7.9 -> 11.7 秒、
+    /// binkar10_1 26.3 -> 38.8 秒。既定では使わない
+    pub(super) fn highs_cutmgmt(&self) -> bool {
+        env_str!("ENOMOTO_MIP_HIGHS_CUTMGMT").is_some() && !self.params.submip
     }
 
     pub(super) fn time_up(&self) -> bool {
@@ -643,7 +668,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.last_log = Instant::now();
         let ub = self.incumbent.as_ref().map(|(z, _)| *z).unwrap_or(f64::INFINITY);
         eprintln!(
-            "MIP: {:8.2}s nodes {:8} open {:7} lb {:.8e} ub {:.8e} lp_iters {} sb_iters {} sb_lps {} sb_secs {:.2} node_iters {} (first {}, lps {}) heur_iters {} dive_iters {} lp_rows {}",
+            "MIP: {:8.2}s nodes {:8} open {:7} lb {:.8e} ub {:.8e} lp_iters {} sb_iters {} sb_lps {} sb_secs {:.2} node_iters {} (first {}, lps {}) heur_iters {} dive_iters {} lp_rows {} node_cut_secs {:.2}",
             self.start.elapsed().as_secs_f64(),
             self.nodes,
             self.queue.len(),
@@ -658,7 +683,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.node_lps,
             self.heur_iters,
             self.dive_iters,
-            self.lp.num_rows()
+            self.lp.num_rows(),
+            self.node_cut_secs
         );
     }
 
@@ -673,7 +699,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             // `ENOMOTO_MIP_RESTART_CUTS_READD`: 再スタート前に効いていたカットを、根の LP を解く前にカットの行として加える
             // (問題の行ではないので木の中で年齢により外せる。プールにもあるので外れても違反すれば戻る)
-            if env_str!("ENOMOTO_MIP_RESTART_CUTS_READD").is_some() && !self.params.submip {
+            if (env_str!("ENOMOTO_MIP_RESTART_CUTS_READD").is_some() || self.highs_cutmgmt()) && !self.params.submip {
                 let rows: Vec<(Vec<(usize, f64)>, f64, f64)> = cuts.iter().filter(|(c, _)| c.iter().all(|&(j, _)| j < self.p.n)).map(|(c, r)| (c.clone(), f64::NEG_INFINITY, *r)).collect();
                 if !rows.is_empty() {
                     self.add_cut_rows(&rows);
@@ -894,6 +920,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.dbg_check_rows("after root cuts");
         self.dbg_lost("root domain (before redcost fixing)", !self.dbg_contains());
         let dbg_root = self.dbg_contains();
+        self.hcm_root_obj = root_obj;
         self.store_root_redcost(root_obj);
         self.root_redcost_fixing();
         if dbg_root && !self.dbg_contains() {
@@ -923,8 +950,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 && !first
                 && env_str!("ENOMOTO_MIP_NO_SIBLING_BACKTRACK").is_none()
                 && !(self.params.submip && env_str!("ENOMOTO_MIP_NO_SIBLING_BACKTRACK_SUB").is_some())
-                // 1 回の潜り (兄弟への戻りを含む) のノード数の上限 (HiGHS: min(1000, ノード数 / 10))
-                && self.nodes - plunge_start < (self.nodes / tunable!("ENOMOTO_T_MIP_PLUNGE_NODES_DIV", 10u64, u64)).min(1000)
+                // 1 回の潜り (兄弟への戻りを含む) のノード数の上限 (HiGHS: min(1000, ノード数 / 10))。
+                // HiGHS 流のカット管理では HiGHS の processNodes の plungeLimit と同じ `ENOMOTO_T_MIP_HCM_PLUNGE_NODES` (既定 100):
+                // 分離は待ち行列から取り出したノードでしか行わないので、潜りが 1000 ノード続くと分離がほとんど起きない
+                // (neos-911970: 14000 ノード中、待ち行列からの取り出しは 70 回)
+                && self.nodes - plunge_start < if self.highs_cutmgmt() { tunable!("ENOMOTO_T_MIP_HCM_PLUNGE_NODES", 100u64, u64) } else { (self.nodes / tunable!("ENOMOTO_T_MIP_PLUNGE_NODES_DIV", 10u64, u64)).min(1000) }
             {
                 let cutoff = self.prune_limit();
                 let glb = self.queue.best_lower_bound();
@@ -1093,6 +1123,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let mut resolves = 0;
             // ノードの分離でカットを加えた後の解き直しか (その LP の時間を `node_cut_secs` に足す)
             let mut node_cut_resolve: Option<Instant> = None;
+            // HiGHS 流のカット管理: このノードでの分離のラウンド数と、前のラウンドの前の目的値
+            let mut hcm_sep_rounds = 0usize;
+            let mut hcm_sep_last_obj = f64::NEG_INFINITY;
             let action = loop {
                 let it0 = self.lp.total_iterations();
                 let iter_limit = (10 * self.avg_node_iters()).max(20_000);
@@ -1336,11 +1369,60 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // ノードでの切除平面 (待ち行列から取り出したノードで 1 回)。カットを足すたびに LP を作り直すので
                 // 今は遅くなる問題が多く、既定では行わない (ENOMOTO_MIP_NODE_CUTS=1 で有効)。
                 // カットプールからのカット (待ち行列から取り出したノードで最大 2 回、各 10 本まで)
-                if resolves < 2 && node.depth > 0 && plunge_depth == 0 && env_str!("ENOMOTO_MIP_NO_POOL_CUTS").is_none() && self.pool_cut_round(&x, 10) {
+                // HiGHS 流のカット管理 (`highs_cutmgmt`): 待ち行列から取り出したノードで、プールと新しい分離を合わせた
+                // ラウンドを、根の LP からの伸びが前のラウンドまでの伸びの 1.01 倍を超えている間 (HiGHS の
+                // `HighsSeparation::separate`) 繰り返す。最初のラウンドはプールのカットだけ (予算に数えない。既定のプールの
+                // ラウンドに相当し、年齢で外れた根のカットを戻す)、2 ラウンド目からは新しい分離も合わせ、ノードの分離に使った
+                // 時間が経過時間の `ENOMOTO_T_MIP_HCM_NODE_SEP_FRAC` 倍に収まる間だけ行う
+                let hcm_sep = self.highs_cutmgmt() && node.depth > 0 && plunge_depth == 0;
+                if hcm_sep {
+                    let feastol = 1e-6 * self.hcm_root_obj.abs().max(1.0);
+                    let fresh = hcm_sep_rounds > 0;
+                    let budget_ok = !fresh || self.node_cut_secs < tunable!("ENOMOTO_T_MIP_HCM_NODE_SEP_FRAC", 0.1, f64) * self.start.elapsed().as_secs_f64();
+                    let go = budget_ok
+                        && hcm_sep_rounds < tunable!("ENOMOTO_T_MIP_HCM_NODE_SEP_ROUNDS", 10usize, usize)
+                        && (hcm_sep_rounds == 0 || node_obj - self.hcm_root_obj > 1.01 * (hcm_sep_last_obj - self.hcm_root_obj).max(feastol));
+                    if go {
+                        let t_nc = Instant::now();
+                        let rows0 = self.lp.num_rows();
+                        let added = self.hcm_node_sep_round(&x, fresh);
+                        if fresh {
+                            self.node_cut_secs += t_nc.elapsed().as_secs_f64();
+                        }
+                        if env_str!("ENOMOTO_MIP_DEBUG_HCM").is_some() {
+                            eprintln!("HCM node {} depth {} round {} obj {:.6} rows {} -> {} added {} pool {}", self.nodes, node.depth, hcm_sep_rounds, node_obj, rows0, self.lp.num_rows(), added, self.cut_pool.len());
+                        }
+                        if added {
+                            hcm_sep_rounds += 1;
+                            hcm_sep_last_obj = node_obj;
+                            resolves += 1;
+                            if fresh {
+                                node_cut_resolve = Some(Instant::now());
+                            }
+                            continue;
+                        }
+                        // プールだけのラウンドで何も加わらなければ、新しい分離のラウンドへ進む
+                        if !fresh {
+                            hcm_sep_rounds = 1;
+                            hcm_sep_last_obj = node_obj;
+                            if self.node_cut_secs < tunable!("ENOMOTO_T_MIP_HCM_NODE_SEP_FRAC", 0.1, f64) * self.start.elapsed().as_secs_f64() {
+                                let t_nc = Instant::now();
+                                let added = self.hcm_node_sep_round(&x, true);
+                                self.node_cut_secs += t_nc.elapsed().as_secs_f64();
+                                if added {
+                                    hcm_sep_rounds = 2;
+                                    resolves += 1;
+                                    node_cut_resolve = Some(Instant::now());
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                } else if resolves < 2 && node.depth > 0 && plunge_depth == 0 && env_str!("ENOMOTO_MIP_NO_POOL_CUTS").is_none() && self.pool_cut_round(&x, 10) {
                     resolves += 1;
                     continue;
                 }
-                if resolves == 0 && node.depth > 0 && plunge_depth == 0 && self.node_cuts_due(node.depth) {
+                if !hcm_sep && resolves == 0 && node.depth > 0 && plunge_depth == 0 && self.node_cuts_due(node.depth) {
                     let t_nc = Instant::now();
                     let added = self.node_cut_round(&x);
                     self.node_cut_secs += t_nc.elapsed().as_secs_f64();
@@ -1968,7 +2050,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // set_basis の修復 (構造変数を後ろから外す) に任せる。`ENOMOTO_MIP_RESTORE_KEEP_CURRENT` なら今の LP の
             // 基底 (直前のノードの最適基底) のまま解く (HiGHS と同じ。neos-911970 では 1 ノードの反復が大きく減るが、
             // misc07 などでは遠いノードの基底から解くことになり悪化した: 40 問で 19 -> 18 問)
-            if env_str!("ENOMOTO_MIP_RESTORE_KEEP_CURRENT").is_some() {
+            // HiGHS 流のカット管理 (`highs_cutmgmt`) でも今の基底のまま解く (neos-911970: 保存した基底を修復して使うと
+            // ノードの LP は 1 回 75 反復で木の下界が根から動かず、今の基底なら 36 反復で 17000 ノード、下界 54.05・最適解 54.76 を発見)
+            if env_str!("ENOMOTO_MIP_RESTORE_KEEP_CURRENT").is_some() || self.highs_cutmgmt() {
                 return;
             }
         }
@@ -2830,7 +2914,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // (効いているものだけ残しても)、木の LP は 405 -> 822 行、ノードの LP は 1 回平均 187 反復 (行が 190 程度なら 47)。
         // neos-911970 (60 秒) では暫定解 56.23 -> 54.83 (最適値 54.76)・下界 53.69 -> 53.62 で解けるには至らず、再スタート後の
         // カットのループが進まなくなる (47.26 のまま。カットの行の上に作る次のカットが変わる) ので既定では使わない
-        let readd = env_str!("ENOMOTO_MIP_RESTART_CUTS_READD").is_some() && !keep_all;
+        let readd = (env_str!("ENOMOTO_MIP_RESTART_CUTS_READD").is_some() || self.highs_cutmgmt()) && !keep_all;
         let cuts_as_rows = (env_str!("ENOMOTO_MIP_RESTART_CUTS_TO_POOL").is_none() && !readd) || keep_all;
         let mut carry: Vec<(Vec<(usize, f64)>, f64)> = Vec::new();
         let act = self.lp.row_activities();
