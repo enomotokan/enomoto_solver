@@ -109,7 +109,7 @@ print(sol.best_bound, sol.mip_gap, sol.nodes)                 # 220.0 0.0 0
 - **プリソルブと制約伝播**：平行な行の統合，probing，活動量に基づく境界の締め付け，衝突解析と双対証明．
 - **切除平面**：CMIR(Gomory 相当の tableau 行を含む)，lifted flow cover，{0, 1/2}-Chvátal–Gomory(zerohalf)．
 - **主ヒューリスティクス**：丸め，fix-and-propagate，Feasibility Pump，Feasibility Jump，潜り込み，内点法の解からの丸め，サブ MIP による改善(RINS，RENS，DINS，Crossover など)．
-- **探索**：pseudocost による reliability 分岐，plunge(子ノードへの潜り込みと warm start)，再スタート，対称性の検出と対称性を崩す不等式(orbitope を含む)．
+- **探索**：擬似コストによる信頼性分岐，plunge(子ノードへの潜り込みと warm start)，再スタート，対称性の検出と対称性を崩す不等式(orbitope を含む)．
 
 打ち切り条件は `time_limit`(秒)，`mip_rel_gap`(相対ギャップ，既定 1e-4)，`node_limit`(ノード数)で指定します．上限で止まったときは `status` が `"time_limit"` か `"node_limit"` になり，暫定解があれば `objective` と各変数の `.value` を読めます．`Solution` の `best_bound`(証明済みの限界)，`mip_gap`(相対ギャップ)，`nodes`(処理したノード数)にも結果が入ります．
 
