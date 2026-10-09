@@ -131,9 +131,11 @@ def problem_list(sets):
 def materialize(s, name, workdir):
     if s != "mittelmann":
         return REPO / f".{s}_cache" / "mps" / f"{name}.mps"
-    from run_mittelmann_benchmark import PROBLEMS, materialize_mps
+    from run_mittelmann_benchmark import PROBLEMS, ensure_raw, materialize_mps
     rel = next(p[1] for p in PROBLEMS if p[0] == name)
-    return materialize_mps(REPO / ".mittelmann_cache", rel, REPO / ".mittelmann_cache/raw" / rel.replace("/", "__"), workdir)
+    # 圧縮データが無ければ plato.asu.edu から取得する。
+    raw = ensure_raw(REPO / ".mittelmann_cache", name, rel)
+    return materialize_mps(REPO / ".mittelmann_cache", rel, raw, workdir)
 
 
 def main():
