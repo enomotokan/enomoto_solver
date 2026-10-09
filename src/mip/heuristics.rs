@@ -1181,7 +1181,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             node_limit,
             rel_gap: self.params.rel_gap,
             abs_gap: self.params.abs_gap,
-            verbose: false,
+            // 診断用: `ENOMOTO_MIP_SUBMIP_VERBOSE` ならサブ MIP の経過も出す
+            verbose: self.params.verbose && env_str!("ENOMOTO_MIP_SUBMIP_VERBOSE").is_some(),
             submip: true,
             cutoff: cutoff.unwrap_or_else(|| self.prune_limit()),
             restarts: 0,
