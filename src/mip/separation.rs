@@ -459,6 +459,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         viol.sort_by(|a, b| b.0.total_cmp(&a.0));
         viol.truncate(max_cuts);
+        // `ENOMOTO_T_MIP_POOL_REL` = r (> 0): 効き目が最大のカットの r 倍に満たないカットは戻さない
+        let rel = tunable!("ENOMOTO_T_MIP_POOL_REL", 0.0, f64);
+        if rel > 0.0 {
+            let top = viol[0].0;
+            viol.retain(|&(e, _)| e >= rel * top);
+        }
         let cap = self.p.m + (2 * self.cut_pool.len()).clamp(100, 2000);
         if self.lp.num_rows() + viol.len() > cap {
             self.remove_inactive_cuts();
@@ -610,10 +616,58 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let m0 = self.p.m;
         let b = self.lp.basis();
         let act = self.lp.row_activities();
+        // 相対的な基準 (既定では使わない):
+        // `ENOMOTO_T_MIP_CUT_SLACK_REL` = s (> 0): 余裕のあるカットのうち、正規化した余裕 (余裕 / 係数の 2 ノルム) が
+        //   カットの中で最大のものの s 倍に満たないもの (ほぼ効いている) は年齢を増やさない
+        // `ENOMOTO_T_MIP_CUT_DUAL_REL` = d (> 0): 効いている (論理変数が非基底の) カットのうち、|双対値| がカットの中で
+        //   最大のものの d 倍に満たないもの (退化して効いているだけ) は年齢を増やす
+        let srel = tunable!("ENOMOTO_T_MIP_CUT_SLACK_REL", 0.0, f64);
+        let drel = tunable!("ENOMOTO_T_MIP_CUT_DUAL_REL", 0.0, f64);
+        let ncut = self.cut_age.len();
+        let mut nslack = vec![0.0f64; ncut];
+        let mut max_slack = 0.0f64;
+        if srel > 0.0 {
+            for k in 0..ncut {
+                let i = m0 + k;
+                let (_, up) = self.lp.row_bounds(i);
+                if b.row[i] == VarStatus::Basic && act[i] < up - 1e-6 * (1.0 + up.abs()) {
+                    let id = self.cut_ids[k];
+                    let norm = match self.cut_norm.get(&id) {
+                        Some(&v) => v,
+                        None => {
+                            let v = self.lp.row(i).iter().map(|&(_, a)| a * a).sum::<f64>().sqrt().max(1e-12);
+                            self.cut_norm.insert(id, v);
+                            v
+                        }
+                    };
+                    nslack[k] = (up - act[i]) / norm;
+                    max_slack = max_slack.max(nslack[k]);
+                }
+            }
+            if self.cut_norm.len() > 4 * ncut + 1000 {
+                let live: std::collections::HashSet<u64> = self.cut_ids.iter().copied().collect();
+                self.cut_norm.retain(|id, _| live.contains(id));
+            }
+        }
+        let mut dual = Vec::new();
+        let mut max_dual = 0.0f64;
+        if drel > 0.0 {
+            dual = self.lp.row_duals();
+            for k in 0..ncut {
+                if b.row[m0 + k] != VarStatus::Basic {
+                    max_dual = max_dual.max(dual[m0 + k].abs());
+                }
+            }
+        }
         for (k, age) in self.cut_age.iter_mut().enumerate() {
             let i = m0 + k;
             let (_, up) = self.lp.row_bounds(i);
             if b.row[i] == VarStatus::Basic && act[i] < up - 1e-6 * (1.0 + up.abs()) {
+                if srel > 0.0 && nslack[k] < srel * max_slack {
+                    continue;
+                }
+                *age = age.saturating_add(1);
+            } else if drel > 0.0 && b.row[i] != VarStatus::Basic && dual[i].abs() < drel * max_dual {
                 *age = age.saturating_add(1);
             } else {
                 *age = 0;

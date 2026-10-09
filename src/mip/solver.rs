@@ -228,6 +228,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// LP のカットの行の番号 (追加順に振る、行を消しても変わらない)。`cut_age` と同じ並び。
     pub(super) cut_ids: Vec<u64>,
     pub(super) next_cut_id: u64,
+    /// カットの行の係数の 2 ノルム (カットの番号ごと。相対的な余裕の基準 `ENOMOTO_T_MIP_CUT_SLACK_REL` で使う)。
+    pub(super) cut_norm: std::collections::HashMap<u64, f64>,
     /// 証明から作った衝突の数。
     proof_conflicts: u64,
     /// 完全オービトープ (orbitopal fixing に使う。サブ MIP では空)。
@@ -402,6 +404,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
         failed_heurs: 0,
         cut_age: Vec::new(),
         cut_ids: Vec::new(),
+        cut_norm: std::collections::HashMap::new(),
         next_cut_id: 0,
         proof_conflicts: 0,
         orbitopes: if params.submip { Rc::new(Vec::new()) } else { super::ORBITOPES.with(|t| t.borrow().clone()).unwrap_or_default() },
