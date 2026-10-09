@@ -745,6 +745,26 @@ fn load_point(f: &str, n: usize, m: usize) -> Option<(Vec<f64>, Vec<f64>)> {
     Some((v[..n].to_vec(), v[n..].to_vec()))
 }
 
+/// 頂点の非基底の側 (`-1`: 下限、`+1`: 上限、`0`: 基底・自由など) を、仕上げの単体法の開始状態に引き継ぐ希望として渡す
+/// (`ENOMOTO_T_XO_CLEANUP_HINT`、既定 1)。基底から始める単体法は非基底列を被約費用の符号が好む側に置き直すので、双対退化した
+/// 列 (被約費用がほぼ 0) を反対の境界へ飛ばし、主実行可能な頂点に主実行不能を大量に作ってから直していた。希望があると、ずれが
+/// `ENOMOTO_T_WARM_NB_TOL` 以内の列は費用を少しずらして頂点の側に置く (分枝限定法の LP と同じ仕組み)。
+/// `which` は 1 = 頂点の修復、2 = 仕上げ (`ENOMOTO_T_XO_CLEANUP_HINT` のビット)。
+fn set_cleanup_hint(nb_status: &[Option<NbStatus>], which: u8) {
+    if tunable!("ENOMOTO_T_XO_CLEANUP_HINT", 1u8, u8) & which == 0 {
+        return;
+    }
+    let hint: Vec<i8> = nb_status
+        .iter()
+        .map(|st| match st {
+            Some(NbStatus::Lower) => -1,
+            Some(NbStatus::Upper) => 1,
+            _ => 0,
+        })
+        .collect();
+    super::slope_intercept_dual::set_warm_nb(Some(hint));
+}
+
 /// 内点法 + クロスオーバー ([`XoOptions`] 付き)。
 pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<SimplexResult> {
     let debug = env_str!("ENOMOTO_DEBUG_CROSSOVER").is_some();
@@ -2135,7 +2155,9 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
         if want_basis && !outer {
             super::slope_intercept_dual::request_duals(true);
         }
+        set_cleanup_hint(&nb_status, 2);
         let r = super::slope_intercept_dual::solve_slope_intercept_dual_from_basis(std, &Default::default(), basis.clone());
+        super::slope_intercept_dual::set_warm_nb(None);
         if want_basis {
             if outer {
                 final_basis_pos = super::slope_intercept_dual::last_duals_basis();
@@ -2535,7 +2557,10 @@ fn repair_vertex(
         lb: std.lb.clone(),
         ub: std.ub.clone(),
     };
-    let res = super::slope_intercept_dual::solve_slope_intercept_dual_from_basis(&std2, &Default::default(), basis.to_vec())?;
+    set_cleanup_hint(nb_status, 1);
+    let res = super::slope_intercept_dual::solve_slope_intercept_dual_from_basis(&std2, &Default::default(), basis.to_vec());
+    super::slope_intercept_dual::set_warm_nb(None);
+    let res = res?;
     if res.status != Status::Optimal {
         return None;
     }
