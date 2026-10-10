@@ -1607,7 +1607,9 @@ pub fn generate_cuts(vars: &CutVars, base: &[(usize, f64)], rhs: f64, flow_cover
         return out;
     };
     let has_cont = base.iter().any(|&(k, a)| a != 0.0 && !vars.is_int[k] && vars.lo[k] < vars.up[k]);
-    if env_str!("ENOMOTO_MIP_LIFTED_COVER").is_some() {
+    // `ENOMOTO_MIP_ROW_LIFTED_COVER`: 元の行 1 本ずつ (`ext_cover` の呼び出し) でだけ lifted cover も試す
+    // (集約行・tableau 行では試さない。どれを残すかは呼び出し側がカットの質で決める)
+    if env_str!("ENOMOTO_MIP_LIFTED_COVER").is_some() || (ext_cover && env_str!("ENOMOTO_MIP_ROW_LIFTED_COVER").is_some()) {
         out.extend(lifted_cover_terms(vars, terms.clone(), beta));
     }
     // δ の探索 (`cmir_terms_multi`) は `ENOMOTO_MIP_CMIR_SEARCH` のときだけ。40 問で、従来 18 問 (sgeomean 28.12) に対し
