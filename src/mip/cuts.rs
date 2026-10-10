@@ -1233,6 +1233,10 @@ fn lifted_cover_terms(vars: &CutVars, terms: Vec<Term>, beta: f64) -> Option<Raw
     if cover.is_empty() || lambda <= minlambda {
         return None;
     }
+    let mut in_cover = vec![false; n];
+    for &k in &cover {
+        in_cover[k] = true;
+    }
     let mut cvals = vals.clone();
     let mut crhs;
     if !has_cont && !has_gen {
@@ -1501,6 +1505,20 @@ fn lifted_cover_terms(vars: &CutVars, terms: Vec<Term>, beta: f64) -> Option<Raw
                 crhs += cvals[k];
             } else {
                 cvals[k] = phi(cvals[k]);
+            }
+        }
+    }
+    // 持ち上げた係数のうち小さいものを落とす (y >= 0 なので、`<=` の左辺の正の係数を 0 にしても妥当なまま。疎になる):
+    // `ENOMOTO_T_MIP_LIFT_KEEP_FRAC` = f (> 0): カバーの外の変数の正の係数で、最大の係数の f 倍未満のものを落とす。
+    // `ENOMOTO_MIP_LIFT_DROP_ZERO`: カバーの外で LP 値が 0 の変数の正の係数を落とす (今の LP 解での違反量は変わらない)
+    let keep_frac = tunable!("ENOMOTO_T_MIP_LIFT_KEEP_FRAC", 0.0, f64);
+    let drop_zero = env_str!("ENOMOTO_MIP_LIFT_DROP_ZERO").is_some();
+    if keep_frac > 0.0 || drop_zero {
+        let cmax = cvals.iter().fold(0.0f64, |m, &c| m.max(c));
+        for k in 0..n {
+            let c = cvals[k];
+            if c > 0.0 && !in_cover[k] && ((keep_frac > 0.0 && c < keep_frac * cmax) || (drop_zero && solval[k] <= FEAS)) {
+                cvals[k] = 0.0;
             }
         }
     }
