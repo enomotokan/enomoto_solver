@@ -180,7 +180,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 break;
             }
             let t_sep = std::time::Instant::now();
-            let mut cands = self.separate_face(&x);
+            let mut cands = self.separate_face(&x, false);
             // 再スタート前のカットをプールで引き継いだとき (`ENOMOTO_MIP_RESTART_CUTS_TO_POOL`): プールで違反しているものも候補にする
             if ((self.params.restarts > 0 && env_str!("ENOMOTO_MIP_RESTART_CUTS_TO_POOL").is_some()) || env_str!("ENOMOTO_MIP_CUTSEL_HIGHS_POOL").is_some()) && round < tunable!("ENOMOTO_T_MIP_ROOT_POOL_ROUNDS", 5usize, usize) && env_str!("ENOMOTO_MIP_NO_ROOT_POOL").is_none() {
                 for (eff, k) in self.pool_violated(&x) {
@@ -482,7 +482,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return false;
         }
         // ノードでは軽い分離 (経路集約の始点・tableau 行を減らす) で、追加するカットも少なくする
-        let cands = self.separate(x, true);
+        // `ENOMOTO_MIP_NODE_FACE_SEP`: ノードでも最適面の頂点で分離する ([`Self::separate_face`])
+        let cands = if env_str!("ENOMOTO_MIP_NODE_FACE_SEP").is_some() { self.separate_face(x, true) } else { self.separate(x, true) };
         if cands.is_empty() {
             return false;
         }
@@ -1245,12 +1246,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 既定は `int` (`off` で使わない)。40 問 (DSE 重みを全ての LP で引き継ぐ既定のもとで): 使わない 18 問 28.07、
     /// `int` 19 問 27.04 (misc07 時間切れ -> 40.9 秒、neos5 時間切れ -> 59.5 秒、mik-250 42.4 -> 16.9 秒、nw04 20.5 -> 8.7 秒、
     /// rout 57.8 秒 -> 時間切れ)、`canon` 17 問 27.66
-    fn separate_face(&mut self, x: &[f64]) -> Vec<Candidate> {
+    fn separate_face(&mut self, x: &[f64], light: bool) -> Vec<Candidate> {
         let mode = match env_str!("ENOMOTO_MIP_FACE_SEP") {
-            Some(m) if m == "off" => return self.separate(x, false),
+            Some(m) if m == "off" => return self.separate(x, light),
             Some(m) if !self.params.submip => m,
             None if !self.params.submip => "int",
-            _ => return self.separate(x, false),
+            _ => return self.separate(x, light),
         };
         let p = self.p;
         let n = p.n;
@@ -1274,7 +1275,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         if ndeg == 0 {
-            return self.separate(x, false);
+            return self.separate(x, light);
         }
         let eps = tunable!("ENOMOTO_T_MIP_FACE_EPS", 1e-5, f64) * cmax;
         let hash = |j: usize| -> f64 {
@@ -1300,9 +1301,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             .collect();
         let cost2: Vec<f64> = (0..n).map(|j| p.cost[j] + eps * c2[j]).collect();
         face.set_costs(&cost2);
-        let st = face.solve(&SolveLimits { iteration_limit: 10 * (p.m + n) as u64 + 1000, cutoff: f64::INFINITY, deadline: self.deadline });
+        let st = face.solve(&SolveLimits { iteration_limit: if light { (p.m + n) as u64 + 100 } else { 10 * (p.m + n) as u64 + 1000 }, cutoff: f64::INFINITY, deadline: self.deadline });
         if st != LpStatus::Optimal {
-            return self.separate(x, false);
+            return self.separate(x, light);
         }
         let xv = face.col_values();
         let z0: f64 = (0..n).map(|j| p.cost[j] * x[j]).sum();
@@ -1312,15 +1313,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
             eprintln!("FACE: degenerate nonbasic {ndeg}, moved {moved} cols, obj {z0:.9} -> {zv:.9}, frac {} -> {}", self.fractional(x).len(), self.fractional(&xv).len());
         }
         if zv > z0 + 1e-7 * (1.0 + z0.abs()) || moved == 0 {
-            return self.separate(x, false);
+            return self.separate(x, light);
         }
         std::mem::swap(&mut self.lp, &mut face);
-        let mut cv = self.separate(&xv, false);
+        let mut cv = self.separate(&xv, light);
         std::mem::swap(&mut self.lp, &mut face);
         if mode == "canon" {
             return cv;
         }
-        let mut cands = self.separate(x, false);
+        let mut cands = self.separate(x, light);
         cands.append(&mut cv);
         cands
     }
