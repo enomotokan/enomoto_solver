@@ -91,7 +91,18 @@ fn solve_portfolio(p: &MipProblem, params: MipParams) -> solver::MipResult {
     let use_presolve = env_str!("ENOMOTO_MIP_NO_PRESOLVE").is_none();
     // 探索を終えたスレッドが示した「これより良い解はない」値 (そのスレッドの打ち切りに使った値)
     let proven: std::sync::Mutex<Option<f64>> = std::sync::Mutex::new(None);
+    // `ENOMOTO_MIP_PORTFOLIO_BISECT`: 3 本目のスレッドで目的値の二分探索を回す ([`bisection_worker`])
+    let bisect = env_str!("ENOMOTO_MIP_PORTFOLIO_BISECT").is_some();
+    let bis_result: std::sync::Mutex<Option<(Option<solver::MipResult>, f64)>> = std::sync::Mutex::new(None);
     let results: Vec<solver::MipResult> = std::thread::scope(|sc| {
+        if bisect {
+            let shared = shared.clone();
+            let bis_result = &bis_result;
+            sc.spawn(move || {
+                let r = bisection_worker(p, params, use_presolve, shared);
+                *bis_result.lock().unwrap() = Some(r);
+            });
+        }
         let hs: Vec<_> = (0..2u8)
             .map(|prof| {
                 let shared = shared.clone();
@@ -115,7 +126,18 @@ fn solve_portfolio(p: &MipProblem, params: MipParams) -> solver::MipResult {
             .collect();
         hs.into_iter().map(|h| h.join().unwrap()).collect()
     });
-    let proven = *proven.lock().unwrap();
+    let mut proven = *proven.lock().unwrap();
+    let mut results = results;
+    if let Some((r, plb)) = bis_result.into_inner().unwrap() {
+        if let Some(r) = r {
+            results.push(r);
+        }
+        // 二分探索のスレッドが示した「plb 未満の解はない」: 最良の解がそれに届いていれば最適
+        let bz = results.iter().filter_map(|r| r.objective).fold(f64::INFINITY, f64::min);
+        if bz.is_finite() && plb >= bz - (params.rel_gap * bz.abs().max(1.0)).max(params.abs_gap) {
+            proven = Some(proven.map_or(plb, |v: f64| v.max(plb)));
+        }
+    }
     // 最良の解
     let mut best: Option<&solver::MipResult> = None;
     for r in &results {
@@ -150,6 +172,80 @@ fn solve_portfolio(p: &MipProblem, params: MipParams) -> solver::MipResult {
             solver::MipResult { status: r.status, x: None, objective: None, best_bound: bound, nodes, lp_iterations }
         }
     }
+}
+
+/// ポートフォリオ並列の目的値の二分探索のスレッド: 共有の最良値 `ub` と木の探索のスレッドの下界 `lb` の間の目標値
+/// `t = lb + f (ub - lb)` を打ち切り値にして問題全体を (時間を区切って) 解く。
+/// - 解が見つかれば共有の最良値が良くなる (求解の中で知らせる。f は 0.5 に戻す)
+/// - 探索を終えて解がなければ「t (と共有の最良値の小さい方) 未満の解はない」と示せたので、下界をそこへ上げる
+///   (f は 0.5 に戻す)。最適で終われば、その値未満の解はない (見つけた解が最適)
+/// - 時間で終わったら f を暫定解の側へ寄せる
+/// 下界が最良値に届いたら全スレッドを止める。戻り値は (見つけた最良の解, 示した下界)。
+fn bisection_worker(p: &MipProblem, params: MipParams, use_presolve: bool, shared: std::sync::Arc<solver::Portfolio>) -> (Option<solver::MipResult>, f64) {
+    use std::sync::atomic::Ordering;
+    crate::simplex::slope_intercept_dual::set_mip_profile(0);
+    solver::set_thread_portfolio(Some(shared.clone()));
+    let t0 = std::time::Instant::now();
+    let tl = params.time_limit;
+    let mut frac = 0.5f64;
+    let mut proven = f64::NEG_INFINITY;
+    let mut best: Option<solver::MipResult> = None;
+    let verbose = params.verbose && env_str!("ENOMOTO_MIP_BISECT_VERBOSE").is_some();
+    loop {
+        let el = t0.elapsed().as_secs_f64();
+        if shared.stop.load(Ordering::Relaxed) || el >= tl - 0.5 {
+            break;
+        }
+        let ub = shared.best();
+        let lb = shared.lb().max(proven);
+        if !ub.is_finite() || !lb.is_finite() {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            continue;
+        }
+        let tol = (params.rel_gap * ub.abs().max(1.0)).max(params.abs_gap);
+        if lb >= ub - tol {
+            shared.stop.store(true, Ordering::Relaxed);
+            break;
+        }
+        let t = lb + frac * (ub - lb);
+        let slice = (tunable!("ENOMOTO_T_MIP_BISECT_SLICE", 0.1, f64) * tl).max(2.0).min(tl - el);
+        let pr = MipParams { time_limit: slice, cutoff: t, verbose: false, ..params };
+        let r = solve_problem(p, pr, use_presolve);
+        let used_cut = t.min(shared.best());
+        if verbose {
+            eprintln!("MIP: bisection thread: lb {lb:.10e} ub {ub:.10e} target {t:.10e} -> {:?} {:?} ({:.1}s)", r.status, r.objective, t0.elapsed().as_secs_f64());
+        }
+        match (r.status, r.objective) {
+            (MipStatus::Optimal, Some(z)) if z < used_cut => {
+                // 打ち切り値未満で最良の解 = 全体の最適 (打ち切り値以上の解はヒューリスティクスが打ち切り値に関係なく
+                // 見つけたもので、探索を終えても「t 未満の解はない」ことしか示さない: 下の腕で扱う)
+                proven = proven.max(z);
+                if best.as_ref().is_none_or(|b| z < b.objective.unwrap()) {
+                    best = Some(r);
+                }
+                shared.stop.store(true, Ordering::Relaxed);
+                break;
+            }
+            (MipStatus::Infeasible, _) | (MipStatus::Optimal, _) => {
+                if let Some(z) = r.objective {
+                    if best.as_ref().is_none_or(|b| z < b.objective.unwrap()) {
+                        best = Some(r);
+                    }
+                }
+                proven = proven.max(used_cut);
+                frac = 0.5;
+            }
+            (_, Some(z)) => {
+                if best.as_ref().is_none_or(|b| z < b.objective.unwrap()) {
+                    best = Some(r);
+                }
+                frac = 0.5;
+            }
+            _ => frac = (0.5 * (1.0 + frac)).min(0.9),
+        }
+    }
+    solver::set_thread_portfolio(None);
+    (best, proven)
 }
 
 /// `p` を (`use_presolve` なら MIP 前処理をかけてから) 分枝限定法で解き、解を `p` の空間に戻す。

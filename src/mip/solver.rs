@@ -348,11 +348,31 @@ pub(super) struct Solver<'a, L: MipLp> {
 pub(crate) struct Portfolio {
     best: std::sync::atomic::AtomicU64,
     pub(crate) stop: std::sync::atomic::AtomicBool,
+    /// 木の探索をしているスレッドの下界 (の最大)。目的値の二分探索のスレッドが目標値を決めるのに使う。
+    lb: std::sync::atomic::AtomicU64,
 }
 
 impl Portfolio {
     pub(crate) fn new() -> Self {
-        Portfolio { best: std::sync::atomic::AtomicU64::new(f64::INFINITY.to_bits()), stop: std::sync::atomic::AtomicBool::new(false) }
+        Portfolio {
+            best: std::sync::atomic::AtomicU64::new(f64::INFINITY.to_bits()),
+            stop: std::sync::atomic::AtomicBool::new(false),
+            lb: std::sync::atomic::AtomicU64::new(f64::NEG_INFINITY.to_bits()),
+        }
+    }
+    pub(crate) fn lb(&self) -> f64 {
+        f64::from_bits(self.lb.load(std::sync::atomic::Ordering::Relaxed))
+    }
+    /// 下界 `v` を知らせる (今の値より大きければ置き換える)。
+    pub(crate) fn publish_lb(&self, v: f64) {
+        use std::sync::atomic::Ordering;
+        let mut cur = self.lb.load(Ordering::Relaxed);
+        while v > f64::from_bits(cur) {
+            match self.lb.compare_exchange_weak(cur, v.to_bits(), Ordering::Relaxed, Ordering::Relaxed) {
+                Ok(_) => break,
+                Err(c) => cur = c,
+            }
+        }
     }
     pub(crate) fn best(&self) -> f64 {
         f64::from_bits(self.best.load(std::sync::atomic::Ordering::Relaxed))
@@ -1065,6 +1085,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut plunge_depth = 0usize;
         let mut plunge_start = 0u64;
         loop {
+            // ポートフォリオ並列: 下界を知らせる (二分探索のスレッドが目標値を決めるのに使う)
+            if self.nodes % 64 == 0 {
+                if let Some(s) = &self.shared {
+                    let mut lb = self.queue.best_lower_bound();
+                    if let Some(n) = plunge.as_ref() {
+                        lb = lb.min(n.lower_bound);
+                    }
+                    if lb.is_finite() && self.queue.len() > 0 {
+                        s.publish_lb(lb);
+                    }
+                }
+            }
             // 目的値の二分探索で、暫定解より良い解がないことを証明した (下界が打ち切り値に届いた)
             if self.incumbent.is_some() && self.bisect_lb >= self.prune_limit() {
                 if self.params.verbose {
