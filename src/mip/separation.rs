@@ -180,7 +180,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 break;
             }
             let t_sep = std::time::Instant::now();
-            let mut cands = self.separate_face(&x, false);
+            // `ENOMOTO_T_MIP_FACE_MAX_CUTS` = k (> 0): 面の頂点からのカットは別枠で最大 k 本選ぶ (今の頂点のカットとは
+            // 競わせない)。0 なら同じ枠で選ぶ
+            let face_quota = tunable!("ENOMOTO_T_MIP_FACE_MAX_CUTS", 0usize, usize);
+            let (mut cands, fcands) = self.separate_face_split(&x, false);
+            let mut face_cands: Vec<Candidate> = Vec::new();
+            if face_quota > 0 {
+                face_cands = fcands;
+            } else {
+                cands.extend(fcands);
+            }
             // 再スタート前のカットをプールで引き継いだとき (`ENOMOTO_MIP_RESTART_CUTS_TO_POOL`): プールで違反しているものも候補にする
             if ((self.params.restarts > 0 && env_str!("ENOMOTO_MIP_RESTART_CUTS_TO_POOL").is_some()) || env_str!("ENOMOTO_MIP_CUTSEL_HIGHS_POOL").is_some()) && round < tunable!("ENOMOTO_T_MIP_ROOT_POOL_ROUNDS", 5usize, usize) && env_str!("ENOMOTO_MIP_NO_ROOT_POOL").is_none() {
                 for (eff, k) in self.pool_violated(&x) {
@@ -188,15 +197,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     cands.push(Candidate { coefs: c.clone(), rhs: *r, efficacy: eff });
                 }
             }
-            let ncands = cands.len();
-            if cands.is_empty() {
+            let ncands = cands.len() + face_cands.len();
+            if ncands == 0 {
                 break;
             }
             let dbg_sep = env_str!("ENOMOTO_MIP_DEBUG_SEP").is_some() && !self.params.submip;
             let t_sel0 = std::time::Instant::now();
             // 候補はすべてカットプールに入れる (選択で落ちたものも、ノードで違反すれば使う)
             if !self.params.submip && env_str!("ENOMOTO_MIP_POOL_SELECTED_ONLY").is_none() {
-                for c in &cands {
+                for c in cands.iter().chain(face_cands.iter()) {
                     self.add_to_pool(&c.coefs, c.rhs);
                 }
             }
@@ -212,6 +221,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 self.select_cuts_highs(cands, max_cuts, &x, maxpar)
             } else {
                 select_cuts(cands, max_cuts, p)
+            };
+            let chosen = if face_cands.is_empty() {
+                chosen
+            } else {
+                // 面の頂点のカットは別枠で選び、今の頂点で選んだカットとほぼ平行なものは除く
+                let mut chosen = chosen;
+                let extra = select_cuts(std::mem::take(&mut face_cands), face_quota, p);
+                for c in extra {
+                    if !chosen.iter().any(|d| cut_parallelism(&c.coefs, &d.coefs) > 0.99) {
+                        chosen.push(c);
+                    }
+                }
+                chosen
             };
             let sep_secs = t_sep.elapsed().as_secs_f64();
             let sel_secs = t_sel0.elapsed().as_secs_f64() - pool_secs;
@@ -1333,11 +1355,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// rout 57.8 秒 -> 時間切れ)、`canon` 17 問 27.66。既定は `int2` (同時に測った `int` 18 問 27.94 に対し 20 問 27.70:
     /// rout 時間切れ -> 31.2 秒、neos5 時間切れ -> 53.2 秒、misc07 39.6 -> 54.1 秒)
     fn separate_face(&mut self, x: &[f64], light: bool) -> Vec<Candidate> {
+        let (mut a, mut b) = self.separate_face_split(x, light);
+        a.append(&mut b);
+        a
+    }
+
+    /// [`Self::separate_face`] の候補を、今の頂点からのもの と 面の頂点からのもの に分けて返す。
+    fn separate_face_split(&mut self, x: &[f64], light: bool) -> (Vec<Candidate>, Vec<Candidate>) {
         let mode = match env_str!("ENOMOTO_MIP_FACE_SEP") {
-            Some(m) if m == "off" => return self.separate(x, light),
+            Some(m) if m == "off" => return (self.separate(x, light), Vec::new()),
             Some(m) if !self.params.submip => m,
             None if !self.params.submip => "int2",
-            _ => return self.separate(x, light),
+            _ => return (self.separate(x, light), Vec::new()),
         };
         let p = self.p;
         let n = p.n;
@@ -1374,7 +1403,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         if ndeg == 0 {
-            return self.separate(x, light);
+            return (self.separate(x, light), Vec::new());
         }
         let eps = tunable!("ENOMOTO_T_MIP_FACE_EPS", 1e-5, f64) * cmax;
         let hash = |j: usize| -> f64 {
@@ -1404,7 +1433,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             _ => vec![(0..n).map(hash).collect()],
         };
         let z0: f64 = (0..n).map(|j| p.cost[j] * x[j]).sum();
-        let mut cands = if mode == "canon" { Vec::new() } else { self.separate(x, light) };
+        let cands = if mode == "canon" { Vec::new() } else { self.separate(x, light) };
+        let mut fcands: Vec<Candidate> = Vec::new();
         let mut used = 0usize;
         for c2 in &dirs {
             let mut f2 = face.clone();
@@ -1435,13 +1465,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             std::mem::swap(&mut self.lp, &mut f2);
             let mut cv = self.separate(&xv, light);
             std::mem::swap(&mut self.lp, &mut f2);
-            cands.append(&mut cv);
+            fcands.append(&mut cv);
             used += 1;
         }
         if mode == "canon" && used == 0 {
-            return self.separate(x, light);
+            return (self.separate(x, light), Vec::new());
         }
-        cands
+        (cands, fcands)
     }
 
     /// 現在の LP 解 `x` を切る候補を作る。
@@ -1995,6 +2025,16 @@ fn select_cuts(cands: Vec<Candidate>, max_cuts: usize, p: &MipProblem) -> Vec<Ca
 }
 
 /// 疎なベクトル (列番号の昇順) の内積。
+/// 2 本のカットの係数の向きの余弦 (絶対値)。
+fn cut_parallelism(a: &[(usize, f64)], b: &[(usize, f64)]) -> f64 {
+    let na = a.iter().map(|&(_, v)| v * v).sum::<f64>().sqrt();
+    let nb = b.iter().map(|&(_, v)| v * v).sum::<f64>().sqrt();
+    if na == 0.0 || nb == 0.0 {
+        return 0.0;
+    }
+    sparse_dot(a, b).abs() / (na * nb)
+}
+
 fn sparse_dot(a: &[(usize, f64)], b: &[(usize, f64)]) -> f64 {
     let (mut i, mut k, mut dot) = (0, 0, 0.0);
     while i < a.len() && k < b.len() {
