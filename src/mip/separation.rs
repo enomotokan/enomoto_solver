@@ -1434,7 +1434,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             _ => vec![(0..n).map(hash).collect()],
         };
         let z0: f64 = (0..n).map(|j| p.cost[j] * x[j]).sum();
+        self.tab_memo.clear();
+        self.tab_memo_mode = 1;
         let cands = if mode == "canon" { Vec::new() } else { self.separate(x, light) };
+        self.tab_memo_mode = 2;
         let mut fcands: Vec<Candidate> = Vec::new();
         let mut used = 0usize;
         for c2 in &dirs {
@@ -1470,6 +1473,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             std::mem::swap(&mut self.lp, &mut f2);
             fcands.append(&mut cv);
             used += 1;
+        }
+        self.tab_memo_mode = 0;
+        if env_str!("ENOMOTO_MIP_DEBUG_FACE").is_some() {
+            eprintln!("FACE tab memo: checked {} rows, same as at the current vertex {}", self.tab_memo_stats.0, self.tab_memo_stats.1);
         }
         if mode == "canon" && used == 0 {
             return (self.separate(x, light), Vec::new());
@@ -1830,6 +1837,33 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if tab_rules && fill_mult > 0.0 && 10.0 * base.len().saturating_sub(w_nnz) as f64 > fill_mult * (10_000 + n) as f64 {
                 n_fill_skip += 1;
                 continue;
+            }
+            // 最適面の頂点での分離: 今の頂点で同じ基底変数の行が、集約した行もその列の LP 値も同じなら、作るカットも
+            // 同じなので飛ばす (`ENOMOTO_MIP_FACE_TAB_SKIP`。照合と数えるのは常に)。同じ行の割合は misc07 で 25% (1323 行中 325)、
+            // 10teams ではほぼ 0 (2088 行中 2: tableau が密で、1 回のピボットでほぼ全ての行が変わる)。分離の時間はほとんど
+            // 変わらないので既定では飛ばさない
+            if self.tab_memo_mode != 0 {
+                use std::hash::{Hash, Hasher};
+                let q = |v: f64| -> i64 { (v * 1e9).round() as i64 };
+                let mut hs = std::collections::hash_map::DefaultHasher::new();
+                for &(j, a) in &base {
+                    j.hash(&mut hs);
+                    q(a).hash(&mut hs);
+                    q(vars.x[j]).hash(&mut hs);
+                }
+                let h = hs.finish();
+                let k = self.lp.basic_var(s);
+                if self.tab_memo_mode == 1 {
+                    self.tab_memo.insert(k, h);
+                } else {
+                    self.tab_memo_stats.0 += 1;
+                    if self.tab_memo.get(&k) == Some(&h) {
+                        self.tab_memo_stats.1 += 1;
+                        if env_str!("ENOMOTO_MIP_FACE_TAB_SKIP").is_some() {
+                            continue;
+                        }
+                    }
+                }
             }
             n_rows_used += 1;
             base_nnz_total += base.len();

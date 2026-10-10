@@ -234,6 +234,12 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) cut_norm: std::collections::HashMap<u64, f64>,
     /// 効いていたカットを双対値でまとめた行の番号 ([`Self::merge_active_cuts`])。年齢で外さない。
     pub(super) merged_cuts: std::collections::HashSet<u64>,
+    /// 最適面の頂点での分離 (`separate_face_split`) で、今の頂点の tableau 行 (基底変数ごとの、集約した行とその列の
+    /// LP 値のハッシュ)。`tab_memo_mode`: 0 = 使わない、1 = 記録する、2 = 照合する。
+    pub(super) tab_memo: std::collections::HashMap<usize, u64>,
+    pub(super) tab_memo_mode: u8,
+    /// (照合した行の数, 同じだった行の数)
+    pub(super) tab_memo_stats: (u64, u64),
     /// 証明から作った衝突の数。
     proof_conflicts: u64,
     /// 完全オービトープ (orbitopal fixing に使う。サブ MIP では空)。
@@ -411,6 +417,9 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
         cut_ids: Vec::new(),
         cut_norm: std::collections::HashMap::new(),
         merged_cuts: std::collections::HashSet::new(),
+        tab_memo: std::collections::HashMap::new(),
+        tab_memo_mode: 0,
+        tab_memo_stats: (0, 0),
         next_cut_id: 0,
         proof_conflicts: 0,
         orbitopes: if params.submip { Rc::new(Vec::new()) } else { super::ORBITOPES.with(|t| t.borrow().clone()).unwrap_or_default() },
