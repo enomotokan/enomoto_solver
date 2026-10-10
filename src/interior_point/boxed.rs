@@ -541,13 +541,13 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
     let solve_acc2 = tunable!("ENOMOTO_T_IPM_SOLVE_ACC2", 1e-6f64, f64);
     let solve_acc2_reg = tunable!("ENOMOTO_T_IPM_SOLVE_ACC2_REG", 1e-10f64, f64);
     let mut prev_solve_rel = 0.0f64;
-    // 試験用 `ENOMOTO_T_IPM_CORR_ACC=m` (0 で使わない): 修正子の Newton 系の相対残差も見る。1: `SOLVE_ACC2` の判定に修正子の残差も
-    // 含める。2: 修正子の残差が `ENOMOTO_T_IPM_CORR_ACC_TOL` (既定 1e-6) を `ENOMOTO_T_IPM_CORR_ACC_K` (既定 3) 反復続けて超えたら、
+    // `ENOMOTO_T_IPM_CORR_ACC=m` (既定 2、0 で使わない): 修正子の Newton 系の相対残差も見る。1: `SOLVE_ACC2` の判定に修正子の残差も
+    // 含める。2: 修正子の残差が `ENOMOTO_T_IPM_CORR_ACC_TOL` (既定 1e-6) を `ENOMOTO_T_IPM_CORR_ACC_K` (既定 1) 反復続けて超えたら、
     // 分解の破綻と同じく ρ・δ を `ENOMOTO_T_IPM_BREAK_REG` まで上げて近接中心を今の点に置き直す (irish-electricity: 終盤に予測子は
     // 解けているが修正子の残差が 1e-8 → 1e4 に破綻し 37 反復空回りした。偶然の破綻で同じ処置が入ると 4 反復で収束した)。
-    let corr_acc = tunable!("ENOMOTO_T_IPM_CORR_ACC", 0u8, u8);
+    let corr_acc = tunable!("ENOMOTO_T_IPM_CORR_ACC", 2u8, u8);
     let corr_acc_tol = tunable!("ENOMOTO_T_IPM_CORR_ACC_TOL", 1e-6f64, f64);
-    let corr_acc_k = tunable!("ENOMOTO_T_IPM_CORR_ACC_K", 3usize, usize);
+    let corr_acc_k = tunable!("ENOMOTO_T_IPM_CORR_ACC_K", 1usize, usize);
     let mut corr_bad = 0usize;
     let mut corr_break = false;
     let mut prev_worst_acc = f64::INFINITY;
