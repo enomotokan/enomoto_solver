@@ -483,6 +483,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // ノードでは軽い分離 (経路集約の始点・tableau 行を減らす) で、追加するカットも少なくする
         // `ENOMOTO_MIP_NODE_FACE_SEP`: ノードでも最適面の頂点で分離する ([`Self::separate_face`])
+        // 40 問: 使わない 18 問 27.20、使う 18 問 27.36 (neos5 時間切れ -> 59.7 秒、neos-860300 54.2 秒 -> 時間切れ。木での分離の
+        // 時間はもともと小さく、差はほぼない)。既定では使わない
         let cands = if env_str!("ENOMOTO_MIP_NODE_FACE_SEP").is_some() { self.separate_face(x, true) } else { self.separate(x, true) };
         if cands.is_empty() {
             return false;
