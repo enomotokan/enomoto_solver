@@ -1640,7 +1640,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // clique カット (2 値列の衝突グラフ。根で一度だけ作って使い回す)。既定では使わない: 40 問で根の下界は
         // ほとんど変わらず、10teams では根の LP 解が変わって根の被約費用ヒューリスティクスが解を見つけられなくなった
-        // (13 問 / 幾何平均 30.57 に悪化)。ENOMOTO_MIP_CLIQUE_CUTS=1 で使う
+        // (13 問 / 幾何平均 30.57 に悪化)。ENOMOTO_MIP_CLIQUE_CUTS=1 で使う。プロービングの含意を辺に加えても (misc07 の辺は
+        // 2198 -> 4760、他の問題はほぼ増えない) 40 問で 20 問 28.11 -> 17 問 30.13 (10teams・rout・misc07 が時間切れ)
         if env_str!("ENOMOTO_MIP_CLIQUE_CUTS").is_some() {
             if self.clique_graph.is_none() {
                 let binary: Vec<bool> = (0..p.n).map(|j| p.is_int[j] && self.dom.global_lo[j] >= 0.0 && self.dom.global_up[j] <= 1.0).collect();

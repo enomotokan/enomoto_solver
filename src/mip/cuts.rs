@@ -1609,6 +1609,8 @@ pub fn generate_cuts(vars: &CutVars, base: &[(usize, f64)], rhs: f64, flow_cover
     let has_cont = base.iter().any(|&(k, a)| a != 0.0 && !vars.is_int[k] && vars.lo[k] < vars.up[k]);
     // `ENOMOTO_MIP_ROW_LIFTED_COVER`: 元の行 1 本ずつ (`ext_cover` の呼び出し) でだけ lifted cover も試す
     // (集約行・tableau 行では試さない。どれを残すかは呼び出し側がカットの質で決める)
+    // 40 問: 使わない 20 問 28.04、使う 19 問 27.66 (mik-250 53.3 -> 20.7 秒、binkar10_1 28.1 -> 24.5 秒、rout 31.9 秒 -> 時間切れ)。
+    // 差はばらつきの範囲なので既定では使わない
     if env_str!("ENOMOTO_MIP_LIFTED_COVER").is_some() || (ext_cover && env_str!("ENOMOTO_MIP_ROW_LIFTED_COVER").is_some()) {
         out.extend(lifted_cover_terms(vars, terms.clone(), beta));
     }
