@@ -621,6 +621,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         //   カットの中で最大のものの s 倍に満たないもの (ほぼ効いている) は年齢を増やさない
         // `ENOMOTO_T_MIP_CUT_DUAL_REL` = d (> 0): 効いている (論理変数が非基底の) カットのうち、|双対値| がカットの中で
         //   最大のものの d 倍に満たないもの (退化して効いているだけ) は年齢を増やす
+        // 40 問 (19 問は同じ): 既定 25.28 に対し s=0.1 は 24.96 だったが、もう一度並べると 25.37 (s=0.05 25.31、
+        // s=0.3 25.28)。d=0.01 は 25.35、プールの r=0.1 は 25.26。差はばらつきの範囲なので、どれも既定では使わない
         let srel = tunable!("ENOMOTO_T_MIP_CUT_SLACK_REL", 0.0, f64);
         let drel = tunable!("ENOMOTO_T_MIP_CUT_DUAL_REL", 0.0, f64);
         let ncut = self.cut_age.len();
