@@ -2376,6 +2376,24 @@ fn factorize_reusing_order(
 /// (あるステップで許容できるピボットが残っていない) なら `None`。
 /// 境界列が適量あれば [`factorize_bordered`]、稠密なら [`factorize_dense_faer`]、
 /// それ以外は Markowitz 消去に振り分ける。
+thread_local! {
+    static RECORD_REMAINDER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static REMAINDER: std::cell::RefCell<Option<(Vec<usize>, Vec<usize>)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// 数値的に特異な行列の、一次従属な部分を調べる (基底の特異の救済用)。稠密切替なしの疎な Markowitz 分解を行い、
+/// ピボットが取れなくなった時点の残りの列と行 `(列, 行)` (同じ本数) を返す。分解できた (正則) なら `None`。
+/// 残りの列は、すでに選んだ列と数値的に一次従属で、残りの行の単位列 (スラック) に差し替えれば正則になる
+/// (単位列はその行が残っている限り消去で値が変わらずピボットに取れるので、残りの列に単位列は入らない)。
+pub fn rank_deficient_remainder(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<(Vec<usize>, Vec<usize>)> {
+    RECORD_REMAINDER.with(|r| r.set(true));
+    REMAINDER.with(|r| *r.borrow_mut() = None);
+    let ok = factorize_flat_markowitz_routed(m, rows_in, false, 0.0).is_some();
+    RECORD_REMAINDER.with(|r| r.set(false));
+    let rem = REMAINDER.with(|r| r.borrow_mut().take());
+    if ok { None } else { rem }
+}
+
 pub fn factorize(m: usize, rows_in: &[Vec<(usize, f64)>]) -> Option<LuFactors> {
     let border = detect_border_columns(m, rows_in);
     factorize_routed(m, rows_in, &border, is_dense_input(m, rows_in), explicit_dense_switch())
@@ -2568,7 +2586,18 @@ fn factorize_flat_markowitz_routed(m: usize, rows_in: &[Vec<(usize, f64)>], dens
             Some(p) => p,
             None => {
                 PROF_DENSE_FALLBACK_STEPS.fetch_add(1, Ordering::Relaxed);
-                state.find_best_pivot(false)?
+                match state.find_best_pivot(false) {
+                    Some(p) => p,
+                    None => {
+                        // [`rank_deficient_remainder`] から呼ばれたときは、ピボットの取れなかった残りの行・列を記録する。
+                        if RECORD_REMAINDER.with(|r| r.get()) {
+                            let rows: Vec<usize> = (0..m).filter(|&i| !state.row_used[i]).collect();
+                            let cols: Vec<usize> = (0..m).filter(|&j| !state.col_used[j]).collect();
+                            REMAINDER.with(|r| *r.borrow_mut() = Some((cols, rows)));
+                        }
+                        return None;
+                    }
+                }
             }
         };
         if let Some(t0) = search_t0 {

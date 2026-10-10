@@ -540,6 +540,55 @@ pub(super) fn factorize_basis(
     r
 }
 
+/// [`factorize_basis`] の、数値的に特異な基底を救済する版。まず普通に分解し、成功すれば何も変えない (経路は同じ)。
+/// 失敗したら、疎な Markowitz 分解でピボットの取れなかった基底の位置を、残りの行のスラックに差し替えて分解し直す
+/// (HiGHS の rank deficiency の扱いと同じ)。`basis`・`basis_pos` を書き換え、差し替えた `(基底の位置, 外れた列)` を返す。
+/// 外れた列の非基底の状態 (どちらの境界に置くか) は呼び出し側が決める。差し替えても分解できなければ `None`。
+pub(super) fn factorize_basis_repair(
+    std: &StdForm,
+    basis: &mut [usize],
+    basis_pos: &mut [Option<usize>],
+    prev: Option<&sparse_lu::FtLu>,
+) -> Option<(sparse_lu::FtLu, Vec<(usize, usize)>)> {
+    if let Some(lu) = factorize_basis(std, basis_pos, prev) {
+        return Some((lu, Vec::new()));
+    }
+    let m = std.n_rows;
+    let n_orig = std.n_total - m;
+    let mut replaced: Vec<(usize, usize)> = Vec::new();
+    // 差し替えた後も (許容誤差の違いで) 分解できないことがあるので数回まで。
+    for _ in 0..tunable!("ENOMOTO_T_BASIS_REPAIR_ROUNDS", 3usize, usize) {
+        let mut rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
+        for (pos, &j) in basis.iter().enumerate() {
+            for &(i, v) in std.cols.col(j) {
+                rows[i].push((pos, v));
+            }
+        }
+        let Some((cols, free_rows)) = sparse_lu::rank_deficient_remainder(m, &rows) else {
+            // 疎な分解では正則: 普通の経路 (稠密切替など) だけが失敗した。稠密切替なしでもう一度。
+            return factorize_basis(std, basis_pos, None).map(|lu| (lu, replaced));
+        };
+        for (&pos, &r) in cols.iter().zip(&free_rows) {
+            let old = basis[pos];
+            let slack = n_orig + r;
+            if basis_pos[slack].is_some() {
+                return None;
+            }
+            basis_pos[old] = None;
+            basis[pos] = slack;
+            basis_pos[slack] = Some(pos);
+            replaced.push((pos, old));
+        }
+        if let Some(lu) = factorize_basis(std, basis_pos, None) {
+            if env_str!("ENOMOTO_DEBUG_BASIS_REPAIR").is_some() {
+                eprintln!("BASIS_REPAIR m={m} replaced {} columns by slacks", replaced.len());
+            }
+            return Some((lu, replaced));
+        }
+    }
+    None
+}
+
 /// トリガ (4) の閾値: FT 更新回数の上限 `max(FT_MAX_UPDATES_FACTOR * m, FT_MAX_UPDATES_FLOOR)`
 /// (`m` に比例させる。[`FT_MAX_UPDATES_FACTOR`] 参照)。
 #[inline]
