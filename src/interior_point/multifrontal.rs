@@ -550,6 +550,9 @@ impl Multifrontal {
 
     /// `rhs` を `M^{-1} rhs` で上書きする。
     pub fn solve_in_place(&self, rhs: &mut [f64]) {
+        if tunable!("ENOMOTO_T_MF_PAR_SOLVE", 0u8, u8) != 0 && !super::kkt::inner_seq() {
+            return self.solve_in_place_tree(rhs);
+        }
         let n = self.n;
         let mut x: Vec<f64> = (0..n).map(|i| rhs[self.perm_fwd[i]]).collect();
         let ns = self.begin.len();
@@ -633,6 +636,161 @@ impl Multifrontal {
             rhs[self.perm_fwd[i]] = x[i];
         }
         let _ = &self.perm_inv;
+    }
+
+    /// [`Self::solve_in_place`] を分解と同じ木で並列に解く (`ENOMOTO_T_MF_PAR_SOLVE=1`)。前進は supernode ごとに子の更新ベクトルを
+    /// 子の順に集め (親の列には足し、親の下の行は自分の更新ベクトルに足す)、自分の列を解いて `-L21 x_s` を足した更新ベクトルを
+    /// 親に返す。独立な部分木は並列。後退は祖先の列の値だけを読むので、親が終わった子どうしは並列。足す順はスレッド数に
+    /// よらない (従来の逐次の解き方とは足す順が違う)。
+    fn solve_in_place_tree(&self, rhs: &mut [f64]) {
+        let n = self.n;
+        let mut x: Vec<f64> = (0..n).map(|i| rhs[self.perm_fwd[i]]).collect();
+        let xp = SyncPtr(x.as_mut_ptr());
+        self.roots.par_iter().for_each(|&r| {
+            let _ = self.fwd_par(r, xp);
+        });
+        self.roots.par_iter().for_each(|&r| self.bwd_par(r, xp));
+        for i in 0..n {
+            rhs[self.perm_fwd[i]] = x[i];
+        }
+    }
+
+    fn fwd_par(&self, s: usize, xp: SyncPtr) -> Vec<f64> {
+        if self.subtree_flops[s] <= self.seq_flops {
+            return self.fwd_seq(s, xp);
+        }
+        let mut chain = vec![s];
+        loop {
+            let last = *chain.last().unwrap();
+            let ch = &self.children[last];
+            if ch.len() == 1 && self.subtree_flops[ch[0]] > self.seq_flops {
+                chain.push(ch[0]);
+            } else {
+                break;
+            }
+        }
+        let bottom = *chain.last().unwrap();
+        let ups: Vec<(usize, Vec<f64>)> = self.children[bottom].par_iter().map(|&c| (c, self.fwd_par(c, xp))).collect();
+        let mut u = self.fwd_node(bottom, ups, xp);
+        for w in (0..chain.len() - 1).rev() {
+            u = self.fwd_node(chain[w], vec![(chain[w + 1], u)], xp);
+        }
+        u
+    }
+
+    fn fwd_seq(&self, s: usize, xp: SyncPtr) -> Vec<f64> {
+        let mut stack: Vec<(usize, usize)> = vec![(s, 0)];
+        let mut pending: Vec<Vec<(usize, Vec<f64>)>> = vec![Vec::new()];
+        loop {
+            let (node, ci) = *stack.last().unwrap();
+            if ci < self.children[node].len() {
+                stack.last_mut().unwrap().1 += 1;
+                stack.push((self.children[node][ci], 0));
+                pending.push(Vec::new());
+                continue;
+            }
+            stack.pop();
+            let ups = pending.pop().unwrap();
+            let u = self.fwd_node(node, ups, xp);
+            match pending.last_mut() {
+                Some(p) => p.push((node, u)),
+                None => return u,
+            }
+        }
+    }
+
+    /// 前進の 1 つの supernode: 子の更新を集め、`L11 y = x_s` を解き、更新ベクトル `u - L21 y` を返す。LDLᵀ では最後に D で割る。
+    fn fwd_node(&self, s: usize, ups: Vec<(usize, Vec<f64>)>, xp: SyncPtr) -> Vec<f64> {
+        let (b, e) = (self.begin[s], self.end[s]);
+        let nc = e - b;
+        let r = self.pat_ptr[s + 1] - self.pat_ptr[s];
+        let f = nc + r;
+        // SAFETY: supernode ごとに列の範囲 [b, e) は重ならず、各 supernode はちょうど 1 回だけ処理される。
+        let xs: &mut [f64] = unsafe { std::slice::from_raw_parts_mut(xp.get().add(b), nc) };
+        let mut u = vec![0.0f64; r];
+        for (c, uc) in ups {
+            let map = &self.child_map[c];
+            for (j, &v) in uc.iter().enumerate() {
+                let mj = map[j] as usize;
+                if mj < nc {
+                    xs[mj] += v;
+                } else {
+                    u[mj - nc] += v;
+                }
+            }
+        }
+        let ls = &self.l[self.l_ptr[s]..self.l_ptr[s + 1]];
+        let lmat = from_column_major_slice::<f64, usize, usize>(ls, f, nc);
+        let (l11, l21) = lmat.split_at_row(nc);
+        {
+            let xm = from_column_major_slice_mut::<f64, usize, usize>(xs, nc, 1);
+            if self.signs.is_some() {
+                faer::linalg::triangular_solve::solve_unit_lower_triangular_in_place(l11, xm, Parallelism::None);
+            } else {
+                faer::linalg::triangular_solve::solve_lower_triangular_in_place(l11, xm, Parallelism::None);
+            }
+        }
+        if r > 0 {
+            faer::linalg::matmul::matmul(
+                from_column_major_slice_mut::<f64, usize, usize>(&mut u, r, 1),
+                l21,
+                from_column_major_slice::<f64, usize, usize>(xs, nc, 1),
+                Some(1.0),
+                -1.0,
+                Parallelism::None,
+            );
+        }
+        if self.signs.is_some() {
+            for j in 0..nc {
+                xs[j] /= ls[j * f + j];
+            }
+        }
+        u
+    }
+
+    fn bwd_par(&self, s: usize, xp: SyncPtr) {
+        if self.subtree_flops[s] <= self.seq_flops {
+            // 部分木を前順で逐次に。
+            let mut stack = vec![s];
+            while let Some(node) = stack.pop() {
+                self.bwd_node(node, xp);
+                stack.extend(self.children[node].iter().rev());
+            }
+            return;
+        }
+        self.bwd_node(s, xp);
+        self.children[s].par_iter().for_each(|&c| self.bwd_par(c, xp));
+    }
+
+    /// 後退の 1 つの supernode: `x_s -= L21ᵀ x[pat]` (祖先の値は確定済み) の後 `L11ᵀ x_s = ...` を解く。
+    fn bwd_node(&self, s: usize, xp: SyncPtr) {
+        let (b, e) = (self.begin[s], self.end[s]);
+        let nc = e - b;
+        let r = self.pat_ptr[s + 1] - self.pat_ptr[s];
+        let f = nc + r;
+        let lmat = from_column_major_slice::<f64, usize, usize>(&self.l[self.l_ptr[s]..self.l_ptr[s + 1]], f, nc);
+        let (l11, l21) = lmat.split_at_row(nc);
+        if r > 0 {
+            let pat = &self.pat[self.pat_ptr[s]..self.pat_ptr[s + 1]];
+            // SAFETY: pat は祖先の列で、祖先は前に処理済み (この間は書かれない)。
+            let tmp: Vec<f64> = pat.iter().map(|&i| unsafe { *xp.get().add(i) }).collect();
+            let xs: &mut [f64] = unsafe { std::slice::from_raw_parts_mut(xp.get().add(b), nc) };
+            faer::linalg::matmul::matmul(
+                from_column_major_slice_mut::<f64, usize, usize>(xs, nc, 1),
+                l21.transpose(),
+                from_column_major_slice::<f64, usize, usize>(&tmp, r, 1),
+                Some(1.0),
+                -1.0,
+                Parallelism::None,
+            );
+        }
+        let xs: &mut [f64] = unsafe { std::slice::from_raw_parts_mut(xp.get().add(b), nc) };
+        let xm = from_column_major_slice_mut::<f64, usize, usize>(xs, nc, 1);
+        if self.signs.is_some() {
+            faer::linalg::triangular_solve::solve_unit_upper_triangular_in_place(l11.transpose(), xm, Parallelism::None);
+        } else {
+            faer::linalg::triangular_solve::solve_upper_triangular_in_place(l11.transpose(), xm, Parallelism::None);
+        }
     }
 
     /// `k` 本の右辺 (`rhs` は列優先の `n x k`) をまとめて解く。中身は `solve_in_place` と同じで、
