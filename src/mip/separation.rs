@@ -1276,6 +1276,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 ndeg += 1;
             }
         }
+        // `ENOMOTO_MIP_FACE_BASIS`: 双対値が 0 で非基底の行 (スラック) による退化も数え、面の LP で点が動かなくても
+        // 基底が変わっていればその基底で分離する (主退化で最適基底が複数ある場合。tableau 行が変わるので別のカットが出る)
+        let face_basis = env_str!("ENOMOTO_MIP_FACE_BASIS").is_some();
+        if face_basis {
+            let y = self.lp.row_duals();
+            for i in 0..b.row.len() {
+                if b.row[i] != VarStatus::Basic && y[i].abs() <= 1e-9 {
+                    ndeg += 1;
+                }
+            }
+        }
         if ndeg == 0 {
             return self.separate(x, light);
         }
@@ -1323,8 +1334,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if env_str!("ENOMOTO_MIP_DEBUG_FACE").is_some() {
                 eprintln!("FACE: degenerate nonbasic {ndeg}, moved {moved} cols, obj {z0:.9} -> {zv:.9}, frac {} -> {}", self.fractional(x).len(), self.fractional(&xv).len());
             }
-            if zv > z0 + 1e-7 * (1.0 + z0.abs()) || moved == 0 {
+            if zv > z0 + 1e-7 * (1.0 + z0.abs()) {
                 continue;
+            }
+            if moved == 0 {
+                // 点は同じ。基底が変わっていればその基底で分離する (`ENOMOTO_MIP_FACE_BASIS`)
+                let fb = f2.basis();
+                let same = fb.col.iter().zip(&b.col).all(|(u, v)| (*u == VarStatus::Basic) == (*v == VarStatus::Basic))
+                    && fb.row.iter().zip(&b.row).all(|(u, v)| (*u == VarStatus::Basic) == (*v == VarStatus::Basic));
+                if !face_basis || same {
+                    continue;
+                }
             }
             std::mem::swap(&mut self.lp, &mut f2);
             let mut cv = self.separate(&xv, light);
