@@ -1279,6 +1279,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // `ENOMOTO_MIP_FACE_BASIS`: 双対値が 0 で非基底の行 (スラック) による退化も数え、面の LP で点が動かなくても
         // 基底が変わっていればその基底で分離する (主退化で最適基底が複数ある場合。tableau 行が変わるので別のカットが出る)
+        // 40 問 (`int2` のもとで): 使わない 20 問 27.89、使う 18 問 28.07 (misc07 57.3 -> 45.6 秒だが、neos5・neos-860300 が
+        // 時間切れ、nw04 10.5 -> 16.4 秒)。既定では使わない
         let face_basis = env_str!("ENOMOTO_MIP_FACE_BASIS").is_some();
         if face_basis {
             let y = self.lp.row_duals();
