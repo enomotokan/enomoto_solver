@@ -181,7 +181,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             let t_sep = std::time::Instant::now();
             // `ENOMOTO_T_MIP_FACE_MAX_CUTS` = k (> 0): 面の頂点からのカットは別枠で最大 k 本選ぶ (今の頂点のカットとは
-            // 競わせない)。0 なら同じ枠で選ぶ
+            // 競わせない)。0 なら同じ枠で選ぶ。40 問: 0 (既定) 19 問 27.70、10 は 17 問 28.14、25 は 17 問 27.83 (rout・neos5 が
+            // 時間切れ、mik-250 47.9 -> 33-40 秒)。既定では使わない
             let face_quota = tunable!("ENOMOTO_T_MIP_FACE_MAX_CUTS", 0usize, usize);
             let (mut cands, fcands) = self.separate_face_split(&x, false);
             let mut face_cands: Vec<Candidate> = Vec::new();
