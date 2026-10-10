@@ -1207,6 +1207,46 @@ impl<'a, L: MipLp> Solver<'a, L> {
         Some((r.status, acc))
     }
 
+    /// 目的値の二分探索 (`ENOMOTO_MIP_OBJ_BISECT`): 下界 `lb` と暫定解 `ub` の間の目標値
+    /// `t = lb + f (ub - lb)` (f は既定 0.5) を打ち切り値にして、問題全体をノード数を限ったサブ MIP で解く。
+    /// - 解が見つかれば暫定解が良くなる (f は 0.5 に戻す)
+    /// - サブ MIP が探索を終えて解がなければ「t 未満の解はない」と証明できたので、下界を t にする (f は 0.5 に戻す)
+    /// - 制限で終わったら f を暫定解の側へ寄せる ((1 + f) / 2、最大 0.9)
+    /// 目標値は行として加えず打ち切り値として渡す (行にすると LP が強く退化する)。見つけた解なら真。
+    pub(super) fn objective_bisection(&mut self, lb: f64) -> bool {
+        let Some(ub) = self.incumbent.as_ref().map(|(z, _)| *z) else { return false };
+        let lb = lb.max(self.bisect_lb);
+        if !lb.is_finite() || ub - lb <= 1e-6 * (1.0 + ub.abs()) {
+            return false;
+        }
+        let t = lb + self.bisect_frac * (ub - lb);
+        self.bisect_stats[0] += 1;
+        let mut sub = self.p.clone();
+        sub.col_lo = self.dom.global_lo.clone();
+        sub.col_up = self.dom.global_up.clone();
+        let nodes = tunable!("ENOMOTO_T_MIP_BISECT_NODES", 2000u64, u64);
+        let r = self.solve_submip_problem(sub, nodes, Some(t));
+        let (status, found) = r.unwrap_or((super::solver::MipStatus::NotSolved, false));
+        let proven = !found && matches!(status, super::solver::MipStatus::Infeasible);
+        if found {
+            self.bisect_stats[1] += 1;
+            self.bisect_frac = 0.5;
+        } else if proven {
+            self.bisect_stats[2] += 1;
+            self.bisect_lb = self.bisect_lb.max(t);
+            self.bisect_frac = 0.5;
+        } else {
+            self.bisect_frac = (0.5 * (1.0 + self.bisect_frac)).min(0.9);
+        }
+        if self.params.verbose {
+            eprintln!(
+                "MIP: objective bisection: lb {lb:.10e} ub {ub:.10e} target {t:.10e} -> status {status:?}, found {found}, proven {proven} (calls {}, found {}, proven {})",
+                self.bisect_stats[0], self.bisect_stats[1], self.bisect_stats[2]
+            );
+        }
+        found
+    }
+
     /// 固定 (列, 下限, 上限) を順に今の定義域に積み、1 つずつ伝播する。矛盾する固定は飛ばす (サブ MIP が丸ごと
     /// 実行不能になるのを防ぐ。HiGHS の RENS・RINS と同じ考え)。戻り値は (積んだ後の定義域の下限, 上限, 積めた数)。
     /// 定義域は戻す。

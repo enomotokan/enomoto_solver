@@ -240,6 +240,13 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) tab_memo_mode: u8,
     /// (照合した行の数, 同じだった行の数)
     pub(super) tab_memo_stats: (u64, u64),
+    /// 目的値の二分探索 ([`Self::objective_bisection`]): 目的値が `bisect_lb` 未満の解はないと証明した値、
+    /// 次の目標値の位置 (下界と暫定解の間の割合)、最後に呼んだノード数、使った時間、(呼び出し, 解, 証明) の回数。
+    pub(super) bisect_lb: f64,
+    pub(super) bisect_frac: f64,
+    pub(super) bisect_last: u64,
+    pub(super) bisect_secs: f64,
+    pub(super) bisect_stats: [u64; 3],
     /// 証明から作った衝突の数。
     proof_conflicts: u64,
     /// 完全オービトープ (orbitopal fixing に使う。サブ MIP では空)。
@@ -420,6 +427,11 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
         tab_memo: std::collections::HashMap::new(),
         tab_memo_mode: 0,
         tab_memo_stats: (0, 0),
+        bisect_lb: f64::NEG_INFINITY,
+        bisect_frac: 0.5,
+        bisect_last: 0,
+        bisect_secs: 0.0,
+        bisect_stats: [0; 3],
         next_cut_id: 0,
         proof_conflicts: 0,
         orbitopes: if params.submip { Rc::new(Vec::new()) } else { super::ORBITOPES.with(|t| t.borrow().clone()).unwrap_or_default() },
@@ -996,6 +1008,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut plunge_depth = 0usize;
         let mut plunge_start = 0u64;
         loop {
+            // 目的値の二分探索で、暫定解より良い解がないことを証明した (下界が打ち切り値に届いた)
+            if self.incumbent.is_some() && self.bisect_lb >= self.prune_limit() {
+                if self.params.verbose {
+                    eprintln!("MIP: objective bisection closed the gap (lower bound {:.10e})", self.bisect_lb);
+                }
+                let z = self.incumbent.as_ref().map(|(z, _)| *z).unwrap();
+                return self.finish(MipStatus::Optimal, z);
+            }
             if self.time_up() {
                 return self.finish_limit(MipStatus::TimeLimit, plunge.as_ref());
             }
@@ -1358,6 +1378,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             }
                         }
                         self.lns_secs += t_lns.elapsed().as_secs_f64();
+                    } else if env_str!("ENOMOTO_MIP_OBJ_BISECT").is_some()
+                        && !self.params.submip
+                        && plunge_depth == 0
+                        && self.incumbent.is_some()
+                        && self.nodes >= self.bisect_last + tunable!("ENOMOTO_T_MIP_BISECT_FREQ", 500u64, u64)
+                        && self.bisect_secs < tunable!("ENOMOTO_T_MIP_BISECT_TIME_FRAC", 0.25, f64) * self.start.elapsed().as_secs_f64()
+                    {
+                        self.bisect_last = self.nodes;
+                        let lb = self.queue.best_lower_bound().min(node_obj);
+                        let t_b = Instant::now();
+                        self.objective_bisection(lb);
+                        self.bisect_secs += t_b.elapsed().as_secs_f64();
                     } else if node.depth > 0 && plunge_depth == 0 && self.heur_iters - self.heur_iters_root < budget {
                         self.randomized_rounding(&x, 1);
                     }
@@ -2054,6 +2086,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if let Some((z, _)) = &self.incumbent {
             lb = lb.min(*z);
         }
+        // 目的値の二分探索で証明した下界
+        lb = lb.max(self.bisect_lb.min(self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z)));
         self.finish(status, lb)
     }
 
