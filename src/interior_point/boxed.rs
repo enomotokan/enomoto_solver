@@ -541,6 +541,15 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
     let solve_acc2 = tunable!("ENOMOTO_T_IPM_SOLVE_ACC2", 1e-6f64, f64);
     let solve_acc2_reg = tunable!("ENOMOTO_T_IPM_SOLVE_ACC2_REG", 1e-10f64, f64);
     let mut prev_solve_rel = 0.0f64;
+    // 試験用 `ENOMOTO_T_IPM_CORR_ACC=m` (0 で使わない): 修正子の Newton 系の相対残差も見る。1: `SOLVE_ACC2` の判定に修正子の残差も
+    // 含める。2: 修正子の残差が `ENOMOTO_T_IPM_CORR_ACC_TOL` (既定 1e-6) を `ENOMOTO_T_IPM_CORR_ACC_K` (既定 3) 反復続けて超えたら、
+    // 分解の破綻と同じく ρ・δ を `ENOMOTO_T_IPM_BREAK_REG` まで上げて近接中心を今の点に置き直す (irish-electricity: 終盤に予測子は
+    // 解けているが修正子の残差が 1e-8 → 1e4 に破綻し 37 反復空回りした。偶然の破綻で同じ処置が入ると 4 反復で収束した)。
+    let corr_acc = tunable!("ENOMOTO_T_IPM_CORR_ACC", 0u8, u8);
+    let corr_acc_tol = tunable!("ENOMOTO_T_IPM_CORR_ACC_TOL", 1e-6f64, f64);
+    let corr_acc_k = tunable!("ENOMOTO_T_IPM_CORR_ACC_K", 3usize, usize);
+    let mut corr_bad = 0usize;
+    let mut corr_break = false;
     let mut prev_worst_acc = f64::INFINITY;
     let mut temp_reg = 0.0f64;
     let solve_acc2_k = tunable!("ENOMOTO_T_IPM_SOLVE_ACC2_K", 3usize, usize);
@@ -824,6 +833,20 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
             prev_worst_acc = worst;
         }
 
+        if corr_break {
+            corr_break = false;
+            let break_reg = tunable!("ENOMOTO_T_IPM_BREAK_REG", 1e-8f64, f64);
+            rho = rho.max(break_reg);
+            delta = delta.max(break_reg);
+            xi.copy_from_slice(&x);
+            lambda.copy_from_slice(&y);
+            lo.nu.copy_from_slice(&lo.z);
+            up.nu.copy_from_slice(&up.z);
+            crate::phase_timing::mark("ipm_corr_break");
+            if debug {
+                eprintln!("IPM it={it} corrector solves inaccurate; raising regularization to rho={rho:.1e} delta={delta:.1e} and recentering");
+            }
+        }
         // ---- 右辺 ----
         // r_x = -(c + ρ(x - ξ) + A^T y - z_l + z_u) = -(dual_res + ρ(x - ξ))
         r_x.par_iter_mut().enumerate().with_min_len(PAR_MIN_LEN).for_each(|(j, r)| *r = -(dual_res[j] + rho * (x[j] - xi[j])));
@@ -941,8 +964,17 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
         lo.set_rs(true, sigma * mu);
         up.set_rs(true, sigma * mu);
         let t_s = std::time::Instant::now();
-        newton(&mut kkt, a, &at, &top, delta, &r_x, &r_y, &mut lo, &mut up, &pos, &mut rhs, n, &mut refine_work);
+        let corr_rel = newton(&mut kkt, a, &at, &top, delta, &r_x, &r_y, &mut lo, &mut up, &pos, &mut rhs, n, &mut refine_work);
         let last_ts = t_s.elapsed().as_secs_f64();
+        if corr_acc == 1 {
+            prev_solve_rel = prev_solve_rel.max(corr_rel);
+        } else if corr_acc == 2 {
+            corr_bad = if corr_rel > corr_acc_tol { corr_bad + 1 } else { 0 };
+            if corr_bad >= corr_acc_k {
+                corr_bad = 0;
+                corr_break = true;
+            }
+        }
         prof.1 += last_ts;
         // 試験用 (`ENOMOTO_T_IPM_GONDZIO_AUTO=C`): 補正子の回数を、この反復の分解の時間が Newton 系 1 回の求解の
         // 時間の何倍かで決める (`floor(t_分解 / (C t_求解))`、上限 `ENOMOTO_T_IPM_GONDZIO_AUTO_MAX`)。分解が重く求解が
