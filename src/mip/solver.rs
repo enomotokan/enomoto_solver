@@ -464,7 +464,22 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
         dive_calls: 0,
         dive_succ: 0,
     };
-    s.run()
+    // DSE 重みは既定で全ての LP で引き継ぐ (根のカットのループ、潜りの子、強分岐、待ち行列のノードは基底と一緒に保存した
+    // 重みを戻す)。`ENOMOTO_MIP_NO_DSE_ALL` で以前の形 (毎回 1 から) に戻す。サブ MIP の中から呼ばれても、終わったら元に戻す
+    use std::sync::atomic::Ordering;
+    let warm = &crate::simplex::slope_intercept_dual::WARM_DSE_ON;
+    let prev = warm.load(Ordering::Relaxed);
+    if dse_all() {
+        warm.store(true, Ordering::Relaxed);
+    }
+    let r = s.run();
+    warm.store(prev, Ordering::Relaxed);
+    r
+}
+
+/// DSE 重みを全ての LP で引き継ぎ、待ち行列のノードに保存するか (既定で真、`ENOMOTO_MIP_NO_DSE_ALL` で偽)。
+fn dse_all() -> bool {
+    env_str!("ENOMOTO_MIP_NO_DSE_ALL").is_none()
 }
 
 impl<'a, L: MipLp> Solver<'a, L> {
@@ -785,12 +800,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 1 ラウンドの反復は 10-45% 減る (neos-1456979 357 -> 193) が、40 問では 19 -> 17 問 (sgeomean 27.64 -> 29.64):
                 // 着く根の LP 解・カットが変わり、10teams (3.3 秒 -> 時間切れ)・neos-860300 が解けなくなった (mik-250 は 31.6 -> 19.4 秒)
                 let root_warm_dse = env_str!("ENOMOTO_MIP_ROOT_WARM_DSE").is_some() && !self.params.submip;
+                let warm_prev = crate::simplex::slope_intercept_dual::WARM_DSE_ON.load(std::sync::atomic::Ordering::Relaxed);
                 if root_warm_dse {
                     crate::simplex::slope_intercept_dual::WARM_DSE_ON.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
                 let cut_ok = env_str!("ENOMOTO_MIP_NO_CUTS").is_some() || self.root_cut_loop(root_iters);
                 if root_warm_dse {
-                    crate::simplex::slope_intercept_dual::WARM_DSE_ON.store(false, std::sync::atomic::Ordering::Relaxed);
+                    crate::simplex::slope_intercept_dual::WARM_DSE_ON.store(warm_prev, std::sync::atomic::Ordering::Relaxed);
                 }
                 if !cut_ok {
                     return self.finish(MipStatus::NotSolved, root_obj);
@@ -949,7 +965,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return r;
         }
         let prot = self.basis_protected_cuts();
-        self.queue.push(OpenNode { changes: Vec::new(), lower_bound: root_obj, estimate: root_obj, depth: 0, basis: Some(Rc::new(self.lp.basis())), basis_epoch: self.row_log.len(), dse: None, branch: None, prot });
+        self.queue.push(OpenNode { changes: Vec::new(), lower_bound: root_obj, estimate: root_obj, depth: 0, basis: Some(Rc::new(self.lp.basis())), basis_epoch: self.row_log.len(), dse: if dse_all() { self.lp.dse_snapshot().map(Rc::new) } else { None }, branch: None, prot });
         // 根のノードは LP を解いた状態のままなので、最初の取り出しでは定義域・LP を作り直さない。
         let mut first = true;
         // 潜っている子ノード (定義域に分枝を積んだ状態で次に処理する)。
@@ -1523,7 +1539,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let basis = Rc::new(self.lp.basis());
             let basis_epoch = self.row_log.len();
             // `ENOMOTO_MIP_NODE_DSE`: 基底と一緒に DSE 重みも保存し、取り出したノードの最初の LP で使う
-            let dse = if env_str!("ENOMOTO_MIP_NODE_DSE").is_some() { self.lp.dse_snapshot().map(Rc::new) } else { None };
+            let dse = if env_str!("ENOMOTO_MIP_NODE_DSE").is_some() || dse_all() { self.lp.dse_snapshot().map(Rc::new) } else { None };
             let prot = self.basis_protected_cuts();
             // 強分岐で子の LP が最適まで解けていれば、その値を子の下界にする
             let sb_bounds = self.last_sb.filter(|&(j, _, _)| j == col && env_str!("ENOMOTO_MIP_NO_SB_CHILD_BOUND").is_none());
