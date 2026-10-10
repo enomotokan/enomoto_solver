@@ -350,6 +350,8 @@ pub(crate) struct Portfolio {
     pub(crate) stop: std::sync::atomic::AtomicBool,
     /// 木の探索をしているスレッドの下界 (の最大)。目的値の二分探索のスレッドが目標値を決めるのに使う。
     lb: std::sync::atomic::AtomicU64,
+    /// 目的値の二分探索のスレッドが示した厳密な下界 (この値未満の解はない。スレッドの間で共有する)。
+    proven: std::sync::atomic::AtomicU64,
 }
 
 impl Portfolio {
@@ -358,6 +360,21 @@ impl Portfolio {
             best: std::sync::atomic::AtomicU64::new(f64::INFINITY.to_bits()),
             stop: std::sync::atomic::AtomicBool::new(false),
             lb: std::sync::atomic::AtomicU64::new(f64::NEG_INFINITY.to_bits()),
+            proven: std::sync::atomic::AtomicU64::new(f64::NEG_INFINITY.to_bits()),
+        }
+    }
+    pub(crate) fn proven(&self) -> f64 {
+        f64::from_bits(self.proven.load(std::sync::atomic::Ordering::Relaxed))
+    }
+    /// 厳密な下界 `v` を知らせる (今の値より大きければ置き換える)。
+    pub(crate) fn publish_proven(&self, v: f64) {
+        use std::sync::atomic::Ordering;
+        let mut cur = self.proven.load(Ordering::Relaxed);
+        while v > f64::from_bits(cur) {
+            match self.proven.compare_exchange_weak(cur, v.to_bits(), Ordering::Relaxed, Ordering::Relaxed) {
+                Ok(_) => break,
+                Err(c) => cur = c,
+            }
         }
     }
     pub(crate) fn lb(&self) -> f64 {
