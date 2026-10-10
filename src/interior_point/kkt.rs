@@ -122,7 +122,7 @@ fn metis_ordering(pat: &SymbolicSparseColMat<usize>) -> Option<(Vec<usize>, Vec<
 /// 2 は 2026-10-09 の比較 (auto の内点法を成分ごとに解くのと合わせて) で既定にした: Mittelmann 9 問のシフト付き幾何平均
 /// 0.818 倍 (nug08-3rd 425 → 160 秒、supportcase10 26 → 18 秒)、Netlib + Kennington 0.998 倍。以前 METIS で悪化した
 /// fome13 は、auto で 8 成分をまとめて 1 つの内点法で解いていたのが原因で、成分ごとに解けば悪化しない。
-fn symbolic_with_ordering(pat: &SymbolicSparseColMat<usize>, dbg: bool) -> Option<SymbolicCholesky<usize>> {
+fn symbolic_with_ordering(pat: &SymbolicSparseColMat<usize>, dbg: bool, limit: usize) -> Option<SymbolicCholesky<usize>> {
     let mode = tunable!("ENOMOTO_T_CHOL_ORDER", 2u8, u8);
     let min_n = tunable!("ENOMOTO_T_CHOL_ORDER_MIN_N", 1000usize, usize);
     let amd = || factorize_symbolic_cholesky::<usize>(pat.as_ref(), Side::Upper, SymmetricOrdering::Amd, chol_symbolic_params()).ok();
@@ -133,6 +133,16 @@ fn symbolic_with_ordering(pat: &SymbolicSparseColMat<usize>, dbg: bool) -> Optio
     let a = if mode == 2 { amd() } else { None };
     let a_flops = a.as_ref().map_or(f64::INFINITY, chol_flops);
     if mode == 2 && a_flops < tunable!("ENOMOTO_T_CHOL_ORDER_MIN_FLOPS", 1e8f64, f64) {
+        return a;
+    }
+    // AMD の因子が分解の上限 (`limit`、上限なしは `usize::MAX`) の `ENOMOTO_T_CHOL_SKIP_METIS_RATIO` 倍 (既定 4、0 で使わない) を超えるなら、
+    // METIS でも上限に収まらないので試さない (METIS の nnz(L) はこれまで AMD の 0.3〜0.5 倍。ex10 の正規方程式は AMD 7.5 億・
+    // METIS 3.6 億で、どちらも上限 1 億を超えて捨てるのに METIS に 7.7 秒かけていた)。
+    let skip_ratio = tunable!("ENOMOTO_T_CHOL_SKIP_METIS_RATIO", 4.0f64, f64);
+    if mode == 2 && skip_ratio > 0.0 && limit < usize::MAX && a.as_ref().is_some_and(|c| c.len_values() as f64 > skip_ratio * limit as f64) {
+        if dbg {
+            eprintln!("NormalKkt: AMD nnz(L)={:?} exceeds {skip_ratio} x the factor limit; METIS skipped", a.as_ref().map(|c| c.len_values()));
+        }
         return a;
     }
     let t0 = std::time::Instant::now();
@@ -515,7 +525,7 @@ impl AugKkt {
             SymbolicSparseColMat::<usize>::try_new_from_indices(dim, dim, &positions).expect("valid KKT sparsity pattern");
         // `ENOMOTO_T_AUG_ORDER=1` (既定): 正規方程式と同じ並べ替えの選び方 (AMD と METIS の演算量の少ない方)。0 は AMD だけ。
         let chol_symbolic = if tunable!("ENOMOTO_T_AUG_ORDER", 1u8, u8) == 1 {
-            symbolic_with_ordering(&symbolic_base, env_str!("ENOMOTO_DEBUG_IPM").is_some())?
+            symbolic_with_ordering(&symbolic_base, env_str!("ENOMOTO_DEBUG_IPM").is_some(), max_nnz)?
         } else {
             factorize_symbolic_cholesky::<usize>(symbolic_base.as_ref(), Side::Upper, SymmetricOrdering::Amd, Default::default()).ok()?
         };
@@ -871,7 +881,7 @@ impl NormalKkt {
         }
         // 0: faer、1: MKL PARDISO (試験用)、2: 自前のマルチフロンタル法 (既定、第 61 回の比較で決めた)。
         let backend = tunable!("ENOMOTO_T_CHOL_BACKEND", 2u8, u8);
-        let chol_symbolic = symbolic_with_ordering(&symbolic_base, dbg)?;
+        let chol_symbolic = symbolic_with_ordering(&symbolic_base, dbg, max_factor_nnz())?;
         if dbg {
             eprintln!("NormalKkt: symbolic (AMD) nnz(L)={} at {:.2}s", chol_symbolic.len_values(), t0.elapsed().as_secs_f64());
         }
@@ -1343,7 +1353,7 @@ mod chol_bench {
         let t0 = std::time::Instant::now();
         let mf_mode = std::env::var("ENOMOTO_T_CHOL_BACKEND").map_or(false, |v| v == "2");
         super::FORCE_SUPERNODAL.with(|c| c.set(mf_mode));
-        let chol = super::symbolic_with_ordering(&sym, false).unwrap();
+        let chol = super::symbolic_with_ordering(&sym, false, usize::MAX).unwrap();
         super::FORCE_SUPERNODAL.with(|c| c.set(false));
         if mf_mode {
             let t0 = std::time::Instant::now();
