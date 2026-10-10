@@ -1463,8 +1463,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     continue;
                 }
             }
+            // `ENOMOTO_MIP_FACE_LIGHT`: 面の頂点では軽い分離 (経路集約の始点・tableau 行を減らす) にする
+            let lt = light || env_str!("ENOMOTO_MIP_FACE_LIGHT").is_some();
             std::mem::swap(&mut self.lp, &mut f2);
-            let mut cv = self.separate(&xv, light);
+            let mut cv = self.separate(&xv, lt);
             std::mem::swap(&mut self.lp, &mut f2);
             fcands.append(&mut cv);
             used += 1;

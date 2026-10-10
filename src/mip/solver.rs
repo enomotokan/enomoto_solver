@@ -472,8 +472,13 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
     use std::sync::atomic::Ordering;
     let warm = &crate::simplex::slope_intercept_dual::WARM_DSE_ON;
     let prev = warm.load(Ordering::Relaxed);
-    if dse_all() {
+    // `ENOMOTO_MIP_SUBMIP_NO_DSE`: サブ MIP (RENS など) の中では引き継がない (10teams: 引き継ぐと根の被約費用ヒューリスティクスの
+    // サブ MIP が 0 ノード -> 366 ノード、0.6 -> 3.5 秒)
+    let sub_off = s.params.submip && env_str!("ENOMOTO_MIP_SUBMIP_NO_DSE").is_some();
+    if dse_all() && !sub_off {
         warm.store(true, Ordering::Relaxed);
+    } else if sub_off {
+        warm.store(false, Ordering::Relaxed);
     }
     let r = s.run();
     warm.store(prev, Ordering::Relaxed);
