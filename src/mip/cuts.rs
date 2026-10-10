@@ -1510,7 +1510,10 @@ fn lifted_cover_terms(vars: &CutVars, terms: Vec<Term>, beta: f64) -> Option<Raw
     }
     // 持ち上げた係数のうち小さいものを落とす (y >= 0 なので、`<=` の左辺の正の係数を 0 にしても妥当なまま。疎になる):
     // `ENOMOTO_T_MIP_LIFT_KEEP_FRAC` = f (> 0): カバーの外の変数の正の係数で、最大の係数の f 倍未満のものを落とす。
-    // `ENOMOTO_MIP_LIFT_DROP_ZERO`: カバーの外で LP 値が 0 の変数の正の係数を落とす (今の LP 解での違反量は変わらない)
+    // `ENOMOTO_MIP_LIFT_DROP_ZERO`: カバーの外で LP 値が 0 の変数の正の係数を落とす (今の LP 解での違反量は変わらない)。
+    // 13 問 x 3 通り (既定 29/39 28.82): 元の行だけ (`ENOMOTO_MIP_ROW_LIFTED_COVER`) は落とさない 26/39 31.21、f = 0.2 で
+    // 23/39 33.14、LP 値 0 を落とす 24/39 31.10。全ての集約行 (`ENOMOTO_MIP_LIFTED_COVER`) は 19/39 33.89、f = 0.2 で
+    // 24/39 32.11、LP 値 0 を落とす 19/39 40.77。どれも既定より悪いので使わない
     let keep_frac = tunable!("ENOMOTO_T_MIP_LIFT_KEEP_FRAC", 0.0, f64);
     let drop_zero = env_str!("ENOMOTO_MIP_LIFT_DROP_ZERO").is_some();
     if keep_frac > 0.0 || drop_zero {

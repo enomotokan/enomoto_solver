@@ -204,8 +204,14 @@ fn bisection_worker(p: &MipProblem, params: MipParams, use_presolve: bool, share
         }
         let tol = (params.rel_gap * ub.abs().max(1.0)).max(params.abs_gap);
         if lb >= ub - tol {
-            shared.stop.store(true, Ordering::Relaxed);
-            break;
+            // 共有の下界は木の探索のスレッドの待ち行列からの目安で、厳密ではない (処理中のノードを含まない)。
+            // 止める合図には使わず、自分で示した下界 (`proven`) だけで判断する
+            if proven >= ub - tol {
+                shared.stop.store(true, Ordering::Relaxed);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            continue;
         }
         let t = lb + frac * (ub - lb);
         let slice = (tunable!("ENOMOTO_T_MIP_BISECT_SLICE", 0.1, f64) * tl).max(2.0).min(tl - el);
