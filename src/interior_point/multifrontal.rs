@@ -550,7 +550,7 @@ impl Multifrontal {
 
     /// `rhs` を `M^{-1} rhs` で上書きする。
     pub fn solve_in_place(&self, rhs: &mut [f64]) {
-        if tunable!("ENOMOTO_T_MF_PAR_SOLVE", 0u8, u8) != 0 && !super::kkt::inner_seq() {
+        if tunable!("ENOMOTO_T_MF_PAR_SOLVE", 1u8, u8) != 0 && !super::kkt::inner_seq() {
             return self.solve_in_place_tree(rhs);
         }
         let n = self.n;
@@ -638,7 +638,7 @@ impl Multifrontal {
         let _ = &self.perm_inv;
     }
 
-    /// [`Self::solve_in_place`] を分解と同じ木で並列に解く (`ENOMOTO_T_MF_PAR_SOLVE=1`)。前進は supernode ごとに子の更新ベクトルを
+    /// [`Self::solve_in_place`] を分解と同じ木で並列に解く (`ENOMOTO_T_MF_PAR_SOLVE`、既定 1、0 で従来の逐次)。前進は supernode ごとに子の更新ベクトルを
     /// 子の順に集め (親の列には足し、親の下の行は自分の更新ベクトルに足す)、自分の列を解いて `-L21 x_s` を足した更新ベクトルを
     /// 親に返す。独立な部分木は並列。後退は祖先の列の値だけを読むので、親が終わった子どうしは並列。足す順はスレッド数に
     /// よらない (従来の逐次の解き方とは足す順が違う)。
