@@ -1061,6 +1061,9 @@ pub(crate) fn take_last_ray() -> Option<Vec<f64>> {
 pub(crate) static WARM_DSE_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// 次の 1 回の warm start の求解だけ、DSE 重みをその基底の厳密な値から始める (呼び出し側が場面を限って立てる。
 /// 例: MIP で待ち行列から取り出したノードの基底を復元した直後。求解の始めに下ろす)。
+/// 次の 1 回の warm start の求解だけ、渡された DSE 重み (同じ基底のもの) を使う (MIP で待ち行列のノードの基底と
+/// 一緒に保存した重みを戻した直後に立てる。求解の始めに下ろす)。
+pub(crate) static WARM_DSE_ONCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 pub(crate) static DSE_EXACT_ONCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 pub(crate) fn set_warm_dse(w: Option<Vec<f64>>) {
@@ -3774,10 +3777,11 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     // 表の行の量。`M` に依存するのはそれを使うスコア `Score2` だけ)。最初のピボットから
     // 厳密 DSE を使う。全スラックの `B0` は符号付き単位行列なので `DseState::new` の単位重みは正確。
     let exact_once = DSE_EXACT_ONCE.swap(false, std::sync::atomic::Ordering::Relaxed);
+    let warm_once = WARM_DSE_ONCE.swap(false, std::sync::atomic::Ordering::Relaxed);
     let mut dse = match WARM_DSE.with(|w| w.borrow_mut().take()) {
         // 既定では使わない (`ENOMOTO_WARM_DSE` で有効): 反復は少し減るが、退化した LP で着く頂点が変わり、misc07・mik-250 で
         // 木が大きくなった (40 問: 18 -> 17 問)
-        Some(w) if warm_started && w.len() == m && (env_str!("ENOMOTO_WARM_DSE").is_some() || WARM_DSE_ON.load(std::sync::atomic::Ordering::Relaxed)) => super::DseState::from_weights(w),
+        Some(w) if warm_started && w.len() == m && (warm_once || env_str!("ENOMOTO_WARM_DSE").is_some() || WARM_DSE_ON.load(std::sync::atomic::Ordering::Relaxed)) => super::DseState::from_weights(w),
         // `ENOMOTO_DSE_EXACT_INIT`: warm start (構造列を含む基底) では、単位重みではなくその基底の厳密な DSE 重みから
         // 始める (HiGHS の HEkkDual::initialiseInstance と同じ。行ごとに BTRAN 1 回、計 m 回)。単位重みは全スラック基底で
         // しか正確でなく、分枝限定法で待ち行列から取り出したノード (保存した基底を復元、重みの引き継ぎなし) の最初の LP は

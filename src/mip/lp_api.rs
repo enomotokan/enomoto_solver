@@ -42,6 +42,12 @@ pub trait MipLp: Clone {
     }
     /// 基底を列番号 (構造列 j < n、行 n + i) で与える ([`TwoStageLp::set_basis_cols`])。対応しない実装は何もしない。
     fn set_basis_cols(&mut self, _b: &[usize], _x: Option<&[f64]>) {}
+    /// 今の基底の DSE 重み (基底変数の番号との組、[`TwoStageLp::dse_snapshot`])。対応しない実装は `None`。
+    fn dse_snapshot(&self) -> Option<Vec<(u32, f32)>> {
+        None
+    }
+    /// DSE 重みを今の基底に当てはめる ([`TwoStageLp::set_dse_vars`])。対応しない実装は何もしない。
+    fn set_dse_vars(&mut self, _w: &[(u32, f32)]) {}
 }
 
 macro_rules! forward_impl {
@@ -90,5 +96,11 @@ forward_impl!(
     },
     fn set_basis_cols(&mut self, b: &[usize], x: Option<&[f64]>) {
         TwoStageLp::set_basis_cols(self, b, x)
+    },
+    fn dse_snapshot(&self) -> Option<Vec<(u32, f32)>> {
+        TwoStageLp::dse_snapshot(self)
+    },
+    fn set_dse_vars(&mut self, w: &[(u32, f32)]) {
+        TwoStageLp::set_dse_vars(self, w)
     }
 );

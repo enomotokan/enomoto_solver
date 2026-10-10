@@ -211,6 +211,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 基底の復元の回数、そのうち基底の数が行数と合わなかった回数、復元後の最初の LP の反復数 (診断用)
     restore_stats: (u64, u64, u64),
     restored_now: bool,
+    /// 直前に戻した基底に、保存した DSE 重みも当てはめたか (次の LP で引き継ぐ)。
+    restored_dse: bool,
     node_lps: u64,
     /// ノードの LP にかかった時間の合計 (秒)。1 回の LP の時間の上限に使う。
     node_lp_secs: f64,
@@ -396,6 +398,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
         node_iters_first: 0,
         restore_stats: (0, 0, 0),
         restored_now: false,
+        restored_dse: false,
         node_lps: 0,
         node_lp_secs: 0.0,
         unresolved: false,
@@ -946,7 +949,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return r;
         }
         let prot = self.basis_protected_cuts();
-        self.queue.push(OpenNode { changes: Vec::new(), lower_bound: root_obj, estimate: root_obj, depth: 0, basis: Some(Rc::new(self.lp.basis())), basis_epoch: self.row_log.len(), branch: None, prot });
+        self.queue.push(OpenNode { changes: Vec::new(), lower_bound: root_obj, estimate: root_obj, depth: 0, basis: Some(Rc::new(self.lp.basis())), basis_epoch: self.row_log.len(), dse: None, branch: None, prot });
         // 根のノードは LP を解いた状態のままなので、最初の取り出しでは定義域・LP を作り直さない。
         let mut first = true;
         // 潜っている子ノード (定義域に分枝を積んだ状態で次に処理する)。
@@ -1010,7 +1013,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         continue;
                     }
                     if let Some(b) = &n.basis {
-                        self.restore_node_basis(b, n.basis_epoch);
+                        self.restore_node_basis(b, n.basis_epoch, n.dse.as_ref().map(|v| v.as_slice()));
                     }
                     n
                 }
@@ -1040,7 +1043,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         }
                         if ok {
                             if let Some(b) = &n.basis {
-                                self.restore_node_basis(b, n.basis_epoch);
+                                self.restore_node_basis(b, n.basis_epoch, n.dse.as_ref().map(|v| v.as_slice()));
                             }
                         }
                         if !ok {
@@ -1165,7 +1168,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if resolves == 0 && self.restored_now && env_str!("ENOMOTO_MIP_RESTORE_EXACT_DSE").is_some() {
                     crate::simplex::slope_intercept_dual::DSE_EXACT_ONCE.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
+                if std::mem::take(&mut self.restored_dse) && resolves == 0 {
+                    crate::simplex::slope_intercept_dual::WARM_DSE_ONCE.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
                 let mut st = self.lp.solve(&capped(self, iter_limit));
+                crate::simplex::slope_intercept_dual::WARM_DSE_ONCE.store(false, std::sync::atomic::Ordering::Relaxed);
                 crate::simplex::slope_intercept_dual::DSE_EXACT_ONCE.store(false, std::sync::atomic::Ordering::Relaxed);
                 if st == LpStatus::TimeLimit && !self.time_up() {
                     st = LpStatus::IterationLimit;
@@ -1515,6 +1522,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let (first_c, second_c) = if prefer_up { (up, down) } else { (down, up) };
             let basis = Rc::new(self.lp.basis());
             let basis_epoch = self.row_log.len();
+            // `ENOMOTO_MIP_NODE_DSE`: 基底と一緒に DSE 重みも保存し、取り出したノードの最初の LP で使う
+            let dse = if env_str!("ENOMOTO_MIP_NODE_DSE").is_some() { self.lp.dse_snapshot().map(Rc::new) } else { None };
             let prot = self.basis_protected_cuts();
             // 強分岐で子の LP が最適まで解けていれば、その値を子の下界にする
             let sb_bounds = self.last_sb.filter(|&(j, _, _)| j == col && env_str!("ENOMOTO_MIP_NO_SB_CHILD_BOUND").is_none());
@@ -1532,6 +1541,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     depth: node.depth + 1,
                     basis: Some(basis.clone()),
                     basis_epoch,
+                    dse: dse.clone(),
                     branch: Some((col, !c.upper, value, lp_obj)),
                     prot: prot.clone(),
                 }
@@ -2024,7 +2034,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// 完全オービトープの固定と伝播を、固定が出なくなるまで (最大 10 回) 繰り返す。矛盾したら偽。
     /// 待ち行列のノードの基底を LP に置く (保存した後の行の追加・削除を当てはめる)。
-    fn restore_node_basis(&mut self, b: &super::lp::Basis, epoch: usize) {
+    fn restore_node_basis(&mut self, b: &super::lp::Basis, epoch: usize, dse: Option<&[(u32, f32)]>) {
         let mr = self.lp.num_rows();
         // 調査用: 保存した基底を使わず、今の LP の基底 (直前のノードの最適基底) のまま解く
         if env_str!("ENOMOTO_MIP_RESTORE_NEVER").is_some() {
@@ -2034,6 +2044,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.restore_stats.0 += 1;
             self.restored_now = true;
             self.lp.set_basis(b);
+            if let Some(w) = dse {
+                self.lp.set_dse_vars(w);
+                self.restored_dse = true;
+            }
             return;
         }
         let mut b2 = b.clone();
@@ -2096,6 +2110,48 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         self.restored_now = true;
         self.lp.set_basis(&b2);
+        if let Some(w) = dse {
+            // 保存したときの行の番号を今の行の番号に直す (行の追加・削除の記録を当てはめる)
+            let n = b.col.len();
+            let m_saved = b.row.len();
+            let mut orig: Vec<usize> = (0..m_saved).collect();
+            if epoch <= self.row_log.len() {
+                for e in &self.row_log[epoch..] {
+                    match e {
+                        RowEdit::Add(k) => orig.extend(std::iter::repeat_n(usize::MAX, *k)),
+                        RowEdit::Delete(mask) => {
+                            let mut i = 0;
+                            orig.retain(|_| {
+                                let keep = !mask.get(i).copied().unwrap_or(false);
+                                i += 1;
+                                keep
+                            });
+                        }
+                    }
+                }
+                let mut cur_of = vec![u32::MAX; m_saved];
+                for (ci, &o) in orig.iter().enumerate() {
+                    if o < m_saved {
+                        cur_of[o] = (n + ci) as u32;
+                    }
+                }
+                let mapped: Vec<(u32, f32)> = w
+                    .iter()
+                    .filter_map(|&(v, x)| {
+                        let v = v as usize;
+                        if v < n {
+                            Some((v as u32, x))
+                        } else if v - n < m_saved && cur_of[v - n] != u32::MAX {
+                            Some((cur_of[v - n], x))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                self.lp.set_dse_vars(&mapped);
+                self.restored_dse = true;
+            }
+        }
     }
 
     /// 分枝する列がパッキング・オービトープの行にあれば、その行で最も左の固定されていない列で分枝する

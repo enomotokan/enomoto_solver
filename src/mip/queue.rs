@@ -45,6 +45,8 @@ pub struct OpenNode {
     /// `basis` を保存したときの LP の行の変更の記録の位置 (`Solver::row_log` の長さ)。戻すときにその後の行の追加・削除を
     /// 基底に当てはめる。
     pub basis_epoch: usize,
+    /// `basis` の DSE 重み (基底変数の番号との組、`basis_epoch` のときの行の番号)。`ENOMOTO_MIP_NODE_DSE` で保存する。
+    pub dse: Option<Rc<Vec<(u32, f32)>>>,
     /// このノードを作った分枝 (列, 上向きか, 親の LP 値, 親の LP 目的値)。pseudocost の更新に使う。
     pub branch: Option<(usize, bool, f64, f64)>,
     /// `basis` で効いている (論理変数が非基底の) カットの番号 (`Solver::cut_ids`)。待ち行列にある間、このカットは

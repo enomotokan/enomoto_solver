@@ -486,6 +486,29 @@ impl TwoStageLp {
         }
     }
 
+    /// 今の基底の DSE 重み (直前の求解の最後の値。基底が変わっていなければ) を、基底変数の番号 (構造列 j < n、
+    /// 行 n + i) との組で返す。待ち行列のノードに基底と一緒に保存する。
+    pub fn dse_snapshot(&self) -> Option<Vec<(u32, f32)>> {
+        match (&self.basis, &self.dse_cache) {
+            (Some(b), Some((cb, w))) if b == cb && w.len() == b.len() => Some(b.iter().zip(w).map(|(&v, &x)| (v as u32, x as f32)).collect()),
+            _ => None,
+        }
+    }
+
+    /// [`Self::dse_snapshot`] の重みを今の基底に当てはめる (番号は今の LP の行に合わせてあること)。基底にない
+    /// 変数の重みは捨て、重みのない基底変数は 1。次の求解が引き継ぐかは [`sid::WARM_DSE_ONCE`] などで決まる。
+    pub fn set_dse_vars(&mut self, w: &[(u32, f32)]) {
+        let Some(b) = &self.basis else { return };
+        let mut map = vec![f32::NAN; self.n + self.rows.len()];
+        for &(v, x) in w {
+            if (v as usize) < map.len() {
+                map[v as usize] = x;
+            }
+        }
+        let ws: Vec<f64> = b.iter().map(|&v| if map[v].is_nan() { 1.0 } else { (map[v] as f64).max(1e-8) }).collect();
+        self.dse_cache = Some((b.clone(), ws));
+    }
+
     pub fn dse_weight(&self, _s: usize) -> f64 {
         1.0
     }
