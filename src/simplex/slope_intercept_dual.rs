@@ -1059,6 +1059,9 @@ pub(crate) fn take_last_ray() -> Option<Vec<f64>> {
 /// 引き継いだ DSE 重みを使うか (`ENOMOTO_WARM_DSE` とは別に、呼び出し側が場面を限って有効にする。例: MIP の根のカットのループ)。
 /// スレッド局所の領域を増やさないよう、プロセス全体の値にしている。
 pub(crate) static WARM_DSE_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// 次の 1 回の warm start の求解だけ、DSE 重みをその基底の厳密な値から始める (呼び出し側が場面を限って立てる。
+/// 例: MIP で待ち行列から取り出したノードの基底を復元した直後。求解の始めに下ろす)。
+pub(crate) static DSE_EXACT_ONCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 pub(crate) fn set_warm_dse(w: Option<Vec<f64>>) {
     WARM_DSE.with(|x| *x.borrow_mut() = w);
@@ -3770,6 +3773,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     // 離基行の重み(論文 5.4 節 Step 2(b) の `γ_i`、注意 7.7): `super::DseState` をそのまま使う(重みは `M` に依存しない
     // 表の行の量。`M` に依存するのはそれを使うスコア `Score2` だけ)。最初のピボットから
     // 厳密 DSE を使う。全スラックの `B0` は符号付き単位行列なので `DseState::new` の単位重みは正確。
+    let exact_once = DSE_EXACT_ONCE.swap(false, std::sync::atomic::Ordering::Relaxed);
     let mut dse = match WARM_DSE.with(|w| w.borrow_mut().take()) {
         // 既定では使わない (`ENOMOTO_WARM_DSE` で有効): 反復は少し減るが、退化した LP で着く頂点が変わり、misc07・mik-250 で
         // 木が大きくなった (40 問: 18 -> 17 問)
@@ -3781,7 +3785,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         // 減るが、着く頂点が変わって根のカットのループが 23.26 で止まり (既定は 47.26)、40 問では 14 問 30.87 (同時に測った
         // 既定 19 問 27.81): misc07・binkar10_1・neos-860300・mik-250・neos5 が時間切れ、beavma 0.8 -> 8.7 秒 (m 回の BTRAN
         // の分だけ LP 1 回が重くなる)。既定では使わない
-        _ if warm_started && env_str!("ENOMOTO_DSE_EXACT_INIT").is_some() => super::DseState::from_basis(m, &lu),
+        _ if warm_started && (exact_once || env_str!("ENOMOTO_DSE_EXACT_INIT").is_some()) => super::DseState::from_basis(m, &lu),
         _ => super::DseState::new(m),
     };
 

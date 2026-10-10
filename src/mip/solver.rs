@@ -1157,7 +1157,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     });
                     l
                 };
+                // `ENOMOTO_MIP_RESTORE_EXACT_DSE`: 待ち行列から取り出して基底を復元したノードの最初の LP だけ、DSE 重みを
+                // その基底の厳密な値から始める (HiGHS は新しい基底で重みを計算し直す。単位重みのままだと反復が多い)
+                if resolves == 0 && self.restored_now && env_str!("ENOMOTO_MIP_RESTORE_EXACT_DSE").is_some() {
+                    crate::simplex::slope_intercept_dual::DSE_EXACT_ONCE.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
                 let mut st = self.lp.solve(&capped(self, iter_limit));
+                crate::simplex::slope_intercept_dual::DSE_EXACT_ONCE.store(false, std::sync::atomic::Ordering::Relaxed);
                 if st == LpStatus::TimeLimit && !self.time_up() {
                     st = LpStatus::IterationLimit;
                 }
