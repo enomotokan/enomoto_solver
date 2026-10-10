@@ -816,6 +816,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 root_obj = self.lp.objective() + self.p.offset;
                 // `ENOMOTO_MIP_MERGE_ROOT_CUTS`: 根の最後の LP で効いているカットを双対値で 1 本にまとめて加える
+                // 40 問: 使わない 20 問 27.57、使う 18 問 28.23 (rout 30.1 秒・neos5 53.7 秒が時間切れ、neos-860300 54.0 -> 48.4 秒、
+                // neos-911970 の下界は上がるが解けない)。既定では使わない
                 if env_str!("ENOMOTO_MIP_MERGE_ROOT_CUTS").is_some() && !self.params.submip {
                     self.merge_active_cuts();
                 }
