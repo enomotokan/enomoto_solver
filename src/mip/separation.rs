@@ -1242,9 +1242,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// - `both`: c2 は同じ擬似乱数。今の頂点と面の頂点の両方で分離して候補を合わせる
     /// - `int`: c2 は分数の整数列を近い整数の側へ押す向き。両方で分離する
     /// 面の頂点の真の目的値が今の値から離れたら (ε が大きすぎた) 今の頂点だけで分離する。
+    /// 既定は `int` (`off` で使わない)。40 問 (DSE 重みを全ての LP で引き継ぐ既定のもとで): 使わない 18 問 28.07、
+    /// `int` 19 問 27.04 (misc07 時間切れ -> 40.9 秒、neos5 時間切れ -> 59.5 秒、mik-250 42.4 -> 16.9 秒、nw04 20.5 -> 8.7 秒、
+    /// rout 57.8 秒 -> 時間切れ)、`canon` 17 問 27.66
     fn separate_face(&mut self, x: &[f64]) -> Vec<Candidate> {
         let mode = match env_str!("ENOMOTO_MIP_FACE_SEP") {
+            Some(m) if m == "off" => return self.separate(x, false),
             Some(m) if !self.params.submip => m,
+            None if !self.params.submip => "int",
             _ => return self.separate(x, false),
         };
         let p = self.p;
