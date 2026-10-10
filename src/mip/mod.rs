@@ -54,7 +54,7 @@ pub fn solve_mip(
         node_limit: settings.node_limit.or(env_f64(env_str!("ENOMOTO_MIP_NODE_LIMIT")).map(|v| v as u64)).unwrap_or(d.node_limit),
         ..d
     };
-    let r = solve_problem(&p, params, env_str!("ENOMOTO_MIP_NO_PRESOLVE").is_none());
+    let r = if env_str!("ENOMOTO_MIP_PORTFOLIO").is_some() { solve_portfolio(&p, params) } else { solve_problem(&p, params, env_str!("ENOMOTO_MIP_NO_PRESOLVE").is_none()) };
     if env_str!("ENOMOTO_MIP_XPROF").is_some() {
         crate::simplex::slope_intercept_dual::xprof("tail");
         for (l, ns) in crate::simplex::slope_intercept_dual::xprof_take() {
@@ -79,6 +79,77 @@ pub fn solve_mip(
         MipStatus::NotSolved => Status::NotSolved,
     };
     SolveResult { status, objective: objective_value, x: r.x, node_limit_hit: r.status == MipStatus::NodeLimit, mip: Some(summary) }
+}
+
+/// ポートフォリオ並列 (`ENOMOTO_MIP_PORTFOLIO`): 設定の違う 2 つの求解を別スレッドで同時に走らせる
+/// (0: 既定、1: 以前の形 = DSE 重みを引き継がず最適面の頂点も使わない。得意な問題が分かれる)。
+/// 見つけた解の目的値を共有して互いの打ち切りに使い、片方が探索を終えたら (最適・実行不能) もう片方を止める。
+/// 片方が「共有の最良値より良い解はない」と示して終われば、もう片方の最良の解が最適。
+fn solve_portfolio(p: &MipProblem, params: MipParams) -> solver::MipResult {
+    use std::sync::atomic::Ordering;
+    let shared = std::sync::Arc::new(solver::Portfolio::new());
+    let use_presolve = env_str!("ENOMOTO_MIP_NO_PRESOLVE").is_none();
+    // 探索を終えたスレッドが示した「これより良い解はない」値 (そのスレッドの打ち切りに使った値)
+    let proven: std::sync::Mutex<Option<f64>> = std::sync::Mutex::new(None);
+    let results: Vec<solver::MipResult> = std::thread::scope(|sc| {
+        let hs: Vec<_> = (0..2u8)
+            .map(|prof| {
+                let shared = shared.clone();
+                let proven = &proven;
+                let params = MipParams { verbose: params.verbose && prof == 0, ..params };
+                sc.spawn(move || {
+                    crate::simplex::slope_intercept_dual::set_mip_profile(prof);
+                    solver::set_thread_portfolio(Some(shared.clone()));
+                    let r = solve_problem(p, params, use_presolve);
+                    solver::set_thread_portfolio(None);
+                    let stopped = shared.stop.load(Ordering::Relaxed);
+                    if !stopped && matches!(r.status, MipStatus::Optimal | MipStatus::Infeasible) {
+                        // このスレッドは探索を終えた: 自分の解か共有の最良値より良い解はない
+                        let own = r.objective.unwrap_or(f64::INFINITY);
+                        *proven.lock().unwrap() = Some(own.min(shared.best()));
+                        shared.stop.store(true, Ordering::Relaxed);
+                    }
+                    r
+                })
+            })
+            .collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    let proven = *proven.lock().unwrap();
+    // 最良の解
+    let mut best: Option<&solver::MipResult> = None;
+    for r in &results {
+        if let Some(z) = r.objective {
+            if best.is_none_or(|b| z < b.objective.unwrap()) {
+                best = Some(r);
+            }
+        }
+    }
+    let nodes = results.iter().map(|r| r.nodes).sum();
+    let lp_iterations = results.iter().map(|r| r.lp_iterations).sum();
+    let mut bound = results.iter().map(|r| r.best_bound).fold(f64::NEG_INFINITY, f64::max);
+    match (best, proven) {
+        (Some(b), Some(_)) => {
+            // 探索を終えたスレッドは、共有の最良値 (= この解以下) より良い解がないことを示した
+            let z = b.objective.unwrap();
+            solver::MipResult { status: MipStatus::Optimal, x: b.x.clone(), objective: Some(z), best_bound: z, nodes, lp_iterations }
+        }
+        (None, Some(_)) => {
+            // どちらも解がなく、片方が探索を終えた
+            let r = results.iter().find(|r| matches!(r.status, MipStatus::Infeasible | MipStatus::Optimal)).unwrap();
+            solver::MipResult { status: r.status, x: None, objective: None, best_bound: r.best_bound, nodes, lp_iterations }
+        }
+        (Some(b), None) => {
+            let z = b.objective.unwrap();
+            bound = bound.min(z);
+            let status = results.iter().map(|r| r.status).find(|s| *s != MipStatus::Optimal).unwrap_or(b.status);
+            solver::MipResult { status, x: b.x.clone(), objective: Some(z), best_bound: bound, nodes, lp_iterations }
+        }
+        (None, None) => {
+            let r = &results[0];
+            solver::MipResult { status: r.status, x: None, objective: None, best_bound: bound, nodes, lp_iterations }
+        }
+    }
 }
 
 /// `p` を (`use_presolve` なら MIP 前処理をかけてから) 分枝限定法で解き、解を `p` の空間に戻す。

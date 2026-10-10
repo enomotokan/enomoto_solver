@@ -247,6 +247,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) bisect_last: u64,
     pub(super) bisect_secs: f64,
     pub(super) bisect_stats: [u64; 3],
+    /// ポートフォリオ並列の共有値 (サブ MIP では持たない)。
+    pub(super) shared: Option<std::sync::Arc<Portfolio>>,
     /// 証明から作った衝突の数。
     proof_conflicts: u64,
     /// 完全オービトープ (orbitopal fixing に使う。サブ MIP では空)。
@@ -341,6 +343,50 @@ pub(super) struct Solver<'a, L: MipLp> {
 
 /// 分枝限定法で解く。
 /// 並列モードのスレッド数 (`ENOMOTO_MIP_THREADS`、既定 1 = 並列にしない)。
+/// ポートフォリオ並列 (`ENOMOTO_MIP_PORTFOLIO`、[`super::solve_mip`]) のスレッド間で共有する値: これまでの最良の
+/// 目的値 (最小化形、定数項込み。全てのスレッドで同じ空間) と、止める合図。
+pub(crate) struct Portfolio {
+    best: std::sync::atomic::AtomicU64,
+    pub(crate) stop: std::sync::atomic::AtomicBool,
+}
+
+impl Portfolio {
+    pub(crate) fn new() -> Self {
+        Portfolio { best: std::sync::atomic::AtomicU64::new(f64::INFINITY.to_bits()), stop: std::sync::atomic::AtomicBool::new(false) }
+    }
+    pub(crate) fn best(&self) -> f64 {
+        f64::from_bits(self.best.load(std::sync::atomic::Ordering::Relaxed))
+    }
+    /// 目的値 `z` の解を見つけたことを知らせる (今の最良より良ければ置き換える)。
+    pub(crate) fn publish(&self, z: f64) {
+        use std::sync::atomic::Ordering;
+        let mut cur = self.best.load(Ordering::Relaxed);
+        while z < f64::from_bits(cur) {
+            match self.best.compare_exchange_weak(cur, z.to_bits(), Ordering::Relaxed, Ordering::Relaxed) {
+                Ok(_) => break,
+                Err(c) => cur = c,
+            }
+        }
+    }
+}
+
+/// スレッドごとのポートフォリオの共有値 (スレッド局所の領域を増やさないよう、スレッドの番号で引く表に持つ)。
+static PORTFOLIOS: std::sync::Mutex<Vec<(std::thread::ThreadId, std::sync::Arc<Portfolio>)>> = std::sync::Mutex::new(Vec::new());
+
+pub(crate) fn set_thread_portfolio(p: Option<std::sync::Arc<Portfolio>>) {
+    let id = std::thread::current().id();
+    let mut t = PORTFOLIOS.lock().unwrap();
+    t.retain(|(i, _)| *i != id);
+    if let Some(p) = p {
+        t.push((id, p));
+    }
+}
+
+fn thread_portfolio() -> Option<std::sync::Arc<Portfolio>> {
+    let id = std::thread::current().id();
+    PORTFOLIOS.lock().unwrap().iter().find(|(i, _)| *i == id).map(|(_, p)| p.clone())
+}
+
 pub(crate) fn mip_threads() -> usize {
     tunable!("ENOMOTO_MIP_THREADS", 1usize, usize).max(1)
 }
@@ -432,6 +478,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
         bisect_last: 0,
         bisect_secs: 0.0,
         bisect_stats: [0; 3],
+        shared: if params.submip { None } else { thread_portfolio() },
         next_cut_id: 0,
         proof_conflicts: 0,
         orbitopes: if params.submip { Rc::new(Vec::new()) } else { super::ORBITOPES.with(|t| t.borrow().clone()).unwrap_or_default() },
@@ -508,7 +555,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
 
 /// DSE 重みを全ての LP で引き継ぎ、待ち行列のノードに保存するか (既定で真、`ENOMOTO_MIP_NO_DSE_ALL` で偽)。
 fn dse_all() -> bool {
-    env_str!("ENOMOTO_MIP_NO_DSE_ALL").is_none()
+    env_str!("ENOMOTO_MIP_NO_DSE_ALL").is_none() && crate::simplex::slope_intercept_dual::mip_profile() != 1
 }
 
 impl<'a, L: MipLp> Solver<'a, L> {
@@ -588,7 +635,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     pub(super) fn time_up(&self) -> bool {
-        self.deadline.is_some_and(|d| Instant::now() >= d)
+        self.deadline.is_some_and(|d| Instant::now() >= d) || self.shared.as_ref().is_some_and(|s| s.stop.load(std::sync::atomic::Ordering::Relaxed))
     }
 
     pub(super) fn limits(&self, iteration_limit: u64) -> SolveLimits {
@@ -617,9 +664,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     pub(super) fn prune_limit(&self) -> f64 {
-        match &self.incumbent {
+        // ポートフォリオ並列: 他のスレッドの解の目的値も打ち切りに使う
+        let own = self.incumbent.as_ref().map(|(z, _)| *z);
+        let shared = self.shared.as_ref().map(|s| s.best()).filter(|v| v.is_finite());
+        let eff = match (own, shared) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        match eff.as_ref() {
             None => self.params.cutoff,
-            Some((z, _)) => {
+            Some(z) => {
                 let strict = match self.obj_step {
                     Some(step) => z - step + (1e-6 * z.abs().max(1.0)).min(0.5 * step),
                     None => z - 1e-9 * z.abs().max(1.0),
@@ -676,6 +730,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
             self.pool_add(z, &x);
+            if let Some(s) = &self.shared {
+                s.publish(z);
+            }
             self.incumbent = Some((z, x));
             self.root_redcost_fixing();
             let lim = self.prune_limit();
