@@ -18,7 +18,21 @@ const MAX_ROW_EDGES: usize = 20_000;
 impl CliqueGraph {
     /// 行 `row_lo <= sum a_j x_j <= row_up` から作る。`binary[j]` は 2 値列か、`lo`/`up` は列の境界 (大域的)。
     pub fn build(n: usize, rows: &[Vec<(usize, f64)>], row_lo: &[f64], row_up: &[f64], binary: &[bool], lo: &[f64], up: &[f64]) -> Self {
+        Self::build_with(n, rows, row_lo, row_up, binary, lo, up, &[])
+    }
+
+    /// [`Self::build`] に、行以外から分かった衝突の組 (`extra`、文字の組) を加える。
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_with(n: usize, rows: &[Vec<(usize, f64)>], row_lo: &[f64], row_up: &[f64], binary: &[bool], lo: &[f64], up: &[f64], extra: &[(u32, u32)]) -> Self {
         let mut adj: Vec<HashSet<u32>> = vec![HashSet::new(); 2 * n];
+        for &(a, b) in extra {
+            let (ja, jb) = ((a / 2) as usize, (b / 2) as usize);
+            if ja == jb || ja >= n || jb >= n || !binary[ja] || !binary[jb] || lo[ja] == up[ja] || lo[jb] == up[jb] {
+                continue;
+            }
+            adj[a as usize].insert(b);
+            adj[b as usize].insert(a);
+        }
         for (i, r) in rows.iter().enumerate() {
             // `sum a x <= b` の形 (>= は符号を反転) ごとに
             for (sign, b) in [(1.0, row_up[i]), (-1.0, -row_lo[i])] {

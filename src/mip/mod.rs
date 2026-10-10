@@ -454,6 +454,26 @@ fn probe(prob: &mut MipProblem, verbose: bool) -> Option<bool> {
     cands.sort_by_key(|&j| std::cmp::Reverse(prob.cols[j].len()));
     let work0 = dom.debug_work();
     let (mut probed, mut fixed, mut tightened) = (0usize, 0usize, 0usize);
+    // 含意 (`ENOMOTO_MIP_NO_PROBE_IMPLICATIONS` で集めない): x_j = v で 0-1 列 x_k が固定されれば、
+    // 「x_j = v かつ x_k が固定と逆の値」は成り立たない (衝突の組)。上限は非零数の 10 倍
+    let want_impl = env_str!("ENOMOTO_MIP_NO_PROBE_IMPLICATIONS").is_none();
+    let edge_cap = 10 * nnz + 10_000;
+    let bin0: Vec<bool> = (0..n).map(|k| prob.is_int[k] && prob.col_lo[k] == 0.0 && prob.col_up[k] == 1.0).collect();
+    let mut edges: Vec<(u32, u32)> = Vec::new();
+    let mut add_edges = |j: usize, v: u32, ch: &[(usize, bool, f64)], edges: &mut Vec<(u32, u32)>| {
+        let lj = 2 * j as u32 + if v == 1 { 0 } else { 1 };
+        for &(k, upper, val) in ch {
+            if k == j || !bin0[k] || edges.len() >= edge_cap {
+                continue;
+            }
+            // x_k <= 0 なら x_k = 1 (文字 2k) と衝突、x_k >= 1 なら x_k = 0 (文字 2k+1) と衝突
+            if upper && val <= 0.5 {
+                edges.push((lj, 2 * k as u32));
+            } else if !upper && val >= 0.5 {
+                edges.push((lj, 2 * k as u32 + 1));
+            }
+        }
+    };
     for (cnt, &j) in cands.iter().enumerate() {
         let cap = if fixed + tightened > 0 { time_cap_found } else { time_cap };
         if cnt % 16 == 0 && (dom.debug_work() - work0 > work_cap || t0.elapsed().as_secs_f64() > cap) {
@@ -486,6 +506,10 @@ fn probe(prob: &mut MipProblem, verbose: bool) -> Option<bool> {
                 fixed += 1;
             }
             (true, true) => {
+                if want_impl {
+                    add_edges(j, 0, &ch0, &mut edges);
+                    add_edges(j, 1, &ch1, &mut edges);
+                }
                 // 両方の結果で変わった (列, 側) だけが締まりうる。値は両方の弱い方
                 let mut first: std::collections::HashMap<(usize, bool), f64> = std::collections::HashMap::new();
                 for &(k, upper, v) in &ch0 {
@@ -523,9 +547,14 @@ fn probe(prob: &mut MipProblem, verbose: bool) -> Option<bool> {
             }
         }
     }
+    // 固定した列を含む組は捨てる (固定後は意味がない)
+    edges.retain(|&(a, b)| dom.lo[(a / 2) as usize] < dom.up[(a / 2) as usize] && dom.lo[(b / 2) as usize] < dom.up[(b / 2) as usize]);
+    edges.sort_unstable();
+    edges.dedup();
     if verbose {
-        eprintln!("MIP: probing: {probed} of {} binaries probed, {fixed} fixed, {tightened} bounds tightened ({:.2}s)", cands.len(), t0.elapsed().as_secs_f64());
+        eprintln!("MIP: probing: {probed} of {} binaries probed, {fixed} fixed, {tightened} bounds tightened, {} implications ({:.2}s)", cands.len(), edges.len(), t0.elapsed().as_secs_f64());
     }
+    prob.conflict_edges = edges;
     if fixed == 0 && tightened == 0 {
         return None;
     }
