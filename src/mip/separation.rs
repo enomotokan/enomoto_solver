@@ -1247,12 +1247,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 面の頂点の真の目的値が今の値から離れたら (ε が大きすぎた) 今の頂点だけで分離する。
     /// 既定は `int` (`off` で使わない)。40 問 (DSE 重みを全ての LP で引き継ぐ既定のもとで): 使わない 18 問 28.07、
     /// `int` 19 問 27.04 (misc07 時間切れ -> 40.9 秒、neos5 時間切れ -> 59.5 秒、mik-250 42.4 -> 16.9 秒、nw04 20.5 -> 8.7 秒、
-    /// rout 57.8 秒 -> 時間切れ)、`canon` 17 問 27.66
+    /// rout 57.8 秒 -> 時間切れ)、`canon` 17 問 27.66。既定は `int2` (同時に測った `int` 18 問 27.94 に対し 20 問 27.70:
+    /// rout 時間切れ -> 31.2 秒、neos5 時間切れ -> 53.2 秒、misc07 39.6 -> 54.1 秒)
     fn separate_face(&mut self, x: &[f64], light: bool) -> Vec<Candidate> {
         let mode = match env_str!("ENOMOTO_MIP_FACE_SEP") {
             Some(m) if m == "off" => return self.separate(x, light),
             Some(m) if !self.params.submip => m,
-            None if !self.params.submip => "int",
+            None if !self.params.submip => "int2",
             _ => return self.separate(x, light),
         };
         let p = self.p;
