@@ -93,15 +93,17 @@ fn solve_portfolio(p: &MipProblem, params: MipParams) -> solver::MipResult {
     let proven: std::sync::Mutex<Option<f64>> = std::sync::Mutex::new(None);
     // `ENOMOTO_MIP_PORTFOLIO_BISECT`: 3 本目のスレッドで目的値の二分探索を回す ([`bisection_worker`])
     // `ENOMOTO_MIP_BISECT_FRACS`: 二分探索のスレッドごとの最初の目標値の位置 (下界と最良値の間の割合、コンマ区切り。
-    // 既定 0.5 の 1 本)。例 "0.5,0.25,0.75" なら 3 本が同時に別の目標値から始める (示した下界はスレッドの間で共有する)
+    // 既定 "0.5,0.25" の 2 本。木の探索のスレッド (割合 1 にあたる) と合わせて 1, 1/2, 1/4 の 3 本で始める)。
+    // 示した下界と見つけた解はスレッドの間で共有し、区間が変わったら二分探索のスレッドは新しい区間の同じ割合で解き直す
     let bisect = env_str!("ENOMOTO_MIP_PORTFOLIO_BISECT").is_some();
     let fracs: Vec<f64> = if bisect {
-        env_str!("ENOMOTO_MIP_BISECT_FRACS").map(|s| s.split(',').filter_map(|v| v.trim().parse::<f64>().ok()).filter(|v| *v > 0.0 && *v < 1.0).collect()).unwrap_or_else(|| vec![0.5])
+        env_str!("ENOMOTO_MIP_BISECT_FRACS").map(|s| s.split(',').filter_map(|v| v.trim().parse::<f64>().ok()).filter(|v| *v > 0.0 && *v < 1.0).collect()).unwrap_or_else(|| vec![0.5, 0.25])
     } else {
         Vec::new()
     };
-    // `ENOMOTO_MIP_PORTFOLIO_TREES`: 木の探索のスレッドの数 (1 なら既定の設定だけ、2 なら以前の形も。既定 2)
-    let ntrees = tunable!("ENOMOTO_MIP_PORTFOLIO_TREES", 2u8, u8).clamp(1, 2);
+    // `ENOMOTO_MIP_PORTFOLIO_TREES`: 木の探索のスレッドの数 (1 なら既定の設定だけ、2 なら以前の形も。
+    // 既定は二分探索のスレッドがあれば 1、なければ 2)
+    let ntrees = env_str!("ENOMOTO_MIP_PORTFOLIO_TREES").and_then(|v| v.parse::<u8>().ok()).unwrap_or(if bisect { 1 } else { 2 }).clamp(1, 2);
     let bis_result: std::sync::Mutex<Vec<(Option<solver::MipResult>, f64)>> = std::sync::Mutex::new(Vec::new());
     let results: Vec<solver::MipResult> = std::thread::scope(|sc| {
         for &f0 in &fracs {
@@ -229,9 +231,17 @@ fn bisection_worker(p: &MipProblem, params: MipParams, use_presolve: bool, share
             continue;
         }
         let t = lb + frac * (ub - lb);
-        let slice = (tunable!("ENOMOTO_T_MIP_BISECT_SLICE", 0.1, f64) * tl).max(2.0).min(tl - el);
+        // 既定 (区間が変わったら解き直す): 時間は区切らず、最良値か厳密な下界が変わったら (どのスレッドが変えても)
+        // 求解を打ち切って、新しい区間で同じ割合の目標値から解き直す。`ENOMOTO_MIP_BISECT_SLICED` なら以前の形
+        // (時間で区切り、決着がつかなければ割合を最良値の側へ寄せる)
+        let sliced = env_str!("ENOMOTO_MIP_BISECT_SLICED").is_some();
+        let slice = if sliced { (tunable!("ENOMOTO_T_MIP_BISECT_SLICE", 0.1, f64) * tl).max(2.0).min(tl - el) } else { tl - el };
         let pr = MipParams { time_limit: slice, cutoff: t, verbose: false, ..params };
+        if !sliced {
+            solver::set_thread_watch(Some(shared.generation()));
+        }
         let r = solve_problem(p, pr, use_presolve);
+        solver::set_thread_watch(None);
         let used_cut = t.min(shared.best());
         if verbose {
             eprintln!("MIP: bisection thread: lb {lb:.10e} ub {ub:.10e} target {t:.10e} -> {:?} {:?} ({:.1}s)", r.status, r.objective, t0.elapsed().as_secs_f64());
@@ -264,7 +274,11 @@ fn bisection_worker(p: &MipProblem, params: MipParams, use_presolve: bool, share
                 }
                 frac = frac0;
             }
-            _ => frac = (0.5 * (1.0 + frac)).min(0.9),
+            _ => {
+                if sliced {
+                    frac = (0.5 * (1.0 + frac)).min(0.9);
+                }
+            }
         }
     }
     solver::set_thread_portfolio(None);

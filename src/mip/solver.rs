@@ -249,6 +249,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) bisect_stats: [u64; 3],
     /// ポートフォリオ並列の共有値 (サブ MIP では持たない)。
     pub(super) shared: Option<std::sync::Arc<Portfolio>>,
+    /// 二分探索のスレッドの求解なら、見張る世代 (区間が変わったら、最低 `ENOMOTO_T_MIP_BISECT_MIN_RUN` 秒走った後で打ち切る)。
+    pub(super) watch: Option<u64>,
     /// 証明から作った衝突の数。
     proof_conflicts: u64,
     /// 完全オービトープ (orbitopal fixing に使う。サブ MIP では空)。
@@ -352,6 +354,8 @@ pub(crate) struct Portfolio {
     lb: std::sync::atomic::AtomicU64,
     /// 目的値の二分探索のスレッドが示した厳密な下界 (この値未満の解はない。スレッドの間で共有する)。
     proven: std::sync::atomic::AtomicU64,
+    /// 区間 (最良値・厳密な下界) が変わった回数。二分探索のスレッドはこれが変わったら目標値を決め直して解き直す。
+    generation: std::sync::atomic::AtomicU64,
 }
 
 impl Portfolio {
@@ -361,7 +365,11 @@ impl Portfolio {
             stop: std::sync::atomic::AtomicBool::new(false),
             lb: std::sync::atomic::AtomicU64::new(f64::NEG_INFINITY.to_bits()),
             proven: std::sync::atomic::AtomicU64::new(f64::NEG_INFINITY.to_bits()),
+            generation: std::sync::atomic::AtomicU64::new(0),
         }
+    }
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation.load(std::sync::atomic::Ordering::Relaxed)
     }
     pub(crate) fn proven(&self) -> f64 {
         f64::from_bits(self.proven.load(std::sync::atomic::Ordering::Relaxed))
@@ -372,7 +380,10 @@ impl Portfolio {
         let mut cur = self.proven.load(Ordering::Relaxed);
         while v > f64::from_bits(cur) {
             match self.proven.compare_exchange_weak(cur, v.to_bits(), Ordering::Relaxed, Ordering::Relaxed) {
-                Ok(_) => break,
+                Ok(_) => {
+                    self.generation.fetch_add(1, Ordering::Relaxed);
+                    break;
+                }
                 Err(c) => cur = c,
             }
         }
@@ -400,7 +411,10 @@ impl Portfolio {
         let mut cur = self.best.load(Ordering::Relaxed);
         while z < f64::from_bits(cur) {
             match self.best.compare_exchange_weak(cur, z.to_bits(), Ordering::Relaxed, Ordering::Relaxed) {
-                Ok(_) => break,
+                Ok(_) => {
+                    self.generation.fetch_add(1, Ordering::Relaxed);
+                    break;
+                }
                 Err(c) => cur = c,
             }
         }
@@ -408,20 +422,35 @@ impl Portfolio {
 }
 
 /// スレッドごとのポートフォリオの共有値 (スレッド局所の領域を増やさないよう、スレッドの番号で引く表に持つ)。
-static PORTFOLIOS: std::sync::Mutex<Vec<(std::thread::ThreadId, std::sync::Arc<Portfolio>)>> = std::sync::Mutex::new(Vec::new());
+/// 3 つ目は二分探索のスレッドの「見張る世代」: 求解の開始時の [`Portfolio::generation`] で、変わったら求解を打ち切る。
+type PortfolioEntry = (std::thread::ThreadId, std::sync::Arc<Portfolio>, Option<u64>);
+static PORTFOLIOS: std::sync::Mutex<Vec<PortfolioEntry>> = std::sync::Mutex::new(Vec::new());
 
 pub(crate) fn set_thread_portfolio(p: Option<std::sync::Arc<Portfolio>>) {
     let id = std::thread::current().id();
     let mut t = PORTFOLIOS.lock().unwrap();
-    t.retain(|(i, _)| *i != id);
+    t.retain(|(i, _, _)| *i != id);
     if let Some(p) = p {
-        t.push((id, p));
+        t.push((id, p, None));
+    }
+}
+
+/// このスレッドの求解が見張る世代を設定する (`None` で見張らない)。
+pub(crate) fn set_thread_watch(g: Option<u64>) {
+    let id = std::thread::current().id();
+    if let Some(e) = PORTFOLIOS.lock().unwrap().iter_mut().find(|(i, _, _)| *i == id) {
+        e.2 = g;
     }
 }
 
 fn thread_portfolio() -> Option<std::sync::Arc<Portfolio>> {
     let id = std::thread::current().id();
-    PORTFOLIOS.lock().unwrap().iter().find(|(i, _)| *i == id).map(|(_, p)| p.clone())
+    PORTFOLIOS.lock().unwrap().iter().find(|(i, _, _)| *i == id).map(|(_, p, _)| p.clone())
+}
+
+fn thread_watch() -> Option<u64> {
+    let id = std::thread::current().id();
+    PORTFOLIOS.lock().unwrap().iter().find(|(i, _, _)| *i == id).and_then(|e| e.2)
 }
 
 pub(crate) fn mip_threads() -> usize {
@@ -516,6 +545,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
         bisect_secs: 0.0,
         bisect_stats: [0; 3],
         shared: if params.submip { None } else { thread_portfolio() },
+        watch: if params.submip { None } else { thread_watch() },
         next_cut_id: 0,
         proof_conflicts: 0,
         orbitopes: if params.submip { Rc::new(Vec::new()) } else { super::ORBITOPES.with(|t| t.borrow().clone()).unwrap_or_default() },
@@ -672,7 +702,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     pub(super) fn time_up(&self) -> bool {
-        self.deadline.is_some_and(|d| Instant::now() >= d) || self.shared.as_ref().is_some_and(|s| s.stop.load(std::sync::atomic::Ordering::Relaxed))
+        self.deadline.is_some_and(|d| Instant::now() >= d)
+            || self.shared.as_ref().is_some_and(|s| {
+                s.stop.load(std::sync::atomic::Ordering::Relaxed)
+                    || self.watch.is_some_and(|g| s.generation() != g && self.start.elapsed().as_secs_f64() >= tunable!("ENOMOTO_T_MIP_BISECT_MIN_RUN", 1.0, f64))
+            })
     }
 
     pub(super) fn limits(&self, iteration_limit: u64) -> SolveLimits {
