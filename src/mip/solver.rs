@@ -621,6 +621,12 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
     r
 }
 
+/// 証明だけのスレッドか (ポートフォリオの二分探索のスレッドで `ENOMOTO_MIP_BISECT_NO_HEUR` のとき。ヒューリスティクスを
+/// 一切走らせず、打ち切り値未満に解がないことを示す木の探索とカットに時間を使う)。サブ MIP には及ばない。
+fn proof_only() -> bool {
+    crate::simplex::slope_intercept_dual::mip_profile() == 2
+}
+
 /// DSE 重みを全ての LP で引き継ぎ、待ち行列のノードに保存するか (既定で真、`ENOMOTO_MIP_NO_DSE_ALL` で偽)。
 fn dse_all() -> bool {
     env_str!("ENOMOTO_MIP_NO_DSE_ALL").is_none() && crate::simplex::slope_intercept_dual::mip_profile() != 1
@@ -918,7 +924,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let nnz: usize = self.p.rows.iter().map(|r| r.len()).sum();
             let cap = if self.params.time_limit.is_finite() { (0.05 * self.params.time_limit).min(5.0) } else { 5.0 };
             let effort = (50 * nnz as u64).clamp(100_000, 50_000_000);
-            if !self.params.submip && mip_threads() > 1 {
+            if !self.params.submip && !proof_only() && mip_threads() > 1 {
                 // 並列モード: 別スレッドで根の LP・切除平面と同時に回す (根のヒューリスティクスの前に受け取る)
                 // 対称性の行・固定を加える前の問題で探す (見つけた解は try_incumbent で並べ替える)
                 let (pc, lo, up) = match &self.orig {
@@ -930,7 +936,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let seed = self.rng ^ 0x9E37_79B9_7F4A_7C15;
                 let h = std::thread::spawn(move || super::heuristics::fj_search(&pc, &lo, &up, effort, cap, seed, Some(&stop2)));
                 self.fj_thread = Some((h, stop));
-            } else if !self.params.submip && self.feasibility_jump(effort, cap) && self.params.verbose {
+            } else if !self.params.submip && !proof_only() && self.feasibility_jump(effort, cap) && self.params.verbose {
                 eprintln!("MIP: feasibility jump found a solution ({:.2}s)", self.start.elapsed().as_secs_f64());
             }
         }
@@ -992,7 +998,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 macro_rules! heur {
                     ($name:expr, $e:expr) => {{
                         let bit = heur_bit($name);
-                        if self.params.skip_heurs & bit != 0 && env_str!("ENOMOTO_MIP_RESTART_ALL_HEURS").is_none() {
+                        if proof_only() && !self.params.submip {
+                            // 証明だけのスレッド: 根のヒューリスティクスは走らせない
+                        } else if self.params.skip_heurs & bit != 0 && env_str!("ENOMOTO_MIP_RESTART_ALL_HEURS").is_none() {
                             if self.params.verbose {
                                 eprintln!("MIP: root heuristic {}: skipped (no solution before the restart)", $name);
                             }
@@ -1475,7 +1483,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 xp("m_redcost");
                 // ノードのヒューリスティクス (安価な単純丸めは毎回、ランダム丸めは予算内で待ち行列から取り出したノードのみ)
-                if resolves == 0 {
+                if resolves == 0 && !(proof_only() && !self.params.submip) {
                     self.simple_rounding(&x);
                     if env_str!("ENOMOTO_MIP_NO_ZIROUND").is_none() {
                         self.zi_round(&x);

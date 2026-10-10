@@ -199,7 +199,8 @@ fn solve_portfolio(p: &MipProblem, params: MipParams) -> solver::MipResult {
 /// 下界が最良値に届いたら全スレッドを止める。戻り値は (見つけた最良の解, 示した下界)。
 fn bisection_worker(p: &MipProblem, params: MipParams, use_presolve: bool, shared: std::sync::Arc<solver::Portfolio>, frac0: f64) -> (Option<solver::MipResult>, f64) {
     use std::sync::atomic::Ordering;
-    crate::simplex::slope_intercept_dual::set_mip_profile(0);
+    // `ENOMOTO_MIP_BISECT_NO_HEUR`: ヒューリスティクスを走らせず、下界の証明だけに集中する
+    crate::simplex::slope_intercept_dual::set_mip_profile(if env_str!("ENOMOTO_MIP_BISECT_NO_HEUR").is_some() { 2 } else { 0 });
     solver::set_thread_portfolio(Some(shared.clone()));
     let t0 = std::time::Instant::now();
     let tl = params.time_limit;
