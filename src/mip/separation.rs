@@ -180,7 +180,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 break;
             }
             let t_sep = std::time::Instant::now();
-            let mut cands = self.separate(&x, false);
+            let mut cands = self.separate_face(&x);
             // 再スタート前のカットをプールで引き継いだとき (`ENOMOTO_MIP_RESTART_CUTS_TO_POOL`): プールで違反しているものも候補にする
             if ((self.params.restarts > 0 && env_str!("ENOMOTO_MIP_RESTART_CUTS_TO_POOL").is_some()) || env_str!("ENOMOTO_MIP_CUTSEL_HIGHS_POOL").is_some()) && round < tunable!("ENOMOTO_T_MIP_ROOT_POOL_ROUNDS", 5usize, usize) && env_str!("ENOMOTO_MIP_NO_ROOT_POOL").is_none() {
                 for (eff, k) in self.pool_violated(&x) {
@@ -1230,6 +1230,94 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         self.path_offset = last + 1;
+    }
+
+    /// 根の分離 (退化に強い形、`ENOMOTO_MIP_FACE_SEP`)。LP が双対退化している (非基底で被約費用が 0 の列がある) と
+    /// 最適解の集合 (最適面) に頂点が多く、どの頂点に着くかは DSE 重みなど解き方の履歴で変わる。カットは着いた頂点から
+    /// 作るので、頂点が変わるとカットも根の下界も変わり、また 1 つの頂点だけを切っても LP は同じ目的値の別の頂点へ移るだけで
+    /// 下界が動かない。そこで最適面の上で決まった頂点を選んで分離する:
+    /// 被約費用が 0 でない非基底列を今の値に固定した LP (の複製) を、費用 c + ε c2 で解き直す (ε c2 は小さいので
+    /// 主の目的値は変わらず、最適面の中で c2 が最小の頂点に移る)。モード:
+    /// - `canon`: c2 は列ごとに決まった擬似乱数。その頂点だけで分離する (着いた頂点によらず同じ点から分離する)
+    /// - `both`: c2 は同じ擬似乱数。今の頂点と面の頂点の両方で分離して候補を合わせる
+    /// - `int`: c2 は分数の整数列を近い整数の側へ押す向き。両方で分離する
+    /// 面の頂点の真の目的値が今の値から離れたら (ε が大きすぎた) 今の頂点だけで分離する。
+    fn separate_face(&mut self, x: &[f64]) -> Vec<Candidate> {
+        let mode = match env_str!("ENOMOTO_MIP_FACE_SEP") {
+            Some(m) if !self.params.submip => m,
+            _ => return self.separate(x, false),
+        };
+        let p = self.p;
+        let n = p.n;
+        let d = self.lp.reduced_costs();
+        let b = self.lp.basis();
+        let cmax = p.cost.iter().fold(0.0f64, |m, c| m.max(c.abs())).max(1.0);
+        let mut face = self.lp.clone();
+        let mut ndeg = 0usize;
+        for j in 0..n {
+            if b.col[j] == VarStatus::Basic {
+                continue;
+            }
+            let (l, u) = face.col_bounds(j);
+            if l == u {
+                continue;
+            }
+            if d[j].abs() > 1e-7 * (1.0 + p.cost[j].abs()) {
+                face.set_col_bounds(j, x[j], x[j]);
+            } else {
+                ndeg += 1;
+            }
+        }
+        if ndeg == 0 {
+            return self.separate(x, false);
+        }
+        let eps = tunable!("ENOMOTO_T_MIP_FACE_EPS", 1e-5, f64) * cmax;
+        let hash = |j: usize| -> f64 {
+            let mut h = (j as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0xD1B5_4A32_D192_ED03;
+            h ^= h >> 31;
+            h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            h ^= h >> 29;
+            (h >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0
+        };
+        let c2: Vec<f64> = (0..n)
+            .map(|j| {
+                if mode == "int" {
+                    let f = x[j] - x[j].floor();
+                    if self.cut_int[j] && f > 1e-6 && f < 1.0 - 1e-6 {
+                        if f < 0.5 { 1.0 } else { -1.0 }
+                    } else {
+                        0.0
+                    }
+                } else {
+                    hash(j)
+                }
+            })
+            .collect();
+        let cost2: Vec<f64> = (0..n).map(|j| p.cost[j] + eps * c2[j]).collect();
+        face.set_costs(&cost2);
+        let st = face.solve(&SolveLimits { iteration_limit: 10 * (p.m + n) as u64 + 1000, cutoff: f64::INFINITY, deadline: self.deadline });
+        if st != LpStatus::Optimal {
+            return self.separate(x, false);
+        }
+        let xv = face.col_values();
+        let z0: f64 = (0..n).map(|j| p.cost[j] * x[j]).sum();
+        let zv: f64 = (0..n).map(|j| p.cost[j] * xv[j]).sum();
+        let moved = (0..n).filter(|&j| (xv[j] - x[j]).abs() > 1e-6).count();
+        if env_str!("ENOMOTO_MIP_DEBUG_FACE").is_some() {
+            eprintln!("FACE: degenerate nonbasic {ndeg}, moved {moved} cols, obj {z0:.9} -> {zv:.9}, frac {} -> {}", self.fractional(x).len(), self.fractional(&xv).len());
+        }
+        if zv > z0 + 1e-7 * (1.0 + z0.abs()) || moved == 0 {
+            return self.separate(x, false);
+        }
+        std::mem::swap(&mut self.lp, &mut face);
+        let mut cv = self.separate(&xv, false);
+        std::mem::swap(&mut self.lp, &mut face);
+        if mode == "canon" {
+            return cv;
+        }
+        let mut cands = self.separate(x, false);
+        cands.append(&mut cv);
+        cands
     }
 
     /// 現在の LP 解 `x` を切る候補を作る。
