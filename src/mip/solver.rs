@@ -249,8 +249,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) bisect_stats: [u64; 3],
     /// ポートフォリオ並列の共有値 (サブ MIP では持たない)。
     pub(super) shared: Option<std::sync::Arc<Portfolio>>,
-    /// 二分探索のスレッドの求解なら、見張る世代 (区間が変わったら、最低 `ENOMOTO_T_MIP_BISECT_MIN_RUN` 秒走った後で打ち切る)。
-    pub(super) watch: Option<u64>,
+    /// 二分探索のスレッドの求解なら、見張り (打ち切る最良値, 目標値)。最低 `ENOMOTO_T_MIP_BISECT_MIN_RUN` 秒走った後で打ち切る。
+    pub(super) watch: Option<(f64, f64)>,
     /// 証明から作った衝突の数。
     proof_conflicts: u64,
     /// 完全オービトープ (orbitopal fixing に使う。サブ MIP では空)。
@@ -422,8 +422,9 @@ impl Portfolio {
 }
 
 /// スレッドごとのポートフォリオの共有値 (スレッド局所の領域を増やさないよう、スレッドの番号で引く表に持つ)。
-/// 3 つ目は二分探索のスレッドの「見張る世代」: 求解の開始時の [`Portfolio::generation`] で、変わったら求解を打ち切る。
-type PortfolioEntry = (std::thread::ThreadId, std::sync::Arc<Portfolio>, Option<u64>);
+/// 3 つ目は二分探索のスレッドの見張り (打ち切る最良値, 自分の目標値): 共有の最良値が前者を下回るか、厳密な下界が
+/// 自分の目標値に届いたら求解を打ち切る。
+type PortfolioEntry = (std::thread::ThreadId, std::sync::Arc<Portfolio>, Option<(f64, f64)>);
 static PORTFOLIOS: std::sync::Mutex<Vec<PortfolioEntry>> = std::sync::Mutex::new(Vec::new());
 
 pub(crate) fn set_thread_portfolio(p: Option<std::sync::Arc<Portfolio>>) {
@@ -435,8 +436,8 @@ pub(crate) fn set_thread_portfolio(p: Option<std::sync::Arc<Portfolio>>) {
     }
 }
 
-/// このスレッドの求解が見張る世代を設定する (`None` で見張らない)。
-pub(crate) fn set_thread_watch(g: Option<u64>) {
+/// このスレッドの求解の見張りを設定する (`None` で見張らない)。
+pub(crate) fn set_thread_watch(g: Option<(f64, f64)>) {
     let id = std::thread::current().id();
     if let Some(e) = PORTFOLIOS.lock().unwrap().iter_mut().find(|(i, _, _)| *i == id) {
         e.2 = g;
@@ -448,7 +449,7 @@ fn thread_portfolio() -> Option<std::sync::Arc<Portfolio>> {
     PORTFOLIOS.lock().unwrap().iter().find(|(i, _, _)| *i == id).map(|(_, p, _)| p.clone())
 }
 
-fn thread_watch() -> Option<u64> {
+fn thread_watch() -> Option<(f64, f64)> {
     let id = std::thread::current().id();
     PORTFOLIOS.lock().unwrap().iter().find(|(i, _, _)| *i == id).and_then(|e| e.2)
 }
@@ -705,7 +706,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.deadline.is_some_and(|d| Instant::now() >= d)
             || self.shared.as_ref().is_some_and(|s| {
                 s.stop.load(std::sync::atomic::Ordering::Relaxed)
-                    || self.watch.is_some_and(|g| s.generation() != g && self.start.elapsed().as_secs_f64() >= tunable!("ENOMOTO_T_MIP_BISECT_MIN_RUN", 1.0, f64))
+                    || self.watch.is_some_and(|(trig, target)| {
+                        (s.best() < trig || s.proven() >= target) && self.start.elapsed().as_secs_f64() >= tunable!("ENOMOTO_T_MIP_BISECT_MIN_RUN", 1.0, f64)
+                    })
             })
     }
 

@@ -238,7 +238,11 @@ fn bisection_worker(p: &MipProblem, params: MipParams, use_presolve: bool, share
         let slice = if sliced { (tunable!("ENOMOTO_T_MIP_BISECT_SLICE", 0.1, f64) * tl).max(2.0).min(tl - el) } else { tl - el };
         let pr = MipParams { time_limit: slice, cutoff: t, verbose: false, ..params };
         if !sliced {
-            solver::set_thread_watch(Some(shared.generation()));
+            // 打ち切るのは、最良値が区間の 1/2 の点を下回ったとき (どのスレッドの解でも。少し良くなっただけなら
+            // 目標値はまだ区間の中なので続ける) と、厳密な下界が自分の目標値に届いたとき (自分の区間に解がないと
+            // ほかのスレッドが示した)
+            let trig = lb + 0.5 * (ub - lb);
+            solver::set_thread_watch(Some((trig.min(t), t)));
         }
         let r = solve_problem(p, pr, use_presolve);
         solver::set_thread_watch(None);
