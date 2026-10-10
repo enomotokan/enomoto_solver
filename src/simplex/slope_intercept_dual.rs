@@ -870,6 +870,11 @@ pub(crate) fn set_ext_control(c: Option<ExtControl>) {
     EXT_STOP.with(|x| x.set(ExtStop::None));
 }
 
+/// 今の打ち切り条件。
+pub(crate) fn ext_control() -> Option<ExtControl> {
+    EXT_CTRL.with(|x| x.get())
+}
+
 /// 直近の求解が [`ExtControl`] で打ち切られた理由。
 pub(crate) fn ext_stop() -> ExtStop {
     EXT_STOP.with(|x| x.get())
@@ -3153,6 +3158,9 @@ impl ColCache {
 pub fn solve_slope_intercept_dual(std: &StdForm, opts: &crate::types::LpOptions) -> Option<SimplexResult> {
     SINGULAR_BAILOUT.with(|f| f.set(false));
     RESTART_BAILOUT.with(|f| f.set(false));
+    // 与えられた基底から始める求解 ([`solve_slope_intercept_dual_from_basis`]) は、1 回目が基底を取り出して消すので、
+    // 解き直しのために写しを取っておく。
+    let warm = WARM_BASIS.with(|w| w.borrow().clone());
     let res = solve_slope_intercept_dual_with(std, opts, false);
     let singular = SINGULAR_BAILOUT.with(|f| f.get());
     let uncertified = RESTART_BAILOUT.with(|f| f.get());
@@ -3166,6 +3174,25 @@ pub fn solve_slope_intercept_dual(std: &StdForm, opts: &crate::types::LpOptions)
     // 作業 #8 対処 5: 解き直しでは費用摂動を既定の大きさに戻す (試験用の縮小 `ENOMOTO_T_PERTURB_*FACTOR` を無視する。
     // 既定の設定では摂動は変わらない)。
     super::set_full_cost_perturbation(true);
+    // 与えられた基底から始めた求解なら、まず同じ基底から解き直す (`ENOMOTO_T_DUAL_RETRY_WARM`、既定 1。0 で従来どおりスラックの
+    // 基底から)。その基底からも破綻したら、スラックの基底から解き直す。従来は 1 回目が基底を消していたので、解き直しは
+    // 常にスラックの基底からになり、クロスオーバーの仕上げ (cont11: 主実行不能の行 10,456) がスラックの基底 (79,201 行) から
+    // 解き直して 900 秒で終わらなかった。
+    if let Some(wb) = warm.filter(|_| tunable!("ENOMOTO_T_DUAL_RETRY_WARM", 1u8, u8) != 0) {
+        SINGULAR_BAILOUT.with(|f| f.set(false));
+        RESTART_BAILOUT.with(|f| f.set(false));
+        WARM_BASIS.with(|w| *w.borrow_mut() = Some(wb));
+        let res = solve_slope_intercept_dual_with(std, opts, true);
+        WARM_BASIS.with(|w| *w.borrow_mut() = None);
+        let failed = SINGULAR_BAILOUT.with(|f| f.get()) || RESTART_BAILOUT.with(|f| f.get());
+        if res.is_some() || !failed {
+            super::set_full_cost_perturbation(false);
+            return res;
+        }
+        if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
+            eprintln!("DEBUG_EXT: retry from the given basis also bailed out, retrying from the slack basis");
+        }
+    }
     let res = solve_slope_intercept_dual_with(std, opts, true);
     super::set_full_cost_perturbation(false);
     res

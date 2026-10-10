@@ -95,6 +95,11 @@ mod prm {
     pub const IPM_ACCEPT_GAP_REL: f64 = 1e8;
     /// 基底の選択のピボット行の候補にする成分の、未ピボット行の最大成分に対する比。
     pub const LI_PIV_REL: f64 = 0.1;
+    /// 行数が `LI_PIV_REL_BIG_M` 以上の問題での比。0.1 では消去が長く続く大きな問題で成長が重なり、選んだ基底が
+    /// 単体法の再分解で特異になった (cont11、119,599 行: 頂点の修復・仕上げが破綻して 900 秒で終わらず、0.5 なら頂点が
+    /// そのまま採用されて 71〜77 秒)。小さな問題では 0.5 だとフィルが増える (qap15、6,330 行: 20.6 → 27.3 秒)。
+    pub const LI_PIV_REL_BIG: f64 = 0.5;
+    pub const LI_PIV_REL_BIG_M: usize = 50_000;
     /// 基底の選択で列を受理する残差の相対閾値 (消去後の未ピボット行の最大成分 / 列の最大成分)。1e-9 では
     /// ほぼ一次従属な列も通り、悪条件な基底で仕上げが長引いた (pilot87 25 → 7 秒、pilot.ja 18 → 0.8 秒。第 21 回)。
     pub const LI_TOL: f64 = 1e-2;
@@ -1723,7 +1728,7 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     // 基底の候補 B の列と行の二部マッチングから、B をブロック上三角に並べる順 (各列の非零の行にマッチした列を先に。強連結成分は
     // 1 かたまり) と、優先するピボット行 (マッチした行) を作る。三角の部分では消去もフィルも起きない。従来の順 (非零の少ない順)
     // で消去の手間が予算を超えたときだけ、この順で選び直す (下の `ENOMOTO_T_XO_LI_ELIM_BUDGET`)。
-    let matching_order = || -> Vec<(usize, Option<usize>)> {
+    let matching_order = || -> (Vec<(usize, Option<usize>)>, usize) {
         let adj: Vec<Vec<usize>> = cand_b.iter().map(|&j| col(std, j).iter().filter(|&&(_, v)| v != 0.0).map(|&(i, _)| i).collect()).collect();
         let mt = crate::graph::max_bipartite_matching(&adj, m);
         // 行 → その行にマッチした候補 (の位置)。
@@ -1747,11 +1752,11 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
         }
         // マッチしなかった (構造的に従属な) 候補は最後に (従来の判定で落ちるか、空いた行で受理される)。
         ord.extend(cand_b.iter().zip(&mt).filter(|(_, r)| r.is_none()).map(|(&j, _)| (j, None)));
+        let big = comps.iter().map(|c| c.len()).max().unwrap_or(0);
         if debug {
-            let big = comps.iter().map(|c| c.len()).max().unwrap_or(0);
             eprintln!("CROSSOVER basis order by matching: matched {} / {}, blocks {} (largest {big}) t={:.3}s", mt.iter().filter(|r| r.is_some()).count(), cand_b.len(), comps.len(), t0.elapsed().as_secs_f64());
         }
-        ord
+        (ord, big)
     };
     let mut sel = BasisSelector::new(m, n);
     if tunable!("ENOMOTO_T_XO_LI_MARKOWITZ", 1u8, u8) != 0 {
@@ -1778,28 +1783,35 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     // 早く足した列の L が長くなり、後の列がそれを何度もたどって消去する (rmine15: 358,395 行・候補 92,060 列で消去 153 億回・140〜500 秒、
     // マッチングの順なら 4 億回・4.6 秒)。マッチングの順を常に使うと、三角に近くない問題で基底が悪条件になる (physiciansched3-3: 候補の
     // 12% がマッチせず、頂点の値が 1.5e17 に達して採用されず、auto 171 → 300 秒)。従来の順で安く済む問題は経路を変えない。
+    // ただしマッチングの順の最大の強連結成分が `ENOMOTO_T_XO_LI_MATCH_MAX_BLOCK` (既定 1000) 列を超えるなら、ブロック上三角に
+    // ならず (成分の中は従来どおり消去する) 選んだ基底も悪くなるので、従来の順をそのまま続ける (cont11: 最大の成分 29,434 列、
+    // 超基底が 19 → 112 本に増え、クロスオーバーが 900 秒で終わらなかった。rmine15 は 8 列)。
     let match_min_m = tunable!("ENOMOTO_T_XO_LI_MATCH_MIN_M", 50_000usize, usize);
-    let li_match_ok = match_min_m > 0 && m >= match_min_m && cand_d.is_empty();
+    let match_max_block = tunable!("ENOMOTO_T_XO_LI_MATCH_MAX_BLOCK", 1000usize, usize);
+    let mut li_match_ok = match_min_m > 0 && m >= match_min_m && cand_d.is_empty();
     let elim_budget = tunable!("ENOMOTO_T_XO_LI_ELIM_BUDGET", 50.0f64, f64) * cand_b.iter().map(|&j| col(std, j).len()).sum::<usize>() as f64;
-    let mut switched = false;
+    let mut switched: Option<Vec<(usize, Option<usize>)>> = None;
     for &j in &cand_b {
         if sel.full() {
             break;
         }
         if li_match_ok && sel.stat[1] as f64 > elim_budget {
-            switched = true;
-            break;
+            let (ord, big) = matching_order();
+            if big <= match_max_block {
+                switched = Some(ord);
+                break;
+            }
+            li_match_ok = false;
         }
         if sel.try_add(j, col(std, j)) {
             st.li_from_b += 1;
         }
     }
-    if switched {
+    if let Some(ord) = switched {
         let row_cnt = std::mem::take(&mut sel.row_cnt);
         sel = BasisSelector::new(m, n);
         sel.row_cnt = row_cnt;
         st.li_from_b = 0;
-        let ord = matching_order();
         for &(j, pref) in &ord {
             if sel.full() {
                 break;
@@ -1954,7 +1966,12 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
         // 頂点が主実行不能 (少数) なら、費用をずらして基底を双対実行可能にしてから双対単体法で主実行不能だけを直し、
         // 直した頂点を元の費用で判定する (`ENOMOTO_T_XO_REPAIR`、既定 1 は第 61 回の比較で決めた。[`repair_vertex`])。
         if accept_gap > 0.0 && tunable!("ENOMOTO_T_XO_REPAIR", 1u8, u8) != 0 && vertex_solution(std, &basis_pos, &nb_status, &lu).is_none() {
-            if let Some(r) = repair_vertex(std, yi, &basis, &basis_pos, &nb_status, &lu, accept_gap, debug) {
+            // 修復の時間の上限: ここまでのクロスオーバー (内点法を含む) の時間の `ENOMOTO_T_XO_REPAIR_TIME_FACTOR` 倍 (既定 2、
+            // 0 で上限なし)、10 秒以上。超えたら修復をやめて仕上げに進む (cont11: 内点法の点のわずかな違いで修復が 18 秒から
+            // 600 秒超に延びた)。
+            let rfac = tunable!("ENOMOTO_T_XO_REPAIR_TIME_FACTOR", 2.0f64, f64);
+            let repair_deadline = (rfac > 0.0).then(|| Instant::now() + std::time::Duration::from_secs_f64((rfac * t0.elapsed().as_secs_f64()).clamp(10.0, 1e6)));
+            if let Some(r) = repair_vertex(std, yi, &basis, &basis_pos, &nb_status, &lu, accept_gap, repair_deadline, debug) {
                 crate::phase_timing::mark("xo_vertex_repaired");
                 return Some(r);
             }
@@ -2480,6 +2497,7 @@ fn repair_vertex(
     nb_status: &[Option<NbStatus>],
     lu: &sparse_lu::FtLu,
     accept_gap: f64,
+    deadline: Option<Instant>,
     debug: bool,
 ) -> Option<SimplexResult> {
     let n = std.n_total;
@@ -2522,6 +2540,9 @@ fn repair_vertex(
         }
     }
     let max_np = tunable!("ENOMOTO_T_XO_REPAIR_MAX", (m / 50).max(20), usize);
+    if debug {
+        eprintln!("CROSSOVER repair: start primal_infeas={np} (max {max_np})");
+    }
     if np == 0 || np > max_np {
         return None;
     }
@@ -2558,11 +2579,29 @@ fn repair_vertex(
         ub: std.ub.clone(),
     };
     set_cleanup_hint(nb_status, 1);
+    use super::slope_intercept_dual::{ext_control, set_ext_control, ExtControl};
+    let outer = ext_control();
+    if let Some(d) = deadline {
+        let c = outer.unwrap_or(ExtControl { iteration_limit: usize::MAX, cutoff: f64::INFINITY, deadline: None });
+        set_ext_control(Some(ExtControl { deadline: Some(c.deadline.map_or(d, |o| o.min(d))), ..c }));
+    }
     let res = super::slope_intercept_dual::solve_slope_intercept_dual_from_basis(&std2, &Default::default(), basis.to_vec());
+    if deadline.is_some() {
+        if debug && super::slope_intercept_dual::ext_stop() == super::slope_intercept_dual::ExtStop::TimeLimit {
+            eprintln!("CROSSOVER repair: time limit reached t={:.3}s", t0.elapsed().as_secs_f64());
+        }
+        set_ext_control(outer);
+    }
     super::slope_intercept_dual::set_warm_nb(None);
+    if debug && res.as_ref().map_or(true, |r| r.status != Status::Optimal) {
+        eprintln!("CROSSOVER repair: gave up (status {:?}) t={:.3}s", res.as_ref().map(|r| format!("{:?}", r.status)), t0.elapsed().as_secs_f64());
+    }
     let res = res?;
     if res.status != Status::Optimal {
         return None;
+    }
+    if debug && res.x.is_none() {
+        eprintln!("CROSSOVER repair: optimal without x");
     }
     let x = res.x.as_ref()?;
     let obj: f64 = (0..n_orig.min(x.len())).map(|j| std.c[j] * x[j]).sum();
@@ -3068,6 +3107,8 @@ fn megiddo_push(
 /// `L` の列 `k` はピボット行 `piv[k]` と、受理時点の未ピボット行での乗数を持つ。
 struct BasisSelector {
     m: usize,
+    /// しきい値つきの部分ピボットの比 ([`prm::LI_PIV_REL`])。
+    piv_rel: f64,
     /// 次の [`Self::try_add`] で優先するピボット行 (数値的に十分大きいとき。マッチングで決めた行)。
     pref_row: Option<usize>,
     /// 診断用の数え上げ (`ENOMOTO_DEBUG_CROSSOVER`): 三角求解でたどった L の列の数、消去で触れた L の非零の数、
@@ -3092,8 +3133,14 @@ struct BasisSelector {
 
 impl BasisSelector {
     fn new(m: usize, n: usize) -> Self {
+        let piv_rel = if m >= tunable!("ENOMOTO_T_XO_LI_PIV_REL_BIG_M", prm::LI_PIV_REL_BIG_M, usize) {
+            tunable!("ENOMOTO_T_XO_LI_PIV_REL_BIG", prm::LI_PIV_REL_BIG, f64)
+        } else {
+            tunable!("ENOMOTO_T_XO_LI_PIV_REL", prm::LI_PIV_REL, f64)
+        };
         BasisSelector {
             m,
+            piv_rel,
             pref_row: None,
             stat: [0; 4],
             chosen: Vec::with_capacity(m),
@@ -3197,11 +3244,11 @@ impl BasisSelector {
             // しきい値つきの部分ピボット: 最大成分の `LI_PIV_REL` 倍以上の行のうち、非零の少ない行を選ぶ (フィルを抑える。
             // 最大成分の行だけでは qap15 で基底の選択に 26 秒かかった)。
             let mut p = best.1;
-            let thr_pref = tunable!("ENOMOTO_T_XO_LI_PIV_REL", prm::LI_PIV_REL, f64) * best.0;
+            let thr_pref = self.piv_rel * best.0;
             if let Some(r) = self.pref_row.filter(|&r| self.pivot_of_row[r] == usize::MAX && self.xw[r].abs() >= thr_pref && self.mark_row[r]) {
                 p = r;
             } else if !self.row_cnt.is_empty() {
-                let thr = tunable!("ENOMOTO_T_XO_LI_PIV_REL", prm::LI_PIV_REL, f64) * best.0;
+                let thr = self.piv_rel * best.0;
                 let mut bc = self.row_cnt[p];
                 for &i in &self.nz_rows {
                     if self.pivot_of_row[i] == usize::MAX && self.xw[i].abs() >= thr && self.row_cnt[i] < bc {
