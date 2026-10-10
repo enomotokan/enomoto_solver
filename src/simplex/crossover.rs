@@ -1718,12 +1718,37 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     cand_d.sort_by_key(|&j| col(std, j).len());
     // 試験用 (`ENOMOTO_T_XO_LI_ORDER=1`): 基底の候補 B を、内点法の点で基底らしい順 (境界からの距離 / |s_j| の大きい順) に
     // 並べる (既定は非零の少ない順)。
-    if tunable!("ENOMOTO_T_XO_LI_ORDER", 0u8, u8) != 0 {
-        let score = |j: usize| -> f64 {
-            let dist = (x[j] - std.lb[j]).min(std.ub[j] - x[j]);
-            dist / s[j].abs().max(1e-12)
-        };
-        cand_b.sort_by(|&a, &b| score(b).partial_cmp(&score(a)).unwrap_or(std::cmp::Ordering::Equal));
+    // 基底の候補の順: 0 = 非零の少ない順、1 = 距離 / |s_j| の大きい順、2 = 絶対のしきい値で 2 段、3 = 相対の 2 段 (候補が m を
+    // 超える本数だけ、境界に近い候補を後ろへ)。既定は行数 `LI_PIV_REL_BIG_M` (5 万) 以上で 3、それ未満で 0 (qap15 (6,330 行)
+    // は 3 で基底の選択のフィルが増えて 900 秒で終わらない。5 万行以上の Mittelmann 7 問では supportcase10 が 17.3 → 13.8 秒
+    // (押し出しのピボット 6,308 → 4,052 本)、他は ±5% 以内)。`ENOMOTO_T_XO_LI_ORDER` で固定。
+    // (`tunable!` は既定値ごと呼び出し箇所で覚えるので、行数で変わる既定は環境変数を別に読む。)
+    let li_order = env_str!("ENOMOTO_T_XO_LI_ORDER").and_then(|v| v.parse::<u8>().ok()).unwrap_or(
+        if m >= tunable!("ENOMOTO_T_XO_LI_PIV_REL_BIG_M", prm::LI_PIV_REL_BIG_M, usize) { 3 } else { 0 },
+    );
+    let li_score = |j: usize| -> f64 {
+        let dist = (x[j] - std.lb[j]).min(std.ub[j] - x[j]);
+        dist / s[j].abs().max(1e-12)
+    };
+    if li_order == 1 {
+        cand_b.sort_by(|&a, &b| li_score(b).partial_cmp(&li_score(a)).unwrap_or(std::cmp::Ordering::Equal));
+    } else if li_order == 2 {
+        // 2 段: 境界からの距離 / |s_j| が `ENOMOTO_T_XO_LI_TIER` 以上の「明らかに内点」の候補を先に、残り (境界に近い候補) を
+        // 後に。段の中は非零の少ない順のまま (安定な分割)。基底に入らずに残る超基底が境界に近い列になり、押し出しで基底変数が
+        // ふさがりにくい (supportcase10: 全体を距離順 (=1) にすると押し出しのピボット 6,308 → 368 本だが、physiciansched3-3 は
+        // フィルが増えて悪化した)。
+        let thr = tunable!("ENOMOTO_T_XO_LI_TIER", 1e2f64, f64);
+        let (mut t0, t1): (Vec<usize>, Vec<usize>) = cand_b.iter().partition(|&&j| li_score(j) >= thr);
+        t0.extend(t1);
+        cand_b = t0;
+    } else if li_order == 3 && cand_b.len() > m {
+        // 2 段の境を相対で決める: 候補が m を超える分 (どうせ基底に入れない本数) だけ、距離 / |s_j| の小さい候補を後ろへ。
+        let excess = cand_b.len() - m;
+        let mut sc: Vec<f64> = cand_b.iter().map(|&j| li_score(j)).collect();
+        let (_, &mut thr, _) = sc.select_nth_unstable_by(excess, |a, b| a.total_cmp(b));
+        let (mut t0, t1): (Vec<usize>, Vec<usize>) = cand_b.iter().partition(|&&j| li_score(j) >= thr);
+        t0.extend(t1);
+        cand_b = t0;
     }
     // 基底の候補 B の列と行の二部マッチングから、B をブロック上三角に並べる順 (各列の非零の行にマッチした列を先に。強連結成分は
     // 1 かたまり) と、優先するピボット行 (マッチした行) を作る。三角の部分では消去もフィルも起きない。従来の順 (非零の少ない順)
