@@ -1287,44 +1287,54 @@ impl<'a, L: MipLp> Solver<'a, L> {
             h ^= h >> 29;
             (h >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0
         };
-        let c2: Vec<f64> = (0..n)
+        // 副目的の向き (`int2`: 近い整数の側へ押す頂点と、遠い側へ押す頂点の 2 つ)
+        let near: Vec<f64> = (0..n)
             .map(|j| {
-                if mode == "int" {
-                    let f = x[j] - x[j].floor();
-                    if self.cut_int[j] && f > 1e-6 && f < 1.0 - 1e-6 {
-                        if f < 0.5 { 1.0 } else { -1.0 }
-                    } else {
-                        0.0
-                    }
+                let f = x[j] - x[j].floor();
+                if self.cut_int[j] && f > 1e-6 && f < 1.0 - 1e-6 {
+                    if f < 0.5 { 1.0 } else { -1.0 }
                 } else {
-                    hash(j)
+                    0.0
                 }
             })
             .collect();
-        let cost2: Vec<f64> = (0..n).map(|j| p.cost[j] + eps * c2[j]).collect();
-        face.set_costs(&cost2);
-        let st = face.solve(&SolveLimits { iteration_limit: if light { (p.m + n) as u64 + 100 } else { 10 * (p.m + n) as u64 + 1000 }, cutoff: f64::INFINITY, deadline: self.deadline });
-        if st != LpStatus::Optimal {
-            return self.separate(x, light);
-        }
-        let xv = face.col_values();
+        let dirs: Vec<Vec<f64>> = match mode {
+            "int" => vec![near],
+            "int2" => {
+                let far: Vec<f64> = near.iter().map(|v| -v).collect();
+                vec![near, far]
+            }
+            _ => vec![(0..n).map(hash).collect()],
+        };
         let z0: f64 = (0..n).map(|j| p.cost[j] * x[j]).sum();
-        let zv: f64 = (0..n).map(|j| p.cost[j] * xv[j]).sum();
-        let moved = (0..n).filter(|&j| (xv[j] - x[j]).abs() > 1e-6).count();
-        if env_str!("ENOMOTO_MIP_DEBUG_FACE").is_some() {
-            eprintln!("FACE: degenerate nonbasic {ndeg}, moved {moved} cols, obj {z0:.9} -> {zv:.9}, frac {} -> {}", self.fractional(x).len(), self.fractional(&xv).len());
+        let mut cands = if mode == "canon" { Vec::new() } else { self.separate(x, light) };
+        let mut used = 0usize;
+        for c2 in &dirs {
+            let mut f2 = face.clone();
+            let cost2: Vec<f64> = (0..n).map(|j| p.cost[j] + eps * c2[j]).collect();
+            f2.set_costs(&cost2);
+            let st = f2.solve(&SolveLimits { iteration_limit: if light { (p.m + n) as u64 + 100 } else { 10 * (p.m + n) as u64 + 1000 }, cutoff: f64::INFINITY, deadline: self.deadline });
+            if st != LpStatus::Optimal {
+                continue;
+            }
+            let xv = f2.col_values();
+            let zv: f64 = (0..n).map(|j| p.cost[j] * xv[j]).sum();
+            let moved = (0..n).filter(|&j| (xv[j] - x[j]).abs() > 1e-6).count();
+            if env_str!("ENOMOTO_MIP_DEBUG_FACE").is_some() {
+                eprintln!("FACE: degenerate nonbasic {ndeg}, moved {moved} cols, obj {z0:.9} -> {zv:.9}, frac {} -> {}", self.fractional(x).len(), self.fractional(&xv).len());
+            }
+            if zv > z0 + 1e-7 * (1.0 + z0.abs()) || moved == 0 {
+                continue;
+            }
+            std::mem::swap(&mut self.lp, &mut f2);
+            let mut cv = self.separate(&xv, light);
+            std::mem::swap(&mut self.lp, &mut f2);
+            cands.append(&mut cv);
+            used += 1;
         }
-        if zv > z0 + 1e-7 * (1.0 + z0.abs()) || moved == 0 {
+        if mode == "canon" && used == 0 {
             return self.separate(x, light);
         }
-        std::mem::swap(&mut self.lp, &mut face);
-        let mut cv = self.separate(&xv, light);
-        std::mem::swap(&mut self.lp, &mut face);
-        if mode == "canon" {
-            return cv;
-        }
-        let mut cands = self.separate(x, light);
-        cands.append(&mut cv);
         cands
     }
 
