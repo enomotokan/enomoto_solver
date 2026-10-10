@@ -845,6 +845,38 @@ fn try_refactorize(std: &StdForm, t: &Tableau, prev: Option<&sparse_lu::FtLu>) -
     basis_kernel::factorize_basis(std, &t.basis_pos, prev)
 }
 
+/// [`try_refactorize`] の、数値的に特異な基底を救済する版 (`ENOMOTO_T_PRIMAL_BASIS_REPAIR`、既定 1。分解が成功する
+/// ときは同じ)。一次従属な基底の列を空いた行のスラックに差し替え ([`basis_kernel::factorize_basis_repair`])、外れた列は
+/// 今の値に近い方の境界に置く。呼び出し側は `x_B` を作り直すこと。主実行不能になりうるが、双対単体法の仕上げの引き継ぎは
+/// 戻った後に `x_B` を確かめて双対単体法で直す。従来は `None` で、仕上げごと結果なしになっていた (irish-electricity:
+/// 仕上げの主単体法の再分解が特異 → 二段解法を一から 190 秒)。
+fn try_refactorize_repair(std: &StdForm, t: &mut Tableau, prev: Option<&sparse_lu::FtLu>) -> Option<sparse_lu::FtLu> {
+    if let Some(lu) = try_refactorize(std, t, prev) {
+        return Some(lu);
+    }
+    if tunable!("ENOMOTO_T_PRIMAL_BASIS_REPAIR", 1u8, u8) == 0 {
+        return None;
+    }
+    let (lu, replaced) = basis_kernel::factorize_basis_repair(std, &mut t.basis, &mut t.basis_pos, None)?;
+    for &(pos, old) in &replaced {
+        let (l, u, v) = (std.lb[old], std.ub[old], t.x[old]);
+        let (st, val) = if l.is_finite() && (!u.is_finite() || v - l <= u - v) {
+            (NbStatus::Lower, l)
+        } else if u.is_finite() {
+            (NbStatus::Upper, u)
+        } else {
+            (NbStatus::Zero, 0.0)
+        };
+        t.nb_status[old] = Some(st);
+        t.x[old] = val;
+        t.nb_status[t.basis[pos]] = None;
+    }
+    if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
+        eprintln!("DEBUG_EXT: primal refactorization singular; replaced {} basis columns by slacks", replaced.len());
+    }
+    Some(lu)
+}
+
 /// 有界変数主単体法の 1 段階 (第 1 段階または第 2 段階) を実行する。
 ///
 /// - `phase1`: 真なら第 1 段階 (合成目的関数と修正比率テスト)、偽なら第 2 段階 (`std.c`)。
@@ -1269,7 +1301,7 @@ fn run_phase2_incremental(std: &StdForm, t: &mut Tableau, lu: &mut sparse_lu::Ft
             need_fresh = false;
             let rhs = t.recompute_basics(lu);
             if kernel.fill_too_big(lu) || t.basis_residual_norm(&rhs) > FT_RESIDUAL_TOL {
-                *lu = try_refactorize(std, t, Some(&*lu))?;
+                *lu = try_refactorize_repair(std, t, Some(&*lu))?;
                 t.recompute_basics(lu);
             }
             for i in 0..m {
@@ -1344,9 +1376,14 @@ fn run_phase2_incremental(std: &StdForm, t: &mut Tableau, lu: &mut sparse_lu::Ft
         let self_width = std.ub[enter] - std.lb[enter];
         let init_alpha1 = if self_width.is_finite() { self_width } else { f64::INFINITY };
         candidates.clear();
+        // `ENOMOTO_T_PRIMAL_REL_PIVOT=r` (既定 1e-5、0 で使わない): `|alpha_i| < r max|alpha|` の行はピボットに取らない
+        // (irish-electricity の仕上げの引き継ぎで、絶対の下限 1e-7 だけでは小さなピボットを取って基底が特異になり、目的値が
+        // 5e25 に発散した。1e-7 では同じく発散、1e-5 なら 1,227 反復・3.4 秒で引き継ぎが終わる)。
+        let rel_piv = tunable!("ENOMOTO_T_PRIMAL_REL_PIVOT", 1e-5f64, f64);
+        let piv_floor = if rel_piv > 0.0 { rel_piv * alpha_rows.iter().map(|&i| alpha[i].abs()).fold(0.0, f64::max) } else { 0.0 };
         for &i in &alpha_rows {
             let rate = -best_dir * alpha[i];
-            if rate.abs() <= min_pivot {
+            if rate.abs() <= min_pivot.max(piv_floor) {
                 continue;
             }
             let var = t.basis[i];
@@ -1483,7 +1520,7 @@ fn run_phase2_incremental(std: &StdForm, t: &mut Tableau, lu: &mut sparse_lu::Ft
 
         // FT 更新 (FTRAN/BTRAN の途中値を使う) と再分解トリガ (3)(4)(5)。残差検査 (1) はリフレッシュ時点でのみ行う。
         if kernel.update_and_check(lu, r).is_due() {
-            *lu = try_refactorize(std, t, Some(&*lu))?;
+            *lu = try_refactorize_repair(std, t, Some(&*lu))?;
             need_fresh = true;
         }
     }

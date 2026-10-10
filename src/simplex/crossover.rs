@@ -2983,6 +2983,8 @@ fn megiddo_push(
     let mut rho = vec![0.0; m];
     let mut nz: Vec<usize> = Vec::new();
     let (mut pivots, mut to_bound, mut unresolved) = (0usize, 0usize, 0usize);
+    let repair = tunable!("ENOMOTO_T_XO_MEGIDDO_REPAIR", 0u8, u8) != 0;
+    let mut repaired = 0usize;
     // 向き `σ` での比率テスト。(歩幅, 塞ぐ基底位置 (自身なら None), 塞いだ境界は上限か)。
     // `nz` は `d` の非零の位置 (基底のほとんどがスラックの問題では `d` が疎で、長さ `m` の走査が手間の大半になる)。
     let ratio = |sigma: f64, j: usize, xj: f64, d: &[f64], nz: &[usize], xb: &[f64], basis: &[usize]| -> (f64, Option<usize>, bool) {
@@ -3058,6 +3060,10 @@ fn megiddo_push(
             }
             break;
         }
+        if basis_pos[j].is_some() {
+            // 特異の救済でスラックとして基底に入った列。
+            continue;
+        }
         let xj = xs[si];
         kernel.ftran_col(&lu, col(std, j), &mut d);
         kernel.ftran_rows_into(&d, &mut nz);
@@ -3114,7 +3120,27 @@ fn megiddo_push(
                 cb[r] = std.c[j];
                 pivots += 1;
                 if kernel.update_and_check(&mut lu, r).is_due() {
-                    lu = factorize_basis(std, basis_pos, Some(&lu))?;
+                    lu = match factorize_basis(std, basis_pos, Some(&lu)) {
+                        Some(f) => f,
+                        // 基底が数値的に特異になった: 一次従属な列を空いた行のスラックに差し替えて続ける
+                        // (`ENOMOTO_T_XO_MEGIDDO_REPAIR`、既定 0: ex10 では救済しても頂点の主実行不能が 2.8 万で仕上げが終わらないので使わない。外れた列は今の値に近い方の境界に置き、仕上げが直す)。
+                        // 従来は押し出し全体を捨てて内点法の結果ごと二段解法で解き直していた (ex10: 超基底 14,618 本の
+                        // 2,067 本目で特異、120 秒の解き直し)。
+                        None if repair => {
+                            let (f, replaced) = super::basis_kernel::factorize_basis_repair(std, basis, basis_pos, None)?;
+                            for &(pos, old) in &replaced {
+                                nb_status[old] = Some(nearest_bound(std, old, xb[pos]));
+                                nb_status[basis[pos]] = None;
+                                // 基底に入ったスラックが押し出し待ちの超基底なら、もう押し出さない。
+                                is_sup[basis[pos]] = false;
+                                cb[pos] = std.c[basis[pos]];
+                            }
+                            unresolved += replaced.len();
+                            repaired += replaced.len();
+                            f
+                        }
+                        None => return None,
+                    };
                     kernel = BasisKernel::new(m, ft_max_updates(m));
                     let xs_ref = &xs;
                     let sv = |jj: usize| xs_ref[sup_idx[jj]];
@@ -3124,8 +3150,35 @@ fn megiddo_push(
         }
         xs[si] = f64::NAN; // 使い終わり (is_sup が偽なので読まれない)
     }
-    let lu = factorize_basis(std, basis_pos, Some(&lu))?;
+    if repaired > 0 && env_str!("ENOMOTO_DEBUG_CROSSOVER").is_some() {
+        eprintln!("CROSSOVER megiddo: singular basis repaired ({repaired} columns replaced by slacks)");
+    }
+    let lu = match factorize_basis(std, basis_pos, Some(&lu)) {
+        Some(f) => f,
+        None if repair => {
+            let (f, replaced) = super::basis_kernel::factorize_basis_repair(std, basis, basis_pos, None)?;
+            for &(pos, old) in &replaced {
+                nb_status[old] = Some(nearest_bound(std, old, xb[pos]));
+                nb_status[basis[pos]] = None;
+            }
+            unresolved += replaced.len();
+            f
+        }
+        None => return None,
+    };
     Some(MegiddoResult { lu, pivots, to_bound, unresolved })
+}
+
+/// 値 `v` に近い方の有限の境界 (自由列は 0)。基底から外した列の非基底の状態に使う。
+fn nearest_bound(std: &StdForm, j: usize, v: f64) -> NbStatus {
+    let (l, u) = (std.lb[j], std.ub[j]);
+    if l.is_finite() && (!u.is_finite() || v - l <= u - v) {
+        NbStatus::Lower
+    } else if u.is_finite() {
+        NbStatus::Upper
+    } else {
+        NbStatus::Zero
+    }
 }
 
 /// 優先順に列を受け取り、一次独立なら基底に加える左から順の疎 LU (Gilbert–Peierls)。
