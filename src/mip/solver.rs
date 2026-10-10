@@ -2017,6 +2017,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 待ち行列のノードの基底を LP に置く (保存した後の行の追加・削除を当てはめる)。
     fn restore_node_basis(&mut self, b: &super::lp::Basis, epoch: usize) {
         let mr = self.lp.num_rows();
+        // 調査用: 保存した基底を使わず、今の LP の基底 (直前のノードの最適基底) のまま解く
+        if env_str!("ENOMOTO_MIP_RESTORE_NEVER").is_some() {
+            return;
+        }
         if epoch == self.row_log.len() && b.row.len() == mr {
             self.restore_stats.0 += 1;
             self.restored_now = true;
