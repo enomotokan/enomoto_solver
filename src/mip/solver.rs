@@ -232,6 +232,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) next_cut_id: u64,
     /// カットの行の係数の 2 ノルム (カットの番号ごと。相対的な余裕の基準 `ENOMOTO_T_MIP_CUT_SLACK_REL` で使う)。
     pub(super) cut_norm: std::collections::HashMap<u64, f64>,
+    /// 効いていたカットを双対値でまとめた行の番号 ([`Self::merge_active_cuts`])。年齢で外さない。
+    pub(super) merged_cuts: std::collections::HashSet<u64>,
     /// 証明から作った衝突の数。
     proof_conflicts: u64,
     /// 完全オービトープ (orbitopal fixing に使う。サブ MIP では空)。
@@ -408,6 +410,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
         cut_age: Vec::new(),
         cut_ids: Vec::new(),
         cut_norm: std::collections::HashMap::new(),
+        merged_cuts: std::collections::HashSet::new(),
         next_cut_id: 0,
         proof_conflicts: 0,
         orbitopes: if params.submip { Rc::new(Vec::new()) } else { super::ORBITOPES.with(|t| t.borrow().clone()).unwrap_or_default() },
@@ -812,6 +815,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     return self.finish(MipStatus::NotSolved, root_obj);
                 }
                 root_obj = self.lp.objective() + self.p.offset;
+                // `ENOMOTO_MIP_MERGE_ROOT_CUTS`: 根の最後の LP で効いているカットを双対値で 1 本にまとめて加える
+                if env_str!("ENOMOTO_MIP_MERGE_ROOT_CUTS").is_some() && !self.params.submip {
+                    self.merge_active_cuts();
+                }
             }
         }
         self.join_fj_thread();

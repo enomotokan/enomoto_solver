@@ -678,6 +678,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 *age = 0;
             }
         }
+        if !self.merged_cuts.is_empty() {
+            for k in 0..ncut {
+                if self.merged_cuts.contains(&self.cut_ids[k]) {
+                    self.cut_age[k] = 0;
+                }
+            }
+        }
     }
 
     /// 年齢が上限 (`ENOMOTO_T_MIP_CUT_AGE_LIMIT`、既定 300。HiGHS の `mip_lp_age_limit` は 10 だが、10 では binkar10_1 で効くカットまで外れた) を超えたカットを LP から外す
@@ -749,6 +756,81 @@ impl<'a, L: MipLp> Solver<'a, L> {
         cnt
     }
 
+    /// 今の LP で効いている (双対値が 0 でない) カットを、|双対値| を重みに足して 1 本の行にまとめて加える
+    /// (各カットは `a_i x <= b_i` なので、非負の重みの和 `sum w_i a_i x <= sum w_i b_i` も妥当)。今の LP の双対解は
+    /// まとめた行に重み 1 を置いても実行可能なので、元のカットが年齢で外れても今の LP の目的値は保たれる
+    /// (子のノードでは個々のカットより弱い)。まとめた行は年齢で外さない。加えたら真。
+    pub(super) fn merge_active_cuts(&mut self) -> bool {
+        let m0 = self.p.m;
+        let n = self.p.n;
+        let mr = self.lp.num_rows();
+        if mr <= m0 {
+            return false;
+        }
+        let y = self.lp.row_duals();
+        let mut wmax = 0.0f64;
+        for i in m0..mr {
+            let (l, u) = self.lp.row_bounds(i);
+            if l == f64::NEG_INFINITY && u.is_finite() {
+                wmax = wmax.max(y[i].abs());
+            }
+        }
+        if wmax <= 1e-12 {
+            return false;
+        }
+        let mut dense = vec![0.0f64; n];
+        let mut rhs = 0.0f64;
+        let mut used = 0usize;
+        for i in m0..mr {
+            let (l, u) = self.lp.row_bounds(i);
+            if l != f64::NEG_INFINITY || !u.is_finite() {
+                continue;
+            }
+            let w = y[i].abs() / wmax;
+            if w <= 1e-9 {
+                continue;
+            }
+            used += 1;
+            for (j, a) in self.lp.row(i) {
+                dense[j] += w * a;
+            }
+            rhs += w * u;
+        }
+        if used < 2 {
+            return false;
+        }
+        let cmax = dense.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+        let mut coefs: Vec<(usize, f64)> = Vec::new();
+        for (j, &c) in dense.iter().enumerate() {
+            if c == 0.0 {
+                continue;
+            }
+            if c.abs() <= 1e-9 * cmax {
+                // 小さい係数は大域的な境界で右辺に移す (c x_j >= min(c lo, c up))
+                let m = if c > 0.0 { c * self.dom.global_lo[j] } else { c * self.dom.global_up[j] };
+                if m.is_finite() {
+                    rhs -= m;
+                    continue;
+                }
+            }
+            coefs.push((j, c));
+        }
+        let max_nnz = tunable!("ENOMOTO_T_MIP_MERGE_MAX_NNZ_FRAC", 1.0, f64);
+        if coefs.is_empty() || coefs.len() as f64 > max_nnz * n as f64 {
+            return false;
+        }
+        let nnz = coefs.len();
+        self.add_cut_rows(&[(coefs, f64::NEG_INFINITY, rhs)]);
+        if let Some(&id) = self.cut_ids.last() {
+            self.merged_cuts.insert(id);
+        }
+        let st = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
+        if self.params.verbose {
+            eprintln!("MIP: merged {used} active cuts into one row ({nnz} nonzeros), LP {st:?} obj {:.10e}", self.lp.objective() + self.p.offset);
+        }
+        true
+    }
+
     /// LP の行のうち、元の行より後ろ (カット) で論理変数が基底にあるものを外す。
     pub(super) fn remove_inactive_cuts(&mut self) {
         let m0 = self.p.m;
@@ -760,10 +842,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let act = self.lp.row_activities();
         let mut remove = vec![false; mr];
         let mut any = false;
+        self.sync_cut_age();
         for i in m0..mr {
             if b.row[i] == VarStatus::Basic {
                 let (_, up) = self.lp.row_bounds(i);
-                if act[i] < up - 1e-6 * (1.0 + up.abs()) {
+                if act[i] < up - 1e-6 * (1.0 + up.abs()) && !self.merged_cuts.contains(&self.cut_ids[i - m0]) {
                     remove[i] = true;
                     any = true;
                 }
