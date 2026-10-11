@@ -1,13 +1,13 @@
 //! 整数変数を含むモデルのための分枝限定法 (計画は `docs/branch_and_cut_plan.md`)。
 //!
-//! - [`lp`]: 状態を保持する LP エンジン (境界の変更・行の追加削除・warm start)。
+//! - [`lp`]・[`lp_api`]: LP の基底・結果の型と、分枝限定法が LP に求める操作 (実装は `simplex::mip_lp::TwoStageLp`)。
 //! - [`problem`]: 最小化形の問題データ。
 //! - [`domain`]: 変数の定義域、変更の記録と巻き戻し、制約伝播。
 //! - [`queue`]: 未処理ノードの待ち行列。
 //! - [`pseudocost`]: pseudocost と分枝スコア。
 //! - [`solver`]: 探索の本体 (reliability 分岐、plunge、暫定解による枝刈り)。
 
-/// 分枝切除法のための、状態を保持する LP エンジン。
+/// 分枝切除法の LP とやり取りする型 (基底・結果・打ち切り条件)。
 pub(crate) mod lp;
 pub(crate) mod lp_api;
 pub(crate) mod problem;

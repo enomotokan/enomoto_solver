@@ -118,7 +118,7 @@ impl PyModel {
     /// `root_solver`: 各 LP の解法。`"auto"` (既定: 前処理後の行数が 5000 以上なら傾き・切片双対二段解法と
     /// 内点法 + クロスオーバーを同時に解き、先に結論を出した側を採る。未満なら二段解法)、`"simplex"`
     /// (二段解法だけ)、`"ipm_crossover"` (内点法 + クロスオーバーだけ)、`"interior"` (独立の IP-PMM 内点法)。
-    /// 整数計画では根と各ノードの LP は分枝限定法専用の LP エンジンで解く (この指定は LP のときだけ効く)。
+    /// 整数計画では根と各ノードの LP は二段解法を warm start で解き直す (この指定は LP のときだけ効く)。
     ///
     /// `distinguish_infeasible_unbounded` (既定 `false`): `false` なら、有限の最適値が
     /// ないと分かった時点で `"infeasible_or_unbounded"` を返す。`true` なら

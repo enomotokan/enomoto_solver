@@ -1,8 +1,7 @@
-//! 分枝限定法が LP に求める操作 ([`MipLp`])。実装は 2 つ:
-//! [`super::lp::LpEngine`] (分枝限定法専用に書いた単体法) と
+//! 分枝限定法が LP に求める操作 ([`MipLp`])。実装は
 //! [`crate::simplex::mip_lp::TwoStageLp`] (既存の傾き・切片二段解法を warm start で使うもの)。
 
-use super::lp::{Basis, LpEngine, LpState, LpStatus, SolveLimits};
+use super::lp::{Basis, LpStatus, SolveLimits};
 use crate::simplex::mip_lp::{InteriorPoint, TwoStageLp, TwoStageState};
 
 /// 分枝限定法が使う LP の操作。
@@ -36,22 +35,16 @@ pub trait MipLp: Clone {
     fn farkas_ray(&self) -> Option<Vec<f64>>;
     fn basis_inverse_row(&mut self, s: usize) -> Vec<f64>;
     /// 今の LP を内点法で解いた点と、クロスオーバーの押し出しの頂点・基底 ([`TwoStageLp::interior_point`])。
-    /// 基底は双対実行可能とは限らない。対応しない実装は `None`。
-    fn interior_point(&self, _zero_cost: bool, _want_vertex: bool, _deadline: std::time::Instant) -> Option<InteriorPoint> {
-        None
-    }
-    /// 直前の求解が非有界だったときの切片問題の境界 ([`TwoStageLp::intercept_bounds`])。対応しない実装は `None`。
-    fn intercept_bounds(&self) -> Option<(Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>)> {
-        None
-    }
-    /// 基底を列番号 (構造列 j < n、行 n + i) で与える ([`TwoStageLp::set_basis_cols`])。対応しない実装は何もしない。
-    fn set_basis_cols(&mut self, _b: &[usize], _x: Option<&[f64]>) {}
-    /// 今の基底の DSE 重み (基底変数の番号との組、[`TwoStageLp::dse_snapshot`])。対応しない実装は `None`。
-    fn dse_snapshot(&self) -> Option<Vec<(u32, f32)>> {
-        None
-    }
-    /// DSE 重みを今の基底に当てはめる ([`TwoStageLp::set_dse_vars`])。対応しない実装は何もしない。
-    fn set_dse_vars(&mut self, _w: &[(u32, f32)]) {}
+    /// 基底は双対実行可能とは限らない。
+    fn interior_point(&self, zero_cost: bool, want_vertex: bool, deadline: std::time::Instant) -> Option<InteriorPoint>;
+    /// 直前の求解が非有界だったときの切片問題の境界 ([`TwoStageLp::intercept_bounds`])。
+    fn intercept_bounds(&self) -> Option<(Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>)>;
+    /// 基底を列番号 (構造列 j < n、行 n + i) で与える ([`TwoStageLp::set_basis_cols`])。
+    fn set_basis_cols(&mut self, b: &[usize], x: Option<&[f64]>);
+    /// 今の基底の DSE 重み (基底変数の番号との組、[`TwoStageLp::dse_snapshot`])。
+    fn dse_snapshot(&self) -> Option<Vec<(u32, f32)>>;
+    /// DSE 重みを今の基底に当てはめる ([`TwoStageLp::set_dse_vars`])。
+    fn set_dse_vars(&mut self, w: &[(u32, f32)]);
 }
 
 macro_rules! forward_impl {
@@ -91,7 +84,6 @@ macro_rules! forward_impl {
     };
 }
 
-forward_impl!(LpEngine, LpState);
 forward_impl!(
     TwoStageLp,
     TwoStageState,

@@ -9,7 +9,7 @@
 //! 4. 打ち切り値 (暫定解から決まる) 以上の下界のノードは捨てる。
 
 use super::domain::{Domain, FEASTOL};
-use super::lp::{LpEngine, LpStatus, SolveLimits, VarStatus};
+use super::lp::{LpStatus, SolveLimits, VarStatus};
 use super::lp_api::MipLp;
 use super::problem::MipProblem;
 use super::pseudocost::Pseudocost;
@@ -686,14 +686,8 @@ pub(crate) fn mip_threads() -> usize {
 pub fn solve(p: &MipProblem, params: MipParams) -> MipResult {
     // ヒューリスティクスのサブ MIP は小さいことが多いので、基底のない求解も二段解法だけで解く (同時実行しない)
     let prev_race = params.submip.then(|| crate::simplex::mip_lp::set_cold_race_threads(1));
-    // LP の実装: 既定は傾き・切片二段解法 (`ENOMOTO_MIP_LP=own` で分枝限定法専用の単体法)。
-    let run = || {
-        if env_str!("ENOMOTO_MIP_LP").is_some_and(|v| v == "own") {
-            solve_with::<LpEngine>(p, params, None, None)
-        } else {
-            solve_with::<crate::simplex::mip_lp::TwoStageLp>(p, params, None, None)
-        }
-    };
+    // LP の実装は傾き・切片二段解法
+    let run = || solve_with::<crate::simplex::mip_lp::TwoStageLp>(p, params, None, None);
     // サブ MIP の経過は利用者向けのログに出さない
     let r = if params.submip { crate::log::suspend(run) } else { run() };
     if let Some(k) = prev_race {
@@ -711,11 +705,7 @@ pub(crate) fn solve_snapshot(snap: std::sync::Arc<TreeSnapshot>, params: MipPara
 /// 木の写し `snap` から解く (`pool` があれば共有の待ち行列からノードを取る従のスレッドとして)。
 fn solve_worker(snap: std::sync::Arc<TreeSnapshot>, pool: Option<std::sync::Arc<WorkPool>>, params: MipParams) -> MipResult {
     let p = snap.p.clone();
-    if env_str!("ENOMOTO_MIP_LP").is_some_and(|v| v == "own") {
-        solve_with::<LpEngine>(&p, params, Some(snap), pool)
-    } else {
-        solve_with::<crate::simplex::mip_lp::TwoStageLp>(&p, params, Some(snap), pool)
-    }
+    solve_with::<crate::simplex::mip_lp::TwoStageLp>(&p, params, Some(snap), pool)
 }
 
 fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::sync::Arc<TreeSnapshot>>, pool: Option<std::sync::Arc<WorkPool>>) -> MipResult {
