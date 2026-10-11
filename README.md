@@ -134,7 +134,7 @@ Models with integer variables are solved by branch and cut, which solves the rel
 - **Primal heuristics:** rounding, fix-and-propagate, Feasibility Pump, Feasibility Jump, diving, rounding from the interior-point solution, improvement by sub-MIPs (RINS, RENS, DINS, Crossover, etc.).
 - **Search:** reliability branching by pseudocosts, plunging (diving into child nodes with warm starts), restarts, symmetry detection and symmetry-breaking inequalities (including orbitopes).
 
-#### Parallel branch and bound
+#### Parallel search
 
 When `threads` is k ≥ 2, branch and bound runs in parallel as follows.
 
@@ -161,7 +161,7 @@ The solution returned is polished before it is reported: integer variables are r
 | `threads` | LP (`root_solver="auto"`) | MIP |
 |---|---|---|
 | 1 (default) | Solved by the slope–intercept dual two-phase method only. | Both the relaxations and the tree search are solved on 1 thread. |
-| k ≥ 2 | Solved at the same time by the two-phase method (1 thread) and the proximal interior-point method + crossover (k − 1 threads), adopting the side that reaches a conclusion first. | Relaxations that cannot be warm-started (the root, etc.) are solved at the same time in the same way as on the left, and after the root is processed the tree is shared among k threads for the search ("Parallel branch and bound" above). |
+| k ≥ 2 | Solved at the same time by the two-phase method (1 thread) and the proximal interior-point method + crossover (k − 1 threads), adopting the side that reaches a conclusion first. | Relaxations that cannot be warm-started (the root, etc.) are solved at the same time in the same way as on the left, and after the root is processed the tree is shared among k threads for the search ("Parallel search" above). |
 
 In parallel execution, the threads are divided before starting into separate pools for the two-phase method (1 thread) and for the interior-point method + crossover (the rest), so the two methods never take each other's threads. If the two-phase method finishes first, its basic solution is used as it is; if the interior-point method + crossover finishes first, the optimal basis obtained in the crossover's finish (the main loop of the two-phase method) is used as it is. The losing side is stopped, and its termination is not waited for.
 
