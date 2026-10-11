@@ -277,6 +277,12 @@ pub(super) struct Solver<'a, L: MipLp> {
     seen_best: f64,
     /// 擬似費用を前回合わせたときの自分の値 (この後に増えた観測を共有の擬似費用に足す)。
     pc_base: Option<Pseudocost>,
+    /// 木を分け合うときの自分の番号、学習の記録をどこまで読んだか、ほかのスレッドの記録を取り込んでいる最中か、
+    /// 取り込んだ [証明, 衝突] の数。
+    pool_tid: u32,
+    learned_cursor: u64,
+    importing: bool,
+    learned_stats: [u64; 2],
     /// 診断用: デバッグ解の対称な像、最後の刈り込みの理由、直前に処理したノードが像を含んでいたか、像がまだ残っているか。
     dbg_imgs: Option<Vec<Vec<f64>>>,
     dbg_last: std::cell::RefCell<String>,
@@ -464,6 +470,24 @@ pub(crate) struct WorkPool {
     bounds: std::sync::Mutex<(Vec<f64>, Vec<f64>)>,
     /// スレッドの間で合わせた擬似費用 (各スレッドの観測の和)。
     pc: std::sync::Mutex<Pseudocost>,
+    /// 各スレッドが作った双対証明・衝突の記録 (どのノードでも成り立つので、ほかのスレッドも取り込む)。
+    learned: std::sync::Mutex<Learned>,
+    /// スレッドの番号の払い出し (記録に自分の分を読み飛ばすために付ける)。
+    next_tid: std::sync::atomic::AtomicU32,
+}
+
+/// スレッドの間で共有する学習の記録 (通し番号つき、古いものから捨てる)。
+#[derive(Default)]
+struct Learned {
+    /// 先頭の記録の通し番号。
+    first: u64,
+    /// (作ったスレッド, 証明 (係数, 定数, 目的関数の証明か) か、衝突 (リテラルの組))
+    items: std::collections::VecDeque<(u32, LearnedItem)>,
+}
+
+enum LearnedItem {
+    Proof(Vec<(usize, f64)>, f64, bool),
+    Lits(Vec<(usize, bool, f64)>),
 }
 
 struct PoolInner {
@@ -471,6 +495,17 @@ struct PoolInner {
     /// 待っていない (ノードを持っているか処理している) スレッドの数。
     busy: usize,
     done: bool,
+}
+
+/// 学習の記録に加える (古いものから捨てて `ENOMOTO_T_MIP_TREE_LEARNED_MAX` 件まで残す)。
+fn learned_push(pool: &WorkPool, tid: u32, it: LearnedItem) {
+    let max = tunable!("ENOMOTO_T_MIP_TREE_LEARNED_MAX", 20000usize, usize);
+    let mut g = pool.learned.lock().unwrap();
+    g.items.push_back((tid, it));
+    while g.items.len() > max {
+        g.items.pop_front();
+        g.first += 1;
+    }
 }
 
 /// このスレッドを待っていない側から外す (終わるスレッドが呼ぶ)。
@@ -485,6 +520,8 @@ fn pool_release(pool: &WorkPool) {
 impl WorkPool {
     fn new(threads: usize, lo: Vec<f64>, up: Vec<f64>, pc: Pseudocost) -> Self {
         WorkPool {
+            learned: std::sync::Mutex::new(Learned::default()),
+            next_tid: std::sync::atomic::AtomicU32::new(0),
             pc: std::sync::Mutex::new(pc),
             bounds: std::sync::Mutex::new((lo, up)),
             inner: std::sync::Mutex::new(PoolInner { nodes: Vec::new(), busy: threads, done: false }),
@@ -756,6 +793,10 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         pool_busy: pool.is_some(),
         seen_best: f64::INFINITY,
         pc_base: None,
+        pool_tid: pool.as_ref().map_or(0, |p| p.next_tid.fetch_add(1, std::sync::atomic::Ordering::Relaxed)),
+        learned_cursor: 0,
+        importing: false,
+        learned_stats: [0; 2],
         dbg_imgs: None,
         dbg_last: std::cell::RefCell::new(String::new()),
         dbg_prev_has: false,
@@ -1530,6 +1571,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 木を分け合う: 大域的な境界の締め付けを共有する (64 ノードおき)
             if self.pool.is_some() && self.nodes % 64 == 0 && env_str!("ENOMOTO_MIP_TREE_NO_SHARED_BOUNDS").is_none() {
                 self.sync_global_bounds();
+            }
+            // 木を分け合う: ほかのスレッドの双対証明・衝突を取り込む (64 ノードおき)
+            if self.pool.is_some() && self.nodes % 64 == 0 && env_str!("ENOMOTO_MIP_TREE_NO_SHARED_PROOFS").is_none() {
+                self.sync_learned();
             }
             // 木を分け合う: 擬似費用の観測を合わせる (`ENOMOTO_T_MIP_TREE_PC_SYNC` ノードおき、0 で合わせない)
             let pc_every = tunable!("ENOMOTO_T_MIP_TREE_PC_SYNC", 16u64, u64);
@@ -3156,6 +3201,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 双対証明・衝突制約のプールに行 `sum coefs x <= rhs` を加える (`obj` なら `rhs = U - konst`、そうでなければ
     /// `rhs = konst`)。上限を超えたら古いものから捨てる。
     pub(super) fn push_pool_row(&mut self, coefs: Vec<(usize, f64)>, konst: f64, obj: bool) {
+        // 木を分け合う: 作った証明をほかのスレッドにも知らせる (取り込んだものは知らせ直さない)
+        if !self.importing {
+            if let Some(pool) = &self.pool {
+                if env_str!("ENOMOTO_MIP_TREE_NO_SHARED_PROOFS").is_none() {
+                    learned_push(pool, self.pool_tid, LearnedItem::Proof(coefs.clone(), konst, obj));
+                }
+            }
+        }
         let p = self.p;
         let nnz_cap = 10 * p.rows.iter().map(|r| r.len()).sum::<usize>() + 100_000;
         let max_rows = tunable!("ENOMOTO_T_MIP_PROOF_POOL", 2000usize, usize);
@@ -3427,8 +3480,54 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let ok = self.lit_conflicts.add(&l);
         if ok {
             self.lit_stats[0] += 1;
+            if !self.importing {
+                if let Some(pool) = &self.pool {
+                    if env_str!("ENOMOTO_MIP_TREE_NO_SHARED_PROOFS").is_none() {
+                        learned_push(pool, self.pool_tid, LearnedItem::Lits(l));
+                    }
+                }
+            }
         }
         ok
+    }
+
+    /// 木を分け合う: ほかのスレッドが作った双対証明・衝突を取り込む。
+    fn sync_learned(&mut self) {
+        let Some(pool) = self.pool.clone() else { return };
+        let got: Vec<LearnedItem> = {
+            let g = pool.learned.lock().unwrap();
+            let start = self.learned_cursor.max(g.first);
+            let end = g.first + g.items.len() as u64;
+            let out = (start..end)
+                .filter_map(|k| {
+                    let (tid, it) = &g.items[(k - g.first) as usize];
+                    if *tid == self.pool_tid {
+                        return None;
+                    }
+                    Some(match it {
+                        LearnedItem::Proof(c, k, o) => LearnedItem::Proof(c.clone(), *k, *o),
+                        LearnedItem::Lits(l) => LearnedItem::Lits(l.clone()),
+                    })
+                })
+                .collect();
+            self.learned_cursor = end;
+            out
+        };
+        self.importing = true;
+        for it in got {
+            match it {
+                LearnedItem::Proof(c, k, o) => {
+                    self.push_pool_row(c, k, o);
+                    self.learned_stats[0] += 1;
+                }
+                LearnedItem::Lits(l) => {
+                    if self.add_lit_conflict(&l) {
+                        self.learned_stats[1] += 1;
+                    }
+                }
+            }
+        }
+        self.importing = false;
     }
 
     fn add_conflict_lits(&mut self, lits: &[(usize, bool, f64)]) -> bool {
@@ -4064,6 +4163,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.pool = Some(pool.clone());
         self.pool_busy = true;
         self.pc_base = Some(self.pc.clone());
+        self.pool_tid = pool.next_tid.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let snap = self.make_snapshot(&shared, &mut None, false);
         // 従は主が止める (止める合図)。時間の上限は主より少し後にして、主より先に止まらないようにする
         let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64() + 2.0);
@@ -4271,7 +4371,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 self.pool_busy = false;
             }
             if self.params.verbose {
-                eprintln!("MIP: tree search threads: worker nodes {}, nodes given away {}, taken {}, global bounds taken from other threads {}", self.worker_totals.0, self.pool_stats[0], self.pool_stats[1], self.pool_stats[2]);
+                eprintln!("MIP: tree search threads: worker nodes {}, nodes given away {}, taken {}, global bounds taken from other threads {}, proofs {} and conflicts {} taken from other threads", self.worker_totals.0, self.pool_stats[0], self.pool_stats[1], self.pool_stats[2], self.learned_stats[0], self.learned_stats[1]);
             }
         }
         // 木の写しから解いた求解が見つけた解を受け取る (止める合図で終わるときも)
