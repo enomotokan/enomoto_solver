@@ -1208,14 +1208,10 @@ fn lifted_cover_terms(vars: &CutVars, terms: Vec<Term>, beta: f64) -> Option<Raw
         if bi != bj {
             return bj.cmp(&bi);
         }
+        // LP 値 × 係数の大きい順、同じなら係数の大きい順。HiGHS の determineCover は差 FEAS 以内を同じとみなすが、
+        // その比較は推移的でなく (a ≈ b, b ≈ c でも a ≠ c)、Rust の sort は全順序でない比較で panic しうるので、厳密に比べる
         let (ca, cb) = (solval[i] * vals[i], solval[j] * vals[j]);
-        if ca > cb + FEAS {
-            return std::cmp::Ordering::Less;
-        }
-        if ca < cb - FEAS {
-            return std::cmp::Ordering::Greater;
-        }
-        vals[j].total_cmp(&vals[i])
+        cb.total_cmp(&ca).then(vals[j].total_cmp(&vals[i]))
     });
     let minlambda = (10.0 * FEAS).max(FEAS * beta.abs());
     let mut it = rest.into_iter();
