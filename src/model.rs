@@ -124,7 +124,7 @@ impl PyModel {
     /// ないと分かった時点で `"infeasible_or_unbounded"` を返す。`true` なら
     /// `"infeasible"` と `"unbounded"` を区別する (`types::LpOptions` 参照)。
     ///
-    /// `time_limit` [秒] / `mip_rel_gap` (既定 1e-4) / `node_limit`: 整数計画の打ち切り条件。
+    /// `time_limit` [秒] / `mip_rel_gap` (既定 0) / `node_limit`: 整数計画の打ち切り条件。
     /// `threads`: 使うスレッドの数 (既定 1。`max_threads()` を超える値はそこで頭打ち)。求解全体をこの数のスレッドの
     /// rayon プールで動かす。`"auto"` で 2 以上なら、LP (整数計画では基底のない緩和問題) を二段解法 (1 スレッド) と
     /// 内点法 + クロスオーバー (残り) で同時に解く。整数計画では木の探索もこの数のスレッドで分け合う。

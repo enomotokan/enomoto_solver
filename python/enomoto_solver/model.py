@@ -171,7 +171,7 @@ class Model:
         ``"unbounded"``、実行不能なら ``"infeasible"`` を返す (False なら ``"infeasible_or_unbounded"``)。
         ``"not_solved"`` はソルバーが判定に至らずに諦めたことを表す。
 
-        整数計画の打ち切り条件: ``time_limit`` (秒)、``mip_rel_gap`` (相対ギャップ、既定 1e-4)、
+        整数計画の打ち切り条件: ``time_limit`` (秒)、``mip_rel_gap`` (相対ギャップ、既定 0)、
         ``node_limit`` (ノード数)。上限で止まると status は ``"time_limit"`` / ``"node_limit"`` になり、
         暫定解があれば ``objective`` と各 Variable の ``.value`` が読める。
 
