@@ -52,6 +52,10 @@ pub struct OpenNode {
     /// `basis` で効いている (論理変数が非基底の) カットの番号 (`Solver::cut_ids`)。待ち行列にある間、このカットは
     /// 年齢で外さない (外すと取り出したときに基底が合わず LP がほぼ解き直しになる)。
     pub prot: Option<Rc<Vec<u64>>>,
+    /// ポートフォリオ並列の木の写し ([`super::solver::TreeSnapshot`]) での、このノードの祖先の番号 (写しの通し番号 << 32 | 写しの
+    /// 中のノードの番号)。子は親のものを引き継ぐ。二分探索のスレッドが「この祖先の部分木には t 未満の解がない」と示したら、
+    /// 下界を t に上げる。
+    pub tags: Option<Rc<Vec<u64>>>,
 }
 
 /// 待ち行列。
@@ -148,6 +152,17 @@ impl NodeQueue {
     pub fn prune(&mut self, cutoff: f64) -> Vec<usize> {
         let ids: Vec<usize> = self.by_lb.range((Key(cutoff), 0)..).map(|&(_, id)| id).collect();
         ids.into_iter().map(|id| self.remove(id).depth).collect()
+    }
+
+    /// ノードをすべて取り出す (枠の世代は保つので、取り出す前の (枠, 世代) ではもう取り出せない)。
+    pub fn take_all(&mut self) -> Vec<OpenNode> {
+        let ids: Vec<usize> = self.by_lb.iter().map(|&(_, id)| id).collect();
+        ids.into_iter().map(|id| self.remove(id)).collect()
+    }
+
+    /// 待ち行列のノード (順不同)。
+    pub fn iter(&self) -> impl Iterator<Item = &OpenNode> {
+        self.nodes.iter().flatten()
     }
 
     /// 保存している基底を捨てる (メモリ節約)。

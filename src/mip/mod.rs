@@ -218,6 +218,12 @@ fn bisection_worker(p: &MipProblem, params: MipParams, use_presolve: bool, share
     let mut proven = f64::NEG_INFINITY;
     let mut best: Option<solver::MipResult> = None;
     let verbose = params.verbose && env_str!("ENOMOTO_MIP_BISECT_VERBOSE").is_some();
+    // `ENOMOTO_MIP_BISECT_SNAPSHOT`: 2 回目からの求解は、木の探索のスレッドの探索木の写し ([`solver::TreeSnapshot`]) の
+    // 未処理のノードから始める (根の LP・カット・ヒューリスティクスを解き直さない)。写しのノードの部分木を探索し終えるたびに、
+    // 木の探索のスレッドはそのノードの子孫の下界を上げる
+    let use_snap = env_str!("ENOMOTO_MIP_BISECT_SNAPSHOT").is_some();
+    let mut solves = 0u64;
+    let mut last_serial = 0u64;
     loop {
         let el = t0.elapsed().as_secs_f64();
         if shared.stop.load(Ordering::Relaxed) || el >= tl - 0.5 {
@@ -260,38 +266,69 @@ fn bisection_worker(p: &MipProblem, params: MipParams, use_presolve: bool, share
             let trig = if env_str!("ENOMOTO_MIP_BISECT_ABORT_ON_UB").is_some() { lb + 0.5 * (ub - lb) } else { f64::NEG_INFINITY };
             solver::set_thread_watch(Some((trig.min(t), t)));
         }
-        let r = solve_problem(p, pr, use_presolve);
+        let snap = if use_snap && solves > 0 {
+            // 新しい写しを求めて待つ (木の探索のスレッドは待ち行列の頭で作る)。来なければ前の写しを使う (古くても
+            // 打ち切り値が成り立つ範囲に入っていれば正しい)
+            shared.snap_req.store(true, Ordering::Release);
+            let w0 = std::time::Instant::now();
+            let wait = tunable!("ENOMOTO_T_MIP_BISECT_SNAP_WAIT", 1.0, f64);
+            let mut got = None;
+            while w0.elapsed().as_secs_f64() < wait && !shared.stop.load(Ordering::Relaxed) && t0.elapsed().as_secs_f64() < tl - 0.5 {
+                if let Some(sn) = shared.snapshot().filter(|sn| sn.serial > last_serial) {
+                    got = Some(sn);
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            got.or_else(|| shared.snapshot()).filter(|sn| t <= sn.valid_below)
+        } else {
+            None
+        };
+        solves += 1;
+        let from_snap = snap.is_some();
+        let snap_info = snap.as_ref().map(|sn| (sn.serial, sn.nodes.len()));
+        let r = match snap {
+            Some(sn) => {
+                last_serial = last_serial.max(sn.serial);
+                // 解は写しの問題の空間なので返さない (木の探索のスレッドが受け取る)
+                let mut r = solver::solve_snapshot(sn, pr);
+                r.x = None;
+                r
+            }
+            None => solve_problem(p, pr, use_presolve),
+        };
         solver::set_thread_watch(None);
         let used_cut = t.min(shared.best());
         if verbose {
-            eprintln!("MIP: bisection thread: lb {lb:.10e} ub {ub:.10e} target {t:.10e} -> {:?} {:?} bound {:.10e} nodes {} ({:.1}s)", r.status, r.objective, r.best_bound, r.nodes, t0.elapsed().as_secs_f64());
+            eprintln!("MIP: bisection thread: lb {lb:.10e} ub {ub:.10e} target {t:.10e} -> {:?} {:?} bound {:.10e} nodes {} snapshot {:?} ({:.1}s)", r.status, r.objective, r.best_bound, r.nodes, snap_info, t0.elapsed().as_secs_f64());
         }
+        // 写しから解いた結果は解 (x) を持たないので、最良の解の候補にしない
+        let r = if from_snap { solver::MipResult { objective: r.objective.filter(|&z| z < used_cut), ..r } } else { r };
+        let keep = |best: &mut Option<solver::MipResult>, r: solver::MipResult| {
+            if let (false, Some(z)) = (from_snap, r.objective) {
+                if best.as_ref().is_none_or(|b| z < b.objective.unwrap()) {
+                    *best = Some(r);
+                }
+            }
+        };
         match (r.status, r.objective) {
             (MipStatus::Optimal, Some(z)) if z < used_cut => {
                 // 打ち切り値未満で最良の解 = 全体の最適 (打ち切り値以上の解はヒューリスティクスが打ち切り値に関係なく
                 // 見つけたもので、探索を終えても「t 未満の解はない」ことしか示さない: 下の腕で扱う)
                 proven = proven.max(z);
                 shared.publish_proven(proven);
-                if best.as_ref().is_none_or(|b| z < b.objective.unwrap()) {
-                    best = Some(r);
-                }
+                keep(&mut best, r);
                 shared.stop.store(true, Ordering::Relaxed);
                 break;
             }
             (MipStatus::Infeasible, _) | (MipStatus::Optimal, _) => {
-                if let Some(z) = r.objective {
-                    if best.as_ref().is_none_or(|b| z < b.objective.unwrap()) {
-                        best = Some(r);
-                    }
-                }
+                keep(&mut best, r);
                 proven = proven.max(used_cut);
                 shared.publish_proven(proven);
                 frac = frac0;
             }
-            (_, Some(z)) => {
-                if best.as_ref().is_none_or(|b| z < b.objective.unwrap()) {
-                    best = Some(r);
-                }
+            (_, Some(_)) => {
+                keep(&mut best, r);
                 frac = frac0;
             }
             _ => {

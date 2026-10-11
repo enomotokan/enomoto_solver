@@ -257,6 +257,16 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) extra_sep_rows: Vec<(Vec<(usize, f64)>, f64)>,
     /// (目的関数の下界のカットを試した回数, カットを加えた回数)
     pub(super) obj_cut_stats: [u64; 2],
+    /// 木の写しから解く求解なら、その写し ([`TreeSnapshot`]) と、写しのノードごとの「部分木のノードがまだ残っているか」。
+    pub(super) snap: Option<std::sync::Arc<TreeSnapshot>>,
+    snap_alive: Vec<bool>,
+    /// 木の探索のスレッド: 写しに入れる問題 (最初の写しで作る)、作った写しの通し番号、受け取った示した値・解の更新の回数、
+    /// [作った写し, 下界を上げたノード, 受け取った解]
+    snap_p: Option<std::sync::Arc<MipProblem>>,
+    snap_serials: Vec<u64>,
+    fb_seen: u64,
+    inbox_seen: u64,
+    snap_stats: [u64; 3],
     /// 証明から作った衝突の数。
     proof_conflicts: u64,
     /// 完全オービトープ (orbitopal fixing に使う。サブ MIP では空)。
@@ -365,6 +375,43 @@ pub(crate) struct Portfolio {
     /// 木の探索のスレッドが根で作ったカット (元の問題の空間) と、それが成り立つ範囲 (目的値がこの値未満の解)。
     /// 二分探索のスレッドが求解の最初に LP に入れる (`ENOMOTO_MIP_BISECT_SHARE_CUTS`)。
     cuts: std::sync::Mutex<Option<std::sync::Arc<(Vec<(Vec<(usize, f64)>, f64)>, f64)>>>,
+    /// 木の写し (`ENOMOTO_MIP_BISECT_SNAPSHOT`): 二分探索のスレッドが写しを求める印、木の探索のスレッドが置いた最新の写し、
+    /// 写しの通し番号。
+    pub(crate) snap_req: std::sync::atomic::AtomicBool,
+    snap: std::sync::Mutex<Option<std::sync::Arc<TreeSnapshot>>>,
+    snap_serial: std::sync::atomic::AtomicU64,
+    /// 写しのノードごとに二分探索のスレッドが示した値 (写しの通し番号 -> ノードごとの「部分木にこの値未満の解はない」)
+    /// と、その更新の回数。
+    fb: std::sync::Mutex<std::collections::HashMap<u64, Vec<f64>>>,
+    fb_ver: std::sync::atomic::AtomicU64,
+    /// 写しから解いた求解が見つけた解 (写しの通し番号, 写しの問題の空間の解)。写しを作った木の探索のスレッドが受け取る。
+    inbox: std::sync::Mutex<Vec<(u64, Vec<f64>)>>,
+    inbox_n: std::sync::atomic::AtomicU64,
+}
+
+/// 木の探索のスレッドの探索木の写し: 二分探索のスレッドが根を解き直さずに、未処理のノードから打ち切り値 t で探索を
+/// 続けるのに使う。写しを作ったときの未処理のノードの全体が「打ち切り値 `valid_below` 未満の解が残りうる領域」の全部なので、
+/// t <= `valid_below` なら、これらのノードを t で探索し終えれば「t 未満の解はない」。
+pub(crate) struct TreeSnapshot {
+    pub(crate) serial: u64,
+    /// 木の探索のスレッドが解いている問題 (前処理・対称性の行を加えた後)。
+    pub(crate) p: std::sync::Arc<MipProblem>,
+    /// 大域的な境界、LP のカットの行 (係数, 下限, 上限)、カットプール (係数 x <= 右辺)、擬似費用。
+    lo: Vec<f64>,
+    up: Vec<f64>,
+    rows: Vec<(Vec<(usize, f64)>, f64, f64)>,
+    pool: Vec<(Vec<(usize, f64)>, f64)>,
+    pc: Pseudocost,
+    pub(crate) nodes: Vec<SnapNode>,
+    pub(crate) valid_below: f64,
+}
+
+pub(crate) struct SnapNode {
+    changes: Vec<BoundChange>,
+    lower_bound: f64,
+    estimate: f64,
+    depth: usize,
+    branch: Option<(usize, bool, f64, f64)>,
 }
 
 impl Portfolio {
@@ -376,7 +423,18 @@ impl Portfolio {
             proven: std::sync::atomic::AtomicU64::new(f64::NEG_INFINITY.to_bits()),
             generation: std::sync::atomic::AtomicU64::new(0),
             cuts: std::sync::Mutex::new(None),
+            snap_req: std::sync::atomic::AtomicBool::new(false),
+            snap: std::sync::Mutex::new(None),
+            snap_serial: std::sync::atomic::AtomicU64::new(0),
+            fb: std::sync::Mutex::new(std::collections::HashMap::new()),
+            fb_ver: std::sync::atomic::AtomicU64::new(0),
+            inbox: std::sync::Mutex::new(Vec::new()),
+            inbox_n: std::sync::atomic::AtomicU64::new(0),
         }
+    }
+    /// 最新の木の写し。
+    pub(crate) fn snapshot(&self) -> Option<std::sync::Arc<TreeSnapshot>> {
+        self.snap.lock().unwrap().clone()
     }
     pub(crate) fn cuts(&self) -> Option<std::sync::Arc<(Vec<(Vec<(usize, f64)>, f64)>, f64)>> {
         self.cuts.lock().unwrap().clone()
@@ -419,14 +477,14 @@ impl Portfolio {
         }
     }
     pub(crate) fn best(&self) -> f64 {
-        f64::from_bits(self.best.load(std::sync::atomic::Ordering::Relaxed))
+        f64::from_bits(self.best.load(std::sync::atomic::Ordering::Acquire))
     }
     /// 目的値 `z` の解を見つけたことを知らせる (今の最良より良ければ置き換える)。
     pub(crate) fn publish(&self, z: f64) {
         use std::sync::atomic::Ordering;
         let mut cur = self.best.load(Ordering::Relaxed);
         while z < f64::from_bits(cur) {
-            match self.best.compare_exchange_weak(cur, z.to_bits(), Ordering::Relaxed, Ordering::Relaxed) {
+            match self.best.compare_exchange_weak(cur, z.to_bits(), Ordering::AcqRel, Ordering::Relaxed) {
                 Ok(_) => {
                     self.generation.fetch_add(1, Ordering::Relaxed);
                     break;
@@ -491,17 +549,34 @@ pub(crate) fn mip_threads() -> usize {
 pub fn solve(p: &MipProblem, params: MipParams) -> MipResult {
     // LP の実装: 既定は傾き・切片二段解法 (`ENOMOTO_MIP_LP=own` で分枝限定法専用の単体法)。
     if env_str!("ENOMOTO_MIP_LP").is_some_and(|v| v == "own") {
-        solve_with::<LpEngine>(p, params)
+        solve_with::<LpEngine>(p, params, None)
     } else {
-        solve_with::<crate::simplex::mip_lp::TwoStageLp>(p, params)
+        solve_with::<crate::simplex::mip_lp::TwoStageLp>(p, params, None)
     }
 }
 
-fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
+/// 木の写し `snap` の未処理のノードから探索を続ける (根のカット・ヒューリスティクス・再スタートは行わない)。解は写しの
+/// 問題 (`snap.p`) の空間。見つけた解は写しを作ったスレッドに渡す ([`Portfolio`] の inbox)。
+pub(crate) fn solve_snapshot(snap: std::sync::Arc<TreeSnapshot>, params: MipParams) -> MipResult {
+    let p = snap.p.clone();
+    if env_str!("ENOMOTO_MIP_LP").is_some_and(|v| v == "own") {
+        solve_with::<LpEngine>(&p, params, Some(snap))
+    } else {
+        solve_with::<crate::simplex::mip_lp::TwoStageLp>(&p, params, Some(snap))
+    }
+}
+
+fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::sync::Arc<TreeSnapshot>>) -> MipResult {
     let start = Instant::now();
     let deadline = if params.time_limit.is_finite() { Some(start + Duration::from_secs_f64(params.time_limit.max(0.0))) } else { None };
     let mut dom = Domain::new(p);
     let fail = |status, nodes| MipResult { status, x: None, objective: None, best_bound: f64::INFINITY, nodes, lp_iterations: 0 };
+    if let Some(sn) = &snap {
+        for j in 0..p.n {
+            dom.tighten_lower(p, j, sn.lo[j]);
+            dom.tighten_upper(p, j, sn.up[j]);
+        }
+    }
     if !dom.propagate(p) {
         return fail(MipStatus::Infeasible, 0);
     }
@@ -514,7 +589,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
         dom,
         lp,
         queue: NodeQueue::new(),
-        pc: Pseudocost::new(p.n),
+        pc: snap.as_ref().map_or_else(|| Pseudocost::new(p.n), |sn| sn.pc.clone()),
         incumbent: None,
         obj_step: p.objective_step(),
         start,
@@ -581,6 +656,13 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
         extra_sep_rows: Vec::new(),
         obj_cut_stats: [0; 2],
         next_cut_id: 0,
+        snap: snap.clone(),
+        snap_alive: Vec::new(),
+        snap_p: None,
+        snap_serials: Vec::new(),
+        fb_seen: 0,
+        inbox_seen: 0,
+        snap_stats: [0; 3],
         proof_conflicts: 0,
         orbitopes: if params.submip { Rc::new(Vec::new()) } else { super::ORBITOPES.with(|t| t.borrow().clone()).unwrap_or_default() },
         orbitope_fixings: 0,
@@ -849,7 +931,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
             self.pool_add(z, &x);
-            if let Some(s) = &self.shared {
+            if let (Some(snap), Some(s)) = (&self.snap, &self.shared) {
+                // 木の写しから解く求解の解は写しの問題の空間なので、写しを作ったスレッドに渡す (共有の最良値はそのスレッドが
+                // 受け取ったときに更新する。解を持たないまま最良値だけ下げると、その解を誰も返せないことがある)
+                s.inbox.lock().unwrap().push((snap.serial, x.clone()));
+                s.inbox_n.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            } else if let Some(s) = &self.shared {
                 s.publish(z);
             }
             self.incumbent = Some((z, x));
@@ -928,6 +1015,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     fn run(&mut self) -> MipResult {
+        // 木の写しから解く: 写しを作ったときの LP のカットの行とカットプールを入れる
+        if let Some(snap) = self.snap.clone() {
+            for (c, r) in &snap.pool {
+                self.add_to_pool(c, *r);
+            }
+            if !snap.rows.is_empty() {
+                self.add_cut_rows(&snap.rows);
+            }
+        }
         // 再スタート前の暫定解 (実行可能性は try_incumbent が確かめる)
         if let Some(cuts) = super::RESTART_CUTS.with(|s| s.borrow_mut().take()) {
             let n0 = self.cut_pool.len();
@@ -963,7 +1059,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let nnz: usize = self.p.rows.iter().map(|r| r.len()).sum();
             let cap = if self.params.time_limit.is_finite() { (0.05 * self.params.time_limit).min(5.0) } else { 5.0 };
             let effort = (50 * nnz as u64).clamp(100_000, 50_000_000);
-            if !self.params.submip && !proof_only() && mip_threads() > 1 {
+            if self.snap.is_some() {
+                // 木の写しから解く: 解探しはしない
+            } else if !self.params.submip && !proof_only() && mip_threads() > 1 {
                 // 並列モード: 別スレッドで根の LP・切除平面と同時に回す (根のヒューリスティクスの前に受け取る)
                 // 対称性の行・固定を加える前の問題で探す (見つけた解は try_incumbent で並べ替える)
                 let (pc, lo, up) = match &self.orig {
@@ -999,7 +1097,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 根の切除平面
         {
             let x = self.lp.col_values();
-            if !self.fractional(&x).is_empty() {
+            if !self.fractional(&x).is_empty() && self.snap.is_none() {
                 self.simple_rounding(&x);
                 // `ENOMOTO_MIP_ROOT_WARM_DSE`: 根のカットのループの間だけ DSE 重みを引き継ぐ (カットを足した後の LP の反復を減らす)。
                 // 1 ラウンドの反復は 10-45% 減る (neos-1456979 357 -> 193) が、40 問では 19 -> 17 問 (sgeomean 27.64 -> 29.64):
@@ -1033,6 +1131,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.parallel_submips = mip_threads() > 1 && !self.params.submip;
             if self.fractional(&x).is_empty() {
                 self.try_lp_solution();
+            } else if self.snap.is_some() {
+                // 木の写しから解く: 根のヒューリスティクスは走らせない
             } else {
                 macro_rules! heur {
                     ($name:expr, $e:expr) => {{
@@ -1205,20 +1305,33 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if dbg_root && !self.dbg_contains() {
             self.dbg_lost("root redcost fixing", true);
         }
-        if let Some(r) = self.maybe_restart() {
-            return r;
+        if self.snap.is_none() {
+            if let Some(r) = self.maybe_restart() {
+                return r;
+            }
         }
         let prot = self.basis_protected_cuts();
-        self.queue.push(OpenNode { changes: Vec::new(), lower_bound: root_obj, estimate: root_obj, depth: 0, basis: Some(Rc::new(self.lp.basis())), basis_epoch: self.row_log.len(), dse: if dse_all() { self.lp.dse_snapshot().map(Rc::new) } else { None }, branch: None, prot });
-        // 根のノードは LP を解いた状態のままなので、最初の取り出しでは定義域・LP を作り直さない。
+        // 木の写しから解くときは、根のノードの代わりに写しのノードを入れる (定義域は取り出すたびに根から積み直す)
         let mut first = true;
+        if let Some(snap) = self.snap.clone() {
+            for (k, n) in snap.nodes.iter().enumerate() {
+                let tags = Some(Rc::new(vec![snap.serial << 32 | k as u64]));
+                self.queue.push(OpenNode { changes: n.changes.clone(), lower_bound: n.lower_bound.max(root_obj), estimate: n.estimate, depth: n.depth, basis: None, basis_epoch: 0, dse: None, branch: n.branch, prot: None, tags });
+            }
+            self.snap_alive = vec![true; snap.nodes.len()];
+            first = false;
+        } else {
+            self.queue.push(OpenNode { changes: Vec::new(), lower_bound: root_obj, estimate: root_obj, depth: 0, basis: Some(Rc::new(self.lp.basis())), basis_epoch: self.row_log.len(), dse: if dse_all() { self.lp.dse_snapshot().map(Rc::new) } else { None }, branch: None, prot, tags: None });
+        }
+        // 根のノードは LP を解いた状態のままなので、最初の取り出しでは定義域・LP を作り直さない。
         // 潜っている子ノード (定義域に分枝を積んだ状態で次に処理する)。
         let mut plunge: Option<OpenNode> = None;
         let mut plunge_depth = 0usize;
         let mut plunge_start = 0u64;
         loop {
             // ポートフォリオ並列: 下界を知らせる (二分探索のスレッドが目標値を決めるのに使う)
-            if self.nodes % 64 == 0 {
+            // 二分探索のスレッドの求解の下界は打ち切り値で絞った問題のものなので、木の写しを使う形では知らせない
+            if self.nodes % 64 == 0 && (self.watch.is_none() || env_str!("ENOMOTO_MIP_BISECT_SNAPSHOT").is_none()) {
                 if let Some(s) = &self.shared {
                     let mut lb = self.queue.best_lower_bound();
                     if let Some(n) = plunge.as_ref() {
@@ -1228,6 +1341,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         s.publish_lb(lb);
                     }
                 }
+            }
+            // 木の写し: 木の探索のスレッドは、写しの求め・二分探索のスレッドが示した値・見つけた解を受け取る。写しから解く
+            // 求解は、写しのノードの部分木を探索し終えたら知らせる
+            if self.snap.is_some() {
+                if self.nodes % 64 == 0 {
+                    self.snap_report(plunge.as_ref());
+                }
+            } else if self.watch.is_none() && !self.params.submip && self.shared.is_some() {
+                self.snap_sync(&mut plunge);
             }
             // 目的値の二分探索で、暫定解より良い解がないことを証明した (下界が打ち切り値に届いた)
             if self.incumbent.is_some() && self.bisect_lb >= self.prune_limit() {
@@ -1878,6 +2000,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     dse: dse.clone(),
                     branch: Some((col, !c.upper, value, lp_obj)),
                     prot: prot.clone(),
+                    tags: node.tags.clone(),
                 }
             };
             let sib = self.queue.push(mk(second_c));
@@ -1912,6 +2035,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         // 待ち行列が空: 探索終了
+        if self.snap.is_some() {
+            self.snap_report(None);
+        }
         if self.unresolved {
             let lb = self.incumbent.as_ref().map(|(z, _)| *z).unwrap_or(f64::NEG_INFINITY);
             return self.finish(MipStatus::NotSolved, lb);
@@ -3481,7 +3607,190 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
     }
 
+    /// 木の探索のスレッド: 写しから解いた求解が見つけた解を受け取る (自分が作った写しの問題の空間のものだけ)。良くなったら真。
+    fn take_inbox(&mut self) -> bool {
+        use std::sync::atomic::Ordering;
+        let Some(s) = self.shared.clone() else { return false };
+        if self.snap.is_some() || self.snap_serials.is_empty() {
+            return false;
+        }
+        let n = s.inbox_n.load(Ordering::Acquire);
+        if n == self.inbox_seen {
+            return false;
+        }
+        self.inbox_seen = n;
+        let got: Vec<Vec<f64>> = {
+            let mut ib = s.inbox.lock().unwrap();
+            let mut keep = Vec::new();
+            let mut mine = Vec::new();
+            for (serial, x) in ib.drain(..) {
+                if self.snap_serials.contains(&serial) {
+                    mine.push(x);
+                } else {
+                    keep.push((serial, x));
+                }
+            }
+            *ib = keep;
+            mine
+        };
+        let mut better = false;
+        for x in got {
+            if x.len() == self.p.n && self.try_incumbent(x) {
+                self.snap_stats[2] += 1;
+                better = true;
+            }
+        }
+        better
+    }
+
+    /// 木の探索のスレッドの、待ち行列の頭での木の写しの処理: 写しから解いた求解の解を受け取り、二分探索のスレッドが示した
+    /// 値でノードの下界を上げ (64 ノードおき)、写しを求められていれば作る。
+    fn snap_sync(&mut self, plunge: &mut Option<OpenNode>) {
+        use std::sync::atomic::Ordering;
+        let Some(s) = self.shared.clone() else { return };
+        self.take_inbox();
+        if self.nodes % 64 == 0 && !self.snap_serials.is_empty() {
+            let v = s.fb_ver.load(Ordering::Acquire);
+            if v != self.fb_seen {
+                self.fb_seen = v;
+                let fb = s.fb.lock().unwrap().clone();
+                let raise = |n: &mut OpenNode, cnt: &mut u64| {
+                    if let Some(tags) = &n.tags {
+                        let mut best = n.lower_bound;
+                        for &t in tags.iter() {
+                            if let Some(vals) = fb.get(&(t >> 32)) {
+                                if let Some(&w) = vals.get((t & 0xffff_ffff) as usize) {
+                                    best = best.max(w);
+                                }
+                            }
+                        }
+                        if best > n.lower_bound {
+                            n.lower_bound = best;
+                            n.estimate = n.estimate.max(best);
+                            *cnt += 1;
+                        }
+                    }
+                };
+                let mut cnt = 0u64;
+                let mut nodes = self.queue.take_all();
+                for n in nodes.iter_mut() {
+                    raise(n, &mut cnt);
+                }
+                for n in nodes {
+                    self.queue.push(n);
+                }
+                if let Some(n) = plunge.as_mut() {
+                    raise(n, &mut cnt);
+                }
+                self.dive_stack.clear();
+                self.snap_stats[1] += cnt;
+            }
+        }
+        if s.snap_req.load(Ordering::Acquire) && !self.unresolved {
+            s.snap_req.store(false, Ordering::Release);
+            self.make_snapshot(&s, plunge);
+        }
+    }
+
+    /// 木の写しを作って共有する。待ち行列のノードと潜っている子に写しの中の番号を付ける (前の写しの番号は 3 つまで残す)。
+    fn make_snapshot(&mut self, s: &Portfolio, plunge: &mut Option<OpenNode>) {
+        use std::sync::atomic::Ordering;
+        let serial = s.snap_serial.fetch_add(1, Ordering::AcqRel) + 1;
+        let p = match &self.snap_p {
+            Some(p) => p.clone(),
+            None => {
+                let p = std::sync::Arc::new(self.p.clone());
+                self.snap_p = Some(p.clone());
+                p
+            }
+        };
+        let mut nodes = self.queue.take_all();
+        let mut snodes = Vec::with_capacity(nodes.len() + 1);
+        let retag = |n: &mut OpenNode, k: usize| {
+            let mut t = vec![serial << 32 | k as u64];
+            if let Some(old) = &n.tags {
+                t.extend(old.iter().take(3));
+            }
+            n.tags = Some(Rc::new(t));
+        };
+        for n in nodes.iter_mut() {
+            retag(n, snodes.len());
+            snodes.push(SnapNode { changes: n.changes.clone(), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch });
+        }
+        for n in nodes {
+            self.queue.push(n);
+        }
+        if let Some(n) = plunge.as_mut() {
+            retag(n, snodes.len());
+            snodes.push(SnapNode { changes: n.changes.clone(), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch });
+        }
+        self.dive_stack.clear();
+        let m0 = self.p.m;
+        let rows: Vec<(Vec<(usize, f64)>, f64, f64)> = (m0..self.lp.num_rows())
+            .map(|i| {
+                let (l, u) = self.lp.row_bounds(i);
+                (self.lp.row(i), l, u)
+            })
+            .collect();
+        let pool: Vec<(Vec<(usize, f64)>, f64)> = self.cut_pool.iter().map(|(c, r, _)| (c.clone(), *r)).collect();
+        let snap = TreeSnapshot { serial, p, lo: self.dom.global_lo.clone(), up: self.dom.global_up.clone(), rows, pool, pc: self.pc.clone(), nodes: snodes, valid_below: self.prune_limit() };
+        if self.params.verbose && env_str!("ENOMOTO_MIP_BISECT_VERBOSE").is_some() {
+            eprintln!("MIP: tree snapshot {serial}: {} nodes, {} cut rows, valid below {:.10e} ({:.1}s)", snap.nodes.len(), snap.rows.len(), snap.valid_below, self.start.elapsed().as_secs_f64());
+        }
+        *s.snap.lock().unwrap() = Some(std::sync::Arc::new(snap));
+        self.snap_serials.push(serial);
+        self.snap_stats[0] += 1;
+    }
+
+    /// 木の写しから解く求解: 部分木を探索し終えた写しのノード (待ち行列にも潜っている子にも、そのノードの子孫が残って
+    /// いない) に、今の打ち切り値 (打ち切り値は下がるだけなので、それまでに刈ったノードもこの値未満の解を持たない) を
+    /// 知らせる。待ち行列の頭 (処理中のノードがないとき) で呼ぶ。
+    fn snap_report(&mut self, plunge: Option<&OpenNode>) {
+        use std::sync::atomic::Ordering;
+        let (Some(snap), Some(s)) = (self.snap.clone(), self.shared.clone()) else { return };
+        if self.unresolved {
+            return;
+        }
+        let k = snap.nodes.len();
+        let mut alive = vec![false; k];
+        let mark = |n: &OpenNode, alive: &mut Vec<bool>| {
+            if let Some(t) = n.tags.as_ref().and_then(|t| t.first()) {
+                if t >> 32 == snap.serial {
+                    let i = (t & 0xffff_ffff) as usize;
+                    if i < alive.len() {
+                        alive[i] = true;
+                    }
+                }
+            }
+        };
+        for n in self.queue.iter() {
+            mark(n, &mut alive);
+        }
+        if let Some(n) = plunge {
+            mark(n, &mut alive);
+        }
+        let v = self.prune_limit();
+        let done: Vec<usize> = (0..k).filter(|&i| self.snap_alive[i] && !alive[i]).collect();
+        if done.is_empty() || !v.is_finite() {
+            return;
+        }
+        {
+            let mut fb = s.fb.lock().unwrap();
+            let e = fb.entry(snap.serial).or_insert_with(|| vec![f64::NEG_INFINITY; k]);
+            for &i in &done {
+                e[i] = e[i].max(v);
+                self.snap_alive[i] = false;
+            }
+        }
+        s.fb_ver.fetch_add(1, Ordering::AcqRel);
+    }
+
     fn finish(&mut self, status: MipStatus, best_bound: f64) -> MipResult {
+        // 木の写しから解いた求解が見つけた解を受け取る (止める合図で終わるときも)
+        let best_bound = if self.take_inbox() { best_bound.min(self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z)) } else { best_bound };
+        if self.params.verbose && self.snap_stats[0] > 0 {
+            eprintln!("MIP: tree snapshots {}: node lower bounds raised {}, solutions received {}", self.snap_stats[0], self.snap_stats[1], self.snap_stats[2]);
+        }
         // 並列モードの別スレッドを止める・待つ
         if let Some((_, stop)) = &self.fj_thread {
             stop.store(true, std::sync::atomic::Ordering::Relaxed);

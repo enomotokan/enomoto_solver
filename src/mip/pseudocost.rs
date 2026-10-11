@@ -2,6 +2,7 @@
 //! (HiGHS の `HighsPseudocost` を簡略化したもの)。
 
 /// 列ごとの pseudocost と観測回数。
+#[derive(Clone)]
 pub struct Pseudocost {
     sum_up: Vec<f64>,
     n_up: Vec<u32>,
