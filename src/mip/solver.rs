@@ -142,6 +142,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) incumbent: Option<(f64, Vec<f64>)>,
     pub(super) obj_step: Option<f64>,
     pub(super) start: Instant,
+    /// 求解の開始時の [`super::cap_clock`] (根のカットのループの上限に使う)。
+    pub(super) cpu0: f64,
     pub(super) deadline: Option<Instant>,
     pub(super) nodes: u64,
     /// 強分岐に使った LP 反復数。
@@ -720,6 +722,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         incumbent: None,
         obj_step: p.objective_step(),
         start,
+        cpu0: super::cap_clock(),
         deadline,
         nodes: 0,
         sb_iters: 0,
@@ -1280,6 +1283,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 eprintln!("MIP: feasibility jump found a solution ({:.2}s)", self.start.elapsed().as_secs_f64());
             }
         }
+        // 木を分け合う従: 準備の間に主が終わっていたら、根の LP を解かずに抜ける
+        if self.pool.as_ref().is_some_and(|p| p.stop.load(std::sync::atomic::Ordering::Relaxed)) {
+            return self.finish(MipStatus::NotSolved, f64::INFINITY);
+        }
         // 根の LP
         self.root_fixed0 = (0..self.p.n).filter(|&j| self.p.is_int[j] && self.dom.global_lo[j] == self.dom.global_up[j]).count();
         let root_st = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
@@ -1527,9 +1534,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.queue.push(OpenNode { changes: Vec::new(), lower_bound: root_obj, estimate: root_obj, depth: 0, basis: Some(Rc::new(self.lp.basis())), basis_epoch: self.row_log.len(), dse: if dse_all() { self.lp.dse_snapshot().map(Rc::new) } else { None }, branch: None, prot, tags: None });
         }
         // 根のノードは LP を解いた状態のままなので、最初の取り出しでは定義域・LP を作り直さない。
-        if self.params.threads > 1 && !self.params.submip && self.watch.is_none() && self.snap.is_none() {
-            self.start_workers();
-        }
+        // 木を分け合う従のスレッドは、未処理のノードが 2 つ以上になってから (根を分枝してから) 始める (根で解ける問題では
+        // 始めない。nw04: 根で閉じるのに、従の準備 (8.7 万列の定義域・LP と根の LP) を待って 4 本で 2-3 秒遅かった)
+        let parallel_tree = self.params.threads > 1 && !self.params.submip && self.watch.is_none() && self.snap.is_none();
         // 潜っている子ノード (定義域に分枝を積んだ状態で次に処理する)。
         let mut plunge: Option<OpenNode> = None;
         let mut plunge_depth = 0usize;
@@ -1567,6 +1574,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let lim = self.prune_limit();
                     self.queue.prune(lim);
                 }
+            }
+            if parallel_tree && self.pool.is_none() && self.queue.len() + plunge.is_some() as usize >= 2 {
+                self.start_workers();
             }
             // 木を分け合う: 大域的な境界の締め付けを共有する (64 ノードおき)
             if self.pool.is_some() && self.nodes % 64 == 0 && env_str!("ENOMOTO_MIP_TREE_NO_SHARED_BOUNDS").is_none() {
