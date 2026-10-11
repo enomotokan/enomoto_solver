@@ -362,6 +362,9 @@ pub(crate) struct Portfolio {
     proven: std::sync::atomic::AtomicU64,
     /// 区間 (最良値・厳密な下界) が変わった回数。二分探索のスレッドはこれが変わったら目標値を決め直して解き直す。
     generation: std::sync::atomic::AtomicU64,
+    /// 木の探索のスレッドが根で作ったカット (元の問題の空間) と、それが成り立つ範囲 (目的値がこの値未満の解)。
+    /// 二分探索のスレッドが求解の最初に LP に入れる (`ENOMOTO_MIP_BISECT_SHARE_CUTS`)。
+    cuts: std::sync::Mutex<Option<std::sync::Arc<(Vec<(Vec<(usize, f64)>, f64)>, f64)>>>,
 }
 
 impl Portfolio {
@@ -372,7 +375,14 @@ impl Portfolio {
             lb: std::sync::atomic::AtomicU64::new(f64::NEG_INFINITY.to_bits()),
             proven: std::sync::atomic::AtomicU64::new(f64::NEG_INFINITY.to_bits()),
             generation: std::sync::atomic::AtomicU64::new(0),
+            cuts: std::sync::Mutex::new(None),
         }
+    }
+    pub(crate) fn cuts(&self) -> Option<std::sync::Arc<(Vec<(Vec<(usize, f64)>, f64)>, f64)>> {
+        self.cuts.lock().unwrap().clone()
+    }
+    fn set_cuts(&self, c: Vec<(Vec<(usize, f64)>, f64)>, valid_below: f64) {
+        *self.cuts.lock().unwrap() = Some(std::sync::Arc::new((c, valid_below)));
     }
     pub(crate) fn generation(&self) -> u64 {
         self.generation.load(std::sync::atomic::Ordering::Relaxed)
@@ -430,34 +440,48 @@ impl Portfolio {
 /// スレッドごとのポートフォリオの共有値 (スレッド局所の領域を増やさないよう、スレッドの番号で引く表に持つ)。
 /// 3 つ目は二分探索のスレッドの見張り (打ち切る最良値, 自分の目標値): 共有の最良値が前者を下回るか、厳密な下界が
 /// 自分の目標値に届いたら求解を打ち切る。
-type PortfolioEntry = (std::thread::ThreadId, std::sync::Arc<Portfolio>, Option<(f64, f64)>);
+/// 4 つ目は、このスレッドの一番外の求解の前処理の尺度 (`x = d x'` の d。カットを元の問題の空間に戻すのに使う)。
+type PortfolioEntry = (std::thread::ThreadId, std::sync::Arc<Portfolio>, Option<(f64, f64)>, Option<std::sync::Arc<Vec<f64>>>);
 static PORTFOLIOS: std::sync::Mutex<Vec<PortfolioEntry>> = std::sync::Mutex::new(Vec::new());
 
 pub(crate) fn set_thread_portfolio(p: Option<std::sync::Arc<Portfolio>>) {
     let id = std::thread::current().id();
     let mut t = PORTFOLIOS.lock().unwrap();
-    t.retain(|(i, _, _)| *i != id);
+    t.retain(|(i, _, _, _)| *i != id);
     if let Some(p) = p {
-        t.push((id, p, None));
+        t.push((id, p, None, None));
     }
 }
 
 /// このスレッドの求解の見張りを設定する (`None` で見張らない)。
 pub(crate) fn set_thread_watch(g: Option<(f64, f64)>) {
     let id = std::thread::current().id();
-    if let Some(e) = PORTFOLIOS.lock().unwrap().iter_mut().find(|(i, _, _)| *i == id) {
+    if let Some(e) = PORTFOLIOS.lock().unwrap().iter_mut().find(|(i, _, _, _)| *i == id) {
         e.2 = g;
     }
 }
 
+/// このスレッドの一番外の求解の前処理の尺度を設定する (ポートフォリオのスレッドでなければ何もしない)。
+pub(crate) fn set_thread_scale(d: Option<Vec<f64>>) {
+    let id = std::thread::current().id();
+    if let Some(e) = PORTFOLIOS.lock().unwrap().iter_mut().find(|(i, _, _, _)| *i == id) {
+        e.3 = d.map(std::sync::Arc::new);
+    }
+}
+
+fn thread_scale() -> Option<std::sync::Arc<Vec<f64>>> {
+    let id = std::thread::current().id();
+    PORTFOLIOS.lock().unwrap().iter().find(|(i, _, _, _)| *i == id).and_then(|e| e.3.clone())
+}
+
 fn thread_portfolio() -> Option<std::sync::Arc<Portfolio>> {
     let id = std::thread::current().id();
-    PORTFOLIOS.lock().unwrap().iter().find(|(i, _, _)| *i == id).map(|(_, p, _)| p.clone())
+    PORTFOLIOS.lock().unwrap().iter().find(|(i, _, _, _)| *i == id).map(|(_, p, _, _)| p.clone())
 }
 
 fn thread_watch() -> Option<(f64, f64)> {
     let id = std::thread::current().id();
-    PORTFOLIOS.lock().unwrap().iter().find(|(i, _, _)| *i == id).and_then(|e| e.2)
+    PORTFOLIOS.lock().unwrap().iter().find(|(i, _, _, _)| *i == id).and_then(|e| e.2)
 }
 
 pub(crate) fn mip_threads() -> usize {
@@ -914,7 +938,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             // `ENOMOTO_MIP_RESTART_CUTS_READD`: 再スタート前に効いていたカットを、根の LP を解く前にカットの行として加える
             // (問題の行ではないので木の中で年齢により外せる。プールにもあるので外れても違反すれば戻る)
-            if (env_str!("ENOMOTO_MIP_RESTART_CUTS_READD").is_some() || self.highs_cutmgmt()) && !self.params.submip {
+            if (env_str!("ENOMOTO_MIP_RESTART_CUTS_READD").is_some() || self.highs_cutmgmt() || self.watch.is_some()) && !self.params.submip {
                 let rows: Vec<(Vec<(usize, f64)>, f64, f64)> = cuts.iter().filter(|(c, _)| c.iter().all(|&(j, _)| j < self.p.n)).map(|(c, r)| (c.clone(), f64::NEG_INFINITY, *r)).collect();
                 if !rows.is_empty() {
                     self.add_cut_rows(&rows);
@@ -1145,6 +1169,35 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.dbg_lost("root domain (before redcost fixing)", !self.dbg_contains());
         let dbg_root = self.dbg_contains();
         self.hcm_root_obj = root_obj;
+        // `ENOMOTO_MIP_BISECT_SHARE_CUTS`: 木の探索のスレッドの一番外の求解は、根で LP に残ったカットを元の問題の空間に戻して
+        // 共有する (二分探索のスレッドが求解の最初に入れる)。成り立つ範囲は今の打ち切り値未満 (根の被約費用による固定は
+        // 打ち切り値を使うので、それで締めた境界から作ったカットはその範囲でだけ成り立つ)。対称性を崩す行・固定を根で
+        // 加えた問題では共有しない (カットがそれに頼っていると、別の求解では成り立たないことがある。オービトープの固定は
+        // 木の中で分枝してから効くので、根のカットには関わらない)
+        if env_str!("ENOMOTO_MIP_BISECT_SHARE_CUTS").is_some() && !self.params.submip && self.params.restarts == 0 && self.watch.is_none() && self.orig.as_ref().is_none_or(|o| o.m == self.p.m && o.col_lo == self.p.col_lo && o.col_up == self.p.col_up) {
+            if let (Some(s), Some(d)) = (self.shared.clone(), thread_scale()) {
+                let m0 = self.p.m;
+                let mut out: Vec<(Vec<(usize, f64)>, f64)> = Vec::new();
+                for i in m0..self.lp.num_rows() {
+                    let (l, u) = self.lp.row_bounds(i);
+                    let row = self.lp.row(i);
+                    if row.iter().any(|&(j, _)| j >= d.len() || d[j] == 0.0) {
+                        continue;
+                    }
+                    let mapped: Vec<(usize, f64)> = row.iter().map(|&(j, v)| (j, v / d[j])).collect();
+                    if u.is_finite() {
+                        out.push((mapped.clone(), u));
+                    }
+                    if l.is_finite() {
+                        out.push((mapped.iter().map(|&(j, v)| (j, -v)).collect(), -l));
+                    }
+                }
+                if self.params.verbose {
+                    eprintln!("MIP: shared {} root cuts with the bisection threads", out.len());
+                }
+                s.set_cuts(out, self.prune_limit());
+            }
+        }
         self.store_root_redcost(root_obj);
         self.root_redcost_fixing();
         if dbg_root && !self.dbg_contains() {

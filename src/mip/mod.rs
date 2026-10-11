@@ -248,6 +248,10 @@ fn bisection_worker(p: &MipProblem, params: MipParams, use_presolve: bool, share
         let sliced = env_str!("ENOMOTO_MIP_BISECT_SLICED").is_some();
         let slice = if sliced { (tunable!("ENOMOTO_T_MIP_BISECT_SLICE", 0.1, f64) * tl).max(2.0).min(tl - el) } else { tl - el };
         let pr = MipParams { time_limit: slice, cutoff: t, verbose: false, ..params };
+        // 木の探索のスレッドが根で作ったカットを、この求解の最初に LP に入れる (成り立つ範囲が目標値を含むときだけ)
+        if let Some(c) = shared.cuts().filter(|c| t <= c.1 && env_str!("ENOMOTO_MIP_BISECT_SHARE_CUTS").is_some()) {
+            RESTART_CUTS.with(|s| *s.borrow_mut() = Some(c.0.clone()));
+        }
         if !sliced {
             // 打ち切るのは、最良値が区間の 1/2 の点を下回ったとき (どのスレッドの解でも。少し良くなっただけなら
             // 目標値はまだ区間の中なので続ける) と、厳密な下界が自分の目標値に届いたとき (自分の区間に解がないと
@@ -372,7 +376,14 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
                 eprintln!("MIP_DEBUG_SOL: reduced objective {} feasible {}", prob.objective(&xd), prob.is_feasible(&xd, 1e-6));
                 solver::DEBUG_SOL.with(|d| *d.borrow_mut() = Some(xd));
             }
+            let outer_level = !params.submip && params.restarts == 0;
+            if outer_level {
+                solver::set_thread_scale(Some(scaling.d.clone()));
+            }
             let mut r = solver::solve(&prob, params);
+            if outer_level {
+                solver::set_thread_scale(None);
+            }
             let mut ok = true;
             if let Some(xr) = r.x.take() {
                 let mut x = xr.clone();
