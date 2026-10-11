@@ -486,7 +486,69 @@ pub fn find_orbitopes(p: &MipProblem, sym: &Symmetry) -> (Vec<Orbitope>, Vec<boo
             let cols: Vec<usize> = (0..s).filter(|&c| g[mat[0][c]] != mat[0][c]).collect();
             swaps.push((cols[0], cols[1], std::sync::Arc::new(g.clone())));
         }
+        // 生成元が同じ列の対応で動かす、0-1 でない整数列の行もオービトープの行に加える (整数の値で辞書式に比べる)。
+        // 加えないと、その列への分枝で道の領域が列の入れ替えで閉じなくなり、動的な固定が最適解を全て外すことがある
+        // (rout の一般整数の 3 行)。連続列の行は分枝しないので加えない (`ENOMOTO_MIP_ORBITOPE_NO_INT_ROWS` で加えない)
+        if env_str!("ENOMOTO_MIP_ORBITOPE_NO_INT_ROWS").is_none() {
+            let inside: std::collections::HashSet<usize> = mat.iter().flatten().copied().collect();
+            let mut orows: std::collections::BTreeMap<usize, Vec<usize>> = std::collections::BTreeMap::new();
+            for &k in gens {
+                let g = &sym.generators[k];
+                for j in 0..n {
+                    if g[j] != j && !inside.contains(&j) && p.is_int[j] {
+                        orows.entry(find(&mut uf, j)).or_default().push(j);
+                    }
+                }
+            }
+            for (_, mut v) in orows {
+                v.sort_unstable();
+                v.dedup();
+                if v.len() != s {
+                    continue;
+                }
+                let mut line = vec![usize::MAX; s];
+                let mut ok = true;
+                for &j in &v {
+                    match col_sig.iter().position(|x| *x == sig(j)) {
+                        Some(c) if line[c] == usize::MAX => line[c] = j,
+                        _ => ok = false,
+                    }
+                }
+                // 各生成元がこの行でも同じ 2 列を入れ替える
+                ok = ok
+                    && gens.iter().all(|&k| {
+                        let g = &sym.generators[k];
+                        let (a, b) = {
+                            let cols: Vec<usize> = (0..s).filter(|&c| g[mat[0][c]] != mat[0][c]).collect();
+                            (cols[0], cols[1])
+                        };
+                        g[line[a]] == line[b] && g[line[b]] == line[a] && (0..s).all(|c| c == a || c == b || g[line[c]] == line[c])
+                    });
+                if ok {
+                    mat.push(line);
+                }
+            }
+        }
         let nrows = mat.len();
+        if env_str!("ENOMOTO_MIP_SYM_DEBUG").is_some() {
+            // オービトープの外で生成元が動かす列 (行の形になっているか)
+            let inside: std::collections::HashSet<usize> = mat.iter().flatten().copied().collect();
+            let mut orows: std::collections::BTreeMap<usize, Vec<usize>> = std::collections::BTreeMap::new();
+            for &k in gens {
+                let g = &sym.generators[k];
+                for j in 0..n {
+                    if g[j] != j && !inside.contains(&j) {
+                        orows.entry(find(&mut uf, j)).or_default().push(j);
+                    }
+                }
+            }
+            for (_, mut v) in orows {
+                v.sort_unstable();
+                v.dedup();
+                let sigs: Vec<Option<usize>> = v.iter().map(|&j| col_sig.iter().position(|x| *x == sig(j))).collect();
+                eprintln!("SYM orbitope other row: {} cols {:?} int {:?} col positions {:?}", v.len(), v, v.iter().map(|&j| p.is_int[j]).collect::<Vec<_>>(), sigs);
+            }
+        }
         out.push(Orbitope { vars: mat, packing: false, row_packing: vec![false; nrows], swaps });
     }
     (out, used)
@@ -534,6 +596,86 @@ fn lexmin_ge(w: Option<&[u8]>, fix: &[Option<u8>]) -> Option<Vec<u8>> {
 /// (`列 0 >=_lex 列 1 >=_lex ...`) の解だけを残す。今の境界 (`lo`, `up`) から、辞書式で最大の解の列 (左から) と最小の解の
 /// 列 (右から) を作り、ある列で最小 > 最大なら実行不能 (`None`)。そうでなければ各列で最大と最小が初めて違う行より上を
 /// その値に固定する (`(列番号, 値)` の一覧を返す)。
+/// `w` 以下 (辞書式) で `lo <= v <= up` を満たす最大の整数ベクトル (`w` が `None` なら上限なし)。なければ `None`。
+fn lexmax_le_int(w: Option<&[f64]>, lo: &[f64], up: &[f64]) -> Option<Vec<f64>> {
+    let r = lo.len();
+    let Some(w) = w else { return Some(up.to_vec()) };
+    let Some(q) = (0..r).find(|&i| w[i] < lo[i] || w[i] > up[i]) else { return Some(w.to_vec()) };
+    let mut v = w.to_vec();
+    let cut = if w[q] > up[q] {
+        v[q] = up[q];
+        q
+    } else {
+        // w_q < lo_q: q より前で 1 下げられる最も後ろの行を下げる
+        let p = (0..q).rev().find(|&p| w[p] - 1.0 >= lo[p])?;
+        v[p] = w[p] - 1.0;
+        p
+    };
+    v[cut + 1..r].copy_from_slice(&up[cut + 1..r]);
+    Some(v)
+}
+
+/// `w` 以上 (辞書式) で `lo <= v <= up` を満たす最小の整数ベクトル (`w` が `None` なら下限なし)。なければ `None`。
+fn lexmin_ge_int(w: Option<&[f64]>, lo: &[f64], up: &[f64]) -> Option<Vec<f64>> {
+    let r = lo.len();
+    let Some(w) = w else { return Some(lo.to_vec()) };
+    let Some(q) = (0..r).find(|&i| w[i] < lo[i] || w[i] > up[i]) else { return Some(w.to_vec()) };
+    let mut v = w.to_vec();
+    let cut = if w[q] < lo[q] {
+        v[q] = lo[q];
+        q
+    } else {
+        let p = (0..q).rev().find(|&p| w[p] + 1.0 <= up[p])?;
+        v[p] = w[p] + 1.0;
+        p
+    };
+    v[cut + 1..r].copy_from_slice(&lo[cut + 1..r]);
+    Some(v)
+}
+
+/// [`orbitopal_fixing`] の整数の行を含む形: 列ごとの整数ベクトルが辞書式で広義減少の解だけを残す。各列で、辞書式で最大の
+/// 解と最小の解が初めて違う行より上はその値に固定し、違う行は [最小, 最大] に締める (`(列番号, 下限, 上限)` の一覧)。
+pub fn orbitopal_fixing_int(orb: &Orbitope, lo: &[f64], up: &[f64]) -> Option<Vec<(usize, f64, f64)>> {
+    let r = orb.vars.len();
+    let s = orb.vars[0].len();
+    let dom = |c: usize| -> (Vec<f64>, Vec<f64>) {
+        let l = (0..r).map(|i| (lo[orb.vars[i][c]] - 1e-6).ceil()).collect();
+        let u = (0..r).map(|i| (up[orb.vars[i][c]] + 1e-6).floor()).collect();
+        (l, u)
+    };
+    let doms: Vec<(Vec<f64>, Vec<f64>)> = (0..s).map(dom).collect();
+    let mut maxv: Vec<Vec<f64>> = Vec::with_capacity(s);
+    for c in 0..s {
+        let v = lexmax_le_int(maxv.last().map(|v| v.as_slice()), &doms[c].0, &doms[c].1)?;
+        maxv.push(v);
+    }
+    let mut minv: Vec<Vec<f64>> = vec![Vec::new(); s];
+    for c in (0..s).rev() {
+        let w = if c + 1 < s { Some(minv[c + 1].as_slice()) } else { None };
+        minv[c] = lexmin_ge_int(w, &doms[c].0, &doms[c].1)?;
+    }
+    let mut out = Vec::new();
+    for c in 0..s {
+        if minv[c].partial_cmp(&maxv[c]) == Some(std::cmp::Ordering::Greater) {
+            return None;
+        }
+        let first = (0..r).find(|&i| minv[c][i] != maxv[c][i]).unwrap_or(r);
+        for i in 0..first.min(r) {
+            let v = minv[c][i];
+            if v.is_finite() && (doms[c].0[i] < v || doms[c].1[i] > v) {
+                out.push((orb.vars[i][c], v, v));
+            }
+        }
+        if first < r {
+            let (l, u) = (minv[c][first].max(doms[c].0[first]), maxv[c][first].min(doms[c].1[first]));
+            if l > doms[c].0[first] || u < doms[c].1[first] {
+                out.push((orb.vars[first][c], l, u));
+            }
+        }
+    }
+    Some(out)
+}
+
 pub fn orbitopal_fixing(orb: &Orbitope, lo: &[f64], up: &[f64]) -> Option<Vec<(usize, f64)>> {
     let r = orb.vars.len();
     let s = orb.vars[0].len();

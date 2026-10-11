@@ -277,6 +277,11 @@ pub(super) struct Solver<'a, L: MipLp> {
     seen_best: f64,
     /// 擬似費用を前回合わせたときの自分の値 (この後に増えた観測を共有の擬似費用に足す)。
     pc_base: Option<Pseudocost>,
+    /// 診断用: デバッグ解の対称な像、最後の刈り込みの理由、直前に処理したノードが像を含んでいたか、像がまだ残っているか。
+    dbg_imgs: Option<Vec<Vec<f64>>>,
+    dbg_last: std::cell::RefCell<String>,
+    dbg_prev_has: bool,
+    dbg_alive: bool,
     workers: Vec<std::thread::JoinHandle<MipResult>>,
     worker_totals: (u64, u64),
     pool_stats: [u64; 3],
@@ -288,6 +293,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) orig: Option<Rc<MipProblem>>,
     /// オービトープの列 -> (オービトープの番号, 行)。
     orb_col: std::collections::HashMap<usize, (usize, usize)>,
+    /// オービトープごとの、生成元が動かすオービトープの外の列 ([`Self::orbitope_propagate`])。
+    orb_others: Option<Rc<Vec<std::collections::HashSet<usize>>>>,
     /// 今の潜りで待ち行列に入れた兄弟ノード ((枠, 世代)、古い順)。潜りが枝刈りで終わったらここから戻る。
     dive_stack: Vec<(usize, u64)>,
     sibling_backtracks: u64,
@@ -749,6 +756,10 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         pool_busy: pool.is_some(),
         seen_best: f64::INFINITY,
         pc_base: None,
+        dbg_imgs: None,
+        dbg_last: std::cell::RefCell::new(String::new()),
+        dbg_prev_has: false,
+        dbg_alive: true,
         pool,
         workers: Vec::new(),
         worker_totals: (0, 0),
@@ -767,6 +778,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         },
         sym_canon: (0, 0),
         orb_col: std::collections::HashMap::new(),
+        orb_others: None,
         dive_stack: Vec::new(),
         sibling_backtracks: 0,
         orbitope_prunes: 0,
@@ -854,6 +866,9 @@ fn dse_all() -> bool {
 impl<'a, L: MipLp> Solver<'a, L> {
     /// 診断用: 現在の定義域がデバッグ解を含み、かつその目的値が打ち切り値未満なら `why` を表示する。
     pub(super) fn dbg_lost(&self, why: &str, contained: bool) {
+        if !self.params.submip {
+            self.dbg_last.replace(format!("{why} at node {}", self.nodes));
+        }
         if self.params.submip || !contained {
             return;
         }
@@ -861,7 +876,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if let Some(x) = d.borrow().as_ref() {
                 let z = self.p.objective(x);
                 if z < self.prune_limit() - 1e-6 {
-                    eprintln!("MIP_DEBUG_SOL lost at node {}: {why} (debug obj {z}, prune limit {})", self.nodes, self.prune_limit());
+                    eprintln!("MIP_DEBUG_SOL lost at node {} ({}): {why} (debug obj {z}, prune limit {})", self.nodes, if self.snap.is_some() { "helper thread" } else { "main thread" }, self.prune_limit());
                 }
             }
         });
@@ -873,6 +888,50 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return false;
         }
         DEBUG_SOL.with(|d| d.borrow().as_ref().is_some_and(|x| changes.iter().all(|c| if c.upper { x[c.col] <= c.value + 1e-6 } else { x[c.col] >= c.value - 1e-6 })))
+    }
+
+    /// 診断用: デバッグ解の対称な像 (オービトープの生成元で閉じた集合) のどれかを、ノード `n` の分枝が含むか。
+    fn dbg_node_has_image(&mut self, n: &OpenNode) -> bool {
+        let Some(x) = DEBUG_SOL.with(|d| d.borrow().clone()) else { return false };
+        if self.dbg_imgs.is_none() {
+            let mut imgs = vec![x];
+            let mut k = 0;
+            while k < imgs.len() && imgs.len() < 5000 {
+                for o in self.orbitopes.iter() {
+                    for (_, _, perm) in &o.swaps {
+                        let mut y = vec![0.0; imgs[k].len()];
+                        for (j, &t) in perm.iter().enumerate() {
+                            y[t] = imgs[k][j];
+                        }
+                        if !imgs.contains(&y) {
+                            imgs.push(y);
+                        }
+                    }
+                }
+                k += 1;
+            }
+            eprintln!("MIP_DEBUG_SOL: {} symmetric images", imgs.len());
+            self.dbg_imgs = Some(imgs);
+        }
+        let imgs = self.dbg_imgs.as_ref().unwrap();
+        imgs.iter().any(|x| n.changes.iter().all(|c| if c.upper { x[c.col] <= c.value + 1e-6 } else { x[c.col] >= c.value - 1e-6 }))
+    }
+
+    /// 診断用: `ENOMOTO_MIP_DEBUG_NODE` のノードで、今の定義域がデバッグ解の像を含むかを表示する。
+    fn dbg_trace(&self, stage: &str) {
+        let Some(k) = env_str!("ENOMOTO_MIP_DEBUG_NODE").and_then(|v| v.parse::<u64>().ok()) else { return };
+        if self.nodes != k || self.params.submip {
+            return;
+        }
+        let Some(imgs) = self.dbg_imgs.as_ref() else { return };
+        let inside: Vec<usize> = (0..imgs.len()).filter(|&i| (0..self.p.n).all(|j| imgs[i][j] >= self.dom.lo[j] - 1e-6 && imgs[i][j] <= self.dom.up[j] + 1e-6)).collect();
+        eprintln!("MIP_DEBUG_NODE {k} {stage}: images inside the domain {:?}", inside);
+        if inside.is_empty() {
+            // どの列の境界が像を外しているか (最初の像について)
+            let x = &imgs[0];
+            let bad: Vec<(usize, f64, f64, f64)> = (0..self.p.n).filter(|&j| x[j] < self.dom.lo[j] - 1e-6 || x[j] > self.dom.up[j] + 1e-6).map(|j| (j, x[j], self.dom.lo[j], self.dom.up[j])).take(10).collect();
+            eprintln!("MIP_DEBUG_NODE {k} {stage}: image 0 violates {:?}", bad);
+        }
     }
 
     /// 診断用: 現在の定義域がデバッグ解を含むか (デバッグ解がなければ偽)。
@@ -1500,6 +1559,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let z = self.incumbent.as_ref().map(|(z, _)| *z).unwrap();
                 return self.finish(MipStatus::Optimal, z);
             }
+            // 診断用: 直前のノードがデバッグ解の像を含んでいたのに、未処理のノードがどれも像を含まなくなったら知らせる
+            if self.dbg_prev_has && self.dbg_alive && !self.params.submip {
+                self.dbg_prev_has = false;
+                let dz = DEBUG_SOL.with(|d| d.borrow().as_ref().map(|x| self.p.objective(x)));
+                if dz.is_some_and(|z| z < self.prune_limit() - 1e-6) {
+                    let nodes: Vec<OpenNode> = self.queue.iter().cloned().chain(plunge.iter().cloned()).collect();
+                    let alive = nodes.iter().any(|n| self.dbg_node_has_image(n));
+                    if !alive {
+                        self.dbg_alive = false;
+                        eprintln!("MIP_DEBUG_SOL: all symmetric images gone after node {} (last pruning: {})", self.nodes, self.dbg_last.borrow());
+                    }
+                }
+            }
             if self.time_up() {
                 return self.finish_limit(MipStatus::TimeLimit, plunge.as_ref());
             }
@@ -1609,6 +1681,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             xp("m_pop");
             first = false;
             self.nodes += 1;
+            if self.dbg_alive && DEBUG_SOL.with(|d| d.borrow().is_some()) && !self.params.submip {
+                self.dbg_prev_has = self.dbg_node_has_image(&node);
+            }
             self.log(false);
             let dn = self.dbg_changes(&node.changes);
             if node.lower_bound >= self.prune_limit() {
@@ -1616,11 +1691,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 self.pc.objlim_leaves += 1;
                 continue;
             }
+            self.dbg_trace("after replaying the branches");
             let stack_before_prop = self.dom.stack_len();
             if dn && !self.dbg_contains() {
                 self.dbg_lost("domain excludes the debug solution before node propagation", dn);
             }
             let prop_ok = self.dom.propagate(self.p);
+            self.dbg_trace("after propagation");
             if !prop_ok {
                 self.add_conflict();
             }
@@ -1630,6 +1707,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             xp("m_prop");
             // 目的関数の伝播 (目的値 <= 打ち切り値)
             let prop_ok = prop_ok && self.propagate_objective();
+            self.dbg_trace("after objective propagation");
             // 双対証明による枝刈りと境界の締め付け
             let prop_ok = prop_ok && {
                 let ok = self.apply_dual_proofs();
@@ -1667,6 +1745,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             };
             xp("m_proof");
+            self.dbg_trace("after dual proofs and literal conflicts");
             // 完全オービトープの固定 (列を辞書式で減少に並べた解だけを残す)
             let prop_ok = prop_ok && {
                 let ok = self.orbitope_propagate(&node.changes);
@@ -1678,6 +1757,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 ok
             };
+            self.dbg_trace("after orbitopal fixing");
             if !prop_ok {
                 self.pc.infeasible_leaves += 1;
                 self.dbg_lost("node propagation", dn);
@@ -1753,6 +1833,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 match st {
                     LpStatus::Optimal => {}
                     LpStatus::Infeasible | LpStatus::ObjectiveBound => {
+                        self.dbg_trace(&format!("LP {st:?} (resolve {resolves}, LP rows {})", self.lp.num_rows()));
                         if st == LpStatus::Infeasible {
                             self.pc.infeasible_leaves += 1;
                             self.add_farkas_proof();
@@ -2838,17 +2919,49 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
         }
+        // オービトープの生成元が動かす、オービトープの外の列 (連続列・一般整数列など)。これに分枝した道では、ノードの
+        // 領域が列の入れ替えで閉じなくなり、分枝した行の順の辞書式で最大の代表がどのノードにも残らないことがある
+        // (rout: 一般整数列への分枝の後の固定で最適解の像が全て消え、1079.19 を最適と報告した)。その道ではその
+        // オービトープの固定をしない (`ENOMOTO_MIP_ORBITOPE_IGNORE_OTHERS` で以前の形)
+        if self.orb_others.is_none() {
+            let others: Vec<std::collections::HashSet<usize>> = orbs
+                .iter()
+                .map(|o| {
+                    let inside: std::collections::HashSet<usize> = o.vars.iter().flatten().copied().collect();
+                    let mut set = std::collections::HashSet::new();
+                    for (_, _, perm) in &o.swaps {
+                        for (j, &t) in perm.iter().enumerate() {
+                            if t != j && !inside.contains(&j) {
+                                set.insert(j);
+                            }
+                        }
+                    }
+                    set
+                })
+                .collect();
+            self.orb_others = Some(Rc::new(others));
+        }
+        let others = self.orb_others.clone().unwrap();
+        let check_others = env_str!("ENOMOTO_MIP_ORBITOPE_IGNORE_OTHERS").is_none();
         // オービトープごとの分枝した行 (分枝した順)
         let subs: Vec<super::symmetry::Orbitope> = if dynamic {
             let mut rows: Vec<Vec<usize>> = vec![Vec::new(); orbs.len()];
+            let mut broken = vec![false; orbs.len()];
             for c in changes {
                 if let Some(&(k, i)) = self.orb_col.get(&c.col) {
                     if !rows[k].contains(&i) {
                         rows[k].push(i);
                     }
                 }
+                if check_others {
+                    for (k, o) in others.iter().enumerate() {
+                        if o.contains(&c.col) {
+                            broken[k] = true;
+                        }
+                    }
+                }
             }
-            rows.iter().enumerate().filter(|(_, r)| !r.is_empty()).map(|(k, r)| orbs[k].sub_rows(r)).collect()
+            rows.iter().enumerate().filter(|(k, r)| !r.is_empty() && !broken[*k]).map(|(k, r)| orbs[k].sub_rows(r)).collect()
         } else {
             orbs.iter().cloned().collect()
         };
@@ -2856,23 +2969,32 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return true;
         }
         for _ in 0..10 {
-            let mut fixes: Vec<(usize, f64)> = Vec::new();
+            let mut fixes: Vec<(usize, f64, f64)> = Vec::new();
             for o in subs.iter() {
-                match super::symmetry::orbitopal_fixing(o, &self.dom.lo, &self.dom.up) {
-                    None => return false,
-                    Some(f) => fixes.extend(f),
+                // 0-1 でない整数の行を含むオービトープは整数の値で比べる形で固定する
+                let int_rows = o.vars.iter().any(|line| line.iter().any(|&j| self.p.col_lo[j] < 0.0 || self.p.col_up[j] > 1.0));
+                if int_rows {
+                    match super::symmetry::orbitopal_fixing_int(o, &self.dom.lo, &self.dom.up) {
+                        None => return false,
+                        Some(f) => fixes.extend(f),
+                    }
+                } else {
+                    match super::symmetry::orbitopal_fixing(o, &self.dom.lo, &self.dom.up) {
+                        None => return false,
+                        Some(f) => fixes.extend(f.into_iter().map(|(j, v)| (j, v, v))),
+                    }
                 }
             }
             if fixes.is_empty() {
                 return true;
             }
             self.orbitope_fixings += fixes.len() as u64;
-            for (j, v) in fixes {
+            for (j, l, u) in fixes {
                 self.dom.set_external(true);
-                self.dom.tighten_lower(self.p, j, v);
+                self.dom.tighten_lower(self.p, j, l);
                 self.dom.set_external(false);
                 self.dom.set_external(true);
-                self.dom.tighten_upper(self.p, j, v);
+                self.dom.tighten_upper(self.p, j, u);
                 self.dom.set_external(false);
             }
             if self.dom.infeasible || !self.dom.propagate(self.p) {
@@ -3805,9 +3927,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         };
         let mut better = false;
         for x in got {
+            let zx = if x.len() == self.p.n { self.p.objective(&x) } else { f64::NAN };
             if x.len() == self.p.n && self.try_incumbent(x) {
                 self.snap_stats[2] += 1;
                 better = true;
+            } else if self.incumbent.as_ref().is_none_or(|(z, _)| zx < *z - 1e-9 * z.abs().max(1.0)) {
+                // 届いた解を受け付けられなかった (従で実行可能と判定した解が主で通らない)。最良値だけが下がり解が失われる
+                eprintln!("MIP: WARNING: a solution from another thread was rejected (objective {zx:.10e}, len {})", self.p.n);
             }
         }
         better
@@ -3943,13 +4069,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64() + 2.0);
         let params = MipParams { time_limit: remaining, node_limit: u64::MAX, verbose: false, threads: 1, ..self.params };
         let prof = crate::simplex::slope_intercept_dual::mip_profile();
+        let dbg = DEBUG_SOL.with(|d| d.borrow().clone());
         for _ in 0..n {
-            let (snap, pool, shared) = (snap.clone(), pool.clone(), shared.clone());
+            let (snap, pool, shared, dbg) = (snap.clone(), pool.clone(), shared.clone(), dbg.clone());
             let h = std::thread::Builder::new()
                 .stack_size(64 << 20)
                 .spawn(move || {
                     crate::simplex::slope_intercept_dual::set_mip_profile(prof);
                     set_thread_portfolio(Some(shared));
+                    DEBUG_SOL.with(|d| *d.borrow_mut() = dbg);
                     let r = solve_worker(snap, Some(pool), params);
                     set_thread_portfolio(None);
                     r
@@ -4059,6 +4187,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         for h in std::mem::take(&mut self.workers) {
             match h.join() {
                 Ok(r) => {
+                    if let (Some(zw), Some((z, _))) = (r.objective, &self.incumbent) {
+                        if zw < *z - 1e-6 * z.abs().max(1.0) {
+                            eprintln!("MIP: WARNING: a tree thread ended with a better solution {zw:.10e} than the main thread's {z:.10e}");
+                        }
+                    }
                     self.worker_totals.0 += r.nodes;
                     self.worker_totals.1 += r.lp_iterations;
                     if !matches!(r.status, MipStatus::Optimal | MipStatus::Infeasible) {
