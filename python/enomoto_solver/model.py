@@ -14,6 +14,7 @@ Model 自体は行列を持たず、変数・目的関数・制約の宣言を R
 from __future__ import annotations
 
 import time
+import warnings
 from dataclasses import dataclass
 from typing import ClassVar, List, Optional
 
@@ -151,7 +152,9 @@ class Model:
         で判断する。``"optimal"`` のときだけ ``objective`` に値が入り、各 Variable の
         ``.value`` が読める (それ以外で ``.value`` を読むと RuntimeError)。
 
-        ``root_solver``: 各 LP (整数計画では各緩和問題) の解法。
+        ``root_solver``: LP (整数変数を含まないモデル) の解法。整数計画の緩和問題は常に傾き・切片双対二段解法を
+        warm start で使って解くので、整数変数を含むモデルに ``"auto"`` (と ``None``) 以外を渡しても効かず、
+        ``UserWarning`` を出す (求解はそのまま続ける)。
 
         - ``"auto"`` (既定、``None`` も同じ): ``threads`` が 2 以上なら、傾き・切片双対二段解法 (1 スレッド) と
           内点法 + クロスオーバー (残りのスレッド) を同時に解き、先に結論を出した側を採る (もう一方は打ち切る)。
@@ -184,6 +187,13 @@ class Model:
         同時実行の勝敗、整数計画では根の LP・切除平面・探索の経過) を、最後に結果を標準出力に出す。
         False なら何も出さない。
         """
+        if root_solver not in (None, "auto") and any(v.vtype == "integer" for v in self._variables):
+            warnings.warn(
+                f"root_solver={root_solver!r} has no effect on a model with integer variables: "
+                "the relaxations of an integer program are always solved by the slope-intercept dual two-phase method",
+                UserWarning,
+                stacklevel=2,
+            )
         if log and self._objective is not None:
             self._log_header(threads)
         t0 = time.perf_counter()

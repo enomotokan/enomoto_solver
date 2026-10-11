@@ -104,7 +104,7 @@ The same applies to models with integer variables. When phase A shows that the r
 
 ### Choosing the LP method
 
-`solve(root_solver=...)` selects the LP method (it applies only to models without integer variables; the relaxations of integer programs are always solved by the slope–intercept dual two-phase method with warm starts).
+`solve(root_solver=...)` selects the LP method (it applies only to models without integer variables; the relaxations of integer programs are always solved by the slope–intercept dual two-phase method with warm starts; specifying anything other than `"auto"` for a model with integer variables issues a `UserWarning` and the setting is ignored).
 
 | `root_solver` | Method |
 |---|---|

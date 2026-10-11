@@ -85,6 +85,30 @@ def test_binary_knapsack():
     assert approx(sol.objective, 220.0)
 
 
+@pytest.mark.parametrize("root_solver", ["simplex", "ipm_crossover", "interior"])
+def test_root_solver_on_integer_model_warns(root_solver):
+    M = Model()
+    x = Variable(int, 0, 3)
+    M.set_objective(x, sense="maximize")
+    M.add_constraint(2 * x <= 5)
+    with pytest.warns(UserWarning, match="no effect on a model with integer variables"):
+        sol = M.solve(root_solver=root_solver, log=False)
+    assert approx(sol.objective, 2.0)
+
+
+@pytest.mark.parametrize("root_solver", [None, "auto"])
+def test_root_solver_auto_on_integer_model_does_not_warn(root_solver):
+    import warnings as w
+
+    M = Model()
+    x = Variable(int, 0, 3)
+    M.set_objective(x, sense="maximize")
+    M.add_constraint(2 * x <= 5)
+    with w.catch_warnings():
+        w.simplefilter("error")
+        M.solve(root_solver=root_solver, log=False)
+
+
 def test_infeasible_status():
     M = Model()
     w = Variable(float, 0, 5)
