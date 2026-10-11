@@ -170,7 +170,7 @@ fn exact_objective(p: &MipProblem, x: &[f64]) -> f64 {
 /// 返す解の研磨: 整数変数をちょうどの整数に丸め、連続変数があれば整数変数をその値に固定した元の問題の LP を
 /// 解き直して連続変数の値を取り替える。分枝限定法の中の LP は前処理・スケーリング・境界の摂動・許容誤差の
 /// 範囲の解を返すので、そのままでは目的値に 1e-12〜1e-9 程度の相対誤差が残る (khb05250, binkar10_1)。
-/// 解き直した解は、元の問題の違反が増えず目的値が悪くならないときだけ採る。最小化形の目的値を返す
+/// 解き直した解は、元の問題の違反 (境界・行) が増えず目的値が悪くならないときだけ採る。最小化形の目的値を返す
 /// (誤差補償つきの和)。`ENOMOTO_MIP_NO_POLISH` なら丸めと目的値の計算し直しだけ。
 fn polish_solution(variables: &[VariableData], objective: &Objective, constraints: &[ConstraintRow], p: &MipProblem, x: &mut Vec<f64>) -> f64 {
     for j in 0..p.n {
@@ -196,7 +196,7 @@ fn polish_solution(variables: &[VariableData], objective: &Objective, constraint
         }
         let zn = exact_objective(p, &xn);
         let (vo, vn) = (max_violation(p, x), max_violation(p, &xn));
-        if vn <= vo.max(1e-9) && zn <= z + 1e-9 * z.abs().max(1.0) {
+        if vn <= vo && zn <= z + 1e-9 * z.abs().max(1.0) {
             *x = xn;
             return zn;
         }
