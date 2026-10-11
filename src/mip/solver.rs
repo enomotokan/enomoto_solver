@@ -277,7 +277,7 @@ pub(super) struct Solver<'a, L: MipLp> {
     seen_best: f64,
     workers: Vec<std::thread::JoinHandle<MipResult>>,
     worker_totals: (u64, u64),
-    pool_stats: [u64; 2],
+    pool_stats: [u64; 3],
     /// 証明から作った衝突の数。
     proof_conflicts: u64,
     /// 完全オービトープ (orbitopal fixing に使う。サブ MIP では空)。
@@ -451,6 +451,8 @@ pub(crate) struct WorkPool {
     len: std::sync::atomic::AtomicUsize,
     /// 解けなかったノードを捨てたスレッドがある (最適とは言えない)。
     unresolved: std::sync::atomic::AtomicBool,
+    /// スレッドの間で共有する大域的な境界 (根の被約費用による固定・双対証明などの大域的な締め付けの和)。
+    bounds: std::sync::Mutex<(Vec<f64>, Vec<f64>)>,
 }
 
 struct PoolInner {
@@ -470,8 +472,9 @@ fn pool_release(pool: &WorkPool) {
 }
 
 impl WorkPool {
-    fn new(threads: usize) -> Self {
+    fn new(threads: usize, lo: Vec<f64>, up: Vec<f64>) -> Self {
         WorkPool {
+            bounds: std::sync::Mutex::new((lo, up)),
             inner: std::sync::Mutex::new(PoolInner { nodes: Vec::new(), busy: threads, done: false }),
             stop: std::sync::atomic::AtomicBool::new(false),
             idle: std::sync::atomic::AtomicUsize::new(0),
@@ -743,7 +746,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         pool,
         workers: Vec::new(),
         worker_totals: (0, 0),
-        pool_stats: [0; 2],
+        pool_stats: [0; 3],
         proof_conflicts: 0,
         orbitopes: match &snap {
             Some(sn) => Rc::new(sn.orbitopes.clone()),
@@ -1458,6 +1461,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let lim = self.prune_limit();
                     self.queue.prune(lim);
                 }
+            }
+            // 木を分け合う: 大域的な境界の締め付けを共有する (64 ノードおき)
+            if self.pool.is_some() && self.nodes % 64 == 0 && env_str!("ENOMOTO_MIP_TREE_NO_SHARED_BOUNDS").is_none() {
+                self.sync_global_bounds();
             }
             // 木を分け合う: 待っているスレッドがいれば、自分の待ち行列から下界の小さいノードを渡す
             if let Some(pool) = &self.pool {
@@ -3909,7 +3916,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 s
             }
         };
-        let pool = std::sync::Arc::new(WorkPool::new(self.params.threads));
+        let pool = std::sync::Arc::new(WorkPool::new(self.params.threads, self.dom.global_lo.clone(), self.dom.global_up.clone()));
         self.pool = Some(pool.clone());
         self.pool_busy = true;
         let snap = self.make_snapshot(&shared, &mut None, false);
@@ -3933,6 +3940,35 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         if self.params.verbose {
             eprintln!("MIP: tree search with {} threads ({:.2}s)", self.params.threads, self.start.elapsed().as_secs_f64());
+        }
+    }
+
+    /// 自分の大域的な境界と共有の境界を突き合わせ、締まっている方に揃える (自分の方が締まっていれば共有の側を、共有の方が
+    /// 締まっていれば自分の側を、大域的な締め付けとして)。締め付けは「打ち切り値未満の解はこれを満たす」もので、どのスレッドの
+    /// 打ち切り値も共有の最良値から作るので、ほかのスレッドの締め付けで除かれるのは最良値を良くしない解だけ。
+    fn sync_global_bounds(&mut self) {
+        let Some(pool) = self.pool.clone() else { return };
+        let mut pulled = Vec::new();
+        {
+            let mut g = pool.bounds.lock().unwrap();
+            let (lo, up) = &mut *g;
+            for j in 0..self.p.n {
+                let (ml, mu) = (self.dom.global_lo[j], self.dom.global_up[j]);
+                if ml > lo[j] {
+                    lo[j] = ml;
+                } else if lo[j] > ml {
+                    pulled.push((j, false, lo[j]));
+                }
+                if mu < up[j] {
+                    up[j] = mu;
+                } else if up[j] < mu {
+                    pulled.push((j, true, up[j]));
+                }
+            }
+        }
+        self.pool_stats[2] += pulled.len() as u64;
+        for (j, upper, v) in pulled {
+            self.dom.tighten_global(self.p, j, upper, v);
         }
     }
 
@@ -4083,7 +4119,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 self.pool_busy = false;
             }
             if self.params.verbose {
-                eprintln!("MIP: tree search threads: worker nodes {}, nodes given away {}, taken {}", self.worker_totals.0, self.pool_stats[0], self.pool_stats[1]);
+                eprintln!("MIP: tree search threads: worker nodes {}, nodes given away {}, taken {}, global bounds taken from other threads {}", self.worker_totals.0, self.pool_stats[0], self.pool_stats[1], self.pool_stats[2]);
             }
         }
         // 木の写しから解いた求解が見つけた解を受け取る (止める合図で終わるときも)
