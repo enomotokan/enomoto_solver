@@ -18,9 +18,11 @@ from .constraint import Constraint
 from .function import Function
 from .model import Model, Solution
 from .variable import Variable
+from ._core import max_threads
 
 # 公開 API
 __all__ = [
+    "max_threads",
     "Model",
     "Variable",
     "Function",

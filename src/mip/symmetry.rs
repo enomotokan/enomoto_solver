@@ -250,7 +250,7 @@ pub struct Orbitope {
     /// 行ごとに、パッキング・分割の行に含まれるか (動的な固定で、分枝した行が全てパッキングならパッキング用の固定を使う)。
     pub row_packing: Vec<bool>,
     /// 列の入れ替えの生成元 (列 a, 列 b, 問題全体の置換 `perm[j] = σ(j)`。0-1 でない列も一緒に動かす)。
-    pub swaps: Vec<(usize, usize, std::rc::Rc<Vec<usize>>)>,
+    pub swaps: Vec<(usize, usize, std::sync::Arc<Vec<usize>>)>,
 }
 
 /// 置換 `perm` (`perm[j] = σ(j)`) で解を写す: `y[σ(j)] = x[j]`。
@@ -484,7 +484,7 @@ pub fn find_orbitopes(p: &MipProblem, sym: &Symmetry) -> (Vec<Orbitope>, Vec<boo
             used[k] = true;
             let g = &sym.generators[k];
             let cols: Vec<usize> = (0..s).filter(|&c| g[mat[0][c]] != mat[0][c]).collect();
-            swaps.push((cols[0], cols[1], std::rc::Rc::new(g.clone())));
+            swaps.push((cols[0], cols[1], std::sync::Arc::new(g.clone())));
         }
         let nrows = mat.len();
         out.push(Orbitope { vars: mat, packing: false, row_packing: vec![false; nrows], swaps });

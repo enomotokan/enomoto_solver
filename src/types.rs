@@ -265,4 +265,6 @@ pub struct MipSettings {
     pub rel_gap: Option<f64>,
     /// ノード数上限。
     pub node_limit: Option<u64>,
+    /// 木の探索に使うスレッドの数 (既定 1。[`crate::mip::max_threads`] を超える値は頭打ちにする)。
+    pub threads: Option<usize>,
 }

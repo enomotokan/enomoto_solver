@@ -148,6 +148,12 @@ impl NodeQueue {
         Some(self.remove(id))
     }
 
+    /// 下界最小のノードを取り出す。
+    pub fn pop_best(&mut self) -> Option<OpenNode> {
+        let id = self.by_lb.iter().next().map(|&(_, id)| id)?;
+        Some(self.remove(id))
+    }
+
     /// 下界が `cutoff` 以上のノードを捨てる。捨てたノードの深さの一覧を返す (木の重みの集計用)。
     pub fn prune(&mut self, cutoff: f64) -> Vec<usize> {
         let ids: Vec<usize> = self.by_lb.range((Key(cutoff), 0)..).map(|&(_, id)| id).collect();

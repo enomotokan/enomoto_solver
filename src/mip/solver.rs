@@ -60,6 +60,8 @@ pub struct MipParams {
     /// 根で呼ばないヒューリスティクス ([`heur_bit`] のビット)。再スタート前の根で解を見つけなかったもの
     /// (問題は固定が増えただけでほぼ同じなので、同じ結果になりやすく時間だけかかる)。
     pub skip_heurs: u64,
+    /// 木の探索に使うスレッドの数 (1 なら並列にしない。[`max_threads`] で頭打ちにしてから渡す)。
+    pub threads: usize,
 }
 
 /// 根のヒューリスティクスの名前に対応するビット (再スタートで飛ばすものの印)。暫定解に依る RINS と、
@@ -75,7 +77,7 @@ pub(super) fn heur_bit(name: &str) -> u64 {
 
 impl Default for MipParams {
     fn default() -> Self {
-        MipParams { time_limit: f64::INFINITY, node_limit: u64::MAX, rel_gap: 1e-4, abs_gap: 1e-6, verbose: false, submip: false, cutoff: f64::INFINITY, restarts: 0, skip_heurs: 0 }
+        MipParams { time_limit: f64::INFINITY, node_limit: u64::MAX, rel_gap: 1e-4, abs_gap: 1e-6, verbose: false, submip: false, cutoff: f64::INFINITY, restarts: 0, skip_heurs: 0, threads: 1 }
     }
 }
 
@@ -267,6 +269,13 @@ pub(super) struct Solver<'a, L: MipLp> {
     fb_seen: u64,
     inbox_seen: u64,
     snap_stats: [u64; 3],
+    /// 木の探索を分け合う共有の待ち行列 ([`WorkPool`])、自分が待っていない側に数えられているか、主が始めた従のスレッド、
+    /// 従の結果の合計 (ノード数, LP の反復数)、[ここへ渡したノード, ここから取ったノード]
+    pool: Option<std::sync::Arc<WorkPool>>,
+    pool_busy: bool,
+    workers: Vec<std::thread::JoinHandle<MipResult>>,
+    worker_totals: (u64, u64),
+    pool_stats: [u64; 2],
     /// 証明から作った衝突の数。
     proof_conflicts: u64,
     /// 完全オービトープ (orbitopal fixing に使う。サブ MIP では空)。
@@ -404,6 +413,10 @@ pub(crate) struct TreeSnapshot {
     pc: Pseudocost,
     pub(crate) nodes: Vec<SnapNode>,
     pub(crate) valid_below: f64,
+    /// 完全オービトープと、対称性の行・固定を加える前の問題 (写しから解く求解も orbitopal fixing をし、ヒューリスティクスの
+    /// 解を並べ替えて使えるように)。
+    orbitopes: Vec<super::symmetry::Orbitope>,
+    orig: Option<std::sync::Arc<MipProblem>>,
 }
 
 pub(crate) struct SnapNode {
@@ -412,6 +425,58 @@ pub(crate) struct SnapNode {
     estimate: f64,
     depth: usize,
     branch: Option<(usize, bool, f64, f64)>,
+}
+
+impl SnapNode {
+    fn of(n: &OpenNode) -> Self {
+        SnapNode { changes: n.changes.clone(), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch }
+    }
+    fn into_open(self) -> OpenNode {
+        OpenNode { changes: self.changes, lower_bound: self.lower_bound, estimate: self.estimate, depth: self.depth, basis: None, basis_epoch: 0, dse: None, branch: self.branch, prot: None, tags: None }
+    }
+}
+
+/// 木の探索を n 本のスレッドで分け合うための共有の待ち行列 (`MipParams::threads` > 1)。根を解いたスレッド (主) が根の後の
+/// 木の写しから残りのスレッド (従) を始め、各スレッドは自分の待ち行列で探索する。待ち行列が空になったスレッドはここから
+/// ノードを取り、ほかのスレッドは待っているスレッドがいれば自分の待ち行列の下界の小さいノードをここへ渡す。
+/// 全てのスレッドが待っていて、ここも空なら探索は終わり。
+pub(crate) struct WorkPool {
+    inner: std::sync::Mutex<PoolInner>,
+    /// 止める合図 (主が終わるときに立てる)。
+    stop: std::sync::atomic::AtomicBool,
+    /// 待っているスレッドの数と、ここにあるノードの数 (錠の外で読む目安。渡すかどうかの判断に使う)。
+    idle: std::sync::atomic::AtomicUsize,
+    len: std::sync::atomic::AtomicUsize,
+    /// 解けなかったノードを捨てたスレッドがある (最適とは言えない)。
+    unresolved: std::sync::atomic::AtomicBool,
+}
+
+struct PoolInner {
+    nodes: Vec<SnapNode>,
+    /// 待っていない (ノードを持っているか処理している) スレッドの数。
+    busy: usize,
+    done: bool,
+}
+
+/// このスレッドを待っていない側から外す (終わるスレッドが呼ぶ)。
+fn pool_release(pool: &WorkPool) {
+    let mut g = pool.inner.lock().unwrap();
+    g.busy = g.busy.saturating_sub(1);
+    if g.busy == 0 && g.nodes.is_empty() {
+        g.done = true;
+    }
+}
+
+impl WorkPool {
+    fn new(threads: usize) -> Self {
+        WorkPool {
+            inner: std::sync::Mutex::new(PoolInner { nodes: Vec::new(), busy: threads, done: false }),
+            stop: std::sync::atomic::AtomicBool::new(false),
+            idle: std::sync::atomic::AtomicUsize::new(0),
+            len: std::sync::atomic::AtomicUsize::new(0),
+            unresolved: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
 }
 
 impl Portfolio {
@@ -549,24 +614,29 @@ pub(crate) fn mip_threads() -> usize {
 pub fn solve(p: &MipProblem, params: MipParams) -> MipResult {
     // LP の実装: 既定は傾き・切片二段解法 (`ENOMOTO_MIP_LP=own` で分枝限定法専用の単体法)。
     if env_str!("ENOMOTO_MIP_LP").is_some_and(|v| v == "own") {
-        solve_with::<LpEngine>(p, params, None)
+        solve_with::<LpEngine>(p, params, None, None)
     } else {
-        solve_with::<crate::simplex::mip_lp::TwoStageLp>(p, params, None)
+        solve_with::<crate::simplex::mip_lp::TwoStageLp>(p, params, None, None)
     }
 }
 
 /// 木の写し `snap` の未処理のノードから探索を続ける (根のカット・ヒューリスティクス・再スタートは行わない)。解は写しの
 /// 問題 (`snap.p`) の空間。見つけた解は写しを作ったスレッドに渡す ([`Portfolio`] の inbox)。
 pub(crate) fn solve_snapshot(snap: std::sync::Arc<TreeSnapshot>, params: MipParams) -> MipResult {
+    solve_worker(snap, None, params)
+}
+
+/// 木の写し `snap` から解く (`pool` があれば共有の待ち行列からノードを取る従のスレッドとして)。
+fn solve_worker(snap: std::sync::Arc<TreeSnapshot>, pool: Option<std::sync::Arc<WorkPool>>, params: MipParams) -> MipResult {
     let p = snap.p.clone();
     if env_str!("ENOMOTO_MIP_LP").is_some_and(|v| v == "own") {
-        solve_with::<LpEngine>(&p, params, Some(snap))
+        solve_with::<LpEngine>(&p, params, Some(snap), pool)
     } else {
-        solve_with::<crate::simplex::mip_lp::TwoStageLp>(&p, params, Some(snap))
+        solve_with::<crate::simplex::mip_lp::TwoStageLp>(&p, params, Some(snap), pool)
     }
 }
 
-fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::sync::Arc<TreeSnapshot>>) -> MipResult {
+fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::sync::Arc<TreeSnapshot>>, pool: Option<std::sync::Arc<WorkPool>>) -> MipResult {
     let start = Instant::now();
     let deadline = if params.time_limit.is_finite() { Some(start + Duration::from_secs_f64(params.time_limit.max(0.0))) } else { None };
     let mut dom = Domain::new(p);
@@ -578,6 +648,9 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         }
     }
     if !dom.propagate(p) {
+        if let Some(pl) = &pool {
+            pool_release(pl);
+        }
         return fail(MipStatus::Infeasible, 0);
     }
     dom.commit_root();
@@ -663,10 +736,23 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         fb_seen: 0,
         inbox_seen: 0,
         snap_stats: [0; 3],
+        pool_busy: pool.is_some(),
+        pool,
+        workers: Vec::new(),
+        worker_totals: (0, 0),
+        pool_stats: [0; 2],
         proof_conflicts: 0,
-        orbitopes: if params.submip { Rc::new(Vec::new()) } else { super::ORBITOPES.with(|t| t.borrow().clone()).unwrap_or_default() },
+        orbitopes: match &snap {
+            Some(sn) => Rc::new(sn.orbitopes.clone()),
+            None if params.submip => Rc::new(Vec::new()),
+            None => super::ORBITOPES.with(|t| t.borrow().clone()).unwrap_or_default(),
+        },
         orbitope_fixings: 0,
-        orig: if params.submip || env_str!("ENOMOTO_MIP_SYM_NO_ORIG").is_some() { None } else { super::SYM_ORIG.with(|t| t.borrow().clone()) },
+        orig: match &snap {
+            Some(sn) => sn.orig.as_ref().map(|o| Rc::new((**o).clone())),
+            None if params.submip || env_str!("ENOMOTO_MIP_SYM_NO_ORIG").is_some() => None,
+            None => super::SYM_ORIG.with(|t| t.borrow().clone()),
+        },
         sym_canon: (0, 0),
         orb_col: std::collections::HashMap::new(),
         dive_stack: Vec::new(),
@@ -831,6 +917,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     pub(super) fn time_up(&self) -> bool {
         self.deadline.is_some_and(|d| Instant::now() >= d)
+            || self.pool.as_ref().is_some_and(|p| p.stop.load(std::sync::atomic::Ordering::Relaxed))
             || self.shared.as_ref().is_some_and(|s| {
                 s.stop.load(std::sync::atomic::Ordering::Relaxed)
                     || self.watch.is_some_and(|(trig, target)| {
@@ -936,6 +1023,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 受け取ったときに更新する。解を持たないまま最良値だけ下げると、その解を誰も返せないことがある)
                 s.inbox.lock().unwrap().push((snap.serial, x.clone()));
                 s.inbox_n.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                // 木を分け合う従のスレッドは、解を主に渡した後で最良値も知らせる (主は終わる前に必ず受け取る)
+                if self.pool.is_some() {
+                    s.publish(z);
+                }
             } else if let Some(s) = &self.shared {
                 s.publish(z);
             }
@@ -1324,6 +1415,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.queue.push(OpenNode { changes: Vec::new(), lower_bound: root_obj, estimate: root_obj, depth: 0, basis: Some(Rc::new(self.lp.basis())), basis_epoch: self.row_log.len(), dse: if dse_all() { self.lp.dse_snapshot().map(Rc::new) } else { None }, branch: None, prot, tags: None });
         }
         // 根のノードは LP を解いた状態のままなので、最初の取り出しでは定義域・LP を作り直さない。
+        if self.params.threads > 1 && !self.params.submip && self.watch.is_none() && self.snap.is_none() {
+            self.start_workers();
+        }
         // 潜っている子ノード (定義域に分枝を積んだ状態で次に処理する)。
         let mut plunge: Option<OpenNode> = None;
         let mut plunge_depth = 0usize;
@@ -1350,6 +1444,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             } else if self.watch.is_none() && !self.params.submip && self.shared.is_some() {
                 self.snap_sync(&mut plunge);
+            }
+            // 木を分け合う: 待っているスレッドがいれば、自分の待ち行列から下界の小さいノードを渡す
+            if let Some(pool) = &self.pool {
+                use std::sync::atomic::Ordering;
+                let (idle, len) = (pool.idle.load(Ordering::Relaxed), pool.len.load(Ordering::Relaxed));
+                if idle > len && self.queue.len() >= 2 {
+                    self.pool_donate(idle - len);
+                }
             }
             // 目的値の二分探索で、暫定解より良い解がないことを証明した (下界が打ち切り値に届いた)
             if self.incumbent.is_some() && self.bisect_lb >= self.prune_limit() {
@@ -1427,7 +1529,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.queue.prune(lim);
                     // 下界最小のノードを選ぶ頻度: 暫定解があれば上げる (下界を押し上げる)
                     let bb_every = if self.incumbent.is_some() { tunable!("ENOMOTO_T_MIP_BB_EVERY_INC", 4u64, u64) } else { tunable!("ENOMOTO_T_MIP_BB_EVERY", 10u64, u64) };
-                    let Some(n) = self.queue.pop(bb_every) else { break };
+                    let n = match self.queue.pop(bb_every) {
+                        Some(n) => n,
+                        // 木を分け合う: 共有の待ち行列から取る (全てのスレッドが待っていて空なら探索は終わり)
+                        None => match self.pool_acquire() {
+                            Ok(Some(n)) => n,
+                            Ok(None) => break,
+                            Err(()) => return self.finish_limit(MipStatus::TimeLimit, None),
+                        },
+                    };
                     if !first {
                         // 根まで戻してノードの分枝を積み直す。
                         self.dom.reset_to_root(self.p);
@@ -2038,6 +2148,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.snap.is_some() {
             self.snap_report(None);
         }
+        // 木を分け合う主: 従を待ち、従が見つけた解を受け取ってから結果を決める
+        self.join_workers();
+        self.take_inbox();
         if self.unresolved {
             let lb = self.incumbent.as_ref().map(|(z, _)| *z).unwrap_or(f64::NEG_INFINITY);
             return self.finish(MipStatus::NotSolved, lb);
@@ -2468,6 +2581,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     fn finish_limit(&mut self, status: MipStatus, current: Option<&OpenNode>) -> MipResult {
+        // 木を分け合う従: 残ったノードを共有の待ち行列に返す (主がそれも含めて下界を出す)
+        if let (Some(pool), true) = (self.pool.clone(), self.snap.is_some()) {
+            let mut back: Vec<SnapNode> = self.queue.iter().map(SnapNode::of).collect();
+            if let Some(n) = current {
+                back.push(SnapNode::of(n));
+            }
+            let mut g = pool.inner.lock().unwrap();
+            g.nodes.extend(back);
+            pool.len.store(g.nodes.len(), std::sync::atomic::Ordering::Relaxed);
+        }
         let mut lb = self.queue.best_lower_bound();
         if let Some(n) = current {
             lb = lb.min(n.lower_bound);
@@ -3688,12 +3811,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         if s.snap_req.load(Ordering::Acquire) && !self.unresolved {
             s.snap_req.store(false, Ordering::Release);
-            self.make_snapshot(&s, plunge);
+            self.make_snapshot(&s, plunge, true);
         }
     }
 
     /// 木の写しを作って共有する。待ち行列のノードと潜っている子に写しの中の番号を付ける (前の写しの番号は 3 つまで残す)。
-    fn make_snapshot(&mut self, s: &Portfolio, plunge: &mut Option<OpenNode>) {
+    fn make_snapshot(&mut self, s: &Portfolio, plunge: &mut Option<OpenNode>, with_nodes: bool) -> std::sync::Arc<TreeSnapshot> {
         use std::sync::atomic::Ordering;
         let serial = s.snap_serial.fetch_add(1, Ordering::AcqRel) + 1;
         let p = match &self.snap_p {
@@ -3704,7 +3827,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 p
             }
         };
-        let mut nodes = self.queue.take_all();
+        let mut nodes = if with_nodes { self.queue.take_all() } else { Vec::new() };
         let mut snodes = Vec::with_capacity(nodes.len() + 1);
         let retag = |n: &mut OpenNode, k: usize| {
             let mut t = vec![serial << 32 | k as u64];
@@ -3720,11 +3843,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         for n in nodes {
             self.queue.push(n);
         }
-        if let Some(n) = plunge.as_mut() {
+        if let Some(n) = plunge.as_mut().filter(|_| with_nodes) {
             retag(n, snodes.len());
             snodes.push(SnapNode { changes: n.changes.clone(), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch });
         }
-        self.dive_stack.clear();
+        if with_nodes {
+            self.dive_stack.clear();
+        }
         let m0 = self.p.m;
         let rows: Vec<(Vec<(usize, f64)>, f64, f64)> = (m0..self.lp.num_rows())
             .map(|i| {
@@ -3733,13 +3858,151 @@ impl<'a, L: MipLp> Solver<'a, L> {
             })
             .collect();
         let pool: Vec<(Vec<(usize, f64)>, f64)> = self.cut_pool.iter().map(|(c, r, _)| (c.clone(), *r)).collect();
-        let snap = TreeSnapshot { serial, p, lo: self.dom.global_lo.clone(), up: self.dom.global_up.clone(), rows, pool, pc: self.pc.clone(), nodes: snodes, valid_below: self.prune_limit() };
+        let orig = self.orig.as_ref().map(|o| std::sync::Arc::new((**o).clone()));
+        let snap = TreeSnapshot { serial, p, lo: self.dom.global_lo.clone(), up: self.dom.global_up.clone(), rows, pool, pc: self.pc.clone(), nodes: snodes, valid_below: self.prune_limit(), orbitopes: (*self.orbitopes).clone(), orig };
         if self.params.verbose && env_str!("ENOMOTO_MIP_BISECT_VERBOSE").is_some() {
             eprintln!("MIP: tree snapshot {serial}: {} nodes, {} cut rows, valid below {:.10e} ({:.1}s)", snap.nodes.len(), snap.rows.len(), snap.valid_below, self.start.elapsed().as_secs_f64());
         }
-        *s.snap.lock().unwrap() = Some(std::sync::Arc::new(snap));
+        let snap = std::sync::Arc::new(snap);
+        if with_nodes {
+            *s.snap.lock().unwrap() = Some(snap.clone());
+            self.snap_stats[0] += 1;
+        }
         self.snap_serials.push(serial);
-        self.snap_stats[0] += 1;
+        snap
+    }
+
+    /// 木を分け合う従のスレッドを始める (根の処理を終えて木の探索に入るところで、主が呼ぶ)。従は根の後の写し (ノードなし)
+    /// から始め、共有の待ち行列からノードを取る。見つけた解は主に渡す。
+    fn start_workers(&mut self) {
+        let n = self.params.threads - 1;
+        let shared = match &self.shared {
+            Some(s) => s.clone(),
+            None => {
+                let s = std::sync::Arc::new(Portfolio::new());
+                if let Some((z, _)) = &self.incumbent {
+                    s.publish(*z);
+                }
+                self.shared = Some(s.clone());
+                s
+            }
+        };
+        let pool = std::sync::Arc::new(WorkPool::new(self.params.threads));
+        self.pool = Some(pool.clone());
+        self.pool_busy = true;
+        let snap = self.make_snapshot(&shared, &mut None, false);
+        // 従は主が止める (止める合図)。時間の上限は主より少し後にして、主より先に止まらないようにする
+        let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64() + 2.0);
+        let params = MipParams { time_limit: remaining, node_limit: u64::MAX, verbose: false, threads: 1, ..self.params };
+        let prof = crate::simplex::slope_intercept_dual::mip_profile();
+        for _ in 0..n {
+            let (snap, pool, shared) = (snap.clone(), pool.clone(), shared.clone());
+            let h = std::thread::Builder::new()
+                .stack_size(64 << 20)
+                .spawn(move || {
+                    crate::simplex::slope_intercept_dual::set_mip_profile(prof);
+                    set_thread_portfolio(Some(shared));
+                    let r = solve_worker(snap, Some(pool), params);
+                    set_thread_portfolio(None);
+                    r
+                })
+                .expect("failed to spawn a tree search thread");
+            self.workers.push(h);
+        }
+        if self.params.verbose {
+            eprintln!("MIP: tree search with {} threads ({:.2}s)", self.params.threads, self.start.elapsed().as_secs_f64());
+        }
+    }
+
+    /// 待っているスレッド `want` 本に、自分の待ち行列の下界の小さいノードを渡す (自分の待ち行列の半分まで)。
+    fn pool_donate(&mut self, want: usize) {
+        use std::sync::atomic::Ordering;
+        let Some(pool) = self.pool.clone() else { return };
+        let k = want.min(self.queue.len() / 2).max(1);
+        let mut out = Vec::with_capacity(k);
+        for _ in 0..k {
+            match self.queue.pop_best() {
+                Some(n) => out.push(SnapNode::of(&n)),
+                None => break,
+            }
+        }
+        self.pool_stats[0] += out.len() as u64;
+        let mut g = pool.inner.lock().unwrap();
+        g.nodes.extend(out);
+        pool.len.store(g.nodes.len(), Ordering::Relaxed);
+    }
+
+    /// 自分の待ち行列が空のとき、共有の待ち行列からノードを取る。なければ待つ。全てのスレッドが待っていて空なら探索は終わり
+    /// (`Ok(None)`)。待っている間に時間切れ・止める合図なら `Err`。
+    fn pool_acquire(&mut self) -> Result<Option<OpenNode>, ()> {
+        use std::sync::atomic::Ordering;
+        let Some(pool) = self.pool.clone() else { return Ok(None) };
+        loop {
+            {
+                let mut g = pool.inner.lock().unwrap();
+                if let Some(k) = (0..g.nodes.len()).min_by(|&a, &b| g.nodes[a].lower_bound.total_cmp(&g.nodes[b].lower_bound)) {
+                    let sn = g.nodes.swap_remove(k);
+                    pool.len.store(g.nodes.len(), Ordering::Relaxed);
+                    if !self.pool_busy {
+                        g.busy += 1;
+                        pool.idle.fetch_sub(1, Ordering::Relaxed);
+                        self.pool_busy = true;
+                    }
+                    self.pool_stats[1] += 1;
+                    return Ok(Some(sn.into_open()));
+                }
+                if self.pool_busy {
+                    g.busy -= 1;
+                    pool.idle.fetch_add(1, Ordering::Relaxed);
+                    self.pool_busy = false;
+                }
+                if g.busy == 0 {
+                    g.done = true;
+                }
+                if g.done {
+                    return Ok(None);
+                }
+            }
+            if self.time_up() {
+                return Err(());
+            }
+            std::thread::sleep(Duration::from_micros(200));
+        }
+    }
+
+    /// 主: 従を止めて待ち、結果を合わせる。戻り値は従の下界と、共有の待ち行列に残ったノードの下界の最小 (なければ +inf)。
+    fn join_workers(&mut self) -> f64 {
+        use std::sync::atomic::Ordering;
+        let Some(pool) = self.pool.clone() else { return f64::INFINITY };
+        if self.workers.is_empty() {
+            return f64::INFINITY;
+        }
+        pool.stop.store(true, Ordering::Relaxed);
+        let mut lb = f64::INFINITY;
+        for h in std::mem::take(&mut self.workers) {
+            match h.join() {
+                Ok(r) => {
+                    self.worker_totals.0 += r.nodes;
+                    self.worker_totals.1 += r.lp_iterations;
+                    if !matches!(r.status, MipStatus::Optimal | MipStatus::Infeasible) {
+                        lb = lb.min(r.best_bound);
+                    }
+                }
+                Err(_) => {
+                    // 従が異常終了した: 探索し残した部分があるかもしれない
+                    self.unresolved = true;
+                    lb = f64::NEG_INFINITY;
+                }
+            }
+        }
+        if pool.unresolved.load(Ordering::Relaxed) {
+            self.unresolved = true;
+        }
+        let g = pool.inner.lock().unwrap();
+        for n in &g.nodes {
+            lb = lb.min(n.lower_bound);
+        }
+        lb
     }
 
     /// 木の写しから解く求解: 部分木を探索し終えた写しのノード (待ち行列にも潜っている子にも、そのノードの子孫が残って
@@ -3786,6 +4049,21 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     fn finish(&mut self, status: MipStatus, best_bound: f64) -> MipResult {
+        // 木を分け合う主: 従を止めて待ち、従と共有の待ち行列の下界を合わせる。従: 待っていない側から外れる
+        let wlb = self.join_workers();
+        let best_bound = if matches!(status, MipStatus::Optimal | MipStatus::Infeasible) { best_bound } else { best_bound.min(wlb) };
+        if let Some(pool) = self.pool.clone() {
+            if self.unresolved && self.snap.is_some() {
+                pool.unresolved.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            if self.pool_busy {
+                pool_release(&pool);
+                self.pool_busy = false;
+            }
+            if self.params.verbose {
+                eprintln!("MIP: tree search threads: worker nodes {}, nodes given away {}, taken {}", self.worker_totals.0, self.pool_stats[0], self.pool_stats[1]);
+            }
+        }
         // 木の写しから解いた求解が見つけた解を受け取る (止める合図で終わるときも)
         let best_bound = if self.take_inbox() { best_bound.min(self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z)) } else { best_bound };
         if self.params.verbose && self.snap_stats[0] > 0 {
@@ -3826,6 +4104,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
             (MipStatus::Infeasible, Some(_)) => MipStatus::Optimal,
             (s, _) => s,
         };
-        MipResult { status, x, objective, best_bound, nodes: self.nodes, lp_iterations: self.lp.total_iterations() }
+        MipResult { status, x, objective, best_bound, nodes: self.nodes + self.worker_totals.0, lp_iterations: self.lp.total_iterations() + self.worker_totals.1 }
     }
 }
