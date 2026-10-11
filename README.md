@@ -146,6 +146,12 @@ When `threads` is k ≥ 2, branch and bound runs in parallel as follows.
 
 Termination criteria are specified with `time_limit` (seconds), `mip_rel_gap` (relative gap, default 1e-4) and `node_limit` (number of nodes). When the solver stops at a limit, `status` becomes `"time_limit"` or `"node_limit"`, and if there is an incumbent, `objective` and each variable's `.value` can be read. The results are also stored in `best_bound` (the proven bound), `mip_gap` (relative gap) and `nodes` (number of nodes processed) of `Solution`.
 
+The relative gap measures the difference between the objective value of the incumbent (the feasible solution with the best objective value found during the search) and the proven bound as
+
+  relative gap = |objective value of the incumbent − proven bound| / max(|objective value of the incumbent|, 1)
+
+(the denominator is set to 1 when it is less than 1, so that the ratio does not become extremely large when the objective value is close to 0). The optimal value lies between the proven bound and the objective value of the incumbent. During the search, nodes whose bound reaches "objective value of the incumbent − max(`mip_rel_gap` × max(|objective value of the incumbent|, 1), 10⁻⁶)" are pruned, so when no unprocessed nodes remain, the relative gap is `mip_rel_gap` or less (or the difference is 10⁻⁶ or less). The solve then ends with `"optimal"`. Therefore `"optimal"` means that the relative difference from the optimal value has been proven to be `mip_rel_gap` or less, and the difference is not necessarily exactly 0. If an exact optimal solution is needed, specify `mip_rel_gap=0` (a difference of 10⁻⁶ still remains).
+
 ### Number of threads (`threads`)
 
 `solve(threads=...)` specifies the number of threads to use (the default is 1). A value above the number of CPUs available to this process (`enomoto_solver.max_threads()`) is capped there. The whole solve, including parallel sections such as presolve, runs on this number of threads.
@@ -182,6 +188,17 @@ Root LP: objective 2.2000000000e2 (0.00s)
      0.0s          0         0     2.200000000e2     2.200000000e2     0.00%
 Result: optimal, objective 220, best bound 220, gap 0.00%, nodes 0 (0.00s)
 ```
+
+The columns of the search progress mean the following.
+
+| Column | Meaning |
+|---|---|
+| `time` | Elapsed time since the start of the solve. |
+| `nodes` | Number of nodes processed (whose relaxations have been solved), the total over all threads. |
+| `open` | Number of unprocessed nodes: subproblems created by branching that are still in the queue and whose relaxations have not been solved yet (the total over all threads). The search ends when it becomes 0. |
+| `best bound` | The proven bound (the lower bound on the optimal value for minimization, the upper bound for maximization). |
+| `incumbent` | The objective value of the incumbent (the feasible solution with the best objective value found). `-` if there is none yet. |
+| `gap` | The relative gap ("Mixed-integer linear optimization (MIP)" above) as a percentage. |
 
 With `solve(log=False)`, neither the notice nor the log is output.
 
