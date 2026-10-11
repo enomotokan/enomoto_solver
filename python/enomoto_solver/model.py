@@ -116,6 +116,7 @@ class Model:
         time_limit: Optional[float] = None,
         mip_rel_gap: Optional[float] = None,
         node_limit: Optional[int] = None,
+        threads: Optional[int] = None,
     ) -> Solution:
         """Rust コアで前処理と最適化を実行し、結果を Solution で返す。
 
@@ -144,6 +145,10 @@ class Model:
         整数計画の打ち切り条件: ``time_limit`` (秒)、``mip_rel_gap`` (相対ギャップ、既定 1e-4)、
         ``node_limit`` (ノード数)。上限で止まると status は ``"time_limit"`` / ``"node_limit"`` になり、
         暫定解があれば ``objective`` と各 Variable の ``.value`` が読める。
+
+        ``threads``: 整数計画の木の探索に使うスレッドの数 (既定 1)。根の処理の後、未処理のノードを
+        スレッドの間で分け合って探索する。``enomoto_solver.max_threads()`` (このプロセスが使える CPU の数。
+        環境変数 ``ENOMOTO_MIP_MAX_THREADS`` でさらに小さくできる) を超える値はそこで頭打ちにする。
         """
         result = self._core.solve(
             root_solver=root_solver,
@@ -151,6 +156,7 @@ class Model:
             time_limit=time_limit,
             mip_rel_gap=mip_rel_gap,
             node_limit=node_limit,
+            threads=threads,
         )
         status = result["status"]
         self._solution_x = result["x"]

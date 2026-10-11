@@ -1071,6 +1071,48 @@ pub(crate) fn take_last_ray() -> Option<Vec<f64>> {
 
 /// 近道で最適になったときに保存した被約費用を取り出す。
 /// 次の求解の最初の DSE 重みを渡す (基底位置順。長さが行数と違えば使わない)。
+/// 引き継いだ DSE 重みを使うか (`ENOMOTO_WARM_DSE` とは別に、呼び出し側が場面を限って有効にする。例: MIP の根のカットのループ)。
+/// スレッドごとの値 (MIP のポートフォリオ並列ではスレッドごとに設定が違う)。スレッド局所の領域を増やさないよう、
+/// 以下の印はまとめて 1 バイトに持つ ([`TlFlag`])。
+pub(crate) static WARM_DSE_ON: TlFlag = TlFlag(1);
+
+thread_local! {
+    /// [`TlFlag`] の印 (ビットごと) と、MIP のポートフォリオの設定 (上位ビット、[`mip_profile`])。
+    static TL_FLAGS: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+}
+
+/// スレッドごとの真偽の印 (`AtomicBool` と同じ呼び方で使う。順序の引数は使わない)。
+pub(crate) struct TlFlag(u8);
+
+impl TlFlag {
+    pub(crate) fn load(&self, _o: std::sync::atomic::Ordering) -> bool {
+        TL_FLAGS.with(|c| c.get() & self.0 != 0)
+    }
+    pub(crate) fn store(&self, v: bool, _o: std::sync::atomic::Ordering) {
+        TL_FLAGS.with(|c| c.set(if v { c.get() | self.0 } else { c.get() & !self.0 }));
+    }
+    pub(crate) fn swap(&self, v: bool, o: std::sync::atomic::Ordering) -> bool {
+        let old = self.load(o);
+        self.store(v, o);
+        old
+    }
+}
+
+/// このスレッドの MIP のポートフォリオの設定 (0 = 既定、1 = 以前の形: DSE 重みを引き継がず、最適面の頂点も使わない)。
+pub(crate) fn mip_profile() -> u8 {
+    TL_FLAGS.with(|c| c.get() >> 4)
+}
+
+pub(crate) fn set_mip_profile(v: u8) {
+    TL_FLAGS.with(|c| c.set((c.get() & 0x0f) | (v << 4)));
+}
+/// 次の 1 回の warm start の求解だけ、DSE 重みをその基底の厳密な値から始める (呼び出し側が場面を限って立てる。
+/// 例: MIP で待ち行列から取り出したノードの基底を復元した直後。求解の始めに下ろす)。
+/// 次の 1 回の warm start の求解だけ、渡された DSE 重み (同じ基底のもの) を使う (MIP で待ち行列のノードの基底と
+/// 一緒に保存した重みを戻した直後に立てる。求解の始めに下ろす)。
+pub(crate) static WARM_DSE_ONCE: TlFlag = TlFlag(2);
+pub(crate) static DSE_EXACT_ONCE: TlFlag = TlFlag(4);
+
 pub(crate) fn set_warm_dse(w: Option<Vec<f64>>) {
     WARM_DSE.with(|x| *x.borrow_mut() = w);
 }
@@ -3792,10 +3834,20 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     // 離基行の重み(論文 5.4 節 Step 2(b) の `γ_i`、注意 7.7): `super::DseState` をそのまま使う(重みは `M` に依存しない
     // 表の行の量。`M` に依存するのはそれを使うスコア `Score2` だけ)。最初のピボットから
     // 厳密 DSE を使う。全スラックの `B0` は符号付き単位行列なので `DseState::new` の単位重みは正確。
+    let exact_once = DSE_EXACT_ONCE.swap(false, std::sync::atomic::Ordering::Relaxed);
+    let warm_once = WARM_DSE_ONCE.swap(false, std::sync::atomic::Ordering::Relaxed);
     let mut dse = match WARM_DSE.with(|w| w.borrow_mut().take()) {
         // 既定では使わない (`ENOMOTO_WARM_DSE` で有効): 反復は少し減るが、退化した LP で着く頂点が変わり、misc07・mik-250 で
         // 木が大きくなった (40 問: 18 -> 17 問)
-        Some(w) if warm_started && w.len() == m && env_str!("ENOMOTO_WARM_DSE").is_some() => super::DseState::from_weights(w),
+        Some(w) if warm_started && w.len() == m && (warm_once || env_str!("ENOMOTO_WARM_DSE").is_some() || WARM_DSE_ON.load(std::sync::atomic::Ordering::Relaxed)) => super::DseState::from_weights(w),
+        // `ENOMOTO_DSE_EXACT_INIT`: warm start (構造列を含む基底) では、単位重みではなくその基底の厳密な DSE 重みから
+        // 始める (HiGHS の HEkkDual::initialiseInstance と同じ。行ごとに BTRAN 1 回、計 m 回)。単位重みは全スラック基底で
+        // しか正確でなく、分枝限定法で待ち行列から取り出したノード (保存した基底を復元、重みの引き継ぎなし) の最初の LP は
+        // neos-911970 で 1 回平均 265 反復 (潜りの子ノードは 97 反復) かかっていた。復元後の最初の LP は 1 回平均 125 反復に
+        // 減るが、着く頂点が変わって根のカットのループが 23.26 で止まり (既定は 47.26)、40 問では 14 問 30.87 (同時に測った
+        // 既定 19 問 27.81): misc07・binkar10_1・neos-860300・mik-250・neos5 が時間切れ、beavma 0.8 -> 8.7 秒 (m 回の BTRAN
+        // の分だけ LP 1 回が重くなる)。既定では使わない
+        _ if warm_started && (exact_once || env_str!("ENOMOTO_DSE_EXACT_INIT").is_some()) => super::DseState::from_basis(m, &lu),
         _ => super::DseState::new(m),
     };
 

@@ -125,9 +125,10 @@ impl PyModel {
     /// `"infeasible"` と `"unbounded"` を区別する (`types::LpOptions` 参照)。
     ///
     /// `time_limit` [秒] / `mip_rel_gap` (既定 1e-4) / `node_limit`: 整数計画の打ち切り条件。
+    /// `threads`: 整数計画の木の探索に使うスレッドの数 (既定 1。`max_threads()` を超える値はそこで頭打ち)。
     ///
     /// 目的関数が未設定なら `ValueError`。
-    #[pyo3(signature = (root_solver=None, distinguish_infeasible_unbounded=false, time_limit=None, mip_rel_gap=None, node_limit=None))]
+    #[pyo3(signature = (root_solver=None, distinguish_infeasible_unbounded=false, time_limit=None, mip_rel_gap=None, node_limit=None, threads=None))]
     fn solve<'py>(
         &self,
         py: Python<'py>,
@@ -136,6 +137,7 @@ impl PyModel {
         time_limit: Option<f64>,
         mip_rel_gap: Option<f64>,
         node_limit: Option<u64>,
+        threads: Option<usize>,
     ) -> PyResult<Bound<'py, PyDict>> {
         let objective = self.objective.as_ref().ok_or_else(|| {
             PyValueError::new_err("no objective set: call Model.set_objective(...) before solve()")
@@ -146,7 +148,7 @@ impl PyModel {
         };
 
         let opts = LpOptions { distinguish_infeasible_unbounded, ..Default::default() };
-        let settings = MipSettings { time_limit, rel_gap: mip_rel_gap, node_limit };
+        let settings = MipSettings { time_limit, rel_gap: mip_rel_gap, node_limit, threads };
         let result = py.allow_threads(|| solve_mip(&self.variables, objective, &self.constraints, root_solver, opts, settings));
 
         // Python に返す結果 dict

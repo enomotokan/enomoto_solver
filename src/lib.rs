@@ -133,11 +133,19 @@ fn last_solve_events() -> Vec<(&'static str, f64)> {
     phase_timing::events()
 }
 
+/// 整数計画の木の探索に使えるスレッドの数の上限 (このプロセスが使える CPU の数。環境変数
+/// `ENOMOTO_MIP_MAX_THREADS` でさらに小さくできる)。
+#[pyfunction]
+fn max_threads() -> usize {
+    mip::max_threads()
+}
+
 /// Python 拡張モジュール `enomoto_solver._core` の初期化。`PyModel` クラスと
 /// `last_solve_events` を登録する。
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyModel>()?;
     m.add_function(wrap_pyfunction!(last_solve_events, m)?)?;
+    m.add_function(wrap_pyfunction!(max_threads, m)?)?;
     Ok(())
 }

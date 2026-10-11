@@ -4,7 +4,7 @@
 //! 通常は後者 (hybrid estimate) で選び、一定回数ごとに下界最小のノードを選ぶ。
 
 use super::lp::Basis;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
 
 /// 全順序つきの f64 (BTreeSet のキー用)。
@@ -45,8 +45,17 @@ pub struct OpenNode {
     /// `basis` を保存したときの LP の行の変更の記録の位置 (`Solver::row_log` の長さ)。戻すときにその後の行の追加・削除を
     /// 基底に当てはめる。
     pub basis_epoch: usize,
+    /// `basis` の DSE 重み (基底変数の番号との組、`basis_epoch` のときの行の番号)。`ENOMOTO_MIP_NODE_DSE` で保存する。
+    pub dse: Option<Rc<Vec<(u32, f32)>>>,
     /// このノードを作った分枝 (列, 上向きか, 親の LP 値, 親の LP 目的値)。pseudocost の更新に使う。
     pub branch: Option<(usize, bool, f64, f64)>,
+    /// `basis` で効いている (論理変数が非基底の) カットの番号 (`Solver::cut_ids`)。待ち行列にある間、このカットは
+    /// 年齢で外さない (外すと取り出したときに基底が合わず LP がほぼ解き直しになる)。
+    pub prot: Option<Rc<Vec<u64>>>,
+    /// ポートフォリオ並列の木の写し ([`super::solver::TreeSnapshot`]) での、このノードの祖先の番号 (写しの通し番号 << 32 | 写しの
+    /// 中のノードの番号)。子は親のものを引き継ぐ。二分探索のスレッドが「この祖先の部分木には t 未満の解がない」と示したら、
+    /// 下界を t に上げる。
+    pub tags: Option<Rc<Vec<u64>>>,
 }
 
 /// 待ち行列。
@@ -58,11 +67,13 @@ pub struct NodeQueue {
     pops: u64,
     /// 枠ごとの世代 (push のたびに増やす。取り出した枠が使い回されても、古い (枠, 世代) では取り出せない)。
     gen: Vec<u64>,
+    /// カットの番号ごとの、そのカットが効いている基底を持つ待ち行列のノードの数。
+    protect: HashMap<u64, u32>,
 }
 
 impl NodeQueue {
     pub fn new() -> Self {
-        NodeQueue { nodes: Vec::new(), free: Vec::new(), by_lb: BTreeSet::new(), by_est: BTreeSet::new(), pops: 0, gen: Vec::new() }
+        NodeQueue { nodes: Vec::new(), free: Vec::new(), by_lb: BTreeSet::new(), by_est: BTreeSet::new(), pops: 0, gen: Vec::new(), protect: HashMap::new() }
     }
 
     pub fn len(&self) -> usize {
@@ -78,6 +89,11 @@ impl NodeQueue {
         let lb = node.lower_bound;
         let est = 0.5 * node.lower_bound + 0.5 * node.estimate;
         let depth = node.depth as f64;
+        if let Some(pr) = &node.prot {
+            for &c in pr.iter() {
+                *self.protect.entry(c).or_insert(0) += 1;
+            }
+        }
         let id = if let Some(id) = self.free.pop() {
             self.nodes[id] = Some(node);
             id
@@ -105,7 +121,10 @@ impl NodeQueue {
     }
 
     fn remove(&mut self, id: usize) -> OpenNode {
-        let node = self.nodes[id].take().unwrap();
+        let mut node = self.nodes[id].take().unwrap();
+        if let Some(pr) = node.prot.take() {
+            self.unprotect(&pr);
+        }
         let est = 0.5 * node.lower_bound + 0.5 * node.estimate;
         self.by_lb.remove(&(Key(node.lower_bound), id));
         self.by_est.remove(&(Key(est), Key(-(node.depth as f64)), id));
@@ -129,16 +148,56 @@ impl NodeQueue {
         Some(self.remove(id))
     }
 
+    /// 下界最小のノードを取り出す。
+    pub fn pop_best(&mut self) -> Option<OpenNode> {
+        let id = self.by_lb.iter().next().map(|&(_, id)| id)?;
+        Some(self.remove(id))
+    }
+
     /// 下界が `cutoff` 以上のノードを捨てる。捨てたノードの深さの一覧を返す (木の重みの集計用)。
     pub fn prune(&mut self, cutoff: f64) -> Vec<usize> {
         let ids: Vec<usize> = self.by_lb.range((Key(cutoff), 0)..).map(|&(_, id)| id).collect();
         ids.into_iter().map(|id| self.remove(id).depth).collect()
     }
 
+    /// ノードをすべて取り出す (枠の世代は保つので、取り出す前の (枠, 世代) ではもう取り出せない)。
+    pub fn take_all(&mut self) -> Vec<OpenNode> {
+        let ids: Vec<usize> = self.by_lb.iter().map(|&(_, id)| id).collect();
+        ids.into_iter().map(|id| self.remove(id)).collect()
+    }
+
+    /// 待ち行列のノード (順不同)。
+    pub fn iter(&self) -> impl Iterator<Item = &OpenNode> {
+        self.nodes.iter().flatten()
+    }
+
     /// 保存している基底を捨てる (メモリ節約)。
     pub fn drop_bases(&mut self) {
+        let mut prs = Vec::new();
         for n in self.nodes.iter_mut().flatten() {
             n.basis = None;
+            if let Some(pr) = n.prot.take() {
+                prs.push(pr);
+            }
         }
+        for pr in prs {
+            self.unprotect(&pr);
+        }
+    }
+
+    fn unprotect(&mut self, pr: &[u64]) {
+        for c in pr {
+            if let Some(k) = self.protect.get_mut(c) {
+                *k -= 1;
+                if *k == 0 {
+                    self.protect.remove(c);
+                }
+            }
+        }
+    }
+
+    /// カット `c` が待ち行列のノードの基底で効いているか。
+    pub fn is_protected(&self, c: u64) -> bool {
+        self.protect.contains_key(&c)
     }
 }

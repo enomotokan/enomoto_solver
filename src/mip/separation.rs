@@ -72,7 +72,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// HiGHS のカット選択 (`HighsCutPool::separate`): スコア = 違反量 / (効いている非零の数 x 効いている列だけのノルム)
     /// (効いている = LP 解が境界から離れている列)。これまでに見た最良のスコアの `min_factor` 倍以上を残し
     /// (残りが少なすぎれば上位半分、全部残れば係数を下げる)、採ったカットとの平行度が 0.1 を超えるものは捨てる。
-    fn select_cuts_highs(&mut self, cands: Vec<Candidate>, max_cuts: usize, x: &[f64]) -> Vec<Candidate> {
+    fn select_cuts_highs(&mut self, cands: Vec<Candidate>, max_cuts: usize, x: &[f64], maxpar: f64) -> Vec<Candidate> {
         let tol = FEASTOL;
         let mut sc: Vec<(f64, Candidate)> = Vec::new();
         for c in cands {
@@ -111,7 +111,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.cutsel_factor = sc[upper].0 / self.cutsel_best;
         }
         sc.truncate(keep);
-        let maxpar = tunable!("ENOMOTO_T_CUTSEL_HIGHS_MAXPAR", 0.1, f64);
         let mut chosen: Vec<(f64, Candidate)> = Vec::new();
         for (_, c) in sc {
             if chosen.len() >= max_cuts {
@@ -134,13 +133,46 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut prev_obj = self.lp.objective();
         let mut prev_nfrac = self.fractional(&self.lp.col_values()).len();
         let first_obj = prev_obj;
+        // HiGHS の停滞判定 (`ENOMOTO_MIP_CUT_STALL_HIGHS`, HighsMipSolverData::evaluateRootNode): 最初の LP 解からの
+        // 移動方向の平均と今の移動の内積 (進み具合) を平滑化し、それが 1% 以上伸びず、かつ目的値の伸びが前のラウンドまでの
+        // 伸びの 0.1% 以下なら停滞。3 回続けて停滞したら止める (目的値が動かなくても LP 解が動いている間は続ける)。
+        // 40 問では 19 問 27.87 -> 17 問 28.49 (最大 100 ラウンドにすると 16 問 29.77): 根の下界は上がる (neos-1456979
+        // 154 -> 163) が、こちらの 1 ラウンドは HiGHS の数倍重く、根に時間がかかる問題 (qnet1・10teams・misc07) が遅くなる
+        let highs_stall = env_str!("ENOMOTO_MIP_CUT_STALL_HIGHS").is_some() && !self.params.submip;
+        let first_x = self.lp.col_values();
+        let mut avgdir = vec![0.0f64; n];
+        let mut smooth = 0.0f64;
+        let mut hstall = 0usize;
+        let mut hrounds = 0usize;
         // サブ MIP (RENS/RINS) では分離に時間をかけない
-        let max_rounds = if self.params.submip { 5 } else { tunable!("ENOMOTO_T_MIP_CUT_ROUNDS", 25usize, usize) };
+        let mut max_rounds = if self.params.submip { 5 } else { tunable!("ENOMOTO_T_MIP_CUT_ROUNDS", 25usize, usize) };
         let time_cap = if self.params.time_limit.is_finite() { tunable!("ENOMOTO_T_MIP_CUT_TIME_FRAC", 0.1, f64) * self.params.time_limit } else { f64::INFINITY };
         let mut total_added = 0usize;
         let mut lp_failures = 0usize;
-        for round in 0..max_rounds {
-            if self.time_up() || self.start.elapsed().as_secs_f64() > time_cap {
+        // `ENOMOTO_MIP_CUT_PHASE2`: 既定の選択 (`select_cuts_hybrid`: 質が最良の 50% 未満のカットは採らない) で停滞して
+        // 止まるところで、HiGHS のスコア (違反量 / (効いている非零の数 x そのノルム)、疎なカットを好む。ラウンドをまたいで
+        // 最良スコアを覚え、その一定割合以上を採る) に切り替えてもう一度続ける第 2 段階。neos-911970 では既定の選択は根の
+        // 下界 47.26 で止まり (100 ラウンド回しても動かない)、HiGHS のスコアなら 51.8 まで上がる (HiGHS は 38 ラウンドで
+        // 52.1)。最初から HiGHS のスコアを使うと misc07・mik-250・neos5 が 60 秒で解けなくなった (木が数倍になる) ので、
+        // 既定の選択が止まった後にだけ使う。第 2 段階は目的値が `ENOMOTO_T_MIP_CUT_PHASE2_STALL` ラウンド続けて
+        // 動かなければ止め、ラウンド数は `ENOMOTO_T_MIP_CUT_PHASE2_ROUNDS` まで (根のカットの時間上限はそのまま)。
+        // 40 問 (同時に測った既定 19 問 27.81 に対し) 18 問 28.64: nw04 33 -> 21 秒、h80x6320d の上界は良くなるが、
+        // neos5 が時間切れ、10teams 4.2 -> 9.1 秒、qnet1 9.4 -> 14.7 秒、misc07 13.7 -> 18.8 秒 (根の LP 解が変わって木が
+        // 変わる)。neos-911970 も 60 秒では解けない (根は 52.1 になるが暫定解が悪くなる) ので既定では使わない
+        let phase2_on = (env_str!("ENOMOTO_MIP_CUT_PHASE2").is_some() || (self.highs_cutmgmt() && env_str!("ENOMOTO_MIP_HCM_NO_PHASE2").is_none())) && !self.params.submip;
+        let mut phase2 = false;
+        // 第 2 段階の時間の上限 (第 1 段階に使った時間の `ENOMOTO_T_MIP_CUT_PHASE2_TIME_MULT` 倍。qnet1 では再スタート後の
+        // 第 2 段階が 88 ラウンド回って根が 6 秒伸び、9.2 秒 -> 17.2 秒になった)
+        let t_loop0 = std::time::Instant::now();
+        let mut phase2_deadline = f64::INFINITY;
+        let mut round_ctr = 0usize;
+        loop {
+            if round_ctr >= max_rounds {
+                break;
+            }
+            let round = round_ctr;
+            round_ctr += 1;
+            if self.time_up() || self.start.elapsed().as_secs_f64() > time_cap || (phase2 && t_loop0.elapsed().as_secs_f64() > phase2_deadline) {
                 break;
             }
             let x = self.lp.col_values();
@@ -148,31 +180,64 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 break;
             }
             let t_sep = std::time::Instant::now();
-            let mut cands = self.separate(&x, false);
+            // `ENOMOTO_T_MIP_FACE_MAX_CUTS` = k (> 0): 面の頂点からのカットは別枠で最大 k 本選ぶ (今の頂点のカットとは
+            // 競わせない)。0 なら同じ枠で選ぶ。40 問: 0 (既定) 19 問 27.70、10 は 17 問 28.14、25 は 17 問 27.83 (rout・neos5 が
+            // 時間切れ、mik-250 47.9 -> 33-40 秒)。既定では使わない
+            let face_quota = tunable!("ENOMOTO_T_MIP_FACE_MAX_CUTS", 0usize, usize);
+            let (mut cands, fcands) = self.separate_face_split(&x, false);
+            let mut face_cands: Vec<Candidate> = Vec::new();
+            if face_quota > 0 {
+                face_cands = fcands;
+            } else {
+                cands.extend(fcands);
+            }
             // 再スタート前のカットをプールで引き継いだとき (`ENOMOTO_MIP_RESTART_CUTS_TO_POOL`): プールで違反しているものも候補にする
             if ((self.params.restarts > 0 && env_str!("ENOMOTO_MIP_RESTART_CUTS_TO_POOL").is_some()) || env_str!("ENOMOTO_MIP_CUTSEL_HIGHS_POOL").is_some()) && round < tunable!("ENOMOTO_T_MIP_ROOT_POOL_ROUNDS", 5usize, usize) && env_str!("ENOMOTO_MIP_NO_ROOT_POOL").is_none() {
-                for (c, r, norm) in &self.cut_pool {
-                    let act: f64 = c.iter().map(|&(j, v)| v * x[j]).sum();
-                    let eff = (act - r) / norm.max(1e-12);
-                    if eff > 1e-4 && act - r > 1e-6 * (1.0 + r.abs()) {
-                        cands.push(Candidate { coefs: c.clone(), rhs: *r, efficacy: eff });
-                    }
+                for (eff, k) in self.pool_violated(&x) {
+                    let (c, r, _) = &self.cut_pool[k];
+                    cands.push(Candidate { coefs: c.clone(), rhs: *r, efficacy: eff });
                 }
             }
-            let ncands = cands.len();
-            if cands.is_empty() {
+            let ncands = cands.len() + face_cands.len();
+            if ncands == 0 {
                 break;
             }
+            let dbg_sep = env_str!("ENOMOTO_MIP_DEBUG_SEP").is_some() && !self.params.submip;
+            let t_sel0 = std::time::Instant::now();
             // 候補はすべてカットプールに入れる (選択で落ちたものも、ノードで違反すれば使う)
             if !self.params.submip && env_str!("ENOMOTO_MIP_POOL_SELECTED_ONLY").is_none() {
-                for c in &cands {
+                for c in cands.iter().chain(face_cands.iter()) {
                     self.add_to_pool(&c.coefs, c.rhs);
                 }
             }
+            let pool_secs = t_sel0.elapsed().as_secs_f64();
+            let cand_nnz: usize = cands.iter().map(|c| c.coefs.len()).sum();
             // 効き目の大きい順に、平行なものを除いて選ぶ
             let max_cuts = tunable!("ENOMOTO_T_MIP_ROOT_MAX_CUTS", 50usize, usize).min(p.m.max(50));
-            let chosen = if env_str!("ENOMOTO_MIP_CUTSEL_HIGHS").is_some() { self.select_cuts_highs(cands, max_cuts, &x) } else { select_cuts(cands, max_cuts, p) };
+            let chosen = if phase2 {
+                let maxpar = tunable!("ENOMOTO_T_MIP_CUT_PHASE2_MAXPAR", 0.3, f64);
+                self.select_cuts_highs(cands, max_cuts, &x, maxpar)
+            } else if env_str!("ENOMOTO_MIP_CUTSEL_HIGHS").is_some() {
+                let maxpar = tunable!("ENOMOTO_T_CUTSEL_HIGHS_MAXPAR", 0.1, f64);
+                self.select_cuts_highs(cands, max_cuts, &x, maxpar)
+            } else {
+                select_cuts(cands, max_cuts, p)
+            };
+            let chosen = if face_cands.is_empty() {
+                chosen
+            } else {
+                // 面の頂点のカットは別枠で選び、今の頂点で選んだカットとほぼ平行なものは除く
+                let mut chosen = chosen;
+                let extra = select_cuts(std::mem::take(&mut face_cands), face_quota, p);
+                for c in extra {
+                    if !chosen.iter().any(|d| cut_parallelism(&c.coefs, &d.coefs) > 0.99) {
+                        chosen.push(c);
+                    }
+                }
+                chosen
+            };
             let sep_secs = t_sep.elapsed().as_secs_f64();
+            let sel_secs = t_sel0.elapsed().as_secs_f64() - pool_secs;
             if chosen.is_empty() {
                 break;
             }
@@ -185,7 +250,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
             let saved_rows = self.lp.num_rows();
+            let t_add0 = std::time::Instant::now();
             self.add_cut_rows(&rows);
+            let add_secs = t_add0.elapsed().as_secs_f64();
+            let t_lp0 = std::time::Instant::now();
             let it0 = self.lp.total_iterations();
             let lim = 10 * root_iters.max(100) + 10_000;
             // 1 回の LP の時間の上限 (全体の 2%、最低 1 秒): 数値的に悪条件の LP が残り時間を使い切るのを防ぐ
@@ -218,6 +286,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 continue;
             }
             let obj = self.lp.objective();
+            if dbg_sep {
+                eprintln!(
+                    "SEP round {round}: cands {ncands} (nnz {cand_nnz}) pool {pool_secs:.3}s select {sel_secs:.3}s add_rows {add_secs:.3}s LP {:.3}s ({} iters, {:.1} us/iter)",
+                    t_lp0.elapsed().as_secs_f64(),
+                    self.lp.total_iterations() - it0,
+                    1e6 * t_lp0.elapsed().as_secs_f64() / (self.lp.total_iterations() - it0).max(1) as f64
+                );
+            }
             if env_str!("ENOMOTO_MIP_DEBUG_FC").is_some() && !self.params.submip {
                 super::cuts::FC_STATS.with(|s| eprintln!("FC stats (calls, cuts, no SNF): {:?}", s.borrow()));
             }
@@ -234,7 +310,34 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.start.elapsed().as_secs_f64()
                 );
             }
-            if env_str!("ENOMOTO_MIP_STALL_OLD").is_some() {
+            if highs_stall {
+                hrounds += 1;
+                let xs = self.lp.col_values();
+                let cur: Vec<f64> = (0..n).map(|j| first_x[j] - xs[j]).collect();
+                let nrm = cur.iter().map(|v| v * v).sum::<f64>().sqrt();
+                let scale = if nrm > 0.0 { 1.0 / nrm } else { 0.0 };
+                let (mut sq, mut dot) = (0.0, 0.0);
+                for j in 0..n {
+                    avgdir[j] = (scale * cur[j] - avgdir[j]) / hrounds as f64;
+                    sq += avgdir[j] * avgdir[j];
+                    dot += avgdir[j] * cur[j];
+                }
+                let progress = if sq > 0.0 { dot / sq.sqrt() } else { 0.0 };
+                if hrounds == 1 {
+                    smooth = progress;
+                } else {
+                    let next = (2.0 / 3.0) * smooth + progress / 3.0;
+                    if next < smooth * 1.01 && obj - first_obj <= (prev_obj - first_obj) * 1.001 {
+                        hstall += 1;
+                        if hstall >= 3 {
+                            break;
+                        }
+                    } else {
+                        hstall = 0;
+                    }
+                    smooth = next;
+                }
+            } else if env_str!("ENOMOTO_MIP_STALL_OLD").is_some() {
                 // 停滞判定: 改善が初回からの改善量のわずかな割合なら停滞
                 let gain = obj - prev_obj;
                 let scale = (obj - first_obj).abs().max(1e-6 * obj.abs().max(1.0));
@@ -252,13 +355,38 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // ラウンドは 2 回分と数える (何も進まない問題で長く回さない。分数の列が減っている間は続ける)。
                 let nfrac = self.fractional(&self.lp.col_values()).len();
                 let reldiff = (obj - prev_obj) / obj.abs().max(prev_obj.abs()).max(1.0);
-                if reldiff <= 1e-4 && nfrac as f64 >= (0.9 - 0.1 * stall as f64) * prev_nfrac as f64 {
-                    stall += if nfrac >= prev_nfrac { 2 } else { 1 };
-                    if stall >= if self.params.submip { 3 } else { tunable!("ENOMOTO_T_MIP_CUT_STALL", 10usize, usize) } {
-                        break;
+                if phase2 {
+                    // 第 2 段階: 目的値だけで停滞を数える
+                    if reldiff <= 1e-4 {
+                        stall += 1;
+                        if stall >= tunable!("ENOMOTO_T_MIP_CUT_PHASE2_STALL", 10usize, usize) {
+                            break;
+                        }
+                    } else {
+                        stall = 0;
                     }
                 } else {
-                    stall = 0;
+                    // `ENOMOTO_MIP_CUT_STALL_ONE`: まったく進まないラウンドも 1 回分と数える (neos-1456979 では最初の
+                    // 4 ラウンドは下界が動かず、続ければ上がる。HiGHS も止めずに 66 ラウンド回して 154 -> 171)
+                    if reldiff <= 1e-4 && nfrac as f64 >= (0.9 - 0.1 * stall as f64) * prev_nfrac as f64 {
+                        stall += if nfrac >= prev_nfrac && env_str!("ENOMOTO_MIP_CUT_STALL_ONE").is_none() { 2 } else { 1 };
+                        if stall >= if self.params.submip { 3 } else { tunable!("ENOMOTO_T_MIP_CUT_STALL", 10usize, usize) } {
+                            if !phase2_on {
+                                break;
+                            }
+                            // 第 2 段階へ (ラウンド数の上限を延ばす)
+                            phase2 = true;
+                            stall = 0;
+                            max_rounds = round_ctr + tunable!("ENOMOTO_T_MIP_CUT_PHASE2_ROUNDS", 60usize, usize);
+                            let t1 = t_loop0.elapsed().as_secs_f64();
+                            phase2_deadline = t1 + (tunable!("ENOMOTO_T_MIP_CUT_PHASE2_TIME_MULT", 3.0, f64) * t1).max(0.2);
+                            if self.params.verbose {
+                                eprintln!("MIP: cut loop phase 2 (HiGHS cut score) from round {} ({:.2}s)", round + 1, self.start.elapsed().as_secs_f64());
+                            }
+                        }
+                    } else {
+                        stall = 0;
+                    }
                 }
                 prev_nfrac = nfrac;
             }
@@ -267,11 +395,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // `ENOMOTO_T_MIP_ROOT_CUT_AGE` > 0: HiGHS と同じく、効いていないラウンドが続いたカットだけを外す
             // (HiGHS の mip_lp_age_limit = 10)
             let root_age = tunable!("ENOMOTO_T_MIP_ROOT_CUT_AGE", 0u32, u32);
+            let t_rm0 = std::time::Instant::now();
+            let rows_before = self.lp.num_rows();
             if root_age > 0 {
                 self.age_cuts();
                 self.remove_cuts_older_than(root_age);
             } else if (round + 1) % tunable!("ENOMOTO_T_MIP_CUT_REMOVE_EVERY", 1usize, usize).max(1) == 0 {
                 self.remove_inactive_cuts();
+            }
+            if dbg_sep {
+                eprintln!("SEP round {round}: removed {} inactive cuts in {:.3}s", rows_before - self.lp.num_rows(), t_rm0.elapsed().as_secs_f64());
             }
         }
         self.remove_inactive_cuts();
@@ -312,6 +445,29 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let norm = coefs.iter().map(|&(_, v)| v * v).sum::<f64>().sqrt();
         self.cut_pool_nnz += coefs.len();
         self.cut_pool.push((coefs.to_vec(), rhs, norm));
+        for &(j, v) in coefs {
+            self.pool_idx.push(j as u32);
+            self.pool_val.push(v);
+        }
+        self.pool_start.push(self.pool_idx.len() as u32);
+    }
+
+    /// カットプールのうち LP 解 `x` が違反するカットの (効き目, 番号)。平坦な複製 (`pool_idx` など) を走査する。
+    pub(super) fn pool_violated(&self, x: &[f64]) -> Vec<(f64, usize)> {
+        let mut viol: Vec<(f64, usize)> = Vec::new();
+        for k in 0..self.cut_pool.len() {
+            let (s, e) = (self.pool_start[k] as usize, self.pool_start[k + 1] as usize);
+            let mut act = 0.0;
+            for t in s..e {
+                act += self.pool_val[t] * x[self.pool_idx[t] as usize];
+            }
+            let r = self.cut_pool[k].1;
+            let eff = (act - r) / self.cut_pool[k].2.max(1e-12);
+            if eff > 1e-4 && act - r > 1e-6 * (1.0 + r.abs()) {
+                viol.push((eff, k));
+            }
+        }
+        viol
     }
 
     /// カットプールから、LP 解 `x` が違反するカットを効き目の大きい順に最大 `max_cuts` 本 LP に加える
@@ -320,19 +476,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.cut_pool.is_empty() {
             return false;
         }
-        let mut viol: Vec<(f64, usize)> = Vec::new();
-        for (k, (c, r, norm)) in self.cut_pool.iter().enumerate() {
-            let act: f64 = c.iter().map(|&(j, v)| v * x[j]).sum();
-            let eff = (act - r) / norm.max(1e-12);
-            if eff > 1e-4 && act - r > 1e-6 * (1.0 + r.abs()) {
-                viol.push((eff, k));
-            }
-        }
+        let mut viol = self.pool_violated(x);
         if viol.is_empty() {
             return false;
         }
         viol.sort_by(|a, b| b.0.total_cmp(&a.0));
         viol.truncate(max_cuts);
+        // `ENOMOTO_T_MIP_POOL_REL` = r (> 0): 効き目が最大のカットの r 倍に満たないカットは戻さない
+        let rel = tunable!("ENOMOTO_T_MIP_POOL_REL", 0.0, f64);
+        if rel > 0.0 {
+            let top = viol[0].0;
+            viol.retain(|&(e, _)| e >= rel * top);
+        }
         let cap = self.p.m + (2 * self.cut_pool.len()).clamp(100, 2000);
         if self.lp.num_rows() + viol.len() > cap {
             self.remove_inactive_cuts();
@@ -350,7 +505,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return false;
         }
         // ノードでは軽い分離 (経路集約の始点・tableau 行を減らす) で、追加するカットも少なくする
-        let cands = self.separate(x, true);
+        // `ENOMOTO_MIP_NODE_FACE_SEP`: ノードでも最適面の頂点で分離する ([`Self::separate_face`])
+        // 40 問: 使わない 18 問 27.20、使う 18 問 27.36 (neos5 時間切れ -> 59.7 秒、neos-860300 54.2 秒 -> 時間切れ。木での分離の
+        // 時間はもともと小さく、差はほぼない)。既定では使わない
+        let cands = if env_str!("ENOMOTO_MIP_NODE_FACE_SEP").is_some() { self.separate_face(x, true) } else { self.separate(x, true) };
         if cands.is_empty() {
             return false;
         }
@@ -372,11 +530,52 @@ impl<'a, L: MipLp> Solver<'a, L> {
         true
     }
 
+    /// HiGHS 流のカット管理 (`Solver::highs_cutmgmt`) でのノードでの分離 1 ラウンド: プールで違反しているカットと、
+    /// 新しく分離したカット (軽い分離) を合わせて選び (最大 `ENOMOTO_T_MIP_HCM_NODE_MAX_CUTS` 本)、年齢の上限を超えたカットを
+    /// 外してから加える。加えたら真 (呼び出し側が LP を解き直す)。LP の行数の上限を超えていれば何もしない。
+    pub(super) fn hcm_node_sep_round(&mut self, x: &[f64], fresh: bool) -> bool {
+        let p = self.p;
+        let max_rows = p.m + (2 * p.m).max(500);
+        if self.lp.num_rows() >= max_rows {
+            return false;
+        }
+        // `fresh` でなければプールのカットだけ (安価。年齢で外れた根のカットを戻すのが主な役目)
+        crate::simplex::slope_intercept_dual::xprof("hcm_pre");
+        let mut cands = if fresh { self.separate(x, true) } else { Vec::new() };
+        crate::simplex::slope_intercept_dual::xprof("hcm_sep");
+        for (eff, k) in self.pool_violated(x) {
+            let (c, r, _) = &self.cut_pool[k];
+            cands.push(Candidate { coefs: c.clone(), rhs: *r, efficacy: eff });
+        }
+        crate::simplex::slope_intercept_dual::xprof("hcm_pool");
+        if cands.is_empty() {
+            return false;
+        }
+        let room = max_rows - self.lp.num_rows();
+        // 1 ラウンドの本数は根と同じ程度まで許す (HiGHS はプールの違反カットを平行度だけで絞る)。年齢で外れたカットが多い
+        // ノードでは、20 本ずつでは根で効いていたカットが戻りきらず、ノードの LP が根より弱くなって木の下界が動かなかった
+        let chosen = select_cuts(cands, room.min(tunable!("ENOMOTO_T_MIP_HCM_NODE_MAX_CUTS", 100usize, usize)), p);
+        if chosen.is_empty() {
+            return false;
+        }
+        let rows: Vec<(Vec<(usize, f64)>, f64, f64)> = chosen.into_iter().map(|c| (c.coefs, f64::NEG_INFINITY, c.rhs)).collect();
+        for (c, _, r) in &rows {
+            self.add_to_pool(c, *r);
+        }
+        self.remove_aged_cuts();
+        self.add_cut_rows(&rows);
+        true
+    }
+
     /// LP にカットの行を加える (年齢 0)。
     pub(super) fn add_cut_rows(&mut self, rows: &[(Vec<(usize, f64)>, f64, f64)]) {
         self.sync_cut_age();
         self.lp.add_rows(rows);
         self.cut_age.extend(std::iter::repeat_n(0, rows.len()));
+        for _ in 0..rows.len() {
+            self.cut_ids.push(self.next_cut_id);
+            self.next_cut_id += 1;
+        }
         self.row_log.push(super::solver::RowEdit::Add(rows.len()));
     }
 
@@ -390,6 +589,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
             k += 1;
             keep
         });
+        let mut k = m0;
+        self.cut_ids.retain(|_| {
+            let keep = !remove[k];
+            k += 1;
+            keep
+        });
         self.lp.delete_rows(remove);
         self.row_log.push(super::solver::RowEdit::Delete(remove.to_vec()));
     }
@@ -398,6 +603,33 @@ impl<'a, L: MipLp> Solver<'a, L> {
     fn sync_cut_age(&mut self) {
         let want = self.lp.num_rows().saturating_sub(self.p.m);
         self.cut_age.resize(want, 0);
+        if self.cut_ids.len() > want {
+            self.cut_ids.truncate(want);
+        }
+        while self.cut_ids.len() < want {
+            self.cut_ids.push(self.next_cut_id);
+            self.next_cut_id += 1;
+        }
+    }
+
+    /// 今の LP の基底で効いている (論理変数が非基底の) カットの番号 (待ち行列に入れるノードに持たせ、その間は年齢で
+    /// 外さない。取り出したときに保存した基底が必ず合う)。`ENOMOTO_MIP_NO_PROTECT_QUEUE_CUTS` で無効。
+    /// 40 問: 19 問 27.04 -> 19 問 26.89 (保護して年齢の上限を一律 30 にすると 17 問 27.55)
+    pub(super) fn basis_protected_cuts(&mut self) -> Option<std::rc::Rc<Vec<u64>>> {
+        // HiGHS 流のカット管理では保護しない (HiGHS と同じく、取り出したノードの基底が LP の行と合わなければ今の基底から解く。
+        // 保護すると待ち行列のノードが数千あるときほぼ全てのカットが外せず、neos-911970 では LP が行数の上限 607 に張り付いた)
+        if env_str!("ENOMOTO_MIP_NO_PROTECT_QUEUE_CUTS").is_some() || self.params.submip || (self.highs_cutmgmt() && env_str!("ENOMOTO_MIP_HCM_PROTECT").is_none()) {
+            return None;
+        }
+        self.sync_cut_age();
+        let m0 = self.p.m;
+        let mr = self.lp.num_rows();
+        if mr <= m0 {
+            return None;
+        }
+        let b = self.lp.basis();
+        let v: Vec<u64> = (m0..mr).filter(|&i| b.row[i] != VarStatus::Basic).map(|i| self.cut_ids[i - m0]).collect();
+        if v.is_empty() { None } else { Some(std::rc::Rc::new(v)) }
     }
 
     /// ノードの LP の後に呼ぶ (HiGHS の LP の aging): 効いていない (論理変数が基底で行に余裕がある) カットの年齢を
@@ -410,21 +642,123 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let m0 = self.p.m;
         let b = self.lp.basis();
         let act = self.lp.row_activities();
+        // 相対的な基準 (既定では使わない):
+        // `ENOMOTO_T_MIP_CUT_SLACK_REL` = s (> 0): 余裕のあるカットのうち、正規化した余裕 (余裕 / 係数の 2 ノルム) が
+        //   カットの中で最大のものの s 倍に満たないもの (ほぼ効いている) は年齢を増やさない
+        // `ENOMOTO_T_MIP_CUT_DUAL_REL` = d (> 0): 効いている (論理変数が非基底の) カットのうち、|双対値| がカットの中で
+        //   最大のものの d 倍に満たないもの (退化して効いているだけ) は年齢を増やす
+        // 40 問 (19 問は同じ): 既定 25.28 に対し s=0.1 は 24.96 だったが、もう一度並べると 25.37 (s=0.05 25.31、
+        // s=0.3 25.28)。d=0.01 は 25.35、プールの r=0.1 は 25.26。差はばらつきの範囲なので、どれも既定では使わない
+        let srel = tunable!("ENOMOTO_T_MIP_CUT_SLACK_REL", 0.0, f64);
+        let drel = tunable!("ENOMOTO_T_MIP_CUT_DUAL_REL", 0.0, f64);
+        let ncut = self.cut_age.len();
+        let mut nslack = vec![0.0f64; ncut];
+        let mut max_slack = 0.0f64;
+        if srel > 0.0 {
+            for k in 0..ncut {
+                let i = m0 + k;
+                let (_, up) = self.lp.row_bounds(i);
+                if b.row[i] == VarStatus::Basic && act[i] < up - 1e-6 * (1.0 + up.abs()) {
+                    let id = self.cut_ids[k];
+                    let norm = match self.cut_norm.get(&id) {
+                        Some(&v) => v,
+                        None => {
+                            let v = self.lp.row(i).iter().map(|&(_, a)| a * a).sum::<f64>().sqrt().max(1e-12);
+                            self.cut_norm.insert(id, v);
+                            v
+                        }
+                    };
+                    nslack[k] = (up - act[i]) / norm;
+                    max_slack = max_slack.max(nslack[k]);
+                }
+            }
+            if self.cut_norm.len() > 4 * ncut + 1000 {
+                let live: std::collections::HashSet<u64> = self.cut_ids.iter().copied().collect();
+                self.cut_norm.retain(|id, _| live.contains(id));
+            }
+        }
+        let mut dual = Vec::new();
+        let mut max_dual = 0.0f64;
+        if drel > 0.0 {
+            dual = self.lp.row_duals();
+            for k in 0..ncut {
+                if b.row[m0 + k] != VarStatus::Basic {
+                    max_dual = max_dual.max(dual[m0 + k].abs());
+                }
+            }
+        }
         for (k, age) in self.cut_age.iter_mut().enumerate() {
             let i = m0 + k;
             let (_, up) = self.lp.row_bounds(i);
             if b.row[i] == VarStatus::Basic && act[i] < up - 1e-6 * (1.0 + up.abs()) {
+                if srel > 0.0 && nslack[k] < srel * max_slack {
+                    continue;
+                }
+                *age = age.saturating_add(1);
+            } else if drel > 0.0 && b.row[i] != VarStatus::Basic && dual[i].abs() < drel * max_dual {
                 *age = age.saturating_add(1);
             } else {
                 *age = 0;
             }
         }
+        if !self.merged_cuts.is_empty() {
+            for k in 0..ncut {
+                if self.merged_cuts.contains(&self.cut_ids[k]) {
+                    self.cut_age[k] = 0;
+                }
+            }
+        }
     }
 
-    /// 年齢が上限 (`ENOMOTO_T_MIP_CUT_AGE_LIMIT`、既定 30。HiGHS の `mip_lp_age_limit` は 10 だが、10 では binkar10_1 で効くカットまで外れた) を超えたカットを LP から外す
+    /// 年齢が上限 (`ENOMOTO_T_MIP_CUT_AGE_LIMIT`、既定 300。HiGHS の `mip_lp_age_limit` は 10 だが、10 では binkar10_1 で効くカットまで外れた) を超えたカットを LP から外す
     /// (プールにあるカットは、違反すればまた戻る)。外した数を返す。
+    /// 年齢は今のノードで効いていない回数なので、待ち行列のノードで効いているカットまで外れうる。そのノードを取り出すと
+    /// 保存した基底が合わず LP がほぼ解き直しになる (binkar10_1: 上限 30 で 1 ノード平均 272 反復、外さなければ 37)。
+    /// 40 問: 上限 30 は 17 問 27.21、100 は 19 問 27.05、300 は 19 問 26.64 (外さないと neos5 で LP が重くなる)
+    ///
+    /// `ENOMOTO_T_MIP_CUT_AGE_PER_ROW` = f (> 0): 上限を f × (元の行の数) にして [`ENOMOTO_T_MIP_CUT_AGE_MIN`, 上の上限] に収める
+    /// (行の少ない問題ではカットが LP を何倍にもする: markshare_4_0 は 4 行で、上限 300 だと遅くなった)。
+    /// `ENOMOTO_T_MIP_CUT_ROWS_CAP` = r (> 0): カットの行が max(r × 元の行の数, 200) を超えたら、年齢の高い順に外して収める。
     pub(super) fn remove_aged_cuts(&mut self) -> usize {
-        self.remove_cuts_older_than(tunable!("ENOMOTO_T_MIP_CUT_AGE_LIMIT", 30u32, u32))
+        let base = tunable!("ENOMOTO_T_MIP_CUT_AGE_LIMIT", 300u32, u32);
+        // 既定は f = 0.5 (40 問: 一律 300 の 19 問 26.72 に対し 19 問 26.41。markshare_4_0 (4 行) 25 -> 14 秒、
+        // neos5 (63 行) は 42 -> 48 秒。カットの行の総数で抑える形 (`ENOMOTO_T_MIP_CUT_ROWS_CAP=2`) は 26.61)
+        let f = tunable!("ENOMOTO_T_MIP_CUT_AGE_PER_ROW", 0.5, f64);
+        // HiGHS 流のカット管理では上限を `ENOMOTO_T_MIP_HCM_AGE_LIMIT` (HiGHS の mip_lp_age_limit は 10) にする。
+        // 30 では neos-911970 の木の下界が根から動かず (潜りの間に根で効いていたカットが外れ、ノードの LP が根より弱くなる)、
+        // 100 で下界 54.70 / 上界 54.76 (最適値)。mik-250 は 30 でも 100 でも 60 秒で解けない (既定は 35 秒)
+        let limit = if self.highs_cutmgmt() {
+            tunable!("ENOMOTO_T_MIP_HCM_AGE_LIMIT", 100u32, u32)
+        } else if f > 0.0 {
+            let lo = tunable!("ENOMOTO_T_MIP_CUT_AGE_MIN", 30u32, u32);
+            ((f * self.p.m as f64) as u32).clamp(lo.min(base), base)
+        } else {
+            base
+        };
+        let mut removed = self.remove_cuts_older_than(limit);
+        let r = tunable!("ENOMOTO_T_MIP_CUT_ROWS_CAP", 0.0, f64);
+        if r > 0.0 {
+            self.sync_cut_age();
+            let cap = ((r * self.p.m as f64) as usize).max(200);
+            let ncut = self.cut_age.len();
+            if ncut > cap {
+                // 年齢の高い順に (ncut - cap) 本外す (年齢 0 = 今効いているものは外さない)
+                let mut order: Vec<(u32, usize)> = self.cut_age.iter().enumerate().filter(|&(_, &a)| a > 0).map(|(k, &a)| (a, k)).collect();
+                order.sort_by(|a, b| b.cmp(a));
+                let m0 = self.p.m;
+                let mut remove = vec![false; self.lp.num_rows()];
+                let mut cnt = 0;
+                for &(_, k) in order.iter().filter(|&&(_, k)| !self.queue.is_protected(self.cut_ids[k])).take(ncut - cap) {
+                    remove[m0 + k] = true;
+                    cnt += 1;
+                }
+                if cnt > 0 {
+                    self.delete_lp_rows(&remove);
+                    removed += cnt;
+                }
+            }
+        }
+        removed
     }
 
     /// 年齢が `limit` を超えたカットを LP から外す。外した数を返す。
@@ -434,7 +768,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut remove = vec![false; self.lp.num_rows()];
         let mut cnt = 0;
         for (k, &age) in self.cut_age.iter().enumerate() {
-            if age > limit {
+            if age > limit && !self.queue.is_protected(self.cut_ids[k]) {
                 remove[m0 + k] = true;
                 cnt += 1;
             }
@@ -443,6 +777,81 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.delete_lp_rows(&remove);
         }
         cnt
+    }
+
+    /// 今の LP で効いている (双対値が 0 でない) カットを、|双対値| を重みに足して 1 本の行にまとめて加える
+    /// (各カットは `a_i x <= b_i` なので、非負の重みの和 `sum w_i a_i x <= sum w_i b_i` も妥当)。今の LP の双対解は
+    /// まとめた行に重み 1 を置いても実行可能なので、元のカットが年齢で外れても今の LP の目的値は保たれる
+    /// (子のノードでは個々のカットより弱い)。まとめた行は年齢で外さない。加えたら真。
+    pub(super) fn merge_active_cuts(&mut self) -> bool {
+        let m0 = self.p.m;
+        let n = self.p.n;
+        let mr = self.lp.num_rows();
+        if mr <= m0 {
+            return false;
+        }
+        let y = self.lp.row_duals();
+        let mut wmax = 0.0f64;
+        for i in m0..mr {
+            let (l, u) = self.lp.row_bounds(i);
+            if l == f64::NEG_INFINITY && u.is_finite() {
+                wmax = wmax.max(y[i].abs());
+            }
+        }
+        if wmax <= 1e-12 {
+            return false;
+        }
+        let mut dense = vec![0.0f64; n];
+        let mut rhs = 0.0f64;
+        let mut used = 0usize;
+        for i in m0..mr {
+            let (l, u) = self.lp.row_bounds(i);
+            if l != f64::NEG_INFINITY || !u.is_finite() {
+                continue;
+            }
+            let w = y[i].abs() / wmax;
+            if w <= 1e-9 {
+                continue;
+            }
+            used += 1;
+            for (j, a) in self.lp.row(i) {
+                dense[j] += w * a;
+            }
+            rhs += w * u;
+        }
+        if used < 2 {
+            return false;
+        }
+        let cmax = dense.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+        let mut coefs: Vec<(usize, f64)> = Vec::new();
+        for (j, &c) in dense.iter().enumerate() {
+            if c == 0.0 {
+                continue;
+            }
+            if c.abs() <= 1e-9 * cmax {
+                // 小さい係数は大域的な境界で右辺に移す (c x_j >= min(c lo, c up))
+                let m = if c > 0.0 { c * self.dom.global_lo[j] } else { c * self.dom.global_up[j] };
+                if m.is_finite() {
+                    rhs -= m;
+                    continue;
+                }
+            }
+            coefs.push((j, c));
+        }
+        let max_nnz = tunable!("ENOMOTO_T_MIP_MERGE_MAX_NNZ_FRAC", 1.0, f64);
+        if coefs.is_empty() || coefs.len() as f64 > max_nnz * n as f64 {
+            return false;
+        }
+        let nnz = coefs.len();
+        self.add_cut_rows(&[(coefs, f64::NEG_INFINITY, rhs)]);
+        if let Some(&id) = self.cut_ids.last() {
+            self.merged_cuts.insert(id);
+        }
+        let st = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
+        if self.params.verbose {
+            eprintln!("MIP: merged {used} active cuts into one row ({nnz} nonzeros), LP {st:?} obj {:.10e}", self.lp.objective() + self.p.offset);
+        }
+        true
     }
 
     /// LP の行のうち、元の行より後ろ (カット) で論理変数が基底にあるものを外す。
@@ -456,10 +865,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let act = self.lp.row_activities();
         let mut remove = vec![false; mr];
         let mut any = false;
+        self.sync_cut_age();
         for i in m0..mr {
             if b.row[i] == VarStatus::Basic {
                 let (_, up) = self.lp.row_bounds(i);
-                if act[i] < up - 1e-6 * (1.0 + up.abs()) {
+                if act[i] < up - 1e-6 * (1.0 + up.abs()) && !self.merged_cuts.contains(&self.cut_ids[i - m0]) {
                     remove[i] = true;
                     any = true;
                 }
@@ -931,6 +1341,152 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.path_offset = last + 1;
     }
 
+    /// 根の分離 (退化に強い形、`ENOMOTO_MIP_FACE_SEP`)。LP が双対退化している (非基底で被約費用が 0 の列がある) と
+    /// 最適解の集合 (最適面) に頂点が多く、どの頂点に着くかは DSE 重みなど解き方の履歴で変わる。カットは着いた頂点から
+    /// 作るので、頂点が変わるとカットも根の下界も変わり、また 1 つの頂点だけを切っても LP は同じ目的値の別の頂点へ移るだけで
+    /// 下界が動かない。そこで最適面の上で決まった頂点を選んで分離する:
+    /// 被約費用が 0 でない非基底列を今の値に固定した LP (の複製) を、費用 c + ε c2 で解き直す (ε c2 は小さいので
+    /// 主の目的値は変わらず、最適面の中で c2 が最小の頂点に移る)。モード:
+    /// - `canon`: c2 は列ごとに決まった擬似乱数。その頂点だけで分離する (着いた頂点によらず同じ点から分離する)
+    /// - `both`: c2 は同じ擬似乱数。今の頂点と面の頂点の両方で分離して候補を合わせる
+    /// - `int`: c2 は分数の整数列を近い整数の側へ押す向き。両方で分離する
+    /// 面の頂点の真の目的値が今の値から離れたら (ε が大きすぎた) 今の頂点だけで分離する。
+    /// 既定は `int` (`off` で使わない)。40 問 (DSE 重みを全ての LP で引き継ぐ既定のもとで): 使わない 18 問 28.07、
+    /// `int` 19 問 27.04 (misc07 時間切れ -> 40.9 秒、neos5 時間切れ -> 59.5 秒、mik-250 42.4 -> 16.9 秒、nw04 20.5 -> 8.7 秒、
+    /// rout 57.8 秒 -> 時間切れ)、`canon` 17 問 27.66。既定は `int2` (同時に測った `int` 18 問 27.94 に対し 20 問 27.70:
+    /// rout 時間切れ -> 31.2 秒、neos5 時間切れ -> 53.2 秒、misc07 39.6 -> 54.1 秒)
+    fn separate_face(&mut self, x: &[f64], light: bool) -> Vec<Candidate> {
+        let (mut a, mut b) = self.separate_face_split(x, light);
+        a.append(&mut b);
+        a
+    }
+
+    /// [`Self::separate_face`] の候補を、今の頂点からのもの と 面の頂点からのもの に分けて返す。
+    fn separate_face_split(&mut self, x: &[f64], light: bool) -> (Vec<Candidate>, Vec<Candidate>) {
+        if crate::simplex::slope_intercept_dual::mip_profile() == 1 {
+            return (self.separate(x, light), Vec::new());
+        }
+        let mode = match env_str!("ENOMOTO_MIP_FACE_SEP") {
+            Some(m) if m == "off" => return (self.separate(x, light), Vec::new()),
+            Some(m) if !self.params.submip => m,
+            None if !self.params.submip => "int2",
+            _ => return (self.separate(x, light), Vec::new()),
+        };
+        let p = self.p;
+        let n = p.n;
+        let d = self.lp.reduced_costs();
+        let b = self.lp.basis();
+        let cmax = p.cost.iter().fold(0.0f64, |m, c| m.max(c.abs())).max(1.0);
+        let mut face = self.lp.clone();
+        let mut ndeg = 0usize;
+        for j in 0..n {
+            if b.col[j] == VarStatus::Basic {
+                continue;
+            }
+            let (l, u) = face.col_bounds(j);
+            if l == u {
+                continue;
+            }
+            if d[j].abs() > 1e-7 * (1.0 + p.cost[j].abs()) {
+                face.set_col_bounds(j, x[j], x[j]);
+            } else {
+                ndeg += 1;
+            }
+        }
+        // `ENOMOTO_MIP_FACE_BASIS`: 双対値が 0 で非基底の行 (スラック) による退化も数え、面の LP で点が動かなくても
+        // 基底が変わっていればその基底で分離する (主退化で最適基底が複数ある場合。tableau 行が変わるので別のカットが出る)
+        // 40 問 (`int2` のもとで): 使わない 20 問 27.89、使う 18 問 28.07 (misc07 57.3 -> 45.6 秒だが、neos5・neos-860300 が
+        // 時間切れ、nw04 10.5 -> 16.4 秒)。既定では使わない
+        let face_basis = env_str!("ENOMOTO_MIP_FACE_BASIS").is_some();
+        if face_basis {
+            let y = self.lp.row_duals();
+            for i in 0..b.row.len() {
+                if b.row[i] != VarStatus::Basic && y[i].abs() <= 1e-9 {
+                    ndeg += 1;
+                }
+            }
+        }
+        if ndeg == 0 {
+            return (self.separate(x, light), Vec::new());
+        }
+        let eps = tunable!("ENOMOTO_T_MIP_FACE_EPS", 1e-5, f64) * cmax;
+        let hash = |j: usize| -> f64 {
+            let mut h = (j as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0xD1B5_4A32_D192_ED03;
+            h ^= h >> 31;
+            h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            h ^= h >> 29;
+            (h >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0
+        };
+        // 副目的の向き (`int2`: 近い整数の側へ押す頂点と、遠い側へ押す頂点の 2 つ)
+        let near: Vec<f64> = (0..n)
+            .map(|j| {
+                let f = x[j] - x[j].floor();
+                if self.cut_int[j] && f > 1e-6 && f < 1.0 - 1e-6 {
+                    if f < 0.5 { 1.0 } else { -1.0 }
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let dirs: Vec<Vec<f64>> = match mode {
+            "int" => vec![near],
+            "int2" => {
+                let far: Vec<f64> = near.iter().map(|v| -v).collect();
+                vec![near, far]
+            }
+            _ => vec![(0..n).map(hash).collect()],
+        };
+        let z0: f64 = (0..n).map(|j| p.cost[j] * x[j]).sum();
+        self.tab_memo.clear();
+        self.tab_memo_mode = 1;
+        let cands = if mode == "canon" { Vec::new() } else { self.separate(x, light) };
+        self.tab_memo_mode = 2;
+        let mut fcands: Vec<Candidate> = Vec::new();
+        let mut used = 0usize;
+        for c2 in &dirs {
+            let mut f2 = face.clone();
+            let cost2: Vec<f64> = (0..n).map(|j| p.cost[j] + eps * c2[j]).collect();
+            f2.set_costs(&cost2);
+            let st = f2.solve(&SolveLimits { iteration_limit: if light { (p.m + n) as u64 + 100 } else { 10 * (p.m + n) as u64 + 1000 }, cutoff: f64::INFINITY, deadline: self.deadline });
+            if st != LpStatus::Optimal {
+                continue;
+            }
+            let xv = f2.col_values();
+            let zv: f64 = (0..n).map(|j| p.cost[j] * xv[j]).sum();
+            let moved = (0..n).filter(|&j| (xv[j] - x[j]).abs() > 1e-6).count();
+            if env_str!("ENOMOTO_MIP_DEBUG_FACE").is_some() {
+                eprintln!("FACE: degenerate nonbasic {ndeg}, moved {moved} cols, obj {z0:.9} -> {zv:.9}, frac {} -> {}", self.fractional(x).len(), self.fractional(&xv).len());
+            }
+            if zv > z0 + 1e-7 * (1.0 + z0.abs()) {
+                continue;
+            }
+            if moved == 0 {
+                // 点は同じ。基底が変わっていればその基底で分離する (`ENOMOTO_MIP_FACE_BASIS`)
+                let fb = f2.basis();
+                let same = fb.col.iter().zip(&b.col).all(|(u, v)| (*u == VarStatus::Basic) == (*v == VarStatus::Basic))
+                    && fb.row.iter().zip(&b.row).all(|(u, v)| (*u == VarStatus::Basic) == (*v == VarStatus::Basic));
+                if !face_basis || same {
+                    continue;
+                }
+            }
+            // `ENOMOTO_MIP_FACE_LIGHT`: 面の頂点では軽い分離 (経路集約の始点・tableau 行を減らす) にする
+            let lt = light || env_str!("ENOMOTO_MIP_FACE_LIGHT").is_some();
+            std::mem::swap(&mut self.lp, &mut f2);
+            let mut cv = self.separate(&xv, lt);
+            std::mem::swap(&mut self.lp, &mut f2);
+            fcands.append(&mut cv);
+            used += 1;
+        }
+        self.tab_memo_mode = 0;
+        if env_str!("ENOMOTO_MIP_DEBUG_FACE").is_some() {
+            eprintln!("FACE tab memo: checked {} rows, same as at the current vertex {}", self.tab_memo_stats.0, self.tab_memo_stats.1);
+        }
+        if mode == "canon" && used == 0 {
+            return (self.separate(x, light), Vec::new());
+        }
+        (cands, fcands)
+    }
+
     /// 現在の LP 解 `x` を切る候補を作る。
     /// `light` (ノード用) なら経路集約の始点と tableau 行の数を絞る。
     fn separate(&mut self, x: &[f64], light: bool) -> Vec<Candidate> {
@@ -979,9 +1535,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                     let vars_h = CutVars { lo: &lo, up: &up, is_int: &is_int, x: &xvh, vb: vb.as_deref() };
                     let mut ch: Vec<Candidate> = Vec::new();
+                    let mut scratch_h = vec![0.0f64; n];
                     let mut push_h = |raw: Option<RawCut>, cands: &mut Vec<Candidate>, s: &Solver<L>| {
                         if let Some(raw) = raw {
-                            if let Some(c) = finish_cut(raw, n, &lp_rows, &s.cut_int, &s.dom.global_lo, &s.dom.global_up, &xh, None) {
+                            if let Some(c) = finish_cut(raw, n, &lp_rows, &s.cut_int, &s.dom.global_lo, &s.dom.global_up, &xh, None, &mut scratch_h) {
                                 cands.push(c);
                             }
                         }
@@ -1009,15 +1566,31 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         let mut cands: Vec<Candidate> = Vec::new();
+        // 診断用: finish_cut に使った時間の累計 (秒)
+        let t_finish = std::cell::Cell::new(0.0f64);
+        let mut finish_scratch = vec![0.0f64; n];
         let mut push = |raw: Option<RawCut>, cands: &mut Vec<Candidate>, s: &Solver<L>| {
             if let Some(raw) = raw {
-                if let Some(c) = finish_cut(raw, n, &lp_rows, &s.cut_int, &s.dom.global_lo, &s.dom.global_up, x, s.incumbent.as_ref().map(|(_, v)| v.as_slice())) {
+                let t0 = std::time::Instant::now();
+                if let Some(c) = finish_cut(raw, n, &lp_rows, &s.cut_int, &s.dom.global_lo, &s.dom.global_up, x, s.incumbent.as_ref().map(|(_, v)| v.as_slice()), &mut finish_scratch) {
                     cands.push(c);
                 }
+                t_finish.set(t_finish.get() + t0.elapsed().as_secs_f64());
             }
         };
         let sep_t0 = std::time::Instant::now();
         let dbg_sep = env_str!("ENOMOTO_MIP_DEBUG_SEP").is_some();
+        // 一時的に加えた行 (目的関数の下界の行など、`Solver::extra_sep_rows`)
+        if !self.extra_sep_rows.is_empty() {
+            let extra = self.extra_sep_rows.clone();
+            for (b, r) in &extra {
+                let n0 = cands.len();
+                for c in generate_cuts(&vars, b, *r, use_flow_cover(), true) {
+                    push(Some(c), &mut cands, self);
+                }
+                keep_best(&mut cands, n0, self.p);
+            }
+        }
         // 元の行 1 本ずつ
         for i in 0..p.m {
             if i % 64 == 0 && self.time_up() {
@@ -1081,13 +1654,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // clique カット (2 値列の衝突グラフ。根で一度だけ作って使い回す)。既定では使わない: 40 問で根の下界は
         // ほとんど変わらず、10teams では根の LP 解が変わって根の被約費用ヒューリスティクスが解を見つけられなくなった
-        // (13 問 / 幾何平均 30.57 に悪化)。ENOMOTO_MIP_CLIQUE_CUTS=1 で使う
+        // (13 問 / 幾何平均 30.57 に悪化)。ENOMOTO_MIP_CLIQUE_CUTS=1 で使う。プロービングの含意を辺に加えても (misc07 の辺は
+        // 2198 -> 4760、他の問題はほぼ増えない) 40 問で 20 問 28.11 -> 17 問 30.13 (10teams・rout・misc07 が時間切れ)
         if env_str!("ENOMOTO_MIP_CLIQUE_CUTS").is_some() {
             if self.clique_graph.is_none() {
                 let binary: Vec<bool> = (0..p.n).map(|j| p.is_int[j] && self.dom.global_lo[j] >= 0.0 && self.dom.global_up[j] <= 1.0).collect();
-                let g = super::clique::CliqueGraph::build(p.n, &p.rows, &p.row_lo, &p.row_up, &binary, &self.dom.global_lo, &self.dom.global_up);
+                let g = super::clique::CliqueGraph::build_with(p.n, &p.rows, &p.row_lo, &p.row_up, &binary, &self.dom.global_lo, &self.dom.global_up, &p.conflict_edges);
                 if self.params.verbose && !self.params.submip {
-                    eprintln!("MIP: clique graph: {} edges", g.num_edges());
+                    let g0 = super::clique::CliqueGraph::build(p.n, &p.rows, &p.row_lo, &p.row_up, &binary, &self.dom.global_lo, &self.dom.global_up);
+                    eprintln!("MIP: clique graph: {} edges ({} from rows, probing implications {})", g.num_edges(), g0.num_edges(), p.conflict_edges.len());
                 }
                 self.clique_graph = Some(std::rc::Rc::new(g));
             }
@@ -1129,22 +1704,107 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
         }
-        basics.sort_by(|a, b| b.1.total_cmp(&a.1));
         let nint = p.is_int.iter().filter(|&&b| b).count();
         let limit = if light { tunable!("ENOMOTO_T_MIP_NODE_TAB_ROWS", 50usize, usize) } else { 200 + (0.1 * (mr.min(nint)) as f64) as usize };
-        basics.truncate(limit);
+        // `ENOMOTO_MIP_TAB_HIGHS_RULES`: HiGHS の HighsTableauSeparator と同じ行の選び方。`dse_weight` は 1 を返すだけなので
+        // 既定のスコアは f(1-f) で、密な行 (基底逆行列の行の非零が多い) が不利にならない。HiGHS は
+        // (1) 基底逆行列の行 w を先に全部計算し、スコア = f(1-f) / ||w||^2 (w_i は行 i の最大係数で拡大縮小) で並べる、
+        // (2) w の最大/最小の比が 1e4 を超える行は使わない、(3) 集約で増える非零 (集約行の長さ - w の非零) の 10 倍が
+        // 10000 + 列数 を超える行は使わない (fill の予算)、(4) 最初にカットが出た行のスコアを基準に、その 0.0025 倍
+        // (カットが 50 本を超えたら 0.01 倍) を下回ったら止める。30n20b8 では集約行の平均非零が 4400-5000 で、200 行の
+        // カット生成 + finish_cut に 1 ラウンド 0.45 秒かかっていた (HiGHS は tableau のカットを 1 本も作らず 0.002-0.012 秒)。
+        // 実測 (根のループ全体の時間 / 最後の下界): neos-1456979 0.58 -> 0.38 秒 (154 のまま)、qnet1 0.54 -> 0.33 秒
+        // (15654 -> 15745)、neos-911970 0.42 -> 0.28 秒 (47.26 のまま)、h80x6320d 2.00 -> 1.84 秒 (5936 -> 5926) だが、
+        // 30n20b8 は 2.41 -> 2.08 秒で下界 151 -> 88.5 (fill の予算なしでも 102: 停止規則が密なカットを切り、こちらは
+        // mod-k などの代わりに tableau 行の密なカットで下界を得ている)。既定では使わない
+        let tab_rules = env_str!("ENOMOTO_MIP_TAB_HIGHS_RULES").is_some();
+        let mut w_cache: Vec<Vec<f64>> = Vec::new();
+        if tab_rules {
+            // 行の最大係数 (LP 行、スラック列を含まない)
+            let row_max: Vec<f64> = lp_rows.iter().map(|r| r.iter().fold(0.0f64, |m, &(_, a)| m.max(a.abs()))).collect();
+            let mut scored: Vec<(usize, f64, Vec<f64>)> = Vec::new();
+            for &(s, _) in &basics {
+                let w = self.lp.basis_inverse_row(s);
+                let (mut norm2, mut wmin, mut wmax, mut cnt) = (0.0f64, f64::INFINITY, 0.0f64, 0usize);
+                for i in 0..mr {
+                    let sw = row_max[i] * w[i].abs();
+                    if sw <= 1e-6 {
+                        continue;
+                    }
+                    wmin = wmin.min(sw);
+                    wmax = wmax.max(sw);
+                    norm2 += sw * sw;
+                    cnt += 1;
+                }
+                if cnt <= 1 || wmax / wmin > 1e4 {
+                    continue;
+                }
+                let k = self.lp.basic_var(s);
+                let f = x[k] - x[k].floor();
+                scored.push((s, f * (1.0 - f) / norm2, w));
+            }
+            scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+            scored.truncate(limit);
+            basics = scored.iter().map(|&(s, sc, _)| (s, sc)).collect();
+            w_cache = scored.into_iter().map(|(_, _, w)| w).collect();
+        } else {
+            basics.sort_by(|a, b| b.1.total_cmp(&a.1));
+        }
+        // `ENOMOTO_T_MIP_TAB_NNZ_BUDGET` = B (>0 で有効): 1 ラウンドの集約の手間 (w の非零の行の長さの合計) の上限を
+        // B * (列数 + LP の非零) にする。BTRAN の直後に手間が分かるので、上限を超える (密な) 行は集約せずに飛ばし、
+        // 後ろの疎な行で埋める (候補は limit の 3 倍まで見て、使う行は limit まで)。既定では使わない (0):
+        // 30n20b8 は w の非零が平均 5 しかなく、LP の行そのものが密 (集約行 4400-7700 非零) で、根の最初のラウンドの
+        // 下界 43 -> 81 は密な行からの 1 本のカットによる。予算をかけると分離は 0.3 -> 0.1 秒/ラウンドになるが、
+        // 根の下界が 151 -> 92 (B=2), 109 (B=5), 105 (B=20) に下がる。neos-911970 は B=2,5 で根のラウンドが減り
+        // 木の下界 53.1 -> 51 に悪化、qnet1 は 4.5 -> 3.0 秒と速くなり、neos-1456979・h80x6320d はほぼ変わらない
+        let lp_nnz: usize = lp_rows.iter().map(|r| r.len()).sum();
+        let nnz_budget_mult = tunable!("ENOMOTO_T_MIP_TAB_NNZ_BUDGET", 0.0, f64);
+        let nnz_budget = if nnz_budget_mult > 0.0 { nnz_budget_mult * (n + lp_nnz) as f64 } else { f64::INFINITY };
+        let mut work_used = 0.0f64;
+        let mut n_budget_skip = 0usize;
+        if !tab_rules {
+            basics.truncate(if nnz_budget.is_finite() { 3 * limit } else { limit });
+        }
         let mut agg = vec![0.0; n];
         let tab_fc = use_flow_cover() && env_str!("ENOMOTO_MIP_TAB_FC").is_some();
-        for &(s, _) in &basics {
+        // 診断 (`ENOMOTO_MIP_DEBUG_SEP`): tableau 行の内訳の時間 (BTRAN, 集約, カット生成 + finish_cut) と行の非零数
+        let (mut t_btran, mut t_agg, mut t_gen) = (0.0f64, 0.0f64, 0.0f64);
+        let (mut n_rows_used, mut w_nnz_total, mut base_nnz_total, mut n_fill_skip) = (0usize, 0usize, 0usize, 0usize);
+        let cands_before_tab = cands.len();
+        let mut best_score = -1.0f64;
+        for (bi, &(s, score)) in basics.iter().enumerate() {
             if self.time_up() {
                 break;
             }
-            let w = self.lp.basis_inverse_row(s);
+            if tab_rules && best_score >= 0.0 {
+                let made = cands.len() - cands_before_tab;
+                let fac = if made >= 50 { 0.01 } else { 0.0025 };
+                if score < fac * best_score {
+                    break;
+                }
+            }
+            if n_rows_used >= limit {
+                break;
+            }
+            let t0 = std::time::Instant::now();
+            let w = if tab_rules { std::mem::take(&mut w_cache[bi]) } else { self.lp.basis_inverse_row(s) };
+            if dbg_sep {
+                t_btran += t0.elapsed().as_secs_f64();
+            }
+            let t0 = std::time::Instant::now();
             let wmax = w.iter().fold(0.0f64, |m, v| m.max(v.abs()));
             if wmax == 0.0 {
                 continue;
             }
             let wmin_keep = 1e-9 * wmax;
+            if nnz_budget.is_finite() {
+                let work: usize = (0..mr).filter(|&i| w[i].abs() > wmin_keep).map(|i| lp_rows[i].len() + 1).sum();
+                if work_used + work as f64 > nnz_budget {
+                    n_budget_skip += 1;
+                    continue;
+                }
+                work_used += work as f64;
+            }
             // 集約: sum_i w_i (a_i x - r_i) = 0
             let mut touched: Vec<usize> = Vec::new();
             let mut base: Vec<(usize, f64)> = Vec::new();
@@ -1178,10 +1838,54 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 agg[j] = 0.0;
             }
+            let w_nnz = w.iter().filter(|v| v.abs() > wmin_keep).count();
+            if dbg_sep {
+                t_agg += t0.elapsed().as_secs_f64();
+                w_nnz_total += w_nnz;
+            }
             if !ok {
                 continue;
             }
+            // HiGHS の fill の予算: 集約で増えた非零の 10 倍が 10000 + 列数 を超える行は使わない
+            // (`ENOMOTO_T_MIP_TAB_FILL_MULT` 倍に緩める。0 なら予算なし。30n20b8 では HiGHS と同じ予算だと全ての行が外れ、
+            // 根の下界が 151 -> 88.5 に下がった: HiGHS は mod-k など他の分離で下界を得るが、こちらは tableau 行に頼っている)
+            let fill_mult = tunable!("ENOMOTO_T_MIP_TAB_FILL_MULT", 1.0, f64);
+            if tab_rules && fill_mult > 0.0 && 10.0 * base.len().saturating_sub(w_nnz) as f64 > fill_mult * (10_000 + n) as f64 {
+                n_fill_skip += 1;
+                continue;
+            }
+            // 最適面の頂点での分離: 今の頂点で同じ基底変数の行が、集約した行もその列の LP 値も同じなら、作るカットも
+            // 同じなので飛ばす (`ENOMOTO_MIP_FACE_TAB_SKIP`。照合と数えるのは常に)。同じ行の割合は misc07 で 25% (1323 行中 325)、
+            // 10teams ではほぼ 0 (2088 行中 2: tableau が密で、1 回のピボットでほぼ全ての行が変わる)。分離の時間はほとんど
+            // 変わらないので既定では飛ばさない
+            if self.tab_memo_mode != 0 {
+                use std::hash::{Hash, Hasher};
+                let q = |v: f64| -> i64 { (v * 1e9).round() as i64 };
+                let mut hs = std::collections::hash_map::DefaultHasher::new();
+                for &(j, a) in &base {
+                    j.hash(&mut hs);
+                    q(a).hash(&mut hs);
+                    q(vars.x[j]).hash(&mut hs);
+                }
+                let h = hs.finish();
+                let k = self.lp.basic_var(s);
+                if self.tab_memo_mode == 1 {
+                    self.tab_memo.insert(k, h);
+                } else {
+                    self.tab_memo_stats.0 += 1;
+                    if self.tab_memo.get(&k) == Some(&h) {
+                        self.tab_memo_stats.1 += 1;
+                        if env_str!("ENOMOTO_MIP_FACE_TAB_SKIP").is_some() {
+                            continue;
+                        }
+                    }
+                }
+            }
+            n_rows_used += 1;
+            base_nnz_total += base.len();
             if !gen_old() {
+                let t0 = std::time::Instant::now();
+                let n_before = cands.len();
                 let neg: Vec<(usize, f64)> = base.iter().map(|&(k, a)| (k, -a)).collect();
                 for b in [&base, &neg] {
                     let n0 = cands.len();
@@ -1189,6 +1893,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         push(Some(c), &mut cands, self);
                     }
                     keep_best(&mut cands, n0, self.p);
+                }
+                if dbg_sep {
+                    t_gen += t0.elapsed().as_secs_f64();
+                }
+                if tab_rules && best_score < 0.0 && cands.len() > n_before {
+                    best_score = score;
                 }
                 continue;
             }
@@ -1207,7 +1917,25 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         if dbg_sep {
-            eprintln!("SEP tableau {:.3}s cands {}", sep_t0.elapsed().as_secs_f64(), cands.len());
+            eprintln!(
+                "SEP tableau {:.3}s cands {} (rows {} of {} candidates, fill-skipped {}, budget-skipped {} (work {:.0} / {:.0}), btran {:.3}s agg {:.3}s gen+finish {:.3}s (finish total this call {:.3}s), mean w nnz {:.0}, mean agg nnz {:.0}, LP rows {} nnz {})",
+                sep_t0.elapsed().as_secs_f64(),
+                cands.len(),
+                n_rows_used,
+                basics.len(),
+                n_fill_skip,
+                n_budget_skip,
+                work_used,
+                nnz_budget,
+                t_btran,
+                t_agg,
+                t_gen,
+                t_finish.get(),
+                w_nnz_total as f64 / basics.len().max(1) as f64,
+                base_nnz_total as f64 / n_rows_used.max(1) as f64,
+                mr,
+                lp_rows.iter().map(|r| r.len()).sum::<usize>()
+            );
         }
         cands
     }
@@ -1223,19 +1951,41 @@ fn finish_cut(
     up: &[f64],
     x: &[f64],
     incumbent: Option<&[f64]>,
+    scratch: &mut [f64],
 ) -> Option<Candidate> {
-    let mut dense: std::collections::BTreeMap<usize, f64> = std::collections::BTreeMap::new();
+    // 構造変数ごとの係数を密な作業領域 (呼び出し側が長さ n の 0 で用意し、ここで 0 に戻す) に集める。
+    // 以前は BTreeMap で、集約行の非零が数千のときは finish_cut が tableau 行のカット生成と同程度の時間を使っていた
+    let mut touched: Vec<usize> = Vec::with_capacity(raw.coefs.len());
     for &(k, c) in &raw.coefs {
         if k < n {
-            *dense.entry(k).or_insert(0.0) += c;
+            if scratch[k] == 0.0 {
+                touched.push(k);
+            }
+            scratch[k] += c;
+            if scratch[k] == 0.0 {
+                scratch[k] = 1e-300;
+            }
         } else {
             for &(j, a) in &lp_rows[k - n] {
-                *dense.entry(j).or_insert(0.0) += c * a;
+                if scratch[j] == 0.0 {
+                    touched.push(j);
+                }
+                scratch[j] += c * a;
+                if scratch[j] == 0.0 {
+                    scratch[j] = 1e-300;
+                }
             }
         }
     }
+    touched.sort_unstable();
+    let mut dense: Vec<(usize, f64)> = Vec::with_capacity(touched.len());
+    for &j in &touched {
+        let v = scratch[j];
+        scratch[j] = 0.0;
+        dense.push((j, if v == 1e-300 { 0.0 } else { v }));
+    }
     let mut rhs = raw.rhs;
-    let cmax = dense.values().fold(0.0f64, |m, v| m.max(v.abs()));
+    let cmax = dense.iter().fold(0.0f64, |m, &(_, v)| m.max(v.abs()));
     if cmax <= 0.0 || !rhs.is_finite() {
         return None;
     }
@@ -1328,6 +2078,16 @@ fn select_cuts(cands: Vec<Candidate>, max_cuts: usize, p: &MipProblem) -> Vec<Ca
 }
 
 /// 疎なベクトル (列番号の昇順) の内積。
+/// 2 本のカットの係数の向きの余弦 (絶対値)。
+fn cut_parallelism(a: &[(usize, f64)], b: &[(usize, f64)]) -> f64 {
+    let na = a.iter().map(|&(_, v)| v * v).sum::<f64>().sqrt();
+    let nb = b.iter().map(|&(_, v)| v * v).sum::<f64>().sqrt();
+    if na == 0.0 || nb == 0.0 {
+        return 0.0;
+    }
+    sparse_dot(a, b).abs() / (na * nb)
+}
+
 fn sparse_dot(a: &[(usize, f64)], b: &[(usize, f64)]) -> f64 {
     let (mut i, mut k, mut dot) = (0, 0, 0.0);
     while i < a.len() && k < b.len() {
@@ -1365,9 +2125,14 @@ fn select_cuts_hybrid(cands: Vec<Candidate>, max_cuts: usize, p: &MipProblem) ->
     scored.sort_by(|a, b| b.0.total_cmp(&a.0));
     let Some(best_score) = scored.first().map(|s| s.0) else { return Vec::new() };
     let (maxpar, goodmaxpar, good) = (tunable!("ENOMOTO_T_CUTSEL_MAXPAR", 0.3, f64), tunable!("ENOMOTO_T_CUTSEL_GOODMAXPAR", 0.7, f64), 0.9 * best_score);
+    // `ENOMOTO_T_CUTSEL_MIN_REL` (既定 0.5): 質が最良の何倍未満のカットは採らない (Wesselmann・Suhl の MOPS と同じ
+    // 最良の 50%)。弱いカットを LP に入れず、1 ラウンドの LP を軽くする (根の LP の反復: qnet1 1936 -> 1149、
+    // h80x6320d 7202 -> 3378)。40 問 2 回: sgeomean 27.84 -> 26.72、28.10 -> 26.81 (misc07 36 -> 11 秒、mik-250 33 -> 25 秒)。
+    // 0.3 は 27.13。0 なら以前と同じ (上限 50 本まで全部)
+    let min_score = tunable!("ENOMOTO_T_CUTSEL_MIN_REL", 0.5, f64) * best_score;
     let mut chosen: Vec<(f64, Candidate)> = Vec::new();
     for (score, nc, c) in scored {
-        if chosen.len() >= max_cuts {
+        if chosen.len() >= max_cuts || score < min_score {
             break;
         }
         let limit = if score >= good { goodmaxpar } else { maxpar };

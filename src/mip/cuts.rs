@@ -1233,6 +1233,10 @@ fn lifted_cover_terms(vars: &CutVars, terms: Vec<Term>, beta: f64) -> Option<Raw
     if cover.is_empty() || lambda <= minlambda {
         return None;
     }
+    let mut in_cover = vec![false; n];
+    for &k in &cover {
+        in_cover[k] = true;
+    }
     let mut cvals = vals.clone();
     let mut crhs;
     if !has_cont && !has_gen {
@@ -1504,6 +1508,23 @@ fn lifted_cover_terms(vars: &CutVars, terms: Vec<Term>, beta: f64) -> Option<Raw
             }
         }
     }
+    // 持ち上げた係数のうち小さいものを落とす (y >= 0 なので、`<=` の左辺の正の係数を 0 にしても妥当なまま。疎になる):
+    // `ENOMOTO_T_MIP_LIFT_KEEP_FRAC` = f (> 0): カバーの外の変数の正の係数で、最大の係数の f 倍未満のものを落とす。
+    // `ENOMOTO_MIP_LIFT_DROP_ZERO`: カバーの外で LP 値が 0 の変数の正の係数を落とす (今の LP 解での違反量は変わらない)。
+    // 13 問 x 3 通り (既定 29/39 28.82): 元の行だけ (`ENOMOTO_MIP_ROW_LIFTED_COVER`) は落とさない 26/39 31.21、f = 0.2 で
+    // 23/39 33.14、LP 値 0 を落とす 24/39 31.10。全ての集約行 (`ENOMOTO_MIP_LIFTED_COVER`) は 19/39 33.89、f = 0.2 で
+    // 24/39 32.11、LP 値 0 を落とす 19/39 40.77。どれも既定より悪いので使わない
+    let keep_frac = tunable!("ENOMOTO_T_MIP_LIFT_KEEP_FRAC", 0.0, f64);
+    let drop_zero = env_str!("ENOMOTO_MIP_LIFT_DROP_ZERO").is_some();
+    if keep_frac > 0.0 || drop_zero {
+        let cmax = cvals.iter().fold(0.0f64, |m, &c| m.max(c));
+        for k in 0..n {
+            let c = cvals[k];
+            if c > 0.0 && !in_cover[k] && ((keep_frac > 0.0 && c < keep_frac * cmax) || (drop_zero && solval[k] <= FEAS)) {
+                cvals[k] = 0.0;
+            }
+        }
+    }
     // y の式から元の変数に戻す
     let mut coefs: Vec<(usize, f64)> = Vec::with_capacity(n);
     let mut r = crhs;
@@ -1607,7 +1628,11 @@ pub fn generate_cuts(vars: &CutVars, base: &[(usize, f64)], rhs: f64, flow_cover
         return out;
     };
     let has_cont = base.iter().any(|&(k, a)| a != 0.0 && !vars.is_int[k] && vars.lo[k] < vars.up[k]);
-    if env_str!("ENOMOTO_MIP_LIFTED_COVER").is_some() {
+    // `ENOMOTO_MIP_ROW_LIFTED_COVER`: 元の行 1 本ずつ (`ext_cover` の呼び出し) でだけ lifted cover も試す
+    // (集約行・tableau 行では試さない。どれを残すかは呼び出し側がカットの質で決める)
+    // 40 問: 使わない 20 問 28.04、使う 19 問 27.66 (mik-250 53.3 -> 20.7 秒、binkar10_1 28.1 -> 24.5 秒、rout 31.9 秒 -> 時間切れ)。
+    // 差はばらつきの範囲なので既定では使わない
+    if env_str!("ENOMOTO_MIP_LIFTED_COVER").is_some() || (ext_cover && env_str!("ENOMOTO_MIP_ROW_LIFTED_COVER").is_some()) {
         out.extend(lifted_cover_terms(vars, terms.clone(), beta));
     }
     // δ の探索 (`cmir_terms_multi`) は `ENOMOTO_MIP_CMIR_SEARCH` のときだけ。40 問で、従来 18 問 (sgeomean 28.12) に対し

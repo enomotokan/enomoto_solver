@@ -30,6 +30,9 @@ pub struct MipProblem {
     pub row_up: Vec<f64>,
     /// 列方向の表現 (列 → (行, 係数))。
     pub cols: Vec<Vec<(usize, f64)>>,
+    /// プロービングで見つけた 0-1 列の含意を、同時には真にならない文字の組として持つ (文字 `2j` は `x_j = 1`、
+    /// `2j + 1` は `x_j = 0`)。衝突グラフ ([`super::clique::CliqueGraph`]) の辺に加える。
+    pub conflict_edges: Vec<(u32, u32)>,
 }
 
 impl MipProblem {
@@ -110,7 +113,7 @@ impl MipProblem {
                 cols[j].push((i, v));
             }
         }
-        MipProblem { n, m, col_lo, col_up, cost, offset, sense_sign, is_int, rows, row_lo, row_up, cols }
+        MipProblem { n, m, col_lo, col_up, cost, offset, sense_sign, is_int, rows, row_lo, row_up, cols, conflict_edges: Vec::new() }
     }
 
     /// 整数列と暗黙の整数列 (連続列だが、整数解では必ず整数値になるもの) の印。カット生成で整数として扱う

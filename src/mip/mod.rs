@@ -30,6 +30,14 @@ use crate::types::{ConstraintRow, LpOptions, MipSettings, MipSummary, Objective,
 use problem::MipProblem;
 use solver::{MipParams, MipStatus};
 
+/// 木の探索に使えるスレッドの数の上限: このプロセスが使える CPU の数 (Linux では CPU affinity と cgroup の割り当てを
+/// 反映する `std::thread::available_parallelism`)。環境変数 `ENOMOTO_MIP_MAX_THREADS` でさらに小さくできる。
+pub fn max_threads() -> usize {
+    let hw = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    let cap = env_str!("ENOMOTO_MIP_MAX_THREADS").and_then(|v| v.parse::<usize>().ok()).filter(|&v| v >= 1).unwrap_or(usize::MAX);
+    hw.min(cap).max(1)
+}
+
 /// (混合) 整数計画問題を解く。整数変数が 1 つもなければ `solve_lp` を 1 回呼ぶだけ。
 pub fn solve_mip(
     variables: &[VariableData],
@@ -52,9 +60,10 @@ pub fn solve_mip(
         rel_gap: settings.rel_gap.or(env_f64(env_str!("ENOMOTO_MIP_REL_GAP"))).unwrap_or(d.rel_gap),
         time_limit: settings.time_limit.or(env_f64(env_str!("ENOMOTO_MIP_TIME_LIMIT"))).unwrap_or(d.time_limit),
         node_limit: settings.node_limit.or(env_f64(env_str!("ENOMOTO_MIP_NODE_LIMIT")).map(|v| v as u64)).unwrap_or(d.node_limit),
+        threads: settings.threads.or(env_f64(env_str!("ENOMOTO_MIP_TREE_THREADS")).map(|v| v as usize)).unwrap_or(d.threads).clamp(1, max_threads()),
         ..d
     };
-    let r = solve_problem(&p, params, env_str!("ENOMOTO_MIP_NO_PRESOLVE").is_none());
+    let r = if env_str!("ENOMOTO_MIP_PORTFOLIO").is_some() { solve_portfolio(&p, params) } else { solve_problem(&p, params, env_str!("ENOMOTO_MIP_NO_PRESOLVE").is_none()) };
     if env_str!("ENOMOTO_MIP_XPROF").is_some() {
         crate::simplex::slope_intercept_dual::xprof("tail");
         for (l, ns) in crate::simplex::slope_intercept_dual::xprof_take() {
@@ -79,6 +88,267 @@ pub fn solve_mip(
         MipStatus::NotSolved => Status::NotSolved,
     };
     SolveResult { status, objective: objective_value, x: r.x, node_limit_hit: r.status == MipStatus::NodeLimit, mip: Some(summary) }
+}
+
+/// ポートフォリオ並列 (`ENOMOTO_MIP_PORTFOLIO`): 設定の違う 2 つの求解を別スレッドで同時に走らせる
+/// (0: 既定、1: 以前の形 = DSE 重みを引き継がず最適面の頂点も使わない。得意な問題が分かれる)。
+/// 見つけた解の目的値を共有して互いの打ち切りに使い、片方が探索を終えたら (最適・実行不能) もう片方を止める。
+/// 片方が「共有の最良値より良い解はない」と示して終われば、もう片方の最良の解が最適。
+fn solve_portfolio(p: &MipProblem, params: MipParams) -> solver::MipResult {
+    use std::sync::atomic::Ordering;
+    let shared = std::sync::Arc::new(solver::Portfolio::new());
+    let use_presolve = env_str!("ENOMOTO_MIP_NO_PRESOLVE").is_none();
+    // 探索を終えたスレッドが示した「これより良い解はない」値 (そのスレッドの打ち切りに使った値)
+    let proven: std::sync::Mutex<Option<f64>> = std::sync::Mutex::new(None);
+    // `ENOMOTO_MIP_PORTFOLIO_BISECT`: 3 本目のスレッドで目的値の二分探索を回す ([`bisection_worker`])
+    // `ENOMOTO_MIP_BISECT_FRACS`: 二分探索のスレッドごとの最初の目標値の位置 (下界と最良値の間の割合、コンマ区切り。
+    // 既定 "0.5,0.25" の 2 本。木の探索のスレッド (割合 1 にあたる) と合わせて 1, 1/2, 1/4 の 3 本で始める)。
+    // 示した下界と見つけた解はスレッドの間で共有し、区間が変わったら二分探索のスレッドは新しい区間の同じ割合で解き直す
+    let bisect = env_str!("ENOMOTO_MIP_PORTFOLIO_BISECT").is_some();
+    let fracs: Vec<f64> = if bisect {
+        env_str!("ENOMOTO_MIP_BISECT_FRACS").map(|s| s.split(',').filter_map(|v| v.trim().parse::<f64>().ok()).filter(|v| *v > 0.0 && *v < 1.0).collect()).unwrap_or_else(|| vec![0.5, 0.25])
+    } else {
+        Vec::new()
+    };
+    // `ENOMOTO_MIP_PORTFOLIO_TREES`: 木の探索のスレッドの数 (1 なら既定の設定だけ、2 なら以前の形も。
+    // 既定は二分探索のスレッドがあれば 1、なければ 2)
+    let ntrees = env_str!("ENOMOTO_MIP_PORTFOLIO_TREES").and_then(|v| v.parse::<u8>().ok()).unwrap_or(if bisect { 1 } else { 2 }).clamp(1, 2);
+    let bis_result: std::sync::Mutex<Vec<(Option<solver::MipResult>, f64)>> = std::sync::Mutex::new(Vec::new());
+    let results: Vec<solver::MipResult> = std::thread::scope(|sc| {
+        for &f0 in &fracs {
+            let shared = shared.clone();
+            let bis_result = &bis_result;
+            sc.spawn(move || {
+                let r = bisection_worker(p, params, use_presolve, shared, f0);
+                bis_result.lock().unwrap().push(r);
+            });
+        }
+        let hs: Vec<_> = (0..ntrees)
+            .map(|prof| {
+                let shared = shared.clone();
+                let proven = &proven;
+                let params = MipParams { verbose: params.verbose && prof == 0, ..params };
+                sc.spawn(move || {
+                    crate::simplex::slope_intercept_dual::set_mip_profile(prof);
+                    solver::set_thread_portfolio(Some(shared.clone()));
+                    let r = solve_problem(p, params, use_presolve);
+                    solver::set_thread_portfolio(None);
+                    let stopped = shared.stop.load(Ordering::Relaxed);
+                    if !stopped && matches!(r.status, MipStatus::Optimal | MipStatus::Infeasible) {
+                        // このスレッドは探索を終えた: 自分の解か共有の最良値より良い解はない
+                        let own = r.objective.unwrap_or(f64::INFINITY);
+                        *proven.lock().unwrap() = Some(own.min(shared.best()));
+                        shared.stop.store(true, Ordering::Relaxed);
+                    }
+                    r
+                })
+            })
+            .collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    let mut proven = *proven.lock().unwrap();
+    // 問題全体の下界は、木の探索のスレッドの下界と、二分探索のスレッドが示した厳密な下界からだけ作る
+    // (二分探索の求解が返す下界は打ち切り値で絞った問題のもので、全体の下界ではない)
+    let tree_bound = results.iter().map(|r| r.best_bound).fold(f64::NEG_INFINITY, f64::max).max(shared.proven());
+    let mut results = results;
+    let mut plb = f64::NEG_INFINITY;
+    for (r, v) in bis_result.into_inner().unwrap() {
+        if let Some(r) = r {
+            results.push(r);
+        }
+        plb = plb.max(v);
+    }
+    plb = plb.max(shared.proven());
+    {
+        // 二分探索のスレッドが示した「plb 未満の解はない」: 最良の解がそれに届いていれば最適
+        let bz = results.iter().filter_map(|r| r.objective).fold(f64::INFINITY, f64::min);
+        if bz.is_finite() && plb >= bz - (params.rel_gap * bz.abs().max(1.0)).max(params.abs_gap) {
+            proven = Some(proven.map_or(plb, |v: f64| v.max(plb)));
+        }
+    }
+    // 最良の解
+    let mut best: Option<&solver::MipResult> = None;
+    for r in &results {
+        if let Some(z) = r.objective {
+            if best.is_none_or(|b| z < b.objective.unwrap()) {
+                best = Some(r);
+            }
+        }
+    }
+    let nodes = results.iter().map(|r| r.nodes).sum();
+    let lp_iterations = results.iter().map(|r| r.lp_iterations).sum();
+    let mut bound = tree_bound;
+    match (best, proven) {
+        (Some(b), Some(_)) => {
+            // 探索を終えたスレッドは、共有の最良値 (= この解以下) より良い解がないことを示した
+            let z = b.objective.unwrap();
+            solver::MipResult { status: MipStatus::Optimal, x: b.x.clone(), objective: Some(z), best_bound: z, nodes, lp_iterations }
+        }
+        (None, Some(_)) => {
+            // どちらも解がなく、片方が探索を終えた
+            let r = results.iter().find(|r| matches!(r.status, MipStatus::Infeasible | MipStatus::Optimal)).unwrap();
+            solver::MipResult { status: r.status, x: None, objective: None, best_bound: r.best_bound, nodes, lp_iterations }
+        }
+        (Some(b), None) => {
+            let z = b.objective.unwrap();
+            bound = bound.min(z);
+            let status = results.iter().map(|r| r.status).find(|s| *s != MipStatus::Optimal).unwrap_or(b.status);
+            solver::MipResult { status, x: b.x.clone(), objective: Some(z), best_bound: bound, nodes, lp_iterations }
+        }
+        (None, None) => {
+            let r = &results[0];
+            solver::MipResult { status: r.status, x: None, objective: None, best_bound: bound, nodes, lp_iterations }
+        }
+    }
+}
+
+/// ポートフォリオ並列の目的値の二分探索のスレッド: 共有の最良値 `ub` と木の探索のスレッドの下界 `lb` の間の目標値
+/// `t = lb + f (ub - lb)` を打ち切り値にして問題全体を (時間を区切って) 解く。
+/// - 解が見つかれば共有の最良値が良くなる (求解の中で知らせる。f は 0.5 に戻す)
+/// - 探索を終えて解がなければ「t (と共有の最良値の小さい方) 未満の解はない」と示せたので、下界をそこへ上げる
+///   (f は 0.5 に戻す)。最適で終われば、その値未満の解はない (見つけた解が最適)
+/// - 時間で終わったら f を暫定解の側へ寄せる
+/// 下界が最良値に届いたら全スレッドを止める。戻り値は (見つけた最良の解, 示した下界)。
+fn bisection_worker(p: &MipProblem, params: MipParams, use_presolve: bool, shared: std::sync::Arc<solver::Portfolio>, frac0: f64) -> (Option<solver::MipResult>, f64) {
+    use std::sync::atomic::Ordering;
+    // `ENOMOTO_MIP_BISECT_NO_HEUR`: ヒューリスティクスを走らせず、下界の証明だけに集中する
+    // `ENOMOTO_MIP_BISECT_ROOT_HEUR`: 根のヒューリスティクスだけ走らせる (見つけた解は共有の最良値になる)
+    crate::simplex::slope_intercept_dual::set_mip_profile(if env_str!("ENOMOTO_MIP_BISECT_NO_HEUR").is_some() {
+        2
+    } else if env_str!("ENOMOTO_MIP_BISECT_ROOT_HEUR").is_some() {
+        3
+    } else {
+        0
+    });
+    solver::set_thread_portfolio(Some(shared.clone()));
+    let t0 = std::time::Instant::now();
+    let tl = params.time_limit;
+    let mut frac = frac0;
+    let mut proven = f64::NEG_INFINITY;
+    let mut best: Option<solver::MipResult> = None;
+    let verbose = params.verbose && env_str!("ENOMOTO_MIP_BISECT_VERBOSE").is_some();
+    // `ENOMOTO_MIP_BISECT_SNAPSHOT`: 2 回目からの求解は、木の探索のスレッドの探索木の写し ([`solver::TreeSnapshot`]) の
+    // 未処理のノードから始める (根の LP・カット・ヒューリスティクスを解き直さない)。写しのノードの部分木を探索し終えるたびに、
+    // 木の探索のスレッドはそのノードの子孫の下界を上げる
+    let use_snap = env_str!("ENOMOTO_MIP_BISECT_SNAPSHOT").is_some();
+    let mut solves = 0u64;
+    let mut last_serial = 0u64;
+    loop {
+        let el = t0.elapsed().as_secs_f64();
+        if shared.stop.load(Ordering::Relaxed) || el >= tl - 0.5 {
+            break;
+        }
+        let ub = shared.best();
+        proven = proven.max(shared.proven());
+        let lb = shared.lb().max(proven);
+        if !ub.is_finite() || !lb.is_finite() {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            continue;
+        }
+        let tol = (params.rel_gap * ub.abs().max(1.0)).max(params.abs_gap);
+        if lb >= ub - tol {
+            // 共有の下界は木の探索のスレッドの待ち行列からの目安で、厳密ではない (処理中のノードを含まない)。
+            // 止める合図には使わず、自分で示した下界 (`proven`) だけで判断する
+            if proven >= ub - tol {
+                shared.stop.store(true, Ordering::Relaxed);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            continue;
+        }
+        let t = lb + frac * (ub - lb);
+        // 既定 (区間が変わったら解き直す): 時間は区切らず、最良値か厳密な下界が変わったら (どのスレッドが変えても)
+        // 求解を打ち切って、新しい区間で同じ割合の目標値から解き直す。`ENOMOTO_MIP_BISECT_SLICED` なら以前の形
+        // (時間で区切り、決着がつかなければ割合を最良値の側へ寄せる)
+        let sliced = env_str!("ENOMOTO_MIP_BISECT_SLICED").is_some();
+        let slice = if sliced { (tunable!("ENOMOTO_T_MIP_BISECT_SLICE", 0.1, f64) * tl).max(2.0).min(tl - el) } else { tl - el };
+        let pr = MipParams { time_limit: slice, cutoff: t, verbose: false, ..params };
+        // 木の探索のスレッドが根で作ったカットを、この求解の最初に LP に入れる (成り立つ範囲が目標値を含むときだけ)
+        if let Some(c) = shared.cuts().filter(|c| t <= c.1 && env_str!("ENOMOTO_MIP_BISECT_SHARE_CUTS").is_some()) {
+            RESTART_CUTS.with(|s| *s.borrow_mut() = Some(c.0.clone()));
+        }
+        if !sliced {
+            // 打ち切るのは、厳密な下界が自分の目標値に届いたとき (自分の区間に解がないとほかのスレッドが示した) だけ。
+            // 最良値が下がっても打ち切らずに同じ木を続ける (枝刈りの値は共有の最良値まで下がるので、続けても
+            // 「min(t, 最良値) 未満の解はない」の証明として正しい。解き直すと、それまでの木を捨てることになる)。
+            // `ENOMOTO_MIP_BISECT_ABORT_ON_UB` なら以前の形 (最良値が区間の 1/2 の点を下回ったら打ち切る)
+            let trig = if env_str!("ENOMOTO_MIP_BISECT_ABORT_ON_UB").is_some() { lb + 0.5 * (ub - lb) } else { f64::NEG_INFINITY };
+            solver::set_thread_watch(Some((trig.min(t), t)));
+        }
+        let snap = if use_snap && solves > 0 {
+            // 新しい写しを求めて待つ (木の探索のスレッドは待ち行列の頭で作る)。来なければ前の写しを使う (古くても
+            // 打ち切り値が成り立つ範囲に入っていれば正しい)
+            shared.snap_req.store(true, Ordering::Release);
+            let w0 = std::time::Instant::now();
+            let wait = tunable!("ENOMOTO_T_MIP_BISECT_SNAP_WAIT", 1.0, f64);
+            let mut got = None;
+            while w0.elapsed().as_secs_f64() < wait && !shared.stop.load(Ordering::Relaxed) && t0.elapsed().as_secs_f64() < tl - 0.5 {
+                if let Some(sn) = shared.snapshot().filter(|sn| sn.serial > last_serial) {
+                    got = Some(sn);
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            got.or_else(|| shared.snapshot()).filter(|sn| t <= sn.valid_below)
+        } else {
+            None
+        };
+        solves += 1;
+        let from_snap = snap.is_some();
+        let snap_info = snap.as_ref().map(|sn| (sn.serial, sn.nodes.len()));
+        let r = match snap {
+            Some(sn) => {
+                last_serial = last_serial.max(sn.serial);
+                // 解は写しの問題の空間なので返さない (木の探索のスレッドが受け取る)
+                let mut r = solver::solve_snapshot(sn, pr);
+                r.x = None;
+                r
+            }
+            None => solve_problem(p, pr, use_presolve),
+        };
+        solver::set_thread_watch(None);
+        let used_cut = t.min(shared.best());
+        if verbose {
+            eprintln!("MIP: bisection thread: lb {lb:.10e} ub {ub:.10e} target {t:.10e} -> {:?} {:?} bound {:.10e} nodes {} snapshot {:?} ({:.1}s)", r.status, r.objective, r.best_bound, r.nodes, snap_info, t0.elapsed().as_secs_f64());
+        }
+        // 写しから解いた結果は解 (x) を持たないので、最良の解の候補にしない
+        let r = if from_snap { solver::MipResult { objective: r.objective.filter(|&z| z < used_cut), ..r } } else { r };
+        let keep = |best: &mut Option<solver::MipResult>, r: solver::MipResult| {
+            if let (false, Some(z)) = (from_snap, r.objective) {
+                if best.as_ref().is_none_or(|b| z < b.objective.unwrap()) {
+                    *best = Some(r);
+                }
+            }
+        };
+        match (r.status, r.objective) {
+            (MipStatus::Optimal, Some(z)) if z < used_cut => {
+                // 打ち切り値未満で最良の解 = 全体の最適 (打ち切り値以上の解はヒューリスティクスが打ち切り値に関係なく
+                // 見つけたもので、探索を終えても「t 未満の解はない」ことしか示さない: 下の腕で扱う)
+                proven = proven.max(z);
+                shared.publish_proven(proven);
+                keep(&mut best, r);
+                shared.stop.store(true, Ordering::Relaxed);
+                break;
+            }
+            (MipStatus::Infeasible, _) | (MipStatus::Optimal, _) => {
+                keep(&mut best, r);
+                proven = proven.max(used_cut);
+                shared.publish_proven(proven);
+                frac = frac0;
+            }
+            (_, Some(_)) => {
+                keep(&mut best, r);
+                frac = frac0;
+            }
+            _ => {
+                if sliced {
+                    frac = (0.5 * (1.0 + frac)).min(0.9);
+                }
+            }
+        }
+    }
+    solver::set_thread_portfolio(None);
+    (best, proven)
 }
 
 /// `p` を (`use_presolve` なら MIP 前処理をかけてから) 分枝限定法で解き、解を `p` の空間に戻す。
@@ -153,7 +423,14 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
                 eprintln!("MIP_DEBUG_SOL: reduced objective {} feasible {}", prob.objective(&xd), prob.is_feasible(&xd, 1e-6));
                 solver::DEBUG_SOL.with(|d| *d.borrow_mut() = Some(xd));
             }
+            let outer_level = !params.submip && params.restarts == 0;
+            if outer_level {
+                solver::set_thread_scale(Some(scaling.d.clone()));
+            }
             let mut r = solver::solve(&prob, params);
+            if outer_level {
+                solver::set_thread_scale(None);
+            }
             let mut ok = true;
             if let Some(xr) = r.x.take() {
                 let mut x = xr.clone();
@@ -383,7 +660,7 @@ fn presolve_mip(p: &MipProblem, verbose: bool) -> Option<Presolved> {
     // 係数の強化 (片側の行の 0-1 列の係数を、整数解を変えずに LP の緩和が締まる値に縮める)
     if env_str!("ENOMOTO_MIP_NO_COEF_TIGHTEN").is_none() {
         let is_int_now: Vec<bool> = p.is_int.clone();
-        let tightened = tighten_coefficients(&mut rows, &mut row_lo, &mut row_up, &pre.lb, &pre.ub, &is_int_now);
+        let tightened = tighten_coefficients(&mut rows, &mut row_lo, &mut row_up, &pre.lb, &pre.ub, &is_int_now, env_str!("ENOMOTO_MIP_COEF_TIGHTEN_GENERAL").is_some());
         let normalized = normalize_integer_rows(&mut rows, &mut row_lo, &mut row_up, &is_int_now);
         if verbose && (tightened > 0 || normalized > 0) {
             eprintln!("MIP: presolve: tightened {tightened} coefficients, normalized {normalized} integer rows");
@@ -397,7 +674,9 @@ fn presolve_mip(p: &MipProblem, verbose: bool) -> Option<Presolved> {
     }
     let fixed = (0..n).filter(|&j| pre.lb[j] == pre.ub[j]).count();
     if verbose {
-        eprintln!("MIP: presolve: rows {} -> {}, free columns {} -> {}, postsolve steps {}", p.m, rows.len(), (0..n).filter(|&j| p.col_lo[j] < p.col_up[j]).count(), n - fixed, pre.postsolve_log.len());
+        let nnz0: usize = p.rows.iter().map(|r| r.len()).sum();
+        let nnz1: usize = rows.iter().map(|r| r.len()).sum();
+        eprintln!("MIP: presolve: rows {} -> {}, free columns {} -> {}, nonzeros {nnz0} -> {nnz1}, postsolve steps {}", p.m, rows.len(), (0..n).filter(|&j| p.col_lo[j] < p.col_up[j]).count(), n - fixed, pre.postsolve_log.len());
     }
     // 代入消去で目的関数に生じた定数を offset に入れる (後処理は縮約後の点について
     // アフィンなので、任意の 1 点で元の目的値との差を測ればよい)。定数が抜けていると
@@ -428,15 +707,21 @@ fn presolve_mip(p: &MipProblem, verbose: bool) -> Option<Presolved> {
 ///   (どちらの値でも成り立つので、大域的に成り立つ)。
 ///
 /// 列の値は変えない (境界を締めるだけ) ので後処理は要らない。手間は伝播で走査した行の長さの合計
-/// (非零数の `ENOMOTO_T_MIP_PROBE_WORK` 倍、既定 20 倍) と時間 (`ENOMOTO_T_MIP_PROBE_TIME` 秒、既定 0.5 秒。長い行の多い問題 (nw04・air03) で 2 秒かけて何も得られなかった) で打ち切る。
+/// (非零数の `ENOMOTO_T_MIP_PROBE_WORK` 倍、既定 20 倍) と時間 (`ENOMOTO_T_MIP_PROBE_TIME` 秒、既定 0.5 秒。固定・締め付けが
+/// 出ていれば `ENOMOTO_T_MIP_PROBE_TIME_FOUND` 秒、既定 0.5 秒。長い行の多い問題 (nw04・air03) は 1 回が重く何も得られない) で打ち切る。
 /// 締めた境界があれば `Some(true)`、何もなければ `None`。
 fn probe(prob: &mut MipProblem, verbose: bool) -> Option<bool> {
     use domain::Domain;
     let t0 = std::time::Instant::now();
     let n = prob.n;
     let nnz: usize = prob.rows.iter().map(|r| r.len()).sum();
+    // 手間の上限は非零数の 20 倍、時間は 0.5 秒 (固定・締め付けが出ていれば `ENOMOTO_T_MIP_PROBE_TIME_FOUND` 秒)。
+    // 大きくすると (2000 倍・1 秒・3 秒) 30n20b8 は 7971 列を全部試して 3241 列を固定し根の LP が 43.3 -> 122.8
+    // (HiGHS 123.0)、neos-860300 も 2035 -> 2210 になるが、40 問では 19 問 28.14 -> 18 問 28.08 (neos-860300 が
+    // 2 回とも時間切れ、30n20b8 はそれでも解が見つからない) で既定にはしない
     let work_cap = (tunable!("ENOMOTO_T_MIP_PROBE_WORK", 20.0, f64) * nnz as f64) as u64 + 100_000;
     let time_cap = tunable!("ENOMOTO_T_MIP_PROBE_TIME", 0.5, f64);
+    let time_cap_found = tunable!("ENOMOTO_T_MIP_PROBE_TIME_FOUND", 0.5, f64);
     let mut dom = Domain::new(prob);
     if !dom.propagate(prob) {
         return Some(false);
@@ -446,8 +731,29 @@ fn probe(prob: &mut MipProblem, verbose: bool) -> Option<bool> {
     cands.sort_by_key(|&j| std::cmp::Reverse(prob.cols[j].len()));
     let work0 = dom.debug_work();
     let (mut probed, mut fixed, mut tightened) = (0usize, 0usize, 0usize);
+    // 含意 (`ENOMOTO_MIP_NO_PROBE_IMPLICATIONS` で集めない): x_j = v で 0-1 列 x_k が固定されれば、
+    // 「x_j = v かつ x_k が固定と逆の値」は成り立たない (衝突の組)。上限は非零数の 10 倍
+    let want_impl = env_str!("ENOMOTO_MIP_NO_PROBE_IMPLICATIONS").is_none();
+    let edge_cap = 10 * nnz + 10_000;
+    let bin0: Vec<bool> = (0..n).map(|k| prob.is_int[k] && prob.col_lo[k] == 0.0 && prob.col_up[k] == 1.0).collect();
+    let mut edges: Vec<(u32, u32)> = Vec::new();
+    let mut add_edges = |j: usize, v: u32, ch: &[(usize, bool, f64)], edges: &mut Vec<(u32, u32)>| {
+        let lj = 2 * j as u32 + if v == 1 { 0 } else { 1 };
+        for &(k, upper, val) in ch {
+            if k == j || !bin0[k] || edges.len() >= edge_cap {
+                continue;
+            }
+            // x_k <= 0 なら x_k = 1 (文字 2k) と衝突、x_k >= 1 なら x_k = 0 (文字 2k+1) と衝突
+            if upper && val <= 0.5 {
+                edges.push((lj, 2 * k as u32));
+            } else if !upper && val >= 0.5 {
+                edges.push((lj, 2 * k as u32 + 1));
+            }
+        }
+    };
     for (cnt, &j) in cands.iter().enumerate() {
-        if cnt % 16 == 0 && (dom.debug_work() - work0 > work_cap || t0.elapsed().as_secs_f64() > time_cap) {
+        let cap = if fixed + tightened > 0 { time_cap_found } else { time_cap };
+        if cnt % 16 == 0 && (dom.debug_work() - work0 > work_cap || t0.elapsed().as_secs_f64() > cap) {
             break;
         }
         if dom.lo[j] == dom.up[j] {
@@ -477,6 +783,10 @@ fn probe(prob: &mut MipProblem, verbose: bool) -> Option<bool> {
                 fixed += 1;
             }
             (true, true) => {
+                if want_impl {
+                    add_edges(j, 0, &ch0, &mut edges);
+                    add_edges(j, 1, &ch1, &mut edges);
+                }
                 // 両方の結果で変わった (列, 側) だけが締まりうる。値は両方の弱い方
                 let mut first: std::collections::HashMap<(usize, bool), f64> = std::collections::HashMap::new();
                 for &(k, upper, v) in &ch0 {
@@ -514,9 +824,14 @@ fn probe(prob: &mut MipProblem, verbose: bool) -> Option<bool> {
             }
         }
     }
+    // 固定した列を含む組は捨てる (固定後は意味がない)
+    edges.retain(|&(a, b)| dom.lo[(a / 2) as usize] < dom.up[(a / 2) as usize] && dom.lo[(b / 2) as usize] < dom.up[(b / 2) as usize]);
+    edges.sort_unstable();
+    edges.dedup();
     if verbose {
-        eprintln!("MIP: probing: {probed} of {} binaries probed, {fixed} fixed, {tightened} bounds tightened ({:.2}s)", cands.len(), t0.elapsed().as_secs_f64());
+        eprintln!("MIP: probing: {probed} of {} binaries probed, {fixed} fixed, {tightened} bounds tightened, {} implications ({:.2}s)", cands.len(), edges.len(), t0.elapsed().as_secs_f64());
     }
+    prob.conflict_edges = edges;
     if fixed == 0 && tightened == 0 {
         return None;
     }
@@ -541,8 +856,22 @@ fn probe(prob: &mut MipProblem, verbose: bool) -> Option<bool> {
 ///
 /// どちらも整数解の集合を変えず、LP の緩和だけを締める (例: 0-1 列の `sum 21 y >= 2` は `sum 2 y >= 2`)。
 /// 列の値は変えないので後処理は要らない。縮めた係数の数を返す。
-fn tighten_coefficients(rows: &mut [Vec<(usize, f64)>], row_lo: &mut [f64], row_up: &mut [f64], lo: &[f64], up: &[f64], is_int: &[bool]) -> usize {
-    let unit = |j: usize| is_int[j] && lo[j].is_finite() && up[j].is_finite() && (up[j] - lo[j] - 1.0).abs() <= 1e-9 && (lo[j] - lo[j].round()).abs() <= 1e-9;
+fn tighten_coefficients(rows: &mut [Vec<(usize, f64)>], row_lo: &mut [f64], row_up: &mut [f64], lo: &[f64], up: &[f64], is_int: &[bool], general: bool) -> usize {
+    // 対象の列: 既定は幅 1 の整数列 (0-1 型)。`ENOMOTO_MIP_COEF_TIGHTEN_GENERAL` なら両側の境界が有限な整数列すべて。
+    // x_j ∈ [l, u] (整数) で a > 0 なら、x_j <= u - 1 で行が冗長 (M - a <= b) のとき d = b - (M - a) だけ縮め、
+    // 右辺を d u 減らす (x_j = u では元と同じ、x_j <= u - 1 では残りの最大活動量で成り立つ)。a < 0 なら右辺を d l 増やす。
+    // 幅 1 (0-1 列) はその特別な場合。一般整数まで広げる (`ENOMOTO_MIP_COEF_TIGHTEN_GENERAL`) と gt2 の前処理後の LP が
+    // 13460 -> 20146.8 (HiGHS と同じ) になるが、40 問では mik-250-20-75-4 が 2 回とも遅くなり (31.7 -> 56-60 秒) 既定にはしない
+    let bin_only = !general;
+    let unit = |j: usize| {
+        is_int[j]
+            && lo[j].is_finite()
+            && up[j].is_finite()
+            && up[j] - lo[j] >= 1.0 - 1e-9
+            && (lo[j] - lo[j].round()).abs() <= 1e-9
+            && (up[j] - up[j].round()).abs() <= 1e-9
+            && (!bin_only || (up[j] - lo[j] - 1.0).abs() <= 1e-9)
+    };
     let mut count = 0;
     for i in 0..rows.len() {
         let (l, u) = (row_lo[i], row_up[i]);
@@ -585,11 +914,9 @@ fn tighten_coefficients(rows: &mut [Vec<(usize, f64)>], row_lo: &mut [f64], row_
                 let d = b - (maxact - a);
                 if d > tol && d < a {
                     e.1 = sg * (a - d);
-                    b -= d;
-                    // x_j の上限の寄与 a (u_j) が (a - d) (u_j) になり、右辺も d 減る。下限の分の移動は l_j が 0 でなければ
-                    // 係数の変化 d に l_j を掛けた分だけ活動量が動くので、最大活動量は d * u_j 減る
+                    // 右辺は d u_j 減る (0-1 型なら u_j = l_j + 1)。最大活動量も x_j の上限での寄与の分 d u_j 減る
+                    b -= d * up[j];
                     maxact -= d * up[j];
-                    b -= d * lo[j];
                     count += 1;
                     changed = true;
                 }
@@ -720,7 +1047,7 @@ mod tests {
         // sum 21 y >= 2 (0-1) -> 2 y0 + 2 y1 + 2 y2 >= 2
         let mut rows = vec![vec![(0, 21.0), (1, 21.0), (2, 21.0)]];
         let (mut lo, mut up) = (vec![2.0], vec![f64::INFINITY]);
-        let n = tighten_coefficients(&mut rows, &mut lo, &mut up, &[0.0; 3], &[1.0; 3], &[true; 3]);
+        let n = tighten_coefficients(&mut rows, &mut lo, &mut up, &[0.0; 3], &[1.0; 3], &[true; 3], false);
         assert_eq!(n, 3);
         assert_eq!(rows[0], vec![(0, 2.0), (1, 2.0), (2, 2.0)]);
         assert_eq!(lo[0], 2.0);
@@ -754,9 +1081,10 @@ mod tests {
             let mut lo = vec![0.0; n];
             let mut up = vec![1.0; n];
             let mut is_int = vec![true; n];
+            // 整数列の幅は 1-3 (0-1 型と一般整数)
             for j in 0..nb {
                 lo[j] = (rnd() * 3.0).floor() - 1.0;
-                up[j] = lo[j] + 1.0;
+                up[j] = lo[j] + 1.0 + (rnd() * 3.0).floor();
             }
             is_int[nb] = false;
             lo[nb] = -2.0 * rnd();
@@ -770,7 +1098,7 @@ mod tests {
             let (rl, ru) = if ge { (rhs, f64::INFINITY) } else { (f64::NEG_INFINITY, rhs) };
             let mut rows = vec![row.clone()];
             let (mut rlo, mut rup) = (vec![rl], vec![ru]);
-            total += tighten_coefficients(&mut rows, &mut rlo, &mut rup, &lo, &up, &is_int);
+            total += tighten_coefficients(&mut rows, &mut rlo, &mut rup, &lo, &up, &is_int, true);
             let feasible = |r: &[(usize, f64)], l: f64, u: f64, y: &[f64]| -> bool {
                 // 連続列は [lo, up] の好きな値を取れる: 活動量の取りうる範囲が [l, u] と交わるか
                 let mut a0 = 0.0;
@@ -786,8 +1114,17 @@ mod tests {
                 let (mn, mx) = (c1.min(c2), c1.max(c2));
                 mx >= l - 1e-9 && mn <= u + 1e-9
             };
-            for mask in 0..(1u32 << nb) {
-                let y: Vec<f64> = (0..nb).map(|j| lo[j] + ((mask >> j) & 1) as f64).collect();
+            // 整数列のすべての値の組 (各列 up - lo + 1 通り) を数え上げる
+            let widths: Vec<usize> = (0..nb).map(|j| (up[j] - lo[j]) as usize + 1).collect();
+            let combos: usize = widths.iter().product();
+            for mut code in 0..combos {
+                let y: Vec<f64> = (0..nb)
+                    .map(|j| {
+                        let v = lo[j] + (code % widths[j]) as f64;
+                        code /= widths[j];
+                        v
+                    })
+                    .collect();
                 assert_eq!(feasible(&row, rl, ru, &y), feasible(&rows[0], rlo[0], rup[0], &y), "row {row:?} [{rl}, {ru}] -> {:?} [{}, {}], y {y:?}", rows[0], rlo[0], rup[0]);
             }
         }
