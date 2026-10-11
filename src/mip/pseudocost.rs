@@ -59,6 +59,53 @@ impl Pseudocost {
         }
     }
 
+    /// スレッドの間での共有: 前回の共有の時点の自分 `base` から増えた観測を共有の `shared` に足し、自分を `shared` の
+    /// 観測に揃える (`base` も揃えた後の値にする)。衝突スコア (古いものほど軽くする重み) はスレッドごとのまま。
+    pub fn merge_shared(&mut self, base: &mut Pseudocost, shared: &mut Pseudocost) {
+        fn mf(a: &mut [f64], b: &mut [f64], s: &mut [f64]) {
+            for k in 0..a.len() {
+                s[k] += a[k] - b[k];
+                a[k] = s[k];
+                b[k] = s[k];
+            }
+        }
+        fn mu(a: &mut [u32], b: &mut [u32], s: &mut [u32]) {
+            for k in 0..a.len() {
+                s[k] = s[k].saturating_add(a[k].saturating_sub(b[k]));
+                a[k] = s[k];
+                b[k] = s[k];
+            }
+        }
+        fn sf(a: &mut f64, b: &mut f64, s: &mut f64) {
+            *s += *a - *b;
+            *a = *s;
+            *b = *s;
+        }
+        fn su(a: &mut u64, b: &mut u64, s: &mut u64) {
+            *s = s.saturating_add(a.saturating_sub(*b));
+            *a = *s;
+            *b = *s;
+        }
+        mf(&mut self.sum_up, &mut base.sum_up, &mut shared.sum_up);
+        mu(&mut self.n_up, &mut base.n_up, &mut shared.n_up);
+        mf(&mut self.sum_down, &mut base.sum_down, &mut shared.sum_down);
+        mu(&mut self.n_down, &mut base.n_down, &mut shared.n_down);
+        sf(&mut self.total_up, &mut base.total_up, &mut shared.total_up);
+        su(&mut self.total_n_up, &mut base.total_n_up, &mut shared.total_n_up);
+        sf(&mut self.total_down, &mut base.total_down, &mut shared.total_down);
+        su(&mut self.total_n_down, &mut base.total_n_down, &mut shared.total_n_down);
+        mu(&mut self.cutoff_up, &mut base.cutoff_up, &mut shared.cutoff_up);
+        mu(&mut self.cutoff_down, &mut base.cutoff_down, &mut shared.cutoff_down);
+        for d in 0..2 {
+            mf(&mut self.inf_sum[d], &mut base.inf_sum[d], &mut shared.inf_sum[d]);
+            mu(&mut self.inf_n[d], &mut base.inf_n[d], &mut shared.inf_n[d]);
+        }
+        sf(&mut self.inf_total, &mut base.inf_total, &mut shared.inf_total);
+        su(&mut self.inf_total_n, &mut base.inf_total_n, &mut shared.inf_total_n);
+        su(&mut self.infeasible_leaves, &mut base.infeasible_leaves, &mut shared.infeasible_leaves);
+        su(&mut self.objlim_leaves, &mut base.objlim_leaves, &mut shared.objlim_leaves);
+    }
+
     /// 衝突 (リテラル (列, 上限か) の組) を衝突スコアに加える。
     pub fn add_conflict(&mut self, lits: &[(usize, bool, f64)]) {
         for &(j, upper, _) in lits {

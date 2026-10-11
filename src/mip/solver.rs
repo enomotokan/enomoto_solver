@@ -275,6 +275,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     pool_busy: bool,
     /// 従が最後に見た共有の最良値。
     seen_best: f64,
+    /// 擬似費用を前回合わせたときの自分の値 (この後に増えた観測を共有の擬似費用に足す)。
+    pc_base: Option<Pseudocost>,
     workers: Vec<std::thread::JoinHandle<MipResult>>,
     worker_totals: (u64, u64),
     pool_stats: [u64; 3],
@@ -453,6 +455,8 @@ pub(crate) struct WorkPool {
     unresolved: std::sync::atomic::AtomicBool,
     /// スレッドの間で共有する大域的な境界 (根の被約費用による固定・双対証明などの大域的な締め付けの和)。
     bounds: std::sync::Mutex<(Vec<f64>, Vec<f64>)>,
+    /// スレッドの間で合わせた擬似費用 (各スレッドの観測の和)。
+    pc: std::sync::Mutex<Pseudocost>,
 }
 
 struct PoolInner {
@@ -472,8 +476,9 @@ fn pool_release(pool: &WorkPool) {
 }
 
 impl WorkPool {
-    fn new(threads: usize, lo: Vec<f64>, up: Vec<f64>) -> Self {
+    fn new(threads: usize, lo: Vec<f64>, up: Vec<f64>, pc: Pseudocost) -> Self {
         WorkPool {
+            pc: std::sync::Mutex::new(pc),
             bounds: std::sync::Mutex::new((lo, up)),
             inner: std::sync::Mutex::new(PoolInner { nodes: Vec::new(), busy: threads, done: false }),
             stop: std::sync::atomic::AtomicBool::new(false),
@@ -743,6 +748,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         snap_stats: [0; 3],
         pool_busy: pool.is_some(),
         seen_best: f64::INFINITY,
+        pc_base: None,
         pool,
         workers: Vec::new(),
         worker_totals: (0, 0),
@@ -1465,6 +1471,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 木を分け合う: 大域的な境界の締め付けを共有する (64 ノードおき)
             if self.pool.is_some() && self.nodes % 64 == 0 && env_str!("ENOMOTO_MIP_TREE_NO_SHARED_BOUNDS").is_none() {
                 self.sync_global_bounds();
+            }
+            // 木を分け合う: 擬似費用の観測を合わせる (`ENOMOTO_T_MIP_TREE_PC_SYNC` ノードおき、0 で合わせない)
+            let pc_every = tunable!("ENOMOTO_T_MIP_TREE_PC_SYNC", 16u64, u64);
+            if pc_every > 0 && self.nodes % pc_every == 0 {
+                if let Some(pool) = self.pool.clone() {
+                    let mut base = self.pc_base.take().unwrap_or_else(|| self.snap.as_ref().map_or_else(|| self.pc.clone(), |sn| sn.pc.clone()));
+                    {
+                        let mut g = pool.pc.lock().unwrap();
+                        self.pc.merge_shared(&mut base, &mut g);
+                    }
+                    self.pc_base = Some(base);
+                }
             }
             // 木を分け合う: 待っているスレッドがいれば、自分の待ち行列から下界の小さいノードを渡す
             if let Some(pool) = &self.pool {
@@ -3916,9 +3934,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 s
             }
         };
-        let pool = std::sync::Arc::new(WorkPool::new(self.params.threads, self.dom.global_lo.clone(), self.dom.global_up.clone()));
+        let pool = std::sync::Arc::new(WorkPool::new(self.params.threads, self.dom.global_lo.clone(), self.dom.global_up.clone(), self.pc.clone()));
         self.pool = Some(pool.clone());
         self.pool_busy = true;
+        self.pc_base = Some(self.pc.clone());
         let snap = self.make_snapshot(&shared, &mut None, false);
         // 従は主が止める (止める合図)。時間の上限は主より少し後にして、主より先に止まらないようにする
         let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64() + 2.0);
