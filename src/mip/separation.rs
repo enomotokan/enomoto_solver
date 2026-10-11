@@ -2009,19 +2009,25 @@ fn finish_cut(
     if cmax <= 0.0 || !rhs.is_finite() {
         return None;
     }
-    // 小さい係数は境界で吸収して消す
+    // 小さい係数は境界で吸収して消す (HiGHS の `postprocessCut` は 100·feastol·max(cmax, 1e-3) ≈ 1e-4·cmax 以下を消す)。
+    // カットは Σ c x <= rhs の向きなので、c_j x_j >= min(c_j lo_j, c_j up_j) (c_j > 0 なら下限、c_j < 0 なら上限) から
+    // Σ_{k≠j} c_k x_k <= rhs - c_j x_j <= rhs - min(...) となり、右辺を緩める向きにだけ動く。
+    // 閾値は `ENOMOTO_T_MIP_CUT_SMALL_REL` (既定 1e-4、1e-9 で以前と同じ)。その境界が無限のときは、以前の閾値 1e-9 以下なら
+    // カットを捨て、それより大きければ係数を残す (以前より多くは捨てない)
+    let small_rel = tunable!("ENOMOTO_T_MIP_CUT_SMALL_REL", 1e-4, f64);
     let mut coefs: Vec<(usize, f64)> = Vec::with_capacity(dense.len());
     for (j, c) in dense {
-        if c.abs() <= 1e-9 * cmax {
-            // c x_j >= min(c lo, c up) を使って右辺を緩める
+        if c.abs() <= small_rel * cmax {
             let m = if c > 0.0 { c * lo[j] } else { c * up[j] };
-            if !m.is_finite() {
+            if m.is_finite() {
+                rhs -= m;
+                continue;
+            }
+            if c.abs() <= 1e-9 * cmax {
                 return None;
             }
-            rhs -= m;
-        } else {
-            coefs.push((j, c));
         }
+        coefs.push((j, c));
     }
     if coefs.is_empty() {
         return None;
@@ -2055,6 +2061,7 @@ fn finish_cut(
             }
         }
     }
+    // 係数の幅 (dynamism) が大きすぎるカットは数値的に危ないので捨てる (小さい係数を吸収した後で判定する)
     let cmax = coefs.iter().fold(0.0f64, |m, &(_, c)| m.max(c.abs()));
     let cmin = coefs.iter().fold(f64::INFINITY, |m, &(_, c)| m.min(c.abs()));
     if cmax / cmin > 1e6 {
