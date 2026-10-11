@@ -200,7 +200,14 @@ fn solve_portfolio(p: &MipProblem, params: MipParams) -> solver::MipResult {
 fn bisection_worker(p: &MipProblem, params: MipParams, use_presolve: bool, shared: std::sync::Arc<solver::Portfolio>, frac0: f64) -> (Option<solver::MipResult>, f64) {
     use std::sync::atomic::Ordering;
     // `ENOMOTO_MIP_BISECT_NO_HEUR`: ヒューリスティクスを走らせず、下界の証明だけに集中する
-    crate::simplex::slope_intercept_dual::set_mip_profile(if env_str!("ENOMOTO_MIP_BISECT_NO_HEUR").is_some() { 2 } else { 0 });
+    // `ENOMOTO_MIP_BISECT_ROOT_HEUR`: 根のヒューリスティクスだけ走らせる (見つけた解は共有の最良値になる)
+    crate::simplex::slope_intercept_dual::set_mip_profile(if env_str!("ENOMOTO_MIP_BISECT_NO_HEUR").is_some() {
+        2
+    } else if env_str!("ENOMOTO_MIP_BISECT_ROOT_HEUR").is_some() {
+        3
+    } else {
+        0
+    });
     solver::set_thread_portfolio(Some(shared.clone()));
     let t0 = std::time::Instant::now();
     let tl = params.time_limit;

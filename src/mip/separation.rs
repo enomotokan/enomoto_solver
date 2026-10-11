@@ -1580,6 +1580,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
         };
         let sep_t0 = std::time::Instant::now();
         let dbg_sep = env_str!("ENOMOTO_MIP_DEBUG_SEP").is_some();
+        // 一時的に加えた行 (目的関数の下界の行など、`Solver::extra_sep_rows`)
+        if !self.extra_sep_rows.is_empty() {
+            let extra = self.extra_sep_rows.clone();
+            for (b, r) in &extra {
+                let n0 = cands.len();
+                for c in generate_cuts(&vars, b, *r, use_flow_cover(), true) {
+                    push(Some(c), &mut cands, self);
+                }
+                keep_best(&mut cands, n0, self.p);
+            }
+        }
         // 元の行 1 本ずつ
         for i in 0..p.m {
             if i % 64 == 0 && self.time_up() {

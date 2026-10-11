@@ -251,6 +251,12 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) shared: Option<std::sync::Arc<Portfolio>>,
     /// 二分探索のスレッドの求解なら、見張り (打ち切る最良値, 目標値)。最低 `ENOMOTO_T_MIP_BISECT_MIN_RUN` 秒走った後で打ち切る。
     pub(super) watch: Option<(f64, f64)>,
+    /// 目的関数の下界のカットを最後に作ったときの厳密な下界 ([`Portfolio::proven`])。
+    pub(super) obj_cut_p: f64,
+    /// 分離に一時的に加える行 (`<=` の形 (係数, 右辺)。変数は構造変数 j < n と LP の行の活動量 n + i)。
+    pub(super) extra_sep_rows: Vec<(Vec<(usize, f64)>, f64)>,
+    /// (目的関数の下界のカットを試した回数, カットを加えた回数)
+    pub(super) obj_cut_stats: [u64; 2],
     /// 証明から作った衝突の数。
     proof_conflicts: u64,
     /// 完全オービトープ (orbitopal fixing に使う。サブ MIP では空)。
@@ -547,6 +553,9 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
         bisect_stats: [0; 3],
         shared: if params.submip { None } else { thread_portfolio() },
         watch: if params.submip { None } else { thread_watch() },
+        obj_cut_p: f64::NEG_INFINITY,
+        extra_sep_rows: Vec::new(),
+        obj_cut_stats: [0; 2],
         next_cut_id: 0,
         proof_conflicts: 0,
         orbitopes: if params.submip { Rc::new(Vec::new()) } else { super::ORBITOPES.with(|t| t.borrow().clone()).unwrap_or_default() },
@@ -625,6 +634,12 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams) -> MipResult {
 /// 一切走らせず、打ち切り値未満に解がないことを示す木の探索とカットに時間を使う)。サブ MIP には及ばない。
 fn proof_only() -> bool {
     crate::simplex::slope_intercept_dual::mip_profile() == 2
+}
+
+/// 木の中のヒューリスティクスを走らせないスレッドか (証明だけのスレッドと、根のヒューリスティクスだけ走らせる
+/// 二分探索のスレッド `ENOMOTO_MIP_BISECT_ROOT_HEUR`)。
+fn tree_heur_off() -> bool {
+    matches!(crate::simplex::slope_intercept_dual::mip_profile(), 2 | 3)
 }
 
 /// DSE 重みを全ての LP で引き継ぎ、待ち行列のノードに保存するか (既定で真、`ENOMOTO_MIP_NO_DSE_ALL` で偽)。
@@ -1483,7 +1498,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 xp("m_redcost");
                 // ノードのヒューリスティクス (安価な単純丸めは毎回、ランダム丸めは予算内で待ち行列から取り出したノードのみ)
-                if resolves == 0 && !(proof_only() && !self.params.submip) {
+                if resolves == 0 && !(tree_heur_off() && !self.params.submip) {
                     self.simple_rounding(&x);
                     if env_str!("ENOMOTO_MIP_NO_ZIROUND").is_none() {
                         self.zi_round(&x);
@@ -1682,6 +1697,46 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 } else if resolves < 2 && node.depth > 0 && plunge_depth == 0 && env_str!("ENOMOTO_MIP_NO_POOL_CUTS").is_none() && self.pool_cut_round(&x, tunable!("ENOMOTO_T_MIP_POOL_CUTS_PER_NODE", 10usize, usize)) {
                     resolves += 1;
                     continue;
+                }
+                // `ENOMOTO_MIP_OBJ_BOUND_CUTS`: ポートフォリオで厳密な下界 P (二分探索のスレッドが示した「P 未満の解はない」)
+                // が上がり、このノードの LP の値より上なら、1 回だけ「目的値 >= P」の行 (そのままの形と、被約費用と行の双対値で
+                // 書き直した形) を分離の材料に加えて分離する。目的関数の行そのものは LP に入れない (強く退化する)
+                if resolves == 0 && self.watch.is_none() && env_str!("ENOMOTO_MIP_OBJ_BOUND_CUTS").is_some() {
+                    let pv = self.shared.as_ref().map_or(f64::NEG_INFINITY, |s| s.proven());
+                    let tol = 1e-6 * (1.0 + pv.abs());
+                    if pv.is_finite() && pv > self.obj_cut_p + tol && pv > node_obj + tol {
+                        self.obj_cut_p = pv;
+                        let n = self.p.n;
+                        let rhs = -(pv - self.p.offset);
+                        // c x >= P - offset  ->  -c x <= -(P - offset)
+                        let r1: Vec<(usize, f64)> = (0..n).filter(|&j| self.p.cost[j] != 0.0).map(|j| (j, -self.p.cost[j])).collect();
+                        // c x = d x + y^T (A x) (d: 被約費用、y: 行の双対値、A x: 行の活動量 = 分離の変数 n + i)
+                        // d は y から計算し直す (LP が返す被約費用は許容誤差の分だけ c - A^T y とずれうる。ずれると
+                        // 書き直した行が c x >= P と同値でなくなり、妥当でないカットになりうる)
+                        let y = self.lp.row_duals();
+                        let mut d = self.p.cost.clone();
+                        for (i, &yi) in y.iter().enumerate() {
+                            if yi != 0.0 {
+                                for (j, a) in self.lp.row(i) {
+                                    d[j] -= yi * a;
+                                }
+                            }
+                        }
+                        let mut r2: Vec<(usize, f64)> = (0..n).filter(|&j| d[j].abs() > 1e-12).map(|j| (j, -d[j])).collect();
+                        r2.extend((0..y.len()).filter(|&i| y[i].abs() > 1e-12).map(|i| (n + i, -y[i])));
+                        self.extra_sep_rows = vec![(r1, rhs), (r2, rhs)];
+                        let t_nc = Instant::now();
+                        let added = self.node_cut_round(&x);
+                        self.extra_sep_rows.clear();
+                        self.node_cut_secs += t_nc.elapsed().as_secs_f64();
+                        self.obj_cut_stats[0] += 1;
+                        if added {
+                            self.obj_cut_stats[1] += 1;
+                            resolves += 1;
+                            node_cut_resolve = Some(Instant::now());
+                            continue;
+                        }
+                    }
                 }
                 if !hcm_sep && resolves == 0 && node.depth > 0 && plunge_depth == 0 && self.node_cuts_due(node.depth) {
                     let t_nc = Instant::now();
@@ -3382,6 +3437,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             eprintln!("MIP: propagation conflicts: analysed {}, no 1-UIP {}, 1-UIP not a row {}, no decision set {}, decision set not a row {}; not a row because continuous {}, general integer {}, both sides {}", self.conf_stats[0], self.conf_stats[1], self.conf_stats[2], self.conf_stats[3], self.conf_stats[4], self.conf_stats[5], self.conf_stats[6], self.conf_stats[7]);
             eprintln!("MIP: objective propagation: pruned {} nodes, tightened {} bounds; strong branching children infeasible by propagation {}, propagated bounds passed to child LPs {}", self.obj_prop_stats[0], self.obj_prop_stats[1], self.sb_prop_stats[0], self.sb_prop_stats[1]);
             eprintln!("MIP: literal conflicts: added {}, in pool {} (aged out {}), pruned {} nodes, tightened {} bounds", self.lit_stats[0], self.lit_conflicts.len(), self.lit_conflicts.removed, self.lit_stats[1], self.lit_stats[2]);
+            if self.obj_cut_stats[0] > 0 {
+                eprintln!("MIP: objective bound cuts: tried {}, added {}", self.obj_cut_stats[0], self.obj_cut_stats[1]);
+            }
             eprintln!("MIP: conflict analysis (HiGHS style): calls {}, conflicts {}, added {}, mean length {:.1}, max length {}, {:.2}s", self.multi_stats[0], self.multi_stats[1], self.multi_stats[2], self.multi_stats[3] as f64 / self.multi_stats[1].max(1) as f64, self.conflict_max_len_multi(), self.multi_secs);
             let cf: Vec<u64> = super::domain::CONFLICT_FAIL.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();
             eprintln!("MIP: conflict analysis failures (all calls): no decision {}, too long midway {}, reason row lacks column {}, empty {}, too long at the end {} (total length {}), max length {}", cf[0], cf[1], cf[2], cf[3], cf[4], cf[5], self.conflict_max_len());
