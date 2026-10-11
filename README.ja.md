@@ -105,7 +105,7 @@ print(sol.status)                   # unbounded
 
 ### スレッド数(`threads`)
 
-`solve(threads=...)` で使うスレッドの数を指定します(既定は 1)．このプロセスが使える CPU の数(`enomoto_solver.max_threads()`．環境変数 `ENOMOTO_MIP_MAX_THREADS` でさらに小さくできます)を超える値は，そこで頭打ちにします．プリソルブなどの並列区間も含め，求解全体をこの数のスレッドで動かします．
+`solve(threads=...)` で使うスレッドの数を指定します(既定は 1)．このプロセスが使える CPU の数(`enomoto_solver.max_threads()`)を超える値は，そこで頭打ちにします．プリソルブなどの並列区間も含め，求解全体をこの数のスレッドで動かします．
 
 | `threads` | LP(`root_solver="auto"`) | 整数計画 |
 |---|---|---|

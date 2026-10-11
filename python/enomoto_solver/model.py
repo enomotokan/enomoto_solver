@@ -148,8 +148,7 @@ class Model:
         ``node_limit`` (ノード数)。上限で止まると status は ``"time_limit"`` / ``"node_limit"`` になり、
         暫定解があれば ``objective`` と各 Variable の ``.value`` が読める。
 
-        ``threads``: 使うスレッドの数 (既定 1)。``enomoto_solver.max_threads()`` (このプロセスが使える CPU の数。
-        環境変数 ``ENOMOTO_MIP_MAX_THREADS`` でさらに小さくできる) を超える値はそこで頭打ちにする。
+        ``threads``: 使うスレッドの数 (既定 1)。``enomoto_solver.max_threads()`` (このプロセスが使える CPU の数) を超える値はそこで頭打ちにする。
         求解全体をこの数のスレッドで動かす。``"auto"`` で 2 以上なら、LP を上のように二段解法と内点法 +
         クロスオーバーで同時に解く。整数計画では warm start できない緩和問題 (根など) を同じように同時に解き、根の処理の後は未処理のノードを
         スレッドの間で分け合って探索する。

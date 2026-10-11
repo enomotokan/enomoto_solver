@@ -105,7 +105,7 @@ Whatever the method, infeasibility and unboundedness are decided by the two-phas
 
 ### Number of threads (`threads`)
 
-`solve(threads=...)` sets the number of threads to use (default 1). Values above the number of CPUs available to the process (`enomoto_solver.max_threads()`, which the environment variable `ENOMOTO_MIP_MAX_THREADS` can lower further) are capped there. The whole solve, including parallel sections such as presolve, runs on this many threads.
+`solve(threads=...)` sets the number of threads to use (default 1). Values above the number of CPUs available to the process (`enomoto_solver.max_threads()`) are capped there. The whole solve, including parallel sections such as presolve, runs on this many threads.
 
 | `threads` | LP (`root_solver="auto"`) | MIP |
 |---|---|---|
