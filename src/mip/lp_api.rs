@@ -2,7 +2,7 @@
 //! [`crate::simplex::mip_lp::TwoStageLp`] (既存の傾き・切片二段解法を warm start で使うもの)。
 
 use super::lp::{Basis, LpStatus, SolveLimits};
-use crate::simplex::mip_lp::{InteriorPoint, TwoStageLp, TwoStageState};
+use crate::simplex::mip_lp::{InteriorPoint, LuSnapshot, TwoStageLp, TwoStageState};
 use std::borrow::Cow;
 
 /// 分枝限定法が使う LP の操作。
@@ -58,6 +58,14 @@ pub trait MipLp: Clone {
     fn dse_snapshot(&self) -> Option<Vec<(u32, f32)>>;
     /// DSE 重みを今の基底に当てはめる ([`TwoStageLp::set_dse_vars`])。
     fn set_dse_vars(&mut self, w: &[(u32, f32)]);
+    /// 今の基底の LU キャッシュを取り出す ([`TwoStageLp::lu_snapshot`])。対応しない実装は `None`。
+    fn lu_snapshot(&self) -> Option<LuSnapshot> {
+        None
+    }
+    /// 取り出した LU キャッシュを、今の基底が同じなら戻す ([`TwoStageLp::adopt_lu_snapshot`])。対応しない実装は何もしない。
+    fn adopt_lu_snapshot(&mut self, _s: &LuSnapshot) -> bool {
+        false
+    }
 }
 
 macro_rules! forward_impl {
@@ -123,5 +131,11 @@ forward_impl!(
     },
     fn set_dse_vars(&mut self, w: &[(u32, f32)]) {
         TwoStageLp::set_dse_vars(self, w)
+    },
+    fn lu_snapshot(&self) -> Option<LuSnapshot> {
+        TwoStageLp::lu_snapshot(self)
+    },
+    fn adopt_lu_snapshot(&mut self, s: &LuSnapshot) -> bool {
+        TwoStageLp::adopt_lu_snapshot(self, s)
     }
 );

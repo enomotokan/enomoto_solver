@@ -111,6 +111,17 @@ pub struct TwoStageState {
     dse_cache: Option<Arc<(Vec<usize>, Vec<f64>)>>,
 }
 
+/// 取り出した LU キャッシュと DSE 重み ([`TwoStageLp::lu_snapshot`]。どちらも `Arc` の共有)。分枝で潜らない側の
+/// 兄弟ノードと一緒に持ち、兄弟へ戻って親の基底を置いたときに [`TwoStageLp::adopt_lu_snapshot`] で戻して分解を省く。
+#[derive(Clone)]
+pub struct LuSnapshot {
+    lu: Arc<LuCache>,
+    /// `lu` の基底の DSE 重み (基底位置の順)。
+    dse: Option<Arc<(Vec<usize>, Vec<f64>)>>,
+    /// 取り出したときの行列の識別子 ([`TwoStageLp::price_key`]。行の追加・削除で変わる)。
+    price_key: u64,
+}
+
 fn shift_of(lo: f64, up: f64) -> f64 {
     if lo.is_finite() {
         lo
@@ -570,6 +581,60 @@ impl TwoStageLp {
         }
         let ws: Vec<f64> = b.iter().map(|&v| if map[v].is_nan() { 1.0 } else { (map[v] as f64).max(1e-8) }).collect();
         self.dse_cache = Some(Arc::new((b.clone(), ws)));
+    }
+
+    /// 今の基底の LU キャッシュ (直前の最適基底のもので、基底がそのままなら) を DSE 重みと一緒に取り出す。
+    pub fn lu_snapshot(&self) -> Option<LuSnapshot> {
+        let c = self.lu_cache.as_ref()?;
+        if !matches!(&self.basis, Some(b) if *b == c.basis) {
+            return None;
+        }
+        // `ENOMOTO_MIP_NO_SIBLING_LU_DSE`: DSE 重みは持たない (戻したときは置いた基底の重みがあればそれを使う)
+        let dse = match &self.dse_cache {
+            Some(d) if d.0 == c.basis && d.1.len() == c.basis.len() && env_str!("ENOMOTO_MIP_NO_SIBLING_LU_DSE").is_none() => Some(d.clone()),
+            _ => None,
+        };
+        Some(LuSnapshot { lu: c.clone(), dse, price_key: self.price_key })
+    }
+
+    /// [`Self::lu_snapshot`] を戻す。行列が取り出したときのままで、今の基底が LU の基底と同じ集合のときだけ、基底を
+    /// LU の基底位置の順に並べ直して LU キャッシュと DSE 重みを差し替え、真を返す ([`Self::set_basis`] は番号順に
+    /// 並べるので、並びを合わせないと次の求解が LU を使わない)。それ以外は何もしない。
+    pub fn adopt_lu_snapshot(&mut self, s: &LuSnapshot) -> bool {
+        let m = self.rows.len();
+        let nt = self.n + m;
+        let cb = &s.lu.basis;
+        if s.price_key != self.price_key || cb.len() != m {
+            return false;
+        }
+        let Some(b) = &self.basis else { return false };
+        if b.len() != m {
+            return false;
+        }
+        // 同じ集合か (どちらも重複のない m 個)
+        let mut pos = vec![usize::MAX; nt];
+        for (k, &v) in b.iter().enumerate() {
+            if v < nt {
+                pos[v] = k;
+            }
+        }
+        if cb.iter().any(|&v| v >= nt || pos[v] == usize::MAX) {
+            return false;
+        }
+        // DSE 重み: 取り出したときの重み、なければ今の基底の重み (ノードに保存した重みなど) を並べ直す
+        let dse: Option<Arc<(Vec<usize>, Vec<f64>)>> = match (&s.dse, self.dse_cache.as_deref()) {
+            (Some(d), _) if d.1.len() == m => Some(d.clone()),
+            (_, Some((db, w))) if db == b && w.len() == m => Some(Arc::new((cb.clone(), cb.iter().map(|&v| w[pos[v]]).collect::<Vec<f64>>()))),
+            _ => None,
+        };
+        sid::xcount("n_sib_lu");
+        self.basis = Some(cb.clone());
+        self.dse_cache = dse;
+        self.lu_cache = Some(s.lu.clone());
+        self.lu = None;
+        self.status = None;
+        self.clear_state_memo();
+        true
     }
 
     pub fn dse_weight(&self, _s: usize) -> f64 {

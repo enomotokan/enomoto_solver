@@ -314,8 +314,10 @@ pub(super) struct Solver<'a, L: MipLp> {
     orb_col: std::collections::HashMap<usize, (usize, usize)>,
     /// オービトープごとの、生成元が動かすオービトープの外の列 ([`Self::orbitope_propagate`])。
     orb_others: Option<Rc<Vec<std::collections::HashSet<usize>>>>,
-    /// 今の潜りで待ち行列に入れた兄弟ノード ((枠, 世代)、古い順)。潜りが枝刈りで終わったらここから戻る。
-    dive_stack: Vec<(usize, u64)>,
+    /// 今の潜りで待ち行列に入れた兄弟ノード ((枠, 世代, 親の LP の LU キャッシュ)、古い順)。潜りが枝刈りで終わったら
+    /// ここから戻る。LU キャッシュは兄弟の始点の基底 (親の最適基底) の分解を省くのに使う
+    /// ([`MipLp::adopt_lu_snapshot`]、`ENOMOTO_MIP_NO_SIBLING_LU` で持たない)。
+    dive_stack: Vec<(usize, u64, Option<crate::simplex::mip_lp::LuSnapshot>)>,
     sibling_backtracks: u64,
     /// 元の問題では実行可能で、オービトープの列の並べ替えで使えるようにした解の数と、それでも使えなかった数。
     sym_canon: (u64, u64),
@@ -1755,6 +1757,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             // 潜りが枝刈りで終わったら、潜った道の兄弟ノード (新しいものから) に戻る (HiGHS の backtrackPlunge)。
             // 潜りの打ち切りの条件 (下界が 全体の下界 + q (打ち切り値 - 全体の下界) 以下) を満たすものだけ
+            let mut sib_lu = None;
             let sibling = if plunge.is_none()
                 && !first
                 && env_str!("ENOMOTO_MIP_NO_SIBLING_BACKTRACK").is_none()
@@ -1769,9 +1772,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let glb = self.queue.best_lower_bound();
                 let limit = if cutoff.is_finite() { glb + tunable!("ENOMOTO_T_MIP_SIBLING_QUOT", 0.25, f64) * (cutoff - glb) } else { f64::INFINITY };
                 let mut got = None;
-                while let Some((id, gen)) = self.dive_stack.pop() {
+                while let Some((id, gen, lu)) = self.dive_stack.pop() {
                     if let Some(n) = self.queue.take(id, gen, limit.min(cutoff)) {
                         got = Some(n);
+                        sib_lu = lu;
                         break;
                     }
                 }
@@ -1804,6 +1808,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                     if let Some(b) = &n.basis {
                         self.restore_node_basis(b, n.basis_epoch, n.dse.as_ref().map(|v| v.as_slice()));
+                        // 置いた基底が親の LP の最適基底のままなら、その LU を使う (行が変わっていれば使わない)
+                        if let Some(s) = &sib_lu {
+                            if n.basis_epoch == self.row_log.len() {
+                                self.lp.adopt_lu_snapshot(s);
+                            }
+                        }
                     }
                     n
                 }
@@ -2420,7 +2430,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             };
             let sib = self.queue.push(mk(second_c));
-            self.dive_stack.push(sib);
+            // 兄弟へ戻ったときのために親の LP の LU を一緒に持つ (共有なので写さない)
+            let sib_lu = if env_str!("ENOMOTO_MIP_NO_SIBLING_LU").is_none() { self.lp.lu_snapshot() } else { None };
+            self.dive_stack.push((sib.0, sib.1, sib_lu));
             let child = mk(first_c);
             plunge_depth += 1;
             // 潜りの打ち切り (SCIP の maxplungequot): 子の下界が 全体の下界 + q (打ち切り値 - 全体の下界) を超えたら
