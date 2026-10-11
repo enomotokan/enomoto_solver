@@ -1701,6 +1701,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // `ENOMOTO_MIP_OBJ_BOUND_CUTS`: ポートフォリオで厳密な下界 P (二分探索のスレッドが示した「P 未満の解はない」)
                 // が上がり、このノードの LP の値より上なら、1 回だけ「目的値 >= P」の行 (そのままの形と、被約費用と行の双対値で
                 // 書き直した形) を分離の材料に加えて分離する。目的関数の行そのものは LP に入れない (強く退化する)
+                // 40 問 (木 1 本 + 二分探索 2 本、二分探索は根だけヒューリスティクス): 使わない 20 問 27.04、使う 20 問 27.37
+                // (加えたのは 15 問で 1-3 回ずつ。neos-911970 で最適値を見つけたが解き切れず、misc07 47.8 -> 55.1 秒)。既定では使わない
                 if resolves == 0 && self.watch.is_none() && env_str!("ENOMOTO_MIP_OBJ_BOUND_CUTS").is_some() {
                     let pv = self.shared.as_ref().map_or(f64::NEG_INFINITY, |s| s.proven());
                     let tol = 1e-6 * (1.0 + pv.abs());
