@@ -506,6 +506,10 @@ struct PoolInner {
     /// 各スレッド (`pool_tid`) の下界: 処理中のノードと自分の待ち行列の最小 ([`Solver::note_current_lb`])。ノードを
     /// 持っていなければ +inf。共有の待ち行列のノードと合わせて全体の下界になる (利用者向けのログに使う)。
     lbs: Vec<f64>,
+    /// 各スレッドの待ち行列のノード数 (`lbs` と同じときに書く。利用者向けのログの未処理のノード数に使う)。
+    open: Vec<usize>,
+    /// 従のスレッドが処理したノード数の合計 (利用者向けのログに使う)。
+    worker_nodes: u64,
     /// 待っていない (ノードを持っているか処理している) スレッドの数。
     busy: usize,
     done: bool,
@@ -538,7 +542,7 @@ impl WorkPool {
             next_tid: std::sync::atomic::AtomicU32::new(0),
             pc: std::sync::Mutex::new(pc),
             bounds: std::sync::Mutex::new((lo, up)),
-            inner: std::sync::Mutex::new(PoolInner { nodes: Vec::new(), lbs: vec![f64::INFINITY; threads], busy: threads, done: false }),
+            inner: std::sync::Mutex::new(PoolInner { nodes: Vec::new(), lbs: vec![f64::INFINITY; threads], open: vec![0; threads], worker_nodes: 0, busy: threads, done: false }),
             stop: std::sync::atomic::AtomicBool::new(false),
             idle: std::sync::atomic::AtomicUsize::new(0),
             len: std::sync::atomic::AtomicUsize::new(0),
@@ -1261,11 +1265,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if let Some(pool) = &self.pool {
             let v = node_lb.min(self.queue.best_lower_bound());
             let t = self.pool_tid as usize;
+            let len = self.queue.len();
+            let worker = self.snap.is_some();
             let mut g = pool.inner.lock().unwrap();
             if g.lbs.len() <= t {
                 g.lbs.resize(t + 1, f64::INFINITY);
+                g.open.resize(t + 1, 0);
             }
             g.lbs[t] = v;
+            g.open[t] = len;
+            if worker {
+                g.worker_nodes += 1;
+            }
         }
     }
 
@@ -1284,6 +1295,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
         lb
     }
 
+    /// 探索全体の (処理したノード数, 未処理のノード数)。木を分け合うときは他のスレッドの分と共有の待ち行列も足す。
+    fn global_node_counts(&self) -> (u64, usize) {
+        let (mut done, mut open) = (self.nodes, self.queue.len());
+        if let Some(pool) = &self.pool {
+            let g = pool.inner.lock().unwrap();
+            done += g.worker_nodes;
+            open += g.nodes.len();
+            let t = self.pool_tid as usize;
+            open += g.open.iter().enumerate().filter(|&(i, _)| i != t).map(|(_, &k)| k).sum::<usize>();
+        }
+        (done, open)
+    }
+
     /// 利用者向けのログの探索の経過の 1 行 (時間、処理したノード数、待ち行列のノード数、限界、暫定解、ギャップ)。
     /// 目的値は元の向き (最大化なら限界は上界)。
     fn user_progress_line(&mut self, ub: f64) {
@@ -1295,7 +1319,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let lb = self.final_lb.unwrap_or_else(|| self.global_lower_bound()).min(ub);
         let fmt = |v: f64| if v.is_finite() { format!("{:.9e}", s * v) } else { "-".to_string() };
         let gap = if ub.is_finite() && lb.is_finite() { format!("{:.2}%", 100.0 * (ub - lb).max(0.0) / ub.abs().max(1.0)) } else { "-".to_string() };
-        user_log!("{:>8.1}s {:>10} {:>9} {:>17} {:>17} {:>9}", self.start.elapsed().as_secs_f64(), self.nodes, self.queue.len(), fmt(lb), fmt(ub), gap);
+        let (done, open) = if self.final_lb.is_some() { (self.nodes + self.worker_totals.0, 0) } else { self.global_node_counts() };
+        user_log!("{:>8.1}s {:>10} {:>9} {:>17} {:>17} {:>9}", self.start.elapsed().as_secs_f64(), done, open, fmt(lb), fmt(ub), gap);
     }
 
     fn run(&mut self) -> MipResult {
@@ -4352,7 +4377,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let t = self.pool_tid as usize;
                 if g.lbs.len() <= t {
                     g.lbs.resize(t + 1, f64::INFINITY);
+                    g.open.resize(t + 1, 0);
                 }
+                g.open[t] = 0;
                 if let Some(k) = (0..g.nodes.len()).min_by(|&a, &b| g.nodes[a].lower_bound.total_cmp(&g.nodes[b].lower_bound)) {
                     let sn = g.nodes.swap_remove(k);
                     // 受け取ったノードの下界を同じ錠の中で書く (共有の待ち行列から消えた後も全体の下界に入るように)

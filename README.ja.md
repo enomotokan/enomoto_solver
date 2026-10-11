@@ -71,11 +71,20 @@ print(x.value, y.value)             # 3.0 7.0
   | `time_limit`，`mip_rel_gap`，`node_limit` | 整数計画の打ち切り条件(秒，相対ギャップ(既定 1e-4)，ノード数)． |
   | `log` | ログを出すか(既定 `True`．下の「ログ」)． |
 
-- `solve()` は常に `Solution` を返し，実行不可能・非有界・求解失敗でも例外は送出しません．結果は `Solution.status` で判断します．`status` が `"optimal"` のときだけ `objective` に値が入り，各変数の値を `.value` で読めます．それ以外では `objective` は `None` で，`.value` を読むと `RuntimeError` になります．
+- `solve()` は常に `Solution` を返し，実行不可能・非有界・求解失敗でも例外は送出しません．結果は `Solution.status` で判断します．`status` が `"optimal"` のとき(整数計画で打ち切ったときは，暫定解があれば)だけ `objective` に値が入り，各変数の値を `.value` で読めます．それ以外では `objective` は `None` で，`.value` を読むと `RuntimeError` になります．
 
 ### 結果の状態と，実行不可能・非有界な問題
 
-`solve()` は `status`，`objective`，`node_limit_hit` を持つ `Solution` を返します．`status` は `"optimal"`，`"infeasible"`，`"unbounded"`，`"infeasible_or_unbounded"`，`"not_solved"` のいずれかです(整数変数を含むモデルでは，さらに `"time_limit"`，`"node_limit"` があります)．
+`solve()` は次の属性を持つ `Solution` を返します．`status` は `"optimal"`，`"infeasible"`，`"unbounded"`，`"infeasible_or_unbounded"`，`"not_solved"` のいずれかです(整数変数を含むモデルでは，さらに `"time_limit"`，`"node_limit"` があります)．
+
+| 属性 | 意味 |
+|---|---|
+| `status` | 結果の状態(上のいずれか)． |
+| `objective` | 解の目的値(元の向きで，定数項を含みます)．`"optimal"` のとき，および整数計画で打ち切ったときに暫定解があれば値が入ります．それ以外は `None`． |
+| `node_limit_hit` | 整数計画でノード数の上限(`node_limit`)により打ち切ったか．LP では常に `False`． |
+| `best_bound` | 整数計画で証明済みの最適値の限界(最小化なら下界，最大化なら上界)．最適値はこの値と `objective` の間にあります．実行不可能なら `inf`(最大化なら `-inf`)．LP では `None`． |
+| `mip_gap` | 整数計画の相対ギャップ \|`objective` − `best_bound`\| / max(\|`objective`\|, 1)．`mip_rel_gap` 以下になると `"optimal"` で終わります．暫定解がなければ `inf`．LP では `None`． |
+| `nodes` | 整数計画で処理した分枝限定法のノード数(全スレッドの合計)．LP では `None`． |
 
 既定では，有限な最適値がないと分かった時点(局面Aの終了時)で止まり，`"infeasible_or_unbounded"` を返します．`distinguish_infeasible_unbounded=True` を渡すと局面Bまで進み，両者を区別します．
 
@@ -105,45 +114,6 @@ print(sol.status)                   # unbounded
 | `"interior"` | プリソルブも独立した近接内点法(IP-PMM)．基底解ではなく，検証用です． |
 
 どの解法を使っても，実行不可能・非有界の判定は二段解法が行います．`"auto"` で内点法 + クロスオーバー側が採られるのは，単体法で最適性を確かめた基底解が得られたときだけです．
-
-### スレッド数(`threads`)
-
-`solve(threads=...)` で使うスレッドの数を指定します(既定は 1)．このプロセスが使える CPU の数(`enomoto_solver.max_threads()`)を超える値は，そこで頭打ちにします．プリソルブなどの並列区間も含め，求解全体をこの数のスレッドで動かします．
-
-| `threads` | LP(`root_solver="auto"`) | 整数計画 |
-|---|---|---|
-| 1(既定) | 傾き・切片双対二段解法だけで解きます． | 緩和問題も木の探索も 1 スレッドで解きます． |
-| k ≥ 2 | 二段解法(1 スレッド)と近接内点法 + クロスオーバー(k − 1 スレッド)で同時に解き，先に結論を出した側を採ります． | warm start できない緩和問題(根など)を左と同じように同時に解き，根の処理の後は k 本のスレッドで木を分け合って探索します(下の「分枝限定法の並列化」)． |
-
-同時実行では，始める前にスレッドを二段解法用(1 本)と内点法 + クロスオーバー用(残り)の別々のプールに分けるので，二つの解法が互いのスレッドを奪い合うことはありません．二段解法が先に解ければその基底解をそのまま使い，内点法 + クロスオーバーが先なら，クロスオーバーの仕上げ(二段解法の主ループ)で得た最適基底をそのまま使います．負けた側は打ち切り，その終了は待ちません．
-
-```python
-import enomoto_solver
-sol = M.solve(threads=enomoto_solver.max_threads())   # 使える CPU をすべて使う
-```
-
-### ログ
-
-`solve()` は既定で，最初に作者・ライセンス・連絡先の案内と問題の大きさを，求解中は要点を，最後に結果を標準出力に出します．求解中の要点は次のとおりです．
-
-- LP：プリソルブ後の大きさ，使う解法，並列実行ではどちらの解法が先に結論を出したか．
-- 整数計画：プリソルブ後の大きさ，根の LP の値，根の切除平面による値の変化，再スタート，探索の経過(経過時間，処理したノード数，未処理のノード数，証明済みの限界，暫定解の目的値，相対ギャップ．5 秒ごと)．
-
-下の「混合整数線型最適化（MIP）」の例では次のように出ます．
-
-```text
-ENOMOTO-Solver 0.1.0 (MIT License)
-Author: Kan Enomoto (https://enomoto-math-labo.com/en)
-For optimization consulting requests and bug reports, contact enomotokan@gmail.com
-Problem: 3 variables (3 integer), 1 constraints, 3 nonzeros, maximize; threads 1
-Presolve: 1 rows, 3 columns -> 1 rows, 3 columns (0.00s)
-Root LP: objective 2.2000000000e2 (0.00s)
-     time      nodes      open        best bound         incumbent       gap
-     0.0s          0         0     2.200000000e2     2.200000000e2     0.00%
-Result: optimal, objective 220, best bound 220, gap 0.00%, nodes 0 (0.00s)
-```
-
-`solve(log=False)` なら案内もログも出しません．
 
 ### 混合整数線型最適化（MIP）
 
@@ -175,6 +145,45 @@ print(sol.best_bound, sol.mip_gap, sol.nodes)                 # 220.0 0.0 0
 - ノードを処理する順序がスレッドの進み具合で変わるため，k ≥ 2 では実行ごとにノード数や求解時間が変わることがあります(求まる最適値は変わりません)．
 
 打ち切り条件は `time_limit`(秒)，`mip_rel_gap`(相対ギャップ，既定 1e-4)，`node_limit`(ノード数)で指定します．上限で止まったときは `status` が `"time_limit"` か `"node_limit"` になり，暫定解があれば `objective` と各変数の `.value` を読めます．`Solution` の `best_bound`(証明済みの限界)，`mip_gap`(相対ギャップ)，`nodes`(処理したノード数)にも結果が入ります．
+
+### スレッド数(`threads`)
+
+`solve(threads=...)` で使うスレッドの数を指定します(既定は 1)．このプロセスが使える CPU の数(`enomoto_solver.max_threads()`)を超える値は，そこで頭打ちにします．プリソルブなどの並列区間も含め，求解全体をこの数のスレッドで動かします．
+
+| `threads` | LP(`root_solver="auto"`) | 整数計画 |
+|---|---|---|
+| 1(既定) | 傾き・切片双対二段解法だけで解きます． | 緩和問題も木の探索も 1 スレッドで解きます． |
+| k ≥ 2 | 二段解法(1 スレッド)と近接内点法 + クロスオーバー(k − 1 スレッド)で同時に解き，先に結論を出した側を採ります． | warm start できない緩和問題(根など)を左と同じように同時に解き，根の処理の後は k 本のスレッドで木を分け合って探索します(上の「分枝限定法の並列化」)． |
+
+同時実行では，始める前にスレッドを二段解法用(1 本)と内点法 + クロスオーバー用(残り)の別々のプールに分けるので，二つの解法が互いのスレッドを奪い合うことはありません．二段解法が先に解ければその基底解をそのまま使い，内点法 + クロスオーバーが先なら，クロスオーバーの仕上げ(二段解法の主ループ)で得た最適基底をそのまま使います．負けた側は打ち切り，その終了は待ちません．
+
+```python
+import enomoto_solver
+sol = M.solve(threads=enomoto_solver.max_threads())   # 使える CPU をすべて使う
+```
+
+### ログ
+
+`solve()` は既定で，最初に作者・ライセンス・連絡先の案内と問題の大きさを，求解中は要点を，最後に結果を標準出力に出します．求解中の要点は次のとおりです．
+
+- LP：プリソルブ後の大きさ，使う解法，並列実行ではどちらの解法が先に結論を出したか．
+- MIP：プリソルブ後の大きさ，根の LP の値，根の切除平面による値の変化，再スタート，探索の経過(経過時間，処理したノード数，未処理のノード数，証明済みの限界，暫定解の目的値，相対ギャップ．5 秒ごと)．
+
+上の「混合整数線型最適化（MIP）」の例では次のように出ます．
+
+```text
+ENOMOTO-Solver 0.1.0 (MIT License)
+Author: Kan Enomoto (https://enomoto-math-labo.com/en)
+For optimization consulting requests and bug reports, contact enomotokan@gmail.com
+Problem: 3 variables (3 integer), 1 constraints, 3 nonzeros, maximize; threads 1
+Presolve: 1 rows, 3 columns -> 1 rows, 3 columns (0.00s)
+Root LP: objective 2.2000000000e2 (0.00s)
+     time      nodes      open        best bound         incumbent       gap
+     0.0s          0         0     2.200000000e2     2.200000000e2     0.00%
+Result: optimal, objective 220, best bound 220, gap 0.00%, nodes 0 (0.00s)
+```
+
+`solve(log=False)` なら案内もログも出しません．
 
 ## ベンチマーク結果
 

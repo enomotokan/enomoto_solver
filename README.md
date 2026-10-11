@@ -71,11 +71,20 @@ print(x.value, y.value)             # 3.0 7.0
   | `time_limit`, `mip_rel_gap`, `node_limit` | Termination criteria for integer programs (seconds, relative gap (default 1e-4), number of nodes). |
   | `log` | Whether to output the log (default `True`; see "Log" below). |
 
-- `solve()` always returns a `Solution` and raises no exception even when the problem is infeasible, unbounded or not solved. Judge the result by `Solution.status`. Only when `status` is `"optimal"` does `objective` hold a value and can each variable's value be read with `.value`. Otherwise `objective` is `None` and reading `.value` raises `RuntimeError`.
+- `solve()` always returns a `Solution` and raises no exception even when the problem is infeasible, unbounded or not solved. Judge the result by `Solution.status`. Only when `status` is `"optimal"` (for integer programs stopped at a limit, when there is an incumbent) does `objective` hold a value and can each variable's value be read with `.value`. Otherwise `objective` is `None` and reading `.value` raises `RuntimeError`.
 
 ### Result status, and infeasible or unbounded problems
 
-`solve()` returns a `Solution` that has `status`, `objective` and `node_limit_hit`. `status` is one of `"optimal"`, `"infeasible"`, `"unbounded"`, `"infeasible_or_unbounded"` and `"not_solved"` (for models with integer variables, there are also `"time_limit"` and `"node_limit"`).
+`solve()` returns a `Solution` that has the following attributes. `status` is one of `"optimal"`, `"infeasible"`, `"unbounded"`, `"infeasible_or_unbounded"` and `"not_solved"` (for models with integer variables, there are also `"time_limit"` and `"node_limit"`).
+
+| Attribute | Meaning |
+|---|---|
+| `status` | The result status (one of the above). |
+| `objective` | The objective value of the solution (in the original sense, including the constant term). It holds a value when the status is `"optimal"`, and for integer programs stopped at a limit when there is an incumbent. Otherwise `None`. |
+| `node_limit_hit` | Whether an integer program was stopped by the limit on the number of nodes (`node_limit`). Always `False` for LP. |
+| `best_bound` | For integer programs, the proven bound on the optimal value (the lower bound for minimization, the upper bound for maximization). The optimal value lies between this value and `objective`. `inf` (`-inf` for maximization) if infeasible. `None` for LP. |
+| `mip_gap` | For integer programs, the relative gap \|`objective` − `best_bound`\| / max(\|`objective`\|, 1). The solve ends with `"optimal"` when it becomes `mip_rel_gap` or less. `inf` if there is no incumbent. `None` for LP. |
+| `nodes` | For integer programs, the number of branch-and-bound nodes processed (the total over all threads). `None` for LP. |
 
 By default, the solver stops when it finds that there is no finite optimal value (at the end of phase A) and returns `"infeasible_or_unbounded"`. Passing `distinguish_infeasible_unbounded=True` makes it proceed to phase B and distinguish the two.
 
@@ -105,45 +114,6 @@ The same applies to models with integer variables. When phase A shows that the r
 | `"interior"` | A proximal interior-point method (IP-PMM) with its own independent presolve. It does not give a basic solution and is intended for verification. |
 
 Whatever the method, infeasibility and unboundedness are decided by the two-phase method. With `"auto"`, the interior-point method + crossover side is adopted only when it yields a basic solution whose optimality has been confirmed by the simplex method.
-
-### Number of threads (`threads`)
-
-`solve(threads=...)` specifies the number of threads to use (the default is 1). A value above the number of CPUs available to this process (`enomoto_solver.max_threads()`) is capped there. The whole solve, including parallel sections such as presolve, runs on this number of threads.
-
-| `threads` | LP (`root_solver="auto"`) | Integer programs |
-|---|---|---|
-| 1 (default) | Solved by the slope–intercept dual two-phase method only. | Both the relaxations and the tree search are solved on 1 thread. |
-| k ≥ 2 | Solved at the same time by the two-phase method (1 thread) and the proximal interior-point method + crossover (k − 1 threads), adopting the side that reaches a conclusion first. | Relaxations that cannot be warm-started (the root, etc.) are solved at the same time in the same way as on the left, and after the root is processed the tree is shared among k threads for the search ("Parallel branch and bound" below). |
-
-In parallel execution, the threads are divided before starting into separate pools for the two-phase method (1 thread) and for the interior-point method + crossover (the rest), so the two methods never take each other's threads. If the two-phase method finishes first, its basic solution is used as it is; if the interior-point method + crossover finishes first, the optimal basis obtained in the crossover's finish (the main loop of the two-phase method) is used as it is. The losing side is stopped, and its termination is not waited for.
-
-```python
-import enomoto_solver
-sol = M.solve(threads=enomoto_solver.max_threads())   # use all available CPUs
-```
-
-### Log
-
-By default, `solve()` outputs to standard output first a notice of the author, the license and the contact, together with the size of the problem, then the key points during the solve, and finally the result. The key points during the solve are as follows.
-
-- LP: the size after presolve, the method used, and in parallel execution which method reached a conclusion first.
-- Integer programs: the size after presolve, the value of the root LP, the change of the value by the root cutting planes, restarts, and the progress of the search (elapsed time, number of nodes processed, number of unprocessed nodes, proven bound, objective value of the incumbent and relative gap; every 5 seconds).
-
-For the example in "Mixed-integer linear optimization (MIP)" below, the output is as follows.
-
-```text
-ENOMOTO-Solver 0.1.0 (MIT License)
-Author: Kan Enomoto (https://enomoto-math-labo.com/en)
-For optimization consulting requests and bug reports, contact enomotokan@gmail.com
-Problem: 3 variables (3 integer), 1 constraints, 3 nonzeros, maximize; threads 1
-Presolve: 1 rows, 3 columns -> 1 rows, 3 columns (0.00s)
-Root LP: objective 2.2000000000e2 (0.00s)
-     time      nodes      open        best bound         incumbent       gap
-     0.0s          0         0     2.200000000e2     2.200000000e2     0.00%
-Result: optimal, objective 220, best bound 220, gap 0.00%, nodes 0 (0.00s)
-```
-
-With `solve(log=False)`, neither the notice nor the log is output.
 
 ### Mixed-integer linear optimization (MIP)
 
@@ -175,6 +145,45 @@ When `threads` is k ≥ 2, branch and bound runs in parallel as follows.
 - Since the order in which nodes are processed changes with the progress of the threads, with k ≥ 2 the number of nodes and the solve time may vary from run to run (the optimal value obtained does not change).
 
 Termination criteria are specified with `time_limit` (seconds), `mip_rel_gap` (relative gap, default 1e-4) and `node_limit` (number of nodes). When the solver stops at a limit, `status` becomes `"time_limit"` or `"node_limit"`, and if there is an incumbent, `objective` and each variable's `.value` can be read. The results are also stored in `best_bound` (the proven bound), `mip_gap` (relative gap) and `nodes` (number of nodes processed) of `Solution`.
+
+### Number of threads (`threads`)
+
+`solve(threads=...)` specifies the number of threads to use (the default is 1). A value above the number of CPUs available to this process (`enomoto_solver.max_threads()`) is capped there. The whole solve, including parallel sections such as presolve, runs on this number of threads.
+
+| `threads` | LP (`root_solver="auto"`) | Integer programs |
+|---|---|---|
+| 1 (default) | Solved by the slope–intercept dual two-phase method only. | Both the relaxations and the tree search are solved on 1 thread. |
+| k ≥ 2 | Solved at the same time by the two-phase method (1 thread) and the proximal interior-point method + crossover (k − 1 threads), adopting the side that reaches a conclusion first. | Relaxations that cannot be warm-started (the root, etc.) are solved at the same time in the same way as on the left, and after the root is processed the tree is shared among k threads for the search ("Parallel branch and bound" above). |
+
+In parallel execution, the threads are divided before starting into separate pools for the two-phase method (1 thread) and for the interior-point method + crossover (the rest), so the two methods never take each other's threads. If the two-phase method finishes first, its basic solution is used as it is; if the interior-point method + crossover finishes first, the optimal basis obtained in the crossover's finish (the main loop of the two-phase method) is used as it is. The losing side is stopped, and its termination is not waited for.
+
+```python
+import enomoto_solver
+sol = M.solve(threads=enomoto_solver.max_threads())   # use all available CPUs
+```
+
+### Log
+
+By default, `solve()` outputs to standard output first a notice of the author, the license and the contact, together with the size of the problem, then the key points during the solve, and finally the result. The key points during the solve are as follows.
+
+- LP: the size after presolve, the method used, and in parallel execution which method reached a conclusion first.
+- MIP: the size after presolve, the value of the root LP, the change of the value by the root cutting planes, restarts, and the progress of the search (elapsed time, number of nodes processed, number of unprocessed nodes, proven bound, objective value of the incumbent and relative gap; every 5 seconds).
+
+For the example in "Mixed-integer linear optimization (MIP)" above, the output is as follows.
+
+```text
+ENOMOTO-Solver 0.1.0 (MIT License)
+Author: Kan Enomoto (https://enomoto-math-labo.com/en)
+For optimization consulting requests and bug reports, contact enomotokan@gmail.com
+Problem: 3 variables (3 integer), 1 constraints, 3 nonzeros, maximize; threads 1
+Presolve: 1 rows, 3 columns -> 1 rows, 3 columns (0.00s)
+Root LP: objective 2.2000000000e2 (0.00s)
+     time      nodes      open        best bound         incumbent       gap
+     0.0s          0         0     2.200000000e2     2.200000000e2     0.00%
+Result: optimal, objective 220, best bound 220, gap 0.00%, nodes 0 (0.00s)
+```
+
+With `solve(log=False)`, neither the notice nor the log is output.
 
 ## Benchmark results
 
