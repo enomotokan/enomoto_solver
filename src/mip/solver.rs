@@ -273,6 +273,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 従の結果の合計 (ノード数, LP の反復数)、[ここへ渡したノード, ここから取ったノード]
     pool: Option<std::sync::Arc<WorkPool>>,
     pool_busy: bool,
+    /// 従が最後に見た共有の最良値。
+    seen_best: f64,
     workers: Vec<std::thread::JoinHandle<MipResult>>,
     worker_totals: (u64, u64),
     pool_stats: [u64; 2],
@@ -737,6 +739,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         inbox_seen: 0,
         snap_stats: [0; 3],
         pool_busy: pool.is_some(),
+        seen_best: f64::INFINITY,
         pool,
         workers: Vec::new(),
         worker_totals: (0, 0),
@@ -1445,6 +1448,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
             } else if self.watch.is_none() && !self.params.submip && self.shared.is_some() {
                 self.snap_sync(&mut plunge);
             }
+            // 木を分け合う従: ほかのスレッドの解で共有の最良値が下がったら、根の被約費用による固定をやり直して待ち行列を刈る
+            // (自分の暫定解が良くなったときと同じ。主は従の解を受け取るときに try_incumbent で行う)
+            if self.pool.is_some() && self.snap.is_some() && env_str!("ENOMOTO_MIP_TREE_NO_SHARED_FIX").is_none() {
+                let b = self.shared.as_ref().map_or(f64::INFINITY, |s| s.best());
+                if b < self.seen_best {
+                    self.seen_best = b;
+                    self.root_redcost_fixing();
+                    let lim = self.prune_limit();
+                    self.queue.prune(lim);
+                }
+            }
             // 木を分け合う: 待っているスレッドがいれば、自分の待ち行列から下界の小さいノードを渡す
             if let Some(pool) = &self.pool {
                 use std::sync::atomic::Ordering;
@@ -1528,7 +1542,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let lim = self.prune_limit();
                     self.queue.prune(lim);
                     // 下界最小のノードを選ぶ頻度: 暫定解があれば上げる (下界を押し上げる)
-                    let bb_every = if self.incumbent.is_some() { tunable!("ENOMOTO_T_MIP_BB_EVERY_INC", 4u64, u64) } else { tunable!("ENOMOTO_T_MIP_BB_EVERY", 10u64, u64) };
+                    let bb_every = if self.has_cutoff_value() { tunable!("ENOMOTO_T_MIP_BB_EVERY_INC", 4u64, u64) } else { tunable!("ENOMOTO_T_MIP_BB_EVERY", 10u64, u64) };
                     let n = match self.queue.pop(bb_every) {
                         Some(n) => n,
                         // 木を分け合う: 共有の待ち行列から取る (全てのスレッドが待っていて空なら探索は終わり)
@@ -1763,7 +1777,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 xp("m_frac");
                 // 被約費用による局所的な固定。LP 解が新しい境界から外れたら解き直す。
-                if self.incumbent.is_some() && self.local_redcost_fixing(node_obj) {
+                if self.has_cutoff_value() && self.local_redcost_fixing(node_obj) {
                     if dn && !self.dbg_contains() {
                         self.dbg_lost("local redcost fixing", true);
                     }
@@ -1905,7 +1919,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             let kind = kinds[self.dive_calls as usize % kinds.len()];
                             let lb = self.queue.best_lower_bound().min(node_obj);
                             let cutoff = self.prune_limit();
-                            let quot = if self.incumbent.is_some() { 0.8 } else { 0.1 };
+                            let quot = if self.has_cutoff_value() { 0.8 } else { 0.1 };
                             let bound = if cutoff.is_finite() { lb + quot * (cutoff - lb) } else { f64::INFINITY };
                             let it0 = self.lp.total_iterations();
                             self.dive_calls += 1;
@@ -2200,6 +2214,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     /// 現在の LP の被約費用で、このノード以下で有効な境界を締める。締めたら真。
+    /// 打ち切り値に使える解の目的値があるか (自分の暫定解、または木を分け合うときはほかのスレッドの解の共有の最良値)。
+    /// 目的値しか使わない処理 (被約費用による固定・ノードの選び方) の条件に使う。木を分け合わないときは自分の暫定解だけ
+    /// (ポートフォリオ並列の挙動は変えない)。
+    fn has_cutoff_value(&self) -> bool {
+        // `ENOMOTO_MIP_TREE_OWN_INC_ONLY`: 以前の形 (自分の暫定解があるときだけ)
+        self.incumbent.is_some() || (self.pool.is_some() && env_str!("ENOMOTO_MIP_TREE_OWN_INC_ONLY").is_none() && self.shared.as_ref().is_some_and(|s| s.best().is_finite()))
+    }
+
     fn local_redcost_fixing(&mut self, node_obj: f64) -> bool {
         let gap = self.prune_limit() - node_obj;
         if !(gap.is_finite() && gap >= 0.0) {
