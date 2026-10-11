@@ -14,13 +14,22 @@ use super::slope_intercept_dual::{self as sid, ExtControl, ExtStop};
 use super::{freeze_std_matrices, StdForm};
 use crate::mip::lp::{Basis, LpStatus, SolveLimits, VarStatus};
 use crate::types::{LpOptions, Status};
+use std::sync::Arc;
+
+/// 最適基底とその LU、最終の被約費用 ([`TwoStageLp::lu_cache`])。状態の保存 ([`TwoStageLp::save_state`]) と
+/// [`TwoStageLp::lu`] は `Arc` で共有し、求解で LU を渡すときだけ (共有中なら) 複製する。
+struct LuCache {
+    basis: Vec<usize>,
+    lu: Arc<super::lu::FtLu>,
+    d: Option<Vec<f64>>,
+}
 
 /// 二段解法を使う MIP 用の LP。
 #[derive(Clone)]
 pub struct TwoStageLp {
     /// 直近の求解の最後の DSE 重み (基底位置順) と、そのときの基底。次の求解の基底が同じなら引き継ぐ
-    /// (行を加えたら新しい行の重みを 1 で足す)。
-    dse_cache: Option<(Vec<usize>, Vec<f64>)>,
+    /// (行を加えたら新しい行の重みを 1 で足す)。状態の保存と共有する。
+    dse_cache: Option<Arc<(Vec<usize>, Vec<f64>)>>,
     n: usize,
     /// 元の行 (列番号の昇順) と行の境界。
     rows: Vec<Vec<(usize, f64)>>,
@@ -41,10 +50,10 @@ pub struct TwoStageLp {
     x: Vec<f64>,
     y: Vec<f64>,
     status: Option<LpStatus>,
-    /// 直近に分解した基底の LU (tableau 行用、基底が変わったら捨てる)。
-    lu: Option<super::lu::FtLu>,
+    /// 直近に分解した基底の LU (tableau 行用、基底が変わったら捨てる)。`lu_cache` の LU と共有することがある。
+    lu: Option<Arc<super::lu::FtLu>>,
     /// 直近の最適基底とその LU (次の warm start で分解を省く)。
-    lu_cache: Option<(Vec<usize>, super::lu::FtLu, Option<Vec<f64>>)>,
+    lu_cache: Option<Arc<LuCache>>,
     iters: u64,
     /// 制約行列の識別子 (作り直すたびに新しい値。PRICE 用の行列の使い回しに使う)。
     price_key: u64,
@@ -90,8 +99,8 @@ pub struct TwoStageState {
     x: Vec<f64>,
     y: Vec<f64>,
     status: Option<LpStatus>,
-    lu_cache: Option<(Vec<usize>, super::lu::FtLu, Option<Vec<f64>>)>,
-    dse_cache: Option<(Vec<usize>, Vec<f64>)>,
+    lu_cache: Option<Arc<LuCache>>,
+    dse_cache: Option<Arc<(Vec<usize>, Vec<f64>)>>,
 }
 
 fn shift_of(lo: f64, up: f64) -> f64 {
@@ -286,7 +295,7 @@ impl TwoStageLp {
         }
         self.rebuild();
         // 新しい行のスラックを基底に入れる (スラックの番号は n + i なので、既存の基底は番号が変わらない)
-        let same = matches!((&self.basis, &self.dse_cache), (Some(b), Some((cb, _))) if b == cb);
+        let same = matches!((&self.basis, self.dse_cache.as_deref()), (Some(b), Some((cb, _))) if b == cb);
         if let Some(b) = self.basis.as_mut() {
             for i in m0..self.rows.len() {
                 b.push(self.n + i);
@@ -294,7 +303,8 @@ impl TwoStageLp {
         }
         // DSE 重みも引き継ぎ、新しい行の重みは 1 (スラックが基底の行)
         if same {
-            if let (Some(b), Some((cb, w))) = (&self.basis, self.dse_cache.as_mut()) {
+            if let (Some(b), Some(c)) = (&self.basis, self.dse_cache.as_mut()) {
+                let (cb, w) = Arc::make_mut(c);
                 cb.clone_from(b);
                 w.resize(b.len(), 1.0);
             }
@@ -335,7 +345,7 @@ impl TwoStageLp {
         let n = self.n;
         let cache = self.dse_cache.take();
         if let Some(b) = self.basis.take() {
-            let same = matches!(&cache, Some((cb, w)) if *cb == b && w.len() == b.len());
+            let same = matches!(cache.as_deref(), Some((cb, w)) if *cb == b && w.len() == b.len());
             let mut nb: Vec<usize> = Vec::with_capacity(k);
             let mut nw: Vec<f64> = Vec::with_capacity(k);
             for (p, &v) in b.iter().enumerate() {
@@ -348,14 +358,14 @@ impl TwoStageLp {
                 }
             }
             if same {
-                self.dse_cache = Some((nb.clone(), nw));
+                self.dse_cache = Some(Arc::new((nb.clone(), nw)));
             }
             self.basis = Some(nb);
         }
         self.rebuild();
         self.repair_basis();
         // 基底を直したら重みは使わない
-        if !matches!((&self.basis, &self.dse_cache), (Some(b), Some((cb, _))) if b == cb) {
+        if !matches!((&self.basis, self.dse_cache.as_deref()), (Some(b), Some((cb, _))) if b == cb) {
             self.dse_cache = None;
         }
         self.status = None;
@@ -503,7 +513,7 @@ impl TwoStageLp {
     /// 今の基底の DSE 重み (直前の求解の最後の値。基底が変わっていなければ) を、基底変数の番号 (構造列 j < n、
     /// 行 n + i) との組で返す。待ち行列のノードに基底と一緒に保存する。
     pub fn dse_snapshot(&self) -> Option<Vec<(u32, f32)>> {
-        match (&self.basis, &self.dse_cache) {
+        match (&self.basis, self.dse_cache.as_deref()) {
             (Some(b), Some((cb, w))) if b == cb && w.len() == b.len() => Some(b.iter().zip(w).map(|(&v, &x)| (v as u32, x as f32)).collect()),
             _ => None,
         }
@@ -520,7 +530,7 @@ impl TwoStageLp {
             }
         }
         let ws: Vec<f64> = b.iter().map(|&v| if map[v].is_nan() { 1.0 } else { (map[v] as f64).max(1e-8) }).collect();
-        self.dse_cache = Some((b.clone(), ws));
+        self.dse_cache = Some(Arc::new((b.clone(), ws)));
     }
 
     pub fn dse_weight(&self, _s: usize) -> f64 {
@@ -531,6 +541,7 @@ impl TwoStageLp {
         self.status
     }
 
+    /// LU と DSE 重みは `Arc` の共有 (複製しない)。
     pub fn save_state(&self) -> TwoStageState {
         TwoStageState { lo: self.lo.clone(), up: self.up.clone(), basis: self.basis.clone(), x: self.x.clone(), y: self.y.clone(), status: self.status, lu_cache: self.lu_cache.clone(), dse_cache: self.dse_cache.clone() }
     }
@@ -796,19 +807,26 @@ impl TwoStageLp {
         sid::set_price_key(Some(self.price_key));
         let r = match self.basis.clone() {
             Some(b) if b.len() == self.rows.len() => {
-                // 同じ基底の LU が手元にあれば渡す (分解を省く)
+                // 同じ基底の LU が手元にあれば渡す (分解を省く)。LU は求解で更新されるので所有権を渡す
+                // (状態の保存や `self.lu` と共有中なら複製する)
+                self.lu = None;
                 match self.lu_cache.take() {
                     // Forrest-Tomlin の更新が積み重なった LU は FTRAN/BTRAN が遅いので、分解し直させる
                     // (主ループの上限 3m に任せると、再分解は減るがノードの処理数はかえって減った)
-                    Some((cb, lu, d)) if cb == b && lu.update_count() < tunable!("ENOMOTO_T_MIP_LU_MAX_UPD", 64usize, usize) => {
-                        sid::set_warm_lu(Some(lu));
+                    Some(c) if c.basis == b && c.lu.update_count() < tunable!("ENOMOTO_T_MIP_LU_MAX_UPD", 64usize, usize) => {
+                        let warm_d = env_str!("ENOMOTO_MIP_WARM_D").is_some();
+                        let (lu, d) = match Arc::try_unwrap(c) {
+                            Ok(c) => (c.lu, c.d),
+                            Err(c) => (c.lu.clone(), if warm_d { c.d.clone() } else { None }),
+                        };
+                        sid::set_warm_lu(Some(Arc::try_unwrap(lu).unwrap_or_else(|lu| (*lu).clone())));
                         // 前回の求解の最終の被約費用は使わない: 主ループが増分で保つ値は求解をまたぐと誤差が積もり
                         // (相対 1e-4 程度)、価格付けしない固定列の値は更新されないので、双対実行可能性の判定を誤る
-                        if env_str!("ENOMOTO_MIP_WARM_D").is_some() {
+                        if warm_d {
                             sid::set_warm_d(d);
                         }
                     }
-                    Some((cb, _, _)) if cb == b => {
+                    Some(c) if c.basis == b => {
                         sid::xcount("n_upd64");
                         sid::set_warm_lu(None)
                     }
@@ -825,7 +843,7 @@ impl TwoStageLp {
                     sid::set_warm_nb(Some(self.nb_hint()));
                 }
                 // 前回の最後の DSE 重み (同じ基底のとき)
-                if let Some((cb, w)) = &self.dse_cache {
+                if let Some((cb, w)) = self.dse_cache.as_deref() {
                     if *cb == b && w.len() == b.len() {
                         sid::set_warm_dse(Some(w.clone()));
                     }
@@ -878,10 +896,10 @@ impl TwoStageLp {
                         }
                         if b.iter().all(|&v| v != usize::MAX) {
                             if let Some(lu) = last_lu {
-                                self.lu_cache = Some((b.clone(), lu, last_d));
+                                self.lu_cache = Some(Arc::new(LuCache { basis: b.clone(), lu: Arc::new(lu), d: last_d }));
                             }
                             if let Some(w) = last_dse.filter(|w| w.len() == b.len()) {
-                                self.dse_cache = Some((b.clone(), w));
+                                self.dse_cache = Some(Arc::new((b.clone(), w)));
                             }
                             self.basis = Some(b);
                         }
@@ -982,9 +1000,10 @@ impl TwoStageLp {
     pub fn basis_inverse_row(&mut self, s: usize) -> Vec<f64> {
         let m = self.rows.len();
         if self.lu.is_none() {
-            if let (Some((cb, lu, _)), Some(b)) = (&self.lu_cache, &self.basis) {
-                if cb == b {
-                    self.lu = Some(lu.clone());
+            // 最適基底の LU を共有する (解くだけなので複製しない)
+            if let (Some(c), Some(b)) = (&self.lu_cache, &self.basis) {
+                if c.basis == *b {
+                    self.lu = Some(c.lu.clone());
                 }
             }
         }
@@ -1003,7 +1022,7 @@ impl TwoStageLp {
                     }
                 }
             }
-            self.lu = super::basis_kernel::factorize_basis(&self.std, &pos, None);
+            self.lu = super::basis_kernel::factorize_basis(&self.std, &pos, None).map(Arc::new);
         }
         let Some(lu) = &self.lu else { return vec![0.0; m] };
         let mut out = vec![0.0; m];
