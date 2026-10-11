@@ -58,9 +58,18 @@ print(sol.status, sol.objective)    # optimal 17.0
 print(x.value, y.value)             # 3.0 7.0
 ```
 
-- `Variable(vtype, lb, ub)` creates a variable in the most recently created `Model` (or pass `model=...`). `vtype` is `float` (continuous) or `int` (integer). Bounds may be `±math.inf`; a free variable is `Variable(float, -math.inf, math.inf)`.
-- Linear expressions are written with `+`, `-` and multiplication by scalars. Constraints are written with `<=`, `>=` and `==`.
+- `Variable(vtype, lb, ub)` creates a variable in the most recently created `Model` (or pass `model=...`). `vtype` is `float` (continuous) or `int` (integer). Bounds may be `±math.inf`, for integer variables too; a free variable is `Variable(float, -math.inf, math.inf)`.
+- Linear expressions are written with `+`, `-`, multiplication by scalars and division by numbers. Constraints are written with `<=`, `>=` and `==`. The objective and constraints must be linear: building a quadratic or higher-order expression, such as a product of variables (`x * y`), a power (`x ** 2`) or division by an expression (`1 / x`), raises a `TypeError` saying that the expression is not linear.
 - `set_objective(f, sense="minimize" | "maximize")` sets the objective (default: minimize).
+- Arguments of `solve()` (all optional):
+
+  | Argument | Meaning |
+  |---|---|
+  | `threads` | Number of threads to use (default 1). With 2 or more, an LP is solved by the two-phase method and the interior-point method + crossover at the same time, and a MIP also shares its tree search among the threads. See "Number of threads (`threads`)" below. |
+  | `root_solver` | The LP method (default `"auto"`; see "Choosing the LP method" below). |
+  | `distinguish_infeasible_unbounded` | Whether to tell infeasible and unbounded apart when there is no finite optimum (default `False`; see "Result status and infeasible or unbounded problems" below). |
+  | `time_limit`, `mip_rel_gap`, `node_limit` | MIP limits (seconds, relative gap (default 1e-4), number of nodes). |
+
 - `solve()` always returns a `Solution`; it never raises because the model is infeasible, unbounded or not solved. Check `Solution.status`. Only when the status is `"optimal"` is `objective` set and each variable's value available as `.value`; otherwise `objective` is `None` and reading `.value` raises `RuntimeError`.
 
 ### Result status and infeasible or unbounded problems

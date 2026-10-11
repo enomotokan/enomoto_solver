@@ -18,12 +18,18 @@ if TYPE_CHECKING:
 # スカラーとして受け付ける数値型 (bool は除外して扱う)
 Number = Real
 
+# 線型でない式を作ろうとしたときのエラーメッセージ
+_NONLINEAR_MSG = (
+    "{op} is not linear: enomoto_solver solves linear and mixed-integer linear problems only, so the objective and "
+    "constraints must be linear expressions (sums of variables times numbers, plus a constant)"
+)
+
 
 class Function:
     """線形式 ``sum(coeffs[j] * x_j) + constant``。
 
-    ``+``, ``-``, スカラー倍 ``*`` で新しい Function を作り、``<=`` / ``>=`` / ``==`` で
-    Constraint を作る。
+    ``+``, ``-``, スカラー倍 ``*``、数値での割り算 ``/`` で新しい Function を作り、``<=`` / ``>=`` / ``==`` で
+    Constraint を作る。式どうしの積・式での割り算・べき乗 (二次以上の式) は TypeError。
 
     属性:
         model: この式が属する Model。
@@ -91,13 +97,35 @@ class Function:
         return (-self) + rhs
 
     def __mul__(self, other):
-        """スカラー倍 ``self * other`` (数値のみ。式どうしの積は不可)。"""
+        """スカラー倍 ``self * other`` (数値のみ)。式どうしの積は二次以上の式になるので TypeError。"""
+        if isinstance(other, Function):
+            raise TypeError(_NONLINEAR_MSG.format(op="product of two expressions (e.g. x * y)"))
         if not isinstance(other, Number) or isinstance(other, bool):
             return NotImplemented
         scalar = float(other)
         return Function(self.model, {j: c * scalar for j, c in self.coeffs.items()}, self.constant * scalar)
 
     __rmul__ = __mul__
+
+    def __truediv__(self, other):
+        """数値での割り算 ``self / other``。式で割ると線型でなくなるので TypeError。"""
+        if isinstance(other, Function):
+            raise TypeError(_NONLINEAR_MSG.format(op="division by an expression (e.g. x / y)"))
+        if not isinstance(other, Number) or isinstance(other, bool):
+            return NotImplemented
+        return self * (1.0 / float(other))
+
+    def __rtruediv__(self, other):
+        """``other / self``: 式で割るので TypeError。"""
+        raise TypeError(_NONLINEAR_MSG.format(op="division by an expression (e.g. 1 / x)"))
+
+    def __pow__(self, other):
+        """べき乗は線型でないので TypeError。"""
+        raise TypeError(_NONLINEAR_MSG.format(op="power of an expression (e.g. x ** 2)"))
+
+    def __rpow__(self, other):
+        """``other ** self`` は線型でないので TypeError。"""
+        raise TypeError(_NONLINEAR_MSG.format(op="power with an expression as the exponent (e.g. 2 ** x)"))
 
     # -- 比較演算: Constraint を作る ------------------------------------
     def __le__(self, other) -> "Constraint":

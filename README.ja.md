@@ -58,9 +58,18 @@ print(sol.status, sol.objective)    # optimal 17.0
 print(x.value, y.value)             # 3.0 7.0
 ```
 
-- `Variable(型, 下限, 上限)` は，最後に作った `Model` に変数を作ります(`model=...` で明示することもできます)．型は `float`(連続)か `int`(整数)です．上下限には `±math.inf` を使えます．自由変数は `Variable(float, -math.inf, math.inf)` です．
-- 線型式は `+`，`-`，スカラー倍で，制約は `<=`，`>=`，`==` で書きます．
+- `Variable(型, 下限, 上限)` は，最後に作った `Model` に変数を作ります(`model=...` で明示することもできます)．型は `float`(連続)か `int`(整数)です．上下限には `±math.inf` を使えます(整数変数でもかまいません)．自由変数は `Variable(float, -math.inf, math.inf)` です．
+- 線型式は `+`，`-`，スカラー倍，数値での割り算で，制約は `<=`，`>=`，`==` で書きます．目的関数と制約は線型式に限ります．変数どうしの積(`x * y`)，べき乗(`x ** 2`)，式での割り算(`1 / x`)のように二次以上になる式を作ると，線型でないことを示す `TypeError` になります．
 - `set_objective(f, sense="minimize" | "maximize")` で目的関数を設定します(既定は最小化)．
+- `solve()` の引数(すべて省略可)：
+
+  | 引数 | 意味 |
+  |---|---|
+  | `threads` | 使うスレッドの数(既定 1)．2 以上なら LP を二段解法と内点法 + クロスオーバーで同時に解き，整数計画では木の探索も分け合います．詳しくは下の「スレッド数(`threads`)」． |
+  | `root_solver` | LP の解法(既定 `"auto"`．下の「LP の解法の選択」)． |
+  | `distinguish_infeasible_unbounded` | 有限な最適値がないとき，実行不可能か非有界かを区別するか(既定 `False`．下の「結果の状態と，実行不可能・非有界な問題」)． |
+  | `time_limit`，`mip_rel_gap`，`node_limit` | 整数計画の打ち切り条件(秒，相対ギャップ(既定 1e-4)，ノード数)． |
+
 - `solve()` は常に `Solution` を返し，実行不可能・非有界・求解失敗でも例外は送出しません．結果は `Solution.status` で判断します．`status` が `"optimal"` のときだけ `objective` に値が入り，各変数の値を `.value` で読めます．それ以外では `objective` は `None` で，`.value` を読むと `RuntimeError` になります．
 
 ### 結果の状態と，実行不可能・非有界な問題
@@ -206,7 +215,7 @@ python -m enomoto_solver.benchmark_highs --max-vars 100000 --out netlib_results.
 
 ## 生成 AI の使用について
 
-手法の着想と理論は著者によるものです．実装の大部分は，著者の設計と指示のもとで AI コーディングアシスタント(Anthropic 社の Claude)が行い，どの実装上の工夫を採用するかは著者が比較実験に基づいて判断しました．
+線型最適化・混合整数最適化の傾き・切片双対二段解法手法の着想と理論は著者によるものです．実装の大部分は，著者の設計と指示のもとで AI コーディングアシスタント(Anthropic 社の Claude)が行い，どの実装上の工夫を採用するかは著者が比較実験に基づいて判断しました．
 
 ## ライセンス
 

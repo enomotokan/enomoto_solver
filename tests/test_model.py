@@ -192,3 +192,56 @@ def test_forcing_row_at_large_scale_is_not_reported_infeasible():
     sol = M.solve()
     assert sol.status == "optimal"
     assert abs(sol.objective - 0.5 * S) <= 1e-7 * S
+
+
+@pytest.mark.parametrize(
+    "make",
+    [
+        lambda x, y: x * y,
+        lambda x, y: (x + 1) * (y + 2),
+        lambda x, y: x**2,
+        lambda x, y: 1 / x,
+        lambda x, y: x / y,
+        lambda x, y: 2**x,
+    ],
+)
+def test_nonlinear_expression_raises_with_explanation(make):
+    # 二次以上の式・式での割り算は、線型式しか扱えないことを示す TypeError になる
+    Model()
+    x = Variable(float, 0, 1)
+    y = Variable(float, 0, 1)
+    with pytest.raises(TypeError, match="not linear"):
+        make(x, y)
+
+
+def test_division_by_number_is_linear():
+    M = Model()
+    x = Variable(float, 0, 10)
+    M.set_objective(x / 2, sense="maximize")
+    sol = M.solve()
+    assert sol.status == "optimal"
+    assert approx(sol.objective, 5.0)
+
+
+@pytest.mark.parametrize("parity, expected", [(1, "infeasible"), (0, "unbounded")])
+@pytest.mark.parametrize("threads", [1, 4])
+def test_mip_infeasible_or_unbounded_distinguished_by_integer_intercept_problem(parity, expected, threads):
+    # 緩和問題は x の方向に非有界。y + z が奇数かつ y - z が偶数 (parity=1) なら整数解がなく実行不能、
+    # parity=0 なら整数解があり非有界 (前処理では見抜けないので、切片問題を整数に制限した問題で決まる)
+    def build():
+        M = Model()
+        x = Variable(float, 0, math.inf)
+        y = Variable(int, -50, 50)
+        z = Variable(int, -50, 50)
+        w = Variable(int, -100, 100)
+        v = Variable(int, -100, 100)
+        M.set_objective(-1 * x)
+        M.add_constraint(y + z - 2 * w == parity)
+        M.add_constraint(y - z - 2 * v == 0)
+        M.add_constraint(x - y - z >= 0)
+        return M
+
+    assert build().solve(threads=threads).status == "infeasible_or_unbounded"
+    sol = build().solve(distinguish_infeasible_unbounded=True, threads=threads)
+    assert sol.status == expected
+    assert sol.objective is None
