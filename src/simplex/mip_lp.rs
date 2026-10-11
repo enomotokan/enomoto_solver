@@ -637,12 +637,14 @@ impl TwoStageLp {
                 eprintln!("MIP root race: simplex won at {:.3}s ({st:?})", t0.elapsed().as_secs_f64());
             }
             crate::phase_timing::mark("race_simplex_won");
+            user_log!("Root LP: the two-phase method finished first ({:.2}s)", t0.elapsed().as_secs_f64());
             return st;
         }
         let Ok(Some((x, duals))) = rx.recv() else {
             return self.solve_once(lim);
         };
         crate::phase_timing::mark("race_ipm_crossover_won");
+        user_log!("Root LP: the interior-point method + crossover finished first ({:.2}s)", t0.elapsed().as_secs_f64());
         let n = self.n;
         let xo: Vec<f64> = (0..n).map(|j| x.get(j).copied().unwrap_or(0.0) + self.shift[j]).collect();
         if let Some((y, bpos)) = duals {

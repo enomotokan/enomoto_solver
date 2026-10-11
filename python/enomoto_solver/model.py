@@ -13,12 +13,36 @@ Model 自体は行列を持たず、変数・目的関数・制約の宣言を R
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import ClassVar, List, Optional
 
 from . import _core
 from .constraint import Constraint
 from .function import Function
+
+
+def _version() -> str:
+    """インストールされているパッケージの版 (分からなければ空文字列)。"""
+    try:
+        from importlib.metadata import version
+
+        return version("enomoto-solver")
+    except Exception:
+        return ""
+
+
+# ``Model.solve(log=True)`` で最初に出す案内
+_BANNER = (
+    "ENOMOTO-Solver {version} (MIT License)\n"
+    "Author: Kan Enomoto (https://enomoto-math-labo.com/en)\n"
+    "For optimization consulting requests and bug reports, contact enomotokan@gmail.com"
+)
+
+
+def _fmt(v: Optional[float]) -> str:
+    """ログに出す数値 (None は "-")。"""
+    return "-" if v is None else f"{v:.10g}"
 
 
 @dataclass(frozen=True)
@@ -57,6 +81,7 @@ class Model:
         self._core = _core.PyModel()
         self._variables: List["Variable"] = []  # noqa: F821 - 循環 import を避けるため Variable は遅延 import
         self._objective: Optional[Function] = None
+        self._sense = "minimize"
         self._constraints: List[Constraint] = []
         self._solution: Optional[Solution] = None
         Model._stack.append(self)
@@ -99,6 +124,7 @@ class Model:
         if sense not in ("minimize", "maximize"):
             raise ValueError("sense must be 'minimize' or 'maximize'")
         self._objective = f
+        self._sense = sense
         self._core.set_objective(f.nonzero_terms(), f.constant, sense)
 
     def add_constraint(self, g: Constraint) -> None:
@@ -117,6 +143,7 @@ class Model:
         mip_rel_gap: Optional[float] = None,
         node_limit: Optional[int] = None,
         threads: Optional[int] = None,
+        log: bool = True,
     ) -> Solution:
         """Rust コアで前処理と最適化を実行し、結果を Solution で返す。
 
@@ -152,7 +179,14 @@ class Model:
         求解全体をこの数のスレッドで動かす。``"auto"`` で 2 以上なら、LP を上のように二段解法と内点法 +
         クロスオーバーで同時に解く。整数計画では warm start できない緩和問題 (根など) を同じように同時に解き、根の処理の後は未処理のノードを
         スレッドの間で分け合って探索する。
+
+        ``log`` (既定 True): 最初に作者・ライセンス・連絡先の案内と問題の大きさを、求解中は要点 (前処理の結果、
+        同時実行の勝敗、整数計画では根の LP・切除平面・探索の経過) を、最後に結果を標準出力に出す。
+        False なら何も出さない。
         """
+        if log and self._objective is not None:
+            self._log_header(threads)
+        t0 = time.perf_counter()
         result = self._core.solve(
             root_solver=root_solver,
             distinguish_infeasible_unbounded=distinguish_infeasible_unbounded,
@@ -160,7 +194,9 @@ class Model:
             mip_rel_gap=mip_rel_gap,
             node_limit=node_limit,
             threads=threads,
+            log=log,
         )
+        elapsed = time.perf_counter() - t0
         status = result["status"]
         self._solution_x = result["x"]
         self._solution = Solution(
@@ -171,7 +207,29 @@ class Model:
             mip_gap=result["mip_gap"],
             nodes=result["nodes"],
         )
+        if log:
+            self._log_result(self._solution, elapsed)
         return self._solution
+
+    def _log_header(self, threads: Optional[int]) -> None:
+        """``solve(log=True)`` の最初の案内と問題の大きさを出す。"""
+        n_int = sum(1 for v in self._variables if v.vtype == "integer")
+        nnz = sum(len(c.nonzero_terms()) for c in self._constraints)
+        used = min(max(threads or 1, 1), _core.max_threads())
+        print(_BANNER.format(version=_version()).replace("  ", " "), flush=True)
+        print(
+            f"Problem: {len(self._variables)} variables ({n_int} integer), {len(self._constraints)} constraints, "
+            f"{nnz} nonzeros, {self._sense}; threads {used}",
+            flush=True,
+        )
+
+    def _log_result(self, sol: Solution, elapsed: float) -> None:
+        """``solve(log=True)`` の最後の結果の行を出す。"""
+        line = f"Result: {sol.status}, objective {_fmt(sol.objective)}"
+        if sol.nodes is not None:
+            gap = "-" if sol.mip_gap is None or sol.mip_gap == float("inf") else f"{100 * sol.mip_gap:.2f}%"
+            line += f", best bound {_fmt(sol.best_bound)}, gap {gap}, nodes {sol.nodes}"
+        print(f"{line} ({elapsed:.2f}s)", flush=True)
 
     def __repr__(self) -> str:
         """変数数・制約数・目的関数の設定有無を示す表示用文字列。"""

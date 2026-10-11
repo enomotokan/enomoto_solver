@@ -226,6 +226,12 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 解けなかったノード (LP が失敗し、分枝もできなかった)。最適性を主張できなくなる。
     unresolved: bool,
     last_log: Instant,
+    /// 利用者向けのログ ([`crate::log`]) の探索の経過の見出しを出したか。
+    user_log_header: bool,
+    /// 処理中 (最後に取り出した) のノードの下界 (根では根の LP の値)。待ち行列にないので全体の下界に足す。
+    cur_lb: f64,
+    /// 終わるときの下界 ([`Self::finish`] が決めたもの)。あれば最後の経過の行はこれを使う。
+    final_lb: Option<f64>,
     /// カット生成に使う変数上下限 (最初の分離で作る)。
     pub(super) vbounds: Option<Rc<super::cuts::VarBounds>>,
     /// 根で解を見つけなかったヒューリスティクス ([`heur_bit`] のビット)。再スタートで引き継ぐ。
@@ -497,6 +503,9 @@ enum LearnedItem {
 
 struct PoolInner {
     nodes: Vec<SnapNode>,
+    /// 各スレッド (`pool_tid`) の下界: 処理中のノードと自分の待ち行列の最小 ([`Solver::note_current_lb`])。ノードを
+    /// 持っていなければ +inf。共有の待ち行列のノードと合わせて全体の下界になる (利用者向けのログに使う)。
+    lbs: Vec<f64>,
     /// 待っていない (ノードを持っているか処理している) スレッドの数。
     busy: usize,
     done: bool,
@@ -529,7 +538,7 @@ impl WorkPool {
             next_tid: std::sync::atomic::AtomicU32::new(0),
             pc: std::sync::Mutex::new(pc),
             bounds: std::sync::Mutex::new((lo, up)),
-            inner: std::sync::Mutex::new(PoolInner { nodes: Vec::new(), busy: threads, done: false }),
+            inner: std::sync::Mutex::new(PoolInner { nodes: Vec::new(), lbs: vec![f64::INFINITY; threads], busy: threads, done: false }),
             stop: std::sync::atomic::AtomicBool::new(false),
             idle: std::sync::atomic::AtomicUsize::new(0),
             len: std::sync::atomic::AtomicUsize::new(0),
@@ -674,11 +683,15 @@ pub fn solve(p: &MipProblem, params: MipParams) -> MipResult {
     // ヒューリスティクスのサブ MIP は小さいことが多いので、基底のない求解も二段解法だけで解く (同時実行しない)
     let prev_race = params.submip.then(|| crate::simplex::mip_lp::set_cold_race_threads(1));
     // LP の実装: 既定は傾き・切片二段解法 (`ENOMOTO_MIP_LP=own` で分枝限定法専用の単体法)。
-    let r = if env_str!("ENOMOTO_MIP_LP").is_some_and(|v| v == "own") {
-        solve_with::<LpEngine>(p, params, None, None)
-    } else {
-        solve_with::<crate::simplex::mip_lp::TwoStageLp>(p, params, None, None)
+    let run = || {
+        if env_str!("ENOMOTO_MIP_LP").is_some_and(|v| v == "own") {
+            solve_with::<LpEngine>(p, params, None, None)
+        } else {
+            solve_with::<crate::simplex::mip_lp::TwoStageLp>(p, params, None, None)
+        }
     };
+    // サブ MIP の経過は利用者向けのログに出さない
+    let r = if params.submip { crate::log::suspend(run) } else { run() };
     if let Some(k) = prev_race {
         crate::simplex::mip_lp::set_cold_race_threads(k);
     }
@@ -775,6 +788,9 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         node_lp_secs: 0.0,
         unresolved: false,
         last_log: start,
+        user_log_header: false,
+        cur_lb: f64::NEG_INFINITY,
+        final_lb: None,
         vbounds: None,
         failed_heurs: 0,
         cut_age: Vec::new(),
@@ -1200,14 +1216,23 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     fn log(&mut self, force: bool) {
-        if !self.params.verbose {
+        let user = crate::log::enabled();
+        if !self.params.verbose && !user {
             return;
         }
-        if !force && self.last_log.elapsed().as_secs_f64() < 2.0 {
+        // 利用者向けのログだけなら 5 秒ごと (開発用の経過は 2 秒ごと)
+        let every = if self.params.verbose { 2.0 } else { 5.0 };
+        if !force && self.last_log.elapsed().as_secs_f64() < every {
             return;
         }
         self.last_log = Instant::now();
         let ub = self.incumbent.as_ref().map(|(z, _)| *z).unwrap_or(f64::INFINITY);
+        if user {
+            self.user_progress_line(ub);
+        }
+        if !self.params.verbose {
+            return;
+        }
         eprintln!(
             "MIP: {:8.2}s nodes {:8} open {:7} lb {:.8e} ub {:.8e} lp_iters {} sb_iters {} sb_lps {} sb_secs {:.2} node_iters {} (first {}, lps {}) heur_iters {} dive_iters {} lp_rows {} node_cut_secs {:.2}",
             self.start.elapsed().as_secs_f64(),
@@ -1227,6 +1252,50 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.lp.num_rows(),
             self.node_cut_secs
         );
+    }
+
+    /// 処理を始めたノードの下界を記録する。木を分け合うときは、このスレッドの下界 (処理中のノードと自分の待ち行列の
+    /// 最小) を共有の領域にも書く ([`PoolInner::lbs`])。
+    fn note_current_lb(&mut self, node_lb: f64) {
+        self.cur_lb = node_lb;
+        if let Some(pool) = &self.pool {
+            let v = node_lb.min(self.queue.best_lower_bound());
+            let t = self.pool_tid as usize;
+            let mut g = pool.inner.lock().unwrap();
+            if g.lbs.len() <= t {
+                g.lbs.resize(t + 1, f64::INFINITY);
+            }
+            g.lbs[t] = v;
+        }
+    }
+
+    /// 探索全体の下界 (最小化形): 自分の待ち行列・処理中のノード、木を分け合うときは共有の待ち行列と各スレッドの下界の最小。
+    fn global_lower_bound(&self) -> f64 {
+        let mut lb = self.queue.best_lower_bound().min(self.cur_lb);
+        if let Some(pool) = &self.pool {
+            let g = pool.inner.lock().unwrap();
+            for n in &g.nodes {
+                lb = lb.min(n.lower_bound);
+            }
+            for &v in &g.lbs {
+                lb = lb.min(v);
+            }
+        }
+        lb
+    }
+
+    /// 利用者向けのログの探索の経過の 1 行 (時間、処理したノード数、待ち行列のノード数、限界、暫定解、ギャップ)。
+    /// 目的値は元の向き (最大化なら限界は上界)。
+    fn user_progress_line(&mut self, ub: f64) {
+        let s = self.p.sense_sign;
+        if !self.user_log_header {
+            self.user_log_header = true;
+            user_log!("{:>9} {:>10} {:>9} {:>17} {:>17} {:>9}", "time", "nodes", "open", "best bound", "incumbent", "gap");
+        }
+        let lb = self.final_lb.unwrap_or_else(|| self.global_lower_bound()).min(ub);
+        let fmt = |v: f64| if v.is_finite() { format!("{:.9e}", s * v) } else { "-".to_string() };
+        let gap = if ub.is_finite() && lb.is_finite() { format!("{:.2}%", 100.0 * (ub - lb).max(0.0) / ub.abs().max(1.0)) } else { "-".to_string() };
+        user_log!("{:>8.1}s {:>10} {:>9} {:>17} {:>17} {:>9}", self.start.elapsed().as_secs_f64(), self.nodes, self.queue.len(), fmt(lb), fmt(ub), gap);
     }
 
     fn run(&mut self) -> MipResult {
@@ -1302,9 +1371,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // (`TwoStageLp::solve`、`crate::simplex::mip_lp::set_cold_race_threads`)
         let root_st = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
         match root_st {
-            LpStatus::Optimal => {}
-            LpStatus::Infeasible => return self.finish(MipStatus::Infeasible, f64::INFINITY),
+            LpStatus::Optimal => {
+                self.cur_lb = self.lp.objective() + self.p.offset;
+                user_log!("Root LP: objective {:.10e} ({:.2}s)", self.p.sense_sign * (self.lp.objective() + self.p.offset), self.start.elapsed().as_secs_f64());
+            }
+            LpStatus::Infeasible => {
+                user_log!("Root LP: infeasible ({:.2}s)", self.start.elapsed().as_secs_f64());
+                return self.finish(MipStatus::Infeasible, f64::INFINITY);
+            }
             LpStatus::Unbounded => {
+                user_log!("Root LP: no finite optimum ({:.2}s)", self.start.elapsed().as_secs_f64());
                 let st = self.resolve_unbounded_root();
                 return self.finish(st, f64::NEG_INFINITY);
             }
@@ -1753,6 +1829,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if self.dbg_alive && DEBUG_SOL.with(|d| d.borrow().is_some()) && !self.params.submip {
                 self.dbg_prev_has = self.dbg_node_has_image(&node);
             }
+            self.note_current_lb(node.lower_bound);
             self.log(false);
             let dn = self.dbg_changes(&node.changes);
             if node.lower_bound >= self.prune_limit() {
@@ -3935,6 +4012,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             skip_heurs: self.params.skip_heurs | self.failed_heurs,
             ..self.params
         };
+        user_log!("Restart {}: {} of {} integer columns newly fixed at the root ({:.2}s)", params.restarts, newly, nint, self.start.elapsed().as_secs_f64());
         if self.params.verbose {
             eprintln!(
                 "MIP: restart {} ({} of {} integer columns newly fixed at the root, {} cuts kept) ({:.2}s)",
@@ -4271,8 +4349,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
         loop {
             {
                 let mut g = pool.inner.lock().unwrap();
+                let t = self.pool_tid as usize;
+                if g.lbs.len() <= t {
+                    g.lbs.resize(t + 1, f64::INFINITY);
+                }
                 if let Some(k) = (0..g.nodes.len()).min_by(|&a, &b| g.nodes[a].lower_bound.total_cmp(&g.nodes[b].lower_bound)) {
                     let sn = g.nodes.swap_remove(k);
+                    // 受け取ったノードの下界を同じ錠の中で書く (共有の待ち行列から消えた後も全体の下界に入るように)
+                    g.lbs[t] = sn.lower_bound;
                     pool.len.store(g.nodes.len(), Ordering::Relaxed);
                     if !self.pool_busy {
                         g.busy += 1;
@@ -4282,6 +4366,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.pool_stats[1] += 1;
                     return Ok(Some(sn.into_open()));
                 }
+                // ノードを持っていない
+                g.lbs[t] = f64::INFINITY;
                 if self.pool_busy {
                     g.busy -= 1;
                     pool.idle.fetch_add(1, Ordering::Relaxed);
@@ -4421,7 +4507,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.params.verbose {
             eprintln!("MIP: root relaxation unbounded; solving the intercept problem with integrality ({:.2}s)", self.start.elapsed().as_secs_f64());
         }
-        let r = super::solve_problem(&sub, params, env_str!("ENOMOTO_MIP_NO_PRESOLVE").is_none());
+        user_log!("Solving the intercept problem with integer variables to tell infeasible from unbounded");
+        let r = crate::log::suspend(|| super::solve_problem(&sub, params, env_str!("ENOMOTO_MIP_NO_PRESOLVE").is_none()));
         if self.params.verbose {
             eprintln!("MIP: intercept problem {:?} ({:.2}s)", r.status, self.start.elapsed().as_secs_f64());
         }
@@ -4460,6 +4547,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         self.parallel_submips = false;
         self.join_submips(0);
+        self.final_lb = Some(best_bound);
         self.log(true);
         if self.params.verbose {
             eprintln!("MIP: dual proofs and conflicts {} (conflicts added {} (from proofs {}), Farkas {}, pruned {} nodes, tightened {} bounds)", self.dual_proofs.len(), self.conflicts_added, self.proof_conflicts, self.farkas_added, self.proof_prunes, self.proof_tightenings);

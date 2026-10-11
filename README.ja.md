@@ -69,6 +69,7 @@ print(x.value, y.value)             # 3.0 7.0
   | `root_solver` | LP の解法(既定 `"auto"`．下の「LP の解法の選択」)． |
   | `distinguish_infeasible_unbounded` | 有限な最適値がないとき，実行不可能か非有界かを区別するか(既定 `False`．下の「結果の状態と，実行不可能・非有界な問題」)． |
   | `time_limit`，`mip_rel_gap`，`node_limit` | 整数計画の打ち切り条件(秒，相対ギャップ(既定 1e-4)，ノード数)． |
+  | `log` | ログを出すか(既定 `True`．下の「ログ」)． |
 
 - `solve()` は常に `Solution` を返し，実行不可能・非有界・求解失敗でも例外は送出しません．結果は `Solution.status` で判断します．`status` が `"optimal"` のときだけ `objective` に値が入り，各変数の値を `.value` で読めます．それ以外では `objective` は `None` で，`.value` を読むと `RuntimeError` になります．
 
@@ -77,6 +78,8 @@ print(x.value, y.value)             # 3.0 7.0
 `solve()` は `status`，`objective`，`node_limit_hit` を持つ `Solution` を返します．`status` は `"optimal"`，`"infeasible"`，`"unbounded"`，`"infeasible_or_unbounded"`，`"not_solved"` のいずれかです(整数変数を含むモデルでは，さらに `"time_limit"`，`"node_limit"` があります)．
 
 既定では，有限な最適値がないと分かった時点(局面Aの終了時)で止まり，`"infeasible_or_unbounded"` を返します．`distinguish_infeasible_unbounded=True` を渡すと局面Bまで進み，両者を区別します．
+
+### 線型最適化（LP）
 
 ```python
 M = Model()
@@ -119,7 +122,30 @@ import enomoto_solver
 sol = M.solve(threads=enomoto_solver.max_threads())   # 使える CPU をすべて使う
 ```
 
-### 整数変数
+### ログ
+
+`solve()` は既定で，最初に作者・ライセンス・連絡先の案内と問題の大きさを，求解中は要点を，最後に結果を標準出力に出します．求解中の要点は次のとおりです．
+
+- LP：プリソルブ後の大きさ，使う解法，並列実行ではどちらの解法が先に結論を出したか．
+- 整数計画：プリソルブ後の大きさ，根の LP の値，根の切除平面による値の変化，再スタート，探索の経過(経過時間，処理したノード数，未処理のノード数，証明済みの限界，暫定解の目的値，相対ギャップ．5 秒ごと)．
+
+下の「混合整数線型最適化（MIP）」の例では次のように出ます．
+
+```text
+ENOMOTO-Solver 0.1.0 (MIT License)
+Author: Kan Enomoto (https://enomoto-math-labo.com/en)
+For optimization consulting requests and bug reports, contact enomotokan@gmail.com
+Problem: 3 variables (3 integer), 1 constraints, 3 nonzeros, maximize; threads 1
+Presolve: 1 rows, 3 columns -> 1 rows, 3 columns (0.00s)
+Root LP: objective 2.2000000000e2 (0.00s)
+     time      nodes      open        best bound         incumbent       gap
+     0.0s          0         0     2.200000000e2     2.200000000e2     0.00%
+Result: optimal, objective 220, best bound 220, gap 0.00%, nodes 0 (0.00s)
+```
+
+`solve(log=False)` なら案内もログも出しません．
+
+### 混合整数線型最適化（MIP）
 
 ```python
 M = Model()

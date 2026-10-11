@@ -69,6 +69,7 @@ print(x.value, y.value)             # 3.0 7.0
   | `root_solver` | The LP method (default `"auto"`; see "Choosing the LP method" below). |
   | `distinguish_infeasible_unbounded` | Whether to distinguish infeasible from unbounded when there is no finite optimal value (default `False`; see "Result status, and infeasible or unbounded problems" below). |
   | `time_limit`, `mip_rel_gap`, `node_limit` | Termination criteria for integer programs (seconds, relative gap (default 1e-4), number of nodes). |
+  | `log` | Whether to output the log (default `True`; see "Log" below). |
 
 - `solve()` always returns a `Solution` and raises no exception even when the problem is infeasible, unbounded or not solved. Judge the result by `Solution.status`. Only when `status` is `"optimal"` does `objective` hold a value and can each variable's value be read with `.value`. Otherwise `objective` is `None` and reading `.value` raises `RuntimeError`.
 
@@ -77,6 +78,8 @@ print(x.value, y.value)             # 3.0 7.0
 `solve()` returns a `Solution` that has `status`, `objective` and `node_limit_hit`. `status` is one of `"optimal"`, `"infeasible"`, `"unbounded"`, `"infeasible_or_unbounded"` and `"not_solved"` (for models with integer variables, there are also `"time_limit"` and `"node_limit"`).
 
 By default, the solver stops when it finds that there is no finite optimal value (at the end of phase A) and returns `"infeasible_or_unbounded"`. Passing `distinguish_infeasible_unbounded=True` makes it proceed to phase B and distinguish the two.
+
+### Linear optimization (LP)
 
 ```python
 M = Model()
@@ -119,7 +122,30 @@ import enomoto_solver
 sol = M.solve(threads=enomoto_solver.max_threads())   # use all available CPUs
 ```
 
-### Integer variables
+### Log
+
+By default, `solve()` outputs to standard output first a notice of the author, the license and the contact, together with the size of the problem, then the key points during the solve, and finally the result. The key points during the solve are as follows.
+
+- LP: the size after presolve, the method used, and in parallel execution which method reached a conclusion first.
+- Integer programs: the size after presolve, the value of the root LP, the change of the value by the root cutting planes, restarts, and the progress of the search (elapsed time, number of nodes processed, number of unprocessed nodes, proven bound, objective value of the incumbent and relative gap; every 5 seconds).
+
+For the example in "Mixed-integer linear optimization (MIP)" below, the output is as follows.
+
+```text
+ENOMOTO-Solver 0.1.0 (MIT License)
+Author: Kan Enomoto (https://enomoto-math-labo.com/en)
+For optimization consulting requests and bug reports, contact enomotokan@gmail.com
+Problem: 3 variables (3 integer), 1 constraints, 3 nonzeros, maximize; threads 1
+Presolve: 1 rows, 3 columns -> 1 rows, 3 columns (0.00s)
+Root LP: objective 2.2000000000e2 (0.00s)
+     time      nodes      open        best bound         incumbent       gap
+     0.0s          0         0     2.200000000e2     2.200000000e2     0.00%
+Result: optimal, objective 220, best bound 220, gap 0.00%, nodes 0 (0.00s)
+```
+
+With `solve(log=False)`, neither the notice nor the log is output.
+
+### Mixed-integer linear optimization (MIP)
 
 ```python
 M = Model()
