@@ -4,7 +4,7 @@
 //! 通常は後者 (hybrid estimate) で選び、一定回数ごとに下界最小のノードを選ぶ。
 
 use super::lp::Basis;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::rc::Rc;
 
 /// 全順序つきの f64 (BTreeSet のキー用)。
@@ -67,13 +67,14 @@ pub struct NodeQueue {
     pops: u64,
     /// 枠ごとの世代 (push のたびに増やす。取り出した枠が使い回されても、古い (枠, 世代) では取り出せない)。
     gen: Vec<u64>,
-    /// カットの番号ごとの、そのカットが効いている基底を持つ待ち行列のノードの数。
-    protect: HashMap<u64, u32>,
+    /// カットの番号ごとの、そのカットが効いている基底を持つ待ち行列のノードの数 (カットの番号は 0 からの連番なので
+    /// 番号で引く。足りなければ伸ばす)。
+    protect: Vec<u32>,
 }
 
 impl NodeQueue {
     pub fn new() -> Self {
-        NodeQueue { nodes: Vec::new(), free: Vec::new(), by_lb: BTreeSet::new(), by_est: BTreeSet::new(), pops: 0, gen: Vec::new(), protect: HashMap::new() }
+        NodeQueue { nodes: Vec::new(), free: Vec::new(), by_lb: BTreeSet::new(), by_est: BTreeSet::new(), pops: 0, gen: Vec::new(), protect: Vec::new() }
     }
 
     pub fn len(&self) -> usize {
@@ -91,7 +92,11 @@ impl NodeQueue {
         let depth = node.depth as f64;
         if let Some(pr) = &node.prot {
             for &c in pr.iter() {
-                *self.protect.entry(c).or_insert(0) += 1;
+                let c = c as usize;
+                if c >= self.protect.len() {
+                    self.protect.resize(c + 1, 0);
+                }
+                self.protect[c] += 1;
             }
         }
         let id = if let Some(id) = self.free.pop() {
@@ -154,10 +159,12 @@ impl NodeQueue {
         Some(self.remove(id))
     }
 
-    /// 下界が `cutoff` 以上のノードを捨てる。捨てたノードの深さの一覧を返す (木の重みの集計用)。
-    pub fn prune(&mut self, cutoff: f64) -> Vec<usize> {
-        let ids: Vec<usize> = self.by_lb.range((Key(cutoff), 0)..).map(|&(_, id)| id).collect();
-        ids.into_iter().map(|id| self.remove(id).depth).collect()
+    /// 下界が `cutoff` 以上のノードを捨てる。
+    pub fn prune(&mut self, cutoff: f64) {
+        // 下界の小さい順に外す (外した枠を使い回す順を以前と同じにする)
+        while let Some(&(_, id)) = self.by_lb.range((Key(cutoff), 0)..).next() {
+            self.remove(id);
+        }
     }
 
     /// ノードをすべて取り出す (枠の世代は保つので、取り出す前の (枠, 世代) ではもう取り出せない)。
@@ -187,17 +194,14 @@ impl NodeQueue {
 
     fn unprotect(&mut self, pr: &[u64]) {
         for c in pr {
-            if let Some(k) = self.protect.get_mut(c) {
-                *k -= 1;
-                if *k == 0 {
-                    self.protect.remove(c);
-                }
+            if let Some(k) = self.protect.get_mut(*c as usize) {
+                *k = k.saturating_sub(1);
             }
         }
     }
 
     /// カット `c` が待ち行列のノードの基底で効いているか。
     pub fn is_protected(&self, c: u64) -> bool {
-        self.protect.contains_key(&c)
+        self.protect.get(c as usize).is_some_and(|&k| k > 0)
     }
 }

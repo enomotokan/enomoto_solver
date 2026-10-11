@@ -435,7 +435,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// カットをプールに加える。係数と右辺が (丸めて) 同じものは加えない。プールの非零数は問題の非零数の
     /// 20 倍 (最低 20 万) までにする。
     pub(super) fn add_to_pool(&mut self, coefs: &[(usize, f64)], rhs: f64) {
-        let nnz_cap = (tunable!("ENOMOTO_T_MIP_CUT_POOL_NNZ_MULT", 20usize, usize) * self.p.rows.iter().map(|r| r.len()).sum::<usize>()).max(200_000);
+        let nnz_cap = (tunable!("ENOMOTO_T_MIP_CUT_POOL_NNZ_MULT", 20usize, usize) * self.p.nnz).max(200_000);
         if self.cut_pool_nnz + coefs.len() > nnz_cap {
             return;
         }
@@ -489,8 +489,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if viol.is_empty() {
             return false;
         }
-        viol.sort_by(|a, b| b.0.total_cmp(&a.0));
+        // 効き目の大きい順、同じなら番号の小さい順 (全順序なので、上位 `max_cuts` 本を選んでから並べても全体を
+        // 安定に並べたのと同じ結果になる)
+        let ord = |a: &(f64, usize), b: &(f64, usize)| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1));
+        if max_cuts > 0 && viol.len() > max_cuts {
+            viol.select_nth_unstable_by(max_cuts - 1, ord);
+        }
         viol.truncate(max_cuts);
+        viol.sort_unstable_by(ord);
         // `ENOMOTO_T_MIP_POOL_REL` = r (> 0): 効き目が最大のカットの r 倍に満たないカットは戻さない
         let rel = tunable!("ENOMOTO_T_MIP_POOL_REL", 0.0, f64);
         if rel > 0.0 {
@@ -661,9 +667,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let srel = tunable!("ENOMOTO_T_MIP_CUT_SLACK_REL", 0.0, f64);
         let drel = tunable!("ENOMOTO_T_MIP_CUT_DUAL_REL", 0.0, f64);
         let ncut = self.cut_age.len();
-        let mut nslack = vec![0.0f64; ncut];
+        // 正規化した余裕 (`srel > 0` のときだけ作る)
+        let mut nslack = Vec::new();
         let mut max_slack = 0.0f64;
         if srel > 0.0 {
+            nslack = vec![0.0f64; ncut];
             for k in 0..ncut {
                 let i = m0 + k;
                 let (_, up) = self.lp.row_bounds(i);
@@ -774,17 +782,20 @@ impl<'a, L: MipLp> Solver<'a, L> {
     pub(super) fn remove_cuts_older_than(&mut self, limit: u32) -> usize {
         self.sync_cut_age();
         let m0 = self.p.m;
+        let old = |k: usize, age: u32| age > limit && !self.queue.is_protected(self.cut_ids[k]);
+        // 外すカットがなければ印の配列を作らない
+        if !self.cut_age.iter().enumerate().any(|(k, &age)| old(k, age)) {
+            return 0;
+        }
         let mut remove = vec![false; self.lp.num_rows()];
         let mut cnt = 0;
         for (k, &age) in self.cut_age.iter().enumerate() {
-            if age > limit && !self.queue.is_protected(self.cut_ids[k]) {
+            if old(k, age) {
                 remove[m0 + k] = true;
                 cnt += 1;
             }
         }
-        if cnt > 0 {
-            self.delete_lp_rows(&remove);
-        }
+        self.delete_lp_rows(&remove);
         cnt
     }
 
@@ -1713,7 +1724,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
         }
-        let nint = p.is_int.iter().filter(|&&b| b).count();
+        let nint = p.nint;
         let limit = if light { tunable!("ENOMOTO_T_MIP_NODE_TAB_ROWS", 50usize, usize) } else { 200 + (0.1 * (mr.min(nint)) as f64) as usize };
         // `ENOMOTO_MIP_TAB_HIGHS_RULES`: HiGHS の HighsTableauSeparator と同じ行の選び方。`dse_weight` は 1 を返すだけなので
         // 既定のスコアは f(1-f) で、密な行 (基底逆行列の行の非零が多い) が不利にならない。HiGHS は

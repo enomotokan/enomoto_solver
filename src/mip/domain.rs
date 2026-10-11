@@ -153,8 +153,8 @@ impl Domain {
 
     /// 変更の記録の長さ (巻き戻し位置として使う)。
     /// 記録の位置 `pos` より後の境界の変更 (列, 上限か, 変更後の値)。同じ列・側が何度も変わったら最後のものが後に来る。
-    pub fn changes_since(&self, pos: usize) -> Vec<(usize, bool, f64)> {
-        self.stack[pos.min(self.stack.len())..].iter().map(|c| (c.col, c.upper, c.new)).collect()
+    pub fn changes_since(&self, pos: usize) -> impl Iterator<Item = (usize, bool, f64)> + '_ {
+        self.stack[pos.min(self.stack.len())..].iter().map(|c| (c.col, c.upper, c.new))
     }
 
     /// 前回呼んでから記録が最も短くなったときの長さを返し、今の長さから数え直す。
@@ -377,13 +377,12 @@ impl Domain {
         while let Some(i) = self.queue.pop() {
             self.in_queue[i] = false;
             // 走査を省いた行は数えない
-            let scanned = self.row_can_tighten(p, i);
-            if scanned {
+            let (use_up, use_lo) = self.row_sides(p, i);
+            if use_up || use_lo {
                 work += p.rows[i].len();
-                DEBUG_WORK.with(|w| w.set(w.get() + p.rows[i].len() as u64));
             }
             self.cur_reason = i as i32;
-            let ok = self.propagate_row(p, i);
+            let ok = self.propagate_row(p, i, use_up, use_lo);
             self.cur_reason = -1;
             if !ok {
                 self.infeasible = true;
@@ -397,19 +396,23 @@ impl Domain {
                 break;
             }
         }
+        // 走査した行の長さはまとめて足す (伝播の途中では読まないので、行ごとに足すのと同じ)
+        DEBUG_WORK.with(|w| w.set(w.get() + work as u64));
         !self.infeasible
     }
 
-    /// 行 `i` からどれかの境界が締まりうるか (走査が必要か)。
-    fn row_can_tighten(&self, p: &MipProblem, i: usize) -> bool {
+    /// 行 `i` の (上限側, 下限側) から境界が締まりうるか (走査が必要か)。余裕が行の最大の幅以上なら、その側からは
+    /// どの境界も締まらない。
+    fn row_sides(&self, p: &MipProblem, i: usize) -> (bool, bool) {
         let cap = self.row_cap[i];
         let (lo_r, up_r) = (p.row_lo[i], p.row_up[i]);
         let up_side = up_r.is_finite() && self.min_inf[i] <= 1 && !(self.min_inf[i] == 0 && up_r - self.min_act[i] >= cap - 1e-9 * (1.0 + cap));
         let lo_side = lo_r.is_finite() && self.max_inf[i] <= 1 && !(self.max_inf[i] == 0 && self.max_act[i] - lo_r >= cap - 1e-9 * (1.0 + cap));
-        up_side || lo_side
+        (up_side, lo_side)
     }
 
-    fn propagate_row(&mut self, p: &MipProblem, i: usize) -> bool {
+    /// 行 `i` で境界を締める。`use_up`/`use_lo` は [`Self::row_sides`] の結果 (今の活動量で計算したもの)。
+    fn propagate_row(&mut self, p: &MipProblem, i: usize, use_up: bool, use_lo: bool) -> bool {
         let lo_r = p.row_lo[i];
         let up_r = p.row_up[i];
         if up_r.is_finite() && self.min_inf[i] == 0 && self.min_act[i] > up_r + row_tol(up_r, self.min_act[i]) {
@@ -424,10 +427,6 @@ impl Domain {
             }
             return false;
         }
-        // 余裕が行の最大の幅以上なら、その側からはどの境界も締まらない
-        let cap = self.row_cap[i];
-        let use_up = up_r.is_finite() && self.min_inf[i] <= 1 && !(self.min_inf[i] == 0 && up_r - self.min_act[i] >= cap - 1e-9 * (1.0 + cap));
-        let use_lo = lo_r.is_finite() && self.max_inf[i] <= 1 && !(self.max_inf[i] == 0 && self.max_act[i] - lo_r >= cap - 1e-9 * (1.0 + cap));
         if !use_up && !use_lo {
             return true;
         }

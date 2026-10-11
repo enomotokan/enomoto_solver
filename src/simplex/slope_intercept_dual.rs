@@ -1028,13 +1028,22 @@ thread_local! {
     static XPROF: std::cell::RefCell<Option<(std::time::Instant, Vec<(&'static str, u128)>)>> = const { std::cell::RefCell::new(None) };
 }
 
+/// どれかのスレッドで区間計時を有効にしたことがあるか (偽なら `xprof`/`xcount` はスレッド局所変数に触れずに戻る)。
+static XPROF_ANY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// 診断用: 区間計時を有効/無効にする (有効にすると累計を消す)。
 pub(crate) fn xprof_enable(on: bool) {
+    if on {
+        XPROF_ANY.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     XPROF.with(|x| *x.borrow_mut() = if on { Some((std::time::Instant::now(), Vec::new())) } else { None });
 }
 
 /// 診断用: 前回の印からここまでの時間を区間 `label` に足す。
 pub(crate) fn xprof(label: &'static str) {
+    if !XPROF_ANY.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
     XPROF.with(|x| {
         if let Some((t, acc)) = x.borrow_mut().as_mut() {
             let now = std::time::Instant::now();
@@ -1050,6 +1059,9 @@ pub(crate) fn xprof(label: &'static str) {
 
 /// 診断用: 回数を数える (表示では 1 回 = 1 ms)。
 pub(crate) fn xcount(label: &'static str) {
+    if !XPROF_ANY.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
     XPROF.with(|x| {
         if let Some((_, acc)) = x.borrow_mut().as_mut() {
             match acc.iter_mut().find(|(l, _)| *l == label) {

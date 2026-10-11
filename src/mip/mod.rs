@@ -800,7 +800,7 @@ fn presolve_mip(p: &MipProblem, verbose: bool) -> Option<Presolved> {
     }
     let fixed = (0..n).filter(|&j| pre.lb[j] == pre.ub[j]).count();
     if verbose {
-        let nnz0: usize = p.rows.iter().map(|r| r.len()).sum();
+        let nnz0 = p.nnz;
         let nnz1: usize = rows.iter().map(|r| r.len()).sum();
         eprintln!("MIP: presolve: rows {} -> {}, free columns {} -> {}, nonzeros {nnz0} -> {nnz1}, postsolve steps {}", p.m, rows.len(), (0..n).filter(|&j| p.col_lo[j] < p.col_up[j]).count(), n - fixed, pre.postsolve_log.len());
     }
@@ -841,7 +841,7 @@ fn probe(prob: &mut MipProblem, verbose: bool) -> Option<bool> {
     let t0 = std::time::Instant::now();
     let c0 = cap_clock();
     let n = prob.n;
-    let nnz: usize = prob.rows.iter().map(|r| r.len()).sum();
+    let nnz = prob.nnz;
     // 手間の上限は非零数の 20 倍、時間は 0.5 秒 (固定・締め付けが出ていれば `ENOMOTO_T_MIP_PROBE_TIME_FOUND` 秒)。
     // 大きくすると (2000 倍・1 秒・3 秒) 30n20b8 は 7971 列を全部試して 3241 列を固定し根の LP が 43.3 -> 122.8
     // (HiGHS 123.0)、neos-860300 も 2035 -> 2210 になるが、40 問では 19 問 28.14 -> 18 問 28.08 (neos-860300 が
@@ -891,12 +891,12 @@ fn probe(prob: &mut MipProblem, verbose: bool) -> Option<bool> {
         // x_j = 0 (変わった境界だけ覚える: 全列の境界を写すと列の多い問題で重い)
         dom.tighten_upper(prob, j, 0.0);
         let ok0 = dom.propagate(prob);
-        let ch0 = if ok0 { dom.changes_since(pos) } else { Vec::new() };
+        let ch0: Vec<_> = if ok0 { dom.changes_since(pos).collect() } else { Vec::new() };
         dom.backtrack_to(prob, pos);
         // x_j = 1
         dom.tighten_lower(prob, j, 1.0);
         let ok1 = dom.propagate(prob);
-        let ch1 = if ok1 { dom.changes_since(pos) } else { Vec::new() };
+        let ch1: Vec<_> = if ok1 { dom.changes_since(pos).collect() } else { Vec::new() };
         dom.backtrack_to(prob, pos);
         match (ok0, ok1) {
             (false, false) => return Some(false),

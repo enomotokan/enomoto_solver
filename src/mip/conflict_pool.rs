@@ -138,18 +138,19 @@ impl LitConflictPool {
         let mut pos = start;
         let mut tightened = 0usize;
         for _ in 0..10 {
-            let changed = dom.changes_since(pos);
-            pos = dom.stack_len();
-            if changed.is_empty() {
+            let end = dom.stack_len();
+            if pos >= end {
                 break;
             }
+            let changed = dom.changes_since(pos);
+            pos = end;
             self.stamp = self.stamp.wrapping_add(1);
             if self.stamp == 0 {
                 self.seen.iter_mut().for_each(|s| *s = 0);
                 self.stamp = 1;
             }
             let mut fixes: Vec<(usize, bool, f64)> = Vec::new();
-            for &(j, _, _) in &changed {
+            for (j, _, _) in changed {
                 for &s in &self.col_index[j] {
                     let s = s as usize;
                     if self.seen[s] == self.stamp {

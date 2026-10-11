@@ -299,6 +299,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     dbg_last: std::cell::RefCell<String>,
     dbg_prev_has: bool,
     dbg_alive: bool,
+    /// 診断用: デバッグ解があり (サブ MIP でない) 診断を行うか (構築時に決める)。偽なら診断の文字列を作らない。
+    dbg_on: bool,
     workers: Vec<std::thread::JoinHandle<MipResult>>,
     worker_totals: (u64, u64),
     pool_stats: [u64; 3],
@@ -386,8 +388,6 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) pool_idx: Vec<u32>,
     pub(super) pool_val: Vec<f64>,
     pub(super) pool_start: Vec<u32>,
-    /// 列ごとの (行, 係数) (oneopt 用、最初に使うときに作る)。
-    pub(super) col_rows: Option<Rc<Vec<Vec<(usize, f64)>>>>,
     /// 求解の開始時 (根の伝播の後) に固定されていた整数列の数 (再スタートの判定用)。
     root_fixed0: usize,
     /// ノードでのダイビングの LP 反復数・呼び出し回数・解を見つけた回数。
@@ -823,6 +823,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         dbg_last: std::cell::RefCell::new(String::new()),
         dbg_prev_has: false,
         dbg_alive: true,
+        dbg_on: !params.submip && DEBUG_SOL.with(|d| d.borrow().is_some()),
         pool,
         workers: Vec::new(),
         worker_totals: (0, 0),
@@ -885,7 +886,6 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         pool_idx: Vec::new(),
         pool_val: Vec::new(),
         pool_start: vec![0],
-        col_rows: None,
         root_fixed0: 0,
         dive_iters: 0,
         dive_calls: 0,
@@ -929,6 +929,9 @@ fn dse_all() -> bool {
 impl<'a, L: MipLp> Solver<'a, L> {
     /// 診断用: 現在の定義域がデバッグ解を含み、かつその目的値が打ち切り値未満なら `why` を表示する。
     pub(super) fn dbg_lost(&self, why: &str, contained: bool) {
+        if !self.dbg_on {
+            return;
+        }
         if !self.params.submip {
             self.dbg_last.replace(format!("{why} at node {}", self.nodes));
         }
@@ -947,7 +950,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// 診断用: ノードの分枝がデバッグ解を含むか。
     fn dbg_changes(&self, changes: &[BoundChange]) -> bool {
-        if self.params.submip {
+        if !self.dbg_on {
             return false;
         }
         DEBUG_SOL.with(|d| d.borrow().as_ref().is_some_and(|x| changes.iter().all(|c| if c.upper { x[c.col] <= c.value + 1e-6 } else { x[c.col] >= c.value - 1e-6 })))
@@ -982,6 +985,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// 診断用: `ENOMOTO_MIP_DEBUG_NODE` のノードで、今の定義域がデバッグ解の像を含むかを表示する。
     fn dbg_trace(&self, stage: &str) {
+        if !self.dbg_on {
+            return;
+        }
         let Some(k) = env_str!("ENOMOTO_MIP_DEBUG_NODE").and_then(|v| v.parse::<u64>().ok()) else { return };
         if self.nodes != k || self.params.submip {
             return;
@@ -999,7 +1005,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// 診断用: 現在の定義域がデバッグ解を含むか (デバッグ解がなければ偽)。
     pub(super) fn dbg_contains(&self) -> bool {
-        if self.params.submip {
+        if !self.dbg_on {
             return false;
         }
         DEBUG_SOL.with(|d| d.borrow().as_ref().is_some_and(|x| (0..self.p.n).all(|j| x[j] >= self.dom.lo[j] - 1e-6 && x[j] <= self.dom.up[j] + 1e-6)))
@@ -1007,7 +1013,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// 診断用: LP の行 (カットを含む) がデバッグ解で満たされているか調べる。
     pub(super) fn dbg_check_rows(&self, label: &str) {
-        if self.params.submip {
+        if !self.dbg_on {
             return;
         }
         DEBUG_SOL.with(|d| {
@@ -1177,18 +1183,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// LP 解の整数列を丸めた点を試し、行で少しはみ出るなら整数を固定して連続部分を LP で解き直す。
     pub(super) fn try_lp_solution(&mut self) -> bool {
-        let x = self.lp.col_values();
-        if self.try_incumbent(x.clone()) {
+        if self.try_incumbent(self.lp.col_values()) {
             return true;
         }
         if !self.p.is_int.iter().any(|&b| !b) {
             return false;
         }
-        // 整数を固定して連続変数を解き直す
+        // 整数を固定して連続変数を解き直す (`try_incumbent` が偽なら LP には触れていないので、LP の値は上と同じ)
         let saved = self.lp.save_state();
         for j in 0..self.p.n {
             if self.p.is_int[j] {
-                let v = x[j].round();
+                let v = self.lp.col_value(j).round();
                 self.lp.set_col_bounds(j, v, v);
             }
         }
@@ -1355,7 +1360,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // LP を使わない局所探索 (Feasibility Jump) で最初の実行可能解を探す。
         {
-            let nnz: usize = self.p.rows.iter().map(|r| r.len()).sum();
+            let nnz = self.p.nnz;
             let cap = if self.params.time_limit.is_finite() { (0.05 * self.params.time_limit).min(5.0) } else { 5.0 };
             let effort = (50 * nnz as u64).clamp(100_000, 50_000_000);
             if self.snap.is_some() {
@@ -1848,7 +1853,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.log(false);
             let dn = self.dbg_changes(&node.changes);
             if node.lower_bound >= self.prune_limit() {
-                self.dbg_lost(&format!("node lower bound {}", node.lower_bound), dn);
+                if self.dbg_on {
+                    self.dbg_lost(&format!("node lower bound {}", node.lower_bound), dn);
+                }
                 self.pc.objlim_leaves += 1;
                 continue;
             }
@@ -1994,7 +2001,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 match st {
                     LpStatus::Optimal => {}
                     LpStatus::Infeasible | LpStatus::ObjectiveBound => {
-                        self.dbg_trace(&format!("LP {st:?} (resolve {resolves}, LP rows {})", self.lp.num_rows()));
+                        if self.dbg_on {
+                            self.dbg_trace(&format!("LP {st:?} (resolve {resolves}, LP rows {})", self.lp.num_rows()));
+                        }
                         if st == LpStatus::Infeasible {
                             self.pc.infeasible_leaves += 1;
                             self.add_farkas_proof();
@@ -2002,7 +2011,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             self.pc.objlim_leaves += 1;
                             self.add_dual_proof();
                         }
-                        self.dbg_lost(&format!("node LP {st:?}"), dn && self.dbg_contains());
+                        if self.dbg_on {
+                            self.dbg_lost(&format!("node LP {st:?}"), dn && self.dbg_contains());
+                        }
                         if let Some((j, up, _, _)) = node.branch {
                             self.pc.add_cutoff(j, up);
                         }
@@ -2033,7 +2044,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if node_obj >= self.prune_limit() {
                     self.add_dual_proof();
                     self.pc.objlim_leaves += 1;
-                    self.dbg_lost(&format!("node LP objective {node_obj}"), dn && self.dbg_contains());
+                    if self.dbg_on {
+                        self.dbg_lost(&format!("node LP objective {node_obj}"), dn && self.dbg_contains());
+                    }
                     break None;
                 }
                 let x = self.lp.col_values();
@@ -2635,6 +2648,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut no_improve = 0.0f64;
         let mut tried = 0usize;
         let mut bound_changes = 0usize;
+        // 強分岐の前の LP の状態 (最初に強分岐する候補で 1 回だけ保存する)。各候補の子の LP は解いた後でこの状態に戻し、
+        // 候補の間では LP に触れない (境界の締め付けは定義域だけ) ので、候補ごとに保存し直しても同じ状態になる
+        let mut sb_saved: Option<L::State> = None;
         for &(j, v, pscore) in &cands {
             let is_reliable = (self.pc.min_observations(j) as f64) >= reliable_thr;
             if is_reliable || !allow_sb || tried >= max_tried || no_improve >= lookahead as f64 || self.time_up() || (self.sb_iters as f64) > maxsb {
@@ -2646,7 +2662,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             tried += 1;
             // 強分岐
-            let saved = self.lp.save_state();
+            let saved = &*sb_saved.get_or_insert_with(|| self.lp.save_state());
             let (lo, up) = (self.dom.lo[j], self.dom.up[j]);
             let mut gains = [0.0f64; 2];
             let mut child_obj = [f64::NEG_INFINITY; 2];
@@ -2723,7 +2739,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         gains[side] = (self.lp.objective() + self.p.offset - node_obj).max(0.0);
                     }
                 }
-                self.lp.restore_state(&saved);
+                self.lp.restore_state(saved);
                 if sb_prop {
                     self.dom.backtrack_to(self.p, pos);
                 }
@@ -3326,7 +3342,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         let p = self.p;
-        let nnz_cap = 10 * p.rows.iter().map(|r| r.len()).sum::<usize>() + 100_000;
+        let nnz_cap = 10 * p.nnz + 100_000;
         let max_rows = tunable!("ENOMOTO_T_MIP_PROOF_POOL", 2000usize, usize);
         while !self.dual_proofs.is_empty() && (self.dual_proofs.len() >= max_rows || self.dual_proof_nnz + coefs.len() > nnz_cap) {
             let (c, _, _) = self.dual_proofs.pop_front().unwrap();
@@ -3400,7 +3416,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 衝突解析の上限の長さ。
     /// HiGHS 式の衝突解析での衝突の長さの上限 (HiGHS: 10 長さ > 1000 + 3 整数列数 なら捨てる)。
     fn conflict_max_len_multi(&self) -> usize {
-        let nint = self.p.is_int.iter().filter(|&&b| b).count();
+        let nint = self.p.nint;
         (tunable!("ENOMOTO_T_MIP_CONFLICT_LEN_INT", 0.3, f64).mul_add(nint as f64, tunable!("ENOMOTO_T_MIP_CONFLICT_LEN_BASE", 100.0, f64)) as usize).max(1)
     }
 
@@ -3953,7 +3969,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.params.submip || self.params.restarts >= tunable!("ENOMOTO_T_MIP_MAX_RESTARTS", 4u32, u32) || env_str!("ENOMOTO_MIP_NO_RESTART").is_some() || self.time_up() {
             return None;
         }
-        let nint = p.is_int.iter().filter(|&&b| b).count();
+        let nint = p.nint;
         let fixed = (0..p.n).filter(|&j| p.is_int[j] && self.dom.global_lo[j] == self.dom.global_up[j]).count();
         let newly = fixed.saturating_sub(self.root_fixed0);
         // HiGHS と同じく、初回は固定された整数列が 1 本でもあれば、2 回目以降は 2.5% 以上で再スタートする

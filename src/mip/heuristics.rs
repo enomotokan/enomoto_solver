@@ -386,7 +386,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.params.submip || !p.is_int.iter().any(|&b| b) {
             return false;
         }
-        let cols = self.ensure_col_rows();
+        let cols = &p.cols;
         let mut act: Vec<f64> = p.rows.iter().map(|r| r.iter().map(|&(j, a)| a * x[j]).sum()).collect();
         // 列 j を向き dir (+1/-1) に動かせる最大の整数幅
         let max_shift = |j: usize, dir: f64, x: &[f64], act: &[f64], lo: &[f64], up: &[f64]| -> f64 {
@@ -452,20 +452,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.dive(DiveKind::Fractional, budget, f64::INFINITY)
     }
 
-    /// 列ごとの (行, 係数) を (なければ) 作る。
-    pub(super) fn ensure_col_rows(&mut self) -> std::rc::Rc<Vec<Vec<(usize, f64)>>> {
-        if self.col_rows.is_none() {
-            let mut cols: Vec<Vec<(usize, f64)>> = vec![Vec::new(); self.p.n];
-            for (i, r) in self.p.rows.iter().enumerate() {
-                for &(j, a) in r {
-                    cols[j].push((i, a));
-                }
-            }
-            self.col_rows = Some(std::rc::Rc::new(cols));
-        }
-        self.col_rows.clone().unwrap()
-    }
-
     /// ダイビング (SCIP の `SCIPperformGenericDivingAlgorithm` の簡略版)。`kind` で丸める列と向きを選び、
     /// 固定 → 伝播 → LP の解き直しを整数解になるまで続ける。固定で実行不能 (または目的値が `search_bound` 以上)
     /// になったら反対側を試し、両側とも駄目なら前の決定に戻って反対側に変える (後戻り、最大
@@ -473,7 +459,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     pub(super) fn dive(&mut self, kind: DiveKind, budget: u64, search_bound: f64) -> bool {
         let p = self.p;
         let verbose = self.params.verbose && (self.nodes <= 1 || env_str!("ENOMOTO_MIP_DEBUG_DIVE").is_some());
-        let cols = self.ensure_col_rows();
+        let cols = &p.cols;
         let saved = self.lp.save_state();
         let pos = self.dom.stack_len();
         let it_start = self.lp.total_iterations();
