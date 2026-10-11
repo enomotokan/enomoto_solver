@@ -14,6 +14,7 @@ use super::slope_intercept_dual::{self as sid, ExtControl, ExtStop};
 use super::{freeze_std_matrices, StdForm};
 use crate::mip::lp::{Basis, LpStatus, SolveLimits, VarStatus};
 use crate::types::{LpOptions, Status};
+use std::cell::OnceCell;
 use std::sync::Arc;
 
 /// 最適基底とその LU、最終の被約費用 ([`TwoStageLp::lu_cache`])。状態の保存 ([`TwoStageLp::save_state`]) と
@@ -61,6 +62,13 @@ pub struct TwoStageLp {
     ray: Option<Vec<f64>>,
     /// 直前の求解が非有界だったときの切片問題の境界 (標準形の列ごとの下限・上限、[`Self::intercept_bounds`])。
     intercept: Option<(Vec<Option<f64>>, Vec<Option<f64>>)>,
+    /// 直近の状態についての [`Self::basis`]・[`Self::reduced_costs`] の結果 (1 ノードで何度も呼ばれるので覚えておく)。
+    /// 境界・行・費用・基底・解・双対を変えたら捨てる ([`Self::clear_memo`])。
+    basis_memo: OnceCell<Basis>,
+    rc_memo: OnceCell<Vec<f64>>,
+    /// 直近の解 `x` についての [`Self::row_activities`] の結果 (行と `x` にだけよるので、`x` か行を変えたら捨てる。
+    /// 列の境界・基底を変えただけなら残し、次の求解の [`Self::nb_hint`] でも使う)。
+    act_memo: OnceCell<Vec<f64>>,
 }
 
 /// [`TwoStageLp::price_key`] の発行元。
@@ -157,7 +165,22 @@ impl TwoStageLp {
             price_key: new_price_key(),
             ray: None,
             intercept: None,
+            basis_memo: OnceCell::new(),
+            rc_memo: OnceCell::new(),
+            act_memo: OnceCell::new(),
         }
+    }
+
+    /// 覚えておいた基底・被約費用を捨てる (列の境界・基底・費用・双対が変わったとき)。行の活動量は残す。
+    fn clear_state_memo(&mut self) {
+        self.basis_memo.take();
+        self.rc_memo.take();
+    }
+
+    /// 覚えておいた基底・被約費用・行の活動量をすべて捨てる (解 `x` か行が変わったとき)。
+    fn clear_memo(&mut self) {
+        self.clear_state_memo();
+        self.act_memo.take();
     }
 
     /// 標準形を作る。戻り値は (標準形, 行の符号)。
@@ -263,6 +286,7 @@ impl TwoStageLp {
         self.std.lb[j] = lo - ns;
         self.std.ub[j] = up - ns;
         self.status = None;
+        self.clear_state_memo();
     }
 
     pub fn set_row_bounds(&mut self, i: usize, lo: f64, up: f64) {
@@ -270,12 +294,14 @@ impl TwoStageLp {
         self.row_up[i] = up;
         self.rebuild();
         self.status = None;
+        self.clear_memo();
     }
 
     pub fn set_costs(&mut self, c: &[f64]) {
         self.cost.copy_from_slice(c);
         self.std.c[..self.n].copy_from_slice(c);
         self.status = None;
+        self.clear_state_memo();
     }
 
     /// 行を加える。標準形を作り直し (`rebuild`: 凍結した行列を作り直し、PRICE 用の行列の識別子を変え、最適基底の LU の
@@ -313,6 +339,7 @@ impl TwoStageLp {
         }
         self.y.resize(self.rows.len(), 0.0);
         self.status = None;
+        self.clear_memo();
         sid::xprof("lp_add_rows");
     }
 
@@ -369,6 +396,7 @@ impl TwoStageLp {
             self.dse_cache = None;
         }
         self.status = None;
+        self.clear_memo();
         sid::xprof("lp_del_rows");
     }
 
@@ -398,6 +426,15 @@ impl TwoStageLp {
     }
 
     pub fn basis(&self) -> Basis {
+        self.basis_ref().clone()
+    }
+
+    /// [`Self::basis`] の参照 (同じ状態で何度呼んでも 1 回だけ作る)。
+    pub fn basis_ref(&self) -> &Basis {
+        self.basis_memo.get_or_init(|| self.compute_basis())
+    }
+
+    fn compute_basis(&self) -> Basis {
         let n = self.n;
         let m = self.rows.len();
         let mut col = vec![VarStatus::Lower; n];
@@ -448,6 +485,7 @@ impl TwoStageLp {
         self.repair_basis();
         self.lu = None;
         self.status = None;
+        self.clear_state_memo();
     }
 
     /// 今の LP (行・列の境界・費用) を内点法で解いた点 (元の空間の構造列の値) を返す。`zero_cost` なら費用 0
@@ -501,6 +539,7 @@ impl TwoStageLp {
         }
         self.lu = None;
         self.status = None;
+        self.clear_memo();
     }
 
     pub fn basic_var(&self, s: usize) -> usize {
@@ -561,6 +600,7 @@ impl TwoStageLp {
         self.x.clone_from(&s.x);
         self.y.clone_from(&s.y);
         self.status = s.status;
+        self.clear_memo();
     }
 
     /// LP を解く。基底がなく (warm start できない)、このスレッドの [`set_cold_race_threads`] が 2 以上なら、
@@ -682,6 +722,7 @@ impl TwoStageLp {
         self.lu_cache = None;
         self.dse_cache = None;
         self.status = None;
+        self.clear_memo();
         let it0 = self.iters;
         let st = self.solve_once(lim);
         if debug {
@@ -784,6 +825,7 @@ impl TwoStageLp {
         self.dse_cache = None;
         self.ray = None;
         self.status = Some(LpStatus::Optimal);
+        self.clear_memo();
         true
     }
 
@@ -853,6 +895,8 @@ impl TwoStageLp {
             _ => sid::solve_slope_intercept_dual(&self.std, &opts),
         };
         sid::xprof("wrapper");
+        // 解・双対・基底が変わる (非最適で終わっても双対は変わりうる)
+        self.clear_memo();
         sid::set_warm_lu(None);
         sid::set_warm_d(None);
         sid::set_warm_nb(None);
@@ -946,8 +990,9 @@ impl TwoStageLp {
             h[j] = if at(v, lo) { -1 } else if at(v, up) { 1 } else { 0 };
         }
         // スラック s_i = b_i - σ_i a_i x (元の空間で): 0 なら下限、上限 (範囲行の幅) なら上限
+        let acts = self.row_activities_ref();
         for i in 0..m {
-            let act: f64 = self.rows[i].iter().map(|&(j, a)| a * self.x[j]).sum();
+            let act = acts[i];
             let (l, u) = (self.row_lo[i], self.row_up[i]);
             let sl = if self.sigma[i] > 0.0 { u - act } else { act - l };
             let su = self.std.ub[n + i];
@@ -969,11 +1014,25 @@ impl TwoStageLp {
     }
 
     pub fn row_activities(&self) -> Vec<f64> {
-        self.rows.iter().map(|r| r.iter().map(|&(j, a)| a * self.x[j]).sum()).collect()
+        self.row_activities_ref().to_vec()
+    }
+
+    /// [`Self::row_activities`] の参照 (同じ解で何度呼んでも 1 回だけ計算する)。
+    pub fn row_activities_ref(&self) -> &[f64] {
+        self.act_memo.get_or_init(|| self.rows.iter().map(|r| r.iter().map(|&(j, a)| a * self.x[j]).sum()).collect())
     }
 
     /// 被約費用 `c - A^T y` (元の空間。標準形の行の符号を考慮)。
     pub fn reduced_costs(&self) -> Vec<f64> {
+        self.reduced_costs_ref().to_vec()
+    }
+
+    /// [`Self::reduced_costs`] の参照 (同じ状態で何度呼んでも 1 回だけ計算する)。
+    pub fn reduced_costs_ref(&self) -> &[f64] {
+        self.rc_memo.get_or_init(|| self.compute_reduced_costs())
+    }
+
+    fn compute_reduced_costs(&self) -> Vec<f64> {
         let mut d = self.cost.clone();
         for (i, r) in self.rows.iter().enumerate() {
             let yi = self.y.get(i).copied().unwrap_or(0.0) * self.sigma[i];

@@ -3,6 +3,7 @@
 
 use super::lp::{Basis, LpStatus, SolveLimits};
 use crate::simplex::mip_lp::{InteriorPoint, TwoStageLp, TwoStageState};
+use std::borrow::Cow;
 
 /// 分枝限定法が使う LP の操作。
 pub trait MipLp: Clone {
@@ -31,6 +32,18 @@ pub trait MipLp: Clone {
     fn row_activities(&self) -> Vec<f64>;
     fn reduced_costs(&self) -> Vec<f64>;
     fn row_duals(&self) -> Vec<f64>;
+    /// [`Self::basis`] を確保なしで見る (覚えておける実装は参照を返す。既定は作って返す)。
+    fn basis_ref(&self) -> Cow<'_, Basis> {
+        Cow::Owned(self.basis())
+    }
+    /// [`Self::row_activities`] を確保なしで見る (既定は作って返す)。
+    fn row_activities_ref(&self) -> Cow<'_, [f64]> {
+        Cow::Owned(self.row_activities())
+    }
+    /// [`Self::reduced_costs`] を確保なしで見る (既定は作って返す)。
+    fn reduced_costs_ref(&self) -> Cow<'_, [f64]> {
+        Cow::Owned(self.reduced_costs())
+    }
     /// 直前の求解が実行不能だったときの双対射線 (元の行の向き、行の重み)。なければ `None`。
     fn farkas_ray(&self) -> Option<Vec<f64>>;
     fn basis_inverse_row(&mut self, s: usize) -> Vec<f64>;
@@ -87,6 +100,15 @@ macro_rules! forward_impl {
 forward_impl!(
     TwoStageLp,
     TwoStageState,
+    fn basis_ref(&self) -> Cow<'_, Basis> {
+        Cow::Borrowed(TwoStageLp::basis_ref(self))
+    },
+    fn row_activities_ref(&self) -> Cow<'_, [f64]> {
+        Cow::Borrowed(TwoStageLp::row_activities_ref(self))
+    },
+    fn reduced_costs_ref(&self) -> Cow<'_, [f64]> {
+        Cow::Borrowed(TwoStageLp::reduced_costs_ref(self))
+    },
     fn interior_point(&self, zero_cost: bool, want_vertex: bool, deadline: std::time::Instant) -> Option<InteriorPoint> {
         TwoStageLp::interior_point(self, zero_cost, want_vertex, deadline)
     },

@@ -2460,8 +2460,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// 根の LP の被約費用を保存する。
     fn store_root_redcost(&mut self, root_obj: f64) {
-        let b = self.lp.basis();
-        let d = self.lp.reduced_costs();
+        let b = self.lp.basis_ref();
+        let d = self.lp.reduced_costs_ref();
         let mut v = Vec::new();
         for j in 0..self.p.n {
             if !self.p.is_int[j] {
@@ -2508,9 +2508,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return false;
         }
         xp("r_pre");
-        let b = self.lp.basis();
+        let b = self.lp.basis_ref();
         xp("r_basis");
-        let d = self.lp.reduced_costs();
+        let d = self.lp.reduced_costs_ref();
         xp("r_d");
         let cont_frac = tunable!("ENOMOTO_T_MIP_REDCOST_CONT_FRAC", 0.1, f64);
         let mut changed = false;
@@ -2585,8 +2585,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 双対退化の度合い (SCIP の `SCIPgetLPDualDegeneracy` の簡略版): 非基底の構造列のうち被約費用が 0 の
     /// 割合と、(基底列 + 被約費用 0 の非基底列) / 行数。
     fn dual_degeneracy(&self) -> (f64, f64) {
-        let b = self.lp.basis();
-        let d = self.lp.reduced_costs();
+        let b = self.lp.basis_ref();
+        let d = self.lp.reduced_costs_ref();
         let (mut nb, mut zero, mut basic) = (0usize, 0usize, 0usize);
         for j in 0..self.p.n {
             if self.dom.lo[j] == self.dom.up[j] {

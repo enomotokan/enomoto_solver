@@ -642,7 +642,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if mr <= m0 {
             return None;
         }
-        let b = self.lp.basis();
+        let b = self.lp.basis_ref();
         let v: Vec<u64> = (m0..mr).filter(|&i| b.row[i] != VarStatus::Basic).map(|i| self.cut_ids[i - m0]).collect();
         if v.is_empty() { None } else { Some(std::rc::Rc::new(v)) }
     }
@@ -655,8 +655,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return;
         }
         let m0 = self.p.m;
-        let b = self.lp.basis();
-        let act = self.lp.row_activities();
+        let b = self.lp.basis_ref();
+        let act = self.lp.row_activities_ref();
         // 相対的な基準 (既定では使わない):
         // `ENOMOTO_T_MIP_CUT_SLACK_REL` = s (> 0): 余裕のあるカットのうち、正規化した余裕 (余裕 / 係数の 2 ノルム) が
         //   カットの中で最大のものの s 倍に満たないもの (ほぼ効いている) は年齢を増やさない
@@ -881,11 +881,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if mr <= m0 {
             return;
         }
-        let b = self.lp.basis();
-        let act = self.lp.row_activities();
+        self.sync_cut_age();
+        let b = self.lp.basis_ref();
+        let act = self.lp.row_activities_ref();
         let mut remove = vec![false; mr];
         let mut any = false;
-        self.sync_cut_age();
         for i in m0..mr {
             if b.row[i] == VarStatus::Basic {
                 let (_, up) = self.lp.row_bounds(i);
