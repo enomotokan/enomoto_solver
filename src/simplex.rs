@@ -2082,14 +2082,34 @@ pub fn solve_lp_dual_with(variables: &[VariableData], objective: &Objective, con
 /// [`solve_lp_dual_with`] の本体: `Unbounded` をまとめる前の状態をそのまま返す。
 fn solve_lp_dual_full_status(variables: &[VariableData], objective: &Objective, constraints: &[ConstraintRow], opts: crate::types::LpOptions) -> SimplexResult {
     crate::phase_timing::start();
+    let t0 = std::time::Instant::now();
     let PresolvedForm { std, scaling: sc, postsolve_log, orig_of_kept, sign, fixed_values, shift } = match build_std_form_presolved(variables, objective, constraints, !opts.distinguish_infeasible_unbounded) {
         Ok(pf) => pf,
         Err(status) => {
             crate::phase_timing::mark(if status == Status::Infeasible { "presolve_infeasible" } else { "presolve_no_finite_optimum" });
+            user_log!("Presolve: {} ({:.2}s)", if status == Status::Infeasible { "the problem is infeasible" } else { "the problem has no finite optimum" }, t0.elapsed().as_secs_f64());
             return SimplexResult { status, x: None };
         }
     };
     crate::phase_timing::mark("presolve_end");
+    user_log!(
+        "Presolve: {} rows, {} columns -> {} rows, {} columns ({:.2}s)",
+        constraints.len(),
+        variables.len(),
+        std.n_rows,
+        std.n_total - std.n_rows,
+        t0.elapsed().as_secs_f64()
+    );
+    if opts.auto_race {
+        user_log!(
+            "Solving with the slope-intercept dual two-phase method (1 thread) and the interior-point method + crossover ({} threads) in parallel",
+            opts.threads.max(2) - 1
+        );
+    } else if opts.ipm_crossover {
+        user_log!("Solving with the interior-point method + crossover");
+    } else {
+        user_log!("Solving with the slope-intercept dual two-phase method");
+    }
     if env_str!("ENOMOTO_DEBUG_PRESOLVE_SIZE").is_some() {
         // n_vars_out は求解に渡る構造列数 (固定変数は除外済み)。
         eprintln!(

@@ -34,6 +34,16 @@ enum Engine {
     IpmCrossover,
 }
 
+impl Engine {
+    /// 利用者向けのログでの名前。
+    fn label(self) -> &'static str {
+        match self {
+            Engine::Simplex => "The two-phase method",
+            Engine::IpmCrossover => "The interior-point method + crossover",
+        }
+    }
+}
+
 /// `std` を 2 つのエンジンで同時に解き、先に結論を出した側の結果を返す (両方とも結論なしなら `NotSolved`)。
 pub(super) fn solve_race(std: Arc<StdForm>, opts: crate::types::LpOptions) -> SimplexResult {
     // 小さな問題 (非零の数が `ENOMOTO_T_RACE_SMALL_NNZ` 未満、既定は `XO_SERIAL_NNZ`) は、プールを作り直さず
@@ -95,6 +105,7 @@ pub(super) fn solve_race(std: Arc<StdForm>, opts: crate::types::LpOptions) -> Si
                     Engine::Simplex => "race_simplex_won",
                     Engine::IpmCrossover => "race_ipm_crossover_won",
                 });
+                user_log!("{} finished first ({:.2}s)", engine.label(), t0.elapsed().as_secs_f64());
                 return r;
             }
         }
@@ -171,6 +182,9 @@ pub(super) fn solve_race_groups(subs: Vec<Arc<StdForm>>, opts: crate::types::LpO
     // 組ごとに、結論なしで戻った側の数 (2 になったらその組は `NotSolved`)。
     let mut gave_up = vec![0u8; k];
     let mut open = k;
+    // 利用者向けのログ: 各側が先に結論を出した組の数
+    let t0 = std::time::Instant::now();
+    let mut wins = [0usize; 2];
     while open > 0 {
         let Ok((g, engine, r)) = rx.recv_timeout(std::time::Duration::from_millis(50)) else {
             if outer.as_ref().is_some_and(|t| t.load(Ordering::Relaxed)) {
@@ -189,6 +203,7 @@ pub(super) fn solve_race_groups(subs: Vec<Arc<StdForm>>, opts: crate::types::LpO
                 Engine::Simplex => "race_simplex_won",
                 Engine::IpmCrossover => "race_ipm_crossover_won",
             });
+            wins[(engine == Engine::IpmCrossover) as usize] += 1;
             results[g] = Some(r);
             open -= 1;
         } else if r.status == Status::NotSolved {
@@ -199,6 +214,12 @@ pub(super) fn solve_race_groups(subs: Vec<Arc<StdForm>>, opts: crate::types::LpO
             }
         }
     }
+    user_log!(
+        "{k} independent parts: the two-phase method finished first in {}, the interior-point method + crossover in {} ({:.2}s)",
+        wins[0],
+        wins[1],
+        t0.elapsed().as_secs_f64()
+    );
     // 結論の出た組は、負けた側が確認点で止まるのを待たずに返す。
     for t in tokens.iter() {
         t.store(true, Ordering::SeqCst);
@@ -236,6 +257,7 @@ fn solve_race_small(std: Arc<StdForm>, opts: crate::types::LpOptions) -> Simplex
             eprintln!("RACE(small) simplex won at {:.3}s", t0.elapsed().as_secs_f64());
         }
         crate::phase_timing::mark("race_simplex_won");
+        user_log!("{} finished first ({:.2}s)", Engine::Simplex.label(), t0.elapsed().as_secs_f64());
         return rs;
     }
     // 内点法が先に結論を出した (または二段解法が結論なしで戻った): 内点法の結果を待つ。
@@ -245,6 +267,7 @@ fn solve_race_small(std: Arc<StdForm>, opts: crate::types::LpOptions) -> Simplex
                 eprintln!("RACE(small) ipm_crossover won at {:.3}s", t0.elapsed().as_secs_f64());
             }
             crate::phase_timing::mark("race_ipm_crossover_won");
+            user_log!("{} finished first ({:.2}s)", Engine::IpmCrossover.label(), t0.elapsed().as_secs_f64());
             r
         }
         _ => rs,

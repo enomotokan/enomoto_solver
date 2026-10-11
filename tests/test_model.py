@@ -245,3 +245,35 @@ def test_mip_infeasible_or_unbounded_distinguished_by_integer_intercept_problem(
     sol = build().solve(distinguish_infeasible_unbounded=True, threads=threads)
     assert sol.status == expected
     assert sol.objective is None
+
+
+def _knapsack():
+    M = Model()
+    items = [(Variable(int, 0, 1), v, w) for v, w in [(60, 10), (100, 20), (120, 30)]]
+    M.set_objective(sum(x * v for x, v, _ in items), sense="maximize")
+    M.add_constraint(sum(x * w for x, _, w in items) <= 50)
+    return M
+
+
+def test_log_is_printed_by_default(capsys):
+    # 既定では、作者・ライセンス・連絡先の案内、問題の大きさ、求解の要点、結果を標準出力に出す
+    sol = _knapsack().solve()
+    out = capsys.readouterr().out
+    assert sol.status == "optimal"
+    assert "MIT License" in out
+    assert "Kan Enomoto" in out
+    assert "https://enomoto-math-labo.com/en" in out
+    assert "enomotokan@gmail.com" in out
+    assert "Problem: 3 variables (3 integer), 1 constraints" in out
+    assert "Root LP:" in out
+    assert "Result: optimal" in out
+    assert out.index("MIT License") < out.index("Root LP:")
+
+
+@pytest.mark.parametrize("threads", [1, 4])
+def test_log_false_prints_nothing(capsys, threads):
+    sol = _knapsack().solve(log=False, threads=threads)
+    assert sol.status == "optimal"
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""

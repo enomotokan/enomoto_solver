@@ -493,7 +493,19 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
 
 fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) -> solver::MipResult {
     let start = RESTART_SOL.with(|s| s.borrow_mut().take());
+    let t_pre = std::time::Instant::now();
     let presolved = if use_presolve { presolve_mip(p, params.verbose) } else { None };
+    // 利用者向けのログ (サブ MIP の前処理は出さない)
+    if !params.submip {
+        let free = |q: &MipProblem| (0..q.n).filter(|&j| q.col_lo[j] < q.col_up[j]).count();
+        match &presolved {
+            Some(Presolved::Reduced { prob, .. }) => {
+                user_log!("Presolve: {} rows, {} columns -> {} rows, {} columns ({:.2}s)", p.m, free(p), prob.m, free(prob), t_pre.elapsed().as_secs_f64())
+            }
+            Some(Presolved::Infeasible) => user_log!("Presolve: the problem is infeasible ({:.2}s)", t_pre.elapsed().as_secs_f64()),
+            None => {}
+        }
+    }
     // 前処理は列の番号を保ち、列の尺度 d を掛ける (x = d x')。前処理後の空間に移して実行可能なら渡す
     // (代入で消えた列などで合わなければ渡さない)
     match (&presolved, start) {

@@ -2,28 +2,28 @@
 
 [日本語版 README](README.ja.md)
 
-ENOMOTO-Solver is a linear programming (LP) and mixed-integer linear programming (MIP) solver with a Python modelling interface and a Rust core.
+ENOMOTO-Solver is a solver for linear optimization problems (LP) and mixed-integer linear optimization problems (MIP), consisting of a Python modelling interface and a Rust core.
 
-Its LP engine implements the **slope–intercept dual two-phase method**, which treats the artificial-bound ("dual big-M") approach to dual phase 1 with a *symbolic* M:
+For LP, it implements the **slope–intercept dual two-phase method**. This is a method that treats the M of the artificial-bound method (the big-M method applied to the dual problem), one of the phase-1 methods of the dual simplex method, symbolically instead of fixing it as a number.
 
-- **Phase A (slope problem):** starting from the all-slack basis, which is dual feasible without any computation, solve the problem obtained by replacing infinite bounds with ±1 and the right-hand side with 0. Its optimal value decides whether the LP can have a finite optimum.
-- **Phase B (intercept problem):** from the final basis of phase A, solve the problem with the slope held fixed by an ordinary dual simplex method.
-- **Clean-up:** if variables remain on artificial bounds, move them to finite bounds with a primal ratio test, keeping optimality.
+- **Phase A (slope problem):** starting from the all-slack basis, which is dual feasible without any computation, solve the problem obtained by replacing infinite bounds with ±1 and the right-hand side with 0. Its optimal value tells whether the original problem can have a finite optimal value.
+- **Phase B (intercept problem):** from the final basis of phase A, solve the problem obtained by fixing the slope with the ordinary dual simplex method.
+- **Post-processing:** if variables remain on artificial bounds, move them to finite bounds with a primal ratio test while keeping optimality.
 
-The method decides, **using the dual simplex method only and without choosing a numerical value for M**, whether an LP has a finite optimum, is unbounded, or is infeasible, and returns an optimal basic solution in the first case.
+In this way, **without choosing a numerical M and with the dual simplex method alone**, it decides whether an LP has a finite optimal value, is unbounded, or is infeasible, and returns an optimal basic solution when it has a finite optimal value.
 
-The solver also includes:
+The following are also implemented.
 
-- **Proximal interior-point method + crossover:** a PIQP-style proximal interior-point method (IP-PMM with Mehrotra's predictor–corrector) computes an interior optimal solution, and a crossover following Liu & Lu (2024) (primal and dual push phases plus basis selection) turns it into an optimal basic solution, finished off by the simplex method.
-- **Running both methods in parallel:** with `threads >= 2` (the default is 1), an LP (and every MIP relaxation that cannot be warm-started) is solved by the slope–intercept dual two-phase method on one thread and by the interior-point method + crossover on the remaining threads at the same time; the first to reach a conclusion wins and the other is stopped.
-- **Mixed-integer linear programming (MIP):** branch and cut with propagation, cutting planes, primal heuristics and symmetry handling. Every relaxation is solved by the slope–intercept dual two-phase method (warm-started from the parent's optimal basis at nodes), and when the root relaxation has no finite optimum, the intercept problem with integrality restrictions decides whether the MIP is infeasible or unbounded (with `distinguish_infeasible_unbounded=True`). With `threads >= 2`, the root relaxation is raced against the interior-point method + crossover and the tree search is shared among several threads.
+- **Proximal interior-point method + crossover:** a PIQP-type proximal interior-point method (IP-PMM, Mehrotra's predictor–corrector method) computes an interior optimal solution, and a crossover (primal and dual push phases and basis selection) turns it into an optimal basic solution. The finish is done by the simplex method.
+- **Parallel execution of the two methods:** with `threads` set to 2 or more (the default is 1), an LP (for integer programs, a relaxation that cannot be warm-started) is solved at the same time by the slope–intercept dual two-phase method (1 thread) and the proximal interior-point method + crossover (the remaining threads), and the side that reaches a conclusion first is adopted (the other is stopped).
+- **Mixed-integer linear optimization (MIP):** solved by branch and cut (constraint propagation, cutting planes, primal heuristics, symmetry handling, etc.). All relaxations are solved by the slope–intercept dual two-phase method (warm-started from the parent's optimal basis at nodes), and when the root relaxation has no finite optimal value, whether the problem is infeasible or unbounded is decided with the problem in which the variables of the intercept problem are restricted to integers (when `distinguish_infeasible_unbounded=True`). With `threads` set to 2 or more, the root relaxation is solved at the same time by the two-phase method and the proximal interior-point method + crossover, and the tree search is shared among several threads.
 
 ## Requirements
 
 - Python 3.9 or later
 - A Rust toolchain (`rustc`, `cargo`)
-- [maturin](https://www.maturin.rs/) 1.5 or later (used to build the extension)
-- For benchmarks only: [highspy](https://pypi.org/project/highspy/) and a C compiler (to decompress the Netlib data)
+- [maturin](https://www.maturin.rs/) 1.5 or later (used to build the extension module)
+- Only for running the benchmarks: [highspy](https://pypi.org/project/highspy/) and a C compiler (used to decompress the Netlib data)
 
 ## Installation
 
@@ -36,18 +36,18 @@ pip install maturin
 maturin develop --release
 ```
 
-Always build with `--release`; a debug build is many times slower.
+Always build with `--release`. A debug build is many times slower.
 
 ## Usage
 
-### Defining and solving a model
+### Defining and solving a problem
 
 ```python
 import math
 from enomoto_solver import Model, Variable
 
 M = Model()
-x = Variable(float, 0, 10)          # continuous variable, 0 <= x <= 10
+x = Variable(float, 0, 10)          # continuous variable 0 <= x <= 10
 y = Variable(float, 0, math.inf)    # bounds may be infinite
 M.set_objective(x + 2 * y, sense="maximize")
 M.add_constraint(x + y <= 10)
@@ -58,25 +58,37 @@ print(sol.status, sol.objective)    # optimal 17.0
 print(x.value, y.value)             # 3.0 7.0
 ```
 
-- `Variable(vtype, lb, ub)` creates a variable in the most recently created `Model` (or pass `model=...`). `vtype` is `float` (continuous) or `int` (integer). Bounds may be `±math.inf`, for integer variables too; a free variable is `Variable(float, -math.inf, math.inf)`.
-- Linear expressions are written with `+`, `-`, multiplication by scalars and division by numbers. Constraints are written with `<=`, `>=` and `==`. The objective and constraints must be linear: building a quadratic or higher-order expression, such as a product of variables (`x * y`), a power (`x ** 2`) or division by an expression (`1 / x`), raises a `TypeError` saying that the expression is not linear.
-- `set_objective(f, sense="minimize" | "maximize")` sets the objective (default: minimize).
+- `Variable(type, lower bound, upper bound)` creates a variable in the most recently created `Model` (it can also be given explicitly with `model=...`). The type is `float` (continuous) or `int` (integer). Bounds may be `±math.inf` (integer variables included). A free variable is `Variable(float, -math.inf, math.inf)`.
+- Linear expressions are written with `+`, `-`, scalar multiplication and division by numbers, and constraints with `<=`, `>=` and `==`. The objective and constraints are limited to linear expressions. Building an expression of degree two or higher, such as a product of variables (`x * y`), a power (`x ** 2`) or division by an expression (`1 / x`), raises a `TypeError` stating that it is not linear.
+- `set_objective(f, sense="minimize" | "maximize")` sets the objective function (the default is minimization).
 - Arguments of `solve()` (all optional):
 
   | Argument | Meaning |
   |---|---|
-  | `threads` | Number of threads to use (default 1). With 2 or more, an LP is solved by the two-phase method and the interior-point method + crossover at the same time, and a MIP also shares its tree search among the threads. See "Number of threads (`threads`)" below. |
+  | `threads` | Number of threads to use (default 1). With 2 or more, an LP is solved at the same time by the two-phase method and the interior-point method + crossover, and for integer programs the tree search is also shared. For details, see "Number of threads (`threads`)" below. |
   | `root_solver` | The LP method (default `"auto"`; see "Choosing the LP method" below). |
-  | `distinguish_infeasible_unbounded` | Whether to tell infeasible and unbounded apart when there is no finite optimum (default `False`; see "Result status and infeasible or unbounded problems" below). |
-  | `time_limit`, `mip_rel_gap`, `node_limit` | MIP limits (seconds, relative gap (default 1e-4), number of nodes). |
+  | `distinguish_infeasible_unbounded` | Whether to distinguish infeasible from unbounded when there is no finite optimal value (default `False`; see "Result status, and infeasible or unbounded problems" below). |
+  | `time_limit`, `mip_rel_gap`, `node_limit` | Termination criteria for integer programs (seconds, relative gap (default 1e-4), number of nodes). |
+  | `log` | Whether to output the log (default `True`; see "Log" below). |
 
-- `solve()` always returns a `Solution`; it never raises because the model is infeasible, unbounded or not solved. Check `Solution.status`. Only when the status is `"optimal"` is `objective` set and each variable's value available as `.value`; otherwise `objective` is `None` and reading `.value` raises `RuntimeError`.
+- `solve()` always returns a `Solution` and raises no exception even when the problem is infeasible, unbounded or not solved. Judge the result by `Solution.status`. Only when `status` is `"optimal"` (for integer programs stopped at a limit, when there is an incumbent) does `objective` hold a value and can each variable's value be read with `.value`. Otherwise `objective` is `None` and reading `.value` raises `RuntimeError`.
 
-### Result status and infeasible or unbounded problems
+### Result status, and infeasible or unbounded problems
 
-`solve()` returns a `Solution` with `status`, `objective` and `node_limit_hit`. The status is one of `"optimal"`, `"infeasible"`, `"unbounded"`, `"infeasible_or_unbounded"` or `"not_solved"` (models with integer variables can also return `"time_limit"` or `"node_limit"`).
+`solve()` returns a `Solution` that has the following attributes. `status` is one of `"optimal"`, `"infeasible"`, `"unbounded"`, `"infeasible_or_unbounded"` and `"not_solved"` (for models with integer variables, there are also `"time_limit"` and `"node_limit"`).
 
-By default, the solver stops as soon as it proves that there is no finite optimum (at the end of phase A) and reports `"infeasible_or_unbounded"`. Pass `distinguish_infeasible_unbounded=True` to continue with phase B and tell the two cases apart:
+| Attribute | Meaning |
+|---|---|
+| `status` | The result status (one of the above). |
+| `objective` | The objective value of the solution (in the original sense, including the constant term). It holds a value when the status is `"optimal"`, and for integer programs stopped at a limit when there is an incumbent. Otherwise `None`. |
+| `node_limit_hit` | Whether an integer program was stopped by the limit on the number of nodes (`node_limit`). Always `False` for LP. |
+| `best_bound` | For integer programs, the proven bound on the optimal value (the lower bound for minimization, the upper bound for maximization). The optimal value lies between this value and `objective`. `inf` (`-inf` for maximization) if infeasible. `None` for LP. |
+| `mip_gap` | For integer programs, the relative gap \|`objective` − `best_bound`\| / max(\|`objective`\|, 1). The solve ends with `"optimal"` when it becomes `mip_rel_gap` or less. `inf` if there is no incumbent. `None` for LP. |
+| `nodes` | For integer programs, the number of branch-and-bound nodes processed (the total over all threads). `None` for LP. |
+
+By default, the solver stops when it finds that there is no finite optimal value (at the end of phase A) and returns `"infeasible_or_unbounded"`. Passing `distinguish_infeasible_unbounded=True` makes it proceed to phase B and distinguish the two.
+
+### Linear optimization (LP)
 
 ```python
 M = Model()
@@ -88,38 +100,22 @@ sol = M.solve(distinguish_infeasible_unbounded=True)
 print(sol.status)                   # unbounded
 ```
 
-The same holds for models with integer variables. When phase A shows that the root relaxation has no finite optimum, the default result is `"infeasible_or_unbounded"`. With `distinguish_infeasible_unbounded=True`, the intercept problem (the phase B problem) with its variables restricted to integers is solved by branch and bound: if it has a feasible solution the result is `"unbounded"`, otherwise `"infeasible"` (a feasible intercept solution x⁰ and the phase A slope x¹ give integer solutions x⁰ + M x¹ whose objective decreases without bound).
+The same applies to models with integer variables. When phase A shows that the root relaxation has no finite optimal value, `"infeasible_or_unbounded"` is returned by default. With `distinguish_infeasible_unbounded=True`, the problem in which the variables of the intercept problem (the phase B problem) are restricted to integers is solved by branch and bound, and `"unbounded"` is returned if it has a feasible solution, `"infeasible"` if it is infeasible (because from a feasible solution x⁰ of the intercept problem and the slope x¹ of phase A, x⁰ + M x¹ becomes an integer solution that lowers the objective value without bound).
 
 ### Choosing the LP method
 
-`solve(root_solver=...)` selects the LP method. It applies only to models without integer variables; MIP relaxations are always solved by the slope–intercept dual two-phase method with warm starts.
+`solve(root_solver=...)` selects the LP method (it applies only to models without integer variables; the relaxations of integer programs are always solved by the slope–intercept dual two-phase method with warm starts).
 
 | `root_solver` | Method |
 |---|---|
-| `"auto"` (default; `None` is the same) | With `threads >= 2`, run the slope–intercept dual two-phase method (1 thread) and the interior-point method + crossover (the remaining threads) in parallel and take whichever concludes first; with `threads=1` (the default) use the two-phase method alone. |
+| `"auto"` (default; `None` is the same) | If `threads` is 2 or more, run the slope–intercept dual two-phase method (1 thread) and the proximal interior-point method + crossover (the remaining threads) in parallel and adopt the side that reaches a conclusion first. With `threads=1` (the default), solve with the two-phase method only. |
 | `"simplex"` | The slope–intercept dual two-phase method only. |
-| `"ipm_crossover"` | The interior-point method + crossover only; falls back to the two-phase method if the interior-point method does not converge. |
-| `"interior"` | A standalone proximal interior-point method (IP-PMM) with its own presolve. Returns a non-basic solution; intended for cross-checking. |
+| `"ipm_crossover"` | The proximal interior-point method + crossover only. If the interior-point method does not converge, the problem is solved again by the two-phase method. |
+| `"interior"` | A proximal interior-point method (IP-PMM) with its own independent presolve. It does not give a basic solution and is intended for verification. |
 
-Whatever the method, infeasibility and unboundedness are decided by the two-phase method. With `"auto"`, the interior-point + crossover result is used only when it yields a basic solution whose optimality has been verified by the simplex method.
+Whatever the method, infeasibility and unboundedness are decided by the two-phase method. With `"auto"`, the interior-point method + crossover side is adopted only when it yields a basic solution whose optimality has been confirmed by the simplex method.
 
-### Number of threads (`threads`)
-
-`solve(threads=...)` sets the number of threads to use (default 1). Values above the number of CPUs available to the process (`enomoto_solver.max_threads()`) are capped there. The whole solve, including parallel sections such as presolve, runs on this many threads.
-
-| `threads` | LP (`root_solver="auto"`) | MIP |
-|---|---|---|
-| 1 (default) | Solved by the slope–intercept dual two-phase method alone. | Relaxations and the tree search use one thread. |
-| k ≥ 2 | Solved by the two-phase method (1 thread) and the interior-point method + crossover (k − 1 threads) at the same time; whichever concludes first wins. | Relaxations that cannot be warm-started (such as the root) are raced in the same way, and after the root the tree search is shared among k threads (see "Parallel branch and bound" below). |
-
-When the two methods race, the threads are split into separate pools before either starts — one thread for the two-phase method and the rest for the interior-point method + crossover — so the two never compete for each other's threads. If the two-phase method finishes first, its basic solution is used as is; if the interior-point method + crossover finishes first, the optimal basis from the crossover's clean-up (the two-phase method's main loop) is used as is. The loser is stopped and not waited for.
-
-```python
-import enomoto_solver
-sol = M.solve(threads=enomoto_solver.max_threads())   # use every available CPU
-```
-
-### Integer variables
+### Mixed-integer linear optimization (MIP)
 
 ```python
 M = Model()
@@ -131,92 +127,148 @@ print(sol.objective, [round(v.value) for v, _, _ in items])   # 220.0 [0, 1, 1]
 print(sol.best_bound, sol.mip_gap, sol.nodes)                 # 220.0 0.0 0
 ```
 
-Models with integer variables are solved by branch and cut, with LP relaxations solved by the slope–intercept dual two-phase method (a simplified implementation of techniques from HiGHS and SCIP):
+Models with integer variables are solved by branch and cut, which solves the relaxations with the slope–intercept dual two-phase method.
 
-- **Presolve and propagation:** merging parallel rows, probing, activity-based bound tightening, conflict analysis and dual proofs.
-- **Cutting planes:** CMIR (including tableau rows, i.e. Gomory-like cuts), lifted flow covers, {0, 1/2}-Chvátal–Gomory (zero-half) cuts.
-- **Primal heuristics:** rounding, fix-and-propagate, Feasibility Pump, Feasibility Jump, diving, rounding from the interior-point solution, and sub-MIP improvement (RINS, RENS, DINS, Crossover, etc.).
-- **Search:** reliability branching on pseudocosts, plunging (diving into a child with a warm start), restarts, symmetry detection with symmetry-breaking inequalities (including orbitopes).
+- **Presolve and constraint propagation:** merging of parallel rows, probing, activity-based bound tightening, conflict analysis and dual proofs.
+- **Cutting planes:** CMIR (including tableau rows equivalent to Gomory cuts), lifted flow cover, {0, 1/2}-Chvátal–Gomory (zerohalf).
+- **Primal heuristics:** rounding, fix-and-propagate, Feasibility Pump, Feasibility Jump, diving, rounding from the interior-point solution, improvement by sub-MIPs (RINS, RENS, DINS, Crossover, etc.).
+- **Search:** reliability branching by pseudocosts, plunging (diving into child nodes with warm starts), restarts, symmetry detection and symmetry-breaking inequalities (including orbitopes).
 
 #### Parallel branch and bound
 
-With `threads` = k ≥ 2, branch and bound runs in parallel as follows.
+When `threads` is k ≥ 2, branch and bound runs in parallel as follows.
 
-- **Relaxations without a starting basis:** the root LP and the root LP after a restart have no basis to start from, so they are solved by the two-phase method (1 thread) and the interior-point method + crossover (k − 1 threads) at the same time. Node relaxations are solved by the two-phase method warm-started from the parent's optimal basis (they finish in a few iterations, so racing the interior-point method would only add overhead). Sub-MIPs inside heuristics (RINS etc.) are usually small, so even their cold solves use the two-phase method alone. Once the tree search uses all k threads, no more races are started.
-- **Root:** root cutting planes and heuristics are run by the thread that solved the root (the main thread).
-- **Tree search:** once the main thread has two open nodes, the other k − 1 threads start from a copy of the tree after the root (a problem closed at the root never starts them). Each thread processes the nodes in its own queue; when a thread runs out of nodes, the others hand it nodes with small lower bounds through a shared queue. The search ends when every thread is waiting and the shared queue is empty.
-- **Shared between threads:** incumbents (the best objective value is used for pruning by every thread), global bound tightenings, pseudocost observations (merged every 16 nodes), and dual proofs and conflicts (imported every 64 nodes).
-- Because the order in which nodes are processed depends on how fast each thread progresses, node counts and solve times can vary from run to run with k ≥ 2 (the optimal value does not).
+- **Relaxations that cannot be warm-started:** the root LP and the root LP after a restart have no basis to start from, so they are solved at the same time by the two-phase method (1 thread) and the proximal interior-point method + crossover (k − 1 threads). Node relaxations are solved by the two-phase method warm-started from the parent's optimal basis (they finish in a few iterations, so running the interior-point method at the same time has no chance of winning and only adds work). Sub-MIPs solved inside heuristics (RINS, etc.) are often small, so even their solves without a basis use the two-phase method only. After the tree search starts using k threads, no parallel execution is done.
+- **Root:** the root cutting planes and heuristics are performed by the thread that solved the root (the main thread).
+- **Tree search:** when the main thread has two unprocessed nodes, the remaining k − 1 threads are started from a copy of the tree after the root processing (for problems solved at the root, no additional threads are created). Each thread processes the nodes in its own queue. When a thread's queue becomes empty, the other threads hand it nodes with small lower bounds through a shared queue. The search ends when all threads are waiting and the shared queue is also empty.
+- **Information shared between threads:** incumbents (the best objective value is used for pruning in all threads), global bound tightenings, pseudocost observations (merged every 16 nodes), and dual proofs and conflicts (imported every 64 nodes).
+- Since the order in which nodes are processed changes with the progress of the threads, with k ≥ 2 the number of nodes and the solve time may vary from run to run (the optimal value obtained does not change).
 
-Limits are set with `time_limit` (seconds), `mip_rel_gap` (relative gap, default 1e-4) and `node_limit` (number of nodes). When a limit stops the search, `status` is `"time_limit"` or `"node_limit"`, and if an incumbent exists, `objective` and each variable's `.value` can be read. `Solution` also reports `best_bound` (the proven bound), `mip_gap` (relative gap) and `nodes` (nodes processed).
+Termination criteria are specified with `time_limit` (seconds), `mip_rel_gap` (relative gap, default 1e-4) and `node_limit` (number of nodes). When the solver stops at a limit, `status` becomes `"time_limit"` or `"node_limit"`, and if there is an incumbent, `objective` and each variable's `.value` can be read. The results are also stored in `best_bound` (the proven bound), `mip_gap` (relative gap) and `nodes` (number of nodes processed) of `Solution`.
+
+The relative gap measures the difference between the objective value of the incumbent (the feasible solution with the best objective value found during the search) and the proven bound as
+
+  relative gap = |objective value of the incumbent − proven bound| / max(|objective value of the incumbent|, 1)
+
+(the denominator is set to 1 when it is less than 1, so that the ratio does not become extremely large when the objective value is close to 0). The optimal value lies between the proven bound and the objective value of the incumbent. During the search, nodes whose bound reaches "objective value of the incumbent − max(`mip_rel_gap` × max(|objective value of the incumbent|, 1), 10⁻⁶)" are pruned, so when no unprocessed nodes remain, the relative gap is `mip_rel_gap` or less (or the difference is 10⁻⁶ or less). The solve then ends with `"optimal"`. Therefore `"optimal"` means that the relative difference from the optimal value has been proven to be `mip_rel_gap` or less, and the difference is not necessarily exactly 0. If an exact optimal solution is needed, specify `mip_rel_gap=0` (a difference of 10⁻⁶ still remains).
+
+### Number of threads (`threads`)
+
+`solve(threads=...)` specifies the number of threads to use (the default is 1). A value above the number of CPUs available to this process (`enomoto_solver.max_threads()`) is capped there. The whole solve, including parallel sections such as presolve, runs on this number of threads.
+
+| `threads` | LP (`root_solver="auto"`) | MIP |
+|---|---|---|
+| 1 (default) | Solved by the slope–intercept dual two-phase method only. | Both the relaxations and the tree search are solved on 1 thread. |
+| k ≥ 2 | Solved at the same time by the two-phase method (1 thread) and the proximal interior-point method + crossover (k − 1 threads), adopting the side that reaches a conclusion first. | Relaxations that cannot be warm-started (the root, etc.) are solved at the same time in the same way as on the left, and after the root is processed the tree is shared among k threads for the search ("Parallel branch and bound" above). |
+
+In parallel execution, the threads are divided before starting into separate pools for the two-phase method (1 thread) and for the interior-point method + crossover (the rest), so the two methods never take each other's threads. If the two-phase method finishes first, its basic solution is used as it is; if the interior-point method + crossover finishes first, the optimal basis obtained in the crossover's finish (the main loop of the two-phase method) is used as it is. The losing side is stopped, and its termination is not waited for.
+
+```python
+import enomoto_solver
+sol = M.solve(threads=enomoto_solver.max_threads())   # use all available CPUs
+```
+
+### Log
+
+By default, `solve()` outputs to standard output first a notice of the author, the license and the contact, together with the size of the problem, then the key points during the solve, and finally the result. The key points during the solve are as follows.
+
+- LP: the size after presolve, the method used, and in parallel execution which method reached a conclusion first.
+- MIP: the size after presolve, the value of the root LP, the change of the value by the root cutting planes, restarts, and the progress of the search (elapsed time, number of nodes processed, number of unprocessed nodes, proven bound, objective value of the incumbent and relative gap; every 5 seconds).
+
+For the example in "Mixed-integer linear optimization (MIP)" above, the output is as follows.
+
+```text
+ENOMOTO-Solver 0.1.0 (MIT License)
+Author: Kan Enomoto (https://enomoto-math-labo.com/en)
+For optimization consulting requests and bug reports, contact enomotokan@gmail.com
+Problem: 3 variables (3 integer), 1 constraints, 3 nonzeros, maximize; threads 1
+Presolve: 1 rows, 3 columns -> 1 rows, 3 columns (0.00s)
+Root LP: objective 2.2000000000e2 (0.00s)
+     time      nodes      open        best bound         incumbent       gap
+     0.0s          0         0     2.200000000e2     2.200000000e2     0.00%
+Result: optimal, objective 220, best bound 220, gap 0.00%, nodes 0 (0.00s)
+```
+
+The columns of the search progress mean the following.
+
+| Column | Meaning |
+|---|---|
+| `time` | Elapsed time since the start of the solve. |
+| `nodes` | Number of nodes processed (whose relaxations have been solved), the total over all threads. |
+| `open` | Number of unprocessed nodes: subproblems created by branching that are still in the queue and whose relaxations have not been solved yet (the total over all threads). The search ends when it becomes 0. |
+| `best bound` | The proven bound (the lower bound on the optimal value for minimization, the upper bound for maximization). |
+| `incumbent` | The objective value of the incumbent (the feasible solution with the best objective value found). `-` if there is none yet. |
+| `gap` | The relative gap ("Mixed-integer linear optimization (MIP)" above) as a percentage. |
+
+With `solve(log=False)`, neither the notice nor the log is output.
 
 ## Benchmark results
 
-Comparison with HiGHS 1.15.1, CLP 1.17.11 and SoPlex 8.1.0 on 207 LPs (measured 2026-09-29/30). Each entry is *problems solved / shifted geometric mean of the solve time in seconds* (shift 10 s; unsolved problems counted at the 600 s time limit). Bold marks the best value in each row.
+We compared with HiGHS 1.15.1, CLP 1.17.11 and SoPlex 8.1.0 on 207 LPs (measured on 29–30 September 2026). Each entry is "number of problems solved / shifted geometric mean of the solve time (seconds)" (shift 10 s; problems not solved are counted at the time limit of 600 s). Bold marks the best value in each row.
 
-| Test set | ENOMOTO | HiGHS | CLP | SoPlex |
+| Problem set | ENOMOTO | HiGHS | CLP | SoPlex |
 |---|---|---|---|---|
-| Netlib, finite optimum (93) | 93 / **0.152** | 93 / 0.166 | 93 / 0.164 | 92 / 0.741 |
-| Kennington (16) | 16 / **0.964** | 16 / 1.68 | 16 / 1.16 | 16 / 5.76 |
-| Mittelmann LPopt (40) | 12 / **377** | 11 / 405 | **18** / 393 | 7 / 503 |
-| Netlib infeasible (29) | 29 / **0.00597** | 29 / 0.0154 | 29 / 0.0743 | 28 / 1.53 |
-| Duals of the infeasible problems, unbounded (29) | 29 / 0.0588 | 29 / 0.335 | 28 / 2.01 | 29 / **0.0332** |
-| All (207) | 179 / **10.6** | 178 / 11.0 | **184** / 11.3 | 172 / 13.4 |
+| Netlib, with a finite optimal solution (93 problems) | 93 / **0.152** | 93 / 0.166 | 93 / 0.164 | 92 / 0.741 |
+| Kennington (16 problems) | 16 / **0.964** | 16 / 1.68 | 16 / 1.16 | 16 / 5.76 |
+| Mittelmann LPopt (40 problems) | 12 / **377** | 11 / 405 | **18** / 393 | 7 / 503 |
+| Netlib infeasible (29 problems) | 29 / **0.00597** | 29 / 0.0154 | 29 / 0.0743 | 28 / 1.53 |
+| Duals of the infeasible problems, unbounded (29 problems) | 29 / 0.0588 | 29 / 0.335 | 28 / 2.01 | 29 / **0.0332** |
+| All (207 problems) | 179 / **10.6** | 178 / 11.0 | **184** / 11.3 | 172 / 13.4 |
 
-Over all 207 problems the plain geometric mean is 0.084 s for ENOMOTO, 0.183 s for HiGHS, 0.100 s for CLP and 0.146 s for SoPlex. ENOMOTO returned no wrong answer; on the 27 unbounded problems where phase A detected that no finite optimum exists, telling unboundedness from infeasibility added about 2% to the solve time.
+The geometric mean over all 207 problems is 0.084 s for ENOMOTO, 0.183 s for HiGHS, 0.100 s for CLP and 0.146 s for SoPlex. ENOMOTO did not return a single wrong answer. On the 27 unbounded problems for which phase A detected that there is no finite optimal solution, the additional time needed to distinguish unbounded from infeasible was about 2% of the solve time.
 
-- Machine: AMD Ryzen 7 5700U laptop (8 cores / 16 threads, 16 GB), WSL2 Ubuntu 22.04 with a 12 GB memory limit. ENOMOTO and HiGHS use 16 threads; CLP and SoPlex are serial. All solvers use default settings apart from the time limit and thread count.
-- Solve time only (reading the MPS file and building the model are excluded; presolve and postsolve are included), median of 3 runs (1 run for runs of 300 s or more), each run in a fresh process.
-- Mittelmann: the 44 public instances available from plato.asu.edu minus the four largest (thk_48, L2CTA3D, dlr2, Dual2_5000), which do not fit in this machine's memory.
-- Full tables, per-problem times and raw data: [benchmarks/paper/summary.md](benchmarks/paper/summary.md), `per_problem.csv`, `results.json`. To reproduce (Linux): [scripts/paper_bench/README.md](scripts/paper_bench/README.md).
+- Machine: a laptop with an AMD Ryzen 7 5700U (8 cores 16 threads, 16 GB memory), Ubuntu 22.04 on WSL2 (memory limit 12 GB). ENOMOTO and HiGHS use 16 threads; CLP and SoPlex are sequential. All settings other than the time limit and the number of threads are the defaults.
+- Times cover the solve call only (reading the MPS file and building the model are not included; presolve and postsolve are included) and are the median of 3 runs (1 run if it took 300 s or more). Each run is solved in a new process.
+- Mittelmann consists of the 40 problems obtained by removing the four largest problems that do not fit in this machine's memory (thk_48, L2CTA3D, dlr2, Dual2_5000) from the 44 public problems available from plato.asu.edu.
+- The full tables, per-problem times and raw data are in [benchmarks/paper/summary.md](benchmarks/paper/summary.md), `per_problem.csv` and `results.json`. For the reproduction procedure (Linux), see [scripts/paper_bench/README.md](scripts/paper_bench/README.md).
 
-### Quick comparison with HiGHS on Netlib
+### Easy comparison with HiGHS on Netlib
 
-The Netlib LP data is not included in this repository because it carries no explicit redistribution licence (see [docs/netlib-data.md](docs/netlib-data.md)). Download and decompress it once:
+The Netlib LP data has no license that explicitly permits redistribution, so it is not included in this repository ([docs/netlib-data.md](docs/netlib-data.md)). Download and decompress it only once at the start.
 
 ```sh
-python scripts/setup_netlib_data.py          # needs network access and a C compiler
+python scripts/setup_netlib_data.py          # requires a network connection and a C compiler
 ```
 
-Then compare with HiGHS (`pip install highspy`):
+Then compare with HiGHS (`pip install highspy`).
 
 ```sh
 python -m enomoto_solver.benchmark_highs --max-vars 100000 --out netlib_results.csv
 ```
 
-Each problem is solved in its own subprocess. The reported times cover the solve call only (reading the MPS file and building the model are excluded) and include presolve and postsolve for both solvers.
+Each problem is solved in a separate subprocess. The measured time covers the solve call only (reading the MPS file and building the model are not included), and for both solvers it includes presolve and postsolve.
 
-## Repository layout
+## Directory structure
 
 | Path | Contents |
 |---|---|
-| `python/enomoto_solver/` | Python modelling interface (`Model`, `Variable`, `Function`, `Constraint`) and the benchmark script |
+| `python/enomoto_solver/` | Python modelling interface (`Model`, `Variable`, `Function`, `Constraint`) and benchmark scripts |
 | `src/model.rs` | Entry point called from Python |
-| `src/presolve.rs`, `src/presolve/` | Presolve (scaling, row/column reductions, postsolve) |
-| `src/simplex.rs` | Standard-form construction, component decomposition, primal simplex |
+| `src/presolve.rs`, `src/presolve/` | Presolve (scaling, row and column reductions, postsolve) |
+| `src/simplex.rs` | Construction of the standard form, decomposition into connected components, primal simplex method |
 | `src/simplex/slope_intercept_dual.rs` | Slope–intercept dual two-phase method |
 | `src/simplex/lu.rs` | Sparse LU factorization and Forrest–Tomlin update |
 | `src/simplex/crossover.rs` | Proximal interior-point method + crossover |
-| `src/simplex/race.rs` | Parallel run of the two-phase method and interior-point + crossover |
-| `src/interior_point.rs`, `src/interior_point/` | Proximal interior-point method (IP-PMM) and KKT factorization |
-| `src/solver.rs` | Dispatch to the LP method (`root_solver`) |
-| `src/mip/` | Branch and cut (propagation, cutting planes, heuristics, symmetry) |
+| `src/simplex/race.rs` | Parallel execution of the two-phase method and the interior-point method + crossover |
+| `src/interior_point.rs`, `src/interior_point/` | Proximal interior-point method (IP-PMM) and factorization of the KKT system |
+| `src/solver.rs` | Dispatch of the LP method (`root_solver`) |
+| `src/mip/` | Branch and cut (constraint propagation, cutting planes, heuristics, symmetry) |
 | `src/params.rs` | Tolerances and tuning parameters |
-| `docs/improvement_history.md` | Record of implementation changes and their measured effects |
-| `benchmarks/netlib_dev_results.csv` | Netlib measurements taken during development (one row per problem and run; `source_file` names the original result file) |
-| `benchmarks/paper/` | Benchmark against HiGHS, CLP and SoPlex used in the paper (207 problems, 600 s limit; `scripts/paper_bench/`) |
-| `benchmarks/mittelmann_results.*` | Earlier Mittelmann LPopt benchmark against HiGHS (2026-09-24, 44 public instances, 600 s limit; `scripts/run_mittelmann_benchmark.py`, Linux only) |
+| `docs/improvement_history.md` | Record of implementation changes and their measured results |
+| `benchmarks/netlib_dev_results.csv` | Netlib measurements taken during development (one row is one problem and one measurement; the `source_file` column is the name of the original result file) |
+| `benchmarks/paper/` | Comparison with HiGHS, CLP and SoPlex included in the paper (207 problems, 600 s limit; `scripts/paper_bench/`) |
+| `benchmarks/mittelmann_results.*` | Comparison with HiGHS on an earlier Mittelmann LPopt benchmark (2026-09-24, 44 public problems, 600 s limit; `scripts/run_mittelmann_benchmark.py`, Linux only) |
 
 ## Paper
 
-The method and the numerical experiments are described in:
+The method and the numerical experiments are summarized in the following paper.
 
-Kan Enomoto, *Complete classification of linear programs by the dual simplex method alone: the slope–intercept dual two-phase method* (in preparation).
+Kan Enomoto, "Complete classification of linear programming problems by the dual simplex method alone: the slope–intercept dual two-phase method" (in preparation).
 
 ## Use of generative AI
 
-The ideas and theory of the method are the author's. Most of the implementation was carried out by an AI coding assistant (Claude, Anthropic) under the author's design and direction; the author decided which implementation techniques to adopt based on comparative experiments.
+The idea and theory of the slope–intercept dual two-phase method for linear optimization and mixed-integer optimization are the author's. Most of the implementation was done by an AI coding assistant (Claude by Anthropic) under the author's design and direction, and the author decided which implementation techniques to adopt based on comparative experiments.
 
-## Licence
+## License
 
 [MIT License](LICENSE) © 2026 Kan Enomoto

@@ -44,8 +44,18 @@ macro_rules! env_str {
     }};
 }
 
+/// 利用者向けのログを 1 行出す ([`log::line`]。`Model.solve(log=True)` のときだけ。書式は `format!` と同じ)。
+macro_rules! user_log {
+    ($($t:tt)*) => {{
+        if $crate::log::enabled() {
+            $crate::log::line(&format!($($t)*));
+        }
+    }};
+}
+
 mod cancel;
 mod graph;
+mod log;
 mod interior_point;
 mod mip;
 mod model;

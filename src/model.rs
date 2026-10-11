@@ -129,8 +129,11 @@ impl PyModel {
     /// rayon プールで動かす。`"auto"` で 2 以上なら、LP (整数計画では基底のない緩和問題) を二段解法 (1 スレッド) と
     /// 内点法 + クロスオーバー (残り) で同時に解く。整数計画では木の探索もこの数のスレッドで分け合う。
     ///
+    /// `log` (既定 `false`): 求解の要点 (前処理の結果、根の LP、探索の経過など) を `sys.stdout` に出す ([`crate::log`])。
+    /// Python の `Model.solve` は既定で `true` を渡す (案内とまとめの行は Python 側で出す)。
+    ///
     /// 目的関数が未設定なら `ValueError`。
-    #[pyo3(signature = (root_solver=None, distinguish_infeasible_unbounded=false, time_limit=None, mip_rel_gap=None, node_limit=None, threads=None))]
+    #[pyo3(signature = (root_solver=None, distinguish_infeasible_unbounded=false, time_limit=None, mip_rel_gap=None, node_limit=None, threads=None, log=false))]
     fn solve<'py>(
         &self,
         py: Python<'py>,
@@ -140,6 +143,7 @@ impl PyModel {
         mip_rel_gap: Option<f64>,
         node_limit: Option<u64>,
         threads: Option<usize>,
+        log: bool,
     ) -> PyResult<Bound<'py, PyDict>> {
         let objective = self.objective.as_ref().ok_or_else(|| {
             PyValueError::new_err("no objective set: call Model.set_objective(...) before solve()")
@@ -153,8 +157,9 @@ impl PyModel {
         let settings = MipSettings { time_limit, rel_gap: mip_rel_gap, node_limit, threads };
         let threads = threads.unwrap_or(1).clamp(1, crate::mip::max_threads());
         let opts = LpOptions { distinguish_infeasible_unbounded, threads, ..Default::default() };
-        let result = py.allow_threads(|| {
-            let run = || solve_mip(&self.variables, objective, &self.constraints, root_solver, opts, settings);
+        let sink = if log { Some(py.import_bound("sys")?.getattr("stdout")?.unbind()) } else { None };
+        let result = py.allow_threads(move || {
+            let run = || crate::log::with_sink(sink, || solve_mip(&self.variables, objective, &self.constraints, root_solver, opts, settings));
             // 前処理・成分の並列求解などの rayon の並列区間も `threads` 本に収める
             match rayon::ThreadPoolBuilder::new().num_threads(threads).thread_name(|i| format!("enomoto-{i}")).build() {
                 Ok(pool) => pool.install(run),

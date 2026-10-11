@@ -411,6 +411,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         self.remove_inactive_cuts();
         let st = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
+        user_log!(
+            "Root cuts: objective {:.10e} -> {:.10e}, {} cuts in the LP ({:.2}s)",
+            p.sense_sign * (first_obj + p.offset),
+            p.sense_sign * (self.lp.objective() + p.offset),
+            self.lp.num_rows() - p.m,
+            self.start.elapsed().as_secs_f64()
+        );
         if self.params.verbose {
             eprintln!(
                 "MIP: cut loop done: {} cuts added, {} in LP, pool {} cuts ({} nonzeros), obj {:.10e} -> {:.10e}",
