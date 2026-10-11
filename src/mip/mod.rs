@@ -138,6 +138,9 @@ fn solve_portfolio(p: &MipProblem, params: MipParams) -> solver::MipResult {
         hs.into_iter().map(|h| h.join().unwrap()).collect()
     });
     let mut proven = *proven.lock().unwrap();
+    // 問題全体の下界は、木の探索のスレッドの下界と、二分探索のスレッドが示した厳密な下界からだけ作る
+    // (二分探索の求解が返す下界は打ち切り値で絞った問題のもので、全体の下界ではない)
+    let tree_bound = results.iter().map(|r| r.best_bound).fold(f64::NEG_INFINITY, f64::max).max(shared.proven());
     let mut results = results;
     let mut plb = f64::NEG_INFINITY;
     for (r, v) in bis_result.into_inner().unwrap() {
@@ -165,7 +168,7 @@ fn solve_portfolio(p: &MipProblem, params: MipParams) -> solver::MipResult {
     }
     let nodes = results.iter().map(|r| r.nodes).sum();
     let lp_iterations = results.iter().map(|r| r.lp_iterations).sum();
-    let mut bound = results.iter().map(|r| r.best_bound).fold(f64::NEG_INFINITY, f64::max);
+    let mut bound = tree_bound;
     match (best, proven) {
         (Some(b), Some(_)) => {
             // 探索を終えたスレッドは、共有の最良値 (= この解以下) より良い解がないことを示した
