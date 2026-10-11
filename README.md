@@ -150,7 +150,7 @@ Termination criteria are specified with `time_limit` (seconds), `mip_rel_gap` (r
 
 `solve(threads=...)` specifies the number of threads to use (the default is 1). A value above the number of CPUs available to this process (`enomoto_solver.max_threads()`) is capped there. The whole solve, including parallel sections such as presolve, runs on this number of threads.
 
-| `threads` | LP (`root_solver="auto"`) | Integer programs |
+| `threads` | LP (`root_solver="auto"`) | MIP |
 |---|---|---|
 | 1 (default) | Solved by the slope–intercept dual two-phase method only. | Both the relaxations and the tree search are solved on 1 thread. |
 | k ≥ 2 | Solved at the same time by the two-phase method (1 thread) and the proximal interior-point method + crossover (k − 1 threads), adopting the side that reaches a conclusion first. | Relaxations that cannot be warm-started (the root, etc.) are solved at the same time in the same way as on the left, and after the root is processed the tree is shared among k threads for the search ("Parallel branch and bound" above). |
