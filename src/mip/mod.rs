@@ -263,7 +263,7 @@ fn bisection_worker(p: &MipProblem, params: MipParams, use_presolve: bool, share
         solver::set_thread_watch(None);
         let used_cut = t.min(shared.best());
         if verbose {
-            eprintln!("MIP: bisection thread: lb {lb:.10e} ub {ub:.10e} target {t:.10e} -> {:?} {:?} ({:.1}s)", r.status, r.objective, t0.elapsed().as_secs_f64());
+            eprintln!("MIP: bisection thread: lb {lb:.10e} ub {ub:.10e} target {t:.10e} -> {:?} {:?} bound {:.10e} nodes {} ({:.1}s)", r.status, r.objective, r.best_bound, r.nodes, t0.elapsed().as_secs_f64());
         }
         match (r.status, r.objective) {
             (MipStatus::Optimal, Some(z)) if z < used_cut => {
