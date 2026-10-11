@@ -1174,6 +1174,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 打ち切り値を使うので、それで締めた境界から作ったカットはその範囲でだけ成り立つ)。対称性を崩す行・固定を根で
         // 加えた問題では共有しない (カットがそれに頼っていると、別の求解では成り立たないことがある。オービトープの固定は
         // 木の中で分枝してから効くので、根のカットには関わらない)
+        // 40 問 (木 1 本 + 二分探索 2 本、二分探索は根だけヒューリスティクス): 共有しない 20 問 27.04、共有する 20 問 26.81
+        // (neos-860300 59.8 -> 49.1 秒、mik-250 44.6 -> 41.2 秒、neos-911970 で最適値を発見。ほかはほぼ同じ)
         if env_str!("ENOMOTO_MIP_BISECT_SHARE_CUTS").is_some() && !self.params.submip && self.params.restarts == 0 && self.watch.is_none() && self.orig.as_ref().is_none_or(|o| o.m == self.p.m && o.col_lo == self.p.col_lo && o.col_up == self.p.col_up) {
             if let (Some(s), Some(d)) = (self.shared.clone(), thread_scale()) {
                 let m0 = self.p.m;
