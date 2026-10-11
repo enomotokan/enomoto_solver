@@ -1180,8 +1180,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             time_limit: (self.submip_time_frac * remaining).min(self.submip_time_max),
             // `ENOMOTO_T_MIP_SUBMIP_NODES_MULT`: サブ MIP のノード上限 (多くは 500) の倍率 (既定 1)
             node_limit: ((node_limit as f64) * tunable!("ENOMOTO_T_MIP_SUBMIP_NODES_MULT", 1.0, f64) * self.submip_node_mult) as u64,
-            rel_gap: self.params.rel_gap,
-            abs_gap: self.params.abs_gap,
+            // サブ MIP は解を探すためのものなので、ギャップは外側の設定より緩くてよい (外側の既定 0 でも 1e-4 で止める)
+            rel_gap: self.params.rel_gap.max(1e-4),
+            abs_gap: self.params.abs_gap.max(1e-6),
             // 診断用: `ENOMOTO_MIP_SUBMIP_VERBOSE` ならサブ MIP の経過も出す
             verbose: self.params.verbose && env_str!("ENOMOTO_MIP_SUBMIP_VERBOSE").is_some(),
             submip: true,

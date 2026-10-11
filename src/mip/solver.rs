@@ -80,7 +80,7 @@ pub(super) fn heur_bit(name: &str) -> u64 {
 
 impl Default for MipParams {
     fn default() -> Self {
-        MipParams { time_limit: f64::INFINITY, node_limit: u64::MAX, rel_gap: 1e-4, abs_gap: 1e-6, verbose: false, submip: false, cutoff: f64::INFINITY, restarts: 0, skip_heurs: 0, threads: 1, distinguish: false }
+        MipParams { time_limit: f64::INFINITY, node_limit: u64::MAX, rel_gap: 0.0, abs_gap: 0.0, verbose: false, submip: false, cutoff: f64::INFINITY, restarts: 0, skip_heurs: 0, threads: 1, distinguish: false }
     }
 }
 

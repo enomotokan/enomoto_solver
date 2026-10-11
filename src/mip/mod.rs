@@ -104,6 +104,19 @@ pub fn solve_mip(
         }
     }
     let s = p.sense_sign;
+    let mut r = r;
+    // 返す解を研磨し、目的値を誤差補償つきの和で計算し直す ([`polish_solution`])
+    if r.status != MipStatus::Unbounded {
+        if let Some(x) = r.x.as_mut() {
+            let z = polish_solution(variables, objective, constraints, &p, x);
+            if r.status == MipStatus::Optimal {
+                r.best_bound = z;
+            } else {
+                r.best_bound = r.best_bound.min(z);
+            }
+            r.objective = Some(z);
+        }
+    }
     // 非有界なら目的値・解は返さない (見つけた実行可能解は最適ではない)
     let unbounded = r.status == MipStatus::Unbounded;
     let objective_value = if unbounded { None } else { r.objective.map(|z| s * z) };
@@ -123,6 +136,72 @@ pub fn solve_mip(
         MipStatus::NotSolved => Status::NotSolved,
     };
     SolveResult { status, objective: objective_value, x: if unbounded { None } else { r.x }, node_limit_hit: r.status == MipStatus::NodeLimit, mip: Some(summary) }
+}
+
+/// 誤差補償つき (Neumaier) の和。
+fn exact_sum(it: impl Iterator<Item = f64>) -> f64 {
+    let (mut sum, mut comp) = (0.0f64, 0.0f64);
+    for v in it {
+        let t = sum + v;
+        comp += if sum.abs() >= v.abs() { (sum - t) + v } else { (v - t) + sum };
+        sum = t;
+    }
+    sum + comp
+}
+
+/// 元の問題での点 `x` の境界・行の違反の最大値 (行の活動量は誤差補償つきの和)。
+fn max_violation(p: &MipProblem, x: &[f64]) -> f64 {
+    let mut v = 0.0f64;
+    for j in 0..p.n {
+        v = v.max(p.col_lo[j] - x[j]).max(x[j] - p.col_up[j]);
+    }
+    for (i, row) in p.rows.iter().enumerate() {
+        let a = exact_sum(row.iter().map(|&(j, c)| c * x[j]));
+        v = v.max(p.row_lo[i] - a).max(a - p.row_up[i]);
+    }
+    v
+}
+
+/// 最小化形の目的値 (定数項込み) を誤差補償つきの和で計算する。
+fn exact_objective(p: &MipProblem, x: &[f64]) -> f64 {
+    exact_sum(std::iter::once(p.offset).chain((0..p.n).map(|j| p.cost[j] * x[j])))
+}
+
+/// 返す解の研磨: 整数変数をちょうどの整数に丸め、連続変数があれば整数変数をその値に固定した元の問題の LP を
+/// 解き直して連続変数の値を取り替える。分枝限定法の中の LP は前処理・スケーリング・境界の摂動・許容誤差の
+/// 範囲の解を返すので、そのままでは目的値に 1e-12〜1e-9 程度の相対誤差が残る (khb05250, binkar10_1)。
+/// 解き直した解は、元の問題の違反が増えず目的値が悪くならないときだけ採る。最小化形の目的値を返す
+/// (誤差補償つきの和)。`ENOMOTO_MIP_NO_POLISH` なら丸めと目的値の計算し直しだけ。
+fn polish_solution(variables: &[VariableData], objective: &Objective, constraints: &[ConstraintRow], p: &MipProblem, x: &mut Vec<f64>) -> f64 {
+    for j in 0..p.n {
+        if p.is_int[j] {
+            x[j] = x[j].round();
+        }
+    }
+    let z = exact_objective(p, x);
+    if p.is_int.iter().all(|&b| b) || env_str!("ENOMOTO_MIP_NO_POLISH").is_some() {
+        return z;
+    }
+    let fixed: Vec<VariableData> = variables
+        .iter()
+        .enumerate()
+        .map(|(j, v)| if p.is_int[j] { VariableData { vtype: VarType::Continuous, lb: x[j], ub: x[j] } } else { v.clone() })
+        .collect();
+    let r = solve_lp(&fixed, objective, constraints, RootSolver::Simplex, LpOptions::default());
+    if let (Status::Optimal, Some(mut xn)) = (r.status, r.x) {
+        for j in 0..p.n {
+            if p.is_int[j] {
+                xn[j] = x[j];
+            }
+        }
+        let zn = exact_objective(p, &xn);
+        let (vo, vn) = (max_violation(p, x), max_violation(p, &xn));
+        if vn <= vo.max(1e-9) && zn <= z + 1e-9 * z.abs().max(1.0) {
+            *x = xn;
+            return zn;
+        }
+    }
+    z
 }
 
 /// ポートフォリオ並列 (`ENOMOTO_MIP_PORTFOLIO`): 設定の違う 2 つの求解を別スレッドで同時に走らせる
