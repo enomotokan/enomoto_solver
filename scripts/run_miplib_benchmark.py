@@ -10,7 +10,7 @@
 結果は問題ごとに `--out` (JSON) に書き足すので、中断しても同じコマンドで再開できる。
 `--table` は JSON から Markdown の表だけを作り直す。
 
-使い方: python scripts/run_miplib_benchmark.py [--time-limit 60] [--only NAME ...] [--table]
+使い方: python scripts/run_miplib_benchmark.py [--time-limit 60] [--threads N] [--only NAME ...] [--table]
 """
 
 from __future__ import annotations
@@ -56,13 +56,13 @@ def fetch(name: str, cache: Path) -> Path:
     return mps
 
 
-def worker_highs(mps: str, time_limit: float) -> None:
+def worker_highs(mps: str, time_limit: float, threads: int) -> None:
     import highspy
 
     h = highspy.Highs()
     h.setOptionValue("output_flag", False)
     h.setOptionValue("time_limit", time_limit)
-    h.setOptionValue("threads", 1)
+    h.setOptionValue("threads", threads)
     h.readModel(mps)
     t = time.perf_counter()
     h.run()
@@ -77,13 +77,13 @@ def worker_highs(mps: str, time_limit: float) -> None:
     }))
 
 
-def worker_ours(mps: str, time_limit: float) -> None:
+def worker_ours(mps: str, time_limit: float, threads: int) -> None:
     from enomoto_solver import benchmark_highs as bh
 
     _, lp = bh._load_lp(Path(mps))
     m, _, _ = bh._build_our_model(lp)
     t = time.perf_counter()
-    r = m.solve(None, False, time_limit, None, None)
+    r = m.solve(None, False, time_limit, None, None, threads)
     t = time.perf_counter() - t
     print(json.dumps({
         "status": r["status"],
@@ -94,10 +94,13 @@ def worker_ours(mps: str, time_limit: float) -> None:
     }))
 
 
-def run_worker(kind: str, mps: Path, time_limit: float) -> dict:
-    cmd = [sys.executable, __file__, f"--worker-{kind}", str(mps), "--time-limit", str(time_limit)]
+def run_worker(kind: str, mps: Path, time_limit: float, threads: int) -> dict:
+    cmd = [sys.executable, __file__, f"--worker-{kind}", str(mps), "--time-limit", str(time_limit), "--threads", str(threads)]
+    # threads > 1 のとき、このクレートは木の探索 (threads) に加えて根のヒューリスティクス・サブ MIP も並列に
+    # 走らせる (ENOMOTO_MIP_THREADS)
+    env = dict(os.environ, ENOMOTO_MIP_THREADS=str(threads)) if threads > 1 else None
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=time_limit * 1.5 + 60)
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=time_limit * 1.5 + 60, env=env)
     except subprocess.TimeoutExpired:
         return {"status": "killed", "objective": None, "bound": None, "nodes": None, "time": None}
     for line in reversed(p.stdout.splitlines()):
@@ -111,7 +114,7 @@ def solved(r: dict) -> bool:
     return r.get("status") in ("Optimal", "optimal")
 
 
-def make_table(results: dict, time_limit: float) -> str:
+def make_table(results: dict, time_limit: float, threads: int) -> str:
     names = [n for n in PROBLEMS if n in results] + [n for n in results if n not in PROBLEMS]
     rows = []
     sg = {"highs": [], "ours": []}
@@ -142,7 +145,8 @@ def make_table(results: dict, time_limit: float) -> str:
         "# MIPLIB 2017 (小〜中規模): enomoto_solver vs HiGHS",
         "",
         f"- 実行日時: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
-        f"- 時間上限 {time_limit:g} 秒、HiGHS は 1 スレッド、既定の相対ギャップ (両者 1e-4)",
+        f"- 時間上限 {time_limit:g} 秒、スレッド数 {threads} (HiGHS は threads、enomoto は木の探索 threads と "
+        f"ENOMOTO_MIP_THREADS)、既定の相対ギャップ (両者 1e-4)",
         "- 時間は求解のみ (MPS 読み込み・モデル構築を除く)。`t` = 時間上限",
         "",
         "| 指標 | HiGHS | enomoto |",
@@ -163,16 +167,17 @@ def main() -> None:
     ap.add_argument("--only", nargs="*")
     ap.add_argument("--out", type=Path, default=REPO_ROOT / "benchmarks" / "miplib_results.json")
     ap.add_argument("--cache-dir", type=Path, default=REPO_ROOT / ".miplib_cache")
+    ap.add_argument("--threads", type=int, default=1, help="両ソルバーに与えるスレッド数")
     ap.add_argument("--table", action="store_true")
     ap.add_argument("--rerun-ours", action="store_true", help="HiGHS の結果は再利用し、このクレートだけ解き直す")
     ap.add_argument("--worker-highs")
     ap.add_argument("--worker-ours")
     a = ap.parse_args()
     if a.worker_highs:
-        return worker_highs(a.worker_highs, a.time_limit)
+        return worker_highs(a.worker_highs, a.time_limit, a.threads)
     if a.worker_ours:
-        return worker_ours(a.worker_ours, a.time_limit)
-    results = json.loads(a.out.read_text()) if a.out.exists() else {}
+        return worker_ours(a.worker_ours, a.time_limit, a.threads)
+    results = json.loads(a.out.read_text(encoding="utf-8")) if a.out.exists() else {}
     if not a.table:
         names = a.only or PROBLEMS
         for n in names:
@@ -181,15 +186,15 @@ def main() -> None:
             mps = fetch(n, a.cache_dir)
             h = results.get(n, {}).get("highs") if a.rerun_ours else None
             if h is None:
-                h = run_worker("highs", mps, a.time_limit)
-            o = run_worker("ours", mps, a.time_limit)
+                h = run_worker("highs", mps, a.time_limit, a.threads)
+            o = run_worker("ours", mps, a.time_limit, a.threads)
             results[n] = {"highs": h, "ours": o}
             print(f"{n:24s} highs={h['status']:>10s} {h['time'] if h['time'] is not None else '-':>8} obj={h['objective']}  "
                   f"ours={o['status']:>10s} {o['time'] if o['time'] is not None else '-':>8} obj={o['objective']}", flush=True)
             a.out.parent.mkdir(parents=True, exist_ok=True)
-            a.out.write_text(json.dumps(results, indent=1))
-    md = make_table(results, a.time_limit)
-    a.out.with_suffix(".md").write_text(md)
+            a.out.write_text(json.dumps(results, indent=1), encoding="utf-8")
+    md = make_table(results, a.time_limit, a.threads)
+    a.out.with_suffix(".md").write_text(md, encoding="utf-8")
     print(md)
 
 

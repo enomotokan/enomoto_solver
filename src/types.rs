@@ -100,8 +100,9 @@ pub enum RootSolver {
     /// 単体法と同じ前処理の後、箱型制約付き IP-PMM 内点法 + クロスオーバー
     /// (Liu & Lu 2024 のらせん型) で最適基底解を求める。
     IpmCrossover,
-    /// 既定。前処理後の行数が `RACE_MIN_ROWS` 以上なら傾き・切片双対二段解法と内点法 + クロスオーバーを
-    /// 同時に解いて先に結論を出した側を採り、未満なら傾き・切片双対二段解法だけで解く。
+    /// 既定。使えるスレッドが 2 本以上 ([`LpOptions::threads`]) なら傾き・切片双対二段解法 (1 スレッド) と
+    /// 内点法 + クロスオーバー (残りのスレッド) を同時に解いて先に結論を出した側を採り、1 本なら
+    /// 傾き・切片双対二段解法だけで解く。
     Auto,
 }
 
@@ -206,9 +207,13 @@ pub struct LpOptions {
     /// 真なら単体法の経路で、前処理後の標準形を内点法 + クロスオーバーで解く
     /// (`RootSolver::IpmCrossover`)。
     pub ipm_crossover: bool,
-    /// 真なら (`RootSolver::Auto`)、前処理後の行数が `RACE_MIN_ROWS` 以上の問題を傾き・切片双対二段解法と
-    /// 内点法 + クロスオーバーで同時に解く。
+    /// 真なら (`RootSolver::Auto` で `threads >= 2`)、前処理後の問題を傾き・切片双対二段解法と
+    /// 内点法 + クロスオーバーで同時に解く (行数が `ENOMOTO_T_RACE_MIN_ROWS` (既定 0) 未満の組は二段解法だけ)。
     pub auto_race: bool,
+    /// この求解に使うスレッドの数 (`Model.solve(threads=...)` をこのプロセスが使える CPU の数で頭打ちにしたもの。
+    /// 0 は 1 と同じ)。求解全体はこの数のスレッドの rayon プールで動き、同時実行では二段解法に 1、
+    /// 内点法 + クロスオーバーに残りを割り当てる。
+    pub threads: usize,
 }
 
 impl Status {
@@ -265,6 +270,7 @@ pub struct MipSettings {
     pub rel_gap: Option<f64>,
     /// ノード数上限。
     pub node_limit: Option<u64>,
-    /// 木の探索に使うスレッドの数 (既定 1。[`crate::mip::max_threads`] を超える値は頭打ちにする)。
+    /// 使うスレッドの数 (既定 1。[`crate::mip::max_threads`] を超える値は頭打ちにする)。2 以上なら基底のない緩和問題
+    /// (根など) を二段解法と内点法 + クロスオーバーで同時に解き、木の探索もこの数のスレッドで分け合う。
     pub threads: Option<usize>,
 }

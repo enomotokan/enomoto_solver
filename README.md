@@ -15,8 +15,8 @@ The method decides, **using the dual simplex method only and without choosing a 
 The solver also includes:
 
 - **Proximal interior-point method + crossover:** a PIQP-style proximal interior-point method (IP-PMM with Mehrotra's predictor–corrector) computes an interior optimal solution, and a crossover following Liu & Lu (2024) (primal and dual push phases plus basis selection) turns it into an optimal basic solution, finished off by the simplex method.
-- **Running both methods in parallel:** by default, an LP with at least 1000 rows after presolve is solved by the slope–intercept dual two-phase method and by the interior-point method + crossover at the same time on separate threads; the first to reach a conclusion wins and the other is stopped.
-- **Mixed-integer linear programming (MIP):** branch and cut with propagation, cutting planes, primal heuristics and symmetry handling.
+- **Running both methods in parallel:** with `threads >= 2` (the default is 1), an LP (and every MIP relaxation that cannot be warm-started) is solved by the slope–intercept dual two-phase method on one thread and by the interior-point method + crossover on the remaining threads at the same time; the first to reach a conclusion wins and the other is stopped.
+- **Mixed-integer linear programming (MIP):** branch and cut with propagation, cutting planes, primal heuristics and symmetry handling. With `threads >= 2`, the tree search is shared among several threads.
 
 ## Requirements
 
@@ -81,16 +81,32 @@ print(sol.status)                   # unbounded
 
 ### Choosing the LP method
 
-`solve(root_solver=...)` selects the LP method (for models with integer variables, the method used for each relaxation).
+`solve(root_solver=...)` selects the LP method. It applies only to models without integer variables; MIP relaxations are always solved by the slope–intercept dual two-phase method with warm starts.
 
 | `root_solver` | Method |
 |---|---|
-| `"auto"` (default; `None` is the same) | If the presolved LP has at least 1000 rows, run the slope–intercept dual two-phase method and the interior-point method + crossover in parallel and take whichever concludes first; otherwise use the two-phase method alone. |
+| `"auto"` (default; `None` is the same) | With `threads >= 2`, run the slope–intercept dual two-phase method (1 thread) and the interior-point method + crossover (the remaining threads) in parallel and take whichever concludes first; with `threads=1` (the default) use the two-phase method alone. |
 | `"simplex"` | The slope–intercept dual two-phase method only. |
 | `"ipm_crossover"` | The interior-point method + crossover only; falls back to the two-phase method if the interior-point method does not converge. |
 | `"interior"` | A standalone proximal interior-point method (IP-PMM) with its own presolve. Returns a non-basic solution; intended for cross-checking. |
 
 Whatever the method, infeasibility and unboundedness are decided by the two-phase method. With `"auto"`, the interior-point + crossover result is used only when it yields a basic solution whose optimality has been verified by the simplex method.
+
+### Number of threads (`threads`)
+
+`solve(threads=...)` sets the number of threads to use (default 1). Values above the number of CPUs available to the process (`enomoto_solver.max_threads()`, which the environment variable `ENOMOTO_MIP_MAX_THREADS` can lower further) are capped there. The whole solve, including parallel sections such as presolve, runs on this many threads.
+
+| `threads` | LP (`root_solver="auto"`) | MIP |
+|---|---|---|
+| 1 (default) | Solved by the slope–intercept dual two-phase method alone. | Relaxations and the tree search use one thread. |
+| k ≥ 2 | Solved by the two-phase method (1 thread) and the interior-point method + crossover (k − 1 threads) at the same time; whichever concludes first wins. | Relaxations that cannot be warm-started (such as the root) are raced in the same way, and after the root the tree search is shared among k threads (see "Parallel branch and bound" below). |
+
+When the two methods race, the threads are split into separate pools before either starts — one thread for the two-phase method and the rest for the interior-point method + crossover — so the two never compete for each other's threads. If the two-phase method finishes first, its basic solution is used as is; if the interior-point method + crossover finishes first, the optimal basis from the crossover's clean-up (the two-phase method's main loop) is used as is. The loser is stopped and not waited for.
+
+```python
+import enomoto_solver
+sol = M.solve(threads=enomoto_solver.max_threads())   # use every available CPU
+```
 
 ### Integer variables
 
@@ -104,12 +120,22 @@ print(sol.objective, [round(v.value) for v, _, _ in items])   # 220.0 [0, 1, 1]
 print(sol.best_bound, sol.mip_gap, sol.nodes)                 # 220.0 0.0 0
 ```
 
-Models with integer variables are solved by branch and cut, with LP relaxations solved by the LP methods above (a simplified implementation of techniques from HiGHS and SCIP):
+Models with integer variables are solved by branch and cut, with LP relaxations solved by the slope–intercept dual two-phase method (a simplified implementation of techniques from HiGHS and SCIP):
 
 - **Presolve and propagation:** merging parallel rows, probing, activity-based bound tightening, conflict analysis and dual proofs.
 - **Cutting planes:** CMIR (including tableau rows, i.e. Gomory-like cuts), lifted flow covers, {0, 1/2}-Chvátal–Gomory (zero-half) cuts.
 - **Primal heuristics:** rounding, fix-and-propagate, Feasibility Pump, Feasibility Jump, diving, rounding from the interior-point solution, and sub-MIP improvement (RINS, RENS, DINS, Crossover, etc.).
 - **Search:** reliability branching on pseudocosts, plunging (diving into a child with a warm start), restarts, symmetry detection with symmetry-breaking inequalities (including orbitopes).
+
+#### Parallel branch and bound
+
+With `threads` = k ≥ 2, branch and bound runs in parallel as follows.
+
+- **Relaxations without a starting basis:** the root LP and the root LP after a restart have no basis to start from, so they are solved by the two-phase method (1 thread) and the interior-point method + crossover (k − 1 threads) at the same time. Node relaxations are solved by the two-phase method warm-started from the parent's optimal basis (they finish in a few iterations, so racing the interior-point method would only add overhead). Sub-MIPs inside heuristics (RINS etc.) are usually small, so even their cold solves use the two-phase method alone. Once the tree search uses all k threads, no more races are started.
+- **Root:** root cutting planes and heuristics are run by the thread that solved the root (the main thread).
+- **Tree search:** once the main thread has two open nodes, the other k − 1 threads start from a copy of the tree after the root (a problem closed at the root never starts them). Each thread processes the nodes in its own queue; when a thread runs out of nodes, the others hand it nodes with small lower bounds through a shared queue. The search ends when every thread is waiting and the shared queue is empty.
+- **Shared between threads:** incumbents (the best objective value is used for pruning by every thread), global bound tightenings, pseudocost observations (merged every 16 nodes), and dual proofs and conflicts (imported every 64 nodes).
+- Because the order in which nodes are processed depends on how fast each thread progresses, node counts and solve times can vary from run to run with k ≥ 2 (the optimal value does not).
 
 Limits are set with `time_limit` (seconds), `mip_rel_gap` (relative gap, default 1e-4) and `node_limit` (number of nodes). When a limit stops the search, `status` is `"time_limit"` or `"node_limit"`, and if an incumbent exists, `objective` and each variable's `.value` can be read. `Solution` also reports `best_bound` (the proven bound), `mip_gap` (relative gap) and `nodes` (nodes processed).
 

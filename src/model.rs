@@ -125,7 +125,9 @@ impl PyModel {
     /// `"infeasible"` と `"unbounded"` を区別する (`types::LpOptions` 参照)。
     ///
     /// `time_limit` [秒] / `mip_rel_gap` (既定 1e-4) / `node_limit`: 整数計画の打ち切り条件。
-    /// `threads`: 整数計画の木の探索に使うスレッドの数 (既定 1。`max_threads()` を超える値はそこで頭打ち)。
+    /// `threads`: 使うスレッドの数 (既定 1。`max_threads()` を超える値はそこで頭打ち)。求解全体をこの数のスレッドの
+    /// rayon プールで動かす。`"auto"` で 2 以上なら、LP (整数計画では基底のない緩和問題) を二段解法 (1 スレッド) と
+    /// 内点法 + クロスオーバー (残り) で同時に解く。整数計画では木の探索もこの数のスレッドで分け合う。
     ///
     /// 目的関数が未設定なら `ValueError`。
     #[pyo3(signature = (root_solver=None, distinguish_infeasible_unbounded=false, time_limit=None, mip_rel_gap=None, node_limit=None, threads=None))]
@@ -147,9 +149,18 @@ impl PyModel {
             None => RootSolver::Auto,
         };
 
-        let opts = LpOptions { distinguish_infeasible_unbounded, ..Default::default() };
+        // 整数計画の設定には指定のまま渡す (未指定なら環境変数 `ENOMOTO_MIP_TREE_THREADS` が効く)
         let settings = MipSettings { time_limit, rel_gap: mip_rel_gap, node_limit, threads };
-        let result = py.allow_threads(|| solve_mip(&self.variables, objective, &self.constraints, root_solver, opts, settings));
+        let threads = threads.unwrap_or(1).clamp(1, crate::mip::max_threads());
+        let opts = LpOptions { distinguish_infeasible_unbounded, threads, ..Default::default() };
+        let result = py.allow_threads(|| {
+            let run = || solve_mip(&self.variables, objective, &self.constraints, root_solver, opts, settings);
+            // 前処理・成分の並列求解などの rayon の並列区間も `threads` 本に収める
+            match rayon::ThreadPoolBuilder::new().num_threads(threads).thread_name(|i| format!("enomoto-{i}")).build() {
+                Ok(pool) => pool.install(run),
+                Err(_) => run(),
+            }
+        });
 
         // Python に返す結果 dict
         let dict = PyDict::new_bound(py);

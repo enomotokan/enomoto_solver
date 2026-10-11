@@ -1,7 +1,7 @@
 //! LP 求解の最上位の振り分け。`root_solver` (`types::RootSolver`、Python の
 //! `Model.solve(root_solver=...)`) で選ばれたエンジンに LP を渡し、
 //! 得られた解から目的関数値 (定数項込み) を計算して `SolveResult` にまとめる。
-//! 既定は `Auto` (大きな問題は傾き・切片二段解法と内点法 + クロスオーバーを同時に解き、それ以外は
+//! 既定は `Auto` (スレッドが 2 本以上なら傾き・切片二段解法と内点法 + クロスオーバーを同時に解き、1 本なら
 //! 傾き・切片二段解法)。`Simplex`、`IpmCrossover`、`Interior` (IP-PMM 内点法、前処理も独立) は明示指定時。
 
 use crate::interior_point;
@@ -24,7 +24,7 @@ pub fn solve_lp(
             (result.status, result.x)
         }
         RootSolver::Auto => {
-            let result = simplex::solve_lp_dual_with(variables, objective, constraints, LpOptions { auto_race: true, ..opts });
+            let result = simplex::solve_lp_dual_with(variables, objective, constraints, LpOptions { auto_race: opts.threads >= 2, ..opts });
             (result.status, result.x)
         }
         RootSolver::IpmCrossover => {

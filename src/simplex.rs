@@ -1749,7 +1749,7 @@ fn presolved_groups(std: &StdForm, opts: &crate::types::LpOptions) -> Option<Vec
     (real_components > 1).then_some(components)
 }
 
-/// 組 `std` を同時実行で解くか (auto かつ行数が `ENOMOTO_T_RACE_MIN_ROWS` 以上)。
+/// 組 `std` を同時実行で解くか (auto でスレッドが 2 本以上、かつ行数が `ENOMOTO_T_RACE_MIN_ROWS` (既定 0) 以上)。
 fn block_races(std: &StdForm, opts: &crate::types::LpOptions) -> bool {
     opts.auto_race && std.n_rows >= tunable!("ENOMOTO_T_RACE_MIN_ROWS", RACE_MIN_ROWS, usize)
 }
@@ -3213,7 +3213,7 @@ mod tests {
     /// 側は結論を出さず (`None`)、二段解法側の `Infeasible` が採られること。
     #[test]
     fn staged_ipm_gives_the_same_verdicts_as_simplex() {
-        let opts = crate::types::LpOptions { distinguish_infeasible_unbounded: true, ipm_crossover: true, auto_race: false };
+        let opts = crate::types::LpOptions { distinguish_infeasible_unbounded: true, ipm_crossover: true, ..Default::default() };
         let n = 60;
         let vars: Vec<VariableData> = (0..n).map(|_| var(0.0, 8.0)).collect();
         let obj_terms: Vec<(usize, f64)> = (0..n).map(|i| (i, 1.0 + (i % 4) as f64)).collect();

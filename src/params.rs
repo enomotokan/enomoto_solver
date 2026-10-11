@@ -99,11 +99,11 @@ pub(crate) mod simplex {
     /// スケーリングの列ノルム計算)。現実的な問題サイズでは常に逐次になる安全弁的な値。
     pub(crate) const RAYON_SIZE_THRESHOLD: usize = 100_000;
 
-    /// `RootSolver::Auto` で、前処理後の行数がこれ以上なら傾き・切片双対二段解法と内点法 + クロスオーバーを
-    /// 同時に解く (`simplex::race`)。未満なら二段解法だけ。`ENOMOTO_T_RACE_MIN_ROWS` で上書きできる。
-    /// 第 47 回の比較で 5000 → 1000 (109 問の幾何平均 0.932 倍、合計 29.6 → 20.9 秒。200 や 0 では小さな問題で
-    /// スレッドの手間が目立ち幾何平均が 1.07〜1.12 倍)。
-    pub(crate) const RACE_MIN_ROWS: usize = 1000;
+    /// `RootSolver::Auto` でスレッドが 2 本以上のとき、前処理後の行数がこれ以上の組を傾き・切片双対二段解法と
+    /// 内点法 + クロスオーバーで同時に解く (`simplex::race`)。未満なら二段解法だけ。`ENOMOTO_T_RACE_MIN_ROWS` で
+    /// 上書きできる。同時実行するかはスレッドの数 (`LpOptions::threads`) で決めるので 0 (行数で絞らない)。
+    /// 以前の既定は 1000 (第 47 回の比較。200 や 0 では小さな問題でスレッドの手間が目立ち幾何平均が 1.07〜1.12 倍)。
+    pub(crate) const RACE_MIN_ROWS: usize = 0;
 
     /// 同時実行で二段解法に割り当てるスレッド数 (残りを内点法 + クロスオーバーに)。二段解法の反復の本体は逐次。
     pub(crate) const RACE_SIMPLEX_THREADS: usize = 1;

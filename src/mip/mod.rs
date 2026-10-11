@@ -91,7 +91,11 @@ pub fn solve_mip(
         threads: settings.threads.or(env_f64(env_str!("ENOMOTO_MIP_TREE_THREADS")).map(|v| v as usize)).unwrap_or(d.threads).clamp(1, max_threads()),
         ..d
     };
+    // 基底のない LP の求解 (根・再スタート後の根) を `threads` 本で同時実行にする (木の探索の従のスレッドを始めたら、
+    // またヒューリスティクスのサブ MIP の中では 1)
+    let prev_race = crate::simplex::mip_lp::set_cold_race_threads(params.threads);
     let r = if env_str!("ENOMOTO_MIP_PORTFOLIO").is_some() { solve_portfolio(&p, params) } else { solve_problem(&p, params, env_str!("ENOMOTO_MIP_NO_PRESOLVE").is_none()) };
+    crate::simplex::mip_lp::set_cold_race_threads(prev_race);
     if env_str!("ENOMOTO_MIP_XPROF").is_some() {
         crate::simplex::slope_intercept_dual::xprof("tail");
         for (l, ns) in crate::simplex::slope_intercept_dual::xprof_take() {

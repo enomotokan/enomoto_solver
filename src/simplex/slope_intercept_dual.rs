@@ -1106,6 +1106,16 @@ pub(crate) fn mip_profile() -> u8 {
 pub(crate) fn set_mip_profile(v: u8) {
     TL_FLAGS.with(|c| c.set((c.get() & 0x0f) | (v << 4)));
 }
+
+/// このスレッドの [`TL_FLAGS`] 全体 (別のスレッドで求解を続けるときに持ち込み・持ち帰る)。
+pub(crate) fn tl_flags() -> u8 {
+    TL_FLAGS.with(|c| c.get())
+}
+
+/// [`tl_flags`] で取った値をこのスレッドに設定する。
+pub(crate) fn set_tl_flags(v: u8) {
+    TL_FLAGS.with(|c| c.set(v));
+}
 /// 次の 1 回の warm start の求解だけ、DSE 重みをその基底の厳密な値から始める (呼び出し側が場面を限って立てる。
 /// 例: MIP で待ち行列から取り出したノードの基底を復元した直後。求解の始めに下ろす)。
 /// 次の 1 回の warm start の求解だけ、渡された DSE 重み (同じ基底のもの) を使う (MIP で待ち行列のノードの基底と

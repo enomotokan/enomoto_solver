@@ -668,12 +668,18 @@ pub(crate) fn mip_threads() -> usize {
 }
 
 pub fn solve(p: &MipProblem, params: MipParams) -> MipResult {
+    // ヒューリスティクスのサブ MIP は小さいことが多いので、基底のない求解も二段解法だけで解く (同時実行しない)
+    let prev_race = params.submip.then(|| crate::simplex::mip_lp::set_cold_race_threads(1));
     // LP の実装: 既定は傾き・切片二段解法 (`ENOMOTO_MIP_LP=own` で分枝限定法専用の単体法)。
-    if env_str!("ENOMOTO_MIP_LP").is_some_and(|v| v == "own") {
+    let r = if env_str!("ENOMOTO_MIP_LP").is_some_and(|v| v == "own") {
         solve_with::<LpEngine>(p, params, None, None)
     } else {
         solve_with::<crate::simplex::mip_lp::TwoStageLp>(p, params, None, None)
+    };
+    if let Some(k) = prev_race {
+        crate::simplex::mip_lp::set_cold_race_threads(k);
     }
+    r
 }
 
 /// 木の写し `snap` の未処理のノードから探索を続ける (根のカット・ヒューリスティクス・再スタートは行わない)。解は写しの
@@ -1289,6 +1295,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // 根の LP
         self.root_fixed0 = (0..self.p.n).filter(|&j| self.p.is_int[j] && self.dom.global_lo[j] == self.dom.global_up[j]).count();
+        // 基底のない求解なので、`threads` >= 2 なら二段解法と内点法 + クロスオーバーで同時に解かれる
+        // (`TwoStageLp::solve`、`crate::simplex::mip_lp::set_cold_race_threads`)
         let root_st = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
         match root_st {
             LpStatus::Optimal => {}
@@ -4158,6 +4166,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// から始め、共有の待ち行列からノードを取る。見つけた解は主に渡す。
     fn start_workers(&mut self) {
         let n = self.params.threads - 1;
+        // 以後は木の探索が全てのスレッドを使うので、このスレッドの基底のない求解は同時実行にしない
+        crate::simplex::mip_lp::set_cold_race_threads(1);
         let shared = match &self.shared {
             Some(s) => s.clone(),
             None => {

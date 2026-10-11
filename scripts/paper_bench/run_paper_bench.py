@@ -193,7 +193,7 @@ def _read_highs(mps: str):
     return h
 
 
-def worker_enomoto(mps: str) -> None:
+def worker_enomoto(mps: str, threads: int) -> None:
     from enomoto_solver import _core
 
     t0 = time.perf_counter()
@@ -204,7 +204,7 @@ def worker_enomoto(mps: str) -> None:
     del h
     _emit({"built": True, "read_time": time.perf_counter() - t0})
     t0 = time.perf_counter()
-    out = model.solve(root_solver=None, distinguish_infeasible_unbounded=True)
+    out = model.solve(root_solver=None, distinguish_infeasible_unbounded=True, threads=threads if threads > 0 else None)
     t = time.perf_counter() - t0
     _emit({"time": t, "status": out["status"], "obj": out.get("objective"),
            "events": [[name, sec] for name, sec in _core.last_solve_events()]})
@@ -262,7 +262,7 @@ def run_once(solver: str, mps: Path, args) -> dict:
     limit = args.time_limit
     env = os.environ.copy()
     if solver == "enomoto":
-        cmd = [sys.executable, __file__, "--worker", "enomoto", str(mps)]
+        cmd = [sys.executable, __file__, "--worker", "enomoto", str(mps), "--threads", str(args.threads)]
         if args.threads > 0:
             env["RAYON_NUM_THREADS"] = str(args.threads)
         grace = 5.0  # 制限時間の設定が無いので、制限時間を過ぎたら止める
@@ -950,7 +950,7 @@ def main() -> None:
     if args.worker:
         kind, mps = args.worker[0], args.worker[1]
         if kind == "enomoto":
-            worker_enomoto(mps)
+            worker_enomoto(mps, args.threads)
         else:
             worker_highs(mps, args.time_limit, args.threads)
         return

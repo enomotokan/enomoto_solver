@@ -2,7 +2,7 @@
 (双対単体法 parallel=on と IPX+クロスオーバーを別プロセスで同時に走らせ、先に結論を出した方を採る)。
 
 時間は求解だけ (MPS 読み込み・モデル構築は含めない)。1 行ずつ JSONL に追記、再実行で再開。
-スレッド数は論理 CPU 数 (ENOMOTO は RAYON_NUM_THREADS、HiGHS は各プロセスの threads)。
+スレッド数は論理 CPU 数 (ENOMOTO は solve の threads、HiGHS は各プロセスの threads)。
 HiGHS 1.15.1 には単体法と内点法を同時に走らせる設定が無いので、2 プロセスで模している。
 
 使い方 (リポジトリのルートで):
@@ -38,7 +38,7 @@ def worker_enomoto(mps: str) -> None:
     h = highspy.Highs(); h.setOptionValue("output_flag", False); h.readModel(mps)
     model = _build_our_model(h.getLp()); del h
     t0 = time.perf_counter()
-    out = model.solve(root_solver="auto", distinguish_infeasible_unbounded=True)
+    out = model.solve(root_solver="auto", distinguish_infeasible_unbounded=True, threads=NCPU)
     t = time.perf_counter() - t0
     print("RESULT " + json.dumps({"time": t, "status": out["status"], "obj": out["objective"],
                                   "events": [[n, s] for n, s in _core.last_solve_events()]}), flush=True)

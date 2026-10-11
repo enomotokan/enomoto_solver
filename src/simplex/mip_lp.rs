@@ -59,6 +59,17 @@ fn new_price_key() -> u64 {
     NEXT_PRICE_KEY.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
+thread_local! {
+    /// このスレッドの基底のない求解を同時実行にするときのスレッド数 ([`TwoStageLp::solve`]。1 なら同時実行しない)。
+    static COLD_RACE_THREADS: std::cell::Cell<usize> = const { std::cell::Cell::new(1) };
+}
+
+/// このスレッドの基底のない求解の同時実行のスレッド数を設定し、前の値を返す ([`crate::mip::solve_mip`] が入口で
+/// `threads` に、木の探索の従のスレッドを始めるときに 1 にする)。
+pub(crate) fn set_cold_race_threads(k: usize) -> usize {
+    COLD_RACE_THREADS.with(|c| c.replace(k.max(1)))
+}
+
 /// [`TwoStageLp::interior_point`] の結果 (元の空間の構造列の値)。
 pub struct InteriorPoint {
     /// 内点法の解。
@@ -538,7 +549,21 @@ impl TwoStageLp {
         self.status = s.status;
     }
 
+    /// LP を解く。基底がなく (warm start できない)、このスレッドの [`set_cold_race_threads`] が 2 以上なら、
+    /// 二段解法と内点法 + クロスオーバーで同時に解く ([`Self::solve_race`])。それ以外は二段解法だけ ([`Self::solve_once`])。
     pub fn solve(&mut self, lim: &SolveLimits) -> LpStatus {
+        let cold = !matches!(&self.basis, Some(b) if b.len() == self.rows.len());
+        if cold && crate::cancel::current().is_none() {
+            let k = COLD_RACE_THREADS.with(|c| c.get());
+            if k >= 2 {
+                return self.solve_race(lim, k);
+            }
+        }
+        self.solve_once(lim)
+    }
+
+    /// 二段解法で 1 回解く。
+    fn solve_once(&mut self, lim: &SolveLimits) -> LpStatus {
         if self.iters == 0 && env_str!("ENOMOTO_MIP_XPROF").is_some() {
             sid::xprof_enable(true);
         }
@@ -555,6 +580,164 @@ impl TwoStageLp {
 
     pub fn solve_primal(&mut self, lim: &SolveLimits) -> LpStatus {
         self.solve(lim)
+    }
+
+    /// 基底のない LP の同時実行 (`threads` >= 2): 二段解法を 1 スレッドの専用プールで ([`Self::solve_once`])、内点法 +
+    /// クロスオーバーを `threads - 1` スレッドの専用プールで同時に解き、先に結論を出した側の基底解を採る (LP の
+    /// [`super::race`] と同じ配分。始める前にプールを分けるので、二段解法の並列区間 (LU・行列ベクトル積) と内点法の
+    /// 分解がスレッドを取り合わない)。内点法側が採るのは最適な頂点が得られたときだけ。そのときは二段解法を打ち切り、クロスオーバーの仕上げ
+    /// (二段解法の主ループ) が記録した最適基底と双対をそのまま使う ([`Self::adopt_basic_solution`])。仕上げの記録が
+    /// 使えない (双対化した問題を解いた経路など) ときだけ、頂点で境界の内側にある列を基底にして warm start で解き直す。
+    fn solve_race(&mut self, lim: &SolveLimits, threads: usize) -> LpStatus {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{mpsc, Arc};
+        if threads < 2 {
+            return self.solve_once(lim);
+        }
+        let build = |k: usize, name: &'static str| rayon::ThreadPoolBuilder::new().num_threads(k).thread_name(move |i| format!("enomoto-mip-{name}-{i}")).build();
+        let (Ok(pool_s), Ok(pool)) = (build(1, "simplex"), build(threads - 1, "ipm")) else {
+            return self.solve_once(lim);
+        };
+        let debug = env_str!("ENOMOTO_DEBUG_RACE").is_some();
+        let t0 = std::time::Instant::now();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let bound = crate::cancel::SharedBound::new(self.std.n_total, self.std.n_rows);
+        type Won = (Vec<f64>, Option<(Vec<f64>, Vec<Option<usize>>)>);
+        let (tx, rx) = mpsc::channel::<Option<Won>>();
+        {
+            let (std, cancel, bound) = (Arc::new(self.std.clone()), cancel.clone(), bound.clone());
+            std::thread::spawn(move || {
+                let r = pool.install(|| {
+                    // 仕上げの二段解法の最適基底と双対を記録させる
+                    sid::request_duals(true);
+                    let r = crate::cancel::with_token(Some(cancel.clone()), || crate::cancel::with_bound(Some(bound), || super::crossover::solve_ipm_crossover(&std)));
+                    let duals = sid::take_duals();
+                    sid::request_duals(false);
+                    r.filter(|r| r.status == Status::Optimal).and_then(|r| r.x).map(|x| (x, duals))
+                });
+                // 最適な頂点が得られ、二段解法より先なら合図を立てて二段解法を止める
+                let won = r.is_some() && !cancel.swap(true, Ordering::SeqCst);
+                let _ = tx.send(if won { r } else { None });
+            });
+        }
+        // 二段解法は 1 スレッドのプールで解く。スレッドごとの設定 (MIP のポートフォリオの設定など) を持ち込み、持ち帰る
+        let flags = sid::tl_flags();
+        let (st, flags) = pool_s.install(|| {
+            sid::set_tl_flags(flags);
+            let st = crate::cancel::with_token(Some(cancel.clone()), || crate::cancel::with_bound(Some(bound), || self.solve_once(lim)));
+            (st, sid::tl_flags())
+        });
+        sid::set_tl_flags(flags);
+        if !cancel.swap(true, Ordering::SeqCst) {
+            // 二段解法が先 (内点法側は確認点で止まる。待たない)
+            if debug {
+                eprintln!("MIP root race: simplex won at {:.3}s ({st:?})", t0.elapsed().as_secs_f64());
+            }
+            crate::phase_timing::mark("race_simplex_won");
+            return st;
+        }
+        let Ok(Some((x, duals))) = rx.recv() else {
+            return self.solve_once(lim);
+        };
+        crate::phase_timing::mark("race_ipm_crossover_won");
+        let n = self.n;
+        let xo: Vec<f64> = (0..n).map(|j| x.get(j).copied().unwrap_or(0.0) + self.shift[j]).collect();
+        if let Some((y, bpos)) = duals {
+            if self.adopt_basic_solution(&xo, y, &bpos) {
+                if debug {
+                    eprintln!("MIP root race: ipm_crossover won at {:.3}s, its optimal basis adopted", t0.elapsed().as_secs_f64());
+                }
+                return LpStatus::Optimal;
+            }
+        }
+        // 仕上げの記録が使えない: 頂点で境界の内側にある列 (足りなければスラック) を基底にして warm start で解き直す
+        let m = self.rows.len();
+        let inside = |v: f64, l: f64, u: f64| v > l + 1e-9 * (1.0 + l.abs()) && v < u - 1e-9 * (1.0 + u.abs());
+        let mut b: Vec<usize> = (0..n).filter(|&j| inside(xo[j], self.lo[j], self.up[j])).collect();
+        for i in 0..m {
+            if inside(self.slack_value(i, &xo), 0.0, self.std.ub[n + i]) {
+                b.push(n + i);
+            }
+        }
+        self.basis = Some(b);
+        self.repair_basis();
+        self.x.copy_from_slice(&xo);
+        self.lu = None;
+        self.lu_cache = None;
+        self.dse_cache = None;
+        self.status = None;
+        let it0 = self.iters;
+        let st = self.solve_once(lim);
+        if debug {
+            eprintln!("MIP root race: ipm_crossover won at {:.3}s, no usable basis -> warm re-solve {st:?} in {} iters", t0.elapsed().as_secs_f64(), self.iters - it0);
+        }
+        st
+    }
+
+    /// 行 `i` のスラック (標準形の値、`σ_i a_i x + s_i = b_i`) を元の空間の点 `x` から求める。
+    fn slack_value(&self, i: usize, x: &[f64]) -> f64 {
+        let act: f64 = self.rows[i].iter().map(|&(j, a)| a * x[j]).sum();
+        if self.sigma[i] > 0.0 {
+            self.row_up[i] - act
+        } else {
+            act - self.row_lo[i]
+        }
+    }
+
+    /// 別のスレッドで求めた基底解 (元の空間の点 `x`、標準形の双対 `y`、列ごとの基底位置 `bpos`) を、この LP の最適解と
+    /// して採る。大きさが合い、非基底の列が境界にあり、被約費用 `c - Aᵀy` の符号が非基底の列の位置と合う (双対実行可能)
+    /// ときだけ採って真を返す。LU と DSE 重みは持たない (次の求解で分解し直す)。
+    fn adopt_basic_solution(&mut self, x: &[f64], y: Vec<f64>, bpos: &[Option<usize>]) -> bool {
+        let n = self.n;
+        let m = self.rows.len();
+        if y.len() != m || bpos.len() != n + m {
+            return false;
+        }
+        let mut b = vec![usize::MAX; m];
+        for (v, p) in bpos.iter().enumerate() {
+            if let Some(p) = *p {
+                if p >= m || b[p] != usize::MAX {
+                    return false;
+                }
+                b[p] = v;
+            }
+        }
+        if b.iter().any(|&v| v == usize::MAX) {
+            return false;
+        }
+        let tol = 1e-7;
+        for v in 0..n + m {
+            if bpos[v].is_some() {
+                continue;
+            }
+            // 標準形の値 (平行移動した空間) と境界
+            let z = if v < n { x[v] - self.shift[v] } else { self.slack_value(v - n, x) };
+            let (l, u) = (self.std.lb[v], self.std.ub[v]);
+            let at_l = l.is_finite() && (z - l).abs() <= 1e-9 * (1.0 + l.abs()) + 1e-9;
+            let at_u = u.is_finite() && (z - u).abs() <= 1e-9 * (1.0 + u.abs()) + 1e-9;
+            let free = !l.is_finite() && !u.is_finite() && z.abs() <= 1e-9;
+            if !(at_l || at_u || free) {
+                return false;
+            }
+            if at_l && at_u {
+                continue; // 固定列は被約費用の符号を問わない
+            }
+            let d = self.std.c[v] - self.std.cols.col(v).iter().map(|&(i, a)| a * y[i]).sum::<f64>();
+            let scale = tol * (1.0 + self.std.c[v].abs());
+            let ok = if at_l { d >= -scale } else if at_u { d <= scale } else { d.abs() <= scale };
+            if !ok {
+                return false;
+            }
+        }
+        self.x.copy_from_slice(&x[..n]);
+        self.y = y;
+        self.basis = Some(b);
+        self.lu = None;
+        self.lu_cache = None;
+        self.dse_cache = None;
+        self.ray = None;
+        self.status = Some(LpStatus::Optimal);
+        true
     }
 
     fn solve_inner(&mut self, lim: &SolveLimits) -> LpStatus {

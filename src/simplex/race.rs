@@ -1,11 +1,12 @@
-//! 傾き・切片双対二段解法と内点法 + クロスオーバーの同時実行 (`RootSolver::Auto`、前処理後の行数が
-//! `RACE_MIN_ROWS` (1000) 以上の問題)。
+//! 傾き・切片双対二段解法と内点法 + クロスオーバーの同時実行 (`RootSolver::Auto` で使えるスレッドが 2 本以上
+//! (`LpOptions::threads`) のとき)。
 //!
 //! 前処理後の標準形を 2 つのスレッドで別々に解き、先に結論 (最適、実行不能、非有界など `NotSolved` 以外)
 //! を出した側を採用する。
 //!
 //! - **スレッドの配分**: 二段解法は反復の本体が逐次なので、`RACE_SIMPLEX_THREADS` (既定 1) スレッドの専用
-//!   rayon プール (連結成分の並列求解に使う) で動かし、内点法 + クロスオーバーは残りのスレッドの専用プールで
+//!   rayon プール (連結成分の並列求解に使う) で動かし、内点法 + クロスオーバーは残り (`LpOptions::threads` から
+//!   二段解法の分を引いたもの) のスレッドの専用プールで
 //!   動かす。プールを分けるので、内点法の Cholesky が全スレッドを埋めて二段解法の並列区間を待たせる
 //!   (またはその逆) ことはない。
 //! - **打ち切り**: 勝った側が [`crate::cancel`] のトークンを立て、負けた側は反復ループの確認点で結論なしに
@@ -41,7 +42,7 @@ pub(super) fn solve_race(std: Arc<StdForm>, opts: crate::types::LpOptions) -> Si
     if std.cols.nnz() < small_nnz {
         return solve_race_small(std, opts);
     }
-    let total = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2).max(2);
+    let total = opts.threads.max(2);
     let s_threads = tunable!("ENOMOTO_T_RACE_SIMPLEX_THREADS", RACE_SIMPLEX_THREADS, usize).clamp(1, total - 1);
     // 試験用 (`ENOMOTO_T_RACE_IPM_THREADS=k`、0 = 残り全部): 内点法側のスレッド数。論理 CPU が多い計算機で、内点法が
     // 残りのスレッドを埋めると、1 スレッドの二段解法がメモリ帯域や同じ物理コア (SMT) の取り合いで遅くなる
@@ -113,7 +114,7 @@ pub(super) fn solve_race(std: Arc<StdForm>, opts: crate::types::LpOptions) -> Si
 /// 戻り値は `subs` と同じ順。どちらの側も結論を出せなかった組は `NotSolved`。
 pub(super) fn solve_race_groups(subs: Vec<Arc<StdForm>>, opts: crate::types::LpOptions) -> Vec<SimplexResult> {
     let k = subs.len();
-    let total = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2).max(2);
+    let total = opts.threads.max(2);
     let s_threads = tunable!("ENOMOTO_T_RACE_SIMPLEX_THREADS", RACE_SIMPLEX_THREADS, usize).clamp(1, total - 1);
     let i_req = tunable!("ENOMOTO_T_RACE_IPM_THREADS", 0usize, usize);
     let i_threads = if i_req == 0 { total - s_threads } else { i_req.min(total - s_threads) };
