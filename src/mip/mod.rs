@@ -253,10 +253,11 @@ fn bisection_worker(p: &MipProblem, params: MipParams, use_presolve: bool, share
             RESTART_CUTS.with(|s| *s.borrow_mut() = Some(c.0.clone()));
         }
         if !sliced {
-            // 打ち切るのは、最良値が区間の 1/2 の点を下回ったとき (どのスレッドの解でも。少し良くなっただけなら
-            // 目標値はまだ区間の中なので続ける) と、厳密な下界が自分の目標値に届いたとき (自分の区間に解がないと
-            // ほかのスレッドが示した)
-            let trig = lb + 0.5 * (ub - lb);
+            // 打ち切るのは、厳密な下界が自分の目標値に届いたとき (自分の区間に解がないとほかのスレッドが示した) だけ。
+            // 最良値が下がっても打ち切らずに同じ木を続ける (枝刈りの値は共有の最良値まで下がるので、続けても
+            // 「min(t, 最良値) 未満の解はない」の証明として正しい。解き直すと、それまでの木を捨てることになる)。
+            // `ENOMOTO_MIP_BISECT_ABORT_ON_UB` なら以前の形 (最良値が区間の 1/2 の点を下回ったら打ち切る)
+            let trig = if env_str!("ENOMOTO_MIP_BISECT_ABORT_ON_UB").is_some() { lb + 0.5 * (ub - lb) } else { f64::NEG_INFINITY };
             solver::set_thread_watch(Some((trig.min(t), t)));
         }
         let r = solve_problem(p, pr, use_presolve);
