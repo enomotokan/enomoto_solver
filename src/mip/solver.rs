@@ -485,6 +485,8 @@ pub(crate) struct WorkPool {
     learned: std::sync::Mutex<Learned>,
     /// スレッドの番号の払い出し (記録に自分の分を読み飛ばすために付ける)。
     next_tid: std::sync::atomic::AtomicU32,
+    /// スレッドの数 (主を含む。木の中のヒューリスティクスを回すスレッドを決めるのに使う)。
+    threads: usize,
 }
 
 /// スレッドの間で共有する学習の記録 (通し番号つき、古いものから捨てる)。
@@ -540,6 +542,7 @@ impl WorkPool {
         WorkPool {
             learned: std::sync::Mutex::new(Learned::default()),
             next_tid: std::sync::atomic::AtomicU32::new(0),
+            threads,
             pc: std::sync::Mutex::new(pc),
             bounds: std::sync::Mutex::new((lo, up)),
             inner: std::sync::Mutex::new(PoolInner { nodes: Vec::new(), lbs: vec![f64::INFINITY; threads], open: vec![0; threads], worker_nodes: 0, busy: threads, done: false }),
@@ -728,6 +731,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
     dom.commit_root();
     dom.take_changed();
     let lp = L::new(&dom.lo, &dom.up, &p.cost, &p.rows, &p.row_lo, &p.row_up);
+    let pool_tid = pool.as_ref().map_or(0, |p| p.next_tid.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
     let mut s: Solver<L> = Solver {
         p,
         params,
@@ -749,7 +753,13 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         heur_iters: 0,
         heur_iters_root: 0,
         locks: super::heuristics::compute_locks(p),
-        rng: 0x2545_F491_4F6C_DD1D,
+        // 乱数の種は従のスレッドごとに変える (同じ暫定解から同じ近傍を重複して探さないように)。
+        // 主 (番号 0)・1 スレッドは以前と同じ種。`ENOMOTO_MIP_TREE_HEUR_ALL` なら全スレッドが同じ種
+        rng: if pool_tid == 0 || env_str!("ENOMOTO_MIP_TREE_HEUR_ALL").is_some() {
+            0x2545_F491_4F6C_DD1D
+        } else {
+            (0x2545_F491_4F6C_DD1D ^ (pool_tid as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)).max(1)
+        },
         root_redcost: None,
         last_rins: 0,
         lb_k: 18.0,
@@ -815,7 +825,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         pool_busy: pool.is_some(),
         seen_best: f64::INFINITY,
         pc_base: None,
-        pool_tid: pool.as_ref().map_or(0, |p| p.next_tid.fetch_add(1, std::sync::atomic::Ordering::Relaxed)),
+        pool_tid,
         learned_cursor: 0,
         importing: false,
         learned_stats: [0; 2],
@@ -2097,7 +2107,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let lns_time = env_str!("ENOMOTO_MIP_LNS_TIME").is_some();
                     let lns_ok = if lns_time { self.lns_secs < frac * self.start.elapsed().as_secs_f64() } else { self.heur_iters - self.heur_iters_root < budget };
                     let lns_freq = if lns_time { tunable!("ENOMOTO_T_MIP_LNS_FREQ", 50u64, u64) } else { 100 };
-                    if node.depth > 0 && plunge_depth == 0 && self.incumbent.is_some() && self.nodes >= self.last_rins + lns_freq && lns_ok {
+                    // 木を分け合うときは一部のスレッドだけが大近傍探索・ダイビングを回す ([`Solver::tree_heur_allowed`])
+                    let heur_ok = self.tree_heur_allowed();
+                    if heur_ok && node.depth > 0 && plunge_depth == 0 && self.incumbent.is_some() && self.nodes >= self.last_rins + lns_freq && lns_ok {
                         self.last_rins = self.nodes;
                         let t_lns = Instant::now();
                         // 改善ヒューリスティクス: ALNS で選ぶ (ENOMOTO_MIP_NO_ALNS なら RINS → Local Branching →
@@ -2147,7 +2159,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     // LP 解から RENS (固定率を調整する版)・Feasibility Pump・ダイビング (1 回 `ENOMOTO_T_MIP_NOINC_DIVE_ITERS`
                     // 反復まで、根と同じく後戻りあり) を順に回す (RENS・pump は根だけで使っていたもの。深いノードでは固定が
                     // 進み部分問題が小さい)。
-                    let noinc = self.incumbent.is_none() && node.depth > 0 && plunge_depth == 0 && env_str!("ENOMOTO_MIP_NOINC_HEUR").is_some();
+                    let noinc = heur_ok && self.incumbent.is_none() && node.depth > 0 && plunge_depth == 0 && env_str!("ENOMOTO_MIP_NOINC_HEUR").is_some();
                     if noinc && self.noinc_secs < tunable!("ENOMOTO_T_MIP_NOINC_TIME_FRAC", 0.3, f64) * self.start.elapsed().as_secs_f64() {
                         let t0 = Instant::now();
                         let it0 = self.lp.total_iterations();
@@ -2178,7 +2190,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                     xp("m_heur");
                     // ダイビング (SCIP の fracdiving / veclendiving: 深さ 10 ごと、ずらし 3 / 7)
-                    if !noinc && (node.depth % 10 == 3 || node.depth % 10 == 7) {
+                    if heur_ok && !noinc && (node.depth % 10 == 3 || node.depth % 10 == 7) {
                         let quota = (0.05 * (self.dive_succ + 1) as f64 / (self.dive_calls + 1) as f64 * self.node_iters as f64) as u64 + 1000;
                         if self.dive_iters < quota && env_str!("ENOMOTO_MIP_NO_NODE_DIVE").is_none() {
                             // 種類を順に回す (SCIP の各ダイビングに相当。誘導は暫定解があるときだけ)
@@ -2500,6 +2512,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
     fn has_cutoff_value(&self) -> bool {
         // `ENOMOTO_MIP_TREE_OWN_INC_ONLY`: 以前の形 (自分の暫定解があるときだけ)
         self.incumbent.is_some() || (self.pool.is_some() && env_str!("ENOMOTO_MIP_TREE_OWN_INC_ONLY").is_none() && self.shared.as_ref().is_some_and(|s| s.best().is_finite()))
+    }
+
+    /// 木の中の大近傍探索・ダイビングをこのスレッドで回すか。木を分け合うときは HiGHS (`HighsMipSolver::run`) と同じく、
+    /// 暫定解があればスレッドの 1/4、なければ 1/2 (切り上げ、主を含む) だけが回す (全スレッドが同じ予算で回すと、同じ
+    /// 暫定解から同じ近傍のサブ MIP を重複して解く)。主 (番号 0)・1 スレッドは常に回す。
+    /// `ENOMOTO_MIP_TREE_HEUR_ALL` なら以前と同じく全スレッドが回す
+    fn tree_heur_allowed(&self) -> bool {
+        let Some(pool) = &self.pool else { return true };
+        if self.pool_tid == 0 || env_str!("ENOMOTO_MIP_TREE_HEUR_ALL").is_some() {
+            return true;
+        }
+        let k = if self.has_cutoff_value() { pool.threads.div_ceil(4) } else { pool.threads.div_ceil(2) };
+        (self.pool_tid as usize) < k
     }
 
     fn local_redcost_fixing(&mut self, node_obj: f64) -> bool {
