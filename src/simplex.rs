@@ -932,6 +932,10 @@ fn run_phase(
     let ratio_pivot_tol = if env_str!("ENOMOTO_PRIMAL_RATIO_PIVOT_TOL_OLD").is_some() { TOL } else { tunable!("ENOMOTO_T_FT_MIN_PIVOT", FT_MIN_PIVOT, f64) };
     let max_iters = max_iters_for(m, std.n_total);
     for iter_idx in 0..max_iters {
+        // 分枝限定法の LP の時刻・反復の上限 (`ExtControl`)。打ち切りは `None` (理由は `ext_stop` に記録される)
+        if slope_intercept_dual::ext_primal_stop(iter_idx) {
+            return None;
+        }
         if iter_idx & 63 == 0 && crate::cancel::is_cancelled() {
             return None; // 同時実行の相手が先に結論を出した
         }
@@ -1280,6 +1284,10 @@ fn run_phase2_incremental(std: &StdForm, t: &mut Tableau, lu: &mut sparse_lu::Ft
     let progress = env_str!("ENOMOTO_DEBUG_PROGRESS").is_some();
     let progress_t0 = std::time::Instant::now();
     for _iter in 0..max_iters {
+        // 分枝限定法の LP の時刻・反復の上限 (`ExtControl`)。打ち切りは `None` (理由は `ext_stop` に記録される)
+        if slope_intercept_dual::ext_primal_stop(_iter) {
+            return None;
+        }
         if _iter & 63 == 0 && crate::cancel::is_cancelled() {
             return None; // 同時実行の相手が先に結論を出した
         }
@@ -1376,14 +1384,16 @@ fn run_phase2_incremental(std: &StdForm, t: &mut Tableau, lu: &mut sparse_lu::Ft
         let self_width = std.ub[enter] - std.lb[enter];
         let init_alpha1 = if self_width.is_finite() { self_width } else { f64::INFINITY };
         candidates.clear();
-        // `ENOMOTO_T_PRIMAL_REL_PIVOT=r` (既定 1e-5、0 で使わない): `|alpha_i| < r max|alpha|` の行はピボットに取らない
-        // (irish-electricity の仕上げの引き継ぎで、絶対の下限 1e-7 だけでは小さなピボットを取って基底が特異になり、目的値が
-        // 5e25 に発散した。1e-7 では同じく発散、1e-5 なら 1,227 反復・3.4 秒で引き継ぎが終わる)。
+        // `ENOMOTO_T_PRIMAL_REL_PIVOT=r` (既定 1e-5、0 で使わない): `|alpha_i| < r max|alpha|` の行は、ほかに出る行の候補が
+        // あればピボットに取らない (irish-electricity の仕上げの引き継ぎで、絶対の下限 1e-7 だけでは小さなピボットを取って
+        // 基底が特異になり、目的値が 5e25 に発散した)。ただしステップ幅 (パス 1) は全ての行で決める。以前は小さな行を
+        // 候補から外していたので、その基底変数がステップを止めずに上下限を大きく外れ、主実行可能性が崩れて発散した
+        // (pilot87 の 1 列を整数にした MIP の根: 目的値が 301.8 から 2e19 へ、7 万反復以上止まらない)。
         let rel_piv = tunable!("ENOMOTO_T_PRIMAL_REL_PIVOT", 1e-5f64, f64);
         let piv_floor = if rel_piv > 0.0 { rel_piv * alpha_rows.iter().map(|&i| alpha[i].abs()).fold(0.0, f64::max) } else { 0.0 };
         for &i in &alpha_rows {
             let rate = -best_dir * alpha[i];
-            if rate.abs() <= min_pivot.max(piv_floor) {
+            if rate.abs() <= min_pivot {
                 continue;
             }
             let var = t.basis[i];
@@ -1399,7 +1409,9 @@ fn run_phase2_incremental(std: &StdForm, t: &mut Tableau, lu: &mut sparse_lu::Ft
         }
         let alpha1 = candidates.iter().map(|c| c.relaxed).fold(init_alpha1, f64::min);
         let window = if ratio_old { harris } else { 0.0 };
-        let admitted = candidates.iter().filter(|c| c.exact <= alpha1 + window);
+        // パス 2 の候補。相対の下限以上のピボットがあればその中から、なければ小さなピボットも含めて選ぶ
+        let big_admitted = candidates.iter().any(|c| c.exact <= alpha1 + window && c.pivot_abs > piv_floor);
+        let admitted = candidates.iter().filter(|c| c.exact <= alpha1 + window && (!big_admitted || c.pivot_abs > piv_floor));
         let leaving = if stall.bland_mode { admitted.min_by_key(|c| t.basis[c.row]) } else { admitted.max_by(|a, b| a.pivot_abs.total_cmp(&b.pivot_abs)) };
         let (leaving_row, leaving_hits_upper, alpha2, best_pivot_mag) = match leaving {
             Some(c) if c.pivot_abs > 0.0 => (Some(c.row), c.hits_upper, c.exact, c.pivot_abs),

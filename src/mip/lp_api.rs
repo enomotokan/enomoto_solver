@@ -40,6 +40,10 @@ pub trait MipLp: Clone {
     fn interior_point(&self, _zero_cost: bool, _want_vertex: bool, _deadline: std::time::Instant) -> Option<InteriorPoint> {
         None
     }
+    /// 直前の求解が非有界だったときの切片問題の境界 ([`TwoStageLp::intercept_bounds`])。対応しない実装は `None`。
+    fn intercept_bounds(&self) -> Option<(Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>)> {
+        None
+    }
     /// 基底を列番号 (構造列 j < n、行 n + i) で与える ([`TwoStageLp::set_basis_cols`])。対応しない実装は何もしない。
     fn set_basis_cols(&mut self, _b: &[usize], _x: Option<&[f64]>) {}
     /// 今の基底の DSE 重み (基底変数の番号との組、[`TwoStageLp::dse_snapshot`])。対応しない実装は `None`。
@@ -96,6 +100,9 @@ forward_impl!(
     },
     fn set_basis_cols(&mut self, b: &[usize], x: Option<&[f64]>) {
         TwoStageLp::set_basis_cols(self, b, x)
+    },
+    fn intercept_bounds(&self) -> Option<(Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>)> {
+        TwoStageLp::intercept_bounds(self)
     },
     fn dse_snapshot(&self) -> Option<Vec<(u32, f32)>> {
         TwoStageLp::dse_snapshot(self)

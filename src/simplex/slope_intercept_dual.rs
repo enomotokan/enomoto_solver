@@ -920,6 +920,31 @@ fn ext_check(iter_idx: usize, stage_b: bool, bound: impl FnOnce() -> f64) -> boo
 }
 
 thread_local! {
+    /// 切片問題の境界の記録を求められているか ([`request_intercept`])。
+    static WANT_INTERCEPT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// 段階 A が `z^1 < 0` で終わったときの切片問題 (論文の式 (8)) の境界 (列ごとの下限・上限の定数項。捨てた側は `None`)。
+    static LAST_INTERCEPT: std::cell::RefCell<Option<(Vec<Option<f64>>, Vec<Option<f64>>)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// 段階 A が `z^1 < 0` (有限の最適値がない) で終わったときの切片問題の境界を記録させる (`on`) か、やめる。記録を消す。
+/// 分枝限定法が、緩和問題が非有界のとき、切片問題を整数に制限した問題で実行不能と非有界を区別するのに使う。
+pub(crate) fn request_intercept(on: bool) {
+    WANT_INTERCEPT.with(|w| w.set(on));
+    LAST_INTERCEPT.with(|d| *d.borrow_mut() = None);
+}
+
+/// [`request_intercept`] で記録した切片問題の境界を取り出す。
+pub(crate) fn take_intercept() -> Option<(Vec<Option<f64>>, Vec<Option<f64>>)> {
+    LAST_INTERCEPT.with(|d| d.borrow_mut().take())
+}
+
+/// 主単体法のループ (仕上げの引き継ぎ、`super::run_phase` など) の 1 反復ごとに呼ぶ: [`ExtControl`] の時刻・反復の
+/// 上限を過ぎたら真 (理由を記録する)。打ち切り条件がなければ (LP の求解) 偽。
+pub(super) fn ext_primal_stop(iter_idx: usize) -> bool {
+    ext_check(iter_idx, false, || f64::NEG_INFINITY)
+}
+
+thread_local! {
     /// 再最適化の近道を使うか ([`set_fast_reopt`])。
     static FAST_REOPT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
@@ -4646,6 +4671,10 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                     }
                 }
                 cache = ColCache::intercept_problem(&cache_orig, &nb_status, &basis, &x_b_slope)?;
+                if z1 < -Z_SLOPE_TOL && WANT_INTERCEPT.with(|w| w.get()) {
+                    let bases = |b: &[Option<Affine1>]| b.iter().map(|a| a.map(|a| a.base)).collect::<Vec<_>>();
+                    LAST_INTERCEPT.with(|d| *d.borrow_mut() = Some((bases(&cache.lower), bases(&cache.upper))));
+                }
                 width_inf = cache.width.iter().map(|w| w.is_none()).collect();
                 row_bounds = RowBounds::new(&cache, &basis, &noise_feasible);
                 phase = Phase::B;

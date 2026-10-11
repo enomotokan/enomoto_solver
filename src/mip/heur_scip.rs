@@ -288,6 +288,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             restarts: 0,
             skip_heurs: 0,
             threads: 1,
+            distinguish: false,
         };
         let r = super::solve_problem(&sub, params, env_str!("ENOMOTO_MIP_SUBMIP_NO_PRESOLVE").is_none());
         self.heur_iters += r.lp_iterations;
@@ -453,6 +454,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             restarts: 0,
             skip_heurs: 0,
             threads: 1,
+            distinguish: false,
         };
         let r = super::solve_problem(&sub, params, env_str!("ENOMOTO_MIP_SUBMIP_NO_PRESOLVE").is_none());
         self.heur_iters += r.lp_iterations;

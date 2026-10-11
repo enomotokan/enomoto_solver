@@ -16,7 +16,7 @@ The solver also includes:
 
 - **Proximal interior-point method + crossover:** a PIQP-style proximal interior-point method (IP-PMM with Mehrotra's predictor–corrector) computes an interior optimal solution, and a crossover following Liu & Lu (2024) (primal and dual push phases plus basis selection) turns it into an optimal basic solution, finished off by the simplex method.
 - **Running both methods in parallel:** with `threads >= 2` (the default is 1), an LP (and every MIP relaxation that cannot be warm-started) is solved by the slope–intercept dual two-phase method on one thread and by the interior-point method + crossover on the remaining threads at the same time; the first to reach a conclusion wins and the other is stopped.
-- **Mixed-integer linear programming (MIP):** branch and cut with propagation, cutting planes, primal heuristics and symmetry handling. With `threads >= 2`, the tree search is shared among several threads.
+- **Mixed-integer linear programming (MIP):** branch and cut with propagation, cutting planes, primal heuristics and symmetry handling. Every relaxation is solved by the slope–intercept dual two-phase method (warm-started from the parent's optimal basis at nodes), and when the root relaxation has no finite optimum, the intercept problem with integrality restrictions decides whether the MIP is infeasible or unbounded (with `distinguish_infeasible_unbounded=True`). With `threads >= 2`, the root relaxation is raced against the interior-point method + crossover and the tree search is shared among several threads.
 
 ## Requirements
 
@@ -78,6 +78,8 @@ M.add_constraint(z <= 5)
 sol = M.solve(distinguish_infeasible_unbounded=True)
 print(sol.status)                   # unbounded
 ```
+
+The same holds for models with integer variables. When phase A shows that the root relaxation has no finite optimum, the default result is `"infeasible_or_unbounded"`. With `distinguish_infeasible_unbounded=True`, the intercept problem (the phase B problem) with its variables restricted to integers is solved by branch and bound: if it has a feasible solution the result is `"unbounded"`, otherwise `"infeasible"` (a feasible intercept solution x⁰ and the phase A slope x¹ give integer solutions x⁰ + M x¹ whose objective decreases without bound).
 
 ### Choosing the LP method
 

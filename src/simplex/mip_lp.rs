@@ -50,6 +50,8 @@ pub struct TwoStageLp {
     price_key: u64,
     /// 直前の求解が実行不能だったときの双対射線 (元の行の向き)。
     ray: Option<Vec<f64>>,
+    /// 直前の求解が非有界だったときの切片問題の境界 (標準形の列ごとの下限・上限、[`Self::intercept_bounds`])。
+    intercept: Option<(Vec<Option<f64>>, Vec<Option<f64>>)>,
 }
 
 /// [`TwoStageLp::price_key`] の発行元。
@@ -145,6 +147,7 @@ impl TwoStageLp {
             iters: 0,
             price_key: new_price_key(),
             ray: None,
+            intercept: None,
         }
     }
 
@@ -674,6 +677,37 @@ impl TwoStageLp {
         st
     }
 
+    /// 直前の求解が非有界 (段階 A が `z^1 < 0`、段階 B で実行可能) だったときの切片問題 (論文の式 (8)) の境界を、元の
+    /// 空間の (列の下限, 列の上限, 行の下限, 行の上限) で返す。行列は同じ。切片問題の実行可能解 `x^0` と段階 A の傾き
+    /// `x^1` (`A x^1 = 0`、目的値を下げる) から `x^0 + M x^1` (M → ∞) が元の問題の実行可能解になるので、切片問題を整数に
+    /// 制限した問題が実行可能なら元の整数計画は非有界、実行不能なら実行不能。
+    pub fn intercept_bounds(&self) -> Option<(Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>)> {
+        let (lo, up) = self.intercept.as_ref()?;
+        let n = self.n;
+        let m = self.rows.len();
+        if lo.len() != n + m || up.len() != n + m {
+            return None;
+        }
+        let inf = f64::INFINITY;
+        // 構造列: 標準形の値 x' = x - shift
+        let col_lo: Vec<f64> = (0..n).map(|j| lo[j].map_or(-inf, |b| b + self.shift[j])).collect();
+        let col_up: Vec<f64> = (0..n).map(|j| up[j].map_or(inf, |b| b + self.shift[j])).collect();
+        // スラック s_i (σ_i a_i x + s_i = b_i): σ = +1 なら a_i x = 上限 - s、σ = -1 なら a_i x = 下限 + s
+        let mut row_lo = vec![-inf; m];
+        let mut row_up = vec![inf; m];
+        for i in 0..m {
+            let (sl, su) = (lo[n + i].unwrap_or(-inf), up[n + i].unwrap_or(inf));
+            if self.sigma[i] > 0.0 {
+                row_lo[i] = self.row_up[i] - su;
+                row_up[i] = self.row_up[i] - sl;
+            } else {
+                row_lo[i] = self.row_lo[i] + sl;
+                row_up[i] = self.row_lo[i] + su;
+            }
+        }
+        Some((col_lo, col_up, row_lo, row_up))
+    }
+
     /// 行 `i` のスラック (標準形の値、`σ_i a_i x + s_i = b_i`) を元の空間の点 `x` から求める。
     fn slack_value(&self, i: usize, x: &[f64]) -> f64 {
         let act: f64 = self.rows[i].iter().map(|&(j, a)| a * x[j]).sum();
@@ -756,6 +790,7 @@ impl TwoStageLp {
         sid::set_fast_reopt(env_str!("ENOMOTO_MIP_NO_FAST_REOPT").is_none());
         sid::request_duals(true);
         sid::request_lu(true);
+        sid::request_intercept(true);
         sid::set_price_key(Some(self.price_key));
         let r = match self.basis.clone() {
             Some(b) if b.len() == self.rows.len() => {
@@ -814,6 +849,9 @@ impl TwoStageLp {
         let last_d = sid::take_last_d();
         let ray = sid::take_last_ray();
         self.ray = None;
+        let intercept = sid::take_intercept();
+        sid::request_intercept(false);
+        self.intercept = None;
         sid::request_lu(false);
         self.lu_cache = None;
         self.iters += sid::ext_iterations() - it0;
@@ -853,7 +891,12 @@ impl TwoStageLp {
                     self.ray = ray.filter(|r| r.len() >= self.rows.len()).map(|r| (0..self.rows.len()).map(|i| r[i] * self.sigma[i]).collect());
                     LpStatus::Infeasible
                 }
-                Status::Unbounded | Status::InfeasibleOrUnbounded => LpStatus::Unbounded,
+                Status::Unbounded | Status::InfeasibleOrUnbounded => {
+                    if res.status == Status::Unbounded {
+                        self.intercept = intercept;
+                    }
+                    LpStatus::Unbounded
+                }
                 _ => LpStatus::Error,
             },
             None => match stop {

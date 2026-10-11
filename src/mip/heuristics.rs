@@ -1189,6 +1189,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             restarts: 0,
             skip_heurs: 0,
             threads: 1,
+            distinguish: false,
         };
         // 並列モード (根のヒューリスティクスの間): 別スレッドで解き始め、結果は後で受け取る
         if self.parallel_submips {

@@ -62,6 +62,9 @@ pub struct MipParams {
     pub skip_heurs: u64,
     /// 木の探索に使うスレッドの数 (1 なら並列にしない。[`max_threads`] で頭打ちにしてから渡す)。
     pub threads: usize,
+    /// 根の緩和問題が非有界のとき、実行不能と非有界を区別するか (`Model.solve(distinguish_infeasible_unbounded=True)`)。
+    /// 偽なら `InfeasibleOrUnbounded` を返す。真なら切片問題を整数に制限した問題を解く ([`Solver::resolve_unbounded_root`])。
+    pub distinguish: bool,
 }
 
 /// 根のヒューリスティクスの名前に対応するビット (再スタートで飛ばすものの印)。暫定解に依る RINS と、
@@ -77,7 +80,7 @@ pub(super) fn heur_bit(name: &str) -> u64 {
 
 impl Default for MipParams {
     fn default() -> Self {
-        MipParams { time_limit: f64::INFINITY, node_limit: u64::MAX, rel_gap: 1e-4, abs_gap: 1e-6, verbose: false, submip: false, cutoff: f64::INFINITY, restarts: 0, skip_heurs: 0, threads: 1 }
+        MipParams { time_limit: f64::INFINITY, node_limit: u64::MAX, rel_gap: 1e-4, abs_gap: 1e-6, verbose: false, submip: false, cutoff: f64::INFINITY, restarts: 0, skip_heurs: 0, threads: 1, distinguish: false }
     }
 }
 
@@ -1301,7 +1304,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         match root_st {
             LpStatus::Optimal => {}
             LpStatus::Infeasible => return self.finish(MipStatus::Infeasible, f64::INFINITY),
-            LpStatus::Unbounded => return self.finish(MipStatus::InfeasibleOrUnbounded, f64::NEG_INFINITY),
+            LpStatus::Unbounded => {
+                let st = self.resolve_unbounded_root();
+                return self.finish(st, f64::NEG_INFINITY);
+            }
             LpStatus::TimeLimit => return self.finish(MipStatus::TimeLimit, f64::NEG_INFINITY),
             _ => return self.finish(MipStatus::NotSolved, f64::NEG_INFINITY),
         }
@@ -4376,6 +4382,55 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         s.fb_ver.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// 根の緩和問題が非有界 (二段解法の段階 A が `z^1 < 0`、段階 B で実行可能) のときの整数計画の結論。区別を求められて
+    /// いなければ `InfeasibleOrUnbounded`。求められていれば、暫定解がすでにあれば非有界 (実行可能解と、緩和問題の目的値を
+    /// 下げる有理数の方向 `x^1` がある)。なければ切片問題 (論文の式 (8)。傾き `x^1` を固定し、その傾きの境界上にない側の
+    /// 境界を捨てた問題) を整数に制限して解く: 実行可能解 `x^0` があれば `x^0 + M x^1` (`M` は `x^1` の整数列の分母の倍数)
+    /// が目的値をいくらでも下げる整数解なので非有界、実行不能なら元の整数計画も実行不能 (元の実行可能解 `x` から
+    /// `x - M x^1` が切片問題の整数解になる)。切片問題の緩和は段階 B の双対実行可能な基底から解けるので下に有界。
+    fn resolve_unbounded_root(&mut self) -> MipStatus {
+        if !self.params.distinguish || self.params.submip {
+            return MipStatus::InfeasibleOrUnbounded;
+        }
+        if self.incumbent.is_some() {
+            return MipStatus::Unbounded;
+        }
+        let p = self.p;
+        let Some((col_lo, col_up, row_lo, row_up)) = self.lp.intercept_bounds().filter(|b| b.0.len() == p.n && b.2.len() >= p.m) else {
+            return MipStatus::InfeasibleOrUnbounded;
+        };
+        let mut sub = p.clone();
+        for j in 0..p.n {
+            let (mut lo, mut up) = (col_lo[j], col_up[j]);
+            if p.is_int[j] {
+                lo = (lo - 1e-9).ceil();
+                up = (up + 1e-9).floor();
+            }
+            if lo > up {
+                return MipStatus::Infeasible;
+            }
+            sub.col_lo[j] = lo;
+            sub.col_up[j] = up;
+        }
+        sub.row_lo.copy_from_slice(&row_lo[..p.m]);
+        sub.row_up.copy_from_slice(&row_up[..p.m]);
+        let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());
+        let params = MipParams { time_limit: remaining, distinguish: false, restarts: 0, skip_heurs: 0, cutoff: f64::INFINITY, ..self.params };
+        if self.params.verbose {
+            eprintln!("MIP: root relaxation unbounded; solving the intercept problem with integrality ({:.2}s)", self.start.elapsed().as_secs_f64());
+        }
+        let r = super::solve_problem(&sub, params, env_str!("ENOMOTO_MIP_NO_PRESOLVE").is_none());
+        if self.params.verbose {
+            eprintln!("MIP: intercept problem {:?} ({:.2}s)", r.status, self.start.elapsed().as_secs_f64());
+        }
+        match r.status {
+            _ if r.x.is_some() => MipStatus::Unbounded,
+            MipStatus::Infeasible => MipStatus::Infeasible,
+            MipStatus::TimeLimit => MipStatus::TimeLimit,
+            _ => MipStatus::InfeasibleOrUnbounded,
+        }
     }
 
     fn finish(&mut self, status: MipStatus, best_bound: f64) -> MipResult {

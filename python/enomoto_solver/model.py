@@ -139,7 +139,9 @@ class Model:
         ``"infeasible"``、``"infeasible_or_unbounded"`` のいずれか。拡張双対単体法の
         段階 A が ``z^1 < 0`` で終われば有限の最適値がないことが証明されてそこで止まり、
         ``z^1 = 0`` なら非有界ではなく、段階 B で最適解を求めるか実行不能を証明する。
-        True を渡すと前者も ``"infeasible"`` と ``"unbounded"`` に分ける。
+        True を渡すと前者も ``"infeasible"`` と ``"unbounded"`` に分ける。整数計画では、根の緩和問題で
+        ``z^1 < 0`` のとき、切片問題 (段階 B の問題) の変数を整数に制限した問題を解き、実行可能解があれば
+        ``"unbounded"``、実行不能なら ``"infeasible"`` を返す (False なら ``"infeasible_or_unbounded"``)。
         ``"not_solved"`` はソルバーが判定に至らずに諦めたことを表す。
 
         整数計画の打ち切り条件: ``time_limit`` (秒)、``mip_rel_gap`` (相対ギャップ、既定 1e-4)、

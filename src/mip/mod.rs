@@ -89,6 +89,7 @@ pub fn solve_mip(
         time_limit: settings.time_limit.or(env_f64(env_str!("ENOMOTO_MIP_TIME_LIMIT"))).unwrap_or(d.time_limit),
         node_limit: settings.node_limit.or(env_f64(env_str!("ENOMOTO_MIP_NODE_LIMIT")).map(|v| v as u64)).unwrap_or(d.node_limit),
         threads: settings.threads.or(env_f64(env_str!("ENOMOTO_MIP_TREE_THREADS")).map(|v| v as usize)).unwrap_or(d.threads).clamp(1, max_threads()),
+        distinguish: opts.distinguish_infeasible_unbounded,
         ..d
     };
     // 基底のない LP の求解 (根・再スタート後の根) を `threads` 本で同時実行にする (木の探索の従のスレッドを始めたら、
@@ -103,7 +104,9 @@ pub fn solve_mip(
         }
     }
     let s = p.sense_sign;
-    let objective_value = r.objective.map(|z| s * z);
+    // 非有界なら目的値・解は返さない (見つけた実行可能解は最適ではない)
+    let unbounded = r.status == MipStatus::Unbounded;
+    let objective_value = if unbounded { None } else { r.objective.map(|z| s * z) };
     let gap = match r.objective {
         Some(z) if r.best_bound.is_finite() => ((z - r.best_bound).max(0.0)) / z.abs().max(1.0),
         Some(_) if r.status == MipStatus::Optimal => 0.0,
@@ -119,7 +122,7 @@ pub fn solve_mip(
         MipStatus::NodeLimit => Status::NodeLimit,
         MipStatus::NotSolved => Status::NotSolved,
     };
-    SolveResult { status, objective: objective_value, x: r.x, node_limit_hit: r.status == MipStatus::NodeLimit, mip: Some(summary) }
+    SolveResult { status, objective: objective_value, x: if unbounded { None } else { r.x }, node_limit_hit: r.status == MipStatus::NodeLimit, mip: Some(summary) }
 }
 
 /// ポートフォリオ並列 (`ENOMOTO_MIP_PORTFOLIO`): 設定の違う 2 つの求解を別スレッドで同時に走らせる
