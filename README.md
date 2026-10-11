@@ -136,7 +136,7 @@ Models with integer variables are solved by branch and cut, which solves the rel
 
 #### Parallel search
 
-When `threads` is k ≥ 2, branch and bound runs in parallel as follows.
+When `threads` is k ≥ 2, the search runs in parallel as follows.
 
 - **Relaxations that cannot be warm-started:** the root LP and the root LP after a restart have no basis to start from, so they are solved at the same time by the two-phase method (1 thread) and the proximal interior-point method + crossover (k − 1 threads). Node relaxations are solved by the two-phase method warm-started from the parent's optimal basis (they finish in a few iterations, so running the interior-point method at the same time has no chance of winning and only adds work). Sub-MIPs solved inside heuristics (RINS, etc.) are often small, so even their solves without a basis use the two-phase method only. After the tree search starts using k threads, no parallel execution is done.
 - **Root:** the root cutting planes and heuristics are performed by the thread that solved the root (the main thread).
