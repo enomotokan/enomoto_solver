@@ -30,6 +30,34 @@ use crate::types::{ConstraintRow, LpOptions, MipSettings, MipSummary, Objective,
 use problem::MipProblem;
 use solver::{MipParams, MipStatus};
 
+/// 時間で決める上限 (根のカットのループ・探り) に使う時計 [秒]: このスレッドが使った CPU 時間 (Linux)。ほかの
+/// プロセスに CPU を取られている間は進まないので、マシンの負荷で打ち切りの位置が変わりにくい (nw04: 負荷で根のカットの
+/// 1 ラウンドが 1.9 -> 4.0 秒になり、時間の上限で 2 ラウンドで止まって根で閉じず 9 -> 17 秒)。Linux 以外と
+/// `ENOMOTO_MIP_WALL_CAPS` では経過時間。差だけを使う。
+pub(crate) fn cap_clock() -> f64 {
+    #[cfg(target_os = "linux")]
+    {
+        if env_str!("ENOMOTO_MIP_WALL_CAPS").is_none() {
+            #[repr(C)]
+            struct Timespec {
+                tv_sec: i64,
+                tv_nsec: i64,
+            }
+            extern "C" {
+                fn clock_gettime(clk: i32, tp: *mut Timespec) -> i32;
+            }
+            const CLOCK_THREAD_CPUTIME_ID: i32 = 3;
+            let mut ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+            // SAFETY: `ts` は有効な書き込み先で、clock_gettime はそこに書くだけ
+            if unsafe { clock_gettime(CLOCK_THREAD_CPUTIME_ID, &mut ts) } == 0 {
+                return ts.tv_sec as f64 + ts.tv_nsec as f64 * 1e-9;
+            }
+        }
+    }
+    static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    EPOCH.get_or_init(std::time::Instant::now).elapsed().as_secs_f64()
+}
+
 /// 木の探索に使えるスレッドの数の上限: このプロセスが使える CPU の数 (Linux では CPU affinity と cgroup の割り当てを
 /// 反映する `std::thread::available_parallelism`)。環境変数 `ENOMOTO_MIP_MAX_THREADS` でさらに小さくできる。
 pub fn max_threads() -> usize {
@@ -713,6 +741,7 @@ fn presolve_mip(p: &MipProblem, verbose: bool) -> Option<Presolved> {
 fn probe(prob: &mut MipProblem, verbose: bool) -> Option<bool> {
     use domain::Domain;
     let t0 = std::time::Instant::now();
+    let c0 = cap_clock();
     let n = prob.n;
     let nnz: usize = prob.rows.iter().map(|r| r.len()).sum();
     // 手間の上限は非零数の 20 倍、時間は 0.5 秒 (固定・締め付けが出ていれば `ENOMOTO_T_MIP_PROBE_TIME_FOUND` 秒)。
@@ -753,7 +782,7 @@ fn probe(prob: &mut MipProblem, verbose: bool) -> Option<bool> {
     };
     for (cnt, &j) in cands.iter().enumerate() {
         let cap = if fixed + tightened > 0 { time_cap_found } else { time_cap };
-        if cnt % 16 == 0 && (dom.debug_work() - work0 > work_cap || t0.elapsed().as_secs_f64() > cap) {
+        if cnt % 16 == 0 && (dom.debug_work() - work0 > work_cap || cap_clock() - c0 > cap) {
             break;
         }
         if dom.lo[j] == dom.up[j] {

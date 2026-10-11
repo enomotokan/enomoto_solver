@@ -163,7 +163,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut phase2 = false;
         // 第 2 段階の時間の上限 (第 1 段階に使った時間の `ENOMOTO_T_MIP_CUT_PHASE2_TIME_MULT` 倍。qnet1 では再スタート後の
         // 第 2 段階が 88 ラウンド回って根が 6 秒伸び、9.2 秒 -> 17.2 秒になった)
-        let t_loop0 = std::time::Instant::now();
+        // 上限はこのスレッドの CPU 時間で測る ([`super::cap_clock`]。求解の開始からの分は `cpu0` から)
+        let t_loop0 = super::cap_clock();
         let mut phase2_deadline = f64::INFINITY;
         let mut round_ctr = 0usize;
         loop {
@@ -172,7 +173,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             let round = round_ctr;
             round_ctr += 1;
-            if self.time_up() || self.start.elapsed().as_secs_f64() > time_cap || (phase2 && t_loop0.elapsed().as_secs_f64() > phase2_deadline) {
+            let now = super::cap_clock();
+            if self.time_up() || now - self.cpu0 > time_cap || (phase2 && now - t_loop0 > phase2_deadline) {
                 break;
             }
             let x = self.lp.col_values();
@@ -378,7 +380,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             phase2 = true;
                             stall = 0;
                             max_rounds = round_ctr + tunable!("ENOMOTO_T_MIP_CUT_PHASE2_ROUNDS", 60usize, usize);
-                            let t1 = t_loop0.elapsed().as_secs_f64();
+                            let t1 = super::cap_clock() - t_loop0;
                             phase2_deadline = t1 + (tunable!("ENOMOTO_T_MIP_CUT_PHASE2_TIME_MULT", 3.0, f64) * t1).max(0.2);
                             if self.params.verbose {
                                 eprintln!("MIP: cut loop phase 2 (HiGHS cut score) from round {} ({:.2}s)", round + 1, self.start.elapsed().as_secs_f64());
