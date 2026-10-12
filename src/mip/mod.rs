@@ -66,7 +66,7 @@ pub fn max_threads() -> usize {
     hw.min(cap).max(1)
 }
 
-/// (混合) 整数計画問題を解く。整数変数が 1 つもなければ `solve_lp` を 1 回呼ぶだけ。
+/// (混合) 整数最適化問題を解く。整数変数が 1 つもなければ `solve_lp` を 1 回呼ぶだけ。
 pub fn solve_mip(
     variables: &[VariableData],
     objective: &Objective,

@@ -57,18 +57,18 @@ use crate::params::presolve::{
 /// 丸め誤差はその大きさに比例するため (`params::presolve::PRESOLVE_REL_TOL` 参照)。
 /// `ENOMOTO_T_PRESOLVE_REL_TOL=0` で従来の絶対判定に戻る。`scale` が有限でなければ `base`。
 #[inline]
-/// 整数計画の前処理で、整数列を示す印 (スレッドローカル)。設定中は、列を代入で消す縮約が整数列を
+/// 整数最適化の前処理で、整数列を示す印 (スレッドローカル)。設定中は、列を代入で消す縮約が整数列を
 /// 消さず、境界の伝播で得た整数列の境界を丸める (計画書 §7)。
 thread_local! {
     static INT_MASK: std::cell::RefCell<Option<std::rc::Rc<Vec<bool>>>> = const { std::cell::RefCell::new(None) };
 }
 
-/// 現在の整数列の印 (整数計画の前処理中でなければ `None`)。
+/// 現在の整数列の印 (整数最適化の前処理中でなければ `None`)。
 pub(crate) fn int_mask() -> Option<std::rc::Rc<Vec<bool>>> {
     INT_MASK.with(|m| m.borrow().clone())
 }
 
-/// 列 `j` が整数列か (整数計画の前処理中でなければ常に偽)。ループ内では [`int_mask`] を先に取り出して使うこと。
+/// 列 `j` が整数列か (整数最適化の前処理中でなければ常に偽)。ループ内では [`int_mask`] を先に取り出して使うこと。
 pub(crate) fn is_int_col(j: usize) -> bool {
     INT_MASK.with(|m| m.borrow().as_ref().is_some_and(|v| v.get(j).copied().unwrap_or(false)))
 }
@@ -93,9 +93,9 @@ fn round_int_bounds(lb: &mut [f64], ub: &mut [f64]) -> bool {
     bad
 }
 
-/// 整数計画用の前処理: 整数列の印 `is_int` を付けて [`run_extended`] を実行する。スケーリングはしない
+/// 整数最適化用の前処理: 整数列の印 `is_int` を付けて [`run_extended`] を実行する。スケーリングはしない
 /// (整数列の列スケールは 1 でなければならないため)。双対の議論に基づく縮約 (dualpropagate、
-/// ineqsingleton、forcingcol) は整数計画では正しくないので行わない。
+/// ineqsingleton、forcingcol) は整数最適化では正しくないので行わない。
 #[allow(clippy::too_many_arguments)]
 pub fn run_extended_mip(n: usize, a: &FaerCsr, b: &[f64], g: &FaerCsr, h: &[f64], c: &[f64], is_int: &[bool], prop_passes: usize, rounds: usize, inner_rounds: usize) -> ExtendedPresolveResult {
     INT_MASK.with(|m| *m.borrow_mut() = Some(std::rc::Rc::new(is_int.to_vec())));

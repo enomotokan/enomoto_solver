@@ -187,9 +187,9 @@ pub enum Status {
     /// どの判定にも至らずに諦めた (回復できない特異な基底や反復上限など)。
     /// 問題自体については何も主張しない。
     NotSolved,
-    /// 整数計画が時間上限で打ち切られた (暫定解があれば `x` と `objective` に入る)。
+    /// 整数最適化が時間上限で打ち切られた (暫定解があれば `x` と `objective` に入る)。
     TimeLimit,
-    /// 整数計画がノード数上限で打ち切られた (暫定解があれば `x` と `objective` に入る)。
+    /// 整数最適化がノード数上限で打ち切られた (暫定解があれば `x` と `objective` に入る)。
     NodeLimit,
 }
 
@@ -244,11 +244,11 @@ pub struct SolveResult {
     /// MIP がノード数上限で打ち切られたか (最良暫定解を返しており、最適性は未証明)。
     /// 通常の LP では常に `false`。
     pub node_limit_hit: bool,
-    /// 整数計画の探索の要約 (LP では `None`)。
+    /// 整数最適化の探索の要約 (LP では `None`)。
     pub mip: Option<MipSummary>,
 }
 
-/// 整数計画の探索の要約 (目的値は元の向き)。
+/// 整数最適化の探索の要約 (目的値は元の向き)。
 #[derive(Debug, Clone, Copy)]
 pub struct MipSummary {
     /// 証明済みの最良の限界 (最小化なら下界、最大化なら上界)。
@@ -261,7 +261,7 @@ pub struct MipSummary {
     pub lp_iterations: u64,
 }
 
-/// 整数計画の求解設定 (`None` なら既定値または環境変数の値)。
+/// 整数最適化の求解設定 (`None` なら既定値または環境変数の値)。
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MipSettings {
     /// 時間上限 [秒]。

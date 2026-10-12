@@ -53,12 +53,12 @@ class Solution:
     属性:
         status: ``"optimal"`` / ``"infeasible"`` / ``"unbounded"`` /
             ``"infeasible_or_unbounded"`` / ``"not_solved"`` のいずれか。
-            整数計画ではさらに ``"time_limit"`` / ``"node_limit"`` (上限で打ち切り。暫定解があれば値が読める)。
+            整数最適化ではさらに ``"time_limit"`` / ``"node_limit"`` (上限で打ち切り。暫定解があれば値が読める)。
         objective: 解の目的値 (``"optimal"``、または打ち切り時に暫定解があるとき。それ以外は None)。
-        node_limit_hit: 整数計画でノード数上限により打ち切られたか (最適性は未証明)。
-        best_bound: 整数計画で証明済みの最良の限界 (最小化なら下界)。LP では None。
-        mip_gap: 整数計画の相対ギャップ。LP では None。
-        nodes: 整数計画で処理したノード数。LP では None。
+        node_limit_hit: 整数最適化でノード数上限により打ち切られたか (最適性は未証明)。
+        best_bound: 整数最適化で証明済みの最良の限界 (最小化なら下界)。LP では None。
+        mip_gap: 整数最適化の相対ギャップ。LP では None。
+        nodes: 整数最適化で処理したノード数。LP では None。
     """
 
     status: str
@@ -152,7 +152,7 @@ class Model:
         で判断する。``"optimal"`` のときだけ ``objective`` に値が入り、各 Variable の
         ``.value`` が読める (それ以外で ``.value`` を読むと RuntimeError)。
 
-        ``root_solver``: LP (整数変数を含まないモデル) の解法。整数計画の緩和問題は常に傾き・切片双対二段解法を
+        ``root_solver``: LP (整数変数を含まないモデル) の解法。整数最適化の緩和問題は常に傾き・切片双対二段解法を
         warm start で使って解くので、整数変数を含むモデルに ``"auto"`` (と ``None``) 以外を渡しても効かず、
         ``UserWarning`` を出す (求解はそのまま続ける)。
 
@@ -169,22 +169,22 @@ class Model:
         ``"infeasible"``、``"infeasible_or_unbounded"`` のいずれか。拡張双対単体法の
         段階 A が ``z^1 < 0`` で終われば有限の最適値がないことが証明されてそこで止まり、
         ``z^1 = 0`` なら非有界ではなく、段階 B で最適解を求めるか実行不能を証明する。
-        True を渡すと前者も ``"infeasible"`` と ``"unbounded"`` に分ける。整数計画では、根の緩和問題で
+        True を渡すと前者も ``"infeasible"`` と ``"unbounded"`` に分ける。整数最適化では、根の緩和問題で
         ``z^1 < 0`` のとき、切片問題 (段階 B の問題) の変数を整数に制限した問題を解き、実行可能解があれば
         ``"unbounded"``、実行不能なら ``"infeasible"`` を返す (False なら ``"infeasible_or_unbounded"``)。
         ``"not_solved"`` はソルバーが判定に至らずに諦めたことを表す。
 
-        整数計画の打ち切り条件: ``time_limit`` (秒)、``mip_rel_gap`` (相対ギャップ、既定 0)、
+        整数最適化の打ち切り条件: ``time_limit`` (秒)、``mip_rel_gap`` (相対ギャップ、既定 0)、
         ``node_limit`` (ノード数)。上限で止まると status は ``"time_limit"`` / ``"node_limit"`` になり、
         暫定解があれば ``objective`` と各 Variable の ``.value`` が読める。
 
         ``threads``: 使うスレッドの数 (既定 1)。``enomoto_solver.max_threads()`` (このプロセスが使える CPU の数) を超える値はそこで頭打ちにする。
         求解全体をこの数のスレッドで動かす。``"auto"`` で 2 以上なら、LP を上のように二段解法と内点法 +
-        クロスオーバーで同時に解く。整数計画では warm start できない緩和問題 (根など) を同じように同時に解き、根の処理の後は未処理のノードを
+        クロスオーバーで同時に解く。整数最適化では warm start できない緩和問題 (根など) を同じように同時に解き、根の処理の後は未処理のノードを
         スレッドの間で分け合って探索する。
 
         ``log`` (既定 True): 最初に作者・ライセンス・連絡先の案内と問題の大きさを、求解中は要点 (前処理の結果、
-        同時実行の勝敗、整数計画では根の LP・切除平面・探索の経過) を、最後に結果を標準出力に出す。
+        同時実行の勝敗、整数最適化では根の LP・切除平面・探索の経過) を、最後に結果を標準出力に出す。
         False なら何も出さない。
         """
         if root_solver not in (None, "auto") and any(v.vtype == "integer" for v in self._variables):

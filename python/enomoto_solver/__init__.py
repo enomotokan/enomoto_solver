@@ -1,4 +1,4 @@
-"""ENOMOTO-Solver: 線形計画・混合整数計画ソルバーの Python 入力インターフェース。
+"""ENOMOTO-Solver: 線形最適化・混合整数最適化ソルバーの Python 入力インターフェース。
 行列の保持・前処理・最適化アルゴリズムは Rust コア (``enomoto_solver._core``) が担う。
 
     from enomoto_solver import Model, Variable

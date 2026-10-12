@@ -109,25 +109,25 @@ impl PyModel {
     /// モデルを解き、結果を dict で返す。整数変数があれば分枝限定法、なければ LP を
     /// 1 回解く (判断は `mip::solve_mip`)。dict のキー:
     /// - `"status"`: 状態文字列 (`"optimal"` / `"infeasible"` / `"unbounded"` /
-    ///   `"infeasible_or_unbounded"` / `"not_solved"`、整数計画ではさらに `"time_limit"` / `"node_limit"`)。
+    ///   `"infeasible_or_unbounded"` / `"not_solved"`、整数最適化ではさらに `"time_limit"` / `"node_limit"`)。
     /// - `"objective"` と `"x"`: 解があるとき (`"optimal"`、または上限で打ち切られたが暫定解があるとき) の値。
     ///   それ以外は `None`。
-    /// - `"node_limit_hit"`: 整数計画がノード数上限で打ち切られたか。
-    /// - `"best_bound"` / `"mip_gap"` / `"nodes"` / `"lp_iterations"`: 整数計画の探索の要約 (LP では `None`)。
+    /// - `"node_limit_hit"`: 整数最適化がノード数上限で打ち切られたか。
+    /// - `"best_bound"` / `"mip_gap"` / `"nodes"` / `"lp_iterations"`: 整数最適化の探索の要約 (LP では `None`)。
     ///
     /// `root_solver`: 各 LP の解法。`"auto"` (既定: 前処理後の行数が 5000 以上なら傾き・切片双対二段解法と
     /// 内点法 + クロスオーバーを同時に解き、先に結論を出した側を採る。未満なら二段解法)、`"simplex"`
     /// (二段解法だけ)、`"ipm_crossover"` (内点法 + クロスオーバーだけ)、`"interior"` (独立の IP-PMM 内点法)。
-    /// 整数計画では根と各ノードの LP は二段解法を warm start で解き直す (この指定は LP のときだけ効く)。
+    /// 整数最適化では根と各ノードの LP は二段解法を warm start で解き直す (この指定は LP のときだけ効く)。
     ///
     /// `distinguish_infeasible_unbounded` (既定 `false`): `false` なら、有限の最適値が
     /// ないと分かった時点で `"infeasible_or_unbounded"` を返す。`true` なら
     /// `"infeasible"` と `"unbounded"` を区別する (`types::LpOptions` 参照)。
     ///
-    /// `time_limit` [秒] / `mip_rel_gap` (既定 0) / `node_limit`: 整数計画の打ち切り条件。
+    /// `time_limit` [秒] / `mip_rel_gap` (既定 0) / `node_limit`: 整数最適化の打ち切り条件。
     /// `threads`: 使うスレッドの数 (既定 1。`max_threads()` を超える値はそこで頭打ち)。求解全体をこの数のスレッドの
-    /// rayon プールで動かす。`"auto"` で 2 以上なら、LP (整数計画では基底のない緩和問題) を二段解法 (1 スレッド) と
-    /// 内点法 + クロスオーバー (残り) で同時に解く。整数計画では木の探索もこの数のスレッドで分け合う。
+    /// rayon プールで動かす。`"auto"` で 2 以上なら、LP (整数最適化では基底のない緩和問題) を二段解法 (1 スレッド) と
+    /// 内点法 + クロスオーバー (残り) で同時に解く。整数最適化では木の探索もこの数のスレッドで分け合う。
     ///
     /// `log` (既定 `false`): 求解の要点 (前処理の結果、根の LP、探索の経過など) を `sys.stdout` に出す ([`crate::log`])。
     /// Python の `Model.solve` は既定で `true` を渡す (案内とまとめの行は Python 側で出す)。
@@ -153,7 +153,7 @@ impl PyModel {
             None => RootSolver::Auto,
         };
 
-        // 整数計画の設定には指定のまま渡す (未指定なら環境変数 `ENOMOTO_MIP_TREE_THREADS` が効く)
+        // 整数最適化の設定には指定のまま渡す (未指定なら環境変数 `ENOMOTO_MIP_TREE_THREADS` が効く)
         let settings = MipSettings { time_limit, rel_gap: mip_rel_gap, node_limit, threads };
         let threads = threads.unwrap_or(1).clamp(1, crate::mip::max_threads());
         let opts = LpOptions { distinguish_infeasible_unbounded, threads, ..Default::default() };

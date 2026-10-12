@@ -179,7 +179,7 @@ fn eliminate_doubleton_equalities_full(n: usize, a: &FaerCsr, b: &[f64], gv: GVi
     let mut claimed: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
     let mut eliminated_a_row = vec![false; a_rows.len()];
 
-    // 整数計画の前処理中は整数列を消さない (連続列の側を消す。両方整数なら見送る)。
+    // 整数最適化の前処理中は整数列を消さない (連続列の側を消す。両方整数なら見送る)。
     let int_mask = crate::presolve::int_mask();
     let is_int = |j: usize| int_mask.as_ref().is_some_and(|m| m[j]);
     for (i, row) in a_rows.iter().enumerate() {

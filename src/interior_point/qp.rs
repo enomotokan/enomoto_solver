@@ -1,4 +1,4 @@
-//! 内点法 (PIQP 型) が前提とする二次計画の標準形
+//! 内点法 (PIQP 型) が前提とする二次最適化の標準形
 //!
 //!   minimize   0.5 x^T P x + c^T x
 //!   subject to A x = b

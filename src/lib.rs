@@ -1,6 +1,6 @@
 //! ENOMOTO-Solver の Rust コア (Python 拡張モジュール `enomoto_solver._core`)。
 //!
-//! 線形計画問題 (LP) と混合整数計画問題 (MIP) を解く。モジュール構成:
+//! 線形最適化問題 (LP) と混合整数最適化問題 (MIP) を解く。モジュール構成:
 //!
 //!   - `types` — 各層で共有するデータ型 (変数・目的関数・制約・求解結果など)。
 //!   - `model` — PyO3 の入口 `PyModel`。Python 側 `Model` からの入力を検証して保持する。
@@ -143,7 +143,7 @@ fn last_solve_events() -> Vec<(&'static str, f64)> {
     phase_timing::events()
 }
 
-/// 整数計画の木の探索に使えるスレッドの数の上限 (このプロセスが使える CPU の数。環境変数
+/// 整数最適化の木の探索に使えるスレッドの数の上限 (このプロセスが使える CPU の数。環境変数
 /// `ENOMOTO_MIP_MAX_THREADS` でさらに小さくできる)。
 #[pyfunction]
 fn max_threads() -> usize {

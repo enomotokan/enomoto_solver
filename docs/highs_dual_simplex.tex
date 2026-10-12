@@ -32,7 +32,7 @@
 \maketitle
 
 \begin{abstract}
-本稿は，オープンソース線形計画ソルバ HiGHS（\url{https://github.com/ERGO-Code/HiGHS}）の双対単体法実装（クラス \code{HEkkDual}／\code{HEkkDualRow}／\code{HEkkDualRHS}，データ本体 \code{HEkk}）について，実際のソースコード（\code{highs/simplex/} 以下，2026年時点の \code{master} ブランチ）を読みながら，用いられているデータ構造と各手続きの数式的な意味を整理する。ENOMOTO-Solver 独自の有界変数専用双対単体法（別稿参照）と異なり，HiGHS は自由変数・両側範囲制約行（ranged row）・退化に対する複数の対策（コスト摂動，双対フェーズ1の人工上下限，Devex/DSE 切り替え，特異基底からのバックトラック）を備えた汎用実装であり，随所でその違いにも触れる。
+本稿は，オープンソース線形最適化ソルバ HiGHS（\url{https://github.com/ERGO-Code/HiGHS}）の双対単体法実装（クラス \code{HEkkDual}／\code{HEkkDualRow}／\code{HEkkDualRHS}，データ本体 \code{HEkk}）について，実際のソースコード（\code{highs/simplex/} 以下，2026年時点の \code{master} ブランチ）を読みながら，用いられているデータ構造と各手続きの数式的な意味を整理する。ENOMOTO-Solver 独自の有界変数専用双対単体法（別稿参照）と異なり，HiGHS は自由変数・両側範囲制約行（ranged row）・退化に対する複数の対策（コスト摂動，双対フェーズ1の人工上下限，Devex/DSE 切り替え，特異基底からのバックトラック）を備えた汎用実装であり，随所でその違いにも触れる。
 \end{abstract}
 
 \tableofcontents
