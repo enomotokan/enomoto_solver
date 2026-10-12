@@ -1,0 +1,139 @@
+# wheel と sdist をビルドしてテストし、main への push で PyPI に登録する。
+#
+# - develop への push・pull request・手動実行: ビルドとテストだけ (登録しない)。
+# - main への push: ビルドとテストに加え、Cargo.toml の version が PyPI にまだなければ登録する
+#   (同じ version は PyPI に二度登録できないので、version を上げたときだけ公開される)。
+# - wheel は abi3 (CPython の安定 ABI、Python 3.9 以上) で OS・アーキテクチャごとに 1 本。PyO3 0.22 が
+#   対応しない新しい Python (3.14 など) にもそのまま入る。
+# - 登録は PyPI の Trusted Publishing (トークン不要)。pypi.org で、このリポジトリの
+#   ワークフロー release.yml・環境 pypi を publisher として登録しておく。
+name: release
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      new: ${{ steps.v.outputs.new }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        run: |
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
+          code=$(curl -s -o /dev/null -w '%{http_code}' "https://pypi.org/pypi/enomoto-solver/$version/json")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [ "$code" = "404" ]; then echo "new=true" >> "$GITHUB_OUTPUT"; else echo "new=false" >> "$GITHUB_OUTPUT"; fi
+          echo "version $version (PyPI: HTTP $code)"
+
+  linux:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          manylinux: 2_28
+          args: --release --out dist --features pyo3/abi3-py39
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-linux-${{ matrix.target }}
+          path: dist
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: PyO3/maturin-action@v1
+        with:
+          target: x64
+          args: --release --out dist --features pyo3/abi3-py39
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-windows-x64
+          path: dist
+
+  macos:
+    runs-on: macos-14
+    strategy:
+      matrix:
+        target: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist --features pyo3/abi3-py39
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-macos-${{ matrix.target }}
+          path: dist
+
+  sdist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist
+
+  # ビルドした wheel を入れて tests/test_model.py を流す (各 OS で Python 3.9・3.13・3.14)。
+  test:
+    needs: [linux, windows, macos]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-14]
+        python: ["3.9", "3.13", "3.14"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: dist
+      - shell: bash
+        run: |
+          python -m pip install --upgrade pip pytest
+          python -m pip install --no-index --find-links dist enomoto-solver
+          cd tests && python -m pytest -q test_model.py
+
+  publish:
+    needs: [version, test, sdist]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.version.outputs.new == 'true'
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
