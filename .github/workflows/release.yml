@@ -44,7 +44,7 @@ jobs:
       - uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          manylinux: auto
+          manylinux: 2_28
           args: --release --out dist --features pyo3/abi3-py39
       - uses: actions/upload-artifact@v4
         with:
