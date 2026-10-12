@@ -26,14 +26,22 @@ The following are also implemented.
 - **Parallel execution of the two methods:** with `threads` set to 2 or more (the default is 1), an LP (for integer programs, a relaxation that cannot be warm-started) is solved at the same time by the slope–intercept dual two-phase method (1 thread) and the proximal interior-point method + crossover (the remaining threads), and the side that reaches a conclusion first is adopted (the other is stopped).
 - **Mixed-integer linear optimization (MIP):** solved by branch and cut (constraint propagation, cutting planes, primal heuristics, symmetry handling, etc.). All relaxations are solved by the slope–intercept dual two-phase method (warm-started from the parent's optimal basis at nodes), and when the root relaxation has no finite optimal value, whether the problem is infeasible or unbounded is decided with the problem in which the variables of the intercept problem are restricted to integers (when `distinguish_infeasible_unbounded=True`). Giving the solver several threads (`threads` set to 2 or more) parallelizes branch and bound: after the root is processed, the threads share the unprocessed nodes and divide the tree search among themselves (the root relaxation is solved at the same time by the two-phase method and the proximal interior-point method + crossover).
 
-## Requirements
+## Installation
+
+Install from PyPI (on the supported platforms above, a prebuilt wheel is installed, so Rust and other build tools are not needed).
+
+```sh
+pip install enomoto-solver
+```
+
+### Building from source
+
+For development or for running the benchmarks, clone the repository and build it. The following are needed.
 
 - Python 3.9 or later
 - A Rust toolchain (`rustc`, `cargo`)
 - [maturin](https://www.maturin.rs/) 1.5 or later (used to build the extension module)
 - Only for running the benchmarks: [highspy](https://pypi.org/project/highspy/) and a C compiler (used to decompress the Netlib data)
-
-## Installation
 
 ```sh
 git clone https://github.com/enomotokan/enomoto_solver.git
