@@ -58,6 +58,35 @@ pub(crate) fn cap_clock() -> f64 {
     EPOCH.get_or_init(std::time::Instant::now).elapsed().as_secs_f64()
 }
 
+/// 求解の経過の記録 (ベンチマークの指標用: 最初の暫定解の時刻と目的値、根の下界)。最小化形・定数項込みの値で、
+/// サブ MIP の中のものは記録しない。プロセスで 1 つなので、同じプロセスで同時に複数の求解をすると混ざる (診断用)。
+pub(crate) struct RunStats {
+    pub(crate) t0: Option<std::time::Instant>,
+    /// 最初の暫定解 (求解の開始からの秒, 目的値)。
+    pub(crate) first_sol: Option<(f64, f64)>,
+    /// 根の切除平面ループを終えた時点の LP の目的値 (再スタート後の根があれば最後のもの)。
+    pub(crate) root_bound: Option<f64>,
+}
+
+pub(crate) static RUN_STATS: std::sync::Mutex<RunStats> = std::sync::Mutex::new(RunStats { t0: None, first_sol: None, root_bound: None });
+
+/// 暫定解の記録 ([`RUN_STATS`])。最初のものだけを残す。
+pub(crate) fn record_incumbent(z: f64) {
+    if let Ok(mut s) = RUN_STATS.lock() {
+        if s.first_sol.is_none() {
+            let t = s.t0.map_or(0.0, |t0| t0.elapsed().as_secs_f64());
+            s.first_sol = Some((t, z));
+        }
+    }
+}
+
+/// 根の下界の記録 ([`RUN_STATS`])。
+pub(crate) fn record_root_bound(z: f64) {
+    if let Ok(mut s) = RUN_STATS.lock() {
+        s.root_bound = Some(z);
+    }
+}
+
 /// 木の探索に使えるスレッドの数の上限: このプロセスが使える CPU の数 (Linux では CPU affinity と cgroup の割り当てを
 /// 反映する `std::thread::available_parallelism`)。環境変数 `ENOMOTO_MIP_MAX_THREADS` でさらに小さくできる。
 pub fn max_threads() -> usize {
@@ -80,6 +109,9 @@ pub fn solve_mip(
         return solve_lp(variables, objective, constraints, root_solver, opts);
     }
     let p = MipProblem::from_model(variables, objective, constraints);
+    if let Ok(mut st) = RUN_STATS.lock() {
+        *st = RunStats { t0: Some(std::time::Instant::now()), first_sol: None, root_bound: None };
+    }
     // 既定値 < 環境変数 < 引数の順に優先する。
     let env_f64 = |v: Option<&str>| v.and_then(|s| s.parse::<f64>().ok());
     let d = MipParams::default();
@@ -125,7 +157,16 @@ pub fn solve_mip(
         Some(_) if r.status == MipStatus::Optimal => 0.0,
         _ => f64::INFINITY,
     };
-    let summary = MipSummary { best_bound: s * r.best_bound, gap, nodes: r.nodes, lp_iterations: r.lp_iterations };
+    let (first_sol, root_bound) = RUN_STATS.lock().map(|st| (st.first_sol, st.root_bound)).unwrap_or((None, None));
+    let summary = MipSummary {
+        best_bound: s * r.best_bound,
+        gap,
+        nodes: r.nodes,
+        lp_iterations: r.lp_iterations,
+        root_bound: root_bound.map_or(f64::NAN, |z| s * z),
+        first_solution_time: first_sol.map_or(f64::NAN, |(t, _)| t),
+        first_solution_objective: first_sol.map_or(f64::NAN, |(_, z)| s * z),
+    };
     let status = match r.status {
         MipStatus::Optimal => Status::Optimal,
         MipStatus::Infeasible => Status::Infeasible,

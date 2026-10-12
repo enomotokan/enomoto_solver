@@ -114,6 +114,8 @@ impl PyModel {
     ///   それ以外は `None`。
     /// - `"node_limit_hit"`: 整数最適化がノード数上限で打ち切られたか。
     /// - `"best_bound"` / `"mip_gap"` / `"nodes"` / `"lp_iterations"`: 整数最適化の探索の要約 (LP では `None`)。
+    /// - `"root_bound"` / `"first_solution_time"` / `"first_solution_objective"`: 根の切除平面ループ後の下界、最初の暫定解の
+    ///   時刻 [秒] と目的値 (整数最適化の評価用。なければ `None`)。
     ///
     /// `root_solver`: 各 LP の解法。`"auto"` (既定: 前処理後の行数が 5000 以上なら傾き・切片双対二段解法と
     /// 内点法 + クロスオーバーを同時に解き、先に結論を出した側を採る。未満なら二段解法)、`"simplex"`
@@ -183,9 +185,13 @@ impl PyModel {
                 dict.set_item(pyo3::intern!(py, "mip_gap"), m.gap)?;
                 dict.set_item(pyo3::intern!(py, "nodes"), m.nodes)?;
                 dict.set_item(pyo3::intern!(py, "lp_iterations"), m.lp_iterations)?;
+                let opt = |v: f64| if v.is_nan() { None } else { Some(v) };
+                dict.set_item(pyo3::intern!(py, "root_bound"), opt(m.root_bound))?;
+                dict.set_item(pyo3::intern!(py, "first_solution_time"), opt(m.first_solution_time))?;
+                dict.set_item(pyo3::intern!(py, "first_solution_objective"), opt(m.first_solution_objective))?;
             }
             None => {
-                for k in ["best_bound", "mip_gap", "nodes", "lp_iterations"] {
+                for k in ["best_bound", "mip_gap", "nodes", "lp_iterations", "root_bound", "first_solution_time", "first_solution_objective"] {
                     dict.set_item(k, py.None())?;
                 }
             }

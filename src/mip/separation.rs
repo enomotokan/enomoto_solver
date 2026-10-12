@@ -411,6 +411,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         self.remove_inactive_cuts();
         let st = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
+        if !self.params.submip && st == LpStatus::Optimal {
+            super::record_root_bound(self.lp.objective() + p.offset);
+        }
         user_log!(
             "Root cuts: objective {:.10e} -> {:.10e}, {} cuts in the LP ({:.2}s)",
             p.sense_sign * (first_obj + p.offset),

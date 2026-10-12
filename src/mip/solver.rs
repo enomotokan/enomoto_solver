@@ -1182,6 +1182,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             } else if let Some(s) = &self.shared {
                 s.publish(z);
             }
+            if !self.params.submip {
+                super::record_incumbent(z);
+            }
             self.incumbent = Some((z, x));
             self.root_redcost_fixing();
             let lim = self.prune_limit();
