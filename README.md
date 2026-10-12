@@ -4,6 +4,14 @@
 
 ENOMOTO-Solver is a solver for linear optimization problems (LP) and mixed-integer linear optimization problems (MIP), consisting of a Python modelling interface and a Rust core.
 
+**Supported platforms:** CPython 3.9 or later (tested on 3.9, 3.13 and 3.14) on the following operating systems. The wheels use abi3 (the stable ABI of Python), so a single wheel per OS installs on every supported version.
+
+| OS | Architecture |
+|---|---|
+| Windows | x86_64 |
+| Linux (glibc 2.28 or later, manylinux_2_28) | x86_64, aarch64 |
+| macOS | x86_64 (Intel), arm64 (Apple silicon) |
+
 For LP, it implements the **slope–intercept dual two-phase method**. This is a method that treats the M of the artificial-bound method (the big-M method applied to the dual problem), one of the phase-1 methods of the dual simplex method, symbolically instead of fixing it as a number.
 
 - **Phase A (slope problem):** starting from the all-slack basis, which is dual feasible without any computation, solve the problem obtained by replacing infinite bounds with ±1 and the right-hand side with 0. Its optimal value tells whether the original problem can have a finite optimal value.
