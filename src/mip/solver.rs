@@ -4546,6 +4546,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 境界を捨てた問題) を整数に制限して解く: 実行可能解 `x^0` があれば `x^0 + M x^1` (`M` は `x^1` の整数列の分母の倍数)
     /// が目的値をいくらでも下げる整数解なので非有界、実行不能なら元の整数計画も実行不能 (元の実行可能解 `x` から
     /// `x - M x^1` が切片問題の整数解になる)。切片問題の緩和は段階 B の双対実行可能な基底から解けるので下に有界。
+    /// 切片問題は実行可能性だけを問うので、目的を 0 にして解く (最初の整数解で終わる)。
     fn resolve_unbounded_root(&mut self) -> MipStatus {
         if !self.params.distinguish || self.params.submip {
             return MipStatus::InfeasibleOrUnbounded;
@@ -4572,6 +4573,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         sub.row_lo.copy_from_slice(&row_lo[..p.m]);
         sub.row_up.copy_from_slice(&row_up[..p.m]);
+        // 知りたいのは整数の実行可能解があるかだけなので、目的を 0 にして実行可能性の問題として解く (最初の整数解で
+        // 下界 0 = 暫定解 0 となり探索が終わる。元の目的のままだと最適性を示すまで木を探索していた)。
+        // `ENOMOTO_MIP_INTERCEPT_KEEP_OBJ` なら以前どおり元の目的で解く
+        if env_str!("ENOMOTO_MIP_INTERCEPT_KEEP_OBJ").is_none() {
+            sub.cost.iter_mut().for_each(|c| *c = 0.0);
+            sub.offset = 0.0;
+        }
         let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());
         let params = MipParams { time_limit: remaining, distinguish: false, restarts: 0, skip_heurs: 0, cutoff: f64::INFINITY, ..self.params };
         if self.params.verbose {
