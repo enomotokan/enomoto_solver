@@ -33,6 +33,9 @@ pub struct MipProblem {
     /// プロービングで見つけた 0-1 列の含意を、同時には真にならない文字の組として持つ (文字 `2j` は `x_j = 1`、
     /// `2j + 1` は `x_j = 0`)。衝突グラフ ([`super::clique::CliqueGraph`]) の辺に加える。
     pub conflict_edges: Vec<(u32, u32)>,
+    /// プロービングで見つけた含意 `x_j = v ⇒ x_k <= b` (上限) / `x_k >= b` (下限): (j, v, k, 上限か, b)。
+    /// implied bound カットの分離に使う。
+    pub implied_bounds: Vec<(u32, bool, u32, bool, f64)>,
     /// 行の非零の数と整数列の数 (`from_rows` で数える。作った後に `rows`・`is_int` を変えるなら数え直すこと)。
     pub nnz: usize,
     pub nint: usize,
@@ -118,7 +121,7 @@ impl MipProblem {
         }
         let nnz = rows.iter().map(|r| r.len()).sum();
         let nint = is_int.iter().filter(|&&b| b).count();
-        MipProblem { n, m, col_lo, col_up, cost, offset, sense_sign, is_int, rows, row_lo, row_up, cols, conflict_edges: Vec::new(), nnz, nint }
+        MipProblem { n, m, col_lo, col_up, cost, offset, sense_sign, is_int, rows, row_lo, row_up, cols, conflict_edges: Vec::new(), implied_bounds: Vec::new(), nnz, nint }
     }
 
     /// 整数列と暗黙の整数列 (連続列だが、整数解では必ず整数値になるもの) の印。カット生成で整数として扱う

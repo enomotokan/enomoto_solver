@@ -252,6 +252,11 @@ fn unsubstitute(vars: &CutVars, t: &Term, c: f64, coefs: &mut Vec<(usize, f64)>)
     }
 }
 
+fn cmir_delta1() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| env_str!("ENOMOTO_MIP_CMIR_DELTA1").is_some())
+}
+
 /// CMIR で切除平面を作る。作れなければ `None`。
 pub fn cmir(vars: &CutVars, base: &[(usize, f64)], rhs: f64) -> Option<RawCut> {
     let (terms, beta) = substitute(vars, base, rhs)?;
@@ -288,6 +293,11 @@ fn cmir_terms(vars: &CutVars, terms: Vec<Term>, beta: f64) -> Option<RawCut> {
         for div in [2.0, 4.0, 8.0] {
             deltas.push(d / div);
         }
+    }
+    // `ENOMOTO_MIP_CMIR_DELTA1`: δ = 1 も試す (HiGHS の CMIR と同じ。係数が大きい行で、整数列の係数そのものより
+    // 1 で割った方が強いことがある)
+    if cmir_delta1() && !deltas.iter().any(|&e| (e - 1.0).abs() <= 1e-9) {
+        deltas.push(1.0);
     }
     // 3. 各 delta で MIR を作り、違反量 / ノルムの最大のものを選ぶ
     let mut best: Option<(f64, f64)> = None; // (delta, efficacy)

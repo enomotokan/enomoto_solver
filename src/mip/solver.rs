@@ -383,8 +383,12 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) proof_prunes: u64,
     pub(super) proof_tightenings: u64,
     /// カットプールの重複判定用のハッシュと、プールの非零数。
-    pub(super) cut_pool_keys: std::collections::HashSet<u64>,
+    pub(super) cut_pool_keys: std::collections::HashMap<u64, usize>,
     pub(super) cut_pool_nnz: usize,
+    /// プールの各カットのハッシュと年齢 (根のラウンド・プールからのラウンドごとに 1 増え、LP に入れたら 0 に戻す)。
+    /// プールが上限に達したとき、年齢の大きいものから捨てる (`ENOMOTO_MIP_POOL_NO_EVICT` なら新しい候補を捨てる)。
+    pub(super) pool_hash: Vec<u64>,
+    pub(super) pool_age: Vec<u32>,
     /// カットプールの平坦な (CSR) 複製: 列番号・係数・各カットの開始位置 (長さ プール数 + 1)。違反の走査を 1 本の配列の
     /// 走査にする (`Vec<Vec<..>>` を辿る走査は mik-250 で 40 秒中 1.4-1.9 秒かかっていた)。`add_to_pool` が同期する。
     pub(super) pool_idx: Vec<u32>,
@@ -893,7 +897,9 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         farkas_added: 0,
         proof_prunes: 0,
         proof_tightenings: 0,
-        cut_pool_keys: std::collections::HashSet::new(),
+        cut_pool_keys: std::collections::HashMap::new(),
+        pool_hash: Vec::new(),
+        pool_age: Vec::new(),
         cut_pool_nnz: 0,
         pool_idx: Vec::new(),
         pool_val: Vec::new(),
@@ -1469,11 +1475,26 @@ impl<'a, L: MipLp> Solver<'a, L> {
             } else if self.snap.is_some() {
                 // 木の写しから解く: 根のヒューリスティクスは走らせない
             } else {
+                // `ENOMOTO_T_MIP_ROOT_HEUR_TIME_FRAC` = f (> 0): 根のヒューリスティクス全体の時間の予算を時間上限の f 倍
+                // (暫定解がなければ `ENOMOTO_T_MIP_ROOT_HEUR_TIME_FRAC_NOINC` 倍) にし、超えたら残りは飛ばす
+                let rh_t0 = Instant::now();
+                let rh_frac = tunable!("ENOMOTO_T_MIP_ROOT_HEUR_TIME_FRAC", 0.0, f64);
+                let rh_frac_noinc = tunable!("ENOMOTO_T_MIP_ROOT_HEUR_TIME_FRAC_NOINC", 0.5, f64);
+                let rh_over = |s: &Self| {
+                    rh_frac > 0.0
+                        && !s.params.submip
+                        && s.params.time_limit.is_finite()
+                        && rh_t0.elapsed().as_secs_f64() > if s.incumbent.is_some() { rh_frac } else { rh_frac_noinc } * s.params.time_limit
+                };
                 macro_rules! heur {
                     ($name:expr, $e:expr) => {{
                         let bit = heur_bit($name);
                         if proof_only() && !self.params.submip {
                             // 証明だけのスレッド: 根のヒューリスティクスは走らせない
+                        } else if rh_over(self) {
+                            if self.params.verbose {
+                                eprintln!("MIP: root heuristic {}: skipped (root heuristic time budget)", $name);
+                            }
                         } else if self.params.skip_heurs & bit != 0 && env_str!("ENOMOTO_MIP_RESTART_ALL_HEURS").is_none() {
                             if self.params.verbose {
                                 eprintln!("MIP: root heuristic {}: skipped (no solution before the restart)", $name);
@@ -1581,11 +1602,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
         }
-        // `ENOMOTO_MIP_HEUR_BUDGET_TREE`: 木の中のヒューリスティクスの予算を、根で使った分を除いて数える。既定は含める:
-        // 含めると根のサブ MIP の反復 (neos-1456979 で約 10 万) が木の予算 (LP 反復の 1/20 + 1 万) を超えて木の中の
-        // RINS・ALNS・ランダム丸めがほとんど動かないが、除くと 40 問で 19 -> 17 問 (sgeomean 27.82 -> 28.39。
-        // binkar10_1・neos-860300 が時間切れ) と悪化し、neos-1456979 も改善しなかった (285 が近傍で局所最適)
-        if env_str!("ENOMOTO_MIP_HEUR_BUDGET_TREE").is_some() {
+        // 木の中のヒューリスティクス (ランダム丸め) の反復の予算は、根で使った分を除いて数える (根のサブ MIP の反復が
+        // h80x6320d・assign1-5-8・graph20 で 5-6 万あり、木の予算 (LP 反復の 1/20 + 1 万) を最初から超えて木の中で
+        // 一度も動かなかった)。`ENOMOTO_MIP_HEUR_BUDGET_ALL` なら以前どおり根の分も数える
+        if env_str!("ENOMOTO_MIP_HEUR_BUDGET_ALL").is_none() {
             self.heur_iters_root = self.heur_iters;
         }
         // 並列モードは根のヒューリスティクスの間だけ (LP 解が整数で途中を飛ばした場合も戻す)
@@ -2115,10 +2135,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let lns_calls: f64 = self.alns_count.iter().sum::<u32>() as f64;
                     let succ_rate = (0.5 * self.alns_reward.iter().sum::<f64>() + 1.0) / (lns_calls + 2.0);
                     let frac = tunable!("ENOMOTO_T_MIP_LNS_TIME_MIN", 0.02, f64) + tunable!("ENOMOTO_T_MIP_LNS_TIME_FRAC", 0.08, f64) * succ_rate;
-                    // 既定はヒューリスティクス共通の反復の予算の中で 100 ノードおき (時間の予算を与えると、改善しない
-                    // 問題で解ける問題を遅くした: 40 問で 15 -> 14 問)。ENOMOTO_MIP_LNS_TIME で時間の予算にする
-                    let lns_time = env_str!("ENOMOTO_MIP_LNS_TIME").is_some();
-                    let lns_ok = if lns_time { self.lns_secs < frac * self.start.elapsed().as_secs_f64() } else { self.heur_iters - self.heur_iters_root < budget };
+                    // 既定は時間の予算で 50 ノードおき。`ENOMOTO_MIP_LNS_ITERS` なら以前の、ヒューリスティクス共通の反復の
+                    // 予算の中で 100 ノードおき (根のサブ MIP の反復を数えるので、根で数万反復使った問題では木の中で
+                    // 一度も呼ばれなかった: h80x6320d・timtab1・assign1-5-8・graph20)
+                    let lns_time = env_str!("ENOMOTO_MIP_LNS_ITERS").is_none();
+                    let lns_avail = frac * self.start.elapsed().as_secs_f64() - self.lns_secs;
+                    let lns_ok = if lns_time { lns_avail > 0.0 } else { self.heur_iters - self.heur_iters_root < budget };
                     let lns_freq = if lns_time { tunable!("ENOMOTO_T_MIP_LNS_FREQ", 50u64, u64) } else { 100 };
                     // 木を分け合うときは一部のスレッドだけが大近傍探索・ダイビングを回す ([`Solver::tree_heur_allowed`])
                     let heur_ok = self.tree_heur_allowed();
@@ -2135,6 +2157,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             self.improve_turn % 3
                         };
                         self.improve_turn += 1;
+                        // 1 回のサブ MIP の時間は時間の予算の残りに合わせる (残りの 2 倍、最低
+                        // `ENOMOTO_T_MIP_LNS_CALL_MIN` 秒)。1 回で 6 秒使うと、割合 2% の予算では以後ほぼ呼べなくなる
+                        // (`ENOMOTO_MIP_LNS_NO_CAP` で上限なし)
+                        let keep_max = self.submip_time_max;
+                        if lns_time && env_str!("ENOMOTO_MIP_LNS_NO_CAP").is_none() {
+                            let cap = (tunable!("ENOMOTO_T_MIP_LNS_CALL_MULT", 2.0, f64) * lns_avail).max(tunable!("ENOMOTO_T_MIP_LNS_CALL_MIN", 0.3, f64));
+                            self.submip_time_max = self.submip_time_max.min(cap);
+                        }
                         match turn {
                             0 => {
                                 self.rins(&x);
@@ -2149,6 +2179,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                                 self.alns(&x);
                             }
                         }
+                        self.submip_time_max = keep_max;
                         self.lns_secs += t_lns.elapsed().as_secs_f64();
                     } else if env_str!("ENOMOTO_MIP_OBJ_BISECT").is_some()
                         && !self.params.submip
@@ -4082,7 +4113,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             node_limit: self.params.node_limit.saturating_sub(self.nodes),
             cutoff: self.prune_limit().min(self.params.cutoff),
             restarts: self.params.restarts + 1,
-            skip_heurs: self.params.skip_heurs | self.failed_heurs,
+            // `ENOMOTO_MIP_RESTART_NOINC_HEURS`: 暫定解がなければ飛ばさない (再スタートで固定が増えて問題が締まった後なので、
+            // 同じヒューリスティクスでも解が見つかりうる)。60 秒・1 スレッドの 40 問では暫定解のないまま再スタートする問題が
+            // なく効果を測れないので既定では使わない
+            skip_heurs: if self.incumbent.is_none() && env_str!("ENOMOTO_MIP_RESTART_NOINC_HEURS").is_some() { 0 } else { self.params.skip_heurs | self.failed_heurs },
             ..self.params
         };
         user_log!("Restart {}: {} of {} integer columns newly fixed at the root ({:.2}s)", params.restarts, newly, nint, self.start.elapsed().as_secs_f64());

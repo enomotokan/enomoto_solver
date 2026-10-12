@@ -766,13 +766,17 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool) -> MipProblem {
     if pairs.is_empty() || env_str!("ENOMOTO_MIP_SYM_DETECT_ONLY").is_some() {
         return prob;
     }
-    let MipProblem { col_lo, col_up, cost, offset, sense_sign, is_int, mut rows, mut row_lo, mut row_up, .. } = prob;
+    let MipProblem { col_lo, col_up, cost, offset, sense_sign, is_int, mut rows, mut row_lo, mut row_up, conflict_edges, implied_bounds, .. } = prob;
     for (i, k) in pairs {
         rows.push(vec![(i.min(k), if i < k { 1.0 } else { -1.0 }), (i.max(k), if i < k { -1.0 } else { 1.0 })]);
         row_lo.push(0.0);
         row_up.push(f64::INFINITY);
     }
-    MipProblem::from_rows(col_lo, col_up, cost, offset, sense_sign, is_int, rows, row_lo, row_up)
+    // プロービングの含意は行を足しても成り立つので引き継ぐ (以前は落としていた)
+    let mut q = MipProblem::from_rows(col_lo, col_up, cost, offset, sense_sign, is_int, rows, row_lo, row_up);
+    q.conflict_edges = conflict_edges;
+    q.implied_bounds = implied_bounds;
+    q
 }
 
 /// 前処理の結果。
@@ -910,6 +914,31 @@ fn probe(prob: &mut MipProblem, verbose: bool) -> Option<bool> {
     let edge_cap = 10 * nnz + 10_000;
     let bin0: Vec<bool> = (0..n).map(|k| prob.is_int[k] && prob.col_lo[k] == 0.0 && prob.col_up[k] == 1.0).collect();
     let mut edges: Vec<(u32, u32)> = Vec::new();
+    // 含意による境界 (implied bound カット用): x_j = v で x_k の境界が締まるもの。上限は非零数の 10 倍
+    let mut implied: Vec<(u32, bool, u32, bool, f64)> = Vec::new();
+    let mut add_implied = |j: usize, v: bool, ch: &[(usize, bool, f64)], dom: &Domain, implied: &mut Vec<(u32, bool, u32, bool, f64)>| {
+        let mut best: std::collections::HashMap<(usize, bool), f64> = std::collections::HashMap::new();
+        for &(k, upper, val) in ch {
+            if k == j {
+                continue;
+            }
+            let e = best.entry((k, upper)).or_insert(val);
+            *e = if upper { e.min(val) } else { e.max(val) };
+        }
+        for ((k, upper), val) in best {
+            if implied.len() >= edge_cap {
+                return;
+            }
+            let (l, u) = (dom.lo[k], dom.up[k]);
+            if !l.is_finite() || !u.is_finite() {
+                continue;
+            }
+            let gain = if upper { u - val } else { val - l };
+            if gain > 1e-6 * (1.0 + val.abs()) {
+                implied.push((j as u32, v, k as u32, upper, val));
+            }
+        }
+    };
     let mut add_edges = |j: usize, v: u32, ch: &[(usize, bool, f64)], edges: &mut Vec<(u32, u32)>| {
         let lj = 2 * j as u32 + if v == 1 { 0 } else { 1 };
         for &(k, upper, val) in ch {
@@ -959,6 +988,11 @@ fn probe(prob: &mut MipProblem, verbose: bool) -> Option<bool> {
                 if want_impl {
                     add_edges(j, 0, &ch0, &mut edges);
                     add_edges(j, 1, &ch1, &mut edges);
+                    // implied bound カット (`ENOMOTO_MIP_IMPLBD_CUTS`) を使うときだけ集める
+                    if env_str!("ENOMOTO_MIP_IMPLBD_CUTS").is_some() {
+                        add_implied(j, false, &ch0, &dom, &mut implied);
+                        add_implied(j, true, &ch1, &dom, &mut implied);
+                    }
                 }
                 // 両方の結果で変わった (列, 側) だけが締まりうる。値は両方の弱い方
                 let mut first: std::collections::HashMap<(usize, bool), f64> = std::collections::HashMap::new();
@@ -1005,6 +1039,9 @@ fn probe(prob: &mut MipProblem, verbose: bool) -> Option<bool> {
         eprintln!("MIP: probing: {probed} of {} binaries probed, {fixed} fixed, {tightened} bounds tightened, {} implications ({:.2}s)", cands.len(), edges.len(), t0.elapsed().as_secs_f64());
     }
     prob.conflict_edges = edges;
+    // 固定した列を含む含意は捨てる
+    implied.retain(|&(j, _, k, _, _)| dom.lo[j as usize] < dom.up[j as usize] && dom.lo[k as usize] < dom.up[k as usize]);
+    prob.implied_bounds = implied;
     if fixed == 0 && tightened == 0 {
         return None;
     }

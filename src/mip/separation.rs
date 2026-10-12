@@ -167,6 +167,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let t_loop0 = super::cap_clock();
         let mut phase2_deadline = f64::INFINITY;
         let mut round_ctr = 0usize;
+        // `ENOMOTO_T_MIP_CUT_PROG_WIN` = W (> 0): 直近 W ラウンドの目的値の伸びが、ループ全体の伸びの
+        // `ENOMOTO_T_MIP_CUT_PROG_EPS` 倍未満なら止める (進み具合による停滞判定。伸びが続く間はラウンド数の上限まで回す)
+        let prog_win = if self.params.submip { 0 } else { tunable!("ENOMOTO_T_MIP_CUT_PROG_WIN", 0usize, usize) };
+        let prog_eps = tunable!("ENOMOTO_T_MIP_CUT_PROG_EPS", 0.01, f64);
+        let mut obj_hist: Vec<f64> = Vec::new();
         loop {
             if round_ctr >= max_rounds {
                 break;
@@ -206,6 +211,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             let dbg_sep = env_str!("ENOMOTO_MIP_DEBUG_SEP").is_some() && !self.params.submip;
             let t_sel0 = std::time::Instant::now();
+            if !self.params.submip {
+                self.age_pool();
+            }
             // 候補はすべてカットプールに入れる (選択で落ちたものも、ノードで違反すれば使う)
             if !self.params.submip && env_str!("ENOMOTO_MIP_POOL_SELECTED_ONLY").is_none() {
                 for c in cands.iter().chain(face_cands.iter()) {
@@ -311,6 +319,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     obj + p.offset,
                     self.start.elapsed().as_secs_f64()
                 );
+            }
+            obj_hist.push(obj);
+            if prog_win > 0 && obj_hist.len() > prog_win {
+                let total = obj - first_obj;
+                let recent = obj - obj_hist[obj_hist.len() - 1 - prog_win];
+                if total > 1e-9 * obj.abs().max(1.0) && recent < prog_eps * total {
+                    if self.params.verbose {
+                        eprintln!("MIP: cut loop: progress of the last {prog_win} rounds {recent:.3e} < {prog_eps} x total {total:.3e}; stop");
+                    }
+                    break;
+                }
             }
             if highs_stall {
                 hrounds += 1;
@@ -439,9 +458,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 20 倍 (最低 20 万) までにする。
     pub(super) fn add_to_pool(&mut self, coefs: &[(usize, f64)], rhs: f64) {
         let nnz_cap = (tunable!("ENOMOTO_T_MIP_CUT_POOL_NNZ_MULT", 20usize, usize) * self.p.nnz).max(200_000);
-        if self.cut_pool_nnz + coefs.len() > nnz_cap {
-            return;
-        }
         // 最大係数 1 に揃えて 1e-9 の格子で丸めたもののハッシュ
         use std::hash::{Hash, Hasher};
         let cmax = coefs.iter().fold(0.0f64, |m, &(_, v)| m.max(v.abs())).max(1e-300);
@@ -451,9 +467,24 @@ impl<'a, L: MipLp> Solver<'a, L> {
             ((v / cmax) * 1e9).round().to_bits().hash(&mut hs);
         }
         ((rhs / cmax) * 1e9).round().to_bits().hash(&mut hs);
-        if !self.cut_pool_keys.insert(hs.finish()) {
+        let key = hs.finish();
+        if let Some(&k) = self.cut_pool_keys.get(&key) {
+            // 既にある: 使われたので年齢を戻す
+            self.pool_age[k] = 0;
             return;
         }
+        if self.cut_pool_nnz + coefs.len() > nnz_cap {
+            if env_str!("ENOMOTO_MIP_POOL_EVICT").is_none() {
+                return;
+            }
+            self.evict_pool(nnz_cap);
+            if self.cut_pool_nnz + coefs.len() > nnz_cap {
+                return;
+            }
+        }
+        self.cut_pool_keys.insert(key, self.cut_pool.len());
+        self.pool_hash.push(key);
+        self.pool_age.push(0);
         let norm = coefs.iter().map(|&(_, v)| v * v).sum::<f64>().sqrt();
         self.cut_pool_nnz += coefs.len();
         self.cut_pool.push((coefs.to_vec(), rhs, norm));
@@ -462,6 +493,58 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.pool_val.push(v);
         }
         self.pool_start.push(self.pool_idx.len() as u32);
+    }
+
+    /// プールの年齢を 1 進める。
+    pub(super) fn age_pool(&mut self) {
+        for a in self.pool_age.iter_mut() {
+            *a = a.saturating_add(1);
+        }
+    }
+
+    /// プールが上限 `nnz_cap` に達したとき、年齢の大きい (長く使われていない) カットから非零数が上限の
+    /// `ENOMOTO_T_MIP_POOL_EVICT_TO` 倍 (既定 0.8) になるまで捨てる (HiGHS の `HighsCutPool` の agelim に相当)。
+    /// 年齢 0 (今のラウンドで加えた・使った) のカットは残す。
+    fn evict_pool(&mut self, nnz_cap: usize) {
+        let target = (tunable!("ENOMOTO_T_MIP_POOL_EVICT_TO", 0.8, f64) * nnz_cap as f64) as usize;
+        let mut ord: Vec<usize> = (0..self.cut_pool.len()).filter(|&k| self.pool_age[k] > 0).collect();
+        // 年齢の大きい順、同じなら古い (番号の小さい) 順
+        ord.sort_by(|&a, &b| self.pool_age[b].cmp(&self.pool_age[a]).then(a.cmp(&b)));
+        let mut drop = vec![false; self.cut_pool.len()];
+        let mut nnz = self.cut_pool_nnz;
+        for k in ord {
+            if nnz <= target {
+                break;
+            }
+            drop[k] = true;
+            nnz -= self.cut_pool[k].0.len();
+        }
+        if !drop.iter().any(|&d| d) {
+            return;
+        }
+        let old = std::mem::take(&mut self.cut_pool);
+        let (hash, age) = (std::mem::take(&mut self.pool_hash), std::mem::take(&mut self.pool_age));
+        self.cut_pool_keys.clear();
+        self.pool_idx.clear();
+        self.pool_val.clear();
+        self.pool_start.clear();
+        self.pool_start.push(0);
+        self.cut_pool_nnz = 0;
+        for (k, c) in old.into_iter().enumerate() {
+            if drop[k] {
+                continue;
+            }
+            self.cut_pool_keys.insert(hash[k], self.cut_pool.len());
+            self.pool_hash.push(hash[k]);
+            self.pool_age.push(age[k]);
+            self.cut_pool_nnz += c.0.len();
+            for &(j, v) in &c.0 {
+                self.pool_idx.push(j as u32);
+                self.pool_val.push(v);
+            }
+            self.pool_start.push(self.pool_idx.len() as u32);
+            self.cut_pool.push(c);
+        }
     }
 
     /// カットプールのうち LP 解 `x` が違反するカットの (効き目, 番号)。平坦な複製 (`pool_idx` など) を走査する。
@@ -511,6 +594,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.remove_inactive_cuts();
         }
         let rows: Vec<(Vec<(usize, f64)>, f64, f64)> = viol.iter().map(|&(_, k)| (self.cut_pool[k].0.clone(), f64::NEG_INFINITY, self.cut_pool[k].1)).collect();
+        self.age_pool();
+        for &(_, k) in &viol {
+            self.pool_age[k] = 0;
+        }
         self.add_cut_rows(&rows);
         true
     }
@@ -1690,12 +1777,47 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 self.clique_graph = Some(std::rc::Rc::new(g));
             }
             let g = self.clique_graph.clone().unwrap();
-            for raw in g.separate(x, 100) {
+            for raw in g.separate(x, tunable!("ENOMOTO_T_MIP_CLIQUE_MAX", 100usize, usize)) {
                 push(Some(raw), &mut cands, self);
             }
         }
         if dbg_sep {
             eprintln!("SEP clique {:.3}s cands {}", sep_t0.elapsed().as_secs_f64(), cands.len());
+        }
+        // implied bound カット (HiGHS の `HighsImplications::separateImpliedBounds`): プロービングの含意
+        // `y = v ⇒ x_k <= b` から `x_k <= u_k - (u_k - b) y` (v = 1) / `x_k <= b + (u_k - b) y` (v = 0) (下限も同様)。
+        // u_k は今の大域的な上限。LP 解で違反するものだけ
+        if env_str!("ENOMOTO_MIP_IMPLBD_CUTS").is_some() && !p.implied_bounds.is_empty() {
+            let (glo, gup) = (&self.dom.global_lo, &self.dom.global_up);
+            let max_ib = tunable!("ENOMOTO_T_MIP_IMPLBD_MAX", 100usize, usize);
+            let mut viol: Vec<(f64, RawCut)> = Vec::new();
+            for &(y, v, k, upper, b) in &p.implied_bounds {
+                let (y, k) = (y as usize, k as usize);
+                if glo[y] == gup[y] || glo[k] == gup[k] || glo[y] != 0.0 || gup[y] != 1.0 {
+                    continue;
+                }
+                // 列を上限側にそろえる: upper なら x_k、下限なら -x_k の上限 (-l_k、含意の値は -b)
+                let (sk, bound, imp) = if upper { (1.0, gup[k], b) } else { (-1.0, -glo[k], -b) };
+                if !bound.is_finite() || imp >= bound - 1e-9 * (1.0 + bound.abs()) {
+                    continue;
+                }
+                let d = bound - imp;
+                // sk x_k + cy y <= rhs
+                let (cy, rhs) = if v { (d, bound) } else { (-d, imp) };
+                let act = sk * x[k] + cy * x[y];
+                let nrm = (1.0 + cy * cy).sqrt();
+                if act - rhs > 1e-6 * nrm * (1.0 + rhs.abs()) {
+                    let coefs = if y < k { vec![(y, cy), (k, sk)] } else { vec![(k, sk), (y, cy)] };
+                    viol.push(((act - rhs) / nrm, RawCut { coefs, rhs }));
+                }
+            }
+            viol.sort_by(|a, b| b.0.total_cmp(&a.0));
+            for (_, raw) in viol.into_iter().take(max_ib) {
+                push(Some(raw), &mut cands, self);
+            }
+            if dbg_sep {
+                eprintln!("SEP implied bounds {:.3}s cands {}", sep_t0.elapsed().as_secs_f64(), cands.len());
+            }
         }
         // 経路集約 (path aggregation、HiGHS の `HighsPathSeparator`)
         if env_str!("ENOMOTO_MIP_NO_PATH_AGG").is_none() {
@@ -2160,15 +2282,39 @@ fn select_cuts_hybrid(cands: Vec<Candidate>, max_cuts: usize, p: &MipProblem) ->
     // h80x6320d 7202 -> 3378)。40 問 2 回: sgeomean 27.84 -> 26.72、28.10 -> 26.81 (misc07 36 -> 11 秒、mik-250 33 -> 25 秒)。
     // 0.3 は 27.13。0 なら以前と同じ (上限 50 本まで全部)
     let min_score = tunable!("ENOMOTO_T_CUTSEL_MIN_REL", 0.5, f64) * best_score;
+    // `ENOMOTO_T_CUTSEL_FILL_FRAC` = f (> 0): 相対閾値で採ったカットが max_cuts·f 本未満なら、閾値を下げて
+    // (候補の上位半分まで) max_cuts·f 本になるまで足す (HiGHS の `HighsCutPool::separate` の「少なすぎれば上位半分」)。
+    // p0201 は候補 130-480 本から 1-4 本しか採らず、25 ラウンドかけても根の下界が伸び切らなかった
+    let fill = (tunable!("ENOMOTO_T_CUTSEL_FILL_FRAC", 0.0, f64) * max_cuts as f64).round() as usize;
+    let half = scored.len().div_ceil(2);
     let mut chosen: Vec<(f64, Candidate)> = Vec::new();
-    for (score, nc, c) in scored {
-        if chosen.len() >= max_cuts || score < min_score {
+    let mut rest: Vec<(f64, f64, Candidate)> = Vec::new();
+    for (k, (score, nc, c)) in scored.into_iter().enumerate() {
+        if chosen.len() >= max_cuts {
+            break;
+        }
+        if score < min_score {
+            if fill > 0 && k < half {
+                rest.push((score, nc, c));
+                continue;
+            }
             break;
         }
         let limit = if score >= good { goodmaxpar } else { maxpar };
         let parallel = chosen.iter().any(|(nd, d)| sparse_dot(&c.coefs, &d.coefs).abs() > limit * nc * nd);
         if !parallel {
             chosen.push((nc, c));
+        }
+    }
+    if chosen.len() < fill {
+        for (_, nc, c) in rest {
+            if chosen.len() >= fill {
+                break;
+            }
+            let parallel = chosen.iter().any(|(nd, d)| sparse_dot(&c.coefs, &d.coefs).abs() > maxpar * nc * nd);
+            if !parallel {
+                chosen.push((nc, c));
+            }
         }
     }
     chosen.into_iter().map(|(_, c)| c).collect()
