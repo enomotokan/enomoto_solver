@@ -5,6 +5,8 @@ edition = "2021"
 license = "MIT"
 authors = ["Kan Enomoto"]
 description = "ENOMOTO-Solver internal engine: CSR storage, preprocessing, optimization algorithms"
+# sdist (maturin sdist) に入れるファイル。ベンチマーク結果・解析メモなどは配布物に含めない。
+include = ["/src/**/*", "/python/enomoto_solver/*.py", "/.cargo/config.toml", "/Cargo.toml", "/Cargo.lock", "/pyproject.toml", "/README.md", "/LICENSE"]
 
 [lib]
 name = "_core"
