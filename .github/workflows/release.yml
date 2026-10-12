@@ -3,6 +3,8 @@
 # - develop への push・pull request・手動実行: ビルドとテストだけ (登録しない)。
 # - main への push: ビルドとテストに加え、Cargo.toml の version が PyPI にまだなければ登録する
 #   (同じ version は PyPI に二度登録できないので、version を上げたときだけ公開される)。
+# - wheel は abi3 (CPython の安定 ABI、Python 3.9 以上) で OS・アーキテクチャごとに 1 本。PyO3 0.22 が
+#   対応しない新しい Python (3.14 など) にもそのまま入る。
 # - 登録は PyPI の Trusted Publishing (トークン不要)。pypi.org で、このリポジトリの
 #   ワークフロー release.yml・環境 pypi を publisher として登録しておく。
 name: release
@@ -43,7 +45,7 @@ jobs:
         with:
           target: ${{ matrix.target }}
           manylinux: auto
-          args: --release --out dist --find-interpreter
+          args: --release --out dist --features pyo3/abi3-py39
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-linux-${{ matrix.target }}
@@ -55,16 +57,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: |
-            3.9
-            3.10
-            3.11
-            3.12
-            3.13
+          python-version: "3.13"
       - uses: PyO3/maturin-action@v1
         with:
           target: x64
-          args: --release --out dist --find-interpreter
+          args: --release --out dist --features pyo3/abi3-py39
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-windows-x64
@@ -79,16 +76,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: |
-            3.9
-            3.10
-            3.11
-            3.12
-            3.13
+          python-version: "3.13"
       - uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist --find-interpreter
+          args: --release --out dist --features pyo3/abi3-py39
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-macos-${{ matrix.target }}
@@ -107,14 +99,14 @@ jobs:
           name: sdist
           path: dist
 
-  # ビルドした wheel を入れて tests/test_model.py を流す (各 OS で最も古い Python と最も新しい Python)。
+  # ビルドした wheel を入れて tests/test_model.py を流す (各 OS で Python 3.9・3.13・3.14)。
   test:
     needs: [linux, windows, macos]
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-14]
-        python: ["3.9", "3.13"]
+        python: ["3.9", "3.13", "3.14"]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
