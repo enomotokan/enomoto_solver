@@ -1,6 +1,6 @@
 # ENOMOTO-Solver
 
-[日本語版 README](README.ja.md)
+[日本語版 README](https://github.com/enomotokan/enomoto_solver/blob/main/README.ja.md)
 
 ENOMOTO-Solver is a solver for linear optimization problems (LP) and mixed-integer linear optimization problems (MIP), consisting of a Python modelling interface and a Rust core.
 
@@ -239,7 +239,7 @@ The geometric mean over all 207 problems is 0.084 s for ENOMOTO, 0.183 s for HiG
 - Machine: a laptop with an AMD Ryzen 7 5700U (8 cores 16 threads, 16 GB memory), Ubuntu 22.04 on WSL2 (memory limit 12 GB). ENOMOTO and HiGHS use 16 threads; CLP and SoPlex are sequential. All settings other than the time limit and the number of threads are the defaults.
 - Times cover the solve call only (reading the MPS file and building the model are not included; presolve and postsolve are included) and are the median of 3 runs (1 run if it took 300 s or more). Each run is solved in a new process.
 - Mittelmann consists of the 40 problems obtained by removing the four largest problems that do not fit in this machine's memory (thk_48, L2CTA3D, dlr2, Dual2_5000) from the 44 public problems available from plato.asu.edu.
-- The full tables, per-problem times and raw data are in [benchmarks/paper/summary.md](benchmarks/paper/summary.md), `per_problem.csv` and `results.json`. For the reproduction procedure (Linux), see [scripts/paper_bench/README.md](scripts/paper_bench/README.md).
+- The full tables, per-problem times and raw data are in [benchmarks/paper/summary.md](https://github.com/enomotokan/enomoto_solver/blob/main/benchmarks/paper/summary.md), `per_problem.csv` and `results.json`. For the reproduction procedure (Linux), see [scripts/paper_bench/README.md](https://github.com/enomotokan/enomoto_solver/blob/main/scripts/paper_bench/README.md).
 
 ### Mixed-integer linear optimization (MIPLIB 2017)
 
@@ -296,11 +296,11 @@ On the problems that both solvers proved optimal, no objective values disagreed.
 
 - Machine: a laptop with an AMD Ryzen 7 5700U (8 cores 16 threads, 16 GB memory), Windows 11. All settings other than the time limit and the number of threads are the defaults (the default relative gap is 0 for ENOMOTO and 1e-4 for HiGHS).
 - Times cover the solve call only (reading the MPS file and building the model are not included) and come from a single run. Each problem is solved in a separate subprocess; the shifted geometric mean uses a shift of 10 s and counts unsolved problems at 60 s.
-- The raw data are in [benchmarks/miplib_results_16t_60s_20261012.json](benchmarks/miplib_results_16t_60s_20261012.json). Reproduce with `python scripts/run_miplib_benchmark.py --time-limit 60 --threads 16` (the problems are downloaded from the MIPLIB site on the first run).
+- The raw data are in [benchmarks/miplib_results_16t_60s_20261012.json](https://github.com/enomotokan/enomoto_solver/blob/main/benchmarks/miplib_results_16t_60s_20261012.json). Reproduce with `python scripts/run_miplib_benchmark.py --time-limit 60 --threads 16` (the problems are downloaded from the MIPLIB site on the first run).
 
 ### Easy comparison with HiGHS on Netlib
 
-The Netlib LP data has no license that explicitly permits redistribution, so it is not included in this repository ([docs/netlib-data.md](docs/netlib-data.md)). Download and decompress it only once at the start.
+The Netlib LP data has no license that explicitly permits redistribution, so it is not included in this repository ([docs/netlib-data.md](https://github.com/enomotokan/enomoto_solver/blob/main/docs/netlib-data.md)). Download and decompress it only once at the start.
 
 ```sh
 python scripts/setup_netlib_data.py          # requires a network connection and a C compiler
@@ -347,4 +347,4 @@ The idea and theory of the slope–intercept dual two-phase method for linear op
 
 ## License
 
-[MIT License](LICENSE) © 2026 Kan Enomoto
+[MIT License](https://github.com/enomotokan/enomoto_solver/blob/main/LICENSE) © 2026 Kan Enomoto
