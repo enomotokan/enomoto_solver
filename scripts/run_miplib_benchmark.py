@@ -173,6 +173,7 @@ def main() -> None:
     ap.add_argument("--worker-highs")
     ap.add_argument("--worker-ours")
     a = ap.parse_args()
+    sys.stdout.reconfigure(encoding="utf-8")  # 表の ✓ を cp932 のコンソールでも出せるように
     if a.worker_highs:
         return worker_highs(a.worker_highs, a.time_limit, a.threads)
     if a.worker_ours:
