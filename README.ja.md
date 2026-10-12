@@ -183,6 +183,7 @@ sol = M.solve(threads=enomoto_solver.max_threads())   # 使える CPU をすべ�
 ENOMOTO-Solver 0.1.0 (MIT License)
 Author: Kan Enomoto (https://enomoto-math-labo.com/en)
 For optimization consulting requests and bug reports, contact enomotokan@gmail.com
+
 Problem: 3 variables (3 integer), 1 constraints, 3 nonzeros, maximize; threads 1
 Presolve: 1 rows, 3 columns -> 1 rows, 3 columns (0.00s)
 Root LP: objective 2.2000000000e2 (0.00s)

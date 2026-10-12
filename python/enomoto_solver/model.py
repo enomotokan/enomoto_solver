@@ -37,7 +37,7 @@ def _version() -> str:
 _BANNER = (
     "ENOMOTO-Solver {version} (MIT License)\n"
     "Author: Kan Enomoto (https://enomoto-math-labo.com/en)\n"
-    "For optimization consulting requests and bug reports, contact enomotokan@gmail.com"
+    "For optimization consulting requests and bug reports, contact enomotokan@gmail.com\n"
 )
 
 
