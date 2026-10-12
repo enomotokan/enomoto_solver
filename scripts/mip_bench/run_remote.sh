@@ -23,6 +23,8 @@ mkdir -p "$WORK/pkg/enomoto_solver"; cp /tmp/mbwt/python/enomoto_solver/*.py "$W
 cp /tmp/mbtarget/release/lib_core.so "$WORK/pkg/enomoto_solver/_core$SUF"
 run() {
   local tag=$1; shift
+  # 既に測った設定は飛ばす (同じセッションに後から設定を足して呼び直せるように)
+  if [ -s "$OUT/res_$tag.json" ]; then echo "skip $tag"; return; fi
   (cd "$WORK" && "$PY" "$REPO/scripts/mip_bench/bench.py" --out "res_$tag.json" -j 4 --env "PYTHONPATH=$WORK/pkg" "$@" > "res_$tag.log" 2>&1)
   cp "$WORK/res_$tag.json" "$WORK/res_$tag.log" "$OUT/"
   git add "$OUT" && git commit -qm "MIP パラメータ計測 ($W): $tag $*" && git push -q origin "HEAD:$BRANCH"
