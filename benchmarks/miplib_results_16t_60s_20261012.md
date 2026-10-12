@@ -1,7 +1,7 @@
 # MIPLIB 2017 (小〜中規模): enomoto_solver vs HiGHS
 
-- 実行日時: 2026-10-12 10:13 UTC
-- 時間上限 60 秒、スレッド数 16 (HiGHS は threads、enomoto は木の探索 threads と ENOMOTO_MIP_THREADS)、既定の相対ギャップ (両者 1e-4)
+- 実行日時: 2026-10-12 10:15 UTC
+- 時間上限 60 秒、スレッド数 16 (HiGHS は threads、enomoto は木の探索 threads と ENOMOTO_MIP_THREADS)、既定の相対ギャップ (HiGHS 1e-4、enomoto 0)
 - 時間は求解のみ (MPS 読み込み・モデル構築を除く)。`t` = 時間上限
 
 | 指標 | HiGHS | enomoto |

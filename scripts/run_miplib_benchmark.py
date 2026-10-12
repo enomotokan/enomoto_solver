@@ -146,7 +146,7 @@ def make_table(results: dict, time_limit: float, threads: int) -> str:
         "",
         f"- 実行日時: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
         f"- 時間上限 {time_limit:g} 秒、スレッド数 {threads} (HiGHS は threads、enomoto は木の探索 threads と "
-        f"ENOMOTO_MIP_THREADS)、既定の相対ギャップ (両者 1e-4)",
+        f"ENOMOTO_MIP_THREADS)、既定の相対ギャップ (HiGHS 1e-4、enomoto 0)",
         "- 時間は求解のみ (MPS 読み込み・モデル構築を除く)。`t` = 時間上限",
         "",
         "| 指標 | HiGHS | enomoto |",

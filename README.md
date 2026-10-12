@@ -225,6 +225,63 @@ The geometric mean over all 207 problems is 0.084 s for ENOMOTO, 0.183 s for HiG
 - Mittelmann consists of the 40 problems obtained by removing the four largest problems that do not fit in this machine's memory (thk_48, L2CTA3D, dlr2, Dual2_5000) from the 44 public problems available from plato.asu.edu.
 - The full tables, per-problem times and raw data are in [benchmarks/paper/summary.md](benchmarks/paper/summary.md), `per_problem.csv` and `results.json`. For the reproduction procedure (Linux), see [scripts/paper_bench/README.md](scripts/paper_bench/README.md).
 
+### Mixed-integer linear optimization (MIPLIB 2017)
+
+We compared with HiGHS 1.15.1 on 40 small to medium problems from MIPLIB 2017 (measured on 12 October 2026). Both solvers were given 16 threads and a time limit of 60 s.
+
+| | ENOMOTO | HiGHS |
+|---|---|---|
+| Problems solved / shifted geometric mean of the solve time (s) | **22** / **22.3** | 20 / 25.4 |
+
+On the problems that both solvers proved optimal, no objective values disagreed. The per-problem results are below. "t" means the run was stopped by the time limit, and the objective is then the value of the best integer solution (incumbent) at that point ("-" means no integer solution). Bold marks the faster time, or, on problems where both solvers were stopped, the better objective.
+
+| Problem | ENOMOTO [s] | HiGHS [s] | ENOMOTO objective | HiGHS objective |
+|---|---:|---:|---:|---:|
+| gen-ip002 | t | t | **-4783.73** | -4762.79 |
+| gen-ip054 | t | t | **6852.68** | 6858.88 |
+| pk1 | t | t | **11** | 14 |
+| gr4x6 | **0.01** | 0.07 | 202.35 | 202.35 |
+| markshare_4_0 | **3.46** | t | 1 | 1 |
+| mas74 | t | t | **11801.2** | 12014.9 |
+| mas76 | **39.42** | t | 40005.1 | 40005.1 |
+| neos5 | t | t | 15 | 15 |
+| p0201 | 2.28 | **0.92** | 7615 | 7615 |
+| misc07 | **8.25** | 32.60 | 2810 | 2810 |
+| flugpl | **0.03** | 0.11 | 1.2015e+06 | 1.2015e+06 |
+| dcmulti | **1.10** | 1.37 | 188182 | 188182 |
+| gt2 | 0.08 | **0.06** | 21166 | 21166 |
+| khb05250 | 0.79 | **0.34** | 1.0694e+08 | 1.0694e+08 |
+| qnet1 | 3.65 | **0.76** | 16029.7 | 16029.7 |
+| rout | **9.76** | 38.98 | 1077.56 | 1077.56 |
+| 10teams | 5.99 | **1.91** | 924 | 924 |
+| air03 | **0.78** | 3.37 | 340160 | 340160 |
+| blend2 | **0.56** | 3.37 | 7.59898 | 7.59898 |
+| fiber | 1.70 | **1.09** | 405935 | 405935 |
+| noswot | t | t | -41 | -41 |
+| qiu | **36.18** | t | -132.873 | -132.873 |
+| neos-911970 | t | **13.27** | 58.34 | 54.76 |
+| 30n20b8 | t | t | - | **553** |
+| binkar10_1 | 33.68 | **27.44** | 6742.2 | 6742.2 |
+| neos-860300 | 34.44 | **20.09** | 3201 | 3201 |
+| eil33-2 | **42.06** | t | 934.008 | 987.674 |
+| nw04 | **8.11** | t | 16862 | 52674 |
+| assign1-5-8 | t | t | 214 | **212** |
+| beavma | 1.00 | **0.29** | 383285 | 383285 |
+| blp-ar98 | t | t | **6995.88** | - |
+| ran14x18-disj-8 | t | t | 3744 | 3744 |
+| h80x6320d | t | **21.24** | 6757.85 | 6382.1 |
+| supportcase26 | t | t | 1946.56 | **1772.96** |
+| timtab1 | t | **55.36** | 880252 | 764774 |
+| bppc4-08 | t | t | 62 | **53** |
+| cvs16r128-89 | t | t | **-35** | -3 |
+| mik-250-20-75-4 | **5.00** | 18.54 | -52301 | -52301 |
+| neos-1456979 | t | t | - | **205** |
+| graph20-20-1rand | t | t | -6 | **-8** |
+
+- Machine: a laptop with an AMD Ryzen 7 5700U (8 cores 16 threads, 16 GB memory), Windows 11. All settings other than the time limit and the number of threads are the defaults (the default relative gap is 0 for ENOMOTO and 1e-4 for HiGHS).
+- Times cover the solve call only (reading the MPS file and building the model are not included) and come from a single run. Each problem is solved in a separate subprocess; the shifted geometric mean uses a shift of 10 s and counts unsolved problems at 60 s.
+- The raw data are in [benchmarks/miplib_results_16t_60s_20261012.json](benchmarks/miplib_results_16t_60s_20261012.json). Reproduce with `python scripts/run_miplib_benchmark.py --time-limit 60 --threads 16` (the problems are downloaded from the MIPLIB site on the first run).
+
 ### Easy comparison with HiGHS on Netlib
 
 The Netlib LP data has no license that explicitly permits redistribution, so it is not included in this repository ([docs/netlib-data.md](docs/netlib-data.md)). Download and decompress it only once at the start.
