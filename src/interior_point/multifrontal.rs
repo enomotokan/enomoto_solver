@@ -75,6 +75,27 @@ pub fn take_prof() -> [f64; 4] {
     o
 }
 
+/// 計測用: 前線の大きさ `f` で分けた区分 (`f` < 32, < 128, < 512, < 2048, それ以上、並列に計算した大きな前線) ごとの
+/// 節点の数・各段階の時間 (ナノ秒、組み立てと extend-add・対角ブロックの分解・三角行列の解法・更新行列) と演算量
+/// (分解 `nc^3/3`・三角行列の解法 `nc^2 r`・更新行列 `nc r^2`)。
+pub const N_BUCKET: usize = 6;
+static BUCKET_N: [std::sync::atomic::AtomicU64; N_BUCKET] = [const { std::sync::atomic::AtomicU64::new(0) }; N_BUCKET];
+static BUCKET_T: [[std::sync::atomic::AtomicU64; 4]; N_BUCKET] = [const { [const { std::sync::atomic::AtomicU64::new(0) }; 4] }; N_BUCKET];
+static BUCKET_F: [[std::sync::atomic::AtomicU64; 3]; N_BUCKET] = [const { [const { std::sync::atomic::AtomicU64::new(0) }; 3] }; N_BUCKET];
+
+/// 計測用: 区分ごとの (節点の数, 各段階の秒, 各段階の演算量) を返して 0 に戻す。
+pub fn take_bucket_prof() -> Vec<(u64, [f64; 4], [f64; 3])> {
+    use std::sync::atomic::Ordering::Relaxed;
+    (0..N_BUCKET)
+        .map(|b| {
+            let n = BUCKET_N[b].swap(0, Relaxed);
+            let t = std::array::from_fn(|i| BUCKET_T[b][i].swap(0, Relaxed) as f64 * 1e-9);
+            let f = std::array::from_fn(|i| BUCKET_F[b][i].swap(0, Relaxed) as f64);
+            (n, t, f)
+        })
+        .collect()
+}
+
 /// 細い supernode (列が少なく下の行が多い) を親へまとめる。子 `c` を親 `p` にまとめると、`c` の更新行列 (`r_c x r_c`)
 /// の extend-add と確保がなくなる代わりに、`c` の列が親の前線の大きさで消去される (0 の分の演算が増える)。
 /// 増える演算量が `alpha * r_c (r_c + 1) / 2` より小さければまとめる。まとめた節点の列が並ぶように番号を付け直す
@@ -787,6 +808,15 @@ impl Multifrontal {
             PROF[1].fetch_add(d(tp1, tp2), Relaxed);
             PROF[2].fetch_add(d(tp2, tp3), Relaxed);
             PROF[3].fetch_add(d(tp3, tp4) - ea_ns, Relaxed);
+            let bk = if big { 5 } else { [32usize, 128, 512, 2048].iter().position(|&lim| f < lim).unwrap_or(4) };
+            BUCKET_N[bk].fetch_add(1, Relaxed);
+            for (i, v) in [d(tp0, tp1) + ea_ns, d(tp1, tp2), d(tp2, tp3), d(tp3, tp4) - ea_ns].into_iter().enumerate() {
+                BUCKET_T[bk][i].fetch_add(v, Relaxed);
+            }
+            let (ncf, rf) = (nc as f64, r as f64);
+            for (i, v) in [ncf * ncf * ncf / 3.0, ncf * ncf * rf, ncf * rf * rf].into_iter().enumerate() {
+                BUCKET_F[bk][i].fetch_add(v as u64, Relaxed);
+            }
             if big {
                 eprintln!("MF big node s={s} nc={nc} r={r} children={} asm+ea={:.3}ms chol={:.3}ms trsm={:.3}ms syrk={:.3}ms", self.children[s].len(),
                     (d(tp0, tp1) + ea_ns) as f64 * 1e-6, d(tp1, tp2) as f64 * 1e-6, d(tp2, tp3) as f64 * 1e-6, (d(tp3, tp4) - ea_ns) as f64 * 1e-6);
@@ -1135,6 +1165,63 @@ impl Multifrontal {
             let col = &mut rhs[c * n..(c + 1) * n];
             for i in 0..n {
                 col[self.perm_fwd[i]] = x[i * k + c];
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod kernel_bench {
+    use faer::linalg::cholesky::llt::compute::{cholesky_in_place, cholesky_in_place_req, LltParams, LltRegularization};
+    use faer::linalg::matmul::triangular::BlockStructure;
+    use faer::{dyn_stack::{GlobalPodBuffer, PodStack}, Mat, Parallelism};
+
+    fn best<F: FnMut()>(reps: usize, mut f: F) -> f64 {
+        let mut b = f64::INFINITY;
+        for _ in 0..reps {
+            let t = std::time::Instant::now();
+            f();
+            b = b.min(t.elapsed().as_secs_f64());
+        }
+        b
+    }
+
+    /// 計測用 (`cargo test --release kernel_bench -- --ignored --nocapture`): マルチフロンタル法の前線で使う faer の
+    /// 密な演算 (下三角の行列積 `U -= L21 L21ᵀ`・Cholesky・三角行列の解法) の GFLOPS を、大きさと並列度ごとに出す
+    /// (前線の大きさ別の内訳 `scripts/mf_bench/buckets.py` と比べて、faer が出せる速さとの差を見る)。
+    #[test]
+    #[ignore]
+    fn kernel_bench() {
+        let pars = [("seq", Parallelism::None), ("par", Parallelism::Rayon(0))];
+        for (pn, par) in pars {
+            // 下三角の行列積: r x r の下三角に r x nc と nc x r の積を足す。
+            for (r, nc) in [(32usize, 16usize), (64, 32), (128, 32), (128, 128), (512, 32), (512, 128), (512, 512), (2048, 64), (2048, 256), (4096, 256), (4096, 1024)] {
+                let a = Mat::<f64>::from_fn(r, nc, |i, j| ((i * 7 + j * 3) % 11) as f64 * 0.1);
+                let mut u = Mat::<f64>::zeros(r, r);
+                let reps = (2e9 / ((r * r * nc) as f64 + 1e5)).clamp(3.0, 2000.0) as usize;
+                let t = best(reps, || {
+                    faer::linalg::matmul::triangular::matmul(u.as_mut(), BlockStructure::TriangularLower, a.as_ref(), BlockStructure::Rectangular, a.as_ref().transpose(), BlockStructure::Rectangular, Some(1.0), -1.0, par);
+                });
+                println!("KBENCH {pn} syrk r={r} nc={nc} t={:.3e}s GFLOPS={:.1}", t, (r * r * nc) as f64 / t * 1e-9);
+            }
+            // Cholesky (nc x nc) と三角行列の解法 (r x nc を L11ᵀ で割る)。
+            for (nc, r) in [(16usize, 64usize), (32, 128), (128, 512), (512, 2048), (2048, 2048)] {
+                let base = Mat::<f64>::from_fn(nc, nc, |i, j| if i == j { nc as f64 + 1.0 } else { 1.0 / (1.0 + (i + j) as f64) });
+                let mut l = base.clone();
+                let mut buf = GlobalPodBuffer::new(cholesky_in_place_req::<f64>(nc, par, LltParams::default()).unwrap());
+                let reps = (2e9 / ((nc * nc * nc) as f64 + 1e5)).clamp(3.0, 2000.0) as usize;
+                let tc = best(reps, || {
+                    l.copy_from(&base);
+                    cholesky_in_place(l.as_mut(), LltRegularization::default(), par, PodStack::new(&mut buf), LltParams::default()).unwrap();
+                });
+                let b0 = Mat::<f64>::from_fn(r, nc, |i, j| ((i + 2 * j) % 5) as f64);
+                let mut b = b0.clone();
+                let tt = best(reps, || {
+                    b.copy_from(&b0);
+                    faer::linalg::triangular_solve::solve_lower_triangular_in_place(l.as_ref(), b.as_mut().transpose_mut(), par);
+                });
+                println!("KBENCH {pn} chol nc={nc} t={tc:.3e}s GFLOPS={:.1} | trsm nc={nc} r={r} t={tt:.3e}s GFLOPS={:.1}",
+                    (nc * nc * nc) as f64 / 3.0 / tc * 1e-9, (nc * nc * r) as f64 / tt * 1e-9);
             }
         }
     }

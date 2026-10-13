@@ -599,6 +599,7 @@ impl AugKkt {
             dynamic_regularization_epsilon: tunable!("ENOMOTO_T_KKT_PIVOT_EPS", PIVOT_EPS, f64),
         };
         if let Some(mf) = self.mf.as_mut() {
+            let t_aug = std::time::Instant::now();
             let ok = mf.factor(a_upper.values(), reg.dynamic_regularization_delta, reg.dynamic_regularization_epsilon);
             self.n_regularized = super::multifrontal::DYNREG.swap(0, std::sync::atomic::Ordering::Relaxed);
             if env_str!("ENOMOTO_DEBUG_REFINE").is_some() {
@@ -606,6 +607,12 @@ impl AugKkt {
                 eprintln!("FACTOR aug mf ok={ok} dynreg={} max|value|={vmax:.2e} top[min,max]=[{:.2e},{:.2e}] mid[min,max]=[{:.2e},{:.2e}]", self.n_regularized,
                     top.iter().cloned().fold(f64::INFINITY, f64::min), top.iter().cloned().fold(0.0, f64::max),
                     mid.iter().cloned().fold(f64::INFINITY, f64::min), mid.iter().cloned().fold(f64::NEG_INFINITY, f64::max));
+                eprintln!("FACTOR mf ok={ok} t={:.3}s prof={:?} dynreg=0", t_aug.elapsed().as_secs_f64(), super::multifrontal::take_prof());
+                for (b, (cnt, t, fl)) in super::multifrontal::take_bucket_prof().into_iter().enumerate() {
+                    if cnt > 0 {
+                        eprintln!("MFBUCKET b={b} n={cnt} t={t:?} flops={fl:?}");
+                    }
+                }
             }
             self.factored = true;
             return;
@@ -1035,6 +1042,11 @@ impl NormalKkt {
             let ok = mf.factor(&self.values, reg.dynamic_regularization_delta, reg.dynamic_regularization_epsilon);
             if env_str!("ENOMOTO_DEBUG_REFINE").is_some() {
                 eprintln!("FACTOR mf ok={ok} t={:.3}s prof={:?} dynreg={}", t_num.elapsed().as_secs_f64(), super::multifrontal::take_prof(), super::multifrontal::DYNREG.swap(0, std::sync::atomic::Ordering::Relaxed));
+                for (b, (cnt, t, fl)) in super::multifrontal::take_bucket_prof().into_iter().enumerate() {
+                    if cnt > 0 {
+                        eprintln!("MFBUCKET b={b} n={cnt} t={t:?} flops={fl:?}");
+                    }
+                }
             }
             ok
         } else {

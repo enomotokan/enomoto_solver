@@ -10,6 +10,7 @@
   - `ipm_total`: 内点法の Newton 系の部分の累計 (`IPM profile total=`)
   - `backend`: 分解に使ったもの (`NormalKkt: backend=` / `AugKkt: backend=`)
   - `maxrss_mb`: ワーカーのプロセスの最大常駐メモリ
+`--save-stderr` なら標準エラーを保存する (`scripts/mf_bench/buckets.py` で前線の大きさ別の内訳を集計する)。
 `--mf-prof` なら `ENOMOTO_DEBUG_MF=1 ENOMOTO_DEBUG_REFINE=1` も付けて、分解ごとの内訳
 (前線の組み立てと extend-add・対角ブロックの分解・三角行列の解法・更新行列の計算、スレッドの和) を合計する
 (計時の手間が入るので、時間の比較とは別に実行する)。
@@ -81,7 +82,7 @@ def parse(stdout: str, stderr: str) -> dict:
     return res
 
 
-def run_one(mps: Path, timeout: float, mem_gb: float, env_extra: dict, mf_prof: bool) -> dict:
+def run_one(mps: Path, timeout: float, mem_gb: float, env_extra: dict, mf_prof: bool, save_stderr: Path | None = None) -> dict:
     cmd = [sys.executable, "-c", WRAP, str(REPO / "scripts/crossover_bench/run.py"), "--worker", str(mps), "ipm_crossover"]
     env = dict(os.environ)
     env["ENOMOTO_DEBUG_IPM"] = "1"
@@ -97,6 +98,9 @@ def run_one(mps: Path, timeout: float, mem_gb: float, env_extra: dict, mf_prof: 
     except subprocess.TimeoutExpired:
         return {"status": "timeout", "time": timeout}
     res = parse(p.stdout, p.stderr)
+    if save_stderr is not None:
+        save_stderr.parent.mkdir(parents=True, exist_ok=True)
+        save_stderr.write_text(p.stderr)
     res["wall"] = time.perf_counter() - t0
     if "status" not in res:
         res["status"] = "crash"
@@ -115,6 +119,7 @@ def main() -> None:
     ap.add_argument("--time-limit", type=float, default=600.0)
     ap.add_argument("--mem-gb", type=float, default=13.5)
     ap.add_argument("--mf-prof", action="store_true")
+    ap.add_argument("--save-stderr", type=Path, help="1 回ごとの標準エラーを <dir>/<問題>__<版>__<回>.txt に保存する")
     ap.add_argument("--out", type=Path, required=True)
     args = ap.parse_args()
 
@@ -138,7 +143,8 @@ def main() -> None:
                 for v, env in variants.items():
                     if done.get((name, v), 0) > rep:
                         continue
-                    r = run_one(mps, args.time_limit, args.mem_gb, env, args.mf_prof)
+                    se = args.save_stderr / f"{name}__{v}__{rep}.txt" if args.save_stderr else None
+                    r = run_one(mps, args.time_limit, args.mem_gb, env, args.mf_prof, se)
                     rec = {"problem": name, "variant": v, "rep": rep, "env": env, "prof_mode": args.mf_prof, **r}
                     with open(args.out, "a") as f:
                         f.write(json.dumps(rec) + "\n")
