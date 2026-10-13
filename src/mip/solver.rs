@@ -204,6 +204,11 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// これまでの近さの最大値、次に呼んでよいノード番号。
     /// 根で同じヒューリスティクスを呼んだときの近さ (`ENOMOTO_MIP_NOINC_ROOT_PRIOR` でバンディットの初期値にする)。
     noinc_prior: [Option<f64>; NOINC_ARMS],
+    /// 「木を進める」腕を選んで、木だけを進めている間の (始めた時刻 [秒], 終える時刻 [秒], その間のノードの LP 解の
+    /// 分数の列の数の最小)。
+    noinc_tree_win: Option<(f64, f64, usize)>,
+    /// 根のヒューリスティクスを始めるときの LP 解の分数の列の数 (「木を進める」腕の近さの基準)。
+    noinc_root_frac: usize,
     noinc_stall: u32,
     noinc_best_close: f64,
     noinc_next_node: u64,
@@ -876,6 +881,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         noinc_count: [0; NOINC_ARMS],
         noinc_cost: [0.0; NOINC_ARMS],
         noinc_prior: [None; NOINC_ARMS],
+        noinc_tree_win: None,
+        noinc_root_frac: 0,
         noinc_stall: 0,
         noinc_best_close: 0.0,
         noinc_next_node: 0,
@@ -1039,8 +1046,11 @@ fn proof_only() -> bool {
 }
 
 /// 暫定解がない間の木の中のヒューリスティクスの腕の数 (0: RENS、1: Feasibility Pump、2..8: ダイビング
-/// 分数・ベクトル長・係数・擬似費用・Farkas・衝突)。
-const NOINC_ARMS: usize = 8;
+/// 分数・ベクトル長・係数・擬似費用・Farkas・衝突、8: 何もせず木を進める ([`NOINC_TREE_ARM`]))。
+const NOINC_ARMS: usize = 9;
+
+/// 「木を進める」腕 (`ENOMOTO_MIP_NOINC_TREE_ARM` のときだけ選ぶ)。
+const NOINC_TREE_ARM: usize = 8;
 
 /// 根のヒューリスティクスの名前に対応する、暫定解がない間の木の中のバンディットの腕 ([`NOINC_ARMS`] の番号)。
 /// 擬似費用・Farkas・衝突のダイビングは根では使わない。
@@ -1590,6 +1600,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 根のヒューリスティクス
         {
             let x = self.lp.col_values();
+            self.noinc_root_frac = self.fractional(&x).len();
             // 並列モード: サブ MIP を使うヒューリスティクスは別スレッドで解かせる
             self.parallel_submips = mip_threads() > 1 && !self.params.submip;
             if self.fractional(&x).is_empty() {
@@ -2376,7 +2387,28 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         tunable!("ENOMOTO_T_MIP_NOINC_TIME_FRAC", 0.3, f64)
                     };
                     let spaced = !adapt_budget || self.nodes >= self.noinc_next_node;
-                    if noinc && spaced && self.noinc_secs < time_frac * self.start.elapsed().as_secs_f64() {
+                    // 「木を進める」腕 (`ENOMOTO_MIP_NOINC_TREE_ARM`、バンディットのとき): 選ばれたら、腕の 1 回の平均時間だけ
+                    // ヒューリスティクスを呼ばずに木を進める。その間のノードの LP 解の分数の列の数の最小を根の LP 解の数と
+                    // 比べたものを近さ (報酬) にする (ダイビングの近さと同じ物差し)。木の方が解に近づく問題 (neos-1456979 は
+                    // 木の探索そのものが最初の解を見つける) では、ヒューリスティクスより木に時間が回る
+                    let mut tree_busy = false;
+                    if let Some((t_start, t_end, fmin)) = self.noinc_tree_win {
+                        let fmin = fmin.min(self.fractional(&x).len());
+                        let now = self.start.elapsed().as_secs_f64();
+                        if self.incumbent.is_some() || now >= t_end {
+                            let found = self.incumbent.is_some();
+                            let close = if found { 1.0 } else if self.noinc_root_frac > 0 { (1.0 - fmin as f64 / self.noinc_root_frac as f64).max(0.0) } else { 0.0 };
+                            self.noinc_update_arm(NOINC_TREE_ARM, if found { 2.0 } else { close }, now - t_start);
+                            self.noinc_tree_win = None;
+                            if self.params.verbose && env_str!("ENOMOTO_MIP_DEBUG_NOINC").is_some() {
+                                eprintln!("MIP:   no-incumbent heuristic arm {NOINC_TREE_ARM} (tree): close {close:.3} found {found} ({:.2}s, node {})", now - t_start, self.nodes);
+                            }
+                        } else {
+                            self.noinc_tree_win = Some((t_start, t_end, fmin));
+                            tree_busy = true;
+                        }
+                    }
+                    if noinc && spaced && !tree_busy && self.noinc_secs < time_frac * self.start.elapsed().as_secs_f64() {
                         let t0 = Instant::now();
                         let it0 = self.lp.total_iterations();
                         // 腕を選ぶ。`ENOMOTO_MIP_NOINC_BANDIT` なら UCB (報酬は解が見つかれば 2、見つからなければ近さ、
@@ -2393,7 +2425,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         };
                         let inc0 = self.incumbent.as_ref().map(|(z, _)| *z);
                         self.heur_close = 0.0;
+                        if arm == NOINC_TREE_ARM {
+                            let calls: u32 = self.noinc_count.iter().enumerate().filter(|&(a, _)| a != NOINC_TREE_ARM).map(|(_, &c)| c).sum();
+                            let cost: f64 = (0..NOINC_ARMS).filter(|&a| a != NOINC_TREE_ARM).map(|a| self.noinc_cost[a]).sum();
+                            let len = if calls > 0 { cost / calls as f64 } else { 5.0 };
+                            let now = self.start.elapsed().as_secs_f64();
+                            self.noinc_tree_win = Some((now, now + len.max(0.5), usize::MAX));
+                        }
                         match arm {
+                            NOINC_TREE_ARM => {}
                             0 => {
                                 self.rens_dive();
                             }
@@ -2419,7 +2459,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         self.noinc_calls += 1;
                         self.heur_iters += self.lp.total_iterations() - it0;
                         self.noinc_secs += secs;
-                        if bandit {
+                        if bandit && arm != NOINC_TREE_ARM {
                             self.noinc_update_arm(arm, if found { 2.0 } else { close }, secs);
                         }
                         if adapt_budget {
@@ -2830,7 +2870,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
     fn noinc_select_arm(&self) -> usize {
         let w = if env_str!("ENOMOTO_MIP_NOINC_ROOT_PRIOR").is_some() { tunable!("ENOMOTO_T_MIP_NOINC_PRIOR_W", 1.0, f64) } else { 0.0 };
         let prior = |a: usize| if w > 0.0 { self.noinc_prior[a] } else { None };
-        if let Some(a) = (0..NOINC_ARMS).find(|&a| self.noinc_count[a] == 0 && prior(a).is_none()) {
+        let n_arms = if env_str!("ENOMOTO_MIP_NOINC_TREE_ARM").is_some() { NOINC_ARMS } else { NOINC_TREE_ARM };
+        if let Some(a) = (0..n_arms).find(|&a| self.noinc_count[a] == 0 && prior(a).is_none()) {
             return a;
         }
         let n_eff = |a: usize| self.noinc_count[a] as f64 + if prior(a).is_some() { w } else { 0.0 };
@@ -2847,7 +2888,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let reward = self.noinc_reward[a] + w * prior(a).unwrap_or(0.0);
             reward / n / (cost / mean_cost).sqrt().max(1.0) + c * (2.0 * total.max(1.0).ln() / n).sqrt()
         };
-        (0..NOINC_ARMS).max_by(|&a, &b| score(a).total_cmp(&score(b))).unwrap()
+        (0..n_arms).max_by(|&a, &b| score(a).total_cmp(&score(b))).unwrap()
     }
 
     fn noinc_update_arm(&mut self, arm: usize, reward: f64, secs: f64) {
