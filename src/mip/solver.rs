@@ -311,6 +311,11 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 木を分け合うときの自分の番号、学習の記録をどこまで読んだか、ほかのスレッドの記録を取り込んでいる最中か、
     /// 取り込んだ [証明, 衝突] の数。
     pool_tid: u32,
+    /// racing ramp-up: このスレッドが競争の結果を処理したか、探索の多様化の種類 (bit 0: 子の順を逆に、bit 1: 分枝の
+    /// スコアに揺らぎ) と、その乱数の状態。
+    race_done: bool,
+    race_div: u8,
+    race_rng: u64,
     learned_cursor: u64,
     importing: bool,
     learned_stats: [u64; 2],
@@ -549,6 +554,9 @@ pub(crate) struct WorkPool {
     /// 各スレッド (`pool_tid`) の下界・待ち行列のノード数・処理したノード数 ([`Solver::note_current_lb`])。共有の
     /// 待ち行列のノードと合わせて全体の下界になる (利用者向けのログに使う)。
     slots: Vec<ThreadSlot>,
+    /// racing ramp-up (`ENOMOTO_MIP_TREE_RACING`): 競争中か、勝者のスレッド番号 (決まるまで -1)。
+    racing: std::sync::atomic::AtomicBool,
+    race_winner: std::sync::atomic::AtomicI64,
     /// 診断用: 木の探索を始めた時刻と、終わったスレッドの [`TreeProf`]。
     t0: Instant,
     prof: std::sync::Mutex<Vec<TreeProf>>,
@@ -557,8 +565,9 @@ pub(crate) struct WorkPool {
 /// 双対証明・衝突制約のプールの行の状態。
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ProofState {
-    /// 自前で、まだほかのスレッドに知らせていない (このスレッドで初めて刈り込み・締め付けに使われたら知らせる)。
-    Own,
+    /// 自前で、まだほかのスレッドに知らせていない。刈り込み・締め付けに使われた回数を持つ (`ENOMOTO_T_MIP_TREE_SHARE_PROOF_USES`
+    /// 回使われたら知らせる)。
+    Own(u16),
     /// 自前で、知らせた (または知らせない) もの。
     OwnDone,
     /// ほかのスレッドから取り込んだもの。
@@ -692,6 +701,8 @@ impl WorkPool {
             learned: std::sync::Mutex::new(Learned::default()),
             next_tid: std::sync::atomic::AtomicU32::new(0),
             threads,
+            racing: std::sync::atomic::AtomicBool::new(false),
+            race_winner: std::sync::atomic::AtomicI64::new(-1),
             t0: Instant::now(),
             prof: std::sync::Mutex::new(Vec::new()),
             pc: std::sync::Mutex::new(pc),
@@ -884,6 +895,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
     dom.take_changed();
     let lp = L::new(&dom.lo, &dom.up, &p.cost, &p.rows, &p.row_lo, &p.row_up);
     let pool_tid = pool.as_ref().map_or(0, |p| p.next_tid.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+    // racing ramp-up の競争中に始めた従か (主は start_workers で決める)
+    let racing0 = pool.as_ref().is_some_and(|pl| pl.racing.load(std::sync::atomic::Ordering::Relaxed));
     let mut s: Solver<L> = Solver {
         p,
         params,
@@ -988,6 +1001,9 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         seen_best: f64::INFINITY,
         pc_base: None,
         pool_tid,
+        race_done: !racing0,
+        race_div: if racing0 { (pool_tid % 4) as u8 } else { 0 },
+        race_rng: 0x2545_F491_4F6C_DD1D ^ (pool_tid as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15),
         learned_cursor: 0,
         importing: false,
         learned_stats: [0; 2],
@@ -1925,7 +1941,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             // `ENOMOTO_T_MIP_TREE_START_NODES`: 従を始める待ち行列のノード数 (多いほど最初に配るノードが増える)
             if parallel_tree && self.pool.is_none() && self.queue.len() + plunge.is_some() as usize >= tunable!("ENOMOTO_T_MIP_TREE_START_NODES", 2usize, usize) {
-                self.start_workers();
+                self.start_workers(&mut plunge);
+            }
+            // racing ramp-up: 競争の終わり (主が決める) と、負けたスレッドの木を捨てる
+            if self.pool.is_some() && !self.race_done && self.race_step(&mut plunge) {
+                continue;
             }
             // 木を分け合う: 大域的な境界の締め付けを共有する (64 ノードおき)
             let t_sync = Instant::now();
@@ -2748,6 +2768,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let cd = self.pc.cost_down(col) * f;
                 if (cu - cd).abs() <= 1e-12 * (1.0 + cu.abs()) { f >= 0.5 } else { cu < cd }
             };
+            let prefer_up = prefer_up ^ (self.race_div & 1 == 1 && !self.race_done);
             let (first_c, second_c) = if prefer_up { (up, down) } else { (down, up) };
             let basis = Rc::new(self.lp.basis());
             let basis_epoch = self.row_log.len();
@@ -3043,6 +3064,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let hybrid = env_str!("ENOMOTO_MIP_NO_HYBRID_SCORE").is_none();
         let score_of = |s: &Self, j: usize, v: f64| if hybrid { s.pc.hybrid_score(j, v - v.floor()) } else { s.pc.score(j, v - v.floor()) };
         let mut cands: Vec<(usize, f64, f64)> = frac.iter().map(|&(j, v)| (j, v, score_of(self, j, v))).collect();
+        // racing ramp-up の多様化: 擬似費用のスコアに ±10% の揺らぎを加える
+        if self.race_div & 2 == 2 && !self.race_done {
+            for c in cands.iter_mut() {
+                self.race_rng ^= self.race_rng << 13;
+                self.race_rng ^= self.race_rng >> 7;
+                self.race_rng ^= self.race_rng << 17;
+                let u = (self.race_rng >> 11) as f64 / (1u64 << 53) as f64;
+                c.2 *= 0.9 + 0.2 * u;
+            }
+        }
         cands.sort_by(|a, b| b.2.total_cmp(&a.2));
         // 予算: ノード LP の反復数 (強分岐を除く) の 0.125 倍 + 25000
         let quot = tunable!("ENOMOTO_T_MIP_SB_QUOT", 0.125, f64) * self.node_iters as f64;
@@ -3865,7 +3896,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// (長さが `ENOMOTO_T_MIP_TREE_SHARE_PROOF_LEN` 以下のものだけ)。
     fn proof_used(&mut self, k: usize) {
         self.proof_ref[k] = true;
-        if self.proof_state[k] != ProofState::Own {
+        let ProofState::Own(uses) = self.proof_state[k] else { return };
+        let uses = uses.saturating_add(1);
+        if (uses as u64) < tunable!("ENOMOTO_T_MIP_TREE_SHARE_PROOF_USES", 1u64, u64) {
+            self.proof_state[k] = ProofState::Own(uses);
             return;
         }
         self.proof_state[k] = ProofState::OwnDone;
@@ -3874,7 +3908,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return;
         }
         let (c, konst, obj) = &self.dual_proofs[k];
-        if c.len() > tunable!("ENOMOTO_T_MIP_TREE_SHARE_PROOF_LEN", usize::MAX, usize) {
+        // 長さの上限: 絶対 (`ENOMOTO_T_MIP_TREE_SHARE_PROOF_LEN`) と列数に対する割合 (`ENOMOTO_T_MIP_TREE_SHARE_LEN_FRAC`、0 なら無制限)
+        let frac = tunable!("ENOMOTO_T_MIP_TREE_SHARE_LEN_FRAC", 0.0, f64);
+        if c.len() > tunable!("ENOMOTO_T_MIP_TREE_SHARE_PROOF_LEN", usize::MAX, usize) || (frac > 0.0 && c.len() as f64 > frac * self.p.n as f64) {
             return;
         }
         learned_push(&pool, self.pool_tid, LearnedItem::Proof(c.clone(), *konst, *obj));
@@ -3893,8 +3929,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         };
         // 木を分け合う: 自前の証明は、このスレッドで初めて刈り込み・締め付けに使われたときにほかのスレッドに知らせる
         // ([`Self::proof_used`])。`ENOMOTO_MIP_TREE_SHARE_PROOFS_AT_ONCE` なら以前と同じく作ったときに知らせる
-        let mut state = if self.importing { ProofState::Imported } else { ProofState::Own };
-        if state == ProofState::Own && env_str!("ENOMOTO_MIP_TREE_SHARE_PROOFS_AT_ONCE").is_some() {
+        let mut state = if self.importing { ProofState::Imported } else { ProofState::Own(0) };
+        if state == ProofState::Own(0) && env_str!("ENOMOTO_MIP_TREE_SHARE_PROOFS_AT_ONCE").is_some() {
             if let Some(pool) = &self.pool {
                 if env_str!("ENOMOTO_MIP_TREE_NO_SHARED_PROOFS").is_none() {
                     learned_push(pool, self.pool_tid, LearnedItem::Proof(coefs.clone(), konst, obj));
@@ -4217,8 +4253,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         if let Some(pool) = &self.pool {
             if env_str!("ENOMOTO_MIP_TREE_NO_SHARED_PROOFS").is_none() {
+                let max_len = tunable!("ENOMOTO_T_MIP_TREE_SHARE_LITS_LEN", usize::MAX, usize);
+                let frac = tunable!("ENOMOTO_T_MIP_TREE_SHARE_LEN_FRAC", 0.0, f64);
                 for l in used {
-                    learned_push(pool, self.pool_tid, LearnedItem::Lits(l));
+                    if l.len() <= max_len && (frac <= 0.0 || l.len() as f64 <= frac * self.p.n as f64) {
+                        learned_push(pool, self.pool_tid, LearnedItem::Lits(l));
+                    }
                 }
             }
         }
@@ -4952,7 +4992,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// 木を分け合う従のスレッドを始める (根の処理を終えて木の探索に入るところで、主が呼ぶ)。従は根の後の写し (ノードなし)
     /// から始め、共有の待ち行列からノードを取る。見つけた解は主に渡す。
-    fn start_workers(&mut self) {
+    fn start_workers(&mut self, plunge: &mut Option<OpenNode>) {
         let n = self.params.threads - 1;
         // 以後は木の探索が全てのスレッドを使うので、このスレッドの基底のない求解は同時実行にしない
         crate::simplex::mip_lp::set_cold_race_threads(1);
@@ -4973,7 +5013,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.pool_busy = true;
         self.pc_base = Some(self.pc.clone());
         self.pool_tid = pool.next_tid.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let snap = self.make_snapshot(&shared, &mut None, false);
+        // racing ramp-up: 従は今の未処理のノードを全部持って始め、各スレッドが同じ木を別の順で探索する
+        let racing = env_str!("ENOMOTO_MIP_TREE_RACING").is_some();
+        pool.racing.store(racing, std::sync::atomic::Ordering::Relaxed);
+        self.race_done = !racing;
+        let snap = if racing { self.make_snapshot(&shared, plunge, true) } else { self.make_snapshot(&shared, &mut None, false) };
         // 従は主が止める (止める合図)。時間の上限は主より少し後にして、主より先に止まらないようにする
         let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64() + 2.0);
         let params = MipParams { time_limit: remaining, node_limit: u64::MAX, verbose: false, threads: 1, ..self.params };
@@ -5063,12 +5107,61 @@ impl<'a, L: MipLp> Solver<'a, L> {
         n
     }
 
+    /// racing ramp-up の進行 (競争中のスレッドがノードごとに呼ぶ)。主は競争の時間 (`ENOMOTO_T_MIP_TREE_RACE_SECS`) が過ぎたら、
+    /// 自分の木の下界 (未処理のノードの最小) が最も大きいスレッドを勝者にする。自分の木を探索し終えたスレッドは (全体を
+    /// 解き終えたので) 自分を勝者にする。勝者が決まったら、負けたスレッドは自分の木を捨てて共有の待ち行列から取る (勝者は
+    /// 待っているスレッドにノードを渡す)。木を捨てたら真。
+    fn race_step(&mut self, plunge: &mut Option<OpenNode>) -> bool {
+        use std::sync::atomic::Ordering;
+        let Some(pool) = self.pool.clone() else { return false };
+        let t = self.pool_tid as i64;
+        if pool.race_winner.load(Ordering::Acquire) < 0 {
+            let exhausted = self.queue.len() == 0 && plunge.is_none();
+            let timeup = self.snap.is_none() && pool.t0.elapsed().as_secs_f64() >= tunable!("ENOMOTO_T_MIP_TREE_RACE_SECS", 5.0, f64);
+            if exhausted {
+                let _ = pool.race_winner.compare_exchange(-1, t, Ordering::AcqRel, Ordering::Acquire);
+            } else if timeup {
+                let mut best = (f64::NEG_INFINITY, t);
+                for (i, sl) in pool.slots.iter().enumerate() {
+                    let v = f64::from_bits(sl.lb.load(Ordering::Relaxed));
+                    if v > best.0 {
+                        best = (v, i as i64);
+                    }
+                }
+                let _ = pool.race_winner.compare_exchange(-1, best.1, Ordering::AcqRel, Ordering::Acquire);
+            } else {
+                return false;
+            }
+        }
+        let w = pool.race_winner.load(Ordering::Acquire);
+        if prof_tree_par() {
+            eprintln!("TREEPAR: race tid {t} sees winner {w} at {:.2}s (own lb {:.6e}, open {})", pool.t0.elapsed().as_secs_f64(), self.queue.best_lower_bound(), self.queue.len() + plunge.is_some() as usize);
+        }
+        self.race_done = true;
+        pool.racing.store(false, Ordering::Relaxed);
+        if w == t {
+            return false;
+        }
+        // 負け: 自分の木を捨てる (勝者の木が全体を覆っている)
+        let _ = self.queue.take_all();
+        *plunge = None;
+        self.dive_stack.clear();
+        if let Some(sl) = pool.slots.get(t as usize) {
+            sl.lb.store(f64::INFINITY.to_bits(), Ordering::Relaxed);
+            sl.open.store(0, Ordering::Relaxed);
+        }
+        true
+    }
+
     /// 質の釣り合い (`ENOMOTO_MIP_TREE_BALANCE`): 共有の待ち行列に自分の下界より十分小さいノードがあれば取って自分の待ち行列に
     /// 入れる。ほかのスレッドの下界が自分の待ち行列の最良より十分大きく、共有の待ち行列が少なければ、最良のノードを渡す。
     /// 「十分」は q (`ENOMOTO_T_MIP_TREE_BALANCE_Q`) × (打ち切り値 − 全体の下界) (打ち切り値がなければ |下界|)。
     fn pool_balance(&mut self) {
         use std::sync::atomic::Ordering;
         let Some(pool) = self.pool.clone() else { return };
+        if !self.race_done {
+            return;
+        }
         let t = self.pool_tid as usize;
         let mine = self.queue.best_lower_bound();
         let me = mine.min(self.cur_lb);
@@ -5108,8 +5201,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return;
         }
         let few = g.nodes.len() < pool.threads;
+        // `ENOMOTO_T_MIP_TREE_BALANCE_KEEP` = K (> 0): UG の collect mode のように、共有の待ち行列に下界の良い (全体の下界 +
+        // しきい値以下の) ノードを K 個は置いておく (良いノードを持つスレッドが出す)
+        let keep = tunable!("ENOMOTO_T_MIP_TREE_BALANCE_KEEP", 0usize, usize);
+        let good = if keep > 0 { g.nodes.iter().filter(|n| n.lower_bound <= all_min + thr).count() } else { 0 };
         drop(g);
-        if few && self.queue.len() >= 2 && others_max > mine + thr {
+        let donate = if keep > 0 { good < keep && mine <= all_min + thr } else { few && others_max > mine + thr };
+        if donate && self.queue.len() >= 2 {
             self.pool_donate(1);
             self.tprof.balance[1] += 1;
         }
