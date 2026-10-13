@@ -1397,14 +1397,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if nested {
                 // サブ MIP の中の RENS ([`Self::nested_rens_ok`]): HiGHS と同じく固定率 0.6 から始め、失敗したら半分にして
                 // やり直す。サブ MIP は小さく、失敗はたいてい 0-1 ノードで実行不能と分かって安いので、やり直しを多く
-                // (`ENOMOTO_T_MIP_SUBMIP_RENS_TRIES`、既定 4)、ノード上限は HiGHS と同じ 200 (500 の 0.4 倍) にする
+                // (`ENOMOTO_T_MIP_SUBMIP_RENS_TRIES`、既定 4)、1 回を安くする: ノード上限 50 (500 の 0.1 倍)、時間は残りの 15%
+                // (最大 3 秒)。30n20b8 では、ノード上限 200・残りの 4 割だと深さ 1 の 1 回が 2.6-4.4 秒かかり (中の深さ 2 の
+                // やり直しも上限近くまで粘る)、外側の 20 秒を 3 回で使い切った。HiGHS の深さ 1 のやり直しは大半が 0-1 ノードで
+                // 実行不能と分かり 0.05-0.4 秒で終わる
                 target = tunable!("ENOMOTO_T_MIP_SUBMIP_RENS_RATE", 0.6, f64);
                 tries = tunable!("ENOMOTO_T_MIP_SUBMIP_RENS_TRIES", 4usize, usize).max(1);
-                self.submip_node_mult *= tunable!("ENOMOTO_T_MIP_SUBMIP_RENS_NODES_MULT", 0.4, f64);
+                self.submip_node_mult *= tunable!("ENOMOTO_T_MIP_SUBMIP_RENS_NODES_MULT", 0.1, f64);
+                self.submip_time_frac = tunable!("ENOMOTO_T_MIP_SUBMIP_RENS_TIME_FRAC", 0.15, f64);
+                self.submip_time_max = tunable!("ENOMOTO_T_MIP_SUBMIP_RENS_TIME_MAX", 3.0, f64);
             }
             let mut found = false;
             for t in 0..tries {
-                if t > 0 {
+                if t > 0 && !nested {
                     self.submip_time_frac = tunable!("ENOMOTO_T_MIP_NOINC_SUBMIP_FRAC2", 0.25, f64);
                 }
                 let (ok, fr) = self.rens_dive_with(Some(target));
