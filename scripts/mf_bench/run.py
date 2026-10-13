@@ -118,6 +118,7 @@ def main() -> None:
     ap.add_argument("--reps", type=int, default=3)
     ap.add_argument("--time-limit", type=float, default=600.0)
     ap.add_argument("--mem-gb", type=float, default=13.5)
+    ap.add_argument("--threads", type=int, help="solve の threads (未指定なら既定の 1)")
     ap.add_argument("--mf-prof", action="store_true")
     ap.add_argument("--save-stderr", type=Path, help="1 回ごとの標準エラーを <dir>/<問題>__<版>__<回>.txt に保存する")
     ap.add_argument("--out", type=Path, required=True)
@@ -127,6 +128,8 @@ def main() -> None:
     for v in args.variants:
         name, _, envs = v.partition("=")
         variants[name] = dict(e.split("=", 1) for e in envs.split(",") if e)
+        if args.threads:
+            variants[name]["ENOMOTO_BENCH_THREADS"] = str(args.threads)
     done: dict = {}
     if args.out.exists():
         for line in args.out.read_text().splitlines():
