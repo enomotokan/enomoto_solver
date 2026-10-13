@@ -1521,6 +1521,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     fn run(&mut self) -> MipResult {
+        // `ENOMOTO_MIP_SUBMIP_NO_SB`: サブ MIP では強分岐をしない (HiGHS のサブ MIP の `mip_pscost_minreliable = 0` と同じ)。
+        // 30n20b8 の根の RENS のサブ MIP は、最初の 26 ノードで強分岐に 2.2 秒 (250 回の LP) 使う
+        if self.params.submip && env_str!("ENOMOTO_MIP_SUBMIP_NO_SB").is_some() {
+            self.pc.min_reliable = 0;
+        }
         // 木の写しから解く: 写しを作ったときの LP のカットの行とカットプールを入れる
         if let Some(snap) = self.snap.clone() {
             for (c, r) in &snap.pool {
@@ -1723,18 +1728,22 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if self.incumbent.is_none() && !self.fractional(&x_root0).is_empty() {
                     heur!("RENS (LP before cuts)", self.rens(&x_root0));
                 }
-                if self.incumbent.is_none() {
+                // `ENOMOTO_MIP_SUBMIP_LIGHT_HEUR`: サブ MIP の根では Feasibility Pump とダイビングを使わない。30n20b8 の根の RENS の
+                // サブ MIP (942 列) では、この 4 つで 2.4 秒使って何も見つけず、入れ子の RENS のサブ MIP でも毎回同じだけかかる
+                // (HiGHS のサブ MIP は根のヒューリスティクスのほとんどを入れ子の RENS に使い、1 回 0.1-1.6 秒で終わる)
+                let light = self.params.submip && env_str!("ENOMOTO_MIP_SUBMIP_LIGHT_HEUR").is_some();
+                if self.incumbent.is_none() && !light {
                     heur!("feasibility pump", self.feasibility_pump(root_iters));
                 }
                 // ダイビングの予算: 最初の根の LP の 2 倍に、カットのループを含めた根全体の反復数の一定割合を足す
                 let dive_budget = 2 * root_iters + 1000 + (tunable!("ENOMOTO_T_MIP_ROOT_DIVE_FRAC", 0.0, f64) * self.lp.total_iterations() as f64) as u64;
-                if self.incumbent.is_none() {
+                if self.incumbent.is_none() && !light {
                     heur!("fractional diving", self.fractional_dive(dive_budget));
                 }
-                if self.incumbent.is_none() {
+                if self.incumbent.is_none() && !light {
                     heur!("vector length diving", self.dive(super::heuristics::DiveKind::VectorLength, dive_budget, f64::INFINITY));
                 }
-                if self.incumbent.is_none() && env_str!("ENOMOTO_MIP_NO_COEF_DIVE").is_none() {
+                if self.incumbent.is_none() && !light && env_str!("ENOMOTO_MIP_NO_COEF_DIVE").is_none() {
                     heur!("coefficient diving", self.dive(super::heuristics::DiveKind::Coefficient, dive_budget, f64::INFINITY));
                 }
                 // LP を使わない最後の手段 (先に使うと質の悪い解で他の暫定解探しを止めてしまう)
