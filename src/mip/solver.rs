@@ -2412,6 +2412,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     // ヒューリスティクスを呼ばずに木を進める。その間のノードの LP 解の分数の列の数の最小を根の LP 解の数と
                     // 比べたものを近さ (報酬) にする (ダイビングの近さと同じ物差し)。木の方が解に近づく問題 (neos-1456979 は
                     // 木の探索そのものが最初の解を見つける) では、ヒューリスティクスより木に時間が回る
+                    // 300 秒・40 問 (1 回ずつ): sgeomean は基準 65.42、BANDIT+BUDGET+ROOT_PRIOR 65.58、+TREE_ARM 66.29、
+                    // TREE_ARM で BUDGET なし 66.47、どれも 23 問。neos-1456979 の最初の解は基準 134 秒、ROOT_PRIOR 221 秒、
+                    // +TREE_ARM 136 秒 (基準並みに戻る)、BUDGET なし 250 秒。30n20b8 はどれも解なし。既定では使わない
                     let mut tree_busy = false;
                     if let Some((t_start, t_end, fmin)) = self.noinc_tree_win {
                         let fmin = fmin.min(self.fractional(&x).len());
