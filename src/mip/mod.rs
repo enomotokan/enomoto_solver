@@ -241,8 +241,10 @@ fn polish_solution(variables: &[VariableData], objective: &Objective, constraint
         // 違反が増えず目的値も (丸め誤差を除いて) 悪くならなければ採る。違反が真に減るなら、目的値が少し悪くなっても採る:
         // 許容誤差の範囲の違反で目的値が実際の最適値より良く見えていた分 (双対値が大きい行では 1e-9 の違反が 1e-8 程度の
         // 相対差になる。binkar10_1) を正すため
+        // 違反の比較には丸め誤差の分 (1e-9) の余裕を持たせる: 元の解の違反がちょうど 0 だと、解き直した解の 1e-15 程度の
+        // 丸め誤差だけで捨てていた (bppc4-08 で目的値 59.994 -> 57 の研磨を捨てていた)
         let scale = z.abs().max(1.0);
-        if (vn <= vo && zn <= z + 1e-9 * scale) || (vn < vo && zn <= z + 1e-6 * scale) {
+        if (vn <= vo.max(1e-9) && zn <= z + 1e-9 * scale) || (vn < vo && zn <= z + 1e-6 * scale) {
             *x = xn;
             return zn;
         }
