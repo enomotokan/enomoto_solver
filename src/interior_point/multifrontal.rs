@@ -53,6 +53,8 @@ pub struct Multifrontal {
     direct: bool,
     /// 直接書くのは、行の写像が連続な範囲がこれ以下のとき (`ENOMOTO_T_MF_DIRECT_RUNS`)。
     direct_runs: usize,
+    /// 直接書くのは、下の行の数がこれ以上のとき (`ENOMOTO_T_MF_DIRECT_MIN_R`)。
+    direct_min_r: usize,
     /// 更新行列の計算を区切る列の幅 (`ENOMOTO_T_MF_CHUNK`)。
     chunk: usize,
     /// 前線の密な演算を並列にする演算量 (`nc f^2`) の下限 (`ENOMOTO_T_MF_PAR_FLOPS`)。
@@ -419,6 +421,7 @@ impl Multifrontal {
             pack_bw: if tunable!("ENOMOTO_T_MF_PACKED", 0u8, u8) != 0 { tunable!("ENOMOTO_T_MF_PACK_BW", 128usize, usize).max(1) } else { 0 },
             direct: tunable!("ENOMOTO_T_MF_DIRECT", 0u8, u8) != 0,
             direct_runs: tunable!("ENOMOTO_T_MF_DIRECT_RUNS", 4usize, usize),
+            direct_min_r: tunable!("ENOMOTO_T_MF_DIRECT_MIN_R", 0usize, usize),
             chunk: tunable!("ENOMOTO_T_MF_CHUNK", 128usize, usize).max(1),
             par_flops: tunable!("ENOMOTO_T_MF_PAR_FLOPS", 5e7f64, f64),
         })
@@ -533,40 +536,42 @@ impl Multifrontal {
         u
     }
 
-    /// 部分木 `s` を後順で逐次に分解し、`s` の更新行列を返す (根なら `None`)。`direct` なら節点を下る時に前線を用意し、
-    /// 子は終わった時に更新行列を親の前線へ足す (子の更新行列を受けていない子は、行列積で親の前線へ直接書く)。
+    /// 部分木 `s` を後順で逐次に分解し、`s` の更新行列を返す (根なら `None`)。`direct` なら子は終わった時に更新行列を
+    /// 親の前線へ足す (子の更新行列を受けていない子は、行列積で親の前線へ直接書く)。
     /// そうでなければ子の更新行列を親が終わるまで `ups` に積んでおく。
     fn run_seq(&self, s: usize, values: &[f64], reg: LltRegularization<f64>, lp: SyncPtr, ok: &std::sync::atomic::AtomicBool) -> Option<Vec<f64>> {
         struct Ent {
             node: usize,
             /// 次に見る子の番号。
             ci: usize,
+            /// L のかたまりを用意したか (`direct` なら最初の子が終わる時、そうでなければ自身が終わる時に用意する)。
+            prepared: bool,
             /// 前線の更新行列 (`direct` で子から受けたものがあれば)。
             u: Option<Vec<f64>>,
             /// まだ足していない子の更新行列。
             ups: Vec<(usize, Vec<f64>)>,
         }
-        if self.direct {
-            self.prepare(s, values, lp);
-        }
-        let mut stack = vec![Ent { node: s, ci: 0, u: None, ups: Vec::new() }];
+        let ent = |node: usize| Ent { node, ci: 0, prepared: false, u: None, ups: Vec::new() };
+        let mut stack = vec![ent(s)];
         loop {
             let top = stack.last_mut().unwrap();
             if top.ci < self.children[top.node].len() {
                 let c = self.children[top.node][top.ci];
                 top.ci += 1;
-                if self.direct {
-                    self.prepare(c, values, lp);
-                }
-                stack.push(Ent { node: c, ci: 0, u: None, ups: Vec::new() });
+                stack.push(ent(c));
                 continue;
             }
             let e = stack.pop().unwrap();
-            if !self.direct {
+            if !e.prepared {
                 self.prepare(e.node, values, lp);
             }
             match stack.last_mut() {
                 Some(p) if self.direct => {
+                    // 親の前線へ書く直前に親を用意する (下る時に用意すると、書く時にはキャッシュから追い出されている)。
+                    if !p.prepared {
+                        self.prepare(p.node, values, lp);
+                        p.prepared = true;
+                    }
                     let pn = p.node;
                     let res = self.finish(e.node, e.ups, e.u, Some((pn, &mut p.u)), reg, lp, ok);
                     debug_assert!(res.is_none());
@@ -744,7 +749,7 @@ impl Multifrontal {
             };
             let map = &self.child_map[s];
             match parent {
-                Some((p, pu)) if self.direct && u.is_none() && map_runs(map) <= self.direct_runs => {
+                Some((p, pu)) if self.direct && u.is_none() && r >= self.direct_min_r && map_runs(map) <= self.direct_runs => {
                     // 子の更新行列を受けていない: U = -A Bᵀ を親の前線へ直接書く。
                     if map[r - 1] as usize >= self.end[p] - self.begin[p] {
                         self.ensure_u(p, pu);
