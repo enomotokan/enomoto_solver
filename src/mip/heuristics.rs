@@ -1685,7 +1685,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut sub = p.clone();
         sub.col_lo = lo;
         sub.col_up = up;
+        self.submip_is_rens = true;
         let r = self.solve_submip_problem(sub, 500, None);
+        self.submip_is_rens = false;
         self.rens_node_limited = matches!(r, Some((super::solver::MipStatus::NodeLimit, _)));
         r.is_some_and(|r| r.1)
     }

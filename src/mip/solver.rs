@@ -225,7 +225,10 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 並列モードで、サブ MIP を別スレッドで解くか (根のヒューリスティクスの間だけ真)。
     pub(super) parallel_submips: bool,
     /// 別スレッドで解いているサブ MIP (出した順)。
-    pub(super) pending_submips: std::collections::VecDeque<std::thread::JoinHandle<MipResult>>,
+    /// 並列モードで別スレッドに出したサブ MIP と、それが根の RENS のものか ([`Self::submip_is_rens`] を出すときに写す)。
+    pub(super) pending_submips: std::collections::VecDeque<(std::thread::JoinHandle<MipResult>, bool)>,
+    /// 次に出すサブ MIP が根の RENS のものか (受け取ったときにノード上限で止まっていれば `rens_node_limited` を立てる)。
+    pub(super) submip_is_rens: bool,
     /// 別スレッドの Feasibility Jump とその停止の印。
     fj_thread: Option<(std::thread::JoinHandle<Option<Vec<f64>>>, std::sync::Arc<std::sync::atomic::AtomicBool>)>,
     /// RENS の固定率の記録 (成功したときの固定率の合計と回数、サブ MIP が実行不能だったときの合計と回数)。
@@ -955,6 +958,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         rens_node_limited: false,
         parallel_submips: false,
         pending_submips: std::collections::VecDeque::new(),
+        submip_is_rens: false,
         fj_thread: None,
         rens_succ: (0.0, 0),
         rens_infeas: (0.0, 0),
@@ -4809,19 +4813,29 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.join_submips(lim - 1);
         }
         let presolve = env_str!("ENOMOTO_MIP_SUBMIP_NO_PRESOLVE").is_none();
-        self.pending_submips.push_back(std::thread::spawn(move || {
-            // 別スレッドで解くサブ MIP も入れ子の深さ 1 として数える ([`super::heuristics::SUBMIP_DEPTH`])
-            super::heuristics::SUBMIP_DEPTH.with(|d| d.set(1));
-            super::solve_problem(&sub, params, presolve)
-        }));
+        let is_rens = std::mem::take(&mut self.submip_is_rens);
+        self.pending_submips.push_back((
+            std::thread::spawn(move || {
+                // 別スレッドで解くサブ MIP も入れ子の深さ 1 として数える ([`super::heuristics::SUBMIP_DEPTH`])
+                super::heuristics::SUBMIP_DEPTH.with(|d| d.set(1));
+                super::solve_problem(&sub, params, presolve)
+            }),
+            is_rens,
+        ));
     }
 
     /// 別スレッドのサブ MIP を、残りが `keep` 本になるまで出した順に待って結果を受け取る。
     pub(super) fn join_submips(&mut self, keep: usize) {
         while self.pending_submips.len() > keep {
-            let h = self.pending_submips.pop_front().unwrap();
+            let (h, is_rens) = self.pending_submips.pop_front().unwrap();
             if let Ok(r) = h.join() {
                 self.heur_iters += r.lp_iterations;
+                // 根の RENS がノード上限で止まったら、ノード上限を増やしてやり直す判断に使う (逐次のときは rens が立てる。
+                // 並列モードでは結果をここで受け取るので、ここで立てないとやり直しが行われない: binkar10_1 で 4 スレッドが
+                // 6754.85 を見つけられず、木が 1 スレッドの 10 倍に増えていた)
+                if is_rens && r.status == MipStatus::NodeLimit && env_str!("ENOMOTO_MIP_NO_PARALLEL_RENS_RETRY").is_none() {
+                    self.rens_node_limited = true;
+                }
                 if self.params.verbose {
                     eprintln!("MIP:   parallel sub-MIP: status {:?}, nodes {}, objective {:?}", r.status, r.nodes, r.objective);
                 }
