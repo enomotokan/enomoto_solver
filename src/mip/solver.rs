@@ -2462,7 +2462,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         if bandit && arm != NOINC_TREE_ARM {
                             self.noinc_update_arm(arm, if found { 2.0 } else { close }, secs);
                         }
-                        if adapt_budget {
+                        // 「木を進める」腕は窓を始めただけ (結果は窓を閉じるときに記録する)
+                        if adapt_budget && arm != NOINC_TREE_ARM {
                             if close > self.noinc_best_close + 1e-3 {
                                 self.noinc_best_close = close;
                                 self.noinc_stall = 0;
@@ -2471,7 +2472,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             }
                             self.noinc_next_node = self.nodes + (1u64 << self.noinc_stall);
                         }
-                        if self.params.verbose && env_str!("ENOMOTO_MIP_DEBUG_NOINC").is_some() {
+                        if self.params.verbose && env_str!("ENOMOTO_MIP_DEBUG_NOINC").is_some() && arm != NOINC_TREE_ARM {
                             eprintln!("MIP:   no-incumbent heuristic arm {arm}: close {close:.3} found {found} ({secs:.2}s, node {}, frac {time_frac:.2}, stall {})", self.nodes, self.noinc_stall);
                         }
                     }
