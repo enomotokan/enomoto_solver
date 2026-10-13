@@ -12,7 +12,7 @@ use faer::linalg::matmul::triangular::BlockStructure;
 use faer::mat::{from_column_major_slice, from_column_major_slice_mut, from_row_major_slice, from_row_major_slice_mut};
 use faer::sparse::linalg::cholesky::{SymbolicCholesky, SymbolicCholeskyRaw};
 use faer::sparse::SymbolicSparseColMat;
-use faer::{Parallelism, dyn_stack::{GlobalPodBuffer, PodStack}};
+use faer::{MatRef, Parallelism, dyn_stack::{GlobalPodBuffer, PodStack}};
 use rayon::prelude::*;
 use faer::reborrow::{Reborrow, ReborrowMut};
 
@@ -46,6 +46,17 @@ pub struct Multifrontal {
     signs: Option<Vec<i8>>,
     /// 更新行列の配列の使い回し (確保と初めて触るときのページフォールトを減らす)。
     pool: std::sync::Mutex<Vec<Vec<f64>>>,
+    /// 更新行列を台形で持つときのかたまりの幅 ([`Front`]、0 なら正方形。試験用 `ENOMOTO_T_MF_PACKED=1` と
+    /// `ENOMOTO_T_MF_PACK_BW`)。
+    pack_bw: usize,
+    /// 逐次に処理する部分木で、子の更新行列を受けていない節点の更新行列を親の前線へ直接書く (試験用 `ENOMOTO_T_MF_DIRECT=1`)。
+    direct: bool,
+    /// 直接書くのは、行の写像が連続な範囲がこれ以下のとき (`ENOMOTO_T_MF_DIRECT_RUNS`)。
+    direct_runs: usize,
+    /// 更新行列の計算を区切る列の幅 (`ENOMOTO_T_MF_CHUNK`)。
+    chunk: usize,
+    /// 前線の密な演算を並列にする演算量 (`nc f^2`) の下限 (`ENOMOTO_T_MF_PAR_FLOPS`)。
+    par_flops: f64,
 }
 
 static PROF: [std::sync::atomic::AtomicU64; 4] = [const { std::sync::atomic::AtomicU64::new(0) }; 4];
@@ -177,6 +188,126 @@ impl SyncPtr {
     }
 }
 
+/// 前線の書き込み先: 左の `nc` 列 (L のかたまり、`f x nc` 列優先、因子の配列の中) と、右下の更新行列 `U` (`r x r`、
+/// 下三角だけを使う)。`U` は `bw == 0` なら正方形の列優先、`bw > 0` なら幅 `bw` の列のかたまりごとの台形
+/// (かたまり `k` は列 `[k bw, (k+1) bw)` の行 `[k bw, r)` だけを列優先で持ち、かたまりを順に並べる)。
+#[derive(Clone, Copy)]
+struct Front {
+    l: SyncPtr,
+    f: usize,
+    nc: usize,
+    u: SyncPtr,
+    r: usize,
+    bw: usize,
+}
+
+/// 大きさ `r` の更新行列の配列の長さ (`bw` は [`Front`] と同じ)。
+fn u_len(r: usize, bw: usize) -> usize {
+    if bw == 0 || r <= bw {
+        return r * r;
+    }
+    // 幅 bw のかたまり k 個 (高さ r, r - bw, ...) と、残りの rem 列 (高さ rem)。
+    let k = r / bw;
+    let rem = r - k * bw;
+    bw * (k * r - bw * (k * (k - 1) / 2)) + rem * rem
+}
+
+impl Front {
+    /// 更新行列だけの前線 (子の更新行列の配列)。
+    fn u_only(u: *mut f64, r: usize, bw: usize) -> Self {
+        Front { l: SyncPtr(std::ptr::null_mut()), f: 0, nc: 0, u: SyncPtr(u), r, bw }
+    }
+
+    /// 前線の列 `j` の対角 `(j, j)` の位置と、その列を含む部分の列の間隔 (列 `j` の行 `i >= j` は `位置 + (i - j)`)。
+    fn col(&self, j: usize) -> (*mut f64, usize) {
+        if j < self.nc {
+            return (self.l.get().wrapping_add(j * self.f + j), self.f);
+        }
+        let c = j - self.nc;
+        if self.bw == 0 {
+            return (self.u.get().wrapping_add(c * self.r + c), self.r);
+        }
+        let k = c / self.bw;
+        let j0 = k * self.bw;
+        let h = self.r - j0;
+        let off = self.bw * (k * self.r - self.bw * (k * k.saturating_sub(1) / 2));
+        (self.u.get().wrapping_add(off + (c - j0) * (h + 1)), h)
+    }
+
+    /// 列 `j` と同じ間隔で並ぶ列の範囲の終わり。
+    fn region_end(&self, j: usize) -> usize {
+        if j < self.nc {
+            self.nc
+        } else if self.bw == 0 {
+            self.nc + self.r
+        } else {
+            (self.nc + ((j - self.nc) / self.bw + 1) * self.bw).min(self.nc + self.r)
+        }
+    }
+}
+
+/// 行の写像 `map` (昇順) が連続な範囲の数。
+fn map_runs(map: &[u32]) -> usize {
+    1 + map.windows(2).filter(|w| w[1] != w[0] + 1).count()
+}
+
+/// 前線 `dst` の下三角に `-A Bᵀ` を足す (`A`・`B` は `m x k`、行 `t` は前線の行 `map[t]`、`map` が `None` なら `t`。
+/// `map` は昇順)。行の写像が連続な範囲・列の間隔が同じ列の範囲・幅 `cw` で列を区切り、区切りごとに書き先の部分行列へ
+/// 行列積を直接書く (対角のかたまりは下三角だけ)。`big` なら並列に計算する。
+fn sub_update(dst: Front, map: Option<&[u32]>, a: MatRef<'_, f64>, b: MatRef<'_, f64>, cw: usize, big: bool) {
+    let m = a.nrows();
+    let idx = |t: usize| map.map_or(t, |mp| mp[t] as usize);
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    let mut t = 0;
+    while t < m {
+        let t0 = t;
+        t += 1;
+        while t < m && idx(t) == idx(t - 1) + 1 {
+            t += 1;
+        }
+        runs.push((t0, t));
+    }
+    // 列の区切り (子の行の範囲 [ca, cb)、それを含む連続な範囲の番号)。
+    let mut chunks: Vec<(usize, usize, usize)> = Vec::new();
+    for (ri, &(t0, t1)) in runs.iter().enumerate() {
+        let mut t = t0;
+        while t < t1 {
+            let e = (dst.region_end(idx(t)) - idx(t) + t).min(t1).min(t.saturating_add(cw));
+            chunks.push((t, e, ri));
+            t = e;
+        }
+    }
+    let one = |&(ca, cb, ri): &(usize, usize, usize), par: Parallelism| {
+        let j = idx(ca);
+        let (p, ld) = dst.col(j);
+        let w = cb - ca;
+        let bt = b.subrows(ca, w).transpose();
+        let block = |ra: usize, rb: usize, st: BlockStructure| {
+            // SAFETY: 書き先は前線の列 [j, j + w) (同じ間隔で並ぶ部分の中) の行 idx(ra)..idx(rb - 1) で、区切りごとに
+            // 列が重ならない。
+            let d = unsafe { faer::mat::from_raw_parts_mut::<f64, usize, usize>(p.wrapping_add(idx(ra) - j), rb - ra, w, 1, ld as isize) };
+            faer::linalg::matmul::triangular::matmul(d, st, a.subrows(ra, rb - ra), BlockStructure::Rectangular, bt, BlockStructure::Rectangular, Some(1.0), -1.0, par);
+        };
+        block(ca, cb, BlockStructure::TriangularLower);
+        let run_end = runs[ri].1;
+        if cb < run_end {
+            block(cb, run_end, BlockStructure::Rectangular);
+        }
+        for &(t0, t1) in &runs[ri + 1..] {
+            block(t0, t1, BlockStructure::Rectangular);
+        }
+    };
+    let seq = super::kkt::inner_seq();
+    if big && !seq && chunks.len() >= 4 {
+        chunks.par_iter().for_each(|c| one(c, Parallelism::None));
+    } else {
+        let par = if big && !seq { Parallelism::Rayon(0) } else { Parallelism::None };
+        for c in &chunks {
+            one(c, par);
+        }
+    }
+}
+
 impl Multifrontal {
     /// 上三角の列圧縮の非零の形 `pat_in` と、faer の supernodal の記号分解 `sym` から作る。supernodal でなければ `None`。
     pub fn new(pat_in: &SymbolicSparseColMat<usize>, sym: &SymbolicCholesky<usize>) -> Option<Self> {
@@ -285,6 +416,11 @@ impl Multifrontal {
             ea_par: tunable!("ENOMOTO_T_MF_EA_PAR", 1e6f64, f64),
             pool: std::sync::Mutex::new(Vec::new()),
             signs: None,
+            pack_bw: if tunable!("ENOMOTO_T_MF_PACKED", 0u8, u8) != 0 { tunable!("ENOMOTO_T_MF_PACK_BW", 128usize, usize).max(1) } else { 0 },
+            direct: tunable!("ENOMOTO_T_MF_DIRECT", 0u8, u8) != 0,
+            direct_runs: tunable!("ENOMOTO_T_MF_DIRECT_RUNS", 4usize, usize),
+            chunk: tunable!("ENOMOTO_T_MF_CHUNK", 128usize, usize).max(1),
+            par_flops: tunable!("ENOMOTO_T_MF_PAR_FLOPS", 5e7f64, f64),
         })
     }
 
@@ -318,6 +454,27 @@ impl Multifrontal {
         Some(mf)
     }
 
+    /// 試験用: 更新行列の形・直接書くか・区切りの幅・並列にする演算量の下限・逐次に処理する部分木の演算量の上限を変える。
+    #[cfg(test)]
+    pub fn set_variant(&mut self, pack_bw: usize, direct: bool, direct_runs: usize, chunk: usize, par_flops: f64, seq_flops: f64) {
+        self.pack_bw = pack_bw;
+        self.direct = direct;
+        self.direct_runs = direct_runs;
+        self.chunk = chunk;
+        self.par_flops = par_flops;
+        self.seq_flops = seq_flops;
+    }
+
+    /// 試験用: 下の行の数の最大・行の写像が飛び飛びの子の数・葉の数。
+    #[cfg(test)]
+    pub fn shape_stats(&self) -> (usize, usize, usize) {
+        let ns = self.begin.len();
+        let max_r = (0..ns).map(|s| self.pat_ptr[s + 1] - self.pat_ptr[s]).max().unwrap_or(0);
+        let multi = self.child_map.iter().filter(|m| !m.is_empty() && map_runs(m) > 1).count();
+        let leaves = self.children.iter().filter(|c| c.is_empty()).count();
+        (max_r, multi, leaves)
+    }
+
     /// supernode の数。
     pub fn n_supernodes(&self) -> usize {
         self.begin.len()
@@ -347,8 +504,8 @@ impl Multifrontal {
         ok.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// 部分木 `s` を分解し、`s` の更新行列 (下の行どうし、`r x r` 列優先) を返す。
-    fn run(&self, s: usize, values: &[f64], reg: LltRegularization<f64>, lp: SyncPtr, ok: &std::sync::atomic::AtomicBool) -> Vec<f64> {
+    /// 部分木 `s` を分解し、`s` の更新行列 (下の行どうし、形は [`Front`]) を返す (根なら `None`)。
+    fn run(&self, s: usize, values: &[f64], reg: LltRegularization<f64>, lp: SyncPtr, ok: &std::sync::atomic::AtomicBool) -> Option<Vec<f64>> {
         if self.subtree_flops[s] <= self.seq_flops {
             return self.run_seq(s, values, reg, lp, ok);
         }
@@ -364,97 +521,167 @@ impl Multifrontal {
             }
         }
         let bottom = *chain.last().unwrap();
-        let ups: Vec<(usize, Vec<f64>)> = self.children[bottom].par_iter().map(|&c| (c, self.run(c, values, reg, lp, ok))).collect();
-        let mut u = self.factor_node(bottom, values, ups, reg, lp, ok);
+        let ups: Vec<(usize, Vec<f64>)> = self.children[bottom].par_iter().filter_map(|&c| self.run(c, values, reg, lp, ok).map(|u| (c, u))).collect();
+        self.prepare(bottom, values, lp);
+        let mut u = self.finish(bottom, ups, None, None, reg, lp, ok);
         for w in (0..chain.len() - 1).rev() {
             let node = chain[w];
-            u = self.factor_node(node, values, vec![(chain[w + 1], u)], reg, lp, ok);
+            self.prepare(node, values, lp);
+            let ups = u.take().map(|v| vec![(chain[w + 1], v)]).unwrap_or_default();
+            u = self.finish(node, ups, None, None, reg, lp, ok);
         }
         u
     }
 
-    /// 部分木 `s` を後順で逐次に分解する。
-    fn run_seq(&self, s: usize, values: &[f64], reg: LltRegularization<f64>, lp: SyncPtr, ok: &std::sync::atomic::AtomicBool) -> Vec<f64> {
-        // 明示的な後順の走査: (節点, 次に見る子の番号)。各節点の子の更新行列は `pending` に積む。
-        let mut stack: Vec<(usize, usize)> = vec![(s, 0)];
-        let mut pending: Vec<Vec<(usize, Vec<f64>)>> = vec![Vec::new()];
+    /// 部分木 `s` を後順で逐次に分解し、`s` の更新行列を返す (根なら `None`)。`direct` なら節点を下る時に前線を用意し、
+    /// 子は終わった時に更新行列を親の前線へ足す (子の更新行列を受けていない子は、行列積で親の前線へ直接書く)。
+    /// そうでなければ子の更新行列を親が終わるまで `ups` に積んでおく。
+    fn run_seq(&self, s: usize, values: &[f64], reg: LltRegularization<f64>, lp: SyncPtr, ok: &std::sync::atomic::AtomicBool) -> Option<Vec<f64>> {
+        struct Ent {
+            node: usize,
+            /// 次に見る子の番号。
+            ci: usize,
+            /// 前線の更新行列 (`direct` で子から受けたものがあれば)。
+            u: Option<Vec<f64>>,
+            /// まだ足していない子の更新行列。
+            ups: Vec<(usize, Vec<f64>)>,
+        }
+        if self.direct {
+            self.prepare(s, values, lp);
+        }
+        let mut stack = vec![Ent { node: s, ci: 0, u: None, ups: Vec::new() }];
         loop {
-            let (node, ci) = *stack.last().unwrap();
-            if ci < self.children[node].len() {
-                stack.last_mut().unwrap().1 += 1;
-                stack.push((self.children[node][ci], 0));
-                pending.push(Vec::new());
+            let top = stack.last_mut().unwrap();
+            if top.ci < self.children[top.node].len() {
+                let c = self.children[top.node][top.ci];
+                top.ci += 1;
+                if self.direct {
+                    self.prepare(c, values, lp);
+                }
+                stack.push(Ent { node: c, ci: 0, u: None, ups: Vec::new() });
                 continue;
             }
-            stack.pop();
-            let ups = pending.pop().unwrap();
-            let u = self.factor_node(node, values, ups, reg, lp, ok);
-            match pending.last_mut() {
-                Some(p) => p.push((node, u)),
-                None => return u,
+            let e = stack.pop().unwrap();
+            if !self.direct {
+                self.prepare(e.node, values, lp);
+            }
+            match stack.last_mut() {
+                Some(p) if self.direct => {
+                    let pn = p.node;
+                    let res = self.finish(e.node, e.ups, e.u, Some((pn, &mut p.u)), reg, lp, ok);
+                    debug_assert!(res.is_none());
+                }
+                Some(p) => {
+                    if let Some(v) = self.finish(e.node, e.ups, e.u, None, reg, lp, ok) {
+                        p.ups.push((e.node, v));
+                    }
+                }
+                None => return self.finish(e.node, e.ups, e.u, None, reg, lp, ok),
             }
         }
     }
 
-    /// supernode `s` の前線を作って部分分解し、L のかたまりを書き、更新行列を返す。前線の左の `nc` 列 (L のかたまり、
-    /// `f x nc`) は因子の配列の中でそのまま組み立てて分解し、右下の `r x r` (更新行列) は別の配列で組み立てる
-    /// (前線全体の確保・0 埋めと、分解後の写しをしない)。
-    fn factor_node(&self, s: usize, values: &[f64], ups: Vec<(usize, Vec<f64>)>, reg: LltRegularization<f64>, lp: SyncPtr, ok: &std::sync::atomic::AtomicBool) -> Vec<f64> {
+    /// supernode `s` の L のかたまり (前線の左の `nc` 列、因子の配列の中) を 0 にして元の行列の値を足す。
+    fn prepare(&self, s: usize, values: &[f64], lp: SyncPtr) {
+        let t0 = prof_on().then(std::time::Instant::now);
+        let nc = self.end[s] - self.begin[s];
+        let f = nc + self.pat_ptr[s + 1] - self.pat_ptr[s];
+        // SAFETY: supernode ごとに `l_ptr` の範囲は重ならず、各 supernode はちょうど 1 回だけ処理される。
+        let lsl: &mut [f64] = unsafe { std::slice::from_raw_parts_mut(lp.0.add(self.l_ptr[s]), f * nc) };
+        lsl.fill(0.0);
+        for &(k, lr, lc) in &self.asm[s] {
+            lsl[lc as usize * f + lr as usize] += values[k as usize];
+        }
+        if let Some(t0) = t0 {
+            PROF[0].fetch_add(t0.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// supernode `s` の前線 (更新行列は `u`)。
+    fn front(&self, s: usize, lp: SyncPtr, u: &mut Option<Vec<f64>>) -> Front {
+        let nc = self.end[s] - self.begin[s];
+        let r = self.pat_ptr[s + 1] - self.pat_ptr[s];
+        let up = u.as_mut().map_or(std::ptr::null_mut(), |v| v.as_mut_ptr());
+        Front { l: SyncPtr(lp.0.wrapping_add(self.l_ptr[s])), f: nc + r, nc, u: SyncPtr(up), r, bw: self.pack_bw }
+    }
+
+    /// supernode `s` の更新行列 `u` がなければ (0 で) 作る。
+    fn ensure_u(&self, s: usize, u: &mut Option<Vec<f64>>) {
+        if u.is_none() {
+            *u = Some(self.take_buf(u_len(self.pat_ptr[s + 1] - self.pat_ptr[s], self.pack_bw)));
+        }
+    }
+
+    /// 子 `c` の更新行列 `uc` を、親 `p` の前線 (更新行列は `pu`、子が更新行列の部分に当たるなら作る) の行・列
+    /// `child_map[c]` に足す (extend-add)。
+    fn extend_add(&self, p: usize, pu: &mut Option<Vec<f64>>, lp: SyncPtr, c: usize, uc: &[f64]) {
+        let map = &self.child_map[c];
+        let rc = map.len();
+        if rc == 0 {
+            return;
+        }
+        if map[rc - 1] as usize >= self.end[p] - self.begin[p] {
+            self.ensure_u(p, pu);
+        }
+        let dst = self.front(p, lp, pu);
+        let src = Front::u_only(uc.as_ptr() as *mut f64, rc, self.pack_bw);
+        // 子の更新行列の列 j を親の前線の列 map[j] に足す (列ごとに書き先が重ならない)。
+        let add_col = |j: usize| {
+            let mj = map[j] as usize;
+            let mi = &map[j..];
+            let last = mi[rc - j - 1] as usize;
+            // SAFETY: 子の配列の列 j の対角から下 (`rc - j` 個) を読むだけ。map は単射なので列 j ごとに書き先の列が違い、
+            // 前線の列 mj の行 mj..=last は前線の中。
+            let (col, dst) = unsafe {
+                (std::slice::from_raw_parts(src.col(j).0 as *const f64, rc - j), std::slice::from_raw_parts_mut(dst.col(mj).0, last - mj + 1))
+            };
+            // 行の写像が連続な部分は、まとめて足す。
+            if last - mj == rc - j - 1 {
+                for (d, &v) in dst.iter_mut().zip(col) {
+                    *d += v;
+                }
+            } else {
+                for (t, &v) in col.iter().enumerate() {
+                    dst[mi[t] as usize - mj] += v;
+                }
+            }
+        };
+        if (rc as f64) * (rc as f64) > self.ea_par && !super::kkt::inner_seq() {
+            (0..rc).into_par_iter().with_min_len(16).for_each(add_col);
+        } else {
+            (0..rc).for_each(add_col);
+        }
+    }
+
+    /// supernode `s` の前線 (L のかたまりは [`Self::prepare`] 済み、更新行列は `u`、まだ足していない子の更新行列は
+    /// `ups`) を部分分解して L のかたまりを書き、更新行列を作る。前線の左の `nc` 列 (L のかたまり、`f x nc`) は因子の
+    /// 配列の中でそのまま組み立てて分解する。親 `parent` (`(親, 親の更新行列)`、親は prepare 済み) があれば、更新行列を
+    /// 親の前線に足して `None` を返し (`direct` で子の更新行列を受けていなければ、行列積で親の前線へ直接書き、更新行列の
+    /// 配列を作らない)、なければ更新行列を返す。
+    #[allow(clippy::too_many_arguments)]
+    fn finish(&self, s: usize, ups: Vec<(usize, Vec<f64>)>, mut u: Option<Vec<f64>>, parent: Option<(usize, &mut Option<Vec<f64>>)>, reg: LltRegularization<f64>, lp: SyncPtr, ok: &std::sync::atomic::AtomicBool) -> Option<Vec<f64>> {
         let nc = self.end[s] - self.begin[s];
         let r = self.pat_ptr[s + 1] - self.pat_ptr[s];
         let f = nc + r;
         let tp0 = std::time::Instant::now();
-        // SAFETY: supernode ごとに `l_ptr` の範囲は重ならず、各 supernode はちょうど 1 回だけ処理される。
-        let lsl: &mut [f64] = unsafe { std::slice::from_raw_parts_mut(lp.0.add(self.l_ptr[s]), f * nc) };
-        lsl.fill(0.0);
-        let mut u = self.take_buf(r * r);
-        for &(k, lr, lc) in &self.asm[s] {
-            lsl[lc as usize * f + lr as usize] += values[k as usize];
+        if !self.direct {
+            self.ensure_u(s, &mut u);
         }
-        let lptr = SyncPtr(lsl.as_mut_ptr());
-        let uptr = SyncPtr(u.as_mut_ptr());
         for (c, uc) in ups {
-            let map = &self.child_map[c];
-            let rc = map.len();
-            // 子の更新行列の列 j を親の前線の列 map[j] に足す (列ごとに書き先が重ならない)。
-            let add_col = |j: usize| {
-                let mj = map[j] as usize;
-                let col = &uc[j * rc + j..(j + 1) * rc];
-                let mi = &map[j..];
-                // SAFETY: map は単射なので列 j ごとに書き先の列が違う。
-                let (dst, off) = unsafe {
-                    if mj < nc {
-                        (std::slice::from_raw_parts_mut(lptr.get().add(mj * f), f), 0usize)
-                    } else {
-                        (std::slice::from_raw_parts_mut(uptr.get().add((mj - nc) * r), r), nc)
-                    }
-                };
-                // 行の写像が連続な部分は、まとめて足す。
-                let first = mi[0] as usize;
-                if mi[rc - j - 1] as usize - first == rc - j - 1 {
-                    for (d, &v) in dst[first - off..first - off + col.len()].iter_mut().zip(col) {
-                        *d += v;
-                    }
-                } else {
-                    for (t, &v) in col.iter().enumerate() {
-                        dst[mi[t] as usize - off] += v;
-                    }
-                }
-            };
-            if (rc as f64) * (rc as f64) > self.ea_par && !super::kkt::inner_seq() {
-                (0..rc).into_par_iter().with_min_len(16).for_each(add_col);
-            } else {
-                (0..rc).for_each(add_col);
-            }
+            self.extend_add(s, &mut u, lp, c, &uc);
             self.give_back(uc);
         }
+        // SAFETY: supernode ごとに `l_ptr` の範囲は重ならず、各 supernode はちょうど 1 回だけ処理される。
+        let lsl: &mut [f64] = unsafe { std::slice::from_raw_parts_mut(lp.0.add(self.l_ptr[s]), f * nc) };
         let tp1 = std::time::Instant::now();
-        let big = (nc as f64) * (f as f64) * (f as f64) > tunable!("ENOMOTO_T_MF_PAR_FLOPS", 5e7f64, f64);
+        let big = (nc as f64) * (f as f64) * (f as f64) > self.par_flops;
         let par = if big && !super::kkt::inner_seq() { Parallelism::Rayon(0) } else { Parallelism::None };
         let lm = from_column_major_slice_mut::<f64, usize, usize>(lsl, f, nc);
         let (mut l11, mut l21) = lm.split_at_row_mut(nc);
         let tp2;
         let mut tp3;
+        // 更新行列 `U = F22 - A Bᵀ` の `A` (LDLᵀ なら `W = L21 D11`、LLᵀ なら `L21`)。
+        let mut w: Option<Vec<f64>> = None;
         if let Some(signs) = &self.signs {
             // LDLᵀ (準定値の拡大系): F11 = L11 D11 L11ᵀ (期待する符号と合わない・小さいピボットは置き換える)、
             // W = F21 L11^{-T} (= L21 D11)、L21 = W D11^{-1}、U = F22 - W L21ᵀ。
@@ -477,75 +704,90 @@ impl Multifrontal {
             if r > 0 {
                 faer::linalg::triangular_solve::solve_unit_lower_triangular_in_place(l11.rb(), l21.rb_mut().transpose_mut(), par);
                 // W (= L21 D) を写してから L21 = W D^{-1}。
-                let mut w = self.take_buf(r * nc);
+                let mut wb = self.take_buf(r * nc);
                 for j in 0..nc {
                     let dinv = 1.0 / l11.read(j, j);
                     for i in 0..r {
                         let v = l21.read(i, j);
-                        w[j * r + i] = v;
+                        wb[j * r + i] = v;
                         l21.write(i, j, v * dinv);
                     }
                 }
+                w = Some(wb);
                 tp3 = std::time::Instant::now();
-                let um = from_column_major_slice_mut::<f64, usize, usize>(&mut u, r, r);
-                faer::linalg::matmul::triangular::matmul(
-                    um,
-                    BlockStructure::TriangularLower,
-                    from_column_major_slice::<f64, usize, usize>(&w, r, nc),
-                    BlockStructure::Rectangular,
-                    l21.rb().transpose(),
-                    BlockStructure::Rectangular,
-                    Some(1.0),
-                    -1.0,
-                    par,
-                );
-                self.give_back(w);
             }
         } else {
-        let mut buf = GlobalPodBuffer::new(cholesky_in_place_req::<f64>(nc, par, LltParams::default()).unwrap());
-        match cholesky_in_place(l11.rb_mut(), reg, par, PodStack::new(&mut buf), LltParams::default()) {
-            Ok(info) => {
-                if info.dynamic_regularization_count > 0 {
-                    DYNREG.fetch_add(info.dynamic_regularization_count, std::sync::atomic::Ordering::Relaxed);
+            let mut buf = GlobalPodBuffer::new(cholesky_in_place_req::<f64>(nc, par, LltParams::default()).unwrap());
+            match cholesky_in_place(l11.rb_mut(), reg, par, PodStack::new(&mut buf), LltParams::default()) {
+                Ok(info) => {
+                    if info.dynamic_regularization_count > 0 {
+                        DYNREG.fetch_add(info.dynamic_regularization_count, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+                Err(_) => ok.store(false, std::sync::atomic::Ordering::Relaxed),
+            }
+            tp2 = std::time::Instant::now();
+            tp3 = tp2;
+            if r > 0 {
+                // L21 = F21 L11^{-T}: L11 L21ᵀ = F21ᵀ を解く。
+                faer::linalg::triangular_solve::solve_lower_triangular_in_place(l11.rb(), l21.rb_mut().transpose_mut(), par);
+                tp3 = std::time::Instant::now();
+            }
+        }
+        let mut ea_ns = 0u64;
+        let mut res = None;
+        if r > 0 {
+            let b = l21.rb();
+            let a = match &w {
+                Some(wb) => from_column_major_slice::<f64, usize, usize>(wb, r, nc),
+                None => b,
+            };
+            let map = &self.child_map[s];
+            match parent {
+                Some((p, pu)) if self.direct && u.is_none() && map_runs(map) <= self.direct_runs => {
+                    // 子の更新行列を受けていない: U = -A Bᵀ を親の前線へ直接書く。
+                    if map[r - 1] as usize >= self.end[p] - self.begin[p] {
+                        self.ensure_u(p, pu);
+                    }
+                    sub_update(self.front(p, lp, pu), Some(map), a, b, self.chunk, big);
+                }
+                parent => {
+                    // U = F22 - A Bᵀ (下三角だけ)。
+                    self.ensure_u(s, &mut u);
+                    let own = Front::u_only(u.as_mut().unwrap().as_mut_ptr(), r, self.pack_bw);
+                    sub_update(own, None, a, b, if self.pack_bw == 0 { usize::MAX } else { self.chunk }, big);
+                    let uv = u.take().unwrap();
+                    if let Some((p, pu)) = parent {
+                        let te = std::time::Instant::now();
+                        self.extend_add(p, pu, lp, s, &uv);
+                        self.give_back(uv);
+                        ea_ns = te.elapsed().as_nanos() as u64;
+                    } else {
+                        res = Some(uv);
+                    }
                 }
             }
-            Err(_) => ok.store(false, std::sync::atomic::Ordering::Relaxed),
         }
-        tp2 = std::time::Instant::now();
-        tp3 = tp2;
-        if r > 0 {
-            // L21 = F21 L11^{-T}: L11 L21ᵀ = F21ᵀ を解く。
-            faer::linalg::triangular_solve::solve_lower_triangular_in_place(l11.rb(), l21.rb_mut().transpose_mut(), par);
-            tp3 = std::time::Instant::now();
-            // U = F22 - L21 L21ᵀ (下三角だけ)。
-            let um = from_column_major_slice_mut::<f64, usize, usize>(&mut u, r, r);
-            faer::linalg::matmul::triangular::matmul(
-                um,
-                BlockStructure::TriangularLower,
-                l21.rb(),
-                BlockStructure::Rectangular,
-                l21.rb().transpose(),
-                BlockStructure::Rectangular,
-                Some(1.0),
-                -1.0,
-                par,
-            );
+        if let Some(wb) = w {
+            self.give_back(wb);
         }
+        if let Some(uv) = u {
+            self.give_back(uv);
         }
         if prof_on() {
             let tp4 = std::time::Instant::now();
             let d = |a: std::time::Instant, b: std::time::Instant| (b - a).as_nanos() as u64;
             use std::sync::atomic::Ordering::Relaxed;
-            PROF[0].fetch_add(d(tp0, tp1), Relaxed);
+            PROF[0].fetch_add(d(tp0, tp1) + ea_ns, Relaxed);
             PROF[1].fetch_add(d(tp1, tp2), Relaxed);
             PROF[2].fetch_add(d(tp2, tp3), Relaxed);
-            PROF[3].fetch_add(d(tp3, tp4), Relaxed);
+            PROF[3].fetch_add(d(tp3, tp4) - ea_ns, Relaxed);
             if big {
                 eprintln!("MF big node s={s} nc={nc} r={r} children={} asm+ea={:.3}ms chol={:.3}ms trsm={:.3}ms syrk={:.3}ms", self.children[s].len(),
-                    d(tp0, tp1) as f64 * 1e-6, d(tp1, tp2) as f64 * 1e-6, d(tp2, tp3) as f64 * 1e-6, d(tp3, tp4) as f64 * 1e-6);
+                    (d(tp0, tp1) + ea_ns) as f64 * 1e-6, d(tp1, tp2) as f64 * 1e-6, d(tp2, tp3) as f64 * 1e-6, (d(tp3, tp4) - ea_ns) as f64 * 1e-6);
             }
         }
-        u
+        res
     }
 
     /// `rhs` を `M^{-1} rhs` で上書きする。

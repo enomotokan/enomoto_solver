@@ -1142,6 +1142,9 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
         status = Status::Optimal;
         if let Some((_, bx, by, brc, brel)) = best {
             crate::phase_timing::record("ipm_push_best", brel.0.max(brel.1).max(brel.2));
+            if debug {
+                eprintln!("IPM profile total={:.3}s factor={:.3}s solve={:.3}s other={:.3}s", t_kkt.elapsed().as_secs_f64(), prof.0, prof.1, t_kkt.elapsed().as_secs_f64() - prof.0 - prof.1);
+            }
             return BoxIpmResult { status, x: bx, y: by.iter().map(|v| -v).collect(), rc: brc, iters, rel_res: brel };
         }
     }
