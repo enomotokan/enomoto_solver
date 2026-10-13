@@ -32,6 +32,20 @@ def load(path: Path) -> dict:
     return agg
 
 
+def load_trace(path: Path) -> dict | None:
+    """`MFTRACE` の行 (分解ごとの壁時計・仕事の合計・消去木の最長経路・大きな前線の時間) を合計する。"""
+    keys = ["wall", "work", "crit", "big", "crit_big"]
+    tot = dict.fromkeys(keys, 0.0)
+    n = 0
+    for line in path.read_text().splitlines():
+        if line.startswith("MFTRACE "):
+            kv = dict(x.split("=") for x in line.split()[1:])
+            for k in keys:
+                tot[k] += float(kv[k])
+            n += 1
+    return {**tot, "n": n} if n else None
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("dir", type=Path)
@@ -39,6 +53,11 @@ def main() -> None:
     args = ap.parse_args()
     out = []
     for f in sorted(args.dir.glob("*.txt")):
+        tr = load_trace(f)
+        if tr:
+            out.append(f"\n### {f.stem}  並列の様子 (分解 {tr['n']} 回の合計)\n")
+            out.append(f"壁時計 {tr['wall']:.2f} 秒 / 仕事の合計 {tr['work']:.2f} 秒 (仕事 / 壁時計 = {tr['work'] / tr['wall']:.2f}) / "
+                       f"消去木の最長経路 {tr['crit']:.2f} 秒 (うち大きな前線 {tr['crit_big']:.2f} 秒) / 大きな前線の合計 {tr['big']:.2f} 秒")
         agg = load(f)
         if not agg:
             continue

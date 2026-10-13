@@ -46,6 +46,8 @@ pub struct Multifrontal {
     signs: Option<Vec<i8>>,
     /// 更新行列の配列の使い回し (確保と初めて触るときのページフォールトを減らす)。
     pool: std::sync::Mutex<Vec<Vec<f64>>>,
+    /// 計測用 (`ENOMOTO_DEBUG_MF_TRACE`): 直近の分解での supernode ごとの所要時間 (ナノ秒、前線の用意を含む)。
+    trace: Option<Vec<std::sync::atomic::AtomicU64>>,
     /// 更新行列を台形で持つときのかたまりの幅 ([`Front`]、0 なら正方形。試験用 `ENOMOTO_T_MF_PACKED=1` と
     /// `ENOMOTO_T_MF_PACK_BW`)。
     pack_bw: usize,
@@ -469,6 +471,7 @@ impl Multifrontal {
             seq_flops: tunable!("ENOMOTO_T_MF_SEQ_FLOPS", 2e6f64, f64),
             ea_par: tunable!("ENOMOTO_T_MF_EA_PAR", 1e6f64, f64),
             pool: std::sync::Mutex::new(Vec::new()),
+            trace: std::env::var("ENOMOTO_DEBUG_MF_TRACE").is_ok().then(|| (0..ns).map(|_| std::sync::atomic::AtomicU64::new(0)).collect()),
             signs: None,
             pack_bw: if tunable!("ENOMOTO_T_MF_PACKED", 0u8, u8) != 0 { tunable!("ENOMOTO_T_MF_PACK_BW", 128usize, usize).max(1) } else { 0 },
             direct: tunable!("ENOMOTO_T_MF_DIRECT", 0u8, u8) != 0,
@@ -539,6 +542,35 @@ impl Multifrontal {
         (max_r, multi, leaves)
     }
 
+    /// 計測用 (`ENOMOTO_DEBUG_MF_TRACE`): 直近の分解の supernode ごとの所要時間から、(仕事の合計, 消去木の最長経路,
+    /// 並列に計算した大きな前線の時間の合計, 最長経路のうち大きな前線の時間) を秒で返す。
+    pub fn trace_summary(&self) -> Option<(f64, f64, f64, f64)> {
+        use std::sync::atomic::Ordering::Relaxed;
+        let tr = self.trace.as_ref()?;
+        let ns = self.begin.len();
+        let big = |s: usize| {
+            let nc = (self.end[s] - self.begin[s]) as f64;
+            let f = nc + (self.pat_ptr[s + 1] - self.pat_ptr[s]) as f64;
+            nc * f * f > self.par_flops
+        };
+        // 子は親より小さい番号なので、番号の順に最長経路を伸ばせる。
+        let mut cp = vec![0.0f64; ns];
+        let mut cpb = vec![0.0f64; ns];
+        let (mut work, mut bigsum) = (0.0, 0.0);
+        for s in 0..ns {
+            let d = tr[s].load(Relaxed) as f64 * 1e-9;
+            work += d;
+            if big(s) {
+                bigsum += d;
+            }
+            let (c, cb) = self.children[s].iter().map(|&c| (cp[c], cpb[c])).fold((0.0, 0.0), |m, x| if x.0 > m.0 { x } else { m });
+            cp[s] = c + d;
+            cpb[s] = cb + if big(s) { d } else { 0.0 };
+        }
+        let (crit, critb) = self.roots.iter().map(|&r| (cp[r], cpb[r])).fold((0.0, 0.0), |m, x| if x.0 > m.0 { x } else { m });
+        Some((work, crit, bigsum, critb))
+    }
+
     /// supernode の数。
     pub fn n_supernodes(&self) -> usize {
         self.begin.len()
@@ -555,6 +587,9 @@ impl Multifrontal {
         let this = &*self;
         let reg = LltRegularization { dynamic_regularization_delta: delta, dynamic_regularization_epsilon: eps };
         let ok = std::sync::atomic::AtomicBool::new(true);
+        if let Some(tr) = &this.trace {
+            tr.iter().for_each(|t| t.store(0, std::sync::atomic::Ordering::Relaxed));
+        }
         if super::kkt::inner_seq() {
             // 外側で独立な成分を並列に解いているとき: rayon を使わず逐次に分解する。
             for &r in &this.roots {
@@ -649,7 +684,7 @@ impl Multifrontal {
 
     /// supernode `s` の L のかたまり (前線の左の `nc` 列、因子の配列の中) を 0 にして元の行列の値を足す。
     fn prepare(&self, s: usize, values: &[f64], lp: SyncPtr) {
-        let t0 = prof_on().then(std::time::Instant::now);
+        let t0 = (prof_on() || self.trace.is_some()).then(std::time::Instant::now);
         let nc = self.end[s] - self.begin[s];
         let f = nc + self.pat_ptr[s + 1] - self.pat_ptr[s];
         // SAFETY: supernode ごとに `l_ptr` の範囲は重ならず、各 supernode はちょうど 1 回だけ処理される。
@@ -659,7 +694,13 @@ impl Multifrontal {
             lsl[lc as usize * f + lr as usize] += values[k as usize];
         }
         if let Some(t0) = t0 {
-            PROF[0].fetch_add(t0.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+            let ns = t0.elapsed().as_nanos() as u64;
+            if prof_on() {
+                PROF[0].fetch_add(ns, std::sync::atomic::Ordering::Relaxed);
+            }
+            if let Some(tr) = &self.trace {
+                tr[s].fetch_add(ns, std::sync::atomic::Ordering::Relaxed);
+            }
         }
     }
 
@@ -866,6 +907,9 @@ impl Multifrontal {
                 eprintln!("MF big node s={s} nc={nc} r={r} children={} asm+ea={:.3}ms chol={:.3}ms trsm={:.3}ms syrk={:.3}ms", self.children[s].len(),
                     (d(tp0, tp1) + ea_ns) as f64 * 1e-6, d(tp1, tp2) as f64 * 1e-6, d(tp2, tp3) as f64 * 1e-6, (d(tp3, tp4) - ea_ns) as f64 * 1e-6);
             }
+        }
+        if let Some(tr) = &self.trace {
+            tr[s].fetch_add(tp0.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
         }
         res
     }

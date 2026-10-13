@@ -601,6 +601,9 @@ impl AugKkt {
         if let Some(mf) = self.mf.as_mut() {
             let t_aug = std::time::Instant::now();
             let ok = mf.factor(a_upper.values(), reg.dynamic_regularization_delta, reg.dynamic_regularization_epsilon);
+            if let Some((work, crit, bigsum, critb)) = mf.trace_summary() {
+                eprintln!("MFTRACE wall={:.4} work={work:.4} crit={crit:.4} big={bigsum:.4} crit_big={critb:.4} threads={}", t_aug.elapsed().as_secs_f64(), rayon::current_num_threads());
+            }
             self.n_regularized = super::multifrontal::DYNREG.swap(0, std::sync::atomic::Ordering::Relaxed);
             if env_str!("ENOMOTO_DEBUG_REFINE").is_some() {
                 let vmax = a_upper.values().iter().fold(0.0f64, |m, v| m.max(v.abs()));
@@ -1040,6 +1043,9 @@ impl NormalKkt {
         } else if let Some(mf) = self.mf.as_mut() {
             let _ = m;
             let ok = mf.factor(&self.values, reg.dynamic_regularization_delta, reg.dynamic_regularization_epsilon);
+            if let Some((work, crit, bigsum, critb)) = mf.trace_summary() {
+                eprintln!("MFTRACE wall={:.4} work={work:.4} crit={crit:.4} big={bigsum:.4} crit_big={critb:.4} threads={}", t_num.elapsed().as_secs_f64(), rayon::current_num_threads());
+            }
             if env_str!("ENOMOTO_DEBUG_REFINE").is_some() {
                 eprintln!("FACTOR mf ok={ok} t={:.3}s prof={:?} dynreg={}", t_num.elapsed().as_secs_f64(), super::multifrontal::take_prof(), super::multifrontal::DYNREG.swap(0, std::sync::atomic::Ordering::Relaxed));
                 for (b, (cnt, t, fl)) in super::multifrontal::take_bucket_prof().into_iter().enumerate() {
