@@ -373,7 +373,7 @@ pub(super) struct Solver<'a, L: MipLp> {
     proof_fifo: [std::collections::VecDeque<u64>; 2],
     /// 捨てた (中身を空にした) が、まだ `dual_proofs` に残っている証明の数。
     proof_dead: usize,
-    /// 証明ごとの、前に捨てる候補になってから刈り込み・締め付けに使われたかの印 (`ENOMOTO_MIP_PROOF_AGING`: 捨てるときに
+    /// 証明ごとの、前に捨てる候補になってから刈り込み・締め付けに使われたかの印 (木を分け合うとき、`ENOMOTO_MIP_PROOF_NO_AGING` でなければ: 捨てるときに
     /// 印のあるものは印を消して後ろに回す。clock 法による「最近使われていないもの」の近似)。
     proof_ref: std::collections::VecDeque<bool>,
     /// 列ごとの、その列を含む証明 (通し番号, 係数)。[0] は係数が正のもの (下限が変わると最小活動量が変わる)、[1] は
@@ -504,7 +504,7 @@ pub(crate) struct SnapNode {
     estimate: f64,
     depth: usize,
     branch: Option<(usize, bool, f64, f64)>,
-    /// 共有の待ち行列で渡すノードの親の LP の最適基底の、列と元の行の部分 (`ENOMOTO_MIP_TREE_PASS_BASIS`)。カットの行は
+    /// 共有の待ち行列で渡すノードの親の LP の最適基底の、列と元の行の部分 (`ENOMOTO_MIP_TREE_NO_PASS_BASIS` でなければ)。カットの行は
     /// スレッドごとに違うので渡さない (受け取った側では基底にする)。
     basis: Option<(Vec<VarStatus>, Vec<VarStatus>)>,
 }
@@ -1940,7 +1940,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
             // `ENOMOTO_T_MIP_TREE_START_NODES`: 従を始める待ち行列のノード数 (多いほど最初に配るノードが増える)
-            if parallel_tree && self.pool.is_none() && self.queue.len() + plunge.is_some() as usize >= tunable!("ENOMOTO_T_MIP_TREE_START_NODES", 2usize, usize) {
+            if parallel_tree && self.pool.is_none() && self.queue.len() + plunge.is_some() as usize >= tunable!("ENOMOTO_T_MIP_TREE_START_NODES", 8usize, usize) {
                 self.start_workers(&mut plunge);
             }
             // racing ramp-up: 競争の終わり (主が決める) と、負けたスレッドの木を捨てる
@@ -1975,7 +1975,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if idle > len && self.queue.len() >= 2 {
                     self.pool_donate(idle - len);
                 }
-                if env_str!("ENOMOTO_MIP_TREE_BALANCE").is_some() && self.nodes % tunable!("ENOMOTO_T_MIP_TREE_BALANCE_EVERY", 32u64, u64) == 0 {
+                if env_str!("ENOMOTO_MIP_TREE_NO_BALANCE").is_none() && self.nodes % tunable!("ENOMOTO_T_MIP_TREE_BALANCE_EVERY", 32u64, u64) == 0 {
                     self.pool_balance();
                 }
                 self.tprof.sync_s += t_sync.elapsed().as_secs_f64();
@@ -2903,7 +2903,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.pool_tid == 0 || env_str!("ENOMOTO_MIP_TREE_HEUR_ALL").is_some() {
             return true;
         }
-        let k = if self.has_cutoff_value() { pool.threads.div_ceil(tunable!("ENOMOTO_T_MIP_TREE_HEUR_DIV_INC", 4usize, usize).max(1)) } else { pool.threads.div_ceil(tunable!("ENOMOTO_T_MIP_TREE_HEUR_DIV_NOINC", 2usize, usize).max(1)) };
+        let k = if self.has_cutoff_value() { pool.threads.div_ceil(tunable!("ENOMOTO_T_MIP_TREE_HEUR_DIV_INC", 2usize, usize).max(1)) } else { pool.threads.div_ceil(tunable!("ENOMOTO_T_MIP_TREE_HEUR_DIV_NOINC", 2usize, usize).max(1)) };
         (self.pool_tid as usize) < k
     }
 
@@ -3825,10 +3825,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         true
     }
 
-    /// 分類 `cat` の証明を 1 本捨てる: 古いものから。`ENOMOTO_MIP_PROOF_AGING` なら、前回から使われた印のあるものは印を
+    /// 分類 `cat` の証明を 1 本捨てる: 古いものから。木を分け合うとき (`ENOMOTO_MIP_PROOF_NO_AGING` でなければ)、前回から使われた印のあるものは印を
     /// 消して後ろに回す (clock 法)。
     fn proof_evict(&mut self, cat: usize) {
-        let aging = env_str!("ENOMOTO_MIP_PROOF_AGING").is_some();
+        let aging = self.pool.is_some() && env_str!("ENOMOTO_MIP_PROOF_NO_AGING").is_none();
         let mut turns = self.proof_fifo[cat].len();
         while let Some(id) = self.proof_fifo[cat].pop_front() {
             let k = (id - self.proof_first_id) as usize;
@@ -3898,7 +3898,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.proof_ref[k] = true;
         let ProofState::Own(uses) = self.proof_state[k] else { return };
         let uses = uses.saturating_add(1);
-        if (uses as u64) < tunable!("ENOMOTO_T_MIP_TREE_SHARE_PROOF_USES", 1u64, u64) {
+        if (uses as u64) < tunable!("ENOMOTO_T_MIP_TREE_SHARE_PROOF_USES", 3u64, u64) {
             self.proof_state[k] = ProofState::Own(uses);
             return;
         }
@@ -3944,10 +3944,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // `ENOMOTO_T_MIP_PROOF_POOL_IMPORTED`
         let cat = (state == ProofState::Imported) as usize;
         let cap = if cat == 0 { tunable!("ENOMOTO_T_MIP_PROOF_POOL", 2000usize, usize) } else { tunable!("ENOMOTO_T_MIP_PROOF_POOL_IMPORTED", 500usize, usize) };
-        // `ENOMOTO_T_MIP_PROOF_POOL_PER_COL` = c (> 0): 上限を max(200, c * 列数) 以下にする (小さい問題で証明のプールが問題より
+        // 木を分け合うとき、`ENOMOTO_T_MIP_PROOF_POOL_PER_COL` = c (> 0、既定 4): 上限を max(200, c * 列数) 以下にする (小さい問題で証明のプールが問題より
         // ずっと大きくなり、ノードごとの伝播が重くなるのを避ける)
-        let per_col = tunable!("ENOMOTO_T_MIP_PROOF_POOL_PER_COL", 0usize, usize);
-        let cap = if per_col > 0 { cap.min((per_col * self.p.n).max(200)) } else { cap };
+        let per_col = tunable!("ENOMOTO_T_MIP_PROOF_POOL_PER_COL", 4usize, usize);
+        let cap = if per_col > 0 && self.pool.is_some() { cap.min((per_col * self.p.n).max(200)) } else { cap };
         if cap == 0 {
             return;
         }
@@ -4245,7 +4245,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     /// 行にできない衝突を境界リテラルのまま衝突プールに入れる (`ENOMOTO_MIP_NO_LIT_CONFLICTS` で無効)。入れたら真。
-    /// 使われた自前の衝突をほかのスレッドに知らせる (`ENOMOTO_MIP_TREE_SHARE_LITS_ON_USE`)。
+    /// 使われた自前の衝突をほかのスレッドに知らせる (`ENOMOTO_MIP_TREE_SHARE_LITS_AT_ONCE` でなければ)。
     fn share_used_lits(&mut self) {
         let used = self.lit_conflicts.take_used_unshared();
         if used.is_empty() {
@@ -4278,9 +4278,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let ok = self.lit_conflicts.add(&l, self.importing);
         if ok {
             self.lit_stats[0] += 1;
-            // `ENOMOTO_MIP_TREE_SHARE_LITS_ON_USE`: 作ったときには知らせず、刈り込み・締め付けに使われたときに知らせる
+            // 作ったときには知らせず、刈り込み・締め付けに使われたときに知らせる (`ENOMOTO_MIP_TREE_SHARE_LITS_AT_ONCE` なら作ったときに)
             // ([`Self::share_used_lits`])
-            if !self.importing && env_str!("ENOMOTO_MIP_TREE_SHARE_LITS_ON_USE").is_none() {
+            if !self.importing && env_str!("ENOMOTO_MIP_TREE_SHARE_LITS_AT_ONCE").is_some() {
                 if let Some(pool) = &self.pool {
                     if env_str!("ENOMOTO_MIP_TREE_NO_SHARED_PROOFS").is_none() {
                         learned_push(pool, self.pool_tid, LearnedItem::Lits(l));
@@ -5080,7 +5080,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut out = Vec::with_capacity(k);
         for _ in 0..k {
             match self.queue.pop_best() {
-                Some(n) => out.push(if env_str!("ENOMOTO_MIP_TREE_PASS_BASIS").is_some() { SnapNode::of_with_basis(&n, self.p.m) } else { SnapNode::of(&n) }),
+                Some(n) => out.push(if env_str!("ENOMOTO_MIP_TREE_NO_PASS_BASIS").is_none() { SnapNode::of_with_basis(&n, self.p.m) } else { SnapNode::of(&n) }),
                 None => break,
             }
         }
@@ -5090,7 +5090,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         pool.len.store(g.nodes.len(), Ordering::Relaxed);
     }
 
-    /// 共有の待ち行列から取ったノードを自分のノードにする。親の基底が付いていれば (`ENOMOTO_MIP_TREE_PASS_BASIS`)、列と元の行は
+    /// 共有の待ち行列から取ったノードを自分のノードにする。親の基底が付いていれば (`ENOMOTO_MIP_TREE_NO_PASS_BASIS` でなければ付ける)、列と元の行は
     /// その状態、このスレッドのカットの行は基底にした基底を付ける (基底変数の数が合わなければ [`Self::restore_node_basis`] の
     /// 修復に任せる)。
     fn open_from_pool(&self, mut sn: SnapNode) -> OpenNode {
@@ -5157,7 +5157,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         true
     }
 
-    /// 質の釣り合い (`ENOMOTO_MIP_TREE_BALANCE`): 共有の待ち行列に自分の下界より十分小さいノードがあれば取って自分の待ち行列に
+    /// 質の釣り合い (既定。`ENOMOTO_MIP_TREE_NO_BALANCE` で無効): 共有の待ち行列に自分の下界より十分小さいノードがあれば取って自分の待ち行列に
     /// 入れる。ほかのスレッドの下界が自分の待ち行列の最良より十分大きく、共有の待ち行列が少なければ、最良のノードを渡す。
     /// 「十分」は q (`ENOMOTO_T_MIP_TREE_BALANCE_Q`) × (打ち切り値 − 全体の下界) (打ち切り値がなければ |下界|)。
     fn pool_balance(&mut self) {

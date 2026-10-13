@@ -35,7 +35,7 @@ pub struct LitConflictPool {
     pub dirty: bool,
     /// 診断用: 枠ごとの、ほかのスレッドから取り込んだ衝突か。
     imported: Vec<bool>,
-    /// 枠ごとの、使われたらほかのスレッドに知らせる (自前でまだ知らせていない) 衝突か (`ENOMOTO_MIP_TREE_SHARE_LITS_ON_USE`)。
+    /// 枠ごとの、使われたらほかのスレッドに知らせる (自前でまだ知らせていない) 衝突か (既定。`ENOMOTO_MIP_TREE_SHARE_LITS_AT_ONCE` なら作ったときに知らせる)。
     unshared: Vec<bool>,
     /// 使われた、まだ知らせていない自前の衝突 ([`Self::take_used_unshared`] で取り出す)。
     used_buf: Vec<Vec<Lit>>,
@@ -141,7 +141,7 @@ impl LitConflictPool {
         self.slots[slot] = Some(l);
         self.ages[slot] = 0;
         self.imported[slot] = imported;
-        self.unshared[slot] = !imported && env_str!("ENOMOTO_MIP_TREE_SHARE_LITS_ON_USE").is_some();
+        self.unshared[slot] = !imported && env_str!("ENOMOTO_MIP_TREE_SHARE_LITS_AT_ONCE").is_none();
         self.dirty = true;
         // 古い索引の項目が増えたら作り直す
         if self.index_len > 4 * self.live_lits + 1000 {
