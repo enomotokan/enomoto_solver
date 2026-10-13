@@ -41,14 +41,14 @@ def main() -> None:
             for v in variants:
                 m = med(d[(p, v)], key)
                 ok = all(r["status"] == "optimal" for r in d[(p, v)])
-                if v == args.base:
+                if v == args.base or b != b:
                     cells.append(f"{m:.1f}" + ("" if ok else " (!)"))
                 else:
                     cells.append(f"{m:.1f} ({m / b:.3f})" + ("" if ok else " (!)"))
                     if m == m and b == b:
                         logs[v].append(math.log(m / b))
             out.append(f"| {p} | " + " | ".join(cells) + " |")
-        out.append("| 幾何平均の比 | - | " + " | ".join(f"{math.exp(sum(logs[v]) / len(logs[v])):.3f}" for v in variants if v != args.base) + " |")
+        out.append("| 幾何平均の比 (基準が解けた問題) | - | " + " | ".join(f"{math.exp(sum(logs[v]) / len(logs[v])):.3f}" for v in variants if v != args.base) + " |")
     out.append("\n### 最大常駐メモリ (MB、各版の最大)\n")
     out.append("| 問題 | " + " | ".join(variants) + " |")
     out.append("|---|" + "---|" * len(variants))
@@ -57,7 +57,7 @@ def main() -> None:
         cells = []
         for v in variants:
             m = max(r.get("maxrss_mb", 0) for r in d[(p, v)])
-            cells.append(f"{m:.0f}" if v == args.base else f"{m:.0f} ({m / b:.2f})")
+            cells.append(f"{m:.0f}" if v == args.base or not b else f"{m:.0f} ({m / b:.2f})")
         out.append(f"| {p} | " + " | ".join(cells) + " |")
     text = "\n".join(out)
     print(text)
