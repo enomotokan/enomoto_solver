@@ -2306,6 +2306,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     // `ENOMOTO_MIP_NOINC_BUDGET`: 時間の割合を木の様子で変える。実行不能で刈れた葉の割合が低い
                     // (暫定解がないと限定操作で刈れず、木が進まない) ほど上限 (既定 0.6) に、高いほど下限 (既定 0.15) に寄せる。
                     // さらに近さ ([`Solver::heur_close`]) の最大値が更新されない回が続くと、呼ぶ間隔を倍々にする (最大 64 ノード)
+                    // 40 問 (90 秒、threads=1) では NOINC_HEUR だけ・BANDIT・BUDGET・両方とも 20 問で、sgeomean は基準 2 回
+                    // (34.10・33.59) の揺れの範囲 (33.94・33.54・33.72・33.74)。暫定解がないまま終わるのは 30n20b8・neos-1456979
+                    // の 2 問だけで、どの設定でも見つからない: 根に 27-50 秒かかり、木の中で呼べるのは 3-9 回なので、8 本の腕を
+                    // 一通り試すところで時間が尽きる (neos-1456979 の近さは擬似費用ダイビング 0.79・分数 0.65、FP 0.01)。既定では使わない
                     let adapt_budget = env_str!("ENOMOTO_MIP_NOINC_BUDGET").is_some();
                     let time_frac = if adapt_budget {
                         let infeas = self.pc.infeasible_leaves as f64 / self.nodes.max(1) as f64;
