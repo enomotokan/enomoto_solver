@@ -359,8 +359,12 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// (根の状態) とそれを取ったノード数、作業領域。
     proof_first_id: u64,
     proof_base: std::collections::VecDeque<(f64, u32, f64)>,
-    /// 診断用: 証明ごとの、ほかのスレッドから取り込んだものか (`dual_proofs` と同じ並び)。
-    proof_imported: std::collections::VecDeque<bool>,
+    /// 証明ごとの状態 (`dual_proofs` と同じ並び、[`ProofState`])。
+    proof_state: std::collections::VecDeque<ProofState>,
+    /// 生きている証明の通し番号を古い順に、[自前, 取り込み] ごとに (上限を分けて古いものから捨てるため)。
+    proof_fifo: [std::collections::VecDeque<u64>; 2],
+    /// 捨てた (中身を空にした) が、まだ `dual_proofs` に残っている証明の数。
+    proof_dead: usize,
     /// 列ごとの、その列を含む証明 (通し番号, 係数)。[0] は係数が正のもの (下限が変わると最小活動量が変わる)、[1] は
     /// それ以外 (上限が変わると変わる)。境界の変わった側だけをたどるように分けて持つ。
     proof_col_index: [Vec<Vec<(u64, f64)>>; 2],
@@ -528,6 +532,19 @@ pub(crate) struct WorkPool {
     prof: std::sync::Mutex<Vec<TreeProf>>,
 }
 
+/// 双対証明・衝突制約のプールの行の状態。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ProofState {
+    /// 自前で、まだほかのスレッドに知らせていない (このスレッドで初めて刈り込み・締め付けに使われたら知らせる)。
+    Own,
+    /// 自前で、知らせた (または知らせない) もの。
+    OwnDone,
+    /// ほかのスレッドから取り込んだもの。
+    Imported,
+    /// 捨てたもの (中身は空、右辺は +inf。先頭に来たら取り除く)。
+    Dead,
+}
+
 /// 診断用: 木の探索のスレッドごとの時間・ノードの内訳 (`ENOMOTO_PROF_TREE_PAR` で終わりに表示する)。
 #[derive(Default, Clone)]
 pub(crate) struct TreeProf {
@@ -557,6 +574,8 @@ pub(crate) struct TreeProf {
     lits: [[u64; 4]; 2],
     proof_live: [usize; 2],
     lits_live: [usize; 2],
+    /// ほかのスレッドに知らせた自前の証明の数。
+    shared: u64,
     /// 主: 求解の始めから、最初のノードを取り出したとき・従を始めたときまで。
     tree_start_s: f64,
     workers_s: f64,
@@ -567,8 +586,8 @@ impl TreeProf {
         let p = &self.proof;
         let l = &self.lits;
         format!(
-            "proofs own/imp: live {}/{} eval {}/{} prune {}/{} tight {}/{} absorb {}/{}; lits own/imp: live {}/{} eval {}/{} prune {}/{} tight {}/{} aged {}/{}",
-            self.proof_live[0], self.proof_live[1], p[0][0], p[1][0], p[0][1], p[1][1], p[0][2], p[1][2], p[0][3], p[1][3],
+            "shared {} proofs own/imp: live {}/{} eval {}/{} prune {}/{} tight {}/{} absorb {}/{}; lits own/imp: live {}/{} eval {}/{} prune {}/{} tight {}/{} aged {}/{}",
+            self.shared, self.proof_live[0], self.proof_live[1], p[0][0], p[1][0], p[0][1], p[1][1], p[0][2], p[1][2], p[0][3], p[1][3],
             self.lits_live[0], self.lits_live[1], l[0][0], l[1][0], l[0][1], l[1][1], l[0][2], l[1][2], l[0][3], l[1][3]
         )
     }
@@ -978,7 +997,9 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         dual_proof_nnz: 0,
         proof_first_id: 0,
         proof_base: std::collections::VecDeque::new(),
-        proof_imported: std::collections::VecDeque::new(),
+        proof_state: std::collections::VecDeque::new(),
+        proof_fifo: [std::collections::VecDeque::new(), std::collections::VecDeque::new()],
+        proof_dead: 0,
         proof_col_index: [Vec::new(), Vec::new()],
         proof_chg_mark: Vec::new(),
         proof_chg_stamp: 0,
@@ -3684,27 +3705,110 @@ impl<'a, L: MipLp> Solver<'a, L> {
         true
     }
 
+    /// 通し番号 `id` の証明を捨てる: 中身を空にして右辺を +inf にする (調べる処理は右辺が無限の行を飛ばす)。列の索引に
+    /// 残った項目は、索引を作り直すまで差分を足すだけで害はない。
+    fn proof_kill(&mut self, id: u64) {
+        let k = (id - self.proof_first_id) as usize;
+        let c = std::mem::take(&mut self.dual_proofs[k].0);
+        self.dual_proof_nnz -= c.len();
+        self.dual_proofs[k].1 = f64::INFINITY;
+        self.dual_proofs[k].2 = false;
+        self.proof_state[k] = ProofState::Dead;
+        self.proof_dead += 1;
+        self.proof_dirty = true;
+    }
+
+    /// 捨てた証明を取り除いて詰め直す。通し番号は付け直す (古い番号より大きい番号から) ので、列の索引・基準は次の
+    /// [`Self::apply_dual_proofs`] で作り直す。
+    fn proof_compact(&mut self) {
+        let old_first = self.proof_first_id;
+        let new_first = old_first + self.dual_proofs.len() as u64;
+        let mut map = std::collections::HashMap::new();
+        let (mut dp, mut base, mut st) = (std::collections::VecDeque::new(), std::collections::VecDeque::new(), std::collections::VecDeque::new());
+        for (k, ((row, b), s)) in std::mem::take(&mut self.dual_proofs).into_iter().zip(std::mem::take(&mut self.proof_base)).zip(std::mem::take(&mut self.proof_state)).enumerate() {
+            if s != ProofState::Dead {
+                map.insert(old_first + k as u64, new_first + dp.len() as u64);
+                dp.push_back(row);
+                base.push_back(b);
+                st.push_back(s);
+            }
+        }
+        self.dual_proofs = dp;
+        self.proof_base = base;
+        self.proof_state = st;
+        for f in self.proof_fifo.iter_mut() {
+            for id in f.iter_mut() {
+                *id = map[id];
+            }
+        }
+        self.proof_first_id = new_first;
+        self.proof_dead = 0;
+        self.proof_always.clear();
+        self.proof_snap = None;
+        self.proof_dirty = true;
+    }
+
+    /// `k` 番目の証明が刈り込み・締め付けに使われた: 自前でまだ知らせていなければ、ほかのスレッドに知らせる
+    /// (長さが `ENOMOTO_T_MIP_TREE_SHARE_PROOF_LEN` 以下のものだけ)。
+    fn proof_used(&mut self, k: usize) {
+        if self.proof_state[k] != ProofState::Own {
+            return;
+        }
+        self.proof_state[k] = ProofState::OwnDone;
+        let Some(pool) = self.pool.clone() else { return };
+        if env_str!("ENOMOTO_MIP_TREE_NO_SHARED_PROOFS").is_some() {
+            return;
+        }
+        let (c, konst, obj) = &self.dual_proofs[k];
+        if c.len() > tunable!("ENOMOTO_T_MIP_TREE_SHARE_PROOF_LEN", usize::MAX, usize) {
+            return;
+        }
+        learned_push(&pool, self.pool_tid, LearnedItem::Proof(c.clone(), *konst, *obj));
+        self.tprof.shared += 1;
+    }
+
     /// 双対証明・衝突制約のプールに行 `sum coefs x <= rhs` を加える (`obj` なら `rhs = U - konst`、そうでなければ
     /// `rhs = konst`)。上限を超えたら古いものから捨てる。
     pub(super) fn push_pool_row(&mut self, coefs: Vec<(usize, f64)>, konst: f64, obj: bool) {
-        // 木を分け合う: 作った証明をほかのスレッドにも知らせる (取り込んだものは知らせ直さない)
-        if !self.importing {
+        // 木を分け合う: 自前の証明は、このスレッドで初めて刈り込み・締め付けに使われたときにほかのスレッドに知らせる
+        // ([`Self::proof_used`])。`ENOMOTO_MIP_TREE_SHARE_PROOFS_AT_ONCE` なら以前と同じく作ったときに知らせる
+        let mut state = if self.importing { ProofState::Imported } else { ProofState::Own };
+        if state == ProofState::Own && env_str!("ENOMOTO_MIP_TREE_SHARE_PROOFS_AT_ONCE").is_some() {
             if let Some(pool) = &self.pool {
                 if env_str!("ENOMOTO_MIP_TREE_NO_SHARED_PROOFS").is_none() {
                     learned_push(pool, self.pool_tid, LearnedItem::Proof(coefs.clone(), konst, obj));
                 }
             }
+            state = ProofState::OwnDone;
         }
         let p = self.p;
         let nnz_cap = 10 * p.nnz + 100_000;
-        let max_rows = tunable!("ENOMOTO_T_MIP_PROOF_POOL", 2000usize, usize);
-        while !self.dual_proofs.is_empty() && (self.dual_proofs.len() >= max_rows || self.dual_proof_nnz + coefs.len() > nnz_cap) {
-            let (c, _, _) = self.dual_proofs.pop_front().unwrap();
-            self.dual_proof_nnz -= c.len();
+        // 上限は自前と取り込みで別 (取り込みが自前の証明を押し出さないように)。取り込みの上限
+        // `ENOMOTO_T_MIP_PROOF_POOL_IMPORTED`
+        let cat = (state == ProofState::Imported) as usize;
+        let cap = if cat == 0 { tunable!("ENOMOTO_T_MIP_PROOF_POOL", 2000usize, usize) } else { tunable!("ENOMOTO_T_MIP_PROOF_POOL_IMPORTED", 500usize, usize) };
+        if cap == 0 {
+            return;
+        }
+        while self.proof_fifo[cat].len() >= cap {
+            let id = self.proof_fifo[cat].pop_front().unwrap();
+            self.proof_kill(id);
+        }
+        // 非零の上限: 取り込みから、なければ自前の古いものから捨てる
+        while self.dual_proof_nnz + coefs.len() > nnz_cap {
+            let Some(id) = self.proof_fifo[1].pop_front().or_else(|| self.proof_fifo[0].pop_front()) else { break };
+            self.proof_kill(id);
+        }
+        // 先頭の捨てたものを取り除く。捨てたものが多ければ詰め直す
+        while self.proof_state.front() == Some(&ProofState::Dead) {
+            self.dual_proofs.pop_front();
             self.proof_base.pop_front();
-            self.proof_imported.pop_front();
+            self.proof_state.pop_front();
             self.proof_first_id += 1;
-            self.proof_dirty = true;
+            self.proof_dead -= 1;
+        }
+        if self.proof_dead > self.dual_proofs.len() / 2 + 256 {
+            self.proof_compact();
         }
         self.dual_proof_nnz += coefs.len();
         let id = self.proof_first_id + self.dual_proofs.len() as u64;
@@ -3719,7 +3823,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             None => (0.0, 0, f64::INFINITY),
         };
         self.proof_base.push_back(base);
-        self.proof_imported.push_back(self.importing);
+        self.proof_state.push_back(state);
+        self.proof_fifo[cat].push_back(id);
         self.proof_dirty = true;
         self.dual_proofs.push_back((coefs, konst, obj));
         let k = self.dual_proofs.len() - 1;
@@ -4218,10 +4323,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     continue;
                 }
                 let slack = rhs - minact;
-                let org = self.proof_imported.get(k).copied().unwrap_or(false) as usize;
+                let org = (self.proof_state[k] == ProofState::Imported) as usize;
                 self.tprof.proof[org][0] += 1;
                 if slack < -1e-6 * (1.0 + rhs.abs()) {
                     self.tprof.proof[org][1] += 1;
+                    self.proof_used(k);
                     return false;
                 }
                 if !full && slack >= self.proof_base[k].2 {
@@ -4243,6 +4349,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         changes.push((j, false, self.dom.up[j] + slack / a - 1e-6));
                     }
                 }
+                let mut used = false;
                 for (j, upper, v) in changes {
                     self.dom.set_external(true);
                     let ch = if upper { self.dom.tighten_upper(p, j, v) } else { self.dom.tighten_lower(p, j, v) };
@@ -4250,13 +4357,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if ch {
                         tightened = true;
                         tightened_now = true;
+                        used = true;
                         self.proof_tightenings += 1;
                         self.tprof.proof[org][2] += 1;
                     }
                     if self.dom.infeasible {
                         self.tprof.proof[org][1] += 1;
+                        self.proof_used(k);
                         return false;
                     }
+                }
+                if used {
+                    self.proof_used(k);
                 }
             }
             if full || !tightened_now || pass == 7 {
@@ -4306,7 +4418,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         continue; // 古い証明
                     }
                     let k = (id - self.proof_first_id) as usize;
-                    self.tprof.proof[self.proof_imported.get(k).copied().unwrap_or(false) as usize][3] += 1;
+                    self.tprof.proof[(self.proof_state[k] == ProofState::Imported) as usize][3] += 1;
                     let (old, new) = (a * old_v, a * new_v);
                     if !self.proof_in_touched[k] {
                         self.proof_in_touched[k] = true;
@@ -4956,8 +5068,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if prof_tree_par() {
             self.tprof.lits = self.lit_conflicts.stats;
             self.tprof.lits_live = self.lit_conflicts.live_by_origin();
-            let imp = self.proof_imported.iter().filter(|&&b| b).count();
-            self.tprof.proof_live = [self.proof_imported.len() - imp, imp];
+            self.tprof.proof_live = [self.proof_fifo[0].len(), self.proof_fifo[1].len()];
         }
         if let (Some(pool), true) = (self.pool.clone(), self.snap.is_some() && prof_tree_par()) {
             self.tprof.tid = self.pool_tid;
