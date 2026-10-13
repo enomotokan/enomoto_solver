@@ -202,6 +202,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     noinc_cost: [f64; NOINC_ARMS],
     /// 暫定解がない間の呼び出しの間隔の調整 (`ENOMOTO_MIP_NOINC_BUDGET`): 近さの最大値が更新されなかった続けての回数、
     /// これまでの近さの最大値、次に呼んでよいノード番号。
+    /// 根で同じヒューリスティクスを呼んだときの近さ (`ENOMOTO_MIP_NOINC_ROOT_PRIOR` でバンディットの初期値にする)。
+    noinc_prior: [Option<f64>; NOINC_ARMS],
     noinc_stall: u32,
     noinc_best_close: f64,
     noinc_next_node: u64,
@@ -849,6 +851,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         noinc_reward: [0.0; NOINC_ARMS],
         noinc_count: [0; NOINC_ARMS],
         noinc_cost: [0.0; NOINC_ARMS],
+        noinc_prior: [None; NOINC_ARMS],
         noinc_stall: 0,
         noinc_best_close: 0.0,
         noinc_next_node: 0,
@@ -1011,6 +1014,19 @@ fn proof_only() -> bool {
 /// 暫定解がない間の木の中のヒューリスティクスの腕の数 (0: RENS、1: Feasibility Pump、2..8: ダイビング
 /// 分数・ベクトル長・係数・擬似費用・Farkas・衝突)。
 const NOINC_ARMS: usize = 8;
+
+/// 根のヒューリスティクスの名前に対応する、暫定解がない間の木の中のバンディットの腕 ([`NOINC_ARMS`] の番号)。
+/// 擬似費用・Farkas・衝突のダイビングは根では使わない。
+fn noinc_root_arm(name: &str) -> Option<usize> {
+    match name {
+        "RENS" => Some(0),
+        "feasibility pump" => Some(1),
+        "fractional diving" => Some(2),
+        "vector length diving" => Some(3),
+        "coefficient diving" => Some(4),
+        _ => None,
+    }
+}
 
 /// 木の中のヒューリスティクスを走らせないスレッドか (証明だけのスレッドと、根のヒューリスティクスだけ走らせる
 /// 二分探索のスレッド `ENOMOTO_MIP_BISECT_ROOT_HEUR`)。
@@ -1580,9 +1596,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             }
                         } else {
                             let t = Instant::now();
+                            // 近さ ([`Solver::heur_close`]) を記録しない関数 (旧来の RENS など) を見分けるため負にしておく
+                            self.heur_close = -1.0;
                             let found = $e;
                             if !found {
                                 self.failed_heurs |= bit;
+                            }
+                            // 木の中のバンディットの腕に当たるものは、近さを初期値として取っておく ([`Solver::noinc_prior`])。
+                            // 並列モードの RENS はサブ MIP を別スレッドに出しただけなので記録しない
+                            if let Some(arm) = noinc_root_arm($name) {
+                                if self.heur_close >= 0.0 && !(arm == 0 && self.parallel_submips) {
+                                    self.noinc_prior[arm] = Some(if found { 1.0 } else { self.heur_close.min(1.0) });
+                                }
                             }
                             if self.params.verbose {
                                 eprintln!("MIP: root heuristic {}: {} ({:.2}s)", $name, if found { "found" } else { "none" }, t.elapsed().as_secs_f64());
@@ -2765,17 +2790,30 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// 暫定解がない間の木の中のヒューリスティクスの腕を UCB で選ぶ (まだ試していない腕を先に)。平均の報酬は、
     /// その腕の 1 回の平均時間が全体の平均より長いほど割り引く (時間の比の平方根で割る)。
+    /// `ENOMOTO_MIP_NOINC_ROOT_PRIOR` なら、根で同じヒューリスティクスを呼んだときの近さを重み
+    /// `ENOMOTO_T_MIP_NOINC_PRIOR_W` (既定 1) 回分の試行として足す (1 未満にすると UCB の探索の項が木で 1 回試した腕
+    /// より大きくなり、初期値のある腕も結局一通り試してしまう: neos-1456979 で 0.5 は 8 本を全部回した)。
+    /// 初期値のある腕は「まだ試していない腕」として先に回さない (根で近づけなかった腕に、木で 1 回を使わない)。
+    /// 初期値だけの腕の時間は全体の平均とみなす
     fn noinc_select_arm(&self) -> usize {
-        if let Some(a) = (0..NOINC_ARMS).find(|&a| self.noinc_count[a] == 0) {
+        let w = if env_str!("ENOMOTO_MIP_NOINC_ROOT_PRIOR").is_some() { tunable!("ENOMOTO_T_MIP_NOINC_PRIOR_W", 1.0, f64) } else { 0.0 };
+        let prior = |a: usize| if w > 0.0 { self.noinc_prior[a] } else { None };
+        if let Some(a) = (0..NOINC_ARMS).find(|&a| self.noinc_count[a] == 0 && prior(a).is_none()) {
             return a;
         }
-        let total: u32 = self.noinc_count.iter().sum();
-        let mean_cost = self.noinc_cost.iter().sum::<f64>() / total as f64 + 1e-3;
+        let n_eff = |a: usize| self.noinc_count[a] as f64 + if prior(a).is_some() { w } else { 0.0 };
+        let total: f64 = (0..NOINC_ARMS).map(n_eff).sum();
+        let calls: u32 = self.noinc_count.iter().sum();
+        let mean_cost = if calls > 0 { self.noinc_cost.iter().sum::<f64>() / calls as f64 } else { 0.0 } + 1e-3;
         let c = tunable!("ENOMOTO_T_MIP_NOINC_UCB_C", 0.5, f64);
         let score = |a: usize| {
-            let n = self.noinc_count[a] as f64;
-            let cost = self.noinc_cost[a] / n + 1e-3;
-            self.noinc_reward[a] / n / (cost / mean_cost).sqrt().max(1.0) + c * (2.0 * (total as f64).ln() / n).sqrt()
+            let n = n_eff(a);
+            if n <= 0.0 {
+                return f64::NEG_INFINITY;
+            }
+            let cost = if self.noinc_count[a] > 0 { self.noinc_cost[a] / self.noinc_count[a] as f64 + 1e-3 } else { mean_cost };
+            let reward = self.noinc_reward[a] + w * prior(a).unwrap_or(0.0);
+            reward / n / (cost / mean_cost).sqrt().max(1.0) + c * (2.0 * total.max(1.0).ln() / n).sqrt()
         };
         (0..NOINC_ARMS).max_by(|&a, &b| score(a).total_cmp(&score(b))).unwrap()
     }
