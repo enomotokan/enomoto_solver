@@ -354,6 +354,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// (根の状態) とそれを取ったノード数、作業領域。
     proof_first_id: u64,
     proof_base: std::collections::VecDeque<(f64, u32, f64)>,
+    /// 診断用: 証明ごとの、ほかのスレッドから取り込んだものか (`dual_proofs` と同じ並び)。
+    proof_imported: std::collections::VecDeque<bool>,
     proof_col_index: Vec<Vec<(u64, f64)>>,
     proof_snap: Option<(Vec<f64>, Vec<f64>)>,
     proof_snap_nodes: u64,
@@ -539,18 +541,35 @@ pub(crate) struct TreeProf {
     kind_s: [f64; 3],
     /// 取り出したノードの下界 (最適値が分かってから刈れたかを数えるため)。
     lbs: Vec<f64>,
+    /// 双対証明・衝突の効き目 ([自前, 取り込み] ごと)。証明: [調べた, ノードを刈った, 境界を締めた, 差分の更新 (費用の目安)]。
+    /// 衝突は [`LitConflictPool::stats`] と同じ並び。終わりにプールに残っていた数 ([自前, 取り込み])。
+    proof: [[u64; 4]; 2],
+    lits: [[u64; 4]; 2],
+    proof_live: [usize; 2],
+    lits_live: [usize; 2],
     /// 主: 求解の始めから、最初のノードを取り出したとき・従を始めたときまで。
     tree_start_s: f64,
     workers_s: f64,
 }
 
 impl TreeProf {
+    fn proofs_line(&self) -> String {
+        let p = &self.proof;
+        let l = &self.lits;
+        format!(
+            "proofs own/imp: live {}/{} eval {}/{} prune {}/{} tight {}/{} absorb {}/{}; lits own/imp: live {}/{} eval {}/{} prune {}/{} tight {}/{} aged {}/{}",
+            self.proof_live[0], self.proof_live[1], p[0][0], p[1][0], p[0][1], p[1][1], p[0][2], p[1][2], p[0][3], p[1][3],
+            self.lits_live[0], self.lits_live[1], l[0][0], l[1][0], l[0][1], l[1][1], l[0][2], l[1][2], l[0][3], l[1][3]
+        )
+    }
+
     fn line(&self, zopt: Option<f64>) -> String {
         let waste = zopt.map_or(0, |z| self.lbs.iter().filter(|&&l| l >= z - 1e-9 * z.abs().max(1.0)).count());
         let per = |k: usize| if self.kind_n[k] > 0 { self.kind_it[k] as f64 / self.kind_n[k] as f64 } else { 0.0 };
         let pms = |k: usize| if self.kind_n[k] > 0 { 1e3 * self.kind_s[k] / self.kind_n[k] as f64 } else { 0.0 };
         format!(
-            "tid {} ready {:.2}s end {:.2}s idle {:.2}s ({} waits) tail {:.2}s sync {:.3}s nodes {} (lb>=opt {}) first LP [dive {} {:.1}it {:.2}ms | queue {} {:.1}it {:.2}ms | pool {} {:.1}it {:.2}ms]",
+            "{} | tid {} ready {:.2}s end {:.2}s idle {:.2}s ({} waits) tail {:.2}s sync {:.3}s nodes {} (lb>=opt {}) first LP [dive {} {:.1}it {:.2}ms | queue {} {:.1}it {:.2}ms | pool {} {:.1}it {:.2}ms]",
+            self.proofs_line(),
             self.tid, self.ready_s, self.end_s, self.idle_s, self.waits, self.tail_s, self.sync_s, self.nodes, waste,
             self.kind_n[0], per(0), pms(0), self.kind_n[1], per(1), pms(1), self.kind_n[2], per(2), pms(2)
         )
@@ -947,6 +966,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         dual_proof_nnz: 0,
         proof_first_id: 0,
         proof_base: std::collections::VecDeque::new(),
+        proof_imported: std::collections::VecDeque::new(),
         proof_col_index: Vec::new(),
         proof_snap: None,
         proof_snap_nodes: 0,
@@ -3628,6 +3648,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let (c, _, _) = self.dual_proofs.pop_front().unwrap();
             self.dual_proof_nnz -= c.len();
             self.proof_base.pop_front();
+            self.proof_imported.pop_front();
             self.proof_first_id += 1;
             self.proof_dirty = true;
         }
@@ -3644,6 +3665,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             None => (0.0, 0, f64::INFINITY),
         };
         self.proof_base.push_back(base);
+        self.proof_imported.push_back(self.importing);
         self.proof_dirty = true;
         self.dual_proofs.push_back((coefs, konst, obj));
         let k = self.dual_proofs.len() - 1;
@@ -3889,7 +3911,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if l.is_empty() {
             return false;
         }
-        let ok = self.lit_conflicts.add(&l);
+        let ok = self.lit_conflicts.add(&l, self.importing);
         if ok {
             self.lit_stats[0] += 1;
             if !self.importing {
@@ -4142,7 +4164,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     continue;
                 }
                 let slack = rhs - minact;
+                let org = self.proof_imported.get(k).copied().unwrap_or(false) as usize;
+                self.tprof.proof[org][0] += 1;
                 if slack < -1e-6 * (1.0 + rhs.abs()) {
+                    self.tprof.proof[org][1] += 1;
                     return false;
                 }
                 if !full && slack >= self.proof_base[k].2 {
@@ -4172,8 +4197,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         tightened = true;
                         tightened_now = true;
                         self.proof_tightenings += 1;
+                        self.tprof.proof[org][2] += 1;
                     }
                     if self.dom.infeasible {
+                        self.tprof.proof[org][1] += 1;
                         return false;
                     }
                 }
@@ -4216,6 +4243,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         continue; // 古い証明、またはこの側は最小活動量に効かない
                     }
                     let k = (id - self.proof_first_id) as usize;
+                    self.tprof.proof[self.proof_imported.get(k).copied().unwrap_or(false) as usize][3] += 1;
                     let (old, new) = (a * old_v, a * new_v);
                     if !self.proof_in_touched[k] {
                         self.proof_in_touched[k] = true;
@@ -4861,6 +4889,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     fn finish(&mut self, status: MipStatus, best_bound: f64) -> MipResult {
         // 診断用: 従は自分の内訳を主に渡す (主は従を待った後に表示する)
+        if prof_tree_par() {
+            self.tprof.lits = self.lit_conflicts.stats;
+            self.tprof.lits_live = self.lit_conflicts.live_by_origin();
+            let imp = self.proof_imported.iter().filter(|&&b| b).count();
+            self.tprof.proof_live = [self.proof_imported.len() - imp, imp];
+        }
         if let (Some(pool), true) = (self.pool.clone(), self.snap.is_some() && prof_tree_par()) {
             self.tprof.tid = self.pool_tid;
             self.tprof.end_s = pool.t0.elapsed().as_secs_f64();

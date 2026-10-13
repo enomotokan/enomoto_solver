@@ -33,6 +33,10 @@ pub struct LitConflictPool {
     free: Vec<usize>,
     /// 前回の伝播の後に衝突を加えたか (加えたら次は記録の最初から調べる)
     pub dirty: bool,
+    /// 診断用: 枠ごとの、ほかのスレッドから取り込んだ衝突か。
+    imported: Vec<bool>,
+    /// 診断用: [自前, 取り込み] ごとの [調べた, 矛盾 (ノードを刈った), 境界を締めた, 使われずに年齢で消えた]。
+    pub stats: [[u64; 4]; 2],
 }
 
 #[inline]
@@ -62,6 +66,8 @@ impl LitConflictPool {
             max_age: tunable!("ENOMOTO_T_MIP_LIT_CONFLICT_AGE", 1000u32, u32),
             removed: 0,
             free: Vec::new(),
+            imported: Vec::new(),
+            stats: [[0; 4]; 2],
         }
     }
 
@@ -69,8 +75,19 @@ impl LitConflictPool {
         self.slots.iter().filter(|s| s.is_some()).count()
     }
 
-    /// 衝突を加える (同じものがあれば加えずに偽)。
-    pub fn add(&mut self, lits: &[Lit]) -> bool {
+    /// 診断用: 残っている衝突の数 ([自前, 取り込み])。
+    pub fn live_by_origin(&self) -> [usize; 2] {
+        let mut n = [0; 2];
+        for (s, c) in self.slots.iter().enumerate() {
+            if c.is_some() {
+                n[self.imported[s] as usize] += 1;
+            }
+        }
+        n
+    }
+
+    /// 衝突を加える (同じものがあれば加えずに偽)。`imported` はほかのスレッドから取り込んだものか (診断用)。
+    pub fn add(&mut self, lits: &[Lit], imported: bool) -> bool {
         if lits.is_empty() {
             return false;
         }
@@ -92,6 +109,7 @@ impl LitConflictPool {
             self.slot_key.push(0);
             self.seen.push(0);
             self.ages.push(0);
+            self.imported.push(false);
             self.slots.len() - 1
         } else {
             let s = self.next % self.cap;
@@ -110,6 +128,7 @@ impl LitConflictPool {
         self.slot_key[slot] = key;
         self.slots[slot] = Some(l);
         self.ages[slot] = 0;
+        self.imported[slot] = imported;
         self.dirty = true;
         // 古い索引の項目が増えたら作り直す
         if self.index_len > 4 * self.live_lits + 1000 {
@@ -149,7 +168,7 @@ impl LitConflictPool {
                 self.seen.iter_mut().for_each(|s| *s = 0);
                 self.stamp = 1;
             }
-            let mut fixes: Vec<(usize, bool, f64)> = Vec::new();
+            let mut fixes: Vec<(usize, bool, f64, usize)> = Vec::new();
             for (j, _, _) in changed {
                 for &s in &self.col_index[j] {
                     let s = s as usize;
@@ -158,6 +177,8 @@ impl LitConflictPool {
                     }
                     self.seen[s] = self.stamp;
                     let Some(c) = &self.slots[s] else { continue };
+                    let org = self.imported[s] as usize;
+                    self.stats[org][0] += 1;
                     let mut open: Option<&Lit> = None;
                     let mut nopen = 0;
                     for lit in c {
@@ -172,6 +193,7 @@ impl LitConflictPool {
                     match (nopen, open) {
                         (0, _) => {
                             self.ages[s] = 0;
+                            self.stats[org][1] += 1;
                             return Err(());
                         }
                         (1, Some(&(k, upper, v))) => {
@@ -179,9 +201,9 @@ impl LitConflictPool {
                             // 否定: x <= v の否定は x >= v + 1 (整数) / x >= v (連続、緩めたもの)
                             let int = p.is_int[k];
                             if upper {
-                                fixes.push((k, false, if int { v.floor() + 1.0 } else { v }));
+                                fixes.push((k, false, if int { v.floor() + 1.0 } else { v }, org));
                             } else {
-                                fixes.push((k, true, if int { v.ceil() - 1.0 } else { v }));
+                                fixes.push((k, true, if int { v.ceil() - 1.0 } else { v }, org));
                             }
                         }
                         _ => {
@@ -191,6 +213,7 @@ impl LitConflictPool {
                                     self.live_lits -= old.len();
                                     self.keys.remove(&self.slot_key[s]);
                                     self.removed += 1;
+                                    self.stats[org][3] += 1;
                                     self.free.push(s);
                                 }
                             }
@@ -202,7 +225,7 @@ impl LitConflictPool {
                 break;
             }
             dom.set_external(true);
-            for (k, upper, v) in fixes {
+            for (k, upper, v, org) in fixes {
                 let ch = if upper {
                     v < dom.up[k] && { dom.tighten_upper(p, k, v); true }
                 } else {
@@ -210,9 +233,11 @@ impl LitConflictPool {
                 };
                 if ch {
                     tightened += 1;
+                    self.stats[org][2] += 1;
                 }
                 if dom.infeasible {
                     dom.set_external(false);
+                    self.stats[org][1] += 1;
                     return Err(());
                 }
             }
