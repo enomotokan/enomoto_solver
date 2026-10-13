@@ -35,6 +35,10 @@ pub struct LitConflictPool {
     pub dirty: bool,
     /// 診断用: 枠ごとの、ほかのスレッドから取り込んだ衝突か。
     imported: Vec<bool>,
+    /// 枠ごとの、使われたらほかのスレッドに知らせる (自前でまだ知らせていない) 衝突か (`ENOMOTO_MIP_TREE_SHARE_LITS_ON_USE`)。
+    unshared: Vec<bool>,
+    /// 使われた、まだ知らせていない自前の衝突 ([`Self::take_used_unshared`] で取り出す)。
+    used_buf: Vec<Vec<Lit>>,
     /// 診断用: [自前, 取り込み] ごとの [調べた, 矛盾 (ノードを刈った), 境界を締めた, 使われずに年齢で消えた]。
     pub stats: [[u64; 4]; 2],
 }
@@ -67,12 +71,19 @@ impl LitConflictPool {
             removed: 0,
             free: Vec::new(),
             imported: Vec::new(),
+            unshared: Vec::new(),
+            used_buf: Vec::new(),
             stats: [[0; 4]; 2],
         }
     }
 
     pub fn len(&self) -> usize {
         self.slots.iter().filter(|s| s.is_some()).count()
+    }
+
+    /// 使われた、まだ知らせていない自前の衝突を取り出す。
+    pub fn take_used_unshared(&mut self) -> Vec<Vec<Lit>> {
+        std::mem::take(&mut self.used_buf)
     }
 
     /// 診断用: 残っている衝突の数 ([自前, 取り込み])。
@@ -110,6 +121,7 @@ impl LitConflictPool {
             self.seen.push(0);
             self.ages.push(0);
             self.imported.push(false);
+            self.unshared.push(false);
             self.slots.len() - 1
         } else {
             let s = self.next % self.cap;
@@ -129,6 +141,7 @@ impl LitConflictPool {
         self.slots[slot] = Some(l);
         self.ages[slot] = 0;
         self.imported[slot] = imported;
+        self.unshared[slot] = !imported && env_str!("ENOMOTO_MIP_TREE_SHARE_LITS_ON_USE").is_some();
         self.dirty = true;
         // 古い索引の項目が増えたら作り直す
         if self.index_len > 4 * self.live_lits + 1000 {
@@ -168,7 +181,7 @@ impl LitConflictPool {
                 self.seen.iter_mut().for_each(|s| *s = 0);
                 self.stamp = 1;
             }
-            let mut fixes: Vec<(usize, bool, f64, usize)> = Vec::new();
+            let mut fixes: Vec<(usize, bool, f64, usize, usize)> = Vec::new();
             for (j, _, _) in changed {
                 for &s in &self.col_index[j] {
                     let s = s as usize;
@@ -194,6 +207,10 @@ impl LitConflictPool {
                         (0, _) => {
                             self.ages[s] = 0;
                             self.stats[org][1] += 1;
+                            if self.unshared[s] {
+                                self.unshared[s] = false;
+                                self.used_buf.push(c.clone());
+                            }
                             return Err(());
                         }
                         (1, Some(&(k, upper, v))) => {
@@ -201,9 +218,9 @@ impl LitConflictPool {
                             // 否定: x <= v の否定は x >= v + 1 (整数) / x >= v (連続、緩めたもの)
                             let int = p.is_int[k];
                             if upper {
-                                fixes.push((k, false, if int { v.floor() + 1.0 } else { v }, org));
+                                fixes.push((k, false, if int { v.floor() + 1.0 } else { v }, org, s));
                             } else {
-                                fixes.push((k, true, if int { v.ceil() - 1.0 } else { v }, org));
+                                fixes.push((k, true, if int { v.ceil() - 1.0 } else { v }, org, s));
                             }
                         }
                         _ => {
@@ -225,7 +242,7 @@ impl LitConflictPool {
                 break;
             }
             dom.set_external(true);
-            for (k, upper, v, org) in fixes {
+            for (k, upper, v, org, s) in fixes {
                 let ch = if upper {
                     v < dom.up[k] && { dom.tighten_upper(p, k, v); true }
                 } else {
@@ -234,6 +251,12 @@ impl LitConflictPool {
                 if ch {
                     tightened += 1;
                     self.stats[org][2] += 1;
+                    if self.unshared[s] {
+                        self.unshared[s] = false;
+                        if let Some(c) = &self.slots[s] {
+                            self.used_buf.push(c.clone());
+                        }
+                    }
                 }
                 if dom.infeasible {
                     dom.set_external(false);

@@ -359,12 +359,18 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// (根の状態) とそれを取ったノード数、作業領域。
     proof_first_id: u64,
     proof_base: std::collections::VecDeque<(f64, u32, f64)>,
+    /// 証明ごとの、係数の並びに対応する締め付けの上界 `|a_j| (u_j - l_j)` (加えたときの大域的な境界。整数列でなければ 0)。
+    /// 係数はこの大きい順に並べて持つ (締め付けでは、これが余裕以下になったら残りの列は締まらないので打ち切る)。
+    proof_keys: std::collections::VecDeque<Vec<f64>>,
     /// 証明ごとの状態 (`dual_proofs` と同じ並び、[`ProofState`])。
     proof_state: std::collections::VecDeque<ProofState>,
     /// 生きている証明の通し番号を古い順に、[自前, 取り込み] ごとに (上限を分けて古いものから捨てるため)。
     proof_fifo: [std::collections::VecDeque<u64>; 2],
     /// 捨てた (中身を空にした) が、まだ `dual_proofs` に残っている証明の数。
     proof_dead: usize,
+    /// 証明ごとの、前に捨てる候補になってから刈り込み・締め付けに使われたかの印 (`ENOMOTO_MIP_PROOF_AGING`: 捨てるときに
+    /// 印のあるものは印を消して後ろに回す。clock 法による「最近使われていないもの」の近似)。
+    proof_ref: std::collections::VecDeque<bool>,
     /// 列ごとの、その列を含む証明 (通し番号, 係数)。[0] は係数が正のもの (下限が変わると最小活動量が変わる)、[1] は
     /// それ以外 (上限が変わると変わる)。境界の変わった側だけをたどるように分けて持つ。
     proof_col_index: [Vec<Vec<(u64, f64)>>; 2],
@@ -493,11 +499,24 @@ pub(crate) struct SnapNode {
     estimate: f64,
     depth: usize,
     branch: Option<(usize, bool, f64, f64)>,
+    /// 共有の待ち行列で渡すノードの親の LP の最適基底の、列と元の行の部分 (`ENOMOTO_MIP_TREE_PASS_BASIS`)。カットの行は
+    /// スレッドごとに違うので渡さない (受け取った側では基底にする)。
+    basis: Option<(Vec<VarStatus>, Vec<VarStatus>)>,
 }
 
 impl SnapNode {
     fn of(n: &OpenNode) -> Self {
-        SnapNode { changes: n.changes.clone(), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch }
+        SnapNode { changes: n.changes.clone(), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, basis: None }
+    }
+    /// [`Self::of`] に、親の LP の基底の列と最初の `m` 行 (元の行) を付ける。
+    fn of_with_basis(n: &OpenNode, m: usize) -> Self {
+        let mut s = Self::of(n);
+        if let Some(b) = &n.basis {
+            if b.row.len() >= m {
+                s.basis = Some((b.col.clone(), b.row[..m].to_vec()));
+            }
+        }
+        s
     }
     fn into_open(self) -> OpenNode {
         OpenNode { changes: self.changes, lower_bound: self.lower_bound, estimate: self.estimate, depth: self.depth, basis: None, basis_epoch: 0, dse: None, branch: self.branch, prot: None, tags: None }
@@ -527,6 +546,9 @@ pub(crate) struct WorkPool {
     next_tid: std::sync::atomic::AtomicU32,
     /// スレッドの数 (主を含む。木の中のヒューリスティクスを回すスレッドを決めるのに使う)。
     threads: usize,
+    /// 各スレッド (`pool_tid`) の下界・待ち行列のノード数・処理したノード数 ([`Solver::note_current_lb`])。共有の
+    /// 待ち行列のノードと合わせて全体の下界になる (利用者向けのログに使う)。
+    slots: Vec<ThreadSlot>,
     /// 診断用: 木の探索を始めた時刻と、終わったスレッドの [`TreeProf`]。
     t0: Instant,
     prof: std::sync::Mutex<Vec<TreeProf>>,
@@ -576,6 +598,8 @@ pub(crate) struct TreeProf {
     lits_live: [usize; 2],
     /// ほかのスレッドに知らせた自前の証明の数。
     shared: u64,
+    /// 質の釣り合いで [取ったノード, 渡したノード]。
+    balance: [u64; 2],
     /// 主: 求解の始めから、最初のノードを取り出したとき・従を始めたときまで。
     tree_start_s: f64,
     workers_s: f64,
@@ -586,8 +610,8 @@ impl TreeProf {
         let p = &self.proof;
         let l = &self.lits;
         format!(
-            "shared {} proofs own/imp: live {}/{} eval {}/{} prune {}/{} tight {}/{} absorb {}/{}; lits own/imp: live {}/{} eval {}/{} prune {}/{} tight {}/{} aged {}/{}",
-            self.shared, self.proof_live[0], self.proof_live[1], p[0][0], p[1][0], p[0][1], p[1][1], p[0][2], p[1][2], p[0][3], p[1][3],
+            "balance {}/{} shared {} proofs own/imp: live {}/{} eval {}/{} prune {}/{} tight {}/{} absorb {}/{}; lits own/imp: live {}/{} eval {}/{} prune {}/{} tight {}/{} aged {}/{}",
+            self.balance[0], self.balance[1], self.shared, self.proof_live[0], self.proof_live[1], p[0][0], p[1][0], p[0][1], p[1][1], p[0][2], p[1][2], p[0][3], p[1][3],
             self.lits_live[0], self.lits_live[1], l[0][0], l[1][0], l[0][1], l[1][1], l[0][2], l[1][2], l[0][3], l[1][3]
         )
     }
@@ -623,15 +647,20 @@ enum LearnedItem {
     Lits(Vec<(usize, bool, f64)>),
 }
 
+/// 木を分け合うスレッドごとの、利用者向けのログに使う値 (ノードごとに書くので錠を取らず、キャッシュラインを分ける)。
+#[repr(align(128))]
+#[derive(Default)]
+struct ThreadSlot {
+    /// 処理中のノードと自分の待ち行列の下界の最小 (f64 のビット)。ノードを持っていなければ +inf。
+    lb: std::sync::atomic::AtomicU64,
+    /// 自分の待ち行列のノード数。
+    open: std::sync::atomic::AtomicUsize,
+    /// 処理したノード数 (従のみ)。
+    nodes: std::sync::atomic::AtomicU64,
+}
+
 struct PoolInner {
     nodes: Vec<SnapNode>,
-    /// 各スレッド (`pool_tid`) の下界: 処理中のノードと自分の待ち行列の最小 ([`Solver::note_current_lb`])。ノードを
-    /// 持っていなければ +inf。共有の待ち行列のノードと合わせて全体の下界になる (利用者向けのログに使う)。
-    lbs: Vec<f64>,
-    /// 各スレッドの待ち行列のノード数 (`lbs` と同じときに書く。利用者向けのログの未処理のノード数に使う)。
-    open: Vec<usize>,
-    /// 従のスレッドが処理したノード数の合計 (利用者向けのログに使う)。
-    worker_nodes: u64,
     /// 待っていない (ノードを持っているか処理している) スレッドの数。
     busy: usize,
     done: bool,
@@ -667,7 +696,8 @@ impl WorkPool {
             prof: std::sync::Mutex::new(Vec::new()),
             pc: std::sync::Mutex::new(pc),
             bounds: std::sync::Mutex::new((lo, up)),
-            inner: std::sync::Mutex::new(PoolInner { nodes: Vec::new(), lbs: vec![f64::INFINITY; threads], open: vec![0; threads], worker_nodes: 0, busy: threads, done: false }),
+            inner: std::sync::Mutex::new(PoolInner { nodes: Vec::new(), busy: threads, done: false }),
+            slots: (0..threads).map(|_| ThreadSlot { lb: std::sync::atomic::AtomicU64::new(f64::INFINITY.to_bits()), ..Default::default() }).collect(),
             stop: std::sync::atomic::AtomicBool::new(false),
             idle: std::sync::atomic::AtomicUsize::new(0),
             len: std::sync::atomic::AtomicUsize::new(0),
@@ -997,9 +1027,11 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         dual_proof_nnz: 0,
         proof_first_id: 0,
         proof_base: std::collections::VecDeque::new(),
+        proof_keys: std::collections::VecDeque::new(),
         proof_state: std::collections::VecDeque::new(),
         proof_fifo: [std::collections::VecDeque::new(), std::collections::VecDeque::new()],
         proof_dead: 0,
+        proof_ref: std::collections::VecDeque::new(),
         proof_col_index: [Vec::new(), Vec::new()],
         proof_chg_mark: Vec::new(),
         proof_chg_stamp: 0,
@@ -1434,17 +1466,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if let Some(pool) = &self.pool {
             let v = node_lb.min(self.queue.best_lower_bound());
             let t = self.pool_tid as usize;
-            let len = self.queue.len();
-            let worker = self.snap.is_some();
-            let mut g = pool.inner.lock().unwrap();
-            if g.lbs.len() <= t {
-                g.lbs.resize(t + 1, f64::INFINITY);
-                g.open.resize(t + 1, 0);
-            }
-            g.lbs[t] = v;
-            g.open[t] = len;
-            if worker {
-                g.worker_nodes += 1;
+            if let Some(sl) = pool.slots.get(t) {
+                use std::sync::atomic::Ordering;
+                sl.lb.store(v.to_bits(), Ordering::Relaxed);
+                sl.open.store(self.queue.len(), Ordering::Relaxed);
+                if self.snap.is_some() {
+                    sl.nodes.fetch_add(1, Ordering::Relaxed);
+                }
             }
         }
     }
@@ -1457,8 +1485,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             for n in &g.nodes {
                 lb = lb.min(n.lower_bound);
             }
-            for &v in &g.lbs {
-                lb = lb.min(v);
+            for sl in &pool.slots {
+                lb = lb.min(f64::from_bits(sl.lb.load(std::sync::atomic::Ordering::Relaxed)));
             }
         }
         lb
@@ -1468,11 +1496,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
     fn global_node_counts(&self) -> (u64, usize) {
         let (mut done, mut open) = (self.nodes, self.queue.len());
         if let Some(pool) = &self.pool {
-            let g = pool.inner.lock().unwrap();
-            done += g.worker_nodes;
-            open += g.nodes.len();
+            use std::sync::atomic::Ordering;
+            open += pool.inner.lock().unwrap().nodes.len();
             let t = self.pool_tid as usize;
-            open += g.open.iter().enumerate().filter(|&(i, _)| i != t).map(|(_, &k)| k).sum::<usize>();
+            done += pool.slots.iter().map(|sl| sl.nodes.load(Ordering::Relaxed)).sum::<u64>();
+            open += pool.slots.iter().enumerate().filter(|&(i, _)| i != t).map(|(_, sl)| sl.open.load(Ordering::Relaxed)).sum::<usize>();
         }
         (done, open)
     }
@@ -1883,7 +1911,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.queue.prune(lim);
                 }
             }
-            if parallel_tree && self.pool.is_none() && self.queue.len() + plunge.is_some() as usize >= 2 {
+            // `ENOMOTO_T_MIP_TREE_START_NODES`: 従を始める待ち行列のノード数 (多いほど最初に配るノードが増える)
+            if parallel_tree && self.pool.is_none() && self.queue.len() + plunge.is_some() as usize >= tunable!("ENOMOTO_T_MIP_TREE_START_NODES", 2usize, usize) {
                 self.start_workers();
             }
             // 木を分け合う: 大域的な境界の締め付けを共有する (64 ノードおき)
@@ -1913,6 +1942,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let (idle, len) = (pool.idle.load(Ordering::Relaxed), pool.len.load(Ordering::Relaxed));
                 if idle > len && self.queue.len() >= 2 {
                     self.pool_donate(idle - len);
+                }
+                if env_str!("ENOMOTO_MIP_TREE_BALANCE").is_some() && self.nodes % tunable!("ENOMOTO_T_MIP_TREE_BALANCE_EVERY", 32u64, u64) == 0 {
+                    self.pool_balance();
                 }
                 self.tprof.sync_s += t_sync.elapsed().as_secs_f64();
             }
@@ -2117,6 +2149,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let start = if self.lit_conflicts.dirty || env_str!("ENOMOTO_MIP_LIT_FULL_SCAN").is_some() { 0 } else { self.lit_pos.min(lw) };
                 self.lit_conflicts.dirty = false;
                 let r = self.lit_conflicts.propagate(self.p, &mut self.dom, start);
+                self.share_used_lits();
                 self.lit_pos = self.dom.stack_len();
                 self.dom.take_low_water();
                 match r {
@@ -2837,7 +2870,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.pool_tid == 0 || env_str!("ENOMOTO_MIP_TREE_HEUR_ALL").is_some() {
             return true;
         }
-        let k = if self.has_cutoff_value() { pool.threads.div_ceil(4) } else { pool.threads.div_ceil(2) };
+        let k = if self.has_cutoff_value() { pool.threads.div_ceil(tunable!("ENOMOTO_T_MIP_TREE_HEUR_DIV_INC", 4usize, usize).max(1)) } else { pool.threads.div_ceil(tunable!("ENOMOTO_T_MIP_TREE_HEUR_DIV_NOINC", 2usize, usize).max(1)) };
         (self.pool_tid as usize) < k
     }
 
@@ -3653,6 +3686,47 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             coefs.push((j, dj));
         }
+        // `ENOMOTO_MIP_PROOF_SHORTEN`: 分枝・伝播で締まった列も、このノードで破れている範囲で右辺に移して短くする。列 j を
+        // 大域的な境界で移すと、このノードの最小活動量は d_j (l_j - L_j) (d_j < 0 なら d_j (u_j - U_j)) だけ下がる (損)。
+        // 損の小さい順に、破れの幅 (最小活動量 - 右辺) の半分を超えない範囲で移す
+        if env_str!("ENOMOTO_MIP_PROOF_SHORTEN").is_some() && coefs.len() > 1 {
+            let rhs0 = if obj { self.prune_limit() - p.offset - konst } else { -konst };
+            let minact0: f64 = coefs.iter().map(|&(j, a)| if a > 0.0 { a * self.dom.lo[j] } else { a * self.dom.up[j] }).sum();
+            let margin = minact0 - rhs0;
+            if minact0.is_finite() && rhs0.is_finite() && margin > 0.0 {
+                let budget = 0.5 * margin;
+                let mut cand: Vec<(f64, usize)> = coefs
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, &(j, a))| {
+                        let (gl, gu) = (self.dom.global_lo[j], self.dom.global_up[j]);
+                        let loss = if a > 0.0 { a * (self.dom.lo[j] - gl) } else { a * (self.dom.up[j] - gu) };
+                        loss.is_finite().then_some((loss.max(0.0), i))
+                    })
+                    .collect();
+                cand.sort_by(|x, y| x.0.total_cmp(&y.0));
+                let mut used = 0.0;
+                let mut drop = vec![false; coefs.len()];
+                let mut kept = coefs.len();
+                for (loss, i) in cand {
+                    if used + loss > budget || kept <= 1 {
+                        break;
+                    }
+                    let (j, a) = coefs[i];
+                    let m = if a > 0.0 { a * self.dom.global_lo[j] } else { a * self.dom.global_up[j] };
+                    used += loss;
+                    konst += m;
+                    drop[i] = true;
+                    kept -= 1;
+                }
+                let mut i = 0;
+                coefs.retain(|_| {
+                    let keep = !drop[i];
+                    i += 1;
+                    keep
+                });
+            }
+        }
         let dbg = env_str!("ENOMOTO_MIP_DEBUG_PROOF").is_some();
         if coefs.is_empty() {
             return false;
@@ -3708,6 +3782,24 @@ impl<'a, L: MipLp> Solver<'a, L> {
         true
     }
 
+    /// 分類 `cat` の証明を 1 本捨てる: 古いものから。`ENOMOTO_MIP_PROOF_AGING` なら、前回から使われた印のあるものは印を
+    /// 消して後ろに回す (clock 法)。
+    fn proof_evict(&mut self, cat: usize) {
+        let aging = env_str!("ENOMOTO_MIP_PROOF_AGING").is_some();
+        let mut turns = self.proof_fifo[cat].len();
+        while let Some(id) = self.proof_fifo[cat].pop_front() {
+            let k = (id - self.proof_first_id) as usize;
+            if aging && turns > 0 && self.proof_ref[k] {
+                self.proof_ref[k] = false;
+                self.proof_fifo[cat].push_back(id);
+                turns -= 1;
+                continue;
+            }
+            self.proof_kill(id);
+            return;
+        }
+    }
+
     /// 通し番号 `id` の証明を捨てる: 中身を空にして右辺を +inf にする (調べる処理は右辺が無限の行を飛ばす)。列の索引に
     /// 残った項目は、索引を作り直すまで差分を足すだけで害はない。
     fn proof_kill(&mut self, id: u64) {
@@ -3717,8 +3809,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.dual_proofs[k].1 = f64::INFINITY;
         self.dual_proofs[k].2 = false;
         self.proof_state[k] = ProofState::Dead;
+        self.proof_keys[k] = Vec::new();
         self.proof_dead += 1;
-        self.proof_dirty = true;
     }
 
     /// 捨てた証明を取り除いて詰め直す。通し番号は付け直す (古い番号より大きい番号から) ので、列の索引・基準は次の
@@ -3727,18 +3819,24 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let old_first = self.proof_first_id;
         let new_first = old_first + self.dual_proofs.len() as u64;
         let mut map = std::collections::HashMap::new();
-        let (mut dp, mut base, mut st) = (std::collections::VecDeque::new(), std::collections::VecDeque::new(), std::collections::VecDeque::new());
-        for (k, ((row, b), s)) in std::mem::take(&mut self.dual_proofs).into_iter().zip(std::mem::take(&mut self.proof_base)).zip(std::mem::take(&mut self.proof_state)).enumerate() {
+        let (mut dp, mut base, mut st, mut keys) = (std::collections::VecDeque::new(), std::collections::VecDeque::new(), std::collections::VecDeque::new(), std::collections::VecDeque::new());
+        let mut refs = std::collections::VecDeque::new();
+        let it = std::mem::take(&mut self.dual_proofs).into_iter().zip(std::mem::take(&mut self.proof_base)).zip(std::mem::take(&mut self.proof_state)).zip(std::mem::take(&mut self.proof_keys)).zip(std::mem::take(&mut self.proof_ref));
+        for (k, ((((row, b), s), ky), rf)) in it.enumerate() {
             if s != ProofState::Dead {
                 map.insert(old_first + k as u64, new_first + dp.len() as u64);
                 dp.push_back(row);
                 base.push_back(b);
                 st.push_back(s);
+                keys.push_back(ky);
+                refs.push_back(rf);
             }
         }
+        self.proof_ref = refs;
         self.dual_proofs = dp;
         self.proof_base = base;
         self.proof_state = st;
+        self.proof_keys = keys;
         for f in self.proof_fifo.iter_mut() {
             for id in f.iter_mut() {
                 *id = map[id];
@@ -3754,6 +3852,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// `k` 番目の証明が刈り込み・締め付けに使われた: 自前でまだ知らせていなければ、ほかのスレッドに知らせる
     /// (長さが `ENOMOTO_T_MIP_TREE_SHARE_PROOF_LEN` 以下のものだけ)。
     fn proof_used(&mut self, k: usize) {
+        self.proof_ref[k] = true;
         if self.proof_state[k] != ProofState::Own {
             return;
         }
@@ -3773,6 +3872,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 双対証明・衝突制約のプールに行 `sum coefs x <= rhs` を加える (`obj` なら `rhs = U - konst`、そうでなければ
     /// `rhs = konst`)。上限を超えたら古いものから捨てる。
     pub(super) fn push_pool_row(&mut self, coefs: Vec<(usize, f64)>, konst: f64, obj: bool) {
+        // 係数を締め付けの上界 |a_j| (u_j - l_j) (大域的な境界) の大きい順に並べる
+        let (coefs, keys) = {
+            let (glo, gup) = (&self.dom.global_lo, &self.dom.global_up);
+            let mut ck: Vec<((usize, f64), f64)> = coefs.into_iter().map(|(j, a)| ((j, a), if self.p.is_int[j] { a.abs() * (gup[j] - glo[j]) } else { 0.0 })).collect();
+            ck.sort_by(|x, y| y.1.total_cmp(&x.1));
+            ck.into_iter().unzip::<_, _, Vec<_>, Vec<_>>()
+        };
         // 木を分け合う: 自前の証明は、このスレッドで初めて刈り込み・締め付けに使われたときにほかのスレッドに知らせる
         // ([`Self::proof_used`])。`ENOMOTO_MIP_TREE_SHARE_PROOFS_AT_ONCE` なら以前と同じく作ったときに知らせる
         let mut state = if self.importing { ProofState::Imported } else { ProofState::Own };
@@ -3790,26 +3896,22 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // `ENOMOTO_T_MIP_PROOF_POOL_IMPORTED`
         let cat = (state == ProofState::Imported) as usize;
         let cap = if cat == 0 { tunable!("ENOMOTO_T_MIP_PROOF_POOL", 2000usize, usize) } else { tunable!("ENOMOTO_T_MIP_PROOF_POOL_IMPORTED", 500usize, usize) };
+        // `ENOMOTO_T_MIP_PROOF_POOL_PER_COL` = c (> 0): 上限を max(200, c * 列数) 以下にする (小さい問題で証明のプールが問題より
+        // ずっと大きくなり、ノードごとの伝播が重くなるのを避ける)
+        let per_col = tunable!("ENOMOTO_T_MIP_PROOF_POOL_PER_COL", 0usize, usize);
+        let cap = if per_col > 0 { cap.min((per_col * self.p.n).max(200)) } else { cap };
         if cap == 0 {
             return;
         }
         while self.proof_fifo[cat].len() >= cap {
-            let id = self.proof_fifo[cat].pop_front().unwrap();
-            self.proof_kill(id);
+            self.proof_evict(cat);
         }
         // 非零の上限: 取り込みから、なければ自前の古いものから捨てる
         while self.dual_proof_nnz + coefs.len() > nnz_cap {
-            let Some(id) = self.proof_fifo[1].pop_front().or_else(|| self.proof_fifo[0].pop_front()) else { break };
-            self.proof_kill(id);
+            let c = if !self.proof_fifo[1].is_empty() { 1 } else if !self.proof_fifo[0].is_empty() { 0 } else { break };
+            self.proof_evict(c);
         }
-        // 先頭の捨てたものを取り除く。捨てたものが多ければ詰め直す
-        while self.proof_state.front() == Some(&ProofState::Dead) {
-            self.dual_proofs.pop_front();
-            self.proof_base.pop_front();
-            self.proof_state.pop_front();
-            self.proof_first_id += 1;
-            self.proof_dead -= 1;
-        }
+        // 捨てたものが多ければ詰め直す (先頭から取り除くと証明の番号がずれて差分を作り直すことになるので、まとめて行う)
         if self.proof_dead > self.dual_proofs.len() / 2 + 256 {
             self.proof_compact();
         }
@@ -3828,7 +3930,40 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.proof_base.push_back(base);
         self.proof_state.push_back(state);
         self.proof_fifo[cat].push_back(id);
-        self.proof_dirty = true;
+        // 差分が今の基準で揃っていれば、この証明の差分だけを足す (全部を作り直さない)。基準の境界と、差分に反映済みの
+        // 境界 (`proof_val_*`) の違いを足す ([`Self::proof_absorb`] と同じ計算)
+        if !self.proof_dirty && self.proof_delta.len() == self.dual_proofs.len() && self.proof_val_lo.len() == p.n {
+            let (slo, sup) = self.proof_snap.as_ref().unwrap();
+            let mut e = (0.0f64, 0i32);
+            for &(j, a) in &coefs {
+                let (s0, v) = if a > 0.0 { (slo[j], self.proof_val_lo[j]) } else { (sup[j], self.proof_val_up[j]) };
+                if s0 == v {
+                    continue;
+                }
+                let (old, new) = (a * s0, a * v);
+                if old.is_finite() {
+                    e.0 -= old;
+                } else {
+                    e.1 -= 1;
+                }
+                if new.is_finite() {
+                    e.0 += new;
+                } else {
+                    e.1 += 1;
+                }
+            }
+            let k = self.dual_proofs.len();
+            self.proof_delta.push(e);
+            self.proof_in_touched.push(false);
+            if e != (0.0, 0) {
+                self.proof_in_touched[k] = true;
+                self.proof_touched.push(k);
+            }
+        } else {
+            self.proof_dirty = true;
+        }
+        self.proof_keys.push_back(keys);
+        self.proof_ref.push_back(false);
         self.dual_proofs.push_back((coefs, konst, obj));
         let k = self.dual_proofs.len() - 1;
         if self.proof_snap.is_some() && self.proof_root_tight(base, self.proof_rhs(k)) {
@@ -4062,6 +4197,21 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     /// 行にできない衝突を境界リテラルのまま衝突プールに入れる (`ENOMOTO_MIP_NO_LIT_CONFLICTS` で無効)。入れたら真。
+    /// 使われた自前の衝突をほかのスレッドに知らせる (`ENOMOTO_MIP_TREE_SHARE_LITS_ON_USE`)。
+    fn share_used_lits(&mut self) {
+        let used = self.lit_conflicts.take_used_unshared();
+        if used.is_empty() {
+            return;
+        }
+        if let Some(pool) = &self.pool {
+            if env_str!("ENOMOTO_MIP_TREE_NO_SHARED_PROOFS").is_none() {
+                for l in used {
+                    learned_push(pool, self.pool_tid, LearnedItem::Lits(l));
+                }
+            }
+        }
+    }
+
     fn add_lit_conflict(&mut self, lits: &[(usize, bool, f64)]) -> bool {
         if env_str!("ENOMOTO_MIP_NO_LIT_CONFLICTS").is_some() {
             return false;
@@ -4076,7 +4226,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let ok = self.lit_conflicts.add(&l, self.importing);
         if ok {
             self.lit_stats[0] += 1;
-            if !self.importing {
+            // `ENOMOTO_MIP_TREE_SHARE_LITS_ON_USE`: 作ったときには知らせず、刈り込み・締め付けに使われたときに知らせる
+            // ([`Self::share_used_lits`])
+            if !self.importing && env_str!("ENOMOTO_MIP_TREE_SHARE_LITS_ON_USE").is_none() {
                 if let Some(pool) = &self.pool {
                     if env_str!("ENOMOTO_MIP_TREE_NO_SHARED_PROOFS").is_none() {
                         learned_push(pool, self.pool_tid, LearnedItem::Lits(l));
@@ -4299,10 +4451,20 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 調べる証明: 最初は差分のある証明すべて。締め付けが起きたら、その記録を差分に取り込んで影響を受けた
         // 証明だけを調べ直す (締め付けの連鎖。全走査の旧方式で先の証明の締め付けが後の証明に効いていたのと同じ)
         let mut scan: Vec<usize> = self.proof_touched.clone();
+        // 目的の証明の右辺 `U - konst` の U (打ち切り値。調べる間は変わらないので 1 回だけ読む: 共有の最良値の読み込みを
+        // 証明ごとにしない)
+        let obj_lim = self.prune_limit() - self.p.offset;
         for pass in 0..8 {
             let mut tightened_now = false;
             for &k in &scan {
-                let rhs = self.proof_rhs(k);
+                let rhs = {
+                    let (_, konst, obj) = &self.dual_proofs[k];
+                    if *obj {
+                        obj_lim - konst
+                    } else {
+                        *konst
+                    }
+                };
                 if !rhs.is_finite() {
                     continue;
                 }
@@ -4338,7 +4500,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 // 整数列の境界を締める: a > 0 なら x_j <= l_j + slack / a
                 let mut changes: Vec<(usize, bool, f64)> = Vec::new();
-                for &(j, a) in &self.dual_proofs[k].0 {
+                let keys = &self.proof_keys[k];
+                for (i, &(j, a)) in self.dual_proofs[k].0.iter().enumerate() {
+                    // 係数は締め付けの上界の大きい順: 上界が余裕以下なら、この列も残りの列も締まらない (`ENOMOTO_MIP_PROOF_NO_EARLY_STOP` で打ち切らない)
+                    if keys[i] <= slack + 1e-9 && env_str!("ENOMOTO_MIP_PROOF_NO_EARLY_STOP").is_none() {
+                        break;
+                    }
                     if !p.is_int[j] || self.dom.lo[j] == self.dom.up[j] {
                         continue;
                     }
@@ -4733,14 +4900,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
         };
         for n in nodes.iter_mut() {
             retag(n, snodes.len());
-            snodes.push(SnapNode { changes: n.changes.clone(), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch });
+            snodes.push(SnapNode { changes: n.changes.clone(), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, basis: None });
         }
         for n in nodes {
             self.queue.push(n);
         }
         if let Some(n) = plunge.as_mut().filter(|_| with_nodes) {
             retag(n, snodes.len());
-            snodes.push(SnapNode { changes: n.changes.clone(), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch });
+            snodes.push(SnapNode { changes: n.changes.clone(), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, basis: None });
         }
         if with_nodes {
             self.dive_stack.clear();
@@ -4853,7 +5020,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut out = Vec::with_capacity(k);
         for _ in 0..k {
             match self.queue.pop_best() {
-                Some(n) => out.push(SnapNode::of(&n)),
+                Some(n) => out.push(if env_str!("ENOMOTO_MIP_TREE_PASS_BASIS").is_some() { SnapNode::of_with_basis(&n, self.p.m) } else { SnapNode::of(&n) }),
                 None => break,
             }
         }
@@ -4861,6 +5028,75 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut g = pool.inner.lock().unwrap();
         g.nodes.extend(out);
         pool.len.store(g.nodes.len(), Ordering::Relaxed);
+    }
+
+    /// 共有の待ち行列から取ったノードを自分のノードにする。親の基底が付いていれば (`ENOMOTO_MIP_TREE_PASS_BASIS`)、列と元の行は
+    /// その状態、このスレッドのカットの行は基底にした基底を付ける (基底変数の数が合わなければ [`Self::restore_node_basis`] の
+    /// 修復に任せる)。
+    fn open_from_pool(&self, mut sn: SnapNode) -> OpenNode {
+        let basis = sn.basis.take();
+        let mut n = sn.into_open();
+        if let Some((col, mut row)) = basis {
+            let mr = self.lp.num_rows();
+            if col.len() == self.p.n && row.len() <= mr {
+                row.resize(mr, VarStatus::Basic);
+                n.basis = Some(Rc::new(super::lp::Basis { col, row }));
+                n.basis_epoch = self.row_log.len();
+            }
+        }
+        n
+    }
+
+    /// 質の釣り合い (`ENOMOTO_MIP_TREE_BALANCE`): 共有の待ち行列に自分の下界より十分小さいノードがあれば取って自分の待ち行列に
+    /// 入れる。ほかのスレッドの下界が自分の待ち行列の最良より十分大きく、共有の待ち行列が少なければ、最良のノードを渡す。
+    /// 「十分」は q (`ENOMOTO_T_MIP_TREE_BALANCE_Q`) × (打ち切り値 − 全体の下界) (打ち切り値がなければ |下界|)。
+    fn pool_balance(&mut self) {
+        use std::sync::atomic::Ordering;
+        let Some(pool) = self.pool.clone() else { return };
+        let t = self.pool_tid as usize;
+        let mine = self.queue.best_lower_bound();
+        let me = mine.min(self.cur_lb);
+        let mut others_min = f64::INFINITY;
+        let mut others_max = f64::NEG_INFINITY;
+        for (i, sl) in pool.slots.iter().enumerate() {
+            if i == t {
+                continue;
+            }
+            let v = f64::from_bits(sl.lb.load(Ordering::Relaxed));
+            if v.is_finite() {
+                others_min = others_min.min(v);
+                others_max = others_max.max(v);
+            }
+        }
+        let cutoff = self.prune_limit();
+        let mut g = pool.inner.lock().unwrap();
+        let best = (0..g.nodes.len()).min_by(|&a, &b| g.nodes[a].lower_bound.total_cmp(&g.nodes[b].lower_bound));
+        let pool_min = best.map_or(f64::INFINITY, |k| g.nodes[k].lower_bound);
+        let all_min = me.min(others_min).min(pool_min);
+        if !all_min.is_finite() {
+            return;
+        }
+        let width = if cutoff.is_finite() { (cutoff - all_min).max(1e-9) } else { all_min.abs().max(1.0) };
+        let thr = tunable!("ENOMOTO_T_MIP_TREE_BALANCE_Q", 0.2, f64) * width;
+        if let Some(k) = best.filter(|_| pool_min < me - thr) {
+            let sn = g.nodes.swap_remove(k);
+            pool.len.store(g.nodes.len(), Ordering::Relaxed);
+            drop(g);
+            if let Some(sl) = pool.slots.get(t) {
+                sl.lb.store(me.min(sn.lower_bound).to_bits(), Ordering::Relaxed);
+            }
+            let n = self.open_from_pool(sn);
+            self.queue.push(n);
+            self.pool_stats[1] += 1;
+            self.tprof.balance[0] += 1;
+            return;
+        }
+        let few = g.nodes.len() < pool.threads;
+        drop(g);
+        if few && self.queue.len() >= 2 && others_max > mine + thr {
+            self.pool_donate(1);
+            self.tprof.balance[1] += 1;
+        }
     }
 
     /// 自分の待ち行列が空のとき、共有の待ち行列からノードを取る。なければ待つ。全てのスレッドが待っていて空なら探索は終わり
@@ -4876,16 +5112,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let r = loop {
             {
                 let mut g = pool.inner.lock().unwrap();
-                let t = self.pool_tid as usize;
-                if g.lbs.len() <= t {
-                    g.lbs.resize(t + 1, f64::INFINITY);
-                    g.open.resize(t + 1, 0);
+                let sl = pool.slots.get(self.pool_tid as usize);
+                if let Some(sl) = sl {
+                    sl.open.store(0, Ordering::Relaxed);
                 }
-                g.open[t] = 0;
                 if let Some(k) = (0..g.nodes.len()).min_by(|&a, &b| g.nodes[a].lower_bound.total_cmp(&g.nodes[b].lower_bound)) {
                     let sn = g.nodes.swap_remove(k);
                     // 受け取ったノードの下界を同じ錠の中で書く (共有の待ち行列から消えた後も全体の下界に入るように)
-                    g.lbs[t] = sn.lower_bound;
+                    if let Some(sl) = sl {
+                        sl.lb.store(sn.lower_bound.to_bits(), Ordering::Relaxed);
+                    }
                     pool.len.store(g.nodes.len(), Ordering::Relaxed);
                     if !self.pool_busy {
                         g.busy += 1;
@@ -4893,10 +5129,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         self.pool_busy = true;
                     }
                     self.pool_stats[1] += 1;
-                    break Ok(Some(sn.into_open()));
+                    break Ok(Some(self.open_from_pool(sn)));
                 }
                 // ノードを持っていない
-                g.lbs[t] = f64::INFINITY;
+                if let Some(sl) = sl {
+                    sl.lb.store(f64::INFINITY.to_bits(), Ordering::Relaxed);
+                }
                 if self.pool_busy {
                     g.busy -= 1;
                     pool.idle.fetch_add(1, Ordering::Relaxed);
