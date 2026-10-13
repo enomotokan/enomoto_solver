@@ -98,6 +98,12 @@ fn metis_ordering(pat: &SymbolicSparseColMat<usize>) -> Option<(Vec<usize>, Vec<
     let mut perm = vec![0i32; n];
     let mut iperm = vec![0i32; n];
     let mut options = [0i32; metis_sys::METIS_NOPTIONS as usize];
+    // METIS (GKlib) はスレッドどうしで共有する状態 (乱数など) を持ち、複数のスレッドから同時に呼ぶと並べ替えが実行ごとに
+    // 変わる (fome13 の同じ形の 8 成分を 4 スレッドで並列に解くと nnz(L) が 131 万〜140 万にばらつき、順に呼べば 8 成分とも
+    // 135 万で毎回同じ)。並べ替えが変わると内点法・クロスオーバー・仕上げの単体法の経路が変わり、まれに止まる・誤った結論を
+    // 返す経路に当たっていた。1 つずつ呼ぶ。
+    static METIS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = METIS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // SAFETY: 配列の長さは METIS の要求どおり (xadj は n+1、adjncy は xadj[n]、perm・iperm は n、options は METIS_NOPTIONS)。
     unsafe {
         metis_sys::METIS_SetDefaultOptions(options.as_mut_ptr());
