@@ -4757,7 +4757,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.join_submips(lim - 1);
         }
         let presolve = env_str!("ENOMOTO_MIP_SUBMIP_NO_PRESOLVE").is_none();
-        self.pending_submips.push_back(std::thread::spawn(move || super::solve_problem(&sub, params, presolve)));
+        self.pending_submips.push_back(std::thread::spawn(move || {
+            // 別スレッドで解くサブ MIP も入れ子の深さ 1 として数える ([`super::heuristics::SUBMIP_DEPTH`])
+            super::heuristics::SUBMIP_DEPTH.with(|d| d.set(1));
+            super::solve_problem(&sub, params, presolve)
+        }));
     }
 
     /// 別スレッドのサブ MIP を、残りが `keep` 本になるまで出した順に待って結果を受け取る。

@@ -30,6 +30,11 @@ pub fn compute_locks(p: &MipProblem) -> Vec<(u32, u32)> {
     locks
 }
 
+thread_local! {
+    /// このスレッドで解いているサブ MIP の入れ子の深さ (元の問題は 0。[`Solver::solve_submip_problem`] で 1 つ増やす)。
+    pub(super) static SUBMIP_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
 impl<'a, L: MipLp> Solver<'a, L> {
     pub(super) fn rand(&mut self) -> f64 {
         let mut x = self.rng;
@@ -1251,7 +1256,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.spawn_submip(sub, params);
             return Some((super::solver::MipStatus::NotSolved, false));
         }
+        let depth = SUBMIP_DEPTH.with(|d| d.get());
+        SUBMIP_DEPTH.with(|d| d.set(depth + 1));
         let r = super::solve_problem(&sub, params, env_str!("ENOMOTO_MIP_SUBMIP_NO_PRESOLVE").is_none());
+        SUBMIP_DEPTH.with(|d| d.set(depth));
         if self.params.verbose {
             let nfree = (0..p.n).filter(|&j| sub.col_lo[j] < sub.col_up[j]).count();
             eprintln!("MIP:   sub-MIP: {nfree} free columns of {}, status {:?}, nodes {}, objective {:?}", p.n, r.status, r.nodes, r.objective);
@@ -1343,13 +1351,23 @@ impl<'a, L: MipLp> Solver<'a, L> {
         (lo, up, applied)
     }
 
+    /// 暫定解がないサブ MIP の中でも、暫定解がない根の RENS を使ってよいか (`ENOMOTO_MIP_SUBMIP_RENS`)。
+    /// HiGHS はサブ MIP の中でも RENS を回し (ヒューリスティクスの努力量 0.8)、30n20b8 の最初の解 553 は、根の RENS の
+    /// サブ MIP の中の RENS のサブ MIP の中の RENS (深さ 3) のランダム丸めで見つけている。サブ MIP の入れ子の深さ
+    /// ([`SUBMIP_DEPTH`]) が `ENOMOTO_T_MIP_SUBMIP_RENS_DEPTH` (既定 2。深さ 3 のサブ MIP まで作る) 以下のときだけ
+    pub(super) fn nested_rens_ok(&self) -> bool {
+        let d = SUBMIP_DEPTH.with(|d| d.get());
+        env_str!("ENOMOTO_MIP_SUBMIP_RENS").is_some() && d >= 1 && d as usize <= tunable!("ENOMOTO_T_MIP_SUBMIP_RENS_DEPTH", 2usize, usize)
+    }
+
     /// RENS (HiGHS の `HighsPrimalHeuristics::RENS` に倣う): LP 解で整数値の整数列を、残りの自由な列の 1 割ずつ
     /// 伝播しながら固定し、そのたびに LP を解き直す (LP が実行不能になったら直前の段に戻る、最大 10 回)。整数値の列が
     /// なくなったら分数の列を丸めて固定する。整数列の固定率が目標 (成功・失敗した固定率から決める、初期 0.6) に
     /// 達したら、その定義域でサブ MIP を解く。`x` は使わない (今の LP 解から始める)。
     pub(super) fn rens(&mut self, _x: &[f64]) -> bool {
         let p = self.p;
-        if self.params.submip {
+        let nested = self.params.submip;
+        if nested && !self.nested_rens_ok() {
             return false;
         }
         // 既定は旧来の全部固定 (ダイビング式は簡単な問題でサブ MIP に時間を取られ、40 問の幾何平均が
@@ -1375,15 +1393,24 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 既定は 1 回 (やり直さない): 30n20b8 では固定率 0.8 -> 0.4 -> 0.2 とサブ MIP が大きくなるほど進まず
             // (1601 列で 275 ノード、4817 列で 31 ノード、6417 列で 0 ノード、どれも時間切れ)、時間を使うだけだった
             let mut target = tunable!("ENOMOTO_T_MIP_NOINC_RENS_RATE", 0.8, f64);
-            let tries = tunable!("ENOMOTO_T_MIP_NOINC_RENS_TRIES", 1usize, usize).max(1);
+            let mut tries = tunable!("ENOMOTO_T_MIP_NOINC_RENS_TRIES", 1usize, usize).max(1);
+            if nested {
+                // サブ MIP の中の RENS ([`Self::nested_rens_ok`]): HiGHS と同じく固定率 0.6 から始め、失敗したら半分にして
+                // やり直す。サブ MIP は小さく、失敗はたいてい 0-1 ノードで実行不能と分かって安いので、やり直しを多く
+                // (`ENOMOTO_T_MIP_SUBMIP_RENS_TRIES`、既定 4)、ノード上限は HiGHS と同じ 200 (500 の 0.4 倍) にする
+                target = tunable!("ENOMOTO_T_MIP_SUBMIP_RENS_RATE", 0.6, f64);
+                tries = tunable!("ENOMOTO_T_MIP_SUBMIP_RENS_TRIES", 4usize, usize).max(1);
+                self.submip_node_mult *= tunable!("ENOMOTO_T_MIP_SUBMIP_RENS_NODES_MULT", 0.4, f64);
+            }
             let mut found = false;
             for t in 0..tries {
                 if t > 0 {
                     self.submip_time_frac = tunable!("ENOMOTO_T_MIP_NOINC_SUBMIP_FRAC2", 0.25, f64);
                 }
                 let (ok, fr) = self.rens_dive_with(Some(target));
-                if self.params.verbose {
-                    eprintln!("MIP:   no-incumbent RENS try {}: target {target:.2}, fixing rate {fr:.2}, found {ok}", t + 1);
+                if self.params.verbose || (nested && env_str!("ENOMOTO_MIP_DEBUG_NOINC").is_some()) {
+                    let depth = SUBMIP_DEPTH.with(|d| d.get());
+                    eprintln!("MIP:   no-incumbent RENS (sub-MIP depth {depth}) try {}: target {target:.2}, fixing rate {fr:.2}, found {ok} ({:.2}s)", t + 1, self.start.elapsed().as_secs_f64());
                 }
                 if ok || self.incumbent.is_some() {
                     found = ok;
@@ -1396,6 +1423,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             (self.submip_time_frac, self.submip_time_max, self.submip_node_mult) = keep;
             return found;
+        }
+        if nested {
+            return false;
         }
         if env_str!("ENOMOTO_MIP_RENS_DIVE").is_none() {
             return self.rens_old(_x);
@@ -1412,7 +1442,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 戻り値は (解を受け入れたか, 達した固定率)。
     fn rens_dive_with(&mut self, target_fixed: Option<f64>) -> (bool, f64) {
         let p = self.p;
-        if self.params.submip {
+        if self.params.submip && !self.nested_rens_ok() {
             return (false, 0.0);
         }
         let ints: Vec<usize> = (0..p.n).filter(|&j| p.is_int[j] && self.dom.lo[j] < self.dom.up[j]).collect();
@@ -1546,6 +1576,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut sub = p.clone();
         sub.col_lo = lo;
         sub.col_up = up;
+        // `ENOMOTO_MIP_SUBMIP_CUTS`: 根 (サブ MIP の中の根も含む) の LP にある切除平面をサブ MIP の行に加える。HiGHS の RENS は
+        // カットを含む LP (`heurlp.getLp()`) からサブ MIP を作る (30n20b8 の根の RENS は 488 行 + カット 127 本)。
+        // 根の LP の行 (元の行の後ろ) はどれも大域的に成り立つカットなので、木の中 (局所的な行がありうる) では加えない
+        if self.nodes <= 1 && env_str!("ENOMOTO_MIP_SUBMIP_CUTS").is_some() {
+            let added = self.append_lp_cuts(&mut sub);
+            if self.params.verbose {
+                eprintln!("MIP:   RENS: {added} cuts added to the sub-MIP");
+            }
+        }
         let r = self.solve_submip_problem(sub, 500, None);
         // 近さの指標 ([`Solver::heur_close`]): 固定率。サブ MIP が実行不能なら 0、制限で止まったら半分
         self.heur_close = match r {
@@ -1566,6 +1605,31 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             _ => (false, fr),
         }
+    }
+
+    /// LP の元の行の後ろにある行 (切除平面) を `sub` に加える。加えた本数を返す。
+    fn append_lp_cuts(&self, sub: &mut MipProblem) -> usize {
+        let m0 = self.p.m;
+        let mr = self.lp.num_rows();
+        let mut added = 0;
+        for i in m0..mr {
+            let (l, u) = self.lp.row_bounds(i);
+            let row: Vec<(usize, f64)> = self.lp.row(i).into_iter().collect();
+            if row.is_empty() || (l == f64::NEG_INFINITY && u == f64::INFINITY) {
+                continue;
+            }
+            let r = sub.m;
+            for &(j, a) in &row {
+                sub.cols[j].push((r, a));
+            }
+            sub.nnz += row.len();
+            sub.rows.push(row);
+            sub.row_lo.push(l);
+            sub.row_up.push(u);
+            sub.m += 1;
+            added += 1;
+        }
+        added
     }
 
     /// 旧来の RENS (LP 解で整数値の列を全部固定する。既定)。
