@@ -66,6 +66,11 @@ pub struct Multifrontal {
     bchol_bs: usize,
     /// [`chol_blocked`] を使う対角ブロックの大きさの下限 (`ENOMOTO_T_MF_BCHOL_MIN`)。
     bchol_min: usize,
+    /// 並列に計算する大きな前線の三角行列の解法を、L21 の行のかたまりごとに並列に行う ([`trsm_rows`]、試験用
+    /// `ENOMOTO_T_MF_PAR_TRSM=1`)。
+    par_trsm: bool,
+    /// 並列に計算する大きな前線の L のかたまりの 0 埋めを並列に行う (試験用 `ENOMOTO_T_MF_PAR_PREP=1`)。
+    par_prep: bool,
 }
 
 static PROF: [std::sync::atomic::AtomicU64; 4] = [const { std::sync::atomic::AtomicU64::new(0) }; 4];
@@ -302,6 +307,40 @@ fn chol_blocked(mut a: faer::MatMut<'_, f64>, reg: LltRegularization<f64>, bs: u
     Ok(dynreg)
 }
 
+/// `L21 = F21 L11^{-T}` (`unit` なら単位下三角の `L11`) を、`L21` の行のかたまり (`rows` 行ずつ) ごとに並列に解く
+/// (行どうしは独立。faer の並列の三角行列の解法は 4 コアで 20〜50 GFLOPS しか出ない)。`w` (LDLᵀ: `W` の配列
+/// `r x nc` 列優先と、`D11` の逆数) があれば、解いた行を `W` に写してから `L21` を `D11` で割る。
+fn trsm_rows(l11: MatRef<'_, f64>, mut l21: faer::MatMut<'_, f64>, unit: bool, w: Option<(SyncPtr, &[f64])>, rows: usize) {
+    let r = l21.nrows();
+    let nc = l21.ncols();
+    let mut blocks = Vec::new();
+    let mut start = 0;
+    while start < r {
+        let h = rows.min(r - start);
+        let (top, rest) = l21.split_at_row_mut(h);
+        blocks.push((start, top));
+        l21 = rest;
+        start += h;
+    }
+    blocks.into_par_iter().for_each(|(st, mut blk)| {
+        if unit {
+            faer::linalg::triangular_solve::solve_unit_lower_triangular_in_place(l11, blk.rb_mut().transpose_mut(), Parallelism::None);
+        } else {
+            faer::linalg::triangular_solve::solve_lower_triangular_in_place(l11, blk.rb_mut().transpose_mut(), Parallelism::None);
+        }
+        if let Some((wp, dinv)) = w {
+            for j in 0..nc {
+                for i in 0..blk.nrows() {
+                    let v = blk.read(i, j);
+                    // SAFETY: W の (st + i, j) はこのかたまりだけが書く。
+                    unsafe { *wp.get().add(j * r + st + i) = v };
+                    blk.write(i, j, v * dinv[j]);
+                }
+            }
+        }
+    });
+}
+
 /// 行の写像 `map` (昇順) が連続な範囲の数。
 fn map_runs(map: &[u32]) -> usize {
     1 + map.windows(2).filter(|w| w[1] != w[0] + 1).count()
@@ -481,6 +520,8 @@ impl Multifrontal {
             par_flops: tunable!("ENOMOTO_T_MF_PAR_FLOPS", 5e7f64, f64),
             bchol_bs: if tunable!("ENOMOTO_T_MF_BCHOL", 0u8, u8) != 0 { tunable!("ENOMOTO_T_MF_BCHOL_BS", 256usize, usize).max(1) } else { 0 },
             bchol_min: tunable!("ENOMOTO_T_MF_BCHOL_MIN", 512usize, usize),
+            par_trsm: tunable!("ENOMOTO_T_MF_PAR_TRSM", 0u8, u8) != 0,
+            par_prep: tunable!("ENOMOTO_T_MF_PAR_PREP", 0u8, u8) != 0,
         })
     }
 
@@ -523,6 +564,18 @@ impl Multifrontal {
         self.chunk = chunk;
         self.par_flops = par_flops;
         self.seq_flops = seq_flops;
+    }
+
+    /// [`trsm_rows`] の行のかたまりの大きさ (スレッドあたり 4 つ程度、32 行以上)。
+    fn trsm_rows(&self, r: usize) -> usize {
+        r.div_ceil(4 * rayon::current_num_threads()).max(32)
+    }
+
+    /// 試験用: 大きな前線の三角行列の解法と L のかたまりの 0 埋めを並列に行うか。
+    #[cfg(test)]
+    pub fn set_par_extra(&mut self, par_trsm: bool, par_prep: bool) {
+        self.par_trsm = par_trsm;
+        self.par_prep = par_prep;
     }
 
     /// 試験用: 大きな前線の対角ブロックの Cholesky をかたまりごとに行う幅 (0 なら faer のまま) と、使う大きさの下限。
@@ -689,7 +742,11 @@ impl Multifrontal {
         let f = nc + self.pat_ptr[s + 1] - self.pat_ptr[s];
         // SAFETY: supernode ごとに `l_ptr` の範囲は重ならず、各 supernode はちょうど 1 回だけ処理される。
         let lsl: &mut [f64] = unsafe { std::slice::from_raw_parts_mut(lp.0.add(self.l_ptr[s]), f * nc) };
-        lsl.fill(0.0);
+        if self.par_prep && (nc as f64) * (f as f64) * (f as f64) > self.par_flops && !super::kkt::inner_seq() {
+            lsl.par_chunks_mut(1 << 15).for_each(|c| c.fill(0.0));
+        } else {
+            lsl.fill(0.0);
+        }
         for &(k, lr, lc) in &self.asm[s] {
             lsl[lc as usize * f + lr as usize] += values[k as usize];
         }
@@ -809,15 +866,20 @@ impl Multifrontal {
             tp2 = std::time::Instant::now();
             tp3 = tp2;
             if r > 0 {
-                faer::linalg::triangular_solve::solve_unit_lower_triangular_in_place(l11.rb(), l21.rb_mut().transpose_mut(), par);
-                // W (= L21 D) を写してから L21 = W D^{-1}。
                 let mut wb = self.take_buf(r * nc);
-                for j in 0..nc {
-                    let dinv = 1.0 / l11.read(j, j);
-                    for i in 0..r {
-                        let v = l21.read(i, j);
-                        wb[j * r + i] = v;
-                        l21.write(i, j, v * dinv);
+                if self.par_trsm && par != Parallelism::None {
+                    let dinv: Vec<f64> = (0..nc).map(|j| 1.0 / l11.read(j, j)).collect();
+                    trsm_rows(l11.rb(), l21.rb_mut(), true, Some((SyncPtr(wb.as_mut_ptr()), &dinv)), self.trsm_rows(r));
+                } else {
+                    faer::linalg::triangular_solve::solve_unit_lower_triangular_in_place(l11.rb(), l21.rb_mut().transpose_mut(), par);
+                    // W (= L21 D) を写してから L21 = W D^{-1}。
+                    for j in 0..nc {
+                        let dinv = 1.0 / l11.read(j, j);
+                        for i in 0..r {
+                            let v = l21.read(i, j);
+                            wb[j * r + i] = v;
+                            l21.write(i, j, v * dinv);
+                        }
                     }
                 }
                 w = Some(wb);
@@ -842,7 +904,11 @@ impl Multifrontal {
             tp3 = tp2;
             if r > 0 {
                 // L21 = F21 L11^{-T}: L11 L21ᵀ = F21ᵀ を解く。
-                faer::linalg::triangular_solve::solve_lower_triangular_in_place(l11.rb(), l21.rb_mut().transpose_mut(), par);
+                if self.par_trsm && par != Parallelism::None {
+                    trsm_rows(l11.rb(), l21.rb_mut(), false, None, self.trsm_rows(r));
+                } else {
+                    faer::linalg::triangular_solve::solve_lower_triangular_in_place(l11.rb(), l21.rb_mut().transpose_mut(), par);
+                }
                 tp3 = std::time::Instant::now();
             }
         }
@@ -1261,6 +1327,7 @@ impl Multifrontal {
 
 #[cfg(test)]
 mod kernel_bench {
+    use faer::reborrow::ReborrowMut;
     use faer::linalg::cholesky::llt::compute::{cholesky_in_place, cholesky_in_place_req, LltParams, LltRegularization};
     use faer::linalg::matmul::triangular::BlockStructure;
     use faer::{dyn_stack::{GlobalPodBuffer, PodStack}, Mat, Parallelism};
@@ -1273,6 +1340,62 @@ mod kernel_bench {
             b = b.min(t.elapsed().as_secs_f64());
         }
         b
+    }
+
+    /// 計測用 (`cargo test --release front_update_bench -- --ignored --nocapture`): 大きな前線と同じ形 (nc 列、下の行 r) の
+    /// 更新行列の計算を、確保と 0 埋めを含めて・含めずに、正方形 (faer の下三角の行列積 1 回) と台形 (かたまりごと) で測る。
+    #[test]
+    #[ignore]
+    fn front_update_bench() {
+        use super::{sub_update, u_len, Front};
+        for (nc, r) in [(64usize, 1300usize), (200, 1300), (200, 2000), (400, 900), (100, 2600)] {
+            let a = Mat::<f64>::from_fn(r, nc, |i, j| ((i * 7 + j * 3) % 11) as f64 * 0.1);
+            let flops = (nc * r * r) as f64;
+            for bw in [0usize, 128, 256] {
+                let len = u_len(r, bw);
+                let mut keep = vec![0.0f64; len];
+                let reps = 20;
+                // 配列を使い回す (0 埋めだけする)。
+                let t_reuse = best(reps, || {
+                    keep.iter_mut().for_each(|v| *v = 0.0);
+                    let f = Front::u_only(keep.as_mut_ptr(), r, bw);
+                    sub_update(f, None, a.as_ref(), a.as_ref(), if bw == 0 { usize::MAX } else { bw }, true);
+                });
+                // 0 埋めなし (行列積だけ)。
+                let t_mm = best(reps, || {
+                    let f = Front::u_only(keep.as_mut_ptr(), r, bw);
+                    sub_update(f, None, a.as_ref(), a.as_ref(), if bw == 0 { usize::MAX } else { bw }, true);
+                });
+                // 毎回新しく確保する (ページフォールトを含む)。
+                let t_fresh = best(reps, || {
+                    let mut u = vec![0.0f64; len];
+                    let f = Front::u_only(u.as_mut_ptr(), r, bw);
+                    sub_update(f, None, a.as_ref(), a.as_ref(), if bw == 0 { usize::MAX } else { bw }, true);
+                    std::hint::black_box(&u);
+                });
+                println!("FUBENCH nc={nc} r={r} bw={bw} matmul={:.2}ms ({:.1} GF) zero+matmul={:.2}ms ({:.1} GF) fresh={:.2}ms ({:.1} GF)",
+                    t_mm * 1e3, flops / t_mm * 1e-9, t_reuse * 1e3, flops / t_reuse * 1e-9, t_fresh * 1e3, flops / t_fresh * 1e-9);
+            }
+            // 三角行列の解法 (L21 = F21 L11^{-T}、L21 は前線の中の列優先 f x nc の下の部分)。
+            let l = Mat::<f64>::from_fn(nc, nc, |i, j| if i == j { 2.0 } else if i > j { 0.01 } else { 0.0 });
+            let f0 = Mat::<f64>::from_fn(nc + r, nc, |i, j| ((i + 2 * j) % 5) as f64);
+            let mut fm = f0.clone();
+            for (pn, par) in [("seq", Parallelism::None), ("par", Parallelism::Rayon(0))] {
+                let t = best(20, || {
+                    fm.copy_from(&f0);
+                    let (_, mut l21) = fm.as_mut().split_at_row_mut(nc);
+                    faer::linalg::triangular_solve::solve_lower_triangular_in_place(l.as_ref(), l21.rb_mut().transpose_mut(), par);
+                });
+                println!("FUBENCH nc={nc} r={r} trsm {pn} {:.2}ms ({:.1} GF, 写しを含む)", t * 1e3, (nc * nc * r) as f64 / t * 1e-9);
+            }
+            let rows = r.div_ceil(4 * rayon::current_num_threads()).max(32);
+            let t = best(20, || {
+                fm.copy_from(&f0);
+                let (_, l21) = fm.as_mut().split_at_row_mut(nc);
+                super::trsm_rows(l.as_ref(), l21, false, None, rows);
+            });
+            println!("FUBENCH nc={nc} r={r} trsm rows(par, {rows} 行ずつ) {:.2}ms ({:.1} GF, 写しを含む)", t * 1e3, (nc * nc * r) as f64 / t * 1e-9);
+        }
     }
 
     /// 計測用 (`cargo test --release kernel_bench -- --ignored --nocapture`): マルチフロンタル法の前線で使う faer の

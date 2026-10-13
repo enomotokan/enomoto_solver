@@ -1544,6 +1544,17 @@ mod mf_variants {
             }
         }
         assert_eq!(n_cases, 3 * 4 * 2 * 3 * 2);
+        // 大きな前線の三角行列の解法を行のかたまりごとに並列に・L のかたまりの 0 埋めを並列に。
+        for pack_bw in [0usize, 64] {
+            for seq in [false, true] {
+                let mut mf = make();
+                mf.set_variant(pack_bw, false, 0, 128, 0.0, 0.0);
+                mf.set_par_extra(true, true);
+                let x = solve(&mut mf, seq);
+                let d = x.iter().zip(&x0).map(|(a, b)| (a - b).abs()).fold(0.0f64, f64::max);
+                assert!(d <= 1e-9 * xmax, "par_trsm pack_bw={pack_bw} seq={seq}: diff {d:e}");
+            }
+        }
         // 大きな前線の対角ブロックをかたまりごとに Cholesky する版 (LLᵀ のときだけ使う)。
         for (bs, min) in [(7usize, 0usize), (64, 0), (16, 100)] {
             for pack_bw in [0usize, 64] {
