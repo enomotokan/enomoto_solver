@@ -93,10 +93,21 @@ def run_one(mps: Path, timeout: float, mem_gb: float, env_extra: dict, mf_prof: 
     lim = int(mem_gb * (1 << 30))
     pre = (lambda: __import__("resource").setrlimit(__import__("resource").RLIMIT_AS, (lim, lim)))
     t0 = time.perf_counter()
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env, preexec_fn=pre)
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env, preexec_fn=pre)
+        out, err = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
-        return {"status": "timeout", "time": timeout}
+        # 打ち切り: どこで止まったかを見るため、途中までの標準エラーも残す。
+        proc.kill()
+        out, err = proc.communicate()
+        if save_stderr is not None:
+            save_stderr.parent.mkdir(parents=True, exist_ok=True)
+            save_stderr.write_text(err)
+        return {"status": "timeout", "time": timeout, "stderr": err[-3000:]}
+
+    class P:
+        stdout, stderr = out, err
+    p = P()
     res = parse(p.stdout, p.stderr)
     if save_stderr is not None:
         save_stderr.parent.mkdir(parents=True, exist_ok=True)
