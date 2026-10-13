@@ -356,7 +356,12 @@ pub(super) struct Solver<'a, L: MipLp> {
     proof_base: std::collections::VecDeque<(f64, u32, f64)>,
     /// 診断用: 証明ごとの、ほかのスレッドから取り込んだものか (`dual_proofs` と同じ並び)。
     proof_imported: std::collections::VecDeque<bool>,
-    proof_col_index: Vec<Vec<(u64, f64)>>,
+    /// 列ごとの、その列を含む証明 (通し番号, 係数)。[0] は係数が正のもの (下限が変わると最小活動量が変わる)、[1] は
+    /// それ以外 (上限が変わると変わる)。境界の変わった側だけをたどるように分けて持つ。
+    proof_col_index: [Vec<Vec<(u64, f64)>>; 2],
+    /// [`Self::proof_absorb`] で、その呼び出しで差分が変わった証明の印 (`proof_chg_stamp` と同じなら印あり)。
+    proof_chg_mark: Vec<u32>,
+    proof_chg_stamp: u32,
     proof_snap: Option<(Vec<f64>, Vec<f64>)>,
     proof_snap_nodes: u64,
     /// 基準を取ったときの打ち切り値 (暫定解が良くなったら取り直す)。
@@ -967,7 +972,9 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         proof_first_id: 0,
         proof_base: std::collections::VecDeque::new(),
         proof_imported: std::collections::VecDeque::new(),
-        proof_col_index: Vec::new(),
+        proof_col_index: [Vec::new(), Vec::new()],
+        proof_chg_mark: Vec::new(),
+        proof_chg_stamp: 0,
         proof_snap: None,
         proof_snap_nodes: 0,
         proof_snap_limit: f64::INFINITY,
@@ -3654,11 +3661,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         self.dual_proof_nnz += coefs.len();
         let id = self.proof_first_id + self.dual_proofs.len() as u64;
-        if self.proof_col_index.len() != p.n {
-            self.proof_col_index = vec![Vec::new(); p.n];
+        if self.proof_col_index[0].len() != p.n {
+            self.proof_col_index = [vec![Vec::new(); p.n], vec![Vec::new(); p.n]];
         }
         for &(j, a) in &coefs {
-            self.proof_col_index[j].push((id, a));
+            self.proof_col_index[(a <= 0.0) as usize][j].push((id, a));
         }
         let base = match &self.proof_snap {
             Some((lo, up)) => proof_min_activity(&coefs, lo, up),
@@ -4071,11 +4078,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.proof_snap.is_none() || self.nodes >= self.proof_snap_nodes + 200 || self.prune_limit() < self.proof_snap_limit || env_str!("ENOMOTO_MIP_PROOF_FULL_SCAN").is_some() {
             let (lo, up) = self.dom.root_bounds();
             self.proof_base = self.dual_proofs.iter().map(|(c, _, _)| proof_min_activity(c, &lo, &up)).collect();
-            self.proof_col_index = vec![Vec::new(); p.n];
+            self.proof_col_index = [vec![Vec::new(); p.n], vec![Vec::new(); p.n]];
             for (k, (c, _, _)) in self.dual_proofs.iter().enumerate() {
                 let id = self.proof_first_id + k as u64;
                 for &(j, a) in c {
-                    self.proof_col_index[j].push((id, a));
+                    self.proof_col_index[(a <= 0.0) as usize][j].push((id, a));
                 }
             }
             self.proof_snap = Some((lo, up));
@@ -4226,7 +4233,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 入るので、見積もりは真の最小活動量以下のまま。
     fn proof_absorb(&mut self, cols: &[usize]) -> Vec<usize> {
         let mut changed: Vec<usize> = Vec::new();
-        let mut in_changed: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        if self.proof_chg_mark.len() < self.proof_delta.len() {
+            self.proof_chg_mark.resize(self.proof_delta.len(), 0);
+        }
+        self.proof_chg_stamp = self.proof_chg_stamp.wrapping_add(1);
+        if self.proof_chg_stamp == 0 {
+            self.proof_chg_mark.iter_mut().for_each(|m| *m = 0);
+            self.proof_chg_stamp = 1;
+        }
+        let stamp = self.proof_chg_stamp;
         for &j in cols {
             for upper in [false, true] {
                 let (old_v, new_v) = if upper { (self.proof_val_up[j], self.dom.up[j]) } else { (self.proof_val_lo[j], self.dom.lo[j]) };
@@ -4238,9 +4253,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 } else {
                     self.proof_val_lo[j] = new_v;
                 }
-                for &(id, a) in &self.proof_col_index[j] {
-                    if id < self.proof_first_id || (a > 0.0) == upper {
-                        continue; // 古い証明、またはこの側は最小活動量に効かない
+                // この側の境界が最小活動量に効く証明だけをたどる (下限は係数が正、上限は係数が正でないもの)
+                for &(id, a) in &self.proof_col_index[upper as usize][j] {
+                    if id < self.proof_first_id {
+                        continue; // 古い証明
                     }
                     let k = (id - self.proof_first_id) as usize;
                     self.tprof.proof[self.proof_imported.get(k).copied().unwrap_or(false) as usize][3] += 1;
@@ -4249,7 +4265,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         self.proof_in_touched[k] = true;
                         self.proof_touched.push(k);
                     }
-                    if in_changed.insert(k) {
+                    if self.proof_chg_mark[k] != stamp {
+                        self.proof_chg_mark[k] = stamp;
                         changed.push(k);
                     }
                     let e = &mut self.proof_delta[k];
