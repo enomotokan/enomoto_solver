@@ -504,6 +504,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let multi_min = tunable!("ENOMOTO_T_MIP_DIVE_MULTI_MIN", 100usize, usize);
         let mut no_multi = false;
         let mut scored: Vec<(f64, usize, f64, bool)> = Vec::new();
+        // 近さの指標 ([`Solver::heur_close`]): 最初の LP 解の分数の列の数に対する、途中の最少の割合
+        let (mut frac0, mut frac_min) = (0usize, usize::MAX);
+        self.heur_close = 0.0;
         'dive: while steps < 4 * p.n + 10 {
             steps += 1;
             if self.time_up() || self.lp.total_iterations() - it_start > budget {
@@ -514,6 +517,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             let x = self.lp.col_values();
             let frac = self.fractional(&x);
+            if steps == 1 {
+                frac0 = frac.len();
+            }
+            frac_min = frac_min.min(frac.len());
+            if frac0 > 0 {
+                self.heur_close = 1.0 - frac_min as f64 / frac0 as f64;
+            }
             if frac.is_empty() {
                 found = self.try_lp_solution();
                 if verbose {
@@ -725,6 +735,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // Objective Feasibility Pump: 距離関数に元の目的関数を重み alpha で混ぜ、反復ごとに減衰させる。
         let cnorm = p.cost.iter().map(|c| c * c).sum::<f64>().sqrt();
         let mut alpha = if cnorm > 0.0 { 1.0f64 } else { 0.0 };
+        // 近さの指標 ([`Solver::heur_close`]): LP 解と丸めた点の距離の、最初の回に対する最小の割合
+        let (mut d0, mut dmin) = (0.0f64, f64::INFINITY);
+        self.heur_close = 0.0;
         for _pass in 0..100 {
             if self.time_up() || self.lp.total_iterations() - it_start > budget {
                 break;
@@ -739,6 +752,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
             for &j in &ints {
                 let th = 0.4 + 0.2 * self.rand();
                 r[j] = (x[j] + 1.0 - th).floor().clamp(self.dom.lo[j], self.dom.up[j]);
+            }
+            let d: f64 = ints.iter().map(|&j| (x[j] - r[j]).abs()).sum();
+            if d0 == 0.0 {
+                d0 = d;
+            }
+            dmin = dmin.min(d);
+            if d0 > 0.0 {
+                self.heur_close = 1.0 - dmin / d0;
             }
             let mut key: Vec<i64> = ints.iter().map(|&j| r[j] as i64).collect();
             let mut cycles = 0;
@@ -1519,12 +1540,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
             eprintln!("MIP:   RENS: fixing rate {fr:.2} (target {target:.2}, {backtracks} backtracks)");
         }
         if fr < 0.1 {
+            self.heur_close = 0.0;
             return (false, fr);
         }
         let mut sub = p.clone();
         sub.col_lo = lo;
         sub.col_up = up;
         let r = self.solve_submip_problem(sub, 500, None);
+        // 近さの指標 ([`Solver::heur_close`]): 固定率。サブ MIP が実行不能なら 0、制限で止まったら半分
+        self.heur_close = match r {
+            Some((super::solver::MipStatus::Infeasible, false)) => 0.0,
+            Some((_, false)) => 0.5 * fr,
+            _ => fr,
+        };
         match r {
             Some((_, true)) => {
                 self.rens_succ.0 += fr;

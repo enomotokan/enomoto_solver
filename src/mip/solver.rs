@@ -192,6 +192,19 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 暫定解がない間の木の中のヒューリスティクス (RENS・Feasibility Pump) に使った時間 (秒) と呼んだ回数。
     pub(super) noinc_secs: f64,
     pub(super) noinc_calls: u64,
+    /// 直前に呼んだヒューリスティクスが解にどれだけ近づいたか (0..1。解が見つからなかったときの報酬に使う)。
+    /// ダイビングは分数の列の数の減り方、Feasibility Pump は丸めた点との距離の減り方、RENS は固定率。
+    pub(super) heur_close: f64,
+    /// 暫定解がない間の木の中のヒューリスティクスのバンディット (`ENOMOTO_MIP_NOINC_BANDIT`): 腕ごとの報酬の合計・
+    /// 試した回数・使った時間 (秒)。腕は [`NOINC_ARMS`] の順。
+    noinc_reward: [f64; NOINC_ARMS],
+    noinc_count: [u32; NOINC_ARMS],
+    noinc_cost: [f64; NOINC_ARMS],
+    /// 暫定解がない間の呼び出しの間隔の調整 (`ENOMOTO_MIP_NOINC_BUDGET`): 近さの最大値が更新されなかった続けての回数、
+    /// これまでの近さの最大値、次に呼んでよいノード番号。
+    noinc_stall: u32,
+    noinc_best_close: f64,
+    noinc_next_node: u64,
     /// サブ MIP の時間の上限 (残り時間に対する割合)。
     pub(super) submip_time_frac: f64,
     /// サブ MIP の時間の上限 (秒)。
@@ -779,6 +792,13 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         hcm_root_obj: f64::NEG_INFINITY,
         noinc_secs: 0.0,
         noinc_calls: 0,
+        heur_close: 0.0,
+        noinc_reward: [0.0; NOINC_ARMS],
+        noinc_count: [0; NOINC_ARMS],
+        noinc_cost: [0.0; NOINC_ARMS],
+        noinc_stall: 0,
+        noinc_best_close: 0.0,
+        noinc_next_node: 0,
         submip_time_frac: tunable!("ENOMOTO_T_MIP_SUBMIP_TIME_FRAC", 0.07, f64),
         submip_time_max: tunable!("ENOMOTO_T_MIP_SUBMIP_TIME_MAX", 6.0, f64),
         noinc_rens_done: false,
@@ -932,6 +952,10 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
 fn proof_only() -> bool {
     crate::simplex::slope_intercept_dual::mip_profile() == 2
 }
+
+/// 暫定解がない間の木の中のヒューリスティクスの腕の数 (0: RENS、1: Feasibility Pump、2..8: ダイビング
+/// 分数・ベクトル長・係数・擬似費用・Farkas・衝突)。
+const NOINC_ARMS: usize = 8;
 
 /// 木の中のヒューリスティクスを走らせないスレッドか (証明だけのスレッドと、根のヒューリスティクスだけ走らせる
 /// 二分探索のスレッド `ENOMOTO_MIP_BISECT_ROOT_HEUR`)。
@@ -2204,11 +2228,36 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     // 反復まで、根と同じく後戻りあり) を順に回す (RENS・pump は根だけで使っていたもの。深いノードでは固定が
                     // 進み部分問題が小さい)。
                     let noinc = heur_ok && self.incumbent.is_none() && node.depth > 0 && plunge_depth == 0 && env_str!("ENOMOTO_MIP_NOINC_HEUR").is_some();
-                    if noinc && self.noinc_secs < tunable!("ENOMOTO_T_MIP_NOINC_TIME_FRAC", 0.3, f64) * self.start.elapsed().as_secs_f64() {
+                    // `ENOMOTO_MIP_NOINC_BUDGET`: 時間の割合を木の様子で変える。実行不能で刈れた葉の割合が低い
+                    // (暫定解がないと限定操作で刈れず、木が進まない) ほど上限 (既定 0.6) に、高いほど下限 (既定 0.15) に寄せる。
+                    // さらに近さ ([`Solver::heur_close`]) の最大値が更新されない回が続くと、呼ぶ間隔を倍々にする (最大 64 ノード)
+                    let adapt_budget = env_str!("ENOMOTO_MIP_NOINC_BUDGET").is_some();
+                    let time_frac = if adapt_budget {
+                        let infeas = self.pc.infeasible_leaves as f64 / self.nodes.max(1) as f64;
+                        let (lo, hi) = (tunable!("ENOMOTO_T_MIP_NOINC_FRAC_LO", 0.15, f64), tunable!("ENOMOTO_T_MIP_NOINC_FRAC_HI", 0.6, f64));
+                        lo + (hi - lo) * (1.0 - infeas.clamp(0.0, 1.0))
+                    } else {
+                        tunable!("ENOMOTO_T_MIP_NOINC_TIME_FRAC", 0.3, f64)
+                    };
+                    let spaced = !adapt_budget || self.nodes >= self.noinc_next_node;
+                    if noinc && spaced && self.noinc_secs < time_frac * self.start.elapsed().as_secs_f64() {
                         let t0 = Instant::now();
                         let it0 = self.lp.total_iterations();
-                        // RENS (固定率を調整する版) → Feasibility Pump → ダイビング (種類を順に) を回す
-                        match self.noinc_calls % 3 {
+                        // 腕を選ぶ。`ENOMOTO_MIP_NOINC_BANDIT` なら UCB (報酬は解が見つかれば 2、見つからなければ近さ、
+                        // それを使った時間で割り引く)、そうでなければ RENS → Feasibility Pump → ダイビング (種類を順に) を回す
+                        let bandit = env_str!("ENOMOTO_MIP_NOINC_BANDIT").is_some();
+                        let arm = if bandit {
+                            self.noinc_select_arm()
+                        } else {
+                            match self.noinc_calls % 3 {
+                                0 => 0,
+                                1 => 1,
+                                _ => 2 + (self.noinc_calls / 3) as usize % 6,
+                            }
+                        };
+                        let inc0 = self.incumbent.as_ref().map(|(z, _)| *z);
+                        self.heur_close = 0.0;
+                        match arm {
                             0 => {
                                 self.rens_dive();
                             }
@@ -2219,7 +2268,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             _ => {
                                 use super::heuristics::DiveKind as K;
                                 let kinds = [K::Fractional, K::VectorLength, K::Coefficient, K::Pseudocost, K::Farkas, K::Conflict];
-                                let kind = kinds[(self.noinc_calls / 3) as usize % kinds.len()];
+                                let kind = kinds[arm - 2];
                                 let it = self.lp.total_iterations();
                                 self.dive_calls += 1;
                                 if self.dive(kind, tunable!("ENOMOTO_T_MIP_NOINC_DIVE_ITERS", 50_000u64, u64), f64::INFINITY) {
@@ -2228,9 +2277,27 @@ impl<'a, L: MipLp> Solver<'a, L> {
                                 self.dive_iters += self.lp.total_iterations() - it;
                             }
                         }
+                        let found = self.incumbent.as_ref().map(|(z, _)| *z) != inc0;
+                        let close = if found { 1.0 } else { self.heur_close.clamp(0.0, 1.0) };
+                        let secs = t0.elapsed().as_secs_f64();
                         self.noinc_calls += 1;
                         self.heur_iters += self.lp.total_iterations() - it0;
-                        self.noinc_secs += t0.elapsed().as_secs_f64();
+                        self.noinc_secs += secs;
+                        if bandit {
+                            self.noinc_update_arm(arm, if found { 2.0 } else { close }, secs);
+                        }
+                        if adapt_budget {
+                            if close > self.noinc_best_close + 1e-3 {
+                                self.noinc_best_close = close;
+                                self.noinc_stall = 0;
+                            } else {
+                                self.noinc_stall = (self.noinc_stall + 1).min(6);
+                            }
+                            self.noinc_next_node = self.nodes + (1u64 << self.noinc_stall);
+                        }
+                        if self.params.verbose && env_str!("ENOMOTO_MIP_DEBUG_NOINC").is_some() {
+                            eprintln!("MIP:   no-incumbent heuristic arm {arm}: close {close:.3} found {found} ({secs:.2}s, node {}, frac {time_frac:.2}, stall {})", self.nodes, self.noinc_stall);
+                        }
                     }
                     xp("m_heur");
                     // ダイビング (SCIP の fracdiving / veclendiving: 深さ 10 ごと、ずらし 3 / 7)
@@ -2615,6 +2682,29 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         changed
+    }
+
+    /// 暫定解がない間の木の中のヒューリスティクスの腕を UCB で選ぶ (まだ試していない腕を先に)。平均の報酬は、
+    /// その腕の 1 回の平均時間が全体の平均より長いほど割り引く (時間の比の平方根で割る)。
+    fn noinc_select_arm(&self) -> usize {
+        if let Some(a) = (0..NOINC_ARMS).find(|&a| self.noinc_count[a] == 0) {
+            return a;
+        }
+        let total: u32 = self.noinc_count.iter().sum();
+        let mean_cost = self.noinc_cost.iter().sum::<f64>() / total as f64 + 1e-3;
+        let c = tunable!("ENOMOTO_T_MIP_NOINC_UCB_C", 0.5, f64);
+        let score = |a: usize| {
+            let n = self.noinc_count[a] as f64;
+            let cost = self.noinc_cost[a] / n + 1e-3;
+            self.noinc_reward[a] / n / (cost / mean_cost).sqrt().max(1.0) + c * (2.0 * (total as f64).ln() / n).sqrt()
+        };
+        (0..NOINC_ARMS).max_by(|&a, &b| score(a).total_cmp(&score(b))).unwrap()
+    }
+
+    fn noinc_update_arm(&mut self, arm: usize, reward: f64, secs: f64) {
+        self.noinc_reward[arm] += reward;
+        self.noinc_count[arm] += 1;
+        self.noinc_cost[arm] += secs;
     }
 
     pub(super) fn avg_node_iters(&self) -> u64 {
