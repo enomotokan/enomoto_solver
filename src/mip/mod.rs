@@ -540,7 +540,7 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
 fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) -> solver::MipResult {
     let start = RESTART_SOL.with(|s| s.borrow_mut().take());
     let t_pre = std::time::Instant::now();
-    let presolved = if use_presolve { presolve_mip(p, params.verbose) } else { None };
+    let presolved = if use_presolve { presolve_mip(p, params.verbose, params.submip) } else { None };
     // 利用者向けのログ (サブ MIP の前処理は出さない)
     if !params.submip {
         let free = |q: &MipProblem| (0..q.n).filter(|&j| q.col_lo[j] < q.col_up[j]).count();
@@ -786,7 +786,7 @@ enum Presolved {
 }
 
 /// 整数を考慮した前処理をかけた問題を作る。前処理が何も減らさなければ `None` (元の問題で解く)。
-fn presolve_mip(p: &MipProblem, verbose: bool) -> Option<Presolved> {
+fn presolve_mip(p: &MipProblem, verbose: bool, submip: bool) -> Option<Presolved> {
     use crate::params::simplex::{PRESOLVE_ROUNDS, PROPAGATION_PASSES, ROWSINGLETON_COLSINGLETON_INNER_ROUNDS};
     let n = p.n;
     // 元の制約 (境界は丸め済みの MipProblem の値を使う)
@@ -867,7 +867,7 @@ fn presolve_mip(p: &MipProblem, verbose: bool) -> Option<Presolved> {
     let offset = if shift.is_finite() { p.offset + shift } else { p.offset };
     let mut prob = MipProblem::from_rows(pre.lb.clone(), pre.ub.clone(), pre.c.clone(), offset, p.sense_sign, p.is_int.clone(), rows, row_lo, row_up);
     if env_str!("ENOMOTO_MIP_NO_PROBING").is_none() {
-        match probe(&mut prob, verbose) {
+        match probe(&mut prob, verbose, submip) {
             Some(false) => return Some(Presolved::Infeasible),
             _ => {}
         }
@@ -886,7 +886,7 @@ fn presolve_mip(p: &MipProblem, verbose: bool) -> Option<Presolved> {
 /// (非零数の `ENOMOTO_T_MIP_PROBE_WORK` 倍、既定 20 倍) と時間 (`ENOMOTO_T_MIP_PROBE_TIME` 秒、既定 0.5 秒。固定・締め付けが
 /// 出ていれば `ENOMOTO_T_MIP_PROBE_TIME_FOUND` 秒、既定 0.5 秒。長い行の多い問題 (nw04・air03) は 1 回が重く何も得られない) で打ち切る。
 /// 締めた境界があれば `Some(true)`、何もなければ `None`。
-fn probe(prob: &mut MipProblem, verbose: bool) -> Option<bool> {
+fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
     use domain::Domain;
     let t0 = std::time::Instant::now();
     let c0 = cap_clock();
@@ -953,82 +953,120 @@ fn probe(prob: &mut MipProblem, verbose: bool) -> Option<bool> {
             }
         }
     };
-    for (cnt, &j) in cands.iter().enumerate() {
-        let cap = if fixed + tightened > 0 { time_cap_found } else { time_cap };
-        if cnt % 16 == 0 && (dom.debug_work() - work0 > work_cap || cap_clock() - c0 > cap) {
+    // `ENOMOTO_MIP_PROBE_ADAPTIVE` (サブ MIP 以外): HiGHS の `runProbing` と同じく、試す回数の予算を成果で伸ばす。
+    // 予算は候補の数から始め、1 回の試行で固定・締め付けた数だけ増やす。候補を一巡して
+    // 固定が候補の 1% 以上出ていれば、残った候補でもう一巡する (最大 `ENOMOTO_T_MIP_PROBE_PASSES` 巡、既定 10。
+    // HiGHS は前処理のループで probing を繰り返す)。手間 (`ENOMOTO_T_MIP_PROBE_ADAPT_WORK` 倍、既定 2000 倍) と時間
+    // (`ENOMOTO_T_MIP_PROBE_ADAPT_TIME` 秒、既定 3 秒) は安全網。30n20b8 は既定の上限 (非零数の 20 倍) では 7971 本中 160 本で
+    // 止まり 1 本も固定できないが、HiGHS は probing を 7 巡 (約 7 秒) 回して列を 8033 -> 4733 本にする
+    // サブ MIP でも使うのは `ENOMOTO_MIP_PROBE_ADAPTIVE_SUBMIP` のとき (時間は `ENOMOTO_T_MIP_PROBE_ADAPT_TIME_SUB` 秒、既定 0.5 秒。
+    // HiGHS はサブ MIP の前処理でも probing を回す)
+    let adaptive = env_str!("ENOMOTO_MIP_PROBE_ADAPTIVE").is_some() && (!submip || env_str!("ENOMOTO_MIP_PROBE_ADAPTIVE_SUBMIP").is_some());
+    let (work_cap, time_cap, time_cap_found) = if adaptive {
+        let t = if submip { tunable!("ENOMOTO_T_MIP_PROBE_ADAPT_TIME_SUB", 0.5, f64) } else { tunable!("ENOMOTO_T_MIP_PROBE_ADAPT_TIME", 3.0, f64) };
+        ((tunable!("ENOMOTO_T_MIP_PROBE_ADAPT_WORK", 2000.0, f64) * nnz as f64) as u64 + 100_000, t, t)
+    } else {
+        (work_cap, time_cap, time_cap_found)
+    };
+    // 予算の初期値は候補の数 (全部を一巡できる)。`ENOMOTO_T_MIP_PROBE_BASE` > 0 ならその回数。HiGHS の 1000 回は含意の多い列
+    // から試す順番と組み合わせたもので、行の多い列から試すこちらの順番では、30n20b8 の固定できる列 (3 行の短い列、3161 本)
+    // が候補の後ろ (4730 番目以降) に並び、1000 回では 1 本も固定できない (全部を試しても 0.96 秒で 3305 本固定)
+    let base = tunable!("ENOMOTO_T_MIP_PROBE_BASE", 0.0, f64);
+    let mut contingent = if adaptive { if base > 0.0 { base } else { cands.len() as f64 } } else { f64::INFINITY };
+    let max_pass = if adaptive { tunable!("ENOMOTO_T_MIP_PROBE_PASSES", 10usize, usize).max(1) } else { 1 };
+    let mut passes = 0usize;
+    'passes: for _pass in 0..max_pass {
+        passes += 1;
+        let fixed_pass0 = fixed;
+        for (cnt, &j) in cands.iter().enumerate() {
+            let cap = if fixed + tightened > 0 { time_cap_found } else { time_cap };
+            if cnt % 16 == 0 && (dom.debug_work() - work0 > work_cap || cap_clock() - c0 > cap) {
+                break 'passes;
+            }
+            if dom.lo[j] == dom.up[j] {
+                continue;
+            }
+            if probed as f64 >= contingent {
+                break 'passes;
+            }
+            let found0 = fixed + tightened;
+            probed += 1;
+            let pos = dom.stack_len();
+            // x_j = 0 (変わった境界だけ覚える: 全列の境界を写すと列の多い問題で重い)
+            dom.tighten_upper(prob, j, 0.0);
+            let ok0 = dom.propagate(prob);
+            let ch0: Vec<_> = if ok0 { dom.changes_since(pos).collect() } else { Vec::new() };
+            dom.backtrack_to(prob, pos);
+            // x_j = 1
+            dom.tighten_lower(prob, j, 1.0);
+            let ok1 = dom.propagate(prob);
+            let ch1: Vec<_> = if ok1 { dom.changes_since(pos).collect() } else { Vec::new() };
+            dom.backtrack_to(prob, pos);
+            match (ok0, ok1) {
+                (false, false) => return Some(false),
+                (false, true) | (true, false) => {
+                    let v = if ok1 { 1.0 } else { 0.0 };
+                    dom.tighten_lower(prob, j, v);
+                    dom.tighten_upper(prob, j, v);
+                    if !dom.propagate(prob) {
+                        return Some(false);
+                    }
+                    fixed += 1;
+                    if env_str!("ENOMOTO_MIP_DEBUG_PROBE").is_some() {
+                        eprintln!("MIP:   probing fixed column {j} at candidate {cnt} (pass {passes}, {} rows)", prob.cols[j].len());
+                    }
+                }
+                (true, true) => {
+                    if want_impl {
+                        add_edges(j, 0, &ch0, &mut edges);
+                        add_edges(j, 1, &ch1, &mut edges);
+                        // implied bound カット (`ENOMOTO_MIP_IMPLBD_CUTS`) を使うときだけ集める
+                        if env_str!("ENOMOTO_MIP_IMPLBD_CUTS").is_some() {
+                            add_implied(j, false, &ch0, &dom, &mut implied);
+                            add_implied(j, true, &ch1, &dom, &mut implied);
+                        }
+                    }
+                    // 両方の結果で変わった (列, 側) だけが締まりうる。値は両方の弱い方
+                    let mut first: std::collections::HashMap<(usize, bool), f64> = std::collections::HashMap::new();
+                    for &(k, upper, v) in &ch0 {
+                        first.insert((k, upper), v);
+                    }
+                    let mut last1: std::collections::HashMap<(usize, bool), f64> = std::collections::HashMap::new();
+                    for &(k, upper, v) in &ch1 {
+                        last1.insert((k, upper), v);
+                    }
+                    let mut any = false;
+                    for (&(k, upper), &v0) in &first {
+                        if k == j {
+                            continue;
+                        }
+                        let Some(&v1) = last1.get(&(k, upper)) else { continue };
+                        if upper {
+                            let u = v0.max(v1);
+                            if u < dom.up[k] - 1e-9 * (1.0 + u.abs()) {
+                                dom.tighten_upper(prob, k, u);
+                                any = true;
+                                tightened += 1;
+                            }
+                        } else {
+                            let l = v0.min(v1);
+                            if l > dom.lo[k] + 1e-9 * (1.0 + l.abs()) {
+                                dom.tighten_lower(prob, k, l);
+                                any = true;
+                                tightened += 1;
+                            }
+                        }
+                    }
+                    if any && !dom.propagate(prob) {
+                        return Some(false);
+                    }
+                }
+            }
+            contingent += (fixed + tightened - found0) as f64;
+        }
+        // もう一巡するのは、この巡で候補の 1% 以上を固定したときだけ
+        if ((fixed - fixed_pass0) as f64) < 0.01 * cands.len() as f64 {
             break;
-        }
-        if dom.lo[j] == dom.up[j] {
-            continue;
-        }
-        probed += 1;
-        let pos = dom.stack_len();
-        // x_j = 0 (変わった境界だけ覚える: 全列の境界を写すと列の多い問題で重い)
-        dom.tighten_upper(prob, j, 0.0);
-        let ok0 = dom.propagate(prob);
-        let ch0: Vec<_> = if ok0 { dom.changes_since(pos).collect() } else { Vec::new() };
-        dom.backtrack_to(prob, pos);
-        // x_j = 1
-        dom.tighten_lower(prob, j, 1.0);
-        let ok1 = dom.propagate(prob);
-        let ch1: Vec<_> = if ok1 { dom.changes_since(pos).collect() } else { Vec::new() };
-        dom.backtrack_to(prob, pos);
-        match (ok0, ok1) {
-            (false, false) => return Some(false),
-            (false, true) | (true, false) => {
-                let v = if ok1 { 1.0 } else { 0.0 };
-                dom.tighten_lower(prob, j, v);
-                dom.tighten_upper(prob, j, v);
-                if !dom.propagate(prob) {
-                    return Some(false);
-                }
-                fixed += 1;
-            }
-            (true, true) => {
-                if want_impl {
-                    add_edges(j, 0, &ch0, &mut edges);
-                    add_edges(j, 1, &ch1, &mut edges);
-                    // implied bound カット (`ENOMOTO_MIP_IMPLBD_CUTS`) を使うときだけ集める
-                    if env_str!("ENOMOTO_MIP_IMPLBD_CUTS").is_some() {
-                        add_implied(j, false, &ch0, &dom, &mut implied);
-                        add_implied(j, true, &ch1, &dom, &mut implied);
-                    }
-                }
-                // 両方の結果で変わった (列, 側) だけが締まりうる。値は両方の弱い方
-                let mut first: std::collections::HashMap<(usize, bool), f64> = std::collections::HashMap::new();
-                for &(k, upper, v) in &ch0 {
-                    first.insert((k, upper), v);
-                }
-                let mut last1: std::collections::HashMap<(usize, bool), f64> = std::collections::HashMap::new();
-                for &(k, upper, v) in &ch1 {
-                    last1.insert((k, upper), v);
-                }
-                let mut any = false;
-                for (&(k, upper), &v0) in &first {
-                    if k == j {
-                        continue;
-                    }
-                    let Some(&v1) = last1.get(&(k, upper)) else { continue };
-                    if upper {
-                        let u = v0.max(v1);
-                        if u < dom.up[k] - 1e-9 * (1.0 + u.abs()) {
-                            dom.tighten_upper(prob, k, u);
-                            any = true;
-                            tightened += 1;
-                        }
-                    } else {
-                        let l = v0.min(v1);
-                        if l > dom.lo[k] + 1e-9 * (1.0 + l.abs()) {
-                            dom.tighten_lower(prob, k, l);
-                            any = true;
-                            tightened += 1;
-                        }
-                    }
-                }
-                if any && !dom.propagate(prob) {
-                    return Some(false);
-                }
-            }
         }
     }
     // 固定した列を含む組は捨てる (固定後は意味がない)
@@ -1036,7 +1074,7 @@ fn probe(prob: &mut MipProblem, verbose: bool) -> Option<bool> {
     edges.sort_unstable();
     edges.dedup();
     if verbose {
-        eprintln!("MIP: probing: {probed} of {} binaries probed, {fixed} fixed, {tightened} bounds tightened, {} implications ({:.2}s)", cands.len(), edges.len(), t0.elapsed().as_secs_f64());
+        eprintln!("MIP: probing: {probed} of {} binaries probed ({passes} passes), {fixed} fixed, {tightened} bounds tightened, {} implications ({:.2}s)", cands.len(), edges.len(), t0.elapsed().as_secs_f64());
     }
     prob.conflict_edges = edges;
     // 固定した列を含む含意は捨てる
@@ -1376,7 +1414,7 @@ mod tests {
         ];
         let rows = vec![vec![(0, 1.0), (1, 1.0), (2, 1.0)], vec![(1, 1.0), (2, 1.0)]];
         let p = MipProblem::from_rows(vec![0.0, 0.0, 0.0], vec![f64::INFINITY, 10.0, 10.0], vec![1000.0, 1.0, 2.0], 0.0, 1.0, vec![false, true, true], rows, vec![1000.0, f64::NEG_INFINITY], vec![1000.0, 15.0]);
-        let Some(Presolved::Reduced { prob, postsolve, scaling }) = presolve_mip(&p, false) else { panic!("expected a reduced problem") };
+        let Some(Presolved::Reduced { prob, postsolve, scaling }) = presolve_mip(&p, false, false) else { panic!("expected a reduced problem") };
         for (x1, x2) in [(3.0, 4.0), (10.0, 5.0), (0.0, 0.0)] {
             let mut xr: Vec<f64> = (0..prob.n).map(|j| prob.col_lo[j].max(0.0).min(prob.col_up[j])).collect();
             for (j, v) in [(1, x1), (2, x2)] {
