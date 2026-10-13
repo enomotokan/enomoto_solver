@@ -1287,7 +1287,9 @@ fn run_phase2_incremental(std: &StdForm, t: &mut Tableau, lu: &mut sparse_lu::Ft
     // 順序で変わり、まれにその基底に当たる)。リフレッシュのたびに、(a) 目的値が有限でない・基底の変数の絶対値の最大が
     // 最初のリフレッシュの値と有限な上下限の絶対値の最大 (1 以上) の `ENOMOTO_T_PRIMAL_BLOWUP_RATIO` (1e6) 倍を超えた、(b) 修復が
     // `ENOMOTO_T_PRIMAL_REPAIR_LIMIT` (8) 回を超えた、(c) 修復の後に目的値が `ENOMOTO_T_PRIMAL_FROZEN_ITERS` (5000) 反復
-    // 動かない、のどれかで打ち切り、呼び出し側に同じ基底からの安全モードでの解き直しを頼む
+    // 動かない、(d) 目的値がそれまでの最良の値から相対 1e-4 を超えて上がったことが `ENOMOTO_T_PRIMAL_RISE_LIMIT` (3) 回
+    // あった、(e) 最良の目的値が `ENOMOTO_T_PRIMAL_NO_IMPROVE_ITERS` (20000) 反復改善しない、のどれかで打ち切り、
+    // 呼び出し側に同じ基底からの安全モードでの解き直しを頼む
     // ([`slope_intercept_dual::mark_restart_bailout`])。
     let guard = tunable!("ENOMOTO_T_PRIMAL_BLOWUP_GUARD", 1u8, u8) != 0;
     let blowup_ratio = tunable!("ENOMOTO_T_PRIMAL_BLOWUP_RATIO", 1e6f64, f64);
@@ -1296,6 +1298,10 @@ fn run_phase2_incremental(std: &StdForm, t: &mut Tableau, lu: &mut sparse_lu::Ft
     let mut repairs = 0usize;
     let mut x_scale: Option<f64> = None; // 最初のリフレッシュの max|x_B| と有限な上下限の絶対値の最大
     let mut frozen: (f64, usize) = (f64::NAN, 0); // (直近の目的値, その値になった反復)
+    let rise_limit = tunable!("ENOMOTO_T_PRIMAL_RISE_LIMIT", 3usize, usize);
+    let no_improve_iters = tunable!("ENOMOTO_T_PRIMAL_NO_IMPROVE_ITERS", 20000usize, usize);
+    let mut best: (f64, usize) = (f64::INFINITY, 0); // (これまでの最良の目的値, それを更新した反復)
+    let mut rises = 0usize; // 目的値が最良の値から相対 1e-4 を超えて上がった回数
     // 計測用 (`ENOMOTO_DEBUG_PROGRESS=1`): 1000 反復ごとに経過時間・目的値・双対実行不能の列数を出す。
     let progress = env_str!("ENOMOTO_DEBUG_PROGRESS").is_some();
     let progress_t0 = std::time::Instant::now();
@@ -1340,10 +1346,18 @@ fn run_phase2_incremental(std: &StdForm, t: &mut Tableau, lu: &mut sparse_lu::Ft
                     frozen = (obj, _iter);
                 }
                 let stuck = repairs > 0 && _iter - frozen.1 >= frozen_iters;
-                if blown || repairs > repair_limit || stuck {
+                // 第 2 段階の主単体法では目的値は増えない。大きく上がったなら主実行可能性が崩れて基底の組を巡回している
+                // (fome13: 1.19e7 から 2.89e7 に上がり、2.89e7 と 6.84e7 を 19 万反復往復した)。
+                if obj < best.0 - 1e-12 * (1.0 + best.0.abs()) {
+                    best = (obj, _iter);
+                } else if obj > best.0 + 1e-4 * best.0.abs().max(1.0) {
+                    rises += 1;
+                }
+                let no_improve = _iter - best.1 >= no_improve_iters;
+                if blown || repairs > repair_limit || stuck || rises >= rise_limit || no_improve {
                     if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
-                        eprintln!("DEBUG_EXT: primal cleanup broke down at iter={_iter} (obj {obj:.3e}, max|x_B| {xmax:.3e} vs scale {x0:.3e}, repairs {repairs}, obj unchanged for {} iters) -> restart",
-                            _iter - frozen.1);
+                        eprintln!("DEBUG_EXT: primal cleanup broke down at iter={_iter} (obj {obj:.3e}, best {:.3e} at iter {}, rises {rises}, max|x_B| {xmax:.3e} vs scale {x0:.3e}, repairs {repairs}, obj unchanged for {} iters) -> restart",
+                            best.0, best.1, _iter - frozen.1);
                     }
                     slope_intercept_dual::mark_restart_bailout();
                     return None;
