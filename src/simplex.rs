@@ -1348,7 +1348,7 @@ fn run_phase2_incremental(std: &StdForm, t: &mut Tableau, lu: &mut sparse_lu::Ft
                 let stuck = repairs > 0 && _iter - frozen.1 >= frozen_iters;
                 // 第 2 段階の主単体法では目的値は増えない。大きく上がったなら主実行可能性が崩れて基底の組を巡回している
                 // (fome13: 1.19e7 から 2.89e7 に上がり、2.89e7 と 6.84e7 を 19 万反復往復した)。
-                if obj < best.0 - 1e-12 * (1.0 + best.0.abs()) {
+                if best.0.is_infinite() || obj < best.0 - 1e-12 * (1.0 + best.0.abs()) {
                     best = (obj, _iter);
                 } else if obj > best.0 + 1e-4 * best.0.abs().max(1.0) {
                     rises += 1;
