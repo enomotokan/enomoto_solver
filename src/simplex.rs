@@ -850,7 +850,7 @@ fn try_refactorize(std: &StdForm, t: &Tableau, prev: Option<&sparse_lu::FtLu>) -
 /// 今の値に近い方の境界に置く。呼び出し側は `x_B` を作り直すこと。主実行不能になりうるが、双対単体法の仕上げの引き継ぎは
 /// 戻った後に `x_B` を確かめて双対単体法で直す。従来は `None` で、仕上げごと結果なしになっていた (irish-electricity:
 /// 仕上げの主単体法の再分解が特異 → 二段解法を一から 190 秒)。
-fn try_refactorize_repair(std: &StdForm, t: &mut Tableau, prev: Option<&sparse_lu::FtLu>) -> Option<sparse_lu::FtLu> {
+fn try_refactorize_repair(std: &StdForm, t: &mut Tableau, prev: Option<&sparse_lu::FtLu>, repairs: &mut usize) -> Option<sparse_lu::FtLu> {
     if let Some(lu) = try_refactorize(std, t, prev) {
         return Some(lu);
     }
@@ -858,6 +858,7 @@ fn try_refactorize_repair(std: &StdForm, t: &mut Tableau, prev: Option<&sparse_l
         return None;
     }
     let (lu, replaced) = basis_kernel::factorize_basis_repair(std, &mut t.basis, &mut t.basis_pos, None)?;
+    *repairs += 1;
     for &(pos, old) in &replaced {
         let (l, u, v) = (std.lb[old], std.ub[old], t.x[old]);
         let (st, val) = if l.is_finite() && (!u.is_finite() || v - l <= u - v) {
@@ -1280,6 +1281,21 @@ fn run_phase2_incremental(std: &StdForm, t: &mut Tableau, lu: &mut sparse_lu::Ft
 
     let mut need_fresh = true; // 次の反復の頭で x_B と d を作り直すか
     let max_iters = max_iters_for(m, n);
+    // 破綻の検出 (`ENOMOTO_T_PRIMAL_BLOWUP_GUARD`、既定 1。0 で従来どおり): 特異な基底の修復 ([`try_refactorize_repair`]) を
+    // 繰り返すうちに基底の変数の値が発散し、目的値が 1e17〜1e20 に跳んだまま動かずに反復の上限まで回ることがある
+    // (4 スレッドの fome13 で数十回に 1 回、1000 反復に約 12 秒で 900 秒の打ち切り。内点法の終わりの点が並列の足し算の
+    // 順序で変わり、まれにその基底に当たる)。リフレッシュのたびに、(a) 目的値が有限でない・基底の変数の絶対値の最大が
+    // 最初のリフレッシュの値と有限な上下限の絶対値の最大 (1 以上) の `ENOMOTO_T_PRIMAL_BLOWUP_RATIO` (1e6) 倍を超えた、(b) 修復が
+    // `ENOMOTO_T_PRIMAL_REPAIR_LIMIT` (8) 回を超えた、(c) 修復の後に目的値が `ENOMOTO_T_PRIMAL_FROZEN_ITERS` (5000) 反復
+    // 動かない、のどれかで打ち切り、呼び出し側に同じ基底からの安全モードでの解き直しを頼む
+    // ([`slope_intercept_dual::mark_restart_bailout`])。
+    let guard = tunable!("ENOMOTO_T_PRIMAL_BLOWUP_GUARD", 1u8, u8) != 0;
+    let blowup_ratio = tunable!("ENOMOTO_T_PRIMAL_BLOWUP_RATIO", 1e6f64, f64);
+    let repair_limit = tunable!("ENOMOTO_T_PRIMAL_REPAIR_LIMIT", 8usize, usize);
+    let frozen_iters = tunable!("ENOMOTO_T_PRIMAL_FROZEN_ITERS", 5000usize, usize);
+    let mut repairs = 0usize;
+    let mut x_scale: Option<f64> = None; // 最初のリフレッシュの max|x_B| と有限な上下限の絶対値の最大
+    let mut frozen: (f64, usize) = (f64::NAN, 0); // (直近の目的値, その値になった反復)
     // 計測用 (`ENOMOTO_DEBUG_PROGRESS=1`): 1000 反復ごとに経過時間・目的値・双対実行不能の列数を出す。
     let progress = env_str!("ENOMOTO_DEBUG_PROGRESS").is_some();
     let progress_t0 = std::time::Instant::now();
@@ -1309,8 +1325,29 @@ fn run_phase2_incremental(std: &StdForm, t: &mut Tableau, lu: &mut sparse_lu::Ft
             need_fresh = false;
             let rhs = t.recompute_basics(lu);
             if kernel.fill_too_big(lu) || t.basis_residual_norm(&rhs) > FT_RESIDUAL_TOL {
-                *lu = try_refactorize_repair(std, t, Some(&*lu))?;
+                *lu = try_refactorize_repair(std, t, Some(&*lu), &mut repairs)?;
                 t.recompute_basics(lu);
+            }
+            if guard {
+                let obj: f64 = (0..n).map(|j| std.c[j] * t.x[j]).sum();
+                let xmax = t.basis.iter().map(|&b| t.x[b].abs()).fold(0.0f64, f64::max);
+                let x0 = *x_scale.get_or_insert_with(|| {
+                    let bmax = (0..n).flat_map(|j| [std.lb[j], std.ub[j]]).filter(|v| v.is_finite()).fold(0.0f64, |a, v| a.max(v.abs()));
+                    xmax.max(bmax).max(1.0)
+                });
+                let blown = !obj.is_finite() || !(xmax <= blowup_ratio * x0);
+                if (obj - frozen.0).abs() > 1e-12 * (1.0 + obj.abs()) || frozen.0.is_nan() {
+                    frozen = (obj, _iter);
+                }
+                let stuck = repairs > 0 && _iter - frozen.1 >= frozen_iters;
+                if blown || repairs > repair_limit || stuck {
+                    if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
+                        eprintln!("DEBUG_EXT: primal cleanup broke down at iter={_iter} (obj {obj:.3e}, max|x_B| {xmax:.3e} vs scale {x0:.3e}, repairs {repairs}, obj unchanged for {} iters) -> restart",
+                            _iter - frozen.1);
+                    }
+                    slope_intercept_dual::mark_restart_bailout();
+                    return None;
+                }
             }
             for i in 0..m {
                 cost_b[i] = std.c[t.basis[i]];
@@ -1532,7 +1569,7 @@ fn run_phase2_incremental(std: &StdForm, t: &mut Tableau, lu: &mut sparse_lu::Ft
 
         // FT 更新 (FTRAN/BTRAN の途中値を使う) と再分解トリガ (3)(4)(5)。残差検査 (1) はリフレッシュ時点でのみ行う。
         if kernel.update_and_check(lu, r).is_due() {
-            *lu = try_refactorize_repair(std, t, Some(&*lu))?;
+            *lu = try_refactorize_repair(std, t, Some(&*lu), &mut repairs)?;
             need_fresh = true;
         }
     }

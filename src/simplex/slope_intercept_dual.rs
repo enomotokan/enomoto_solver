@@ -1685,6 +1685,12 @@ fn shift_degenerate_costs(std: &StdForm, nb_status: &[Option<NbStatus>], base: f
 /// 最初の求解 (`!safe_pivot`) で `tol` を超えたら解き直しを要求して真を返す。
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
+/// 仕上げの主単体法 ([`super::run_phase2_incremental`]) が数値的に破綻して打ち切ったことを記録する
+/// ([`solve_slope_intercept_dual`] が同じ基底から安全モードで解き直す)。
+pub(crate) fn mark_restart_bailout() {
+    RESTART_BAILOUT.with(|f| f.set(true));
+}
+
 fn xb_consistency_bailout(rho: &[f64], rows: Option<&[u32]>, rhs: &[f64], x_r: f64, tol: f64, safe_pivot: bool, debug: bool, iter: usize, r: usize, diag: &mut (f64, usize)) -> bool {
     let rel = xb_row_mismatch(rho, rows, rhs, x_r);
     if rel > diag.0 {
