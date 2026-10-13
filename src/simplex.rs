@@ -1769,7 +1769,8 @@ fn solve_presolved(std: StdForm, opts: &crate::types::LpOptions) -> SimplexResul
     let mut results: Vec<Option<SimplexResult>> = (0..subs.len()).map(|_| None).collect();
     // 同時実行しない組 (並列に解く)。
     let plain: Vec<(usize, &StdForm)> = subs.iter().enumerate().filter(|&(k, _)| !races[k]).collect();
-    let use_parallel = plain.iter().any(|&(k, _)| groups[k].len() >= PARALLEL_COMPONENT_MIN_VARS);
+    // 試験用 `ENOMOTO_T_SPLIT_SEQ=1`: 成分を並列に解かない (成分の中の並列はそのまま。成分どうしの干渉の切り分け用)。
+    let use_parallel = plain.iter().any(|&(k, _)| groups[k].len() >= PARALLEL_COMPONENT_MIN_VARS) && tunable!("ENOMOTO_T_SPLIT_SEQ", 0u8, u8) == 0;
     let plain_results: Vec<(usize, SimplexResult)> = if use_parallel {
         use rayon::prelude::*;
         let token = crate::cancel::current();
@@ -1831,7 +1832,7 @@ fn solve_block(std: StdForm, opts: &crate::types::LpOptions) -> SimplexResult {
 /// 1 つの [`SimplexResult`] に組み立てる。どれかの組が [`PARALLEL_COMPONENT_MIN_VARS`] 以上なら rayon で並列に解く。
 fn solve_split(std: &StdForm, groups: &[Vec<usize>], solve_one: impl Fn(&StdForm) -> SimplexResult + Sync) -> SimplexResult {
     let sub_std_forms = split_std_form(std, groups);
-    let use_parallel = groups.iter().any(|c| c.len() >= PARALLEL_COMPONENT_MIN_VARS); // rayon で並列に解くか
+    let use_parallel = groups.iter().any(|c| c.len() >= PARALLEL_COMPONENT_MIN_VARS) && tunable!("ENOMOTO_T_SPLIT_SEQ", 0u8, u8) == 0; // rayon で並列に解くか (試験用 `ENOMOTO_T_SPLIT_SEQ=1` で並列にしない)
     let results: Vec<SimplexResult> = if use_parallel {
         use rayon::prelude::*;
         // 打ち切りのトークン (同時実行時) を各成分のタスクに引き継ぐ (`crate::cancel`)。
