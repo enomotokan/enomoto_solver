@@ -1173,6 +1173,31 @@ pub(crate) fn take_last_d() -> Option<Vec<f64>> {
     LAST_D.with(|l| l.borrow_mut().take())
 }
 
+/// 残っていた LU `lu` が基底 `basis` (位置 `k` の列 `basis[k]`) のものかを検算する: 基底の列の和を右辺にして解き、
+/// 解がすべて 1 (相対 1e-6 以内) か。warm start の LU はスレッドローカル ([`WARM_LU`]) で、次元しか見ていなかった。
+/// 成分を並列に解くと、ある成分の保存から取り出しまでの間に同じスレッドが別の成分の求解を丸ごと実行 (rayon の仕事の
+/// 盗み) し、同じ次元の別の問題の LU を取り違えていた (fome13 は同じ形の 8 成分。4 スレッドで数十回に 1 回、仕上げの
+/// 単体法が特異な分解・発散・循環で止まった)。分枝限定法の並行の LP も同じ経路を通る。
+fn warm_lu_matches(std: &StdForm, basis: &[usize], lu: &sparse_lu::FtLu) -> bool {
+    let m = std.n_rows;
+    if lu.dim() != m || basis.len() != m {
+        return false;
+    }
+    let mut rhs = vec![0.0f64; m];
+    for &j in basis {
+        if j >= std.n_total {
+            return false;
+        }
+        for &(i, v) in std.cols.col(j) {
+            rhs[i] += v;
+        }
+    }
+    let mut x = vec![0.0f64; m];
+    let mut scratch = vec![0.0f64; m];
+    lu.solve_into(&rhs, &mut scratch, &mut x);
+    x.iter().all(|&v| (v - 1.0).abs() <= 1e-6)
+}
+
 /// 次の warm start に使う LU を渡す (基底と同じ並びのもの)。
 pub(crate) fn set_warm_lu(lu: Option<sparse_lu::FtLu>) {
     WARM_LU.with(|w| *w.borrow_mut() = lu.map(Box::new));
@@ -1245,7 +1270,7 @@ fn warm_start_basis(
         pos[j] = Some(k);
     }
     let lu = match WARM_LU.with(|w| w.borrow_mut().take()) {
-        Some(l) if l.dim() == m => *l,
+        Some(l) if warm_lu_matches(std, wb, &l) => *l,
         _ => {
             let Some(l) = refactorize(std, &pos, None) else {
                 return false;
@@ -3251,6 +3276,18 @@ impl ColCache {
 /// 1 回だけ解き直す(`STUCK_ROW_MIN_PIVOT` 参照)。通常の求解が成功する問題では
 /// 経路は変わらず、数値的に破綻した求解だけを救済する。
 pub fn solve_slope_intercept_dual(std: &StdForm, opts: &crate::types::LpOptions) -> Option<SimplexResult> {
+    // 解き直しの印と費用摂動の設定はスレッドローカル。成分を並列に解くと、外側の求解が印を立ててから読むまでの間に
+    // 同じスレッドが別の成分の求解を丸ごと実行 (rayon の仕事の盗み) し、その入口で印が消える。入口の値を出口で戻す。
+    let saved = (SINGULAR_BAILOUT.with(|f| f.get()), RESTART_BAILOUT.with(|f| f.get()), super::full_cost_perturbation());
+    let res = solve_slope_intercept_dual_retrying(std, opts);
+    SINGULAR_BAILOUT.with(|f| f.set(saved.0));
+    RESTART_BAILOUT.with(|f| f.set(saved.1));
+    super::set_full_cost_perturbation(saved.2);
+    res
+}
+
+/// [`solve_slope_intercept_dual`] の本体 (破綻したときの解き直しを含む)。
+fn solve_slope_intercept_dual_retrying(std: &StdForm, opts: &crate::types::LpOptions) -> Option<SimplexResult> {
     SINGULAR_BAILOUT.with(|f| f.set(false));
     RESTART_BAILOUT.with(|f| f.set(false));
     // 与えられた基底から始める求解 ([`solve_slope_intercept_dual_from_basis`]) は、1 回目が基底を取り出して消すので、
@@ -3594,7 +3631,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     // 現基底の LU 分解(Forrest-Tomlin 更新付き)。
     xprof("setup1");
     let mut lu = match WARM_LU.with(|w| w.borrow_mut().take()) {
-        Some(l) if warm_started && l.dim() == m => *l,
+        Some(l) if warm_started && warm_lu_matches(std, &basis, &l) => *l,
         _ => refactorize(std, &basis_pos, None)?,
     };
     xprof("setup_lu");

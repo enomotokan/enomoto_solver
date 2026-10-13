@@ -777,6 +777,11 @@ thread_local! {
     static FULL_COST_PERTURBATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+/// [`FULL_COST_PERTURBATION`] の今の値。
+pub(crate) fn full_cost_perturbation() -> bool {
+    FULL_COST_PERTURBATION.with(|f| f.get())
+}
+
 /// [`FULL_COST_PERTURBATION`] を設定する。
 pub(crate) fn set_full_cost_perturbation(on: bool) {
     FULL_COST_PERTURBATION.with(|f| f.set(on));
