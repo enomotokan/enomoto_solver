@@ -59,6 +59,11 @@ pub struct Multifrontal {
     chunk: usize,
     /// 前線の密な演算を並列にする演算量 (`nc f^2`) の下限 (`ENOMOTO_T_MF_PAR_FLOPS`)。
     par_flops: f64,
+    /// 並列に計算する大きな前線の対角ブロックの Cholesky を、この幅のかたまりごとに行う ([`chol_blocked`]、0 なら faer
+    /// のまま。試験用 `ENOMOTO_T_MF_BCHOL=1` と幅 `ENOMOTO_T_MF_BCHOL_BS`)。
+    bchol_bs: usize,
+    /// [`chol_blocked`] を使う対角ブロックの大きさの下限 (`ENOMOTO_T_MF_BCHOL_MIN`)。
+    bchol_min: usize,
 }
 
 static PROF: [std::sync::atomic::AtomicU64; 4] = [const { std::sync::atomic::AtomicU64::new(0) }; 4];
@@ -269,6 +274,32 @@ impl Front {
     }
 }
 
+/// 対角ブロック `a` (`n x n`、下三角を使う) の Cholesky 分解を、幅 `bs` の列のかたまりごとに左から順に行う
+/// (かたまりの対角の `bs x bs` は逐次に分解し、その下の三角行列の解法と右下の残りの更新は `par` の行列演算)。
+/// faer の Cholesky は並列にしても伸びない (4 コアで `n = 2048` が 49 GFLOPS、`n = 512` は逐次より遅い。行列積は
+/// 100 GFLOPS を超える) ので、大きな前線で使う。成功なら置き換えたピボットの数。
+fn chol_blocked(mut a: faer::MatMut<'_, f64>, reg: LltRegularization<f64>, bs: usize, par: Parallelism) -> Result<usize, ()> {
+    let n = a.nrows();
+    let bs = bs.max(1);
+    let mut buf = GlobalPodBuffer::new(cholesky_in_place_req::<f64>(bs.min(n), Parallelism::None, LltParams::default()).unwrap());
+    let mut dynreg = 0;
+    let mut k0 = 0;
+    while k0 < n {
+        let kb = bs.min(n - k0);
+        let (mut a11, _, mut a21, a22) = a.rb_mut().submatrix_mut(k0, k0, n - k0, n - k0).split_at_mut(kb, kb);
+        match cholesky_in_place(a11.rb_mut(), reg, Parallelism::None, PodStack::new(&mut buf), LltParams::default()) {
+            Ok(info) => dynreg += info.dynamic_regularization_count,
+            Err(_) => return Err(()),
+        }
+        if k0 + kb < n {
+            faer::linalg::triangular_solve::solve_lower_triangular_in_place(a11.rb(), a21.rb_mut().transpose_mut(), par);
+            faer::linalg::matmul::triangular::matmul(a22, BlockStructure::TriangularLower, a21.rb(), BlockStructure::Rectangular, a21.rb().transpose(), BlockStructure::Rectangular, Some(1.0), -1.0, par);
+        }
+        k0 += kb;
+    }
+    Ok(dynreg)
+}
+
 /// 行の写像 `map` (昇順) が連続な範囲の数。
 fn map_runs(map: &[u32]) -> usize {
     1 + map.windows(2).filter(|w| w[1] != w[0] + 1).count()
@@ -445,6 +476,8 @@ impl Multifrontal {
             direct_min_r: tunable!("ENOMOTO_T_MF_DIRECT_MIN_R", 0usize, usize),
             chunk: tunable!("ENOMOTO_T_MF_CHUNK", 128usize, usize).max(1),
             par_flops: tunable!("ENOMOTO_T_MF_PAR_FLOPS", 5e7f64, f64),
+            bchol_bs: if tunable!("ENOMOTO_T_MF_BCHOL", 0u8, u8) != 0 { tunable!("ENOMOTO_T_MF_BCHOL_BS", 256usize, usize).max(1) } else { 0 },
+            bchol_min: tunable!("ENOMOTO_T_MF_BCHOL_MIN", 512usize, usize),
         })
     }
 
@@ -487,6 +520,13 @@ impl Multifrontal {
         self.chunk = chunk;
         self.par_flops = par_flops;
         self.seq_flops = seq_flops;
+    }
+
+    /// 試験用: 大きな前線の対角ブロックの Cholesky をかたまりごとに行う幅 (0 なら faer のまま) と、使う大きさの下限。
+    #[cfg(test)]
+    pub fn set_bchol(&mut self, bs: usize, min: usize) {
+        self.bchol_bs = bs;
+        self.bchol_min = min;
     }
 
     /// 試験用: 下の行の数の最大・行の写像が飛び飛びの子の数・葉の数。
@@ -743,11 +783,16 @@ impl Multifrontal {
                 tp3 = std::time::Instant::now();
             }
         } else {
-            let mut buf = GlobalPodBuffer::new(cholesky_in_place_req::<f64>(nc, par, LltParams::default()).unwrap());
-            match cholesky_in_place(l11.rb_mut(), reg, par, PodStack::new(&mut buf), LltParams::default()) {
-                Ok(info) => {
-                    if info.dynamic_regularization_count > 0 {
-                        DYNREG.fetch_add(info.dynamic_regularization_count, std::sync::atomic::Ordering::Relaxed);
+            let res = if self.bchol_bs > 0 && big && nc >= self.bchol_min {
+                chol_blocked(l11.rb_mut(), reg, self.bchol_bs, par)
+            } else {
+                let mut buf = GlobalPodBuffer::new(cholesky_in_place_req::<f64>(nc, par, LltParams::default()).unwrap());
+                cholesky_in_place(l11.rb_mut(), reg, par, PodStack::new(&mut buf), LltParams::default()).map(|info| info.dynamic_regularization_count).map_err(|_| ())
+            };
+            match res {
+                Ok(cnt) => {
+                    if cnt > 0 {
+                        DYNREG.fetch_add(cnt, std::sync::atomic::Ordering::Relaxed);
                     }
                 }
                 Err(_) => ok.store(false, std::sync::atomic::Ordering::Relaxed),
@@ -1205,7 +1250,7 @@ mod kernel_bench {
                 println!("KBENCH {pn} syrk r={r} nc={nc} t={:.3e}s GFLOPS={:.1}", t, (r * r * nc) as f64 / t * 1e-9);
             }
             // Cholesky (nc x nc) と三角行列の解法 (r x nc を L11ᵀ で割る)。
-            for (nc, r) in [(16usize, 64usize), (32, 128), (128, 512), (512, 2048), (2048, 2048)] {
+            for (nc, r) in [(16usize, 64usize), (32, 128), (128, 512), (512, 2048), (1024, 1024), (2048, 2048), (4096, 256)] {
                 let base = Mat::<f64>::from_fn(nc, nc, |i, j| if i == j { nc as f64 + 1.0 } else { 1.0 / (1.0 + (i + j) as f64) });
                 let mut l = base.clone();
                 let mut buf = GlobalPodBuffer::new(cholesky_in_place_req::<f64>(nc, par, LltParams::default()).unwrap());
@@ -1222,6 +1267,16 @@ mod kernel_bench {
                 });
                 println!("KBENCH {pn} chol nc={nc} t={tc:.3e}s GFLOPS={:.1} | trsm nc={nc} r={r} t={tt:.3e}s GFLOPS={:.1}",
                     (nc * nc * nc) as f64 / 3.0 / tc * 1e-9, (nc * nc * r) as f64 / tt * 1e-9);
+                for bs in [64usize, 128, 256] {
+                    if nc < 2 * bs {
+                        continue;
+                    }
+                    let tb = best(reps, || {
+                        l.copy_from(&base);
+                        super::chol_blocked(l.as_mut(), LltRegularization::default(), bs, par).unwrap();
+                    });
+                    println!("KBENCH {pn} chol_blocked nc={nc} bs={bs} t={tb:.3e}s GFLOPS={:.1}", (nc * nc * nc) as f64 / 3.0 / tb * 1e-9);
+                }
             }
         }
     }

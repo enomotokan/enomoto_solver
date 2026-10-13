@@ -1538,6 +1538,17 @@ mod mf_variants {
             }
         }
         assert_eq!(n_cases, 3 * 4 * 2 * 3 * 2);
+        // 大きな前線の対角ブロックをかたまりごとに Cholesky する版 (LLᵀ のときだけ使う)。
+        for (bs, min) in [(7usize, 0usize), (64, 0), (16, 100)] {
+            for pack_bw in [0usize, 64] {
+                let mut mf = make();
+                mf.set_variant(pack_bw, false, 0, 128, 0.0, 0.0);
+                mf.set_bchol(bs, min);
+                let x = solve(&mut mf, false);
+                let d = x.iter().zip(&x0).map(|(a, b)| (a - b).abs()).fold(0.0f64, f64::max);
+                assert!(d <= 1e-9 * xmax, "bchol bs={bs} min={min} pack_bw={pack_bw}: diff {d:e}");
+            }
+        }
     }
 
     #[test]
