@@ -327,3 +327,13 @@ gdb のサンプリング (行番号つきのビルド、gen-ip054 threads=4) �
 
 試験用に残したもの (既定では無効): `ENOMOTO_MIP_TREE_RACING` (+ `_RACE_SECS`)、`ENOMOTO_T_MIP_TREE_BALANCE_KEEP`、
 `ENOMOTO_T_MIP_TREE_SHARE_LEN_FRAC`、`ENOMOTO_T_MIP_TREE_SHARE_LITS_LEN`、`ENOMOTO_MIP_PROOF_SHORTEN`。
+
+### 最終確認 (`be6af15`、成果連動の probing (`77aced5`) を含む。同じビルドで各 2 回、`eval/fv_*.jsonl`)
+
+| | SGM | 解けた | ギャップ |
+|---|---:|---:|---:|
+| 切り替え前の既定 (無効にする環境変数を全て設定) | 21.93 秒 | 22.5 | 13.29% |
+| 新しい既定 | 21.16 秒 (−3.5%) | 24 | 12.36% (−7.0%) |
+| 参考: セッションの最初の threads=4 (`8e95f64`、1 回) | 22.93 秒 | 22 | 15.83% |
+
+最初の threads=4 からは SGM −7.7%、ギャップ −21.9% (このセッションの改修のほか、同じ期間の他の変更を含む)。
