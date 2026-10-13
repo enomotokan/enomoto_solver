@@ -317,6 +317,9 @@ pub(super) struct Solver<'a, L: MipLp> {
     workers: Vec<std::thread::JoinHandle<MipResult>>,
     worker_totals: (u64, u64),
     pool_stats: [u64; 3],
+    /// 診断用 (`ENOMOTO_PROF_TREE_PAR`): 木の探索の内訳と、今のノードの種類 ([`TreeProf::kind_n`])。
+    tprof: TreeProf,
+    tp_kind: usize,
     /// 証明から作った衝突の数。
     proof_conflicts: u64,
     /// 完全オービトープ (orbitopal fixing に使う。サブ MIP では空)。
@@ -506,6 +509,54 @@ pub(crate) struct WorkPool {
     next_tid: std::sync::atomic::AtomicU32,
     /// スレッドの数 (主を含む。木の中のヒューリスティクスを回すスレッドを決めるのに使う)。
     threads: usize,
+    /// 診断用: 木の探索を始めた時刻と、終わったスレッドの [`TreeProf`]。
+    t0: Instant,
+    prof: std::sync::Mutex<Vec<TreeProf>>,
+}
+
+/// 診断用: 木の探索のスレッドごとの時間・ノードの内訳 (`ENOMOTO_PROF_TREE_PAR` で終わりに表示する)。
+#[derive(Default, Clone)]
+pub(crate) struct TreeProf {
+    tid: u32,
+    /// 木の探索を始めた時刻 ([`WorkPool::t0`]) から、最初に共有の待ち行列からノードを取りに来るまで (従の準備)。
+    ready_s: f64,
+    /// 木の探索を始めた時刻から、このスレッドが終わるまで。
+    end_s: f64,
+    /// 共有の待ち行列でノードを待った時間と、待った回数 (すぐ取れなかった回数)。
+    idle_s: f64,
+    waits: u64,
+    /// 最後の待ち (探索の終わり・止める合図までノードが来なかった) の時間。
+    tail_s: f64,
+    /// スレッドの間の同期 (境界・学習・擬似費用・ノードを渡す) の時間。
+    sync_s: f64,
+    /// 処理したノードの数 (取り出した数)。
+    nodes: u64,
+    /// ノードの最初の LP を種類ごとに: 0 = 潜り・兄弟 (直前の LP の続き), 1 = 自分の待ち行列から, 2 = 共有の待ち行列から。
+    kind_n: [u64; 3],
+    kind_it: [u64; 3],
+    kind_s: [f64; 3],
+    /// 取り出したノードの下界 (最適値が分かってから刈れたかを数えるため)。
+    lbs: Vec<f64>,
+    /// 主: 求解の始めから、最初のノードを取り出したとき・従を始めたときまで。
+    tree_start_s: f64,
+    workers_s: f64,
+}
+
+impl TreeProf {
+    fn line(&self, zopt: Option<f64>) -> String {
+        let waste = zopt.map_or(0, |z| self.lbs.iter().filter(|&&l| l >= z - 1e-9 * z.abs().max(1.0)).count());
+        let per = |k: usize| if self.kind_n[k] > 0 { self.kind_it[k] as f64 / self.kind_n[k] as f64 } else { 0.0 };
+        let pms = |k: usize| if self.kind_n[k] > 0 { 1e3 * self.kind_s[k] / self.kind_n[k] as f64 } else { 0.0 };
+        format!(
+            "tid {} ready {:.2}s end {:.2}s idle {:.2}s ({} waits) tail {:.2}s sync {:.3}s nodes {} (lb>=opt {}) first LP [dive {} {:.1}it {:.2}ms | queue {} {:.1}it {:.2}ms | pool {} {:.1}it {:.2}ms]",
+            self.tid, self.ready_s, self.end_s, self.idle_s, self.waits, self.tail_s, self.sync_s, self.nodes, waste,
+            self.kind_n[0], per(0), pms(0), self.kind_n[1], per(1), pms(1), self.kind_n[2], per(2), pms(2)
+        )
+    }
+}
+
+fn prof_tree_par() -> bool {
+    env_str!("ENOMOTO_PROF_TREE_PAR").is_some()
 }
 
 /// スレッドの間で共有する学習の記録 (通し番号つき、古いものから捨てる)。
@@ -562,6 +613,8 @@ impl WorkPool {
             learned: std::sync::Mutex::new(Learned::default()),
             next_tid: std::sync::atomic::AtomicU32::new(0),
             threads,
+            t0: Instant::now(),
+            prof: std::sync::Mutex::new(Vec::new()),
             pc: std::sync::Mutex::new(pc),
             bounds: std::sync::Mutex::new((lo, up)),
             inner: std::sync::Mutex::new(PoolInner { nodes: Vec::new(), lbs: vec![f64::INFINITY; threads], open: vec![0; threads], worker_nodes: 0, busy: threads, done: false }),
@@ -864,6 +917,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         workers: Vec::new(),
         worker_totals: (0, 0),
         pool_stats: [0; 3],
+        tprof: TreeProf::default(),
+        tp_kind: 0,
         proof_conflicts: 0,
         orbitopes: match &snap {
             Some(sn) => Rc::new(sn.orbitopes.clone()),
@@ -1748,6 +1803,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 self.start_workers();
             }
             // 木を分け合う: 大域的な境界の締め付けを共有する (64 ノードおき)
+            let t_sync = Instant::now();
             if self.pool.is_some() && self.nodes % 64 == 0 && env_str!("ENOMOTO_MIP_TREE_NO_SHARED_BOUNDS").is_none() {
                 self.sync_global_bounds();
             }
@@ -1774,6 +1830,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if idle > len && self.queue.len() >= 2 {
                     self.pool_donate(idle - len);
                 }
+                self.tprof.sync_s += t_sync.elapsed().as_secs_f64();
             }
             // 目的値の二分探索で、暫定解より良い解がないことを証明した (下界が打ち切り値に届いた)
             if self.incumbent.is_some() && self.bisect_lb >= self.prune_limit() {
@@ -1831,6 +1888,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 None
             };
             let from_sibling = sibling.is_some();
+            self.tp_kind = 0;
             let node = match plunge.take().or(sibling) {
                 Some(n) if !from_sibling => n,
                 Some(n) => {
@@ -1873,10 +1931,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     // 下界最小のノードを選ぶ頻度: 暫定解があれば上げる (下界を押し上げる)
                     let bb_every = if self.has_cutoff_value() { tunable!("ENOMOTO_T_MIP_BB_EVERY_INC", 4u64, u64) } else { tunable!("ENOMOTO_T_MIP_BB_EVERY", 10u64, u64) };
                     let n = match self.queue.pop(bb_every) {
-                        Some(n) => n,
+                        Some(n) => {
+                            self.tp_kind = 1;
+                            n
+                        }
                         // 木を分け合う: 共有の待ち行列から取る (全てのスレッドが待っていて空なら探索は終わり)
                         None => match self.pool_acquire() {
-                            Ok(Some(n)) => n,
+                            Ok(Some(n)) => {
+                                self.tp_kind = 2;
+                                n
+                            }
                             Ok(None) => break,
                             Err(()) => return self.finish_limit(MipStatus::TimeLimit, None),
                         },
@@ -1911,8 +1975,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             };
             xp("m_pop");
+            if first {
+                self.tprof.tree_start_s = self.start.elapsed().as_secs_f64();
+            }
             first = false;
             self.nodes += 1;
+            self.tprof.nodes += 1;
+            if prof_tree_par() {
+                self.tprof.lbs.push(node.lower_bound);
+            }
             if self.dbg_alive && DEBUG_SOL.with(|d| d.borrow().is_some()) && !self.params.submip {
                 self.dbg_prev_has = self.dbg_node_has_image(&node);
             }
@@ -2060,6 +2131,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 self.node_iters += self.lp.total_iterations() - it0;
                 if resolves == 0 {
                     self.node_iters_first += self.lp.total_iterations() - it0;
+                    let k = std::mem::take(&mut self.tp_kind);
+                    self.tprof.kind_n[k] += 1;
+                    self.tprof.kind_it[k] += self.lp.total_iterations() - it0;
+                    self.tprof.kind_s[k] += t_lp.elapsed().as_secs_f64();
                     if std::mem::take(&mut self.restored_now) {
                         self.restore_stats.2 += self.lp.total_iterations() - it0;
                     }
@@ -4461,6 +4536,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         };
         let pool = std::sync::Arc::new(WorkPool::new(self.params.threads, self.dom.global_lo.clone(), self.dom.global_up.clone(), self.pc.clone()));
+        self.tprof.workers_s = self.start.elapsed().as_secs_f64();
         self.pool = Some(pool.clone());
         self.pool_busy = true;
         self.pc_base = Some(self.pc.clone());
@@ -4543,7 +4619,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
     fn pool_acquire(&mut self) -> Result<Option<OpenNode>, ()> {
         use std::sync::atomic::Ordering;
         let Some(pool) = self.pool.clone() else { return Ok(None) };
-        loop {
+        let t_wait = Instant::now();
+        if self.tprof.ready_s == 0.0 && self.snap.is_some() {
+            self.tprof.ready_s = pool.t0.elapsed().as_secs_f64();
+        }
+        let mut waited = false;
+        let r = loop {
             {
                 let mut g = pool.inner.lock().unwrap();
                 let t = self.pool_tid as usize;
@@ -4563,7 +4644,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         self.pool_busy = true;
                     }
                     self.pool_stats[1] += 1;
-                    return Ok(Some(sn.into_open()));
+                    break Ok(Some(sn.into_open()));
                 }
                 // ノードを持っていない
                 g.lbs[t] = f64::INFINITY;
@@ -4576,14 +4657,23 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     g.done = true;
                 }
                 if g.done {
-                    return Ok(None);
+                    break Ok(None);
                 }
             }
             if self.time_up() {
-                return Err(());
+                break Err(());
             }
+            waited = true;
             std::thread::sleep(Duration::from_micros(200));
+        };
+        let w = t_wait.elapsed().as_secs_f64();
+        if matches!(r, Ok(Some(_))) {
+            self.tprof.idle_s += w;
+            self.tprof.waits += waited as u64;
+        } else {
+            self.tprof.tail_s += w;
         }
+        r
     }
 
     /// 主: 従を止めて待ち、結果を合わせる。戻り値は従の下界と、共有の待ち行列に残ったノードの下界の最小 (なければ +inf)。
@@ -4728,6 +4818,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     fn finish(&mut self, status: MipStatus, best_bound: f64) -> MipResult {
+        // 診断用: 従は自分の内訳を主に渡す (主は従を待った後に表示する)
+        if let (Some(pool), true) = (self.pool.clone(), self.snap.is_some() && prof_tree_par()) {
+            self.tprof.tid = self.pool_tid;
+            self.tprof.end_s = pool.t0.elapsed().as_secs_f64();
+            pool.prof.lock().unwrap().push(std::mem::take(&mut self.tprof));
+        }
         // 木を分け合う主: 従を止めて待ち、従と共有の待ち行列の下界を合わせる。従: 待っていない側から外れる
         let wlb = self.join_workers();
         let best_bound = if matches!(status, MipStatus::Optimal | MipStatus::Infeasible) { best_bound } else { best_bound.min(wlb) };
@@ -4745,6 +4841,23 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // 木の写しから解いた求解が見つけた解を受け取る (止める合図で終わるときも)
         let best_bound = if self.take_inbox() { best_bound.min(self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z)) } else { best_bound };
+        if prof_tree_par() && self.snap.is_none() && !self.params.submip && self.watch.is_none() {
+            let z = self.incumbent.as_ref().map(|(z, _)| *z);
+            let total = self.start.elapsed().as_secs_f64();
+            let mut me = std::mem::take(&mut self.tprof);
+            me.tid = self.pool_tid;
+            let mut rows = Vec::new();
+            if let Some(pool) = &self.pool {
+                me.end_s = pool.t0.elapsed().as_secs_f64();
+                rows = std::mem::take(&mut *pool.prof.lock().unwrap());
+            }
+            eprintln!("TREEPAR: total {total:.2}s tree start {:.2}s workers start {:.2}s threads {} status {status:?} obj {z:?} bound {best_bound:.10e}", me.tree_start_s, me.workers_s, self.params.threads);
+            rows.insert(0, me);
+            rows.sort_by_key(|r| r.tid);
+            for r in &rows {
+                eprintln!("TREEPAR: {}", r.line(z));
+            }
+        }
         if self.params.verbose && self.snap_stats[0] > 0 {
             eprintln!("MIP: tree snapshots {}: node lower bounds raised {}, solutions received {}", self.snap_stats[0], self.snap_stats[1], self.snap_stats[2]);
         }
