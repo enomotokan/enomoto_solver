@@ -1523,7 +1523,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
     fn run(&mut self) -> MipResult {
         // `ENOMOTO_MIP_SUBMIP_NO_SB`: サブ MIP では強分岐をしない (HiGHS のサブ MIP の `mip_pscost_minreliable = 0` と同じ)。
         // 30n20b8 の根の RENS のサブ MIP は、最初の 26 ノードで強分岐に 2.2 秒 (250 回の LP) 使う
-        if self.params.submip && env_str!("ENOMOTO_MIP_SUBMIP_NO_SB").is_some() {
+        // 暫定解がない (打ち切り値が無限の) サブ MIP だけ: すべてのサブ MIP に使うと RINS などの改善のサブ MIP が弱まり、
+        // 40 問 (300 秒) で timtab1 の主ギャップ 0.059 -> 0.121、bppc4-08 0.036 -> 0.070、binkar10_1 23.7 -> 35.4 秒
+        if self.params.submip && self.params.cutoff.is_infinite() && env_str!("ENOMOTO_MIP_SUBMIP_NO_SB").is_some() {
             self.pc.min_reliable = 0;
         }
         // 木の写しから解く: 写しを作ったときの LP のカットの行とカットプールを入れる
@@ -1731,7 +1733,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // `ENOMOTO_MIP_SUBMIP_LIGHT_HEUR`: サブ MIP の根では Feasibility Pump とダイビングを使わない。30n20b8 の根の RENS の
                 // サブ MIP (942 列) では、この 4 つで 2.4 秒使って何も見つけず、入れ子の RENS のサブ MIP でも毎回同じだけかかる
                 // (HiGHS のサブ MIP は根のヒューリスティクスのほとんどを入れ子の RENS に使い、1 回 0.1-1.6 秒で終わる)
-                let light = self.params.submip && env_str!("ENOMOTO_MIP_SUBMIP_LIGHT_HEUR").is_some();
+                // (暫定解がない、つまり打ち切り値が無限のサブ MIP だけ。`ENOMOTO_MIP_SUBMIP_NO_SB` と同じ理由)
+                let light = self.params.submip && self.params.cutoff.is_infinite() && env_str!("ENOMOTO_MIP_SUBMIP_LIGHT_HEUR").is_some();
                 if self.incumbent.is_none() && !light {
                     heur!("feasibility pump", self.feasibility_pump(root_iters));
                 }
