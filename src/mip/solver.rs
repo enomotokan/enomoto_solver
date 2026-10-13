@@ -2362,6 +2362,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     // (34.10・33.59) の揺れの範囲 (33.94・33.54・33.72・33.74)。暫定解がないまま終わるのは 30n20b8・neos-1456979
                     // の 2 問だけで、どの設定でも見つからない: 根に 27-50 秒かかり、木の中で呼べるのは 3-9 回なので、8 本の腕を
                     // 一通り試すところで時間が尽きる (neos-1456979 の近さは擬似費用ダイビング 0.79・分数 0.65、FP 0.01)。既定では使わない
+                    // 300 秒 (根の近さの引き継ぎ ROOT_PRIOR を含む): sgeomean は基準 66.91、NOINC_HEUR 67.55、BANDIT+BUDGET 67.41、
+                    // +ROOT_PRIOR 66.06、どれも 21 問。30n20b8 はどの設定でも解なし。neos-1456979 の最初の解は基準 118 秒
+                    // (木の探索そのものがノード 4731 で見つける)、NOINC_HEUR 119 秒、BANDIT+BUDGET 解なし、+ROOT_PRIOR 211 秒:
+                    // 木の中のヒューリスティクスは 22 回呼んでも見つけず (近さは 0.7-0.89 で止まる)、時間の 6 割を取って木が
+                    // 同じノードに着くのを遅らせただけだった (実行不能の葉が少ないので BUDGET が上限 0.6 にする)
                     let adapt_budget = env_str!("ENOMOTO_MIP_NOINC_BUDGET").is_some();
                     let time_frac = if adapt_budget {
                         let infeas = self.pc.infeasible_leaves as f64 / self.nodes.max(1) as f64;
