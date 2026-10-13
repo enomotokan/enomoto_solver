@@ -142,9 +142,10 @@ def main() -> None:
         work = Path(tempfile.mkdtemp(prefix="mfb_"))
         try:
             mps = materialize(args.set, name, work)
+            failed: set = set()
             for rep in range(args.reps):
                 for v, env in variants.items():
-                    if done.get((name, v), 0) > rep:
+                    if done.get((name, v), 0) > rep or v in failed:
                         continue
                     se = args.save_stderr / f"{name}__{v}__{rep}.txt" if args.save_stderr else None
                     r = run_one(mps, args.time_limit, args.mem_gb, env, args.mf_prof, se)
@@ -153,8 +154,9 @@ def main() -> None:
                         f.write(json.dumps(rec) + "\n")
                     print(f"{name:20s} {v:12s} rep={rep} {r['status']:10s} time={r.get('time', 0):8.2f}s "
                           f"factor={r.get('ipm_factor', float('nan')):8.2f}s rss={r.get('maxrss_mb', 0):7.0f}MB {r.get('backend')}", flush=True)
+                    # 打ち切り・異常終了した版は、この問題の残りの回を飛ばす (他の版は続ける)。
                     if r["status"] in ("timeout", "crash"):
-                        break
+                        failed.add(v)
         finally:
             shutil.rmtree(work, ignore_errors=True)
 
