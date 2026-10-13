@@ -5139,6 +5139,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         self.race_done = true;
         pool.racing.store(false, Ordering::Relaxed);
+        // 写しのノードの部分木を探索し終えた知らせ ([`Self::snap_report`]) を止める: この後は木を捨てたり (負け)、ノードを
+        // ほかのスレッドに渡したり (勝ち) して、待ち行列から写しのノードの子孫が消えても探索し終えたとは限らない
+        // (知らせると主がその部分木を刈ってしまう。neos-860300 で 3479 を最適と誤って報告した)
+        self.snap_alive.iter_mut().for_each(|a| *a = false);
         if w == t {
             return false;
         }
