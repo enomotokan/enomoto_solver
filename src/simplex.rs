@@ -1756,6 +1756,56 @@ fn solve_std_form_decomposed(std: &StdForm, opts: &crate::types::LpOptions) -> S
     solve_split(std, &components, solve_one)
 }
 
+/// 独立な成分 `items` を `f` で並列に解き、結果を同じ順で返す (`sizes` は成分の大きさの目安。大きい順に配る)。
+///
+/// rayon の仕事として配ると、成分の中の並列処理 (内点法の分解など) の待ち時間に同じスレッドが別の成分の求解を丸ごと
+/// 入れ子で実行し (仕事の盗み)、求解単位のスレッドローカルの状態 (warm start の LU・解き直しの印・許容誤差など) を
+/// 書き換えていた (4 スレッドの fome13: 数十回に 1 回止まる、誤った結論を返す、目的値が実行ごとに揺れる)。
+/// ここでは今のプールのスレッド数 `T` のうち `k = min(T, 成分の数)` 本の専用のスレッドを立て、それぞれに `T / k` 本の
+/// 専用の rayon のプールを持たせて、成分を 1 つずつ取り出して解く。成分の中の並列はそのプールの中だけで行うので、
+/// 別の成分の求解が入れ子で入り込まない。打ち切りのトークン (`crate::cancel`) は各スレッドに引き継ぐ。
+/// 試験用 `ENOMOTO_T_SPLIT_RAYON=1` で従来の rayon の `par_iter` (比較用)。
+fn par_components<T: Sync, R: Send>(items: &[T], sizes: &[usize], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    let token = crate::cancel::current();
+    if tunable!("ENOMOTO_T_SPLIT_RAYON", 0u8, u8) != 0 {
+        use rayon::prelude::*;
+        return items.par_iter().map(|it| crate::cancel::with_token(token.clone(), || f(it))).collect();
+    }
+    let total = rayon::current_num_threads().max(1);
+    let k = total.min(items.len());
+    if k <= 1 {
+        return items.iter().map(&f).collect();
+    }
+    // 大きい成分から配る (最後に大きな成分が 1 つだけ残って他のスレッドが遊ぶのを減らす)。
+    let mut order: Vec<usize> = (0..items.len()).collect();
+    order.sort_by_key(|&i| std::cmp::Reverse(sizes.get(i).copied().unwrap_or(0)));
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let slots: Vec<std::sync::Mutex<Option<R>>> = (0..items.len()).map(|_| std::sync::Mutex::new(None)).collect();
+    std::thread::scope(|sc| {
+        for w in 0..k {
+            // スレッド数を k 本に分ける (余りは先頭のスレッドに 1 本ずつ)。
+            let p = total / k + usize::from(w < total % k);
+            let (token, next, slots, order, f) = (token.clone(), &next, &slots, &order, &f);
+            std::thread::Builder::new()
+                .name(format!("enomoto-c{w}"))
+                .spawn_scoped(sc, move || {
+                    let run = || loop {
+                        let t = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(&i) = order.get(t) else { break };
+                        let r = crate::cancel::with_token(token.clone(), || f(&items[i]));
+                        *slots[i].lock().unwrap() = Some(r);
+                    };
+                    match rayon::ThreadPoolBuilder::new().num_threads(p).thread_name(move |j| format!("enomoto-c{w}-{j}")).build() {
+                        Ok(pool) => pool.install(run),
+                        Err(_) => run(),
+                    }
+                })
+                .expect("failed to spawn a component thread");
+        }
+    });
+    slots.into_iter().map(|m| m.into_inner().unwrap().expect("every component is solved")).collect()
+}
+
 /// 前処理後の標準形を解く入口。独立な成分への分割はここで 1 回だけ行い ([`presolved_groups`])、組ごとに解き方を
 /// 割り振る ([`solve_block`]): auto で行数が `ENOMOTO_T_RACE_MIN_ROWS` 以上の組は傾き・切片双対二段解法と内点法 +
 /// クロスオーバーの同時実行、それ以外は選ばれた 1 つのエンジン。各エンジンの中では分割し直さない。
@@ -1777,9 +1827,8 @@ fn solve_presolved(std: StdForm, opts: &crate::types::LpOptions) -> SimplexResul
     // 試験用 `ENOMOTO_T_SPLIT_SEQ=1`: 成分を並列に解かない (成分の中の並列はそのまま。成分どうしの干渉の切り分け用)。
     let use_parallel = plain.iter().any(|&(k, _)| groups[k].len() >= PARALLEL_COMPONENT_MIN_VARS) && tunable!("ENOMOTO_T_SPLIT_SEQ", 0u8, u8) == 0;
     let plain_results: Vec<(usize, SimplexResult)> = if use_parallel {
-        use rayon::prelude::*;
-        let token = crate::cancel::current();
-        plain.par_iter().map(|&(k, s)| (k, crate::cancel::with_token(token.clone(), || solve_one_engine(s, opts)))).collect()
+        let sizes: Vec<usize> = plain.iter().map(|&(_, s)| s.cols.nnz()).collect();
+        par_components(&plain, &sizes, |&(k, s)| (k, solve_one_engine(s, opts)))
     } else {
         plain.iter().map(|&(k, s)| (k, solve_one_engine(s, opts))).collect()
     };
@@ -1839,18 +1888,13 @@ fn solve_split(std: &StdForm, groups: &[Vec<usize>], solve_one: impl Fn(&StdForm
     let sub_std_forms = split_std_form(std, groups);
     let use_parallel = groups.iter().any(|c| c.len() >= PARALLEL_COMPONENT_MIN_VARS) && tunable!("ENOMOTO_T_SPLIT_SEQ", 0u8, u8) == 0; // rayon で並列に解くか (試験用 `ENOMOTO_T_SPLIT_SEQ=1` で並列にしない)
     let results: Vec<SimplexResult> = if use_parallel {
-        use rayon::prelude::*;
-        // 打ち切りのトークン (同時実行時) を各成分のタスクに引き継ぐ (`crate::cancel`)。
-        let token = crate::cancel::current();
         // 試験用 `ENOMOTO_T_SPLIT_INNER_SEQ=1`: 大きな組の数がスレッド数以上なら、外側の並列でスレッドが埋まるので、
         // 組の中の分解 (内点法の正規方程式) は並列にしない (入れ子の並列の分割・同期の手間と、待ち合わせ中に別の組の
         // 仕事を盗んで組の進み方がばらつくのを避ける)。
         let n_big = groups.iter().filter(|c| c.len() >= PARALLEL_COMPONENT_MIN_VARS).count();
         let inner_seq = tunable!("ENOMOTO_T_SPLIT_INNER_SEQ", 0u8, u8) != 0 && n_big >= rayon::current_num_threads();
-        sub_std_forms
-            .par_iter()
-            .map(|s| crate::cancel::with_token(token.clone(), || crate::interior_point::kkt::with_inner_seq(inner_seq, || solve_one(s))))
-            .collect()
+        let sizes: Vec<usize> = sub_std_forms.iter().map(|s| s.cols.nnz()).collect();
+        par_components(&sub_std_forms, &sizes, |s| crate::interior_point::kkt::with_inner_seq(inner_seq, || solve_one(s)))
     } else {
         sub_std_forms.iter().map(&solve_one).collect()
     };
