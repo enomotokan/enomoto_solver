@@ -139,7 +139,7 @@ def main() -> None:
                     if done.get((name, v), 0) > rep:
                         continue
                     r = run_one(mps, args.time_limit, args.mem_gb, env, args.mf_prof)
-                    rec = {"problem": name, "variant": v, "rep": rep, "env": env, "mf_prof": args.mf_prof, **r}
+                    rec = {"problem": name, "variant": v, "rep": rep, "env": env, "prof_mode": args.mf_prof, **r}
                     with open(args.out, "a") as f:
                         f.write(json.dumps(rec) + "\n")
                     print(f"{name:20s} {v:12s} rep={rep} {r['status']:10s} time={r.get('time', 0):8.2f}s "
