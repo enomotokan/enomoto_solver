@@ -305,8 +305,11 @@ pub(super) struct Solver<'a, L: MipLp> {
     snap_stats: [u64; 3],
     /// 木の探索を分け合う共有の待ち行列 ([`WorkPool`])、自分が待っていない側に数えられているか、主が始めた従のスレッド、
     /// 従の結果の合計 (ノード数, LP の反復数)、[ここへ渡したノード, ここから取ったノード]
-    pool: Option<std::sync::Arc<WorkPool>>,
+    pub(super) pool: Option<std::sync::Arc<WorkPool>>,
     pool_busy: bool,
+    /// 主: 従を始めた後、ノードを渡し始めるまで待つ期限 (待ち行列のノードが `ENOMOTO_T_MIP_TREE_START_NODES` 個たまるか、
+    /// この時刻を過ぎたら渡し始める)。従は先に始めて準備 (写しからの LP・根の LP) を主の探索と並行させる。
+    pool_hold: Option<Instant>,
     /// 従が最後に見た共有の最良値。
     seen_best: f64,
     /// 擬似費用を前回合わせたときの自分の値 (この後に増えた観測を共有の擬似費用に足す)。
@@ -1002,6 +1005,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         inbox_seen: 0,
         snap_stats: [0; 3],
         pool_busy: pool.is_some(),
+        pool_hold: None,
         seen_best: f64::INFINITY,
         pc_base: None,
         pool_tid,
@@ -1943,9 +1947,20 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.queue.prune(lim);
                 }
             }
-            // `ENOMOTO_T_MIP_TREE_START_NODES`: 従を始める待ち行列のノード数 (多いほど最初に配るノードが増える)
-            if parallel_tree && self.pool.is_none() && self.queue.len() + plunge.is_some() as usize >= tunable!("ENOMOTO_T_MIP_TREE_START_NODES", 8usize, usize) {
+            // 従を始める: 待ち行列のノードが `ENOMOTO_T_MIP_TREE_SPAWN_NODES` 個 (既定 2、根を分枝した後) たまったら始め、
+            // ノードを渡し始めるのは `ENOMOTO_T_MIP_TREE_START_NODES` 個 (既定 8) たまるか `ENOMOTO_T_MIP_TREE_HOLD_SECS` 秒
+            // (既定 1) 経ってから (従の準備を主の探索と並行させる)。`ENOMOTO_MIP_TREE_LATE_SPAWN` なら以前と同じく
+            // START_NODES 個たまってから始めてすぐ渡す
+            let late = env_str!("ENOMOTO_MIP_TREE_LATE_SPAWN").is_some();
+            let spawn_at = if late { tunable!("ENOMOTO_T_MIP_TREE_START_NODES", 8usize, usize) } else { tunable!("ENOMOTO_T_MIP_TREE_SPAWN_NODES", 2usize, usize) };
+            if parallel_tree && self.pool.is_none() && self.queue.len() + plunge.is_some() as usize >= spawn_at {
                 self.start_workers(&mut plunge);
+                if !late {
+                    self.pool_hold = Some(Instant::now() + Duration::from_secs_f64(tunable!("ENOMOTO_T_MIP_TREE_HOLD_SECS", 1.0, f64)));
+                }
+            }
+            if self.pool_hold.is_some_and(|t| Instant::now() >= t || self.queue.len() >= tunable!("ENOMOTO_T_MIP_TREE_START_NODES", 8usize, usize)) {
+                self.pool_hold = None;
             }
             // racing ramp-up: 競争の終わり (主が決める) と、負けたスレッドの木を捨てる
             if self.pool.is_some() && !self.race_done && self.race_step(&mut plunge) {
@@ -1976,7 +1991,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if let Some(pool) = &self.pool {
                 use std::sync::atomic::Ordering;
                 let (idle, len) = (pool.idle.load(Ordering::Relaxed), pool.len.load(Ordering::Relaxed));
-                if idle > len && self.queue.len() >= 2 {
+                if idle > len && self.queue.len() >= 2 && self.pool_hold.is_none() {
                     self.pool_donate(idle - len);
                 }
                 if env_str!("ENOMOTO_MIP_TREE_NO_BALANCE").is_none() && self.nodes % tunable!("ENOMOTO_T_MIP_TREE_BALANCE_EVERY", 32u64, u64) == 0 {
@@ -5225,7 +5240,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let good = if keep > 0 { g.nodes.iter().filter(|n| n.lower_bound <= all_min + thr).count() } else { 0 };
         drop(g);
         let donate = if keep > 0 { good < keep && mine <= all_min + thr } else { few && others_max > mine + thr };
-        if donate && self.queue.len() >= 2 {
+        if donate && self.queue.len() >= 2 && self.pool_hold.is_none() {
             self.pool_donate(1);
             self.tprof.balance[1] += 1;
         }

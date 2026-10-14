@@ -1917,148 +1917,281 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let (mut n_rows_used, mut w_nnz_total, mut base_nnz_total, mut n_fill_skip) = (0usize, 0usize, 0usize, 0usize);
         let cands_before_tab = cands.len();
         let mut best_score = -1.0f64;
-        for (bi, &(s, score)) in basics.iter().enumerate() {
-            if self.time_up() {
-                break;
-            }
-            if tab_rules && best_score >= 0.0 {
-                let made = cands.len() - cands_before_tab;
-                let fac = if made >= 50 { 0.01 } else { 0.0025 };
-                if score < fac * best_score {
+        // 根の分離 (木を分け合う前、サブ MIP でない) で既定の行の選び方なら、tableau 行のカットの生成と仕上げ (分離の時間の
+        // 大半: 30n20b8・blp-ar98・graph20-20-1rand で 8 割) を複数のスレッドで行う (`ENOMOTO_MIP_SEP_SEQ` で逐次)。
+        // 行の選択と集約は逐次で今までと同じ順に行い、行ごとの候補 (keep_best 後) を同じ順につなぐので結果は逐次と同じ
+        let par_threads = self.params.threads.max(1);
+        let par = par_threads > 1
+            && !light
+            && !self.params.submip
+            && self.pool.is_none()
+            && !gen_old()
+            && !tab_rules
+            && !nnz_budget.is_finite()
+            && env_str!("ENOMOTO_MIP_SEP_SEQ").is_none();
+        if par {
+            let mut bases: Vec<Vec<(usize, f64)>> = Vec::new();
+            for &(s, _) in basics.iter() {
+                if self.time_up() || n_rows_used >= limit {
                     break;
                 }
-            }
-            if n_rows_used >= limit {
-                break;
-            }
-            let t0 = std::time::Instant::now();
-            let w = if tab_rules { std::mem::take(&mut w_cache[bi]) } else { self.lp.basis_inverse_row(s) };
-            if dbg_sep {
-                t_btran += t0.elapsed().as_secs_f64();
-            }
-            let t0 = std::time::Instant::now();
-            let wmax = w.iter().fold(0.0f64, |m, v| m.max(v.abs()));
-            if wmax == 0.0 {
-                continue;
-            }
-            let wmin_keep = 1e-9 * wmax;
-            if nnz_budget.is_finite() {
-                let work: usize = (0..mr).filter(|&i| w[i].abs() > wmin_keep).map(|i| lp_rows[i].len() + 1).sum();
-                if work_used + work as f64 > nnz_budget {
-                    n_budget_skip += 1;
+                let w = self.lp.basis_inverse_row(s);
+                let wmax = w.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+                if wmax == 0.0 {
                     continue;
                 }
-                work_used += work as f64;
-            }
-            // 集約: sum_i w_i (a_i x - r_i) = 0
-            let mut touched: Vec<usize> = Vec::new();
-            let mut base: Vec<(usize, f64)> = Vec::new();
-            let mut ok = true;
-            let mut wnz_min = f64::INFINITY;
-            for i in 0..mr {
-                let wi = w[i];
-                if wi.abs() <= wmin_keep {
+                let wmin_keep = 1e-9 * wmax;
+                let mut touched: Vec<usize> = Vec::new();
+                let mut base: Vec<(usize, f64)> = Vec::new();
+                let mut wnz_min = f64::INFINITY;
+                for i in 0..mr {
+                    let wi = w[i];
+                    if wi.abs() <= wmin_keep {
+                        continue;
+                    }
+                    wnz_min = wnz_min.min(wi.abs());
+                    for &(j, a) in &lp_rows[i] {
+                        if agg[j] == 0.0 {
+                            touched.push(j);
+                        }
+                        agg[j] += wi * a;
+                        if agg[j] == 0.0 {
+                            agg[j] = 1e-300;
+                        }
+                    }
+                    base.push((n + i, -wi));
+                }
+                let ok = wmax / wnz_min <= 1e6;
+                for &j in &touched {
+                    let v = agg[j];
+                    if v.abs() > 1e-11 && ok {
+                        base.push((j, v));
+                    }
+                    agg[j] = 0.0;
+                }
+                if !ok {
                     continue;
                 }
-                wnz_min = wnz_min.min(wi.abs());
-                for &(j, a) in &lp_rows[i] {
-                    if agg[j] == 0.0 {
-                        touched.push(j);
+                // 最適面の頂点での分離の照合 (逐次の経路と同じ)
+                if self.tab_memo_mode != 0 {
+                    use std::hash::{Hash, Hasher};
+                    let q = |v: f64| -> i64 { (v * 1e9).round() as i64 };
+                    let mut hs = std::collections::hash_map::DefaultHasher::new();
+                    for &(j, a) in &base {
+                        j.hash(&mut hs);
+                        q(a).hash(&mut hs);
+                        q(vars.x[j]).hash(&mut hs);
                     }
-                    agg[j] += wi * a;
-                    if agg[j] == 0.0 {
-                        agg[j] = 1e-300;
-                    }
-                }
-                base.push((n + i, -wi));
-            }
-            // 重みの比が大きすぎる集約は数値的に危ないので使わない
-            if wmax / wnz_min > 1e6 {
-                ok = false;
-            }
-            for &j in &touched {
-                let v = agg[j];
-                if v.abs() > 1e-11 && ok {
-                    base.push((j, v));
-                }
-                agg[j] = 0.0;
-            }
-            let w_nnz = w.iter().filter(|v| v.abs() > wmin_keep).count();
-            if dbg_sep {
-                t_agg += t0.elapsed().as_secs_f64();
-                w_nnz_total += w_nnz;
-            }
-            if !ok {
-                continue;
-            }
-            // HiGHS の fill の予算: 集約で増えた非零の 10 倍が 10000 + 列数 を超える行は使わない
-            // (`ENOMOTO_T_MIP_TAB_FILL_MULT` 倍に緩める。0 なら予算なし。30n20b8 では HiGHS と同じ予算だと全ての行が外れ、
-            // 根の下界が 151 -> 88.5 に下がった: HiGHS は mod-k など他の分離で下界を得るが、こちらは tableau 行に頼っている)
-            let fill_mult = tunable!("ENOMOTO_T_MIP_TAB_FILL_MULT", 1.0, f64);
-            if tab_rules && fill_mult > 0.0 && 10.0 * base.len().saturating_sub(w_nnz) as f64 > fill_mult * (10_000 + n) as f64 {
-                n_fill_skip += 1;
-                continue;
-            }
-            // 最適面の頂点での分離: 今の頂点で同じ基底変数の行が、集約した行もその列の LP 値も同じなら、作るカットも
-            // 同じなので飛ばす (`ENOMOTO_MIP_FACE_TAB_SKIP`。照合と数えるのは常に)。同じ行の割合は misc07 で 25% (1323 行中 325)、
-            // 10teams ではほぼ 0 (2088 行中 2: tableau が密で、1 回のピボットでほぼ全ての行が変わる)。分離の時間はほとんど
-            // 変わらないので既定では飛ばさない
-            if self.tab_memo_mode != 0 {
-                use std::hash::{Hash, Hasher};
-                let q = |v: f64| -> i64 { (v * 1e9).round() as i64 };
-                let mut hs = std::collections::hash_map::DefaultHasher::new();
-                for &(j, a) in &base {
-                    j.hash(&mut hs);
-                    q(a).hash(&mut hs);
-                    q(vars.x[j]).hash(&mut hs);
-                }
-                let h = hs.finish();
-                let k = self.lp.basic_var(s);
-                if self.tab_memo_mode == 1 {
-                    self.tab_memo.insert(k, h);
-                } else {
-                    self.tab_memo_stats.0 += 1;
-                    if self.tab_memo.get(&k) == Some(&h) {
-                        self.tab_memo_stats.1 += 1;
-                        if env_str!("ENOMOTO_MIP_FACE_TAB_SKIP").is_some() {
-                            continue;
+                    let h = hs.finish();
+                    let k = self.lp.basic_var(s);
+                    if self.tab_memo_mode == 1 {
+                        self.tab_memo.insert(k, h);
+                    } else {
+                        self.tab_memo_stats.0 += 1;
+                        if self.tab_memo.get(&k) == Some(&h) {
+                            self.tab_memo_stats.1 += 1;
+                            if env_str!("ENOMOTO_MIP_FACE_TAB_SKIP").is_some() {
+                                continue;
+                            }
                         }
                     }
                 }
+                n_rows_used += 1;
+                base_nnz_total += base.len();
+                bases.push(base);
             }
-            n_rows_used += 1;
-            base_nnz_total += base.len();
-            if !gen_old() {
-                let t0 = std::time::Instant::now();
-                let n_before = cands.len();
-                let neg: Vec<(usize, f64)> = base.iter().map(|&(k, a)| (k, -a)).collect();
-                for b in [&base, &neg] {
-                    let n0 = cands.len();
-                    for c in generate_cuts(&vars, b, 0.0, tab_fc, false) {
-                        push(Some(c), &mut cands, self);
+            let t0 = std::time::Instant::now();
+            let (cut_int, glo, gup) = (&self.cut_int[..], &self.dom.global_lo[..], &self.dom.global_up[..]);
+            let inc = self.incumbent.as_ref().map(|(_, v)| v.as_slice());
+            let (pp, lp_rows_ref, vars_ref, bases_ref) = (self.p, &lp_rows, &vars, &bases);
+            let nb = bases.len();
+            let nth = par_threads.min(nb.max(1));
+            // 行をスレッドに交互に割り当てる (行はスコア順で、重さが偏らないように)
+            let parts: Vec<Vec<(usize, Vec<Candidate>)>> = std::thread::scope(|sc| {
+                let hs: Vec<_> = (0..nth)
+                    .map(|t| {
+                        sc.spawn(move || {
+                            let mut scratch = vec![0.0f64; n];
+                            let mut out = Vec::new();
+                            let mut k = t;
+                            while k < nb {
+                                let base = &bases_ref[k];
+                                let neg: Vec<(usize, f64)> = base.iter().map(|&(j, a)| (j, -a)).collect();
+                                let mut cs: Vec<Candidate> = Vec::new();
+                                for b in [base, &neg] {
+                                    let n0 = cs.len();
+                                    for raw in generate_cuts(vars_ref, b, 0.0, tab_fc, false) {
+                                        if let Some(c) = finish_cut(raw, n, lp_rows_ref, cut_int, glo, gup, x, inc, &mut scratch) {
+                                            cs.push(c);
+                                        }
+                                    }
+                                    keep_best(&mut cs, n0, pp);
+                                }
+                                out.push((k, cs));
+                                k += nth;
+                            }
+                            out
+                        })
+                    })
+                    .collect();
+                hs.into_iter().map(|h| h.join().unwrap()).collect()
+            });
+            let mut by_row: Vec<Vec<Candidate>> = (0..nb).map(|_| Vec::new()).collect();
+            for part in parts {
+                for (k, cs) in part {
+                    by_row[k] = cs;
+                }
+            }
+            for cs in by_row {
+                cands.extend(cs);
+            }
+            if dbg_sep {
+                t_gen += t0.elapsed().as_secs_f64();
+            }
+        } else {
+            for (bi, &(s, score)) in basics.iter().enumerate() {
+                if self.time_up() {
+                    break;
+                }
+                if tab_rules && best_score >= 0.0 {
+                    let made = cands.len() - cands_before_tab;
+                    let fac = if made >= 50 { 0.01 } else { 0.0025 };
+                    if score < fac * best_score {
+                        break;
                     }
-                    keep_best(&mut cands, n0, self.p);
                 }
+                if n_rows_used >= limit {
+                    break;
+                }
+                let t0 = std::time::Instant::now();
+                let w = if tab_rules { std::mem::take(&mut w_cache[bi]) } else { self.lp.basis_inverse_row(s) };
                 if dbg_sep {
-                    t_gen += t0.elapsed().as_secs_f64();
+                    t_btran += t0.elapsed().as_secs_f64();
                 }
-                if tab_rules && best_score < 0.0 && cands.len() > n_before {
-                    best_score = score;
+                let t0 = std::time::Instant::now();
+                let wmax = w.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+                if wmax == 0.0 {
+                    continue;
                 }
-                continue;
-            }
-            let r = cmir(&vars, &base, 0.0);
-            push(r, &mut cands, self);
-            let neg: Vec<(usize, f64)> = base.iter().map(|&(k, a)| (k, -a)).collect();
-            let r = cmir(&vars, &neg, 0.0);
-            push(r, &mut cands, self);
-            if use_lifted_cover() {
-                push(lifted_cover(&vars, &base, 0.0), &mut cands, self);
-                push(lifted_cover(&vars, &neg, 0.0), &mut cands, self);
-            }
-            if tab_fc {
-                push(lifted_flow_cover(&vars, &base, 0.0), &mut cands, self);
-                push(lifted_flow_cover(&vars, &neg, 0.0), &mut cands, self);
+                let wmin_keep = 1e-9 * wmax;
+                if nnz_budget.is_finite() {
+                    let work: usize = (0..mr).filter(|&i| w[i].abs() > wmin_keep).map(|i| lp_rows[i].len() + 1).sum();
+                    if work_used + work as f64 > nnz_budget {
+                        n_budget_skip += 1;
+                        continue;
+                    }
+                    work_used += work as f64;
+                }
+                // 集約: sum_i w_i (a_i x - r_i) = 0
+                let mut touched: Vec<usize> = Vec::new();
+                let mut base: Vec<(usize, f64)> = Vec::new();
+                let mut ok = true;
+                let mut wnz_min = f64::INFINITY;
+                for i in 0..mr {
+                    let wi = w[i];
+                    if wi.abs() <= wmin_keep {
+                        continue;
+                    }
+                    wnz_min = wnz_min.min(wi.abs());
+                    for &(j, a) in &lp_rows[i] {
+                        if agg[j] == 0.0 {
+                            touched.push(j);
+                        }
+                        agg[j] += wi * a;
+                        if agg[j] == 0.0 {
+                            agg[j] = 1e-300;
+                        }
+                    }
+                    base.push((n + i, -wi));
+                }
+                // 重みの比が大きすぎる集約は数値的に危ないので使わない
+                if wmax / wnz_min > 1e6 {
+                    ok = false;
+                }
+                for &j in &touched {
+                    let v = agg[j];
+                    if v.abs() > 1e-11 && ok {
+                        base.push((j, v));
+                    }
+                    agg[j] = 0.0;
+                }
+                let w_nnz = w.iter().filter(|v| v.abs() > wmin_keep).count();
+                if dbg_sep {
+                    t_agg += t0.elapsed().as_secs_f64();
+                    w_nnz_total += w_nnz;
+                }
+                if !ok {
+                    continue;
+                }
+                // HiGHS の fill の予算: 集約で増えた非零の 10 倍が 10000 + 列数 を超える行は使わない
+                // (`ENOMOTO_T_MIP_TAB_FILL_MULT` 倍に緩める。0 なら予算なし。30n20b8 では HiGHS と同じ予算だと全ての行が外れ、
+                // 根の下界が 151 -> 88.5 に下がった: HiGHS は mod-k など他の分離で下界を得るが、こちらは tableau 行に頼っている)
+                let fill_mult = tunable!("ENOMOTO_T_MIP_TAB_FILL_MULT", 1.0, f64);
+                if tab_rules && fill_mult > 0.0 && 10.0 * base.len().saturating_sub(w_nnz) as f64 > fill_mult * (10_000 + n) as f64 {
+                    n_fill_skip += 1;
+                    continue;
+                }
+                // 最適面の頂点での分離: 今の頂点で同じ基底変数の行が、集約した行もその列の LP 値も同じなら、作るカットも
+                // 同じなので飛ばす (`ENOMOTO_MIP_FACE_TAB_SKIP`。照合と数えるのは常に)。同じ行の割合は misc07 で 25% (1323 行中 325)、
+                // 10teams ではほぼ 0 (2088 行中 2: tableau が密で、1 回のピボットでほぼ全ての行が変わる)。分離の時間はほとんど
+                // 変わらないので既定では飛ばさない
+                if self.tab_memo_mode != 0 {
+                    use std::hash::{Hash, Hasher};
+                    let q = |v: f64| -> i64 { (v * 1e9).round() as i64 };
+                    let mut hs = std::collections::hash_map::DefaultHasher::new();
+                    for &(j, a) in &base {
+                        j.hash(&mut hs);
+                        q(a).hash(&mut hs);
+                        q(vars.x[j]).hash(&mut hs);
+                    }
+                    let h = hs.finish();
+                    let k = self.lp.basic_var(s);
+                    if self.tab_memo_mode == 1 {
+                        self.tab_memo.insert(k, h);
+                    } else {
+                        self.tab_memo_stats.0 += 1;
+                        if self.tab_memo.get(&k) == Some(&h) {
+                            self.tab_memo_stats.1 += 1;
+                            if env_str!("ENOMOTO_MIP_FACE_TAB_SKIP").is_some() {
+                                continue;
+                            }
+                        }
+                    }
+                }
+                n_rows_used += 1;
+                base_nnz_total += base.len();
+                if !gen_old() {
+                    let t0 = std::time::Instant::now();
+                    let n_before = cands.len();
+                    let neg: Vec<(usize, f64)> = base.iter().map(|&(k, a)| (k, -a)).collect();
+                    for b in [&base, &neg] {
+                        let n0 = cands.len();
+                        for c in generate_cuts(&vars, b, 0.0, tab_fc, false) {
+                            push(Some(c), &mut cands, self);
+                        }
+                        keep_best(&mut cands, n0, self.p);
+                    }
+                    if dbg_sep {
+                        t_gen += t0.elapsed().as_secs_f64();
+                    }
+                    if tab_rules && best_score < 0.0 && cands.len() > n_before {
+                        best_score = score;
+                    }
+                    continue;
+                }
+                let r = cmir(&vars, &base, 0.0);
+                push(r, &mut cands, self);
+                let neg: Vec<(usize, f64)> = base.iter().map(|&(k, a)| (k, -a)).collect();
+                let r = cmir(&vars, &neg, 0.0);
+                push(r, &mut cands, self);
+                if use_lifted_cover() {
+                    push(lifted_cover(&vars, &base, 0.0), &mut cands, self);
+                    push(lifted_cover(&vars, &neg, 0.0), &mut cands, self);
+                }
+                if tab_fc {
+                    push(lifted_flow_cover(&vars, &base, 0.0), &mut cands, self);
+                    push(lifted_flow_cover(&vars, &neg, 0.0), &mut cands, self);
+                }
             }
         }
         if dbg_sep {
