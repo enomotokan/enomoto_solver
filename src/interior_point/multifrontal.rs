@@ -283,6 +283,73 @@ impl Front {
     }
 }
 
+/// 前線の密な演算に faer 0.24 を使うか (`ENOMOTO_T_MF_FAER24`、既定 1。0 で faer 0.20)。0.24 は AVX-512 の核を実行時に選ぶので
+/// 速い (Xeon 2.1GHz・AVX-512 で行列積が 1 スレッド 30 → 43〜60 GFLOPS、4 スレッド 95〜115 → 138〜190 GFLOPS)。
+fn dense24() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| tunable!("ENOMOTO_T_MF_FAER24", 1u8, u8) != 0)
+}
+
+fn par24(par: Parallelism) -> faer24::Par {
+    if par == Parallelism::None { faer24::Par::Seq } else { faer24::Par::rayon(0) }
+}
+
+/// faer 0.20 の行列の参照を faer 0.24 の参照として見る (同じ領域・同じ間隔)。
+fn ref24<'a>(m: MatRef<'a, f64>) -> faer24::MatRef<'a, f64> {
+    // SAFETY: 同じ領域を同じ寿命で読むだけ。
+    unsafe { faer24::MatRef::from_raw_parts(m.as_ptr(), m.nrows(), m.ncols(), m.row_stride(), m.col_stride()) }
+}
+
+fn mut24<'a>(m: faer::MatMut<'a, f64>) -> faer24::MatMut<'a, f64> {
+    let (r, c, rs, cs) = (m.nrows(), m.ncols(), m.row_stride(), m.col_stride());
+    // SAFETY: 元の可変参照を消費して、同じ領域を同じ寿命で書く。
+    unsafe { faer24::MatMut::from_raw_parts_mut(m.as_ptr_mut(), r, c, rs, cs) }
+}
+
+/// LLᵀ の Cholesky (`a` の下三角、成功なら置き換えたピボットの数)。
+fn chol_llt(a: faer::MatMut<'_, f64>, reg: LltRegularization<f64>, par: Parallelism) -> Result<usize, ()> {
+    let n = a.nrows();
+    if dense24() {
+        let p = par24(par);
+        let mut buf = faer24::dyn_stack::MemBuffer::new(faer24::linalg::cholesky::llt::factor::cholesky_in_place_scratch::<f64>(n, p, Default::default()));
+        let reg24 = faer24::linalg::cholesky::llt::factor::LltRegularization {
+            dynamic_regularization_delta: reg.dynamic_regularization_delta,
+            dynamic_regularization_epsilon: reg.dynamic_regularization_epsilon,
+        };
+        return faer24::linalg::cholesky::llt::factor::cholesky_in_place(mut24(a), reg24, p, faer24::dyn_stack::MemStack::new(&mut buf), Default::default())
+            .map(|i| i.dynamic_regularization_count)
+            .map_err(|_| ());
+    }
+    let mut buf = GlobalPodBuffer::new(cholesky_in_place_req::<f64>(n, par, LltParams::default()).unwrap());
+    cholesky_in_place(a, reg, par, PodStack::new(&mut buf), LltParams::default()).map(|info| info.dynamic_regularization_count).map_err(|_| ())
+}
+
+/// `x ← L^{-1} x` (`l` は下三角、`unit` なら単位下三角)。
+fn trsm_lower(l: MatRef<'_, f64>, x: faer::MatMut<'_, f64>, unit: bool, par: Parallelism) {
+    if dense24() {
+        if unit {
+            faer24::linalg::triangular_solve::solve_unit_lower_triangular_in_place(ref24(l), mut24(x), par24(par));
+        } else {
+            faer24::linalg::triangular_solve::solve_lower_triangular_in_place(ref24(l), mut24(x), par24(par));
+        }
+    } else if unit {
+        faer::linalg::triangular_solve::solve_unit_lower_triangular_in_place(l, x, par);
+    } else {
+        faer::linalg::triangular_solve::solve_lower_triangular_in_place(l, x, par);
+    }
+}
+
+/// `d ← d - a b` (`d` は `st` の形: 下三角だけ、または長方形)。
+fn gemm_sub(d: faer::MatMut<'_, f64>, st: BlockStructure, a: MatRef<'_, f64>, b: MatRef<'_, f64>, par: Parallelism) {
+    if dense24() {
+        use faer24::linalg::matmul::triangular::BlockStructure as B24;
+        let st24 = if st == BlockStructure::TriangularLower { B24::TriangularLower } else { B24::Rectangular };
+        faer24::linalg::matmul::triangular::matmul(mut24(d), st24, faer24::Accum::Add, ref24(a), B24::Rectangular, ref24(b), B24::Rectangular, -1.0, par24(par));
+    } else {
+        faer::linalg::matmul::triangular::matmul(d, st, a, BlockStructure::Rectangular, b, BlockStructure::Rectangular, Some(1.0), -1.0, par);
+    }
+}
+
 /// 対角ブロック `a` (`n x n`、下三角を使う) の Cholesky 分解を、幅 `bs` の列のかたまりごとに左から順に行う
 /// (かたまりの対角の `bs x bs` は逐次に分解し、その下の三角行列の解法と右下の残りの更新は `par` の行列演算)。
 /// faer の Cholesky は並列にしても伸びない (4 コアで `n = 2048` が 49 GFLOPS、`n = 512` は逐次より遅い。行列積は
@@ -290,19 +357,15 @@ impl Front {
 fn chol_blocked(mut a: faer::MatMut<'_, f64>, reg: LltRegularization<f64>, bs: usize, par: Parallelism) -> Result<usize, ()> {
     let n = a.nrows();
     let bs = bs.max(1);
-    let mut buf = GlobalPodBuffer::new(cholesky_in_place_req::<f64>(bs.min(n), Parallelism::None, LltParams::default()).unwrap());
     let mut dynreg = 0;
     let mut k0 = 0;
     while k0 < n {
         let kb = bs.min(n - k0);
         let (mut a11, _, mut a21, a22) = a.rb_mut().submatrix_mut(k0, k0, n - k0, n - k0).split_at_mut(kb, kb);
-        match cholesky_in_place(a11.rb_mut(), reg, Parallelism::None, PodStack::new(&mut buf), LltParams::default()) {
-            Ok(info) => dynreg += info.dynamic_regularization_count,
-            Err(_) => return Err(()),
-        }
+        dynreg += chol_llt(a11.rb_mut(), reg, Parallelism::None)?;
         if k0 + kb < n {
-            faer::linalg::triangular_solve::solve_lower_triangular_in_place(a11.rb(), a21.rb_mut().transpose_mut(), par);
-            faer::linalg::matmul::triangular::matmul(a22, BlockStructure::TriangularLower, a21.rb(), BlockStructure::Rectangular, a21.rb().transpose(), BlockStructure::Rectangular, Some(1.0), -1.0, par);
+            trsm_lower(a11.rb(), a21.rb_mut().transpose_mut(), false, par);
+            gemm_sub(a22, BlockStructure::TriangularLower, a21.rb(), a21.rb().transpose(), par);
         }
         k0 += kb;
     }
@@ -325,11 +388,7 @@ fn trsm_rows(l11: MatRef<'_, f64>, mut l21: faer::MatMut<'_, f64>, unit: bool, w
         start += h;
     }
     blocks.into_par_iter().for_each(|(st, mut blk)| {
-        if unit {
-            faer::linalg::triangular_solve::solve_unit_lower_triangular_in_place(l11, blk.rb_mut().transpose_mut(), Parallelism::None);
-        } else {
-            faer::linalg::triangular_solve::solve_lower_triangular_in_place(l11, blk.rb_mut().transpose_mut(), Parallelism::None);
-        }
+        trsm_lower(l11, blk.rb_mut().transpose_mut(), unit, Parallelism::None);
         if let Some((wp, dinv)) = w {
             for j in 0..nc {
                 for i in 0..blk.nrows() {
@@ -383,7 +442,7 @@ fn sub_update(dst: Front, map: Option<&[u32]>, a: MatRef<'_, f64>, b: MatRef<'_,
             // SAFETY: 書き先は前線の列 [j, j + w) (同じ間隔で並ぶ部分の中) の行 idx(ra)..idx(rb - 1) で、区切りごとに
             // 列が重ならない。
             let d = unsafe { faer::mat::from_raw_parts_mut::<f64, usize, usize>(p.wrapping_add(idx(ra) - j), rb - ra, w, 1, ld as isize) };
-            faer::linalg::matmul::triangular::matmul(d, st, a.subrows(ra, rb - ra), BlockStructure::Rectangular, bt, BlockStructure::Rectangular, Some(1.0), -1.0, par);
+            gemm_sub(d, st, a.subrows(ra, rb - ra), bt, par);
         };
         block(ca, cb, BlockStructure::TriangularLower);
         let run_end = runs[ri].1;
@@ -876,7 +935,7 @@ impl Multifrontal {
                     let dinv: Vec<f64> = (0..nc).map(|j| 1.0 / l11.read(j, j)).collect();
                     trsm_rows(l11.rb(), l21.rb_mut(), true, Some((SyncPtr(wb.as_mut_ptr()), &dinv)), self.trsm_rows(r));
                 } else {
-                    faer::linalg::triangular_solve::solve_unit_lower_triangular_in_place(l11.rb(), l21.rb_mut().transpose_mut(), par);
+                    trsm_lower(l11.rb(), l21.rb_mut().transpose_mut(), true, par);
                     // W (= L21 D) を写してから L21 = W D^{-1}。
                     for j in 0..nc {
                         let dinv = 1.0 / l11.read(j, j);
@@ -894,8 +953,7 @@ impl Multifrontal {
             let res = if self.bchol_bs > 0 && big && nc >= self.bchol_min {
                 chol_blocked(l11.rb_mut(), reg, self.bchol_bs, par)
             } else {
-                let mut buf = GlobalPodBuffer::new(cholesky_in_place_req::<f64>(nc, par, LltParams::default()).unwrap());
-                cholesky_in_place(l11.rb_mut(), reg, par, PodStack::new(&mut buf), LltParams::default()).map(|info| info.dynamic_regularization_count).map_err(|_| ())
+                chol_llt(l11.rb_mut(), reg, par)
             };
             match res {
                 Ok(cnt) => {
@@ -912,7 +970,7 @@ impl Multifrontal {
                 if self.par_trsm && par != Parallelism::None {
                     trsm_rows(l11.rb(), l21.rb_mut(), false, None, self.trsm_rows(r));
                 } else {
-                    faer::linalg::triangular_solve::solve_lower_triangular_in_place(l11.rb(), l21.rb_mut().transpose_mut(), par);
+                    trsm_lower(l11.rb(), l21.rb_mut().transpose_mut(), false, par);
                 }
                 tp3 = std::time::Instant::now();
             }

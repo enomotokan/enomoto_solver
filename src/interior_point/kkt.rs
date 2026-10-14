@@ -1405,6 +1405,12 @@ mod chol_bench {
                 }
             }
             let res = mx.iter().zip(&b).map(|(a, b)| (a - b).abs()).fold(0.0f64, f64::max);
+            let t = std::time::Instant::now();
+            for _ in 0..10 {
+                let mut x = b.clone();
+                mf.solve_in_place(&mut x);
+            }
+            println!("solve={:.4}s", t.elapsed().as_secs_f64() / 10.0);
             let _ = super::super::multifrontal::take_prof();
             let t = std::time::Instant::now();
             mf.factor(&val, 1e-8, 1e-14);
