@@ -231,6 +231,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) submip_is_rens: bool,
     /// 別スレッドの Feasibility Jump とその停止の印。
     fj_thread: Option<(std::thread::JoinHandle<Option<Vec<f64>>>, std::sync::Arc<std::sync::atomic::AtomicBool>)>,
+    /// 根のヒューリスティクスの最初に別スレッドで始めた局所探索 (`ENOMOTO_MIP_PAR_LOCAL_SEARCH`。結果は元の位置で受け取る)。
+    pub(super) ls_thread: Option<std::thread::JoinHandle<super::heuristics::LocalSearchResult>>,
     /// RENS の固定率の記録 (成功したときの固定率の合計と回数、サブ MIP が実行不能だったときの合計と回数)。
     pub(super) rens_succ: (f64, u32),
     pub(super) rens_infeas: (f64, u32),
@@ -963,6 +965,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         pending_submips: std::collections::VecDeque::new(),
         submip_is_rens: false,
         fj_thread: None,
+        ls_thread: None,
         rens_succ: (0.0, 0),
         rens_infeas: (0.0, 0),
         node_iters: 0,
@@ -1733,6 +1736,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         }
                     }};
                 }
+                // `ENOMOTO_MIP_PAR_LOCAL_SEARCH`: 並列モードで暫定解がなければ、局所探索を今から別スレッドで始める
+                // (Feasibility Pump・ダイビングと重ねる。結果は元の位置 (下の "local search") で受け取る)
+                if mip_threads() > 1 && !self.params.submip && self.incumbent.is_none() && env_str!("ENOMOTO_MIP_PAR_LOCAL_SEARCH").is_some() && env_str!("ENOMOTO_MIP_NO_LOCAL_SEARCH").is_none() {
+                    self.spawn_local_search();
+                }
                 heur!("simple rounding", self.simple_rounding(&x));
                 if env_str!("ENOMOTO_MIP_NO_ZIROUND").is_none() {
                     heur!("ZI round", self.zi_round(&x));
@@ -1806,6 +1814,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if self.incumbent.is_none() && env_str!("ENOMOTO_MIP_MINREL").is_some() {
                     heur!("min relaxation", self.min_relaxation());
                 }
+                // `ENOMOTO_MIP_PAR_LATE_SUBMIPS`: 並列モードでは、この後の RENS のやり直しと RINS のサブ MIP を同時に解く
+                // (RINS はやり直しの結果を待たずに今の暫定解で作る)
+                let par_late = mip_threads() > 1 && !self.params.submip && env_str!("ENOMOTO_MIP_PAR_LATE_SUBMIPS").is_some();
+                self.parallel_submips = par_late;
                 // 根の RENS のサブ MIP がノード上限で止まり、根のヒューリスティクスの後も差が大きい (既定 0.5% 超) なら、
                 // ノード上限を 4 倍にして RENS をやり直す (`ENOMOTO_MIP_NO_RENS_MORE_NODES` で無効)。binkar10_1 は 500 ノードの
                 // RENS が 7182 で止まり、根の暫定解 6822.81 から木が 60 秒進まない (被約費用固定が効かず再スタートもしない)。
@@ -1823,6 +1835,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 暫定解 (Feasibility Jump・pump・丸めなどで得たもの) を根の LP 解との RINS で磨く
                 if self.incumbent.is_some() && env_str!("ENOMOTO_MIP_NO_ROOT_RINS").is_none() {
                     heur!("RINS", self.rins(&x));
+                }
+                if par_late {
+                    self.parallel_submips = false;
+                    self.join_submips(0);
                 }
                 if self.params.verbose {
                     eprintln!("MIP: after root heuristics: incumbent {:?} ({:.2}s)", self.incumbent.as_ref().map(|(z, _)| *z), self.start.elapsed().as_secs_f64());
