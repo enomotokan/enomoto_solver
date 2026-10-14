@@ -106,7 +106,13 @@ pub fn solve_mip(
 ) -> SolveResult {
     let has_discrete = variables.iter().any(|v| v.vtype != VarType::Continuous);
     if !has_discrete {
-        return solve_lp(variables, objective, constraints, root_solver, opts);
+        // 制限時間: 期限を過ぎると各解法は結論なしで戻る ([`crate::cancel::with_deadline`])。そのときは `TimeLimit`
+        let deadline = settings.time_limit.filter(|t| t.is_finite()).map(|t| std::time::Instant::now() + std::time::Duration::from_secs_f64(t.max(0.0)));
+        let mut r = crate::cancel::with_deadline(deadline, || solve_lp(variables, objective, constraints, root_solver, opts));
+        if r.status == Status::NotSolved && deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            r.status = Status::TimeLimit;
+        }
+        return r;
     }
     let p = MipProblem::from_model(variables, objective, constraints);
     if let Ok(mut st) = RUN_STATS.lock() {

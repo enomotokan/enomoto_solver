@@ -7,19 +7,50 @@
 //! トークンはスレッドローカルに置く ([`with_token`])。求解の関数の引数 (`LpOptions` など) を変えずに
 //! 済み、トークンを持たないスレッド (通常の求解) では常に偽。rayon で作業を別スレッドに分ける箇所
 //! (連結成分の並列求解) は [`current`] で取り出したトークンを各タスクで [`with_token`] し直す。
+//!
+//! LP の制限時間 (`Model.solve(time_limit=...)`) は、トークンとは別にスレッドローカルの期限 ([`with_deadline`]) で
+//! 持つ。同時実行はトークンを自分のものに置き換えるので、期限はトークンに載せず、別スレッドに仕事を渡す箇所
+//! (同時実行、連結成分の並列求解) で [`deadline`] を取り出して渡し直す。期限を過ぎると [`is_cancelled`] が真になり、
+//! 各解法は打ち切りと同じく結論なしで戻る。
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 thread_local! {
     static TOKEN: RefCell<Option<Arc<AtomicBool>>> = const { RefCell::new(None) };
+    static DEADLINE: Cell<Option<Instant>> = const { Cell::new(None) };
 }
 
-/// このスレッドの求解が打ち切りを求められているか。
+/// このスレッドの求解が打ち切りを求められているか (トークンが立った、または期限を過ぎた)。
 #[inline]
 pub fn is_cancelled() -> bool {
-    TOKEN.with(|t| t.borrow().as_ref().is_some_and(|a| a.load(Ordering::Relaxed)))
+    TOKEN.with(|t| t.borrow().as_ref().is_some_and(|a| a.load(Ordering::Relaxed))) || deadline_passed()
+}
+
+/// このスレッドの期限 (なければ `None`)。
+pub fn deadline() -> Option<Instant> {
+    DEADLINE.with(|d| d.get())
+}
+
+/// このスレッドの期限を過ぎたか。
+#[inline]
+pub fn deadline_passed() -> bool {
+    deadline().is_some_and(|d| Instant::now() >= d)
+}
+
+/// `deadline` (今の期限より早ければ) をこのスレッドの期限にして `f` を実行し、元に戻す。
+pub fn with_deadline<R>(deadline: Option<Instant>, f: impl FnOnce() -> R) -> R {
+    let prev = DEADLINE.with(|d| d.get());
+    let new = match (prev, deadline) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    };
+    DEADLINE.with(|d| d.set(new));
+    let r = f();
+    DEADLINE.with(|d| d.set(prev));
+    r
 }
 
 /// このスレッドのトークン (なければ `None`)。

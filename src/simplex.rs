@@ -1797,9 +1797,10 @@ fn solve_std_form_decomposed(std: &StdForm, opts: &crate::types::LpOptions) -> S
 /// warm start の LU の検算 (`slope_intercept_dual::warm_lu_matches`) と解き直しの印の保護で備える。
 fn par_components<T: Sync, R: Send>(items: &[T], sizes: &[usize], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
     let token = crate::cancel::current();
+    let deadline = crate::cancel::deadline();
     if tunable!("ENOMOTO_T_SPLIT_DEDICATED", 0u8, u8) == 0 {
         use rayon::prelude::*;
-        return items.par_iter().map(|it| crate::cancel::with_token(token.clone(), || f(it))).collect();
+        return items.par_iter().map(|it| crate::cancel::with_deadline(deadline, || crate::cancel::with_token(token.clone(), || f(it)))).collect();
     }
     let total = rayon::current_num_threads().max(1);
     let k = total.min(items.len());
@@ -1822,7 +1823,7 @@ fn par_components<T: Sync, R: Send>(items: &[T], sizes: &[usize], f: impl Fn(&T)
                     let run = || loop {
                         let t = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         let Some(&i) = order.get(t) else { break };
-                        let r = crate::cancel::with_token(token.clone(), || f(&items[i]));
+                        let r = crate::cancel::with_deadline(deadline, || crate::cancel::with_token(token.clone(), || f(&items[i])));
                         *slots[i].lock().unwrap() = Some(r);
                     };
                     match rayon::ThreadPoolBuilder::new().num_threads(p).thread_name(move |j| format!("enomoto-c{w}-{j}")).build() {

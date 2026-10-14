@@ -383,6 +383,9 @@ pub fn solve(qp: &QpStd) -> IpmResult {
     let mut stall = 0usize;
 
     for _iter in 0..MAX_ITERS {
+        if crate::cancel::is_cancelled() {
+            return IpmResult { status: Status::NotSolved, x: None }; // 制限時間を過ぎた (状態は推定しない)
+        }
         csr_mat_vec_into(a, &x, &mut ws.ax);
         csr_mat_vec_into(g, &x, &mut ws.gx);
 
