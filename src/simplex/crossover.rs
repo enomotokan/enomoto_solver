@@ -2017,7 +2017,15 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
             // 修復の時間の上限: ここまでのクロスオーバー (内点法を含む) の時間の `ENOMOTO_T_XO_REPAIR_TIME_FACTOR` 倍 (既定 2、
             // 0 で上限なし)、10 秒以上。超えたら修復をやめて仕上げに進む (cont11: 内点法の点のわずかな違いで修復が 18 秒から
             // 600 秒超に延びた)。
-            let rfac = tunable!("ENOMOTO_T_XO_REPAIR_TIME_FACTOR", 2.0f64, f64);
+            // 二段解法と同時に解いているとき (共有の下界がある: `RootSolver::Auto` の同時実行) は、修復が長引いても二段解法が
+            // 先に結論を出すので上限は要らない。打ち切ると修復した基底からの仕上げに進み、修復を続けるより遅いことがある
+            // (irish-electricity、auto 16 スレッド: 修復 16.6 秒が上限 約 15 秒を超え、仕上げ 150 秒超で二段解法に負けた。
+            // 上限なしなら 29 秒)。同時実行での倍率は `ENOMOTO_T_XO_REPAIR_TIME_FACTOR_RACE` (既定 0 = 上限なし)。
+            let rfac = if crate::cancel::bound().is_some() {
+                tunable!("ENOMOTO_T_XO_REPAIR_TIME_FACTOR_RACE", 0.0f64, f64)
+            } else {
+                tunable!("ENOMOTO_T_XO_REPAIR_TIME_FACTOR", 2.0f64, f64)
+            };
             let repair_deadline = (rfac > 0.0).then(|| Instant::now() + std::time::Duration::from_secs_f64((rfac * t0.elapsed().as_secs_f64()).clamp(10.0, 1e6)));
             match repair_vertex(std, yi, &basis, &basis_pos, &nb_status, &lu, accept_gap, repair_deadline, debug) {
                 Ok(r) => {
