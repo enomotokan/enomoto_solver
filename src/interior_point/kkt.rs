@@ -1121,6 +1121,33 @@ impl NormalKkt {
                         }
                     }
                 });
+            } else if block > 0 && self.pardiso.is_none() && tunable!("ENOMOTO_T_WOODBURY_FAER_PAR", 1u8, u8) != 0 {
+                // faer の分解 (simplicial を選んだ小さな因子) でも、列を束ねて複数の右辺を 1 回で解き (因子を 1 回読むだけで
+                // 済む)、束どうしは並列に回す。従来は 1 本ずつ逐次に解いていて、stormG2_1000 (行 37.8 万、稠密な列 119 本、
+                // nnz(L) 458 万) では分解そのものは 8.6e7 flops なのに Woodbury の求解で 1 反復 1.7 秒かかっていた。
+                use rayon::prelude::*;
+                let llt = faer::sparse::linalg::cholesky::LltRef::<usize, f64>::new(&self.chol_symbolic, &self.l_values);
+                let req = self.chol_symbolic.solve_in_place_req::<f64>(block).unwrap();
+                let dscale = &self.dscale;
+                w.par_chunks_mut(p * block).for_each(|cols| {
+                    let nc = cols.len() / p;
+                    if !dscale.is_empty() {
+                        for col in cols.chunks_mut(p) {
+                            for (v, s) in col.iter_mut().zip(dscale) {
+                                *v *= s;
+                            }
+                        }
+                    }
+                    let mut buf = GlobalPodBuffer::new(req);
+                    llt.solve_in_place_with_conj(Conj::No, from_column_major_slice_mut(cols, p, nc), faer::Parallelism::None, PodStack::new(&mut buf));
+                    if !dscale.is_empty() {
+                        for col in cols.chunks_mut(p) {
+                            for (v, s) in col.iter_mut().zip(dscale) {
+                                *v *= s;
+                            }
+                        }
+                    }
+                });
             } else {
                 for q in 0..k {
                     self.solve_ms(&mut w[q * p..(q + 1) * p]);

@@ -1958,9 +1958,19 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
         // 押し出しの時間の上限: 内点法の時間の `ENOMOTO_T_XO_MEGIDDO_TIME_FACTOR` 倍 (既定 2) + 1 秒。超えたら残りは近い方の
         // 境界に置いたまま仕上げに任せる (qap15: 超基底 2,317 本、基底の LU の fill が多く 1 本ごとの FTRAN が重い)。
         // 既定 1 では ex10 (内点法 16 秒、押し出し 25 秒) が間に合わず諦めていた。
-        let mfac = tunable!("ENOMOTO_T_XO_MEGIDDO_TIME_FACTOR", 2.0f64, f64);
+        // 二段解法と同時に解いているとき (共有の下界がある) は、上限の役目 (止まらないこと) を同時実行の二段解法が果たすので
+        // 上限をかけない (`ENOMOTO_T_XO_MEGIDDO_TIME_FACTOR_RACE`、既定 0 = 上限なし。頂点の修復の上限と同じ考え方)。
+        // neos-5251015 (auto 16 スレッド): 内点法 9 秒の後の超基底 9.3 万本の押し出しに 123 秒かかり、上限 19 秒で諦めると
+        // 二段解法も解けず結論なし。上限なしなら 134 秒で最適 (HiGHS 376 秒)。
+        let in_race = crate::cancel::bound().is_some();
+        let mfac = if in_race {
+            tunable!("ENOMOTO_T_XO_MEGIDDO_TIME_FACTOR_RACE", 0.0f64, f64)
+        } else {
+            tunable!("ENOMOTO_T_XO_MEGIDDO_TIME_FACTOR", 2.0f64, f64)
+        };
         // 小さな問題で打ち切らないよう 1 秒の下駄をはかせる (第 32 回: 下駄なしでは Netlib が 1.05 倍遅かった)。
-        let deadline = Instant::now() + std::time::Duration::from_secs_f64((mfac * ipm_secs + if mfac > 0.0 { 1.0 } else { 0.0 }).clamp(0.0, 1e6));
+        let secs = if in_race && mfac <= 0.0 { 1e6 } else { mfac * ipm_secs + if mfac > 0.0 { 1.0 } else { 0.0 } };
+        let deadline = Instant::now() + std::time::Duration::from_secs_f64(secs.clamp(0.0, 1e6));
         // 押し出しの間の再分解は、LU が密になった基底で稠密切替を早めに使う (行数 2000 以上・直前の LU が 1 行 16 要素以上・
         // 密度 0.1。qap15 で押し出しが 1,000 秒超 → 6 秒。二段解法全体に広げると maros-r7 が 25% 遅くなったのでここだけ。
         // `ENOMOTO_T_XO_MEGIDDO_DENSE=0` で使わない)。
