@@ -5289,6 +5289,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
         };
         let pool = std::sync::Arc::new(WorkPool::new(self.params.threads, self.dom.global_lo.clone(), self.dom.global_up.clone(), self.pc.clone()));
         self.tprof.workers_s = self.start.elapsed().as_secs_f64();
+        if prof_tree_par() {
+            eprintln!(
+                "TREEPAR: spawn at {:.2}s tree start {:.2}s nodes {} sb {:.2}s ({} LPs, {} iters) node LP {:.2}s ({} LPs, {} iters)",
+                self.tprof.workers_s, self.tprof.tree_start_s, self.nodes, self.sb_secs, self.sb_lps, self.sb_iters, self.node_lp_secs, self.node_lps, self.node_iters
+            );
+        }
         self.pool = Some(pool.clone());
         self.pool_busy = true;
         self.pc_base = Some(self.pc.clone());
