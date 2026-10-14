@@ -72,12 +72,16 @@ pub(super) fn solve_race(std: Arc<StdForm>, opts: crate::types::LpOptions) -> Si
     let (tx, rx) = mpsc::channel::<(Engine, Option<SimplexResult>)>();
     // 二段解法 (段階 B) が書き、内点法が読む元の問題の最適値の下界。
     let bound = crate::cancel::SharedBound::new(std.n_total, std.n_rows);
+    // 制限時間の期限 (別スレッドに渡し直す)
+    let deadline = crate::cancel::deadline();
 
     {
         let (std, cancel, tx, bound) = (std.clone(), cancel.clone(), tx.clone(), bound.clone());
         std::thread::spawn(move || {
             let r = pool_s.install(|| {
-                crate::cancel::with_token(Some(cancel), || crate::cancel::with_bound(Some(bound), || solve_simplex_block(&std, &opts)))
+                crate::cancel::with_deadline(deadline, || {
+                    crate::cancel::with_token(Some(cancel), || crate::cancel::with_bound(Some(bound), || solve_simplex_block(&std, &opts)))
+                })
             });
             let _ = tx.send((Engine::Simplex, Some(r)));
         });
@@ -86,7 +90,9 @@ pub(super) fn solve_race(std: Arc<StdForm>, opts: crate::types::LpOptions) -> Si
         let (std, cancel, tx, bound) = (std.clone(), cancel.clone(), tx.clone(), bound.clone());
         std::thread::spawn(move || {
             let r = pool_i.install(|| {
-                crate::cancel::with_token(Some(cancel), || crate::cancel::with_bound(Some(bound), || crossover::solve_ipm_crossover(&std)))
+                crate::cancel::with_deadline(deadline, || {
+                    crate::cancel::with_token(Some(cancel), || crate::cancel::with_bound(Some(bound), || crossover::solve_ipm_crossover(&std)))
+                })
             });
             let _ = tx.send((Engine::IpmCrossover, r));
         });
@@ -140,6 +146,7 @@ pub(super) fn solve_race_groups(subs: Vec<Arc<StdForm>>, opts: crate::types::LpO
     let bounds: Arc<Vec<crate::cancel::SharedBound>> = Arc::new(subs.iter().map(|s| crate::cancel::SharedBound::new(s.n_total, s.n_rows)).collect());
     // 外側の打ち切り (この呼び出し自体が別の同時実行の中にあるとき) を各組のトークンに伝える。
     let outer = crate::cancel::current();
+    let deadline = crate::cancel::deadline();
     // 大きい順 (行列の非零の数)。内点法側はこの順、二段解法側は逆順に解く。
     let mut order: Vec<usize> = (0..k).collect();
     order.sort_by_key(|&g| std::cmp::Reverse(subs[g].cols.nnz()));
@@ -154,7 +161,9 @@ pub(super) fn solve_race_groups(subs: Vec<Arc<StdForm>>, opts: crate::types::LpO
                     if tokens[g].load(Ordering::SeqCst) {
                         continue;
                     }
-                    let r = crate::cancel::with_token(Some(tokens[g].clone()), || crate::cancel::with_bound(Some(bounds[g].clone()), || solve_simplex_block(&subs[g], &opts)));
+                    let r = crate::cancel::with_deadline(deadline, || {
+                        crate::cancel::with_token(Some(tokens[g].clone()), || crate::cancel::with_bound(Some(bounds[g].clone()), || solve_simplex_block(&subs[g], &opts)))
+                    });
                     if tx.send((g, Engine::Simplex, r)).is_err() {
                         break;
                     }
@@ -171,7 +180,9 @@ pub(super) fn solve_race_groups(subs: Vec<Arc<StdForm>>, opts: crate::types::LpO
                     if tokens[g].load(Ordering::SeqCst) {
                         return;
                     }
-                    let r = crate::cancel::with_token(Some(tokens[g].clone()), || crate::cancel::with_bound(Some(bounds[g].clone()), || crossover::solve_ipm_crossover(&subs[g])));
+                    let r = crate::cancel::with_deadline(deadline, || {
+                        crate::cancel::with_token(Some(tokens[g].clone()), || crate::cancel::with_bound(Some(bounds[g].clone()), || crossover::solve_ipm_crossover(&subs[g])))
+                    });
                     let _ = tx.send((g, Engine::IpmCrossover, r.unwrap_or(SimplexResult { status: Status::NotSolved, x: None })));
                 });
             });
@@ -187,7 +198,7 @@ pub(super) fn solve_race_groups(subs: Vec<Arc<StdForm>>, opts: crate::types::LpO
     let mut wins = [0usize; 2];
     while open > 0 {
         let Ok((g, engine, r)) = rx.recv_timeout(std::time::Duration::from_millis(50)) else {
-            if outer.as_ref().is_some_and(|t| t.load(Ordering::Relaxed)) {
+            if outer.as_ref().is_some_and(|t| t.load(Ordering::Relaxed)) || crate::cancel::deadline_passed() {
                 for t in tokens.iter() {
                     t.store(true, Ordering::SeqCst);
                 }
@@ -244,8 +255,11 @@ fn solve_race_small(std: Arc<StdForm>, opts: crate::types::LpOptions) -> Simplex
     let (tx, rx) = mpsc::channel::<Option<SimplexResult>>();
     {
         let (std, cancel, bound) = (std.clone(), cancel.clone(), bound.clone());
+        let deadline = crate::cancel::deadline();
         pool.spawn(move || {
-            let r = crate::cancel::with_token(Some(cancel.clone()), || crate::cancel::with_bound(Some(bound), || crossover::solve_ipm_crossover(&std)));
+            let r = crate::cancel::with_deadline(deadline, || {
+                crate::cancel::with_token(Some(cancel.clone()), || crate::cancel::with_bound(Some(bound), || crossover::solve_ipm_crossover(&std)))
+            });
             // 結論が出たら先に立てて二段解法を止める (二段解法が先なら立っている)。
             let won = r.as_ref().is_some_and(|r| r.status != Status::NotSolved) && !cancel.swap(true, Ordering::SeqCst);
             let _ = tx.send(if won { r } else { None });

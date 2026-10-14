@@ -28,6 +28,10 @@ use super::{sparse_lu, StdForm};
 use crate::params::lu::DENSE_RHS_FRACTION;
 use crate::params::simplex::{FT_BUMP_LIMIT_FACTOR, FT_CHECK_INTERVAL, FT_MIN_PIVOT};
 use crate::params::slope_intercept_dual::{FTRAN_U_HYPER_DENSITY, FT_MAX_UPDATES_FACTOR, FT_MAX_UPDATES_FLOOR, SYNTH_CLOCK_FACTOR, SYNTH_CLOCK_LARGE_M, SYNTH_CLOCK_LARGE_REF_M, SYNTH_CLOCK_MID_REF_MULT, SYNTH_CLOCK_MIN_UPDATES};
+use crate::params::slope_intercept_dual::{
+    D_GROSS_MISMATCH_REL_TOL, GROSS_MISMATCH_SCALE_FLOOR, XB_CHECK_FULL_EVERY, XB_CHECK_INTERVAL, XB_DRIFT_ESCALATION_FACTOR, XB_DRIFT_ESCALATION_STEP, XB_DRIFT_FRESH_FLOOR_FACTOR,
+    XB_DRIFT_FRESH_FLOOR_FRAC, XB_DRIFT_MIN_UPDATES, XB_DRIFT_MIN_UPDATES_MULT, XB_DRIFT_REL_K, XB_DRIFT_REL_TOL, XB_DRIFT_SAMPLE_GUARD, XB_DRIFT_SAMPLE_K, XB_DRIFT_TOL, XB_DRIFT_TOL_MAX,
+};
 use std::sync::OnceLock;
 
 /// [`BasisKernel::update_and_check_with`] の判定結果 (どのトリガで再分解が要るか)。
@@ -434,6 +438,16 @@ impl BasisKernel {
         self.check_after_update(lu, updated, density)
     }
 
+    /// ピボットの 2 通りの値の照合 (HiGHS `updateVerify` 相当、[`super::pivot_values_agree`])。`col` は入る列、`rho` は
+    /// ピボット行の BTRAN の結果 ([`Self::btran_row`])、`alpha_col` は入る列の FTRAN の結果のピボット行の値。行の値は
+    /// `rho · col`。基底を入れ替える**前**に呼び、合わなければ呼び出し側がこのピボットを捨てて再分解し、選び直す
+    /// (双対単体法の主ループと同じ。入れ替えてから再分解すると、不正確なピボットで動かした値が残る)。再分解の直後
+    /// (更新 0 回) は再分解しても直らないので照合せず真を返す。
+    pub(super) fn pivot_agrees(&self, lu: &sparse_lu::FtLu, col: &[(usize, f64)], rho: &[f64], alpha_col: f64) -> bool {
+        let alpha_row: f64 = col.iter().map(|&(i, a)| a * rho[i]).sum();
+        !pivot_values_disagree(lu, alpha_row, alpha_col)
+    }
+
     /// FT 更新の後の再分解トリガ (2)(4)(5)(3) ([`Self::update_and_check`] の説明の順)。
     #[inline]
     fn check_after_update(&mut self, lu: &sparse_lu::FtLu, updated: bool, density: SynthDensity) -> RefactorDue {
@@ -487,6 +501,201 @@ impl BasisKernel {
 /// 分解が得られるかどうかは変わらず、手間だけが変わる。特異基底なら `None`。
 /// 主単体法・双対単体法の再分解はすべてこれを通る (双対単体法は特異のときの印を
 /// `slope_intercept_dual::refactorize` で付け足す)。
+/// 基底解 `x_B` の残差の相対値: `r = rhs - B x_B` の各行を、その行の大きさ `1 + |rhs_i| + Σ_k |B_ik x_B_k|` で割った
+/// 値の最大 (`rhs` は呼び出し側が非基底の値を引いた右辺 `b - A_N x_N`)。FT 更新を重ねた LU の誤差で `x_B` がずれていないかを、
+/// 実際の行列で確かめる (双対単体法の主ループの `x_B` のずれの検査と同じ考え方)。手間は基底の列の非零の数。
+pub(super) fn basic_residual(std: &StdForm, basis: &[usize], xb: &[f64], rhs: &[f64]) -> f64 {
+    let m = std.n_rows;
+    let mut r = rhs.to_vec();
+    let mut act = vec![0.0f64; m];
+    for (k, &j) in basis.iter().enumerate() {
+        let v = xb[k];
+        if v == 0.0 {
+            continue;
+        }
+        for &(i, a) in std.cols.col(j) {
+            r[i] -= a * v;
+            act[i] += (a * v).abs();
+        }
+    }
+    (0..m).map(|i| r[i].abs() / (1.0 + rhs[i].abs() + act[i])).fold(0.0, f64::max)
+}
+
+// ---------------------------------------------------------------- ピボットの安全機構 (双対単体法の主ループ・押し出しで共有)
+
+/// 照合 ([`super::pivot_values_agree`]) が合わないか。再分解の直後 (更新 0 回) は再分解しても直らないので、合わない
+/// とはみなさない (双対単体法の主ループ・仕上げ・押し出しで共通)。
+#[inline]
+pub(super) fn pivot_values_disagree(lu: &sparse_lu::FtLu, alpha_row: f64, alpha_col: f64) -> bool {
+    lu.update_count() > 0 && !super::pivot_values_agree(alpha_row, alpha_col)
+}
+
+/// ピボットの 2 通りの値の桁がまったく合わない (片方が実質 0) か。[`pivot_values_disagree`] よりずっと緩い第 2 の検査で、
+/// 更新の回数によらず行う。そのまま基底に入れると基底行列が特異になり、以後の再計算はすべて無意味になるので、確定前に
+/// しか防げない。尺度は `FT_MIN_PIVOT` で下限を取らない (取ると小さな値同士の桁違いを見逃す)。`GROSS_MISMATCH_SCALE_FLOOR`
+/// (1e-300) は 0/0 の回避だけが目的。
+#[inline]
+pub(super) fn pivot_grossly_inconsistent(alpha_row: f64, alpha_col: f64) -> bool {
+    let scale = alpha_row.abs().max(alpha_col.abs()).max(GROSS_MISMATCH_SCALE_FLOOR);
+    (alpha_row - alpha_col).abs() / scale > D_GROSS_MISMATCH_REL_TOL
+}
+
+/// 特異になる基底の事前検査: `|alpha_r|` が `FT_MIN_PIVOT` 未満なら、FT 更新はこのピボットを拒否し、`q` を入れた基底を
+/// 丸ごと再分解することになる。その基底がほぼ一次従属だと再分解が特異で失敗し、確定済みの状態を戻せない (greenbea_dual:
+/// `|alpha_r|` = 3.5e-8、2.5e-9)。そこで確定前に、基底位置 `r` の `leaving` を `q` に入れ替えた基底で
+/// `is_singular` (基底の位置の表を受け取り、再分解が特異なら真) を試し、元に戻す。`|alpha_r|` が小さいときだけ試す
+/// (正則なら何も変えない)。特異なら真 (呼び出し側はこのピボットを捨てて選び直す)。
+pub(super) fn pivot_makes_singular(basis_pos: &mut [Option<usize>], leaving: usize, q: usize, r: usize, alpha_r: f64, is_singular: impl FnOnce(&[Option<usize>]) -> bool) -> bool {
+    if alpha_r.abs() >= tunable!("ENOMOTO_T_FT_MIN_PIVOT", FT_MIN_PIVOT, f64) {
+        return false;
+    }
+    basis_pos[leaving] = None;
+    basis_pos[q] = Some(r);
+    let singular = is_singular(basis_pos);
+    basis_pos[q] = None;
+    basis_pos[leaving] = Some(r);
+    singular
+}
+
+/// `x_B` のずれの検査の方針と状態 (双対単体法の主ループから移した。残差そのものの計算は呼び出し側が持つ: 傾き・切片法は
+/// 基底と傾きの 2 つのチャネルを持つ)。
+///
+/// - 許容誤差の出発点は [`XB_DRIFT_TOL`] (`ENOMOTO_XB_DRIFT_TOL`)。1 回の求解内でドリフト起因の再分解が
+///   [`XB_DRIFT_ESCALATION_STEP`] 回起きるごとに [`XB_DRIFT_ESCALATION_FACTOR`] 倍に緩める (上限 [`XB_DRIFT_TOL_MAX`])。
+///   再分解後最初の検査 (FT 更新 [`XB_CHECK_INTERVAL`] 回以内) で既に超えていれば、次の段へすぐ緩める。
+/// - 再分解直後の残差による下限 (`ENOMOTO_XB_DRIFT_REL_K`)、更新の少ない eta での緩和 (`ENOMOTO_XB_DRIFT_MIN_UPDATES`)、
+///   新規残差の下限 (`ENOMOTO_XB_DRIFT_FRESH_FLOOR`) (どれも既定オフ)。
+/// - 丸め誤差の尺度に対する相対判定 ([`XB_DRIFT_REL_TOL`]、`ENOMOTO_XB_DRIFT_REL_TOL`)。
+/// - 巡回行の標本による事前検査 (`ENOMOTO_XB_DRIFT_SAMPLE`、既定オフ) と、その全体の検査の周期 (`ENOMOTO_T_XB_CHECK_FULL_EVERY`)。
+pub(super) struct XbDriftGuard {
+    base_tol: f64,
+    rel_tol: f64,
+    trigger_count: usize,
+    resid_after_refactor: f64,
+    sample_k: usize,
+    sample_guard: f64,
+    sample_offset: usize,
+    full_every: usize,
+    checks_since_full: usize,
+    last_scale: (f64, f64),
+    fresh_floor_factor: f64,
+    fresh_floor_frac: f64,
+    fresh_floor: f64,
+}
+
+impl XbDriftGuard {
+    /// 双対単体法の主ループの既定 (環境変数の上書きを含む)。
+    pub(super) fn from_env() -> Self {
+        XbDriftGuard {
+            base_tol: env_str!("ENOMOTO_XB_DRIFT_TOL").and_then(|s| s.parse::<f64>().ok()).unwrap_or(XB_DRIFT_TOL),
+            rel_tol: tunable!("ENOMOTO_XB_DRIFT_REL_TOL", XB_DRIFT_REL_TOL, f64),
+            trigger_count: 0,
+            resid_after_refactor: 0.0,
+            sample_k: tunable!("ENOMOTO_XB_DRIFT_SAMPLE", XB_DRIFT_SAMPLE_K, usize),
+            sample_guard: tunable!("ENOMOTO_XB_DRIFT_SAMPLE_GUARD", XB_DRIFT_SAMPLE_GUARD, f64),
+            sample_offset: 0,
+            full_every: tunable!("ENOMOTO_T_XB_CHECK_FULL_EVERY", XB_CHECK_FULL_EVERY, usize),
+            checks_since_full: 0,
+            last_scale: (0.0, 0.0),
+            fresh_floor_factor: tunable!("ENOMOTO_XB_DRIFT_FRESH_FLOOR", XB_DRIFT_FRESH_FLOOR_FACTOR, f64),
+            fresh_floor_frac: tunable!("ENOMOTO_XB_DRIFT_FRESH_FLOOR_FRAC", XB_DRIFT_FRESH_FLOOR_FRAC, f64),
+            fresh_floor: 0.0,
+        }
+    }
+
+    /// 段階的に緩めた許容誤差 (再分解直後の下限などを入れる前)。
+    fn escalated_tol(&self) -> f64 {
+        let steps = (self.trigger_count / tunable!("ENOMOTO_T_XB_DRIFT_ESCALATION_STEP", XB_DRIFT_ESCALATION_STEP, usize)) as i32;
+        (self.base_tol * XB_DRIFT_ESCALATION_FACTOR.powi(steps)).min(XB_DRIFT_TOL_MAX)
+    }
+
+    /// FT 更新 `updates` 回の時点の実効の許容誤差。
+    pub(super) fn effective_tol(&self, updates: usize) -> f64 {
+        let mut tol = self.escalated_tol();
+        if updates > XB_CHECK_INTERVAL {
+            // 相対下限: 再分解直後の残差より下には再分解しても下がらない。
+            let rel_k: f64 = tunable!("ENOMOTO_XB_DRIFT_REL_K", XB_DRIFT_REL_K, f64);
+            tol = tol.max((rel_k * self.resid_after_refactor).min(XB_DRIFT_TOL_MAX));
+        }
+        // 更新回数の少ない eta ファイルでは、再分解が割に合うまで中程度のドリフトを許す。
+        let min_updates: usize = tunable!("ENOMOTO_XB_DRIFT_MIN_UPDATES", XB_DRIFT_MIN_UPDATES, usize);
+        if updates < min_updates {
+            let mult: f64 = tunable!("ENOMOTO_XB_DRIFT_MIN_UPDATES_MULT", XB_DRIFT_MIN_UPDATES_MULT, f64);
+            tol = tol.max((mult * tol).min(XB_DRIFT_TOL_MAX));
+        }
+        if self.fresh_floor > 0.0 {
+            tol = tol.max(self.fresh_floor);
+        }
+        tol
+    }
+
+    /// 標本の事前検査で全体の検査を省いてよいか。`estimate(k, offset)` は `1/k` の巡回行の標本による (基底, 傾き) の
+    /// 残差の推定。再分解後最初の検査と、`full_every` 回に 1 回は必ず全体の検査を行う。結果に応じて全体の検査の周期を数える。
+    pub(super) fn sample_clear(&mut self, updates: usize, tol: f64, estimate: impl FnOnce(usize, usize) -> (f64, f64), debug_iter: Option<usize>) -> bool {
+        let force_full = self.full_every > 0 && self.checks_since_full + 1 >= self.full_every;
+        let clear = self.sample_k >= 2 && updates > XB_CHECK_INTERVAL && !force_full && {
+            let (sb, ss) = estimate(self.sample_k, self.sample_offset);
+            self.sample_offset = (self.sample_offset + 1) % self.sample_k;
+            if let Some(it) = debug_iter {
+                eprintln!("DEBUG_XB_DRIFT_SAMPLE: iter={it} est_base={sb:.3e} est_slope={ss:.3e} effective_tol={tol:.3e}");
+            }
+            // 直近の全体検査で測った丸め誤差の尺度 (相対判定) も許容誤差に含める (ken-11)。
+            let (tb, ts) = if self.rel_tol > 0.0 { (tol.max(self.rel_tol * self.last_scale.0), tol.max(self.rel_tol * self.last_scale.1)) } else { (tol, tol) };
+            sb <= self.sample_guard * tb && ss <= self.sample_guard * ts
+        };
+        if clear {
+            self.checks_since_full += 1;
+        } else {
+            self.checks_since_full = 0;
+        }
+        clear
+    }
+
+    /// 全体の検査の判定: (基底, 傾き) の残差 `resid` が許容誤差 `tol` を超え、丸め誤差の尺度 `scale()` (絶対判定で
+    /// 発火しそうなときだけ計算する) に対しても大きければ再分解する (真を返す)。再分解するときはドリフト起因の回数を
+    /// 数え、再分解後最初の検査なら次の段へすぐ緩める (klein3: 再分解 22 → 15 回)。
+    pub(super) fn judge(&mut self, updates: usize, resid: (f64, f64), tol: f64, scale: impl FnOnce() -> (f64, f64), debug_iter: Option<usize>) -> bool {
+        let resid_max = resid.0.max(resid.1);
+        if updates <= XB_CHECK_INTERVAL {
+            self.resid_after_refactor = resid_max;
+        }
+        if let Some(it) = debug_iter {
+            eprintln!("DEBUG_XB_DRIFT: iter={it} resid_base={:.3e} resid_slope={:.3e} drift_trigger_count={} effective_tol={tol:.3e}", resid.0, resid.1, self.trigger_count);
+        }
+        let mut refactor = resid_max > tol;
+        if refactor && self.rel_tol > 0.0 {
+            let (sb, ss) = scale();
+            refactor = resid.0 > tol.max(self.rel_tol * sb) || resid.1 > tol.max(self.rel_tol * ss);
+            self.last_scale = (sb, ss);
+            if let Some(it) = debug_iter {
+                eprintln!("DEBUG_XB_DRIFT_REL: iter={it} scale_base={sb:.3e} scale_slope={ss:.3e} refactor={refactor}");
+            }
+        }
+        if refactor {
+            self.trigger_count += 1;
+            if updates <= XB_CHECK_INTERVAL {
+                let step = tunable!("ENOMOTO_T_XB_DRIFT_ESCALATION_STEP", XB_DRIFT_ESCALATION_STEP, usize);
+                self.trigger_count = self.trigger_count.div_ceil(step) * step;
+            }
+        }
+        refactor
+    }
+
+    /// 新規残差の下限を使うか (`ENOMOTO_XB_DRIFT_FRESH_FLOOR` が正)。
+    pub(super) fn wants_fresh_residual(&self) -> bool {
+        self.fresh_floor_factor > 0.0
+    }
+
+    /// 再分解の直後に測った残差 `fresh` で新規残差の下限を更新する ([`Self::wants_fresh_residual`] のときだけ呼ぶ)。
+    pub(super) fn on_refactor_fresh(&mut self, fresh: f64, debug_iter: Option<usize>) {
+        let tol_now = self.escalated_tol();
+        self.fresh_floor = if fresh > self.fresh_floor_frac * tol_now { (self.fresh_floor_factor * fresh).min(XB_DRIFT_TOL_MAX) } else { 0.0 };
+        if let Some(it) = debug_iter {
+            eprintln!("DEBUG_XB_DRIFT_FRESH: iter={it} fresh_resid={fresh:.3e} tol={tol_now:.3e} floor={:.3e}", self.fresh_floor);
+        }
+    }
+}
+
 pub(super) fn factorize_basis(
     std: &StdForm,
     basis_pos: &[Option<usize>],
