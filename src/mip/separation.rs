@@ -1370,32 +1370,37 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     for &(i, w) in &weights {
                         base.push((n + i, -w));
                     }
-                    let neg: Vec<(usize, f64)> = base.iter().map(|&(k, a)| (k, -a)).collect();
-                    if gen_old() {
-                        push(cmir(vars, &base, 0.0), cands, self);
-                        if use_lifted_cover() {
-                            push(lifted_cover(vars, &base, 0.0), cands, self);
-                        }
-                        push(cmir(vars, &neg, 0.0), cands, self);
-                        if use_lifted_cover() {
-                            push(lifted_cover(vars, &neg, 0.0), cands, self);
-                        }
-                        if use_flow_cover() {
-                            push(lifted_flow_cover(vars, &base, 0.0), cands, self);
-                            push(lifted_flow_cover(vars, &neg, 0.0), cands, self);
-                        }
+                    // 並列の分離: 集約した行を集めるだけにする (カットは呼び出し側でまとめて作る)
+                    if let Some(col) = self.path_collect.as_mut() {
+                        col.push(base);
                     } else {
-                        for b in [&base, &neg] {
-                            let n0 = cands.len();
-                            for r in generate_cuts(vars, b, 0.0, use_flow_cover(), false) {
-                                push(Some(r), cands, self);
+                        let neg: Vec<(usize, f64)> = base.iter().map(|&(k, a)| (k, -a)).collect();
+                        if gen_old() {
+                            push(cmir(vars, &base, 0.0), cands, self);
+                            if use_lifted_cover() {
+                                push(lifted_cover(vars, &base, 0.0), cands, self);
                             }
-                            keep_best(cands, n0, self.p);
+                            push(cmir(vars, &neg, 0.0), cands, self);
+                            if use_lifted_cover() {
+                                push(lifted_cover(vars, &neg, 0.0), cands, self);
+                            }
+                            if use_flow_cover() {
+                                push(lifted_flow_cover(vars, &base, 0.0), cands, self);
+                                push(lifted_flow_cover(vars, &neg, 0.0), cands, self);
+                            }
+                        } else {
+                            for b in [&base, &neg] {
+                                let n0 = cands.len();
+                                for r in generate_cuts(vars, b, 0.0, use_flow_cover(), false) {
+                                    push(Some(r), cands, self);
+                                }
+                                keep_best(cands, n0, self.p);
+                            }
                         }
-                    }
-                    // HiGHS と同じく、カットが出たら経路を伸ばさない (`ENOMOTO_MIP_PATH_STOP_ON_CUT`)
-                    if cands.len() > n_before && stop_on_cut {
-                        break;
+                        // HiGHS と同じく、カットが出たら経路を伸ばさない (`ENOMOTO_MIP_PATH_STOP_ON_CUT`)
+                        if cands.len() > n_before && stop_on_cut {
+                            break;
+                        }
                     }
                 }
                 // 打ち消す連続変数: 境界から最も離れたもの
@@ -1832,7 +1837,29 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 self.path_aggregation_highs(&vars, &lp_rows, &mut cands, &mut push);
             }
             if !highs_only || old_only {
-                self.path_aggregation(&vars, &lp_rows, &mut cands, &mut push, max_starts);
+                // 根で並列の分離なら、集約した行を順に集めてからカットの生成と仕上げを並列に行う (集約は逐次と同じ順で、
+                // カットの有無で経路を変えないので結果は逐次と同じ。`ENOMOTO_MIP_PATH_STOP_ON_CUT` では逐次)
+                let par_path = self.params.threads > 1
+                    && !light
+                    && !self.params.submip
+                    && self.pool.is_none()
+                    && !gen_old()
+                    && env_str!("ENOMOTO_MIP_PATH_STOP_ON_CUT").is_none()
+                    && env_str!("ENOMOTO_MIP_SEP_SEQ").is_none()
+                    && env_str!("ENOMOTO_MIP_PATH_SEQ").is_none();
+                if par_path {
+                    self.path_collect = Some(Vec::new());
+                    self.path_aggregation(&vars, &lp_rows, &mut cands, &mut push, max_starts);
+                    let bases = self.path_collect.take().unwrap_or_default();
+                    let inc = self.incumbent.as_ref().map(|(_, v)| v.as_slice());
+                    let (by_row, cpu) = gen_cuts_parallel(&bases, self.params.threads, &vars, use_flow_cover(), n, &lp_rows, &self.cut_int, &self.dom.global_lo, &self.dom.global_up, x, inc, self.p);
+                    self.sep_par_cpu += cpu;
+                    for cs in by_row {
+                        cands.extend(cs);
+                    }
+                } else {
+                    self.path_aggregation(&vars, &lp_rows, &mut cands, &mut push, max_starts);
+                }
             }
         }
         if dbg_sep {
@@ -2220,6 +2247,66 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         cands
     }
+}
+
+/// 集約した行 `bases` ごとに (その行と符号を反転した行から) カットを作って仕上げ、行ごとに keep_best で絞った候補を
+/// 行の順に返す (`nth` 本のスレッドに交互に割り当てる。結果は逐次と同じ)。2 つ目の戻り値はスレッドの CPU 時間の合計。
+#[allow(clippy::too_many_arguments)]
+fn gen_cuts_parallel(
+    bases: &[Vec<(usize, f64)>],
+    nth: usize,
+    vars: &CutVars,
+    flow_cover: bool,
+    n: usize,
+    lp_rows: &[Vec<(usize, f64)>],
+    cut_int: &[bool],
+    glo: &[f64],
+    gup: &[f64],
+    x: &[f64],
+    inc: Option<&[f64]>,
+    p: &MipProblem,
+) -> (Vec<Vec<Candidate>>, f64) {
+    let nb = bases.len();
+    let nth = nth.min(nb.max(1));
+    let parts: Vec<(Vec<(usize, Vec<Candidate>)>, f64)> = std::thread::scope(|sc| {
+        let hs: Vec<_> = (0..nth)
+            .map(|t| {
+                sc.spawn(move || {
+                    let c0 = super::cap_clock();
+                    let mut scratch = vec![0.0f64; n];
+                    let mut out = Vec::new();
+                    let mut k = t;
+                    while k < nb {
+                        let base = &bases[k];
+                        let neg: Vec<(usize, f64)> = base.iter().map(|&(j, a)| (j, -a)).collect();
+                        let mut cs: Vec<Candidate> = Vec::new();
+                        for b in [base, &neg] {
+                            let n0 = cs.len();
+                            for raw in generate_cuts(vars, b, 0.0, flow_cover, false) {
+                                if let Some(c) = finish_cut(raw, n, lp_rows, cut_int, glo, gup, x, inc, &mut scratch) {
+                                    cs.push(c);
+                                }
+                            }
+                            keep_best(&mut cs, n0, p);
+                        }
+                        out.push((k, cs));
+                        k += nth;
+                    }
+                    (out, super::cap_clock() - c0)
+                })
+            })
+            .collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    let mut by_row: Vec<Vec<Candidate>> = (0..nb).map(|_| Vec::new()).collect();
+    let mut cpu = 0.0;
+    for (part, c) in parts {
+        cpu += c;
+        for (k, cs) in part {
+            by_row[k] = cs;
+        }
+    }
+    (by_row, cpu)
 }
 
 /// 生のカット (構造変数と行の活動量の変数) を構造変数だけの式にし、整え、検査する。

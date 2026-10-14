@@ -117,6 +117,10 @@ pub struct MipResult {
 }
 
 thread_local! {
+    /// 並列のダイビング (`ENOMOTO_MIP_PAR_DIVES`): このスレッドで写しから作る求解が根の後に行うヒューリスティクス
+    /// (0 = しない、1 = Feasibility Pump、2 = fractional、3 = vector length、4 = coefficient diving) と、ダイビングの反復の予算、
+    /// 根の LP の反復数 (Feasibility Pump の予算に使う)。
+    static DIVE_ONLY: std::cell::Cell<(u8, u64, u64)> = const { std::cell::Cell::new((0, 0, 0)) };
     /// 診断用: 既知の最適解 (縮約後の空間、`ENOMOTO_MIP_DEBUG_SOL`)。この解を含むノードが
     /// 枝刈りされたら理由を表示する (SCIP の debug solution と同様)。
     pub(crate) static DEBUG_SOL: std::cell::RefCell<Option<Vec<f64>>> = const { std::cell::RefCell::new(None) };
@@ -150,6 +154,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 根の分離を並列にしたとき、ほかのスレッドが使った CPU 時間の合計 (`ENOMOTO_MIP_SEP_COUNT_CPU` なら根のカットの時間の
     /// 上限に含める。含めないと、主の CPU 時間で測る上限の中でラウンドが増え、実時間はかえって長くなる)。
     pub(super) sep_par_cpu: f64,
+    /// 並列の分離で、経路集約の集約した行を集める先 (`Some` の間は [`Self::path_aggregation`] がカットを作らずにここへ入れる)。
+    pub(super) path_collect: Option<Vec<Vec<(usize, f64)>>>,
     /// 並列の強分岐 (`ENOMOTO_MIP_PAR_SB`) の [まとめた回数, 並列に解いた候補の数]。
     par_sb_stats: [u64; 2],
     pub(super) deadline: Option<Instant>,
@@ -934,6 +940,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         start,
         cpu0: super::cap_clock(),
         sep_par_cpu: 0.0,
+        path_collect: None,
         par_sb_stats: [0; 2],
         deadline,
         nodes: 0,
@@ -1707,8 +1714,39 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.parallel_submips = mip_threads() > 1 && !self.params.submip;
             if self.fractional(&x).is_empty() {
                 self.try_lp_solution();
+                // 並列のダイビングのための求解: 根の LP が整数なら、その解を返して終える (木は探索しない)
+                if DIVE_ONLY.with(|d| d.get()).0 > 0 && self.snap.is_some() {
+                    let (x, objective) = match &self.incumbent {
+                        Some((z, x)) => (Some(x.clone()), Some(*z)),
+                        None => (None, None),
+                    };
+                    return MipResult { status: MipStatus::NotSolved, x, objective, best_bound: f64::NEG_INFINITY, nodes: 0, lp_iterations: self.lp.total_iterations() };
+                }
             } else if self.snap.is_some() {
-                // 木の写しから解く: 根のヒューリスティクスは走らせない
+                // 木の写しから解く: 根のヒューリスティクスは走らせない。並列のダイビングのための求解なら、指定のものだけを
+                // 行って見つけた解を返す
+                let (kind, budget, riters) = DIVE_ONLY.with(|d| d.get());
+                if kind > 0 {
+                    match kind {
+                        1 => {
+                            self.feasibility_pump(riters);
+                        }
+                        2 => {
+                            self.fractional_dive(budget);
+                        }
+                        3 => {
+                            self.dive(super::heuristics::DiveKind::VectorLength, budget, f64::INFINITY);
+                        }
+                        _ => {
+                            self.dive(super::heuristics::DiveKind::Coefficient, budget, f64::INFINITY);
+                        }
+                    }
+                    let (x, objective) = match &self.incumbent {
+                        Some((z, x)) => (Some(x.clone()), Some(*z)),
+                        None => (None, None),
+                    };
+                    return MipResult { status: MipStatus::NotSolved, x, objective, best_bound: f64::NEG_INFINITY, nodes: 0, lp_iterations: self.lp.total_iterations() };
+                }
             } else {
                 // `ENOMOTO_T_MIP_ROOT_HEUR_TIME_FRAC` = f (> 0): 根のヒューリスティクス全体の時間の予算を時間上限の f 倍
                 // (暫定解がなければ `ENOMOTO_T_MIP_ROOT_HEUR_TIME_FRAC_NOINC` 倍) にし、超えたら残りは飛ばす
@@ -1786,19 +1824,55 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // (HiGHS のサブ MIP は根のヒューリスティクスのほとんどを入れ子の RENS に使い、1 回 0.1-1.6 秒で終わる)
                 // (暫定解がない、つまり打ち切り値が無限のサブ MIP だけ。`ENOMOTO_MIP_SUBMIP_NO_SB` と同じ理由)
                 let light = self.params.submip && self.params.cutoff.is_infinite() && env_str!("ENOMOTO_MIP_SUBMIP_LIGHT_HEUR").is_some();
-                if self.incumbent.is_none() && !light {
-                    heur!("feasibility pump", self.feasibility_pump(root_iters));
-                }
                 // ダイビングの予算: 最初の根の LP の 2 倍に、カットのループを含めた根全体の反復数の一定割合を足す
                 let dive_budget = 2 * root_iters + 1000 + (tunable!("ENOMOTO_T_MIP_ROOT_DIVE_FRAC", 0.0, f64) * self.lp.total_iterations() as f64) as u64;
-                if self.incumbent.is_none() && !light {
-                    heur!("fractional diving", self.fractional_dive(dive_budget));
+                // `ENOMOTO_MIP_PAR_DIVES`: 並列モードで暫定解がなければ、Feasibility Pump と 3 つのダイビングを、今の根の写しから
+                // 作った求解でそれぞれ別スレッドで同時に行い、元の順の位置で結果を受け取る (先のもので暫定解が見つかっても、
+                // 後のものの解も受け取る)
+                let mut par_dives: Vec<Option<std::thread::JoinHandle<MipResult>>> = Vec::new();
+                if self.incumbent.is_none() && !light && mip_threads() > 1 && !self.params.submip && env_str!("ENOMOTO_MIP_PAR_DIVES").is_some() {
+                    let snap = self.make_snapshot(&Portfolio::new(), &mut None, false);
+                    let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());
+                    let params = MipParams { time_limit: remaining, node_limit: u64::MAX, verbose: false, threads: 1, ..self.params };
+                    for kind in 1..=4u8 {
+                        let on = kind != 4 || env_str!("ENOMOTO_MIP_NO_COEF_DIVE").is_none();
+                        par_dives.push(on.then(|| {
+                            let sn = snap.clone();
+                            std::thread::Builder::new()
+                                .stack_size(64 << 20)
+                                .spawn(move || {
+                                    DIVE_ONLY.with(|d| d.set((kind, dive_budget, root_iters)));
+                                    solve_worker(sn, None, params)
+                                })
+                                .expect("failed to spawn a diving thread")
+                        }));
+                    }
                 }
-                if self.incumbent.is_none() && !light {
-                    heur!("vector length diving", self.dive(super::heuristics::DiveKind::VectorLength, dive_budget, f64::INFINITY));
-                }
-                if self.incumbent.is_none() && !light && env_str!("ENOMOTO_MIP_NO_COEF_DIVE").is_none() {
-                    heur!("coefficient diving", self.dive(super::heuristics::DiveKind::Coefficient, dive_budget, f64::INFINITY));
+                let take_dive = |s: &mut Self, dives: &mut Vec<Option<std::thread::JoinHandle<MipResult>>>, k: usize| -> bool {
+                    let Some(h) = dives.get_mut(k).and_then(|h| h.take()) else { return false };
+                    match h.join() {
+                        Ok(r) => r.x.is_some_and(|x| s.try_incumbent(x)),
+                        Err(_) => false,
+                    }
+                };
+                if !par_dives.is_empty() {
+                    heur!("feasibility pump", take_dive(self, &mut par_dives, 0));
+                    heur!("fractional diving", take_dive(self, &mut par_dives, 1));
+                    heur!("vector length diving", take_dive(self, &mut par_dives, 2));
+                    heur!("coefficient diving", take_dive(self, &mut par_dives, 3));
+                } else {
+                    if self.incumbent.is_none() && !light {
+                        heur!("feasibility pump", self.feasibility_pump(root_iters));
+                    }
+                    if self.incumbent.is_none() && !light {
+                        heur!("fractional diving", self.fractional_dive(dive_budget));
+                    }
+                    if self.incumbent.is_none() && !light {
+                        heur!("vector length diving", self.dive(super::heuristics::DiveKind::VectorLength, dive_budget, f64::INFINITY));
+                    }
+                    if self.incumbent.is_none() && !light && env_str!("ENOMOTO_MIP_NO_COEF_DIVE").is_none() {
+                        heur!("coefficient diving", self.dive(super::heuristics::DiveKind::Coefficient, dive_budget, f64::INFINITY));
+                    }
                 }
                 // LP を使わない最後の手段 (先に使うと質の悪い解で他の暫定解探しを止めてしまう)
                 if self.incumbent.is_none() && env_str!("ENOMOTO_MIP_NO_SHIFTPROP").is_none() {
