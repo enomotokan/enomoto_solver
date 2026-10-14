@@ -1759,15 +1759,18 @@ fn solve_std_form_decomposed(std: &StdForm, opts: &crate::types::LpOptions) -> S
 /// 独立な成分 `items` を `f` で並列に解き、結果を同じ順で返す (`sizes` は成分の大きさの目安。大きい順に配る)。
 ///
 /// rayon の仕事として配ると、成分の中の並列処理 (内点法の分解など) の待ち時間に同じスレッドが別の成分の求解を丸ごと
-/// 入れ子で実行し (仕事の盗み)、求解単位のスレッドローカルの状態 (warm start の LU・解き直しの印・許容誤差など) を
-/// 書き換えていた (4 スレッドの fome13: 数十回に 1 回止まる、誤った結論を返す、目的値が実行ごとに揺れる)。
-/// ここでは今のプールのスレッド数 `T` のうち `k = min(T, 成分の数)` 本の専用のスレッドを立て、それぞれに `T / k` 本の
-/// 専用の rayon のプールを持たせて、成分を 1 つずつ取り出して解く。成分の中の並列はそのプールの中だけで行うので、
-/// 別の成分の求解が入れ子で入り込まない。打ち切りのトークン (`crate::cancel`) は各スレッドに引き継ぐ。
-/// 試験用 `ENOMOTO_T_SPLIT_RAYON=1` で従来の rayon の `par_iter` (比較用)。
+/// 入れ子で実行しうる (仕事の盗み)。そのとき求解単位のスレッドローカルの状態 (warm start の LU・解き直しの印など) が
+/// 書き換えられる危険がある。
+/// 既定は rayon の `par_iter` (打ち切りのトークン `crate::cancel` を各成分に引き継ぐ)。試験用 `ENOMOTO_T_SPLIT_DEDICATED=1`
+/// では今のプールのスレッド数 `T` のうち `k = min(T, 成分の数)` 本の専用のスレッドを立て、それぞれに `T / k` 本の
+/// 専用の rayon のプールを持たせて、成分を 1 つずつ取り出して解く (成分の中の並列はそのプールの中だけで行うので、
+/// 別の成分の求解が入れ子で入り込まない)。fome13 の止まる不具合の真の原因は METIS の同時呼び出しで (`kkt::metis_ordering`)、
+/// それを直した後の比較 (4 スレッド・Mittelmann 10 問) では専用の方式は幾何平均 1.002 倍、cygnet (4 成分) で 1.19 倍遅い
+/// (先に終わった成分のスレッドが残りの成分を手伝えない) ので既定にしない。入れ子でのスレッドローカルの書き換えには、
+/// warm start の LU の検算 (`slope_intercept_dual::warm_lu_matches`) と解き直しの印の保護で備える。
 fn par_components<T: Sync, R: Send>(items: &[T], sizes: &[usize], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
     let token = crate::cancel::current();
-    if tunable!("ENOMOTO_T_SPLIT_RAYON", 0u8, u8) != 0 {
+    if tunable!("ENOMOTO_T_SPLIT_DEDICATED", 0u8, u8) == 0 {
         use rayon::prelude::*;
         return items.par_iter().map(|it| crate::cancel::with_token(token.clone(), || f(it))).collect();
     }
