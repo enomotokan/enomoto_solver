@@ -1314,7 +1314,8 @@ fn warm_start_basis(
                 dt
             };
             let small = hint_tol * (1.0 + std.c[j].abs());
-            if h[j] < 0 && lo.is_finite() && dt >= -small {
+            // 希望が ±2 なら被約費用の符号によらずその側に置く (主実行可能な基底から始めるとき。費用をずらす)。
+            if h[j] < 0 && lo.is_finite() && (h[j] == -2 || dt >= -small) {
                 if d < -TOL {
                     active_cost[j] -= d;
                     d_out[j] = 0.0;
@@ -1323,7 +1324,7 @@ fn warm_start_basis(
                 st[j] = Some(NbStatus::Lower);
                 continue;
             }
-            if h[j] > 0 && hi.is_finite() && dt <= small {
+            if h[j] > 0 && hi.is_finite() && (h[j] == 2 || dt <= small) {
                 if d > TOL {
                     active_cost[j] -= d;
                     d_out[j] = 0.0;
@@ -1364,7 +1365,7 @@ fn warm_start_basis(
                 match (st[j], h[j]) {
                     (None, _) => {}
                     (_, 0) => unknown += 1,
-                    (Some(NbStatus::Lower), -1) | (Some(NbStatus::Upper), 1) => agree += 1,
+                    (Some(NbStatus::Lower), -1 | -2) | (Some(NbStatus::Upper), 1 | 2) => agree += 1,
                     _ => differ += 1,
                 }
             }

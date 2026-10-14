@@ -1987,6 +1987,7 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     // 単体法の最適基底の双対から戻すので、双対を記録しない近道で返すと、正しい頂点でも `Dualized::finish` が捨てて
     // 元の (行数の多い) 問題を解き直していた (rmine15・graph40-40 で正規方程式の因子が数十 GB になり落ちた)。
     // 頂点の基底は双対実行可能とは限らず、修復は費用をずらした問題を解くので、どちらの双対も記録には使えない。
+    let mut repaired_start: Option<(Vec<usize>, Vec<i8>)> = None;
     if let (Some(yi), false) = (&y_ipm, super::slope_intercept_dual::duals_requested()) {
         // 頂点が主実行不能 (少数) なら、費用をずらして基底を双対実行可能にしてから双対単体法で主実行不能だけを直し、
         // 直した頂点を元の費用で判定する (`ENOMOTO_T_XO_REPAIR`、既定 1 は第 61 回の比較で決めた。[`repair_vertex`])。
@@ -1996,9 +1997,15 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
             // 600 秒超に延びた)。
             let rfac = tunable!("ENOMOTO_T_XO_REPAIR_TIME_FACTOR", 2.0f64, f64);
             let repair_deadline = (rfac > 0.0).then(|| Instant::now() + std::time::Duration::from_secs_f64((rfac * t0.elapsed().as_secs_f64()).clamp(10.0, 1e6)));
-            if let Some(r) = repair_vertex(std, yi, &basis, &basis_pos, &nb_status, &lu, accept_gap, repair_deadline, debug) {
-                crate::phase_timing::mark("xo_vertex_repaired");
-                return Some(r);
+            match repair_vertex(std, yi, &basis, &basis_pos, &nb_status, &lu, accept_gap, repair_deadline, debug) {
+                Ok(r) => {
+                    crate::phase_timing::mark("xo_vertex_repaired");
+                    return Some(r);
+                }
+                // 修復した基底 (主実行可能、ずらした費用で最適) は、ギャップが足りなくても仕上げの開始点にする
+                // (`ENOMOTO_T_XO_REPAIR_REUSE`、既定 1。irish-electricity: 捨てて元の基底から仕上げると 1.2 万ピボット)。
+                Err(Some(rb)) if tunable!("ENOMOTO_T_XO_REPAIR_REUSE", 1u8, u8) != 0 => repaired_start = Some(rb),
+                Err(_) => {}
             }
         }
         if let Some(xv) = vertex_solution(std, &basis_pos, &nb_status, &lu) {
@@ -2197,8 +2204,20 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
         if want_basis && !outer {
             super::slope_intercept_dual::request_duals(true);
         }
-        set_cleanup_hint(&nb_status, 2);
-        let r = super::slope_intercept_dual::solve_slope_intercept_dual_from_basis(std, &Default::default(), basis.clone());
+        let start = match repaired_start.take() {
+            Some((rb, hint)) => {
+                if debug {
+                    eprintln!("CROSSOVER cleanup from the repaired basis");
+                }
+                super::slope_intercept_dual::set_warm_nb(Some(hint));
+                rb
+            }
+            None => {
+                set_cleanup_hint(&nb_status, 2);
+                basis.clone()
+            }
+        };
+        let r = super::slope_intercept_dual::solve_slope_intercept_dual_from_basis(std, &Default::default(), start);
         super::slope_intercept_dual::set_warm_nb(None);
         if want_basis {
             if outer {
@@ -2524,7 +2543,7 @@ fn repair_vertex(
     accept_gap: f64,
     deadline: Option<Instant>,
     debug: bool,
-) -> Option<SimplexResult> {
+) -> Result<SimplexResult, Option<(Vec<usize>, Vec<i8>)>> {
     let n = std.n_total;
     let m = std.n_rows;
     let n_orig = n - m;
@@ -2558,7 +2577,7 @@ fn repair_vertex(
         let tl = ftol * (1.0 + std.lb[j].abs().min(1e12));
         let tu = ftol * (1.0 + std.ub[j].abs().min(1e12));
         if !xb[k].is_finite() {
-            return None;
+            return Err(None);
         }
         if xb[k] < std.lb[j] - tl || xb[k] > std.ub[j] + tu {
             np += 1;
@@ -2569,7 +2588,7 @@ fn repair_vertex(
         eprintln!("CROSSOVER repair: start primal_infeas={np} (max {max_np})");
     }
     if np == 0 || np > max_np {
-        return None;
+        return Err(None);
     }
     // 費用をずらす: 非基底の被約費用を、下限なら >= 0、上限なら <= -10 TOL、0 に置いた自由列なら 0 にする。
     let cb: Vec<f64> = basis.iter().map(|&j| std.c[j]).collect();
@@ -2610,7 +2629,10 @@ fn repair_vertex(
         let c = outer.unwrap_or(ExtControl { iteration_limit: usize::MAX, cutoff: f64::INFINITY, deadline: None });
         set_ext_control(Some(ExtControl { deadline: Some(c.deadline.map_or(d, |o| o.min(d))), ..c }));
     }
+    super::slope_intercept_dual::request_duals(true);
     let res = super::slope_intercept_dual::solve_slope_intercept_dual_from_basis(&std2, &Default::default(), basis.to_vec());
+    let final_pos = super::slope_intercept_dual::take_duals().map(|(_, bp)| bp);
+    super::slope_intercept_dual::request_duals(false);
     if deadline.is_some() {
         if debug && super::slope_intercept_dual::ext_stop() == super::slope_intercept_dual::ExtStop::TimeLimit {
             eprintln!("CROSSOVER repair: time limit reached t={:.3}s", t0.elapsed().as_secs_f64());
@@ -2621,14 +2643,14 @@ fn repair_vertex(
     if debug && res.as_ref().map_or(true, |r| r.status != Status::Optimal) {
         eprintln!("CROSSOVER repair: gave up (status {:?}) t={:.3}s", res.as_ref().map(|r| format!("{:?}", r.status)), t0.elapsed().as_secs_f64());
     }
-    let res = res?;
+    let Some(res) = res else { return Err(None) };
     if res.status != Status::Optimal {
-        return None;
+        return Err(None);
     }
     if debug && res.x.is_none() {
         eprintln!("CROSSOVER repair: optimal without x");
     }
-    let x = res.x.as_ref()?;
+    let Some(x) = res.x.as_ref() else { return Err(None) };
     let obj: f64 = (0..n_orig.min(x.len())).map(|j| std.c[j] * x[j]).sum();
     // 下界: y_ipm と、元の頂点の基底で補正した y。
     let mut best = lagrangian_lower_bound(std, yi);
@@ -2643,7 +2665,35 @@ fn repair_vertex(
             t0.elapsed().as_secs_f64()
         );
     }
-    (gap <= accept_gap && gap >= -accept_gap).then_some(res)
+    if gap <= accept_gap && gap >= -accept_gap {
+        return Ok(res);
+    }
+    // 採用しないときは、修復した基底と非基底の位置 (±2 = 被約費用の符号によらずその側に置く) を返す。
+    let Some(bp) = final_pos.filter(|bp| bp.len() == n && x.len() == n) else { return Err(None) };
+    let mut rb = vec![usize::MAX; m];
+    let mut hint = vec![0i8; n];
+    for j in 0..n {
+        match bp[j] {
+            Some(k) if k < m => rb[k] = j,
+            Some(_) => return Err(None),
+            None => {
+                let (lo, hi) = (std.lb[j], std.ub[j]);
+                let tl = 1e-9 * (1.0 + lo.abs().min(1e12));
+                let tu = 1e-9 * (1.0 + hi.abs().min(1e12));
+                hint[j] = if lo.is_finite() && (x[j] - lo).abs() <= tl {
+                    -2
+                } else if hi.is_finite() && (x[j] - hi).abs() <= tu {
+                    2
+                } else {
+                    0
+                };
+            }
+        }
+    }
+    if rb.contains(&usize::MAX) {
+        return Err(None);
+    }
+    Err(Some((rb, hint)))
 }
 
 /// 双対の最適面への射影の補正量 Δ を返す (`ENOMOTO_T_XO_ACCEPT_PROJ`)。S は、内点法の点 `xi` で境界までの距離が

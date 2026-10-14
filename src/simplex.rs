@@ -1246,6 +1246,7 @@ fn run_phase2_incremental(std: &StdForm, t: &mut Tableau, lu: &mut sparse_lu::Ft
     // cont1 策3 の比率テストを旧版に戻す (A/B 用)。
     let ratio_old = tunable!("ENOMOTO_HANDOFF_RATIO_OLD", 0u8, u8) != 0;
     let mut expand = ExpandState::new();
+    let shift_infeas = tunable!("ENOMOTO_T_PRIMAL_SHIFT_INFEAS", 1u8, u8) != 0;
 
     let mut gamma: Vec<f64> = if use_devex { vec![1.0; n] } else { SteepestEdgeState::new(std).gamma }; // 最急辺 (または Devex) 重み
     let mut cost_b = vec![0.0; m]; // c_B
@@ -1402,9 +1403,18 @@ fn run_phase2_incremental(std: &StdForm, t: &mut Tableau, lu: &mut sparse_lu::Ft
             if !bound.is_finite() {
                 continue;
             }
-            let exact = (bound - val) / rate;
+            let mut exact = (bound - val) / rate;
             let relaxed_bound = if is_upper { bound + expand.delta } else { bound - expand.delta };
-            let relaxed = (relaxed_bound - val) / rate;
+            let mut relaxed = (relaxed_bound - val) / rate;
+            // すでに上下限の外にある基底変数 (EXPAND の緩め幅を超えて外れたもの: 差分更新・リセット後の x_B の誤差) は、
+            // 今の値を境界とみなす (`ENOMOTO_T_PRIMAL_SHIFT_INFEAS`、既定 1)。そのままでは relaxed < 0 で
+            // alpha1 が負になり、パス 2 がその行を小さなピボットでも選んで最小ステップ `EXPAND_TAU / |pivot|` で大きく進み、
+            // 他の基底変数を大きく外して基底も特異に近くなる (irish-electricity の仕上げの引き継ぎで |pivot| 1e-6、
+            // max|alpha| 357、目的値が 2.5e6 から 3e34 へ発散した)。
+            if shift_infeas && exact < 0.0 {
+                exact = 0.0;
+                relaxed = expand.delta / rate.abs();
+            }
             candidates.push(Candidate { row: i, exact, relaxed, pivot_abs: alpha[i].abs(), hits_upper: is_upper });
         }
         let alpha1 = candidates.iter().map(|c| c.relaxed).fold(init_alpha1, f64::min);
@@ -1440,6 +1450,23 @@ fn run_phase2_incremental(std: &StdForm, t: &mut Tableau, lu: &mut sparse_lu::Ft
             stall.stall_count = 0;
         }
 
+        if env_str!("ENOMOTO_DEBUG_PRIMAL_TRACE").is_some() {
+            let amax = alpha_rows.iter().map(|&i| alpha[i].abs()).fold(0.0, f64::max);
+            let worst = alpha_rows
+                .iter()
+                .map(|&i| {
+                    let v = t.basis[i];
+                    let xv = t.x[v] - best_dir * alpha[i] * theta;
+                    (std.lb[v] - xv).max(xv - std.ub[v])
+                })
+                .fold(0.0, f64::max);
+            let obj: f64 = (0..n).map(|j| std.c[j] * t.x[j]).sum();
+            eprintln!(
+                "PTRACE it={_iter} enter={enter} d={dj_enter:.3e} theta={theta:.3e} alpha1={alpha1:.3e} leave={leaving_row:?} piv={best_pivot_mag:.3e} amax={amax:.3e} nnz={} viol_after={worst:.3e} obj={obj:.10e} fresh={fresh_now} delta={:.2e}",
+                alpha_rows.len(),
+                expand.delta
+            );
+        }
         for &i in &alpha_rows {
             let var = t.basis[i];
             t.x[var] -= best_dir * alpha[i] * theta;
