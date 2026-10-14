@@ -854,7 +854,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
 /// FJ との違い: 行の重みの平滑化 (重みは確率的に増やし、満たされた行の重みは減らす)、逆戻りの禁止 (タブー)、
 /// 改善する手がなければランダムな手、何度かの再出発、実行可能解が見つかったら目的値をそれより良くする行を
 /// 足して続ける。戻り値は (最良の実行可能解, 違反の合計が最小だった点とその違反)。
-pub(super) fn local_search(p: &MipProblem, lo: &[f64], up: &[f64], time_cap: f64, max_steps: u64, seed: u64) -> (Option<Vec<f64>>, Option<(Vec<f64>, f64)>) {
+/// [`local_search`] の結果 (実行可能解、違反最小の点とその違反量)。
+pub(super) type LocalSearchResult = (Option<Vec<f64>>, Option<(Vec<f64>, f64)>);
+
+pub(super) fn local_search(p: &MipProblem, lo: &[f64], up: &[f64], time_cap: f64, max_steps: u64, seed: u64) -> LocalSearchResult {
     let (n, m) = (p.n, p.m);
     let mut rng = seed | 1;
     let mut rand = move || {
