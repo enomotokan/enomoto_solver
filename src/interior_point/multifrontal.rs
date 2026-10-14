@@ -48,8 +48,9 @@ pub struct Multifrontal {
     pool: std::sync::Mutex<Vec<Vec<f64>>>,
     /// 計測用 (`ENOMOTO_DEBUG_MF_TRACE`): 直近の分解での supernode ごとの所要時間 (ナノ秒、前線の用意を含む)。
     trace: Option<Vec<std::sync::atomic::AtomicU64>>,
-    /// 更新行列を台形で持つときのかたまりの幅 ([`Front`]、0 なら正方形。試験用 `ENOMOTO_T_MF_PACKED=1` と
-    /// `ENOMOTO_T_MF_PACK_BW`)。
+    /// 更新行列を台形で持つときのかたまりの幅 ([`Front`]、0 なら正方形)。既定で台形 (`ENOMOTO_T_MF_PACKED`、既定 1。0 で
+    /// 正方形)、幅 `ENOMOTO_T_MF_PACK_BW` (既定 128)。2026-10-13 の比較 (Mittelmann 10 問、`benchmarks/mf_bench/ab2_*`):
+    /// 1 スレッドで分解の累計 0.927 倍、最大常駐メモリ 0.51〜1.00 倍。
     pack_bw: usize,
     /// 逐次に処理する部分木で、子の更新行列を受けていない節点の更新行列を親の前線へ直接書く (試験用 `ENOMOTO_T_MF_DIRECT=1`)。
     direct: bool,
@@ -62,7 +63,8 @@ pub struct Multifrontal {
     /// 前線の密な演算を並列にする演算量 (`nc f^2`) の下限 (`ENOMOTO_T_MF_PAR_FLOPS`)。
     par_flops: f64,
     /// 並列に計算する大きな前線の対角ブロックの Cholesky を、この幅のかたまりごとに行う ([`chol_blocked`]、0 なら faer
-    /// のまま。試験用 `ENOMOTO_T_MF_BCHOL=1` と幅 `ENOMOTO_T_MF_BCHOL_BS`)。
+    /// のまま)。既定で使う (`ENOMOTO_T_MF_BCHOL`、既定 1。0 で faer のまま)、幅 `ENOMOTO_T_MF_BCHOL_BS` (既定 256)。
+    /// 4 スレッドの比較で台形 + 併合に対し分解の累計 0.968 倍 (qap15 0.92、rail4284 0.87)。1 スレッドでは faer と同じ。
     bchol_bs: usize,
     /// [`chol_blocked`] を使う対角ブロックの大きさの下限 (`ENOMOTO_T_MF_BCHOL_MIN`)。
     bchol_min: usize,
@@ -425,7 +427,10 @@ impl Multifrontal {
             pat_ptr[k + 1] = pat.len();
         }
         let (mut perm_fwd, mut perm_inv) = (perm_fwd, perm_inv);
-        let alpha = tunable!("ENOMOTO_T_MF_AMALG", 0.0f64, f64);
+        // 細い supernode の併合 (`ENOMOTO_T_MF_AMALG`、既定 64、0 で併合しない)。2026-10-13 の比較 (台形と合わせて、
+        // Mittelmann 10 問): 1 スレッドで分解の累計 0.771 倍 (s250r10 0.389、square41 0.377、nug08-3rd 0.830)、
+        // 4 スレッドで 0.860 倍。alpha は 16・32・64・128 を試して 64 が最も速かった (s250r10・square41)。
+        let alpha = tunable!("ENOMOTO_T_MF_AMALG", 64.0f64, f64);
         if alpha > 0.0 {
             amalgamate(alpha, &mut perm_fwd, &mut perm_inv, &mut begin, &mut end, &mut pat_ptr, &mut pat);
         }
@@ -512,13 +517,13 @@ impl Multifrontal {
             pool: std::sync::Mutex::new(Vec::new()),
             trace: std::env::var("ENOMOTO_DEBUG_MF_TRACE").is_ok().then(|| (0..ns).map(|_| std::sync::atomic::AtomicU64::new(0)).collect()),
             signs: None,
-            pack_bw: if tunable!("ENOMOTO_T_MF_PACKED", 0u8, u8) != 0 { tunable!("ENOMOTO_T_MF_PACK_BW", 128usize, usize).max(1) } else { 0 },
+            pack_bw: if tunable!("ENOMOTO_T_MF_PACKED", 1u8, u8) != 0 { tunable!("ENOMOTO_T_MF_PACK_BW", 128usize, usize).max(1) } else { 0 },
             direct: tunable!("ENOMOTO_T_MF_DIRECT", 0u8, u8) != 0,
             direct_runs: tunable!("ENOMOTO_T_MF_DIRECT_RUNS", 4usize, usize),
             direct_min_r: tunable!("ENOMOTO_T_MF_DIRECT_MIN_R", 0usize, usize),
             chunk: tunable!("ENOMOTO_T_MF_CHUNK", 128usize, usize).max(1),
             par_flops: tunable!("ENOMOTO_T_MF_PAR_FLOPS", 5e7f64, f64),
-            bchol_bs: if tunable!("ENOMOTO_T_MF_BCHOL", 0u8, u8) != 0 { tunable!("ENOMOTO_T_MF_BCHOL_BS", 256usize, usize).max(1) } else { 0 },
+            bchol_bs: if tunable!("ENOMOTO_T_MF_BCHOL", 1u8, u8) != 0 { tunable!("ENOMOTO_T_MF_BCHOL_BS", 256usize, usize).max(1) } else { 0 },
             bchol_min: tunable!("ENOMOTO_T_MF_BCHOL_MIN", 512usize, usize),
             par_trsm: tunable!("ENOMOTO_T_MF_PAR_TRSM", 0u8, u8) != 0,
             par_prep: tunable!("ENOMOTO_T_MF_PAR_PREP", 0u8, u8) != 0,
