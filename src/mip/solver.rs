@@ -1761,13 +1761,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return MipResult { status: MipStatus::NotSolved, x: None, objective: None, best_bound: f64::NEG_INFINITY, nodes: 0, lp_iterations: self.lp.total_iterations() };
         }
         self.join_fj_thread();
-        // `ENOMOTO_MIP_BG_CUTS`: 並列モードで、根のヒューリスティクスの間に、今の根の写しから作った求解でカットのループを
-        // 続ける (分離は残りのスレッドで並列)。ヒューリスティクスが終わったら止め、その LP に残ったカット (効いているもの)
-        // で根の LP のカットを置き換える (目的値が上がったときだけ)。`ENOMOTO_MIP_BG_CUTS=heavy` なら停滞の判定を緩め、
-        // 停滞したら HiGHS のスコアの第 2 段階に入る
+        // 並列モードで、根のヒューリスティクスの間に、今の根の写しから作った求解でカットのループを続ける (分離は残りの
+        // スレッドで並列)。ヒューリスティクスが終わったら止め、その LP に残ったカット (効いているもの) で根の LP のカットを
+        // 置き換える (目的値が上がったときだけ)。既定で使う (`ENOMOTO_MIP_NO_BG_CUTS` で使わない)。`ENOMOTO_MIP_BG_CUTS=heavy`
+        // なら停滞の判定を緩め、停滞したら HiGHS のスコアの第 2 段階に入る。
+        // 40 問 (各 2 回、threads=4): 使わない SGM 20.79・ギャップ 11.91%、使う 20.58 (−1.0%、2 回とも改善)・11.73%、heavy
+        // 20.60・11.95%。根の下界は h80x6320d 5947 -> 6051、qnet1 15714 -> 15787、binkar10_1 6710.6 -> 6719.9 (heavy は
+        // 停滞する問題でさらに上がる: timtab1 465655 -> 571329 だが、カットが増えて木が重くなり全体は同じ)
         let mut bg_cuts: Option<BgCuts> = None;
         if self.snap.is_none() && !self.params.submip && self.params.threads > 1 && env_str!("ENOMOTO_MIP_NO_CUTS").is_none() && !self.fractional(&self.lp.col_values()).is_empty() {
-            if let Some(mode) = env_str!("ENOMOTO_MIP_BG_CUTS") {
+            let bg_mode = env_str!("ENOMOTO_MIP_BG_CUTS").or(if env_str!("ENOMOTO_MIP_NO_BG_CUTS").is_none() { Some("1") } else { None });
+            if let Some(mode) = bg_mode {
                 let job = std::sync::Arc::new(CutJob { stop: std::sync::atomic::AtomicBool::new(false), heavy: mode == "heavy", out: std::sync::Mutex::new(None) });
                 let snap = self.make_snapshot(&Portfolio::new(), &mut None, false);
                 let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());
