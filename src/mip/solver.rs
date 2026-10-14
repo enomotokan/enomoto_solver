@@ -147,6 +147,11 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) start: Instant,
     /// 求解の開始時の [`super::cap_clock`] (根のカットのループの上限に使う)。
     pub(super) cpu0: f64,
+    /// 根の分離を並列にしたとき、ほかのスレッドが使った CPU 時間の合計 (`ENOMOTO_MIP_SEP_COUNT_CPU` なら根のカットの時間の
+    /// 上限に含める。含めないと、主の CPU 時間で測る上限の中でラウンドが増え、実時間はかえって長くなる)。
+    pub(super) sep_par_cpu: f64,
+    /// 並列の強分岐 (`ENOMOTO_MIP_PAR_SB`) の [まとめた回数, 並列に解いた候補の数]。
+    par_sb_stats: [u64; 2],
     pub(super) deadline: Option<Instant>,
     pub(super) nodes: u64,
     /// 強分岐に使った LP 反復数。
@@ -570,6 +575,18 @@ pub(crate) struct WorkPool {
     prof: std::sync::Mutex<Vec<TreeProf>>,
 }
 
+/// 並列の強分岐 (`ENOMOTO_MIP_PAR_SB`) で別スレッドが解いた子の LP の結果。主が逐次と同じ順に当てはめる。
+struct SbSide {
+    st: LpStatus,
+    /// 目的値 (定数項込み。反復上限で止まったときは途中の値)。
+    obj: f64,
+    iters: u64,
+    /// 最適なら LP 解 (整数なら暫定解の候補)。
+    x: Option<Vec<f64>>,
+    /// 証明に使う行の重み (実行不能なら Farkas の射線、それ以外は双対)。
+    y: Option<Vec<f64>>,
+}
+
 /// 双対証明・衝突制約のプールの行の状態。
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ProofState {
@@ -916,6 +933,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         obj_step: p.objective_step(),
         start,
         cpu0: super::cap_clock(),
+        sep_par_cpu: 0.0,
+        par_sb_stats: [0; 2],
         deadline,
         nodes: 0,
         sb_iters: 0,
@@ -3140,7 +3159,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 強分岐の前の LP の状態 (最初に強分岐する候補で 1 回だけ保存する)。各候補の子の LP は解いた後でこの状態に戻し、
         // 候補の間では LP に触れない (境界の締め付けは定義域だけ) ので、候補ごとに保存し直しても同じ状態になる
         let mut sb_saved: Option<L::State> = None;
-        for &(j, v, pscore) in &cands {
+        // `ENOMOTO_MIP_PAR_SB`: 木を分け合う前 (主だけで探索している間) か、ほかの木のスレッドが全て待っているときは、強分岐する
+        // 候補をスレッド数ずつまとめて、LP の複製で子の LP を並列に解く。結果は逐次と同じ順に当てはめる (打ち切ったら残りは
+        // 捨てる)。逐次との違い: まとめた間に暫定解が良くなっても打ち切り値は解き始めたときのもの、子の LP 解が整数で暫定解に
+        // ならないときの連続列の解き直しはしない
+        let par_sb = self.params.threads > 1
+            && !self.params.submip
+            && env_str!("ENOMOTO_MIP_SB_PROP").is_none()
+            && env_str!("ENOMOTO_MIP_PAR_SB").is_some()
+            && self.pool.as_ref().is_none_or(|pl| pl.idle.load(std::sync::atomic::Ordering::Relaxed) + 1 >= pl.threads);
+        let mut pre: std::collections::HashMap<usize, [SbSide; 2]> = std::collections::HashMap::new();
+        for (ci, &(j, v, pscore)) in cands.iter().enumerate() {
             let is_reliable = (self.pc.min_observations(j) as f64) >= reliable_thr;
             if is_reliable || !allow_sb || tried >= max_tried || no_improve >= lookahead as f64 || self.time_up() || (self.sb_iters as f64) > maxsb {
                 if best.is_none_or(|(_, _, s)| pscore > s) {
@@ -3156,6 +3185,108 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let mut gains = [0.0f64; 2];
             let mut child_obj = [f64::NEG_INFINITY; 2];
             let mut cut = [false; 2];
+            if par_sb && !pre.contains_key(&j) {
+                // この候補から、強分岐するはずの候補 (信頼できないもの) をスレッド数まで集めて並列に解く
+                let nth = self.params.threads;
+                let mut batch: Vec<(usize, f64, f64, f64)> = vec![(j, v, lo, up)];
+                for &(j2, v2, _) in &cands[ci + 1..] {
+                    if batch.len() >= nth || tried + batch.len() > max_tried {
+                        break;
+                    }
+                    if (self.pc.min_observations(j2) as f64) < reliable_thr {
+                        batch.push((j2, v2, self.dom.lo[j2], self.dom.up[j2]));
+                    }
+                }
+                let lim = self.limits(sb_iter_limit);
+                let offset = self.p.offset;
+                let lp0 = &self.lp;
+                let saved0 = saved;
+                let batch_ref = &batch;
+                let outs: Vec<Vec<(usize, [SbSide; 2])>> = std::thread::scope(|sc| {
+                    let hs: Vec<_> = (0..nth.min(batch.len()))
+                        .map(|t| {
+                            let mut lpc = lp0.clone();
+                            let saved_c = saved0.clone();
+                            let lim_c = lim.clone();
+                            sc.spawn(move || {
+                                let mut out = Vec::new();
+                                let mut k = t;
+                                while k < batch_ref.len() {
+                                    let (jj, vv, l0, u0) = batch_ref[k];
+                                    let mut sides: Vec<SbSide> = Vec::with_capacity(2);
+                                    for is_up in [false, true] {
+                                        if is_up {
+                                            lpc.set_col_bounds(jj, vv.ceil(), u0);
+                                        } else {
+                                            lpc.set_col_bounds(jj, l0, vv.floor());
+                                        }
+                                        let it0 = lpc.total_iterations();
+                                        let st = lpc.solve(&lim_c);
+                                        let iters = lpc.total_iterations() - it0;
+                                        let obj = lpc.objective() + offset;
+                                        let x = (st == LpStatus::Optimal).then(|| lpc.col_values());
+                                        let y = match st {
+                                            LpStatus::Infeasible => lpc.farkas_ray(),
+                                            LpStatus::Optimal | LpStatus::ObjectiveBound => Some(lpc.row_duals()),
+                                            _ => None,
+                                        };
+                                        sides.push(SbSide { st, obj, iters, x, y });
+                                        lpc.restore_state(&saved_c);
+                                    }
+                                    let up_side = sides.pop().unwrap();
+                                    let down_side = sides.pop().unwrap();
+                                    out.push((jj, [down_side, up_side]));
+                                    k += nth;
+                                }
+                                out
+                            })
+                        })
+                        .collect();
+                    hs.into_iter().map(|h| h.join().unwrap()).collect()
+                });
+                for o in outs {
+                    for (jj, r) in o {
+                        pre.insert(jj, r);
+                    }
+                }
+                self.par_sb_stats[0] += 1;
+                self.par_sb_stats[1] += batch.len() as u64;
+            }
+            if let Some(rs) = pre.remove(&j) {
+                for (side, (is_up, r)) in [false, true].into_iter().zip(rs).enumerate() {
+                    self.sb_iters += r.iters;
+                    self.sb_lps += 1;
+                    match r.st {
+                        LpStatus::Optimal => {
+                            let o = r.obj;
+                            gains[side] = (o - node_obj).max(0.0);
+                            child_obj[side] = o;
+                            let delta = if is_up { v.ceil() - v } else { v - v.floor() };
+                            self.pc.add_observation(j, is_up, delta, gains[side]);
+                            if o >= self.prune_limit() {
+                                cut[side] = true;
+                                if let Some(y) = &r.y {
+                                    self.sb_child_proof_y(j, is_up, v, false, y);
+                                }
+                            } else if let Some(x) = r.x {
+                                if self.fractional(&x).is_empty() {
+                                    self.try_incumbent(x);
+                                }
+                            }
+                        }
+                        LpStatus::Infeasible | LpStatus::ObjectiveBound => {
+                            cut[side] = true;
+                            self.pc.add_cutoff(j, is_up);
+                            if let Some(y) = &r.y {
+                                self.sb_child_proof_y(j, is_up, v, r.st == LpStatus::Infeasible, y);
+                            }
+                        }
+                        _ => {
+                            gains[side] = (r.obj - node_obj).max(0.0);
+                        }
+                    }
+                }
+            } else {
             for (side, is_up) in [(0usize, false), (1usize, true)] {
                 // 子の定義域を LP の前に伝播する (HiGHS): 矛盾すれば LP を解かずに切る (衝突解析もする)。矛盾しなければ
                 // 伝播で締まった境界も子の LP に渡す
@@ -3232,6 +3363,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if sb_prop {
                     self.dom.backtrack_to(self.p, pos);
                 }
+            }
             }
             match (cut[0], cut[1]) {
                 (true, true) => return BranchAction::Prune,
@@ -3673,6 +3805,35 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 強分岐の子 (列 `j` を `v` の上/下に分けた側) が打ち切られたときの証明 (`infeasible` なら Farkas、そうでなければ
     /// 双対証明)。強分岐は子の境界を LP にだけ置くので、証明が今の定義域で破れているかを正しく調べ、衝突解析がその
     /// 境界を決定として使えるよう、その間だけ定義域にも置く (伝播はしない)。
+    /// [`Self::sb_child_proof`] と同じだが、子の LP の行の重み `y` (別スレッドで解いたもの) から作る。
+    fn sb_child_proof_y(&mut self, j: usize, is_up: bool, v: f64, infeasible: bool, y: &[f64]) {
+        let dual_ok = !(self.params.submip && env_str!("ENOMOTO_MIP_SUBMIP_PROOFS").is_none() || env_str!("ENOMOTO_MIP_NO_DUAL_PROOF").is_some());
+        let farkas_ok = !(self.params.submip && env_str!("ENOMOTO_MIP_SUBMIP_PROOFS").is_none() || env_str!("ENOMOTO_MIP_NO_FARKAS").is_some());
+        if env_str!("ENOMOTO_MIP_SB_PROOF_OLD").is_some() {
+            if !infeasible && dual_ok {
+                self.add_proof_from(y, true);
+            }
+            return;
+        }
+        let pos = self.dom.stack_len();
+        if is_up {
+            self.dom.tighten_lower(self.p, j, v.ceil());
+        } else {
+            self.dom.tighten_upper(self.p, j, v.floor());
+        }
+        if !self.dom.infeasible {
+            if infeasible {
+                if farkas_ok && !self.add_proof_from(y, false) {
+                    let neg: Vec<f64> = y.iter().map(|v| -v).collect();
+                    self.add_proof_from(&neg, false);
+                }
+            } else if dual_ok {
+                self.add_proof_from(y, true);
+            }
+        }
+        self.dom.backtrack_to(self.p, pos);
+    }
+
     fn sb_child_proof(&mut self, j: usize, is_up: bool, v: f64, infeasible: bool) {
         if env_str!("ENOMOTO_MIP_SB_PROOF_OLD").is_some() {
             if !infeasible {
@@ -5535,6 +5696,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             eprintln!("MIP: conflict analysis (HiGHS style): calls {}, conflicts {}, added {}, mean length {:.1}, max length {}, {:.2}s", self.multi_stats[0], self.multi_stats[1], self.multi_stats[2], self.multi_stats[3] as f64 / self.multi_stats[1].max(1) as f64, self.conflict_max_len_multi(), self.multi_secs);
             let cf: Vec<u64> = super::domain::CONFLICT_FAIL.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();
             eprintln!("MIP: conflict analysis failures (all calls): no decision {}, too long midway {}, reason row lacks column {}, empty {}, too long at the end {} (total length {}), max length {}", cf[0], cf[1], cf[2], cf[3], cf[4], cf[5], self.conflict_max_len());
+            if self.par_sb_stats[0] > 0 {
+                eprintln!("MIP: parallel strong branching: {} batches, {} candidates", self.par_sb_stats[0], self.par_sb_stats[1]);
+            }
             eprintln!("MIP: sibling backtracks {}; basis restores {} (basic count mismatch {}), first LP iterations after a restore {}", self.sibling_backtracks, self.restore_stats.0, self.restore_stats.1, self.restore_stats.2);
             if !self.orbitopes.is_empty() {
                 eprintln!("MIP: orbitopes {}: fixed {} bounds, pruned {} nodes", self.orbitopes.len(), self.orbitope_fixings, self.orbitope_prunes);

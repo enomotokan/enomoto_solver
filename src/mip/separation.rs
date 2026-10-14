@@ -179,6 +179,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let round = round_ctr;
             round_ctr += 1;
             let now = super::cap_clock();
+            let now = if env_str!("ENOMOTO_MIP_SEP_COUNT_CPU").is_some() { now + self.sep_par_cpu } else { now };
             if self.time_up() || now - self.cpu0 > time_cap || (phase2 && now - t_loop0 > phase2_deadline) {
                 break;
             }
@@ -2007,10 +2008,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let nb = bases.len();
             let nth = par_threads.min(nb.max(1));
             // 行をスレッドに交互に割り当てる (行はスコア順で、重さが偏らないように)
-            let parts: Vec<Vec<(usize, Vec<Candidate>)>> = std::thread::scope(|sc| {
+            let parts: Vec<(Vec<(usize, Vec<Candidate>)>, f64)> = std::thread::scope(|sc| {
                 let hs: Vec<_> = (0..nth)
                     .map(|t| {
                         sc.spawn(move || {
+                            let c0 = super::cap_clock();
                             let mut scratch = vec![0.0f64; n];
                             let mut out = Vec::new();
                             let mut k = t;
@@ -2030,14 +2032,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
                                 out.push((k, cs));
                                 k += nth;
                             }
-                            out
+                            (out, super::cap_clock() - c0)
                         })
                     })
                     .collect();
                 hs.into_iter().map(|h| h.join().unwrap()).collect()
             });
             let mut by_row: Vec<Vec<Candidate>> = (0..nb).map(|_| Vec::new()).collect();
-            for part in parts {
+            for (part, cpu) in parts {
+                self.sep_par_cpu += cpu;
                 for (k, cs) in part {
                     by_row[k] = cs;
                 }

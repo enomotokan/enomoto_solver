@@ -14,6 +14,8 @@ crate-type = ["cdylib"]
 
 [dependencies]
 faer = { version = "0.20.2", default-features = false, features = ["std", "linalg", "lu", "rayon"] }
+# multifrontal の前線の密な演算 (Cholesky・三角行列の解法・行列積) だけに使う新しい版 (AVX-512 の核を実行時に選ぶので 0.20 より速い)。
+faer24 = { package = "faer", version = "0.24", default-features = false, features = ["std", "rayon"] }
 pyo3 = { version = "0.22", features = ["extension-module"] }
 rayon = "1.10"
 mimalloc = { version = "0.1", default-features = false }
