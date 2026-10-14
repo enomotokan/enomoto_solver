@@ -84,7 +84,9 @@ def worker(mps: str, solver: str, sizes_only: bool) -> None:
         os.environ["ENOMOTO_DEBUG_PRESOLVE_SIZE"] = "1"
         os.environ["ENOMOTO_PRESOLVE_ONLY"] = "1"
     t0 = time.perf_counter()
-    out = model.solve(root_solver=solver, distinguish_infeasible_unbounded=True)
+    # スレッドの数 (`ENOMOTO_BENCH_THREADS`、未指定なら solve の既定の 1)。
+    threads = int(os.environ["ENOMOTO_BENCH_THREADS"]) if os.environ.get("ENOMOTO_BENCH_THREADS") else None
+    out = model.solve(root_solver=solver, distinguish_infeasible_unbounded=True, threads=threads)
     t = time.perf_counter() - t0
     print("RESULT " + json.dumps({"time": t, "status": out["status"], "obj": out["objective"],
                                   "events": [[n, s] for n, s in _core.last_solve_events()]}), flush=True)

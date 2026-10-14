@@ -98,6 +98,12 @@ fn metis_ordering(pat: &SymbolicSparseColMat<usize>) -> Option<(Vec<usize>, Vec<
     let mut perm = vec![0i32; n];
     let mut iperm = vec![0i32; n];
     let mut options = [0i32; metis_sys::METIS_NOPTIONS as usize];
+    // METIS (GKlib) はスレッドどうしで共有する状態 (乱数など) を持ち、複数のスレッドから同時に呼ぶと並べ替えが実行ごとに
+    // 変わる (fome13 の同じ形の 8 成分を 4 スレッドで並列に解くと nnz(L) が 131 万〜140 万にばらつき、順に呼べば 8 成分とも
+    // 135 万で毎回同じ)。並べ替えが変わると内点法・クロスオーバー・仕上げの単体法の経路が変わり、まれに止まる・誤った結論を
+    // 返す経路に当たっていた。1 つずつ呼ぶ。
+    static METIS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = METIS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // SAFETY: 配列の長さは METIS の要求どおり (xadj は n+1、adjncy は xadj[n]、perm・iperm は n、options は METIS_NOPTIONS)。
     unsafe {
         metis_sys::METIS_SetDefaultOptions(options.as_mut_ptr());
@@ -599,13 +605,23 @@ impl AugKkt {
             dynamic_regularization_epsilon: tunable!("ENOMOTO_T_KKT_PIVOT_EPS", PIVOT_EPS, f64),
         };
         if let Some(mf) = self.mf.as_mut() {
+            let t_aug = std::time::Instant::now();
             let ok = mf.factor(a_upper.values(), reg.dynamic_regularization_delta, reg.dynamic_regularization_epsilon);
+            if let Some((work, crit, bigsum, critb)) = mf.trace_summary() {
+                eprintln!("MFTRACE wall={:.4} work={work:.4} crit={crit:.4} big={bigsum:.4} crit_big={critb:.4} threads={}", t_aug.elapsed().as_secs_f64(), rayon::current_num_threads());
+            }
             self.n_regularized = super::multifrontal::DYNREG.swap(0, std::sync::atomic::Ordering::Relaxed);
             if env_str!("ENOMOTO_DEBUG_REFINE").is_some() {
                 let vmax = a_upper.values().iter().fold(0.0f64, |m, v| m.max(v.abs()));
                 eprintln!("FACTOR aug mf ok={ok} dynreg={} max|value|={vmax:.2e} top[min,max]=[{:.2e},{:.2e}] mid[min,max]=[{:.2e},{:.2e}]", self.n_regularized,
                     top.iter().cloned().fold(f64::INFINITY, f64::min), top.iter().cloned().fold(0.0, f64::max),
                     mid.iter().cloned().fold(f64::INFINITY, f64::min), mid.iter().cloned().fold(f64::NEG_INFINITY, f64::max));
+                eprintln!("FACTOR mf ok={ok} t={:.3}s prof={:?} dynreg=0", t_aug.elapsed().as_secs_f64(), super::multifrontal::take_prof());
+                for (b, (cnt, t, fl)) in super::multifrontal::take_bucket_prof().into_iter().enumerate() {
+                    if cnt > 0 {
+                        eprintln!("MFBUCKET b={b} n={cnt} t={t:?} flops={fl:?}");
+                    }
+                }
             }
             self.factored = true;
             return;
@@ -1033,8 +1049,16 @@ impl NormalKkt {
         } else if let Some(mf) = self.mf.as_mut() {
             let _ = m;
             let ok = mf.factor(&self.values, reg.dynamic_regularization_delta, reg.dynamic_regularization_epsilon);
+            if let Some((work, crit, bigsum, critb)) = mf.trace_summary() {
+                eprintln!("MFTRACE wall={:.4} work={work:.4} crit={crit:.4} big={bigsum:.4} crit_big={critb:.4} threads={}", t_num.elapsed().as_secs_f64(), rayon::current_num_threads());
+            }
             if env_str!("ENOMOTO_DEBUG_REFINE").is_some() {
                 eprintln!("FACTOR mf ok={ok} t={:.3}s prof={:?} dynreg={}", t_num.elapsed().as_secs_f64(), super::multifrontal::take_prof(), super::multifrontal::DYNREG.swap(0, std::sync::atomic::Ordering::Relaxed));
+                for (b, (cnt, t, fl)) in super::multifrontal::take_bucket_prof().into_iter().enumerate() {
+                    if cnt > 0 {
+                        eprintln!("MFBUCKET b={b} n={cnt} t={t:?} flops={fl:?}");
+                    }
+                }
             }
             ok
         } else {
@@ -1405,5 +1429,182 @@ mod chol_bench {
             };
             println!("CHOLBENCH faer {name} n={n} nnz(L)={} kind={kind} symbolic={t_sym:.3}s numeric={best:.3}s", chol.len_values());
         }
+    }
+}
+
+#[cfg(test)]
+mod mf_variants {
+    use faer::sparse::linalg::cholesky::{factorize_symbolic_cholesky, SymmetricOrdering};
+    use faer::sparse::SymbolicSparseColMat;
+    use faer::Side;
+
+    use super::super::multifrontal::Multifrontal;
+
+    /// 3 次元の格子 (`k^3` 点) のラプラシアン風の対称行列に、遠い点どうしの結合を少し足したもの
+    /// (子の更新行列の行が親の前線で飛び飛びになるように)。上三角の列圧縮 `(列の始まり, 行, 値)`。
+    fn grid(k: usize, extra: usize, seed: u64) -> (usize, Vec<usize>, Vec<usize>, Vec<f64>) {
+        let n = k * k * k;
+        let mut s = seed;
+        let mut rnd = move || {
+            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (s >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let mut cols: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
+        let id = |x: usize, y: usize, z: usize| (z * k + y) * k + x;
+        for z in 0..k {
+            for y in 0..k {
+                for x in 0..k {
+                    let i = id(x, y, z);
+                    cols[i].push((i, 8.0 + rnd()));
+                    for (dx, dy, dz) in [(1, 0, 0), (0, 1, 0), (0, 0, 1)] {
+                        let (a, b, c) = (x + dx, y + dy, z + dz);
+                        if a < k && b < k && c < k {
+                            let j = id(a, b, c);
+                            cols[j].push((i, -1.0 + 0.1 * rnd()));
+                        }
+                    }
+                }
+            }
+        }
+        for _ in 0..extra {
+            let (a, b) = ((rnd() * n as f64) as usize % n, (rnd() * n as f64) as usize % n);
+            if a != b {
+                let (r, c) = (a.min(b), a.max(b));
+                if !cols[c].iter().any(|e| e.0 == r) {
+                    cols[c].push((r, 0.3 * (rnd() - 0.5)));
+                    cols[c][0].1 += 0.2;
+                    cols[r][0].1 += 0.2;
+                }
+            }
+        }
+        let mut ptr = vec![0usize; n + 1];
+        let (mut idx, mut val) = (Vec::new(), Vec::new());
+        for c in 0..n {
+            cols[c].sort_by_key(|e| e.0);
+            for &(r, v) in &cols[c] {
+                idx.push(r);
+                val.push(v);
+            }
+            ptr[c + 1] = idx.len();
+        }
+        (n, ptr, idx, val)
+    }
+
+    /// 上三角の列圧縮の対称行列 `M` と `x` の積。
+    fn sym_mul(n: usize, ptr: &[usize], idx: &[usize], val: &[f64], x: &[f64]) -> Vec<f64> {
+        let mut y = vec![0.0; n];
+        for c in 0..n {
+            for k in ptr[c]..ptr[c + 1] {
+                let r = idx[k];
+                y[r] += val[k] * x[c];
+                if r != c {
+                    y[c] += val[k] * x[r];
+                }
+            }
+        }
+        y
+    }
+
+    /// 更新行列の形 (正方形・台形、半端なかたまりの幅)・親の前線へ直接書くか・区切りの幅・並列にするか・
+    /// 逐次の部分木の大きさの組み合わせで、分解して解いた結果が既定の版と (丸め誤差の範囲で) 一致し、残差が小さいこと。
+    fn check(n: usize, ptr: Vec<usize>, idx: Vec<usize>, val: Vec<f64>, signs: Option<Vec<i8>>) {
+        let sym = SymbolicSparseColMat::<usize>::new_checked(n, n, ptr.clone(), None, idx.clone());
+        let chol = factorize_symbolic_cholesky::<usize>(sym.as_ref(), Side::Upper, SymmetricOrdering::Amd, super::chol_symbolic_params_with(true)).unwrap();
+        let make = || match &signs {
+            Some(sg) => Multifrontal::new_ldlt(&sym, &chol, sg).unwrap(),
+            None => Multifrontal::new(&sym, &chol).unwrap(),
+        };
+        let b: Vec<f64> = (0..n).map(|i| 1.0 + (i % 7) as f64).collect();
+        let solve = |mf: &mut Multifrontal, seq: bool| {
+            assert!(super::with_inner_seq(seq, || mf.factor(&val, 1e-12, 1e-30)));
+            let mut x = b.clone();
+            super::with_inner_seq(seq, || mf.solve_in_place(&mut x));
+            x
+        };
+        let mut base = make();
+        let (max_r, multi, leaves) = base.shape_stats();
+        // 台形のかたまり (幅 64) を複数持つ更新行列・飛び飛びの写像・葉があること。
+        assert!(max_r > 128 && multi > 0 && leaves > 0, "max_r={max_r} multi={multi} leaves={leaves} ns={}", base.n_supernodes());
+        base.set_variant(0, false, 0, 128, 5e7, 2e6);
+        let x0 = solve(&mut base, false);
+        let res = sym_mul(n, &ptr, &idx, &val, &x0).iter().zip(&b).map(|(a, b)| (a - b).abs()).fold(0.0f64, f64::max);
+        assert!(res < 1e-8, "residual {res:e}");
+        let xmax = x0.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+        let mut n_cases = 0;
+        for pack_bw in [0usize, 5, 64] {
+            for (direct, runs) in [(false, 0usize), (true, 1), (true, 4), (true, usize::MAX)] {
+                for chunk in [3usize, 128] {
+                    for (par_flops, seq_flops) in [(5e7, 2e6), (0.0, 0.0), (0.0, 1e4)] {
+                        for seq in [false, true] {
+                            let mut mf = make();
+                            mf.set_variant(pack_bw, direct, runs, chunk, par_flops, seq_flops);
+                            // 2 回分解して、使い回した配列の残りが結果に混ざらないことも見る。
+                            let _ = solve(&mut mf, seq);
+                            let x = solve(&mut mf, seq);
+                            let d = x.iter().zip(&x0).map(|(a, b)| (a - b).abs()).fold(0.0f64, f64::max);
+                            assert!(d <= 1e-9 * xmax, "pack_bw={pack_bw} direct={direct} runs={runs} chunk={chunk} par={par_flops} seq_flops={seq_flops} seq={seq}: diff {d:e}");
+                            n_cases += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(n_cases, 3 * 4 * 2 * 3 * 2);
+        // 大きな前線の三角行列の解法を行のかたまりごとに並列に・L のかたまりの 0 埋めを並列に。
+        for pack_bw in [0usize, 64] {
+            for seq in [false, true] {
+                let mut mf = make();
+                mf.set_variant(pack_bw, false, 0, 128, 0.0, 0.0);
+                mf.set_par_extra(true, true);
+                let x = solve(&mut mf, seq);
+                let d = x.iter().zip(&x0).map(|(a, b)| (a - b).abs()).fold(0.0f64, f64::max);
+                assert!(d <= 1e-9 * xmax, "par_trsm pack_bw={pack_bw} seq={seq}: diff {d:e}");
+            }
+        }
+        // 大きな前線の対角ブロックをかたまりごとに Cholesky する版 (LLᵀ のときだけ使う)。
+        for (bs, min) in [(7usize, 0usize), (64, 0), (16, 100)] {
+            for pack_bw in [0usize, 64] {
+                let mut mf = make();
+                mf.set_variant(pack_bw, false, 0, 128, 0.0, 0.0);
+                mf.set_bchol(bs, min);
+                let x = solve(&mut mf, false);
+                let d = x.iter().zip(&x0).map(|(a, b)| (a - b).abs()).fold(0.0f64, f64::max);
+                assert!(d <= 1e-9 * xmax, "bchol bs={bs} min={min} pack_bw={pack_bw}: diff {d:e}");
+            }
+        }
+    }
+
+    #[test]
+    fn llt_variants_match() {
+        let (n, ptr, idx, val) = grid(11, 200, 1);
+        check(n, ptr, idx, val, None);
+    }
+
+    #[test]
+    fn ldlt_variants_match() {
+        // 準定値の拡大系 [H Aᵀ; A -δI] (H は格子、A は疎な乱数)。
+        let (n1, ptr1, idx1, val1) = grid(9, 50, 2);
+        let m = 200;
+        let mut s = 7u64;
+        let mut rnd = move || {
+            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (s >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let (mut ptr, mut idx, mut val) = (ptr1, idx1, val1);
+        for i in 0..m {
+            let mut rows: Vec<usize> = (0..4).map(|_| (rnd() * n1 as f64) as usize % n1).collect();
+            rows.sort_unstable();
+            rows.dedup();
+            for r in rows {
+                idx.push(r);
+                val.push(rnd() - 0.5);
+            }
+            idx.push(n1 + i);
+            val.push(-1e-2);
+            ptr.push(idx.len());
+        }
+        let n = n1 + m;
+        let signs: Vec<i8> = (0..n).map(|i| if i < n1 { 1 } else { -1 }).collect();
+        check(n, ptr, idx, val, Some(signs));
     }
 }

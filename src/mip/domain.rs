@@ -78,6 +78,12 @@ pub struct Domain {
     /// 行ごとの `max_j |a_ij| (u_j - l_j)` (作ったときの境界で。境界は締まるだけなので以後も上界)。
     /// 行の余裕がこれ以上なら、その行からはどの境界も締まらないので走査を省く (HiGHS の capacity threshold)。
     row_cap: Vec<f64>,
+    /// 含意による伝播 (`ENOMOTO_MIP_IMPL_PROP`): 文字 (`2j` は `x_j = 1`、`2j+1` は `x_j = 0`) ごとの、同時には成り立たない
+    /// 文字 ([`MipProblem::conflict_edges`] から作る)。HiGHS のクリーク表の伝播に当たる (行の伝播では見えない、
+    /// プロービングで見つけた含意も使う)。
+    impl_adj: Option<std::sync::Arc<Vec<Vec<u32>>>>,
+    /// 固定されて、含意を伝播するのを待つ 2 値列。
+    impl_queue: Vec<usize>,
 }
 
 thread_local! {
@@ -114,6 +120,17 @@ impl Domain {
             resets: 0,
             global_lo: p.col_lo.clone(),
             global_up: p.col_up.clone(),
+            impl_adj: if env_str!("ENOMOTO_MIP_IMPL_PROP").is_some() && !p.conflict_edges.is_empty() {
+                let mut adj = vec![Vec::new(); 2 * p.n];
+                for &(a, b) in &p.conflict_edges {
+                    adj[a as usize].push(b);
+                    adj[b as usize].push(a);
+                }
+                Some(std::sync::Arc::new(adj))
+            } else {
+                None
+            },
+            impl_queue: Vec::new(),
             row_cap: if env_str!("ENOMOTO_MIP_NO_ROWCAP").is_some() { vec![f64::INFINITY; p.m] } else { p.rows.iter().map(|r| r.iter().map(|&(j, a)| a.abs() * (p.col_up[j] - p.col_lo[j])).fold(0.0f64, f64::max)).collect() },
         };
         d.recompute_activities(p);
@@ -263,6 +280,9 @@ impl Domain {
         }
         self.update_activity(p, j, upper, old, v);
         self.mark_changed(j);
+        if self.impl_adj.is_some() && self.lo[j] == self.up[j] && (self.lo[j] == 0.0 || self.lo[j] == 1.0) && p.is_int[j] {
+            self.impl_queue.push(j);
+        }
         if self.lo[j] > self.up[j] + bound_tol(self.lo[j]) {
             if !self.infeasible {
                 self.conflict = Some(ConflictSrc::Col(j));
@@ -313,6 +333,7 @@ impl Domain {
             self.in_queue[i] = false;
         }
         self.queue.clear();
+        self.impl_queue.clear();
     }
 
     /// 根まで戻し、保留中の大域的な締め付けを適用する。
@@ -374,7 +395,38 @@ impl Domain {
         }
         let nnz_limit = 20 * (p.m + p.n) + 100_000;
         let mut work = 0usize;
-        while let Some(i) = self.queue.pop() {
+        loop {
+            // 含意を先に伝播する (固定された 2 値列の文字と同時に成り立たない文字の列を、反対の値に固定する)。
+            // 理由は記録しない (衝突解析では決定と同じに扱われるが、矛盾する境界の組としては正しいまま)
+            if let Some(adj) = self.impl_adj.clone() {
+                while let Some(j) = self.impl_queue.pop() {
+                    if self.lo[j] != self.up[j] {
+                        continue;
+                    }
+                    let lit = 2 * j + if self.lo[j] == 1.0 { 0 } else { 1 };
+                    work += adj[lit].len();
+                    for &c in &adj[lit] {
+                        let k = (c / 2) as usize;
+                        if c % 2 == 0 {
+                            if self.up[k] > 0.0 {
+                                self.set_bound(p, k, true, 0.0, true);
+                            }
+                        } else if self.lo[k] < 1.0 {
+                            self.set_bound(p, k, false, 1.0, true);
+                        }
+                        if self.infeasible {
+                            break;
+                        }
+                    }
+                    if self.infeasible {
+                        break;
+                    }
+                }
+                if self.infeasible {
+                    break;
+                }
+            }
+            let Some(i) = self.queue.pop() else { break };
             self.in_queue[i] = false;
             // 走査を省いた行は数えない
             let (use_up, use_lo) = self.row_sides(p, i);

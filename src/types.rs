@@ -259,6 +259,12 @@ pub struct MipSummary {
     pub nodes: u64,
     /// 単体法の反復数の合計。
     pub lp_iterations: u64,
+    /// 根の切除平面ループを終えた時点の LP の目的値 (再スタートがあれば最後の根のもの。なければ NaN)。
+    pub root_bound: f64,
+    /// 最初の暫定解を見つけた時刻 [秒] (求解の開始から。なければ NaN)。
+    pub first_solution_time: f64,
+    /// 最初の暫定解の目的値 (なければ NaN)。
+    pub first_solution_objective: f64,
 }
 
 /// 整数最適化の求解設定 (`None` なら既定値または環境変数の値)。
