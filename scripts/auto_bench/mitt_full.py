@@ -13,6 +13,7 @@
   - 最初に圧縮データをまとめて取得しておく (ディスクの空きが --min-free-gb を割らない範囲で)。
     取得できなかった問題は、その問題の番が来たときにもう一度取りにいく。
   - 計測中は Windows のスリープを抑止する。
+  - ディスクの空きが足りず展開できない問題は飛ばし (skip、reason "disk")、再開時にもう一度試す。
 
 使い方 (リポジトリのルートで):
     python scripts/auto_bench/mitt_full.py --out benchmarks/mitt_full_16t_600s.jsonl
@@ -381,7 +382,9 @@ def main():
     if a.out.exists():
         for l in a.out.read_text(encoding="utf-8").splitlines():
             r = json.loads(l)
-            if r.get("type") in ("done", "skip"): done.add(r["problem"])
+            # ディスク不足で飛ばした問題は再開時にもう一度試す (空きを作ってから同じコマンドで再実行)
+            if r.get("type") == "done" or (r.get("type") == "skip" and not r["reason"].startswith("disk")):
+                done.add(r["problem"])
     else:
         import highspy
         append({"type": "meta", "started": datetime.now(timezone.utc).isoformat(timespec="seconds"), "commit": a.commit,
