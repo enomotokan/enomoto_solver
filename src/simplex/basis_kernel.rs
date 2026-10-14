@@ -434,6 +434,19 @@ impl BasisKernel {
         self.check_after_update(lu, updated, density)
     }
 
+    /// ピボットの 2 通りの値の照合 (HiGHS `updateVerify` 相当、[`super::pivot_values_agree`])。`col` は入る列、`rho` は
+    /// ピボット行の BTRAN の結果 ([`Self::btran_row`])、`alpha_col` は入る列の FTRAN の結果のピボット行の値。行の値は
+    /// `rho · col`。基底を入れ替える**前**に呼び、合わなければ呼び出し側がこのピボットを捨てて再分解し、選び直す
+    /// (双対単体法の主ループと同じ。入れ替えてから再分解すると、不正確なピボットで動かした値が残る)。再分解の直後
+    /// (更新 0 回) は再分解しても直らないので照合せず真を返す。
+    pub(super) fn pivot_agrees(&self, lu: &sparse_lu::FtLu, col: &[(usize, f64)], rho: &[f64], alpha_col: f64) -> bool {
+        if lu.update_count() == 0 {
+            return true;
+        }
+        let alpha_row: f64 = col.iter().map(|&(i, a)| a * rho[i]).sum();
+        super::pivot_values_agree(alpha_row, alpha_col)
+    }
+
     /// FT 更新の後の再分解トリガ (2)(4)(5)(3) ([`Self::update_and_check`] の説明の順)。
     #[inline]
     fn check_after_update(&mut self, lu: &sparse_lu::FtLu, updated: bool, density: SynthDensity) -> RefactorDue {
@@ -487,6 +500,26 @@ impl BasisKernel {
 /// 分解が得られるかどうかは変わらず、手間だけが変わる。特異基底なら `None`。
 /// 主単体法・双対単体法の再分解はすべてこれを通る (双対単体法は特異のときの印を
 /// `slope_intercept_dual::refactorize` で付け足す)。
+/// 基底解 `x_B` の残差の相対値: `r = rhs - B x_B` の各行を、その行の大きさ `1 + |rhs_i| + Σ_k |B_ik x_B_k|` で割った
+/// 値の最大 (`rhs` は呼び出し側が非基底の値を引いた右辺 `b - A_N x_N`)。FT 更新を重ねた LU の誤差で `x_B` がずれていないかを、
+/// 実際の行列で確かめる (双対単体法の主ループの `x_B` のずれの検査と同じ考え方)。手間は基底の列の非零の数。
+pub(super) fn basic_residual(std: &StdForm, basis: &[usize], xb: &[f64], rhs: &[f64]) -> f64 {
+    let m = std.n_rows;
+    let mut r = rhs.to_vec();
+    let mut act = vec![0.0f64; m];
+    for (k, &j) in basis.iter().enumerate() {
+        let v = xb[k];
+        if v == 0.0 {
+            continue;
+        }
+        for &(i, a) in std.cols.col(j) {
+            r[i] -= a * v;
+            act[i] += (a * v).abs();
+        }
+    }
+    (0..m).map(|i| r[i].abs() / (1.0 + rhs[i].abs() + act[i])).fold(0.0, f64::max)
+}
+
 pub(super) fn factorize_basis(
     std: &StdForm,
     basis_pos: &[Option<usize>],
