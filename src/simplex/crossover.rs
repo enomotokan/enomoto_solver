@@ -472,6 +472,11 @@ thread_local! {
 }
 
 thread_local! {
+    /// 押し出しの時間切れでクロスオーバーを諦めた印 ([`solve_ipm_crossover`] が元の問題で内点法をやり直さないため)。
+    static XO_GAVE_UP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+thread_local! {
     /// `ipm_point_only` で止めたときの内点法の点 `(x, y, 内点法の時間)`。
     static XO_IPM_POINT: std::cell::RefCell<Option<(Vec<f64>, Vec<f64>, f64)>> = const { std::cell::RefCell::new(None) };
 }
@@ -684,10 +689,12 @@ pub(super) fn ipm_feasibility(std: &StdForm) -> Option<bool> {
 /// 元の解を戻す。双対 LP で解けなかったら元の問題で解く (`ENOMOTO_T_XO_DUALIZE=0` で双対化しない)。
 pub(super) fn solve_ipm_crossover(std: &StdForm) -> Option<SimplexResult> {
     if tunable!("ENOMOTO_T_XO_DUALIZE", 1u8, u8) != 0 {
+        XO_GAVE_UP.with(|g| g.set(false));
         if let Some(r) = solve_ipm_crossover_dualized(std) {
             return Some(r);
         }
-        if crate::cancel::is_cancelled() {
+        // 双対 LP の押し出しが時間切れで諦めたなら、元の問題で内点法をやり直さず二段解法に任せる。
+        if crate::cancel::is_cancelled() || XO_GAVE_UP.with(|g| g.get()) {
             return None;
         }
     }
@@ -1964,6 +1971,18 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
         crate::phase_timing::record("xo_megiddo_bound", ms.to_bound as f64);
         crate::phase_timing::record("xo_megiddo_unresolved", ms.unresolved as f64);
         crate::phase_timing::mark("megiddo_end");
+        // 時間切れで押し出せなかった超基底が多ければ、クロスオーバーを諦めて二段解法で解き直す
+        // (`ENOMOTO_T_XO_MEGIDDO_GIVEUP`、既定 100、0 で諦めない)。境界に置いた列が基底解を大きく動かし (ex10 を双対化せずに
+        // 解いたとき: 残り 330 本で主実行不能 3.3 万)、そこからの修復・仕上げは二段解法を一から解くより遅い (600 秒で終わらない)。
+        let giveup = tunable!("ENOMOTO_T_XO_MEGIDDO_GIVEUP", 100usize, usize);
+        if giveup > 0 && ms.timed_out >= giveup {
+            crate::phase_timing::record("xo_megiddo_timed_out", ms.timed_out as f64);
+            XO_GAVE_UP.with(|g| g.set(true));
+            if debug {
+                eprintln!("CROSSOVER megiddo: {} superbasics left at the deadline; giving up the crossover", ms.timed_out);
+            }
+            return None;
+        }
         if debug {
             eprintln!(
                 "CROSSOVER megiddo pivots={} to_bound={} unresolved={} t={:.3}s",
@@ -2200,7 +2219,13 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     // 時間の上限は主の押し出しと同じ。頂点を採る問題 (Netlib・Kennington の多く) で先に押し出すと、その分だけ遅かった
     // (ken-18 5.4 → 6.3 秒)。双対化した問題 (双対 LP のままクロスオーバー) は頂点の判定を使わないので必ずここに来る
     // (ex10: 押し出し 14,618 本で主・双対とも実行可能になり、仕上げ 0.9 秒)。
-    if repaired_start.is_none() && tunable!("ENOMOTO_T_XO_CLEANUP_MAIN", 1u8, u8) != 0 && tunable!("ENOMOTO_T_XO_DUAL_MEGIDDO", 1u8, u8) != 0 {
+    // 頂点が主実行可能なときだけ (押し出しは主の値を変えないので、仕上げは主単体法で済む見込み。主実行不能な頂点
+    // (pilot.we: 押し出せなかった超基底 2 本) では押し出しても仕上げが速くならなかった)。
+    if repaired_start.is_none()
+        && tunable!("ENOMOTO_T_XO_CLEANUP_MAIN", 1u8, u8) != 0
+        && tunable!("ENOMOTO_T_XO_DUAL_MEGIDDO", 1u8, u8) != 0
+        && vertex_solution(std, &basis_pos, &nb_status, &lu).is_some()
+    {
         let mfac = tunable!("ENOMOTO_T_XO_MEGIDDO_TIME_FACTOR", 1.0f64, f64);
         let deadline = Instant::now() + std::time::Duration::from_secs_f64((mfac * ipm_secs + if mfac > 0.0 { 1.0 } else { 0.0 }).clamp(0.0, 1e6));
         let mut yd = y.clone();
@@ -2978,6 +3003,8 @@ struct MegiddoResult {
     to_bound: usize,
     /// どちら向きにも塞がれず押し出せなかった数 (呼び出し側が先に決めた境界に置いたまま)。
     unresolved: usize,
+    /// そのうち時間切れで押し出さなかった数。
+    timed_out: usize,
 }
 
 /// Megiddo (1991) 式の超基底変数の押し出し。
@@ -3062,9 +3089,8 @@ fn megiddo_push(
     let mut nz: Vec<usize> = Vec::new();
     let (mut pivots, mut to_bound, mut unresolved) = (0usize, 0usize, 0usize);
     let repair = tunable!("ENOMOTO_T_XO_MEGIDDO_REPAIR", 0u8, u8) != 0;
-    let undo = tunable!("ENOMOTO_T_XO_MEGIDDO_UNDO", 1u8, u8) != 0;
+    let mut timed_out = 0usize;
     let mut repaired = 0usize;
-    let mut reverted = 0usize;
     let mut prof = [0.0f64; 4];
     let (mut nz_sum, mut nrefac) = (0usize, 0usize);
     let t_push = Instant::now();
@@ -3138,6 +3164,7 @@ fn megiddo_push(
         if si % 16 == 0 && Instant::now() > deadline {
             // 時間切れ: 残りは呼び出し側が置いた境界のまま (仕上げが直す)。
             unresolved += sup.len() - si;
+            timed_out = sup.len() - si;
             for &jr in &sup[si..] {
                 is_sup[jr] = false;
             }
@@ -3215,46 +3242,23 @@ fn megiddo_push(
                     nrefac += 1;
                     lu = match factorize_basis(std, basis_pos, Some(&lu)) {
                         Some(f) => f,
-                        None => {
-                            // 入れた列で基底が数値的に特異になった (FT 更新が退けられ、分解し直すと特異)。この 1 回のピボットだけを
-                            // 取り消し (`q` を基底に戻す)、`j` は今の値に近い方の境界に置いて押し出しを続ける (仕上げが直す)。
-                            // 戻した基底も分解できなければ従来どおり押し出し全体を捨てる (呼び出し側が二段解法で解き直す)。
-                            // `ENOMOTO_T_XO_MEGIDDO_UNDO=0` で取り消さない。
-                            let mut undone = None;
-                            if undo {
-                                basis[r] = q;
-                                basis_pos[q] = Some(r);
-                                basis_pos[j] = None;
-                                nb_status[q] = None;
-                                nb_status[j] = Some(nearest_bound(std, j, xj + ts));
-                                cb[r] = std.c[q];
-                                pivots -= 1;
-                                undone = factorize_basis(std, basis_pos, None);
-                                if undone.is_some() {
-                                    unresolved += 1;
-                                    reverted += 1;
-                                }
+                        // 基底が数値的に特異になった: 一次従属な列を空いた行のスラックに差し替えて続ける
+                        // (`ENOMOTO_T_XO_MEGIDDO_REPAIR`、既定 0: ex10 では 300 本を差し替えて頂点の主実行不能が 3 万になり、
+                        // 仕上げが終わらない)。既定では押し出し全体を捨てて二段解法で解き直す。
+                        None if repair => {
+                            let (f, replaced) = super::basis_kernel::factorize_basis_repair(std, basis, basis_pos, None)?;
+                            for &(pos, old) in &replaced {
+                                nb_status[old] = Some(nearest_bound(std, old, xb[pos]));
+                                nb_status[basis[pos]] = None;
+                                // 基底に入ったスラックが押し出し待ちの超基底なら、もう押し出さない。
+                                is_sup[basis[pos]] = false;
+                                cb[pos] = std.c[basis[pos]];
                             }
-                            match undone {
-                                Some(f) => f,
-                                // 一次従属な列を空いた行のスラックに差し替えて続ける (`ENOMOTO_T_XO_MEGIDDO_REPAIR`、既定 0:
-                                // ex10 では 300 本を差し替えて頂点の主実行不能が 3 万になり、仕上げが終わらない)。
-                                None if repair => {
-                                    let (f, replaced) = super::basis_kernel::factorize_basis_repair(std, basis, basis_pos, None)?;
-                                    for &(pos, old) in &replaced {
-                                        nb_status[old] = Some(nearest_bound(std, old, xb[pos]));
-                                        nb_status[basis[pos]] = None;
-                                        // 基底に入ったスラックが押し出し待ちの超基底なら、もう押し出さない。
-                                        is_sup[basis[pos]] = false;
-                                        cb[pos] = std.c[basis[pos]];
-                                    }
-                                    unresolved += replaced.len();
-                                    repaired += replaced.len();
-                                    f
-                                }
-                                None => return None,
-                            }
+                            unresolved += replaced.len();
+                            repaired += replaced.len();
+                            f
                         }
+                        None => return None,
                     };
                     kernel = BasisKernel::new(m, ft_max);
                     let xs_ref = &xs;
@@ -3272,9 +3276,6 @@ fn megiddo_push(
     if env_str!("ENOMOTO_DEBUG_CROSSOVER").is_some() {
         eprintln!("CROSSOVER megiddo prof: total={:.2}s ftran={:.2} btran={:.2} update={:.2} refactor={:.2} ({nrefac}x) avg_nz={:.0}", t_push.elapsed().as_secs_f64(), prof[0], prof[1], prof[2], prof[3], nz_sum as f64 / (pivots + to_bound).max(1) as f64);
     }
-    if reverted > 0 && env_str!("ENOMOTO_DEBUG_CROSSOVER").is_some() {
-        eprintln!("CROSSOVER megiddo: {reverted} pivots undone (singular basis), entering columns left at the nearest bound");
-    }
     let lu = match factorize_basis(std, basis_pos, Some(&lu)) {
         Some(f) => f,
         None if repair => {
@@ -3288,7 +3289,7 @@ fn megiddo_push(
         }
         None => return None,
     };
-    Some(MegiddoResult { lu, pivots, to_bound, unresolved })
+    Some(MegiddoResult { lu, pivots, to_bound, unresolved, timed_out })
 }
 
 /// [`megiddo_dual_push`] の結果。
