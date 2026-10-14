@@ -121,6 +121,11 @@ thread_local! {
     /// (0 = しない、1 = Feasibility Pump、2 = fractional、3 = vector length、4 = coefficient diving) と、ダイビングの反復の予算、
     /// 根の LP の反復数 (Feasibility Pump の予算に使う)。
     static DIVE_ONLY: std::cell::Cell<(u8, u64, u64)> = const { std::cell::Cell::new((0, 0, 0)) };
+    /// 根のヒューリスティクスの間にカットを強める求解 (`ENOMOTO_MIP_BG_CUTS`): このスレッドで写しから作る求解はカットの
+    /// ループだけを行い、止めの合図まで続けて、最後の LP に残ったカットの行と目的値を返す。
+    /// カットを強める求解の、主の根の LP の反復数 (カットの LP の反復上限に使う)
+    pub(super) static BG_ROOT_ITERS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    pub(super) static CUT_JOB: std::cell::RefCell<Option<std::sync::Arc<CutJob>>> = const { std::cell::RefCell::new(None) };
     /// 診断用: 既知の最適解 (縮約後の空間、`ENOMOTO_MIP_DEBUG_SOL`)。この解を含むノードが
     /// 枝刈りされたら理由を表示する (SCIP の debug solution と同様)。
     pub(crate) static DEBUG_SOL: std::cell::RefCell<Option<Vec<f64>>> = const { std::cell::RefCell::new(None) };
@@ -156,6 +161,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) sep_par_cpu: f64,
     /// 並列の分離で、経路集約の集約した行を集める先 (`Some` の間は [`Self::path_aggregation`] がカットを作らずにここへ入れる)。
     pub(super) path_collect: Option<Vec<Vec<(usize, f64)>>>,
+    /// カットを強める求解で回したラウンド数
+    pub(super) bg_cut_rounds: usize,
     /// 並列の強分岐 (`ENOMOTO_MIP_PAR_SB`) の [まとめた回数, 並列に解いた候補の数]。
     par_sb_stats: [u64; 2],
     pub(super) deadline: Option<Instant>,
@@ -899,6 +906,38 @@ pub(crate) fn solve_snapshot(snap: std::sync::Arc<TreeSnapshot>, params: MipPara
     solve_worker(snap, None, params)
 }
 
+/// 根のヒューリスティクスの間にカットを強める求解との受け渡し。
+pub(super) struct CutJob {
+    /// 止めの合図 (主のヒューリスティクスが終わった)
+    pub(super) stop: std::sync::atomic::AtomicBool,
+    /// 重い設定 (停滞したら HiGHS のスコアの第 2 段階に入る、停滞の判定を緩める)
+    pub(super) heavy: bool,
+    /// 結果: 最後の LP のカットの行 (係数, 下限, 上限)、目的値 (offset 込み)、ラウンド数
+    pub(super) out: std::sync::Mutex<Option<(Vec<(Vec<(usize, f64)>, f64, f64)>, f64, usize)>>,
+}
+
+/// カットを強める求解のスレッド。落とすと止めの合図を出して終わりを待つ (主が途中で戻っても残らないように)。
+struct BgCuts {
+    job: std::sync::Arc<CutJob>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl BgCuts {
+    fn finish(&mut self) -> Option<(Vec<(Vec<(usize, f64)>, f64, f64)>, f64, usize)> {
+        self.job.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+        self.job.out.lock().unwrap().take()
+    }
+}
+
+impl Drop for BgCuts {
+    fn drop(&mut self) {
+        let _ = self.finish();
+    }
+}
+
 /// 木の写し `snap` から解く (`pool` があれば共有の待ち行列からノードを取る従のスレッドとして)。
 fn solve_worker(snap: std::sync::Arc<TreeSnapshot>, pool: Option<std::sync::Arc<WorkPool>>, params: MipParams) -> MipResult {
     let p = snap.p.clone();
@@ -941,6 +980,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         cpu0: super::cap_clock(),
         sep_par_cpu: 0.0,
         path_collect: None,
+        bg_cut_rounds: 0,
         par_sb_stats: [0; 2],
         deadline,
         nodes: 0,
@@ -1677,10 +1717,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // カットを加える前の根の LP 解 (RENS の 2 つ目の近傍に使う)
         let x_root0 = self.lp.col_values();
         // 根の切除平面
+        let cut_job = CUT_JOB.with(|j| j.borrow().clone()).filter(|_| self.snap.is_some());
         {
             let x = self.lp.col_values();
-            if !self.fractional(&x).is_empty() && self.snap.is_none() {
-                self.simple_rounding(&x);
+            if !self.fractional(&x).is_empty() && (self.snap.is_none() || cut_job.is_some()) {
+                if cut_job.is_none() {
+                    self.simple_rounding(&x);
+                }
                 // `ENOMOTO_MIP_ROOT_WARM_DSE`: 根のカットのループの間だけ DSE 重みを引き継ぐ (カットを足した後の LP の反復を減らす)。
                 // 1 ラウンドの反復は 10-45% 減る (neos-1456979 357 -> 193) が、40 問では 19 -> 17 問 (sgeomean 27.64 -> 29.64):
                 // 着く根の LP 解・カットが変わり、10teams (3.3 秒 -> 時間切れ)・neos-860300 が解けなくなった (mik-250 は 31.6 -> 19.4 秒)
@@ -1705,7 +1748,44 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
         }
+        if let Some(job) = &cut_job {
+            let rows: Vec<(Vec<(usize, f64)>, f64, f64)> = (self.p.m..self.lp.num_rows())
+                .map(|i| {
+                    let (l, u) = self.lp.row_bounds(i);
+                    (self.lp.row(i), l, u)
+                })
+                .collect();
+            {
+                *job.out.lock().unwrap() = Some((rows, self.lp.objective() + self.p.offset, self.bg_cut_rounds));
+            }
+            return MipResult { status: MipStatus::NotSolved, x: None, objective: None, best_bound: f64::NEG_INFINITY, nodes: 0, lp_iterations: self.lp.total_iterations() };
+        }
         self.join_fj_thread();
+        // `ENOMOTO_MIP_BG_CUTS`: 並列モードで、根のヒューリスティクスの間に、今の根の写しから作った求解でカットのループを
+        // 続ける (分離は残りのスレッドで並列)。ヒューリスティクスが終わったら止め、その LP に残ったカット (効いているもの)
+        // で根の LP のカットを置き換える (目的値が上がったときだけ)。`ENOMOTO_MIP_BG_CUTS=heavy` なら停滞の判定を緩め、
+        // 停滞したら HiGHS のスコアの第 2 段階に入る
+        let mut bg_cuts: Option<BgCuts> = None;
+        if self.snap.is_none() && !self.params.submip && self.params.threads > 1 && env_str!("ENOMOTO_MIP_NO_CUTS").is_none() && !self.fractional(&self.lp.col_values()).is_empty() {
+            if let Some(mode) = env_str!("ENOMOTO_MIP_BG_CUTS") {
+                let job = std::sync::Arc::new(CutJob { stop: std::sync::atomic::AtomicBool::new(false), heavy: mode == "heavy", out: std::sync::Mutex::new(None) });
+                let snap = self.make_snapshot(&Portfolio::new(), &mut None, false);
+                let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());
+                let threads = tunable!("ENOMOTO_T_MIP_BG_CUTS_THREADS", (self.params.threads - 1).max(1), usize);
+                let params = MipParams { time_limit: remaining, node_limit: u64::MAX, verbose: false, threads, ..self.params };
+                let j2 = job.clone();
+                let ri = root_iters;
+                let handle = std::thread::Builder::new()
+                    .stack_size(64 << 20)
+                    .spawn(move || {
+                        CUT_JOB.with(|j| *j.borrow_mut() = Some(j2));
+                        BG_ROOT_ITERS.with(|c| c.set(ri));
+                        let _ = solve_worker(snap, None, params);
+                    })
+                    .expect("failed to spawn the cut thread");
+                bg_cuts = Some(BgCuts { job, handle: Some(handle) });
+            }
+        }
         // 根のヒューリスティクス
         {
             let x = self.lp.col_values();
@@ -1947,6 +2027,72 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 並列モードは根のヒューリスティクスの間だけ (LP 解が整数で途中を飛ばした場合も戻す)
         self.parallel_submips = false;
         self.join_submips(0);
+        // カットを強める求解を止め、その LP のカットで根の LP のカットを置き換える
+        if let Some(mut bg) = bg_cuts.take() {
+            let t0 = Instant::now();
+            let res = bg.finish();
+            let wait = t0.elapsed().as_secs_f64();
+            // 根の LP を解き直しておく (ヒューリスティクスの後で状態が戻っていることを確かめる)
+            let st0 = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
+            let cur = self.lp.objective() + self.p.offset;
+            match res {
+                Some((rows, obj, rounds)) if obj > cur + 1e-9 * cur.abs().max(1.0) && st0 == LpStatus::Optimal => {
+                    let m0 = self.p.m;
+                    let nr = self.lp.num_rows();
+                    let saved: Vec<(Vec<(usize, f64)>, f64, f64)> = (m0..nr)
+                        .map(|i| {
+                            let (l, u) = self.lp.row_bounds(i);
+                            (self.lp.row(i), l, u)
+                        })
+                        .collect();
+                    let mut remove = vec![false; nr];
+                    for r in remove.iter_mut().skip(m0) {
+                        *r = true;
+                    }
+                    self.delete_lp_rows(&remove);
+                    self.add_cut_rows(&rows);
+                    for (c, l, u) in &rows {
+                        if u.is_finite() && !l.is_finite() {
+                            self.add_to_pool(c, *u);
+                        }
+                    }
+                    let st = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
+                    let new = self.lp.objective() + self.p.offset;
+                    if st == LpStatus::Optimal && new >= cur - 1e-9 * cur.abs().max(1.0) {
+                        if self.params.verbose {
+                            eprintln!("MIP: background cuts: {} rounds, {} cut rows (was {}), obj {:.10e} -> {:.10e} (waited {:.2}s, {:.2}s)", rounds, rows.len(), saved.len(), cur, new, wait, self.start.elapsed().as_secs_f64());
+                        }
+                        root_obj = new;
+                        if !self.params.submip {
+                            super::record_root_bound(new);
+                        }
+                    } else {
+                        // 戻す
+                        let nr = self.lp.num_rows();
+                        let mut remove = vec![false; nr];
+                        for r in remove.iter_mut().skip(m0) {
+                            *r = true;
+                        }
+                        self.delete_lp_rows(&remove);
+                        self.add_cut_rows(&saved);
+                        let st2 = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
+                        if self.params.verbose {
+                            eprintln!("MIP: background cuts: LP {st:?} / obj {new:.10e} < {cur:.10e}; restored ({st2:?})");
+                        }
+                    }
+                }
+                Some((_, obj, rounds)) => {
+                    if self.params.verbose {
+                        eprintln!("MIP: background cuts: {rounds} rounds, obj {obj:.10e} not above {cur:.10e}; not used (waited {wait:.2}s)");
+                    }
+                }
+                None => {
+                    if self.params.verbose {
+                        eprintln!("MIP: background cuts: no result (waited {wait:.2}s)");
+                    }
+                }
+            }
+        }
         if env_str!("ENOMOTO_MIP_DEBUG_BOUNDS").is_some() {
             DEBUG_SOL.with(|d| {
                 if let Some(x) = d.borrow().as_ref() {
