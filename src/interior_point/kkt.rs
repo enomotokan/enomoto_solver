@@ -171,9 +171,11 @@ fn symbolic_with_ordering(pat: &SymbolicSparseColMat<usize>, dbg: bool, limit: u
             nd.as_ref().map(|c| c.len_values())
         );
     }
-    // 演算量の少ない方 (METIS は 0.8 倍未満のときだけ)。
+    // 演算量の少ない方 (METIS は AMD の `ENOMOTO_T_CHOL_ORDER_METIS_RATIO` 倍 (既定 0.9) 未満のときだけ。0.8 では
+    // physiciansched3-3 (0.856 倍) が AMD になり、METIS なら因子の非零 2,900 万 → 2,200 万、内点法 + クロスオーバー 87 → 79 秒)。
+    let ratio = tunable!("ENOMOTO_T_CHOL_ORDER_METIS_RATIO", 0.9f64, f64);
     match (a, nd) {
-        (Some(a), Some(nd)) => Some(if nd_flops < 0.8 * a_flops { nd } else { a }),
+        (Some(a), Some(nd)) => Some(if nd_flops < ratio * a_flops { nd } else { a }),
         (a, nd) => a.or(nd),
     }
 }

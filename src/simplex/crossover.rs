@@ -472,7 +472,7 @@ thread_local! {
 }
 
 thread_local! {
-    /// 押し出しの時間切れでクロスオーバーを諦めた印 ([`solve_ipm_crossover`] が元の問題で内点法をやり直さないため)。
+    /// 押し出しの時間切れ・基底の特異でクロスオーバーを諦めた印 ([`solve_ipm_crossover`] が元の問題で内点法をやり直さないため)。
     static XO_GAVE_UP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
@@ -1965,7 +1965,21 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
             sparse_lu::with_dense_switch_override((2000, 16, 0.1), || megiddo_push(std, &x, &leftover, &mut basis, &mut basis_pos, &mut nb_status, lu, deadline))
         } else {
             megiddo_push(std, &x, &leftover, &mut basis, &mut basis_pos, &mut nb_status, lu, deadline)
-        }?;
+        };
+        // 押し出しの途中で基底が特異になったら、時間切れと同じく諦めた印を立てる (`ENOMOTO_T_XO_SINGULAR_GIVEUP`、既定 1):
+        // 双対化した経路の失敗の後に元の問題で内点法をやり直しても、押し出しは同じ超基底の数を相手に時間切れで諦める
+        // (ex10: 双対化の点で特異 → 元の問題の内点法 19 秒 + 押し出し 20 秒で諦める。その間、同時実行の二段解法と
+        // 計算資源を取り合う: auto 16 スレッド 112 秒、やり直さなければ 103 秒)。
+        let Some(ms) = ms else {
+            crate::phase_timing::mark("xo_megiddo_singular");
+            if tunable!("ENOMOTO_T_XO_SINGULAR_GIVEUP", 1u8, u8) != 0 {
+                XO_GAVE_UP.with(|g| g.set(true));
+            }
+            if debug {
+                eprintln!("CROSSOVER megiddo: the basis became singular during the push; giving up the crossover");
+            }
+            return None;
+        };
         lu = ms.lu;
         crate::phase_timing::record("xo_megiddo_pivots", ms.pivots as f64);
         crate::phase_timing::record("xo_megiddo_bound", ms.to_bound as f64);
