@@ -35,7 +35,7 @@ const DUALIZE_FEAS_TOL: f64 = 1e-6;
 
 /// 双対化するか: 行数 `m >= DUALIZE_MIN_ROWS`、`m >= DUALIZE_MIN_RATIO * n` (構造列数)、構造列の平均非零数が
 /// `DUALIZE_MAX_COL_NNZ` 以下。
-fn applicable(std: &StdForm) -> bool {
+fn applicable(std: &StdForm, max_col_nnz: f64) -> bool {
     let min_rows = tunable!("ENOMOTO_T_DUALIZE_MIN_ROWS", DUALIZE_MIN_ROWS, usize);
     let ratio = tunable!("ENOMOTO_T_DUALIZE_MIN_RATIO", DUALIZE_MIN_RATIO, f64);
     let m = std.n_rows;
@@ -44,7 +44,7 @@ fn applicable(std: &StdForm) -> bool {
         return false;
     }
     let nnz: usize = (0..n).map(|j| std.cols.col(j).len()).sum();
-    (nnz as f64) <= tunable!("ENOMOTO_T_DUALIZE_MAX_COL_NNZ", DUALIZE_MAX_COL_NNZ, f64) * n.max(1) as f64
+    (nnz as f64) <= max_col_nnz * n.max(1) as f64
 }
 
 /// 双対 LP と、その解から元の解を戻すための情報。
@@ -74,9 +74,14 @@ pub(super) fn solve(std: &StdForm, opts: &crate::types::LpOptions) -> Option<Sim
     d.finish(std, res, duals.map(|(pi, _)| pi), t0)
 }
 
-/// 双対化の対象なら双対 LP を作る (単体法・内点法で共通の判定)。対象外なら `None`。
+/// 双対化の対象なら双対 LP を作る (単体法の判定)。対象外なら `None`。
 pub(super) fn build(std: &StdForm) -> Option<Dualized> {
-    if !applicable(std) {
+    build_with(std, tunable!("ENOMOTO_T_DUALIZE_MAX_COL_NNZ", DUALIZE_MAX_COL_NNZ, f64))
+}
+
+/// [`build`] の、構造列の平均非零数の上限を与える版 (内点法 + クロスオーバーは単体法より密な列まで双対化する)。
+pub(super) fn build_with(std: &StdForm, max_col_nnz: f64) -> Option<Dualized> {
+    if !applicable(std, max_col_nnz) {
         return None;
     }
     let debug = env_str!("ENOMOTO_DEBUG_DUALIZE").is_some();

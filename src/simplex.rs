@@ -777,6 +777,11 @@ thread_local! {
     static FULL_COST_PERTURBATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+/// [`FULL_COST_PERTURBATION`] の今の値。
+pub(crate) fn full_cost_perturbation() -> bool {
+    FULL_COST_PERTURBATION.with(|f| f.get())
+}
+
 /// [`FULL_COST_PERTURBATION`] を設定する。
 pub(crate) fn set_full_cost_perturbation(on: bool) {
     FULL_COST_PERTURBATION.with(|f| f.set(on));
@@ -850,7 +855,7 @@ fn try_refactorize(std: &StdForm, t: &Tableau, prev: Option<&sparse_lu::FtLu>) -
 /// 今の値に近い方の境界に置く。呼び出し側は `x_B` を作り直すこと。主実行不能になりうるが、双対単体法の仕上げの引き継ぎは
 /// 戻った後に `x_B` を確かめて双対単体法で直す。従来は `None` で、仕上げごと結果なしになっていた (irish-electricity:
 /// 仕上げの主単体法の再分解が特異 → 二段解法を一から 190 秒)。
-fn try_refactorize_repair(std: &StdForm, t: &mut Tableau, prev: Option<&sparse_lu::FtLu>) -> Option<sparse_lu::FtLu> {
+fn try_refactorize_repair(std: &StdForm, t: &mut Tableau, prev: Option<&sparse_lu::FtLu>, repairs: &mut usize) -> Option<sparse_lu::FtLu> {
     if let Some(lu) = try_refactorize(std, t, prev) {
         return Some(lu);
     }
@@ -858,6 +863,7 @@ fn try_refactorize_repair(std: &StdForm, t: &mut Tableau, prev: Option<&sparse_l
         return None;
     }
     let (lu, replaced) = basis_kernel::factorize_basis_repair(std, &mut t.basis, &mut t.basis_pos, None)?;
+    *repairs += 1;
     for &(pos, old) in &replaced {
         let (l, u, v) = (std.lb[old], std.ub[old], t.x[old]);
         let (st, val) = if l.is_finite() && (!u.is_finite() || v - l <= u - v) {
@@ -1246,6 +1252,7 @@ fn run_phase2_incremental(std: &StdForm, t: &mut Tableau, lu: &mut sparse_lu::Ft
     // cont1 策3 の比率テストを旧版に戻す (A/B 用)。
     let ratio_old = tunable!("ENOMOTO_HANDOFF_RATIO_OLD", 0u8, u8) != 0;
     let mut expand = ExpandState::new();
+    let shift_infeas = tunable!("ENOMOTO_T_PRIMAL_SHIFT_INFEAS", 1u8, u8) != 0;
 
     let mut gamma: Vec<f64> = if use_devex { vec![1.0; n] } else { SteepestEdgeState::new(std).gamma }; // 最急辺 (または Devex) 重み
     let mut cost_b = vec![0.0; m]; // c_B
@@ -1280,6 +1287,27 @@ fn run_phase2_incremental(std: &StdForm, t: &mut Tableau, lu: &mut sparse_lu::Ft
 
     let mut need_fresh = true; // 次の反復の頭で x_B と d を作り直すか
     let max_iters = max_iters_for(m, n);
+    // 破綻の検出 (`ENOMOTO_T_PRIMAL_BLOWUP_GUARD`、既定 1。0 で従来どおり): 特異な基底の修復 ([`try_refactorize_repair`]) を
+    // 繰り返すうちに基底の変数の値が発散し、目的値が 1e17〜1e20 に跳んだまま動かずに反復の上限まで回ることがある
+    // (4 スレッドの fome13 で数十回に 1 回、1000 反復に約 12 秒で 900 秒の打ち切り。内点法の終わりの点が並列の足し算の
+    // 順序で変わり、まれにその基底に当たる)。リフレッシュのたびに、(a) 目的値が有限でない・基底の変数の絶対値の最大が
+    // 最初のリフレッシュの値と有限な上下限の絶対値の最大 (1 以上) の `ENOMOTO_T_PRIMAL_BLOWUP_RATIO` (1e6) 倍を超えた、(b) 修復が
+    // `ENOMOTO_T_PRIMAL_REPAIR_LIMIT` (8) 回を超えた、(c) 修復の後に目的値が `ENOMOTO_T_PRIMAL_FROZEN_ITERS` (5000) 反復
+    // 動かない、(d) 目的値がそれまでの最良の値から相対 1e-4 を超えて上がったことが `ENOMOTO_T_PRIMAL_RISE_LIMIT` (3) 回
+    // あった、(e) 最良の目的値が `ENOMOTO_T_PRIMAL_NO_IMPROVE_ITERS` (20000) 反復改善しない、のどれかで打ち切り、
+    // 呼び出し側に同じ基底からの安全モードでの解き直しを頼む
+    // ([`slope_intercept_dual::mark_restart_bailout`])。
+    let guard = tunable!("ENOMOTO_T_PRIMAL_BLOWUP_GUARD", 1u8, u8) != 0;
+    let blowup_ratio = tunable!("ENOMOTO_T_PRIMAL_BLOWUP_RATIO", 1e6f64, f64);
+    let repair_limit = tunable!("ENOMOTO_T_PRIMAL_REPAIR_LIMIT", 8usize, usize);
+    let frozen_iters = tunable!("ENOMOTO_T_PRIMAL_FROZEN_ITERS", 5000usize, usize);
+    let mut repairs = 0usize;
+    let mut x_scale: Option<f64> = None; // 最初のリフレッシュの max|x_B| と有限な上下限の絶対値の最大
+    let mut frozen: (f64, usize) = (f64::NAN, 0); // (直近の目的値, その値になった反復)
+    let rise_limit = tunable!("ENOMOTO_T_PRIMAL_RISE_LIMIT", 3usize, usize);
+    let no_improve_iters = tunable!("ENOMOTO_T_PRIMAL_NO_IMPROVE_ITERS", 20000usize, usize);
+    let mut best: (f64, usize) = (f64::INFINITY, 0); // (これまでの最良の目的値, それを更新した反復)
+    let mut rises = 0usize; // 目的値が最良の値から相対 1e-4 を超えて上がった回数
     // 計測用 (`ENOMOTO_DEBUG_PROGRESS=1`): 1000 反復ごとに経過時間・目的値・双対実行不能の列数を出す。
     let progress = env_str!("ENOMOTO_DEBUG_PROGRESS").is_some();
     let progress_t0 = std::time::Instant::now();
@@ -1309,8 +1337,37 @@ fn run_phase2_incremental(std: &StdForm, t: &mut Tableau, lu: &mut sparse_lu::Ft
             need_fresh = false;
             let rhs = t.recompute_basics(lu);
             if kernel.fill_too_big(lu) || t.basis_residual_norm(&rhs) > FT_RESIDUAL_TOL {
-                *lu = try_refactorize_repair(std, t, Some(&*lu))?;
+                *lu = try_refactorize_repair(std, t, Some(&*lu), &mut repairs)?;
                 t.recompute_basics(lu);
+            }
+            if guard {
+                let obj: f64 = (0..n).map(|j| std.c[j] * t.x[j]).sum();
+                let xmax = t.basis.iter().map(|&b| t.x[b].abs()).fold(0.0f64, f64::max);
+                let x0 = *x_scale.get_or_insert_with(|| {
+                    let bmax = (0..n).flat_map(|j| [std.lb[j], std.ub[j]]).filter(|v| v.is_finite()).fold(0.0f64, |a, v| a.max(v.abs()));
+                    xmax.max(bmax).max(1.0)
+                });
+                let blown = !obj.is_finite() || !(xmax <= blowup_ratio * x0);
+                if (obj - frozen.0).abs() > 1e-12 * (1.0 + obj.abs()) || frozen.0.is_nan() {
+                    frozen = (obj, _iter);
+                }
+                let stuck = repairs > 0 && _iter - frozen.1 >= frozen_iters;
+                // 第 2 段階の主単体法では目的値は増えない。大きく上がったなら主実行可能性が崩れて基底の組を巡回している
+                // (fome13: 1.19e7 から 2.89e7 に上がり、2.89e7 と 6.84e7 を 19 万反復往復した)。
+                if best.0.is_infinite() || obj < best.0 - 1e-12 * (1.0 + best.0.abs()) {
+                    best = (obj, _iter);
+                } else if obj > best.0 + 1e-4 * best.0.abs().max(1.0) {
+                    rises += 1;
+                }
+                let no_improve = _iter - best.1 >= no_improve_iters;
+                if blown || repairs > repair_limit || stuck || rises >= rise_limit || no_improve {
+                    if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
+                        eprintln!("DEBUG_EXT: primal cleanup broke down at iter={_iter} (obj {obj:.3e}, best {:.3e} at iter {}, rises {rises}, max|x_B| {xmax:.3e} vs scale {x0:.3e}, repairs {repairs}, obj unchanged for {} iters) -> restart",
+                            best.0, best.1, _iter - frozen.1);
+                    }
+                    slope_intercept_dual::mark_restart_bailout();
+                    return None;
+                }
             }
             for i in 0..m {
                 cost_b[i] = std.c[t.basis[i]];
@@ -1402,9 +1459,18 @@ fn run_phase2_incremental(std: &StdForm, t: &mut Tableau, lu: &mut sparse_lu::Ft
             if !bound.is_finite() {
                 continue;
             }
-            let exact = (bound - val) / rate;
+            let mut exact = (bound - val) / rate;
             let relaxed_bound = if is_upper { bound + expand.delta } else { bound - expand.delta };
-            let relaxed = (relaxed_bound - val) / rate;
+            let mut relaxed = (relaxed_bound - val) / rate;
+            // すでに上下限の外にある基底変数 (EXPAND の緩め幅を超えて外れたもの: 差分更新・リセット後の x_B の誤差) は、
+            // 今の値を境界とみなす (`ENOMOTO_T_PRIMAL_SHIFT_INFEAS`、既定 1)。そのままでは relaxed < 0 で
+            // alpha1 が負になり、パス 2 がその行を小さなピボットでも選んで最小ステップ `EXPAND_TAU / |pivot|` で大きく進み、
+            // 他の基底変数を大きく外して基底も特異に近くなる (irish-electricity の仕上げの引き継ぎで |pivot| 1e-6、
+            // max|alpha| 357、目的値が 2.5e6 から 3e34 へ発散した)。
+            if shift_infeas && exact < 0.0 {
+                exact = 0.0;
+                relaxed = expand.delta / rate.abs();
+            }
             candidates.push(Candidate { row: i, exact, relaxed, pivot_abs: alpha[i].abs(), hits_upper: is_upper });
         }
         let alpha1 = candidates.iter().map(|c| c.relaxed).fold(init_alpha1, f64::min);
@@ -1440,6 +1506,23 @@ fn run_phase2_incremental(std: &StdForm, t: &mut Tableau, lu: &mut sparse_lu::Ft
             stall.stall_count = 0;
         }
 
+        if env_str!("ENOMOTO_DEBUG_PRIMAL_TRACE").is_some() {
+            let amax = alpha_rows.iter().map(|&i| alpha[i].abs()).fold(0.0, f64::max);
+            let worst = alpha_rows
+                .iter()
+                .map(|&i| {
+                    let v = t.basis[i];
+                    let xv = t.x[v] - best_dir * alpha[i] * theta;
+                    (std.lb[v] - xv).max(xv - std.ub[v])
+                })
+                .fold(0.0, f64::max);
+            let obj: f64 = (0..n).map(|j| std.c[j] * t.x[j]).sum();
+            eprintln!(
+                "PTRACE it={_iter} enter={enter} d={dj_enter:.3e} theta={theta:.3e} alpha1={alpha1:.3e} leave={leaving_row:?} piv={best_pivot_mag:.3e} amax={amax:.3e} nnz={} viol_after={worst:.3e} obj={obj:.10e} fresh={fresh_now} delta={:.2e}",
+                alpha_rows.len(),
+                expand.delta
+            );
+        }
         for &i in &alpha_rows {
             let var = t.basis[i];
             t.x[var] -= best_dir * alpha[i] * theta;
@@ -1532,7 +1615,7 @@ fn run_phase2_incremental(std: &StdForm, t: &mut Tableau, lu: &mut sparse_lu::Ft
 
         // FT 更新 (FTRAN/BTRAN の途中値を使う) と再分解トリガ (3)(4)(5)。残差検査 (1) はリフレッシュ時点でのみ行う。
         if kernel.update_and_check(lu, r).is_due() {
-            *lu = try_refactorize_repair(std, t, Some(&*lu))?;
+            *lu = try_refactorize_repair(std, t, Some(&*lu), &mut repairs)?;
             need_fresh = true;
         }
     }
@@ -1700,6 +1783,60 @@ fn solve_std_form_decomposed(std: &StdForm, opts: &crate::types::LpOptions) -> S
     solve_split(std, &components, solve_one)
 }
 
+/// 独立な成分 `items` を `f` で並列に解き、結果を同じ順で返す (`sizes` は成分の大きさの目安。大きい順に配る)。
+///
+/// rayon の仕事として配ると、成分の中の並列処理 (内点法の分解など) の待ち時間に同じスレッドが別の成分の求解を丸ごと
+/// 入れ子で実行しうる (仕事の盗み)。そのとき求解単位のスレッドローカルの状態 (warm start の LU・解き直しの印など) が
+/// 書き換えられる危険がある。
+/// 既定は rayon の `par_iter` (打ち切りのトークン `crate::cancel` を各成分に引き継ぐ)。試験用 `ENOMOTO_T_SPLIT_DEDICATED=1`
+/// では今のプールのスレッド数 `T` のうち `k = min(T, 成分の数)` 本の専用のスレッドを立て、それぞれに `T / k` 本の
+/// 専用の rayon のプールを持たせて、成分を 1 つずつ取り出して解く (成分の中の並列はそのプールの中だけで行うので、
+/// 別の成分の求解が入れ子で入り込まない)。fome13 の止まる不具合の真の原因は METIS の同時呼び出しで (`kkt::metis_ordering`)、
+/// それを直した後の比較 (4 スレッド・Mittelmann 10 問) では専用の方式は幾何平均 1.002 倍、cygnet (4 成分) で 1.19 倍遅い
+/// (先に終わった成分のスレッドが残りの成分を手伝えない) ので既定にしない。入れ子でのスレッドローカルの書き換えには、
+/// warm start の LU の検算 (`slope_intercept_dual::warm_lu_matches`) と解き直しの印の保護で備える。
+fn par_components<T: Sync, R: Send>(items: &[T], sizes: &[usize], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    let token = crate::cancel::current();
+    let deadline = crate::cancel::deadline();
+    if tunable!("ENOMOTO_T_SPLIT_DEDICATED", 0u8, u8) == 0 {
+        use rayon::prelude::*;
+        return items.par_iter().map(|it| crate::cancel::with_deadline(deadline, || crate::cancel::with_token(token.clone(), || f(it)))).collect();
+    }
+    let total = rayon::current_num_threads().max(1);
+    let k = total.min(items.len());
+    if k <= 1 {
+        return items.iter().map(&f).collect();
+    }
+    // 大きい成分から配る (最後に大きな成分が 1 つだけ残って他のスレッドが遊ぶのを減らす)。
+    let mut order: Vec<usize> = (0..items.len()).collect();
+    order.sort_by_key(|&i| std::cmp::Reverse(sizes.get(i).copied().unwrap_or(0)));
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let slots: Vec<std::sync::Mutex<Option<R>>> = (0..items.len()).map(|_| std::sync::Mutex::new(None)).collect();
+    std::thread::scope(|sc| {
+        for w in 0..k {
+            // スレッド数を k 本に分ける (余りは先頭のスレッドに 1 本ずつ)。
+            let p = total / k + usize::from(w < total % k);
+            let (token, next, slots, order, f) = (token.clone(), &next, &slots, &order, &f);
+            std::thread::Builder::new()
+                .name(format!("enomoto-c{w}"))
+                .spawn_scoped(sc, move || {
+                    let run = || loop {
+                        let t = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(&i) = order.get(t) else { break };
+                        let r = crate::cancel::with_deadline(deadline, || crate::cancel::with_token(token.clone(), || f(&items[i])));
+                        *slots[i].lock().unwrap() = Some(r);
+                    };
+                    match rayon::ThreadPoolBuilder::new().num_threads(p).thread_name(move |j| format!("enomoto-c{w}-{j}")).build() {
+                        Ok(pool) => pool.install(run),
+                        Err(_) => run(),
+                    }
+                })
+                .expect("failed to spawn a component thread");
+        }
+    });
+    slots.into_iter().map(|m| m.into_inner().unwrap().expect("every component is solved")).collect()
+}
+
 /// 前処理後の標準形を解く入口。独立な成分への分割はここで 1 回だけ行い ([`presolved_groups`])、組ごとに解き方を
 /// 割り振る ([`solve_block`]): auto で行数が `ENOMOTO_T_RACE_MIN_ROWS` 以上の組は傾き・切片双対二段解法と内点法 +
 /// クロスオーバーの同時実行、それ以外は選ばれた 1 つのエンジン。各エンジンの中では分割し直さない。
@@ -1718,11 +1855,11 @@ fn solve_presolved(std: StdForm, opts: &crate::types::LpOptions) -> SimplexResul
     let mut results: Vec<Option<SimplexResult>> = (0..subs.len()).map(|_| None).collect();
     // 同時実行しない組 (並列に解く)。
     let plain: Vec<(usize, &StdForm)> = subs.iter().enumerate().filter(|&(k, _)| !races[k]).collect();
-    let use_parallel = plain.iter().any(|&(k, _)| groups[k].len() >= PARALLEL_COMPONENT_MIN_VARS);
+    // 試験用 `ENOMOTO_T_SPLIT_SEQ=1`: 成分を並列に解かない (成分の中の並列はそのまま。成分どうしの干渉の切り分け用)。
+    let use_parallel = plain.iter().any(|&(k, _)| groups[k].len() >= PARALLEL_COMPONENT_MIN_VARS) && tunable!("ENOMOTO_T_SPLIT_SEQ", 0u8, u8) == 0;
     let plain_results: Vec<(usize, SimplexResult)> = if use_parallel {
-        use rayon::prelude::*;
-        let token = crate::cancel::current();
-        plain.par_iter().map(|&(k, s)| (k, crate::cancel::with_token(token.clone(), || solve_one_engine(s, opts)))).collect()
+        let sizes: Vec<usize> = plain.iter().map(|&(_, s)| s.cols.nnz()).collect();
+        par_components(&plain, &sizes, |&(k, s)| (k, solve_one_engine(s, opts)))
     } else {
         plain.iter().map(|&(k, s)| (k, solve_one_engine(s, opts))).collect()
     };
@@ -1780,20 +1917,15 @@ fn solve_block(std: StdForm, opts: &crate::types::LpOptions) -> SimplexResult {
 /// 1 つの [`SimplexResult`] に組み立てる。どれかの組が [`PARALLEL_COMPONENT_MIN_VARS`] 以上なら rayon で並列に解く。
 fn solve_split(std: &StdForm, groups: &[Vec<usize>], solve_one: impl Fn(&StdForm) -> SimplexResult + Sync) -> SimplexResult {
     let sub_std_forms = split_std_form(std, groups);
-    let use_parallel = groups.iter().any(|c| c.len() >= PARALLEL_COMPONENT_MIN_VARS); // rayon で並列に解くか
+    let use_parallel = groups.iter().any(|c| c.len() >= PARALLEL_COMPONENT_MIN_VARS) && tunable!("ENOMOTO_T_SPLIT_SEQ", 0u8, u8) == 0; // rayon で並列に解くか (試験用 `ENOMOTO_T_SPLIT_SEQ=1` で並列にしない)
     let results: Vec<SimplexResult> = if use_parallel {
-        use rayon::prelude::*;
-        // 打ち切りのトークン (同時実行時) を各成分のタスクに引き継ぐ (`crate::cancel`)。
-        let token = crate::cancel::current();
         // 試験用 `ENOMOTO_T_SPLIT_INNER_SEQ=1`: 大きな組の数がスレッド数以上なら、外側の並列でスレッドが埋まるので、
         // 組の中の分解 (内点法の正規方程式) は並列にしない (入れ子の並列の分割・同期の手間と、待ち合わせ中に別の組の
         // 仕事を盗んで組の進み方がばらつくのを避ける)。
         let n_big = groups.iter().filter(|c| c.len() >= PARALLEL_COMPONENT_MIN_VARS).count();
         let inner_seq = tunable!("ENOMOTO_T_SPLIT_INNER_SEQ", 0u8, u8) != 0 && n_big >= rayon::current_num_threads();
-        sub_std_forms
-            .par_iter()
-            .map(|s| crate::cancel::with_token(token.clone(), || crate::interior_point::kkt::with_inner_seq(inner_seq, || solve_one(s))))
-            .collect()
+        let sizes: Vec<usize> = sub_std_forms.iter().map(|s| s.cols.nnz()).collect();
+        par_components(&sub_std_forms, &sizes, |s| crate::interior_point::kkt::with_inner_seq(inner_seq, || solve_one(s)))
     } else {
         sub_std_forms.iter().map(&solve_one).collect()
     };

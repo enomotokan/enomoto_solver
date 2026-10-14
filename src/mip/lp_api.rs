@@ -6,8 +6,8 @@ use crate::simplex::mip_lp::{InteriorPoint, LuSnapshot, TwoStageLp, TwoStageStat
 use std::borrow::Cow;
 
 /// 分枝限定法が使う LP の操作。
-pub trait MipLp: Clone {
-    type State: Clone;
+pub trait MipLp: Clone + Send {
+    type State: Clone + Send;
     fn new(col_lo: &[f64], col_up: &[f64], cost: &[f64], rows: &[Vec<(usize, f64)>], row_lo: &[f64], row_up: &[f64]) -> Self;
     fn num_rows(&self) -> usize;
     fn total_iterations(&self) -> u64;

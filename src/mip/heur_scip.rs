@@ -358,10 +358,38 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// 局所探索 ([`super::heuristics::local_search`]) を根で回す。見つからなければ、違反の最小だった点を
     /// `self.repair_start` に残す (Repair の出発点)。
+    /// 局所探索を別スレッドで始める (`ENOMOTO_MIP_PAR_LOCAL_SEARCH`)。引数は [`Self::local_search_heur`] と同じ。
+    pub(super) fn spawn_local_search(&mut self) {
+        let p = self.p;
+        let cap = if self.params.time_limit.is_finite() { (tunable!("ENOMOTO_T_MIP_LS_TIME_FRAC", 0.05, f64) * self.params.time_limit).min(5.0) } else { 5.0 };
+        let nnz: u64 = p.rows.iter().map(|r| r.len() as u64).sum();
+        let seed = self.rng ^ 0xD1B5_4A32_D192_ED03;
+        self.rand();
+        let (q, lo, up) = match self.orig.clone() {
+            Some(o) => ((*o).clone(), o.col_lo.clone(), o.col_up.clone()),
+            None => (p.clone(), self.dom.lo.clone(), self.dom.up.clone()),
+        };
+        let steps = (200 * nnz).clamp(200_000, 100_000_000);
+        self.ls_thread = Some(std::thread::spawn(move || super::heuristics::local_search(&q, &lo, &up, cap, steps, seed)));
+    }
+
     pub(super) fn local_search_heur(&mut self) -> bool {
         let p = self.p;
         if self.params.submip {
             return false;
+        }
+        if let Some(h) = self.ls_thread.take() {
+            let Ok((feas, inf)) = h.join() else { return false };
+            if let Some((x, v)) = inf {
+                if self.params.verbose && self.nodes <= 1 {
+                    eprintln!("MIP:   local search (parallel): least violation {v:.3e}");
+                }
+                self.repair_start = Some(x);
+            }
+            return match feas {
+                Some(x) => self.try_incumbent(x),
+                None => false,
+            };
         }
         let cap = if self.params.time_limit.is_finite() { (tunable!("ENOMOTO_T_MIP_LS_TIME_FRAC", 0.05, f64) * self.params.time_limit).min(5.0) } else { 5.0 };
         let nnz: u64 = p.rows.iter().map(|r| r.len() as u64).sum();

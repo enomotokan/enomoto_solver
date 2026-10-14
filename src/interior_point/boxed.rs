@@ -457,6 +457,20 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
             up.s[k] = (s_t[nl + k] + d_s0).max(INIT_POSITIVE_FLOOR);
             up.z[k] = (nu_t[nl + k] + d_nu0).max(INIT_POSITIVE_FLOOR);
         }
+        // 試験用 `ENOMOTO_T_IPM_INIT_LOCAL=θ` (0 で無効): 一律の持ち上げ (最も外れた境界に合わせて全ての s, z を
+        // 持ち上げる) の代わりに、列ごとに `s = max(s̃, θ)`、`z = max(ν̃, θ)` とする (Linf_520c: 少数の列の 2e4 の違反に
+        // 合わせて全ての s が 4.7e4 になり、境界に近いはずのスラック列が 1e6 へ押し上げられて抜けられなくなる)。
+        let init_local = tunable!("ENOMOTO_T_IPM_INIT_LOCAL", 0.0f64, f64);
+        if init_local > 0.0 {
+            for k in 0..nl {
+                lo.s[k] = s_t[k].max(init_local);
+                lo.z[k] = nu_t[k].max(init_local);
+            }
+            for k in 0..up.len() {
+                up.s[k] = s_t[nl + k].max(init_local);
+                up.z[k] = nu_t[nl + k].max(init_local);
+            }
+        }
         lo.nu.copy_from_slice(&lo.z);
         up.nu.copy_from_slice(&up.z);
     }
@@ -568,6 +582,8 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
     let push_max = tunable!("ENOMOTO_T_IPM_PUSH_ITERS", 15usize, usize);
     // 残差の最悪値が最良の半分を下回らない反復がこの回数続いたら高精度化をやめる (既定 2 は第 61 回の比較で決めた。第 46 回は 1)。
     let push_stall_max = tunable!("ENOMOTO_T_IPM_PUSH_STALL", 2usize, usize);
+    let infeas_guard = tunable!("ENOMOTO_T_IPM_INFEAS_GUARD", 0.0f64, f64);
+    let mut guard_ratio0: Option<f64> = None;
     let mut pushing = false;
     let mut push_it = 0usize;
     let mut push_stall = 0usize;
@@ -958,7 +974,17 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
             sz_aff += det_sum(side.len(), |k| (side.s[k] + alpha_p_aff * side.ds_aff[k]) * (side.z[k] + alpha_d_aff * side.dz_aff[k]));
         }
         let mu_aff = sz_aff / n_bnd as f64;
-        let sigma = (mu_aff / mu.max(GAP_DIV_GUARD)).clamp(0.0, 1.0).powi(3);
+        let mut sigma = (mu_aff / mu.max(GAP_DIV_GUARD)).clamp(0.0, 1.0).powi(3);
+        // 試験用 `ENOMOTO_T_IPM_INFEAS_GUARD=K` (0 で無効): 双対残差と μ の比が最初の反復の K 倍を超えたら、σμ を
+        // `‖r_d‖ / (K × 最初の比)` 以上に保つ (残差より先に μ を下げて境界から遠い列の乗数がつぶれ、双対残差が
+        // 下がらなくなるのを防ぐ: Linf_520c)。
+        if infeas_guard > 0.0 && mu > 0.0 && res.dual.is_finite() {
+            let ratio = res.dual / mu;
+            let r0 = *guard_ratio0.get_or_insert(ratio);
+            if r0 > 0.0 && ratio > infeas_guard * r0 {
+                sigma = sigma.max((res.dual / (infeas_guard * r0) / mu).min(1.0));
+            }
+        }
 
         // 2) 修正子 + 中心化
         lo.set_rs(true, sigma * mu);
@@ -1142,6 +1168,9 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
         status = Status::Optimal;
         if let Some((_, bx, by, brc, brel)) = best {
             crate::phase_timing::record("ipm_push_best", brel.0.max(brel.1).max(brel.2));
+            if debug {
+                eprintln!("IPM profile total={:.3}s factor={:.3}s solve={:.3}s other={:.3}s", t_kkt.elapsed().as_secs_f64(), prof.0, prof.1, t_kkt.elapsed().as_secs_f64() - prof.0 - prof.1);
+            }
             return BoxIpmResult { status, x: bx, y: by.iter().map(|v| -v).collect(), rc: brc, iters, rel_res: brel };
         }
     }

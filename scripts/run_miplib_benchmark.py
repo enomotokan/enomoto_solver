@@ -91,7 +91,21 @@ def worker_ours(mps: str, time_limit: float, threads: int) -> None:
         "bound": r["best_bound"],
         "nodes": r["nodes"],
         "time": t,
+        "root_bound": r.get("root_bound"),
+        "first_solution_time": r.get("first_solution_time"),
+        "first_solution_objective": r.get("first_solution_objective"),
     }))
+
+
+def primal_gap(obj, ref) -> float:
+    """主ギャップ (SCIP/MIPLIB の定義): 解なし・符号が逆なら 1、それ以外は |obj - ref| / max(|obj|, |ref|)。"""
+    if obj is None or ref is None:
+        return 1.0
+    if abs(obj - ref) <= 1e-9 * max(1.0, abs(ref)):
+        return 0.0
+    if obj * ref < 0:
+        return 1.0
+    return abs(obj - ref) / max(abs(obj), abs(ref))
 
 
 def run_worker(kind: str, mps: Path, time_limit: float, threads: int) -> dict:
@@ -120,6 +134,7 @@ def make_table(results: dict, time_limit: float, threads: int) -> str:
     sg = {"highs": [], "ours": []}
     n_solved = {"highs": 0, "ours": 0}
     wrong = []
+    pgap = {"highs": 0.0, "ours": 0.0}
     for n in names:
         h, o = results[n]["highs"], results[n]["ours"]
         for k, r in (("highs", h), ("ours", o)):
@@ -136,7 +151,16 @@ def make_table(results: dict, time_limit: float, threads: int) -> str:
             match = "-"
         fmt = lambda r: f"{r['time']:.2f}" if solved(r) else ("t" if "time" in str(r["status"]).lower() or r["status"] == "killed" else str(r["status"]))
         fobj = lambda r: f"{r['objective']:.6g}" if r.get("objective") is not None else "-"
-        rows.append(f"| {n} | {fmt(h)} | {fmt(o)} | {fobj(h)} | {fobj(o)} | {h.get('nodes')} | {o.get('nodes')} | {match} |")
+        # 主ギャップの参照値: 両者の目的値のうち良い方 (最小化・最大化は分からないので、解けた側があればその値)
+        refv = h["objective"] if solved(h) else (o["objective"] if solved(o) else None)
+        g = {k: primal_gap(r.get("objective"), refv) if refv is not None else None for k, r in (("highs", h), ("ours", o))}
+        for k in g:
+            pgap[k] += g[k] or 0.0
+        fg = lambda v: "-" if v is None else f"{v:.4f}"
+        frb = lambda v: "-" if v is None else f"{v:.6g}"
+        ffs = lambda v: "-" if v is None else f"{v:.2f}"
+        rows.append(f"| {n} | {fmt(h)} | {fmt(o)} | {fobj(h)} | {fobj(o)} | {h.get('nodes')} | {o.get('nodes')} | {match} "
+                    f"| {fg(g['ours'])} | {frb(o.get('root_bound'))} | {ffs(o.get('first_solution_time'))} |")
 
     def shifted_geomean(ts, shift=10.0):
         return math.exp(sum(math.log(t + shift) for t in ts) / len(ts)) - shift if ts else float("nan")
@@ -154,9 +178,13 @@ def make_table(results: dict, time_limit: float, threads: int) -> str:
         f"| 解けた問題数 (/{len(names)}) | {n_solved['highs']} | {n_solved['ours']} |",
         f"| Shifted geomean [s] (shift 10、未解決は上限扱い) | {shifted_geomean(sg['highs']):.2f} | {shifted_geomean(sg['ours']):.2f} |",
         f"| 目的値の不一致 | | {len(wrong)} {wrong if wrong else ''} |",
+        f"| 主ギャップの和 (参照値は解けた側の目的値) | {pgap['highs']:.4f} | {pgap['ours']:.4f} |",
         "",
-        "| 問題 | HiGHS [s] | enomoto [s] | HiGHS 目的値 | enomoto 目的値 | HiGHS ノード | enomoto ノード | 一致 |",
-        "|---|---:|---:|---:|---:|---:|---:|:---:|",
+        "主ギャップ = |目的値 - 参照値| / max(|目的値|, |参照値|) (解なしは 1)。根の下界は enomoto の根の切除平面ループ後の LP 値"
+        " (再スタートがあれば最後の根)、最初の解は enomoto の最初の暫定解の時刻。",
+        "",
+        "| 問題 | HiGHS [s] | enomoto [s] | HiGHS 目的値 | enomoto 目的値 | HiGHS ノード | enomoto ノード | 一致 | enomoto 主ギャップ | enomoto 根の下界 | enomoto 最初の解 [s] |",
+        "|---|---:|---:|---:|---:|---:|---:|:---:|---:|---:|---:|",
     ] + rows
     return "\n".join(out) + "\n"
 
