@@ -805,8 +805,13 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     // 試験用 (`ENOMOTO_T_XO_IPM_PC_MIN_NNZ`): 内点法に渡す行列の非零の数がこれ未満ならそろえない (小さな問題では
     // 反復が増える・手間が目立つ: degen3・greenbea・ken-13。第 49 回)。
     let pc_min_nnz = tunable!("ENOMOTO_T_XO_IPM_PC_MIN_NNZ", 0usize, usize);
-    let ipm_pc_requested = tunable!("ENOMOTO_T_XO_IPM_PC", 0u8, u8) != 0;
-    let ipm_pc = if a_j.compute_nnz() >= pc_min_nnz { tunable!("ENOMOTO_T_XO_IPM_PC", 0u8, u8) } else { 0 };
+    // 双対化した問題 (`ipm_point_only`) は `ENOMOTO_T_XO_DUALIZE_IPM_PC` (既定 3: 幾何平均の後に平衡化) でそろえる。双対 LP の
+    // 行列は単体法向けに主の問題で最大値をそろえた行列の転置で、費用は元の右辺 (尺度をそろえていない) なので、そろえないと
+    // Mehrotra 型の初期点 (全成分を同じ量だけ持ち上げる) が解から遠く、内点法が境界の近くを這う (physiciansched3-3:
+    // 96 → 56 反復、IPX は同じ双対 LP で 70 反復)。
+    let pc_setting = if xo.ipm_point_only { tunable!("ENOMOTO_T_XO_DUALIZE_IPM_PC", 3u8, u8) } else { tunable!("ENOMOTO_T_XO_IPM_PC", 0u8, u8) };
+    let ipm_pc_requested = pc_setting != 0;
+    let ipm_pc = if a_j.compute_nnz() >= pc_min_nnz { pc_setting } else { 0 };
     let pc = (ipm_pc != 0 && xo.given_point.is_none()).then(|| ipm_prescaled(&a_j, &b_j, &c_j, &l_j, &u_j, ipm_pc));
     crate::phase_timing::mark("xo_ipm_start");
     let ipm = if let Some((gx, gy, _)) = xo.given_point {

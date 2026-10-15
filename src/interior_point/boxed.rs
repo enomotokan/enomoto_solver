@@ -267,6 +267,10 @@ const DIVERGE_FACTOR: f64 = 1e6;
 
 /// [`solve_box_lp`] に近似解 `warm` からのウォームスタートを加えたもの。
 pub fn solve_box_lp_warm(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], max_iters: usize, warm: Option<&WarmStart>) -> BoxIpmResult {
+    // 診断用 (`ENOMOTO_DEBUG_IPM_DUMP=ファイル`): 内点法に渡す問題を書き出す (`ipm_dump_replay` で同じ内点法だけを繰り返し試すため)。
+    if let Some(f) = env_str!("ENOMOTO_DEBUG_IPM_DUMP") {
+        dump_problem(&f, a, b, c, l, u);
+    }
     // 主変数と費用の大きさをそろえる: `x = β x'`、`c = γ c'` (β = max(1, ‖b‖∞)、γ = ‖c‖∞)。
     // 単体法向けの前処理 (Ruiz) は行列の要素をそろえるが、右辺・境界 (伝播で付いた暗黙の
     // 境界を含む) と費用の大きさの差は残り (pilot4 で ‖b‖ ≈ 3e4、‖c‖ ≈ 0.05)、PIQP の初期点の
@@ -301,6 +305,50 @@ pub fn solve_box_lp_warm(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64]
     r
 }
 
+/// 診断用: 問題 `(A, b, c, l, u)` を `n p nnz row_ptr col_idx val b c l u` (u64 / f64、リトルエンディアン) で書き出す。
+fn dump_problem(f: &str, a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64]) {
+    let mut out: Vec<u8> = Vec::new();
+    let rp = a.row_ptrs();
+    let ci = a.col_indices();
+    let nnz = rp[a.nrows()];
+    for v in [a.ncols(), a.nrows(), nnz] {
+        out.extend((v as u64).to_le_bytes());
+    }
+    for &v in rp.iter().chain(&ci[..nnz]) {
+        out.extend((v as u64).to_le_bytes());
+    }
+    for &v in a.values()[..nnz].iter().chain(b).chain(c).chain(l).chain(u) {
+        out.extend(v.to_le_bytes());
+    }
+    let _ = std::fs::write(f, out);
+}
+
+/// 診断用: [`dump_problem`] が書き出した問題を読む。
+#[cfg(test)]
+fn load_problem(f: &str) -> (FaerCsr, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
+    let bytes = std::fs::read(f).unwrap();
+    let mut pos = 0usize;
+    let mut next_u = || {
+        let v = u64::from_le_bytes(bytes[pos..pos + 8].try_into().unwrap()) as usize;
+        pos += 8;
+        v
+    };
+    let (n, p, nnz) = (next_u(), next_u(), next_u());
+    let rp: Vec<usize> = (0..=p).map(|_| next_u()).collect();
+    let ci: Vec<usize> = (0..nnz).map(|_| next_u()).collect();
+    let rest: Vec<f64> = bytes[8 * (3 + p + 1 + nnz)..].chunks_exact(8).map(|c| f64::from_le_bytes(c.try_into().unwrap())).collect();
+    let vals = rest[..nnz].to_vec();
+    let mut o = nnz;
+    let mut take = |k: usize| {
+        let v = rest[o..o + k].to_vec();
+        o += k;
+        v
+    };
+    let (b, c, l, u) = (take(p), take(n), take(n), take(n));
+    let sym = faer::sparse::SymbolicSparseRowMat::new_checked(p, n, rp, None, ci);
+    (FaerCsr::new(sym, vals), b, c, l, u)
+}
+
 /// [`solve_box_lp`] の本体 (大きさをそろえた後の問題を解く)。
 /// [`WarmStart`] を大きさをそろえた後の単位にしたもの。
 struct WarmScaled<'a> {
@@ -321,6 +369,7 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
     let n = a.ncols();
     let p = a.nrows();
     let debug = env_str!("ENOMOTO_DEBUG_IPM").is_some();
+    let debug2 = env_str!("ENOMOTO_DEBUG_IPM") == Some("2");
     let lo_idx: Vec<usize> = (0..n).filter(|&j| l[j].is_finite()).collect();
     let up_idx: Vec<usize> = (0..n).filter(|&j| u[j].is_finite()).collect();
     let mut lo = Side::new(-1.0, lo_idx.clone(), lo_idx.iter().map(|&j| l[j]).collect());
@@ -470,6 +519,13 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
                 up.s[k] = s_t[nl + k].max(init_local);
                 up.z[k] = nu_t[nl + k].max(init_local);
             }
+        }
+        // 試験用 `ENOMOTO_T_IPM_INIT_IPX=1`: IPX (HiGHS) の初期点。主は境界に寄せた点からの最小ノルムの修正 (c によらない)、
+        // 双対は `Aᵀ y ≈ c` の最小二乗解で別々に作り、それぞれを `1 + 1.5 × (最大の違反)` だけ持ち上げた後、相補積の
+        // 平均で水準をそろえる。
+        if tunable!("ENOMOTO_T_IPM_INIT_IPX", 0u8, u8) != 0 {
+            init_ipx(&mut kkt, a, &at, b, c, l, u, delta, &mut top, &mut mid, &mut rhs, &mut refine_work, &mut x, &mut y, &mut lo, &mut up);
+            xi.copy_from_slice(&x);
         }
         lo.nu.copy_from_slice(&lo.z);
         up.nu.copy_from_slice(&up.z);
@@ -1068,10 +1124,46 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
                 }
             }
             eprintln!(
-                "IPM it={it:3} alpha_p={alpha_p:.2e} alpha_d={alpha_d:.2e} mu={mu:.2e} sigma={sigma:.2e} min(sz)/mu={:.1e} max(sz)/mu={:.1e}",
+                "IPM it={it:3} alpha_p={alpha_p:.2e} alpha_d={alpha_d:.2e} mu={mu:.2e} sigma={sigma:.2e} min(sz)/mu={:.1e} max(sz)/mu={:.1e} solve_rel={solve_rel:.1e} corr_rel={corr_rel:.1e}",
                 pmin / mu.max(GAP_DIV_GUARD),
                 pmax / mu.max(GAP_DIV_GUARD)
             );
+        }
+        if debug2 {
+            debug_centrality(it, &lo, &up, mu, sigma, alpha_p_aff, alpha_d_aff, alpha_p, alpha_d);
+            // 方向の分解: 実行可能性の部分 (r_s = 0) と相補性の部分 (r_x = r_y = r_z = 0) のそれぞれの歩幅。
+            let saved: Vec<(Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>)> =
+                [&lo, &up].iter().map(|sd| (sd.r_s.clone(), sd.r_z.clone(), sd.dz.clone(), sd.ds.clone())).collect();
+            let mut tmp = vec![0.0; dim];
+            let zx = vec![0.0; n];
+            let zy = vec![0.0; p];
+            for side in [&mut lo, &mut up] {
+                side.r_s.iter_mut().for_each(|v| *v = 0.0);
+            }
+            newton(&mut kkt, a, &at, &top, delta, &r_x, &r_y, &mut lo, &mut up, &pos, &mut tmp, n, &mut refine_work);
+            let fp = fraction_to_boundary(&lo.s, &lo.ds).min(fraction_to_boundary(&up.s, &up.ds));
+            let fd = fraction_to_boundary(&lo.z, &lo.dz).min(fraction_to_boundary(&up.z, &up.dz));
+            for (side, sv) in [&mut lo, &mut up].into_iter().zip(saved.iter()) {
+                side.r_s.copy_from_slice(&sv.0);
+                side.r_z.iter_mut().for_each(|v| *v = 0.0);
+            }
+            newton(&mut kkt, a, &at, &top, delta, &zx, &zy, &mut lo, &mut up, &pos, &mut tmp, n, &mut refine_work);
+            let cp = fraction_to_boundary(&lo.s, &lo.ds).min(fraction_to_boundary(&up.s, &up.ds));
+            let cd = fraction_to_boundary(&lo.z, &lo.dz).min(fraction_to_boundary(&up.z, &up.dz));
+            // 予測子の相補性の部分 (r_s = -s z) だけ。
+            for side in [&mut lo, &mut up] {
+                side.set_rs(false, 0.0);
+            }
+            newton(&mut kkt, a, &at, &top, delta, &zx, &zy, &mut lo, &mut up, &pos, &mut tmp, n, &mut refine_work);
+            let ap0 = fraction_to_boundary(&lo.s, &lo.ds).min(fraction_to_boundary(&up.s, &up.ds));
+            let ad0 = fraction_to_boundary(&lo.z, &lo.dz).min(fraction_to_boundary(&up.z, &up.dz));
+            for (side, sv) in [&mut lo, &mut up].into_iter().zip(saved) {
+                side.r_s = sv.0;
+                side.r_z = sv.1;
+                side.dz = sv.2;
+                side.ds = sv.3;
+            }
+            eprintln!("IPM3 it={it:3} feas-only=({fp:.2e},{fd:.2e}) corr-compl-only=({cp:.2e},{cd:.2e}) aff-compl-only=({ap0:.2e},{ad0:.2e}) full=({alpha_p:.2e},{alpha_d:.2e})");
         }
         {
             let (dx, dy) = rhs.split_at(n);
@@ -1199,6 +1291,160 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
     BoxIpmResult { status, x, y: y.iter().map(|v| -v).collect(), rc, iters, rel_res: rel }
 }
 
+/// IPX (HiGHS) の初期点 (`IPM::ComputeStartingPoint`) を作る ([`solve_box_lp_scaled`] の `ENOMOTO_T_IPM_INIT_IPX`)。
+#[allow(clippy::too_many_arguments)]
+fn init_ipx(
+    kkt: &mut IpmKkt,
+    a: &FaerCsr,
+    at: &FaerCsr,
+    b: &[f64],
+    c: &[f64],
+    l: &[f64],
+    u: &[f64],
+    delta: f64,
+    top: &mut [f64],
+    mid: &mut [f64],
+    rhs: &mut [f64],
+    work: &mut Vec<f64>,
+    x: &mut [f64],
+    y: &mut [f64],
+    lo: &mut Side,
+    up: &mut Side,
+) {
+    let n = x.len();
+    let p = y.len();
+    // 単位行列 (+ 小さな正則化) の KKT 系 [I Aᵀ; A -δI]。
+    top.fill(1.0);
+    kkt.factor(top, delta, mid);
+    // x0 = 0 を境界に寄せ、A dx = b - A x0 の最小ノルム解で直す。
+    let x0: Vec<f64> = (0..n).map(|j| 0.0f64.max(l[j]).min(u[j])).collect();
+    let mut ax0 = vec![0.0; p];
+    csr_mat_vec_into(a, &x0, &mut ax0);
+    rhs[..n].fill(0.0);
+    for i in 0..p {
+        rhs[n + i] = b[i] - ax0[i];
+    }
+    kkt.solve_refined(a, at, top, delta, rhs, REFINE_STEPS, work);
+    for j in 0..n {
+        x[j] = x0[j] + rhs[j];
+    }
+    let mut xinf = 0.0f64;
+    for side in [&mut *lo, &mut *up] {
+        for k in 0..side.len() {
+            let v = -side.sgn * (x[side.idx[k]] - side.bnd[k]);
+            side.s[k] = v;
+            xinf = xinf.max(-v);
+        }
+    }
+    let xshift1 = 1.0 + 1.5 * xinf;
+    // y: Aᵀ y ≈ c の最小二乗解 ([I Aᵀ; A -δI][z; v] = [c; 0]、z = c - Aᵀ v、内部の双対は y = -v)。
+    rhs[..n].copy_from_slice(c);
+    rhs[n..].fill(0.0);
+    kkt.solve_refined(a, at, top, delta, rhs, REFINE_STEPS, work);
+    for i in 0..p {
+        y[i] = -rhs[n + i];
+    }
+    let mut aty = vec![0.0; n];
+    at_mul(a, at, y, &mut aty);
+    let mut zv: Vec<f64> = (0..n).map(|j| c[j] + aty[j]).collect();
+    let cnorm = c.iter().map(|v| v * v).sum::<f64>().sqrt();
+    if cnorm > 0.0 {
+        let znorm = zv.iter().map(|v| v * v).sum::<f64>().sqrt();
+        const RHO: f64 = 0.05;
+        if znorm < RHO * cnorm {
+            for j in 0..n {
+                zv[j] += RHO * c[j];
+            }
+            for v in y.iter_mut() {
+                *v *= 1.0 - RHO;
+            }
+        }
+    }
+    let mut zinf = 0.0f64;
+    for side in [&mut *lo, &mut *up] {
+        for k in 0..side.len() {
+            let j = side.idx[k];
+            let boxed = l[j].is_finite() && u[j].is_finite();
+            let v = if cnorm == 0.0 { 1.0 } else { -side.sgn * zv[j] * if boxed { 0.5 } else { 1.0 } };
+            side.z[k] = v;
+            zinf = zinf.max(-v);
+        }
+    }
+    let zshift1 = if cnorm == 0.0 { 0.0 } else { 1.0 + 1.5 * zinf };
+    let (mut xsum, mut zsum, mut musum) = (1.0, 1.0, 1.0);
+    for side in [&mut *lo, &mut *up] {
+        for k in 0..side.len() {
+            side.s[k] += xshift1;
+            side.z[k] += zshift1;
+            xsum += side.s[k];
+            zsum += side.z[k];
+            musum += side.s[k] * side.z[k];
+        }
+    }
+    let (xs2, zs2) = (0.5 * musum / zsum, 0.5 * musum / xsum);
+    for side in [lo, up] {
+        for k in 0..side.len() {
+            side.s[k] += xs2;
+            side.z[k] += zs2;
+        }
+    }
+}
+
+/// 診断用 (`ENOMOTO_DEBUG_IPM=2`): 相補積 `s z / μ` の分布と、歩幅を止めている成分。
+#[allow(clippy::too_many_arguments)]
+fn debug_centrality(it: usize, lo: &Side, up: &Side, mu: f64, sigma: f64, apa: f64, ada: f64, ap: f64, ad: f64) {
+    let edges = [1e-3, 1e-2, 1e-1, 0.5, 2.0, 10.0, 100.0];
+    let mut hist = [[0usize; 8]; 2];
+    for (si, side) in [lo, up].iter().enumerate() {
+        for k in 0..side.len() {
+            let v = side.s[k] * side.z[k] / mu;
+            let b = edges.iter().position(|&e| v < e).unwrap_or(7);
+            hist[si][b] += 1;
+        }
+    }
+    // 歩幅を止めた成分 (主: s、双対: z) と、その成分の s, z, ds, dz、新しい相補積 / 目標。
+    let mut blk = String::new();
+    for (name, primal) in [("P", true), ("D", false)] {
+        let mut best = (f64::INFINITY, 0usize, 0usize);
+        for (si, side) in [lo, up].iter().enumerate() {
+            for k in 0..side.len() {
+                let (v, dv) = if primal { (side.s[k], side.ds[k]) } else { (side.z[k], side.dz[k]) };
+                if dv < 0.0 {
+                    let a = v / -dv;
+                    if a < best.0 {
+                        best = (a, si, k);
+                    }
+                }
+            }
+        }
+        if best.0.is_finite() {
+            let side = if best.1 == 0 { lo } else { up };
+            let k = best.2;
+            let (s, z, ds, dz) = (side.s[k], side.z[k], side.ds[k], side.dz[k]);
+            blk += &format!(
+                " blk{name}[{}{} j={}] s={s:.2e} z={z:.2e} ds={ds:.2e} dz={dz:.2e} sz/mu={:.1e} dsa={:.2e} dza={:.2e}",
+                if best.1 == 0 { "lo" } else { "up" },
+                k,
+                side.idx[k],
+                s * z / mu,
+                side.ds_aff[k],
+                side.dz_aff[k]
+            );
+        }
+    }
+    // 修正子の後の点の相補積の分布 (歩幅 ap, ad で進んだ点、目標 σμ との比)。
+    let mut hn = [0usize; 8];
+    let tgt = (sigma * mu).max(1e-300);
+    for side in [lo, up] {
+        for k in 0..side.len() {
+            let v = (side.s[k] + ap * side.ds[k]) * (side.z[k] + ad * side.dz[k]) / tgt;
+            let b = edges.iter().position(|&e| v < e).unwrap_or(7);
+            hn[b] += 1;
+        }
+    }
+    eprintln!("IPM2 it={it:3} aff=({apa:.2e},{ada:.2e}) hist_lo={:?} hist_up={:?} new/target={:?}{blk}", hist[0], hist[1], hn);
+}
+
 /// 予測子/修正子の Newton 方向: 各 `Side` の `r_z`・`r_s`・`w` から縮約系の右辺を作って解き、
 /// `sol[..n] = dx`、`sol[n..] = dy`、各 `Side` の `dz`・`ds` を書く。行列は分解済み。
 #[allow(clippy::too_many_arguments)]
@@ -1304,6 +1550,20 @@ fn dual_infeasibility_certificate(a: &FaerCsr, c: &[f64], x: &[f64], lo: &Side, 
 mod tests {
     use super::*;
     use crate::sparse::csr_from_rows;
+
+    /// 診断用: `ENOMOTO_IPM_REPLAY=ファイル` ([`dump_problem`] の出力) の問題を内点法で解く
+    /// (`RUSTFLAGS="-C link-arg=-lpython3.13" cargo test --release --lib ipm_dump_replay -- --ignored --nocapture`。
+    /// PyO3 の `extension-module` のため、テストの実行ファイルには libpython を明示的に結ぶ)。
+    #[test]
+    #[ignore]
+    fn ipm_dump_replay() {
+        let f = std::env::var("ENOMOTO_IPM_REPLAY").expect("ENOMOTO_IPM_REPLAY");
+        let (a, b, c, l, u) = load_problem(&f);
+        let t = std::time::Instant::now();
+        let r = solve_box_lp(&a, &b, &c, &l, &u, 200);
+        let obj: f64 = c.iter().zip(&r.x).map(|(p, q)| p * q).sum();
+        eprintln!("REPLAY status={:?} iters={} obj={obj:.10e} rel_res={:?} time={:.2}s", r.status, r.iters, r.rel_res, t.elapsed().as_secs_f64());
+    }
 
     #[test]
     fn box_ipm_detects_infeasible_and_solves_feasible() {

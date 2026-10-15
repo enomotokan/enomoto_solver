@@ -1080,6 +1080,13 @@ impl NormalKkt {
             c.set((a, n_ + t_num.elapsed().as_secs_f64()));
         });
         if !ok {
+            if env_str!("ENOMOTO_DEBUG_REFINE").is_some() {
+                let nf = self.values.iter().filter(|v| !v.is_finite()).count();
+                let (dmin, dmax) = d.iter().fold((f64::INFINITY, 0.0f64), |(a, b), &v| (a.min(v), b.max(v)));
+                let (vmin, vmax) = self.values.iter().fold((f64::INFINITY, 0.0f64), |(a, b), &v| (a.min(v.abs()), b.max(v.abs())));
+                let ds = self.dscale.iter().fold((f64::INFINITY, 0.0f64), |(a, b), &v| (a.min(v), b.max(v)));
+                eprintln!("FACTOR fail: nonfinite values={nf} d=[{dmin:.2e},{dmax:.2e}] |values|=[{vmin:.2e},{vmax:.2e}] dscale=[{:.2e},{:.2e}] delta={delta:.2e}", ds.0, ds.1);
+            }
             return false;
         }
         // Woodbury: W = M_s^{-1} U (U の列 q = a_q * sqrt(dinv_q))、C = I + U^T W の Cholesky。
@@ -1317,6 +1324,7 @@ impl IpmKkt {
         self.solve_plain(a, at, rhs);
         let mut prev = f64::INFINITY;
         let mut last_rel = 0.0f64;
+        let mut steps = 0usize;
         let refine = tunable!("ENOMOTO_T_IPM_REFINE_STEPS", refine, usize);
         for _ in 0..refine {
             // kx = K rhs
@@ -1344,13 +1352,14 @@ impl IpmKkt {
                 break;
             }
             prev = nrm;
+            steps += 1;
             self.solve_plain(a, at, r);
             for i in 0..dim {
                 rhs[i] += r[i];
             }
         }
         if env_str!("ENOMOTO_DEBUG_REFINE").is_some() {
-            eprintln!("REFINE rel_residual={last_rel:.2e}");
+            eprintln!("REFINE rel_residual={last_rel:.2e} steps={steps}");
         }
         last_rel
     }
