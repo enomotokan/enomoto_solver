@@ -430,9 +430,25 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
     let eps_abs = tunable!("ENOMOTO_T_IPM_EPS", EPS_ABS, f64);
     let eps_rel = tunable!("ENOMOTO_T_IPM_EPS", EPS_REL, f64);
     // Gondzio の多重中心性補正子の最大回数 (0 で Mehrotra の予測子・修正子だけ)。
-    let gondzio_max = tunable!("ENOMOTO_T_IPM_GONDZIO", BOX_GONDZIO, usize);
+    let mut gondzio_max = tunable!("ENOMOTO_T_IPM_GONDZIO", BOX_GONDZIO, usize);
+    // `ENOMOTO_T_IPM_GONDZIO_BIG_FLOPS=F` (既定 `BOX_GONDZIO_BIG_FLOPS`、0 で使わない): 分解の演算量の見積もりが F 以上で、因子の非零 1 個あたりの
+    // 演算量が `ENOMOTO_T_IPM_GONDZIO_BIG_RATIO` 以上 (分解が求解よりはるかに重い) なら、補正子を `ENOMOTO_T_IPM_GONDZIO_BIG` 回にする
+    // (記号分解から決まるので計算機によらない)。neos-3025225 (拡大系 7.3e10 flops、nnz(L) 7,210 万): 44 → 30 反復。
+    let big_flops = tunable!("ENOMOTO_T_IPM_GONDZIO_BIG_FLOPS", crate::params::interior_point::BOX_GONDZIO_BIG_FLOPS, f64);
+    if big_flops > 0.0 && gondzio_max == 0 {
+        let fl = kkt.factor_flops();
+        if fl >= big_flops && fl >= tunable!("ENOMOTO_T_IPM_GONDZIO_BIG_RATIO", 500.0f64, f64) * kkt.factor_nnz() as f64 {
+            gondzio_max = tunable!("ENOMOTO_T_IPM_GONDZIO_BIG", 2usize, usize);
+            if env_str!("ENOMOTO_DEBUG_IPM").is_some() {
+                eprintln!("IPM factor flops {fl:.2e} (nnz(L) {}): Gondzio correctors {gondzio_max}", kkt.factor_nnz());
+            }
+        }
+    }
     let gondzio_small_step = tunable!("ENOMOTO_T_IPM_GONDZIO_SMALL_STEP", 1.0f64, f64);
-    let gondzio_auto = tunable!("ENOMOTO_T_IPM_GONDZIO_AUTO", 0.0f64, f64);
+    let gondzio_auto = tunable!("ENOMOTO_T_IPM_GONDZIO_AUTO", crate::params::interior_point::BOX_GONDZIO_AUTO, f64);
+    // 自動の規則を使う分解 1 回の時間の下限 (秒、`ENOMOTO_T_IPM_GONDZIO_AUTO_MIN_TF`)。分解の軽い問題では補正子の回数が求解の時間の
+    // 揺れで変わり、経路が変わって遅くなることがあった (第 48 回: pilot.ja 0.21 → 2.6 秒)。
+    let gondzio_auto_min_tf = tunable!("ENOMOTO_T_IPM_GONDZIO_AUTO_MIN_TF", crate::params::interior_point::BOX_GONDZIO_AUTO_MIN_TF, f64);
     let gondzio_auto_max = tunable!("ENOMOTO_T_IPM_GONDZIO_AUTO_MAX", 2usize, usize);
     let mut nan_recover_left = tunable!("ENOMOTO_T_IPM_NAN_RECOVER", 0usize, usize);
     let switch_aug_k = tunable!("ENOMOTO_T_IPM_SWITCH_AUG", 0usize, usize);
@@ -1068,7 +1084,7 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
         // 試験用 (`ENOMOTO_T_IPM_GONDZIO_AUTO=C`): 補正子の回数を、この反復の分解の時間が Newton 系 1 回の求解の
         // 時間の何倍かで決める (`floor(t_分解 / (C t_求解))`、上限 `ENOMOTO_T_IPM_GONDZIO_AUTO_MAX`)。分解が重く求解が
         // 軽い問題 (dfl001・pds-20・ken-18) だけ補正子で反復を減らし、求解が重い問題 (osa-60) では使わない。
-        let gondzio_k = if gondzio_auto > 0.0 && last_ts > 0.0 {
+        let gondzio_k = if gondzio_auto > 0.0 && last_ts > 0.0 && last_tf >= gondzio_auto_min_tf {
             gondzio_max.max(((last_tf / (gondzio_auto * last_ts)) as usize).min(gondzio_auto_max))
         } else {
             gondzio_max

@@ -1139,8 +1139,20 @@ pub(crate) mod interior_point {
     /// 高精度化の段 (停止基準に達した後) で、予測子の Newton 系の相対残差がこれを超えたら正則化を強めて同じ点で解き直す
     /// (`ENOMOTO_T_IPM_PUSH_SOLVE_ACC`、0 で使わない。neos3: 相対残差 4e76 の方向で歩いて高精度化が 1 反復目で破綻していた)。
     pub(crate) const BOX_PUSH_SOLVE_ACC: f64 = 1e-6;
+    /// Gondzio の補正子の回数を分解と求解の時間の比で決める係数 C (`floor(t_分解 / (C t_求解))`、`ENOMOTO_T_IPM_GONDZIO_AUTO`、
+    /// 0 で使わない) と、それを使う分解 1 回の時間の下限 (秒、`ENOMOTO_T_IPM_GONDZIO_AUTO_MIN_TF`)。
+    pub(crate) const BOX_GONDZIO_AUTO: f64 = 0.0;
+    pub(crate) const BOX_GONDZIO_AUTO_MIN_TF: f64 = 0.0;
+    /// 分解の演算量の見積もりがこれ以上 (かつ因子の非零 1 個あたり 500 以上) なら Gondzio の補正子を 2 回にする
+    /// (`ENOMOTO_T_IPM_GONDZIO_BIG_FLOPS`、0 で使わない)。
+    pub(crate) const BOX_GONDZIO_BIG_FLOPS: f64 = 5e10;
     /// 正規方程式の組み立てを出力の列の範囲で並列に分ける組の数の下限 (`ENOMOTO_T_NORMAL_ASM_PAR`、0 で使わない。結果はビット一致)。
     pub(crate) const NORMAL_ASM_PAR_MIN_TRIPLETS: usize = 2_000_000;
+    /// 記号分解の並べ替えで AMD と METIS を同時に計算するパターンの非零の下限 (`ENOMOTO_T_CHOL_ORDER_PAR_NNZ`、0 で逐次)。
+    pub(crate) const CHOL_ORDER_PAR_NNZ: usize = 1_000_000;
+    /// 正規方程式の稠密な列の Woodbury を、faer の simplicial の因子なら V = L^{-1} P U (疎) の形で扱うか
+    /// (`ENOMOTO_T_WOODBURY_SPARSE_V`、0 で従来の W = M_s^{-1} U)。
+    pub(crate) const WOODBURY_SPARSE_V: u8 = 1;
 
     /// 停止判定 (主・双対残差と双対ギャップ) の絶対許容誤差。
     pub(crate) const EPS_ABS: f64 = 1e-8;

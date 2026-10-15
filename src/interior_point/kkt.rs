@@ -135,8 +135,28 @@ fn symbolic_with_ordering(pat: &SymbolicSparseColMat<usize>, dbg: bool, limit: u
     if mode == 0 || pat.nrows() < min_n {
         return amd();
     }
+    let metis_symbolic = || {
+        let t0 = std::time::Instant::now();
+        let nd = metis_ordering(pat).and_then(|(perm, perm_inv)| {
+            let p = faer::perm::PermRef::<usize>::new_checked(&perm, &perm_inv, pat.nrows());
+            factorize_symbolic_cholesky::<usize>(pat.as_ref(), Side::Upper, SymmetricOrdering::Custom(p), chol_symbolic_params()).ok()
+        });
+        (nd, t0.elapsed().as_secs_f64())
+    };
+    // パターンの非零が `ENOMOTO_T_CHOL_ORDER_PAR_NNZ` (既定 `CHOL_ORDER_PAR_NNZ`、0 で使わない) 以上なら、AMD と METIS を同時に計算する
+    // (下の規則で METIS を使わないことになれば捨てる。選ぶ規則と結果は逐次と同じ)。neos-3025225 の拡大系は METIS 9.2 秒 + AMD。
+    let par_nnz = tunable!("ENOMOTO_T_CHOL_ORDER_PAR_NNZ", crate::params::interior_point::CHOL_ORDER_PAR_NNZ, usize);
+    let mut pre_nd: Option<(Option<SymbolicCholesky<usize>>, f64)> = None;
     // 2: まず AMD。演算量の見積もりが `ENOMOTO_T_CHOL_ORDER_MIN_FLOPS` 未満なら METIS は試さない (並べ替えの時間が割に合わない)。
-    let a = if mode == 2 { amd() } else { None };
+    let a = if mode == 2 && par_nnz > 0 && pat.compute_nnz() >= par_nnz && rayon::current_num_threads() > 1 {
+        let (a, nd) = rayon::join(amd, metis_symbolic);
+        pre_nd = Some(nd);
+        a
+    } else if mode == 2 {
+        amd()
+    } else {
+        None
+    };
     let a_flops = a.as_ref().map_or(f64::INFINITY, chol_flops);
     if mode == 2 && a_flops < tunable!("ENOMOTO_T_CHOL_ORDER_MIN_FLOPS", 1e8f64, f64) {
         return a;
@@ -151,12 +171,7 @@ fn symbolic_with_ordering(pat: &SymbolicSparseColMat<usize>, dbg: bool, limit: u
         }
         return a;
     }
-    let t0 = std::time::Instant::now();
-    let nd = metis_ordering(pat).and_then(|(perm, perm_inv)| {
-        let p = faer::perm::PermRef::<usize>::new_checked(&perm, &perm_inv, pat.nrows());
-        factorize_symbolic_cholesky::<usize>(pat.as_ref(), Side::Upper, SymmetricOrdering::Custom(p), chol_symbolic_params()).ok()
-    });
-    let t_nd = t0.elapsed().as_secs_f64();
+    let (nd, t_nd) = pre_nd.unwrap_or_else(metis_symbolic);
     if mode == 1 {
         if dbg {
             eprintln!("NormalKkt: METIS nnz(L)={:?} in {t_nd:.2}s", nd.as_ref().map(|c| c.len_values()));
@@ -485,6 +500,9 @@ pub struct AugKkt {
     mf: Option<super::multifrontal::Multifrontal>,
 }
 
+/// 診断用 (`ENOMOTO_DEBUG_WOODBURY`): 正規方程式の求解の回数と、その内訳の時間 (ナノ秒: A·D^{-1}r と A^T、M^{-1} の求解)。
+static NK_SOLVE_STAT: [std::sync::atomic::AtomicU64; 4] = [const { std::sync::atomic::AtomicU64::new(0) }; 4];
+
 /// 反復改良を打ち切る残差 (右辺の無限大ノルム (1 以上) に対する相対値)。
 const REFINE_TOL: f64 = 1e-13;
 
@@ -698,6 +716,21 @@ impl AugKkt {
     }
 }
 
+/// [`NormalKkt::v_gram`] の詰め直し先。
+struct VGramMap {
+    /// 密にする行の数。
+    nd: usize,
+    /// V の列 q の非零ごとの行き先: 上位ビットが 0 なら密な行列 (列優先、nd x k) の位置、1 なら疎な行の並び (`sq`) の位置。
+    dest: Vec<Vec<u32>>,
+    /// 疎な行の CSR の行の始まりと、並びの各要素の列 q。
+    sptr: Vec<usize>,
+    sq: Vec<u32>,
+    /// 値の詰め直し先 (使い回す。V の非零の位置は変わらないので、書かれない位置は 0 のまま)。
+    vdata: Vec<f64>,
+    sval: Vec<f64>,
+}
+
+
 /// 正規方程式 `(A diag(d)^{-1} A^T + δ I) dy = A diag(d)^{-1} r_x - r_y` による拡大系
 /// `[diag(d) A^T; A -δI] [dx; dy] = [r_x; r_y]` の求解 (`dx = (r_x - A^T dy) / d`)。
 ///
@@ -742,6 +775,18 @@ pub struct NormalKkt {
     /// Woodbury: `W = M_s^{-1} U` (列優先 `p x k`) と `C = I + U^T W` の Cholesky 因子 (下三角、行優先 `k x k`)。
     w_mat: Vec<f64>,
     c_chol: Vec<f64>,
+    /// Woodbury を V = L^{-1} P U (疎) で扱うときの V の列 (並べ替えた番号の昇順の位置と値)。`use_v` の間だけ有効。
+    v_cols: Vec<(Vec<u32>, Vec<f64>)>,
+    /// 直近の分解で V の形を使ったか。
+    use_v: bool,
+    /// V の形で使う、因子の消去木の親 (並べ替えた番号、根は `usize::MAX`) と並べ替え (`fwd`、`inv`)。
+    etree: Vec<usize>,
+    perm_fwd: Vec<usize>,
+    perm_inv: Vec<usize>,
+    /// V の形の求解の作業領域 (長さ p)。
+    tmp_v: Vec<f64>,
+    /// C = I + V^T V を作るときの詰め直し先 (V の非零の位置は分解ごとに変わらないので最初に作る)。
+    v_gram_map: Option<VGramMap>,
     /// 作業領域。
     tmp_n: Vec<f64>,
     tmp_p: Vec<f64>,
@@ -956,6 +1001,13 @@ impl NormalKkt {
             dinv: vec![0.0; n],
             w_mat: vec![0.0; p * k],
             c_chol: vec![0.0; k * k],
+            v_cols: Vec::new(),
+            use_v: false,
+            etree: Vec::new(),
+            perm_fwd: Vec::new(),
+            perm_inv: Vec::new(),
+            tmp_v: Vec::new(),
+            v_gram_map: None,
             tmp_n: vec![0.0; n],
             tmp_p: vec![0.0; p],
             factored: false,
@@ -968,6 +1020,323 @@ impl NormalKkt {
     /// `L` の非零数。
     pub fn factor_nnz(&self) -> usize {
         self.chol_symbolic.len_values()
+    }
+
+    /// Woodbury を V の形で扱えるか ([`Self::factor`] の `ENOMOTO_T_WOODBURY_SPARSE_V`)。
+    fn sparse_v_ok(&self) -> bool {
+        use faer::sparse::linalg::cholesky::SymbolicCholeskyRaw;
+        tunable!("ENOMOTO_T_WOODBURY_SPARSE_V", crate::params::interior_point::WOODBURY_SPARSE_V, u8) != 0
+            && self.mf.is_none()
+            && self.pardiso.is_none()
+            && self.dscale.is_empty()
+            && matches!(self.chol_symbolic.raw(), SymbolicCholeskyRaw::Simplicial(_))
+    }
+
+    /// V = L^{-1} P U の列を到達集合の前進代入で作る (列どうしは並列)。
+    fn build_sparse_v(&mut self) {
+        use faer::sparse::linalg::cholesky::SymbolicCholeskyRaw;
+        use rayon::prelude::*;
+        let p = self.p;
+        let SymbolicCholeskyRaw::Simplicial(sl) = self.chol_symbolic.raw() else { unreachable!() };
+        let (cp, ri) = (sl.col_ptrs(), sl.row_indices());
+        if self.etree.len() != p {
+            // simplicial の L は列ごとに対角が先頭で、残りの行の最小のものが消去木の親。
+            self.etree = (0..p).map(|j| if cp[j + 1] > cp[j] + 1 { ri[cp[j] + 1] } else { usize::MAX }).collect();
+            match self.chol_symbolic.perm() {
+                Some(pm) => {
+                    let (f, i) = pm.arrays();
+                    self.perm_fwd = f.to_vec();
+                    self.perm_inv = i.to_vec();
+                }
+                None => {
+                    self.perm_fwd = (0..p).collect();
+                    self.perm_inv = (0..p).collect();
+                }
+            }
+        }
+        let (lv, parent, inv) = (&self.l_values, &self.etree, &self.perm_inv);
+        let (dense_cols, dinv, col_ent, col_ptr) = (&self.dense_cols, &self.dinv, &self.col_ent, &self.col_ptr);
+        // 2 回目からは到達集合 (V の非零の位置) を使い回し、値だけを前進代入で求める。
+        if self.v_cols.len() == dense_cols.len() && !self.v_cols.is_empty() {
+            self.v_cols.par_iter_mut().enumerate().for_each_init(
+                || vec![0.0f64; p],
+                |w, (q, (idx, val))| {
+                    let j = dense_cols[q];
+                    let sq = dinv[j].sqrt();
+                    for &(i, v) in &col_ent[col_ptr[j]..col_ptr[j + 1]] {
+                        w[inv[i]] += v * sq;
+                    }
+                    for &jj in idx.iter() {
+                        let jj = jj as usize;
+                        let x = w[jj] / lv[cp[jj]];
+                        w[jj] = x;
+                        if x != 0.0 {
+                            for t in cp[jj] + 1..cp[jj + 1] {
+                                w[ri[t]] -= lv[t] * x;
+                            }
+                        }
+                    }
+                    for (o, &jj) in val.iter_mut().zip(idx.iter()) {
+                        *o = w[jj as usize];
+                        w[jj as usize] = 0.0;
+                    }
+                },
+            );
+            return;
+        }
+        self.v_gram_map = None;
+        self.v_cols = (0..dense_cols.len())
+            .into_par_iter()
+            .map_init(
+                || (vec![0.0f64; p], vec![false; p]),
+                |(w, mk), q| {
+                    let j = dense_cols[q];
+                    let sq = dinv[j].sqrt();
+                    let mut reach: Vec<usize> = Vec::new();
+                    for &(i, v) in &col_ent[col_ptr[j]..col_ptr[j + 1]] {
+                        let mut t = inv[i];
+                        w[t] += v * sq;
+                        while t != usize::MAX && !mk[t] {
+                            mk[t] = true;
+                            reach.push(t);
+                            t = parent[t];
+                        }
+                    }
+                    // 子の番号は親より小さいので、昇順が前進代入の順。列 jj の L の行はどれも jj の祖先 (到達集合の中)。
+                    reach.sort_unstable();
+                    for &jj in &reach {
+                        let x = w[jj] / lv[cp[jj]];
+                        w[jj] = x;
+                        if x != 0.0 {
+                            for t in cp[jj] + 1..cp[jj + 1] {
+                                w[ri[t]] -= lv[t] * x;
+                            }
+                        }
+                    }
+                    let vals: Vec<f64> = reach.iter().map(|&jj| w[jj]).collect();
+                    for &jj in &reach {
+                        w[jj] = 0.0;
+                        mk[jj] = false;
+                    }
+                    (reach.into_iter().map(|v| v as u32).collect(), vals)
+                },
+            )
+            .collect();
+    }
+
+    /// C = I + V^T V (行優先、k x k)。V の行のうち非零が `k` の `ENOMOTO_T_WOODBURY_GRAM_DENSE` 倍 (既定 0.5、0 で使わない) 以上の行は
+    /// 密な行列にして行列積で、残りの行は行ごとの外積で足す (stormG2_1000: 100 列以上で非零の行 3.7 万が Σ(行の非零)² 5.2e8 の
+    /// 9 割を占める。列どうしの内積で作ると 1 回 0.2 秒)。
+    fn v_gram(&mut self) -> Vec<f64> {
+        use rayon::prelude::*;
+        let (p, k) = (self.p, self.dense_cols.len());
+        let frac = tunable!("ENOMOTO_T_WOODBURY_GRAM_DENSE", 0.5f64, f64);
+        if frac <= 0.0 {
+            return self.v_gram_cols();
+        }
+        let dbg = env_str!("ENOMOTO_DEBUG_WOODBURY").is_some();
+        let t0 = std::time::Instant::now();
+        if self.v_gram_map.is_none() {
+            let vc = &self.v_cols;
+            let mut cnt = vec![0u32; p];
+            for (idx, _) in vc {
+                for &i in idx {
+                    cnt[i as usize] += 1;
+                }
+            }
+            let thr = ((frac * k as f64).ceil() as u32).max(1);
+            // 密にする行の番号。
+            let mut dpos = vec![u32::MAX; p];
+            let mut nd = 0usize;
+            for i in 0..p {
+                if cnt[i] >= thr {
+                    dpos[i] = nd as u32;
+                    nd += 1;
+                }
+            }
+            // 残りの行の CSR (行 -> 列 q)。
+            let mut sptr = vec![0usize; p + 1];
+            for i in 0..p {
+                sptr[i + 1] = sptr[i] + if dpos[i] == u32::MAX { cnt[i] as usize } else { 0 };
+            }
+            let mut sq = vec![0u32; sptr[p]];
+            let mut fill = sptr.clone();
+            let dest: Vec<Vec<u32>> = vc
+                .iter()
+                .enumerate()
+                .map(|(q, (idx, _))| {
+                    idx.iter()
+                        .map(|&i| {
+                            let i = i as usize;
+                            if dpos[i] != u32::MAX {
+                                (q * nd + dpos[i] as usize) as u32
+                            } else {
+                                let t = fill[i];
+                                fill[i] += 1;
+                                sq[t] = q as u32;
+                                (t as u32) | 0x8000_0000
+                            }
+                        })
+                        .collect()
+                })
+                .collect();
+            let (nv, ns) = (nd * k, sptr[p]);
+            self.v_gram_map = Some(VGramMap { nd, dest, sptr, sq, vdata: vec![0.0; nv], sval: vec![0.0; ns] });
+        }
+        let vc = &self.v_cols;
+        let map = self.v_gram_map.as_mut().unwrap();
+        let nd = map.nd;
+        {
+            // 列 q ごとの行き先は互いに重ならないので、列を並列に詰め直す。
+            struct Ptr(*mut f64, *mut f64);
+            unsafe impl Sync for Ptr {}
+            let ptr = Ptr(map.vdata.as_mut_ptr(), map.sval.as_mut_ptr());
+            let ptr = &ptr;
+            vc.par_iter().zip(map.dest.par_iter()).for_each(|((_, val), dst)| {
+                for (&v, &d) in val.iter().zip(dst) {
+                    // SAFETY: 行き先は列どうしで重ならず、配列の長さの内 (詰め直し先を作ったときの位置)。
+                    unsafe {
+                        if d & 0x8000_0000 == 0 {
+                            *ptr.0.add(d as usize) = v;
+                        } else {
+                            *ptr.1.add((d & 0x7fff_ffff) as usize) = v;
+                        }
+                    }
+                }
+            });
+        }
+        let map = self.v_gram_map.as_ref().unwrap();
+        let vd = faer::mat::from_column_major_slice::<f64, usize, usize>(&map.vdata, nd, k);
+        let (sq_, sval, sptr) = (&map.sq, &map.sval, &map.sptr);
+        let t1 = t0.elapsed().as_secs_f64();
+        let gd = if nd > 0 { vd.transpose() * vd } else { faer::Mat::<f64>::zeros(k, k) };
+        let t2 = t0.elapsed().as_secs_f64();
+        // 外積は行を束ねて並列に足し、束ごとの k x k を合わせる。
+        let chunk = p.div_ceil(4 * rayon::current_num_threads().max(1)).max(1);
+        let gs = (0..p.div_ceil(chunk))
+            .into_par_iter()
+            .map(|b| {
+                let mut acc = vec![0.0f64; k * k];
+                for i in b * chunk..((b + 1) * chunk).min(p) {
+                    let (rq, rv) = (&sq_[sptr[i]..sptr[i + 1]], &sval[sptr[i]..sptr[i + 1]]);
+                    for a_ in 0..rq.len() {
+                        let (qa, va) = (rq[a_], rv[a_]);
+                        for b_ in 0..=a_ {
+                            let (qb, vb) = (rq[b_], rv[b_]);
+                            let (r, c) = if qa >= qb { (qa as usize, qb as usize) } else { (qb as usize, qa as usize) };
+                            acc[r * k + c] += va * vb;
+                        }
+                    }
+                }
+                acc
+            })
+            .reduce(|| vec![0.0f64; k * k], |mut x, y| {
+                for (a, b) in x.iter_mut().zip(&y) {
+                    *a += b;
+                }
+                x
+            });
+        if dbg {
+            eprintln!("WOODBURY gram parts: build={t1:.3} gemm={:.3} (nd={nd}) outer={:.3} (sparse entries {})", t2 - t1, t0.elapsed().as_secs_f64() - t2, sptr[p]);
+        }
+        let mut cm = vec![0.0f64; k * k];
+        for r in 0..k {
+            for c in 0..=r {
+                let v = gd.read(r, c) + gs[r * k + c] + if r == c { 1.0 } else { 0.0 };
+                cm[r * k + c] = v;
+                cm[c * k + r] = v;
+            }
+        }
+        cm
+    }
+
+    /// [`Self::v_gram`] の列どうしの内積の版。
+    fn v_gram_cols(&self) -> Vec<f64> {
+        use rayon::prelude::*;
+        let (p, k) = (self.p, self.dense_cols.len());
+        let vc = &self.v_cols;
+        let rows: Vec<Vec<f64>> = (0..k)
+            .into_par_iter()
+            .map_init(
+                || vec![0.0f64; p],
+                |w, r| {
+                    for (&i, &v) in vc[r].0.iter().zip(&vc[r].1) {
+                        w[i as usize] = v;
+                    }
+                    let row: Vec<f64> = (0..=r).map(|c| vc[c].0.iter().zip(&vc[c].1).map(|(&i, &v)| v * w[i as usize]).sum::<f64>()).collect();
+                    for &i in &vc[r].0 {
+                        w[i as usize] = 0.0;
+                    }
+                    row
+                },
+            )
+            .collect();
+        let mut cm = vec![0.0f64; k * k];
+        for r in 0..k {
+            for c in 0..=r {
+                let v = rows[r][c] + if r == c { 1.0 } else { 0.0 };
+                cm[r * k + c] = v;
+                cm[c * k + r] = v;
+            }
+        }
+        cm
+    }
+
+    /// V の形で `rhs ← (M_s + U U^T)^{-1} rhs` を解く ([`Self::factor`] の `ENOMOTO_T_WOODBURY_SPARSE_V`)。
+    fn solve_woodbury_v(&mut self, rhs: &mut [f64]) {
+        use faer::sparse::linalg::cholesky::SymbolicCholeskyRaw;
+        let (p, k) = (self.p, self.dense_cols.len());
+        let SymbolicCholeskyRaw::Simplicial(sl) = self.chol_symbolic.raw() else { unreachable!() };
+        let (cp, ri) = (sl.col_ptrs(), sl.row_indices());
+        let lv = &self.l_values;
+        let z = &mut self.tmp_v;
+        z.resize(p, 0.0);
+        for t in 0..p {
+            z[t] = rhs[self.perm_fwd[t]];
+        }
+        for j in 0..p {
+            let x = z[j] / lv[cp[j]];
+            z[j] = x;
+            if x != 0.0 {
+                for t in cp[j] + 1..cp[j + 1] {
+                    z[ri[t]] -= lv[t] * x;
+                }
+            }
+        }
+        let mut g: Vec<f64> = self.v_cols.iter().map(|(idx, val)| idx.iter().zip(val).map(|(&i, &v)| v * z[i as usize]).sum()).collect();
+        let l = &self.c_chol;
+        for r in 0..k {
+            let mut v = g[r];
+            for t in 0..r {
+                v -= l[r * k + t] * g[t];
+            }
+            g[r] = v / l[r * k + r];
+        }
+        for r in (0..k).rev() {
+            let mut v = g[r];
+            for t in r + 1..k {
+                v -= l[t * k + r] * g[t];
+            }
+            g[r] = v / l[r * k + r];
+        }
+        for (q, (idx, val)) in self.v_cols.iter().enumerate() {
+            let gq = g[q];
+            if gq != 0.0 {
+                for (&i, &v) in idx.iter().zip(val) {
+                    z[i as usize] -= gq * v;
+                }
+            }
+        }
+        for j in (0..p).rev() {
+            let mut x = z[j];
+            for t in cp[j] + 1..cp[j + 1] {
+                x -= lv[t] * z[ri[t]];
+            }
+            z[j] = x / lv[cp[j]];
+        }
+        for t in 0..p {
+            rhs[self.perm_fwd[t]] = z[t];
+        }
     }
 
     /// `M_s` (疎な列だけの正規方程式) の Cholesky で `rhs` を上書きして解く。
@@ -1153,8 +1522,48 @@ impl NormalKkt {
         }
         // Woodbury: W = M_s^{-1} U (U の列 q = a_q * sqrt(dinv_q))、C = I + U^T W の Cholesky。
         let k = self.dense_cols.len();
+        if env_str!("ENOMOTO_DEBUG_WOODBURY").is_some() {
+            use std::sync::atomic::Ordering::Relaxed;
+            let st: Vec<u64> = NK_SOLVE_STAT.iter().map(|a| a.swap(0, Relaxed)).collect();
+            eprintln!("NKSOLVE since last factor: n={} rhs={:.3}s ms={:.3}s at={:.3}s", st[0], st[1] as f64 * 1e-9, st[2] as f64 * 1e-9, st[3] as f64 * 1e-9);
+        }
         if k > 0 {
             let t_w = std::time::Instant::now();
+            // `ENOMOTO_T_WOODBURY_SPARSE_V` (既定 `WOODBURY_SPARSE_V`): faer の simplicial の因子なら、W = M_s^{-1} U (密な p x k) の代わりに
+            // V = L^{-1} P U を疎のまま持つ (M_s = P^T L L^T P)。C = I + V^T V、求解は
+            // `M^{-1} r = P^T L^{-T} (z - V C^{-1} V^T z)`、`z = L^{-1} P r`。V の列は u_q の非零から消去木を根までたどった到達集合だけで、
+            // stormG2_1000 (p = 37.8 万、稠密な列 119 本) では p x k の 14.8%。毎回の求解の稠密な積和 (2 p k) と、W を作る 119 本の
+            // 全体の求解がなくなる。
+            self.use_v = self.sparse_v_ok();
+            let mut cm = if self.use_v {
+                self.build_sparse_v();
+                if env_str!("ENOMOTO_DEBUG_WOODBURY").is_some() {
+                    let nnz: usize = self.v_cols.iter().map(|c| c.0.len()).sum();
+                    eprintln!("WOODBURY sparse V: p={p} k={k} nnz(V)={nnz} ({:.3} of p k) built in {:.3}s", nnz as f64 / (p * k) as f64, t_w.elapsed().as_secs_f64());
+                }
+                if env_str!("ENOMOTO_DEBUG_WOODBURY_ROWS").is_some() {
+                    let mut cnt = vec![0u32; p];
+                    for (idx, _) in &self.v_cols {
+                        for &i in idx {
+                            cnt[i as usize] += 1;
+                        }
+                    }
+                    let mut hist = [0usize; 8];
+                    let mut sq = 0.0f64;
+                    for &c in &cnt {
+                        sq += (c as f64) * (c as f64);
+                        let b = match c { 0 => 0, 1 => 1, 2..=3 => 2, 4..=15 => 3, 16..=59 => 4, 60..=99 => 5, 100..=118 => 6, _ => 7 };
+                        hist[b] += 1;
+                    }
+                    eprintln!("WOODBURY V rows: hist(0,1,2-3,4-15,16-59,60-99,100-118,119+)={hist:?} sum(rownnz^2)={sq:.3e}");
+                }
+                let t_g = std::time::Instant::now();
+                let g = self.v_gram();
+                if env_str!("ENOMOTO_DEBUG_WOODBURY").is_some() {
+                    eprintln!("WOODBURY sparse V gram {:.3}s", t_g.elapsed().as_secs_f64());
+                }
+                g
+            } else {
             let mut w = std::mem::take(&mut self.w_mat);
             for q in 0..k {
                 let j = self.dense_cols[q];
@@ -1223,6 +1632,33 @@ impl NormalKkt {
                 }
             }
             self.w_mat = w;
+            if env_str!("ENOMOTO_DEBUG_WOODBURY_REACH").is_some() && self.mf.is_none() {
+                use faer::sparse::linalg::cholesky::SymbolicCholeskyRaw;
+                if let SymbolicCholeskyRaw::Simplicial(sl) = self.chol_symbolic.raw() {
+                    let cp = sl.col_ptrs();
+                    let ri = sl.row_indices();
+                    let parent: Vec<usize> = (0..p).map(|j| if cp[j + 1] > cp[j] + 1 { ri[cp[j] + 1] } else { usize::MAX }).collect();
+                    let diag_first = (0..p).all(|j| cp[j + 1] == cp[j] || ri[cp[j]] == j);
+                    let inv: Vec<usize> = match self.chol_symbolic.perm() {
+                        Some(pm) => pm.arrays().1.to_vec(),
+                        None => (0..p).collect(),
+                    };
+                    let mut mark = vec![usize::MAX; p];
+                    let mut total = 0usize;
+                    for q in 0..k {
+                        let j = self.dense_cols[q];
+                        for &(i, _) in &self.col_ent[self.col_ptr[j]..self.col_ptr[j + 1]] {
+                            let mut v = inv[i];
+                            while v != usize::MAX && mark[v] != q {
+                                mark[v] = q;
+                                total += 1;
+                                v = parent[v];
+                            }
+                        }
+                    }
+                    eprintln!("WOODBURY reach: diag_first={diag_first} sum|reach|={total} p*k={} ratio={:.4}", p * k, total as f64 / (p * k) as f64);
+                }
+            }
             if env_str!("ENOMOTO_DEBUG_WOODBURY").is_some() {
                 eprintln!("WOODBURY p={p} k={k} block={block} solve={:.3}s", t_w.elapsed().as_secs_f64());
             }
@@ -1239,6 +1675,8 @@ impl NormalKkt {
                     cm[r * k + c] = sq * acc + if r == c { 1.0 } else { 0.0 };
                 }
             }
+            cm
+            };
             // 対称化してから密 Cholesky (行優先の下三角)
             for r in 0..k {
                 for c in 0..r {
@@ -1278,14 +1716,20 @@ impl NormalKkt {
         assert!(self.factored, "NormalKkt::solve_in_place before factor");
         let (n, p) = (self.n, self.p);
         let (rx, ry) = rhs.split_at_mut(n);
+        let t_s0 = std::time::Instant::now();
         // dy の右辺 = A D^{-1} r_x - r_y
         self.tmp_n.par_iter_mut().zip(rx.par_iter()).zip(self.dinv.par_iter()).for_each(|((t, &r), &di)| *t = r * di);
         csr_mat_vec_into(a, &self.tmp_n, &mut self.tmp_p);
         ry.par_iter_mut().zip(self.tmp_p.par_iter()).for_each(|(y, &t)| *y = t - *y);
-        self.solve_ms(ry);
-        // Woodbury の補正: dy -= W C^{-1} U^T dy0
         let k = self.dense_cols.len();
-        if k > 0 {
+        let t_s1 = std::time::Instant::now();
+        if k > 0 && self.use_v {
+            self.solve_woodbury_v(ry);
+        } else {
+            self.solve_ms(ry);
+        }
+        // Woodbury の補正: dy -= W C^{-1} U^T dy0
+        if k > 0 && !self.use_v {
             let mut g = vec![0.0f64; k];
             for (q, &j) in self.dense_cols.iter().enumerate() {
                 let sq = self.dinv[j].sqrt();
@@ -1315,9 +1759,17 @@ impl NormalKkt {
                 }
             }
         }
+        let t_s2 = std::time::Instant::now();
         // dx = D^{-1} (r_x - A^T dy)
         at_mul(a, at, ry, &mut self.tmp_n);
         rx.par_iter_mut().zip(self.tmp_n.par_iter()).zip(self.dinv.par_iter()).for_each(|((x, &t), &di)| *x = (*x - t) * di);
+        {
+            use std::sync::atomic::Ordering::Relaxed;
+            NK_SOLVE_STAT[0].fetch_add(1, Relaxed);
+            NK_SOLVE_STAT[1].fetch_add((t_s1 - t_s0).as_nanos() as u64, Relaxed);
+            NK_SOLVE_STAT[2].fetch_add((t_s2 - t_s1).as_nanos() as u64, Relaxed);
+            NK_SOLVE_STAT[3].fetch_add(t_s2.elapsed().as_nanos() as u64, Relaxed);
+        }
     }
 }
 
@@ -1358,6 +1810,14 @@ impl IpmKkt {
         match self {
             IpmKkt::Normal(k) => k.factor_nnz(),
             IpmKkt::Aug(k) => k.factor_nnz(),
+        }
+    }
+
+    /// 数値分解の演算量の見積もり (記号分解から決まる)。
+    pub fn factor_flops(&self) -> f64 {
+        match self {
+            IpmKkt::Normal(k) => chol_flops(&k.chol_symbolic),
+            IpmKkt::Aug(k) => chol_flops(&k.chol_symbolic),
         }
     }
 
@@ -1712,5 +2172,74 @@ mod mf_variants {
         let n = n1 + m;
         let signs: Vec<i8> = (0..n).map(|i| if i < n1 { 1 } else { -1 }).collect();
         check(n, ptr, idx, val, Some(signs));
+    }
+}
+
+#[cfg(test)]
+mod woodbury_tests {
+    use super::*;
+    use crate::sparse::csr_from_rows;
+
+    /// 稠密な列を Woodbury で扱う正規方程式 (既定では V = L^{-1} P U の形) の解が、拡大系
+    /// `[diag(d) A^T; A -δI] [dx; dy] = [r_x; r_y]` を満たす。
+    #[test]
+    fn normal_with_dense_columns_solves_augmented_system() {
+        let p = 1200usize;
+        let n_sparse = 2000usize;
+        let n_dense = 5usize;
+        let n = n_sparse + n_dense;
+        let mut rng = 12345u64;
+        let mut next = || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng
+        };
+        let mut rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); p];
+        for j in 0..n_sparse {
+            let r1 = (next() as usize) % p;
+            let mut r2 = (next() as usize) % p;
+            if r2 == r1 {
+                r2 = (r1 + 1) % p;
+            }
+            rows[r1].push((j, 1.0 + (next() % 7) as f64 * 0.1));
+            rows[r2].push((j, -1.0));
+        }
+        // 各行に必ず非零を置く (疎な列でつないで M_s を正則に近づける。δ でも正則)。
+        for q in 0..n_dense {
+            let j = n_sparse + q;
+            for i in 0..p {
+                if (i + q) % 2 == 0 {
+                    rows[i].push((j, 0.5 + (next() % 5) as f64 * 0.1));
+                }
+            }
+        }
+        for r in rows.iter_mut() {
+            r.sort_by_key(|e| e.0);
+        }
+        let a = csr_from_rows(&rows, n);
+        let at = crate::sparse::csr_transpose(&a);
+        let mut kkt = NormalKkt::new(&a).expect("normal equations");
+        assert_eq!(kkt.dense_cols.len(), n_dense, "dense columns should be split off");
+        let d: Vec<f64> = (0..n).map(|_| 0.5 + (next() % 100) as f64 * 0.05).collect();
+        let delta = 1e-6;
+        assert!(kkt.factor(&d, delta));
+        let mut rhs: Vec<f64> = (0..n + p).map(|_| (next() % 2001) as f64 / 1000.0 - 1.0).collect();
+        let b = rhs.clone();
+        kkt.solve_in_place(&a, &at, &mut rhs);
+        let (dx, dy) = rhs.split_at(n);
+        // 残差: d dx + A^T dy - r_x、A dx - δ dy - r_y。
+        let mut atdy = vec![0.0; n];
+        crate::sparse::csr_mat_t_vec_into(&a, dy, &mut atdy);
+        let mut adx = vec![0.0; p];
+        crate::sparse::csr_mat_vec_into(&a, dx, &mut adx);
+        let mut worst = 0.0f64;
+        for j in 0..n {
+            worst = worst.max((d[j] * dx[j] + atdy[j] - b[j]).abs());
+        }
+        for i in 0..p {
+            worst = worst.max((adx[i] - delta * dy[i] - b[n + i]).abs());
+        }
+        assert!(worst < 1e-7, "residual {worst:e}");
     }
 }
