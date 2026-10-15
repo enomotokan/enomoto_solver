@@ -1139,6 +1139,8 @@ pub(crate) mod interior_point {
     /// 高精度化の段 (停止基準に達した後) で、予測子の Newton 系の相対残差がこれを超えたら正則化を強めて同じ点で解き直す
     /// (`ENOMOTO_T_IPM_PUSH_SOLVE_ACC`、0 で使わない。neos3: 相対残差 4e76 の方向で歩いて高精度化が 1 反復目で破綻していた)。
     pub(crate) const BOX_PUSH_SOLVE_ACC: f64 = 1e-6;
+    /// 正規方程式の組み立てを出力の列の範囲で並列に分ける組の数の下限 (`ENOMOTO_T_NORMAL_ASM_PAR`、0 で使わない。結果はビット一致)。
+    pub(crate) const NORMAL_ASM_PAR_MIN_TRIPLETS: usize = 2_000_000;
 
     /// 停止判定 (主・双対残差と双対ギャップ) の絶対許容誤差。
     pub(crate) const EPS_ABS: f64 = 1e-8;
@@ -1246,4 +1248,10 @@ pub(crate) mod crossover {
     pub(crate) const MEGIDDO_BTRAN_U: u8 = 1;
     /// 頂点の判定で基底の双対 y_B も試す (`ENOMOTO_T_XO_ACCEPT_YB`。neos-5251015)。
     pub(crate) const ACCEPT_YB: u8 = 1;
+    /// 押し出しの FTRAN の結果の非零行の一覧を、位置の記録が行数のこの割合を超えたら記録を並べ替えずに走査で作る
+    /// (`ENOMOTO_T_XO_MEGIDDO_ROWS_DENSE`、0 で常に並べ替える (既定)。結果はビット一致。ex10 の押し出しでは並べ替えも走査も 3.5 秒で差がなかった)。
+    pub(crate) const MEGIDDO_ROWS_DENSE: f64 = 0.0;
+    /// 押し出しで、求解の時間が再分解の時間に届かない間は FT 更新を `ENOMOTO_T_XO_MEGIDDO_FT_MAX` のこの倍まで続ける
+    /// (`ENOMOTO_T_XO_MEGIDDO_FT_ADAPT`、1 以下で従来どおり)。
+    pub(crate) const MEGIDDO_FT_ADAPT: f64 = 4.0;
 }

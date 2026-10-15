@@ -360,6 +360,23 @@ impl BasisKernel {
         }
     }
 
+    /// [`Self::ftran_rows_into`] で、位置の記録が `m` の `dense_frac` 倍を超えるなら記録を並べ替えずに `out` を走査する版
+    /// (どちらも昇順。走査では値が 0 の行が入らないだけ)。結果が密な FTRAN で記録の並べ替え (`sort_unstable` + `dedup`) が
+    /// 走査より重くなる (ex10 の押し出し: 平均 2.9 万非零 / 6.3 万行)。
+    #[inline]
+    pub(super) fn ftran_rows_into_dense_aware(&mut self, out: &[f64], rows: &mut Vec<usize>, dense_frac: f64) {
+        let dense = match self.ftrack.alpha.indices() {
+            Some(idx) => idx.len() as f64 > dense_frac * self.m as f64,
+            None => true,
+        };
+        if dense {
+            rows.clear();
+            rows.extend((0..self.m).filter(|&i| out[i] != 0.0));
+        } else {
+            self.ftran_rows_into(out, rows);
+        }
+    }
+
     /// 直前のピボット行の BTRAN の結果 `out` の非ゼロ行を昇順で `rows` に入れる ([`Self::ftran_rows_into`] の BTRAN 版)。
     #[inline]
     pub(super) fn btran_rows_into(&self, out: &[f64], rows: &mut Vec<usize>) {

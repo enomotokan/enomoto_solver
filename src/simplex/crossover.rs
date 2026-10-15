@@ -3234,7 +3234,14 @@ fn megiddo_push(
     let btran_u_only = tunable!("ENOMOTO_T_XO_MEGIDDO_BTRAN_U", crate::params::crossover::MEGIDDO_BTRAN_U, u8) != 0;
     // 診断用 (`ENOMOTO_DEBUG_XO_TILDE=k`): 最初の k 回のピボットで、`e_tilde · a_tilde` と BTRAN 全体の行の値を並べて出す。
     let mut tilde_check: usize = env_str!("ENOMOTO_DEBUG_XO_TILDE").and_then(|v| v.parse().ok()).unwrap_or(0);
-    let mut kernel = BasisKernel::new(m, ft_max);
+    // FT 更新の回数が `ft_max` に達しても、前回の再分解からの求解 (FTRAN・BTRAN・更新) の時間がその再分解の時間に届かない間は
+    // `ft_max` の `ENOMOTO_T_XO_MEGIDDO_FT_ADAPT` 倍まで更新を続ける (既定 `MEGIDDO_FT_ADAPT`、1 以下で従来どおり `ft_max` で再分解)。
+    // stormG2_1000 (52.8 万行) の押し出しは FTRAN の結果が平均 12 非零と疎で、FTRAN 0.5 秒に対して 300 回ごとの再分解が 128 回・19.6 秒。
+    let ft_adapt = tunable!("ENOMOTO_T_XO_MEGIDDO_FT_ADAPT", crate::params::crossover::MEGIDDO_FT_ADAPT, f64);
+    let ft_hi = if ft_adapt > 1.0 { ((ft_max as f64 * ft_adapt) as usize).min(ft_max_updates(m)).max(ft_max) } else { ft_max };
+    // 直近の再分解の時間と、その時点の求解の累計時間。
+    let (mut last_refac, mut solve_mark) = (0.0f64, 0.0f64);
+    let mut kernel = BasisKernel::new(m, ft_hi);
     let mut d = vec![0.0; m];
     let mut rho = vec![0.0; m];
     let mut nz: Vec<usize> = Vec::new();
@@ -3242,8 +3249,11 @@ fn megiddo_push(
     let repair = tunable!("ENOMOTO_T_XO_MEGIDDO_REPAIR", 0u8, u8) != 0;
     let mut timed_out = 0usize;
     let mut repaired = 0usize;
-    let mut prof = [0.0f64; 4];
+    let mut prof = [0.0f64; 5];
     let (mut nz_sum, mut nrefac) = (0usize, 0usize);
+    // FTRAN の結果の非零行の一覧を、記録が行数のこの割合を超えたら並べ替えずに走査で作る (`ENOMOTO_T_XO_MEGIDDO_ROWS_DENSE`、
+    // 0 で常に記録を並べ替える。結果はビット一致)。
+    let rows_dense_frac = tunable!("ENOMOTO_T_XO_MEGIDDO_ROWS_DENSE", crate::params::crossover::MEGIDDO_ROWS_DENSE, f64);
     let t_push = Instant::now();
     // 向き `σ` での比率テスト。(歩幅, 塞ぐ基底位置 (自身なら None), 塞いだ境界は上限か)。
     // `nz` は `d` の非零の位置 (基底のほとんどがスラックの問題では `d` が疎で、長さ `m` の走査が手間の大半になる)。
@@ -3335,8 +3345,14 @@ fn megiddo_push(
         let (dj, sigma, t, blk, up) = loop {
             let tq = Instant::now();
             kernel.ftran_col(&lu, col(std, j), &mut d);
-            kernel.ftran_rows_into(&d, &mut nz);
             prof[0] += tq.elapsed().as_secs_f64();
+            let tq = Instant::now();
+            if rows_dense_frac > 0.0 {
+                kernel.ftran_rows_into_dense_aware(&d, &mut nz, rows_dense_frac);
+            } else {
+                kernel.ftran_rows_into(&d, &mut nz);
+            }
+            prof[4] += tq.elapsed().as_secs_f64();
             nz_sum += nz.len();
             let mut dj = std.c[j];
             for &k in &nz {
@@ -3387,11 +3403,13 @@ fn megiddo_push(
                         Some(f) => f,
                         None => return None,
                     };
-                    kernel = BasisKernel::new(m, ft_max);
+                    kernel = BasisKernel::new(m, ft_hi);
                     let xs_ref = &xs;
                     let sv = |jj: usize| xs_ref[sup_idx[jj]];
                     recompute_xb(&lu, basis_pos, nb_status, &is_sup, &sv, &mut xb);
                     prof[3] += tq.elapsed().as_secs_f64();
+                    last_refac = tq.elapsed().as_secs_f64();
+                    solve_mark = prof[0] + prof[1] + prof[2] + prof[4];
                     retried = true;
                     continue;
                 }
@@ -3430,6 +3448,9 @@ fn megiddo_push(
                 pivots += 1;
                 let tq = Instant::now();
                 let mut due = kernel.update_and_check(&mut lu, r).is_due();
+                if !due && ft_hi > ft_max && lu.update_count() >= ft_max && prof[0] + prof[1] + prof[2] + prof[4] - solve_mark >= last_refac {
+                    due = true;
+                }
                 // `x_B` の残差の検査 (`ENOMOTO_T_XO_MEGIDDO_XB_CHECK` 回の更新ごと、既定 200、0 で行わない。1 回の手間は `A` の非零の数で、pds-100 では 50 回ごとで計 0.75 秒): 実際の行列で
                 // `b - A_N x_N - B x_B` を測り、`xb_tol` を超えたら再分解する ([`super::basis_kernel::basic_residual`])。
                 // 照合はピボットの 1 要素しか見ないので、`x_B` の差分更新に溜まった誤差はこちらで拾う。
@@ -3475,11 +3496,13 @@ fn megiddo_push(
                         }
                         None => return None,
                     };
-                    kernel = BasisKernel::new(m, ft_max);
+                    kernel = BasisKernel::new(m, ft_hi);
                     let xs_ref = &xs;
                     let sv = |jj: usize| xs_ref[sup_idx[jj]];
                     recompute_xb(&lu, basis_pos, nb_status, &is_sup, &sv, &mut xb);
                     prof[3] += tq.elapsed().as_secs_f64();
+                    last_refac = tq.elapsed().as_secs_f64();
+                    solve_mark = prof[0] + prof[1] + prof[2] + prof[4];
                 }
             }
         }
@@ -3489,7 +3512,7 @@ fn megiddo_push(
         eprintln!("CROSSOVER megiddo: singular basis repaired ({repaired} columns replaced by slacks)");
     }
     if env_str!("ENOMOTO_DEBUG_CROSSOVER").is_some() {
-        eprintln!("CROSSOVER megiddo prof: total={:.2}s ftran={:.2} btran={:.2} update={:.2} refactor={:.2} ({nrefac}x, {nverify} by verify, {nxb} by x_B residual) avg_nz={:.0}", t_push.elapsed().as_secs_f64(), prof[0], prof[1], prof[2], prof[3], nz_sum as f64 / (pivots + to_bound).max(1) as f64);
+        eprintln!("CROSSOVER megiddo prof: total={:.2}s ftran={:.2} rows={:.2} btran={:.2} update={:.2} refactor={:.2} ({nrefac}x, {nverify} by verify, {nxb} by x_B residual) avg_nz={:.0}", t_push.elapsed().as_secs_f64(), prof[0], prof[4], prof[1], prof[2], prof[3], nz_sum as f64 / (pivots + to_bound).max(1) as f64);
     }
     let lu = match factorize_basis(std, basis_pos, Some(&lu)) {
         Some(f) => f,

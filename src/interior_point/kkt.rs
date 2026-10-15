@@ -726,6 +726,8 @@ pub struct NormalKkt {
     /// 疎な列の組 (列ごとに連続、列 `sparse_cols[c]` の組は `dest[trip_start[c]..trip_start[c+1]]`) の行き先。
     trip_start: Vec<usize>,
     dest: Vec<u32>,
+    /// 疎な列の非零がどれも行の昇順 (重複なし) か (組み立てを出力の列の範囲で並列に分けられる条件)。
+    cols_sorted: bool,
     /// 対角 `(i, i)` の行き先。
     diag_dest: Vec<u32>,
     /// CSC の値 (上三角)。
@@ -933,6 +935,7 @@ impl NormalKkt {
         let solve_buf = GlobalPodBuffer::new(chol_symbolic.solve_in_place_req::<f64>(1).ok()?);
         let nnz = symbolic_base.compute_nnz();
         let k = dense_cols.len();
+        let cols_sorted = sparse_cols.iter().all(|&j| col_ent[col_ptr[j]..col_ptr[j + 1]].windows(2).all(|w| w[0].0 < w[1].0));
         Some(NormalKkt {
             n,
             p,
@@ -942,6 +945,7 @@ impl NormalKkt {
             dense_cols,
             trip_start,
             dest,
+            cols_sorted,
             diag_dest,
             values: vec![0.0; nnz],
             symbolic_base,
@@ -998,6 +1002,62 @@ impl NormalKkt {
         self.dinv.par_iter_mut().zip(d.par_iter()).for_each(|(o, &v)| *o = 1.0 / v);
         // 疎な列の組の値を CSC の値の配列に直接足し込む。
         self.values.fill(0.0);
+        // 組の数が `ENOMOTO_T_NORMAL_ASM_PAR` (既定 `NORMAL_ASM_PAR_MIN_TRIPLETS`、0 で使わない) 以上なら、出力 (上三角の CSC)
+        // の列の範囲ごとにスレッドへ分けて足し込む。列の非零が行の昇順なら組 (a, b) (a <= b) の行き先は行 `b` の列なので、各スレッドは
+        // 全ての列を同じ順に見て、自分の範囲に行き先を持つ組だけを足す。各値への足し込みの順は逐次と同じで、結果はビット一致
+        // (scpm1: 5000 x 5000 の密な正規方程式に 1 反復 7,800 万組、逐次で 0.56 秒)。
+        let par_min = tunable!("ENOMOTO_T_NORMAL_ASM_PAR", crate::params::interior_point::NORMAL_ASM_PAR_MIN_TRIPLETS, usize);
+        let nthr = rayon::current_num_threads();
+        if par_min > 0 && self.dest.len() >= par_min && nthr > 1 && self.cols_sorted {
+            let p_ = self.p;
+            let cp = self.symbolic_base.col_ptrs();
+            let total = cp[p_];
+            let nb = (2 * nthr).min(p_.max(1));
+            // 値の数がほぼ等しくなる列の境 (出力の列の範囲)。
+            let mut bounds = vec![0usize];
+            for k in 1..nb {
+                let target = total * k / nb;
+                let c = cp.partition_point(|&v| v < target).min(p_);
+                if c > *bounds.last().unwrap() {
+                    bounds.push(c);
+                }
+            }
+            bounds.push(p_);
+            let mut slices: Vec<(usize, usize, &mut [f64])> = Vec::with_capacity(bounds.len());
+            let mut rest: &mut [f64] = &mut self.values;
+            let mut consumed = 0usize;
+            for w in bounds.windows(2) {
+                let (lo, hi) = (cp[w[0]], cp[w[1]]);
+                let (head, tail) = std::mem::take(&mut rest).split_at_mut(hi - consumed);
+                slices.push((w[0], w[1], head));
+                debug_assert_eq!(lo, consumed);
+                consumed = hi;
+                rest = tail;
+            }
+            let (sparse_cols, col_ent, col_ptr, trip_start, dest, dinv) = (&self.sparse_cols, &self.col_ent, &self.col_ptr, &self.trip_start, &self.dest, &self.dinv);
+            slices.into_par_iter().for_each(|(clo, chi, slice)| {
+                let vbase = cp[clo];
+                for (c, &j) in sparse_cols.iter().enumerate() {
+                    let e = &col_ent[col_ptr[j]..col_ptr[j + 1]];
+                    let blo = e.partition_point(|x| x.0 < clo);
+                    let bhi = e.partition_point(|x| x.0 < chi);
+                    if blo == bhi {
+                        continue;
+                    }
+                    let dst = &dest[trip_start[c]..trip_start[c + 1]];
+                    let di = dinv[j];
+                    let len = e.len();
+                    for a_ in 0..bhi {
+                        // 組の並び (a_ が外側、b_ = a_.. が内側) での (a_, a_) の位置。
+                        let off = a_ * len - if a_ == 0 { 0 } else { a_ * (a_ - 1) / 2 };
+                        let va = e[a_].1 * di;
+                        for b_ in blo.max(a_)..bhi {
+                            slice[dst[off + b_ - a_] as usize - vbase] += va * e[b_].1;
+                        }
+                    }
+                }
+            });
+        } else {
         let vals = &mut self.values;
         for (c, &j) in self.sparse_cols.iter().enumerate() {
             let e = &self.col_ent[self.col_ptr[j]..self.col_ptr[j + 1]];
@@ -1012,6 +1072,8 @@ impl NormalKkt {
                 }
             }
         }
+        }
+        let vals = &mut self.values;
         for &q in &self.diag_dest {
             vals[q as usize] += delta;
         }
