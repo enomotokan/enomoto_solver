@@ -127,9 +127,13 @@ impl MipProblem {
     /// 整数列と暗黙の整数列 (連続列だが、整数解では必ず整数値になるもの) の印。カット生成で整数として扱う
     /// (分枝はしない)。等式行 `a_j x_j + sum_k a_k x_k = b` で、他の列がすべて (暗黙の) 整数、
     /// `a_k / a_j` と `b / a_j` がすべて整数なら `x_j` は暗黙の整数 (HiGHS の implied integer の主側の判定)。
+    /// 双対側の判定 (HiGHS の dual implied integer): 費用が非零で 1 本の不等式行にしか現れない列は、最適解では
+    /// 境界か、費用を下げる向きに効く行の側を等号にする値を取るので、境界 (有限のもの) が整数で、その行の側と
+    /// 他の列が同じ条件を満たせば暗黙の整数 (どの最適解でも整数値。`ENOMOTO_MIP_NO_DUAL_IMPLINT` で使わない)。
     /// 新しく印のついた列から更に判定が進むので、変化がなくなるまで繰り返す。
     pub fn implied_integers(&self) -> Vec<bool> {
         let integral = |v: f64| (v - v.round()).abs() <= 1e-9 * v.abs().max(1.0);
+        let dual = env_str!("ENOMOTO_MIP_NO_DUAL_IMPLINT").is_none();
         let mut mark = self.is_int.clone();
         loop {
             let mut changed = false;
@@ -140,6 +144,14 @@ impl MipProblem {
                 let ok = self.cols[j].iter().any(|&(i, a)| {
                     self.row_lo[i] == self.row_up[i]
                         && integral(self.row_lo[i] / a)
+                        && self.rows[i].iter().all(|&(k, b)| k == j || (mark[k] && integral(b / a)))
+                }) || (dual && self.cols[j].len() == 1 && self.cost[j] != 0.0 && {
+                    let (i, a) = self.cols[j][0];
+                    // 費用を下げる向きに x_j を動かすのを止める行の側: c > 0 なら x_j を減らすので、a > 0 なら行の値が
+                    // 減って下側、a < 0 なら上側で止まる (c < 0 なら逆)
+                    let side = if (self.cost[j] > 0.0) == (a > 0.0) { self.row_lo[i] } else { self.row_up[i] };
+                    [self.col_lo[j], self.col_up[j]].iter().all(|&v| !v.is_finite() || integral(v))
+                        && (!side.is_finite() || integral(side / a))
                         && self.rows[i].iter().all(|&(k, b)| k == j || (mark[k] && integral(b / a)))
                 });
                 if ok {
