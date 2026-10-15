@@ -330,9 +330,11 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 従の結果の合計 (ノード数, LP の反復数)、[ここへ渡したノード, ここから取ったノード]
     pub(super) pool: Option<std::sync::Arc<WorkPool>>,
     pool_busy: bool,
-    /// ヒューリスティクス役 ([`Self::heur_role_run`]) を終えて木の探索に戻ったか (戻ったら二度と役に就かない)、
+    /// ヒューリスティクス役 ([`Self::heur_role_run`]) を終えて木の探索に戻ったときの (時刻, 共有の最良値, 次に役に戻るまでの
+    /// 秒数) (`ENOMOTO_MIP_HEUR_ROLE_REENTER` でなければ、戻ったら二度と役に就かない)、役に就いた回数、
     /// 役の間の [大近傍探索の呼び出し, 暫定解を良くした回数, 取り込んだ解の数]。
-    heur_role_done: bool,
+    heur_role_retired: Option<(Instant, f64, f64)>,
+    heur_role_entries: u64,
     heur_role_stats: [u64; 3],
     /// 主: 従を始めた後、ノードを渡し始めるまで待つ期限 (待ち行列のノードが `ENOMOTO_T_MIP_TREE_START_NODES` 個たまるか、
     /// この時刻を過ぎたら渡し始める)。従は先に始めて準備 (写しからの LP・根の LP) を主の探索と並行させる。
@@ -1105,7 +1107,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         inbox_seen: 0,
         snap_stats: [0; 3],
         pool_busy: pool.is_some(),
-        heur_role_done: false,
+        heur_role_retired: None,
+        heur_role_entries: 0,
         heur_role_stats: [0; 3],
         pool_hold: None,
         seen_best: f64::INFINITY,
@@ -2297,7 +2300,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 self.tprof.sync_s += t_sync.elapsed().as_secs_f64();
             }
             // ヒューリスティクス役 (`ENOMOTO_MIP_HEUR_ROLE`): 番号の大きい従は、解ができたら木を離れて大近傍探索を回し続ける
-            if plunge.is_none() && !first && !self.heur_role_done && self.heur_role_mine() {
+            if plunge.is_none() && !first && self.heur_role_mine() {
                 match self.heur_role_run() {
                     Some(true) => break,
                     Some(false) => return self.finish_limit(MipStatus::TimeLimit, None),
@@ -3246,7 +3249,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 終え、共有の解があるとき。
     fn heur_role_mine(&self) -> bool {
         let Some(pool) = &self.pool else { return false };
-        pool.heur_k > 0 && self.snap.is_some() && self.race_done && (self.pool_tid as usize) >= pool.threads - pool.heur_k && pool.has_x.load(std::sync::atomic::Ordering::Acquire)
+        if !(pool.heur_k > 0 && self.snap.is_some() && self.race_done && (self.pool_tid as usize) >= pool.threads - pool.heur_k && pool.has_x.load(std::sync::atomic::Ordering::Acquire)) {
+            return false;
+        }
+        // 木の探索に戻った後: `ENOMOTO_MIP_HEUR_ROLE_REENTER` なら、ほかのスレッドが最良値を良くしたか (近傍の中心が変わった)、
+        // 戻ってから決めた秒数が過ぎたら役に戻る (64 ノードおきに調べる)
+        match self.heur_role_retired {
+            None => true,
+            Some((t, best, cool)) => {
+                env_str!("ENOMOTO_MIP_HEUR_ROLE_REENTER").is_some()
+                    && self.nodes % 64 == 0
+                    && (self.shared.as_ref().is_some_and(|s| s.best() < best - 1e-9 * best.abs().max(1.0)) || t.elapsed().as_secs_f64() >= cool)
+            }
+        }
     }
 
     /// 共有の最良の解が自分の暫定解より良ければ取り込む (解の空間はどのスレッドも同じ。共有の最良値は既に下がっている)。
@@ -3269,6 +3284,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         use std::sync::atomic::Ordering;
         let pool = self.pool.clone()?;
         let t_role = Instant::now();
+        self.heur_role_entries += 1;
         let mut out = Vec::with_capacity(self.queue.len());
         while let Some(n) = self.queue.pop_best() {
             out.push(SnapNode::of_with_basis(&n, self.p.m));
@@ -3327,7 +3343,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             } else {
                 fails += 1;
                 if patience > 0 && fails >= patience {
-                    self.heur_role_done = true;
+                    // 木の探索に戻る。役に戻るまでの秒数は戻るたびに倍にする (`ENOMOTO_T_MIP_HEUR_ROLE_COOLDOWN`、既定 5 秒から)
+                    let cool = self.heur_role_retired.map_or(tunable!("ENOMOTO_T_MIP_HEUR_ROLE_COOLDOWN", 5.0, f64), |(_, _, c)| 2.0 * c);
+                    let best = self.shared.as_ref().map_or(f64::INFINITY, |s| s.best());
+                    self.heur_role_retired = Some((Instant::now(), best, cool));
                     break None;
                 }
             }
@@ -3339,8 +3358,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         ROLE_POOL.with(|r| *r.borrow_mut() = None);
         if prof_tree_par() || env_str!("ENOMOTO_MIP_HEUR_ROLE_VERBOSE").is_some() {
             eprintln!(
-                "HEURROLE: tid {} {:.2}s in role ({}), {} LNS calls, {} improved, {} imported, ALNS counts {:?}",
+                "HEURROLE: tid {} entry {} {:.2}s in role ({}), {} LNS calls, {} improved, {} imported, ALNS counts {:?}",
                 self.pool_tid,
+                self.heur_role_entries,
                 t_role.elapsed().as_secs_f64(),
                 match res {
                     Some(true) => "tree done",
