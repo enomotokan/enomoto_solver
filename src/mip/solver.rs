@@ -132,6 +132,9 @@ thread_local! {
     /// 次に始める求解 ([`solve`]) の最初の暫定解 (その問題の空間)。再スタートで前の暫定解を引き継ぐのに使う。
     /// 求解の開始時に取り出す (同じスレッドで後から始まるサブ MIP には渡らない)。
     pub(crate) static START_SOL: std::cell::RefCell<Option<Vec<f64>>> = const { std::cell::RefCell::new(None) };
+    /// ヒューリスティクス役のスレッド (`ENOMOTO_MIP_HEUR_ROLE`、[`Solver::heur_role_run`]) の共有の待ち行列。このスレッドで
+    /// 解くサブ MIP も、木の探索が終わるか止める合図が立ったら打ち切る ([`Solver::time_up`])。
+    static ROLE_POOL: std::cell::RefCell<Option<std::sync::Arc<WorkPool>>> = const { std::cell::RefCell::new(None) };
 }
 
 /// 分枝の決定。
@@ -327,6 +330,10 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 従の結果の合計 (ノード数, LP の反復数)、[ここへ渡したノード, ここから取ったノード]
     pub(super) pool: Option<std::sync::Arc<WorkPool>>,
     pool_busy: bool,
+    /// ヒューリスティクス役 ([`Self::heur_role_run`]) を終えて木の探索に戻ったか (戻ったら二度と役に就かない)、
+    /// 役の間の [大近傍探索の呼び出し, 暫定解を良くした回数, 取り込んだ解の数]。
+    heur_role_done: bool,
+    heur_role_stats: [u64; 3],
     /// 主: 従を始めた後、ノードを渡し始めるまで待つ期限 (待ち行列のノードが `ENOMOTO_T_MIP_TREE_START_NODES` 個たまるか、
     /// この時刻を過ぎたら渡し始める)。従は先に始めて準備 (写しからの LP・根の LP) を主の探索と並行させる。
     pool_hold: Option<Instant>,
@@ -586,6 +593,15 @@ pub(crate) struct WorkPool {
     /// 診断用: 木の探索を始めた時刻と、終わったスレッドの [`TreeProf`]。
     t0: Instant,
     prof: std::sync::Mutex<Vec<TreeProf>>,
+    /// ヒューリスティクス役 (`ENOMOTO_MIP_HEUR_ROLE`) のスレッドの数 (番号の大きい方から。0 なら役を分けない)。
+    heur_k: usize,
+    /// 全てのスレッドで最良の解 (目的値, 解)。ヒューリスティクス役のスレッドが近傍の中心に使う。`has_x` はそれがあるか。
+    best_x: std::sync::Mutex<Option<(f64, std::sync::Arc<Vec<f64>>)>>,
+    has_x: std::sync::atomic::AtomicBool,
+    /// 木の探索のスレッドが最近解いたノードの LP 解 (ヒューリスティクス役のスレッドの RINS・DINS 用)。
+    lp_x: std::sync::Mutex<Option<std::sync::Arc<Vec<f64>>>>,
+    /// 木の探索が終わった (`PoolInner::done` を錠の外で読む目安)。
+    fin: std::sync::atomic::AtomicBool,
 }
 
 /// 並列の強分岐 (`ENOMOTO_MIP_PAR_SB`) で別スレッドが解いた子の LP の結果。主が逐次と同じ順に当てはめる。
@@ -730,7 +746,17 @@ fn pool_release(pool: &WorkPool) {
     g.busy = g.busy.saturating_sub(1);
     if g.busy == 0 && g.nodes.is_empty() {
         g.done = true;
+        pool.fin.store(true, std::sync::atomic::Ordering::Release);
     }
+}
+
+/// ヒューリスティクス役のスレッドの数 (`ENOMOTO_MIP_HEUR_ROLE` のとき、スレッド数が `ENOMOTO_T_MIP_HEUR_ROLE_MIN_THREADS`
+/// (既定 4) 以上なら、スレッド数 × `ENOMOTO_T_MIP_HEUR_ROLE_FRAC` (既定 0.25) の切り捨て、最低 1。主の分は残す)。
+fn heur_role_count(threads: usize) -> usize {
+    if env_str!("ENOMOTO_MIP_HEUR_ROLE").is_none() || threads < tunable!("ENOMOTO_T_MIP_HEUR_ROLE_MIN_THREADS", 4usize, usize).max(2) {
+        return 0;
+    }
+    ((threads as f64 * tunable!("ENOMOTO_T_MIP_HEUR_ROLE_FRAC", 0.25, f64)).floor() as usize).clamp(1, threads - 1)
 }
 
 impl WorkPool {
@@ -743,6 +769,11 @@ impl WorkPool {
             race_winner: std::sync::atomic::AtomicI64::new(-1),
             t0: Instant::now(),
             prof: std::sync::Mutex::new(Vec::new()),
+            heur_k: heur_role_count(threads),
+            best_x: std::sync::Mutex::new(None),
+            has_x: std::sync::atomic::AtomicBool::new(false),
+            lp_x: std::sync::Mutex::new(None),
+            fin: std::sync::atomic::AtomicBool::new(false),
             pc: std::sync::Mutex::new(pc),
             bounds: std::sync::Mutex::new((lo, up)),
             inner: std::sync::Mutex::new(PoolInner { nodes: Vec::new(), busy: threads, done: false }),
@@ -1076,6 +1107,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         inbox_seen: 0,
         snap_stats: [0; 3],
         pool_busy: pool.is_some(),
+        heur_role_done: false,
+        heur_role_stats: [0; 3],
         pool_hold: None,
         seen_best: f64::INFINITY,
         pc_base: None,
@@ -1356,6 +1389,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     pub(super) fn time_up(&self) -> bool {
         self.deadline.is_some_and(|d| Instant::now() >= d)
             || self.pool.as_ref().is_some_and(|p| p.stop.load(std::sync::atomic::Ordering::Relaxed))
+            || ROLE_POOL.with(|r| r.borrow().as_ref().is_some_and(|p| p.stop.load(std::sync::atomic::Ordering::Relaxed) || p.fin.load(std::sync::atomic::Ordering::Relaxed)))
             || self.shared.as_ref().is_some_and(|s| {
                 s.stop.load(std::sync::atomic::Ordering::Relaxed)
                     || self.watch.is_some_and(|(trig, target)| {
@@ -1470,6 +1504,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             if !self.params.submip {
                 super::record_incumbent(z);
+            }
+            // 木を分け合う: 解そのものも共有する (ヒューリスティクス役のスレッドが近傍の中心に使う)
+            if let Some(pool) = self.pool.as_ref().filter(|p| p.heur_k > 0) {
+                let mut g = pool.best_x.lock().unwrap();
+                if g.as_ref().is_none_or(|(zb, _)| z < *zb) {
+                    *g = Some((z, std::sync::Arc::new(x.clone())));
+                    pool.has_x.store(true, std::sync::atomic::Ordering::Release);
+                }
             }
             self.incumbent = Some((z, x));
             self.root_redcost_fixing();
@@ -2294,6 +2336,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 self.tprof.sync_s += t_sync.elapsed().as_secs_f64();
             }
+            // ヒューリスティクス役 (`ENOMOTO_MIP_HEUR_ROLE`): 番号の大きい従は、解ができたら木を離れて大近傍探索を回し続ける
+            if plunge.is_none() && !first && !self.heur_role_done && self.heur_role_mine() {
+                match self.heur_role_run() {
+                    Some(true) => break,
+                    Some(false) => return self.finish_limit(MipStatus::TimeLimit, None),
+                    None => continue,
+                }
+            }
             // 目的値の二分探索で、暫定解より良い解がないことを証明した (下界が打ち切り値に届いた)
             if self.incumbent.is_some() && self.bisect_lb >= self.prune_limit() {
                 if self.params.verbose {
@@ -2706,6 +2756,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let lns_freq = if lns_time { tunable!("ENOMOTO_T_MIP_LNS_FREQ", 50u64, u64) } else { 100 };
                     // 木を分け合うときは一部のスレッドだけが大近傍探索・ダイビングを回す ([`Solver::tree_heur_allowed`])
                     let heur_ok = self.tree_heur_allowed();
+                    // ヒューリスティクス役のスレッドに、待ち行列から取ったノードの LP 解を渡す (`ENOMOTO_T_MIP_HEUR_ROLE_LPX_EVERY` ノードおき)
+                    if let Some(pool) = self.pool.as_ref().filter(|p| p.heur_k > 0) {
+                        if node.depth > 0 && plunge_depth == 0 && self.nodes % tunable!("ENOMOTO_T_MIP_HEUR_ROLE_LPX_EVERY", 8u64, u64).max(1) == 0 {
+                            *pool.lp_x.lock().unwrap() = Some(std::sync::Arc::new(x.clone()));
+                        }
+                    }
                     if heur_ok && node.depth > 0 && plunge_depth == 0 && self.incumbent.is_some() && self.nodes >= self.last_rins + lns_freq && lns_ok {
                         self.last_rins = self.nodes;
                         let t_lns = Instant::now();
@@ -3214,11 +3270,130 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// `ENOMOTO_MIP_TREE_HEUR_ALL` なら以前と同じく全スレッドが回す
     fn tree_heur_allowed(&self) -> bool {
         let Some(pool) = &self.pool else { return true };
+        // ヒューリスティクス役を分けるとき: 解があれば (役のスレッドが大近傍探索を回すので) 木の探索のスレッドは回さない
+        // (`ENOMOTO_MIP_HEUR_ROLE_TREE_LNS` なら以前と同じく回す)
+        if pool.heur_k > 0 && pool.has_x.load(std::sync::atomic::Ordering::Acquire) && env_str!("ENOMOTO_MIP_HEUR_ROLE_TREE_LNS").is_none() {
+            return false;
+        }
         if self.pool_tid == 0 || env_str!("ENOMOTO_MIP_TREE_HEUR_ALL").is_some() {
             return true;
         }
         let k = if self.has_cutoff_value() { pool.threads.div_ceil(tunable!("ENOMOTO_T_MIP_TREE_HEUR_DIV_INC", 2usize, usize).max(1)) } else { pool.threads.div_ceil(tunable!("ENOMOTO_T_MIP_TREE_HEUR_DIV_NOINC", 2usize, usize).max(1)) };
         (self.pool_tid as usize) < k
+    }
+
+    /// このスレッドがヒューリスティクス役に就くか: 役を分けていて、番号が大きい方から `heur_k` 本の従で、racing ramp-up を
+    /// 終え、共有の解があるとき。
+    fn heur_role_mine(&self) -> bool {
+        let Some(pool) = &self.pool else { return false };
+        pool.heur_k > 0 && self.snap.is_some() && self.race_done && (self.pool_tid as usize) >= pool.threads - pool.heur_k && pool.has_x.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// 共有の最良の解が自分の暫定解より良ければ取り込む (解の空間はどのスレッドも同じ。共有の最良値は既に下がっている)。
+    fn heur_role_import(&mut self, pool: &WorkPool) {
+        let got = pool.best_x.lock().unwrap().clone();
+        if let Some((z, x)) = got {
+            if self.incumbent.as_ref().is_none_or(|(zi, _)| z < *zi - 1e-9 * zi.abs().max(1.0)) {
+                self.pool_add(z, &x);
+                self.incumbent = Some((z, (*x).clone()));
+                self.heur_role_stats[2] += 1;
+            }
+        }
+    }
+
+    /// ヒューリスティクス役 (`ENOMOTO_MIP_HEUR_ROLE`): 自分の待ち行列のノードを全て共有の待ち行列に渡し (待っていない側からも
+    /// 外れる)、共有の最良の解と木の探索のスレッドが渡したノードの LP 解から ALNS の大近傍探索を回し続ける。見つけた解は
+    /// 通常どおり主に渡す ([`Self::try_incumbent`])。`ENOMOTO_T_MIP_HEUR_ROLE_PATIENCE` = P (> 0) 回続けて暫定解を良く
+    /// できなければ木の探索に戻る (`None`)。木の探索が終わったら `Some(true)`、時間切れ・止める合図なら `Some(false)`。
+    fn heur_role_run(&mut self) -> Option<bool> {
+        use std::sync::atomic::Ordering;
+        let pool = self.pool.clone()?;
+        let t_role = Instant::now();
+        let mut out = Vec::with_capacity(self.queue.len());
+        while let Some(n) = self.queue.pop_best() {
+            out.push(SnapNode::of_with_basis(&n, self.p.m));
+        }
+        self.dive_stack.clear();
+        {
+            let mut g = pool.inner.lock().unwrap();
+            g.nodes.extend(out);
+            pool.len.store(g.nodes.len(), Ordering::Relaxed);
+            if self.pool_busy {
+                g.busy -= 1;
+                self.pool_busy = false;
+            }
+            if g.busy == 0 && g.nodes.is_empty() {
+                g.done = true;
+                pool.fin.store(true, Ordering::Release);
+            }
+        }
+        if let Some(sl) = pool.slots.get(self.pool_tid as usize) {
+            sl.lb.store(f64::INFINITY.to_bits(), Ordering::Relaxed);
+            sl.open.store(0, Ordering::Relaxed);
+        }
+        self.dom.reset_to_root(self.p);
+        self.sync_lp();
+        ROLE_POOL.with(|r| *r.borrow_mut() = Some(pool.clone()));
+        let patience = tunable!("ENOMOTO_T_MIP_HEUR_ROLE_PATIENCE", 0u64, u64);
+        // 1 回のサブ MIP の時間の上限 (秒)。木の探索が終わったらサブ MIP も止まる ([`Self::time_up`])
+        let call_max = tunable!("ENOMOTO_T_MIP_HEUR_ROLE_CALL_MAX", 5.0, f64);
+        let mut fails = 0u64;
+        let res = loop {
+            if pool.fin.load(Ordering::Acquire) {
+                break Some(true);
+            }
+            if self.time_up() {
+                break Some(false);
+            }
+            self.heur_role_import(&pool);
+            let lpx = pool.lp_x.lock().unwrap().clone();
+            let x = match (lpx, &self.incumbent) {
+                (Some(x), _) => (*x).clone(),
+                (None, Some((_, x))) => x.clone(),
+                (None, None) => break None,
+            };
+            let z0 = self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z);
+            let keep = self.submip_time_max;
+            self.submip_time_max = keep.min(call_max);
+            let t = Instant::now();
+            self.alns(&x);
+            self.submip_time_max = keep;
+            let dt = t.elapsed().as_secs_f64();
+            self.lns_secs += dt;
+            self.heur_role_stats[0] += 1;
+            if self.incumbent.as_ref().is_some_and(|(z, _)| *z < z0) {
+                self.heur_role_stats[1] += 1;
+                fails = 0;
+            } else {
+                fails += 1;
+                if patience > 0 && fails >= patience {
+                    self.heur_role_done = true;
+                    break None;
+                }
+            }
+            // 近傍が作れずすぐ戻る呼び出しが続くと空回りするので少し待つ
+            if dt < 1e-3 {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        };
+        ROLE_POOL.with(|r| *r.borrow_mut() = None);
+        if prof_tree_par() || env_str!("ENOMOTO_MIP_HEUR_ROLE_VERBOSE").is_some() {
+            eprintln!(
+                "HEURROLE: tid {} {:.2}s in role ({}), {} LNS calls, {} improved, {} imported, ALNS counts {:?}",
+                self.pool_tid,
+                t_role.elapsed().as_secs_f64(),
+                match res {
+                    Some(true) => "tree done",
+                    Some(false) => "stopped",
+                    None => "back to tree",
+                },
+                self.heur_role_stats[0],
+                self.heur_role_stats[1],
+                self.heur_role_stats[2],
+                self.alns_count
+            );
+        }
+        res
     }
 
     fn local_redcost_fixing(&mut self, node_obj: f64) -> bool {
@@ -5474,6 +5649,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         };
         let pool = std::sync::Arc::new(WorkPool::new(self.params.threads, self.dom.global_lo.clone(), self.dom.global_up.clone(), self.pc.clone()));
+        if let Some((z, x)) = &self.incumbent {
+            *pool.best_x.lock().unwrap() = Some((*z, std::sync::Arc::new(x.clone())));
+            pool.has_x.store(true, std::sync::atomic::Ordering::Release);
+        }
+        if self.params.verbose && pool.heur_k > 0 {
+            eprintln!("MIP: {} of {} tree threads take the heuristic role once a solution exists", pool.heur_k, self.params.threads);
+        }
         self.tprof.workers_s = self.start.elapsed().as_secs_f64();
         if prof_tree_par() {
             eprintln!(
@@ -5732,6 +5914,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 if g.busy == 0 {
                     g.done = true;
+                    pool.fin.store(true, Ordering::Release);
                 }
                 if g.done {
                     break Ok(None);
