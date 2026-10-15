@@ -815,20 +815,19 @@ fn pool_release(pool: &WorkPool) {
     }
 }
 
-/// ヒューリスティクス役のスレッドの数 (`ENOMOTO_MIP_HEUR_ROLE` のとき、スレッド数が `ENOMOTO_T_MIP_HEUR_ROLE_MIN_THREADS`
-/// (既定 4) 以上なら、スレッド数 × `ENOMOTO_T_MIP_HEUR_ROLE_FRAC` (既定 0.25) の切り捨て、最低 1。主の分は残す)。
 fn heur_role_verbose() -> bool {
     env_str!("ENOMOTO_MIP_HEUR_ROLE_VERBOSE").is_some()
 }
 
-/// ヒューリスティクス役を起動の判定で決めるか (`ENOMOTO_MIP_HEUR_ROLE_TRIGGER`。でなければ解ができたら就く)。
+/// ヒューリスティクス役を起動の判定で決めるか (既定。`ENOMOTO_MIP_HEUR_ROLE_TRIGGER=off` なら以前の形で、解ができたら就く)。
 fn heur_trigger_mode() -> bool {
-    env_str!("ENOMOTO_MIP_HEUR_ROLE_TRIGGER").is_some()
+    env_str!("ENOMOTO_MIP_HEUR_ROLE_TRIGGER").is_none_or(|v| v != "off")
 }
 
-/// 起動の判定を、大近傍探索の限界効用の比較で行うか (`ENOMOTO_MIP_HEUR_ROLE_TRIGGER=mu`、[`Solver::mu_worth`])。
+/// 起動の判定を、大近傍探索の限界効用の比較で行うか (既定、[`Solver::mu_worth`])。`ENOMOTO_MIP_HEUR_ROLE_TRIGGER=tree` なら
+/// 以前の形 (木の完了の予測と刈れる割合のしきい値、[`TriggerEval`]) で判定する。
 fn heur_mu_mode() -> bool {
-    env_str!("ENOMOTO_MIP_HEUR_ROLE_TRIGGER").is_some_and(|v| v == "mu")
+    env_str!("ENOMOTO_MIP_HEUR_ROLE_TRIGGER").is_none_or(|v| v == "mu")
 }
 
 /// ヒューリスティクス役の起動の判定の材料 ([`Solver::heur_trigger_eval`])。
@@ -853,8 +852,14 @@ impl TriggerEval {
     }
 }
 
+/// ヒューリスティクス役のスレッドの数 (既定で使う。`ENOMOTO_MIP_NO_HEUR_ROLE` で使わない)。スレッド数が
+/// `ENOMOTO_T_MIP_HEUR_ROLE_MIN_THREADS` (既定 4) 以上なら、スレッド数 × `ENOMOTO_T_MIP_HEUR_ROLE_FRAC` (既定 0.25) の切り捨て、
+/// 最低 1。主の分は残す。
+/// MIPLIB 40 問 (4 スレッド、60 秒): 使わない 3 回 SGM 22.60/22.95/23.13 秒・解けた 24/23/23 問・主ギャップの和 3.08/3.07/3.09、
+/// 使う (限界効用・証明の寄与で判定) 22.37 秒・24 問・2.45 (bppc4-08 0.117 -> 0.019、blp-ar98 0.126 -> 0.023、cvs16r128-89
+/// 0.48 -> 0.10、qiu・noswot は時間内に解ける)
 fn heur_role_count(threads: usize) -> usize {
-    if env_str!("ENOMOTO_MIP_HEUR_ROLE").is_none() || threads < tunable!("ENOMOTO_T_MIP_HEUR_ROLE_MIN_THREADS", 4usize, usize).max(2) {
+    if env_str!("ENOMOTO_MIP_NO_HEUR_ROLE").is_some() || threads < tunable!("ENOMOTO_T_MIP_HEUR_ROLE_MIN_THREADS", 4usize, usize).max(2) {
         return 0;
     }
     ((threads as f64 * tunable!("ENOMOTO_T_MIP_HEUR_ROLE_FRAC", 0.25, f64)).floor() as usize).clamp(1, threads - 1)
@@ -3572,17 +3577,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 証明への寄与を木の探索の 1 スレッドあたりの完了率の速さ × `ENOMOTO_T_MIP_HEUR_MU_KAPPA` (既定 1) と比べる。役に
     /// 就いている間 (`in_role`) は、しきい値を `ENOMOTO_T_MIP_HEUR_MU_HYST` 倍 (既定 0.5) に下げる (起動と停止を繰り返さないように)。
     /// 観測がなければ、主解の側は価値ありとし (試して測る)、証明の側は価値なしとする。
-    /// `ENOMOTO_MIP_FOCUS` = primal / proof で、どちらの寄与で判定するかを固定できる (良い暫定解を優先するか、最適性の証明を優先するか)。
+    /// どちらの寄与で判定するかは `ENOMOTO_MIP_FOCUS` で決める: 既定 (proof) は常に証明への寄与 (木の完了率が測れるほど
+    /// 進まない問題では木の側の値が 0 になり、近傍探索の寄与が 0 でも「0 以上」として就く。bppc4-08・blp-ar98 など。木が
+    /// 進んでいて近傍探索で何も刈れない問題 (qiu) では就かない)、primal は常に主解への寄与 (良い暫定解を優先)、auto は
+    /// 案 1 の予測で切り替える。
     fn mu_worth(&self, ev: &TriggerEval, in_role: bool) -> bool {
         let Some(pool) = &self.pool else { return false };
         let mu = *pool.mu.lock().unwrap();
         let h = if in_role { tunable!("ENOMOTO_T_MIP_HEUR_MU_HYST", 0.5, f64) } else { 1.0 };
-        // `ENOMOTO_MIP_FOCUS`: primal なら常に主解への寄与で、proof なら常に証明への寄与で判定する (既定は案 1 の予測で切り替える)
         let focus = env_str!("ENOMOTO_MIP_FOCUS");
         let primal_side = match focus.as_deref() {
             Some("primal") => true,
-            Some("proof") => false,
-            _ => ev.est > ev.left,
+            Some("auto") => ev.est > ev.left,
+            _ => false,
         };
         let thr_p = h * tunable!("ENOMOTO_T_MIP_HEUR_MU_PRIMAL", 0.002, f64);
         if primal_side && focus.as_deref() == Some("primal") {
@@ -3613,7 +3620,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// ヒューリスティクス役 (`ENOMOTO_MIP_HEUR_ROLE`): 自分の待ち行列のノードを全て共有の待ち行列に渡し (待っていない側からも
     /// 外れる)、共有の最良の解と木の探索のスレッドが渡したノードの LP 解から ALNS の大近傍探索を回し続ける。見つけた解は
-    /// 通常どおり主に渡す ([`Self::try_incumbent`])。`ENOMOTO_T_MIP_HEUR_ROLE_PATIENCE` = P (> 0) 回続けて暫定解を良く
+    /// 通常どおり主に渡す ([`Self::try_incumbent`])。`ENOMOTO_T_MIP_HEUR_ROLE_PATIENCE` = P (既定 20、0 なら戻らない) 回続けて暫定解を良く
     /// できなければ木の探索に戻る (`None`)。木の探索が終わったら `Some(true)`、時間切れ・止める合図なら `Some(false)`。
     fn heur_role_run(&mut self) -> Option<bool> {
         use std::sync::atomic::Ordering;
@@ -3646,7 +3653,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.dom.reset_to_root(self.p);
         self.sync_lp();
         ROLE_POOL.with(|r| *r.borrow_mut() = Some(pool.clone()));
-        let patience = tunable!("ENOMOTO_T_MIP_HEUR_ROLE_PATIENCE", 0u64, u64);
+        let patience = tunable!("ENOMOTO_T_MIP_HEUR_ROLE_PATIENCE", 20u64, u64);
         // 1 回のサブ MIP の時間の上限 (秒)。木の探索が終わったらサブ MIP も止まる ([`Self::time_up`])
         let call_max = tunable!("ENOMOTO_T_MIP_HEUR_ROLE_CALL_MAX", 5.0, f64);
         let mut fails = 0u64;
