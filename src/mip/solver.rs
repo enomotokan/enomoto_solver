@@ -765,6 +765,10 @@ struct MuStats {
     proof: Option<f64>,
     primal: Option<f64>,
     n: u64,
+    /// 主解への寄与のうち、木の探索を始めてからの観測だけの平均と、その数 (根の実績は大きく出すぎるので、証明寄りの判定
+    /// (`ENOMOTO_MIP_FOCUS` が primal 以外) ではこちらを使う)。
+    primal_tree: Option<f64>,
+    n_tree: u64,
 }
 
 impl MuStats {
@@ -775,6 +779,11 @@ impl MuStats {
         }
         self.primal = Some(self.primal.map_or(primal, |v| l * v + (1.0 - l) * primal));
         self.n += 1;
+        // 根の実績 (証明への寄与なし) は木の探索の観測に数えない
+        if proof.is_some() {
+            self.primal_tree = Some(self.primal_tree.map_or(primal, |v| l * v + (1.0 - l) * primal));
+            self.n_tree += 1;
+        }
     }
 }
 
@@ -3575,8 +3584,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
             Some("proof") => false,
             _ => ev.est > ev.left,
         };
-        if primal_side {
-            mu.primal.is_none_or(|v| v >= h * tunable!("ENOMOTO_T_MIP_HEUR_MU_PRIMAL", 0.002, f64))
+        let thr_p = h * tunable!("ENOMOTO_T_MIP_HEUR_MU_PRIMAL", 0.002, f64);
+        if primal_side && focus.as_deref() == Some("primal") {
+            // 良い暫定解を優先: 根の実績も事前の値に使い、観測がなければ試す
+            mu.primal.is_none_or(|v| v >= thr_p)
+        } else if primal_side {
+            // 既定 (証明寄り): 木の探索を始めてからの大近傍探索の観測が `ENOMOTO_T_MIP_HEUR_MU_MIN_OBS` (既定 3) 回以上あり、
+            // その平均がしきい値以上のときだけ (木のノードが暫定解を良くしていて大近傍探索が効かない問題 (qiu) では就かない)
+            mu.n_tree >= tunable!("ENOMOTO_T_MIP_HEUR_MU_MIN_OBS", 3u64, u64) && mu.primal_tree.is_some_and(|v| v >= thr_p)
         } else {
             let tree = (pool.threads - pool.in_role.load(std::sync::atomic::Ordering::Relaxed)).max(1) as f64;
             let vt = ev.v / tree;
