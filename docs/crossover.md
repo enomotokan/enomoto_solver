@@ -248,6 +248,9 @@ Netlib・Kennington・scpm1 など内点法が勝つ問題の因子はこれよ�
 (`crossover::solve_ipm_crossover`、節目 `xo_dualized`)。Newton 系の次元が行数から構造列数に減る (supportcase10: 105,209 → 8,955、
 nnz(L) 1,614 万・設定 2.2 秒)。仕上げの単体法の最適基底の行の双対 `π` から `x'_j = -π_j` で元の解を戻し、元の問題の制約を
 満たさなければ元の問題を内点法で解く (`xo_dualized_failed`)。`ENOMOTO_T_XO_DUALIZE=0` で双対化しない。
+双対 LP は内点法の前に行・列を幾何平均でそろえてから平衡化する (`ENOMOTO_T_XO_DUALIZE_IPM_PC`、既定 3、0 でそろえない。
+双対化しない問題の `ENOMOTO_T_XO_IPM_PC` は既定 0 のまま)。physiciansched3-3 で内点法 96 → 55 反復
+(`analysis/physiciansched3_ipm_20261015.md`)。
 
 | 内点法 + クロスオーバー単独 (600 秒、`benchmarks/crossover/ab14/`) | 双対化なし | 双対化 |
 |---|---|---|
