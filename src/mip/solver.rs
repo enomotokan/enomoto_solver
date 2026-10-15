@@ -3600,9 +3600,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // その平均がしきい値以上のときだけ (木のノードが暫定解を良くしていて大近傍探索が効かない問題 (qiu) では就かない)
             mu.n_tree >= tunable!("ENOMOTO_T_MIP_HEUR_MU_MIN_OBS", 3u64, u64) && mu.primal_tree.is_some_and(|v| v >= thr_p)
         } else {
+            // 既定 (proof): (a) 大近傍探索の証明への寄与が正で、木の探索の 1 スレッドあたりの完了率の速さ × κ 以上か、
+            // (b) 木が停滞している (完了の予測が残り時間の `ENOMOTO_T_MIP_HEUR_MU_STAGNANT` 倍 (既定 4) 以上。役の間は
+            // その `ENOMOTO_T_MIP_HEUR_MU_HYST` 倍) ときに、木の中の大近傍探索の観測がまだ少ないか、主解への寄与がしきい値以上なら
+            // 就く。以前は (a) を「0 以上」で判定していて、木の完了率が測れるほど進まないときだけ 0 >= 0 で就いていた (少しでも
+            // 進むと就かず、cvs16r128-89 で 2 回目は一度も就かなかった)。qiu は予測が残り時間の約 2 倍で (b) に当たらない
             let tree = (pool.threads - pool.in_role.load(std::sync::atomic::Ordering::Relaxed)).max(1) as f64;
             let vt = ev.v / tree;
-            mu.proof.is_some_and(|v| v >= h * tunable!("ENOMOTO_T_MIP_HEUR_MU_KAPPA", 1.0, f64) * vt)
+            let proof_ok = mu.proof.is_some_and(|v| v > 0.0 && v >= h * tunable!("ENOMOTO_T_MIP_HEUR_MU_KAPPA", 1.0, f64) * vt);
+            let stagnant = ev.est >= h * tunable!("ENOMOTO_T_MIP_HEUR_MU_STAGNANT", 4.0, f64) * ev.left;
+            let primal_ok = mu.n_tree < tunable!("ENOMOTO_T_MIP_HEUR_MU_MIN_OBS", 3u64, u64) || mu.primal_tree.is_some_and(|v| v >= thr_p);
+            proof_ok || (stagnant && primal_ok)
         }
     }
 
