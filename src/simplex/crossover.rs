@@ -698,6 +698,12 @@ pub(super) fn solve_ipm_crossover(std: &StdForm) -> Option<SimplexResult> {
             return None;
         }
     }
+    // 診断用 (`ENOMOTO_DEBUG_XO_POINT_LOAD=ファイル`): 双対化しない問題でも、前に書き出した点を読んで内点法を飛ばす
+    // (`ENOMOTO_DEBUG_XO_POINT_SAVE` で書き出したもの。大きさが合わなければ普通に解く)。
+    if let Some((x, y)) = env_str!("ENOMOTO_DEBUG_XO_POINT_LOAD").and_then(|f| load_point(&f, std.n_total, std.n_rows)) {
+        let secs = env_str!("ENOMOTO_DEBUG_XO_POINT_SECS").and_then(|v| v.parse().ok()).unwrap_or(1e6);
+        return solve_ipm_crossover_with(std, &XoOptions { given_point: Some((&x, &y, secs)), ..Default::default() });
+    }
     solve_ipm_crossover_with(std, &XoOptions::default())
 }
 
@@ -1088,6 +1094,13 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     // 頂点の採用判定の射影 (`ENOMOTO_T_XO_ACCEPT_PROJ`) で最適分割を推定するのに使う内点法の主の点 (押し出しの前)。
     let x_ipm_saved = (tunable!("ENOMOTO_T_XO_ACCEPT_PROJ", 0u8, u8) != 0).then(|| x.clone());
     let mut y = ipm.y;
+    // 診断用 (`ENOMOTO_DEBUG_XO_POINT_SAVE=ファイル`): 双対化しない問題の内点法の点を書き出す (`ENOMOTO_DEBUG_XO_POINT_LOAD` で読む)。
+    if xo.given_point.is_none() && !xo.ipm_point_only {
+        if let Some(f) = env_str!("ENOMOTO_DEBUG_XO_POINT_SAVE") {
+            let bytes: Vec<u8> = x.iter().chain(y.iter()).flat_map(|v| v.to_le_bytes()).collect();
+            let _ = std::fs::write(f, bytes);
+        }
+    }
     if xo.ipm_point_only {
         XO_IPM_POINT.with(|p| *p.borrow_mut() = Some((x, y, ipm_secs)));
         return None;
@@ -1854,6 +1867,23 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
         sel = BasisSelector::new(m, n);
         sel.row_cnt = row_cnt;
         st.li_from_b = 0;
+        // どの候補にもマッチしなかった行は、最後に足りない行のスラックで埋まる。そのスラックを先に入れておく
+        // (`ENOMOTO_T_XO_LI_MATCH_SLACK_FIRST`、既定 1、0 で従来どおり最後に埋める)。後から埋めると、マッチしなかった行の候補の
+        // 成分が消去のたびに L の列に残って積み上がる (neos3: 51 万行のうち 22.8 万行がマッチせず、消去 39 億回・nnz(L) 1.1 億で
+        // 60 秒。先に入れると三角の部分の消去が要らない)。
+        if tunable!("ENOMOTO_T_XO_LI_MATCH_SLACK_FIRST", crate::params::crossover::LI_MATCH_SLACK_FIRST, u8) != 0 {
+            let mut matched = vec![false; m];
+            for &(_, pref) in &ord {
+                if let Some(r) = pref {
+                    matched[r] = true;
+                }
+            }
+            for i in 0..m {
+                if !matched[i] && sel.try_add(n_orig + i, col(std, n_orig + i)) {
+                    st.li_slack += 1;
+                }
+            }
+        }
         for &(j, pref) in &ord {
             if sel.full() {
                 break;
@@ -1944,7 +1974,7 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     let mut lu = factorize_basis(std, &basis_pos, None)?;
     // 基底に選ばれず、境界から離れたまま残った基底候補 (超基底変数)。今は上で近い方の境界へ移した
     // 扱いにしてあり、Megiddo 式の押し出しが有効なら、そこから主実行可能性を保って境界へ押し出す。
-    let leftover: Vec<usize> = (0..n)
+    let mut leftover: Vec<usize> = (0..n)
         .filter(|&j| {
             ps[j] == PStat::Basic
                 && basis_pos[j].is_none()
@@ -1955,6 +1985,22 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
                 }
         })
         .collect();
+    // 押し出す順 (`ENOMOTO_T_XO_MEGIDDO_ORDER`): 0 = 列番号の順、1 = 境界までの距離の小さい順、2 = 大きい順、
+    // 3 = 距離 / |s_j| の大きい順 (IPX は内点法の重みの大きい順に押し出す)、4 = 小さい順 (既定)。基底らしくない (境界に近く、
+    // 被約費用の大きい) 列から押し出すと、自身の境界で止まる列が増え、基底を入れ替えても FTRAN が疎なまま進む (第 64 回:
+    // savsched1 の超基底 20.4 万本で、列番号の順はピボット 12.5 万・FTRAN の平均非零 11,496、4 は 11.4 万・4,768 で押し出しが
+    // 約 1.5 倍速い。3 は 15.7 万・14,155 で遅い。neos-5251015 では 1 が列番号の順より遅く (115 → 145 秒)、4 は 105 秒)。
+    let order = tunable!("ENOMOTO_T_XO_MEGIDDO_ORDER", crate::params::crossover::MEGIDDO_ORDER, u8);
+    match order {
+        1 | 2 => {
+            let dist = |j: usize| (x[j] - std.lb[j]).min(std.ub[j] - x[j]);
+            let o = order;
+            leftover.sort_by(|&a, &b| if o == 1 { dist(a).total_cmp(&dist(b)) } else { dist(b).total_cmp(&dist(a)) });
+        }
+        3 => leftover.sort_by(|&a, &b| li_score(b).total_cmp(&li_score(a))),
+        4 => leftover.sort_by(|&a, &b| li_score(a).total_cmp(&li_score(b))),
+        _ => {}
+    }
     crate::phase_timing::record("xo_leftover", leftover.len() as f64);
     if debug {
         eprintln!("CROSSOVER leftover superbasics={} (|B|-m after primal push={})", leftover.len(), st.basic_after_push as i64 - m as i64);
@@ -2108,7 +2154,7 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
             // - 試験用 `ENOMOTO_T_XO_ACCEPT_PROJ=1`: 最適面への射影 (Mehrotra–Ye)。内点法の点から上下限の間にあると推定した
             //   変数と、頂点で上下限の間にある基底変数の集合 S について、`A_Sᵀ (y_ipm + Δ) = c_S` を満たす最小ノルムの Δ
             //   (`Δ = A_S w`、`(A_Sᵀ A_S + εI) w = d_S`) で y を射影する。
-            if accept_gap > 0.0 && gap > accept_gap && (yfix || implied || x_ipm_saved.is_some()) {
+            if accept_gap > 0.0 && gap > accept_gap && (yfix || implied || x_ipm_saved.is_some() || tunable!("ENOMOTO_T_XO_ACCEPT_YB", crate::params::crossover::ACCEPT_YB, u8) != 0) {
                 let bnds = implied.then(|| implied_bounds(std, 3));
                 let (lbs, ubs): (&[f64], &[f64]) = match &bnds {
                     Some((l, u)) => (l, u),
@@ -2161,11 +2207,15 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
                         }
                     }
                 }
-                if implied && gap > accept_gap {
+                // 頂点の基底の双対 y_B (`B^T y = c_B`) でも測る (`ENOMOTO_T_XO_ACCEPT_YB`、既定 1、0 で試験用の `IMPLIED` のときだけ)。
+                // 基底が双対実行可能なら L(y_B) は頂点の目的値そのもので、最適な基底をそのまま受理できる。内点法が同時実行の
+                // 二段解法の下界で早く打ち切られた (neos-5251015: 4 反復) ときは y_ipm の下界が粗く (判定ギャップ 286)、最適な基底でも
+                // 受理されずに双対の押し出しに進み、それが基底を崩して仕上げが 900 秒で終わらないことがあった。
+                if (implied || tunable!("ENOMOTO_T_XO_ACCEPT_YB", crate::params::crossover::ACCEPT_YB, u8) != 0) && gap > accept_gap {
                     let cb: Vec<f64> = basis.iter().map(|&j| std.c[j]).collect();
                     let mut yb = vec![0.0; m];
                     lu.solve_transpose_into(&cb, &mut scratch, &mut yb);
-                    try_y("y_B, implied bounds", &yb, &mut gap);
+                    try_y(if implied { "y_B, implied bounds" } else { "y_B" }, &yb, &mut gap);
                 }
                 crate::phase_timing::record("xo_vertex_gap_fix", gap);
             }
@@ -3181,6 +3231,9 @@ fn megiddo_push(
     // (照合でも x_B の誤差は拾えるので、こちらは誤差が大きいときの安全網)。
     let xb_tol = tunable!("ENOMOTO_T_XO_MEGIDDO_XB_TOL", crate::params::slope_intercept_dual::XB_DRIFT_TOL_MAX, f64);
     let (mut nverify, mut nxb) = (0usize, 0usize);
+    let btran_u_only = tunable!("ENOMOTO_T_XO_MEGIDDO_BTRAN_U", crate::params::crossover::MEGIDDO_BTRAN_U, u8) != 0;
+    // 診断用 (`ENOMOTO_DEBUG_XO_TILDE=k`): 最初の k 回のピボットで、`e_tilde · a_tilde` と BTRAN 全体の行の値を並べて出す。
+    let mut tilde_check: usize = env_str!("ENOMOTO_DEBUG_XO_TILDE").and_then(|v| v.parse().ok()).unwrap_or(0);
     let mut kernel = BasisKernel::new(m, ft_max);
     let mut d = vec![0.0; m];
     let mut rho = vec![0.0; m];
@@ -3309,8 +3362,22 @@ fn megiddo_push(
             if let (Some(r), true) = (blk, t.is_finite()) {
                 // `rho` は FT 更新の `e_tilde` の記録にも使う (この後で因子を変えないので、そのまま更新に使える)。
                 let tq = Instant::now();
-                kernel.btran_row(&lu, r, &mut rho);
-                let ok = !verify || retried || kernel.pivot_agrees(&lu, col(std, j), &rho, d[r]);
+                // 照合の行の値は `e_tilde · a_tilde` で求め、BTRAN は FT 更新に要る `U^T` 段だけにする
+                // (`ENOMOTO_T_XO_MEGIDDO_BTRAN_U`、既定 1、0 で従来の BTRAN 全体。値は丸め誤差の範囲で同じ)。
+                let ok = if btran_u_only {
+                    kernel.btran_row_e_tilde(&lu, r);
+                    if tilde_check > 0 {
+                        tilde_check -= 1;
+                        let at = kernel.alpha_row_tilde();
+                        kernel.btran_row(&lu, r, &mut rho);
+                        let ar: f64 = col(std, j).iter().map(|&(i, a)| a * rho[i]).sum();
+                        eprintln!("CROSSOVER megiddo tilde check: alpha_col={:.6e} rho.a={ar:.6e} e~.a~={at:.6e} upd={}", d[r], lu.update_count());
+                    }
+                    !verify || retried || kernel.pivot_agrees_tilde(&lu, d[r])
+                } else {
+                    kernel.btran_row(&lu, r, &mut rho);
+                    !verify || retried || kernel.pivot_agrees(&lu, col(std, j), &rho, d[r])
+                };
                 prof[1] += tq.elapsed().as_secs_f64();
                 if !ok {
                     let tq = Instant::now();

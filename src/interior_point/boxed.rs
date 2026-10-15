@@ -605,6 +605,12 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
     let solve_acc = tunable!("ENOMOTO_T_IPM_SOLVE_ACC", 0.0f64, f64);
     let solve_acc_bump = tunable!("ENOMOTO_T_IPM_SOLVE_ACC_BUMP", 100.0f64, f64);
     let solve_acc_min = tunable!("ENOMOTO_T_IPM_SOLVE_ACC_MIN", 1e-11f64, f64);
+    // 高精度化の段 (停止基準に達した後) だけで使う `ENOMOTO_T_IPM_SOLVE_ACC` の値 (`ENOMOTO_T_IPM_PUSH_SOLVE_ACC`、既定 1e-6、
+    // 0 で使わない)。停止基準に達するまでの経路は変えない。高精度化の段では正則化が下限 (1e-13) にあり、正規方程式の求解が
+    // 破綻しても (neos3: 相対残差 4e76) その方向で歩いて残差が非有限になり、高精度化を 1 反復目で打ち切っていた。正則化を
+    // 強めて同じ点で解き直すと、ギャップ 1.1e-10 → 5.5e-13 まで進み、頂点を下界で確かめる判定 (相対 1e-8) に通る
+    // (直さないと 2.2e-8 で通らず、仕上げの単体法が 600 秒で終わらない)。
+    let push_solve_acc = tunable!("ENOMOTO_T_IPM_PUSH_SOLVE_ACC", crate::params::interior_point::BOX_PUSH_SOLVE_ACC, f64);
     let mut acc_retries = 0usize;
     let aug_on_inacc = tunable!("ENOMOTO_T_IPM_AUG_ON_INACCURATE", 1e-6f64, f64);
     let aug_on_inacc_any = tunable!("ENOMOTO_T_IPM_AUG_ON_INACCURATE_ANY", 0u8, u8) != 0;
@@ -981,7 +987,8 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
         // 試験用 (`ENOMOTO_T_IPM_SOLVE_ACC=t`): 予測子の Newton 系の (反復改良後の) 相対残差が t を超えたら (分解の精度が
         // 足りない: ken-18 は 30 反復目から 1e-5〜1e2 になり、方向が意味をなさず 35 反復空回りした)、この反復を捨てて
         // ρ・δ を `ENOMOTO_T_IPM_SOLVE_ACC_BUMP` 倍 (下限 `ENOMOTO_T_IPM_SOLVE_ACC_MIN`) に強めて同じ点で解き直す。
-        if solve_acc > 0.0 && solve_rel > solve_acc && acc_retries < 5 && sol_aff.iter().all(|v| v.is_finite()) {
+        let acc_tol = if pushing && push_solve_acc > 0.0 { if solve_acc > 0.0 { solve_acc.min(push_solve_acc) } else { push_solve_acc } } else { solve_acc };
+        if acc_tol > 0.0 && solve_rel > acc_tol && acc_retries < 5 && sol_aff.iter().all(|v| v.is_finite()) {
             acc_retries += 1;
             rho = (rho * solve_acc_bump).max(solve_acc_min);
             delta = (delta * solve_acc_bump).max(solve_acc_min);

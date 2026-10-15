@@ -1136,6 +1136,9 @@ pub(crate) mod interior_point {
     /// 戻らないことがある (wood1p: 29 反復目で主残差 2e-10 → 30 反復目 1.7e-2、以後 200 反復まで回る)。
     pub(crate) const BOX_BLOWUP: f64 = 1e3;
     pub(crate) const BOX_BLOWUP_NEAR: f64 = 1e3;
+    /// 高精度化の段 (停止基準に達した後) で、予測子の Newton 系の相対残差がこれを超えたら正則化を強めて同じ点で解き直す
+    /// (`ENOMOTO_T_IPM_PUSH_SOLVE_ACC`、0 で使わない。neos3: 相対残差 4e76 の方向で歩いて高精度化が 1 反復目で破綻していた)。
+    pub(crate) const BOX_PUSH_SOLVE_ACC: f64 = 1e-6;
 
     /// 停止判定 (主・双対残差と双対ギャップ) の絶対許容誤差。
     pub(crate) const EPS_ABS: f64 = 1e-8;
@@ -1230,4 +1233,17 @@ pub(crate) mod mip {
 pub(crate) mod alloc {
     /// このバイト数未満のメモリブロックは mimalloc に、以上はシステムアロケータに割り当てる。
     pub(crate) const MIMALLOC_SIZE_LIMIT: usize = 4 * 1024;
+}
+
+/// 内点法 + クロスオーバー (`simplex::crossover`) の既定値 (第 64 回以降の追加分。以前の値は `crossover.rs` の `prm`)。
+pub(crate) mod crossover {
+    /// マッチングの順で基底を選び直すとき、マッチしなかった行のスラックを先に入れるか (`ENOMOTO_T_XO_LI_MATCH_SLACK_FIRST`。
+    /// neos3: 基底の選択 60 → 0.14 秒)。
+    pub(crate) const LI_MATCH_SLACK_FIRST: u8 = 1;
+    /// Megiddo 式の押し出しの順 (`ENOMOTO_T_XO_MEGIDDO_ORDER`。4 = 境界までの距離 / |s_j| の小さい順)。
+    pub(crate) const MEGIDDO_ORDER: u8 = 4;
+    /// 押し出しの照合の BTRAN を `U^T` 段だけにする (`ENOMOTO_T_XO_MEGIDDO_BTRAN_U`。savsched1: BTRAN 120 → 9 秒)。
+    pub(crate) const MEGIDDO_BTRAN_U: u8 = 1;
+    /// 頂点の判定で基底の双対 y_B も試す (`ENOMOTO_T_XO_ACCEPT_YB`。neos-5251015)。
+    pub(crate) const ACCEPT_YB: u8 = 1;
 }

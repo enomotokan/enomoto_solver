@@ -384,6 +384,29 @@ impl BasisKernel {
         self.e_tilde_row = Some(r);
     }
 
+    /// ピボット行の BTRAN のうち FT 更新に要る `e_tilde` だけを求める ([`sparse_lu::FtLu::solve_transpose_unit_e_tilde`])。
+    /// `B^-T e_r` は求めない (行の値が要らない主の押し出し用)。照合は [`Self::pivot_agrees_tilde`]。
+    pub(super) fn btran_row_e_tilde(&mut self, lu: &sparse_lu::FtLu, r: usize) {
+        lu.solve_transpose_unit_e_tilde(r, &mut self.e_tilde, &mut self.btran_work);
+        self.e_tilde_row = Some(r);
+    }
+
+    /// [`Self::pivot_agrees`] を、行の値 `e_tilde · a_tilde` (直前の [`Self::ftran_col`] と [`Self::btran_row_e_tilde`] の記録)
+    /// で行う。
+    pub(super) fn pivot_agrees_tilde(&self, lu: &sparse_lu::FtLu, alpha_col: f64) -> bool {
+        !pivot_values_disagree(lu, self.alpha_row_tilde(), alpha_col)
+    }
+
+    /// 行の値 `e_tilde · a_tilde`。
+    pub(super) fn alpha_row_tilde(&self) -> f64 {
+        // `a_tilde` の配列には記録の外に前回までの値が残りうる (FT 更新は記録した位置しか読まない) ので、記録があればその位置で取る。
+        if let Some(idx) = self.ftrack.a_tilde.indices() {
+            return idx.iter().map(|&q| self.e_tilde[q] * self.a_tilde[q]).sum();
+        }
+        // `e_tilde` の位置の記録は重複を含みうるので使わない。
+        self.e_tilde.iter().zip(&self.a_tilde).map(|(e, a)| e * a).sum()
+    }
+
     /// [`Self::btran_row`] に、続く融合 FTRAN (DSE の `tau = B^-1 rho`) のための非ゼロステップの
     /// 記録 `steps` を加えたもの (疎経路なら超疎版。`out` の約束は [`Self::btran_row`] と同じ)。結果はどちらもビット一致。
     #[inline]
