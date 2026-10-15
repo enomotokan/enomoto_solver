@@ -914,6 +914,8 @@ pub(super) struct CutJob {
     pub(super) heavy: bool,
     /// 結果: 最後の LP のカットの行 (係数, 下限, 上限)、目的値 (offset 込み)、ラウンド数
     pub(super) out: std::sync::Mutex<Option<(Vec<(Vec<(usize, f64)>, f64, f64)>, f64, usize)>>,
+    /// 途中の LP 解 (ラウンドごとに更新)。`ENOMOTO_MIP_BG_CUTS_SHARE_X` なら主の根のヒューリスティクスが使う
+    pub(super) latest_x: std::sync::Mutex<Option<Vec<f64>>>,
 }
 
 /// カットを強める求解のスレッド。落とすと止めの合図を出して終わりを待つ (主が途中で戻っても残らないように)。
@@ -1772,7 +1774,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.snap.is_none() && !self.params.submip && self.params.threads > 1 && env_str!("ENOMOTO_MIP_NO_CUTS").is_none() && !self.fractional(&self.lp.col_values()).is_empty() {
             let bg_mode = env_str!("ENOMOTO_MIP_BG_CUTS").or(if env_str!("ENOMOTO_MIP_NO_BG_CUTS").is_none() { Some("1") } else { None });
             if let Some(mode) = bg_mode {
-                let job = std::sync::Arc::new(CutJob { stop: std::sync::atomic::AtomicBool::new(false), heavy: mode == "heavy", out: std::sync::Mutex::new(None) });
+                let job = std::sync::Arc::new(CutJob { stop: std::sync::atomic::AtomicBool::new(false), heavy: mode == "heavy", out: std::sync::Mutex::new(None), latest_x: std::sync::Mutex::new(None) });
                 let snap = self.make_snapshot(&Portfolio::new(), &mut None, false);
                 let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());
                 let threads = tunable!("ENOMOTO_T_MIP_BG_CUTS_THREADS", (self.params.threads - 1).max(1), usize);
@@ -1791,8 +1793,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         // 根のヒューリスティクス
+        // `ENOMOTO_MIP_BG_CUTS_SHARE_X`: カットを強める求解の途中の LP 解を、各ヒューリスティクスの前に受け取って使う
+        let share_x = bg_cuts.is_some() && env_str!("ENOMOTO_MIP_BG_CUTS_SHARE_X").is_some();
+        let mut shared_x_used = 0usize;
         {
-            let x = self.lp.col_values();
+            #[allow(unused_mut)]
+            let mut x = self.lp.col_values();
             self.noinc_root_frac = self.fractional(&x).len();
             // 並列モード: サブ MIP を使うヒューリスティクスは別スレッドで解かせる
             self.parallel_submips = mip_threads() > 1 && !self.params.submip;
@@ -1857,6 +1863,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                                 eprintln!("MIP: root heuristic {}: skipped (no solution before the restart)", $name);
                             }
                         } else {
+                            if share_x {
+                                if let Some(nx) = bg_cuts.as_ref().and_then(|b| b.job.latest_x.lock().unwrap().take()) {
+                                    if nx.len() == x.len() {
+                                        x = nx;
+                                        shared_x_used += 1;
+                                    }
+                                }
+                            }
                             let t = Instant::now();
                             // 近さ ([`Solver::heur_close`]) を記録しない関数 (旧来の RENS など) を見分けるため負にしておく
                             self.heur_close = -1.0;
@@ -2017,6 +2031,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.parallel_submips = false;
                     self.join_submips(0);
                 }
+                if self.params.verbose && share_x {
+                    eprintln!("MIP: root heuristics used {shared_x_used} LP solutions from the background cuts");
+                }
                 if self.params.verbose {
                     eprintln!("MIP: after root heuristics: incumbent {:?} ({:.2}s)", self.incumbent.as_ref().map(|(z, _)| *z), self.start.elapsed().as_secs_f64());
                 }
@@ -2069,6 +2086,25 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         root_obj = new;
                         if !self.params.submip {
                             super::record_root_bound(new);
+                        }
+                        // `ENOMOTO_MIP_BG_CUTS_REHEUR`: 置き換えた LP の解で軽いヒューリスティクスをもう一度回す (`1`: 丸めだけ、
+                        // `rins`: 丸めと、暫定解があれば RINS も)
+                        if let Some(mode) = env_str!("ENOMOTO_MIP_BG_CUTS_REHEUR") {
+                            let x2 = self.lp.col_values();
+                            if !self.fractional(&x2).is_empty() {
+                                let t1 = Instant::now();
+                                let z0 = self.incumbent.as_ref().map(|(z, _)| *z);
+                                let a = self.simple_rounding(&x2);
+                                let b = self.zi_round(&x2);
+                                let c = mode == "rins" && self.incumbent.is_some() && self.rins(&x2);
+                                if self.params.verbose {
+                                    eprintln!(
+                                        "MIP: background cuts: heuristics on the new LP solution: rounding {a} ZI {b} RINS {c}, incumbent {z0:?} -> {:?} ({:.2}s)",
+                                        self.incumbent.as_ref().map(|(z, _)| *z),
+                                        t1.elapsed().as_secs_f64()
+                                    );
+                                }
+                            }
                         }
                     } else {
                         // 戻す

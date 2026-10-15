@@ -306,6 +306,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 continue;
             }
             let obj = self.lp.objective();
+            if let Some(j) = &job {
+                *j.latest_x.lock().unwrap() = Some(self.lp.col_values());
+            }
             if dbg_sep {
                 eprintln!(
                     "SEP round {round}: cands {ncands} (nnz {cand_nnz}) pool {pool_secs:.3}s select {sel_secs:.3}s add_rows {add_secs:.3}s LP {:.3}s ({} iters, {:.1} us/iter)",
