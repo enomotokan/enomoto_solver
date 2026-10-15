@@ -53,7 +53,8 @@ class Solution:
     属性:
         status: ``"optimal"`` / ``"infeasible"`` / ``"unbounded"`` /
             ``"infeasible_or_unbounded"`` / ``"not_solved"`` のいずれか。
-            整数最適化ではさらに ``"time_limit"`` / ``"node_limit"`` (上限で打ち切り。暫定解があれば値が読める)。
+            制限時間で打ち切ると ``"time_limit"`` (整数最適化では暫定解があれば値が読める)、整数最適化ではさらに
+            ``"node_limit"``。
         objective: 解の目的値 (``"optimal"``、または打ち切り時に暫定解があるとき。それ以外は None)。
         node_limit_hit: 整数最適化でノード数上限により打ち切られたか (最適性は未証明)。
         best_bound: 整数最適化で証明済みの最良の限界 (最小化なら下界)。LP では None。
@@ -173,6 +174,9 @@ class Model:
         ``z^1 < 0`` のとき、切片問題 (段階 B の問題) の変数を整数に制限した問題を解き、実行可能解があれば
         ``"unbounded"``、実行不能なら ``"infeasible"`` を返す (False なら ``"infeasible_or_unbounded"``)。
         ``"not_solved"`` はソルバーが判定に至らずに諦めたことを表す。
+
+        ``time_limit`` (秒): 制限時間。LP では、期限までに結論が出なければ status ``"time_limit"`` で返す
+        (前処理の途中では止まらないので、前処理が長い問題では少し超えることがある)。
 
         整数最適化の打ち切り条件: ``time_limit`` (秒)、``mip_rel_gap`` (相対ギャップ、既定 0)、
         ``node_limit`` (ノード数)。上限で止まると status は ``"time_limit"`` / ``"node_limit"`` になり、

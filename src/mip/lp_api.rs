@@ -6,16 +6,19 @@ use crate::simplex::mip_lp::{InteriorPoint, LuSnapshot, TwoStageLp, TwoStageStat
 use std::borrow::Cow;
 
 /// 分枝限定法が使う LP の操作。
-pub trait MipLp: Clone {
-    type State: Clone;
+pub trait MipLp: Clone + Send {
+    type State: Clone + Send;
     fn new(col_lo: &[f64], col_up: &[f64], cost: &[f64], rows: &[Vec<(usize, f64)>], row_lo: &[f64], row_up: &[f64]) -> Self;
     fn num_rows(&self) -> usize;
     fn total_iterations(&self) -> u64;
+    /// 反復の累計を書き戻す (予算の数え方に入れたくない求解の分を戻す)。
+    fn set_total_iterations(&mut self, v: u64);
     fn col_bounds(&self, j: usize) -> (f64, f64);
     fn row_bounds(&self, i: usize) -> (f64, f64);
     fn row(&self, i: usize) -> Vec<(usize, f64)>;
     fn set_col_bounds(&mut self, j: usize, lo: f64, up: f64);
     fn set_costs(&mut self, c: &[f64]);
+    fn costs(&self) -> Vec<f64>;
     fn add_rows(&mut self, rows: &[(Vec<(usize, f64)>, f64, f64)]);
     fn delete_rows(&mut self, remove: &[bool]);
     fn basis(&self) -> Basis;
@@ -78,11 +81,13 @@ macro_rules! forward_impl {
             }
             fn num_rows(&self) -> usize { <$t>::num_rows(self) }
             fn total_iterations(&self) -> u64 { <$t>::total_iterations(self) }
+            fn set_total_iterations(&mut self, v: u64) { <$t>::set_total_iterations(self, v) }
             fn col_bounds(&self, j: usize) -> (f64, f64) { <$t>::col_bounds(self, j) }
             fn row_bounds(&self, i: usize) -> (f64, f64) { <$t>::row_bounds(self, i) }
             fn row(&self, i: usize) -> Vec<(usize, f64)> { <$t>::row(self, i) }
             fn set_col_bounds(&mut self, j: usize, lo: f64, up: f64) { <$t>::set_col_bounds(self, j, lo, up) }
             fn set_costs(&mut self, c: &[f64]) { <$t>::set_costs(self, c) }
+            fn costs(&self) -> Vec<f64> { <$t>::costs(self) }
             fn add_rows(&mut self, rows: &[(Vec<(usize, f64)>, f64, f64)]) { <$t>::add_rows(self, rows) }
             fn delete_rows(&mut self, remove: &[bool]) { <$t>::delete_rows(self, remove) }
             fn basis(&self) -> Basis { <$t>::basis(self) }

@@ -1,0 +1,22 @@
+mittelmann/ex10                back1            optimal      148.183s ok=True obj=99.99999999999986 ref=100.00000000000013
+mittelmann/ex10                back0            optimal       70.195s ok=True obj=100.00000000000038 ref=100.00000000000013
+mittelmann/graph40-40          back1            timeout      600.000s ok=False obj=None ref=None
+mittelmann/graph40-40          back0            timeout      600.000s ok=False obj=None ref=None
+Traceback (most recent call last):
+  File "/home/user/enomoto_solver/scripts/crossover_bench/run.py", line 221, in <module>
+    main()
+    ~~~~^^
+  File "/home/user/enomoto_solver/scripts/crossover_bench/run.py", line 182, in main
+    mps = materialize(set_name, name, workdir) if workdir else materialize(set_name, name, Path("."))
+          ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/user/enomoto_solver/scripts/crossover_bench/run.py", line 54, in materialize
+    return materialize_mps(CACHES["mittelmann"], rel, raw, workdir)
+  File "/home/user/enomoto_solver/scripts/run_mittelmann_benchmark.py", line 151, in materialize_mps
+    with bz2.open(raw, "rb") as src, open(packed, "wb") as dst:
+         ~~~~~~~~^^^^^^^^^^^
+  File "/usr/lib/python3.13/bz2.py", line 312, in open
+    binary_file = BZ2File(filename, bz_mode, compresslevel=compresslevel)
+  File "/usr/lib/python3.13/bz2.py", line 81, in __init__
+    self._fp = _builtin_open(filename, mode)
+               ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/home/user/enomoto_solver/.mittelmann_cache/raw/misc__neos.bz2'
