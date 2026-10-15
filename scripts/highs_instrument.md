@@ -9,6 +9,10 @@ HiGHS 1.15.1 (`git clone --depth 1 --branch v1.15.1 https://github.com/ERGO-Code
 - `HSEP round k obj v sep0= sep1= sep2=`: 分離のラウンドごとの LP 値と分離器ごとのカット数 (tableau / path / mod-k)
 - `HGEN` / `HMIX`: 経路集約の CMIR・path mixing cut
 - 環境変数 `HIGHS_NO_MIX`: path mixing cut を止める
+- `HADD 0 obj v lprows r`: 分離のラウンドでカットプールから LP に加えて解き直した後の LP 値と LP の行数 (行数の増分が
+  そのラウンドで LP に入ったカットの数の目安。`HADD` の最初の数は `addCuts` の後なので常に 0)
+- 環境変数 `HIGHS_SKIP_SEP=数字の並び`: 分離器を止める (0: tableau、1: path、2: mod-k。例 `HIGHS_SKIP_SEP=02`)
+- 環境変数 `HIGHS_NO_IMPLB` / `HIGHS_NO_CLQ`: implied bound・clique の分離を止める
 - 環境変数 `HIGHS_CUT_DUMP=ファイル`: 最初の分離ラウンドの経路集約の集約行と生成したカットを書き出す
   (`presolve=off` で使う)。`HIGHS_CUT_DUMP=ファイル cargo test --release highs_cut_dump -- --ignored --nocapture`
   でこちらの CMIR と比べる
