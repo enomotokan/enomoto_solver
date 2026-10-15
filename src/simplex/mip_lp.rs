@@ -264,6 +264,10 @@ impl TwoStageLp {
         self.iters
     }
 
+    pub fn set_total_iterations(&mut self, v: u64) {
+        self.iters = v;
+    }
+
     pub fn col_bounds(&self, j: usize) -> (f64, f64) {
         (self.lo[j], self.up[j])
     }

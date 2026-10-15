@@ -1602,6 +1602,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     z = z2;
                 }
             }
+            self.resolve_continuous(&mut x, &mut z);
             self.pool_add(z, &x);
             if let (Some(snap), Some(s)) = (&self.snap, &self.shared) {
                 // 木の写しから解く求解の解は写しの問題の空間なので、写しを作ったスレッドに渡す (共有の最良値はそのスレッドが
@@ -1635,6 +1636,101 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         better
+    }
+
+    /// 暫定解 `x` (目的値 `z`) の整数列を固定し、連続列を元の境界に戻した LP を解いて、連続列の値を取り替える
+    /// (実行可能で目的値が良くなるときだけ)。ヒューリスティクスの解の連続列は最適とは限らない: 目的値の上限を制約にする
+    /// Proximity Search の解は、連続の目的の列が上限に張り付いたまま返る (bppc4-08 は 0-1 の割り当てでは z = 57 にできる
+    /// 解が 59.994 のまま暫定解になり、枝刈りもその値で行っていた)。`ENOMOTO_MIP_NO_INC_LP` で使わない。
+    /// 今の LP の双対値で `x` の最適性が示せるなら解かない ([`Self::continuous_optimal_by_duals`])。解き直しの反復は
+    /// LP の反復の累計に入れない (累計を基準にするヒューリスティクスの予算などを動かさないため)
+    fn resolve_continuous(&mut self, x: &mut Vec<f64>, z: &mut f64) {
+        if self.p.is_int.iter().all(|&b| b) || self.time_up() || env_str!("ENOMOTO_MIP_NO_INC_LP").is_some() {
+            return;
+        }
+        // Feasibility Pump は LP の費用を距離に置き換えたまま解を試すので、元の費用に戻して解く
+        let cost = self.lp.costs();
+        if env_str!("ENOMOTO_MIP_INC_LP_NO_DUAL_CHECK").is_none() && self.continuous_optimal_by_duals(x, &cost) {
+            return;
+        }
+        let saved = self.lp.save_state();
+        let it0 = self.lp.total_iterations();
+        let swap = cost != self.p.cost;
+        if swap {
+            self.lp.set_costs(&self.p.cost);
+        }
+        for j in 0..self.p.n {
+            let (lo, up) = if self.p.is_int[j] { (x[j], x[j]) } else { (self.p.col_lo[j], self.p.col_up[j]) };
+            self.lp.set_col_bounds(j, lo, up);
+        }
+        let st = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
+        if st == LpStatus::Optimal {
+            let mut y = self.lp.col_values();
+            for j in 0..self.p.n {
+                if self.p.is_int[j] {
+                    y[j] = x[j];
+                }
+            }
+            let zy = self.p.objective(&y);
+            if zy < *z - 1e-9 * z.abs().max(1.0) && self.p.is_feasible(&y, FEASTOL) {
+                if self.params.verbose {
+                    eprintln!("MIP: fixed-integer LP improved incumbent {z:.10e} -> {zy:.10e}");
+                }
+                *x = y;
+                *z = zy;
+            }
+        }
+        if swap {
+            self.lp.set_costs(&cost);
+        }
+        self.lp.restore_state(&saved);
+        self.lp.set_total_iterations(it0);
+    }
+
+    /// 今の LP の双対値 `y` (費用 `lp_cost` で解いたもの) を使い、整数列を `x` に固定した LP で `x` が最適なことを
+    /// 弱双対で示せるか。どの `y` についても、被約費用 `d = c - A^T y` (`c` は元の費用) から
+    /// `L(y) = Σ_行 (y_i >= 0 なら y_i lo_i、負なら y_i up_i) + Σ_整数列 d_j x_j + Σ_連続列 (d_j >= 0 なら d_j lo_j、負なら d_j up_j)`
+    /// (連続列は大域の境界) は固定した LP の下界なので、`c x - L(y)` が相対 1e-9 以下なら `x` の連続部分は (その誤差の範囲で)
+    /// 最適。ノードの LP 解をそのまま暫定解にしたときは成り立つ。Proximity Search の解のように連続列が上限などに
+    /// 張り付いて動かせる解では成り立たない
+    fn continuous_optimal_by_duals(&self, x: &[f64], lp_cost: &[f64]) -> bool {
+        const ZERO: f64 = 1e-11;
+        let y = self.lp.row_duals();
+        let mut d = self.lp.reduced_costs();
+        if d.len() < self.p.n {
+            return false;
+        }
+        let mut lower = 0.0;
+        for (i, &yi) in y.iter().enumerate() {
+            if yi.abs() <= ZERO {
+                continue;
+            }
+            let (lo, up) = self.lp.row_bounds(i);
+            let b = if yi > 0.0 { lo } else { up };
+            if !b.is_finite() {
+                return false;
+            }
+            lower += yi * b;
+        }
+        let mut cx = 0.0;
+        for j in 0..self.p.n {
+            d[j] += self.p.cost[j] - lp_cost[j];
+            cx += self.p.cost[j] * x[j];
+            if self.p.is_int[j] {
+                lower += d[j] * x[j];
+            } else if d[j].abs() > ZERO {
+                let b = if d[j] > 0.0 { self.p.col_lo[j] } else { self.p.col_up[j] };
+                if !b.is_finite() {
+                    return false;
+                }
+                lower += d[j] * b;
+            }
+        }
+        let ok = cx - lower <= 1e-9 * cx.abs().max(1.0);
+        if self.params.verbose {
+            eprintln!("MIP: fixed-integer LP dual check: c x {cx:.10e}, dual bound {lower:.10e} -> {}", if ok { "skip" } else { "solve" });
+        }
+        ok
     }
 
     /// LP 解の整数列を丸めた点を試し、行で少しはみ出るなら整数を固定して連続部分を LP で解き直す。
