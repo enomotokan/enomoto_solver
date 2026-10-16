@@ -66,6 +66,8 @@ struct Candidate {
     coefs: Vec<(usize, f64)>,
     rhs: f64,
     efficacy: f64,
+    /// 根の選択を通さずに LP に入れる (implied bound カット)。
+    forced: bool,
 }
 
 impl<'a, L: MipLp> Solver<'a, L> {
@@ -241,7 +243,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if ((self.params.restarts > 0 && env_str!("ENOMOTO_MIP_RESTART_CUTS_TO_POOL").is_some()) || env_str!("ENOMOTO_MIP_CUTSEL_HIGHS_POOL").is_some()) && round < tunable!("ENOMOTO_T_MIP_ROOT_POOL_ROUNDS", 5usize, usize) && env_str!("ENOMOTO_MIP_NO_ROOT_POOL").is_none() {
                 for (eff, k) in self.pool_violated(&x) {
                     let (c, r, _) = &self.cut_pool[k];
-                    cands.push(Candidate { coefs: c.clone(), rhs: *r, efficacy: eff });
+                    cands.push(Candidate { coefs: c.clone(), rhs: *r, efficacy: eff, forced: false });
                 }
             }
             let ncands = cands.len() + face_cands.len();
@@ -264,6 +266,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 効き目の大きい順に、平行なものを除いて選ぶ
             let max_cuts = tunable!("ENOMOTO_T_MIP_ROOT_MAX_CUTS", 50usize, usize).min(p.m.max(50));
             let max_cuts = if adapt_max_cuts > 0 { adapt_max_cuts } else { max_cuts };
+            let (forced, cands): (Vec<Candidate>, Vec<Candidate>) = cands.into_iter().partition(|c| c.forced);
             let chosen = if phase2 {
                 let maxpar = tunable!("ENOMOTO_T_MIP_CUT_PHASE2_MAXPAR", 0.3, f64);
                 self.select_cuts_highs(cands, max_cuts, &x, maxpar)
@@ -288,6 +291,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 chosen
             };
+            let mut chosen = chosen;
+            chosen.extend(forced);
             let sep_secs = t_sep.elapsed().as_secs_f64();
             let sel_secs = t_sel0.elapsed().as_secs_f64() - pool_secs;
             if chosen.is_empty() {
@@ -701,7 +706,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         crate::simplex::slope_intercept_dual::xprof("hcm_sep");
         for (eff, k) in self.pool_violated(x) {
             let (c, r, _) = &self.cut_pool[k];
-            cands.push(Candidate { coefs: c.clone(), rhs: *r, efficacy: eff });
+            cands.push(Candidate { coefs: c.clone(), rhs: *r, efficacy: eff, forced: false });
         }
         crate::simplex::slope_intercept_dual::xprof("hcm_pool");
         if cands.is_empty() {
@@ -1843,12 +1848,21 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // implied bound カット (HiGHS の `HighsImplications::separateImpliedBounds`): プロービングの含意
         // `y = v ⇒ x_k <= b` から `x_k <= u_k - (u_k - b) y` (v = 1) / `x_k <= b + (u_k - b) y` (v = 0) (下限も同様)。
         // u_k は今の大域的な上限。LP 解で違反するものだけ
-        if env_str!("ENOMOTO_MIP_IMPLBD_CUTS").is_some() && !p.implied_bounds.is_empty() {
+        // 既定では含意の相手が連続変数のものだけを使う (`ENOMOTO_MIP_IMPLBD_CONT`、施設配置の分解した不等式 `x_ij <= d_i y_j`:
+        // pg は容量の行 `sum_i x_ij <= C y_j` だけでは緩和が弱く、これで 60 秒で解けない -> 25 秒)。`ENOMOTO_MIP_IMPLBD_CUTS` なら
+        // 0-1 変数どうしの含意も使う (全問で使うと 40 問で eil33-2・mik-250 が遅くなり SGM +2.7%)。`ENOMOTO_MIP_NO_IMPLBD_CONT` で無効
+        let ib_all = env_str!("ENOMOTO_MIP_IMPLBD_CUTS").is_some();
+        // 既定 (連続変数のみ) は根だけ (`light` はノードの分離)。ノードでも作ると木の経過が変わり rout などが揺れる
+        let ib_cont = !ib_all && !light && env_str!("ENOMOTO_MIP_NO_IMPLBD_CONT").is_none();
+        if (ib_all || ib_cont) && !p.implied_bounds.is_empty() {
             let (glo, gup) = (&self.dom.global_lo, &self.dom.global_up);
-            let max_ib = tunable!("ENOMOTO_T_MIP_IMPLBD_MAX", 100usize, usize);
+            let max_ib = tunable!("ENOMOTO_T_MIP_IMPLBD_MAX", 5000usize, usize);
             let mut viol: Vec<(f64, RawCut)> = Vec::new();
             for &(y, v, k, upper, b) in &p.implied_bounds {
                 let (y, k) = (y as usize, k as usize);
+                if ib_cont && p.is_int[k] {
+                    continue;
+                }
                 if glo[y] == gup[y] || glo[k] == gup[k] || glo[y] != 0.0 || gup[y] != 1.0 {
                     continue;
                 }
@@ -1868,8 +1882,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
             viol.sort_by(|a, b| b.0.total_cmp(&a.0));
+            let n0 = cands.len();
             for (_, raw) in viol.into_iter().take(max_ib) {
                 push(Some(raw), &mut cands, self);
+            }
+            // 2 非零で 1 本ずつ別の (y, x) の組を締めるので、根では選択 (質の閾値・平行度) を通さずに全部入れる (HiGHS も
+            // implied bound カットはプールに直接入れる)。pg: 選択を通すと根 -9027、通さなければ -8680 (HiGHS -8680) で 60 秒で解けない -> 7.9 秒
+            if env_str!("ENOMOTO_MIP_IMPLBD_SELECT").is_none() {
+                for c in &mut cands[n0..] {
+                    c.forced = true;
+                }
             }
             if dbg_sep {
                 eprintln!("SEP implied bounds {:.3}s cands {}", sep_t0.elapsed().as_secs_f64(), cands.len());
@@ -2491,7 +2513,7 @@ fn finish_cut(
             return None;
         }
     }
-    Some(Candidate { coefs, rhs, efficacy })
+    Some(Candidate { coefs, rhs, efficacy, forced: false })
 }
 
 /// 効き目の大きい順に、既に選んだものとほぼ平行 (|cos| > 0.99) なものを除いて選ぶ。

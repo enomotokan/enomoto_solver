@@ -1043,8 +1043,8 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
                     if want_impl {
                         add_edges(j, 0, &ch0, &mut edges);
                         add_edges(j, 1, &ch1, &mut edges);
-                        // implied bound カット (`ENOMOTO_MIP_IMPLBD_CUTS`) を使うときだけ集める
-                        if env_str!("ENOMOTO_MIP_IMPLBD_CUTS").is_some() {
+                        // implied bound カットを使うときだけ集める (既定は相手が連続変数のものだけ使う。`ENOMOTO_MIP_NO_IMPLBD_CONT` で使わない)
+                        if env_str!("ENOMOTO_MIP_IMPLBD_CUTS").is_some() || env_str!("ENOMOTO_MIP_NO_IMPLBD_CONT").is_none() {
                             add_implied(j, false, &ch0, &dom, &mut implied);
                             add_implied(j, true, &ch1, &dom, &mut implied);
                         }
