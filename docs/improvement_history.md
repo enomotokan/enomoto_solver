@@ -9088,6 +9088,24 @@ Netlib 93・Kennington 16 (交互に 3 回): `ipm_crossover` は合計 41.9 → 
 
 Netlib 93・Kennington 16 (交互に 3 回): `ipm_crossover`・`auto` とも全問正解、10 秒ずらした幾何平均の比 1.000。
 
+## MIP: HiGHS と同じ手順の Feasibility Jump (FJ2) を既定に、主側の弱さの調査 (採用) (2026-10-16)
+
+計測は 4 CPU・15 GB の機械、両ソルバー 4 スレッド・60 秒。詳細は `analysis/mip_primal_weakness_20261016.md`。
+
+- 原因の調査: 暫定解の出どころを `ENOMOTO_MIP_LOG` のログに出す計装を足し、HiGHS のログの Src と並べた。最初の解が遅い主因は
+  Feasibility Jump (旧来の簡略版が comp07-2idx・comp21-2idx・net12 などで解を見つけない)。ほかに RENS・RINS の固定しすぎ
+  (根の RENS のサブ MIP の約 1/3 が 0 ノードで実行不能)、木の中の大近傍探索の予算の小ささ、丸め系の連続部分の LP の反復上限。
+- 採用: Luteberget & Sartor の FJ を HiGHS の実装 (`FeasibilityJump.hpp`) どおりに移植した (`src/mip/fj.rs`。HiGHS の写しにない
+  負の係数の区間の入れ替えは参照実装どおり入れた)。HiGHS の FJ は改善のない手間の上限ですぐ止まるので、時間の上限 (3 秒) まで
+  旧来の局所探索と種を変えた FJ2 を続けて最良の解を返す (別スレッド。逐次では FJ2 で見つからなければ旧来のものだけ)。並列モードでは
+  FJ のスレッドが終わっていれば根のカットの各ラウンドで受け取る。`ENOMOTO_MIP_NO_FJ2` で以前の形。
+- 93 問 (依頼の A・B・C・見張りと既定の 40 問、各 2 回の平均): 主ギャップの和 14.91 → 13.77、最初の解の時刻 (ずらし 1 の幾何平均)
+  3.88 → 3.07 秒、解けた数 29 → 28.5 (noswot が 2 回中 1 回時間切れ)、40 問の SGM 21.60 → 21.26 秒。目的値の不一致 0。
+- 不採用 (既定では無効で残す): RENS・RINS の固定率の上限 (`ENOMOTO_MIP_FIX_CAP`)、サブ MIP に LP のカット行 (`ENOMOTO_MIP_SUBMIP_CUTS`)、
+  並列のサブ MIP の随時受け取り (`ENOMOTO_MIP_POLL_SUBMIPS`)、ランダム丸めの HiGHS 化 (`ENOMOTO_MIP_RR_HIGHS`)、FJ の解だけの間も
+  根の暫定解なし用のヒューリスティクスを回す (`ENOMOTO_MIP_FJ2_KEEP_NOINC`)、根の Pump・ダイビングの時間の上限
+  (`ENOMOTO_T_MIP_ROOT_DIVE_TIME_FRAC`、未計測)。
+
 ## 改名一覧 (整理時)
 
 本メモ中は旧名で書かれている。

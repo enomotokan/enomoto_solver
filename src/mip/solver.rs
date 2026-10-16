@@ -6042,10 +6042,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.incumbent.is_none() || (self.inc_only_fj && env_str!("ENOMOTO_MIP_FJ2_KEEP_NOINC").is_some())
     }
 
-    /// 別スレッドの Feasibility Jump が終わっていれば結果を受け取る (`ENOMOTO_MIP_FJ2` のとき。根のカットのループの各ラウンドで
+    /// 別スレッドの Feasibility Jump が終わっていれば結果を受け取る (`ENOMOTO_MIP_NO_FJ2` でないとき。根のカットのループの各ラウンドで
     /// 呼ぶ。HiGHS 流の FJ は多くの問題で 1 秒以内に終わるので、カットのループの終わりまで待たずに暫定解にする)。
     pub(super) fn poll_fj_thread(&mut self) {
-        if self.fj_thread.as_ref().is_some_and(|(h, _)| h.is_finished()) && env_str!("ENOMOTO_MIP_FJ2").is_some() {
+        if self.fj_thread.as_ref().is_some_and(|(h, _)| h.is_finished()) && env_str!("ENOMOTO_MIP_NO_FJ2").is_none() {
             self.join_fj_thread();
         }
     }

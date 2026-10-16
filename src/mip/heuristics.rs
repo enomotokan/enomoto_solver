@@ -1064,11 +1064,14 @@ pub(super) fn local_search(p: &MipProblem, lo: &[f64], up: &[f64], time_cap: f64
 /// Feasibility Jump の探索本体 (Solver の状態に依らないので別スレッドでも動かせる)。`lo`/`up` は列の境界、
 /// `seed` は乱数の種、`stop` が立ったら止める。実行可能な点が見つかれば返す。
 pub(super) fn fj_search(p: &MipProblem, lo: &[f64], up: &[f64], effort: u64, time_cap: f64, seed: u64, stop: Option<&std::sync::atomic::AtomicBool>) -> Option<Vec<f64>> {
-    // `ENOMOTO_MIP_FJ2`: HiGHS と同じ手順の Feasibility Jump ([`super::fj`]) を使う。HiGHS の FJ は改善のない手間の
+    // HiGHS と同じ手順の Feasibility Jump ([`super::fj`]) を使う (`ENOMOTO_MIP_NO_FJ2` なら旧来の局所探索だけ)。旧来のものは
+    // comp07-2idx・comp21-2idx・net12 などで解を見つけられず、最初の解が 30〜60 秒になっていた (FJ2 は 0.05〜0.2 秒)。
+    // 93 問 (4 スレッド・60 秒・2 回): 主ギャップの和 14.91 -> 13.77、最初の解の時刻の幾何平均 3.88 -> 3.07 秒
+    // (analysis/mip_primal_weakness_20261016.md)。HiGHS の FJ は改善のない手間の
     // 上限ですぐ止まる (nexp-150-20-8-5 では 0.13 秒で 549 を見つけて止まり、旧 FJ は 3 秒で 256 を見つけていた)。
     // 時間の上限が残っていれば (`ENOMOTO_MIP_FJ2_ONLY` でなければ)、種を変えた FJ2 と旧来の局所探索を続けて回し、
     // 目的値の最良のものを返す
-    if env_str!("ENOMOTO_MIP_FJ2").is_some() {
+    if env_str!("ENOMOTO_MIP_NO_FJ2").is_none() {
         let t0 = Instant::now();
         let left = |cap: f64| (cap - t0.elapsed().as_secs_f64()).max(0.0);
         let stopped = || stop.is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed));
