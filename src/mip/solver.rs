@@ -254,6 +254,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) heur_label: &'static str,
     /// 根のヒューリスティクス 1 回の時間の上限 (`ENOMOTO_T_MIP_ROOT_DIVE_TIME_FRAC`。[`Solver::time_up`] が見る)
     pub(super) heur_stop: Option<Instant>,
+    /// 最初の根の LP の反復数 (丸め系のヒューリスティクスの連続部分の LP の反復上限に使う)
+    pub(super) root_lp_iters: u64,
     /// ヒューリスティクス役を務めている間か (ログで暫定解の出どころを示すため)
     pub(super) in_heur_role: bool,
     /// 受け取った解が別のスレッドのヒューリスティクスのものか (ログの表示用)
@@ -1182,6 +1184,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         pending_submips: std::collections::VecDeque::new(),
         heur_label: "",
         heur_stop: None,
+        root_lp_iters: 0,
         in_heur_role: false,
         other_thread_label: false,
         submip_fix_rate: None,
@@ -2003,6 +2006,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             super::record_root_bound(root_obj);
         }
         let root_iters = self.lp.total_iterations();
+        self.root_lp_iters = root_iters;
         if self.params.verbose {
             eprintln!("MIP: root LP {:.10e} ({} iters, {:.2}s)", root_obj, self.lp.total_iterations(), self.start.elapsed().as_secs_f64());
         }

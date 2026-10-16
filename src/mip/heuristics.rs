@@ -180,7 +180,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.lp.set_basis_cols(b, Some(xb));
                 }
                 let it0 = self.lp.total_iterations();
-                let lim = (2 * self.avg_node_iters()).max(1000);
+                // `ENOMOTO_MIP_RR_HIGHS`: 反復の上限を HiGHS のランダム丸めと同じ max(10000, 最初の根の LP の 2 倍) にする
+                // (以前の 2 × ノードの平均 (根では 2000) では、根の LP に 1 万反復以上かかる連続変数の多い問題 (trento1 など) で、
+                // 整数列の固定までは成功しても連続部分の LP が解き終わらなかった)
+                let lim = if env_str!("ENOMOTO_MIP_RR_HIGHS").is_some() {
+                    (2 * self.avg_node_iters()).max(10_000).max(2 * self.root_lp_iters)
+                } else {
+                    (2 * self.avg_node_iters()).max(1000)
+                };
                 let st = self.lp.solve(&self.limits(lim));
                 self.heur_iters += self.lp.total_iterations() - it0;
                 if st == LpStatus::Optimal {
@@ -365,9 +372,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
         for t in 0..tries {
             let t0 = std::time::Instant::now();
             let mut target = x.to_vec();
+            let highs = env_str!("ENOMOTO_MIP_RR_HIGHS").is_some();
             for &j in &order {
-                let th = if t == 0 { 0.5 } else { 0.1 + 0.8 * self.rand() };
-                target[j] = (x[j] + 1.0 - th).floor();
+                // `ENOMOTO_MIP_RR_HIGHS`: HiGHS の randomizedRounding と同じく、上向きの lock がなければ切り上げ、下向きの lock が
+                // なければ切り捨て (その向きに動かしても行を破らない)、それ以外は乱数の閾値で丸める (1 回目も乱数)
+                let (dl, ul) = self.locks[j];
+                target[j] = if highs && ul == 0 {
+                    (x[j] - FEASTOL).ceil()
+                } else if highs && dl == 0 {
+                    (x[j] + FEASTOL).floor()
+                } else {
+                    let th = if t == 0 && !highs { 0.5 } else { 0.1 + 0.8 * self.rand() };
+                    (x[j] + 1.0 - th).floor()
+                };
             }
             let found = self.fix_and_propagate(&target, &order);
             if env_str!("ENOMOTO_MIP_DEBUG_RR").is_some() {
