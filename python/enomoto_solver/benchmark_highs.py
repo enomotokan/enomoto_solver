@@ -56,7 +56,8 @@ def _load_lp(mps_path: Path):
     h = highspy.Highs()
     h.setOptionValue("output_flag", False)
     status = h.readModel(str(mps_path))
-    if "kOk" not in str(status):
+    # 警告 (`kWarning`) は読み込めている (momentum1 など)。失敗は `kError` のときだけ
+    if "kError" in str(status):
         raise RuntimeError(f"readModel failed: {status}")
     return h, h.getLp()
 

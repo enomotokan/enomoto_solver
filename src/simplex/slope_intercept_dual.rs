@@ -7026,23 +7026,34 @@ pub(super) fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_
             // この点は摂動コストに対して最適。コスト摂動が真の双対実行不能性を
             // 隠していないかを、摂動なしのコストで `d` を再計算して確かめる。
             let mut true_d = vec![0.0f64; n_total];
+            // 被約費用の丸め誤差の目安 `|c_j| + Σ |a_ij y_i|` (列ごと)
+            let mut d_mag = vec![0.0f64; n_total];
             {
                 let c_b: Vec<f64> = basis.iter().map(|&bv| std.c[bv]).collect();
                 let mut y = vec![0.0f64; m];
                 lu.solve_transpose_into(&c_b, &mut lu_scratch, &mut y);
                 for j in 0..n_total {
                     let mut dj = std.c[j];
+                    let mut mag = std.c[j].abs();
                     for &(i, v) in std.cols.col(j) {
                         dj -= v * y[i];
+                        mag += (v * y[i]).abs();
                     }
                     true_d[j] = dj;
+                    d_mag[j] = mag;
                 }
             }
             // 固定列 (`lb == ub`) はどのピボットでも動かないので、符号の誤った被約費用が
             // あっても実行可能な対処が無く、双対実行不能とは数えない
             // (`ENOMOTO_POLISH_DUAL_KEEP_FIXED` で数える)。`polish_dual_tol` は既定で `TOL`
             // (`ENOMOTO_POLISH_DUAL_TOL` で上書き可)。
+            // 費用が大きい列では、被約費用 `c_j - a_jᵀy` の丸め誤差 (`ε (|c_j| + Σ |a_ij y_i|)` 程度) だけで絶対の `TOL` を
+            // 超える。その大きさ (`ENOMOTO_T_POLISH_DUAL_ROUND_K` 倍、既定 64) までは双対実行不能と数えない。leo1 (費用 3e7)
+            // の根の LP では d_j = -2.4e-9 (相対 1e-16) の 1 列が主単体法への引き継ぎで消えず、引き継ぎの上限 (3 回) で
+            // `NotSolved` になっていた (費用が 7e4 程度より小さい列では従来と同じ `TOL`)
             let polish_dual_tol = tunable!("ENOMOTO_POLISH_DUAL_TOL", TOL, f64);
+            let round_k = tunable!("ENOMOTO_T_POLISH_DUAL_ROUND_K", 64.0, f64) * f64::EPSILON;
+            let dual_tol = |j: usize| polish_dual_tol.max(round_k * d_mag[j]);
             let exclude_fixed = tunable!("ENOMOTO_POLISH_DUAL_KEEP_FIXED", 0u8, u8) == 0;
             let is_dual_bad = |j: usize| -> bool {
                 if exclude_fixed && std.lb[j] == std.ub[j] {
@@ -7050,9 +7061,9 @@ pub(super) fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_
                 }
                 match nb_status[j] {
                     None => false,
-                    Some(NbStatus::Lower) => true_d[j] < -polish_dual_tol,
-                    Some(NbStatus::Upper) => true_d[j] > polish_dual_tol,
-                    Some(NbStatus::Zero) => true_d[j].abs() > polish_dual_tol,
+                    Some(NbStatus::Lower) => true_d[j] < -dual_tol(j),
+                    Some(NbStatus::Upper) => true_d[j] > dual_tol(j),
+                    Some(NbStatus::Zero) => true_d[j].abs() > dual_tol(j),
                 }
             };
             let true_dual_feasible = !(0..n_total).any(is_dual_bad);

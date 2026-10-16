@@ -29,6 +29,11 @@ pub trait MipLp: Clone + Send {
     fn restore_state(&mut self, s: &Self::State);
     fn solve(&mut self, lim: &SolveLimits) -> LpStatus;
     fn solve_primal(&mut self, lim: &SolveLimits) -> LpStatus;
+    /// [`Self::solve`] が結論を出せなかった (`Error`・`IterationLimit`) LP を別の経路で解き直す
+    /// ([`TwoStageLp::solve_ipm_rescue`])。対応しない実装は `Error`。
+    fn solve_rescue(&mut self, _lim: &SolveLimits) -> LpStatus {
+        LpStatus::Error
+    }
     fn objective(&self) -> f64;
     fn col_values(&self) -> Vec<f64>;
     fn col_value(&self, j: usize) -> f64;
@@ -124,6 +129,9 @@ forward_impl!(
     },
     fn interior_point(&self, zero_cost: bool, want_vertex: bool, deadline: std::time::Instant) -> Option<InteriorPoint> {
         TwoStageLp::interior_point(self, zero_cost, want_vertex, deadline)
+    },
+    fn solve_rescue(&mut self, lim: &SolveLimits) -> LpStatus {
+        TwoStageLp::solve_ipm_rescue(self, lim)
     },
     fn set_basis_cols(&mut self, b: &[usize], x: Option<&[f64]>) {
         TwoStageLp::set_basis_cols(self, b, x)

@@ -1609,11 +1609,20 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.tab_memo_mode = 2;
         let mut fcands: Vec<Candidate> = Vec::new();
         let mut used = 0usize;
+        // 面の LP 1 回の時間の上限 (カットを加えた LP と同じ、全体の 2%、最低 1 秒)。neos-3656078-kumeu・neos-933966 では
+        // 根の最初のラウンドの面の LP が数値的に破綻して解き直しを繰り返し、残り時間 (50 秒以上) を使い切っていた
+        let cap = if self.params.time_limit.is_finite() { (tunable!("ENOMOTO_T_MIP_CUT_LP_TIME_FRAC", 0.02, f64) * self.params.time_limit).max(1.0) } else { f64::INFINITY };
         for c2 in &dirs {
             let mut f2 = face.clone();
             let cost2: Vec<f64> = (0..n).map(|j| p.cost[j] + eps * c2[j]).collect();
             f2.set_costs(&cost2);
-            let st = f2.solve(&SolveLimits { iteration_limit: if light { (p.m + n) as u64 + 100 } else { 10 * (p.m + n) as u64 + 1000 }, cutoff: f64::INFINITY, deadline: self.deadline });
+            let deadline = if cap.is_finite() {
+                let d = std::time::Instant::now() + std::time::Duration::from_secs_f64(cap);
+                Some(self.deadline.map_or(d, |g| g.min(d)))
+            } else {
+                self.deadline
+            };
+            let st = f2.solve(&SolveLimits { iteration_limit: if light { (p.m + n) as u64 + 100 } else { 10 * (p.m + n) as u64 + 1000 }, cutoff: f64::INFINITY, deadline });
             if st != LpStatus::Optimal {
                 continue;
             }
