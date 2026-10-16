@@ -1944,7 +1944,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.root_fixed0 = (0..self.p.n).filter(|&j| self.p.is_int[j] && self.dom.global_lo[j] == self.dom.global_up[j]).count();
         // 基底のない求解なので、`threads` >= 2 なら二段解法と内点法 + クロスオーバーで同時に解かれる
         // (`TwoStageLp::solve`、`crate::simplex::mip_lp::set_cold_race_threads`)
-        let root_st = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
+        let mut root_st = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
+        if matches!(root_st, LpStatus::Error | LpStatus::IterationLimit) && !self.time_up() {
+            // 結論を出せなかった (数値的な破綻など): 内点法 + クロスオーバーだけで解き直す
+            if self.params.verbose {
+                eprintln!("MIP: root LP {root_st:?} ({:.2}s), re-solving with the interior-point method + crossover", self.start.elapsed().as_secs_f64());
+            }
+            root_st = self.lp.solve_rescue(&SolveLimits { deadline: self.deadline, ..Default::default() });
+        }
         match root_st {
             LpStatus::Optimal => {
                 self.cur_lb = self.lp.objective() + self.p.offset;
@@ -1959,10 +1966,25 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let st = self.resolve_unbounded_root();
                 return self.finish(st, f64::NEG_INFINITY);
             }
-            LpStatus::TimeLimit => return self.finish(MipStatus::TimeLimit, f64::NEG_INFINITY),
-            _ => return self.finish(MipStatus::NotSolved, f64::NEG_INFINITY),
+            LpStatus::TimeLimit => {
+                self.join_fj_thread();
+                return self.finish(MipStatus::TimeLimit, f64::NEG_INFINITY);
+            }
+            _ => {
+                // 根の LP が解けない: LP を使わない Feasibility Jump の解だけは受け取る
+                if self.params.verbose {
+                    eprintln!("MIP: root LP failed ({root_st:?})");
+                }
+                self.join_fj_thread();
+                let st = if self.time_up() { MipStatus::TimeLimit } else { MipStatus::NotSolved };
+                return self.finish(st, f64::NEG_INFINITY);
+            }
         }
         let mut root_obj = self.lp.objective() + self.p.offset;
+        // 根の下界 (カットのループが最後の LP で書き直す。ループが途中で終わっても根の LP の値は残す)
+        if !self.params.submip && self.snap.is_none() {
+            super::record_root_bound(root_obj);
+        }
         let root_iters = self.lp.total_iterations();
         if self.params.verbose {
             eprintln!("MIP: root LP {:.10e} ({} iters, {:.2}s)", root_obj, self.lp.total_iterations(), self.start.elapsed().as_secs_f64());
@@ -1990,7 +2012,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     crate::simplex::slope_intercept_dual::WARM_DSE_ON.store(warm_prev, std::sync::atomic::Ordering::Relaxed);
                 }
                 if !cut_ok {
-                    return self.finish(MipStatus::NotSolved, root_obj);
+                    // カットを外した LP も解けなかった。期限に当たったのなら時間切れ (カットを加える前の根の LP の値は下界)
+                    self.join_fj_thread();
+                    let st = if self.time_up() { MipStatus::TimeLimit } else { MipStatus::NotSolved };
+                    return self.finish(st, root_obj);
                 }
                 root_obj = self.lp.objective() + self.p.offset;
                 // `ENOMOTO_MIP_MERGE_ROOT_CUTS`: 根の最後の LP で効いているカットを双対値で 1 本にまとめて加える
@@ -2105,6 +2130,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         let bit = heur_bit($name);
                         if proof_only() && !self.params.submip {
                             // 証明だけのスレッド: 根のヒューリスティクスは走らせない
+                        } else if self.time_up() {
+                            // 期限を過ぎた: 残りのヒューリスティクスは走らせない (局所探索などは期限を見ずに数秒使う)
                         } else if rh_over(self) {
                             if self.params.verbose {
                                 eprintln!("MIP: root heuristic {}: skipped (root heuristic time budget)", $name);
