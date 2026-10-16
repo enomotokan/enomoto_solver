@@ -175,6 +175,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let t_loop0 = super::cap_clock();
         let mut phase2_deadline = f64::INFINITY;
         let mut round_ctr = 0usize;
+        // 固定費用ネットワーク型 (連続変数のほぼ全てに VUB `x <= u y` の 2 非零の行があり、その行が大半) では、根のカット選択を
+        // 緩める (質の閾値なし、平行度の上限 0.9)。flow cover 系のカットは同じ y の係数が支配的で互いに平行と判定されやすく、
+        // 既定の選択では 1 ラウンドに数本しか入らない (sp150x300d: 候補 456 本 -> 31 本、根の下界 56.9 (HiGHS 68.7))。
+        // 固定費用型 18 問 (beasleyC1-3, mc7/8/11, h50x2450, h80x6320d, sp150x300d, p200x1188c, aflow30a/40b, rout など、60 秒) で
+        // SGM 29.16 -> 27.00、29.09 -> 27.49 (2 回)、解けた問題 9 -> 10。`ENOMOTO_MIP_NO_CUTSEL_FC` で無効
+        let fc_relax = env_str!("ENOMOTO_MIP_NO_CUTSEL_FC").is_none() && !self.params.submip && fixed_charge_network(p);
+        if fc_relax && self.params.verbose {
+            eprintln!("MIP: fixed-charge network structure: relaxed root cut selection");
+        }
         // `ENOMOTO_MIP_CUT_ADAPT_MAX` (実験的): 採ったカットが 1 ラウンドの上限に達したら、次のラウンドの上限を 2 倍にする
         // (`ENOMOTO_T_MIP_CUT_ADAPT_MAX_CAP` 本まで)。同じ形のブロックが多数ある問題 (neos-3381206-awhea: 475 個の箱) では
         // 毎ラウンド候補が数千本あり、50 本ずつでは LP が切られていない別のブロックに移るだけで下界が動かない
@@ -261,6 +270,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             } else if env_str!("ENOMOTO_MIP_CUTSEL_HIGHS").is_some() {
                 let maxpar = tunable!("ENOMOTO_T_CUTSEL_HIGHS_MAXPAR", 0.1, f64);
                 self.select_cuts_highs(cands, max_cuts, &x, maxpar)
+            } else if fc_relax {
+                select_cuts_hybrid_with(cands, max_cuts, p, tunable!("ENOMOTO_T_CUTSEL_FC_MIN_REL", 0.0, f64), tunable!("ENOMOTO_T_CUTSEL_FC_MAXPAR", 0.9, f64))
             } else {
                 select_cuts(cands, max_cuts, p)
             };
@@ -2491,6 +2502,36 @@ fn select_cuts(cands: Vec<Candidate>, max_cuts: usize, p: &MipProblem) -> Vec<Ca
     select_cuts_hybrid(cands, max_cuts, p)
 }
 
+/// 固定費用ネットワーク型か: 連続変数 1 つと整数変数 1 つからなる行 (VUB/VLB) が行の
+/// `ENOMOTO_T_FC_ROW_FRAC` (0.7) 以上で、連続変数の `ENOMOTO_T_FC_COL_FRAC` (0.9) 以上がそのような行を持つ。
+fn fixed_charge_network(p: &MipProblem) -> bool {
+    // 前処理で消えた列 (行に現れない、固定された) は数えない
+    let ncont = (0..p.n).filter(|&j| !p.is_int[j] && !p.cols[j].is_empty() && p.col_lo[j] < p.col_up[j]).count();
+    if ncont == 0 || p.m == 0 {
+        return false;
+    }
+    let mut has_vb = vec![false; p.n];
+    let mut nrows = 0usize;
+    for r in &p.rows {
+        if r.len() != 2 {
+            continue;
+        }
+        let (a, b) = (r[0].0, r[1].0);
+        let c = match (p.is_int[a], p.is_int[b]) {
+            (false, true) => a,
+            (true, false) => b,
+            _ => continue,
+        };
+        nrows += 1;
+        has_vb[c] = true;
+    }
+    let ncol = has_vb.iter().filter(|&&v| v).count();
+    if env_str!("ENOMOTO_MIP_LOG").is_some() {
+        eprintln!("MIP: fixed-charge check: vb rows {nrows} of {}, continuous with vb {ncol} of {ncont}", p.m);
+    }
+    nrows as f64 >= tunable!("ENOMOTO_T_FC_ROW_FRAC", 0.7, f64) * p.m as f64 && ncol as f64 >= tunable!("ENOMOTO_T_FC_COL_FRAC", 0.9, f64) * ncont as f64
+}
+
 /// 疎なベクトル (列番号の昇順) の内積。
 /// 2 本のカットの係数の向きの余弦 (絶対値)。
 fn cut_parallelism(a: &[(usize, f64)], b: &[(usize, f64)]) -> f64 {
@@ -2524,6 +2565,11 @@ fn sparse_dot(a: &[(usize, f64)], b: &[(usize, f64)]) -> f64 {
 /// 0.9 倍以上の「良い」カットは平行度 0.7 まで許す (SCIP の既定は 0.1 / 0.5 だが、こちらはカットのラウンド数が
 /// 少ないので緩めにした方が良かった)。
 fn select_cuts_hybrid(cands: Vec<Candidate>, max_cuts: usize, p: &MipProblem) -> Vec<Candidate> {
+    select_cuts_hybrid_with(cands, max_cuts, p, tunable!("ENOMOTO_T_CUTSEL_MIN_REL", 0.5, f64), tunable!("ENOMOTO_T_CUTSEL_MAXPAR", 0.3, f64))
+}
+
+/// [`select_cuts_hybrid`] の質の閾値 (最良の何倍未満を捨てるか) と平行度の上限を指定する版。
+fn select_cuts_hybrid_with(cands: Vec<Candidate>, max_cuts: usize, p: &MipProblem, min_rel: f64, maxpar: f64) -> Vec<Candidate> {
     let cnorm = p.cost.iter().map(|c| c * c).sum::<f64>().sqrt();
     let density_exp = tunable!("ENOMOTO_T_CUTSEL_DENSITY_EXP", 0.0, f64);
     let mut scored: Vec<(f64, f64, Candidate)> = cands
@@ -2538,12 +2584,14 @@ fn select_cuts_hybrid(cands: Vec<Candidate>, max_cuts: usize, p: &MipProblem) ->
         .collect();
     scored.sort_by(|a, b| b.0.total_cmp(&a.0));
     let Some(best_score) = scored.first().map(|s| s.0) else { return Vec::new() };
-    let (maxpar, goodmaxpar, good) = (tunable!("ENOMOTO_T_CUTSEL_MAXPAR", 0.3, f64), tunable!("ENOMOTO_T_CUTSEL_GOODMAXPAR", 0.7, f64), 0.9 * best_score);
+    // 質が最良の 0.9 倍以上の「良い」カットの平行度の上限 (`maxpar` より小さくてもそのまま使う。固定費用型の緩めた選択で
+    // maxpar に合わせて 0.9 にすると sp150x300d の根の下界が 65.3 -> 58.0 に下がった)
+    let (goodmaxpar, good) = (tunable!("ENOMOTO_T_CUTSEL_GOODMAXPAR", 0.7, f64), 0.9 * best_score);
     // `ENOMOTO_T_CUTSEL_MIN_REL` (既定 0.5): 質が最良の何倍未満のカットは採らない (Wesselmann・Suhl の MOPS と同じ
     // 最良の 50%)。弱いカットを LP に入れず、1 ラウンドの LP を軽くする (根の LP の反復: qnet1 1936 -> 1149、
     // h80x6320d 7202 -> 3378)。40 問 2 回: sgeomean 27.84 -> 26.72、28.10 -> 26.81 (misc07 36 -> 11 秒、mik-250 33 -> 25 秒)。
     // 0.3 は 27.13。0 なら以前と同じ (上限 50 本まで全部)
-    let min_score = tunable!("ENOMOTO_T_CUTSEL_MIN_REL", 0.5, f64) * best_score;
+    let min_score = min_rel * best_score;
     // `ENOMOTO_T_CUTSEL_FILL_FRAC` = f (> 0): 相対閾値で採ったカットが max_cuts·f 本未満なら、閾値を下げて
     // (候補の上位半分まで) max_cuts·f 本になるまで足す (HiGHS の `HighsCutPool::separate` の「少なすぎれば上位半分」)。
     // p0201 は候補 130-480 本から 1-4 本しか採らず、25 ラウンドかけても根の下界が伸び切らなかった
