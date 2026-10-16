@@ -1064,10 +1064,50 @@ pub(super) fn local_search(p: &MipProblem, lo: &[f64], up: &[f64], time_cap: f64
 /// Feasibility Jump の探索本体 (Solver の状態に依らないので別スレッドでも動かせる)。`lo`/`up` は列の境界、
 /// `seed` は乱数の種、`stop` が立ったら止める。実行可能な点が見つかれば返す。
 pub(super) fn fj_search(p: &MipProblem, lo: &[f64], up: &[f64], effort: u64, time_cap: f64, seed: u64, stop: Option<&std::sync::atomic::AtomicBool>) -> Option<Vec<f64>> {
-    // `ENOMOTO_MIP_FJ2`: HiGHS と同じ手順の Feasibility Jump ([`super::fj`]) を使う
+    // `ENOMOTO_MIP_FJ2`: HiGHS と同じ手順の Feasibility Jump ([`super::fj`]) を使う。HiGHS の FJ は改善のない手間の
+    // 上限ですぐ止まる (nexp-150-20-8-5 では 0.13 秒で 549 を見つけて止まり、旧 FJ は 3 秒で 256 を見つけていた)。
+    // 時間の上限が残っていれば (`ENOMOTO_MIP_FJ2_ONLY` でなければ)、種を変えた FJ2 と旧来の局所探索を続けて回し、
+    // 目的値の最良のものを返す
     if env_str!("ENOMOTO_MIP_FJ2").is_some() {
-        return super::fj::fj2_search(p, lo, up, time_cap, seed, stop);
+        let t0 = Instant::now();
+        let left = |cap: f64| (cap - t0.elapsed().as_secs_f64()).max(0.0);
+        let stopped = || stop.is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed));
+        let mut best = super::fj::fj2_search(p, lo, up, time_cap, seed, stop);
+        if env_str!("ENOMOTO_MIP_FJ2_ONLY").is_some() {
+            return best;
+        }
+        // 逐次 (止める印のない呼び出し) では主のスレッドを待たせるので、FJ2 で見つかれば終わり、見つからなければ旧来の
+        // 局所探索を残り時間で回すだけにする
+        if stop.is_none() {
+            return if best.is_some() { best } else { fj_search_old(p, lo, up, effort, left(time_cap), seed, None) };
+        }
+        let better = |a: &Option<Vec<f64>>, b: Option<Vec<f64>>| -> Option<Vec<f64>> {
+            match (a, b) {
+                (Some(x), Some(y)) => Some(if p.objective(&y) < p.objective(x) { y } else { x.clone() }),
+                (None, y) => y,
+                (x, None) => x.clone(),
+            }
+        };
+        // 旧来の局所探索 (残り時間の半分まで)
+        if left(time_cap) > 0.0 && !stopped() {
+            let r = fj_search_old(p, lo, up, effort, 0.5 * left(time_cap), seed ^ 0x5851_F42D_4C95_7F2D, stop);
+            best = better(&best, r);
+        }
+        // 種を変えた FJ2 を時間の上限まで
+        let mut k = 1u64;
+        while left(time_cap) > 0.05 && !stopped() && k < 64 {
+            let r = super::fj::fj2_search(p, lo, up, left(time_cap), seed.wrapping_add(k.wrapping_mul(0x9E37_79B9_7F4A_7C15)), stop);
+            best = better(&best, r);
+            k += 1;
+        }
+        return best;
     }
+    fj_search_old(p, lo, up, effort, time_cap, seed, stop)
+}
+
+/// 旧来の Feasibility Jump 風の局所探索 (違反している行を 1 本選び、その行の変数の値を行の重み付きの違反が最小になる
+/// 候補に動かす)。実行可能な点が見つかれば返す。
+fn fj_search_old(p: &MipProblem, lo: &[f64], up: &[f64], effort: u64, time_cap: f64, seed: u64, stop: Option<&std::sync::atomic::AtomicBool>) -> Option<Vec<f64>> {
     let mut rng = seed | 1;
     let mut rand = move || {
         rng ^= rng >> 12;

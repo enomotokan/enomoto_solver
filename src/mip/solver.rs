@@ -256,6 +256,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) heur_stop: Option<Instant>,
     /// 最初の根の LP の反復数 (丸め系のヒューリスティクスの連続部分の LP の反復上限に使う)
     pub(super) root_lp_iters: u64,
+    /// 暫定解が Feasibility Jump で見つけたものだけか (`ENOMOTO_MIP_FJ2_KEEP_NOINC` の判定に使う)
+    pub(super) inc_only_fj: bool,
     /// ヒューリスティクス役を務めている間か (ログで暫定解の出どころを示すため)
     pub(super) in_heur_role: bool,
     /// 受け取った解が別のスレッドのヒューリスティクスのものか (ログの表示用)
@@ -1185,6 +1187,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         heur_label: "",
         heur_stop: None,
         root_lp_iters: 0,
+        inc_only_fj: false,
         in_heur_role: false,
         other_thread_label: false,
         submip_fix_rate: None,
@@ -1646,6 +1649,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     pool.has_x.store(true, std::sync::atomic::Ordering::Release);
                 }
             }
+            self.inc_only_fj = self.heur_label.starts_with("feasibility jump");
             self.incumbent = Some((z, x));
             self.root_redcost_fixing();
             let lim = self.prune_limit();
@@ -2281,21 +2285,21 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     heur!("vector length diving", take_dive(self, &mut par_dives, 2));
                     heur!("coefficient diving", take_dive(self, &mut par_dives, 3));
                 } else {
-                    if self.incumbent.is_none() && !light {
+                    if self.noinc_like() && !light {
                         heur!("feasibility pump", self.feasibility_pump(root_iters));
                     }
-                    if self.incumbent.is_none() && !light {
+                    if self.noinc_like() && !light {
                         heur!("fractional diving", self.fractional_dive(dive_budget));
                     }
-                    if self.incumbent.is_none() && !light {
+                    if self.noinc_like() && !light {
                         heur!("vector length diving", self.dive(super::heuristics::DiveKind::VectorLength, dive_budget, f64::INFINITY));
                     }
-                    if self.incumbent.is_none() && !light && env_str!("ENOMOTO_MIP_NO_COEF_DIVE").is_none() {
+                    if self.noinc_like() && !light && env_str!("ENOMOTO_MIP_NO_COEF_DIVE").is_none() {
                         heur!("coefficient diving", self.dive(super::heuristics::DiveKind::Coefficient, dive_budget, f64::INFINITY));
                     }
                 }
                 // LP を使わない最後の手段 (先に使うと質の悪い解で他の暫定解探しを止めてしまう)
-                if self.incumbent.is_none() && env_str!("ENOMOTO_MIP_NO_SHIFTPROP").is_none() {
+                if self.noinc_like() && env_str!("ENOMOTO_MIP_NO_SHIFTPROP").is_none() {
                     heur!("shift-and-propagate", self.shift_and_propagate());
                 }
                 // SCIP 由来 (locks・clique・vbounds)。暫定解がないか、根の LP との差が 1% 以上なら使う
@@ -2316,10 +2320,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 self.parallel_submips = false;
                 self.join_submips(0);
                 // 局所探索と Repair (暫定解がなければ)
-                if self.incumbent.is_none() && env_str!("ENOMOTO_MIP_NO_LOCAL_SEARCH").is_none() {
+                if self.noinc_like() && env_str!("ENOMOTO_MIP_NO_LOCAL_SEARCH").is_none() {
                     heur!("local search", self.local_search_heur());
                 }
-                if self.incumbent.is_none() && env_str!("ENOMOTO_MIP_NO_REPAIR").is_none() {
+                if self.noinc_like() && env_str!("ENOMOTO_MIP_NO_REPAIR").is_none() {
                     heur!("repair", self.repair(&x));
                 }
                 // 違反量を最小にする補助 MIP (最後の手段、既定では使わない: 30n20b8・neos-1456979 で違反 0 の点が
@@ -6028,6 +6032,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
         }
+    }
+
+    /// 根の「暫定解がなければ回す」ヒューリスティクス (Feasibility Pump・ダイビング・Shift-and-Propagate・局所探索・Repair) を
+    /// 回すか。暫定解がなければ真。`ENOMOTO_MIP_FJ2_KEEP_NOINC` なら、暫定解が Feasibility Jump のものだけの間も真
+    /// (FJ の質の悪い解のせいで、より良い解を見つける根の局所探索などを飛ばさないように。ns1830653 は根の局所探索が
+    /// 26622 を見つけるが、FJ の 43808 があると回らなかった)。
+    pub(super) fn noinc_like(&self) -> bool {
+        self.incumbent.is_none() || (self.inc_only_fj && env_str!("ENOMOTO_MIP_FJ2_KEEP_NOINC").is_some())
     }
 
     /// 別スレッドの Feasibility Jump が終わっていれば結果を受け取る (`ENOMOTO_MIP_FJ2` のとき。根のカットのループの各ラウンドで
