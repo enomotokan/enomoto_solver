@@ -132,6 +132,9 @@ thread_local! {
     /// 次に始める求解 ([`solve`]) の最初の暫定解 (その問題の空間)。再スタートで前の暫定解を引き継ぐのに使う。
     /// 求解の開始時に取り出す (同じスレッドで後から始まるサブ MIP には渡らない)。
     pub(crate) static START_SOL: std::cell::RefCell<Option<Vec<f64>>> = const { std::cell::RefCell::new(None) };
+    /// 次に始めるサブ MIP の根の LP の初めの基底 (列の状態。`ENOMOTO_MIP_SUBMIP_BASIS`)。呼び出し側の LP の基底を渡す
+    /// (HiGHS のサブ MIP の `rootbasis`)。前処理は列の番号を保つので列の状態はそのまま使え、行は論理変数で埋めて修復する。
+    pub(crate) static SUBMIP_BASIS: std::cell::RefCell<Option<Vec<super::lp::VarStatus>>> = const { std::cell::RefCell::new(None) };
     /// ヒューリスティクス役のスレッド (`ENOMOTO_MIP_HEUR_ROLE`、[`Solver::heur_role_run`]) の共有の待ち行列。このスレッドで
     /// 解くサブ MIP も、木の探索が終わるか止める合図が立ったら打ち切る ([`Solver::time_up`])。
     static ROLE_POOL: std::cell::RefCell<Option<std::sync::Arc<WorkPool>>> = const { std::cell::RefCell::new(None) };
@@ -258,6 +261,10 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) root_lp_iters: u64,
     /// 暫定解が Feasibility Jump で見つけたものだけか (`ENOMOTO_MIP_FJ2_KEEP_NOINC` の判定に使う)
     pub(super) inc_only_fj: bool,
+    /// サブ MIP の停滞の数え上げ (`ENOMOTO_T_MIP_SUBMIP_STALL`)
+    submip_stall: u64,
+    /// 次に別スレッドで出すサブ MIP の根の LP の初めの基底 ([`SUBMIP_BASIS`])
+    pub(super) submip_basis: Option<Vec<super::lp::VarStatus>>,
     /// ヒューリスティクス役を務めている間か (ログで暫定解の出どころを示すため)
     pub(super) in_heur_role: bool,
     /// 受け取った解が別のスレッドのヒューリスティクスのものか (ログの表示用)
@@ -1188,6 +1195,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         heur_stop: None,
         root_lp_iters: 0,
         inc_only_fj: false,
+        submip_stall: 0,
+        submip_basis: None,
         in_heur_role: false,
         other_thread_label: false,
         submip_fix_rate: None,
@@ -1968,6 +1977,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.root_fixed0 = (0..self.p.n).filter(|&j| self.p.is_int[j] && self.dom.global_lo[j] == self.dom.global_up[j]).count();
         // 基底のない求解なので、`threads` >= 2 なら二段解法と内点法 + クロスオーバーで同時に解かれる
         // (`TwoStageLp::solve`、`crate::simplex::mip_lp::set_cold_race_threads`)
+        if self.params.submip {
+            if let Some(col) = SUBMIP_BASIS.with(|s| s.borrow_mut().take()) {
+                if col.len() == self.p.n {
+                    self.lp.set_basis(&super::lp::Basis { col, row: Vec::new() });
+                }
+            }
+        }
         let mut root_st = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
         if matches!(root_st, LpStatus::Error | LpStatus::IterationLimit) && !self.time_up() {
             // 結論を出せなかった (数値的な破綻など): 内点法 + クロスオーバーだけで解き直す
@@ -2733,6 +2749,20 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let n = match self.queue.pop(bb_every) {
                         Some(n) => {
                             self.tp_kind = 1;
+                            // `ENOMOTO_T_MIP_SUBMIP_STALL` (サブ MIP の中だけ、0 なら使わない): 暫定解があり、待ち行列から取ったノードの
+                            // 推定値が打ち切り値以上のことが続けてこの回数あれば止める (HiGHS の `mip_max_stall_nodes`、サブ MIP では 12。
+                            // 改善の見込みのないサブ MIP を早く切り、1 回の時間の上限を短くしなくて済むようにする)
+                            let stall_lim = if self.params.submip { tunable!("ENOMOTO_T_MIP_SUBMIP_STALL", 0u64, u64) } else { 0 };
+                            if stall_lim > 0 && self.incumbent.is_some() {
+                                if n.estimate >= self.prune_limit() {
+                                    self.submip_stall += 1;
+                                    if self.submip_stall >= stall_lim {
+                                        return self.finish_limit(MipStatus::NodeLimit, Some(&n));
+                                    }
+                                } else {
+                                    self.submip_stall = 0;
+                                }
+                            }
                             n
                         }
                         // 木を分け合う: 共有の待ち行列から取る (全てのスレッドが待っていて空なら探索は終わり)
@@ -5971,10 +6001,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         let label = self.heur_label;
         let fix_rate = self.submip_fix_rate.take();
+        let basis = self.submip_basis.take();
         self.pending_submips.push_back((
             std::thread::spawn(move || {
                 // 別スレッドで解くサブ MIP も入れ子の深さ 1 として数える ([`super::heuristics::SUBMIP_DEPTH`])
                 super::heuristics::SUBMIP_DEPTH.with(|d| d.set(1));
+                if let Some(b) = basis {
+                    SUBMIP_BASIS.with(|s| *s.borrow_mut() = Some(b));
+                }
                 super::solve_problem(&sub, params, presolve)
             }),
             is_rens,

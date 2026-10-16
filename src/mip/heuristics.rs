@@ -1339,15 +1339,22 @@ impl<'a, L: MipLp> Solver<'a, L> {
             threads: 1,
             distinguish: false,
         };
+        // `ENOMOTO_MIP_SUBMIP_BASIS`: 今の LP の基底 (列の状態) をサブ MIP の根の LP の初めの基底にする
+        let basis = if env_str!("ENOMOTO_MIP_SUBMIP_BASIS").is_some() && sub.n == p.n && self.lp.num_rows() >= p.m { Some(self.lp.basis().col) } else { None };
         // 並列モード (根のヒューリスティクスの間): 別スレッドで解き始め、結果は後で受け取る
         if self.parallel_submips {
+            self.submip_basis = basis;
             self.spawn_submip(sub, params);
             return Some((super::solver::MipStatus::NotSolved, false));
         }
         let fix_rate = self.submip_fix_rate.take();
         let depth = SUBMIP_DEPTH.with(|d| d.get());
         SUBMIP_DEPTH.with(|d| d.set(depth + 1));
+        if let Some(b) = basis {
+            super::solver::SUBMIP_BASIS.with(|s| *s.borrow_mut() = Some(b));
+        }
         let r = super::solve_problem(&sub, params, env_str!("ENOMOTO_MIP_SUBMIP_NO_PRESOLVE").is_none());
+        super::solver::SUBMIP_BASIS.with(|s| *s.borrow_mut() = None);
         SUBMIP_DEPTH.with(|d| d.set(depth));
         if self.params.verbose {
             let nfree = (0..p.n).filter(|&j| sub.col_lo[j] < sub.col_up[j]).count();
@@ -1560,6 +1567,20 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// [`Self::rens_dive`] で、目標の固定率を `target` に固定するもの (`None` なら成功・失敗から決める)。
     /// 戻り値は (解を受け入れたか, 達した固定率)。
     fn rens_dive_with(&mut self, target_fixed: Option<f64>) -> (bool, f64) {
+        self.dive_neighbourhood(target_fixed, None)
+    }
+
+    /// ダイビング式の RINS (`ENOMOTO_MIP_RINS_DIVE`。HiGHS の `HighsPrimalHeuristics::RINS` に倣う): LP 解が整数値で暫定解と
+    /// 同じ値の列を、目標の固定率まで段ごとに固定して LP を解き直す。そういう列がなくなったら、分数の列のうち丸めると暫定解の
+    /// 値になる列を、丸め幅の小さい順に (合計 0.5 まで) 固定する。LP が実行不能なら直前の段に戻る。残りをサブ MIP として解く。
+    pub(super) fn rins_dive(&mut self) -> bool {
+        let Some((_, inc)) = self.incumbent.as_ref() else { return false };
+        let inc = inc.clone();
+        self.dive_neighbourhood(None, Some(&inc)).0
+    }
+
+    /// [`Self::rens_dive_with`] (`inc` が `None`) と [`Self::rins_dive`] (`inc` が暫定解) の本体。
+    fn dive_neighbourhood(&mut self, target_fixed: Option<f64>, inc: Option<&[f64]>) -> (bool, f64) {
         let p = self.p;
         if self.params.submip && !self.nested_rens_ok() {
             return (false, 0.0);
@@ -1604,6 +1625,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if (v - v.round()).abs() > FEASTOL {
                     continue;
                 }
+                // RINS: 暫定解と同じ値のときだけ
+                if inc.is_some_and(|inc| (inc[j] - v.round()).abs() > 0.5) {
+                    continue;
+                }
                 branched += 1;
                 self.dom.tighten_lower(p, j, v.round());
                 self.dom.tighten_upper(p, j, v.round());
@@ -1617,15 +1642,31 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             if branched == 0 {
                 // 整数値の列がない: 分数の列を、目的値の悪くなる向き (費用 0 なら近い側) に丸めて固定する
-                // (丸め幅の小さい列から、丸め幅の合計が 0.5 に達するまで)
+                // (丸め幅の小さい列から、丸め幅の合計が 0.5 に達するまで)。RINS では丸めると暫定解の値になる列だけ
                 let mut fr_cols: Vec<(f64, usize, f64)> = order
                     .iter()
                     .filter(|&&j| self.dom.lo[j] < self.dom.up[j])
-                    .map(|&j| {
+                    .filter_map(|&j| {
                         let v = x[j];
-                        let fv = if p.cost[j] > 0.0 { v.ceil() } else if p.cost[j] < 0.0 { v.floor() } else { v.round() };
+                        let fv = match inc {
+                            Some(inc) => {
+                                if (v.round() - inc[j]).abs() > 0.5 {
+                                    return None;
+                                }
+                                inc[j]
+                            }
+                            None => {
+                                if p.cost[j] > 0.0 {
+                                    v.ceil()
+                                } else if p.cost[j] < 0.0 {
+                                    v.floor()
+                                } else {
+                                    v.round()
+                                }
+                            }
+                        };
                         let fv = fv.clamp(self.dom.lo[j], self.dom.up[j]);
-                        ((fv - v).abs(), j, fv)
+                        Some(((fv - v).abs(), j, fv))
                     })
                     .collect();
                 fr_cols.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -1674,7 +1715,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.sync_lp();
         self.lp.restore_state(&saved);
         if self.params.verbose && self.nodes <= 1 {
-            eprintln!("MIP:   RENS: fixing rate {fr:.2} (target {target:.2}, {backtracks} backtracks)");
+            eprintln!("MIP:   {}: fixing rate {fr:.2} (target {target:.2}, {backtracks} backtracks)", if inc.is_some() { "RINS (dive)" } else { "RENS" });
         }
         if fr < 0.1 {
             self.heur_close = 0.0;
@@ -1914,6 +1955,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let p = self.p;
         if self.params.submip {
             return false;
+        }
+        if env_str!("ENOMOTO_MIP_RINS_DIVE").is_some() {
+            return self.rins_dive();
         }
         let Some((_, inc)) = self.incumbent.as_ref() else { return false };
         let inc = inc.clone();
