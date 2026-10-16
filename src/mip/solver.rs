@@ -247,7 +247,17 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) parallel_submips: bool,
     /// 別スレッドで解いているサブ MIP (出した順)。
     /// 並列モードで別スレッドに出したサブ MIP と、それが根の RENS のものか ([`Self::submip_is_rens`] を出すときに写す)。
-    pub(super) pending_submips: std::collections::VecDeque<(std::thread::JoinHandle<MipResult>, bool)>,
+    pub(super) pending_submips: std::collections::VecDeque<(std::thread::JoinHandle<MipResult>, bool, &'static str, std::time::Instant, Option<f64>)>,
+    /// 次に出すサブ MIP の固定率 (RENS・RINS の固定率の記録 `rens_succ`・`rens_infeas` に結果を反映するため)。
+    pub(super) submip_fix_rate: Option<f64>,
+    /// いま走らせているヒューリスティクスの名前 (ログで暫定解の出どころを示すため)
+    pub(super) heur_label: &'static str,
+    /// 根のヒューリスティクス 1 回の時間の上限 (`ENOMOTO_T_MIP_ROOT_DIVE_TIME_FRAC`。[`Solver::time_up`] が見る)
+    pub(super) heur_stop: Option<Instant>,
+    /// ヒューリスティクス役を務めている間か (ログで暫定解の出どころを示すため)
+    pub(super) in_heur_role: bool,
+    /// 受け取った解が別のスレッドのヒューリスティクスのものか (ログの表示用)
+    other_thread_label: bool,
     /// 次に出すサブ MIP が根の RENS のものか (受け取ったときにノード上限で止まっていれば `rens_node_limited` を立てる)。
     pub(super) submip_is_rens: bool,
     /// 別スレッドの Feasibility Jump とその停止の印。
@@ -515,7 +525,7 @@ pub(crate) struct Portfolio {
     fb: std::sync::Mutex<std::collections::HashMap<u64, Vec<f64>>>,
     fb_ver: std::sync::atomic::AtomicU64,
     /// 写しから解いた求解が見つけた解 (写しの通し番号, 写しの問題の空間の解)。写しを作った木の探索のスレッドが受け取る。
-    inbox: std::sync::Mutex<Vec<(u64, Vec<f64>)>>,
+    inbox: std::sync::Mutex<Vec<(u64, Vec<f64>, &'static str, bool)>>,
     inbox_n: std::sync::atomic::AtomicU64,
 }
 
@@ -1170,6 +1180,11 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         rens_node_limited: false,
         parallel_submips: false,
         pending_submips: std::collections::VecDeque::new(),
+        heur_label: "",
+        heur_stop: None,
+        in_heur_role: false,
+        other_thread_label: false,
+        submip_fix_rate: None,
         submip_is_rens: false,
         fj_thread: None,
         ls_thread: None,
@@ -1501,6 +1516,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     pub(super) fn time_up(&self) -> bool {
         self.deadline.is_some_and(|d| Instant::now() >= d)
+            || self.heur_stop.is_some_and(|d| Instant::now() >= d)
             || self.pool.as_ref().is_some_and(|p| p.stop.load(std::sync::atomic::Ordering::Relaxed))
             || ROLE_POOL.with(|r| r.borrow().as_ref().is_some_and(|p| p.stop.load(std::sync::atomic::Ordering::Relaxed) || p.fin.load(std::sync::atomic::Ordering::Relaxed)))
             || self.shared.as_ref().is_some_and(|s| {
@@ -1607,7 +1623,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if let (Some(snap), Some(s)) = (&self.snap, &self.shared) {
                 // 木の写しから解く求解の解は写しの問題の空間なので、写しを作ったスレッドに渡す (共有の最良値はそのスレッドが
                 // 受け取ったときに更新する。解を持たないまま最良値だけ下げると、その解を誰も返せないことがある)
-                s.inbox.lock().unwrap().push((snap.serial, x.clone()));
+                s.inbox.lock().unwrap().push((snap.serial, x.clone(), self.heur_label, self.in_heur_role));
                 s.inbox_n.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
                 // 木を分け合う従のスレッドは、解を主に渡した後で最良値も知らせる (主は終わる前に必ず受け取る)
                 if self.pool.is_some() {
@@ -1632,7 +1648,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let lim = self.prune_limit();
             self.queue.prune(lim);
             if self.params.verbose {
-                eprintln!("MIP: new incumbent {:.10e} at node {} ({:.2}s)", z, self.nodes, self.start.elapsed().as_secs_f64());
+                let other = if std::mem::take(&mut self.other_thread_label) { "other thread: " } else { "" };
+                eprintln!("MIP: new incumbent {:.10e} at node {} ({:.2}s) [{other}{}]", z, self.nodes, self.start.elapsed().as_secs_f64(), if self.heur_label.is_empty() { "tree" } else { self.heur_label });
             }
         }
         better
@@ -2126,7 +2143,22 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             // 近さ ([`Solver::heur_close`]) を記録しない関数 (旧来の RENS など) を見分けるため負にしておく
                             self.heur_close = -1.0;
                             let z_before = self.incumbent.as_ref().map(|(z, _)| *z);
+                            self.heur_label = $name;
+                            // `ENOMOTO_T_MIP_ROOT_DIVE_TIME_FRAC`: Feasibility Pump・ダイビング 1 回の時間を時間上限のこの割合までにする
+                            // (既定 0 は上限なし。trento1 では Pump が 1 回で 45 秒使い、その間に別スレッドの RENS が見つけた解も
+                            // 受け取れなかった)
+                            let cap = tunable!("ENOMOTO_T_MIP_ROOT_DIVE_TIME_FRAC", 0.0, f64);
+                            if cap > 0.0 && !self.params.submip && self.params.time_limit.is_finite() && ($name == "feasibility pump" || $name.ends_with("diving")) {
+                                self.heur_stop = Some(Instant::now() + std::time::Duration::from_secs_f64(cap * self.params.time_limit));
+                            }
                             let found = $e;
+                            self.heur_stop = None;
+                            self.heur_label = "";
+                            // `ENOMOTO_MIP_POLL_SUBMIPS`: 別スレッドのサブ MIP のうち終わったものの結果をすぐ受け取る (以前は根の
+                            // ヒューリスティクスを一通り回し終えてから受け取ったので、見つかった解が後のヒューリスティクスに使われなかった)
+                            if env_str!("ENOMOTO_MIP_POLL_SUBMIPS").is_some() {
+                                self.poll_submips();
+                            }
                             if !found {
                                 self.failed_heurs |= bit;
                             }
@@ -2956,10 +2988,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 xp("m_redcost");
                 // ノードのヒューリスティクス (安価な単純丸めは毎回、ランダム丸めは予算内で待ち行列から取り出したノードのみ)
                 if resolves == 0 && !(tree_heur_off() && !self.params.submip) {
+                    self.heur_label = "tree rounding";
                     self.simple_rounding(&x);
                     if env_str!("ENOMOTO_MIP_NO_ZIROUND").is_none() {
                         self.zi_round(&x);
                     }
+                    self.heur_label = "";
                     let budget = self.lp.total_iterations() / 20 + 10_000;
                     // 大近傍探索 (サブ MIP) は反復の予算とは別に、経過時間の一定割合までの時間の予算で呼ぶ
                     // (サブ MIP の反復を共通の予算に数えると、1 回で使い切ってしばらく呼べなくなる)
@@ -3043,7 +3077,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         self.objective_bisection(lb);
                         self.bisect_secs += t_b.elapsed().as_secs_f64();
                     } else if node.depth > 0 && plunge_depth == 0 && self.heur_iters - self.heur_iters_root < budget {
+                        self.heur_label = "tree randomized rounding";
                         self.randomized_rounding(&x, 1);
+                        self.heur_label = "";
                     }
                     // 暫定解がない間は木の中でも解探しを強める (`ENOMOTO_MIP_NOINC_HEUR` で有効。根で暫定解のない 2 問
                     // (neos-1456979・30n20b8) でも解は見つからなかった: HiGHS はどちらも根のカットで下界を大きく上げた後の
@@ -3193,9 +3229,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             let bound = if cutoff.is_finite() { lb + quot * (cutoff - lb) } else { f64::INFINITY };
                             let it0 = self.lp.total_iterations();
                             self.dive_calls += 1;
+                            self.heur_label = "tree diving";
                             if self.dive(kind, quota - self.dive_iters, bound) {
                                 self.dive_succ += 1;
                             }
+                            self.heur_label = "";
                             let used = self.lp.total_iterations() - it0;
                             self.dive_iters += used;
                             self.heur_iters += used;
@@ -3731,6 +3769,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let pool = self.pool.clone()?;
         let t_role = Instant::now();
         self.heur_role_entries += 1;
+        self.in_heur_role = true;
         pool.in_role.fetch_add(1, Ordering::Relaxed);
         let mut out = Vec::with_capacity(self.queue.len());
         while let Some(n) = self.queue.pop_best() {
@@ -3825,6 +3864,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         };
         ROLE_POOL.with(|r| *r.borrow_mut() = None);
         pool.in_role.fetch_sub(1, Ordering::Relaxed);
+        self.in_heur_role = false;
         if prof_tree_par() || heur_role_verbose() {
             eprintln!(
                 "HEURROLE: tid {} entry {} {:.2}s in role ({}), {} LNS calls, {} improved, {} imported, ALNS counts {:?}",
@@ -5890,6 +5930,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         let presolve = env_str!("ENOMOTO_MIP_SUBMIP_NO_PRESOLVE").is_none();
         let is_rens = std::mem::take(&mut self.submip_is_rens);
+        if self.params.verbose {
+            let nfree = (0..sub.n).filter(|&j| sub.col_lo[j] < sub.col_up[j]).count();
+            eprintln!("MIP:   parallel sub-MIP started ({}): {nfree} free columns of {}", self.heur_label, sub.n);
+        }
+        let label = self.heur_label;
+        let fix_rate = self.submip_fix_rate.take();
         self.pending_submips.push_back((
             std::thread::spawn(move || {
                 // 別スレッドで解くサブ MIP も入れ子の深さ 1 として数える ([`super::heuristics::SUBMIP_DEPTH`])
@@ -5897,13 +5943,37 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 super::solve_problem(&sub, params, presolve)
             }),
             is_rens,
+            label,
+            Instant::now(),
+            fix_rate,
         ));
     }
 
     /// 別スレッドのサブ MIP を、残りが `keep` 本になるまで出した順に待って結果を受け取る。
     pub(super) fn join_submips(&mut self, keep: usize) {
         while self.pending_submips.len() > keep {
-            let (h, is_rens) = self.pending_submips.pop_front().unwrap();
+            let item = self.pending_submips.pop_front().unwrap();
+            self.take_submip(item);
+        }
+    }
+
+    /// 別スレッドのサブ MIP のうち終わっているものの結果を受け取る (終わっていないものは待たない)。
+    pub(super) fn poll_submips(&mut self) {
+        let mut k = 0;
+        while k < self.pending_submips.len() {
+            if self.pending_submips[k].0.is_finished() {
+                let item = self.pending_submips.remove(k).unwrap();
+                self.take_submip(item);
+            } else {
+                k += 1;
+            }
+        }
+    }
+
+    /// 別スレッドのサブ MIP 1 本の結果を受け取る。
+    fn take_submip(&mut self, item: (std::thread::JoinHandle<MipResult>, bool, &'static str, std::time::Instant, Option<f64>)) {
+        let (h, is_rens, label, t0, fix_rate) = item;
+        {
             if let Ok(r) = h.join() {
                 self.heur_iters += r.lp_iterations;
                 // 根の RENS がノード上限で止まったら、ノード上限を増やしてやり直す判断に使う (逐次のときは rens が立てる。
@@ -5913,12 +5983,27 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.rens_node_limited = true;
                 }
                 if self.params.verbose {
-                    eprintln!("MIP:   parallel sub-MIP: status {:?}, nodes {}, objective {:?}", r.status, r.nodes, r.objective);
+                    eprintln!("MIP:   parallel sub-MIP ({label}): status {:?}, nodes {}, objective {:?}, {:.2}s", r.status, r.nodes, r.objective, t0.elapsed().as_secs_f64());
                 }
+                let mut acc = false;
+                let infeasible = r.status == MipStatus::Infeasible;
                 if let Some(x) = r.x {
-                    self.try_incumbent(x);
+                    let keep = std::mem::replace(&mut self.heur_label, label);
+                    acc = self.try_incumbent(x);
+                    self.heur_label = keep;
+                }
+                if let Some(fr) = fix_rate {
+                    self.note_fix_rate(fr, infeasible, acc);
                 }
             }
+        }
+    }
+
+    /// 別スレッドの Feasibility Jump が終わっていれば結果を受け取る (`ENOMOTO_MIP_FJ2` のとき。根のカットのループの各ラウンドで
+    /// 呼ぶ。HiGHS 流の FJ は多くの問題で 1 秒以内に終わるので、カットのループの終わりまで待たずに暫定解にする)。
+    pub(super) fn poll_fj_thread(&mut self) {
+        if self.fj_thread.as_ref().is_some_and(|(h, _)| h.is_finished()) && env_str!("ENOMOTO_MIP_FJ2").is_some() {
+            self.join_fj_thread();
         }
     }
 
@@ -5927,7 +6012,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if let Some((h, stop)) = self.fj_thread.take() {
             stop.store(true, std::sync::atomic::Ordering::Relaxed);
             if let Ok(Some(x)) = h.join() {
-                if self.try_incumbent(x) && self.params.verbose {
+                self.heur_label = "feasibility jump (parallel)";
+                let ok = self.try_incumbent(x);
+                self.heur_label = "";
+                if ok && self.params.verbose {
                     eprintln!("MIP: feasibility jump (parallel) found a solution ({:.2}s)", self.start.elapsed().as_secs_f64());
                 }
             }
@@ -5946,24 +6034,34 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return false;
         }
         self.inbox_seen = n;
-        let got: Vec<Vec<f64>> = {
+        let got: Vec<(Vec<f64>, &'static str, bool)> = {
             let mut ib = s.inbox.lock().unwrap();
             let mut keep = Vec::new();
             let mut mine = Vec::new();
-            for (serial, x) in ib.drain(..) {
+            for (serial, x, label, role) in ib.drain(..) {
                 if self.snap_serials.contains(&serial) {
-                    mine.push(x);
+                    mine.push((x, label, role));
                 } else {
-                    keep.push((serial, x));
+                    keep.push((serial, x, label, role));
                 }
             }
             *ib = keep;
             mine
         };
         let mut better = false;
-        for x in got {
+        for (x, label, role) in got {
             let zx = if x.len() == self.p.n { self.p.objective(&x) } else { f64::NAN };
-            if x.len() == self.p.n && self.try_incumbent(x) {
+            self.heur_label = match (role, label.is_empty()) {
+                (true, true) => "other thread (heuristic role)",
+                (true, false) => label,
+                (false, true) => "other thread (tree)",
+                (false, false) => label,
+            };
+            self.other_thread_label = !label.is_empty() || role;
+            let ok = x.len() == self.p.n && self.try_incumbent(x);
+            self.heur_label = "";
+            self.other_thread_label = false;
+            if ok {
                 self.snap_stats[2] += 1;
                 better = true;
             } else if self.incumbent.as_ref().is_none_or(|(z, _)| zx < *z - 1e-9 * z.abs().max(1.0)) {
