@@ -1339,8 +1339,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             threads: 1,
             distinguish: false,
         };
-        // `ENOMOTO_MIP_SUBMIP_BASIS`: 今の LP の基底 (列の状態) をサブ MIP の根の LP の初めの基底にする
-        let basis = if env_str!("ENOMOTO_MIP_SUBMIP_BASIS").is_some() && sub.n == p.n && self.lp.num_rows() >= p.m { Some(self.lp.basis().col) } else { None };
+        // 今の LP の基底 (列の状態) をサブ MIP の根の LP の初めの基底にする (HiGHS の `rootbasis`。`ENOMOTO_MIP_NO_SUBMIP_BASIS` で
+        // 使わない)。停滞による打ち切り (`ENOMOTO_T_MIP_SUBMIP_STALL`) と合わせて 93 問 (4 スレッド・60 秒、2 回): 主ギャップの和
+        // 13.77 -> 12.99、SGM 38.29 -> 37.66 秒 (analysis/mip_primal_weakness_20261016.md)
+        let basis = if env_str!("ENOMOTO_MIP_NO_SUBMIP_BASIS").is_none() && sub.n == p.n && self.lp.num_rows() >= p.m { Some(self.lp.basis().col) } else { None };
         // 並列モード (根のヒューリスティクスの間): 別スレッドで解き始め、結果は後で受け取る
         if self.parallel_submips {
             self.submip_basis = basis;
