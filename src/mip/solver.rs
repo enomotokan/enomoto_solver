@@ -3643,7 +3643,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 主 (木を分け合わないときは自分) が調べ、次を全て満たしたら入る (戻らない):
     /// - 今のギャップ (最良値 - 全体の下界) が、最初の暫定解のときのギャップ (最初の暫定解 - 根の下界) の
     ///   `ENOMOTO_T_MIP_PROOF_GAP_FRAC` (既定 0.1) 倍以下か、相対ギャップが `ENOMOTO_T_MIP_PROOF_REL_GAP` (既定 0 = 見ない) 以下
-    /// - 最良値が良くなってからの時間が、経過時間の `ENOMOTO_T_MIP_PROOF_STALL_FRAC` (既定 0.5) 倍以上、かつ
+    /// - 相対ギャップが `ENOMOTO_T_MIP_PROOF_REL_GAP_MAX` (既定 0.05) 以下
+    /// - 最良値が (ギャップの 2% を超えて) 良くなってからの時間が、経過時間の `ENOMOTO_T_MIP_PROOF_STALL_FRAC` (既定 0.5) 倍以上、かつ
     ///   `ENOMOTO_T_MIP_PROOF_STALL_MIN` (既定 2) 秒以上
     fn proof_phase_check(&mut self) {
         if self.params.submip || self.pool_tid != 0 || self.in_proof_phase() || env_str!("ENOMOTO_MIP_PROOF_SWITCH").is_none() {
@@ -3664,13 +3665,25 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if !self.proof_first_z.is_finite() {
             self.proof_first_z = z;
         }
-        if z < self.proof_last_best.0 - 1e-9 * z.abs().max(1.0) {
+        // 最良値の改善は、そのときのギャップの `ENOMOTO_T_MIP_PROOF_IMPROVE` (既定 0.02) 倍を超えるときだけ数える
+        // (qiu では 1e-9 程度の改善が続き、停滞の時間がそのたびに 0 に戻っていた)
+        let lb_now = self.global_lower_bound();
+        let tol = if self.proof_last_best.0.is_finite() && lb_now.is_finite() {
+            tunable!("ENOMOTO_T_MIP_PROOF_IMPROVE", 0.02, f64) * (self.proof_last_best.0 - lb_now).max(0.0)
+        } else {
+            0.0
+        };
+        if z < self.proof_last_best.0 - tol.max(1e-9 * z.abs().max(1.0)) {
             self.proof_last_best = (z, now);
             return;
         }
         let el = self.start.elapsed().as_secs_f64();
         let stall = now.duration_since(self.proof_last_best.1).as_secs_f64();
         if stall < tunable!("ENOMOTO_T_MIP_PROOF_STALL_FRAC", 0.5, f64) * el || stall < tunable!("ENOMOTO_T_MIP_PROOF_STALL_MIN", 2.0, f64) {
+            if env_str!("ENOMOTO_MIP_PROOF_DEBUG").is_some() {
+                let lb = self.global_lower_bound();
+                eprintln!("PROOFDBG: {el:.1}s stall {stall:.1}s (short) gap {:.3e} gap0 {:.3e}", z - lb, self.proof_first_z - self.hcm_root_obj);
+            }
             return;
         }
         let lb = self.global_lower_bound();
@@ -3680,7 +3693,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let gap = (z - lb).max(0.0);
         let gap0 = (self.proof_first_z - self.hcm_root_obj).max(0.0);
         let rel = gap / z.abs().max(lb.abs()).max(1e-9);
-        let ok = (gap0 > 0.0 && gap <= tunable!("ENOMOTO_T_MIP_PROOF_GAP_FRAC", 0.1, f64) * gap0) || rel <= tunable!("ENOMOTO_T_MIP_PROOF_REL_GAP", 0.0, f64);
+        // 相対ギャップが `ENOMOTO_T_MIP_PROOF_REL_GAP_MAX` (既定 0.05) を超えるときは入らない (最初の暫定解が悪いと
+        // ギャップの比はすぐ小さくなる: radiationm18-12-05 は相対ギャップ 10%、rococoC10-001000 は 22% で入っていた)
+        let ok = ((gap0 > 0.0 && gap <= tunable!("ENOMOTO_T_MIP_PROOF_GAP_FRAC", 0.1, f64) * gap0) || rel <= tunable!("ENOMOTO_T_MIP_PROOF_REL_GAP", 0.0, f64))
+            && rel <= tunable!("ENOMOTO_T_MIP_PROOF_REL_GAP_MAX", 0.05, f64);
+        if env_str!("ENOMOTO_MIP_PROOF_DEBUG").is_some() {
+            eprintln!("PROOFDBG: {el:.1}s stall {stall:.1}s gap {gap:.3e} gap0 {gap0:.3e} ratio {:.3} rel {rel:.4} ok {ok}", gap / gap0.max(1e-300));
+        }
         if !ok {
             return;
         }
