@@ -508,6 +508,12 @@ pub(super) struct Solver<'a, L: MipLp> {
     dive_iters: u64,
     dive_calls: u64,
     dive_succ: u64,
+    /// 証明の段階の検出 (`ENOMOTO_MIP_PROOF_SWITCH`、[`Self::proof_phase_check`]): 木を分け合わないときの印、最初の
+    /// 暫定解の目的値、最後に最良値が良くなった (と気づいた) 時刻とその値、前回調べた時刻。
+    proof_phase: bool,
+    proof_first_z: f64,
+    proof_last_best: (f64, Instant),
+    proof_eval_at: Option<Instant>,
 }
 
 /// 分枝限定法で解く。
@@ -636,6 +642,8 @@ pub(crate) struct WorkPool {
     in_role: std::sync::atomic::AtomicUsize,
     /// 大近傍探索の価値の指数移動平均 ([`MuStats`])。
     mu: std::sync::Mutex<MuStats>,
+    /// 証明の段階に入った (`ENOMOTO_MIP_PROOF_SWITCH`、[`Solver::proof_phase_check`])。主が立て、各スレッドが読む。
+    proof_phase: std::sync::atomic::AtomicBool,
 }
 
 /// 並列の強分岐 (`ENOMOTO_MIP_PAR_SB`) で別スレッドが解いた子の LP の結果。主が逐次と同じ順に当てはめる。
@@ -841,6 +849,11 @@ fn heur_role_verbose() -> bool {
 }
 
 /// ヒューリスティクス役を起動の判定で決めるか (既定。`ENOMOTO_MIP_HEUR_ROLE_TRIGGER=off` なら以前の形で、解ができたら就く)。
+/// 証明の段階 (`ENOMOTO_MIP_PROOF_SWITCH`) でヒューリスティクス役も止めるか (`ENOMOTO_MIP_PROOF_KEEP_ROLE` なら止めない)。
+fn proof_phase_stops_role() -> bool {
+    env_str!("ENOMOTO_MIP_PROOF_KEEP_ROLE").is_none()
+}
+
 fn heur_trigger_mode() -> bool {
     env_str!("ENOMOTO_MIP_HEUR_ROLE_TRIGGER").is_none_or(|v| v != "off")
 }
@@ -903,6 +916,7 @@ impl WorkPool {
             fin: std::sync::atomic::AtomicBool::new(false),
             in_role: std::sync::atomic::AtomicUsize::new(0),
             mu: std::sync::Mutex::new(MuStats::default()),
+            proof_phase: std::sync::atomic::AtomicBool::new(false),
             pc: std::sync::Mutex::new(pc),
             bounds: std::sync::Mutex::new((lo, up)),
             inner: std::sync::Mutex::new(PoolInner { nodes: Vec::new(), busy: threads, done: false }),
@@ -1344,6 +1358,10 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         dive_iters: 0,
         dive_calls: 0,
         dive_succ: 0,
+        proof_phase: false,
+        proof_first_z: f64::INFINITY,
+        proof_last_best: (f64::INFINITY, Instant::now()),
+        proof_eval_at: None,
     };
     // DSE 重みは既定で全ての LP で引き継ぐ (根のカットのループ、潜りの子、強分岐、待ち行列のノードは基底と一緒に保存した
     // 重みを戻す)。`ENOMOTO_MIP_NO_DSE_ALL` で以前の形 (毎回 1 から) に戻す。サブ MIP の中から呼ばれても、終わったら元に戻す
@@ -1659,6 +1677,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
             self.inc_only_fj = self.heur_label.starts_with("feasibility jump");
+            if !self.proof_first_z.is_finite() {
+                self.proof_first_z = z;
+            }
             self.incumbent = Some((z, x));
             self.root_redcost_fixing();
             let lim = self.prune_limit();
@@ -2749,7 +2770,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let lim = self.prune_limit();
                     self.queue.prune(lim);
                     // 下界最小のノードを選ぶ頻度: 暫定解があれば上げる (下界を押し上げる)
-                    let bb_every = if self.has_cutoff_value() { tunable!("ENOMOTO_T_MIP_BB_EVERY_INC", 4u64, u64) } else { tunable!("ENOMOTO_T_MIP_BB_EVERY", 10u64, u64) };
+                    self.proof_phase_check();
+                    let bb_every = if self.in_proof_phase() {
+                        tunable!("ENOMOTO_T_MIP_PROOF_BB_EVERY", 1u64, u64)
+                    } else if self.has_cutoff_value() {
+                        tunable!("ENOMOTO_T_MIP_BB_EVERY_INC", 4u64, u64)
+                    } else {
+                        tunable!("ENOMOTO_T_MIP_BB_EVERY", 10u64, u64)
+                    };
                     let n = match self.queue.pop(bb_every) {
                         Some(n) => {
                             self.tp_kind = 1;
@@ -3602,11 +3630,81 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.incumbent.is_some() || (self.pool.is_some() && env_str!("ENOMOTO_MIP_TREE_OWN_INC_ONLY").is_none() && self.shared.as_ref().is_some_and(|s| s.best().is_finite()))
     }
 
+    /// 証明の段階に入ったか ([`Self::proof_phase_check`])。
+    fn in_proof_phase(&self) -> bool {
+        match &self.pool {
+            Some(pool) => pool.proof_phase.load(std::sync::atomic::Ordering::Relaxed),
+            None => self.proof_phase,
+        }
+    }
+
+    /// 証明の段階の検出 (`ENOMOTO_MIP_PROOF_SWITCH`): 最適解かそれに近い解が早く見つかり、残りは最適性の証明だけの問題
+    /// (noswot・mas76・binkar10_1 など) で、木の中の主側の処理を止めて下界最小のノード選択に切り替える。0.5 秒おきに
+    /// 主 (木を分け合わないときは自分) が調べ、次を全て満たしたら入る (戻らない):
+    /// - 今のギャップ (最良値 - 全体の下界) が、最初の暫定解のときのギャップ (最初の暫定解 - 根の下界) の
+    ///   `ENOMOTO_T_MIP_PROOF_GAP_FRAC` (既定 0.1) 倍以下か、相対ギャップが `ENOMOTO_T_MIP_PROOF_REL_GAP` (既定 0 = 見ない) 以下
+    /// - 最良値が良くなってからの時間が、経過時間の `ENOMOTO_T_MIP_PROOF_STALL_FRAC` (既定 0.5) 倍以上、かつ
+    ///   `ENOMOTO_T_MIP_PROOF_STALL_MIN` (既定 2) 秒以上
+    fn proof_phase_check(&mut self) {
+        if self.params.submip || self.pool_tid != 0 || self.in_proof_phase() || env_str!("ENOMOTO_MIP_PROOF_SWITCH").is_none() {
+            return;
+        }
+        if self.proof_eval_at.is_some_and(|t| t.elapsed().as_secs_f64() < 0.5) {
+            return;
+        }
+        let now = Instant::now();
+        self.proof_eval_at = Some(now);
+        let z = match &self.shared {
+            Some(s) => s.best(),
+            None => self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z),
+        };
+        if !z.is_finite() {
+            return;
+        }
+        if !self.proof_first_z.is_finite() {
+            self.proof_first_z = z;
+        }
+        if z < self.proof_last_best.0 - 1e-9 * z.abs().max(1.0) {
+            self.proof_last_best = (z, now);
+            return;
+        }
+        let el = self.start.elapsed().as_secs_f64();
+        let stall = now.duration_since(self.proof_last_best.1).as_secs_f64();
+        if stall < tunable!("ENOMOTO_T_MIP_PROOF_STALL_FRAC", 0.5, f64) * el || stall < tunable!("ENOMOTO_T_MIP_PROOF_STALL_MIN", 2.0, f64) {
+            return;
+        }
+        let lb = self.global_lower_bound();
+        if !lb.is_finite() {
+            return;
+        }
+        let gap = (z - lb).max(0.0);
+        let gap0 = (self.proof_first_z - self.hcm_root_obj).max(0.0);
+        let rel = gap / z.abs().max(lb.abs()).max(1e-9);
+        let ok = (gap0 > 0.0 && gap <= tunable!("ENOMOTO_T_MIP_PROOF_GAP_FRAC", 0.1, f64) * gap0) || rel <= tunable!("ENOMOTO_T_MIP_PROOF_REL_GAP", 0.0, f64);
+        if !ok {
+            return;
+        }
+        match &self.pool {
+            Some(pool) => pool.proof_phase.store(true, std::sync::atomic::Ordering::Relaxed),
+            None => self.proof_phase = true,
+        }
+        if self.params.verbose {
+            eprintln!(
+                "MIP: proof phase at node {} ({el:.2}s): best {z:.10e} bound {lb:.10e} gap {gap:.3e} (first-incumbent gap {gap0:.3e}), no improvement for {stall:.1}s",
+                self.nodes
+            );
+        }
+    }
+
     /// 木の中の大近傍探索・ダイビングをこのスレッドで回すか。木を分け合うときは HiGHS (`HighsMipSolver::run`) と同じく、
     /// 暫定解があればスレッドの 1/4、なければ 1/2 (切り上げ、主を含む) だけが回す (全スレッドが同じ予算で回すと、同じ
     /// 暫定解から同じ近傍のサブ MIP を重複して解く)。主 (番号 0)・1 スレッドは常に回す。
     /// `ENOMOTO_MIP_TREE_HEUR_ALL` なら以前と同じく全スレッドが回す
     fn tree_heur_allowed(&self) -> bool {
+        // 証明の段階では木の中の大近傍探索・ダイビングを止める (単純丸め・ZI round は続ける)
+        if self.in_proof_phase() {
+            return false;
+        }
         let Some(pool) = &self.pool else { return true };
         // ヒューリスティクス役を分けるとき: 解があれば (役のスレッドが大近傍探索を回すので) 木の探索のスレッドは回さない
         // (`ENOMOTO_MIP_HEUR_ROLE_TREE_LNS` なら以前と同じく回す)
@@ -3627,6 +3725,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
     fn heur_role_mine(&mut self) -> bool {
         let Some(pool) = &self.pool else { return false };
         if !(pool.heur_k > 0 && self.snap.is_some() && self.race_done && (self.pool_tid as usize) >= pool.threads - pool.heur_k && pool.has_x.load(std::sync::atomic::Ordering::Acquire)) {
+            return false;
+        }
+        if proof_phase_stops_role() && pool.proof_phase.load(std::sync::atomic::Ordering::Relaxed) {
             return false;
         }
         // 起動の判定 (`ENOMOTO_MIP_HEUR_ROLE_TRIGGER`): 0.25 秒おきに、木の証明が時間内に終わりそうになく、暫定解が良くなれば
@@ -3875,6 +3976,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             if self.time_up() {
                 break Some(false);
+            }
+            // 証明の段階に入ったら木の探索に戻る (役には戻らない、[`Self::heur_role_mine`])
+            if proof_phase_stops_role() && pool.proof_phase.load(Ordering::Relaxed) {
+                break None;
             }
             self.heur_role_import(&pool);
             let lpx = pool.lp_x.lock().unwrap().clone();
