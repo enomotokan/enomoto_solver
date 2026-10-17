@@ -683,6 +683,13 @@ pub(crate) struct TreeProf {
     /// 共有の待ち行列でノードを待った時間と、待った回数 (すぐ取れなかった回数)。
     idle_s: f64,
     waits: u64,
+    /// `idle_s` の内訳: 錠を取って調べていた時間 (錠の取り合い・ノードの走査) と、眠って待った時間。
+    lock_s: f64,
+    sleep_s: f64,
+    /// 共有の待ち行列から取ったときの、待ち行列に残っていたノード数の合計 (平均の大きさを見る)。
+    pool_len_sum: u64,
+    /// 木の中の大近傍探索 (サブ MIP) に使った時間。
+    lns_s: f64,
     /// 最後の待ち (探索の終わり・止める合図までノードが来なかった) の時間。
     tail_s: f64,
     /// スレッドの間の同期 (境界・学習・擬似費用・ノードを渡す) の時間。
@@ -726,9 +733,9 @@ impl TreeProf {
         let per = |k: usize| if self.kind_n[k] > 0 { self.kind_it[k] as f64 / self.kind_n[k] as f64 } else { 0.0 };
         let pms = |k: usize| if self.kind_n[k] > 0 { 1e3 * self.kind_s[k] / self.kind_n[k] as f64 } else { 0.0 };
         format!(
-            "{} | tid {} ready {:.2}s end {:.2}s idle {:.2}s ({} waits) tail {:.2}s sync {:.3}s nodes {} (lb>=opt {}) first LP [dive {} {:.1}it {:.2}ms | queue {} {:.1}it {:.2}ms | pool {} {:.1}it {:.2}ms]",
+            "{} | tid {} ready {:.2}s end {:.2}s idle {:.2}s ({} waits, lock {:.2}s sleep {:.2}s, pool mean {:.1}) lns {:.2}s tail {:.2}s sync {:.3}s nodes {} (lb>=opt {}) first LP [dive {} {:.1}it {:.2}ms | queue {} {:.1}it {:.2}ms | pool {} {:.1}it {:.2}ms]",
             self.proofs_line(),
-            self.tid, self.ready_s, self.end_s, self.idle_s, self.waits, self.tail_s, self.sync_s, self.nodes, waste,
+            self.tid, self.ready_s, self.end_s, self.idle_s, self.waits, self.lock_s, self.sleep_s, self.pool_len_sum as f64 / self.kind_n[2].max(1) as f64, self.lns_s, self.tail_s, self.sync_s, self.nodes, waste,
             self.kind_n[0], per(0), pms(0), self.kind_n[1], per(1), pms(1), self.kind_n[2], per(2), pms(2)
         )
     }
@@ -1843,7 +1850,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return;
         }
         eprintln!(
-            "MIP: {:8.2}s nodes {:8} open {:7} lb {:.8e} ub {:.8e} lp_iters {} sb_iters {} sb_lps {} sb_secs {:.2} node_iters {} (first {}, lps {}) heur_iters {} dive_iters {} lp_rows {} node_cut_secs {:.2}",
+            "MIP: {:8.2}s nodes {:8} open {:7} lb {:.8e} ub {:.8e} lp_iters {} sb_iters {} sb_lps {} sb_secs {:.2} node_iters {} (first {}, lps {}) heur_iters {} dive_iters {} lp_rows {} node_cut_secs {:.2}{}",
             self.start.elapsed().as_secs_f64(),
             self.nodes,
             self.queue.len(),
@@ -1859,7 +1866,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.heur_iters,
             self.dive_iters,
             self.lp.num_rows(),
-            self.node_cut_secs
+            self.node_cut_secs,
+            // 木を分け合うとき: 共有の待ち行列の大きさと待っているスレッドの数 (符号つきで出す。下に回っていれば負)
+            self.pool.as_ref().map_or(String::new(), |pl| {
+                use std::sync::atomic::Ordering;
+                format!(" pool_len {} pool_idle {}", pl.len.load(Ordering::Relaxed), pl.idle.load(Ordering::Relaxed) as isize)
+            }),
         );
     }
 
@@ -3972,6 +3984,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if self.pool_busy {
                 g.busy -= 1;
                 self.pool_busy = false;
+                // `ENOMOTO_MIP_ROLE_IDLE_FIX`: 待っているスレッドの数 (`idle`) も合わせる。合わせないと、役から木に戻って
+                // 共有の待ち行列からノードを取るときに `idle` を 1 減らして usize の下に回り (`pool_busy` が偽のまま取るので
+                // 増やした分がない)、以後どのスレッドも「待っているスレッドがいる」と見て毎ノード自分の待ち行列の半分を
+                // 共有の待ち行列に渡し続ける (pk1 の速い山はこの状態: 自分の待ち行列がほぼ空になりカットが保護されず LP が
+                // 小さいままになる。analysis/pk1_variance_20261017.md)。既定では直さない: 直すだけでは pk1 が常に遅い山になり、保護を外す組との 40 問の比較は 1 回では差が出なかった
+                if env_str!("ENOMOTO_MIP_ROLE_IDLE_FIX").is_some() {
+                    pool.idle.fetch_add(1, Ordering::Relaxed);
+                }
             }
             if g.busy == 0 && g.nodes.is_empty() {
                 g.done = true;
@@ -6641,7 +6661,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut waited = false;
         let r = loop {
             {
+                let t_lock = Instant::now();
                 let mut g = pool.inner.lock().unwrap();
+                self.tprof.pool_len_sum += g.nodes.len() as u64;
                 let sl = pool.slots.get(self.pool_tid as usize);
                 if let Some(sl) = sl {
                     sl.open.store(0, Ordering::Relaxed);
@@ -6659,8 +6681,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         self.pool_busy = true;
                     }
                     self.pool_stats[1] += 1;
-                    break Ok(Some(self.open_from_pool(sn)));
+                    let n = self.open_from_pool(sn);
+                    self.tprof.lock_s += t_lock.elapsed().as_secs_f64();
+                    break Ok(Some(n));
                 }
+                self.tprof.lock_s += t_lock.elapsed().as_secs_f64();
                 // ノードを持っていない
                 if let Some(sl) = sl {
                     sl.lb.store(f64::INFINITY.to_bits(), Ordering::Relaxed);
@@ -6682,7 +6707,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 break Err(());
             }
             waited = true;
+            let t_sleep = Instant::now();
             std::thread::sleep(Duration::from_micros(200));
+            self.tprof.sleep_s += t_sleep.elapsed().as_secs_f64();
         };
         let w = t_wait.elapsed().as_secs_f64();
         if matches!(r, Ok(Some(_))) {
@@ -6845,6 +6872,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if let (Some(pool), true) = (self.pool.clone(), self.snap.is_some() && prof_tree_par()) {
             self.tprof.tid = self.pool_tid;
             self.tprof.end_s = pool.t0.elapsed().as_secs_f64();
+            self.tprof.lns_s = self.lns_secs;
             pool.prof.lock().unwrap().push(std::mem::take(&mut self.tprof));
         }
         // 木を分け合う主: 従を止めて待ち、従と共有の待ち行列の下界を合わせる。従: 待っていない側から外れる
