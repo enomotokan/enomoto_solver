@@ -1665,6 +1665,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.queue.prune(lim);
             if self.params.verbose {
                 let other = if std::mem::take(&mut self.other_thread_label) { "other thread: " } else { "" };
+                // 被約費用による大域的な固定の後に固定されている整数列の数 (根の LP を解く前に固定されていた数との差も)。
+                // 木の途中で再スタートする価値があるかの目安
+                let gfix = (0..self.p.n).filter(|&j| self.p.is_int[j] && self.dom.global_lo[j] == self.dom.global_up[j]).count();
+                eprintln!("MIP:   global fixed integers {gfix} of {} (newly {} since the root LP)", self.p.nint, gfix.saturating_sub(self.root_fixed0));
                 eprintln!("MIP: new incumbent {:.10e} at node {} ({:.2}s) [{other}{}]", z, self.nodes, self.start.elapsed().as_secs_f64(), if self.heur_label.is_empty() { "tree" } else { self.heur_label });
             }
         }
