@@ -824,10 +824,89 @@ impl MuStats {
 }
 
 struct PoolInner {
-    nodes: Vec<SnapNode>,
+    nodes: PoolNodes,
     /// 待っていない (ノードを持っているか処理している) スレッドの数。
     busy: usize,
     done: bool,
+}
+
+/// 共有の待ち行列のノード。既定では下界の小さい順の二分ヒープ (先頭が下界最小)。`ENOMOTO_MIP_POOL_LINEAR` なら以前と同じく
+/// 並べずに置き、下界最小のノードを毎回全体の走査で探す (pk1 では共有の待ち行列が 3〜9 万ノードになり、走査に錠の中で
+/// スレッドあたり 3〜8 秒使っていた。analysis/pk1_variance_20261017.md)。
+struct PoolNodes {
+    v: Vec<SnapNode>,
+    heap: bool,
+}
+
+impl PoolNodes {
+    fn new() -> Self {
+        PoolNodes { v: Vec::new(), heap: env_str!("ENOMOTO_MIP_POOL_LINEAR").is_none() }
+    }
+    fn len(&self) -> usize {
+        self.v.len()
+    }
+    fn is_empty(&self) -> bool {
+        self.v.is_empty()
+    }
+    fn iter(&self) -> std::slice::Iter<'_, SnapNode> {
+        self.v.iter()
+    }
+    fn push(&mut self, n: SnapNode) {
+        self.v.push(n);
+        if self.heap {
+            let mut i = self.v.len() - 1;
+            while i > 0 {
+                let p = (i - 1) / 2;
+                if self.v[i].lower_bound < self.v[p].lower_bound {
+                    self.v.swap(i, p);
+                    i = p;
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+    fn extend(&mut self, it: impl IntoIterator<Item = SnapNode>) {
+        for n in it {
+            self.push(n);
+        }
+    }
+    /// 下界最小のノードの位置 (ヒープなら先頭)。
+    fn best(&self) -> Option<usize> {
+        if self.heap {
+            (!self.v.is_empty()).then_some(0)
+        } else {
+            (0..self.v.len()).min_by(|&a, &b| self.v[a].lower_bound.total_cmp(&self.v[b].lower_bound))
+        }
+    }
+    fn min_lower_bound(&self) -> f64 {
+        self.best().map_or(f64::INFINITY, |k| self.v[k].lower_bound)
+    }
+    /// 下界最小のノードを取り出す。
+    fn pop_best(&mut self) -> Option<SnapNode> {
+        let k = self.best()?;
+        let n = self.v.swap_remove(k);
+        if self.heap && !self.v.is_empty() {
+            let len = self.v.len();
+            let mut i = 0;
+            loop {
+                let (l, r) = (2 * i + 1, 2 * i + 2);
+                let mut m = i;
+                if l < len && self.v[l].lower_bound < self.v[m].lower_bound {
+                    m = l;
+                }
+                if r < len && self.v[r].lower_bound < self.v[m].lower_bound {
+                    m = r;
+                }
+                if m == i {
+                    break;
+                }
+                self.v.swap(i, m);
+                i = m;
+            }
+        }
+        Some(n)
+    }
 }
 
 /// 学習の記録に加える (古いものから捨てて `ENOMOTO_T_MIP_TREE_LEARNED_MAX` 件まで残す)。
@@ -926,7 +1005,7 @@ impl WorkPool {
             proof_phase: std::sync::atomic::AtomicBool::new(false),
             pc: std::sync::Mutex::new(pc),
             bounds: std::sync::Mutex::new((lo, up)),
-            inner: std::sync::Mutex::new(PoolInner { nodes: Vec::new(), busy: threads, done: false }),
+            inner: std::sync::Mutex::new(PoolInner { nodes: PoolNodes::new(), busy: threads, done: false }),
             slots: (0..threads).map(|_| ThreadSlot { lb: std::sync::atomic::AtomicU64::new(f64::INFINITY.to_bits()), ..Default::default() }).collect(),
             stop: std::sync::atomic::AtomicBool::new(false),
             idle: std::sync::atomic::AtomicUsize::new(0),
@@ -1898,9 +1977,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut lb = self.queue.best_lower_bound().min(self.cur_lb);
         if let Some(pool) = &self.pool {
             let g = pool.inner.lock().unwrap();
-            for n in &g.nodes {
-                lb = lb.min(n.lower_bound);
-            }
+            lb = lb.min(g.nodes.min_lower_bound());
             for sl in &pool.slots {
                 lb = lb.min(f64::from_bits(sl.lb.load(std::sync::atomic::Ordering::Relaxed)));
             }
@@ -3844,7 +3921,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut wcuts = [0.0f64; 8];
         {
             let g = pool.inner.lock().unwrap();
-            for n in &g.nodes {
+            for n in g.nodes.iter() {
                 let wt = 0.5f64.powi(n.depth.min(2000) as i32);
                 w += wt;
                 for i in 0..8 {
@@ -3984,12 +4061,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if self.pool_busy {
                 g.busy -= 1;
                 self.pool_busy = false;
-                // `ENOMOTO_MIP_ROLE_IDLE_FIX`: 待っているスレッドの数 (`idle`) も合わせる。合わせないと、役から木に戻って
+                // 待っているスレッドの数 (`idle`) も合わせる (`ENOMOTO_MIP_NO_ROLE_IDLE_FIX` なら以前と同じく合わせない)。合わせないと、役から木に戻って
                 // 共有の待ち行列からノードを取るときに `idle` を 1 減らして usize の下に回り (`pool_busy` が偽のまま取るので
                 // 増やした分がない)、以後どのスレッドも「待っているスレッドがいる」と見て毎ノード自分の待ち行列の半分を
                 // 共有の待ち行列に渡し続ける (pk1 の速い山はこの状態: 自分の待ち行列がほぼ空になりカットが保護されず LP が
-                // 小さいままになる。analysis/pk1_variance_20261017.md)。既定では直さない: 直すだけでは pk1 が常に遅い山になり、保護を外す組との 40 問の比較は 1 回では差が出なかった
-                if env_str!("ENOMOTO_MIP_ROLE_IDLE_FIX").is_some() {
+                // 小さいままになる。analysis/pk1_variance_20261017.md)。直すと待ち行列のノードが残り、カットの保護で LP が膨らむので、
+                // 保護は既定でやめた ([`Self::basis_protected_cuts`])
+                if env_str!("ENOMOTO_MIP_NO_ROLE_IDLE_FIX").is_none() {
                     pool.idle.fetch_add(1, Ordering::Relaxed);
                 }
             }
@@ -6615,16 +6693,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         let cutoff = self.prune_limit();
         let mut g = pool.inner.lock().unwrap();
-        let best = (0..g.nodes.len()).min_by(|&a, &b| g.nodes[a].lower_bound.total_cmp(&g.nodes[b].lower_bound));
-        let pool_min = best.map_or(f64::INFINITY, |k| g.nodes[k].lower_bound);
+        let pool_min = g.nodes.min_lower_bound();
         let all_min = me.min(others_min).min(pool_min);
         if !all_min.is_finite() {
             return;
         }
         let width = if cutoff.is_finite() { (cutoff - all_min).max(1e-9) } else { all_min.abs().max(1.0) };
         let thr = tunable!("ENOMOTO_T_MIP_TREE_BALANCE_Q", 0.2, f64) * width;
-        if let Some(k) = best.filter(|_| pool_min < me - thr) {
-            let sn = g.nodes.swap_remove(k);
+        if let Some(sn) = if pool_min < me - thr { g.nodes.pop_best() } else { None } {
             pool.len.store(g.nodes.len(), Ordering::Relaxed);
             drop(g);
             if let Some(sl) = pool.slots.get(t) {
@@ -6668,8 +6744,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if let Some(sl) = sl {
                     sl.open.store(0, Ordering::Relaxed);
                 }
-                if let Some(k) = (0..g.nodes.len()).min_by(|&a, &b| g.nodes[a].lower_bound.total_cmp(&g.nodes[b].lower_bound)) {
-                    let sn = g.nodes.swap_remove(k);
+                if let Some(sn) = g.nodes.pop_best() {
                     // 受け取ったノードの下界を同じ錠の中で書く (共有の待ち行列から消えた後も全体の下界に入るように)
                     if let Some(sl) = sl {
                         sl.lb.store(sn.lower_bound.to_bits(), Ordering::Relaxed);
@@ -6755,10 +6830,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.unresolved = true;
         }
         let g = pool.inner.lock().unwrap();
-        for n in &g.nodes {
-            lb = lb.min(n.lower_bound);
-        }
-        lb
+        lb.min(g.nodes.min_lower_bound())
     }
 
     /// 木の写しから解く求解: 部分木を探索し終えた写しのノード (待ち行列にも潜っている子にも、そのノードの子孫が残って

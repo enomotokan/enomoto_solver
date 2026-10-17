@@ -775,12 +775,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     /// 今の LP の基底で効いている (論理変数が非基底の) カットの番号 (待ち行列に入れるノードに持たせ、その間は年齢で
-    /// 外さない。取り出したときに保存した基底が必ず合う)。`ENOMOTO_MIP_NO_PROTECT_QUEUE_CUTS` で無効。
-    /// 40 問: 19 問 27.04 -> 19 問 26.89 (保護して年齢の上限を一律 30 にすると 17 問 27.55)
+    /// 外さない。取り出したときに保存した基底が必ず合う)。既定では使わない (`ENOMOTO_MIP_PROTECT_QUEUE_CUTS` で使う)。
+    /// 以前は既定で使っていた (40 問: 19 問 27.04 -> 19 問 26.89、保護して年齢の上限を一律 30 にすると 17 問 27.55) が、待ち行列の
+    /// ノードが数千あると、それぞれが入れた時点で効いていたカットの和でほぼ全てのカットが外せなくなり LP が膨らむ (pk1 は元 45 行が
+    /// 約 545 行になり、ノードの LP が 2 倍遅い)。その計測は役の復帰で `idle` が下に回り待ち行列がほぼ空になる不具合のある状態で
+    /// 取ったもの (analysis/pk1_variance_20261017.md)。HiGHS も保護せず、基底が行と合わなければ今の基底から解く
     pub(super) fn basis_protected_cuts(&mut self) -> Option<std::rc::Rc<Vec<u64>>> {
         // HiGHS 流のカット管理では保護しない (HiGHS と同じく、取り出したノードの基底が LP の行と合わなければ今の基底から解く。
         // 保護すると待ち行列のノードが数千あるときほぼ全てのカットが外せず、neos-911970 では LP が行数の上限 607 に張り付いた)
-        if env_str!("ENOMOTO_MIP_NO_PROTECT_QUEUE_CUTS").is_some() || self.params.submip || (self.highs_cutmgmt() && env_str!("ENOMOTO_MIP_HCM_PROTECT").is_none()) {
+        if env_str!("ENOMOTO_MIP_PROTECT_QUEUE_CUTS").is_none() || env_str!("ENOMOTO_MIP_NO_PROTECT_QUEUE_CUTS").is_some() || self.params.submip || (self.highs_cutmgmt() && env_str!("ENOMOTO_MIP_HCM_PROTECT").is_none()) {
             return None;
         }
         self.sync_cut_age();
