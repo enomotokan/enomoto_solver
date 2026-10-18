@@ -4061,13 +4061,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if self.pool_busy {
                 g.busy -= 1;
                 self.pool_busy = false;
-                // 待っているスレッドの数 (`idle`) も合わせる (`ENOMOTO_MIP_NO_ROLE_IDLE_FIX` なら以前と同じく合わせない)。合わせないと、役から木に戻って
+                // `ENOMOTO_MIP_ROLE_IDLE_FIX`: 待っているスレッドの数 (`idle`) も合わせる。合わせないと、役から木に戻って
                 // 共有の待ち行列からノードを取るときに `idle` を 1 減らして usize の下に回り (`pool_busy` が偽のまま取るので
                 // 増やした分がない)、以後どのスレッドも「待っているスレッドがいる」と見て毎ノード自分の待ち行列の半分を
                 // 共有の待ち行列に渡し続ける (pk1 の速い山はこの状態: 自分の待ち行列がほぼ空になりカットが保護されず LP が
-                // 小さいままになる。analysis/pk1_variance_20261017.md)。直すと待ち行列のノードが残り、カットの保護で LP が膨らむので、
-                // 保護は既定でやめた ([`Self::basis_protected_cuts`])
-                if env_str!("ENOMOTO_MIP_NO_ROLE_IDLE_FIX").is_none() {
+                // 小さいままになる。analysis/pk1_variance_20261017.md)。既定では合わせない: 合わせると 93 問 (2 回) で主ギャップの
+                // 和が 12.99 -> 15.26 (trento1 0.07 -> 0.69、neos-1445765 0.42 -> 0.62 など、保護の有無によらない) と悪くなった。
+                // 役から戻った後に全スレッドが共有の待ち行列へノードを出し続ける今の動き (実質の既定) を、意図した形で書き直すのは今後の課題
+                if env_str!("ENOMOTO_MIP_ROLE_IDLE_FIX").is_some() {
                     pool.idle.fetch_add(1, Ordering::Relaxed);
                 }
             }
