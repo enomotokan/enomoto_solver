@@ -514,6 +514,12 @@ pub(super) struct Solver<'a, L: MipLp> {
     proof_first_z: f64,
     proof_last_best: (f64, Instant),
     proof_eval_at: Option<Instant>,
+    /// カットの行のハッシュ ([`Self::refresh_row_hashes`]) と、作ったときの行の記録の位置。`cut_basis_stats` は共有の待ち行列に
+    /// 出したノードに付けたカットの状態の数・受け取って当てはめた数 (`ENOMOTO_MIP_TREE_SHARE_CUT_BASIS`)。
+    row_hash: Vec<u64>,
+    row_hash_map: std::collections::HashMap<u64, usize>,
+    row_hash_epoch: Option<usize>,
+    cut_basis_stats: [u64; 2],
 }
 
 /// 分枝限定法で解く。
@@ -576,11 +582,14 @@ pub(crate) struct SnapNode {
     /// 共有の待ち行列で渡すノードの親の LP の最適基底の、列と元の行の部分 (`ENOMOTO_MIP_TREE_NO_PASS_BASIS` でなければ)。カットの行は
     /// スレッドごとに違うので渡さない (受け取った側では基底にする)。
     basis: Option<(Vec<VarStatus>, Vec<VarStatus>)>,
+    /// 親の LP の基底で非基底だったカットの行の (カットのハッシュ, 状態) (`ENOMOTO_MIP_TREE_SHARE_CUT_BASIS`)。受け取った側は同じ
+    /// カットの行があればその状態にする ([`Solver::open_from_pool`])。
+    cut_basis: Option<Vec<(u64, VarStatus)>>,
 }
 
 impl SnapNode {
     fn of(n: &OpenNode) -> Self {
-        SnapNode { changes: n.changes.clone(), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, basis: None }
+        SnapNode { changes: n.changes.clone(), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, basis: None, cut_basis: None }
     }
     /// [`Self::of`] に、親の LP の基底の列と最初の `m` 行 (元の行) を付ける。
     fn of_with_basis(n: &OpenNode, m: usize) -> Self {
@@ -908,6 +917,12 @@ impl PoolNodes {
 /// 全て共有の待ち行列に出して、取るときは自分の待ち行列と同じ選び方 ([`PoolNodes::pop_hybrid`]) をする。
 fn tree_shared_queue() -> bool {
     env_str!("ENOMOTO_MIP_TREE_SHARED_QUEUE").is_some()
+}
+
+/// 今の潜りの兄弟だけを手元に残すか (`ENOMOTO_MIP_TREE_KEEP_SIBLINGS`): 潜りが終わったときに親の基底・LU のまま安く戻れる兄弟
+/// (`dive_stack`) だけを自分の待ち行列に残し、ほかのノードは全て共有の待ち行列に出す。取るときは自分の待ち行列と同じ選び方。
+fn tree_keep_siblings() -> bool {
+    env_str!("ENOMOTO_MIP_TREE_KEEP_SIBLINGS").is_some()
 }
 
 /// 木を分け合うスレッドの間で、カットプールに入れたカットを共有するか (`ENOMOTO_MIP_TREE_SHARE_CUTS`)。カットは大域的な
@@ -1455,6 +1470,10 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         proof_first_z: f64::INFINITY,
         proof_last_best: (f64::INFINITY, Instant::now()),
         proof_eval_at: None,
+        row_hash: Vec::new(),
+        row_hash_map: std::collections::HashMap::new(),
+        row_hash_epoch: None,
+        cut_basis_stats: [0; 2],
     };
     // DSE 重みは既定で全ての LP で引き継ぐ (根のカットのループ、潜りの子、強分岐、待ち行列のノードは基底と一緒に保存した
     // 重みを戻す)。`ENOMOTO_MIP_NO_DSE_ALL` で以前の形 (毎回 1 から) に戻す。サブ MIP の中から呼ばれても、終わったら元に戻す
@@ -2790,6 +2809,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if !self.queue.is_empty() && self.pool_hold.is_none() {
                         self.pool_donate_all();
                     }
+                } else if tree_keep_siblings() && self.race_done {
+                    // 今の潜りの兄弟 (`dive_stack`) だけを手元に残し、ほかは全て共有の待ち行列に出す
+                    if self.queue.len() > self.dive_stack.len() && self.pool_hold.is_none() {
+                        self.pool_donate_except_siblings();
+                    }
                 } else if idle > len && self.queue.len() >= 2 && self.pool_hold.is_none() {
                     self.pool_donate(idle - len);
                 }
@@ -2801,7 +2825,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if cap > 0 && self.snap.is_some() && self.race_done && self.queue.len() > cap && self.pool_hold.is_none() {
                     self.pool_donate_n(self.queue.len() - cap);
                 }
-                if !tree_shared_queue() && env_str!("ENOMOTO_MIP_TREE_NO_BALANCE").is_none() && self.nodes % tunable!("ENOMOTO_T_MIP_TREE_BALANCE_EVERY", 32u64, u64) == 0 {
+                if !tree_shared_queue() && !tree_keep_siblings() && env_str!("ENOMOTO_MIP_TREE_NO_BALANCE").is_none() && self.nodes % tunable!("ENOMOTO_T_MIP_TREE_BALANCE_EVERY", 32u64, u64) == 0 {
                     self.pool_balance();
                 }
                 self.tprof.sync_s += t_sync.elapsed().as_secs_f64();
@@ -4103,7 +4127,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         pool.in_role.fetch_add(1, Ordering::Relaxed);
         let mut out = Vec::with_capacity(self.queue.len());
         while let Some(n) = self.queue.pop_best() {
-            out.push(SnapNode::of_with_basis(&n, self.p.m));
+            out.push(self.snap_of(&n));
         }
         self.dive_stack.clear();
         {
@@ -6502,14 +6526,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
         };
         for n in nodes.iter_mut() {
             retag(n, snodes.len());
-            snodes.push(SnapNode { changes: n.changes.clone(), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, basis: None });
+            snodes.push(SnapNode { changes: n.changes.clone(), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, cut_basis: None, basis: None });
         }
         for n in nodes {
             self.queue.push(n);
         }
         if let Some(n) = plunge.as_mut().filter(|_| with_nodes) {
             retag(n, snodes.len());
-            snodes.push(SnapNode { changes: n.changes.clone(), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, basis: None });
+            snodes.push(SnapNode { changes: n.changes.clone(), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, cut_basis: None, basis: None });
         }
         if with_nodes {
             self.dive_stack.clear();
@@ -6645,7 +6669,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut out = Vec::with_capacity(k);
         for _ in 0..k {
             match self.queue.pop_best() {
-                Some(n) => out.push(if env_str!("ENOMOTO_MIP_TREE_NO_PASS_BASIS").is_none() { SnapNode::of_with_basis(&n, self.p.m) } else { SnapNode::of(&n) }),
+                Some(n) => out.push(self.snap_of(&n)),
                 None => break,
             }
         }
@@ -6659,14 +6683,29 @@ impl<'a, L: MipLp> Solver<'a, L> {
     fn pool_donate_n(&mut self, k: usize) {
         use std::sync::atomic::Ordering;
         let Some(pool) = self.pool.clone() else { return };
-        let pass_basis = env_str!("ENOMOTO_MIP_TREE_NO_PASS_BASIS").is_none();
         let mut out = Vec::with_capacity(k);
         for _ in 0..k {
             match self.queue.pop_best() {
-                Some(n) => out.push(if pass_basis { SnapNode::of_with_basis(&n, self.p.m) } else { SnapNode::of(&n) }),
+                Some(n) => out.push(self.snap_of(&n)),
                 None => break,
             }
         }
+        self.pool_stats[0] += out.len() as u64;
+        let mut g = pool.inner.lock().unwrap();
+        g.nodes.extend(out);
+        pool.len.store(g.nodes.len(), Ordering::Relaxed);
+    }
+
+    /// 今の潜りの兄弟 (`dive_stack`) 以外のノードを共有の待ち行列に出す (`ENOMOTO_MIP_TREE_KEEP_SIBLINGS`)。
+    fn pool_donate_except_siblings(&mut self) {
+        use std::sync::atomic::Ordering;
+        let Some(pool) = self.pool.clone() else { return };
+        let keep: Vec<(usize, u64)> = self.dive_stack.iter().map(|&(id, gen, _)| (id, gen)).collect();
+        let nodes = self.queue.take_all_except(&keep);
+        if nodes.is_empty() {
+            return;
+        }
+        let out: Vec<SnapNode> = nodes.iter().map(|n| self.snap_of(n)).collect();
         self.pool_stats[0] += out.len() as u64;
         let mut g = pool.inner.lock().unwrap();
         g.nodes.extend(out);
@@ -6677,10 +6716,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
     fn pool_donate_all(&mut self) {
         use std::sync::atomic::Ordering;
         let Some(pool) = self.pool.clone() else { return };
-        let pass_basis = env_str!("ENOMOTO_MIP_TREE_NO_PASS_BASIS").is_none();
         let mut out = Vec::with_capacity(self.queue.len());
         while let Some(n) = self.queue.pop_best() {
-            out.push(if pass_basis { SnapNode::of_with_basis(&n, self.p.m) } else { SnapNode::of(&n) });
+            out.push(self.snap_of(&n));
         }
         self.pool_stats[0] += out.len() as u64;
         let mut g = pool.inner.lock().unwrap();
@@ -6691,18 +6729,103 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 共有の待ち行列から取ったノードを自分のノードにする。親の基底が付いていれば (`ENOMOTO_MIP_TREE_NO_PASS_BASIS` でなければ付ける)、列と元の行は
     /// その状態、このスレッドのカットの行は基底にした基底を付ける (基底変数の数が合わなければ [`Self::restore_node_basis`] の
     /// 修復に任せる)。
-    fn open_from_pool(&self, mut sn: SnapNode) -> OpenNode {
+    fn open_from_pool(&mut self, mut sn: SnapNode) -> OpenNode {
         let basis = sn.basis.take();
+        let cut_basis = sn.cut_basis.take();
         let mut n = sn.into_open();
         if let Some((col, mut row)) = basis {
             let mr = self.lp.num_rows();
             if col.len() == self.p.n && row.len() <= mr {
                 row.resize(mr, VarStatus::Basic);
+                // 渡した側で非基底だったカットと同じカットの行があれば、その状態にする (`ENOMOTO_MIP_TREE_SHARE_CUT_BASIS`)
+                if let Some(cb) = cut_basis {
+                    self.refresh_row_hashes();
+                    let mut hit = 0u64;
+                    for (h, st) in cb {
+                        if let Some(&i) = self.row_hash_map.get(&h) {
+                            if i < mr {
+                                row[i] = st;
+                                hit += 1;
+                            }
+                        }
+                    }
+                    self.cut_basis_stats[1] += hit;
+                }
                 n.basis = Some(Rc::new(super::lp::Basis { col, row }));
                 n.basis_epoch = self.row_log.len();
             }
         }
         n
+    }
+
+    /// 共有の待ち行列に出すノード ([`SnapNode`])。親の基底の列と元の行 (`ENOMOTO_MIP_TREE_NO_PASS_BASIS` でなければ) と、
+    /// `ENOMOTO_MIP_TREE_SHARE_CUT_BASIS` なら非基底だったカットの行の (ハッシュ, 状態) を付ける。
+    fn snap_of(&mut self, n: &OpenNode) -> SnapNode {
+        if env_str!("ENOMOTO_MIP_TREE_NO_PASS_BASIS").is_some() {
+            return SnapNode::of(n);
+        }
+        let mut s = SnapNode::of_with_basis(n, self.p.m);
+        if s.basis.is_some() && env_str!("ENOMOTO_MIP_TREE_SHARE_CUT_BASIS").is_some() {
+            if let Some(b) = n.basis.clone() {
+                // 保存したときの行を今の行に合わせる (行の追加・削除の記録を当てはめる。[`Self::restore_node_basis`] と同じ)
+                let mut row = b.row.clone();
+                if n.basis_epoch <= self.row_log.len() {
+                    for e in &self.row_log[n.basis_epoch..] {
+                        match e {
+                            RowEdit::Add(k) => row.extend(std::iter::repeat_n(VarStatus::Basic, *k)),
+                            RowEdit::Delete(mask) => {
+                                let mut i = 0;
+                                row.retain(|_| {
+                                    let keep = !mask.get(i).copied().unwrap_or(false);
+                                    i += 1;
+                                    keep
+                                });
+                            }
+                        }
+                    }
+                }
+                let mr = self.lp.num_rows();
+                if row.len() == mr {
+                    self.refresh_row_hashes();
+                    let cb: Vec<(u64, VarStatus)> = (self.p.m..mr).filter(|&i| row[i] != VarStatus::Basic).map(|i| (self.row_hash[i], row[i])).collect();
+                    self.cut_basis_stats[0] += cb.len() as u64;
+                    s.cut_basis = Some(cb);
+                }
+            }
+        }
+        s
+    }
+
+    /// LP のカットの行のハッシュ (係数と右辺を最大の係数で割って丸めたもの) と、ハッシュから行への表を、行が変わっていれば作り直す。
+    fn refresh_row_hashes(&mut self) {
+        use std::hash::{Hash, Hasher};
+        let mr = self.lp.num_rows();
+        if self.row_hash_epoch == Some(self.row_log.len()) && self.row_hash.len() == mr {
+            return;
+        }
+        self.row_hash.clear();
+        self.row_hash_map.clear();
+        for i in 0..mr {
+            if i < self.p.m {
+                self.row_hash.push(0);
+                continue;
+            }
+            let coefs = self.lp.row(i);
+            let (lo, up) = self.lp.row_bounds(i);
+            let cmax = coefs.iter().fold(0.0f64, |m, &(_, v)| m.max(v.abs())).max(1e-300);
+            let mut hs = std::collections::hash_map::DefaultHasher::new();
+            for &(j, v) in &coefs {
+                j.hash(&mut hs);
+                ((v / cmax) * 1e9).round().to_bits().hash(&mut hs);
+            }
+            for v in [lo, up] {
+                if v.is_finite() { ((v / cmax) * 1e9).round().to_bits() } else { v.to_bits() }.hash(&mut hs);
+            }
+            let h = hs.finish();
+            self.row_hash.push(h);
+            self.row_hash_map.entry(h).or_insert(i);
+        }
+        self.row_hash_epoch = Some(self.row_log.len());
     }
 
     /// racing ramp-up の進行 (競争中のスレッドがノードごとに呼ぶ)。主は競争の時間 (`ENOMOTO_T_MIP_TREE_RACE_SECS`) が過ぎたら、
@@ -6824,7 +6947,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         let mut waited = false;
         // 共有の待ち行列だけで探索するときは、自分の待ち行列と同じ選び方で取る
-        let shared_sel = tree_shared_queue() && self.snap.is_some() && self.race_done;
+        let shared_sel = (tree_shared_queue() && self.snap.is_some() || tree_keep_siblings()) && self.race_done;
         let bb_every = if self.in_proof_phase() {
             tunable!("ENOMOTO_T_MIP_PROOF_BB_EVERY", 1u64, u64)
         } else if self.has_cutoff_value() {
@@ -7043,6 +7166,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.tprof.tid = self.pool_tid;
             self.tprof.end_s = pool.t0.elapsed().as_secs_f64();
             self.tprof.lns_s = self.lns_secs;
+            if self.cut_basis_stats[0] + self.cut_basis_stats[1] > 0 {
+                eprintln!("TREEPAR: tid {} cut basis: sent {} matched {} (backtracks to siblings {})", self.pool_tid, self.cut_basis_stats[0], self.cut_basis_stats[1], self.sibling_backtracks);
+            }
             pool.prof.lock().unwrap().push(std::mem::take(&mut self.tprof));
         }
         // 木を分け合う主: 従を止めて待ち、従と共有の待ち行列の下界を合わせる。従: 待っていない側から外れる
