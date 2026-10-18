@@ -2793,6 +2793,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 } else if idle > len && self.queue.len() >= 2 && self.pool_hold.is_none() {
                     self.pool_donate(idle - len);
                 }
+                // `ENOMOTO_T_MIP_TREE_LOCAL_CAP` = K (> 0、既定 0 = 使わない): 自分の待ち行列を K ノードまでにし、超えた分は下界の
+                // 小さい順に共有の待ち行列へ出す。役の復帰で `idle` が下に回った状態 (毎ノード待ち行列の半分を出し、手元には深い
+                // ノードだけが残り、手元が尽きたら木全体で下界最小のノードから再開する。pk1・trento1 で良かった) を、役の有無に
+                // よらず意図して作る
+                let cap = tunable!("ENOMOTO_T_MIP_TREE_LOCAL_CAP", 0usize, usize);
+                if cap > 0 && self.snap.is_some() && self.race_done && self.queue.len() > cap && self.pool_hold.is_none() {
+                    self.pool_donate_n(self.queue.len() - cap);
+                }
                 if !tree_shared_queue() && env_str!("ENOMOTO_MIP_TREE_NO_BALANCE").is_none() && self.nodes % tunable!("ENOMOTO_T_MIP_TREE_BALANCE_EVERY", 32u64, u64) == 0 {
                     self.pool_balance();
                 }
@@ -6638,6 +6646,24 @@ impl<'a, L: MipLp> Solver<'a, L> {
         for _ in 0..k {
             match self.queue.pop_best() {
                 Some(n) => out.push(if env_str!("ENOMOTO_MIP_TREE_NO_PASS_BASIS").is_none() { SnapNode::of_with_basis(&n, self.p.m) } else { SnapNode::of(&n) }),
+                None => break,
+            }
+        }
+        self.pool_stats[0] += out.len() as u64;
+        let mut g = pool.inner.lock().unwrap();
+        g.nodes.extend(out);
+        pool.len.store(g.nodes.len(), Ordering::Relaxed);
+    }
+
+    /// 自分の待ち行列から下界の小さい順に `k` ノードを共有の待ち行列に出す (`ENOMOTO_T_MIP_TREE_LOCAL_CAP`)。
+    fn pool_donate_n(&mut self, k: usize) {
+        use std::sync::atomic::Ordering;
+        let Some(pool) = self.pool.clone() else { return };
+        let pass_basis = env_str!("ENOMOTO_MIP_TREE_NO_PASS_BASIS").is_none();
+        let mut out = Vec::with_capacity(k);
+        for _ in 0..k {
+            match self.queue.pop_best() {
+                Some(n) => out.push(if pass_basis { SnapNode::of_with_basis(&n, self.p.m) } else { SnapNode::of(&n) }),
                 None => break,
             }
         }
