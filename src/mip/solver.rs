@@ -373,14 +373,14 @@ pub(super) struct Solver<'a, L: MipLp> {
     pc_base: Option<Pseudocost>,
     /// 木を分け合うときの自分の番号、学習の記録をどこまで読んだか、ほかのスレッドの記録を取り込んでいる最中か、
     /// 取り込んだ [証明, 衝突] の数。
-    pool_tid: u32,
+    pub(super) pool_tid: u32,
     /// racing ramp-up: このスレッドが競争の結果を処理したか、探索の多様化の種類 (bit 0: 子の順を逆に、bit 1: 分枝の
     /// スコアに揺らぎ) と、その乱数の状態。
     race_done: bool,
     race_div: u8,
     race_rng: u64,
     learned_cursor: u64,
-    importing: bool,
+    pub(super) importing: bool,
     learned_stats: [u64; 2],
     /// 診断用: デバッグ解の対称な像、最後の刈り込みの理由、直前に処理したノードが像を含んでいたか、像がまだ残っているか。
     dbg_imgs: Option<Vec<Vec<f64>>>,
@@ -754,9 +754,11 @@ struct Learned {
     items: std::collections::VecDeque<(u32, LearnedItem)>,
 }
 
-enum LearnedItem {
+pub(super) enum LearnedItem {
     Proof(Vec<(usize, f64)>, f64, bool),
     Lits(Vec<(usize, bool, f64)>),
+    /// カットプールのカット (係数 x <= 右辺)。`ENOMOTO_MIP_TREE_SHARE_CUTS`。
+    Cut(Vec<(usize, f64)>, f64),
 }
 
 /// 木を分け合うスレッドごとの、利用者向けのログに使う値 (ノードごとに書くので錠を取らず、キャッシュラインを分ける)。
@@ -830,87 +832,92 @@ struct PoolInner {
     done: bool,
 }
 
-/// 共有の待ち行列のノード。既定では下界の小さい順の二分ヒープ (先頭が下界最小)。`ENOMOTO_MIP_POOL_LINEAR` なら以前と同じく
-/// 並べずに置き、下界最小のノードを毎回全体の走査で探す (pk1 では共有の待ち行列が 3〜9 万ノードになり、走査に錠の中で
-/// スレッドあたり 3〜8 秒使っていた。analysis/pk1_variance_20261017.md)。
+/// 共有の待ち行列のノード。自分の待ち行列 ([`super::queue::NodeQueue`]) と同じく、下界の順と「下界と推定値の平均」の順の
+/// 2 つの順序付き集合で索引する (以前は並べずに置き、下界最小のノードを毎回全体の走査で探していた。pk1 では共有の待ち行列が
+/// 3〜9 万ノードになり、走査に錠の中でスレッドあたり 3〜8 秒使っていた。analysis/pk1_variance_20261017.md)。
 struct PoolNodes {
-    v: Vec<SnapNode>,
-    heap: bool,
+    v: Vec<Option<SnapNode>>,
+    free: Vec<usize>,
+    by_lb: std::collections::BTreeSet<(super::queue::Key, usize)>,
+    by_est: std::collections::BTreeSet<(super::queue::Key, super::queue::Key, usize)>,
+    pops: u64,
 }
 
 impl PoolNodes {
     fn new() -> Self {
-        PoolNodes { v: Vec::new(), heap: env_str!("ENOMOTO_MIP_POOL_LINEAR").is_none() }
+        PoolNodes { v: Vec::new(), free: Vec::new(), by_lb: std::collections::BTreeSet::new(), by_est: std::collections::BTreeSet::new(), pops: 0 }
     }
     fn len(&self) -> usize {
-        self.v.len()
+        self.by_lb.len()
     }
     fn is_empty(&self) -> bool {
-        self.v.is_empty()
+        self.by_lb.is_empty()
     }
-    fn iter(&self) -> std::slice::Iter<'_, SnapNode> {
-        self.v.iter()
+    fn iter(&self) -> impl Iterator<Item = &SnapNode> {
+        self.v.iter().flatten()
+    }
+    fn est_key(n: &SnapNode) -> (super::queue::Key, super::queue::Key) {
+        (super::queue::Key(0.5 * n.lower_bound + 0.5 * n.estimate), super::queue::Key(-(n.depth as f64)))
     }
     fn push(&mut self, n: SnapNode) {
-        self.v.push(n);
-        if self.heap {
-            let mut i = self.v.len() - 1;
-            while i > 0 {
-                let p = (i - 1) / 2;
-                if self.v[i].lower_bound < self.v[p].lower_bound {
-                    self.v.swap(i, p);
-                    i = p;
-                } else {
-                    break;
-                }
+        let lb = super::queue::Key(n.lower_bound);
+        let (e, d) = Self::est_key(&n);
+        let id = match self.free.pop() {
+            Some(id) => {
+                self.v[id] = Some(n);
+                id
             }
-        }
+            None => {
+                self.v.push(Some(n));
+                self.v.len() - 1
+            }
+        };
+        self.by_lb.insert((lb, id));
+        self.by_est.insert((e, d, id));
     }
     fn extend(&mut self, it: impl IntoIterator<Item = SnapNode>) {
         for n in it {
             self.push(n);
         }
     }
-    /// 下界最小のノードの位置 (ヒープなら先頭)。
-    fn best(&self) -> Option<usize> {
-        if self.heap {
-            (!self.v.is_empty()).then_some(0)
-        } else {
-            (0..self.v.len()).min_by(|&a, &b| self.v[a].lower_bound.total_cmp(&self.v[b].lower_bound))
-        }
+    fn remove(&mut self, id: usize) -> SnapNode {
+        let n = self.v[id].take().unwrap();
+        let (e, d) = Self::est_key(&n);
+        self.by_lb.remove(&(super::queue::Key(n.lower_bound), id));
+        self.by_est.remove(&(e, d, id));
+        self.free.push(id);
+        n
     }
     fn min_lower_bound(&self) -> f64 {
-        self.best().map_or(f64::INFINITY, |k| self.v[k].lower_bound)
+        self.by_lb.iter().next().map_or(f64::INFINITY, |&(k, _)| k.0)
     }
     /// 下界最小のノードを取り出す。
     fn pop_best(&mut self) -> Option<SnapNode> {
-        let k = self.best()?;
-        let n = self.v.swap_remove(k);
-        if self.heap && !self.v.is_empty() {
-            let len = self.v.len();
-            let mut i = 0;
-            loop {
-                let (l, r) = (2 * i + 1, 2 * i + 2);
-                let mut m = i;
-                if l < len && self.v[l].lower_bound < self.v[m].lower_bound {
-                    m = l;
-                }
-                if r < len && self.v[r].lower_bound < self.v[m].lower_bound {
-                    m = r;
-                }
-                if m == i {
-                    break;
-                }
-                self.v.swap(i, m);
-                i = m;
-            }
-        }
-        Some(n)
+        let id = self.by_lb.iter().next().map(|&(_, id)| id)?;
+        Some(self.remove(id))
+    }
+    /// 自分の待ち行列と同じ選び方で取り出す: `bb_every` 回に 1 回は下界最小、それ以外は「下界と推定値の平均」が最小。
+    fn pop_hybrid(&mut self, bb_every: u64) -> Option<SnapNode> {
+        self.pops += 1;
+        let id = if self.pops % bb_every.max(1) == 0 { self.by_lb.iter().next().map(|&(_, id)| id) } else { self.by_est.iter().next().map(|&(_, _, id)| id) }?;
+        Some(self.remove(id))
     }
 }
 
+/// 共有の待ち行列だけで探索するか (`ENOMOTO_MIP_TREE_SHARED_QUEUE`): 各スレッドは潜りの子だけを自分で持ち、兄弟などのノードは
+/// 全て共有の待ち行列に出して、取るときは自分の待ち行列と同じ選び方 ([`PoolNodes::pop_hybrid`]) をする。
+fn tree_shared_queue() -> bool {
+    env_str!("ENOMOTO_MIP_TREE_SHARED_QUEUE").is_some()
+}
+
+/// 木を分け合うスレッドの間で、カットプールに入れたカットを共有するか (`ENOMOTO_MIP_TREE_SHARE_CUTS`)。カットは大域的な
+/// 境界で作るので、どのスレッドのどのノードでも成り立つ (被約費用による固定で締めた境界のものは、共有の打ち切り値未満の解で)。
+pub(super) fn tree_share_cuts() -> bool {
+    env_str!("ENOMOTO_MIP_TREE_SHARE_CUTS").is_some()
+}
+
 /// 学習の記録に加える (古いものから捨てて `ENOMOTO_T_MIP_TREE_LEARNED_MAX` 件まで残す)。
-fn learned_push(pool: &WorkPool, tid: u32, it: LearnedItem) {
+pub(super) fn learned_push(pool: &WorkPool, tid: u32, it: LearnedItem) {
     let max = tunable!("ENOMOTO_T_MIP_TREE_LEARNED_MAX", 20000usize, usize);
     let mut g = pool.learned.lock().unwrap();
     g.items.push_back((tid, it));
@@ -2598,6 +2605,38 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             });
         }
+        // `ENOMOTO_T_MIP_ROOT_LNS_REPEAT` = N (> 0、既定 0 = 使わない): 根のヒューリスティクスの後、暫定解があれば大近傍探索
+        // ([`Self::alns`]、木の中・ヒューリスティクス役と同じ腕の選び方) を、改善しない呼び出しが `ENOMOTO_T_MIP_ROOT_LNS_PATIENCE`
+        // (既定 2) 回続くか、N 回か、根の大近傍探索の時間が時間上限の `ENOMOTO_T_MIP_ROOT_LNS_TIME_FRAC` (既定 0.1) 倍を超えるまで
+        // 繰り返す (暫定解が停滞するまで根で磨く)
+        let lns_rep = tunable!("ENOMOTO_T_MIP_ROOT_LNS_REPEAT", 0u64, u64);
+        if lns_rep > 0 && !self.params.submip && self.snap.is_none() && self.incumbent.is_some() {
+            let patience = tunable!("ENOMOTO_T_MIP_ROOT_LNS_PATIENCE", 2u64, u64).max(1);
+            let tmax = tunable!("ENOMOTO_T_MIP_ROOT_LNS_TIME_FRAC", 0.1, f64) * self.params.time_limit;
+            let t0 = Instant::now();
+            let x = self.lp.col_values();
+            let mut fails = 0u64;
+            for k in 0..lns_rep {
+                if self.time_up() || t0.elapsed().as_secs_f64() >= tmax || fails >= patience {
+                    break;
+                }
+                let z0 = self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z);
+                let ts = Instant::now();
+                self.heur_label = "root LNS repeat";
+                self.alns(&x);
+                self.heur_label = "";
+                self.lns_secs += ts.elapsed().as_secs_f64();
+                let z1 = self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z);
+                if z1 < z0 - 1e-9 * z0.abs().max(1.0) {
+                    fails = 0;
+                } else {
+                    fails += 1;
+                }
+                if self.params.verbose {
+                    eprintln!("MIP: root LNS repeat {k}: {z0:.10e} -> {z1:.10e} ({:.2}s)", ts.elapsed().as_secs_f64());
+                }
+            }
+        }
         self.dbg_check_rows("after root cuts");
         self.dbg_lost("root domain (before redcost fixing)", !self.dbg_contains());
         let dbg_root = self.dbg_contains();
@@ -2746,10 +2785,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if let Some(pool) = &self.pool {
                 use std::sync::atomic::Ordering;
                 let (idle, len) = (pool.idle.load(Ordering::Relaxed), pool.len.load(Ordering::Relaxed));
-                if idle > len && self.queue.len() >= 2 && self.pool_hold.is_none() {
+                if tree_shared_queue() && self.snap.is_some() && self.race_done {
+                    // 共有の待ち行列だけで探索する: 自分の待ち行列のノードを全て出す
+                    if !self.queue.is_empty() && self.pool_hold.is_none() {
+                        self.pool_donate_all();
+                    }
+                } else if idle > len && self.queue.len() >= 2 && self.pool_hold.is_none() {
                     self.pool_donate(idle - len);
                 }
-                if env_str!("ENOMOTO_MIP_TREE_NO_BALANCE").is_none() && self.nodes % tunable!("ENOMOTO_T_MIP_TREE_BALANCE_EVERY", 32u64, u64) == 0 {
+                if !tree_shared_queue() && env_str!("ENOMOTO_MIP_TREE_NO_BALANCE").is_none() && self.nodes % tunable!("ENOMOTO_T_MIP_TREE_BALANCE_EVERY", 32u64, u64) == 0 {
                     self.pool_balance();
                 }
                 self.tprof.sync_s += t_sync.elapsed().as_secs_f64();
@@ -5719,6 +5763,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     Some(match it {
                         LearnedItem::Proof(c, k, o) => LearnedItem::Proof(c.clone(), *k, *o),
                         LearnedItem::Lits(l) => LearnedItem::Lits(l.clone()),
+                        LearnedItem::Cut(c, r) => LearnedItem::Cut(c.clone(), *r),
                     })
                 })
                 .collect();
@@ -5737,6 +5782,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         self.learned_stats[1] += 1;
                     }
                 }
+                LearnedItem::Cut(c, r) => self.add_to_pool(&c, r),
             }
         }
         self.importing = false;
@@ -6601,6 +6647,21 @@ impl<'a, L: MipLp> Solver<'a, L> {
         pool.len.store(g.nodes.len(), Ordering::Relaxed);
     }
 
+    /// 自分の待ち行列のノードを全て共有の待ち行列に出す (`ENOMOTO_MIP_TREE_SHARED_QUEUE`)。
+    fn pool_donate_all(&mut self) {
+        use std::sync::atomic::Ordering;
+        let Some(pool) = self.pool.clone() else { return };
+        let pass_basis = env_str!("ENOMOTO_MIP_TREE_NO_PASS_BASIS").is_none();
+        let mut out = Vec::with_capacity(self.queue.len());
+        while let Some(n) = self.queue.pop_best() {
+            out.push(if pass_basis { SnapNode::of_with_basis(&n, self.p.m) } else { SnapNode::of(&n) });
+        }
+        self.pool_stats[0] += out.len() as u64;
+        let mut g = pool.inner.lock().unwrap();
+        g.nodes.extend(out);
+        pool.len.store(g.nodes.len(), Ordering::Relaxed);
+    }
+
     /// 共有の待ち行列から取ったノードを自分のノードにする。親の基底が付いていれば (`ENOMOTO_MIP_TREE_NO_PASS_BASIS` でなければ付ける)、列と元の行は
     /// その状態、このスレッドのカットの行は基底にした基底を付ける (基底変数の数が合わなければ [`Self::restore_node_basis`] の
     /// 修復に任せる)。
@@ -6736,6 +6797,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.tprof.ready_s = pool.t0.elapsed().as_secs_f64();
         }
         let mut waited = false;
+        // 共有の待ち行列だけで探索するときは、自分の待ち行列と同じ選び方で取る
+        let shared_sel = tree_shared_queue() && self.snap.is_some() && self.race_done;
+        let bb_every = if self.in_proof_phase() {
+            tunable!("ENOMOTO_T_MIP_PROOF_BB_EVERY", 1u64, u64)
+        } else if self.has_cutoff_value() {
+            tunable!("ENOMOTO_T_MIP_BB_EVERY_INC", 4u64, u64)
+        } else {
+            tunable!("ENOMOTO_T_MIP_BB_EVERY", 10u64, u64)
+        };
         let r = loop {
             {
                 let t_lock = Instant::now();
@@ -6745,7 +6815,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if let Some(sl) = sl {
                     sl.open.store(0, Ordering::Relaxed);
                 }
-                if let Some(sn) = g.nodes.pop_best() {
+                let got = if shared_sel { g.nodes.pop_hybrid(bb_every) } else { g.nodes.pop_best() };
+                if let Some(sn) = got {
                     // 受け取ったノードの下界を同じ錠の中で書く (共有の待ち行列から消えた後も全体の下界に入るように)
                     if let Some(sl) = sl {
                         sl.lb.store(sn.lower_bound.to_bits(), Ordering::Relaxed);

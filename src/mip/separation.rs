@@ -550,6 +550,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.pool_val.push(v);
         }
         self.pool_start.push(self.pool_idx.len() as u32);
+        // 木を分け合う: 新しいカットをほかのスレッドにも渡す (取り込み中のものは渡し返さない)
+        if !self.importing && self.snap.is_some() && super::solver::tree_share_cuts() {
+            if let Some(pool) = &self.pool {
+                super::solver::learned_push(pool, self.pool_tid, super::solver::LearnedItem::Cut(coefs.to_vec(), rhs));
+            }
+        }
     }
 
     /// プールの年齢を 1 進める。
