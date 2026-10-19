@@ -931,6 +931,8 @@ pub fn run_extended(
                     lb[j] = lb[j].max(refreshed_lb[j]);
                     ub[j] = ub[j].min(refreshed_ub[j]);
                 }
+                // 許容誤差以内の交差は固定し、越えるものは後の矛盾の判定 (`bounds_inconsistent`) に任せる
+                let _ = propagate::fix_crossed_bounds(&mut lb, &ub);
                 cur_real_rows = refreshed_real_rows;
                 cur_real_rhs = refreshed_real_rhs;
             }
@@ -1204,6 +1206,11 @@ pub fn run_extended(
             lb[sub.var] = 0.0;
             ub[sub.var] = 0.0;
         }
+    }
+
+    // 結果の境界に交差を残さない (許容誤差以内なら固定、越えれば実行不能)
+    if propagate::fix_crossed_bounds(&mut lb, &ub) {
+        return extended_infeasible(sc, a, b, c, n);
     }
 
     if env_str!("ENOMOTO_DEBUG_PRESOLVE_HASH").is_some() {
