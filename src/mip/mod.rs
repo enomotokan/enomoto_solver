@@ -902,10 +902,31 @@ fn presolve_mip(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs: Opti
         let bin = |j: usize| prob.is_int[j] && prob.col_lo[j] == 0.0 && prob.col_up[j] == 1.0 && pre.scaling.d.get(j).is_none_or(|&d| d == 1.0);
         prob.conflict_edges = p.conflict_edges.iter().copied().filter(|&(a, b)| bin((a / 2) as usize) && bin((b / 2) as usize)).collect();
     }
-    // LP による固定は含意を集めるプロービングの前に行う (固定をプロービングの伝播に使い、固定した列の含意を作らない)
+    // LP による固定は含意を集めるプロービングの前に行う (固定をプロービングの伝播に使い、固定した列の含意を作らない)。
+    // 固定したら前処理をもう一度かける (固定した列と、それで冗長になった行を消し、縮約を続ける。プロービングもそちらで行う)。
+    // 前処理は列の番号を保ち、整数最適化では列の尺度をかけない (d = 1) ので、後処理は内側の手順の後に外側の手順を並べればよい
     if let Some(secs) = lp_probe_secs {
-        if !lp_probe(&mut prob, verbose, secs) {
-            return Some(Presolved::Infeasible);
+        match lp_probe(&mut prob, verbose, secs) {
+            None => return Some(Presolved::Infeasible),
+            Some(fixed) if fixed > 0 && env_str!("ENOMOTO_MIP_LP_PROBE_NO_REPRESOLVE").is_none() => {
+                let mut postsolve = pre.postsolve_log;
+                return match presolve_mip(&prob, verbose, submip, None) {
+                    Some(Presolved::Infeasible) => Some(Presolved::Infeasible),
+                    Some(Presolved::Reduced { prob: prob2, postsolve: post2, scaling: sc2 }) => {
+                        debug_assert!(sc2.d.iter().chain(&pre.scaling.d).all(|&d| d == 1.0));
+                        postsolve.extend(post2);
+                        Some(Presolved::Reduced { prob: prob2, postsolve, scaling: pre.scaling })
+                    }
+                    // 2 回目の前処理が何も減らさない: 1 回目の結果にプロービングだけかける
+                    None => {
+                        if env_str!("ENOMOTO_MIP_NO_PROBING").is_none() && probe(&mut prob, verbose, submip) == Some(false) {
+                            return Some(Presolved::Infeasible);
+                        }
+                        Some(Presolved::Reduced { prob, postsolve, scaling: pre.scaling })
+                    }
+                };
+            }
+            Some(_) => {}
         }
     }
     if env_str!("ENOMOTO_MIP_NO_PROBING").is_none() {
@@ -927,16 +948,16 @@ fn presolve_mip(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs: Opti
 /// app1-1 では 0-1 列 1030 個のうち 925 個が「1 にすると LP が実行不能」で、LP 解の分数値の 19 個を固定するだけで LP 値が
 /// −20.96 → −3.98 (目的関数は整数なので下界 −3 = 最適値) になる。HiGHS は経路集約・tableau のカットで根を −4 にし、こちらは
 /// 根のカットのループで −7〜−8.6 にしかならず、木の根の強分枝で初めて −3.99 に届いていた。
-/// 実行不能と分かったら偽。
-fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64) -> bool {
+/// 固定した列の数を返す。実行不能と分かったら `None`。
+fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64) -> Option<usize> {
     use lp::{LpStatus, SolveLimits};
     let t0 = std::time::Instant::now();
     let deadline = Some(t0 + std::time::Duration::from_secs_f64(secs.max(0.0)));
     let mut lp = crate::simplex::mip_lp::TwoStageLp::new(&prob.col_lo, &prob.col_up, &prob.cost, &prob.rows, &prob.row_lo, &prob.row_up);
     match lp.solve(&SolveLimits { deadline, ..Default::default() }) {
         LpStatus::Optimal => {}
-        LpStatus::Infeasible => return false,
-        _ => return true,
+        LpStatus::Infeasible => return None,
+        _ => return Some(0),
     }
     let z0 = lp.objective() + prob.offset;
     let root_iters = lp.total_iterations();
@@ -1039,11 +1060,12 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64) -> bool {
             t0.elapsed().as_secs_f64()
         );
     }
-    if ok {
-        let b = lp.basis().col;
-        solver::ROOT_BASIS.with(|s| *s.borrow_mut() = Some(b));
+    if !ok {
+        return None;
     }
-    ok
+    let b = lp.basis().col;
+    solver::ROOT_BASIS.with(|s| *s.borrow_mut() = Some(b));
+    Some(n_fixed)
 }
 
 /// プロービング (SCIP・HiGHS の前処理と同じ): 0-1 列 `x_j` を 0 にして伝播した結果と 1 にして伝播した結果を比べる。
