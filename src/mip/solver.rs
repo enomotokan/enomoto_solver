@@ -520,6 +520,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     row_hash_map: std::collections::HashMap<u64, usize>,
     row_hash_epoch: Option<usize>,
     cut_basis_stats: [u64; 2],
+    /// 最後に待ち行列の半分を共有の待ち行列へ出した時刻 (`ENOMOTO_T_MIP_TREE_DONATE_HALF_SECS`)。
+    donate_half_at: Option<Instant>,
 }
 
 /// 分枝限定法で解く。
@@ -1478,6 +1480,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         row_hash_map: std::collections::HashMap::new(),
         row_hash_epoch: None,
         cut_basis_stats: [0; 2],
+        donate_half_at: None,
     };
     // DSE 重みは既定で全ての LP で引き継ぐ (根のカットのループ、潜りの子、強分岐、待ち行列のノードは基底と一緒に保存した
     // 重みを戻す)。`ENOMOTO_MIP_NO_DSE_ALL` で以前の形 (毎回 1 から) に戻す。サブ MIP の中から呼ばれても、終わったら元に戻す
@@ -2825,6 +2828,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 小さい順に共有の待ち行列へ出す。役の復帰で `idle` が下に回った状態 (毎ノード待ち行列の半分を出し、手元には深い
                 // ノードだけが残り、手元が尽きたら木全体で下界最小のノードから再開する。pk1・trento1 で良かった) を、役の有無に
                 // よらず意図して作る
+                // `ENOMOTO_T_MIP_TREE_DONATE_HALF_SECS` = T (> 0、既定 0 = 使わない): T 秒おきに、自分の待ち行列の半分を下界の小さい順に
+                // 共有の待ち行列へ出す (役の復帰で `idle` が下に回った状態では毎ノード半分を出していた。その間隔を決めて、役の有無によらず行う)
+                let half_secs = tunable!("ENOMOTO_T_MIP_TREE_DONATE_HALF_SECS", 0.0, f64);
+                if half_secs > 0.0 && self.race_done && self.queue.len() >= 2 && self.pool_hold.is_none() {
+                    let due = self.donate_half_at.is_none_or(|t| t.elapsed().as_secs_f64() >= half_secs);
+                    if due {
+                        self.donate_half_at = Some(Instant::now());
+                        self.pool_donate_n(self.queue.len() / 2);
+                    }
+                }
                 let cap = tunable!("ENOMOTO_T_MIP_TREE_LOCAL_CAP", 0usize, usize);
                 if cap > 0 && self.snap.is_some() && self.race_done && self.queue.len() > cap && self.pool_hold.is_none() {
                     self.pool_donate_n(self.queue.len() - cap);
