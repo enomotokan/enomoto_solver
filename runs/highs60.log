@@ -1,0 +1,79 @@
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+MIP roll3000 has 2295 rows; 1166 cols; 29386 nonzeros; 738 integer variables (246 binary)
+Coefficient ranges:
+  Matrix  [2e-01, 3e+02]
+  Cost    [1e+00, 1e+00]
+  Bound   [1e+00, 1e+09]
+  RHS     [6e-01, 1e+03]
+WARNING: Problem has some excessively large column bounds
+WARNING:    Consider scaling the    bounds by 1e-3, or setting the user_bound_scale option to -10
+Presolving model
+1702 rows, 1036 cols, 27932 nonzeros 0s
+1473 rows, 996 cols, 25017 nonzeros 0s
+Presolve reductions: rows 1473(-822); columns 996(-170); nonzeros 25017(-4369) 
+
+Solving MIP model with:
+   1473 rows
+   996 cols (610 binary, 114 integer, 12 implied int., 260 continuous, 0 domain fixed)
+   25017 nonzeros
+   Thread count 1 (of 4 threads). Using 1 max workers. Parallel search off
+
+Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+     I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+     S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+     Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+         0       0         0   0.00%   0               inf                  inf        0      0      0         0     0.3s
+         0       0         0   0.00%   11097.880287    inf                  inf        0      0      4      1244     0.4s
+ L       0       0         0   0.00%   12619.183463    13357              5.52%     5025    307    153      7419     6.9s
+
+1.7% inactive integer columns, restarting
+Model after restart has 1436 rows, 974 cols (588 bin., 114 int., 12 impl., 260 cont., 0 dom.fix.), and 24578 nonzeros
+
+         0       0         0   0.00%   12619.765358    13357              5.52%      165      0      0     14523    11.7s
+         0       0         0   0.00%   12619.765358    13357              5.52%      165    152      2     16018    12.0s
+ L       0       0         0   0.00%   12622.391946    13009              2.97%      477    196      2     19976    18.7s
+         6       0         1   3.12%   12622.392302    13009              2.97%      500    153    159     59674    26.3s
+        10       1         4  18.75%   12622.392302    13009              2.97%      521    153    371     75829    31.4s
+        15       1         5  20.31%   12622.392302    13009              2.97%      526    153    443     95177    36.5s
+        24       3         9  23.44%   12622.392302    13009              2.97%      562    153    718    115108    42.4s
+        98      12        39  25.62%   12622.392302    13009              2.97%      641    153   1475    128562    47.4s
+ T     160      25        61  32.87%   12629.391141    12982              2.72%     1618    225   1921    135997    51.1s
+       311      66       114  33.38%   12629.391141    12982              2.72%     2209    233   3415    145578    56.3s
+ T     416      13       160  44.46%   12629.391141    12905              2.14%     2362    246   4190    150390    59.3s
+ T     419      10       161  44.48%   12629.391141    12899              2.09%     2364    246   4266    150445    59.3s
+       435      14       168  44.54%   12629.391141    12899              2.09%     2950    202   4442    151733    60.0s
+
+Solving report
+  Model             roll3000
+  Status            Time limit reached
+  Primal bound      12899
+  Dual bound        12629.3911414
+  Gap               2.09% (tolerance: 0.01%)
+  P-D integral      1.84663242634
+  Solution status   feasible
+                    12899 (objective)
+                    0 (bound viol.)
+                    1.019888618e-10 (int. viol.)
+                    0 (row viol.)
+  Timing            60.01
+                    2.40 (Presolve)
+                        MIP    time [calls] = 0.26 [1]
+                        subMIP time [calls] = 2.14 [48]
+                    57.59 (Solve)
+                        MIP    time [calls] = 47.34 [1]
+                        subMIP time [calls] = 10.25 [39]
+                    0.00 (Postsolve)
+                        MIP    time [calls] = 0.00 [1]
+                        subMIP time [calls] = 0.00 [48]
+  Max sub-MIP depth 8
+  Nodes             435
+  Repair LPs        0
+  LP iterations     151733
+                    107933 (strong br.)
+                    8117 (separation)
+                    15201 (heuristics)
