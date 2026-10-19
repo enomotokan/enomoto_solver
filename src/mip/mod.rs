@@ -960,10 +960,17 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64) -> Option<usize> {
         _ => return Some(0),
     }
     let z0 = lp.objective() + prob.offset;
+    let root_secs = t0.elapsed().as_secs_f64();
     let root_iters = lp.total_iterations();
     let iter_budget = (tunable!("ENOMOTO_T_MIP_LP_PROBE_ITER_MULT", 2.0, f64) * root_iters as f64) as u64 + 5000;
     let per_lp = (root_iters / 4).clamp(200, 2000);
     let passes = tunable!("ENOMOTO_T_MIP_LP_PROBE_PASSES", 3usize, usize);
+    // 最初の `ENOMOTO_T_MIP_LP_PROBE_GIVEUP` 列で 1 つも固定できなければやめる (固定が出る問題では最初からすぐ出る:
+    // app1-1 は最初の 24 列で 21 個。40 問で固定が出るのは 5 問で、出ない問題に 1 問平均 0.5 秒、最大 3 秒かかっていた)
+    let giveup = tunable!("ENOMOTO_T_MIP_LP_PROBE_GIVEUP", 20usize, usize);
+    // 固定が 1 つもないまま、最初の LP の `ENOMOTO_T_MIP_LP_PROBE_GIVEUP_TIME_MULT` 倍 (+ 0.1 秒) の時間を使ってもやめる
+    // (子の LP が重い問題: cvs16r128-89 は 5 列で 3 秒、根の LP は 0.9 秒)
+    let giveup_secs = tunable!("ENOMOTO_T_MIP_LP_PROBE_GIVEUP_TIME_MULT", 1.0, f64) * root_secs + 0.1;
     let budget_left = |lp: &crate::simplex::mip_lp::TwoStageLp| lp.total_iterations() - root_iters < iter_budget && t0.elapsed().as_secs_f64() < secs;
     let (mut n_lps, mut n_fixed, mut n_tried) = (0usize, 0usize, 0usize);
     let mut tried: std::collections::HashSet<(usize, i64)> = std::collections::HashSet::new();
@@ -987,7 +994,7 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64) -> Option<usize> {
         // (列, 上限を締めるか, 値)
         let mut fixes: Vec<(usize, bool, f64)> = Vec::new();
         for &(j, v) in &cands {
-            if !budget_left(&lp) {
+            if !budget_left(&lp) || (n_fixed + fixes.len() == 0 && (n_tried >= giveup || t0.elapsed().as_secs_f64() > giveup_secs)) {
                 break;
             }
             tried.insert((j, v.floor() as i64));
@@ -1063,8 +1070,12 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64) -> Option<usize> {
     if !ok {
         return None;
     }
-    let b = lp.basis().col;
-    solver::ROOT_BASIS.with(|s| *s.borrow_mut() = Some(b));
+    // 固定したときだけ最後の LP の基底を根の LP に渡す (固定がなければ根の LP は前処理の LP と同じ問題で、基底を渡すと
+    // 着く頂点が変わり、カット・探索の経路が変わるだけ: qiu は固定 0 で 40 問の 2 回とも遅くなった)
+    if n_fixed > 0 {
+        let b = lp.basis().col;
+        solver::ROOT_BASIS.with(|s| *s.borrow_mut() = Some(b));
+    }
     Some(n_fixed)
 }
 
