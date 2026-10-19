@@ -198,6 +198,13 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) root_redcost: Option<(f64, Vec<(usize, bool, f64, f64)>)>,
     /// 固定費用ネットワーク型の問題で、木のノードの分離を強めるか ([`Solver::node_cuts_due`]、`ENOMOTO_MIP_FC_NODE_SEP` で使う。評価中)
     pub(super) fc_node_sep: bool,
+    /// `ENOMOTO_MIP_FC_NODE_SEP_ADAPT`: [`Self::fc_node_sep`] の毎ノードの分離を、効き目 (分離後の解き直しで LP の値が
+    /// 打ち切り値までの差のどれだけ上がったか) と時間で絞る ([`Solver::node_cuts_due`])。評価中
+    pub(super) fc_adapt: bool,
+    /// ノードの分離の効き目の統計: (回数, 効き目の指数移動平均, 分離で枝が切れた回数, 深さの規則から外れて分離した回数)
+    pub(super) fc_stats: (u64, f64, u64, u64),
+    /// 効き目が低いときに、何回に 1 回は試し続けるかの数え
+    pub(super) fc_probe: u64,
     /// 最後に RINS を試したノード番号。
     pub(super) last_rins: u64,
     /// Local Branching の近傍の大きさ (結果で調整する)。
@@ -1295,7 +1302,12 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
             (0x2545_F491_4F6C_DD1D ^ (pool_tid as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)).max(1)
         },
         root_redcost: None,
-        fc_node_sep: !params.submip && env_str!("ENOMOTO_MIP_FC_NODE_SEP").is_some() && super::separation::fixed_charge_network_for_nodes(p),
+        fc_node_sep: !params.submip
+            && (env_str!("ENOMOTO_MIP_FC_NODE_SEP").is_some() || env_str!("ENOMOTO_MIP_FC_NODE_SEP_ADAPT").is_some())
+            && super::separation::fixed_charge_network_for_nodes(p),
+        fc_adapt: env_str!("ENOMOTO_MIP_FC_NODE_SEP_ADAPT").is_some(),
+        fc_stats: (0, 0.0, 0, 0),
+        fc_probe: 0,
         last_rins: 0,
         lb_k: 18.0,
         improve_turn: 0,
@@ -1692,9 +1704,31 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// この値以上の下界のノードは捨ててよい (最小化形、定数項込み)。
     /// このノードで新しいカットを分離するか (SCIP の separator の freq と同じく、深さが `freq` の倍数のノードだけ。
     /// `ENOMOTO_T_MIP_NODE_CUT_FREQ`、既定 10、0 なら分離しない。`ENOMOTO_MIP_NODE_CUTS` なら毎回)。
-    fn node_cuts_due(&self, depth: usize) -> bool {
+    fn node_cuts_due(&mut self, depth: usize) -> bool {
         if env_str!("ENOMOTO_MIP_NODE_CUTS").is_some() {
             return true;
+        }
+        let freq = tunable!("ENOMOTO_T_MIP_NODE_CUT_FREQ", 10usize, usize);
+        // 効き目と時間で絞る版 (`ENOMOTO_MIP_FC_NODE_SEP_ADAPT`): 最初の W 回は毎回分離し、その後は効き目の移動平均が
+        // しきい値以上で、ノードの分離 (解き直しを含む) の時間が経過時間の f 倍以下の間だけ毎回分離する。外れたら深さの規則に
+        // 戻るが、P 回に 1 回は試して効き目を測り続ける
+        if self.fc_node_sep && self.fc_adapt {
+            if freq > 0 && depth % freq == 0 {
+                return true;
+            }
+            let warm = self.fc_stats.0 < tunable!("ENOMOTO_T_MIP_FC_SEP_WARM", 30u64, u64);
+            let eff_ok = self.fc_stats.1 >= tunable!("ENOMOTO_T_MIP_FC_SEP_MIN_GAIN", 0.05, f64);
+            let time_ok = self.node_cut_secs < tunable!("ENOMOTO_T_MIP_FC_SEP_TIME_FRAC", 0.3, f64) * self.start.elapsed().as_secs_f64();
+            let go = if time_ok && (warm || eff_ok) {
+                true
+            } else {
+                self.fc_probe += 1;
+                time_ok && self.fc_probe % tunable!("ENOMOTO_T_MIP_FC_SEP_PROBE", 8u64, u64) == 0
+            };
+            if go {
+                self.fc_stats.3 += 1;
+            }
+            return go;
         }
         // 固定費用ネットワーク型では、待ち行列から取り出したノードで毎回分離する (HiGHS も取り出したノードで毎回分離する)。
         // 分枝で開閉が決まった弧で LP 解が変わり、経路集約の flow cover 系のカットが効く: beasleyC3 は 4 スレッド・120 秒で
@@ -1713,8 +1747,24 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if f > 0.0 && self.node_cut_secs < f * self.start.elapsed().as_secs_f64() {
             return true;
         }
-        let freq = tunable!("ENOMOTO_T_MIP_NODE_CUT_FREQ", 10usize, usize);
         freq > 0 && depth % freq == 0
+    }
+
+    /// ノードの分離の後の解き直しの結果を効き目の統計に入れる (`obj0`: 分離の前の LP の値、`obj`: 解き直した値。
+    /// 枝が切れたら +inf)。効き目は打ち切り値までの差に対する上がり幅 (0..1)。暫定解がなければ |obj0| の 1% を差とする
+    pub(super) fn fc_record(&mut self, obj0: f64, obj: f64) {
+        if !self.fc_node_sep {
+            return;
+        }
+        let lim = self.prune_limit();
+        let gap = if lim.is_finite() && lim > obj0 { lim - obj0 } else { 1e-2 * obj0.abs().max(1.0) };
+        let g = if obj.is_finite() { ((obj - obj0) / gap).clamp(0.0, 1.0) } else { 1.0 };
+        if obj >= lim {
+            self.fc_stats.2 += 1;
+        }
+        self.fc_stats.0 += 1;
+        let a = (1.0 / self.fc_stats.0 as f64).max(tunable!("ENOMOTO_T_MIP_FC_SEP_EMA", 0.05, f64));
+        self.fc_stats.1 += a * (g - self.fc_stats.1);
     }
 
     pub(super) fn prune_limit(&self) -> f64 {
@@ -1975,7 +2025,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return;
         }
         eprintln!(
-            "MIP: {:8.2}s nodes {:8} open {:7} lb {:.8e} ub {:.8e} lp_iters {} sb_iters {} sb_lps {} sb_secs {:.2} node_iters {} (first {}, lps {}) heur_iters {} dive_iters {} lp_rows {} node_cut_secs {:.2}{}",
+            "MIP: {:8.2}s nodes {:8} open {:7} lb {:.8e} ub {:.8e} lp_iters {} sb_iters {} sb_lps {} sb_secs {:.2} node_iters {} (first {}, lps {}) heur_iters {} dive_iters {} lp_rows {} node_cut_secs {:.2}{}{}",
             self.start.elapsed().as_secs_f64(),
             self.nodes,
             self.queue.len(),
@@ -1992,6 +2042,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.dive_iters,
             self.lp.num_rows(),
             self.node_cut_secs,
+            if self.fc_node_sep {
+                format!(" fc_sep calls {} gain_ema {:.4} prunes {} extra {}", self.fc_stats.0, self.fc_stats.1, self.fc_stats.2, self.fc_stats.3)
+            } else {
+                String::new()
+            },
             // 木を分け合うとき: 共有の待ち行列の大きさと待っているスレッドの数 (符号つきで出す。下に回っていれば負)
             self.pool.as_ref().map_or(String::new(), |pl| {
                 use std::sync::atomic::Ordering;
@@ -3145,6 +3200,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let mut resolves = 0;
             // ノードの分離でカットを加えた後の解き直しか (その LP の時間を `node_cut_secs` に足す)
             let mut node_cut_resolve: Option<Instant> = None;
+            // ノードの分離 ([`Solver::node_cuts_due`]) の前の LP の値 (解き直しの後に効き目を測る)
+            let mut fc_obj0: Option<f64> = None;
             // HiGHS 流のカット管理: このノードでの分離のラウンド数と、前のラウンドの前の目的値
             let mut hcm_sep_rounds = 0usize;
             let mut hcm_sep_last_obj = f64::NEG_INFINITY;
@@ -3209,6 +3266,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 match st {
                     LpStatus::Optimal => {}
                     LpStatus::Infeasible | LpStatus::ObjectiveBound => {
+                        if let Some(o) = fc_obj0.take() {
+                            self.fc_record(o, f64::INFINITY);
+                        }
                         if self.dbg_on {
                             self.dbg_trace(&format!("LP {st:?} (resolve {resolves}, LP rows {})", self.lp.num_rows()));
                         }
@@ -3235,6 +3295,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 xp("m_lpstat");
                 node_obj = self.lp.objective() + self.p.offset;
+                if let Some(o) = fc_obj0.take() {
+                    self.fc_record(o, node_obj);
+                }
                 if !self.params.submip && env_str!("ENOMOTO_MIP_NO_CUT_AGING").is_none() {
                     self.age_cuts();
                     // 年齢の上限を超えたカットを外す (行の削除は LP を作り直すので、ある程度まとめて)
@@ -3654,6 +3717,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let added = self.node_cut_round(&x);
                     self.node_cut_secs += t_nc.elapsed().as_secs_f64();
                     if added {
+                        fc_obj0 = Some(node_obj);
                         resolves += 1;
                         // 解き直しの時間もノードの分離の時間に数える
                         node_cut_resolve = Some(Instant::now());
