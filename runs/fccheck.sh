@@ -1,0 +1,1 @@
+for f in /home/user/enomoto_solver/.miplib_cache/*.mps; do p=$(basename $f .mps); echo "== $p"; ENOMOTO_MIP_LOG=1 ENOMOTO_MIP_FC_NODE_SEP=1 timeout 60 python /home/user/wt/beasleyC3_mc11/runs/run_eno.py $p 3 2>&1 | grep -m3 "fixed-charge check"; done
