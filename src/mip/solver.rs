@@ -511,7 +511,7 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 証明の段階の検出 (`ENOMOTO_MIP_PROOF_SWITCH`、[`Self::proof_phase_check`]): 木を分け合わないときの印、最初の
     /// 暫定解の目的値、最後に最良値が良くなった (と気づいた) 時刻とその値、前回調べた時刻。
     proof_phase: bool,
-    proof_first_z: f64,
+    pub(super) proof_first_z: f64,
     proof_last_best: (f64, Instant),
     proof_eval_at: Option<Instant>,
     /// カットの行のハッシュ ([`Self::refresh_row_hashes`]) と、作ったときの行の記録の位置。`cut_basis_stats` は共有の待ち行列に
@@ -2006,7 +2006,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     /// 探索全体の下界 (最小化形): 自分の待ち行列・処理中のノード、木を分け合うときは共有の待ち行列と各スレッドの下界の最小。
-    fn global_lower_bound(&self) -> f64 {
+    pub(super) fn global_lower_bound(&self) -> f64 {
         let mut lb = self.queue.best_lower_bound().min(self.cur_lb);
         if let Some(pool) = &self.pool {
             let g = pool.inner.lock().unwrap();

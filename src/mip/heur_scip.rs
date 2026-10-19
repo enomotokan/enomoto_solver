@@ -24,15 +24,40 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.sol_pool.truncate(POOL_SIZE);
     }
 
+    /// `ENOMOTO_MIP_CROSSOVER_FOCUS`: 解のプールのうち「目的値 - 今の全体の下界」が「最も悪い解の目的値 - 根の下界」の
+    /// `ENOMOTO_T_MIP_CROSSOVER_FOCUS_FRAC` (既定 0.5) 倍以下の解が `ENOMOTO_T_MIP_CROSSOVER_FOCUS_MIN` (既定 3) 個以上あれば、
+    /// その解の番号 (良い順) を返す。最も悪い解は最初の暫定解とプールの最悪の解の悪い方、根の下界はカットの後の根の LP の値。
+    /// 大近傍探索 ([`Self::alns`]) はこのとき `ENOMOTO_T_MIP_CROSSOVER_FOCUS_PROB` (既定 0.75) の確率で、この解の中から選ぶ Crossover を使う
+    pub(super) fn crossover_focus_set(&self) -> Option<Vec<usize>> {
+        if env_str!("ENOMOTO_MIP_CROSSOVER_FOCUS").is_none() || self.params.submip || self.sol_pool.len() < 3 {
+            return None;
+        }
+        let worst = self.sol_pool.iter().map(|(z, _)| *z).fold(self.proof_first_z, |a, b| if a.is_finite() { a.max(b) } else { b });
+        let lb = self.global_lower_bound();
+        if !(worst.is_finite() && lb.is_finite() && self.hcm_root_obj.is_finite()) {
+            return None;
+        }
+        let thr = tunable!("ENOMOTO_T_MIP_CROSSOVER_FOCUS_FRAC", 0.5, f64) * (worst - self.hcm_root_obj).max(0.0);
+        let good: Vec<usize> = (0..self.sol_pool.len()).filter(|&k| self.sol_pool[k].0 - lb <= thr).collect();
+        (good.len() >= tunable!("ENOMOTO_T_MIP_CROSSOVER_FOCUS_MIN", 3usize, usize).max(2)).then_some(good)
+    }
+
     /// Crossover (SCIP の heur_crossover): プールの最良の解と他の解 (最大 2 つ、乱数で選ぶ) で値が一致する整数列を
     /// 固定したサブ MIP を解く。固定率が 5 割に届かなければ使わない。
     pub(super) fn crossover(&mut self) -> bool {
+        self.crossover_from(None)
+    }
+
+    /// [`Self::crossover`] を、`cands` (解のプールの番号、良い順) があればその中から選んだ解で行う。
+    pub(super) fn crossover_from(&mut self, cands: Option<&[usize]>) -> bool {
         let p = self.p;
-        if self.params.submip || self.sol_pool.len() < 2 {
+        if self.params.submip || self.sol_pool.len() < 2 || cands.is_some_and(|c| c.len() < 2) {
             return false;
         }
-        let mut picks = vec![0usize];
-        let others: Vec<usize> = (1..self.sol_pool.len()).collect();
+        let all: Vec<usize> = (0..self.sol_pool.len()).collect();
+        let cands = cands.unwrap_or(&all);
+        let mut picks = vec![cands[0]];
+        let others: Vec<usize> = cands[1..].to_vec();
         let k = others.len().min(2);
         let mut rest = others;
         for _ in 0..k {

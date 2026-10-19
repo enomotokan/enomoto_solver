@@ -2164,6 +2164,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 })
                 .unwrap(),
         };
+        // `ENOMOTO_MIP_CROSSOVER_FOCUS`: 良い解がそろったら Crossover に集中する ([`Self::crossover_focus_set`])
+        let focus = self.crossover_focus_set();
+        let arm = if focus.is_some() && self.rand() < tunable!("ENOMOTO_T_MIP_CROSSOVER_FOCUS_PROB", 0.75, f64) { 4 } else { arm };
         let z0 = self.incumbent.as_ref().map(|(z, _)| *z).unwrap();
         self.heur_label = ["tree RINS", "tree local branching", "tree proximity", "tree mutation", "tree crossover", "tree DINS"][arm];
         let ok = match arm {
@@ -2171,7 +2174,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             1 => self.local_branching(),
             2 => self.proximity_search(),
             3 => self.mutation(),
-            4 => self.crossover(),
+            4 => self.crossover_from(focus.as_deref()),
             _ => self.dins(x),
         };
         self.heur_label = "";
