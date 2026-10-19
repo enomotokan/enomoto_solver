@@ -1937,7 +1937,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // 経路集約 (path aggregation、HiGHS の `HighsPathSeparator`)
         if env_str!("ENOMOTO_MIP_NO_PATH_AGG").is_none() {
-            let max_starts = if light { tunable!("ENOMOTO_T_MIP_NODE_PATH_STARTS", 0usize, usize) } else { tunable!("ENOMOTO_T_MIP_PATH_STARTS", 1000usize, usize) };
+            // 固定費用ネットワーク型ではノードでも経路集約の始点を使う (`ENOMOTO_T_MIP_NODE_FC_PATH_STARTS`、[`Solver::node_cuts_due`])
+            let max_starts = if !light {
+                tunable!("ENOMOTO_T_MIP_PATH_STARTS", 1000usize, usize)
+            } else if self.fc_node_sep {
+                tunable!("ENOMOTO_T_MIP_NODE_FC_PATH_STARTS", 1000usize, usize)
+            } else {
+                tunable!("ENOMOTO_T_MIP_NODE_PATH_STARTS", 0usize, usize)
+            };
             // 既定は HiGHS の経路集約の移植 (`ENOMOTO_MIP_PATH_OLD` で従来の経路集約)
             // 経路集約: 従来のもの (`ENOMOTO_MIP_PATH_OLD`)、HiGHS の移植 (`ENOMOTO_MIP_PATH_HIGHS_ONLY`)、既定は両方
             // (h80x6320d・rout は移植で根の下界が上がり、mik-250 は従来のものの方が強い)
@@ -2565,6 +2572,17 @@ fn select_cuts(cands: Vec<Candidate>, max_cuts: usize, p: &MipProblem) -> Vec<Ca
 /// 固定費用ネットワーク型か: 連続変数 1 つと整数変数 1 つからなる行 (VUB/VLB) が行の
 /// `ENOMOTO_T_FC_ROW_FRAC` (0.7) 以上で、連続変数の `ENOMOTO_T_FC_COL_FRAC` (0.9) 以上がそのような行を持つ。
 fn fixed_charge_network(p: &MipProblem) -> bool {
+    fixed_charge_network_with(p, tunable!("ENOMOTO_T_FC_ROW_FRAC", 0.7, f64))
+}
+
+/// 木のノードの分離を強める固定費用ネットワーク型の判定 ([`Solver::node_cuts_due`]): [`fixed_charge_network`] と同じだが、
+/// 行の割合のしきい値は `ENOMOTO_T_FC_NODE_ROW_FRAC` (0.5)。流量保存の行も数えるので、弧に対して節点の多いネットワークでは
+/// VUB の行の割合が下がる (beasleyC3: 1473 行中 852 行 = 58%、連続変数は 852 本すべてが VUB を持つ)
+pub(super) fn fixed_charge_network_for_nodes(p: &MipProblem) -> bool {
+    fixed_charge_network_with(p, tunable!("ENOMOTO_T_FC_NODE_ROW_FRAC", 0.5, f64))
+}
+
+fn fixed_charge_network_with(p: &MipProblem, row_frac: f64) -> bool {
     // 前処理で消えた列 (行に現れない、固定された) は数えない
     let ncont = (0..p.n).filter(|&j| !p.is_int[j] && !p.cols[j].is_empty() && p.col_lo[j] < p.col_up[j]).count();
     if ncont == 0 || p.m == 0 {
@@ -2589,7 +2607,7 @@ fn fixed_charge_network(p: &MipProblem) -> bool {
     if env_str!("ENOMOTO_MIP_LOG").is_some() {
         eprintln!("MIP: fixed-charge check: vb rows {nrows} of {}, continuous with vb {ncol} of {ncont}", p.m);
     }
-    nrows as f64 >= tunable!("ENOMOTO_T_FC_ROW_FRAC", 0.7, f64) * p.m as f64 && ncol as f64 >= tunable!("ENOMOTO_T_FC_COL_FRAC", 0.9, f64) * ncont as f64
+    nrows as f64 >= row_frac * p.m as f64 && ncol as f64 >= tunable!("ENOMOTO_T_FC_COL_FRAC", 0.9, f64) * ncont as f64
 }
 
 /// 疎なベクトル (列番号の昇順) の内積。

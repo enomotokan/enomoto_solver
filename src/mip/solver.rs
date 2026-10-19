@@ -196,6 +196,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 根の LP の目的値と、非基底の構造変数の (列, 下限側か, 被約費用)。暫定解が良くなるたびに
     /// 大域的な被約費用固定に使う。
     pub(super) root_redcost: Option<(f64, Vec<(usize, bool, f64, f64)>)>,
+    /// 固定費用ネットワーク型の問題で、木のノードの分離を強めるか ([`Solver::node_cuts_due`]、`ENOMOTO_MIP_FC_NODE_SEP` で使う。評価中)
+    pub(super) fc_node_sep: bool,
     /// 最後に RINS を試したノード番号。
     pub(super) last_rins: u64,
     /// Local Branching の近傍の大きさ (結果で調整する)。
@@ -1293,6 +1295,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
             (0x2545_F491_4F6C_DD1D ^ (pool_tid as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)).max(1)
         },
         root_redcost: None,
+        fc_node_sep: !params.submip && env_str!("ENOMOTO_MIP_FC_NODE_SEP").is_some() && super::separation::fixed_charge_network_for_nodes(p),
         last_rins: 0,
         lb_k: 18.0,
         improve_turn: 0,
@@ -1691,6 +1694,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// `ENOMOTO_T_MIP_NODE_CUT_FREQ`、既定 10、0 なら分離しない。`ENOMOTO_MIP_NODE_CUTS` なら毎回)。
     fn node_cuts_due(&self, depth: usize) -> bool {
         if env_str!("ENOMOTO_MIP_NODE_CUTS").is_some() {
+            return true;
+        }
+        // 固定費用ネットワーク型では、待ち行列から取り出したノードで毎回分離する (HiGHS も取り出したノードで毎回分離する)。
+        // 分枝で開閉が決まった弧で LP 解が変わり、経路集約の flow cover 系のカットが効く: beasleyC3 は 4 スレッド・120 秒で
+        // 時間切れ (木の下界 746.9、最適 754) -> 57 秒 (経路集約の始点も使う、[`Self::separate`])。一律に毎回分離すると
+        // neos5・misc07 などが悪化する (下の注記)
+        if self.fc_node_sep {
             return true;
         }
         // `ENOMOTO_T_MIP_NODE_CUT_TIME_FRAC` = f (> 0): HiGHS と同じく待ち行列から取り出したノードでは毎回分離するが、
