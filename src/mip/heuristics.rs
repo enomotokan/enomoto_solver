@@ -1823,8 +1823,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// `ENOMOTO_MIP_FIX_CAP`: RENS・RINS の固定を、固定率の目標 ([`Self::target_fix_rate`]) で止めるか。
     /// HiGHS の RENS・RINS は LP 解 (と暫定解) に合う整数列を、目標の固定率に達するまでしか固定しない。全部固定すると
     /// 近傍が狭すぎ、drayage-25-23 では 11090 列中 229 列しか残らずサブ MIP が 0 ノードで実行不能になる。
-    pub(super) fn fix_cap_on() -> bool {
-        env_str!("ENOMOTO_MIP_FIX_CAP").is_some()
+    pub(super) fn fix_cap_on(&self) -> bool {
+        self.force_fix_cap || env_str!("ENOMOTO_MIP_FIX_CAP").is_some()
     }
 
     /// 固定 (列, 下限, 上限) を順に今の定義域に積み、1 つずつ伝播する ([`Self::propagated_fixings`] と同じ。矛盾する固定は
@@ -1921,7 +1921,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             return self.solve_submip(lo2, up2, 500);
         }
-        if Self::fix_cap_on() {
+        if self.fix_cap_on() {
             // 分数の列の切り上げ・切り下げの範囲を先に、整数値の列の固定は乱数の順 (0 でない値を先) に、目標の固定率まで積む
             let target = self.target_fix_rate();
             let mut fixes: Vec<(usize, f64, f64)> = (0..p.n).filter(|&j| p.is_int[j] && lo[j] < up[j] && (lo[j] > self.dom.lo[j] || up[j] < self.dom.up[j])).map(|j| (j, lo[j], up[j])).collect();
@@ -2000,7 +2000,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let (lo, up, _) = self.propagated_fixings(&fixes);
             return self.solve_submip(lo, up, 500);
         }
-        if Self::fix_cap_on() {
+        if self.fix_cap_on() {
             let target = self.target_fix_rate();
             self.shuffle_fixes(&mut fixes);
             let (lo, up, fr) = self.capped_fixings(&fixes, target);

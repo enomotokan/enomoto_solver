@@ -5,7 +5,10 @@ export ENOMOTO_MIP_THREADS=4
 while read -r name prob secs envs; do
   [ -z "$name" ] && continue
   case "$name" in \#*) continue;; esac
-  if [[ "$name" == highs* ]]; then
+  if [[ "$name" == highsopt* ]]; then
+    # 残りは HiGHS のオプション (opt=val ...)
+    timeout $((${secs%.*}*2+120)) python run_highs.py $prob $secs $envs > ${LOGDIR:-t4}/$name.log 2>&1
+  elif [[ "$name" == highs* ]]; then
     env $envs timeout $((${secs%.*}*2+120)) python run_highs.py $prob $secs > ${LOGDIR:-t4}/$name.log 2>&1
   else
     env ENOMOTO_MIP_LOG=1 $envs timeout $((${secs%.*}*2+120)) python run_eno.py $prob $secs > ${LOGDIR:-t4}/$name.log 2>&1
