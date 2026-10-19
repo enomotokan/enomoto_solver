@@ -150,7 +150,7 @@ fn max_threads() -> usize {
     mip::max_threads()
 }
 
-/// `Model.solve` で `threads` を指定しないときのスレッドの数 (使える CPU が 4 つ以上なら 4、なければ 1)。
+/// `Model.solve` で `threads` を指定しないときのスレッドの数 (使える CPU の数 + 1 の半分)。
 #[pyfunction]
 fn default_threads() -> usize {
     mip::default_threads()

@@ -23,7 +23,7 @@ In this way, **without choosing a numerical M and with the dual simplex method a
 The following are also implemented.
 
 - **Proximal interior-point method + crossover:** a proximal interior-point method (IP-PMM, Mehrotra's predictor–corrector method) computes an interior optimal solution, and a crossover (primal and dual push phases and basis selection) turns it into an optimal basic solution. The finish is done by the simplex method.
-- **Parallel execution of the two methods:** with `threads` set to 2 or more (the default is 4 when 4 or more CPUs are available, otherwise 1), an LP (for integer programs, a relaxation that cannot be warm-started) is solved at the same time by the slope–intercept dual two-phase method (1 thread) and the proximal interior-point method + crossover (the remaining threads), and the side that reaches a conclusion first is adopted (the other is stopped).
+- **Parallel execution of the two methods:** with `threads` set to 2 or more (by default, half of the available CPUs rounded up, as in HiGHS), an LP (for integer programs, a relaxation that cannot be warm-started) is solved at the same time by the slope–intercept dual two-phase method (1 thread) and the proximal interior-point method + crossover (the remaining threads), and the side that reaches a conclusion first is adopted (the other is stopped).
 - **Mixed-integer linear optimization (MIP):** solved by branch and cut (constraint propagation, cutting planes, primal heuristics, symmetry handling, etc.). All relaxations are solved by the slope–intercept dual two-phase method (warm-started from the parent's optimal basis at nodes), and when the root relaxation has no finite optimal value, whether the problem is infeasible or unbounded is decided with the problem in which the variables of the intercept problem are restricted to integers (when `distinguish_infeasible_unbounded=True`). Giving the solver several threads (`threads` set to 2 or more) parallelizes branch and bound: after the root is processed, the threads share the unprocessed nodes and divide the tree search among themselves (the root relaxation is solved at the same time by the two-phase method and the proximal interior-point method + crossover).
 
 ## Installation
@@ -81,7 +81,7 @@ print(x.value, y.value)             # 3.0 7.0
 
   | Argument | Meaning |
   |---|---|
-  | `threads` | Number of threads to use (default: 4 when 4 or more CPUs are available, otherwise 1; see `enomoto_solver.default_threads()`). With 2 or more, an LP is solved at the same time by the two-phase method and the interior-point method + crossover, and for integer programs the tree search is also shared. For details, see "Number of threads (`threads`)" below. |
+  | `threads` | Number of threads to use (default: half of the available CPUs rounded up, as in HiGHS; see `enomoto_solver.default_threads()`). With 2 or more, an LP is solved at the same time by the two-phase method and the interior-point method + crossover, and for integer programs the tree search is also shared. For details, see "Number of threads (`threads`)" below. |
   | `root_solver` | The LP method (default `"auto"`; see "Choosing the LP method" below). |
   | `distinguish_infeasible_unbounded` | Whether to distinguish infeasible from unbounded when there is no finite optimal value (default `False`; see "Result status, and infeasible or unbounded problems" below). |
   | `time_limit`, `mip_rel_gap`, `node_limit` | Termination criteria for integer programs (seconds, relative gap (default 0), number of nodes). |
@@ -173,7 +173,7 @@ The solution returned is polished before it is reported: integer variables are r
 
 ### Number of threads (`threads`)
 
-`solve(threads=...)` specifies the number of threads to use. If omitted, 4 threads are used when 4 or more CPUs are available to this process, and 1 otherwise (`enomoto_solver.default_threads()`). A value above the number of CPUs available to this process (`enomoto_solver.max_threads()`) is capped there. The whole solve, including parallel sections such as presolve, runs on this number of threads.
+`solve(threads=...)` specifies the number of threads to use. If omitted, (number of CPUs available to this process + 1) / 2 threads are used, as in HiGHS (`enomoto_solver.default_threads()`; 2 with 4 logical cores, 4 with 8). A value above the number of CPUs available to this process (`enomoto_solver.max_threads()`) is capped there. The whole solve, including parallel sections such as presolve, runs on this number of threads.
 
 | `threads` | LP (`root_solver="auto"`) | MIP |
 |---|---|---|

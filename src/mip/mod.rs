@@ -96,9 +96,10 @@ pub fn max_threads() -> usize {
     hw.min(cap).max(1)
 }
 
-/// スレッドの数を指定しないときの既定値: このプロセスが使える CPU ([`max_threads`]) が 4 つ以上なら 4、なければ 1。
+/// スレッドの数を指定しないときの既定値: このプロセスが使える CPU ([`max_threads`]) の数 + 1 の半分 (HiGHS の
+/// `threads = 0` と同じ。論理コアが 4 なら 2、8 なら 4)。
 pub fn default_threads() -> usize {
-    if max_threads() >= 4 { 4 } else { 1 }
+    max_threads().div_ceil(2).max(1)
 }
 
 /// (混合) 整数最適化問題を解く。整数変数が 1 つもなければ `solve_lp` を 1 回呼ぶだけ。
