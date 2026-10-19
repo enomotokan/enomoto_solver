@@ -2839,7 +2839,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                 }
                 let cap = tunable!("ENOMOTO_T_MIP_TREE_LOCAL_CAP", 0usize, usize);
-                if cap > 0 && self.snap.is_some() && self.race_done && self.queue.len() > cap && self.pool_hold.is_none() {
+                if cap > 0 && self.race_done && self.queue.len() > cap && self.pool_hold.is_none() {
                     self.pool_donate_n(self.queue.len() - cap);
                 }
                 if !tree_shared_queue() && !tree_keep_siblings() && env_str!("ENOMOTO_MIP_TREE_NO_BALANCE").is_none() && self.nodes % tunable!("ENOMOTO_T_MIP_TREE_BALANCE_EVERY", 32u64, u64) == 0 {
