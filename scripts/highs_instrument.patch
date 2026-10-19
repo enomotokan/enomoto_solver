@@ -40,6 +40,203 @@ index b4c37d1..6da70f2 100644
    std::set<std::pair<HighsInt, HighsInt>>::iterator it;
    if (freeSpaces_.empty() ||
        (it = freeSpaces_.lower_bound(
+diff --git a/highs/mip/HighsCutGeneration.cpp b/highs/mip/HighsCutGeneration.cpp
+index 4013925..d42e99d 100644
+--- a/highs/mip/HighsCutGeneration.cpp
++++ b/highs/mip/HighsCutGeneration.cpp
+@@ -1,3 +1,4 @@
++#include <cstdio>
+ /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+ /*                                                                       */
+ /*    This file is part of the HiGHS linear optimization suite           */
+@@ -22,6 +23,8 @@ HighsCutGeneration::HighsCutGeneration(const HighsLpRelaxation& lpRelaxation,
+       feastol(lpRelaxation.getMipSolver().mipdata_->feastol),
+       epsilon(lpRelaxation.getMipSolver().mipdata_->epsilon) {}
+ 
++extern FILE* g_gcTraceF;
++
+ bool HighsCutGeneration::determineCover(bool lpSol) {
+   if (rhs <= 10 * feastol) return false;
+ 
+@@ -608,6 +611,11 @@ bool HighsCutGeneration::cmirCutGenerationHeuristic(double minEfficacy,
+     }
+   }
+ 
++  if (g_gcTraceF) {
++    fprintf(g_gcTraceF, "CMIR deltas");
++    for (double dd : deltas) fprintf(g_gcTraceF, " %.6g", dd);
++    fprintf(g_gcTraceF, " initialScale %.6g best %.6g eff %.6g\n", initialScale, bestdelta, bestefficacy);
++  }
+   if (bestdelta == -1) return false;
+ 
+   /* try if multiplying best delta by 2 4 or 8 gives a better efficacy */
+@@ -687,6 +695,11 @@ bool HighsCutGeneration::cmirCutGenerationHeuristic(double minEfficacy,
+     }
+   }
+ 
++  if (g_gcTraceF) {
++    fprintf(g_gcTraceF, "CMIR final delta %.6g eff %.6g comp", bestdelta, bestefficacy);
++    for (HighsInt k : integerinds) fprintf(g_gcTraceF, " %d:%d", (int)inds[k], (int)complementation[k]);
++    fprintf(g_gcTraceF, "\n");
++  }
+   HighsCDouble scale = 1.0 / HighsCDouble(bestdelta);
+   HighsCDouble scalrhs = rhs * scale;
+   double downrhs = floor(double(scalrhs));
+@@ -1055,6 +1068,23 @@ static void checkNumerics(const double* vals, HighsInt len, double rhs) {
+ }
+ #endif
+ 
++FILE* g_gcTraceF = nullptr;  // set by HighsPathSeparator while dumping bases (declared at the top)
++static void gcTrace(const char* tag, const HighsInt* inds, const double* vals, HighsInt len, double rhs,
++                    const std::vector<double>* upper = nullptr, const std::vector<double>* solval = nullptr,
++                    const std::vector<uint8_t>* isint = nullptr, const std::vector<uint8_t>* comp = nullptr) {
++  if (!g_gcTraceF) return;
++  fprintf(g_gcTraceF, "%s rhs %.10g len %d", tag, rhs, (int)len);
++  for (HighsInt i = 0; i < len; ++i) {
++    fprintf(g_gcTraceF, " %d:%.6g", (int)inds[i], vals[i]);
++    if (upper) fprintf(g_gcTraceF, "[u%.4g", (*upper)[i]);
++    if (solval) fprintf(g_gcTraceF, ",x%.4g", (*solval)[i]);
++    if (isint) fprintf(g_gcTraceF, ",%c", (*isint)[i] ? 'i' : 'c');
++    if (comp && !comp->empty()) fprintf(g_gcTraceF, ",%s", (*comp)[i] ? "C" : "");
++    if (upper) fprintf(g_gcTraceF, "]");
++  }
++  fprintf(g_gcTraceF, "\n");
++}
++
+ bool HighsCutGeneration::generateCut(HighsTransformedLp& transLp,
+                                      std::vector<HighsInt>& inds_,
+                                      std::vector<double>& vals_, double& rhs_,
+@@ -1103,8 +1133,16 @@ bool HighsCutGeneration::generateCut(HighsTransformedLp& transLp,
+ #endif
+ 
+   bool intsPositive = true;
+-  if (!transLp.transform(vals_, upper, solval, inds_, rhs_, intsPositive))
++  gcTrace("IN", inds_.data(), vals_.data(), (HighsInt)inds_.size(), rhs_);
++  if (!transLp.transform(vals_, upper, solval, inds_, rhs_, intsPositive)) {
++    if (g_gcTraceF) fprintf(g_gcTraceF, "FAIL transform\n");
+     return false;
++  }
++  if (g_gcTraceF) {
++    fprintf(g_gcTraceF, "BT");
++    for (HighsInt c : inds_) fprintf(g_gcTraceF, " %d:%d", (int)c, transLp.boundTypeOf(c));
++    fprintf(g_gcTraceF, "\n");
++  }
+ 
+   rowlen = inds_.size();
+   this->inds = inds_.data();
+@@ -1114,9 +1152,16 @@ bool HighsCutGeneration::generateCut(HighsTransformedLp& transLp,
+   bool hasUnboundedInts = false;
+   bool hasGeneralInts = false;
+   bool hasContinuous = false;
++  {
++    std::vector<uint8_t> ii(rowlen);
++    if (g_gcTraceF) { for (HighsInt i = 0; i < rowlen; ++i) ii[i] = lpRelaxation.isColIntegral(inds[i]); gcTrace("TR", inds, vals, rowlen, double(rhs), &upper, &solval, &ii); }
++  }
+   if (!preprocessBaseInequality(hasUnboundedInts, hasGeneralInts,
+-                                hasContinuous))
++                                hasContinuous)) {
++    if (g_gcTraceF) fprintf(g_gcTraceF, "FAIL preprocess\n");
+     return false;
++  }
++  if (g_gcTraceF) { std::vector<uint8_t> ii(isintegral.begin(), isintegral.begin() + rowlen); gcTrace("PP", inds, vals, rowlen, double(rhs), &upper, &solval, &ii); fprintf(g_gcTraceF, "FL unbInt %d genInt %d cont %d\n", hasUnboundedInts, hasGeneralInts, hasContinuous); }
+ 
+   // it can happen that there is an unbounded integer variable during the
+   // transform call so that the integers are not transformed to positive values.
+@@ -1137,8 +1182,11 @@ bool HighsCutGeneration::generateCut(HighsTransformedLp& transLp,
+ 
+   // try to generate a cut
+   if (!tryGenerateCut(inds_, vals_, hasUnboundedInts, hasGeneralInts,
+-                      hasContinuous, 10 * feastol, onlyInitialCMIRScale))
++                      hasContinuous, 10 * feastol, onlyInitialCMIRScale)) {
++    if (g_gcTraceF) fprintf(g_gcTraceF, "FAIL trygen\n");
+     return false;
++  }
++  if (g_gcTraceF) { std::vector<uint8_t> ii(isintegral.begin(), isintegral.begin() + rowlen); gcTrace("TG", inds, vals, rowlen, double(rhs), &upper, &solval, &ii, &complementation); }
+ 
+   // remove the complementation if exists
+   removeComplementation();
+@@ -1157,21 +1205,23 @@ bool HighsCutGeneration::generateCut(HighsTransformedLp& transLp,
+   rhs_ = (double)rhs;
+   vals_.resize(rowlen);
+   inds_.resize(rowlen);
+-  if (!transLp.untransform(vals_, inds_, rhs_)) return false;
++  if (!transLp.untransform(vals_, inds_, rhs_)) { if (g_gcTraceF) fprintf(g_gcTraceF, "FAIL untransform\n"); return false; }
+ 
+   rowlen = inds_.size();
+   inds = inds_.data();
+   vals = vals_.data();
+   rhs = rhs_;
++  gcTrace("UT", inds, vals, rowlen, rhs_);
+ 
+   lpRelaxation.getMipSolver().mipdata_->debugSolution.checkCut(inds, vals,
+                                                                rowlen, rhs_);
+   // apply cut postprocessing including scaling and removal of small
+   // coefficients
+-  if (!postprocessCut(transLp.getGlobaldom())) return false;
++  if (!postprocessCut(transLp.getGlobaldom())) { if (g_gcTraceF) fprintf(g_gcTraceF, "FAIL postprocess\n"); return false; }
+   rhs_ = (double)rhs;
+   vals_.resize(rowlen);
+   inds_.resize(rowlen);
++  gcTrace("PO", inds_.data(), vals_.data(), rowlen, rhs_);
+ 
+   lpRelaxation.getMipSolver().mipdata_->debugSolution.checkCut(
+       inds_.data(), vals_.data(), rowlen, rhs_);
+@@ -1181,9 +1231,10 @@ bool HighsCutGeneration::generateCut(HighsTransformedLp& transLp,
+   const auto& sol = lpRelaxation.getSolution().col_value;
+   for (HighsInt i = 0; i != rowlen; ++i) violation += sol[inds[i]] * vals_[i];
+ 
+-  if (violation <= 10 * feastol) return false;
++  if (violation <= 10 * feastol) { if (g_gcTraceF) fprintf(g_gcTraceF, "FAIL violation %.3g\n", double(violation)); return false; }
+ 
+   transLp.getGlobaldom().tightenCoefficients(inds, vals, rowlen, rhs_);
++  gcTrace("TC", inds, vals, rowlen, rhs_);
+ 
+   // if the cut is violated by a small factor above the feasibility
+   // tolerance, add it to the cutpool
+@@ -1193,6 +1244,7 @@ bool HighsCutGeneration::generateCut(HighsTransformedLp& transLp,
+ 
+   // only return true if cut was accepted by the cutpool, i.e. not a duplicate
+   // of a cut already in the pool
++  if (g_gcTraceF) fprintf(g_gcTraceF, "POOL %d\n", (int)cutindex);
+   return cutindex != -1;
+ }
+ 
+@@ -1387,8 +1439,10 @@ bool HighsCutGeneration::tryGenerateCut(std::vector<HighsInt>& inds_,
+                                         bool onlyInitialCMIRScale,
+                                         bool allowRejectCut, bool lpSol) {
+   // use cmir if there are unbounded integer variables
+-  if (hasUnboundedInts)
++  if (hasUnboundedInts) {
++    if (g_gcTraceF) fprintf(g_gcTraceF, "USE cmir-only (unbounded ints)\n");
+     return cmirCutGenerationHeuristic(minEfficacy, onlyInitialCMIRScale);
++  }
+ 
+   // 0. Save data before determining cover and applying lifting functions
+   tmpVals.assign(vals, vals + rowlen);
+@@ -1420,6 +1474,7 @@ bool HighsCutGeneration::tryGenerateCut(std::vector<HighsInt>& inds_,
+       assert(!hasGeneralInts);
+       success = separateLiftedMixedBinaryCover();
+     }
++    if (g_gcTraceF) fprintf(g_gcTraceF, "COVER %d kind %d\n", (int)success, !hasContinuous && !hasGeneralInts ? 0 : hasGeneralInts ? 1 : 2);
+   } while (false);
+ 
+   double minMirEfficacy = minEfficacy;
+@@ -1455,6 +1510,7 @@ bool HighsCutGeneration::tryGenerateCut(std::vector<HighsInt>& inds_,
+   vals = tmpVals.data();
+ 
+   if (cmirCutGenerationHeuristic(minMirEfficacy, onlyInitialCMIRScale)) {
++    if (g_gcTraceF) fprintf(g_gcTraceF, "USE cmir (lifted %d)\n", (int)success);
+     // take the cmir cut as it is better
+     inds_.swap(tmpInds);
+     vals_.swap(tmpVals);
+@@ -1462,6 +1518,7 @@ bool HighsCutGeneration::tryGenerateCut(std::vector<HighsInt>& inds_,
+     vals = vals_.data();
+     return true;
+   } else if (success) {
++    if (g_gcTraceF) fprintf(g_gcTraceF, "USE lifted\n");
+     // take the previous lifted cut as cmir could not improve
+     // we restore the old complementation vector, right hand side, and values
+     rhs = tmpRhs;
 diff --git a/highs/mip/HighsDomain.cpp b/highs/mip/HighsDomain.cpp
 index f09d0f5..bf2f514 100644
 --- a/highs/mip/HighsDomain.cpp
@@ -105,16 +302,17 @@ index f09d0f5..bf2f514 100644
    pseudocost.increaseConflictWeight();
    for (const LocalDomChg& locdomchg : resolvedDomainChanges) {
 diff --git a/highs/mip/HighsPathSeparator.cpp b/highs/mip/HighsPathSeparator.cpp
-index d4fa7ad..edd8acd 100644
+index d4fa7ad..b0f2c86 100644
 --- a/highs/mip/HighsPathSeparator.cpp
 +++ b/highs/mip/HighsPathSeparator.cpp
-@@ -1,3 +1,5 @@
+@@ -1,3 +1,6 @@
 +#include <cstdlib>
 +#include <cstdio>
++extern FILE* g_gcTraceF;
  /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
  /*                                                                       */
  /*    This file is part of the HiGHS linear optimization suite           */
-@@ -30,6 +32,39 @@ void HighsPathSeparator::separateLpSolution(HighsLpRelaxation& lpRelaxation,
+@@ -30,6 +33,48 @@ void HighsPathSeparator::separateLpSolution(HighsLpRelaxation& lpRelaxation,
    const HighsMipSolver& mip = lpRelaxation.getMipSolver();
    const HighsLp& lp = lpRelaxation.getLp();
    const HighsSolution& lpSolution = lpRelaxation.getSolution();
@@ -134,12 +332,21 @@ index d4fa7ad..edd8acd 100644
 +      for (HighsInt k = 0; k < len; ++k) fprintf(dumpf, " %d %.17g", (int)ri[k], rv[k]);
 +      fprintf(dumpf, "\n");
 +    }
++    // slack bounds as HiGHS uses them (from the global domain activity) and the best variable bounds
++    for (HighsInt i = 0; i < lp.num_row_; ++i)
++      fprintf(dumpf, "S %d %.17g %.17g\n", (int)i, lpRelaxation.slackLower(i, gd), lpRelaxation.slackUpper(i, gd));
++    transLp.dumpVbs(dumpf);
++    if (getenv("HIGHS_GC_TRACE")) g_gcTraceF = fopen(getenv("HIGHS_GC_TRACE"), "w");
 +  } else if (dumpCalls == 2 && dumpf) {
++    if (g_gcTraceF) { fclose(g_gcTraceF); g_gcTraceF = nullptr; }
 +    fclose(dumpf);
 +    dumpf = nullptr;
 +  }
++  static int baseNo = 0;
 +  auto dumpBase = [&](const std::vector<HighsInt>& bi, const std::vector<double>& bv) {
 +    if (!dumpf) return;
++    if (g_gcTraceF) fprintf(g_gcTraceF, "BASE %d\n", baseNo);
++    ++baseNo;
 +    fprintf(dumpf, "B %d", (int)bi.size());
 +    for (size_t k = 0; k < bi.size(); ++k) fprintf(dumpf, " %d %.17g", (int)bi[k], bv[k]);
 +    fprintf(dumpf, "\n");
@@ -154,7 +361,7 @@ index d4fa7ad..edd8acd 100644
  
    std::vector<RowType> rowtype;
    rowtype.resize(lp.num_row_);
-@@ -350,7 +385,9 @@ void HighsPathSeparator::separateLpSolution(HighsLpRelaxation& lpRelaxation,
+@@ -350,7 +395,9 @@ void HighsPathSeparator::separateLpSolution(HighsLpRelaxation& lpRelaxation,
  
          // generate cut
          double rhs = 0;
@@ -164,7 +371,7 @@ index d4fa7ad..edd8acd 100644
  
          lpAggregator.getCurrentAggregation(baseRowInds, baseRowVals, true);
          if (!aggregatedPath.empty() || bestOutArcCol != -1 ||
-@@ -359,7 +396,12 @@ void HighsPathSeparator::separateLpSolution(HighsLpRelaxation& lpRelaxation,
+@@ -359,7 +406,12 @@ void HighsPathSeparator::separateLpSolution(HighsLpRelaxation& lpRelaxation,
  
          // generate reverse cut
          rhs = 0;
@@ -178,7 +385,7 @@ index d4fa7ad..edd8acd 100644
  
          if (success || (bestOutArcCol == -1 && bestInArcCol == -1)) break;
  
-@@ -393,7 +435,8 @@ void HighsPathSeparator::separateLpSolution(HighsLpRelaxation& lpRelaxation,
+@@ -393,7 +445,8 @@ void HighsPathSeparator::separateLpSolution(HighsLpRelaxation& lpRelaxation,
  
        // if the path has length at least 2 try to separate a path mixing cut
        HighsInt pathLen = aggregatedPath.size();
@@ -188,7 +395,7 @@ index d4fa7ad..edd8acd 100644
          // generate path mixing cut
          HighsHashTable<HighsInt, HighsInt> indexPos;
  
-@@ -529,9 +572,12 @@ void HighsPathSeparator::separateLpSolution(HighsLpRelaxation& lpRelaxation,
+@@ -529,9 +582,12 @@ void HighsPathSeparator::separateLpSolution(HighsLpRelaxation& lpRelaxation,
                  cutVals.resize(numInds);
                  inds.resize(numInds);
  
@@ -382,3 +589,64 @@ index fa58ef2..9228865 100644
      if (transLp.getGlobaldom().infeasible()) break;
  
      lpAggregator.clear();
+diff --git a/highs/mip/HighsTransformedLp.cpp b/highs/mip/HighsTransformedLp.cpp
+index 609c7dd..cc60fc2 100644
+--- a/highs/mip/HighsTransformedLp.cpp
++++ b/highs/mip/HighsTransformedLp.cpp
+@@ -7,6 +7,8 @@
+ /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+ 
+ #include "mip/HighsTransformedLp.h"
++#include <cstdio>
++extern FILE* g_gcTraceF;
+ 
+ #include "mip/HighsMipSolverData.h"
+ #include "util/HighsCDouble.h"
+@@ -172,6 +174,7 @@ bool HighsTransformedLp::transform(std::vector<double>& vals,
+     double ub = getUb(col);
+ 
+     if (ub - lb < mip.options_mip_->small_matrix_value) {
++      if (g_gcTraceF) fprintf(g_gcTraceF, "XFIXED col %d val %.6g lb %.6g ub %.6g\n", (int)col, vals[i], lb, ub);
+       tmpRhs -= std::min(lb, ub) * vals[i];
+       remove(i);
+       continue;
+@@ -291,6 +294,12 @@ bool HighsTransformedLp::transform(std::vector<double>& vals,
+       }
+     }
+ 
++    if (g_gcTraceF) {
++      fprintf(g_gcTraceF, "XF col %d val %.6g lb %.6g ub %.6g type %d", (int)col, vals[i], lb, ub, (int)boundTypes[col]);
++      if (bestVlb[col].first != -1) fprintf(g_gcTraceF, " vlb(%d,%.6g,%.6g)", (int)bestVlb[col].first, bestVlb[col].second.coef, bestVlb[col].second.constant);
++      if (bestVub[col].first != -1) fprintf(g_gcTraceF, " vub(%d,%.6g,%.6g)", (int)bestVub[col].first, bestVub[col].second.coef, bestVub[col].second.constant);
++      fprintf(g_gcTraceF, " dist lb %.4g ub %.4g slb %.4g sub %.4g\n", lbDist[col], ubDist[col], simpleLbDist[col], simpleUbDist[col]);
++    }
+     switch (boundTypes[col]) {
+       case BoundType::kSimpleLb:
+         if (vals[i] > 0) {
+diff --git a/highs/mip/HighsTransformedLp.h b/highs/mip/HighsTransformedLp.h
+index bb7e929..e01e746 100644
+--- a/highs/mip/HighsTransformedLp.h
++++ b/highs/mip/HighsTransformedLp.h
+@@ -14,6 +14,7 @@
+ #ifndef MIP_HIGHS_TRANSFORMED_LP_H_
+ #define MIP_HIGHS_TRANSFORMED_LP_H_
+ 
++#include <cstdio>
+ #include <vector>
+ 
+ #include "lp_data/HConst.h"
+@@ -62,6 +63,14 @@ class HighsTransformedLp {
+                    double& rhs, bool integral = false);
+ 
+   const HighsDomain& getGlobaldom() const { return globaldom_; }
++  int boundTypeOf(HighsInt col) const { return (int)boundTypes[col]; }
++  // diagnostic: write the best variable bounds of every column ("VUB col bincol coef const", "VLB ...")
++  void dumpVbs(FILE* f) const {
++    for (size_t c = 0; c < bestVub.size(); ++c) {
++      if (bestVub[c].first != -1) fprintf(f, "VUB %d %d %.17g %.17g\n", (int)c, (int)bestVub[c].first, bestVub[c].second.coef, bestVub[c].second.constant);
++      if (bestVlb[c].first != -1) fprintf(f, "VLB %d %d %.17g %.17g\n", (int)c, (int)bestVlb[c].first, bestVlb[c].second.coef, bestVlb[c].second.constant);
++    }
++  }
+ };
+ 
+ #endif
