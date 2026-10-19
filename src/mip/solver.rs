@@ -2824,10 +2824,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 } else if idle > len && self.queue.len() >= 2 && self.pool_hold.is_none() {
                     self.pool_donate(idle - len);
                 }
-                // `ENOMOTO_T_MIP_TREE_LOCAL_CAP` = K (> 0、既定 0 = 使わない): 自分の待ち行列を K ノードまでにし、超えた分は下界の
-                // 小さい順に共有の待ち行列へ出す。役の復帰で `idle` が下に回った状態 (毎ノード待ち行列の半分を出し、手元には深い
-                // ノードだけが残り、手元が尽きたら木全体で下界最小のノードから再開する。pk1・trento1 で良かった) を、役の有無に
-                // よらず意図して作る
+                // `ENOMOTO_T_MIP_TREE_LOCAL_CAP` = K (既定 1000、0 で使わない): 自分の待ち行列を K ノードまでにし、超えた分は下界の
+                // 小さい順に共有の待ち行列へ出す (手元の近いノードを続けて処理する利点を残したまま、手元が数千ノードに膨らむのを防ぎ、
+                // 浅いノードをほかのスレッドに回す)。40 問 (2 回、`idle` の修正と組み): 解けた数 24.5 -> 25.0、SGM 20.58 -> 20.74 秒、
+                // 主ギャップの和 2.006 -> 1.949、noswot が 2 回とも解ける (38.6・31.7 秒)。上限 2・8 (手元をほぼ空にする) は証明が主の
+                // 問題で遅かった (h80x6320d・eil33-2・neos-860300)
                 // `ENOMOTO_T_MIP_TREE_DONATE_HALF_SECS` = T (> 0、既定 0 = 使わない): T 秒おきに、自分の待ち行列の半分を下界の小さい順に
                 // 共有の待ち行列へ出す (役の復帰で `idle` が下に回った状態では毎ノード半分を出していた。その間隔を決めて、役の有無によらず行う)
                 let half_secs = tunable!("ENOMOTO_T_MIP_TREE_DONATE_HALF_SECS", 0.0, f64);
@@ -2838,7 +2839,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         self.pool_donate_n(self.queue.len() / 2);
                     }
                 }
-                let cap = tunable!("ENOMOTO_T_MIP_TREE_LOCAL_CAP", 0usize, usize);
+                let cap = tunable!("ENOMOTO_T_MIP_TREE_LOCAL_CAP", 1000usize, usize);
                 if cap > 0 && self.race_done && self.queue.len() > cap && self.pool_hold.is_none() {
                     self.pool_donate_n(self.queue.len() - cap);
                 }
@@ -4154,14 +4155,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if self.pool_busy {
                 g.busy -= 1;
                 self.pool_busy = false;
-                // `ENOMOTO_MIP_ROLE_IDLE_FIX`: 待っているスレッドの数 (`idle`) も合わせる。合わせないと、役から木に戻って
+                // 待っているスレッドの数 (`idle`) も合わせる (`ENOMOTO_MIP_NO_ROLE_IDLE_FIX` なら以前と同じく合わせない)。合わせないと、役から木に戻って
                 // 共有の待ち行列からノードを取るときに `idle` を 1 減らして usize の下に回り (`pool_busy` が偽のまま取るので
                 // 増やした分がない)、以後どのスレッドも「待っているスレッドがいる」と見て毎ノード自分の待ち行列の半分を
                 // 共有の待ち行列に渡し続ける (pk1 の速い山はこの状態: 自分の待ち行列がほぼ空になりカットが保護されず LP が
-                // 小さいままになる。analysis/pk1_variance_20261017.md)。既定では合わせない: 合わせると 93 問 (2 回) で主ギャップの
-                // 和が 12.99 -> 15.26 (trento1 0.07 -> 0.69、neos-1445765 0.42 -> 0.62 など、保護の有無によらない) と悪くなった。
-                // 役から戻った後に全スレッドが共有の待ち行列へノードを出し続ける今の動き (実質の既定) を、意図した形で書き直すのは今後の課題
-                if env_str!("ENOMOTO_MIP_ROLE_IDLE_FIX").is_some() {
+                // 小さいままになる。analysis/pk1_variance_20261017.md)。合わせるだけでは 93 問 (2 回) で主ギャップの和が 12.99 -> 15.26 と
+                // 悪くなったが、手元の待ち行列の上限 (`ENOMOTO_T_MIP_TREE_LOCAL_CAP`、既定 1000) と組むと 40 問で既定と同等以上になったので、
+                // 役の有無で探索が変わらないこの組を既定にした
+                if env_str!("ENOMOTO_MIP_NO_ROLE_IDLE_FIX").is_none() {
                     pool.idle.fetch_add(1, Ordering::Relaxed);
                 }
             }
