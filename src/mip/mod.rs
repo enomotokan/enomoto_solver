@@ -564,6 +564,8 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
 fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) -> solver::MipResult {
     let start = RESTART_SOL.with(|s| s.borrow_mut().take());
     let t_pre = std::time::Instant::now();
+    // 時間上限は前処理・対称性の検出の時間も含める (分枝限定法の時計は `solver::solve` の開始から測るので、渡す前に引く)
+    let remaining = |params: MipParams| MipParams { time_limit: (params.time_limit - t_pre.elapsed().as_secs_f64()).max(0.0), ..params };
     let presolved = if use_presolve { presolve_mip(p, params.verbose, params.submip) } else { None };
     // 利用者向けのログ (サブ MIP の前処理は出さない)
     if !params.submip {
@@ -623,7 +625,7 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
             if outer_level {
                 solver::set_thread_scale(Some(scaling.d.clone()));
             }
-            let mut r = solver::solve(&prob, params);
+            let mut r = solver::solve(&prob, remaining(params));
             if outer_level {
                 solver::set_thread_scale(None);
             }
@@ -650,9 +652,9 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
                 // 暫定解がないと目的値の定数のずれが分からないので下界は報告しない
                 r.best_bound = f64::NEG_INFINITY;
             }
-            if ok { r } else { solver::solve(p, params) }
+            if ok { r } else { solver::solve(p, remaining(params)) }
         }
-        None => solver::solve(p, params),
+        None => solver::solve(p, remaining(params)),
     }
 }
 

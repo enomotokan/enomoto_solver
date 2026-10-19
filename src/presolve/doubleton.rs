@@ -179,9 +179,13 @@ fn eliminate_doubleton_equalities_full(n: usize, a: &FaerCsr, b: &[f64], gv: GVi
     let mut claimed: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
     let mut eliminated_a_row = vec![false; a_rows.len()];
 
-    // 整数最適化の前処理中は整数列を消さない (連続列の側を消す。両方整数なら見送る)。
+    // 整数最適化の前処理中は、整数列は連続列の側を消す。両方整数なら、残す列が整数ならいつも消す列も整数になる
+    // (`a_keep / a_elim` と `rhs / a_elim` が整数) ときだけ消す (`x = y` など。neos-3083819-nubu は 4725 行のうち 4215 行が
+    // 整数列どうしの `x - y = 0` で、HiGHS は前処理で 388 行に減らす)。`ENOMOTO_PRESOLVE_NO_INT_DOUBLETON` で見送る (従来)
     let int_mask = crate::presolve::int_mask();
     let is_int = |j: usize| int_mask.as_ref().is_some_and(|m| m[j]);
+    let int_pairs = env_str!("ENOMOTO_PRESOLVE_NO_INT_DOUBLETON").is_none();
+    let is_integral = |v: f64| (v - v.round()).abs() <= 1e-9 * v.abs().max(1.0);
     for (i, row) in a_rows.iter().enumerate() {
         if row.len() != 2 {
             continue;
@@ -192,10 +196,17 @@ fn eliminate_doubleton_equalities_full(n: usize, a: &FaerCsr, b: &[f64], gv: GVi
             std::mem::swap(&mut term_elim, &mut term_keep);
         }
         if is_int(term_elim.0) {
-            if is_int(term_keep.0) || term_keep.1.abs() < 1e-3 * term_elim.1.abs() {
+            if is_int(term_keep.0) {
+                // 係数の絶対値の小さい方を消せば比が整数になりうる
+                std::mem::swap(&mut term_elim, &mut term_keep);
+                if !int_pairs || term_elim.1.abs() < TOL || !is_integral(term_keep.1 / term_elim.1) || !is_integral(b[i] / term_elim.1) {
+                    continue;
+                }
+            } else if term_keep.1.abs() < 1e-3 * term_elim.1.abs() {
                 continue;
+            } else {
+                std::mem::swap(&mut term_elim, &mut term_keep);
             }
-            std::mem::swap(&mut term_elim, &mut term_keep);
         }
         let (var_elim, coeff_elim) = term_elim;
         let (var_keep, coeff_keep) = term_keep;
