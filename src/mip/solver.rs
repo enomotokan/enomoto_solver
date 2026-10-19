@@ -1166,8 +1166,12 @@ fn thread_watch() -> Option<(f64, f64)> {
 }
 
 pub(crate) fn mip_threads() -> usize {
-    tunable!("ENOMOTO_MIP_THREADS", 1usize, usize).max(1)
+    let env = tunable!("ENOMOTO_MIP_THREADS", 0usize, usize);
+    if env > 0 { env } else { MIP_THREADS_DEFAULT.load(std::sync::atomic::Ordering::Relaxed).max(1) }
 }
+
+/// [`mip_threads`] の既定 (`ENOMOTO_MIP_THREADS` がないとき)。[`super::solve_mip`] が求解の間だけ木の探索のスレッド数にする。
+pub(crate) static MIP_THREADS_DEFAULT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
 
 pub fn solve(p: &MipProblem, params: MipParams) -> MipResult {
     // ヒューリスティクスのサブ MIP は小さいことが多いので、基底のない求解も二段解法だけで解く (同時実行しない)
