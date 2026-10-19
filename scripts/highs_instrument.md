@@ -16,3 +16,12 @@ HiGHS 1.15.1 (`git clone --depth 1 --branch v1.15.1 https://github.com/ERGO-Code
 - 環境変数 `HIGHS_CUT_DUMP=ファイル`: 最初の分離ラウンドの経路集約の集約行と生成したカットを書き出す
   (`presolve=off` で使う)。`HIGHS_CUT_DUMP=ファイル cargo test --release highs_cut_dump -- --ignored --nocapture`
   でこちらの CMIR と比べる
+- 環境変数 `HIGHS_TAB_DUMP=ファイル` (`HIGHS_TAB_DUMP_CALL=k`、既定 1): 本体の MIP の tableau の分離の k 回目の呼び出しの LP の状態・
+  集約行・カットを同じ形式で書き出す (行の後ろに整数の行かどうか `I 0|1`、`F` 候補の数とそのうち行のスラックの数、`V` 集約した
+  基底変数 (行のスラックか) とスコア、`O` LP 値)。上のテストでそのまま比べられる
+- `HPROP 数 obj v`: 分離のラウンドの後の伝播で変わった境界の数と LP 値
+- 環境変数 `HIGHS_ADD_DUMP=ファイル`: 本体の MIP の最初の 3 回の、プールから LP に入れたカット (`A 回 右辺 長さ 列 係数 ...`) を書き出す
+- 環境変数 `HIGHS_TAB_NO_SLACK`: tableau の分離で、整数の行のスラックを候補にしない
+- 上のテストは libpython にリンクしないと通らない (pyo3 の extension-module のため)。例:
+  `CARGO_TARGET_DIR=/tmp/tgt RUSTFLAGS="-L $(python3 -c 'import sysconfig;print(sysconfig.get_config_var("LIBDIR"))') -C link-arg=-lpython3.13"`。
+  `HIGHS_CUT_DUMP_ONLYH=k` で HiGHS だけがカットを作れた集約行を詳しく表示する

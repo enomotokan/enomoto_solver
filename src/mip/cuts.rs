@@ -1043,6 +1043,7 @@ mod highs_dump {
         let (mut lo, mut up, mut isint, mut x) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         let mut rows: Vec<Vec<(usize, f64)>> = Vec::new();
         let (mut rlo, mut rup) = (Vec::new(), Vec::new());
+        let mut row_int: Vec<bool> = Vec::new();
         let mut bases: Vec<Vec<(usize, f64)>> = Vec::new();
         let mut res: Vec<Option<(Vec<(usize, f64)>, f64)>> = Vec::new();
         let num = |s: &str| -> f64 {
@@ -1071,6 +1072,8 @@ mod highs_dump {
                     let act = num(w[3]);
                     let len: usize = w[4].parse().unwrap();
                     rows.push((0..len).map(|k| (w[5 + 2 * k].parse().unwrap(), num(w[6 + 2 * k]))).collect());
+                    // tableau の書き出し (`HIGHS_TAB_DUMP`) は行の後ろに整数の行かどうか (`I 0|1`) を付ける
+                    row_int.push(w.get(5 + 2 * len) == Some(&"I") && w.get(6 + 2 * len) == Some(&"1"));
                     let _ = act;
                 }
                 "B" => {
@@ -1096,10 +1099,12 @@ mod highs_dump {
         let mut vx = x.clone();
         let mut vint = isint.clone();
         for i in 0..m {
-            vlo.push(rlo[i]);
-            vup.push(rup[i]);
+            // 整数の行の活動量は整数 (こちらの分離と同じく境界を整数に丸める)
+            let (l, u) = if row_int[i] { ((rlo[i] - 1e-6).ceil(), (rup[i] + 1e-6).floor()) } else { (rlo[i], rup[i]) };
+            vlo.push(l);
+            vup.push(u);
             vx.push(rows[i].iter().map(|&(j, a)| a * x[j]).sum());
-            vint.push(false);
+            vint.push(row_int[i]);
         }
         let vb = VarBounds::from_rows(n, &isint, &rows, &rlo, &rup);
         let vars = CutVars { lo: &vlo, up: &vup, is_int: &vint, x: &vx, vb: Some(&vb) };
@@ -1162,6 +1167,15 @@ mod highs_dump {
                 }
                 (Some(eh), None) => {
                     only_h += 1;
+                    // `HIGHS_CUT_DUMP_ONLYH=k`: HiGHS だけがカットを作れた集約行のうち効き目の大きいもの (> 0.1) を k 本まで詳しく表示
+                    if eh > 0.1 && std::env::var("HIGHS_CUT_DUMP_ONLYH").ok().and_then(|v| v.parse::<usize>().ok()).is_some_and(|k| only_h <= k * 20) {
+                        let bb: Vec<String> = b.iter().map(|&(k, a)| format!("{k}{}:{a:.4}[{},{}]x={:.4}", if vint[k] { "i" } else { "c" }, vlo[k], vup[k], vx[k])).collect();
+                        println!("onlyh detail: highs eff {eh:.4}\n   base: {}", bb.join(" "));
+                        if let Some((c, r)) = r {
+                            let c2: Vec<String> = c.iter().map(|&(k, a)| format!("{k}:{a:.4}")).collect();
+                            println!("   highs cut <= {r:.4}: {}", c2.join(" "));
+                        }
+                    }
                     if shown < 15 {
                         shown += 1;
                         println!("only highs: {eh:.4} base len {}: {:?}", b.len(), &b[..b.len().min(12)]);
