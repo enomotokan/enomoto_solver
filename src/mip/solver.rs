@@ -2101,7 +2101,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if let Some(x) = START_SOL.with(|s| s.borrow_mut().take()) {
             if x.len() == self.p.n {
                 let ok = self.try_incumbent(x);
-                if self.params.verbose {
+                if self.params.verbose || env_str!("ENOMOTO_MIP_START_FILE").is_some() {
                     eprintln!("MIP: start solution from before the restart: accepted {ok}");
                 }
             }

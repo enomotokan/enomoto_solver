@@ -144,6 +144,28 @@ pub fn solve_mip(
     };
     // 基底のない LP の求解 (根・再スタート後の根) を `threads` 本で同時実行にする (木の探索の従のスレッドを始めたら、
     // またヒューリスティクスのサブ MIP の中では 1)
+    // 診断用 (`ENOMOTO_MIP_START_FILE`): 最初の暫定解を与える (元の問題の列の順に 1 行 1 値)。再スタートで暫定解を
+    // 引き継ぐ経路 (`RESTART_SOL`) に置くので、前処理後の問題で実行可能なときだけ使われる。主側 (解を見つける) と
+    // 双対側 (証明) の切り分けに使う (mzzv42z・neos-960392 の調査)。
+    if let Some(f) = env_str!("ENOMOTO_MIP_START_FILE") {
+        match std::fs::read_to_string(f) {
+            Ok(s) => {
+                let x: Vec<f64> = s.lines().filter_map(|l| l.trim().parse().ok()).collect();
+                let ok = x.len() == p.n;
+                eprintln!(
+                    "MIP_START_FILE: {} values (n = {}), objective {} feasible {}",
+                    x.len(),
+                    p.n,
+                    if ok { p.sense_sign * p.objective(&x) } else { f64::NAN },
+                    ok && p.is_feasible(&x, 1e-6)
+                );
+                if ok {
+                    RESTART_SOL.with(|s| *s.borrow_mut() = Some(x));
+                }
+            }
+            Err(e) => eprintln!("MIP_START_FILE: cannot read {f}: {e}"),
+        }
+    }
     let prev_race = crate::simplex::mip_lp::set_cold_race_threads(params.threads);
     // 根のサブ MIP・Feasibility Jump を別スレッドで回すかなどの判定 ([`solver::mip_threads`]) も、`ENOMOTO_MIP_THREADS` が
     // なければこのスレッド数にする
@@ -589,7 +611,7 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
             let xr: Vec<f64> = x.iter().zip(&scaling.d).map(|(v, d)| v / d).collect();
             if prob.is_feasible(&xr, 1e-6) {
                 solver::START_SOL.with(|s| *s.borrow_mut() = Some(xr));
-            } else if params.verbose {
+            } else if params.verbose || env_str!("ENOMOTO_MIP_START_FILE").is_some() {
                 eprintln!("MIP: the start solution is not feasible in the presolved problem; dropped");
             }
         }
