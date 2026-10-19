@@ -135,6 +135,9 @@ thread_local! {
     /// 次に始めるサブ MIP の根の LP の初めの基底 (列の状態。`ENOMOTO_MIP_NO_SUBMIP_BASIS` でなければ)。呼び出し側の LP の基底を渡す
     /// (HiGHS のサブ MIP の `rootbasis`)。前処理は列の番号を保つので列の状態はそのまま使え、行は論理変数で埋めて修復する。
     pub(crate) static SUBMIP_BASIS: std::cell::RefCell<Option<Vec<super::lp::VarStatus>>> = const { std::cell::RefCell::new(None) };
+    /// 次に始める求解 (サブ MIP でないもの) の根の LP の初めの基底 (列の状態)。前処理の LP による固定
+    /// ([`super::lp_probe`]) が解いた LP の基底を渡す (根の LP を解き直す手間を減らす)。
+    pub(crate) static ROOT_BASIS: std::cell::RefCell<Option<Vec<super::lp::VarStatus>>> = const { std::cell::RefCell::new(None) };
     /// ヒューリスティクス役のスレッド (`ENOMOTO_MIP_HEUR_ROLE`、[`Solver::heur_role_run`]) の共有の待ち行列。このスレッドで
     /// 解くサブ MIP も、木の探索が終わるか止める合図が立ったら打ち切る ([`Solver::time_up`])。
     static ROLE_POOL: std::cell::RefCell<Option<std::sync::Arc<WorkPool>>> = const { std::cell::RefCell::new(None) };
@@ -2126,6 +2129,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // (`TwoStageLp::solve`、`crate::simplex::mip_lp::set_cold_race_threads`)
         if self.params.submip {
             if let Some(col) = SUBMIP_BASIS.with(|s| s.borrow_mut().take()) {
+                if col.len() == self.p.n {
+                    self.lp.set_basis(&super::lp::Basis { col, row: Vec::new() });
+                }
+            }
+        }
+        if !self.params.submip && self.snap.is_none() {
+            if let Some(col) = ROOT_BASIS.with(|s| s.borrow_mut().take()) {
                 if col.len() == self.p.n {
                     self.lp.set_basis(&super::lp::Basis { col, row: Vec::new() });
                 }
