@@ -1034,6 +1034,126 @@ fn lifted_flow_cover_impl(vars: &CutVars, base: &[(usize, f64)], rhs: f64) -> Op
 mod highs_dump {
     use super::*;
 
+    /// 試作 (診断用): 1 本の行の活動量の境界から変数上下限を作る。行の連続変数 x (係数 a) と 0-1 変数 y (係数 b) の組ごとに、
+    /// y = 0, 1 のときの x の境界 (他の項は大域的な境界で最小・最大の活動量) を求め、y = 1 の方が厳しければ
+    /// `x >= l0 + (l1 - l0) y` (VLB) / `x <= u0 + (u1 - u0) y` (VUB) とする (l0, u0 は x の境界との max/min。HiGHS が probing の
+    /// 含意から作る `addVLB`/`addVUB` と同じ形)。2 非零の行でもこれと同じものになる
+    fn vb_from_row_activity(n: usize, lo: &[f64], up: &[f64], isint: &[bool], rows: &[Vec<(usize, f64)>], rlo: &[f64], rup: &[f64]) -> VarBounds {
+        let mut vb = VarBounds { vub: vec![Vec::new(); n], vlb: vec![Vec::new(); n] };
+        let is_bin = |j: usize| isint[j] && lo[j] == 0.0 && up[j] == 1.0;
+        for (i, r) in rows.iter().enumerate() {
+            // 他の項の最小・最大の活動量 (無限大の項の数も数える)
+            let (mut mn, mut mx, mut n_mn_inf, mut n_mx_inf) = (0.0f64, 0.0f64, 0usize, 0usize);
+            for &(j, a) in r {
+                let (l, u) = (lo[j], up[j]);
+                let (cmin, cmax) = if a > 0.0 { (a * l, a * u) } else { (a * u, a * l) };
+                if cmin.is_finite() { mn += cmin } else { n_mn_inf += 1 }
+                if cmax.is_finite() { mx += cmax } else { n_mx_inf += 1 }
+            }
+            let term_min = |j: usize, a: f64| if a > 0.0 { a * lo[j] } else { a * up[j] };
+            let term_max = |j: usize, a: f64| if a > 0.0 { a * up[j] } else { a * lo[j] };
+            for &(xk, a) in r {
+                if isint[xk] || a.abs() < 1e-9 {
+                    continue;
+                }
+                for &(y, b) in r {
+                    if !is_bin(y) || b.abs() < 1e-9 {
+                        continue;
+                    }
+                    // 行 <= rup: a x <= rup - b y - (他の項の最小)
+                    if rup[i].is_finite() {
+                        let (tx, ty) = (term_min(xk, a), term_min(y, b));
+                        let n_inf = n_mn_inf - (!tx.is_finite()) as usize - (!ty.is_finite()) as usize;
+                        if n_inf == 0 {
+                            let rest = mn - if tx.is_finite() { tx } else { 0.0 } - if ty.is_finite() { ty } else { 0.0 };
+                            let (v0, v1) = ((rup[i] - rest) / a, (rup[i] - b - rest) / a);
+                            push_vb(&mut vb, xk, y, a > 0.0, v0, v1, lo[xk], up[xk]);
+                        }
+                    }
+                    // 行 >= rlo: a x >= rlo - b y - (他の項の最大)
+                    if rlo[i].is_finite() {
+                        let (tx, ty) = (term_max(xk, a), term_max(y, b));
+                        let n_inf = n_mx_inf - (!tx.is_finite()) as usize - (!ty.is_finite()) as usize;
+                        if n_inf == 0 {
+                            let rest = mx - if tx.is_finite() { tx } else { 0.0 } - if ty.is_finite() { ty } else { 0.0 };
+                            let (v0, v1) = ((rlo[i] - rest) / a, (rlo[i] - b - rest) / a);
+                            push_vb(&mut vb, xk, y, a < 0.0, v0, v1, lo[xk], up[xk]);
+                        }
+                    }
+                }
+            }
+        }
+        vb
+    }
+
+    /// `upper` なら x <= v0 (y = 0) / v1 (y = 1)、そうでなければ x >= v0 / v1。y = 1 の方だけが x の境界より厳しいときに加える
+    fn push_vb(vb: &mut VarBounds, xk: usize, y: usize, upper: bool, v0: f64, v1: f64, l: f64, u: f64) {
+        const TOL: f64 = 1e-9;
+        if upper {
+            if !u.is_finite() {
+                return;
+            }
+            let (u0, u1) = (v0.min(u), v1.min(u));
+            if u1 < u0 - TOL && u0 >= u - TOL {
+                vb.vub[xk].push((y, u1 - u0, u0));
+            }
+        } else {
+            if !l.is_finite() {
+                return;
+            }
+            let (l0, l1) = (v0.max(l), v1.max(l));
+            if l1 > l0 + TOL && l0 <= l + TOL {
+                vb.vlb[xk].push((y, l1 - l0, l0));
+            }
+        }
+    }
+
+    /// 試作 (診断用): HiGHS の `cmirCutGenerationHeuristic` と同じ δ の候補を加えた CMIR。整数変数の係数 (こちらの既定) に加えて、
+    /// P = min(1, 2^e) (2^e は集約行の係数の絶対値の最大より大きい最小の 2 のべき) と max|a_int| + P を試し、最良の δ の
+    /// 2・4・8 倍も試してから、補変数化の反転 (`cmir_build`) に進む
+    fn cmir_highs_deltas(vars: &CutVars, base: &[(usize, f64)], rhs: f64) -> Option<RawCut> {
+        let (terms, beta) = substitute(vars, base, rhs)?;
+        if !terms.iter().any(|t| t.int) {
+            return None;
+        }
+        let maxabs = base.iter().fold(0.0f64, |m, &(_, a)| m.max(a.abs()));
+        let p = if maxabs > 0.0 { (2.0f64).powi(maxabs.log2().floor() as i32 + 1).min(1.0) } else { 1.0 };
+        let mut deltas: Vec<f64> = Vec::new();
+        let mut maxint = 0.0f64;
+        for t in &terms {
+            if t.int && t.yv > 1e-6 && t.a.abs() > 1e-6 {
+                deltas.push(t.a.abs());
+                maxint = maxint.max(t.a.abs());
+            }
+        }
+        for d in deltas.clone() {
+            for div in [2.0, 4.0, 8.0] {
+                deltas.push(d / div);
+            }
+        }
+        deltas.push(p);
+        deltas.push(maxint + p);
+        let mut best: Option<(f64, f64)> = None;
+        for &d in &deltas {
+            if let Some(e) = mir_efficacy(&terms, beta, d) {
+                if best.is_none_or(|(_, b)| e > b) {
+                    best = Some((d, e));
+                }
+            }
+        }
+        let (mut d0, mut e0) = best?;
+        let base_d = d0;
+        for k in [2.0, 4.0, 8.0] {
+            if let Some(e) = mir_efficacy(&terms, beta, base_d * k) {
+                if e > e0 {
+                    d0 = base_d * k;
+                    e0 = e;
+                }
+            }
+        }
+        cmir_build(vars, terms, beta, d0, e0)
+    }
+
     #[test]
     #[ignore]
     fn highs_cut_dump() {
@@ -1043,6 +1163,9 @@ mod highs_dump {
         let (mut lo, mut up, mut isint, mut x) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         let mut rows: Vec<Vec<(usize, f64)>> = Vec::new();
         let (mut rlo, mut rup) = (Vec::new(), Vec::new());
+        let mut row_int: Vec<bool> = Vec::new();
+        let mut slack_b: Vec<(usize, f64, f64)> = Vec::new();
+        let mut hvb: Vec<(bool, usize, usize, f64, f64)> = Vec::new();
         let mut bases: Vec<Vec<(usize, f64)>> = Vec::new();
         let mut res: Vec<Option<(Vec<(usize, f64)>, f64)>> = Vec::new();
         let num = |s: &str| -> f64 {
@@ -1071,12 +1194,17 @@ mod highs_dump {
                     let act = num(w[3]);
                     let len: usize = w[4].parse().unwrap();
                     rows.push((0..len).map(|k| (w[5 + 2 * k].parse().unwrap(), num(w[6 + 2 * k]))).collect());
+                    // tableau の書き出し (`HIGHS_TAB_DUMP`) は行の後ろに整数の行かどうか (`I 0|1`) を付ける
+                    row_int.push(w.get(5 + 2 * len) == Some(&"I") && w.get(6 + 2 * len) == Some(&"1"));
                     let _ = act;
                 }
                 "B" => {
                     let len: usize = w[1].parse().unwrap();
                     bases.push((0..len).map(|k| (w[2 + 2 * k].parse().unwrap(), num(w[3 + 2 * k]))).collect());
                 }
+                // HiGHS の計装 (`HighsPathSeparator`) が書く、分離の開始時の行の活動量の境界 (大域的な境界から) と最良の変数上下限
+                "S" => slack_b.push((w[1].parse::<usize>().unwrap(), num(w[2]), num(w[3]))),
+                "VUB" | "VLB" => hvb.push((w[0] == "VUB", w[1].parse().unwrap(), w[2].parse().unwrap(), num(w[3]), num(w[4]))),
                 "X" => {
                     if w[1] == "1" {
                         let rhs = num(w[2]);
@@ -1096,12 +1224,63 @@ mod highs_dump {
         let mut vx = x.clone();
         let mut vint = isint.clone();
         for i in 0..m {
-            vlo.push(rlo[i]);
-            vup.push(rup[i]);
+            // 整数の行の活動量は整数 (こちらの分離と同じく境界を整数に丸める)
+            let (l, u) = if row_int[i] { ((rlo[i] - 1e-6).ceil(), (rup[i] + 1e-6).floor()) } else { (rlo[i], rup[i]) };
+            vlo.push(l);
+            vup.push(u);
             vx.push(rows[i].iter().map(|&(j, a)| a * x[j]).sum());
-            vint.push(false);
+            vint.push(row_int[i]);
         }
-        let vb = VarBounds::from_rows(n, &isint, &rows, &rlo, &rup);
+        // 試作の切り替え (診断用): `HIGHS_CUT_DUMP_SLACK` 行の活動量の境界に HiGHS の値 (`S`) を使う、
+        // `HIGHS_CUT_DUMP_VB` HiGHS の変数上下限 (`VUB`/`VLB`) を加える、
+        // `HIGHS_CUT_DUMP_BOUNDS=ファイル` 集約行ごとに列の境界を置き換える (行 `集約行の番号 列 下限 上限`、HiGHS がそのカットを
+        // 作ったときの大域的な境界)
+        if std::env::var("HIGHS_CUT_DUMP_SLACK").is_ok() {
+            for &(i, l, u) in &slack_b {
+                let (l, u) = if row_int[i] { ((l - 1e-6).ceil(), (u + 1e-6).floor()) } else { (l, u) };
+                vlo[n + i] = l;
+                vup[n + i] = u;
+            }
+        }
+        let mut vb = VarBounds::from_rows(n, &isint, &rows, &rlo, &rup);
+        if std::env::var("HIGHS_CUT_DUMP_VBROW").is_ok() {
+            let extra = vb_from_row_activity(n, &lo, &up, &isint, &rows, &rlo, &rup);
+            let (nl, nu) = (extra.vlb.iter().map(|v| v.len()).sum::<usize>(), extra.vub.iter().map(|v| v.len()).sum::<usize>());
+            println!("VBROW: {nl} VLBs, {nu} VUBs from row activity (columns with a VLB: {})", extra.vlb.iter().filter(|v| !v.is_empty()).count());
+            if let Ok(f) = std::env::var("HIGHS_CUT_DUMP_VBROW_OUT") {
+                use std::io::Write;
+                let mut o = std::fs::File::create(f).unwrap();
+                for (c, v) in extra.vlb.iter().enumerate() {
+                    for &(y, d, e) in v {
+                        writeln!(o, "VLB {c} {y} {d} {e}").unwrap();
+                    }
+                }
+                for (c, v) in extra.vub.iter().enumerate() {
+                    for &(y, d, e) in v {
+                        writeln!(o, "VUB {c} {y} {d} {e}").unwrap();
+                    }
+                }
+            }
+            for c in 0..n {
+                vb.vlb[c].extend(extra.vlb[c].iter().copied());
+                vb.vub[c].extend(extra.vub[c].iter().copied());
+            }
+        }
+        if std::env::var("HIGHS_CUT_DUMP_VB").is_ok() {
+            for &(is_ub, c, y, d, e) in &hvb {
+                if c < n {
+                    if is_ub { vb.vub[c].push((y, d, e)) } else { vb.vlb[c].push((y, d, e)) }
+                }
+            }
+        }
+        let mut per_base_bounds: std::collections::HashMap<usize, Vec<(usize, f64, f64)>> = std::collections::HashMap::new();
+        if let Ok(f) = std::env::var("HIGHS_CUT_DUMP_BOUNDS") {
+            for l in std::fs::read_to_string(f).unwrap().lines() {
+                let w: Vec<&str> = l.split_whitespace().collect();
+                per_base_bounds.entry(w[0].parse().unwrap()).or_default().push((w[1].parse().unwrap(), num(w[2]), num(w[3])));
+            }
+        }
+        let mut per_base_out = std::env::var("HIGHS_CUT_DUMP_PERBASE").ok().map(|f| std::fs::File::create(f).unwrap());
         let vars = CutVars { lo: &vlo, up: &vup, is_int: &vint, x: &vx, vb: Some(&vb) };
         // 論理変数を行の式に展開して、効き目 (違反量 / ノルム) を測る
         let eff = |coefs: &[(usize, f64)], rhs: f64| -> f64 {
@@ -1122,15 +1301,59 @@ mod highs_dump {
         let (mut both, mut only_h, mut only_o, mut none) = (0, 0, 0, 0);
         let (mut sum_h, mut sum_o) = (0.0, 0.0);
         let mut shown = 0;
-        for (b, r) in bases.iter().zip(&res) {
+        for (bi, (b, r)) in bases.iter().zip(&res).enumerate() {
             let mut best_o: Option<f64> = None;
-            for c in [cmir(&vars, b, 0.0), lifted_flow_cover(&vars, b, 0.0), lifted_cover(&vars, b, 0.0)].into_iter().flatten() {
+            let (mut lo2, mut up2) = (Vec::new(), Vec::new());
+            let vars_b = match per_base_bounds.get(&bi) {
+                Some(list) => {
+                    lo2 = vlo.clone();
+                    up2 = vup.clone();
+                    for &(c, l, u) in list {
+                        lo2[c] = l;
+                        up2[c] = u;
+                    }
+                    CutVars { lo: &lo2, up: &up2, is_int: &vint, x: &vx, vb: Some(&vb) }
+                }
+                None => CutVars { lo: &vlo, up: &vup, is_int: &vint, x: &vx, vb: Some(&vb) },
+            };
+            let mut which = "";
+            let proto = std::env::var("HIGHS_CUT_DUMP_DELTAS").is_ok().then(|| cmir_highs_deltas(&vars_b, b, 0.0)).flatten();
+            for (nm, c) in [("cmir", cmir(&vars_b, b, 0.0)), ("lfc", lifted_flow_cover(&vars_b, b, 0.0)), ("lc", lifted_cover(&vars_b, b, 0.0)), ("cmirH", proto)] {
+                let Some(c) = c else { continue };
                 let e = eff(&c.coefs, c.rhs);
-                if e > 1e-6 {
-                    best_o = Some(best_o.map_or(e, |v: f64| v.max(e)));
+                if e > 1e-6 && best_o.is_none_or(|v| e > v) {
+                    best_o = Some(e);
+                    which = nm;
+                }
+            }
+            let _ = (&lo2, &up2);
+            // `HIGHS_CUT_DUMP_SHOW=番号,...`: その集約行でのこちらの置き換えの結果と、δ ごとの MIR の効き目を表示する
+            if std::env::var("HIGHS_CUT_DUMP_SHOW").is_ok_and(|v| v.split(',').any(|t| t.parse() == Ok(bi))) {
+                println!("SHOW base {bi}: {:?}", b);
+                match substitute(&vars_b, b, 0.0) {
+                    None => println!("   substitute: None"),
+                    Some((terms, beta)) => {
+                        let tt: Vec<String> = terms.iter().map(|t| format!("{}{}:{:.6}{}(y={:.4},u={:.4}{})", t.k, if t.int { "i" } else { "c" }, t.a, if t.comp { "C" } else { "" }, t.yv, t.yu, match t.sub { Sub::Simple => String::new(), Sub::Vub(y, d, e) => format!(",vub {y} {d:.4} {e:.4}"), Sub::Vlb(y, d, e) => format!(",vlb {y} {d:.4} {e:.4}") })).collect();
+                        println!("   substitute: beta {beta:.6} terms {}", tt.join(" "));
+                        for t in terms.iter().filter(|t| t.int) {
+                            let d = t.a.abs();
+                            for div in [1.0, 2.0, 4.0, 8.0] {
+                                println!("     delta {:.6}: eff {:?} coefs {:?}", d / div, mir_efficacy(&terms, beta, d / div), mir_coefs(&terms, beta, d / div));
+                            }
+                        }
+                        for d in [1.0, 2.0, 4.0, 8.0] {
+                            println!("     delta {d}: eff {:?} coefs {:?}", mir_efficacy(&terms, beta, d), mir_coefs(&terms, beta, d));
+                        }
+                        println!("     cmir -> {:?}", cmir_terms(&vars_b, terms.clone(), beta).map(|c| (c.coefs, c.rhs)));
+                        println!("     cmirH -> {:?}", cmir_highs_deltas(&vars_b, b, 0.0).map(|c| (c.coefs, c.rhs)));
+                    }
                 }
             }
             let h = r.as_ref().map(|(c, rhs)| eff(c, *rhs));
+            if let Some(f) = per_base_out.as_mut() {
+                use std::io::Write;
+                writeln!(f, "{bi} {} {} {which}", h.map_or("-".to_string(), |v| format!("{v:.6}")), best_o.map_or("-".to_string(), |v| format!("{v:.6}"))).unwrap();
+            }
             match (h, best_o) {
                 (Some(eh), Some(eo)) => {
                     both += 1;
@@ -1162,6 +1385,15 @@ mod highs_dump {
                 }
                 (Some(eh), None) => {
                     only_h += 1;
+                    // `HIGHS_CUT_DUMP_ONLYH=k`: HiGHS だけがカットを作れた集約行のうち効き目の大きいもの (> 0.1) を k 本まで詳しく表示
+                    if eh > 0.1 && std::env::var("HIGHS_CUT_DUMP_ONLYH").ok().and_then(|v| v.parse::<usize>().ok()).is_some_and(|k| only_h <= k * 20) {
+                        let bb: Vec<String> = b.iter().map(|&(k, a)| format!("{k}{}:{a:.4}[{},{}]x={:.4}", if vint[k] { "i" } else { "c" }, vlo[k], vup[k], vx[k])).collect();
+                        println!("onlyh detail: highs eff {eh:.4}\n   base: {}", bb.join(" "));
+                        if let Some((c, r)) = r {
+                            let c2: Vec<String> = c.iter().map(|&(k, a)| format!("{k}:{a:.4}")).collect();
+                            println!("   highs cut <= {r:.4}: {}", c2.join(" "));
+                        }
+                    }
                     if shown < 15 {
                         shown += 1;
                         println!("only highs: {eh:.4} base len {}: {:?}", b.len(), &b[..b.len().min(12)]);

@@ -557,6 +557,7 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
     if outer {
         ORBITOPES.with(|t| *t.borrow_mut() = None);
         SYM_ORIG.with(|t| *t.borrow_mut() = None);
+        solver::ROOT_BASIS.with(|t| *t.borrow_mut() = None);
     }
     r
 }
@@ -566,7 +567,10 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
     let t_pre = std::time::Instant::now();
     // 時間上限は前処理・対称性の検出の時間も含める (分枝限定法の時計は `solver::solve` の開始から測るので、渡す前に引く)
     let remaining = |params: MipParams| MipParams { time_limit: (params.time_limit - t_pre.elapsed().as_secs_f64()).max(0.0), ..params };
-    let presolved = if use_presolve { presolve_mip(p, params.verbose, params.submip) } else { None };
+    // 前処理の LP による固定 ([`lp_probe`]) は最初の求解だけ (サブ MIP・再スタートの後は使わない)
+    let lp_probe_secs = (env_str!("ENOMOTO_MIP_LP_PROBE").is_some() && !params.submip && params.restarts == 0)
+        .then(|| if params.time_limit.is_finite() { tunable!("ENOMOTO_T_MIP_LP_PROBE_TIME_FRAC", 0.05, f64) * params.time_limit } else { 10.0 });
+    let presolved = if use_presolve { presolve_mip(p, params.verbose, params.submip, lp_probe_secs) } else { None };
     // 利用者向けのログ (サブ MIP の前処理は出さない)
     if !params.submip {
         let free = |q: &MipProblem| (0..q.n).filter(|&j| q.col_lo[j] < q.col_up[j]).count();
@@ -812,7 +816,7 @@ enum Presolved {
 }
 
 /// 整数を考慮した前処理をかけた問題を作る。前処理が何も減らさなければ `None` (元の問題で解く)。
-fn presolve_mip(p: &MipProblem, verbose: bool, submip: bool) -> Option<Presolved> {
+fn presolve_mip(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs: Option<f64>) -> Option<Presolved> {
     use crate::params::simplex::{PRESOLVE_ROUNDS, PROPAGATION_PASSES, ROWSINGLETON_COLSINGLETON_INNER_ROUNDS};
     let n = p.n;
     // 元の制約 (境界は丸め済みの MipProblem の値を使う)
@@ -898,6 +902,33 @@ fn presolve_mip(p: &MipProblem, verbose: bool, submip: bool) -> Option<Presolved
         let bin = |j: usize| prob.is_int[j] && prob.col_lo[j] == 0.0 && prob.col_up[j] == 1.0 && pre.scaling.d.get(j).is_none_or(|&d| d == 1.0);
         prob.conflict_edges = p.conflict_edges.iter().copied().filter(|&(a, b)| bin((a / 2) as usize) && bin((b / 2) as usize)).collect();
     }
+    // LP による固定は含意を集めるプロービングの前に行う (固定をプロービングの伝播に使い、固定した列の含意を作らない)。
+    // 固定したら前処理をもう一度かける (固定した列と、それで冗長になった行を消し、縮約を続ける。プロービングもそちらで行う)。
+    // 前処理は列の番号を保ち、整数最適化では列の尺度をかけない (d = 1) ので、後処理は内側の手順の後に外側の手順を並べればよい
+    if let Some(secs) = lp_probe_secs {
+        match lp_probe(&mut prob, verbose, secs) {
+            None => return Some(Presolved::Infeasible),
+            Some(fixed) if fixed > 0 && env_str!("ENOMOTO_MIP_LP_PROBE_NO_REPRESOLVE").is_none() => {
+                let mut postsolve = pre.postsolve_log;
+                return match presolve_mip(&prob, verbose, submip, None) {
+                    Some(Presolved::Infeasible) => Some(Presolved::Infeasible),
+                    Some(Presolved::Reduced { prob: prob2, postsolve: post2, scaling: sc2 }) => {
+                        debug_assert!(sc2.d.iter().chain(&pre.scaling.d).all(|&d| d == 1.0));
+                        postsolve.extend(post2);
+                        Some(Presolved::Reduced { prob: prob2, postsolve, scaling: pre.scaling })
+                    }
+                    // 2 回目の前処理が何も減らさない: 1 回目の結果にプロービングだけかける
+                    None => {
+                        if env_str!("ENOMOTO_MIP_NO_PROBING").is_none() && probe(&mut prob, verbose, submip) == Some(false) {
+                            return Some(Presolved::Infeasible);
+                        }
+                        Some(Presolved::Reduced { prob, postsolve, scaling: pre.scaling })
+                    }
+                };
+            }
+            Some(_) => {}
+        }
+    }
     if env_str!("ENOMOTO_MIP_NO_PROBING").is_none() {
         match probe(&mut prob, verbose, submip) {
             Some(false) => return Some(Presolved::Infeasible),
@@ -905,6 +936,136 @@ fn presolve_mip(p: &MipProblem, verbose: bool, submip: bool) -> Option<Presolved
         }
     }
     Some(Presolved::Reduced { prob, postsolve: pre.postsolve_log, scaling: pre.scaling })
+}
+
+/// LP による固定 (`ENOMOTO_MIP_LP_PROBE`、前処理の最後、含意を集めるプロービングの前): LP 緩和を解き、LP 解で分数値の整数列
+/// x_j = v ごとに、上の子 (x_j >= ceil v) と下の子 (x_j <= floor v) の LP を反復上限つきで解く。片方が実行不能なら逆側に
+/// 固定し (根の強分枝で子が実行不能になったときの固定と同じ。どの整数解でも成り立つ)、両方なら問題は実行不能。固定したら
+/// LP を解き直し、新しく分数値になった列で繰り返す (`ENOMOTO_T_MIP_LP_PROBE_PASSES` 回まで)。手間の上限は LP の反復の合計
+/// (`ENOMOTO_T_MIP_LP_PROBE_ITER_MULT` x 最初の LP の反復 + 5000) と時間 `secs`。最後の LP の基底は根の LP に渡す
+/// ([`solver::ROOT_BASIS`])。
+///
+/// app1-1 では 0-1 列 1030 個のうち 925 個が「1 にすると LP が実行不能」で、LP 解の分数値の 19 個を固定するだけで LP 値が
+/// −20.96 → −3.98 (目的関数は整数なので下界 −3 = 最適値) になる。HiGHS は経路集約・tableau のカットで根を −4 にし、こちらは
+/// 根のカットのループで −7〜−8.6 にしかならず、木の根の強分枝で初めて −3.99 に届いていた。
+/// 固定した列の数を返す。実行不能と分かったら `None`。
+fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64) -> Option<usize> {
+    use lp::{LpStatus, SolveLimits};
+    let t0 = std::time::Instant::now();
+    let deadline = Some(t0 + std::time::Duration::from_secs_f64(secs.max(0.0)));
+    let mut lp = crate::simplex::mip_lp::TwoStageLp::new(&prob.col_lo, &prob.col_up, &prob.cost, &prob.rows, &prob.row_lo, &prob.row_up);
+    match lp.solve(&SolveLimits { deadline, ..Default::default() }) {
+        LpStatus::Optimal => {}
+        LpStatus::Infeasible => return None,
+        _ => return Some(0),
+    }
+    let z0 = lp.objective() + prob.offset;
+    let root_iters = lp.total_iterations();
+    let iter_budget = (tunable!("ENOMOTO_T_MIP_LP_PROBE_ITER_MULT", 2.0, f64) * root_iters as f64) as u64 + 5000;
+    let per_lp = (root_iters / 4).clamp(200, 2000);
+    let passes = tunable!("ENOMOTO_T_MIP_LP_PROBE_PASSES", 3usize, usize);
+    let budget_left = |lp: &crate::simplex::mip_lp::TwoStageLp| lp.total_iterations() - root_iters < iter_budget && t0.elapsed().as_secs_f64() < secs;
+    let (mut n_lps, mut n_fixed, mut n_tried) = (0usize, 0usize, 0usize);
+    let mut tried: std::collections::HashSet<(usize, i64)> = std::collections::HashSet::new();
+    let mut ok = true;
+    for pass in 0..passes {
+        let x = lp.col_values();
+        let mut cands: Vec<(usize, f64)> = (0..prob.n)
+            .filter(|&j| prob.is_int[j] && prob.col_lo[j] < prob.col_up[j] && (x[j] - x[j].round()).abs() > domain::FEASTOL && !tried.contains(&(j, x[j].floor() as i64)))
+            .map(|j| (j, x[j]))
+            .collect();
+        // 分数部分が 1/2 に近い順
+        cands.sort_by(|a, b| {
+            let fa = a.1 - a.1.floor();
+            let fb = b.1 - b.1.floor();
+            (fb * (1.0 - fb)).total_cmp(&(fa * (1.0 - fa)))
+        });
+        if cands.is_empty() || !budget_left(&lp) {
+            break;
+        }
+        let saved = lp.save_state();
+        // (列, 上限を締めるか, 値)
+        let mut fixes: Vec<(usize, bool, f64)> = Vec::new();
+        for &(j, v) in &cands {
+            if !budget_left(&lp) {
+                break;
+            }
+            tried.insert((j, v.floor() as i64));
+            n_tried += 1;
+            let (lo, up) = (prob.col_lo[j], prob.col_up[j]);
+            let mut cut = [false; 2];
+            for (side, is_up) in [(0usize, true), (1usize, false)] {
+                if is_up {
+                    lp.set_col_bounds(j, v.ceil(), up);
+                } else {
+                    lp.set_col_bounds(j, lo, v.floor());
+                }
+                cut[side] = lp.solve(&SolveLimits { iteration_limit: per_lp, deadline, ..Default::default() }) == LpStatus::Infeasible;
+                n_lps += 1;
+                lp.restore_state(&saved);
+            }
+            match (cut[0], cut[1]) {
+                (true, true) => {
+                    ok = false;
+                    break;
+                }
+                // 上の子が実行不能なら上限を floor に、下の子なら下限を ceil に
+                (true, false) => fixes.push((j, true, v.floor())),
+                (false, true) => fixes.push((j, false, v.ceil())),
+                _ => {}
+            }
+        }
+        if verbose {
+            eprintln!(
+                "MIP: LP probing pass {}: {} candidates, {} fixings{} ({} LPs, {} iters, {:.2}s)",
+                pass + 1,
+                cands.len(),
+                fixes.len(),
+                if ok { "" } else { ", both sides infeasible" },
+                n_lps,
+                lp.total_iterations() - root_iters,
+                t0.elapsed().as_secs_f64()
+            );
+        }
+        if !ok || fixes.is_empty() {
+            break;
+        }
+        for &(j, upper, val) in &fixes {
+            if upper {
+                prob.col_up[j] = prob.col_up[j].min(val);
+            } else {
+                prob.col_lo[j] = prob.col_lo[j].max(val);
+            }
+            lp.set_col_bounds(j, prob.col_lo[j], prob.col_up[j]);
+        }
+        n_fixed += fixes.len();
+        match lp.solve(&SolveLimits { deadline, ..Default::default() }) {
+            LpStatus::Optimal => {}
+            LpStatus::Infeasible => {
+                ok = false;
+                break;
+            }
+            _ => break,
+        }
+    }
+    if verbose && n_tried > 0 {
+        eprintln!(
+            "MIP: LP probing: tried {} columns, fixed {}, LP {:.10e} -> {:.10e} ({} LPs, {} iters, {:.2}s)",
+            n_tried,
+            n_fixed,
+            z0,
+            lp.objective() + prob.offset,
+            n_lps,
+            lp.total_iterations() - root_iters,
+            t0.elapsed().as_secs_f64()
+        );
+    }
+    if !ok {
+        return None;
+    }
+    let b = lp.basis().col;
+    solver::ROOT_BASIS.with(|s| *s.borrow_mut() = Some(b));
+    Some(n_fixed)
 }
 
 /// プロービング (SCIP・HiGHS の前処理と同じ): 0-1 列 `x_j` を 0 にして伝播した結果と 1 にして伝播した結果を比べる。
@@ -1455,7 +1616,7 @@ mod tests {
         ];
         let rows = vec![vec![(0, 1.0), (1, 1.0), (2, 1.0)], vec![(1, 1.0), (2, 1.0)]];
         let p = MipProblem::from_rows(vec![0.0, 0.0, 0.0], vec![f64::INFINITY, 10.0, 10.0], vec![1000.0, 1.0, 2.0], 0.0, 1.0, vec![false, true, true], rows, vec![1000.0, f64::NEG_INFINITY], vec![1000.0, 15.0]);
-        let Some(Presolved::Reduced { prob, postsolve, scaling }) = presolve_mip(&p, false, false) else { panic!("expected a reduced problem") };
+        let Some(Presolved::Reduced { prob, postsolve, scaling }) = presolve_mip(&p, false, false, None) else { panic!("expected a reduced problem") };
         for (x1, x2) in [(3.0, 4.0), (10.0, 5.0), (0.0, 0.0)] {
             let mut xr: Vec<f64> = (0..prob.n).map(|j| prob.col_lo[j].max(0.0).min(prob.col_up[j])).collect();
             for (j, v) in [(1, x1), (2, x2)] {
