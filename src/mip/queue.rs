@@ -167,6 +167,12 @@ impl NodeQueue {
         }
     }
 
+    /// `keep` の (枠, 世代) 以外のノードを下界の小さい順にすべて取り出す。
+    pub fn take_all_except(&mut self, keep: &[(usize, u64)]) -> Vec<OpenNode> {
+        let ids: Vec<usize> = self.by_lb.iter().map(|&(_, id)| id).filter(|&id| !keep.iter().any(|&(k, g)| k == id && self.gen[id] == g)).collect();
+        ids.into_iter().map(|id| self.remove(id)).collect()
+    }
+
     /// ノードをすべて取り出す (枠の世代は保つので、取り出す前の (枠, 世代) ではもう取り出せない)。
     pub fn take_all(&mut self) -> Vec<OpenNode> {
         let ids: Vec<usize> = self.by_lb.iter().map(|&(_, id)| id).collect();

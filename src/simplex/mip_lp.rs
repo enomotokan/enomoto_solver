@@ -264,6 +264,10 @@ impl TwoStageLp {
         self.iters
     }
 
+    pub fn set_total_iterations(&mut self, v: u64) {
+        self.iters = v;
+    }
+
     pub fn col_bounds(&self, j: usize) -> (f64, f64) {
         (self.lo[j], self.up[j])
     }
@@ -707,6 +711,7 @@ impl TwoStageLp {
     /// 分解がスレッドを取り合わない)。内点法側が採るのは最適な頂点が得られたときだけ。そのときは二段解法を打ち切り、クロスオーバーの仕上げ
     /// (二段解法の主ループ) が記録した最適基底と双対をそのまま使う ([`Self::adopt_basic_solution`])。仕上げの記録が
     /// 使えない (双対化した問題を解いた経路など) ときだけ、頂点で境界の内側にある列を基底にして warm start で解き直す。
+    /// 二段解法が結論を出せずに終わった (`Error`・`IterationLimit`) ときは勝ちとせず、期限まで内点法側の結果を待つ。
     fn solve_race(&mut self, lim: &SolveLimits, threads: usize) -> LpStatus {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::{mpsc, Arc};
@@ -725,11 +730,14 @@ impl TwoStageLp {
         let (tx, rx) = mpsc::channel::<Option<Won>>();
         {
             let (std, cancel, bound) = (Arc::new(self.std.clone()), cancel.clone(), bound.clone());
+            let deadline = lim.deadline;
             std::thread::spawn(move || {
                 let r = pool.install(|| {
                     // 仕上げの二段解法の最適基底と双対を記録させる
                     sid::request_duals(true);
-                    let r = crate::cancel::with_token(Some(cancel.clone()), || crate::cancel::with_bound(Some(bound), || super::crossover::solve_ipm_crossover(&std)));
+                    let r = crate::cancel::with_deadline(deadline, || {
+                        crate::cancel::with_token(Some(cancel.clone()), || crate::cancel::with_bound(Some(bound), || super::crossover::solve_ipm_crossover(&std)))
+                    });
                     let duals = sid::take_duals();
                     sid::request_duals(false);
                     r.filter(|r| r.status == Status::Optimal).and_then(|r| r.x).map(|x| (x, duals))
@@ -747,20 +755,61 @@ impl TwoStageLp {
             (st, sid::tl_flags())
         });
         sid::set_tl_flags(flags);
-        if !cancel.swap(true, Ordering::SeqCst) {
-            // 二段解法が先 (内点法側は確認点で止まる。待たない)
-            if debug {
-                eprintln!("MIP root race: simplex won at {:.3}s ({st:?})", t0.elapsed().as_secs_f64());
+        let conclusive = matches!(st, LpStatus::Optimal | LpStatus::Infeasible | LpStatus::Unbounded | LpStatus::ObjectiveBound | LpStatus::TimeLimit);
+        let won = if conclusive {
+            if !cancel.swap(true, Ordering::SeqCst) {
+                // 二段解法が先 (内点法側は確認点で止まる。待たない)
+                if debug {
+                    eprintln!("MIP root race: simplex won at {:.3}s ({st:?})", t0.elapsed().as_secs_f64());
+                }
+                crate::phase_timing::mark("race_simplex_won");
+                user_log!("Root LP: the two-phase method finished first ({:.2}s)", t0.elapsed().as_secs_f64());
+                return st;
             }
-            crate::phase_timing::mark("race_simplex_won");
-            user_log!("Root LP: the two-phase method finished first ({:.2}s)", t0.elapsed().as_secs_f64());
-            return st;
-        }
-        let Ok(Some((x, duals))) = rx.recv() else {
+            rx.recv().ok().flatten()
+        } else {
+            // 二段解法は結論を出せなかった (数値的な破綻など): 内点法側を止めずに、期限まで結果を待つ。leo1・leo2 では
+            // 二段解法が 0.1 秒で `Error` を返して勝ちとされ、内点法側を止めて MIP が `NotSolved` で終わっていた
+            if debug {
+                eprintln!("MIP root race: simplex ended without a conclusion at {:.3}s ({st:?}), waiting for ipm_crossover", t0.elapsed().as_secs_f64());
+            }
+            let r = match lim.deadline {
+                Some(d) => rx.recv_timeout(d.saturating_duration_since(std::time::Instant::now())).ok(),
+                None => rx.recv().ok(),
+            };
+            cancel.store(true, Ordering::SeqCst);
+            match r.flatten() {
+                Some(w) => Some(w),
+                None => return if lim.deadline.is_some_and(|d| std::time::Instant::now() >= d) { LpStatus::TimeLimit } else { st },
+            }
+        };
+        let Some((x, duals)) = won else {
             return self.solve_once(lim);
         };
         crate::phase_timing::mark("race_ipm_crossover_won");
         user_log!("Root LP: the interior-point method + crossover finished first ({:.2}s)", t0.elapsed().as_secs_f64());
+        self.adopt_ipm_vertex(&x, duals, lim, debug, t0)
+    }
+
+    /// 内点法 + クロスオーバーで単独に解き (このスレッドで、期限は `lim.deadline`)、得られた最適な頂点をこの LP の解として採る
+    /// ([`Self::solve_race`] の内点法側と同じ)。二段解法が結論を出せなかった LP (MIP の根) の解き直しに使う。
+    pub fn solve_ipm_rescue(&mut self, lim: &SolveLimits) -> LpStatus {
+        let t0 = std::time::Instant::now();
+        let std = self.std.clone();
+        sid::request_duals(true);
+        let r = crate::cancel::with_deadline(lim.deadline, || super::crossover::solve_ipm_crossover(&std));
+        let duals = sid::take_duals();
+        sid::request_duals(false);
+        let Some(x) = r.filter(|r| r.status == Status::Optimal).and_then(|r| r.x) else {
+            return if lim.deadline.is_some_and(|d| std::time::Instant::now() >= d) { LpStatus::TimeLimit } else { LpStatus::Error };
+        };
+        let st = self.adopt_ipm_vertex(&x, duals, lim, env_str!("ENOMOTO_DEBUG_RACE").is_some(), t0);
+        self.status = Some(st);
+        st
+    }
+
+    /// 内点法 + クロスオーバーの最適な頂点 `x` (標準形の空間) と仕上げの記録 `duals` を、この LP の解として採る。
+    fn adopt_ipm_vertex(&mut self, x: &[f64], duals: Option<(Vec<f64>, Vec<Option<usize>>)>, lim: &SolveLimits, debug: bool, t0: std::time::Instant) -> LpStatus {
         let n = self.n;
         let xo: Vec<f64> = (0..n).map(|j| x.get(j).copied().unwrap_or(0.0) + self.shift[j]).collect();
         if let Some((y, bpos)) = duals {

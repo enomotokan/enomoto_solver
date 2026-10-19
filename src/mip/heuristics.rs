@@ -180,7 +180,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.lp.set_basis_cols(b, Some(xb));
                 }
                 let it0 = self.lp.total_iterations();
-                let lim = (2 * self.avg_node_iters()).max(1000);
+                // `ENOMOTO_MIP_RR_HIGHS`: 反復の上限を HiGHS のランダム丸めと同じ max(10000, 最初の根の LP の 2 倍) にする
+                // (以前の 2 × ノードの平均 (根では 2000) では、根の LP に 1 万反復以上かかる連続変数の多い問題 (trento1 など) で、
+                // 整数列の固定までは成功しても連続部分の LP が解き終わらなかった)
+                let lim = if env_str!("ENOMOTO_MIP_RR_HIGHS").is_some() {
+                    (2 * self.avg_node_iters()).max(10_000).max(2 * self.root_lp_iters)
+                } else {
+                    (2 * self.avg_node_iters()).max(1000)
+                };
                 let st = self.lp.solve(&self.limits(lim));
                 self.heur_iters += self.lp.total_iterations() - it0;
                 if st == LpStatus::Optimal {
@@ -365,9 +372,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
         for t in 0..tries {
             let t0 = std::time::Instant::now();
             let mut target = x.to_vec();
+            let highs = env_str!("ENOMOTO_MIP_RR_HIGHS").is_some();
             for &j in &order {
-                let th = if t == 0 { 0.5 } else { 0.1 + 0.8 * self.rand() };
-                target[j] = (x[j] + 1.0 - th).floor();
+                // `ENOMOTO_MIP_RR_HIGHS`: HiGHS の randomizedRounding と同じく、上向きの lock がなければ切り上げ、下向きの lock が
+                // なければ切り捨て (その向きに動かしても行を破らない)、それ以外は乱数の閾値で丸める (1 回目も乱数)
+                let (dl, ul) = self.locks[j];
+                target[j] = if highs && ul == 0 {
+                    (x[j] - FEASTOL).ceil()
+                } else if highs && dl == 0 {
+                    (x[j] + FEASTOL).floor()
+                } else {
+                    let th = if t == 0 && !highs { 0.5 } else { 0.1 + 0.8 * self.rand() };
+                    (x[j] + 1.0 - th).floor()
+                };
             }
             let found = self.fix_and_propagate(&target, &order);
             if env_str!("ENOMOTO_MIP_DEBUG_RR").is_some() {
@@ -514,7 +531,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.heur_close = 0.0;
         'dive: while steps < 4 * p.n + 10 {
             steps += 1;
-            if self.time_up() || self.lp.total_iterations() - it_start > budget {
+            if self.time_up() || self.lp.total_iterations() - it_start > budget || self.poll_found_solution() {
                 if verbose {
                     eprintln!("MIP:   dive ran out of budget at depth {} ({} iterations, {backtracks} backtracks)", decisions.len(), self.lp.total_iterations() - it_start);
                 }
@@ -744,7 +761,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let (mut d0, mut dmin) = (0.0f64, f64::INFINITY);
         self.heur_close = 0.0;
         for _pass in 0..100 {
-            if self.time_up() || self.lp.total_iterations() - it_start > budget {
+            if self.time_up() || self.lp.total_iterations() - it_start > budget || self.poll_found_solution() {
                 break;
             }
             let x = self.lp.col_values();
@@ -1047,6 +1064,53 @@ pub(super) fn local_search(p: &MipProblem, lo: &[f64], up: &[f64], time_cap: f64
 /// Feasibility Jump の探索本体 (Solver の状態に依らないので別スレッドでも動かせる)。`lo`/`up` は列の境界、
 /// `seed` は乱数の種、`stop` が立ったら止める。実行可能な点が見つかれば返す。
 pub(super) fn fj_search(p: &MipProblem, lo: &[f64], up: &[f64], effort: u64, time_cap: f64, seed: u64, stop: Option<&std::sync::atomic::AtomicBool>) -> Option<Vec<f64>> {
+    // HiGHS と同じ手順の Feasibility Jump ([`super::fj`]) を使う (`ENOMOTO_MIP_NO_FJ2` なら旧来の局所探索だけ)。旧来のものは
+    // comp07-2idx・comp21-2idx・net12 などで解を見つけられず、最初の解が 30〜60 秒になっていた (FJ2 は 0.05〜0.2 秒)。
+    // 93 問 (4 スレッド・60 秒・2 回): 主ギャップの和 14.91 -> 13.77、最初の解の時刻の幾何平均 3.88 -> 3.07 秒
+    // (analysis/mip_primal_weakness_20261016.md)。HiGHS の FJ は改善のない手間の
+    // 上限ですぐ止まる (nexp-150-20-8-5 では 0.13 秒で 549 を見つけて止まり、旧 FJ は 3 秒で 256 を見つけていた)。
+    // 時間の上限が残っていれば (`ENOMOTO_MIP_FJ2_ONLY` でなければ)、種を変えた FJ2 と旧来の局所探索を続けて回し、
+    // 目的値の最良のものを返す
+    if env_str!("ENOMOTO_MIP_NO_FJ2").is_none() {
+        let t0 = Instant::now();
+        let left = |cap: f64| (cap - t0.elapsed().as_secs_f64()).max(0.0);
+        let stopped = || stop.is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed));
+        let mut best = super::fj::fj2_search(p, lo, up, time_cap, seed, stop);
+        if env_str!("ENOMOTO_MIP_FJ2_ONLY").is_some() {
+            return best;
+        }
+        // 逐次 (止める印のない呼び出し) では主のスレッドを待たせるので、FJ2 で見つかれば終わり、見つからなければ旧来の
+        // 局所探索を残り時間で回すだけにする
+        if stop.is_none() {
+            return if best.is_some() { best } else { fj_search_old(p, lo, up, effort, left(time_cap), seed, None) };
+        }
+        let better = |a: &Option<Vec<f64>>, b: Option<Vec<f64>>| -> Option<Vec<f64>> {
+            match (a, b) {
+                (Some(x), Some(y)) => Some(if p.objective(&y) < p.objective(x) { y } else { x.clone() }),
+                (None, y) => y,
+                (x, None) => x.clone(),
+            }
+        };
+        // 旧来の局所探索 (残り時間の半分まで)
+        if left(time_cap) > 0.0 && !stopped() {
+            let r = fj_search_old(p, lo, up, effort, 0.5 * left(time_cap), seed ^ 0x5851_F42D_4C95_7F2D, stop);
+            best = better(&best, r);
+        }
+        // 種を変えた FJ2 を時間の上限まで
+        let mut k = 1u64;
+        while left(time_cap) > 0.05 && !stopped() && k < 64 {
+            let r = super::fj::fj2_search(p, lo, up, left(time_cap), seed.wrapping_add(k.wrapping_mul(0x9E37_79B9_7F4A_7C15)), stop);
+            best = better(&best, r);
+            k += 1;
+        }
+        return best;
+    }
+    fj_search_old(p, lo, up, effort, time_cap, seed, stop)
+}
+
+/// 旧来の Feasibility Jump 風の局所探索 (違反している行を 1 本選び、その行の変数の値を行の重み付きの違反が最小になる
+/// 候補に動かす)。実行可能な点が見つかれば返す。
+fn fj_search_old(p: &MipProblem, lo: &[f64], up: &[f64], effort: u64, time_cap: f64, seed: u64, stop: Option<&std::sync::atomic::AtomicBool>) -> Option<Vec<f64>> {
     let mut rng = seed | 1;
     let mut rand = move || {
         rng ^= rng >> 12;
@@ -1234,6 +1298,27 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         sub.col_lo = lo;
         sub.col_up = up;
+        // `ENOMOTO_MIP_SUBMIP_CUTS`: 今の LP のカットの行のうち LP 解で効いている (等号で成り立つ) ものをサブ MIP の行に加える
+        // (HiGHS はサブ MIP に今の LP (カットを含み、効いていない行を除いたもの) を渡す。元の行だけのサブ MIP は根の LP が弱く、
+        // neos-3381206-awhea では 500 ノードで解が見つからない)。カットはプールで大域的に使うもので、打ち切り値で成り立つ
+        // ものもサブ MIP の打ち切り値 (同じかより厳しい) では成り立つ
+        if env_str!("ENOMOTO_MIP_SUBMIP_CUTS").is_some() && sub.n == p.n {
+            let cuts = self.lp_tight_cut_rows();
+            if !cuts.is_empty() {
+                let mut rows = std::mem::take(&mut sub.rows);
+                let mut row_lo = std::mem::take(&mut sub.row_lo);
+                let mut row_up = std::mem::take(&mut sub.row_up);
+                for (r, l, u) in cuts {
+                    rows.push(r);
+                    row_lo.push(l);
+                    row_up.push(u);
+                }
+                let mut s2 = super::problem::MipProblem::from_rows(std::mem::take(&mut sub.col_lo), std::mem::take(&mut sub.col_up), std::mem::take(&mut sub.cost), sub.offset, sub.sense_sign, std::mem::take(&mut sub.is_int), rows, row_lo, row_up);
+                s2.conflict_edges = std::mem::take(&mut sub.conflict_edges);
+                s2.implied_bounds = std::mem::take(&mut sub.implied_bounds);
+                sub = s2;
+            }
+        }
         let remaining = match self.deadline {
             Some(d) => d.saturating_duration_since(Instant::now()).as_secs_f64(),
             None => f64::INFINITY,
@@ -1254,14 +1339,24 @@ impl<'a, L: MipLp> Solver<'a, L> {
             threads: 1,
             distinguish: false,
         };
+        // 今の LP の基底 (列の状態) をサブ MIP の根の LP の初めの基底にする (HiGHS の `rootbasis`。`ENOMOTO_MIP_NO_SUBMIP_BASIS` で
+        // 使わない)。停滞による打ち切り (`ENOMOTO_T_MIP_SUBMIP_STALL`) と合わせて 93 問 (4 スレッド・60 秒、2 回): 主ギャップの和
+        // 13.77 -> 12.99、SGM 38.29 -> 37.66 秒 (analysis/mip_primal_weakness_20261016.md)
+        let basis = if env_str!("ENOMOTO_MIP_NO_SUBMIP_BASIS").is_none() && sub.n == p.n && self.lp.num_rows() >= p.m { Some(self.lp.basis().col) } else { None };
         // 並列モード (根のヒューリスティクスの間): 別スレッドで解き始め、結果は後で受け取る
         if self.parallel_submips {
+            self.submip_basis = basis;
             self.spawn_submip(sub, params);
             return Some((super::solver::MipStatus::NotSolved, false));
         }
+        let fix_rate = self.submip_fix_rate.take();
         let depth = SUBMIP_DEPTH.with(|d| d.get());
         SUBMIP_DEPTH.with(|d| d.set(depth + 1));
+        if let Some(b) = basis {
+            super::solver::SUBMIP_BASIS.with(|s| *s.borrow_mut() = Some(b));
+        }
         let r = super::solve_problem(&sub, params, env_str!("ENOMOTO_MIP_SUBMIP_NO_PRESOLVE").is_none());
+        super::solver::SUBMIP_BASIS.with(|s| *s.borrow_mut() = None);
         SUBMIP_DEPTH.with(|d| d.set(depth));
         if self.params.verbose {
             let nfree = (0..p.n).filter(|&j| sub.col_lo[j] < sub.col_up[j]).count();
@@ -1272,7 +1367,32 @@ impl<'a, L: MipLp> Solver<'a, L> {
             Some(x) => self.try_incumbent(x),
             None => false,
         };
+        if let Some(fr) = fix_rate {
+            self.note_fix_rate(fr, r.status == super::solver::MipStatus::Infeasible, acc);
+        }
         Some((r.status, acc))
+    }
+
+    /// 今の LP のカットの行 (問題の行より後ろ) のうち、LP 解で上限か下限に (相対 1e-6 で) 接しているもの。
+    fn lp_tight_cut_rows(&self) -> Vec<(Vec<(usize, f64)>, f64, f64)> {
+        let m0 = self.p.m;
+        let nr = self.lp.num_rows();
+        if nr <= m0 {
+            return Vec::new();
+        }
+        let act = self.lp.row_activities();
+        let mut out = Vec::new();
+        for i in m0..nr {
+            let (l, u) = self.lp.row_bounds(i);
+            let a = act[i];
+            let tight = (u.is_finite() && a >= u - 1e-6 * (1.0 + u.abs())) || (l.is_finite() && a <= l + 1e-6 * (1.0 + l.abs()));
+            if tight {
+                let mut r = self.lp.row(i);
+                r.sort_by_key(|&(j, _)| j);
+                out.push((r, l, u));
+            }
+        }
+        out
     }
 
     /// 目的値の二分探索 (`ENOMOTO_MIP_OBJ_BISECT`): 下界 `lb` と暫定解 `ub` の間の目標値
@@ -1449,6 +1569,20 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// [`Self::rens_dive`] で、目標の固定率を `target` に固定するもの (`None` なら成功・失敗から決める)。
     /// 戻り値は (解を受け入れたか, 達した固定率)。
     fn rens_dive_with(&mut self, target_fixed: Option<f64>) -> (bool, f64) {
+        self.dive_neighbourhood(target_fixed, None)
+    }
+
+    /// ダイビング式の RINS (`ENOMOTO_MIP_RINS_DIVE`。HiGHS の `HighsPrimalHeuristics::RINS` に倣う): LP 解が整数値で暫定解と
+    /// 同じ値の列を、目標の固定率まで段ごとに固定して LP を解き直す。そういう列がなくなったら、分数の列のうち丸めると暫定解の
+    /// 値になる列を、丸め幅の小さい順に (合計 0.5 まで) 固定する。LP が実行不能なら直前の段に戻る。残りをサブ MIP として解く。
+    pub(super) fn rins_dive(&mut self) -> bool {
+        let Some((_, inc)) = self.incumbent.as_ref() else { return false };
+        let inc = inc.clone();
+        self.dive_neighbourhood(None, Some(&inc)).0
+    }
+
+    /// [`Self::rens_dive_with`] (`inc` が `None`) と [`Self::rins_dive`] (`inc` が暫定解) の本体。
+    fn dive_neighbourhood(&mut self, target_fixed: Option<f64>, inc: Option<&[f64]>) -> (bool, f64) {
         let p = self.p;
         if self.params.submip && !self.nested_rens_ok() {
             return (false, 0.0);
@@ -1457,19 +1591,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if ints.is_empty() {
             return (false, 0.0);
         }
-        // 目標の固定率
-        let r0 = tunable!("ENOMOTO_T_MIP_RENS_RATE", 0.6, f64);
-        let (mut low, mut high) = (r0, r0);
-        if self.rens_infeas.1 > 0 {
-            high = 0.9 * self.rens_infeas.0 / self.rens_infeas.1 as f64;
-            low = low.min(high);
-        }
-        if self.rens_succ.1 > 0 {
-            let r = self.rens_succ.0 / self.rens_succ.1 as f64;
-            low = low.min(0.9 * r);
-            high = high.max(1.1 * r);
-        }
-        let target = target_fixed.unwrap_or_else(|| (low + (high - low) * self.rand()).clamp(0.05, 0.95));
+        let target = target_fixed.unwrap_or_else(|| self.target_fix_rate());
         let saved = self.lp.save_state();
         let pos = self.dom.stack_len();
         let it_start = self.lp.total_iterations();
@@ -1505,6 +1627,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if (v - v.round()).abs() > FEASTOL {
                     continue;
                 }
+                // RINS: 暫定解と同じ値のときだけ
+                if inc.is_some_and(|inc| (inc[j] - v.round()).abs() > 0.5) {
+                    continue;
+                }
                 branched += 1;
                 self.dom.tighten_lower(p, j, v.round());
                 self.dom.tighten_upper(p, j, v.round());
@@ -1518,15 +1644,31 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             if branched == 0 {
                 // 整数値の列がない: 分数の列を、目的値の悪くなる向き (費用 0 なら近い側) に丸めて固定する
-                // (丸め幅の小さい列から、丸め幅の合計が 0.5 に達するまで)
+                // (丸め幅の小さい列から、丸め幅の合計が 0.5 に達するまで)。RINS では丸めると暫定解の値になる列だけ
                 let mut fr_cols: Vec<(f64, usize, f64)> = order
                     .iter()
                     .filter(|&&j| self.dom.lo[j] < self.dom.up[j])
-                    .map(|&j| {
+                    .filter_map(|&j| {
                         let v = x[j];
-                        let fv = if p.cost[j] > 0.0 { v.ceil() } else if p.cost[j] < 0.0 { v.floor() } else { v.round() };
+                        let fv = match inc {
+                            Some(inc) => {
+                                if (v.round() - inc[j]).abs() > 0.5 {
+                                    return None;
+                                }
+                                inc[j]
+                            }
+                            None => {
+                                if p.cost[j] > 0.0 {
+                                    v.ceil()
+                                } else if p.cost[j] < 0.0 {
+                                    v.floor()
+                                } else {
+                                    v.round()
+                                }
+                            }
+                        };
                         let fv = fv.clamp(self.dom.lo[j], self.dom.up[j]);
-                        ((fv - v).abs(), j, fv)
+                        Some(((fv - v).abs(), j, fv))
                     })
                     .collect();
                 fr_cols.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -1575,7 +1717,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.sync_lp();
         self.lp.restore_state(&saved);
         if self.params.verbose && self.nodes <= 1 {
-            eprintln!("MIP:   RENS: fixing rate {fr:.2} (target {target:.2}, {backtracks} backtracks)");
+            eprintln!("MIP:   {}: fixing rate {fr:.2} (target {target:.2}, {backtracks} backtracks)", if inc.is_some() { "RINS (dive)" } else { "RENS" });
         }
         if fr < 0.1 {
             self.heur_close = 0.0;
@@ -1640,6 +1782,100 @@ impl<'a, L: MipLp> Solver<'a, L> {
         added
     }
 
+    /// `ENOMOTO_MIP_POLL_SUBMIPS`: 暫定解のない根の Feasibility Pump・ダイビングの途中で、別スレッドのサブ MIP のうち
+    /// 終わったものの結果を受け取り、暫定解ができたら真 (呼び出し側は打ち切る)。
+    pub(super) fn poll_found_solution(&mut self) -> bool {
+        if self.pending_submips.is_empty() || self.incumbent.is_some() || env_str!("ENOMOTO_MIP_POLL_SUBMIPS").is_none() {
+            return false;
+        }
+        self.poll_submips();
+        self.incumbent.is_some()
+    }
+
+    /// サブ MIP の近傍の目標の固定率 (HiGHS の `determineTargetFixingRate`): 初期 0.6。サブ MIP が実行不能だった
+    /// 固定率の平均の 0.9 倍を上の端に、解が見つかった固定率の平均の 0.9〜1.1 倍を含むように範囲を広げ、その中から乱数で選ぶ。
+    pub(super) fn target_fix_rate(&mut self) -> f64 {
+        let r0 = tunable!("ENOMOTO_T_MIP_RENS_RATE", 0.6, f64);
+        let (mut low, mut high) = (r0, r0);
+        if self.rens_infeas.1 > 0 {
+            high = 0.9 * self.rens_infeas.0 / self.rens_infeas.1 as f64;
+            low = low.min(high);
+        }
+        if self.rens_succ.1 > 0 {
+            let r = self.rens_succ.0 / self.rens_succ.1 as f64;
+            low = low.min(0.9 * r);
+            high = high.max(1.1 * r);
+        }
+        (low + (high - low) * self.rand()).clamp(0.05, 0.95)
+    }
+
+    /// 固定率 `fr` のサブ MIP の結果を固定率の記録に入れる (実行不能なら失敗の記録、暫定解が良くなれば成功の記録)。
+    pub(super) fn note_fix_rate(&mut self, fr: f64, infeasible: bool, improved: bool) {
+        if improved {
+            self.rens_succ.0 += fr;
+            self.rens_succ.1 += 1;
+        } else if infeasible {
+            self.rens_infeas.0 += fr;
+            self.rens_infeas.1 += 1;
+        }
+    }
+
+    /// `ENOMOTO_MIP_FIX_CAP`: RENS・RINS の固定を、固定率の目標 ([`Self::target_fix_rate`]) で止めるか。
+    /// HiGHS の RENS・RINS は LP 解 (と暫定解) に合う整数列を、目標の固定率に達するまでしか固定しない。全部固定すると
+    /// 近傍が狭すぎ、drayage-25-23 では 11090 列中 229 列しか残らずサブ MIP が 0 ノードで実行不能になる。
+    pub(super) fn fix_cap_on() -> bool {
+        env_str!("ENOMOTO_MIP_FIX_CAP").is_some()
+    }
+
+    /// 固定 (列, 下限, 上限) を順に今の定義域に積み、1 つずつ伝播する ([`Self::propagated_fixings`] と同じ。矛盾する固定は
+    /// 飛ばす)。ただし、`target` が 1 未満なら、今の定義域で自由な整数列のうち固定された割合が `target` に達したところで
+    /// 止める (範囲を狭めるだけの固定 (下限 < 上限) は数えない)。戻り値は (下限, 上限, 達した固定率)。定義域は戻す。
+    pub(super) fn capped_fixings(&mut self, fixes: &[(usize, f64, f64)], target: f64) -> (Vec<f64>, Vec<f64>, f64) {
+        let p = self.p;
+        let pos = self.dom.stack_len();
+        let ints: Vec<usize> = (0..p.n).filter(|&j| p.is_int[j] && self.dom.lo[j] < self.dom.up[j]).collect();
+        let nint = ints.len().max(1) as f64;
+        let rate = |s: &Self| ints.iter().filter(|&&j| s.dom.lo[j] == s.dom.up[j]).count() as f64 / nint;
+        let work0 = self.dom.debug_work();
+        let work_cap = 20 * p.rows.iter().map(|r| r.len() as u64).sum::<u64>() + 1_000_000;
+        // 固定率は (固定の数 / 64) ごとに数え直す (毎回数えると整数列の数 × 固定の数かかる)
+        let every = (fixes.len() / 64).max(1);
+        let mut fr = 0.0;
+        for (k, &(j, l, u)) in fixes.iter().enumerate() {
+            if k % 64 == 0 && (self.time_up() || self.dom.debug_work() - work0 > work_cap) {
+                break;
+            }
+            if k % every == 0 && target < 1.0 {
+                fr = rate(self);
+                if fr >= target {
+                    break;
+                }
+            }
+            if self.dom.lo[j] >= l && self.dom.up[j] <= u {
+                continue;
+            }
+            let before = self.dom.stack_len();
+            self.dom.tighten_lower(p, j, l);
+            self.dom.tighten_upper(p, j, u);
+            if !self.dom.propagate(p) {
+                self.dom.backtrack_to(p, before);
+            }
+        }
+        fr = rate(self);
+        let (lo, up) = (self.dom.lo.clone(), self.dom.up.clone());
+        self.dom.backtrack_to(p, pos);
+        (lo, up, fr)
+    }
+
+    /// 並べ替え: 乱数で混ぜてから、値が 0 でない固定を先に (1 への固定の方が伝播で多くの列を決める)。
+    pub(super) fn shuffle_fixes(&mut self, fixes: &mut [(usize, f64, f64)]) {
+        for k in (1..fixes.len()).rev() {
+            let r = ((self.rand() * (k + 1) as f64) as usize).min(k);
+            fixes.swap(k, r);
+        }
+        fixes.sort_by_key(|&(_, v, _)| (v == 0.0) as u8);
+    }
+
     /// 旧来の RENS (LP 解で整数値の列を全部固定する。既定)。
     fn rens_old(&mut self, x: &[f64]) -> bool {
         let p = self.p;
@@ -1685,6 +1921,27 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             return self.solve_submip(lo2, up2, 500);
         }
+        if Self::fix_cap_on() {
+            // 分数の列の切り上げ・切り下げの範囲を先に、整数値の列の固定は乱数の順 (0 でない値を先) に、目標の固定率まで積む
+            let target = self.target_fix_rate();
+            let mut fixes: Vec<(usize, f64, f64)> = (0..p.n).filter(|&j| p.is_int[j] && lo[j] < up[j] && (lo[j] > self.dom.lo[j] || up[j] < self.dom.up[j])).map(|j| (j, lo[j], up[j])).collect();
+            let mut fx: Vec<(usize, f64, f64)> = (0..p.n).filter(|&j| p.is_int[j] && lo[j] == up[j] && self.dom.lo[j] < self.dom.up[j]).map(|j| (j, lo[j], up[j])).collect();
+            self.shuffle_fixes(&mut fx);
+            fixes.extend(fx);
+            let (lo2, up2, fr) = self.capped_fixings(&fixes, target);
+            if self.params.verbose && self.nodes <= 1 {
+                eprintln!("MIP:   RENS (capped): fixing rate {fr:.2} (target {target:.2}, LP-integral {:.2})", nfix as f64 / nint as f64);
+            }
+            let mut sub = p.clone();
+            sub.col_lo = lo2;
+            sub.col_up = up2;
+            self.submip_is_rens = true;
+            self.submip_fix_rate = Some(fr);
+            let r = self.solve_submip_problem(sub, 500, None);
+            self.submip_is_rens = false;
+            self.rens_node_limited = matches!(r, Some((super::solver::MipStatus::NodeLimit, _)));
+            return r.is_some_and(|r| r.1);
+        }
         let mut sub = p.clone();
         sub.col_lo = lo;
         sub.col_up = up;
@@ -1700,6 +1957,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let p = self.p;
         if self.params.submip {
             return false;
+        }
+        if env_str!("ENOMOTO_MIP_RINS_DIVE").is_some() {
+            return self.rins_dive();
         }
         let Some((_, inc)) = self.incumbent.as_ref() else { return false };
         let inc = inc.clone();
@@ -1738,6 +1998,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 fixes.push((j, inc[j], inc[j]));
             }
             let (lo, up, _) = self.propagated_fixings(&fixes);
+            return self.solve_submip(lo, up, 500);
+        }
+        if Self::fix_cap_on() {
+            let target = self.target_fix_rate();
+            self.shuffle_fixes(&mut fixes);
+            let (lo, up, fr) = self.capped_fixings(&fixes, target);
+            if self.params.verbose && self.nodes <= 1 {
+                eprintln!("MIP:   RINS (capped): fixing rate {fr:.2} (target {target:.2}, agreeing {:.2})", fixes.len() as f64 / nint as f64);
+            }
+            self.submip_fix_rate = Some(fr);
             return self.solve_submip(lo, up, 500);
         }
         fixes.sort_by_key(|&(_, v, _)| (v == 0.0) as u8);
@@ -1895,6 +2165,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 .unwrap(),
         };
         let z0 = self.incumbent.as_ref().map(|(z, _)| *z).unwrap();
+        self.heur_label = ["tree RINS", "tree local branching", "tree proximity", "tree mutation", "tree crossover", "tree DINS"][arm];
         let ok = match arm {
             0 => self.rins(x),
             1 => self.local_branching(),
@@ -1903,6 +2174,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             4 => self.crossover(),
             _ => self.dins(x),
         };
+        self.heur_label = "";
         // 報酬: 改善できたら 1 (改善の相対的な大きさで少し上乗せ)
         let z1 = self.incumbent.as_ref().map(|(z, _)| *z).unwrap();
         let reward = if ok && z1 < z0 { 1.0 + ((z0 - z1) / z0.abs().max(1.0)).min(1.0) } else { 0.0 };

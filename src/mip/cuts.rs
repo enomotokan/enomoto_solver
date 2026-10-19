@@ -80,6 +80,14 @@ pub struct RawCut {
     pub rhs: f64,
 }
 
+/// 連続変数の置き換えで、単純な上下限と変数上下限の余裕を同点とみなす幅 (HiGHS の feastol)。
+const VB_TIE_TOL: f64 = 1e-6;
+
+/// 同点のとき項が消える方の変数上下限を選ぶのをやめる (`ENOMOTO_MIP_VB_TIE_OLD`、比較用)。
+fn vb_tie_old() -> bool {
+    env_str!("ENOMOTO_MIP_VB_TIE_OLD").is_some()
+}
+
 const MIN_FRAC: f64 = 0.005;
 const MAX_SCALE: f64 = 1e6;
 
@@ -147,6 +155,20 @@ fn substitute(vars: &CutVars, base: &[(usize, f64)], rhs: f64) -> Option<(Vec<Te
                     let slack = x - d * vars.x[y] - e;
                     if slack >= -1e-9 && slack < best.0 - 1e-9 {
                         best = (slack, Sub::Vlb(y, d, e), false);
+                    }
+                }
+                // 同点 (余裕の差が許容誤差以内) なら、項が消える方の変数上下限を選ぶ (HiGHS の `HighsTransformedLp::transform`:
+                // 係数が負なら VUB、正なら VLB)。使われていない弧 (x = y = 0) は単純な下限と VUB の両方に乗っていて、
+                // 単純な下限で置き換えると x の項が残り、VUB なら消えて `sum y >= 1` のような強いカットになる
+                // (p200x1188c の根の下界 5825 -> 11420 (HiGHS 11640)、h80x6320d が解けるようになった。40 問の SGM 32.08 -> 31.74)
+                if !vb_tie_old() && best.1 == Sub::Simple && (a < 0.0) != best.2 {
+                    let list = if a < 0.0 { &vb.vub[k] } else { &vb.vlb[k] };
+                    for &(y, d, e) in list {
+                        let slack = if a < 0.0 { d * vars.x[y] + e - x } else { x - d * vars.x[y] - e };
+                        if slack >= -1e-9 && slack <= best.0 + VB_TIE_TOL {
+                            best = (slack.max(0.0), if a < 0.0 { Sub::Vub(y, d, e) } else { Sub::Vlb(y, d, e) }, a < 0.0);
+                            break;
+                        }
                     }
                 }
             }

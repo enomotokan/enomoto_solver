@@ -23,7 +23,7 @@ In this way, **without choosing a numerical M and with the dual simplex method a
 The following are also implemented.
 
 - **Proximal interior-point method + crossover:** a proximal interior-point method (IP-PMM, Mehrotra's predictor–corrector method) computes an interior optimal solution, and a crossover (primal and dual push phases and basis selection) turns it into an optimal basic solution. The finish is done by the simplex method.
-- **Parallel execution of the two methods:** with `threads` set to 2 or more (the default is 1), an LP (for integer programs, a relaxation that cannot be warm-started) is solved at the same time by the slope–intercept dual two-phase method (1 thread) and the proximal interior-point method + crossover (the remaining threads), and the side that reaches a conclusion first is adopted (the other is stopped).
+- **Parallel execution of the two methods:** with `threads` set to 2 or more (by default, half of the available CPUs rounded up, as in HiGHS), an LP (for integer programs, a relaxation that cannot be warm-started) is solved at the same time by the slope–intercept dual two-phase method (1 thread) and the proximal interior-point method + crossover (the remaining threads), and the side that reaches a conclusion first is adopted (the other is stopped).
 - **Mixed-integer linear optimization (MIP):** solved by branch and cut (constraint propagation, cutting planes, primal heuristics, symmetry handling, etc.). All relaxations are solved by the slope–intercept dual two-phase method (warm-started from the parent's optimal basis at nodes), and when the root relaxation has no finite optimal value, whether the problem is infeasible or unbounded is decided with the problem in which the variables of the intercept problem are restricted to integers (when `distinguish_infeasible_unbounded=True`). Giving the solver several threads (`threads` set to 2 or more) parallelizes branch and bound: after the root is processed, the threads share the unprocessed nodes and divide the tree search among themselves (the root relaxation is solved at the same time by the two-phase method and the proximal interior-point method + crossover).
 
 ## Installation
@@ -81,7 +81,7 @@ print(x.value, y.value)             # 3.0 7.0
 
   | Argument | Meaning |
   |---|---|
-  | `threads` | Number of threads to use (default 1). With 2 or more, an LP is solved at the same time by the two-phase method and the interior-point method + crossover, and for integer programs the tree search is also shared. For details, see "Number of threads (`threads`)" below. |
+  | `threads` | Number of threads to use (default: half of the available CPUs rounded up, as in HiGHS; see `enomoto_solver.default_threads()`). With 2 or more, an LP is solved at the same time by the two-phase method and the interior-point method + crossover, and for integer programs the tree search is also shared. For details, see "Number of threads (`threads`)" below. |
   | `root_solver` | The LP method (default `"auto"`; see "Choosing the LP method" below). |
   | `distinguish_infeasible_unbounded` | Whether to distinguish infeasible from unbounded when there is no finite optimal value (default `False`; see "Result status, and infeasible or unbounded problems" below). |
   | `time_limit`, `mip_rel_gap`, `node_limit` | Termination criteria for integer programs (seconds, relative gap (default 0), number of nodes). |
@@ -124,7 +124,7 @@ The same applies to models with integer variables. When phase A shows that the r
 
 | `root_solver` | Method |
 |---|---|
-| `"auto"` (default; `None` is the same) | If `threads` is 2 or more, run the slope–intercept dual two-phase method (1 thread) and the proximal interior-point method + crossover (the remaining threads) in parallel and adopt the side that reaches a conclusion first. With `threads=1` (the default), solve with the two-phase method only. |
+| `"auto"` (default; `None` is the same) | If `threads` is 2 or more, run the slope–intercept dual two-phase method (1 thread) and the proximal interior-point method + crossover (the remaining threads) in parallel and adopt the side that reaches a conclusion first. With `threads=1`, solve with the two-phase method only. |
 | `"simplex"` | The slope–intercept dual two-phase method only. |
 | `"ipm_crossover"` | The proximal interior-point method + crossover only. If the interior-point method does not converge, the problem is solved again by the two-phase method. |
 | `"interior"` | A proximal interior-point method (IP-PMM) with its own independent presolve. It does not give a basic solution and is intended for verification. |
@@ -157,6 +157,7 @@ When `threads` is k ≥ 2, the search runs in parallel as follows.
 - **Relaxations that cannot be warm-started:** the root LP and the root LP after a restart have no basis to start from, so they are solved at the same time by the two-phase method (1 thread) and the proximal interior-point method + crossover (k − 1 threads). Node relaxations are solved by the two-phase method warm-started from the parent's optimal basis (they finish in a few iterations, so running the interior-point method at the same time has no chance of winning and only adds work). Sub-MIPs solved inside heuristics (RINS, etc.) are often small, so even their solves without a basis use the two-phase method only. After the tree search starts using k threads, no parallel execution is done.
 - **Root:** the root cutting planes and heuristics are performed by the thread that solved the root (the main thread).
 - **Tree search:** when the main thread has two unprocessed nodes, the remaining k − 1 threads are started from a copy of the tree after the root processing (for problems solved at the root, no additional threads are created). Each thread processes the nodes in its own queue. When a thread's queue becomes empty, the other threads hand it nodes with small lower bounds through a shared queue. The search ends when all threads are waiting and the shared queue is also empty.
+- **Heuristic thread:** with k ≥ 4, ⌊k/4⌋ of the threads may leave the tree search and run improvement heuristics (adaptive large neighborhood search) continuously. A thread takes this role only while the large neighborhood search is estimated to close at least as much of the tree per second as one tree-search thread does (the tree progress is measured by the weight 2^−depth of the open nodes, and the heuristic's contribution by an exponential moving average of the tree weight its improvements prune). It returns to the tree search when this no longer holds or after 20 calls in a row without improving the incumbent. Set the environment variable `ENOMOTO_MIP_FOCUS=primal` to favor good incumbents over the optimality proof, or `ENOMOTO_MIP_NO_HEUR_ROLE=1` to disable this.
 - **Information shared between threads:** incumbents (the best objective value is used for pruning in all threads), global bound tightenings, pseudocost observations (merged every 16 nodes), and dual proofs and conflicts (imported every 64 nodes).
 - Since the order in which nodes are processed changes with the progress of the threads, with k ≥ 2 the number of nodes and the solve time may vary from run to run (the optimal value obtained does not change).
 
@@ -172,11 +173,11 @@ The solution returned is polished before it is reported: integer variables are r
 
 ### Number of threads (`threads`)
 
-`solve(threads=...)` specifies the number of threads to use (the default is 1). A value above the number of CPUs available to this process (`enomoto_solver.max_threads()`) is capped there. The whole solve, including parallel sections such as presolve, runs on this number of threads.
+`solve(threads=...)` specifies the number of threads to use. If omitted, (number of CPUs available to this process + 1) / 2 threads are used, as in HiGHS (`enomoto_solver.default_threads()`; 2 with 4 logical cores, 4 with 8). A value above the number of CPUs available to this process (`enomoto_solver.max_threads()`) is capped there. The whole solve, including parallel sections such as presolve, runs on this number of threads.
 
 | `threads` | LP (`root_solver="auto"`) | MIP |
 |---|---|---|
-| 1 (default) | Solved by the slope–intercept dual two-phase method only. | Both the relaxations and the tree search are solved on 1 thread. |
+| 1 | Solved by the slope–intercept dual two-phase method only. | Both the relaxations and the tree search are solved on 1 thread. |
 | k ≥ 2 | Solved at the same time by the two-phase method (1 thread) and the proximal interior-point method + crossover (k − 1 threads), adopting the side that reaches a conclusion first. | Relaxations that cannot be warm-started (the root, etc.) are solved at the same time in the same way as on the left, and after the root is processed the tree is shared among k threads for the search ("Parallel search" above). |
 
 In parallel execution, the threads are divided before starting into separate pools for the two-phase method (1 thread) and for the interior-point method + crossover (the rest), so the two methods never take each other's threads. If the two-phase method finishes first, its basic solution is used as it is; if the interior-point method + crossover finishes first, the optimal basis obtained in the crossover's finish (the main loop of the two-phase method) is used as it is. The losing side is stopped, and its termination is not waited for.

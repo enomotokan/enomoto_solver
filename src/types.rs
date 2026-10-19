@@ -276,7 +276,8 @@ pub struct MipSettings {
     pub rel_gap: Option<f64>,
     /// ノード数上限。
     pub node_limit: Option<u64>,
-    /// 使うスレッドの数 (既定 1。[`crate::mip::max_threads`] を超える値は頭打ちにする)。2 以上なら基底のない緩和問題
+    /// 使うスレッドの数 (未指定なら `LpOptions::threads`。Python の `Model.solve` は未指定のとき [`crate::mip::default_threads`]
+    /// (使える CPU の数 + 1 の半分) を渡す。[`crate::mip::max_threads`] を超える値は頭打ちにする)。2 以上なら基底のない緩和問題
     /// (根など) を二段解法と内点法 + クロスオーバーで同時に解き、木の探索もこの数のスレッドで分け合う。
     pub threads: Option<usize>,
 }

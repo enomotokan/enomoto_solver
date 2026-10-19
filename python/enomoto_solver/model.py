@@ -182,7 +182,7 @@ class Model:
         ``node_limit`` (ノード数)。上限で止まると status は ``"time_limit"`` / ``"node_limit"`` になり、
         暫定解があれば ``objective`` と各 Variable の ``.value`` が読める。
 
-        ``threads``: 使うスレッドの数 (既定 1)。``enomoto_solver.max_threads()`` (このプロセスが使える CPU の数) を超える値はそこで頭打ちにする。
+        ``threads``: 使うスレッドの数 (既定は ``enomoto_solver.default_threads()``: 使える CPU の数 + 1 の半分。HiGHS と同じ)。``enomoto_solver.max_threads()`` (このプロセスが使える CPU の数) を超える値はそこで頭打ちにする。
         求解全体をこの数のスレッドで動かす。``"auto"`` で 2 以上なら、LP を上のように二段解法と内点法 +
         クロスオーバーで同時に解く。整数最適化では warm start できない緩和問題 (根など) を同じように同時に解き、根の処理の後は未処理のノードを
         スレッドの間で分け合って探索する。
@@ -229,7 +229,7 @@ class Model:
         """``solve(log=True)`` の最初の案内と問題の大きさを出す。"""
         n_int = sum(1 for v in self._variables if v.vtype == "integer")
         nnz = sum(len(c.nonzero_terms()) for c in self._constraints)
-        used = min(max(threads or 1, 1), _core.max_threads())
+        used = min(max(threads or _core.default_threads(), 1), _core.max_threads())
         print(_BANNER.format(version=_version()).replace("  ", " "), flush=True)
         print(
             f"Problem: {len(self._variables)} variables ({n_int} integer), {len(self._constraints)} constraints, "

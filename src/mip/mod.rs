@@ -16,7 +16,8 @@ pub(crate) mod conflict_pool;
 pub(crate) mod queue;
 pub(crate) mod pseudocost;
 pub(crate) mod solver;
-pub(crate) mod heuristics;
+pub(crate) mod fj;
+mod heuristics;
 pub(crate) mod heur_scip;
 pub(crate) mod heur_ipm;
 pub(crate) mod symmetry;
@@ -95,6 +96,12 @@ pub fn max_threads() -> usize {
     hw.min(cap).max(1)
 }
 
+/// スレッドの数を指定しないときの既定値: このプロセスが使える CPU ([`max_threads`]) の数 + 1 の半分 (HiGHS の
+/// `threads = 0` と同じ。論理コアが 4 なら 2、8 なら 4)。
+pub fn default_threads() -> usize {
+    max_threads().div_ceil(2).max(1)
+}
+
 /// (混合) 整数最適化問題を解く。整数変数が 1 つもなければ `solve_lp` を 1 回呼ぶだけ。
 pub fn solve_mip(
     variables: &[VariableData],
@@ -126,15 +133,24 @@ pub fn solve_mip(
         rel_gap: settings.rel_gap.or(env_f64(env_str!("ENOMOTO_MIP_REL_GAP"))).unwrap_or(d.rel_gap),
         time_limit: settings.time_limit.or(env_f64(env_str!("ENOMOTO_MIP_TIME_LIMIT"))).unwrap_or(d.time_limit),
         node_limit: settings.node_limit.or(env_f64(env_str!("ENOMOTO_MIP_NODE_LIMIT")).map(|v| v as u64)).unwrap_or(d.node_limit),
-        threads: settings.threads.or(env_f64(env_str!("ENOMOTO_MIP_TREE_THREADS")).map(|v| v as usize)).unwrap_or(d.threads).clamp(1, max_threads()),
+        // 未指定なら `opts.threads` (Python の `Model.solve` は未指定のとき [`default_threads`] を渡す)
+        threads: settings.threads.or(env_f64(env_str!("ENOMOTO_MIP_TREE_THREADS")).map(|v| v as usize)).unwrap_or(opts.threads.max(d.threads)).clamp(1, max_threads()),
         distinguish: opts.distinguish_infeasible_unbounded,
+        // 診断用 (`ENOMOTO_MIP_CUTOFF`): 打ち切り値を元の目的の向きで与える (この値以上の下界のノードを捨てる)。
+        // 最適値が分かっている問題で、暫定解を見つける運の良し悪しと証明の時間を切り分けるために使う
+        // (pk1 の揺れの調査。最適値 11 の整数目的なら 10.5 を与えると、暫定解 11 を持って始めたのと同じ木になる)
+        cutoff: env_f64(env_str!("ENOMOTO_MIP_CUTOFF")).map_or(d.cutoff, |v| p.sense_sign * v),
         ..d
     };
     // 基底のない LP の求解 (根・再スタート後の根) を `threads` 本で同時実行にする (木の探索の従のスレッドを始めたら、
     // またヒューリスティクスのサブ MIP の中では 1)
     let prev_race = crate::simplex::mip_lp::set_cold_race_threads(params.threads);
+    // 根のサブ MIP・Feasibility Jump を別スレッドで回すかなどの判定 ([`solver::mip_threads`]) も、`ENOMOTO_MIP_THREADS` が
+    // なければこのスレッド数にする
+    let prev_mt = solver::MIP_THREADS_DEFAULT.swap(params.threads, std::sync::atomic::Ordering::Relaxed);
     let r = if env_str!("ENOMOTO_MIP_PORTFOLIO").is_some() { solve_portfolio(&p, params) } else { solve_problem(&p, params, env_str!("ENOMOTO_MIP_NO_PRESOLVE").is_none()) };
     crate::simplex::mip_lp::set_cold_race_threads(prev_race);
+    solver::MIP_THREADS_DEFAULT.store(prev_mt, std::sync::atomic::Ordering::Relaxed);
     if env_str!("ENOMOTO_MIP_XPROF").is_some() {
         crate::simplex::slope_intercept_dual::xprof("tail");
         for (l, ns) in crate::simplex::slope_intercept_dual::xprof_take() {
@@ -1043,8 +1059,8 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
                     if want_impl {
                         add_edges(j, 0, &ch0, &mut edges);
                         add_edges(j, 1, &ch1, &mut edges);
-                        // implied bound カット (`ENOMOTO_MIP_IMPLBD_CUTS`) を使うときだけ集める
-                        if env_str!("ENOMOTO_MIP_IMPLBD_CUTS").is_some() {
+                        // implied bound カットを使うときだけ集める (既定は相手が連続変数のものだけ使う。`ENOMOTO_MIP_NO_IMPLBD_CONT` で使わない)
+                        if env_str!("ENOMOTO_MIP_IMPLBD_CUTS").is_some() || env_str!("ENOMOTO_MIP_NO_IMPLBD_CONT").is_none() {
                             add_implied(j, false, &ch0, &dom, &mut implied);
                             add_implied(j, true, &ch1, &dom, &mut implied);
                         }

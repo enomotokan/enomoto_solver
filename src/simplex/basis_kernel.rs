@@ -360,6 +360,23 @@ impl BasisKernel {
         }
     }
 
+    /// [`Self::ftran_rows_into`] で、位置の記録が `m` の `dense_frac` 倍を超えるなら記録を並べ替えずに `out` を走査する版
+    /// (どちらも昇順。走査では値が 0 の行が入らないだけ)。結果が密な FTRAN で記録の並べ替え (`sort_unstable` + `dedup`) が
+    /// 走査より重くなる (ex10 の押し出し: 平均 2.9 万非零 / 6.3 万行)。
+    #[inline]
+    pub(super) fn ftran_rows_into_dense_aware(&mut self, out: &[f64], rows: &mut Vec<usize>, dense_frac: f64) {
+        let dense = match self.ftrack.alpha.indices() {
+            Some(idx) => idx.len() as f64 > dense_frac * self.m as f64,
+            None => true,
+        };
+        if dense {
+            rows.clear();
+            rows.extend((0..self.m).filter(|&i| out[i] != 0.0));
+        } else {
+            self.ftran_rows_into(out, rows);
+        }
+    }
+
     /// 直前のピボット行の BTRAN の結果 `out` の非ゼロ行を昇順で `rows` に入れる ([`Self::ftran_rows_into`] の BTRAN 版)。
     #[inline]
     pub(super) fn btran_rows_into(&self, out: &[f64], rows: &mut Vec<usize>) {
@@ -382,6 +399,29 @@ impl BasisKernel {
             lu.solve_transpose_unit_work(r, out, &mut self.e_tilde, &mut self.btran_work, None);
         }
         self.e_tilde_row = Some(r);
+    }
+
+    /// ピボット行の BTRAN のうち FT 更新に要る `e_tilde` だけを求める ([`sparse_lu::FtLu::solve_transpose_unit_e_tilde`])。
+    /// `B^-T e_r` は求めない (行の値が要らない主の押し出し用)。照合は [`Self::pivot_agrees_tilde`]。
+    pub(super) fn btran_row_e_tilde(&mut self, lu: &sparse_lu::FtLu, r: usize) {
+        lu.solve_transpose_unit_e_tilde(r, &mut self.e_tilde, &mut self.btran_work);
+        self.e_tilde_row = Some(r);
+    }
+
+    /// [`Self::pivot_agrees`] を、行の値 `e_tilde · a_tilde` (直前の [`Self::ftran_col`] と [`Self::btran_row_e_tilde`] の記録)
+    /// で行う。
+    pub(super) fn pivot_agrees_tilde(&self, lu: &sparse_lu::FtLu, alpha_col: f64) -> bool {
+        !pivot_values_disagree(lu, self.alpha_row_tilde(), alpha_col)
+    }
+
+    /// 行の値 `e_tilde · a_tilde`。
+    pub(super) fn alpha_row_tilde(&self) -> f64 {
+        // `a_tilde` の配列には記録の外に前回までの値が残りうる (FT 更新は記録した位置しか読まない) ので、記録があればその位置で取る。
+        if let Some(idx) = self.ftrack.a_tilde.indices() {
+            return idx.iter().map(|&q| self.e_tilde[q] * self.a_tilde[q]).sum();
+        }
+        // `e_tilde` の位置の記録は重複を含みうるので使わない。
+        self.e_tilde.iter().zip(&self.a_tilde).map(|(e, a)| e * a).sum()
     }
 
     /// [`Self::btran_row`] に、続く融合 FTRAN (DSE の `tau = B^-1 rho`) のための非ゼロステップの

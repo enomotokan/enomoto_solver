@@ -6998,6 +6998,61 @@ impl FtLu {
     /// [`Self::solve_transpose_unit_work`] の超疎版 (策2、大きな問題の主ループ用。結果はビット一致):
     /// `U^T`/`L^T` 段を非ゼロ位置のヒープで駆動し、出力も一覧の位置だけ書く ([`UnitBtranWork`] 参照)。
     #[inline(never)]
+    /// ピボット行の BTRAN のうち、FT 更新に要る `U^T` 段 (`e_tilde`) だけを求める ([`Self::solve_transpose_unit_work_sparse`]
+    /// の前半と同じ計算・同じ記録)。`R` eta と `L^T` 段は解かず、`B^-T e_i` (`out`) は書かない (前回の `out` とその非ゼロ位置の
+    /// 記録はそのまま)。ピボットの照合は `e_tilde · a_tilde` (入る列の FTRAN の `U` 段への入力) で行える
+    /// (`e_i^T B^-1 a = e_i^T U^-1 (R L^-1 a)`。クロスオーバーの押し出し)。
+    pub fn solve_transpose_unit_e_tilde(&self, i: usize, e_tilde_out: &mut [f64], work: &mut UnitBtranWork) {
+        let m = self.base.m;
+        if work.w.len() != m {
+            work.w = vec![0.0; m];
+            work.e_full = true;
+        }
+        if work.marks.len() != m {
+            work.marks = EpochMarks::new(m);
+        }
+        let hyper = work.sparse && work.density < 0.5 * tunable!("ENOMOTO_T_BTRAN_HYPER_FRACTION", BTRAN_HYPER_FRACTION, f64) && tiny_drop() <= 0.0;
+        let UnitBtranWork { w, touch, e_touch, e_full, marks, uheap, uq, bitqueue, .. } = work;
+
+        let s0 = self.base.col_perm_inv[i];
+        w[s0] = 1.0;
+        touch.clear();
+        touch.push(s0);
+        let tracked = if hyper {
+            if *bitqueue {
+                let n = self.singles.len() + self.u_seq.n_headers();
+                uq.ensure(n);
+                self.u_transpose_sweep_heap(w, touch, marks, &mut MonoMinQueue { q: uq, n })
+            } else {
+                self.u_transpose_sweep_heap(w, touch, marks, uheap)
+            }
+        } else {
+            self.u_transpose_sweep_track(w, touch)
+        };
+        if *e_full {
+            e_tilde_out.fill(0.0);
+        } else {
+            for &q in e_touch.iter() {
+                e_tilde_out[q] = 0.0;
+            }
+        }
+        if tracked {
+            // `touch` には同じ位置が重複して入りうる (超疎でない掃引) ので、写し終えてから 0 に戻す。
+            for &q in touch.iter() {
+                e_tilde_out[q] = w[q];
+            }
+            for &q in touch.iter() {
+                w[q] = 0.0;
+            }
+            std::mem::swap(touch, e_touch);
+            *e_full = false;
+        } else {
+            e_tilde_out.copy_from_slice(w);
+            w.fill(0.0);
+            *e_full = true;
+        }
+    }
+
     pub fn solve_transpose_unit_work_sparse(&self, i: usize, out: &mut [f64], e_tilde_out: &mut [f64], work: &mut UnitBtranWork, mut cap: Option<&mut StepCapture>) {
         let m = self.base.m;
         if work.w.len() != m {

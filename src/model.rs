@@ -129,7 +129,8 @@ impl PyModel {
     /// `time_limit` [秒]: 制限時間。LP では期限までに結論が出なければ `"time_limit"` を返す (期限は
     /// [`crate::cancel::with_deadline`]。前処理の途中では止まらない)。
     /// `time_limit` / `mip_rel_gap` (既定 0) / `node_limit`: 整数最適化の打ち切り条件。
-    /// `threads`: 使うスレッドの数 (既定 1。`max_threads()` を超える値はそこで頭打ち)。求解全体をこの数のスレッドの
+    /// `threads`: 使うスレッドの数 (既定は `default_threads()`: 使える CPU の数 + 1 の半分。`max_threads()` を超える値は
+    /// そこで頭打ち)。求解全体をこの数のスレッドの
     /// rayon プールで動かす。`"auto"` で 2 以上なら、LP (整数最適化では基底のない緩和問題) を二段解法 (1 スレッド) と
     /// 内点法 + クロスオーバー (残り) で同時に解く。整数最適化では木の探索もこの数のスレッドで分け合う。
     ///
@@ -159,7 +160,7 @@ impl PyModel {
 
         // 整数最適化の設定には指定のまま渡す (未指定なら環境変数 `ENOMOTO_MIP_TREE_THREADS` が効く)
         let settings = MipSettings { time_limit, rel_gap: mip_rel_gap, node_limit, threads };
-        let threads = threads.unwrap_or(1).clamp(1, crate::mip::max_threads());
+        let threads = threads.unwrap_or_else(crate::mip::default_threads).clamp(1, crate::mip::max_threads());
         let opts = LpOptions { distinguish_infeasible_unbounded, threads, ..Default::default() };
         let sink = if log { Some(py.import_bound("sys")?.getattr("stdout")?.unbind()) } else { None };
         let result = py.allow_threads(move || {

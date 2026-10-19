@@ -204,15 +204,34 @@ index d4fa7ad..edd8acd 100644
                  // printf("cut is violated for k = %d\n", k);
                  break;
 diff --git a/highs/mip/HighsSeparation.cpp b/highs/mip/HighsSeparation.cpp
-index a2c144c..ddfc773 100644
+index a2c144c..7220964 100644
 --- a/highs/mip/HighsSeparation.cpp
 +++ b/highs/mip/HighsSeparation.cpp
-@@ -1,3 +1,4 @@
+@@ -1,3 +1,5 @@
++#include <cstring>
 +#include <cstdio>
  /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
  /*                                                                       */
  /*    This file is part of the HiGHS linear optimization suite           */
-@@ -137,14 +138,20 @@ HighsInt HighsSeparation::separationRound(HighsDomain& propdomain,
+@@ -91,7 +93,7 @@ HighsInt HighsSeparation::separationRound(HighsDomain& propdomain,
+ 
+   if (!mipdata.parallelLockActive())
+     lp->getMipSolver().profiling_->start(implBoundClock);
+-  mipdata.implications.separateImpliedBounds(
++  if (!getenv("HIGHS_NO_IMPLB")) mipdata.implications.separateImpliedBounds(
+       *lp, lp->getSolution().col_value, mipworker_.getCutPool(),
+       mipdata.feastol, mipworker_.getGlobalDomain(),
+       mipdata.parallelLockActive());
+@@ -107,7 +109,7 @@ HighsInt HighsSeparation::separationRound(HighsDomain& propdomain,
+ 
+   if (!mipdata.parallelLockActive())
+     lp->getMipSolver().profiling_->start(cliqueClock);
+-  mipdata.cliquetable.separateCliques(
++  if (!getenv("HIGHS_NO_CLQ")) mipdata.cliquetable.separateCliques(
+       lp->getMipSolver(), sol.col_value, mipworker_.getCutPool(),
+       mipdata.feastol,
+       mipdata.parallelLockActive() ? mipworker_.randgen
+@@ -137,14 +139,21 @@ HighsInt HighsSeparation::separationRound(HighsDomain& propdomain,
    }
    HighsLpAggregator lpAggregator(*lp);
  
@@ -221,6 +240,7 @@ index a2c144c..ddfc773 100644
 +  fprintf(stderr, "HSEP round %d obj %.6f", roundNo, lp->getObjective());
    for (const std::unique_ptr<HighsSeparator>& separator : separators) {
 +    HighsInt before = mipworker_.getCutPool().getNumCuts();
++    { const char* sk = getenv("HIGHS_SKIP_SEP"); int k = (int)(&separator - &separators[0]); if (sk && strchr(sk, '0' + k)) continue; }
      separator->run(*lp, lpAggregator, transLp, mipworker_.getCutPool());
 +    fprintf(stderr, " sep%d=%d", (int)(&separator - &separators[0]), (int)(mipworker_.getCutPool().getNumCuts() - before));
      if (mipworker_.getGlobalDomain().infeasible()) {
@@ -233,3 +253,11 @@ index a2c144c..ddfc773 100644
    numboundchgs = propagateAndResolve();
    if (numboundchgs == -1)
      return 0;
+@@ -163,6 +172,7 @@ HighsInt HighsSeparation::separationRound(HighsDomain& propdomain,
+     ncuts += cutset.numCuts();
+     lp->addCuts(cutset);
+     status = lp->resolveLp(&propdomain);
++    fprintf(stderr, "HADD %d obj %.6f lprows %d\n", (int)cutset.numCuts(), lp->getObjective(), (int)lp->numRows());
+     lp->performAging(true);
+ 
+     // only for the master domain.

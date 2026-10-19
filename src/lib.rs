@@ -150,6 +150,12 @@ fn max_threads() -> usize {
     mip::max_threads()
 }
 
+/// `Model.solve` で `threads` を指定しないときのスレッドの数 (使える CPU の数 + 1 の半分)。
+#[pyfunction]
+fn default_threads() -> usize {
+    mip::default_threads()
+}
+
 /// Python 拡張モジュール `enomoto_solver._core` の初期化。`PyModel` クラスと
 /// `last_solve_events` を登録する。
 #[pymodule]
@@ -157,5 +163,6 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyModel>()?;
     m.add_function(wrap_pyfunction!(last_solve_events, m)?)?;
     m.add_function(wrap_pyfunction!(max_threads, m)?)?;
+    m.add_function(wrap_pyfunction!(default_threads, m)?)?;
     Ok(())
 }

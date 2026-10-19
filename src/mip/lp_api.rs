@@ -11,11 +11,14 @@ pub trait MipLp: Clone + Send {
     fn new(col_lo: &[f64], col_up: &[f64], cost: &[f64], rows: &[Vec<(usize, f64)>], row_lo: &[f64], row_up: &[f64]) -> Self;
     fn num_rows(&self) -> usize;
     fn total_iterations(&self) -> u64;
+    /// 反復の累計を書き戻す (予算の数え方に入れたくない求解の分を戻す)。
+    fn set_total_iterations(&mut self, v: u64);
     fn col_bounds(&self, j: usize) -> (f64, f64);
     fn row_bounds(&self, i: usize) -> (f64, f64);
     fn row(&self, i: usize) -> Vec<(usize, f64)>;
     fn set_col_bounds(&mut self, j: usize, lo: f64, up: f64);
     fn set_costs(&mut self, c: &[f64]);
+    fn costs(&self) -> Vec<f64>;
     fn add_rows(&mut self, rows: &[(Vec<(usize, f64)>, f64, f64)]);
     fn delete_rows(&mut self, remove: &[bool]);
     fn basis(&self) -> Basis;
@@ -26,6 +29,11 @@ pub trait MipLp: Clone + Send {
     fn restore_state(&mut self, s: &Self::State);
     fn solve(&mut self, lim: &SolveLimits) -> LpStatus;
     fn solve_primal(&mut self, lim: &SolveLimits) -> LpStatus;
+    /// [`Self::solve`] が結論を出せなかった (`Error`・`IterationLimit`) LP を別の経路で解き直す
+    /// ([`TwoStageLp::solve_ipm_rescue`])。対応しない実装は `Error`。
+    fn solve_rescue(&mut self, _lim: &SolveLimits) -> LpStatus {
+        LpStatus::Error
+    }
     fn objective(&self) -> f64;
     fn col_values(&self) -> Vec<f64>;
     fn col_value(&self, j: usize) -> f64;
@@ -78,11 +86,13 @@ macro_rules! forward_impl {
             }
             fn num_rows(&self) -> usize { <$t>::num_rows(self) }
             fn total_iterations(&self) -> u64 { <$t>::total_iterations(self) }
+            fn set_total_iterations(&mut self, v: u64) { <$t>::set_total_iterations(self, v) }
             fn col_bounds(&self, j: usize) -> (f64, f64) { <$t>::col_bounds(self, j) }
             fn row_bounds(&self, i: usize) -> (f64, f64) { <$t>::row_bounds(self, i) }
             fn row(&self, i: usize) -> Vec<(usize, f64)> { <$t>::row(self, i) }
             fn set_col_bounds(&mut self, j: usize, lo: f64, up: f64) { <$t>::set_col_bounds(self, j, lo, up) }
             fn set_costs(&mut self, c: &[f64]) { <$t>::set_costs(self, c) }
+            fn costs(&self) -> Vec<f64> { <$t>::costs(self) }
             fn add_rows(&mut self, rows: &[(Vec<(usize, f64)>, f64, f64)]) { <$t>::add_rows(self, rows) }
             fn delete_rows(&mut self, remove: &[bool]) { <$t>::delete_rows(self, remove) }
             fn basis(&self) -> Basis { <$t>::basis(self) }
@@ -119,6 +129,9 @@ forward_impl!(
     },
     fn interior_point(&self, zero_cost: bool, want_vertex: bool, deadline: std::time::Instant) -> Option<InteriorPoint> {
         TwoStageLp::interior_point(self, zero_cost, want_vertex, deadline)
+    },
+    fn solve_rescue(&mut self, lim: &SolveLimits) -> LpStatus {
+        TwoStageLp::solve_ipm_rescue(self, lim)
     },
     fn set_basis_cols(&mut self, b: &[usize], x: Option<&[f64]>) {
         TwoStageLp::set_basis_cols(self, b, x)

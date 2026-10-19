@@ -1635,12 +1635,21 @@ fn connected_components_of_std_form(std: &StdForm) -> Option<(Vec<Vec<usize>>, V
     let n_orig = std.n_total - std.n_rows;
     let mut parent: Vec<usize> = (0..n_orig).collect(); // union-find の親
     let mut has_row = vec![false; n_orig];
-    /// union-find の根を経路圧縮つきで求める。
+    /// union-find の根を経路圧縮つきで求める。再帰しない (根まで辿ってから、通った節を根につなぎ直す)。再帰版は
+    /// 親の鎖の長さだけスタックを使い、列あたりの非零の多い neos-3025225 (69,846 列) で鎖が数万段になり、Windows の
+    /// スレッドのスタック (1 MB) を溢れて異常終了していた (Linux でも `ulimit -s 1024` で再現)。
     fn find(parent: &mut [usize], x: usize) -> usize {
-        if parent[x] != x {
-            parent[x] = find(parent, parent[x]);
+        let mut root = x;
+        while parent[root] != root {
+            root = parent[root];
         }
-        parent[x]
+        let mut cur = x;
+        while parent[cur] != root {
+            let next = parent[cur];
+            parent[cur] = root;
+            cur = next;
+        }
+        root
     }
     /// `a` と `b` の成分を併合する。
     fn union(parent: &mut [usize], a: usize, b: usize) {

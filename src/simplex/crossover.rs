@@ -698,6 +698,12 @@ pub(super) fn solve_ipm_crossover(std: &StdForm) -> Option<SimplexResult> {
             return None;
         }
     }
+    // 診断用 (`ENOMOTO_DEBUG_XO_POINT_LOAD=ファイル`): 双対化しない問題でも、前に書き出した点を読んで内点法を飛ばす
+    // (`ENOMOTO_DEBUG_XO_POINT_SAVE` で書き出したもの。大きさが合わなければ普通に解く)。
+    if let Some((x, y)) = env_str!("ENOMOTO_DEBUG_XO_POINT_LOAD").and_then(|f| load_point(&f, std.n_total, std.n_rows)) {
+        let secs = env_str!("ENOMOTO_DEBUG_XO_POINT_SECS").and_then(|v| v.parse().ok()).unwrap_or(1e6);
+        return solve_ipm_crossover_with(std, &XoOptions { given_point: Some((&x, &y, secs)), ..Default::default() });
+    }
     solve_ipm_crossover_with(std, &XoOptions::default())
 }
 
@@ -805,8 +811,13 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     // 試験用 (`ENOMOTO_T_XO_IPM_PC_MIN_NNZ`): 内点法に渡す行列の非零の数がこれ未満ならそろえない (小さな問題では
     // 反復が増える・手間が目立つ: degen3・greenbea・ken-13。第 49 回)。
     let pc_min_nnz = tunable!("ENOMOTO_T_XO_IPM_PC_MIN_NNZ", 0usize, usize);
-    let ipm_pc_requested = tunable!("ENOMOTO_T_XO_IPM_PC", 0u8, u8) != 0;
-    let ipm_pc = if a_j.compute_nnz() >= pc_min_nnz { tunable!("ENOMOTO_T_XO_IPM_PC", 0u8, u8) } else { 0 };
+    // 双対化した問題 (`ipm_point_only`) は `ENOMOTO_T_XO_DUALIZE_IPM_PC` (既定 3: 幾何平均の後に平衡化) でそろえる。双対 LP の
+    // 行列は単体法向けに主の問題で最大値をそろえた行列の転置で、費用は元の右辺 (尺度をそろえていない) なので、そろえないと
+    // Mehrotra 型の初期点 (全成分を同じ量だけ持ち上げる) が解から遠く、内点法が境界の近くを這う (physiciansched3-3:
+    // 96 → 56 反復、IPX は同じ双対 LP で 70 反復)。
+    let pc_setting = if xo.ipm_point_only { tunable!("ENOMOTO_T_XO_DUALIZE_IPM_PC", 3u8, u8) } else { tunable!("ENOMOTO_T_XO_IPM_PC", 0u8, u8) };
+    let ipm_pc_requested = pc_setting != 0;
+    let ipm_pc = if a_j.compute_nnz() >= pc_min_nnz { pc_setting } else { 0 };
     let pc = (ipm_pc != 0 && xo.given_point.is_none()).then(|| ipm_prescaled(&a_j, &b_j, &c_j, &l_j, &u_j, ipm_pc));
     crate::phase_timing::mark("xo_ipm_start");
     let ipm = if let Some((gx, gy, _)) = xo.given_point {
@@ -1083,6 +1094,13 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     // 頂点の採用判定の射影 (`ENOMOTO_T_XO_ACCEPT_PROJ`) で最適分割を推定するのに使う内点法の主の点 (押し出しの前)。
     let x_ipm_saved = (tunable!("ENOMOTO_T_XO_ACCEPT_PROJ", 0u8, u8) != 0).then(|| x.clone());
     let mut y = ipm.y;
+    // 診断用 (`ENOMOTO_DEBUG_XO_POINT_SAVE=ファイル`): 双対化しない問題の内点法の点を書き出す (`ENOMOTO_DEBUG_XO_POINT_LOAD` で読む)。
+    if xo.given_point.is_none() && !xo.ipm_point_only {
+        if let Some(f) = env_str!("ENOMOTO_DEBUG_XO_POINT_SAVE") {
+            let bytes: Vec<u8> = x.iter().chain(y.iter()).flat_map(|v| v.to_le_bytes()).collect();
+            let _ = std::fs::write(f, bytes);
+        }
+    }
     if xo.ipm_point_only {
         XO_IPM_POINT.with(|p| *p.borrow_mut() = Some((x, y, ipm_secs)));
         return None;
@@ -1849,6 +1867,23 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
         sel = BasisSelector::new(m, n);
         sel.row_cnt = row_cnt;
         st.li_from_b = 0;
+        // どの候補にもマッチしなかった行は、最後に足りない行のスラックで埋まる。そのスラックを先に入れておく
+        // (`ENOMOTO_T_XO_LI_MATCH_SLACK_FIRST`、既定 1、0 で従来どおり最後に埋める)。後から埋めると、マッチしなかった行の候補の
+        // 成分が消去のたびに L の列に残って積み上がる (neos3: 51 万行のうち 22.8 万行がマッチせず、消去 39 億回・nnz(L) 1.1 億で
+        // 60 秒。先に入れると三角の部分の消去が要らない)。
+        if tunable!("ENOMOTO_T_XO_LI_MATCH_SLACK_FIRST", crate::params::crossover::LI_MATCH_SLACK_FIRST, u8) != 0 {
+            let mut matched = vec![false; m];
+            for &(_, pref) in &ord {
+                if let Some(r) = pref {
+                    matched[r] = true;
+                }
+            }
+            for i in 0..m {
+                if !matched[i] && sel.try_add(n_orig + i, col(std, n_orig + i)) {
+                    st.li_slack += 1;
+                }
+            }
+        }
         for &(j, pref) in &ord {
             if sel.full() {
                 break;
@@ -1939,7 +1974,7 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     let mut lu = factorize_basis(std, &basis_pos, None)?;
     // 基底に選ばれず、境界から離れたまま残った基底候補 (超基底変数)。今は上で近い方の境界へ移した
     // 扱いにしてあり、Megiddo 式の押し出しが有効なら、そこから主実行可能性を保って境界へ押し出す。
-    let leftover: Vec<usize> = (0..n)
+    let mut leftover: Vec<usize> = (0..n)
         .filter(|&j| {
             ps[j] == PStat::Basic
                 && basis_pos[j].is_none()
@@ -1950,6 +1985,22 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
                 }
         })
         .collect();
+    // 押し出す順 (`ENOMOTO_T_XO_MEGIDDO_ORDER`): 0 = 列番号の順、1 = 境界までの距離の小さい順、2 = 大きい順、
+    // 3 = 距離 / |s_j| の大きい順 (IPX は内点法の重みの大きい順に押し出す)、4 = 小さい順 (既定)。基底らしくない (境界に近く、
+    // 被約費用の大きい) 列から押し出すと、自身の境界で止まる列が増え、基底を入れ替えても FTRAN が疎なまま進む (第 64 回:
+    // savsched1 の超基底 20.4 万本で、列番号の順はピボット 12.5 万・FTRAN の平均非零 11,496、4 は 11.4 万・4,768 で押し出しが
+    // 約 1.5 倍速い。3 は 15.7 万・14,155 で遅い。neos-5251015 では 1 が列番号の順より遅く (115 → 145 秒)、4 は 105 秒)。
+    let order = tunable!("ENOMOTO_T_XO_MEGIDDO_ORDER", crate::params::crossover::MEGIDDO_ORDER, u8);
+    match order {
+        1 | 2 => {
+            let dist = |j: usize| (x[j] - std.lb[j]).min(std.ub[j] - x[j]);
+            let o = order;
+            leftover.sort_by(|&a, &b| if o == 1 { dist(a).total_cmp(&dist(b)) } else { dist(b).total_cmp(&dist(a)) });
+        }
+        3 => leftover.sort_by(|&a, &b| li_score(b).total_cmp(&li_score(a))),
+        4 => leftover.sort_by(|&a, &b| li_score(a).total_cmp(&li_score(b))),
+        _ => {}
+    }
     crate::phase_timing::record("xo_leftover", leftover.len() as f64);
     if debug {
         eprintln!("CROSSOVER leftover superbasics={} (|B|-m after primal push={})", leftover.len(), st.basic_after_push as i64 - m as i64);
@@ -2103,7 +2154,7 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
             // - 試験用 `ENOMOTO_T_XO_ACCEPT_PROJ=1`: 最適面への射影 (Mehrotra–Ye)。内点法の点から上下限の間にあると推定した
             //   変数と、頂点で上下限の間にある基底変数の集合 S について、`A_Sᵀ (y_ipm + Δ) = c_S` を満たす最小ノルムの Δ
             //   (`Δ = A_S w`、`(A_Sᵀ A_S + εI) w = d_S`) で y を射影する。
-            if accept_gap > 0.0 && gap > accept_gap && (yfix || implied || x_ipm_saved.is_some()) {
+            if accept_gap > 0.0 && gap > accept_gap && (yfix || implied || x_ipm_saved.is_some() || tunable!("ENOMOTO_T_XO_ACCEPT_YB", crate::params::crossover::ACCEPT_YB, u8) != 0) {
                 let bnds = implied.then(|| implied_bounds(std, 3));
                 let (lbs, ubs): (&[f64], &[f64]) = match &bnds {
                     Some((l, u)) => (l, u),
@@ -2156,11 +2207,15 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
                         }
                     }
                 }
-                if implied && gap > accept_gap {
+                // 頂点の基底の双対 y_B (`B^T y = c_B`) でも測る (`ENOMOTO_T_XO_ACCEPT_YB`、既定 1、0 で試験用の `IMPLIED` のときだけ)。
+                // 基底が双対実行可能なら L(y_B) は頂点の目的値そのもので、最適な基底をそのまま受理できる。内点法が同時実行の
+                // 二段解法の下界で早く打ち切られた (neos-5251015: 4 反復) ときは y_ipm の下界が粗く (判定ギャップ 286)、最適な基底でも
+                // 受理されずに双対の押し出しに進み、それが基底を崩して仕上げが 900 秒で終わらないことがあった。
+                if (implied || tunable!("ENOMOTO_T_XO_ACCEPT_YB", crate::params::crossover::ACCEPT_YB, u8) != 0) && gap > accept_gap {
                     let cb: Vec<f64> = basis.iter().map(|&j| std.c[j]).collect();
                     let mut yb = vec![0.0; m];
                     lu.solve_transpose_into(&cb, &mut scratch, &mut yb);
-                    try_y("y_B, implied bounds", &yb, &mut gap);
+                    try_y(if implied { "y_B, implied bounds" } else { "y_B" }, &yb, &mut gap);
                 }
                 crate::phase_timing::record("xo_vertex_gap_fix", gap);
             }
@@ -3176,7 +3231,17 @@ fn megiddo_push(
     // (照合でも x_B の誤差は拾えるので、こちらは誤差が大きいときの安全網)。
     let xb_tol = tunable!("ENOMOTO_T_XO_MEGIDDO_XB_TOL", crate::params::slope_intercept_dual::XB_DRIFT_TOL_MAX, f64);
     let (mut nverify, mut nxb) = (0usize, 0usize);
-    let mut kernel = BasisKernel::new(m, ft_max);
+    let btran_u_only = tunable!("ENOMOTO_T_XO_MEGIDDO_BTRAN_U", crate::params::crossover::MEGIDDO_BTRAN_U, u8) != 0;
+    // 診断用 (`ENOMOTO_DEBUG_XO_TILDE=k`): 最初の k 回のピボットで、`e_tilde · a_tilde` と BTRAN 全体の行の値を並べて出す。
+    let mut tilde_check: usize = env_str!("ENOMOTO_DEBUG_XO_TILDE").and_then(|v| v.parse().ok()).unwrap_or(0);
+    // FT 更新の回数が `ft_max` に達しても、前回の再分解からの求解 (FTRAN・BTRAN・更新) の時間がその再分解の時間に届かない間は
+    // `ft_max` の `ENOMOTO_T_XO_MEGIDDO_FT_ADAPT` 倍まで更新を続ける (既定 `MEGIDDO_FT_ADAPT`、1 以下で従来どおり `ft_max` で再分解)。
+    // stormG2_1000 (52.8 万行) の押し出しは FTRAN の結果が平均 12 非零と疎で、FTRAN 0.5 秒に対して 300 回ごとの再分解が 128 回・19.6 秒。
+    let ft_adapt = tunable!("ENOMOTO_T_XO_MEGIDDO_FT_ADAPT", crate::params::crossover::MEGIDDO_FT_ADAPT, f64);
+    let ft_hi = if ft_adapt > 1.0 { ((ft_max as f64 * ft_adapt) as usize).min(ft_max_updates(m)).max(ft_max) } else { ft_max };
+    // 直近の再分解の時間と、その時点の求解の累計時間。
+    let (mut last_refac, mut solve_mark) = (0.0f64, 0.0f64);
+    let mut kernel = BasisKernel::new(m, ft_hi);
     let mut d = vec![0.0; m];
     let mut rho = vec![0.0; m];
     let mut nz: Vec<usize> = Vec::new();
@@ -3184,8 +3249,11 @@ fn megiddo_push(
     let repair = tunable!("ENOMOTO_T_XO_MEGIDDO_REPAIR", 0u8, u8) != 0;
     let mut timed_out = 0usize;
     let mut repaired = 0usize;
-    let mut prof = [0.0f64; 4];
+    let mut prof = [0.0f64; 5];
     let (mut nz_sum, mut nrefac) = (0usize, 0usize);
+    // FTRAN の結果の非零行の一覧を、記録が行数のこの割合を超えたら並べ替えずに走査で作る (`ENOMOTO_T_XO_MEGIDDO_ROWS_DENSE`、
+    // 0 で常に記録を並べ替える。結果はビット一致)。
+    let rows_dense_frac = tunable!("ENOMOTO_T_XO_MEGIDDO_ROWS_DENSE", crate::params::crossover::MEGIDDO_ROWS_DENSE, f64);
     let t_push = Instant::now();
     // 向き `σ` での比率テスト。(歩幅, 塞ぐ基底位置 (自身なら None), 塞いだ境界は上限か)。
     // `nz` は `d` の非零の位置 (基底のほとんどがスラックの問題では `d` が疎で、長さ `m` の走査が手間の大半になる)。
@@ -3277,8 +3345,14 @@ fn megiddo_push(
         let (dj, sigma, t, blk, up) = loop {
             let tq = Instant::now();
             kernel.ftran_col(&lu, col(std, j), &mut d);
-            kernel.ftran_rows_into(&d, &mut nz);
             prof[0] += tq.elapsed().as_secs_f64();
+            let tq = Instant::now();
+            if rows_dense_frac > 0.0 {
+                kernel.ftran_rows_into_dense_aware(&d, &mut nz, rows_dense_frac);
+            } else {
+                kernel.ftran_rows_into(&d, &mut nz);
+            }
+            prof[4] += tq.elapsed().as_secs_f64();
             nz_sum += nz.len();
             let mut dj = std.c[j];
             for &k in &nz {
@@ -3304,8 +3378,22 @@ fn megiddo_push(
             if let (Some(r), true) = (blk, t.is_finite()) {
                 // `rho` は FT 更新の `e_tilde` の記録にも使う (この後で因子を変えないので、そのまま更新に使える)。
                 let tq = Instant::now();
-                kernel.btran_row(&lu, r, &mut rho);
-                let ok = !verify || retried || kernel.pivot_agrees(&lu, col(std, j), &rho, d[r]);
+                // 照合の行の値は `e_tilde · a_tilde` で求め、BTRAN は FT 更新に要る `U^T` 段だけにする
+                // (`ENOMOTO_T_XO_MEGIDDO_BTRAN_U`、既定 1、0 で従来の BTRAN 全体。値は丸め誤差の範囲で同じ)。
+                let ok = if btran_u_only {
+                    kernel.btran_row_e_tilde(&lu, r);
+                    if tilde_check > 0 {
+                        tilde_check -= 1;
+                        let at = kernel.alpha_row_tilde();
+                        kernel.btran_row(&lu, r, &mut rho);
+                        let ar: f64 = col(std, j).iter().map(|&(i, a)| a * rho[i]).sum();
+                        eprintln!("CROSSOVER megiddo tilde check: alpha_col={:.6e} rho.a={ar:.6e} e~.a~={at:.6e} upd={}", d[r], lu.update_count());
+                    }
+                    !verify || retried || kernel.pivot_agrees_tilde(&lu, d[r])
+                } else {
+                    kernel.btran_row(&lu, r, &mut rho);
+                    !verify || retried || kernel.pivot_agrees(&lu, col(std, j), &rho, d[r])
+                };
                 prof[1] += tq.elapsed().as_secs_f64();
                 if !ok {
                     let tq = Instant::now();
@@ -3315,11 +3403,13 @@ fn megiddo_push(
                         Some(f) => f,
                         None => return None,
                     };
-                    kernel = BasisKernel::new(m, ft_max);
+                    kernel = BasisKernel::new(m, ft_hi);
                     let xs_ref = &xs;
                     let sv = |jj: usize| xs_ref[sup_idx[jj]];
                     recompute_xb(&lu, basis_pos, nb_status, &is_sup, &sv, &mut xb);
                     prof[3] += tq.elapsed().as_secs_f64();
+                    last_refac = tq.elapsed().as_secs_f64();
+                    solve_mark = prof[0] + prof[1] + prof[2] + prof[4];
                     retried = true;
                     continue;
                 }
@@ -3358,6 +3448,9 @@ fn megiddo_push(
                 pivots += 1;
                 let tq = Instant::now();
                 let mut due = kernel.update_and_check(&mut lu, r).is_due();
+                if !due && ft_hi > ft_max && lu.update_count() >= ft_max && prof[0] + prof[1] + prof[2] + prof[4] - solve_mark >= last_refac {
+                    due = true;
+                }
                 // `x_B` の残差の検査 (`ENOMOTO_T_XO_MEGIDDO_XB_CHECK` 回の更新ごと、既定 200、0 で行わない。1 回の手間は `A` の非零の数で、pds-100 では 50 回ごとで計 0.75 秒): 実際の行列で
                 // `b - A_N x_N - B x_B` を測り、`xb_tol` を超えたら再分解する ([`super::basis_kernel::basic_residual`])。
                 // 照合はピボットの 1 要素しか見ないので、`x_B` の差分更新に溜まった誤差はこちらで拾う。
@@ -3403,11 +3496,13 @@ fn megiddo_push(
                         }
                         None => return None,
                     };
-                    kernel = BasisKernel::new(m, ft_max);
+                    kernel = BasisKernel::new(m, ft_hi);
                     let xs_ref = &xs;
                     let sv = |jj: usize| xs_ref[sup_idx[jj]];
                     recompute_xb(&lu, basis_pos, nb_status, &is_sup, &sv, &mut xb);
                     prof[3] += tq.elapsed().as_secs_f64();
+                    last_refac = tq.elapsed().as_secs_f64();
+                    solve_mark = prof[0] + prof[1] + prof[2] + prof[4];
                 }
             }
         }
@@ -3417,7 +3512,7 @@ fn megiddo_push(
         eprintln!("CROSSOVER megiddo: singular basis repaired ({repaired} columns replaced by slacks)");
     }
     if env_str!("ENOMOTO_DEBUG_CROSSOVER").is_some() {
-        eprintln!("CROSSOVER megiddo prof: total={:.2}s ftran={:.2} btran={:.2} update={:.2} refactor={:.2} ({nrefac}x, {nverify} by verify, {nxb} by x_B residual) avg_nz={:.0}", t_push.elapsed().as_secs_f64(), prof[0], prof[1], prof[2], prof[3], nz_sum as f64 / (pivots + to_bound).max(1) as f64);
+        eprintln!("CROSSOVER megiddo prof: total={:.2}s ftran={:.2} rows={:.2} btran={:.2} update={:.2} refactor={:.2} ({nrefac}x, {nverify} by verify, {nxb} by x_B residual) avg_nz={:.0}", t_push.elapsed().as_secs_f64(), prof[0], prof[4], prof[1], prof[2], prof[3], nz_sum as f64 / (pivots + to_bound).max(1) as f64);
     }
     let lu = match factorize_basis(std, basis_pos, Some(&lu)) {
         Some(f) => f,

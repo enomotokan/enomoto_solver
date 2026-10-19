@@ -145,7 +145,7 @@ pub fn detect(p: &MipProblem, time_cap: f64, max_tries: usize) -> Option<Symmetr
                 continue;
             }
             tries += 1;
-            if let Some(perm) = search(p, &col, &row, a, b, t0, time_cap) {
+            if let Some(perm) = search(p, &col, &row, a, b, t0, time_cap, &row_counts) {
                 if verify(p, &perm, &row_counts) {
                     for j in 0..n {
                         let (x, y) = (find(&mut uf, j), find(&mut uf, perm[j]));
@@ -184,7 +184,47 @@ pub fn detect(p: &MipProblem, time_cap: f64, max_tries: usize) -> Option<Symmetr
 }
 
 /// 列 `a` を `b` に写す置換を、個別化と細分化で 1 本作る (色が全て 1 列ずつになるまで)。作れなければ `None`。
-fn search(p: &MipProblem, col0: &[u64], row0: &[u64], a: usize, b: usize, t0: std::time::Instant, time_cap: f64) -> Option<Vec<usize>> {
+/// `search` の近道 (`ENOMOTO_MIP_SYM_NO_SHORTCUT` で使わない): 今の色で、1 列だけの色は色で対応させ、2 列以上の色は A と B の
+/// 両方にある列を動かさず、片側にしかない列どうしを対応させた置換を作る (呼び出し側で確かめる)。同じ形のブロックが多数ある
+/// 問題 (neos-3381206-awhea: 同じ箱が 475 個) で、箱 a と b の入れ替えは最初の細分化の直後にこれで得られる
+/// (A 側の残りの箱の色は {b, 他}、B 側は {a, 他} なので、他は動かさず b -> a)。個別化を全ての色が
+/// 1 列になるまで続けると 1 回の試行に数百回の細分化が要り、時間の上限 (0.3 秒) までに生成元が 1 つしか見つからなかった
+fn shortcut_perm(n: usize, ma: &std::collections::HashMap<u64, Vec<usize>>, mb: &std::collections::HashMap<u64, Vec<usize>>) -> Option<Vec<usize>> {
+    let mut perm = vec![usize::MAX; n];
+    for (c, va) in ma {
+        let vb = mb.get(c)?;
+        if va.len() != vb.len() {
+            return None;
+        }
+        // 両側にある列は動かさず、片側にしかない列どうしを番号の順に対応させる (1 列だけの色はそのまま対応)
+        let (mut onlya, mut onlyb): (Vec<usize>, Vec<usize>) = (Vec::new(), Vec::new());
+        let (mut i, mut k) = (0, 0);
+        while i < va.len() || k < vb.len() {
+            if i < va.len() && k < vb.len() && va[i] == vb[k] {
+                perm[va[i]] = va[i];
+                i += 1;
+                k += 1;
+            } else if k >= vb.len() || (i < va.len() && va[i] < vb[k]) {
+                onlya.push(va[i]);
+                i += 1;
+            } else {
+                onlyb.push(vb[k]);
+                k += 1;
+            }
+        }
+        if onlya.len() != onlyb.len() {
+            return None;
+        }
+        for (x, y) in onlya.into_iter().zip(onlyb) {
+            perm[x] = y;
+        }
+    }
+    Some(perm)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn search(p: &MipProblem, col0: &[u64], row0: &[u64], a: usize, b: usize, t0: std::time::Instant, time_cap: f64, row_counts: &std::collections::HashMap<u64, i64>) -> Option<Vec<usize>> {
+    let use_shortcut = env_str!("ENOMOTO_MIP_SYM_NO_SHORTCUT").is_none();
     let n = p.n;
     let (mut ca, mut ra) = (col0.to_vec(), row0.to_vec());
     let (mut cb, mut rb) = (col0.to_vec(), row0.to_vec());
@@ -207,6 +247,13 @@ fn search(p: &MipProblem, col0: &[u64], row0: &[u64], a: usize, b: usize, t0: st
         }
         if ma.len() != mb.len() {
             return None;
+        }
+        if use_shortcut {
+            if let Some(perm) = shortcut_perm(n, &ma, &mb) {
+                if verify(p, &perm, row_counts) {
+                    return Some(perm);
+                }
+            }
         }
         let mut pick: Option<(usize, usize)> = None;
         for (c, va) in &ma {
