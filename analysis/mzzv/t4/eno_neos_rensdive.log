@@ -19,3 +19,32 @@ MIP: cut loop done: 8 cuts added, 7 in LP, pool 610 cuts (3744527 nonzeros), obj
 MIP: root heuristic simple rounding: none (0.00s)
 MIP: root heuristic ZI round: none (0.00s)
 MIP: root heuristic randomized rounding: none (0.05s)
+MIP:   interior rounding: 1 interior points, vertex true (1.13s)
+MIP:   interior rounding: 6 rounded points tried, found false
+MIP: root heuristic interior rounding: none (1.30s)
+MIP: root heuristic root reduced cost: none (0.00s)
+MIP:   LP face: only 0 of 58529 integer columns fixed
+MIP: root heuristic LP face: none (0.00s)
+MIP:   RENS: fixing rate 0.60 (target 0.60, 0 backtracks)
+MIP:   parallel sub-MIP started (RENS): 23332 free columns of 59376
+MIP: root heuristic RENS: none (0.15s)
+MIP:   locks: fixing rate 0.68
+MIP:   parallel sub-MIP started (locks): 18640 free columns of 59376
+MIP: root heuristic locks: none (0.08s)
+MIP:   clique: fixing rate 1.00
+MIP:   parallel sub-MIP started (clique): 192 free columns of 59376
+MIP: root heuristic clique: none (0.10s)
+MIP: root heuristic vbounds (loose): none (0.00s)
+MIP: root heuristic vbounds (tight): none (0.00s)
+MIP:   parallel sub-MIP (RENS): status TimeLimit, nodes 0, objective None, 3.04s
+MIP:   parallel sub-MIP (locks): status Infeasible, nodes 0, objective None, 2.96s
+MIP:   parallel sub-MIP (clique): status Infeasible, nodes 0, objective None, 2.86s
+MIP:   sub-MIP: 692 free columns of 59376, status Optimal, nodes 0, objective Some(-226.0)
+MIP:   global fixed integers 847 of 59376 (newly 0 since the root LP)
+MIP: new incumbent -2.2600000000e2 at node 0 (13.88s) [RINS]
+MIP: root heuristic RINS: found (0.26s)
+MIP: after root heuristics: incumbent Some(-226.0) (13.89s)
+MIP: background cuts: 1 rounds, obj -2.3800000000e2 not above -2.3800000000e2; not used (waited 1.19s)
+     time      nodes      open        best bound         incumbent       gap
+    15.1s          1         0    -2.380000000e2    -2.260000000e2     5.31%
+MIP:    15.09s nodes        1 open       0 lb inf ub -2.26000000e2 lp_iters 8126 sb_iters 0 sb_lps 0 sb_secs 0.00 node_iters 0 (first 0, lps 0) heur_iters 19726 dive_iters 0 lp_rows 4236 node_cut_secs 0.00
