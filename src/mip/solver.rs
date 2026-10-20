@@ -316,7 +316,7 @@ pub(super) struct Solver<'a, L: MipLp> {
     fj_thread: Option<(std::thread::JoinHandle<Option<Vec<f64>>>, std::sync::Arc<std::sync::atomic::AtomicBool>)>,
     /// 根のヒューリスティクスの最初に別スレッドで始めた局所探索 (`ENOMOTO_MIP_PAR_LOCAL_SEARCH`。結果は元の位置で受け取る)。
     pub(super) ls_thread: Option<std::thread::JoinHandle<super::heuristics::LocalSearchResult>>,
-    /// 根の解発見スレッド (`ENOMOTO_MIP_FIND_THREAD`、[`find_thread_on`])。根のヒューリスティクスの後と木の各ノードで、終わっていれば受け取る
+    /// 根の解発見スレッド ([`find_thread_on`])。根のヒューリスティクスの後と木の各ノードで、終わっていれば受け取る
     find_thread: Option<std::thread::JoinHandle<MipResult>>,
     find_out: Option<std::sync::Arc<std::sync::Mutex<Vec<Vec<f64>>>>>,
     find_stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
@@ -1044,14 +1044,17 @@ impl TriggerEval {
     }
 }
 
-/// 根の解発見スレッド (`ENOMOTO_MIP_FIND_THREAD`、試作、既定では使わない): 根で暫定解が質の悪い FJ の解だけ ([`Solver::fj_poor`]) のとき、
+/// 根の解発見スレッド (既定で使う。`ENOMOTO_MIP_NO_FIND_THREAD` で使わない): 根で暫定解が質の悪い FJ の解だけ ([`Solver::fj_poor`]) のとき、
 /// 根の写しから作った求解を別スレッドで動かし、暫定解なし用のヒューリスティクス (局所探索・fractional / vector length / coefficient
 /// diving・Feasibility Pump) を順に回す (主スレッドは暫定解があるのでこれらを回さない)。背景のカットの分離のスレッドを 1 本減らして
 /// 空ける。時間の予算は残りの `ENOMOTO_T_MIP_FIND_THREAD_FRAC` (既定 0.3) 倍、最大 `ENOMOTO_T_MIP_FIND_THREAD_MAX` (既定 20) 秒。
 /// 見つけた解は根のヒューリスティクスの後と木の各ノードで受け取る (待たない)。FJ2 (d1bfefd) の後、neos-950242 の根の局所探索
 /// (4 = 最適値) と nursesched-sprint02 のダイビングが FJ の解のせいで回らなくなった
+/// 主の暫定解が質の悪い FJ の解でなくなったら止める ([`Solver::poll_find_thread`])。40 問 + 16 問 (4 スレッド・60 秒、同じコンテナで
+/// 既定と続けて測る対を順番を入れ替えて 2 組): 40 問は解けた数 25/25 -> 25/25・SGM 18.53/20.41 -> 18.16/20.59 秒・不一致 0、
+/// 16 問は主ギャップの和 2.87/2.87 -> 2.41/2.41 (neos-950242 が 2 組とも 19 -> 6)
 pub(super) fn find_thread_on() -> bool {
-    env_str!("ENOMOTO_MIP_FIND_THREAD").is_some()
+    env_str!("ENOMOTO_MIP_NO_FIND_THREAD").is_none()
 }
 
 /// 質の悪い FJ の解だけのときの暫定解なし用の RENS (既定で使う。`ENOMOTO_MIP_NO_FJ_POOR_BG_RENS` で使わない): 根で暫定解が Feasibility Jump の解だけで、根の LP から遠い
