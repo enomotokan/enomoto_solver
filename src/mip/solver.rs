@@ -251,6 +251,9 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) submip_node_mult: f64,
     /// 直近の (旧来の) RENS のサブ MIP がノード上限で止まったか。
     pub(super) rens_node_limited: bool,
+    /// RENS・RINS の固定を目標の固定率で止める (`ENOMOTO_MIP_FIX_CAP` と同じ) のを一時的に強制する
+    /// (`ENOMOTO_MIP_ROOT_WIDE_SUBMIP` の広い近傍のやり直しの間だけ真)。
+    pub(super) force_fix_cap: bool,
     /// 並列モードで、サブ MIP を別スレッドで解くか (根のヒューリスティクスの間だけ真)。
     pub(super) parallel_submips: bool,
     /// 別スレッドで解いているサブ MIP (出した順)。
@@ -1323,6 +1326,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         noinc_rens_done: false,
         submip_node_mult: 1.0,
         rens_node_limited: false,
+        force_fix_cap: false,
         parallel_submips: false,
         pending_submips: std::collections::VecDeque::new(),
         heur_label: "",
@@ -2111,7 +2115,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if let Some(x) = START_SOL.with(|s| s.borrow_mut().take()) {
             if x.len() == self.p.n {
                 let ok = self.try_incumbent(x);
-                if self.params.verbose {
+                if self.params.verbose || env_str!("ENOMOTO_MIP_START_FILE").is_some() {
                     eprintln!("MIP: start solution from before the restart: accepted {ok}");
                 }
             }
@@ -2554,6 +2558,29 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if par_late {
                     self.parallel_submips = false;
                     self.join_submips(0);
+                }
+                // `ENOMOTO_MIP_ROOT_WIDE_SUBMIP` (試作、既定では使わない): 根の RENS・RINS の後も暫定解と根の LP の差が大きい
+                // (既定 0.5% 超) なら、固定を目標の固定率 (初期 0.6) で止めた広い近傍 (`ENOMOTO_MIP_FIX_CAP` と同じ) で、
+                // サブ MIP に長めの時間 (残りの `ENOMOTO_T_MIP_WIDE_SUBMIP_FRAC` = 0.3、最大 `ENOMOTO_T_MIP_WIDE_SUBMIP_MAX` = 20 秒)
+                // を与えて RENS と RINS をもう 1 回ずつ解く。既定の RENS・RINS は LP 解 (と暫定解) に合う列を全部固定するので、
+                // neos-960392 (根の LP = 最適値 -238) では RENS が 294 列残して実行不能、RINS は 692 列のサブ MIP の最適値 -226
+                // 止まりになる。固定率を止めても既定の時間 (残りの 7%、最大 6 秒) ではサブ MIP が根のヒューリスティクスの途中で
+                // 時間切れになる (8391 列で 3 秒、0 ノード)
+                if env_str!("ENOMOTO_MIP_ROOT_WIDE_SUBMIP").is_some() && !self.params.submip {
+                    let gap_of = |s: &Self| s.incumbent.as_ref().map(|(z, _)| (z - (s.lp.objective() + s.p.offset)) / z.abs().max(1.0));
+                    let min_gap = tunable!("ENOMOTO_T_MIP_WIDE_SUBMIP_GAP", 0.005, f64);
+                    if gap_of(self).is_some_and(|g| g > min_gap) {
+                        let keep = (self.submip_time_frac, self.submip_time_max);
+                        self.submip_time_frac = tunable!("ENOMOTO_T_MIP_WIDE_SUBMIP_FRAC", 0.3, f64);
+                        self.submip_time_max = tunable!("ENOMOTO_T_MIP_WIDE_SUBMIP_MAX", 20.0, f64);
+                        self.force_fix_cap = true;
+                        heur!("RENS (wide)", self.rens(&x));
+                        if gap_of(self).is_some_and(|g| g > min_gap) {
+                            heur!("RINS (wide)", self.rins(&x));
+                        }
+                        self.force_fix_cap = false;
+                        (self.submip_time_frac, self.submip_time_max) = keep;
+                    }
                 }
                 if self.params.verbose && share_x {
                     eprintln!("MIP: root heuristics used {shared_x_used} LP solutions from the background cuts");
