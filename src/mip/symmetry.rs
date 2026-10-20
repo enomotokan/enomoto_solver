@@ -830,6 +830,92 @@ fn packing_fixing(orb: &Orbitope, fixes: &[Vec<Option<u8>>]) -> Option<Vec<(usiz
     Some(out)
 }
 
+/// [`lex_leader_pairs_except`] が使う生成元 (同じ条件で選ぶ)。
+pub fn lex_leader_generators_except(sym: &Symmetry, skip: &[bool], orbitope_vars: &[bool]) -> Vec<Vec<usize>> {
+    sym.generators.iter().enumerate().filter(|&(k, g)| !skip[k] && !(0..g.len()).any(|j| g[j] != j && orbitope_vars[j])).map(|(_, g)| g.clone()).collect()
+}
+
+/// `x` を、生成元 `gens` の群で写して、[`lex_leader_pairs_except`] の行 (同じ生成元から作ったもの) を満たす点にする
+/// (`ENOMOTO_MIP_SYM_LEX_CANON`)。写しても元の問題での実行可能性と目的値は変わらない。
+/// (2) の行 (`x_{i0} >= x_k`、`k` は `i0` の軌道): 軌道の中で値が最大の列 `k` から `i0` への生成元の道を幅優先で探し、
+/// その順に写す。(1) の行 (生成元ごとに `x_i >= x_{σ^{-1}(i)}`): 生成元とその逆で写して辞書式に大きくなる間は写す
+/// (辞書式に増えるだけなので `i0` より前は変わらず、`x_{i0}` は減らない)。`max_steps` 回の写しで止める。
+/// 行を満たす点にできたら真。
+pub fn lex_canonicalize(gens: &[Vec<usize>], x: &mut [f64], max_steps: usize) -> bool {
+    let n = x.len();
+    if gens.is_empty() {
+        return true;
+    }
+    let inv: Vec<Vec<usize>> = gens
+        .iter()
+        .map(|g| {
+            let mut h = vec![0; n];
+            for j in 0..n {
+                h[g[j]] = j;
+            }
+            h
+        })
+        .collect();
+    let mut steps = 0usize;
+    // (2): i0 の軌道で値が最大の列を i0 へ
+    if let Some(i0) = (0..n).find(|&j| gens.iter().any(|g| g[j] != j)) {
+        // i0 から逆向きに辿る: prev[k] = (k から 1 歩で進む先, 使う写し)。写し σ は k の値を σ(k) に移す
+        let mut prev: Vec<Option<(usize, usize, bool)>> = vec![None; n];
+        let mut seen = vec![false; n];
+        seen[i0] = true;
+        let mut queue = std::collections::VecDeque::from([i0]);
+        let mut orbit = vec![i0];
+        while let Some(c) = queue.pop_front() {
+            // σ(k) = c となる k: g なら k = g^{-1}(c)、g^{-1} なら k = g(c)
+            for (t, g) in gens.iter().enumerate() {
+                for (k, fwd) in [(inv[t][c], true), (g[c], false)] {
+                    if !seen[k] {
+                        seen[k] = true;
+                        prev[k] = Some((c, t, fwd));
+                        queue.push_back(k);
+                        orbit.push(k);
+                    }
+                }
+            }
+        }
+        let kmax = orbit.iter().copied().fold(i0, |b, k| if x[k] > x[b] + 1e-9 { k } else { b });
+        let mut k = kmax;
+        while let Some((c, t, fwd)) = prev[k] {
+            apply_perm(if fwd { &gens[t] } else { &inv[t] }, x);
+            steps += 1;
+            k = c;
+        }
+    }
+    // (1): 辞書式に大きくなる写しを繰り返す
+    let lex_gt = |a: &[f64], b: &[f64]| -> bool {
+        for j in 0..n {
+            if a[j] > b[j] + 1e-9 {
+                return true;
+            }
+            if a[j] < b[j] - 1e-9 {
+                return false;
+            }
+        }
+        false
+    };
+    let mut improved = true;
+    while improved && steps < max_steps {
+        improved = false;
+        for t in 0..gens.len() {
+            for perm in [&gens[t], &inv[t]] {
+                let mut y = x.to_vec();
+                apply_perm(perm, &mut y);
+                steps += 1;
+                if lex_gt(&y, x) {
+                    x.copy_from_slice(&y);
+                    improved = true;
+                }
+            }
+        }
+    }
+    !improved
+}
+
 /// 対称性を崩す不等式 `x_i - x_k >= 0` の組 `(i, k)` (lex-leader、モジュールの説明を参照)。`skip` の印のある生成元は
 /// 使わない (オービトープで扱う)。印のない生成元のうち、オービトープの列を動かすものも使わない (別の順序の対称性の
 /// 扱いと混ぜると成り立たないことがある)。
@@ -925,6 +1011,26 @@ mod tests {
         assert_eq!(orbs.len(), 1);
         assert_eq!(orbs[0].vars, vec![vec![0, 1, 2], vec![3, 4, 5]]);
         assert!(used.iter().all(|&u| u));
+    }
+
+    #[test]
+    fn lex_canonicalize_satisfies_lex_leader_pairs() {
+        // 3 列の巡回 (0 1 2) と、別の 2 列の入れ替え (3 4)
+        let gens = vec![vec![1, 2, 0, 3, 4], vec![0, 1, 2, 4, 3]];
+        let sym = Symmetry { generators: gens.clone(), orbit: vec![0, 0, 0, 1, 1], num_orbits: 2 };
+        let pairs = lex_leader_pairs_except(&sym, &[false, false], &[false; 5]);
+        for x0 in [[0.0, 0.0, 1.0, 0.0, 1.0], [0.0, 1.0, 0.0, 1.0, 0.0], [0.0, 1.0, 1.0, 0.0, 1.0]] {
+            let mut x = x0.to_vec();
+            assert!(lex_canonicalize(&gens, &mut x, 1000));
+            for &(i, k) in &pairs {
+                assert!(x[i] >= x[k], "{x0:?} -> {x:?} violates x{i} >= x{k}");
+            }
+            let mut a = x0.to_vec();
+            let mut b = x.clone();
+            a.sort_by(|p, q| p.partial_cmp(q).unwrap());
+            b.sort_by(|p, q| p.partial_cmp(q).unwrap());
+            assert_eq!(a, b);
+        }
     }
 
     #[test]

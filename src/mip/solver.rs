@@ -274,6 +274,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) root_lp_iters: u64,
     /// 暫定解が Feasibility Jump で見つけたものだけか (`ENOMOTO_MIP_FJ2_KEEP_NOINC` の判定に使う)
     pub(super) inc_only_fj: bool,
+    /// 根の LP (カットのループの後は最後の LP) の目的値。`ENOMOTO_MIP_FJ_POOR_NOINC` の判定に使う (根の外では -inf)
+    pub(super) fj_poor_lb: f64,
     /// サブ MIP の停滞の数え上げ (`ENOMOTO_T_MIP_SUBMIP_STALL`)
     submip_stall: u64,
     /// 次に別スレッドで出すサブ MIP の根の LP の初めの基底 ([`SUBMIP_BASIS`])
@@ -412,6 +414,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     proof_conflicts: u64,
     /// 完全オービトープ (orbitopal fixing に使う。サブ MIP では空)。
     orbitopes: Rc<Vec<super::symmetry::Orbitope>>,
+    /// lex-leader の行を作った生成元 ([`super::SYM_LEX_GENS`]。`ENOMOTO_MIP_SYM_LEX_CANON` で使う)
+    lex_gens: Rc<Vec<Vec<usize>>>,
     /// 対称性の行・固定を加える前の問題 (なければ `None`)。ヒューリスティクスの解の判定・局所探索に使う。
     pub(super) orig: Option<Rc<MipProblem>>,
     /// オービトープの列 -> (オービトープの番号, 行)。
@@ -586,6 +590,7 @@ pub(crate) struct TreeSnapshot {
     /// 解を並べ替えて使えるように)。
     orbitopes: Vec<super::symmetry::Orbitope>,
     orig: Option<std::sync::Arc<MipProblem>>,
+    lex_gens: Vec<Vec<usize>>,
 }
 
 pub(crate) struct SnapNode {
@@ -1341,6 +1346,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         heur_stop: None,
         root_lp_iters: 0,
         inc_only_fj: false,
+        fj_poor_lb: f64::NEG_INFINITY,
         submip_stall: 0,
         submip_basis: None,
         in_heur_role: false,
@@ -1426,6 +1432,11 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
             None => super::ORBITOPES.with(|t| t.borrow().clone()).unwrap_or_default(),
         },
         orbitope_fixings: 0,
+        lex_gens: match &snap {
+            Some(sn) => Rc::new(sn.lex_gens.clone()),
+            None if params.submip => Rc::new(Vec::new()),
+            None => super::SYM_LEX_GENS.with(|t| t.borrow().clone()).unwrap_or_default(),
+        },
         orig: match &snap {
             Some(sn) => sn.orig.as_ref().map(|o| Rc::new((**o).clone())),
             None if params.submip || env_str!("ENOMOTO_MIP_SYM_NO_ORIG").is_some() => None,
@@ -1798,6 +1809,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             for o in self.orbitopes.iter() {
                 o.canonicalize(&mut x);
+            }
+            // `ENOMOTO_MIP_SYM_LEX_CANON` (試作): lex-leader の行に反する解も生成元で写して使う。9946555 (対称性の検出の近道)
+            // で neos-950242 に lex-leader の行 3-4 本が付くようになり、根の局所探索・FJ の解 (4、22 など) が並べ替えられずに
+            // 捨てられていた (以前は対称性なしで 4 を見つけていた)
+            if !self.lex_gens.is_empty() && !self.p.is_feasible(&x, FEASTOL) && env_str!("ENOMOTO_MIP_SYM_LEX_CANON").is_some() {
+                super::symmetry::lex_canonicalize(&self.lex_gens, &mut x, 4 * self.lex_gens.len() * 64 + 1000);
             }
             if !self.p.is_feasible(&x, FEASTOL) {
                 self.sym_canon.1 += 1;
@@ -2242,6 +2259,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         let mut root_obj = self.lp.objective() + self.p.offset;
+        if self.snap.is_none() {
+            self.fj_poor_lb = root_obj;
+        }
         // 根の下界 (カットのループが最後の LP で書き直す。ループが途中で終わっても根の LP の値は残す)
         if !self.params.submip && self.snap.is_none() {
             super::record_root_bound(root_obj);
@@ -2280,6 +2300,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     return self.finish(st, root_obj);
                 }
                 root_obj = self.lp.objective() + self.p.offset;
+                if self.snap.is_none() {
+                    self.fj_poor_lb = root_obj;
+                }
                 // `ENOMOTO_MIP_MERGE_ROOT_CUTS`: 根の最後の LP で効いているカットを双対値で 1 本にまとめて加える
                 // 40 問: 使わない 20 問 27.57、使う 18 問 28.23 (rout 30.1 秒・neos5 53.7 秒が時間切れ、neos-860300 54.0 -> 48.4 秒、
                 // neos-911970 の下界は上がるが解けない)。既定では使わない
@@ -2522,7 +2545,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     heur!("vector length diving", take_dive(self, &mut par_dives, 2));
                     heur!("coefficient diving", take_dive(self, &mut par_dives, 3));
                 } else {
-                    if self.noinc_like() && !light {
+                    if self.noinc_like() && !light && !(self.incumbent.is_some() && self.fj_poor() && env_str!("ENOMOTO_MIP_FJ_POOR_NOINC").is_some_and(|v| v == "nopump")) {
                         heur!("feasibility pump", self.feasibility_pump(root_iters));
                     }
                     if self.noinc_like() && !light {
@@ -6533,7 +6556,25 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// (FJ の質の悪い解のせいで、より良い解を見つける根の局所探索などを飛ばさないように。ns1830653 は根の局所探索が
     /// 26622 を見つけるが、FJ の 43808 があると回らなかった)。
     pub(super) fn noinc_like(&self) -> bool {
-        self.incumbent.is_none() || (self.inc_only_fj && env_str!("ENOMOTO_MIP_FJ2_KEEP_NOINC").is_some())
+        self.incumbent.is_none()
+            || (self.inc_only_fj && env_str!("ENOMOTO_MIP_FJ2_KEEP_NOINC").is_some())
+            || (self.fj_poor() && env_str!("ENOMOTO_MIP_FJ_POOR_NOINC").is_some_and(|v| v != "rens"))
+    }
+
+    /// `ENOMOTO_MIP_FJ_POOR_NOINC` (試作): 根で、暫定解が Feasibility Jump のものだけで、その目的値が根の LP の値から大きく
+    /// 離れている (相対ギャップ (z - lb) / max(|z|, |lb|, 1) が `ENOMOTO_T_MIP_FJ_POOR_GAP` (既定 0.5) を超える) か。
+    /// 真なら、根の暫定解なし用のヒューリスティクス ([`Self::noinc_like`]、値が `rens` なら回さない) と暫定解なし用の
+    /// ダイビング式 RENS を、暫定解がないときと同じく回す (FJ の解は暫定解として残し、打ち切り値に使う)。
+    /// d1bfefd (FJ2 の既定化) で、FJ2 が数秒で出す質の悪い解 (hypothyroid-k1 の -3、nursesched-sprint02 の 251) が、
+    /// 以前は最適値近くを見つけていた暫定解なし用の RENS (hypothyroid-k1 -2851) やベクトル長ダイビング (nursesched 69)
+    /// を止めていた。FJ の解が根の LP に近い問題 (KEEP_NOINC で悪化した C の問題を想定) では今までどおり回さない
+    pub(super) fn fj_poor(&self) -> bool {
+        let Some((z, _)) = self.incumbent.as_ref() else { return false };
+        if !self.inc_only_fj || self.nodes > 1 || self.params.submip || !self.fj_poor_lb.is_finite() || env_str!("ENOMOTO_MIP_FJ_POOR_NOINC").is_none() {
+            return false;
+        }
+        let lb = self.fj_poor_lb;
+        (z - lb) / z.abs().max(lb.abs()).max(1.0) > tunable!("ENOMOTO_T_MIP_FJ_POOR_GAP", 0.5, f64)
     }
 
     /// 別スレッドの Feasibility Jump が終わっていれば結果を受け取る (`ENOMOTO_MIP_NO_FJ2` でないとき。根のカットのループの各ラウンドで
@@ -6702,7 +6743,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             .collect();
         let pool: Vec<(Vec<(usize, f64)>, f64)> = self.cut_pool.iter().map(|(c, r, _)| (c.clone(), *r)).collect();
         let orig = self.orig.as_ref().map(|o| std::sync::Arc::new((**o).clone()));
-        let snap = TreeSnapshot { serial, p, lo: self.dom.global_lo.clone(), up: self.dom.global_up.clone(), rows, pool, pc: self.pc.clone(), nodes: snodes, valid_below: self.prune_limit(), orbitopes: (*self.orbitopes).clone(), orig };
+        let snap = TreeSnapshot { serial, p, lo: self.dom.global_lo.clone(), up: self.dom.global_up.clone(), rows, pool, pc: self.pc.clone(), nodes: snodes, valid_below: self.prune_limit(), orbitopes: (*self.orbitopes).clone(), orig, lex_gens: (*self.lex_gens).clone() };
         if self.params.verbose && env_str!("ENOMOTO_MIP_BISECT_VERBOSE").is_some() {
             eprintln!("MIP: tree snapshot {serial}: {} nodes, {} cut rows, valid below {:.10e} ({:.1}s)", snap.nodes.len(), snap.rows.len(), snap.valid_below, self.start.elapsed().as_secs_f64());
         }
