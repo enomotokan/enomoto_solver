@@ -552,11 +552,13 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
     if outer {
         ORBITOPES.with(|t| *t.borrow_mut() = None);
         SYM_ORIG.with(|t| *t.borrow_mut() = None);
+        SYM_LEX_GENS.with(|t| *t.borrow_mut() = None);
     }
     let r = solve_problem_inner(p, params, use_presolve);
     if outer {
         ORBITOPES.with(|t| *t.borrow_mut() = None);
         SYM_ORIG.with(|t| *t.borrow_mut() = None);
+        SYM_LEX_GENS.with(|t| *t.borrow_mut() = None);
         solver::ROOT_BASIS.with(|t| *t.borrow_mut() = None);
     }
     r
@@ -667,6 +669,8 @@ thread_local! {
     pub(crate) static ORBITOPES: std::cell::RefCell<Option<std::rc::Rc<Vec<symmetry::Orbitope>>>> = const { std::cell::RefCell::new(None) };
     /// 対称性の行・固定を加える前の問題 (同じく外側の求解の終わりに消す)。
     pub(crate) static SYM_ORIG: std::cell::RefCell<Option<std::rc::Rc<MipProblem>>> = const { std::cell::RefCell::new(None) };
+    /// lex-leader の行を作った生成元 (`ENOMOTO_MIP_SYM_LEX_CANON` でヒューリスティクスの解を写すのに使う。同じく消す)。
+    pub(crate) static SYM_LEX_GENS: std::cell::RefCell<Option<std::rc::Rc<Vec<Vec<usize>>>>> = const { std::cell::RefCell::new(None) };
 }
 
 /// 対称性を探し、対称性を崩す不等式 `x_i - x_k >= 0` ([`symmetry::lex_leader_pairs`]) を行として加えた問題を返す。
@@ -692,6 +696,7 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool) -> MipProblem {
         }
     }
     let pairs = symmetry::lex_leader_pairs_except(&sym, &used, &in_orb);
+    SYM_LEX_GENS.with(|t| *t.borrow_mut() = Some(std::rc::Rc::new(symmetry::lex_leader_generators_except(&sym, &used, &in_orb))));
     // パッキング・分割の行 (係数が全て 1、右辺 <= 1) に含まれるオービトープの行だけで作ったオービトープに置き換える
     // (列の入れ替えは全体の対称性なので、その部分行列の列を辞書式に並べた解が必ずある)。パッキングの行が半分以上の
     // ときだけ。すると列 c の最初の 1 は行 c 以降なので、x_{i,c} = 0 (c > i) を根で固定できる
