@@ -148,4 +148,4 @@
   `separate` のクリークの条件 (`fallback` は根だけ、`ENOMOTO_MIP_CLIQUE_FB_NODES` でノードでも)、`CLIQUE_FB_SECOND`。
   環境変数: `ENOMOTO_MIP_CLIQUE_CUTS=fallback`、`ENOMOTO_T_MIP_CLIQUE_FB_GAIN` (1e-4)・`_FB_RATIO` (0.5)・`_FB_FRAC` (0、0.9 を推奨)・
   `_FB_EARLY` (0)、`ENOMOTO_MIP_CLIQUE_FB_NODES`・`ENOMOTO_MIP_CLIQUE_FB_SHARED_CAP`。既定 (環境変数なし) の動きは変えていない。
-- `cargo test --release --lib mip::` が通る (下の結果)。
+- `cargo test --release --lib mip::` 27 件が通る (1 件は ignored。pyo3 のため `RUSTFLAGS` で libpython をリンク)。
