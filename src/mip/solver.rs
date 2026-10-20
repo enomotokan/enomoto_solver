@@ -5152,18 +5152,21 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let (deg, ratio) = self.dual_degeneracy();
             deg >= 0.8 || ratio >= 2.0
         };
-        let allow_sb = sb <= maxsb && !degenerate;
+        // 診断用 `ENOMOTO_MIP_SB_FULL`: 全ノードで全候補を強分岐する (退化・予算・信頼度・先読みを見ない)。分枝の列の選び方で
+        // 木がどこまで小さくなるかの目安
+        let sb_full = env_str!("ENOMOTO_MIP_SB_FULL").is_some();
+        let allow_sb = sb_full || (sb <= maxsb && !degenerate);
         // 信頼度のしきい値: 予算の残りに応じて 1..5
         let mut prio = ((maxsb - sb) / (sb + 1.0)).min(1.0);
         prio = prio.max((quot - sb) / (sb + 1.0)).max(0.0);
-        let reliable_thr = (1.0 - prio) * 1.0 + prio * 5.0;
+        let reliable_thr = if sb_full { f64::INFINITY } else { (1.0 - prio) * 1.0 + prio * 5.0 };
         // 強分岐 LP の反復上限 (平均ノード反復の `ENOMOTO_T_MIP_SB_ITERMULT` 倍、10〜500)。倍率 2 -> 4 で 40 問 90 秒の SGM が
         // 5 台のマシン (各 2 回、マシンごとの基準と比較) で -2.7, -1.0, -2.1, +0.2, -2.8% (平均 -1.7%) なので 4 にした
         // (analysis/mip_opt_eval_20261011.md)
         let sb_iter_limit = ((tunable!("ENOMOTO_T_MIP_SB_ITERMULT", 4.0, f64) * self.avg_node_iters() as f64 * (1.0 + 20.0 / self.nodes.max(1) as f64)) as u64).clamp(10, 500);
         let unreliable: usize = cands.iter().filter(|&&(j, _, _)| (self.pc.min_observations(j) as f64) < reliable_thr).count();
-        let lookahead = (tunable!("ENOMOTO_T_MIP_SB_LOOKAHEAD", 9.0, f64) * (1.0 + unreliable as f64 / cands.len().max(1) as f64)) as usize;
-        let max_tried = tunable!("ENOMOTO_T_MIP_SB_MAXCAND", 100usize, usize);
+        let lookahead = if sb_full { usize::MAX } else { (tunable!("ENOMOTO_T_MIP_SB_LOOKAHEAD", 9.0, f64) * (1.0 + unreliable as f64 / cands.len().max(1) as f64)) as usize };
+        let max_tried = if sb_full { usize::MAX } else { tunable!("ENOMOTO_T_MIP_SB_MAXCAND", 100usize, usize) };
         let mut best: Option<(usize, f64, f64)> = None; // (列, 値, スコア)
         self.last_sb = None;
         let mut best_sb: Option<(usize, f64, f64)> = None; // best が強分岐で評価した列なら (列, 下の子の値, 上の子の値)
@@ -5185,7 +5188,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut pre: std::collections::HashMap<usize, [SbSide; 2]> = std::collections::HashMap::new();
         for (ci, &(j, v, pscore)) in cands.iter().enumerate() {
             let is_reliable = (self.pc.min_observations(j) as f64) >= reliable_thr;
-            if is_reliable || !allow_sb || tried >= max_tried || no_improve >= lookahead as f64 || self.time_up() || (self.sb_iters as f64) > maxsb {
+            if is_reliable || !allow_sb || tried >= max_tried || no_improve >= lookahead as f64 || self.time_up() || (!sb_full && (self.sb_iters as f64) > maxsb) {
                 if best.is_none_or(|(_, _, s)| pscore > s) {
                     best = Some((j, v, pscore));
                     best_sb = None;
