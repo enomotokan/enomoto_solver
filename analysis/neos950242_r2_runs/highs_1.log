@@ -1,0 +1,70 @@
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+MIP neos-950242 has 34224 rows; 5760 cols; 104160 nonzeros; 5760 integer variables (5520 binary)
+Coefficient ranges:
+  Matrix  [1e+00, 1e+00]
+  Cost    [1e+00, 1e+00]
+  Bound   [1e+00, 2e+01]
+  RHS     [1e+00, 1e+00]
+Presolving model
+32976 rows, 4512 cols, 101664 nonzeros 0s
+32736 rows, 4272 cols, 101184 nonzeros 0s
+Presolve reductions: rows 32736(-1488); columns 4272(-1488); nonzeros 101184(-2976) 
+Objective function is integral with scale 1
+
+Solving MIP model with:
+   32736 rows
+   4272 cols (4272 binary, 0 integer, 0 implied int., 0 continuous, 0 domain fixed)
+   101184 nonzeros
+   Thread count 4 (of 4 threads). Using 1 max workers. Parallel search off
+
+Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+     I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+     S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+     Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+ J       0       0         0   0.00%   -inf            5                  Large        0      0      0         0     0.4s
+         0       0         0   0.00%   1               5                 80.00%        0      0     27      1021     0.8s
+         0       0         0   0.00%   2               5                 60.00%     2885     56    211      4373     5.8s
+         0       0         0   0.00%   2               5                 60.00%     3203    108    211      7841    11.2s
+         0       0         0   0.00%   2               5                 60.00%     3217    104    807     34687    26.0s
+
+Symmetry detection completed in 0.9s
+Found 23 generator(s)
+
+ T       5       0         2  62.50%   2               4                 50.00%     3217    104    817     35880    28.0s
+        14       0         6 100.00%   4               4                  0.00%     3220    104    882     38755    30.1s
+
+Solving report
+  Model             neos-950242
+  Status            Optimal
+  Primal bound      4
+  Dual bound        4
+  Gap               0%
+  P-D integral      18.6524139992
+  Solution status   feasible
+                    4 (objective)
+                    0 (bound viol.)
+                    6.41930952838e-13 (int. viol.)
+                    0 (row viol.)
+  Timing            30.08
+                    0.81 (Presolve)
+                        MIP    time [calls] = 0.36 [1]
+                        subMIP time [calls] = 0.45 [8]
+                    29.27 (Solve)
+                        MIP    time [calls] = 25.93 [1]
+                        subMIP time [calls] = 3.34 [3]
+                    0.00 (Postsolve)
+                        MIP    time [calls] = 0.00 [1]
+                        subMIP time [calls] = 0.00 [8]
+  Max sub-MIP depth 4
+  Nodes             14
+  Repair LPs        0
+  LP iterations     38755
+                    0 (strong br.)
+                    7494 (separation)
+                    26172 (heuristics)
+TIME 30.0894318

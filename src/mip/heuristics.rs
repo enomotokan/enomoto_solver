@@ -956,7 +956,10 @@ pub(super) fn local_search(p: &MipProblem, lo: &[f64], up: &[f64], time_cap: f64
                 // 実行可能: 記録し、目的値をそれより良くする行を有効にして続ける
                 let z = act[m];
                 best_feas = Some(x.clone());
-                let step_obj = 1e-6 * z.abs().max(1.0);
+                // `ENOMOTO_MIP_LS_OBJ_STEP` (試作): 刻み 1e-6 |z| は目的値の行の許容誤差 FEASTOL (1 + |z|) より小さく、目的値の
+                // 行が違反にならず (下で vset が空のまま) 最初の実行可能解で抜けていた (neos-950242 は 2639 歩・0.04 秒で 6 のまま)。
+                // 目的関数が整数 (整数列だけに整数の係数) なら刻み 1、そうでなければ許容誤差の 2 倍以上にする
+                let step_obj = if ls_obj_step_on() { ls_obj_step(p, z) } else { 1e-6 * z.abs().max(1.0) };
                 obj_bound = z - step_obj;
                 if viol(m, act[m], obj_bound) > 0.0 && vpos[m] == usize::MAX {
                     vpos[m] = vset.len();
@@ -1058,7 +1061,30 @@ pub(super) fn local_search(p: &MipProblem, lo: &[f64], up: &[f64], time_cap: f64
             }
         }
     }
+    if env_str!("ENOMOTO_MIP_LS_DEBUG").is_some() {
+        eprintln!("MIP:   [ls debug] n {n} m {m} steps {steps_total} (max {max_steps}), cap {time_cap:.2}s, best {:?}, least violation {:?}", best_feas.as_ref().map(|x| p.objective(x)), best_inf.as_ref().map(|b| b.1));
+    }
     (best_feas, best_inf)
+}
+
+/// [`local_search`] で実行可能解を見つけた後に目的値の行を付ける刻みを直す (既定で使う。`ENOMOTO_MIP_NO_LS_OBJ_STEP` で
+/// 以前の刻み)。以前の刻み 1e-6·max(|z|,1) は行の許容誤差より小さく、行が違反にならないので最初の実行可能解で止まっていた
+/// (neos-950242 は 6 で止まり、直すと 4 = 最適値)
+pub(super) fn ls_obj_step_on() -> bool {
+    env_str!("ENOMOTO_MIP_NO_LS_OBJ_STEP").is_none()
+}
+
+/// [`local_search`] の目的値の行の刻み (`ENOMOTO_MIP_LS_OBJ_STEP`): 目的関数が整数 (係数の非零が全て整数列で、値が整数) なら
+/// 行の許容誤差 t = FEASTOL (1 + min(|z|, 1e6)) より大きい整数 (floor(t) + 1、|z| < 1e6 なら 1)、そうでなければ
+/// max(1e-6 |z|, 4 t)。
+fn ls_obj_step(p: &MipProblem, z: f64) -> f64 {
+    let tol = FEASTOL * (1.0 + z.abs().min(1e6));
+    let integral = (0..p.n).all(|j| p.cost[j] == 0.0 || (p.is_int[j] && (p.cost[j] - p.cost[j].round()).abs() <= 1e-9));
+    if integral && p.cost.iter().any(|&c| c != 0.0) {
+        tol.floor() + 1.0
+    } else {
+        (1e-6 * z.abs().max(1.0)).max(4.0 * tol)
+    }
 }
 
 /// 実行可能性問題 (目的関数が全部 0) で FJ を延ばすか (既定で使う。`ENOMOTO_MIP_NO_FJ_FEAS_EXTEND` で使わない)。

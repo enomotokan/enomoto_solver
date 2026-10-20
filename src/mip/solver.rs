@@ -2096,7 +2096,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     pool.has_x.store(true, std::sync::atomic::Ordering::Release);
                 }
             }
-            self.inc_only_fj = self.heur_label.starts_with("feasibility jump");
+            // 根の解発見スレッドの解も FJ の解と同じに扱う (質の悪い解なら、暫定解なし用の RENS・解発見スレッドを続ける)。
+            // 局所探索の刻みを直した後、hypothyroid-k1 では解発見スレッドの局所探索が -27 を返し、それで「FJ の解だけ」でなくなって
+            // 暫定解なし用の RENS (-2851 = 最適値を出す) が回らなくなった
+            self.inc_only_fj = self.heur_label.starts_with("feasibility jump") || self.heur_label.starts_with("find thread");
             if !self.proof_first_z.is_finite() {
                 self.proof_first_z = z;
             }
@@ -5145,6 +5148,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 continue;
             }
             tried += 1;
+            // 根の解発見スレッドが動いている間は、強分岐の候補ごとにその解を受け取る (既定で使う。`ENOMOTO_MIP_NO_FIND_POLL_SB` で使わない)。
+            // neos-950242 では解発見スレッドの局所探索が 12.5 秒に 4 (= 根の LP の値) を出すが、主は最初のノードの強分岐
+            // (約 13 秒) の間受け取らず、25.5 秒まで暫定解が 19 のままだった。暫定解でこのノードが刈れるなら強分岐をやめる
+            // (候補の間は LP に触れないので、そのまま返してよい)
+            if self.find_thread.is_some() && env_str!("ENOMOTO_MIP_NO_FIND_POLL_SB").is_none() {
+                self.poll_find_thread();
+                if node_obj >= self.prune_limit() {
+                    return BranchAction::Prune;
+                }
+            }
             // 強分岐
             let saved = &*sb_saved.get_or_insert_with(|| self.lp.save_state());
             let (lo, up) = (self.dom.lo[j], self.dom.up[j]);
