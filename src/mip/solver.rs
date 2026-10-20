@@ -187,6 +187,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 強分岐に使った時間 (秒) と、強分岐で解いた LP の数。
     pub(super) sb_secs: f64,
     pub(super) sb_lps: u64,
+    /// 分枝の選択の回数と、そのうち双対退化で強分岐をしなかった回数 (診断用)。
+    pub(super) sb_degen_stats: [u64; 2],
     /// 直前の分枝の選択で、選んだ列の強分岐の子の LP 値 (列, 下の子, 上の子)。最適まで解けなかった側は -inf。
     pub(super) last_sb: Option<(usize, f64, f64)>,
     /// clique カット用の 2 値列の衝突グラフ (根で作る)。
@@ -1353,6 +1355,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         sb_iters: 0,
         sb_secs: 0.0,
         sb_lps: 0,
+        sb_degen_stats: [0; 2],
         last_sb: None,
         clique_graph: None,
         clique_auto: None,
@@ -5002,10 +5005,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let maxsb = quot + 25_000.0;
         let sb = self.sb_iters as f64;
         // 双対退化の強いノードでは強分岐をしない (根以外)
-        let degenerate = depth > 0 && {
+        // `ENOMOTO_MIP_SB_NO_DEGEN_SKIP`: 双対退化でも強分岐を止めない
+        let degenerate = depth > 0 && env_str!("ENOMOTO_MIP_SB_NO_DEGEN_SKIP").is_none() && {
             let (deg, ratio) = self.dual_degeneracy();
             deg >= 0.8 || ratio >= 2.0
         };
+        self.sb_degen_stats[0] += 1;
+        self.sb_degen_stats[1] += degenerate as u64;
         let allow_sb = sb <= maxsb && !degenerate;
         // 信頼度のしきい値: 予算の残りに応じて 1..5
         let mut prio = ((maxsb - sb) / (sb + 1.0)).min(1.0);
@@ -8143,6 +8149,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if self.par_sb_stats[0] > 0 {
                 eprintln!("MIP: parallel strong branching: {} batches, {} candidates", self.par_sb_stats[0], self.par_sb_stats[1]);
             }
+            eprintln!("MIP: branching: {} selections, {} without strong branching for dual degeneracy; sb LPs {} iters {}", self.sb_degen_stats[0], self.sb_degen_stats[1], self.sb_lps, self.sb_iters);
             eprintln!("MIP: sibling backtracks {}; basis restores {} (basic count mismatch {}), first LP iterations after a restore {}", self.sibling_backtracks, self.restore_stats.0, self.restore_stats.1, self.restore_stats.2);
             eprintln!("MIP: node diag: nodes {} node LPs {} mean rows {:.1} iters {} ({:.1}/LP) LP secs {:.2} sep rounds {} added {} node cut secs {:.2} final rows {}", self.nodes, self.node_lps, self.node_lp_rows as f64 / self.node_lps.max(1) as f64, self.node_iters, self.node_iters as f64 / self.node_lps.max(1) as f64, self.node_lp_secs, self.node_sep_stats[0], self.node_sep_stats[1], self.node_cut_secs, self.lp.num_rows());
             if env_str!("ENOMOTO_MIP_NODE_CUT_ADAPT").is_some() {
