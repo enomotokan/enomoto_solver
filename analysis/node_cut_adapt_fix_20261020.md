@@ -3,6 +3,9 @@
 - 環境: 専用コンテナ 4 CPU (`nproc` = 4)。ソルバーは同時に 1 つだけ動かし、ビルドとも重ねていない。
 - ブランチ `inv/nca-fix-20261020`、基準 0cf255d (統合ブランチ: クリーク行の拡張・行をまとめた後の再前処理・probing の同値列の代入・
   根の広い近傍のサブ MIP が既定)。HiGHS は使っていない。
+- **このメモの数値はすべて 0cf255d (ROOT_WIDE_SUBMIP が既定) の上で取ったもの**。計測の後、親セッションの指示で統合ブランチの
+  d492cc5 (ROOT_WIDE_SUBMIP を既定では使わない形に戻した) を取り込んだ (cf16994、`cargo test --release --lib` 308 件通過)。
+  d492cc5 の上では測り直していない (rout は ROOT_WIDE_SUBMIP で +4 秒という報告があり、既定の rout の時間は変わりうる)。
 - **計測はすべて 4 スレッド** (`ENOMOTO_MIP_THREADS=4` + `solve(..., threads=4, log=True)`)、時間上限 60 秒。
   多くの計測は診断の行を取るため `ENOMOTO_MIP_LOG=1` を付けた (`nl_` で始まる設定と `runs/nca/results_nolog.tsv` は付けていない)。
 - スクリプト: `runs/nca/run1.py <問題> <名前> <回> [ENV=VAL ...] [NOLOG]` (1 問を解いて `runs/nca/results.tsv` に 1 行足す)、
