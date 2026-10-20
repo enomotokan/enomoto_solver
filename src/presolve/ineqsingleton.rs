@@ -57,6 +57,13 @@ fn others_range(row: &[(usize, f64)], skip: usize, lb: &[f64], ub: &[f64]) -> (f
 /// - `c`: 目的関数係数
 /// - `lb`, `ub`: 変数の境界
 pub fn resolve_inequality_singletons(n: usize, a: &FaerCsr, real_rows: &[Vec<(usize, f64)>], real_rhs: &[f64], c: &[f64], lb: &[f64], ub: &[f64]) -> IneqSingletonResult {
+    resolve_inequality_singletons_int(n, a, real_rows, real_rhs, c, lb, ub, None)
+}
+
+/// [`resolve_inequality_singletons`] の整数最適化版: `is_int` の列は固定だけ行い、等式化はしない (等式化は `x_j` が行を
+/// 等号にする値を取れることを使うので、整数列では成り立たない。固定は箱の端への移動なので整数列でも成り立つ)。
+#[allow(clippy::too_many_arguments)]
+pub fn resolve_inequality_singletons_int(n: usize, a: &FaerCsr, real_rows: &[Vec<(usize, f64)>], real_rhs: &[f64], c: &[f64], lb: &[f64], ub: &[f64], is_int: Option<&[bool]>) -> IneqSingletonResult {
     let mut out = IneqSingletonResult { fixes: Vec::new(), implied_equalities: Vec::new() };
 
     // 等式行に現れる列は colsingleton / aggregator の担当なので除外する。
@@ -178,7 +185,7 @@ pub fn resolve_inequality_singletons(n: usize, a: &FaerCsr, real_rows: &[Vec<(us
             (lower, lower, r_hi, partner[i])
         };
         let Some(g_row) = g_row else { continue };
-        if !side.is_finite() || !residual.is_finite() {
+        if is_int.is_some_and(|m| m[j]) || !side.is_finite() || !residual.is_finite() {
             continue;
         }
         // 上側なら a x_j <= S - r_lo、下側なら a x_j >= S - r_hi から得られる x_j の含意値。
