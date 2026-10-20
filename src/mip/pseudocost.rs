@@ -214,7 +214,7 @@ impl Pseudocost {
         self.inf_total_n += 1;
     }
 
-    fn inference(&self, j: usize, up: bool) -> f64 {
+    pub fn inference(&self, j: usize, up: bool) -> f64 {
         let d = up as usize;
         let avg = if self.inf_total_n > 0 { self.inf_total / self.inf_total_n as f64 } else { 0.0 };
         if self.inf_n[d][j] > 0 { self.inf_sum[d][j] / self.inf_n[d][j] as f64 } else { avg }

@@ -335,6 +335,12 @@ pub(super) struct Solver<'a, L: MipLp> {
     node_iters_first: u64,
     /// 基底の復元の回数、そのうち基底の数が行数と合わなかった回数、復元後の最初の LP の反復数 (診断用)
     restore_stats: (u64, u64, u64),
+    /// `ENOMOTO_MIP_CHILD_ROOTSOL` と、そのための根の LP 解。
+    child_rootsol: bool,
+    root_lp_x: Option<Vec<f64>>,
+    /// 潜った子の向き (下, 上) の数と、潜りを打ち切って子を待ち行列に入れた数 (診断)。
+    child_dir_stats: [u64; 2],
+    plunge_aborts: u64,
     restored_now: bool,
     /// 直前に戻した基底に、保存した DSE 重みも当てはめたか (次の LP で引き継ぐ)。
     restored_dse: bool,
@@ -1444,6 +1450,10 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         node_iters: 0,
         node_iters_first: 0,
         restore_stats: (0, 0, 0),
+        child_rootsol: env_str!("ENOMOTO_MIP_CHILD_ROOTSOL").is_some(),
+        root_lp_x: None,
+        child_dir_stats: [0; 2],
+        plunge_aborts: 0,
         restored_now: false,
         restored_dse: false,
         node_lps: 0,
@@ -4354,11 +4364,32 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let f = value - value.floor();
             let down = BoundChange { col, upper: true, value: value.floor() };
             let up = BoundChange { col, upper: false, value: value.ceil() };
-            let prefer_up = {
+            // `ENOMOTO_MIP_CHILD_ROOTSOL`: HiGHS の本体の木の子の選び方 (`ChildSelectionRule::kRootSol`): 両側の推論の平均を、
+            // 根の LP 解からの距離で重み付けし (今の値が根の値より大きければ上を優先)、大きい方 (同じなら上) へ潜る
+            if node.depth == 0 && self.child_rootsol {
+                self.root_lp_x = Some(self.lp.col_values());
+            }
+            let prefer_up = if self.child_rootsol {
+                let eps = 1e-9;
+                let (fl, ce) = (value.floor(), value.ceil());
+                let mut up_p = self.pc.inference(col, true) + eps;
+                let mut down_p = self.pc.inference(col, false) + eps;
+                if let Some(rx) = &self.root_lp_x {
+                    let r = rx[col].clamp(fl, ce);
+                    up_p *= 1.0 + (value - r);
+                    down_p *= 1.0 + (r - value);
+                }
+                up_p + eps >= down_p
+            } else {
                 let cu = self.pc.cost_up(col) * (1.0 - f);
                 let cd = self.pc.cost_down(col) * f;
                 if (cu - cd).abs() <= 1e-12 * (1.0 + cu.abs()) { f >= 0.5 } else { cu < cd }
             };
+            if prefer_up {
+                self.child_dir_stats[1] += 1;
+            } else {
+                self.child_dir_stats[0] += 1;
+            }
             let prefer_up = prefer_up ^ (self.race_div & 1 == 1 && !self.race_done);
             let (first_c, second_c) = if prefer_up { (up, down) } else { (down, up) };
             let basis = Rc::new(self.lp.basis());
@@ -4414,6 +4445,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 plunge = Some(child);
             } else {
+                self.plunge_aborts += 1;
                 self.queue.push(child);
             }
             xp("m_child");
@@ -8268,7 +8300,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if self.par_sb_stats[0] > 0 {
                 eprintln!("MIP: parallel strong branching: {} batches, {} candidates", self.par_sb_stats[0], self.par_sb_stats[1]);
             }
-            eprintln!("MIP: sibling backtracks {}; basis restores {} (basic count mismatch {}), first LP iterations after a restore {}", self.sibling_backtracks, self.restore_stats.0, self.restore_stats.1, self.restore_stats.2);
+            eprintln!("MIP: sibling backtracks {}; basis restores {} (basic count mismatch {}), first LP iterations after a restore {}; child down/up {:?}, plunge aborts {}", self.sibling_backtracks, self.restore_stats.0, self.restore_stats.1, self.restore_stats.2, self.child_dir_stats, self.plunge_aborts);
             eprintln!("MIP: node diag: nodes {} node LPs {} mean rows {:.1} iters {} ({:.1}/LP) LP secs {:.2} sep rounds {} added {} node cut secs {:.2} final rows {}", self.nodes, self.node_lps, self.node_lp_rows as f64 / self.node_lps.max(1) as f64, self.node_iters, self.node_iters as f64 / self.node_lps.max(1) as f64, self.node_lp_secs, self.node_sep_stats[0], self.node_sep_stats[1], self.node_cut_secs, self.lp.num_rows());
             if env_str!("ENOMOTO_MIP_NODE_CUT_ADAPT").is_some() || self.tree_sep {
                 eprintln!("MIP: adaptive node cuts: rounds {} effective {} skipped {} (rate {:.3}), node cut secs {:.2}, outcomes cutoff/<0.02/<0.1/<0.3/>=0.3 {:?}, cut nnz {:?} (rows mean {:.1})", self.nca_stats[0], self.nca_stats[1], self.nca_stats[2], self.nca_ema, self.node_cut_secs, self.nca_hist, self.nca_cut_nnz, self.p.rows.iter().map(|r| r.len()).sum::<usize>() as f64 / self.p.m.max(1) as f64);
@@ -8282,7 +8314,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // `ENOMOTO_MIP_NCA_DIAG`: 木の従のスレッドの分も出す (診断用)
         if !self.params.verbose && !self.params.submip && env_str!("ENOMOTO_MIP_NCA_DIAG").is_some() {
-            eprintln!("MIP: node diag (thread {}): nodes {} node LPs {} mean rows {:.1} iters {} ({:.1}/LP) LP secs {:.2} sep rounds {} added {} node cut secs {:.2} final rows {}; adaptive rounds {} effective {} cut nnz {:?}", self.pool_tid, self.nodes, self.node_lps, self.node_lp_rows as f64 / self.node_lps.max(1) as f64, self.node_iters, self.node_iters as f64 / self.node_lps.max(1) as f64, self.node_lp_secs, self.node_sep_stats[0], self.node_sep_stats[1], self.node_cut_secs, self.lp.num_rows(), self.nca_stats[0], self.nca_stats[1], self.nca_cut_nnz);
+            eprintln!("MIP: node diag (thread {}): child down/up {:?} plunge aborts {} restores {} sibling backtracks {}; nodes {} node LPs {} mean rows {:.1} iters {} ({:.1}/LP) LP secs {:.2} sep rounds {} added {} node cut secs {:.2} final rows {}; adaptive rounds {} effective {} cut nnz {:?}", self.pool_tid, self.child_dir_stats, self.plunge_aborts, self.restore_stats.0, self.sibling_backtracks, self.nodes, self.node_lps, self.node_lp_rows as f64 / self.node_lps.max(1) as f64, self.node_iters, self.node_iters as f64 / self.node_lps.max(1) as f64, self.node_lp_secs, self.node_sep_stats[0], self.node_sep_stats[1], self.node_cut_secs, self.lp.num_rows(), self.nca_stats[0], self.nca_stats[1], self.nca_cut_nnz);
         }
         let (x, objective) = match &self.incumbent {
             Some((z, x)) => (Some(x.clone()), Some(*z)),
