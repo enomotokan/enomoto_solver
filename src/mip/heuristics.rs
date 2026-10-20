@@ -1305,7 +1305,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 加工したサブ MIP (`sub`: 列は元と同じ並び) を解き、見つかった解を元の問題の暫定解の候補にする。
     /// `cutoff` はサブ MIP の目的値の打ち切り値 (`None` なら元の打ち切り値。目的関数を変えたサブ MIP では指定する)。
     /// 戻り値は (サブ MIP の状態, 解を受け入れたか)。
-    fn solve_submip_problem(&mut self, mut sub: super::problem::MipProblem, node_limit: u64, cutoff: Option<f64>) -> Option<(super::solver::MipStatus, bool)> {
+    pub(super) fn solve_submip_problem(&mut self, mut sub: super::problem::MipProblem, node_limit: u64, cutoff: Option<f64>) -> Option<(super::solver::MipStatus, bool)> {
         let p = self.p;
         let (lo, up) = (std::mem::take(&mut sub.col_lo), std::mem::take(&mut sub.col_up));
         // 伝播の丸め誤差で下限 > 上限 (ごくわずか) になった列は 1 点に固定する

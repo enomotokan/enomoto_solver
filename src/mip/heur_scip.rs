@@ -368,13 +368,41 @@ impl<'a, L: MipLp> Solver<'a, L> {
             lo[j] = fixv;
             up[j] = fixv;
         }
-        if nint == 0 || (nfix as f64) < tunable!("ENOMOTO_T_MIP_LPFACE_RATE", 0.3, f64) * nint as f64 {
+        // `ENOMOTO_MIP_LPFACE_TIGHT` (試作): サブ MIP の打ち切り値を根の LP の値 (目的関数の刻みで切り上げたもの) にし、
+        // 固定率の下限を `ENOMOTO_T_MIP_LPFACE_TIGHT_RATE` (既定 0.1) に下げ、サブ MIP の時間を残りの
+        // `ENOMOTO_T_MIP_LPFACE_TIME_FRAC` (既定 0.07、通常と同じ) にする。最適面の上の整数解だけを探すので、暫定解 (FJ の
+        // 質の悪い解) の打ち切り値で LP 値の上の方まで探すより速く終わる。10teams では、被約費用が 0 でない整数列が
+        // 回によって 440〜535 本 (固定率 0.28〜0.33) と揺れ、既定の下限 0.3 で LP face が動くかどうかが分かれていた
+        // (analysis/10teams_20261020.md)
+        let tight = env_str!("ENOMOTO_MIP_LPFACE_TIGHT").is_some();
+        let min_rate = if tight { tunable!("ENOMOTO_T_MIP_LPFACE_TIGHT_RATE", 0.1, f64) } else { tunable!("ENOMOTO_T_MIP_LPFACE_RATE", 0.3, f64) };
+        if nint == 0 || (nfix as f64) < min_rate * nint as f64 {
             if self.params.verbose && self.nodes <= 1 {
                 eprintln!("MIP:   LP face: only {nfix} of {nint} integer columns fixed");
             }
             return false;
         }
-        let r = self.solve_submip(lo, up, 500);
+        let r = if tight {
+            let lb = self.lp.objective() + p.offset;
+            let target = match self.obj_step {
+                Some(step) => step * ((lb - p.offset) / step - 1e-6).ceil() + p.offset + (1e-6 * lb.abs().max(1.0)).min(0.5 * step),
+                None => lb + 1e-6 * lb.abs().max(1.0),
+            };
+            let cutoff = target.min(self.prune_limit());
+            let mut sub = p.clone();
+            sub.col_lo = lo;
+            sub.col_up = up;
+            let keep = self.submip_time_frac;
+            self.submip_time_frac = tunable!("ENOMOTO_T_MIP_LPFACE_TIME_FRAC", 0.07, f64);
+            if self.params.verbose && self.nodes <= 1 {
+                eprintln!("MIP:   LP face (tight): sub-MIP cutoff {cutoff:.10e} (root LP {lb:.10e})");
+            }
+            let r = self.solve_submip_problem(sub, 500, Some(cutoff)).is_some_and(|r| r.1);
+            self.submip_time_frac = keep;
+            r
+        } else {
+            self.solve_submip(lo, up, 500)
+        };
         if self.params.verbose && self.nodes <= 1 {
             eprintln!("MIP:   LP face: {nfix} of {nint} integer columns fixed, found {r}");
         }
