@@ -333,6 +333,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let prog_win = if self.params.submip { 0 } else { tunable!("ENOMOTO_T_MIP_CUT_PROG_WIN", 0usize, usize) };
         let prog_eps = tunable!("ENOMOTO_T_MIP_CUT_PROG_EPS", 0.01, f64);
         let mut obj_hist: Vec<f64> = Vec::new();
+        let stall_move = env_str!("ENOMOTO_MIP_CUT_STALL_MOVE").is_some() && !self.params.submip;
         loop {
             self.poll_fj_thread();
             if self.root_gap_closed() {
@@ -405,6 +406,28 @@ impl<'a, L: MipLp> Solver<'a, L> {
             } else {
                 None
             };
+            // `ENOMOTO_MIP_CUTSEL_VIOL` (実験的): 選択の枠 (質の閾値の基準もこの中の最良) を今の LP 解を切る (違反 > 許容) 候補だけにする。
+            // 面の頂点の候補のうち今の解を切るものは効き目を今の解で測り直して同じ枠に入れ、切らないものは別枠で
+            // `ENOMOTO_T_MIP_CUTSEL_VIOL_FACE_MAX` 本まで採る。今の解を切るカットを 1 本も採れなければループを止める
+            let viol_sel = !self.params.submip && face_quota == 0 && env_str!("ENOMOTO_MIP_CUTSEL_VIOL").is_some();
+            let mut face_extra: Vec<Candidate> = Vec::new();
+            if viol_sel {
+                let viol_at = |c: &Candidate| -> (f64, f64) {
+                    let act: f64 = c.coefs.iter().map(|&(j, v)| v * x[j]).sum();
+                    let norm = c.coefs.iter().map(|&(_, v)| v * v).sum::<f64>().sqrt();
+                    (act - c.rhs, (act - c.rhs) / norm.max(1e-300))
+                };
+                for mut c in fcands.drain(..) {
+                    let (v, eff) = viol_at(&c);
+                    if v > 1e-6 * (1.0 + c.rhs.abs()) && eff >= 1e-5 {
+                        c.efficacy = eff;
+                        cands.push(c);
+                    } else {
+                        face_extra.push(c);
+                    }
+                }
+                cands.retain(|c| c.forced || viol_at(c).0 > 1e-6 * (1.0 + c.rhs.abs()));
+            }
             let mut face_cands: Vec<Candidate> = Vec::new();
             if face_quota > 0 {
                 face_cands = fcands;
@@ -418,8 +441,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     cands.push(Candidate { coefs: c.clone(), rhs: *r, efficacy: eff, forced: false });
                 }
             }
-            let ncands = cands.len() + face_cands.len();
-            if ncands == 0 {
+            let ncands = cands.len() + face_cands.len() + face_extra.len();
+            if ncands == 0 || (viol_sel && cands.is_empty()) {
                 break;
             }
             let dbg_sep = env_str!("ENOMOTO_MIP_DEBUG_SEP").is_some() && !self.params.submip;
@@ -429,7 +452,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             // 候補はすべてカットプールに入れる (選択で落ちたものも、ノードで違反すれば使う)
             if !self.params.submip && env_str!("ENOMOTO_MIP_POOL_SELECTED_ONLY").is_none() {
-                for c in cands.iter().chain(face_cands.iter()) {
+                for c in cands.iter().chain(face_cands.iter()).chain(face_extra.iter()) {
                     self.add_to_pool(&c.coefs, c.rhs);
                 }
             }
@@ -468,6 +491,22 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let mut chosen = chosen;
             // 選択の上限まで採ったか (選択を通さないカットは数えない)
             let quota_full = chosen.len() >= max_cuts && ncands >= 2 * max_cuts;
+            // 今の解を切るカットの本数 (`ENOMOTO_MIP_CUTSEL_VIOL` の面の別枠を足す前)
+            let ncut_x = chosen.len() + forced.len();
+            if viol_sel {
+                if ncut_x == 0 {
+                    break;
+                }
+                let quota = tunable!("ENOMOTO_T_MIP_CUTSEL_VIOL_FACE_MAX", 5usize, usize);
+                if quota > 0 && !face_extra.is_empty() {
+                    let extra = select_cuts(std::mem::take(&mut face_extra), quota, p);
+                    for c in extra {
+                        if !chosen.iter().any(|d| cut_parallelism(&c.coefs, &d.coefs) > 0.99) {
+                            chosen.push(c);
+                        }
+                    }
+                }
+            }
             chosen.extend(forced);
             let sep_secs = t_sep.elapsed().as_secs_f64();
             let sel_secs = t_sel0.elapsed().as_secs_f64() - pool_secs;
@@ -630,7 +669,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     // `ENOMOTO_MIP_CUT_STALL_ONE`: まったく進まないラウンドも 1 回分と数える (neos-1456979 では最初の
                     // 4 ラウンドは下界が動かず、続ければ上がる。HiGHS も止めずに 66 ラウンド回して 154 -> 171)
                     if reldiff <= 1e-4 && nfrac as f64 >= (0.9 - 0.1 * stall as f64) * prev_nfrac as f64 && !saturated && !widen_now {
-                        stall += if nfrac >= prev_nfrac && env_str!("ENOMOTO_MIP_CUT_STALL_ONE").is_none() && !widened { 2 } else { 1 };
+                        // `ENOMOTO_MIP_CUT_STALL_MOVE` (実験的): 今の解を切るカットを採って LP の解が動いたラウンドは
+                        // (目的値・分数の列の数が動かなくても) 2 回分と数えない
+                        let moved = stall_move && ncut_x > 0 && {
+                            let xs = self.lp.col_values();
+                            (0..n).any(|j| (xs[j] - x[j]).abs() > 1e-6 * (1.0 + x[j].abs()))
+                        };
+                        stall += if nfrac >= prev_nfrac && env_str!("ENOMOTO_MIP_CUT_STALL_ONE").is_none() && !widened && !moved { 2 } else { 1 };
                         if stall >= if self.params.submip { 3 } else if heavy { tunable!("ENOMOTO_T_MIP_BG_CUTS_STALL", 20usize, usize) } else { tunable!("ENOMOTO_T_MIP_CUT_STALL", 10usize, usize) } {
                             if !phase2_on {
                                 break;
