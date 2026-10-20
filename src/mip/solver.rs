@@ -123,6 +123,8 @@ thread_local! {
     static DIVE_ONLY: std::cell::Cell<(u8, u64, u64)> = const { std::cell::Cell::new((0, 0, 0)) };
     /// 根の解発見スレッド ([`find_thread_on`]) が解を見つけるたびに置く場所 (主が [`Solver::poll_find_thread`] で受け取る)
     static FIND_OUT: std::cell::RefCell<Option<std::sync::Arc<std::sync::Mutex<Vec<Vec<f64>>>>>> = const { std::cell::RefCell::new(None) };
+    /// 根の解発見スレッドの止めの合図 (主の暫定解が質の悪い FJ の解でなくなったら主が立てる。[`Solver::time_up`] が見る)
+    static FIND_STOP: std::cell::RefCell<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>> = const { std::cell::RefCell::new(None) };
     /// 根のヒューリスティクスの間にカットを強める求解 (`ENOMOTO_MIP_BG_CUTS`): このスレッドで写しから作る求解はカットの
     /// ループだけを行い、止めの合図まで続けて、最後の LP に残ったカットの行と目的値を返す。
     /// カットを強める求解の、主の根の LP の反復数 (カットの LP の反復上限に使う)
@@ -317,6 +319,7 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 根の解発見スレッド (`ENOMOTO_MIP_FIND_THREAD`、[`find_thread_on`])。根のヒューリスティクスの後と木の各ノードで、終わっていれば受け取る
     find_thread: Option<std::thread::JoinHandle<MipResult>>,
     find_out: Option<std::sync::Arc<std::sync::Mutex<Vec<Vec<f64>>>>>,
+    find_stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// RENS の固定率の記録 (成功したときの固定率の合計と回数、サブ MIP が実行不能だったときの合計と回数)。
     pub(super) rens_succ: (f64, u32),
     pub(super) rens_infeas: (f64, u32),
@@ -1418,6 +1421,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         ls_thread: None,
         find_thread: None,
         find_out: None,
+        find_stop: None,
         rens_succ: (0.0, 0),
         rens_infeas: (0.0, 0),
         node_iters: 0,
@@ -1761,6 +1765,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     pub(super) fn time_up(&self) -> bool {
         self.deadline.is_some_and(|d| Instant::now() >= d)
             || self.heur_stop.is_some_and(|d| Instant::now() >= d)
+            || (self.snap.is_some() && FIND_STOP.with(|f| f.borrow().as_ref().is_some_and(|s| s.load(std::sync::atomic::Ordering::Relaxed))))
             || self.pool.as_ref().is_some_and(|p| p.stop.load(std::sync::atomic::Ordering::Relaxed))
             || ROLE_POOL.with(|r| r.borrow().as_ref().is_some_and(|p| p.stop.load(std::sync::atomic::Ordering::Relaxed) || p.fin.load(std::sync::atomic::Ordering::Relaxed)))
             || self.shared.as_ref().is_some_and(|s| {
@@ -2546,6 +2551,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let basis = self.lp.basis();
             let out = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
             self.find_out = Some(out.clone());
+            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            self.find_stop = Some(stop.clone());
             if self.params.verbose {
                 eprintln!("MIP: find thread started (budget {budget:.1}s, {:.2}s)", self.start.elapsed().as_secs_f64());
             }
@@ -2555,6 +2562,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     .spawn(move || {
                         DIVE_ONLY.with(|d| d.set((5, dive_budget, ri)));
                         FIND_OUT.with(|o| *o.borrow_mut() = Some(out));
+                        FIND_STOP.with(|o| *o.borrow_mut() = Some(stop));
                         BG_ROOT_BASIS.with(|b| *b.borrow_mut() = Some(basis));
                         solve_worker(snap, None, params)
                     })
@@ -7063,6 +7071,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 木の写しを作って共有する。待ち行列のノードと潜っている子に写しの中の番号を付ける (前の写しの番号は 3 つまで残す)。
     /// 根の解発見スレッド ([`find_thread_on`]) が終わっていれば、その解を受け取る (待たない)。
     fn poll_find_thread(&mut self) {
+        // 主の暫定解が質の悪い FJ の解でなくなったら (FJ 以外の解が入った、または根の LP との相対ギャップが
+        // `ENOMOTO_T_MIP_FIND_THREAD_STOP_GAP` (既定は `ENOMOTO_T_MIP_FJ_POOR_GAP` と同じ 0.5) 以下)、解発見スレッドを止める
+        // (`ENOMOTO_MIP_FIND_THREAD_NO_STOP` で止めない)
+        if self.find_thread.is_some() && env_str!("ENOMOTO_MIP_FIND_THREAD_NO_STOP").is_none() {
+            let lb = self.fj_poor_lb;
+            let thr = tunable!("ENOMOTO_T_MIP_FIND_THREAD_STOP_GAP", tunable!("ENOMOTO_T_MIP_FJ_POOR_GAP", 0.5, f64), f64);
+            let poor = self.incumbent.as_ref().is_some_and(|(z, _)| self.inc_only_fj && lb.is_finite() && (z - lb) / z.abs().max(lb.abs()).max(1.0) > thr);
+            if let Some(st) = self.find_stop.as_ref().filter(|_| !poor) {
+                if !st.swap(true, std::sync::atomic::Ordering::Relaxed) && self.params.verbose {
+                    eprintln!("MIP: find thread asked to stop (incumbent {:?}, {:.2}s)", self.incumbent.as_ref().map(|(z, _)| *z), self.start.elapsed().as_secs_f64());
+                }
+            }
+        }
         let got: Vec<Vec<f64>> = self.find_out.as_ref().map(|o| std::mem::take(&mut *o.lock().unwrap())).unwrap_or_default();
         for x in got {
             let z0 = self.incumbent.as_ref().map(|(z, _)| *z);
