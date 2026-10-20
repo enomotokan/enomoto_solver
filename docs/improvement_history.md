@@ -9440,6 +9440,17 @@ neos-950242 の 2 回目の調査 (`analysis/neos950242_r2_20261020.md`)。
   - 不一致 0。対象の問題で両方の組で解けたものはない。既定にしない。
 - 結果: benchmarks/*_5638001_{newdef,phase2cap}_rPC{a,b}.json
 
+## 2026-10-20: TREE_SEP の HEAVY 1.25 + CUT_AGE 30 は不採用、今の既定の確認 (CB)
+
+- 旧既定 (98b0d12) との比較 rT2a/rT2b では TREE_SEP+HEAVY+CUT_AGE が 40 問 24/25→26/26、16 問 8/9→8/11 だったが、TREE_SEP 自体の効果と区別できないので、TREE_SEP 入りの develop 6eda17d で既定と HEAVY 1.25 + CUT_AGE 30 を対で計測。
+  - rHAa: 40 問 26→26、SGM 19.83→20.17。16 問 9→10 (uccase12・neos-960392 を得て beasleyC3 を落とす)。
+  - rHAb: 40 問 26→26、SGM 21.72→22.29。16 問 10→9 (beasleyC3 を落とす)。
+  - 不一致 0。上乗せの効果はなく、beasleyC3 を 2 組とも落とすので既定にしない。
+- 今の既定 f80fa4a と、TREE_SEP・LS_OBJ_STEP・FIND_POLL_SB を止めた形の対の計測 (rCBa/rCBb):
+  - 40 問 24→26 / 25→26、16 問 7→8 / 7→10。neos-950242 と neos-911970 は 2 組とも既定でだけ解ける。不一致 0。
+- beasleyC3 は今の既定で 32.6 秒 (rHAa)・33.3 秒 (rHAb)・37.7 秒 (rCBb) で解ける回がある (rCBa では解けない)。
+- 結果: benchmarks/*_6eda17d_{newdef,heavyage}_rHA{a,b}.json、*_f80fa4a_{newdef,prev}_rCB{a,b}.json、*_98b0d12_{newdef,treesep2}_rT2{a,b}.json
+
 ## 改名一覧 (整理時)
 
 本メモ中は旧名で書かれている。
