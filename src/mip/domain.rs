@@ -664,6 +664,13 @@ impl Domain {
     /// 置き換えた組と UIP の否定から「再収束」の衝突も作る。各衝突は同時には成り立たない境界のリテラルの組
     /// (列, 上限か, 値)。長さ `max_len` を超える衝突は作らない。
     pub fn analyze_multi(&self, p: &MipProblem, start: ConflictStart, max_len: usize, reconv: bool) -> Vec<Vec<(usize, bool, f64)>> {
+        self.analyze_multi_bumps(p, start, max_len, reconv, None)
+    }
+
+    /// [`Self::analyze_multi`] と同じだが、`bumps` があれば HiGHS が衝突スコアを上げる境界の変更 (列, 上限か) を足す:
+    /// 矛盾の最初の説明に使った変更全部 (長さの上限を調べる前) と、段ごとの置き換えで新しく加わった変更
+    /// (HiGHS `conflictAnalysis` と `resolveDepth(.., increaseConflictScore = true)`。再収束の衝突の分は数えない)。
+    pub fn analyze_multi_bumps(&self, p: &MipProblem, start: ConflictStart, max_len: usize, reconv: bool, mut bumps: Option<&mut Vec<(usize, bool)>>) -> Vec<Vec<(usize, bool, f64)>> {
         let end = self.stack.len();
         let dec: Vec<usize> = (0..end).filter(|&k| self.stack[k].reason == -1).collect();
         if dec.is_empty() {
@@ -793,6 +800,9 @@ impl Domain {
                 }
             }
         };
+        if let Some(b) = bumps.as_deref_mut() {
+            b.extend(init.iter().map(|&k| (self.stack[k].col, self.stack[k].upper)));
+        }
         if init.is_empty() || init.len() > max_len {
             return Vec::new();
         }
@@ -828,7 +838,13 @@ impl Domain {
                 set.remove(&k);
                 cnt -= 1;
                 for e in ex {
-                    if set.insert(e) && e >= lo && e < hi {
+                    let new = set.insert(e);
+                    if new {
+                        if let Some(b) = bumps.as_deref_mut() {
+                            b.push((self.stack[e].col, self.stack[e].upper));
+                        }
+                    }
+                    if new && e >= lo && e < hi {
                         cnt += 1;
                     }
                 }

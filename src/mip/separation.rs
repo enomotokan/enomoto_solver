@@ -36,6 +36,11 @@ pub(super) fn clique_cuts_mode() -> Option<&'static str> {
     }
 }
 
+/// `ENOMOTO_MIP_CUT_AGE_HIGHS` ([`Solver::age_cuts`])。
+pub(super) fn cut_age_highs() -> bool {
+    env_str!("ENOMOTO_MIP_CUT_AGE_HIGHS").is_some()
+}
+
 fn use_lifted_cover() -> bool {
     env_str!("ENOMOTO_MIP_LIFTED_COVER").is_some()
 }
@@ -1062,6 +1067,29 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let live: std::collections::HashSet<u64> = self.cut_ids.iter().copied().collect();
                 self.cut_norm.retain(|id, _| live.contains(id));
             }
+        }
+        // `ENOMOTO_MIP_CUT_AGE_HIGHS`: HiGHS の `HighsLpRelaxation::performAging` と同じ付け方。論理変数が基底なら
+        // (余裕がなくても) 年齢を 1 増やし、非基底で |双対値| > 1e-7 なら 0 に戻し、非基底で双対値が 0 なら変えない。
+        // 既定の付け方は非基底なら双対値が 0 でも 0 に戻すので、双対退化の強い問題 (neos-2978193-inde) では根のカットが
+        // 木の LP からほとんど外れない
+        if cut_age_highs() {
+            let dual = self.lp.row_duals();
+            for (k, age) in self.cut_age.iter_mut().enumerate() {
+                let i = m0 + k;
+                if b.row[i] == VarStatus::Basic {
+                    *age = age.saturating_add(1);
+                } else if dual[i].abs() > 1e-7 {
+                    *age = 0;
+                }
+            }
+            if !self.merged_cuts.is_empty() {
+                for k in 0..ncut {
+                    if self.merged_cuts.contains(&self.cut_ids[k]) {
+                        self.cut_age[k] = 0;
+                    }
+                }
+            }
+            return;
         }
         let mut dual = Vec::new();
         let mut max_dual = 0.0f64;

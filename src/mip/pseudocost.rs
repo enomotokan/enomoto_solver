@@ -126,6 +126,25 @@ impl Pseudocost {
     }
 
     /// 分枝の観測を加える: 列 `j` を `delta` (>0) だけ動かしたら目的値が `gain` (>=0) 増えた。
+    /// HiGHS の `increaseConflictWeight` + `increaseConflictScoreUp/Down`: 1 回の衝突解析で説明に使った境界の変更
+    /// (列, 上限か) の列の衝突スコアを今の重みだけ上げ、重みを 1.02 倍にする (下限の変更は上への分枝の側)。
+    pub fn bump_conflict(&mut self, chg: &[(usize, bool)]) {
+        self.conflict_inc *= 1.02;
+        for &(j, upper) in chg {
+            let d = (!upper) as usize;
+            self.conflict[d][j] += self.conflict_inc;
+            self.conflict_total += self.conflict_inc;
+        }
+        if self.conflict_inc > 1e100 {
+            let f = 1e-100;
+            for v in self.conflict.iter_mut().flat_map(|c| c.iter_mut()) {
+                *v *= f;
+            }
+            self.conflict_inc *= f;
+            self.conflict_total *= f;
+        }
+    }
+
     pub fn add_observation(&mut self, j: usize, up: bool, delta: f64, gain: f64) {
         if delta <= 1e-9 || !gain.is_finite() {
             return;
@@ -214,7 +233,7 @@ impl Pseudocost {
         self.inf_total_n += 1;
     }
 
-    fn inference(&self, j: usize, up: bool) -> f64 {
+    pub fn inference(&self, j: usize, up: bool) -> f64 {
         let d = up as usize;
         let avg = if self.inf_total_n > 0 { self.inf_total / self.inf_total_n as f64 } else { 0.0 };
         if self.inf_n[d][j] > 0 { self.inf_sum[d][j] / self.inf_n[d][j] as f64 } else { avg }
