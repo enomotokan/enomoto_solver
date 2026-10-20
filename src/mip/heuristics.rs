@@ -1067,9 +1067,11 @@ pub(super) fn local_search(p: &MipProblem, lo: &[f64], up: &[f64], time_cap: f64
     (best_feas, best_inf)
 }
 
-/// `ENOMOTO_MIP_LS_OBJ_STEP` (試作): [`local_search`] で実行可能解を見つけた後に目的値の行を付ける刻みを直す
+/// [`local_search`] で実行可能解を見つけた後に目的値の行を付ける刻みを直す (既定で使う。`ENOMOTO_MIP_NO_LS_OBJ_STEP` で
+/// 以前の刻み)。以前の刻み 1e-6·max(|z|,1) は行の許容誤差より小さく、行が違反にならないので最初の実行可能解で止まっていた
+/// (neos-950242 は 6 で止まり、直すと 4 = 最適値)
 pub(super) fn ls_obj_step_on() -> bool {
-    env_str!("ENOMOTO_MIP_LS_OBJ_STEP").is_some()
+    env_str!("ENOMOTO_MIP_NO_LS_OBJ_STEP").is_none()
 }
 
 /// [`local_search`] の目的値の行の刻み (`ENOMOTO_MIP_LS_OBJ_STEP`): 目的関数が整数 (係数の非零が全て整数列で、値が整数) なら
