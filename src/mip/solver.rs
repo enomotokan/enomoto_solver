@@ -121,6 +121,10 @@ thread_local! {
     /// (0 = しない、1 = Feasibility Pump、2 = fractional、3 = vector length、4 = coefficient diving) と、ダイビングの反復の予算、
     /// 根の LP の反復数 (Feasibility Pump の予算に使う)。
     static DIVE_ONLY: std::cell::Cell<(u8, u64, u64)> = const { std::cell::Cell::new((0, 0, 0)) };
+    /// 根の解発見スレッド ([`find_thread_on`]) が解を見つけるたびに置く場所 (主が [`Solver::poll_find_thread`] で受け取る)
+    static FIND_OUT: std::cell::RefCell<Option<std::sync::Arc<std::sync::Mutex<Vec<Vec<f64>>>>>> = const { std::cell::RefCell::new(None) };
+    /// 根の解発見スレッドの止めの合図 (主の暫定解が質の悪い FJ の解でなくなったら主が立てる。[`Solver::time_up`] が見る)
+    static FIND_STOP: std::cell::RefCell<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>> = const { std::cell::RefCell::new(None) };
     /// 根のヒューリスティクスの間にカットを強める求解 (`ENOMOTO_MIP_BG_CUTS`): このスレッドで写しから作る求解はカットの
     /// ループだけを行い、止めの合図まで続けて、最後の LP に残ったカットの行と目的値を返す。
     /// カットを強める求解の、主の根の LP の反復数 (カットの LP の反復上限に使う)
@@ -312,6 +316,10 @@ pub(super) struct Solver<'a, L: MipLp> {
     fj_thread: Option<(std::thread::JoinHandle<Option<Vec<f64>>>, std::sync::Arc<std::sync::atomic::AtomicBool>)>,
     /// 根のヒューリスティクスの最初に別スレッドで始めた局所探索 (`ENOMOTO_MIP_PAR_LOCAL_SEARCH`。結果は元の位置で受け取る)。
     pub(super) ls_thread: Option<std::thread::JoinHandle<super::heuristics::LocalSearchResult>>,
+    /// 根の解発見スレッド ([`find_thread_on`])。根のヒューリスティクスの後と木の各ノードで、終わっていれば受け取る
+    find_thread: Option<std::thread::JoinHandle<MipResult>>,
+    find_out: Option<std::sync::Arc<std::sync::Mutex<Vec<Vec<f64>>>>>,
+    find_stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// RENS の固定率の記録 (成功したときの固定率の合計と回数、サブ MIP が実行不能だったときの合計と回数)。
     pub(super) rens_succ: (f64, u32),
     pub(super) rens_infeas: (f64, u32),
@@ -1036,6 +1044,19 @@ impl TriggerEval {
     }
 }
 
+/// 根の解発見スレッド (既定で使う。`ENOMOTO_MIP_NO_FIND_THREAD` で使わない): 根で暫定解が質の悪い FJ の解だけ ([`Solver::fj_poor`]) のとき、
+/// 根の写しから作った求解を別スレッドで動かし、暫定解なし用のヒューリスティクス (局所探索・fractional / vector length / coefficient
+/// diving・Feasibility Pump) を順に回す (主スレッドは暫定解があるのでこれらを回さない)。背景のカットの分離のスレッドを 1 本減らして
+/// 空ける。時間の予算は残りの `ENOMOTO_T_MIP_FIND_THREAD_FRAC` (既定 0.3) 倍、最大 `ENOMOTO_T_MIP_FIND_THREAD_MAX` (既定 20) 秒。
+/// 見つけた解は根のヒューリスティクスの後と木の各ノードで受け取る (待たない)。FJ2 (d1bfefd) の後、neos-950242 の根の局所探索
+/// (4 = 最適値) と nursesched-sprint02 のダイビングが FJ の解のせいで回らなくなった
+/// 主の暫定解が質の悪い FJ の解でなくなったら止める ([`Solver::poll_find_thread`])。40 問 + 16 問 (4 スレッド・60 秒、同じコンテナで
+/// 既定と続けて測る対を順番を入れ替えて 2 組): 40 問は解けた数 25/25 -> 25/25・SGM 18.53/20.41 -> 18.16/20.59 秒・不一致 0、
+/// 16 問は主ギャップの和 2.87/2.87 -> 2.41/2.41 (neos-950242 が 2 組とも 19 -> 6)
+pub(super) fn find_thread_on() -> bool {
+    env_str!("ENOMOTO_MIP_NO_FIND_THREAD").is_none()
+}
+
 /// 質の悪い FJ の解だけのときの暫定解なし用の RENS (既定で使う。`ENOMOTO_MIP_NO_FJ_POOR_BG_RENS` で使わない): 根で暫定解が Feasibility Jump の解だけで、根の LP から遠い
 /// ([`Solver::fj_poor`]、相対ギャップ > `ENOMOTO_T_MIP_FJ_POOR_GAP`) とき、暫定解なし用のダイビング式 RENS を回し
 /// (サブ MIP は根のヒューリスティクスの間の別スレッド、[`Solver::parallel_submips`])、背景のカットの分離のスレッドを 1 本減らす。
@@ -1401,6 +1422,9 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         submip_is_rens: false,
         fj_thread: None,
         ls_thread: None,
+        find_thread: None,
+        find_out: None,
+        find_stop: None,
         rens_succ: (0.0, 0),
         rens_infeas: (0.0, 0),
         node_iters: 0,
@@ -1744,6 +1768,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     pub(super) fn time_up(&self) -> bool {
         self.deadline.is_some_and(|d| Instant::now() >= d)
             || self.heur_stop.is_some_and(|d| Instant::now() >= d)
+            || (self.snap.is_some() && FIND_STOP.with(|f| f.borrow().as_ref().is_some_and(|s| s.load(std::sync::atomic::Ordering::Relaxed))))
             || self.pool.as_ref().is_some_and(|p| p.stop.load(std::sync::atomic::Ordering::Relaxed))
             || ROLE_POOL.with(|r| r.borrow().as_ref().is_some_and(|p| p.stop.load(std::sync::atomic::Ordering::Relaxed) || p.fin.load(std::sync::atomic::Ordering::Relaxed)))
             || self.shared.as_ref().is_some_and(|s| {
@@ -1926,6 +1951,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 x[j] = x[j].round();
             }
         }
+        // 元の問題では実行可能だが、対称性の行・固定に反し、並べ替えても直らなかった解 (`ENOMOTO_MIP_SYM_ORIG_INC`)
+        let mut orig_only = false;
         if !self.p.is_feasible(&x, FEASTOL) {
             // 対称性の行・固定だけに反する解: 元の問題で実行可能なら、オービトープの列を辞書式の順に並べ替える
             // (対称性で写すので実行可能性と目的値は変わらない)
@@ -1944,18 +1971,32 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             if !self.p.is_feasible(&x, FEASTOL) {
                 self.sym_canon.1 += 1;
-                return false;
+                // `ENOMOTO_MIP_SYM_ORIG_INC` (試作): それでも暫定解にする。対称性の行は対称な解のうち 1 つを残す絞り込みで、
+                // この解の像のどれかが対称性の行を満たし目的値は同じなので、目的値は打ち切り値に使え、解そのものは元の問題の
+                // 解として返せる。対称性の行のある問題で解を磨く手順 (oneopt・連続変数の解き直し・解の溜め) には使わない
+                // 再スタートの後の問題は前処理をかけ直していて (列の代入・固定・目的関数の定数)、`orig` (最初の回の対称性の行を
+                // 加える前の問題) とは解の空間が違うので使わない
+                if env_str!("ENOMOTO_MIP_SYM_ORIG_INC").is_none() || self.params.restarts > 0 || orig.n != self.p.n {
+                    return false;
+                }
+                orig_only = true;
+            } else {
+                self.sym_canon.0 += 1;
             }
-            self.sym_canon.0 += 1;
         }
         let z = self.p.objective(&x);
-        self.pool_add(z, &x);
+        if !orig_only {
+            self.pool_add(z, &x);
+        }
         let better = self.incumbent.as_ref().is_none_or(|(inc, _)| z < *inc - 1e-9 * inc.abs().max(1.0));
         if better {
             // oneopt (SCIP の heur_oneopt): 整数列を 1 つずつ目的値の良くなる向きに、行を破らない範囲で動かす
             let mut x = x;
             let mut z = z;
-            if env_str!("ENOMOTO_MIP_NO_ONEOPT").is_none() && self.one_opt(&mut x) {
+            if orig_only && self.params.verbose {
+                eprintln!("MIP: accepting a solution feasible in the problem without the symmetry rows ({z:.10e})");
+            }
+            if !orig_only && env_str!("ENOMOTO_MIP_NO_ONEOPT").is_none() && self.one_opt(&mut x) {
                 let z2 = self.p.objective(&x);
                 if z2 < z && self.p.is_feasible(&x, FEASTOL) {
                     if self.params.verbose {
@@ -1964,8 +2005,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     z = z2;
                 }
             }
-            self.resolve_continuous(&mut x, &mut z);
-            self.pool_add(z, &x);
+            if !orig_only {
+                self.resolve_continuous(&mut x, &mut z);
+                self.pool_add(z, &x);
+            }
             if let (Some(snap), Some(s)) = (&self.snap, &self.shared) {
                 // 木の写しから解く求解の解は写しの問題の空間なので、写しを作ったスレッドに渡す (共有の最良値はそのスレッドが
                 // 受け取ったときに更新する。解を持たないまま最良値だけ下げると、その解を誰も返せないことがある)
@@ -2371,7 +2414,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
         }
-        if self.snap.is_some() && CUT_JOB.with(|j| j.borrow().is_some()) {
+        if self.snap.is_some() && (CUT_JOB.with(|j| j.borrow().is_some()) || DIVE_ONLY.with(|d| d.get()).0 == 5) {
             if let Some(b) = BG_ROOT_BASIS.with(|s| s.borrow_mut().take()) {
                 if b.col.len() == self.p.n && b.row.len() == self.lp.num_rows() {
                     self.lp.set_basis(&b);
@@ -2500,6 +2543,36 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 40 問 (各 2 回、threads=4): 使わない SGM 20.79・ギャップ 11.91%、使う 20.58 (−1.0%、2 回とも改善)・11.73%、heavy
         // 20.60・11.95%。根の下界は h80x6320d 5947 -> 6051、qnet1 15714 -> 15787、binkar10_1 6710.6 -> 6719.9 (heavy は
         // 停滞する問題でさらに上がる: timtab1 465655 -> 571329 だが、カットが増えて木が重くなり全体は同じ)
+        let mut find_spawned = false;
+        if find_thread_on() && self.snap.is_none() && !self.params.submip && self.params.threads > 2 && self.fj_poor() && !self.fractional(&self.lp.col_values()).is_empty() {
+            let snap = self.make_snapshot(&Portfolio::new(), &mut None, false);
+            let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());
+            let budget = (tunable!("ENOMOTO_T_MIP_FIND_THREAD_FRAC", 0.3, f64) * remaining).min(tunable!("ENOMOTO_T_MIP_FIND_THREAD_MAX", 20.0, f64));
+            let params = MipParams { time_limit: budget, node_limit: u64::MAX, verbose: env_str!("ENOMOTO_MIP_FIND_THREAD_LOG").is_some(), threads: 1, ..self.params };
+            let dive_budget = 2 * root_iters + 1000;
+            let ri = root_iters;
+            let basis = self.lp.basis();
+            let out = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            self.find_out = Some(out.clone());
+            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            self.find_stop = Some(stop.clone());
+            if self.params.verbose {
+                eprintln!("MIP: find thread started (budget {budget:.1}s, {:.2}s)", self.start.elapsed().as_secs_f64());
+            }
+            self.find_thread = Some(
+                std::thread::Builder::new()
+                    .stack_size(64 << 20)
+                    .spawn(move || {
+                        DIVE_ONLY.with(|d| d.set((5, dive_budget, ri)));
+                        FIND_OUT.with(|o| *o.borrow_mut() = Some(out));
+                        FIND_STOP.with(|o| *o.borrow_mut() = Some(stop));
+                        BG_ROOT_BASIS.with(|b| *b.borrow_mut() = Some(basis));
+                        solve_worker(snap, None, params)
+                    })
+                    .expect("failed to spawn the find thread"),
+            );
+            find_spawned = true;
+        }
         let mut bg_cuts: Option<BgCuts> = None;
         if self.snap.is_none() && !self.params.submip && self.params.threads > 1 && env_str!("ENOMOTO_MIP_NO_CUTS").is_none() && !self.fractional(&self.lp.col_values()).is_empty() {
             let bg_mode = env_str!("ENOMOTO_MIP_BG_CUTS").or(if env_str!("ENOMOTO_MIP_NO_BG_CUTS").is_none() { Some("1") } else { None });
@@ -2510,6 +2583,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let mut threads = tunable!("ENOMOTO_T_MIP_BG_CUTS_THREADS", (self.params.threads - 1).max(1), usize);
                 // 暫定解が質の悪い FJ の解だけなら (`ENOMOTO_MIP_NO_FJ_POOR_BG_RENS` で使わない)、背景のカットの分離のスレッドを 1 本減らし、
                 // 空いた分で暫定解なし用のダイビング式 RENS のサブ MIP を別スレッドで解く ([`fj_poor_bg_rens`])
+                if find_spawned && threads > 1 {
+                    threads -= 1;
+                }
                 if fj_poor_bg_rens() && self.fj_poor() && threads > 1 {
                     threads -= 1;
                     if self.params.verbose {
@@ -2570,6 +2646,34 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         3 => {
                             self.dive(super::heuristics::DiveKind::VectorLength, budget, f64::INFINITY);
                         }
+                        5 => {
+                            // 根の解発見スレッド ([`find_thread_on`]): 暫定解なし用のヒューリスティクスを予算の中で順に回す
+                            let z0 = self.incumbent.as_ref().map(|(z, _)| *z);
+                            let steps: [(&'static str, u8); 5] = [("local search", 0), ("fractional diving", 2), ("vector length diving", 3), ("coefficient diving", 4), ("feasibility pump", 1)];
+                            for (name, k) in steps {
+                                if self.time_up() {
+                                    break;
+                                }
+                                let t = Instant::now();
+                                self.heur_label = name;
+                                let found = match k {
+                                    0 => env_str!("ENOMOTO_MIP_NO_LOCAL_SEARCH").is_none() && self.local_search_heur(),
+                                    1 => self.feasibility_pump(riters),
+                                    2 => self.fractional_dive(budget),
+                                    3 => self.dive(super::heuristics::DiveKind::VectorLength, budget, f64::INFINITY),
+                                    _ => env_str!("ENOMOTO_MIP_NO_COEF_DIVE").is_none() && self.dive(super::heuristics::DiveKind::Coefficient, budget, f64::INFINITY),
+                                };
+                                self.heur_label = "";
+                                if found {
+                                    if let (Some(o), Some((_, x))) = (FIND_OUT.with(|o| o.borrow().clone()), self.incumbent.as_ref()) {
+                                        o.lock().unwrap().push(x.clone());
+                                    }
+                                }
+                                if self.params.verbose {
+                                    eprintln!("MIP: [find thread] {name}: {} ({:.2}s), incumbent {z0:?} -> {:?}", if found { "found" } else { "none" }, t.elapsed().as_secs_f64(), self.incumbent.as_ref().map(|(z, _)| *z));
+                                }
+                            }
+                        }
                         _ => {
                             self.dive(super::heuristics::DiveKind::Coefficient, budget, f64::INFINITY);
                         }
@@ -2615,6 +2719,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                                         shared_x_used += 1;
                                     }
                                 }
+                            }
+                            if self.find_out.is_some() {
+                                self.poll_find_thread();
                             }
                             let t = Instant::now();
                             // 近さ ([`Solver::heur_close`]) を記録しない関数 (旧来の RENS など) を見分けるため負にしておく
@@ -2761,6 +2868,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 並列モード: 別スレッドのサブ MIP の結果を出した順に受け取る
                 self.parallel_submips = false;
                 self.join_submips(0);
+                self.poll_find_thread();
                 // 局所探索と Repair (暫定解がなければ)
                 if self.noinc_like() && env_str!("ENOMOTO_MIP_NO_LOCAL_SEARCH").is_none() {
                     heur!("local search", self.local_search_heur());
@@ -3346,6 +3454,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             first = false;
             self.nodes += 1;
             self.tprof.nodes += 1;
+            if self.find_thread.is_some() {
+                self.poll_find_thread();
+            }
             if prof_tree_par() {
                 self.tprof.lbs.push(node.lower_bound);
             }
@@ -6961,6 +7072,46 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     /// 木の写しを作って共有する。待ち行列のノードと潜っている子に写しの中の番号を付ける (前の写しの番号は 3 つまで残す)。
+    /// 根の解発見スレッド ([`find_thread_on`]) が終わっていれば、その解を受け取る (待たない)。
+    fn poll_find_thread(&mut self) {
+        // 主の暫定解が質の悪い FJ の解でなくなったら (FJ 以外の解が入った、または根の LP との相対ギャップが
+        // `ENOMOTO_T_MIP_FIND_THREAD_STOP_GAP` (既定は `ENOMOTO_T_MIP_FJ_POOR_GAP` と同じ 0.5) 以下)、解発見スレッドを止める
+        // (`ENOMOTO_MIP_FIND_THREAD_NO_STOP` で止めない)
+        if self.find_thread.is_some() && env_str!("ENOMOTO_MIP_FIND_THREAD_NO_STOP").is_none() {
+            let lb = self.fj_poor_lb;
+            let thr = tunable!("ENOMOTO_T_MIP_FIND_THREAD_STOP_GAP", tunable!("ENOMOTO_T_MIP_FJ_POOR_GAP", 0.5, f64), f64);
+            let poor = self.incumbent.as_ref().is_some_and(|(z, _)| self.inc_only_fj && lb.is_finite() && (z - lb) / z.abs().max(lb.abs()).max(1.0) > thr);
+            if let Some(st) = self.find_stop.as_ref().filter(|_| !poor) {
+                if !st.swap(true, std::sync::atomic::Ordering::Relaxed) && self.params.verbose {
+                    eprintln!("MIP: find thread asked to stop (incumbent {:?}, {:.2}s)", self.incumbent.as_ref().map(|(z, _)| *z), self.start.elapsed().as_secs_f64());
+                }
+            }
+        }
+        let got: Vec<Vec<f64>> = self.find_out.as_ref().map(|o| std::mem::take(&mut *o.lock().unwrap())).unwrap_or_default();
+        for x in got {
+            let z0 = self.incumbent.as_ref().map(|(z, _)| *z);
+            let label = std::mem::replace(&mut self.heur_label, "find thread");
+            let acc = self.try_incumbent(x);
+            self.heur_label = label;
+            if self.params.verbose {
+                eprintln!("MIP: find thread solution: accepted {acc} (incumbent {z0:?}) ({:.2}s, node {})", self.start.elapsed().as_secs_f64(), self.nodes);
+            }
+        }
+        if !self.find_thread.as_ref().is_some_and(|h| h.is_finished()) {
+            return;
+        }
+        let Some(h) = self.find_thread.take() else { return };
+        if let Ok(r) = h.join() {
+            let z0 = self.incumbent.as_ref().map(|(z, _)| *z);
+            let label = std::mem::replace(&mut self.heur_label, "find thread");
+            let acc = r.x.is_some_and(|x| self.try_incumbent(x));
+            self.heur_label = label;
+            if self.params.verbose {
+                eprintln!("MIP: find thread done: objective {:?}, accepted {acc} (incumbent {z0:?}) ({:.2}s, node {})", r.objective, self.start.elapsed().as_secs_f64(), self.nodes);
+            }
+        }
+    }
+
     fn make_snapshot(&mut self, s: &Portfolio, plunge: &mut Option<OpenNode>, with_nodes: bool) -> std::sync::Arc<TreeSnapshot> {
         use std::sync::atomic::Ordering;
         let serial = s.snap_serial.fetch_add(1, Ordering::AcqRel) + 1;
