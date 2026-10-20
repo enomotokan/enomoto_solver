@@ -1,7 +1,7 @@
 import sys, time
 from pathlib import Path
 from enomoto_solver import benchmark_highs as bh
-mps = Path("/home/user/enomoto_solver/.miplib_cache/neos-911970.mps")
+mps = Path(__import__("os").environ.get("MPS", "/home/user/enomoto_solver/.miplib_cache/neos-911970.mps"))
 T = float(sys.argv[1]) if len(sys.argv) > 1 else 60.0
 _, lp = bh._load_lp(mps); m, _, _ = bh._build_our_model(lp)
 t = time.time()

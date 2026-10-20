@@ -1,0 +1,34 @@
+bppc4-08                 highs=Time limit reached 60.00853240199967 obj=53.00000000000001  ours=time_limit 60.059750376999546 obj=54.00000000000001
+assign1-5-8              highs=Time limit reached 60.00222181599975 obj=211.99999999999986  ours=time_limit 60.04327145099978 obj=212.00000000000003
+eil33-2                  highs=Time limit reached 60.01935518600021 obj=987.6741330000004  ours=   optimal 33.836785401999805 obj=934.007916
+10teams                  highs=   Optimal 2.109999665000032 obj=924.0000000000005  ours=   optimal 24.119566962000135 obj=924.0
+neos-1456979             highs=Time limit reached 60.02864600699968 obj=205.0  ours=time_limit 60.13065499999993 obj=274.0
+timtab1                  highs=Time limit reached 60.00411498700032 obj=764773.9999998701  ours=time_limit 60.02829707099954 obj=765999.9999997902
+gen-ip054                highs=Time limit reached 60.009003544000734 obj=6858.262906057774  ours=time_limit 60.05884229200001 obj=6852.67873462
+ran14x18-disj-8          highs=Time limit reached 60.02162481100004 obj=3736.0  ours=time_limit 60.05362174399943 obj=3748.0
+# MIPLIB 2017 (小〜中規模): enomoto_solver vs HiGHS
+
+- 実行日時: 2026-10-20 00:52 UTC
+- 時間上限 60 秒、スレッド数 4 (HiGHS は threads、enomoto は木の探索 threads と ENOMOTO_MIP_THREADS)、既定の相対ギャップ (HiGHS 1e-4、enomoto 0)
+- 時間は求解のみ (MPS 読み込み・モデル構築を除く)。`t` = 時間上限
+
+| 指標 | HiGHS | enomoto |
+|---|---:|---:|
+| 解けた問題数 (/8) | 1 | 2 |
+| Shifted geomean [s] (shift 10、未解決は上限扱い) | 46.22 | 50.35 |
+| 目的値の不一致 | | 0  |
+| 主ギャップの和 (参照値は解けた側の目的値) | 0.0543 | 0.0000 |
+
+主ギャップ = |目的値 - 参照値| / max(|目的値|, |参照値|) (解なしは 1)。根の下界は enomoto の根の切除平面ループ後の LP 値 (再スタートがあれば最後の根)、最初の解は enomoto の最初の暫定解の時刻。
+
+| 問題 | HiGHS [s] | enomoto [s] | HiGHS 目的値 | enomoto 目的値 | HiGHS ノード | enomoto ノード | 一致 | enomoto 主ギャップ | enomoto 根の下界 | enomoto 最初の解 [s] |
+|---|---:|---:|---:|---:|---:|---:|:---:|---:|---:|---:|
+| gen-ip054 | t | t | 6858.26 | 6852.68 | 197525 | 596059 |  | - | 6768.21 | 0.08 |
+| 10teams | 2.11 | 24.12 | 924 | 924 | 1 | 1810 | ✓ | 0.0000 | 924 | 3.08 |
+| eil33-2 | t | 33.84 | 987.674 | 934.008 | 145 | 7895 | - | 0.0000 | 818.394 | 3.85 |
+| assign1-5-8 | t | t | 212 | 212 | 16650 | 182609 |  | - | 186.364 | 1.72 |
+| ran14x18-disj-8 | t | t | 3736 | 3748 | 1847 | 11834 |  | - | 3468.09 | 0.22 |
+| timtab1 | t | t | 764774 | 766000 | 8488 | 31942 |  | - | 416538 | 1.69 |
+| bppc4-08 | t | t | 53 | 54 | 8956 | 34308 |  | - | 51.59 | 1.87 |
+| neos-1456979 | t | t | 205 | 274 | 99 | 13468 |  | - | 154.561 | 44.38 |
+
