@@ -1,7 +1,7 @@
 # physiciansched6-2: Feasibility Jump を通すのに要る縮約の特定と試作 (2026-10-20、担当 physician2)
 
 機械は 4 CPU (`nproc` = 4、専用コンテナ)。基準はブランチ `inv/physician2-20261020` の起点 `c3ed13f` (統合ブランチ + 前の調査 #10 の
-試作)、試作のコミットは `e2526b0` (と、その後のメモのコミット)。試作はすべて環境変数で有効にし、既定は変えていない。
+試作)、試作のコミットは `e2526b0` と `7f520bf` (DOMCOL_PRED の候補の上限を分けたもの・メモ)。試作はすべて環境変数で有効にし、既定は変えていない。
 **計測はすべて 4 スレッド** (ENOMOTO は `ENOMOTO_MIP_THREADS=4`・`m.solve(None, False, T, None, None, 4, log=True)`、HiGHS 1.15.1 は
 `threads=4`)。時間上限は求解が 60 秒、FJ の確かめは 2〜4 秒 (FJ は根の前に回すので短くてよい)。
 スクリプト・小さいログは `analysis/physiciansched6-2_fj_20261020/`:
