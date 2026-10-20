@@ -35,6 +35,11 @@ use solver::{MipParams, MipStatus};
 /// プロセスに CPU を取られている間は進まないので、マシンの負荷で打ち切りの位置が変わりにくい (nw04: 負荷で根のカットの
 /// 1 ラウンドが 1.9 -> 4.0 秒になり、時間の上限で 2 ラウンドで止まって根で閉じず 9 -> 17 秒)。Linux 以外と
 /// `ENOMOTO_MIP_WALL_CAPS` では経過時間。差だけを使う。
+/// `ENOMOTO_MIP_IMPLBD_GENINT` (試作、[`separation`] の implied bound カット): 一般整数の列への含意も使う。
+pub(crate) fn implbd_genint() -> bool {
+    env_str!("ENOMOTO_MIP_IMPLBD_GENINT").is_some()
+}
+
 pub(crate) fn cap_clock() -> f64 {
     #[cfg(target_os = "linux")]
     {
@@ -1600,6 +1605,11 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
         for ((k, upper), val) in best {
             if implied.len() >= edge_cap {
                 return;
+            }
+            // `ENOMOTO_MIP_IMPLBD_GENINT`: 0-1 列どうしの含意は衝突の組 (clique) と同じなので集めない (HiGHS も 0-1 列の含意は
+            // clique 表に入れ、implied bound には使わない)。0-1 列の含意で上限を使い切り、一般整数の含意が落ちるのを防ぐ
+            if implbd_genint() && bin0[k] {
+                continue;
             }
             let (l, u) = (dom.lo[k], dom.up[k]);
             if !l.is_finite() || !u.is_finite() {

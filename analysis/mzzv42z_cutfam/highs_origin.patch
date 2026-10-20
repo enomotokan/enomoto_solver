@@ -1,0 +1,106 @@
+diff --git a/highs/mip/HighsCutPool.cpp b/highs/mip/HighsCutPool.cpp
+index b9011e8..345afab 100644
+--- a/highs/mip/HighsCutPool.cpp
++++ b/highs/mip/HighsCutPool.cpp
+@@ -500,6 +500,8 @@ void HighsCutPool::separateLpCutsAfterRestart(HighsCutSet& cutset) {
+   assert((HighsInt)propRows.size() == numPropRows);
+ }
+ 
++int g_cut_origin = 5;
++std::vector<signed char> g_cut_origin_of;
+ HighsInt HighsCutPool::addCut(const HighsMipSolver& mipsolver, HighsInt* Rindex,
+                               double* Rvalue, HighsInt Rlen, double rhs,
+                               bool integral, bool propagate,
+@@ -610,6 +612,7 @@ HighsInt HighsCutPool::addCut(const HighsMipSolver& mipsolver, HighsInt* Rindex,
+   }
+ 
+   // set the right hand side and reset the age
++  if (this == &mipsolver.mipdata_->getCutPool() && !mipsolver.submip) { if ((int)g_cut_origin_of.size() <= rowindex) g_cut_origin_of.resize(rowindex + 1, 5); g_cut_origin_of[rowindex] = (signed char)g_cut_origin; }
+   rhs_[rowindex] = rhs;
+   ages_[rowindex] = std::max(HighsInt{0}, agelim_ - 5);
+   ++ageDistribution[ages_[rowindex]];
+diff --git a/highs/mip/HighsLpRelaxation.h b/highs/mip/HighsLpRelaxation.h
+index 0a4c2f2..6b693cc 100644
+--- a/highs/mip/HighsLpRelaxation.h
++++ b/highs/mip/HighsLpRelaxation.h
+@@ -195,6 +195,7 @@ class HighsLpRelaxation {
+   const HighsLp& getLp() const { return lpsolver.getLp(); }
+ 
+   const HighsSolution& getSolution() const { return lpsolver.getSolution(); }
++  const std::vector<LpRow>& getLpRowsDbg() const { return lprows; }
+ 
+   double slackUpper(HighsInt row, const HighsDomain& globaldom) const;
+ 
+diff --git a/highs/mip/HighsSeparation.cpp b/highs/mip/HighsSeparation.cpp
+index 511e0d1..a41e5f5 100644
+--- a/highs/mip/HighsSeparation.cpp
++++ b/highs/mip/HighsSeparation.cpp
+@@ -1,5 +1,9 @@
+ #include <cstring>
+ #include <cstdio>
++#include <vector>
++#include <cmath>
++extern int g_cut_origin;
++extern std::vector<signed char> g_cut_origin_of;
+ /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+ /*                                                                       */
+ /*    This file is part of the HiGHS linear optimization suite           */
+@@ -93,6 +97,7 @@ HighsInt HighsSeparation::separationRound(HighsDomain& propdomain,
+ 
+   if (!mipdata.parallelLockActive())
+     lp->getMipSolver().profiling_->start(implBoundClock);
++  g_cut_origin = 0; HighsInt dbgPool0 = mipworker_.getCutPool().getNumCuts();
+   if (!getenv("HIGHS_NO_IMPLB")) mipdata.implications.separateImpliedBounds(
+       *lp, lp->getSolution().col_value, mipworker_.getCutPool(),
+       mipdata.feastol, mipworker_.getGlobalDomain(),
+@@ -109,6 +114,7 @@ HighsInt HighsSeparation::separationRound(HighsDomain& propdomain,
+ 
+   if (!mipdata.parallelLockActive())
+     lp->getMipSolver().profiling_->start(cliqueClock);
++  HighsInt dbgPool1 = mipworker_.getCutPool().getNumCuts(); double dbgObj1 = lp->getObjective(); g_cut_origin = 1;
+   if (!getenv("HIGHS_NO_CLQ")) mipdata.cliquetable.separateCliques(
+       lp->getMipSolver(), sol.col_value, mipworker_.getCutPool(),
+       mipdata.feastol,
+@@ -125,7 +131,7 @@ HighsInt HighsSeparation::separationRound(HighsDomain& propdomain,
+     return 0;
+   else
+     ncuts += numboundchgs;
+-  fprintf(stderr, "HPROP %d obj %.6f\n", (int)numboundchgs, lp->getObjective());
++  fprintf(stderr, "HPROP %d obj %.6f implb_cuts %d obj_after_implb %.6f clique_cuts %d\n", (int)numboundchgs, lp->getObjective(), (int)(dbgPool1 - dbgPool0), dbgObj1, (int)(mipworker_.getCutPool().getNumCuts() - dbgPool1));
+ 
+   if (&propdomain != &mipworker_.getGlobalDomain())
+     lp->computeBasicDegenerateDuals(
+@@ -146,6 +152,7 @@ HighsInt HighsSeparation::separationRound(HighsDomain& propdomain,
+   for (const std::unique_ptr<HighsSeparator>& separator : separators) {
+     HighsInt before = mipworker_.getCutPool().getNumCuts();
+     { const char* sk = getenv("HIGHS_SKIP_SEP"); int k = (int)(&separator - &separators[0]); if (sk && strchr(sk, '0' + k)) continue; }
++    g_cut_origin = 2 + (int)(&separator - &separators[0]);
+     separator->run(*lp, lpAggregator, transLp, mipworker_.getCutPool());
+     fprintf(stderr, " sep%d=%d", (int)(&separator - &separators[0]), (int)(mipworker_.getCutPool().getNumCuts() - before));
+     if (mipworker_.getGlobalDomain().infeasible()) {
+@@ -155,6 +162,7 @@ HighsInt HighsSeparation::separationRound(HighsDomain& propdomain,
+   }
+ 
+   fprintf(stderr, "\n");
++  g_cut_origin = 5;
+   numboundchgs = propagateAndResolve();
+   if (numboundchgs == -1)
+     return 0;
+@@ -188,6 +196,17 @@ HighsInt HighsSeparation::separationRound(HighsDomain& propdomain,
+     lp->addCuts(cutset);
+     status = lp->resolveLp(&propdomain);
+     fprintf(stderr, "HADD %d obj %.6f lprows %d\n", (int)cutset.numCuts(), lp->getObjective(), (int)lp->numRows());
++    if (!lp->getMipSolver().submip) {
++      int inlp[6] = {0}, act[6] = {0};
++      const auto& rows = lp->getLpRowsDbg();
++      const auto& rd = lp->getSolution().row_dual;
++      for (size_t r = 0; r < rows.size(); ++r) {
++        if ((int)rows[r].origin != 1) continue;
++        int o = rows[r].index < (HighsInt)g_cut_origin_of.size() ? g_cut_origin_of[rows[r].index] : 5;
++        inlp[o]++; if (r < rd.size() && std::fabs(rd[r]) > 1e-9) act[o]++;
++      }
++      fprintf(stderr, "HORIG obj %.6f implb %d/%d clique %d/%d tableau %d/%d path %d/%d modk %d/%d other %d/%d\n", lp->getObjective(), inlp[0], act[0], inlp[1], act[1], inlp[2], act[2], inlp[3], act[3], inlp[4], act[4], inlp[5], act[5]);
++    }
+     lp->performAging(true);
+ 
+     // only for the master domain.
