@@ -1926,6 +1926,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 x[j] = x[j].round();
             }
         }
+        // 元の問題では実行可能だが、対称性の行・固定に反し、並べ替えても直らなかった解 (`ENOMOTO_MIP_SYM_ORIG_INC`)
+        let mut orig_only = false;
         if !self.p.is_feasible(&x, FEASTOL) {
             // 対称性の行・固定だけに反する解: 元の問題で実行可能なら、オービトープの列を辞書式の順に並べ替える
             // (対称性で写すので実行可能性と目的値は変わらない)
@@ -1944,18 +1946,30 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             if !self.p.is_feasible(&x, FEASTOL) {
                 self.sym_canon.1 += 1;
-                return false;
+                // `ENOMOTO_MIP_SYM_ORIG_INC` (試作): それでも暫定解にする。対称性の行は対称な解のうち 1 つを残す絞り込みで、
+                // この解の像のどれかが対称性の行を満たし目的値は同じなので、目的値は打ち切り値に使え、解そのものは元の問題の
+                // 解として返せる。対称性の行のある問題で解を磨く手順 (oneopt・連続変数の解き直し・解の溜め) には使わない
+                if env_str!("ENOMOTO_MIP_SYM_ORIG_INC").is_none() {
+                    return false;
+                }
+                orig_only = true;
+            } else {
+                self.sym_canon.0 += 1;
             }
-            self.sym_canon.0 += 1;
         }
         let z = self.p.objective(&x);
-        self.pool_add(z, &x);
+        if !orig_only {
+            self.pool_add(z, &x);
+        }
         let better = self.incumbent.as_ref().is_none_or(|(inc, _)| z < *inc - 1e-9 * inc.abs().max(1.0));
         if better {
             // oneopt (SCIP の heur_oneopt): 整数列を 1 つずつ目的値の良くなる向きに、行を破らない範囲で動かす
             let mut x = x;
             let mut z = z;
-            if env_str!("ENOMOTO_MIP_NO_ONEOPT").is_none() && self.one_opt(&mut x) {
+            if orig_only && self.params.verbose {
+                eprintln!("MIP: accepting a solution feasible in the problem without the symmetry rows ({z:.10e})");
+            }
+            if !orig_only && env_str!("ENOMOTO_MIP_NO_ONEOPT").is_none() && self.one_opt(&mut x) {
                 let z2 = self.p.objective(&x);
                 if z2 < z && self.p.is_feasible(&x, FEASTOL) {
                     if self.params.verbose {
@@ -1964,8 +1978,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     z = z2;
                 }
             }
-            self.resolve_continuous(&mut x, &mut z);
-            self.pool_add(z, &x);
+            if !orig_only {
+                self.resolve_continuous(&mut x, &mut z);
+                self.pool_add(z, &x);
+            }
             if let (Some(snap), Some(s)) = (&self.snap, &self.shared) {
                 // 木の写しから解く求解の解は写しの問題の空間なので、写しを作ったスレッドに渡す (共有の最良値はそのスレッドが
                 // 受け取ったときに更新する。解を持たないまま最良値だけ下げると、その解を誰も返せないことがある)
