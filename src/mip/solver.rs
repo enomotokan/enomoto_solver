@@ -2258,6 +2258,21 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let nnz = self.p.nnz;
             let cap = if self.params.time_limit.is_finite() { (0.05 * self.params.time_limit).min(5.0) } else { 5.0 };
             let effort = (50 * nnz as u64).clamp(100_000, 50_000_000);
+            // 診断用 (`ENOMOTO_MIP_DEBUG_FJ_TRIALS=N`): 根の前に FJ2 を種を変えて N 回 (各回は手間の上限まで) 回し、解を見つけた回数と
+            // 最小の違反行数を出す。FJ2 は決定的で、1 回の成否は行の並びなどで変わるので、前処理の形の比べ方に使う
+            if let Some(k) = env_str!("ENOMOTO_MIP_DEBUG_FJ_TRIALS").and_then(|v| v.parse::<u64>().ok()).filter(|_| !self.params.submip && self.snap.is_none()) {
+                let (pc, lo, up) = match &self.orig {
+                    Some(o) => ((**o).clone(), o.col_lo.clone(), o.col_up.clone()),
+                    None => (self.p.clone(), self.dom.lo.clone(), self.dom.up.clone()),
+                };
+                let mut found = 0;
+                for t in 0..k {
+                    if super::fj::fj2_search(&pc, &lo, &up, 30.0, 0x1234_5678u64.wrapping_add(t.wrapping_mul(0x9E37_79B9_7F4A_7C15)), None).is_some() {
+                        found += 1;
+                    }
+                }
+                eprintln!("MIP: FJ trials: found {found}/{k}");
+            }
             if self.snap.is_some() || env_str!("ENOMOTO_MIP_DEBUG_NO_FJ").is_some() {
                 // 木の写しから解く: 解探しはしない (`ENOMOTO_MIP_DEBUG_NO_FJ` は診断用に FJ を使わない)
             } else if !self.params.submip && !proof_only() && mip_threads() > 1 {

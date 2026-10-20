@@ -331,6 +331,22 @@ impl Domain {
         }
     }
 
+    /// 含意による伝播に衝突の組 (文字の組) を足す (含意の伝播を使っていなければ使い始める)。プロービング
+    /// (`ENOMOTO_MIP_PROBE_CLIQUE`) が見つけた含意を、後の列のプロービングの伝播に使う (HiGHS はプロービングで見つけた含意を
+    /// クリーク表に入れ、クリーク表で伝播する。行の伝播では `x = 1 => y = 0` の対偶 `y = 1 => x = 0` が見えないことがある)。
+    /// 足す前に固定されていた列の含意は伝播しないので、根で呼ぶこと。
+    pub fn add_implications(&mut self, n: usize, edges: &[(u32, u32)]) {
+        if edges.is_empty() {
+            return;
+        }
+        let arc = self.impl_adj.get_or_insert_with(|| std::sync::Arc::new(vec![Vec::new(); 2 * n]));
+        let adj = std::sync::Arc::make_mut(arc);
+        for &(a, b) in edges {
+            adj[a as usize].push(b);
+            adj[b as usize].push(a);
+        }
+    }
+
     /// 記録を `pos` まで巻き戻す (境界と活動量を戻し、矛盾の印を消す)。
     pub fn backtrack_to(&mut self, p: &MipProblem, pos: usize) {
         self.low_water = self.low_water.min(pos);
@@ -994,6 +1010,24 @@ fn row_tol(rhs: f64, act: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 足した含意は対偶の向きにも伝播する: `x0 = 1 => x2 = 0` (文字 0 と 4 の衝突) を足すと、x2 = 1 で x0 = 0
+    #[test]
+    fn add_implications_propagates_contrapositive() {
+        // x0 + x1 + x2 <= 3 (何も伝播しない)
+        let p = MipProblem::from_rows(vec![0.0; 3], vec![1.0; 3], vec![-1.0; 3], 0.0, 1.0, vec![true; 3], vec![vec![(0, 1.0), (1, 1.0), (2, 1.0)]], vec![f64::NEG_INFINITY], vec![3.0]);
+        let mut d = Domain::new(&p);
+        assert!(d.propagate(&p));
+        d.add_implications(p.n, &[(0, 4)]);
+        let pos = d.stack_len();
+        d.tighten_lower(&p, 2, 1.0);
+        assert!(d.propagate(&p));
+        assert_eq!(d.up[0], 0.0);
+        d.backtrack_to(&p, pos);
+        d.tighten_lower(&p, 0, 1.0);
+        assert!(d.propagate(&p));
+        assert_eq!(d.up[2], 0.0);
+    }
 
     fn knap() -> MipProblem {
         // 3x0 + 4x1 + 5x2 <= 7, x 0/1 整数; x0 + x1 >= 1
