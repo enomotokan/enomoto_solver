@@ -3,7 +3,8 @@
 問題は https://miplib.zib.de/WebData/instances/<name>.mps.gz から `<repo>/.miplib_cache/` に取得する
 (一度だけ。キャッシュは .gitignore 済み)。各問題を両ソルバーでそれぞれ別のサブプロセスで解く:
 
-- HiGHS: 既定の設定 + `time_limit`。`Highs.run()` の時間を測る。
+- HiGHS: 既定の設定 + `time_limit` + `mip_rel_gap = 0` (このクレートの既定の相対ギャップ 0 にそろえる。2026-10-20 から。
+  それより前の結果は HiGHS の既定 1e-4)。`Highs.run()` の時間を測る。
 - このクレート: MPS は HiGHS で読み、`benchmark_highs._build_our_model` でモデルを作る (整数性も渡す)。
   `model.solve(time_limit=...)` の時間だけを測る。親プロセスは時間上限 + 余裕で打ち切る。
 
@@ -63,6 +64,9 @@ def worker_highs(mps: str, time_limit: float, threads: int) -> None:
     h.setOptionValue("output_flag", False)
     h.setOptionValue("time_limit", time_limit)
     h.setOptionValue("threads", threads)
+    # このクレートの既定 (相対ギャップ 0) にそろえる。HiGHS の既定 1e-4 のままだと、根の LP と最適値の差が 1e-5 しかない
+    # uccase12 などで HiGHS だけが 1 ノードで「最適」と打ち切り、比べられない
+    h.setOptionValue("mip_rel_gap", 0.0)
     h.readModel(mps)
     t = time.perf_counter()
     h.run()
@@ -170,7 +174,7 @@ def make_table(results: dict, time_limit: float, threads: int) -> str:
         "",
         f"- 実行日時: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
         f"- 時間上限 {time_limit:g} 秒、スレッド数 {threads} (HiGHS は threads、enomoto は木の探索 threads と "
-        f"ENOMOTO_MIP_THREADS)、既定の相対ギャップ (HiGHS 1e-4、enomoto 0)",
+        f"ENOMOTO_MIP_THREADS)、相対ギャップは両方 0 (HiGHS は mip_rel_gap = 0)",
         "- 時間は求解のみ (MPS 読み込み・モデル構築を除く)。`t` = 時間上限",
         "",
         "| 指標 | HiGHS | enomoto |",
@@ -198,6 +202,7 @@ def main() -> None:
     ap.add_argument("--threads", type=int, default=1, help="両ソルバーに与えるスレッド数")
     ap.add_argument("--table", action="store_true")
     ap.add_argument("--rerun-ours", action="store_true", help="HiGHS の結果は再利用し、このクレートだけ解き直す")
+    ap.add_argument("--rerun-highs", action="store_true", help="このクレートの結果は再利用し、HiGHS だけ解き直す")
     ap.add_argument("--worker-highs")
     ap.add_argument("--worker-ours")
     a = ap.parse_args()
@@ -210,13 +215,15 @@ def main() -> None:
     if not a.table:
         names = a.only or PROBLEMS
         for n in names:
-            if n in results and not a.rerun_ours:
+            if n in results and not (a.rerun_ours or a.rerun_highs):
                 continue
             mps = fetch(n, a.cache_dir)
             h = results.get(n, {}).get("highs") if a.rerun_ours else None
             if h is None:
                 h = run_worker("highs", mps, a.time_limit, a.threads)
-            o = run_worker("ours", mps, a.time_limit, a.threads)
+            o = results.get(n, {}).get("ours") if a.rerun_highs else None
+            if o is None:
+                o = run_worker("ours", mps, a.time_limit, a.threads)
             results[n] = {"highs": h, "ours": o}
             print(f"{n:24s} highs={h['status']:>10s} {h['time'] if h['time'] is not None else '-':>8} obj={h['objective']}  "
                   f"ours={o['status']:>10s} {o['time'] if o['time'] is not None else '-':>8} obj={o['objective']}", flush=True)

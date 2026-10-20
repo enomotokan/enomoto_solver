@@ -396,11 +396,18 @@ pub(super) fn fj2_search(p: &super::problem::MipProblem, lo: &[f64], up: &[f64],
     for v in 0..n {
         s.reset_moves(v);
     }
-    let max_total = nnz.max(1) << 10;
-    let max_since = nnz.max(1) << 8;
+    // 手間の上限 (非零の数 × 1024、最後の改善から × 256)。`ENOMOTO_T_MIP_FJ_EFFORT_MULT` 倍にする (診断用、既定 1)
+    let mult = tunable!("ENOMOTO_T_MIP_FJ_EFFORT_MULT", 1u64, u64).max(1);
+    let max_total = (nnz.max(1) << 10) * mult;
+    let max_since = (nnz.max(1) << 8) * mult;
     let mut best_viol = usize::MAX;
     let mut best_obj = f64::INFINITY;
     let mut best_x: Option<Vec<f64>> = None;
+    // `ENOMOTO_MIP_FJ_LP_REPAIR`: 解が見つからなければ、違反の行の数が最も少なかった点 (`ENOMOTO_T_MIP_FJ_LP_REPAIR_MAX_VIOL`
+    // 行以下、既定 50) の整数列を固定して、連続列を LP で解き直す ([`lp_repair`])
+    let repair = env_str!("ENOMOTO_MIP_FJ_LP_REPAIR").is_some() && p.is_int.iter().any(|&b| !b);
+    let repair_max = tunable!("ENOMOTO_T_MIP_FJ_LP_REPAIR_MAX_VIOL", 50usize, usize);
+    let mut best_inf: Option<Vec<f64>> = None;
     let mut effort_last_improve = 0u64;
     let mut effort_last_check = 0u64;
     let t0 = Instant::now();
@@ -411,6 +418,9 @@ pub(super) fn fj2_search(p: &super::problem::MipProblem, lo: &[f64], up: &[f64],
         if s.violated.len() < best_viol {
             effort_last_improve = s.effort;
             best_viol = s.violated.len();
+            if repair && best_viol > 0 && best_viol <= repair_max {
+                best_inf = Some(s.x.clone());
+            }
         }
         let mut check = s.effort - effort_last_check > 500_000;
         if s.violated.is_empty() && s.objective < best_obj {
@@ -439,9 +449,27 @@ pub(super) fn fj2_search(p: &super::problem::MipProblem, lo: &[f64], up: &[f64],
         }
         s.do_move(v);
     }
+    if env_str!("ENOMOTO_MIP_FJ_DEBUG").is_some_and(|v| v == "2") && best_x.is_none() {
+        // 終わったときに違反している行の形 (向き・長さ・連続列の数・右辺) を数える
+        let mut kinds: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+        for &ci in &s.violated {
+            let c = &s.cons[ci as usize];
+            let nc = c.coeffs.iter().filter(|&&(j, _)| !s.is_int[j as usize]).count();
+            let k = format!("{} len {} cont {} rhs {:.4}", if c.sense == Sense::Lte { "<=" } else { ">=" }, c.coeffs.len(), nc, c.rhs);
+            *kinds.entry(k).or_insert(0) += 1;
+        }
+        eprintln!("MIP:   FJ2 violated rows at the end: {kinds:?}");
+    }
+    let mut repaired = "";
+    if best_x.is_none() {
+        if let Some(xi) = best_inf.as_ref() {
+            best_x = lp_repair(p, &s.lb, &s.ub, xi);
+            repaired = if best_x.is_some() { " (LP repair: found)" } else { " (LP repair: failed)" };
+        }
+    }
     if env_str!("ENOMOTO_MIP_FJ_DEBUG").is_some() {
         eprintln!(
-            "MIP:   FJ2: {} rows (as inequalities), {} nonzeros, {steps} steps, effort {} (max {max_total}), least violated rows {best_viol}, found {} (objective {best_obj:.6e}), stopped by {why}, {:.2}s",
+            "MIP:   FJ2{repaired}: {} rows (as inequalities), {} nonzeros, {steps} steps, effort {} (max {max_total}), least violated rows {best_viol}, found {} (objective {best_obj:.6e}), stopped by {why}, {:.2}s",
             s.cons.len(),
             nnz,
             s.effort,
@@ -450,4 +478,61 @@ pub(super) fn fj2_search(p: &super::problem::MipProblem, lo: &[f64], up: &[f64],
         );
     }
     best_x
+}
+
+/// FJ の点の修復 (`ENOMOTO_MIP_FJ_LP_REPAIR`、既定では使わない): 整数列を `x` の値 (丸めたもの) に固定し、連続列だけの LP を
+/// 元の費用で解く。FJ は 1 変数ずつ動かすので、連続列どうしの 2 行 (`0.5 a - b <= 43.75`・`b - a <= -925` で、両方を満たすのは
+/// 両方の列を同時に動かしたときだけ) を満たせずに止まることがある (physiciansched6-2、HiGHS の前処理の後の問題)。
+/// 整数列だけの行が破れていれば何もしない。実行可能なら (行と境界を 1e-6 で確かめて) 点を返す。
+fn lp_repair(p: &super::problem::MipProblem, lb: &[f64], ub: &[f64], x: &[f64]) -> Option<Vec<f64>> {
+    use crate::types::{ConstraintRow, LinearExpr, LpOptions, Objective, RootSolver, RowSense, Status, VarType, VariableData};
+    let n = p.n;
+    let xi: Vec<f64> = (0..n).map(|j| if p.is_int[j] { x[j].round() } else { x[j] }).collect();
+    // 連続列の番号付け
+    let mut idx = vec![usize::MAX; n];
+    let mut vars: Vec<VariableData> = Vec::new();
+    let mut cost: Vec<f64> = Vec::new();
+    for j in 0..n {
+        if !p.is_int[j] {
+            idx[j] = vars.len();
+            vars.push(VariableData { vtype: VarType::Continuous, lb: lb[j], ub: ub[j] });
+            cost.push(p.cost[j]);
+        }
+    }
+    let mut cons: Vec<ConstraintRow> = Vec::new();
+    for i in 0..p.m {
+        let mut k = 0.0;
+        let mut coeffs: Vec<(usize, f64)> = Vec::new();
+        for &(j, a) in &p.rows[i] {
+            if p.is_int[j] { k += a * xi[j] } else { coeffs.push((idx[j], a)) }
+        }
+        let (lo, up) = (p.row_lo[i] - k, p.row_up[i] - k);
+        if coeffs.is_empty() {
+            if lo > 1e-6 * (1.0 + lo.abs()) || up < -1e-6 * (1.0 + up.abs()) {
+                return None;
+            }
+            continue;
+        }
+        let expr = LinearExpr { coeffs: coeffs.into_iter().collect(), constant: 0.0 };
+        if lo == up {
+            cons.push(ConstraintRow { expr, sense: RowSense::Eq, rhs: lo });
+            continue;
+        }
+        if lo.is_finite() {
+            cons.push(ConstraintRow { expr: expr.clone(), sense: RowSense::Ge, rhs: lo });
+        }
+        if up.is_finite() {
+            cons.push(ConstraintRow { expr, sense: RowSense::Le, rhs: up });
+        }
+    }
+    let obj = Objective { expr: LinearExpr { coeffs: cost.iter().enumerate().filter(|&(_, &c)| c != 0.0).map(|(k, &c)| (k, c)).collect(), constant: 0.0 }, sense: crate::types::Sense::Minimize };
+    let r = crate::solver::solve_lp(&vars, &obj, &cons, RootSolver::Simplex, LpOptions::default());
+    let (Status::Optimal, Some(y)) = (r.status, r.x) else { return None };
+    let mut out = xi;
+    for j in 0..n {
+        if !p.is_int[j] {
+            out[j] = y[idx[j]].clamp(lb[j], ub[j]);
+        }
+    }
+    p.is_feasible(&out, 1e-6).then_some(out)
 }

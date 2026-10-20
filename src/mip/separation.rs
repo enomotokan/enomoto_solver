@@ -10,6 +10,13 @@ use super::problem::MipProblem;
 use super::domain::FEASTOL;
 use super::lp::{LpStatus, SolveLimits, VarStatus};
 use super::solver::Solver;
+
+thread_local! {
+    /// `ENOMOTO_MIP_CLIQUE_CUTS=auto` の、最初の求解 (再スタート前) の判定。再スタートの後の求解が引き継ぐ
+    static CLIQUE_AUTO_FIRST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+    /// `ENOMOTO_MIP_CLIQUE_CUTS=fallback` で clique カットを加えて回す 2 回目のループの中か (時間の上限をループの始めから数える)
+    static CLIQUE_FB_SECOND: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 use super::lp_api::MipLp;
 
 /// LP に加える前のカット (構造変数の係数、右辺、効き目)。
@@ -127,6 +134,102 @@ impl<'a, L: MipLp> Solver<'a, L> {
         chosen.into_iter().map(|(_, c)| c).collect()
     }
 
+    /// clique カット用の衝突グラフ (根で一度だけ作って使い回す)。
+    fn clique_graph_get(&mut self) -> std::rc::Rc<super::clique::CliqueGraph> {
+        let p = self.p;
+        if self.clique_graph.is_none() {
+            let binary: Vec<bool> = (0..p.n).map(|j| p.is_int[j] && self.dom.global_lo[j] >= 0.0 && self.dom.global_up[j] <= 1.0).collect();
+            let g = super::clique::CliqueGraph::build_with(p.n, &p.rows, &p.row_lo, &p.row_up, &binary, &self.dom.global_lo, &self.dom.global_up, &p.conflict_edges);
+            if self.params.verbose && !self.params.submip {
+                let g0 = super::clique::CliqueGraph::build(p.n, &p.rows, &p.row_lo, &p.row_up, &binary, &self.dom.global_lo, &self.dom.global_up);
+                eprintln!("MIP: clique graph: {} edges ({} from rows, probing implications {})", g.num_edges(), g0.num_edges(), p.conflict_edges.len());
+            }
+            self.clique_graph = Some(std::rc::Rc::new(g));
+        }
+        self.clique_graph.clone().unwrap()
+    }
+
+    /// `ENOMOTO_MIP_CLIQUE_CUTS=auto` の判定 (試作): 根の LP 解で破れる clique カットだけを LP に入れて解き直し、目的値の伸びが
+    /// `ENOMOTO_T_MIP_CLIQUE_AUTO_GAIN` (既定 1e-3) x max(1, |目的値|) を超えれば使う。試した行は外し、LP の状態を戻す。
+    /// drayage-25-23 では 99718.79 -> 100121.99 (4e-3、HiGHS の根の下界と同じ)。clique カットを常に使うと misc07 の根は
+    /// 1535.54 -> 1536.21 しか上がらないのに木が変わって 7 秒 -> 10 秒に遅くなる
+    fn clique_trial(&mut self, root_iters: u64) -> bool {
+        let t0 = std::time::Instant::now();
+        let Some((obj0, obj1, nfrac0, nfrac1, ncuts)) = self.clique_trial_lp(root_iters) else {
+            if self.params.verbose {
+                eprintln!("MIP: clique trial: no violated clique cuts; not used ({:.2}s)", t0.elapsed().as_secs_f64());
+            }
+            return false;
+        };
+        let thr = tunable!("ENOMOTO_T_MIP_CLIQUE_AUTO_GAIN", 1e-3, f64) * obj0.abs().max(1.0);
+        // `ENOMOTO_T_MIP_CLIQUE_AUTO_FRAC` = r (> 0): 分数の列の数が r 倍以下に減るときも使う (目的値が既に最適値で動かない
+        // drayage-100-23 でも、clique カットで LP 解が整数に近づき根の RENS が最適解を見つける)
+        let frac_r = tunable!("ENOMOTO_T_MIP_CLIQUE_AUTO_FRAC", 0.0, f64);
+        let on = obj1 - obj0 > thr || (frac_r > 0.0 && (nfrac1 as f64) <= frac_r * nfrac0 as f64);
+        if self.params.verbose {
+            eprintln!("MIP: clique trial: {ncuts} cuts, LP {obj0:.10e} -> {obj1:.10e}, fractional {nfrac0} -> {nfrac1}; {} ({:.2}s)", if on { "used" } else { "not used" }, t0.elapsed().as_secs_f64());
+        }
+        on
+    }
+
+    /// 今の LP 解で破れる clique カットだけを LP に入れて解き直し、(目的値, 入れた後の目的値, 分数の列の数, 入れた後の数, カットの数)
+    /// を返す (破れるカットがなければ `None`)。試した行は外し、LP の状態を戻す
+    fn clique_trial_lp(&mut self, root_iters: u64) -> Option<(f64, f64, usize, usize, usize)> {
+        let g = self.clique_graph_get();
+        let x = self.lp.col_values();
+        let cuts = g.separate(&x, tunable!("ENOMOTO_T_MIP_CLIQUE_MAX", 100usize, usize));
+        if cuts.is_empty() {
+            return None;
+        }
+        let obj0 = self.lp.objective();
+        let nfrac0 = self.fractional(&x).len();
+        let saved = self.lp.save_state();
+        let m0 = self.lp.num_rows();
+        let rows: Vec<(Vec<(usize, f64)>, f64, f64)> = cuts.iter().map(|c| (c.coefs.clone(), f64::NEG_INFINITY, c.rhs)).collect();
+        self.lp.add_rows(&rows);
+        let st = self.lp.solve(&SolveLimits { iteration_limit: 10 * root_iters.max(100) + 10_000, cutoff: f64::INFINITY, deadline: self.deadline });
+        let obj1 = if st == LpStatus::Optimal { self.lp.objective() } else { obj0 };
+        let nfrac1 = if st == LpStatus::Optimal { self.fractional(&self.lp.col_values()).len() } else { nfrac0 };
+        let mut remove = vec![false; self.lp.num_rows()];
+        for r in remove.iter_mut().skip(m0) {
+            *r = true;
+        }
+        self.lp.delete_rows(&remove);
+        self.lp.restore_state(&saved);
+        Some((obj0, obj1, nfrac0, nfrac1, cuts.len()))
+    }
+
+    /// `ENOMOTO_MIP_CLIQUE_CUTS=fallback` の判定 (試作): 根の切除平面ループを clique カットなしで回し終えた LP で、破れる clique
+    /// カットだけを入れた LP の伸び g_c を測り、ループ全体の伸び g_d (clique なしのカットでの伸び) と比べる。
+    /// g_c > `ENOMOTO_T_MIP_CLIQUE_FB_GAIN` (既定 1e-4) x max(1, |目的値|) かつ g_c > `ENOMOTO_T_MIP_CLIQUE_FB_RATIO` (既定 0.5) x g_d
+    /// なら使う (ほかのカットで伸びない問題でだけ使う)。drayage-25-23 は g_d = 0、30n20b8 は g_d = 15 に対し g_c は 1 程度
+    fn clique_fallback_trial(&mut self, root_iters: u64, first_obj: f64) -> bool {
+        let t0 = std::time::Instant::now();
+        let Some((obj0, obj1, nfrac0, nfrac1, ncuts)) = self.clique_trial_lp(root_iters) else {
+            if self.params.verbose {
+                eprintln!("MIP: clique fallback: no violated clique cuts; not used ({:.2}s)", t0.elapsed().as_secs_f64());
+            }
+            return false;
+        };
+        let (gc, gd) = (obj1 - obj0, obj0 - first_obj);
+        let scale = obj0.abs().max(1.0);
+        let on = gc > tunable!("ENOMOTO_T_MIP_CLIQUE_FB_GAIN", 1e-4, f64) * scale && gc > tunable!("ENOMOTO_T_MIP_CLIQUE_FB_RATIO", 0.5, f64) * gd;
+        // `ENOMOTO_T_MIP_CLIQUE_FB_FRAC` = r (> 0): ほかのカットで目的値がまったく動かず (g_d <= 1e-9)、clique カットで分数の列の数が
+        // r 倍以下に減るときも使う (drayage-100-23 は根の LP 値が最適値で g_c = 0。clique カットで LP 解が整数に近づき根の RENS が効く)
+        let frac_r = tunable!("ENOMOTO_T_MIP_CLIQUE_FB_FRAC", 0.0, f64);
+        let on = on || (frac_r > 0.0 && gd <= 1e-9 * scale && (nfrac1 as f64) <= frac_r * nfrac0 as f64);
+        if self.params.verbose {
+            eprintln!(
+                "MIP: clique fallback: {ncuts} cuts, LP {obj0:.10e} -> {obj1:.10e} (g_c {:.3e}, g_d {:.3e} relative), fractional {nfrac0} -> {nfrac1}; {} ({:.2}s)",
+                gc / scale,
+                gd / scale,
+                if on { "used" } else { "not used" },
+                t0.elapsed().as_secs_f64()
+            );
+        }
+        on
+    }
+
     /// 根の切除平面ループ。LP は根の最適解の状態で呼ぶこと。終わったときも LP は最適 (でなければ偽)。
     pub(super) fn root_cut_loop(&mut self, root_iters: u64) -> bool {
         let p = self.p;
@@ -135,6 +238,25 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut prev_obj = self.lp.objective();
         let mut prev_nfrac = self.fractional(&self.lp.col_values()).len();
         let first_obj = prev_obj;
+        if env_str!("ENOMOTO_MIP_CLIQUE_CUTS") == Some("auto") && self.clique_auto.is_none() && !self.params.submip {
+            // 再スタートの後は最初の求解の判定を引き継ぐ (再スタートの根は前の根のカットを持つので、試しても伸びない)
+            let on = match CLIQUE_AUTO_FIRST.with(|c| c.get()) {
+                Some(v) if self.params.restarts > 0 => v,
+                _ => self.clique_trial(root_iters),
+            };
+            if self.params.restarts == 0 {
+                CLIQUE_AUTO_FIRST.with(|c| c.set(Some(on)));
+            }
+            self.clique_auto = Some(on);
+        }
+        // `fallback`: ループの後で判定する ([`Self::clique_fallback_trial`])。再スタートの後は最初の求解の判定を引き継ぐ
+        let mut clique_fb = env_str!("ENOMOTO_MIP_CLIQUE_CUTS") == Some("fallback") && self.clique_auto.is_none() && !self.params.submip;
+        if clique_fb && self.params.restarts > 0 {
+            if let Some(v) = CLIQUE_AUTO_FIRST.with(|c| c.get()) {
+                self.clique_auto = Some(v);
+                clique_fb = false;
+            }
+        }
         // HiGHS の停滞判定 (`ENOMOTO_MIP_CUT_STALL_HIGHS`, HighsMipSolverData::evaluateRootNode): 最初の LP 解からの
         // 移動方向の平均と今の移動の内積 (進み具合) を平滑化し、それが 1% 以上伸びず、かつ目的値の伸びが前のラウンドまでの
         // 伸びの 0.1% 以下なら停滞。3 回続けて停滞したら止める (目的値が動かなくても LP 解が動いている間は続ける)。
@@ -175,6 +297,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 第 2 段階が 88 ラウンド回って根が 6 秒伸び、9.2 秒 -> 17.2 秒になった)
         // 上限はこのスレッドの CPU 時間で測る ([`super::cap_clock`]。求解の開始からの分は `cpu0` から)
         let t_loop0 = super::cap_clock();
+        // fallback の 2 回目のループ: 1 回目で根のカットの時間の上限 (`ENOMOTO_T_MIP_CUT_TIME_FRAC`) を使い切っていても回るよう、
+        // 上限をこのループの始めから数える (drayage-25-23 では 1 回目に 6.9 秒かかり、2 回目が 1 ラウンドも回らなかった)
+        let cap_base = if CLIQUE_FB_SECOND.with(|c| c.get()) && env_str!("ENOMOTO_MIP_CLIQUE_FB_SHARED_CAP").is_none() { t_loop0 } else { self.cpu0 };
         let mut phase2_deadline = f64::INFINITY;
         let mut round_ctr = 0usize;
         // 固定費用ネットワーク型 (連続変数のほぼ全てに VUB `x <= u y` の 2 非零の行があり、その行が大半) では、根のカット選択を
@@ -210,6 +335,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut obj_hist: Vec<f64> = Vec::new();
         loop {
             self.poll_fj_thread();
+            if self.root_gap_closed() {
+                break;
+            }
             if round_ctr >= max_rounds {
                 let k = obj_hist.len();
                 let extend = adapt_rounds
@@ -228,10 +356,24 @@ impl<'a, L: MipLp> Solver<'a, L> {
             round_ctr += 1;
             let now = super::cap_clock();
             let now = if env_str!("ENOMOTO_MIP_SEP_COUNT_CPU").is_some() { now + self.sep_par_cpu } else { now };
-            if self.time_up() || now - self.cpu0 > time_cap || (phase2 && now - t_loop0 > phase2_deadline && !heavy) || stopped(&job) {
+            if self.time_up() || now - cap_base > time_cap || (phase2 && now - t_loop0 > phase2_deadline && !heavy) || stopped(&job) {
                 break;
             }
             self.bg_cut_rounds = round_ctr;
+            // `ENOMOTO_T_MIP_CLIQUE_FB_EARLY` = k (> 0): fallback の判定を、k ラウンド回っても目的値がまったく動かないときは
+            // k ラウンド目で行い、使うならこのループの続きで clique カットを加える (drayage-25-23 では clique なしの 6 ラウンドに
+            // 6.5 秒かかる)。ここで使わないと決まらなければループの後でもう一度判定する
+            let fb_early = tunable!("ENOMOTO_T_MIP_CLIQUE_FB_EARLY", 0usize, usize);
+            if clique_fb && fb_early > 0 && round == fb_early && job.is_none() && self.lp.objective() - first_obj <= 1e-9 * self.lp.objective().abs().max(1.0) {
+                if self.clique_fallback_trial(root_iters, first_obj) {
+                    if self.params.restarts == 0 {
+                        CLIQUE_AUTO_FIRST.with(|c| c.set(Some(true)));
+                    }
+                    self.clique_auto = Some(true);
+                    clique_fb = false;
+                    stall = 0;
+                }
+            }
             let x = self.lp.col_values();
             if self.fractional(&x).is_empty() {
                 break;
@@ -241,7 +383,28 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 競わせない)。0 なら同じ枠で選ぶ。40 問: 0 (既定) 19 問 27.70、10 は 17 問 28.14、25 は 17 問 27.83 (rout・neos5 が
             // 時間切れ、mik-250 47.9 -> 33-40 秒)。既定では使わない
             let face_quota = tunable!("ENOMOTO_T_MIP_FACE_MAX_CUTS", 0usize, usize);
-            let (mut cands, fcands) = self.separate_face_split(&x, false);
+            let (mut cands, mut fcands) = self.separate_face_split(&x, false);
+            // `ENOMOTO_MIP_CUTSEL_FACE_ANCHOR` (実験的): 面の頂点からのカットの効き目はその頂点で測ったもので、今の LP 解は
+            // 切らないことがある。それが最良のスコアになると、質の閾値 (最良の 50%) で今の頂点を切るカットが全部落ち、
+            // 選んだ面のカットを足しても LP が動かず (効いていないので外され、次のラウンドでまた選ばれる) 停滞判定で止まる
+            // (roll3000: 今の解での活動量 0.068 の x818 + x831 <= 1 が効き目 0.38 で毎ラウンド 1 本だけ選ばれる)。
+            // 1: 質の閾値の基準 (最良のスコア) を今の頂点の候補だけで決める。2: 加えて面の候補の効き目を今の解で測り直し、
+            // 今の解を切らないものは捨てる
+            let face_anchor = if self.params.submip || face_quota > 0 { 0 } else { tunable!("ENOMOTO_MIP_CUTSEL_FACE_ANCHOR", 0usize, usize) };
+            if face_anchor >= 2 {
+                fcands.retain_mut(|c| {
+                    let act: f64 = c.coefs.iter().map(|&(j, v)| v * x[j]).sum();
+                    let norm = c.coefs.iter().map(|&(_, v)| v * v).sum::<f64>().sqrt();
+                    c.efficacy = (act - c.rhs) / norm.max(1e-300);
+                    act - c.rhs > 1e-6 * (1.0 + c.rhs.abs()) && c.efficacy >= 1e-5
+                });
+            }
+            let anchor = if face_anchor >= 1 {
+                let cnorm = p.cost.iter().map(|c| c * c).sum::<f64>().sqrt();
+                cands.iter().filter(|c| !c.forced).map(|c| cut_score(c, p, cnorm)).fold(None, |m: Option<f64>, v| Some(m.map_or(v, |m| m.max(v))))
+            } else {
+                None
+            };
             let mut face_cands: Vec<Candidate> = Vec::new();
             if face_quota > 0 {
                 face_cands = fcands;
@@ -284,6 +447,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 self.select_cuts_highs(cands, max_cuts, &x, maxpar)
             } else if fc_relax {
                 select_cuts_hybrid_with(cands, max_cuts, p, tunable!("ENOMOTO_T_CUTSEL_FC_MIN_REL", 0.0, f64), tunable!("ENOMOTO_T_CUTSEL_FC_MAXPAR", 0.9, f64))
+            } else if face_anchor >= 1 && env_str!("ENOMOTO_MIP_CUTSEL_OLD").is_none() {
+                select_cuts_hybrid_anchor(cands, max_cuts, p, tunable!("ENOMOTO_T_CUTSEL_MIN_REL", 0.5, f64), tunable!("ENOMOTO_T_CUTSEL_MAXPAR", 0.3, f64), anchor)
             } else {
                 select_cuts(cands, max_cuts, p)
             };
@@ -506,6 +671,20 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         self.remove_inactive_cuts();
         let st = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
+        if clique_fb && st == LpStatus::Optimal && job.is_none() && !self.time_up() {
+            let on = self.clique_fallback_trial(root_iters, first_obj);
+            if self.params.restarts == 0 {
+                CLIQUE_AUTO_FIRST.with(|c| c.set(Some(on)));
+            }
+            self.clique_auto = Some(on);
+            if on {
+                // clique カットを加えてループを続ける (2 回目のループは判定しない)
+                CLIQUE_FB_SECOND.with(|c| c.set(true));
+                let ok = self.root_cut_loop(root_iters);
+                CLIQUE_FB_SECOND.with(|c| c.set(false));
+                return ok;
+            }
+        }
         if !self.params.submip && st == LpStatus::Optimal && job.is_none() {
             super::record_root_bound(self.lp.objective() + p.offset);
         }
@@ -705,6 +884,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return false;
         }
         let rows: Vec<(Vec<(usize, f64)>, f64, f64)> = chosen.into_iter().map(|c| (c.coefs, f64::NEG_INFINITY, c.rhs)).collect();
+        // 加えるカットの非零の数の平均を効き目で続けるノードの分離の密度の判定 ([`Solver::nca_dense`]) に入れる
+        let d = rows.iter().map(|r| r.0.len()).sum::<usize>() as f64 / rows.len() as f64;
+        self.nca_cut_nnz = Some(self.nca_cut_nnz.map_or(d, |e| 0.9 * e + 0.1 * d));
         // カットはプールにも入れ (他のノードで違反すれば戻る)、このノードで効いていないカットは外してから加える
         // (HiGHS の aging と同じく LP を小さく保つ。外したカットもプールにあれば戻せる)
         if env_str!("ENOMOTO_MIP_NODE_CUTS_KEEP").is_none() {
@@ -1865,17 +2047,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // ほとんど変わらず、10teams では根の LP 解が変わって根の被約費用ヒューリスティクスが解を見つけられなくなった
         // (13 問 / 幾何平均 30.57 に悪化)。ENOMOTO_MIP_CLIQUE_CUTS=1 で使う。プロービングの含意を辺に加えても (misc07 の辺は
         // 2198 -> 4760、他の問題はほぼ増えない) 40 問で 20 問 28.11 -> 17 問 30.13 (10teams・rout・misc07 が時間切れ)
-        if env_str!("ENOMOTO_MIP_CLIQUE_CUTS").is_some() {
-            if self.clique_graph.is_none() {
-                let binary: Vec<bool> = (0..p.n).map(|j| p.is_int[j] && self.dom.global_lo[j] >= 0.0 && self.dom.global_up[j] <= 1.0).collect();
-                let g = super::clique::CliqueGraph::build_with(p.n, &p.rows, &p.row_lo, &p.row_up, &binary, &self.dom.global_lo, &self.dom.global_up, &p.conflict_edges);
-                if self.params.verbose && !self.params.submip {
-                    let g0 = super::clique::CliqueGraph::build(p.n, &p.rows, &p.row_lo, &p.row_up, &binary, &self.dom.global_lo, &self.dom.global_up);
-                    eprintln!("MIP: clique graph: {} edges ({} from rows, probing implications {})", g.num_edges(), g0.num_edges(), p.conflict_edges.len());
-                }
-                self.clique_graph = Some(std::rc::Rc::new(g));
-            }
-            let g = self.clique_graph.clone().unwrap();
+        // `ENOMOTO_MIP_CLIQUE_CUTS=root` (試作): 根の分離だけで使う (ノードの分離 `light` では使わない)。drayage-25-23 の根の
+        // 下界は 1 ラウンド目で 99718.79 -> 100121.99 (HiGHS と同じ。HiGHS も clique と implied bound の分離を止めると根で動かない)
+        // `ENOMOTO_MIP_CLIQUE_CUTS=auto` (試作): 根で一度だけ clique カットだけを入れた LP を解き、下界が上がる問題でだけ使う
+        // ([`Self::clique_trial`])
+        let clique_mode = env_str!("ENOMOTO_MIP_CLIQUE_CUTS");
+        // `ENOMOTO_MIP_CLIQUE_CUTS=fallback` (試作): 根のループを clique なしで回し、ほかのカットで伸びず clique カットで伸びる問題でだけ
+        // 根の続きのラウンドで使う ([`Self::clique_fallback_trial`])。ノードでは使わない (`ENOMOTO_MIP_CLIQUE_FB_NODES` で使う)
+        let fb_nodes = env_str!("ENOMOTO_MIP_CLIQUE_FB_NODES").is_some();
+        if clique_mode.is_some_and(|m| !(light && (m == "root" || (m == "fallback" && !fb_nodes))) && ((m != "auto" && m != "fallback") || self.clique_auto == Some(true))) {
+            let g = self.clique_graph_get();
             for raw in g.separate(x, tunable!("ENOMOTO_T_MIP_CLIQUE_MAX", 100usize, usize)) {
                 push(Some(raw), &mut cands, self);
             }
@@ -1948,7 +2129,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 既定は HiGHS の経路集約の移植 (`ENOMOTO_MIP_PATH_OLD` で従来の経路集約)
             // 経路集約: 従来のもの (`ENOMOTO_MIP_PATH_OLD`)、HiGHS の移植 (`ENOMOTO_MIP_PATH_HIGHS_ONLY`)、既定は両方
             // (h80x6320d・rout は移植で根の下界が上がり、mik-250 は従来のものの方が強い)
-            let old_only = env_str!("ENOMOTO_MIP_PATH_OLD").is_some() || light;
+            // `ENOMOTO_MIP_FC_NODE_PATH_HIGHS`: 固定費用ネットワーク型の毎ノードの分離では、ノードでも HiGHS の移植を使う
+            let node_highs = light && self.fc_node_sep && env_str!("ENOMOTO_MIP_FC_NODE_PATH_HIGHS").is_some();
+            let old_only = env_str!("ENOMOTO_MIP_PATH_OLD").is_some() || (light && !node_highs);
             let highs_only = env_str!("ENOMOTO_MIP_PATH_HIGHS_ONLY").is_some();
             if !old_only {
                 self.path_aggregation_highs(&vars, &lp_rows, &mut cands, &mut push);
@@ -2648,20 +2831,42 @@ fn select_cuts_hybrid(cands: Vec<Candidate>, max_cuts: usize, p: &MipProblem) ->
 
 /// [`select_cuts_hybrid`] の質の閾値 (最良の何倍未満を捨てるか) と平行度の上限を指定する版。
 fn select_cuts_hybrid_with(cands: Vec<Candidate>, max_cuts: usize, p: &MipProblem, min_rel: f64, maxpar: f64) -> Vec<Candidate> {
+    select_cuts_hybrid_anchor(cands, max_cuts, p, min_rel, maxpar, None)
+}
+
+/// [`select_cuts_hybrid`] のスコア。
+fn cut_score(c: &Candidate, p: &MipProblem, cnorm: f64) -> f64 {
+    // 密なカットを避ける (`ENOMOTO_T_CUTSEL_DENSITY_EXP` = α: スコアを 非零の数^α で割る。HiGHS は効いている
+    // 非零の数で割る (α = 1 相当)。密なカットは LP の反復が増え、カットの行から作る次のカットも密になる)
+    cut_quality(c, p, cnorm) / (c.coefs.len().max(1) as f64).powf(tunable!("ENOMOTO_T_CUTSEL_DENSITY_EXP", 0.0, f64))
+}
+
+/// [`select_cuts_hybrid_with`] の、質の閾値の基準のスコアを `anchor` で与えられる版 (`None` なら候補の最良のスコア)。
+fn select_cuts_hybrid_anchor(cands: Vec<Candidate>, max_cuts: usize, p: &MipProblem, min_rel: f64, maxpar: f64, anchor: Option<f64>) -> Vec<Candidate> {
     let cnorm = p.cost.iter().map(|c| c * c).sum::<f64>().sqrt();
-    let density_exp = tunable!("ENOMOTO_T_CUTSEL_DENSITY_EXP", 0.0, f64);
     let mut scored: Vec<(f64, f64, Candidate)> = cands
         .into_iter()
         .map(|c| {
             let nc = c.coefs.iter().map(|&(_, v)| v * v).sum::<f64>().sqrt();
-            // 密なカットを避ける (`ENOMOTO_T_CUTSEL_DENSITY_EXP` = α: スコアを 非零の数^α で割る。HiGHS は効いている
-            // 非零の数で割る (α = 1 相当)。密なカットは LP の反復が増え、カットの行から作る次のカットも密になる)
-            let score = cut_quality(&c, p, cnorm) / (c.coefs.len().max(1) as f64).powf(density_exp);
-            (score, nc, c)
+            (cut_score(&c, p, cnorm), nc, c)
         })
         .collect();
     scored.sort_by(|a, b| b.0.total_cmp(&a.0));
     let Some(best_score) = scored.first().map(|s| s.0) else { return Vec::new() };
+    let best_score = anchor.map_or(best_score, |a| a.min(best_score));
+    if env_str!("ENOMOTO_MIP_DEBUG_CUTSEL").is_some() {
+        let above = scored.iter().filter(|s| s.0 >= min_rel * best_score).count();
+        let top: Vec<String> = scored
+            .iter()
+            .take(6)
+            .map(|(s, nc, c)| {
+                let objpar = if cnorm > 0.0 && *nc > 0.0 { c.coefs.iter().map(|&(j, v)| v * p.cost[j]).sum::<f64>().abs() / (cnorm * nc) } else { 0.0 };
+                format!("{s:.4}(eff {:.4} op {objpar:.2} nnz {})", c.efficacy, c.coefs.len())
+            })
+            .collect();
+        let max_eff = scored.iter().map(|s| s.2.efficacy).fold(0.0, f64::max);
+        eprintln!("CUTSEL: {} cands, {above} above {min_rel} x best, max eff {max_eff:.4}; top {}", scored.len(), top.join(" "));
+    }
     // 質が最良の 0.9 倍以上の「良い」カットの平行度の上限 (`maxpar` より小さくてもそのまま使う。固定費用型の緩めた選択で
     // maxpar に合わせて 0.9 にすると sp150x300d の根の下界が 65.3 -> 58.0 に下がった)
     let (goodmaxpar, good) = (tunable!("ENOMOTO_T_CUTSEL_GOODMAXPAR", 0.7, f64), 0.9 * best_score);
@@ -2675,6 +2880,8 @@ fn select_cuts_hybrid_with(cands: Vec<Candidate>, max_cuts: usize, p: &MipProble
     // p0201 は候補 130-480 本から 1-4 本しか採らず、25 ラウンドかけても根の下界が伸び切らなかった
     let fill = (tunable!("ENOMOTO_T_CUTSEL_FILL_FRAC", 0.0, f64) * max_cuts as f64).round() as usize;
     let half = scored.len().div_ceil(2);
+    let dbg = env_str!("ENOMOTO_MIP_DEBUG_CUTSEL").is_some();
+    let mut n_par = 0usize;
     let mut chosen: Vec<(f64, Candidate)> = Vec::new();
     let mut rest: Vec<(f64, f64, Candidate)> = Vec::new();
     for (k, (score, nc, c)) in scored.into_iter().enumerate() {
@@ -2692,7 +2899,12 @@ fn select_cuts_hybrid_with(cands: Vec<Candidate>, max_cuts: usize, p: &MipProble
         let parallel = chosen.iter().any(|(nd, d)| sparse_dot(&c.coefs, &d.coefs).abs() > limit * nc * nd);
         if !parallel {
             chosen.push((nc, c));
+        } else {
+            n_par += 1;
         }
+    }
+    if dbg {
+        eprintln!("CUTSEL: chosen {} (parallel rejected {n_par})", chosen.len());
     }
     if chosen.len() < fill {
         for (_, nc, c) in rest {
