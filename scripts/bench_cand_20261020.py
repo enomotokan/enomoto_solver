@@ -13,7 +13,8 @@ sys.path.insert(0, str(REPO / 'scripts'))
 from run_miplib_benchmark import PROBLEMS
 P16 = ("nursesched-sprint02 hypothyroid-k1 ns1116954 neos-950242 drayage-25-23 drayage-100-23 beasleyC3 mc11 physiciansched6-2 "
        "uccase12 neos-2978193-inde neos-911970 mzzv42z neos-960392 roll3000 app1-1").split()
-SHA = subprocess.run(['git', 'rev-parse', '--short=7', 'HEAD'], cwd=REPO, capture_output=True, text=True).stdout.strip() or 'unknown'
+# 結果をコミットすると HEAD が進むので、`ENOMOTO_BENCH_SHA` でファイル名の SHA を固定できる (ビルドしたコミットを渡す)
+SHA = os.environ.get('ENOMOTO_BENCH_SHA') or subprocess.run(['git', 'rev-parse', '--short=7', 'HEAD'], cwd=REPO, capture_output=True, text=True).stdout.strip() or 'unknown'
 name, run = sys.argv[1], sys.argv[2]
 env = dict(os.environ, **dict(a.split('=', 1) for a in sys.argv[3:]))
 logdir = REPO / 'benchmarks' / 'cand_logs'
