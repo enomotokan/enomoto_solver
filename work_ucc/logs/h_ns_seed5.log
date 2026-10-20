@@ -1,0 +1,51 @@
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+MIP ns1116954 has 131991 rows; 12648 cols; 410582 nonzeros; 7482 integer variables (7482 binary)
+Coefficient ranges:
+  Matrix  [1e+00, 1e+01]
+  Cost    [0e+00, 0e+00]
+  Bound   [1e+00, 1e+00]
+  RHS     [1e+00, 1e+01]
+Presolving model
+131871 rows, 11928 cols, 409862 nonzeros 0s
+131865 rows, 11928 cols, 409952 nonzeros 1s
+Presolve reductions: rows 131865(-126); columns 11928(-720); nonzeros 409952(-630) 
+Objective function is integral with scale 1
+
+Solving MIP model with:
+   131865 rows
+   11928 cols (7482 binary, 0 integer, 0 implied int., 4446 continuous, 0 domain fixed)
+   409952 nonzeros
+   Thread count 4 (of 4 threads). Using 1 max workers. Parallel search off
+
+Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+     I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+     S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+     Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+         0       0         0   0.00%   0               inf                  inf        0      0      0         0     3.2s
+         0       0         0   0.00%   0               inf                  inf        0      0      3     16156    60.0s
+
+Solving report
+  Model             ns1116954
+  Status            Time limit reached
+  Primal bound      inf
+  Dual bound        0
+  Gap               inf
+  P-D integral      0
+  Solution status   -
+  Timing            60.03
+                    1.57 (Presolve)
+                    58.46 (Solve)
+                    0.00 (Postsolve)
+  Max sub-MIP depth 0
+  Nodes             0
+  Repair LPs        0
+  LP iterations     16156
+                    0 (strong br.)
+                    0 (separation)
+                    0 (heuristics)
+RESULT {"status": "Time limit reached", "objective": Infinity, "bound": 0.0, "nodes": 0, "time": 60.0510513239999}

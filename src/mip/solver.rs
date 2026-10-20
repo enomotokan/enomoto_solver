@@ -126,6 +126,8 @@ thread_local! {
     /// カットを強める求解の、主の根の LP の反復数 (カットの LP の反復上限に使う)
     pub(super) static BG_ROOT_ITERS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     pub(super) static CUT_JOB: std::cell::RefCell<Option<std::sync::Arc<CutJob>>> = const { std::cell::RefCell::new(None) };
+    /// カットを強める求解の根の LP の初めの基底 (主の根の LP の最後の基底。`ENOMOTO_MIP_BG_CUTS_BASIS`)
+    static BG_ROOT_BASIS: std::cell::RefCell<Option<super::lp::Basis>> = const { std::cell::RefCell::new(None) };
     /// 診断用: 既知の最適解 (縮約後の空間、`ENOMOTO_MIP_DEBUG_SOL`)。この解を含むノードが
     /// 枝刈りされたら理由を表示する (SCIP の debug solution と同様)。
     pub(crate) static DEBUG_SOL: std::cell::RefCell<Option<Vec<f64>>> = const { std::cell::RefCell::new(None) };
@@ -2281,7 +2283,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
         }
+        if self.snap.is_some() && CUT_JOB.with(|j| j.borrow().is_some()) {
+            if let Some(b) = BG_ROOT_BASIS.with(|s| s.borrow_mut().take()) {
+                if b.col.len() == self.p.n && b.row.len() == self.lp.num_rows() {
+                    self.lp.set_basis(&b);
+                }
+            }
+        }
         let mut root_st = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
+        if self.params.verbose && self.snap.is_some() {
+            eprintln!("MIP: [snapshot] root LP {root_st:?} ({} iters, {:.2}s)", self.lp.total_iterations(), self.start.elapsed().as_secs_f64());
+        }
         if matches!(root_st, LpStatus::Error | LpStatus::IterationLimit) && !self.time_up() {
             // 結論を出せなかった (数値的な破綻など): 内点法 + クロスオーバーだけで解き直す
             if self.params.verbose {
@@ -2398,14 +2410,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let snap = self.make_snapshot(&Portfolio::new(), &mut None, false);
                 let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());
                 let threads = tunable!("ENOMOTO_T_MIP_BG_CUTS_THREADS", (self.params.threads - 1).max(1), usize);
-                let params = MipParams { time_limit: remaining, node_limit: u64::MAX, verbose: false, threads, ..self.params };
+                let params = MipParams { time_limit: remaining, node_limit: u64::MAX, verbose: env_str!("ENOMOTO_MIP_BG_CUTS_LOG").is_some(), threads, ..self.params };
                 let j2 = job.clone();
                 let ri = root_iters;
+                // `ENOMOTO_MIP_BG_CUTS_BASIS`: 主の根の LP の最後の基底 (写しの問題の行 + カットの行と同じ並び) を渡す。渡さないと
+                // 写しの根の LP は基底なしで解き直しになり、uccase12 (88600 行) では 38 秒たっても終わらず、主がその終わりを
+                // 待って 23〜27 秒止まっていた (LP は止めの合図を見ない)
+                let bg_basis = if env_str!("ENOMOTO_MIP_BG_CUTS_BASIS").is_some() { Some(self.lp.basis()) } else { None };
                 let handle = std::thread::Builder::new()
                     .stack_size(64 << 20)
                     .spawn(move || {
                         CUT_JOB.with(|j| *j.borrow_mut() = Some(j2));
                         BG_ROOT_ITERS.with(|c| c.set(ri));
+                        BG_ROOT_BASIS.with(|b| *b.borrow_mut() = bg_basis);
                         let _ = solve_worker(snap, None, params);
                     })
                     .expect("failed to spawn the cut thread");
@@ -2727,8 +2744,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let res = bg.finish();
             let wait = t0.elapsed().as_secs_f64();
             // 根の LP を解き直しておく (ヒューリスティクスの後で状態が戻っていることを確かめる)
+            let it0 = self.lp.total_iterations();
             let st0 = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
             let cur = self.lp.objective() + self.p.offset;
+            if self.params.verbose {
+                eprintln!("MIP: background cuts: root LP re-solved before replacing the cuts: {st0:?}, {} iters ({:.2}s)", self.lp.total_iterations() - it0, self.start.elapsed().as_secs_f64());
+            }
             match res {
                 Some((rows, obj, rounds)) if obj > cur + 1e-9 * cur.abs().max(1.0) && st0 == LpStatus::Optimal => {
                     let m0 = self.p.m;
