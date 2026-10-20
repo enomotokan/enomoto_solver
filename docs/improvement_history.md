@@ -9257,9 +9257,9 @@ beasleyC3・mc11 の調査 (`analysis/beasleyC3_mc11_20261019.md`) から。HiGH
   - P1 `ENOMOTO_MIP_CLIQUE_CUTS=fallback` + `ENOMOTO_T_MIP_CLIQUE_FB_FRAC=0.9` (ほかのカットで下界が上がらないときだけクリークカット):
     drayage-25-23 が 2 組とも解ける。40 問は 2 組とも 25 / 25・不一致 0。
   - P2 `ENOMOTO_MIP_FJ_FEAS_EXTEND` + `ENOMOTO_MIP_ROOT_GAP_EXIT`: ns1116954 が 2 組とも解ける。40 問は 25 / 25・不一致 0。
-  - P3 physiciansched6-2 の前処理 (`INEQ_SINGLETON`・`DUAL_UB`・`CS_OBJ_PIVOT`・`FJ_LP_REPAIR`): physiciansched6-2 に解 (49524) が
-    出るが解けない。
-  - P4 (P1〜P3 全部): 16 問で 4 → 6 問だが uccase12 の暫定解が 798739 (最適値 11507) と悪くなる回がある。
+  - P3 physiciansched6-2 の前処理 (`INEQ_SINGLETON`・`DUAL_UB`・`CS_OBJ_PIVOT`・`FJ_LP_REPAIR`): physiciansched6-2 に解 (49524〜) が
+    出るが解けない。uccase12 の暫定解を P3 を含む 3 回とも 798739 (最適値 11507) にし、1 組で 40 問の qiu・eil33-2 を落とす。既定にしない。
+  - P4 (P1〜P3 全部): 16 問で 2 組とも +2 問 (3 → 5、4 → 6) だが P3 の uccase12 の悪化を含む。
   手元の 16 スレッドで確かめてから既定にするか決める。
 - 不採用 (既定では使わない、試作のまま残す): `ENOMOTO_MIP_FJ_POOR_NOINC` (hypothyroid-k1 で最適値の解が出るが noswot・
   nursesched-sprint02・qiu を落とす)、`ENOMOTO_MIP_SYM_LEX_CANON`、`ENOMOTO_MIP_FC_NODE_SEP2` (beasleyC3 を 2 回中 1 回)、
