@@ -363,6 +363,10 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) cut_norm: std::collections::HashMap<u64, f64>,
     /// 効いていたカットを双対値でまとめた行の番号 ([`Self::merge_active_cuts`])。年齢で外さない。
     pub(super) merged_cuts: std::collections::HashSet<u64>,
+    /// `ENOMOTO_MIP_TREE_SEP` のラウンドで加えたカットの番号 (`ENOMOTO_T_MIP_TREE_SEP_CUT_AGE` で年齢の上限を別にする)
+    pub(super) ts_cut_ids: std::collections::HashSet<u64>,
+    /// `ENOMOTO_MIP_TREE_SEP`: 最初に分離を考えた取り出したノードでの LP の行数 (`ENOMOTO_T_MIP_TREE_SEP_HEAVY` の基準)
+    pub(super) ts_rows0: usize,
     /// 最適面の頂点での分離 (`separate_face_split`) で、今の頂点の tableau 行 (基底変数ごとの、集約した行とその列の
     /// LP 値のハッシュ)。`tab_memo_mode`: 0 = 使わない、1 = 記録する、2 = 照合する。
     pub(super) tab_memo: std::collections::HashMap<usize, u64>,
@@ -1451,6 +1455,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         cut_ids: Vec::new(),
         cut_norm: std::collections::HashMap::new(),
         merged_cuts: std::collections::HashSet::new(),
+        ts_cut_ids: std::collections::HashSet::new(),
+        ts_rows0: 0,
         tab_memo: std::collections::HashMap::new(),
         tab_memo_mode: 0,
         tab_memo_stats: (0, 0),
@@ -1854,7 +1860,20 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.nca_dense() {
             return depth_rule;
         }
-        if depth_rule || self.nca_ema >= tunable!("ENOMOTO_T_MIP_TREE_SEP_RATE", 0.2, f64) {
+        // `ENOMOTO_T_MIP_TREE_SEP_HEAVY` = h (> 0): LP の行が最初の取り出したノードの h 倍を超えて重くなったら、毎回分離するのに
+        // 要る効いた割合を `ENOMOTO_T_MIP_TREE_SEP_HEAVY_RATE` (既定 0.4) に上げる。noswot では分離そのものは軽い (経過時間の 3%) が、
+        // 残ったカットでノードの LP が 420 -> 590 行・27 -> 35 反復と重くなり遅くなった (効いた割合 0.19〜0.32)。neos-911970 は
+        // 行が 2 倍になるが割合 0.44〜0.57 で、重くなっても続ける価値がある
+        if self.ts_rows0 == 0 {
+            self.ts_rows0 = self.lp.num_rows().max(1);
+        }
+        let h = tunable!("ENOMOTO_T_MIP_TREE_SEP_HEAVY", 0.0, f64);
+        let rate = if h > 0.0 && self.lp.num_rows() as f64 > h * self.ts_rows0 as f64 {
+            tunable!("ENOMOTO_T_MIP_TREE_SEP_HEAVY_RATE", 0.4, f64)
+        } else {
+            tunable!("ENOMOTO_T_MIP_TREE_SEP_RATE", 0.2, f64)
+        };
+        if depth_rule || self.nca_ema >= rate {
             return true;
         }
         self.nca_stats[2] += 1;
@@ -4193,7 +4212,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                     ts_last = node_obj;
                     let t_nc = Instant::now();
+                    let r0 = self.lp.num_rows();
                     let added = self.node_cut_round(&x);
+                    if added {
+                        self.mark_tree_sep_cuts(r0);
+                    }
                     self.node_cut_secs += t_nc.elapsed().as_secs_f64();
                     self.node_sep_stats[0] += 1;
                     self.node_sep_stats[1] += added as u64;
