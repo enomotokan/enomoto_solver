@@ -357,6 +357,20 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 break;
             }
             self.bg_cut_rounds = round_ctr;
+            // `ENOMOTO_T_MIP_CLIQUE_FB_EARLY` = k (> 0): fallback の判定を、k ラウンド回っても目的値がまったく動かないときは
+            // k ラウンド目で行い、使うならこのループの続きで clique カットを加える (drayage-25-23 では clique なしの 6 ラウンドに
+            // 6.5 秒かかる)。ここで使わないと決まらなければループの後でもう一度判定する
+            let fb_early = tunable!("ENOMOTO_T_MIP_CLIQUE_FB_EARLY", 0usize, usize);
+            if clique_fb && fb_early > 0 && round == fb_early && job.is_none() && self.lp.objective() - first_obj <= 1e-9 * self.lp.objective().abs().max(1.0) {
+                if self.clique_fallback_trial(root_iters, first_obj) {
+                    if self.params.restarts == 0 {
+                        CLIQUE_AUTO_FIRST.with(|c| c.set(Some(true)));
+                    }
+                    self.clique_auto = Some(true);
+                    clique_fb = false;
+                    stall = 0;
+                }
+            }
             let x = self.lp.col_values();
             if self.fractional(&x).is_empty() {
                 break;
