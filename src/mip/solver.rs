@@ -212,7 +212,9 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// `ENOMOTO_MIP_FC_NODE_SEP2`: [`Self::fc_node_sep`] の分離を、待ち行列から取り出したノードでプールのカットを戻した後にも
     /// 行い、LP の値が伸びる間ラウンドを繰り返す (HiGHS の `HighsSeparation::separate`)。評価中
     pub(super) fc_sep2: bool,
-    /// `ENOMOTO_MIP_TREE_SEP`: 木の中の分離の規則をまとめた試作 ([`Solver::tree_sep_start`])。評価中
+    /// 木の中の分離の規則 ([`Solver::tree_sep_start`]、既定で使う。`ENOMOTO_MIP_NO_TREE_SEP` で使わない): 待ち行列から取り出した
+    /// ノードでもプールのラウンドの後に分離し、LP の値が伸びる間ラウンドを繰り返す。40 問 + 16 問 (4 スレッド・60 秒、2 組) で
+    /// neos-911970 が 2 組とも解け (既定は時間切れ)、40 問の解けた数 24/25 -> 26/26、目的値の不一致 0
     pub(super) tree_sep: bool,
     /// [`Self::tree_sep`] で、固定費用ネットワーク型ならノードの分離でも経路集約の始点を使う
     pub(super) tree_sep_fc: bool,
@@ -1380,8 +1382,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
             && super::separation::fixed_charge_network_for_nodes(p),
         fc_adapt: env_str!("ENOMOTO_MIP_FC_NODE_SEP_ADAPT").is_some(),
         fc_sep2: env_str!("ENOMOTO_MIP_FC_NODE_SEP2").is_some(),
-        tree_sep: !params.submip && env_str!("ENOMOTO_MIP_TREE_SEP").is_some(),
-        tree_sep_fc: !params.submip && env_str!("ENOMOTO_MIP_TREE_SEP").is_some() && env_str!("ENOMOTO_MIP_TREE_SEP_NO_FC").is_none() && super::separation::fixed_charge_network_for_nodes(p),
+        tree_sep: !params.submip && env_str!("ENOMOTO_MIP_NO_TREE_SEP").is_none(),
+        tree_sep_fc: !params.submip && env_str!("ENOMOTO_MIP_NO_TREE_SEP").is_none() && env_str!("ENOMOTO_MIP_TREE_SEP_NO_FC").is_none() && super::separation::fixed_charge_network_for_nodes(p),
         fc_stats: (0, 0.0, 0, 0),
         fc_probe: 0,
         last_rins: 0,
