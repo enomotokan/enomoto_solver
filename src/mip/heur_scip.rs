@@ -388,17 +388,21 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 Some(step) => step * ((lb - p.offset) / step - 1e-6).ceil() + p.offset + (1e-6 * lb.abs().max(1.0)).min(0.5 * step),
                 None => lb + 1e-6 * lb.abs().max(1.0),
             };
-            let cutoff = target.min(self.prune_limit());
+            // `ENOMOTO_MIP_LPFACE_TIGHT=nocut`: 打ち切り値は変えない (固定率の下限・時間・ノードの上限だけ変える。切り分け用)
+            let cutoff = if env_str!("ENOMOTO_MIP_LPFACE_TIGHT").is_some_and(|v| v == "nocut") { self.prune_limit() } else { target.min(self.prune_limit()) };
             let mut sub = p.clone();
             sub.col_lo = lo;
             sub.col_up = up;
-            let keep = self.submip_time_frac;
+            // サブ MIP の時間は残りの `ENOMOTO_T_MIP_LPFACE_TIME_FRAC` (最大 `ENOMOTO_T_MIP_LPFACE_TIME_MAX`、既定 6 秒 (通常と同じ))、
+            // ノードの上限は `ENOMOTO_T_MIP_LPFACE_NODES` (既定 500 (通常と同じ))
+            let keep = (self.submip_time_frac, self.submip_time_max);
             self.submip_time_frac = tunable!("ENOMOTO_T_MIP_LPFACE_TIME_FRAC", 0.07, f64);
+            self.submip_time_max = tunable!("ENOMOTO_T_MIP_LPFACE_TIME_MAX", 6.0, f64);
             if self.params.verbose && self.nodes <= 1 {
                 eprintln!("MIP:   LP face (tight): sub-MIP cutoff {cutoff:.10e} (root LP {lb:.10e})");
             }
-            let r = self.solve_submip_problem(sub, 500, Some(cutoff)).is_some_and(|r| r.1);
-            self.submip_time_frac = keep;
+            let r = self.solve_submip_problem(sub, tunable!("ENOMOTO_T_MIP_LPFACE_NODES", 500u64, u64), Some(cutoff)).is_some_and(|r| r.1);
+            (self.submip_time_frac, self.submip_time_max) = keep;
             r
         } else {
             self.solve_submip(lo, up, 500)
