@@ -2116,6 +2116,7 @@ fn dominated_binary_fixings_with(prob: &MipProblem, pred: bool) -> Vec<(usize, f
     let mut fixed = vec![false; n];
     let mut out = Vec::new();
     let mut pairs = 0usize;
+    let (mut pred_pairs, max_pred_pairs) = (0usize, tunable!("ENOMOTO_T_MIP_DOMCOL_PRED_MAX_PAIRS", 1_000_000usize, usize));
     let mut cand: Vec<(usize, f64, bool)> = Vec::new(); // (k, sk, 衝突しているか)
     'outer: for j in 0..n {
         if !binary[j] {
@@ -2130,17 +2131,8 @@ fn dominated_binary_fixings_with(prob: &MipProblem, pred: bool) -> Vec<(usize, f
             for &lk in g.neighbors(lj) {
                 cand.push(((lk / 2) as usize, if lk % 2 == 0 { 1.0 } else { -1.0 }, true));
             }
-            if pred {
-                // HiGHS の bestRowPlus: 文字 y_j の係数が行を締める向き (上限側で正、上限がなく下限側で負) の最も短い行。
-                // y_j が y_k を支配するなら y_k はその行にある (上の (b) にもこの行で足りる)
-                let best = cols[j].iter().filter(|&&(i, a)| (if prob.row_up[i].is_finite() { 1.0 } else { -1.0 }) * a * sj > 0.0).min_by_key(|&&(i, _)| prob.rows[i].len());
-                if let Some(&(i0, _)) = best {
-                    for &(k, _) in &prob.rows[i0] {
-                        cand.push((k, 1.0, false));
-                        cand.push((k, -1.0, false));
-                    }
-                }
-            } else if implied_up(j, sj) {
+            // (b) の候補 (y_j の最も短い行)
+            if implied_up(j, sj) {
                 if let Some(&(i0, _)) = cols[j].iter().min_by_key(|&&(i, _)| prob.rows[i].len()) {
                     for &(k, _) in &prob.rows[i0] {
                         cand.push((k, 1.0, false));
@@ -2148,14 +2140,35 @@ fn dominated_binary_fixings_with(prob: &MipProblem, pred: bool) -> Vec<(usize, f
                     }
                 }
             }
+            // (c) の候補: HiGHS の bestRowPlus (文字 y_j の係数が行を締める向き (上限側で正、上限がなく下限側で負) の最も
+            // 短い行)。y_j が y_k を支配するなら y_k はその行にある。(a)(b) の候補の後に、別の上限
+            // `ENOMOTO_T_MIP_DOMCOL_PRED_MAX_PAIRS` (既定 100 万) の中で調べる (同じ上限にすると長い行で (a)(b) の手間を使い切る。
+            // blp-ar98 で固定が 1539 → 16 になった)
+            let n_ab = cand.len();
+            if pred && pred_pairs < max_pred_pairs {
+                let best = cols[j].iter().filter(|&&(i, a)| (if prob.row_up[i].is_finite() { 1.0 } else { -1.0 }) * a * sj > 0.0).min_by_key(|&&(i, _)| prob.rows[i].len());
+                if let Some(&(i0, _)) = best {
+                    for &(k, _) in &prob.rows[i0] {
+                        cand.push((k, 1.0, false));
+                        cand.push((k, -1.0, false));
+                    }
+                }
+            }
             let up_j = pred && implied_up(j, sj);
-            for &(k, sk, conf) in &cand {
+            for (ci, &(k, sk, conf)) in cand.iter().enumerate() {
                 if k == j || !binary[k] || fixed[k] {
                     continue;
                 }
-                pairs += 1;
-                if pairs > max_pairs {
-                    break 'outer;
+                if ci < n_ab {
+                    pairs += 1;
+                    if pairs > max_pairs {
+                        break 'outer;
+                    }
+                } else {
+                    pred_pairs += 1;
+                    if pred_pairs > max_pred_pairs {
+                        break;
+                    }
                 }
                 if dominates(j, sj, k, sk) && (!pred || conf || up_j || worst_case_ok(j, sj, k, sk)) {
                     // y_k = 0: sk = +1 なら x_k = 0、sk = -1 なら x_k = 1
