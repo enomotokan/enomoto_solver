@@ -233,6 +233,14 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) nca_pending: Option<f64>,
     pub(super) nca_ema: f64,
     pub(super) nca_stats: [u64; 3],
+    /// 診断用: ノードの LP の行数の合計 (`node_lps` で割ると平均)、木のノードでの新しい分離のラウンド数と加えたラウンド数
+    pub(super) node_lp_rows: u64,
+    pub(super) node_sep_stats: [u64; 2],
+    /// 診断用: 効き目で続けるノードの分離の結果の内訳 (打ち切り、伸び/差が 0.02 未満、0.1 未満、0.3 未満、0.3 以上)
+    pub(super) nca_hist: [u64; 5],
+    /// ノードで加えたカットの非零の数の指数移動平均 (`ENOMOTO_T_MIP_NODE_CUT_ADAPT_DENSITY`、[`Solver::nca_dense`])。
+    /// まだ測っていなければ None (最初に LP にある根のカットの行の平均で始める)
+    pub(super) nca_cut_nnz: Option<f64>,
     /// 暫定解がない間の木の中のヒューリスティクス (RENS・Feasibility Pump) に使った時間 (秒) と呼んだ回数。
     pub(super) noinc_secs: f64,
     pub(super) noinc_calls: u64,
@@ -1338,6 +1346,10 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         nca_pending: None,
         nca_ema: 1.0,
         nca_stats: [0; 3],
+        node_lp_rows: 0,
+        node_sep_stats: [0; 2],
+        nca_hist: [0; 5],
+        nca_cut_nnz: None,
         noinc_secs: 0.0,
         noinc_calls: 0,
         heur_close: 0.0,
@@ -1781,9 +1793,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 経過時間の `ENOMOTO_T_MIP_NODE_CUT_ADAPT_FRAC` 倍に収まり、分離が効いた割合 (分離の後の LP の値の伸びが打ち切り値までの
     /// 差の `ENOMOTO_T_MIP_NODE_CUT_ADAPT_GAIN` 倍以上、または打ち切り) の指数移動平均が `ENOMOTO_T_MIP_NODE_CUT_ADAPT_RATE`
     /// 以上の間は毎回分離する。割合が下がったら `ENOMOTO_T_MIP_NODE_CUT_ADAPT_PROBE` ノードに 1 回だけ試して割合を測り直す。
-    /// `ENOMOTO_T_MIP_NODE_CUT_TIME_FRAC` (一律に毎回分離) が neos5・misc07 などで遅くなったので、効かない問題では止める形にした
+    /// `ENOMOTO_T_MIP_NODE_CUT_TIME_FRAC` (一律に毎回分離) が neos5・misc07 などで遅くなったので、効かない問題では止める形にした。
+    /// 伸びで数える効き目は qiu・misc07・mas76 でも 0.9 以上になり、遅くなる問題を止められない (neos-911970 は 0.3〜0.5)。
+    /// そこで費用の側を 2 つ足した: カットが密なら止める ([`Self::nca_dense`])、分離の時間がノードの LP の時間に比べて
+    /// 大きければ止める ([`Self::nca_lp_budget_ok`])。analysis/node_cut_adapt_fix_20261020.md
     fn node_cut_adapt_due(&mut self) -> bool {
-        if self.node_cut_secs >= tunable!("ENOMOTO_T_MIP_NODE_CUT_ADAPT_FRAC", 0.1, f64) * self.start.elapsed().as_secs_f64() {
+        if self.node_cut_secs >= tunable!("ENOMOTO_T_MIP_NODE_CUT_ADAPT_FRAC", 0.1, f64) * self.start.elapsed().as_secs_f64() || !self.nca_lp_budget_ok() {
             return false;
         }
         if self.nca_ema >= tunable!("ENOMOTO_T_MIP_NODE_CUT_ADAPT_RATE", 0.3, f64) {
@@ -1791,6 +1806,35 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         self.nca_stats[2] += 1;
         self.nca_stats[2] % tunable!("ENOMOTO_T_MIP_NODE_CUT_ADAPT_PROBE", 20u64, u64).max(1) == 0
+    }
+
+    /// 効き目で続けるノードの分離の時間 (解き直しを含む) が、ノードの LP の時間の `ENOMOTO_T_MIP_NODE_CUT_ADAPT_LP_FRAC` 倍
+    /// (既定 0.1、0 なら判定しない) に収まっているか。ノードの LP が軽く木が大きい問題 (mas76: 1 回 9 反復) では、分離の時間が
+    /// ノードの LP の 0.2〜0.7 倍になり、伸びが打ち切り値までの差の 2% を超えても (効いた割合 0.95〜1.0) ノード数は減らない
+    /// (misc07・mas76・eil33-2・mik-250 が 15〜30% 遅い)。neos-911970 では 0.04〜0.08 倍
+    fn nca_lp_budget_ok(&self) -> bool {
+        let f = tunable!("ENOMOTO_T_MIP_NODE_CUT_ADAPT_LP_FRAC", 0.1, f64);
+        f <= 0.0 || self.node_cut_secs < f * self.node_lp_secs
+    }
+
+    /// 効き目で続けるノードの分離を止めるほどカットが密か: ノードで加えたカットの非零の数の指数移動平均が、元の行の平均の
+    /// `ENOMOTO_T_MIP_NODE_CUT_ADAPT_DENSITY` 倍 (既定 10、0 なら判定しない) を超えるか。密なら効き目で続ける分離をやめ、
+    /// 既定の深さの規則だけで分離する (ノードの分離はどれもこの平均を更新するので、疎に戻れば再び続ける)。密なカットは加えた後のすべてのノードの LP を
+    /// 重くする (qiu: 元の行 3.5 非零に対しカット 300〜390 非零、rout: 7.3 に対し 140〜160。neos-911970 は 32 に対し 19)。
+    /// 分離の時間 (`..._FRAC`) にはこの LP の重さが入らず、伸び (`..._GAIN`) は qiu の方が neos-911970 より大きいので、
+    /// 費用の側をカットの密度で見る
+    pub(super) fn nca_dense(&mut self) -> bool {
+        let r = tunable!("ENOMOTO_T_MIP_NODE_CUT_ADAPT_DENSITY", 10.0, f64);
+        if r <= 0.0 {
+            return false;
+        }
+        let m0 = self.p.m;
+        if self.nca_cut_nnz.is_none() && self.lp.num_rows() > m0 {
+            let k = self.lp.num_rows() - m0;
+            self.nca_cut_nnz = Some((m0..self.lp.num_rows()).map(|i| self.lp.row(i).len()).sum::<usize>() as f64 / k as f64);
+        }
+        let avg = (self.p.rows.iter().map(|r| r.len()).sum::<usize>() as f64 / m0.max(1) as f64).max(1.0);
+        self.nca_cut_nnz.is_some_and(|d| d > r * avg)
     }
 
     /// ノードの分離の後の解き直しの結果を効き目の統計に入れる (`obj0`: 分離の前の LP の値、`obj`: 解き直した値。
@@ -3370,11 +3414,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 if let Some(o0) = self.nca_pending.take() {
                     let ok = match st {
-                        LpStatus::Infeasible | LpStatus::ObjectiveBound => true,
+                        LpStatus::Infeasible | LpStatus::ObjectiveBound => {
+                            self.nca_hist[0] += 1;
+                            true
+                        }
                         LpStatus::Optimal => {
                             let o = self.lp.objective() + self.p.offset;
                             let lim = self.prune_limit();
                             let gap = if lim.is_finite() { (lim - o0).max(1e-9) } else { o0.abs().max(1.0) };
+                            let r = (o - o0) / gap;
+                            self.nca_hist[if o >= lim { 0 } else if r < 0.02 { 1 } else if r < 0.1 { 2 } else if r < 0.3 { 3 } else { 4 }] += 1;
                             o >= lim || o - o0 >= tunable!("ENOMOTO_T_MIP_NODE_CUT_ADAPT_GAIN", 0.02, f64) * gap
                         }
                         _ => false,
@@ -3399,6 +3448,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                 }
                 self.node_lps += 1;
+                self.node_lp_rows += self.lp.num_rows() as u64;
                 match st {
                     LpStatus::Optimal => {}
                     LpStatus::Infeasible | LpStatus::ObjectiveBound => {
@@ -3860,13 +3910,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         && (fc2_rounds == 0 || node_obj - fc2_first > 1.01 * (fc2_last - fc2_first).max(feastol))
                         && self.node_cut_secs < tunable!("ENOMOTO_T_MIP_FC_SEP2_TIME_FRAC", 0.1, f64) * self.start.elapsed().as_secs_f64()
                 };
-                let nca = env_str!("ENOMOTO_MIP_NODE_CUT_ADAPT").is_some() && !self.params.submip;
-                if nca && !hcm_sep && node.depth > 0 && plunge_depth == 0 && (nca_rounds == 0 || nca_last_ok) && nca_rounds < tunable!("ENOMOTO_T_MIP_NODE_CUT_ADAPT_ROUNDS", 3usize, usize) && (self.node_cuts_due(node.depth) || self.node_cut_adapt_due()) {
+                let nca = env_str!("ENOMOTO_MIP_NODE_CUT_ADAPT").is_some() && !self.params.submip && !self.nca_dense();
+                if nca && !hcm_sep && node.depth > 0 && plunge_depth == 0 && (nca_rounds == 0 || (nca_last_ok && self.nca_lp_budget_ok())) && nca_rounds < tunable!("ENOMOTO_T_MIP_NODE_CUT_ADAPT_ROUNDS", 3usize, usize) && (self.node_cuts_due(node.depth) || self.node_cut_adapt_due()) {
                     nca_rounds += 1;
                     nca_last_ok = false;
                     let t_nc = Instant::now();
                     let added = self.node_cut_round(&x);
                     self.node_cut_secs += t_nc.elapsed().as_secs_f64();
+                    self.node_sep_stats[0] += 1;
+                    self.node_sep_stats[1] += added as u64;
                     if added {
                         self.nca_pending = Some(node_obj);
                         resolves += 1;
@@ -3877,6 +3929,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let t_nc = Instant::now();
                     let added = self.node_cut_round(&x);
                     self.node_cut_secs += t_nc.elapsed().as_secs_f64();
+                    self.node_sep_stats[0] += 1;
+                    self.node_sep_stats[1] += added as u64;
                     if fc2_due {
                         if fc2_rounds == 0 {
                             fc2_first = node_obj;
@@ -7523,8 +7577,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 eprintln!("MIP: parallel strong branching: {} batches, {} candidates", self.par_sb_stats[0], self.par_sb_stats[1]);
             }
             eprintln!("MIP: sibling backtracks {}; basis restores {} (basic count mismatch {}), first LP iterations after a restore {}", self.sibling_backtracks, self.restore_stats.0, self.restore_stats.1, self.restore_stats.2);
+            eprintln!("MIP: node diag: nodes {} node LPs {} mean rows {:.1} iters {} ({:.1}/LP) LP secs {:.2} sep rounds {} added {} node cut secs {:.2} final rows {}", self.nodes, self.node_lps, self.node_lp_rows as f64 / self.node_lps.max(1) as f64, self.node_iters, self.node_iters as f64 / self.node_lps.max(1) as f64, self.node_lp_secs, self.node_sep_stats[0], self.node_sep_stats[1], self.node_cut_secs, self.lp.num_rows());
             if env_str!("ENOMOTO_MIP_NODE_CUT_ADAPT").is_some() {
-                eprintln!("MIP: adaptive node cuts: rounds {} effective {} skipped {} (rate {:.3}), node cut secs {:.2}", self.nca_stats[0], self.nca_stats[1], self.nca_stats[2], self.nca_ema, self.node_cut_secs);
+                eprintln!("MIP: adaptive node cuts: rounds {} effective {} skipped {} (rate {:.3}), node cut secs {:.2}, outcomes cutoff/<0.02/<0.1/<0.3/>=0.3 {:?}, cut nnz {:?} (rows mean {:.1})", self.nca_stats[0], self.nca_stats[1], self.nca_stats[2], self.nca_ema, self.node_cut_secs, self.nca_hist, self.nca_cut_nnz, self.p.rows.iter().map(|r| r.len()).sum::<usize>() as f64 / self.p.m.max(1) as f64);
             }
             if !self.orbitopes.is_empty() {
                 eprintln!("MIP: orbitopes {}: fixed {} bounds, pruned {} nodes", self.orbitopes.len(), self.orbitope_fixings, self.orbitope_prunes);
@@ -7532,6 +7587,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if self.sym_canon != (0, 0) {
                 eprintln!("MIP: symmetry: {} heuristic solutions mapped to the symmetry-reduced problem, {} could not be", self.sym_canon.0, self.sym_canon.1);
             }
+        }
+        // `ENOMOTO_MIP_NCA_DIAG`: 木の従のスレッドの分も出す (診断用)
+        if !self.params.verbose && !self.params.submip && env_str!("ENOMOTO_MIP_NCA_DIAG").is_some() {
+            eprintln!("MIP: node diag (thread {}): nodes {} node LPs {} mean rows {:.1} iters {} ({:.1}/LP) LP secs {:.2} sep rounds {} added {} node cut secs {:.2} final rows {}; adaptive rounds {} effective {} cut nnz {:?}", self.pool_tid, self.nodes, self.node_lps, self.node_lp_rows as f64 / self.node_lps.max(1) as f64, self.node_iters, self.node_iters as f64 / self.node_lps.max(1) as f64, self.node_lp_secs, self.node_sep_stats[0], self.node_sep_stats[1], self.node_cut_secs, self.lp.num_rows(), self.nca_stats[0], self.nca_stats[1], self.nca_cut_nnz);
         }
         let (x, objective) = match &self.incumbent {
             Some((z, x)) => (Some(x.clone()), Some(*z)),

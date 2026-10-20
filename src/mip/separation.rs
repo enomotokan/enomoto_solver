@@ -728,6 +728,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return false;
         }
         let rows: Vec<(Vec<(usize, f64)>, f64, f64)> = chosen.into_iter().map(|c| (c.coefs, f64::NEG_INFINITY, c.rhs)).collect();
+        // 加えるカットの非零の数の平均を効き目で続けるノードの分離の密度の判定 ([`Solver::nca_dense`]) に入れる
+        let d = rows.iter().map(|r| r.0.len()).sum::<usize>() as f64 / rows.len() as f64;
+        self.nca_cut_nnz = Some(self.nca_cut_nnz.map_or(d, |e| 0.9 * e + 0.1 * d));
         // カットはプールにも入れ (他のノードで違反すれば戻る)、このノードで効いていないカットは外してから加える
         // (HiGHS の aging と同じく LP を小さく保つ。外したカットもプールにあれば戻せる)
         if env_str!("ENOMOTO_MIP_NODE_CUTS_KEEP").is_none() {
