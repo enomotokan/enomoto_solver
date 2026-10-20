@@ -1938,7 +1938,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // `ENOMOTO_MIP_SYM_ORIG_INC` (試作): それでも暫定解にする。対称性の行は対称な解のうち 1 つを残す絞り込みで、
                 // この解の像のどれかが対称性の行を満たし目的値は同じなので、目的値は打ち切り値に使え、解そのものは元の問題の
                 // 解として返せる。対称性の行のある問題で解を磨く手順 (oneopt・連続変数の解き直し・解の溜め) には使わない
-                if env_str!("ENOMOTO_MIP_SYM_ORIG_INC").is_none() {
+                // 再スタートの後の問題は前処理をかけ直していて (列の代入・固定・目的関数の定数)、`orig` (最初の回の対称性の行を
+                // 加える前の問題) とは解の空間が違うので使わない
+                if env_str!("ENOMOTO_MIP_SYM_ORIG_INC").is_none() || self.params.restarts > 0 || orig.n != self.p.n {
                     return false;
                 }
                 orig_only = true;
