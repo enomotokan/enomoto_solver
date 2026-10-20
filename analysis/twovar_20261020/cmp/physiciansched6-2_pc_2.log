@@ -1,0 +1,84 @@
+MIP: presolve: tightened 4407 coefficients, normalized 0 integer rows
+MIP: presolve: merged 3588 parallel rows (3528 new equations)
+MIP: presolve: rows 168336 -> 15889, free columns 110454 -> 9755, nonzeros 480259 -> 52409, postsolve steps 10430
+MIP: presolve: tightened 12 coefficients, normalized 0 integer rows
+MIP: presolve: merged 60 parallel rows (0 new equations)
+MIP: presolve: rows 15889 -> 12115, free columns 9755 -> 6179, nonzeros 52409 -> 44832, postsolve steps 3530
+/usr/local/lib/python3.13/dist-packages/enomoto_solver/__init__.py
+Root LP: the two-phase method finished first (2.99s)
+MIP: probing: 5444 of 5623 binaries probed (1 passes), 1 fixed, 180 bounds tightened, 98038 implications (0.08s)
+MIP: probing: 1084 equivalent binary pairs
+MIP: presolve: tightened 4 coefficients, normalized 0 integer rows
+MIP: presolve: merged 60 parallel rows (0 new equations)
+MIP: presolve: rows 13199 -> 9868, free columns 5999 -> 4977, nonzeros 47000 -> 35876, postsolve steps 1022
+MIP: probing: 4421 of 4421 binaries probed (1 passes), 0 fixed, 0 bounds tightened, 59504 implications (0.05s)
+MIP: probing: 0 equivalent binary pairs
+Presolve: 168336 rows, 110454 columns -> 9868 rows, 4977 columns (3.62s)
+MIP: clique extension: 3644 rows extended, 10857 nonzeros added, 0 columns fixed, 0 duplicate and 1451 dominated rows removed (30403 edges, 0.02s)
+MIP: symmetry: 18 generators, 1 orbits on 19 columns, 18 lex-leader rows (0.32s)
+Root LP: the two-phase method finished first (2.03s)
+Root LP: objective 4.8583100000e4 (2.04s)
+MIP: root LP 4.8583100000e4 (5417 iters, 2.04s)
+MIP: fixed-charge check: vb rows 2 of 8435, continuous with vb 2 of 556
+MIP: cut round 0: 50 cuts did not move the objective; up to 1000 cuts per round from now
+MIP: cut round 0: 50 cuts (of 3209, sep 2.79s, LP 872 iters), LP rows 8485 (cut rows mean nnz 2), obj 4.8587391667e4 (5.27s)
+MIP: cut round 1: LP status TimeLimit, removed the cuts (Optimal)
+Root cuts: objective 4.8583100000e4 -> 4.8587391667e4, 48 cuts in the LP (9.20s)
+MIP: cut loop done: 380 cuts added, 48 in LP, pool 1302 cuts (787919 nonzeros), obj 4.8583100000e4 -> 4.8587391667e4
+MIP: root heuristic simple rounding: none (0.00s)
+MIP: root heuristic ZI round: none (0.00s)
+MIP: root heuristic trivial: none (0.01s)
+MIP: root heuristic randomized rounding: none (0.03s)
+MIP:   interior rounding: 1 interior points, vertex true (0.99s)
+MIP:   interior rounding: 6 rounded points tried, found false
+MIP: root heuristic interior rounding: none (1.07s)
+MIP: root heuristic root reduced cost: none (0.00s)
+MIP:   LP face: only 155 of 4421 integer columns fixed
+MIP: root heuristic LP face: none (0.00s)
+MIP:   RENS: fixing rate 0.59 (target 0.80, 1 backtracks)
+MIP:   parallel sub-MIP started (RENS): 2353 free columns of 111827
+MIP:   no-incumbent RENS (sub-MIP depth 0) try 1: target 0.80, fixing rate 0.59, found false (10.97s)
+MIP: root heuristic RENS: none (0.63s)
+MIP:   parallel sub-MIP started (RENS (LP before cuts)): 1415 free columns of 111827
+MIP: root heuristic RENS (LP before cuts): none (0.01s)
+MIP: fixed-charge check: vb rows 2 of 8435, continuous with vb 2 of 556
+MIP: root heuristic feasibility pump: none (14.91s)
+MIP:   dive ran out of budget at depth 182 (13480 iterations, 1 backtracks)
+MIP: root heuristic fractional diving: none (9.37s)
+MIP:   dive ran out of budget at depth 48 (12396 iterations, 0 backtracks)
+MIP: root heuristic vector length diving: none (6.86s)
+MIP:   dive ran out of budget at depth 71 (11893 iterations, 0 backtracks)
+MIP: root heuristic coefficient diving: none (7.36s)
+MIP:   shift-and-propagate: gave up (69 decisions, 20 backtracks, 422 rows violated before the LP)
+MIP: root heuristic shift-and-propagate: none (0.00s)
+MIP:   locks: fixing rate 0.65
+MIP:   parallel sub-MIP started (locks): 2098 free columns of 111827
+MIP: root heuristic locks: none (0.02s)
+MIP:   clique: fixing rate 0.94
+MIP:   parallel sub-MIP (RENS): status Infeasible, nodes 1, objective None, 38.54s
+MIP:   parallel sub-MIP started (clique): 843 free columns of 111827
+MIP: root heuristic clique: none (0.01s)
+MIP:   vbounds (loose): fixing rate 0.00
+MIP: root heuristic vbounds (loose): none (0.00s)
+MIP:   vbounds (tight): fixing rate 0.00
+MIP: root heuristic vbounds (tight): none (0.00s)
+MIP:   parallel sub-MIP (RENS (LP before cuts)): status Infeasible, nodes 0, objective None, 38.53s
+MIP:   parallel sub-MIP (locks): status Infeasible, nodes 0, objective None, 0.18s
+MIP:   parallel sub-MIP (clique): status Infeasible, nodes 0, objective None, 0.17s
+MIP:   local search: least violation 1.550e1
+MIP: root heuristic local search: none (2.80s)
+MIP:   repair: 14 violated rows, 375 free columns, remaining violation 1.150e1
+MIP: root heuristic repair: none (0.13s)
+MIP: after root heuristics: incumbent None (52.61s)
+MIP: background cuts: LP TimeLimit / obj 4.8587391667e4 < 4.8587391667e4; restored (TimeLimit)
+     time      nodes      open        best bound         incumbent       gap
+    56.1s          0         0     4.858739167e4                 -         -
+MIP:    56.11s nodes        0 open       1 lb 4.85873917e4 ub inf lp_iters 82483 sb_iters 0 sb_lps 0 sb_secs 0.00 node_iters 0 (first 0, lps 0) heur_iters 103995 dive_iters 0 lp_rows 8483 node_cut_secs 0.00
+MIP: dual proofs and conflicts 0 (conflicts added 0 (from proofs 0), Farkas 0, pruned 0 nodes, tightened 0 bounds)
+MIP: propagation conflicts: analysed 67, no 1-UIP 0, 1-UIP not a row 0, no decision set 0, decision set not a row 0; not a row because continuous 0, general integer 0, both sides 0
+MIP: objective propagation: pruned 0 nodes, tightened 0 bounds; strong branching children infeasible by propagation 0, propagated bounds passed to child LPs 0
+MIP: literal conflicts: added 189, in pool 189 (aged out 0), pruned 0 nodes, tightened 0 bounds
+MIP: conflict analysis (HiGHS style): calls 67, conflicts 302, added 189, mean length 27.7, max length 32903, 0.03s
+MIP: conflict analysis failures (all calls): no decision 0, too long midway 0, reason row lacks column 0, empty 0, too long at the end 0 (total length 0), max length 50
+MIP: sibling backtracks 0; basis restores 0 (basic count mismatch 0), first LP iterations after a restore 0
+RESULT {'status': 'time_limit', 'objective': None, 'best_bound': -inf, 'mip_gap': inf, 'nodes': 0, 'lp_iterations': 82483, 'root_bound': 48587.39166666666, 'first_solution_time': None, 'first_solution_objective': None, 'node_limit_hit': False} 60.119128704071045

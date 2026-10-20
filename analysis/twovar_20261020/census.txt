@@ -1,0 +1,112 @@
+# all4 拡張の前 (DUMP_PRESOLVED) / all4 拡張の後 (DUMP_PRESOLVED2) / HiGHS の前処理後
+== /tmp/claude-0/-home-user-enomoto-solver/5f8e8eb3-260b-5192-964a-e5b07fd24100/scratchpad/eno_all.mps
+rows 11896 cols 111827 (int 109346, binary 5435) eq 269 nnz 43862
+2-var +-1 binary rows: {'pack': 3833, 'impl': 356, 'cover': 1}  long clique rows (>=3 lits): 457
+  pack  n=  3833 tri2=    69 triA=  1121 dom=  1052 scc=     0 trans=    24
+  impl  n=   356 tri2=     0 triA=     0 dom=     0 scc=     0 trans=     0
+  cover n=     1 tri2=     0 triA=     0 dom=     0 scc=     0 trans=     0
+  implication SCC: nontrivial comps 0 covering 0 vars, contradictory vars 0
+  greedy clique cover of 2-var edges: 4144 cliques, 23 of size>=3 (sizes [(3, 23)]), covering 69 edge-slots
+== /tmp/claude-0/-home-user-enomoto-solver/5f8e8eb3-260b-5192-964a-e5b07fd24100/scratchpad/eno_all_ce.mps
+rows 10467 cols 111827 (int 109346, binary 5435) eq 269 nnz 47471
+2-var +-1 binary rows: {'pack': 214, 'cover': 1, 'impl': 334}  long clique rows (>=3 lits): 2669
+  pack  n=   214 tri2=     0 triA=     0 dom=     0 scc=     0 trans=     0
+  impl  n=   334 tri2=     0 triA=     0 dom=     0 scc=     0 trans=     0
+  cover n=     1 tri2=     0 triA=     0 dom=     0 scc=     0 trans=     0
+  implication SCC: nontrivial comps 0 covering 0 vars, contradictory vars 0
+  greedy clique cover of 2-var edges: 549 cliques, 0 of size>=3 (sizes []), covering 0 edge-slots
+== /tmp/claude-0/-home-user-enomoto-solver/5f8e8eb3-260b-5192-964a-e5b07fd24100/scratchpad/highs_pre.mps
+rows 8861 cols 4608 (int 4185, binary 4185) eq 283 nnz 40149
+2-var +-1 binary rows: {'pack': 215, 'impl': 347}  long clique rows (>=3 lits): 2327
+  pack  n=   215 tri2=     0 triA=     0 dom=     0 scc=     0 trans=     0
+  impl  n=   347 tri2=     0 triA=     2 dom=     2 scc=     0 trans=     0
+  implication SCC: nontrivial comps 0 covering 0 vars, contradictory vars 0
+  greedy clique cover of 2-var edges: 554 cliques, 0 of size>=3 (sizes []), covering 0 edge-slots
+
+# 拡張の後 vs HiGHS
+ENOMOTO 2-var rows 549, HiGHS 2-var rows 562, HiGHS long clique rows 2327, HiGHS cols 4608
+  cover zero           1
+  impl  both:row2      332
+  impl  one            2
+  pack  both:row2      214
+  sizes of HiGHS rows absorbing: []
+HiGHS 2-var rows also in ENOMOTO: 554 / 562
+
+# coldiff all4 拡張の後 vs HiGHS
+columns ENOMOTO Counter({'B': 5435, 'C': 556}) HiGHS Counter({'B': 4185, 'C': 423})
+only in ENOMOTO Counter({'B': 1277, 'C': 133})  only in HiGHS Counter({'B': 27})
+type changed {}
+kind                                 ENO   HiGHS
+('bin', 'E', '11-100')                19      19
+('bin', 'E', '>100')                   2       2
+('bin', 'L', '3')                   3435    2649
+('bin', 'L', '4-10')                 879    1100
+('bin', 'R', '11-100')                 1       1
+('bin±1', 'E', '11-100')             126     126
+('bin±1', 'E', '4-10')                 7       7
+('bin±1', 'L', '11-100')              12      10
+('bin±1', 'L', '3')                 1384     911
+('bin±1', 'L', '4-10')               689     660
+('bin±1', 'R', '11-100')              51      51
+('bin±1', 'R', '4-10')                 8       8
+('clique', 'E', '11-100')             51      51
+('clique', 'E', '3')                   6      18
+('clique', 'E', '4-10')               57      60
+('clique', 'L', '11-100')              2       2
+('clique', 'L', '2')                 549     562
+('clique', 'L', '3')                 991    1018
+('clique', 'L', '4-10')             1562    1178
+('mixed', 'E', '>100')                 1       0
+('mixed', 'G', '11-100')               0       2
+('mixed', 'G', '2')                    0       6
+('mixed', 'L', '11-100')               5       2
+('mixed', 'L', '2')                  117       0
+('mixed', 'L', '3')                  140     131
+('mixed', 'L', '4-10')               373     287
+ENOMOTO-only binaries: #rows per column [(2, 367), (3, 318), (4, 106), (5, 192), (6, 103), (7, 162), (8, 16), (9, 2), (10, 11)]
+ENOMOTO-only binaries appear in rows of kind: [(('bin', 'L', '3'), 1728), (('bin±1', 'L', '3'), 894), (('bin', 'L', '4-10'), 763), (('mixed', 'L', '4-10'), 623), (('bin±1', 'L', '4-10'), 486), (('clique', 'L', '4-10'), 413), (('clique', 'L', '3'), 121), (('mixed', 'L', '3'), 38), (('clique', 'L', '11-100'), 20), (('clique', 'L', '2'), 4), (('bin±1', 'E', '11-100'), 2), (('bin', 'E', '>100'), 2)]
+
+# coldiff pc vs HiGHS
+columns ENOMOTO Counter({'B': 4421, 'C': 556}) HiGHS Counter({'B': 4185, 'C': 423})
+only in ENOMOTO Counter({'B': 484, 'C': 133})  only in HiGHS Counter({'B': 248})
+type changed {}
+kind                                 ENO   HiGHS
+('bin', 'E', '11-100')                19      19
+('bin', 'E', '>100')                   2       2
+('bin', 'L', '3')                   2751    2649
+('bin', 'L', '4-10')                 549    1100
+('bin', 'R', '11-100')                 1       1
+('bin±1', 'E', '11-100')             126     126
+('bin±1', 'E', '4-10')                 7       7
+('bin±1', 'L', '11-100')              12      10
+('bin±1', 'L', '3')                  700     911
+('bin±1', 'L', '4-10')               359     660
+('bin±1', 'R', '11-100')              51      51
+('bin±1', 'R', '4-10')                 8       8
+('clique', 'E', '11-100')             51      51
+('clique', 'E', '3')                   6      18
+('clique', 'E', '4-10')               57      60
+('clique', 'L', '11-100')              2       2
+('clique', 'L', '2')                 549     562
+('clique', 'L', '3')                 991    1018
+('clique', 'L', '4-10')             1540    1178
+('mixed', 'E', '>100')                 1       0
+('mixed', 'G', '11-100')               0       2
+('mixed', 'G', '2')                    0       6
+('mixed', 'L', '11-100')               5       2
+('mixed', 'L', '2')                  117       0
+('mixed', 'L', '3')                  140     131
+('mixed', 'L', '4-10')               373     287
+ENOMOTO-only binaries: #rows per column [(2, 31), (3, 40), (4, 40), (5, 147), (6, 65), (7, 72), (8, 61), (9, 19), (10, 9)]
+ENOMOTO-only binaries appear in rows of kind: [(('bin', 'L', '3'), 909), (('bin±1', 'L', '3'), 427), (('clique', 'L', '4-10'), 390), (('mixed', 'L', '4-10'), 357), (('bin', 'L', '4-10'), 316), (('bin±1', 'L', '4-10'), 154), (('clique', 'L', '3'), 121), (('mixed', 'L', '3'), 24), (('clique', 'L', '11-100'), 20), (('clique', 'L', '2'), 3), (('bin±1', 'E', '11-100'), 2), (('bin', 'E', '>100'), 2)]
+
+# probe_gap (HiGHS Probing 切 vs 既定)
+cols in P0 not in P1: 915 binary 839
+conflict edges 19120
+fix (literal adjacent to x and ~x): 0  eq (pairwise): 0  in nontrivial SCC: 0  contradictory vars: 0
+all binaries in nontrivial SCC: 0
+
+# Sparsify の書き換え (HiGHS 基本の縮約だけ vs + Sparsify、pc の前処理後に)
+rows only in a 240 only in b 0 cols only in a 74
+changed rows 4
+(len a, len b, eq): [((94, 20, True), 1), ((46, 19, False), 1), ((77, 11, False), 1), ((78, 12, False), 1)]
