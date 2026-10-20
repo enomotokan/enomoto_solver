@@ -3137,7 +3137,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // `ENOMOTO_MIP_ROOT_OBJ_PROBE_SUBMIP`: サブ MIP (RENS・RINS など) の根でも行う。サブ MIP では渡された打ち切り値
         // (元の問題の暫定解) も使う
         let probe_sub = env_str!("ENOMOTO_MIP_ROOT_OBJ_PROBE_SUBMIP").is_some();
-        if env_str!("ENOMOTO_MIP_ROOT_OBJ_PROBE").is_some() && self.snap.is_none() && (!self.params.submip || probe_sub) {
+        if env_str!("ENOMOTO_MIP_NO_ROOT_OBJ_PROBE").is_none() && self.snap.is_none() && (!self.params.submip || probe_sub) {
             let proved = self.root_obj_probe();
             if dbg_root && !self.dbg_contains() {
                 self.dbg_lost("root objective probing", true);
@@ -6213,7 +6213,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
     }
 
-    /// 打ち切り値つきの根のプロービング (試作、`ENOMOTO_MIP_ROOT_OBJ_PROBE` で使う。既定では使わない): 暫定解があるとき、
+    /// 打ち切り値つきの根のプロービング (既定で使う。`ENOMOTO_MIP_NO_ROOT_OBJ_PROBE` で使わない): 暫定解があるとき、
     /// 根の LP 解で分数値の 0-1 列 x_j ごとに x_j = 0 と x_j = 1 を試し、行の伝播と目的関数の伝播 (`目的値 <= 打ち切り値`)
     /// で矛盾する側があれば、逆の値に大域的に固定する (打ち切り値より良い解はその側にない)。固定はすぐ定義域に入れるので、
     /// 後の列の試しにも効く。HiGHS は根の分離の 1 回目 (`HighsImplications::separateImpliedBounds`) で、まだ試していない
@@ -6257,13 +6257,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             .filter(|&j| p.is_int[j] && self.dom.lo[j] == 0.0 && self.dom.up[j] == 1.0 && x[j] > FEASTOL && x[j] < 1.0 - FEASTOL)
             .collect();
         // 効きそうなときだけ回す: 暫定解 (打ち切り値) と根の LP 値の相対ギャップが `ENOMOTO_T_MIP_ROOT_OBJ_PROBE_MAX_GAP`
-        // 以下 (既定 無限 = 見ない) で、候補 (分数値の 0-1 列) が `ENOMOTO_T_MIP_ROOT_OBJ_PROBE_MIN_CANDS` 本以上 (既定 0)
+        // 以下 (既定 0.05) で、候補 (分数値の 0-1 列) が `ENOMOTO_T_MIP_ROOT_OBJ_PROBE_MIN_CANDS` 本以上 (既定 500)
         // のときだけ。ギャップ = (打ち切り値 - LP 値) / max(|打ち切り値|, |LP 値|, 1)
         let lp_z = self.lp.objective() + p.offset;
         let cut_z = self.incumbent.as_ref().map_or(self.prune_limit(), |(z, _)| *z);
         let rel_gap = (cut_z - lp_z).max(0.0) / cut_z.abs().max(lp_z.abs()).max(1.0);
-        let max_gap = tunable!("ENOMOTO_T_MIP_ROOT_OBJ_PROBE_MAX_GAP", f64::INFINITY, f64);
-        let min_cands = tunable!("ENOMOTO_T_MIP_ROOT_OBJ_PROBE_MIN_CANDS", 0usize, usize);
+        let max_gap = tunable!("ENOMOTO_T_MIP_ROOT_OBJ_PROBE_MAX_GAP", 0.05, f64);
+        let min_cands = tunable!("ENOMOTO_T_MIP_ROOT_OBJ_PROBE_MIN_CANDS", 500usize, usize);
         let log = self.params.verbose || (self.params.submip && env_str!("ENOMOTO_MIP_ROOT_OBJ_PROBE_LOG").is_some());
         if rel_gap > max_gap || cands.len() < min_cands {
             if log {
@@ -6277,7 +6277,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return false;
         }
         let (mut probed, mut fixed, mut both) = (0usize, 0usize, false);
-        let learn = env_str!("ENOMOTO_MIP_ROOT_OBJ_PROBE_IMPL").is_some();
+        let learn = env_str!("ENOMOTO_MIP_ROOT_OBJ_PROBE_NO_IMPL").is_none();
         // `ENOMOTO_MIP_ROOT_OBJ_PROBE_REDCOST`: 根の LP の被約費用の行 `z + sum d_j (x_j - b_j) <= U` (b_j は LP 解で列が
         // いた境界。双対の実行可能性から、LP の行 (カットを含む) を満たす全ての x で z(x) >= z + sum d_j (x_j - b_j)) も
         // 伝播する。被約費用による固定は列 1 本ずつだが、この行は試しで動いた列の分を足し合わせるので、LP の情報を持った
@@ -6291,10 +6291,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }))
             .flatten()
             .filter(|(_, u)| u.is_finite());
-        // `ENOMOTO_MIP_ROOT_OBJ_PROBE_CUTS`: LP に入っているカットの行も伝播する (定義域の伝播は元の行だけなので、
+        // カットの行 (既定で使う、`ENOMOTO_MIP_ROOT_OBJ_PROBE_NO_CUTS` で使わない): LP に入っているカットの行も伝播する (定義域の伝播は元の行だけなので、
         // 再スタートでカットが行になるまで効かなかった。HiGHS はカットプールのカットも伝播する)。行ごとに 1 回ずつ
         let mut cut_rows: Vec<(Vec<(usize, f64)>, f64)> = Vec::new();
-        if env_str!("ENOMOTO_MIP_ROOT_OBJ_PROBE_CUTS").is_some() {
+        if env_str!("ENOMOTO_MIP_ROOT_OBJ_PROBE_NO_CUTS").is_none() {
             for i in p.m..self.lp.num_rows() {
                 let (l, u) = self.lp.row_bounds(i);
                 let r = self.lp.row(i);
@@ -6332,7 +6332,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     && self.propagate_objective_with(false)
                     && rc_row.as_ref().is_none_or(|(r, u)| self.propagate_le_row(r, *u, false))
                     && cut_rows.iter().all(|(r, u)| self.propagate_le_row(r, *u, false)));
-                // `ENOMOTO_MIP_ROOT_OBJ_PROBE_IMPL`: 矛盾しなかった側で固定された 0-1 列を含意 (x_j = v => x_c = w) として
+                // 含意 (既定で使う、`ENOMOTO_MIP_ROOT_OBJ_PROBE_NO_IMPL` で使わない): 矛盾しなかった側で固定された 0-1 列を含意 (x_j = v => x_c = w) として
                 // 定義域に足し、後の列の試しの伝播に使う (HiGHS はプロービングの含意をクリーク表に入れる)。打ち切り値を
                 // 使って得た含意なので、打ち切り値より良い解でだけ成り立つ (大域的な固定と同じ)
                 if !bad[k] && learn {
