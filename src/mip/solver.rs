@@ -1036,13 +1036,15 @@ impl TriggerEval {
     }
 }
 
-/// `ENOMOTO_MIP_FJ_POOR_BG_RENS` (試作、既定では使わない): 根で暫定解が Feasibility Jump の解だけで、根の LP から遠い
+/// 質の悪い FJ の解だけのときの暫定解なし用の RENS (既定で使う。`ENOMOTO_MIP_NO_FJ_POOR_BG_RENS` で使わない): 根で暫定解が Feasibility Jump の解だけで、根の LP から遠い
 /// ([`Solver::fj_poor`]、相対ギャップ > `ENOMOTO_T_MIP_FJ_POOR_GAP`) とき、暫定解なし用のダイビング式 RENS を回し
 /// (サブ MIP は根のヒューリスティクスの間の別スレッド、[`Solver::parallel_submips`])、背景のカットの分離のスレッドを 1 本減らす。
 /// `ENOMOTO_MIP_FJ_POOR_NOINC` と違い、Pump・ダイビングなど主スレッドで回す暫定解なし用のヒューリスティクスは回さない
-/// (根の時間を延ばさない)。FJ2 (d1bfefd) の後、hypothyroid-k1 では FJ の -3 が暫定解になり、RENS が -2851 (最適値) を出さなくなった
+/// (根の時間を延ばさない)。FJ2 (d1bfefd) の後、hypothyroid-k1 では FJ の -3 が暫定解になり、RENS が -2851 (最適値) を出さなくなった。
+/// 40 問 + 16 問 (4 スレッド・60 秒、同じコンテナの対 2 組): 40 問は解けた数 24/25 -> 25/24・SGM 21.52/19.25 -> 20.62/20.52 秒・不一致 0、
+/// 16 問は解けた数 2/5 -> 4/4・主ギャップの和 4.71/3.02 -> 2.87/2.95 (hypothyroid-k1 は 2 組とも -2851、nursesched-sprint02 28.3 秒)
 pub(super) fn fj_poor_bg_rens() -> bool {
-    env_str!("ENOMOTO_MIP_FJ_POOR_BG_RENS").is_some()
+    env_str!("ENOMOTO_MIP_NO_FJ_POOR_BG_RENS").is_none()
 }
 
 /// ヒューリスティクス役のスレッドの数 (既定で使う。`ENOMOTO_MIP_NO_HEUR_ROLE` で使わない)。スレッド数が
@@ -2506,7 +2508,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let snap = self.make_snapshot(&Portfolio::new(), &mut None, false);
                 let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());
                 let mut threads = tunable!("ENOMOTO_T_MIP_BG_CUTS_THREADS", (self.params.threads - 1).max(1), usize);
-                // `ENOMOTO_MIP_FJ_POOR_BG_RENS`: 暫定解が質の悪い FJ の解だけなら、背景のカットの分離のスレッドを 1 本減らし、
+                // 暫定解が質の悪い FJ の解だけなら (`ENOMOTO_MIP_NO_FJ_POOR_BG_RENS` で使わない)、背景のカットの分離のスレッドを 1 本減らし、
                 // 空いた分で暫定解なし用のダイビング式 RENS のサブ MIP を別スレッドで解く ([`fj_poor_bg_rens`])
                 if fj_poor_bg_rens() && self.fj_poor() && threads > 1 {
                     threads -= 1;
