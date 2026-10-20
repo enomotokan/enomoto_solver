@@ -1,6 +1,6 @@
 import sys, highspy
 T = float(sys.argv[1]) if len(sys.argv) > 1 else 60
-h = highspy.Highs(); h.setOptionValue("threads", 1); h.setOptionValue("time_limit", T)
+h = highspy.Highs(); h.setOptionValue("threads", 4); h.setOptionValue("time_limit", T)
 for kv in sys.argv[2:]:
     k, v = kv.split("="); 
     try: v = int(v)

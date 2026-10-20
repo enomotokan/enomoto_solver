@@ -241,7 +241,28 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 競わせない)。0 なら同じ枠で選ぶ。40 問: 0 (既定) 19 問 27.70、10 は 17 問 28.14、25 は 17 問 27.83 (rout・neos5 が
             // 時間切れ、mik-250 47.9 -> 33-40 秒)。既定では使わない
             let face_quota = tunable!("ENOMOTO_T_MIP_FACE_MAX_CUTS", 0usize, usize);
-            let (mut cands, fcands) = self.separate_face_split(&x, false);
+            let (mut cands, mut fcands) = self.separate_face_split(&x, false);
+            // `ENOMOTO_MIP_CUTSEL_FACE_ANCHOR` (実験的): 面の頂点からのカットの効き目はその頂点で測ったもので、今の LP 解は
+            // 切らないことがある。それが最良のスコアになると、質の閾値 (最良の 50%) で今の頂点を切るカットが全部落ち、
+            // 選んだ面のカットを足しても LP が動かず (効いていないので外され、次のラウンドでまた選ばれる) 停滞判定で止まる
+            // (roll3000: 今の解での活動量 0.068 の x818 + x831 <= 1 が効き目 0.38 で毎ラウンド 1 本だけ選ばれる)。
+            // 1: 質の閾値の基準 (最良のスコア) を今の頂点の候補だけで決める。2: 加えて面の候補の効き目を今の解で測り直し、
+            // 今の解を切らないものは捨てる
+            let face_anchor = if self.params.submip || face_quota > 0 { 0 } else { tunable!("ENOMOTO_MIP_CUTSEL_FACE_ANCHOR", 0usize, usize) };
+            if face_anchor >= 2 {
+                fcands.retain_mut(|c| {
+                    let act: f64 = c.coefs.iter().map(|&(j, v)| v * x[j]).sum();
+                    let norm = c.coefs.iter().map(|&(_, v)| v * v).sum::<f64>().sqrt();
+                    c.efficacy = (act - c.rhs) / norm.max(1e-300);
+                    act - c.rhs > 1e-6 * (1.0 + c.rhs.abs()) && c.efficacy >= 1e-5
+                });
+            }
+            let anchor = if face_anchor >= 1 {
+                let cnorm = p.cost.iter().map(|c| c * c).sum::<f64>().sqrt();
+                cands.iter().filter(|c| !c.forced).map(|c| cut_score(c, p, cnorm)).fold(None, |m: Option<f64>, v| Some(m.map_or(v, |m| m.max(v))))
+            } else {
+                None
+            };
             let mut face_cands: Vec<Candidate> = Vec::new();
             if face_quota > 0 {
                 face_cands = fcands;
@@ -284,6 +305,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 self.select_cuts_highs(cands, max_cuts, &x, maxpar)
             } else if fc_relax {
                 select_cuts_hybrid_with(cands, max_cuts, p, tunable!("ENOMOTO_T_CUTSEL_FC_MIN_REL", 0.0, f64), tunable!("ENOMOTO_T_CUTSEL_FC_MAXPAR", 0.9, f64))
+            } else if face_anchor >= 1 && env_str!("ENOMOTO_MIP_CUTSEL_OLD").is_none() {
+                select_cuts_hybrid_anchor(cands, max_cuts, p, tunable!("ENOMOTO_T_CUTSEL_MIN_REL", 0.5, f64), tunable!("ENOMOTO_T_CUTSEL_MAXPAR", 0.3, f64), anchor)
             } else {
                 select_cuts(cands, max_cuts, p)
             };
@@ -2648,20 +2671,42 @@ fn select_cuts_hybrid(cands: Vec<Candidate>, max_cuts: usize, p: &MipProblem) ->
 
 /// [`select_cuts_hybrid`] の質の閾値 (最良の何倍未満を捨てるか) と平行度の上限を指定する版。
 fn select_cuts_hybrid_with(cands: Vec<Candidate>, max_cuts: usize, p: &MipProblem, min_rel: f64, maxpar: f64) -> Vec<Candidate> {
+    select_cuts_hybrid_anchor(cands, max_cuts, p, min_rel, maxpar, None)
+}
+
+/// [`select_cuts_hybrid`] のスコア。
+fn cut_score(c: &Candidate, p: &MipProblem, cnorm: f64) -> f64 {
+    // 密なカットを避ける (`ENOMOTO_T_CUTSEL_DENSITY_EXP` = α: スコアを 非零の数^α で割る。HiGHS は効いている
+    // 非零の数で割る (α = 1 相当)。密なカットは LP の反復が増え、カットの行から作る次のカットも密になる)
+    cut_quality(c, p, cnorm) / (c.coefs.len().max(1) as f64).powf(tunable!("ENOMOTO_T_CUTSEL_DENSITY_EXP", 0.0, f64))
+}
+
+/// [`select_cuts_hybrid_with`] の、質の閾値の基準のスコアを `anchor` で与えられる版 (`None` なら候補の最良のスコア)。
+fn select_cuts_hybrid_anchor(cands: Vec<Candidate>, max_cuts: usize, p: &MipProblem, min_rel: f64, maxpar: f64, anchor: Option<f64>) -> Vec<Candidate> {
     let cnorm = p.cost.iter().map(|c| c * c).sum::<f64>().sqrt();
-    let density_exp = tunable!("ENOMOTO_T_CUTSEL_DENSITY_EXP", 0.0, f64);
     let mut scored: Vec<(f64, f64, Candidate)> = cands
         .into_iter()
         .map(|c| {
             let nc = c.coefs.iter().map(|&(_, v)| v * v).sum::<f64>().sqrt();
-            // 密なカットを避ける (`ENOMOTO_T_CUTSEL_DENSITY_EXP` = α: スコアを 非零の数^α で割る。HiGHS は効いている
-            // 非零の数で割る (α = 1 相当)。密なカットは LP の反復が増え、カットの行から作る次のカットも密になる)
-            let score = cut_quality(&c, p, cnorm) / (c.coefs.len().max(1) as f64).powf(density_exp);
-            (score, nc, c)
+            (cut_score(&c, p, cnorm), nc, c)
         })
         .collect();
     scored.sort_by(|a, b| b.0.total_cmp(&a.0));
     let Some(best_score) = scored.first().map(|s| s.0) else { return Vec::new() };
+    let best_score = anchor.map_or(best_score, |a| a.min(best_score));
+    if env_str!("ENOMOTO_MIP_DEBUG_CUTSEL").is_some() {
+        let above = scored.iter().filter(|s| s.0 >= min_rel * best_score).count();
+        let top: Vec<String> = scored
+            .iter()
+            .take(6)
+            .map(|(s, nc, c)| {
+                let objpar = if cnorm > 0.0 && *nc > 0.0 { c.coefs.iter().map(|&(j, v)| v * p.cost[j]).sum::<f64>().abs() / (cnorm * nc) } else { 0.0 };
+                format!("{s:.4}(eff {:.4} op {objpar:.2} nnz {})", c.efficacy, c.coefs.len())
+            })
+            .collect();
+        let max_eff = scored.iter().map(|s| s.2.efficacy).fold(0.0, f64::max);
+        eprintln!("CUTSEL: {} cands, {above} above {min_rel} x best, max eff {max_eff:.4}; top {}", scored.len(), top.join(" "));
+    }
     // 質が最良の 0.9 倍以上の「良い」カットの平行度の上限 (`maxpar` より小さくてもそのまま使う。固定費用型の緩めた選択で
     // maxpar に合わせて 0.9 にすると sp150x300d の根の下界が 65.3 -> 58.0 に下がった)
     let (goodmaxpar, good) = (tunable!("ENOMOTO_T_CUTSEL_GOODMAXPAR", 0.7, f64), 0.9 * best_score);
@@ -2675,6 +2720,8 @@ fn select_cuts_hybrid_with(cands: Vec<Candidate>, max_cuts: usize, p: &MipProble
     // p0201 は候補 130-480 本から 1-4 本しか採らず、25 ラウンドかけても根の下界が伸び切らなかった
     let fill = (tunable!("ENOMOTO_T_CUTSEL_FILL_FRAC", 0.0, f64) * max_cuts as f64).round() as usize;
     let half = scored.len().div_ceil(2);
+    let dbg = env_str!("ENOMOTO_MIP_DEBUG_CUTSEL").is_some();
+    let mut n_par = 0usize;
     let mut chosen: Vec<(f64, Candidate)> = Vec::new();
     let mut rest: Vec<(f64, f64, Candidate)> = Vec::new();
     for (k, (score, nc, c)) in scored.into_iter().enumerate() {
@@ -2692,7 +2739,12 @@ fn select_cuts_hybrid_with(cands: Vec<Candidate>, max_cuts: usize, p: &MipProble
         let parallel = chosen.iter().any(|(nd, d)| sparse_dot(&c.coefs, &d.coefs).abs() > limit * nc * nd);
         if !parallel {
             chosen.push((nc, c));
+        } else {
+            n_par += 1;
         }
+    }
+    if dbg {
+        eprintln!("CUTSEL: chosen {} (parallel rejected {n_par})", chosen.len());
     }
     if chosen.len() < fill {
         for (_, nc, c) in rest {
