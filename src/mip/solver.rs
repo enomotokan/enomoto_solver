@@ -6145,6 +6145,26 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let cands: Vec<usize> = (0..p.n)
             .filter(|&j| p.is_int[j] && self.dom.lo[j] == 0.0 && self.dom.up[j] == 1.0 && x[j] > FEASTOL && x[j] < 1.0 - FEASTOL)
             .collect();
+        // 効きそうなときだけ回す: 暫定解 (打ち切り値) と根の LP 値の相対ギャップが `ENOMOTO_T_MIP_ROOT_OBJ_PROBE_MAX_GAP`
+        // 以下 (既定 無限 = 見ない) で、候補 (分数値の 0-1 列) が `ENOMOTO_T_MIP_ROOT_OBJ_PROBE_MIN_CANDS` 本以上 (既定 0)
+        // のときだけ。ギャップ = (打ち切り値 - LP 値) / max(|打ち切り値|, |LP 値|, 1)
+        let lp_z = self.lp.objective() + p.offset;
+        let cut_z = self.incumbent.as_ref().map_or(self.prune_limit(), |(z, _)| *z);
+        let rel_gap = (cut_z - lp_z).max(0.0) / cut_z.abs().max(lp_z.abs()).max(1.0);
+        let max_gap = tunable!("ENOMOTO_T_MIP_ROOT_OBJ_PROBE_MAX_GAP", f64::INFINITY, f64);
+        let min_cands = tunable!("ENOMOTO_T_MIP_ROOT_OBJ_PROBE_MIN_CANDS", 0usize, usize);
+        let log = self.params.verbose || (self.params.submip && env_str!("ENOMOTO_MIP_ROOT_OBJ_PROBE_LOG").is_some());
+        if rel_gap > max_gap || cands.len() < min_cands {
+            if log {
+                eprintln!(
+                    "MIP: {}root objective probing: skipped (gap {:.3e} (LP {lp_z:.10e}, incumbent {cut_z:.10e}), {} fractional binaries)",
+                    if self.params.submip { "sub-MIP " } else { "" },
+                    rel_gap,
+                    cands.len()
+                );
+            }
+            return false;
+        }
         let (mut probed, mut fixed, mut both) = (0usize, 0usize, false);
         let learn = env_str!("ENOMOTO_MIP_ROOT_OBJ_PROBE_IMPL").is_some();
         // `ENOMOTO_MIP_ROOT_OBJ_PROBE_REDCOST`: 根の LP の被約費用の行 `z + sum d_j (x_j - b_j) <= U` (b_j は LP 解で列が
@@ -6325,8 +6345,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.root_obj_probe_stats = [probed as u64, fixed as u64];
         if self.params.verbose || (self.params.submip && env_str!("ENOMOTO_MIP_ROOT_OBJ_PROBE_LOG").is_some()) {
             eprintln!(
-                "MIP: {}root objective probing: {} fractional binaries, {probed} probed, {fixed} fixed, {n_edges} implications{} (cutoff {:.10e}, redcost row {}, {} cut rows, {:.2}s)",
+                "MIP: {}root objective probing: gap {:.3e}, {} fractional binaries, {probed} probed, {fixed} fixed, {n_edges} implications{} (cutoff {:.10e}, redcost row {}, {} cut rows, {:.2}s)",
                 if self.params.submip { "sub-MIP " } else { "" },
+                rel_gap,
                 cands.len(),
                 if both { ", both sides infeasible" } else { "" },
                 self.prune_limit(),
