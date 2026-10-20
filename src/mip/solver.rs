@@ -3026,7 +3026,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if dbg_root && !self.dbg_contains() {
             self.dbg_lost("root redcost fixing", true);
         }
-        if env_str!("ENOMOTO_MIP_ROOT_OBJ_PROBE").is_some() && self.snap.is_none() && !self.params.submip {
+        // `ENOMOTO_MIP_ROOT_OBJ_PROBE_SUBMIP`: サブ MIP (RENS・RINS など) の根でも行う。サブ MIP では渡された打ち切り値
+        // (元の問題の暫定解) も使う
+        let probe_sub = env_str!("ENOMOTO_MIP_ROOT_OBJ_PROBE_SUBMIP").is_some();
+        if env_str!("ENOMOTO_MIP_ROOT_OBJ_PROBE").is_some() && self.snap.is_none() && (!self.params.submip || probe_sub) {
             let proved = self.root_obj_probe();
             if dbg_root && !self.dbg_contains() {
                 self.dbg_lost("root objective probing", true);
@@ -3041,6 +3044,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         }
                         return self.finish(MipStatus::Optimal, z);
                     }
+                } else if self.params.submip {
+                    // サブ MIP で自分の暫定解がない: 渡された打ち切り値より良い解はない
+                    if self.params.verbose {
+                        eprintln!("MIP: root objective probing: no solution better than the cutoff in the sub-MIP");
+                    }
+                    return self.finish(MipStatus::Infeasible, f64::INFINITY);
                 }
             }
         }
@@ -6103,10 +6112,30 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 時間を使い切っていた。固定が出れば根の再スタート ([`Self::maybe_restart`]) が固定を入れて前処理からやり直す。
     /// 時間は時間上限の `ENOMOTO_T_MIP_ROOT_OBJ_PROBE_TIME_FRAC` 倍 (既定 0.2) まで。最初の
     /// `ENOMOTO_T_MIP_ROOT_OBJ_PROBE_GIVEUP` 列 (既定 200) で 1 つも固定できなければやめる。
+    /// [`Self::root_obj_probe`] の 1 回の試し: `x_j <= v` (`upper`) か `x_j >= v` を置いて、行・目的関数・被約費用の行・
+    /// カットの行で伝播し、矛盾したら真。定義域は元に戻す。
+    fn probe_bound_infeasible(&mut self, j: usize, upper: bool, v: f64, rc_row: Option<&(Vec<(usize, f64)>, f64)>, cut_rows: &[(Vec<(usize, f64)>, f64)]) -> bool {
+        let p = self.p;
+        let pos = self.dom.stack_len();
+        if upper {
+            self.dom.tighten_upper(p, j, v);
+        } else {
+            self.dom.tighten_lower(p, j, v);
+        }
+        let ok = !self.dom.infeasible
+            && self.dom.propagate(p)
+            && self.propagate_objective_with(false)
+            && rc_row.is_none_or(|(r, u)| self.propagate_le_row(r, *u, false))
+            && cut_rows.iter().all(|(r, u)| self.propagate_le_row(r, *u, false));
+        self.dom.backtrack_to(p, pos);
+        !ok
+    }
+
     /// どちらの値でも矛盾する列が見つかった (打ち切り値より良い解がない) なら真。
     fn root_obj_probe(&mut self) -> bool {
         let p = self.p;
-        if !self.has_cutoff_value() || !self.prune_limit().is_finite() || self.dom.infeasible || self.time_up() {
+        let sub_cutoff = self.params.submip && self.params.cutoff.is_finite();
+        if !(self.has_cutoff_value() || sub_cutoff) || !self.prune_limit().is_finite() || self.dom.infeasible || self.time_up() {
             return false;
         }
         let t0 = Instant::now();
@@ -6218,10 +6247,86 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 _ => {}
             }
         }
+        // `ENOMOTO_MIP_ROOT_OBJ_PROBE_GENINT`: 0-1 でない有界の整数列 (幅 2 以上) でも、境界の側ごとに二分探索で試す。
+        // 上の側: `x >= m` が矛盾する最小の m を探し (矛盾は m について単調とみなす)、上限を m - 1 にする。下の側も同じ。
+        // 試しは片側 ceil(log2(上限 - 下限)) 回程度。下限の側 (`x >= 下限`) から矛盾すれば打ち切り値より良い解はない
+        let (mut gi_probed, mut gi_tight, mut gi_probes) = (0usize, 0usize, 0usize);
+        if env_str!("ENOMOTO_MIP_ROOT_OBJ_PROBE_GENINT").is_some() && !both {
+            let gcands: Vec<usize> = (0..p.n)
+                .filter(|&j| p.is_int[j] && self.dom.lo[j].is_finite() && self.dom.up[j].is_finite() && self.dom.up[j] - self.dom.lo[j] >= 2.0)
+                .collect();
+            'cols: for &j in &gcands {
+                if self.time_up() || t0.elapsed().as_secs_f64() > tmax {
+                    break;
+                }
+                gi_probed += 1;
+                // upper = false: x >= v を試して上限を探す。upper = true: x <= v を試して下限を探す
+                for upper in [false, true] {
+                    let (lo, up) = (self.dom.lo[j], self.dom.up[j]);
+                    if up - lo < 1.0 {
+                        break;
+                    }
+                    // 端 (x >= up / x <= lo) が矛盾しなければ締まらない
+                    let edge = if upper { lo } else { up };
+                    gi_probes += 1;
+                    if !self.probe_bound_infeasible(j, upper, edge, rc_row.as_ref(), &cut_rows) {
+                        continue;
+                    }
+                    // a: 矛盾しない側の値 (現在の反対の端は矛盾しないとみなす)、b: 矛盾する値
+                    let (mut a, mut b) = if upper { (up, lo) } else { (lo, up) };
+                    let mut whole = false;
+                    // 反対の端そのものが矛盾するか (区間全体が矛盾)
+                    gi_probes += 1;
+                    if self.probe_bound_infeasible(j, upper, a, rc_row.as_ref(), &cut_rows) {
+                        whole = true;
+                    }
+                    if whole {
+                        both = true;
+                        break 'cols;
+                    }
+                    while (b - a).abs() > 1.0 {
+                        let m = ((a + b) / 2.0).floor();
+                        let m = if m == a { a + (b - a).signum() } else { m };
+                        gi_probes += 1;
+                        if self.probe_bound_infeasible(j, upper, m, rc_row.as_ref(), &cut_rows) {
+                            b = m;
+                        } else {
+                            a = m;
+                        }
+                        if self.time_up() {
+                            break;
+                        }
+                    }
+                    // x >= b (upper=false) が矛盾 => 上限 b - 1。x <= b (upper=true) が矛盾 => 下限 b + 1
+                    if upper {
+                        self.dom.tighten_global(p, j, false, b + 1.0);
+                        self.dom.tighten_lower(p, j, b + 1.0);
+                    } else {
+                        self.dom.tighten_global(p, j, true, b - 1.0);
+                        self.dom.tighten_upper(p, j, b - 1.0);
+                    }
+                    gi_tight += 1;
+                    if !self.dom.propagate(p) {
+                        both = true;
+                        break 'cols;
+                    }
+                }
+            }
+            if self.params.verbose || (self.params.submip && env_str!("ENOMOTO_MIP_ROOT_OBJ_PROBE_LOG").is_some()) {
+                eprintln!(
+                    "MIP: {}root objective probing (general integers): {} columns, {gi_probed} probed ({gi_probes} probes), {gi_tight} bounds tightened{} ({:.2}s)",
+                    if self.params.submip { "sub-MIP " } else { "" },
+                    gcands.len(),
+                    if both { ", infeasible" } else { "" },
+                    t0.elapsed().as_secs_f64()
+                );
+            }
+        }
         self.root_obj_probe_stats = [probed as u64, fixed as u64];
-        if self.params.verbose {
+        if self.params.verbose || (self.params.submip && env_str!("ENOMOTO_MIP_ROOT_OBJ_PROBE_LOG").is_some()) {
             eprintln!(
-                "MIP: root objective probing: {} fractional binaries, {probed} probed, {fixed} fixed, {n_edges} implications{} (cutoff {:.10e}, redcost row {}, {} cut rows, {:.2}s)",
+                "MIP: {}root objective probing: {} fractional binaries, {probed} probed, {fixed} fixed, {n_edges} implications{} (cutoff {:.10e}, redcost row {}, {} cut rows, {:.2}s)",
+                if self.params.submip { "sub-MIP " } else { "" },
                 cands.len(),
                 if both { ", both sides infeasible" } else { "" },
                 self.prune_limit(),
