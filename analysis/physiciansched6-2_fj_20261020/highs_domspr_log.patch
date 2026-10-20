@@ -1,0 +1,76 @@
+diff --git a/highs/presolve/HPresolve.cpp b/highs/presolve/HPresolve.cpp
+index 4c20fac..48ecb04 100644
+--- a/highs/presolve/HPresolve.cpp
++++ b/highs/presolve/HPresolve.cpp
+@@ -1,3 +1,5 @@
++#include <cstdlib>
++#include <cstdio>
+ /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+ /*                                                                       */
+ /*    This file is part of the HiGHS linear optimization suite           */
+@@ -1272,6 +1274,7 @@ HPresolve::Result HPresolve::dominatedColumns(
+           lowerBound = std::ceil(lowerBound - primal_feastol);
+         if (lowerBound == model->col_upper_[col]) {
+           numFixedColsPredBndAnalysis++;
++          if (std::getenv("HIGHS_DOM_LOG")) fprintf(stderr, "HDOM pred col=%s up other=%s\n", model->col_names_.empty() ? std::to_string(col).c_str() : model->col_names_[col].c_str(), model->col_names_.empty() ? std::to_string(otherCol).c_str() : model->col_names_[otherCol].c_str());
+           HPRESOLVE_CHECKED_CALL(fixCol(col, HighsInt{1}));
+         } else if (model->integrality_[col] != HighsVarType::kContinuous) {
+           numModifiedBndsPredBndAnalysis++;
+@@ -1283,6 +1286,7 @@ HPresolve::Result HPresolve::dominatedColumns(
+           upperBound = std::floor(upperBound + primal_feastol);
+         if (upperBound == model->col_lower_[col]) {
+           numFixedColsPredBndAnalysis++;
++          if (std::getenv("HIGHS_DOM_LOG")) fprintf(stderr, "HDOM pred col=%s lo other=%s\n", model->col_names_.empty() ? std::to_string(col).c_str() : model->col_names_[col].c_str(), model->col_names_.empty() ? std::to_string(otherCol).c_str() : model->col_names_[otherCol].c_str());
+           HPRESOLVE_CHECKED_CALL(fixCol(col, HighsInt{-1}));
+         } else if (model->integrality_[col] != HighsVarType::kContinuous) {
+           numModifiedBndsPredBndAnalysis++;
+@@ -1346,6 +1350,13 @@ HPresolve::Result HPresolve::dominatedColumns(
+             // case (iii) lb(x_j) = -inf, -x_j > -x_k: set x_k = ub(x_k)
+             // direction = -1, multiplier = -1:
+             // case (iv)  lb(x_j) = -inf, -x_j >  x_k: set x_k = lb(x_k)
++            if (std::getenv("HIGHS_DOM_LOG"))
++              fprintf(stderr, "HDOM fix j=%s(%c,%d) k=%s(%c,%d) dir=%d mult=%d why=%s lenj=%d lenk=%d\n",
++                      model->col_names_.empty() ? std::to_string(col).c_str() : model->col_names_[col].c_str(),
++                      model->integrality_[col] == HighsVarType::kInteger ? (isBinary(col) ? 'B' : 'I') : 'C', (int)colsize[col],
++                      model->col_names_.empty() ? std::to_string(k).c_str() : model->col_names_[k].c_str(),
++                      model->integrality_[k] == HighsVarType::kInteger ? (isBinary(k) ? 'B' : 'I') : 'C', (int)colsize[k],
++                      (int)direction, (int)multiplier, currentBoundImplied ? "implied" : "clique", (int)colsize[col], (int)colsize[k]);
+             HPRESOLVE_CHECKED_CALL(fixCol(k, -direction_k));
+           } else if (tryToStrengthenBounds) {
+             // tighten bounds via predictive bound analysis, see Theorem 3
+@@ -1444,6 +1455,7 @@ HPresolve::Result HPresolve::dominatedColumns(
+           averageNumRedsPredBndAnalysis >= minAverageNumRedsPredBndAnalysis));
+   }
+ 
++  if (std::getenv("HIGHS_DOM_LOG")) fprintf(stderr, "HDOM call fixed=%d pred_fixed=%d pred_bnds=%d checks=%zu\n", (int)numFixedCols, (int)numFixedColsPredBndAnalysis, (int)numModifiedBndsPredBndAnalysis, numDomChecks);
+   if (numFixedCols > 0 || numModifiedBndsPredBndAnalysis > 0)
+     highsLogDev(options->log_options, HighsLogType::kInfo,
+                 "Fixed %d dominated columns and strengthened %d bounds\n",
+@@ -4536,6 +4548,7 @@ HPresolve::Result HPresolve::detectDominatedCol(
+       return Result::kOk;
+     // cannot fix to +-infinity -> infeasible
+     if (direction * bound == -kHighsInf) return Result::kDualInfeasible;
++    if (std::getenv("HIGHS_DOM_LOG")) fprintf(stderr, "HDDC strong col=%s(%c,%d) dir=%d dualbnd=%g cost=%g\n", model->col_names_.empty() ? std::to_string(col).c_str() : model->col_names_[col].c_str(), model->integrality_[col] == HighsVarType::kInteger ? 'I' : 'C', (int)colsize[col], (int)direction, dualBound, model->col_cost_[col]);
+     if (logging_on) analysis_.startPresolveRuleLog(kPresolveRuleDominatedCol);
+     // fix variable
+     if (direction > 0)
+@@ -4559,6 +4572,7 @@ HPresolve::Result HPresolve::detectDominatedCol(
+     if (direction * dualBound < -options->dual_feasibility_tolerance)
+       return Result::kOk;
+     if (direction * bound != -kHighsInf) {
++      if (std::getenv("HIGHS_DOM_LOG")) fprintf(stderr, "HDDC weak col=%s(%c,%d) dir=%d dualbnd=%g cost=%g\n", model->col_names_.empty() ? std::to_string(col).c_str() : model->col_names_[col].c_str(), model->integrality_[col] == HighsVarType::kInteger ? 'I' : 'C', (int)colsize[col], (int)direction, dualBound, model->col_cost_[col]);
+       if (logging_on) analysis_.startPresolveRuleLog(kPresolveRuleDominatedCol);
+       // fix variable
+       if (direction > 0)
+@@ -8516,6 +8530,11 @@ HPresolve::Result HPresolve::sparsify(HighsPostsolveStack& postsolve_stack) {
+ 
+     if (sparsifyRows.empty()) continue;
+ 
++    if (std::getenv("HIGHS_SPARSIFY_LOG"))
++      for (const auto& sr : sparsifyRows)
++        fprintf(stderr, "HSPR eq=%s len=%d rhs=%g int=%d -> row=%s len=%d [%g,%g] int=%d scale=%g\n",
++                model->row_names_.empty() ? std::to_string(eqrow).c_str() : model->row_names_[eqrow].c_str(), (int)rowsize[eqrow], model->row_lower_[eqrow], (int)rowsizeInteger[eqrow],
++                model->row_names_.empty() ? std::to_string(sr.index).c_str() : model->row_names_[sr.index].c_str(), (int)rowsize[sr.index], model->row_lower_[sr.index], model->row_upper_[sr.index], (int)rowsizeInteger[sr.index], sr.value);
+     postsolve_stack.equalityRowAdditions(eqrow, getStoredRow(), sparsifyRows);
+     double rhs = model->row_lower_[eqrow];
+     for (const auto& sparsifyRow : sparsifyRows) {
