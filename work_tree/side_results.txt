@@ -1,0 +1,32 @@
+neos-860300 base 1 1006 3.201000000e3 3.201000000e3 RESULT t=28.8 status=None obj=None bound=None nodes=None
+neos-860300 full 1 898 3.201000000e3 3.201000000e3 RESULT t=30.0 status=None obj=None bound=None nodes=None
+eil33-2 base 1 13371 9.340079160e2 9.340079160e2 RESULT t=41.2 status=None obj=None bound=None nodes=None
+eil33-2 full 1 11626 9.340079160e2 9.340079160e2 RESULT t=37.0 status=None obj=None bound=None nodes=None
+binkar10_1 base 1 13994 6.742200024e3 6.742200024e3 RESULT t=28.6 status=None obj=None bound=None nodes=None
+binkar10_1 full 1 4745 6.742200024e3 6.742200024e3 RESULT t=14.4 status=None obj=None bound=None nodes=None
+10teams base 1 302 9.240000000e2 9.240000000e2 RESULT t=12.9 status=None obj=None bound=None nodes=None
+10teams full 1 5164 9.240000000e2 9.240000000e2 RESULT t=24.5 status=None obj=None bound=None nodes=None
+mas76 base 1 129701 4.000505414e4 4.000505414e4 RESULT t=11.4 status=None obj=None bound=None nodes=None
+mas76 full 1 336505 4.000505414e4 4.000505414e4 RESULT t=42.9 status=None obj=None bound=None nodes=None
+neos-860300 base 2 731 3.201000000e3 3.201000000e3 RESULT t=27.5 status=None obj=None bound=None nodes=None
+neos-860300 full 2 1096 3.201000000e3 3.201000000e3 RESULT t=29.8 status=None obj=None bound=None nodes=None
+eil33-2 base 2 8730 9.340079160e2 9.340079160e2 RESULT t=33.0 status=None obj=None bound=None nodes=None
+eil33-2 full 2 12140 9.340079160e2 9.340079160e2 RESULT t=39.2 status=None obj=None bound=None nodes=None
+binkar10_1 base 2 12215 6.742200024e3 6.742200024e3 RESULT t=25.0 status=None obj=None bound=None nodes=None
+binkar10_1 full 2 5049 6.742200024e3 6.742200024e3 RESULT t=16.6 status=None obj=None bound=None nodes=None
+10teams base 2 1298 9.240000000e2 9.240000000e2 RESULT t=15.9 status=None obj=None bound=None nodes=None
+10teams full 2 273 9.240000000e2 9.240000000e2 RESULT t=15.1 status=None obj=None bound=None nodes=None
+mas76 base 2 125087 4.000505414e4 4.000505414e4 RESULT t=10.6 status=None obj=None bound=None nodes=None
+mas76 full 2 319501 4.000505414e4 4.000505414e4 RESULT t=40.7 status=None obj=None bound=None nodes=None
+neos-860300 fd 1 791 3.201000000e3 3.201000000e3 RESULT t=27.4 status=None obj=None bound=None nodes=None
+eil33-2 fd 1 9855 9.340079160e2 9.340079160e2 RESULT t=34.0 status=None obj=None bound=None nodes=None
+10teams fd 1 0 9.240000000e2 9.240000000e2 RESULT t=11.2 status=None obj=None bound=None nodes=None
+neos-860300 fd 2 785 3.201000000e3 3.201000000e3 RESULT t=27.8 status=None obj=None bound=None nodes=None
+eil33-2 fd 2 8721 9.340079160e2 9.340079160e2 RESULT t=33.3 status=None obj=None bound=None nodes=None
+10teams fd 2 0 9.240000000e2 9.240000000e2 RESULT t=10.5 status=None obj=None bound=None nodes=None
+# fd (= LP_INT_BOUNDS + PROOF_SIDE_REDUCE=dense(1/10 条件つき) + PROOF_CMIR + PROOF_CMIR_POOL) の mas76・binkar10_1 (手で実行、最後の版)
+mas76 fd 1 145913 RESULT t=13.5
+binkar10_1 fd 1 6489 RESULT t=18.7
+mas76 fd 2 151775 RESULT t=13.8
+binkar10_1 fd 2 6302 RESULT t=15.9
+# mas76 の切り分け (1 回ずつ): LP_INT_BOUNDS だけ 12.3 秒 / SIDE_REDUCE=1 だけ 34.8 秒 / LP_INT+SIDE=1 28.8 秒 / CMIR+CMIR_POOL だけ 11.2 秒
