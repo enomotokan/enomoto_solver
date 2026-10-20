@@ -648,7 +648,7 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
             if let Some(f) = env_str!("ENOMOTO_MIP_DEBUG_DUMP_PRESOLVED").filter(|_| !params.submip && params.restarts == 0) {
                 dump_mps(&prob, &f);
             }
-            let prob = if env_str!("ENOMOTO_MIP_CLIQUE_EXTEND").is_some() && (!params.submip || env_str!("ENOMOTO_MIP_CLIQUE_EXTEND_SUBMIP").is_some()) { extend_clique_rows(prob, params.verbose) } else { prob };
+            let prob = if env_str!("ENOMOTO_MIP_NO_CLIQUE_EXTEND").is_none() && (!params.submip || env_str!("ENOMOTO_MIP_CLIQUE_EXTEND_SUBMIP").is_some()) { extend_clique_rows(prob, params.verbose) } else { prob };
             let prob = if !params.submip && params.restarts == 0 && env_str!("ENOMOTO_MIP_NO_SYMMETRY").is_none() { add_symmetry_rows(prob, params.verbose) } else { prob };
             if let Some(f) = env_str!("ENOMOTO_MIP_DEBUG_SOL").filter(|_| !params.submip) {
                 let x0: Vec<f64> = std::fs::read_to_string(f).unwrap().lines().map(|l| l.trim().parse().unwrap()).collect();
@@ -694,9 +694,9 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
 }
 
 thread_local! {
-    /// [`presolve_mip`] の `ENOMOTO_MIP_MERGE_REPRESOLVE` の 2 回目の前処理の中か。
+    /// [`presolve_mip`] の 行をまとめた後のかけ直し (`ENOMOTO_MIP_NO_MERGE_REPRESOLVE` で使わない) の 2 回目の前処理の中か。
     static MERGE_REPRESOLVING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// [`probe`] が見つけた同値な 0-1 列の組 (j, k, 否定か) (`ENOMOTO_MIP_PROBE_EQUIV`)。
+    /// [`probe`] が見つけた同値な 0-1 列の組 (j, k, 否定か) (`ENOMOTO_MIP_NO_PROBE_EQUIV` で使わない)。
     static PROBE_EQUIV: std::cell::RefCell<Vec<(usize, usize, bool)>> = const { std::cell::RefCell::new(Vec::new()) };
     /// 同値な列による前処理のかけ直しの深さ。
     static PROBE_EQUIV_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -918,7 +918,7 @@ fn dump_mps(p: &MipProblem, f: &str) {
     eprintln!("MIP: presolved problem written to {f} (objective offset {:e})", p.offset);
 }
 
-/// クリーク行の拡張 (`ENOMOTO_MIP_CLIQUE_EXTEND`、既定では使わない。HiGHS の前処理の probing の "lifted nonzeros" に当たる):
+/// クリーク行の拡張 (既定で使う。`ENOMOTO_MIP_NO_CLIQUE_EXTEND` で使わない。HiGHS の前処理の probing の "lifted nonzeros" に当たる):
 /// 0-1 列だけで「文字の和 <= 1」の形の片側の行 (集合詰め込み行、`1 - x` の文字を含む) について、行のすべての文字と衝突する
 /// (衝突グラフ = 行から作る組 + プロービングの含意 [`MipProblem::conflict_edges`]) 文字を行に加える。加えた文字どうしも
 /// 衝突するものだけ足すので、行は大きなクリークのままで整数解は変わらず、LP の緩和だけが締まる。
@@ -1188,11 +1188,11 @@ fn presolve_mip(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs: Opti
         let bin = |j: usize| prob.is_int[j] && prob.col_lo[j] == 0.0 && prob.col_up[j] == 1.0 && pre.scaling.d.get(j).is_none_or(|&d| d == 1.0);
         prob.conflict_edges = p.conflict_edges.iter().copied().filter(|&(a, b)| bin((a / 2) as usize) && bin((b / 2) as usize)).collect();
     }
-    // `ENOMOTO_MIP_MERGE_REPRESOLVE`: 行をまとめて等式ができたら、前処理をもう一度かける (1 回だけ)。前処理の中では向きの逆の
+    // 行をまとめた後のかけ直し (既定で使う。`ENOMOTO_MIP_NO_MERGE_REPRESOLVE` で使わない): 行をまとめて等式ができたら、前処理をもう一度かける (1 回だけ)。前処理の中では向きの逆の
     // 不等式の組は等式として見えないので、`x = y`・`x + y = 1` の代入 (二項等式の消去) がされずに残る。physiciansched6-2 は
     // こうしてできた 0-1 列どうしの `x - y = 0` が 3482 本、`x + y = 1` が 46 本残り (HiGHS の前処理後は等式 283 本)、
     // Feasibility Jump が解を見つけられない。後処理は内側の手順の後に外側の手順を並べる (LP による固定と同じ)
-    if new_eq > 0 && env_str!("ENOMOTO_MIP_MERGE_REPRESOLVE").is_some() && !MERGE_REPRESOLVING.with(|f| f.get()) {
+    if new_eq > 0 && env_str!("ENOMOTO_MIP_NO_MERGE_REPRESOLVE").is_none() && !MERGE_REPRESOLVING.with(|f| f.get()) {
         MERGE_REPRESOLVING.with(|f| f.set(true));
         let r = presolve_mip(&prob, verbose, submip, lp_probe_secs);
         MERGE_REPRESOLVING.with(|f| f.set(false));
@@ -1240,7 +1240,7 @@ fn presolve_mip(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs: Opti
             _ => {}
         }
     }
-    // `ENOMOTO_MIP_PROBE_EQUIV`: プロービングで見つけた同値な 0-1 列を等式 (`x_k - x_j = 0` / `x_k + x_j = 1`) として足し、
+    // 同値な 0-1 列の代入 (既定で使う。`ENOMOTO_MIP_NO_PROBE_EQUIV` で使わない): プロービングで見つけた同値な 0-1 列を等式 (`x_k - x_j = 0` / `x_k + x_j = 1`) として足し、
     // 前処理をもう一度かける (二項等式の消去が列を代入で消す)。かけ直しは `ENOMOTO_T_MIP_PROBE_EQUIV_ROUNDS` 回まで (既定 2)
     let equiv = PROBE_EQUIV.with(|e| std::mem::take(&mut *e.borrow_mut()));
     let depth = PROBE_EQUIV_DEPTH.with(|d| d.get());
@@ -1520,7 +1520,7 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
     let base = tunable!("ENOMOTO_T_MIP_PROBE_BASE", 0.0, f64);
     let mut contingent = if adaptive { if base > 0.0 { base } else { cands.len() as f64 } } else { f64::INFINITY };
     let max_pass = if adaptive { tunable!("ENOMOTO_T_MIP_PROBE_PASSES", 10usize, usize).max(1) } else { 1 };
-    let want_equiv = env_str!("ENOMOTO_MIP_PROBE_EQUIV").is_some() && !submip;
+    let want_equiv = env_str!("ENOMOTO_MIP_NO_PROBE_EQUIV").is_none() && !submip;
     let mut equiv: Vec<(usize, usize, bool)> = Vec::new();
     let mut passes = 0usize;
     'passes: for _pass in 0..max_pass {
@@ -1583,7 +1583,7 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
                     for &(k, upper, v) in &ch1 {
                         last1.insert((k, upper), v);
                     }
-                    // 同値な 0-1 列 (`ENOMOTO_MIP_PROBE_EQUIV`): x_j = 0 で x_k = 0、x_j = 1 で x_k = 1 なら x_k = x_j。
+                    // 同値な 0-1 列 (既定で集める。`ENOMOTO_MIP_NO_PROBE_EQUIV` で集めない): x_j = 0 で x_k = 0、x_j = 1 で x_k = 1 なら x_k = x_j。
                     // 逆向きなら x_k = 1 - x_j。等式の行として足して前処理をかけ直す ([`presolve_mip`]、HiGHS の probing の代入)
                     if want_equiv {
                         for (&(k, upper), &v0) in &first {
