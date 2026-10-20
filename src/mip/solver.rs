@@ -6104,6 +6104,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             .filter(|&j| p.is_int[j] && self.dom.lo[j] == 0.0 && self.dom.up[j] == 1.0 && x[j] > FEASTOL && x[j] < 1.0 - FEASTOL)
             .collect();
         let (mut probed, mut fixed, mut both) = (0usize, 0usize, false);
+        let learn = env_str!("ENOMOTO_MIP_ROOT_OBJ_PROBE_IMPL").is_some();
+        let mut new_edges: Vec<(u32, u32)> = Vec::new();
+        let mut n_edges = 0usize;
         for &j in &cands {
             if self.time_up() || t0.elapsed().as_secs_f64() > tmax || (fixed == 0 && probed >= giveup) {
                 break;
@@ -6121,7 +6124,28 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.dom.tighten_lower(p, j, 1.0);
                 }
                 bad[k] = !(!self.dom.infeasible && self.dom.propagate(p) && self.propagate_objective_with(false));
+                // `ENOMOTO_MIP_ROOT_OBJ_PROBE_IMPL`: 矛盾しなかった側で固定された 0-1 列を含意 (x_j = v => x_c = w) として
+                // 定義域に足し、後の列の試しの伝播に使う (HiGHS はプロービングの含意をクリーク表に入れる)。打ち切り値を
+                // 使って得た含意なので、打ち切り値より良い解でだけ成り立つ (大域的な固定と同じ)
+                if !bad[k] && learn {
+                    let lj = 2 * j as u32 + if v == 1.0 { 0 } else { 1 };
+                    for (c, upper, val) in self.dom.changes_since(pos + 1) {
+                        if c != j && p.is_int[c] && self.dom.lo[c] == self.dom.up[c] && (val == 0.0 || val == 1.0) && self.dom.global_lo[c] == 0.0 && self.dom.global_up[c] == 1.0 {
+                            // x_c = val (上限を 0 にした / 下限を 1 にした) => 文字 (c = 1 - val) と衝突
+                            let _ = upper;
+                            let lc = 2 * c as u32 + if val == 1.0 { 1 } else { 0 };
+                            new_edges.push((lj, lc));
+                        }
+                    }
+                }
                 self.dom.backtrack_to(p, pos);
+            }
+            if !new_edges.is_empty() {
+                new_edges.sort_unstable();
+                new_edges.dedup();
+                n_edges += new_edges.len();
+                self.dom.add_implications(p.n, &new_edges);
+                new_edges.clear();
             }
             match bad {
                 [true, true] => {
@@ -6149,7 +6173,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.root_obj_probe_stats = [probed as u64, fixed as u64];
         if self.params.verbose {
             eprintln!(
-                "MIP: root objective probing: {} fractional binaries, {probed} probed, {fixed} fixed{} (cutoff {:.10e}, {:.2}s)",
+                "MIP: root objective probing: {} fractional binaries, {probed} probed, {fixed} fixed, {n_edges} implications{} (cutoff {:.10e}, {:.2}s)",
                 cands.len(),
                 if both { ", both sides infeasible" } else { "" },
                 self.prune_limit(),
