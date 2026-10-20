@@ -9415,6 +9415,15 @@ neos-950242 の 2 回目の調査 (`analysis/neos950242_r2_20261020.md`)。
   (-21〜-27) になった。解発見スレッドの解も FJ の解と同じに扱う (`inc_only_fj`) ようにした。手元 4 スレッド・60 秒: hypothyroid-k1
   26.0・25.8 秒、neos-950242 13.8 秒、nursesched-sprint02 36.0 秒、drayage-100-23 19.5 秒で最適。
 
+## 2026-10-20: LP 面の部分 MIP の強化 (LPFACE_TIGHT) は不採用、neos-2978193-inde 2 回目の調査
+
+- LPFACE_TIGHT=1 (T_LPFACE_TIME_FRAC=0.3, TIME_MAX=15, NODES=2000) を 12fb389 で対の計測 (4 スレッド・60 秒、同じコンテナで順序を入れ替えて 2 組)。
+  - 40 問: 既定 24/25 → 25/25 (rLFa、10teams の揺れ)、rLFb は 25/25 で同じ。SGM 20.90→20.15 / 18.12→19.28。不一致 0。
+  - 16 問: rLFa 6→8 (hypothyroid-k1・uccase12。どちらも揺れの大きい問題)、rLFb 6→5 (nursesched-sprint02 を落とす)。対象の問題で両方の組で解けたものはない。
+  - drayage-25-23・ns1116954 などで遅くなる。既定にしない (環境変数のまま)。
+- neos-2978193-inde 2 回目 (inv/neos2978193-r2-20261020): 「根のカットが LP に残るから木が大きい」は成り立たない。カットを早く外すほど木が大きくなる。唯一やや良い RESTART_CUTS_TO_POOL=1 は再スタートする問題 (mik-250・mas76・neos-911970) で悪化するので計測にもかけない。メモ: analysis/neos-2978193-inde_r2_20261020.md
+- 結果: benchmarks/*_12fb389_{newdef,lpface}_rLF{a,b}.json
+
 ## 改名一覧 (整理時)
 
 本メモ中は旧名で書かれている。
