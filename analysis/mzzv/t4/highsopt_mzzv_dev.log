@@ -1,0 +1,181 @@
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+readMPS: Trying to open file /home/user/enomoto_solver/.miplib_cache/mzzv42z.mps
+readMPS: Read NAME    OK
+readMPS: Read ROWS    OK
+readMPS: Read COLUMNS OK
+readMPS: Read RHS     OK
+readMPS: Read BOUNDS  OK
+ MIP      : mzzv42z
+Rows      : 10460
+Cols      : 11717
+Nonzeros  : 151261
+Integer   : 11717 (11482 binary)
+Coefficient ranges:
+  Matrix  [1e+00, 1e+03]
+  Cost    [8e+00, 1e+03]
+  Bound   [1e+00, 1e+02]
+  RHS     [1e+00, 1e+00]
+Presolving model
+Permitted suppression of presolve rules via presolve_rule_off option:
+   Rule  6 (set bit  6 =    64): Forcing row
+   Rule  7 (set bit  7 =   128): Forcing col
+   Rule  8 (set bit  8 =   256): Free col substitution
+   Rule  9 (set bit  9 =   512): Doubleton equation
+   Rule 10 (set bit 10 =  1024): Dependent equations
+   Rule 11 (set bit 11 =  2048): Dependent free columns
+   Rule 12 (set bit 12 =  4096): Aggregator
+   Rule 13 (set bit 13 =  8192): Parallel rows and columns
+   Rule 14 (set bit 14 = 16384): Sparsify
+   Rule 15 (set bit 15 = 32768): Probing
+   Rule 16 (set bit 16 = 65536): Enumeration
+   Rule 17 (set bit 17 = 131072): Dual fixing
+   Rule 18 (set bit 18 = 262144): Col stuffing
+   Rule 19 (set bit 19 = 524288): Initial sweep
+10460 rows, 11717 cols, 151261 nonzeros 0s
+Sparsify removed 0.1% of nonzeros
+Strengthened 37 coefficients
+Fixed 41 dominated columns and strengthened 0 bounds
+Enumeration presolve fixed 280 columns, tightened 0 bounds and performed 11 substitutions
+6802 probing evaluations: 591 deleted rows, 1000 deleted columns, 13388 lifted nonzeros
+8948 rows, 9795 cols, 124089 nonzeros 4s
+Sparsify removed 0.1% of nonzeros
+Enumeration presolve fixed 787 columns, tightened 0 bounds and performed 31 substitutions
+2500 probing evaluations: 505 deleted rows, 938 deleted columns, 3119 lifted nonzeros
+7286 rows, 7767 cols, 90279 nonzeros 8s
+Sparsify removed 0.1% of nonzeros
+Enumeration presolve fixed 9 columns, tightened 0 bounds and performed 0 substitutions
+7220 probing evaluations: 262 deleted rows, 310 deleted columns, 2829 lifted nonzeros
+Sparsify removed 0.1% of nonzeros
+6859 probing evaluations: 15 deleted rows, 28 deleted columns, 370 lifted nonzeros
+Fixed 85 dominated columns and strengthened 0 bounds
+6139 rows, 6980 cols, 80276 nonzeros 18s
+Presolve reductions: rows 6139(-4321); columns 6980(-4737); nonzeros 80276(-70985) 
+Objective function is integral with scale 0.5
+
+Solving MIP model with:
+   6139 rows
+   6980 cols (6745 binary, 235 integer, 0 implied int., 0 continuous, 0 domain fixed)
+   80276 nonzeros
+   Thread count 4 (of 4 threads). Using 1 max workers. Parallel search off
+Feasibility Jump: starting solve. weightUpdateDecay=1, relaxContinuous=0  
+
+Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+     I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+     S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+     Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+ J       0       0         0   0.00%   -inf            0                  Large        0      0      0         0    18.5s
+         0       0         0   0.00%   -21414.23133    0                  Large        0      0      6      4783    19.0s
+Fixing 504 columns (504 integers) sitting at bound at analytic center
+
+HighsPrimalHeuristics::solveSubMip Before run() for     MIP at depth  0 on thread  0
+
+HighsPrimalHeuristics::solveSubMip Before run() for sub-MIP at depth  1 on thread  0
+HighsPrimalHeuristics::solveSubMip After  run() for sub-MIP at depth  1 on thread  0
+
+HighsPrimalHeuristics::solveSubMip After  run() for     MIP at depth  0 on thread  0
+
+ L       0       0         0   0.00%   -20737.693926   -20540             0.96%     5719    373    366     12413    24.8s
+
+HighsPrimalHeuristics::solveSubMip Before run() for     MIP at depth  0 on thread  0
+
+HighsPrimalHeuristics::solveSubMip Before run() for sub-MIP at depth  1 on thread  0
+HighsPrimalHeuristics::solveSubMip After  run() for sub-MIP at depth  1 on thread  0
+
+
+HighsPrimalHeuristics::solveSubMip Before run() for sub-MIP at depth  1 on thread  0
+HighsPrimalHeuristics::solveSubMip After  run() for sub-MIP at depth  1 on thread  0
+
+
+HighsPrimalHeuristics::solveSubMip Before run() for sub-MIP at depth  1 on thread  0
+HighsPrimalHeuristics::solveSubMip After  run() for sub-MIP at depth  1 on thread  0
+
+HighsPrimalHeuristics::solveSubMip After  run() for     MIP at depth  0 on thread  0
+
+
+14.6% inactive integer columns, restarting
+Sparsify removed 0.5% of nonzeros
+Strengthened 6 coefficients
+Fixed 10 dominated columns and strengthened 0 bounds
+1165 probing evaluations: 25 deleted rows, 35 deleted columns, 162 lifted nonzeros
+Sparsify removed 0.1% of nonzeros
+Reached time limit
+         0       0         0   0.00%   -20728.719673   -20540             0.92%      226   1382      0     14723    30.3s
+
+Solving report
+  Model             mzzv42z
+  Status            Time limit reached
+  Primal bound      -20540
+  Dual bound        -20728.7196733
+  Gap               0.919% (tolerance: 0.01%)
+  P-D integral      0.0499066243131
+  Solution status   feasible
+                    -20540 (objective)
+                    0 (bound viol.)
+                    1.13686837722e-13 (int. viol.)
+                    0 (row viol.)
+  Timing            30.25
+                    19.42 (Presolve)
+                        MIP    time [calls] = 18.26 [1]
+                        subMIP time [calls] = 1.16 [6]
+                    10.82 (Solve)
+                        MIP    time [calls] = 9.54 [1]
+                        subMIP time [calls] = 1.29 [6]
+                    0.00 (Postsolve)
+                        MIP    time [calls] = 0.00 [1]
+                        subMIP time [calls] = 0.00 [6]
+  Max sub-MIP depth 4
+  Nodes             0
+  Repair LPs        0
+  LP iterations     14723
+                    0 (strong br.)
+                    7850 (separation)
+                    2011 (heuristics)
+getKktFailures:: cost norm = 1.12e+03; bound norm =       40
+getKktFailures:                      LP  (abs / rel)         Col (abs / rel)         Row (abs / rel)
+getKktFailures: primal infeasibility 9.04e-15 / 2.21e-16     5.17e-15 / 1.26e-16     9.04e-15 / 2.21e-16
+callSolveMip return of HighsStatus::Warning
+
+MIP sub-solver profiling: number of threads used = 2
+
+Thread 0
+Solver                    Calls    Time       Time/call      MIP%
+MIP                           1  3.0251e+01  3.0251e+01
+Du simplex (basis)           33  1.8020e+00  5.4606e-02       6.0
+Du simplex (no basis)         1  4.2960e-01  4.2960e-01       1.4
+Sub-MIP                       2  2.4495e+00  1.2247e+00       8.1
+TOTAL                            4.6811e+00                  15.5
+
+Thread 1
+Solver                    Calls    Time       Time/call      MIP%
+IPX (AC)                      3  8.5429e-01  2.8476e-01       2.8
+TOTAL                            8.5429e-01                   2.8
+
+Sub-MIP sub-solver profiling
+
+Thread 0
+Solver                    Calls    Time       Time/call  Sub-MIP%
+Du simplex (basis)          121  4.7808e-01  3.9511e-03      19.5
+TOTAL                            4.7808e-01                  19.5
+
+Percent (sub-)MIP time by thread
+
+MIP sub-solver            0     1
+Du simplex (basis)      6.0      
+Du simplex (no basis)   1.4      
+IPX (AC)                      2.8
+Sub-MIP                 8.1      
+=================================
+Total                  15.5   2.8
+=================================
+
+Sub-MIP sub-solver        0     1
+Du simplex (basis)     19.5      
+=================================
+Total                  19.5      
+=================================
+RESULT mzzv42z 30.275609970092773 -20539.999999999996 -20728.719673260843 0
