@@ -396,8 +396,10 @@ pub(super) fn fj2_search(p: &super::problem::MipProblem, lo: &[f64], up: &[f64],
     for v in 0..n {
         s.reset_moves(v);
     }
-    let max_total = nnz.max(1) << 10;
-    let max_since = nnz.max(1) << 8;
+    // 手間の上限 (非零の数 × 1024、最後の改善から × 256)。`ENOMOTO_T_MIP_FJ_EFFORT_MULT` 倍にする (診断用、既定 1)
+    let mult = tunable!("ENOMOTO_T_MIP_FJ_EFFORT_MULT", 1u64, u64).max(1);
+    let max_total = (nnz.max(1) << 10) * mult;
+    let max_since = (nnz.max(1) << 8) * mult;
     let mut best_viol = usize::MAX;
     let mut best_obj = f64::INFINITY;
     let mut best_x: Option<Vec<f64>> = None;
@@ -438,6 +440,17 @@ pub(super) fn fj2_search(p: &super::problem::MipProblem, lo: &[f64], up: &[f64],
             break;
         }
         s.do_move(v);
+    }
+    if env_str!("ENOMOTO_MIP_FJ_DEBUG").is_some_and(|v| v == "2") && best_x.is_none() {
+        // 終わったときに違反している行の形 (向き・長さ・連続列の数・右辺) を数える
+        let mut kinds: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+        for &ci in &s.violated {
+            let c = &s.cons[ci as usize];
+            let nc = c.coeffs.iter().filter(|&&(j, _)| !s.is_int[j as usize]).count();
+            let k = format!("{} len {} cont {} rhs {:.4}", if c.sense == Sense::Lte { "<=" } else { ">=" }, c.coeffs.len(), nc, c.rhs);
+            *kinds.entry(k).or_insert(0) += 1;
+        }
+        eprintln!("MIP:   FJ2 violated rows at the end: {kinds:?}");
     }
     if env_str!("ENOMOTO_MIP_FJ_DEBUG").is_some() {
         eprintln!(

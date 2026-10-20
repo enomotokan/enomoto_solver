@@ -698,8 +698,12 @@ pub fn run_extended(
 
         // 不等式行の列シングルトン (`ineqsingleton`、大きな問題か `ENOMOTO_INEQ_SINGLETON` 設定時):
         // 列を上下限に固定するか、その行を等式に変えて後段の colsingleton に消去させる。
-        if ineq_singleton_on && int_mask().is_none() {
-            let isr = timed_step!("ineqsingleton", ineqsingleton::resolve_inequality_singletons(n, &a, &cur_real_rows, &cur_real_rhs, &c, &lb, &ub));
+        // 整数最適化の前処理では使わない (`ENOMOTO_MIP_INEQ_SINGLETON` で使う。整数列は固定だけ、連続列は等式化も。
+        // physiciansched6-2 では目的の費用が `y >= Σ 罰則の列` の形の連続列 (この行だけに出る) にあり、これを消さないと
+        // 罰則の列が費用のない鎖のまま残って Feasibility Jump が解を見つけられない)
+        let mip_mask = int_mask();
+        if ineq_singleton_on && (mip_mask.is_none() || env_str!("ENOMOTO_MIP_INEQ_SINGLETON").is_some()) {
+            let isr = timed_step!("ineqsingleton", ineqsingleton::resolve_inequality_singletons_int(n, &a, &cur_real_rows, &cur_real_rhs, &c, &lb, &ub, mip_mask.as_deref().map(|v| v.as_slice())));
             if env_str!("ENOMOTO_DEBUG_INEQ_SINGLETON").is_some() {
                 eprintln!("DEBUG_INEQ_SINGLETON: fixes={} implied_equalities={}", isr.fixes.len(), isr.implied_equalities.len());
             }
