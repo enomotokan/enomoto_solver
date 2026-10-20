@@ -1073,6 +1073,20 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
         }
+        // `ENOMOTO_MIP_CUT_AGE_HIGHS`: HiGHS の `HighsLpRelaxation::performAging` と同じく、論理変数が基底のカットは余裕が 0
+        // (退化して効いている形) でも年齢を増やし、非基底でも双対値が 0 なら増やす。0 に戻すのは双対値が 0 でないものだけ。
+        // 既定の数え方では退化した基底の行の年齢が 0 に戻り続け、上限を下げても LP のカットの行が減らない (mc11 で上限 50 でも 3770 行)
+        if env_str!("ENOMOTO_MIP_CUT_AGE_HIGHS").is_some() {
+            let y = self.lp.row_duals();
+            for (k, age) in self.cut_age.iter_mut().enumerate() {
+                let i = m0 + k;
+                if b.row[i] == VarStatus::Basic || y[i].abs() <= 1e-9 {
+                    *age = age.saturating_add(1);
+                } else {
+                    *age = 0;
+                }
+            }
+        } else {
         for (k, age) in self.cut_age.iter_mut().enumerate() {
             let i = m0 + k;
             let (_, up) = self.lp.row_bounds(i);
@@ -1086,6 +1100,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             } else {
                 *age = 0;
             }
+        }
         }
         if !self.merged_cuts.is_empty() {
             for k in 0..ncut {
@@ -1122,6 +1137,29 @@ impl<'a, L: MipLp> Solver<'a, L> {
             base
         };
         let mut removed = self.remove_cuts_older_than(limit);
+        // `ENOMOTO_T_MIP_TREE_SEP_CUT_AGE` = a (> 0): `ENOMOTO_MIP_TREE_SEP` のラウンドで加えたカットは年齢 a で外す
+        // (根のカットは上の上限のまま)。ノードで加えたカットの行が残ってノードの LP が重くなるのを抑える
+        let ts_age = tunable!("ENOMOTO_T_MIP_TREE_SEP_CUT_AGE", 0u32, u32);
+        if ts_age > 0 && !self.ts_cut_ids.is_empty() {
+            self.sync_cut_age();
+            let m0 = self.p.m;
+            let mut remove = vec![false; self.lp.num_rows()];
+            let mut cnt = 0;
+            for (k, &age) in self.cut_age.iter().enumerate() {
+                if age > ts_age && self.ts_cut_ids.contains(&self.cut_ids[k]) && !self.queue.is_protected(self.cut_ids[k]) {
+                    remove[m0 + k] = true;
+                    cnt += 1;
+                }
+            }
+            if cnt > 0 {
+                self.delete_lp_rows(&remove);
+                removed += cnt;
+            }
+            if self.ts_cut_ids.len() > 4 * self.cut_ids.len() + 1000 {
+                let live: std::collections::HashSet<u64> = self.cut_ids.iter().copied().collect();
+                self.ts_cut_ids.retain(|id| live.contains(id));
+            }
+        }
         let r = tunable!("ENOMOTO_T_MIP_CUT_ROWS_CAP", 0.0, f64);
         if r > 0.0 {
             self.sync_cut_age();
@@ -1145,6 +1183,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         removed
+    }
+
+    /// `ENOMOTO_MIP_TREE_SEP` のラウンドで LP の行 `r0..` に加えたカットを覚える (`ENOMOTO_T_MIP_TREE_SEP_CUT_AGE` > 0 のときだけ)
+    pub(super) fn mark_tree_sep_cuts(&mut self, r0: usize) {
+        if tunable!("ENOMOTO_T_MIP_TREE_SEP_CUT_AGE", 0u32, u32) == 0 {
+            return;
+        }
+        self.sync_cut_age();
+        let m0 = self.p.m;
+        for k in r0.max(m0) - m0..self.cut_ids.len() {
+            self.ts_cut_ids.insert(self.cut_ids[k]);
+        }
     }
 
     /// 年齢が `limit` を超えたカットを LP から外す。外した数を返す。
@@ -2133,7 +2183,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 固定費用ネットワーク型ではノードでも経路集約の始点を使う (`ENOMOTO_T_MIP_NODE_FC_PATH_STARTS`、[`Solver::node_cuts_due`])
             let max_starts = if !light {
                 tunable!("ENOMOTO_T_MIP_PATH_STARTS", 1000usize, usize)
-            } else if self.fc_node_sep {
+            } else if self.fc_node_sep || self.tree_sep_fc {
                 tunable!("ENOMOTO_T_MIP_NODE_FC_PATH_STARTS", 1000usize, usize)
             } else {
                 tunable!("ENOMOTO_T_MIP_NODE_PATH_STARTS", 0usize, usize)
