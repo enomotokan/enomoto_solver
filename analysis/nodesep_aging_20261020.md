@@ -158,3 +158,8 @@ mik-250・misc07・mas76・rout は時間の差が 3 秒・2 割未満 (表に�
    (`ENOMOTO_MIP_RESTORE_KEEP_CURRENT`) と組む必要がある。TREE_SEP は今の基底から解くので ts_ah50 はその組だが、それでも良くならなかった。
    ノードあたりの反復の差 (HiGHS 30〜60) の主因は行の数ではなく、取り出すノードと直前のノードの離れ方 (潜りの量) の方と推測する。
 3. 既定にするかは、noswot の悪化を直した上で 40 問をもう 2 組測って決める。今のままでは 40 問の解けた数 +0.5、SGM 差なし。
+
+## 6. テスト
+
+`RUSTFLAGS="-C link-arg=-L/usr/lib/x86_64-linux-gnu -C link-arg=-lpython3.13" CARGO_TARGET_DIR=target/testbuild cargo test --release --lib`:
+既定 308 件通過 (17 件は無視)。`ENOMOTO_MIP_TREE_SEP=1 ENOMOTO_MIP_CUT_AGE_HIGHS=1` でも 308 件通過。
