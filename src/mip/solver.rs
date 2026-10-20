@@ -126,6 +126,8 @@ thread_local! {
     /// カットを強める求解の、主の根の LP の反復数 (カットの LP の反復上限に使う)
     pub(super) static BG_ROOT_ITERS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     pub(super) static CUT_JOB: std::cell::RefCell<Option<std::sync::Arc<CutJob>>> = const { std::cell::RefCell::new(None) };
+    /// カットを強める求解の根の LP の初めの基底 (主の根の LP の最後の基底。既定で渡す。`ENOMOTO_MIP_NO_BG_CUTS_BASIS` で渡さない)
+    static BG_ROOT_BASIS: std::cell::RefCell<Option<super::lp::Basis>> = const { std::cell::RefCell::new(None) };
     /// 診断用: 既知の最適解 (縮約後の空間、`ENOMOTO_MIP_DEBUG_SOL`)。この解を含むノードが
     /// 枝刈りされたら理由を表示する (SCIP の debug solution と同様)。
     pub(crate) static DEBUG_SOL: std::cell::RefCell<Option<Vec<f64>>> = const { std::cell::RefCell::new(None) };
@@ -1232,6 +1234,8 @@ pub(super) struct CutJob {
     pub(super) out: std::sync::Mutex<Option<(Vec<(Vec<(usize, f64)>, f64, f64)>, f64, usize)>>,
     /// 途中の LP 解 (ラウンドごとに更新)。`ENOMOTO_MIP_BG_CUTS_SHARE_X` なら主の根のヒューリスティクスが使う
     pub(super) latest_x: std::sync::Mutex<Option<Vec<f64>>>,
+    /// 結果の LP の最後の基底 (既定で返す。`ENOMOTO_MIP_NO_BG_CUTS_BASIS` で返さない。主がカットの行を置き換えた後の LP に入れる)
+    pub(super) basis: std::sync::Mutex<Option<super::lp::Basis>>,
 }
 
 /// カットを強める求解のスレッド。落とすと止めの合図を出して終わりを待つ (主が途中で戻っても残らないように)。
@@ -1810,6 +1814,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.fc_stats.1 += a * (g - self.fc_stats.1);
     }
 
+    /// `ENOMOTO_MIP_ROOT_GAP_EXIT`: 根 (写しから解く求解でない) で、根の LP の値 (`cur_lb`、カット前の値で常に正しい下界) が暫定解の打ち切り値 ([`Self::prune_limit`]) に
+    /// 届いたか。届いていれば根のカット・ヒューリスティクスを続けずに最適で終える。ns1116954 (目的関数が全部 0) では FJ が
+    /// 14.5 秒に 0 を見つけても、カットのループ・根のヒューリスティクス (内点法の丸め 17 秒)・裏のカットを回して 52 秒で終わっていた
+    pub(super) fn root_gap_closed(&self) -> bool {
+        env_str!("ENOMOTO_MIP_ROOT_GAP_EXIT").is_some()
+            && self.snap.is_none()
+            && self.incumbent.is_some()
+            && self.cur_lb >= self.prune_limit()
+    }
+
     pub(super) fn prune_limit(&self) -> f64 {
         // ポートフォリオ並列: 他のスレッドの解の目的値も打ち切りに使う
         let own = self.incumbent.as_ref().map(|(z, _)| *z);
@@ -2252,7 +2266,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 };
                 let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let stop2 = stop.clone();
-                let seed = self.rng ^ 0x9E37_79B9_7F4A_7C15;
+                // `ENOMOTO_T_MIP_FJ_SEED` (診断用): FJ の種をずらす (FJ の当たり外れが種の運かを見る)
+                let seed = (self.rng ^ 0x9E37_79B9_7F4A_7C15).wrapping_add(tunable!("ENOMOTO_T_MIP_FJ_SEED", 0u64, u64).wrapping_mul(0xD1B5_4A32_D192_ED03));
+                // 実行可能性問題では FJ を根のカットのループの終わりまで (時間上限の半分まで) 回し続ける
+                let cap = if super::heuristics::fj_feas_extend(&pc) && self.params.time_limit.is_finite() { tunable!("ENOMOTO_T_MIP_FJ_FEAS_FRAC", 0.5, f64) * self.params.time_limit } else { cap };
                 let h = std::thread::spawn(move || super::heuristics::fj_search(&pc, &lo, &up, effort, cap, seed, Some(&stop2)));
                 self.fj_thread = Some((h, stop));
             } else if !self.params.submip && !proof_only() && self.feasibility_jump(effort, cap) && self.params.verbose {
@@ -2281,7 +2298,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
         }
+        if self.snap.is_some() && CUT_JOB.with(|j| j.borrow().is_some()) {
+            if let Some(b) = BG_ROOT_BASIS.with(|s| s.borrow_mut().take()) {
+                if b.col.len() == self.p.n && b.row.len() == self.lp.num_rows() {
+                    self.lp.set_basis(&b);
+                }
+            }
+        }
         let mut root_st = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
+        if self.params.verbose && self.snap.is_some() {
+            eprintln!("MIP: [snapshot] root LP {root_st:?} ({} iters, {:.2}s)", self.lp.total_iterations(), self.start.elapsed().as_secs_f64());
+        }
         if matches!(root_st, LpStatus::Error | LpStatus::IterationLimit) && !self.time_up() {
             // 結論を出せなかった (数値的な破綻など): 内点法 + クロスオーバーだけで解き直す
             if self.params.verbose {
@@ -2378,11 +2405,21 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 })
                 .collect();
             {
+                if env_str!("ENOMOTO_MIP_NO_BG_CUTS_BASIS").is_none() {
+                    *job.basis.lock().unwrap() = Some(self.lp.basis());
+                }
                 *job.out.lock().unwrap() = Some((rows, self.lp.objective() + self.p.offset, self.bg_cut_rounds));
             }
             return MipResult { status: MipStatus::NotSolved, x: None, objective: None, best_bound: f64::NEG_INFINITY, nodes: 0, lp_iterations: self.lp.total_iterations() };
         }
         self.join_fj_thread();
+        if self.root_gap_closed() {
+            let z = self.incumbent.as_ref().map(|(z, _)| *z).unwrap();
+            if self.params.verbose {
+                eprintln!("MIP: the root LP bound {:.10e} closed the gap to the incumbent {z:.10e} ({:.2}s)", self.cur_lb, self.start.elapsed().as_secs_f64());
+            }
+            return self.finish(MipStatus::Optimal, z);
+        }
         // 並列モードで、根のヒューリスティクスの間に、今の根の写しから作った求解でカットのループを続ける (分離は残りの
         // スレッドで並列)。ヒューリスティクスが終わったら止め、その LP に残ったカット (効いているもの) で根の LP のカットを
         // 置き換える (目的値が上がったときだけ)。既定で使う (`ENOMOTO_MIP_NO_BG_CUTS` で使わない)。`ENOMOTO_MIP_BG_CUTS=heavy`
@@ -2394,18 +2431,23 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.snap.is_none() && !self.params.submip && self.params.threads > 1 && env_str!("ENOMOTO_MIP_NO_CUTS").is_none() && !self.fractional(&self.lp.col_values()).is_empty() {
             let bg_mode = env_str!("ENOMOTO_MIP_BG_CUTS").or(if env_str!("ENOMOTO_MIP_NO_BG_CUTS").is_none() { Some("1") } else { None });
             if let Some(mode) = bg_mode {
-                let job = std::sync::Arc::new(CutJob { stop: std::sync::atomic::AtomicBool::new(false), heavy: mode == "heavy", out: std::sync::Mutex::new(None), latest_x: std::sync::Mutex::new(None) });
+                let job = std::sync::Arc::new(CutJob { stop: std::sync::atomic::AtomicBool::new(false), heavy: mode == "heavy", out: std::sync::Mutex::new(None), latest_x: std::sync::Mutex::new(None), basis: std::sync::Mutex::new(None) });
                 let snap = self.make_snapshot(&Portfolio::new(), &mut None, false);
                 let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());
                 let threads = tunable!("ENOMOTO_T_MIP_BG_CUTS_THREADS", (self.params.threads - 1).max(1), usize);
-                let params = MipParams { time_limit: remaining, node_limit: u64::MAX, verbose: false, threads, ..self.params };
+                let params = MipParams { time_limit: remaining, node_limit: u64::MAX, verbose: env_str!("ENOMOTO_MIP_BG_CUTS_LOG").is_some(), threads, ..self.params };
                 let j2 = job.clone();
                 let ri = root_iters;
+                // 既定で (`ENOMOTO_MIP_NO_BG_CUTS_BASIS` で渡さない) 主の根の LP の最後の基底 (写しの問題の行 + カットの行と同じ並び) を渡す。渡さないと
+                // 写しの根の LP は基底なしで解き直しになり、uccase12 (88600 行) では 38 秒たっても終わらず、主がその終わりを
+                // 待って 23〜27 秒止まっていた (LP は止めの合図を見ない)
+                let bg_basis = if env_str!("ENOMOTO_MIP_NO_BG_CUTS_BASIS").is_none() { Some(self.lp.basis()) } else { None };
                 let handle = std::thread::Builder::new()
                     .stack_size(64 << 20)
                     .spawn(move || {
                         CUT_JOB.with(|j| *j.borrow_mut() = Some(j2));
                         BG_ROOT_ITERS.with(|c| c.set(ri));
+                        BG_ROOT_BASIS.with(|b| *b.borrow_mut() = bg_basis);
                         let _ = solve_worker(snap, None, params);
                     })
                     .expect("failed to spawn the cut thread");
@@ -2727,8 +2769,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let res = bg.finish();
             let wait = t0.elapsed().as_secs_f64();
             // 根の LP を解き直しておく (ヒューリスティクスの後で状態が戻っていることを確かめる)
+            let it0 = self.lp.total_iterations();
             let st0 = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
             let cur = self.lp.objective() + self.p.offset;
+            if self.params.verbose {
+                eprintln!("MIP: background cuts: root LP re-solved before replacing the cuts: {st0:?}, {} iters ({:.2}s)", self.lp.total_iterations() - it0, self.start.elapsed().as_secs_f64());
+            }
             match res {
                 Some((rows, obj, rounds)) if obj > cur + 1e-9 * cur.abs().max(1.0) && st0 == LpStatus::Optimal => {
                     let m0 = self.p.m;
@@ -2745,13 +2791,22 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                     self.delete_lp_rows(&remove);
                     self.add_cut_rows(&rows);
+                    if let Some(b) = bg.job.basis.lock().unwrap().take() {
+                        if b.col.len() == self.p.n && b.row.len() == self.lp.num_rows() {
+                            self.lp.set_basis(&b);
+                        }
+                    }
                     for (c, l, u) in &rows {
                         if u.is_finite() && !l.is_finite() {
                             self.add_to_pool(c, *u);
                         }
                     }
+                    let it1 = self.lp.total_iterations();
                     let st = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
                     let new = self.lp.objective() + self.p.offset;
+                    if self.params.verbose {
+                        eprintln!("MIP: background cuts: LP with the replaced cuts: {st:?}, {} iters ({:.2}s)", self.lp.total_iterations() - it1, self.start.elapsed().as_secs_f64());
+                    }
                     if st == LpStatus::Optimal && new >= cur - 1e-9 * cur.abs().max(1.0) {
                         if self.params.verbose {
                             eprintln!("MIP: background cuts: {} rounds, {} cut rows (was {}), obj {:.10e} -> {:.10e} (waited {:.2}s, {:.2}s)", rounds, rows.len(), saved.len(), cur, new, wait, self.start.elapsed().as_secs_f64());

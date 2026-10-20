@@ -210,6 +210,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut obj_hist: Vec<f64> = Vec::new();
         loop {
             self.poll_fj_thread();
+            if self.root_gap_closed() {
+                break;
+            }
             if round_ctr >= max_rounds {
                 let k = obj_hist.len();
                 let extend = adapt_rounds
