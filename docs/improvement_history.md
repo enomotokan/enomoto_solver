@@ -9451,6 +9451,15 @@ neos-950242 の 2 回目の調査 (`analysis/neos950242_r2_20261020.md`)。
 - beasleyC3 は今の既定で 32.6 秒 (rHAa)・33.3 秒 (rHAb)・37.7 秒 (rCBb) で解ける回がある (rCBa では解けない)。
 - 結果: benchmarks/*_6eda17d_{newdef,heavyage}_rHA{a,b}.json、*_f80fa4a_{newdef,prev}_rCB{a,b}.json、*_98b0d12_{newdef,treesep2}_rT2{a,b}.json
 
+## 2026-10-20: P5 (INEQ_SINGLETON・DUAL_UB・CS_OBJ_PIVOT・FJ_LP_REPAIR・INC_LP_CAP・RINS_FJ_BOOST) は保留
+
+- 1d1bc8c での対の計測 (rP5a/rP5b) と、今の develop に physiciansched6-2 の試作 (2bbc36d) をマージした 5f671fb での対の計測 (rPDa/rPDb)。
+  - rPDa: 40 問 25→26 (10teams)、SGM 22.01→21.77。16 問 10→9 (beasleyC3 を落とす)、SGM 37.70→36.80、主ギャップの和 1.09→0.19。
+  - rPDb: 40 問 26→26、SGM 20.99→20.59。16 問 11→10 (beasleyC3 を得て uccase12・roll3000 を落とす)、SGM 37.58→35.05、主ギャップの和 1.09→0.10。
+  - physiciansched6-2 は既定では 4 組とも解が見つからず、P5 では 4 組とも約 10 秒で解が出る (49624〜51429、最適 49324)。
+  - 不一致 0。SGM と主ギャップは良いが、16 問の解けた数が 2 組とも 1 減る (落としたのは揺れの大きい問題) ので、採用の基準 (解けた数が減らない) を満たさない。既定にしない。
+- 結果: benchmarks/*_1d1bc8c_{newdef,p5}_rP5{a,b}.json、*_5f671fb_{newdef,p5}_rPD{a,b}.json
+
 ## 改名一覧 (整理時)
 
 本メモ中は旧名で書かれている。
