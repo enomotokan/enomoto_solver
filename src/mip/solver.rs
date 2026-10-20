@@ -3582,7 +3582,26 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let x = self.lp.col_values();
                 let frac = self.fractional(&x);
                 if frac.is_empty() {
-                    self.try_lp_solution();
+                    if self.try_lp_solution() {
+                        break None;
+                    }
+                    // 許容誤差の中で整数の LP 解が、丸めると行に反する (big-M の行 x <= M y で y = 1e-10、x = M y): ノードを捨てると
+                    // その先の解を失う (beavma の再スタートの後の問題で 383285 を捨て 383738.6 を最適と返した)。整数からのずれが
+                    // 最大の固定されていない整数列で分枝する
+                    let mut xr = x.clone();
+                    for j in 0..self.p.n {
+                        if self.p.is_int[j] {
+                            xr[j] = xr[j].round();
+                        }
+                    }
+                    if !self.p.is_feasible(&xr, FEASTOL) {
+                        let pick = (0..self.p.n)
+                            .filter(|&j| self.p.is_int[j] && self.dom.lo[j] < self.dom.up[j] && x[j] != x[j].round())
+                            .max_by(|&a, &b| (x[a] - x[a].round()).abs().total_cmp(&(x[b] - x[b].round()).abs()));
+                        if let Some(j) = pick {
+                            break Some(Some((j, x[j], node_obj, vec![(j, x[j])])));
+                        }
+                    }
                     break None;
                 }
                 xp("m_frac");
