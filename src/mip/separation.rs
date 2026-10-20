@@ -514,7 +514,20 @@ impl<'a, L: MipLp> Solver<'a, L> {
             } else {
                 self.deadline
             };
-            let st = self.lp.solve(&SolveLimits { iteration_limit: lim, cutoff: f64::INFINITY, deadline: lp_deadline });
+            let mut st = self.lp.solve(&SolveLimits { iteration_limit: lim, cutoff: f64::INFINITY, deadline: lp_deadline });
+            // `ENOMOTO_T_MIP_CUT_LP_RETRY` = k (> 0、試作): 1 回の LP の時間の上限で止まったら、カットを外す前に同じ基底から
+            // もう k 倍の時間だけ解き続ける。mzzv42z (10460 行) に implied bound カット 300 本余りを一度に入れると LP が
+            // 1700 反復ほどかかり、上限 1.2 秒 (60 秒の 2%) に当たる回と当たらない回があって、当たると全部捨てて根の下界が
+            // -21534 のまま終わる (当たらなければ -21203)
+            let retry = tunable!("ENOMOTO_T_MIP_CUT_LP_RETRY", 0.0, f64);
+            if st == LpStatus::TimeLimit && retry > 0.0 && cap.is_finite() && !self.time_up() {
+                let d = std::time::Instant::now() + std::time::Duration::from_secs_f64(retry * cap);
+                let d = Some(self.deadline.map_or(d, |g| g.min(d)));
+                st = self.lp.solve(&SolveLimits { iteration_limit: lim, cutoff: f64::INFINITY, deadline: d });
+                if self.params.verbose {
+                    eprintln!("MIP: cut round {round}: LP hit the time cap; continued for up to {:.2}s more: {st:?}", retry * cap);
+                }
+            }
             self.sb_iters += 0;
             let _ = it0;
             if st != LpStatus::Optimal {
@@ -2135,13 +2148,20 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let ib_all = env_str!("ENOMOTO_MIP_IMPLBD_CUTS").is_some();
         // 既定 (連続変数のみ) は根だけ (`light` はノードの分離)。ノードでも作ると木の経過が変わり rout などが揺れる
         let ib_cont = !ib_all && !light && env_str!("ENOMOTO_MIP_NO_IMPLBD_CONT").is_none();
+        // `ENOMOTO_MIP_IMPLBD_GENINT` (試作): 含意の相手が一般整数 (0-1 でない整数) の列も使う (HiGHS の
+        // `separateImpliedBounds` と同じく 0-1 でない列全部)。mzzv42z (全部整数、一般整数 235 列) は連続変数がないので
+        // 既定では 1 本も出ないが、HiGHS の根の分離で LP に入るカットの 8 割がこれで、止めると根の下界が -20829 -> -21209 に
+        // 落ちる。`=nodes` ならノードの分離 (`light`) でも使う
+        let ib_gen_mode = env_str!("ENOMOTO_MIP_IMPLBD_GENINT");
+        let ib_gen = !ib_all && ib_gen_mode.is_some() && (!light || ib_gen_mode == Some("nodes"));
+        let ib_cont = ib_cont || ib_gen;
         if (ib_all || ib_cont) && !p.implied_bounds.is_empty() {
             let (glo, gup) = (&self.dom.global_lo, &self.dom.global_up);
             let max_ib = tunable!("ENOMOTO_T_MIP_IMPLBD_MAX", 5000usize, usize);
             let mut viol: Vec<(f64, RawCut)> = Vec::new();
             for &(y, v, k, upper, b) in &p.implied_bounds {
                 let (y, k) = (y as usize, k as usize);
-                if ib_cont && p.is_int[k] {
+                if ib_cont && p.is_int[k] && !(ib_gen && !(glo[k] >= 0.0 && gup[k] <= 1.0)) {
                     continue;
                 }
                 if glo[y] == gup[y] || glo[k] == gup[k] || glo[y] != 0.0 || gup[y] != 1.0 {

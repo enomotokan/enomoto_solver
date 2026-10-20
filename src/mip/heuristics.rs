@@ -1748,6 +1748,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let st = self.lp.solve(&self.limits(lim));
                 self.heur_iters += self.lp.total_iterations() - it0;
                 ok = st == LpStatus::Optimal;
+                if self.params.verbose && self.nodes <= 1 && !ok {
+                    eprintln!("MIP:   neighbourhood dive: LP {:?} at fixing rate {:.2} ({} iterations, limit {lim})", st, rate(self), self.lp.total_iterations() - it0);
+                }
             }
             if !ok {
                 // 直前の段に戻る (この段の固定を捨てる)。戻った後は固定率をそこまでで打ち切る
@@ -2001,6 +2004,25 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// RINS: 暫定解と LP 解で値が一致する整数列を固定したサブ MIP を解く。固定は伝播しながら積み、矛盾するものは飛ばす。
     pub(super) fn rins(&mut self, x: &[f64]) -> bool {
+        // `ENOMOTO_MIP_RINS_FJ_BOOST` (試作、既定では使わない): 根で暫定解が Feasibility Jump のものだけのとき、RINS のサブ MIP の
+        // 時間の上限を残りの `ENOMOTO_T_MIP_RINS_FJ_BOOST_FRAC` (0.25)、最大 `ENOMOTO_T_MIP_RINS_FJ_BOOST_MAX` (15 秒) にする
+        // (既定は 0.07・6 秒)。physiciansched6-2 (P3 + `ENOMOTO_MIP_INC_LP_CAP`) では FJ の解 50926 / 51429 からの RINS
+        // (自由な列 約 3000) が 2〜3 秒で根も終わらずに止まる回と、1 ノードで 49624 を出す回があった
+        if env_str!("ENOMOTO_MIP_RINS_FJ_BOOST").is_some() && !self.params.submip && self.nodes <= 1 && self.inc_only_fj {
+            let keep = (self.submip_time_frac, self.submip_time_max);
+            self.submip_time_frac = tunable!("ENOMOTO_T_MIP_RINS_FJ_BOOST_FRAC", 0.25, f64);
+            self.submip_time_max = tunable!("ENOMOTO_T_MIP_RINS_FJ_BOOST_MAX", 15.0, f64);
+            if self.params.verbose {
+                eprintln!("MIP:   RINS: incumbent only from feasibility jump, sub-MIP time fraction {:.2}, max {:.1}s", self.submip_time_frac, self.submip_time_max);
+            }
+            let r = self.rins_inner(x);
+            (self.submip_time_frac, self.submip_time_max) = keep;
+            return r;
+        }
+        self.rins_inner(x)
+    }
+
+    fn rins_inner(&mut self, x: &[f64]) -> bool {
         let p = self.p;
         if self.params.submip {
             return false;
@@ -2008,8 +2030,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if env_str!("ENOMOTO_MIP_RINS_DIVE").is_some() {
             return self.rins_dive();
         }
-        let Some((_, inc)) = self.incumbent.as_ref() else { return false };
-        let inc = inc.clone();
+        // 暫定解がなければ参照解 (`ENOMOTO_MIP_RESTART_REF`、再スタート前の暫定解) を相手にする。参照解は今の境界の外にある列が
+        // あるが、下の固定は境界の中にある値だけを使い、サブ MIP は打ち切り値 (前の暫定解より良いこと) を引き継ぐ
+        let inc = match (self.incumbent.as_ref(), self.ref_sol.as_ref()) {
+            (Some((_, inc)), _) => inc.clone(),
+            (None, Some(r)) => r.clone(),
+            (None, None) => return false,
+        };
         let mut fixes: Vec<(usize, f64, f64)> = Vec::new();
         let mut nint = 0usize;
         for j in 0..p.n {

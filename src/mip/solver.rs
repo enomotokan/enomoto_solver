@@ -138,6 +138,9 @@ thread_local! {
     /// 次に始める求解 ([`solve`]) の最初の暫定解 (その問題の空間)。再スタートで前の暫定解を引き継ぐのに使う。
     /// 求解の開始時に取り出す (同じスレッドで後から始まるサブ MIP には渡らない)。
     pub(crate) static START_SOL: std::cell::RefCell<Option<Vec<f64>>> = const { std::cell::RefCell::new(None) };
+    /// 次に始める求解の、暫定解にはできない参照解 (`ENOMOTO_MIP_RESTART_REF`、試作)。再スタート前の暫定解が、打ち切り値による
+    /// 固定 (被約費用・根の目的値の探り) で再スタート後の問題では実行不能になったときに置き、RINS の相手に使う。
+    pub(crate) static REF_SOL: std::cell::RefCell<Option<Vec<f64>>> = const { std::cell::RefCell::new(None) };
     /// 次に始めるサブ MIP の根の LP の初めの基底 (列の状態。`ENOMOTO_MIP_NO_SUBMIP_BASIS` でなければ)。呼び出し側の LP の基底を渡す
     /// (HiGHS のサブ MIP の `rootbasis`)。前処理は列の番号を保つので列の状態はそのまま使え、行は論理変数で埋めて修復する。
     pub(crate) static SUBMIP_BASIS: std::cell::RefCell<Option<Vec<super::lp::VarStatus>>> = const { std::cell::RefCell::new(None) };
@@ -306,6 +309,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) root_lp_iters: u64,
     /// 暫定解が Feasibility Jump で見つけたものだけか (`ENOMOTO_MIP_FJ2_KEEP_NOINC` の判定に使う)
     pub(super) inc_only_fj: bool,
+    /// 暫定解がないときに RINS の相手に使う参照解 ([`REF_SOL`]、`ENOMOTO_MIP_RESTART_REF`)
+    pub(super) ref_sol: Option<Vec<f64>>,
     /// 根の LP (カットのループの後は最後の LP) の目的値。`ENOMOTO_MIP_FJ_POOR_NOINC` の判定に使う (根の外では -inf)
     pub(super) fj_poor_lb: f64,
     /// サブ MIP の停滞の数え上げ (`ENOMOTO_T_MIP_SUBMIP_STALL`)
@@ -1427,6 +1432,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         heur_stop: None,
         root_lp_iters: 0,
         inc_only_fj: false,
+        ref_sol: None,
         fj_poor_lb: f64::NEG_INFINITY,
         submip_stall: 0,
         submip_basis: None,
@@ -2049,6 +2055,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         let z = self.p.objective(&x);
+        // `ENOMOTO_MIP_RESTART_REF` (試作): 再スタート後の求解では、打ち切り値 (再スタート前の暫定解より良いこと) に届かない解を
+        // 暫定解にしない。届かない解は外側では捨てられるのに、暫定解にすると RINS などの相手になり、暫定解なし用の
+        // ヒューリスティクスも止める (mzzv42z: 打ち切り値 -19874 の再スタートの後で FJ の -680・RINS の -5770 を暫定解にした)
+        if self.incumbent.is_none() && self.params.restarts > 0 && !self.params.submip && z > self.params.cutoff && env_str!("ENOMOTO_MIP_RESTART_REF").is_some() {
+            return false;
+        }
         if !orig_only {
             self.pool_add(z, &x);
         }
@@ -2144,7 +2156,20 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let (lo, up) = if self.p.is_int[j] { (x[j], x[j]) } else { (self.p.col_lo[j], self.p.col_up[j]) };
             self.lp.set_col_bounds(j, lo, up);
         }
-        let st = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
+        // `ENOMOTO_MIP_INC_LP_CAP` (試作、既定では使わない): この LP の時間の上限を全体の `ENOMOTO_T_MIP_INC_LP_TIME_FRAC`
+        // (0.02、最低 1 秒) にする。uccase12 で DUAL_UB + CS_OBJ_PIVOT のとき、根の LP の直後に FJ の解 (865106) を受け取り、
+        // この LP が 8.4 秒から 56 秒まで止まらず、根のカット・ヒューリスティクスが 1 つも回らなかった
+        let deadline = if env_str!("ENOMOTO_MIP_INC_LP_CAP").is_some() && self.params.time_limit.is_finite() {
+            let cap = (tunable!("ENOMOTO_T_MIP_INC_LP_TIME_FRAC", 0.02, f64) * self.params.time_limit).max(1.0);
+            let d = std::time::Instant::now() + std::time::Duration::from_secs_f64(cap);
+            Some(self.deadline.map_or(d, |g| g.min(d)))
+        } else {
+            self.deadline
+        };
+        let st = self.lp.solve(&SolveLimits { deadline, ..Default::default() });
+        if self.params.verbose && st != LpStatus::Optimal {
+            eprintln!("MIP: fixed-integer LP: {st:?} ({} iters)", self.lp.total_iterations() - it0);
+        }
         if st == LpStatus::Optimal {
             let mut y = self.lp.col_values();
             for j in 0..self.p.n {
@@ -2408,6 +2433,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             } else if self.params.verbose {
                 eprintln!("MIP: {} cuts from before the restart put in the cut pool", self.cut_pool.len() - n0);
+            }
+        }
+        if let Some(x) = REF_SOL.with(|s| s.borrow_mut().take()) {
+            if x.len() == self.p.n {
+                self.ref_sol = Some(x);
             }
         }
         if let Some(x) = START_SOL.with(|s| s.borrow_mut().take()) {
@@ -2856,7 +2886,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     heur!("LP face", self.lp_face());
                 }
                 heur!("RENS", self.rens(&x));
-                if self.incumbent.is_none() && !self.fractional(&x_root0).is_empty() {
+                if self.incumbent.is_none() && self.ref_sol.is_none() && !self.fractional(&x_root0).is_empty() {
                     heur!("RENS (LP before cuts)", self.rens(&x_root0));
                 }
                 // `ENOMOTO_MIP_SUBMIP_LIGHT_HEUR`: サブ MIP の根では Feasibility Pump とダイビングを使わない。30n20b8 の根の RENS の
@@ -2967,7 +2997,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                 }
                 // 暫定解 (Feasibility Jump・pump・丸めなどで得たもの) を根の LP 解との RINS で磨く
-                if self.incumbent.is_some() && env_str!("ENOMOTO_MIP_NO_ROOT_RINS").is_none() {
+                if (self.incumbent.is_some() || self.ref_sol.is_some()) && env_str!("ENOMOTO_MIP_NO_ROOT_RINS").is_none() {
                     heur!("RINS", self.rins(&x));
                 }
                 // 目的関数の台のサブ MIP (`ENOMOTO_MIP_OBJ_SUPPORT`、試作、[`Solver::obj_support`])。暫定解が根の LP の値から
@@ -7345,7 +7375,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// (FJ の質の悪い解のせいで、より良い解を見つける根の局所探索などを飛ばさないように。ns1830653 は根の局所探索が
     /// 26622 を見つけるが、FJ の 43808 があると回らなかった)。
     pub(super) fn noinc_like(&self) -> bool {
-        self.incumbent.is_none()
+        // 参照解 (`ENOMOTO_MIP_RESTART_REF`) があれば、再スタート前の暫定解が打ち切り値として生きているので暫定解なし扱いにしない
+        (self.incumbent.is_none() && self.ref_sol.is_none())
             || (self.inc_only_fj && env_str!("ENOMOTO_MIP_FJ2_KEEP_NOINC").is_some())
             || (self.fj_poor() && env_str!("ENOMOTO_MIP_FJ_POOR_NOINC").is_some_and(|v| v != "rens"))
     }
