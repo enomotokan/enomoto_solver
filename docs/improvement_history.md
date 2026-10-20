@@ -9460,6 +9460,15 @@ neos-950242 の 2 回目の調査 (`analysis/neos950242_r2_20261020.md`)。
   - 不一致 0。SGM と主ギャップは良いが、16 問の解けた数が 2 組とも 1 減る (落としたのは揺れの大きい問題) ので、採用の基準 (解けた数が減らない) を満たさない。既定にしない。
 - 結果: benchmarks/*_1d1bc8c_{newdef,p5}_rP5{a,b}.json、*_5f671fb_{newdef,p5}_rPD{a,b}.json
 
+## 2026-10-20: p5s (P5 から RINS_FJ_BOOST を除いた 5 つ) も不採用
+
+- physiciansched6-2 で解が出るには INEQ_SINGLETON・DUAL_UB・CS_OBJ_PIVOT・FJ_LP_REPAIR の 4 つがすべて要る (1 つ外すと 30 秒で解なし)。RINS_FJ_BOOST は要らない。uccase12 は 4 つだけだと 798739 に悪化し、INC_LP_CAP で戻る。
+- 5f671fb で既定と p5s (4 つ + INC_LP_CAP) を対で計測 (rPSa/rPSb)。
+  - 40 問: 26→26 / 26→26、SGM 20.64→20.85 / 19.73→19.59。p5s は rPSa で neos-1456979 の解が見つからない。
+  - 16 問: 11→9 / 11→9。2 組とも beasleyC3 (既定 33.4・40.3 秒) と uccase12 (57.9・47.7 秒) を落とす (p5s も最適値の解は持つが証明が間に合わない)。physiciansched6-2 は 51429 / 49524 (既定は解なし)。
+  - 不一致 0。16 問の解けた数が 2 組とも 2 減るので既定にしない。beasleyC3 は P5 系の 4 組中 3 組で落ちており、前処理の変更が beasleyC3 の証明を遅くしている見込み (未確認)。
+- 結果: benchmarks/*_5f671fb_{newdef,p5s}_rPS{a,b}.json
+
 ## 改名一覧 (整理時)
 
 本メモ中は旧名で書かれている。
