@@ -1098,6 +1098,10 @@ enum Presolved {
 
 /// 整数を考慮した前処理をかけた問題を作る。前処理が何も減らさなければ `None` (元の問題で解く)。
 fn presolve_mip(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs: Option<f64>) -> Option<Presolved> {
+    presolve_mip_depth(p, verbose, submip, lp_probe_secs, 0)
+}
+
+fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs: Option<f64>, depth: u32) -> Option<Presolved> {
     use crate::params::simplex::{PRESOLVE_ROUNDS, PROPAGATION_PASSES, ROWSINGLETON_COLSINGLETON_INNER_ROUNDS};
     // 前の呼び出しのプロービングが残した同値な列の組は使わない (列の番号が違いうる)
     PROBE_EQUIV.with(|e| e.borrow_mut().clear());
@@ -1215,7 +1219,7 @@ fn presolve_mip(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs: Opti
             None => return Some(Presolved::Infeasible),
             Some(fixed) if fixed > 0 && env_str!("ENOMOTO_MIP_LP_PROBE_NO_REPRESOLVE").is_none() => {
                 let mut postsolve = pre.postsolve_log;
-                return match presolve_mip(&prob, verbose, submip, None) {
+                return match presolve_mip_depth(&prob, verbose, submip, None, depth) {
                     Some(Presolved::Infeasible) => Some(Presolved::Infeasible),
                     Some(Presolved::Reduced { prob: prob2, postsolve: post2, scaling: sc2 }) => {
                         debug_assert!(sc2.d.iter().chain(&pre.scaling.d).all(|&d| d == 1.0));
@@ -1224,8 +1228,12 @@ fn presolve_mip(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs: Opti
                     }
                     // 2 回目の前処理が何も減らさない: 1 回目の結果にプロービングだけかける
                     None => {
-                        if env_str!("ENOMOTO_MIP_NO_PROBING").is_none() && probe(&mut prob, verbose, submip) == Some(false) {
-                            return Some(Presolved::Infeasible);
+                        if env_str!("ENOMOTO_MIP_NO_PROBING").is_none() {
+                            match probe(&mut prob, verbose, submip) {
+                                Some(false) => return Some(Presolved::Infeasible),
+                                Some(true) => return represolve_after_probe(prob, postsolve, pre.scaling, verbose, submip, depth),
+                                None => {}
+                            }
                         }
                         Some(Presolved::Reduced { prob, postsolve, scaling: pre.scaling })
                     }
@@ -1237,7 +1245,8 @@ fn presolve_mip(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs: Opti
     if env_str!("ENOMOTO_MIP_NO_PROBING").is_none() {
         match probe(&mut prob, verbose, submip) {
             Some(false) => return Some(Presolved::Infeasible),
-            _ => {}
+            Some(true) => return represolve_after_probe(prob, pre.postsolve_log, pre.scaling, verbose, submip, depth),
+            None => {}
         }
     }
     // `ENOMOTO_MIP_PROBE_EQUIV`: プロービングで見つけた同値な 0-1 列を等式 (`x_k - x_j = 0` / `x_k + x_j = 1`) として足し、
@@ -1268,6 +1277,32 @@ fn presolve_mip(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs: Opti
         }
     }
     Some(Presolved::Reduced { prob, postsolve: pre.postsolve_log, scaling: pre.scaling })
+}
+
+/// プロービングの後の前処理のかけ直し (試作、`ENOMOTO_MIP_PROBE_REPRESOLVE` で使う。既定では使わない): プロービングが
+/// 境界を締めた (固定した) とき、締めた境界で前処理をもう一度かける (`ENOMOTO_T_MIP_PROBE_REPRESOLVE_MAX` 回まで、既定 2)。
+/// プロービングは連続列の境界も締める (drayage-25-23 では時刻の列の境界) が、その境界で冗長になった行・強められる係数は
+/// 前処理をかけ直さないと残る。drayage-25-23 では 3212 行のまま根を解き、再スタートの前処理で初めて 3873 -> 1150 行になる
+/// (HiGHS は前処理の中で 732 行まで減らす)。かけ直した前処理は新しい問題でプロービングをやり直す (含意はそちらで集め直す)。
+/// 前処理は列の番号を保ち、整数最適化では列の尺度をかけない (d = 1) ので、後処理は内側の手順の後に外側の手順を並べればよい
+fn represolve_after_probe(prob: MipProblem, mut postsolve: Vec<crate::presolve::PostsolveStep>, scaling: crate::presolve::scaling::Scaling, verbose: bool, submip: bool, depth: u32) -> Option<Presolved> {
+    let max = tunable!("ENOMOTO_T_MIP_PROBE_REPRESOLVE_MAX", 2u32, u32);
+    if env_str!("ENOMOTO_MIP_PROBE_REPRESOLVE").is_none() || depth >= max || (submip && env_str!("ENOMOTO_MIP_PROBE_REPRESOLVE_SUBMIP").is_none()) {
+        return Some(Presolved::Reduced { prob, postsolve, scaling });
+    }
+    if verbose {
+        eprintln!("MIP: presolve again after probing (round {})", depth + 1);
+    }
+    match presolve_mip_depth(&prob, verbose, submip, None, depth + 1) {
+        Some(Presolved::Infeasible) => Some(Presolved::Infeasible),
+        Some(Presolved::Reduced { prob: prob2, postsolve: post2, scaling: sc2 }) => {
+            debug_assert!(sc2.d.iter().chain(&scaling.d).all(|&d| d == 1.0));
+            postsolve.extend(post2);
+            Some(Presolved::Reduced { prob: prob2, postsolve, scaling })
+        }
+        // 何も減らない: プロービングの結果 (含意・締めた境界) を持つ元の問題を使う
+        None => Some(Presolved::Reduced { prob, postsolve, scaling }),
+    }
 }
 
 /// LP による固定 (既定で使う。`ENOMOTO_MIP_NO_LP_PROBE` で使わない。前処理の最後、含意を集めるプロービングの前): LP 緩和を解き、LP 解で分数値の整数列

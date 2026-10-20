@@ -185,6 +185,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) last_sb: Option<(usize, f64, f64)>,
     /// clique カット用の 2 値列の衝突グラフ (根で作る)。
     pub(super) clique_graph: Option<std::rc::Rc<super::clique::CliqueGraph>>,
+    /// `ENOMOTO_MIP_CLIQUE_CUTS=auto` の判定 (根で一度だけ試す。`None` は未判定)。
+    pub(super) clique_auto: Option<bool>,
     /// ヒューリスティクスに使った LP 反復数。
     pub(super) heur_iters: u64,
     /// 根のヒューリスティクスを終えた時点の `heur_iters` (木の中の予算は、これを引いた分で数える)。
@@ -1307,6 +1309,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         sb_lps: 0,
         last_sb: None,
         clique_graph: None,
+        clique_auto: None,
         heur_iters: 0,
         heur_iters_root: 0,
         locks: super::heuristics::compute_locks(p),
