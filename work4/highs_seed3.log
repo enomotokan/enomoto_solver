@@ -1,0 +1,87 @@
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+MIP neos-2978193-inde has 396 rows; 20800 cols; 41600 nonzeros; 64 integer variables (64 binary)
+Coefficient ranges:
+  Matrix  [1e+00, 1e+01]
+  Cost    [5e-05, 1e+00]
+  Bound   [1e+00, 1e+00]
+  RHS     [1e+00, 5e+00]
+WARNING: Problem has some excessively small costs
+Presolving model
+396 rows, 20800 cols, 41600 nonzeros 0s
+396 rows, 20800 cols, 41600 nonzeros 0s
+Presolve reductions: rows 396(-0); columns 20800(-0); nonzeros 41600(-0) - Not reduced
+
+Solving MIP model with:
+   396 rows
+   20800 cols (64 binary, 0 integer, 0 implied int., 20736 continuous, 0 domain fixed)
+   41600 nonzeros
+   Thread count 4 (of 4 threads). Using 1 max workers. Parallel search off
+
+Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+     I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+     S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+     Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+ J       0       0         0   0.00%   -inf            56.10650801        Large        0      0      0         0     0.2s
+ R       0       0         0   0.00%   -2.418518186    -1.926279235      25.55%        0      0      0       823     0.4s
+ L       0       0         0   0.00%   -2.418518186    -2.388061686       1.28%     2043    261      0      2076     2.0s
+
+12.5% inactive integer columns, restarting
+Model after restart has 396 rows, 20792 cols (56 bin., 0 int., 0 impl., 20736 cont., 0 dom.fix.), and 41584 nonzeros
+
+         0       0         0   0.00%   -2.418518186    -2.388061686       1.28%      219      0      0      5457     2.1s
+         0       0         0   0.00%   -2.418518186    -2.388061686       1.28%      219     62      0      5673     2.2s
+ L       0       0         0   0.00%   -2.418518186    -2.388061686       1.28%     1954    331      0      7052     5.6s
+
+Symmetry detection completed in 0.0s
+Found 5 generator(s)
+
+       391      76       153  54.99%   -2.418518186    -2.388061686       1.28%     2440    283    405     35568    10.6s
+       794     112       329  58.57%   -2.418518186    -2.388061686       1.28%     2823    286    693     57141    15.6s
+      1214     136       527  65.39%   -2.418518186    -2.388061686       1.28%     2978    113    903     85881    20.6s
+      1613     136       726  66.78%   -2.418518186    -2.388061686       1.28%     2719     91   1051    114737    25.6s
+      1996     133       916  70.82%   -2.418518186    -2.388061686       1.28%     2661     80   1304    143852    30.7s
+      2397     119      1122  73.31%   -2.418518186    -2.388061686       1.28%     2535     90   1432    173357    35.7s
+      2622     123      1232  74.19%   -2.418518186    -2.388061686       1.28%     2592    123   1539    190027    45.2s
+      3021     119      1430  75.70%   -2.418518186    -2.388061686       1.28%     2503     69   1723    246253    50.2s
+      3474     127      1653  77.55%   -2.418518186    -2.388061686       1.28%     2357    122   1845    276898    55.2s
+      3857     117      1848  78.47%   -2.418518186    -2.388061686       1.28%     2527     92   1960    307740    60.2s
+      4252     122      2041  79.41%   -2.418518186    -2.388061686       1.28%     2741    140   2055    337011    65.2s
+      4636     123      2230  79.84%   -2.418518186    -2.388061686       1.28%     3076    108   2265    365166    70.2s
+      5026     120      2426  80.79%   -2.418518186    -2.388061686       1.28%     2925    172   1764    395800    75.2s
+      5252       0      2546 100.00%   -2.388061686    -2.388061686       0.00%     3010    212   1583    417637    78.9s
+
+Solving report
+  Model             neos-2978193-inde
+  Status            Optimal
+  Primal bound      -2.388061686
+  Dual bound        -2.388061686
+  Gap               0% (tolerance: 0.01%)
+  P-D integral      1.61228054653
+  Solution status   feasible
+                    -2.388061686 (objective)
+                    0 (bound viol.)
+                    4.21884749358e-15 (int. viol.)
+                    0 (row viol.)
+  Timing            78.94
+                    1.68 (Presolve)
+                        MIP    time [calls] = 0.15 [1]
+                        subMIP time [calls] = 1.53 [28]
+                    77.24 (Solve)
+                        MIP    time [calls] = 68.55 [1]
+                        subMIP time [calls] = 8.69 [28]
+                    0.00 (Postsolve)
+                        MIP    time [calls] = 0.00 [1]
+                        subMIP time [calls] = 0.00 [28]
+  Max sub-MIP depth 8
+  Nodes             5252
+  Repair LPs        0
+  LP iterations     417637
+                    0 (strong br.)
+                    13813 (separation)
+                    37813 (heuristics)
+RESULT HighsModelStatus.kOptimal -2.3880616860000066 -2.3880616860000066 5252

@@ -1,0 +1,748 @@
+/usr/local/lib/python3.13/dist-packages/enomoto_solver/__init__.py
+MIP: presolve: rows 396 -> 396, free columns 20800 -> 20800, nonzeros 41600 -> 41600, postsolve steps 0
+Root LP: the two-phase method finished first (0.03s)
+MIP: LP probing pass 1: 39 candidates, 0 fixings (24 LPs, 750 iters, 0.14s)
+MIP: LP probing: tried 12 columns, fixed 0, LP -2.4185181860e0 -> -2.4185181860e0 (24 LPs, 750 iters, 0.14s)
+MIP: probing: 64 of 64 binaries probed (1 passes), 0 fixed, 0 bounds tightened, 0 implications (0.00s)
+Presolve: 396 rows, 20800 columns -> 396 rows, 20800 columns (0.18s)
+MIP: symmetry: 2 full orbitopes (8x3, 8x4)
+MIP: symmetry: 5 generators, 5200 orbits on 18200 columns, 0 lex-leader rows (0.08s)
+Root LP: the two-phase method finished first (0.04s)
+Root LP: objective -2.4185181860e0 (0.04s)
+MIP: root LP -2.4185181860e0 (651 iters, 0.04s)
+MIP: fixed-charge check: vb rows 0 of 396, continuous with vb 0 of 20736
+MIP: cut round 0: 339 cuts (of 645, sep 0.13s, LP 330 iters), LP rows 735 (cut rows mean nnz 2), obj -2.4185181860e0 (0.22s)
+MIP: cut round 1: 202 cuts (of 2357, sep 0.50s, LP 253 iters), LP rows 847 (cut rows mean nnz 2), obj -2.4185181860e0 (0.77s)
+MIP: cut round 2: 121 cuts (of 1866, sep 0.52s, LP 166 iters), LP rows 849 (cut rows mean nnz 2), obj -2.4185181860e0 (1.34s)
+MIP: cut round 3: 108 cuts (of 1917, sep 0.63s, LP 233 iters), LP rows 896 (cut rows mean nnz 2), obj -2.4185181860e0 (2.03s)
+MIP: cut round 4: 90 cuts (of 1850, sep 0.58s, LP 181 iters), LP rows 913 (cut rows mean nnz 2), obj -2.4185181860e0 (2.65s)
+MIP: cut round 5: 94 cuts (of 2020, sep 0.49s, LP 96 iters), LP rows 943 (cut rows mean nnz 2), obj -2.4185181860e0 (3.17s)
+MIP: fixed-integer LP dual check: c x 3.0406422777e1, dual bound -1.8131651860e0 -> solve
+MIP: fixed-integer LP improved incumbent 3.0406422777e1 -> 1.0844339408e1
+MIP:   global fixed integers 0 of 64 (newly 0 since the root LP)
+MIP: new incumbent 1.0844339408e1 at node 0 (3.26s) [feasibility jump (parallel)]
+MIP: feasibility jump (parallel) found a solution (3.26s)
+MIP: cut round 6: 68 cuts (of 1724, sep 0.58s, LP 120 iters), LP rows 961 (cut rows mean nnz 2), obj -2.4185181860e0 (3.87s)
+MIP: cut round 7: 66 cuts (of 1650, sep 0.48s, LP 87 iters), LP rows 956 (cut rows mean nnz 2), obj -2.4185181860e0 (4.37s)
+Root cuts: objective -2.4185181860e0 -> -2.4185181860e0, 483 cuts in the LP (4.38s)
+MIP: cut loop done: 1088 cuts added, 483 in LP, pool 1525 cuts (832000 nonzeros), obj -2.4185181860e0 -> -2.4185181860e0
+MIP: root heuristic simple rounding: none (0.00s)
+MIP: root heuristic ZI round: none (0.00s)
+MIP: fixed-charge check: vb rows 0 of 396, continuous with vb 0 of 20736
+MIP: fixed-integer LP dual check: c x -2.2939838820e0, dual bound -2.2939838820e0 -> skip
+MIP:   global fixed integers 0 of 64 (newly 0 since the root LP)
+MIP: new incumbent -2.2939838820e0 at node 0 (4.52s) [randomized rounding]
+MIP: root heuristic randomized rounding: found (0.14s)
+MIP:   interior rounding: 1 interior points, vertex true (0.16s)
+MIP:   interior rounding: 6 rounded points tried, found false
+MIP: root heuristic interior rounding: none (0.22s)
+MIP:   root reduced cost: 8 lurking bounds, fixing rate 0.12
+MIP: root heuristic root reduced cost: none (0.00s)
+MIP:   LP face: only 8 of 64 integer columns fixed
+MIP: root heuristic LP face: none (0.00s)
+MIP:   parallel sub-MIP started (RENS): 20757 free columns of 20800
+MIP: root heuristic RENS: none (0.00s)
+MIP:   locks: fixing rate 0.88
+MIP:   parallel sub-MIP started (locks): 20744 free columns of 20800
+MIP: root heuristic locks: none (0.00s)
+MIP: root heuristic clique: none (0.00s)
+MIP: root heuristic vbounds (loose): none (0.00s)
+MIP: root heuristic vbounds (tight): none (0.00s)
+MIP:   parallel sub-MIP (RENS): status TimeLimit, nodes 308, objective Some(-2.388061685999999), 3.85s
+MIP: fixed-integer LP dual check: c x -2.3880616860e0, dual bound -2.4185181860e0 -> solve
+MIP:   global fixed integers 0 of 64 (newly 0 since the root LP)
+MIP: new incumbent -2.3880616860e0 at node 0 (8.63s) [RENS]
+MIP:   parallel sub-MIP (locks): status Optimal, nodes 0, objective Some(13.164181627870633), 3.89s
+MIP:   sub-MIP: 20757 free columns of 20800, status TimeLimit, nodes 255, objective Some(-2.3415871561053043)
+MIP: root heuristic RINS: none (3.58s)
+MIP: after root heuristics: incumbent Some(-2.388061685999999) (12.21s)
+MIP: background cuts: 7 rounds, obj -2.4185181860e0 not above -2.4185181860e0; not used (waited 0.00s)
+Restart 1: 8 of 64 integer columns newly fixed at the root (12.22s)
+MIP: restart 1 (8 of 64 integer columns newly fixed at the root, 483 cuts kept) (12.22s)
+MIP: presolve: rows 879 -> 837, free columns 20792 -> 20792, nonzeros 42583 -> 42483, postsolve steps 0
+MIP: probing: 56 of 56 binaries probed (1 passes), 0 fixed, 0 bounds tightened, 0 implications (0.00s)
+Presolve: 879 rows, 20792 columns -> 837 rows, 20792 columns (0.02s)
+MIP: fixed-integer LP dual check: c x -2.3880616860e0, dual bound -8.3581749712e1 -> solve
+Root LP: the two-phase method finished first (0.03s)
+MIP:   global fixed integers 8 of 64 (newly 8 since the root LP)
+MIP: new incumbent -2.3880616860e0 at node 0 (0.03s) [tree]
+MIP: start solution from before the restart: accepted true
+Root LP: the two-phase method finished first (0.08s)
+Root LP: objective -2.4185181860e0 (0.11s)
+MIP: root LP -2.4185181860e0 (944 iters, 0.11s)
+MIP: fixed-charge check: vb rows 428 of 837, continuous with vb 379 of 20736
+MIP: cut round 0: 142 cuts (of 1374, sep 0.36s, LP 281 iters), LP rows 979 (cut rows mean nnz 2), obj -2.4185181860e0 (0.53s)
+MIP: cut round 1: 88 cuts (of 1885, sep 0.40s, LP 140 iters), LP rows 1010 (cut rows mean nnz 2), obj -2.4185181860e0 (0.96s)
+MIP: cut round 2: 49 cuts (of 1695, sep 0.40s, LP 116 iters), LP rows 1012 (cut rows mean nnz 2), obj -2.4185181860e0 (1.39s)
+MIP: cut round 3: 65 cuts (of 1911, sep 0.44s, LP 101 iters), LP rows 1047 (cut rows mean nnz 2), obj -2.4185181860e0 (1.86s)
+MIP: cut round 4: 56 cuts (of 1568, sep 0.55s, LP 66 iters), LP rows 1060 (cut rows mean nnz 2), obj -2.4185181860e0 (2.43s)
+MIP: cut round 5: 48 cuts (of 1191, sep 0.50s, LP 22 iters), LP rows 1068 (cut rows mean nnz 2), obj -2.4185181860e0 (2.94s)
+MIP: cut round 6: 43 cuts (of 1139, sep 0.46s, LP 108 iters), LP rows 1059 (cut rows mean nnz 2), obj -2.4185181860e0 (3.42s)
+Root cuts: objective -2.4185181860e0 -> -2.4185181860e0, 175 cuts in the LP (3.43s)
+MIP: cut loop done: 491 cuts added, 175 in LP, pool 947 cuts (849660 nonzeros), obj -2.4185181860e0 -> -2.4185181860e0
+MIP: root heuristic simple rounding: skipped (no solution before the restart)
+MIP: root heuristic ZI round: skipped (no solution before the restart)
+MIP: root heuristic randomized rounding: none (0.06s)
+MIP: root heuristic interior rounding: skipped (no solution before the restart)
+MIP: root heuristic root reduced cost: skipped (no solution before the restart)
+MIP: root heuristic LP face: skipped (no solution before the restart)
+MIP: root heuristic RENS: skipped (no solution before the restart)
+MIP: root heuristic locks: skipped (no solution before the restart)
+MIP: root heuristic clique: skipped (no solution before the restart)
+MIP: root heuristic vbounds (loose): skipped (no solution before the restart)
+MIP: root heuristic vbounds (tight): skipped (no solution before the restart)
+MIP: fixed-charge check: vb rows 428 of 837, continuous with vb 379 of 20736
+MIP:   sub-MIP: 20763 free columns of 20800, status TimeLimit, nodes 153, objective Some(-2.388061685999999)
+MIP: root heuristic RINS: none (3.08s)
+MIP: after root heuristics: incumbent Some(-2.388061685999999) (6.57s)
+MIP: background cuts: 6 rounds, obj -2.4185181860e0 not above -2.4185181860e0; not used (waited 0.04s)
+     time      nodes      open        best bound         incumbent       gap
+     6.6s          1         0    -2.418518186e0    -2.388061686e0     1.28%
+MIP:     6.61s nodes        1 open       0 lb inf ub -2.38806169e0 lp_iters 2071 sb_iters 0 sb_lps 0 sb_secs 0.00 node_iters 0 (first 0, lps 0) heur_iters 19111 dive_iters 0 lp_rows 1012 node_cut_secs 0.00
+MIP: 1 of 4 tree threads take the heuristic role once a solution exists
+MIP: tree search with 4 threads (8.02s)
+PCONF none (proof len 1939)
+     8.6s         24        15    -2.418518186e0    -2.388061686e0     1.28%
+MIP:     8.62s nodes       20 open      15 lb -2.41851819e0 ub -2.38806169e0 lp_iters 11134 sb_iters 6443 sb_lps 52 sb_secs 1.40 node_iters 1385 (first 1385, lps 19) heur_iters 21581 dive_iters 1235 lp_rows 1012 node_cut_secs 0.00 pool_len 0 pool_idle 0
+PROOF dense 17330 of 20800: conflict only
+PROOF dense 17188 of 20800: conflict only
+PCONF none (proof len 4338)
+PROOF dense 17238 of 20800: conflict only
+PROOF dense 17229 of 20800: conflict only
+PROOF dense 17278 of 20800: conflict only
+PROOF dense 17240 of 20800: conflict only
+PROOF dense 17511 of 20800: conflict only
+PROOF dense 17209 of 20800: conflict only
+PROOF dense 17409 of 20800: conflict only
+PROOF dense 17232 of 20800: conflict only
+PROOF dense 17075 of 20800: conflict only
+PROOF dense 17121 of 20800: conflict only
+PROOF dense 17333 of 20800: conflict only
+PROOF dense 17160 of 20800: conflict only
+PROOF dense 17344 of 20800: conflict only
+PROOF dense 17003 of 20800: conflict only
+PROOF dense 17278 of 20800: conflict only
+PROOF dense 17087 of 20800: conflict only
+PROOF dense 17137 of 20800: conflict only
+PROOF dense 17278 of 20800: conflict only
+PCONF none (proof len 4941)
+PROOF reject not violated: minact 0.961225999726516 rhs 0.9612259976119404 obj true lp_obj -2.4155466859999994 limit -2.3880616883880608 len 17524 rows_skipped 0
+PROOF dense 17579 of 20800: conflict only
+PROOF dense 17062 of 20800: conflict only
+MIP:   sub-MIP: 20757 free columns of 20800, status TimeLimit, nodes 1, objective Some(-2.341587156)
+MIP:   ALNS arm 0 reward 0.000 (counts [1, 0, 0, 0, 0, 0])
+PROOF dense 17273 of 20800: conflict only
+PROOF reject not violated: minact 0.33436499986550366 rhs 0.33436499761868 obj true lp_obj -2.4155466860000003 limit -2.3880616883880608 len 17498 rows_skipped 0
+PROOF dense 17054 of 20800: conflict only
+PROOF dense 17216 of 20800: conflict only
+PROOF dense 17219 of 20800: conflict only
+PROOF dense 17522 of 20800: conflict only
+    10.7s        292       153    -2.418518186e0    -2.388061686e0     1.28%
+MIP:    10.68s nodes       62 open      41 lb -2.41851819e0 ub -2.38806169e0 lp_iters 15836 sb_iters 6443 sb_lps 52 sb_secs 1.41 node_iters 5978 (first 5631, lps 66) heur_iters 29329 dive_iters 1235 lp_rows 1031 node_cut_secs 0.00 pool_len 0 pool_idle 0
+PROOF reject not violated: minact 1.872088999760053 rhs 1.8720889975820478 obj true lp_obj -2.4155466859999986 limit -2.3880616883880608 len 17593 rows_skipped 0
+PROOF reject not violated: minact 1.493439999715913 rhs 1.493439997611946 obj true lp_obj -2.415546685999998 limit -2.3880616883880608 len 17500 rows_skipped 0
+PROOF dense 17168 of 20800: conflict only
+PROOF reject not violated: minact -0.05943000017689399 rhs -0.059430002388061176 obj true lp_obj -2.4155466859999994 limit -2.3880616883880608 len 17399 rows_skipped 0
+PROOF dense 17084 of 20800: conflict only
+PROOF dense 17109 of 20800: conflict only
+PROOF dense 17235 of 20800: conflict only
+PROOF dense 17336 of 20800: conflict only
+PROOF dense 17132 of 20800: conflict only
+PROOF dense 17197 of 20800: conflict only
+PROOF dense 17273 of 20800: conflict only
+PROOF dense 17238 of 20800: conflict only
+PROOF dense 17382 of 20800: conflict only
+PROOF reject not violated: minact 0.34177000000000035 rhs 0.34176999761194127 obj true lp_obj -2.4155466860000008 limit -2.3880616883880608 len 17463 rows_skipped 0
+PROOF dense 17338 of 20800: conflict only
+PROOF dense 17295 of 20800: conflict only
+PROOF reject not violated: minact -0.41413500001593945 rhs -0.4141350023880608 obj true lp_obj -2.4133486860000004 limit -2.3880616883880608 len 17511 rows_skipped 0
+PROOF reject not violated: minact 2.4791318000641307 rhs 2.479131797694124 obj true lp_obj -2.4155466859999994 limit -2.3880616883880608 len 17477 rows_skipped 0
+PROOF dense 17265 of 20800: conflict only
+PROOF dense 17395 of 20800: conflict only
+PROOF reject not violated: minact 0.9504949999681221 rhs 0.9504949976119432 obj true lp_obj -2.4133486859999995 limit -2.3880616883880608 len 17573 rows_skipped 0
+PROOF dense 17465 of 20800: conflict only
+PROOF dense 17198 of 20800: conflict only
+PROOF dense 17382 of 20800: conflict only
+PROOF reject not violated: minact 2.110144999999999 rhs 2.110144997611939 obj true lp_obj -2.4155466860000008 limit -2.3880616883880608 len 17506 rows_skipped 0
+PROOF reject not violated: minact -0.007405000185132876 rhs -0.0074050023880603 obj true lp_obj -2.4155466860000003 limit -2.3880616883880608 len 17517 rows_skipped 0
+PROOF reject not violated: minact 0.6984449998313365 rhs 0.6984449976119338 obj true lp_obj -2.4155466860000003 limit -2.3880616883880608 len 17525 rows_skipped 0
+PCONF none (proof len 5536)
+PROOF reject not violated: minact 0.3878957997463097 rhs 0.387895797513099 obj true lp_obj -2.415546685999998 limit -2.3880616883880608 len 17580 rows_skipped 0
+PROOF dense 17467 of 20800: conflict only
+PROOF dense 17317 of 20800: conflict only
+PROOF reject not violated: minact 0.8396149998231077 rhs 0.8396149976119447 obj true lp_obj -2.4155466859999986 limit -2.3880616883880608 len 17508 rows_skipped 0
+PROOF reject not violated: minact 0.6984449999576501 rhs 0.698444997738243 obj true lp_obj -2.4155466860000003 limit -2.3880616883880608 len 17558 rows_skipped 0
+PROOF dense 17379 of 20800: conflict only
+PROOF reject not violated: minact 0.08914499949403497 rhs 0.08914499761193762 obj true lp_obj -2.415546685999998 limit -2.3880616883880608 len 17480 rows_skipped 0
+PROOF reject not violated: minact -0.022310000471852175 rhs -0.022310002233519644 obj true lp_obj -2.4185181859999982 limit -2.3880616883880608 len 8845 rows_skipped 0
+    12.7s        690       315    -2.418518186e0    -2.388061686e0     1.28%
+MIP:    12.69s nodes      140 open      87 lb -2.41851819e0 ub -2.38806169e0 lp_iters 25565 sb_iters 6443 sb_lps 52 sb_secs 1.41 node_iters 15300 (first 14209, lps 149) heur_iters 29798 dive_iters 1297 lp_rows 1046 node_cut_secs 0.10 pool_len 1 pool_idle 0
+PROOF dense 17485 of 20800: conflict only
+PROOF dense 17385 of 20800: conflict only
+PROOF reject not violated: minact 1.6944157996190767 rhs 1.6944157976699898 obj true lp_obj -2.4155466859999986 limit -2.3880616883880608 len 17505 rows_skipped 0
+PROOF dense 17226 of 20800: conflict only
+PROOF reject not violated: minact 1.2881397676202273 rhs 1.2881397655363749 obj true lp_obj -2.398048065999998 limit -2.3880616883880608 len 17922 rows_skipped 0
+PROOF dense 17354 of 20800: conflict only
+PROOF reject not violated: minact 1.6632789996873405 rhs 1.6632789976333786 obj true lp_obj -2.415546686 limit -2.3880616883880608 len 17560 rows_skipped 0
+PCONF none (proof len 5898)
+PROOF reject not violated: minact 0.4612750003467289 rhs 0.46127499829881824 obj true lp_obj -2.4133486860530655 limit -2.3880616883880608 len 17548 rows_skipped 5
+PROOF reject not violated: minact -0.3399498003953578 rhs -0.3399498024398313 obj true lp_obj -2.4155466859999994 limit -2.3880616883880608 len 17517 rows_skipped 0
+PROOF reject not violated: minact 0.9536031999157162 rhs 0.9536031976139667 obj true lp_obj -2.391092715999999 limit -2.3880616883880608 len 8850 rows_skipped 0
+PROOF reject not violated: minact 0.8985953998563998 rhs 0.8985953976241619 obj true lp_obj -2.398048066 limit -2.3880616883880608 len 17957 rows_skipped 0
+PROOF reject not violated: minact 1.2696839996908593 rhs 1.2696839976104477 obj true lp_obj -2.4185181859999996 limit -2.3880616883880608 len 17485 rows_skipped 0
+PROOF dense 17444 of 20800: conflict only
+PROOF reject not violated: minact 1.6050410002364082 rhs 1.6050409978760056 obj true lp_obj -2.398048066 limit -2.3880616883880608 len 17968 rows_skipped 0
+PROOF reject not violated: minact 0.1337649996626904 rhs 0.1337649976119386 obj true lp_obj -2.4155466859999994 limit -2.3880616883880608 len 17466 rows_skipped 0
+PROOF reject not violated: minact -0.14117000031813023 rhs -0.14117000238806154 obj true lp_obj -2.4155466859999994 limit -2.3880616883880608 len 17511 rows_skipped 0
+PCONF none (proof len 5864)
+PROOF reject not violated: minact 0.5572749998944408 rhs 0.5572749976684102 obj true lp_obj -2.4155466859999986 limit -2.3880616883880608 len 17499 rows_skipped 0
+PROOF dense 17342 of 20800: conflict only
+PROOF dense 18063 of 20800: conflict only
+PROOF dense 18078 of 20800: conflict only
+PROOF dense 18077 of 20800: conflict only
+PROOF dense 17326 of 20800: conflict only
+PROOF dense 18072 of 20800: conflict only
+PROOF dense 17370 of 20800: conflict only
+PROOF dense 18133 of 20800: conflict only
+PROOF reject not violated: minact -0.2897450001843842 rhs -0.28974500238731027 obj true lp_obj -2.4155466860000003 limit -2.3880616883880608 len 17506 rows_skipped 0
+PROOF reject not violated: minact 0.9526999001871113 rhs 0.9526998987301076 obj true lp_obj -2.4185181859999987 limit -2.3880616883880608 len 17467 rows_skipped 0
+PROOF reject not violated: minact -0.28974500000000014 rhs -0.2897450023880599 obj true lp_obj -2.4155466859999977 limit -2.3880616883880608 len 17423 rows_skipped 0
+PROOF reject not violated: minact -0.20060000000823935 rhs -0.20060000238806142 obj true lp_obj -2.4155466859999977 limit -2.3880616883880608 len 17462 rows_skipped 0
+PCONF none (proof len 7009)
+PROOF dense 17386 of 20800: conflict only
+PROOF dense 17366 of 20800: conflict only
+PROOF dense 18151 of 20800: conflict only
+PROOF reject not violated: minact 1.1219549998313294 rhs 1.1219549976119296 obj true lp_obj -2.415546685999999 limit -2.3880616883880608 len 17406 rows_skipped 0
+PROOF dense 17458 of 20800: conflict only
+PROOF reject not violated: minact 0.6984449998313464 rhs 0.698444997611944 obj true lp_obj -2.415546685999998 limit -2.3880616883880608 len 17477 rows_skipped 0
+PROOF reject not violated: minact -0.20060000014947516 rhs -0.20060000238806275 obj true lp_obj -2.418518185999996 limit -2.3880616883880608 len 17385 rows_skipped 0
+PROOF dense 17490 of 20800: conflict only
+PROOF reject not violated: minact -0.1114550000000008 rhs -0.11145500238806116 obj true lp_obj -2.4155466860000003 limit -2.3880616883880608 len 17465 rows_skipped 0
+PROOF reject not violated: minact 1.2111000000000014 rhs 1.2110999976119454 obj true lp_obj -2.4155466859999963 limit -2.3880616883880608 len 17542 rows_skipped 0
+PROOF dense 17528 of 20800: conflict only
+PROOF reject not violated: minact 0.23240199999026126 rhs 0.23240199761044256 obj true lp_obj -2.415546686 limit -2.3880616883880608 len 17420 rows_skipped 0
+    14.7s       1157       376    -2.418518186e0    -2.388061686e0     1.28%
+MIP:    14.70s nodes      238 open     133 lb -2.41851819e0 ub -2.38806169e0 lp_iters 38152 sb_iters 6443 sb_lps 52 sb_secs 1.42 node_iters 27287 (first 25916, lps 251) heur_iters 30525 dive_iters 1424 lp_rows 1060 node_cut_secs 0.10 pool_len 1 pool_idle 0
+PROOF dense 17477 of 20800: conflict only
+PROOF dense 17445 of 20800: conflict only
+PROOF reject not violated: minact -0.35715500000000255 rhs -0.3571550023880623 obj true lp_obj -2.418518186000001 limit -2.3880616883880608 len 17463 rows_skipped 0
+PROOF dense 17296 of 20800: conflict only
+PROOF reject not violated: minact 0.9807850000000018 rhs 0.9807849976119449 obj true lp_obj -2.4155466859999994 limit -2.3880616883880608 len 17397 rows_skipped 0
+PROOF reject not violated: minact 0.41610499999999995 rhs 0.41610499761194 obj true lp_obj -2.4155466859999986 limit -2.3880616883880608 len 17417 rows_skipped 0
+PROOF dense 17513 of 20800: conflict only
+PROOF reject not violated: minact -0.14857500033731003 rhs -0.14857500238806143 obj true lp_obj -2.415546685999999 limit -2.3880616883880608 len 17404 rows_skipped 0
+PROOF dense 17399 of 20800: conflict only
+PROOF reject not violated: minact 0.2749349999865195 rhs 0.2749349976134394 obj true lp_obj -2.4155466859999977 limit -2.3880616883880608 len 17473 rows_skipped 0
+PROOF reject not violated: minact 0.4161049998825703 rhs 0.416104997654291 obj true lp_obj -2.4155466860000003 limit -2.3880616883880608 len 17474 rows_skipped 0
+PROOF reject not violated: minact 1.0159449999840557 rhs 1.0159449976119372 obj true lp_obj -2.4163201859999996 limit -2.3880616883880608 len 17487 rows_skipped 0
+PROOF reject not violated: minact 0.36407999999325913 rhs 0.3640799976134397 obj true lp_obj -2.4155466859999986 limit -2.3880616883880608 len 17430 rows_skipped 0
+PROOF reject not violated: minact 0.5001887997788248 rhs 0.5001887975098622 obj true lp_obj -2.4155466860000003 limit -2.3880616883880608 len 17505 rows_skipped 0
+PCONF none (proof len 5021)
+PROOF reject not violated: minact 0.7875900000000016 rhs 0.7875899976119443 obj true lp_obj -2.415546686000001 limit -2.3880616883880608 len 17432 rows_skipped 0
+PROOF dense 17383 of 20800: conflict only
+PROOF reject not violated: minact -0.2897450000082392 rhs -0.2897450023880599 obj true lp_obj -2.4155466860000003 limit -2.3880616883880608 len 17487 rows_skipped 0
+PROOF reject not violated: minact 0.9879449998587674 rhs 0.9879449976119452 obj true lp_obj -2.4155466859999977 limit -2.3880616883880608 len 17444 rows_skipped 0
+PROOF reject not violated: minact 1.1813850000000006 rhs 1.1813849976119442 obj true lp_obj -2.4155466859999994 limit -2.3880616883880608 len 17542 rows_skipped 0
+PROOF reject not violated: minact 1.500524999806629 rhs 1.500524997611945 obj true lp_obj -2.415546685999999 limit -2.3880616883880608 len 17543 rows_skipped 0
+PROOF reject not violated: minact 0.8096549998148802 rhs 0.8096549976119576 obj true lp_obj -2.415546686000001 limit -2.3880616883880608 len 17459 rows_skipped 0
+PROOF reject not violated: minact 0.6834649997004336 rhs 0.6834649976639176 obj true lp_obj -2.415546685999999 limit -2.3880616883880608 len 17503 rows_skipped 0
+PROOF reject not violated: minact -0.2897450005059665 rhs -0.2897450023880608 obj true lp_obj -2.415546686000001 limit -2.3880616883880608 len 17464 rows_skipped 0
+PROOF reject not violated: minact 0.27493499949403544 rhs 0.27493499761194373 obj true lp_obj -2.4155466859999994 limit -2.3880616883880608 len 17440 rows_skipped 0
+PROOF reject not violated: minact 0.386144999967044 rhs 0.38614499761194043 obj true lp_obj -2.4155466860000003 limit -2.3880616883880608 len 17480 rows_skipped 0
+PROOF reject not violated: minact -0.28974500049933816 rhs -0.2897450023880599 obj true lp_obj -2.415546685999998 limit -2.3880616883880608 len 17512 rows_skipped 0
+PROOF dense 17413 of 20800: conflict only
+PROOF reject not violated: minact -0.32698180004542804 rhs -0.3269818024267481 obj true lp_obj -2.411355379338433 limit -2.3880616883880608 len 17547 rows_skipped 0
+PROOF reject not violated: minact -0.28974500067462106 rhs -0.28974500238806034 obj true lp_obj -2.415546686 limit -2.3880616883880608 len 17485 rows_skipped 0
+PROOF dense 17297 of 20800: conflict only
+PROOF reject not violated: minact 0.6984449994940336 rhs 0.6984449976119405 obj true lp_obj -2.415546686000001 limit -2.3880616883880608 len 17521 rows_skipped 0
+PROOF reject not violated: minact 0.6984450000000025 rhs 0.6984449976119409 obj true lp_obj -2.415546685999999 limit -2.3880616883880608 len 17436 rows_skipped 0
+PROOF reject not violated: minact 0.8096549999917577 rhs 0.8096549976119367 obj true lp_obj -2.4155466859999986 limit -2.3880616883880608 len 17384 rows_skipped 0
+PROOF reject not violated: minact -0.289745000402017 rhs -0.2897450022899877 obj true lp_obj -2.415546686 limit -2.3880616883880608 len 17500 rows_skipped 0
+PROOF reject not violated: minact 0.779694999687814 rhs 0.7796949976119425 obj true lp_obj -2.415546685999999 limit -2.3880616883880608 len 17482 rows_skipped 0
+PROOF reject not violated: minact 0.5572749998313457 rhs 0.5572749976119407 obj true lp_obj -2.415546685999998 limit -2.3880616883880608 len 17526 rows_skipped 0
+PROOF reject not violated: minact 0.6648601998154615 rhs 0.6648601975639998 obj true lp_obj -2.414291566020553 limit -2.3880616883880608 len 17537 rows_skipped 0
+    16.7s       1607       522    -2.418518186e0    -2.388061686e0     1.28%
+MIP:    16.72s nodes      365 open     180 lb -2.41851819e0 ub -2.38806169e0 lp_iters 51330 sb_iters 6443 sb_lps 52 sb_secs 1.43 node_iters 40105 (first 38562, lps 367) heur_iters 30885 dive_iters 1424 lp_rows 1065 node_cut_secs 0.10 pool_len 1 pool_idle 0
+PROOF reject not violated: minact 0.34483779982310625 rhs 0.3448377976119388 obj true lp_obj -2.4169492859999986 limit -2.3880616883880608 len 17401 rows_skipped 0
+PCONF none (proof len 5312)
+PROOF reject not violated: minact 0.40119999986700333 rhs 0.40119999761194025 obj true lp_obj -2.415546686000002 limit -2.3880616883880608 len 17541 rows_skipped 0
+PROOF dense 17558 of 20800: conflict only
+PROOF reject not violated: minact 0.5572749999737858 rhs 0.5572749976186833 obj true lp_obj -2.4155466859999994 limit -2.3880616883880608 len 17422 rows_skipped 0
+PROOF reject not violated: minact 1.6866349999917656 rhs 1.6866349976119484 obj true lp_obj -2.4155466859999977 limit -2.3880616883880608 len 17467 rows_skipped 0
+PROOF reject not violated: minact 0.6984450000000034 rhs 0.6984449976119445 obj true lp_obj -2.4155466859999986 limit -2.3880616883880608 len 17436 rows_skipped 0
+PROOF dense 17597 of 20800: conflict only
+PCONF none (proof len 17539)
+PROOF dense 17539 of 20800: conflict only
+PCONF none (proof len 6220)
+PROOF reject not violated: minact 0.22997447949607921 rhs 0.22997447757638279 obj true lp_obj -2.4142915660170066 limit -2.3880616883880608 len 17544 rows_skipped 0
+PROOF dense 17294 of 20800: conflict only
+PROOF reject not violated: minact -0.14857500017614506 rhs -0.14857500238805965 obj true lp_obj -2.415546686 limit -2.3880616883880608 len 17441 rows_skipped 0
+PROOF reject not violated: minact 0.6536649998587643 rhs 0.6536649976119429 obj true lp_obj -2.415546685999998 limit -2.3880616883880608 len 17426 rows_skipped 0
+PROOF reject not violated: minact -0.289745000024717 rhs -0.28974500238805945 obj true lp_obj -2.415546685999999 limit -2.3880616883880608 len 17464 rows_skipped 0
+PROOF reject not violated: minact 0.7741366672079789 rhs 0.7741366649924881 obj true lp_obj -2.4185181859999996 limit -2.3880616883880608 len 17545 rows_skipped 0
+PROOF reject not violated: minact -0.11145500016865509 rhs -0.11145500238806116 obj true lp_obj -2.4155466859999994 limit -2.3880616883880608 len 17464 rows_skipped 0
+PROOF reject not violated: minact 0.3258112882671081 rhs 0.32581128643747714 obj true lp_obj -2.4172630660224366 limit -2.3880616883880608 len 17541 rows_skipped 0
+PROOF reject not violated: minact 0.007404999768026957 rhs 0.007404997760513066 obj true lp_obj -2.418518185999999 limit -2.3880616883880608 len 17456 rows_skipped 0
+PROOF reject not violated: minact -0.20060000016865517 rhs -0.20060000238806142 obj true lp_obj -2.4155466859999986 limit -2.3880616883880608 len 17411 rows_skipped 0
+PCONF none (proof len 8392)
+PROOF reject not violated: minact 0.16429499945600207 rhs 0.16429499763898647 obj true lp_obj -2.417263066041889 limit -2.3880616883880608 len 17458 rows_skipped 0
+PROOF reject not violated: minact -0.1708850002637324 rhs -0.17088500234570914 obj true lp_obj -2.418518186 limit -2.3880616883880608 len 17480 rows_skipped 0
+PROOF reject not violated: minact 0.5349649999850196 rhs 0.5349649976119397 obj true lp_obj -2.4185181859999996 limit -2.3880616883880608 len 17407 rows_skipped 0
+PROOF reject not violated: minact 0.3937949999850199 rhs 0.3937949976119417 obj true lp_obj -2.4185181860000013 limit -2.3880616883880608 len 17451 rows_skipped 0
+PROOF reject not violated: minact -0.0728255001946744 rhs -0.0728255023932296 obj true lp_obj -2.4185181860000005 limit -2.3880616883880608 len 17426 rows_skipped 0
+PROOF reject not violated: minact -0.17088500016865546 rhs -0.1708850023880628 obj true lp_obj -2.416949285999999 limit -2.3880616883880608 len 17428 rows_skipped 0
+PROOF reject not violated: minact 0.010835999830314086 rhs 0.010835997611940762 obj true lp_obj -2.416949285999999 limit -2.3880616883880608 len 8981 rows_skipped 0
+PROOF reject not violated: minact -0.28974500033731215 rhs -0.28974500238806344 obj true lp_obj -2.4185181859999982 limit -2.3880616883880608 len 17445 rows_skipped 0
+PROOF reject not violated: minact -0.0817400001329972 rhs -0.08174000238806078 obj true lp_obj -2.4155466859999994 limit -2.3880616883880608 len 17397 rows_skipped 0
+PCONF none (proof len 7022)
+PROOF reject not violated: minact -0.12034100024523176 rhs -0.12034100247201218 obj true lp_obj -2.4155466859999986 limit -2.3880616883880608 len 17496 rows_skipped 0
+PROOF reject not violated: minact 0.36408000000000074 rhs 0.3640799976119413 obj true lp_obj -2.4155466860000003 limit -2.3880616883880608 len 17488 rows_skipped 0
+PROOF reject not violated: minact 0.27493500000000093 rhs 0.27493499761194107 obj true lp_obj -2.4155466859999977 limit -2.3880616883880608 len 17481 rows_skipped 0
+PROOF dense 17491 of 20800: conflict only
+PROOF reject not violated: minact 0.2479709998156155 rhs 0.24797099761194064 obj true lp_obj -2.4155466859999986 limit -2.3880616883880608 len 17510 rows_skipped 0
+PROOF reject not violated: minact 0.274934999887818 rhs 0.2749349976401798 obj true lp_obj -2.4155466859999986 limit -2.3880616883880608 len 9131 rows_skipped 0
+PROOF reject not violated: minact 0.27493499984845426 rhs 0.27493499761193974 obj true lp_obj -2.418518185999998 limit -2.3880616883880608 len 17354 rows_skipped 0
+PROOF dense 17344 of 20800: conflict only
+PROOF reject not violated: minact -0.007404999999999919 rhs -0.007405002388060744 obj true lp_obj -2.4155466859999986 limit -2.3880616883880608 len 17484 rows_skipped 0
+PROOF reject not violated: minact 1.2447109996220884 rhs 1.2447109973429016 obj true lp_obj -2.4155466859999986 limit -2.3880616883880608 len 9259 rows_skipped 0
+PROOF reject not violated: minact 0.13376500000000072 rhs 0.1337649976119386 obj true lp_obj -2.4155466860000008 limit -2.3880616883880608 len 17487 rows_skipped 0
+PROOF reject not violated: minact -0.2897450000000002 rhs -0.2897450023880599 obj true lp_obj -2.4155466859999994 limit -2.3880616883880608 len 17391 rows_skipped 0
+PROOF dense 17337 of 20800: conflict only
+PROOF dense 17511 of 20800: conflict only
+PROOF reject not violated: minact 0.36407999986700396 rhs 0.36407999761193954 obj true lp_obj -2.4155466859999994 limit -2.3880616883880608 len 17420 rows_skipped 0
+PROOF reject not violated: minact 0.3401119999872678 rhs 0.3401119976074485 obj true lp_obj -2.4155466859999986 limit -2.3880616883880608 len 17542 rows_skipped 0
+PROOF reject not violated: minact -0.20060000041383913 rhs -0.20060000237394338 obj true lp_obj -2.415546686 limit -2.3880616883880608 len 8554 rows_skipped 0
+PROOF reject not violated: minact 0.3640799996626907 rhs 0.3640799976119422 obj true lp_obj -2.4155466859999994 limit -2.3880616883880608 len 17453 rows_skipped 0
+PROOF reject not violated: minact -0.2006000003016522 rhs -0.20060000238806142 obj true lp_obj -2.415546686 limit -2.3880616883880608 len 17461 rows_skipped 0
+PROOF dense 17274 of 20800: conflict only
+PROOF dense 17311 of 20800: conflict only
+PROOF reject not violated: minact -0.23031500016865514 rhs -0.23031500238806135 obj true lp_obj -2.4155466859999994 limit -2.3880616883880608 len 17499 rows_skipped 0
+PROOF reject not violated: minact 0.1337650000000003 rhs 0.13376499761193905 obj true lp_obj -2.4155466859999986 limit -2.3880616883880608 len 17420 rows_skipped 0
+PROOF dense 17350 of 20800: conflict only
+PROOF reject not violated: minact -0.1708850002392402 rhs -0.17088500230410775 obj true lp_obj -2.4155466860000003 limit -2.3880616883880608 len 17403 rows_skipped 0
+PCONF none (proof len 6209)
+    18.7s       2063       622    -2.418518186e0    -2.388061686e0     1.28%
+MIP:    18.72s nodes      472 open     215 lb -2.41851819e0 ub -2.38806169e0 lp_iters 62707 sb_iters 6443 sb_lps 52 sb_secs 1.45 node_iters 51143 (first 49488, lps 465) heur_iters 31384 dive_iters 1584 lp_rows 1066 node_cut_secs 0.10 pool_len 1 pool_idle 0
+PROOF reject not violated: minact -0.2897450006746205 rhs -0.2897450023880608 obj true lp_obj -2.415546685999998 limit -2.3880616883880608 len 17509 rows_skipped 0
+PROOF reject not violated: minact 0.45322499999176474 rhs 0.4532249976119429 obj true lp_obj -2.4185181859999987 limit -2.3880616883880608 len 17347 rows_skipped 0
+PROOF reject not violated: minact 0.22290999984845547 rhs 0.22290999761194907 obj true lp_obj -2.4185181859999987 limit -2.3880616883880608 len 17489 rows_skipped 0
+PROOF reject not violated: minact 0.5126549998484549 rhs 0.5126549976119414 obj true lp_obj -2.398048066223096 limit -2.3880616883880608 len 7076 rows_skipped 0
+PROOF reject not violated: minact 0.5572749990097013 rhs 0.5572749976119851 obj true lp_obj -2.4155466859999994 limit -2.3880616883880608 len 17688 rows_skipped 0
+PROOF reject not violated: minact -0.05943000050596501 rhs -0.05943000238806073 obj true lp_obj -2.4155466859999986 limit -2.3880616883880608 len 17467 rows_skipped 0
+PROOF reject not violated: minact 0.8988849996073395 rhs 0.8988849976339202 obj true lp_obj -2.4155466860000003 limit -2.3880616883880608 len 17699 rows_skipped 0
+PROOF reject not violated: minact 1.109063599766623 rhs 1.1090635974927037 obj true lp_obj -2.4172630660098826 limit -2.3880616883880608 len 17480 rows_skipped 0
+PROOF reject not violated: minact 0.9903519995241379 rhs 0.9903519974718251 obj true lp_obj -2.4155466859999994 limit -2.3880616883880608 len 17592 rows_skipped 0
+PROOF reject not violated: minact -0.17088500013299684 rhs -0.1708850023880606 obj true lp_obj -2.4155466859999994 limit -2.3880616883880608 len 17365 rows_skipped 0
+PROOF reject not violated: minact 0.8396149999999983 rhs 0.8396149976119403 obj true lp_obj -2.4155466859999986 limit -2.3880616883880608 len 17396 rows_skipped 0
+PROOF reject not violated: minact 0.22290999983134538 rhs 0.22290999761193975 obj true lp_obj -2.4155466859999986 limit -2.3880616883880608 len 17458 rows_skipped 0
+PROOF reject not violated: minact 0.6745779999426704 rhs 0.6745779975859465 obj true lp_obj -2.4185181859999996 limit -2.3880616883880608 len 17524 rows_skipped 0
+PROOF reject not violated: minact 0.7652799999835231 rhs 0.7652799976119433 obj true lp_obj -2.4155466859999994 limit -2.3880616883880608 len 17525 rows_skipped 0
+PROOF reject not violated: minact -0.28974500084327515 rhs -0.28974500238805945 obj true lp_obj -2.4155466860000003 limit -2.3880616883880608 len 17466 rows_skipped 0
+PROOF reject not violated: minact 0.7652799999835223 rhs 0.7652799976119424 obj true lp_obj -2.4155466860000008 limit -2.3880616883880608 len 17563 rows_skipped 0
+PROOF dense 17335 of 20800: conflict only
+PROOF reject not violated: minact -0.28974500033667994 rhs -0.28974500238806034 obj true lp_obj -2.418518185999997 limit -2.3880616883880608 len 17434 rows_skipped 0
+PROOF reject not violated: minact 0.3625409995026536 rhs 0.3625409973518323 obj true lp_obj -2.418518185999998 limit -2.3880616883880608 len 17483 rows_skipped 0
+PROOF dense 17423 of 20800: conflict only
+PROOF reject not violated: minact -0.08174000066874218 rhs -0.08174000238806034 obj true lp_obj -2.4155466859999986 limit -2.3880616883880608 len 17584 rows_skipped 0
+PROOF reject not violated: minact 0.3046499995111397 rhs 0.30464999761193656 obj true lp_obj -2.4185181859999982 limit -2.3880616883880608 len 17480 rows_skipped 0
+PROOF reject not violated: minact 0.27493499949403705 rhs 0.2749349976119415 obj true lp_obj -2.4155466859999986 limit -2.3880616883880608 len 17535 rows_skipped 0
+PROOF dense 17393 of 20800: conflict only
+PROOF dense 17597 of 20800: conflict only
+PROOF reject not violated: minact 0.5616723634770212 rhs 0.5616723615963206 obj true lp_obj -2.418518186000001 limit -2.3880616883880608 len 17491 rows_skipped 1
+PROOF reject not violated: minact 0.5496450003260644 rhs 0.5496449982917162 obj true lp_obj -2.418518185999998 limit -2.3880616883880608 len 17476 rows_skipped 0
+PROOF dense 17306 of 20800: conflict only
+PROOF dense 17364 of 20800: conflict only
+PROOF reject not violated: minact 0.5249585999888332 rhs 0.5249585976119437 obj true lp_obj -2.3980480659999994 limit -2.3880616883880608 len 17945 rows_skipped 0
+PROOF dense 17208 of 20800: conflict only
+PROOF reject not violated: minact 0.8396150000000022 rhs 0.8396149976119456 obj true lp_obj -2.418518185999998 limit -2.3880616883880608 len 17564 rows_skipped 0
+PROOF reject not violated: minact -0.1411700001680246 rhs -0.1411700023880611 obj true lp_obj -2.4185181859999996 limit -2.3880616883880608 len 17443 rows_skipped 0
+PROOF reject not violated: minact 0.7221679999797801 rhs 0.7221679975984596 obj true lp_obj -2.398048066 limit -2.3880616883880608 len 7366 rows_skipped 0
+PROOF reject not violated: minact -0.17088500016865582 rhs -0.17088500238806148 obj true lp_obj -2.4155466859999994 limit -2.3880616883880608 len 17458 rows_skipped 0
+PROOF reject not violated: minact -0.1708850000082377 rhs -0.1708850023880526 obj true lp_obj -2.4185181859999987 limit -2.3880616883880608 len 17402 rows_skipped 0
+PROOF dense 17300 of 20800: conflict only
+PROOF reject not violated: minact -0.28974500016865495 rhs -0.28974500238805945 obj true lp_obj -2.4155466859999986 limit -2.3880616883880608 len 17487 rows_skipped 0
+PCONF none (proof len 6469)
+PROOF dense 17318 of 20800: conflict only
+PROOF dense 17679 of 20800: conflict only
+PROOF reject not violated: minact -0.2897450003373102 rhs -0.28974500238805945 obj true lp_obj -2.4155466860000008 limit -2.3880616883880608 len 17432 rows_skipped 0
+PROOF dense 17252 of 20800: conflict only
+PROOF reject not violated: minact -0.052025000038198904 rhs -0.052025002387311226 obj true lp_obj -2.4185181859999987 limit -2.3880616883880608 len 17479 rows_skipped 0
+PCONF none (proof len 5786)
+PROOF dense 17441 of 20800: conflict only
+PROOF reject not violated: minact 0.27493499983134595 rhs 0.27493499761194107 obj true lp_obj -2.415546685999998 limit -2.3880616883880608 len 17491 rows_skipped 0
+PROOF dense 17494 of 20800: conflict only
+    20.7s       2470       739    -2.418518186e0    -2.388061686e0     1.28%
+MIP:    20.73s nodes      598 open     245 lb -2.41851819e0 ub -2.38806169e0 lp_iters 74947 sb_iters 6443 sb_lps 52 sb_secs 1.46 node_iters 63163 (first 61465, lps 593) heur_iters 31604 dive_iters 1584 lp_rows 1069 node_cut_secs 0.13 pool_len 1 pool_idle 0
+PROOF dense 17501 of 20800: conflict only
+PROOF reject not violated: minact 0.13376500000000055 rhs 0.13376499761193905 obj true lp_obj -2.4155466859999986 limit -2.3880616883880608 len 17481 rows_skipped 0
+PROOF reject not violated: minact -0.28974500000823883 rhs -0.28974500238803635 obj true lp_obj -2.4155466859999994 limit -2.3880616883880608 len 17368 rows_skipped 0
+PROOF reject not violated: minact 0.13376500000000047 rhs 0.1337649976119395 obj true lp_obj -2.415546686000001 limit -2.3880616883880608 len 17481 rows_skipped 0
+PROOF reject not violated: minact 0.4495923999302188 rhs 0.4495923975899787 obj true lp_obj -2.416320186 limit -2.3880616883880608 len 17509 rows_skipped 0
+PROOF reject not violated: minact -0.1411700000000002 rhs -0.1411700023880611 obj true lp_obj -2.418518185999999 limit -2.3880616883880608 len 17425 rows_skipped 0
+PROOF reject not violated: minact -0.2005999999999999 rhs -0.2006000023880623 obj true lp_obj -2.4185181859999987 limit -2.3880616883880608 len 17425 rows_skipped 0
+PROOF reject not violated: minact -0.1708850001515466 rhs -0.17088500238806237 obj true lp_obj -2.416949286 limit -2.3880616883880608 len 17482 rows_skipped 0
+PROOF dense 17389 of 20800: conflict only
+PROOF reject not violated: minact -0.28974499999999975 rhs -0.28974500238805767 obj true lp_obj -2.4185181859999987 limit -2.3880616883880608 len 17422 rows_skipped 0
+PROOF reject not violated: minact 0.25262499983134595 rhs 0.25262499761194146 obj true lp_obj -2.4185181859999996 limit -2.3880616883880608 len 17443 rows_skipped 0
+PROOF reject not violated: minact 0.31205499983134505 rhs 0.3120549976119369 obj true lp_obj -2.4185181859999996 limit -2.3880616883880608 len 7324 rows_skipped 0
+PCONF none (proof len 17538)
+PROOF dense 17538 of 20800: conflict only
+PROOF dense 17636 of 20800: conflict only
+PROOF reject not violated: minact -0.2897450003373103 rhs -0.28974500238806034 obj true lp_obj -2.4155466859999986 limit -2.3880616883880608 len 17446 rows_skipped 0
+PROOF reject not violated: minact -0.2897450001768937 rhs -0.2897450023880568 obj true lp_obj -2.4155466859999977 limit -2.3880616883880608 len 17446 rows_skipped 0
+PROOF reject not violated: minact -0.28974500017689403 rhs -0.289745002388059 obj true lp_obj -2.4185181859999987 limit -2.3880616883880608 len 17445 rows_skipped 0
+PROOF reject not violated: minact -0.2897450001686558 rhs -0.2897450023880608 obj true lp_obj -2.4155466859999986 limit -2.3880616883880608 len 17436 rows_skipped 0
+PROOF reject not violated: minact -0.11885999999999994 rhs -0.11886000238805972 obj true lp_obj -2.4185181859999987 limit -2.3880616883880608 len 17288 rows_skipped 0
+PROOF reject not violated: minact 1.1985487998573907 rhs 1.198548797622927 obj true lp_obj -2.3999950161146617 limit -2.3880616883880608 len 6163 rows_skipped 0
+PROOF reject not violated: minact 0.0787209997897444 rhs 0.07872099760005513 obj true lp_obj -2.4185181859999987 limit -2.3880616883880608 len 17463 rows_skipped 0
+PROOF reject not violated: minact -0.14116999999999996 rhs -0.14117000238806154 obj true lp_obj -2.418518185999996 limit -2.3880616883880608 len 17489 rows_skipped 0
+PROOF reject not violated: minact -0.23031500016865508 rhs -0.23031500238806046 obj true lp_obj -2.4155466859999986 limit -2.3880616883880608 len 17521 rows_skipped 0
+PROOF reject not violated: minact -0.20060000028084263 rhs -0.2006000023457104 obj true lp_obj -2.4185181859999982 limit -2.3880616883880608 len 17445 rows_skipped 0
+PROOF reject not violated: minact 0.31468879999999844 rhs 0.31468879761193946 obj true lp_obj -2.3970235161146616 limit -2.3880616883880608 len 5708 rows_skipped 0
+PROOF reject not violated: minact 0.2229099998729426 rhs 0.22290999765357355 obj true lp_obj -2.4185181859999987 limit -2.3880616883880608 len 17382 rows_skipped 0
+PROOF dense 17586 of 20800: conflict only
+PROOF reject not violated: minact -0.11145500014947547 rhs -0.11145500238806205 obj true lp_obj -2.418518185999998 limit -2.3880616883880608 len 17439 rows_skipped 0
+PROOF reject not violated: minact -0.28974500044650403 rhs -0.2897450023598229 obj true lp_obj -2.4185181859999996 limit -2.3880616883880608 len 17493 rows_skipped 0
+PROOF reject not violated: minact -0.08174000016865562 rhs -0.08174000238806078 obj true lp_obj -2.418518185999998 limit -2.3880616883880608 len 17514 rows_skipped 0
+PROOF reject not violated: minact 0.22290999952969337 rhs 0.22290999761194064 obj true lp_obj -2.415546686 limit -2.3880616883880608 len 17518 rows_skipped 0
+PROOF reject not violated: minact 1.4027379998016307 rhs 1.402737997617887 obj true lp_obj -2.418518186 limit -2.3880616883880608 len 17588 rows_skipped 0
+PCONF none (proof len 8047)
+PROOF reject not violated: minact 0.7875900000000011 rhs 0.7875899976119443 obj true lp_obj -2.4155466860000008 limit -2.3880616883880608 len 17423 rows_skipped 0
+PROOF dense 17332 of 20800: conflict only
+PCONF none (proof len 7671)
+PROOF reject not violated: minact 0.6761350000000035 rhs 0.6761349976119448 obj true lp_obj -2.4185181859999996 limit -2.3880616883880608 len 17446 rows_skipped 0
+PCONF none (proof len 6433)
+PROOF reject not violated: minact -0.2897450003201999 rhs -0.28974500238805545 obj true lp_obj -2.418518185999998 limit -2.3880616883880608 len 17377 rows_skipped 0
+PROOF reject not violated: minact -0.05202500032020181 rhs -0.052025002388061736 obj true lp_obj -2.391033185999999 limit -2.3880616883880608 len 6485 rows_skipped 0
+PROOF dense 17082 of 20800: conflict only
+    22.7s       2860       897    -2.418518186e0    -2.388061686e0     1.28%
+MIP:    22.74s nodes      709 open     287 lb -2.41851819e0 ub -2.38806169e0 lp_iters 86922 sb_iters 6443 sb_lps 52 sb_secs 1.47 node_iters 74906 (first 73208, lps 693) heur_iters 31922 dive_iters 1670 lp_rows 1069 node_cut_secs 0.13 pool_len 1 pool_idle 0
+PROOF reject not violated: minact 0.6984449998313446 rhs 0.6984449976119382 obj true lp_obj -2.4155466859999994 limit -2.3880616883880608 len 17495 rows_skipped 0
+PCONF none (proof len 17523)
+PROOF dense 17523 of 20800: conflict only
+PCONF none (proof len 5237)
+PCONF none (proof len 5245)
+PCONF none (proof len 3985)
+PROOF reject not violated: minact 0.45322499936840555 rhs 0.45322499761793145 obj true lp_obj -2.418518185999999 limit -2.3880616883880608 len 17534 rows_skipped 0
+PROOF reject not violated: minact 0.5824519998138246 rhs 0.5824519979519138 obj true lp_obj -2.4176322769166414 limit -2.3880616883880608 len 17359 rows_skipped 2
+PCONF none (proof len 5661)
+PROOF reject not violated: minact 0.8396149998313462 rhs 0.8396149976119438 obj true lp_obj -2.4155466859999986 limit -2.3880616883880608 len 17458 rows_skipped 0
+PCONF none (proof len 6180)
+PCONF none (proof len 5245)
+PCONF none (proof len 5013)
+PROOF reject not violated: minact 0.22290999983134502 rhs 0.22290999761194064 obj true lp_obj -2.415546685999998 limit -2.3880616883880608 len 17501 rows_skipped 0
+PROOF reject not violated: minact 1.0573350012594722 rhs 1.0573349991092473 obj true lp_obj -2.418518185999998 limit -2.3880616883880608 len 17453 rows_skipped 5
+PROOF dense 17201 of 20800: conflict only
+PROOF dense 17378 of 20800: conflict only
+PROOF reject not violated: minact -0.08174000014866042 rhs -0.08174000223352396 obj true lp_obj -2.4185181860000005 limit -2.3880616883880608 len 17451 rows_skipped 0
+PROOF reject not violated: minact 0.2749349999835224 rhs 0.2749349976119384 obj true lp_obj -2.415546686000001 limit -2.3880616883880608 len 17360 rows_skipped 0
+PROOF dense 17605 of 20800: conflict only
+PROOF reject not violated: minact -0.28974500000000003 rhs -0.2897450023880599 obj true lp_obj -2.418518185999995 limit -2.3880616883880608 len 17425 rows_skipped 0
+PROOF reject not violated: minact -0.052025000151546 rhs -0.05202500238805774 obj true lp_obj -2.418518185999998 limit -2.3880616883880608 len 17483 rows_skipped 0
+MIP:   sub-MIP: 20792 free columns of 20800, status TimeLimit, nodes 0, objective None
+MIP:   local branching k=18: TimeLimit, improved false
+MIP:   ALNS arm 1 reward 0.000 (counts [1, 1, 0, 0, 0, 0])
+PROOF dense 17197 of 20800: conflict only
+PROOF dense 17292 of 20800: conflict only
+PROOF reject not violated: minact -0.14857500043537986 rhs -0.14857500224689701 obj true lp_obj -2.415546685999997 limit -2.3880616883880608 len 17382 rows_skipped 0
+    24.8s       3189      1072    -2.418518186e0    -2.388061686e0     1.28%
+MIP:    24.75s nodes      794 open     322 lb -2.41851819e0 ub -2.38806169e0 lp_iters 97772 sb_iters 6443 sb_lps 52 sb_secs 1.48 node_iters 85650 (first 83952, lps 775) heur_iters 34649 dive_iters 1670 lp_rows 1069 node_cut_secs 0.13 pool_len 1 pool_idle 0
+PROOF reject not violated: minact -0.2897450001686549 rhs -0.28974500238805945 obj true lp_obj -2.4155466859999994 limit -2.3880616883880608 len 17407 rows_skipped 0
+PROOF reject not violated: minact 0.9360225001745753 rhs 0.9360224979047596 obj true lp_obj -2.4114641160685113 limit -2.3880616883880608 len 17603 rows_skipped 1
+PROOF dense 17286 of 20800: conflict only
+PROOF reject not violated: minact -0.1708850001686554 rhs -0.17088500238806104 obj true lp_obj -2.418518185999998 limit -2.3880616883880608 len 17439 rows_skipped 0
+PROOF reject not violated: minact 0.36407999999999985 rhs 0.36407999761193777 obj true lp_obj -2.418518186000004 limit -2.3880616883880608 len 17288 rows_skipped 0
+PROOF reject not violated: minact 0.2749350000000006 rhs 0.2749349976119402 obj true lp_obj -2.4155466859999994 limit -2.3880616883880608 len 17410 rows_skipped 0
+PROOF dense 17295 of 20800: conflict only
+PROOF reject not violated: minact 0.5021821999902665 rhs 0.5021821976186835 obj true lp_obj -2.3915754744048483 limit -2.3880616883880608 len 4802 rows_skipped 0
+PROOF dense 17789 of 20800: conflict only
+    26.8s       3487      1312    -2.418518186e0    -2.388061686e0     1.28%
+MIP:    26.80s nodes      860 open     386 lb -2.41851819e0 ub -2.38806169e0 lp_iters 108164 sb_iters 6443 sb_lps 52 sb_secs 1.49 node_iters 95955 (first 94257, lps 841) heur_iters 34823 dive_iters 1757 lp_rows 1069 node_cut_secs 0.13 pool_len 0 pool_idle 0
+PROOF reject not violated: minact 0.4346671999210883 rhs 0.43466719762569284 obj true lp_obj -2.3999950159999983 limit -2.3880616883880608 len 6323 rows_skipped 0
+PROOF reject not violated: minact 0.6113097999999997 rhs 0.6113097976119417 obj true lp_obj -2.3999950159999983 limit -2.3880616883880608 len 6683 rows_skipped 0
+PROOF reject not violated: minact 0.5883443999832988 rhs 0.5883443976119436 obj true lp_obj -2.3999950159999983 limit -2.3880616883880608 len 6086 rows_skipped 0
+PCONF none (proof len 4569)
+PCONF none (proof len 7413)
+PCONF none (proof len 6771)
+PROOF reject not violated: minact -0.022309999999997186 rhs -0.022310002388056915 obj true lp_obj -2.391033186 limit -2.3880616883880608 len 8824 rows_skipped 0
+PROOF reject not violated: minact -0.28974500000000036 rhs -0.2897450023880612 obj true lp_obj -2.4155466859999986 limit -2.3880616883880608 len 17477 rows_skipped 0
+PROOF reject not violated: minact -0.2897450000142309 rhs -0.2897450023865611 obj true lp_obj -2.4155466859999994 limit -2.3880616883880608 len 17494 rows_skipped 0
+PROOF dense 17956 of 20800: conflict only
+PROOF dense 17778 of 20800: conflict only
+PROOF reject not violated: minact 0.3060605995124385 rhs 0.30606059753185333 obj true lp_obj -2.417263066012398 limit -2.3880616883880608 len 17635 rows_skipped 0
+PCONF none (proof len 6409)
+    28.8s       3797      1516    -2.418518186e0    -2.388061686e0     1.28%
+MIP:    28.82s nodes      928 open     451 lb -2.41851819e0 ub -2.38806169e0 lp_iters 119815 sb_iters 6443 sb_lps 52 sb_secs 1.50 node_iters 107606 (first 105882, lps 909) heur_iters 34823 dive_iters 1757 lp_rows 1069 node_cut_secs 0.13 pool_len 1 pool_idle 0
+PROOF dense 17400 of 20800: conflict only
+PROOF dense 17402 of 20800: conflict only
+PROOF dense 17415 of 20800: conflict only
+PROOF dense 17345 of 20800: conflict only
+PROOF dense 17894 of 20800: conflict only
+PROOF reject not violated: minact 0.4161049999917626 rhs 0.4161049976119413 obj true lp_obj -2.4155466859999994 limit -2.3880616883880608 len 17459 rows_skipped 0
+PROOF reject not violated: minact -0.28974500034554906 rhs -0.28974500238805945 obj true lp_obj -2.4155466859999994 limit -2.3880616883880608 len 17507 rows_skipped 0
+PROOF reject not violated: minact 0.6984450000000026 rhs 0.6984449976119431 obj true lp_obj -2.4155466859999994 limit -2.3880616883880608 len 8860 rows_skipped 0
+PROOF reject not violated: minact 0.2749350000000001 rhs 0.27493499761193974 obj true lp_obj -2.4155466859999994 limit -2.3880616883880608 len 17433 rows_skipped 0
+PROOF reject not violated: minact -0.28974500017689275 rhs -0.2897450023880559 obj true lp_obj -2.415546685999999 limit -2.3880616883880608 len 17417 rows_skipped 0
+PROOF reject not violated: minact 0.13376500000000058 rhs 0.13376499761194216 obj true lp_obj -2.415546685999998 limit -2.3880616883880608 len 17376 rows_skipped 0
+PROOF reject not violated: minact 0.15159399917905655 rhs 0.15159399760005066 obj true lp_obj -2.415546686000001 limit -2.3880616883880608 len 8987 rows_skipped 0
+PROOF dense 17286 of 20800: conflict only
+PROOF reject not violated: minact -0.0520250001768935 rhs -0.05202500238805907 obj true lp_obj -2.391033185999999 limit -2.3880616883880608 len 5397 rows_skipped 0
+PROOF reject not violated: minact -0.28974500000000025 rhs -0.2897450023880599 obj true lp_obj -2.415546686 limit -2.3880616883880608 len 17365 rows_skipped 0
+    30.8s       4136      1695    -2.418518186e0    -2.388061686e0     1.28%
+MIP:    30.85s nodes     1011 open     505 lb -2.41851819e0 ub -2.38806169e0 lp_iters 131968 sb_iters 6443 sb_lps 52 sb_secs 1.52 node_iters 119645 (first 117921, lps 988) heur_iters 34937 dive_iters 1757 lp_rows 1068 node_cut_secs 0.13 pool_len 2 pool_idle 0
+PROOF reject not violated: minact 0.0019149998003519797 rhs 0.001914997662964879 obj true lp_obj -2.4155466859999986 limit -2.3880616883880608 len 17452 rows_skipped 0
+PCONF none (proof len 6181)
+PROOF reject not violated: minact 0.03176939999999895 rhs 0.0317693976119382 obj true lp_obj -2.399995016390213 limit -2.3880616883880608 len 6343 rows_skipped 0
+PROOF dense 17904 of 20800: conflict only
+PROOF reject not violated: minact -0.009536799999999512 rhs -0.009536802379463527 obj true lp_obj -2.4185181859999987 limit -2.3880616883880608 len 9138 rows_skipped 0
+PROOF reject not violated: minact 1.113185600000002 rhs 1.1131855976119462 obj true lp_obj -2.3994875219999976 limit -2.3880616883880608 len 17872 rows_skipped 0
+PROOF reject not violated: minact 3.4140288033320756 rhs 3.4140288013533153 obj true lp_obj -2.3994875219999976 limit -2.3880616883880608 len 8331 rows_skipped 0
+PROOF dense 18020 of 20800: conflict only
+PROOF reject not violated: minact 0.020829000000001027 rhs 0.020828997611944455 obj true lp_obj -2.4155466859999994 limit -2.3880616883880608 len 17367 rows_skipped 0
+PROOF reject not violated: minact -0.12557500001116467 rhs -0.12557500238805908 obj true lp_obj -2.397023516 limit -2.3880616883880608 len 6350 rows_skipped 0
+PROOF reject not violated: minact -0.28974500018588206 rhs -0.2897450022483863 obj true lp_obj -2.4155466859999994 limit -2.3880616883880608 len 17496 rows_skipped 0
+PROOF reject not violated: minact 0.24170399968537695 rhs 0.2417039976119324 obj true lp_obj -2.39109271635531 limit -2.3880616883880608 len 5924 rows_skipped 0
+PROOF reject not violated: minact 0.13968899989412287 rhs 0.13968899752370545 obj true lp_obj -2.398528886012352 limit -2.3880616883880608 len 17884 rows_skipped 0
+PROOF reject not violated: minact -0.009536799999999929 rhs -0.009536802379464415 obj true lp_obj -2.3970235162745976 limit -2.3880616883880608 len 9132 rows_skipped 0
+PROOF reject not violated: minact 0.0867772000000002 rhs 0.08677719762053648 obj true lp_obj -2.3970235162745976 limit -2.3880616883880608 len 8811 rows_skipped 0
+PROOF reject not violated: minact 0.42671620021014917 rhs 0.42671619790659543 obj true lp_obj -2.3985288860700895 limit -2.3880616883880608 len 17855 rows_skipped 1
+PROOF dense 17882 of 20800: conflict only
+PROOF dense 17798 of 20800: conflict only
+PROOF reject not violated: minact -0.2600300022036469 rhs -0.26003000238806084 obj true lp_obj -2.3910927160141435 limit -2.3880616883880608 len 8376 rows_skipped 0
+    32.9s       4422      1779    -2.418518186e0    -2.388061686e0     1.28%
+MIP:    32.86s nodes     1077 open     563 lb -2.41851819e0 ub -2.38806169e0 lp_iters 143735 sb_iters 6443 sb_lps 52 sb_secs 1.53 node_iters 131220 (first 129493, lps 1054) heur_iters 35182 dive_iters 1810 lp_rows 1069 node_cut_secs 0.13 pool_len 1 pool_idle 0
+PROOF reject not violated: minact 0.41384747202732936 rhs 0.4138474698361634 obj true lp_obj -2.3910331859999983 limit -2.3880616883880608 len 8892 rows_skipped 0
+PROOF dense 17799 of 20800: conflict only
+PROOF reject not violated: minact 0.8093810000000006 rhs 0.8093809976119415 obj true lp_obj -2.391033186 limit -2.3880616883880608 len 8358 rows_skipped 0
+PCONF none (proof len 3981)
+PROOF dense 17868 of 20800: conflict only
+PROOF dense 17845 of 20800: conflict only
+PROOF reject not violated: minact 0.6464199998587657 rhs 0.646419997611944 obj true lp_obj -2.3935512860805104 limit -2.3880616883880608 len 8951 rows_skipped 0
+PROOF reject not violated: minact -0.14117000000000024 rhs -0.14117000238795763 obj true lp_obj -2.4185181859999987 limit -2.3880616883880608 len 17415 rows_skipped 0
+PROOF reject not violated: minact 7.593418779792176 rhs 7.593418777457809 obj true lp_obj -2.39691869223808 limit -2.3880616883880608 len 9306 rows_skipped 0
+PROOF reject not violated: minact -0.14709400015100896 rhs -0.1470940023527696 obj true lp_obj -2.39691869223808 limit -2.3880616883880608 len 8535 rows_skipped 0
+PROOF dense 17829 of 20800: conflict only
+PROOF dense 17860 of 20800: conflict only
+PROOF dense 17800 of 20800: conflict only
+PCONF none (proof len 5413)
+PROOF reject not violated: minact 0.08173999979199495 rhs 0.08173999761193773 obj true lp_obj -2.3969186922701575 limit -2.3880616883880608 len 8586 rows_skipped 0
+PROOF dense 17418 of 20800: conflict only
+PCONF none (proof len 5347)
+PROOF reject not violated: minact 0.5438510000176464 rhs 0.543850997647235 obj true lp_obj -2.391033186000001 limit -2.3880616883880608 len 8519 rows_skipped 0
+PROOF reject not violated: minact 0.14857499999999976 rhs 0.14857499763051285 obj true lp_obj -2.3935512860165433 limit -2.3880616883880608 len 18060 rows_skipped 0
+PROOF reject not violated: minact 0.5572749998484531 rhs 0.557274997611938 obj true lp_obj -2.3935512860165433 limit -2.3880616883880608 len 9234 rows_skipped 0
+PROOF reject not violated: minact 0.7058499998484551 rhs 0.7058499976119412 obj true lp_obj -2.3935512860165433 limit -2.3880616883880608 len 8640 rows_skipped 0
+PROOF reject not violated: minact 0.05943000000000011 rhs 0.059429997629576015 obj true lp_obj -2.3935512860165433 limit -2.3880616883880608 len 6120 rows_skipped 0
+    34.9s       4771      1834    -2.418518186e0    -2.388061686e0     1.28%
+MIP:    34.86s nodes     1165 open     613 lb -2.41851819e0 ub -2.38806169e0 lp_iters 156425 sb_iters 6443 sb_lps 52 sb_secs 1.54 node_iters 143730 (first 141950, lps 1134) heur_iters 35362 dive_iters 1810 lp_rows 1073 node_cut_secs 0.13 pool_len 0 pool_idle 0
+PROOF reject not violated: minact -0.1828010001484271 rhs -0.18280100235463959 obj true lp_obj -2.4185181859999973 limit -2.3880616883880608 len 17467 rows_skipped 0
+PROOF reject not violated: minact -0.08174000023632379 rhs -0.08174000214291377 obj true lp_obj -2.416949286017455 limit -2.3880616883880608 len 17431 rows_skipped 2
+PROOF reject not violated: minact 0.14117000000000007 rhs 0.14116999713348832 obj true lp_obj -2.3910927160219786 limit -2.3880616888665105 len 8810 rows_skipped 0
+PCONF none (proof len 8909)
+PROOF reject not violated: minact 0.20059999969690692 rhs 0.20059999713348997 obj true lp_obj -2.3910331859999987 limit -2.3880616888665105 len 18211 rows_skipped 0
+PROOF dense 17194 of 20800: conflict only
+PROOF reject not violated: minact 0.7760884999514748 rhs 0.7760884971026107 obj true lp_obj -2.418518185999999 limit -2.3880616888665105 len 17477 rows_skipped 0
+MIP:   sub-MIP: 20792 free columns of 20800, status TimeLimit, nodes 0, objective None
+MIP:   proximity search: TimeLimit, improved false
+MIP:   ALNS arm 2 reward 0.000 (counts [1, 1, 1, 0, 0, 0])
+PROOF dense 17796 of 20800: conflict only
+PROOF reject not violated: minact 0.33436500000000074 rhs 0.3343649971334912 obj true lp_obj -2.391033185999999 limit -2.3880616888665105 len 7245 rows_skipped 0
+PCONF none (proof len 4999)
+PROOF dense 18092 of 20800: conflict only
+PROOF reject not violated: minact 0.3046500000000006 rhs 0.3046499971334904 obj true lp_obj -2.391033185999998 limit -2.3880616888665105 len 4850 rows_skipped 0
+PROOF dense 17966 of 20800: conflict only
+    36.9s       5069      1936    -2.418518186e0    -2.388061686e0     1.28%
+MIP:    36.92s nodes     1225 open     629 lb -2.41851819e0 ub -2.38806169e0 lp_iters 173778 sb_iters 6443 sb_lps 52 sb_secs 1.54 node_iters 160909 (first 158912, lps 1189) heur_iters 37944 dive_iters 1830 lp_rows 1086 node_cut_secs 0.13 pool_len 0 pool_idle 0
+PROOF dense 17420 of 20800: conflict only
+PROOF reject not violated: minact 0.21978464994470745 rhs 0.2197846470973044 obj true lp_obj -2.4041756860000008 limit -2.3880616888665105 len 8203 rows_skipped 0
+PROOF reject not violated: minact 1.0234177984542372 rhs 1.0234177956937645 obj true lp_obj -2.3910927159999975 limit -2.3880616888665105 len 8977 rows_skipped 0
+PROOF dense 17404 of 20800: conflict only
+PROOF reject not violated: minact -0.1114550000899466 rhs -0.11145500279442633 obj true lp_obj -2.391033186000002 limit -2.3880616888665105 len 4847 rows_skipped 0
+PROOF reject not violated: minact 1.0699300000000027 rhs 1.0699299971335048 obj true lp_obj -2.3910331860000023 limit -2.3880616888665105 len 5168 rows_skipped 0
+PCONF none (proof len 8153)
+PROOF dense 18113 of 20800: conflict only
+PROOF reject not violated: minact 0.6984450000000009 rhs 0.6984449971334925 obj true lp_obj -2.391033186000001 limit -2.3880616888665105 len 18101 rows_skipped 0
+PROOF reject not violated: minact 1.8529310000256358 rhs 1.8529309972642714 obj true lp_obj -2.391033186000001 limit -2.3880616888665105 len 8664 rows_skipped 5
+PROOF reject not violated: minact 0.7429700000000006 rhs 0.7429699971334935 obj true lp_obj -2.391033186 limit -2.3880616888665105 len 18162 rows_skipped 0
+PROOF reject not violated: minact 0.13376500000000202 rhs 0.13376499713349022 obj true lp_obj -2.391033186 limit -2.3880616888665105 len 9124 rows_skipped 0
+PROOF reject not violated: minact 0.133765 rhs 0.13376499713348888 obj true lp_obj -2.391033186 limit -2.3880616888665105 len 18095 rows_skipped 0
+PROOF dense 18099 of 20800: conflict only
+PROOF reject not violated: minact -0.1485750000000001 rhs -0.14857500286650938 obj true lp_obj -2.391092716222279 limit -2.3880616888665105 len 8535 rows_skipped 0
+PROOF reject not violated: minact -0.08174000001485765 rhs -0.08174000280070803 obj true lp_obj -2.418518185999999 limit -2.3880616888665105 len 17390 rows_skipped 5
+PROOF dense 18033 of 20800: conflict only
+PROOF dense 17892 of 20800: conflict only
+PROOF dense 17793 of 20800: conflict only
+PROOF reject not violated: minact 0.2184669999999921 rhs 0.2184669971334836 obj true lp_obj -2.402178686069712 limit -2.3880616888665105 len 17844 rows_skipped 0
+PROOF dense 17630 of 20800: conflict only
+PCONF none (proof len 18273)
+PROOF dense 18273 of 20800: conflict only
+PROOF reject not violated: minact 0.5126550000000151 rhs 0.5126549971335828 obj true lp_obj -2.392638632132182 limit -2.3880616888665105 len 6399 rows_skipped 0
+    38.9s       5407      1944    -2.418518186e0    -2.388061686e0     1.28%
+MIP:    38.94s nodes     1307 open     665 lb -2.41851819e0 ub -2.38806169e0 lp_iters 187110 sb_iters 6443 sb_lps 52 sb_secs 1.55 node_iters 174133 (first 171971, lps 1265) heur_iters 38086 dive_iters 1864 lp_rows 1090 node_cut_secs 0.22 pool_len 0 pool_idle 0
+PCONF none (proof len 5134)
+PROOF dense 17767 of 20800: conflict only
+PROOF dense 18101 of 20800: conflict only
+PROOF reject not violated: minact 0.158876999999993 rhs 0.15887699716461334 obj true lp_obj -2.3910331859999996 limit -2.3880616888665105 len 8814 rows_skipped 0
+PROOF dense 18055 of 20800: conflict only
+PROOF dense 18094 of 20800: conflict only
+PROOF dense 18178 of 20800: conflict only
+PROOF reject not violated: minact 0.11145499999999742 rhs 0.1114549971334875 obj true lp_obj -2.3910927161268245 limit -2.3880616888665105 len 5753 rows_skipped 0
+PROOF dense 18081 of 20800: conflict only
+PROOF reject not violated: minact 0.4163362999767142 rhs 0.41633629746517187 obj true lp_obj -2.391033186000002 limit -2.3880616888665105 len 18129 rows_skipped 0
+PROOF reject not violated: minact -0.26003000000000004 rhs -0.2600300028665088 obj true lp_obj -2.391033186000002 limit -2.3880616888665105 len 8159 rows_skipped 0
+PROOF reject not violated: minact -0.20060000000000025 rhs -0.20060000286650936 obj true lp_obj -2.391033186000002 limit -2.3880616888665105 len 6920 rows_skipped 0
+PROOF dense 18075 of 20800: conflict only
+PROOF dense 18174 of 20800: conflict only
+PROOF reject not violated: minact -0.08174000000000016 rhs -0.08174000286651228 obj true lp_obj -2.3910331859999983 limit -2.3880616888665105 len 8808 rows_skipped 0
+PROOF reject not violated: minact -0.28974500015154764 rhs -0.28974500286651095 obj true lp_obj -2.3910331859999983 limit -2.3880616888665105 len 18141 rows_skipped 0
+PROOF reject not violated: minact 0.18569499977731416 rhs 0.18569499724186667 obj true lp_obj -2.3910331859999983 limit -2.3880616888665105 len 18110 rows_skipped 1
+PCONF none (proof len 7676)
+PROOF reject not violated: minact -0.21545750018126178 rhs -0.21545750289622445 obj true lp_obj -2.3910331859999983 limit -2.3880616888665105 len 7655 rows_skipped 0
+PROOF dense 18131 of 20800: conflict only
+PROOF dense 18287 of 20800: conflict only
+PROOF reject not violated: minact -0.052025000151546597 rhs -0.052025002866511016 obj true lp_obj -2.3910331859999987 limit -2.3880616888665105 len 8261 rows_skipped 0
+PROOF reject not violated: minact 0.04603450001400499 rhs 0.04603449802281245 obj true lp_obj -2.3910331859999987 limit -2.3880616888665105 len 7958 rows_skipped 9
+PROOF reject not violated: minact -0.05202500035955275 rhs -0.052025002866511016 obj true lp_obj -2.391033186 limit -2.3880616888665105 len 18147 rows_skipped 0
+PROOF reject not violated: minact -0.11145500030309319 rhs -0.11145500286651222 obj true lp_obj -2.391033186 limit -2.3880616888665105 len 8308 rows_skipped 0
+PROOF reject not violated: minact -0.11145500015154669 rhs -0.11145500286651044 obj true lp_obj -2.391033186 limit -2.3880616888665105 len 6135 rows_skipped 0
+PROOF reject not violated: minact -0.22437200030606408 rhs -0.22437200286948134 obj true lp_obj -2.3910331860000005 limit -2.3880616888665105 len 18194 rows_skipped 0
+PROOF reject not violated: minact 0.9050106001624812 rhs 0.9050105976358322 obj true lp_obj -2.3910331860000005 limit -2.3880616888665105 len 8082 rows_skipped 0
+PROOF reject not violated: minact -0.10551200015451805 rhs -0.10551200286948559 obj true lp_obj -2.3910331860000005 limit -2.3880616888665105 len 7621 rows_skipped 0
+PCONF none (proof len 5700)
+PROOF reject not violated: minact 0.13220799963748703 rhs 0.13220799716508536 obj true lp_obj -2.391033185999999 limit -2.3880616888665105 len 18158 rows_skipped 1
+PROOF reject not violated: minact 0.1856949997919941 rhs 0.18569499716805682 obj true lp_obj -2.391033185999999 limit -2.3880616888665105 len 8286 rows_skipped 1
+PROOF reject not violated: minact -0.19465700030607916 rhs -0.19465700286920073 obj true lp_obj -2.391033185999999 limit -2.3880616888665105 len 5634 rows_skipped 0
+PROOF reject not violated: minact -0.105512000154517 rhs -0.10551200286948292 obj true lp_obj -2.391033185999999 limit -2.3880616888665105 len 7422 rows_skipped 0
+    40.9s       5714      1987    -2.418518186e0    -2.388061686e0     1.28%
+MIP:    40.95s nodes     1373 open     709 lb -2.41851819e0 ub -2.38806169e0 lp_iters 200146 sb_iters 6443 sb_lps 52 sb_secs 1.57 node_iters 186875 (first 184441, lps 1326) heur_iters 38380 dive_iters 1864 lp_rows 1100 node_cut_secs 0.32 pool_len 0 pool_idle 0
+PROOF reject not violated: minact -0.1411700001515468 rhs -0.1411700028665086 obj true lp_obj -2.391033185999999 limit -2.3880616888665105 len 18139 rows_skipped 0
+PROOF reject not violated: minact 0.28226875001239793 rhs 0.28226874738855834 obj true lp_obj -2.3910331860000005 limit -2.3880616888665105 len 18114 rows_skipped 2
+PROOF reject not violated: minact -0.12987830036103798 rhs -0.12987830290811297 obj true lp_obj -2.3910331860000005 limit -2.3880616888665105 len 7427 rows_skipped 0
+PROOF dense 17946 of 20800: conflict only
+PROOF dense 17423 of 20800: conflict only
+PROOF reject not violated: minact 0.149766999844796 rhs 0.14976699713349184 obj true lp_obj -2.3910331860000005 limit -2.3880616888665105 len 7747 rows_skipped 0
+PROOF dense 18079 of 20800: conflict only
+PROOF reject not violated: minact 1.0331536001241397 rhs 1.033153597437321 obj true lp_obj -2.3910927159999997 limit -2.3880616888665105 len 8573 rows_skipped 5
+PROOF dense 18091 of 20800: conflict only
+PROOF reject not violated: minact 0.535403399783733 rhs 0.5354033971072809 obj true lp_obj -2.3910927159999997 limit -2.3880616888665105 len 8891 rows_skipped 0
+PROOF reject not violated: minact -0.007405000000002215 rhs -0.007405002866511801 obj true lp_obj -2.3910927163557374 limit -2.3880616888665105 len 6037 rows_skipped 0
+PROOF reject not violated: minact -0.23031500015154666 rhs -0.23031500286650974 obj true lp_obj -2.391033185999999 limit -2.3880616888665105 len 18135 rows_skipped 0
+PROOF reject not violated: minact 1.716017500081717 rhs 1.7160175012465335 obj true lp_obj -2.391033186 limit -2.3880616888665105 len 18234 rows_skipped 7
+PROOF reject not violated: minact -0.23031499999999988 rhs -0.23031500286650886 obj true lp_obj -2.3910331859999983 limit -2.3880616888665105 len 18087 rows_skipped 0
+PROOF reject not violated: minact 0.037119999851424335 rhs 0.03711999719291903 obj true lp_obj -2.391033185999998 limit -2.3880616888665105 len 18103 rows_skipped 0
+PROOF dense 18092 of 20800: conflict only
+PROOF reject not violated: minact 0.8173050000000006 rhs 0.8173049971334949 obj true lp_obj -2.391092715999999 limit -2.3880616888665105 len 9132 rows_skipped 0
+PROOF reject not violated: minact 0.30464999999999953 rhs 0.30464999713348906 obj true lp_obj -2.391092715999999 limit -2.3880616888665105 len 5668 rows_skipped 0
+PROOF reject not violated: minact -0.17088500015154667 rhs -0.1708850028665112 obj true lp_obj -2.4185181859999987 limit -2.3880616888665105 len 17479 rows_skipped 0
+PROOF reject not violated: minact -0.2897450000082455 rhs -0.2897450028665234 obj true lp_obj -2.416949285999999 limit -2.3880616888665105 len 17441 rows_skipped 0
+PCONF none (proof len 7761)
+PROOF reject not violated: minact -0.05202499999999992 rhs -0.05202500286651013 obj true lp_obj -2.3910927161912405 limit -2.3880616888665105 len 9131 rows_skipped 0
+PROOF dense 17743 of 20800: conflict only
+PROOF reject not violated: minact 0.49583039992706973 rhs 0.4958303970782061 obj true lp_obj -2.3910927163294358 limit -2.3880616888665105 len 8346 rows_skipped 0
+PROOF reject not violated: minact -0.14857499999999996 rhs -0.14857500286650982 obj true lp_obj -2.399995016362252 limit -2.3880616888665105 len 8799 rows_skipped 0
+PROOF reject not violated: minact -0.20060000016865542 rhs -0.20060000286651247 obj true lp_obj -2.4155466859999986 limit -2.3880616888665105 len 17451 rows_skipped 0
+PROOF dense 17855 of 20800: conflict only
+PROOF reject not violated: minact 0.2749350000000006 rhs 0.27493499713349046 obj true lp_obj -2.391033186 limit -2.3880616888665105 len 18097 rows_skipped 0
+PROOF reject not violated: minact 0.08174000000000003 rhs 0.08173999713348845 obj true lp_obj -2.4155466859999994 limit -2.3880616888665105 len 17494 rows_skipped 0
+PROOF dense 18132 of 20800: conflict only
+PROOF reject not violated: minact 0.9287600000000014 rhs 0.9287599971334948 obj true lp_obj -2.3910331859999987 limit -2.3880616888665105 len 18092 rows_skipped 0
+PROOF reject not violated: minact 0.1441509996981889 rhs 0.14415099700086653 obj true lp_obj -2.39852888601235 limit -2.3880616888665105 len 18032 rows_skipped 0
+PROOF reject not violated: minact 0.8990450000000014 rhs 0.899044997133494 obj true lp_obj -2.3910331859999974 limit -2.3880616888665105 len 18113 rows_skipped 0
+PROOF reject not violated: minact 0.9287599999999967 rhs 0.928759997133489 obj true lp_obj -2.3910331859999974 limit -2.3880616888665105 len 5166 rows_skipped 0
+PROOF dense 17719 of 20800: conflict only
+PROOF reject not violated: minact 0.08677720000000039 rhs 0.0867771971334883 obj true lp_obj -2.391092716075469 limit -2.3880616888665105 len 9131 rows_skipped 0
+    43.0s       6132      1977    -2.418518186e0    -2.388061686e0     1.28%
+MIP:    42.98s nodes     1455 open     754 lb -2.41851819e0 ub -2.38806169e0 lp_iters 213410 sb_iters 6443 sb_lps 52 sb_secs 1.58 node_iters 199862 (first 197276, lps 1402) heur_iters 38727 dive_iters 1934 lp_rows 1110 node_cut_secs 0.32 pool_len 0 pool_idle 0
+PROOF reject not violated: minact -0.05202500017689381 rhs -0.05202500286651146 obj true lp_obj -2.3999950163773907 limit -2.3880616888665105 len 5807 rows_skipped 0
+PROOF reject not violated: minact -0.14857499999999985 rhs -0.14857500286650938 obj true lp_obj -2.415546685999999 limit -2.3880616888665105 len 17358 rows_skipped 0
+PROOF reject not violated: minact -0.28974500000000003 rhs -0.2897450028665096 obj true lp_obj -2.4155466860000017 limit -2.3880616888665105 len 17474 rows_skipped 0
+PROOF reject not violated: minact -0.28974500016865473 rhs -0.2897450028665096 obj true lp_obj -2.415546686 limit -2.3880616888665105 len 17369 rows_skipped 0
+PROOF dense 17904 of 20800: conflict only
+PROOF dense 18053 of 20800: conflict only
+PROOF reject not violated: minact 0.08174000000000024 rhs 0.08173999713348934 obj true lp_obj -2.415546686000001 limit -2.3880616888665105 len 17556 rows_skipped 0
+PROOF reject not violated: minact -0.1411700000074902 rhs -0.1411700028665117 obj true lp_obj -2.4185181859999987 limit -2.3880616888665105 len 17340 rows_skipped 0
+PROOF reject not violated: minact 1.310254001645511 rhs 1.3102539992533337 obj true lp_obj -2.3970235161778075 limit -2.3880616888665105 len 7978 rows_skipped 0
+PROOF dense 17818 of 20800: conflict only
+PROOF reject not violated: minact -0.17088500033731036 rhs -0.17088500286651476 obj true lp_obj -2.3910927159999984 limit -2.3880616888665105 len 4218 rows_skipped 0
+PROOF reject not violated: minact -0.28974500000000036 rhs -0.28974500286651184 obj true lp_obj -2.415546686000001 limit -2.3880616888665105 len 17466 rows_skipped 0
+PROOF reject not violated: minact 0.0817399999211764 rhs 0.08173999720407643 obj true lp_obj -2.4155466859999986 limit -2.3880616888665105 len 17455 rows_skipped 0
+PROOF reject not violated: minact -0.11145500014866204 rhs -0.11145500285239551 obj true lp_obj -2.4155466859999986 limit -2.3880616888665105 len 6448 rows_skipped 0
+PROOF reject not violated: minact -0.2006000000000002 rhs -0.20060000286651158 obj true lp_obj -2.4155466859999986 limit -2.3880616888665105 len 17383 rows_skipped 0
+PROOF reject not violated: minact 0.310573999999994 rhs 0.310573997133484 obj true lp_obj -2.3999950161181376 limit -2.3880616888665105 len 8230 rows_skipped 0
+PCONF none (proof len 7463)
+PROOF dense 18091 of 20800: conflict only
+PROOF dense 17947 of 20800: conflict only
+PROOF dense 18091 of 20800: conflict only
+PROOF reject not violated: minact 0.3454724999999875 rhs 0.34547249716135564 obj true lp_obj -2.4041756859999976 limit -2.3880616888665105 len 17769 rows_skipped 0
+PROOF reject not violated: minact 0.27493500000000054 rhs 0.27493499713349046 obj true lp_obj -2.4155466859999994 limit -2.3880616888665105 len 17409 rows_skipped 0
+PROOF dense 18116 of 20800: conflict only
+PROOF dense 17771 of 20800: conflict only
+PROOF dense 18198 of 20800: conflict only
+PROOF reject not violated: minact -0.20060000016865517 rhs -0.20060000286651114 obj true lp_obj -2.4155466859999994 limit -2.3880616888665105 len 17462 rows_skipped 0
+PROOF reject not violated: minact 0.2233999998484532 rhs 0.22339999713349012 obj true lp_obj -2.4163201859999996 limit -2.3880616888665105 len 17433 rows_skipped 0
+    45.0s       6434      2079    -2.418518186e0    -2.388061686e0     1.28%
+MIP:    44.99s nodes     1548 open     784 lb -2.41851819e0 ub -2.38806169e0 lp_iters 228452 sb_iters 6443 sb_lps 52 sb_secs 1.59 node_iters 214476 (first 211890, lps 1483) heur_iters 39155 dive_iters 1934 lp_rows 1110 node_cut_secs 0.32 pool_len 0 pool_idle 0
+PROOF reject not violated: minact 0.41610500000000306 rhs 0.4161049971334947 obj true lp_obj -2.3910331859999983 limit -2.3880616888665105 len 18203 rows_skipped 0
+PROOF reject not violated: minact 0.09647499955563127 rhs 0.09647499717509023 obj true lp_obj -2.4155466859999986 limit -2.3880616888665105 len 17430 rows_skipped 0
+PROOF reject not violated: minact 0.1717049999999996 rhs 0.1717049971334892 obj true lp_obj -2.416320185999999 limit -2.3880616888665105 len 17471 rows_skipped 0
+PROOF dense 17858 of 20800: conflict only
+PROOF dense 18075 of 20800: conflict only
+PROOF reject not violated: minact -0.11145500016865387 rhs -0.11145500286651222 obj true lp_obj -2.3910927161567304 limit -2.3880616888665105 len 7221 rows_skipped 0
+PROOF dense 17784 of 20800: conflict only
+PROOF dense 18036 of 20800: conflict only
+PROOF reject not violated: minact 0.08173999999999618 rhs 0.08173999713348312 obj true lp_obj -2.3910927159999997 limit -2.3880616888665105 len 8172 rows_skipped 0
+PROOF dense 17510 of 20800: conflict only
+PCONF none (proof len 17958)
+PROOF dense 17958 of 20800: conflict only
+PROOF dense 18087 of 20800: conflict only
+PROOF dense 18061 of 20800: conflict only
+PROOF reject not violated: minact 1.4414150000000008 rhs 1.4414149971334949 obj true lp_obj -2.391092716390136 limit -2.3880616888665105 len 6426 rows_skipped 0
+PCONF none (proof len 3669)
+PROOF dense 18088 of 20800: conflict only
+PROOF reject not violated: minact 0.24524249999317893 rhs 0.2452424971604099 obj true lp_obj -2.400769716019061 limit -2.3880616888665105 len 17889 rows_skipped 0
+PROOF dense 18108 of 20800: conflict only
+PROOF dense 17989 of 20800: conflict only
+PROOF reject not violated: minact 0.53854499940034 rhs 0.5385449976694909 obj true lp_obj -2.4163201861062356 limit -2.3880616888665105 len 17453 rows_skipped 5
+PROOF reject not violated: minact 1.0894399998632123 rhs 1.0894399976703113 obj true lp_obj -2.4163201861048633 limit -2.3880616888665105 len 17490 rows_skipped 8
+PROOF dense 18146 of 20800: conflict only
+PROOF reject not violated: minact 0.7737819997309834 rhs 0.7737819972250772 obj true lp_obj -2.4163201861012644 limit -2.3880616888665105 len 17348 rows_skipped 1
+PROOF dense 18038 of 20800: conflict only
+PROOF dense 18114 of 20800: conflict only
+PROOF dense 17984 of 20800: conflict only
+PROOF reject not violated: minact -0.20060000000000022 rhs -0.2006000028665107 obj true lp_obj -2.3910331859999983 limit -2.3880616888665105 len 18097 rows_skipped 0
+PROOF dense 18081 of 20800: conflict only
+PCONF none (proof len 7562)
+PROOF reject not violated: minact 0.2119678008986153 rhs 0.21196779854186154 obj true lp_obj -2.3910927166449727 limit -2.3880616888665105 len 7711 rows_skipped 6
+PROOF reject not violated: minact 0.33426999960537207 rhs 0.33426999725967077 obj true lp_obj -2.3910927166449727 limit -2.3880616888665105 len 7986 rows_skipped 2
+    47.0s       6836      2065    -2.418518186e0    -2.388061686e0     1.28%
+MIP:    47.01s nodes     1629 open     813 lb -2.41851819e0 ub -2.38806169e0 lp_iters 242139 sb_iters 6443 sb_lps 52 sb_secs 1.60 node_iters 227609 (first 224894, lps 1558) heur_iters 39724 dive_iters 1949 lp_rows 1123 node_cut_secs 0.40 pool_len 1 pool_idle 0
+PROOF dense 18067 of 20800: conflict only
+PROOF dense 18070 of 20800: conflict only
+PROOF dense 18075 of 20800: conflict only
+PROOF reject not violated: minact -0.23031500000000016 rhs -0.23031500286650974 obj true lp_obj -2.391033185999999 limit -2.3880616888665105 len 18084 rows_skipped 0
+PROOF reject not violated: minact -0.28974500003295656 rhs -0.28974500286651006 obj true lp_obj -2.4155466859999972 limit -2.3880616888665105 len 17471 rows_skipped 0
+PROOF reject not violated: minact 0.08916699960236307 rhs 0.08916699690761432 obj true lp_obj -2.4155466859999994 limit -2.3880616888665105 len 17503 rows_skipped 0
+PROOF reject not violated: minact -0.28974500000823944 rhs -0.2897450028665105 obj true lp_obj -2.4155466859999977 limit -2.3880616888665105 len 17412 rows_skipped 0
+PROOF reject not violated: minact -0.2897449999999999 rhs -0.28974500286651006 obj true lp_obj -2.4155466859999977 limit -2.3880616888665105 len 17402 rows_skipped 0
+PROOF dense 18062 of 20800: conflict only
+PCONF none (proof len 5465)
+PROOF dense 17440 of 20800: conflict only
+PROOF dense 17940 of 20800: conflict only
+PROOF reject not violated: minact -0.17088500000599227 rhs -0.17088500286501196 obj true lp_obj -2.415546685999997 limit -2.3880616888665105 len 4573 rows_skipped 0
+PROOF reject not violated: minact -0.08174000000000062 rhs -0.08174000286651051 obj true lp_obj -2.3910331859999987 limit -2.3880616888665105 len 18104 rows_skipped 0
+PROOF reject not violated: minact -0.17088500000000018 rhs -0.1708850028665112 obj true lp_obj -2.3910331859999987 limit -2.3880616888665105 len 8803 rows_skipped 0
+MIP: tree search threads: worker nodes 5266, nodes given away 28, taken 0, global bounds taken from other threads 0, proofs 215 and conflicts 103 taken from other threads
+    47.6s       6919         0    -2.418518186e0    -2.388061686e0     1.28%
+MIP:    47.57s nodes     1653 open     816 lb -2.41694929e0 ub -2.38806169e0 lp_iters 245562 sb_iters 6443 sb_lps 52 sb_secs 1.60 node_iters 230914 (first 228199, lps 1579) heur_iters 39842 dive_iters 1949 lp_rows 1123 node_cut_secs 0.40 pool_len 1268 pool_idle 0
+MIP: dual proofs and conflicts 400 (conflicts added 15 (from proofs 205), Farkas 0, pruned 49 nodes, tightened 3860 bounds)
+MIP: propagation conflicts: analysed 3, no 1-UIP 0, 1-UIP not a row 0, no decision set 0, decision set not a row 0; not a row because continuous 0, general integer 0, both sides 0
+MIP: objective propagation: pruned 0 nodes, tightened 0 bounds; strong branching children infeasible by propagation 0, propagated bounds passed to child LPs 0
+MIP: literal conflicts: added 313, in pool 254 (aged out 59), pruned 5 nodes, tightened 172 bounds
+MIP: conflict analysis (HiGHS style): calls 208, conflicts 212, added 210, mean length 16.4, max length 119, 0.04s
+MIP: conflict analysis failures (all calls): no decision 0, too long midway 53, reason row lacks column 0, empty 0, too long at the end 42 (total length 4792), max length 50
+MIP: sibling backtracks 659; basis restores 811 (basic count mismatch 34), first LP iterations after a restore 156700
+MIP: orbitopes 2: fixed 3680 bounds, pruned 64 nodes
+MIP: symmetry: 0 heuristic solutions mapped to the symmetry-reduced problem, 1 could not be
+Presolve: 396 rows, 20800 columns -> 358 rows, 11016 columns (0.01s)
+Solving with the slope-intercept dual two-phase method
+RESULT 60.12 {'status': 'time_limit', 'objective': -2.388061686, 'best_bound': -2.418518185999985, 'mip_gap': 0.01275364877655217, 'nodes': 6919, 'lp_iterations': 979473, 'root_bound': -2.4185181860000013, 'first_solution_time': 3.524497089, 'first_solution_objective': 10.844339407999998, 'node_limit_hit': False}

@@ -1,0 +1,77 @@
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+MIP neos-2978193-inde has 396 rows; 20800 cols; 41600 nonzeros; 64 integer variables (64 binary)
+Coefficient ranges:
+  Matrix  [1e+00, 1e+01]
+  Cost    [5e-05, 1e+00]
+  Bound   [1e+00, 1e+00]
+  RHS     [1e+00, 5e+00]
+WARNING: Problem has some excessively small costs
+Presolving model
+396 rows, 20800 cols, 41600 nonzeros 0s
+396 rows, 20800 cols, 41600 nonzeros 0s
+Presolve reductions: rows 396(-0); columns 20800(-0); nonzeros 41600(-0) - Not reduced
+
+Solving MIP model with:
+   396 rows
+   20800 cols (64 binary, 0 integer, 0 implied int., 20736 continuous, 0 domain fixed)
+   41600 nonzeros
+   Thread count 4 (of 4 threads). Using 1 max workers. Parallel search off
+
+Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+     I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+     S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+     Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+ J       0       0         0   0.00%   -inf            57.13230347        Large        0      0      0         0     0.2s
+ R       0       0         0   0.00%   -2.418518186    -2.388061686       1.28%        0      0      0       755     0.3s
+
+12.5% inactive integer columns, restarting
+Model after restart has 396 rows, 20792 cols (56 bin., 0 int., 0 impl., 20736 cont., 0 dom.fix.), and 41584 nonzeros
+
+         0       0         0   0.00%   -2.418518186    -2.388061686       1.28%        0      0      0       755     0.4s
+         0       0         0   0.00%   -2.418518186    -2.388061686       1.28%        0      0      0       755     0.5s
+ L       0       0         0   0.00%   -2.418518186    -2.388061686       1.28%     2341    321      0      2347     2.8s
+
+Symmetry detection completed in 0.0s
+Found 5 generator(s)
+
+       211      53        76  13.09%   -2.418518186    -2.388061686       1.28%     2576    268    107     27539     7.9s
+       602     112       234  17.93%   -2.418518186    -2.388061686       1.28%     3124    273    360     46916    12.9s
+       971     132       405  50.38%   -2.418518186    -2.388061686       1.28%     2850    175    731     68976    17.9s
+      1373     173       585  56.43%   -2.418518186    -2.388061686       1.28%     2670    149    915     92043    22.9s
+      1788       0       787 100.00%   -2.388061686    -2.388061686       0.00%     3098    196   1545    111454    26.9s
+
+Solving report
+  Model             neos-2978193-inde
+  Status            Optimal
+  Primal bound      -2.388061686
+  Dual bound        -2.388061686
+  Gap               0% (tolerance: 0.01%)
+  P-D integral      0.528085257782
+  Solution status   feasible
+                    -2.388061686 (objective)
+                    0 (bound viol.)
+                    6.66133814775e-16 (int. viol.)
+                    0 (row viol.)
+  Timing            26.91
+                    0.69 (Presolve)
+                        MIP    time [calls] = 0.14 [1]
+                        subMIP time [calls] = 0.54 [9]
+                    26.21 (Solve)
+                        MIP    time [calls] = 22.89 [1]
+                        subMIP time [calls] = 3.32 [9]
+                    0.00 (Postsolve)
+                        MIP    time [calls] = 0.00 [1]
+                        subMIP time [calls] = 0.00 [9]
+  Max sub-MIP depth 6
+  Nodes             1788
+  Repair LPs        0
+  LP iterations     111454
+                    0 (strong br.)
+                    4678 (separation)
+                    14363 (heuristics)
+RESULT HighsModelStatus.kOptimal -2.388061686000004 -2.388061686000004 1788

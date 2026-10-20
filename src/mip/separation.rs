@@ -208,6 +208,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let prog_win = if self.params.submip { 0 } else { tunable!("ENOMOTO_T_MIP_CUT_PROG_WIN", 0usize, usize) };
         let prog_eps = tunable!("ENOMOTO_T_MIP_CUT_PROG_EPS", 0.01, f64);
         let mut obj_hist: Vec<f64> = Vec::new();
+        // `ENOMOTO_MIP_DROP_FUTILE_CUTS`: 再スタート前の根のカットが目的値を全く動かさなかったら、再スタート後はループを回さない
+        if job.is_none() && !self.params.submip && self.params.restarts > 0 && super::FUTILE_ROOT_CUTS.with(|f| f.replace(false)) {
+            max_rounds = 0;
+            if self.params.verbose {
+                eprintln!("MIP: cut loop skipped (the root cuts before the restart did not move the objective)");
+            }
+        }
         loop {
             self.poll_fj_thread();
             if round_ctr >= max_rounds {
@@ -505,6 +512,22 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         self.remove_inactive_cuts();
+        // `ENOMOTO_MIP_DROP_FUTILE_CUTS` (試作、既定は無効): ループ全体で目的値が全く動かなかったら (相対 1e-9 以下)、カットの行を
+        // LP から全て外す (プールには残る)。neos-2978193-inde では 9 ラウンドで 942 本 (平均非零 2) を入れても根の下界は
+        // 1e-10 も動かず、LP に残った 450〜1000 行がノードの LP を重くしていた
+        if super::solver::drop_futile_cuts() && !self.params.submip && job.is_none() && round_ctr > 0 && self.lp.num_rows() > p.m {
+            let gain = self.lp.objective() - first_obj;
+            if gain <= 1e-9 * (1.0 + first_obj.abs()) {
+                let n_cut = self.lp.num_rows() - p.m;
+                let mut remove = vec![false; self.lp.num_rows()];
+                remove[p.m..].iter_mut().for_each(|r| *r = true);
+                self.delete_lp_rows(&remove);
+                self.futile_root_cuts = true;
+                if self.params.verbose {
+                    eprintln!("MIP: root cuts did not move the objective ({gain:.3e}); removed {n_cut} cut rows from the LP");
+                }
+            }
+        }
         let st = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
         if !self.params.submip && st == LpStatus::Optimal && job.is_none() {
             super::record_root_bound(self.lp.objective() + p.offset);

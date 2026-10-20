@@ -1,0 +1,32 @@
+/usr/local/lib/python3.13/dist-packages/enomoto_solver/__init__.py
+Root LP: the two-phase method finished first (0.03s)
+Presolve: 396 rows, 20800 columns -> 396 rows, 20800 columns (0.18s)
+Root LP: the two-phase method finished first (0.03s)
+Root LP: objective -2.4185181860e0 (0.03s)
+Root cuts: objective -2.4185181860e0 -> -2.4185181860e0, 424 cuts in the LP (4.66s)
+Restart 1: 8 of 64 integer columns newly fixed at the root (12.37s)
+Presolve: 820 rows, 20792 columns -> 784 rows, 20792 columns (0.02s)
+Root LP: the two-phase method finished first (0.02s)
+Root LP: the two-phase method finished first (0.07s)
+Root LP: objective -2.4185181860e0 (0.09s)
+Root cuts: objective -2.4185181860e0 -> -2.4185181860e0, 153 cuts in the LP (3.62s)
+     time      nodes      open        best bound         incumbent       gap
+     6.8s          1         0    -2.418518186e0    -2.388061686e0     1.28%
+TREEPAR: spawn at 8.17s tree start 6.80s nodes 1 sb 1.35s (42 LPs, 6063 iters) node LP 0.00s (1 LPs, 1 iters)
+    11.8s        580        73    -2.418518186e0    -2.388061686e0     1.28%
+    16.9s       1327       282    -2.399995017e0    -2.388061686e0     0.50%
+    21.9s       2299       282    -2.399995017e0    -2.388061686e0     0.50%
+    26.9s       3449       280    -2.399995017e0    -2.388061686e0     0.50%
+    31.9s       4357       340    -2.399995017e0    -2.388061686e0     0.50%
+    36.9s       5459       168    -2.399995016e0    -2.388061686e0     0.50%
+    41.9s       7025        60    -2.391092716e0    -2.388061686e0     0.13%
+    46.9s       8590        27    -2.391033186e0    -2.388061686e0     0.12%
+TREEPAR: total 47.38s tree start 6.80s workers start 8.17s threads 4 status TimeLimit obj Some(-2.388061685999998) bound -2.3910331860e0
+TREEPAR: balance 8/7 shared 115 proofs own/imp: live 107/0 eval 213605/25820 prune 186/24 tight 5093/2572 absorb 1114576/75588; lits own/imp: live 346/124 eval 495918/155838 prune 24/16 tight 280/657 aged 215/64 | tid 0 ready 0.00s end 39.22s idle 0.01s (2 waits, lock 0.00s sleep 0.01s, pool mean 1.0) lns 0.00s tail 0.00s sync 0.153s nodes 2186 (lb>=opt 0) first LP [dive 1433 97.4it 14.49ms | queue 296 271.8it 32.27ms | pool 3 1035.3it 83.15ms]
+TREEPAR: balance 8/7 shared 85 proofs own/imp: live 110/1 eval 218625/11414 prune 331/15 tight 5639/529 absorb 862161/25645; lits own/imp: live 262/189 eval 289192/147733 prune 9/5 tight 111/78 aged 112/29 | tid 1 ready 0.11s end 39.21s idle 0.26s (7 waits, lock 0.00s sleep 0.26s, pool mean 1.3) lns 0.00s tail 0.00s sync 0.137s nodes 2112 (lb>=opt 0) first LP [dive 1398 108.7it 19.01ms | queue 194 225.2it 30.04ms | pool 9 1318.3it 94.50ms]
+TREEPAR: balance 0/14 shared 106 proofs own/imp: live 107/0 eval 261678/10432 prune 309/12 tight 6510/924 absorb 1015423/16505; lits own/imp: live 260/122 eval 316793/145754 prune 28/0 tight 232/62 aged 152/64 | tid 2 ready 0.12s end 39.18s idle 0.36s (13 waits, lock 0.00s sleep 0.36s, pool mean 1.6) lns 0.00s tail 0.00s sync 0.141s nodes 2321 (lb>=opt 0) first LP [dive 1618 105.5it 16.33ms | queue 130 188.1it 28.92ms | pool 14 1410.3it 86.01ms]
+TREEPAR: balance 9/4 shared 125 proofs own/imp: live 101/0 eval 214154/4488 prune 122/9 tight 5353/570 absorb 825685/10641; lits own/imp: live 234/117 eval 472650/152023 prune 26/10 tight 304/345 aged 268/65 | tid 3 ready 0.13s end 39.18s idle 0.32s (11 waits, lock 0.00s sleep 0.32s, pool mean 1.0) lns 0.00s tail 0.00s sync 0.133s nodes 2096 (lb>=opt 0) first LP [dive 1512 104.0it 17.24ms | queue 207 235.7it 30.38ms | pool 12 1423.8it 97.65ms]
+    47.4s       8715         0    -2.391033186e0    -2.388061686e0     0.12%
+Presolve: 396 rows, 20800 columns -> 358 rows, 11016 columns (0.01s)
+Solving with the slope-intercept dual two-phase method
+RESULT 60.09 {'status': 'time_limit', 'objective': -2.388061686, 'best_bound': -2.391033185999999, 'mip_gap': 0.0012443145909587022, 'nodes': 8715, 'lp_iterations': 937960, 'root_bound': -2.4185181859999965, 'first_solution_time': 3.371626674, 'first_solution_objective': 10.844339407999998, 'node_limit_hit': False}

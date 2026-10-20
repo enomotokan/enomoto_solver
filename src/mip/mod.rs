@@ -545,6 +545,9 @@ thread_local! {
     /// 再スタート前のカット (`係数 x <= 右辺`)。再スタートが [`solve_problem`] に渡す問題の空間で置き、前処理後の空間に
     /// 移して置き直し、求解の開始時にカットプールに入れる (static TLS の領域が足りないので 1 つで済ませる)。
     pub(crate) static RESTART_CUTS: std::cell::RefCell<Option<Vec<(Vec<(usize, f64)>, f64)>>> = const { std::cell::RefCell::new(None) };
+    /// 再スタート前の根のカットのループが目的値を全く動かさなかった (`ENOMOTO_MIP_DROP_FUTILE_CUTS`)。再スタートが置き、
+    /// 再スタート後の根のカットのループが取り出す (真ならループを回さない)。
+    pub(crate) static FUTILE_ROOT_CUTS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: bool) -> solver::MipResult {

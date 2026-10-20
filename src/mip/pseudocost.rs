@@ -1,6 +1,11 @@
 //! pseudocost (分枝による目的値の増加の単位あたりの平均) と分枝スコア
 //! (HiGHS の `HighsPseudocost` を簡略化したもの)。
 
+/// `ENOMOTO_MIP_DEGEN_SCORE`: 分枝のスコアに LP の双対退化の係数を使う (試作、既定は無効)。
+pub fn degen_score() -> bool {
+    env_str!("ENOMOTO_MIP_DEGEN_SCORE").is_some()
+}
+
 /// 列ごとの pseudocost と観測回数。
 #[derive(Clone)]
 pub struct Pseudocost {
@@ -31,6 +36,9 @@ pub struct Pseudocost {
     conflict: [Vec<f64>; 2],
     conflict_inc: f64,
     conflict_total: f64,
+    /// LP の双対退化の係数 (HiGHS の `degeneracyFactor`、1 以上)。`ENOMOTO_MIP_DEGEN_SCORE` のとき分枝の直前に
+    /// [`super::solver`] が設定し、[`Self::hybrid`] で pseudocost の項を割り、推論・打ち切り・衝突の項に掛ける。
+    pub degen_fac: f64,
 }
 
 impl Pseudocost {
@@ -56,6 +64,7 @@ impl Pseudocost {
             conflict: [vec![0.0; n], vec![0.0; n]],
             conflict_inc: 1.0,
             conflict_total: 0.0,
+            degen_fac: 1.0,
         }
     }
 
@@ -243,8 +252,19 @@ impl Pseudocost {
         let n = self.conflict[0].len().max(1) as f64;
         let conf_avg = (self.conflict_total / (2.0 * n)).max(eps);
         let conf = self.conflict[0][j].max(eps * conf_avg) * self.conflict[1][j].max(eps * conf_avg);
-        let wc = tunable!("ENOMOTO_T_MIP_CONFLICT_WEIGHT", 0.0, f64);
+        // `ENOMOTO_MIP_DEGEN_SCORE` (試作): HiGHS の `HighsPseudocost::getScore` と同じく、LP の双対退化の係数 `degen_fac` で
+        // pseudocost の項を割り、推論・打ち切り・衝突の項に掛ける (退化した LP の目的値の増加は当てにならないので、
+        // 推論・衝突の情報で選ぶ)。衝突の重みは HiGHS と同じ 1e-2 を既定にする (`ENOMOTO_T_MIP_CONFLICT_WEIGHT` が優先)。
+        // neos-2978193-inde (輸送問題型の連続変数 20736 列、根の LP の列/行の比が大きい) で木が HiGHS の 5 倍だった。
+        let degen = degen_score();
+        let wc = tunable!("ENOMOTO_T_MIP_CONFLICT_WEIGHT", if degen { 1e-2 } else { 0.0 }, f64);
         let conf_term = if self.conflict_total > 0.0 { wc * s(conf, conf_avg * conf_avg) } else { 0.0 };
+        if degen {
+            // HiGHS と同じく葉の種類による重み (`dynw`) は使わない (暫定解があると打ち切りの葉が多く `dynw` が 1e-3 程度になり、
+            // 衝突・推論の項が消える)
+            let f = self.degen_fac.max(1.0);
+            return f * (1e-4 * s(inf, inf_avg) + 1e-4 * s(cut, 0.01) + conf_term) + s(ps, ps_avg) / f;
+        }
         dynw * (1e-4 * s(inf, inf_avg) + 1e-4 * s(cut, 0.01) + conf_term) + s(ps, ps_avg) / dynw
     }
 

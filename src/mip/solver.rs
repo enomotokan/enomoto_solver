@@ -172,6 +172,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) path_collect: Option<Vec<Vec<(usize, f64)>>>,
     /// カットを強める求解で回したラウンド数
     pub(super) bg_cut_rounds: usize,
+    /// 根のカットのループが目的値を全く動かさず、カットの行を LP から外した (`ENOMOTO_MIP_DROP_FUTILE_CUTS`)。
+    pub(super) futile_root_cuts: bool,
     /// 並列の強分岐 (`ENOMOTO_MIP_PAR_SB`) の [まとめた回数, 並列に解いた候補の数]。
     par_sb_stats: [u64; 2],
     pub(super) deadline: Option<Instant>,
@@ -304,6 +306,10 @@ pub(super) struct Solver<'a, L: MipLp> {
     cur_lb: f64,
     /// 終わるときの下界 ([`Self::finish`] が決めたもの)。あれば最後の経過の行はこれを使う。
     final_lb: Option<f64>,
+    /// `ENOMOTO_MIP_DEGEN_SCORE` の診断: (分枝の回数, 退化の係数の対数の和)。
+    degen_stats: (u64, f64),
+    /// 診断: ノードの終わり方 [親の下界で刈る, 伝播で矛盾, LP 実行不能, LP の目的値の打ち切り (途中), LP の最適値で刈る]。
+    leaf_stats: [u64; 5],
     /// カット生成に使う変数上下限 (最初の分離で作る)。
     pub(super) vbounds: Option<Rc<super::cuts::VarBounds>>,
     /// 根で解を見つけなかったヒューリスティクス ([`heur_bit`] のビット)。再スタートで引き継ぐ。
@@ -755,6 +761,12 @@ impl TreeProf {
             self.kind_n[0], per(0), pms(0), self.kind_n[1], per(1), pms(1), self.kind_n[2], per(2), pms(2)
         )
     }
+}
+
+/// `ENOMOTO_MIP_DROP_FUTILE_CUTS` (試作): 根のカットのループが目的値を全く動かさなかったらカットの行を LP から外し、
+/// 再スタートでも問題の行にしない ([`Solver::maybe_restart`])。
+pub(super) fn drop_futile_cuts() -> bool {
+    env_str!("ENOMOTO_MIP_DROP_FUTILE_CUTS").is_some()
 }
 
 fn prof_tree_par() -> bool {
@@ -1276,6 +1288,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         sep_par_cpu: 0.0,
         path_collect: None,
         bg_cut_rounds: 0,
+        futile_root_cuts: false,
         par_sb_stats: [0; 2],
         deadline,
         nodes: 0,
@@ -1351,6 +1364,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         user_log_header: false,
         cur_lb: f64::NEG_INFINITY,
         final_lb: None,
+        degen_stats: (0, 0.0),
+        leaf_stats: [0; 5],
         vbounds: None,
         failed_heurs: 0,
         cut_age: Vec::new(),
@@ -3060,6 +3075,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.dbg_lost(&format!("node lower bound {}", node.lower_bound), dn);
                 }
                 self.pc.objlim_leaves += 1;
+                self.leaf_stats[0] += 1;
                 continue;
             }
             self.dbg_trace("after replaying the branches");
@@ -3132,6 +3148,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.dbg_trace("after orbitopal fixing");
             if !prop_ok {
                 self.pc.infeasible_leaves += 1;
+                self.leaf_stats[1] += 1;
                 self.dbg_lost("node propagation", dn);
                 if let Some((j, up, _, _)) = node.branch {
                     self.pc.add_cutoff(j, up);
@@ -3214,9 +3231,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         }
                         if st == LpStatus::Infeasible {
                             self.pc.infeasible_leaves += 1;
+                            self.leaf_stats[2] += 1;
                             self.add_farkas_proof();
                         } else {
                             self.pc.objlim_leaves += 1;
+                            self.leaf_stats[3] += 1;
                             self.add_dual_proof();
                         }
                         if self.dbg_on {
@@ -3250,6 +3269,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                 }
                 if node_obj >= self.prune_limit() {
+                    self.leaf_stats[4] += 1;
                     self.add_dual_proof();
                     self.pc.objlim_leaves += 1;
                     if self.dbg_on {
@@ -4432,8 +4452,55 @@ impl<'a, L: MipLp> Solver<'a, L> {
         (deg, ratio)
     }
 
+    /// HiGHS の `HighsLpRelaxation::computeLPDegneracy` と同じ LP の双対退化の係数 (1 以上)。
+    /// 非基底で被約費用が 0 の列・双対値が 0 の不等式の行の割合 (退化の割合) が 0.8 以上なら `10^(10 (割合 - 0.7))`、
+    /// 双対値が 0 でない非基底の列・行を除いた変数の数と行の数の比が 2 以上なら `10 比` を掛ける。
+    fn highs_degeneracy_factor(&self) -> f64 {
+        let b = self.lp.basis_ref();
+        let d = self.lp.reduced_costs_ref();
+        let y = self.lp.row_duals();
+        let m = self.lp.num_rows();
+        let tol = 1e-7;
+        let (mut fixed_rows, mut ineq, mut basic_eq) = (0usize, 0usize, 0usize);
+        for i in 0..m.min(b.row.len()).min(y.len()) {
+            let (lo, up) = self.lp.row_bounds(i);
+            if lo != up {
+                ineq += 1;
+                if b.row[i] != VarStatus::Basic && y[i].abs() > tol {
+                    fixed_rows += 1;
+                }
+            } else if b.row[i] == VarStatus::Basic {
+                basic_eq += 1;
+            }
+        }
+        let n = self.p.n.min(b.col.len()).min(d.len());
+        let (mut fixed_cols, mut already_fixed) = (0usize, 0usize);
+        for j in 0..n {
+            if b.col[j] != VarStatus::Basic {
+                if d[j].abs() > tol {
+                    fixed_cols += 1;
+                } else if self.dom.lo[j] == self.dom.up[j] {
+                    already_fixed += 1;
+                }
+            }
+        }
+        let base = (n + ineq + basic_eq) as f64 - (already_fixed + m) as f64;
+        let share = if base > 0.0 { 1.0 - (fixed_cols + fixed_rows) as f64 / base } else { 0.0 };
+        let free = (n + ineq + basic_eq) as f64 - (fixed_cols + fixed_rows + already_fixed) as f64;
+        let ratio = if m > 0 { free / m as f64 } else { 1.0 };
+        let f1 = if share < 0.8 { 1.0 } else { 10f64.powf(10.0 * (share - 0.7)) };
+        let f2 = if ratio < 2.0 { 1.0 } else { 10.0 * ratio };
+        f1 * f2
+    }
+
     fn select_branch(&mut self, frac: &[(usize, f64)], node_obj: f64, depth: usize) -> BranchAction {
         let t0 = Instant::now();
+        if super::pseudocost::degen_score() {
+            let f = self.highs_degeneracy_factor();
+            self.pc.degen_fac = f;
+            self.degen_stats.0 += 1;
+            self.degen_stats.1 += f.ln();
+        }
         self.last_sb = None;
         let r = self.select_branch_inner(frac, node_obj, depth);
         self.sb_secs += t0.elapsed().as_secs_f64();
@@ -6228,7 +6295,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // neos-911970 (60 秒) では暫定解 56.23 -> 54.83 (最適値 54.76)・下界 53.69 -> 53.62 で解けるには至らず、再スタート後の
         // カットのループが進まなくなる (47.26 のまま。カットの行の上に作る次のカットが変わる) ので既定では使わない
         let readd = (env_str!("ENOMOTO_MIP_RESTART_CUTS_READD").is_some() || self.highs_cutmgmt()) && !keep_all;
-        let cuts_as_rows = (env_str!("ENOMOTO_MIP_RESTART_CUTS_TO_POOL").is_none() && !readd) || keep_all;
+        // `ENOMOTO_MIP_DROP_FUTILE_CUTS`: 根のカットが目的値を全く動かさなかったら (カットの行は LP から外してある)、
+        // カットは問題の行にせずプールで渡し、再スタート後の根のカットのループも回さない
+        let futile = self.futile_root_cuts;
+        let cuts_as_rows = ((env_str!("ENOMOTO_MIP_RESTART_CUTS_TO_POOL").is_none() && !readd) || keep_all) && !futile;
         let mut carry: Vec<(Vec<(usize, f64)>, f64)> = Vec::new();
         let act = self.lp.row_activities();
         for i in p.m..self.lp.num_rows() {
@@ -6297,11 +6367,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             super::RESTART_CUTS.with(|s| *s.borrow_mut() = Some(carry));
         }
+        super::FUTILE_ROOT_CUTS.with(|f| f.set(futile));
         // 暫定解を引き継ぐ (新しい問題は列が同じ)
         if env_str!("ENOMOTO_MIP_RESTART_NO_INCUMBENT").is_none() {
             super::RESTART_SOL.with(|s| *s.borrow_mut() = self.incumbent.as_ref().map(|(_, x)| x.clone()));
         }
         let r = super::solve_problem(&newp, params, true);
+        super::FUTILE_ROOT_CUTS.with(|f| f.set(false));
         super::RESTART_SOL.with(|s| *s.borrow_mut() = None);
         super::RESTART_CUTS.with(|s| *s.borrow_mut() = None);
         let nodes = self.nodes + r.nodes;
@@ -7267,6 +7339,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             eprintln!("MIP: conflict analysis failures (all calls): no decision {}, too long midway {}, reason row lacks column {}, empty {}, too long at the end {} (total length {}), max length {}", cf[0], cf[1], cf[2], cf[3], cf[4], cf[5], self.conflict_max_len());
             if self.par_sb_stats[0] > 0 {
                 eprintln!("MIP: parallel strong branching: {} batches, {} candidates", self.par_sb_stats[0], self.par_sb_stats[1]);
+            }
+            eprintln!("MIP: node ends (this thread): lower bound {}, propagation {}, LP infeasible {}, LP objective bound {}, LP optimal >= limit {}", self.leaf_stats[0], self.leaf_stats[1], self.leaf_stats[2], self.leaf_stats[3], self.leaf_stats[4]);
+            if self.degen_stats.0 > 0 {
+                eprintln!("MIP: degeneracy factor at branching: {} times, geometric mean {:.3e}", self.degen_stats.0, (self.degen_stats.1 / self.degen_stats.0 as f64).exp());
             }
             eprintln!("MIP: sibling backtracks {}; basis restores {} (basic count mismatch {}), first LP iterations after a restore {}", self.sibling_backtracks, self.restore_stats.0, self.restore_stats.1, self.restore_stats.2);
             if !self.orbitopes.is_empty() {
