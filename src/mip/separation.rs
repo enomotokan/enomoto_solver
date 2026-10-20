@@ -212,6 +212,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let (gc, gd) = (obj1 - obj0, obj0 - first_obj);
         let scale = obj0.abs().max(1.0);
         let on = gc > tunable!("ENOMOTO_T_MIP_CLIQUE_FB_GAIN", 1e-4, f64) * scale && gc > tunable!("ENOMOTO_T_MIP_CLIQUE_FB_RATIO", 0.5, f64) * gd;
+        // `ENOMOTO_T_MIP_CLIQUE_FB_FRAC` = r (> 0): ほかのカットで目的値がまったく動かず (g_d <= 1e-9)、clique カットで分数の列の数が
+        // r 倍以下に減るときも使う (drayage-100-23 は根の LP 値が最適値で g_c = 0。clique カットで LP 解が整数に近づき根の RENS が効く)
+        let frac_r = tunable!("ENOMOTO_T_MIP_CLIQUE_FB_FRAC", 0.0, f64);
+        let on = on || (frac_r > 0.0 && gd <= 1e-9 * scale && (nfrac1 as f64) <= frac_r * nfrac0 as f64);
         if self.params.verbose {
             eprintln!(
                 "MIP: clique fallback: {ncuts} cuts, LP {obj0:.10e} -> {obj1:.10e} (g_c {:.3e}, g_d {:.3e} relative), fractional {nfrac0} -> {nfrac1}; {} ({:.2}s)",
