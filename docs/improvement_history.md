@@ -9331,6 +9331,19 @@ neos-950242 では以前 4 (最適値) を出していた根の局所探索が�
 - 同じブランチの試作 `ENOMOTO_MIP_SYM_ORIG_INC` (元の問題で実行可能だが対称性の行に反する解も、再スタートの前なら暫定解にする) は
   既定では使わない (40 問 + 16 問で当たるのは assign1-5-8 の 1 本だけ)。
 
+## MIP: clique カットの fallback (P1) と、実行可能性問題の FJ の延長・根で打ち切り値に届いたら終える (P2) を既定に (採用) (2026-10-20)
+
+`analysis/highsonly16_summary_20261020.md` §3 の候補 P1・P2。クラウド 4 コア・4 スレッド・60 秒の対の計測 (3b35332、各 2 組) と、
+手元 16 スレッドでの確認のあと既定にした。
+
+- P1: `ENOMOTO_MIP_CLIQUE_CUTS` の既定を `fallback` (根のループを clique なしで回し、ほかのカットで伸びず clique カットで伸びる問題でだけ
+  根の続きで使う)、`ENOMOTO_T_MIP_CLIQUE_FB_FRAC` の既定を 0.9 に。`ENOMOTO_MIP_CLIQUE_CUTS=off` で使わない。
+  drayage-25-23 が 2 組とも解ける (`analysis/drayage_clique_20261020.md`)。
+- P2: `ENOMOTO_MIP_FJ_FEAS_EXTEND` (実行可能性問題で FJ を延ばす) と `ENOMOTO_MIP_ROOT_GAP_EXIT` (根の LP が打ち切り値に届いたら根で終える)
+  を既定に。`ENOMOTO_MIP_NO_FJ_FEAS_EXTEND`・`ENOMOTO_MIP_NO_ROOT_GAP_EXIT` で使わない。ns1116954 が 2 組とも解ける
+  (`analysis/uccase12_ns1116954_20261020.md`)。
+- どちらも 40 問は 2 組とも解けた数 25 / 25・目的値の不一致 0。手元 4 スレッド・60 秒の確認: drayage-25-23 36.5 秒、ns1116954 29.0 秒。
+
 ## 改名一覧 (整理時)
 
 本メモ中は旧名で書かれている。
