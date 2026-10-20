@@ -1,0 +1,79 @@
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+Number of PL entries in BOUNDS section is 1255
+Number of BV entries in BOUNDS section is 1225
+MIP app1-1 has 4926 rows; 2480 cols; 18275 nonzeros; 1225 integer variables (1225 binary)
+Coefficient ranges:
+  Matrix  [1e-04, 1e+00]
+  Cost    [1e+00, 1e+00]
+  Bound   [1e+00, 1e+00]
+  RHS     [1e-04, 1e+00]
+Presolving model
+4925 rows, 2478 cols, 18268 nonzeros 0s
+3649 rows, 1253 cols, 24981 nonzeros 0s
+3242 rows, 1059 cols, 19029 nonzeros 0s
+Presolve reductions: rows 3242(-1684); columns 1059(-1421); nonzeros 19029(+754) 
+Objective function is integral with scale 1
+
+Solving MIP model with:
+   3242 rows
+   1059 cols (1030 binary, 0 integer, 0 implied int., 29 continuous, 0 domain fixed)
+   19029 nonzeros
+   Thread count 4 (of 4 threads). Using 1 max workers. Parallel search off
+
+Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+     I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+     S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+     Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+ J       0       0         0   0.00%   -inf            0                  Large        0      0      0         0     0.2s
+         0       0         0   0.00%   -20.95666514    0                  Large        0      0      0        67     0.2s
+
+1.7% inactive integer columns, restarting
+Model after restart has 3208 rows, 1042 cols (1013 bin., 0 int., 0 impl., 29 cont., 0 dom.fix.), and 18808 nonzeros
+
+         0       0         0   0.00%   -4              0                  Large      128      0      0      5423     3.8s
+         0       0         0   0.00%   -4              0                  Large      128     39      0      5554     3.8s
+         2       0         1  50.00%   -4              0                  Large     2724    246      8     10787    11.4s
+
+Restarting search from the root node
+Model after restart has 2684 rows, 780 cols (751 bin., 0 int., 0 impl., 29 cont., 0 dom.fix.), and 15429 nonzeros
+
+      1060       0         0   0.00%   -3              0                  Large      406      0      0     52871    16.1s
+      1060       0         0   0.00%   -3              0                  Large      406    224      3     53141    16.1s
+ T    2662       0       771 100.00%   -3              -3                 0.00%     6000     46    859     84227    21.1s
+      2663       0       772 100.00%   -3              -3                 0.00%     6000     46    859     84229    21.1s
+
+Solving report
+  Model             app1-1
+  Status            Optimal
+  Primal bound      -3
+  Dual bound        -3
+  Gap               0% (tolerance: 0.01%)
+  P-D integral      0
+  Solution status   feasible
+                    -3 (objective)
+                    0 (bound viol.)
+                    0 (int. viol.)
+                    0 (row viol.)
+  Timing            21.06
+                    3.17 (Presolve)
+                        MIP    time [calls] = 0.17 [1]
+                        subMIP time [calls] = 3.00 [77]
+                    17.88 (Solve)
+                        MIP    time [calls] = 10.17 [1]
+                        subMIP time [calls] = 7.71 [65]
+                    0.00 (Postsolve)
+                        MIP    time [calls] = 0.00 [1]
+                        subMIP time [calls] = 0.00 [77]
+  Max sub-MIP depth 10
+  Nodes             2663
+  Repair LPs        0
+  LP iterations     84229
+                    0 (strong br.)
+                    2420 (separation)
+                    15025 (heuristics)
+RESULT -3.0 2663 ...

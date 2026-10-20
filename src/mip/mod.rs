@@ -91,7 +91,10 @@ pub(crate) fn record_root_bound(z: f64) {
 /// 木の探索に使えるスレッドの数の上限: このプロセスが使える CPU の数 (Linux では CPU affinity と cgroup の割り当てを
 /// 反映する `std::thread::available_parallelism`)。環境変数 `ENOMOTO_MIP_MAX_THREADS` でさらに小さくできる。
 pub fn max_threads() -> usize {
-    let hw = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    // 診断用: `ENOMOTO_MIP_DIAG_HW_THREADS` で使える CPU の数を上書きする (CPU の少ない計算機で多スレッドの振る舞いを再現する)
+    let hw = env_str!("ENOMOTO_MIP_DIAG_HW_THREADS")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1));
     let cap = env_str!("ENOMOTO_MIP_MAX_THREADS").and_then(|v| v.parse::<usize>().ok()).filter(|&v| v >= 1).unwrap_or(usize::MAX);
     hw.min(cap).max(1)
 }

@@ -2024,6 +2024,202 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.solve_submip(lo, up, 500)
     }
 
+    /// 目的関数の台のサブ MIP (`ENOMOTO_MIP_OBJ_SUPPORT`、試作): 費用のある整数列が少ない問題 (整数列の
+    /// `ENOMOTO_T_MIP_OBJ_SUPPORT_FRAC` (既定 0.1) 以下) で、費用のある整数列だけを固定し、伝播しながら積んで、残りを
+    /// 自由にしたサブ MIP を解く。費用のない列は自由なので、実行可能性だけを探す問題になる。
+    /// 固定の値: LP 解で整数値の列はその値。分数の列は、まず全部を目的を悪くする向きに丸め、LP 解で目的を良くする向きに
+    /// 近い順に、固定した列の目的値が LP 解の同じ列の目的値 (の刻みへの切り上げ) に届くまで良くする向きへ丸め直す
+    /// (目的値を下界に揃える)。サブ MIP が解を出さなければ、丸め直す列の組を替えて `ENOMOTO_T_MIP_OBJ_SUPPORT_TRIES`
+    /// (既定 4) 回まで試す (組は近い順の組み合わせの辞書順)。app1-1 (目的は 0-1 列 23 個の −1) では下界 −3 の LP 解が
+    /// 2 個を 1、2 個を分数にしていて、正しい 3 個を固定した問題は根の局所探索で −3 が見つかる
+    pub(super) fn obj_support(&mut self, x: &[f64]) -> bool {
+        let p = self.p;
+        if self.params.submip {
+            return false;
+        }
+        let nint = (0..p.n).filter(|&j| p.is_int[j]).count();
+        let mut cols: Vec<usize> = (0..p.n).filter(|&j| p.is_int[j] && p.cost[j] != 0.0 && self.dom.lo[j] < self.dom.up[j]).collect();
+        if cols.is_empty() || cols.len() as f64 > tunable!("ENOMOTO_T_MIP_OBJ_SUPPORT_FRAC", 0.1, f64) * nint as f64 {
+            return false;
+        }
+        cols.sort_by(|&a, &b| p.cost[b].abs().total_cmp(&p.cost[a].abs()).then(a.cmp(&b)));
+        let mut base: Vec<(usize, f64, f64)> = Vec::with_capacity(cols.len());
+        // 分数の列: (列, 悪くする向きの値, 良くする向きの値, 良くする向きへの近さ)
+        let mut frac: Vec<(usize, f64, f64, f64)> = Vec::new();
+        for &j in &cols {
+            let r = x[j].round();
+            if (x[j] - r).abs() <= FEASTOL {
+                base.push((j, r, r));
+            } else if p.cost[j] < 0.0 {
+                frac.push((j, x[j].floor(), x[j].ceil(), x[j] - x[j].floor()));
+            } else {
+                frac.push((j, x[j].ceil(), x[j].floor(), x[j].ceil() - x[j]));
+            }
+        }
+        // 分数の列が多ければ (`ENOMOTO_T_MIP_OBJ_SUPPORT_MAX_FRAC`、既定 8 個より多い) 呼ばない: 丸め直す組の選び方が
+        // 当たらない (app1-2 は 260 列のうち 151 列が分数で、4 回の局所探索 12.9 秒が無駄になった)
+        if frac.len() > tunable!("ENOMOTO_T_MIP_OBJ_SUPPORT_MAX_FRAC", 8usize, usize) {
+            if self.params.verbose {
+                eprintln!("MIP:   objective support: {} cost columns, {} fractional; skipped", cols.len(), frac.len());
+            }
+            return false;
+        }
+        frac.sort_by(|a, b| b.3.total_cmp(&a.3).then(a.0.cmp(&b.0)));
+        // 目的関数に刻みがあり、暫定解と目標の差が刻みの `ENOMOTO_T_MIP_OBJ_SUPPORT_MAX_STEPS` (既定 4) 倍以下のときだけ
+        // (graph20-20-1rand は LP 解の目標 −37 に対し暫定解 −3 で、局所探索とサブ MIP の 12.6 秒が無駄になった)
+        let Some(step) = self.obj_step else { return false };
+        let z_inc = self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z);
+        let lp_obj: f64 = (0..p.n).map(|j| p.cost[j] * x[j]).sum::<f64>() + p.offset;
+        let lb_round = step * ((lp_obj - p.offset) / step - 1e-6).ceil() + p.offset;
+        if !(z_inc - lb_round <= tunable!("ENOMOTO_T_MIP_OBJ_SUPPORT_MAX_STEPS", 4.0, f64) * step + 1e-9) {
+            if self.params.verbose {
+                eprintln!("MIP:   objective support: incumbent {z_inc} is more than the allowed steps above {lb_round}; skipped");
+            }
+            return false;
+        }
+        // 目標: LP 解の費用のある整数列の目的値の刻みへの切り上げ
+        let lp_part: f64 = cols.iter().map(|&j| p.cost[j] * x[j]).sum();
+        let target = step * (lp_part / step - 1e-6).ceil();
+        let fixed_part: f64 = base.iter().map(|&(j, v, _)| p.cost[j] * v).sum::<f64>() + frac.iter().map(|&(j, w, _, _)| p.cost[j] * w).sum::<f64>();
+        // 近い順に何個丸め直せば目標に届くか
+        let mut need = 0usize;
+        let mut acc = fixed_part;
+        while need < frac.len() && acc > target + 1e-9 * target.abs().max(1.0) {
+            let (j, w, b, _) = frac[need];
+            acc += p.cost[j] * (b - w);
+            need += 1;
+        }
+        let tries = tunable!("ENOMOTO_T_MIP_OBJ_SUPPORT_TRIES", 4usize, usize).max(1);
+        let nodes = tunable!("ENOMOTO_T_MIP_OBJ_SUPPORT_NODES", 500u64, u64);
+        // 丸め直す列の組 (frac の添字) を辞書順に
+        let mut pick: Vec<usize> = (0..need).collect();
+        for t in 0..tries {
+            if t > 0 {
+                // 次の組み合わせ
+                let k = frac.len();
+                let mut i = need;
+                loop {
+                    if i == 0 {
+                        return false;
+                    }
+                    i -= 1;
+                    if pick[i] < k - need + i {
+                        break;
+                    }
+                }
+                pick[i] += 1;
+                for l in i + 1..need {
+                    pick[l] = pick[l - 1] + 1;
+                }
+            }
+            let mut fixes = base.clone();
+            for (k, &(j, w, b, _)) in frac.iter().enumerate() {
+                let v = if pick.contains(&k) { b } else { w };
+                fixes.push((j, v, v));
+            }
+            // 良くする向きの値 (目的値を下界に揃えるもの) を先に積む
+            fixes.sort_by_key(|&(j, v, _)| (p.cost[j] * v >= 0.0) as u8);
+            let (lo, up, applied) = self.propagated_fixings(&fixes);
+            if self.params.verbose {
+                let nfree = (0..p.n).filter(|&j| lo[j] < up[j]).count();
+                let ones: Vec<usize> = fixes.iter().filter(|f| f.1 != 0.0).map(|f| f.0).collect();
+                eprintln!(
+                    "MIP:   objective support try {}: {} cost columns ({} fractional, {} rounded up to the target {target}), applied {}, nonzero {:?}, {nfree} free columns",
+                    t + 1,
+                    cols.len(),
+                    frac.len(),
+                    need,
+                    applied,
+                    ones
+                );
+            }
+            if applied < fixes.len() {
+                // 伝播で矛盾した (積めなかった固定がある): この組は飛ばす
+                if need == 0 {
+                    return false;
+                }
+                continue;
+            }
+            // 先に固定した定義域で局所探索を回す (`ENOMOTO_MIP_OBJ_SUPPORT_NO_LS` で回さない。サブ MIP の中では局所探索は
+            // 回らない。時間は `ENOMOTO_T_MIP_OBJ_SUPPORT_LS_SECS` (既定 3) 秒まで)
+            if env_str!("ENOMOTO_MIP_OBJ_SUPPORT_NO_LS").is_none() {
+                let nnz: u64 = p.rows.iter().map(|r| r.len() as u64).sum();
+                // 診断用: `ENOMOTO_T_MIP_OBJ_SUPPORT_SEED` で種を変える。`ENOMOTO_MIP_OBJ_SUPPORT_DIAG_NOFIX` なら固定しない定義域で回す (対照)
+                let seed = self.rng ^ 0x9E37_79B9_7F4A_7C15 ^ tunable!("ENOMOTO_T_MIP_OBJ_SUPPORT_SEED", 0u64, u64).wrapping_mul(0xD1B5_4A32_D192_ED03);
+                let (lo, up) = if env_str!("ENOMOTO_MIP_OBJ_SUPPORT_DIAG_NOFIX").is_some() { (self.dom.lo.clone(), self.dom.up.clone()) } else { (lo.clone(), up.clone()) };
+                self.rand();
+                let t_ls = Instant::now();
+                let (feas, inf) = local_search(p, &lo, &up, tunable!("ENOMOTO_T_MIP_OBJ_SUPPORT_LS_SECS", 3.0, f64), (200 * nnz).clamp(200_000, 100_000_000), seed);
+                let had = feas.is_some();
+                // 局所探索の許容誤差は 1e-6 より緩いことがあるので、受け入れられなければ整数列をその値に固定した LP で
+                // 連続列を解き直す
+                let cand = feas.or_else(|| inf.as_ref().filter(|v| v.1 <= 1e-4).map(|v| v.0.clone()));
+                let ok = cand.is_some_and(|x| self.try_incumbent(x.clone()) || self.fixed_int_lp(&x));
+                if self.params.verbose {
+                    eprintln!(
+                        "MIP:   objective support try {}: local search found {had}, accepted {ok}, least violation {:?} ({:.2}s)",
+                        t + 1,
+                        inf.as_ref().map(|v| v.1),
+                        t_ls.elapsed().as_secs_f64()
+                    );
+                }
+                if ok {
+                    return true;
+                }
+            }
+            // 実行可能性だけを探す問題なので、ほかのサブ MIP より長い時間を与える (残りの `ENOMOTO_T_MIP_OBJ_SUPPORT_TIME_FRAC`
+            // (既定 0.2)、最大 `ENOMOTO_T_MIP_OBJ_SUPPORT_TIME_MAX` (既定 10) 秒)
+            let keep = (self.submip_time_frac, self.submip_time_max);
+            self.submip_time_frac = tunable!("ENOMOTO_T_MIP_OBJ_SUPPORT_TIME_FRAC", 0.2, f64);
+            self.submip_time_max = tunable!("ENOMOTO_T_MIP_OBJ_SUPPORT_TIME_MAX", 10.0, f64);
+            let found = self.solve_submip(lo, up, nodes);
+            (self.submip_time_frac, self.submip_time_max) = keep;
+            if found {
+                return true;
+            }
+            if need == 0 || self.time_up() {
+                return false;
+            }
+        }
+        false
+    }
+
+    /// 整数列を `x` の値 (丸めたもの) に固定し、連続列を元の費用の LP で解き直した点を暫定解の候補にする。
+    /// LP の状態は戻す。
+    pub(super) fn fixed_int_lp(&mut self, x: &[f64]) -> bool {
+        let p = self.p;
+        if self.time_up() {
+            return false;
+        }
+        let saved = self.lp.save_state();
+        let it0 = self.lp.total_iterations();
+        let cost = self.lp.costs();
+        let swap = cost != p.cost;
+        if swap {
+            self.lp.set_costs(&p.cost);
+        }
+        for j in 0..p.n {
+            let (lo, up) = if p.is_int[j] { (x[j].round(), x[j].round()) } else { (self.dom.global_lo[j], self.dom.global_up[j]) };
+            self.lp.set_col_bounds(j, lo, up);
+        }
+        let st = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
+        let y = (st == LpStatus::Optimal).then(|| {
+            let mut y = self.lp.col_values();
+            for j in 0..p.n {
+                if p.is_int[j] {
+                    y[j] = x[j].round();
+                }
+            }
+            y
+        });
+        if swap {
+            self.lp.set_costs(&cost);
+        }
+        self.lp.restore_state(&saved);
+        self.lp.set_total_iterations(it0);
+        y.is_some_and(|y| self.try_incumbent(y))
+    }
+
     /// 暫定解の 2 値列を何個変えたか (Hamming 距離) の行: `sum_{inc=0} x_j - sum_{inc=1} x_j` と、その定数
     /// (`|{inc=1}|`)。距離 = 行の値 + 定数。2 値列 (大域的な境界が [0, 1]) だけを数える。
     fn hamming_row(&self, inc: &[f64]) -> (Vec<(usize, f64)>, f64) {

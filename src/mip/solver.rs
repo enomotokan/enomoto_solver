@@ -1738,6 +1738,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
     }
 
+    /// 暫定解があり、その値が下界 `lb` (の切り上げ) より目的関数の刻み (なければ相対 1e-6) 以上悪いか
+    /// ([`Self::obj_support`] を呼ぶ条件)。
+    pub(super) fn obj_support_gap(&self, lb: f64) -> bool {
+        let Some((z, _)) = self.incumbent.as_ref() else { return false };
+        match self.obj_step {
+            Some(step) => *z - step * ((lb - self.p.offset) / step - 1e-6).ceil() - self.p.offset >= step - 1e-9,
+            None => *z - lb > 1e-6 * z.abs().max(1.0),
+        }
+    }
+
     pub(super) fn sync_lp(&mut self) {
         for j in self.dom.take_changed() {
             self.lp.set_col_bounds(j, self.dom.lo[j], self.dom.up[j]);
@@ -2535,6 +2545,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 暫定解 (Feasibility Jump・pump・丸めなどで得たもの) を根の LP 解との RINS で磨く
                 if self.incumbent.is_some() && env_str!("ENOMOTO_MIP_NO_ROOT_RINS").is_none() {
                     heur!("RINS", self.rins(&x));
+                }
+                // 目的関数の台のサブ MIP (`ENOMOTO_MIP_OBJ_SUPPORT`、試作、[`Solver::obj_support`])。暫定解が根の LP の値から
+                // 目的関数の刻み以上離れているときだけ
+                if env_str!("ENOMOTO_MIP_OBJ_SUPPORT").is_some() && self.obj_support_gap(root_obj) {
+                    heur!("objective support", self.obj_support(&x));
                 }
                 if par_late {
                     self.parallel_submips = false;
