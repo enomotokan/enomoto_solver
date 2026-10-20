@@ -1,0 +1,72 @@
+MODULE /usr/local/lib/python3.13/dist-packages/enomoto_solver/__init__.py
+MIP: presolve: tightened 4046 coefficients, normalized 0 integer rows
+MIP: presolve: rows 4630 -> 3197, free columns 11090 -> 9974, nonzeros 41550 -> 31766, postsolve steps 0
+Root LP: the two-phase method finished first (0.06s)
+MIP: LP probing pass 1: 290 candidates, 0 fixings (8 LPs, 646 iters, 0.17s)
+MIP: LP probing: tried 4 columns, fixed 0, LP 1.1714141979e4 -> 1.1714141979e4 (8 LPs, 646 iters, 0.17s)
+MIP: probing: 7684 of 9909 binaries probed (1 passes), 0 fixed, 2225 bounds tightened, 322252 implications (0.43s)
+Presolve: 4630 rows, 11090 columns -> 3197 rows, 7749 columns (0.62s)
+Root LP: the two-phase method finished first (0.06s)
+Root LP: objective 1.0333387407e5 (0.07s)
+MIP: root LP 1.0333387407e5 (671 iters, 0.07s)
+MIP: fixed-charge check: vb rows 0 of 3197, continuous with vb 0 of 65
+MIP: cut round 0: 162 cuts (of 625, sep 0.61s, LP 230 iters), LP rows 3359 (cut rows mean nnz 2), obj 1.0333387407e5 (0.71s)
+MIP: cut round 1: 93 cuts (of 539, sep 0.84s, LP 330 iters), LP rows 3388 (cut rows mean nnz 2), obj 1.0333387407e5 (1.63s)
+MIP: cut round 2: 102 cuts (of 643, sep 0.77s, LP 151 iters), LP rows 3399 (cut rows mean nnz 2), obj 1.0333387407e5 (2.46s)
+MIP: cut round 3: 83 cuts (of 442, sep 0.85s, LP 222 iters), LP rows 3377 (cut rows mean nnz 2), obj 1.0333387407e5 (3.36s)
+MIP:   global fixed integers 3341 of 11025 (newly 0 since the root LP)
+MIP: new incumbent 2.7896415607e5 at node 0 (3.41s) [feasibility jump (parallel)]
+MIP: feasibility jump (parallel) found a solution (3.41s)
+MIP: cut round 4: 88 cuts (of 420, sep 0.72s, LP 355 iters), LP rows 3395 (cut rows mean nnz 2), obj 1.0333387407e5 (4.20s)
+MIP: cut round 5: 92 cuts (of 399, sep 0.98s, LP 295 iters), LP rows 3405 (cut rows mean nnz 2), obj 1.0333387407e5 (5.24s)
+MIP: clique graph: 633679 edges (632412 from rows, probing implications 322252)
+MIP: clique fallback: 20 cuts, LP 1.0333387407e5 -> 1.0333387407e5 (g_c -2.816e-16, g_d 1.408e-16 relative), fractional 191 -> 153; used (0.43s)
+MIP: fixed-charge check: vb rows 0 of 3197, continuous with vb 0 of 65
+MIP: cut round 0: 109 cuts (of 595, sep 0.93s, LP 361 iters), LP rows 3423 (cut rows mean nnz 3), obj 1.0333387407e5 (6.71s)
+Root cuts: objective 1.0333387407e5 -> 1.0333387407e5, 114 cuts in the LP (6.72s)
+MIP: cut loop done: 109 cuts added, 114 in LP, pool 1506 cuts (240170 nonzeros), obj 1.0333387407e5 -> 1.0333387407e5
+MIP: root heuristic simple rounding: none (0.00s)
+MIP: root heuristic ZI round: none (0.00s)
+MIP: root heuristic randomized rounding: none (0.01s)
+MIP: fixed-charge check: vb rows 0 of 3197, continuous with vb 0 of 65
+MIP:   interior rounding: 1 interior points, vertex true (0.36s)
+MIP:   interior rounding: 6 rounded points tried, found false
+MIP: root heuristic interior rounding: none (0.40s)
+MIP:   root reduced cost: 2097 lurking bounds, fixing rate 0.29
+MIP: root heuristic root reduced cost: none (0.00s)
+MIP:   LP face: only 2097 of 7684 integer columns fixed
+MIP: root heuristic LP face: none (0.00s)
+MIP:   parallel sub-MIP started (RENS): 238 free columns of 11090
+MIP: root heuristic RENS: none (0.01s)
+MIP:   locks: fixing rate 0.79
+MIP:   parallel sub-MIP started (locks): 1665 free columns of 11090
+MIP: root heuristic locks: none (0.01s)
+MIP:   clique: fixing rate 0.91
+MIP:   parallel sub-MIP started (clique): 733 free columns of 11090
+MIP: root heuristic clique: none (0.02s)
+MIP: root heuristic vbounds (loose): none (0.00s)
+MIP: root heuristic vbounds (tight): none (0.00s)
+MIP:   parallel sub-MIP (RENS): status Infeasible, nodes 0, objective None, 0.03s
+MIP:   parallel sub-MIP (locks): status Optimal, nodes 0, objective Some(985824.9105834961), 0.05s
+MIP:   parallel sub-MIP (clique): status Optimal, nodes 0, objective Some(108471.16081237794), 0.07s
+MIP:   global fixed integers 3341 of 11025 (newly 0 since the root LP)
+MIP: new incumbent 1.0847116081e5 at node 0 (7.27s) [clique]
+MIP:   sub-MIP: 249 free columns of 11090, status Optimal, nodes 0, objective Some(103333.87407302856)
+MIP:   global fixed integers 3341 of 11025 (newly 0 since the root LP)
+MIP: new incumbent 1.0333387407e5 at node 0 (7.36s) [RINS]
+MIP: root heuristic RINS: found (0.09s)
+MIP: after root heuristics: incumbent Some(103333.87407302856) (7.36s)
+MIP: background cuts: 1 rounds, obj 1.0333387407e5 not above 1.0333387407e5; not used (waited 0.27s)
+     time      nodes      open        best bound         incumbent       gap
+     7.6s          0         0     1.033338741e5     1.033338741e5     0.00%
+MIP:     7.63s nodes        0 open       0 lb inf ub 1.03333874e5 lp_iters 3103 sb_iters 0 sb_lps 0 sb_secs 0.00 node_iters 0 (first 0, lps 0) heur_iters 430 dive_iters 0 lp_rows 3311 node_cut_secs 0.00
+MIP: dual proofs and conflicts 0 (conflicts added 0 (from proofs 0), Farkas 0, pruned 0 nodes, tightened 0 bounds)
+MIP: propagation conflicts: analysed 19, no 1-UIP 0, 1-UIP not a row 0, no decision set 0, decision set not a row 0; not a row because continuous 0, general integer 0, both sides 0
+MIP: objective propagation: pruned 0 nodes, tightened 0 bounds; strong branching children infeasible by propagation 0, propagated bounds passed to child LPs 0
+MIP: literal conflicts: added 26, in pool 26 (aged out 0), pruned 0 nodes, tightened 0 bounds
+MIP: conflict analysis (HiGHS style): calls 19, conflicts 43, added 26, mean length 127.0, max length 3407, 0.01s
+MIP: conflict analysis failures (all calls): no decision 0, too long midway 0, reason row lacks column 0, empty 0, too long at the end 0 (total length 0), max length 50
+MIP: sibling backtracks 0; basis restores 0 (basic count mismatch 0), first LP iterations after a restore 0
+Presolve: 4630 rows, 11090 columns -> 0 rows, 0 columns (0.01s)
+Solving with the slope-intercept dual two-phase method
+RESULT 8.27 {'status': 'optimal', 'objective': 103333.87407302856, 'best_bound': 103333.87407302856, 'mip_gap': 0.0, 'nodes': 0, 'lp_iterations': 3103, 'root_bound': 103333.87407302858, 'first_solution_time': 4.029336209, 'first_solution_objective': 278964.156074524, 'node_limit_hit': False}

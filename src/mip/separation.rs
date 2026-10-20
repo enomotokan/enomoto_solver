@@ -14,6 +14,8 @@ use super::solver::Solver;
 thread_local! {
     /// `ENOMOTO_MIP_CLIQUE_CUTS=auto` の、最初の求解 (再スタート前) の判定。再スタートの後の求解が引き継ぐ
     static CLIQUE_AUTO_FIRST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+    /// `ENOMOTO_MIP_CLIQUE_CUTS=fallback` で clique カットを加えて回す 2 回目のループの中か (時間の上限をループの始めから数える)
+    static CLIQUE_FB_SECOND: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 use super::lp_api::MipLp;
 
@@ -295,6 +297,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 第 2 段階が 88 ラウンド回って根が 6 秒伸び、9.2 秒 -> 17.2 秒になった)
         // 上限はこのスレッドの CPU 時間で測る ([`super::cap_clock`]。求解の開始からの分は `cpu0` から)
         let t_loop0 = super::cap_clock();
+        // fallback の 2 回目のループ: 1 回目で根のカットの時間の上限 (`ENOMOTO_T_MIP_CUT_TIME_FRAC`) を使い切っていても回るよう、
+        // 上限をこのループの始めから数える (drayage-25-23 では 1 回目に 6.9 秒かかり、2 回目が 1 ラウンドも回らなかった)
+        let cap_base = if CLIQUE_FB_SECOND.with(|c| c.get()) && env_str!("ENOMOTO_MIP_CLIQUE_FB_SHARED_CAP").is_none() { t_loop0 } else { self.cpu0 };
         let mut phase2_deadline = f64::INFINITY;
         let mut round_ctr = 0usize;
         // 固定費用ネットワーク型 (連続変数のほぼ全てに VUB `x <= u y` の 2 非零の行があり、その行が大半) では、根のカット選択を
@@ -348,7 +353,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             round_ctr += 1;
             let now = super::cap_clock();
             let now = if env_str!("ENOMOTO_MIP_SEP_COUNT_CPU").is_some() { now + self.sep_par_cpu } else { now };
-            if self.time_up() || now - self.cpu0 > time_cap || (phase2 && now - t_loop0 > phase2_deadline && !heavy) || stopped(&job) {
+            if self.time_up() || now - cap_base > time_cap || (phase2 && now - t_loop0 > phase2_deadline && !heavy) || stopped(&job) {
                 break;
             }
             self.bg_cut_rounds = round_ctr;
@@ -657,7 +662,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.clique_auto = Some(on);
             if on {
                 // clique カットを加えてループを続ける (2 回目のループは判定しない)
-                return self.root_cut_loop(root_iters);
+                CLIQUE_FB_SECOND.with(|c| c.set(true));
+                let ok = self.root_cut_loop(root_iters);
+                CLIQUE_FB_SECOND.with(|c| c.set(false));
+                return ok;
             }
         }
         if !self.params.submip && st == LpStatus::Optimal && job.is_none() {
