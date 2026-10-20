@@ -1,0 +1,63 @@
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+MIP uccase12 has 121161 rows; 62529 cols; 419447 nonzeros; 9072 integer variables (9072 binary)
+Coefficient ranges:
+  Matrix  [9e-05, 4e+02]
+  Cost    [1e+00, 7e+00]
+  Bound   [1e+00, 1e+04]
+  RHS     [3e-02, 6e+03]
+Presolving model
+92577 rows, 40434 cols, 368618 nonzeros 0s
+88217 rows, 40240 cols, 341681 nonzeros 1s
+Presolve reductions: rows 88217(-32944); columns 40240(-22289); nonzeros 341681(-77766) 
+
+Solving MIP model with:
+   88217 rows
+   40240 cols (9072 binary, 0 integer, 170 implied int., 30998 continuous, 0 domain fixed)
+   341681 nonzeros
+   Thread count 4 (of 4 threads). Using 1 max workers. Parallel search off
+
+Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+     I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+     S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+     Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+         0       0         0   0.00%   0               inf                  inf        0      0      0         0     2.7s
+ R       0       0         0   0.00%   11507.291389    12292.895042       6.39%        0      0      0     31414     4.8s
+ C       0       0         0   0.00%   11507.361888    11626.711244       1.03%      540     64      0     31532     8.8s
+ L       0       0         0   0.00%   11507.36896     11507.405062       0.00%      729     76      0     31560    23.2s
+         1       0         1 100.00%   11507.36896     11507.405062       0.00%      729     76      0     37972    23.2s
+
+Solving report
+  Model             uccase12
+  Status            Optimal
+  Primal bound      11507.4050616
+  Dual bound        11507.3689602
+  Gap               0.000314% (tolerance: 0.01%)
+  P-D integral      0.403839067303
+  Solution status   feasible
+                    11507.4050616 (objective)
+                    0 (bound viol.)
+                    3.39075893799e-11 (int. viol.)
+                    0 (row viol.)
+  Timing            23.24
+                    1.69 (Presolve)
+                        MIP    time [calls] = 1.07 [1]
+                        subMIP time [calls] = 0.63 [3]
+                    21.54 (Solve)
+                        MIP    time [calls] = 10.45 [1]
+                        subMIP time [calls] = 11.09 [3]
+                    0.00 (Postsolve)
+                        MIP    time [calls] = 0.00 [1]
+                        subMIP time [calls] = 0.00 [3]
+  Max sub-MIP depth 6
+  Nodes             1
+  Repair LPs        0
+  LP iterations     37972
+                    0 (strong br.)
+                    146 (separation)
+                    6412 (heuristics)
+RESULT {"status": "Optimal", "objective": 11507.405061634989, "bound": 11507.368960185, "nodes": 1, "time": 23.26725330599993}

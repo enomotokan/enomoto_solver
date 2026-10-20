@@ -1061,6 +1061,11 @@ pub(super) fn local_search(p: &MipProblem, lo: &[f64], up: &[f64], time_cap: f64
     (best_feas, best_inf)
 }
 
+/// `ENOMOTO_MIP_FJ_FEAS_EXTEND` が立っていて、目的関数が全部 0 (実行可能性問題) か。
+pub(super) fn fj_feas_extend(p: &MipProblem) -> bool {
+    env_str!("ENOMOTO_MIP_FJ_FEAS_EXTEND").is_some() && p.cost.iter().all(|&c| c == 0.0)
+}
+
 /// Feasibility Jump の探索本体 (Solver の状態に依らないので別スレッドでも動かせる)。`lo`/`up` は列の境界、
 /// `seed` は乱数の種、`stop` が立ったら止める。実行可能な点が見つかれば返す。
 pub(super) fn fj_search(p: &MipProblem, lo: &[f64], up: &[f64], effort: u64, time_cap: f64, seed: u64, stop: Option<&std::sync::atomic::AtomicBool>) -> Option<Vec<f64>> {
@@ -1077,6 +1082,20 @@ pub(super) fn fj_search(p: &MipProblem, lo: &[f64], up: &[f64], effort: u64, tim
         let stopped = || stop.is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed));
         let mut best = super::fj::fj2_search(p, lo, up, time_cap, seed, stop);
         if env_str!("ENOMOTO_MIP_FJ2_ONLY").is_some() {
+            return best;
+        }
+        // `ENOMOTO_MIP_FJ_FEAS_EXTEND`: 目的関数が全部 0 (実行可能性問題) なら、見つかるまで種を変えた FJ2 だけを時間の上限まで
+        // 繰り返す (見つかれば最適なのですぐ返す)。ns1116954 は 1 回の FJ2 が違反 1〜2 行で止まり、HiGHS も種 0 以外
+        // (1〜5) では 60 秒で解を出せない (FJ の種の運)
+        if stop.is_some() && fj_feas_extend(p) {
+            let mut k = 1u64;
+            while best.is_none() && left(time_cap) > 0.05 && !stopped() {
+                best = super::fj::fj2_search(p, lo, up, left(time_cap), seed.wrapping_add(k.wrapping_mul(0x9E37_79B9_7F4A_7C15)), stop);
+                k += 1;
+            }
+            if env_str!("ENOMOTO_MIP_FJ_DEBUG").is_some() {
+                eprintln!("MIP:   FJ2 (feasibility problem): {k} tries, found {} ({:.2}s)", best.is_some(), t0.elapsed().as_secs_f64());
+            }
             return best;
         }
         // 逐次 (止める印のない呼び出し) では主のスレッドを待たせるので、FJ2 で見つかれば終わり、見つからなければ旧来の

@@ -1,0 +1,54 @@
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+MIP uccase12 has 121161 rows; 62529 cols; 419447 nonzeros; 9072 integer variables (9072 binary)
+Coefficient ranges:
+  Matrix  [9e-05, 4e+02]
+  Cost    [1e+00, 7e+00]
+  Bound   [1e+00, 1e+04]
+  RHS     [3e-02, 6e+03]
+
+Presolve is switched off
+
+Solving MIP model with:
+   121161 rows
+   62529 cols (9072 binary, 0 integer, 0 implied int., 53457 continuous, 0 domain fixed)
+   419447 nonzeros
+   Thread count 4 (of 4 threads). Using 1 max workers. Parallel search off
+
+Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+     I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+     S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+     Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+         0       0         0   0.00%   0               inf                  inf        0      0      0         0     2.2s
+         0       0         0   0.00%   11507.285324    inf                  inf        0      0      3     32524     4.8s
+ C       0       0         0   0.00%   11507.36071     11507.925433       0.00%      804    107     22     32725     8.5s
+         1       0         1 100.00%   11507.36071     11507.925433       0.00%      804    107     22     32725     8.5s
+
+Solving report
+  Model             uccase12
+  Status            Optimal
+  Primal bound      11507.9254335
+  Dual bound        11507.3607098
+  Gap               0.00491% (tolerance: 0.01%)
+  P-D integral      3.82403806331e-06
+  Solution status   feasible
+                    11507.9254335 (objective)
+                    0 (bound viol.)
+                    2.17603712827e-14 (int. viol.)
+                    0 (row viol.)
+  Timing            8.54
+                    0.09 (Presolve)
+                    8.44 (Solve)
+                    0.00 (Postsolve)
+  Max sub-MIP depth 0
+  Nodes             1
+  Repair LPs        0
+  LP iterations     32725
+                    0 (strong br.)
+                    201 (separation)
+                    0 (heuristics)
+RESULT {"status": "Optimal", "objective": 11507.92543346, "bound": 11507.36070981, "nodes": 1, "time": 8.570250276000024}
