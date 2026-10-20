@@ -24,6 +24,18 @@ use super::lp_api::MipLp;
 /// HiGHS の lifted cover を CMIR と並べて試すか (`ENOMOTO_MIP_LIFTED_COVER` で有効)。qnet1 では根の下界が
 /// 15627 -> 15924 (HiGHS 16022) と上がったが、40 問では 19 -> 17 問 (sgeomean 27.91 -> 29.06) と悪化した
 /// (misc07・neos5・binkar10_1・neos-860300 が遅くなった) ので既定では使わない。
+/// clique カットの使い方 (`ENOMOTO_MIP_CLIQUE_CUTS`)。既定は `fallback` (根のループを clique なしで回し、ほかのカットで伸びず
+/// clique カットで伸びる問題でだけ根の続きで使う、[`Solver::clique_fallback_trial`])。`off` (か `0`) で使わない。
+/// 40 問 + 16 問 (4 スレッド・60 秒、`ENOMOTO_T_MIP_CLIQUE_FB_FRAC=0.9` と組んで 2 組) で drayage-25-23 が 2 組とも解け、
+/// 40 問は解けた数・不一致とも変わらない。手元 16 スレッドでも確かめて既定にした
+pub(super) fn clique_cuts_mode() -> Option<&'static str> {
+    match env_str!("ENOMOTO_MIP_CLIQUE_CUTS") {
+        Some("off") | Some("0") => None,
+        Some(m) => Some(m),
+        None => Some("fallback"),
+    }
+}
+
 fn use_lifted_cover() -> bool {
     env_str!("ENOMOTO_MIP_LIFTED_COVER").is_some()
 }
@@ -214,9 +226,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let (gc, gd) = (obj1 - obj0, obj0 - first_obj);
         let scale = obj0.abs().max(1.0);
         let on = gc > tunable!("ENOMOTO_T_MIP_CLIQUE_FB_GAIN", 1e-4, f64) * scale && gc > tunable!("ENOMOTO_T_MIP_CLIQUE_FB_RATIO", 0.5, f64) * gd;
-        // `ENOMOTO_T_MIP_CLIQUE_FB_FRAC` = r (> 0): ほかのカットで目的値がまったく動かず (g_d <= 1e-9)、clique カットで分数の列の数が
+        // `ENOMOTO_T_MIP_CLIQUE_FB_FRAC` = r (> 0、既定 0.9。0 で使わない): ほかのカットで目的値がまったく動かず (g_d <= 1e-9)、clique カットで分数の列の数が
         // r 倍以下に減るときも使う (drayage-100-23 は根の LP 値が最適値で g_c = 0。clique カットで LP 解が整数に近づき根の RENS が効く)
-        let frac_r = tunable!("ENOMOTO_T_MIP_CLIQUE_FB_FRAC", 0.0, f64);
+        let frac_r = tunable!("ENOMOTO_T_MIP_CLIQUE_FB_FRAC", 0.9, f64);
         let on = on || (frac_r > 0.0 && gd <= 1e-9 * scale && (nfrac1 as f64) <= frac_r * nfrac0 as f64);
         if self.params.verbose {
             eprintln!(
@@ -238,7 +250,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut prev_obj = self.lp.objective();
         let mut prev_nfrac = self.fractional(&self.lp.col_values()).len();
         let first_obj = prev_obj;
-        if env_str!("ENOMOTO_MIP_CLIQUE_CUTS") == Some("auto") && self.clique_auto.is_none() && !self.params.submip {
+        if clique_cuts_mode() == Some("auto") && self.clique_auto.is_none() && !self.params.submip {
             // 再スタートの後は最初の求解の判定を引き継ぐ (再スタートの根は前の根のカットを持つので、試しても伸びない)
             let on = match CLIQUE_AUTO_FIRST.with(|c| c.get()) {
                 Some(v) if self.params.restarts > 0 => v,
@@ -250,7 +262,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.clique_auto = Some(on);
         }
         // `fallback`: ループの後で判定する ([`Self::clique_fallback_trial`])。再スタートの後は最初の求解の判定を引き継ぐ
-        let mut clique_fb = env_str!("ENOMOTO_MIP_CLIQUE_CUTS") == Some("fallback") && self.clique_auto.is_none() && !self.params.submip;
+        let mut clique_fb = clique_cuts_mode() == Some("fallback") && self.clique_auto.is_none() && !self.params.submip;
         if clique_fb && self.params.restarts > 0 {
             if let Some(v) = CLIQUE_AUTO_FIRST.with(|c| c.get()) {
                 self.clique_auto = Some(v);
@@ -2066,8 +2078,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 下界は 1 ラウンド目で 99718.79 -> 100121.99 (HiGHS と同じ。HiGHS も clique と implied bound の分離を止めると根で動かない)
         // `ENOMOTO_MIP_CLIQUE_CUTS=auto` (試作): 根で一度だけ clique カットだけを入れた LP を解き、下界が上がる問題でだけ使う
         // ([`Self::clique_trial`])
-        let clique_mode = env_str!("ENOMOTO_MIP_CLIQUE_CUTS");
-        // `ENOMOTO_MIP_CLIQUE_CUTS=fallback` (試作): 根のループを clique なしで回し、ほかのカットで伸びず clique カットで伸びる問題でだけ
+        let clique_mode = clique_cuts_mode();
+        // `ENOMOTO_MIP_CLIQUE_CUTS=fallback` (既定、[`clique_cuts_mode`]): 根のループを clique なしで回し、ほかのカットで伸びず clique カットで伸びる問題でだけ
         // 根の続きのラウンドで使う ([`Self::clique_fallback_trial`])。ノードでは使わない (`ENOMOTO_MIP_CLIQUE_FB_NODES` で使う)
         let fb_nodes = env_str!("ENOMOTO_MIP_CLIQUE_FB_NODES").is_some();
         if clique_mode.is_some_and(|m| !(light && (m == "root" || (m == "fallback" && !fb_nodes))) && ((m != "auto" && m != "fallback") || self.clique_auto == Some(true))) {

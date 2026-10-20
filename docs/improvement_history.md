@@ -9304,6 +9304,46 @@ Pump・ダイビング) が回らなくなった (hypothyroid-k1 は FJ の -3 �
   FRb の 10teams (10.5 秒 -> 時間切れ)・noswot (19.9 -> 36.6 秒)。この中で試作が働くのは noswot だけで (10teams・uccase12 では
   `fj_poor()` が偽)、noswot は 2 組で向きが逆。16 問で FRb が落とした uccase12 も試作が働かない問題。
 
+## MIP: 根の解発見スレッド (採用) (2026-10-20)
+
+FJ の質の悪い解が暫定解になると、主スレッドは暫定解なし用のヒューリスティクス (局所探索・ダイビング・Pump) を回さない。
+neos-950242 では以前 4 (最適値) を出していた根の局所探索が回らず、FJ の 19 のままだった
+(`analysis/regress_nursesched_hypothyroid_ns1116954_neos950242_20261020.md`)。
+
+- 根で暫定解が FJ の解だけで根の LP から遠い (`fj_poor()`) とき、根の写しから作った求解を別スレッドで動かし (根の LP の基底を渡す)、
+  局所探索 -> fractional / vector length / coefficient diving -> Feasibility Pump を順に回す。時間の予算は残りの 0.3 倍・最大 20 秒
+  (`ENOMOTO_T_MIP_FIND_THREAD_FRAC`・`_MAX`)。見つけた解はすぐ共有の置き場に置き、主が根のヒューリスティクスの各手の前と木の各ノードで
+  受け取る (待たない)。背景のカットの分離のスレッドを 1 本減らす。`ENOMOTO_MIP_NO_FIND_THREAD` で止める。
+- 主の暫定解が質の悪い FJ の解でなくなったら (FJ 以外の解が入るか、根の LP との相対ギャップが 0.5 以下) 止めの合図を立てる
+  (`ENOMOTO_T_MIP_FIND_THREAD_STOP_GAP`、`ENOMOTO_MIP_FIND_THREAD_NO_STOP` で止めない)。止めのない版 (533c803) は 2 組とも
+  drayage-100-23 を 12 -> 31 秒に遅くし、mzzv42z の暫定解を約 1000〜1500 悪くした。
+- 40 問 + 16 問 (クラウド 4 コア、4 スレッド・60 秒、同じコンテナで既定と続けて測る対を順番を入れ替えて 2 組、
+  `benchmarks/*_4t_60s_20261020_142913b_{newdef,findthread}_rF2{a,b}.*`):
+
+  | 組 | 40 問 解けた数 既定 / 試作 | 40 問 SGM | 不一致 | 16 問 解けた数 | 16 問 主ギャップの和 |
+  |---|---|---|---|---|---|
+  | F2a (既定 → 試作) | 25 / 25 | 18.53 / 18.16 | 0 | 5 / 5 | 2.87 / 2.41 |
+  | F2b (試作 → 既定) | 25 / 25 | 20.41 / 20.59 | 0 | 5 / 4 | 2.87 / 2.41 |
+
+  neos-950242 は 2 組とも 19 -> 6 (最適値 4)。F2b で落とした uccase12 (既定 49.2 秒) は解発見スレッドが働かない問題。
+  1 組だけの差: drayage-100-23 10.3 -> 17.1 秒・pk1 13.3 -> 23.3 秒 (F2a)、neos-960392 21.5 -> 31.4 秒 (F2b)。
+  qiu (36.5 -> 17.9、29.6 -> 39.5 秒)・noswot は 2 組で向きが逆。HiGHS は解けて ENOMOTO が解けない問題で解けるようになったものはない。
+- 同じブランチの試作 `ENOMOTO_MIP_SYM_ORIG_INC` (元の問題で実行可能だが対称性の行に反する解も、再スタートの前なら暫定解にする) は
+  既定では使わない (40 問 + 16 問で当たるのは assign1-5-8 の 1 本だけ)。
+
+## MIP: clique カットの fallback (P1) と、実行可能性問題の FJ の延長・根で打ち切り値に届いたら終える (P2) を既定に (採用) (2026-10-20)
+
+`analysis/highsonly16_summary_20261020.md` §3 の候補 P1・P2。クラウド 4 コア・4 スレッド・60 秒の対の計測 (3b35332、各 2 組) と、
+手元 16 スレッドでの確認のあと既定にした。
+
+- P1: `ENOMOTO_MIP_CLIQUE_CUTS` の既定を `fallback` (根のループを clique なしで回し、ほかのカットで伸びず clique カットで伸びる問題でだけ
+  根の続きで使う)、`ENOMOTO_T_MIP_CLIQUE_FB_FRAC` の既定を 0.9 に。`ENOMOTO_MIP_CLIQUE_CUTS=off` で使わない。
+  drayage-25-23 が 2 組とも解ける (`analysis/drayage_clique_20261020.md`)。
+- P2: `ENOMOTO_MIP_FJ_FEAS_EXTEND` (実行可能性問題で FJ を延ばす) と `ENOMOTO_MIP_ROOT_GAP_EXIT` (根の LP が打ち切り値に届いたら根で終える)
+  を既定に。`ENOMOTO_MIP_NO_FJ_FEAS_EXTEND`・`ENOMOTO_MIP_NO_ROOT_GAP_EXIT` で使わない。ns1116954 が 2 組とも解ける
+  (`analysis/uccase12_ns1116954_20261020.md`)。
+- どちらも 40 問は 2 組とも解けた数 25 / 25・目的値の不一致 0。手元 4 スレッド・60 秒の確認: drayage-25-23 36.5 秒、ns1116954 29.0 秒。
+
 ## 改名一覧 (整理時)
 
 本メモ中は旧名で書かれている。
