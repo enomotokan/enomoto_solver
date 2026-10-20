@@ -212,6 +212,12 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// `ENOMOTO_MIP_FC_NODE_SEP2`: [`Self::fc_node_sep`] の分離を、待ち行列から取り出したノードでプールのカットを戻した後にも
     /// 行い、LP の値が伸びる間ラウンドを繰り返す (HiGHS の `HighsSeparation::separate`)。評価中
     pub(super) fc_sep2: bool,
+    /// 木の中の分離の規則 ([`Solver::tree_sep_start`]、既定で使う。`ENOMOTO_MIP_NO_TREE_SEP` で使わない): 待ち行列から取り出した
+    /// ノードでもプールのラウンドの後に分離し、LP の値が伸びる間ラウンドを繰り返す。40 問 + 16 問 (4 スレッド・60 秒、2 組) で
+    /// neos-911970 が 2 組とも解け (既定は時間切れ)、40 問の解けた数 24/25 -> 26/26、目的値の不一致 0
+    pub(super) tree_sep: bool,
+    /// [`Self::tree_sep`] で、固定費用ネットワーク型ならノードの分離でも経路集約の始点を使う
+    pub(super) tree_sep_fc: bool,
     /// ノードの分離の効き目の統計: (回数, 効き目の指数移動平均, 分離で枝が切れた回数, 深さの規則から外れて分離した回数)
     pub(super) fc_stats: (u64, f64, u64, u64),
     /// 効き目が低いときに、何回に 1 回は試し続けるかの数え
@@ -359,6 +365,10 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) cut_norm: std::collections::HashMap<u64, f64>,
     /// 効いていたカットを双対値でまとめた行の番号 ([`Self::merge_active_cuts`])。年齢で外さない。
     pub(super) merged_cuts: std::collections::HashSet<u64>,
+    /// `ENOMOTO_MIP_TREE_SEP` のラウンドで加えたカットの番号 (`ENOMOTO_T_MIP_TREE_SEP_CUT_AGE` で年齢の上限を別にする)
+    pub(super) ts_cut_ids: std::collections::HashSet<u64>,
+    /// `ENOMOTO_MIP_TREE_SEP`: 最初に分離を考えた取り出したノードでの LP の行数 (`ENOMOTO_T_MIP_TREE_SEP_HEAVY` の基準)
+    pub(super) ts_rows0: usize,
     /// 最適面の頂点での分離 (`separate_face_split`) で、今の頂点の tableau 行 (基底変数ごとの、集約した行とその列の
     /// LP 値のハッシュ)。`tab_memo_mode`: 0 = 使わない、1 = 記録する、2 = 照合する。
     pub(super) tab_memo: std::collections::HashMap<usize, u64>,
@@ -1372,6 +1382,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
             && super::separation::fixed_charge_network_for_nodes(p),
         fc_adapt: env_str!("ENOMOTO_MIP_FC_NODE_SEP_ADAPT").is_some(),
         fc_sep2: env_str!("ENOMOTO_MIP_FC_NODE_SEP2").is_some(),
+        tree_sep: !params.submip && env_str!("ENOMOTO_MIP_NO_TREE_SEP").is_none(),
+        tree_sep_fc: !params.submip && env_str!("ENOMOTO_MIP_NO_TREE_SEP").is_none() && env_str!("ENOMOTO_MIP_TREE_SEP_NO_FC").is_none() && super::separation::fixed_charge_network_for_nodes(p),
         fc_stats: (0, 0.0, 0, 0),
         fc_probe: 0,
         last_rins: 0,
@@ -1447,6 +1459,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         cut_ids: Vec::new(),
         cut_norm: std::collections::HashMap::new(),
         merged_cuts: std::collections::HashSet::new(),
+        ts_cut_ids: std::collections::HashSet::new(),
+        ts_rows0: 0,
         tab_memo: std::collections::HashMap::new(),
         tab_memo_mode: 0,
         tab_memo_stats: (0, 0),
@@ -1835,6 +1849,49 @@ impl<'a, L: MipLp> Solver<'a, L> {
         freq > 0 && depth % freq == 0
     }
 
+    /// `ENOMOTO_MIP_TREE_SEP` (木の中の分離の規則をまとめた試作): 待ち行列から取り出したノードで最初のラウンドの分離を
+    /// するか。(1) 費用: ノードの分離 (解き直しを含む) の時間が経過時間の `ENOMOTO_T_MIP_TREE_SEP_TIME_FRAC` 倍 (既定 0.1) と
+    /// ノードの LP の時間の `ENOMOTO_T_MIP_TREE_SEP_LP_FRAC` 倍 (既定 0.25、0 で判定しない) に収まる間だけ。カットが密
+    /// ([`Self::nca_dense`]、`ENOMOTO_T_MIP_NODE_CUT_ADAPT_DENSITY`) なら深さの規則 ([`Self::node_cuts_due`] の既定の部分) だけ。
+    /// (2) 頻度: 効いた割合の指数移動平均 (`nca_ema`、伸びが打ち切り値までの差の `ENOMOTO_T_MIP_NODE_CUT_ADAPT_GAIN` 倍以上か打ち切り)
+    /// が `ENOMOTO_T_MIP_TREE_SEP_RATE` (既定 0.2) 以上なら毎回、下なら深さの規則と `ENOMOTO_T_MIP_TREE_SEP_PROBE` (既定 10)
+    /// ノードに 1 回の試し
+    fn tree_sep_start(&mut self, depth: usize) -> bool {
+        let freq = tunable!("ENOMOTO_T_MIP_NODE_CUT_FREQ", 10usize, usize);
+        let depth_rule = freq > 0 && depth % freq == 0;
+        if !self.tree_sep_budget_ok() {
+            return depth_rule;
+        }
+        if self.nca_dense() {
+            return depth_rule;
+        }
+        // `ENOMOTO_T_MIP_TREE_SEP_HEAVY` = h (> 0): LP の行が最初の取り出したノードの h 倍を超えて重くなったら、毎回分離するのに
+        // 要る効いた割合を `ENOMOTO_T_MIP_TREE_SEP_HEAVY_RATE` (既定 0.4) に上げる。noswot では分離そのものは軽い (経過時間の 3%) が、
+        // 残ったカットでノードの LP が 420 -> 590 行・27 -> 35 反復と重くなり遅くなった (効いた割合 0.19〜0.32)。neos-911970 は
+        // 行が 2 倍になるが割合 0.44〜0.57 で、重くなっても続ける価値がある
+        if self.ts_rows0 == 0 {
+            self.ts_rows0 = self.lp.num_rows().max(1);
+        }
+        let h = tunable!("ENOMOTO_T_MIP_TREE_SEP_HEAVY", 0.0, f64);
+        let rate = if h > 0.0 && self.lp.num_rows() as f64 > h * self.ts_rows0 as f64 {
+            tunable!("ENOMOTO_T_MIP_TREE_SEP_HEAVY_RATE", 0.4, f64)
+        } else {
+            tunable!("ENOMOTO_T_MIP_TREE_SEP_RATE", 0.2, f64)
+        };
+        if depth_rule || self.nca_ema >= rate {
+            return true;
+        }
+        self.nca_stats[2] += 1;
+        self.nca_stats[2] % tunable!("ENOMOTO_T_MIP_TREE_SEP_PROBE", 10u64, u64).max(1) == 0
+    }
+
+    /// [`Self::tree_sep_start`] の時間の予算 (2 ラウンド目以降もこれを見る)
+    fn tree_sep_budget_ok(&self) -> bool {
+        let f = tunable!("ENOMOTO_T_MIP_TREE_SEP_LP_FRAC", 0.25, f64);
+        self.node_cut_secs < tunable!("ENOMOTO_T_MIP_TREE_SEP_TIME_FRAC", 0.1, f64) * self.start.elapsed().as_secs_f64()
+            && (f <= 0.0 || self.node_cut_secs < f * self.node_lp_secs.max(0.05))
+    }
+
     /// 効き目で続けるノードの分離 (`ENOMOTO_MIP_NODE_CUT_ADAPT`): 待ち行列から取り出したノードで、ノードの分離に使った時間が
     /// 経過時間の `ENOMOTO_T_MIP_NODE_CUT_ADAPT_FRAC` 倍に収まり、分離が効いた割合 (分離の後の LP の値の伸びが打ち切り値までの
     /// 差の `ENOMOTO_T_MIP_NODE_CUT_ADAPT_GAIN` 倍以上、または打ち切り) の指数移動平均が `ENOMOTO_T_MIP_NODE_CUT_ADAPT_RATE`
@@ -1880,7 +1937,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.nca_cut_nnz = Some((m0..self.lp.num_rows()).map(|i| self.lp.row(i).len()).sum::<usize>() as f64 / k as f64);
         }
         let avg = (self.p.rows.iter().map(|r| r.len()).sum::<usize>() as f64 / m0.max(1) as f64).max(1.0);
-        self.nca_cut_nnz.is_some_and(|d| d > r * avg)
+        // `ENOMOTO_MIP_TREE_SEP` では上限を列の数の `ENOMOTO_T_MIP_TREE_SEP_DENSITY_COLS` 倍 (既定 0.05) より下げない: 元の行が
+        // 非常に短い問題 (beasleyC3 は 1 行平均 2.8 非零) では、列の 1.7% のカット (29 非零) でも元の行の 10 倍を超えて止まった。
+        // qiu (840 列、カット 110〜220 非零)・rout (556 列、150〜185) は 0.05 倍でも密と判定される
+        let floor = if self.tree_sep { tunable!("ENOMOTO_T_MIP_TREE_SEP_DENSITY_COLS", 0.05, f64) * self.p.n as f64 } else { 0.0 };
+        self.nca_cut_nnz.is_some_and(|d| d > (r * avg).max(floor))
     }
 
     /// ノードの分離の後の解き直しの結果を効き目の統計に入れる (`obj0`: 分離の前の LP の値、`obj`: 解き直した値。
@@ -3599,6 +3660,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let mut fc2_rounds = 0usize;
             let mut fc2_first = f64::NEG_INFINITY;
             let mut fc2_last = f64::NEG_INFINITY;
+            // `ENOMOTO_MIP_TREE_SEP`: このノードでのラウンド数 (加わらなければ打ち止め)、最初のラウンドの前と前のラウンドの前の LP の値
+            let mut ts_rounds = 0usize;
+            let mut ts_first = f64::NEG_INFINITY;
+            let mut ts_last = f64::NEG_INFINITY;
             let action = loop {
                 let it0 = self.lp.total_iterations();
                 let iter_limit = (10 * self.avg_node_iters()).max(20_000);
@@ -4162,7 +4227,40 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         && (fc2_rounds == 0 || node_obj - fc2_first > 1.01 * (fc2_last - fc2_first).max(feastol))
                         && self.node_cut_secs < tunable!("ENOMOTO_T_MIP_FC_SEP2_TIME_FRAC", 0.1, f64) * self.start.elapsed().as_secs_f64()
                 };
-                let nca = env_str!("ENOMOTO_MIP_NODE_CUT_ADAPT").is_some() && !self.params.submip && !self.nca_dense();
+                // `ENOMOTO_MIP_TREE_SEP`: 取り出したノードでは、プールのラウンドの後でも分離し ([`Solver::tree_sep_start`] で始めるか
+                // を決める)、LP の値が前のラウンドまでの伸びの 1.01 倍を超えて伸び、時間の予算に収まる間
+                // `ENOMOTO_T_MIP_TREE_SEP_ROUNDS` (既定 5) ラウンドまで繰り返す。分離しても加わらなければそのノードでは打ち止め
+                let ts_due = self.tree_sep && !hcm_sep && node.depth > 0 && plunge_depth == 0 && ts_rounds < tunable!("ENOMOTO_T_MIP_TREE_SEP_ROUNDS", 5usize, usize) && {
+                    let feastol = 1e-6 * node_obj.abs().max(1.0);
+                    if ts_rounds == 0 {
+                        self.tree_sep_start(node.depth)
+                    } else {
+                        node_obj - ts_first > 1.01 * (ts_last - ts_first).max(feastol) && self.tree_sep_budget_ok() && !self.nca_dense()
+                    }
+                };
+                if ts_due {
+                    if ts_rounds == 0 {
+                        ts_first = node_obj;
+                    }
+                    ts_last = node_obj;
+                    let t_nc = Instant::now();
+                    let r0 = self.lp.num_rows();
+                    let added = self.node_cut_round(&x);
+                    if added {
+                        self.mark_tree_sep_cuts(r0);
+                    }
+                    self.node_cut_secs += t_nc.elapsed().as_secs_f64();
+                    self.node_sep_stats[0] += 1;
+                    self.node_sep_stats[1] += added as u64;
+                    ts_rounds = if added { ts_rounds + 1 } else { usize::MAX };
+                    if added {
+                        self.nca_pending = Some(node_obj);
+                        resolves += 1;
+                        node_cut_resolve = Some(Instant::now());
+                        continue;
+                    }
+                }
+                let nca = !self.tree_sep && env_str!("ENOMOTO_MIP_NODE_CUT_ADAPT").is_some() && !self.params.submip && !self.nca_dense();
                 if nca && !hcm_sep && node.depth > 0 && plunge_depth == 0 && (nca_rounds == 0 || (nca_last_ok && self.nca_lp_budget_ok())) && nca_rounds < tunable!("ENOMOTO_T_MIP_NODE_CUT_ADAPT_ROUNDS", 3usize, usize) && (self.node_cuts_due(node.depth) || self.node_cut_adapt_due()) {
                     nca_rounds += 1;
                     nca_last_ok = false;
@@ -4177,7 +4275,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         node_cut_resolve = Some(Instant::now());
                         continue;
                     }
-                } else if fc2_due || (!(self.fc_node_sep && self.fc_sep2) && !nca && !hcm_sep && resolves == 0 && node.depth > 0 && plunge_depth == 0 && self.node_cuts_due(node.depth)) {
+                } else if fc2_due || (!(self.fc_node_sep && self.fc_sep2) && !self.tree_sep && !nca && !hcm_sep && resolves == 0 && node.depth > 0 && plunge_depth == 0 && self.node_cuts_due(node.depth)) {
                     let t_nc = Instant::now();
                     let added = self.node_cut_round(&x);
                     self.node_cut_secs += t_nc.elapsed().as_secs_f64();
@@ -5486,7 +5584,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // `ENOMOTO_MIP_FC_NODE_SEP2` でも今の基底のまま解く: 取り出したノードごとに分離するとカットの行の出入りが多く、
             // 保存した基底の修復からの解き直しが重い (mc11、4 スレッド・60 秒: 取り出した後の最初の LP が 1 回平均 1400 反復
             // (118 回、うち不一致 36) -> 74 反復 (231 回、うち不一致 131))。`ENOMOTO_MIP_FC_SEP2_REPAIR` で従来の修復
-            let fc2_keep = self.fc_node_sep && self.fc_sep2 && env_str!("ENOMOTO_MIP_FC_SEP2_REPAIR").is_none();
+            let fc2_keep = (self.fc_node_sep && self.fc_sep2 && env_str!("ENOMOTO_MIP_FC_SEP2_REPAIR").is_none())
+                || (self.tree_sep && env_str!("ENOMOTO_MIP_TREE_SEP_REPAIR").is_none());
             if env_str!("ENOMOTO_MIP_RESTORE_KEEP_CURRENT").is_some() || (self.highs_cutmgmt() && !hcm_repair) || fc2_keep {
                 return;
             }
@@ -8145,7 +8244,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             eprintln!("MIP: sibling backtracks {}; basis restores {} (basic count mismatch {}), first LP iterations after a restore {}", self.sibling_backtracks, self.restore_stats.0, self.restore_stats.1, self.restore_stats.2);
             eprintln!("MIP: node diag: nodes {} node LPs {} mean rows {:.1} iters {} ({:.1}/LP) LP secs {:.2} sep rounds {} added {} node cut secs {:.2} final rows {}", self.nodes, self.node_lps, self.node_lp_rows as f64 / self.node_lps.max(1) as f64, self.node_iters, self.node_iters as f64 / self.node_lps.max(1) as f64, self.node_lp_secs, self.node_sep_stats[0], self.node_sep_stats[1], self.node_cut_secs, self.lp.num_rows());
-            if env_str!("ENOMOTO_MIP_NODE_CUT_ADAPT").is_some() {
+            if env_str!("ENOMOTO_MIP_NODE_CUT_ADAPT").is_some() || self.tree_sep {
                 eprintln!("MIP: adaptive node cuts: rounds {} effective {} skipped {} (rate {:.3}), node cut secs {:.2}, outcomes cutoff/<0.02/<0.1/<0.3/>=0.3 {:?}, cut nnz {:?} (rows mean {:.1})", self.nca_stats[0], self.nca_stats[1], self.nca_stats[2], self.nca_ema, self.node_cut_secs, self.nca_hist, self.nca_cut_nnz, self.p.rows.iter().map(|r| r.len()).sum::<usize>() as f64 / self.p.m.max(1) as f64);
             }
             if !self.orbitopes.is_empty() {
