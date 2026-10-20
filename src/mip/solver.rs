@@ -1897,11 +1897,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.fc_stats.1 += a * (g - self.fc_stats.1);
     }
 
-    /// `ENOMOTO_MIP_ROOT_GAP_EXIT`: 根 (写しから解く求解でない) で、根の LP の値 (`cur_lb`、カット前の値で常に正しい下界) が暫定解の打ち切り値 ([`Self::prune_limit`]) に
+    /// 根の LP が打ち切り値に届いたら根で終える (既定で使う。`ENOMOTO_MIP_NO_ROOT_GAP_EXIT` で使わない): 根 (写しから解く求解でない) で、根の LP の値 (`cur_lb`、カット前の値で常に正しい下界) が暫定解の打ち切り値 ([`Self::prune_limit`]) に
     /// 届いたか。届いていれば根のカット・ヒューリスティクスを続けずに最適で終える。ns1116954 (目的関数が全部 0) では FJ が
     /// 14.5 秒に 0 を見つけても、カットのループ・根のヒューリスティクス (内点法の丸め 17 秒)・裏のカットを回して 52 秒で終わっていた
     pub(super) fn root_gap_closed(&self) -> bool {
-        env_str!("ENOMOTO_MIP_ROOT_GAP_EXIT").is_some()
+        env_str!("ENOMOTO_MIP_NO_ROOT_GAP_EXIT").is_none()
             && self.snap.is_none()
             && self.incumbent.is_some()
             && self.cur_lb >= self.prune_limit()

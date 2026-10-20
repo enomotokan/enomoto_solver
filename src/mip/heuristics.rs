@@ -1061,9 +1061,11 @@ pub(super) fn local_search(p: &MipProblem, lo: &[f64], up: &[f64], time_cap: f64
     (best_feas, best_inf)
 }
 
-/// `ENOMOTO_MIP_FJ_FEAS_EXTEND` が立っていて、目的関数が全部 0 (実行可能性問題) か。
+/// 実行可能性問題 (目的関数が全部 0) で FJ を延ばすか (既定で使う。`ENOMOTO_MIP_NO_FJ_FEAS_EXTEND` で使わない)。
+/// `ENOMOTO_MIP_ROOT_GAP_EXIT` と組んで 40 問 + 16 問 (4 スレッド・60 秒、2 組) で ns1116954 が 2 組とも解け、40 問は変わらない。
+/// 手元 16 スレッドでも確かめて既定にした
 pub(super) fn fj_feas_extend(p: &MipProblem) -> bool {
-    env_str!("ENOMOTO_MIP_FJ_FEAS_EXTEND").is_some() && p.cost.iter().all(|&c| c == 0.0)
+    env_str!("ENOMOTO_MIP_NO_FJ_FEAS_EXTEND").is_none() && p.cost.iter().all(|&c| c == 0.0)
 }
 
 /// Feasibility Jump の探索本体 (Solver の状態に依らないので別スレッドでも動かせる)。`lo`/`up` は列の境界、
