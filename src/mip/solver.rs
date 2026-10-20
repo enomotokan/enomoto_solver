@@ -5017,6 +5017,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 continue;
             }
             tried += 1;
+            // `ENOMOTO_MIP_FIND_POLL_SB` (試作): 根の解発見スレッドが動いている間は、強分岐の候補ごとにその解を受け取る。
+            // neos-950242 では解発見スレッドの局所探索が 12.5 秒に 4 (= 根の LP の値) を出すが、主は最初のノードの強分岐
+            // (約 13 秒) の間受け取らず、25.5 秒まで暫定解が 19 のままだった。暫定解でこのノードが刈れるなら強分岐をやめる
+            // (候補の間は LP に触れないので、そのまま返してよい)
+            if self.find_thread.is_some() && env_str!("ENOMOTO_MIP_FIND_POLL_SB").is_some() {
+                self.poll_find_thread();
+                if node_obj >= self.prune_limit() {
+                    return BranchAction::Prune;
+                }
+            }
             // 強分岐
             let saved = &*sb_saved.get_or_insert_with(|| self.lp.save_state());
             let (lo, up) = (self.dom.lo[j], self.dom.up[j]);
