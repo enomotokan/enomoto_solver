@@ -1036,6 +1036,15 @@ impl TriggerEval {
     }
 }
 
+/// `ENOMOTO_MIP_FJ_POOR_BG_RENS` (試作、既定では使わない): 根で暫定解が Feasibility Jump の解だけで、根の LP から遠い
+/// ([`Solver::fj_poor`]、相対ギャップ > `ENOMOTO_T_MIP_FJ_POOR_GAP`) とき、暫定解なし用のダイビング式 RENS を回し
+/// (サブ MIP は根のヒューリスティクスの間の別スレッド、[`Solver::parallel_submips`])、背景のカットの分離のスレッドを 1 本減らす。
+/// `ENOMOTO_MIP_FJ_POOR_NOINC` と違い、Pump・ダイビングなど主スレッドで回す暫定解なし用のヒューリスティクスは回さない
+/// (根の時間を延ばさない)。FJ2 (d1bfefd) の後、hypothyroid-k1 では FJ の -3 が暫定解になり、RENS が -2851 (最適値) を出さなくなった
+pub(super) fn fj_poor_bg_rens() -> bool {
+    env_str!("ENOMOTO_MIP_FJ_POOR_BG_RENS").is_some()
+}
+
 /// ヒューリスティクス役のスレッドの数 (既定で使う。`ENOMOTO_MIP_NO_HEUR_ROLE` で使わない)。スレッド数が
 /// `ENOMOTO_T_MIP_HEUR_ROLE_MIN_THREADS` (既定 4) 以上なら、スレッド数 × `ENOMOTO_T_MIP_HEUR_ROLE_FRAC` (既定 0.25) の切り捨て、
 /// 最低 1。主の分は残す。
@@ -2496,7 +2505,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let job = std::sync::Arc::new(CutJob { stop: std::sync::atomic::AtomicBool::new(false), heavy: mode == "heavy", out: std::sync::Mutex::new(None), latest_x: std::sync::Mutex::new(None), basis: std::sync::Mutex::new(None) });
                 let snap = self.make_snapshot(&Portfolio::new(), &mut None, false);
                 let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());
-                let threads = tunable!("ENOMOTO_T_MIP_BG_CUTS_THREADS", (self.params.threads - 1).max(1), usize);
+                let mut threads = tunable!("ENOMOTO_T_MIP_BG_CUTS_THREADS", (self.params.threads - 1).max(1), usize);
+                // `ENOMOTO_MIP_FJ_POOR_BG_RENS`: 暫定解が質の悪い FJ の解だけなら、背景のカットの分離のスレッドを 1 本減らし、
+                // 空いた分で暫定解なし用のダイビング式 RENS のサブ MIP を別スレッドで解く ([`fj_poor_bg_rens`])
+                if fj_poor_bg_rens() && self.fj_poor() && threads > 1 {
+                    threads -= 1;
+                    if self.params.verbose {
+                        eprintln!("MIP: the incumbent is a poor feasibility jump solution; background cuts use {threads} threads");
+                    }
+                }
                 let params = MipParams { time_limit: remaining, node_limit: u64::MAX, verbose: env_str!("ENOMOTO_MIP_BG_CUTS_LOG").is_some(), threads, ..self.params };
                 let j2 = job.clone();
                 let ri = root_iters;
@@ -6812,7 +6829,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// を止めていた。FJ の解が根の LP に近い問題 (KEEP_NOINC で悪化した C の問題を想定) では今までどおり回さない
     pub(super) fn fj_poor(&self) -> bool {
         let Some((z, _)) = self.incumbent.as_ref() else { return false };
-        if !self.inc_only_fj || self.nodes > 1 || self.params.submip || !self.fj_poor_lb.is_finite() || env_str!("ENOMOTO_MIP_FJ_POOR_NOINC").is_none() {
+        if !self.inc_only_fj || self.nodes > 1 || self.params.submip || !self.fj_poor_lb.is_finite() || (env_str!("ENOMOTO_MIP_FJ_POOR_NOINC").is_none() && !fj_poor_bg_rens()) {
             return false;
         }
         let lb = self.fj_poor_lb;
