@@ -514,6 +514,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     obj_cols: Option<std::rc::Rc<Vec<(usize, f64)>>>,
     /// 目的関数の伝播 [刈ったノード, 締めた境界]、強分岐の子の伝播 [矛盾した子, 子の LP に渡した境界]
     obj_prop_stats: [u64; 2],
+    /// [`Self::root_obj_probe`] の (試した列, 固定した列)
+    root_obj_probe_stats: [u64; 2],
     sb_prop_stats: [u64; 2],
     /// 行にできない衝突 (連続列・一般整数列を含む) を境界リテラルのまま持つプール
     lit_conflicts: super::conflict_pool::LitConflictPool,
@@ -1528,6 +1530,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         debug_x_done: false,
         obj_cols: None,
         obj_prop_stats: [0; 2],
+        root_obj_probe_stats: [0; 2],
         sb_prop_stats: [0; 2],
         lit_conflicts: super::conflict_pool::LitConflictPool::new(p.n, tunable!("ENOMOTO_T_MIP_LIT_CONFLICT_POOL", 5000usize, usize)),
         lit_stats: [0; 3],
@@ -3022,6 +3025,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.root_redcost_fixing();
         if dbg_root && !self.dbg_contains() {
             self.dbg_lost("root redcost fixing", true);
+        }
+        if env_str!("ENOMOTO_MIP_ROOT_OBJ_PROBE").is_some() && self.snap.is_none() && !self.params.submip {
+            self.root_obj_probe();
+            if dbg_root && !self.dbg_contains() {
+                self.dbg_lost("root objective probing", true);
+            }
         }
         if self.snap.is_none() {
             if let Some(r) = self.maybe_restart() {
@@ -6072,6 +6081,83 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
     }
 
+    /// 打ち切り値つきの根のプロービング (試作、`ENOMOTO_MIP_ROOT_OBJ_PROBE` で使う。既定では使わない): 暫定解があるとき、
+    /// 根の LP 解で分数値の 0-1 列 x_j ごとに x_j = 0 と x_j = 1 を試し、行の伝播と目的関数の伝播 (`目的値 <= 打ち切り値`)
+    /// で矛盾する側があれば、逆の値に大域的に固定する (打ち切り値より良い解はその側にない)。固定はすぐ定義域に入れるので、
+    /// 後の列の試しにも効く。HiGHS は根の分離の 1 回目 (`HighsImplications::separateImpliedBounds`) で、まだ試していない
+    /// 分数値の 0-1 列を全てプロービングする (このときの定義域の伝播は打ち切り値つきの目的関数の伝播を含む)。
+    /// hypothyroid-k1 では HiGHS は暫定解 -2692 (打ち切り -2693) で 2153 列を試して 968 列を固定し、LP 値が
+    /// -2902.85 -> -2851.08 になって根で解き終わる。こちらは前処理のプロービング (打ち切り値なし) しかなく、木の根の強分枝に
+    /// 時間を使い切っていた。固定が出れば根の再スタート ([`Self::maybe_restart`]) が固定を入れて前処理からやり直す。
+    /// 時間は時間上限の `ENOMOTO_T_MIP_ROOT_OBJ_PROBE_TIME_FRAC` 倍 (既定 0.2) まで。最初の
+    /// `ENOMOTO_T_MIP_ROOT_OBJ_PROBE_GIVEUP` 列 (既定 200) で 1 つも固定できなければやめる。
+    fn root_obj_probe(&mut self) {
+        let p = self.p;
+        if !self.has_cutoff_value() || !self.prune_limit().is_finite() || self.dom.infeasible || self.time_up() {
+            return;
+        }
+        let t0 = Instant::now();
+        let tmax = tunable!("ENOMOTO_T_MIP_ROOT_OBJ_PROBE_TIME_FRAC", 0.2, f64) * if self.params.time_limit.is_finite() { self.params.time_limit } else { 300.0 };
+        let giveup = tunable!("ENOMOTO_T_MIP_ROOT_OBJ_PROBE_GIVEUP", 200usize, usize);
+        let x = self.lp.col_values();
+        let cands: Vec<usize> = (0..p.n)
+            .filter(|&j| p.is_int[j] && self.dom.lo[j] == 0.0 && self.dom.up[j] == 1.0 && x[j] > FEASTOL && x[j] < 1.0 - FEASTOL)
+            .collect();
+        let (mut probed, mut fixed, mut both) = (0usize, 0usize, false);
+        for &j in &cands {
+            if self.time_up() || t0.elapsed().as_secs_f64() > tmax || (fixed == 0 && probed >= giveup) {
+                break;
+            }
+            if self.dom.lo[j] == self.dom.up[j] {
+                continue;
+            }
+            probed += 1;
+            let mut bad = [false; 2];
+            for (k, v) in [0.0f64, 1.0].into_iter().enumerate() {
+                let pos = self.dom.stack_len();
+                if v == 0.0 {
+                    self.dom.tighten_upper(p, j, 0.0);
+                } else {
+                    self.dom.tighten_lower(p, j, 1.0);
+                }
+                bad[k] = !(!self.dom.infeasible && self.dom.propagate(p) && self.propagate_objective_with(false));
+                self.dom.backtrack_to(p, pos);
+            }
+            match bad {
+                [true, true] => {
+                    // どちらの値でも打ち切り値より良い解はない: 暫定解が最適。ここでは固定せず、根の LP に任せる
+                    both = true;
+                    break;
+                }
+                [true, false] | [false, true] => {
+                    let v = if bad[0] { 1.0 } else { 0.0 };
+                    self.dom.tighten_global(p, j, v == 0.0, v);
+                    if v == 0.0 {
+                        self.dom.tighten_upper(p, j, 0.0);
+                    } else {
+                        self.dom.tighten_lower(p, j, 1.0);
+                    }
+                    fixed += 1;
+                    if !self.dom.propagate(p) {
+                        both = true;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.root_obj_probe_stats = [probed as u64, fixed as u64];
+        if self.params.verbose {
+            eprintln!(
+                "MIP: root objective probing: {} fractional binaries, {probed} probed, {fixed} fixed{} (cutoff {:.10e}, {:.2}s)",
+                cands.len(),
+                if both { ", both sides infeasible" } else { "" },
+                self.prune_limit(),
+                t0.elapsed().as_secs_f64()
+            );
+        }
+    }
+
     /// 衝突 (同時には成り立たない境界の組) が 0-1 列だけなら、`sum_{x_j >= 1} x_j - sum_{x_j <= 0} x_j <= |{x_j >= 1}| - 1`
     /// の行にしてプールに入れる (入れたら真)。
     /// 目的関数の伝播 (HiGHS の objective propagation): `sum c_j x_j <= U - 定数項` (`U` は打ち切り値) を 1 本の行として
@@ -6080,8 +6166,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
     pub(super) fn propagate_objective(&mut self) -> bool {
         // 既定では無効 (`ENOMOTO_MIP_OBJ_PROP` で有効): neos-911970 の下界・暫定解は良くなるが、40 問では 2 回の比較とも
         // わずかに悪化した (sgeomean +0.2〜0.3)
-        if env_str!("ENOMOTO_MIP_OBJ_PROP").is_none() || self.dom.infeasible {
+        if env_str!("ENOMOTO_MIP_OBJ_PROP").is_none() {
             return !self.dom.infeasible;
+        }
+        self.propagate_objective_with(true)
+    }
+
+    /// [`Self::propagate_objective`] の本体 (環境変数を見ない)。`conflicts` が偽なら矛盾のときに衝突を足さない
+    /// (根のプロービング [`Self::root_obj_probe`] は列ごとに矛盾しうるので足さない)。
+    fn propagate_objective_with(&mut self, conflicts: bool) -> bool {
+        if self.dom.infeasible {
+            return false;
         }
         let p = self.p;
         let u = self.prune_limit() - p.offset;
@@ -6117,7 +6212,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             if ninf == 0 && minact > u + 1e-6 * (1.0 + u.abs()) {
                 self.obj_prop_stats[0] += 1;
-                if env_str!("ENOMOTO_MIP_NO_EXTRA_CONFLICTS").is_none() && !self.params.submip {
+                if conflicts && env_str!("ENOMOTO_MIP_NO_EXTRA_CONFLICTS").is_none() && !self.params.submip {
                     self.add_conflicts_multi(super::domain::ConflictStart::Proof(&obj, u));
                 }
                 return false;
@@ -6155,7 +6250,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             self.dom.set_external(false);
             if self.dom.infeasible {
-                if self.dom.conflict.is_some() && env_str!("ENOMOTO_MIP_NO_EXTRA_CONFLICTS").is_none() {
+                if conflicts && self.dom.conflict.is_some() && env_str!("ENOMOTO_MIP_NO_EXTRA_CONFLICTS").is_none() {
                     self.add_conflict();
                 }
                 return false;
@@ -6164,7 +6259,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 break;
             }
             if !self.dom.propagate(p) {
-                self.add_conflict();
+                if conflicts {
+                    self.add_conflict();
+                }
                 return false;
             }
         }
