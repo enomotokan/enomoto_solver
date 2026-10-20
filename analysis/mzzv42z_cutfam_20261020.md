@@ -6,6 +6,7 @@ HiGHS 1.15.1 は `scripts/highs_instrument.patch` に `analysis/mzzv42z_cutfam/h
 HiGHS の根だけの計測は `mip_max_nodes=1`・`mip_heuristic_effort=0`・`threads=4`。
 台本とログは `analysis/mzzv42z_cutfam/` (`hroot.sh`: HiGHS の根、`erun.sh`: ENOMOTO 1 回、`pair.sh`: 既定と試作を交互に、
 `affected.sh`: 試作で implied bound の候補が変わる問題を探す、`compare.py`: 2 つの結果 JSON を並べる、`logs/`)。
+容量のため `logs/e_*.log` からは `SEP rows|zerohalf|clique|path|removed`・`FC stats`・ノードの進み具合の行を除いた (2 章の表はそれらを除く前に数えた)。
 
 ## 結論
 
