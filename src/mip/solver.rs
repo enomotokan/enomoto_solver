@@ -4584,8 +4584,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if tree_diag() {
                 eprintln!("MIP_TREE_DIAG: end of tree search: incumbent {z:.10e} shared best {sb:.10e} prune limit {lim:.10e} workers/pool bound {wlb:.10e} unresolved {}", self.unresolved);
             }
+            // 共有の最良値を公表した解が主に届いていない (受信箱で拒まれた、など)。木はその値から作った打ち切り値で刈っているので、
+            // 主の暫定解を最適とは言えない (以前は警告だけ出して最適と報告していた。analysis/h80x6320d_warning_20261021.md)
             if sb < z - 1e-9 * z.abs().max(1.0) {
-                eprintln!("MIP: WARNING: the shared best value {sb:.10e} is better than the main thread's incumbent {z:.10e} at the end of the tree search");
+                eprintln!("MIP: WARNING: the shared best value {sb:.10e} is better than the main thread's incumbent {z:.10e} at the end of the tree search; not reporting optimality");
+                if !self.unresolved && env_str!("ENOMOTO_MIP_TREE_NO_END_CHECK").is_none() {
+                    return self.finish(MipStatus::NotSolved, wlb.min(lim));
+                }
             }
             if self.dbg_on {
                 let dz = DEBUG_SOL.with(|d| d.borrow().as_ref().map(|x| self.p.objective(x)));
@@ -8751,16 +8756,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         pool.stop.store(true, Ordering::Relaxed);
         let mut lb = f64::INFINITY;
+        // 従が終わったときの解 (従の問題は主の問題の写しなので、主の解としてそのまま使える)
+        let mut ended: Vec<(f64, Option<Vec<f64>>)> = Vec::new();
         for h in std::mem::take(&mut self.workers) {
             match h.join() {
                 Ok(r) => {
                     if tree_diag() {
                         eprintln!("MIP_TREE_DIAG: worker ended: status {:?} objective {:?} bound {:.10e} nodes {}", r.status, r.objective, r.best_bound, r.nodes);
                     }
-                    if let (Some(zw), Some((z, _))) = (r.objective, &self.incumbent) {
-                        if zw < *z - 1e-6 * z.abs().max(1.0) {
-                            eprintln!("MIP: WARNING: a tree thread ended with a better solution {zw:.10e} than the main thread's {z:.10e}");
-                        }
+                    if let Some(zw) = r.objective {
+                        ended.push((zw, r.x));
                     }
                     self.worker_totals.0 += r.nodes;
                     self.worker_totals.1 += r.lp_iterations;
@@ -8777,6 +8782,30 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         if pool.unresolved.load(Ordering::Relaxed) {
             self.unresolved = true;
+        }
+        // 従が見つけた解は受信箱 (`take_inbox`) で主に届く。主が共有の待ち行列を待っている間 (`pool_acquire`) は受信箱を見ないので、
+        // 探索の終わり際に従 (ヒューリスティクス役の従の ALNS など) が見つけた解はここまで受信箱に残っている。従の解と主の
+        // 暫定解を比べるのは受信箱を受け取ってから (以前はその前に比べていて、正しく届く解に「従が主より良い解で終わった」の
+        // 警告を出していた: h80x6320d、analysis/h80x6320d_warning_20261021.md)。受け取っても従の方が良ければ (受信箱で解が
+        // 拒まれた・失われた)、従が返した解そのものを暫定解に試し、それでも悪ければ警告する
+        if self.take_inbox() && tree_diag() {
+            eprintln!("MIP_TREE_DIAG: a better solution was taken from the inbox after joining the workers (incumbent {:?})", self.incumbent.as_ref().map(|(z, _)| *z));
+        }
+        for (zw, x) in ended {
+            let better = |inc: &Option<(f64, Vec<f64>)>| inc.as_ref().is_none_or(|(z, _)| zw < *z - 1e-6 * z.abs().max(1.0));
+            if !better(&self.incumbent) {
+                continue;
+            }
+            if let Some(x) = x {
+                self.heur_label = "other thread (tree, at the end)";
+                let ok = self.try_incumbent(x);
+                self.heur_label = "";
+                if ok && !better(&self.incumbent) {
+                    continue;
+                }
+            }
+            let z = self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z);
+            eprintln!("MIP: WARNING: a tree thread ended with a better solution {zw:.10e} than the main thread's {z:.10e}");
         }
         let g = pool.inner.lock().unwrap();
         lb.min(g.nodes.min_lower_bound())
