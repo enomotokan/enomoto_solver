@@ -46,12 +46,22 @@ pub(crate) fn implbd_genint() -> bool {
 /// (neos-960392 (全部 0-1) では根の RENS が解を出すかが根のカットの経路で決まり、gfr では 4 回とも -2 だった)。
 /// `=2` なら一般整数がある問題では根の面の頂点の分離も止める (`ENOMOTO_MIP_FACE_SEP=off` と同じ。mzzv42z・roll3000 は
 /// G+R に F がないと根が崩れる)
+/// 2026-10-21 から既定で `=2` 相当 (`ENOMOTO_T_MIP_GR_AUTO_MIN_FRAC` 0.01 と合わせて、計測 QP・QC の 4 組で解けた数 +7、
+/// SGM は 8 つ中 6 つ良い)。`ENOMOTO_MIP_NO_GR_AUTO` で使わない
 pub(crate) fn gr_auto() -> bool {
-    env_str!("ENOMOTO_MIP_GR_AUTO").is_some()
+    env_str!("ENOMOTO_MIP_GR_AUTO").is_some() || env_str!("ENOMOTO_MIP_NO_GR_AUTO").is_none()
+}
+
+/// [`gr_auto`] で根の面の頂点の分離も止めるか (`ENOMOTO_MIP_GR_AUTO=2`、既定。`ENOMOTO_MIP_GR_AUTO` に 2 以外を与えると止めない)
+pub(crate) fn gr_auto_face_off() -> bool {
+    match env_str!("ENOMOTO_MIP_GR_AUTO") {
+        Some(v) => v == "2",
+        None => env_str!("ENOMOTO_MIP_NO_GR_AUTO").is_none(),
+    }
 }
 
 /// この問題で G (一般整数の含意の implied bound カット) を働かせるか ([`implbd_genint`] か、[`gr_auto`] で一般整数があるとき)
-/// `ENOMOTO_T_MIP_GR_AUTO_MIN_FRAC` (試作、既定 0): 一般整数の列が固定されていない列のこの割合に満たない問題では働かせない。
+/// `ENOMOTO_T_MIP_GR_AUTO_MIN_FRAC` (既定 0.01): 一般整数の列が固定されていない列のこの割合に満たない問題では働かせない。
 /// nursesched-sprint02 (一般整数 20 / 10250 列) では根の頂点が変わって根のヒューリスティクスが外れ (71、既定は 59)、再スタートで
 /// 固まる列が 7000 本前後 -> 1382 本になり時間切れになる回がある。mzzv42z は 235 / 11717 列 (2.0%)
 pub(crate) fn implbd_genint_for(is_int: &[bool], lo: &[f64], up: &[f64]) -> bool {
@@ -63,7 +73,7 @@ pub(crate) fn implbd_genint_for(is_int: &[bool], lo: &[f64], up: &[f64]) -> bool
     }
     let ngen = (0..is_int.len()).filter(|&k| is_int[k] && lo[k] < up[k] && !(lo[k] >= 0.0 && up[k] <= 1.0)).count();
     let nfree = (0..is_int.len()).filter(|&k| lo[k] < up[k]).count();
-    ngen > 0 && ngen as f64 >= tunable!("ENOMOTO_T_MIP_GR_AUTO_MIN_FRAC", 0.0, f64) * nfree as f64
+    ngen > 0 && ngen as f64 >= tunable!("ENOMOTO_T_MIP_GR_AUTO_MIN_FRAC", 0.01, f64) * nfree as f64
 }
 
 pub(crate) fn cap_clock() -> f64 {

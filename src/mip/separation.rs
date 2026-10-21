@@ -2030,17 +2030,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if in_bg && env_str!("ENOMOTO_MIP_FACE_SEP_BG") == Some("off") {
             return (self.separate(x, light), Vec::new());
         }
-        if env_str!("ENOMOTO_MIP_GR_AUTO") == Some("2") && super::implbd_genint_for(&self.p.is_int, &self.p.col_lo, &self.p.col_up) {
+        if super::gr_auto_face_off() && super::implbd_genint_for(&self.p.is_int, &self.p.col_lo, &self.p.col_up) {
             return (self.separate(x, light), Vec::new());
         }
-        // `ENOMOTO_MIP_FACE_SEP_FC=off` (試作): 固定費用ネットワーク型 (根のカット選択を緩める問題) では面の頂点の分離を止める。
+        // `ENOMOTO_MIP_FACE_SEP_FC=off` (2026-10-21 から既定。`=on` で止めない): 固定費用ネットワーク型 (根のカット選択を緩める問題) では面の頂点の分離を止める。
         // mc11: 止めると根の手前のカットが 2.6 -> 1.1〜1.5 秒で 11069 (止めなければ 11108) に着き、背景のカットが 23 -> 50〜56
         // ラウンド回って 11455 -> 11672〜11674 (最適 11689) になり 60 秒で解ける (背景のカットだけ止めても 11549〜11604 で解けない)
-        // `ENOMOTO_T_MIP_FACE_SEP_FC_MAXCOLS` (試作、既定は上限なし): 列 (前処理の後) がこの数を超える問題では止めない。
+        // `ENOMOTO_T_MIP_FACE_SEP_FC_MAXCOLS` (既定 5000): 列 (前処理の後) がこの数を超える問題では止めない。
         // h80x6320d (12640 列) では F で根の頂点が変わると根の RINS が 9 回中 5 回 6644.8 しか出さず (既定は 6 回とも
         // 6388〜6418)、最初の再スタートで固まる列が 4473〜5126 -> 996 本になって 2 回目の再スタートが要り 54〜60 秒かかる
         // (analysis/qf_narrow_20261021.md)。mc11 は 3034 列
-        if self.fc_network && env_str!("ENOMOTO_MIP_FACE_SEP_FC") == Some("off") && self.p.n <= tunable!("ENOMOTO_T_MIP_FACE_SEP_FC_MAXCOLS", usize::MAX, usize) {
+        if self.fc_network && env_str!("ENOMOTO_MIP_FACE_SEP_FC") != Some("on") && self.p.n <= tunable!("ENOMOTO_T_MIP_FACE_SEP_FC_MAXCOLS", 5000usize, usize) {
             return (self.separate(x, light), Vec::new());
         }
         let mode = match env_str!("ENOMOTO_MIP_FACE_SEP") {
