@@ -9698,6 +9698,14 @@ neos-950242 の 2 回目の調査 (`analysis/neos950242_r2_20261020.md`)。
 - 16 問: IQa newdef 11・32.67 / m5k 11・36.17 / m5keq2 10・33.49、IQb newdef 11・36.52 / m5k 10・38.42 / m5keq2 10・39.64。不一致 0、"MIP: WARNING" 0。
 - m5k は 40 問の SGM が 2 組とも良いが、16 問の SGM が 2 組とも悪く IQb で beasleyC3 を落とすので不採用。physiciansched6-2 は IQa の m5k で根の下界 49110・暫定解 50626 だったが IQb の m5k では 51029 で再現しない。m5keq2 も 16 問で 2 組とも解けた数が減る。
 
+## 2026-10-21: physiciansched6-2 の 5 回目の試作 (代入 + カットの予算 + 代入後の FJ + tableau 行の HiGHS の規則) は保留
+
+- analysis/physiciansched_r5_20261021.md の試作 e2all (`ENOMOTO_MIP_PROBE_EQUIV2=1 ENOMOTO_MIP_EQUIV2_CUTS=1 ENOMOTO_MIP_EQUIV2_FJ=1 ENOMOTO_MIP_EQUIV2_TAB=1`、代入が働くのは 55 問中 physiciansched6-2 だけ)。442434b で 40 + 16 問を 2 組。
+- 40 問 (解けた・SGM): R5a newdef 26・20.05 / e2all 26・19.94、R5b newdef 25・20.39 / e2all 25・20.18。
+- 16 問: R5a newdef 11・31.47 / e2all 11・33.22、R5b newdef 12・33.51 / e2all 11・35.64 (uccase12 49.3 秒 → 時間切れ)。不一致 0、"MIP: WARNING" 0。
+- physiciansched6-2: 暫定解 51029 → 50626・50124、最初の暫定解 9.3〜9.5 → 7.4〜7.5 秒、時間切れの下界 48587 → 49065・49291 (最適 49324)。まだ 60 秒では解けない。
+- 16 問の SGM が 2 組とも悪く R5b で解けた数が 1 減る (他の問題は同じ形を解くので揺れか、2 巡目のプロービング 0.1〜0.5 秒の分) ので基準を満たさず保留。physiciansched6-2 が 60 秒で解けるところまで進めてから測り直す。
+
 ## 改名一覧 (整理時)
 
 本メモ中は旧名で書かれている。
