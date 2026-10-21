@@ -340,6 +340,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // `ENOMOTO_T_MIP_CUT_ADAPT_ROUNDS_FRAC` 以上なら上限を 25 ラウンド延ばす (`ENOMOTO_T_MIP_CUT_ADAPT_ROUNDS_CAP` まで)
         let adapt_rounds = env_str!("ENOMOTO_MIP_CUT_ADAPT_ROUNDS").is_some() && !self.params.submip;
         let mut obj_hist: Vec<f64> = vec![prev_obj];
+        // カットを加える前の根の LP の値 (`ENOMOTO_MIP_CUT_STRONG_AUTO` の判定用)
+        let cut_lp0 = prev_obj;
         // `ENOMOTO_T_MIP_CUT_PROG_WIN` = W (> 0): 直近 W ラウンドの目的値の伸びが、ループ全体の伸びの
         // `ENOMOTO_T_MIP_CUT_PROG_EPS` 倍未満なら止める (進み具合による停滞判定。伸びが続く間はラウンド数の上限まで回す)
         let prog_win = if self.params.submip { 0 } else { tunable!("ENOMOTO_T_MIP_CUT_PROG_WIN", 0usize, usize) };
@@ -356,12 +358,49 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     && max_rounds < tunable!("ENOMOTO_T_MIP_CUT_ADAPT_ROUNDS_CAP", 100usize, usize)
                     && k > 5
                     && obj_hist[k - 1] - obj_hist[k - 6] >= tunable!("ENOMOTO_T_MIP_CUT_ADAPT_ROUNDS_FRAC", 0.05, f64) * (obj_hist[k - 1] - obj_hist[0]).max(1e-9);
-                if !extend {
-                    break;
+                // `ENOMOTO_MIP_CUT_PHASE2_AT_CAP`: 第 1 段階がラウンドの上限に当たって止まるときは (停滞していなくても)、
+                // 第 2 段階 (HiGHS のスコア) へ進む (`ENOMOTO_MIP_CUT_PHASE2` がなくても。停滞で止まるときは既定のまま止める)。
+                // timtab1 は既定の選択で 25 ラウンド目まで毎回 1-3% 伸び、停滞の判定に届かないので、`ENOMOTO_MIP_CUT_PHASE2`・
+                // `ENOMOTO_MIP_HIGHS_CUTMGMT` でも第 2 段階に入らない (根の下界 495790、第 2 段階に入ると 598k-602k、HiGHS 569k-610k)
+                let to_phase2 = !extend && !phase2 && !self.params.submip && env_str!("ENOMOTO_MIP_CUT_PHASE2_AT_CAP").is_some();
+                // `ENOMOTO_MIP_CUT_STRONG_AUTO` (試作): 第 1 段階がラウンドの上限に当たったとき、カットが根の LP の値を大きく
+                // (`ENOMOTO_T_MIP_CUT_STRONG_FRAC` (既定 0.3) × max(|LP|, |今の値|) 以上) 上げていて、直近 5 ラウンドもまだ全体の伸びの
+                // `ENOMOTO_T_MIP_CUT_STRONG_RECENT` (既定 0.01) 以上伸びているなら、第 2 段階へ進み (`CUT_PHASE2_AT_CAP` と同じ)、
+                // 以後 HiGHS 流のカット管理 (`ENOMOTO_MIP_HIGHS_CUTMGMT`) を有効にする (値が `cap` なら第 2 段階だけ)。
+                // timtab1 は 163277 -> 495790 (25 ラウンド目まで毎回伸びる)。40 問で上限に当たるほかの問題の伸びは 1 割未満
+                let strong = !extend && !phase2 && !self.params.submip && k > 5 && env_str!("ENOMOTO_MIP_CUT_STRONG_AUTO").is_some() && {
+                    // 大きさは元の問題の目的値 (前処理の定数項を足した値) で測る
+                    let (z0, z1) = (cut_lp0 + p.offset, obj_hist[k - 1] + p.offset);
+                    let gain = z1 - z0;
+                    z0.is_finite()
+                        && gain >= tunable!("ENOMOTO_T_MIP_CUT_STRONG_FRAC", 0.3, f64) * z0.abs().max(z1.abs()).max(1.0)
+                        && obj_hist[k - 1] - obj_hist[k - 6] >= tunable!("ENOMOTO_T_MIP_CUT_STRONG_RECENT", 0.01, f64) * gain
+                };
+                if strong {
+                    if env_str!("ENOMOTO_MIP_CUT_STRONG_AUTO").is_none_or(|v| v != "cap") {
+                        self.hcm_auto = true;
+                    }
+                    if self.params.verbose {
+                        eprintln!("MIP: strong cuts at the round limit: LP {:.6e} -> {:.6e}, HiGHS cut management {}", cut_lp0 + p.offset, obj_hist[k - 1] + p.offset, self.hcm_auto);
+                    }
                 }
-                max_rounds += 25;
-                if self.params.verbose {
-                    eprintln!("MIP: cut loop extended to {max_rounds} rounds");
+                let to_phase2 = to_phase2 || strong;
+                if to_phase2 {
+                    phase2 = true;
+                    stall = 0;
+                    max_rounds = round_ctr + tunable!("ENOMOTO_T_MIP_CUT_PHASE2_ROUNDS", 60usize, usize);
+                    let t1 = super::cap_clock() - t_loop0;
+                    phase2_deadline = t1 + (tunable!("ENOMOTO_T_MIP_CUT_PHASE2_TIME_MULT", 3.0, f64) * t1).max(0.2);
+                    if self.params.verbose {
+                        eprintln!("MIP: cut loop phase 2 (HiGHS cut score) at the round limit {round_ctr} ({:.2}s)", self.start.elapsed().as_secs_f64());
+                    }
+                } else if !extend {
+                    break;
+                } else {
+                    max_rounds += 25;
+                    if self.params.verbose {
+                        eprintln!("MIP: cut loop extended to {max_rounds} rounds");
+                    }
                 }
             }
             let round = round_ctr;
