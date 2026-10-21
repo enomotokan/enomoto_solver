@@ -600,7 +600,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             let saved_rows = self.lp.num_rows();
             let t_add0 = std::time::Instant::now();
+            let dse_check = env_str!("ENOMOTO_MIP_DEBUG_DSE_CHECK").is_some() && !self.params.submip;
+            if dse_check {
+                self.lp.debug_dse_check(&format!("round {round} before add_rows"));
+            }
             self.add_cut_rows(&rows);
+            if dse_check {
+                self.lp.debug_dse_check(&format!("round {round} after add_rows ({} rows)", rows.len()));
+            }
             let add_secs = t_add0.elapsed().as_secs_f64();
             let t_lp0 = std::time::Instant::now();
             let it0 = self.lp.total_iterations();
@@ -820,7 +827,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let rows_before = self.lp.num_rows();
             if root_age > 0 {
                 self.age_cuts();
-                self.remove_cuts_older_than(root_age);
+                let removed = self.remove_cuts_older_than(root_age);
+                if env_str!("ENOMOTO_MIP_DEBUG_DSE_CHECK").is_some() && !self.params.submip && removed > 0 {
+                    self.lp.debug_dse_check(&format!("round {round} after removing {removed} old cuts"));
+                }
             } else if (round + 1) % tunable!("ENOMOTO_T_MIP_CUT_REMOVE_EVERY", 1usize, usize).max(1) == 0 {
                 self.remove_inactive_cuts();
             }

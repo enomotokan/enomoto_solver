@@ -76,6 +76,8 @@ pub trait MipLp: Clone + Send {
     }
     /// 診断用: 今の LP を新しい LP として同じ基底から解き直す ([`TwoStageLp::resolve_fresh_debug`])。対応しない実装は何もしない。
     fn resolve_fresh_debug(&self, _basis: Option<&[usize]>, _weights: Option<&[f64]>) {}
+    /// 診断用: 引き継ぐ DSE 重みと厳密な重みを比べて表示する ([`TwoStageLp::debug_dse_check`])。対応しない実装は何もしない。
+    fn debug_dse_check(&self, _tag: &str) {}
     /// 今の基底の DSE 重み (基底変数の番号との組、[`TwoStageLp::dse_snapshot`])。
     fn dse_snapshot(&self) -> Option<Vec<(u32, f32)>>;
     /// DSE 重みを今の基底に当てはめる ([`TwoStageLp::set_dse_vars`])。
@@ -161,6 +163,9 @@ forward_impl!(
     },
     fn resolve_fresh_debug(&self, basis: Option<&[usize]>, weights: Option<&[f64]>) {
         TwoStageLp::resolve_fresh_debug(self, basis, weights)
+    },
+    fn debug_dse_check(&self, tag: &str) {
+        TwoStageLp::debug_dse_check(self, tag)
     },
     fn intercept_bounds(&self) -> Option<(Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>)> {
         TwoStageLp::intercept_bounds(self)

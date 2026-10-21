@@ -400,6 +400,10 @@ impl TwoStageLp {
         });
         let n = self.n;
         let cache = self.dse_cache.take();
+        if env_str!("ENOMOTO_MIP_DEBUG_DSE_CHECK").is_some() {
+            let nonbasic_removed = (0..m).filter(|&i| remove[i] && self.basis.as_ref().is_some_and(|b| !b.contains(&(n + i)))).count();
+            eprintln!("DSE_CHECK delete_rows: removing {} rows, {} of them with a nonbasic slack", remove.iter().filter(|&&r| r).count(), nonbasic_removed);
+        }
         if let Some(b) = self.basis.take() {
             let same = matches!(cache.as_deref(), Some((cb, w)) if *cb == b && w.len() == b.len());
             let mut nb: Vec<usize> = Vec::with_capacity(k);
@@ -1093,6 +1097,9 @@ impl TwoStageLp {
                                 self.dse_cache = Some(Arc::new((b.clone(), w)));
                             }
                             self.basis = Some(b);
+                            if env_str!("ENOMOTO_MIP_DEBUG_DSE_CHECK").is_some() {
+                                self.debug_dse_check(&format!("after solve ({} iters, polish {})", sid::ext_iterations() - it0, sid::ext_polish_iterations()));
+                            }
                         }
                     }
                     LpStatus::Optimal
@@ -1207,6 +1214,28 @@ impl TwoStageLp {
         }
         let lu = super::basis_kernel::factorize_basis(&self.std, &pos, None)?;
         Some(super::DseState::from_basis(m, &lu).w)
+    }
+
+    /// 診断用 (`ENOMOTO_MIP_DEBUG_DSE_CHECK`): 今の基底について、次の求解に渡す DSE 重みと厳密な重みを比べて表示する
+    /// (`tag` は場面)。重みがなければその旨。比が 10 倍以上・1/10 以下の行の数と最大・最小の比、比が最大の 3 行を出す。
+    pub fn debug_dse_check(&self, tag: &str) {
+        let Some(b) = &self.basis else { return };
+        let m = self.rows.len();
+        let Some(w) = self.dse_weights() else {
+            eprintln!("DSE_CHECK {tag}: rows {m}, no weights to carry");
+            return;
+        };
+        let Some(ex) = self.exact_dse_weights() else {
+            eprintln!("DSE_CHECK {tag}: rows {m}, basis singular");
+            return;
+        };
+        let mut ratios: Vec<(f64, usize)> = (0..m).filter(|&i| !w[i].is_nan()).map(|i| (w[i] / ex[i], i)).collect();
+        ratios.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        let k = ratios.len();
+        let (over, under) = (ratios.iter().filter(|r| r.0 >= 10.0).count(), ratios.iter().filter(|r| r.0 <= 0.1).count());
+        let top: Vec<String> = ratios.iter().rev().take(3).map(|&(r, i)| format!("pos {i} var {} w {:.2e} exact {:.2e} ratio {:.1e}", b[i], w[i], ex[i], r)).collect();
+        let bot: Vec<String> = ratios.iter().take(2).map(|&(r, i)| format!("pos {i} var {} w {:.2e} exact {:.2e} ratio {:.1e}", b[i], w[i], ex[i], r)).collect();
+        eprintln!("DSE_CHECK {tag}: rows {m} (nan {}), ratio >=10: {over}, <=0.1: {under}, max {:.1e}, min {:.1e} | {} | {}", m - k, ratios.last().map_or(0.0, |r| r.0), ratios.first().map_or(0.0, |r| r.0), top.join("; "), bot.join("; "));
     }
 
     /// 次の求解に渡す DSE 重み (基底位置順。今の基底のものがなければ `None`)。

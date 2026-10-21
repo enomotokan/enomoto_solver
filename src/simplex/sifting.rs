@@ -369,7 +369,7 @@ fn solve_warm(sub: &StdForm, basis: Vec<usize>, x0: &[f64], _opts: &crate::types
     t.recompute_basics(&lu);
     let mut stall = super::PrimalStallState::new();
     let debug = env_str!("ENOMOTO_DEBUG_SIFTING").is_some();
-    let Some(st) = super::run_phase2_incremental(sub, &mut t, &mut lu, &mut stall) else {
+    let Some(st) = super::run_phase2_incremental(sub, &mut t, &mut lu, &mut stall, None) else {
         if debug {
             eprintln!("SIFTING: warm primal: singular basis");
         }

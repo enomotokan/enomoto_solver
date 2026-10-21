@@ -4807,16 +4807,20 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                     diag_max_pick_w.sqrt()
                 );
             }
-            if WANT_LU.with(|w| w.get()) {
+            // 最後の DSE 重みは cleanup・polish のピボットの分も更新してから保存する ([`finish`] の `dse`)
+            let want_dse = WANT_LU.with(|w| w.get());
+            let res = if fast_reopt && warm_started && active_cost.iter().zip(&std.c).all(|(a, c)| a == c) {
+                match fast_finish(std, &basis_pos, &nb_status, &cache_orig, n_orig, lu, &d) {
+                    Ok(r) => Some(r),
+                    Err(l) => finish(std, &mut basis, &mut basis_pos, &mut nb_status, &delta, &cache_orig, n_orig, l, want_dse.then_some(&mut dse)),
+                }
+            } else {
+                finish(std, &mut basis, &mut basis_pos, &mut nb_status, &delta, &cache_orig, n_orig, lu, want_dse.then_some(&mut dse))
+            };
+            if want_dse {
                 LAST_DSE.with(|l| *l.borrow_mut() = Some(dse.w.clone()));
             }
-            if fast_reopt && warm_started && active_cost.iter().zip(&std.c).all(|(a, c)| a == c) {
-                match fast_finish(std, &basis_pos, &nb_status, &cache_orig, n_orig, lu, &d) {
-                    Ok(r) => return Some(r),
-                    Err(l) => return finish(std, &mut basis, &mut basis_pos, &mut nb_status, &delta, &cache_orig, n_orig, l),
-                }
-            }
-            return finish(std, &mut basis, &mut basis_pos, &mut nb_status, &delta, &cache_orig, n_orig, lu);
+            return res;
         };
         // 作業 #5 M1: 選んだ行の逸脱が、その行の主値の丸め誤差の水準 `C eps sqrt(w_r) max(‖b‖∞, 1)` 以下なら
         // 雑音として以後実行可能扱いにする(`Eligible = ∅` の `noise_feasible` と同じ処理)。基底が数値的に従属に
@@ -6570,8 +6574,15 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
 /// 引数: `basis`/`basis_pos`/`nb_status` は主ループ終了時の基底状態(更新される)、
 /// `delta` は各列の `M` 追跡側、`cache` は元問題の `M`-アフィン境界
 /// (`ColCache::build`)、`lu` は現基底の LU 分解(再分解せずに受け取る)。
-fn finish(std: &StdForm, basis: &mut [usize], basis_pos: &mut [Option<usize>], nb_status: &mut [Option<NbStatus>], delta: &[MSide], cache: &ColCache, n_orig: usize, lu: sparse_lu::FtLu) -> Option<SimplexResult> {
+/// `dse`: 主ループの最後の DSE 重み。cleanup・polish のピボットごとに更新し (主ループと同じ式。[`super::DseState::update_after_pivot`])、
+/// 呼び出し側が次の warm start に引き継ぐ。以前は主ループの出口で保存した重みをそのまま引き継いでいたので、cleanup・polish の
+/// ピボット (1 回の求解に 1〜2 回) の分だけ基底と合わない重みになり、MIP の根のカットのループで求解を重ねるごとに厳密な値から
+/// 桁違いにずれていった (analysis/lp_hang_20261021.md)。`ENOMOTO_NO_POLISH_DSE=1` で以前の動作 (更新しない)。
+fn finish(std: &StdForm, basis: &mut [usize], basis_pos: &mut [Option<usize>], nb_status: &mut [Option<NbStatus>], delta: &[MSide], cache: &ColCache, n_orig: usize, lu: sparse_lu::FtLu, mut dse: Option<&mut super::DseState>) -> Option<SimplexResult> {
     xprof("main");
+    if env_str!("ENOMOTO_NO_POLISH_DSE").is_some() {
+        dse = None;
+    }
     // `lu` は主ループ最終反復の分解(現基底に対して正確)をそのまま使う。
     // 現基底での `x_B(M)` と目的関数値 `z(M) = z_B + z_N` を求める。
     let (x_b_base, x_b_slope) = solve_x_b(std, &lu, nb_status, cache)?;
@@ -6721,6 +6732,13 @@ fn finish(std: &StdForm, basis: &mut [usize], basis_pos: &mut [Option<usize>], n
             x_b_base[r] = v_j.base + dir * t_r.base;
             x_b_slope[r] = snap_slope(v_j.slope + dir * t_r.slope);
             let beta_r = basis[r];
+            // DSE 重みの更新 (ピボット前の基底で `rho = B^-T e_r`、`tau = B^-1 rho`。`alpha_col` は `B^-1 A_j`)
+            if let Some(dse) = dse.as_deref_mut() {
+                let (mut rho, mut tau) = (vec![0.0f64; m], vec![0.0f64; m]);
+                lu.solve_transpose_unit(r, &mut lu_scratch, &mut rho);
+                lu.solve_into(&rho, &mut lu_scratch, &mut tau);
+                dse.update_after_pivot(r, &alpha_col, &tau, &rho);
+            }
             nb_status[beta_r] = Some(if rate_r > 0.0 { NbStatus::Upper } else { NbStatus::Lower });
             basis_pos[beta_r] = None;
             basis[r] = j;
@@ -6740,8 +6758,16 @@ fn finish(std: &StdForm, basis: &mut [usize], basis_pos: &mut [Option<usize>], n
         if debug_ext {
             eprintln!("DEBUG_EXT: cleanup_pivots={cleanup_count} cleanup_parked={parked} cleanup_parked_zero={parked_zero}");
         }
-        return polish_with_true_bounds(std, basis, basis_pos, nb_status, lu);
+        return polish_with_true_bounds(std, basis, basis_pos, nb_status, lu, dse);
     }
+    // 旧来の cleanup では重みを更新しない: ピボットがあれば重みを未知にする (次の warm start が厳密な値を計算し直す)
+    let legacy_dse_invalidate = |dse: &mut Option<&mut super::DseState>, cleanup_count: usize| {
+        if cleanup_count > 0 {
+            if let Some(d) = dse.as_deref_mut() {
+                d.w.iter_mut().for_each(|v| *v = f64::NAN);
+            }
+        }
+    };
     // 旧来の cleanup(`ENOMOTO_LEGACY_CLEANUP=1`): M 側の非基底列を、`B^-1 A_j` が
     // 非ゼロな最初の行と退化ピボットで入れ替える。
     loop {
@@ -6804,7 +6830,8 @@ fn finish(std: &StdForm, basis: &mut [usize], basis_pos: &mut [Option<usize>], n
     if debug_ext {
         eprintln!("DEBUG_EXT: cleanup_pivots={cleanup_count}");
     }
-    polish_with_true_bounds(std, basis, basis_pos, nb_status, lu)
+    legacy_dse_invalidate(&mut dse, cleanup_count);
+    polish_with_true_bounds(std, basis, basis_pos, nb_status, lu, dse)
 }
 
 /// 後処理の最終段: `M`/`Affine1` を使わず `std.lb`/`std.ub` 上で直接動く
@@ -6821,10 +6848,19 @@ fn finish(std: &StdForm, basis: &mut [usize], basis_pos: &mut [Option<usize>], n
 ///
 /// 引数 `basis`/`basis_pos`/`nb_status` は cleanup 後の基底状態(この関数で更新される)、
 /// `lu` はその基底の LU 分解。戻り値 `None` は数値的破綻(`NotSolved` として報告)。
-pub(super) fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [Option<usize>], nb_status: &mut [Option<NbStatus>], lu: sparse_lu::FtLu) -> Option<SimplexResult> {
+/// `dse`: 引き継ぐ DSE 重み (あれば)。ピボットごとに更新する ([`finish`] 参照)。巻き戻し・主単体法への引き継ぎの後は
+/// 基底と合わなくなるので未知 (`NaN`) にする (次の warm start が厳密な値を計算し直す)。
+pub(super) fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_pos: &mut [Option<usize>], nb_status: &mut [Option<NbStatus>], lu: sparse_lu::FtLu, mut dse: Option<&mut super::DseState>) -> Option<SimplexResult> {
     xprof("finish");
     let n_total = std.n_total;
     let m = std.n_rows;
+    // DSE 重みの更新用の `tau = B^-1 rho`
+    let mut dse_tau = vec![0.0f64; if dse.is_some() { m } else { 0 }];
+    let dse_invalidate = |dse: &mut Option<&mut super::DseState>| {
+        if let Some(d) = dse.as_deref_mut() {
+            d.w.iter_mut().for_each(|v| *v = f64::NAN);
+        }
+    };
     // 停滞(目的関数がほぼ進まないピボット)がこの回数を超えたら Bland 規則に切り替える。
     let stall_limit = (STALL_LIMIT_PER_ROW * m).max(STALL_LIMIT_MIN);
     // 行の実行不能判定の許容誤差の下限: 主ループで `x_B` のずれから広げた値 ([`set_row_primal_error`])。
@@ -6969,6 +7005,7 @@ pub(super) fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_
                     }
                     let (l, bans) = rollback_core(std, basis, basis_pos, nb_status, &mut pivot_log, &mut pivot_flips, &lu, &mut |_, _| {})?;
                     polish_rollbacks += 1;
+                    dse_invalidate(&mut dse);
                     if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
                         eprintln!("DEBUG_EXT: polish singular refactor -> rolled back pivots (last r={} q={}, banned {}), rollbacks={polish_rollbacks}", bans[0].0, bans[0].1, bans.len());
                     }
@@ -7207,12 +7244,13 @@ pub(super) fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_
             let handoff_iters0 = super::prof_phases::RUN_PHASE_ITERS.load(std::sync::atomic::Ordering::Relaxed);
             // `ENOMOTO_HANDOFF_INCREMENTAL` (S4、既定オン、`0` で無効): `run_phase` の代わりに
             // `x_B`/`d` 増分維持版の主単体ループを使う(経路は変わりうる)。
+            // 主単体法のピボットでも DSE 重みを更新する (以前は主ループの出口の重みをそのまま引き継いでいた)
             let status = if tunable!("ENOMOTO_HANDOFF_INCREMENTAL", 1u8, u8) != 0 {
-                super::run_phase2_incremental(std, &mut t, &mut lu, &mut stall)
+                super::run_phase2_incremental(std, &mut t, &mut lu, &mut stall, dse.as_deref_mut())
             } else {
                 let mut expand = super::ExpandState::new();
                 let mut se = super::SteepestEdgeState::new(std);
-                super::run_phase(std, &mut t, false, &mut lu, kernel.periodic_counter_mut(), &mut expand, &mut se, &mut stall)
+                super::run_phase(std, &mut t, false, &mut lu, kernel.periodic_counter_mut(), &mut expand, &mut se, &mut stall, dse.as_deref_mut())
             };
             if profile_phases_polish {
                 eprintln!("PROF_HANDOFF run_phase={:.3}ms ok={}", handoff_t0.elapsed().as_secs_f64() * 1e3, status.is_some());
@@ -7536,6 +7574,11 @@ pub(super) fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_
             stall_count = 0;
         }
 
+        // DSE 重みの更新 (ピボット前の基底。`rho = B^-T e_r` と `alpha_full = B^-1 A_q` はこの反復の値、`tau = B^-1 rho` を 1 回解く)
+        if let Some(dse) = dse.as_deref_mut() {
+            lu.solve_into(&rho, &mut lu_scratch, &mut dse_tau);
+            dse.update_after_pivot(r, &alpha_full, &dse_tau, &rho);
+        }
         // 基底交換: `basis[r]` が離基して境界に、`q` が入基する。
         let leaving_var = basis[r];
         nb_status[leaving_var] = Some(if d_dir > 0 { NbStatus::Lower } else { NbStatus::Upper });
@@ -7877,7 +7920,7 @@ mod tests {
         let cache = ColCache::build(&std, n_orig);
         let lu = refactorize(&std, &basis_pos, None).unwrap();
         let before = CLEANUP_PIVOTS.load(Relaxed);
-        let res = finish(&std, &mut basis, &mut basis_pos, &mut nb_status, &delta, &cache, n_orig, lu).unwrap();
+        let res = finish(&std, &mut basis, &mut basis_pos, &mut nb_status, &delta, &cache, n_orig, lu, None).unwrap();
         assert_eq!(res.status, Status::Optimal);
         let x = res.x.unwrap();
         assert!(approx(x[0], 3.0) && approx(x[1], 0.0) && approx(x[2], 2.0), "x={x:?}");
