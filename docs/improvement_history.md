@@ -9656,6 +9656,14 @@ neos-950242 の 2 回目の調査 (`analysis/neos950242_r2_20261020.md`)。
 - 修正 (src/mip/solver.rs): 従の結果を集めてから受信箱を受け取り、その後で比べる。それでも従が良ければ従の解を暫定解に試し、まだ悪ければ警告。合わせて「共有の最良値が主の暫定解より良い」(公表した解が主に届いていない) ときに警告だけで optimal と報告していたのを NotSolved にした (`ENOMOTO_MIP_TREE_NO_END_CHECK` で以前どおり)。修正版の再現設定 16 回で警告 0。cargo test 308 通過。
 - 計測 DCb の newdef で roll3000 に出た警告 (時間切れ、本文なし) が同じものかは未確認。以後の計測は本文を mip_warning_text に残す。
 
+## 2026-10-21: 双対証明の修正の確認と、FC_SUBMIP・SUBMIP_CUTS の再計測 (PR): 修正は既定のまま、サブ MIP の強化は不採用
+
+- develop bb93649 (双対証明の修正入り) で 40 + 16 問、newdef / oldproof (`ENOMOTO_T_MIP_PROOF_NUM_TOL=0` で修正を外す) / fcs (`ENOMOTO_MIP_FC_SUBMIP=1`) / subrows (`ENOMOTO_MIP_SUBMIP_CUTS=1`) を 2 組 (PRa・PRb は順を逆に)。
+- 40 問 (解けた・SGM): PRa newdef 26・22.21 / oldproof 25・22.06 / fcs 26・22.26 / subrows 26・21.99、PRb newdef 26・21.43 / oldproof 25・21.99 / fcs 26・22.27 / subrows 26・22.08。
+- 16 問: PRa newdef 11・36.11 / oldproof 9・37.61 / fcs 10・36.83 / subrows 9・37.62、PRb newdef 11・32.54 / oldproof 10・39.84 / fcs 10・36.28 / subrows 9・38.39。不一致はどれも 0。
+- 双対証明の修正は解けた数が 2 組とも多く (40 問 +1、16 問 +1〜2) 既定のまま。fcs・subrows は 2 組とも 16 問で解けた数が newdef より減るので不採用 (mc11 の誤った最適値は出なかった)。
+- "MIP: WARNING" は PRb の oldproof の mc11 (時間切れ) と PRa の subrows の 10teams (optimal・正しい値) に各 1 件。ビルドが本文を残す前のもので種類は不明。Fable の調査に回した。
+
 ## 改名一覧 (整理時)
 
 本メモ中は旧名で書かれている。
