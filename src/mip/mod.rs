@@ -578,6 +578,7 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
         ORBITOPES.with(|t| *t.borrow_mut() = None);
         SYM_ORIG.with(|t| *t.borrow_mut() = None);
         SYM_LEX_GENS.with(|t| *t.borrow_mut() = None);
+        EQUIV2_USED.with(|f| f.set(false));
     }
     let r = solve_problem_inner(p, params, use_presolve);
     if outer {
@@ -749,6 +750,10 @@ thread_local! {
     static PROBE_EQUIV: std::cell::RefCell<Vec<(usize, usize, bool)>> = const { std::cell::RefCell::new(Vec::new()) };
     /// 同値な列による前処理のかけ直しの深さ。
     static PROBE_EQUIV_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// [`probe`] の同値の 2 巡目 (`ENOMOTO_MIP_PROBE_EQUIV2`) が多くの組を見つけた: 境界を締めていても代入まで進む ([`probe_equiv_fix`])
+    static PROBE_EQUIV_FORCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// この求解の前処理で `ENOMOTO_MIP_PROBE_EQUIV2` の代入を使った (根のカットの `ENOMOTO_MIP_EQUIV2_CUTS` の判定用。最初の求解の始めに戻す)
+    pub(crate) static EQUIV2_USED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 thread_local! {
@@ -1154,6 +1159,7 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
     use crate::params::simplex::{PRESOLVE_ROUNDS, PROPAGATION_PASSES, ROWSINGLETON_COLSINGLETON_INNER_ROUNDS};
     // 前の呼び出しのプロービングが残した同値な列の組は使わない (列の番号が違いうる)
     PROBE_EQUIV.with(|e| e.borrow_mut().clear());
+    PROBE_EQUIV_FORCE.with(|f| f.set(false));
     let n = p.n;
     // 元の制約 (境界は丸め済みの MipProblem の値を使う)
     let vars: Vec<VariableData> = (0..n).map(|j| VariableData { vtype: if p.is_int[j] { VarType::Integer } else { VarType::Continuous }, lb: p.col_lo[j], ub: p.col_up[j] }).collect();
@@ -1300,9 +1306,15 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
                         if env_str!("ENOMOTO_MIP_NO_PROBING").is_none() {
                             match probe(&mut prob, verbose, submip) {
                                 Some(false) => return Some(Presolved::Infeasible),
-                                Some(true) => return represolve_after_probe(prob, postsolve, pre.scaling, verbose, submip, depth),
-                                None => {}
+                                Some(true) if !probe_equiv_fix() => return represolve_after_probe(prob, postsolve, pre.scaling, verbose, submip, depth),
+                                _ => {}
                             }
+                        }
+                        if env_str!("ENOMOTO_MIP_PROBE_EQUIV_FIX").is_some() || PROBE_EQUIV_FORCE.with(|f| f.get()) {
+                            return match substitute_probe_equiv(&prob, postsolve, pre.scaling, verbose, submip) {
+                                Ok(r) => Some(r),
+                                Err((postsolve, scaling)) => Some(Presolved::Reduced { prob, postsolve, scaling }),
+                            };
                         }
                         Some(Presolved::Reduced { prob, postsolve, scaling: pre.scaling })
                     }
@@ -1314,8 +1326,8 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
     if env_str!("ENOMOTO_MIP_NO_PROBING").is_none() {
         match probe(&mut prob, verbose, submip) {
             Some(false) => return Some(Presolved::Infeasible),
-            Some(true) => return represolve_after_probe(prob, pre.postsolve_log, pre.scaling, verbose, submip, depth),
-            None => {}
+            Some(true) if !probe_equiv_fix() => return represolve_after_probe(prob, pre.postsolve_log, pre.scaling, verbose, submip, depth),
+            _ => {}
         }
     }
     // `ENOMOTO_MIP_DOMCOL`: 支配される 0-1 列を固定し ([`dominated_binary_fixings`])、前処理をかけ直す (LP による固定と同じ形、1 回だけ)
@@ -1347,6 +1359,27 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
             }
         }
     }
+    match substitute_probe_equiv(&prob, pre.postsolve_log, pre.scaling, verbose, submip) {
+        Ok(r) => Some(r),
+        Err((postsolve, scaling)) => Some(Presolved::Reduced { prob, postsolve, scaling }),
+    }
+}
+
+/// `ENOMOTO_MIP_PROBE_EQUIV_FIX` (試作、既定では使わない): プロービングが境界を締めたときも ([`probe`] が `Some(true)`)、
+/// `ENOMOTO_MIP_PROBE_REPRESOLVE` がなければ [`represolve_after_probe`] で早く戻らず、後ろの同値な 0-1 列の代入
+/// ([`substitute_probe_equiv`]) まで進む。既定では締めた境界が 1 本でもあると、見つけた同値な列を代入せずに返していた
+/// (physiciansched6-2 は締め付け 179 本で、`ENOMOTO_MIP_PROBE_CLIQUE` の 1084 組を代入しない)。代入のかけ直しの前処理は
+/// 締めた境界の上でかけるので、締めた境界も使われる。同値な組がなければ既定と同じ (早く戻るのと同じ結果になる)
+/// `ENOMOTO_MIP_PROBE_EQUIV2` の 2 巡目が多くの組を見つけたとき ([`PROBE_EQUIV_FORCE`]) も同じ。
+fn probe_equiv_fix() -> bool {
+    env_str!("ENOMOTO_MIP_PROBE_REPRESOLVE").is_none()
+        && PROBE_EQUIV.with(|e| !e.borrow().is_empty())
+        && (env_str!("ENOMOTO_MIP_PROBE_EQUIV_FIX").is_some() || PROBE_EQUIV_FORCE.with(|f| f.get()))
+}
+
+/// 同値な 0-1 列の代入 ([`presolve_mip`] の最後)。代入してかけ直した前処理が問題を減らしたらその結果を返す。
+/// 減らなければ受け取った後処理と尺度を返す。
+fn substitute_probe_equiv(prob: &MipProblem, mut postsolve: Vec<crate::presolve::PostsolveStep>, scaling: crate::presolve::scaling::Scaling, verbose: bool, submip: bool) -> Result<Presolved, (Vec<crate::presolve::PostsolveStep>, crate::presolve::scaling::Scaling)> {
     // 同値な 0-1 列の代入 (既定で使う。`ENOMOTO_MIP_NO_PROBE_EQUIV` で使わない): プロービングで見つけた同値な 0-1 列を等式 (`x_k - x_j = 0` / `x_k + x_j = 1`) として足し、
     // 前処理をもう一度かける (二項等式の消去が列を代入で消す)。かけ直しは `ENOMOTO_T_MIP_PROBE_EQUIV_ROUNDS` 回まで (既定 2)
     let equiv = PROBE_EQUIV.with(|e| std::mem::take(&mut *e.borrow_mut()));
@@ -1365,16 +1398,15 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
         let r = presolve_mip(&q, verbose, submip, None);
         PROBE_EQUIV_DEPTH.with(|d| d.set(depth));
         match r {
-            Some(Presolved::Infeasible) => return Some(Presolved::Infeasible),
-            Some(Presolved::Reduced { prob: prob2, postsolve: post2, scaling: sc2 }) if sc2.d.iter().chain(&pre.scaling.d).all(|&d| d == 1.0) => {
-                let mut postsolve = pre.postsolve_log;
+            Some(Presolved::Infeasible) => return Ok(Presolved::Infeasible),
+            Some(Presolved::Reduced { prob: prob2, postsolve: post2, scaling: sc2 }) if sc2.d.iter().chain(&scaling.d).all(|&d| d == 1.0) => {
                 postsolve.extend(post2);
-                return Some(Presolved::Reduced { prob: prob2, postsolve, scaling: pre.scaling });
+                return Ok(Presolved::Reduced { prob: prob2, postsolve, scaling });
             }
             _ => {}
         }
     }
-    Some(Presolved::Reduced { prob, postsolve: pre.postsolve_log, scaling: pre.scaling })
+    Err((postsolve, scaling))
 }
 
 /// プロービングの後の前処理のかけ直し (試作、`ENOMOTO_MIP_PROBE_REPRESOLVE` で使う。既定では使わない): プロービングが
@@ -1655,7 +1687,12 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
     let max_pass = if adaptive { tunable!("ENOMOTO_T_MIP_PROBE_PASSES", 10usize, usize).max(1) } else { 1 };
     let want_equiv = env_str!("ENOMOTO_MIP_NO_PROBE_EQUIV").is_none() && !submip;
     // `ENOMOTO_MIP_PROBE_CLIQUE`: 見つけた含意を後の列のプロービングの伝播に使う ([`domain::Domain::add_implications`])
-    let want_pclique = env_str!("ENOMOTO_MIP_PROBE_CLIQUE").is_some() && !submip;
+    // `ENOMOTO_MIP_PROBE_CLIQUE=equiv`: 含意は同値な列を見つけるためだけに使う (下の 2 巡目。固定・締め付け・含意の表は変えない)。
+    // `ENOMOTO_MIP_PROBE_EQUIV2`: 同じ 2 巡目を回し、見つけた組が候補の `ENOMOTO_T_MIP_PROBE_EQUIV2_MIN_FRAC` (既定 5%) 以上のときだけ使い、
+    // そのときは境界を締めていても代入まで進む ([`probe_equiv_fix`])。少なければ捨てる (既定と同じ問題になる)
+    let equiv2 = env_str!("ENOMOTO_MIP_PROBE_EQUIV2").is_some() && !submip;
+    let pclique_equiv = (equiv2 || env_str!("ENOMOTO_MIP_PROBE_CLIQUE").is_some_and(|v| v == "equiv")) && !submip;
+    let want_pclique = env_str!("ENOMOTO_MIP_PROBE_CLIQUE").is_some() && !pclique_equiv && !submip;
     let mut equiv: Vec<(usize, usize, bool)> = Vec::new();
     let mut passes = 0usize;
     'passes: for _pass in 0..max_pass {
@@ -1769,6 +1806,66 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
         // もう一巡するのは、この巡で候補の 1% 以上を固定したときだけ
         if ((fixed - fixed_pass0) as f64) < 0.01 * cands.len() as f64 {
             break;
+        }
+    }
+    // `ENOMOTO_MIP_PROBE_CLIQUE=equiv`: 集めた含意をすべて伝播に入れた写しの定義域で 0-1 列をもう一巡試し、同値な組だけを足す。
+    // 行の伝播では `x = 1 => y = 0` の対偶が見えないので、同値な組の多くを見落とす (physiciansched6-2 は 8 組、含意を使うと 1084 組)。
+    // `PROBE_CLIQUE` そのものは見つけた含意で固定・締め付け・含意の表 (クリークのグラフ) まで変え、ほかの問題の経路も変える
+    if want_equiv && pclique_equiv && !edges.is_empty() {
+        let tq = std::time::Instant::now();
+        let n0 = equiv.len();
+        let mut d2 = dom.clone();
+        d2.add_implications(n, &edges);
+        // 時間の上限 (`ENOMOTO_T_MIP_PROBE_EQUIV2_TIME`、既定 0.5 秒)。`ENOMOTO_T_MIP_PROBE_EQUIV2_GIVEUP_TIME` 秒 (既定 0.1 秒) 経っても
+        // 1 組も見つからなければやめる (見つからない問題で 1 秒使い切っていた: nw04・air03・neos-960392)。列の数で打ち切ると
+        // (行の多い列から 128 列) physiciansched6-2 の組 (行の少ない列) に届かない
+        let time_cap2 = tunable!("ENOMOTO_T_MIP_PROBE_EQUIV2_TIME", 0.5, f64);
+        let giveup2 = tunable!("ENOMOTO_T_MIP_PROBE_EQUIV2_GIVEUP_TIME", 0.1, f64);
+        let w0 = d2.debug_work();
+        for &j in &cands {
+            // 毎列見る (長い列の多い問題では 16 列で 0.7 秒かかる: nw04)
+            if d2.debug_work() - w0 > work_cap || tq.elapsed().as_secs_f64() > time_cap2 || (tq.elapsed().as_secs_f64() > giveup2 && equiv.len() == n0) {
+                break;
+            }
+            if d2.lo[j] == d2.up[j] {
+                continue;
+            }
+            let pos = d2.stack_len();
+            d2.tighten_upper(prob, j, 0.0);
+            let ok0 = d2.propagate(prob);
+            let ch0: std::collections::HashMap<(usize, bool), f64> = if ok0 { d2.changes_since(pos).map(|(k, u, v)| ((k, u), v)).collect() } else { Default::default() };
+            d2.backtrack_to(prob, pos);
+            d2.tighten_lower(prob, j, 1.0);
+            let ok1 = d2.propagate(prob);
+            let ch1: std::collections::HashMap<(usize, bool), f64> = if ok1 { d2.changes_since(pos).map(|(k, u, v)| ((k, u), v)).collect() } else { Default::default() };
+            d2.backtrack_to(prob, pos);
+            if !(ok0 && ok1) {
+                continue;
+            }
+            for (&(k, upper), &v0) in &ch0 {
+                if k == j || !bin0[k] || d2.lo[k] == d2.up[k] {
+                    continue;
+                }
+                let Some(&v1) = ch1.get(&(k, !upper)) else { continue };
+                if upper && v0 <= 0.5 && v1 >= 0.5 {
+                    equiv.push((j, k, false));
+                } else if !upper && v0 >= 0.5 && v1 <= 0.5 {
+                    equiv.push((j, k, true));
+                }
+            }
+        }
+        let found2 = equiv.len() - n0;
+        if equiv2 {
+            // 組は両向きで 2 回ずつ数える (j から k、k から j) ので半分で比べる
+            if (found2 / 2) as f64 >= tunable!("ENOMOTO_T_MIP_PROBE_EQUIV2_MIN_FRAC", 0.05, f64) * cands.len() as f64 && found2 > 0 {
+                PROBE_EQUIV_FORCE.with(|f| f.set(true));
+                EQUIV2_USED.with(|f| f.set(true));
+            } else {
+                equiv.truncate(n0);
+            }
+        }
+        if verbose {
+            eprintln!("MIP: probing: equivalence pass with implications: {found2} pairs found ({:.2}s){}", tq.elapsed().as_secs_f64(), if equiv2 { if PROBE_EQUIV_FORCE.with(|f| f.get()) { ", used" } else { ", not used" } } else { "" });
         }
     }
     // 固定した列を含む組は捨てる (固定後は意味がない)

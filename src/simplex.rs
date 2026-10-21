@@ -89,6 +89,9 @@ mod dualize;
 pub(crate) mod mip_lp;
 #[cfg(test)]
 mod lp_bug_debug;
+/// 根のカットのループで書き出した LP を解き直す診断テスト (`ENOMOTO_MIP_DEBUG_DUMP_CUT_LP`)。
+#[cfg(test)]
+mod cut_lp_debug;
 
 /// 単体法の各メインループの反復上限を問題サイズから決める。
 ///
@@ -903,8 +906,11 @@ fn run_phase(
     expand: &mut ExpandState,
     se: &mut SteepestEdgeState,
     stall: &mut PrimalStallState,
+    mut dse: Option<&mut DseState>,
 ) -> Option<Status> {
     let m = std.n_rows;
+    // 双対単体法から引き継いだ DSE 重みの更新用の `tau` ([`run_phase2_incremental`] と同じ)
+    let mut dse_tau: Vec<f64> = vec![0.0; if dse.is_some() { m } else { 0 }];
     // 部分価格付けの乱数種 (固定値を n_total で変化させる: 再現性のため)。
     let pricing_seed = 0x2545_F491_4F6C_DD1D_u64 ^ (std.n_total as u64);
     // Bland 規則へ切り替えるまでの停滞ピボット回数の上限。
@@ -1193,6 +1199,10 @@ fn run_phase(
                 let w: &[f64] = &w_buf;
                 let gamma_t_old = se.gamma[enter];
                 let pivot = alpha[r];
+                if let Some(dse) = dse.as_deref_mut() {
+                    lu.solve_into(rho, &mut scratch_buf, &mut dse_tau);
+                    dse.update_after_pivot(r, alpha, &dse_tau, rho);
+                }
 
                 let leaving_var = t.basis[r];
                 t.nb_status[leaving_var] = Some(if leaving_hits_upper { NbStatus::Upper } else { NbStatus::Lower });
@@ -1238,7 +1248,12 @@ fn run_phase(
 /// 作り直し) は、最初の反復、EXPAND リセット時、再分解後、そして「入る候補なし」(Optimal)
 /// または「ブロック行なし」(Unbounded) を確定する前に行う (差分値は提案のみ、確定は新しい値で)。
 /// 戻り値の意味は [`run_phase`] と同じ。
-fn run_phase2_incremental(std: &StdForm, t: &mut Tableau, lu: &mut sparse_lu::FtLu, stall: &mut PrimalStallState) -> Option<Status> {
+/// `dse`: 双対単体法から引き継いだ DSE 重み (あれば)。ピボットごとに更新し (`tau = B^-1 rho` の FTRAN 1 回)、
+/// 次の双対単体法の warm start に渡せるようにする (HiGHS の主単体法も双対の重みを保つ)。特異な基底の修復をしたら
+/// 基底と合わなくなるので未知 (`NaN`) にする。
+fn run_phase2_incremental(std: &StdForm, t: &mut Tableau, lu: &mut sparse_lu::FtLu, stall: &mut PrimalStallState, mut dse: Option<&mut DseState>) -> Option<Status> {
+    // DSE 重みの更新用の `tau` (重みがあるときだけ使う)
+    let mut dse_tau: Vec<f64> = Vec::new();
     use std::sync::atomic::Ordering::Relaxed;
     let m = std.n_rows;
     let n = std.n_total;
@@ -1338,6 +1353,11 @@ fn run_phase2_incremental(std: &StdForm, t: &mut Tableau, lu: &mut sparse_lu::Ft
             let rhs = t.recompute_basics(lu);
             if kernel.fill_too_big(lu) || t.basis_residual_norm(&rhs) > FT_RESIDUAL_TOL {
                 *lu = try_refactorize_repair(std, t, Some(&*lu), &mut repairs)?;
+            if repairs > 0 {
+                if let Some(d) = dse.as_deref_mut() {
+                    d.w.iter_mut().for_each(|v| *v = f64::NAN);
+                }
+            }
                 t.recompute_basics(lu);
             }
             if guard {
@@ -1546,6 +1566,14 @@ fn run_phase2_incremental(std: &StdForm, t: &mut Tableau, lu: &mut sparse_lu::Ft
             rho_rows.clear();
             rho_rows.extend(0..m);
         }
+        // 双対単体法の DSE 重みの更新 (入れ替え前の基底。`rho = B^-T e_r`、`alpha = B^-1 A_q`、`tau = B^-1 rho`)
+        if let Some(dse) = dse.as_deref_mut() {
+            if dse_tau.len() != m {
+                dse_tau.resize(m, 0.0);
+            }
+            lu.solve_into(&rho, &mut scratch, &mut dse_tau);
+            dse.update_after_pivot(r, &alpha, &dse_tau, &rho);
+        }
         for &i in &rho_rows {
             let rv = rho[i];
             let wv = if use_devex { 0.0 } else { w[i] };
@@ -1616,6 +1644,11 @@ fn run_phase2_incremental(std: &StdForm, t: &mut Tableau, lu: &mut sparse_lu::Ft
         // FT 更新 (FTRAN/BTRAN の途中値を使う) と再分解トリガ (3)(4)(5)。残差検査 (1) はリフレッシュ時点でのみ行う。
         if kernel.update_and_check(lu, r).is_due() {
             *lu = try_refactorize_repair(std, t, Some(&*lu), &mut repairs)?;
+            if repairs > 0 {
+                if let Some(d) = dse.as_deref_mut() {
+                    d.w.iter_mut().for_each(|v| *v = f64::NAN);
+                }
+            }
             need_fresh = true;
         }
     }
@@ -2069,6 +2102,31 @@ impl DseState {
             }
         }
         DseState { w, use_parallel: m > RAYON_SIZE_THRESHOLD }
+    }
+
+    /// 重みが `NaN` (未知) の行だけ、[`Self::from_basis`] と同じ BTRAN でその基底の厳密な値にする。MIP で行 (カット) を
+    /// 加えた直後の warm start 用: 古い行の引き継いだ重みはそのまま正しく (`B^-1` の行が変わらない)、新しい行の重みだけ
+    /// 分からない。埋めた行数を返す。
+    fn fill_missing(&mut self, lu: &sparse_lu::FtLu) -> usize {
+        let m = self.w.len();
+        let mut scratch = vec![0.0; m];
+        let mut z = vec![0.0; m];
+        let floor = tunable!("ENOMOTO_T_STEEPEST_EDGE_FLOOR", STEEPEST_EDGE_FLOOR, f64);
+        let mut filled = 0;
+        for i in 0..m {
+            if !self.w[i].is_nan() {
+                continue;
+            }
+            if lu.update_count() == 0 {
+                lu.solve_transpose_unit_into(i, &mut scratch, &mut z);
+            } else {
+                lu.solve_transpose_unit(i, &mut scratch, &mut z);
+            }
+            let norm_sq: f64 = z.iter().map(|&v| v * v).sum();
+            self.w[i] = norm_sq.max(floor);
+            filled += 1;
+        }
+        filled
     }
 
     /// ピボット後の DSE 重み更新。

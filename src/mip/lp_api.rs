@@ -62,6 +62,22 @@ pub trait MipLp: Clone + Send {
     fn intercept_bounds(&self) -> Option<(Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>)>;
     /// 基底を列番号 (構造列 j < n、行 n + i) で与える ([`TwoStageLp::set_basis_cols`])。
     fn set_basis_cols(&mut self, b: &[usize], x: Option<&[f64]>);
+    /// 今の基底 (基底列の番号、[`TwoStageLp::basis_cols`])。対応しない実装は `None`。
+    fn basis_cols(&self) -> Option<Vec<usize>> {
+        None
+    }
+    /// 診断用: 今の LP と出発の基底をファイルに書き出す ([`TwoStageLp::dump_lp`])。対応しない実装は何もしない。
+    fn dump_lp(&self, _prefix: &str, _basis: Option<&[usize]>, _weights: Option<&[f64]>) -> std::io::Result<()> {
+        Ok(())
+    }
+    /// 次の求解に渡す DSE 重み (基底位置順、[`TwoStageLp::dse_weights`])。対応しない実装は `None`。
+    fn dse_weights(&self) -> Option<Vec<f64>> {
+        None
+    }
+    /// 診断用: 今の LP を新しい LP として同じ基底から解き直す ([`TwoStageLp::resolve_fresh_debug`])。対応しない実装は何もしない。
+    fn resolve_fresh_debug(&self, _basis: Option<&[usize]>, _weights: Option<&[f64]>) {}
+    /// 診断用: 引き継ぐ DSE 重みと厳密な重みを比べて表示する ([`TwoStageLp::debug_dse_check`])。対応しない実装は何もしない。
+    fn debug_dse_check(&self, _tag: &str) {}
     /// 今の基底の DSE 重み (基底変数の番号との組、[`TwoStageLp::dse_snapshot`])。
     fn dse_snapshot(&self) -> Option<Vec<(u32, f32)>>;
     /// DSE 重みを今の基底に当てはめる ([`TwoStageLp::set_dse_vars`])。
@@ -135,6 +151,21 @@ forward_impl!(
     },
     fn set_basis_cols(&mut self, b: &[usize], x: Option<&[f64]>) {
         TwoStageLp::set_basis_cols(self, b, x)
+    },
+    fn basis_cols(&self) -> Option<Vec<usize>> {
+        TwoStageLp::basis_cols(self)
+    },
+    fn dump_lp(&self, prefix: &str, basis: Option<&[usize]>, weights: Option<&[f64]>) -> std::io::Result<()> {
+        TwoStageLp::dump_lp(self, prefix, basis, weights)
+    },
+    fn dse_weights(&self) -> Option<Vec<f64>> {
+        TwoStageLp::dse_weights(self)
+    },
+    fn resolve_fresh_debug(&self, basis: Option<&[usize]>, weights: Option<&[f64]>) {
+        TwoStageLp::resolve_fresh_debug(self, basis, weights)
+    },
+    fn debug_dse_check(&self, tag: &str) {
+        TwoStageLp::debug_dse_check(self, tag)
     },
     fn intercept_bounds(&self) -> Option<(Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>)> {
         TwoStageLp::intercept_bounds(self)
