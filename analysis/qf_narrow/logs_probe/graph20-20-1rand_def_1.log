@@ -1,0 +1,77 @@
+MIP: presolve: rows 5587 -> 4995, free columns 2183 -> 2146, nonzeros 19277 -> 17390, postsolve steps 0
+Root LP: the two-phase method finished first (0.21s)
+MIP: probing: 2146 of 2146 binaries probed (1 passes), 0 fixed, 0 bounds tightened, 73112 implications (0.03s)
+MIP: probing: 185 equivalent binary pairs
+MIP: presolve: rows 5180 -> 4810, free columns 2146 -> 1961, nonzeros 17760 -> 17020, postsolve steps 185
+MIP: probing: 1961 of 1961 binaries probed (1 passes), 0 fixed, 0 bounds tightened, 52022 implications (0.02s)
+MIP: probing: 0 equivalent binary pairs
+Presolve: 5587 rows, 2183 columns -> 4810 rows, 1961 columns (0.27s)
+MIP: clique extension: 0 rows extended, 0 nonzeros added, 0 columns fixed, 0 duplicate and 0 dominated rows removed (26011 edges, 0.01s)
+MIP: symmetry: 2 full orbitopes (52x37, 1x79)
+MIP: symmetry: 114 generators, 53 orbits on 2003 columns, 0 lex-leader rows (0.30s)
+MIP: FJ problem (FJ_P3): rows 4810 -> 4810, free columns 1961 -> 1961, 0 continuous bounds tightened
+Root LP: the two-phase method finished first (0.46s)
+Root LP: objective -3.7000000000e1 (0.46s)
+MIP: root LP -3.7000000000e1 (2085 iters, 0.46s)
+MIP: oneopt improved -1.0000000000e0 -> -3.0000000000e0
+MIP:   global fixed integers 222 of 2183 (newly 0 since the root LP)
+MIP: new incumbent -3.0000000000e0 at node 0 (0.46s) [feasibility jump (parallel)]
+MIP: feasibility jump (parallel) found a solution (0.46s)
+MIP: cut round 0: 41 cuts (of 1800, sep 1.99s, LP 933 iters), LP rows 4851 (cut rows mean nnz 127), obj -3.7000000000e1 (2.84s)
+FACETIME root restarts 0 rounds 1: sep 1.99s (face 1.78s, 1 vertices), LP 0.38s, loop 2.38s, obj -3.7000000000e1
+MIP: clique graph: 26011 edges (26011 from rows, probing implications 52022)
+MIP: clique fallback: no violated clique cuts; not used (0.01s)
+Root cuts: objective -3.7000000000e1 -> -3.7000000000e1, 29 cuts in the LP (2.85s)
+MIP: cut loop done: 41 cuts added, 29 in LP, pool 313 cuts (340391 nonzeros), obj -3.7000000000e1 -> -3.7000000000e1
+MIP: find thread started (budget 0.2s, 2.85s)
+MIP: the incumbent is a poor feasibility jump solution; background cuts use 1 threads
+MIP: root heuristic simple rounding: none (0.00s)
+MIP: root heuristic ZI round: none (0.00s)
+MIP: root heuristic randomized rounding: none (0.00s)
+MIP:   interior rounding: IPM (cost) failed (0.18s)
+MIP:   interior rounding: 0 interior points, vertex false (0.18s)
+MIP:   interior rounding: 0 rounded points tried, found false
+MIP: root heuristic interior rounding: none (0.18s)
+MIP:   global fixed integers 222 of 2183 (newly 0 since the root LP)
+MIP: new incumbent -6.0000000000e0 at node 0 (3.04s) [find thread]
+MIP: find thread solution: accepted true (incumbent Some(-3.0)) (3.04s, node 0)
+MIP: find thread done: objective Some(-6.0), accepted false (incumbent Some(-6.0)) (3.04s, node 0)
+MIP: root heuristic root reduced cost: none (0.00s)
+MIP:   LP face: only 37 of 1961 integer columns fixed
+MIP: root heuristic LP face: none (0.00s)
+MIP:   neighbourhood dive: LP Infeasible at fixing rate 0.75 (853 iterations, limit 2989)
+MIP:   RENS: fixing rate 0.71 (target 0.80, 1 backtracks)
+MIP:   parallel sub-MIP started (RENS): 563 free columns of 2183
+MIP:   no-incumbent RENS (sub-MIP depth 0) try 1: target 0.80, fixing rate 0.71, found false (3.26s)
+MIP: root heuristic RENS: none (0.22s)
+MIP:   locks: fixing rate 0.89
+MIP:   parallel sub-MIP started (locks): 225 free columns of 2183
+MIP: root heuristic locks: none (0.00s)
+MIP:   clique: fixing rate 0.60
+MIP:   parallel sub-MIP started (clique): 791 free columns of 2183
+MIP: root heuristic clique: none (0.00s)
+MIP: root heuristic vbounds (loose): none (0.00s)
+MIP: root heuristic vbounds (tight): none (0.00s)
+MIP:   parallel sub-MIP (RENS): status Infeasible, nodes 0, objective None, 0.01s
+MIP:   parallel sub-MIP (locks): status TimeLimit, nodes 0, objective None, 0.02s
+MIP:   parallel sub-MIP (clique): status Infeasible, nodes 0, objective None, 0.01s
+MIP:   sub-MIP: 626 free columns of 2183, status TimeLimit, nodes 0, objective None
+MIP: root heuristic RINS: none (0.02s)
+MIP: after root heuristics: incumbent Some(-6.0) (3.29s)
+MIP: background cuts: root LP re-solved before replacing the cuts: TimeLimit, 1 iters (3.48s)
+MIP: background cuts: no result (waited 0.18s)
+     time      nodes      open        best bound         incumbent       gap
+     3.5s          0         0    -3.700000000e1    -6.000000000e0   516.67%
+MIP:     3.48s nodes        0 open       1 lb -3.70000000e1 ub -6.00000000e0 lp_iters 3884 sb_iters 0 sb_lps 0 sb_secs 0.00 node_iters 0 (first 0, lps 0) heur_iters 870 dive_iters 0 lp_rows 4839 node_cut_secs 0.00
+MIP: dual proofs and conflicts 0 (conflicts added 0 (from proofs 0), Farkas 0, pruned 0 nodes, tightened 0 bounds)
+MIP: propagation conflicts: analysed 3, no 1-UIP 0, 1-UIP not a row 0, no decision set 0, decision set not a row 0; not a row because continuous 0, general integer 0, both sides 0
+MIP: objective propagation: pruned 0 nodes, tightened 0 bounds; strong branching children infeasible by propagation 0, propagated bounds passed to child LPs 0
+MIP: literal conflicts: added 10, in pool 10 (aged out 0), pruned 0 nodes, tightened 0 bounds
+MIP: conflict analysis (HiGHS style): calls 3, conflicts 30, added 10, mean length 94.7, max length 754, 0.00s
+MIP: conflict analysis failures (all calls): no decision 0, too long midway 0, reason row lacks column 0, empty 0, too long at the end 0 (total length 0), max length 50
+MIP: branching: 0 selections, 0 without strong branching for dual degeneracy; sb LPs 0 iters 0
+MIP: sibling backtracks 0; basis restores 0 (basic count mismatch 0), first LP iterations after a restore 0
+MIP: node diag: nodes 0 node LPs 0 mean rows 0.0 iters 0 (0.0/LP) LP secs 0.00 sep rounds 0 added 0 node cut secs 0.00 final rows 4839
+MIP: adaptive node cuts: rounds 0 effective 0 skipped 0 (rate 1.000), node cut secs 0.00, outcomes cutoff/<0.02/<0.1/<0.3/>=0.3 [0, 0, 0, 0, 0], cut nnz None (rows mean 3.5)
+MIP: orbitopes 2: fixed 0 bounds, pruned 0 nodes
+RESULT time_limit -6.0 -37.0 0 4.1 -37.0

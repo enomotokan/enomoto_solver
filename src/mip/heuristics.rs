@@ -1789,6 +1789,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let st = self.lp.solve(&self.limits(lim));
                 self.heur_iters += self.lp.total_iterations() - it0;
                 ok = st == LpStatus::Optimal;
+                if self.params.verbose && self.nodes <= 1 && !ok {
+                    eprintln!("MIP:   neighbourhood dive: LP {:?} at fixing rate {:.2} ({} iterations, limit {lim})", st, rate(self), self.lp.total_iterations() - it0);
+                }
             }
             if !ok {
                 // 直前の段に戻る (この段の固定を捨てる)。戻った後は固定率をそこまでで打ち切る
@@ -2068,8 +2071,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if env_str!("ENOMOTO_MIP_RINS_DIVE").is_some() {
             return self.rins_dive();
         }
-        let Some((_, inc)) = self.incumbent.as_ref() else { return false };
-        let inc = inc.clone();
+        // 暫定解がなければ参照解 (`ENOMOTO_MIP_RESTART_REF`、再スタート前の暫定解) を相手にする。参照解は今の境界の外にある列が
+        // あるが、下の固定は境界の中にある値だけを使い、サブ MIP は打ち切り値 (前の暫定解より良いこと) を引き継ぐ
+        let inc = match (self.incumbent.as_ref(), self.ref_sol.as_ref()) {
+            (Some((_, inc)), _) => inc.clone(),
+            (None, Some(r)) => r.clone(),
+            (None, None) => return false,
+        };
         let mut fixes: Vec<(usize, f64, f64)> = Vec::new();
         let mut nint = 0usize;
         for j in 0..p.n {

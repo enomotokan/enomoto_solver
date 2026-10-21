@@ -1,0 +1,185 @@
+MIP: presolve: rows 27 -> 27, free columns 30 -> 30, nonzeros 532 -> 532, postsolve steps 0
+Root LP: the two-phase method finished first (0.00s)
+MIP: LP probing pass 1: 15 candidates, 0 fixings (30 LPs, 170 iters, 0.01s)
+MIP: LP probing: tried 15 columns, fixed 0, LP 6.7652090427e3 -> 6.7652090427e3 (30 LPs, 170 iters, 0.01s)
+MIP: probing: 0 of 0 binaries probed (10 passes), 0 fixed, 0 bounds tightened, 0 implications (0.00s)
+MIP: probing: 0 equivalent binary pairs
+Presolve: 27 rows, 30 columns -> 27 rows, 30 columns (0.01s)
+MIP: clique extension: 0 rows extended, 0 nonzeros added, 0 columns fixed, 0 duplicate and 0 dominated rows removed (0 edges, 0.00s)
+MIP: symmetry: none (0.00s)
+MIP: FJ problem (FJ_P3): rows 27 -> 27, free columns 30 -> 30, 0 continuous bounds tightened
+Root LP: the interior-point method + crossover finished first (0.01s)
+Root LP: objective 6.7652090427e3 (0.01s)
+MIP: root LP 6.7652090427e3 (30 iters, 0.01s)
+MIP: cut round 0: 1 cuts (of 39, sep 0.00s, LP 7 iters), LP rows 28 (cut rows mean nnz 2), obj 6.7662498397e3 (0.02s)
+MIP: cut round 1: 1 cuts (of 48, sep 0.01s, LP 4 iters), LP rows 29 (cut rows mean nnz 16), obj 6.7669360976e3 (0.02s)
+MIP: cut round 2: 1 cuts (of 44, sep 0.01s, LP 4 iters), LP rows 30 (cut rows mean nnz 21), obj 6.7675438777e3 (0.03s)
+MIP: cut round 3: 2 cuts (of 46, sep 0.00s, LP 7 iters), LP rows 32 (cut rows mean nnz 20), obj 6.7676447872e3 (0.03s)
+MIP: cut round 4: 1 cuts (of 41, sep 0.00s, LP 5 iters), LP rows 33 (cut rows mean nnz 22), obj 6.7677519486e3 (0.04s)
+MIP: cut round 5: 1 cuts (of 43, sep 0.00s, LP 4 iters), LP rows 33 (cut rows mean nnz 22), obj 6.7677989936e3 (0.04s)
+MIP: cut round 6: 1 cuts (of 43, sep 0.00s, LP 5 iters), LP rows 34 (cut rows mean nnz 23), obj 6.7679016140e3 (0.04s)
+MIP: cut round 7: 1 cuts (of 45, sep 0.00s, LP 6 iters), LP rows 34 (cut rows mean nnz 23), obj 6.7679617305e3 (0.04s)
+FACETIME root restarts 0 rounds 8: sep 0.03s (face 0.00s, 0 vertices), LP 0.00s, loop 0.03s, obj 6.7679617305e3
+MIP: clique graph: 0 edges (0 from rows, probing implications 0)
+MIP: clique fallback: no violated clique cuts; not used (0.00s)
+Root cuts: objective 6.7652090427e3 -> 6.7679617305e3, 6 cuts in the LP (0.04s)
+MIP: cut loop done: 9 cuts added, 6 in LP, pool 159 cuts (4677 nonzeros), obj 6.7652090427e3 -> 6.7679617305e3
+MIP: oneopt improved 3.4797609061e4 -> 2.0165747691e4
+MIP:   global fixed integers 0 of 30 (newly 0 since the root LP)
+MIP: new incumbent 2.0165747691e4 at node 0 (0.05s) [feasibility jump (parallel)]
+MIP: feasibility jump (parallel) found a solution (0.05s)
+MIP: find thread started (budget 1.2s, 0.05s)
+MIP: the incumbent is a poor feasibility jump solution; background cuts use 1 threads
+MIP: root heuristic simple rounding: none (0.00s)
+MIP: oneopt improved 7.6926075278e3 -> 7.3748246099e3
+MIP:   global fixed integers 0 of 30 (newly 0 since the root LP)
+MIP: new incumbent 7.3748246099e3 at node 0 (0.05s) [ZI round]
+MIP: root heuristic ZI round: found (0.00s)
+MIP: find thread asked to stop (incumbent Some(7374.824609948), 0.05s)
+MIP:   global fixed integers 0 of 30 (newly 0 since the root LP)
+MIP: new incumbent 7.1944785622e3 at node 0 (0.05s) [randomized rounding]
+MIP: root heuristic randomized rounding: found (0.00s)
+MIP:   interior rounding: 1 interior points, vertex true (0.01s)
+MIP:   interior rounding: 1 rounded points tried, found false
+MIP: root heuristic interior rounding: none (0.01s)
+MIP: find thread done: objective None, accepted false (incumbent Some(7194.478562197)) (0.05s, node 0)
+MIP:   root reduced cost: 6 lurking bounds, fixing rate 0.20
+MIP: root heuristic root reduced cost: none (0.00s)
+MIP:   LP face: only 6 of 30 integer columns fixed
+MIP: root heuristic LP face: none (0.00s)
+MIP: root heuristic RENS: none (0.00s)
+MIP:   locks: fixing rate 0.83
+MIP:   parallel sub-MIP started (locks): 5 free columns of 30
+MIP: root heuristic locks: none (0.00s)
+MIP: root heuristic clique: none (0.00s)
+MIP: root heuristic vbounds (loose): none (0.00s)
+MIP: root heuristic vbounds (tight): none (0.00s)
+MIP:   parallel sub-MIP (locks): status Optimal, nodes 0, objective Some(23189.367807589), 0.00s
+FACETIME bg restarts 0 rounds 7: sep 0.01s (face 0.00s, 0 vertices), LP 0.00s, loop 0.01s, obj 6.7682093472e3
+MIP:   sub-MIP: 15 free columns of 30, status NodeLimit, nodes 500, objective Some(6940.517950444)
+MIP:   global fixed integers 0 of 30 (newly 0 since the root LP)
+MIP: new incumbent 6.9405179504e3 at node 0 (0.11s) [RINS]
+MIP: root heuristic RINS: found (0.05s)
+MIP: after root heuristics: incumbent Some(6940.517950444) (0.11s)
+MIP: background cuts: root LP re-solved before replacing the cuts: Optimal, 1 iters (0.11s)
+MIP: background cuts: LP with the replaced cuts: Optimal, 1 iters (0.11s)
+MIP: background cuts: 7 rounds, 4 cut rows (was 6), obj 6.7679617305e3 -> 6.7682093472e3 (waited 0.00s, 0.11s)
+MIP: root objective probing: skipped (gap 2.483e-2 (LP 6.7682093472e3, incumbent 6.9405179504e3), 0 fractional binaries)
+MIP: 1 of 4 tree threads take the heuristic role once a solution exists
+MIP: tree search with 4 threads (0.11s)
+MIP:   ALNS arm 0 reward 0.000 (counts [1, 0, 0, 0, 0, 0])
+MIP:   global fixed integers 0 of 30 (newly 0 since the root LP)
+MIP: new incumbent 6.9166822285e3 at node 119 (0.17s) [tree rounding]
+MIP:   ALNS arm 1 reward 0.000 (counts [1, 1, 0, 0, 0, 0])
+MIP:   ALNS arm 2 reward 0.000 (counts [1, 1, 1, 0, 0, 0])
+MIP:   global fixed integers 0 of 30 (newly 0 since the root LP)
+MIP: new incumbent 6.9145267421e3 at node 208 (0.17s) [tree rounding]
+MIP:   sub-MIP: 7 free columns of 30, status Optimal, nodes 0, objective Some(6914.526742127)
+MIP:   mutation (23 fixed): Some((Optimal, false))
+MIP:   ALNS arm 3 reward 0.000 (counts [1, 1, 1, 1, 0, 0])
+MIP:   ALNS arm 4 reward 0.000 (counts [1, 1, 1, 1, 1, 0])
+MIP:   sub-MIP: 8 free columns of 30, status Optimal, nodes 0, objective Some(7009.945635554999)
+MIP:   DINS (20 of 30 fixed): improved false
+MIP:   ALNS arm 5 reward 0.000 (counts [1, 1, 1, 1, 1, 1])
+MIP:   sub-MIP: 7 free columns of 30, status Optimal, nodes 0, objective Some(7119.645082697999)
+MIP:   DINS (20 of 30 fixed): improved false
+MIP:   ALNS arm 5 reward 0.000 (counts [1, 1, 1, 1, 1, 2])
+MIP:   ALNS arm 4 reward 0.000 (counts [1, 1, 1, 1, 2, 2])
+MIP:   sub-MIP: 11 free columns of 30, status Optimal, nodes 1, objective Some(6914.526742127)
+MIP:   mutation (19 fixed): Some((Optimal, false))
+MIP:   ALNS arm 3 reward 0.000 (counts [1, 1, 1, 2, 2, 2])
+MIP:   global fixed integers 0 of 30 (newly 0 since the root LP)
+MIP: new incumbent 6.8902320340e3 at node 887 (0.26s) [other thread: tree crossover]
+MIP:   global fixed integers 0 of 30 (newly 0 since the root LP)
+MIP: new incumbent 6.8752566256e3 at node 988 (0.27s) [tree rounding]
+MIP:   ALNS arm 2 reward 0.000 (counts [1, 1, 2, 2, 2, 2])
+MIP:   ALNS arm 1 reward 0.000 (counts [1, 2, 2, 2, 2, 2])
+MIP:   ALNS arm 0 reward 0.000 (counts [2, 2, 2, 2, 2, 2])
+MIP:   sub-MIP: 8 free columns of 30, status Optimal, nodes 0, objective Some(7206.156675816999)
+MIP:   DINS (15 of 30 fixed): improved false
+MIP:   ALNS arm 5 reward 0.000 (counts [2, 2, 2, 2, 2, 3])
+MIP:   ALNS arm 4 reward 0.000 (counts [2, 2, 2, 2, 3, 3])
+MIP:   sub-MIP: 3 free columns of 30, status Optimal, nodes 0, objective Some(6875.256625638001)
+MIP:   mutation (27 fixed): Some((Optimal, false))
+MIP:   ALNS arm 3 reward 0.000 (counts [2, 2, 2, 3, 3, 3])
+MIP:   ALNS arm 2 reward 0.000 (counts [2, 2, 3, 3, 3, 3])
+MIP:   ALNS arm 1 reward 0.000 (counts [2, 3, 3, 3, 3, 3])
+MIP:   sub-MIP: 8 free columns of 30, status Optimal, nodes 0, objective Some(6958.6652534879995)
+MIP:   ALNS arm 0 reward 0.000 (counts [3, 3, 3, 3, 3, 3])
+MIP:   sub-MIP: 9 free columns of 30, status Optimal, nodes 0, objective Some(7057.438458544)
+MIP:   DINS (16 of 30 fixed): improved false
+MIP:   ALNS arm 5 reward 0.000 (counts [3, 3, 3, 3, 3, 4])
+MIP:   global fixed integers 0 of 30 (newly 0 since the root LP)
+MIP: new incumbent 6.8582629061e3 at node 2791 (0.74s) [tree randomized rounding]
+MIP:   global fixed integers 0 of 30 (newly 0 since the root LP)
+MIP: new incumbent 6.8579868950e3 at node 2887 (0.77s) [other thread: tree rounding]
+MIP:   ALNS arm 4 reward 0.000 (counts [3, 3, 3, 3, 4, 4])
+MIP:   sub-MIP: 9 free columns of 30, status Optimal, nodes 0, objective Some(6857.9868950400005)
+MIP:   mutation (21 fixed): Some((Optimal, false))
+MIP:   ALNS arm 3 reward 0.000 (counts [3, 3, 3, 4, 4, 4])
+MIP:   ALNS arm 2 reward 0.000 (counts [3, 3, 4, 4, 4, 4])
+MIP:   ALNS arm 1 reward 0.000 (counts [3, 4, 4, 4, 4, 4])
+MIP:   ALNS arm 0 reward 0.000 (counts [4, 4, 4, 4, 4, 4])
+MIP:   sub-MIP: 8 free columns of 30, status Optimal, nodes 0, objective Some(7196.2612078189995)
+MIP:   DINS (12 of 30 fixed): improved false
+MIP:   ALNS arm 5 reward 0.000 (counts [4, 4, 4, 4, 4, 5])
+MIP:   ALNS arm 4 reward 0.000 (counts [4, 4, 4, 4, 5, 5])
+MIP:   sub-MIP: 6 free columns of 30, status Optimal, nodes 0, objective Some(6857.9868950400005)
+MIP:   mutation (24 fixed): Some((Optimal, false))
+MIP:   ALNS arm 3 reward 0.000 (counts [4, 4, 4, 5, 5, 5])
+MIP:   ALNS arm 2 reward 0.000 (counts [4, 4, 5, 5, 5, 5])
+MIP:   ALNS arm 1 reward 0.000 (counts [4, 5, 5, 5, 5, 5])
+MIP:   ALNS arm 0 reward 0.000 (counts [5, 5, 5, 5, 5, 5])
+MIP:   sub-MIP: 4 free columns of 30, status Optimal, nodes 0, objective Some(6959.079578471999)
+MIP:   DINS (18 of 30 fixed): improved false
+MIP:   ALNS arm 5 reward 0.000 (counts [5, 5, 5, 5, 5, 6])
+MIP:   ALNS arm 4 reward 0.000 (counts [5, 5, 5, 5, 6, 6])
+MIP:   sub-MIP: 6 free columns of 30, status Optimal, nodes 0, objective Some(6857.9868950400005)
+MIP:   mutation (24 fixed): Some((Optimal, false))
+MIP:   ALNS arm 3 reward 0.000 (counts [5, 5, 5, 6, 6, 6])
+MIP:   ALNS arm 2 reward 0.000 (counts [5, 5, 6, 6, 6, 6])
+MIP:   ALNS arm 1 reward 0.000 (counts [5, 6, 6, 6, 6, 6])
+MIP:   ALNS arm 0 reward 0.000 (counts [6, 6, 6, 6, 6, 6])
+MIP:   sub-MIP: 19 free columns of 30, status Optimal, nodes 13, objective Some(7075.0749780139995)
+MIP:   DINS (9 of 30 fixed): improved false
+MIP:   ALNS arm 5 reward 0.000 (counts [6, 6, 6, 6, 6, 7])
+     time      nodes      open        best bound         incumbent       gap
+     2.0s      23379     16329     6.777920163e3     6.857986895e3     1.17%
+MIP:     2.00s nodes     6030 open     995 lb 6.84296315e3 ub 6.85798690e3 lp_iters 36779 sb_iters 1637 sb_lps 260 sb_secs 0.03 node_iters 34011 (first 32341, lps 5943) heur_iters 7768 dive_iters 1056 lp_rows 31 node_cut_secs 0.12 pool_len 12343 pool_idle 0
+MIP:   ALNS arm 4 reward 0.000 (counts [6, 6, 6, 6, 7, 7])
+MIP:   sub-MIP: 10 free columns of 30, status Optimal, nodes 1, objective Some(6857.9868950400005)
+MIP:   mutation (20 fixed): Some((Optimal, false))
+MIP:   ALNS arm 3 reward 0.000 (counts [6, 6, 6, 7, 7, 7])
+MIP:   ALNS arm 2 reward 0.000 (counts [6, 6, 7, 7, 7, 7])
+MIP:   ALNS arm 1 reward 0.000 (counts [6, 7, 7, 7, 7, 7])
+MIP:   ALNS arm 0 reward 0.000 (counts [7, 7, 7, 7, 7, 7])
+MIP:   sub-MIP: 5 free columns of 30, status Optimal, nodes 0, objective Some(7180.671575994001)
+MIP:   DINS (13 of 30 fixed): improved false
+MIP:   ALNS arm 5 reward 0.000 (counts [7, 7, 7, 7, 7, 8])
+MIP:   ALNS arm 4 reward 0.000 (counts [7, 7, 7, 7, 8, 8])
+MIP:   sub-MIP: 11 free columns of 30, status Optimal, nodes 1, objective Some(6857.9868950400005)
+MIP:   mutation (19 fixed): Some((Optimal, false))
+MIP:   ALNS arm 3 reward 0.000 (counts [7, 7, 7, 8, 8, 8])
+MIP:   ALNS arm 2 reward 0.000 (counts [7, 7, 8, 8, 8, 8])
+MIP:   ALNS arm 1 reward 0.000 (counts [7, 8, 8, 8, 8, 8])
+MIP:   ALNS arm 0 reward 0.000 (counts [8, 8, 8, 8, 8, 8])
+MIP:   sub-MIP: 18 free columns of 30, status Optimal, nodes 3, objective Some(7188.371145063999)
+MIP:   DINS (11 of 30 fixed): improved false
+MIP:   ALNS arm 5 reward 0.000 (counts [8, 8, 8, 8, 8, 9])
+MIP:   sub-MIP: 15 free columns of 30, status TimeLimit, nodes 82, objective Some(6857.9868950400005)
+MIP:   crossover (15 of 30 fixed, 3 solutions): improved false
+MIP:   ALNS arm 4 reward 0.000 (counts [8, 8, 8, 8, 9, 9])
+MIP: tree search threads: worker nodes 31706, nodes given away 4698, taken 279, global bounds taken from other threads 0, proofs 1683 and conflicts 23 taken from other threads
+     4.0s      42006         0     6.779697887e3     6.857986895e3     1.14%
+MIP:     4.01s nodes    10300 open     999 lb 6.83476131e3 ub 6.85798690e3 lp_iters 60848 sb_iters 1637 sb_lps 260 sb_secs 0.04 node_iters 58058 (first 54696, lps 9968) heur_iters 10354 dive_iters 1078 lp_rows 32 node_cut_secs 0.21 pool_len 22555 pool_idle 0
+MIP: dual proofs and conflicts 854 (conflicts added 0 (from proofs 995), Farkas 0, pruned 1342 nodes, tightened 483443 bounds)
+MIP: propagation conflicts: analysed 392, no 1-UIP 0, 1-UIP not a row 0, no decision set 0, decision set not a row 0; not a row because continuous 0, general integer 0, both sides 0
+MIP: objective propagation: pruned 0 nodes, tightened 0 bounds; strong branching children infeasible by propagation 0, propagated bounds passed to child LPs 0
+MIP: literal conflicts: added 1611, in pool 337 (aged out 1274), pruned 4 nodes, tightened 43 bounds
+MIP: conflict analysis (HiGHS style): calls 1387, conflicts 1607, added 1588, mean length 20.0, max length 109, 0.02s
+MIP: conflict analysis failures (all calls): no decision 0, too long midway 0, reason row lacks column 0, empty 0, too long at the end 0 (total length 0), max length 13
+MIP: branching: 7954 selections, 0 without strong branching for dual degeneracy; sb LPs 260 iters 1637
+MIP: sibling backtracks 2396; basis restores 5599 (basic count mismatch 785), first LP iterations after a restore 26168
+MIP: node diag: nodes 10300 node LPs 9968 mean rows 32.5 iters 58058 (5.8/LP) LP secs 0.87 sep rounds 364 added 74 node cut secs 0.21 final rows 32
+MIP: adaptive node cuts: rounds 74 effective 3 skipped 1398 (rate 0.111), node cut secs 0.21, outcomes cutoff/<0.02/<0.1/<0.3/>=0.3 [0, 71, 1, 1, 1], cut nnz Some(23.82076893487492) (rows mean 19.7)
+RESULT time_limit 6857.9868950400005 6779.697887058059 42006 4.0 6768.209347215373
