@@ -1393,6 +1393,13 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
     let pool_tid = pool.as_ref().map_or(0, |p| p.next_tid.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
     // racing ramp-up の競争中に始めた従か (主は start_workers で決める)
     let racing0 = pool.as_ref().is_some_and(|pl| pl.racing.load(std::sync::atomic::Ordering::Relaxed));
+    if !params.submip {
+        if let Some(x) = DEBUG_SOL.with(|d| d.borrow().clone()) {
+            if x.len() == p.n {
+                dom.dbg_sol = Some(std::sync::Arc::new(x));
+            }
+        }
+    }
     let mut s: Solver<L> = Solver {
         p,
         params,
@@ -1801,7 +1808,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             for &(j, xj, lo, up) in &bad {
                 let upper = xj > up + 1e-6;
                 match self.dom.last_change_of(j, upper) {
-                    Some((pos, reason, old, new)) => eprintln!("MIP_DEBUG_NODE {k} {stage}:   col {j} {} bound set by stack entry {pos} (reason {reason}: -1 decision, -2 external, -3 local redcost fixing, -4 strong branching fixing, -5 orbitope, -6 dual proof, -7 literal conflict, -8 objective propagation, >= 0 row) {old} -> {new}; stack len {}, global [{}, {}]", if upper { "upper" } else { "lower" }, self.dom.stack_len(), self.dom.global_lo[j], self.dom.global_up[j]),
+                    Some((pos, reason, old, new)) => eprintln!("MIP_DEBUG_NODE {k} {stage}:   col {j} {} bound set by stack entry {pos} (reason {reason}: -1 decision, -2 external, -3 local redcost fixing, -4 strong branching fixing, -5 orbitope, -6 dual proof, -7 literal conflict, -8 objective propagation, -9 implication (with ENOMOTO_MIP_DEBUG_IMPL_TAG), >= 0 row) {old} -> {new}; stack len {}, global [{}, {}]", if upper { "upper" } else { "lower" }, self.dom.stack_len(), self.dom.global_lo[j], self.dom.global_up[j]),
                     None => eprintln!("MIP_DEBUG_NODE {k} {stage}:   col {j} {} bound is in the root state (not on the stack); global [{}, {}], root/current [{lo}, {up}]", if upper { "upper" } else { "lower" }, self.dom.global_lo[j], self.dom.global_up[j]),
                 }
             }

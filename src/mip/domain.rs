@@ -70,6 +70,8 @@ pub struct Domain {
     low_water: usize,
     /// 根に戻ったときに適用する大域的な境界の締め付け (列, 上限か, 値)。
     pending_global: Vec<(usize, bool, f64)>,
+    /// 診断用: デバッグ解 (含意の伝播がデバッグ解を切ったら表示する)。
+    pub dbg_sol: Option<std::sync::Arc<Vec<f64>>>,
     /// 根に戻った回数 (活動量の誤差の蓄積を防ぐための定期的な再計算に使う)。
     resets: u64,
     /// 大域的な境界 (根で確定したものと、その後の大域的な締め付けを反映したもの)。
@@ -117,6 +119,7 @@ impl Domain {
             cur_reason: -1,
             low_water: 0,
             pending_global: Vec::new(),
+            dbg_sol: None,
             resets: 0,
             global_lo: p.col_lo.clone(),
             global_up: p.col_up.clone(),
@@ -447,8 +450,21 @@ impl Domain {
                     }
                     let lit = 2 * j + if self.lo[j] == 1.0 { 0 } else { 1 };
                     work += adj[lit].len();
+                    // 診断用 (`ENOMOTO_MIP_DEBUG_IMPL_TAG`): 含意による変更の理由を -9 にして出どころを区別する (衝突解析の段の区切りが
+                    // 変わるので診断のときだけ)
+                    let saved_reason = self.cur_reason;
+                    if env_str!("ENOMOTO_MIP_DEBUG_IMPL_TAG").is_some() {
+                        self.cur_reason = -9;
+                    }
                     for &c in &adj[lit] {
                         let k = (c / 2) as usize;
+                        // 診断用: 含意 (x_j = lo_j => x_k = w) がデバッグ解で成り立たなければ、含意が誤り
+                        if let Some(x) = &self.dbg_sol {
+                            let w = if c % 2 == 0 { 0.0 } else { 1.0 };
+                            if (x[j] - self.lo[j]).abs() <= 1e-6 && (x[k] - w).abs() > 1e-6 {
+                                eprintln!("MIP_DEBUG_SOL: implication x{j} = {} => x{k} = {w} is violated by the debug solution (x{j} {}, x{k} {})", self.lo[j], x[j], x[k]);
+                            }
+                        }
                         if c % 2 == 0 {
                             if self.up[k] > 0.0 {
                                 self.set_bound(p, k, true, 0.0, true);
@@ -460,6 +476,7 @@ impl Domain {
                             break;
                         }
                     }
+                    self.cur_reason = saved_reason;
                     if self.infeasible {
                         break;
                     }
