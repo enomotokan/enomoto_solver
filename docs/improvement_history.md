@@ -9691,6 +9691,13 @@ neos-950242 の 2 回目の調査 (`analysis/neos950242_r2_20261020.md`)。
 - 確認: mzzv42z -20785.7・-20783.9 (最適 -20540)、physiciansched6-2 48587〜48823 (49324)、roll3000・timtab1・30n20b8・supportcase26 も有限で最適値以下。cargo test 308 通過。
 - 副産物: mzzv42z では木の従 3 本が根の LP を基底なしで解き直して 60 秒までに木に加わらない (写しが根の基底を持たない)。
 
+## 2026-10-21: INEQ_SINGLETON を使う行数の下限を 1 万から 5000 に下げる (m5k) は不採用
+
+- ユーザーの案。`ENOMOTO_T_LARGE_PRESOLVE_MIN_ROWS=5000` (LP の前処理と共通の下限) を develop 34e55d0 で 40 + 16 問、newdef / m5k / m5keq2 (m5k + `PROBE_EQUIV2` + `EQUIV2_CUTS`) を 2 組。
+- 40 問 (解けた・SGM): IQa newdef 25・21.14 / m5k 26・19.79 / m5keq2 26・20.45、IQb newdef 26・20.88 / m5k 26・20.37 / m5keq2 26・21.40。
+- 16 問: IQa newdef 11・32.67 / m5k 11・36.17 / m5keq2 10・33.49、IQb newdef 11・36.52 / m5k 10・38.42 / m5keq2 10・39.64。不一致 0、"MIP: WARNING" 0。
+- m5k は 40 問の SGM が 2 組とも良いが、16 問の SGM が 2 組とも悪く IQb で beasleyC3 を落とすので不採用。physiciansched6-2 は IQa の m5k で根の下界 49110・暫定解 50626 だったが IQb の m5k では 51029 で再現しない。m5keq2 も 16 問で 2 組とも解けた数が減る。
+
 ## 改名一覧 (整理時)
 
 本メモ中は旧名で書かれている。
