@@ -2480,19 +2480,44 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let cap = if self.params.time_limit.is_finite() { (0.05 * self.params.time_limit).min(5.0) } else { 5.0 };
             let effort = (50 * nnz as u64).clamp(100_000, 50_000_000);
             // 診断用 (`ENOMOTO_MIP_DEBUG_FJ_TRIALS=N`): 根の前に FJ2 を種を変えて N 回 (各回は手間の上限まで) 回し、解を見つけた回数と
-            // 最小の違反行数を出す。FJ2 は決定的で、1 回の成否は行の並びなどで変わるので、前処理の形の比べ方に使う
+            // 最小の違反行数を出す。FJ2 は決定的で、1 回の成否は行の並びなどで変わるので、前処理の形の比べ方に使う。
+            // 既定の FJ_P3 のときは本番と同じ FJ 用の問題 ([`super::fj_p3_problem`]、LP 修復つき) で回し、種も本番と同じ
+            // (t 回目は `ENOMOTO_T_MIP_FJ_SEED=t` の種。`ENOMOTO_MIP_DEBUG_FJ_TRIALS_OLD` で以前の種と本体の問題)。
+            // 1 回の時間の上限は `ENOMOTO_T_MIP_DEBUG_FJ_TRIALS_CAP` 秒 (既定 30)
             if let Some(k) = env_str!("ENOMOTO_MIP_DEBUG_FJ_TRIALS").and_then(|v| v.parse::<u64>().ok()).filter(|_| !self.params.submip && self.snap.is_none()) {
                 let (pc, lo, up) = match &self.orig {
                     Some(o) => ((**o).clone(), o.col_lo.clone(), o.col_up.clone()),
                     None => (self.p.clone(), self.dom.lo.clone(), self.dom.up.clone()),
                 };
+                let old = env_str!("ENOMOTO_MIP_DEBUG_FJ_TRIALS_OLD").is_some();
+                let trial_cap = tunable!("ENOMOTO_T_MIP_DEBUG_FJ_TRIALS_CAP", 30.0, f64);
+                let p3 = if !old && super::fj_p3_on() { super::fj_p3_problem(&pc) } else { None };
+                let base_seed = self.rng ^ 0x9E37_79B9_7F4A_7C15;
                 let mut found = 0;
+                let mut viols: Vec<String> = Vec::new();
                 for t in 0..k {
-                    if super::fj::fj2_search(&pc, &lo, &up, 30.0, 0x1234_5678u64.wrapping_add(t.wrapping_mul(0x9E37_79B9_7F4A_7C15)), None).is_some() {
+                    let t0 = Instant::now();
+                    let r = if old {
+                        super::fj::fj2_search(&pc, &lo, &up, trial_cap, 0x1234_5678u64.wrapping_add(t.wrapping_mul(0x9E37_79B9_7F4A_7C15)), None)
+                    } else {
+                        let seed = base_seed.wrapping_add(t.wrapping_mul(0xD1B5_4A32_D192_ED03));
+                        match &p3 {
+                            Some((q, _, _)) => {
+                                crate::set_fj_p3_force(true);
+                                let r = super::fj::fj2_search(q, &q.col_lo, &q.col_up, trial_cap, seed, None);
+                                crate::set_fj_p3_force(false);
+                                r
+                            }
+                            None => super::fj::fj2_search(&pc, &lo, &up, trial_cap, seed, None),
+                        }
+                    };
+                    let obj = r.as_ref().map(|x| match &p3 { Some((q, _, _)) => q.objective(x), None => pc.objective(x) });
+                    if r.is_some() {
                         found += 1;
                     }
+                    viols.push(format!("{}{:.2}s", obj.map_or("-".to_string(), |o| format!("{o:.1}@")), t0.elapsed().as_secs_f64()));
                 }
-                eprintln!("MIP: FJ trials: found {found}/{k}");
+                eprintln!("MIP: FJ trials: found {found}/{k} ({}) [{}]", if p3.is_some() { "FJ_P3 problem" } else { "main problem" }, viols.join(" "));
             }
             if self.snap.is_some() || env_str!("ENOMOTO_MIP_DEBUG_NO_FJ").is_some() {
                 // 木の写しから解く: 解探しはしない (`ENOMOTO_MIP_DEBUG_NO_FJ` は診断用に FJ を使わない)

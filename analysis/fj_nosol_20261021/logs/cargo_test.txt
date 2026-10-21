@@ -1,0 +1,778 @@
+   Compiling autocfg v1.5.1
+   Compiling bytemuck v1.25.2
+   Compiling crossbeam-utils v0.8.22
+   Compiling version_check v0.9.5
+   Compiling libm v0.2.16
+   Compiling crossbeam-epoch v0.9.20
+   Compiling num-traits v0.2.19
+   Compiling proc-macro2 v1.0.107
+   Compiling crossbeam-deque v0.8.7
+   Compiling libc v0.2.189
+   Compiling cfg-if v1.0.4
+   Compiling quote v1.0.47
+   Compiling reborrow v0.5.5
+   Compiling num-complex v0.4.6
+   Compiling unicode-ident v1.0.24
+   Compiling bitflags v2.13.1
+   Compiling paste v1.0.15
+   Compiling rayon-core v1.13.0
+   Compiling raw-cpuid v11.6.0
+   Compiling either v1.18.0
+   Compiling rayon v1.12.0
+   Compiling dyn-stack-macros v0.1.3
+   Compiling dyn-stack v0.13.2
+   Compiling target-lexicon v0.12.16
+   Compiling once_cell v1.21.4
+   Compiling seq-macro v0.3.6
+   Compiling nano-gemm-codegen v0.1.0
+   Compiling nano-gemm-codegen v0.2.1
+   Compiling syn v2.0.119
+   Compiling pyo3-build-config v0.22.6
+   Compiling pulp v0.22.3
+   Compiling pulp-wasm-simd-flag v0.1.1
+   Compiling pulp v0.21.5
+   Compiling shlex v2.0.1
+   Compiling jobserver v0.1.35
+   Compiling find-msvc-tools v0.1.13
+   Compiling cc v1.4.7
+   Compiling syn v1.0.109
+   Compiling nano-gemm-core v0.1.0
+   Compiling nano-gemm-core v0.2.1
+   Compiling equator-macro v0.4.2
+   Compiling gemm-common v0.19.0
+   Compiling equator-macro v0.2.1
+   Compiling equator v0.2.2
+   Compiling equator v0.4.2
+   Compiling gemm-common v0.18.2
+   Compiling pyo3-macros-backend v0.22.6
+   Compiling pyo3-ffi v0.22.6
+   Compiling nano-gemm-c32 v0.2.1
+   Compiling nano-gemm-c64 v0.2.1
+   Compiling nano-gemm-f64 v0.2.1
+   Compiling nano-gemm-f32 v0.2.1
+   Compiling nano-gemm-f64 v0.1.0
+   Compiling nano-gemm-c64 v0.1.0
+   Compiling nano-gemm-f32 v0.1.0
+   Compiling nano-gemm-c32 v0.1.0
+   Compiling crossbeam-queue v0.3.14
+   Compiling crossbeam-channel v0.5.17
+   Compiling defer v0.2.1
+   Compiling crossbeam v0.8.5
+   Compiling libmimalloc-sys v0.1.49
+   Compiling atomic-wait v1.1.0
+   Compiling memoffset v0.9.1
+   Compiling generativity v1.2.1
+   Compiling heck v0.5.0
+   Compiling spindle v0.2.6
+   Compiling interpol v0.2.1
+   Compiling private-gemm-x86 v0.1.22
+   Compiling gemm-f64 v0.18.2
+   Compiling gemm-c64 v0.18.2
+   Compiling gemm-f32 v0.18.2
+   Compiling gemm-c32 v0.18.2
+   Compiling gemm-c32 v0.19.0
+   Compiling gemm-f64 v0.19.0
+   Compiling gemm-f32 v0.19.0
+   Compiling gemm-c64 v0.19.0
+   Compiling qd v0.8.0
+   Compiling metis-sys v0.3.2
+   Compiling num_cpus v1.17.0
+   Compiling pyo3 v0.22.6
+   Compiling pulp v0.18.22
+   Compiling coe-rs v0.1.2
+   Compiling matrixcompare-core v0.1.0
+   Compiling equator-macro v0.6.0
+   Compiling equator v0.6.0
+   Compiling matrixcompare v0.3.0
+   Compiling faer-entity v0.20.1
+   Compiling faer-traits v0.24.0
+   Compiling gemm v0.19.0
+   Compiling gemm v0.18.2
+   Compiling nano-gemm v0.1.3
+   Compiling nano-gemm v0.2.2
+   Compiling pyo3-macros v0.22.6
+   Compiling dyn-stack v0.11.0
+   Compiling unindent v0.2.4
+   Compiling indoc v2.0.7
+   Compiling dbgf v0.1.2
+   Compiling faer v0.20.2
+   Compiling mimalloc v0.1.52
+   Compiling faer v0.24.4
+   Compiling libloading v0.8.9
+   Compiling enomoto_core v0.1.3 (/home/user/enomoto_solver)
+warning: unused doc comment
+   --> src/mip/mod.rs:563:1
+    |
+563 | / /// `p` を (`use_presolve` なら MIP 前処理をかけてから) 分枝限定法で解き、解を `p` の空間に戻す。
+564 | | /// 戻した解が `p` で実行可能でなければ (前処理の誤りの安全網)、前処理なしで解き直す。
+565 | | /// サブ MIP (RENS/RINS) もこれで解く。
+    | |_--------------------------------------^
+    |   |
+    |   rustdoc does not generate documentation for macro invocations
+    |
+    = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+    = note: `#[warn(unused_doc_comments)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused doc comment
+  --> src/presolve.rs:54:1
+   |
+54 | / /// 前処理の実行不能判定に使う許容誤差: `base * (1 + |scale|)` (相対形、既定) または `base` (従来の絶対形)。
+55 | | ///
+56 | | /// `scale` は判定に関わる量の大きさ (固定値、行の活動度の項の絶対値の和、境界の絶対値など)。
+57 | | /// 丸め誤差はその大きさに比例するため (`params::presolve::PRESOLVE_REL_TOL` 参照)。
+58 | | /// `ENOMOTO_T_PRESOLVE_REL_TOL=0` で従来の絶対判定に戻る。`scale` が有限でなければ `base`。
+   | |_-------------------------------------------------------------------------------------------^
+   |   |
+   |   rustdoc does not generate documentation for macro invocations
+   |
+   = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: `#[inline]` attribute cannot be used on macro calls
+  --> src/presolve.rs:59:1
+   |
+59 | #[inline]
+   | ^^^^^^^^^
+   |
+   = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+   = help: `#[inline]` can only be applied to functions
+   = note: `#[warn(unused_attributes)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused doc comment
+  --> src/presolve.rs:54:1
+   |
+54 | / /// 前処理の実行不能判定に使う許容誤差: `base * (1 + |scale|)` (相対形、既定) または `base` (従来の絶対形)。
+55 | | ///
+56 | | /// `scale` は判定に関わる量の大きさ (固定値、行の活動度の項の絶対値の和、境界の絶対値など)。
+57 | | /// 丸め誤差はその大きさに比例するため (`params::presolve::PRESOLVE_REL_TOL` 参照)。
+...  |
+60 | | /// 整数最適化の前処理で、整数列を示す印 (スレッドローカル)。設定中は、列を代入で消す縮約が整数列を
+61 | | /// 消さず、境界の伝播で得た整数列の境界を丸める (計画書 §7)。
+   | |_-------------------------------------------------------------^
+   |   |
+   |   rustdoc does not generate documentation for macro invocations
+   |
+   = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> src/simplex/lu.rs:2375:1
+     |
+2375 | / /// `m x m` の疎行列 (疎行 `(列, 値)` の並び) を LU 分解する。数値的に特異
+2376 | | /// (あるステップで許容できるピボットが残っていない) なら `None`。
+2377 | | /// 境界列が適量あれば [`factorize_bordered`]、稠密なら [`factorize_dense_faer`]、
+2378 | | /// それ以外は Markowitz 消去に振り分ける。
+     | |_------------------------------------------^
+     |   |
+     |   rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused variable: `p`
+    --> src/mip/heuristics.rs:1566:13
+     |
+1566 |         let p = self.p;
+     |             ^ help: if this is intentional, prefix it with an underscore: `_p`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `fr` is never read
+    --> src/mip/heuristics.rs:1939:22
+     |
+1939 |         let mut fr = 0.0;
+     |                      ^^^ this value is reassigned later and never used
+...
+1945 |                 fr = rate(self);
+     |                 --------------- `fr` is overwritten here before the previous value is read
+     |
+     = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src/mip/separation.rs:369:13
+    |
+369 |         let mut obj_hist: Vec<f64> = vec![prev_obj];
+    |             ----^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `obj_hist`
+   --> src/mip/separation.rs:369:13
+    |
+369 |         let mut obj_hist: Vec<f64> = vec![prev_obj];
+    |             ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_obj_hist`
+
+warning: variable does not need to be mutable
+    --> src/mip/separation.rs:1610:25
+     |
+1610 | ...   let mut skip_col = |j: usize, arcs: &Vec<Vec<(usize, f64)>>, other: &Vec<Vec<(usize, f64)>>, try_neg: &mut bool, path: &Vec<...
+     |           ----^^^^^^^^
+     |           |
+     |           help: remove this `mut`
+
+warning: unused variable: `j`
+   --> src/mip/zerohalf.rs:244:46
+    |
+244 |         let act: f64 = c.coefs.iter().map(|&(j, a)| a * 0.5).sum();
+    |                                              ^ help: if this is intentional, prefix it with an underscore: `_j`
+
+warning: variable does not need to be mutable
+    --> src/mip/mod.rs:1623:9
+     |
+1623 |     let mut add_implied = |j: usize, v: bool, ch: &[(usize, bool, f64)], dom: &Domain, implied: &mut Vec<(u32, bool, u32, bool, f6...
+     |         ----^^^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/mip/mod.rs:1646:9
+     |
+1646 |     let mut add_edges = |j: usize, v: u32, ch: &[(usize, bool, f64)], edges: &mut Vec<(u32, u32)>| {
+     |         ----^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: unused variable: `variables`
+    --> src/mip/mod.rs:3047:13
+     |
+3047 |         let variables = vec![
+     |             ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_variables`
+
+warning: variable does not need to be mutable
+   --> src/presolve/doubleton.rs:349:17
+    |
+349 |             let mut rand_row = |len: usize, rnd: &mut dyn FnMut() -> u64| -> Vec<(usize, f64)> {
+    |                 ----^^^^^^^^
+    |                 |
+    |                 help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/presolve/scaling.rs:345:17
+    |
+345 |             let mut rows_of = |count: usize, rnd: &mut dyn FnMut() -> u64| -> Vec<Vec<(usize, f64)>> {
+    |                 ----^^^^^^^
+    |                 |
+    |                 help: remove this `mut`
+
+warning: value assigned to `alpha_nnz` is never read
+    --> src/simplex/slope_intercept_dual.rs:5602:29
+     |
+5602 |         let mut alpha_nnz = m;
+     |                             ^ this value is reassigned later and never used
+...
+5638 |             alpha_nnz = a_nnz;
+     |             ----------------- `alpha_nnz` is overwritten here before the previous value is read
+
+warning: variable does not need to be mutable
+    --> src/simplex.rs:2311:9
+     |
+2311 |     let mut apply = |rows: &mut Vec<Vec<(usize, f64)>>, rs: &[f64], cs: &[f64], dr: &mut [f64], dc: &mut [f64]| {
+     |         ----^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: type `simplex::StdForm` is more private than the item `solve_simplex_block`
+    --> src/simplex.rs:2396:1
+     |
+2396 | pub(super) fn solve_simplex_block(std: &StdForm, opts: &crate::types::LpOptions) -> SimplexResult {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ function `solve_simplex_block` is reachable at visibility `pub(crate)`
+     |
+note: but type `simplex::StdForm` is only usable at visibility `pub(self)`
+    --> src/simplex.rs:241:1
+     |
+ 241 | struct StdForm {
+     | ^^^^^^^^^^^^^^
+     = note: `#[warn(private_interfaces)]` on by default
+
+warning: type `simplex::StdForm` is more private than the item `simplex::slope_intercept_dual::solve_slope_intercept_dual`
+    --> src/simplex/slope_intercept_dual.rs:3279:1
+     |
+3279 | pub fn solve_slope_intercept_dual(std: &StdForm, opts: &crate::types::LpOptions) -> Option<SimplexResult> {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ function `simplex::slope_intercept_dual::solve_slope_intercept_dual` is reachable at visibility `pub(crate)`
+     |
+note: but type `simplex::StdForm` is only usable at visibility `pub(self)`
+    --> src/simplex.rs:241:1
+     |
+ 241 | struct StdForm {
+     | ^^^^^^^^^^^^^^
+
+warning: methods `matvec` and `solve_refined` are never used
+   --> src/interior_point/kkt.rs:673:12
+    |
+514 | impl AugKkt {
+    | ----------- methods in this implementation
+...
+673 |     pub fn matvec(&self, a: &FaerCsr, v: &[f64], out: &mut [f64]) {
+    |            ^^^^^^
+...
+688 |     pub fn solve_refined(&mut self, a: &FaerCsr, rhs: &mut [f64], refine: usize, work: &mut Vec<f64>) {
+    |            ^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `available` is never used
+  --> src/interior_point/pardiso.rs:70:8
+   |
+70 | pub fn available() -> bool {
+   |        ^^^^^^^^^
+
+warning: method `factor_nnz` is never used
+   --> src/interior_point/pardiso.rs:205:12
+    |
+ 93 | impl Pardiso {
+    | ------------ method in this implementation
+...
+205 |     pub fn factor_nnz(&self) -> usize {
+    |            ^^^^^^^^^^
+
+warning: field `w` is never read
+    --> src/mip/solver.rs:1073:5
+     |
+1064 | struct TriggerEval {
+     |        ----------- field in this struct
+...
+1073 |     w: f64,
+     |     ^
+
+warning: method `generation` is never used
+    --> src/mip/solver.rs:1180:19
+     |
+1152 | impl Portfolio {
+     | -------------- method in this implementation
+...
+1180 |     pub(crate) fn generation(&self) -> u64 {
+     |                   ^^^^^^^^^^
+
+warning: method `crossover` is never used
+  --> src/mip/heur_scip.rs:47:19
+   |
+11 | impl<'a, L: MipLp> Solver<'a, L> {
+   | -------------------------------- method in this implementation
+...
+47 |     pub(super) fn crossover(&mut self) -> bool {
+   |                   ^^^^^^^^^
+
+warning: constant `INT_TOL` is never used
+    --> src/params.rs:1233:22
+     |
+1233 |     pub(crate) const INT_TOL: f64 = 1e-6;
+     |                      ^^^^^^^
+
+warning: constant `OBJ_EPS` is never used
+    --> src/params.rs:1237:22
+     |
+1237 |     pub(crate) const OBJ_EPS: f64 = 1e-7;
+     |                      ^^^^^^^
+
+warning: constant `MAX_NODES` is never used
+    --> src/params.rs:1240:22
+     |
+1240 |     pub(crate) const MAX_NODES: usize = 20_000;
+     |                      ^^^^^^^^^
+
+warning: constant `BOUND_INFEAS_TOL` is never used
+    --> src/params.rs:1243:22
+     |
+1243 |     pub(crate) const BOUND_INFEAS_TOL: f64 = 1e-9;
+     |                      ^^^^^^^^^^^^^^^^
+
+warning: field `h` is never read
+  --> src/presolve/parallelrows.rs:32:9
+   |
+24 | pub struct ParallelRowsResult {
+   |            ------------------ field in this struct
+...
+32 |     pub h: Vec<f64>,
+   |         ^
+
+warning: method `paths` is never used
+   --> src/simplex/basis_kernel.rs:212:19
+    |
+174 | impl BasisKernel {
+    | ---------------- method in this implementation
+...
+212 |     pub(super) fn paths(&self) -> SparsePaths {
+    |                   ^^^^^
+
+warning: method `gt_zero` is never used
+   --> src/simplex/slope_intercept_dual.rs:521:8
+    |
+484 | impl Affine1 {
+    | ------------ method in this implementation
+...
+521 |     fn gt_zero(&self) -> bool {
+    |        ^^^^^^^
+
+warning: field `x1` is never read
+    --> src/simplex/slope_intercept_dual.rs:1436:23
+     |
+1436 |     NoFiniteOptimum { x1: Vec<f64> },
+     |     ---------------   ^^
+     |     |
+     |     field in this variant
+
+warning: methods `num_cols`, `set_row_bounds`, and `last_status` are never used
+   --> src/simplex/mip_lp.rs:255:12
+    |
+135 | impl TwoStageLp {
+    | --------------- methods in this implementation
+...
+255 |     pub fn num_cols(&self) -> usize {
+    |            ^^^^^^^^
+...
+307 |     pub fn set_row_bounds(&mut self, i: usize, lo: f64, up: f64) {
+    |            ^^^^^^^^^^^^^^
+...
+648 |     pub fn last_status(&self) -> Option<LpStatus> {
+    |            ^^^^^^^^^^^
+
+warning: method `flip` is never used
+  --> src/types.rs:81:12
+   |
+66 | impl RowSense {
+   | ------------- method in this implementation
+...
+81 |     pub fn flip(self) -> Self {
+   |            ^^^^
+
+warning: the `col_entry_start:` in this pattern is redundant
+    --> src/simplex/slope_intercept_dual.rs:3764:17
+     |
+3764 |                 col_entry_start: ref col_entry_start,
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: use shorthand field pattern: `ref col_entry_start`
+     |
+     = note: `#[warn(non_shorthand_field_patterns)]` on by default
+
+warning: `enomoto_core` (lib test) generated 37 warnings (run `cargo fix --lib -p enomoto_core --tests` to apply 13 suggestions)
+    Finished `release` profile [optimized] target(s) in 2m 35s
+     Running unittests src/lib.rs (target/release/deps/_core-3c4d803deacd8501)
+
+running 325 tests
+test graph::tests::dulmage_mendelsohn_blocks_topological_none_when_matching_is_imperfect ... ok
+test graph::tests::dulmage_mendelsohn_blocks_topological_none_when_not_square ... ok
+test graph::tests::dulmage_mendelsohn_blocks_topological_orders_a_pure_chain_source_first ... ok
+test graph::tests::dulmage_mendelsohn_blocks_topological_keeps_a_genuine_cycle_together ... ok
+test graph::tests::max_bipartite_matching_covers_a_perfect_matching ... ok
+test graph::tests::dulmage_mendelsohn_blocks_matches_disjoint_column_groups ... ok
+test graph::tests::max_bipartite_matching_displaces_an_existing_match_on_success ... ok
+test graph::tests::max_bipartite_matching_falls_through_a_failed_recursion_to_its_own_free_column ... ok
+test graph::tests::max_bipartite_matching_leaves_excess_rows_unmatched ... ok
+test graph::tests::tarjan_scc_finds_a_simple_cycle ... ok
+test graph::tests::tarjan_scc_splits_a_pure_chain_into_singletons ... ok
+test interior_point::boxed::tests::ipm_dump_replay ... ignored
+test interior_point::kkt::chol_bench::chol_bench ... ignored
+test graph::tests::max_bipartite_matching_matches_the_recursive_reference_on_many_random_graphs ... ok
+test interior_point::boxed::tests::box_ipm_detects_infeasible_and_solves_feasible ... ok
+test graph::tests::max_bipartite_matching_handles_a_deep_augmenting_chain_without_overflowing_the_stack ... ok
+test interior_point::multifrontal::kernel_bench::front_update_bench ... ignored
+test interior_point::multifrontal::kernel_bench::kernel_bench ... ignored
+test interior_point::pdlp::tests::pdlp_solves_small_lp ... ok
+test mip::clique::tests::complemented_literals ... ok
+test mip::clique::tests::triangle_clique_cut ... ok
+test mip::cuts::highs_dump::highs_cut_dump ... ignored
+test interior_point::kkt::woodbury_tests::normal_with_dense_columns_solves_augmented_system ... ok
+test mip::cuts::tests::cover_on_knapsack ... ok
+test mip::cuts::lifted_cover_tests::lifted_cover_is_valid ... ok
+test mip::cuts::tests::flow_cover_textbook_example ... ok
+test mip::cuts::tests::mir_on_simple_row ... ok
+test mip::cuts::tests::mir_with_variable_upper_bound ... ok
+test mip::domain::tests::add_implications_propagates_contrapositive ... ok
+test mip::domain::tests::propagation_and_backtrack ... ok
+test mip::problem::tests::implied_integers_chain_through_equalities ... ok
+test mip::symmetry::tests::canonicalize_sorts_columns_with_star_generators ... ok
+test mip::symmetry::tests::finds_orbitope_for_identical_machines ... ok
+test mip::symmetry::tests::finds_swap_of_identical_machines ... ok
+test mip::symmetry::tests::lex_canonicalize_satisfies_lex_leader_pairs ... ok
+test mip::symmetry::tests::no_symmetry_when_costs_differ ... ok
+test mip::cuts::tests::flow_cover_random_validity ... ok
+test mip::symmetry::tests::orbitopal_fixing_small_cases ... ok
+test mip::symmetry::tests::orbitopal_fixing_brute_force ... ok
+test mip::symmetry::tests::rejects_color_equal_but_non_symmetric ... ok
+test mip::tests::dominated_binary_fixings_keep_optimum ... ok
+test mip::tests::dual_bound_tightening_keeps_optimum ... ok
+test mip::tests::extend_clique_rows_adds_common_neighbors ... ok
+test mip::tests::integer_bounds_are_rounded ... ok
+test mip::tests::merge_parallel_rows_makes_ranged_row ... ok
+test mip::tests::presolve_keeps_objective_constant ... ok
+test mip::tests::sparsify_rows_subtracts_disjoint_equations ... ok
+test mip::symmetry::tests::packing_orbitopal_fixing_brute_force ... ok
+test mip::tests::tighten_coefficients_saturates_cover_row ... ok
+test mip::zerohalf::tests::odd_cycle_in_a_triangle ... ok
+test mip::tests::tighten_coefficients_keeps_integer_feasible_set ... ok
+test presolve::aggregator::tests::cascading_elimination_within_one_call ... ok
+test presolve::aggregator::tests::eliminates_an_implied_free_column_appearing_in_two_rows ... ok
+test presolve::aggregator::tests::fillin_cost_counts_only_genuinely_new_columns ... ok
+test presolve::aggregator::tests::fold_reaches_a_shared_real_row_too ... ok
+test presolve::aggregator::tests::neither_row_alone_proving_it_leaves_the_column_un_eliminated ... ok
+test mip::zerohalf::tests::random_validity ... ok
+test presolve::aggregator::tests::no_implied_free_columns_is_a_no_op ... ok
+test presolve::aggregator::tests::residual_range_excludes_only_the_named_columns_own_term ... ok
+test presolve::aggregator::tests::non_implied_free_column_is_left_alone ... ok
+test presolve::aggregator::tests::row_activity_matches_hand_derivation ... ok
+test presolve::aggregator::tests::v2_has_candidate_is_consistent_with_v2 ... ok
+test presolve::aggregator::tests::v2_min_a_count_two_keeps_the_old_gate ... ok
+test presolve::aggregator::tests::v2_rejects_a_justification_whose_shared_row_was_already_consumed ... ok
+test presolve::aggregator::tests::v2_uses_an_inequality_row_to_justify_the_other_side ... ok
+test presolve::aggregator::tests::xrow_eliminates_a_column_no_single_row_alone_justifies ... ok
+test presolve::aggregator::tests::xrow_rejects_a_justification_whose_shared_row_was_already_consumed ... ok
+test presolve::dominatedcol::tests::does_nothing_when_neither_escape_route_is_open ... ok
+test presolve::dominatedcol::tests::excludes_variables_appearing_in_any_equality_row ... ok
+test presolve::dominatedcol::tests::fixes_the_dominated_column_to_its_lower_bound ... ok
+test presolve::dominatedcol::tests::fixes_the_dominating_column_to_its_upper_bound_when_the_dominated_side_is_unbounded_below ... ok
+test presolve::dominatedcol::tests::leaves_a_non_dominated_pair_untouched ... ok
+test presolve::dominatedcol::tests::never_reuses_a_committed_column_as_either_side_of_a_second_fix ... ok
+test presolve::doubleton::tests::eliminates_larger_coefficient_variable_and_rewrites_other_rows ... ok
+test presolve::doubleton::tests::no_candidate_fast_path_matches_full_pass ... ok
+test presolve::doubleton::tests::recovers_eliminated_variable_value_within_its_own_bounds ... ok
+test presolve::dualpropagate::tests::bounded_hub_column_proves_nothing ... ok
+test presolve::dualpropagate::tests::free_hub_column_forces_its_only_inequality_tight ... ok
+test presolve::dualpropagate::tests::no_real_rows_is_a_no_op ... ok
+test presolve::dualpropagate::tests::two_free_columns_sharing_a_row_still_forces_it ... ok
+test presolve::dualpropagate::tests::unfavorable_cost_sign_alone_proves_nothing ... ok
+test presolve::foldfixed::tests::a_row_reduced_to_zero_live_terms_is_infeasible_when_inconsistent ... ok
+test presolve::foldfixed::tests::a_row_reduced_to_zero_live_terms_tolerates_relative_rounding_at_large_scale ... ok
+test presolve::foldfixed::tests::a_row_reduced_to_zero_live_terms_vanishes_when_consistent ... ok
+test presolve::foldfixed::tests::an_inequality_row_reduced_to_zero_live_terms_only_needs_nonnegative_slack ... ok
+test presolve::foldfixed::tests::drops_fixed_terms_and_folds_their_value_into_rhs ... ok
+test presolve::foldfixed::tests::explicit_zero_coefficients_are_dropped_without_touching_rhs ... ok
+test presolve::foldfixed::tests::leaves_a_row_with_no_fixed_columns_untouched ... ok
+test presolve::forcingcol::tests::column_with_cost_or_in_equality_or_locked_is_kept ... ok
+test presolve::forcingcol::tests::zero_cost_column_relaxing_all_its_rows_is_removed_and_restored ... ok
+test presolve::freevar::tests::a_row_elimination_folds_into_a_shared_real_row_too ... ok
+test presolve::freevar::tests::cascading_elimination_of_two_free_variables ... ok
+test presolve::freevar::tests::cascading_elimination_through_shared_inequality_row ... ok
+test presolve::freevar::tests::eliminates_free_variable_appearing_in_two_rows ... ok
+test presolve::freevar::tests::free_variable_in_one_inequality_row_with_favorable_sign_is_substituted ... ok
+test presolve::freevar::tests::free_variable_in_one_inequality_row_with_unfavorable_sign_is_unbounded ... ok
+test presolve::freevar::tests::free_variable_in_one_inequality_row_with_zero_cost_is_substituted ... ok
+test presolve::freevar::tests::free_variable_in_two_inequality_rows_is_left_alone ... ok
+test presolve::freevar::tests::leftover_free_variable_with_nonzero_cost_is_unbounded ... ok
+test presolve::freevar::tests::leftover_free_variable_with_zero_cost_is_fixed ... ok
+test presolve::freevar::tests::no_free_variables_is_a_no_op ... ok
+test presolve::ineqsingleton::tests::equality_row_columns_are_left_to_colsingleton ... ok
+test presolve::ineqsingleton::tests::fixes_when_the_row_can_never_bind ... ok
+test presolve::ineqsingleton::tests::lower_side_becomes_tight_when_cost_pushes_down ... ok
+test presolve::ineqsingleton::tests::neither_when_the_box_and_the_row_both_can_bind ... ok
+test presolve::ineqsingleton::tests::ranged_pair_is_one_row_and_its_upper_side_becomes_tight ... ok
+test presolve::parallelcols::tests::handles_negative_scale ... ok
+test presolve::parallelcols::tests::ignores_columns_with_no_real_row_appearance ... ok
+test presolve::parallelcols::tests::leaves_a_fully_free_column_untouched ... ok
+test presolve::parallelcols::tests::leaves_unequal_cost_ratio_untouched ... ok
+test presolve::parallelcols::tests::merges_a_whole_group_in_one_call ... ok
+test presolve::parallelcols::tests::merges_two_identical_columns_with_equal_cost ... ok
+test presolve::parallelcols::tests::merges_an_upper_unbounded_column_the_standgub_shape ... ok
+test presolve::parallelcols::tests::recovers_a_feasible_split_at_every_extreme_and_interior_point ... ok
+test presolve::parallelcols::tests::refuses_a_merge_that_would_make_the_result_lower_unbounded ... ok
+test presolve::parallelrows::tests::detects_infeasibility_when_the_bounds_cross ... ok
+test presolve::parallelrows::tests::ignores_same_sign_duplicates_leaving_them_for_reduce_inequalities ... ok
+test presolve::parallelrows::tests::leaves_a_genuine_range_untouched ... ok
+test presolve::parallelrows::tests::leaves_box_bound_rows_untouched ... ok
+test presolve::parallelrows::tests::merges_a_tight_opposite_pair_into_an_equality ... ok
+test presolve::propagate::eqprop_tests::contradictory_equality_row_is_infeasible ... ok
+test presolve::propagate::eqprop_tests::dominant_term_bound_avoids_cancellation ... ok
+test presolve::propagate::eqprop_tests::forcing_row_fixes_every_term_at_its_matching_bound ... ok
+test presolve::propagate::eqprop_tests::free_column_gets_a_finite_bound_from_an_equality_row ... ok
+test presolve::propagate::eqprop_tests::relative_tolerance_in_equality_infeasibility ... ok
+test presolve::propagate::tests::forcing_row_fixes_every_variable_to_its_minimum_bound ... ok
+test presolve::propagate::tests::forcing_row_with_mixed_signs_uses_the_matching_bound_per_term ... ok
+test presolve::redundancy::opposite_pair_tests::finds_only_zero_width_opposite_pairs ... ok
+test presolve::redundancy::tests::dedupe_rows_matches_reference_bit_for_bit ... ok
+test presolve::redundancy::tests::dense_density_threshold_routes_known_instances_correctly ... ok
+test presolve::redundancy::tests::drop_linearly_dependent_maps_pivot_positions_to_the_right_rows ... ok
+test presolve::redundancy::tests::drop_linearly_dependent_sparse_blocked_handles_independent_blocks_separately ... ok
+test presolve::redundancy::tests::drop_linearly_dependent_sparse_blocked_matches_unblocked_on_a_single_component ... ok
+test presolve::redundancy::tests::drop_linearly_dependent_sparse_drops_an_exact_duplicate ... ok
+test presolve::redundancy::tests::drop_linearly_dependent_sparse_finds_the_right_rank_in_a_larger_system ... ok
+test presolve::redundancy::tests::drop_linearly_dependent_sparse_keeps_everything_when_independent ... ok
+test presolve::redundancy::tests::drop_linearly_dependent_sparse_keeps_rhs_inconsistent_rows ... ok
+test presolve::redundancy::tests::drop_linearly_dependent_sparse_matches_dense_on_the_same_case ... ok
+test presolve::redundancy::tests::drop_linearly_dependent_sparse_blocked_matches_sequential_result_under_parallel_dispatch ... ok
+test presolve::redundancy::tests::dulmage_mendelsohn_blocks_splits_a_pure_chain_into_singletons ... ok
+test presolve::redundancy::tests::dulmage_mendelsohn_blocks_splits_disjoint_cyclic_groups ... ok
+test presolve::redundancy::tests::reduce_inequalities_matches_reference_bit_for_bit ... ok
+test presolve::redundancy::tests::reduce_inequality_rows_matches_materialized_g ... ok
+test presolve::rowdominance::tests::a_row_used_to_justify_a_drop_is_never_itself_dropped_in_the_same_call ... ok
+test presolve::rowdominance::tests::drops_the_row_dominated_by_a_tighter_pointwise_larger_row ... ok
+test presolve::rowdominance::tests::excludes_rows_touching_an_equality_locked_column ... ok
+test presolve::rowdominance::tests::keeps_both_when_bounds_disagree_with_coefficient_order ... ok
+test presolve::rowdominance::tests::keeps_both_when_a_column_can_go_negative ... ok
+test presolve::rowdominance::tests::leaves_box_bound_rows_untouched ... ok
+test presolve::rowsingleton::tests::feasibility_level_violation_is_clamped_to_the_bound ... ok
+test presolve::rowsingleton::tests::fixes_a_singleton_row_and_drops_it ... ok
+test presolve::rowsingleton::tests::reports_infeasible_when_forced_value_outside_bounds ... ok
+test presolve::rowsingleton::tests::violation_beyond_feasibility_tolerance_is_infeasible_at_large_scale ... ok
+test presolve::rowsingleton::tests::tiny_relative_bound_violation_at_large_scale_is_not_infeasible ... ok
+test presolve::scaling::tests::col_norm_fold_rayon_threshold_microbench ... ignored
+test presolve::smallcoeff::tests::drops_a_coefficient_whose_contribution_is_negligible_via_a_tiny_bound_width ... ok
+test presolve::smallcoeff::tests::drops_a_raw_noise_coefficient_regardless_of_bound_width ... ok
+test presolve::smallcoeff::tests::keeps_a_genuinely_significant_coefficient ... ok
+test presolve::smallcoeff::tests::merges_duplicate_column_entries_before_testing_them ... ok
+test presolve::scaling::tests::unit_fast_path_matches_plain_loop_bit_for_bit ... ok
+test presolve::smallcoeff::tests::respects_the_cumulative_budget_across_several_small_entries_in_one_row ... ok
+test presolve::sparsify::tests::a_row_already_used_as_a_target_is_never_used_as_a_later_pivot ... ok
+test presolve::sparsify::tests::leaves_a_non_superset_row_untouched ... ok
+test presolve::sparsify::tests::sparsifies_a_superset_equality_row ... ok
+test presolve::stuffing::tests::candidate_with_infinite_own_bound_is_skipped ... ok
+test presolve::sparsify::tests::sparsifies_a_superset_inequality_row_with_zero_fill_in ... ok
+test presolve::stuffing::tests::column_in_equality_row_is_excluded ... ok
+test presolve::stuffing::tests::column_in_two_rows_is_not_a_singleton ... ok
+test presolve::stuffing::tests::empty_input_fixes_nothing ... ok
+test presolve::stuffing::tests::favorable_sign_is_left_to_dualfix ... ok
+test presolve::stuffing::tests::mirror_case_reduces_correctly_via_the_y_substitution ... ok
+test presolve::stuffing::tests::fractional_knapsack_best_and_worst_ratio_items_get_fixed ... ok
+test presolve::stuffing::tests::unbounded_other_column_blocks_the_upper_fixing ... ok
+test simplex::lp_bug_debug::doubleton_keeps_contradictory_bounds_infeasible ... ok
+test simplex::lp_bug_debug::lp_bug_debug ... ignored
+test simplex::lu::lu_dump_bench::lu_dump_bench ... ignored
+test simplex::lu::tests::border_crossover_sweep ... ignored
+test simplex::lu::tests::border_crossover_sweep_fine ... ignored
+test simplex::lu::tests::border_crossover_sweep_partial_density ... ignored
+test simplex::lu::tests::border_crossover_sweep_scaling ... ignored
+test simplex::lp_bug_debug::unbounded_cases_reported_unbounded ... ok
+test simplex::lu::tests::dense_block_bench ... ignored
+test simplex::lu::tests::density_gate_flips_a_sparse_rhs_channel_dense_and_back ... ok
+test simplex::lu::tests::btran_agrees_between_scatter_and_gather_after_ft_updates ... ok
+test simplex::lu::tests::factorize_and_solve_matches_expected ... ok
+test simplex::lu::tests::factorize_bordered_falls_back_to_none_on_stuck_sparse_phase ... ok
+test simplex::lu::tests::factorize_bordered_matches_flat_markowitz ... ok
+test simplex::lu::tests::factorize_bordered_matches_flat_markowitz_larger ... ok
+test simplex::lu::tests::factorize_dense_faer_detects_singular ... ok
+test simplex::lu::tests::factorize_dense_faer_matches_hand_verified_solve ... ok
+test simplex::lu::tests::factorize_detects_singular ... ok
+test simplex::lu::tests::factorize_diagonal_matches_expected_solve ... ok
+test simplex::lu::tests::factorize_diagonal_rejects_off_diagonal_entries ... ok
+test simplex::lu::tests::factorize_diagonal_vs_markowitz_sweep ... ignored
+test simplex::lu::tests::factorize_dispatches_dense_input_to_faer ... ok
+test simplex::lu::tests::factorize_reusing_matches_a_from_scratch_factorization_through_column_replacements ... ok
+test simplex::lu::tests::ft_update_chain_of_three_matches_full_refactor ... ok
+test simplex::lu::tests::ft_update_chain_of_two_matches_full_refactor ... ok
+test simplex::lu::tests::ft_update_matches_full_refactor ... ok
+test simplex::lu::tests::ft_update_matches_full_refactor_on_dense_basis ... ok
+test simplex::lu::tests::ft_update_rejects_tiny_pivot ... ok
+test simplex::lu::tests::hyper_u_ftran_is_bit_identical ... ok
+test simplex::lu::tests::l_row_is_the_exact_transpose_of_l_col ... ok
+test simplex::lu::tests::l_transpose_scatter_matches_gather ... ok
+test simplex::lu::tests::lu_kernel_bench ... ignored
+test simplex::lu::tests::pair_ftran_is_bit_identical_to_two_separate_solves ... ok
+test simplex::lu::tests::reused_order_rejects_a_singular_matrix ... ok
+test simplex::lu::tests::reused_order_repicks_the_row_when_the_recorded_one_is_numerically_weak ... ok
+test simplex::lu::tests::reused_order_reproduces_a_fresh_factorization_of_the_same_matrix ... ok
+test simplex::lu::tests::reused_order_respects_the_fill_limit ... ok
+test simplex::lu::tests::reused_order_solves_a_basis_whose_columns_were_replaced ... ok
+test simplex::lu::tests::should_use_dense_solve_flags_dense_rhs_and_not_sparse ... ok
+test simplex::lu::tests::solve_paths_report_the_result_nonzero_count ... ok
+test simplex::lu::tests::solve_transpose_unit_into_matches_dense_on_fresh_factorization ... ok
+test simplex::lu::tests::solve_transpose_unit_is_bit_identical_to_the_dense_unit_rhs_path ... ok
+test simplex::lu::tests::sparse_solve_matches_dense_after_reordering_u_seq ... ok
+test simplex::lu::tests::sparse_solve_matches_dense_on_simple_case ... ok
+test simplex::lu::tests::sparse_solve_matches_dense_with_ft_updates ... ok
+test simplex::lu::tests::sparse_solve_repeated_calls_reuse_scratch_correctly ... ok
+test simplex::lu::tests::ft_update_on_dense_block_matches_full_refactor ... ok
+test simplex::lu::tests::try_update_precomputed_matches_try_update ... ok
+test simplex::lu::tests::unit_btran_work_and_tau_gp_are_bit_identical ... ok
+test simplex::mip_lp::tests::interior_point_and_crossover_vertex ... ok
+test simplex::mip_lp::tests::small_lp_and_bound_change ... ok
+test simplex::mip_lp::tests::warm_start_from_dual_infeasible_basis ... ok
+test simplex::slope_intercept_dual::tests::bfrt_flips_multiple_bounded_candidates_before_the_real_unbounded_pivot ... ok
+test simplex::slope_intercept_dual::tests::cleanup_ratio_test_pivots_on_the_blocking_row_and_stays_primal_feasible ... ok
+test simplex::slope_intercept_dual::tests::degenerate_cost_shift_moves_only_near_zero_nonbasic_duals_inward ... ok
+test simplex::slope_intercept_dual::tests::direct_pivot_resolves_unbounded_column_into_the_basis ... ok
+test simplex::slope_intercept_dual::tests::genuinely_free_column_reaches_a_finite_optimum_via_one_equality_row ... ok
+test simplex::slope_intercept_dual::tests::infeasibility_certificate_accepts_a_farkas_row_and_rejects_a_feasible_one ... ok
+test simplex::slope_intercept_dual::tests::infeasible_row_is_reported_regardless_of_an_unbounded_column ... ok
+test simplex::slope_intercept_dual::tests::m_zero_bounded_direction_is_optimal_at_its_finite_bound ... ok
+test simplex::slope_intercept_dual::tests::m_zero_unbounded_direction_reports_unbounded ... ok
+test simplex::slope_intercept_dual::tests::noise_pivot_filter_drops_only_candidates_below_the_noise_level ... ok
+test simplex::slope_intercept_dual::tests::orphaned_unbounded_column_with_zero_cost_is_cleaned_up_without_a_pivot ... ok
+test simplex::slope_intercept_dual::tests::rollback_undoes_the_last_pivot_and_its_trailing_flips ... ok
+test simplex::slope_intercept_dual::tests::two_free_columns_tied_only_through_opposing_inequality_rows_park_one_at_zero ... ok
+test simplex::slope_intercept_dual::tests::xb_row_mismatch_is_relative_to_the_dot_product_terms ... ok
+test simplex::slope_intercept_dual::tests::zero_cost_free_column_starts_at_zero_and_enters_first ... ok
+test simplex::tests::colsingleton_substitutes_singleton_equality_and_folds_cost ... ok
+test simplex::tests::component_statuses_combine_soundly ... ok
+test simplex::tests::contradictory_equality_rows_detected_infeasible ... ok
+test simplex::tests::disconnected_model_reports_infeasible_when_either_component_is ... ok
+test simplex::tests::disconnected_model_solves_via_connected_component_split ... ok
+test simplex::tests::doubleton_chain_within_one_pass_recovers_correctly ... ok
+test simplex::tests::doubleton_eliminates_larger_coefficient_variable_and_rewrites_other_row ... ok
+test simplex::tests::dse_update_rayon_threshold_microbench ... ignored
+test simplex::tests::dual_bfrt_flips_multiple_variables_in_one_iteration ... ok
+test simplex::tests::dual_knapsack_lp_relaxation ... ok
+test simplex::tests::dual_larger_lp_matches_independent_ipm_solver ... ok
+test simplex::tests::dual_lp1_matches_primal ... ok
+test simplex::tests::dual_lp2_matches_primal ... ok
+test simplex::tests::dualfix_fixes_a_dominated_variable ... ok
+test simplex::tests::duplicate_equality_rows_via_shared_presolve ... ok
+test simplex::tests::freevar_eliminated_through_multiple_equality_rows_end_to_end ... ok
+test simplex::tests::freevar_eliminated_via_equality_row_folds_into_a_shared_inequality_row_end_to_end ... ok
+test simplex::tests::freevar_in_exactly_one_inequality_row_eliminated_by_presolve_end_to_end ... ok
+test simplex::tests::freevar_leftover_unconstrained_with_nonzero_cost_is_unbounded ... ok
+test simplex::tests::freevar_leftover_unconstrained_with_zero_cost_fixes_to_zero ... ok
+test simplex::tests::freevar_residual_both_sides_infinite_only_in_inequality_rows_end_to_end ... ok
+test simplex::tests::freevar_residual_mixed_with_ordinary_and_bounded_columns_end_to_end ... ok
+test simplex::tests::freevar_residual_only_in_inequality_rows_with_nonzero_objective_end_to_end ... ok
+test simplex::tests::improving_ray_over_an_infeasible_rest_is_infeasible_when_distinguishing ... ok
+test simplex::tests::infeasible_detected ... ok
+test simplex::tests::ipm_crossover_matches_simplex ... ok
+test simplex::tests::ipm_crossover_reaches_vertex_on_degenerate_optimal_face ... ok
+test simplex::tests::knapsack_lp_relaxation ... ok
+test simplex::tests::large_independent_components_are_solved_by_parallel_slope_intercept_calls ... ok
+test simplex::tests::larger_lp_matches_independent_ipm_solver_and_exercises_ft_triggers ... ok
+test simplex::tests::lb_unbounded_below_reaches_finite_optimum ... ok
+test simplex::tests::lp1_maximize_with_le_bounds ... ok
+test simplex::tests::lp2_minimize_with_ge_and_eq ... ok
+test simplex::tests::lp3_wide_bounds_dont_bind ... ok
+test simplex::tests::many_independent_singleton_components_exercise_the_parallel_split_path ... ok
+test simplex::tests::mutually_coupled_free_variables_reach_a_correct_answer ... ok
+test simplex::tests::parallel_inequality_rows_keep_the_tighter_one ... ok
+test simplex::tests::race_matches_simplex_and_keeps_infeasibility_verdict ... ok
+test simplex::tests::rayon_threshold_microbench ... ignored
+test simplex::tests::single_variable_ge_row_conflicting_with_own_bound_is_infeasible ... ok
+test simplex::tests::solve_lp_dual_end_to_end_finite_optimum_with_unbounded_structural_column ... ok
+test simplex::tests::solve_lp_dual_end_to_end_unbounded_structural_column ... ok
+test simplex::tests::staged_ipm_gives_the_same_verdicts_as_simplex ... ok
+test simplex::tests::steepest_edge_weights_match_brute_force_recompute ... ok
+test simplex::tests::surviving_one_sided_bounds_stay_infinite_in_std_form ... ok
+test sparse::tests::accumulator_matches_a_btreemap_merge_entry_for_entry ... ok
+test sparse::tests::accumulator_remove_drops_an_index_even_when_its_value_is_nonzero ... ok
+test sparse::tests::accumulator_reset_isolates_successive_merges ... ok
+test sparse::tests::accumulator_set_is_last_write_wins_and_add_accumulates ... ok
+test sparse::tests::accumulator_take_sorted_vec_reports_the_index_space_as_its_length ... ok
+test sparse::tests::both_orientations_agree_on_mat_vec_and_its_transpose ... ok
+test sparse::tests::col_counts_and_row_counts_agree_across_orientations ... ok
+test sparse::tests::csc_builder_keeps_empty_columns ... ok
+test sparse::tests::csc_builder_matches_a_two_pass_build_of_the_same_matrix ... ok
+test sparse::tests::csc_built_from_rows_matches_csc_built_by_conversion ... ok
+test sparse::tests::csc_col_dense_matches_the_dense_column ... ok
+test sparse::tests::csc_columns_match_the_hand_transposed_matrix ... ok
+test sparse::tests::csc_empty_has_every_column_present_and_empty ... ok
+test sparse::tests::csr_from_flat_and_to_csc_match_from_rows ... ok
+test sparse::tests::csr_from_rows_direct_matches_faer_triplets ... ok
+test sparse::tests::csr_round_trips_through_csc_unchanged ... ok
+test sparse::tests::csr_rows_pruned_drops_explicitly_stored_zeros ... ok
+test sparse::tests::empty_matrix_dimensions_and_products_stay_well_defined ... ok
+test sparse::tests::epoch_marks_begin_clears_every_previous_mark ... ok
+test sparse::tests::epoch_marks_survive_counter_wraparound ... ok
+test sparse::tests::epoch_marks_unmark_takes_one_mark_back_for_this_pass_only ... ok
+test sparse::tests::faer_interop_round_trips ... ok
+test sparse::tests::from_dense_tol_sparsifies_a_noisy_dense_vector ... ok
+test sparse::tests::from_entry_stream_matches_a_concatenated_two_block_build ... ok
+test sparse::tests::from_rows_canonical_fixes_unsorted_duplicated_input ... ok
+test sparse::tests::from_triplets_builds_the_same_matrix_as_from_rows ... ok
+test sparse::tests::hybrid_vec_both_representations_agree_on_dot_and_axpy ... ok
+test sparse::tests::hybrid_vec_picks_its_representation_from_fill ... ok
+test sparse::tests::hybrid_vec_remove_index_keeps_nnz_honest_in_both_arms ... ok
+test sparse::tests::owned_row_and_column_views_carry_the_right_logical_length ... ok
+test sparse::tests::pack_scaled_dense_matches_collect_then_pack ... ok
+test sparse::tests::scatter_dense_and_axpy_helpers_match_their_sparse_vec_forms ... ok
+test sparse::tests::sparse_products_match_their_dense_counterparts ... ok
+test sparse::tests::sparse_vec_canonicalize_sorts_merges_and_prunes ... ok
+test sparse::tests::sparse_vec_mutators_cover_the_incremental_build_path ... ok
+test sparse::tests::sparse_vec_scatter_gather_round_trips_and_dot_matches_dense ... ok
+test sparse::tests::transpose_of_transpose_is_the_original ... ok
+test interior_point::kkt::mf_variants::ldlt_variants_match ... ok
+test interior_point::kkt::mf_variants::llt_variants_match ... ok
+test simplex::lu::tests::tracked_iteration_matches_untracked_reference ... ok
+
+test result: ok. 308 passed; 0 failed; 17 ignored; 0 measured; 0 filtered out; finished in 1.34s
+
+CARGO_TEST_EXIT=0

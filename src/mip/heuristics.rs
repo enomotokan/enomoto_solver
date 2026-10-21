@@ -1143,12 +1143,20 @@ pub(super) fn fj_search(p: &MipProblem, lo: &[f64], up: &[f64], effort: u64, tim
             let r = fj_search_old(p, lo, up, effort, 0.5 * left(time_cap), seed ^ 0x5851_F42D_4C95_7F2D, stop);
             best = better(&best, r);
         }
-        // 種を変えた FJ2 を時間の上限まで
+        // 種を変えた FJ2 を時間の上限まで。`ENOMOTO_MIP_FJ_MIN_TRIALS=N` (試作): 時間の上限を過ぎても、止める印が立つ
+        // (根の LP が解けて主スレッドが受け取りに来る) までは、見つかるまで N 回目の種までは回す。時間の上限 (時間上限の 5%、
+        // 5 秒まで) は壁時計なので、種の列の何番目まで回れるかが機械の速さ・負荷・時間上限で変わる (physiciansched6-2 は
+        // 7 番目の種で初めて見つかり、60 秒・4 スレッドの空いた機械で約 2.2 秒かかる。30 秒では上限 1.5 秒で届かない)
+        let min_trials = tunable!("ENOMOTO_MIP_FJ_MIN_TRIALS", 0u64, u64);
         let mut k = 1u64;
-        while left(time_cap) > 0.05 && !stopped() && k < 64 {
-            let r = super::fj::fj2_search(p, lo, up, left(time_cap), seed.wrapping_add(k.wrapping_mul(0x9E37_79B9_7F4A_7C15)), stop);
+        while (left(time_cap) > 0.05 || (best.is_none() && k < min_trials)) && !stopped() && k < 64 {
+            let tc = if best.is_none() && k < min_trials { left(time_cap).max(time_cap.max(1.0)) } else { left(time_cap) };
+            let r = super::fj::fj2_search(p, lo, up, tc, seed.wrapping_add(k.wrapping_mul(0x9E37_79B9_7F4A_7C15)), stop);
             best = better(&best, r);
             k += 1;
+        }
+        if env_str!("ENOMOTO_MIP_FJ_DEBUG").is_some() {
+            eprintln!("MIP:   FJ2: {k} seeds tried, found {} ({:.2}s, cap {time_cap:.2}s)", best.is_some(), t0.elapsed().as_secs_f64());
         }
         return best;
     }

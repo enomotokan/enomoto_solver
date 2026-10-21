@@ -2060,6 +2060,11 @@ pub(super) fn fj_p3_problem(pc: &MipProblem) -> Option<(MipProblem, Vec<crate::p
     if env_str!("ENOMOTO_MIP_LOG").is_some() {
         eprintln!("MIP: FJ problem (FJ_P3): rows {} -> {}, free columns {} -> {}, {k} continuous bounds tightened", pc.m, prob.m, (0..pc.n).filter(|&j| pc.col_lo[j] < pc.col_up[j]).count(), (0..prob.n).filter(|&j| prob.col_lo[j] < prob.col_up[j]).count());
     }
+    // 診断用 (`ENOMOTO_MIP_DEBUG_FJ_DUMP=<接頭辞>`): 本体の問題と FJ 用の問題を MPS に書き出す (列の番号は同じ)
+    if let Some(prefix) = env_str!("ENOMOTO_MIP_DEBUG_FJ_DUMP") {
+        let _ = pc.write_mps(&format!("{prefix}_main.mps"));
+        let _ = prob.write_mps(&format!("{prefix}_fjp3.mps"));
+    }
     Some((prob, post, sc))
 }
 
@@ -2089,6 +2094,9 @@ fn dual_bound_tightening(prob: &mut MipProblem) -> usize {
     }
     let mut count = 0;
     let cols = prob.cols.clone();
+    // 診断用 (`ENOMOTO_MIP_DEBUG_DUAL_UB`): 費用のある連続列について、締められなかった理由を数える
+    let dbg = env_str!("ENOMOTO_MIP_DEBUG_DUAL_UB").is_some();
+    let (mut n_cand, mut n_dir, mut n_inf, mut n_need, mut n_loose) = (0usize, 0usize, 0usize, 0usize, 0usize);
     for j in 0..prob.n {
         if prob.is_int[j] || prob.col_lo[j] == prob.col_up[j] || cols[j].is_empty() {
             continue;
@@ -2097,6 +2105,9 @@ fn dual_bound_tightening(prob: &mut MipProblem) -> usize {
         for d in [1.0f64, -1.0] {
             if d * prob.cost[j] < 0.0 {
                 continue;
+            }
+            if dbg && prob.cost[j] != 0.0 {
+                n_cand += 1;
             }
             let cur = if d > 0.0 { prob.col_up[j] } else { -prob.col_lo[j] };
             let other = if d > 0.0 { prob.col_lo[j] } else { -prob.col_up[j] };
@@ -2116,6 +2127,12 @@ fn dual_bound_tightening(prob: &mut MipProblem) -> usize {
                     let c = side * ay;
                     if c > 0.0 {
                         ok = false; // y を増やすと苦しくなる向きがある
+                        if dbg && prob.cost[j] != 0.0 {
+                            n_dir += 1;
+                            if n_dir <= 5 {
+                                eprintln!("MIP:   DUAL_UB: column {j} (cost {}, bounds [{}, {}], {} rows) is in a row that gets harder: row {i} (len {}, cont {}, [{}, {}]) coefficient {a}", prob.cost[j], prob.col_lo[j], prob.col_up[j], cols[j].len(), prob.rows[i].len(), prob.rows[i].iter().filter(|&&(k, _)| !prob.is_int[k]).count(), prob.row_lo[i], prob.row_up[i]);
+                            }
+                        }
                         break;
                     }
                     // 楽になる向き: c y <= b - (ほかの列の活動)。ほかの列の最悪 = side 向きの最大活動
@@ -2127,6 +2144,12 @@ fn dual_bound_tightening(prob: &mut MipProblem) -> usize {
                     let own_inf = !own.is_finite();
                     if inf - own_inf as u32 > 0 {
                         ok = false;
+                        if dbg && prob.cost[j] != 0.0 {
+                            n_inf += 1;
+                            if n_inf <= 5 {
+                                eprintln!("MIP:   DUAL_UB: column {j} (cost {}, bounds [{}, {}], {} rows): row {i} (len {}, cont {}, [{}, {}]) has an infinite activity of the other columns", prob.cost[j], prob.col_lo[j], prob.col_up[j], cols[j].len(), prob.rows[i].len(), prob.rows[i].iter().filter(|&&(k, _)| !prob.is_int[k]).count(), prob.row_lo[i], prob.row_up[i]);
+                            }
+                        }
                         break;
                     }
                     let rest = if own_inf { act } else { act - own };
@@ -2138,6 +2161,9 @@ fn dual_bound_tightening(prob: &mut MipProblem) -> usize {
                 }
             }
             if !ok || !need.is_finite() {
+                if dbg && ok && prob.cost[j] != 0.0 {
+                    n_need += 1;
+                }
                 continue;
             }
             // 少し余裕を持たせる (丸め誤差で最適解を落とさない)
@@ -2149,8 +2175,13 @@ fn dual_bound_tightening(prob: &mut MipProblem) -> usize {
                     prob.col_lo[j] = -nb;
                 }
                 count += 1;
+            } else if dbg && prob.cost[j] != 0.0 {
+                n_loose += 1;
             }
         }
+    }
+    if dbg {
+        eprintln!("MIP:   DUAL_UB: {n_cand} continuous columns with a cost: {count} tightened (all columns), rejected: harder direction {n_dir}, infinite activity {n_inf}, no finite need {n_need}, already tight {n_loose}");
     }
     count
 }
