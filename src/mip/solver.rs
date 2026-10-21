@@ -217,7 +217,7 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// `ENOMOTO_MIP_FC_NODE_SEP2`: [`Self::fc_node_sep`] の分離を、待ち行列から取り出したノードでプールのカットを戻した後にも
     /// 行い、LP の値が伸びる間ラウンドを繰り返す (HiGHS の `HighsSeparation::separate`)。評価中
     pub(super) fc_sep2: bool,
-    /// `ENOMOTO_MIP_FC_SUBMIP` (既定で使う。`ENOMOTO_MIP_NO_FC_SUBMIP` で止める): 固定費用ネットワーク型 ([`super::separation::fixed_charge_network_for_nodes`])
+    /// `ENOMOTO_MIP_FC_SUBMIP` (試作、既定では使わない。2026-10-21 に既定にしたが、同じ経路 (SUBMIP_CUTS + サブ MIP のカット 25 ラウンド) で mc11 が誤った最適値 11712 を返した回があったので戻した): 固定費用ネットワーク型 ([`super::separation::fixed_charge_network_for_nodes`])
     /// の問題で、ヒューリスティクスのサブ MIP に LP のカットの行を加え (`ENOMOTO_MIP_SUBMIP_CUTS` と同じ)、サブ MIP の根のカットの
     /// ラウンドを通常の求解と同じにする。analysis/beasleyC3_r3_20261020.md
     pub(super) fc_submip: bool,
@@ -1403,7 +1403,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
             && super::separation::fixed_charge_network_for_nodes(p),
         fc_adapt: env_str!("ENOMOTO_MIP_FC_NODE_SEP_ADAPT").is_some(),
         fc_sep2: env_str!("ENOMOTO_MIP_FC_NODE_SEP2").is_some(),
-        fc_submip: !params.submip && (env_str!("ENOMOTO_MIP_FC_SUBMIP").is_some() || env_str!("ENOMOTO_MIP_NO_FC_SUBMIP").is_none()) && super::separation::fixed_charge_network_for_nodes(p),
+        fc_submip: !params.submip && env_str!("ENOMOTO_MIP_FC_SUBMIP").is_some() && super::separation::fixed_charge_network_for_nodes(p),
         tree_sep: !params.submip && env_str!("ENOMOTO_MIP_NO_TREE_SEP").is_none(),
         tree_sep_fc: !params.submip && env_str!("ENOMOTO_MIP_NO_TREE_SEP").is_none() && env_str!("ENOMOTO_MIP_TREE_SEP_NO_FC").is_none() && super::separation::fixed_charge_network_for_nodes(p),
         fc_stats: (0, 0.0, 0, 0),

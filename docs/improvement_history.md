@@ -9541,6 +9541,12 @@ neos-950242 の 2 回目の調査 (`analysis/neos950242_r2_20261020.md`)。
   - 不一致 0、解けた数は同じ。組み合わせの効果ははっきりせず、悪化も揺れの範囲と見て、既定はそのままにする。
 - 結果: benchmarks/*_2d26a7e_{newdef,prev}_rC2{a,b}.json
 
+## 2026-10-21: FC_SUBMIP の既定化を取り消す (mc11 の誤った最適値)
+
+- サブ MIP の強化を全問に広げた計測 (6ffe911、rSXa) で、suball (SUBMIP_CUTS=1 T_MIP_SUBMIP_CUT_ROUNDS=25 T_MIP_SUBMIP_CUT_STALL=10) が mc11 で 34.24 秒に optimal 11712 を返した (最適値 11689、不一致)。mc11 は固定費用型なので、この経路は既定にした FC_SUBMIP (サブ MIP にカットの行 + 根のカット 25 ラウンド・停滞 10) と同じ。
+- 手元 (4 スレッド・60 秒) で suball 3 回・FC_SUBMIP 既定 3 回では再現せず (時間切れ、11689〜11708)。
+- 原因が分かるまで FC_SUBMIP を既定から外す (`ENOMOTO_MIP_FC_SUBMIP=1` で使う試作に戻す)。原因の調査を別に立てる。
+
 ## 改名一覧 (整理時)
 
 本メモ中は旧名で書かれている。
