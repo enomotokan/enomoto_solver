@@ -561,6 +561,11 @@ pub(super) struct Solver<'a, L: MipLp> {
     farkas_added: u64,
     /// 双対証明で枝刈りしたノード数と、締めた境界の数 (表示用)。
     pub(super) proof_prunes: u64,
+    /// 診断用 (`ENOMOTO_MIP_PROOF_VERIFY`): 直前に [`Self::apply_dual_proofs`] がノードを刈ったときの証明の番号。
+    proof_last_prune: Option<usize>,
+    /// 診断用 (`ENOMOTO_MIP_PROOF_VERIFY`): 証明で刈ったノードの LP を解き直して確かめた数 [LP が打ち切り値以上か実行不能 (正しい),
+    /// LP が打ち切り値未満 (証明が誤り)、確かめられなかった]。
+    proof_verify_stats: [u64; 3],
     pub(super) proof_tightenings: u64,
     /// カットプールの重複判定用のハッシュと、プールの非零数。
     pub(super) cut_pool_keys: std::collections::HashMap<u64, usize>,
@@ -835,6 +840,13 @@ fn prof_tree_par() -> bool {
 /// (analysis/partree_race_20261021.md)。
 fn proof_diag() -> bool {
     env_str!("ENOMOTO_MIP_PROOF_DIAG").is_some()
+}
+
+/// 診断用 (`ENOMOTO_MIP_PROOF_VERIFY`): 双対証明・衝突制約がノードを刈るたびに、そのノードの LP を (証明による締め付けを戻して)
+/// 解き直し、LP の値が打ち切り値未満なら証明が誤り (または LP から外れたカットに頼った証明) として表示する
+/// (analysis/partree_race_20261021.md §9)。デバッグ解がなくても、どのスレッドでも働く。
+fn proof_verify() -> bool {
+    env_str!("ENOMOTO_MIP_PROOF_VERIFY").is_some()
 }
 
 fn tree_diag() -> bool {
@@ -1610,6 +1622,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         conf_stats: [0; 8],
         farkas_added: 0,
         proof_prunes: 0,
+        proof_last_prune: None,
+        proof_verify_stats: [0; 3],
         proof_tightenings: 0,
         cut_pool_keys: std::collections::HashMap::new(),
         pool_hash: Vec::new(),
@@ -3672,6 +3686,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.dbg_trace("after objective propagation");
             // 双対証明による枝刈りと境界の締め付け
             let prop_ok = prop_ok && {
+                let pos_pf = self.dom.stack_len();
+                self.proof_last_prune = None;
                 let ok = self.apply_dual_proofs();
                 if !ok {
                     if self.dom.conflict.is_some() && env_str!("ENOMOTO_MIP_NO_EXTRA_CONFLICTS").is_none() {
@@ -3679,6 +3695,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                     self.proof_prunes += 1;
                     self.dbg_lost("dual proof", dn && self.dbg_contains());
+                    if proof_verify() {
+                        self.proof_verify_lp(pos_pf, node.lower_bound, dn);
+                    }
                 }
                 ok
             };
@@ -6240,6 +6259,22 @@ impl<'a, L: MipLp> Solver<'a, L> {
             state = ProofState::OwnDone;
         }
         let p = self.p;
+        // 診断用 (デバッグ解): プールに入る行 (自前・取り込み) がデバッグ解を切っていないか (目的の証明は、デバッグ解が打ち切り値より
+        // 良いときだけ)
+        if self.dbg_on {
+            DEBUG_SOL.with(|d| {
+                if let Some(x) = d.borrow().as_ref() {
+                    let dz = p.objective(x);
+                    let rhs = if obj { self.prune_limit() - p.offset - konst } else { konst };
+                    if (!obj || dz < self.prune_limit() - 1e-6) && rhs.is_finite() {
+                        let act: f64 = coefs.iter().map(|&(j, a)| a * x[j]).sum();
+                        if act > rhs + 1e-6 * (1.0 + rhs.abs()) {
+                            eprintln!("MIP_DEBUG_SOL: node {} thread {}: pool row ({state:?}, obj {obj}, len {}, konst {konst:.10e}) is violated by the debug solution: activity {act:.10e} > rhs {rhs:.10e} (debug obj {dz}, prune limit {})", self.nodes, self.pool_tid, coefs.len(), self.prune_limit());
+                        }
+                    }
+                }
+            });
+        }
         let nnz_cap = 10 * p.nnz + 100_000;
         // 上限は自前と取り込みで別 (取り込みが自前の証明を押し出さないように)。取り込みの上限
         // `ENOMOTO_T_MIP_PROOF_POOL_IMPORTED`
@@ -7223,6 +7258,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                     self.tprof.proof[org][1] += 1;
                     self.proof_used(k);
+                    self.proof_last_prune = Some(k);
                     return false;
                 }
                 if !full && slack >= self.proof_base[k].2 {
@@ -7267,6 +7303,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if self.dom.infeasible {
                         self.tprof.proof[org][1] += 1;
                         self.proof_used(k);
+                        self.proof_last_prune = Some(k);
                         return false;
                     }
                 }
@@ -7288,6 +7325,48 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return self.dom.propagate(p);
         }
         true
+    }
+
+    /// 診断用 (`ENOMOTO_MIP_PROOF_VERIFY`): 証明がこのノードを刈った直後に、証明による締め付けを `pos` まで戻してノードの LP を
+    /// 解き直し、LP の値 (定数項込み) が打ち切り値未満なら `PROOF_VERIFY: ... WRONG` と表示する (証明が誤りか、証明が頼った
+    /// カットが LP から外れている)。LP 解での証明の活動量も出す (右辺を超えていれば、証明は今の LP の行から導けない)。
+    fn proof_verify_lp(&mut self, pos: usize, node_lb: f64, dn: bool) {
+        let p = self.p;
+        self.dom.backtrack_to(p, pos);
+        self.sync_lp();
+        let st = self.lp.solve(&SolveLimits { iteration_limit: 200_000, cutoff: f64::INFINITY, deadline: self.deadline });
+        let lim = self.prune_limit();
+        let k = self.proof_last_prune;
+        let desc = |s: &Self| match k {
+            Some(k) => {
+                let (c, konst, obj) = &s.dual_proofs[k];
+                let rhs = s.proof_rhs(k);
+                let exact: f64 = c.iter().map(|&(j, a)| if a > 0.0 { a * s.dom.lo[j] } else { a * s.dom.up[j] }).sum();
+                format!("proof {k} ({:?}, obj {obj}, len {}, konst {konst:.10e}, rhs {rhs:.10e}, min activity at the node {exact:.10e})", s.proof_state[k], c.len())
+            }
+            None => "proof ? (pruned by propagation after tightening)".to_string(),
+        };
+        match st {
+            LpStatus::Optimal => {
+                let obj = self.lp.objective() + p.offset;
+                if obj < lim - 1e-6 * (1.0 + lim.abs()) {
+                    self.proof_verify_stats[1] += 1;
+                    let x = self.lp.col_values();
+                    let act = k.map(|k| self.dual_proofs[k].0.iter().map(|&(j, a)| a * x[j]).sum::<f64>());
+                    eprintln!(
+                        "PROOF_VERIFY: WRONG: node {} thread {}: {} pruned a node whose LP objective is {obj:.10e} < prune limit {lim:.10e} (node lower bound {node_lb:.10e}, proof activity at the LP solution {act:?}, debug solution in node {dn}, lp rows {})",
+                        self.nodes, self.pool_tid, desc(self), self.lp.num_rows()
+                    );
+                } else {
+                    self.proof_verify_stats[0] += 1;
+                }
+            }
+            LpStatus::Infeasible => self.proof_verify_stats[0] += 1,
+            _ => {
+                self.proof_verify_stats[2] += 1;
+                eprintln!("PROOF_VERIFY: node {} thread {}: {} pruned a node; LP {st:?} (not verified)", self.nodes, self.pool_tid, desc(self));
+            }
+        }
     }
 
     /// 診断用 (`ENOMOTO_MIP_PROOF_DIAG` またはデバッグ解): 証明 `k` がこのノードを刈るとき、差分で求めた最小活動量
@@ -8533,6 +8612,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.log(true);
         if self.params.verbose {
             eprintln!("MIP: dual proofs and conflicts {} (conflicts added {} (from proofs {}), Farkas {}, pruned {} nodes, tightened {} bounds)", self.dual_proofs.len(), self.conflicts_added, self.proof_conflicts, self.farkas_added, self.proof_prunes, self.proof_tightenings);
+            if proof_verify() {
+                eprintln!("MIP: proof prunes verified by re-solving the node LP: correct {}, WRONG {}, not verified {}", self.proof_verify_stats[0], self.proof_verify_stats[1], self.proof_verify_stats[2]);
+            }
             eprintln!("MIP: propagation conflicts: analysed {}, no 1-UIP {}, 1-UIP not a row {}, no decision set {}, decision set not a row {}; not a row because continuous {}, general integer {}, both sides {}", self.conf_stats[0], self.conf_stats[1], self.conf_stats[2], self.conf_stats[3], self.conf_stats[4], self.conf_stats[5], self.conf_stats[6], self.conf_stats[7]);
             if cutpool_prop() {
                 eprintln!("MIP: cut pool propagation: calls {}, pruned {} nodes, tightened {} bounds, {:.2}s, pool {} cuts", self.cutpool_prop_stats[0], self.cutpool_prop_stats[1], self.cutpool_prop_stats[2], self.cutpool_prop_stats[3] as f64 * 1e-9, self.cut_pool.len());
