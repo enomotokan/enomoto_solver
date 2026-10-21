@@ -9590,6 +9590,14 @@ neos-950242 の 2 回目の調査 (`analysis/neos950242_r2_20261020.md`)。
 - 40 問: FLa newdef 23・SGM 24.35 / flat 22・25.04、FLb flat 25・21.63 / newdef 25・21.45。16 問: FLa newdef 8・44.20 / flat 7・46.37、FLb flat 9・38.64 / newdef 10・36.46。不一致 0、"MIP: WARNING" 0。
 - 2 組とも解けた数が減るか同じで SGM も悪いので不採用。10teams (FLa) を落とし、beasleyC3 (FLa)・noswot (FLb) は解けたが揺れの範囲。neos-2978193-inde は両方とも時間切れ (目的値は最適値に到達、証明できない)。
 
+## 2026-10-21: 競合の修正後のサブ MIP 強化 (FC_SUBMIP・SUBMIP_CUTS) の計測 (PF) は既定にしない
+
+- develop 5ed9443 (並列の木の競合の修正後) で 40 + 16 問、newdef / fcs (`ENOMOTO_MIP_FC_SUBMIP=1`) / subrows (`ENOMOTO_MIP_SUBMIP_CUTS=1`) を同じコンテナで 2 組 (PFa・PFb は順を逆に)。
+- 40 問 (解けた・SGM): PFa newdef 26・21.05 / fcs 26・21.05 / subrows 26・20.64、PFb newdef 26・21.92 / fcs 26・21.39 / subrows 26・21.17。
+- 16 問: PFa newdef 10・35.44 / fcs 10・35.91 / subrows 11・33.54、PFb newdef 10・37.74 / fcs 9・36.03 / subrows 9・35.33。
+- 不一致はどの設定も 0。SGM は subrows が 4 つとも良いが、PFb の 16 問で解けた数が 1 減るので基準を満たさない。fcs も PFb で 1 減る。mc11 の誤った最適値 (11712・11728) の原因が分かるまでどちらも既定にしない。
+- この計測では計測スクリプトがソルバーの stderr を捨てていて "MIP: WARNING" を見られなかったので、以後は結果の JSON の `mip_warnings` と 1 問 1 行の要約の `MIP_WARNING=` に残すようにした (6ecd00c)。
+
 ## 改名一覧 (整理時)
 
 本メモ中は旧名で書かれている。
