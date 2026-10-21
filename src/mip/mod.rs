@@ -680,7 +680,7 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
             solver::MipResult { status: MipStatus::Infeasible, x: None, objective: None, best_bound: f64::INFINITY, nodes: 0, lp_iterations: 0 }
         }
         Some(Presolved::Reduced { mut prob, postsolve, scaling }) => {
-            if env_str!("ENOMOTO_MIP_DUAL_UB").is_some() && !params.submip {
+            if (env_str!("ENOMOTO_MIP_DUAL_UB").is_some() && !params.submip) || crate::fj_p3_force() {
                 let k = dual_bound_tightening(&mut prob);
                 if params.verbose {
                     eprintln!("MIP: presolve: tightened {k} continuous column bounds by dual arguments");
@@ -1940,6 +1940,39 @@ fn normalize_integer_rows(rows: &mut [Vec<(usize, f64)>], row_lo: &mut [f64], ro
 /// 費用が非正なら向きを逆にして下限を締める。physiciansched6-2 の罰則の列 (`100 Σx + 600 z - w <= 600` だけに出る費用 1 の w、
 /// 416 本) は ENOMOTO では [0, ∞) のまま残り、HiGHS の前処理後は [0, 100〜600] になる。上限がないと Feasibility Jump が
 /// 解を見つけられない (同じ問題で上限を入れるだけで 20 回中 0 回 → 19 回)。締めた境界の数を返す (1 回だけ、連鎖しない)。
+/// Feasibility Jump だけに渡す問題 (`ENOMOTO_MIP_FJ_P3`、試作、既定では使わない): 本体の前処理後の問題 `pc` に、このスレッドだけ
+/// `ENOMOTO_MIP_INEQ_SINGLETON`・`ENOMOTO_MIP_CS_OBJ_PIVOT` を有効にした前処理をもう一度かけ、双対の推論で連続列の境界を締める
+/// ([`dual_bound_tightening`])。本体の問題は変えない。前処理は列の番号を保つので、FJ の解は `postsolve` を逆順に当てて尺度を
+/// 戻せば `pc` の空間の解になる ([`fj_p3_solution`])。physiciansched6-2 では FJ が解を見つけるのにこの 3 つと FJ の LP 修復の
+/// 4 つが全部要る (1 つでも外すと 20 秒で解なし) が、p5s として本体の前処理に入れると beasleyC3・uccase12 で証明が遅れる
+pub(super) fn fj_p3_problem(pc: &MipProblem) -> Option<(MipProblem, Vec<crate::presolve::PostsolveStep>, Option<crate::presolve::scaling::Scaling>)> {
+    crate::set_fj_p3_force(true);
+    let r = presolve_mip(pc, false, false, None);
+    crate::set_fj_p3_force(false);
+    let (mut prob, post, sc) = match r {
+        Some(Presolved::Reduced { prob, postsolve, scaling }) if prob.n == pc.n => (prob, postsolve, Some(scaling)),
+        Some(Presolved::Reduced { .. }) | Some(Presolved::Infeasible) => return None,
+        None => (pc.clone(), Vec::new(), None),
+    };
+    let k = dual_bound_tightening(&mut prob);
+    if env_str!("ENOMOTO_MIP_LOG").is_some() {
+        eprintln!("MIP: FJ problem (FJ_P3): rows {} -> {}, free columns {} -> {}, {k} continuous bounds tightened", pc.m, prob.m, (0..pc.n).filter(|&j| pc.col_lo[j] < pc.col_up[j]).count(), (0..prob.n).filter(|&j| prob.col_lo[j] < prob.col_up[j]).count());
+    }
+    Some((prob, post, sc))
+}
+
+/// [`fj_p3_problem`] の問題での解 `x` を元の問題 `pc` の空間に戻す。
+pub(super) fn fj_p3_solution(x: Vec<f64>, post: &[crate::presolve::PostsolveStep], sc: &Option<crate::presolve::scaling::Scaling>) -> Vec<f64> {
+    let mut x = x;
+    for step in post.iter().rev() {
+        step.apply(&mut x);
+    }
+    match sc {
+        Some(sc) => crate::presolve::scaling::unscale_x(sc, &x),
+        None => x,
+    }
+}
+
 fn dual_bound_tightening(prob: &mut MipProblem) -> usize {
     let m = prob.rows.len();
     let (mut mn, mut mx) = (vec![0.0f64; m], vec![0.0f64; m]);

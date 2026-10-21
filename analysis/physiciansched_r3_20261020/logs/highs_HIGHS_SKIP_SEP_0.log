@@ -1,0 +1,85 @@
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+Command line parsed using CLI11 2.5.0: Copyright (c) 2017-2025 University of Cincinnati
+Set option threads to 4
+Set option time_limit to 60
+Set option mip_rel_gap to 0
+Number of BV entries in BOUNDS section is 109346
+MIP physiciansched6-2 has 168336 rows; 111827 cols; 480259 nonzeros; 109346 integer variables (109346 binary)
+Coefficient ranges:
+  Matrix  [2e-01, 1e+03]
+  Cost    [1e+00, 1e+00]
+  Bound   [1e+00, 1e+00]
+  RHS     [1e+00, 3e+02]
+Presolving model
+61799 rows, 10875 cols, 100259 nonzeros 0s
+13040 rows, 6143 cols, 53335 nonzeros 0s
+10083 rows, 5765 cols, 41171 nonzeros 0s
+8861 rows, 4608 cols, 40149 nonzeros 1s
+8861 rows, 4608 cols, 40149 nonzeros 1s
+Presolve reductions: rows 8861(-159475); columns 4608(-107219); nonzeros 40149(-440110) 
+
+Solving MIP model with:
+   8861 rows
+   4608 cols (4185 binary, 0 integer, 414 implied int., 9 continuous, 0 domain fixed)
+   40149 nonzeros
+   Thread count 4 (of 4 threads). Using 1 max workers. Parallel search off
+
+Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+     I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+     S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+     Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+         0       0         0   0.00%   35707.5         inf                  inf        0      0      0         0     1.5s
+         0       0         0   0.00%   47410.756313    inf                  inf        0      0      5      6633     3.4s
+         0       0         0   0.00%   47960.166667    inf                  inf      440    283    180     12877     8.5s
+         0       0         0   0.00%   48460.916667    inf                  inf      504    264    322     27307    15.4s
+
+2.1% inactive integer columns, restarting
+Model after restart has 7367 rows, 4491 cols (4077 bin., 0 int., 405 impl., 9 cont., 0 dom.fix.), and 33520 nonzeros
+
+         0       0         0   0.00%   48460.916667    inf                  inf      246      0      0     27307    15.7s
+         0       0         0   0.00%   48560.416667    inf                  inf      246    171      5     32886    17.6s
+         0       0         0   0.00%   48668.75        inf                  inf      449    289    196     37783    22.7s
+ L       0       0         0   0.00%   48668.75        49324              1.33%      461    300    210     38631    27.5s
+
+3.1% inactive integer columns, restarting
+Model after restart has 7056 rows, 4328 cols (3939 bin., 0 int., 387 impl., 2 cont., 0 dom.fix.), and 32034 nonzeros
+
+         0       0         0   0.00%   48668.75        49324              1.33%      233      0      0     47128    28.2s
+         0       0         0   0.00%   48668.75        49324              1.33%      233    159      3     53280    30.2s
+         0       0         0   0.00%   49123.75        49324              0.41%      524    352      3     59488    35.2s
+         7       0         4 100.00%   49324           49324              0.00%      580    257      8     62516    38.7s
+
+Solving report
+  Model             physiciansched6-2
+  Status            Optimal
+  Primal bound      49324
+  Dual bound        49324
+  Gap               0%
+  P-D integral      0.102943676822
+  Solution status   feasible
+                    49324 (objective)
+                    0 (bound viol.)
+                    9.7699626167e-15 (int. viol.)
+                    0 (row viol.)
+  Timing            38.67
+                    2.25 (Presolve)
+                        MIP    time [calls] = 1.31 [1]
+                        subMIP time [calls] = 0.94 [12]
+                    36.41 (Solve)
+                        MIP    time [calls] = 32.73 [1]
+                        subMIP time [calls] = 3.68 [5]
+                    0.00 (Postsolve)
+                        MIP    time [calls] = 0.00 [1]
+                        subMIP time [calls] = 0.00 [12]
+  Max sub-MIP depth 4
+  Nodes             7
+  Repair LPs        0
+  LP iterations     62516
+                    0 (strong br.)
+                    22921 (separation)
+                    19663 (heuristics)

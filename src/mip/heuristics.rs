@@ -1414,7 +1414,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if let Some(b) = basis {
             super::solver::SUBMIP_BASIS.with(|s| *s.borrow_mut() = Some(b));
         }
+        // `ENOMOTO_MIP_FJ_P3=submip` (試作): サブ MIP の前処理でも p5s の前処理の変更を有効にする ([`super::fj_p3_problem`]。本体の問題は変えない)
+        let p3 = env_str!("ENOMOTO_MIP_FJ_P3") == Some("submip") && !crate::fj_p3_force();
+        if p3 {
+            crate::set_fj_p3_force(true);
+        }
         let r = super::solve_problem(&sub, params, env_str!("ENOMOTO_MIP_SUBMIP_NO_PRESOLVE").is_none());
+        if p3 {
+            crate::set_fj_p3_force(false);
+        }
         super::solver::SUBMIP_BASIS.with(|s| *s.borrow_mut() = None);
         SUBMIP_DEPTH.with(|d| d.set(depth));
         if self.params.verbose {
