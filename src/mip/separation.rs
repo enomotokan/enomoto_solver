@@ -245,6 +245,24 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     /// 根の切除平面ループ。LP は根の最適解の状態で呼ぶこと。終わったときも LP は最適 (でなければ偽)。
+    /// `ENOMOTO_MIP_EQUIV2_CUTS` (試作、既定では使わない): 前処理が `ENOMOTO_MIP_PROBE_EQUIV2` で同値な 0-1 列を多数代入した問題
+    /// ([`super::EQUIV2_USED`]) だけ、根のカットのループの予算を広げる: 面の頂点での分離を止め、根のカットの時間の上限を全体の
+    /// `ENOMOTO_T_MIP_EQUIV2_CUT_TIME_FRAC` (既定 0.3)、1 回の LP の上限を `ENOMOTO_T_MIP_EQUIV2_CUT_LP_TIME_FRAC` (既定 0.05) にし、
+    /// LP が上限で止まってもカットを外さずに解き続ける (`ENOMOTO_MIP_CUT_LP_CONTINUE` と同じ)。physiciansched6-2 は代入の後に
+    /// tableau のカットで根の下界が伸び続けるが (HiGHS も Probing の代入の後のカットで根を閉じる)、既定の予算では 1〜2 ラウンドで止まる
+    pub(super) fn equiv2_cuts(&self) -> bool {
+        !self.params.submip && env_str!("ENOMOTO_MIP_EQUIV2_CUTS").is_some() && super::EQUIV2_USED.with(|f| f.get())
+    }
+
+    /// 根のカットのループの 1 回の LP の時間の上限 (全体に対する割合)。
+    fn cut_lp_time_frac(&self) -> f64 {
+        if self.equiv2_cuts() {
+            tunable!("ENOMOTO_T_MIP_EQUIV2_CUT_LP_TIME_FRAC", 0.05, f64)
+        } else {
+            tunable!("ENOMOTO_T_MIP_CUT_LP_TIME_FRAC", 0.02, f64)
+        }
+    }
+
     pub(super) fn root_cut_loop(&mut self, root_iters: u64) -> bool {
         let p = self.p;
         let n = p.n;
@@ -289,7 +307,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 同じ形の近傍を 1 ノードで解く (analysis/beasleyC3_r3_20261020.md)
         let fc_sub = self.params.submip && self.params.fc_submip;
         let mut max_rounds = if fc_sub { tunable!("ENOMOTO_T_MIP_FC_SUBMIP_CUT_ROUNDS", 25usize, usize) } else if self.params.submip { tunable!("ENOMOTO_T_MIP_SUBMIP_CUT_ROUNDS", 5usize, usize) } else { tunable!("ENOMOTO_T_MIP_CUT_ROUNDS", 25usize, usize) };
-        let mut time_cap = if self.params.time_limit.is_finite() { tunable!("ENOMOTO_T_MIP_CUT_TIME_FRAC", 0.1, f64) * self.params.time_limit } else { f64::INFINITY };
+        let eq2c = self.equiv2_cuts();
+        let cut_frac = if eq2c { tunable!("ENOMOTO_T_MIP_EQUIV2_CUT_TIME_FRAC", 0.3, f64) } else { tunable!("ENOMOTO_T_MIP_CUT_TIME_FRAC", 0.1, f64) };
+        let mut time_cap = if self.params.time_limit.is_finite() { cut_frac * self.params.time_limit } else { f64::INFINITY };
         // 根のヒューリスティクスの間にカットを強める求解: 止めの合図まで続ける (ラウンド数・時間の上限なし)
         let job = super::solver::CUT_JOB.with(|j| j.borrow().clone()).filter(|_| self.snap.is_some());
         if job.is_some() {
@@ -586,7 +606,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let it0 = self.lp.total_iterations();
             let lim = 10 * root_iters.max(100) + 10_000;
             // 1 回の LP の時間の上限 (全体の 2%、最低 1 秒): 数値的に悪条件の LP が残り時間を使い切るのを防ぐ
-            let cap = if self.params.time_limit.is_finite() { (tunable!("ENOMOTO_T_MIP_CUT_LP_TIME_FRAC", 0.02, f64) * self.params.time_limit).max(1.0) } else { f64::INFINITY };
+            let cap = if self.params.time_limit.is_finite() { (self.cut_lp_time_frac() * self.params.time_limit).max(1.0) } else { f64::INFINITY };
             let lp_deadline = if cap.is_finite() {
                 let d = std::time::Instant::now() + std::time::Duration::from_secs_f64(cap);
                 Some(self.deadline.map_or(d, |g| g.min(d)))
@@ -598,7 +618,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 同じ上限でもう `ENOMOTO_T_MIP_CUT_LP_CONTINUE_MAX` 回 (既定 2) まで解き続ける (根のカットの時間の上限を過ぎていても)。
             // physiciansched6-2 (同値の代入の後) では 1 ラウンドに数百本のカットを入れた LP が上限 (3 秒) を少し超え、外したカットの
             // 分の反復が無駄になり、2 回で根のカットのループが止まっていた
-            if st == LpStatus::TimeLimit && (env_str!("ENOMOTO_MIP_CUT_LP_CONTINUE").is_some() || extend_on) && !self.params.submip {
+            // `ENOMOTO_MIP_EQUIV2_CUTS` では `ENOMOTO_T_MIP_EQUIV2_CUT_LP_CONTINUE` (既定 1) のときだけ解き続ける
+            let eq2_cont = eq2c && tunable!("ENOMOTO_T_MIP_EQUIV2_CUT_LP_CONTINUE", 1usize, usize) > 0;
+            if st == LpStatus::TimeLimit && (env_str!("ENOMOTO_MIP_CUT_LP_CONTINUE").is_some() || extend_on || eq2_cont) && !self.params.submip {
                 for _ in 0..tunable!("ENOMOTO_T_MIP_CUT_LP_CONTINUE_MAX", 2usize, usize) {
                     if self.time_up() || stopped(&job) {
                         break;
@@ -629,7 +651,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 // 1 回の失敗ではやめない (そのラウンドのカットだけ捨てて続ける。2 回目でやめる)
                 lp_failures += 1;
-                if st2 != LpStatus::Optimal || lp_failures >= 2 || env_str!("ENOMOTO_MIP_CUT_LP_FAIL_STOP").is_some() {
+                // `ENOMOTO_MIP_EQUIV2_CUTS` では `ENOMOTO_T_MIP_EQUIV2_CUT_LP_FAILS` 回目 (既定 2) でやめる
+                let max_fail = if eq2c { tunable!("ENOMOTO_T_MIP_EQUIV2_CUT_LP_FAILS", 2usize, usize) } else { 2 };
+                if st2 != LpStatus::Optimal || lp_failures >= max_fail || env_str!("ENOMOTO_MIP_CUT_LP_FAIL_STOP").is_some() {
                     return st2 == LpStatus::Optimal;
                 }
                 continue;
@@ -1910,7 +1934,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if crate::simplex::slope_intercept_dual::mip_profile() == 1 {
             return (self.separate(x, light), Vec::new());
         }
-        if CUT_EXTENDED.with(|c| c.get()) && !self.params.submip {
+        if (CUT_EXTENDED.with(|c| c.get()) || self.equiv2_cuts()) && !self.params.submip {
             return (self.separate(x, light), Vec::new());
         }
         let mode = match env_str!("ENOMOTO_MIP_FACE_SEP") {
@@ -1992,7 +2016,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut used = 0usize;
         // 面の LP 1 回の時間の上限 (カットを加えた LP と同じ、全体の 2%、最低 1 秒)。neos-3656078-kumeu・neos-933966 では
         // 根の最初のラウンドの面の LP が数値的に破綻して解き直しを繰り返し、残り時間 (50 秒以上) を使い切っていた
-        let cap = if self.params.time_limit.is_finite() { (tunable!("ENOMOTO_T_MIP_CUT_LP_TIME_FRAC", 0.02, f64) * self.params.time_limit).max(1.0) } else { f64::INFINITY };
+        let cap = if self.params.time_limit.is_finite() { (self.cut_lp_time_frac() * self.params.time_limit).max(1.0) } else { f64::INFINITY };
         for c2 in &dirs {
             let mut f2 = face.clone();
             let cost2: Vec<f64> = (0..n).map(|j| p.cost[j] + eps * c2[j]).collect();
