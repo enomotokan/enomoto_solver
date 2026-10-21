@@ -3,7 +3,7 @@
 //! 下界の順と「下界と推定値の平均」の順の 2 つの順序付き集合でノードを索引する。
 //! 通常は後者 (hybrid estimate) で選び、一定回数ごとに下界最小のノードを選ぶ。
 
-use super::lp::Basis;
+use super::lp::{Basis, VarStatus};
 use std::collections::BTreeSet;
 use std::rc::Rc;
 
@@ -56,7 +56,13 @@ pub struct OpenNode {
     /// 中のノードの番号)。子は親のものを引き継ぐ。二分探索のスレッドが「この祖先の部分木には t 未満の解がない」と示したら、
     /// 下界を t に上げる。
     pub tags: Option<Rc<Vec<u64>>>,
+    /// 共有の待ち行列から取ったノードで、渡した側の基底で非基底だったカットの行の中身と状態 (`ENOMOTO_MIP_RESTORE_READD` のビット 2、
+    /// 試作)。取り出して基底を置くときに、同じ行がなければ LP に加えてその状態にする ([`super::solver`] の `restore_node_basis`)。
+    pub ship: Option<std::sync::Arc<Vec<(std::sync::Arc<CutRow>, VarStatus)>>>,
 }
+
+/// カットの行の中身 (係数, 下限, 上限)。
+pub type CutRow = (Vec<(usize, f64)>, f64, f64);
 
 /// 待ち行列。
 pub struct NodeQueue {

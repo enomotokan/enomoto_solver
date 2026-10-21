@@ -347,6 +347,32 @@ pub(super) struct Solver<'a, L: MipLp> {
     restored_now: bool,
     /// 直前に戻した基底に、保存した DSE 重みも当てはめたか (次の LP で引き継ぐ)。
     restored_dse: bool,
+    /// 調査用 (`ENOMOTO_MIP_RESTORE_DIAG`) と B・C の場面の判定: 直前の基底の復元の (出どころ 0 兄弟 1 手元 2 共有, 種類 `RD_*`,
+    /// 保存してから加わった行, 外された効いていた行, 戻した行 (A))。最初の LP の後に [`Self::rdiag`] に積む。
+    rdiag_cur: Option<[usize; 5]>,
+    /// 出どころ × 種類ごとの (回数, 最初の LP の反復, 秒, 加わった行, 外された効いていた行, 戻した行)。
+    rdiag: [[[f64; 6]; RD_KINDS]; 3],
+    /// 基底の復元にかかった時間 (A の行の追加を含む)。
+    rdiag_restore_secs: f64,
+    /// 調査用 (`ENOMOTO_MIP_RESTORE_PAIR`): 復元の直前の今の基底と DSE 重み、置く基底と当てはめる重み。最初の LP の前に
+    /// 方式を入れ替えて試し解きし、反復を比べる。
+    pair_prev: Option<(super::lp::Basis, Option<Vec<(u32, f32)>>)>,
+    pair_rest: Option<(super::lp::Basis, Option<Vec<(u32, f32)>>)>,
+    /// 試し解きの方式ごとの (回数, 反復) を種類ごとに
+    pair_stats: std::collections::BTreeMap<(usize, usize), [[f64; 2]; PAIR_N]>,
+    /// A (`ENOMOTO_MIP_RESTORE_READD`、試作): ビットの和。1 手元の待ち行列 (兄弟を含む) のノードで外された効いていた行を戻す、
+    /// 2 共有の待ち行列に出すノードに効いていたカットの行を付け、受け取った側で加える。0 なら使わない。
+    pub(super) readd_mode: u8,
+    /// A: カットの行の中身 (カットの番号ごと。外した行と、共有の待ち行列に出すために読んだ行。古いものから捨てる)。
+    pub(super) cut_rows: std::collections::HashMap<u64, std::sync::Arc<super::queue::CutRow>>,
+    pub(super) cut_rows_order: std::collections::VecDeque<u64>,
+    /// A: `row_log` の各 Delete で外した行のカットの番号 (印の付いた行の順。元の行は u64::MAX、Add は空)。`row_log` と同じ長さ。
+    pub(super) row_log_ids: Vec<Rc<Vec<u64>>>,
+    /// A: カットの行のハッシュ (カットの番号ごと、[`cut_row_hash`])。外された行の中身が残っていなかった回数。
+    cut_hash: std::collections::HashMap<u64, u64>,
+    readd_miss: u64,
+    /// A の手間 (行の行き先の再生, 行の追加) の秒
+    readd_secs: [f64; 2],
     node_lps: u64,
     /// ノードの LP にかかった時間の合計 (秒)。1 回の LP の時間の上限に使う。
     node_lp_secs: f64,
@@ -662,11 +688,14 @@ pub(crate) struct SnapNode {
     /// 親の LP の基底で非基底だったカットの行の (カットのハッシュ, 状態) (`ENOMOTO_MIP_TREE_SHARE_CUT_BASIS`)。受け取った側は同じ
     /// カットの行があればその状態にする ([`Solver::open_from_pool`])。
     cut_basis: Option<Vec<(u64, VarStatus)>>,
+    /// A (`ENOMOTO_MIP_RESTORE_READD=2`): 親の LP の基底で非基底だったカットの行の中身と状態、列と元の行の DSE 重み。
+    ship: Option<std::sync::Arc<Vec<(std::sync::Arc<super::queue::CutRow>, VarStatus)>>>,
+    ship_dse: Option<Vec<(u32, f32)>>,
 }
 
 impl SnapNode {
     fn of(n: &OpenNode) -> Self {
-        SnapNode { changes: n.changes.clone(), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, basis: None, cut_basis: None }
+        SnapNode { changes: n.changes.clone(), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, basis: None, cut_basis: None, ship: None, ship_dse: None }
     }
     /// [`Self::of`] に、親の LP の基底の列と最初の `m` 行 (元の行) を付ける。
     fn of_with_basis(n: &OpenNode, m: usize) -> Self {
@@ -679,7 +708,7 @@ impl SnapNode {
         s
     }
     fn into_open(self) -> OpenNode {
-        OpenNode { changes: self.changes, lower_bound: self.lower_bound, estimate: self.estimate, depth: self.depth, basis: None, basis_epoch: 0, dse: None, branch: self.branch, prot: None, tags: None }
+        OpenNode { changes: self.changes, lower_bound: self.lower_bound, estimate: self.estimate, depth: self.depth, basis: None, basis_epoch: 0, dse: None, branch: self.branch, prot: None, tags: None, ship: None }
     }
 }
 
@@ -1468,6 +1497,19 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         restore_stats: (0, 0, 0),
         restored_now: false,
         restored_dse: false,
+        rdiag_cur: None,
+        rdiag: [[[0.0; 6]; RD_KINDS]; 3],
+        rdiag_restore_secs: 0.0,
+        pair_prev: None,
+        pair_rest: None,
+        pair_stats: std::collections::BTreeMap::new(),
+        readd_mode: env_str!("ENOMOTO_MIP_RESTORE_READD").and_then(|v| v.parse().ok()).unwrap_or(0),
+        cut_rows: std::collections::HashMap::new(),
+        cut_rows_order: std::collections::VecDeque::new(),
+        row_log_ids: Vec::new(),
+        cut_hash: std::collections::HashMap::new(),
+        readd_miss: 0,
+        readd_secs: [0.0; 2],
         node_lps: 0,
         node_lp_secs: 0.0,
         unresolved: false,
@@ -1673,6 +1715,61 @@ fn tree_heur_off() -> bool {
 }
 
 /// DSE 重みを全ての LP で引き継ぎ、待ち行列のノードに保存するか (既定で真、`ENOMOTO_MIP_NO_DSE_ALL` で偽)。
+/// 基底の復元の種類 ([`Solver::rdiag_cur`])。
+const RD_NONE: usize = 0;
+/// 保存した後に行が変わっていない (保存した基底と DSE 重みをそのまま置いた)
+const RD_EXACT: usize = 1;
+/// 行が変わったが、外された行はどれも基底だった (写して置けた)。加わった行が 50 以下 / より多い
+const RD_MAP: usize = 2;
+const RD_MAPBIG: usize = 3;
+/// 外された効いていた行があり、今の基底 (直前のノードの基底) のまま解く
+const RD_KEEP: usize = 4;
+/// 外された効いていた行があり、基底変数の数を修復して置いた
+const RD_REPAIR: usize = 5;
+/// A: 外された効いていた行を戻して (共有の待ち行列のノードは渡されたカットを加えて) 保存した基底をそのまま置いた
+const RD_READD: usize = 6;
+/// 共有の待ち行列のノードで、カットの行を基底にした基底の基底変数の数が合わず `set_basis` の修復に任せた
+const RD_POOLFIX: usize = 7;
+/// 共有の待ち行列のノードで、基底変数の数が合った (カットの行がない、または A)
+const RD_POOLOK: usize = 8;
+const RD_KINDS: usize = 9;
+/// 対の試し解きの方式: 置く基底 + 保存した重み / + 厳密な重み / + 単位重み / + 保存した重みと列の側の希望 (D)、
+/// 今の基底 + 単位重み / + 今の重み (C) / + 厳密な重み (B)
+const PAIR_N: usize = 7;
+const PAIR_NAMES: [&str; PAIR_N] = ["R_saved", "R_exact", "R_unit", "R_nb", "K_unit", "K_warm", "K_exact"];
+/// 対の試し解きを、保存してから加わった行の数で分ける区切り (以下)
+const PAIR_BINS: [usize; 4] = [0, 20, 100, 500];
+const RD_NAMES: [&str; RD_KINDS] = ["none", "exact", "map", "mapbig", "keep", "repair", "readd", "poolfix", "poolok"];
+
+/// B: 最初の LP を厳密な DSE 重みから始める復元の種類 (`1 << RD_*` の和、`ENOMOTO_MIP_RESTORE_EXACT_SEL`)。
+fn rd_exact_mask() -> u32 {
+    env_str!("ENOMOTO_MIP_RESTORE_EXACT_SEL").and_then(|v| v.parse().ok()).unwrap_or(0)
+}
+
+/// C: 前の基底の重みの写しから始める復元の種類 (`1 << RD_*` の和、`ENOMOTO_MIP_RESTORE_COPY_DSE`)。
+fn rd_copy_mask() -> u32 {
+    env_str!("ENOMOTO_MIP_RESTORE_COPY_DSE").and_then(|v| v.parse().ok()).unwrap_or(0)
+}
+
+fn rdiag_on() -> bool {
+    env_str!("ENOMOTO_MIP_RESTORE_DIAG").is_some()
+}
+
+/// カットの行のハッシュ (係数と右辺を最大の係数で割って丸めたもの。[`Solver::refresh_row_hashes`] と同じ)。
+fn cut_row_hash(coefs: &[(usize, f64)], lo: f64, up: f64) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let cmax = coefs.iter().fold(0.0f64, |m, &(_, v)| m.max(v.abs())).max(1e-300);
+    let mut hs = std::collections::hash_map::DefaultHasher::new();
+    for &(j, v) in coefs {
+        j.hash(&mut hs);
+        ((v / cmax) * 1e9).round().to_bits().hash(&mut hs);
+    }
+    for v in [lo, up] {
+        if v.is_finite() { ((v / cmax) * 1e9).round().to_bits() } else { v.to_bits() }.hash(&mut hs);
+    }
+    hs.finish()
+}
+
 fn dse_all() -> bool {
     env_str!("ENOMOTO_MIP_NO_DSE_ALL").is_none() && crate::simplex::slope_intercept_dual::mip_profile() != 1
 }
@@ -3289,12 +3386,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if let Some(snap) = self.snap.clone() {
             for (k, n) in snap.nodes.iter().enumerate() {
                 let tags = Some(Rc::new(vec![snap.serial << 32 | k as u64]));
-                self.queue.push(OpenNode { changes: n.changes.clone(), lower_bound: n.lower_bound.max(root_obj), estimate: n.estimate, depth: n.depth, basis: None, basis_epoch: 0, dse: None, branch: n.branch, prot: None, tags });
+                self.queue.push(OpenNode { changes: n.changes.clone(), lower_bound: n.lower_bound.max(root_obj), estimate: n.estimate, depth: n.depth, basis: None, basis_epoch: 0, dse: None, branch: n.branch, prot: None, tags, ship: None });
             }
             self.snap_alive = vec![true; snap.nodes.len()];
             first = false;
         } else {
-            self.queue.push(OpenNode { changes: Vec::new(), lower_bound: root_obj, estimate: root_obj, depth: 0, basis: Some(Rc::new(self.lp.basis())), basis_epoch: self.row_log.len(), dse: if dse_all() { self.lp.dse_snapshot().map(Rc::new) } else { None }, branch: None, prot, tags: None });
+            self.queue.push(OpenNode { changes: Vec::new(), lower_bound: root_obj, estimate: root_obj, depth: 0, basis: Some(Rc::new(self.lp.basis())), basis_epoch: self.row_log.len(), dse: if dse_all() { self.lp.dse_snapshot().map(Rc::new) } else { None }, branch: None, prot, tags: None, ship: None });
         }
         // 根のノードは LP を解いた状態のままなので、最初の取り出しでは定義域・LP を作り直さない。
         // 木を分け合う従のスレッドは、未処理のノードが 2 つ以上になってから (根を分枝してから) 始める (根で解ける問題では
@@ -3488,6 +3585,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             };
             let from_sibling = sibling.is_some();
             self.tp_kind = 0;
+            self.rdiag_cur = None;
             let node = match plunge.take().or(sibling) {
                 Some(n) if !from_sibling => n,
                 Some(n) => {
@@ -3511,7 +3609,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         continue;
                     }
                     if let Some(b) = &n.basis {
-                        self.restore_node_basis(b, n.basis_epoch, n.dse.as_ref().map(|v| v.as_slice()));
+                        self.restore_node_basis(b, n.basis_epoch, n.dse.as_ref().map(|v| v.as_slice()), n.ship.as_ref().map(|v| v.as_slice()));
                         // 置いた基底が親の LP の最適基底のままなら、その LU を使う (行が変わっていれば使わない)
                         if let Some(s) = &sib_lu {
                             if n.basis_epoch == self.row_log.len() {
@@ -3582,7 +3680,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         }
                         if ok {
                             if let Some(b) = &n.basis {
-                                self.restore_node_basis(b, n.basis_epoch, n.dse.as_ref().map(|v| v.as_slice()));
+                                self.restore_node_basis(b, n.basis_epoch, n.dse.as_ref().map(|v| v.as_slice()), n.ship.as_ref().map(|v| v.as_slice()));
                             }
                         }
                         if !ok {
@@ -3742,8 +3840,25 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // neos-911970: 取り出したノードの最初の LP は 1 回 300 -> 98 反復、60 秒のノード数 2190 -> 6424 だが、
                 // 探索の順が変わって下界 54.23 -> 53.09。40 問: 19 問 25.05 -> 25.90 (binkar10_1 21 -> 33 秒、mik-250 22 -> 28 秒、
                 // neos5 37 -> 49 秒: 行ごとの BTRAN m 回の分が重い)。既定では使わない
+                // B (`ENOMOTO_MIP_RESTORE_EXACT_SEL`、試作): 選んだ種類の復元 (`1 << RD_*` の和) の最初の LP だけ厳密な DSE 重みから始める
+                if resolves == 0 {
+                    if let Some(d) = self.rdiag_cur {
+                        if rd_exact_mask() & (1 << d[1]) != 0 {
+                            self.restored_dse = false;
+                            crate::simplex::slope_intercept_dual::DSE_EXACT_ONCE.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
+                }
                 if resolves == 0 && self.restored_now && env_str!("ENOMOTO_MIP_RESTORE_EXACT_DSE").is_some() {
                     crate::simplex::slope_intercept_dual::DSE_EXACT_ONCE.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                if resolves == 0 && self.pair_prev.is_some() {
+                    if let Some(d) = self.rdiag_cur {
+                        let l = capped(self, iter_limit);
+                        self.pair_trials(d[1], d[2], &l);
+                    }
+                    self.pair_prev = None;
+                    self.pair_rest = None;
                 }
                 if std::mem::take(&mut self.restored_dse) && resolves == 0 {
                     crate::simplex::slope_intercept_dual::WARM_DSE_ONCE.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -3802,6 +3917,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if std::mem::take(&mut self.restored_now) {
                         self.restore_stats.2 += self.lp.total_iterations() - it0;
                     }
+                    let d = self.rdiag_cur.take().unwrap_or([k.min(2), RD_NONE, 0, 0, 0]);
+                    if env_str!("ENOMOTO_MIP_RESTORE_DIAG") == Some("2") && d[0] > 0 {
+                        let fixed = (0..self.p.n).filter(|&j| self.dom.lo[j] == self.dom.up[j]).count();
+                        eprintln!("RDLINE tid {} src {} kind {} it {} st {:?} depth {} changes {} fixed {} lb {:.6} lp {:.6} lim {:.6} add {} lost {} readd {}", self.pool_tid, d[0], RD_NAMES[d[1]], self.lp.total_iterations() - it0, st, node.depth, node.changes.len(), fixed, node.lower_bound, self.lp.objective() + self.p.offset, self.prune_limit(), d[2], d[3], d[4]);
+                    }
+                    let r = &mut self.rdiag[d[0]][d[1]];
+                    r[0] += 1.0;
+                    r[1] += (self.lp.total_iterations() - it0) as f64;
+                    r[2] += t_lp.elapsed().as_secs_f64();
+                    r[3] += d[2] as f64;
+                    r[4] += d[3] as f64;
+                    r[5] += d[4] as f64;
                 }
                 self.node_lps += 1;
                 self.node_lp_rows += self.lp.num_rows() as u64;
@@ -4428,6 +4555,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     branch: Some((col, !c.upper, value, lp_obj)),
                     prot: prot.clone(),
                     tags: node.tags.clone(),
+                    ship: None,
                 }
             };
             let sib = self.queue.push(mk(second_c));
@@ -5580,20 +5708,139 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.add_proof_from(&y, true);
     }
 
+    /// A: カットの番号 `id` の行 (今の LP の行 `i`) の中身を残す (上限 `ENOMOTO_T_MIP_READD_CACHE` 本、古いものから捨てる)。
+    pub(super) fn remember_cut_row(&mut self, id: u64, i: usize) -> std::sync::Arc<super::queue::CutRow> {
+        if let Some(c) = self.cut_rows.get(&id) {
+            return c.clone();
+        }
+        let (lo, up) = self.lp.row_bounds(i);
+        let c = std::sync::Arc::new((self.lp.row(i), lo, up));
+        self.cut_rows.insert(id, c.clone());
+        self.cut_rows_order.push_back(id);
+        let cap = tunable!("ENOMOTO_T_MIP_READD_CACHE", 30_000usize, usize);
+        while self.cut_rows_order.len() > cap {
+            if let Some(o) = self.cut_rows_order.pop_front() {
+                self.cut_rows.remove(&o);
+            }
+        }
+        c
+    }
+
+    /// D (`ENOMOTO_MIP_RESTORE_NB`、試作): 置いた基底の非基底の構造列を、保存した基底の側 (下限・上限) に置くよう希望する。
+    /// 既定では次の求解が今の解 (直前のノードの LP 解) から置き場所の希望を作り、双対退化した列 (被約費用 0) は直前のノードの
+    /// 側に置かれる。保存した基底の頂点から離れ、主実行不能な基底変数が増える。
+    fn restore_nb_hint(&mut self, b: &super::lp::Basis) {
+        if env_str!("ENOMOTO_MIP_RESTORE_NB").is_none() {
+            return;
+        }
+        let h: Vec<i8> = b
+            .col
+            .iter()
+            .map(|s| match s {
+                VarStatus::Lower => -1,
+                VarStatus::Upper => 1,
+                _ => 0,
+            })
+            .collect();
+        self.lp.set_nb_hint(h);
+    }
+
+    /// 保存したときの行 (`saved` 行、記録の位置 `epoch`) が今どうなっているか: 今の行の番号 (`Ok(i)`)、外したカットの番号
+    /// (`Err(id)`、記録がなければ `Err(u64::MAX)`)。
+    fn row_fates(&self, saved: usize, epoch: usize) -> Vec<Result<usize, u64>> {
+        let mut fate = vec![Err(u64::MAX); saved];
+        if epoch > self.row_log.len() {
+            return fate;
+        }
+        let ids_ok = self.row_log_ids.len() == self.row_log.len();
+        let mut cur: Vec<usize> = (0..saved).collect();
+        for (k, e) in self.row_log[epoch..].iter().enumerate() {
+            match e {
+                RowEdit::Add(c) => cur.extend(std::iter::repeat_n(usize::MAX, *c)),
+                RowEdit::Delete(mask) => {
+                    let ids = if ids_ok { Some(&self.row_log_ids[epoch + k]) } else { None };
+                    let mut t = 0;
+                    let mut next = Vec::with_capacity(cur.len());
+                    for (p, &sv) in cur.iter().enumerate() {
+                        if mask.get(p).copied().unwrap_or(false) {
+                            if sv != usize::MAX {
+                                fate[sv] = Err(ids.and_then(|v| v.get(t).copied()).unwrap_or(u64::MAX));
+                            }
+                            t += 1;
+                        } else {
+                            next.push(sv);
+                        }
+                    }
+                    cur = next;
+                }
+            }
+        }
+        for (p, &sv) in cur.iter().enumerate() {
+            if sv != usize::MAX {
+                fate[sv] = Ok(p);
+            }
+        }
+        fate
+    }
+
     /// 完全オービトープの固定と伝播を、固定が出なくなるまで (最大 10 回) 繰り返す。矛盾したら偽。
-    /// 待ち行列のノードの基底を LP に置く (保存した後の行の追加・削除を当てはめる)。
-    fn restore_node_basis(&mut self, b: &super::lp::Basis, epoch: usize, dse: Option<&[(u32, f32)]>) {
+    /// 待ち行列のノードの基底を LP に置く (保存した後の行の追加・削除を当てはめる)。`ship` は共有の待ち行列から取ったノードに
+    /// 渡した側が付けた、非基底だったカットの行 (A、`ENOMOTO_MIP_RESTORE_READD=2`)。
+    fn restore_node_basis(&mut self, b: &super::lp::Basis, epoch: usize, dse: Option<&[(u32, f32)]>, ship: Option<&[(std::sync::Arc<super::queue::CutRow>, VarStatus)]>) {
+        let t0 = Instant::now();
+        self.restore_node_basis_in(b, epoch, dse, ship);
+        self.rdiag_restore_secs += t0.elapsed().as_secs_f64();
+    }
+
+    fn restore_node_basis_in(&mut self, b: &super::lp::Basis, epoch: usize, dse: Option<&[(u32, f32)]>, ship: Option<&[(std::sync::Arc<super::queue::CutRow>, VarStatus)]>) {
         let mr = self.lp.num_rows();
+        let src = self.tp_kind.min(2);
+        // 保存してから加わった行・外された行の数 (場面の判定と診断)
+        let (mut added, mut deleted) = (0usize, 0usize);
+        if epoch <= self.row_log.len() {
+            for e in &self.row_log[epoch..] {
+                match e {
+                    RowEdit::Add(k) => added += *k,
+                    RowEdit::Delete(mask) => deleted += mask.iter().filter(|&&d| d).count(),
+                }
+            }
+        }
+        self.rdiag_cur = Some([src, RD_NONE, added, 0, 0]);
+        let set_kind = |s: &mut Self, k: usize| {
+            if let Some(d) = s.rdiag_cur.as_mut() {
+                d[1] = k;
+            }
+        };
         // 調査用: 保存した基底を使わず、今の LP の基底 (直前のノードの最適基底) のまま解く
         if env_str!("ENOMOTO_MIP_RESTORE_NEVER").is_some() {
             return;
         }
-        if epoch == self.row_log.len() && b.row.len() == mr {
+        if epoch == self.row_log.len() && b.row.len() == mr && ship.is_none() {
+            let nb = b.col.iter().chain(b.row.iter()).filter(|&&s| s == VarStatus::Basic).count();
+            // 共有の待ち行列から取って手元の待ち行列に入れたノード (釣り合い) も、カットの行を基底にした基底なので数が合わないことがある
+            let kind = if nb != mr { RD_POOLFIX } else if src == 2 { RD_POOLOK } else { RD_EXACT };
+            set_kind(self, kind);
+            // `ENOMOTO_MIP_POOL_KEEP_CURRENT` (試作): 共有の待ち行列のノードで基底変数の数が合わなければ、修復せず今の基底のまま解く
+            if kind == RD_POOLFIX && env_str!("ENOMOTO_MIP_POOL_KEEP_CURRENT").is_some() {
+                set_kind(self, RD_KEEP);
+                self.restore_stats.1 += 1;
+                return;
+            }
+            if env_str!("ENOMOTO_MIP_RESTORE_PAIR").is_some() && !self.params.submip {
+                self.pair_prev = Some((self.lp.basis(), self.lp.dse_snapshot()));
+                self.pair_rest = Some((b.clone(), dse.map(|w| w.to_vec())));
+            }
             self.restore_stats.0 += 1;
             self.restored_now = true;
+            let cur_w = if kind == RD_POOLFIX && rd_copy_mask() & (1 << RD_POOLFIX) != 0 { self.lp.dse_snapshot() } else { None };
             self.lp.set_basis(b);
+            self.restore_nb_hint(b);
             if let Some(w) = dse {
                 self.lp.set_dse_vars(w);
+                self.restored_dse = true;
+            } else if let Some(w) = cur_w {
+                // C: 前の基底の重みの写し (今も基底の変数はその重み、ほかは 1)
+                self.lp.set_dse_vars(&w);
                 self.restored_dse = true;
             }
             return;
@@ -5615,7 +5862,87 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         b2.row.resize(mr, VarStatus::Basic);
+        // A: 保存した基底で非基底だったのに外されたカットの行 (と共有の待ち行列のノードに渡されたカットの行) を戻す。同じ行が
+        // 今の LP にあって基底ならその状態にし、なければ LP に加える (加えた行も普通どおり年齢で外れる)
+        if self.readd_mode > 0 && epoch <= self.row_log.len() {
+            let mut extra: Vec<(std::sync::Arc<super::queue::CutRow>, VarStatus)> = Vec::new();
+            let mut ok = true;
+            let mut lost = 0usize;
+            if b.row.len() > self.p.m && self.readd_mode & 1 != 0 && deleted > 0 {
+                let tf = Instant::now();
+                let fates = self.row_fates(b.row.len(), epoch);
+                self.readd_secs[0] += tf.elapsed().as_secs_f64();
+                for i in self.p.m..b.row.len() {
+                    if b.row[i] == VarStatus::Basic {
+                        continue;
+                    }
+                    if let Err(id) = fates[i] {
+                        lost += 1;
+                        match self.cut_rows.get(&id) {
+                            Some(c) => extra.push((c.clone(), b.row[i])),
+                            None => ok = false,
+                        }
+                    }
+                }
+            }
+            if let Some(sh) = ship {
+                extra.extend(sh.iter().cloned());
+            }
+            if let Some(d) = self.rdiag_cur.as_mut() {
+                d[3] = lost;
+            }
+            let cap = tunable!("ENOMOTO_T_MIP_READD_MAX", 1_000_000usize, usize);
+            if !ok {
+                self.readd_miss += 1;
+            }
+            if ok && !extra.is_empty() && extra.len() <= cap {
+                // 今の LP のカットの行のハッシュ → 行 (ハッシュはカットの番号ごとに覚えておき、行を全部読み直さない)
+                self.sync_cut_age();
+                let mut by_hash: std::collections::HashMap<u64, usize> = std::collections::HashMap::with_capacity(mr - self.p.m);
+                for i in self.p.m..mr {
+                    let id = self.cut_ids[i - self.p.m];
+                    let h = match self.cut_hash.get(&id) {
+                        Some(&h) => h,
+                        None => {
+                            let (lo, up) = self.lp.row_bounds(i);
+                            let h = cut_row_hash(&self.lp.row(i), lo, up);
+                            self.cut_hash.insert(id, h);
+                            h
+                        }
+                    };
+                    by_hash.entry(h).or_insert(i);
+                }
+                if self.cut_hash.len() > 4 * (mr - self.p.m) + 10_000 {
+                    let live: std::collections::HashSet<u64> = self.cut_ids.iter().copied().collect();
+                    self.cut_hash.retain(|id, _| live.contains(id));
+                }
+                let mut add: Vec<(Vec<(usize, f64)>, f64, f64)> = Vec::new();
+                let mut add_st: Vec<VarStatus> = Vec::new();
+                for (c, st) in &extra {
+                    let h = cut_row_hash(&c.0, c.1, c.2);
+                    match by_hash.get(&h) {
+                        Some(&i) if i >= self.p.m && i < mr && b2.row[i] == VarStatus::Basic => b2.row[i] = *st,
+                        _ => {
+                            add.push((c.0.clone(), c.1, c.2));
+                            add_st.push(*st);
+                        }
+                    }
+                }
+                if !add.is_empty() {
+                    let ta = Instant::now();
+                    self.add_cut_rows(&add);
+                    self.readd_secs[1] += ta.elapsed().as_secs_f64();
+                    b2.row.extend(add_st);
+                }
+                if let Some(d) = self.rdiag_cur.as_mut() {
+                    d[4] = extra.len();
+                }
+            }
+        }
+        let mr = self.lp.num_rows();
         let nb = b2.col.iter().chain(b2.row.iter()).filter(|&&s| s == VarStatus::Basic).count();
+        let readd_done = self.rdiag_cur.is_some_and(|d| d[4] > 0);
+        set_kind(self, if readd_done && nb == mr { RD_READD } else if src == 2 { if nb == mr { RD_POOLOK } else { RD_POOLFIX } } else if nb != mr { RD_REPAIR } else if added > 50 { RD_MAPBIG } else { RD_MAP });
         self.restore_stats.0 += 1;
         // `ENOMOTO_MIP_HCM_REPAIR`: HiGHS 流のカット管理でも今の基底のままにせず、この修復で保存した基底を使う
         let hcm_repair = self.highs_cutmgmt() && env_str!("ENOMOTO_MIP_HCM_REPAIR").is_some();
@@ -5644,6 +5971,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         let nb = b2.col.iter().chain(b2.row.iter()).filter(|&&s| s == VarStatus::Basic).count();
+        if env_str!("ENOMOTO_MIP_RESTORE_PAIR").is_some() && !self.params.submip {
+            self.pair_prev = Some((self.lp.basis(), self.lp.dse_snapshot()));
+            self.pair_rest = Some((b2.clone(), dse.map(|w| self.map_saved_dse(b, epoch, w))));
+        }
         if nb != mr {
             self.restore_stats.1 += 1;
             // 保存した基底で非基底だった (効いていた) カットの行が削除されていると基底変数が多すぎる。既定では
@@ -5658,53 +5989,131 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let fc2_keep = (self.fc_node_sep && self.fc_sep2 && env_str!("ENOMOTO_MIP_FC_SEP2_REPAIR").is_none())
                 || (self.tree_sep && env_str!("ENOMOTO_MIP_TREE_SEP_REPAIR").is_none());
             if env_str!("ENOMOTO_MIP_RESTORE_KEEP_CURRENT").is_some() || (self.highs_cutmgmt() && !hcm_repair) || fc2_keep {
+                set_kind(self, RD_KEEP);
+                // C: 今の基底のまま解くときは、その基底の重み (直前の LP の最後の重み) を引き継ぐ
+                if rd_copy_mask() & (1 << RD_KEEP) != 0 && self.lp.dse_snapshot().is_some() {
+                    self.restored_dse = true;
+                }
                 return;
             }
         }
         self.restored_now = true;
+        let cur_w = if nb != mr && rd_copy_mask() & (1 << RD_REPAIR) != 0 { self.lp.dse_snapshot() } else { None };
         self.lp.set_basis(&b2);
+        self.restore_nb_hint(&b2);
+        if let Some(w) = cur_w {
+            self.lp.set_dse_vars(&w);
+            self.restored_dse = true;
+            return;
+        }
         if let Some(w) = dse {
             // 保存したときの行の番号を今の行の番号に直す (行の追加・削除の記録を当てはめる)
-            let n = b.col.len();
-            let m_saved = b.row.len();
-            let mut orig: Vec<usize> = (0..m_saved).collect();
             if epoch <= self.row_log.len() {
-                for e in &self.row_log[epoch..] {
-                    match e {
-                        RowEdit::Add(k) => orig.extend(std::iter::repeat_n(usize::MAX, *k)),
-                        RowEdit::Delete(mask) => {
-                            let mut i = 0;
-                            orig.retain(|_| {
-                                let keep = !mask.get(i).copied().unwrap_or(false);
-                                i += 1;
-                                keep
-                            });
-                        }
-                    }
-                }
-                let mut cur_of = vec![u32::MAX; m_saved];
-                for (ci, &o) in orig.iter().enumerate() {
-                    if o < m_saved {
-                        cur_of[o] = (n + ci) as u32;
-                    }
-                }
-                let mapped: Vec<(u32, f32)> = w
-                    .iter()
-                    .filter_map(|&(v, x)| {
-                        let v = v as usize;
-                        if v < n {
-                            Some((v as u32, x))
-                        } else if v - n < m_saved && cur_of[v - n] != u32::MAX {
-                            Some((cur_of[v - n], x))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
+                let mapped = self.map_saved_dse(b, epoch, w);
                 self.lp.set_dse_vars(&mapped);
                 self.restored_dse = true;
             }
         }
+    }
+
+    /// 保存した DSE 重み (保存したときの行の番号) を今の行の番号に直す (行の追加・削除の記録を当てはめる)。
+    fn map_saved_dse(&self, b: &super::lp::Basis, epoch: usize, w: &[(u32, f32)]) -> Vec<(u32, f32)> {
+        let n = b.col.len();
+        let m_saved = b.row.len();
+        let mut orig: Vec<usize> = (0..m_saved).collect();
+        if epoch <= self.row_log.len() {
+            for e in &self.row_log[epoch..] {
+                match e {
+                    RowEdit::Add(k) => orig.extend(std::iter::repeat_n(usize::MAX, *k)),
+                    RowEdit::Delete(mask) => {
+                        let mut i = 0;
+                        orig.retain(|_| {
+                            let keep = !mask.get(i).copied().unwrap_or(false);
+                            i += 1;
+                            keep
+                        });
+                    }
+                }
+            }
+        }
+        let mut cur_of = vec![u32::MAX; m_saved];
+        for (ci, &o) in orig.iter().enumerate() {
+            if o < m_saved {
+                cur_of[o] = (n + ci) as u32;
+            }
+        }
+        w.iter()
+            .filter_map(|&(v, x)| {
+                let v = v as usize;
+                if v < n {
+                    Some((v as u32, x))
+                } else if v - n < m_saved && cur_of[v - n] != u32::MAX {
+                    Some((cur_of[v - n], x))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// 調査用 (`ENOMOTO_MIP_RESTORE_PAIR`): 取り出したノードの最初の LP の前に、置き方と DSE 重みを入れ替えて試し解きし
+    /// ([`PAIR_NAMES`])、反復を種類ごとに積む。LP の状態と反復の合計は戻す。
+    fn pair_trials(&mut self, kind: usize, added: usize, limits: &SolveLimits) {
+        use crate::simplex::slope_intercept_dual::{DSE_EXACT_ONCE, WARM_DSE_ONCE};
+        use std::sync::atomic::Ordering::Relaxed;
+        let (Some(prev), Some(rest)) = (self.pair_prev.take(), self.pair_rest.take()) else { return };
+        let saved = self.lp.save_state();
+        let it_total = self.lp.total_iterations();
+        let mr = self.lp.num_rows();
+        if prev.0.row.len() != mr || rest.0.row.len() != mr {
+            return;
+        }
+        for t in 0..PAIR_N {
+            let (basis, w) = if t < 4 { (&rest.0, &rest.1) } else { (&prev.0, &prev.1) };
+            self.lp.set_basis(basis);
+            match t {
+                // 単位重み (重みのない基底変数は 1)
+                2 | 4 => self.lp.set_dse_vars(&[]),
+                0 | 3 => {
+                    if let Some(w) = w {
+                        self.lp.set_dse_vars(w);
+                        WARM_DSE_ONCE.store(true, Relaxed);
+                    }
+                    if t == 3 {
+                        let h: Vec<i8> = basis.col.iter().map(|s| match s {
+                            VarStatus::Lower => -1,
+                            VarStatus::Upper => 1,
+                            _ => 0,
+                        }).collect();
+                        self.lp.set_nb_hint(h);
+                    }
+                }
+                1 | 6 => DSE_EXACT_ONCE.store(true, Relaxed),
+                5 => {
+                    if let Some(w) = w {
+                        self.lp.set_dse_vars(w);
+                        WARM_DSE_ONCE.store(true, Relaxed);
+                    }
+                }
+                _ => {}
+            }
+            let it0 = self.lp.total_iterations();
+            let st = self.lp.solve(limits);
+            WARM_DSE_ONCE.store(false, Relaxed);
+            DSE_EXACT_ONCE.store(false, Relaxed);
+            let it = self.lp.total_iterations() - it0;
+            if env_str!("ENOMOTO_MIP_RESTORE_PAIR") == Some("2") {
+                eprintln!("PAIRLINE kind {} t {} it {} st {:?} obj {:.6} rows {} w {:?}", RD_NAMES[kind], PAIR_NAMES[t], it, st, self.lp.objective(), mr, w.as_ref().map(|w| (w.len(), w.iter().filter(|x| x.1 != 1.0).count())));
+            }
+            if matches!(st, LpStatus::Optimal | LpStatus::Infeasible | LpStatus::ObjectiveBound) {
+                let bin = PAIR_BINS.iter().position(|&b| added <= b).unwrap_or(PAIR_BINS.len());
+                let e = self.pair_stats.entry((kind, bin)).or_insert([[0.0; 2]; PAIR_N]);
+                e[t][0] += 1.0;
+                e[t][1] += it as f64;
+            }
+            self.lp.restore_state(&saved);
+        }
+        self.lp.set_total_iterations(it_total);
     }
 
     /// 分枝する列がパッキング・オービトープの行にあれば、その行で最も左の固定されていない列で分枝する
@@ -7710,14 +8119,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
         };
         for n in nodes.iter_mut() {
             retag(n, snodes.len());
-            snodes.push(SnapNode { changes: n.changes.clone(), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, cut_basis: None, basis: None });
+            snodes.push(SnapNode { changes: n.changes.clone(), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, cut_basis: None, basis: None, ship: None, ship_dse: None });
         }
         for n in nodes {
             self.queue.push(n);
         }
         if let Some(n) = plunge.as_mut().filter(|_| with_nodes) {
             retag(n, snodes.len());
-            snodes.push(SnapNode { changes: n.changes.clone(), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, cut_basis: None, basis: None });
+            snodes.push(SnapNode { changes: n.changes.clone(), lower_bound: n.lower_bound, estimate: n.estimate, depth: n.depth, branch: n.branch, cut_basis: None, basis: None, ship: None, ship_dse: None });
         }
         if with_nodes {
             self.dive_stack.clear();
@@ -7916,6 +8325,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
     fn open_from_pool(&mut self, mut sn: SnapNode) -> OpenNode {
         let basis = sn.basis.take();
         let cut_basis = sn.cut_basis.take();
+        let ship = sn.ship.take();
+        let ship_dse = sn.ship_dse.take();
         let mut n = sn.into_open();
         if let Some((col, mut row)) = basis {
             let mr = self.lp.num_rows();
@@ -7937,6 +8348,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 n.basis = Some(Rc::new(super::lp::Basis { col, row }));
                 n.basis_epoch = self.row_log.len();
+                if ship.is_some() && self.readd_mode & 2 != 0 {
+                    n.ship = ship;
+                    n.dse = ship_dse.map(Rc::new);
+                }
             }
         }
         n
@@ -7949,6 +8364,35 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return SnapNode::of(n);
         }
         let mut s = SnapNode::of_with_basis(n, self.p.m);
+        // A (`ENOMOTO_MIP_RESTORE_READD=2`): 親の基底で非基底だったカットの行の中身と状態、列と元の行の DSE 重みを付ける
+        if s.basis.is_some() && self.readd_mode & 2 != 0 {
+            if let Some(b) = n.basis.clone() {
+                let fates = self.row_fates(b.row.len(), n.basis_epoch);
+                let mut v = Vec::new();
+                let mut ok = true;
+                for i in self.p.m..b.row.len() {
+                    if b.row[i] == VarStatus::Basic {
+                        continue;
+                    }
+                    match fates[i] {
+                        Ok(c) => {
+                            self.sync_cut_age();
+                            let id = self.cut_ids[c - self.p.m];
+                            v.push((self.remember_cut_row(id, c), b.row[i]));
+                        }
+                        Err(id) => match self.cut_rows.get(&id) {
+                            Some(c) => v.push((c.clone(), b.row[i])),
+                            None => ok = false,
+                        },
+                    }
+                }
+                if ok {
+                    let lim = (self.p.n + self.p.m) as u32;
+                    s.ship_dse = n.dse.as_ref().map(|w| w.iter().copied().filter(|&(v, _)| v < lim).collect());
+                    s.ship = Some(std::sync::Arc::new(v));
+                }
+            }
+        }
         if s.basis.is_some() && env_str!("ENOMOTO_MIP_TREE_SHARE_CUT_BASIS").is_some() {
             if let Some(b) = n.basis.clone() {
                 // 保存したときの行を今の行に合わせる (行の追加・削除の記録を当てはめる。[`Self::restore_node_basis`] と同じ)
@@ -7982,7 +8426,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// LP のカットの行のハッシュ (係数と右辺を最大の係数で割って丸めたもの) と、ハッシュから行への表を、行が変わっていれば作り直す。
     fn refresh_row_hashes(&mut self) {
-        use std::hash::{Hash, Hasher};
         let mr = self.lp.num_rows();
         if self.row_hash_epoch == Some(self.row_log.len()) && self.row_hash.len() == mr {
             return;
@@ -7996,16 +8439,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             let coefs = self.lp.row(i);
             let (lo, up) = self.lp.row_bounds(i);
-            let cmax = coefs.iter().fold(0.0f64, |m, &(_, v)| m.max(v.abs())).max(1e-300);
-            let mut hs = std::collections::hash_map::DefaultHasher::new();
-            for &(j, v) in &coefs {
-                j.hash(&mut hs);
-                ((v / cmax) * 1e9).round().to_bits().hash(&mut hs);
-            }
-            for v in [lo, up] {
-                if v.is_finite() { ((v / cmax) * 1e9).round().to_bits() } else { v.to_bits() }.hash(&mut hs);
-            }
-            let h = hs.finish();
+            let h = cut_row_hash(&coefs, lo, up);
             self.row_hash.push(h);
             self.row_hash_map.entry(h).or_insert(i);
         }
@@ -8340,6 +8774,28 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     fn finish(&mut self, status: MipStatus, best_bound: f64) -> MipResult {
+        if rdiag_on() && !self.params.submip {
+            let src = ["dive", "local", "pool"];
+            let mut out = format!("RESTDIAG tid {} nodes {} restore_secs {:.3} cut_rows {} readd_miss {} readd_secs {:.3} {:.3}", self.pool_tid, self.nodes, self.rdiag_restore_secs, self.cut_rows.len(), self.readd_miss, self.readd_secs[0], self.readd_secs[1]);
+            for (si, row) in self.rdiag.iter().enumerate() {
+                for (ki, r) in row.iter().enumerate() {
+                    if r[0] > 0.0 {
+                        let n = r[0];
+                        out += &format!(" | {}/{} n {} it {:.1} ms {:.2} add {:.1} lost {:.1} readd {:.1}", src[si], RD_NAMES[ki], n, r[1] / n, 1e3 * r[2] / n, r[3] / n, r[4] / n, r[5] / n);
+                    }
+                }
+            }
+            eprintln!("{out}");
+            for (&(k, bin), row) in self.pair_stats.iter() {
+                {
+                    let mut o = format!("RESTPAIR tid {} kind {} addbin {}", self.pool_tid, RD_NAMES[k], bin);
+                    for (t, r) in row.iter().enumerate() {
+                        o += &format!(" {} {} {:.1}", PAIR_NAMES[t], r[0], r[1] / r[0].max(1.0));
+                    }
+                    eprintln!("{o}");
+                }
+            }
+        }
         // 診断用: 従は自分の内訳を主に渡す (主は従を待った後に表示する)
         if prof_tree_par() {
             self.tprof.lits = self.lit_conflicts.stats;

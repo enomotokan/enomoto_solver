@@ -70,6 +70,9 @@ pub trait MipLp: Clone + Send {
     fn lu_snapshot(&self) -> Option<LuSnapshot> {
         None
     }
+    /// 次の求解の非基底列の置き場所の希望 (列 j < n: -1 下限・+1 上限・0 なし) を与える ([`TwoStageLp::set_nb_hint`])。
+    /// 対応しない実装は何もしない。
+    fn set_nb_hint(&mut self, _h: Vec<i8>) {}
     /// 取り出した LU キャッシュを、今の基底が同じなら戻す ([`TwoStageLp::adopt_lu_snapshot`])。対応しない実装は何もしない。
     fn adopt_lu_snapshot(&mut self, _s: &LuSnapshot) -> bool {
         false
@@ -150,5 +153,8 @@ forward_impl!(
     },
     fn adopt_lu_snapshot(&mut self, s: &LuSnapshot) -> bool {
         TwoStageLp::adopt_lu_snapshot(self, s)
+    },
+    fn set_nb_hint(&mut self, h: Vec<i8>) {
+        TwoStageLp::set_nb_hint(self, h)
     }
 );

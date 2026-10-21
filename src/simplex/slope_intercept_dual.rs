@@ -3927,10 +3927,18 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     // 厳密 DSE を使う。全スラックの `B0` は符号付き単位行列なので `DseState::new` の単位重みは正確。
     let exact_once = DSE_EXACT_ONCE.swap(false, std::sync::atomic::Ordering::Relaxed);
     let warm_once = WARM_DSE_ONCE.swap(false, std::sync::atomic::Ordering::Relaxed);
-    let mut dse = match WARM_DSE.with(|w| w.borrow_mut().take()) {
+    let warm_w = WARM_DSE.with(|w| w.borrow_mut().take());
+    if env_str!("ENOMOTO_DEBUG_DSEINIT").is_some() {
+        let on = warm_once || env_str!("ENOMOTO_WARM_DSE").is_some() || WARM_DSE_ON.load(std::sync::atomic::Ordering::Relaxed);
+        let how = if warm_w.as_ref().is_some_and(|w| w.len() == m) && warm_started && on { "warm" } else if warm_started && (exact_once || env_str!("ENOMOTO_DSE_EXACT_INIT").is_some()) { "exact" } else if warm_started { "unit_warmstart" } else { "unit_cold" };
+        eprintln!("DSEINIT {how} m {m}");
+    }
+    let mut dse = match warm_w {
         // 既定では使わない (`ENOMOTO_WARM_DSE` で有効): 反復は少し減るが、退化した LP で着く頂点が変わり、misc07・mik-250 で
         // 木が大きくなった (40 問: 18 -> 17 問)
-        Some(w) if warm_started && w.len() == m && (warm_once || env_str!("ENOMOTO_WARM_DSE").is_some() || WARM_DSE_ON.load(std::sync::atomic::Ordering::Relaxed)) => super::DseState::from_weights(w),
+        // 厳密な重みを頼まれた (`DSE_EXACT_ONCE`) ときは引き継ぎより優先する (MIP の `ENOMOTO_MIP_RESTORE_EXACT_SEL` などの試作。
+        // 引き継ぎが既定 (`WARM_DSE_ON`) の今は、こうしないと頼んでも引き継いだ重みが使われる)
+        Some(w) if warm_started && !exact_once && w.len() == m && (warm_once || env_str!("ENOMOTO_WARM_DSE").is_some() || WARM_DSE_ON.load(std::sync::atomic::Ordering::Relaxed)) => super::DseState::from_weights(w),
         // `ENOMOTO_DSE_EXACT_INIT`: warm start (構造列を含む基底) では、単位重みではなくその基底の厳密な DSE 重みから
         // 始める (HiGHS の HEkkDual::initialiseInstance と同じ。行ごとに BTRAN 1 回、計 m 回)。単位重みは全スラック基底で
         // しか正確でなく、分枝限定法で待ち行列から取り出したノード (保存した基底を復元、重みの引き継ぎなし) の最初の LP は

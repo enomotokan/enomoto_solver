@@ -31,6 +31,8 @@ pub struct TwoStageLp {
     /// 直近の求解の最後の DSE 重み (基底位置順) と、そのときの基底。次の求解の基底が同じなら引き継ぐ
     /// (行を加えたら新しい行の重みを 1 で足す)。状態の保存と共有する。
     dse_cache: Option<Arc<(Vec<usize>, Vec<f64>)>>,
+    /// 次の求解だけに使う非基底列の置き場所の希望 ([`Self::set_nb_hint`]。なければ今の解から作る [`Self::nb_hint`])。
+    nb_override: Option<Vec<i8>>,
     n: usize,
     /// 元の行 (列番号の昇順) と行の境界。
     rows: Vec<Vec<(usize, f64)>>,
@@ -172,6 +174,7 @@ impl TwoStageLp {
             lu: None,
             lu_cache: None,
             dse_cache: None,
+            nb_override: None,
             iters: 0,
             price_key: new_price_key(),
             ray: None,
@@ -490,6 +493,11 @@ impl TwoStageLp {
             };
         }
         Basis { col, row }
+    }
+
+    /// 次の求解の非基底の構造列の置き場所の希望 (列 j < n: -1 下限・+1 上限・0 なし) を与える (1 回だけ使う)。
+    pub fn set_nb_hint(&mut self, h: Vec<i8>) {
+        self.nb_override = Some(h);
     }
 
     pub fn set_basis(&mut self, b: &Basis) {
@@ -1000,7 +1008,16 @@ impl TwoStageLp {
                     }
                 }
                 if env_str!("ENOMOTO_MIP_NO_NB_HINT").is_none() {
-                    sid::set_warm_nb(Some(self.nb_hint()));
+                    let mut h = self.nb_hint();
+                    // 与えられた希望 (待ち行列のノードの保存した基底の列の側) があれば構造列はそれを使う
+                    if let Some(o) = self.nb_override.take() {
+                        for (hj, &oj) in h.iter_mut().zip(o.iter()).take(self.n) {
+                            if oj != 0 {
+                                *hj = oj;
+                            }
+                        }
+                    }
+                    sid::set_warm_nb(Some(h));
                 }
                 // 前回の最後の DSE 重み (同じ基底のとき)
                 if let Some((cb, w)) = self.dse_cache.as_deref() {
@@ -1018,6 +1035,7 @@ impl TwoStageLp {
         sid::set_warm_lu(None);
         sid::set_warm_d(None);
         sid::set_warm_nb(None);
+        self.nb_override = None;
         sid::set_warm_dse(None);
         let last_dse = sid::take_last_dse();
         self.dse_cache = None;

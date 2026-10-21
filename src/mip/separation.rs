@@ -1058,12 +1058,32 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.next_cut_id += 1;
         }
         self.row_log.push(super::solver::RowEdit::Add(rows.len()));
+        if self.readd_mode > 0 {
+            self.row_log_ids.push(std::rc::Rc::new(Vec::new()));
+        }
     }
 
     /// LP の行を消す (カットの年齢も合わせて消す)。
     pub(super) fn delete_lp_rows(&mut self, remove: &[bool]) {
         self.sync_cut_age();
         let m0 = self.p.m;
+        // A (`ENOMOTO_MIP_RESTORE_READD`): 外す行のカットの番号と中身を残す (待ち行列のノードの基底で効いていた行を戻すため)
+        if self.readd_mode > 0 {
+            let mut ids = Vec::new();
+            for (i, &r) in remove.iter().enumerate() {
+                if !r {
+                    continue;
+                }
+                if i < m0 || i - m0 >= self.cut_ids.len() {
+                    ids.push(u64::MAX);
+                    continue;
+                }
+                let id = self.cut_ids[i - m0];
+                ids.push(id);
+                self.remember_cut_row(id, i);
+            }
+            self.row_log_ids.push(std::rc::Rc::new(ids));
+        }
         let mut k = m0;
         self.cut_age.retain(|_| {
             let keep = !remove[k];
@@ -1081,7 +1101,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     /// カットの年齢の長さを LP のカットの行の数に合わせる (足りなければ 0 で埋める)。
-    fn sync_cut_age(&mut self) {
+    pub(super) fn sync_cut_age(&mut self) {
         let want = self.lp.num_rows().saturating_sub(self.p.m);
         self.cut_age.resize(want, 0);
         if self.cut_ids.len() > want {
