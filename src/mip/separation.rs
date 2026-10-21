@@ -326,7 +326,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 既定の選択では 1 ラウンドに数本しか入らない (sp150x300d: 候補 456 本 -> 31 本、根の下界 56.9 (HiGHS 68.7))。
         // 固定費用型 18 問 (beasleyC1-3, mc7/8/11, h50x2450, h80x6320d, sp150x300d, p200x1188c, aflow30a/40b, rout など、60 秒) で
         // SGM 29.16 -> 27.00、29.09 -> 27.49 (2 回)、解けた問題 9 -> 10。`ENOMOTO_MIP_NO_CUTSEL_FC` で無効
-        let fc_relax = env_str!("ENOMOTO_MIP_NO_CUTSEL_FC").is_none() && !self.params.submip && fixed_charge_network(p);
+        let fc_net = !self.params.submip && fixed_charge_network(p);
+        self.fc_network = fc_net;
+        let fc_relax = env_str!("ENOMOTO_MIP_NO_CUTSEL_FC").is_none() && fc_net;
         if fc_relax && self.params.verbose {
             eprintln!("MIP: fixed-charge network structure: relaxed root cut selection");
         }
@@ -1938,6 +1940,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return (self.separate(x, light), Vec::new());
         }
         if env_str!("ENOMOTO_MIP_GR_AUTO") == Some("2") && super::implbd_genint_for(&self.p.is_int, &self.p.col_lo, &self.p.col_up) {
+            return (self.separate(x, light), Vec::new());
+        }
+        // `ENOMOTO_MIP_FACE_SEP_FC=off` (試作): 固定費用ネットワーク型 (根のカット選択を緩める問題) では面の頂点の分離を止める。
+        // mc11: 止めると根の手前のカットが 2.6 -> 1.1〜1.5 秒で 11069 (止めなければ 11108) に着き、背景のカットが 23 -> 50〜56
+        // ラウンド回って 11455 -> 11672〜11674 (最適 11689) になり 60 秒で解ける (背景のカットだけ止めても 11549〜11604 で解けない)
+        if self.fc_network && env_str!("ENOMOTO_MIP_FACE_SEP_FC") == Some("off") {
             return (self.separate(x, light), Vec::new());
         }
         let mode = match env_str!("ENOMOTO_MIP_FACE_SEP") {

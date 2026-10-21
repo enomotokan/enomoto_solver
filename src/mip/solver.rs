@@ -184,6 +184,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) path_collect: Option<Vec<Vec<(usize, f64)>>>,
     /// カットを強める求解で回したラウンド数
     pub(super) bg_cut_rounds: usize,
+    /// 根のカットのループで固定費用ネットワーク型と判定したか (`ENOMOTO_MIP_FACE_SEP_FC`、試作)
+    pub(super) fc_network: bool,
     /// 並列の強分岐 (`ENOMOTO_MIP_PAR_SB`) の [まとめた回数, 並列に解いた候補の数]。
     par_sb_stats: [u64; 2],
     pub(super) deadline: Option<Instant>,
@@ -1382,6 +1384,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         sep_par_cpu: 0.0,
         path_collect: None,
         bg_cut_rounds: 0,
+        fc_network: false,
         par_sb_stats: [0; 2],
         deadline,
         nodes: 0,
