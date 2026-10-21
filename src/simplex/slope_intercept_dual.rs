@@ -3993,6 +3993,22 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         }
     };
 
+    // `ENOMOTO_DSE_WEIGHT_CHECK` (試作、既定では使わない): 選んだ行の保持している DSE 重みと `‖rho‖^2` (真の値) を比べる
+    // (HiGHS `HEkkDual::chooseRow`・`acceptDualSteepestEdgeWeight` と同じ): 真の値で上書きし、保持値が真の値の
+    // `ENOMOTO_T_DSE_ACCEPT` (既定 0.25、HiGHS `kAcceptDseWeightThreshold`) 倍未満なら行を選び直す (大きすぎる保持値は
+    // 選ばれないので HiGHS は気にしない)。さらに (HiGHS にはない) 直近 `ENOMOTO_T_DSE_ERR_WINDOW` 回の選択のうち
+    // `ENOMOTO_T_DSE_ERR_RATIO` 倍を超えてずれた割合が `ENOMOTO_T_DSE_ERR_FRAC` 以上なら、全行の重みを厳密に計算し直す
+    // (`ENOMOTO_T_DSE_RECOMPUTE=0` で選び直しだけ)。引き継いだ重みがずれているときの安全網 (analysis/lp_hang_20261021.md)
+    let dse_weight_check = env_str!("ENOMOTO_DSE_WEIGHT_CHECK").is_some();
+    let dse_accept: f64 = tunable!("ENOMOTO_T_DSE_ACCEPT", 0.25, f64);
+    let dse_err_ratio: f64 = tunable!("ENOMOTO_T_DSE_ERR_RATIO", 4.0, f64);
+    let dse_err_window: usize = if dse_weight_check { tunable!("ENOMOTO_T_DSE_ERR_WINDOW", 50usize, usize) } else { 0 };
+    let dse_err_frac: f64 = tunable!("ENOMOTO_T_DSE_ERR_FRAC", 0.3, f64);
+    let dse_recompute_on = dse_weight_check && tunable!("ENOMOTO_T_DSE_RECOMPUTE", 1u8, u8) != 0;
+    let mut dse_err_ring = vec![false; dse_err_window];
+    let (mut dse_err_idx, mut dse_err_cnt) = (0usize, 0usize);
+    let (mut diag_dse_rejects, mut diag_dse_recomputes, mut diag_dse_checked, mut diag_dse_dev) = (0usize, 0usize, 0usize, 0usize);
+    let dse_floor: f64 = tunable!("ENOMOTO_T_STEEPEST_EDGE_FLOOR", STEEPEST_EDGE_FLOOR, f64);
     // 停滞(目的関数への寄与がほぼ 0 のピボット)がこの回数を超えたら Bland 規則に切り替える。
     let stall_limit = (STALL_LIMIT_PER_ROW * m).max(STALL_LIMIT_MIN);
     // 連続した停滞ピボットの数。
@@ -4800,6 +4816,9 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
             }
             if noise_diag {
                 eprintln!("DEBUG_EXT: degenerate_pivots={diag_degen} max_run={diag_degen_max_run} cost_shifts={diag_shift_events} shifted_cols={diag_shift_cols} xb_mismatch={:.3e}@{}", diag_xb_mismatch.0, diag_xb_mismatch.1);
+                if dse_weight_check {
+                    eprintln!("DEBUG_EXT: dse_weight_check: checked={diag_dse_checked} deviated={diag_dse_dev} rejected={diag_dse_rejects} recomputed={diag_dse_recomputes}");
+                }
             }
             if noise_diag && noise_on {
                 eprintln!(
@@ -4846,6 +4865,39 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         // 通常の `f64`)。この反復の FT 更新用に `e_tilde` (U^-T 後・R 逆適用前の中間値) を `kernel` に、
         // 融合 `tau` FTRAN 用に非ゼロステップを `rho_steps` に記録する (大きな問題では超疎版)。
         timed!(profile_phases, prof_phases::BTRAN, kernel.btran_row_steps(&lu, r, &mut rho, &mut rho_steps));
+        // `ENOMOTO_DSE_WEIGHT_CHECK`: 保持している重みと真の値の比較 (上の説明)
+        if dse_weight_check {
+            let exact_w = dot(&rho, &rho).max(dse_floor);
+            let held = dse.weight(r);
+            dse.w[r] = exact_w;
+            diag_dse_checked += 1;
+            let dev = held < exact_w / dse_err_ratio || held > exact_w * dse_err_ratio;
+            diag_dse_dev += dev as usize;
+            if dse_err_window > 0 {
+                let i = dse_err_idx % dse_err_window;
+                dse_err_cnt -= dse_err_ring[i] as usize;
+                dse_err_ring[i] = dev;
+                dse_err_cnt += dev as usize;
+                dse_err_idx += 1;
+                if dse_recompute_on && dse_err_idx >= dse_err_window && dse_err_cnt as f64 >= dse_err_frac * dse_err_window as f64 {
+                    dse = super::DseState::from_basis(m, &lu);
+                    diag_dse_recomputes += 1;
+                    dse_err_ring.iter_mut().for_each(|v| *v = false);
+                    dse_err_cnt = 0;
+                    dse_err_idx = 0;
+                    shortlist_valid = false;
+                    chuzr_heap_valid = false;
+                    continue;
+                }
+            }
+            if held < dse_accept * exact_w {
+                // 保持値が小さすぎた (この行が選ばれやすくなっていた): 真の値に直して選び直す
+                diag_dse_rejects += 1;
+                shortlist_valid = false;
+                chuzr_heap_valid = false;
+                continue;
+            }
+        }
         // 診断: 維持している DSE 重みと `‖rho‖^2`(真の値)の相対誤差を区間別に数える
         // (`O(m)` なので作業量集計 `ENOMOTO_PROF_PHASES_EXT_WORK` のときだけ。策8)。
         if profile_work {
