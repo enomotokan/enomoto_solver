@@ -142,8 +142,15 @@ pub fn eliminate_singleton_equalities_view(n: usize, a: &FaerCsr, b: &[f64], gv:
 
     // 整数最適化の前処理中は整数列を消さない (復元値が整数になる保証がないため)。
     let int_mask = crate::presolve::int_mask();
+    // `ENOMOTO_MIP_KEEP_BOUNDED_SLACK` (試作): 整数最適化の前処理で、上下限が両方とも有限の連続列は消さない (等式を範囲制約に
+    // 変えない)。timtab1 は 171 本の等式すべてに有界の連続のスラック (目的の費用つき) があり、消すと等式が範囲制約になる
+    // (HiGHS は残す: 161 行 360 列)
+    let keep_bounded = int_mask.is_some() && env_str!("ENOMOTO_MIP_KEEP_BOUNDED_SLACK").is_some();
     for j in 0..n {
         if appearances[j] != 1 || int_mask.as_ref().is_some_and(|m| m[j]) {
+            continue;
+        }
+        if keep_bounded && lb[j].is_finite() && ub[j].is_finite() {
             continue;
         }
         let Some(i) = owning_a_row[j] else { continue }; // 唯一の出現が G 側

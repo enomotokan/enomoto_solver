@@ -187,6 +187,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 強分岐に使った時間 (秒) と、強分岐で解いた LP の数。
     pub(super) sb_secs: f64,
     pub(super) sb_lps: u64,
+    /// 分枝の選択の回数と、そのうち双対退化で強分岐をしなかった回数 (診断用)。
+    pub(super) sb_degen_stats: [u64; 2],
     /// 直前の分枝の選択で、選んだ列の強分岐の子の LP 値 (列, 下の子, 上の子)。最適まで解けなかった側は -inf。
     pub(super) last_sb: Option<(usize, f64, f64)>,
     /// clique カット用の 2 値列の衝突グラフ (根で作る)。
@@ -532,6 +534,10 @@ pub(super) struct Solver<'a, L: MipLp> {
     obj_cols: Option<std::rc::Rc<Vec<(usize, f64)>>>,
     /// 目的関数の伝播 [刈ったノード, 締めた境界]、強分岐の子の伝播 [矛盾した子, 子の LP に渡した境界]
     obj_prop_stats: [u64; 2],
+    /// カットプールの伝播 (`ENOMOTO_MIP_CUTPOOL_PROP`): 呼び出し回数、枝刈りしたノード数、締めた境界の数、時間 (ナノ秒)。
+    cutpool_prop_stats: [u64; 4],
+    /// 根のカットのループが HiGHS 流のカット管理を有効にしたか (`ENOMOTO_MIP_CUT_STRONG_AUTO`、[`Self::highs_cutmgmt`])。
+    pub(super) hcm_auto: bool,
     /// [`Self::root_obj_probe`] の (試した列, 固定した列)
     root_obj_probe_stats: [u64; 2],
     sb_prop_stats: [u64; 2],
@@ -628,6 +634,8 @@ pub(crate) struct TreeSnapshot {
     pc: Pseudocost,
     pub(crate) nodes: Vec<SnapNode>,
     pub(crate) valid_below: f64,
+    /// 根で HiGHS 流のカット管理を有効にしたか (`ENOMOTO_MIP_CUT_STRONG_AUTO`)。
+    hcm_auto: bool,
     /// 完全オービトープと、対称性の行・固定を加える前の問題 (写しから解く求解も orbitopal fixing をし、ヒューリスティクスの
     /// 解を並べ替えて使えるように)。
     orbitopes: Vec<super::symmetry::Orbitope>,
@@ -1014,6 +1022,11 @@ fn pool_release(pool: &WorkPool) {
     }
 }
 
+/// ノードでカットプールを伝播するか (`ENOMOTO_MIP_CUTPOOL_PROP`、試作。サブ MIP でも使う)。
+fn cutpool_prop() -> bool {
+    env_str!("ENOMOTO_MIP_CUTPOOL_PROP").is_some()
+}
+
 fn heur_role_verbose() -> bool {
     env_str!("ENOMOTO_MIP_HEUR_ROLE_VERBOSE").is_some()
 }
@@ -1363,6 +1376,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         sb_iters: 0,
         sb_secs: 0.0,
         sb_lps: 0,
+        sb_degen_stats: [0; 2],
         last_sb: None,
         clique_graph: None,
         clique_auto: None,
@@ -1568,6 +1582,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         debug_x_done: false,
         obj_cols: None,
         obj_prop_stats: [0; 2],
+        cutpool_prop_stats: [0; 4],
+        hcm_auto: snap.as_ref().is_some_and(|sn| sn.hcm_auto),
         root_obj_probe_stats: [0; 2],
         sb_prop_stats: [0; 2],
         lit_conflicts: super::conflict_pool::LitConflictPool::new(p.n, tunable!("ENOMOTO_T_MIP_LIT_CONFLICT_POOL", 5000usize, usize)),
@@ -1779,7 +1795,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 行の追加・削除そのもの (標準形の作り直し + 次の求解での再分解) は 40 秒中 0.9 + 0.7 秒 (3192 回)、再分解は 0.1 秒未満、
     /// プールの違反の走査は 1.4-1.9 秒だった (走査は平坦な複製 `pool_idx` で安くした)
     pub(super) fn highs_cutmgmt(&self) -> bool {
-        env_str!("ENOMOTO_MIP_HIGHS_CUTMGMT").is_some() && !self.params.submip
+        (env_str!("ENOMOTO_MIP_HIGHS_CUTMGMT").is_some() || self.hcm_auto) && !self.params.submip
     }
 
     pub(super) fn time_up(&self) -> bool {
@@ -2144,7 +2160,20 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let (lo, up) = if self.p.is_int[j] { (x[j], x[j]) } else { (self.p.col_lo[j], self.p.col_up[j]) };
             self.lp.set_col_bounds(j, lo, up);
         }
-        let st = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
+        // `ENOMOTO_MIP_INC_LP_CAP` (試作、既定では使わない): この LP の時間の上限を全体の `ENOMOTO_T_MIP_INC_LP_TIME_FRAC`
+        // (0.02、最低 1 秒) にする。uccase12 で DUAL_UB + CS_OBJ_PIVOT のとき、根の LP の直後に FJ の解 (865106) を受け取り、
+        // この LP が 8.4 秒から 56 秒まで止まらず、根のカット・ヒューリスティクスが 1 つも回らなかった
+        let deadline = if env_str!("ENOMOTO_MIP_INC_LP_CAP").is_some() && self.params.time_limit.is_finite() {
+            let cap = (tunable!("ENOMOTO_T_MIP_INC_LP_TIME_FRAC", 0.02, f64) * self.params.time_limit).max(1.0);
+            let d = std::time::Instant::now() + std::time::Duration::from_secs_f64(cap);
+            Some(self.deadline.map_or(d, |g| g.min(d)))
+        } else {
+            self.deadline
+        };
+        let st = self.lp.solve(&SolveLimits { deadline, ..Default::default() });
+        if self.params.verbose && st != LpStatus::Optimal {
+            eprintln!("MIP: fixed-integer LP: {st:?} ({} iters)", self.lp.total_iterations() - it0);
+        }
         if st == LpStatus::Optimal {
             let mut y = self.lp.col_values();
             for j in 0..self.p.n {
@@ -3621,6 +3650,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                 }
             };
+            // カットプールの伝播 (`ENOMOTO_MIP_CUTPOOL_PROP`、[`Self::propagate_cut_pool`])
+            let prop_ok = prop_ok && (!cutpool_prop() || self.propagate_cut_pool());
             xp("m_proof");
             self.dbg_trace("after dual proofs and literal conflicts");
             // 完全オービトープの固定 (列を辞書式で減少に並べた解だけを残す)
@@ -5103,10 +5134,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let maxsb = quot + 25_000.0;
         let sb = self.sb_iters as f64;
         // 双対退化の強いノードでは強分岐をしない (根以外)
-        let degenerate = depth > 0 && {
+        // `ENOMOTO_MIP_SB_NO_DEGEN_SKIP`: 双対退化でも強分岐を止めない
+        let degenerate = depth > 0 && env_str!("ENOMOTO_MIP_SB_NO_DEGEN_SKIP").is_none() && {
             let (deg, ratio) = self.dual_degeneracy();
             deg >= 0.8 || ratio >= 2.0
         };
+        self.sb_degen_stats[0] += 1;
+        self.sb_degen_stats[1] += degenerate as u64;
         let allow_sb = sb <= maxsb && !degenerate;
         // 信頼度のしきい値: 予算の残りに応じて 1..5
         let mut prio = ((maxsb - sb) / (sb + 1.0)).min(1.0);
@@ -6621,6 +6655,103 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.propagate_le_row(&obj, u, conflicts)
     }
 
+    /// カットプールの伝播 (`ENOMOTO_MIP_CUTPOOL_PROP`、試作): プールのカット (大域的に成り立つ `sum a x <= rhs`) を
+    /// ノードの定義域で伝播する (HiGHS は `HighsDomain::CutpoolPropagation` で全ノードでプールを伝播する)。整数列は丸めて
+    /// 締め、連続列は幅の `ENOMOTO_T_MIP_CUTPOOL_PROP_CONT` (既定 0.1) 倍以上縮むときだけ締める。境界が変わったら行の伝播を
+    /// 挟んで最大 `ENOMOTO_T_MIP_CUTPOOL_PROP_PASSES` (既定 2) 回まで繰り返す。矛盾ならそのカットから衝突を作って偽。
+    /// timtab1 はカットが短く (非零 2-4) 一般整数 (0-5) を含み、HiGHS は 7k ノードで証明するがこちらは 5 万ノードでも閉じない
+    fn propagate_cut_pool(&mut self) -> bool {
+        let p = self.p;
+        let t0 = Instant::now();
+        self.cutpool_prop_stats[0] += 1;
+        let passes = tunable!("ENOMOTO_T_MIP_CUTPOOL_PROP_PASSES", 2usize, usize);
+        let cont_frac = tunable!("ENOMOTO_T_MIP_CUTPOOL_PROP_CONT", 0.1, f64);
+        let mut bad: Option<usize> = None;
+        'outer: for _ in 0..passes {
+            let mut changed = false;
+            for k in 0..self.cut_pool.len() {
+                let (s0, e0) = (self.pool_start[k] as usize, self.pool_start[k + 1] as usize);
+                let rhs = self.cut_pool[k].1;
+                let mut minact = 0.0f64;
+                let mut ninf = 0usize;
+                let mut infj = usize::MAX;
+                for t in s0..e0 {
+                    let (j, c) = (self.pool_idx[t] as usize, self.pool_val[t]);
+                    let b = if c > 0.0 { self.dom.lo[j] } else { self.dom.up[j] };
+                    if b.is_finite() {
+                        minact += c * b;
+                    } else {
+                        ninf += 1;
+                        infj = j;
+                    }
+                }
+                if ninf >= 2 {
+                    continue;
+                }
+                if ninf == 0 && minact > rhs + 1e-6 * (1.0 + rhs.abs()) {
+                    bad = Some(k);
+                    break 'outer;
+                }
+                let gap = rhs - minact;
+                for t in s0..e0 {
+                    let (j, c) = (self.pool_idx[t] as usize, self.pool_val[t]);
+                    if ninf == 1 && j != infj {
+                        continue;
+                    }
+                    let (lo, up) = (self.dom.lo[j], self.dom.up[j]);
+                    if ninf == 0 && c.abs() * (up - lo) <= gap + 1e-9 * (1.0 + gap.abs()) {
+                        continue;
+                    }
+                    let tight = if c > 0.0 {
+                        let v = if ninf == 0 { lo + gap / c } else { gap / c };
+                        let need = if p.is_int[j] { 1e-6 * (1.0 + up.abs().min(1e6)) } else { (cont_frac * (up - lo)).max(1e-6 * (1.0 + up.abs().min(1e6))) };
+                        v < up - need && self.dom.tighten_upper(p, j, v)
+                    } else {
+                        let v = if ninf == 0 { up + gap / c } else { gap / c };
+                        let need = if p.is_int[j] { 1e-6 * (1.0 + lo.abs().min(1e6)) } else { (cont_frac * (up - lo)).max(1e-6 * (1.0 + lo.abs().min(1e6))) };
+                        v > lo + need && self.dom.tighten_lower(p, j, v)
+                    };
+                    if tight {
+                        changed = true;
+                        self.cutpool_prop_stats[2] += 1;
+                    }
+                    if self.dom.infeasible {
+                        bad = Some(k);
+                        break 'outer;
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+            if !self.dom.propagate(p) {
+                self.cutpool_prop_stats[1] += 1;
+                self.cutpool_prop_stats[3] += t0.elapsed().as_nanos() as u64;
+                if env_str!("ENOMOTO_MIP_NO_EXTRA_CONFLICTS").is_none() {
+                    self.add_conflict();
+                }
+                return false;
+            }
+        }
+        let ok = match bad {
+            None => true,
+            Some(k) => {
+                self.cutpool_prop_stats[1] += 1;
+                if self.dom.infeasible {
+                    if self.dom.conflict.is_some() && env_str!("ENOMOTO_MIP_NO_EXTRA_CONFLICTS").is_none() {
+                        self.add_conflict();
+                    }
+                } else if env_str!("ENOMOTO_MIP_NO_EXTRA_CONFLICTS").is_none() && !self.params.submip {
+                    let (coefs, rhs) = (self.cut_pool[k].0.clone(), self.cut_pool[k].1);
+                    self.add_conflicts_multi(super::domain::ConflictStart::Proof(&coefs, rhs));
+                }
+                false
+            }
+        };
+        self.cutpool_prop_stats[3] += t0.elapsed().as_nanos() as u64;
+        ok
+    }
+
     /// 1 本の行 `sum a_j x_j <= u` を定義域で伝播する ([`Self::propagate_objective_with`] の本体。根のプロービングの
     /// 被約費用の行にも使う)。矛盾なら偽。
     fn propagate_le_row(&mut self, obj: &[(usize, f64)], u: f64, conflicts: bool) -> bool {
@@ -7572,7 +7703,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             .collect();
         let pool: Vec<(Vec<(usize, f64)>, f64)> = self.cut_pool.iter().map(|(c, r, _)| (c.clone(), *r)).collect();
         let orig = self.orig.as_ref().map(|o| std::sync::Arc::new((**o).clone()));
-        let snap = TreeSnapshot { serial, p, lo: self.dom.global_lo.clone(), up: self.dom.global_up.clone(), rows, pool, pc: self.pc.clone(), nodes: snodes, valid_below: self.prune_limit(), orbitopes: (*self.orbitopes).clone(), orig, lex_gens: (*self.lex_gens).clone() };
+        let snap = TreeSnapshot { serial, p, lo: self.dom.global_lo.clone(), up: self.dom.global_up.clone(), rows, pool, pc: self.pc.clone(), nodes: snodes, valid_below: self.prune_limit(), hcm_auto: self.hcm_auto, orbitopes: (*self.orbitopes).clone(), orig, lex_gens: (*self.lex_gens).clone() };
         if self.params.verbose && env_str!("ENOMOTO_MIP_BISECT_VERBOSE").is_some() {
             eprintln!("MIP: tree snapshot {serial}: {} nodes, {} cut rows, valid below {:.10e} ({:.1}s)", snap.nodes.len(), snap.rows.len(), snap.valid_below, self.start.elapsed().as_secs_f64());
         }
@@ -8244,6 +8375,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.params.verbose {
             eprintln!("MIP: dual proofs and conflicts {} (conflicts added {} (from proofs {}), Farkas {}, pruned {} nodes, tightened {} bounds)", self.dual_proofs.len(), self.conflicts_added, self.proof_conflicts, self.farkas_added, self.proof_prunes, self.proof_tightenings);
             eprintln!("MIP: propagation conflicts: analysed {}, no 1-UIP {}, 1-UIP not a row {}, no decision set {}, decision set not a row {}; not a row because continuous {}, general integer {}, both sides {}", self.conf_stats[0], self.conf_stats[1], self.conf_stats[2], self.conf_stats[3], self.conf_stats[4], self.conf_stats[5], self.conf_stats[6], self.conf_stats[7]);
+            if cutpool_prop() {
+                eprintln!("MIP: cut pool propagation: calls {}, pruned {} nodes, tightened {} bounds, {:.2}s, pool {} cuts", self.cutpool_prop_stats[0], self.cutpool_prop_stats[1], self.cutpool_prop_stats[2], self.cutpool_prop_stats[3] as f64 * 1e-9, self.cut_pool.len());
+            }
             eprintln!("MIP: objective propagation: pruned {} nodes, tightened {} bounds; strong branching children infeasible by propagation {}, propagated bounds passed to child LPs {}", self.obj_prop_stats[0], self.obj_prop_stats[1], self.sb_prop_stats[0], self.sb_prop_stats[1]);
             eprintln!("MIP: literal conflicts: added {}, in pool {} (aged out {}), pruned {} nodes, tightened {} bounds", self.lit_stats[0], self.lit_conflicts.len(), self.lit_conflicts.removed, self.lit_stats[1], self.lit_stats[2]);
             if self.obj_cut_stats[0] > 0 {
@@ -8255,6 +8389,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if self.par_sb_stats[0] > 0 {
                 eprintln!("MIP: parallel strong branching: {} batches, {} candidates", self.par_sb_stats[0], self.par_sb_stats[1]);
             }
+            eprintln!("MIP: branching: {} selections, {} without strong branching for dual degeneracy; sb LPs {} iters {}", self.sb_degen_stats[0], self.sb_degen_stats[1], self.sb_lps, self.sb_iters);
             eprintln!("MIP: sibling backtracks {}; basis restores {} (basic count mismatch {}), first LP iterations after a restore {}", self.sibling_backtracks, self.restore_stats.0, self.restore_stats.1, self.restore_stats.2);
             eprintln!("MIP: node diag: nodes {} node LPs {} mean rows {:.1} iters {} ({:.1}/LP) LP secs {:.2} sep rounds {} added {} node cut secs {:.2} final rows {}", self.nodes, self.node_lps, self.node_lp_rows as f64 / self.node_lps.max(1) as f64, self.node_iters, self.node_iters as f64 / self.node_lps.max(1) as f64, self.node_lp_secs, self.node_sep_stats[0], self.node_sep_stats[1], self.node_cut_secs, self.lp.num_rows());
             if env_str!("ENOMOTO_MIP_NODE_CUT_ADAPT").is_some() || self.tree_sep {
