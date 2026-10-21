@@ -2111,9 +2111,12 @@ pub(super) fn fj_p3_on() -> bool {
 /// ([`dual_bound_tightening`])。本体の問題は変えない。前処理は列の番号を保つので、FJ の解は `postsolve` を逆順に当てて尺度を
 /// 戻せば `pc` の空間の解になる ([`fj_p3_solution`])。physiciansched6-2 では FJ が解を見つけるのにこの 3 つと FJ の LP 修復の
 /// 4 つが全部要る (1 つでも外すと 20 秒で解なし) が、p5s として本体の前処理に入れると beasleyC3・uccase12 で証明が遅れる
-pub(super) fn fj_p3_problem(pc: &MipProblem) -> Option<(MipProblem, Vec<crate::presolve::PostsolveStep>, Option<crate::presolve::scaling::Scaling>)> {
+/// `ineq`: 大きさに依らず INEQ_SINGLETON を使う (`ENOMOTO_MIP_EQUIV2_FJ`、[`crate::fj_p3_ineq`])
+pub(super) fn fj_p3_problem(pc: &MipProblem, ineq: bool) -> Option<(MipProblem, Vec<crate::presolve::PostsolveStep>, Option<crate::presolve::scaling::Scaling>)> {
     crate::set_fj_p3_force(true);
+    crate::set_fj_p3_ineq(ineq);
     let r = presolve_mip(pc, false, false, None);
+    crate::set_fj_p3_ineq(false);
     crate::set_fj_p3_force(false);
     let (mut prob, post, sc) = match r {
         Some(Presolved::Reduced { prob, postsolve, scaling }) if prob.n == pc.n => (prob, postsolve, Some(scaling)),

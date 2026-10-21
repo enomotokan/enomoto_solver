@@ -2499,7 +2499,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // (15654 -> 15745)、neos-911970 0.42 -> 0.28 秒 (47.26 のまま)、h80x6320d 2.00 -> 1.84 秒 (5936 -> 5926) だが、
         // 30n20b8 は 2.41 -> 2.08 秒で下界 151 -> 88.5 (fill の予算なしでも 102: 停止規則が密なカットを切り、こちらは
         // mod-k などの代わりに tableau 行の密なカットで下界を得ている)。既定では使わない
-        let tab_rules = env_str!("ENOMOTO_MIP_TAB_HIGHS_RULES").is_some();
+        // `ENOMOTO_MIP_EQUIV2_TAB` (試作): 前処理が `ENOMOTO_MIP_PROBE_EQUIV2` の代入を使った求解 (サブ MIP でない) だけ HiGHS の選び方にする。
+        // physiciansched6-2 の代入後の根のカットは既定の選び方では 48957〜48990 で止まり、HiGHS の選び方で 49050〜49215 まで伸びる
+        // (analysis/physiciansched_r5_20261021.md)
+        let tab_rules = env_str!("ENOMOTO_MIP_TAB_HIGHS_RULES").is_some()
+            || (env_str!("ENOMOTO_MIP_EQUIV2_TAB").is_some() && !self.params.submip && super::EQUIV2_USED.with(|f| f.get()));
         let mut w_cache: Vec<Vec<f64>> = Vec::new();
         if tab_rules {
             // 行の最大係数 (LP 行、スラック列を含まない)
