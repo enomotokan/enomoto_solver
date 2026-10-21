@@ -121,9 +121,14 @@ def run_worker(kind: str, mps: Path, time_limit: float, threads: int) -> dict:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=time_limit * 1.5 + 60, env=env)
     except subprocess.TimeoutExpired:
         return {"status": "killed", "objective": None, "bound": None, "nodes": None, "time": None}
+    # ソルバーの警告 (部分木を失った疑いなど) は stderr にしか出ないので、件数を結果に残す
+    n_warn = p.stderr.count("MIP: WARNING")
     for line in reversed(p.stdout.splitlines()):
         if line.startswith("{"):
-            return json.loads(line)
+            r = json.loads(line)
+            if n_warn:
+                r["mip_warnings"] = n_warn
+            return r
     return {"status": f"crash rc={p.returncode}", "objective": None, "bound": None, "nodes": None, "time": None,
             "stderr": p.stderr[-2000:]}
 
@@ -226,7 +231,8 @@ def main() -> None:
                 o = run_worker("ours", mps, a.time_limit, a.threads)
             results[n] = {"highs": h, "ours": o}
             print(f"{n:24s} highs={h['status']:>10s} {h['time'] if h['time'] is not None else '-':>8} obj={h['objective']}  "
-                  f"ours={o['status']:>10s} {o['time'] if o['time'] is not None else '-':>8} obj={o['objective']}", flush=True)
+                  f"ours={o['status']:>10s} {o['time'] if o['time'] is not None else '-':>8} obj={o['objective']}"
+                  + (f" MIP_WARNING={o['mip_warnings']}" if o.get('mip_warnings') else ""), flush=True)
             a.out.parent.mkdir(parents=True, exist_ok=True)
             a.out.write_text(json.dumps(results, indent=1), encoding="utf-8")
     md = make_table(results, a.time_limit, a.threads)
