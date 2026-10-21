@@ -1815,6 +1815,29 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
     }
 
+    /// 診断用: 定義域がデバッグ解を外しているとき、外している列ごとに、その境界の出どころ (記録の位置・理由、ノードの分枝に
+    /// 含まれるか、または根の状態) を表示する。
+    fn dbg_explain_exclusion(&self, changes: &[BoundChange]) {
+        DEBUG_SOL.with(|d| {
+            let Some(x) = d.borrow().clone() else { return };
+            if self.p.objective(&x) >= self.prune_limit() - 1e-6 {
+                return;
+            }
+            for j in 0..self.p.n {
+                let (lo, up) = (self.dom.lo[j], self.dom.up[j]);
+                if x[j] >= lo - 1e-6 && x[j] <= up + 1e-6 {
+                    continue;
+                }
+                let upper = x[j] > up + 1e-6;
+                let in_changes = changes.iter().any(|c| c.col == j && c.upper == upper);
+                match self.dom.last_change_of(j, upper) {
+                    Some((pos, reason, old, new)) => eprintln!("MIP_DEBUG_SOL:   node {} thread {}: col {j} (x_dbg {}) {} bound {old} -> {new} set by stack entry {pos} of {} (reason {reason}; in this node's branches: {in_changes}); global [{}, {}]", self.nodes, self.pool_tid, x[j], if upper { "upper" } else { "lower" }, self.dom.stack_len(), self.dom.global_lo[j], self.dom.global_up[j]),
+                    None => eprintln!("MIP_DEBUG_SOL:   node {} thread {}: col {j} (x_dbg {}) {} bound [{lo}, {up}] is in the root state (not on the stack); global [{}, {}]", self.nodes, self.pool_tid, x[j], if upper { "upper" } else { "lower" }, self.dom.global_lo[j], self.dom.global_up[j]),
+                }
+            }
+        });
+    }
+
     /// 診断用: 現在の定義域がデバッグ解を含むか (デバッグ解がなければ偽)。
     pub(super) fn dbg_contains(&self) -> bool {
         if !self.dbg_on {
@@ -3696,6 +3719,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let stack_before_prop = self.dom.stack_len();
             if dn && !self.dbg_contains() {
                 self.dbg_lost("domain excludes the debug solution before node propagation", dn);
+                self.dbg_explain_exclusion(&node.changes);
             }
             let prop_ok = self.dom.propagate(self.p);
             self.dbg_trace("after propagation");
