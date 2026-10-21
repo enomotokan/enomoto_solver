@@ -51,8 +51,19 @@ pub(crate) fn gr_auto() -> bool {
 }
 
 /// この問題で G (一般整数の含意の implied bound カット) を働かせるか ([`implbd_genint`] か、[`gr_auto`] で一般整数があるとき)
+/// `ENOMOTO_T_MIP_GR_AUTO_MIN_FRAC` (試作、既定 0): 一般整数の列が固定されていない列のこの割合に満たない問題では働かせない。
+/// nursesched-sprint02 (一般整数 20 / 10250 列) では根の頂点が変わって根のヒューリスティクスが外れ (71、既定は 59)、再スタートで
+/// 固まる列が 7000 本前後 -> 1382 本になり時間切れになる回がある。mzzv42z は 235 / 11717 列 (2.0%)
 pub(crate) fn implbd_genint_for(is_int: &[bool], lo: &[f64], up: &[f64]) -> bool {
-    implbd_genint() || (gr_auto() && (0..is_int.len()).any(|k| is_int[k] && lo[k] < up[k] && !(lo[k] >= 0.0 && up[k] <= 1.0)))
+    if implbd_genint() {
+        return true;
+    }
+    if !gr_auto() {
+        return false;
+    }
+    let ngen = (0..is_int.len()).filter(|&k| is_int[k] && lo[k] < up[k] && !(lo[k] >= 0.0 && up[k] <= 1.0)).count();
+    let nfree = (0..is_int.len()).filter(|&k| lo[k] < up[k]).count();
+    ngen > 0 && ngen as f64 >= tunable!("ENOMOTO_T_MIP_GR_AUTO_MIN_FRAC", 0.0, f64) * nfree as f64
 }
 
 pub(crate) fn cap_clock() -> f64 {
