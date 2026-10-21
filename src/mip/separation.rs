@@ -613,7 +613,30 @@ impl<'a, L: MipLp> Solver<'a, L> {
             } else {
                 self.deadline
             };
+            // 診断 (`ENOMOTO_MIP_DEBUG_DUMP_CUT_LP=ディレクトリ`): カットを足した LP と出発の基底を、求解の前の状態で
+            // `<ディレクトリ>/cutlp_r<ラウンド>_<結果>.mps/.bas` に書き出す (analysis/lp_hang_20261021.md)
+            let dump_dir = env_str!("ENOMOTO_MIP_DEBUG_DUMP_CUT_LP").filter(|_| !self.params.submip && job.is_none());
+            let dump_basis = dump_dir.as_ref().map(|_| (self.lp.basis_cols(), self.lp.dse_weights()));
+            // `ENOMOTO_MIP_CUT_DSE_EXACT` (試作、既定では使わない): カットを足した LP を、引き継いだ DSE 重みではなく出発の基底の
+            // 厳密な重み (行ごとに BTRAN 1 回) から解く。引き継いだ重みは求解をまたいで更新を重ねるうちに厳密な値から大きく
+            // 外れ (physiciansched6-2 では 1e8〜1e9 の重みが数百行)、カットを足した LP の反復が数倍〜十数倍に増えることがある
+            // (analysis/lp_hang_20261021.md)
+            let cut_dse_exact = env_str!("ENOMOTO_MIP_CUT_DSE_EXACT").is_some() && !self.params.submip;
+            if cut_dse_exact {
+                crate::simplex::slope_intercept_dual::DSE_EXACT_ONCE.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
             let mut st = self.lp.solve(&SolveLimits { iteration_limit: lim, cutoff: f64::INFINITY, deadline: lp_deadline });
+            crate::simplex::slope_intercept_dual::DSE_EXACT_ONCE.store(false, std::sync::atomic::Ordering::Relaxed);
+            if let Some(dir) = &dump_dir {
+                let prefix = format!("{dir}/cutlp_r{round}_{st:?}");
+                let (b, w) = dump_basis.as_ref().unwrap();
+                let r = self.lp.dump_lp(&prefix, b.as_deref(), w.as_deref());
+                eprintln!("MIP: cut round {round}: LP {st:?} after {} iters ({:.3}s), written to {prefix}.mps/.bas ({r:?})", self.lp.total_iterations() - it0, t_lp0.elapsed().as_secs_f64());
+                // 診断 (`ENOMOTO_MIP_DEBUG_CUT_LP_RESOLVE`): 上限で止まった LP を、同じスレッドで新しい LP として解き直す
+                if st == LpStatus::TimeLimit && env_str!("ENOMOTO_MIP_DEBUG_CUT_LP_RESOLVE").is_some() {
+                    self.lp.resolve_fresh_debug(b.as_deref(), w.as_deref());
+                }
+            }
             // `ENOMOTO_MIP_CUT_LP_CONTINUE` (試作、既定では使わない): 1 回の LP の時間の上限で止まったとき、カットを外さずに
             // 同じ上限でもう `ENOMOTO_T_MIP_CUT_LP_CONTINUE_MAX` 回 (既定 2) まで解き続ける (根のカットの時間の上限を過ぎていても)。
             // physiciansched6-2 (同値の代入の後) では 1 ラウンドに数百本のカットを入れた LP が上限 (3 秒) を少し超え、外したカットの

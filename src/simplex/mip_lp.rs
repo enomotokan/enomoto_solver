@@ -66,6 +66,9 @@ pub struct TwoStageLp {
     /// 境界・行・費用・基底・解・双対を変えたら捨てる ([`Self::clear_memo`])。
     basis_memo: OnceCell<Basis>,
     rc_memo: OnceCell<Vec<f64>>,
+    /// 打ち切られた求解の続きを解くときの非基底列の置き場所 (`ENOMOTO_MIP_LP_RESUME`、[`Self::solve_inner`])。
+    /// 行・境界・基底が変わったら捨てる ([`Self::clear_memo`])。
+    resume_nb: Option<Vec<i8>>,
     /// 直近の解 `x` についての [`Self::row_activities`] の結果 (行と `x` にだけよるので、`x` か行を変えたら捨てる。
     /// 列の境界・基底を変えただけなら残し、次の求解の [`Self::nb_hint`] でも使う)。
     act_memo: OnceCell<Vec<f64>>,
@@ -179,6 +182,7 @@ impl TwoStageLp {
             basis_memo: OnceCell::new(),
             rc_memo: OnceCell::new(),
             act_memo: OnceCell::new(),
+            resume_nb: None,
         }
     }
 
@@ -192,6 +196,7 @@ impl TwoStageLp {
     fn clear_memo(&mut self) {
         self.clear_state_memo();
         self.act_memo.take();
+        self.resume_nb = None;
     }
 
     /// 標準形を作る。戻り値は (標準形, 行の符号)。
@@ -324,9 +329,18 @@ impl TwoStageLp {
     /// `kExtendInvertWhenAddingRows` で INVERT を拡張する)。コストの実測 (mik-250、HiGHS 流のカット管理で 40 秒、3192 回の
     /// 追加 + 削除): この関数 0.9 秒、`delete_rows` 0.7 秒、再分解 0.1 秒未満。LP の反復 (16 秒) に比べ小さいので、
     /// LU の拡張は実装していない (`ENOMOTO_MIP_XPROF` の `lp_add_rows` / `lp_del_rows` で測れる)。
+    /// 行を加える。既存の基底に新しい行のスラックを足し、DSE 重みも引き継ぐ (新しい行の重みは 1)。
+    /// `ENOMOTO_MIP_ROWS_DSE_EXACT` (試作、既定では使わない): 新しい行の重みを 1 ではなく「未知」(`NaN`) にし、次の求解が
+    /// 分解した直後にその基底での厳密な値を BTRAN で埋める ([`super::DseState::fill_missing`]、行ごとに BTRAN 1 回)。
+    /// 新しい行 k (スラックが基底) の `B^-1` の行は `[-a_k(B) B_old^-1, 1]` なので重みは `1 + |B_old^-T a_k(B)|^2` で、
+    /// 1 からかけ離れる (physiciansched6-2 のカットの行で最大 1e3〜4e3)。古い行の `B^-1` の行は変わらないので引き継いだ
+    /// 重みはそのまま正しい。重み 1 のままだと、カットを足した LP の行の選択が Dantzig 規則に近くなって反復が 10 倍以上に
+    /// 増え (HiGHS の 2224 反復に対し 30948 反復)、根のカットのループの 1 回の LP の時間の上限で止まっていた
+    /// (analysis/lp_hang_20261021.md)
     pub fn add_rows(&mut self, new_rows: &[(Vec<(usize, f64)>, f64, f64)]) {
         sid::xprof("lp_pre_add");
         let m0 = self.rows.len();
+        let new_w = if env_str!("ENOMOTO_MIP_ROWS_DSE_EXACT").is_some() { f64::NAN } else { 1.0 };
         for (r, l, u) in new_rows {
             let mut r: Vec<(usize, f64)> = r.iter().filter(|&&(_, v)| v != 0.0).cloned().collect();
             r.sort_unstable_by_key(|&(j, _)| j);
@@ -347,7 +361,7 @@ impl TwoStageLp {
             if let (Some(b), Some(c)) = (&self.basis, self.dse_cache.as_mut()) {
                 let (cb, w) = Arc::make_mut(c);
                 cb.clone_from(b);
-                w.resize(b.len(), 1.0);
+                w.resize(b.len(), new_w);
             }
         } else {
             self.dse_cache = None;
@@ -577,13 +591,14 @@ impl TwoStageLp {
     /// 変数の重みは捨て、重みのない基底変数は 1。次の求解が引き継ぐかは [`sid::WARM_DSE_ONCE`] などで決まる。
     pub fn set_dse_vars(&mut self, w: &[(u32, f32)]) {
         let Some(b) = &self.basis else { return };
-        let mut map = vec![f32::NAN; self.n + self.rows.len()];
+        // 渡されなかった重みは `INFINITY` の印 (1 にする)。渡された `NaN` (未知、求解の始めに厳密な値を埋める) はそのまま
+        let mut map = vec![f32::INFINITY; self.n + self.rows.len()];
         for &(v, x) in w {
             if (v as usize) < map.len() {
                 map[v as usize] = x;
             }
         }
-        let ws: Vec<f64> = b.iter().map(|&v| if map[v].is_nan() { 1.0 } else { (map[v] as f64).max(1e-8) }).collect();
+        let ws: Vec<f64> = b.iter().map(|&v| if map[v].is_infinite() { 1.0 } else if map[v].is_nan() { f64::NAN } else { (map[v] as f64).max(1e-8) }).collect();
         self.dse_cache = Some(Arc::new((b.clone(), ws)));
     }
 
@@ -695,7 +710,7 @@ impl TwoStageLp {
         let pol0 = sid::ext_polish_iterations();
         let st = self.solve_inner(lim);
         if env_str!("ENOMOTO_MIP_DEBUG_LP").is_some() {
-            eprintln!("TSLP solve st={st:?} iters={} polish={} us={} warm={}", self.iters - it0, sid::ext_polish_iterations() - pol0, t0.elapsed().as_micros(), self.basis.is_some());
+            eprintln!("TSLP solve st={st:?} iters={} polish={} us={} warm={} dse_cache={} lu_cache={}", self.iters - it0, sid::ext_polish_iterations() - pol0, t0.elapsed().as_micros(), self.basis.is_some(), self.dse_cache.is_some(), self.lu_cache.is_some());
         }
         self.status = Some(st);
         st
@@ -960,6 +975,12 @@ impl TwoStageLp {
         let it0 = sid::ext_iterations();
         sid::xprof("between");
         sid::set_ext_control(Some(ctrl));
+        // `ENOMOTO_MIP_LP_RESUME` (試作、既定では使わない): 時間・反復の上限で止まった求解の基底・DSE 重み・非基底列の
+        // 置き場所を残し、次の求解をそこから始める (続きを解く)。従来は打ち切られた求解の進みを捨て、次の求解は前の最適
+        // 基底から単位重みでやり直していた (根のカットのループの「LP を続ける」がやり直しになっていた、
+        // analysis/lp_hang_20261021.md)
+        let resume_on = env_str!("ENOMOTO_MIP_LP_RESUME").is_some();
+        sid::request_stop_state(resume_on);
         sid::set_fast_reopt(env_str!("ENOMOTO_MIP_NO_FAST_REOPT").is_none());
         sid::request_duals(true);
         sid::request_lu(true);
@@ -999,13 +1020,18 @@ impl TwoStageLp {
                         sid::set_warm_lu(None)
                     }
                 }
-                if env_str!("ENOMOTO_MIP_NO_NB_HINT").is_none() {
+                // 打ち切られた求解の続き (`resume_nb`) なら止まったときの置き場所、それ以外は前回の解から
+                if let Some(h) = self.resume_nb.take() {
+                    sid::set_warm_nb(Some(h));
+                } else if env_str!("ENOMOTO_MIP_NO_NB_HINT").is_none() {
                     sid::set_warm_nb(Some(self.nb_hint()));
                 }
                 // 前回の最後の DSE 重み (同じ基底のとき)
                 if let Some((cb, w)) = self.dse_cache.as_deref() {
                     if *cb == b && w.len() == b.len() {
                         sid::set_warm_dse(Some(w.clone()));
+                    } else if env_str!("ENOMOTO_MIP_DEBUG_LP").is_some() {
+                        eprintln!("TSLP solve: dse_cache basis differs (len {} vs {})", cb.len(), b.len());
                     }
                 }
                 sid::solve_slope_intercept_dual_from_basis(&self.std, &opts, b)
@@ -1027,6 +1053,9 @@ impl TwoStageLp {
         sid::set_fast_reopt(false);
         let duals = sid::take_duals();
         sid::request_duals(false);
+        if r.is_some() {
+            sid::request_stop_state(false);
+        }
         let last_lu = sid::take_last_lu();
         let last_d = sid::take_last_d();
         let ray = sid::take_last_ray();
@@ -1081,7 +1110,26 @@ impl TwoStageLp {
                 }
                 _ => LpStatus::Error,
             },
-            None => match stop {
+            None => {
+                if resume_on && matches!(stop, ExtStop::TimeLimit | ExtStop::IterationLimit) {
+                    if let Some((b, w, h)) = sid::take_stop_state() {
+                        let m = self.rows.len();
+                        let nt = n + m;
+                        let mut seen = vec![false; nt];
+                        let ok = b.len() == m && w.len() == m && h.len() == nt && b.iter().all(|&v| v < nt && !std::mem::replace(&mut seen[v], true));
+                        if ok {
+                            if env_str!("ENOMOTO_MIP_DEBUG_LP").is_some() {
+                                let changed = self.basis.as_ref().map_or(m, |ob| b.iter().zip(ob).filter(|(a, c)| a != c).count());
+                                eprintln!("TSLP solve: {stop:?}; keeping the basis reached so far ({changed} positions changed) for the next solve");
+                            }
+                            self.basis = Some(b.clone());
+                            self.dse_cache = Some(Arc::new((b, w)));
+                            self.resume_nb = Some(h);
+                        }
+                    }
+                }
+                sid::request_stop_state(false);
+                match stop {
                 ExtStop::IterationLimit => LpStatus::IterationLimit,
                 ExtStop::ObjectiveBound => {
                     // 打ち切ったときの双対 (双対証明に使う)
@@ -1093,7 +1141,8 @@ impl TwoStageLp {
                 }
                 ExtStop::TimeLimit => LpStatus::TimeLimit,
                 ExtStop::None => LpStatus::Error,
-            },
+                }
+            }
         }
     }
 
@@ -1121,6 +1170,74 @@ impl TwoStageLp {
 
     pub fn objective(&self) -> f64 {
         (0..self.n).map(|j| self.cost[j] * self.x[j]).sum()
+    }
+
+    /// 今の基底 (基底列の番号、長さ m。構造列 j < n、スラック n + i)。`None` なら全スラック基底。
+    pub fn basis_cols(&self) -> Option<Vec<usize>> {
+        self.basis.clone()
+    }
+
+    /// 診断用 (`ENOMOTO_MIP_DEBUG_CUT_LP_RESOLVE`): 今の LP (行・境界・費用) から新しい LP を作り、`basis`・今の解 `x`・
+    /// `weights` を与えて上限なしで解き直し、反復数を表示する。同じプロセス・同じスレッドで、LP の内部状態 (列の平行移動量、
+    /// LU のピボット閾値など) だけを新しくしたときに求解の経路が変わるかを見る (analysis/lp_hang_20261021.md)。
+    pub fn resolve_fresh_debug(&self, basis: Option<&[usize]>, weights: Option<&[f64]>) {
+        let Some(b) = basis else { return };
+        let mut lp = TwoStageLp::new(&self.lo, &self.up, &self.cost, &self.rows, &self.row_lo, &self.row_up);
+        lp.set_basis_cols(b, Some(&self.x));
+        if let Some(w) = weights.filter(|w| w.len() == b.len()) {
+            let pairs: Vec<(u32, f32)> = b.iter().zip(w).map(|(&v, &x)| (v as u32, x as f32)).collect();
+            lp.set_dse_vars(&pairs);
+        }
+        let t0 = std::time::Instant::now();
+        let st = lp.solve(&SolveLimits::default());
+        eprintln!("TSLP resolve_fresh_debug: {st:?} after {} iters ({:.3}s), obj {:.10e}", lp.total_iterations(), t0.elapsed().as_secs_f64(), lp.objective());
+    }
+
+    /// 診断用: 今の基底を分解して、その厳密な DSE 重み (基底位置順、[`super::DseState::from_basis`]) を返す。
+    /// 基底がない・特異なら `None`。
+    pub fn exact_dse_weights(&self) -> Option<Vec<f64>> {
+        let b = self.basis.as_ref()?;
+        let m = self.rows.len();
+        if b.len() != m {
+            return None;
+        }
+        let mut pos = vec![None; self.n + m];
+        for (p, &v) in b.iter().enumerate() {
+            pos[v] = Some(p);
+        }
+        let lu = super::basis_kernel::factorize_basis(&self.std, &pos, None)?;
+        Some(super::DseState::from_basis(m, &lu).w)
+    }
+
+    /// 次の求解に渡す DSE 重み (基底位置順。今の基底のものがなければ `None`)。
+    pub fn dse_weights(&self) -> Option<Vec<f64>> {
+        match (&self.basis, self.dse_cache.as_deref()) {
+            (Some(b), Some((cb, w))) if b == cb && w.len() == b.len() => Some(w.clone()),
+            _ => None,
+        }
+    }
+
+    /// 診断用 (`ENOMOTO_MIP_DEBUG_DUMP_CUT_LP`): 今の LP (行・列の境界・費用、カットの行を含む。最小化形、整数の印なし) を
+    /// `<prefix>.mps` (自由 MPS、列 `c<番号>`・行 `r<番号>`) に、出発の基底を `<prefix>.bas` に書き出す。`.bas` は
+    /// 1 行目 `n m`、2 行目 基底列の番号 (m 個。空なら全スラック基底)、3 行目 直近の解 `x` (n 個。非基底列の置き場所の希望
+    /// [`Self::nb_hint`] の元)、4 行目 次の求解に渡す DSE 重み (基底位置順。引き継ぐ重みがなければ空行)。`basis` を渡せばその基底を書く (求解の前に取り出した出発の基底)。
+    /// 読み戻しは `cut_lp_debug` テスト (ENOMOTO) と `analysis/lp_hang_20261021/solve_dump.py` (HiGHS)。
+    pub fn dump_lp(&self, prefix: &str, basis: Option<&[usize]>, weights: Option<&[f64]>) -> std::io::Result<()> {
+        use std::fmt::Write as _;
+        let n = self.n;
+        let m = self.rows.len();
+        let p = crate::mip::problem::MipProblem::from_rows(self.lo.clone(), self.up.clone(), self.cost.clone(), 0.0, 1.0, vec![false; n], self.rows.clone(), self.row_lo.clone(), self.row_up.clone());
+        p.write_mps(&format!("{prefix}.mps"))?;
+        let mut o = String::new();
+        let _ = writeln!(o, "{n} {m}");
+        let b: Vec<String> = basis.map(|b| b.to_vec()).or_else(|| self.basis.clone()).unwrap_or_default().iter().map(|v| v.to_string()).collect();
+        let _ = writeln!(o, "{}", b.join(" "));
+        let xs: Vec<String> = self.x.iter().map(|v| format!("{v:.17e}")).collect();
+        let _ = writeln!(o, "{}", xs.join(" "));
+        // 4 行目: 次の求解に渡す DSE 重み (基底位置順、[`Self::dse_cache`] が書く基底のものなら。なければ空行)
+        let ws: Vec<String> = weights.map(|w| w.to_vec()).or_else(|| self.dse_weights()).unwrap_or_default().iter().map(|v| format!("{v:.17e}")).collect();
+        let _ = writeln!(o, "{}", ws.join(" "));
+        std::fs::write(format!("{prefix}.bas"), o)
     }
 
     pub fn col_values(&self) -> Vec<f64> {
