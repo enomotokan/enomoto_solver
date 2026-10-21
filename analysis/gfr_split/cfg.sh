@@ -17,6 +17,7 @@ cfg() {
     P) echo "ENOMOTO_MIP_GR_AUTO=2 ENOMOTO_MIP_FACE_SEP_BG=off $X";;
     PnoBG) echo "ENOMOTO_MIP_GR_AUTO=2 $X";;
     Q) echo "ENOMOTO_MIP_GR_AUTO=2 ENOMOTO_MIP_FACE_SEP_FC=off $X";;
+    Qf) echo "ENOMOTO_MIP_GR_AUTO=2 ENOMOTO_MIP_FACE_SEP_FC=off $X";;  # Q と同じ (X の受け取りの直しの後のビルド)
     BG) echo "ENOMOTO_MIP_FACE_SEP_BG=off";;
     *) echo "${!1}";;
   esac

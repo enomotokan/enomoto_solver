@@ -186,6 +186,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) bg_cut_rounds: usize,
     /// 根のカットのループで固定費用ネットワーク型と判定したか (`ENOMOTO_MIP_FACE_SEP_FC`、試作)
     pub(super) fc_network: bool,
+    /// 再スタート前の暫定解 (`START_SOL`) を受け取っている間か ([`Self::try_incumbent`] の `ENOMOTO_MIP_RESTART_REF` の判定を飛ばす)
+    accepting_start: bool,
     /// 並列の強分岐 (`ENOMOTO_MIP_PAR_SB`) の [まとめた回数, 並列に解いた候補の数]。
     par_sb_stats: [u64; 2],
     pub(super) deadline: Option<Instant>,
@@ -1385,6 +1387,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         path_collect: None,
         bg_cut_rounds: 0,
         fc_network: false,
+        accepting_start: false,
         par_sb_stats: [0; 2],
         deadline,
         nodes: 0,
@@ -2085,7 +2088,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // `ENOMOTO_MIP_RESTART_REF` (試作): 再スタート後の求解では、打ち切り値 (再スタート前の暫定解より良いこと) に届かない解を
         // 暫定解にしない。届かない解は外側では捨てられるのに、暫定解にすると RINS などの相手になり、暫定解なし用の
         // ヒューリスティクスも止める (mzzv42z: 打ち切り値 -19874 の再スタートの後で FJ の -680・RINS の -5770 を暫定解にした)
-        if self.incumbent.is_none() && self.params.restarts > 0 && !self.params.submip && z > self.params.cutoff && env_str!("ENOMOTO_MIP_RESTART_REF").is_some() {
+        // 再スタート前の暫定解そのもの (再スタート後の問題でも実行可能なもの) は打ち切り値より必ず悪いが、受け取る
+        // (受け取らないと再スタート後の求解が暫定解なしになる。neos-911970: 62.30 を捨て、60 秒で解けない回が増えた)
+        if self.incumbent.is_none() && self.params.restarts > 0 && !self.params.submip && !self.accepting_start && z > self.params.cutoff && env_str!("ENOMOTO_MIP_RESTART_REF").is_some() {
             return false;
         }
         if !orig_only {
@@ -2470,7 +2475,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         if let Some(x) = START_SOL.with(|s| s.borrow_mut().take()) {
             if x.len() == self.p.n {
+                self.accepting_start = true;
                 let ok = self.try_incumbent(x);
+                self.accepting_start = false;
                 if self.params.verbose || env_str!("ENOMOTO_MIP_START_FILE").is_some() {
                     eprintln!("MIP: start solution from before the restart: accepted {ok}");
                 }
