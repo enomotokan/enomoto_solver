@@ -1,0 +1,204 @@
+MIP: presolve: tightened 4407 coefficients, normalized 0 integer rows
+MIP: presolve: merged 3588 parallel rows (3528 new equations)
+MIP: presolve: rows 168336 -> 15862, free columns 110454 -> 9728, nonzeros 480259 -> 52240, postsolve steps 10436
+MIP: presolve: tightened 12 coefficients, normalized 0 integer rows
+MIP: presolve: merged 60 parallel rows (0 new equations)
+MIP: presolve: rows 15862 -> 12086, free columns 9728 -> 6150, nonzeros 52240 -> 44659, postsolve steps 3530
+TSLP solve st=TimeLimit iters=4225 polish=0 us=1990302 warm=false
+Root LP: the two-phase method finished first (1.99s)
+MIP: probing: 5444 of 5623 binaries probed (1 passes), 1 fixed, 179 bounds tightened, 98038 implications (0.10s)
+MIP: probing: 1084 equivalent binary pairs
+MIP: presolve again after probing (round 1)
+MIP: presolve: tightened 5 coefficients, normalized 0 integer rows
+MIP: presolve: merged 60 parallel rows (0 new equations)
+MIP: presolve: rows 12086 -> 11883, free columns 5970 -> 5970, nonzeros 44659 -> 43737, postsolve steps 0
+MIP: probing: 5443 of 5443 binaries probed (1 passes), 0 fixed, 0 bounds tightened, 97749 implications (0.07s)
+MIP: probing: 1084 equivalent binary pairs
+MIP: presolve: merged 60 parallel rows (0 new equations)
+MIP: presolve: rows 12967 -> 9839, free columns 5970 -> 4948, nonzeros 45905 -> 35703, postsolve steps 1022
+MIP: probing: 4421 of 4421 binaries probed (1 passes), 0 fixed, 0 bounds tightened, 59504 implications (0.04s)
+MIP: probing: 0 equivalent binary pairs
+Presolve: 168336 rows, 110454 columns -> 9839 rows, 4948 columns (3.03s)
+MIP: presolve: tightened 436 continuous column bounds by dual arguments
+MIP: clique extension: 3644 rows extended, 10857 nonzeros added, 0 columns fixed, 0 duplicate and 1451 dominated rows removed (30403 edges, 0.02s)
+MIP: symmetry: 14 generators, 1 orbits on 15 columns, 14 lex-leader rows (0.33s)
+MIP: fixed-charge check: vb rows 1 of 8402, continuous with vb 1 of 527
+TSLP solve st=Optimal iters=5501 polish=2 us=2010908 warm=true
+Root LP: the two-phase method finished first (2.01s)
+Root LP: objective 4.8583100000e4 (2.02s)
+MIP: root LP 4.8583100000e4 (5501 iters, 2.02s)
+MIP: fixed-charge check: vb rows 1 of 8402, continuous with vb 1 of 527
+TSLP solve st=Optimal iters=803 polish=1 us=157319 warm=true
+MIP:   global fixed integers 104925 of 109346 (newly 0 since the root LP)
+MIP: new incumbent 5.2529000000e4 at node 0 (2.19s) [feasibility jump (parallel)]
+MIP: feasibility jump (parallel) found a solution (2.19s)
+SEP rows 0.040s cands 542
+SEP zerohalf 0.054s cands 642
+SEP clique 0.054s cands 642
+SEP implied bounds 0.055s cands 642
+SEP path 0.067s cands 1486
+SEP tableau 0.259s cands 3069 (rows 852 of 852 candidates, fill-skipped 0, budget-skipped 0 (work 0 / inf), btran 0.000s agg 0.000s gen+finish 0.105s (finish total this call 0.001s), mean w nnz 0, mean agg nnz 1205, LP rows 8402 nnz 39215)
+TSLP solve st=Optimal iters=779 polish=1 us=361554 warm=true
+MIP: cut round 0: 50 cuts did not move the objective; up to 1000 cuts per round from now
+SEP round 0: cands 3069 (nnz 1589730) pool 0.025s select 0.009s add_rows 0.003s LP 0.362s (779 iters, 464.6 us/iter)
+MIP: cut round 0: 50 cuts (of 3069, sep 0.30s, LP 779 iters), LP rows 8452 (cut rows mean nnz 2), obj 4.8587391667e4 (2.85s)
+SEP round 0: removed 2 inactive cuts in 0.004s
+SEP rows 0.045s cands 601
+SEP zerohalf 0.061s cands 701
+SEP clique 0.062s cands 701
+SEP implied bounds 0.062s cands 701
+SEP path 0.074s cands 1495
+SEP tableau 0.322s cands 3513 (rows 1044 of 1045 candidates, fill-skipped 0, budget-skipped 0 (work 0 / inf), btran 0.000s agg 0.000s gen+finish 0.164s (finish total this call 0.001s), mean w nnz 0, mean agg nnz 1637, LP rows 8450 nnz 39311)
+TSLP solve st=Optimal iters=2204 polish=1 us=1082878 warm=true
+SEP round 1: cands 3513 (nnz 2473148) pool 0.027s select 0.013s add_rows 0.003s LP 1.083s (2204 iters, 491.4 us/iter)
+MIP: cut round 1: 338 cuts (of 3513, sep 0.36s, LP 2204 iters), LP rows 8788 (cut rows mean nnz 2), obj 4.8683500000e4 (4.31s)
+SEP round 1: removed 64 inactive cuts in 0.004s
+SEP rows 0.028s cands 486
+SEP zerohalf 0.049s cands 586
+SEP clique 0.049s cands 586
+SEP implied bounds 0.049s cands 586
+SEP path 0.061s cands 1108
+SEP tableau 0.295s cands 3222 (rows 1058 of 1072 candidates, fill-skipped 0, budget-skipped 0 (work 0 / inf), btran 0.000s agg 0.000s gen+finish 0.147s (finish total this call 0.001s), mean w nnz 0, mean agg nnz 1478, LP rows 8724 nnz 40020)
+TSLP solve st=Optimal iters=1624 polish=1 us=928479 warm=true
+SEP round 2: cands 3222 (nnz 2401794) pool 0.026s select 0.012s add_rows 0.003s LP 0.929s (1624 iters, 571.9 us/iter)
+MIP: cut round 2: 233 cuts (of 3222, sep 0.34s, LP 1624 iters), LP rows 8957 (cut rows mean nnz 3), obj 4.8788651515e4 (5.58s)
+SEP round 2: removed 59 inactive cuts in 0.004s
+SEP rows 0.024s cands 373
+SEP zerohalf 0.050s cands 473
+SEP clique 0.050s cands 473
+SEP implied bounds 0.051s cands 473
+SEP path 0.064s cands 825
+SEP tableau 0.363s cands 2943 (rows 1061 of 1089 candidates, fill-skipped 0, budget-skipped 0 (work 0 / inf), btran 0.000s agg 0.000s gen+finish 0.188s (finish total this call 0.001s), mean w nnz 0, mean agg nnz 1857, LP rows 8898 nnz 40533)
+TSLP solve st=Optimal iters=1758 polish=2 us=1043335 warm=true
+SEP round 3: cands 2943 (nnz 3243285) pool 0.035s select 0.015s add_rows 0.003s LP 1.044s (1758 iters, 593.6 us/iter)
+MIP: cut round 3: 154 cuts (of 2943, sep 0.42s, LP 1758 iters), LP rows 9052 (cut rows mean nnz 3), obj 4.8873600000e4 (7.05s)
+SEP round 3: removed 71 inactive cuts in 0.003s
+SEP rows 0.026s cands 310
+SEP zerohalf 0.050s cands 410
+SEP clique 0.050s cands 410
+SEP implied bounds 0.051s cands 410
+SEP path 0.064s cands 673
+SEP tableau 0.430s cands 2624 (rows 1057 of 1098 candidates, fill-skipped 0, budget-skipped 0 (work 0 / inf), btran 0.000s agg 0.000s gen+finish 0.255s (finish total this call 0.000s), mean w nnz 0, mean agg nnz 2102, LP rows 8981 nnz 40783)
+TSLP solve st=Optimal iters=2366 polish=1 us=1268576 warm=true
+SEP round 4: cands 2624 (nnz 3112009) pool 0.036s select 0.015s add_rows 0.003s LP 1.269s (2366 iters, 536.3 us/iter)
+MIP: cut round 4: 115 cuts (of 2624, sep 0.48s, LP 2366 iters), LP rows 9096 (cut rows mean nnz 3), obj 4.8957333333e4 (8.81s)
+SEP round 4: removed 57 inactive cuts in 0.004s
+SEP rows 0.016s cands 275
+SEP zerohalf 0.038s cands 375
+SEP clique 0.038s cands 375
+SEP implied bounds 0.038s cands 375
+SEP path 0.049s cands 572
+SEP tableau 0.391s cands 2311 (rows 1019 of 1103 candidates, fill-skipped 0, budget-skipped 0 (work 0 / inf), btran 0.000s agg 0.000s gen+finish 0.231s (finish total this call 0.000s), mean w nnz 0, mean agg nnz 2344, LP rows 9039 nnz 40953)
+TSLP solve st=Optimal iters=1052 polish=2 us=596069 warm=true
+SEP round 5: cands 2311 (nnz 2971278) pool 0.032s select 0.014s add_rows 0.004s LP 0.596s (1052 iters, 566.9 us/iter)
+MIP: cut round 5: 76 cuts (of 2311, sep 0.44s, LP 1052 iters), LP rows 9115 (cut rows mean nnz 3), obj 4.8978545455e4 (9.86s)
+SEP round 5: removed 50 inactive cuts in 0.004s
+SEP rows 0.018s cands 270
+SEP zerohalf 0.043s cands 370
+SEP clique 0.043s cands 370
+SEP implied bounds 0.043s cands 370
+SEP path 0.056s cands 485
+SEP tableau 0.488s cands 2230 (rows 1051 of 1106 candidates, fill-skipped 0, budget-skipped 0 (work 0 / inf), btran 0.000s agg 0.000s gen+finish 0.309s (finish total this call 0.000s), mean w nnz 0, mean agg nnz 2478, LP rows 9065 nnz 41007)
+TSLP solve st=Optimal iters=1977 polish=1 us=1261418 warm=true
+SEP round 6: cands 2230 (nnz 3167867) pool 0.047s select 0.023s add_rows 0.005s LP 1.262s (1977 iters, 638.2 us/iter)
+MIP: cut round 6: 63 cuts (of 2230, sep 0.56s, LP 1977 iters), LP rows 9128 (cut rows mean nnz 3), obj 4.9024000000e4 (11.69s)
+SEP round 6: removed 46 inactive cuts in 0.004s
+SEP rows 0.015s cands 233
+SEP zerohalf 0.042s cands 333
+SEP clique 0.042s cands 333
+SEP implied bounds 0.043s cands 333
+SEP path 0.056s cands 465
+SEP tableau 0.435s cands 1983 (rows 992 of 1108 candidates, fill-skipped 0, budget-skipped 0 (work 0 / inf), btran 0.000s agg 0.000s gen+finish 0.249s (finish total this call 0.001s), mean w nnz 0, mean agg nnz 2595, LP rows 9082 nnz 41123)
+TSLP solve st=Optimal iters=885 polish=1 us=541269 warm=true
+SEP round 7: cands 1983 (nnz 2804520) pool 0.032s select 0.013s add_rows 0.003s LP 0.542s (885 iters, 612.0 us/iter)
+MIP: cut round 7: 49 cuts (of 1983, sep 0.48s, LP 885 iters), LP rows 9131 (cut rows mean nnz 3), obj 4.9024000000e4 (12.72s)
+SEP round 7: removed 39 inactive cuts in 0.005s
+SEP rows 0.012s cands 225
+SEP zerohalf 0.036s cands 325
+SEP clique 0.037s cands 325
+SEP implied bounds 0.037s cands 325
+SEP path 0.051s cands 382
+SEP tableau 0.447s cands 1902 (rows 1023 of 1109 candidates, fill-skipped 0, budget-skipped 0 (work 0 / inf), btran 0.000s agg 0.000s gen+finish 0.275s (finish total this call 0.000s), mean w nnz 0, mean agg nnz 2504, LP rows 9092 nnz 41163)
+TSLP solve st=Optimal iters=1137 polish=1 us=750533 warm=true
+SEP round 8: cands 1902 (nnz 2688106) pool 0.030s select 0.013s add_rows 0.004s LP 0.751s (1137 iters, 660.4 us/iter)
+MIP: cut round 8: 71 cuts (of 1902, sep 0.49s, LP 1137 iters), LP rows 9163 (cut rows mean nnz 3), obj 4.9124000000e4 (13.97s)
+SEP round 8: removed 39 inactive cuts in 0.005s
+SEP rows 0.020s cands 191
+SEP zerohalf 0.044s cands 291
+SEP clique 0.044s cands 291
+SEP implied bounds 0.044s cands 291
+SEP path 0.058s cands 357
+SEP tableau 0.538s cands 1905 (rows 1047 of 1112 candidates, fill-skipped 0, budget-skipped 0 (work 0 / inf), btran 0.000s agg 0.000s gen+finish 0.328s (finish total this call 0.000s), mean w nnz 0, mean agg nnz 2961, LP rows 9124 nnz 41458)
+TSLP solve st=Optimal iters=1527 polish=2 us=1060744 warm=true
+SEP round 9: cands 1905 (nnz 3391419) pool 0.042s select 0.017s add_rows 0.004s LP 1.061s (1527 iters, 694.9 us/iter)
+MIP: cut round 9: 68 cuts (of 1905, sep 0.60s, LP 1527 iters), LP rows 9192 (cut rows mean nnz 3), obj 4.9124000000e4 (15.65s)
+SEP round 9: removed 48 inactive cuts in 0.006s
+TSLP solve st=Optimal iters=1 polish=0 us=30738 warm=true
+MIP: clique graph: 30403 edges (23611 from rows, probing implications 59504)
+TSLP solve st=Optimal iters=9555 polish=1 us=6250061 warm=true
+MIP: clique fallback: 100 cuts, LP 4.4114000000e4 -> 4.4114000000e4 (g_c 0.000e0, g_d 1.226e-2 relative), fractional 1255 -> 1099; not used (6.30s)
+Root cuts: objective 4.8583100000e4 -> 4.9124000000e4, 742 cuts in the LP (21.98s)
+MIP: cut loop done: 1217 cuts added, 742 in LP, pool 1442 cuts (784299 nonzeros), obj 4.8583100000e4 -> 4.9124000000e4
+MIP: root heuristic simple rounding: none (0.00s)
+MIP: root heuristic ZI round: none (0.00s)
+MIP: fixed-charge check: vb rows 1 of 8402, continuous with vb 1 of 527
+MIP: root heuristic randomized rounding: none (0.02s)
+MIP:   interior rounding: 1 interior points, vertex true (0.92s)
+MIP:   interior rounding: 6 rounded points tried, found false
+MIP: root heuristic interior rounding: none (1.01s)
+MIP: root heuristic root reduced cost: none (0.00s)
+MIP:   LP face: only 139 of 4421 integer columns fixed
+MIP: root heuristic LP face: none (0.00s)
+MIP:   parallel sub-MIP started (RENS): 1782 free columns of 111827
+MIP: root heuristic RENS: none (0.00s)
+MIP:   locks: fixing rate 0.65
+MIP:   parallel sub-MIP started (locks): 2069 free columns of 111827
+MIP: root heuristic locks: none (0.02s)
+MIP:   clique: fixing rate 0.96
+MIP:   parallel sub-MIP started (clique): 713 free columns of 111827
+MIP: root heuristic clique: none (0.01s)
+MIP:   vbounds (loose): fixing rate 0.00
+MIP: root heuristic vbounds (loose): none (0.00s)
+MIP:   vbounds (tight): fixing rate 0.00
+MIP: root heuristic vbounds (tight): none (0.00s)
+TSLP solve st=Optimal iters=1424 polish=1 us=145020 warm=true
+SEP rows 0.011s cands 200
+SEP zerohalf 0.015s cands 300
+SEP clique 0.015s cands 300
+SEP implied bounds 0.015s cands 304
+SEP path 0.020s cands 538
+SEP tableau 0.046s cands 1324 (rows 393 of 393 candidates, fill-skipped 0, budget-skipped 0 (work 0 / inf), btran 0.004s agg 0.004s gen+finish 0.018s (finish total this call 0.005s), mean w nnz 104, mean agg nnz 169, LP rows 1990 nnz 7427)
+TSLP solve st=Optimal iters=424 polish=1 us=74070 warm=true
+TSLP solve st=Optimal iters=1 polish=0 us=11676 warm=true
+TSLP solve st=Optimal iters=1 polish=0 us=11378 warm=true
+TSLP solve st=Optimal iters=1174 polish=2 us=288992 warm=true
+TSLP solve st=TimeLimit iters=193 polish=0 us=34709 warm=true
+MIP:   parallel sub-MIP (RENS): status TimeLimit, nodes 0, objective None, 0.96s
+MIP:   parallel sub-MIP (locks): status Infeasible, nodes 0, objective None, 0.94s
+MIP:   parallel sub-MIP (clique): status Infeasible, nodes 0, objective None, 0.93s
+TSLP solve st=Optimal iters=1881 polish=1 us=247642 warm=true
+TSLP solve st=Optimal iters=1 polish=0 us=12354 warm=true
+TSLP solve st=Optimal iters=1 polish=0 us=12348 warm=true
+TSLP solve st=TimeLimit iters=1369 polish=1 us=390744 warm=true
+MIP:   sub-MIP: 2291 free columns of 111827, status TimeLimit, nodes 0, objective None
+MIP: root heuristic RINS: none (0.90s)
+MIP: after root heuristics: incumbent Some(52529.0) (24.91s)
+TSLP solve st=TimeLimit iters=24417 polish=0 us=14542504 warm=true
+TSLP solve st=TimeLimit iters=1 polish=0 us=14706 warm=true
+MIP: background cuts: root LP re-solved before replacing the cuts: TimeLimit, 1 iters (36.64s)
+MIP: background cuts: no result (waited 11.72s)
+     time      nodes      open        best bound         incumbent       gap
+    36.6s          0         0     4.912400000e4     5.252900000e4     6.48%
+MIP:    36.64s nodes        0 open       1 lb 4.91240000e4 ub 5.25290000e4 lp_iters 30367 sb_iters 0 sb_lps 0 sb_secs 0.00 node_iters 0 (first 0, lps 0) heur_iters 6469 dive_iters 0 lp_rows 9144 node_cut_secs 0.00
+MIP: dual proofs and conflicts 0 (conflicts added 0 (from proofs 0), Farkas 0, pruned 0 nodes, tightened 0 bounds)
+MIP: propagation conflicts: analysed 28, no 1-UIP 0, 1-UIP not a row 0, no decision set 0, decision set not a row 0; not a row because continuous 0, general integer 0, both sides 0
+MIP: objective propagation: pruned 0 nodes, tightened 0 bounds; strong branching children infeasible by propagation 0, propagated bounds passed to child LPs 0
+MIP: literal conflicts: added 93, in pool 93 (aged out 0), pruned 0 nodes, tightened 0 bounds
+MIP: conflict analysis (HiGHS style): calls 28, conflicts 113, added 93, mean length 33.1, max length 32903, 0.01s
+MIP: conflict analysis failures (all calls): no decision 0, too long midway 0, reason row lacks column 0, empty 0, too long at the end 0 (total length 0), max length 50
+MIP: sibling backtracks 0; basis restores 0 (basic count mismatch 0), first LP iterations after a restore 0
+MIP: node diag: nodes 0 node LPs 0 mean rows 0.0 iters 0 (0.0/LP) LP secs 0.00 sep rounds 0 added 0 node cut secs 0.00 final rows 9144
+MIP: adaptive node cuts: rounds 0 effective 0 skipped 0 (rate 1.000), node cut secs 0.00, outcomes cutoff/<0.02/<0.1/<0.3/>=0.3 [0, 0, 0, 0, 0], cut nnz None (rows mean 4.7)
+Presolve: 168336 rows, 111827 columns -> 9 rows, 9 columns (0.18s)
+Solving with the slope-intercept dual two-phase method
+{"status": "time_limit", "objective": 52529.00000000002, "best_bound": 49123.99999999999, "nodes": 0, "root_bound": 49123.99999999999, "first_solution_time": 5.582056132, "first_solution_objective": 52529.0, "time": 40.41893905500001}
