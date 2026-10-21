@@ -42,6 +42,87 @@ pub struct MipProblem {
 }
 
 impl MipProblem {
+    /// 診断用: 自由 MPS 形式で書き出す (最小化形の費用と定数項、行の範囲は RANGES、整数列は MARKER)。
+    pub fn write_mps(&self, path: &str) -> std::io::Result<()> {
+        use std::fmt::Write as _;
+        let mut o = String::new();
+        let _ = writeln!(o, "NAME sub\nROWS\n N obj");
+        let mut kind = Vec::with_capacity(self.m);
+        for i in 0..self.m {
+            let (l, u) = (self.row_lo[i], self.row_up[i]);
+            let k = if l == u { 'E' } else if l.is_finite() && !u.is_finite() { 'G' } else { 'L' };
+            kind.push(k);
+            let _ = writeln!(o, " {k} r{i}");
+        }
+        let _ = writeln!(o, "COLUMNS");
+        let mut cols: Vec<Vec<(usize, f64)>> = vec![Vec::new(); self.n];
+        for (i, r) in self.rows.iter().enumerate() {
+            for &(j, a) in r {
+                cols[j].push((i, a));
+            }
+        }
+        let mut in_int = false;
+        for j in 0..self.n {
+            if self.is_int[j] != in_int {
+                let _ = writeln!(o, " M{j} 'MARKER' '{}'", if self.is_int[j] { "INTORG" } else { "INTEND" });
+                in_int = self.is_int[j];
+            }
+            if self.cost[j] != 0.0 {
+                let _ = writeln!(o, " c{j} obj {:.17e}", self.cost[j]);
+            }
+            for &(i, a) in &cols[j] {
+                let _ = writeln!(o, " c{j} r{i} {a:.17e}");
+            }
+            if self.cost[j] == 0.0 && cols[j].is_empty() {
+                let _ = writeln!(o, " c{j} obj 0");
+            }
+        }
+        if in_int {
+            let _ = writeln!(o, " Mend 'MARKER' 'INTEND'");
+        }
+        let _ = writeln!(o, "RHS");
+        if self.offset != 0.0 {
+            let _ = writeln!(o, " rhs obj {:.17e}", -self.offset);
+        }
+        for i in 0..self.m {
+            let v = if kind[i] == 'G' { self.row_lo[i] } else if self.row_up[i].is_finite() { self.row_up[i] } else { 0.0 };
+            if v != 0.0 {
+                let _ = writeln!(o, " rhs r{i} {v:.17e}");
+            }
+        }
+        let _ = writeln!(o, "RANGES");
+        for i in 0..self.m {
+            if kind[i] == 'L' && self.row_lo[i].is_finite() && self.row_up[i].is_finite() {
+                let _ = writeln!(o, " rng r{i} {:.17e}", self.row_up[i] - self.row_lo[i]);
+            }
+            if kind[i] == 'L' && !self.row_up[i].is_finite() {
+                // 両側とも無限の行 (自由な行) は L 0 + 範囲なしにはできないので、大きな右辺にする
+            }
+        }
+        let _ = writeln!(o, "BOUNDS");
+        for j in 0..self.n {
+            let (l, u) = (self.col_lo[j], self.col_up[j]);
+            if l == u {
+                let _ = writeln!(o, " FX bnd c{j} {l:.17e}");
+                continue;
+            }
+            if l.is_finite() {
+                let _ = writeln!(o, " LO bnd c{j} {l:.17e}");
+            } else {
+                let _ = writeln!(o, " MI bnd c{j}");
+            }
+            if u.is_finite() {
+                let _ = writeln!(o, " UP bnd c{j} {u:.17e}");
+            } else if self.is_int[j] {
+                let _ = writeln!(o, " PL bnd c{j}");
+            }
+        }
+        let _ = writeln!(o, "ENDATA");
+        std::fs::write(path, o)
+    }
+}
+
+impl MipProblem {
     /// モデルの変数・目的・制約から作る。整数列の境界は丸める。
     pub fn from_model(variables: &[VariableData], objective: &Objective, constraints: &[ConstraintRow]) -> Self {
         let n = variables.len();

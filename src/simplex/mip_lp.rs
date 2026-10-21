@@ -756,7 +756,11 @@ impl TwoStageLp {
         });
         sid::set_tl_flags(flags);
         let conclusive = matches!(st, LpStatus::Optimal | LpStatus::Infeasible | LpStatus::Unbounded | LpStatus::ObjectiveBound | LpStatus::TimeLimit);
-        let won = if conclusive {
+        // `ENOMOTO_MIP_ROOT_LP_IPM` (診断用、既定では使わない): 二段解法が先に最適で終わっても内点法 + クロスオーバーの頂点を待って採る。
+        // beasleyC3 では、どちらが先かで根の頂点が変わり、背景のカットの後の下界が 741.96 (二段解法) と 746.3 (内点法) に分かれ、
+        // 解けるかどうかがほぼこれで決まった (analysis/beasleyC3_r3_20261020.md)
+        let wait_ipm = st == LpStatus::Optimal && env_str!("ENOMOTO_MIP_ROOT_LP_IPM").is_some();
+        let won = if conclusive && !wait_ipm {
             if !cancel.swap(true, Ordering::SeqCst) {
                 // 二段解法が先 (内点法側は確認点で止まる。待たない)
                 if debug {
