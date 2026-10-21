@@ -745,7 +745,7 @@ struct SbSide {
 }
 
 /// 双対証明・衝突制約のプールの行の状態。
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum ProofState {
     /// 自前で、まだほかのスレッドに知らせていない。刈り込み・締め付けに使われた回数を持つ (`ENOMOTO_T_MIP_TREE_SHARE_PROOF_USES`
     /// 回使われたら知らせる)。
@@ -833,6 +833,10 @@ fn prof_tree_par() -> bool {
 
 /// 診断用 (`ENOMOTO_MIP_TREE_DIAG`): 木を分け合うスレッドの受け渡しと、optimal で終わるときの突き合わせを表示する
 /// (analysis/partree_race_20261021.md)。
+fn proof_diag() -> bool {
+    env_str!("ENOMOTO_MIP_PROOF_DIAG").is_some()
+}
+
 fn tree_diag() -> bool {
     env_str!("ENOMOTO_MIP_TREE_DIAG").is_some()
 }
@@ -7214,6 +7218,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let org = (self.proof_state[k] == ProofState::Imported) as usize;
                 self.tprof.proof[org][0] += 1;
                 if slack < -1e-6 * (1.0 + rhs.abs()) {
+                    if self.dbg_on || proof_diag() {
+                        self.proof_diag_prune(k, rhs, minact, full);
+                    }
                     self.tprof.proof[org][1] += 1;
                     self.proof_used(k);
                     return false;
@@ -7244,6 +7251,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 let mut used = false;
                 for (j, upper, v) in changes {
+                    if self.dbg_on {
+                        self.proof_diag_tighten(k, j, upper, v, rhs, minact);
+                    }
                     self.dom.set_external(true);
                     let ch = if upper { self.dom.tighten_upper(p, j, v) } else { self.dom.tighten_lower(p, j, v) };
                     self.dom.set_external(false);
@@ -7278,6 +7288,51 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return self.dom.propagate(p);
         }
         true
+    }
+
+    /// 診断用 (`ENOMOTO_MIP_PROOF_DIAG` またはデバッグ解): 証明 `k` がこのノードを刈るとき、差分で求めた最小活動量
+    /// `minact` を今の境界で全部計算し直したものと比べ、デバッグ解があれば、証明そのものがデバッグ解を切っていないか
+    /// (証明が誤り) と、ノードがデバッグ解を含んでいたか (含んでいて証明が正しければ差分の誤り) を表示する。
+    fn proof_diag_prune(&self, k: usize, rhs: f64, minact: f64, full: bool) {
+        let (c, konst, obj) = &self.dual_proofs[k];
+        let exact: f64 = c.iter().map(|&(j, a)| if a > 0.0 { a * self.dom.lo[j] } else { a * self.dom.up[j] }).sum();
+        let tol = 1e-6 * (1.0 + rhs.abs());
+        let origin = format!("{:?}", self.proof_state[k]);
+        if !full && (exact - minact).abs() > 1e-6 * (1.0 + exact.abs()) && exact <= rhs + tol {
+            eprintln!("PROOF_DIAG: node {} thread {}: proof {k} ({origin}, obj {obj}, len {}) prunes with incremental min activity {minact:.10e} but the exact one is {exact:.10e} (rhs {rhs:.10e})", self.nodes, self.pool_tid, c.len());
+        }
+        if self.dbg_on {
+            DEBUG_SOL.with(|d| {
+                if let Some(x) = d.borrow().as_ref() {
+                    let dz = self.p.objective(x);
+                    if dz < self.prune_limit() - 1e-6 {
+                        let act: f64 = c.iter().map(|&(j, a)| a * x[j]).sum();
+                        let inside = (0..self.p.n).all(|j| x[j] >= self.dom.lo[j] - 1e-6 && x[j] <= self.dom.up[j] + 1e-6);
+                        if act > rhs + tol {
+                            eprintln!("MIP_DEBUG_SOL: node {} thread {}: proof {k} ({origin}, obj {obj}, len {}, konst {konst:.10e}) is violated by the debug solution: activity {act:.10e} > rhs {rhs:.10e} (debug obj {dz}, prune limit {})", self.nodes, self.pool_tid, c.len(), self.prune_limit());
+                        } else if inside {
+                            eprintln!("MIP_DEBUG_SOL: node {} thread {}: proof {k} ({origin}) prunes a node that contains the debug solution although the debug solution satisfies it (activity {act:.10e} <= rhs {rhs:.10e}; min activity incremental {minact:.10e} exact {exact:.10e})", self.nodes, self.pool_tid);
+                        }
+                    }
+                }
+            });
+        }
+    }
+
+    /// 診断用 (デバッグ解): 証明 `k` による締め付け `x_j <= v` (`upper`) / `x_j >= v` が、今の定義域が含むデバッグ解を切るなら表示する。
+    fn proof_diag_tighten(&self, k: usize, j: usize, upper: bool, v: f64, rhs: f64, minact: f64) {
+        DEBUG_SOL.with(|d| {
+            if let Some(x) = d.borrow().as_ref() {
+                let cuts = if upper { x[j] > v + 1e-6 } else { x[j] < v - 1e-6 };
+                if !cuts || self.p.objective(x) >= self.prune_limit() - 1e-6 || !(0..self.p.n).all(|i| x[i] >= self.dom.lo[i] - 1e-6 && x[i] <= self.dom.up[i] + 1e-6) {
+                    return;
+                }
+                let (c, _, obj) = &self.dual_proofs[k];
+                let act: f64 = c.iter().map(|&(i, a)| a * x[i]).sum();
+                let exact: f64 = c.iter().map(|&(i, a)| if a > 0.0 { a * self.dom.lo[i] } else { a * self.dom.up[i] }).sum();
+                eprintln!("MIP_DEBUG_SOL: node {} thread {}: proof {k} ({:?}, obj {obj}) tightens col {j} {} {v} cutting the debug solution (x {}); proof activity at the debug solution {act:.10e}, rhs {rhs:.10e}, min activity incremental {minact:.10e} exact {exact:.10e}", self.nodes, self.pool_tid, self.proof_state[k], if upper { "<=" } else { ">=" }, x[j]);
+            }
+        });
     }
 
     /// 列 `cols` の境界の変化 (`proof_val_*` から今の境界へ) を証明の差分 (`proof_delta`) に足し、差分が変わった

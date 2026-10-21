@@ -154,3 +154,59 @@ ENOMOTO_T_MIP_HEUR_ROLE_COOLDOWN=0.05` (役を何度も出入りさせる)。PV 
 - 次に調べること: mc11 で、打ち切り値が下がった直後の待ち行列の一括の喪失を `ENOMOTO_MIP_DEBUG_SOL` (前の調査の
   `mc11_pre.sol`) 付きで見張る。デバッグ解の検査は `dbg_lost("dual proof")` などで既にあるが、前の調査の 90 回では
   出ていない (起きた回がない)。打ち切り値をわざと下げる (例: 11728 を `cutoff` に与える) と再現しやすいかを試す。
+
+## 8. 引き継ぎ (11728 の型の調査、途中で止めた)
+
+親の指示で、11728 の型 (打ち切り値の改善の直後に、LP の下界が打ち切り値より下のノードを LP を解かずに一括で捨てる) を
+調べ始めたところで別のセッションに引き継ぐ。土台は develop 5ed9443 をこのブランチにマージした (90390ae)。
+
+### 8.1 分かったこと
+
+- 事実 (11728 のログ `inv/gfrsplit-20261021:analysis/gfr_split/logs/mc11_noF_1.log` の終わりの要約): `objective propagation:
+  pruned 0 nodes`、`literal conflicts: ... pruned 0 nodes`、`dual proofs and conflicts 8 (...) pruned 765 nodes, tightened 16680
+  bounds`。`proof_prunes` (= `pruned 765`) は `apply_dual_proofs` が偽を返した回数だけを数える (`solver.rs` のノードの伝播の中)。
+  ほかのスレッドから取り込んだ証明は 2 本。つまり約 750 ノードの一括の喪失は **双対証明のプール (8 本しかない) によるもの**で、
+  目的関数の伝播・リテラルの衝突ではない (ただし `apply_dual_proofs` の締め付けの後の `dom.propagate` で不能になった分も
+  ここに数えられる)。
+- 事実 (コード): 証明の作り方 (`add_proof_from`) は、どの y でも `(c - y^T A) x <= U - y^T b` (y_i > 0 なら行の下限、< 0 なら上限)
+  なので、**LP の行が全て大域的に成り立つなら正しい**。列を右辺に移すのは大域的な境界で行う。適用 (`apply_dual_proofs`) は
+  右辺を `prune_limit() - offset - konst` で毎回計算し直す。最小活動量は「根の状態の境界 (`dom.root_bounds()`) での基準
+  `proof_base` + 根から変えた列の差分 `proof_delta`」の差分計算 (`proof_absorb`)。打ち切り値が下がると基準を取り直す
+  (`self.prune_limit() < self.proof_snap_limit`)。
+- 疑わしい点 (推測、未確認): (a) LP に大域的に成り立たない行 (ノードで局所的な境界から作ったカット、局所的に変えた行の
+  境界など) があり、それを使った証明が誤る。打ち切り値が下がると右辺が小さくなり、誤った証明が一斉に破れる形と合う。
+  (b) 差分の最小活動量 (`proof_base` + `proof_delta`) が真の値より大きくなる (取り直し・巻き戻しの取りこぼし)。(c) 取り込んだ
+  証明は同じ列の空間のまま (`sync_learned` → `push_pool_row`) で、ここにずれは見つからなかった。
+
+### 8.2 入れた検査 (コミット済み、診断用)
+
+- `ENOMOTO_MIP_PROOF_DIAG` (またはデバッグ解があるとき): `apply_dual_proofs` で証明がノードを刈るときに `proof_diag_prune` が、
+  差分の最小活動量と今の境界で全部計算し直した値を比べ、食い違って刈るべきでないなら `PROOF_DIAG: ... prunes with incremental
+  min activity ... but the exact one is ...` と出す ((b) の検出)。
+- デバッグ解があるとき: 刈った証明がデバッグ解に破られていれば `MIP_DEBUG_SOL: node N thread T: proof k (Own/Imported, ...) is
+  violated by the debug solution` ((a) の検出、証明が誤り)。証明はデバッグ解を満たすのにデバッグ解を含むノードを刈ったら
+  `... prunes a node that contains the debug solution although the debug solution satisfies it` ((b) の検出)。証明による
+  締め付けがデバッグ解を切れば `... tightens col j ... cutting the debug solution` (`proof_diag_tighten`)。
+- 既存: 証明を作るとき (`add_proof_from`) にデバッグ解を切れば `MIP_DEBUG_SOL: dual proof cuts off the debug solution` (以前からある)。
+  ただし `push_pool_row` で取り込む証明 (ほかのスレッドから) は作った側でしか検査されない (従もデバッグ解を持つので作った側で出る)。
+- `ProofState` に `Debug` を付けた (表示用)。既定の動作は変えていない。
+
+### 8.3 試したこと
+
+- デバッグ解: 前処理後 (クリーク行の拡張の後、`ENOMOTO_MIP_DEBUG_DUMP_PRESOLVED2`) の mc11 を HiGHS 1.15.1 (`mip_rel_gap=0`) で
+  解いた (`runs/cutoffprune/hsol.py`、11689、`runs/cutoffprune/mc11_pre.sol`)。読み込みは `reduced objective 11689 feasible true`。
+- 打ち切り値を最初から与える (`ENOMOTO_MIP_CUTOFF=11728`、元の向きの値) + デバッグ解 + `ENOMOTO_MIP_PROOF_DIAG`、4 スレッド・
+  60 秒 (`runs/cutoffprune/batch1.sh`): 1 回目は時間切れ (暫定解 11723、下界 11485)、`PROOF_DIAG`・`MIP_DEBUG_SOL: node`・
+  `lost at` は 0。`all symmetric images gone after node 290` が 1 回出たが、これは主の手元の待ち行列しか見ない既知の誤報
+  (§6・前の調査)。2 回目の途中で止めた。予定していた残り (11728 の設定 noF = `ENOMOTO_MIP_IMPLBD_GENINT=1
+  ENOMOTO_T_MIP_CUT_LP_RETRY=4 ENOMOTO_MIP_RESTART_REF=1` + 打ち切り値 3 回、1 スレッド 2 回、noF だけ 4 回) は走らせていない。
+
+### 8.4 次にやること (提案)
+
+1. `batch1.sh` の残りを走らせる。noF の設定は 11728 の回と同じ (再スタートが 1 回起きる。RESTART_REF を含む)。
+2. 打ち切り値を最初から与える形は「途中で打ち切り値が大きく下がる」形と違う。待ち行列が大きい状態で打ち切り値を下げるには、
+   例えば一定の時刻・ノード数で `params.cutoff` 相当の値を下げる診断用の仕掛けを入れる (未実装)。
+3. (a) を直接調べる: LP の行のうち大域的でない行があるか。ノードのカット (`tree_sep`・`node_cuts_due`・FC のノードの分離) が
+   局所的な境界で作られていないか、行の境界をノードで変える箇所 (`set_row_bounds` など) がないかを洗う。デバッグ解で
+   `dbg_check_rows` (LP の行がデバッグ解を満たすか) を証明を作る直前に呼ぶと、誤った行を特定できる。
+4. 11712 の回も同じ形だった可能性がある (ログなし)。§1 の修正とは独立に調べる。
