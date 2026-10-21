@@ -15,7 +15,7 @@ def cell(v, p=None):
     out = []
     for k, st, obj, sec, root in sorted(v):
         wrong = st == 'optimal' and p in OPT and abs(obj - OPT[p]) > 1e-6 * max(1, abs(OPT[p]))
-        out.append(f"誤 {obj:g} ({sec:.0f}s)" if wrong else f"**{sec:.0f}s**" if st == 'optimal' else f"{obj:g}")
+        out.append(f"誤 {obj:g} ({sec:.1f}s)" if wrong else f"**{sec:.1f}s**" if st == 'optimal' else f"{obj:g}")
     return " / ".join(out)
 print("| 問題 | " + " | ".join(cfgs) + " |")
 print("|---|" + "---|" * len(cfgs))
