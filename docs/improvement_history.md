@@ -9664,6 +9664,13 @@ neos-950242 の 2 回目の調査 (`analysis/neos950242_r2_20261020.md`)。
 - 双対証明の修正は解けた数が 2 組とも多く (40 問 +1、16 問 +1〜2) 既定のまま。fcs・subrows は 2 組とも 16 問で解けた数が newdef より減るので不採用 (mc11 の誤った最適値は出なかった)。
 - "MIP: WARNING" は PRb の oldproof の mc11 (時間切れ) と PRa の subrows の 10teams (optimal・正しい値) に各 1 件。ビルドが本文を残す前のもので種類は不明。Fable の調査に回した。
 
+## 2026-10-21: 今日の修正 3 つ (DSE 重みの更新・双対証明の誤差・木のスレッドの解の受け取り) を合わせた確認 (TD)
+
+- develop 8564ace で 40 + 16 問、newdef と fixoff (`ENOMOTO_NO_POLISH_DSE=1 ENOMOTO_T_MIP_PROOF_NUM_TOL=0 ENOMOTO_MIP_TREE_NO_END_CHECK=1`) を 2 組 (TDa・TDb は順を逆に)。
+- 40 問 (解けた・SGM): TDa newdef 25・21.17 / fixoff 25・22.37、TDb newdef 25・21.40 / fixoff 25・21.43。
+- 16 問: TDa newdef 8・38.91 / fixoff 10・39.63、TDb newdef 11・36.73 / fixoff 11・37.08。不一致 0、"MIP: WARNING" 0 (本文を残す計測スクリプトで)。
+- SGM は 4 つとも修正ありが良い。TDa の 16 問で解けた数が 2 減ったのは beasleyC3 (755 対 754、47 秒) と uccase12 (50 秒) で、どちらも回ごとに揺れる問題。修正は答えの正しさと LP の内部状態の不具合を直すものなので既定のまま。
+
 ## 改名一覧 (整理時)
 
 本メモ中は旧名で書かれている。
