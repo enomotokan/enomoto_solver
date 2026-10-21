@@ -9477,6 +9477,15 @@ neos-950242 の 2 回目の調査 (`analysis/neos950242_r2_20261020.md`)。
   - 不一致 0。16 問の解けた数が 2 組とも減るので既定にしない。
 - 結果: benchmarks/*_bcb64a1_{newdef,pcr}_rPR{a,b}.json
 
+## 2026-10-21: 再スタートで前の暫定解を参照解に残す (RESTART_REF) と、根の強化との組 (gfr) は不採用
+
+- mzzv42z の 3 回目の調査の試作。c9c751e (develop + mzzv42z-r3) で既定・rref (RESTART_REF=1)・gfr (IMPLBD_GENINT=1 T_MIP_CUT_LP_RETRY=4 FACE_SEP=off RESTART_REF=1) を 2 組 (rMZa/rMZb、順序は逆)。
+  - rref: 40 問 25→26 / 26→26、16 問 11→11 / 10→7。rMZb で drayage-25-23・uccase12・neos-911970 を落とし、neos-911970 は rMZa でも 20.8→55.5 秒と遅い。既定にしない。
+  - gfr: 40 問 25→25 / 26→25、16 問 11→9 / 10→8。2 組とも neos-911970・neos-960392 (rMZa は -2 しか出ない)・uccase12 を落とす。
+  - 一方 gfr は 2 組とも mc11 を解く (25.5・22.7 秒、今日初めて。HiGHS はこのマシンで 65.6 秒)。mzzv42z は -20500・-20520 (最適 -20540)、roll3000 は 2 組とも 12890 に届く (証明なし)。どの部分が mc11 に効き、どの部分が neos-911970・neos-960392 を崩すかは切り分けが要る。
+  - 不一致 0。
+- 結果: benchmarks/*_c9c751e_{newdef,rref,gfr}_rMZ{a,b}.json
+
 ## 改名一覧 (整理時)
 
 本メモ中は旧名で書かれている。
