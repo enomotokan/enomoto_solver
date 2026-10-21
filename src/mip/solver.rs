@@ -452,7 +452,7 @@ pub(super) struct Solver<'a, L: MipLp> {
     dbg_prev_has: bool,
     dbg_alive: bool,
     /// 診断用: デバッグ解があり (サブ MIP でない) 診断を行うか (構築時に決める)。偽なら診断の文字列を作らない。
-    dbg_on: bool,
+    pub(super) dbg_on: bool,
     workers: Vec<std::thread::JoinHandle<MipResult>>,
     worker_totals: (u64, u64),
     pool_stats: [u64; 3],
@@ -563,6 +563,9 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) proof_prunes: u64,
     /// 診断用 (`ENOMOTO_MIP_PROOF_VERIFY`): 直前に [`Self::apply_dual_proofs`] がノードを刈ったときの証明の番号。
     proof_last_prune: Option<usize>,
+    /// 診断用 (`ENOMOTO_MIP_PROOF_VERIFY`): 直前の刈り込みが、同じ呼び出しの中の証明による締め付け (整数の丸めを含む) の後に
+    /// 起きたか (LP の値が打ち切り値未満でも正しい刈り込みでありうる)。
+    proof_prune_after_tighten: bool,
     /// 診断用 (`ENOMOTO_MIP_PROOF_VERIFY`): 証明で刈ったノードの LP を解き直して確かめた数 [LP が打ち切り値以上か実行不能 (正しい),
     /// LP が打ち切り値未満 (証明が誤り)、確かめられなかった]。
     proof_verify_stats: [u64; 3],
@@ -1623,6 +1626,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         farkas_added: 0,
         proof_prunes: 0,
         proof_last_prune: None,
+        proof_prune_after_tighten: false,
         proof_verify_stats: [0; 3],
         proof_tightenings: 0,
         cut_pool_keys: std::collections::HashMap::new(),
@@ -3688,6 +3692,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let prop_ok = prop_ok && {
                 let pos_pf = self.dom.stack_len();
                 self.proof_last_prune = None;
+                self.proof_prune_after_tighten = false;
                 let ok = self.apply_dual_proofs();
                 if !ok {
                     if self.dom.conflict.is_some() && env_str!("ENOMOTO_MIP_NO_EXTRA_CONFLICTS").is_none() {
@@ -6123,6 +6128,61 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let act: f64 = coefs.iter().map(|&(j, a)| a * x[j]).sum();
                     if act > rhs + 1e-6 * (1.0 + rhs.abs()) {
                         eprintln!("MIP_DEBUG_SOL: dual proof cuts off the debug solution ({act} > {rhs})");
+                        // 破れの分解: 破れ = (目的値 - U) - sum_i y_i (A_i x - b_i) + sum_{移した列 j} d_j (g_j - x_j)。正しい行なら
+                        // y_i (A_i x - b_i) >= 0、正しい大域的な境界なら d_j (g_j - x_j) <= 0 なので、破れの原因になる行・列を出す
+                        let ymax = y.iter().take(self.lp.num_rows()).fold(0.0f64, |m, v| m.max(v.abs()));
+                        let mut bad_rows: Vec<(f64, usize, f64, f64, f64, f64)> = Vec::new();
+                        let mut sum_rows = 0.0f64;
+                        for (i, &yi) in y.iter().enumerate().take(self.lp.num_rows()) {
+                            if yi.abs() <= 1e-12 {
+                                continue;
+                            }
+                            let (lo, up) = self.lp.row_bounds(i);
+                            let b = if yi > 0.0 { lo } else { up };
+                            if !b.is_finite() {
+                                continue;
+                            }
+                            let ax: f64 = self.lp.row(i).iter().map(|&(j, a)| a * x[j]).sum();
+                            let t = yi * (ax - b);
+                            sum_rows += t;
+                            if t < -1e-7 * (1.0 + b.abs()) {
+                                bad_rows.push((t, i, yi, ax, lo, up));
+                            }
+                        }
+                        let mut kept = vec![false; p.n];
+                        for &(j, _) in &coefs {
+                            kept[j] = true;
+                        }
+                        let mut bad_cols: Vec<(f64, usize, f64, f64, f64, f64)> = Vec::new();
+                        let mut sum_cols = 0.0f64;
+                        for (j, &dj) in d.iter().enumerate() {
+                            if dj == 0.0 || kept[j] {
+                                continue;
+                            }
+                            let g = if dj > 0.0 { self.dom.global_lo[j] } else { self.dom.global_up[j] };
+                            if !g.is_finite() {
+                                continue;
+                            }
+                            let t = dj * (g - x[j]);
+                            sum_cols += t;
+                            if t > 1e-7 * (1.0 + g.abs()) {
+                                bad_cols.push((t, j, dj, x[j], self.dom.global_lo[j], self.dom.global_up[j]));
+                            }
+                        }
+                        bad_rows.sort_by(|a, b| a.0.total_cmp(&b.0));
+                        bad_cols.sort_by(|a, b| b.0.total_cmp(&a.0));
+                        eprintln!(
+                            "MIP_DEBUG_SOL: proof decomposition at node {} thread {}: debug obj - U = {:.6e}, -sum_i y_i (A_i x - b_i) = {:.6e}, sum_moved d_j (g_j - x_j) = {:.6e}; max |y| {ymax:.3e}, lp rows {} (orig {}), lp obj {:.10e}, proof len {} dmax {dmax:.3e}; rows the debug solution violates (weighted): {}, moved columns outside the global bounds: {}",
+                            self.nodes, self.pool_tid, self.p.objective(x) - self.prune_limit(), -sum_rows, sum_cols, self.lp.num_rows(), p.m, self.lp.objective() + p.offset, coefs.len(), bad_rows.len(), bad_cols.len()
+                        );
+                        for &(t, i, yi, ax, lo, up) in bad_rows.iter().take(8) {
+                            let row = self.lp.row(i);
+                            let terms: Vec<String> = row.iter().take(6).map(|&(j, a)| format!("{a:+.4}*x{j}[{:.4}]", x[j])).collect();
+                            eprintln!("MIP_DEBUG_SOL:   row {i} ({}): y {yi:.6e}, {lo} <= activity {ax:.10e} <= {up}, contribution {t:.6e}, len {}: {}{}", if i < p.m { "original" } else { "cut" }, row.len(), terms.join(" "), if row.len() > 6 { " ..." } else { "" });
+                        }
+                        for &(t, j, dj, xj, gl, gu) in bad_cols.iter().take(8) {
+                            eprintln!("MIP_DEBUG_SOL:   moved col {j}: d {dj:.6e}, x {xj}, global [{gl}, {gu}], node [{}, {}], contribution {t:.6e}", self.dom.lo[j], self.dom.up[j]);
+                        }
                     }
                 }
             }
@@ -7259,6 +7319,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.tprof.proof[org][1] += 1;
                     self.proof_used(k);
                     self.proof_last_prune = Some(k);
+                    self.proof_prune_after_tighten = tightened;
                     return false;
                 }
                 if !full && slack >= self.proof_base[k].2 {
@@ -7304,6 +7365,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         self.tprof.proof[org][1] += 1;
                         self.proof_used(k);
                         self.proof_last_prune = Some(k);
+                        self.proof_prune_after_tighten = true;
                         return false;
                     }
                 }
@@ -7354,8 +7416,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let x = self.lp.col_values();
                     let act = k.map(|k| self.dual_proofs[k].0.iter().map(|&(j, a)| a * x[j]).sum::<f64>());
                     eprintln!(
-                        "PROOF_VERIFY: WRONG: node {} thread {}: {} pruned a node whose LP objective is {obj:.10e} < prune limit {lim:.10e} (node lower bound {node_lb:.10e}, proof activity at the LP solution {act:?}, debug solution in node {dn}, lp rows {})",
-                        self.nodes, self.pool_tid, desc(self), self.lp.num_rows()
+                        "PROOF_VERIFY: WRONG: node {} thread {}: {} pruned a node whose LP objective is {obj:.10e} < prune limit {lim:.10e} (node lower bound {node_lb:.10e}, proof activity at the LP solution {act:?}, after tightening {}, debug solution in node {dn}, lp rows {})",
+                        self.nodes, self.pool_tid, desc(self), self.proof_prune_after_tighten, self.lp.num_rows()
                     );
                 } else {
                     self.proof_verify_stats[0] += 1;
