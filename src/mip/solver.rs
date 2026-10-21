@@ -369,6 +369,9 @@ pub(super) struct Solver<'a, L: MipLp> {
     user_log_header: bool,
     /// 処理中 (最後に取り出した) のノードの下界 (根では根の LP の値)。待ち行列にないので全体の下界に足す。
     cur_lb: f64,
+    /// 根の LP の値 (カットのループの後はその値)。この求解の問題全体の下界として常に正しいので、時間切れなどで終わるときに
+    /// 返す下界はこれより下げない (従のスレッドの失敗・再スタート後の求解の結果などで下界が失われても、根の下界は返す)。
+    root_lb: f64,
     /// 終わるときの下界 ([`Self::finish`] が決めたもの)。あれば最後の経過の行はこれを使う。
     final_lb: Option<f64>,
     /// カット生成に使う変数上下限 (最初の分離で作る)。
@@ -1530,6 +1533,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         last_log: start,
         user_log_header: false,
         cur_lb: f64::NEG_INFINITY,
+        root_lb: f64::NEG_INFINITY,
         final_lb: None,
         vbounds: None,
         failed_heurs: 0,
@@ -2671,6 +2675,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         match root_st {
             LpStatus::Optimal => {
                 self.cur_lb = self.lp.objective() + self.p.offset;
+                self.root_lb = self.cur_lb;
                 user_log!("Root LP: objective {:.10e} ({:.2}s)", self.p.sense_sign * (self.lp.objective() + self.p.offset), self.start.elapsed().as_secs_f64());
             }
             LpStatus::Infeasible => {
@@ -2684,7 +2689,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             LpStatus::TimeLimit => {
                 self.join_fj_thread();
-                return self.finish(MipStatus::TimeLimit, f64::NEG_INFINITY);
+                return self.finish(MipStatus::TimeLimit, self.root_fail_bound());
             }
             _ => {
                 // 根の LP が解けない: LP を使わない Feasibility Jump の解だけは受け取る
@@ -2693,7 +2698,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 self.join_fj_thread();
                 let st = if self.time_up() { MipStatus::TimeLimit } else { MipStatus::NotSolved };
-                return self.finish(st, f64::NEG_INFINITY);
+                return self.finish(st, self.root_fail_bound());
             }
         }
         let mut root_obj = self.lp.objective() + self.p.offset;
@@ -2738,6 +2743,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     return self.finish(st, root_obj);
                 }
                 root_obj = self.lp.objective() + self.p.offset;
+                self.root_lb = root_obj;
                 if self.snap.is_none() {
                     self.fj_poor_lb = root_obj;
                 }
@@ -5852,6 +5858,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
     }
 
+    /// 根の LP が解けずに終わるときの下界: 木を分け合う従のスレッドは、共有の待ち行列からノードを取る前なので探索し残した
+    /// 部分木がなく、主の下界を下げない (+inf)。主 (ほかの求解) は根の下界がない (-inf。カット前の根の LP が解けていれば
+    /// [`Self::finish`] が `root_lb` で抑える)。
+    fn root_fail_bound(&self) -> f64 {
+        if self.pool.is_some() && self.snap.is_some() { f64::INFINITY } else { f64::NEG_INFINITY }
+    }
+
     fn finish_limit(&mut self, status: MipStatus, current: Option<&OpenNode>) -> MipResult {
         // 木を分け合う従: 残ったノードを共有の待ち行列に返す (主がそれも含めて下界を出す)
         if let (Some(pool), true) = (self.pool.clone(), self.snap.is_some()) {
@@ -7973,7 +7986,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 Some(z) => (MipStatus::Optimal, z),
                 None => (MipStatus::Infeasible, f64::INFINITY),
             },
-            s => (s, r.best_bound.min(objective.unwrap_or(f64::INFINITY))),
+            // 再スタート後の求解の下界が失われていても (暫定解なしで終わった、など)、再スタート前の根の下界は正しい
+            s => (s, r.best_bound.max(self.root_lb).min(objective.unwrap_or(f64::INFINITY))),
         };
         Some(MipResult { status, x, objective, best_bound, nodes, lp_iterations: iters })
     }
@@ -8963,7 +8977,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // 木を分け合う主: 従を止めて待ち、従と共有の待ち行列の下界を合わせる。従: 待っていない側から外れる
         let wlb = self.join_workers();
-        let best_bound = if matches!(status, MipStatus::Optimal | MipStatus::Infeasible) { best_bound } else { best_bound.min(wlb) };
+        // 時間切れなどで終わるとき、下界は根の LP の値 (`root_lb`、この問題全体の下界として常に正しい) より下げない。
+        // 従のスレッドが写しの根の LP で時間切れになって -inf を返す・再スタート後の求解が暫定解なしで終わるなどで
+        // 下界を失い、根の下界が分かっているのに -inf を返していた (mzzv42z・physiciansched6-2 の 4 スレッド・60 秒。
+        // analysis/bound_inf_20261021.md)。暫定解があればその値で上から抑える (根の下界が暫定解の値をわずかに越えうる)
+        let best_bound = if matches!(status, MipStatus::Optimal | MipStatus::Infeasible) {
+            best_bound
+        } else {
+            best_bound.min(wlb).max(self.root_lb).min(self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z))
+        };
         if let Some(pool) = self.pool.clone() {
             if self.unresolved && self.snap.is_some() {
                 pool.unresolved.store(true, std::sync::atomic::Ordering::Relaxed);

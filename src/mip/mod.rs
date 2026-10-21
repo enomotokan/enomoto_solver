@@ -776,6 +776,9 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
                 if p.is_feasible(&x, 1e-6) {
                     let z_orig = p.objective(&x);
                     let shift = z_orig - prob.objective(&xr);
+                    if params.verbose && shift.abs() > 1e-9 * z_orig.abs().max(1.0) {
+                        eprintln!("MIP: presolve: objective shift {shift:e} between the presolved problem and the original at the incumbent (expected ~0)");
+                    }
                     r.best_bound += shift;
                     r.objective = Some(z_orig);
                     r.x = Some(x);
@@ -787,10 +790,11 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
                 }
             } else if let Some(shift) = ref_shift.filter(|_| r.status != MipStatus::Infeasible) {
                 r.best_bound += shift;
-            } else if r.status != MipStatus::Infeasible {
-                // 暫定解がないと目的値の定数のずれが分からないので下界は報告しない
-                r.best_bound = f64::NEG_INFINITY;
             }
+            // 暫定解がなくても下界はそのまま報告する: 前処理は代入で生じた目的値の定数を `offset` に入れる ([`presolve_mip`]。
+            // 後処理は縮約後の点についてアフィン) ので、前処理後の問題の下界は元の問題の下界でもある。以前は定数のずれが
+            // 分からないとして -inf にしていた (根の下界が分かっているのに -inf を返していた: 暫定解なしの physiciansched6-2、
+            // 再スタート後の求解が暫定解なしで終わる mzzv42z。analysis/bound_inf_20261021.md)
             if ok { r } else { solver::solve(p, remaining(params)) }
         }
         None => solver::solve(p, remaining(params)),
