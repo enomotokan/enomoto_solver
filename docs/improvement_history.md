@@ -9605,6 +9605,14 @@ neos-950242 の 2 回目の調査 (`analysis/neos950242_r2_20261020.md`)。
 - 16 問: EQa newdef 8・39.87 / eq2 9・37.51、EQb newdef 10・35.91 / eq2 9・37.06。不一致 0、"MIP: WARNING" 0。
 - 40 問の SGM が 2 組とも悪く、16 問は一勝一敗なので既定にしない。eq2 では physiciansched6-2 に 2 組とも暫定解が出ない (newdef は 51029・50826): 代入後の前処理後が 1 万行を切り、FJ 用の問題で INEQ_SINGLETON が効かなくなるため (analysis/fj_nosol_20261021.md)。`ENOMOTO_MIP_FJ_P3_INEQ=1` の計測 (FJQ) の後に組み合わせで測り直す。
 
+## 2026-10-21: FJ 用の問題で行数に依らず INEQ_SINGLETON (FJ_P3_INEQ)・FJ の種の最少回数 (FJ_MIN_TRIALS=8) は不採用
+
+- physiciansched6-2 の FJ が解を出さない調査 (analysis/fj_nosol_20261021.md) の試作。45c6090 で 40 + 16 問、newdef / ineq (`ENOMOTO_MIP_FJ_P3_INEQ=1`) / min8 (`ENOMOTO_MIP_FJ_MIN_TRIALS=8`) を同じコンテナで 2 組 (FJQa・FJQb は順を逆に)。
+- 40 問 (解けた・SGM): FJQa newdef 26・22.02 / ineq 26・21.30 / min8 26・21.15、FJQb newdef 26・21.71 / ineq 26・21.30 / min8 24・22.02。
+- 16 問: FJQa newdef 11・34.24 / ineq 9・37.12 / min8 10・36.88、FJQb newdef 10・34.80 / ineq 9・35.54 / min8 9・36.88。不一致 0、"MIP: WARNING" 0。
+- どちらも 16 問で 2 組とも解けた数が減るので不採用 (ineq は beasleyC3・uccase12、min8 は neos-960392・beasleyC3 を落とす。ineq が FJ 用の問題を変えるのは 55 問中 dcmulti・roll3000 だけなので、落ちた問題の多くは揺れ)。physiciansched6-2 は 6 本とも 9.4〜10.5 秒で暫定解 51029 が出た。
+- eq2 (PROBE_EQUIV2 + EQUIV2_CUTS) と ineq の組み合わせは、ineq 単独で良くないので測らない。
+
 ## 改名一覧 (整理時)
 
 本メモ中は旧名で書かれている。
