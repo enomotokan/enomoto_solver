@@ -363,12 +363,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // timtab1 は既定の選択で 25 ラウンド目まで毎回 1-3% 伸び、停滞の判定に届かないので、`ENOMOTO_MIP_CUT_PHASE2`・
                 // `ENOMOTO_MIP_HIGHS_CUTMGMT` でも第 2 段階に入らない (根の下界 495790、第 2 段階に入ると 598k-602k、HiGHS 569k-610k)
                 let to_phase2 = !extend && !phase2 && !self.params.submip && env_str!("ENOMOTO_MIP_CUT_PHASE2_AT_CAP").is_some();
-                // `ENOMOTO_MIP_CUT_STRONG_AUTO` (試作): 第 1 段階がラウンドの上限に当たったとき、カットが根の LP の値を大きく
+                // `ENOMOTO_MIP_CUT_STRONG_AUTO` (既定で使う。`ENOMOTO_MIP_NO_CUT_STRONG_AUTO` で止める): 第 1 段階がラウンドの上限に当たったとき、カットが根の LP の値を大きく
                 // (`ENOMOTO_T_MIP_CUT_STRONG_FRAC` (既定 0.3) × max(|LP|, |今の値|) 以上) 上げていて、直近 5 ラウンドもまだ全体の伸びの
                 // `ENOMOTO_T_MIP_CUT_STRONG_RECENT` (既定 0.01) 以上伸びているなら、第 2 段階へ進み (`CUT_PHASE2_AT_CAP` と同じ)、
                 // 以後 HiGHS 流のカット管理 (`ENOMOTO_MIP_HIGHS_CUTMGMT`) を有効にする (値が `cap` なら第 2 段階だけ)。
                 // timtab1 は 163277 -> 495790 (25 ラウンド目まで毎回伸びる)。40 問で上限に当たるほかの問題の伸びは 1 割未満
-                let strong = !extend && !phase2 && !self.params.submip && k > 5 && env_str!("ENOMOTO_MIP_CUT_STRONG_AUTO").is_some() && {
+                let strong_env = env_str!("ENOMOTO_MIP_CUT_STRONG_AUTO");
+                let strong_on = strong_env.is_some() || env_str!("ENOMOTO_MIP_NO_CUT_STRONG_AUTO").is_none();
+                let strong = !extend && !phase2 && !self.params.submip && k > 5 && strong_on && {
                     // 大きさは元の問題の目的値 (前処理の定数項を足した値) で測る
                     let (z0, z1) = (cut_lp0 + p.offset, obj_hist[k - 1] + p.offset);
                     let gain = z1 - z0;
@@ -377,7 +379,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         && obj_hist[k - 1] - obj_hist[k - 6] >= tunable!("ENOMOTO_T_MIP_CUT_STRONG_RECENT", 0.01, f64) * gain
                 };
                 if strong {
-                    if env_str!("ENOMOTO_MIP_CUT_STRONG_AUTO").is_none_or(|v| v != "cap") {
+                    if strong_env.is_none_or(|v| v != "cap") {
                         self.hcm_auto = true;
                     }
                     if self.params.verbose {
