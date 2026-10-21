@@ -128,6 +128,8 @@ def run_worker(kind: str, mps: Path, time_limit: float, threads: int) -> dict:
             r = json.loads(line)
             if n_warn:
                 r["mip_warnings"] = n_warn
+                # 警告の本文も残す (件数だけでは、どの警告かを再現で確かめることになる。analysis/h80x6320d_warning_20261021.md)
+                r["mip_warning_lines"] = [l[:300] for l in p.stderr.splitlines() if "MIP: WARNING" in l][:20]
             return r
     return {"status": f"crash rc={p.returncode}", "objective": None, "bound": None, "nodes": None, "time": None,
             "stderr": p.stderr[-2000:]}
