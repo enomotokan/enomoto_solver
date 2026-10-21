@@ -9523,6 +9523,15 @@ neos-950242 の 2 回目の調査 (`analysis/neos950242_r2_20261020.md`)。
   - 不一致 0。
 - 結果: benchmarks/*_48ea5b8_{newdef,fcs}_rFS{a,b}.json。全問に広げた形 (SUBMIP_CUTS・サブ MIP のラウンド) は 6ffe911 で別に計測中。
 
+## 2026-10-21: Feasibility Jump にだけ p5s の前処理をかけ直した問題を渡す (FJ_P3) を既定に
+
+- physiciansched6-2 の 3 回目の調査の試作。p5s (INEQ_SINGLETON・DUAL_UB・CS_OBJ_PIVOT・FJ_LP_REPAIR・INC_LP_CAP) を本体の前処理に入れると beasleyC3・uccase12 で証明が遅れて不採用だったので、本体の前処理・根・木は既定のまま、FJ のスレッドの中だけで本体の前処理後の問題に INEQ_SINGLETON・CS_OBJ_PIVOT の前処理と DUAL_UB の締め付けをかけ直し、FJ (LP 修復つき) の解を後処理で本体の空間に戻す。FJ の解を受け取ったときの連続列の解き直しの LP には INC_LP_CAP と同じ時間上限を付ける。`ENOMOTO_MIP_NO_FJ_P3` で止める (`ENOMOTO_MIP_FJ_P3=submip` はサブ MIP の前処理でも使う試作のまま、既定では使わない)。
+- 5a68a23 で対の計測 (rFPa/rFPb、4 スレッド・60 秒):
+  - 40 問: 25→26 / 26→26、SGM 20.43→19.80 / 20.45→20.15。
+  - 16 問: 10→10 / 9→9、SGM 37.74→35.98 / 38.60→36.63。physiciansched6-2 は解なし → 50826 / 51029 (最適 49324)。drayage-25-23・beasleyC3・neos-911970 を得て、uccase12 (2 組とも、HiGHS も 60 秒で解けない問題)・neos-2978193-inde を落とす。
+  - 不一致 0、解けた数は減らず、SGM は 4 つとも良くなる。
+- 結果: benchmarks/*_5a68a23_{newdef,fjp3}_rFP{a,b}.json
+
 ## 改名一覧 (整理時)
 
 本メモ中は旧名で書かれている。

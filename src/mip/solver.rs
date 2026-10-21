@@ -2172,7 +2172,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // (0.02、最低 1 秒) にする。uccase12 で DUAL_UB + CS_OBJ_PIVOT のとき、根の LP の直後に FJ の解 (865106) を受け取り、
         // この LP が 8.4 秒から 56 秒まで止まらず、根のカット・ヒューリスティクスが 1 つも回らなかった
         // `ENOMOTO_MIP_FJ_P3` のときも使う (FJ の解は境界を締めた問題のもので、uccase12 では同じくこの LP が長引く)
-        let deadline = if (env_str!("ENOMOTO_MIP_INC_LP_CAP").is_some() || env_str!("ENOMOTO_MIP_FJ_P3").is_some()) && self.params.time_limit.is_finite() {
+        let deadline = if (env_str!("ENOMOTO_MIP_INC_LP_CAP").is_some() || super::fj_p3_on()) && self.params.time_limit.is_finite() {
             let cap = (tunable!("ENOMOTO_T_MIP_INC_LP_TIME_FRAC", 0.02, f64) * self.params.time_limit).max(1.0);
             let d = std::time::Instant::now() + std::time::Duration::from_secs_f64(cap);
             Some(self.deadline.map_or(d, |g| g.min(d)))
@@ -2491,8 +2491,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let seed = (self.rng ^ 0x9E37_79B9_7F4A_7C15).wrapping_add(tunable!("ENOMOTO_T_MIP_FJ_SEED", 0u64, u64).wrapping_mul(0xD1B5_4A32_D192_ED03));
                 // 実行可能性問題では FJ を根のカットのループの終わりまで (時間上限の半分まで) 回し続ける
                 let cap = if super::heuristics::fj_feas_extend(&pc) && self.params.time_limit.is_finite() { tunable!("ENOMOTO_T_MIP_FJ_FEAS_FRAC", 0.5, f64) * self.params.time_limit } else { cap };
-                // `ENOMOTO_MIP_FJ_P3` (試作): FJ だけ、p5s の前処理の変更をかけ直した問題で探す ([`super::fj_p3_problem`])
-                let fj_p3 = env_str!("ENOMOTO_MIP_FJ_P3").is_some();
+                // `ENOMOTO_MIP_FJ_P3` (既定、`ENOMOTO_MIP_NO_FJ_P3` で止める): FJ だけ、p5s の前処理の変更をかけ直した問題で探す ([`super::fj_p3_problem`])
+                let fj_p3 = super::fj_p3_on();
                 let h = std::thread::spawn(move || {
                     if fj_p3 {
                         if let Some((q, post, sc)) = super::fj_p3_problem(&pc) {
