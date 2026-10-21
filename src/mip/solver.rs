@@ -4573,6 +4573,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// 根の LP の被約費用を保存する。
     fn store_root_redcost(&mut self, root_obj: f64) {
+        // 診断用: 根の被約費用を取る LP の状態が `root_obj` の LP と同じか (ヒューリスティクスが費用・境界を変えたまま戻していないと、
+        // 被約費用が根の LP のものでなくなり、打ち切り値による大域的な固定が誤る)
+        let lp_obj = self.lp.objective() + self.p.offset;
+        if (lp_obj - root_obj).abs() > 1e-6 * (1.0 + root_obj.abs()) {
+            eprintln!("MIP: WARNING: root reduced costs are taken from an LP whose objective {lp_obj:.10e} differs from the root objective {root_obj:.10e} (rows {}, thread {})", self.lp.num_rows(), self.pool_tid);
+        }
+        if self.dbg_on && self.dbg_contains() {
+            self.dbg_local_redcost_check(root_obj);
+        }
         let b = self.lp.basis_ref();
         let d = self.lp.reduced_costs_ref();
         let mut v = Vec::new();
@@ -4604,6 +4613,107 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         self.root_redcost = Some((z, list));
+    }
+
+    /// 診断用 (デバッグ解): 強分枝の子 (列 `j` を `v` の上/下に分けた側) が打ち切られた (`st`: 実行不能・打ち切り値以上) とき、
+    /// 今のノードがデバッグ解を含み、デバッグ解がその側にあれば、打ち切りは誤り。子の LP を打ち切り値なしで解き直して
+    /// 真の値を表示する (LP の状態は戻す)。
+    fn dbg_sb_cut_check(&mut self, j: usize, is_up: bool, v: f64, st: LpStatus, obj: f64) {
+        if !self.dbg_on || !self.dbg_contains() {
+            return;
+        }
+        let Some(x) = DEBUG_SOL.with(|d| d.borrow().clone()) else { return };
+        let p = self.p;
+        let dz = p.objective(&x);
+        if dz >= self.prune_limit() - 1e-6 {
+            return;
+        }
+        let on_side = if is_up { x[j] >= v.ceil() - 1e-6 } else { x[j] <= v.floor() + 1e-6 };
+        if !on_side {
+            return;
+        }
+        let saved = self.lp.save_state();
+        let (lo, up) = (self.dom.lo[j], self.dom.up[j]);
+        for c in 0..p.n {
+            self.lp.set_col_bounds(c, self.dom.lo[c], self.dom.up[c]);
+        }
+        if is_up {
+            self.lp.set_col_bounds(j, v.ceil(), up);
+        } else {
+            self.lp.set_col_bounds(j, lo, v.floor());
+        }
+        let st2 = self.lp.solve(&SolveLimits { iteration_limit: 1_000_000, cutoff: f64::INFINITY, deadline: self.deadline });
+        let o2 = self.lp.objective() + p.offset;
+        let act = self.lp.row_activities();
+        let mut viol = 0usize;
+        for i in 0..self.lp.num_rows() {
+            let a: f64 = self.lp.row(i).iter().map(|&(c, w)| w * x[c]).sum();
+            let (l, u) = self.lp.row_bounds(i);
+            if a < l - 1e-6 * (1.0 + l.abs()) || a > u + 1e-6 * (1.0 + u.abs()) {
+                viol += 1;
+            }
+        }
+        let _ = act;
+        eprintln!(
+            "MIP_DEBUG_SOL: node {} thread {}: strong branching cut off the child x{j} {} {} that contains the debug solution (x_dbg {}, debug obj {dz}, prune limit {:.10e}): child LP {st:?} obj {obj:.10e}; re-solved without cutoff: {st2:?} obj {o2:.10e}; LP rows {} of which the debug solution violates {viol}; node dom [{lo}, {up}]",
+            self.nodes, self.pool_tid, if is_up { ">=" } else { "<=" }, if is_up { v.ceil() } else { v.floor() }, x[j], self.prune_limit(), self.lp.num_rows()
+        );
+        self.lp.restore_state(&saved);
+    }
+
+    /// 診断用 (デバッグ解): [`Self::local_redcost_fixing`] の根拠 `c x >= z + sum_{非基底 j} d_j (x_j - 境界_j)` をデバッグ解で確かめ、
+    /// 破れていれば内訳 (z、c x、非基底の項の和、符号の合わない被約費用、寄与の大きい列) を表示する。
+    fn dbg_local_redcost_check(&self, node_obj: f64) {
+        DEBUG_SOL.with(|dd| {
+            let Some(x) = dd.borrow().clone() else { return };
+            let p = self.p;
+            let dz = p.objective(&x);
+            if dz >= self.prune_limit() - 1e-6 {
+                return;
+            }
+            let b = self.lp.basis_ref();
+            let d = self.lp.reduced_costs_ref();
+            let mut sum = 0.0f64;
+            let mut terms: Vec<(f64, usize, &'static str, f64, f64, f64)> = Vec::new();
+            let (mut wrong_sign, mut max_wrong, mut max_basic) = (0usize, 0.0f64, 0.0f64);
+            for j in 0..p.n {
+                let (lo, up) = (self.dom.lo[j], self.dom.up[j]);
+                let (st, bound) = match b.col[j] {
+                    VarStatus::Lower => ("Lower", lo),
+                    VarStatus::Upper => ("Upper", up),
+                    VarStatus::Basic => {
+                        max_basic = max_basic.max(d[j].abs());
+                        continue;
+                    }
+                    _ => ("Other", 0.0),
+                };
+                if (st == "Lower" && d[j] < -1e-7) || (st == "Upper" && d[j] > 1e-7) {
+                    wrong_sign += 1;
+                    max_wrong = max_wrong.max(d[j].abs());
+                }
+                if !bound.is_finite() {
+                    continue;
+                }
+                let t = d[j] * (x[j] - bound);
+                sum += t;
+                if t.abs() > 1e-9 {
+                    terms.push((t, j, st, d[j], x[j], bound));
+                }
+            }
+            let lhs = dz;
+            let rhs = node_obj + sum;
+            if lhs < rhs - 1e-6 * (1.0 + rhs.abs()) {
+                terms.sort_by(|a, b| b.0.total_cmp(&a.0));
+                eprintln!(
+                    "MIP_DEBUG_SOL: node {} thread {}: redcost fixing: the dual bound is violated at the debug solution: c x = {lhs:.10e} < z + sum d_j (x_j - bound_j) = {node_obj:.10e} + {sum:.10e} = {rhs:.10e} (lp obj now {:.10e}, lp rows {}, prune limit {:.10e}; nonbasic with wrong-sign d: {wrong_sign} (max {max_wrong:.3e}), max |d| on basic {max_basic:.3e})",
+                    self.nodes, self.pool_tid, self.lp.objective() + p.offset, self.lp.num_rows(), self.prune_limit()
+                );
+                for &(t, j, st, dj, xj, bound) in terms.iter().take(8) {
+                    let (ll, lu) = self.lp.col_bounds(j);
+                    eprintln!("MIP_DEBUG_SOL:   col {j} ({st}, int {}): d {dj:.6e}, x_dbg {xj}, bound {bound}, dom [{}, {}], lp [{ll}, {lu}], global [{}, {}], term {t:.6e}", p.is_int[j], self.dom.lo[j], self.dom.up[j], self.dom.global_lo[j], self.dom.global_up[j]);
+                }
+            }
+        });
     }
 
     /// 現在の LP の被約費用で、このノード以下で有効な境界を締める。締めたら真。
@@ -5079,6 +5189,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return false;
         }
         xp("r_pre");
+        // 診断用 (デバッグ解): このノードがデバッグ解を含むなら、固定の根拠の弱双対の不等式 c x >= z + sum_{非基底 j} d_j (x_j - 境界_j) を
+        // デバッグ解で確かめる (破れていれば z・d・境界のどれかが今の LP と食い違っている)
+        if self.dbg_on && self.dbg_contains() {
+            self.dbg_local_redcost_check(node_obj);
+        }
         let b = self.lp.basis_ref();
         xp("r_basis");
         let d = self.lp.reduced_costs_ref();
@@ -5390,6 +5505,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             self.pc.add_observation(j, is_up, delta, gains[side]);
                             if o >= self.prune_limit() {
                                 cut[side] = true;
+                                if self.dbg_on {
+                                    self.dbg_sb_cut_check(j, is_up, v, r.st, o);
+                                }
                                 if let Some(y) = &r.y {
                                     self.sb_child_proof_y(j, is_up, v, false, y);
                                 }
@@ -5402,6 +5520,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         LpStatus::Infeasible | LpStatus::ObjectiveBound => {
                             cut[side] = true;
                             self.pc.add_cutoff(j, is_up);
+                            if self.dbg_on {
+                                self.dbg_sb_cut_check(j, is_up, v, r.st, r.obj);
+                            }
                             if let Some(y) = &r.y {
                                 self.sb_child_proof_y(j, is_up, v, r.st == LpStatus::Infeasible, y);
                             }
@@ -5466,6 +5587,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         self.pc.add_observation(j, is_up, delta, gains[side]);
                         if o >= self.prune_limit() {
                             cut[side] = true;
+                            if self.dbg_on {
+                                self.dbg_sb_cut_check(j, is_up, v, st, o);
+                            }
                             self.sb_child_proof(j, is_up, v, false);
                         } else {
                             let x = self.lp.col_values();
@@ -5477,6 +5601,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     LpStatus::Infeasible | LpStatus::ObjectiveBound => {
                         cut[side] = true;
                         self.pc.add_cutoff(j, is_up);
+                        if self.dbg_on {
+                            let o = self.lp.objective() + self.p.offset;
+                            self.dbg_sb_cut_check(j, is_up, v, st, o);
+                        }
                         self.sb_child_proof(j, is_up, v, st == LpStatus::Infeasible);
                     }
                     _ => {
@@ -5493,15 +5621,23 @@ impl<'a, L: MipLp> Solver<'a, L> {
             match (cut[0], cut[1]) {
                 (true, true) => return BranchAction::Prune,
                 (true, false) => {
+                    let had = self.dbg_on && self.dbg_contains();
                     self.dom.set_external(true);
                     self.dom.tighten_lower(self.p, j, v.ceil());
                     self.dom.set_external(false);
+                    if had && !self.dbg_contains() {
+                        self.dbg_lost(&format!("strong branching fixing x{j} >= {}", v.ceil()), true);
+                    }
                     bound_changes += 1;
                 }
                 (false, true) => {
+                    let had = self.dbg_on && self.dbg_contains();
                     self.dom.set_external(true);
                     self.dom.tighten_upper(self.p, j, v.floor());
                     self.dom.set_external(false);
+                    if had && !self.dbg_contains() {
+                        self.dbg_lost(&format!("strong branching fixing x{j} <= {}", v.floor()), true);
+                    }
                     bound_changes += 1;
                 }
                 _ => {}
@@ -5581,6 +5717,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         self.pc.add_observation(j, is_up, delta, gains[side]);
                         if o >= self.prune_limit() {
                             cut[side] = true;
+                            if self.dbg_on {
+                                self.dbg_sb_cut_check(j, is_up, v, st, o);
+                            }
                         } else {
                             // 強分岐の LP 解が整数なら暫定解の候補
                             let x = self.lp.col_values();
@@ -5592,6 +5731,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     LpStatus::Infeasible | LpStatus::ObjectiveBound => {
                         cut[side] = true;
                         self.pc.add_cutoff(j, is_up);
+                        if self.dbg_on {
+                            let o = self.lp.objective() + self.p.offset;
+                            self.dbg_sb_cut_check(j, is_up, v, st, o);
+                        }
                     }
                     _ => {
                         // 反復上限など: 途中の目的値を目安にする
