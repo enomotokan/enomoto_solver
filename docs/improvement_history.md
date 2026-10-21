@@ -9577,6 +9577,13 @@ neos-950242 の 2 回目の調査 (`analysis/neos950242_r2_20261020.md`)。
   - 不一致 0。qf は組によって大きく違い (rQFb は 40 問で 3 減る)、基準を満たさないので既定にしない。mc11・mzzv42z には効くので、働く条件をさらに絞る (h80x6320d を外すなど) 余地がある。
 - 結果: benchmarks/*_1feb4bc_{newdef,qf,rref}_rQF{a,b}.json
 
+## 2026-10-21: 並列の木の探索で部分木を失ったまま最適と報告する不具合の修正
+
+- mc11 で 2 回 (11712: SUBMIP_CUTS + サブ MIP のカット 25 ラウンド、11728: IMPLBD_GENINT + CUT_LP_RETRY + RESTART_REF) 誤った最適値を返した件の調査 (analysis/mc11_wrongopt_20261021.md、analysis/partree_race_20261021.md)。
+- 原因: ヒューリスティクス役のスレッドが木の探索に戻った直後の pool_balance が、busy を増やさずに共有の待ち行列から下界最小のノードを取っていた。そのスレッドは部分木を持ったまま「待っている側」に数えられ、ほかのスレッドが同時に待ち状態で共有の待ち行列が空になると、busy == 0 で探索終了と判定され、残ったノードの下界を捨てて optimal を返していた。サブ MIP の設定には固有でない。
+- 修正 (src/mip/solver.rs): 待っている側のままノードを取るときは錠の中で busy に戻す。安全網として、主の終わりに止めた従や共有の待ち行列に打ち切り値未満のノードが残っていれば警告して NotSolved を返す。診断 `ENOMOTO_MIP_TREE_DIAG`、修正を外す `ENOMOTO_MIP_TREE_NO_BALANCE_BUSY_FIX`・`ENOMOTO_MIP_TREE_NO_END_CHECK`。
+- 確認: 起きやすくする仕掛けつきで markshare_4_0 が 30 回中 17 回部分木を失って optimal → 修正後 0 回。仕掛けなしの 138 回 (mc11・beasleyC3・rout・neos-911970) で値はすべて正しい。11712 の回がこの経路だったかは確かめられていない (形はよく合う)。計測では "MIP: WARNING" を見張る。
+
 ## 改名一覧 (整理時)
 
 本メモ中は旧名で書かれている。
