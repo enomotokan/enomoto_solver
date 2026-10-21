@@ -41,9 +41,11 @@ pub(crate) fn implbd_genint() -> bool {
 }
 
 /// `ENOMOTO_MIP_GR_AUTO` (試作、inv/gfrsplit-20261021): 一般整数 (0-1 でない整数) の列がある問題だけで
-/// `ENOMOTO_MIP_IMPLBD_GENINT` と `ENOMOTO_T_MIP_CUT_LP_RETRY=4` を働かせる。一般整数がなければ G は含意の相手を
-/// 増やさず、プロービングの含意の集め方 (0-1 の相手を集めない) を変えるだけで、neos-960392 (全部 0-1) では
-/// 探る列が 19200 -> 28272 列に変わって根の経路が変わっていた
+/// `ENOMOTO_MIP_IMPLBD_GENINT` と `ENOMOTO_T_MIP_CUT_LP_RETRY=4` を働かせる。一般整数がなければ G はカットを増やさない
+/// (プロービングで 0-1 の相手の含意を集めなくなるだけ) が、R はカットを入れた LP の時間の上限を延ばして根の経路を変える
+/// (neos-960392 (全部 0-1) では根の RENS が解を出すかが根のカットの経路で決まり、gfr では 4 回とも -2 だった)。
+/// `=2` なら一般整数がある問題では根の面の頂点の分離も止める (`ENOMOTO_MIP_FACE_SEP=off` と同じ。mzzv42z・roll3000 は
+/// G+R に F がないと根が崩れる)
 pub(crate) fn gr_auto() -> bool {
     env_str!("ENOMOTO_MIP_GR_AUTO").is_some()
 }

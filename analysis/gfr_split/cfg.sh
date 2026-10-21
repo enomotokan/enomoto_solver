@@ -13,6 +13,10 @@ cfg() {
     GR) echo "$G $R";;
     R) echo "$R";;
     X) echo "$X";;
+    # 試作 (inv/gfrsplit-20261021)
+    P) echo "ENOMOTO_MIP_GR_AUTO=2 ENOMOTO_MIP_FACE_SEP_BG=off $X";;
+    PnoBG) echo "ENOMOTO_MIP_GR_AUTO=2 $X";;
+    BG) echo "ENOMOTO_MIP_FACE_SEP_BG=off";;
     *) echo "${!1}";;
   esac
 }
