@@ -9654,7 +9654,7 @@ neos-950242 の 2 回目の調査 (`analysis/neos950242_r2_20261020.md`)。
 
 - 計測 LDb の cutdse で h80x6320d に "MIP: WARNING" が 1 件 (optimal、値は正しい) 出た件の調査 (analysis/h80x6320d_warning_20261021.md、Fable)。警告は「木のスレッドが主より良い解で終わった」で、答えの正しさに関わらない誤報。主は従を待つ間は受信箱 (従の解) を見ず、終わり際に従が見つけた解は join_workers の後の take_inbox で届くが、join_workers は受信箱を受け取る前に比べて警告していた。根の RINS を切った再現設定で 38 回中 2 回。
 - 修正 (src/mip/solver.rs): 従の結果を集めてから受信箱を受け取り、その後で比べる。それでも従が良ければ従の解を暫定解に試し、まだ悪ければ警告。合わせて「共有の最良値が主の暫定解より良い」(公表した解が主に届いていない) ときに警告だけで optimal と報告していたのを NotSolved にした (`ENOMOTO_MIP_TREE_NO_END_CHECK` で以前どおり)。修正版の再現設定 16 回で警告 0。cargo test 308 通過。
-- 計測 DCb の newdef で roll3000 に出た警告 (時間切れ、本文なし) が同じものかは未確認。以後の計測は本文を mip_warning_text に残す。
+- 計測 DCb の newdef の roll3000 (時間切れ) と QPa の newdef の blp-ar98 も同じ警告 #4 の誤報 (時間切れの経路も join_workers → take_inbox の順)。修正後の roll3000 60 秒 10 回で警告 0。PR の mc11・10teams の警告も同じ型とみられる (本文なし)。
 
 ## 2026-10-21: 双対証明の修正の確認と、FC_SUBMIP・SUBMIP_CUTS の再計測 (PR): 修正は既定のまま、サブ MIP の強化は不採用
 
