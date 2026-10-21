@@ -657,6 +657,20 @@ impl AggOptions {
     }
 }
 
+/// `ENOMOTO_MIP_AGG_INT` (試作、既定では使わない): 整数最適化の前処理で、整数列も implied free の代入で消す (HiGHS の
+/// aggregator の `isImpliedIntegral` と同じ条件)。ピボットの等式行 `coeff x_j + sum a_k x_k = rhs` の他の列がすべて整数列で、
+/// `a_k / coeff` と `rhs / coeff` がすべて整数なら、x_j は他の列の整数値から整数に決まるので、x_j の整数性の制約を失わない。
+/// 整数最適化の前処理は列の尺度をかけない (d = 1) ので、行の尺度は比に効かない。
+pub(crate) fn mip_agg_int() -> bool {
+    env_str!("ENOMOTO_MIP_AGG_INT").is_some()
+}
+
+/// 等式行 `row` (`row` に列 `j` の係数 `coeff`、右辺 `rhs`) で整数列 `j` を代入すると整数性が保たれるか ([`mip_agg_int`])。
+fn implied_integral(row: &[(usize, f64)], j: usize, coeff: f64, rhs: f64, is_int: &[bool]) -> bool {
+    let integral = |v: f64| (v - v.round()).abs() <= 1e-9 * v.abs().max(1.0);
+    integral(rhs / coeff) && row.iter().all(|&(k, v)| k == j || v == 0.0 || (is_int[k] && integral(v / coeff)))
+}
+
 /// [`eliminate_implied_free_columns_v2`] の前段付き版 (既定の Aggregator 入口)。
 /// まず [`v2_has_candidate`] で候補の有無だけを安価に調べ、候補が無ければ
 /// 何もコピーせず `None` (問題は不変) を返す。候補があれば v2 の結果を `Some` で返す。
@@ -682,9 +696,10 @@ pub fn v2_has_candidate(n: usize, a: &FaerCsr, b: &[f64], lb: &[f64], ub: &[f64]
     let ar = a.as_ref();
     // 等式行の本数。
     let p = ar.nrows();
-    // 自由列は freevar の担当なので候補から外す。整数最適化の前処理中は整数列も外す (消さない)。
+    // 自由列は freevar の担当なので候補から外す。整数最適化の前処理中は整数列も外す (消さない。`ENOMOTO_MIP_AGG_INT` なら候補に残す)。
     let int_mask = crate::presolve::int_mask();
-    let is_free = |j: usize| (lb[j] == f64::NEG_INFINITY && ub[j] == f64::INFINITY) || int_mask.as_ref().is_some_and(|m| m[j]);
+    let agg_int = mip_agg_int();
+    let is_free = |j: usize| (lb[j] == f64::NEG_INFINITY && ub[j] == f64::INFINITY) || (!agg_int && int_mask.as_ref().is_some_and(|m| m[j]));
     // 各列が現れる等式行 / 実不等式行の本数。
     let mut col_a_count = vec![0usize; n];
     let mut col_g_count = vec![0usize; n];
@@ -803,9 +818,11 @@ pub fn eliminate_implied_free_columns_v2_scaled(n: usize, a: &FaerCsr, b: &[f64]
     let mut c: Vec<f64> = c.to_vec();
     let mut real_rows: Vec<Vec<(usize, f64)>> = real_rows.to_vec();
     let mut real_rhs: Vec<f64> = real_rhs.to_vec();
-    // 自由列は freevar の担当なので候補から外す。整数最適化の前処理中は整数列も外す (消さない)。
+    // 自由列は freevar の担当なので候補から外す。整数最適化の前処理中は整数列も外す (消さない。`ENOMOTO_MIP_AGG_INT` なら
+    // 代入で整数性が保たれるピボット行があるときだけ消す: 下の [`implied_integral`])。
     let int_mask = crate::presolve::int_mask();
-    let is_free = |j: usize| (lb[j] == f64::NEG_INFINITY && ub[j] == f64::INFINITY) || int_mask.as_ref().is_some_and(|m| m[j]);
+    let agg_int = mip_agg_int();
+    let is_free = |j: usize| (lb[j] == f64::NEG_INFINITY && ub[j] == f64::INFINITY) || (!agg_int && int_mask.as_ref().is_some_and(|m| m[j]));
     // 係数参照を二分探索にするため、全行を列番号順にソートしておく (密な行で二乗時間になるのを防ぐ)。
     for row in a_rows.iter_mut().chain(real_rows.iter_mut()) {
         if !row.windows(2).all(|w| w[0].0 < w[1].0) {
@@ -982,7 +999,8 @@ pub fn eliminate_implied_free_columns_v2_scaled(n: usize, a: &FaerCsr, b: &[f64]
                 let un = if col_scale.is_empty() { sc } else { a_rows[i].iter().map(|&(k, v)| piv_mag(k, v)).fold(0.0f64, f64::max) };
                 (sc, un)
             });
-            coeff.abs() >= ratio * row_max || (!col_scale.is_empty() && piv_mag(j, coeff) >= ratio * row_max_u)
+            (coeff.abs() >= ratio * row_max || (!col_scale.is_empty() && piv_mag(j, coeff) >= ratio * row_max_u))
+                && (!agg_int || int_mask.as_ref().is_none_or(|m| !m[j] || implied_integral(&a_rows[i], j, coeff, b[i], m)))
         }) else {
             continue;
         };
@@ -1078,6 +1096,19 @@ mod tests {
     }
 
     /// implied-free 列が無い問題では何も変えないことを確認する。
+    #[test]
+    fn implied_integral_needs_integer_partners_and_integral_ratios() {
+        let is_int = [true, true, false];
+        // 2 x0 - 2 x1 = 4: x0 = 2 + x1 は整数
+        assert!(implied_integral(&[(0, 2.0), (1, -2.0)], 0, 2.0, 4.0, &is_int));
+        // 2 x0 - x1 = 0: x0 = x1 / 2 は整数とは限らない
+        assert!(!implied_integral(&[(0, 2.0), (1, -1.0)], 0, 2.0, 0.0, &is_int));
+        // 右辺の比が整数でない
+        assert!(!implied_integral(&[(0, 2.0), (1, -2.0)], 0, 2.0, 1.0, &is_int));
+        // 相手が連続列
+        assert!(!implied_integral(&[(0, 1.0), (2, -1.0)], 0, 1.0, 0.0, &is_int));
+    }
+
     #[test]
     fn no_implied_free_columns_is_a_no_op() {
         // x0 は自由 (freevar の担当)。x1/x2 は有界だが各 1 行にしか現れない
