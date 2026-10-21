@@ -1,0 +1,358 @@
+warning: unused doc comment
+   --> src/mip/mod.rs:563:1
+    |
+563 | / /// `p` を (`use_presolve` なら MIP 前処理をかけてから) 分枝限定法で解き、解を `p` の空間に戻す。
+564 | | /// 戻した解が `p` で実行可能でなければ (前処理の誤りの安全網)、前処理なしで解き直す。
+565 | | /// サブ MIP (RENS/RINS) もこれで解く。
+    | |_--------------------------------------^
+    |   |
+    |   rustdoc does not generate documentation for macro invocations
+    |
+    = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+    = note: `#[warn(unused_doc_comments)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused doc comment
+  --> src/presolve.rs:54:1
+   |
+54 | / /// 前処理の実行不能判定に使う許容誤差: `base * (1 + |scale|)` (相対形、既定) または `base` (従来の絶対形)。
+55 | | ///
+56 | | /// `scale` は判定に関わる量の大きさ (固定値、行の活動度の項の絶対値の和、境界の絶対値など)。
+57 | | /// 丸め誤差はその大きさに比例するため (`params::presolve::PRESOLVE_REL_TOL` 参照)。
+58 | | /// `ENOMOTO_T_PRESOLVE_REL_TOL=0` で従来の絶対判定に戻る。`scale` が有限でなければ `base`。
+   | |_-------------------------------------------------------------------------------------------^
+   |   |
+   |   rustdoc does not generate documentation for macro invocations
+   |
+   = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: `#[inline]` attribute cannot be used on macro calls
+  --> src/presolve.rs:59:1
+   |
+59 | #[inline]
+   | ^^^^^^^^^
+   |
+   = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+   = help: `#[inline]` can only be applied to functions
+   = note: `#[warn(unused_attributes)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused doc comment
+  --> src/presolve.rs:54:1
+   |
+54 | / /// 前処理の実行不能判定に使う許容誤差: `base * (1 + |scale|)` (相対形、既定) または `base` (従来の絶対形)。
+55 | | ///
+56 | | /// `scale` は判定に関わる量の大きさ (固定値、行の活動度の項の絶対値の和、境界の絶対値など)。
+57 | | /// 丸め誤差はその大きさに比例するため (`params::presolve::PRESOLVE_REL_TOL` 参照)。
+...  |
+60 | | /// 整数最適化の前処理で、整数列を示す印 (スレッドローカル)。設定中は、列を代入で消す縮約が整数列を
+61 | | /// 消さず、境界の伝播で得た整数列の境界を丸める (計画書 §7)。
+   | |_-------------------------------------------------------------^
+   |   |
+   |   rustdoc does not generate documentation for macro invocations
+   |
+   = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> src/simplex/lu.rs:2375:1
+     |
+2375 | / /// `m x m` の疎行列 (疎行 `(列, 値)` の並び) を LU 分解する。数値的に特異
+2376 | | /// (あるステップで許容できるピボットが残っていない) なら `None`。
+2377 | | /// 境界列が適量あれば [`factorize_bordered`]、稠密なら [`factorize_dense_faer`]、
+2378 | | /// それ以外は Markowitz 消去に振り分ける。
+     | |_------------------------------------------^
+     |   |
+     |   rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused variable: `p`
+    --> src/mip/heuristics.rs:1558:13
+     |
+1558 |         let p = self.p;
+     |             ^ help: if this is intentional, prefix it with an underscore: `_p`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `fr` is never read
+    --> src/mip/heuristics.rs:1931:22
+     |
+1931 |         let mut fr = 0.0;
+     |                      ^^^ this value is reassigned later and never used
+...
+1937 |                 fr = rate(self);
+     |                 --------------- `fr` is overwritten here before the previous value is read
+     |
+     = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src/mip/separation.rs:369:13
+    |
+369 |         let mut obj_hist: Vec<f64> = vec![prev_obj];
+    |             ----^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `obj_hist`
+   --> src/mip/separation.rs:369:13
+    |
+369 |         let mut obj_hist: Vec<f64> = vec![prev_obj];
+    |             ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_obj_hist`
+
+warning: variable does not need to be mutable
+    --> src/mip/separation.rs:1633:25
+     |
+1633 | ...   let mut skip_col = |j: usize, arcs: &Vec<Vec<(usize, f64)>>, other: &Vec<Vec<(usize, f64)>>, try_neg: &mut bool, path: &Vec<...
+     |           ----^^^^^^^^
+     |           |
+     |           help: remove this `mut`
+
+warning: unused variable: `j`
+   --> src/mip/zerohalf.rs:244:46
+    |
+244 |         let act: f64 = c.coefs.iter().map(|&(j, a)| a * 0.5).sum();
+    |                                              ^ help: if this is intentional, prefix it with an underscore: `_j`
+
+warning: variable does not need to be mutable
+    --> src/mip/mod.rs:1623:9
+     |
+1623 |     let mut add_implied = |j: usize, v: bool, ch: &[(usize, bool, f64)], dom: &Domain, implied: &mut Vec<(u32, bool, u32, bool, f6...
+     |         ----^^^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/mip/mod.rs:1646:9
+     |
+1646 |     let mut add_edges = |j: usize, v: u32, ch: &[(usize, bool, f64)], edges: &mut Vec<(u32, u32)>| {
+     |         ----^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: unused variable: `variables`
+    --> src/mip/mod.rs:3016:13
+     |
+3016 |         let variables = vec![
+     |             ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_variables`
+
+warning: variable does not need to be mutable
+   --> src/presolve/doubleton.rs:349:17
+    |
+349 |             let mut rand_row = |len: usize, rnd: &mut dyn FnMut() -> u64| -> Vec<(usize, f64)> {
+    |                 ----^^^^^^^^
+    |                 |
+    |                 help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/presolve/scaling.rs:345:17
+    |
+345 |             let mut rows_of = |count: usize, rnd: &mut dyn FnMut() -> u64| -> Vec<Vec<(usize, f64)>> {
+    |                 ----^^^^^^^
+    |                 |
+    |                 help: remove this `mut`
+
+warning: value assigned to `alpha_nnz` is never read
+    --> src/simplex/slope_intercept_dual.rs:5658:29
+     |
+5658 |         let mut alpha_nnz = m;
+     |                             ^ this value is reassigned later and never used
+...
+5694 |             alpha_nnz = a_nnz;
+     |             ----------------- `alpha_nnz` is overwritten here before the previous value is read
+
+warning: variable does not need to be mutable
+    --> src/simplex.rs:2339:9
+     |
+2339 |     let mut apply = |rows: &mut Vec<Vec<(usize, f64)>>, rs: &[f64], cs: &[f64], dr: &mut [f64], dc: &mut [f64]| {
+     |         ----^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: type `simplex::StdForm` is more private than the item `solve_simplex_block`
+    --> src/simplex.rs:2424:1
+     |
+2424 | pub(super) fn solve_simplex_block(std: &StdForm, opts: &crate::types::LpOptions) -> SimplexResult {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ function `solve_simplex_block` is reachable at visibility `pub(crate)`
+     |
+note: but type `simplex::StdForm` is only usable at visibility `pub(self)`
+    --> src/simplex.rs:244:1
+     |
+ 244 | struct StdForm {
+     | ^^^^^^^^^^^^^^
+     = note: `#[warn(private_interfaces)]` on by default
+
+warning: type `simplex::StdForm` is more private than the item `simplex::slope_intercept_dual::solve_slope_intercept_dual`
+    --> src/simplex/slope_intercept_dual.rs:3299:1
+     |
+3299 | pub fn solve_slope_intercept_dual(std: &StdForm, opts: &crate::types::LpOptions) -> Option<SimplexResult> {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ function `simplex::slope_intercept_dual::solve_slope_intercept_dual` is reachable at visibility `pub(crate)`
+     |
+note: but type `simplex::StdForm` is only usable at visibility `pub(self)`
+    --> src/simplex.rs:244:1
+     |
+ 244 | struct StdForm {
+     | ^^^^^^^^^^^^^^
+
+warning: methods `matvec` and `solve_refined` are never used
+   --> src/interior_point/kkt.rs:673:12
+    |
+514 | impl AugKkt {
+    | ----------- methods in this implementation
+...
+673 |     pub fn matvec(&self, a: &FaerCsr, v: &[f64], out: &mut [f64]) {
+    |            ^^^^^^
+...
+688 |     pub fn solve_refined(&mut self, a: &FaerCsr, rhs: &mut [f64], refine: usize, work: &mut Vec<f64>) {
+    |            ^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `available` is never used
+  --> src/interior_point/pardiso.rs:70:8
+   |
+70 | pub fn available() -> bool {
+   |        ^^^^^^^^^
+
+warning: method `factor_nnz` is never used
+   --> src/interior_point/pardiso.rs:205:12
+    |
+ 93 | impl Pardiso {
+    | ------------ method in this implementation
+...
+205 |     pub fn factor_nnz(&self) -> usize {
+    |            ^^^^^^^^^^
+
+warning: field `w` is never read
+    --> src/mip/solver.rs:1073:5
+     |
+1064 | struct TriggerEval {
+     |        ----------- field in this struct
+...
+1073 |     w: f64,
+     |     ^
+
+warning: method `generation` is never used
+    --> src/mip/solver.rs:1180:19
+     |
+1152 | impl Portfolio {
+     | -------------- method in this implementation
+...
+1180 |     pub(crate) fn generation(&self) -> u64 {
+     |                   ^^^^^^^^^^
+
+warning: method `crossover` is never used
+  --> src/mip/heur_scip.rs:47:19
+   |
+11 | impl<'a, L: MipLp> Solver<'a, L> {
+   | -------------------------------- method in this implementation
+...
+47 |     pub(super) fn crossover(&mut self) -> bool {
+   |                   ^^^^^^^^^
+
+warning: constant `INT_TOL` is never used
+    --> src/params.rs:1233:22
+     |
+1233 |     pub(crate) const INT_TOL: f64 = 1e-6;
+     |                      ^^^^^^^
+
+warning: constant `OBJ_EPS` is never used
+    --> src/params.rs:1237:22
+     |
+1237 |     pub(crate) const OBJ_EPS: f64 = 1e-7;
+     |                      ^^^^^^^
+
+warning: constant `MAX_NODES` is never used
+    --> src/params.rs:1240:22
+     |
+1240 |     pub(crate) const MAX_NODES: usize = 20_000;
+     |                      ^^^^^^^^^
+
+warning: constant `BOUND_INFEAS_TOL` is never used
+    --> src/params.rs:1243:22
+     |
+1243 |     pub(crate) const BOUND_INFEAS_TOL: f64 = 1e-9;
+     |                      ^^^^^^^^^^^^^^^^
+
+warning: field `h` is never read
+  --> src/presolve/parallelrows.rs:32:9
+   |
+24 | pub struct ParallelRowsResult {
+   |            ------------------ field in this struct
+...
+32 |     pub h: Vec<f64>,
+   |         ^
+
+warning: method `paths` is never used
+   --> src/simplex/basis_kernel.rs:212:19
+    |
+174 | impl BasisKernel {
+    | ---------------- method in this implementation
+...
+212 |     pub(super) fn paths(&self) -> SparsePaths {
+    |                   ^^^^^
+
+warning: method `gt_zero` is never used
+   --> src/simplex/slope_intercept_dual.rs:521:8
+    |
+484 | impl Affine1 {
+    | ------------ method in this implementation
+...
+521 |     fn gt_zero(&self) -> bool {
+    |        ^^^^^^^
+
+warning: field `x1` is never read
+    --> src/simplex/slope_intercept_dual.rs:1456:23
+     |
+1456 |     NoFiniteOptimum { x1: Vec<f64> },
+     |     ---------------   ^^
+     |     |
+     |     field in this variant
+
+warning: methods `num_cols`, `set_row_bounds`, and `last_status` are never used
+   --> src/simplex/mip_lp.rs:260:12
+    |
+138 | impl TwoStageLp {
+    | --------------- methods in this implementation
+...
+260 |     pub fn num_cols(&self) -> usize {
+    |            ^^^^^^^^
+...
+312 |     pub fn set_row_bounds(&mut self, i: usize, lo: f64, up: f64) {
+    |            ^^^^^^^^^^^^^^
+...
+663 |     pub fn last_status(&self) -> Option<LpStatus> {
+    |            ^^^^^^^^^^^
+
+warning: method `flip` is never used
+  --> src/types.rs:81:12
+   |
+66 | impl RowSense {
+   | ------------- method in this implementation
+...
+81 |     pub fn flip(self) -> Self {
+   |            ^^^^
+
+warning: the `col_entry_start:` in this pattern is redundant
+    --> src/simplex/slope_intercept_dual.rs:3784:17
+     |
+3784 |                 col_entry_start: ref col_entry_start,
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: use shorthand field pattern: `ref col_entry_start`
+     |
+     = note: `#[warn(non_shorthand_field_patterns)]` on by default
+
+warning: `enomoto_core` (lib test) generated 37 warnings (run `cargo fix --lib -p enomoto_core --tests` to apply 13 suggestions)
+    Finished `release` profile [optimized] target(s) in 0.11s
+     Running unittests src/lib.rs (target/release/deps/_core-3c4d803deacd8501)
+
+running 1 test
+CUTLP: /home/user/enomoto_solver/analysis/lp_hang_20261021/dumps/run8/cutlp_r8_TimeLimit: n=111827 m=9185 nnz=42092 basis=9185 x=111827 dse=9185
+CUTLP: inherited/exact weight ratio over 9138 rows: min 8.796e-16 p1 5.038e-11 median 1.000e0 p99 2.813e3 max 5.119e7; <0.01: 381 <0.1: 851 [0.1,10): 6561 >=10: 1726 >=100: 847 >=1e4: 38; exact max 5.144e8 p99 1.386e7 median 7.514e0
+CUTLP: largest ratios: pos 393 var 112233 w 5.119e7 exact 1.000e0 ratio 5.119e7 | pos 308 var 112144 w 2.444e7 exact 1.000e0 ratio 2.444e7 | pos 4331 var 112175 w 1.891e7 exact 1.000e0 ratio 1.891e7 | pos 628 var 120818 w 3.110e7 exact 2.160e0 ratio 1.440e7 | pos 351 var 112190 w 1.416e7 exact 1.000e0 ratio 1.416e7
+DEBUG_EXT: warm start from a given basis (cost shifts 0, hint agree 111695 differ 132 unknown 0, primal infeasible basics 47)
+DEBUG_EXT: stage A skipped (S empty)
+DEBUG_EXT: DSE weights: unit (warm_started=true, passed=none, warm_dse_on=false, once=false)
+CUTLP: rep=0 status=IterationLimit iters=2 time=0.036s (18162.2 us/iter) obj=4.9156983333e4
+test simplex::cut_lp_debug::cut_lp_debug ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 325 filtered out; finished in 0.69s
+

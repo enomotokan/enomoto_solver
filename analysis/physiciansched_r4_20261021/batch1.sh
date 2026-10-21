@@ -1,0 +1,7 @@
+#!/bin/bash
+cd "$(dirname "$0")"
+P=physiciansched6-2
+./run_cfg.sh $P 60 def ENOMOTO_MIP_LOG=1
+./run_cfg.sh $P 60 efc ENOMOTO_MIP_LOG=1 ENOMOTO_MIP_PROBE_EQUIV_FIX=1 ENOMOTO_MIP_PROBE_CLIQUE=equiv
+./run_cfg.sh $P 60 ef ENOMOTO_MIP_LOG=1 ENOMOTO_MIP_PROBE_EQUIV_FIX=1
+./run_cfg.sh $P 60 pcr ENOMOTO_MIP_LOG=1 ENOMOTO_MIP_PROBE_CLIQUE=1 ENOMOTO_MIP_PROBE_REPRESOLVE=1

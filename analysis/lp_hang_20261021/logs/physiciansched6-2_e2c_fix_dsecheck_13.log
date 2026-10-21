@@ -1,0 +1,195 @@
+MIP: presolve: tightened 4407 coefficients, normalized 0 integer rows
+MIP: presolve: merged 3588 parallel rows (3528 new equations)
+MIP: presolve: rows 168336 -> 15892, free columns 110454 -> 9758, nonzeros 480259 -> 52849, postsolve steps 10427
+MIP: presolve: tightened 12 coefficients, normalized 0 integer rows
+MIP: presolve: merged 60 parallel rows (0 new equations)
+MIP: presolve: rows 15892 -> 12119, free columns 9758 -> 6183, nonzeros 52849 -> 45274, postsolve steps 3529
+TSLP solve st=TimeLimit iters=5921 polish=0 us=2993540 warm=false dse_cache=false lu_cache=false
+Root LP: the two-phase method finished first (3.00s)
+MIP: probing: equivalence pass with implications: 2168 pairs found (0.11s), used
+MIP: probing: 5444 of 5623 binaries probed (1 passes), 1 fixed, 180 bounds tightened, 77450 implications (0.22s)
+MIP: probing: 1084 equivalent binary pairs
+MIP: presolve: tightened 4 coefficients, normalized 0 integer rows
+MIP: presolve: merged 60 parallel rows (0 new equations)
+MIP: presolve: rows 13203 -> 9872, free columns 6003 -> 4981, nonzeros 47442 -> 36318, postsolve steps 1022
+MIP: probing: equivalence pass with implications: 0 pairs found (0.04s), not used
+MIP: probing: 4421 of 4421 binaries probed (1 passes), 0 fixed, 0 bounds tightened, 56700 implications (0.07s)
+MIP: probing: 0 equivalent binary pairs
+Presolve: 168336 rows, 110454 columns -> 9872 rows, 4981 columns (4.26s)
+MIP: clique extension: 3644 rows extended, 10857 nonzeros added, 0 columns fixed, 0 duplicate and 1451 dominated rows removed (30379 edges, 0.02s)
+MIP: symmetry: 15 generators, 1 orbits on 16 columns, 15 lex-leader rows (0.33s)
+MIP: fixed-charge check: vb rows 4 of 8436, continuous with vb 4 of 560
+MIP: FJ problem (FJ_P3): rows 8421 -> 8357, free columns 4981 -> 4980, 3 continuous bounds tightened
+DSE_CHECK after solve (6530 iters, polish 1): rows 8436 (nan 0), ratio >=10: 0, <=0.1: 0, max 1.0e0, min 9.8e-1 | pos 327 var 112154 w 1.00e0 exact 1.00e0 ratio 1.0e0; pos 178 var 112218 w 1.00e0 exact 1.00e0 ratio 1.0e0; pos 307 var 112134 w 1.00e0 exact 1.00e0 ratio 1.0e0 | pos 298 var 112125 w 9.76e-1 exact 1.00e0 ratio 9.8e-1; pos 305 var 112132 w 9.91e-1 exact 1.00e0 ratio 9.9e-1
+TSLP solve st=Optimal iters=6530 polish=1 us=4020185 warm=true dse_cache=true lu_cache=true
+Root LP: the two-phase method finished first (4.02s)
+Root LP: objective 4.8583100000e4 (4.04s)
+MIP: root LP 4.8583100000e4 (6530 iters, 4.04s)
+MIP: fixed-charge check: vb rows 4 of 8436, continuous with vb 4 of 560
+DSE_CHECK round 0 before add_rows: rows 8436 (nan 0), ratio >=10: 0, <=0.1: 0, max 1.0e0, min 9.8e-1 | pos 327 var 112154 w 1.00e0 exact 1.00e0 ratio 1.0e0; pos 178 var 112218 w 1.00e0 exact 1.00e0 ratio 1.0e0; pos 307 var 112134 w 1.00e0 exact 1.00e0 ratio 1.0e0 | pos 298 var 112125 w 9.76e-1 exact 1.00e0 ratio 9.8e-1; pos 305 var 112132 w 9.91e-1 exact 1.00e0 ratio 9.9e-1
+DSE_CHECK round 0 after add_rows (50 rows): rows 8486 (nan 0), ratio >=10: 0, <=0.1: 12, max 1.0e0, min 6.7e-4 | pos 327 var 112154 w 1.00e0 exact 1.00e0 ratio 1.0e0; pos 178 var 112218 w 1.00e0 exact 1.00e0 ratio 1.0e0; pos 307 var 112134 w 1.00e0 exact 1.00e0 ratio 1.0e0 | pos 8482 var 120309 w 1.00e0 exact 1.49e3 ratio 6.7e-4; pos 8484 var 120311 w 1.00e0 exact 1.00e3 ratio 1.0e-3
+DSE_CHECK after solve (799 iters, polish 1): rows 8486 (nan 0), ratio >=10: 0, <=0.1: 1, max 1.0e0, min 6.2e-3 | pos 6489 var 50521 w 1.00e-4 exact 1.00e-4 ratio 1.0e0; pos 178 var 112218 w 1.00e0 exact 1.00e0 ratio 1.0e0; pos 166 var 112240 w 1.00e0 exact 1.00e0 ratio 1.0e0 | pos 8444 var 120271 w 4.00e-2 exact 6.41e0 ratio 6.2e-3; pos 8480 var 120307 w 1.00e0 exact 1.12e0 ratio 8.9e-1
+TSLP solve st=Optimal iters=799 polish=1 us=842731 warm=true dse_cache=true lu_cache=true
+MIP: cut round 0: 50 cuts did not move the objective; up to 1000 cuts per round from now
+MIP: cut round 0: 50 cuts (of 3180, sep 0.52s, LP 799 iters), LP rows 8486 (cut rows mean nnz 2), obj 4.8587391667e4 (6.24s)
+DSE_CHECK delete_rows: removing 3 rows, 0 of them with a nonbasic slack
+DSE_CHECK round 1 before add_rows: rows 8483 (nan 0), ratio >=10: 0, <=0.1: 0, max 1.0e0, min 8.9e-1 | pos 6488 var 50521 w 1.00e-4 exact 1.00e-4 ratio 1.0e0; pos 178 var 112218 w 1.00e0 exact 1.00e0 ratio 1.0e0; pos 166 var 112240 w 1.00e0 exact 1.00e0 ratio 1.0e0 | pos 8477 var 120304 w 1.00e0 exact 1.12e0 ratio 8.9e-1; pos 298 var 112125 w 9.76e-1 exact 1.00e0 ratio 9.8e-1
+DSE_CHECK round 1 after add_rows (338 rows): rows 8821 (nan 0), ratio >=10: 0, <=0.1: 122, max 1.0e0, min 8.8e-5 | pos 6488 var 50521 w 1.00e-4 exact 1.00e-4 ratio 1.0e0; pos 178 var 112218 w 1.00e0 exact 1.00e0 ratio 1.0e0; pos 166 var 112240 w 1.00e0 exact 1.00e0 ratio 1.0e0 | pos 8535 var 120362 w 1.00e0 exact 1.14e4 ratio 8.8e-5; pos 8768 var 120595 w 1.00e0 exact 6.33e3 ratio 1.6e-4
+DSE_CHECK after solve (1878 iters, polish 2): rows 8821 (nan 0), ratio >=10: 0, <=0.1: 10, max 1.0e0, min 3.4e-11 | pos 332 var 112159 w 1.00e0 exact 1.00e0 ratio 1.0e0; pos 7759 var 50209 w 1.00e-4 exact 1.00e-4 ratio 1.0e0; pos 4290 var 116113 w 2.00e0 exact 2.00e0 ratio 1.0e0 | pos 8735 var 120562 w 1.49e-10 exact 4.31e0 ratio 3.4e-11; pos 8792 var 120619 w 1.00e-10 exact 2.03e0 ratio 4.9e-11
+TSLP solve st=Optimal iters=1878 polish=1 us=1481544 warm=true dse_cache=true lu_cache=true
+MIP: cut round 1: 338 cuts (of 3577, sep 0.45s, LP 1878 iters), LP rows 8821 (cut rows mean nnz 2), obj 4.8683625000e4 (9.11s)
+DSE_CHECK delete_rows: removing 74 rows, 0 of them with a nonbasic slack
+DSE_CHECK round 2 before add_rows: rows 8747 (nan 0), ratio >=10: 0, <=0.1: 7, max 1.0e0, min 4.9e-11 | pos 330 var 112159 w 1.00e0 exact 1.00e0 ratio 1.0e0; pos 7730 var 50209 w 1.00e-4 exact 1.00e-4 ratio 1.0e0; pos 4282 var 116113 w 2.00e0 exact 2.00e0 ratio 1.0e0 | pos 8722 var 120552 w 1.00e-10 exact 2.03e0 ratio 4.9e-11; pos 8721 var 120551 w 1.00e-10 exact 2.03e0 ratio 4.9e-11
+DSE_CHECK round 2 after add_rows (267 rows): rows 9014 (nan 0), ratio >=10: 0, <=0.1: 95, max 1.0e0, min 4.9e-11 | pos 330 var 112159 w 1.00e0 exact 1.00e0 ratio 1.0e0; pos 7730 var 50209 w 1.00e-4 exact 1.00e-4 ratio 1.0e0; pos 4282 var 116113 w 2.00e0 exact 2.00e0 ratio 1.0e0 | pos 8722 var 120552 w 1.00e-10 exact 2.03e0 ratio 4.9e-11; pos 8721 var 120551 w 1.00e-10 exact 2.03e0 ratio 4.9e-11
+DSE_CHECK after solve (1725 iters, polish 4): rows 9014 (nan 9014), ratio >=10: 0, <=0.1: 0, max 0.0e0, min 0.0e0 |  | 
+TSLP solve st=Optimal iters=1725 polish=2 us=1687846 warm=true dse_cache=true lu_cache=true
+MIP: cut round 2: 267 cuts (of 3226, sep 0.46s, LP 1725 iters), LP rows 9014 (cut rows mean nnz 3), obj 4.8773327381e4 (12.16s)
+DSE_CHECK delete_rows: removing 68 rows, 0 of them with a nonbasic slack
+DSE_CHECK round 3 before add_rows: rows 8946 (nan 8946), ratio >=10: 0, <=0.1: 0, max 0.0e0, min 0.0e0 |  | 
+DSE_CHECK round 3 after add_rows (146 rows): rows 9092 (nan 8946), ratio >=10: 0, <=0.1: 52, max 9.6e-1, min 1.6e-3 | pos 8954 var 120781 w 1.00e0 exact 1.04e0 ratio 9.6e-1; pos 8947 var 120774 w 1.00e0 exact 1.12e0 ratio 8.9e-1; pos 8959 var 120786 w 1.00e0 exact 1.13e0 ratio 8.8e-1 | pos 9085 var 120912 w 1.00e0 exact 6.19e2 ratio 1.6e-3; pos 8966 var 120793 w 1.00e0 exact 6.12e2 ratio 1.6e-3
+DSE_CHECK after solve (1532 iters, polish 6): rows 9092 (nan 9092), ratio >=10: 0, <=0.1: 0, max 0.0e0, min 0.0e0 |  | 
+TSLP solve st=Optimal iters=1532 polish=2 us=2021329 warm=true dse_cache=true lu_cache=true
+MIP: cut round 3: 146 cuts (of 2962, sep 0.56s, LP 1532 iters), LP rows 9092 (cut rows mean nnz 3), obj 4.8873625000e4 (15.71s)
+DSE_CHECK delete_rows: removing 70 rows, 0 of them with a nonbasic slack
+DSE_CHECK round 4 before add_rows: rows 9022 (nan 9022), ratio >=10: 0, <=0.1: 0, max 0.0e0, min 0.0e0 |  | 
+DSE_CHECK round 4 after add_rows (85 rows): rows 9107 (nan 9022), ratio >=10: 0, <=0.1: 40, max 8.8e-1, min 2.9e-4 | pos 9025 var 120852 w 1.00e0 exact 1.13e0 ratio 8.8e-1; pos 9098 var 120925 w 1.00e0 exact 1.23e0 ratio 8.2e-1; pos 9097 var 120924 w 1.00e0 exact 1.23e0 ratio 8.2e-1 | pos 9071 var 120898 w 1.00e0 exact 3.49e3 ratio 2.9e-4; pos 9103 var 120930 w 1.00e0 exact 2.22e3 ratio 4.5e-4
+DSE_CHECK after solve (858 iters, polish 7): rows 9107 (nan 0), ratio >=10: 0, <=0.1: 1, max 1.0e0, min 1.9e-2 | pos 330 var 112166 w 1.00e0 exact 1.00e0 ratio 1.0e0; pos 6285 var 115723 w 2.00e0 exact 2.00e0 ratio 1.0e0; pos 378 var 112214 w 1.00e0 exact 1.00e0 ratio 1.0e0 | pos 9099 var 120926 w 3.13e-2 exact 1.66e0 ratio 1.9e-2; pos 9044 var 120871 w 1.25e0 exact 2.00e0 ratio 6.3e-1
+TSLP solve st=Optimal iters=858 polish=1 us=1511613 warm=true dse_cache=true lu_cache=true
+MIP: cut round 4: 85 cuts (of 1976, sep 0.53s, LP 858 iters), LP rows 9107 (cut rows mean nnz 3), obj 4.8873625000e4 (18.78s)
+DSE_CHECK delete_rows: removing 48 rows, 0 of them with a nonbasic slack
+DSE_CHECK round 5 before add_rows: rows 9059 (nan 0), ratio >=10: 0, <=0.1: 1, max 1.0e0, min 1.9e-2 | pos 327 var 112166 w 1.00e0 exact 1.00e0 ratio 1.0e0; pos 6270 var 115723 w 2.00e0 exact 2.00e0 ratio 1.0e0; pos 375 var 112214 w 1.00e0 exact 1.00e0 ratio 1.0e0 | pos 9052 var 120879 w 3.13e-2 exact 1.66e0 ratio 1.9e-2; pos 9005 var 120828 w 1.25e0 exact 2.00e0 ratio 6.3e-1
+DSE_CHECK round 5 after add_rows (87 rows): rows 9146 (nan 0), ratio >=10: 0, <=0.1: 44, max 1.0e0, min 4.9e-4 | pos 327 var 112166 w 1.00e0 exact 1.00e0 ratio 1.0e0; pos 6270 var 115723 w 2.00e0 exact 2.00e0 ratio 1.0e0; pos 375 var 112214 w 1.00e0 exact 1.00e0 ratio 1.0e0 | pos 9099 var 120926 w 1.00e0 exact 2.02e3 ratio 4.9e-4; pos 9127 var 120954 w 1.00e0 exact 7.91e2 ratio 1.3e-3
+TSLP solve st=TimeLimit iters=4257 polish=0 us=2775422 warm=true dse_cache=false lu_cache=false
+DSE_CHECK after solve (2660 iters, polish 9): rows 9146 (nan 9146), ratio >=10: 0, <=0.1: 0, max 0.0e0, min 0.0e0 |  | 
+TSLP solve st=Optimal iters=2660 polish=2 us=2799190 warm=true dse_cache=true lu_cache=true
+MIP: cut round 5: LP continued after the time limit: Optimal
+MIP: cut round 5: 87 cuts (of 2731, sep 0.54s, LP 6917 iters), LP rows 9146 (cut rows mean nnz 3), obj 4.8940333333e4 (25.90s)
+DSE_CHECK delete_rows: removing 66 rows, 0 of them with a nonbasic slack
+DSE_CHECK after solve (1 iters, polish 9): rows 9080 (nan 0), ratio >=10: 0, <=0.1: 0, max 1.0e0, min 1.0e0 | pos 9079 var 8540 w 1.00e0 exact 1.00e0 ratio 1.0e0; pos 9078 var 116223 w 2.00e0 exact 2.00e0 ratio 1.0e0; pos 9077 var 116307 w 2.88e2 exact 2.88e2 ratio 1.0e0 | pos 0 var 110836 w 9.00e4 exact 9.00e4 ratio 1.0e0; pos 1 var 114212 w 1.29e4 exact 1.29e4 ratio 1.0e0
+TSLP solve st=Optimal iters=1 polish=0 us=1174573 warm=true dse_cache=true lu_cache=true
+MIP: clique graph: 30379 edges (23611 from rows, probing implications 56700)
+DSE_CHECK after solve (1326 iters, polish 11): rows 9180 (nan 9180), ratio >=10: 0, <=0.1: 0, max 0.0e0, min 0.0e0 |  | 
+TSLP solve st=Optimal iters=1326 polish=2 us=1355768 warm=true dse_cache=true lu_cache=true
+DSE_CHECK delete_rows: removing 100 rows, 71 of them with a nonbasic slack
+MIP: clique fallback: 100 cuts, LP 4.8940333333e4 -> 4.8940452381e4 (g_c 2.433e-6, g_d 7.299e-3 relative), fractional 1299 -> 1181; not used (1.41s)
+Root cuts: objective 4.8583100000e4 -> 4.8940333333e4, 644 cuts in the LP (28.50s)
+MIP: cut loop done: 973 cuts added, 644 in LP, pool 1581 cuts (796640 nonzeros), obj 4.8583100000e4 -> 4.8940333333e4
+MIP: root heuristic simple rounding: none (0.00s)
+MIP: root heuristic ZI round: none (0.00s)
+MIP: root heuristic trivial: none (0.01s)
+MIP: fixed-charge check: vb rows 4 of 8436, continuous with vb 4 of 560
+MIP: root heuristic randomized rounding: none (0.04s)
+MIP:   interior rounding: 1 interior points, vertex true (2.40s)
+DSE_CHECK after solve (2714 iters, polish 1): rows 9080 (nan 0), ratio >=10: 11, <=0.1: 1163, max 9.0e4, min 9.8e-16 | pos 712 var 32555 w 1.00e0 exact 1.11e-5 ratio 9.0e4; pos 688 var 30885 w 1.00e0 exact 1.11e-5 ratio 9.0e4; pos 705 var 32057 w 1.00e0 exact 2.22e-5 ratio 4.5e4 | pos 2625 var 112351 w 1.00e-10 exact 1.02e5 ratio 9.8e-16; pos 2739 var 112478 w 1.00e-10 exact 7.67e4 ratio 1.3e-15
+TSLP solve st=Optimal iters=2714 polish=1 us=2387202 warm=true dse_cache=true lu_cache=true
+MIP: fixed-charge check: vb rows 4 of 8436, continuous with vb 4 of 560
+MIP:   interior rounding: 6 rounded points tried, found false
+MIP: root heuristic interior rounding: none (2.52s)
+MIP: root heuristic root reduced cost: none (0.00s)
+MIP:   LP face: only 129 of 4421 integer columns fixed
+MIP: root heuristic LP face: none (0.00s)
+DSE_CHECK after solve (2 iters, polish 11): rows 9080 (nan 0), ratio >=10: 0, <=0.1: 0, max 1.0e0, min 1.0e0 | pos 538 var 112381 w 2.71e8 exact 2.71e8 ratio 1.0e0; pos 93 var 113973 w 3.86e3 exact 3.86e3 ratio 1.0e0; pos 537 var 112380 w 1.69e7 exact 1.69e7 ratio 1.0e0 | pos 4234 var 112896 w 3.59e2 exact 3.59e2 ratio 1.0e0; pos 4798 var 116704 w 1.46e3 exact 1.46e3 ratio 1.0e0
+TSLP solve st=Optimal iters=2 polish=0 us=630298 warm=true dse_cache=true lu_cache=true
+DSE_CHECK after solve (1 iters, polish 11): rows 9080 (nan 0), ratio >=10: 0, <=0.1: 0, max 1.0e0, min 1.0e0 | pos 538 var 112381 w 2.71e8 exact 2.71e8 ratio 1.0e0; pos 93 var 113973 w 3.86e3 exact 3.86e3 ratio 1.0e0; pos 537 var 112380 w 1.69e7 exact 1.69e7 ratio 1.0e0 | pos 4234 var 112896 w 3.59e2 exact 3.59e2 ratio 1.0e0; pos 4798 var 116704 w 1.46e3 exact 1.46e3 ratio 1.0e0
+TSLP solve st=Optimal iters=1 polish=0 us=561207 warm=true dse_cache=true lu_cache=true
+TSLP solve st=TimeLimit iters=1473 polish=0 us=1038261 warm=true dse_cache=false lu_cache=false
+DSE_CHECK after solve (2 iters, polish 11): rows 9080 (nan 0), ratio >=10: 0, <=0.1: 0, max 1.0e0, min 1.0e0 | pos 5867 var 117797 w 5.52e2 exact 5.52e2 ratio 1.0e0; pos 1499 var 113351 w 5.52e2 exact 5.52e2 ratio 1.0e0; pos 93 var 113973 w 3.86e3 exact 3.86e3 ratio 1.0e0 | pos 4234 var 112896 w 3.59e2 exact 3.59e2 ratio 1.0e0; pos 5372 var 115466 w 5.68e3 exact 5.68e3 ratio 1.0e0
+TSLP solve st=Optimal iters=2 polish=0 us=502014 warm=true dse_cache=true lu_cache=true
+DSE_CHECK after solve (2 iters, polish 11): rows 9080 (nan 0), ratio >=10: 0, <=0.1: 0, max 1.0e0, min 1.0e0 | pos 3588 var 115465 w 1.53e3 exact 1.53e3 ratio 1.0e0; pos 374 var 112216 w 3.74e6 exact 3.74e6 ratio 1.0e0; pos 6653 var 12730 w 9.71e2 exact 9.71e2 ratio 1.0e0 | pos 1018 var 112865 w 1.67e3 exact 1.67e3 ratio 1.0e0; pos 3702 var 87395 w 1.67e3 exact 1.67e3 ratio 1.0e0
+TSLP solve st=Optimal iters=2 polish=0 us=538287 warm=true dse_cache=true lu_cache=true
+TSLP solve st=TimeLimit iters=1601 polish=0 us=1005364 warm=true dse_cache=false lu_cache=false
+DSE_CHECK after solve (171 iters, polish 12): rows 9080 (nan 0), ratio >=10: 0, <=0.1: 0, max 1.0e0, min 1.0e0 | pos 5362 var 30615 w 1.00e0 exact 1.00e0 ratio 1.0e0; pos 6321 var 118271 w 1.00e0 exact 1.00e0 ratio 1.0e0; pos 6319 var 114211 w 5.00e0 exact 5.00e0 ratio 1.0e0 | pos 387 var 112229 w 1.00e0 exact 1.00e0 ratio 1.0e0; pos 2460 var 114321 w 1.00e0 exact 1.00e0 ratio 1.0e0
+TSLP solve st=Optimal iters=171 polish=1 us=686277 warm=true dse_cache=true lu_cache=true
+DSE_CHECK round 0 before add_rows: rows 9080 (nan 0), ratio >=10: 11, <=0.1: 1163, max 9.0e4, min 9.8e-16 | pos 712 var 32555 w 1.00e0 exact 1.11e-5 ratio 9.0e4; pos 688 var 30885 w 1.00e0 exact 1.11e-5 ratio 9.0e4; pos 705 var 32057 w 1.00e0 exact 2.22e-5 ratio 4.5e4 | pos 2625 var 112351 w 1.00e-10 exact 1.02e5 ratio 9.8e-16; pos 2739 var 112478 w 1.00e-10 exact 7.67e4 ratio 1.3e-15
+DSE_CHECK round 0 after add_rows (50 rows): rows 9130 (nan 0), ratio >=10: 11, <=0.1: 1179, max 9.0e4, min 9.8e-16 | pos 712 var 32555 w 1.00e0 exact 1.11e-5 ratio 9.0e4; pos 688 var 30885 w 1.00e0 exact 1.11e-5 ratio 9.0e4; pos 705 var 32057 w 1.00e0 exact 2.22e-5 ratio 4.5e4 | pos 2625 var 112351 w 1.00e-10 exact 1.02e5 ratio 9.8e-16; pos 2739 var 112478 w 1.00e-10 exact 7.67e4 ratio 1.3e-15
+DSE_CHECK after solve (2 iters, polish 12): rows 9080 (nan 0), ratio >=10: 0, <=0.1: 0, max 1.0e0, min 1.0e0 | pos 5362 var 30615 w 1.00e0 exact 1.00e0 ratio 1.0e0; pos 6321 var 118271 w 1.00e0 exact 1.00e0 ratio 1.0e0; pos 6319 var 114211 w 5.00e0 exact 5.00e0 ratio 1.0e0 | pos 387 var 112229 w 1.00e0 exact 1.00e0 ratio 1.0e0; pos 2460 var 114321 w 1.00e0 exact 1.00e0 ratio 1.0e0
+TSLP solve st=Optimal iters=2 polish=0 us=806376 warm=true dse_cache=true lu_cache=true
+DSE_CHECK after solve (10 iters, polish 12): rows 9080 (nan 0), ratio >=10: 0, <=0.1: 0, max 1.0e0, min 1.0e0 | pos 5362 var 30615 w 1.00e0 exact 1.00e0 ratio 1.0e0; pos 6321 var 118271 w 1.00e0 exact 1.00e0 ratio 1.0e0; pos 6319 var 114211 w 5.00e0 exact 5.00e0 ratio 1.0e0 | pos 387 var 112229 w 1.00e0 exact 1.00e0 ratio 1.0e0; pos 2460 var 114321 w 1.00e0 exact 1.00e0 ratio 1.0e0
+TSLP solve st=Optimal iters=10 polish=0 us=824715 warm=true dse_cache=true lu_cache=true
+DSE_CHECK after solve (577 iters, polish 2): rows 9130 (nan 0), ratio >=10: 11, <=0.1: 1088, max 9.0e4, min 3.0e-15 | pos 712 var 32555 w 1.00e0 exact 1.11e-5 ratio 9.0e4; pos 688 var 30885 w 1.00e0 exact 1.11e-5 ratio 9.0e4; pos 705 var 32057 w 1.00e0 exact 2.22e-5 ratio 4.5e4 | pos 2392 var 111153 w 1.00e-10 exact 3.33e4 ratio 3.0e-15; pos 2624 var 112350 w 1.00e-10 exact 3.25e4 ratio 3.1e-15
+TSLP solve st=Optimal iters=577 polish=1 us=1042801 warm=true dse_cache=true lu_cache=true
+DSE_CHECK delete_rows: removing 60 rows, 0 of them with a nonbasic slack
+DSE_CHECK after solve (1 iters, polish 12): rows 9080 (nan 0), ratio >=10: 0, <=0.1: 0, max 1.0e0, min 1.0e0 | pos 5362 var 30615 w 1.00e0 exact 1.00e0 ratio 1.0e0; pos 6321 var 118271 w 1.00e0 exact 1.00e0 ratio 1.0e0; pos 6319 var 114211 w 5.00e0 exact 5.00e0 ratio 1.0e0 | pos 387 var 112229 w 1.00e0 exact 1.00e0 ratio 1.0e0; pos 2460 var 114321 w 1.00e0 exact 1.00e0 ratio 1.0e0
+TSLP solve st=Optimal iters=1 polish=0 us=510362 warm=true dse_cache=true lu_cache=true
+DSE_CHECK after solve (3 iters, polish 12): rows 9080 (nan 0), ratio >=10: 0, <=0.1: 0, max 1.0e0, min 1.0e0 | pos 5362 var 30615 w 1.00e0 exact 1.00e0 ratio 1.0e0; pos 6321 var 118271 w 1.00e0 exact 1.00e0 ratio 1.0e0; pos 6319 var 114211 w 5.00e0 exact 5.00e0 ratio 1.0e0 | pos 387 var 112229 w 1.00e0 exact 1.00e0 ratio 1.0e0; pos 2460 var 114321 w 1.00e0 exact 1.00e0 ratio 1.0e0
+TSLP solve st=Optimal iters=3 polish=0 us=516241 warm=true dse_cache=true lu_cache=true
+DSE_CHECK after solve (1 iters, polish 12): rows 9080 (nan 0), ratio >=10: 0, <=0.1: 0, max 1.0e0, min 1.0e0 | pos 5362 var 30615 w 1.00e0 exact 1.00e0 ratio 1.0e0; pos 6321 var 118271 w 1.00e0 exact 1.00e0 ratio 1.0e0; pos 6319 var 114211 w 5.00e0 exact 5.00e0 ratio 1.0e0 | pos 387 var 112229 w 1.00e0 exact 1.00e0 ratio 1.0e0; pos 2460 var 114321 w 1.00e0 exact 1.00e0 ratio 1.0e0
+TSLP solve st=Optimal iters=1 polish=0 us=540487 warm=true dse_cache=true lu_cache=true
+TSLP solve st=TimeLimit iters=1473 polish=0 us=1025169 warm=true dse_cache=false lu_cache=false
+DSE_CHECK after solve (1 iters, polish 12): rows 9080 (nan 0), ratio >=10: 0, <=0.1: 0, max 1.0e0, min 1.0e0 | pos 5362 var 30615 w 1.00e0 exact 1.00e0 ratio 1.0e0; pos 6321 var 118271 w 1.00e0 exact 1.00e0 ratio 1.0e0; pos 6319 var 114211 w 5.00e0 exact 5.00e0 ratio 1.0e0 | pos 387 var 112229 w 1.00e0 exact 1.00e0 ratio 1.0e0; pos 2460 var 114321 w 1.00e0 exact 1.00e0 ratio 1.0e0
+TSLP solve st=Optimal iters=1 polish=0 us=612473 warm=true dse_cache=true lu_cache=true
+DSE_CHECK after solve (74 iters, polish 14): rows 9080 (nan 9080), ratio >=10: 0, <=0.1: 0, max 0.0e0, min 0.0e0 |  | 
+TSLP solve st=Optimal iters=74 polish=2 us=656638 warm=true dse_cache=true lu_cache=true
+TSLP solve st=TimeLimit iters=1089 polish=0 us=1009860 warm=true dse_cache=false lu_cache=false
+DSE_CHECK round 1 before add_rows: rows 9070 (nan 0), ratio >=10: 11, <=0.1: 1088, max 9.0e4, min 3.0e-15 | pos 700 var 32555 w 1.00e0 exact 1.11e-5 ratio 9.0e4; pos 676 var 30885 w 1.00e0 exact 1.11e-5 ratio 9.0e4; pos 693 var 32057 w 1.00e0 exact 2.22e-5 ratio 4.5e4 | pos 2371 var 111153 w 1.00e-10 exact 3.33e4 ratio 3.0e-15; pos 2602 var 112350 w 1.00e-10 exact 3.25e4 ratio 3.1e-15
+DSE_CHECK after solve (670 iters, polish 16): rows 9080 (nan 9080), ratio >=10: 0, <=0.1: 0, max 0.0e0, min 0.0e0 |  | 
+TSLP solve st=Optimal iters=670 polish=2 us=1474960 warm=true dse_cache=true lu_cache=true
+DSE_CHECK round 1 after add_rows (81 rows): rows 9151 (nan 0), ratio >=10: 11, <=0.1: 1120, max 9.0e4, min 3.0e-15 | pos 700 var 32555 w 1.00e0 exact 1.11e-5 ratio 9.0e4; pos 676 var 30885 w 1.00e0 exact 1.11e-5 ratio 9.0e4; pos 693 var 32057 w 1.00e0 exact 2.22e-5 ratio 4.5e4 | pos 2371 var 111153 w 1.00e-10 exact 3.33e4 ratio 3.0e-15; pos 2602 var 112350 w 1.00e-10 exact 3.25e4 ratio 3.1e-15
+DSE_CHECK after solve (838 iters, polish 3): rows 9151 (nan 0), ratio >=10: 10, <=0.1: 969, max 9.0e4, min 1.9e-15 | pos 700 var 32555 w 1.00e0 exact 1.11e-5 ratio 9.0e4; pos 693 var 32057 w 1.00e0 exact 2.22e-5 ratio 4.5e4; pos 1188 var 54692 w 1.00e0 exact 1.00e-4 ratio 1.0e4 | pos 2633 var 112382 w 1.03e-10 exact 5.27e4 ratio 1.9e-15; pos 2602 var 112350 w 1.00e-10 exact 3.25e4 ratio 3.1e-15
+TSLP solve st=Optimal iters=838 polish=1 us=1109180 warm=true dse_cache=true lu_cache=true
+DSE_CHECK delete_rows: removing 51 rows, 0 of them with a nonbasic slack
+DSE_CHECK after solve (790 iters, polish 17): rows 9080 (nan 0), ratio >=10: 170, <=0.1: 283, max 5.8e4, min 1.4e-17 | pos 608 var 112450 w 5.81e4 exact 1.00e0 ratio 5.8e4; pos 188 var 112196 w 2.37e4 exact 1.00e0 ratio 2.4e4; pos 2114 var 113242 w 9.41e2 exact 1.00e0 ratio 9.4e2 | pos 4205 var 112495 w 1.00e-10 exact 7.14e6 ratio 1.4e-17; pos 609 var 112453 w 1.00e-10 exact 2.04e5 ratio 4.9e-16
+TSLP solve st=Optimal iters=790 polish=1 us=1677062 warm=true dse_cache=true lu_cache=true
+DSE_CHECK after solve (47 iters, polish 18): rows 9080 (nan 0), ratio >=10: 263, <=0.1: 294, max 5.8e4, min 1.7e-17 | pos 608 var 112450 w 5.81e4 exact 1.00e0 ratio 5.8e4; pos 188 var 112196 w 2.37e4 exact 1.00e0 ratio 2.4e4; pos 2114 var 113242 w 9.41e2 exact 1.00e0 ratio 9.4e2 | pos 4205 var 112495 w 1.00e-10 exact 5.99e6 ratio 1.7e-17; pos 3794 var 112297 w 1.00e-10 exact 5.47e5 ratio 1.8e-16
+TSLP solve st=Optimal iters=47 polish=1 us=542316 warm=true dse_cache=true lu_cache=true
+DSE_CHECK after solve (3 iters, polish 18): rows 9080 (nan 0), ratio >=10: 263, <=0.1: 293, max 5.8e4, min 1.7e-17 | pos 608 var 112450 w 5.81e4 exact 1.00e0 ratio 5.8e4; pos 188 var 112196 w 2.37e4 exact 1.00e0 ratio 2.4e4; pos 2114 var 113242 w 9.41e2 exact 1.00e0 ratio 9.4e2 | pos 4205 var 112495 w 1.00e-10 exact 5.99e6 ratio 1.7e-17; pos 3794 var 112297 w 1.00e-10 exact 5.47e5 ratio 1.8e-16
+TSLP solve st=Optimal iters=3 polish=0 us=484233 warm=true dse_cache=true lu_cache=true
+TSLP solve st=TimeLimit iters=1409 polish=0 us=1025620 warm=true dse_cache=false lu_cache=false
+DSE_CHECK after solve (256 iters, polish 19): rows 9080 (nan 0), ratio >=10: 197, <=0.1: 296, max 5.8e4, min 1.7e-16 | pos 608 var 112450 w 5.81e4 exact 1.00e0 ratio 5.8e4; pos 188 var 112196 w 2.37e4 exact 1.00e0 ratio 2.4e4; pos 2114 var 113242 w 9.41e2 exact 1.00e0 ratio 9.4e2 | pos 639 var 112483 w 1.00e-10 exact 5.99e5 ratio 1.7e-16; pos 439 var 112282 w 1.00e-10 exact 6.75e4 ratio 1.5e-15
+TSLP solve st=Optimal iters=256 polish=1 us=527498 warm=true dse_cache=true lu_cache=true
+TSLP solve st=Infeasible iters=137 polish=0 us=62243 warm=true dse_cache=false lu_cache=false
+MIP:   RENS: fixing rate 0.80 (target 0.80, 1 backtracks)
+MIP:   parallel sub-MIP started (RENS): 1449 free columns of 111827
+MIP:   no-incumbent RENS (sub-MIP depth 0) try 1: target 0.80, fixing rate 0.80, found false (43.27s)
+MIP: root heuristic RENS: none (12.18s)
+MIP:   parallel sub-MIP started (RENS (LP before cuts)): 1412 free columns of 111827
+MIP: root heuristic RENS (LP before cuts): none (0.00s)
+DSE_CHECK after solve (1 iters, polish 19): rows 9080 (nan 0), ratio >=10: 0, <=0.1: 0, max 1.0e0, min 1.0e0 | pos 9079 var 8540 w 1.00e0 exact 1.00e0 ratio 1.0e0; pos 9078 var 116223 w 2.00e0 exact 2.00e0 ratio 1.0e0; pos 9077 var 116307 w 2.88e2 exact 2.88e2 ratio 1.0e0 | pos 0 var 110836 w 9.00e4 exact 9.00e4 ratio 1.0e0; pos 1 var 114212 w 1.29e4 exact 1.29e4 ratio 1.0e0
+TSLP solve st=Optimal iters=1 polish=0 us=571816 warm=true dse_cache=true lu_cache=true
+TSLP solve st=TimeLimit iters=1441 polish=0 us=1000982 warm=true dse_cache=false lu_cache=false
+DSE_CHECK round 2 before add_rows: rows 9100 (nan 0), ratio >=10: 10, <=0.1: 967, max 9.0e4, min 1.9e-15 | pos 692 var 32555 w 1.00e0 exact 1.11e-5 ratio 9.0e4; pos 685 var 32057 w 1.00e0 exact 2.22e-5 ratio 4.5e4; pos 1177 var 54692 w 1.00e0 exact 1.00e-4 ratio 1.0e4 | pos 2617 var 112382 w 1.03e-10 exact 5.27e4 ratio 1.9e-15; pos 2586 var 112350 w 1.00e-10 exact 3.25e4 ratio 3.1e-15
+DSE_CHECK round 2 after add_rows (54 rows): rows 9154 (nan 0), ratio >=10: 10, <=0.1: 991, max 9.0e4, min 1.9e-15 | pos 692 var 32555 w 1.00e0 exact 1.11e-5 ratio 9.0e4; pos 685 var 32057 w 1.00e0 exact 2.22e-5 ratio 4.5e4; pos 1177 var 54692 w 1.00e0 exact 1.00e-4 ratio 1.0e4 | pos 2617 var 112382 w 1.03e-10 exact 5.27e4 ratio 1.9e-15; pos 2586 var 112350 w 1.00e-10 exact 3.25e4 ratio 3.1e-15
+DSE_CHECK after solve (1062 iters, polish 5): rows 9154 (nan 9154), ratio >=10: 0, <=0.1: 0, max 0.0e0, min 0.0e0 |  | 
+TSLP solve st=Optimal iters=1062 polish=2 us=1212193 warm=true dse_cache=true lu_cache=true
+DSE_CHECK delete_rows: removing 39 rows, 0 of them with a nonbasic slack
+TSLP solve st=TimeLimit iters=577 polish=0 us=1002111 warm=true dse_cache=false lu_cache=false
+TSLP solve st=TimeLimit iters=705 polish=0 us=1002863 warm=true dse_cache=false lu_cache=false
+DSE_CHECK round 3 before add_rows: rows 9115 (nan 9115), ratio >=10: 0, <=0.1: 0, max 0.0e0, min 0.0e0 |  | 
+DSE_CHECK round 3 after add_rows (91 rows): rows 9206 (nan 9115), ratio >=10: 0, <=0.1: 47, max 8.2e-1, min 1.4e-5 | pos 9140 var 120967 w 1.00e0 exact 1.23e0 ratio 8.2e-1; pos 9147 var 120974 w 1.00e0 exact 1.31e0 ratio 7.7e-1; pos 9139 var 120966 w 1.00e0 exact 1.33e0 ratio 7.5e-1 | pos 9168 var 120995 w 1.00e0 exact 7.33e4 ratio 1.4e-5; pos 9200 var 121027 w 1.00e0 exact 1.83e4 ratio 5.5e-5
+DSE_CHECK after solve (8754 iters, polish 21): rows 9080 (nan 9080), ratio >=10: 0, <=0.1: 0, max 0.0e0, min 0.0e0 |  | 
+TSLP solve st=Optimal iters=8754 polish=2 us=6640708 warm=true dse_cache=true lu_cache=true
+TSLP solve st=TimeLimit iters=641 polish=0 us=1003818 warm=true dse_cache=false lu_cache=false
+DSE_CHECK delete_rows: removing 91 rows, 0 of them with a nonbasic slack
+DSE_CHECK after solve (1 iters, polish 5): rows 9115 (nan 0), ratio >=10: 20, <=0.1: 4159, max 9.0e4, min 9.2e-11 | pos 687 var 32555 w 1.00e0 exact 1.11e-5 ratio 9.0e4; pos 665 var 30948 w 1.00e0 exact 1.11e-5 ratio 9.0e4; pos 1968 var 86473 w 1.00e0 exact 2.22e-5 ratio 4.5e4 | pos 2508 var 112279 w 1.00e0 exact 1.09e10 ratio 9.2e-11; pos 2452 var 112389 w 1.00e0 exact 3.04e9 ratio 3.3e-10
+TSLP solve st=Optimal iters=1 polish=0 us=641521 warm=true dse_cache=true lu_cache=true
+TSLP solve st=TimeLimit iters=1921 polish=0 us=1010572 warm=true dse_cache=false lu_cache=false
+DSE_CHECK after solve (3730 iters, polish 23): rows 9080 (nan 9080), ratio >=10: 0, <=0.1: 0, max 0.0e0, min 0.0e0 |  | 
+TSLP solve st=Optimal iters=3730 polish=2 us=3283617 warm=true dse_cache=true lu_cache=true
+TSLP solve st=TimeLimit iters=1569 polish=0 us=1021707 warm=true dse_cache=false lu_cache=false
+DSE_CHECK round 4 before add_rows: rows 9115 (nan 0), ratio >=10: 20, <=0.1: 4159, max 9.0e4, min 9.2e-11 | pos 687 var 32555 w 1.00e0 exact 1.11e-5 ratio 9.0e4; pos 665 var 30948 w 1.00e0 exact 1.11e-5 ratio 9.0e4; pos 1968 var 86473 w 1.00e0 exact 2.22e-5 ratio 4.5e4 | pos 2508 var 112279 w 1.00e0 exact 1.09e10 ratio 9.2e-11; pos 2452 var 112389 w 1.00e0 exact 3.04e9 ratio 3.3e-10
+TSLP solve st=TimeLimit iters=1753 polish=1 us=1552306 warm=true dse_cache=false lu_cache=false
+MIP: root heuristic feasibility pump: none (12.11s)
+MIP:   parallel sub-MIP (RENS): status Infeasible, nodes 0, objective None, 12.12s
+MIP:   parallel sub-MIP (RENS (LP before cuts)): status Infeasible, nodes 0, objective None, 12.11s
+MIP: after root heuristics: incumbent None (55.39s)
+DSE_CHECK round 4 after add_rows (90 rows): rows 9205 (nan 0), ratio >=10: 20, <=0.1: 4206, max 9.0e4, min 9.2e-11 | pos 687 var 32555 w 1.00e0 exact 1.11e-5 ratio 9.0e4; pos 665 var 30948 w 1.00e0 exact 1.11e-5 ratio 9.0e4; pos 1968 var 86473 w 1.00e0 exact 2.22e-5 ratio 4.5e4 | pos 2508 var 112279 w 1.00e0 exact 1.09e10 ratio 9.2e-11; pos 2452 var 112389 w 1.00e0 exact 3.04e9 ratio 3.3e-10
+TSLP solve st=TimeLimit iters=1 polish=0 us=20590 warm=true dse_cache=false lu_cache=false
+DSE_CHECK delete_rows: removing 90 rows, 0 of them with a nonbasic slack
+TSLP solve st=TimeLimit iters=1 polish=0 us=19901 warm=true dse_cache=false lu_cache=false
+TSLP solve st=TimeLimit iters=1 polish=0 us=15979 warm=true dse_cache=false lu_cache=false
+MIP: background cuts: root LP re-solved before replacing the cuts: TimeLimit, 1 iters (55.52s)
+MIP: background cuts: no result (waited 0.12s)
+     time      nodes      open        best bound         incumbent       gap
+    55.5s          0         0     4.894033333e4                 -         -
+MIP:    55.52s nodes        0 open       1 lb 4.89403333e4 ub inf lp_iters 37978 sb_iters 0 sb_lps 0 sb_secs 0.00 node_iters 0 (first 0, lps 0) heur_iters 16411 dive_iters 0 lp_rows 9080 node_cut_secs 0.00
+MIP: dual proofs and conflicts 0 (conflicts added 0 (from proofs 0), Farkas 0, pruned 0 nodes, tightened 0 bounds)
+MIP: propagation conflicts: analysed 34, no 1-UIP 0, 1-UIP not a row 0, no decision set 0, decision set not a row 0; not a row because continuous 0, general integer 0, both sides 0
+MIP: objective propagation: pruned 0 nodes, tightened 0 bounds; strong branching children infeasible by propagation 0, propagated bounds passed to child LPs 0
+MIP: literal conflicts: added 115, in pool 115 (aged out 0), pruned 0 nodes, tightened 0 bounds
+MIP: conflict analysis (HiGHS style): calls 34, conflicts 174, added 115, mean length 16.7, max length 32903, 0.02s
+MIP: conflict analysis failures (all calls): no decision 0, too long midway 0, reason row lacks column 0, empty 0, too long at the end 0 (total length 0), max length 50
+MIP: branching: 0 selections, 0 without strong branching for dual degeneracy; sb LPs 0 iters 0
+MIP: sibling backtracks 0; basis restores 0 (basic count mismatch 0), first LP iterations after a restore 0
+MIP: node diag: nodes 0 node LPs 0 mean rows 0.0 iters 0 (0.0/LP) LP secs 0.00 sep rounds 0 added 0 node cut secs 0.00 final rows 9080
+MIP: adaptive node cuts: rounds 0 effective 0 skipped 0 (rate 1.000), node cut secs 0.00, outcomes cutoff/<0.02/<0.1/<0.3/>=0.3 [0, 0, 0, 0, 0], cut nnz None (rows mean 4.7)
+{"status": "time_limit", "objective": null, "best_bound": -Infinity, "nodes": 0, "root_bound": 48940.33333333333, "first_solution_time": null, "first_solution_objective": null, "time": 60.33436312000049}
