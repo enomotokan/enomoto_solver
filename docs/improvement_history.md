@@ -9469,6 +9469,14 @@ neos-950242 の 2 回目の調査 (`analysis/neos950242_r2_20261020.md`)。
   - 不一致 0。16 問の解けた数が 2 組とも 2 減るので既定にしない。beasleyC3 は P5 系の 4 組中 3 組で落ちており、前処理の変更が beasleyC3 の証明を遅くしている見込み (未確認)。
 - 結果: benchmarks/*_5f671fb_{newdef,p5s}_rPS{a,b}.json
 
+## 2026-10-21: 同値な 0-1 列の代入 (PROBE_CLIQUE + PROBE_REPRESOLVE、PCR) は不採用
+
+- physiciansched6-2 の 3 回目の調査で、probe が境界を締めると represolve に早く戻り、同値な 0-1 列の代入に届かないことが分かった。既存の PROBE_CLIQUE=1 PROBE_REPRESOLVE=1 で代入されるので、bcb64a1 (develop + physiciansched-r3) で対の計測 (rPRa/rPRb)。
+  - 40 問: 26→26 / 26→26、SGM 18.79→19.70 / 19.41→19.37。30n20b8 は 2 組とも解なし → 553。blp-ar98 は 6445→6555 / 6368→7031 と悪化。neos-1456979 は組によって解の有無が入れ替わる。
+  - 16 問: 10→9 / 10→9。2 組とも neos-960392 を落とす (既定 32.7・33.6 秒)。physiciansched6-2 は PCR だけでは解が出ない (p5s がないと FJ が解を出さない)。
+  - 不一致 0。16 問の解けた数が 2 組とも減るので既定にしない。
+- 結果: benchmarks/*_bcb64a1_{newdef,pcr}_rPR{a,b}.json
+
 ## 改名一覧 (整理時)
 
 本メモ中は旧名で書かれている。
