@@ -675,6 +675,16 @@ pub(crate) struct TreeSnapshot {
     orbitopes: Vec<super::symmetry::Orbitope>,
     orig: Option<std::sync::Arc<MipProblem>>,
     lex_gens: Vec<Vec<usize>>,
+    /// 写しを作ったときの LP の基底 (`ENOMOTO_MIP_TREE_ROOT_BASIS`、試作。列と、元の行 + `rows` の行)
+    root_basis: Option<super::lp::Basis>,
+}
+
+/// `ENOMOTO_MIP_TREE_ROOT_BASIS` (試作、inv/mzzv42z-r4-20261021、既定では使わない): 木を分け合う従が写しの根の LP を、主の LP の
+/// 基底から解き始める (既定は基底なしで最初から解く)。また、従が根の LP の途中で時間切れになったら、従はまだノードを持って
+/// いないので下界を +inf として返す (既定は -inf を返し、主の下界 (= 報告する下界) が -inf になる)。mzzv42z (10800 行) では
+/// 木に入った後の 20 秒で従 3 本が 1 ノードも処理せず、時間切れの下界が -inf になっていた (analysis/mzzv42z_r4_20261021.md)
+fn tree_root_basis() -> bool {
+    env_str!("ENOMOTO_MIP_TREE_ROOT_BASIS").is_some()
 }
 
 pub(crate) struct SnapNode {
@@ -2182,7 +2192,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // ヒューリスティクスも止める (mzzv42z: 打ち切り値 -19874 の再スタートの後で FJ の -680・RINS の -5770 を暫定解にした)
         // 再スタート前の暫定解そのもの (再スタート後の問題でも実行可能なもの) は打ち切り値より必ず悪いが、受け取る
         // (受け取らないと再スタート後の求解が暫定解なしになる。neos-911970: 62.30 を捨て、60 秒で解けない回が増えた)
-        if self.incumbent.is_none() && self.params.restarts > 0 && !self.params.submip && !self.accepting_start && z > self.params.cutoff && env_str!("ENOMOTO_MIP_RESTART_REF").is_some() {
+        if self.incumbent.is_none() && self.params.restarts > 0 && !self.params.submip && !self.accepting_start && z > self.params.cutoff && super::restart_ref_for(self.p) {
             return false;
         }
         if !orig_only {
@@ -2548,7 +2558,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             // `ENOMOTO_MIP_RESTART_CUTS_READD`: 再スタート前に効いていたカットを、根の LP を解く前にカットの行として加える
             // (問題の行ではないので木の中で年齢により外せる。プールにもあるので外れても違反すれば戻る)
-            if (env_str!("ENOMOTO_MIP_RESTART_CUTS_READD").is_some() || self.highs_cutmgmt() || self.watch.is_some()) && !self.params.submip {
+            if (env_str!("ENOMOTO_MIP_RESTART_CUTS_READD").is_some() || self.highs_cutmgmt() || self.watch.is_some() || super::gr_restart_readd_for(self.p)) && !self.params.submip {
                 let rows: Vec<(Vec<(usize, f64)>, f64, f64)> = cuts.iter().filter(|(c, _)| c.iter().all(|&(j, _)| j < self.p.n)).map(|(c, r)| (c.clone(), f64::NEG_INFINITY, *r)).collect();
                 if !rows.is_empty() {
                     self.add_cut_rows(&rows);
@@ -2657,6 +2667,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
         }
+        // `ENOMOTO_MIP_TREE_ROOT_BASIS` (試作): 木を分け合う従は主の LP の基底から解き始める
+        if self.pool.is_some() && tree_root_basis() {
+            if let Some(b) = self.snap.as_ref().and_then(|s| s.root_basis.clone()) {
+                if b.col.len() == self.p.n && b.row.len() == self.lp.num_rows() {
+                    self.lp.set_basis(&b);
+                }
+            }
+        }
         let mut root_st = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
         if self.params.verbose && self.snap.is_some() {
             eprintln!("MIP: [snapshot] root LP {root_st:?} ({} iters, {:.2}s)", self.lp.total_iterations(), self.start.elapsed().as_secs_f64());
@@ -2684,7 +2702,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             LpStatus::TimeLimit => {
                 self.join_fj_thread();
-                return self.finish(MipStatus::TimeLimit, f64::NEG_INFINITY);
+                // `ENOMOTO_MIP_TREE_ROOT_BASIS` (試作): 木を分け合う従はまだノードを持っていない (ノードは主と共有の待ち行列にある)
+                let lb = if self.pool.is_some() && self.snap.is_some() && tree_root_basis() { f64::INFINITY } else { f64::NEG_INFINITY };
+                return self.finish(MipStatus::TimeLimit, lb);
             }
             _ => {
                 // 根の LP が解けない: LP を使わない Feasibility Jump の解だけは受け取る
@@ -3244,7 +3264,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         // `rins`: 丸めと、暫定解があれば RINS も、`rens` (試作): 丸めと RENS と RINS)。`rens` は beasleyC3 のため:
                         // 根のヒューリスティクスの RENS は前景のカットの後の LP (712〜720) で 768〜787 しか出さないが、HiGHS は
                         // カットの後の根 (733) の部分 MIP で 1.7 秒に 756 を見つける。背景のカットの後の LP は 742〜748 と強い
-                        if let Some(mode) = env_str!("ENOMOTO_MIP_BG_CUTS_REHEUR") {
+                        // `ENOMOTO_MIP_GR_RESTART` (試作) では一般整数のある問題で `rins`
+                        if let Some(mode) = env_str!("ENOMOTO_MIP_BG_CUTS_REHEUR").or_else(|| super::gr_restart_for(self.p).then_some("rins")) {
                             let x2 = self.lp.col_values();
                             if !self.fractional(&x2).is_empty() {
                                 let t1 = Instant::now();
@@ -7875,7 +7896,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // (効いているものだけ残しても)、木の LP は 405 -> 822 行、ノードの LP は 1 回平均 187 反復 (行が 190 程度なら 47)。
         // neos-911970 (60 秒) では暫定解 56.23 -> 54.83 (最適値 54.76)・下界 53.69 -> 53.62 で解けるには至らず、再スタート後の
         // カットのループが進まなくなる (47.26 のまま。カットの行の上に作る次のカットが変わる) ので既定では使わない
-        let readd = (env_str!("ENOMOTO_MIP_RESTART_CUTS_READD").is_some() || self.highs_cutmgmt()) && !keep_all;
+        let readd = (env_str!("ENOMOTO_MIP_RESTART_CUTS_READD").is_some() || self.highs_cutmgmt() || super::gr_restart_readd_for(p)) && !keep_all;
         let cuts_as_rows = (env_str!("ENOMOTO_MIP_RESTART_CUTS_TO_POOL").is_none() && !readd) || keep_all;
         let mut carry: Vec<(Vec<(usize, f64)>, f64)> = Vec::new();
         let act = self.lp.row_activities();
@@ -7947,7 +7968,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // 暫定解を引き継ぐ (新しい問題は列が同じ)
         if env_str!("ENOMOTO_MIP_RESTART_NO_INCUMBENT").is_none() {
-            super::RESTART_SOL.with(|s| *s.borrow_mut() = self.incumbent.as_ref().map(|(_, x)| x.clone()));
+            // `ENOMOTO_MIP_RESTART_REF` (試作): 暫定解がなければ参照解を渡す (2 回目以降の再スタートでも参照解を失わない。
+            // qnet1 は 3 回再スタートし、渡さないと 2 回目の後の求解が暫定解なしで局所探索を 2.7〜2.9 秒ずつ回していた)
+            let ref_x = if self.incumbent.is_none() && super::restart_ref_for(p) { self.ref_sol.clone() } else { None };
+            super::RESTART_SOL.with(|s| *s.borrow_mut() = self.incumbent.as_ref().map(|(_, x)| x.clone()).or(ref_x));
         }
         let r = super::solve_problem(&newp, params, true);
         super::RESTART_SOL.with(|s| *s.borrow_mut() = None);
@@ -8296,7 +8320,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             .collect();
         let pool: Vec<(Vec<(usize, f64)>, f64)> = self.cut_pool.iter().map(|(c, r, _)| (c.clone(), *r)).collect();
         let orig = self.orig.as_ref().map(|o| std::sync::Arc::new((**o).clone()));
-        let snap = TreeSnapshot { serial, p, lo: self.dom.global_lo.clone(), up: self.dom.global_up.clone(), rows, pool, pc: self.pc.clone(), nodes: snodes, valid_below: self.prune_limit(), hcm_auto: self.hcm_auto, orbitopes: (*self.orbitopes).clone(), orig, lex_gens: (*self.lex_gens).clone() };
+        let root_basis = if tree_root_basis() { Some(self.lp.basis()) } else { None };
+        let snap = TreeSnapshot { serial, p, lo: self.dom.global_lo.clone(), up: self.dom.global_up.clone(), rows, pool, pc: self.pc.clone(), nodes: snodes, valid_below: self.prune_limit(), hcm_auto: self.hcm_auto, orbitopes: (*self.orbitopes).clone(), orig, lex_gens: (*self.lex_gens).clone(), root_basis };
         if self.params.verbose && env_str!("ENOMOTO_MIP_BISECT_VERBOSE").is_some() {
             eprintln!("MIP: tree snapshot {serial}: {} nodes, {} cut rows, valid below {:.10e} ({:.1}s)", snap.nodes.len(), snap.rows.len(), snap.valid_below, self.start.elapsed().as_secs_f64());
         }

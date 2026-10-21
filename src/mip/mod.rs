@@ -76,6 +76,30 @@ pub(crate) fn implbd_genint_for(is_int: &[bool], lo: &[f64], up: &[f64]) -> bool
     ngen > 0 && ngen as f64 >= tunable!("ENOMOTO_T_MIP_GR_AUTO_MIN_FRAC", 0.01, f64) * nfree as f64
 }
 
+/// `ENOMOTO_MIP_GR_RESTART` (試作、inv/mzzv42z-r4-20261021、既定では使わない): 一般整数のある問題 ([`implbd_genint_for`] が真、
+/// 既定の P3 と同じ条件) だけで、再スタートと根の扱いを変える ((1) と (3)。(2) は `=readd` のときだけ)。
+/// (1) `ENOMOTO_MIP_RESTART_REF` (再スタート前の暫定解を参照解として残す・打ち切り値に届かない解を暫定解にしない・下界を報告する)、
+/// (2) `ENOMOTO_MIP_RESTART_CUTS_READD` (再スタート前に効いていたカットを問題の行にせず、根の LP の前にカットの行として足す)、
+/// (3) `ENOMOTO_MIP_BG_CUTS_REHEUR=rins` (背景のカットで置き換えた根の LP の解で、丸めと RINS をもう一度回す)。
+/// mzzv42z (4 スレッド・60 秒) では、根の RENS が固定率 0.35〜0.43 に崩れる回 (根のカットの 1 ラウンド目の LP が時間の上限に
+/// 当たって根のカットが 1〜2 ラウンドで止まる回) でも背景のカットの後の RINS で -20400 台が出て、再スタートで暫定解を
+/// 捨てて根の LP を解き直す (6〜19 秒) のをやめる (analysis/mzzv42z_r4_20261021.md)
+pub(crate) fn gr_restart_for(p: &MipProblem) -> bool {
+    env_str!("ENOMOTO_MIP_GR_RESTART").is_some() && implbd_genint_for(&p.is_int, &p.col_lo, &p.col_up)
+}
+
+/// [`gr_restart_for`] で (2) `ENOMOTO_MIP_RESTART_CUTS_READD` も使うか (`ENOMOTO_MIP_GR_RESTART=readd` のときだけ。
+/// カットを問題の行にしないと再スタート後の根のカットが弱くなる問題がある: mik-250-20-75-4 は -53829 -> -53948、7.4〜7.9 秒 -> 9.5〜10.5 秒。
+/// mzzv42z では (2) がなくても再スタート後 12〜13 秒で木に入る (あれば 8〜12 秒))
+pub(crate) fn gr_restart_readd_for(p: &MipProblem) -> bool {
+    env_str!("ENOMOTO_MIP_GR_RESTART") == Some("readd") && gr_restart_for(p)
+}
+
+/// `ENOMOTO_MIP_RESTART_REF` か [`gr_restart_for`]
+pub(crate) fn restart_ref_for(p: &MipProblem) -> bool {
+    env_str!("ENOMOTO_MIP_RESTART_REF").is_some() || gr_restart_for(p)
+}
+
 pub(crate) fn cap_clock() -> f64 {
     #[cfg(target_os = "linux")]
     {
@@ -694,7 +718,7 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
     match (&presolved, start) {
         (Some(Presolved::Reduced { prob, scaling, .. }), Some(x)) if x.len() == prob.n => {
             let xr: Vec<f64> = x.iter().zip(&scaling.d).map(|(v, d)| v / d).collect();
-            if params.restarts > 0 && env_str!("ENOMOTO_MIP_RESTART_REF").is_some() {
+            if params.restarts > 0 && restart_ref_for(p) {
                 ref_shift = Some(p.objective(&x) - prob.objective(&xr));
             }
             if prob.is_feasible(&xr, 1e-6) {
@@ -702,7 +726,7 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
             } else {
                 // `ENOMOTO_MIP_RESTART_REF` (試作、既定では使わない): 再スタート前の暫定解が再スタート後の問題で実行不能
                 // (打ち切り値による固定で外れる) なら、暫定解にはせず RINS の参照解として渡す
-                let as_ref = params.restarts > 0 && env_str!("ENOMOTO_MIP_RESTART_REF").is_some();
+                let as_ref = params.restarts > 0 && restart_ref_for(p);
                 if as_ref {
                     solver::REF_SOL.with(|s| *s.borrow_mut() = Some(xr));
                 }
