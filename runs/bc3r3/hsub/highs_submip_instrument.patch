@@ -1,0 +1,104 @@
+diff --git a/highs/mip/HighsPrimalHeuristics.cpp b/highs/mip/HighsPrimalHeuristics.cpp
+index cb6efd3..c28d504 100644
+--- a/highs/mip/HighsPrimalHeuristics.cpp
++++ b/highs/mip/HighsPrimalHeuristics.cpp
+@@ -6,6 +6,7 @@
+ /*                                                                       */
+ /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+ #include "mip/HighsPrimalHeuristics.h"
++#include "Highs.h"
+ 
+ #include <numeric>
+ #include <unordered_set>
+@@ -74,6 +75,9 @@ void HighsPrimalHeuristics::setupIntCols() {
+   });
+ }
+ 
++thread_local const char* hs_heur_tag = "?";
++thread_local double hs_heur_target = -1;
++
+ bool HighsPrimalHeuristics::solveSubMip(
+     HighsMipWorker& worker, const HighsLp& lp, const HighsBasis& basis,
+     double fixingRate, std::vector<double> colLower,
+@@ -167,7 +171,41 @@ bool HighsPrimalHeuristics::solveSubMip(
+   if (!mipsolver.submip) mipsolver.profiling_->start(kSubSolverSubMip);
+   // Ensure that sub-solver call time data accumulate in the sub-MIP record
+   mipsolver.profiling_->setSubMip(true);
++  if (!mipsolver.submip && getenv("HIGHS_SUBMIP_DUMP") &&
++      std::string(hs_heur_tag) == "RENS") {
++    Highs dumper;
++    dumper.setOptionValue("output_flag", false);
++    HighsLp d = submip;
++    d.offset_ = lp.offset_;
++    dumper.passModel(d);
++    dumper.writeModel(getenv("HIGHS_SUBMIP_DUMP"));
++    fprintf(stderr, "HSUB dumped RENS sub-MIP to %s (cutoff %.4f)\n",
++            getenv("HIGHS_SUBMIP_DUMP"), worker.upper_limit);
++  }
++  double hs_t0 = mipsolver.timer_.read();
++  const char* hs_tag = hs_heur_tag;
++  double hs_target = hs_heur_target;
++  double hs_ul0 = worker.upper_limit;
+   submipsolver.run();
++  if (!mipsolver.submip) {
++    HighsInt nfreeint = 0, nfreecont = 0, nint = 0;
++    for (HighsInt j = 0; j < submip.num_col_; ++j) {
++      bool isint = submip.integrality_[j] != HighsVarType::kContinuous;
++      bool fr = submip.col_lower_[j] < submip.col_upper_[j];
++      if (isint) { ++nint; nfreeint += fr; } else nfreecont += fr;
++    }
++    fprintf(stderr,
++            "HSUB %s t %.2f..%.2f lb %.4f ul %.4f target %.3f fixrate %.3f "
++            "lp rows %d (model %d) cols %d int %d freeint %d freecont %d "
++            "status %d nodes %lld obj %.4f maxnodes %d\n",
++            hs_tag, hs_t0, mipsolver.timer_.read(),
++            mipsolver.mipdata_->lower_bound, hs_ul0, hs_target,
++            fixingRate, int(lp.num_row_), int(mipsolver.model_->num_row_),
++            int(submip.num_col_), int(nint), int(nfreeint), int(nfreecont),
++            int(submipsolver.modelstatus_),
++            (long long)submipsolver.node_count_,
++            submipsolver.solution_objective_, int(maxnodes));
++  }
+   if (mipsolver.profiling_->sub_solver_)
+     printf(
+         "HighsPrimalHeuristics::solveSubMip After  run() for %sMIP at depth "
+@@ -366,6 +404,7 @@ void HighsPrimalHeuristics::rootReducedCost(HighsMipWorker& worker) {
+   double fixingRate = neighbourhood.getFixingRate();
+   if (fixingRate < 0.3) return;
+ 
++  hs_heur_tag = "RRC";
+   solveSubMip(worker, *mipsolver.model_, mipsolver.mipdata_->firstrootbasis,
+               fixingRate, localdom.col_lower_, localdom.col_upper_,
+               500,  // std::max(50, int(0.05 *
+@@ -432,6 +471,7 @@ void HighsPrimalHeuristics::RENS(HighsMipWorker& worker,
+   // determine the initial number of unfixed variables fixing rate to decide if
+   // the problem is restricted enough to be considered for solving a submip
+   double maxfixingrate = determineTargetFixingRate(worker);
++  hs_heur_target = maxfixingrate;
+   double fixingrate = 0.0;
+   bool stop = false;
+   // heurlp.setIterationLimit(2 * mipsolver.mipdata_->maxrootlpiters);
+@@ -624,6 +664,7 @@ retry:
+                 HighsInt{1},
+                 static_cast<HighsInt>(mipsolver.mipdata_->workers.size()) / 4)
+           : 1;
++  hs_heur_tag = "RENS";
+   const bool solve_sub_mip_return = solveSubMip(
+       worker, heurlp.getLp(), heurlp.getLpSolver().getBasis(), fixingrate,
+       localdom.col_lower_, localdom.col_upper_,
+@@ -701,6 +742,7 @@ void HighsPrimalHeuristics::RINS(HighsMipWorker& worker,
+   // determine the initial number of unfixed variables fixing rate to decide if
+   // the problem is restricted enough to be considered for solving a submip
+   double maxfixingrate = determineTargetFixingRate(worker);
++  hs_heur_target = maxfixingrate;
+   double minfixingrate = 0.25;
+   double fixingrate = 0.0;
+   bool stop = false;
+@@ -935,6 +977,7 @@ retry:
+                 HighsInt{1},
+                 static_cast<HighsInt>(mipsolver.mipdata_->workers.size()) / 4)
+           : 1;
++  hs_heur_tag = "RINS";
+   const bool solve_sub_mip_return = solveSubMip(
+       worker, heurlp.getLp(), heurlp.getLpSolver().getBasis(), fixingrate,
+       localdom.col_lower_, localdom.col_upper_,

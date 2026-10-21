@@ -1,0 +1,40 @@
+あなたは enomoto_solver (Rust 製 LP/MIP ソルバー、Python バインディング) の MIP 性能を調べる調査セッションです。親セッションが 7 つの調査セッションを並列に動かしており、あなたはその 1 つです。担当は「HiGHS 1.15.1 は 4 スレッド 60 秒で解くが ENOMOTO は解けない」問題の 1 つです。報告・メモ・コミットメッセージは日本語で書いてください。
+
+## 環境と準備
+- コンテナは専用 (`nproc` で確かめる。4 の想定)。自分の中でもソルバーは同時に 1 つだけ動かす。
+- ブランチ `inv/beasleyC3-r3-20261020` が checkout されているはず (`git branch --show-current`。違えば `git fetch origin inv/beasleyC3-r3-20261020 && git checkout -B inv/beasleyC3-r3-20261020 origin/inv/beasleyC3-r3-20261020`)。土台は develop c4eddd2 に physiciansched6-2 の試作 (INC_LP_CAP・RINS_FJ_BOOST) をマージした 2ff0c43。
+- 今日の develop で既定になったもの: 解発見スレッド (根で別スレッド)、FJ の解が悪いときの BG RENS、クリークカットの代替、ノードでのカット分離 (TREE_SEP)、局所探索の目的値の刻みの修正、条件つきの根の目的値の打ち切りによる探り (probing) など。経緯は docs/improvement_history.md の末尾。
+- 既定にするか計測中の候補 p5s: `ENOMOTO_MIP_INEQ_SINGLETON=1 ENOMOTO_MIP_DUAL_UB=1 ENOMOTO_MIP_CS_OBJ_PIVOT=1 ENOMOTO_MIP_FJ_LP_REPAIR=1 ENOMOTO_MIP_INC_LP_CAP=1`。担当の問題では既定と p5s の両方で見ること。
+- 準備: `pip install highspy==1.15.1 maturin scipy`、`maturin build --release -o dist`、`pip install --no-deps --force-reinstall dist/<wheel>`、`cd /tmp && python -c "import enomoto_solver; print(enomoto_solver.__file__)"`。基準と試作を比べるときは別の worktree でビルドして `pip install --target <dir>/.pylib` と `PYTHONPATH=<dir>/.pylib` で分けてよい。
+- MPS: `python scripts/run_miplib_benchmark.py --only <問題> ...` で `.miplib_cache/` に落ちる。直接なら https://miplib.zib.de/WebData/instances/<name>.mps.gz 。
+- HiGHS の内部を見たいときは scripts/highs_instrument.md の計測用パッチを当ててよい。
+- ログを詳しく見るには `ENOMOTO_MIP_LOG=1`。
+
+## 計測の条件 (必須)
+- すべて 4 スレッド。ENOMOTO: `from enomoto_solver import benchmark_highs as bh; _, lp = bh._load_lp(Path(mps)); m, _, _ = bh._build_our_model(lp); m.solve(None, False, T, None, None, 4, log=True)`。HiGHS: `threads=4`、`mip_rel_gap=0`、`output_flag=True`。
+- 時間上限は 60 秒。差が見えにくければ 120〜300 秒に延ばしてよい。
+- 時間よりも、ノード数・下界・暫定解の値と時刻で比べる。4 スレッドは非決定的なので、結論に使う比較は 2 回以上動かして揺れを見る。
+
+## 調べること (HiGHS と ENOMOTO を並べる)
+- 前処理後の問題の大きさ、根の LP 緩和の値と、カットの後の根の下界 (カットの族ごとの数も)
+- 最初の解の時刻と値、暫定解の推移
+- 木のノード数、ノード当たりの時間、時間上限の時点の下界
+- 前の調査のメモ (下に書く) で分かっていることは繰り返さず、そこから先を調べる。前の調査の結論が今の develop でも成り立つかはまず確かめる。
+
+## 試作
+- 直し方の見当がついたら試作する。既定は変えず、環境変数 (`ENOMOTO_MIP_...`) で有効にする。
+- 担当の問題で 2 回以上効果を確かめる。副作用を見るため、MIPLIB 40 問 (scripts/run_miplib_benchmark.py の PROBLEMS) のうち試作が働く条件に当たる問題を数問選んで既定と比べる。40 問全体の計測はしない (親が行う)。
+- `cargo test --release --lib` が通ることを確かめる (pyo3 のため `RUSTFLAGS="-L $(python3 -c "import sysconfig;print(sysconfig.get_config_var('LIBDIR'))") -lpython$(python3 -c "import sysconfig;print(sysconfig.get_config_var('LDVERSION'))")"` と `LD_LIBRARY_PATH` が要る)。
+
+## 成果物
+- 調査メモ `analysis/beasleyC3_r3_20261020.md`。冒頭に環境 (CPU の数)、コミット、スレッド数、時間上限。推測と確かめた事実を分け、うまくいかなかった試みも書く。
+- メモ・試作・小さいログをブランチ `inv/beasleyC3-r3-20261020` にコミットして `git push -u origin inv/beasleyC3-r3-20261020`。このブランチ以外 (develop・main など) には push しない。
+- 終わったら親 (@parent) に send_message で次を送り、同じ内容を最後の返答にする:
+  - 結論: 解けない主因を 1〜3 個、根拠の数値 (4 スレッド) つき。
+  - 試作: 環境変数 (計測にそのまま渡せる `A=1 B=2` の形)、変えたファイルと関数、コミット、担当の問題での効果、副作用を見た問題での結果。試作しなかったらその理由。
+  - 既定にする候補か、副作用の見込み。
+  - 確かでない点。
+  - メモのパス、push したブランチとコミット。
+
+## 担当: beasleyC3
+beasleyC3 (HiGHS 25.8 秒・最適 754)。今日の計測では既定で解ける回 (32.6・33.3・37.7・52.3 秒) と解けない回 (60 秒で 756〜770) が半々。揺れの原因を突き止め、毎回解けるようにするのが目標。前の調査: analysis/beasleyC3_mc11_20261019.md・analysis/beasleyC3_mc11_20261020.md・analysis/nodesep_aging_20261020.md (TREE_SEP で 4/5 解ける)。解けた回と解けない回で、根の下界・最適解 754 の発見時刻・ノード数のどれが違うかを比べる。

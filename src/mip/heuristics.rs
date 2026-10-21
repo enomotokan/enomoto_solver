@@ -1349,7 +1349,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // (HiGHS はサブ MIP に今の LP (カットを含み、効いていない行を除いたもの) を渡す。元の行だけのサブ MIP は根の LP が弱く、
         // neos-3381206-awhea では 500 ノードで解が見つからない)。カットはプールで大域的に使うもので、打ち切り値で成り立つ
         // ものもサブ MIP の打ち切り値 (同じかより厳しい) では成り立つ
-        if env_str!("ENOMOTO_MIP_SUBMIP_CUTS").is_some() && sub.n == p.n {
+        if (env_str!("ENOMOTO_MIP_SUBMIP_CUTS").is_some() || self.fc_submip) && sub.n == p.n {
             let cuts = self.lp_tight_cut_rows();
             if !cuts.is_empty() {
                 let mut rows = std::mem::take(&mut sub.rows);
@@ -1364,6 +1364,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 s2.conflict_edges = std::mem::take(&mut sub.conflict_edges);
                 s2.implied_bounds = std::mem::take(&mut sub.implied_bounds);
                 sub = s2;
+            }
+        }
+        // 診断用 `ENOMOTO_MIP_SUBMIP_DUMP=<接頭辞>`: 根 (外側の求解) のサブ MIP を `<接頭辞><番号>.mps` に書き出す
+        if let Some(pre) = env_str!("ENOMOTO_MIP_SUBMIP_DUMP") {
+            if !self.params.submip && self.nodes <= 1 {
+                static K: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+                let k = K.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let f = format!("{pre}{k}.mps");
+                let nfree = (0..sub.n).filter(|&j| sub.is_int[j] && sub.col_lo[j] < sub.col_up[j]).count();
+                let _ = sub.write_mps(&f);
+                eprintln!("MIP:   sub-MIP dump {f}: rows {}, free integer columns {nfree} of {} (cutoff {:.6e}, {:.2}s)", sub.m, sub.is_int.iter().filter(|&&b| b).count(), cutoff.unwrap_or_else(|| self.prune_limit()), self.start.elapsed().as_secs_f64());
             }
         }
         let remaining = match self.deadline {
@@ -1385,6 +1396,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             skip_heurs: 0,
             threads: 1,
             distinguish: false,
+            fc_submip: self.fc_submip,
         };
         // 今の LP の基底 (列の状態) をサブ MIP の根の LP の初めの基底にする (HiGHS の `rootbasis`。`ENOMOTO_MIP_NO_SUBMIP_BASIS` で
         // 使わない)。停滞による打ち切り (`ENOMOTO_T_MIP_SUBMIP_STALL`) と合わせて 93 問 (4 スレッド・60 秒、2 回): 主ギャップの和
@@ -1653,6 +1665,27 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let r = (self.rand() * (k + 1) as f64) as usize;
             order.swap(k, r.min(k));
         }
+        // `ENOMOTO_MIP_DIVE_LOCK_ORDER` (試作、既定では使わない): HiGHS の `setupIntCols` と同じく、上向き・下向きの lock の数の
+        // 積 ((ε + 上) × (ε + 下)) の大きい順に固定する (同点は上の乱数の順)。beasleyC3 では HiGHS の RENS (固定率 0.516) の近傍の
+        // 最適値が 756 なのに、乱数の順の ENOMOTO の RENS (固定率 0.53) は 767 だった (analysis/beasleyC3_r3_20261020.md)
+        if env_str!("ENOMOTO_MIP_DIVE_LOCK_ORDER").is_some() {
+            let score = |j: usize| {
+                let (mut up, mut down) = (0usize, 0usize);
+                for &(i, a) in &p.cols[j] {
+                    if p.row_up[i].is_finite() {
+                        if a > 0.0 { up += 1 } else { down += 1 }
+                    }
+                    if p.row_lo[i].is_finite() {
+                        if a > 0.0 { down += 1 } else { up += 1 }
+                    }
+                }
+                (1e-6 + up as f64) * (1e-6 + down as f64)
+            };
+            let sc: Vec<f64> = order.iter().map(|&j| score(j)).collect();
+            let mut idx: Vec<usize> = (0..order.len()).collect();
+            idx.sort_by(|&a, &b| sc[b].total_cmp(&sc[a]));
+            order = idx.into_iter().map(|k| order[k]).collect();
+        }
         loop {
             if self.time_up() || self.lp.total_iterations() - it_start > budget {
                 break;
@@ -1776,7 +1809,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // `ENOMOTO_MIP_SUBMIP_CUTS`: 根 (サブ MIP の中の根も含む) の LP にある切除平面をサブ MIP の行に加える。HiGHS の RENS は
         // カットを含む LP (`heurlp.getLp()`) からサブ MIP を作る (30n20b8 の根の RENS は 488 行 + カット 127 本)。
         // 根の LP の行 (元の行の後ろ) はどれも大域的に成り立つカットなので、木の中 (局所的な行がありうる) では加えない
-        if self.nodes <= 1 && env_str!("ENOMOTO_MIP_SUBMIP_CUTS").is_some() {
+        if self.nodes <= 1 && (env_str!("ENOMOTO_MIP_SUBMIP_CUTS").is_some() || self.fc_submip) {
             let added = self.append_lp_cuts(&mut sub);
             if self.params.verbose {
                 eprintln!("MIP:   RENS: {added} cuts added to the sub-MIP");
