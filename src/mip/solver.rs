@@ -831,6 +831,12 @@ fn prof_tree_par() -> bool {
     env_str!("ENOMOTO_PROF_TREE_PAR").is_some()
 }
 
+/// 診断用 (`ENOMOTO_MIP_TREE_DIAG`): 木を分け合うスレッドの受け渡しと、optimal で終わるときの突き合わせを表示する
+/// (analysis/partree_race_20261021.md)。
+fn tree_diag() -> bool {
+    env_str!("ENOMOTO_MIP_TREE_DIAG").is_some()
+}
+
 /// スレッドの間で共有する学習の記録 (通し番号つき、古いものから捨てる)。
 #[derive(Default)]
 struct Learned {
@@ -1699,6 +1705,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
         });
     }
 
+    /// 待ち行列の下界が `lim` 以上のノードを捨てる。診断用: デバッグ解を含むノードを捨てたら知らせる (`queue.prune` の一括の
+    /// 刈り込みは以前はデバッグ解の検査の外だった)。
+    fn prune_queue(&mut self, lim: f64) {
+        if self.dbg_on {
+            let lb = self.queue.iter().filter(|n| n.lower_bound >= lim && self.dbg_changes(&n.changes)).map(|n| n.lower_bound).fold(f64::INFINITY, f64::min);
+            if lb.is_finite() {
+                self.dbg_lost(&format!("queue prune (node lower bound {lb}, limit {lim})"), true);
+            }
+        }
+        self.queue.prune(lim);
+    }
+
     /// 診断用: ノードの分枝がデバッグ解を含むか。
     fn dbg_changes(&self, changes: &[BoundChange]) -> bool {
         if !self.dbg_on {
@@ -2130,7 +2148,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.incumbent = Some((z, x));
             self.root_redcost_fixing();
             let lim = self.prune_limit();
-            self.queue.prune(lim);
+            self.prune_queue(lim);
             if self.params.verbose {
                 let other = if std::mem::take(&mut self.other_thread_label) { "other thread: " } else { "" };
                 // 被約費用による大域的な固定の後に固定されている整数列の数 (根の LP を解く前に固定されていた数との差も)。
@@ -3335,7 +3353,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.seen_best = b;
                     self.root_redcost_fixing();
                     let lim = self.prune_limit();
-                    self.queue.prune(lim);
+                    self.prune_queue(lim);
                 }
             }
             // 従を始める: 待ち行列のノードが `ENOMOTO_T_MIP_TREE_SPAWN_NODES` 個 (既定 2、根を分枝した後) たまったら始め、
@@ -3526,7 +3544,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     plunge_start = self.nodes;
                     self.dive_stack.clear();
                     let lim = self.prune_limit();
-                    self.queue.prune(lim);
+                    self.prune_queue(lim);
                     // 下界最小のノードを選ぶ頻度: 暫定解があれば上げる (下界を押し上げる)
                     self.proof_phase_check();
                     let bb_every = if self.in_proof_phase() {
@@ -3595,6 +3613,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             };
             xp("m_pop");
+            // 診断用 (`ENOMOTO_T_MIP_TREE_DIAG_WAITING_SLEEP_MS`): 待っている側に数えられたままノードを処理するスレッドを眠らせ、
+            // その間にほかのスレッドが探索の終わりを判定する競合を起こしやすくする
+            if self.pool.is_some() && !self.pool_busy {
+                let ms = tunable!("ENOMOTO_T_MIP_TREE_DIAG_WAITING_SLEEP_MS", 0u64, u64);
+                if tree_diag() {
+                    eprintln!("MIP_TREE_DIAG: tid {} processes a node (lower bound {:.10e}) while counted as waiting", self.pool_tid, node.lower_bound);
+                }
+                if ms > 0 {
+                    std::thread::sleep(Duration::from_millis(ms));
+                }
+            }
             if first {
                 self.tprof.tree_start_s = self.start.elapsed().as_secs_f64();
             }
@@ -4468,8 +4497,32 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.snap_report(None);
         }
         // 木を分け合う主: 従を待ち、従が見つけた解を受け取ってから結果を決める
-        self.join_workers();
+        let wlb = self.join_workers();
         self.take_inbox();
+        // 従を止めた後に、止められた従が返したノード・共有の待ち行列に残ったノード (下界 `wlb`) が打ち切り値より小さければ、
+        // 探索し残した部分木がある (最適とは言えない)。また共有の最良値が主の暫定解より良ければ、その解が主に届いていない
+        if self.pool.is_some() && self.snap.is_none() {
+            let lim = self.prune_limit();
+            let z = self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z);
+            let sb = self.shared.as_ref().map_or(f64::INFINITY, |s| s.best());
+            if tree_diag() {
+                eprintln!("MIP_TREE_DIAG: end of tree search: incumbent {z:.10e} shared best {sb:.10e} prune limit {lim:.10e} workers/pool bound {wlb:.10e} unresolved {}", self.unresolved);
+            }
+            if sb < z - 1e-9 * z.abs().max(1.0) {
+                eprintln!("MIP: WARNING: the shared best value {sb:.10e} is better than the main thread's incumbent {z:.10e} at the end of the tree search");
+            }
+            if self.dbg_on {
+                let dz = DEBUG_SOL.with(|d| d.borrow().as_ref().map(|x| self.p.objective(x)));
+                if let Some(dz) = dz.filter(|&dz| dz < lim - 1e-6) {
+                    eprintln!("MIP_DEBUG_SOL: the tree search ended with prune limit {lim} above the debug solution's objective {dz} (incumbent {z})");
+                }
+            }
+            // `ENOMOTO_MIP_TREE_NO_END_CHECK` (診断用): 以前と同じく確かめずに最適と報告する (誤りの再現用)
+            if wlb < lim && !self.unresolved && env_str!("ENOMOTO_MIP_TREE_NO_END_CHECK").is_none() {
+                eprintln!("MIP: WARNING: nodes with lower bound {wlb:.10e} below the prune limit {lim:.10e} remained when the tree search threads were stopped; not reporting optimality");
+                return self.finish(MipStatus::NotSolved, wlb.min(z));
+            }
+        }
         if self.unresolved {
             let lb = self.incumbent.as_ref().map(|(z, _)| *z).unwrap_or(f64::NEG_INFINITY);
             return self.finish(MipStatus::NotSolved, lb);
@@ -5549,6 +5602,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let mut back: Vec<SnapNode> = self.queue.iter().map(SnapNode::of).collect();
             if let Some(n) = current {
                 back.push(SnapNode::of(n));
+            }
+            if self.dbg_on && back.iter().any(|n| self.dbg_changes(&n.changes)) {
+                eprintln!("MIP_DEBUG_SOL: tree thread {} stopped ({status:?}) holding a node that contains the debug solution (returned to the shared queue)", self.pool_tid);
+            }
+            if tree_diag() && !back.is_empty() {
+                eprintln!("MIP_TREE_DIAG: tid {} stopped ({status:?}) holding {} nodes (min lower bound {:.10e}, counted as {})", self.pool_tid, back.len(), back.iter().map(|n| n.lower_bound).fold(f64::INFINITY, f64::min), if self.pool_busy { "busy" } else { "waiting" });
             }
             let mut g = pool.inner.lock().unwrap();
             g.nodes.extend(back);
@@ -8097,6 +8156,20 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let thr = tunable!("ENOMOTO_T_MIP_TREE_BALANCE_Q", 0.2, f64) * width;
         if let Some(sn) = if pool_min < me - thr { g.nodes.pop_best() } else { None } {
             pool.len.store(g.nodes.len(), Ordering::Relaxed);
+            // 待っている側に数えられたまま (ヒューリスティクス役から木に戻った直後) ノードを取るときは、待っていない側に戻す
+            // ([`Self::pool_acquire`] と同じ)。戻さないと、このスレッドがノードを持っている間にほかのスレッドが「全員が待っていて
+            // 共有の待ち行列も空」と判定して探索を終え、このスレッドの部分木が失われる (mc11 で 11712 を最適と誤って報告した
+            // 経路の候補。analysis/partree_race_20261021.md)
+            if !self.pool_busy {
+                if tree_diag() {
+                    eprintln!("MIP_TREE_DIAG: tid {} took a node (lower bound {:.10e}) by balancing while counted as waiting (busy {}, pool {})", self.pool_tid, sn.lower_bound, g.busy, g.nodes.len());
+                }
+                if env_str!("ENOMOTO_MIP_TREE_NO_BALANCE_BUSY_FIX").is_none() {
+                    g.busy += 1;
+                    pool.idle.fetch_sub(1, Ordering::Relaxed);
+                    self.pool_busy = true;
+                }
+            }
             drop(g);
             if let Some(sl) = pool.slots.get(t) {
                 sl.lb.store(me.min(sn.lower_bound).to_bits(), Ordering::Relaxed);
@@ -8213,6 +8286,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         for h in std::mem::take(&mut self.workers) {
             match h.join() {
                 Ok(r) => {
+                    if tree_diag() {
+                        eprintln!("MIP_TREE_DIAG: worker ended: status {:?} objective {:?} bound {:.10e} nodes {}", r.status, r.objective, r.best_bound, r.nodes);
+                    }
                     if let (Some(zw), Some((z, _))) = (r.objective, &self.incumbent) {
                         if zw < *z - 1e-6 * z.abs().max(1.0) {
                             eprintln!("MIP: WARNING: a tree thread ended with a better solution {zw:.10e} than the main thread's {z:.10e}");
