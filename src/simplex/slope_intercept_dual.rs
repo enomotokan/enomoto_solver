@@ -1203,6 +1203,26 @@ pub(crate) fn set_warm_lu(lu: Option<sparse_lu::FtLu>) {
     WARM_LU.with(|w| *w.borrow_mut() = lu.map(Box::new));
 }
 
+thread_local! {
+    /// 外部の打ち切り (時間・反復の上限) で止まったときの状態を残すか ([`request_stop_state`])。
+    static WANT_STOP_STATE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// 外部の打ち切りで止まったときの (基底, DSE 重み (基底位置順), 非基底列の置き場所 (列ごと: -1 下限、+1 上限、0 自由の 0))。
+    static LAST_STOP_STATE: std::cell::RefCell<Option<(Vec<usize>, Vec<f64>, Vec<i8>)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// 外部の打ち切り (時間・反復の上限) で主ループを抜けるとき、そのときの基底・DSE 重み・非基底列の置き場所を残すかを設定する
+/// (残したものは捨てる)。MIP の LP ラッパーが、打ち切られた求解の続きをその基底から始めるために使う
+/// (`ENOMOTO_MIP_LP_RESUME`、analysis/lp_hang_20261021.md)。
+pub(crate) fn request_stop_state(on: bool) {
+    WANT_STOP_STATE.with(|w| w.set(on));
+    LAST_STOP_STATE.with(|l| *l.borrow_mut() = None);
+}
+
+/// 外部の打ち切りで止まったときの状態を取り出す ([`request_stop_state`])。
+pub(crate) fn take_stop_state() -> Option<(Vec<usize>, Vec<f64>, Vec<i8>)> {
+    LAST_STOP_STATE.with(|l| l.borrow_mut().take())
+}
+
 /// 最適で返るときに基底の LU を保存するかを設定する (保存済みのものは捨てる)。
 pub(crate) fn request_lu(on: bool) {
     WANT_LU.with(|w| w.set(on));
@@ -3928,9 +3948,30 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     let exact_once = DSE_EXACT_ONCE.swap(false, std::sync::atomic::Ordering::Relaxed);
     let warm_once = WARM_DSE_ONCE.swap(false, std::sync::atomic::Ordering::Relaxed);
     let mut dse = match WARM_DSE.with(|w| w.borrow_mut().take()) {
+        // 呼び出し側が「この 1 回は厳密な重みから」と求めたとき ([`DSE_EXACT_ONCE`]) は、引き継いだ重みがあってもそれを使う
+        _ if warm_started && exact_once => {
+            if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
+                eprintln!("DEBUG_EXT: DSE weights: exact for the whole basis (requested once)");
+            }
+            super::DseState::from_basis(m, &lu)
+        }
         // 既定では使わない (`ENOMOTO_WARM_DSE` で有効): 反復は少し減るが、退化した LP で着く頂点が変わり、misc07・mik-250 で
         // 木が大きくなった (40 問: 18 -> 17 問)
-        Some(w) if warm_started && w.len() == m && (warm_once || env_str!("ENOMOTO_WARM_DSE").is_some() || WARM_DSE_ON.load(std::sync::atomic::Ordering::Relaxed)) => super::DseState::from_weights(w),
+        Some(w) if warm_started && w.len() == m && (warm_once || env_str!("ENOMOTO_WARM_DSE").is_some() || WARM_DSE_ON.load(std::sync::atomic::Ordering::Relaxed)) => {
+            let mut s = super::DseState::from_weights(w);
+            if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
+                eprintln!("DEBUG_EXT: DSE weights: inherited ({} rows, {} unknown)", s.w.len(), s.w.iter().filter(|v| v.is_nan()).count());
+            }
+            // 重みが `NaN` の行 (MIP で加えた直後の行、`ENOMOTO_MIP_ROWS_DSE_EXACT`) は、この基底の厳密な値を BTRAN で埋める
+            if s.w.iter().any(|v| v.is_nan()) {
+                let t0 = std::time::Instant::now();
+                let k = s.fill_missing(&lu);
+                if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
+                    eprintln!("DEBUG_EXT: exact DSE weights for {k} rows without a weight ({:.3}s)", t0.elapsed().as_secs_f64());
+                }
+            }
+            s
+        }
         // `ENOMOTO_DSE_EXACT_INIT`: warm start (構造列を含む基底) では、単位重みではなくその基底の厳密な DSE 重みから
         // 始める (HiGHS の HEkkDual::initialiseInstance と同じ。行ごとに BTRAN 1 回、計 m 回)。単位重みは全スラック基底で
         // しか正確でなく、分枝限定法で待ち行列から取り出したノード (保存した基底を復元、重みの引き継ぎなし) の最初の LP は
@@ -3938,8 +3979,18 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         // 減るが、着く頂点が変わって根のカットのループが 23.26 で止まり (既定は 47.26)、40 問では 14 問 30.87 (同時に測った
         // 既定 19 問 27.81): misc07・binkar10_1・neos-860300・mik-250・neos5 が時間切れ、beavma 0.8 -> 8.7 秒 (m 回の BTRAN
         // の分だけ LP 1 回が重くなる)。既定では使わない
-        _ if warm_started && (exact_once || env_str!("ENOMOTO_DSE_EXACT_INIT").is_some()) => super::DseState::from_basis(m, &lu),
-        _ => super::DseState::new(m),
+        _ if warm_started && (exact_once || env_str!("ENOMOTO_DSE_EXACT_INIT").is_some()) => {
+            if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
+                eprintln!("DEBUG_EXT: DSE weights: exact for the whole basis");
+            }
+            super::DseState::from_basis(m, &lu)
+        }
+        w => {
+            if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
+                eprintln!("DEBUG_EXT: DSE weights: unit (warm_started={warm_started}, passed={}, warm_dse_on={}, once={warm_once})", w.as_ref().map_or("none".to_string(), |w| w.len().to_string()), WARM_DSE_ON.load(std::sync::atomic::Ordering::Relaxed));
+            }
+            super::DseState::new(m)
+        }
     };
 
     // 停滞(目的関数への寄与がほぼ 0 のピボット)がこの回数を超えたら Bland 規則に切り替える。
@@ -4350,6 +4401,11 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
             xprof("main_ext");
             if profile_phases {
                 prof_phases::report(wall_t0.elapsed().as_nanos() as usize);
+            }
+            // 時間・反復の上限で止まるときは、求められていれば今の基底・DSE 重み・非基底列の置き場所を残す (続きを解くため)
+            if WANT_STOP_STATE.with(|w| w.get()) && matches!(ext_stop(), ExtStop::TimeLimit | ExtStop::IterationLimit) {
+                let hint: Vec<i8> = nb_status.iter().map(|s| match s { Some(NbStatus::Lower) => -1, Some(NbStatus::Upper) => 1, _ => 0 }).collect();
+                LAST_STOP_STATE.with(|l| *l.borrow_mut() = Some((basis.clone(), dse.w.clone(), hint)));
             }
             return None; // 外部の打ち切り条件 (分枝限定法の LP)
         }

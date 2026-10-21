@@ -89,6 +89,9 @@ mod dualize;
 pub(crate) mod mip_lp;
 #[cfg(test)]
 mod lp_bug_debug;
+/// 根のカットのループで書き出した LP を解き直す診断テスト (`ENOMOTO_MIP_DEBUG_DUMP_CUT_LP`)。
+#[cfg(test)]
+mod cut_lp_debug;
 
 /// 単体法の各メインループの反復上限を問題サイズから決める。
 ///
@@ -2069,6 +2072,31 @@ impl DseState {
             }
         }
         DseState { w, use_parallel: m > RAYON_SIZE_THRESHOLD }
+    }
+
+    /// 重みが `NaN` (未知) の行だけ、[`Self::from_basis`] と同じ BTRAN でその基底の厳密な値にする。MIP で行 (カット) を
+    /// 加えた直後の warm start 用: 古い行の引き継いだ重みはそのまま正しく (`B^-1` の行が変わらない)、新しい行の重みだけ
+    /// 分からない。埋めた行数を返す。
+    fn fill_missing(&mut self, lu: &sparse_lu::FtLu) -> usize {
+        let m = self.w.len();
+        let mut scratch = vec![0.0; m];
+        let mut z = vec![0.0; m];
+        let floor = tunable!("ENOMOTO_T_STEEPEST_EDGE_FLOOR", STEEPEST_EDGE_FLOOR, f64);
+        let mut filled = 0;
+        for i in 0..m {
+            if !self.w[i].is_nan() {
+                continue;
+            }
+            if lu.update_count() == 0 {
+                lu.solve_transpose_unit_into(i, &mut scratch, &mut z);
+            } else {
+                lu.solve_transpose_unit(i, &mut scratch, &mut z);
+            }
+            let norm_sq: f64 = z.iter().map(|&v| v * v).sum();
+            self.w[i] = norm_sq.max(floor);
+            filled += 1;
+        }
+        filled
     }
 
     /// ピボット後の DSE 重み更新。

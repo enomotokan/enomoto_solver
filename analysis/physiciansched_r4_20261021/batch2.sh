@@ -1,0 +1,7 @@
+#!/bin/bash
+cd "$(dirname "$0")"
+P=physiciansched6-2
+E2="ENOMOTO_MIP_PROBE_EQUIV2=1"
+./run_cfg.sh $P 60 e2 ENOMOTO_MIP_LOG=1 $E2
+./run_cfg.sh $P 60 e2c ENOMOTO_MIP_LOG=1 $E2 ENOMOTO_MIP_EQUIV2_CUTS=1
+./run_cfg.sh $P 60 e2c5 ENOMOTO_MIP_LOG=1 $E2 ENOMOTO_MIP_EQUIV2_CUTS=1 ENOMOTO_T_MIP_EQUIV2_CUT_TIME_FRAC=0.5

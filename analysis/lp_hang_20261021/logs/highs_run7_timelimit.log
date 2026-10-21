@@ -1,0 +1,25 @@
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+read dumps/run7/cutlp_r8_TimeLimit.mps: HighsStatus.kOk n=111827 m=9196
+basis: cols {'L': 109315, 'U': 134, 'Z': 0, 'B': 2378} rows {'L': 24, 'U': 2354, 'B': 6818}
+setBasis: HighsStatus.kOk
+LP cutlp_r8_TimeLimit has 9196 rows; 111827 cols; 42183 nonzeros
+Coefficient ranges:
+  Matrix  [4e-03, 1e+03]
+  Cost    [1e+00, 1e+00]
+  Bound   [1e+00, 8e+03]
+  RHS     [6e-17, 8e+02]
+WARNING: Problem has some excessively small row bounds
+Solving LP with useful basis
+Using dual simplex solver
+  Iteration        Objective     Infeasibilities num(sum)
+          0     4.8987081319e+04 Pr: 75(159.423); Du: 0(7.53774e-08) 0.3s
+       1574     4.9093583333e+04 Pr: 0(0); Du: 0(2.06562e-08) 1.2s
+
+Model name          : cutlp_r8_TimeLimit
+Model status        : Optimal
+Simplex   iterations: 1574
+Objective value     :  4.9093583333e+04
+P-D objective error :  3.1863939213e-15
+HiGHS run time      :          1.21
+RESULT dumps/run7/cutlp_r8_TimeLimit mode=warm alg=dual: status=Optimal iters=1574 time=1.213s obj=4.9093583333e+04
