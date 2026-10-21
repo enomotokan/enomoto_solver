@@ -18,6 +18,10 @@ thread_local! {
     static CLIQUE_FB_SECOND: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// `ENOMOTO_MIP_CUT_EXTEND` で根のカットの時間の上限を延ばした後か (延ばした後は面の頂点での分離を止める)
     static CUT_EXTENDED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// 最初の求解 (再スタート前) の根のカットのループが目的値をまったく動かさなかったか (`ENOMOTO_MIP_FLAT_RESTART`)
+    pub(super) static FLAT_ROOT_FIRST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// 最初の求解の根の RINS が解を見つけなかったときの暫定解の値 (`ENOMOTO_MIP_FLAT_RESTART`)
+    pub(super) static RINS_FAIL_Z: std::cell::Cell<Option<f64>> = const { std::cell::Cell::new(None) };
 }
 use super::lp_api::MipLp;
 
@@ -252,6 +256,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut prev_obj = self.lp.objective();
         let mut prev_nfrac = self.fractional(&self.lp.col_values()).len();
         let first_obj = prev_obj;
+        if !self.params.submip && self.params.restarts == 0 && self.snap.is_none() && !CLIQUE_FB_SECOND.with(|c| c.get()) {
+            FLAT_ROOT_FIRST.with(|c| c.set(false));
+            RINS_FAIL_Z.with(|c| c.set(None));
+        }
         if clique_cuts_mode() == Some("auto") && self.clique_auto.is_none() && !self.params.submip {
             // 再スタートの後は最初の求解の判定を引き継ぐ (再スタートの根は前の根のカットを持つので、試しても伸びない)
             let on = match CLIQUE_AUTO_FIRST.with(|c| c.get()) {
@@ -290,6 +298,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let fc_sub = self.params.submip && self.params.fc_submip;
         let mut max_rounds = if fc_sub { tunable!("ENOMOTO_T_MIP_FC_SUBMIP_CUT_ROUNDS", 25usize, usize) } else if self.params.submip { tunable!("ENOMOTO_T_MIP_SUBMIP_CUT_ROUNDS", 5usize, usize) } else { tunable!("ENOMOTO_T_MIP_CUT_ROUNDS", 25usize, usize) };
         let mut time_cap = if self.params.time_limit.is_finite() { tunable!("ENOMOTO_T_MIP_CUT_TIME_FRAC", 0.1, f64) * self.params.time_limit } else { f64::INFINITY };
+        // `ENOMOTO_MIP_FLAT_RESTART` (試作): 再スタート前の根のカットのループが目的値をまったく動かさなかったなら、再スタート後の
+        // ループは `ENOMOTO_T_MIP_FLAT_RESTART_CUT_ROUNDS` (既定 1) ラウンドまで (前の根の効いていたカットは行として持っている)。
+        // neos-2978193-inde では再スタート前後とも 8 ラウンド・約 6 秒ずつ回り、根の LP の値は -2.4185181860 のまま
+        if self.flat_restart() {
+            max_rounds = max_rounds.min(tunable!("ENOMOTO_T_MIP_FLAT_RESTART_CUT_ROUNDS", 1usize, usize));
+            if self.params.verbose {
+                eprintln!("MIP: flat root before the restart: up to {max_rounds} cut rounds, no background cuts");
+            }
+        }
+        // `ENOMOTO_T_MIP_FLAT_CUT_ROUNDS` = k (> 0、試作): 最初の求解の根で、k ラウンド回っても目的値がまったく動かなければ止める
+        let flat_stop = if self.params.submip || self.params.restarts > 0 { 0 } else { tunable!("ENOMOTO_T_MIP_FLAT_CUT_ROUNDS", 0usize, usize) };
         // 根のヒューリスティクスの間にカットを強める求解: 止めの合図まで続ける (ラウンド数・時間の上限なし)
         let job = super::solver::CUT_JOB.with(|j| j.borrow().clone()).filter(|_| self.snap.is_some());
         if job.is_some() {
@@ -416,6 +435,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         eprintln!("MIP: cut loop extended to {max_rounds} rounds");
                     }
                 }
+            }
+            if flat_stop > 0 && round_ctr >= flat_stop && job.is_none() && self.lp.objective() - first_obj <= 1e-9 * self.lp.objective().abs().max(1.0) {
+                if self.params.verbose {
+                    eprintln!("MIP: cut loop: objective unchanged after {round_ctr} rounds; stop");
+                }
+                break;
             }
             let round = round_ctr;
             round_ctr += 1;
@@ -799,6 +824,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         if !self.params.submip && st == LpStatus::Optimal && job.is_none() {
             super::record_root_bound(self.lp.objective() + p.offset);
+        }
+        if !self.params.submip && self.params.restarts == 0 && job.is_none() {
+            let flat = st == LpStatus::Optimal && self.lp.objective() - first_obj <= 1e-9 * self.lp.objective().abs().max(1.0);
+            FLAT_ROOT_FIRST.with(|c| c.set(flat));
         }
         user_log!(
             "Root cuts: objective {:.10e} -> {:.10e}, {} cuts in the LP ({:.2}s)",
