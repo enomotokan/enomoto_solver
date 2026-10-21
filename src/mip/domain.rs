@@ -70,6 +70,8 @@ pub struct Domain {
     low_water: usize,
     /// 根に戻ったときに適用する大域的な境界の締め付け (列, 上限か, 値)。
     pending_global: Vec<(usize, bool, f64)>,
+    /// 診断用: デバッグ解 (含意の伝播がデバッグ解を切ったら表示する)。
+    pub dbg_sol: Option<std::sync::Arc<Vec<f64>>>,
     /// 根に戻った回数 (活動量の誤差の蓄積を防ぐための定期的な再計算に使う)。
     resets: u64,
     /// 大域的な境界 (根で確定したものと、その後の大域的な締め付けを反映したもの)。
@@ -117,6 +119,7 @@ impl Domain {
             cur_reason: -1,
             low_water: 0,
             pending_global: Vec::new(),
+            dbg_sol: None,
             resets: 0,
             global_lo: p.col_lo.clone(),
             global_up: p.col_up.clone(),
@@ -178,6 +181,11 @@ impl Domain {
 
     /// 変更の記録の長さ (巻き戻し位置として使う)。
     /// 記録の位置 `pos` より後の境界の変更 (列, 上限か, 変更後の値)。同じ列・側が何度も変わったら最後のものが後に来る。
+    /// 診断用: 列 `j` の側 `upper` の境界を最後に変えた記録 (位置, 理由, 変更前, 変更後)。記録になければ `None` (根の状態の境界)。
+    pub fn last_change_of(&self, j: usize, upper: bool) -> Option<(usize, i64, f64, f64)> {
+        self.stack.iter().enumerate().rev().find(|(_, c)| c.col == j && c.upper == upper).map(|(k, c)| (k, c.reason as i64, c.old, c.new))
+    }
+
     pub fn changes_since(&self, pos: usize) -> impl Iterator<Item = (usize, bool, f64)> + '_ {
         self.stack[pos.min(self.stack.len())..].iter().map(|c| (c.col, c.upper, c.new))
     }
@@ -442,8 +450,21 @@ impl Domain {
                     }
                     let lit = 2 * j + if self.lo[j] == 1.0 { 0 } else { 1 };
                     work += adj[lit].len();
+                    // 診断用 (`ENOMOTO_MIP_DEBUG_IMPL_TAG`): 含意による変更の理由を -9 にして出どころを区別する (衝突解析の段の区切りが
+                    // 変わるので診断のときだけ)
+                    let saved_reason = self.cur_reason;
+                    if env_str!("ENOMOTO_MIP_DEBUG_IMPL_TAG").is_some() {
+                        self.cur_reason = -9;
+                    }
                     for &c in &adj[lit] {
                         let k = (c / 2) as usize;
+                        // 診断用: 含意 (x_j = lo_j => x_k = w) がデバッグ解で成り立たなければ、含意が誤り
+                        if let Some(x) = &self.dbg_sol {
+                            let w = if c % 2 == 0 { 0.0 } else { 1.0 };
+                            if (x[j] - self.lo[j]).abs() <= 1e-6 && (x[k] - w).abs() > 1e-6 {
+                                eprintln!("MIP_DEBUG_SOL: implication x{j} = {} => x{k} = {w} is violated by the debug solution (x{j} {}, x{k} {})", self.lo[j], x[j], x[k]);
+                            }
+                        }
                         if c % 2 == 0 {
                             if self.up[k] > 0.0 {
                                 self.set_bound(p, k, true, 0.0, true);
@@ -455,6 +476,7 @@ impl Domain {
                             break;
                         }
                     }
+                    self.cur_reason = saved_reason;
                     if self.infeasible {
                         break;
                     }
@@ -655,6 +677,13 @@ impl Domain {
     /// 段は分枝の決定だけで区切る。
     pub fn set_external(&mut self, on: bool) {
         self.cur_reason = if on { -2 } else { -1 };
+    }
+
+    /// 診断用: 外から来た変更の出どころを理由の値で区別する (`-2 - tag`。衝突解析は `< 0` / `== -1` しか見ないので動作は同じ)。
+    /// tag: 1 被約費用による局所的な固定、2 強分枝の子の打ち切りによる固定、3 オービトープの固定、4 双対証明の締め付け、
+    /// 5 リテラルの衝突、6 目的関数の伝播。
+    pub fn set_external_tag(&mut self, tag: i32) {
+        self.cur_reason = -2 - tag;
     }
 
     /// HiGHS 式の衝突解析 (`HighsDomain::ConflictSet::conflictAnalysis`)。矛盾 (`start`) を、

@@ -241,7 +241,7 @@ impl LitConflictPool {
             if fixes.is_empty() {
                 break;
             }
-            dom.set_external(true);
+            dom.set_external_tag(5);
             for (k, upper, v, org, s) in fixes {
                 let ch = if upper {
                     v < dom.up[k] && { dom.tighten_upper(p, k, v); true }

@@ -1050,6 +1050,22 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// LP にカットの行を加える (年齢 0)。
     pub(super) fn add_cut_rows(&mut self, rows: &[(Vec<(usize, f64)>, f64, f64)]) {
+        // 診断用 (デバッグ解): どのスレッドでも、LP に加えるカットの行がデバッグ解を切っていれば表示する (打ち切り値より良いときだけ)
+        if self.dbg_on {
+            super::solver::DEBUG_SOL.with(|d| {
+                if let Some(x) = d.borrow().as_ref() {
+                    if self.p.objective(x) < self.prune_limit() - 1e-6 {
+                        for (k, (c, lo, up)) in rows.iter().enumerate() {
+                            let act: f64 = c.iter().map(|&(j, a)| a * x[j]).sum();
+                            if act < lo - 1e-6 * (1.0 + lo.abs()) || act > up + 1e-6 * (1.0 + up.abs()) {
+                                let terms: Vec<String> = c.iter().take(8).map(|&(j, a)| format!("{a:+.4}*x{j}[{:.4}]", x[j])).collect();
+                                eprintln!("MIP_DEBUG_SOL: node {} thread {}: cut row {k} of {} added to the LP (as row {}) is violated by the debug solution: {lo} <= {act:.10e} <= {up}, len {}: {}{}", self.nodes, self.pool_tid, rows.len(), self.lp.num_rows() + k, c.len(), terms.join(" "), if c.len() > 8 { " ..." } else { "" });
+                            }
+                        }
+                    }
+                }
+            });
+        }
         self.sync_cut_age();
         self.lp.add_rows(rows);
         self.cut_age.extend(std::iter::repeat_n(0, rows.len()));
