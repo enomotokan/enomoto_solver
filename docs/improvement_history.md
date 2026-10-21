@@ -9620,6 +9620,13 @@ neos-950242 の 2 回目の調査 (`analysis/neos950242_r2_20261020.md`)。
 - 修正 (src/mip/solver.rs `add_proof_from`): 破れの幅 (最小活動量 - 右辺) が `ENOMOTO_T_MIP_PROOF_NUM_TOL` (1e-9) × (Σ|y_i|(1+|b_i|) + Σ|d_j|(1+|境界_j|)) 以下なら証明とそこから作る衝突を捨てる。Farkas の射線は正規化してから同じ判定。
 - 確認: 修正後 mc11 打ち切り値 11728 を 50 回 + 既定 6 回、beasleyC3・rout・neos-911970・pk1 各 3 回 (4 スレッド 60 秒) で目的値はすべて正しい。捨てた証明は 68 回で 1 本。cargo test 308 通過。40 + 16 問の計測は別に立てる。
 
+## 2026-10-21: サブ MIP の前処理だけを強める (PROBE_ADAPTIVE_SUBMIP・CLIQUE_EXTEND_SUBMIP) は不採用
+
+- ユーザーの案 (サブ MIP の強化はカットではなく係数強化・伝播で)。係数強化・伝播は既にサブ MIP の前処理でも行っているので、サブ MIP で弱めている 2 つ (成果連動のプロービングの予算、集合詰め込み行の拡張) を本体並みにした。develop d7a3136 で 40 + 16 問、newdef / subpre (`ENOMOTO_MIP_PROBE_ADAPTIVE_SUBMIP=1 ENOMOTO_MIP_CLIQUE_EXTEND_SUBMIP=1`) / subprb (プロービングだけ) を 2 組 (SPa・SPb は順を逆に)。
+- 40 問 (解けた・SGM): SPa newdef 24・25.00 / subpre 24・24.31 / subprb 22・25.49、SPb newdef 26・19.88 / subpre 25・21.03 / subprb 26・20.23。
+- 16 問: SPa newdef 5・48.07 / subpre 8・46.89 / subprb 7・43.71、SPb newdef 10・35.49 / subpre 9・36.56 / subprb 9・38.18。不一致 0、"MIP: WARNING" 0。
+- SPa は機械が遅く (newdef が 40 問 24・16 問 5)、そこでは subpre・subprb が 16 問で良い (ns1116954・neos-911970・hypothyroid-k1)。速い SPb では両方とも解けた数が減る。基準を満たさないので不採用。
+
 ## 改名一覧 (整理時)
 
 本メモ中は旧名で書かれている。
