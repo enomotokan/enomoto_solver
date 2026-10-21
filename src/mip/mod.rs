@@ -40,6 +40,19 @@ pub(crate) fn implbd_genint() -> bool {
     env_str!("ENOMOTO_MIP_IMPLBD_GENINT").is_some()
 }
 
+/// `ENOMOTO_MIP_GR_AUTO` (試作、inv/gfrsplit-20261021): 一般整数 (0-1 でない整数) の列がある問題だけで
+/// `ENOMOTO_MIP_IMPLBD_GENINT` と `ENOMOTO_T_MIP_CUT_LP_RETRY=4` を働かせる。一般整数がなければ G は含意の相手を
+/// 増やさず、プロービングの含意の集め方 (0-1 の相手を集めない) を変えるだけで、neos-960392 (全部 0-1) では
+/// 探る列が 19200 -> 28272 列に変わって根の経路が変わっていた
+pub(crate) fn gr_auto() -> bool {
+    env_str!("ENOMOTO_MIP_GR_AUTO").is_some()
+}
+
+/// この問題で G (一般整数の含意の implied bound カット) を働かせるか ([`implbd_genint`] か、[`gr_auto`] で一般整数があるとき)
+pub(crate) fn implbd_genint_for(is_int: &[bool], lo: &[f64], up: &[f64]) -> bool {
+    implbd_genint() || (gr_auto() && (0..is_int.len()).any(|k| is_int[k] && lo[k] < up[k] && !(lo[k] >= 0.0 && up[k] <= 1.0)))
+}
+
 pub(crate) fn cap_clock() -> f64 {
     #[cfg(target_os = "linux")]
     {
@@ -1606,6 +1619,7 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
     let want_impl = env_str!("ENOMOTO_MIP_NO_PROBE_IMPLICATIONS").is_none();
     let edge_cap = 10 * nnz + 10_000;
     let bin0: Vec<bool> = (0..n).map(|k| prob.is_int[k] && prob.col_lo[k] == 0.0 && prob.col_up[k] == 1.0).collect();
+    let genint_on = implbd_genint_for(&prob.is_int, &prob.col_lo, &prob.col_up);
     // 引き継いだ含意 ([`presolve_mip`] の `ENOMOTO_MIP_KEEP_IMPLICATIONS`) に足していく
     let mut edges: Vec<(u32, u32)> = std::mem::take(&mut prob.conflict_edges);
     // 含意による境界 (implied bound カット用): x_j = v で x_k の境界が締まるもの。上限は非零数の 10 倍
@@ -1625,7 +1639,7 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
             }
             // `ENOMOTO_MIP_IMPLBD_GENINT`: 0-1 列どうしの含意は衝突の組 (clique) と同じなので集めない (HiGHS も 0-1 列の含意は
             // clique 表に入れ、implied bound には使わない)。0-1 列の含意で上限を使い切り、一般整数の含意が落ちるのを防ぐ
-            if implbd_genint() && bin0[k] {
+            if genint_on && bin0[k] {
                 continue;
             }
             let (l, u) = (dom.lo[k], dom.up[k]);

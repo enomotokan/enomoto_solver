@@ -618,7 +618,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // もう k 倍の時間だけ解き続ける。mzzv42z (10460 行) に implied bound カット 300 本余りを一度に入れると LP が
             // 1700 反復ほどかかり、上限 1.2 秒 (60 秒の 2%) に当たる回と当たらない回があって、当たると全部捨てて根の下界が
             // -21534 のまま終わる (当たらなければ -21203)
-            let retry = tunable!("ENOMOTO_T_MIP_CUT_LP_RETRY", 0.0, f64);
+            // `ENOMOTO_MIP_GR_AUTO` (試作): 一般整数の列がある問題だけ 4 倍 (G のカットを入れた LP を捨てないため)
+            let mut retry = tunable!("ENOMOTO_T_MIP_CUT_LP_RETRY", 0.0, f64);
+            if retry == 0.0 && st == LpStatus::TimeLimit && super::gr_auto() && super::implbd_genint_for(&p.is_int, &p.col_lo, &p.col_up) {
+                retry = 4.0;
+            }
             if st == LpStatus::TimeLimit && retry > 0.0 && cap.is_finite() && !self.time_up() {
                 let d = std::time::Instant::now() + std::time::Duration::from_secs_f64(retry * cap);
                 let d = Some(self.deadline.map_or(d, |g| g.min(d)));
@@ -1926,6 +1930,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if CUT_EXTENDED.with(|c| c.get()) && !self.params.submip {
             return (self.separate(x, light), Vec::new());
         }
+        // 試作 (inv/gfrsplit-20261021): `ENOMOTO_MIP_FACE_SEP_BG=off` なら背景のカットの求解 (`CUT_JOB`) だけ面の頂点の分離を止める
+        // (根の手前のカット・ヒューリスティクスの経路は既定のまま)。`ENOMOTO_MIP_GR_AUTO=2` なら一般整数の列がある問題だけ止める
+        // (G が働く問題。mzzv42z は G と面の分離を止めることの両方で根の RENS が崩れなくなる)
+        let in_bg = self.snap.is_some() && super::solver::CUT_JOB.with(|j| j.borrow().is_some());
+        if in_bg && env_str!("ENOMOTO_MIP_FACE_SEP_BG") == Some("off") {
+            return (self.separate(x, light), Vec::new());
+        }
+        if env_str!("ENOMOTO_MIP_GR_AUTO") == Some("2") && super::implbd_genint_for(&self.p.is_int, &self.p.col_lo, &self.p.col_up) {
+            return (self.separate(x, light), Vec::new());
+        }
         let mode = match env_str!("ENOMOTO_MIP_FACE_SEP") {
             Some(m) if m == "off" => return (self.separate(x, light), Vec::new()),
             Some(m) if !self.params.submip => m,
@@ -2257,7 +2271,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 既定では 1 本も出ないが、HiGHS の根の分離で LP に入るカットの 8 割がこれで、止めると根の下界が -20829 -> -21209 に
         // 落ちる。`=nodes` ならノードの分離 (`light`) でも使う
         let ib_gen_mode = env_str!("ENOMOTO_MIP_IMPLBD_GENINT");
-        let ib_gen = !ib_all && ib_gen_mode.is_some() && (!light || ib_gen_mode == Some("nodes"));
+        // `ENOMOTO_MIP_GR_AUTO` (試作): 一般整数の列があるときだけ根で使う ([`super::implbd_genint_for`])
+        let ib_gen_auto = ib_gen_mode.is_none() && !light && super::gr_auto() && super::implbd_genint_for(&p.is_int, &p.col_lo, &p.col_up);
+        let ib_gen = !ib_all && ((ib_gen_mode.is_some() && (!light || ib_gen_mode == Some("nodes"))) || ib_gen_auto);
         let ib_cont = ib_cont || ib_gen;
         if (ib_all || ib_cont) && !p.implied_bounds.is_empty() {
             let (glo, gup) = (&self.dom.global_lo, &self.dom.global_up);
