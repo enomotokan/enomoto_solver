@@ -9627,6 +9627,14 @@ neos-950242 の 2 回目の調査 (`analysis/neos950242_r2_20261020.md`)。
 - 16 問: SPa newdef 5・48.07 / subpre 8・46.89 / subprb 7・43.71、SPb newdef 10・35.49 / subpre 9・36.56 / subprb 9・38.18。不一致 0、"MIP: WARNING" 0。
 - SPa は機械が遅く (newdef が 40 問 24・16 問 5)、そこでは subpre・subprb が 16 問で良い (ns1116954・neos-911970・hypothyroid-k1)。速い SPb では両方とも解けた数が減る。基準を満たさないので不採用。
 
+## 2026-10-21: 根のカットの LP を厳密な DSE 重みから解く (CUT_DSE_EXACT)・加えた行の重みを埋めて続きから解く (ROWS_DSE_EXACT + LP_RESUME) は不採用
+
+- physiciansched6-2 の根のカットの LP が終わらない調査 (analysis/lp_hang_20261021.md) の最初の試作。重みがずれる根本の原因 (仕上げ・主単体法への引き継ぎのピボットで重みを更新していない) を直す前の対症療法。7ce7077 (develop d7a3136 + 試作) で 40 + 16 問、newdef / cutdse / rowsres を 2 組 (LDa・LDb は順を逆に)。
+- 40 問 (解けた・SGM): LDa newdef 26・21.30 / cutdse 25・22.05 / rowsres 26・21.24、LDb newdef 23・24.68 / cutdse 22・25.95 / rowsres 24・24.14。
+- 16 問: LDa newdef 9・37.32 / cutdse 10・39.64 / rowsres 9・39.18、LDb newdef 7・44.96 / cutdse 6・46.97 / rowsres 8・44.80。不一致 0。
+- cutdse は 2 組とも 40 問で解けた数が減り SGM も悪い。rowsres は 16 問の SGM が LDa で悪い。どちらも不採用。根本の修正 (計測 DF) で判断する。
+- LDb の cutdse で h80x6320d に "MIP: WARNING" が 1 件 (optimal、値は正しい)。本文が残っていなかったので Fable の調査を立て、計測スクリプトに本文も残すようにした (121ed10)。
+
 ## 改名一覧 (整理時)
 
 本メモ中は旧名で書かれている。
