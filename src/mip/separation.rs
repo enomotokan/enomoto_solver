@@ -321,6 +321,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let cap_base = if CLIQUE_FB_SECOND.with(|c| c.get()) && env_str!("ENOMOTO_MIP_CLIQUE_FB_SHARED_CAP").is_none() { t_loop0 } else { self.cpu0 };
         let mut phase2_deadline = f64::INFINITY;
         let mut round_ctr = 0usize;
+        // 診断 (`ENOMOTO_MIP_DEBUG_FACETIME`): このループの分離・面の頂点の分離・LP の時間の合計
+        let face0 = (self.face_secs, self.face_used);
+        let (mut sep_tot, mut lp_tot, mut nrounds) = (0.0f64, 0.0f64, 0usize);
+        let t_loop_wall = std::time::Instant::now();
         // 固定費用ネットワーク型 (連続変数のほぼ全てに VUB `x <= u y` の 2 非零の行があり、その行が大半) では、根のカット選択を
         // 緩める (質の閾値なし、平行度の上限 0.9)。flow cover 系のカットは同じ y の係数が支配的で互いに平行と判定されやすく、
         // 既定の選択では 1 ラウンドに数本しか入らない (sp150x300d: 候補 456 本 -> 31 本、根の下界 56.9 (HiGHS 68.7))。
@@ -563,6 +567,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let quota_full = chosen.len() >= max_cuts && ncands >= 2 * max_cuts;
             chosen.extend(forced);
             let sep_secs = t_sep.elapsed().as_secs_f64();
+            sep_tot += sep_secs;
+            nrounds += 1;
             let sel_secs = t_sel0.elapsed().as_secs_f64() - pool_secs;
             if chosen.is_empty() {
                 break;
@@ -634,6 +640,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
             self.sb_iters += 0;
+            lp_tot += t_lp0.elapsed().as_secs_f64();
             let _ = it0;
             if st != LpStatus::Optimal {
                 // 数値的に困ったら今回のカットを外して戻す
@@ -801,6 +808,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         self.remove_inactive_cuts();
+        if env_str!("ENOMOTO_MIP_DEBUG_FACETIME").is_some() && !self.params.submip {
+            eprintln!(
+                "FACETIME {}restarts {} rounds {nrounds}: sep {sep_tot:.2}s (face {:.2}s, {} vertices), LP {lp_tot:.2}s, loop {:.2}s, obj {:.10e}",
+                if job.is_some() { "bg " } else { "root " },
+                self.params.restarts,
+                self.face_secs - face0.0,
+                self.face_used - face0.1,
+                t_loop_wall.elapsed().as_secs_f64(),
+                self.lp.objective() + p.offset
+            );
+        }
         let st = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
         if clique_fb && st == LpStatus::Optimal && job.is_none() && !self.time_up() {
             let on = self.clique_fallback_trial(root_iters, first_obj);
@@ -2023,6 +2041,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.tab_memo_mode = 1;
         let cands = if mode == "canon" { Vec::new() } else { self.separate(x, light) };
         self.tab_memo_mode = 2;
+        let t_face0 = std::time::Instant::now();
         let mut fcands: Vec<Candidate> = Vec::new();
         let mut used = 0usize;
         // 面の LP 1 回の時間の上限 (カットを加えた LP と同じ、全体の 2%、最低 1 秒)。neos-3656078-kumeu・neos-933966 では
@@ -2069,6 +2088,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             used += 1;
         }
         self.tab_memo_mode = 0;
+        self.face_secs += t_face0.elapsed().as_secs_f64();
+        self.face_used += used;
         if env_str!("ENOMOTO_MIP_DEBUG_FACE").is_some() {
             eprintln!("FACE tab memo: checked {} rows, same as at the current vertex {}", self.tab_memo_stats.0, self.tab_memo_stats.1);
         }

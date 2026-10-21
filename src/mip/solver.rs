@@ -186,6 +186,9 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) bg_cut_rounds: usize,
     /// 根のカットのループで固定費用ネットワーク型と判定したか (`ENOMOTO_MIP_FACE_SEP_FC`、試作)
     pub(super) fc_network: bool,
+    /// 根の面の頂点の分離 (面の LP とその頂点での分離) に使った時間の合計と、使った面の頂点の数 (`ENOMOTO_MIP_DEBUG_FACETIME`)
+    pub(super) face_secs: f64,
+    pub(super) face_used: usize,
     /// 再スタート前の暫定解 (`START_SOL`) を受け取っている間か ([`Self::try_incumbent`] の `ENOMOTO_MIP_RESTART_REF` の判定を飛ばす)
     accepting_start: bool,
     /// 並列の強分岐 (`ENOMOTO_MIP_PAR_SB`) の [まとめた回数, 並列に解いた候補の数]。
@@ -1387,6 +1390,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         path_collect: None,
         bg_cut_rounds: 0,
         fc_network: false,
+        face_secs: 0.0,
+        face_used: 0,
         accepting_start: false,
         par_sb_stats: [0; 2],
         deadline,
