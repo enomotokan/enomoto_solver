@@ -135,9 +135,21 @@ pub fn detect(p: &MipProblem, time_cap: f64, max_tries: usize) -> Option<Symmetr
     let mut uf: Vec<usize> = (0..n).collect();
     let mut generators: Vec<Vec<usize>> = Vec::new();
     let mut tries = 0usize;
+    // `ENOMOTO_T_MIP_SYM_TIME_EXT` = e (> `time_cap`、試作。既定 0 で使わない): 上限 `time_cap` に達した時点で、生成元が
+    // `ENOMOTO_T_MIP_SYM_EXT_MIN_GENS` (既定 100) 個以上、試した組の `ENOMOTO_T_MIP_SYM_EXT_RATE` (既定 0.5) 以上で見つかって
+    // いれば、上限を e 秒に延ばす。beasleyC3 では 0.3 秒で 773 個のうち 190〜490 個 (時刻しだい) で打ち切られ、根の下界
+    // (背景のカットの後) が回ごとに 730〜746 と揺れた。全部見つけるのに 0.64 秒。生成元が遅くしか見つからない問題 (nw04: 0.3 秒で
+    // 2 個) まで延ばすと nw04 が 11 -> 26 秒、h80x6320d (40 個) が 34〜38 -> 40〜48 秒になった (analysis/beasleyC3_r3_20261020.md)
+    let ext = tunable!("ENOMOTO_T_MIP_SYM_TIME_EXT", 0.0, f64);
+    let ext_rate = tunable!("ENOMOTO_T_MIP_SYM_EXT_RATE", 0.5, f64);
+    let ext_min = tunable!("ENOMOTO_T_MIP_SYM_EXT_MIN_GENS", 100usize, usize);
+    let mut time_cap = time_cap;
     'cells: for cell in &cells {
         let a = cell[0];
         for &b in &cell[1..] {
+            if ext > time_cap && t0.elapsed().as_secs_f64() > time_cap && generators.len() >= ext_min.max(1) && generators.len() as f64 >= ext_rate * tries as f64 {
+                time_cap = ext;
+            }
             if tries >= max_tries || t0.elapsed().as_secs_f64() > time_cap {
                 break 'cells;
             }
@@ -145,7 +157,9 @@ pub fn detect(p: &MipProblem, time_cap: f64, max_tries: usize) -> Option<Symmetr
                 continue;
             }
             tries += 1;
-            if let Some(perm) = search(p, &col, &row, a, b, t0, time_cap, &row_counts) {
+            // 延長するときは 1 回の探索の中の上限も延長後の値にする (`time_cap` をまたいだ探索が打ち切られて、見つかる生成元が
+            // 772 / 773 個と回ごとに変わった)
+            if let Some(perm) = search(p, &col, &row, a, b, t0, time_cap.max(ext), &row_counts) {
                 if verify(p, &perm, &row_counts) {
                     for j in 0..n {
                         let (x, y) = (find(&mut uf, j), find(&mut uf, perm[j]));

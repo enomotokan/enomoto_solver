@@ -3085,7 +3085,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             super::record_root_bound(new);
                         }
                         // `ENOMOTO_MIP_BG_CUTS_REHEUR`: 置き換えた LP の解で軽いヒューリスティクスをもう一度回す (`1`: 丸めだけ、
-                        // `rins`: 丸めと、暫定解があれば RINS も)
+                        // `rins`: 丸めと、暫定解があれば RINS も、`rens` (試作): 丸めと RENS と RINS)。`rens` は beasleyC3 のため:
+                        // 根のヒューリスティクスの RENS は前景のカットの後の LP (712〜720) で 768〜787 しか出さないが、HiGHS は
+                        // カットの後の根 (733) の部分 MIP で 1.7 秒に 756 を見つける。背景のカットの後の LP は 742〜748 と強い
                         if let Some(mode) = env_str!("ENOMOTO_MIP_BG_CUTS_REHEUR") {
                             let x2 = self.lp.col_values();
                             if !self.fractional(&x2).is_empty() {
@@ -3093,10 +3095,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                                 let z0 = self.incumbent.as_ref().map(|(z, _)| *z);
                                 let a = self.simple_rounding(&x2);
                                 let b = self.zi_round(&x2);
-                                let c = mode == "rins" && self.incumbent.is_some() && self.rins(&x2);
+                                let r = mode == "rens" && self.rens(&x2);
+                                let c = (mode == "rins" || mode == "rens") && self.incumbent.is_some() && self.rins(&x2);
                                 if self.params.verbose {
                                     eprintln!(
-                                        "MIP: background cuts: heuristics on the new LP solution: rounding {a} ZI {b} RINS {c}, incumbent {z0:?} -> {:?} ({:.2}s)",
+                                        "MIP: background cuts: heuristics on the new LP solution: rounding {a} ZI {b} RENS {r} RINS {c}, incumbent {z0:?} -> {:?} ({:.2}s)",
                                         self.incumbent.as_ref().map(|(z, _)| *z),
                                         t1.elapsed().as_secs_f64()
                                     );
