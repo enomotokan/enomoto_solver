@@ -566,6 +566,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     farkas_added: u64,
     /// 双対証明で枝刈りしたノード数と、締めた境界の数 (表示用)。
     pub(super) proof_prunes: u64,
+    /// 数値誤差の見積もりの範囲内でしか破れていないために捨てた証明の数 ([`Self::add_proof_from`])。
+    pub(super) proof_numeric_rejects: u64,
     /// 診断用 (`ENOMOTO_MIP_PROOF_VERIFY`): 直前に [`Self::apply_dual_proofs`] がノードを刈ったときの証明の番号。
     proof_last_prune: Option<usize>,
     /// 診断用 (`ENOMOTO_MIP_PROOF_VERIFY`): 直前の刈り込みが、同じ呼び出しの中の証明による締め付け (整数の丸めを含む) の後に
@@ -1639,6 +1641,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         conf_stats: [0; 8],
         farkas_added: 0,
         proof_prunes: 0,
+        proof_numeric_rejects: 0,
         proof_last_prune: None,
         proof_prune_after_tighten: false,
         proof_verify_stats: [0; 4],
@@ -6193,9 +6196,24 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// `rhs = -konst`)。
     fn add_proof_from(&mut self, y: &[f64], obj: bool) -> bool {
         let p = self.p;
+        // 実行不能の証明 (Farkas) は斉次なので、射線を最大の成分で 1 に正規化する (下の数値誤差の見積もりを小さく保つ)
+        let y_norm: Vec<f64>;
+        let y: &[f64] = if obj {
+            y
+        } else {
+            let m = y.iter().take(self.lp.num_rows()).fold(0.0f64, |m, v| m.max(v.abs()));
+            if m > 0.0 && m.is_finite() {
+                y_norm = y.iter().map(|v| v / m).collect();
+                &y_norm
+            } else {
+                y
+            }
+        };
         let mut d = if obj { p.cost.clone() } else { vec![0.0; p.n] };
         let mut konst = 0.0;
         let mut skipped = 0usize;
+        // 数値誤差の見積もり: 行の重み y_i と行の境界、係数と列の境界の大きさに比例する項の和 (下で破れの幅と比べる)
+        let mut num_err = 0.0f64;
         for (i, &yi) in y.iter().enumerate().take(self.lp.num_rows()) {
             if yi.abs() <= 1e-12 {
                 continue;
@@ -6207,11 +6225,26 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 continue; // その行は使わない (y_i = 0 とみなす。d もそれに合わせて作る)
             }
             konst += yi * b;
+            num_err += yi.abs() * (1.0 + b.abs());
             for (j, a) in self.lp.row(i) {
                 d[j] -= yi * a;
             }
         }
         let dmax = d.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+        for (j, &dj) in d.iter().enumerate() {
+            if dj != 0.0 {
+                let b = if dj > 0.0 { self.dom.lo[j] } else { self.dom.up[j] };
+                let b = if b.is_finite() { b } else if dj > 0.0 { self.dom.global_lo[j] } else { self.dom.global_up[j] };
+                if b.is_finite() {
+                    num_err += dj.abs() * (1.0 + b.abs());
+                }
+            }
+        }
+        // 行の重みが極端に大きい (強分枝の子が実行不能に近く、双対単体法が双対の射線に沿って進む途中で打ち切り値を越えて止まった
+        // ときなど、|y| が 1e20 になった例がある) と、konst = Σ y_i b_i と d = c - y^T A は桁落ちで意味を失い、行を 1e-13 しか破らない
+        // 最適解をも切る「証明」になる (mc11 の誤った最適値 11728 の原因。analysis/partree_race_20261021.md §9.6)。どの y でも数学的には
+        // 正しいが、浮動小数では |y| × (行・境界の許容誤差) の分だけ破れの幅に余裕が要る
+        num_err *= tunable!("ENOMOTO_T_MIP_PROOF_NUM_TOL", 1e-9, f64);
         if dmax <= 1e-9 {
             return false;
         }
@@ -6297,6 +6330,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 今のノードで破れていることを確かめる (数値誤差で破れていない証明は使わない)
         let rhs = if obj { self.prune_limit() - p.offset - konst } else { -konst };
         let minact: f64 = coefs.iter().map(|&(j, a)| if a > 0.0 { a * self.dom.lo[j] } else { a * self.dom.up[j] }).sum();
+        if minact.is_finite() && minact > rhs + 1e-6 * (1.0 + rhs.abs()) && minact - rhs <= num_err {
+            // 破れているが、数値誤差の見積もりの範囲内: 証明として信用しない
+            self.proof_numeric_rejects += 1;
+            if dbg || self.params.verbose && env_str!("ENOMOTO_MIP_PROOF_NUM_LOG").is_some() {
+                let ymax = y.iter().take(self.lp.num_rows()).fold(0.0f64, |m, v| m.max(v.abs()));
+                eprintln!("PROOF reject numerically unreliable: minact - rhs {:.3e} <= error estimate {num_err:.3e} (max |y| {ymax:.3e}, dmax {dmax:.3e}, konst {konst:.3e}, obj {obj}, len {})", minact - rhs, coefs.len());
+            }
+            return false;
+        }
         if !minact.is_finite() || minact <= rhs + 1e-6 * (1.0 + rhs.abs()) {
             if dbg {
                 eprintln!("PROOF reject not violated: minact {minact} rhs {rhs} obj {obj} lp_obj {} limit {} len {} rows_skipped {}", self.lp.objective() + p.offset, self.prune_limit(), coefs.len(), skipped);
@@ -8903,7 +8945,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.final_lb = Some(best_bound);
         self.log(true);
         if self.params.verbose {
-            eprintln!("MIP: dual proofs and conflicts {} (conflicts added {} (from proofs {}), Farkas {}, pruned {} nodes, tightened {} bounds)", self.dual_proofs.len(), self.conflicts_added, self.proof_conflicts, self.farkas_added, self.proof_prunes, self.proof_tightenings);
+            eprintln!("MIP: dual proofs and conflicts {} (conflicts added {} (from proofs {}), Farkas {}, pruned {} nodes, tightened {} bounds, rejected as numerically unreliable {})", self.dual_proofs.len(), self.conflicts_added, self.proof_conflicts, self.farkas_added, self.proof_prunes, self.proof_tightenings, self.proof_numeric_rejects);
             if proof_verify() {
                 eprintln!("MIP: proof prunes verified by re-solving the node LP: correct {}, WRONG {} (DEFINITE {}), not verified {}", self.proof_verify_stats[0], self.proof_verify_stats[1], self.proof_verify_stats[3], self.proof_verify_stats[2]);
             }
