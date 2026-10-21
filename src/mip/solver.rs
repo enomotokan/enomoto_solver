@@ -1798,6 +1798,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let x = &imgs[0];
             let bad: Vec<(usize, f64, f64, f64)> = (0..self.p.n).filter(|&j| x[j] < self.dom.lo[j] - 1e-6 || x[j] > self.dom.up[j] + 1e-6).map(|j| (j, x[j], self.dom.lo[j], self.dom.up[j])).take(10).collect();
             eprintln!("MIP_DEBUG_NODE {k} {stage}: image 0 violates {:?}", bad);
+            for &(j, xj, lo, up) in &bad {
+                let upper = xj > up + 1e-6;
+                match self.dom.last_change_of(j, upper) {
+                    Some((pos, reason, old, new)) => eprintln!("MIP_DEBUG_NODE {k} {stage}:   col {j} {} bound set by stack entry {pos} (reason {reason}: -1 decision, -2 external, >= 0 row) {old} -> {new}; stack len {}, global [{}, {}]", if upper { "upper" } else { "lower" }, self.dom.stack_len(), self.dom.global_lo[j], self.dom.global_up[j]),
+                    None => eprintln!("MIP_DEBUG_NODE {k} {stage}:   col {j} {} bound is in the root state (not on the stack); global [{}, {}], root/current [{lo}, {up}]", if upper { "upper" } else { "lower" }, self.dom.global_lo[j], self.dom.global_up[j]),
+                }
+            }
         }
     }
 
