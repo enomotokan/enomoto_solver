@@ -671,6 +671,11 @@ pub(crate) struct TreeSnapshot {
     pc: Pseudocost,
     pub(crate) nodes: Vec<SnapNode>,
     pub(crate) valid_below: f64,
+    /// 写しを作ったときの LP の基底 (列と、元の行 + `rows` のカットの行) と DSE 重み。写しから解く求解は根の LP をここから
+    /// warm start する (基底なしで解き直すと、大きい問題では従のスレッドが根の LP だけで時間切れになる: mzzv42z の 4 スレッド・
+    /// 60 秒で従 3 本が木に一度も加わらなかった。analysis/bound_inf_20261021.md §5)。`ENOMOTO_MIP_TREE_NO_SNAP_BASIS` で持たせない
+    basis: Option<super::lp::Basis>,
+    dse: Option<Vec<(u32, f32)>>,
     /// 根で HiGHS 流のカット管理を有効にしたか (`ENOMOTO_MIP_CUT_STRONG_AUTO`)。
     hcm_auto: bool,
     /// 完全オービトープと、対称性の行・固定を加える前の問題 (写しから解く求解も orbitopal fixing をし、ヒューリスティクスの
@@ -2654,16 +2659,36 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
         }
+        let mut bg_basis_used = false;
         if self.snap.is_some() && (CUT_JOB.with(|j| j.borrow().is_some()) || DIVE_ONLY.with(|d| d.get()).0 == 5) {
             if let Some(b) = BG_ROOT_BASIS.with(|s| s.borrow_mut().take()) {
                 if b.col.len() == self.p.n && b.row.len() == self.lp.num_rows() {
                     self.lp.set_basis(&b);
+                    bg_basis_used = true;
                 }
             }
         }
+        // 木の写しから解く: 写しを作ったときの基底と DSE 重みから根の LP を warm start する (カットの行は写しと同じなので
+        // 行の状態もそのまま使える)
+        let mut snap_basis_used = false;
+        if let Some(sn) = self.snap.clone().filter(|_| !bg_basis_used) {
+            if let Some(b) = sn.basis.as_ref().filter(|b| b.col.len() == self.p.n && b.row.len() == self.lp.num_rows()) {
+                self.lp.set_basis(b);
+                if let Some(w) = &sn.dse {
+                    self.lp.set_dse_vars(w);
+                    crate::simplex::slope_intercept_dual::WARM_DSE_ONCE.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                snap_basis_used = true;
+            }
+        }
+        let t_root_lp = Instant::now();
         let mut root_st = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
+        crate::simplex::slope_intercept_dual::WARM_DSE_ONCE.store(false, std::sync::atomic::Ordering::Relaxed);
         if self.params.verbose && self.snap.is_some() {
             eprintln!("MIP: [snapshot] root LP {root_st:?} ({} iters, {:.2}s)", self.lp.total_iterations(), self.start.elapsed().as_secs_f64());
+        }
+        if tree_diag() && self.snap.is_some() && self.pool.is_some() {
+            eprintln!("MIP_TREE_DIAG: tid {} root LP {root_st:?} from the snapshot basis {snap_basis_used}: {} iters, {:.2}s ({:.2}s since the thread started)", self.pool_tid, self.lp.total_iterations(), t_root_lp.elapsed().as_secs_f64(), self.start.elapsed().as_secs_f64());
         }
         if matches!(root_st, LpStatus::Error | LpStatus::IterationLimit) && !self.time_up() {
             // 結論を出せなかった (数値的な破綻など): 内点法 + クロスオーバーだけで解き直す
@@ -8310,7 +8335,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             .collect();
         let pool: Vec<(Vec<(usize, f64)>, f64)> = self.cut_pool.iter().map(|(c, r, _)| (c.clone(), *r)).collect();
         let orig = self.orig.as_ref().map(|o| std::sync::Arc::new((**o).clone()));
-        let snap = TreeSnapshot { serial, p, lo: self.dom.global_lo.clone(), up: self.dom.global_up.clone(), rows, pool, pc: self.pc.clone(), nodes: snodes, valid_below: self.prune_limit(), hcm_auto: self.hcm_auto, orbitopes: (*self.orbitopes).clone(), orig, lex_gens: (*self.lex_gens).clone() };
+        // 今の LP の基底 (行は `rows` と同じ) と DSE 重み。木の中なら最後に解いたノードの最適基底で、根の LP (大域的な境界) に
+        // 対しては双対実行可能なので、双対単体法の warm start になる
+        let (basis, dse) = if env_str!("ENOMOTO_MIP_TREE_NO_SNAP_BASIS").is_none() { (Some(self.lp.basis()), self.lp.dse_snapshot()) } else { (None, None) };
+        let snap = TreeSnapshot { serial, p, lo: self.dom.global_lo.clone(), up: self.dom.global_up.clone(), rows, pool, pc: self.pc.clone(), nodes: snodes, valid_below: self.prune_limit(), basis, dse, hcm_auto: self.hcm_auto, orbitopes: (*self.orbitopes).clone(), orig, lex_gens: (*self.lex_gens).clone() };
         if self.params.verbose && env_str!("ENOMOTO_MIP_BISECT_VERBOSE").is_some() {
             eprintln!("MIP: tree snapshot {serial}: {} nodes, {} cut rows, valid below {:.10e} ({:.1}s)", snap.nodes.len(), snap.rows.len(), snap.valid_below, self.start.elapsed().as_secs_f64());
         }
