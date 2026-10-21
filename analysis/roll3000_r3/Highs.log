@@ -1,0 +1,408 @@
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+Command line parsed using CLI11 2.5.0: Copyright (c) 2017-2025 University of Cincinnati
+Set option presolve to "off"
+Set option threads to 4
+Set option time_limit to 30
+Set option mip_max_nodes to 1
+Number of BV entries in BOUNDS section is 610
+Number of UI entries in BOUNDS section is 114
+MIP roll3000_highs_pre has 1473 rows; 996 cols; 25017 nonzeros; 724 integer variables (610 binary)
+Coefficient ranges:
+  Matrix  [1e+00, 3e+02]
+  Cost    [4e+00, 1e+02]
+  Bound   [6e-01, 4e+02]
+  RHS     [1e+00, 1e+03]
+
+Presolve is switched off
+
+Solving MIP model with:
+   1473 rows
+   996 cols (610 binary, 114 integer, 0 implied int., 272 continuous, 0 domain fixed)
+   25017 nonzeros
+   Thread count 4 (of 4 threads). Using 1 max workers. Parallel search off
+
+Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+     I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+     S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+     Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+         0       0         0   0.00%   0               inf                  inf        0      0      0         0     0.1s
+         0       0         0   0.00%   11097.880287    inf                  inf        0      0      2      1244     0.1s
+ L       0       0         0   0.00%   12673.875381    14351             11.69%     2332    274    224      7043     3.9s
+ L       0       0         0   0.00%   12673.875381    13590              6.74%     2332    274    224     10184     5.2s
+ L       0       0         0   0.00%   12676.364546    13223              4.13%     2231    191    224     13379     6.8s
+         1       1         1   0.00%   12676.364546    13223              4.13%     2231    191    224     16628     6.8s
+
+Solving report
+  Model             roll3000_highs_pre
+  Status            Solution limit reached
+  Primal bound      13222.9999999
+  Dual bound        12676.3645459
+  Gap               4.13% (tolerance: 0.01%)
+  P-D integral      0.261432106681
+  Solution status   feasible
+                    13222.9999999 (objective)
+                    0 (bound viol.)
+                    9.33672215876e-10 (int. viol.)
+                    0 (row viol.)
+  Timing            6.82
+                    0.48 (Presolve)
+                        MIP    time [calls] = 0.00 [1]
+                        subMIP time [calls] = 0.48 [19]
+                    6.33 (Solve)
+                        MIP    time [calls] = 2.95 [1]
+                        subMIP time [calls] = 3.39 [15]
+                    0.00 (Postsolve)
+                        MIP    time [calls] = 0.00 [1]
+                        subMIP time [calls] = 0.00 [19]
+  Max sub-MIP depth 10
+  Nodes             1
+  Repair LPs        0
+  LP iterations     16628
+                    0 (strong br.)
+                    5880 (separation)
+                    9504 (heuristics)
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+Command line parsed using CLI11 2.5.0: Copyright (c) 2017-2025 University of Cincinnati
+Set option presolve to "off"
+Set option threads to 4
+Set option time_limit to 30
+Set option mip_max_nodes to 1
+Number of BV entries in BOUNDS section is 610
+Number of UI entries in BOUNDS section is 114
+MIP roll3000_highs_pre has 1473 rows; 996 cols; 25017 nonzeros; 724 integer variables (610 binary)
+Coefficient ranges:
+  Matrix  [1e+00, 3e+02]
+  Cost    [4e+00, 1e+02]
+  Bound   [6e-01, 4e+02]
+  RHS     [1e+00, 1e+03]
+
+Presolve is switched off
+
+Solving MIP model with:
+   1473 rows
+   996 cols (610 binary, 114 integer, 0 implied int., 272 continuous, 0 domain fixed)
+   25017 nonzeros
+   Thread count 4 (of 4 threads). Using 1 max workers. Parallel search off
+
+Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+     I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+     S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+     Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+         0       0         0   0.00%   0               inf                  inf        0      0      0         0     0.0s
+         0       0         0   0.00%   11097.880287    inf                  inf        0      0      2      1244     0.1s
+ L       0       0         0   0.00%   12253.352734    14677             16.51%      588    263    160      3878     1.7s
+ L       0       0         0   0.00%   12253.352734    13461              8.97%      588    263    160      6754     2.6s
+ L       0       0         0   0.00%   12265.047084    13306              7.82%      559    159    160      9548     3.6s
+         1       1         1   0.00%   12265.047084    13306              7.82%      559    159    160     12468     3.6s
+
+Solving report
+  Model             roll3000_highs_pre
+  Status            Solution limit reached
+  Primal bound      13306
+  Dual bound        12265.0470839
+  Gap               7.82% (tolerance: 0.01%)
+  P-D integral      0.241579411462
+  Solution status   feasible
+                    13306 (objective)
+                    0 (bound viol.)
+                    1.1945999745e-13 (int. viol.)
+                    0 (row viol.)
+  Timing            3.64
+                    0.43 (Presolve)
+                        MIP    time [calls] = 0.00 [1]
+                        subMIP time [calls] = 0.43 [18]
+                    3.20 (Solve)
+                        MIP    time [calls] = 0.95 [1]
+                        subMIP time [calls] = 2.26 [13]
+                    0.00 (Postsolve)
+                        MIP    time [calls] = 0.00 [1]
+                        subMIP time [calls] = 0.00 [18]
+  Max sub-MIP depth 8
+  Nodes             1
+  Repair LPs        0
+  LP iterations     12468
+                    0 (strong br.)
+                    2697 (separation)
+                    8527 (heuristics)
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+Command line parsed using CLI11 2.5.0: Copyright (c) 2017-2025 University of Cincinnati
+Set option presolve to "off"
+Set option threads to 4
+Set option time_limit to 30
+Set option mip_max_nodes to 1
+Number of BV entries in BOUNDS section is 610
+Number of UI entries in BOUNDS section is 114
+MIP roll3000_highs_pre has 1473 rows; 996 cols; 25017 nonzeros; 724 integer variables (610 binary)
+Coefficient ranges:
+  Matrix  [1e+00, 3e+02]
+  Cost    [4e+00, 1e+02]
+  Bound   [6e-01, 4e+02]
+  RHS     [1e+00, 1e+03]
+
+Presolve is switched off
+
+Solving MIP model with:
+   1473 rows
+   996 cols (610 binary, 114 integer, 0 implied int., 272 continuous, 0 domain fixed)
+   25017 nonzeros
+   Thread count 4 (of 4 threads). Using 1 max workers. Parallel search off
+
+Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+     I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+     S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+     Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+         0       0         0   0.00%   0               inf                  inf        0      0      0         0     0.1s
+         0       0         0   0.00%   11097.880287    inf                  inf        0      0      2      1244     0.1s
+ L       0       0         0   0.00%   12466.561556    14294             12.78%     4520    199    160      5684     2.6s
+ L       0       0         0   0.00%   12466.561556    13975             10.79%     4520    199    160      8484     3.9s
+ L       0       0         0   0.00%   12466.561556    13529              7.85%     3609    134    160     11770     5.3s
+         1       1         1   0.00%   12466.561556    13529              7.85%     3609    134    160     15370     5.3s
+
+Solving report
+  Model             roll3000_highs_pre
+  Status            Solution limit reached
+  Primal bound      13529
+  Dual bound        12466.5615558
+  Gap               7.85% (tolerance: 0.01%)
+  P-D integral      0.318198869
+  Solution status   feasible
+                    13529 (objective)
+                    0 (bound viol.)
+                    5.77315972805e-15 (int. viol.)
+                    0 (row viol.)
+  Timing            5.26
+                    0.49 (Presolve)
+                        MIP    time [calls] = 0.00 [1]
+                        subMIP time [calls] = 0.49 [15]
+                    4.77 (Solve)
+                        MIP    time [calls] = 1.78 [1]
+                        subMIP time [calls] = 2.99 [13]
+                    0.00 (Postsolve)
+                        MIP    time [calls] = 0.00 [1]
+                        subMIP time [calls] = 0.00 [15]
+  Max sub-MIP depth 8
+  Nodes             1
+  Repair LPs        0
+  LP iterations     15370
+                    0 (strong br.)
+                    4440 (separation)
+                    9686 (heuristics)
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+Command line parsed using CLI11 2.5.0: Copyright (c) 2017-2025 University of Cincinnati
+Set option presolve to "off"
+Set option threads to 4
+Set option time_limit to 30
+Set option mip_max_nodes to 1
+Number of BV entries in BOUNDS section is 610
+Number of UI entries in BOUNDS section is 114
+MIP roll3000_highs_pre has 1473 rows; 996 cols; 25017 nonzeros; 724 integer variables (610 binary)
+Coefficient ranges:
+  Matrix  [1e+00, 3e+02]
+  Cost    [4e+00, 1e+02]
+  Bound   [6e-01, 4e+02]
+  RHS     [1e+00, 1e+03]
+
+Presolve is switched off
+
+Solving MIP model with:
+   1473 rows
+   996 cols (610 binary, 114 integer, 0 implied int., 272 continuous, 0 domain fixed)
+   25017 nonzeros
+   Thread count 4 (of 4 threads). Using 1 max workers. Parallel search off
+
+Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+     I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+     S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+     Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+         0       0         0   0.00%   0               inf                  inf        0      0      0         0     0.0s
+         0       0         0   0.00%   11097.880287    inf                  inf        0      0      2      1244     0.1s
+ L       0       0         0   0.00%   12607.723651    13804              8.67%     4729    235    166      5726     2.9s
+ L       0       0         0   0.00%   12607.723651    13522              6.76%     4407    237    166      8331     4.2s
+ L       0       0         0   0.00%   12616.373675    13102              3.71%     3292    172    166     11359     5.4s
+         1       1         1   0.00%   12616.373675    13102              3.71%     3292    172    166     13851     5.4s
+
+Solving report
+  Model             roll3000_highs_pre
+  Status            Solution limit reached
+  Primal bound      13102
+  Dual bound        12616.3736753
+  Gap               3.71% (tolerance: 0.01%)
+  P-D integral      0.191197156902
+  Solution status   feasible
+                    13102 (objective)
+                    0 (bound viol.)
+                    8.34887714518e-14 (int. viol.)
+                    0 (row viol.)
+  Timing            5.44
+                    0.43 (Presolve)
+                        MIP    time [calls] = 0.00 [1]
+                        subMIP time [calls] = 0.43 [15]
+                    5.00 (Solve)
+                        MIP    time [calls] = 2.17 [1]
+                        subMIP time [calls] = 2.83 [13]
+                    0.00 (Postsolve)
+                        MIP    time [calls] = 0.00 [1]
+                        subMIP time [calls] = 0.00 [15]
+  Max sub-MIP depth 10
+  Nodes             1
+  Repair LPs        12 (0 feasible; 0 iterations)
+  LP iterations     13851
+                    0 (strong br.)
+                    4524 (separation)
+                    8083 (heuristics)
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+Command line parsed using CLI11 2.5.0: Copyright (c) 2017-2025 University of Cincinnati
+Set option presolve to "off"
+Set option threads to 4
+Set option time_limit to 30
+Set option mip_max_nodes to 1
+Number of BV entries in BOUNDS section is 610
+Number of UI entries in BOUNDS section is 114
+MIP roll3000_highs_pre has 1473 rows; 996 cols; 25017 nonzeros; 724 integer variables (610 binary)
+Coefficient ranges:
+  Matrix  [1e+00, 3e+02]
+  Cost    [4e+00, 1e+02]
+  Bound   [6e-01, 4e+02]
+  RHS     [1e+00, 1e+03]
+
+Presolve is switched off
+
+Solving MIP model with:
+   1473 rows
+   996 cols (610 binary, 114 integer, 0 implied int., 272 continuous, 0 domain fixed)
+   25017 nonzeros
+   Thread count 4 (of 4 threads). Using 1 max workers. Parallel search off
+
+Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+     I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+     S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+     Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+         0       0         0   0.00%   0               inf                  inf        0      0      0         0     0.1s
+         0       0         0   0.00%   11097.880287    inf                  inf        0      0      2      1244     0.1s
+ L       0       0         0   0.00%   12556.800099    13775              8.84%     4443    278    160      5776     2.9s
+ L       0       0         0   0.00%   12557.264533    13738              8.59%     4331    241    160      8669     4.6s
+ L       0       0         0   0.00%   12557.264533    13373              6.10%     3027    191    160     12422     6.5s
+         1       1         1   0.00%   12557.264533    13373              6.10%     3027    191    160     16407     6.5s
+
+Solving report
+  Model             roll3000_highs_pre
+  Status            Solution limit reached
+  Primal bound      13373
+  Dual bound        12557.2645327
+  Gap               6.1% (tolerance: 0.01%)
+  P-D integral      0.312352626451
+  Solution status   feasible
+                    13373 (objective)
+                    0 (bound viol.)
+                    5.25171572896e-13 (int. viol.)
+                    0 (row viol.)
+  Timing            6.48
+                    0.66 (Presolve)
+                        MIP    time [calls] = 0.00 [1]
+                        subMIP time [calls] = 0.66 [27]
+                    5.81 (Solve)
+                        MIP    time [calls] = 2.09 [1]
+                        subMIP time [calls] = 3.72 [17]
+                    0.00 (Postsolve)
+                        MIP    time [calls] = 0.00 [1]
+                        subMIP time [calls] = 0.00 [27]
+  Max sub-MIP depth 10
+  Nodes             1
+  Repair LPs        0
+  LP iterations     16407
+                    0 (strong br.)
+                    4556 (separation)
+                    10607 (heuristics)
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+Command line parsed using CLI11 2.5.0: Copyright (c) 2017-2025 University of Cincinnati
+Set option presolve to "off"
+Set option threads to 4
+Set option time_limit to 30
+Set option mip_max_nodes to 1
+Number of BV entries in BOUNDS section is 610
+Number of UI entries in BOUNDS section is 114
+MIP roll3000_highs_pre has 1473 rows; 996 cols; 25017 nonzeros; 724 integer variables (610 binary)
+Coefficient ranges:
+  Matrix  [1e+00, 3e+02]
+  Cost    [4e+00, 1e+02]
+  Bound   [6e-01, 4e+02]
+  RHS     [1e+00, 1e+03]
+
+Presolve is switched off
+
+Solving MIP model with:
+   1473 rows
+   996 cols (610 binary, 114 integer, 0 implied int., 272 continuous, 0 domain fixed)
+   25017 nonzeros
+   Thread count 4 (of 4 threads). Using 1 max workers. Parallel search off
+
+Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+     I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+     S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+     Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+         0       0         0   0.00%   0               inf                  inf        0      0      0         0     0.0s
+         0       0         0   0.00%   11097.880287    inf                  inf        0      0      2      1244     0.1s
+ L       0       0         0   0.00%   12634.282755    13617              7.22%     5315    247    170      6366     3.1s
+ L       0       0         0   0.00%   12637.145797    13090              3.46%     5116    252    170      9225     4.3s
+ L       0       0         0   0.00%   12637.263168    13090              3.46%     3393    178    170     12193     6.3s
+         1       1         1   0.00%   12637.263168    13090              3.46%     3393    178    170     16396     6.3s
+
+Solving report
+  Model             roll3000_highs_pre
+  Status            Solution limit reached
+  Primal bound      13090
+  Dual bound        12637.2631677
+  Gap               3.46% (tolerance: 0.01%)
+  P-D integral      0.156505736638
+  Solution status   feasible
+                    13090 (objective)
+                    0 (bound viol.)
+                    8.90390312517e-11 (int. viol.)
+                    0 (row viol.)
+  Timing            6.29
+                    0.70 (Presolve)
+                        MIP    time [calls] = 0.00 [1]
+                        subMIP time [calls] = 0.70 [23]
+                    5.59 (Solve)
+                        MIP    time [calls] = 2.27 [1]
+                        subMIP time [calls] = 3.32 [23]
+                    0.00 (Postsolve)
+                        MIP    time [calls] = 0.00 [1]
+                        subMIP time [calls] = 0.00 [23]
+  Max sub-MIP depth 8
+  Nodes             1
+  Repair LPs        0
+  LP iterations     16396
+                    0 (strong br.)
+                    5209 (separation)
+                    9943 (heuristics)

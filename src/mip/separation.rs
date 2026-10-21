@@ -81,6 +81,7 @@ fn keep_best(cands: &mut Vec<Candidate>, n0: usize, p: &MipProblem) {
     cands.truncate(n0 + 1);
 }
 
+#[derive(Clone)]
 struct Candidate {
     coefs: Vec<(usize, f64)>,
     rhs: f64,
@@ -417,6 +418,20 @@ impl<'a, L: MipLp> Solver<'a, L> {
             } else {
                 None
             };
+            // `ENOMOTO_MIP_FACE_RESCUE` (実験的): 面の頂点の候補には今の LP 解を切らないものがある。既定の選択で選んだカットが
+            // 1 本も今の解を切らないとき (面のカットが質の閾値の基準を上げて今の頂点のカットを全部落としたとき) だけ、
+            // 今の解を切らない面の候補を除いて選び直す。そうでないラウンドは何も変えない (FACE_ANCHOR より狭い)
+            let face_rescue = !self.params.submip && face_quota == 0 && face_anchor == 0 && env_str!("ENOMOTO_MIP_FACE_RESCUE").is_some();
+            let cuts_x = |c: &Candidate| -> bool {
+                let act: f64 = c.coefs.iter().map(|&(j, v)| v * x[j]).sum();
+                act - c.rhs > 1e-6 * (1.0 + c.rhs.abs())
+            };
+            let mut rescue_alt: Option<Vec<Candidate>> = None;
+            if face_rescue && fcands.iter().any(|c| !cuts_x(c)) {
+                let mut alt: Vec<Candidate> = cands.iter().filter(|c| !c.forced).cloned().collect();
+                alt.extend(fcands.iter().filter(|c| cuts_x(c)).cloned());
+                rescue_alt = Some(alt);
+            }
             let mut face_cands: Vec<Candidate> = Vec::new();
             if face_quota > 0 {
                 face_cands = fcands;
@@ -462,7 +477,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
             } else if face_anchor >= 1 && env_str!("ENOMOTO_MIP_CUTSEL_OLD").is_none() {
                 select_cuts_hybrid_anchor(cands, max_cuts, p, tunable!("ENOMOTO_T_CUTSEL_MIN_REL", 0.5, f64), tunable!("ENOMOTO_T_CUTSEL_MAXPAR", 0.3, f64), anchor)
             } else {
-                select_cuts(cands, max_cuts, p)
+                let chosen = select_cuts(cands, max_cuts, p);
+                match rescue_alt.take() {
+                    Some(alt) if !chosen.iter().any(|c| cuts_x(c)) => {
+                        if self.params.verbose {
+                            eprintln!("MIP: cut round {round}: none of {} chosen cuts cuts the LP point, re-selecting without such face cuts", chosen.len());
+                        }
+                        select_cuts(alt, max_cuts, p)
+                    }
+                    _ => chosen,
+                }
             };
             let chosen = if face_cands.is_empty() {
                 chosen
