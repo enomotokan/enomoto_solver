@@ -128,6 +128,9 @@ def run_worker(kind: str, mps: Path, time_limit: float, threads: int) -> dict:
             r = json.loads(line)
             if n_warn:
                 r["mip_warnings"] = n_warn
+                # 本文 (重複を除いて最初の 5 種類) も残す。件数だけでは何の警告か分からない
+                texts = list(dict.fromkeys(l.strip() for l in p.stderr.splitlines() if "MIP: WARNING" in l))
+                r["mip_warning_text"] = texts[:5]
             return r
     return {"status": f"crash rc={p.returncode}", "objective": None, "bound": None, "nodes": None, "time": None,
             "stderr": p.stderr[-2000:]}
