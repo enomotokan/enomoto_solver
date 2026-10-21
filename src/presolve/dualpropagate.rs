@@ -164,6 +164,145 @@ pub fn propagate_dual_bounds(n: usize, a: &FaerCsr, real_g_rows: &[Vec<(usize, f
     DualReductions { implied_equalities, fixed_columns }
 }
 
+/// 整数最適化の前処理用の双対の固定 (`ENOMOTO_MIP_DUALPROP`、既定では使わない。HiGHS 1.15.1 の `detectDominatedCol` と
+/// `updateRowDualImpliedBounds` に当たる): 双対の系 (t 行) は **連続列** からだけ作る (整数列は相補性が成り立たない)。
+/// 連続列の境界は、無限か、ほかの列の境界と 1 本の行から厳密に (余裕 1e-6、1 行だけに出る列は等しくてもよい) 導けるとき
+/// 無限とみなす (HiGHS の `isLowerStrictlyImplied` / `isUpperStrictlyImplied`)。こうして得た双対の箱で、被約費用の範囲が
+/// - 正 (> TOL) なら下限に、負なら上限に固定する (どの列でも。どの最適解でもその境界にある)
+/// - 0 以上 (0 以下) なら下限 (上限) に固定する (t 行を作らなかった列だけ。弱い支配。ある最適解がその境界にある。
+///   t 行を作った列を固定すると箱が変わるので使わない)
+/// 整数列の固定が正しいのは、整数列を任意の値に固定した連続列の LP の双対実行可能領域がこの箱に入り、その上で被約費用が
+/// 0 以上なら整数列を下げても LP の値が増えないため。含意等式は返さない。固定する `(列, 値)` を返す。
+pub fn mip_dual_fixings(n: usize, a: &FaerCsr, real_g_rows: &[Vec<(usize, f64)>], h: &[f64], b: &[f64], c: &[f64], lb: &[f64], ub: &[f64], is_int: &[bool], passes: usize) -> Vec<(usize, f64)> {
+    let ar = a.as_ref();
+    let num_a = ar.nrows();
+    let num_g = real_g_rows.len();
+    let num_duals = num_a + num_g;
+    if num_duals == 0 {
+        return Vec::new();
+    }
+    let col_terms = CscMat::from_entry_stream(num_duals, n, |emit| {
+        for i in 0..num_a {
+            for (j, v) in csr_row_iter(a, i) {
+                if v != 0.0 {
+                    emit(i, j, v);
+                }
+            }
+        }
+        for (gi, row) in real_g_rows.iter().enumerate() {
+            for &(j, v) in row {
+                if v != 0.0 {
+                    emit(num_a + gi, j, v);
+                }
+            }
+        }
+    });
+    // 行 (双対の番号) ごとの係数・右辺・等式か
+    let rows_of = |i: usize| -> Vec<(usize, f64)> { if i < num_a { csr_row_iter(a, i).collect() } else { real_g_rows[i - num_a].clone() } };
+    let all_rows: Vec<Vec<(usize, f64)>> = (0..num_duals).map(rows_of).collect();
+    let rhs = |i: usize| if i < num_a { b[i] } else { h[i - num_a] };
+    // 行ごとの最小・最大活動 (有限部分と無限の項の数)
+    let mut mn = vec![0.0f64; num_duals];
+    let mut mx = vec![0.0f64; num_duals];
+    let mut mn_inf = vec![0u32; num_duals];
+    let mut mx_inf = vec![0u32; num_duals];
+    for (i, r) in all_rows.iter().enumerate() {
+        for &(j, v) in r {
+            let (lo_c, up_c) = if v > 0.0 { (v * lb[j], v * ub[j]) } else { (v * ub[j], v * lb[j]) };
+            if lo_c.is_finite() { mn[i] += lo_c } else { mn_inf[i] += 1 }
+            if up_c.is_finite() { mx[i] += up_c } else { mx_inf[i] += 1 }
+        }
+    }
+    let margin = |j: usize| if col_terms.col(j).len() == 1 { -1e-6 } else { 1e-6 };
+    // 列 j の上限 (up = true) / 下限が行から厳密に導けるか
+    let strictly_implied = |j: usize, up: bool| -> bool {
+        let bound = if up { ub[j] } else { lb[j] };
+        if !bound.is_finite() {
+            return true;
+        }
+        col_terms.col(j).iter().any(|&(i, v)| {
+            // 向き d: d = +1 は row <= rhs (A の行と G の行)、d = -1 は row >= rhs (A の行だけ)
+            let dirs: &[f64] = if i < num_a { &[1.0, -1.0] } else { &[1.0] };
+            dirs.iter().any(|&d| {
+                let aj = d * v;
+                // 上限を導くには aj > 0、下限を導くには aj < 0
+                if (up && aj <= 0.0) || (!up && aj >= 0.0) {
+                    return false;
+                }
+                // d 向きの最小活動 (j を除く)
+                let (act, inf) = if d > 0.0 { (mn[i], mn_inf[i]) } else { (-mx[i], mx_inf[i]) };
+                let own = if aj > 0.0 { aj * lb[j] } else { aj * ub[j] };
+                let own_inf = !own.is_finite();
+                if inf - own_inf as u32 > 0 {
+                    return false;
+                }
+                let rest = if own_inf { act } else { act - own };
+                let implied = (d * rhs(i) - rest) / aj;
+                if up { implied < bound - margin(j) } else { implied > bound + margin(j) }
+            })
+        })
+    };
+    let mut t_rows: Vec<Vec<(usize, f64)>> = Vec::new();
+    let mut t_h: Vec<f64> = Vec::new();
+    let mut has_t = vec![false; n];
+    for j in 0..n {
+        if is_int[j] || col_terms.col(j).is_empty() || lb[j] == ub[j] {
+            continue;
+        }
+        if strictly_implied(j, true) {
+            t_rows.push(col_terms.col(j).iter().map(|&(i, v)| (i, -v)).collect());
+            t_h.push(c[j]);
+            has_t[j] = true;
+        }
+        if strictly_implied(j, false) {
+            t_rows.push(col_terms.col(j).to_vec());
+            t_h.push(-c[j]);
+            has_t[j] = true;
+        }
+    }
+    let result = if t_rows.is_empty() {
+        let mut dl = vec![f64::NEG_INFINITY; num_duals];
+        for gi in 0..num_g {
+            dl[num_a + gi] = 0.0 / -1.0;
+        }
+        propagate::PropagateSplit { lb: dl, ub: vec![f64::INFINITY; num_duals], real_rows: Vec::new(), real_rhs: Vec::new(), infeasible: false, passes_used: 0, converged: true, work: 0 }
+    } else {
+        for gi in 0..num_g {
+            t_rows.push(vec![(num_a + gi, -1.0)]);
+            t_h.push(0.0);
+        }
+        let t_g = csr_from_rows(&t_rows, num_duals);
+        propagate::propagate_without_g_rebuild(num_duals, &t_g, &t_h, passes)
+    };
+    if result.infeasible {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for j in 0..n {
+        let terms = col_terms.col(j);
+        if terms.is_empty() || lb[j] == ub[j] {
+            continue;
+        }
+        let (mut rlo, mut rhi) = (c[j], c[j]);
+        for &(i, v) in terms {
+            let (dlo, dhi) = (result.lb[i], result.ub[i]);
+            let (tlo, thi) = if v > 0.0 { (v * dlo, v * dhi) } else { (v * dhi, v * dlo) };
+            rlo += tlo;
+            rhi += thi;
+        }
+        if rlo.is_nan() || rhi.is_nan() {
+            continue;
+        }
+        let weak = !has_t[j];
+        if (rlo > TOL || (weak && rlo >= -TOL)) && lb[j] > f64::NEG_INFINITY {
+            out.push((j, lb[j]));
+        } else if (rhi < -TOL || (weak && rhi <= TOL)) && ub[j] < f64::INFINITY {
+            out.push((j, ub[j]));
+        }
+    }
+    out
+}
+
 /// [`run`] の含意等式 (行昇格) の結果だけを返す薄いラッパー。現在はこのモジュールのテストからのみ使用。
 pub fn find_implied_equalities(n: usize, a: &FaerCsr, real_g_rows: &[Vec<(usize, f64)>], c: &[f64], lb: &[f64], ub: &[f64], orig_lb: &[f64], orig_ub: &[f64], passes: usize) -> Vec<usize> {
     propagate_dual_bounds(n, a, real_g_rows, c, lb, ub, orig_lb, orig_ub, passes).implied_equalities

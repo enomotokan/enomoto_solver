@@ -133,6 +133,14 @@ impl Domain {
             impl_queue: Vec::new(),
             row_cap: if env_str!("ENOMOTO_MIP_NO_ROWCAP").is_some() { vec![f64::INFINITY; p.m] } else { p.rows.iter().map(|r| r.iter().map(|&(j, a)| a.abs() * (p.col_up[j] - p.col_lo[j])).fold(0.0f64, f64::max)).collect() },
         };
+        // 問題の境界が許容誤差の範囲で交差していたら (前処理の丸め。h80x6320d で下限 21.0、上限 20.999999999999932)
+        // 上限を下限にそろえる (`set_bound` と同じ。交差したままだと `x.clamp(lo, up)` が panic する)
+        for j in 0..p.n {
+            if d.lo[j] > d.up[j] && d.lo[j] <= d.up[j] + bound_tol(d.lo[j]) {
+                d.up[j] = d.lo[j];
+                d.global_up[j] = d.lo[j];
+            }
+        }
         d.recompute_activities(p);
         for i in 0..p.m {
             d.mark_row(i);
@@ -266,6 +274,16 @@ impl Domain {
     }
 
     fn set_bound(&mut self, p: &MipProblem, j: usize, upper: bool, v: f64, record: bool) {
+        // 反対側の境界を許容誤差の範囲で越えるだけなら、反対側の境界にそろえる (下限 > 上限のまま残すと、
+        // `x.clamp(lo, up)` が panic する。h80x6320d で下限 12.000000000000014、上限 12.0 になった)。
+        // 許容誤差を越えるものは下で矛盾とする
+        let v = if upper {
+            if v < self.lo[j] && self.lo[j] <= v + bound_tol(self.lo[j]) { self.lo[j] } else { v }
+        } else if v > self.up[j] && v <= self.up[j] + bound_tol(v) {
+            self.up[j]
+        } else {
+            v
+        };
         let old = if upper { self.up[j] } else { self.lo[j] };
         if old == v {
             return;
@@ -310,6 +328,22 @@ impl Domain {
             true
         } else {
             false
+        }
+    }
+
+    /// 含意による伝播に衝突の組 (文字の組) を足す (含意の伝播を使っていなければ使い始める)。プロービング
+    /// (`ENOMOTO_MIP_PROBE_CLIQUE`) が見つけた含意を、後の列のプロービングの伝播に使う (HiGHS はプロービングで見つけた含意を
+    /// クリーク表に入れ、クリーク表で伝播する。行の伝播では `x = 1 => y = 0` の対偶 `y = 1 => x = 0` が見えないことがある)。
+    /// 足す前に固定されていた列の含意は伝播しないので、根で呼ぶこと。
+    pub fn add_implications(&mut self, n: usize, edges: &[(u32, u32)]) {
+        if edges.is_empty() {
+            return;
+        }
+        let arc = self.impl_adj.get_or_insert_with(|| std::sync::Arc::new(vec![Vec::new(); 2 * n]));
+        let adj = std::sync::Arc::make_mut(arc);
+        for &(a, b) in edges {
+            adj[a as usize].push(b);
+            adj[b as usize].push(a);
         }
     }
 
@@ -365,9 +399,12 @@ impl Domain {
         } else {
             v
         };
+        // 反対側の大域的な境界を許容誤差の範囲で越えるだけなら、そろえる (`set_bound` と同じ)
         if upper {
+            let v = if v < self.global_lo[j] && self.global_lo[j] <= v + bound_tol(self.global_lo[j]) { self.global_lo[j] } else { v };
             self.global_up[j] = self.global_up[j].min(v);
         } else {
+            let v = if v > self.global_up[j] && v <= self.global_up[j] + bound_tol(v) { self.global_up[j] } else { v };
             self.global_lo[j] = self.global_lo[j].max(v);
         }
         if self.stack.is_empty() {
@@ -973,6 +1010,24 @@ fn row_tol(rhs: f64, act: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 足した含意は対偶の向きにも伝播する: `x0 = 1 => x2 = 0` (文字 0 と 4 の衝突) を足すと、x2 = 1 で x0 = 0
+    #[test]
+    fn add_implications_propagates_contrapositive() {
+        // x0 + x1 + x2 <= 3 (何も伝播しない)
+        let p = MipProblem::from_rows(vec![0.0; 3], vec![1.0; 3], vec![-1.0; 3], 0.0, 1.0, vec![true; 3], vec![vec![(0, 1.0), (1, 1.0), (2, 1.0)]], vec![f64::NEG_INFINITY], vec![3.0]);
+        let mut d = Domain::new(&p);
+        assert!(d.propagate(&p));
+        d.add_implications(p.n, &[(0, 4)]);
+        let pos = d.stack_len();
+        d.tighten_lower(&p, 2, 1.0);
+        assert!(d.propagate(&p));
+        assert_eq!(d.up[0], 0.0);
+        d.backtrack_to(&p, pos);
+        d.tighten_lower(&p, 0, 1.0);
+        assert!(d.propagate(&p));
+        assert_eq!(d.up[2], 0.0);
+    }
 
     fn knap() -> MipProblem {
         // 3x0 + 4x1 + 5x2 <= 7, x 0/1 整数; x0 + x1 >= 1

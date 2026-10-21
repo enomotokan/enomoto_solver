@@ -91,7 +91,10 @@ pub(crate) fn record_root_bound(z: f64) {
 /// 木の探索に使えるスレッドの数の上限: このプロセスが使える CPU の数 (Linux では CPU affinity と cgroup の割り当てを
 /// 反映する `std::thread::available_parallelism`)。環境変数 `ENOMOTO_MIP_MAX_THREADS` でさらに小さくできる。
 pub fn max_threads() -> usize {
-    let hw = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    // 診断用: `ENOMOTO_MIP_DIAG_HW_THREADS` で使える CPU の数を上書きする (CPU の少ない計算機で多スレッドの振る舞いを再現する)
+    let hw = env_str!("ENOMOTO_MIP_DIAG_HW_THREADS")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1));
     let cap = env_str!("ENOMOTO_MIP_MAX_THREADS").and_then(|v| v.parse::<usize>().ok()).filter(|&v| v >= 1).unwrap_or(usize::MAX);
     hw.min(cap).max(1)
 }
@@ -144,6 +147,28 @@ pub fn solve_mip(
     };
     // 基底のない LP の求解 (根・再スタート後の根) を `threads` 本で同時実行にする (木の探索の従のスレッドを始めたら、
     // またヒューリスティクスのサブ MIP の中では 1)
+    // 診断用 (`ENOMOTO_MIP_START_FILE`): 最初の暫定解を与える (元の問題の列の順に 1 行 1 値)。再スタートで暫定解を
+    // 引き継ぐ経路 (`RESTART_SOL`) に置くので、前処理後の問題で実行可能なときだけ使われる。主側 (解を見つける) と
+    // 双対側 (証明) の切り分けに使う (mzzv42z・neos-960392 の調査)。
+    if let Some(f) = env_str!("ENOMOTO_MIP_START_FILE") {
+        match std::fs::read_to_string(f) {
+            Ok(s) => {
+                let x: Vec<f64> = s.lines().filter_map(|l| l.trim().parse().ok()).collect();
+                let ok = x.len() == p.n;
+                eprintln!(
+                    "MIP_START_FILE: {} values (n = {}), objective {} feasible {}",
+                    x.len(),
+                    p.n,
+                    if ok { p.sense_sign * p.objective(&x) } else { f64::NAN },
+                    ok && p.is_feasible(&x, 1e-6)
+                );
+                if ok {
+                    RESTART_SOL.with(|s| *s.borrow_mut() = Some(x));
+                }
+            }
+            Err(e) => eprintln!("MIP_START_FILE: cannot read {f}: {e}"),
+        }
+    }
     let prev_race = crate::simplex::mip_lp::set_cold_race_threads(params.threads);
     // 根のサブ MIP・Feasibility Jump を別スレッドで回すかなどの判定 ([`solver::mip_threads`]) も、`ENOMOTO_MIP_THREADS` が
     // なければこのスレッド数にする
@@ -552,11 +577,14 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
     if outer {
         ORBITOPES.with(|t| *t.borrow_mut() = None);
         SYM_ORIG.with(|t| *t.borrow_mut() = None);
+        SYM_LEX_GENS.with(|t| *t.borrow_mut() = None);
     }
     let r = solve_problem_inner(p, params, use_presolve);
     if outer {
         ORBITOPES.with(|t| *t.borrow_mut() = None);
         SYM_ORIG.with(|t| *t.borrow_mut() = None);
+        SYM_LEX_GENS.with(|t| *t.borrow_mut() = None);
+        solver::ROOT_BASIS.with(|t| *t.borrow_mut() = None);
     }
     r
 }
@@ -564,7 +592,47 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
 fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) -> solver::MipResult {
     let start = RESTART_SOL.with(|s| s.borrow_mut().take());
     let t_pre = std::time::Instant::now();
-    let presolved = if use_presolve { presolve_mip(p, params.verbose, params.submip) } else { None };
+    // 時間上限は前処理・対称性の検出の時間も含める (分枝限定法の時計は `solver::solve` の開始から測るので、渡す前に引く)
+    let remaining = |params: MipParams| MipParams { time_limit: (params.time_limit - t_pre.elapsed().as_secs_f64()).max(0.0), ..params };
+    // 前処理の LP による固定 ([`lp_probe`]) は最初の求解だけ (サブ MIP・再スタートの後は使わない)
+    let lp_probe_secs = (env_str!("ENOMOTO_MIP_NO_LP_PROBE").is_none() && !params.submip && params.restarts == 0)
+        .then(|| if params.time_limit.is_finite() { tunable!("ENOMOTO_T_MIP_LP_PROBE_TIME_FRAC", 0.05, f64) * params.time_limit } else { 10.0 });
+    let presolved = if use_presolve { presolve_mip(p, params.verbose, params.submip, lp_probe_secs) } else { None };
+    // `ENOMOTO_MIP_SPARSIFY_LATE`: HiGHS と同じく前処理 (プロービング・同値の代入の後) の最後に 1 回だけ疎化し
+    // ([`sparsify_rows_highs`]、`=old` なら [`sparsify_rows`])、書き換えたら前処理をもう一度かける (その中では疎化しない)
+    let presolved = match presolved {
+        Some(Presolved::Reduced { prob, postsolve, scaling }) if env_str!("ENOMOTO_MIP_SPARSIFY_LATE").is_some() && !params.submip && params.restarts == 0 => {
+            let MipProblem { col_lo, col_up, cost, offset, sense_sign, is_int, mut rows, mut row_lo, mut row_up, .. } = prob.clone();
+            let k = if env_str!("ENOMOTO_MIP_SPARSIFY_LATE").is_some_and(|v| v == "old") {
+                sparsify_rows(&mut rows, &mut row_lo, &mut row_up, &is_int, prob.n)
+            } else {
+                sparsify_rows_highs(&mut rows, &mut row_lo, &mut row_up, &is_int, &col_lo, &col_up, prob.n)
+            };
+            if params.verbose {
+                eprintln!("MIP: presolve: sparsified {k} rows (late)");
+            }
+            if k == 0 {
+                Some(Presolved::Reduced { prob, postsolve, scaling })
+            } else {
+                let q = MipProblem::from_rows(col_lo, col_up, cost, offset, sense_sign, is_int, rows, row_lo, row_up);
+                SPARSIFY_REPRESOLVING.with(|f| f.set(true));
+                let r = presolve_mip(&q, params.verbose, params.submip, None);
+                SPARSIFY_REPRESOLVING.with(|f| f.set(false));
+                match r {
+                    Some(Presolved::Infeasible) => Some(Presolved::Infeasible),
+                    Some(Presolved::Reduced { prob: prob2, postsolve: post2, scaling: sc2 }) if sc2.d.iter().chain(&scaling.d).all(|&d| d == 1.0) => {
+                        let mut postsolve = postsolve;
+                        postsolve.extend(post2);
+                        Some(Presolved::Reduced { prob: prob2, postsolve, scaling })
+                    }
+                    // かけ直しが何も減らさない (または尺度が掛かった): 疎化した問題をそのまま使う
+                    _ if scaling.d.iter().all(|&d| d == 1.0) => Some(Presolved::Reduced { prob: q, postsolve, scaling }),
+                    _ => Some(Presolved::Reduced { prob, postsolve, scaling }),
+                }
+            }
+        }
+        other => other,
+    };
     // 利用者向けのログ (サブ MIP の前処理は出さない)
     if !params.submip {
         let free = |q: &MipProblem| (0..q.n).filter(|&j| q.col_lo[j] < q.col_up[j]).count();
@@ -583,7 +651,7 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
             let xr: Vec<f64> = x.iter().zip(&scaling.d).map(|(v, d)| v / d).collect();
             if prob.is_feasible(&xr, 1e-6) {
                 solver::START_SOL.with(|s| *s.borrow_mut() = Some(xr));
-            } else if params.verbose {
+            } else if params.verbose || env_str!("ENOMOTO_MIP_START_FILE").is_some() {
                 eprintln!("MIP: the start solution is not feasible in the presolved problem; dropped");
             }
         }
@@ -611,7 +679,21 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
             RESTART_CUTS.with(|s| *s.borrow_mut() = None);
             solver::MipResult { status: MipStatus::Infeasible, x: None, objective: None, best_bound: f64::INFINITY, nodes: 0, lp_iterations: 0 }
         }
-        Some(Presolved::Reduced { prob, postsolve, scaling }) => {
+        Some(Presolved::Reduced { mut prob, postsolve, scaling }) => {
+            if (env_str!("ENOMOTO_MIP_DUAL_UB").is_some() && !params.submip) || crate::fj_p3_force() {
+                let k = dual_bound_tightening(&mut prob);
+                if params.verbose {
+                    eprintln!("MIP: presolve: tightened {k} continuous column bounds by dual arguments");
+                }
+            }
+            if let Some(f) = env_str!("ENOMOTO_MIP_DEBUG_DUMP_PRESOLVED").filter(|_| !params.submip && params.restarts == 0) {
+                dump_mps(&prob, &f);
+            }
+            let prob = if env_str!("ENOMOTO_MIP_NO_CLIQUE_EXTEND").is_none() && (!params.submip || env_str!("ENOMOTO_MIP_CLIQUE_EXTEND_SUBMIP").is_some()) { extend_clique_rows(prob, params.verbose) } else { prob };
+            // 診断用: クリーク行の拡張の後の問題 (`ENOMOTO_MIP_DEBUG_DUMP_PRESOLVED2=ファイル`)
+            if let Some(f) = env_str!("ENOMOTO_MIP_DEBUG_DUMP_PRESOLVED2").filter(|_| !params.submip && params.restarts == 0) {
+                dump_mps(&prob, &f);
+            }
             let prob = if !params.submip && params.restarts == 0 && env_str!("ENOMOTO_MIP_NO_SYMMETRY").is_none() { add_symmetry_rows(prob, params.verbose) } else { prob };
             if let Some(f) = env_str!("ENOMOTO_MIP_DEBUG_SOL").filter(|_| !params.submip) {
                 let x0: Vec<f64> = std::fs::read_to_string(f).unwrap().lines().map(|l| l.trim().parse().unwrap()).collect();
@@ -623,7 +705,7 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
             if outer_level {
                 solver::set_thread_scale(Some(scaling.d.clone()));
             }
-            let mut r = solver::solve(&prob, params);
+            let mut r = solver::solve(&prob, remaining(params));
             if outer_level {
                 solver::set_thread_scale(None);
             }
@@ -650,10 +732,23 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
                 // 暫定解がないと目的値の定数のずれが分からないので下界は報告しない
                 r.best_bound = f64::NEG_INFINITY;
             }
-            if ok { r } else { solver::solve(p, params) }
+            if ok { r } else { solver::solve(p, remaining(params)) }
         }
-        None => solver::solve(p, params),
+        None => solver::solve(p, remaining(params)),
     }
+}
+
+thread_local! {
+    /// [`presolve_mip`] の 行をまとめた後のかけ直し (`ENOMOTO_MIP_NO_MERGE_REPRESOLVE` で使わない) の 2 回目の前処理の中か。
+    static MERGE_REPRESOLVING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// [`presolve_mip`] の `ENOMOTO_MIP_DOMCOL` のかけ直しの中か。
+    static DOMCOL_REPRESOLVING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// [`presolve_mip`] の `ENOMOTO_MIP_SPARSIFY` のかけ直しの中か。
+    static SPARSIFY_REPRESOLVING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// [`probe`] が見つけた同値な 0-1 列の組 (j, k, 否定か) (`ENOMOTO_MIP_NO_PROBE_EQUIV` で使わない)。
+    static PROBE_EQUIV: std::cell::RefCell<Vec<(usize, usize, bool)>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// 同値な列による前処理のかけ直しの深さ。
+    static PROBE_EQUIV_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 thread_local! {
@@ -661,6 +756,8 @@ thread_local! {
     pub(crate) static ORBITOPES: std::cell::RefCell<Option<std::rc::Rc<Vec<symmetry::Orbitope>>>> = const { std::cell::RefCell::new(None) };
     /// 対称性の行・固定を加える前の問題 (同じく外側の求解の終わりに消す)。
     pub(crate) static SYM_ORIG: std::cell::RefCell<Option<std::rc::Rc<MipProblem>>> = const { std::cell::RefCell::new(None) };
+    /// lex-leader の行を作った生成元 (`ENOMOTO_MIP_SYM_LEX_CANON` でヒューリスティクスの解を写すのに使う。同じく消す)。
+    pub(crate) static SYM_LEX_GENS: std::cell::RefCell<Option<std::rc::Rc<Vec<Vec<usize>>>>> = const { std::cell::RefCell::new(None) };
 }
 
 /// 対称性を探し、対称性を崩す不等式 `x_i - x_k >= 0` ([`symmetry::lex_leader_pairs`]) を行として加えた問題を返す。
@@ -686,6 +783,7 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool) -> MipProblem {
         }
     }
     let pairs = symmetry::lex_leader_pairs_except(&sym, &used, &in_orb);
+    SYM_LEX_GENS.with(|t| *t.borrow_mut() = Some(std::rc::Rc::new(symmetry::lex_leader_generators_except(&sym, &used, &in_orb))));
     // パッキング・分割の行 (係数が全て 1、右辺 <= 1) に含まれるオービトープの行だけで作ったオービトープに置き換える
     // (列の入れ替えは全体の対称性なので、その部分行列の列を辞書式に並べた解が必ずある)。パッキングの行が半分以上の
     // ときだけ。すると列 c の最初の 1 は行 c 以降なので、x_{i,c} = 0 (c > i) を根で固定できる
@@ -803,6 +901,244 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool) -> MipProblem {
     q
 }
 
+/// 診断用 (`ENOMOTO_MIP_DEBUG_DUMP_PRESOLVED=ファイル`): 前処理後の問題 (最小化形、offset は目的の定数列 `OBJCONST` に入れない) を
+/// 固定形式でない MPS に書き出す。列は `C<番号>`、行は `R<番号>`。
+fn dump_mps(p: &MipProblem, f: &str) {
+    use std::fmt::Write as _;
+    let mut s = String::new();
+    let _ = writeln!(s, "NAME presolved\nROWS\n N OBJ");
+    for i in 0..p.m {
+        let t = if p.row_lo[i] == p.row_up[i] { "E" } else if p.row_up[i].is_finite() { "L" } else { "G" };
+        let _ = writeln!(s, " {t} R{i}");
+    }
+    let _ = writeln!(s, "COLUMNS");
+    let mut in_int = false;
+    for j in 0..p.n {
+        if p.is_int[j] != in_int {
+            let _ = writeln!(s, "    M{j} 'MARKER' {}", if p.is_int[j] { "'INTORG'" } else { "'INTEND'" });
+            in_int = p.is_int[j];
+        }
+        if p.cost[j] != 0.0 {
+            let _ = writeln!(s, "    C{j} OBJ {:e}", p.cost[j]);
+        }
+        for &(i, a) in &p.cols[j] {
+            let _ = writeln!(s, "    C{j} R{i} {a:e}");
+        }
+        if p.cost[j] == 0.0 && p.cols[j].is_empty() {
+            let _ = writeln!(s, "    C{j} OBJ 0");
+        }
+    }
+    if in_int {
+        let _ = writeln!(s, "    MEND 'MARKER' 'INTEND'");
+    }
+    let _ = writeln!(s, "RHS");
+    for i in 0..p.m {
+        let r = if p.row_up[i].is_finite() { p.row_up[i] } else { p.row_lo[i] };
+        if r != 0.0 {
+            let _ = writeln!(s, "    RHS R{i} {r:e}");
+        }
+    }
+    let _ = writeln!(s, "RANGES");
+    for i in 0..p.m {
+        if p.row_lo[i] != p.row_up[i] && p.row_lo[i].is_finite() && p.row_up[i].is_finite() {
+            let _ = writeln!(s, "    RNG R{i} {:e}", p.row_up[i] - p.row_lo[i]);
+        }
+    }
+    let _ = writeln!(s, "BOUNDS");
+    for j in 0..p.n {
+        let (l, u) = (p.col_lo[j], p.col_up[j]);
+        if l == u {
+            let _ = writeln!(s, " FX BND C{j} {l:e}");
+            continue;
+        }
+        if l == f64::NEG_INFINITY {
+            let _ = writeln!(s, " MI BND C{j}");
+        } else if l != 0.0 {
+            let _ = writeln!(s, " LO BND C{j} {l:e}");
+        }
+        if u.is_finite() {
+            let _ = writeln!(s, " UP BND C{j} {u:e}");
+        } else if p.is_int[j] {
+            let _ = writeln!(s, " PL BND C{j}");
+        }
+    }
+    let _ = writeln!(s, "ENDATA");
+    let _ = std::fs::write(f, s);
+    eprintln!("MIP: presolved problem written to {f} (objective offset {:e})", p.offset);
+}
+
+/// クリーク行の拡張 (既定で使う。`ENOMOTO_MIP_NO_CLIQUE_EXTEND` で使わない。HiGHS の前処理の probing の "lifted nonzeros" に当たる):
+/// 0-1 列だけで「文字の和 <= 1」の形の片側の行 (集合詰め込み行、`1 - x` の文字を含む) について、行のすべての文字と衝突する
+/// (衝突グラフ = 行から作る組 + プロービングの含意 [`MipProblem::conflict_edges`]) 文字を行に加える。加えた文字どうしも
+/// 衝突するものだけ足すので、行は大きなクリークのままで整数解は変わらず、LP の緩和だけが締まる。
+/// 等式の行 (文字の和 = 1) では、すべての文字と衝突する文字は偽に固定できる (`ENOMOTO_MIP_CLIQUE_EXTEND_FIX`)。
+/// 1 行に加える文字は `ENOMOTO_T_MIP_CLIQUE_EXTEND_MAX` 個まで (既定 1000)。拡張でまったく同じになった行は 1 本にする。
+fn extend_clique_rows(prob: MipProblem, verbose: bool) -> MipProblem {
+    let t0 = std::time::Instant::now();
+    let n = prob.n;
+    let binary: Vec<bool> = (0..n).map(|j| prob.is_int[j] && prob.col_lo[j] == 0.0 && prob.col_up[j] == 1.0).collect();
+    let g = clique::CliqueGraph::build_with(n, &prob.rows, &prob.row_lo, &prob.row_up, &binary, &prob.col_lo, &prob.col_up, &prob.conflict_edges);
+    let max_add = tunable!("ENOMOTO_T_MIP_CLIQUE_EXTEND_MAX", 1000usize, usize);
+    let want_fix = env_str!("ENOMOTO_MIP_CLIQUE_EXTEND_FIX").is_some();
+    let MipProblem { mut col_lo, mut col_up, cost, offset, sense_sign, is_int, mut rows, mut row_lo, mut row_up, conflict_edges, implied_bounds, .. } = prob;
+    let (mut ext_rows, mut added, mut fixed) = (0usize, 0usize, 0usize);
+    let mut fix_lits: Vec<u32> = Vec::new();
+    // 片側の集合詰め込み行の文字の集合 (拡張の後)。ほかの片側の集合詰め込み行に含まれる行は冗長なので消す
+    // (`ENOMOTO_MIP_CLIQUE_EXTEND_KEEP_DOMINATED` で消さない)。HiGHS のクリークの統合も含まれるクリークを消す
+    let mut clique_rows: Vec<(usize, Vec<u32>)> = Vec::new();
+    for i in 0..rows.len() {
+        let (l, u) = (row_lo[i], row_up[i]);
+        let eq = l == u;
+        // sg * row <= b の向き (等式は <= の向きで見る)
+        let sg = if u.is_finite() && (eq || !l.is_finite()) {
+            1.0
+        } else if l.is_finite() && !u.is_finite() {
+            -1.0
+        } else {
+            continue;
+        };
+        let b = if sg > 0.0 { u } else { -l };
+        let r = &rows[i];
+        if r.len() < 2 || !r.iter().all(|&(j, a)| binary[j] && ((sg * a) - 1.0).abs() <= 1e-12 || binary[j] && ((sg * a) + 1.0).abs() <= 1e-12) {
+            continue;
+        }
+        // 文字の和 <= b + (負の係数の数)
+        let nneg = r.iter().filter(|&&(_, a)| sg * a < 0.0).count() as f64;
+        if ((b + nneg) - 1.0).abs() > 1e-9 {
+            continue;
+        }
+        let lits: Vec<u32> = r.iter().map(|&(j, a)| if sg * a > 0.0 { 2 * j as u32 } else { 2 * j as u32 + 1 }).collect();
+        // 候補: 隣接の最も少ない文字の隣接から
+        let &l0 = lits.iter().min_by_key(|&&x| g.neighbors(x).len()).unwrap();
+        let in_row: std::collections::HashSet<usize> = r.iter().map(|&(j, _)| j).collect();
+        let mut add: Vec<u32> = Vec::new();
+        for &c in g.neighbors(l0) {
+            if add.len() >= max_add {
+                break;
+            }
+            let jc = (c / 2) as usize;
+            if in_row.contains(&jc) || col_lo[jc] == col_up[jc] {
+                continue;
+            }
+            if lits.iter().all(|&x| x == l0 || g.adjacent(x, c)) && add.iter().all(|&y| (y / 2) as usize != jc && g.adjacent(y, c)) {
+                add.push(c);
+            }
+        }
+        if !eq {
+            let mut all: Vec<u32> = lits.iter().chain(&add).copied().collect();
+            all.sort_unstable();
+            clique_rows.push((i, all));
+        }
+        if add.is_empty() {
+            continue;
+        }
+        if eq {
+            // 等式: 行のどれかが真なので、全員と衝突する文字は偽
+            if want_fix {
+                fix_lits.extend(add.iter().copied());
+            }
+            continue;
+        }
+        let mut b2 = b;
+        for &c in &add {
+            let jc = (c / 2) as usize;
+            if c % 2 == 0 {
+                rows[i].push((jc, sg));
+            } else {
+                rows[i].push((jc, -sg));
+                b2 -= 1.0;
+            }
+        }
+        rows[i].sort_unstable_by_key(|e| e.0);
+        if sg > 0.0 {
+            row_up[i] = b2;
+        } else {
+            row_lo[i] = -b2;
+        }
+        ext_rows += 1;
+        added += add.len();
+    }
+    for c in fix_lits {
+        let j = (c / 2) as usize;
+        if col_lo[j] < col_up[j] {
+            // 文字 x_j (c 偶数) が偽なら x_j = 0、文字 1 - x_j が偽なら x_j = 1
+            if c % 2 == 0 {
+                col_up[j] = 0.0;
+            } else {
+                col_lo[j] = 1.0;
+            }
+            fixed += 1;
+        }
+    }
+    // 拡張でまったく同じになった行を 1 本にする
+    let mut seen: std::collections::HashMap<(Vec<(usize, u64)>, u64, u64), ()> = std::collections::HashMap::new();
+    let mut keep = vec![true; rows.len()];
+    let mut dup = 0usize;
+    let mut dominated = 0usize;
+    if env_str!("ENOMOTO_MIP_CLIQUE_EXTEND_KEEP_DOMINATED").is_none() {
+        // 文字 -> それを含むクリーク行 (clique_rows の添字)
+        let mut by_lit: std::collections::HashMap<u32, Vec<usize>> = std::collections::HashMap::new();
+        for (c, (_, ls)) in clique_rows.iter().enumerate() {
+            for &l in ls {
+                by_lit.entry(l).or_default().push(c);
+            }
+        }
+        let mut order: Vec<usize> = (0..clique_rows.len()).collect();
+        order.sort_by_key(|&c| clique_rows[c].1.len());
+        let mut gone = vec![false; clique_rows.len()];
+        for &c in &order {
+            let (i, ls) = &clique_rows[c];
+            // 含む行の候補: 文字のうち含む行の最も少ないものから
+            let Some(l0) = ls.iter().min_by_key(|l| by_lit.get(l).map_or(0, |v| v.len())) else { continue };
+            let found = by_lit[l0].iter().any(|&d| {
+                d != c && !gone[d] && {
+                    let ld = &clique_rows[d].1;
+                    (ld.len() > ls.len() || (ld.len() == ls.len() && d < c)) && ls.iter().all(|x| ld.binary_search(x).is_ok())
+                }
+            });
+            if found {
+                gone[c] = true;
+                keep[*i] = false;
+                dominated += 1;
+            }
+        }
+    }
+    for i in 0..rows.len() {
+        if !keep[i] {
+            continue;
+        }
+        let key = (rows[i].iter().map(|&(j, a)| (j, a.to_bits())).collect::<Vec<_>>(), row_lo[i].to_bits(), row_up[i].to_bits());
+        if seen.insert(key, ()).is_some() {
+            keep[i] = false;
+            dup += 1;
+        }
+    }
+    if dup + dominated > 0 {
+        let mut k = 0;
+        rows.retain(|_| {
+            k += 1;
+            keep[k - 1]
+        });
+        let mut k = 0;
+        row_lo.retain(|_| {
+            k += 1;
+            keep[k - 1]
+        });
+        let mut k = 0;
+        row_up.retain(|_| {
+            k += 1;
+            keep[k - 1]
+        });
+    }
+    if verbose {
+        eprintln!("MIP: clique extension: {ext_rows} rows extended, {added} nonzeros added, {fixed} columns fixed, {dup} duplicate and {dominated} dominated rows removed ({} edges, {:.2}s)", g.num_edges(), t0.elapsed().as_secs_f64());
+    }
+    let mut q = MipProblem::from_rows(col_lo, col_up, cost, offset, sense_sign, is_int, rows, row_lo, row_up);
+    q.conflict_edges = conflict_edges;
+    q.implied_bounds = implied_bounds;
+    q
+}
+
 /// 前処理の結果。
 enum Presolved {
     Infeasible,
@@ -810,8 +1146,14 @@ enum Presolved {
 }
 
 /// 整数を考慮した前処理をかけた問題を作る。前処理が何も減らさなければ `None` (元の問題で解く)。
-fn presolve_mip(p: &MipProblem, verbose: bool, submip: bool) -> Option<Presolved> {
+fn presolve_mip(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs: Option<f64>) -> Option<Presolved> {
+    presolve_mip_depth(p, verbose, submip, lp_probe_secs, 0)
+}
+
+fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs: Option<f64>, depth: u32) -> Option<Presolved> {
     use crate::params::simplex::{PRESOLVE_ROUNDS, PROPAGATION_PASSES, ROWSINGLETON_COLSINGLETON_INNER_ROUNDS};
+    // 前の呼び出しのプロービングが残した同値な列の組は使わない (列の番号が違いうる)
+    PROBE_EQUIV.with(|e| e.borrow_mut().clear());
     let n = p.n;
     // 元の制約 (境界は丸め済みの MipProblem の値を使う)
     let vars: Vec<VariableData> = (0..n).map(|j| VariableData { vtype: if p.is_int[j] { VarType::Integer } else { VarType::Continuous }, lb: p.col_lo[j], ub: p.col_up[j] }).collect();
@@ -868,10 +1210,28 @@ fn presolve_mip(p: &MipProblem, verbose: bool, submip: bool) -> Option<Presolved
     }
     // 係数が定数倍の関係にある行をまとめる (上限側と下限側の組は範囲制約 1 本に、同じ向きはきつい方に)。
     // 前処理は範囲制約を 2 本の不等式で表すので、そのままだと LP の行が倍になる
+    let eq0 = (0..rows.len()).filter(|&i| row_lo[i] == row_up[i]).count();
     let merged = if env_str!("ENOMOTO_MIP_NO_ROW_MERGE").is_none() { merge_parallel_rows(&mut rows, &mut row_lo, &mut row_up) } else { 0 };
+    // 行をまとめて新しくできた等式 (`x - y <= 0` と `x - y >= 0` から `x = y` など) の数
+    let new_eq = (0..rows.len()).filter(|&i| row_lo[i] == row_up[i]).count().saturating_sub(eq0);
     if verbose && merged > 0 {
-        eprintln!("MIP: presolve: merged {merged} parallel rows");
+        eprintln!("MIP: presolve: merged {merged} parallel rows ({new_eq} new equations)");
     }
+    // `ENOMOTO_MIP_SPARSIFY`: 等式の倍数を引いて行を疎にする ([`sparsify_rows`])。書き換えたら前処理をかけ直す (下の
+    // MERGE_REPRESOLVE と同じ形。疎になった行が冗長・強制になったり、列が支配されたりする)
+    let sparsified = if env_str!("ENOMOTO_MIP_SPARSIFY").is_some() && !submip && !SPARSIFY_REPRESOLVING.with(|f| f.get()) {
+        let k = if env_str!("ENOMOTO_MIP_SPARSIFY").is_some_and(|v| v == "highs") {
+            sparsify_rows_highs(&mut rows, &mut row_lo, &mut row_up, &p.is_int, &pre.lb, &pre.ub, n)
+        } else {
+            sparsify_rows(&mut rows, &mut row_lo, &mut row_up, &p.is_int, n)
+        };
+        if verbose {
+            eprintln!("MIP: presolve: sparsified {k} rows");
+        }
+        k
+    } else {
+        0
+    };
     let fixed = (0..n).filter(|&j| pre.lb[j] == pre.ub[j]).count();
     if verbose {
         let nnz0 = p.nnz;
@@ -896,13 +1256,293 @@ fn presolve_mip(p: &MipProblem, verbose: bool, submip: bool) -> Option<Presolved
         let bin = |j: usize| prob.is_int[j] && prob.col_lo[j] == 0.0 && prob.col_up[j] == 1.0 && pre.scaling.d.get(j).is_none_or(|&d| d == 1.0);
         prob.conflict_edges = p.conflict_edges.iter().copied().filter(|&(a, b)| bin((a / 2) as usize) && bin((b / 2) as usize)).collect();
     }
+    // 行をまとめた後のかけ直し (既定で使う。`ENOMOTO_MIP_NO_MERGE_REPRESOLVE` で使わない): 行をまとめて等式ができたら、前処理をもう一度かける (1 回だけ)。前処理の中では向きの逆の
+    // 不等式の組は等式として見えないので、`x = y`・`x + y = 1` の代入 (二項等式の消去) がされずに残る。physiciansched6-2 は
+    // こうしてできた 0-1 列どうしの `x - y = 0` が 3482 本、`x + y = 1` が 46 本残り (HiGHS の前処理後は等式 283 本)、
+    // Feasibility Jump が解を見つけられない。後処理は内側の手順の後に外側の手順を並べる (LP による固定と同じ)
+    let merge_rp = new_eq > 0 && env_str!("ENOMOTO_MIP_NO_MERGE_REPRESOLVE").is_none() && !MERGE_REPRESOLVING.with(|f| f.get());
+    if merge_rp || sparsified > 0 {
+        // 疎化のかけ直しの中では疎化しない (1 回だけ)
+        let (was_m, was_s) = (MERGE_REPRESOLVING.with(|f| f.get()), SPARSIFY_REPRESOLVING.with(|f| f.get()));
+        MERGE_REPRESOLVING.with(|f| f.set(was_m || merge_rp));
+        SPARSIFY_REPRESOLVING.with(|f| f.set(was_s || sparsified > 0));
+        let r = presolve_mip(&prob, verbose, submip, lp_probe_secs);
+        MERGE_REPRESOLVING.with(|f| f.set(was_m));
+        SPARSIFY_REPRESOLVING.with(|f| f.set(was_s));
+        match r {
+            Some(Presolved::Infeasible) => return Some(Presolved::Infeasible),
+            Some(Presolved::Reduced { prob: prob2, postsolve: post2, scaling: sc2 }) if sc2.d.iter().chain(&pre.scaling.d).all(|&d| d == 1.0) => {
+                let mut postsolve = pre.postsolve_log;
+                postsolve.extend(post2);
+                return Some(Presolved::Reduced { prob: prob2, postsolve, scaling: pre.scaling });
+            }
+            // 何も減らない (または尺度が掛かった): このまま続ける
+            _ => {}
+        }
+    }
+    // LP による固定は含意を集めるプロービングの前に行う (固定をプロービングの伝播に使い、固定した列の含意を作らない)。
+    // 固定したら前処理をもう一度かける (固定した列と、それで冗長になった行を消し、縮約を続ける。プロービングもそちらで行う)。
+    // 前処理は列の番号を保ち、整数最適化では列の尺度をかけない (d = 1) ので、後処理は内側の手順の後に外側の手順を並べればよい
+    if let Some(secs) = lp_probe_secs {
+        match lp_probe(&mut prob, verbose, secs) {
+            None => return Some(Presolved::Infeasible),
+            Some(fixed) if fixed > 0 && env_str!("ENOMOTO_MIP_LP_PROBE_NO_REPRESOLVE").is_none() => {
+                let mut postsolve = pre.postsolve_log;
+                return match presolve_mip_depth(&prob, verbose, submip, None, depth) {
+                    Some(Presolved::Infeasible) => Some(Presolved::Infeasible),
+                    Some(Presolved::Reduced { prob: prob2, postsolve: post2, scaling: sc2 }) => {
+                        debug_assert!(sc2.d.iter().chain(&pre.scaling.d).all(|&d| d == 1.0));
+                        postsolve.extend(post2);
+                        Some(Presolved::Reduced { prob: prob2, postsolve, scaling: pre.scaling })
+                    }
+                    // 2 回目の前処理が何も減らさない: 1 回目の結果にプロービングだけかける
+                    None => {
+                        if env_str!("ENOMOTO_MIP_NO_PROBING").is_none() {
+                            match probe(&mut prob, verbose, submip) {
+                                Some(false) => return Some(Presolved::Infeasible),
+                                Some(true) => return represolve_after_probe(prob, postsolve, pre.scaling, verbose, submip, depth),
+                                None => {}
+                            }
+                        }
+                        Some(Presolved::Reduced { prob, postsolve, scaling: pre.scaling })
+                    }
+                };
+            }
+            Some(_) => {}
+        }
+    }
     if env_str!("ENOMOTO_MIP_NO_PROBING").is_none() {
         match probe(&mut prob, verbose, submip) {
             Some(false) => return Some(Presolved::Infeasible),
+            Some(true) => return represolve_after_probe(prob, pre.postsolve_log, pre.scaling, verbose, submip, depth),
+            None => {}
+        }
+    }
+    // `ENOMOTO_MIP_DOMCOL`: 支配される 0-1 列を固定し ([`dominated_binary_fixings`])、前処理をかけ直す (LP による固定と同じ形、1 回だけ)
+    if env_str!("ENOMOTO_MIP_DOMCOL").is_some() && !submip && !DOMCOL_REPRESOLVING.with(|f| f.get()) {
+        let t0 = std::time::Instant::now();
+        let fix = dominated_binary_fixings(&prob);
+        if verbose {
+            eprintln!("MIP: presolve: {} dominated binaries fixed ({:.2}s)", fix.len(), t0.elapsed().as_secs_f64());
+        }
+        for &(j, v) in &fix {
+            prob.col_lo[j] = v;
+            prob.col_up[j] = v;
+        }
+        // 固定が自由な列の `ENOMOTO_T_MIP_DOMCOL_REPRESOLVE_FRAC` (既定 5%) 未満なら、かけ直さずに境界だけ固定する
+        // (nw04 は 87482 列中 372 列の固定に前処理 1 回 (約 1.8 秒) をかけ直していた)
+        let nfree = (0..n).filter(|&j| prob.col_lo[j] < prob.col_up[j]).count() + fix.len();
+        if !fix.is_empty() && fix.len() as f64 >= tunable!("ENOMOTO_T_MIP_DOMCOL_REPRESOLVE_FRAC", 0.05, f64) * nfree as f64 {
+            DOMCOL_REPRESOLVING.with(|f| f.set(true));
+            let r = presolve_mip(&prob, verbose, submip, None);
+            DOMCOL_REPRESOLVING.with(|f| f.set(false));
+            match r {
+                Some(Presolved::Infeasible) => return Some(Presolved::Infeasible),
+                Some(Presolved::Reduced { prob: prob2, postsolve: post2, scaling: sc2 }) if sc2.d.iter().chain(&pre.scaling.d).all(|&d| d == 1.0) => {
+                    let mut postsolve = pre.postsolve_log;
+                    postsolve.extend(post2);
+                    return Some(Presolved::Reduced { prob: prob2, postsolve, scaling: pre.scaling });
+                }
+                _ => {}
+            }
+        }
+    }
+    // 同値な 0-1 列の代入 (既定で使う。`ENOMOTO_MIP_NO_PROBE_EQUIV` で使わない): プロービングで見つけた同値な 0-1 列を等式 (`x_k - x_j = 0` / `x_k + x_j = 1`) として足し、
+    // 前処理をもう一度かける (二項等式の消去が列を代入で消す)。かけ直しは `ENOMOTO_T_MIP_PROBE_EQUIV_ROUNDS` 回まで (既定 2)
+    let equiv = PROBE_EQUIV.with(|e| std::mem::take(&mut *e.borrow_mut()));
+    let depth = PROBE_EQUIV_DEPTH.with(|d| d.get());
+    if !equiv.is_empty() && depth < tunable!("ENOMOTO_T_MIP_PROBE_EQUIV_ROUNDS", 2usize, usize) {
+        let MipProblem { col_lo, col_up, cost, offset, sense_sign, is_int, mut rows, mut row_lo, mut row_up, .. } = prob.clone();
+        for &(j, k, neg) in &equiv {
+            let (a, b) = (j.min(k), j.max(k));
+            rows.push(vec![(a, 1.0), (b, if neg { 1.0 } else { -1.0 })]);
+            let r = if neg { 1.0 } else { 0.0 };
+            row_lo.push(r);
+            row_up.push(r);
+        }
+        let q = MipProblem::from_rows(col_lo, col_up, cost, offset, sense_sign, is_int, rows, row_lo, row_up);
+        PROBE_EQUIV_DEPTH.with(|d| d.set(depth + 1));
+        let r = presolve_mip(&q, verbose, submip, None);
+        PROBE_EQUIV_DEPTH.with(|d| d.set(depth));
+        match r {
+            Some(Presolved::Infeasible) => return Some(Presolved::Infeasible),
+            Some(Presolved::Reduced { prob: prob2, postsolve: post2, scaling: sc2 }) if sc2.d.iter().chain(&pre.scaling.d).all(|&d| d == 1.0) => {
+                let mut postsolve = pre.postsolve_log;
+                postsolve.extend(post2);
+                return Some(Presolved::Reduced { prob: prob2, postsolve, scaling: pre.scaling });
+            }
             _ => {}
         }
     }
     Some(Presolved::Reduced { prob, postsolve: pre.postsolve_log, scaling: pre.scaling })
+}
+
+/// プロービングの後の前処理のかけ直し (試作、`ENOMOTO_MIP_PROBE_REPRESOLVE` で使う。既定では使わない): プロービングが
+/// 境界を締めた (固定した) とき、締めた境界で前処理をもう一度かける (`ENOMOTO_T_MIP_PROBE_REPRESOLVE_MAX` 回まで、既定 2)。
+/// プロービングは連続列の境界も締める (drayage-25-23 では時刻の列の境界) が、その境界で冗長になった行・強められる係数は
+/// 前処理をかけ直さないと残る。drayage-25-23 では 3212 行のまま根を解き、再スタートの前処理で初めて 3873 -> 1150 行になる
+/// (HiGHS は前処理の中で 732 行まで減らす)。かけ直した前処理は新しい問題でプロービングをやり直す (含意はそちらで集め直す)。
+/// 前処理は列の番号を保ち、整数最適化では列の尺度をかけない (d = 1) ので、後処理は内側の手順の後に外側の手順を並べればよい
+fn represolve_after_probe(prob: MipProblem, mut postsolve: Vec<crate::presolve::PostsolveStep>, scaling: crate::presolve::scaling::Scaling, verbose: bool, submip: bool, depth: u32) -> Option<Presolved> {
+    let max = tunable!("ENOMOTO_T_MIP_PROBE_REPRESOLVE_MAX", 2u32, u32);
+    if env_str!("ENOMOTO_MIP_PROBE_REPRESOLVE").is_none() || depth >= max || (submip && env_str!("ENOMOTO_MIP_PROBE_REPRESOLVE_SUBMIP").is_none()) {
+        return Some(Presolved::Reduced { prob, postsolve, scaling });
+    }
+    if verbose {
+        eprintln!("MIP: presolve again after probing (round {})", depth + 1);
+    }
+    match presolve_mip_depth(&prob, verbose, submip, None, depth + 1) {
+        Some(Presolved::Infeasible) => Some(Presolved::Infeasible),
+        Some(Presolved::Reduced { prob: prob2, postsolve: post2, scaling: sc2 }) => {
+            debug_assert!(sc2.d.iter().chain(&scaling.d).all(|&d| d == 1.0));
+            postsolve.extend(post2);
+            Some(Presolved::Reduced { prob: prob2, postsolve, scaling })
+        }
+        // 何も減らない: プロービングの結果 (含意・締めた境界) を持つ元の問題を使う
+        None => Some(Presolved::Reduced { prob, postsolve, scaling }),
+    }
+}
+
+/// LP による固定 (既定で使う。`ENOMOTO_MIP_NO_LP_PROBE` で使わない。前処理の最後、含意を集めるプロービングの前): LP 緩和を解き、LP 解で分数値の整数列
+/// x_j = v ごとに、上の子 (x_j >= ceil v) と下の子 (x_j <= floor v) の LP を反復上限つきで解く。片方が実行不能なら逆側に
+/// 固定し (根の強分枝で子が実行不能になったときの固定と同じ。どの整数解でも成り立つ)、両方なら問題は実行不能。固定したら
+/// LP を解き直し、新しく分数値になった列で繰り返す (`ENOMOTO_T_MIP_LP_PROBE_PASSES` 回まで)。手間の上限は LP の反復の合計
+/// (`ENOMOTO_T_MIP_LP_PROBE_ITER_MULT` x 最初の LP の反復 + 5000) と時間 `secs`。最後の LP の基底は根の LP に渡す
+/// ([`solver::ROOT_BASIS`])。
+///
+/// app1-1 では 0-1 列 1030 個のうち 925 個が「1 にすると LP が実行不能」で、LP 解の分数値の 19 個を固定するだけで LP 値が
+/// −20.96 → −3.98 (目的関数は整数なので下界 −3 = 最適値) になる。HiGHS は経路集約・tableau のカットで根を −4 にし、こちらは
+/// 根のカットのループで −7〜−8.6 にしかならず、木の根の強分枝で初めて −3.99 に届いていた。
+/// 固定した列の数を返す。実行不能と分かったら `None`。
+fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64) -> Option<usize> {
+    use lp::{LpStatus, SolveLimits};
+    let t0 = std::time::Instant::now();
+    let deadline = Some(t0 + std::time::Duration::from_secs_f64(secs.max(0.0)));
+    let mut lp = crate::simplex::mip_lp::TwoStageLp::new(&prob.col_lo, &prob.col_up, &prob.cost, &prob.rows, &prob.row_lo, &prob.row_up);
+    match lp.solve(&SolveLimits { deadline, ..Default::default() }) {
+        LpStatus::Optimal => {}
+        LpStatus::Infeasible => return None,
+        _ => return Some(0),
+    }
+    let z0 = lp.objective() + prob.offset;
+    let root_secs = t0.elapsed().as_secs_f64();
+    let root_iters = lp.total_iterations();
+    let iter_budget = (tunable!("ENOMOTO_T_MIP_LP_PROBE_ITER_MULT", 2.0, f64) * root_iters as f64) as u64 + 5000;
+    let per_lp = (root_iters / 4).clamp(200, 2000);
+    let passes = tunable!("ENOMOTO_T_MIP_LP_PROBE_PASSES", 3usize, usize);
+    // 最初の `ENOMOTO_T_MIP_LP_PROBE_GIVEUP` 列で 1 つも固定できなければやめる (固定が出る問題では最初からすぐ出る:
+    // app1-1 は最初の 24 列で 21 個。40 問で固定が出るのは 5 問で、出ない問題に 1 問平均 0.5 秒、最大 3 秒かかっていた)
+    let giveup = tunable!("ENOMOTO_T_MIP_LP_PROBE_GIVEUP", 20usize, usize);
+    // 固定が 1 つもないまま、最初の LP の `ENOMOTO_T_MIP_LP_PROBE_GIVEUP_TIME_MULT` 倍 (+ 0.1 秒) の時間を使ってもやめる
+    // (子の LP が重い問題: cvs16r128-89 は 5 列で 3 秒、根の LP は 0.9 秒)
+    let giveup_secs = tunable!("ENOMOTO_T_MIP_LP_PROBE_GIVEUP_TIME_MULT", 1.0, f64) * root_secs + 0.1;
+    let budget_left = |lp: &crate::simplex::mip_lp::TwoStageLp| lp.total_iterations() - root_iters < iter_budget && t0.elapsed().as_secs_f64() < secs;
+    let (mut n_lps, mut n_fixed, mut n_tried) = (0usize, 0usize, 0usize);
+    let mut tried: std::collections::HashSet<(usize, i64)> = std::collections::HashSet::new();
+    let mut ok = true;
+    for pass in 0..passes {
+        let x = lp.col_values();
+        let mut cands: Vec<(usize, f64)> = (0..prob.n)
+            .filter(|&j| prob.is_int[j] && prob.col_lo[j] < prob.col_up[j] && (x[j] - x[j].round()).abs() > domain::FEASTOL && !tried.contains(&(j, x[j].floor() as i64)))
+            .map(|j| (j, x[j]))
+            .collect();
+        // 分数部分が 1/2 に近い順
+        cands.sort_by(|a, b| {
+            let fa = a.1 - a.1.floor();
+            let fb = b.1 - b.1.floor();
+            (fb * (1.0 - fb)).total_cmp(&(fa * (1.0 - fa)))
+        });
+        if cands.is_empty() || !budget_left(&lp) {
+            break;
+        }
+        let saved = lp.save_state();
+        // (列, 上限を締めるか, 値)
+        let mut fixes: Vec<(usize, bool, f64)> = Vec::new();
+        for &(j, v) in &cands {
+            if !budget_left(&lp) || (n_fixed + fixes.len() == 0 && (n_tried >= giveup || t0.elapsed().as_secs_f64() > giveup_secs)) {
+                break;
+            }
+            tried.insert((j, v.floor() as i64));
+            n_tried += 1;
+            let (lo, up) = (prob.col_lo[j], prob.col_up[j]);
+            let mut cut = [false; 2];
+            for (side, is_up) in [(0usize, true), (1usize, false)] {
+                if is_up {
+                    lp.set_col_bounds(j, v.ceil(), up);
+                } else {
+                    lp.set_col_bounds(j, lo, v.floor());
+                }
+                cut[side] = lp.solve(&SolveLimits { iteration_limit: per_lp, deadline, ..Default::default() }) == LpStatus::Infeasible;
+                n_lps += 1;
+                lp.restore_state(&saved);
+            }
+            match (cut[0], cut[1]) {
+                (true, true) => {
+                    ok = false;
+                    break;
+                }
+                // 上の子が実行不能なら上限を floor に、下の子なら下限を ceil に
+                (true, false) => fixes.push((j, true, v.floor())),
+                (false, true) => fixes.push((j, false, v.ceil())),
+                _ => {}
+            }
+        }
+        if verbose {
+            eprintln!(
+                "MIP: LP probing pass {}: {} candidates, {} fixings{} ({} LPs, {} iters, {:.2}s)",
+                pass + 1,
+                cands.len(),
+                fixes.len(),
+                if ok { "" } else { ", both sides infeasible" },
+                n_lps,
+                lp.total_iterations() - root_iters,
+                t0.elapsed().as_secs_f64()
+            );
+        }
+        if !ok || fixes.is_empty() {
+            break;
+        }
+        for &(j, upper, val) in &fixes {
+            if upper {
+                prob.col_up[j] = prob.col_up[j].min(val);
+            } else {
+                prob.col_lo[j] = prob.col_lo[j].max(val);
+            }
+            lp.set_col_bounds(j, prob.col_lo[j], prob.col_up[j]);
+        }
+        n_fixed += fixes.len();
+        match lp.solve(&SolveLimits { deadline, ..Default::default() }) {
+            LpStatus::Optimal => {}
+            LpStatus::Infeasible => {
+                ok = false;
+                break;
+            }
+            _ => break,
+        }
+    }
+    if verbose && n_tried > 0 {
+        eprintln!(
+            "MIP: LP probing: tried {} columns, fixed {}, LP {:.10e} -> {:.10e} ({} LPs, {} iters, {:.2}s)",
+            n_tried,
+            n_fixed,
+            z0,
+            lp.objective() + prob.offset,
+            n_lps,
+            lp.total_iterations() - root_iters,
+            t0.elapsed().as_secs_f64()
+        );
+    }
+    if !ok {
+        return None;
+    }
+    // 固定したときだけ最後の LP の基底を根の LP に渡す (固定がなければ根の LP は前処理の LP と同じ問題で、基底を渡すと
+    // 着く頂点が変わり、カット・探索の経路が変わるだけ: qiu は固定 0 で 40 問の 2 回とも遅くなった)。ただし最初の LP に
+    // `ENOMOTO_T_MIP_LP_PROBE_BASIS_SECS` 秒 (既定 1 秒) 以上かかったら、根で解き直す手間を省くために渡す
+    if n_fixed > 0 || root_secs >= tunable!("ENOMOTO_T_MIP_LP_PROBE_BASIS_SECS", 1.0, f64) {
+        let b = lp.basis().col;
+        solver::ROOT_BASIS.with(|s| *s.borrow_mut() = Some(b));
+    }
+    Some(n_fixed)
 }
 
 /// プロービング (SCIP・HiGHS の前処理と同じ): 0-1 列 `x_j` を 0 にして伝播した結果と 1 にして伝播した結果を比べる。
@@ -1013,6 +1653,10 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
     let base = tunable!("ENOMOTO_T_MIP_PROBE_BASE", 0.0, f64);
     let mut contingent = if adaptive { if base > 0.0 { base } else { cands.len() as f64 } } else { f64::INFINITY };
     let max_pass = if adaptive { tunable!("ENOMOTO_T_MIP_PROBE_PASSES", 10usize, usize).max(1) } else { 1 };
+    let want_equiv = env_str!("ENOMOTO_MIP_NO_PROBE_EQUIV").is_none() && !submip;
+    // `ENOMOTO_MIP_PROBE_CLIQUE`: 見つけた含意を後の列のプロービングの伝播に使う ([`domain::Domain::add_implications`])
+    let want_pclique = env_str!("ENOMOTO_MIP_PROBE_CLIQUE").is_some() && !submip;
+    let mut equiv: Vec<(usize, usize, bool)> = Vec::new();
     let mut passes = 0usize;
     'passes: for _pass in 0..max_pass {
         passes += 1;
@@ -1057,8 +1701,12 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
                 }
                 (true, true) => {
                     if want_impl {
+                        let e0 = edges.len();
                         add_edges(j, 0, &ch0, &mut edges);
                         add_edges(j, 1, &ch1, &mut edges);
+                        if want_pclique {
+                            dom.add_implications(n, &edges[e0..]);
+                        }
                         // implied bound カットを使うときだけ集める (既定は相手が連続変数のものだけ使う。`ENOMOTO_MIP_NO_IMPLBD_CONT` で使わない)
                         if env_str!("ENOMOTO_MIP_IMPLBD_CUTS").is_some() || env_str!("ENOMOTO_MIP_NO_IMPLBD_CONT").is_none() {
                             add_implied(j, false, &ch0, &dom, &mut implied);
@@ -1073,6 +1721,21 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
                     let mut last1: std::collections::HashMap<(usize, bool), f64> = std::collections::HashMap::new();
                     for &(k, upper, v) in &ch1 {
                         last1.insert((k, upper), v);
+                    }
+                    // 同値な 0-1 列 (既定で集める。`ENOMOTO_MIP_NO_PROBE_EQUIV` で集めない): x_j = 0 で x_k = 0、x_j = 1 で x_k = 1 なら x_k = x_j。
+                    // 逆向きなら x_k = 1 - x_j。等式の行として足して前処理をかけ直す ([`presolve_mip`]、HiGHS の probing の代入)
+                    if want_equiv {
+                        for (&(k, upper), &v0) in &first {
+                            if k == j || !bin0[k] || dom.lo[k] == dom.up[k] {
+                                continue;
+                            }
+                            let Some(&v1) = last1.get(&(k, !upper)) else { continue };
+                            if upper && v0 <= 0.5 && v1 >= 0.5 {
+                                equiv.push((j, k, false));
+                            } else if !upper && v0 >= 0.5 && v1 <= 0.5 {
+                                equiv.push((j, k, true));
+                            }
+                        }
                     }
                     let mut any = false;
                     for (&(k, upper), &v0) in &first {
@@ -1116,6 +1779,14 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
         eprintln!("MIP: probing: {probed} of {} binaries probed ({passes} passes), {fixed} fixed, {tightened} bounds tightened, {} implications ({:.2}s)", cands.len(), edges.len(), t0.elapsed().as_secs_f64());
     }
     prob.conflict_edges = edges;
+    if want_equiv {
+        let mut seen = std::collections::HashSet::new();
+        equiv.retain(|&(j, k, _)| dom.lo[j] < dom.up[j] && dom.lo[k] < dom.up[k] && seen.insert((j.min(k), j.max(k))));
+        if verbose {
+            eprintln!("MIP: probing: {} equivalent binary pairs", equiv.len());
+        }
+        PROBE_EQUIV.with(|e| *e.borrow_mut() = std::mem::take(&mut equiv));
+    }
     // 固定した列を含む含意は捨てる
     implied.retain(|&(j, _, k, _, _)| dom.lo[j as usize] < dom.up[j as usize] && dom.lo[k as usize] < dom.up[k as usize]);
     prob.implied_bounds = implied;
@@ -1262,6 +1933,617 @@ fn normalize_integer_rows(rows: &mut [Vec<(usize, f64)>], row_lo: &mut [f64], ro
     count
 }
 
+/// 双対の推論による連続列の境界の締め付け (`ENOMOTO_MIP_DUAL_UB`、既定では使わない): 費用が非負 (最小化) の連続列 x_j が、
+/// x_j を増やすと楽になる行 (`<=` の向きで係数が負) では、ほかの列が最悪の値 (その行の最大活動) でも行を満たす値
+/// `u* = max_i (maxact_i(j を除く) - b_i) / |a_ij|` を超える必要はない。x_j を増やすと苦しくなる向き (等式を含む) には出ない
+/// ときだけ使う。u* より大きい解は x_j を u* に下げても行は破れず目的も悪くならないので、上限を `max(lb, u*)` にできる。
+/// 費用が非正なら向きを逆にして下限を締める。physiciansched6-2 の罰則の列 (`100 Σx + 600 z - w <= 600` だけに出る費用 1 の w、
+/// 416 本) は ENOMOTO では [0, ∞) のまま残り、HiGHS の前処理後は [0, 100〜600] になる。上限がないと Feasibility Jump が
+/// 解を見つけられない (同じ問題で上限を入れるだけで 20 回中 0 回 → 19 回)。締めた境界の数を返す (1 回だけ、連鎖しない)。
+/// [`fj_p3_problem`] を使うか (既定で使う。`ENOMOTO_MIP_NO_FJ_P3` で止める。`ENOMOTO_MIP_FJ_P3` を与えたときも使う)。
+pub(super) fn fj_p3_on() -> bool {
+    env_str!("ENOMOTO_MIP_FJ_P3").is_some() || env_str!("ENOMOTO_MIP_NO_FJ_P3").is_none()
+}
+
+/// Feasibility Jump だけに渡す問題 (`ENOMOTO_MIP_FJ_P3`、既定で使う ([`fj_p3_on`])): 本体の前処理後の問題 `pc` に、このスレッドだけ
+/// `ENOMOTO_MIP_INEQ_SINGLETON`・`ENOMOTO_MIP_CS_OBJ_PIVOT` を有効にした前処理をもう一度かけ、双対の推論で連続列の境界を締める
+/// ([`dual_bound_tightening`])。本体の問題は変えない。前処理は列の番号を保つので、FJ の解は `postsolve` を逆順に当てて尺度を
+/// 戻せば `pc` の空間の解になる ([`fj_p3_solution`])。physiciansched6-2 では FJ が解を見つけるのにこの 3 つと FJ の LP 修復の
+/// 4 つが全部要る (1 つでも外すと 20 秒で解なし) が、p5s として本体の前処理に入れると beasleyC3・uccase12 で証明が遅れる
+pub(super) fn fj_p3_problem(pc: &MipProblem) -> Option<(MipProblem, Vec<crate::presolve::PostsolveStep>, Option<crate::presolve::scaling::Scaling>)> {
+    crate::set_fj_p3_force(true);
+    let r = presolve_mip(pc, false, false, None);
+    crate::set_fj_p3_force(false);
+    let (mut prob, post, sc) = match r {
+        Some(Presolved::Reduced { prob, postsolve, scaling }) if prob.n == pc.n => (prob, postsolve, Some(scaling)),
+        Some(Presolved::Reduced { .. }) | Some(Presolved::Infeasible) => return None,
+        None => (pc.clone(), Vec::new(), None),
+    };
+    let k = dual_bound_tightening(&mut prob);
+    if env_str!("ENOMOTO_MIP_LOG").is_some() {
+        eprintln!("MIP: FJ problem (FJ_P3): rows {} -> {}, free columns {} -> {}, {k} continuous bounds tightened", pc.m, prob.m, (0..pc.n).filter(|&j| pc.col_lo[j] < pc.col_up[j]).count(), (0..prob.n).filter(|&j| prob.col_lo[j] < prob.col_up[j]).count());
+    }
+    Some((prob, post, sc))
+}
+
+/// [`fj_p3_problem`] の問題での解 `x` を元の問題 `pc` の空間に戻す。
+pub(super) fn fj_p3_solution(x: Vec<f64>, post: &[crate::presolve::PostsolveStep], sc: &Option<crate::presolve::scaling::Scaling>) -> Vec<f64> {
+    let mut x = x;
+    for step in post.iter().rev() {
+        step.apply(&mut x);
+    }
+    match sc {
+        Some(sc) => crate::presolve::scaling::unscale_x(sc, &x),
+        None => x,
+    }
+}
+
+fn dual_bound_tightening(prob: &mut MipProblem) -> usize {
+    let m = prob.rows.len();
+    let (mut mn, mut mx) = (vec![0.0f64; m], vec![0.0f64; m]);
+    let (mut mn_inf, mut mx_inf) = (vec![0u32; m], vec![0u32; m]);
+    for (i, r) in prob.rows.iter().enumerate() {
+        for &(j, a) in r {
+            let (l, u) = (prob.col_lo[j], prob.col_up[j]);
+            let (lo_c, up_c) = if a > 0.0 { (a * l, a * u) } else { (a * u, a * l) };
+            if lo_c.is_finite() { mn[i] += lo_c } else { mn_inf[i] += 1 }
+            if up_c.is_finite() { mx[i] += up_c } else { mx_inf[i] += 1 }
+        }
+    }
+    let mut count = 0;
+    let cols = prob.cols.clone();
+    for j in 0..prob.n {
+        if prob.is_int[j] || prob.col_lo[j] == prob.col_up[j] || cols[j].is_empty() {
+            continue;
+        }
+        // d = +1: 上限を締める (費用 >= 0)、d = -1: 下限を締める (費用 <= 0)。費用 0 は両方を試す
+        for d in [1.0f64, -1.0] {
+            if d * prob.cost[j] < 0.0 {
+                continue;
+            }
+            let cur = if d > 0.0 { prob.col_up[j] } else { -prob.col_lo[j] };
+            let other = if d > 0.0 { prob.col_lo[j] } else { -prob.col_up[j] };
+            if !other.is_finite() {
+                continue;
+            }
+            // y = d x_j を増やすと楽になる行だけか。楽になる行ごとに必要な y の値の最大
+            let mut need = other;
+            let mut ok = true;
+            for &(i, a) in &cols[j] {
+                let ay = d * a; // y の係数
+                for (side, b) in [(1.0f64, prob.row_up[i]), (-1.0, -prob.row_lo[i])] {
+                    if !b.is_finite() {
+                        continue;
+                    }
+                    // side 向きの行: side * row <= b。y の係数 side * ay
+                    let c = side * ay;
+                    if c > 0.0 {
+                        ok = false; // y を増やすと苦しくなる向きがある
+                        break;
+                    }
+                    // 楽になる向き: c y <= b - (ほかの列の活動)。ほかの列の最悪 = side 向きの最大活動
+                    let (act, inf) = if side > 0.0 { (mx[i], mx_inf[i]) } else { (-mn[i], mn_inf[i]) };
+                    let own = {
+                        let ax = side * a;
+                        if ax > 0.0 { ax * prob.col_up[j] } else { ax * prob.col_lo[j] }
+                    };
+                    let own_inf = !own.is_finite();
+                    if inf - own_inf as u32 > 0 {
+                        ok = false;
+                        break;
+                    }
+                    let rest = if own_inf { act } else { act - own };
+                    // c y <= b - rest かつ c < 0: y >= (rest - b) / |c|
+                    need = need.max((rest - b) / (-c));
+                }
+                if !ok {
+                    break;
+                }
+            }
+            if !ok || !need.is_finite() {
+                continue;
+            }
+            // 少し余裕を持たせる (丸め誤差で最適解を落とさない)
+            let nb = need + 1e-9 * (1.0 + need.abs());
+            if nb < cur - 1e-6 * (1.0 + cur.abs().min(1e9)) {
+                if d > 0.0 {
+                    prob.col_up[j] = nb;
+                } else {
+                    prob.col_lo[j] = -nb;
+                }
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
+/// 支配される 0-1 列の固定 (`ENOMOTO_MIP_DOMCOL`、既定では使わない。HiGHS の前処理の "dominated columns"、Gamrath ら 2015):
+/// 0-1 列の文字 (`y = x` か `y = 1 - x`) で考える。文字 y_j・y_k で、費用が `c(y_j) <= c(y_k)`、すべての行で y_j の係数が y_k の
+/// 係数より行を破りにくい (上限のある向きで `a_ij <= a_ik`、下限のある向きで `a_ij >= a_ik`、等式は等しい) とき、y_j は y_k を
+/// 支配する: y_k = 1 の解から y_k を 0 に、y_j を 1 増やすと、行はどれも破れず目的も悪くならない。よって
+/// - y_j と y_k が衝突する (同時に 1 にならない。衝突グラフの辺) なら y_k = 0 の最適解がある
+/// - y_j の上限 1 が行から導ける (ほかの列の境界と 1 本の行で `y_j <= 1` が出る。増やしても境界を越えない) なら y_k = 0
+/// のどちらかで y_k を 0 に固定する。候補は、衝突グラフの y_j の隣と、(上限が導けるとき) y_j の最も短い行の列。
+/// 固定した列を含む組は使わない (固定は順に、それまでの固定をした問題で正しい。支配と「導ける」は境界を締めても崩れない)。
+/// 調べる組は `ENOMOTO_T_MIP_DOMCOL_MAX_PAIRS` まで (既定 100 万)。固定 (列, 値) を返す。
+fn dominated_binary_fixings(prob: &MipProblem) -> Vec<(usize, f64)> {
+    dominated_binary_fixings_with(prob, env_str!("ENOMOTO_MIP_DOMCOL_PRED").is_some())
+}
+
+/// [`dominated_binary_fixings`] の本体。`pred` は `ENOMOTO_MIP_DOMCOL_PRED` (予測の境界の (c) も使う)。
+fn dominated_binary_fixings_with(prob: &MipProblem, pred: bool) -> Vec<(usize, f64)> {
+    let n = prob.n;
+    let binary: Vec<bool> = (0..n).map(|j| prob.is_int[j] && prob.col_lo[j] == 0.0 && prob.col_up[j] == 1.0).collect();
+    let g = clique::CliqueGraph::build_with(n, &prob.rows, &prob.row_lo, &prob.row_up, &binary, &prob.col_lo, &prob.col_up, &prob.conflict_edges);
+    let max_pairs = tunable!("ENOMOTO_T_MIP_DOMCOL_MAX_PAIRS", 1_000_000usize, usize);
+    let mut cols: Vec<Vec<(usize, f64)>> = prob.cols.clone();
+    for c in cols.iter_mut() {
+        c.sort_unstable_by_key(|e| e.0);
+    }
+    // 行ごとの最小・最大活動 (有限部分と無限の項の数)
+    let m = prob.rows.len();
+    let (mut mn, mut mx) = (vec![0.0f64; m], vec![0.0f64; m]);
+    let (mut mn_inf, mut mx_inf) = (vec![0u32; m], vec![0u32; m]);
+    for (i, r) in prob.rows.iter().enumerate() {
+        for &(j, a) in r {
+            let (l, u) = (prob.col_lo[j], prob.col_up[j]);
+            let (lo_c, up_c) = if a > 0.0 { (a * l, a * u) } else { (a * u, a * l) };
+            if lo_c.is_finite() { mn[i] += lo_c } else { mn_inf[i] += 1 }
+            if up_c.is_finite() { mx[i] += up_c } else { mx_inf[i] += 1 }
+        }
+    }
+    // 文字 (j, s) の上限 1 が行から導けるか (s = +1: x_j <= 1、s = -1: x_j >= 0)。0-1 列の寄与は有限
+    let implied_up = |j: usize, s: f64| -> bool {
+        cols[j].iter().any(|&(i, a)| {
+            // 向き d (上限側 +1: a x <= up、下限側 -1: -a x <= -lo) ごとに、文字の係数が正になる向きで
+            [(1.0, prob.row_up[i]), (-1.0, -prob.row_lo[i])].into_iter().any(|(d, b)| {
+                let al = d * a * s; // 文字 y の係数 (x = y か 1 - y)
+                if !b.is_finite() || al <= 0.0 {
+                    return false;
+                }
+                // d 向きの最小活動 (j を除く)
+                let (act, inf) = if d > 0.0 { (mn[i], mn_inf[i]) } else { (-mx[i], mx_inf[i]) };
+                if inf > 0 {
+                    return false;
+                }
+                let aj = d * a;
+                let own = if aj > 0.0 { aj * prob.col_lo[j] } else { aj * prob.col_up[j] };
+                let rest = act - own;
+                // 文字 y の項: s = +1 なら aj x = al y、s = -1 なら aj x = aj - al y (定数 aj は右辺へ)
+                let bb = if s > 0.0 { b } else { b - aj };
+                (bb - rest) / al <= 1.0 + 1e-9
+            })
+        })
+    };
+    // 文字 (j, sj) が (k, sk) を支配するか
+    let dominates = |j: usize, sj: f64, k: usize, sk: f64| -> bool {
+        if sj * prob.cost[j] > sk * prob.cost[k] + 1e-9 * (1.0 + prob.cost[k].abs()) {
+            return false;
+        }
+        let (cj, ck) = (&cols[j], &cols[k]);
+        let (mut a, mut b) = (0, 0);
+        while a < cj.len() || b < ck.len() {
+            let (i, aj, ak) = if b >= ck.len() || (a < cj.len() && cj[a].0 < ck[b].0) {
+                a += 1;
+                (cj[a - 1].0, sj * cj[a - 1].1, 0.0)
+            } else if a >= cj.len() || ck[b].0 < cj[a].0 {
+                b += 1;
+                (ck[b - 1].0, 0.0, sk * ck[b - 1].1)
+            } else {
+                a += 1;
+                b += 1;
+                (cj[a - 1].0, sj * cj[a - 1].1, sk * ck[b - 1].1)
+            };
+            let tol = 1e-9 * (1.0 + aj.abs().max(ak.abs()));
+            if prob.row_up[i].is_finite() && aj > ak + tol {
+                return false;
+            }
+            if prob.row_lo[i].is_finite() && aj < ak - tol {
+                return false;
+            }
+        }
+        true
+    };
+    // `ENOMOTO_MIP_DOMCOL_PRED`: HiGHS の予測の境界 (Gamrath ら 2015 の定理 3 (vi)) に当たる (c) も使う: y_j が y_k を支配し
+    // c(y_k) >= 0 のとき、y_j = 1・y_k = 0 にして、y_k を下げると破れうる行 (y_k の係数が上限側で負・下限側で正) が、ほかの
+    // 列の最悪の値でも満たされるなら y_k = 0 にできる (支配の補題で y_j = 1 か y_k = 0 の最適解があり、y_j = 1 の側でも
+    // y_k を 0 に下げて行は破れず目的も悪くならない)。physiciansched6-2 には係数も費用も同じ 0-1 列が 3 本ずつの組が 13 あり、
+    // HiGHS は各組の 2 本をこれで 0 に固定する (3 本の和が 1 を超えても得をしない)
+    // 列 x の値 (文字 (j, s) の値 v に当たる)
+    let xval = |s: f64, v: f64| if s > 0.0 { v } else { 1.0 - v };
+    let worst_case_ok = |j: usize, sj: f64, k: usize, sk: f64| -> bool {
+        if sk * prob.cost[k] < -1e-9 * (1.0 + prob.cost[k].abs()) {
+            return false;
+        }
+        let (xj, xk) = (xval(sj, 1.0), xval(sk, 0.0));
+        cols[k].iter().all(|&(i, ak)| {
+            // y_k を下げると (x_k の向き -sk) 行の活動は -sk * ak だけ動く
+            let dk = -sk * ak;
+            let aj = cols[j].binary_search_by_key(&i, |e| e.0).map(|p| cols[j][p].1).unwrap_or(0.0);
+            // j・k を除いたほかの列の最大・最小活動
+            let contrib = |jj: usize, a: f64| if a > 0.0 { (a * prob.col_lo[jj], a * prob.col_up[jj]) } else { (a * prob.col_up[jj], a * prob.col_lo[jj]) };
+            let (jl, ju) = contrib(j, aj);
+            let (kl, ku) = contrib(k, ak);
+            let fixed_act = aj * xj + ak * xk;
+            // 上限側: 活動が増える向き (dk > 0) なら最大活動で確かめる
+            if prob.row_up[i].is_finite() && dk > 0.0 {
+                if mx_inf[i] > 0 {
+                    return false;
+                }
+                if mx[i] - ju - ku + fixed_act > prob.row_up[i] + 1e-9 * (1.0 + prob.row_up[i].abs()) {
+                    return false;
+                }
+            }
+            if prob.row_lo[i].is_finite() && dk < 0.0 {
+                if mn_inf[i] > 0 {
+                    return false;
+                }
+                if mn[i] - jl - kl + fixed_act < prob.row_lo[i] - 1e-9 * (1.0 + prob.row_lo[i].abs()) {
+                    return false;
+                }
+            }
+            true
+        })
+    };
+    let mut fixed = vec![false; n];
+    let mut out = Vec::new();
+    let mut pairs = 0usize;
+    let (mut pred_pairs, max_pred_pairs) = (0usize, tunable!("ENOMOTO_T_MIP_DOMCOL_PRED_MAX_PAIRS", 1_000_000usize, usize));
+    let mut cand: Vec<(usize, f64, bool)> = Vec::new(); // (k, sk, 衝突しているか)
+    'outer: for j in 0..n {
+        if !binary[j] {
+            continue;
+        }
+        for sj in [1.0, -1.0] {
+            if fixed[j] {
+                continue 'outer;
+            }
+            let lj = if sj > 0.0 { 2 * j as u32 } else { 2 * j as u32 + 1 };
+            cand.clear();
+            for &lk in g.neighbors(lj) {
+                cand.push(((lk / 2) as usize, if lk % 2 == 0 { 1.0 } else { -1.0 }, true));
+            }
+            // (b) の候補 (y_j の最も短い行)
+            if implied_up(j, sj) {
+                if let Some(&(i0, _)) = cols[j].iter().min_by_key(|&&(i, _)| prob.rows[i].len()) {
+                    for &(k, _) in &prob.rows[i0] {
+                        cand.push((k, 1.0, false));
+                        cand.push((k, -1.0, false));
+                    }
+                }
+            }
+            // (c) の候補: HiGHS の bestRowPlus (文字 y_j の係数が行を締める向き (上限側で正、上限がなく下限側で負) の最も
+            // 短い行)。y_j が y_k を支配するなら y_k はその行にある。(a)(b) の候補の後に、別の上限
+            // `ENOMOTO_T_MIP_DOMCOL_PRED_MAX_PAIRS` (既定 100 万) の中で調べる (同じ上限にすると長い行で (a)(b) の手間を使い切る。
+            // blp-ar98 で固定が 1539 → 16 になった)
+            let n_ab = cand.len();
+            if pred && pred_pairs < max_pred_pairs {
+                let best = cols[j].iter().filter(|&&(i, a)| (if prob.row_up[i].is_finite() { 1.0 } else { -1.0 }) * a * sj > 0.0).min_by_key(|&&(i, _)| prob.rows[i].len());
+                if let Some(&(i0, _)) = best {
+                    for &(k, _) in &prob.rows[i0] {
+                        cand.push((k, 1.0, false));
+                        cand.push((k, -1.0, false));
+                    }
+                }
+            }
+            let up_j = pred && implied_up(j, sj);
+            for (ci, &(k, sk, conf)) in cand.iter().enumerate() {
+                if k == j || !binary[k] || fixed[k] {
+                    continue;
+                }
+                if ci < n_ab {
+                    pairs += 1;
+                    if pairs > max_pairs {
+                        break 'outer;
+                    }
+                } else {
+                    pred_pairs += 1;
+                    if pred_pairs > max_pred_pairs {
+                        break;
+                    }
+                }
+                if dominates(j, sj, k, sk) && (!pred || conf || up_j || worst_case_ok(j, sj, k, sk)) {
+                    // y_k = 0: sk = +1 なら x_k = 0、sk = -1 なら x_k = 1
+                    fixed[k] = true;
+                    out.push((k, if sk > 0.0 { 0.0 } else { 1.0 }));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// 行の疎化 (`ENOMOTO_MIP_SPARSIFY`、既定では使わない。HiGHS の前処理の Sparsify の、フィルインのない半分): 等式の行 `e`
+/// (2 列以上) の列がすべて行 `r` に含まれるとき、`r` から `s e` (`s` は消せる列の最も多い倍率) を引いて非零を減らす。
+/// 等式の倍数を足し引きするだけなので実行可能領域は変わらず、後処理も要らない。整数列だけの行で係数が整数なら `s` も整数に限る
+/// (係数を整数のまま保つ。係数の強化・カットの前提)。書き換えた行は、この呼び出しでは等式として使わず、等式として使った行は
+/// 書き換えない (相互に引き合うと系が壊れる)。1 行から複数の等式を引いてよい。手間は 1 本の等式あたり、その最も出現の少ない
+/// 列を含む行の数まで。
+///
+/// physiciansched6-2 では、勤務の数の長い行 (77 列の `Σ ≤ 26`) から同じ列の部分集合の等式 (66 列の `Σ = 18`) を引くと
+/// 11 列の `Σ ≤ 8` になる (66 列は互いに素な 18 本の等式 `Σ = 1`)。HiGHS の前処理は 4 本しか書き換えないが、これを切ると
+/// Feasibility Jump が解を見つけられない。
+/// 書き換えた行の数を返す。
+fn sparsify_rows(rows: &mut [Vec<(usize, f64)>], row_lo: &mut [f64], row_up: &mut [f64], is_int: &[bool], n: usize) -> usize {
+    let m = rows.len();
+    let max_len = tunable!("ENOMOTO_T_MIP_SPARSIFY_MAX_EQ_LEN", 1000usize, usize);
+    let mut col_rows: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (i, r) in rows.iter().enumerate() {
+        for &(j, _) in r {
+            col_rows[j].push(i);
+        }
+    }
+    // 長い等式から (長い行ほど減らせる非零が多い)
+    let mut eqs: Vec<usize> = (0..m).filter(|&i| row_lo[i] == row_up[i] && rows[i].len() >= 2 && rows[i].len() <= max_len).collect();
+    eqs.sort_by_key(|&i| std::cmp::Reverse(rows[i].len()));
+    let mut changed = vec![false; m];
+    let mut pivot = vec![false; m];
+    let mut count = 0usize;
+    for e in eqs {
+        if changed[e] {
+            continue;
+        }
+        let re = rows[e].clone();
+        let be = row_lo[e];
+        let Some(&(anchor, _)) = re.iter().min_by_key(|&&(j, _)| col_rows[j].len()) else { continue };
+        let cand = col_rows[anchor].clone();
+        for r in cand {
+            if r == e || pivot[r] || rows[r].len() <= re.len() {
+                continue;
+            }
+            let rr = &rows[r];
+            // r の係数 (列は昇順でないこともあるので探す表を作る)
+            let coef: std::collections::HashMap<usize, f64> = rr.iter().copied().collect();
+            if !re.iter().all(|(j, _)| coef.contains_key(j)) {
+                continue;
+            }
+            // 倍率の候補: 各列の a_r / a_e。最も多く出るもの
+            let mut ratios: Vec<f64> = re.iter().map(|&(j, a)| coef[&j] / a).collect();
+            ratios.sort_by(|a, b| a.total_cmp(b));
+            let (mut best, mut best_cnt) = (0.0, 0usize);
+            let mut k = 0;
+            while k < ratios.len() {
+                let mut l = k;
+                while l < ratios.len() && (ratios[l] - ratios[k]).abs() <= 1e-12 * (1.0 + ratios[k].abs()) {
+                    l += 1;
+                }
+                if l - k > best_cnt {
+                    best_cnt = l - k;
+                    best = ratios[k];
+                }
+                k = l;
+            }
+            if best_cnt == 0 || best == 0.0 {
+                continue;
+            }
+            // 整数列だけで係数が整数の行は、倍率も整数に限る
+            let int_row = rr.iter().all(|&(j, a)| is_int[j] && a == a.round());
+            if int_row && (best != best.round() || !re.iter().all(|&(_, a)| a == a.round())) {
+                continue;
+            }
+            let ecoef: std::collections::HashMap<usize, f64> = re.iter().copied().collect();
+            let mut nr: Vec<(usize, f64)> = Vec::with_capacity(rr.len());
+            for &(j, a) in rr {
+                let v = match ecoef.get(&j) {
+                    Some(&ae) => {
+                        let v = a - best * ae;
+                        if v.abs() <= 1e-12 * (1.0 + a.abs()) { 0.0 } else { v }
+                    }
+                    None => a,
+                };
+                if v != 0.0 {
+                    nr.push((j, v));
+                }
+            }
+            if nr.len() >= rr.len() {
+                continue;
+            }
+            let shift = best * be;
+            if env_str!("ENOMOTO_MIP_DEBUG_SPARSIFY").is_some() {
+                eprintln!("MIP:   sparsify row {r} (len {} -> {}, [{}, {}]) by equation {e} (len {}, = {be}) x {best}", rr.len(), nr.len(), row_lo[r], row_up[r], re.len());
+            }
+            if row_lo[r].is_finite() {
+                row_lo[r] -= shift;
+            }
+            if row_up[r].is_finite() {
+                row_up[r] -= shift;
+            }
+            rows[r] = nr;
+            if !changed[r] {
+                count += 1;
+            }
+            changed[r] = true;
+            pivot[e] = true;
+        }
+    }
+    count
+}
+
+/// 行の疎化を HiGHS 1.15.1 の `HPresolve::sparsify` と同じ選び方でする (`ENOMOTO_MIP_SPARSIFY=highs`、既定では使わない)。
+/// [`sparsify_rows`] との違い:
+/// - 等式は **短い順** (HiGHS の `equations` は (行の長さ, 行) の順の集合で、呼び出しの初めの写しを順に使う)。書き換えた等式も
+///   その後に (その時の中身で) 等式として使う
+/// - 候補の行は等式の最も出現の少ない列を含む行。フィルインを 1 列まで許す (等式が連続列だけで候補の行に整数列があれば 0。
+///   一般整数列 (幅 1.5 超) のフィルインは許さない)。加えて、最も出現の少ない列が一般整数でなければ、2 番目に少ない列を含み
+///   最も少ない列を含まない行 (等式のほかの列はすべて含む) も候補にする (等式が連続列だけなら整数列のある行は除く)
+/// - 倍率は `|s| <= 1e3` で、消える非零の最も多いもの (同数なら |s| の小さい方)。倍率どうしが `sqrt(1e-6)/|a|` より近いときの
+///   扱いも HiGHS と同じ。消える数がフィルインより多ければ書き換える。整数の倍率に限らない
+/// - 書き換えで絶対値 1e-9 以下になった係数は消す (`small_matrix_value`)
+/// 書き換えた行の数を返す。
+fn sparsify_rows_highs(rows: &mut [Vec<(usize, f64)>], row_lo: &mut [f64], row_up: &mut [f64], is_int: &[bool], col_lo: &[f64], col_up: &[f64], n: usize) -> usize {
+    use std::collections::{BTreeSet, HashMap};
+    let m = rows.len();
+    let small = 1e-9;
+    let min_nz = 1e-6f64.sqrt();
+    let general = |j: usize| is_int[j] && col_up[j] - col_lo[j] > 1.5;
+    let mut r: Vec<HashMap<usize, f64>> = rows.iter().map(|row| row.iter().copied().filter(|&(_, a)| a != 0.0).collect()).collect();
+    let mut col_rows: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); n];
+    for (i, row) in r.iter().enumerate() {
+        for &j in row.keys() {
+            col_rows[j].insert(i);
+        }
+    }
+    let nint = |row: &HashMap<usize, f64>| row.keys().filter(|&&j| is_int[j]).count();
+    let mut eqs: Vec<usize> = (0..m).filter(|&i| row_lo[i] == row_up[i] && r[i].len() >= 2).collect();
+    eqs.sort_by_key(|&i| (r[i].len(), i));
+    let mut changed = vec![false; m];
+    let debug = env_str!("ENOMOTO_MIP_DEBUG_SPARSIFY").is_some();
+    // possibleScales: 倍率の昇順の (倍率, 数)。数 -1 は数値的に悪い倍率
+    let add_scale = |ps: &mut Vec<(f64, i64)>, scale: f64, eqv: f64, candv: f64| {
+        let tol = min_nz / eqv.abs();
+        let pos = ps.partition_point(|&(s, _)| s < scale - tol);
+        if pos < ps.len() && (ps[pos].0 - scale).abs() <= tol {
+            if ps[pos].1 == -1 {
+                return;
+            }
+            if (ps[pos].0 * eqv + candv).abs() <= small {
+                ps[pos].1 += 1;
+            } else {
+                ps[pos].1 = -1;
+            }
+        } else {
+            ps.insert(pos, (scale, 1));
+        }
+    };
+    let best_scale = |ps: &[(f64, i64)], misses: i64| -> (f64, i64) {
+        let (mut scale, mut num) = (0.0f64, 0i64);
+        for &(s, c) in ps {
+            if c <= misses {
+                continue;
+            }
+            if c > num || (c == num && s.abs() < scale.abs()) {
+                scale = s;
+                num = c;
+            }
+        }
+        (scale, num)
+    };
+    let mut count = 0usize;
+    for e in eqs {
+        if r[e].len() < 2 || row_lo[e] != row_up[e] {
+            continue;
+        }
+        let mut re: Vec<(usize, f64)> = r[e].iter().map(|(&j, &a)| (j, a)).collect();
+        re.sort_unstable_by_key(|x| x.0);
+        let rhs = row_lo[e];
+        let eq_int = re.iter().filter(|x| is_int[x.0]).count();
+        // 最も出現の少ない列と 2 番目
+        let (mut c1, mut c2) = (usize::MAX, usize::MAX);
+        for &(j, _) in &re {
+            if c1 == usize::MAX || col_rows[j].len() < col_rows[c1].len() {
+                c2 = c1;
+                c1 = j;
+            } else if c2 == usize::MAX || col_rows[j].len() < col_rows[c2].len() {
+                c2 = j;
+            }
+        }
+        let mut targets: Vec<(usize, f64)> = Vec::new();
+        let mut ps: Vec<(f64, i64)> = Vec::new();
+        for &cand in &col_rows[c1] {
+            if cand == e {
+                continue;
+            }
+            ps.clear();
+            let cr = &r[cand];
+            let mut misses = 0i64;
+            let max_misses = if eq_int == 0 && nint(cr) != 0 { 0 } else { 1 };
+            for &(j, a) in &re {
+                let Some(&cv) = cr.get(&j) else {
+                    if general(j) {
+                        misses = 2;
+                        break;
+                    }
+                    misses += 1;
+                    if misses > max_misses {
+                        break;
+                    }
+                    continue;
+                };
+                let scale = -cv / a;
+                if scale.abs() > 1e3 {
+                    continue;
+                }
+                add_scale(&mut ps, scale, a, cv);
+            }
+            if misses > max_misses || ps.is_empty() {
+                continue;
+            }
+            let (scale, num) = best_scale(&ps, misses);
+            if num > misses {
+                targets.push((cand, scale));
+            }
+        }
+        if !general(c1) && c2 != usize::MAX {
+            for &cand in &col_rows[c2] {
+                if cand == e || r[cand].contains_key(&c1) {
+                    continue;
+                }
+                let cr = &r[cand];
+                if eq_int == 0 && nint(cr) != 0 {
+                    continue;
+                }
+                ps.clear();
+                let mut skip = false;
+                for &(j, a) in &re {
+                    if j == c1 {
+                        continue;
+                    }
+                    let Some(&cv) = cr.get(&j) else {
+                        skip = true;
+                        break;
+                    };
+                    let scale = -cv / a;
+                    if scale.abs() > 1e3 {
+                        continue;
+                    }
+                    add_scale(&mut ps, scale, a, cv);
+                }
+                if skip || ps.is_empty() {
+                    continue;
+                }
+                let (scale, num) = best_scale(&ps, 1);
+                if num > 1 {
+                    targets.push((cand, scale));
+                }
+            }
+        }
+        for (row, scale) in targets {
+            if debug {
+                eprintln!("MIP:   sparsify(highs) row {row} (len {}, [{}, {}]) by equation {e} (len {}, = {rhs}) x {scale}", r[row].len(), row_lo[row], row_up[row], re.len());
+            }
+            if row_lo[row].is_finite() {
+                row_lo[row] += scale * rhs;
+            }
+            if row_up[row].is_finite() {
+                row_up[row] += scale * rhs;
+            }
+            for &(j, a) in &re {
+                let v = r[row].get(&j).copied().unwrap_or(0.0) + scale * a;
+                if v.abs() <= small {
+                    if r[row].remove(&j).is_some() {
+                        col_rows[j].remove(&row);
+                    }
+                } else if r[row].insert(j, v).is_none() {
+                    col_rows[j].insert(row);
+                }
+            }
+            if !changed[row] {
+                count += 1;
+                changed[row] = true;
+            }
+        }
+    }
+    for (i, row) in r.into_iter().enumerate() {
+        if changed[i] {
+            let mut v: Vec<(usize, f64)> = row.into_iter().collect();
+            v.sort_unstable_by_key(|x| x.0);
+            rows[i] = v;
+        }
+    }
+    count
+}
+
 /// 係数が定数倍の関係にある行をまとめる。各行を最初の係数で割った形で分類し、同じ形の行の
 /// `base x` の範囲の共通部分を、最初の行 (元の倍率) の範囲制約 1 本にする。共通部分が空 (実行不能) なら
 /// その組はまとめない (伝播・LP が検出する)。まとめた (消した) 行の数を返す。
@@ -1327,6 +2609,29 @@ fn merge_parallel_rows(rows: &mut Vec<Vec<(usize, f64)>>, row_lo: &mut Vec<f64>,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// クリーク行の拡張: `x0 + x1 <= 1` に、x0・x1 の両方と衝突する x2 (`x0 + x2 <= 1`・`x1 + x2 <= 1`) を加え、
+    /// 拡張した行に含まれる 2 本の行は消す。x3 は x1 とだけ衝突するので加えない。否定の文字 (`x4 - x5 <= 0` は
+    /// `x4 + (1 - x5) <= 1`) も扱う
+    #[test]
+    fn extend_clique_rows_adds_common_neighbors() {
+        let rows = vec![vec![(0, 1.0), (1, 1.0)], vec![(0, 1.0), (2, 1.0)], vec![(1, 1.0), (2, 1.0)], vec![(1, 1.0), (3, 1.0)], vec![(4, 1.0), (5, -1.0)], vec![(4, 1.0), (6, 1.0)], vec![(5, -1.0), (6, 1.0)]];
+        let m = rows.len();
+        let p = MipProblem::from_rows(vec![0.0; 7], vec![1.0; 7], vec![-1.0; 7], 0.0, 1.0, vec![true; 7], rows, vec![f64::NEG_INFINITY; m], vec![1.0, 1.0, 1.0, 1.0, 0.0, 1.0, 0.0]);
+        let q = extend_clique_rows(p, false);
+        let has = |r: &[(usize, f64)], up: f64| (0..q.m).any(|i| q.rows[i] == r && q.row_up[i] == up);
+        assert!(has(&[(0, 1.0), (1, 1.0), (2, 1.0)], 1.0));
+        assert!(has(&[(1, 1.0), (3, 1.0)], 1.0));
+        // x4 + (1 - x5) + x6 <= 1  <=>  x4 - x5 + x6 <= 0
+        assert!(has(&[(4, 1.0), (5, -1.0), (6, 1.0)], 0.0));
+        assert_eq!(q.m, 3);
+        // 整数解は変わらない: 元の行を満たす点は拡張後も満たす (全列挙)
+        for mask in 0u32..128 {
+            let x: Vec<f64> = (0..7).map(|j| ((mask >> j) & 1) as f64).collect();
+            let orig_ok = [x[0] + x[1], x[0] + x[2], x[1] + x[2], x[1] + x[3], x[4] + x[6]].iter().all(|&v| v <= 1.0) && x[4] - x[5] <= 0.0 && x[6] - x[5] <= 0.0;
+            assert_eq!(orig_ok, q.is_feasible(&x, 1e-9), "{x:?}");
+        }
+    }
 
     /// 上限側と下限側 (符号の逆の倍) の行が範囲制約 1 本にまとまること
     #[test]
@@ -1419,6 +2724,171 @@ mod tests {
     }
 
     #[test]
+    fn sparsify_rows_subtracts_disjoint_equations() {
+        // x0 + x1 = 1、x2 + x3 = 1 を x0 + x1 + x2 + x3 + x4 <= 3 から引くと x4 <= 1。等式の行は書き換えない
+        let mut rows = vec![vec![(0, 1.0), (1, 1.0)], vec![(2, 1.0), (3, 1.0)], vec![(0, 1.0), (1, 1.0), (2, 1.0), (3, 1.0), (4, 1.0)], vec![(0, 2.0), (1, 3.0), (5, 1.0)]];
+        let mut lo = vec![1.0, 1.0, f64::NEG_INFINITY, f64::NEG_INFINITY];
+        let mut up = vec![1.0, 1.0, 3.0, 4.0];
+        let k = sparsify_rows(&mut rows, &mut lo, &mut up, &[true; 6], 6);
+        assert_eq!(rows[2], vec![(4, 1.0)]);
+        assert_eq!(up[2], 1.0);
+        assert_eq!(rows[0].len() + rows[1].len(), 4);
+        // 2 x0 + 3 x1 + x5 <= 4: 倍率 2 で x0 を、3 で x1 を消せる (どちらも 1 列)。整数の倍率で 1 列減る
+        assert_eq!(rows[3].len(), 2);
+        assert_eq!(k, 2);
+        // 整数の行で整数でない倍率は使わない: 2 x0 + 2 x1 + x5 <= 3 と 2 x0 + 2 x1 = 2 (倍率 1) は使い、
+        // x0 + x1 + x5 <= 1 と 2 x0 + 2 x1 = 2 (倍率 1/2) は使わない
+        let mut rows = vec![vec![(0, 2.0), (1, 2.0)], vec![(0, 1.0), (1, 1.0), (5, 1.0)]];
+        let mut lo = vec![2.0, f64::NEG_INFINITY];
+        let mut up = vec![2.0, 1.0];
+        assert_eq!(sparsify_rows(&mut rows, &mut lo, &mut up, &[true; 6], 6), 0);
+    }
+
+    /// 支配による固定は最適値を変えない (小さな 0-1 問題を全部数えて比べる)
+    #[test]
+    fn dominated_binary_fixings_keep_optimum() {
+        let mut seed = 12345u64;
+        let mut rnd = |k: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % k
+        };
+        let mut total_fixed = [0usize; 2];
+        for _ in 0..2000 {
+            let n = 6;
+            let m = 1 + rnd(4) as usize;
+            let mut rows = Vec::new();
+            let (mut rlo, mut rup) = (Vec::new(), Vec::new());
+            for _ in 0..m {
+                let mut r: Vec<(usize, f64)> = Vec::new();
+                for j in 0..n {
+                    let (take, a) = (rnd(2) == 0, rnd(5) as f64 - 2.0);
+                    if take && a != 0.0 {
+                        r.push((j, a));
+                    }
+                }
+                if r.len() < 2 {
+                    r = vec![(0, 1.0), (1 + rnd(5) as usize, 1.0)];
+                }
+                let b = rnd(3) as f64;
+                match rnd(3) {
+                    0 => {
+                        rlo.push(f64::NEG_INFINITY);
+                        rup.push(b);
+                    }
+                    1 => {
+                        rlo.push(b - 1.0);
+                        rup.push(f64::INFINITY);
+                    }
+                    _ => {
+                        rlo.push(b - 1.0);
+                        rup.push(b + 1.0);
+                    }
+                }
+                rows.push(r);
+            }
+            // 衝突を作るための集合詰め込み行
+            rows.push(vec![(rnd(3) as usize, 1.0), (3 + rnd(3) as usize, 1.0)]);
+            rlo.push(f64::NEG_INFINITY);
+            rup.push(1.0);
+            let cost: Vec<f64> = (0..n).map(|_| rnd(5) as f64 - 2.0).collect();
+            let p = MipProblem::from_rows(vec![0.0; n], vec![1.0; n], cost, 0.0, 1.0, vec![true; n], rows, rlo, rup);
+            let best = |lo: &[f64], up: &[f64]| -> f64 {
+                let mut z = f64::INFINITY;
+                for mask in 0..(1u32 << n) {
+                    let x: Vec<f64> = (0..n).map(|j| ((mask >> j) & 1) as f64).collect();
+                    if (0..n).all(|j| x[j] >= lo[j] && x[j] <= up[j]) && p.is_feasible(&x, 1e-9) {
+                        z = z.min(p.objective(&x));
+                    }
+                }
+                z
+            };
+            for pred in [false, true] {
+                let fix = dominated_binary_fixings_with(&p, pred);
+                let (mut lo, mut up) = (p.col_lo.clone(), p.col_up.clone());
+                for &(j, v) in &fix {
+                    lo[j] = v;
+                    up[j] = v;
+                }
+                total_fixed[pred as usize] += fix.len();
+                assert_eq!(best(&p.col_lo, &p.col_up), best(&lo, &up), "fixings {fix:?} (pred {pred}) change the optimum: rows {:?} lo {:?} up {:?} cost {:?}", p.rows, p.row_lo, p.row_up, p.cost);
+            }
+        }
+        // 予測の境界 (pred) は固定を増やす
+        assert!(total_fixed[0] > 0 && total_fixed[1] > total_fixed[0], "{total_fixed:?}");
+    }
+
+    /// 双対の推論による連続列の上限 ([`dual_bound_tightening`]) は最適解を落とさない: 0-1 列 x と罰則の連続列 w
+    /// (`a x - w <= b`、費用は正) の問題で、総当たりの最適解 (w = max(0, a x - b) の最小) が締めた境界の中にある
+    #[test]
+    fn dual_bound_tightening_keeps_optimum() {
+        let mut seed = 777u64;
+        let mut rnd = |k: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % k
+        };
+        let mut tightened = 0;
+        for _ in 0..500 {
+            let (nb, nw) = (5usize, 2usize);
+            let n = nb + nw;
+            let mut rows = Vec::new();
+            let (mut rlo, mut rup) = (Vec::new(), Vec::new());
+            for w in 0..nw {
+                // 罰則の行: Σ a x - w <= b (w を増やすと楽になる)
+                let mut r: Vec<(usize, f64)> = Vec::new();
+                for j in 0..nb {
+                    if rnd(2) == 0 {
+                        let a = 1.0 + rnd(4) as f64;
+                        r.push((j, a));
+                    }
+                }
+                r.push((nb + w, -1.0));
+                rows.push(r);
+                rlo.push(f64::NEG_INFINITY);
+                rup.push(rnd(4) as f64);
+            }
+            // 0-1 列だけの行 (被覆・詰め込み)
+            let mut cover: std::collections::BTreeMap<usize, f64> = std::collections::BTreeMap::new();
+            cover.insert(0, 1.0);
+            for j in 0..nb {
+                if rnd(2) == 0 {
+                    cover.insert(j, 1.0);
+                }
+            }
+            rows.push(cover.into_iter().collect());
+            rlo.push(1.0);
+            rup.push(f64::INFINITY);
+            let cost: Vec<f64> = (0..n).map(|j| if j < nb { rnd(5) as f64 - 2.0 } else { 1.0 + rnd(3) as f64 }).collect();
+            let is_int: Vec<bool> = (0..n).map(|j| j < nb).collect();
+            let up0: Vec<f64> = (0..n).map(|j| if j < nb { 1.0 } else { f64::INFINITY }).collect();
+            let p = MipProblem::from_rows(vec![0.0; n], up0, cost, 0.0, 1.0, is_int, rows, rlo, rup);
+            let mut q = p.clone();
+            tightened += dual_bound_tightening(&mut q);
+            // 総当たり: x を決めると最適な w は各罰則の行の max(0, a x - b)
+            let (mut zbest, mut xbest) = (f64::INFINITY, Vec::new());
+            for mask in 0..(1u32 << nb) {
+                let mut x: Vec<f64> = (0..nb).map(|j| ((mask >> j) & 1) as f64).collect();
+                for w in 0..nw {
+                    let act: f64 = p.rows[w].iter().filter(|e| e.0 < nb).map(|&(j, a)| a * x[j]).sum();
+                    x.push((act - p.row_up[w]).max(0.0));
+                }
+                if p.is_feasible(&x, 1e-9) && p.objective(&x) < zbest {
+                    zbest = p.objective(&x);
+                    xbest = x;
+                }
+            }
+            if xbest.is_empty() {
+                continue;
+            }
+            assert!(q.is_feasible(&xbest, 1e-9) && (0..n).all(|j| xbest[j] >= q.col_lo[j] - 1e-9 && xbest[j] <= q.col_up[j] + 1e-9), "tightened bounds cut off the optimum {xbest:?}: {:?} {:?}", q.col_lo, q.col_up);
+        }
+        assert!(tightened > 0);
+    }
+
+    #[test]
     fn merge_parallel_rows_makes_ranged_row() {
         let mut rows = vec![vec![(0, 1.0), (1, 2.0)], vec![(0, -2.0), (1, -4.0)], vec![(0, 1.0), (1, 1.0)]];
         let mut lo = vec![f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY];
@@ -1453,7 +2923,7 @@ mod tests {
         ];
         let rows = vec![vec![(0, 1.0), (1, 1.0), (2, 1.0)], vec![(1, 1.0), (2, 1.0)]];
         let p = MipProblem::from_rows(vec![0.0, 0.0, 0.0], vec![f64::INFINITY, 10.0, 10.0], vec![1000.0, 1.0, 2.0], 0.0, 1.0, vec![false, true, true], rows, vec![1000.0, f64::NEG_INFINITY], vec![1000.0, 15.0]);
-        let Some(Presolved::Reduced { prob, postsolve, scaling }) = presolve_mip(&p, false, false) else { panic!("expected a reduced problem") };
+        let Some(Presolved::Reduced { prob, postsolve, scaling }) = presolve_mip(&p, false, false, None) else { panic!("expected a reduced problem") };
         for (x1, x2) in [(3.0, 4.0), (10.0, 5.0), (0.0, 0.0)] {
             let mut xr: Vec<f64> = (0..prob.n).map(|j| prob.col_lo[j].max(0.0).min(prob.col_up[j])).collect();
             for (j, v) in [(1, x1), (2, x2)] {
