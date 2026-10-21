@@ -9547,6 +9547,16 @@ neos-950242 の 2 回目の調査 (`analysis/neos950242_r2_20261020.md`)。
 - 手元 (4 スレッド・60 秒) で suball 3 回・FC_SUBMIP 既定 3 回では再現せず (時間切れ、11689〜11708)。
 - 原因が分かるまで FC_SUBMIP を既定から外す (`ENOMOTO_MIP_FC_SUBMIP=1` で使う試作に戻す)。原因の調査を別に立てる。
 
+## 2026-10-21: サブ MIP の強化を全問に広げた計測 (SX)
+
+- 6ffe911 (develop + beasleyC3-r3) で既定・suball (SUBMIP_CUTS=1 T_MIP_SUBMIP_CUT_ROUNDS=25 T_MIP_SUBMIP_CUT_STALL=10)・subrows (SUBMIP_CUTS=1)・subrounds (ROUNDS/STALL だけ) を 2 組 (rSXa/rSXb、順序は逆)。
+  - 既定: 40 問 26 / 25、SGM 19.31 / 20.93。16 問 10 / 9、SGM 33.16 / 36.46。
+  - subrows: 40 問 26 / 26、SGM 18.94 / 20.12。16 問 12 / 10、SGM 32.91 / 36.38。不一致 0。4 つの指標とも既定以上。
+  - suball: 40 問 26 / 26、SGM 19.23 / 21.44。16 問 12 / 10。rSXa で mc11 が optimal 11712 (誤り、最適 11689)。
+  - subrounds: 40 問 25 / 25、SGM 20.76 / 20.70。16 問 10 / 9。良くない。
+- 効いているのはカットの行で、ラウンドを増やすのは効かない。ただし mc11 の誤った最適値の原因 (調査中、inv/mc11-wrongopt-20261021) が分かるまで、行を渡す形も既定にしない (2026-10-16 の計測では SUBMIP_CUTS で ns1830653・net12 が悪化していたことにも注意)。
+- 結果: benchmarks/*_6ffe911_{newdef,suball,subrows,subrounds}_rSX{a,b}.json
+
 ## 改名一覧 (整理時)
 
 本メモ中は旧名で書かれている。
