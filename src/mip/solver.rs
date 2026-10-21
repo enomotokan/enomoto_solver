@@ -336,6 +336,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 基底の復元の回数、そのうち基底の数が行数と合わなかった回数、復元後の最初の LP の反復数 (診断用)
     restore_stats: (u64, u64, u64),
     restored_now: bool,
+    /// 調査用 (`ENOMOTO_MIP_DBG_RESTORE`): 直前の基底の復元の (保存からの行の追加数, 削除数, 種類 0 一致 1 写像 2 今の基底, 保存時の行数)
+    dbg_restore: Option<(usize, usize, u8, usize)>,
     /// 直前に戻した基底に、保存した DSE 重みも当てはめたか (次の LP で引き継ぐ)。
     restored_dse: bool,
     node_lps: u64,
@@ -810,6 +812,14 @@ impl TreeProf {
             self.kind_n[0], per(0), pms(0), self.kind_n[1], per(1), pms(1), self.kind_n[2], per(2), pms(2)
         )
     }
+}
+
+fn tree_pool_bb() -> bool {
+    env_str!("ENOMOTO_MIP_TREE_POOL_BB").is_some()
+}
+
+fn dbg_restore_on() -> bool {
+    env_str!("ENOMOTO_MIP_DBG_RESTORE").is_some()
 }
 
 fn prof_tree_par() -> bool {
@@ -1445,6 +1455,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         node_iters_first: 0,
         restore_stats: (0, 0, 0),
         restored_now: false,
+        dbg_restore: None,
         restored_dse: false,
         node_lps: 0,
         node_lp_secs: 0.0,
@@ -2144,7 +2155,20 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let (lo, up) = if self.p.is_int[j] { (x[j], x[j]) } else { (self.p.col_lo[j], self.p.col_up[j]) };
             self.lp.set_col_bounds(j, lo, up);
         }
-        let st = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
+        // `ENOMOTO_MIP_INC_LP_CAP` (試作、既定では使わない): この LP の時間の上限を全体の `ENOMOTO_T_MIP_INC_LP_TIME_FRAC`
+        // (0.02、最低 1 秒) にする。uccase12 で DUAL_UB + CS_OBJ_PIVOT のとき、根の LP の直後に FJ の解 (865106) を受け取り、
+        // この LP が 8.4 秒から 56 秒まで止まらず、根のカット・ヒューリスティクスが 1 つも回らなかった
+        let deadline = if env_str!("ENOMOTO_MIP_INC_LP_CAP").is_some() && self.params.time_limit.is_finite() {
+            let cap = (tunable!("ENOMOTO_T_MIP_INC_LP_TIME_FRAC", 0.02, f64) * self.params.time_limit).max(1.0);
+            let d = std::time::Instant::now() + std::time::Duration::from_secs_f64(cap);
+            Some(self.deadline.map_or(d, |g| g.min(d)))
+        } else {
+            self.deadline
+        };
+        let st = self.lp.solve(&SolveLimits { deadline, ..Default::default() });
+        if self.params.verbose && st != LpStatus::Optimal {
+            eprintln!("MIP: fixed-integer LP: {st:?} ({} iters)", self.lp.total_iterations() - it0);
+        }
         if st == LpStatus::Optimal {
             let mut y = self.lp.col_values();
             for j in 0..self.p.n {
@@ -3483,7 +3507,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     } else {
                         tunable!("ENOMOTO_T_MIP_BB_EVERY", 10u64, u64)
                     };
-                    let n = match self.queue.pop(bb_every) {
+                    let from_pool = self.pool_best_on_bb_turn(bb_every);
+                    let n = match from_pool.or_else(|| self.queue.pop(bb_every)) {
+                        Some(n) if self.tp_kind == 2 => n,
                         Some(n) => {
                             self.tp_kind = 1;
                             // `ENOMOTO_T_MIP_SUBMIP_STALL` (サブ MIP の中だけ、既定 12、0 なら使わない): 暫定解があり、待ち行列から取ったノードの
@@ -3741,6 +3767,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if resolves == 0 {
                     self.node_iters_first += self.lp.total_iterations() - it0;
                     let k = std::mem::take(&mut self.tp_kind);
+                    if let Some((add, del, kind, r0)) = self.dbg_restore.take() {
+                        if k == 1 {
+                            eprintln!("DBGRESTORE kind {kind} rows_saved {r0} rows_now {} added {add} deleted {del} iters {} depth {} lb {:.6e} lp {:.6e}", self.lp.num_rows(), self.lp.total_iterations() - it0, node.depth, node.lower_bound, self.lp.objective() + self.p.offset);
+                        }
+                    }
                     self.tprof.kind_n[k] += 1;
                     self.tprof.kind_it[k] += self.lp.total_iterations() - it0;
                     self.tprof.kind_s[k] += t_lp.elapsed().as_secs_f64();
@@ -5530,6 +5561,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if env_str!("ENOMOTO_MIP_RESTORE_NEVER").is_some() {
             return;
         }
+        if dbg_restore_on() {
+            let (mut add, mut del) = (0usize, 0usize);
+            if epoch <= self.row_log.len() {
+                for e in &self.row_log[epoch..] {
+                    match e {
+                        RowEdit::Add(k) => add += *k,
+                        RowEdit::Delete(mask) => del += mask.iter().filter(|&&d| d).count(),
+                    }
+                }
+            }
+            self.dbg_restore = Some((add, del, 0, b.row.len()));
+        }
         if epoch == self.row_log.len() && b.row.len() == mr {
             self.restore_stats.0 += 1;
             self.restored_now = true;
@@ -5600,8 +5643,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let fc2_keep = (self.fc_node_sep && self.fc_sep2 && env_str!("ENOMOTO_MIP_FC_SEP2_REPAIR").is_none())
                 || (self.tree_sep && env_str!("ENOMOTO_MIP_TREE_SEP_REPAIR").is_none());
             if env_str!("ENOMOTO_MIP_RESTORE_KEEP_CURRENT").is_some() || (self.highs_cutmgmt() && !hcm_repair) || fc2_keep {
+                if let Some(d) = self.dbg_restore.as_mut() {
+                    d.2 = 2;
+                }
                 return;
             }
+        }
+        if let Some(d) = self.dbg_restore.as_mut() {
+            d.2 = 1;
         }
         self.restored_now = true;
         self.lp.set_basis(&b2);
@@ -7959,6 +8008,35 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.pool_donate(1);
             self.tprof.balance[1] += 1;
         }
+    }
+
+    /// `ENOMOTO_MIP_TREE_POOL_BB` (試作、既定では使わない): 自分の待ち行列で下界最小を選ぶ番に、共有の待ち行列の最小の下界が自分の
+    /// 待ち行列の最小より低ければ、共有の待ち行列から取る (選び方の周期は 1 つ進める)。従来は共有の待ち行列から取るのは自分の待ち行列が
+    /// 空のときと、質の釣り合い ([`Self::pool_balance`]、32 ノードに 1 回、自分の下界より 0.2 × (打ち切り値 − 全体の下界) 以上
+    /// 低いとき) だけで、ヒューリスティクス役に移ったスレッドや手元の上限 (`ENOMOTO_T_MIP_TREE_LOCAL_CAP`) で出された下界の低い
+    /// ノードが共有の待ち行列に残り、全体の下界がそこで止まった (mc11、4 スレッド・60 秒: 共有の待ち行列の最小 11483 が 18〜45 秒の
+    /// 間動かず、各スレッドの下界は 11541〜11577)。取ったノードは `tp_kind` 2 にする。
+    fn pool_best_on_bb_turn(&mut self, bb_every: u64) -> Option<OpenNode> {
+        use std::sync::atomic::Ordering;
+        if !tree_pool_bb() || !self.race_done || !self.queue.next_pop_is_best(bb_every) {
+            return None;
+        }
+        let pool = self.pool.clone()?;
+        let mine = self.queue.best_lower_bound();
+        let mut g = pool.inner.lock().unwrap();
+        if !(g.nodes.min_lower_bound() < mine) {
+            return None;
+        }
+        let sn = g.nodes.pop_best()?;
+        pool.len.store(g.nodes.len(), Ordering::Relaxed);
+        if let Some(sl) = pool.slots.get(self.pool_tid as usize) {
+            sl.lb.store(mine.min(sn.lower_bound).min(self.cur_lb).to_bits(), Ordering::Relaxed);
+        }
+        drop(g);
+        self.queue.skip_pop();
+        self.pool_stats[1] += 1;
+        self.tp_kind = 2;
+        Some(self.open_from_pool(sn))
     }
 
     /// 自分の待ち行列が空のとき、共有の待ち行列からノードを取る。なければ待つ。全てのスレッドが待っていて空なら探索は終わり

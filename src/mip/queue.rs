@@ -153,6 +153,16 @@ impl NodeQueue {
         Some(self.remove(id))
     }
 
+    /// 次の [`Self::pop`] が下界最小を選ぶ番か。
+    pub fn next_pop_is_best(&self, bb_every: u64) -> bool {
+        (self.pops + 1) % bb_every.max(1) == 0
+    }
+
+    /// [`Self::pop`] の番を 1 つ進める (ほかの待ち行列から取ったとき、選び方の周期を保つ)。
+    pub fn skip_pop(&mut self) {
+        self.pops += 1;
+    }
+
     /// 下界最小のノードを取り出す。
     pub fn pop_best(&mut self) -> Option<OpenNode> {
         let id = self.by_lb.iter().next().map(|&(_, id)| id)?;

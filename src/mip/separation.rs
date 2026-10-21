@@ -345,6 +345,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let prog_win = if self.params.submip { 0 } else { tunable!("ENOMOTO_T_MIP_CUT_PROG_WIN", 0usize, usize) };
         let prog_eps = tunable!("ENOMOTO_T_MIP_CUT_PROG_EPS", 0.01, f64);
         let mut obj_hist: Vec<f64> = Vec::new();
+        // `ENOMOTO_MIP_FC_CUT_ROUNDS` (試作、既定では使わない): 固定費用ネットワーク型 (`fc_relax`) では、ラウンドの上限に達しても
+        // 直近 5 ラウンドの目的値の伸びがループ全体の伸びの `ENOMOTO_T_MIP_FC_CUT_ROUNDS_FRAC` (0.02) 倍以上なら上限を 25 延ばす
+        // (`ENOMOTO_T_MIP_FC_CUT_ROUNDS_CAP` (100) まで。時間の上限 `ENOMOTO_T_MIP_CUT_TIME_FRAC` はそのまま)。mc11 (4 スレッド・60 秒) は
+        // 25 ラウンド目でも 1 ラウンド約 +40 伸びていて (前景 11108、背景の後 11462、HiGHS の根 11492)、上限 60 では前景 11509・
+        // 背景の後 11604、60 秒の下界 11629〜11634 (既定 11489〜11509)。`ENOMOTO_MIP_CUT_ADAPT_ROUNDS` は全体の伸びが最初の LP
+        // (608.8) から測って約 1 万で、0.05 倍の基準に届かず延びない
+        let fc_rounds = fc_relax && env_str!("ENOMOTO_MIP_FC_CUT_ROUNDS").is_some();
+        let mut round_obj: Vec<f64> = Vec::new();
         loop {
             self.poll_fj_thread();
             if self.root_gap_closed() {
@@ -356,7 +364,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     && max_rounds < tunable!("ENOMOTO_T_MIP_CUT_ADAPT_ROUNDS_CAP", 100usize, usize)
                     && k > 5
                     && obj_hist[k - 1] - obj_hist[k - 6] >= tunable!("ENOMOTO_T_MIP_CUT_ADAPT_ROUNDS_FRAC", 0.05, f64) * (obj_hist[k - 1] - obj_hist[0]).max(1e-9);
-                if !extend {
+                let k = round_obj.len();
+                let fc_extend = fc_rounds
+                    && max_rounds < tunable!("ENOMOTO_T_MIP_FC_CUT_ROUNDS_CAP", 100usize, usize)
+                    && k > 5
+                    && round_obj[k - 1] - round_obj[k - 6] >= tunable!("ENOMOTO_T_MIP_FC_CUT_ROUNDS_FRAC", 0.02, f64) * (round_obj[k - 1] - first_obj).max(1e-9);
+                if !extend && !fc_extend {
                     break;
                 }
                 max_rounds += 25;
@@ -665,6 +678,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             prev_obj = obj;
             obj_hist.push(obj);
+            round_obj.push(obj);
             // 効いていないカットを外す (論理変数が基底にあり、行が緩んでいるもの)。`ENOMOTO_T_MIP_CUT_REMOVE_EVERY` ラウンドごと
             // `ENOMOTO_T_MIP_ROOT_CUT_AGE` > 0: HiGHS と同じく、効いていないラウンドが続いたカットだけを外す
             // (HiGHS の mip_lp_age_limit = 10)
