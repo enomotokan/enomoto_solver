@@ -1820,6 +1820,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// mik-250 で HiGHS 流にすると LP の反復が 193k -> 390k (同じ 4517 ノード) に増え、単体法の主ループが 7.2 -> 16.4 秒。
     /// 行の追加・削除そのもの (標準形の作り直し + 次の求解での再分解) は 40 秒中 0.9 + 0.7 秒 (3192 回)、再分解は 0.1 秒未満、
     /// プールの違反の走査は 1.4-1.9 秒だった (走査は平坦な複製 `pool_idx` で安くした)
+    /// `ENOMOTO_MIP_FLAT_RESTART` (試作): 再スタート後の求解で、再スタート前の根のカット (と背景のカット) が目的値を
+    /// まったく動かさなかったか。そうなら再スタート後の根のカットのループを短くし、背景のカットと、前に解を見つけなかった
+    /// RINS (暫定解が同じとき) を飛ばす
+    pub(super) fn flat_restart(&self) -> bool {
+        !self.params.submip && self.params.restarts > 0 && self.snap.is_none() && env_str!("ENOMOTO_MIP_FLAT_RESTART").is_some() && super::separation::FLAT_ROOT_FIRST.with(|c| c.get())
+    }
+
     pub(super) fn highs_cutmgmt(&self) -> bool {
         (env_str!("ENOMOTO_MIP_HIGHS_CUTMGMT").is_some() || self.hcm_auto) && !self.params.submip
     }
@@ -2709,7 +2716,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             find_spawned = true;
         }
         let mut bg_cuts: Option<BgCuts> = None;
-        if self.snap.is_none() && !self.params.submip && self.params.threads > 1 && env_str!("ENOMOTO_MIP_NO_CUTS").is_none() && !self.fractional(&self.lp.col_values()).is_empty() {
+        if self.snap.is_none() && !self.params.submip && self.params.threads > 1 && env_str!("ENOMOTO_MIP_NO_CUTS").is_none() && !self.fractional(&self.lp.col_values()).is_empty() && !self.flat_restart() {
             let bg_mode = env_str!("ENOMOTO_MIP_BG_CUTS").or(if env_str!("ENOMOTO_MIP_NO_BG_CUTS").is_none() { Some("1") } else { None });
             if let Some(mode) = bg_mode {
                 let job = std::sync::Arc::new(CutJob { stop: std::sync::atomic::AtomicBool::new(false), heavy: mode == "heavy", out: std::sync::Mutex::new(None), latest_x: std::sync::Mutex::new(None), basis: std::sync::Mutex::new(None) });
@@ -3035,8 +3042,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                 }
                 // 暫定解 (Feasibility Jump・pump・丸めなどで得たもの) を根の LP 解との RINS で磨く
-                if self.incumbent.is_some() && env_str!("ENOMOTO_MIP_NO_ROOT_RINS").is_none() {
+                let rins_same = self.flat_restart() && super::separation::RINS_FAIL_Z.with(|c| c.get()).is_some_and(|z| self.incumbent.as_ref().is_some_and(|(z1, _)| *z1 >= z));
+                if rins_same && self.params.verbose {
+                    eprintln!("MIP: root heuristic RINS: skipped (flat root; no solution before the restart with the same incumbent)");
+                }
+                if self.incumbent.is_some() && env_str!("ENOMOTO_MIP_NO_ROOT_RINS").is_none() && !rins_same {
+                    let z0 = self.incumbent.as_ref().map(|(z, _)| *z);
                     heur!("RINS", self.rins(&x));
+                    if !self.params.submip && self.params.restarts == 0 && self.snap.is_none() {
+                        let z1 = self.incumbent.as_ref().map(|(z, _)| *z);
+                        super::separation::RINS_FAIL_Z.with(|c| c.set(if z1 == z0 { z1 } else { None }));
+                    }
                 }
                 // 目的関数の台のサブ MIP (`ENOMOTO_MIP_OBJ_SUPPORT`、試作、[`Solver::obj_support`])。暫定解が根の LP の値から
                 // 目的関数の刻み以上離れているときだけ
@@ -3101,6 +3117,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             match res {
                 Some((rows, obj, rounds)) if obj > cur + 1e-9 * cur.abs().max(1.0) && st0 == LpStatus::Optimal => {
+                    if self.params.restarts == 0 {
+                        super::separation::FLAT_ROOT_FIRST.with(|c| c.set(false));
+                    }
                     let m0 = self.p.m;
                     let nr = self.lp.num_rows();
                     let saved: Vec<(Vec<(usize, f64)>, f64, f64)> = (m0..nr)
