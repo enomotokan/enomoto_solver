@@ -167,7 +167,7 @@ pub fn eliminate_singleton_equalities_view(n: usize, a: &FaerCsr, b: &[f64], gv:
         // `ENOMOTO_T_MIP_CS_OBJ_PIVOT_RATIO` (既定 1e-6) まで下げる。physiciansched6-2 は目的の費用を 1 本の連続列
         // (`0.000999 y = Σ (罰則の列) + …` の 37 列の等式、行の最大係数 1) が持ち、この列が残ると Feasibility Jump が解を
         // 見つけられない (HiGHS は Free col substitution で消し、費用を行の列に配る)。復元の誤差は 1/0.000999 倍程度
-        let ratio = if int_mask.is_some() && new_c[j] != 0.0 && env_str!("ENOMOTO_MIP_CS_OBJ_PIVOT").is_some() {
+        let ratio = if int_mask.is_some() && new_c[j] != 0.0 && (env_str!("ENOMOTO_MIP_CS_OBJ_PIVOT").is_some() || crate::fj_p3_force()) {
             tunable!("ENOMOTO_T_MIP_CS_OBJ_PIVOT_RATIO", 1e-6, f64)
         } else {
             tunable!("ENOMOTO_T_CS_SUBSTITUTION_PIVOT_RATIO", SUBSTITUTION_PIVOT_RATIO, f64)
