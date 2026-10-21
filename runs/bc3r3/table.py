@@ -7,7 +7,7 @@ for f in sorted(D.glob('*_[0-9].log')):
     n = f.stem
     if n.startswith(('highs', 'symt1_0', 'symt3', 'symt10')) or '_' in n.rsplit('_', 1)[0] and not n.startswith(('p5s', 'def', 'symt', 'nosym', 'ext', 'reh', 'rens', 'rdive', 'defco', 'symt1co')):
         continue
-    if not re.match(r'^(def|p5s|symt1|nosym|ext|ext2|p5sext|reh|rens|rdive|defco|symt1co|exthv|extipm|p5sextipm)_\d$', n):
+    if not re.match(r'^(def|defb|fcsub|p5sfcsub|p5s|symt1|nosym|ext|ext2|scr|scr2|scrdv|sc|scdive|screh|r516|p5sext|reh|rens|rdive|defco|symt1co|exthv|extipm|p5sextipm)_\d$', n):
         continue
     L = f.read_text()
     r = re.search(r'RESULT (.*)', L)

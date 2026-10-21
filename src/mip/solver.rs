@@ -65,6 +65,9 @@ pub struct MipParams {
     /// 根の緩和問題が非有界のとき、実行不能と非有界を区別するか (`Model.solve(distinguish_infeasible_unbounded=True)`)。
     /// 偽なら `InfeasibleOrUnbounded` を返す。真なら切片問題を整数に制限した問題を解く ([`Solver::resolve_unbounded_root`])。
     pub distinguish: bool,
+    /// 固定費用ネットワーク型の問題のサブ MIP か (`ENOMOTO_MIP_FC_SUBMIP` の試作。親が [`Solver::fc_submip`] のときに立てる):
+    /// 根のカットのラウンドを通常の求解と同じにする (分離の `ENOMOTO_T_MIP_FC_SUBMIP_CUT_ROUNDS`、既定 25)
+    pub fc_submip: bool,
 }
 
 /// 根のヒューリスティクスの名前に対応するビット (再スタートで飛ばすものの印)。暫定解に依る RINS と、
@@ -80,7 +83,7 @@ pub(super) fn heur_bit(name: &str) -> u64 {
 
 impl Default for MipParams {
     fn default() -> Self {
-        MipParams { time_limit: f64::INFINITY, node_limit: u64::MAX, rel_gap: 0.0, abs_gap: 0.0, verbose: false, submip: false, cutoff: f64::INFINITY, restarts: 0, skip_heurs: 0, threads: 1, distinguish: false }
+        MipParams { time_limit: f64::INFINITY, node_limit: u64::MAX, rel_gap: 0.0, abs_gap: 0.0, verbose: false, submip: false, cutoff: f64::INFINITY, restarts: 0, skip_heurs: 0, threads: 1, distinguish: false, fc_submip: false }
     }
 }
 
@@ -212,6 +215,10 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// `ENOMOTO_MIP_FC_NODE_SEP2`: [`Self::fc_node_sep`] の分離を、待ち行列から取り出したノードでプールのカットを戻した後にも
     /// 行い、LP の値が伸びる間ラウンドを繰り返す (HiGHS の `HighsSeparation::separate`)。評価中
     pub(super) fc_sep2: bool,
+    /// `ENOMOTO_MIP_FC_SUBMIP` (試作、既定では使わない): 固定費用ネットワーク型 ([`super::separation::fixed_charge_network_for_nodes`])
+    /// の問題で、ヒューリスティクスのサブ MIP に LP のカットの行を加え (`ENOMOTO_MIP_SUBMIP_CUTS` と同じ)、サブ MIP の根のカットの
+    /// ラウンドを通常の求解と同じにする。analysis/beasleyC3_r3_20261020.md
+    pub(super) fc_submip: bool,
     /// 木の中の分離の規則 ([`Solver::tree_sep_start`]、既定で使う。`ENOMOTO_MIP_NO_TREE_SEP` で使わない): 待ち行列から取り出した
     /// ノードでもプールのラウンドの後に分離し、LP の値が伸びる間ラウンドを繰り返す。40 問 + 16 問 (4 スレッド・60 秒、2 組) で
     /// neos-911970 が 2 組とも解け (既定は時間切れ)、40 問の解けた数 24/25 -> 26/26、目的値の不一致 0
@@ -1382,6 +1389,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
             && super::separation::fixed_charge_network_for_nodes(p),
         fc_adapt: env_str!("ENOMOTO_MIP_FC_NODE_SEP_ADAPT").is_some(),
         fc_sep2: env_str!("ENOMOTO_MIP_FC_NODE_SEP2").is_some(),
+        fc_submip: !params.submip && env_str!("ENOMOTO_MIP_FC_SUBMIP").is_some() && super::separation::fixed_charge_network_for_nodes(p),
         tree_sep: !params.submip && env_str!("ENOMOTO_MIP_NO_TREE_SEP").is_none(),
         tree_sep_fc: !params.submip && env_str!("ENOMOTO_MIP_NO_TREE_SEP").is_none() && env_str!("ENOMOTO_MIP_TREE_SEP_NO_FC").is_none() && super::separation::fixed_charge_network_for_nodes(p),
         fc_stats: (0, 0.0, 0, 0),
