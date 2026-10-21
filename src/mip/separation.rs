@@ -341,12 +341,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let cap_base = if CLIQUE_FB_SECOND.with(|c| c.get()) && env_str!("ENOMOTO_MIP_CLIQUE_FB_SHARED_CAP").is_none() { t_loop0 } else { self.cpu0 };
         let mut phase2_deadline = f64::INFINITY;
         let mut round_ctr = 0usize;
+        // 診断 (`ENOMOTO_MIP_DEBUG_FACETIME`): このループの分離・面の頂点の分離・LP の時間の合計
+        let face0 = (self.face_secs, self.face_used);
+        let (mut sep_tot, mut lp_tot, mut nrounds) = (0.0f64, 0.0f64, 0usize);
+        let t_loop_wall = std::time::Instant::now();
         // 固定費用ネットワーク型 (連続変数のほぼ全てに VUB `x <= u y` の 2 非零の行があり、その行が大半) では、根のカット選択を
         // 緩める (質の閾値なし、平行度の上限 0.9)。flow cover 系のカットは同じ y の係数が支配的で互いに平行と判定されやすく、
         // 既定の選択では 1 ラウンドに数本しか入らない (sp150x300d: 候補 456 本 -> 31 本、根の下界 56.9 (HiGHS 68.7))。
         // 固定費用型 18 問 (beasleyC1-3, mc7/8/11, h50x2450, h80x6320d, sp150x300d, p200x1188c, aflow30a/40b, rout など、60 秒) で
         // SGM 29.16 -> 27.00、29.09 -> 27.49 (2 回)、解けた問題 9 -> 10。`ENOMOTO_MIP_NO_CUTSEL_FC` で無効
-        let fc_relax = env_str!("ENOMOTO_MIP_NO_CUTSEL_FC").is_none() && !self.params.submip && fixed_charge_network(p);
+        let fc_net = !self.params.submip && fixed_charge_network(p);
+        self.fc_network = fc_net;
+        let fc_relax = env_str!("ENOMOTO_MIP_NO_CUTSEL_FC").is_none() && fc_net;
         if fc_relax && self.params.verbose {
             eprintln!("MIP: fixed-charge network structure: relaxed root cut selection");
         }
@@ -581,6 +587,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let quota_full = chosen.len() >= max_cuts && ncands >= 2 * max_cuts;
             chosen.extend(forced);
             let sep_secs = t_sep.elapsed().as_secs_f64();
+            sep_tot += sep_secs;
+            nrounds += 1;
             let sel_secs = t_sel0.elapsed().as_secs_f64() - pool_secs;
             if chosen.is_empty() {
                 break;
@@ -666,7 +674,25 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                 }
             }
+            // `ENOMOTO_T_MIP_CUT_LP_RETRY` = k (> 0、試作): 1 回の LP の時間の上限で止まったら、カットを外す前に同じ基底から
+            // もう k 倍の時間だけ解き続ける。mzzv42z (10460 行) に implied bound カット 300 本余りを一度に入れると LP が
+            // 1700 反復ほどかかり、上限 1.2 秒 (60 秒の 2%) に当たる回と当たらない回があって、当たると全部捨てて根の下界が
+            // -21534 のまま終わる (当たらなければ -21203)
+            // `ENOMOTO_MIP_GR_AUTO` (試作): 一般整数の列がある問題だけ 4 倍 (G のカットを入れた LP を捨てないため)
+            let mut retry = tunable!("ENOMOTO_T_MIP_CUT_LP_RETRY", 0.0, f64);
+            if retry == 0.0 && st == LpStatus::TimeLimit && super::gr_auto() && super::implbd_genint_for(&p.is_int, &p.col_lo, &p.col_up) {
+                retry = 4.0;
+            }
+            if st == LpStatus::TimeLimit && retry > 0.0 && cap.is_finite() && !self.time_up() {
+                let d = std::time::Instant::now() + std::time::Duration::from_secs_f64(retry * cap);
+                let d = Some(self.deadline.map_or(d, |g| g.min(d)));
+                st = self.lp.solve(&SolveLimits { iteration_limit: lim, cutoff: f64::INFINITY, deadline: d });
+                if self.params.verbose {
+                    eprintln!("MIP: cut round {round}: LP hit the time cap; continued for up to {:.2}s more: {st:?}", retry * cap);
+                }
+            }
             self.sb_iters += 0;
+            lp_tot += t_lp0.elapsed().as_secs_f64();
             let _ = it0;
             if st != LpStatus::Optimal {
                 // 数値的に困ったら今回のカットを外して戻す
@@ -839,6 +865,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         self.remove_inactive_cuts();
+        if env_str!("ENOMOTO_MIP_DEBUG_FACETIME").is_some() && !self.params.submip {
+            eprintln!(
+                "FACETIME {}restarts {} rounds {nrounds}: sep {sep_tot:.2}s (face {:.2}s, {} vertices), LP {lp_tot:.2}s, loop {:.2}s, obj {:.10e}",
+                if job.is_some() { "bg " } else { "root " },
+                self.params.restarts,
+                self.face_secs - face0.0,
+                self.face_used - face0.1,
+                t_loop_wall.elapsed().as_secs_f64(),
+                self.lp.objective() + p.offset
+            );
+        }
         let st = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
         if clique_fb && st == LpStatus::Optimal && job.is_none() && !self.time_up() {
             let on = self.clique_fallback_trial(root_iters, first_obj);
@@ -1986,6 +2023,26 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if (CUT_EXTENDED.with(|c| c.get()) || self.equiv2_cuts()) && !self.params.submip {
             return (self.separate(x, light), Vec::new());
         }
+        // 試作 (inv/gfrsplit-20261021): `ENOMOTO_MIP_FACE_SEP_BG=off` なら背景のカットの求解 (`CUT_JOB`) だけ面の頂点の分離を止める
+        // (根の手前のカット・ヒューリスティクスの経路は既定のまま)。`ENOMOTO_MIP_GR_AUTO=2` なら一般整数の列がある問題だけ止める
+        // (G が働く問題。mzzv42z は G と面の分離を止めることの両方で根の RENS が崩れなくなる)
+        let in_bg = self.snap.is_some() && super::solver::CUT_JOB.with(|j| j.borrow().is_some());
+        if in_bg && env_str!("ENOMOTO_MIP_FACE_SEP_BG") == Some("off") {
+            return (self.separate(x, light), Vec::new());
+        }
+        if env_str!("ENOMOTO_MIP_GR_AUTO") == Some("2") && super::implbd_genint_for(&self.p.is_int, &self.p.col_lo, &self.p.col_up) {
+            return (self.separate(x, light), Vec::new());
+        }
+        // `ENOMOTO_MIP_FACE_SEP_FC=off` (試作): 固定費用ネットワーク型 (根のカット選択を緩める問題) では面の頂点の分離を止める。
+        // mc11: 止めると根の手前のカットが 2.6 -> 1.1〜1.5 秒で 11069 (止めなければ 11108) に着き、背景のカットが 23 -> 50〜56
+        // ラウンド回って 11455 -> 11672〜11674 (最適 11689) になり 60 秒で解ける (背景のカットだけ止めても 11549〜11604 で解けない)
+        // `ENOMOTO_T_MIP_FACE_SEP_FC_MAXCOLS` (試作、既定は上限なし): 列 (前処理の後) がこの数を超える問題では止めない。
+        // h80x6320d (12640 列) では F で根の頂点が変わると根の RINS が 9 回中 5 回 6644.8 しか出さず (既定は 6 回とも
+        // 6388〜6418)、最初の再スタートで固まる列が 4473〜5126 -> 996 本になって 2 回目の再スタートが要り 54〜60 秒かかる
+        // (analysis/qf_narrow_20261021.md)。mc11 は 3034 列
+        if self.fc_network && env_str!("ENOMOTO_MIP_FACE_SEP_FC") == Some("off") && self.p.n <= tunable!("ENOMOTO_T_MIP_FACE_SEP_FC_MAXCOLS", usize::MAX, usize) {
+            return (self.separate(x, light), Vec::new());
+        }
         let mode = match env_str!("ENOMOTO_MIP_FACE_SEP") {
             Some(m) if m == "off" => return (self.separate(x, light), Vec::new()),
             Some(m) if !self.params.submip => m,
@@ -2061,6 +2118,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.tab_memo_mode = 1;
         let cands = if mode == "canon" { Vec::new() } else { self.separate(x, light) };
         self.tab_memo_mode = 2;
+        let t_face0 = std::time::Instant::now();
         let mut fcands: Vec<Candidate> = Vec::new();
         let mut used = 0usize;
         // 面の LP 1 回の時間の上限 (カットを加えた LP と同じ、全体の 2%、最低 1 秒)。neos-3656078-kumeu・neos-933966 では
@@ -2107,6 +2165,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             used += 1;
         }
         self.tab_memo_mode = 0;
+        self.face_secs += t_face0.elapsed().as_secs_f64();
+        self.face_used += used;
         if env_str!("ENOMOTO_MIP_DEBUG_FACE").is_some() {
             eprintln!("FACE tab memo: checked {} rows, same as at the current vertex {}", self.tab_memo_stats.0, self.tab_memo_stats.1);
         }
@@ -2312,13 +2372,22 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let ib_all = env_str!("ENOMOTO_MIP_IMPLBD_CUTS").is_some();
         // 既定 (連続変数のみ) は根だけ (`light` はノードの分離)。ノードでも作ると木の経過が変わり rout などが揺れる
         let ib_cont = !ib_all && !light && env_str!("ENOMOTO_MIP_NO_IMPLBD_CONT").is_none();
+        // `ENOMOTO_MIP_IMPLBD_GENINT` (試作): 含意の相手が一般整数 (0-1 でない整数) の列も使う (HiGHS の
+        // `separateImpliedBounds` と同じく 0-1 でない列全部)。mzzv42z (全部整数、一般整数 235 列) は連続変数がないので
+        // 既定では 1 本も出ないが、HiGHS の根の分離で LP に入るカットの 8 割がこれで、止めると根の下界が -20829 -> -21209 に
+        // 落ちる。`=nodes` ならノードの分離 (`light`) でも使う
+        let ib_gen_mode = env_str!("ENOMOTO_MIP_IMPLBD_GENINT");
+        // `ENOMOTO_MIP_GR_AUTO` (試作): 一般整数の列があるときだけ根で使う ([`super::implbd_genint_for`])
+        let ib_gen_auto = ib_gen_mode.is_none() && !light && super::gr_auto() && super::implbd_genint_for(&p.is_int, &p.col_lo, &p.col_up);
+        let ib_gen = !ib_all && ((ib_gen_mode.is_some() && (!light || ib_gen_mode == Some("nodes"))) || ib_gen_auto);
+        let ib_cont = ib_cont || ib_gen;
         if (ib_all || ib_cont) && !p.implied_bounds.is_empty() {
             let (glo, gup) = (&self.dom.global_lo, &self.dom.global_up);
             let max_ib = tunable!("ENOMOTO_T_MIP_IMPLBD_MAX", 5000usize, usize);
             let mut viol: Vec<(f64, RawCut)> = Vec::new();
             for &(y, v, k, upper, b) in &p.implied_bounds {
                 let (y, k) = (y as usize, k as usize);
-                if ib_cont && p.is_int[k] {
+                if ib_cont && p.is_int[k] && !(ib_gen && !(glo[k] >= 0.0 && gup[k] <= 1.0)) {
                     continue;
                 }
                 if glo[y] == gup[y] || glo[k] == gup[k] || glo[y] != 0.0 || gup[y] != 1.0 {

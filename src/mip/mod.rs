@@ -35,6 +35,37 @@ use solver::{MipParams, MipStatus};
 /// プロセスに CPU を取られている間は進まないので、マシンの負荷で打ち切りの位置が変わりにくい (nw04: 負荷で根のカットの
 /// 1 ラウンドが 1.9 -> 4.0 秒になり、時間の上限で 2 ラウンドで止まって根で閉じず 9 -> 17 秒)。Linux 以外と
 /// `ENOMOTO_MIP_WALL_CAPS` では経過時間。差だけを使う。
+/// `ENOMOTO_MIP_IMPLBD_GENINT` (試作、[`separation`] の implied bound カット): 一般整数の列への含意も使う。
+pub(crate) fn implbd_genint() -> bool {
+    env_str!("ENOMOTO_MIP_IMPLBD_GENINT").is_some()
+}
+
+/// `ENOMOTO_MIP_GR_AUTO` (試作、inv/gfrsplit-20261021): 一般整数 (0-1 でない整数) の列がある問題だけで
+/// `ENOMOTO_MIP_IMPLBD_GENINT` と `ENOMOTO_T_MIP_CUT_LP_RETRY=4` を働かせる。一般整数がなければ G はカットを増やさない
+/// (プロービングで 0-1 の相手の含意を集めなくなるだけ) が、R はカットを入れた LP の時間の上限を延ばして根の経路を変える
+/// (neos-960392 (全部 0-1) では根の RENS が解を出すかが根のカットの経路で決まり、gfr では 4 回とも -2 だった)。
+/// `=2` なら一般整数がある問題では根の面の頂点の分離も止める (`ENOMOTO_MIP_FACE_SEP=off` と同じ。mzzv42z・roll3000 は
+/// G+R に F がないと根が崩れる)
+pub(crate) fn gr_auto() -> bool {
+    env_str!("ENOMOTO_MIP_GR_AUTO").is_some()
+}
+
+/// この問題で G (一般整数の含意の implied bound カット) を働かせるか ([`implbd_genint`] か、[`gr_auto`] で一般整数があるとき)
+/// `ENOMOTO_T_MIP_GR_AUTO_MIN_FRAC` (試作、既定 0): 一般整数の列が固定されていない列のこの割合に満たない問題では働かせない。
+/// nursesched-sprint02 (一般整数 20 / 10250 列) では根の頂点が変わって根のヒューリスティクスが外れ (71、既定は 59)、再スタートで
+/// 固まる列が 7000 本前後 -> 1382 本になり時間切れになる回がある。mzzv42z は 235 / 11717 列 (2.0%)
+pub(crate) fn implbd_genint_for(is_int: &[bool], lo: &[f64], up: &[f64]) -> bool {
+    if implbd_genint() {
+        return true;
+    }
+    if !gr_auto() {
+        return false;
+    }
+    let ngen = (0..is_int.len()).filter(|&k| is_int[k] && lo[k] < up[k] && !(lo[k] >= 0.0 && up[k] <= 1.0)).count();
+    let nfree = (0..is_int.len()).filter(|&k| lo[k] < up[k]).count();
+    ngen > 0 && ngen as f64 >= tunable!("ENOMOTO_T_MIP_GR_AUTO_MIN_FRAC", 0.0, f64) * nfree as f64
+}
+
 pub(crate) fn cap_clock() -> f64 {
     #[cfg(target_os = "linux")]
     {
@@ -647,13 +678,27 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
     }
     // 前処理は列の番号を保ち、列の尺度 d を掛ける (x = d x')。前処理後の空間に移して実行可能なら渡す
     // (代入で消えた列などで合わなければ渡さない)
+    // `ENOMOTO_MIP_RESTART_REF` (試作): 再スタート前の暫定解 (元の行を満たす) から前処理の前後の目的値のずれを求めておき、
+    // 再スタート後の求解が暫定解なしで終わっても下界を報告する
+    let mut ref_shift: Option<f64> = None;
     match (&presolved, start) {
         (Some(Presolved::Reduced { prob, scaling, .. }), Some(x)) if x.len() == prob.n => {
             let xr: Vec<f64> = x.iter().zip(&scaling.d).map(|(v, d)| v / d).collect();
+            if params.restarts > 0 && env_str!("ENOMOTO_MIP_RESTART_REF").is_some() {
+                ref_shift = Some(p.objective(&x) - prob.objective(&xr));
+            }
             if prob.is_feasible(&xr, 1e-6) {
                 solver::START_SOL.with(|s| *s.borrow_mut() = Some(xr));
-            } else if params.verbose || env_str!("ENOMOTO_MIP_START_FILE").is_some() {
-                eprintln!("MIP: the start solution is not feasible in the presolved problem; dropped");
+            } else {
+                // `ENOMOTO_MIP_RESTART_REF` (試作、既定では使わない): 再スタート前の暫定解が再スタート後の問題で実行不能
+                // (打ち切り値による固定で外れる) なら、暫定解にはせず RINS の参照解として渡す
+                let as_ref = params.restarts > 0 && env_str!("ENOMOTO_MIP_RESTART_REF").is_some();
+                if as_ref {
+                    solver::REF_SOL.with(|s| *s.borrow_mut() = Some(xr));
+                }
+                if params.verbose || env_str!("ENOMOTO_MIP_START_FILE").is_some() {
+                    eprintln!("MIP: the start solution is not feasible in the presolved problem; dropped{}", if as_ref { " (kept as the RINS reference)" } else { "" });
+                }
             }
         }
         (None, Some(x)) if x.len() == p.n => solver::START_SOL.with(|s| *s.borrow_mut() = Some(x)),
@@ -677,6 +722,7 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
     match presolved {
         Some(Presolved::Infeasible) => {
             solver::START_SOL.with(|s| *s.borrow_mut() = None);
+            solver::REF_SOL.with(|s| *s.borrow_mut() = None);
             RESTART_CUTS.with(|s| *s.borrow_mut() = None);
             solver::MipResult { status: MipStatus::Infeasible, x: None, objective: None, best_bound: f64::INFINITY, nodes: 0, lp_iterations: 0 }
         }
@@ -729,6 +775,8 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
                     }
                     ok = false;
                 }
+            } else if let Some(shift) = ref_shift.filter(|_| r.status != MipStatus::Infeasible) {
+                r.best_bound += shift;
             } else if r.status != MipStatus::Infeasible {
                 // 暫定解がないと目的値の定数のずれが分からないので下界は報告しない
                 r.best_bound = f64::NEG_INFINITY;
@@ -1616,6 +1664,7 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
     let want_impl = env_str!("ENOMOTO_MIP_NO_PROBE_IMPLICATIONS").is_none();
     let edge_cap = 10 * nnz + 10_000;
     let bin0: Vec<bool> = (0..n).map(|k| prob.is_int[k] && prob.col_lo[k] == 0.0 && prob.col_up[k] == 1.0).collect();
+    let genint_on = implbd_genint_for(&prob.is_int, &prob.col_lo, &prob.col_up);
     // 引き継いだ含意 ([`presolve_mip`] の `ENOMOTO_MIP_KEEP_IMPLICATIONS`) に足していく
     let mut edges: Vec<(u32, u32)> = std::mem::take(&mut prob.conflict_edges);
     // 含意による境界 (implied bound カット用): x_j = v で x_k の境界が締まるもの。上限は非零数の 10 倍
@@ -1632,6 +1681,11 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
         for ((k, upper), val) in best {
             if implied.len() >= edge_cap {
                 return;
+            }
+            // `ENOMOTO_MIP_IMPLBD_GENINT`: 0-1 列どうしの含意は衝突の組 (clique) と同じなので集めない (HiGHS も 0-1 列の含意は
+            // clique 表に入れ、implied bound には使わない)。0-1 列の含意で上限を使い切り、一般整数の含意が落ちるのを防ぐ
+            if genint_on && bin0[k] {
+                continue;
             }
             let (l, u) = (dom.lo[k], dom.up[k]);
             if !l.is_finite() || !u.is_finite() {
