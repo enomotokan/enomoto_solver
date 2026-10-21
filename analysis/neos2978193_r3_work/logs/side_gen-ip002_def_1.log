@@ -1,0 +1,537 @@
+MIP: presolve: rows 24 -> 24, free columns 41 -> 41, nonzeros 922 -> 922, postsolve steps 0
+Root LP: the interior-point method + crossover finished first (0.00s)
+MIP: LP probing pass 1: 18 candidates, 0 fixings (36 LPs, 173 iters, 0.00s)
+MIP: LP probing: tried 18 columns, fixed 0, LP -4.8405419613e3 -> -4.8405419613e3 (36 LPs, 173 iters, 0.00s)
+MIP: probing: 0 of 0 binaries probed (10 passes), 0 fixed, 0 bounds tightened, 0 implications (0.00s)
+MIP: probing: 0 equivalent binary pairs
+Presolve: 24 rows, 41 columns -> 24 rows, 41 columns (0.01s)
+MIP: clique extension: 0 rows extended, 0 nonzeros added, 0 columns fixed, 0 duplicate and 0 dominated rows removed (0 edges, 0.00s)
+MIP: symmetry: none (0.00s)
+Root LP: the two-phase method finished first (0.00s)
+Root LP: objective -4.8405419613e3 (0.00s)
+MIP: root LP -4.8405419613e3 (40 iters, 0.00s)
+MIP: cut round 0: 1 cuts (of 36, sep 0.01s, LP 5 iters), LP rows 25 (cut rows mean nnz 41), obj -4.8397941282e3 (0.02s)
+MIP: cut round 1: 1 cuts (of 46, sep 0.01s, LP 5 iters), LP rows 26 (cut rows mean nnz 41), obj -4.8396395308e3 (0.02s)
+MIP: cut round 2: 1 cuts (of 48, sep 0.01s, LP 5 iters), LP rows 27 (cut rows mean nnz 41), obj -4.8391864750e3 (0.04s)
+MIP: cut round 3: 1 cuts (of 50, sep 0.01s, LP 12 iters), LP rows 28 (cut rows mean nnz 41), obj -4.8381712304e3 (0.04s)
+MIP: cut round 4: 1 cuts (of 46, sep 0.00s, LP 6 iters), LP rows 28 (cut rows mean nnz 41), obj -4.8380126853e3 (0.05s)
+MIP: cut round 5: 1 cuts (of 46, sep 0.01s, LP 6 iters), LP rows 28 (cut rows mean nnz 41), obj -4.8378782821e3 (0.06s)
+MIP: cut round 6: 1 cuts (of 50, sep 0.00s, LP 6 iters), LP rows 29 (cut rows mean nnz 41), obj -4.8378394712e3 (0.06s)
+MIP: cut round 7: 1 cuts (of 50, sep 0.00s, LP 5 iters), LP rows 30 (cut rows mean nnz 41), obj -4.8377980745e3 (0.07s)
+MIP: cut round 8: 1 cuts (of 52, sep 0.00s, LP 4 iters), LP rows 31 (cut rows mean nnz 41), obj -4.8377526832e3 (0.07s)
+MIP: cut round 9: 1 cuts (of 48, sep 0.00s, LP 5 iters), LP rows 31 (cut rows mean nnz 41), obj -4.8376449892e3 (0.08s)
+MIP: clique graph: 0 edges (0 from rows, probing implications 0)
+MIP: clique fallback: no violated clique cuts; not used (0.00s)
+Root cuts: objective -4.8405419613e3 -> -4.8376449892e3, 6 cuts in the LP (0.08s)
+MIP: cut loop done: 10 cuts added, 6 in LP, pool 242 cuts (9921 nonzeros), obj -4.8405419613e3 -> -4.8376449892e3
+MIP:   global fixed integers 0 of 41 (newly 0 since the root LP)
+MIP: new incumbent -2.6236800040e3 at node 0 (0.08s) [feasibility jump (parallel)]
+MIP: feasibility jump (parallel) found a solution (0.08s)
+MIP: root heuristic simple rounding: none (0.00s)
+MIP:   global fixed integers 0 of 41 (newly 0 since the root LP)
+MIP: new incumbent -4.6330123575e3 at node 0 (0.08s) [ZI round]
+MIP: root heuristic ZI round: found (0.00s)
+MIP: root heuristic randomized rounding: none (0.00s)
+MIP:   interior rounding: 1 interior points, vertex true (0.01s)
+MIP:   interior rounding: 1 rounded points tried, found false
+MIP: root heuristic interior rounding: none (0.01s)
+MIP:   root reduced cost: 16 lurking bounds, fixing rate 0.39
+MIP:   parallel sub-MIP started (root reduced cost): 25 free columns of 41
+MIP: root heuristic root reduced cost: none (0.00s)
+MIP:   parallel sub-MIP started (LP face): 25 free columns of 41
+MIP:   LP face: 16 of 41 integer columns fixed, found false
+MIP: root heuristic LP face: none (0.00s)
+MIP: root heuristic RENS: none (0.00s)
+MIP:   locks: fixing rate 0.80
+MIP:   parallel sub-MIP started (locks): 8 free columns of 41
+MIP: root heuristic locks: none (0.00s)
+MIP: root heuristic clique: none (0.00s)
+MIP: root heuristic vbounds (loose): none (0.00s)
+MIP: root heuristic vbounds (tight): none (0.00s)
+MIP:   parallel sub-MIP (root reduced cost): status NodeLimit, nodes 500, objective Some(-4724.3536752), 0.09s
+MIP:   global fixed integers 0 of 41 (newly 0 since the root LP)
+MIP: new incumbent -4.7243536752e3 at node 0 (0.19s) [root reduced cost]
+MIP:   parallel sub-MIP (LP face): status NodeLimit, nodes 500, objective Some(-4724.3536752), 0.09s
+MIP:   parallel sub-MIP (locks): status Optimal, nodes 0, objective Some(-4046.6825616), 0.09s
+MIP:   sub-MIP: 20 free columns of 41, status NodeLimit, nodes 500, objective Some(-4723.9083354800005)
+MIP: root heuristic RINS: none (0.12s)
+MIP: after root heuristics: incumbent Some(-4724.3536752) (0.31s)
+MIP: background cuts: root LP re-solved before replacing the cuts: Optimal, 1 iters (0.31s)
+MIP: background cuts: LP with the replaced cuts: Optimal, 1 iters (0.31s)
+MIP: background cuts: 7 rounds, 6 cut rows (was 6), obj -4.8376449892e3 -> -4.8374739788e3 (waited 0.00s, 0.31s)
+MIP: root objective probing: skipped (gap 2.338e-2 (LP -4.8374739788e3, incumbent -4.7243536752e3), 0 fractional binaries)
+MIP: 1 of 4 tree threads take the heuristic role once a solution exists
+MIP: tree search with 4 threads (0.31s)
+MIP:   global fixed integers 0 of 41 (newly 0 since the root LP)
+MIP: new incumbent -4.7339762146e3 at node 30 (0.35s) [tree rounding]
+MIP:   ALNS arm 0 reward 0.000 (counts [1, 0, 0, 0, 0, 0])
+MIP:   ALNS arm 1 reward 0.000 (counts [1, 1, 0, 0, 0, 0])
+MIP:   ALNS arm 2 reward 0.000 (counts [1, 1, 1, 0, 0, 0])
+MIP:   global fixed integers 0 of 41 (newly 0 since the root LP)
+MIP: new incumbent -4.7470854608e3 at node 216 (0.41s) [other thread: tree rounding]
+MIP:   sub-MIP: 8 free columns of 41, status Optimal, nodes 1, objective Some(-4747.08546078)
+MIP:   mutation (33 fixed): Some((Optimal, false))
+MIP:   ALNS arm 3 reward 0.000 (counts [1, 1, 1, 1, 0, 0])
+MIP:   ALNS arm 4 reward 0.000 (counts [1, 1, 1, 1, 1, 0])
+MIP:   sub-MIP: 15 free columns of 41, status NodeLimit, nodes 29, objective Some(-4697.193188380001)
+MIP:   DINS (26 of 41 fixed): improved false
+MIP:   ALNS arm 5 reward 0.000 (counts [1, 1, 1, 1, 1, 1])
+MIP:   sub-MIP: 18 free columns of 41, status NodeLimit, nodes 165, objective Some(-4717.826774500001)
+MIP:   DINS (21 of 41 fixed): improved false
+MIP:   ALNS arm 5 reward 0.000 (counts [1, 1, 1, 1, 1, 2])
+MIP:   global fixed integers 0 of 41 (newly 0 since the root LP)
+MIP: new incumbent -4.7585286279e3 at node 1729 (0.85s) [other thread: tree rounding]
+MIP:   global fixed integers 0 of 41 (newly 0 since the root LP)
+MIP: new incumbent -4.7620080053e3 at node 2593 (1.10s) [other thread: tree rounding]
+MIP:   ALNS arm 4 reward 0.000 (counts [1, 1, 1, 1, 2, 2])
+MIP:   sub-MIP: 12 free columns of 41, status Optimal, nodes 1, objective Some(-4762.0080053)
+MIP:   mutation (29 fixed): Some((Optimal, false))
+MIP:   ALNS arm 3 reward 0.000 (counts [1, 1, 1, 2, 2, 2])
+     time      nodes      open        best bound         incumbent       gap
+     2.0s      18448     16565    -4.825903049e3    -4.762008005e3     1.34%
+MIP:     2.00s nodes     4505 open    1000 lb -4.77647148e3 ub -4.76200801e3 lp_iters 28272 sb_iters 2341 sb_lps 368 sb_secs 0.04 node_iters 24777 (first 24470, lps 4521) heur_iters 21265 dive_iters 1052 lp_rows 24 node_cut_secs 0.09 pool_len 12565 pool_idle 0
+MIP:   ALNS arm 2 reward 0.000 (counts [1, 1, 2, 2, 2, 2])
+MIP:   ALNS arm 1 reward 0.000 (counts [1, 2, 2, 2, 2, 2])
+MIP:   ALNS arm 0 reward 0.000 (counts [2, 2, 2, 2, 2, 2])
+MIP:   sub-MIP: 8 free columns of 41, status Optimal, nodes 0, objective Some(-4595.1935865000005)
+MIP:   DINS (27 of 41 fixed): improved false
+MIP:   ALNS arm 5 reward 0.000 (counts [2, 2, 2, 2, 2, 3])
+MIP:   ALNS arm 4 reward 0.000 (counts [2, 2, 2, 2, 3, 3])
+MIP:   sub-MIP: 10 free columns of 41, status Optimal, nodes 1, objective Some(-4762.0080053)
+MIP:   mutation (31 fixed): Some((Optimal, false))
+MIP:   ALNS arm 3 reward 0.000 (counts [2, 2, 2, 3, 3, 3])
+MIP:   ALNS arm 2 reward 0.000 (counts [2, 2, 3, 3, 3, 3])
+MIP:   ALNS arm 1 reward 0.000 (counts [2, 3, 3, 3, 3, 3])
+MIP:   ALNS arm 0 reward 0.000 (counts [3, 3, 3, 3, 3, 3])
+MIP:   sub-MIP: 5 free columns of 41, status Infeasible, nodes 0, objective None
+MIP:   DINS (24 of 41 fixed): improved false
+MIP:   ALNS arm 5 reward 0.000 (counts [3, 3, 3, 3, 3, 4])
+MIP:   ALNS arm 4 reward 0.000 (counts [3, 3, 3, 3, 4, 4])
+MIP:   sub-MIP: 11 free columns of 41, status Optimal, nodes 3, objective Some(-4762.0080053)
+MIP:   mutation (30 fixed): Some((Optimal, false))
+MIP:   ALNS arm 3 reward 0.000 (counts [3, 3, 3, 4, 4, 4])
+MIP:   ALNS arm 2 reward 0.000 (counts [3, 3, 4, 4, 4, 4])
+MIP:   ALNS arm 1 reward 0.000 (counts [3, 4, 4, 4, 4, 4])
+MIP:   ALNS arm 0 reward 0.000 (counts [4, 4, 4, 4, 4, 4])
+MIP:   sub-MIP: 7 free columns of 41, status Optimal, nodes 0, objective Some(-4683.659543299999)
+MIP:   DINS (21 of 41 fixed): improved false
+MIP:   ALNS arm 5 reward 0.000 (counts [4, 4, 4, 4, 4, 5])
+MIP:   ALNS arm 4 reward 0.000 (counts [4, 4, 4, 4, 5, 5])
+MIP:   sub-MIP: 15 free columns of 41, status NodeLimit, nodes 96, objective Some(-4762.0080053)
+MIP:   mutation (26 fixed): Some((NodeLimit, false))
+MIP:   ALNS arm 3 reward 0.000 (counts [4, 4, 4, 5, 5, 5])
+     4.0s      32165     24750    -4.823485870e3    -4.762008005e3     1.29%
+MIP:     4.00s nodes     7923 open     998 lb -4.76921665e3 ub -4.76200801e3 lp_iters 44831 sb_iters 2341 sb_lps 368 sb_secs 0.05 node_iters 41312 (first 40710, lps 7645) heur_iters 23842 dive_iters 1076 lp_rows 24 node_cut_secs 0.14 pool_len 20758 pool_idle 0
+MIP:   ALNS arm 2 reward 0.000 (counts [4, 4, 5, 5, 5, 5])
+MIP:   ALNS arm 1 reward 0.000 (counts [4, 5, 5, 5, 5, 5])
+MIP:   ALNS arm 0 reward 0.000 (counts [5, 5, 5, 5, 5, 5])
+MIP:   sub-MIP: 12 free columns of 41, status Optimal, nodes 0, objective Some(-4678.472718399999)
+MIP:   DINS (20 of 41 fixed): improved false
+MIP:   ALNS arm 5 reward 0.000 (counts [5, 5, 5, 5, 5, 6])
+MIP:   ALNS arm 4 reward 0.000 (counts [5, 5, 5, 5, 6, 6])
+MIP:   sub-MIP: 14 free columns of 41, status Optimal, nodes 1, objective Some(-4762.0080053)
+MIP:   mutation (27 fixed): Some((Optimal, false))
+MIP:   ALNS arm 3 reward 0.000 (counts [5, 5, 5, 6, 6, 6])
+MIP:   ALNS arm 2 reward 0.000 (counts [5, 5, 6, 6, 6, 6])
+MIP:   ALNS arm 1 reward 0.000 (counts [5, 6, 6, 6, 6, 6])
+MIP:   ALNS arm 0 reward 0.000 (counts [6, 6, 6, 6, 6, 6])
+MIP:   sub-MIP: 11 free columns of 41, status Optimal, nodes 0, objective Some(-4612.817520850001)
+MIP:   DINS (20 of 41 fixed): improved false
+MIP:   ALNS arm 5 reward 0.000 (counts [6, 6, 6, 6, 6, 7])
+MIP:   ALNS arm 4 reward 0.000 (counts [6, 6, 6, 6, 7, 7])
+MIP:   sub-MIP: 9 free columns of 41, status Optimal, nodes 1, objective Some(-4762.0080053)
+MIP:   mutation (32 fixed): Some((Optimal, false))
+MIP:   ALNS arm 3 reward 0.000 (counts [6, 6, 6, 7, 7, 7])
+     6.0s      44966     32009    -4.822198254e3    -4.762008005e3     1.26%
+MIP:     6.00s nodes    11457 open     994 lb -4.76667787e3 ub -4.76200801e3 lp_iters 62610 sb_iters 2341 sb_lps 368 sb_secs 0.06 node_iters 59074 (first 58324, lps 10892) heur_iters 24362 dive_iters 1093 lp_rows 24 node_cut_secs 0.21 pool_len 28019 pool_idle 0
+MIP:   ALNS arm 2 reward 0.000 (counts [6, 6, 7, 7, 7, 7])
+MIP:   ALNS arm 1 reward 0.000 (counts [6, 7, 7, 7, 7, 7])
+MIP:   ALNS arm 0 reward 0.000 (counts [7, 7, 7, 7, 7, 7])
+MIP:   sub-MIP: 5 free columns of 41, status Infeasible, nodes 0, objective None
+MIP:   DINS (23 of 41 fixed): improved false
+MIP:   ALNS arm 5 reward 0.000 (counts [7, 7, 7, 7, 7, 8])
+MIP:   global fixed integers 0 of 41 (newly 0 since the root LP)
+MIP: new incumbent -4.7708663426e3 at node 12178 (6.42s) [other thread: tree randomized rounding]
+MIP:   ALNS arm 4 reward 0.000 (counts [7, 7, 7, 7, 8, 8])
+MIP:   sub-MIP: 13 free columns of 41, status Optimal, nodes 1, objective Some(-4770.8663426)
+MIP:   mutation (28 fixed): Some((Optimal, false))
+MIP:   ALNS arm 3 reward 0.000 (counts [7, 7, 7, 8, 8, 8])
+MIP:   ALNS arm 2 reward 0.000 (counts [7, 7, 8, 8, 8, 8])
+MIP:   ALNS arm 1 reward 0.000 (counts [7, 8, 8, 8, 8, 8])
+MIP:   ALNS arm 0 reward 0.000 (counts [8, 8, 8, 8, 8, 8])
+MIP:   sub-MIP: 16 free columns of 41, status Optimal, nodes 0, objective Some(-4635.944074)
+MIP:   DINS (24 of 41 fixed): improved false
+MIP:   ALNS arm 5 reward 0.000 (counts [8, 8, 8, 8, 8, 9])
+MIP:   ALNS arm 4 reward 0.000 (counts [8, 8, 8, 8, 9, 9])
+MIP:   sub-MIP: 16 free columns of 41, status Optimal, nodes 9, objective Some(-4770.8663426)
+MIP:   mutation (25 fixed): Some((Optimal, false))
+MIP:   ALNS arm 3 reward 0.000 (counts [8, 8, 8, 9, 9, 9])
+MIP:   ALNS arm 2 reward 0.000 (counts [8, 8, 9, 9, 9, 9])
+MIP:   ALNS arm 1 reward 0.000 (counts [8, 9, 9, 9, 9, 9])
+MIP:   ALNS arm 0 reward 0.000 (counts [9, 9, 9, 9, 9, 9])
+MIP:   sub-MIP: 8 free columns of 41, status Optimal, nodes 0, objective Some(-4605.596355600001)
+MIP:   DINS (29 of 41 fixed): improved false
+MIP:   ALNS arm 5 reward 0.000 (counts [9, 9, 9, 9, 9, 10])
+     8.0s      57831     38981    -4.821473706e3    -4.770866343e3     1.06%
+MIP:     8.00s nodes    14595 open    1000 lb -4.79014946e3 ub -4.77086634e3 lp_iters 80899 sb_iters 2341 sb_lps 368 sb_secs 0.06 node_iters 77345 (first 76505, lps 13951) heur_iters 25329 dive_iters 1111 lp_rows 24 node_cut_secs 0.27 pool_len 34985 pool_idle 0
+MIP:   ALNS arm 4 reward 0.000 (counts [9, 9, 9, 9, 10, 10])
+MIP:   sub-MIP: 13 free columns of 41, status Optimal, nodes 1, objective Some(-4770.8663426)
+MIP:   mutation (28 fixed): Some((Optimal, false))
+MIP:   ALNS arm 3 reward 0.000 (counts [9, 9, 9, 10, 10, 10])
+MIP:   ALNS arm 2 reward 0.000 (counts [9, 9, 10, 10, 10, 10])
+MIP:   ALNS arm 1 reward 0.000 (counts [9, 10, 10, 10, 10, 10])
+MIP:   sub-MIP: 7 free columns of 41, status Optimal, nodes 0, objective Some(-4624.4583172)
+MIP:   ALNS arm 0 reward 0.000 (counts [10, 10, 10, 10, 10, 10])
+MIP:   sub-MIP: 1 free columns of 41, status Infeasible, nodes 0, objective None
+MIP:   DINS (23 of 41 fixed): improved false
+MIP:   ALNS arm 5 reward 0.000 (counts [10, 10, 10, 10, 10, 11])
+MIP:   ALNS arm 4 reward 0.000 (counts [10, 10, 10, 10, 11, 11])
+MIP:   sub-MIP: 12 free columns of 41, status Optimal, nodes 1, objective Some(-4770.8663426)
+MIP:   mutation (29 fixed): Some((Optimal, false))
+MIP:   ALNS arm 3 reward 0.000 (counts [10, 10, 10, 11, 11, 11])
+MIP:   ALNS arm 2 reward 0.000 (counts [10, 10, 11, 11, 11, 11])
+MIP:   ALNS arm 1 reward 0.000 (counts [10, 11, 11, 11, 11, 11])
+MIP:   ALNS arm 0 reward 0.000 (counts [11, 11, 11, 11, 11, 11])
+MIP:   sub-MIP: 5 free columns of 41, status Optimal, nodes 0, objective Some(-4703.634904600001)
+MIP:   DINS (29 of 41 fixed): improved false
+MIP:   ALNS arm 5 reward 0.000 (counts [11, 11, 11, 11, 11, 12])
+MIP:   sub-MIP: 20 free columns of 41, status NodeLimit, nodes 500, objective Some(-4758.328365599999)
+MIP:   crossover (21 of 41 fixed, 3 solutions): improved false
+MIP:   ALNS arm 4 reward 0.000 (counts [11, 11, 11, 11, 12, 12])
+    10.0s      69457     45553    -4.820662865e3    -4.770866343e3     1.04%
+MIP:    10.00s nodes    17363 open    1000 lb -4.78365182e3 ub -4.77086634e3 lp_iters 95342 sb_iters 2341 sb_lps 368 sb_secs 0.07 node_iters 91779 (first 90684, lps 16493) heur_iters 30803 dive_iters 1120 lp_rows 24 node_cut_secs 0.34 pool_len 41558 pool_idle 0
+    12.0s      82020     51746    -4.819928590e3    -4.770866343e3     1.03%
+MIP:    12.00s nodes    20691 open     999 lb -4.78720248e3 ub -4.77086634e3 lp_iters 112684 sb_iters 2341 sb_lps 368 sb_secs 0.08 node_iters 109113 (first 107814, lps 19526) heur_iters 30819 dive_iters 1128 lp_rows 24 node_cut_secs 0.40 pool_len 47756 pool_idle 0
+    14.0s      93799     57599    -4.819323865e3    -4.770866343e3     1.02%
+MIP:    14.00s nodes    23928 open     999 lb -4.78271432e3 ub -4.77086634e3 lp_iters 130104 sb_iters 2341 sb_lps 368 sb_secs 0.09 node_iters 126523 (first 125072, lps 22524) heur_iters 30839 dive_iters 1138 lp_rows 24 node_cut_secs 0.46 pool_len 53607 pool_idle 0
+MIP:   sub-MIP: 11 free columns of 41, status Optimal, nodes 1, objective Some(-4770.8663426)
+MIP:   mutation (30 fixed): Some((Optimal, false))
+MIP:   ALNS arm 3 reward 0.000 (counts [11, 11, 11, 12, 12, 12])
+MIP:   ALNS arm 2 reward 0.000 (counts [11, 11, 12, 12, 12, 12])
+MIP:   ALNS arm 1 reward 0.000 (counts [11, 12, 12, 12, 12, 12])
+MIP:   sub-MIP: 10 free columns of 41, status Optimal, nodes 1, objective Some(-4763.7667635)
+MIP:   ALNS arm 0 reward 0.000 (counts [12, 12, 12, 12, 12, 12])
+MIP:   sub-MIP: 10 free columns of 41, status Optimal, nodes 0, objective Some(-4692.7642101)
+MIP:   DINS (25 of 41 fixed): improved false
+MIP:   ALNS arm 5 reward 0.000 (counts [12, 12, 12, 12, 12, 13])
+MIP:   ALNS arm 4 reward 0.000 (counts [12, 12, 12, 12, 13, 13])
+MIP:   sub-MIP: 9 free columns of 41, status Optimal, nodes 0, objective Some(-4770.8663426)
+MIP:   mutation (32 fixed): Some((Optimal, false))
+MIP:   ALNS arm 3 reward 0.000 (counts [12, 12, 12, 13, 13, 13])
+    16.0s     105251     63167    -4.818795911e3    -4.770866343e3     1.00%
+MIP:    16.00s nodes    26837 open    1000 lb -4.80239972e3 ub -4.77086634e3 lp_iters 145626 sb_iters 2341 sb_lps 368 sb_secs 0.09 node_iters 142035 (first 140418, lps 25207) heur_iters 31308 dive_iters 1148 lp_rows 24 node_cut_secs 0.52 pool_len 59170 pool_idle 0
+MIP:   ALNS arm 2 reward 0.000 (counts [12, 12, 13, 13, 13, 13])
+MIP:   ALNS arm 1 reward 0.000 (counts [12, 13, 13, 13, 13, 13])
+MIP:   ALNS arm 0 reward 0.000 (counts [13, 13, 13, 13, 13, 13])
+MIP:   sub-MIP: 9 free columns of 41, status Optimal, nodes 0, objective Some(-4635.1889386)
+MIP:   DINS (29 of 41 fixed): improved false
+MIP:   ALNS arm 5 reward 0.000 (counts [13, 13, 13, 13, 13, 14])
+MIP:   ALNS arm 4 reward 0.000 (counts [13, 13, 13, 13, 14, 14])
+MIP:   sub-MIP: 10 free columns of 41, status Optimal, nodes 1, objective Some(-4770.8663426)
+MIP:   mutation (31 fixed): Some((Optimal, false))
+MIP:   ALNS arm 3 reward 0.000 (counts [13, 13, 13, 14, 14, 14])
+MIP:   ALNS arm 2 reward 0.000 (counts [13, 13, 14, 14, 14, 14])
+MIP:   ALNS arm 1 reward 0.000 (counts [13, 14, 14, 14, 14, 14])
+MIP:   ALNS arm 0 reward 0.000 (counts [14, 14, 14, 14, 14, 14])
+MIP:   sub-MIP: 14 free columns of 41, status Optimal, nodes 0, objective Some(-4562.49582428)
+MIP:   DINS (17 of 41 fixed): improved false
+MIP:   ALNS arm 5 reward 0.000 (counts [14, 14, 14, 14, 14, 15])
+MIP:   ALNS arm 4 reward 0.000 (counts [14, 14, 14, 14, 15, 15])
+MIP:   sub-MIP: 14 free columns of 41, status Optimal, nodes 1, objective Some(-4770.8663426)
+MIP:   mutation (27 fixed): Some((Optimal, false))
+MIP:   ALNS arm 3 reward 0.000 (counts [14, 14, 14, 15, 15, 15])
+    18.0s     117023     68817    -4.818328167e3    -4.770866343e3     0.99%
+MIP:    18.00s nodes    29799 open     998 lb -4.77831052e3 ub -4.77086634e3 lp_iters 161545 sb_iters 2341 sb_lps 368 sb_secs 0.10 node_iters 157948 (first 156230, lps 27922) heur_iters 31633 dive_iters 1154 lp_rows 24 node_cut_secs 0.58 pool_len 64855 pool_idle 0
+MIP:   ALNS arm 2 reward 0.000 (counts [14, 14, 15, 15, 15, 15])
+MIP:   ALNS arm 1 reward 0.000 (counts [14, 15, 15, 15, 15, 15])
+MIP:   ALNS arm 0 reward 0.000 (counts [15, 15, 15, 15, 15, 15])
+MIP:   sub-MIP: 6 free columns of 41, status Optimal, nodes 0, objective Some(-4609.7954003800005)
+MIP:   DINS (20 of 41 fixed): improved false
+MIP:   ALNS arm 5 reward 0.000 (counts [15, 15, 15, 15, 15, 16])
+MIP:   ALNS arm 4 reward 0.000 (counts [15, 15, 15, 15, 16, 16])
+MIP:   sub-MIP: 13 free columns of 41, status Optimal, nodes 1, objective Some(-4770.8663426)
+MIP:   mutation (28 fixed): Some((Optimal, false))
+MIP:   ALNS arm 3 reward 0.000 (counts [15, 15, 15, 16, 16, 16])
+MIP:   ALNS arm 2 reward 0.000 (counts [15, 15, 16, 16, 16, 16])
+MIP:   ALNS arm 1 reward 0.000 (counts [15, 16, 16, 16, 16, 16])
+MIP:   ALNS arm 0 reward 0.000 (counts [16, 16, 16, 16, 16, 16])
+MIP:   sub-MIP: 4 free columns of 41, status Optimal, nodes 0, objective Some(-4447.304555500001)
+MIP:   DINS (29 of 41 fixed): improved false
+MIP:   ALNS arm 5 reward 0.000 (counts [16, 16, 16, 16, 16, 17])
+MIP:   ALNS arm 4 reward 0.000 (counts [16, 16, 16, 16, 17, 17])
+MIP:   sub-MIP: 11 free columns of 41, status Optimal, nodes 1, objective Some(-4770.8663426)
+MIP:   mutation (30 fixed): Some((Optimal, false))
+MIP:   ALNS arm 3 reward 0.000 (counts [16, 16, 16, 17, 17, 17])
+    20.0s     129197     74769    -4.817931511e3    -4.770866343e3     0.99%
+MIP:    20.00s nodes    32846 open     997 lb -4.77813923e3 ub -4.77086634e3 lp_iters 177789 sb_iters 2341 sb_lps 368 sb_secs 0.11 node_iters 174183 (first 172333, lps 30705) heur_iters 32014 dive_iters 1163 lp_rows 24 node_cut_secs 0.63 pool_len 70788 pool_idle 0
+MIP:   ALNS arm 2 reward 0.000 (counts [16, 16, 17, 17, 17, 17])
+MIP:   ALNS arm 1 reward 0.000 (counts [16, 17, 17, 17, 17, 17])
+MIP:   ALNS arm 0 reward 0.000 (counts [17, 17, 17, 17, 17, 17])
+MIP:   sub-MIP: 10 free columns of 41, status Optimal, nodes 0, objective Some(-4623.8259759)
+MIP:   DINS (16 of 41 fixed): improved false
+MIP:   ALNS arm 5 reward 0.000 (counts [17, 17, 17, 17, 17, 18])
+MIP:   ALNS arm 4 reward 0.000 (counts [17, 17, 17, 17, 18, 18])
+MIP:   sub-MIP: 16 free columns of 41, status Optimal, nodes 1, objective Some(-4770.8663426)
+MIP:   mutation (25 fixed): Some((Optimal, false))
+MIP:   ALNS arm 3 reward 0.000 (counts [17, 17, 17, 18, 18, 18])
+MIP:   ALNS arm 2 reward 0.000 (counts [17, 17, 18, 18, 18, 18])
+MIP:   ALNS arm 1 reward 0.000 (counts [17, 18, 18, 18, 18, 18])
+MIP:   sub-MIP: 13 free columns of 41, status Optimal, nodes 3, objective Some(-4725.6607181)
+MIP:   ALNS arm 0 reward 0.000 (counts [18, 18, 18, 18, 18, 18])
+    22.0s     141169     80417    -4.817482207e3    -4.770866343e3     0.98%
+MIP:    22.00s nodes    35873 open     998 lb -4.78407391e3 ub -4.77086634e3 lp_iters 193967 sb_iters 2341 sb_lps 368 sb_secs 0.11 node_iters 190354 (first 188275, lps 33489) heur_iters 32873 dive_iters 1170 lp_rows 24 node_cut_secs 0.69 pool_len 76430 pool_idle 0
+MIP:   sub-MIP: 5 free columns of 41, status Infeasible, nodes 0, objective None
+MIP:   DINS (25 of 41 fixed): improved false
+MIP:   ALNS arm 5 reward 0.000 (counts [18, 18, 18, 18, 18, 19])
+MIP:   ALNS arm 4 reward 0.000 (counts [18, 18, 18, 18, 19, 19])
+MIP:   sub-MIP: 16 free columns of 41, status NodeLimit, nodes 88, objective Some(-4770.8663426)
+MIP:   mutation (25 fixed): Some((NodeLimit, false))
+MIP:   ALNS arm 3 reward 0.000 (counts [18, 18, 18, 19, 19, 19])
+MIP:   global fixed integers 0 of 41 (newly 0 since the root LP)
+MIP: new incumbent -4.7837333916e3 at node 37448 (23.11s) [other thread: tree randomized rounding]
+MIP:   ALNS arm 2 reward 0.000 (counts [18, 18, 19, 19, 19, 19])
+    24.0s     153230     84847    -4.817128322e3    -4.783733392e3     0.70%
+MIP:    24.00s nodes    38718 open    1000 lb -4.80038685e3 ub -4.78373339e3 lp_iters 210619 sb_iters 2341 sb_lps 368 sb_secs 0.12 node_iters 207000 (first 204817, lps 36205) heur_iters 34687 dive_iters 1176 lp_rows 24 node_cut_secs 0.76 pool_len 80852 pool_idle 0
+MIP:   ALNS arm 1 reward 0.000 (counts [18, 19, 19, 19, 19, 19])
+MIP:   ALNS arm 0 reward 0.000 (counts [19, 19, 19, 19, 19, 19])
+MIP:   sub-MIP: 11 free columns of 41, status Optimal, nodes 0, objective Some(-4683.97823125)
+MIP:   DINS (27 of 41 fixed): improved false
+MIP:   ALNS arm 5 reward 0.000 (counts [19, 19, 19, 19, 19, 20])
+MIP:   ALNS arm 4 reward 0.000 (counts [19, 19, 19, 19, 20, 20])
+MIP:   sub-MIP: 11 free columns of 41, status Optimal, nodes 1, objective Some(-4783.733391600001)
+MIP:   mutation (30 fixed): Some((Optimal, false))
+MIP:   ALNS arm 3 reward 0.000 (counts [19, 19, 19, 20, 20, 20])
+MIP:   ALNS arm 2 reward 0.000 (counts [19, 19, 20, 20, 20, 20])
+MIP:   ALNS arm 1 reward 0.000 (counts [19, 20, 20, 20, 20, 20])
+MIP:   ALNS arm 0 reward 0.000 (counts [20, 20, 20, 20, 20, 20])
+MIP:   sub-MIP: 11 free columns of 41, status Optimal, nodes 0, objective Some(-4684.184275199999)
+MIP:   DINS (24 of 41 fixed): improved false
+MIP:   ALNS arm 5 reward 0.000 (counts [20, 20, 20, 20, 20, 21])
+MIP:   ALNS arm 4 reward 0.000 (counts [20, 20, 20, 20, 21, 21])
+    26.0s     163869     89854    -4.816838356e3    -4.783733392e3     0.69%
+MIP:    26.01s nodes    41280 open     999 lb -4.78957825e3 ub -4.78373339e3 lp_iters 225050 sb_iters 2341 sb_lps 368 sb_secs 0.13 node_iters 221424 (first 219078, lps 38556) heur_iters 34874 dive_iters 1183 lp_rows 24 node_cut_secs 0.82 pool_len 85866 pool_idle 0
+MIP:   sub-MIP: 12 free columns of 41, status Optimal, nodes 1, objective Some(-4783.733391600001)
+MIP:   mutation (29 fixed): Some((Optimal, false))
+MIP:   ALNS arm 3 reward 0.000 (counts [20, 20, 20, 21, 21, 21])
+MIP:   ALNS arm 2 reward 0.000 (counts [20, 20, 21, 21, 21, 21])
+MIP:   ALNS arm 1 reward 0.000 (counts [20, 21, 21, 21, 21, 21])
+MIP:   ALNS arm 0 reward 0.000 (counts [21, 21, 21, 21, 21, 21])
+MIP:   sub-MIP: 13 free columns of 41, status Optimal, nodes 0, objective Some(-4579.181229)
+MIP:   DINS (18 of 41 fixed): improved false
+MIP:   ALNS arm 5 reward 0.000 (counts [21, 21, 21, 21, 21, 22])
+MIP:   ALNS arm 4 reward 0.000 (counts [21, 21, 21, 21, 22, 22])
+MIP:   sub-MIP: 13 free columns of 41, status Optimal, nodes 1, objective Some(-4783.733391600001)
+MIP:   mutation (28 fixed): Some((Optimal, false))
+MIP:   ALNS arm 3 reward 0.000 (counts [21, 21, 21, 22, 22, 22])
+MIP:   ALNS arm 2 reward 0.000 (counts [21, 21, 22, 22, 22, 22])
+MIP:   ALNS arm 1 reward 0.000 (counts [21, 22, 22, 22, 22, 22])
+    28.0s     174124     93186    -4.816530494e3    -4.783733392e3     0.69%
+MIP:    28.01s nodes    43772 open     999 lb -4.79460372e3 ub -4.78373339e3 lp_iters 238391 sb_iters 2341 sb_lps 368 sb_secs 0.13 node_iters 234744 (first 232322, lps 40754) heur_iters 35154 dive_iters 1204 lp_rows 24 node_cut_secs 0.87 pool_len 89189 pool_idle 0
+MIP:   sub-MIP: 11 free columns of 41, status Optimal, nodes 0, objective Some(-4660.0162231)
+MIP:   ALNS arm 0 reward 0.000 (counts [22, 22, 22, 22, 22, 22])
+MIP:   sub-MIP: 8 free columns of 41, status Optimal, nodes 0, objective Some(-4703.84299535)
+MIP:   DINS (17 of 41 fixed): improved false
+MIP:   ALNS arm 5 reward 0.000 (counts [22, 22, 22, 22, 22, 23])
+MIP:   ALNS arm 4 reward 0.000 (counts [22, 22, 22, 22, 23, 23])
+MIP:   sub-MIP: 15 free columns of 41, status Optimal, nodes 1, objective Some(-4783.733391600001)
+MIP:   mutation (26 fixed): Some((Optimal, false))
+MIP:   ALNS arm 3 reward 0.000 (counts [22, 22, 22, 23, 23, 23])
+MIP:   ALNS arm 2 reward 0.000 (counts [22, 22, 23, 23, 23, 23])
+MIP:   ALNS arm 1 reward 0.000 (counts [22, 23, 23, 23, 23, 23])
+MIP:   ALNS arm 0 reward 0.000 (counts [23, 23, 23, 23, 23, 23])
+MIP:   sub-MIP: 3 free columns of 41, status Optimal, nodes 0, objective Some(-4626.6880055500005)
+MIP:   DINS (25 of 41 fixed): improved false
+MIP:   ALNS arm 5 reward 0.000 (counts [23, 23, 23, 23, 23, 24])
+MIP:   ALNS arm 4 reward 0.000 (counts [23, 23, 23, 23, 24, 24])
+    30.0s     185212     96915    -4.816220365e3    -4.783733392e3     0.68%
+MIP:    30.01s nodes    46410 open     999 lb -4.80471464e3 ub -4.78373339e3 lp_iters 252974 sb_iters 2341 sb_lps 368 sb_secs 0.14 node_iters 249327 (first 246847, lps 43143) heur_iters 35420 dive_iters 1204 lp_rows 24 node_cut_secs 0.92 pool_len 92924 pool_idle 0
+MIP:   sub-MIP: 10 free columns of 41, status Optimal, nodes 1, objective Some(-4783.733391600001)
+MIP:   mutation (31 fixed): Some((Optimal, false))
+MIP:   ALNS arm 3 reward 0.000 (counts [23, 23, 23, 24, 24, 24])
+MIP:   ALNS arm 2 reward 0.000 (counts [23, 23, 24, 24, 24, 24])
+MIP:   ALNS arm 1 reward 0.000 (counts [23, 24, 24, 24, 24, 24])
+MIP:   ALNS arm 0 reward 0.000 (counts [24, 24, 24, 24, 24, 24])
+MIP:   sub-MIP: 14 free columns of 41, status Optimal, nodes 0, objective Some(-4682.2567246)
+MIP:   DINS (23 of 41 fixed): improved false
+MIP:   ALNS arm 5 reward 0.000 (counts [24, 24, 24, 24, 24, 25])
+MIP:   ALNS arm 4 reward 0.000 (counts [24, 24, 24, 24, 25, 25])
+MIP:   sub-MIP: 15 free columns of 41, status Optimal, nodes 1, objective Some(-4783.733391600001)
+MIP:   mutation (26 fixed): Some((Optimal, false))
+MIP:   ALNS arm 3 reward 0.000 (counts [24, 24, 24, 25, 25, 25])
+MIP:   ALNS arm 2 reward 0.000 (counts [24, 24, 25, 25, 25, 25])
+    32.0s     196104    100531    -4.815948291e3    -4.783733392e3     0.67%
+MIP:    32.01s nodes    49173 open     989 lb -4.78635761e3 ub -4.78373339e3 lp_iters 268149 sb_iters 2341 sb_lps 368 sb_secs 0.15 node_iters 264500 (first 261982, lps 45631) heur_iters 35788 dive_iters 1206 lp_rows 24 node_cut_secs 0.97 pool_len 96553 pool_idle 0
+MIP:   ALNS arm 1 reward 0.000 (counts [24, 25, 25, 25, 25, 25])
+MIP:   sub-MIP: 14 free columns of 41, status Optimal, nodes 0, objective Some(-4650.039316699999)
+MIP:   ALNS arm 0 reward 0.000 (counts [25, 25, 25, 25, 25, 25])
+MIP:   sub-MIP: 10 free columns of 41, status Optimal, nodes 0, objective Some(-4565.6804927)
+MIP:   DINS (21 of 41 fixed): improved false
+MIP:   ALNS arm 5 reward 0.000 (counts [25, 25, 25, 25, 25, 26])
+MIP:   ALNS arm 4 reward 0.000 (counts [25, 25, 25, 25, 26, 26])
+MIP:   sub-MIP: 10 free columns of 41, status Optimal, nodes 0, objective Some(-4783.733391600001)
+MIP:   mutation (31 fixed): Some((Optimal, false))
+MIP:   ALNS arm 3 reward 0.000 (counts [25, 25, 25, 26, 26, 26])
+MIP:   ALNS arm 2 reward 0.000 (counts [25, 25, 26, 26, 26, 26])
+MIP:   ALNS arm 1 reward 0.000 (counts [25, 26, 26, 26, 26, 26])
+MIP:   ALNS arm 0 reward 0.000 (counts [26, 26, 26, 26, 26, 26])
+MIP:   sub-MIP: 9 free columns of 41, status Optimal, nodes 0, objective Some(-4664.8037846)
+MIP:   DINS (23 of 41 fixed): improved false
+MIP:   ALNS arm 5 reward 0.000 (counts [26, 26, 26, 26, 26, 27])
+    34.0s     206855    104160    -4.815710893e3    -4.783733392e3     0.67%
+MIP:    34.01s nodes    51817 open     993 lb -4.80942399e3 ub -4.78373339e3 lp_iters 282869 sb_iters 2341 sb_lps 368 sb_secs 0.15 node_iters 279211 (first 276641, lps 48013) heur_iters 35950 dive_iters 1215 lp_rows 24 node_cut_secs 1.03 pool_len 100176 pool_idle 0
+MIP:   ALNS arm 4 reward 0.000 (counts [26, 26, 26, 26, 27, 27])
+MIP:   sub-MIP: 13 free columns of 41, status Optimal, nodes 1, objective Some(-4676.6558006000005)
+MIP:   mutation (28 fixed): Some((Optimal, false))
+MIP:   ALNS arm 3 reward 0.000 (counts [26, 26, 26, 27, 27, 27])
+MIP:   ALNS arm 2 reward 0.000 (counts [26, 26, 27, 27, 27, 27])
+MIP:   ALNS arm 1 reward 0.000 (counts [26, 27, 27, 27, 27, 27])
+MIP:   ALNS arm 0 reward 0.000 (counts [27, 27, 27, 27, 27, 27])
+MIP:   sub-MIP: 14 free columns of 41, status Optimal, nodes 0, objective Some(-4630.1361621)
+MIP:   DINS (19 of 41 fixed): improved false
+MIP:   ALNS arm 5 reward 0.000 (counts [27, 27, 27, 27, 27, 28])
+MIP:   ALNS arm 4 reward 0.000 (counts [27, 27, 27, 27, 28, 28])
+MIP:   sub-MIP: 7 free columns of 41, status Optimal, nodes 0, objective Some(-4783.733391600001)
+MIP:   mutation (34 fixed): Some((Optimal, false))
+MIP:   ALNS arm 3 reward 0.000 (counts [27, 27, 27, 28, 28, 28])
+    36.0s     217264    107607    -4.815463681e3    -4.783733392e3     0.66%
+MIP:    36.01s nodes    54370 open     988 lb -4.81458508e3 ub -4.78373339e3 lp_iters 296698 sb_iters 2341 sb_lps 368 sb_secs 0.16 node_iters 293038 (first 290417, lps 50292) heur_iters 36368 dive_iters 1217 lp_rows 24 node_cut_secs 1.09 pool_len 103647 pool_idle 0
+MIP:   ALNS arm 2 reward 0.000 (counts [27, 27, 28, 28, 28, 28])
+MIP:   ALNS arm 1 reward 0.000 (counts [27, 28, 28, 28, 28, 28])
+MIP:   ALNS arm 0 reward 0.000 (counts [28, 28, 28, 28, 28, 28])
+MIP:   sub-MIP: 10 free columns of 41, status Optimal, nodes 0, objective Some(-4576.004589100001)
+MIP:   DINS (18 of 41 fixed): improved false
+MIP:   ALNS arm 5 reward 0.000 (counts [28, 28, 28, 28, 28, 29])
+MIP:   ALNS arm 4 reward 0.000 (counts [28, 28, 28, 28, 29, 29])
+MIP:   sub-MIP: 13 free columns of 41, status Optimal, nodes 3, objective Some(-4783.733391600001)
+MIP:   mutation (28 fixed): Some((Optimal, false))
+MIP:   ALNS arm 3 reward 0.000 (counts [28, 28, 28, 29, 29, 29])
+MIP:   ALNS arm 2 reward 0.000 (counts [28, 28, 29, 29, 29, 29])
+    38.0s     227611    110886    -4.815239700e3    -4.783733392e3     0.66%
+MIP:    38.01s nodes    56905 open     996 lb -4.80960250e3 ub -4.78373339e3 lp_iters 310188 sb_iters 2341 sb_lps 368 sb_secs 0.16 node_iters 306517 (first 303859, lps 52518) heur_iters 36887 dive_iters 1228 lp_rows 24 node_cut_secs 1.14 pool_len 106897 pool_idle 0
+MIP:   ALNS arm 1 reward 0.000 (counts [28, 29, 29, 29, 29, 29])
+MIP:   ALNS arm 0 reward 0.000 (counts [29, 29, 29, 29, 29, 29])
+MIP:   sub-MIP: 13 free columns of 41, status Optimal, nodes 0, objective Some(-4668.674373600002)
+MIP:   DINS (24 of 41 fixed): improved false
+MIP:   ALNS arm 5 reward 0.000 (counts [29, 29, 29, 29, 29, 30])
+MIP:   ALNS arm 4 reward 0.000 (counts [29, 29, 29, 29, 30, 30])
+MIP:   sub-MIP: 11 free columns of 41, status Optimal, nodes 1, objective Some(-4783.733391600001)
+MIP:   mutation (30 fixed): Some((Optimal, false))
+MIP:   ALNS arm 3 reward 0.000 (counts [29, 29, 29, 30, 30, 30])
+MIP:   ALNS arm 2 reward 0.000 (counts [29, 29, 30, 30, 30, 30])
+MIP:   ALNS arm 1 reward 0.000 (counts [29, 30, 30, 30, 30, 30])
+MIP:   ALNS arm 0 reward 0.000 (counts [30, 30, 30, 30, 30, 30])
+    40.0s     238377    114190    -4.815006816e3    -4.783733392e3     0.65%
+MIP:    40.01s nodes    59551 open     991 lb -4.78733584e3 ub -4.78373339e3 lp_iters 324339 sb_iters 2341 sb_lps 368 sb_secs 0.17 node_iters 320666 (first 317938, lps 54840) heur_iters 37103 dive_iters 1230 lp_rows 24 node_cut_secs 1.20 pool_len 110209 pool_idle 0
+MIP:   sub-MIP: 3 free columns of 41, status Infeasible, nodes 0, objective None
+MIP:   DINS (33 of 41 fixed): improved false
+MIP:   ALNS arm 5 reward 0.000 (counts [30, 30, 30, 30, 30, 31])
+MIP:   sub-MIP: 20 free columns of 41, status NodeLimit, nodes 444, objective Some(-4770.8663426)
+MIP:   crossover (21 of 41 fixed, 3 solutions): improved false
+MIP:   ALNS arm 4 reward 0.000 (counts [30, 30, 30, 30, 31, 31])
+    42.0s     249220    117431    -4.814803264e3    -4.783733392e3     0.65%
+MIP:    42.01s nodes    62240 open     981 lb -4.78565900e3 ub -4.78373339e3 lp_iters 339056 sb_iters 2341 sb_lps 368 sb_secs 0.18 node_iters 335381 (first 332608, lps 57234) heur_iters 42106 dive_iters 1232 lp_rows 24 node_cut_secs 1.25 pool_len 113466 pool_idle 0
+    44.0s     259367    120560    -4.814617162e3    -4.783733392e3     0.65%
+MIP:    44.01s nodes    64940 open    1000 lb -4.79263126e3 ub -4.78373339e3 lp_iters 353824 sb_iters 2341 sb_lps 368 sb_secs 0.18 node_iters 350144 (first 347305, lps 59639) heur_iters 42116 dive_iters 1237 lp_rows 24 node_cut_secs 1.32 pool_len 116586 pool_idle 0
+MIP:   sub-MIP: 13 free columns of 41, status Optimal, nodes 1, objective Some(-4783.733391600001)
+MIP:   mutation (28 fixed): Some((Optimal, false))
+MIP:   ALNS arm 3 reward 0.000 (counts [30, 30, 30, 31, 31, 31])
+MIP:   ALNS arm 2 reward 0.000 (counts [30, 30, 31, 31, 31, 31])
+    46.0s     270026    123829    -4.814427004e3    -4.783733392e3     0.64%
+MIP:    46.01s nodes    67532 open     986 lb -4.78539376e3 ub -4.78373339e3 lp_iters 367818 sb_iters 2341 sb_lps 368 sb_secs 0.19 node_iters 364134 (first 361260, lps 61935) heur_iters 42222 dive_iters 1241 lp_rows 24 node_cut_secs 1.37 pool_len 119855 pool_idle 0
+MIP:   ALNS arm 1 reward 0.000 (counts [30, 31, 31, 31, 31, 31])
+MIP:   ALNS arm 0 reward 0.000 (counts [31, 31, 31, 31, 31, 31])
+MIP:   sub-MIP: 6 free columns of 41, status Optimal, nodes 0, objective Some(-4700.33335288)
+MIP:   DINS (30 of 41 fixed): improved false
+MIP:   ALNS arm 5 reward 0.000 (counts [31, 31, 31, 31, 31, 32])
+MIP:   ALNS arm 4 reward 0.000 (counts [31, 31, 31, 31, 32, 32])
+MIP:   sub-MIP: 10 free columns of 41, status Optimal, nodes 0, objective Some(-4783.733391600001)
+MIP:   mutation (31 fixed): Some((Optimal, false))
+MIP:   ALNS arm 3 reward 0.000 (counts [31, 31, 31, 32, 32, 32])
+MIP:   ALNS arm 2 reward 0.000 (counts [31, 31, 32, 32, 32, 32])
+MIP:   ALNS arm 1 reward 0.000 (counts [31, 32, 32, 32, 32, 32])
+    48.0s     280491    127060    -4.814224467e3    -4.783733392e3     0.64%
+MIP:    48.01s nodes    70118 open    1000 lb -4.80125460e3 ub -4.78373339e3 lp_iters 382107 sb_iters 2341 sb_lps 368 sb_secs 0.19 node_iters 378407 (first 375505, lps 64231) heur_iters 42307 dive_iters 1257 lp_rows 24 node_cut_secs 1.43 pool_len 123072 pool_idle 0
+MIP:   ALNS arm 0 reward 0.000 (counts [32, 32, 32, 32, 32, 32])
+MIP:   sub-MIP: 9 free columns of 41, status Optimal, nodes 0, objective Some(-4589.3825814)
+MIP:   DINS (18 of 41 fixed): improved false
+MIP:   ALNS arm 5 reward 0.000 (counts [32, 32, 32, 32, 32, 33])
+MIP:   ALNS arm 4 reward 0.000 (counts [32, 32, 32, 32, 33, 33])
+MIP:   sub-MIP: 13 free columns of 41, status Optimal, nodes 1, objective Some(-4783.733391600001)
+MIP:   mutation (28 fixed): Some((Optimal, false))
+MIP:   ALNS arm 3 reward 0.000 (counts [32, 32, 32, 33, 33, 33])
+MIP:   ALNS arm 2 reward 0.000 (counts [32, 32, 33, 33, 33, 33])
+    50.0s     291319    130280    -4.814011264e3    -4.783733392e3     0.63%
+MIP:    50.01s nodes    72650 open     999 lb -4.79077726e3 ub -4.78373339e3 lp_iters 395730 sb_iters 2341 sb_lps 368 sb_secs 0.20 node_iters 392030 (first 389079, lps 66490) heur_iters 42414 dive_iters 1257 lp_rows 24 node_cut_secs 1.48 pool_len 126292 pool_idle 0
+MIP:   ALNS arm 1 reward 0.000 (counts [32, 33, 33, 33, 33, 33])
+MIP:   ALNS arm 0 reward 0.000 (counts [33, 33, 33, 33, 33, 33])
+MIP:   sub-MIP: 7 free columns of 41, status Optimal, nodes 0, objective Some(-4707.3318517)
+MIP:   DINS (17 of 41 fixed): improved false
+MIP:   ALNS arm 5 reward 0.000 (counts [33, 33, 33, 33, 33, 34])
+MIP:   ALNS arm 4 reward 0.000 (counts [33, 33, 33, 33, 34, 34])
+MIP:   sub-MIP: 16 free columns of 41, status Optimal, nodes 1, objective Some(-4604.6554683)
+MIP:   mutation (25 fixed): Some((Optimal, false))
+MIP:   ALNS arm 3 reward 0.000 (counts [33, 33, 33, 34, 34, 34])
+MIP:   ALNS arm 2 reward 0.000 (counts [33, 33, 34, 34, 34, 34])
+MIP:   ALNS arm 1 reward 0.000 (counts [33, 34, 34, 34, 34, 34])
+    52.0s     301456    133081    -4.813817870e3    -4.783733392e3     0.63%
+MIP:    52.01s nodes    75184 open     999 lb -4.79912363e3 ub -4.78373339e3 lp_iters 409777 sb_iters 2341 sb_lps 368 sb_secs 0.20 node_iters 406074 (first 403019, lps 68728) heur_iters 42648 dive_iters 1260 lp_rows 24 node_cut_secs 1.53 pool_len 129103 pool_idle 0
+MIP:   ALNS arm 0 reward 0.000 (counts [34, 34, 34, 34, 34, 34])
+MIP:   sub-MIP: 7 free columns of 41, status Optimal, nodes 0, objective Some(-4702.12249525)
+MIP:   DINS (24 of 41 fixed): improved false
+MIP:   ALNS arm 5 reward 0.000 (counts [34, 34, 34, 34, 34, 35])
+MIP:   ALNS arm 4 reward 0.000 (counts [34, 34, 34, 34, 35, 35])
+MIP:   sub-MIP: 18 free columns of 41, status Optimal, nodes 1, objective Some(-4783.733391600001)
+MIP:   mutation (23 fixed): Some((Optimal, false))
+MIP:   ALNS arm 3 reward 0.000 (counts [34, 34, 34, 35, 35, 35])
+MIP:   ALNS arm 2 reward 0.000 (counts [34, 34, 35, 35, 35, 35])
+MIP:   ALNS arm 1 reward 0.000 (counts [34, 35, 35, 35, 35, 35])
+MIP:   sub-MIP: 13 free columns of 41, status Optimal, nodes 1, objective Some(-4740.97566393)
+MIP:   ALNS arm 0 reward 0.000 (counts [35, 35, 35, 35, 35, 35])
+    54.0s     311095    135808    -4.813658200e3    -4.783733392e3     0.63%
+MIP:    54.01s nodes    77678 open     997 lb -4.78710542e3 ub -4.78373339e3 lp_iters 423207 sb_iters 2341 sb_lps 368 sb_secs 0.21 node_iters 419500 (first 416393, lps 70900) heur_iters 42974 dive_iters 1264 lp_rows 24 node_cut_secs 1.59 pool_len 131833 pool_idle 0
+MIP:   sub-MIP: 5 free columns of 41, status Optimal, nodes 0, objective Some(-4678.381265100001)
+MIP:   DINS (26 of 41 fixed): improved false
+MIP:   ALNS arm 5 reward 0.000 (counts [35, 35, 35, 35, 35, 36])
+MIP:   ALNS arm 4 reward 0.000 (counts [35, 35, 35, 35, 36, 36])
+MIP:   sub-MIP: 16 free columns of 41, status Optimal, nodes 3, objective Some(-4680.061564600001)
+MIP:   mutation (25 fixed): Some((Optimal, false))
+MIP:   ALNS arm 3 reward 0.000 (counts [35, 35, 35, 36, 36, 36])
+MIP:   ALNS arm 2 reward 0.000 (counts [35, 35, 36, 36, 36, 36])
+MIP:   ALNS arm 1 reward 0.000 (counts [35, 36, 36, 36, 36, 36])
+    56.0s     320754    138407    -4.813504280e3    -4.783733392e3     0.62%
+MIP:    56.01s nodes    80061 open     989 lb -4.78737941e3 ub -4.78373339e3 lp_iters 436299 sb_iters 2341 sb_lps 368 sb_secs 0.22 node_iters 432587 (first 429398, lps 72986) heur_iters 43877 dive_iters 1269 lp_rows 24 node_cut_secs 1.65 pool_len 134425 pool_idle 0
+MIP:   ALNS arm 0 reward 0.000 (counts [36, 36, 36, 36, 36, 36])
+MIP:   sub-MIP: 10 free columns of 41, status Optimal, nodes 0, objective Some(-4625.359477000001)
+MIP:   DINS (19 of 41 fixed): improved false
+MIP:   ALNS arm 5 reward 0.000 (counts [36, 36, 36, 36, 36, 37])
+MIP:   ALNS arm 4 reward 0.000 (counts [36, 36, 36, 36, 37, 37])
+MIP:   sub-MIP: 11 free columns of 41, status Optimal, nodes 1, objective Some(-4783.733391600001)
+MIP:   mutation (30 fixed): Some((Optimal, false))
+MIP:   ALNS arm 3 reward 0.000 (counts [36, 36, 36, 37, 37, 37])
+MIP:   ALNS arm 2 reward 0.000 (counts [36, 36, 37, 37, 37, 37])
+MIP:   ALNS arm 1 reward 0.000 (counts [36, 37, 37, 37, 37, 37])
+MIP:   ALNS arm 0 reward 0.000 (counts [37, 37, 37, 37, 37, 37])
+    58.0s     330497    140967    -4.813345968e3    -4.783733392e3     0.62%
+MIP:    58.01s nodes    82578 open     979 lb -4.78509358e3 ub -4.78373339e3 lp_iters 449735 sb_iters 2341 sb_lps 368 sb_secs 0.22 node_iters 446021 (first 442755, lps 75172) heur_iters 44024 dive_iters 1271 lp_rows 24 node_cut_secs 1.70 pool_len 137008 pool_idle 0
+MIP:   sub-MIP: 13 free columns of 41, status Optimal, nodes 0, objective Some(-4628.6172607)
+MIP:   DINS (23 of 41 fixed): improved false
+MIP:   ALNS arm 5 reward 0.000 (counts [37, 37, 37, 37, 37, 38])
+MIP:   sub-MIP: 15 free columns of 41, status NodeLimit, nodes 71, objective Some(-4783.733391600001)
+MIP:   crossover (26 of 41 fixed, 3 solutions): improved false
+MIP:   ALNS arm 4 reward 0.000 (counts [37, 37, 37, 37, 38, 38])
+MIP:   sub-MIP: 13 free columns of 41, status Optimal, nodes 1, objective Some(-4783.733391600001)
+MIP:   mutation (28 fixed): Some((Optimal, false))
+MIP:   ALNS arm 3 reward 0.000 (counts [37, 37, 37, 38, 38, 38])
+MIP: tree search threads: worker nodes 255493, nodes given away 37543, taken 2603, global bounds taken from other threads 37, proofs 27844 and conflicts 243 taken from other threads
+    60.0s     340583         0    -4.813180176e3    -4.783733392e3     0.62%
+MIP:    59.99s nodes    85090 open     987 lb -4.81215025e3 ub -4.78373339e3 lp_iters 463364 sb_iters 2341 sb_lps 368 sb_secs 0.23 node_iters 459640 (first 456337, lps 77385) heur_iters 45807 dive_iters 1281 lp_rows 24 node_cut_secs 1.75 pool_len 142641 pool_idle 0
+MIP: dual proofs and conflicts 847 (conflicts added 0 (from proofs 15009), Farkas 0, pruned 8536 nodes, tightened 6622143 bounds)
+MIP: propagation conflicts: analysed 4517, no 1-UIP 0, 1-UIP not a row 0, no decision set 0, decision set not a row 0; not a row because continuous 0, general integer 0, both sides 0
+MIP: objective propagation: pruned 0 nodes, tightened 0 bounds; strong branching children infeasible by propagation 0, propagated bounds passed to child LPs 0
+MIP: literal conflicts: added 22807, in pool 425 (aged out 22382), pruned 4 nodes, tightened 106 bounds
+MIP: conflict analysis (HiGHS style): calls 19526, conflicts 22636, added 22564, mean length 22.4, max length 112, 0.31s
+MIP: conflict analysis failures (all calls): no decision 0, too long midway 0, reason row lacks column 0, empty 0, too long at the end 0 (total length 0), max length 14
+MIP: sibling backtracks 16963; basis restores 53333 (basic count mismatch 23), first LP iterations after a restore 291139; child down/up [48554, 12953], plunge aborts 29751
+MIP: node diag: nodes 85090 node LPs 77385 mean rows 24.1 iters 459640 (5.9/LP) LP secs 6.98 sep rounds 2179 added 72 node cut secs 1.75 final rows 24
+MIP: adaptive node cuts: rounds 72 effective 2 skipped 4078 (rate 0.046), node cut secs 1.75, outcomes cutoff/<0.02/<0.1/<0.3/>=0.3 [0, 70, 2, 0, 0], cut nnz Some(40.96861894039102) (rows mean 38.4)
+{"status": "time_limit", "objective": -4783.7333916, "best_bound": -4813.1801763770545, "nodes": 340583, "root_bound": -4837.473978798133, "first_solution_time": 0.097506879, "first_solution_objective": -2623.6800040000003, "time": 60.05228257099952}
