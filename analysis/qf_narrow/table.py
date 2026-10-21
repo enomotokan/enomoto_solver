@@ -42,7 +42,7 @@ def parse(f):
                 bg=f"{bg.group(1)}r {float(bg.group(2)):.6g}" if bg else "-",
                 ft=f"{ft.group(1)}r face {ft.group(3)}/sep {ft.group(2)}/LP {ftl.group(1)} loop {ftl.group(2)}" if ft else "-",
                 fb=f"{fb.group(1)}r face {fb.group(3)}/sep {fb.group(2)}/LP {fb.group(4)}" if fb else "-")
-files = sorted(glob.glob(os.path.join(os.path.dirname(__file__) or ".", "logs", "*.log")))
+files = sorted(glob.glob(os.path.join(os.environ.get("LOGS") or os.path.join(os.path.dirname(__file__) or ".", "logs"), "*.log")))
 want = sys.argv[1:]
 rows = collections.defaultdict(list)
 for f in files:
