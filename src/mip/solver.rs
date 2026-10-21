@@ -1801,7 +1801,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             for &(j, xj, lo, up) in &bad {
                 let upper = xj > up + 1e-6;
                 match self.dom.last_change_of(j, upper) {
-                    Some((pos, reason, old, new)) => eprintln!("MIP_DEBUG_NODE {k} {stage}:   col {j} {} bound set by stack entry {pos} (reason {reason}: -1 decision, -2 external, >= 0 row) {old} -> {new}; stack len {}, global [{}, {}]", if upper { "upper" } else { "lower" }, self.dom.stack_len(), self.dom.global_lo[j], self.dom.global_up[j]),
+                    Some((pos, reason, old, new)) => eprintln!("MIP_DEBUG_NODE {k} {stage}:   col {j} {} bound set by stack entry {pos} (reason {reason}: -1 decision, -2 external, -3 local redcost fixing, -4 strong branching fixing, -5 orbitope, -6 dual proof, -7 literal conflict, -8 objective propagation, >= 0 row) {old} -> {new}; stack len {}, global [{}, {}]", if upper { "upper" } else { "lower" }, self.dom.stack_len(), self.dom.global_lo[j], self.dom.global_up[j]),
                     None => eprintln!("MIP_DEBUG_NODE {k} {stage}:   col {j} {} bound is in the root state (not on the stack); global [{}, {}], root/current [{lo}, {up}]", if upper { "upper" } else { "lower" }, self.dom.global_lo[j], self.dom.global_up[j]),
                 }
             }
@@ -5220,7 +5220,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if !(up - v >= min_cut) {
                         continue;
                     }
-                    self.dom.set_external(true);
+                    self.dom.set_external_tag(1);
                     changed |= self.dom.tighten_upper(self.p, j, v);
                     self.dom.set_external(false);
                 }
@@ -5229,7 +5229,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if !(v - lo >= min_cut) {
                         continue;
                     }
-                    self.dom.set_external(true);
+                    self.dom.set_external_tag(1);
                     changed |= self.dom.tighten_lower(self.p, j, v);
                     self.dom.set_external(false);
                 }
@@ -5629,7 +5629,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 (true, true) => return BranchAction::Prune,
                 (true, false) => {
                     let had = self.dbg_on && self.dbg_contains();
-                    self.dom.set_external(true);
+                    self.dom.set_external_tag(2);
                     self.dom.tighten_lower(self.p, j, v.ceil());
                     self.dom.set_external(false);
                     if had && !self.dbg_contains() {
@@ -5639,7 +5639,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 (false, true) => {
                     let had = self.dbg_on && self.dbg_contains();
-                    self.dom.set_external(true);
+                    self.dom.set_external_tag(2);
                     self.dom.tighten_upper(self.p, j, v.floor());
                     self.dom.set_external(false);
                     if had && !self.dbg_contains() {
@@ -5754,13 +5754,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 (true, true) => return BranchAction::Prune,
                 (true, false) => {
                     // 下側が打ち切り → 上側に固定
-                    self.dom.set_external(true);
+                    self.dom.set_external_tag(2);
                     self.dom.tighten_lower(self.p, j, v.ceil());
                     self.dom.set_external(false);
                     return BranchAction::Resolve;
                 }
                 (false, true) => {
-                    self.dom.set_external(true);
+                    self.dom.set_external_tag(2);
                     self.dom.tighten_upper(self.p, j, v.floor());
                     self.dom.set_external(false);
                     return BranchAction::Resolve;
@@ -6074,10 +6074,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             self.orbitope_fixings += fixes.len() as u64;
             for (j, l, u) in fixes {
-                self.dom.set_external(true);
+                self.dom.set_external_tag(3);
                 self.dom.tighten_lower(self.p, j, l);
                 self.dom.set_external(false);
-                self.dom.set_external(true);
+                self.dom.set_external_tag(3);
                 self.dom.tighten_upper(self.p, j, u);
                 self.dom.set_external(false);
             }
@@ -7143,7 +7143,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             let gap = u - minact;
             let mut changed = false;
-            self.dom.set_external(true);
+            self.dom.set_external_tag(6);
             for &(j, c) in obj.iter() {
                 let (lo, up) = (self.dom.lo[j], self.dom.up[j]);
                 let rest_gap = if ninf == 0 {
@@ -7531,7 +7531,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if self.dbg_on {
                         self.proof_diag_tighten(k, j, upper, v, rhs, minact);
                     }
-                    self.dom.set_external(true);
+                    self.dom.set_external_tag(4);
                     let ch = if upper { self.dom.tighten_upper(p, j, v) } else { self.dom.tighten_lower(p, j, v) };
                     self.dom.set_external(false);
                     if ch {

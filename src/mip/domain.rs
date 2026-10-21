@@ -662,6 +662,13 @@ impl Domain {
         self.cur_reason = if on { -2 } else { -1 };
     }
 
+    /// 診断用: 外から来た変更の出どころを理由の値で区別する (`-2 - tag`。衝突解析は `< 0` / `== -1` しか見ないので動作は同じ)。
+    /// tag: 1 被約費用による局所的な固定、2 強分枝の子の打ち切りによる固定、3 オービトープの固定、4 双対証明の締め付け、
+    /// 5 リテラルの衝突、6 目的関数の伝播。
+    pub fn set_external_tag(&mut self, tag: i32) {
+        self.cur_reason = -2 - tag;
+    }
+
     /// HiGHS 式の衝突解析 (`HighsDomain::ConflictSet::conflictAnalysis`)。矛盾 (`start`) を、
     /// (1) 必要な分だけの境界の変更で説明し (`resolveLinearLeq`: 大域的な境界からの寄与の大きい変更から、矛盾を示すのに
     /// 足りるまで選ぶ)、(2) 分枝の深さの段ごとに、その段の変更が 1 つ (UIP) になるまで理由で置き換えて衝突を作り
