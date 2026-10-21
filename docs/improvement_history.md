@@ -9598,6 +9598,13 @@ neos-950242 の 2 回目の調査 (`analysis/neos950242_r2_20261020.md`)。
 - 不一致はどの設定も 0。SGM は subrows が 4 つとも良いが、PFb の 16 問で解けた数が 1 減るので基準を満たさない。fcs も PFb で 1 減る。mc11 の誤った最適値 (11712・11728) の原因が分かるまでどちらも既定にしない。
 - この計測では計測スクリプトがソルバーの stderr を捨てていて "MIP: WARNING" を見られなかったので、以後は結果の JSON の `mip_warnings` と 1 問 1 行の要約の `MIP_WARNING=` に残すようにした (6ecd00c)。
 
+## 2026-10-21: 同値な 0-1 列の代入を絞って効かせる (PROBE_EQUIV2 + EQUIV2_CUTS) は保留
+
+- physiciansched6-2 の 4 回目の試作 (analysis/ の physiciansched6-2 4 回目のメモ)。537659c で 40 + 16 問、newdef と対にして 2 組 (EQa: newdef→eq2、EQb: eq2→newdef)。
+- 40 問 (解けた・SGM): EQa newdef 26・21.56 / eq2 26・22.10、EQb newdef 26・20.29 / eq2 26・20.89。
+- 16 問: EQa newdef 8・39.87 / eq2 9・37.51、EQb newdef 10・35.91 / eq2 9・37.06。不一致 0、"MIP: WARNING" 0。
+- 40 問の SGM が 2 組とも悪く、16 問は一勝一敗なので既定にしない。eq2 では physiciansched6-2 に 2 組とも暫定解が出ない (newdef は 51029・50826): 代入後の前処理後が 1 万行を切り、FJ 用の問題で INEQ_SINGLETON が効かなくなるため (analysis/fj_nosol_20261021.md)。`ENOMOTO_MIP_FJ_P3_INEQ=1` の計測 (FJQ) の後に組み合わせで測り直す。
+
 ## 改名一覧 (整理時)
 
 本メモ中は旧名で書かれている。
