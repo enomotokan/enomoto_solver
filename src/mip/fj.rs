@@ -405,7 +405,7 @@ pub(super) fn fj2_search(p: &super::problem::MipProblem, lo: &[f64], up: &[f64],
     let mut best_x: Option<Vec<f64>> = None;
     // `ENOMOTO_MIP_FJ_LP_REPAIR`: 解が見つからなければ、違反の行の数が最も少なかった点 (`ENOMOTO_T_MIP_FJ_LP_REPAIR_MAX_VIOL`
     // 行以下、既定 50) の整数列を固定して、連続列を LP で解き直す ([`lp_repair`])
-    let repair = env_str!("ENOMOTO_MIP_FJ_LP_REPAIR").is_some() && p.is_int.iter().any(|&b| !b);
+    let repair = (env_str!("ENOMOTO_MIP_FJ_LP_REPAIR").is_some() || crate::fj_p3_force()) && p.is_int.iter().any(|&b| !b);
     let repair_max = tunable!("ENOMOTO_T_MIP_FJ_LP_REPAIR_MAX_VIOL", 50usize, usize);
     let mut best_inf: Option<Vec<f64>> = None;
     let mut effort_last_improve = 0u64;

@@ -1402,7 +1402,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if let Some(b) = basis {
             super::solver::SUBMIP_BASIS.with(|s| *s.borrow_mut() = Some(b));
         }
+        // `ENOMOTO_MIP_FJ_P3=submip` (試作): サブ MIP の前処理でも p5s の前処理の変更を有効にする ([`super::fj_p3_problem`]。本体の問題は変えない)
+        let p3 = env_str!("ENOMOTO_MIP_FJ_P3") == Some("submip") && !crate::fj_p3_force();
+        if p3 {
+            crate::set_fj_p3_force(true);
+        }
         let r = super::solve_problem(&sub, params, env_str!("ENOMOTO_MIP_SUBMIP_NO_PRESOLVE").is_none());
+        if p3 {
+            crate::set_fj_p3_force(false);
+        }
         super::solver::SUBMIP_BASIS.with(|s| *s.borrow_mut() = None);
         SUBMIP_DEPTH.with(|d| d.set(depth));
         if self.params.verbose {
@@ -2001,6 +2009,25 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// RINS: 暫定解と LP 解で値が一致する整数列を固定したサブ MIP を解く。固定は伝播しながら積み、矛盾するものは飛ばす。
     pub(super) fn rins(&mut self, x: &[f64]) -> bool {
+        // `ENOMOTO_MIP_RINS_FJ_BOOST` (試作、既定では使わない): 根で暫定解が Feasibility Jump のものだけのとき、RINS のサブ MIP の
+        // 時間の上限を残りの `ENOMOTO_T_MIP_RINS_FJ_BOOST_FRAC` (0.25)、最大 `ENOMOTO_T_MIP_RINS_FJ_BOOST_MAX` (15 秒) にする
+        // (既定は 0.07・6 秒)。physiciansched6-2 (P3 + `ENOMOTO_MIP_INC_LP_CAP`) では FJ の解 50926 / 51429 からの RINS
+        // (自由な列 約 3000) が 2〜3 秒で根も終わらずに止まる回と、1 ノードで 49624 を出す回があった
+        if env_str!("ENOMOTO_MIP_RINS_FJ_BOOST").is_some() && !self.params.submip && self.nodes <= 1 && self.inc_only_fj {
+            let keep = (self.submip_time_frac, self.submip_time_max);
+            self.submip_time_frac = tunable!("ENOMOTO_T_MIP_RINS_FJ_BOOST_FRAC", 0.25, f64);
+            self.submip_time_max = tunable!("ENOMOTO_T_MIP_RINS_FJ_BOOST_MAX", 15.0, f64);
+            if self.params.verbose {
+                eprintln!("MIP:   RINS: incumbent only from feasibility jump, sub-MIP time fraction {:.2}, max {:.1}s", self.submip_time_frac, self.submip_time_max);
+            }
+            let r = self.rins_inner(x);
+            (self.submip_time_frac, self.submip_time_max) = keep;
+            return r;
+        }
+        self.rins_inner(x)
+    }
+
+    fn rins_inner(&mut self, x: &[f64]) -> bool {
         let p = self.p;
         if self.params.submip {
             return false;

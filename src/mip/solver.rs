@@ -2144,7 +2144,21 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let (lo, up) = if self.p.is_int[j] { (x[j], x[j]) } else { (self.p.col_lo[j], self.p.col_up[j]) };
             self.lp.set_col_bounds(j, lo, up);
         }
-        let st = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
+        // `ENOMOTO_MIP_INC_LP_CAP` (試作、既定では使わない): この LP の時間の上限を全体の `ENOMOTO_T_MIP_INC_LP_TIME_FRAC`
+        // (0.02、最低 1 秒) にする。uccase12 で DUAL_UB + CS_OBJ_PIVOT のとき、根の LP の直後に FJ の解 (865106) を受け取り、
+        // この LP が 8.4 秒から 56 秒まで止まらず、根のカット・ヒューリスティクスが 1 つも回らなかった
+        // `ENOMOTO_MIP_FJ_P3` のときも使う (FJ の解は境界を締めた問題のもので、uccase12 では同じくこの LP が長引く)
+        let deadline = if (env_str!("ENOMOTO_MIP_INC_LP_CAP").is_some() || env_str!("ENOMOTO_MIP_FJ_P3").is_some()) && self.params.time_limit.is_finite() {
+            let cap = (tunable!("ENOMOTO_T_MIP_INC_LP_TIME_FRAC", 0.02, f64) * self.params.time_limit).max(1.0);
+            let d = std::time::Instant::now() + std::time::Duration::from_secs_f64(cap);
+            Some(self.deadline.map_or(d, |g| g.min(d)))
+        } else {
+            self.deadline
+        };
+        let st = self.lp.solve(&SolveLimits { deadline, ..Default::default() });
+        if self.params.verbose && st != LpStatus::Optimal {
+            eprintln!("MIP: fixed-integer LP: {st:?} ({} iters)", self.lp.total_iterations() - it0);
+        }
         if st == LpStatus::Optimal {
             let mut y = self.lp.col_values();
             for j in 0..self.p.n {
@@ -2453,7 +2467,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let seed = (self.rng ^ 0x9E37_79B9_7F4A_7C15).wrapping_add(tunable!("ENOMOTO_T_MIP_FJ_SEED", 0u64, u64).wrapping_mul(0xD1B5_4A32_D192_ED03));
                 // 実行可能性問題では FJ を根のカットのループの終わりまで (時間上限の半分まで) 回し続ける
                 let cap = if super::heuristics::fj_feas_extend(&pc) && self.params.time_limit.is_finite() { tunable!("ENOMOTO_T_MIP_FJ_FEAS_FRAC", 0.5, f64) * self.params.time_limit } else { cap };
-                let h = std::thread::spawn(move || super::heuristics::fj_search(&pc, &lo, &up, effort, cap, seed, Some(&stop2)));
+                // `ENOMOTO_MIP_FJ_P3` (試作): FJ だけ、p5s の前処理の変更をかけ直した問題で探す ([`super::fj_p3_problem`])
+                let fj_p3 = env_str!("ENOMOTO_MIP_FJ_P3").is_some();
+                let h = std::thread::spawn(move || {
+                    if fj_p3 {
+                        if let Some((q, post, sc)) = super::fj_p3_problem(&pc) {
+                            crate::set_fj_p3_force(true);
+                            let r = super::heuristics::fj_search(&q, &q.col_lo, &q.col_up, effort, cap, seed, Some(&stop2));
+                            crate::set_fj_p3_force(false);
+                            return r.map(|x| super::fj_p3_solution(x, &post, &sc));
+                        }
+                    }
+                    super::heuristics::fj_search(&pc, &lo, &up, effort, cap, seed, Some(&stop2))
+                });
                 self.fj_thread = Some((h, stop));
             } else if !self.params.submip && !proof_only() && self.feasibility_jump(effort, cap) && self.params.verbose {
                 eprintln!("MIP: feasibility jump found a solution ({:.2}s)", self.start.elapsed().as_secs_f64());
@@ -7280,6 +7306,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 super::heuristics::SUBMIP_DEPTH.with(|d| d.set(1));
                 if let Some(b) = basis {
                     SUBMIP_BASIS.with(|s| *s.borrow_mut() = Some(b));
+                }
+                // `ENOMOTO_MIP_FJ_P3=submip` (試作): サブ MIP の前処理でも p5s の前処理の変更を有効にする
+                if env_str!("ENOMOTO_MIP_FJ_P3") == Some("submip") {
+                    crate::set_fj_p3_force(true);
                 }
                 super::solve_problem(&sub, params, presolve)
             }),

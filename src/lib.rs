@@ -31,6 +31,22 @@ macro_rules! tunable {
     }};
 }
 
+thread_local! {
+    /// Feasibility Jump 用の問題を作る前処理の中か (`ENOMOTO_MIP_FJ_P3`、試作): このスレッドだけで `ENOMOTO_MIP_INEQ_SINGLETON`・
+    /// `ENOMOTO_MIP_CS_OBJ_PIVOT`・`ENOMOTO_MIP_FJ_LP_REPAIR` を有効とみなす
+    static FJ_P3_FORCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// [`FJ_P3_FORCE`] が立っているか。
+pub(crate) fn fj_p3_force() -> bool {
+    FJ_P3_FORCE.with(|c| c.get())
+}
+
+/// [`FJ_P3_FORCE`] を立てる・下ろす。
+pub(crate) fn set_fj_p3_force(on: bool) {
+    FJ_P3_FORCE.with(|c| c.set(on));
+}
+
 /// 環境変数 (フラグや文字列設定) をプロセスごとに 1 回だけ読み、`OnceLock` に
 /// キャッシュして `Option<&'static str>` で返す。求解中に何度も参照される
 /// `ENOMOTO_*` フラグの読み取りコストを避けるため。
