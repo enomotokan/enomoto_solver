@@ -3443,7 +3443,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             {
                 let cutoff = self.prune_limit();
                 let glb = self.queue.best_lower_bound();
-                let limit = if cutoff.is_finite() { glb + tunable!("ENOMOTO_T_MIP_SIBLING_QUOT", 0.25, f64) * (cutoff - glb) } else { f64::INFINITY };
+                let sq = if self.proof_plunge() { 1.0 } else { tunable!("ENOMOTO_T_MIP_SIBLING_QUOT", 0.25, f64) };
+                let limit = if cutoff.is_finite() { glb + sq * (cutoff - glb) } else { f64::INFINITY };
                 let mut got = None;
                 while let Some((id, gen, lu)) = self.dive_stack.pop() {
                     if let Some(n) = self.queue.take(id, gen, limit.min(cutoff)) {
@@ -4429,7 +4430,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 潜らずに待ち行列から選び直す
             let plunge_ok = {
                 let cutoff = self.prune_limit();
-                if cutoff.is_finite() && env_str!("ENOMOTO_MIP_NO_PLUNGE_ABORT").is_none() {
+                if cutoff.is_finite() && env_str!("ENOMOTO_MIP_NO_PLUNGE_ABORT").is_none() && !self.proof_plunge() {
                     let glb = self.queue.best_lower_bound().min(node_obj);
                     child.lower_bound <= glb + tunable!("ENOMOTO_T_MIP_PLUNGE_QUOT", 0.25, f64) * (cutoff - glb)
                 } else {
@@ -4518,7 +4519,20 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     /// 証明の段階に入ったか ([`Self::proof_phase_check`])。
+    /// 証明の段階か (`ENOMOTO_MIP_PROOF_SWITCH` のときだけ。下界最小のノード選択・木の中のヒューリスティクスを止めるのに使う)。
     fn in_proof_phase(&self) -> bool {
+        env_str!("ENOMOTO_MIP_PROOF_SWITCH").is_some() && self.proof_phase_flag()
+    }
+
+    /// `ENOMOTO_MIP_PROOF_PLUNGE`: 証明の段階 (検出は `ENOMOTO_MIP_PROOF_SWITCH` と同じ [`Self::proof_phase_check`]) に入ったら、
+    /// 潜り・兄弟への戻りを下界で打ち切らない (HiGHS と同じく刈られるまで潜る)。ほかは変えない。neos-2978193-inde では
+    /// 最適解を早く持ち、残りは証明だけなのに、潜りの打ち切りでノードの 6 割前後が基底を戻すノードになり LP の反復が増えていた
+    /// (analysis/neos2978193_r3_20261020.md)
+    fn proof_plunge(&self) -> bool {
+        env_str!("ENOMOTO_MIP_PROOF_PLUNGE").is_some() && self.proof_phase_flag()
+    }
+
+    fn proof_phase_flag(&self) -> bool {
         match &self.pool {
             Some(pool) => pool.proof_phase.load(std::sync::atomic::Ordering::Relaxed),
             None => self.proof_phase,
@@ -4534,7 +4548,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// - 最良値が (ギャップの 2% を超えて) 良くなってからの時間が、経過時間の `ENOMOTO_T_MIP_PROOF_STALL_FRAC` (既定 0.5) 倍以上、かつ
     ///   `ENOMOTO_T_MIP_PROOF_STALL_MIN` (既定 2) 秒以上
     fn proof_phase_check(&mut self) {
-        if self.params.submip || self.pool_tid != 0 || self.in_proof_phase() || env_str!("ENOMOTO_MIP_PROOF_SWITCH").is_none() {
+        if self.params.submip || self.pool_tid != 0 || self.proof_phase_flag() || (env_str!("ENOMOTO_MIP_PROOF_SWITCH").is_none() && env_str!("ENOMOTO_MIP_PROOF_PLUNGE").is_none()) {
             return;
         }
         if self.proof_eval_at.is_some_and(|t| t.elapsed().as_secs_f64() < 0.5) {
@@ -4633,7 +4647,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if !(pool.heur_k > 0 && self.snap.is_some() && self.race_done && (self.pool_tid as usize) >= pool.threads - pool.heur_k && pool.has_x.load(std::sync::atomic::Ordering::Acquire)) {
             return false;
         }
-        if proof_phase_stops_role() && pool.proof_phase.load(std::sync::atomic::Ordering::Relaxed) {
+        if proof_phase_stops_role() && env_str!("ENOMOTO_MIP_PROOF_SWITCH").is_some() && pool.proof_phase.load(std::sync::atomic::Ordering::Relaxed) {
             return false;
         }
         // 起動の判定 (`ENOMOTO_MIP_HEUR_ROLE_TRIGGER`): 0.25 秒おきに、木の証明が時間内に終わりそうになく、暫定解が良くなれば
@@ -4894,7 +4908,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 break Some(false);
             }
             // 証明の段階に入ったら木の探索に戻る (役には戻らない、[`Self::heur_role_mine`])
-            if proof_phase_stops_role() && pool.proof_phase.load(Ordering::Relaxed) {
+            if proof_phase_stops_role() && env_str!("ENOMOTO_MIP_PROOF_SWITCH").is_some() && pool.proof_phase.load(Ordering::Relaxed) {
                 break None;
             }
             self.heur_role_import(&pool);
