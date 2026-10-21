@@ -1,0 +1,193 @@
+MIP: presolve: tightened 4407 coefficients, normalized 0 integer rows
+MIP: presolve: merged 3588 parallel rows (3528 new equations)
+MIP: presolve: rows 168336 -> 15862, free columns 110454 -> 9728, nonzeros 480259 -> 52240, postsolve steps 10436
+MIP: presolve: tightened 12 coefficients, normalized 0 integer rows
+MIP: presolve: merged 60 parallel rows (0 new equations)
+MIP: presolve: rows 15862 -> 12086, free columns 9728 -> 6150, nonzeros 52240 -> 44659, postsolve steps 3530
+TSLP solve st=TimeLimit iters=3297 polish=0 us=1258247 warm=false
+MIP: probing: 5444 of 5623 binaries probed (1 passes), 1 fixed, 179 bounds tightened, 77450 implications (0.05s)
+MIP: probing: 8 equivalent binary pairs
+Presolve: 168336 rows, 110454 columns -> 12086 rows, 5970 columns (1.92s)
+MIP: presolve: tightened 436 continuous column bounds by dual arguments
+MIP: clique extension: 3644 rows extended, 10857 nonzeros added, 0 columns fixed, 0 duplicate and 1429 dominated rows removed (47429 edges, 0.03s)
+MIP: symmetry: 15 generators, 1 orbits on 16 columns, 15 lex-leader rows (0.33s)
+MIP: fixed-charge check: vb rows 1 of 10672, continuous with vb 1 of 527
+Presolve: 607 rows, 2481 columns -> 9 rows, 9 columns (0.00s)
+Solving with the slope-intercept dual two-phase method
+MIP: fixed-integer LP dual check: c x 4.7420000000e4, dual bound 8.2125000000e3 -> solve
+TSLP solve st=Optimal iters=29 polish=1 us=20089 warm=true
+MIP:   global fixed integers 103903 of 109346 (newly 103903 since the root LP)
+MIP: new incumbent 5.2630000000e4 at node 0 (0.28s) [tree]
+MIP: feasibility jump found a solution (0.28s)
+TSLP solve st=Optimal iters=8587 polish=1 us=4465224 warm=true
+Root LP: objective 4.8583100000e4 (4.75s)
+MIP: root LP 4.8583100000e4 (8587 iters, 4.75s)
+MIP: fixed-charge check: vb rows 1 of 10672, continuous with vb 1 of 527
+TSLP solve st=Optimal iters=679 polish=1 us=396461 warm=true
+MIP: cut round 0: 50 cuts did not move the objective; up to 1000 cuts per round from now
+MIP: cut round 0: 50 cuts (of 4135, sep 0.50s, LP 679 iters), LP rows 10722 (cut rows mean nnz 2), obj 4.8587391667e4 (5.65s)
+TSLP solve st=TimeLimit iters=1793 polish=0 us=1148232 warm=true
+TSLP solve st=Optimal iters=1 polish=0 us=22170 warm=true
+MIP: cut round 1: LP status TimeLimit, removed the cuts (Optimal)
+TSLP solve st=TimeLimit iters=1889 polish=0 us=1136071 warm=true
+TSLP solve st=Optimal iters=1 polish=0 us=22608 warm=true
+MIP: cut round 2: LP status TimeLimit, removed the cuts (Optimal)
+MIP: root heuristic simple rounding: none (0.00s)
+MIP: root heuristic ZI round: none (0.00s)
+MIP: root heuristic randomized rounding: none (0.02s)
+MIP:   interior rounding: 1 interior points, vertex true (1.05s)
+MIP:   interior rounding: 6 rounded points tried, found false
+MIP: root heuristic interior rounding: none (1.14s)
+MIP: root heuristic root reduced cost: none (0.00s)
+MIP:   LP face: only 172 of 5443 integer columns fixed
+MIP: root heuristic LP face: none (0.00s)
+MIP:   sub-MIP: 2398 free columns of 111827, status Infeasible, nodes 0, objective None
+MIP: root heuristic RENS: none (0.03s)
+MIP:   locks: fixing rate 0.65
+MIP:   sub-MIP: 2422 free columns of 111827, status Infeasible, nodes 0, objective None
+MIP: root heuristic locks: none (0.07s)
+MIP:   clique: fixing rate 0.92
+MIP:   sub-MIP: 957 free columns of 111827, status Infeasible, nodes 0, objective None
+MIP: root heuristic clique: none (0.06s)
+MIP:   vbounds (loose): fixing rate 0.00
+MIP: root heuristic vbounds (loose): none (0.00s)
+MIP:   vbounds (tight): fixing rate 0.00
+MIP: root heuristic vbounds (tight): none (0.00s)
+TSLP solve st=Optimal iters=1097 polish=1 us=102045 warm=true
+TSLP solve st=Optimal iters=252 polish=1 us=52651 warm=true
+TSLP solve st=Optimal iters=249 polish=1 us=54779 warm=true
+TSLP solve st=Optimal iters=216 polish=1 us=49892 warm=true
+TSLP solve st=Optimal iters=1 polish=0 us=13183 warm=true
+TSLP solve st=Optimal iters=1 polish=0 us=12425 warm=true
+TSLP solve st=TimeLimit iters=511 polish=1 us=75176 warm=true
+MIP:   sub-MIP: 3044 free columns of 111827, status TimeLimit, nodes 0, objective None
+MIP: root heuristic RINS: none (0.84s)
+MIP: after root heuristics: incumbent Some(52630.0) (11.79s)
+MIP: root objective probing: skipped (gap 7.681e-2 (LP 4.8587391667e4, incumbent 5.2630000000e4), 1871 fractional binaries)
+     time      nodes      open        best bound         incumbent       gap
+    11.8s          1         0     4.858739167e4     5.263000000e4     7.68%
+MIP:    11.79s nodes        1 open       0 lb inf ub 5.26300000e4 lp_iters 12950 sb_iters 0 sb_lps 0 sb_secs 0.00 node_iters 0 (first 0, lps 0) heur_iters 2327 dive_iters 0 lp_rows 10722 node_cut_secs 0.00
+TSLP solve st=Optimal iters=1 polish=0 us=17357 warm=true
+TSLP solve st=Optimal iters=96 polish=1 us=70302 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=105157 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=100893 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=96346 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=97576 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=93344 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=94331 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=94102 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=97160 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=104560 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=103546 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=106008 warm=true
+TSLP solve st=Optimal iters=150 polish=1 us=103612 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=103850 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=103797 warm=true
+TSLP solve st=Optimal iters=100 polish=1 us=70685 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=107336 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=105969 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=104080 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=100000 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=92846 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=99299 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=99492 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=97202 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=117905 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=109779 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=99240 warm=true
+TSLP solve st=Optimal iters=165 polish=1 us=109020 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=103243 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=114577 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=103013 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=107058 warm=true
+TSLP solve st=Optimal iters=89 polish=1 us=69838 warm=true
+TSLP solve st=Optimal iters=140 polish=1 us=97739 warm=true
+TSLP solve st=Optimal iters=101 polish=1 us=76010 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=109666 warm=true
+TSLP solve st=Optimal iters=41 polish=1 us=52175 warm=true
+TSLP solve st=Optimal iters=112 polish=1 us=91080 warm=true
+TSLP solve st=Optimal iters=75 polish=1 us=57833 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=101506 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=100746 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=98714 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=102718 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=108338 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=109691 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=111081 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=104728 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=105773 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=107293 warm=true
+TSLP solve st=Optimal iters=110 polish=1 us=79750 warm=true
+TSLP solve st=Optimal iters=87 polish=1 us=63363 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=119517 warm=true
+TSLP solve st=Optimal iters=87 polish=1 us=85068 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=116279 warm=true
+TSLP solve st=Optimal iters=14 polish=1 us=26486 warm=true
+TSLP solve st=Optimal iters=2 polish=0 us=14570 warm=true
+TSLP solve st=Optimal iters=2 polish=0 us=17199 warm=true
+TSLP solve st=Optimal iters=170 polish=2 us=122958 warm=true
+TSLP solve st=Optimal iters=172 polish=2 us=123465 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=94215 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=97132 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=112188 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=92333 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=102819 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=99687 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=107396 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=129241 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=101905 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=110572 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=117727 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=145473 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=143409 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=125531 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=111359 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=108902 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=111820 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=120569 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=99105 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=90663 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=92840 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=91504 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=95806 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=97227 warm=true
+TSLP solve st=Optimal iters=101 polish=1 us=67368 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=96735 warm=true
+TSLP solve st=Optimal iters=102 polish=1 us=68642 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=99999 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=99085 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=108276 warm=true
+TSLP solve st=IterationLimit iters=169 polish=0 us=122830 warm=true
+    20.8s          2         1     4.858739167e4     5.263000000e4     7.68%
+MIP:    20.76s nodes        2 open       1 lb 4.85873917e4 ub 5.26300000e4 lp_iters 26697 sb_iters 13746 sb_lps 90 sb_secs 8.95 node_iters 1 (first 1, lps 1) heur_iters 2327 dive_iters 0 lp_rows 10722 node_cut_secs 0.00
+TSLP solve st=Optimal iters=239 polish=1 us=162473 warm=true
+TSLP solve st=Optimal iters=305 polish=2 us=214644 warm=true
+TSLP solve st=Optimal iters=152 polish=1 us=105333 warm=true
+TSLP solve st=Optimal iters=265 polish=1 us=170526 warm=true
+TSLP solve st=Optimal iters=152 polish=1 us=99766 warm=true
+TSLP solve st=Optimal iters=308 polish=1 us=192212 warm=true
+TSLP solve st=Optimal iters=2 polish=0 us=19296 warm=true
+TSLP solve st=Optimal iters=261 polish=1 us=161633 warm=true
+TSLP solve st=Optimal iters=2 polish=0 us=20386 warm=true
+TSLP solve st=Optimal iters=229 polish=1 us=148733 warm=true
+TSLP solve st=Optimal iters=2 polish=0 us=20224 warm=true
+TSLP solve st=Optimal iters=184 polish=1 us=118008 warm=true
+TSLP solve st=Optimal iters=2 polish=0 us=19677 warm=true
+TSLP solve st=IterationLimit iters=501 polish=0 us=360474 warm=true
+TSLP solve st=Optimal iters=2 polish=0 us=21331 warm=true
+TSLP solve st=TimeLimit iters=193 polish=0 us=97453 warm=true
+TSLP solve st=TimeLimit iters=1 polish=0 us=17547 warm=true
+    22.7s          2         0     4.858739167e4     5.263000000e4     7.68%
+MIP:    22.74s nodes        2 open       2 lb 4.85873917e4 ub 5.26300000e4 lp_iters 29497 sb_iters 16307 sb_lps 106 sb_secs 10.76 node_iters 240 (first 240, lps 2) heur_iters 2327 dive_iters 0 lp_rows 10722 node_cut_secs 0.00
+MIP: dual proofs and conflicts 0 (conflicts added 0 (from proofs 0), Farkas 0, pruned 0 nodes, tightened 0 bounds)
+MIP: propagation conflicts: analysed 25, no 1-UIP 0, 1-UIP not a row 0, no decision set 0, decision set not a row 0; not a row because continuous 0, general integer 0, both sides 0
+MIP: objective propagation: pruned 0 nodes, tightened 0 bounds; strong branching children infeasible by propagation 0, propagated bounds passed to child LPs 0
+MIP: literal conflicts: added 49, in pool 49 (aged out 0), pruned 0 nodes, tightened 0 bounds
+MIP: conflict analysis (HiGHS style): calls 25, conflicts 74, added 49, mean length 18.0, max length 32903, 0.01s
+MIP: conflict analysis failures (all calls): no decision 0, too long midway 0, reason row lacks column 0, empty 0, too long at the end 0 (total length 0), max length 50
+MIP: sibling backtracks 0; basis restores 0 (basic count mismatch 0), first LP iterations after a restore 0
+MIP: node diag: nodes 2 node LPs 2 mean rows 10722.0 iters 240 (120.0/LP) LP secs 0.18 sep rounds 0 added 0 node cut secs 0.00 final rows 10722
+MIP: adaptive node cuts: rounds 0 effective 0 skipped 0 (rate 1.000), node cut secs 0.00, outcomes cutoff/<0.02/<0.1/<0.3/>=0.3 [0, 0, 0, 0, 0], cut nnz None (rows mean 4.5)
+Presolve: 168336 rows, 111827 columns -> 9 rows, 9 columns (0.15s)
+Solving with the slope-intercept dual two-phase method
+{"status": "time_limit", "objective": 52630.00000000003, "best_bound": 48587.39166666666, "nodes": 2, "root_bound": 48583.10000000004, "first_solution_time": 2.566928751, "first_solution_objective": 52630.0, "time": 25.36063203699996}

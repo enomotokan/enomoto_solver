@@ -16,6 +16,8 @@ thread_local! {
     static CLIQUE_AUTO_FIRST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
     /// `ENOMOTO_MIP_CLIQUE_CUTS=fallback` で clique カットを加えて回す 2 回目のループの中か (時間の上限をループの始めから数える)
     static CLIQUE_FB_SECOND: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// `ENOMOTO_MIP_CUT_EXTEND` で根のカットの時間の上限を延ばした後か (延ばした後は面の頂点での分離を止める)
+    static CUT_EXTENDED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 use super::lp_api::MipLp;
 
@@ -345,6 +347,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let prog_win = if self.params.submip { 0 } else { tunable!("ENOMOTO_T_MIP_CUT_PROG_WIN", 0usize, usize) };
         let prog_eps = tunable!("ENOMOTO_T_MIP_CUT_PROG_EPS", 0.01, f64);
         let mut obj_hist: Vec<f64> = Vec::new();
+        let extend_on = env_str!("ENOMOTO_MIP_CUT_EXTEND").is_some() && !self.params.submip && job.is_none() && self.params.time_limit.is_finite();
+        let extend_max = tunable!("ENOMOTO_T_MIP_CUT_EXTEND_MAX", 0.3, f64) * self.params.time_limit;
+        CUT_EXTENDED.with(|c| c.set(false));
+        // ラウンドごとの目的値 (`ENOMOTO_MIP_CUT_EXTEND` の判定用。最初は根の LP の値)
+        let mut ext_hist: Vec<f64> = vec![first_obj];
         loop {
             self.poll_fj_thread();
             if self.root_gap_closed() {
@@ -368,6 +375,24 @@ impl<'a, L: MipLp> Solver<'a, L> {
             round_ctr += 1;
             let now = super::cap_clock();
             let now = if env_str!("ENOMOTO_MIP_SEP_COUNT_CPU").is_some() { now + self.sep_par_cpu } else { now };
+            // `ENOMOTO_MIP_CUT_EXTEND` (試作、既定では使わない): 根のカットの時間の上限に来ても、直近 3 ラウンドの目的値の伸びが
+            // (3 ラウンドに満たなければ回った分) |目的値| の `ENOMOTO_T_MIP_CUT_EXTEND_MIN_GAIN` 倍 (既定 1e-3) 以上なら、上限を全体の `ENOMOTO_T_MIP_CUT_EXTEND_STEP`
+            // (0.05) ずつ、合わせて `ENOMOTO_T_MIP_CUT_EXTEND_MAX` (0.3) まで延ばす。延ばした後は面の頂点での分離 (LP を 2 回解く)
+            // を止める。また最初から、1 回の LP の時間の上限で止まった LP は外さずに解き続ける (`ENOMOTO_MIP_CUT_LP_CONTINUE` と同じ)。
+            // physiciansched6-2 (同値の代入の後) では根のカットが 1 ラウンド 1〜2 秒で 48587 -> 49124 (10 ラウンド) と伸び続けるが、
+            // 既定の上限 (全体の 10%) で 1〜2 ラウンドで止まっていた
+            if extend_on && now - cap_base > time_cap && !self.time_up() && !phase2 && !stopped(&job) && time_cap + 1e-9 < extend_max {
+                let k = ext_hist.len();
+                let obj = self.lp.objective();
+                let w = (k.saturating_sub(1)).min(3);
+                if w >= 1 && ext_hist[k - 1] - ext_hist[k - 1 - w] >= tunable!("ENOMOTO_T_MIP_CUT_EXTEND_MIN_GAIN", 1e-3, f64) * obj.abs().max(1.0) {
+                    time_cap = (time_cap + tunable!("ENOMOTO_T_MIP_CUT_EXTEND_STEP", 0.05, f64) * self.params.time_limit).min(extend_max);
+                    CUT_EXTENDED.with(|c| c.set(true));
+                    if self.params.verbose {
+                        eprintln!("MIP: cut round {round}: still improving ({:.6e} in {w} rounds); root cut time cap extended to {time_cap:.1}s", ext_hist[k - 1] - ext_hist[k - 1 - w]);
+                    }
+                }
+            }
             if self.time_up() || now - cap_base > time_cap || (phase2 && now - t_loop0 > phase2_deadline && !heavy) || stopped(&job) {
                 break;
             }
@@ -478,6 +503,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 chosen
             };
             let mut chosen = chosen;
+            // 診断 (`ENOMOTO_MIP_DEBUG_TOPCUTS` = k): 選んだカットの最初の k 本を、列の LP 値・境界・整数かと並べて表示する
+            let topk = tunable!("ENOMOTO_MIP_DEBUG_TOPCUTS", 0usize, usize);
+            if topk > 0 && !self.params.submip {
+                for c in chosen.iter().take(topk) {
+                    let terms: Vec<String> = c.coefs.iter().take(8).map(|&(j, a)| format!("{a:+.3}*x{j}[{:.3} {}..{} {}]", x[j], self.dom.global_lo[j], self.dom.global_up[j], if p.is_int[j] { "I" } else { "C" })).collect();
+                    eprintln!("TOPCUT round {round} eff {:.4} nnz {} <= {:.3}: {}", c.efficacy, c.coefs.len(), c.rhs, terms.join(" "));
+                }
+            }
             // 選択の上限まで採ったか (選択を通さないカットは数えない)
             let quota_full = chosen.len() >= max_cuts && ncands >= 2 * max_cuts;
             chosen.extend(forced);
@@ -514,7 +547,27 @@ impl<'a, L: MipLp> Solver<'a, L> {
             } else {
                 self.deadline
             };
-            let st = self.lp.solve(&SolveLimits { iteration_limit: lim, cutoff: f64::INFINITY, deadline: lp_deadline });
+            let mut st = self.lp.solve(&SolveLimits { iteration_limit: lim, cutoff: f64::INFINITY, deadline: lp_deadline });
+            // `ENOMOTO_MIP_CUT_LP_CONTINUE` (試作、既定では使わない): 1 回の LP の時間の上限で止まったとき、カットを外さずに
+            // 同じ上限でもう `ENOMOTO_T_MIP_CUT_LP_CONTINUE_MAX` 回 (既定 2) まで解き続ける (根のカットの時間の上限を過ぎていても)。
+            // physiciansched6-2 (同値の代入の後) では 1 ラウンドに数百本のカットを入れた LP が上限 (3 秒) を少し超え、外したカットの
+            // 分の反復が無駄になり、2 回で根のカットのループが止まっていた
+            if st == LpStatus::TimeLimit && (env_str!("ENOMOTO_MIP_CUT_LP_CONTINUE").is_some() || extend_on) && !self.params.submip {
+                for _ in 0..tunable!("ENOMOTO_T_MIP_CUT_LP_CONTINUE_MAX", 2usize, usize) {
+                    if self.time_up() || stopped(&job) {
+                        break;
+                    }
+                    let d = std::time::Instant::now() + std::time::Duration::from_secs_f64(cap);
+                    let d = Some(self.deadline.map_or(d, |g| g.min(d)));
+                    st = self.lp.solve(&SolveLimits { iteration_limit: lim, cutoff: f64::INFINITY, deadline: d });
+                    if self.params.verbose {
+                        eprintln!("MIP: cut round {round}: LP continued after the time limit: {st:?}");
+                    }
+                    if st != LpStatus::TimeLimit {
+                        break;
+                    }
+                }
+            }
             self.sb_iters += 0;
             let _ = it0;
             if st != LpStatus::Optimal {
@@ -665,6 +718,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             prev_obj = obj;
             obj_hist.push(obj);
+            ext_hist.push(obj);
             // 効いていないカットを外す (論理変数が基底にあり、行が緩んでいるもの)。`ENOMOTO_T_MIP_CUT_REMOVE_EVERY` ラウンドごと
             // `ENOMOTO_T_MIP_ROOT_CUT_AGE` > 0: HiGHS と同じく、効いていないラウンドが続いたカットだけを外す
             // (HiGHS の mip_lp_age_limit = 10)
@@ -1810,6 +1864,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if crate::simplex::slope_intercept_dual::mip_profile() == 1 {
             return (self.separate(x, light), Vec::new());
         }
+        if CUT_EXTENDED.with(|c| c.get()) && !self.params.submip {
+            return (self.separate(x, light), Vec::new());
+        }
         let mode = match env_str!("ENOMOTO_MIP_FACE_SEP") {
             Some(m) if m == "off" => return (self.separate(x, light), Vec::new()),
             Some(m) if !self.params.submip => m,
@@ -2044,8 +2101,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 keep_best(&mut cands, n0, self.p);
             }
         }
-        // 元の行 1 本ずつ
-        for i in 0..p.m {
+        // 元の行 1 本ずつ (診断用 `ENOMOTO_MIP_DEBUG_NO_ROW_CUTS`: 使わない)
+        let row_cuts_m = if env_str!("ENOMOTO_MIP_DEBUG_NO_ROW_CUTS").is_some() { 0 } else { p.m };
+        for i in 0..row_cuts_m {
             if i % 64 == 0 && self.time_up() {
                 return cands;
             }
@@ -2227,9 +2285,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if dbg_sep {
             eprintln!("SEP path {:.3}s cands {}", sep_t0.elapsed().as_secs_f64(), cands.len());
         }
-        // tableau 行
+        // tableau 行 (診断用 `ENOMOTO_MIP_DEBUG_NO_TAB_CUTS`: 使わない)
         let mut basics: Vec<(usize, f64)> = Vec::new();
-        for s in 0..mr {
+        let tab_mr = if env_str!("ENOMOTO_MIP_DEBUG_NO_TAB_CUTS").is_some() { 0 } else { mr };
+        for s in 0..tab_mr {
             let k = self.lp.basic_var(s);
             if k < n && self.cut_int[k] {
                 let v = x[k];
