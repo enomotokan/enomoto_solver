@@ -2144,7 +2144,20 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let (lo, up) = if self.p.is_int[j] { (x[j], x[j]) } else { (self.p.col_lo[j], self.p.col_up[j]) };
             self.lp.set_col_bounds(j, lo, up);
         }
-        let st = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
+        // `ENOMOTO_MIP_INC_LP_CAP` (試作、既定では使わない): この LP の時間の上限を全体の `ENOMOTO_T_MIP_INC_LP_TIME_FRAC`
+        // (0.02、最低 1 秒) にする。uccase12 で DUAL_UB + CS_OBJ_PIVOT のとき、根の LP の直後に FJ の解 (865106) を受け取り、
+        // この LP が 8.4 秒から 56 秒まで止まらず、根のカット・ヒューリスティクスが 1 つも回らなかった
+        let deadline = if env_str!("ENOMOTO_MIP_INC_LP_CAP").is_some() && self.params.time_limit.is_finite() {
+            let cap = (tunable!("ENOMOTO_T_MIP_INC_LP_TIME_FRAC", 0.02, f64) * self.params.time_limit).max(1.0);
+            let d = std::time::Instant::now() + std::time::Duration::from_secs_f64(cap);
+            Some(self.deadline.map_or(d, |g| g.min(d)))
+        } else {
+            self.deadline
+        };
+        let st = self.lp.solve(&SolveLimits { deadline, ..Default::default() });
+        if self.params.verbose && st != LpStatus::Optimal {
+            eprintln!("MIP: fixed-integer LP: {st:?} ({} iters)", self.lp.total_iterations() - it0);
+        }
         if st == LpStatus::Optimal {
             let mut y = self.lp.col_values();
             for j in 0..self.p.n {
