@@ -496,6 +496,11 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 証明ごとの、係数の並びに対応する締め付けの上界 `|a_j| (u_j - l_j)` (加えたときの大域的な境界。整数列でなければ 0)。
     /// 係数はこの大きい順に並べて持つ (締め付けでは、これが余裕以下になったら残りの列は締まらないので打ち切る)。
     proof_keys: std::collections::VecDeque<Vec<f64>>,
+    /// 診断用 (`ENOMOTO_MIP_PROOF_VERIFY`): 自前の証明を作ったときに y_i != 0 だったカットの行の番号 (`cut_ids`)。取り込んだ行・
+    /// 衝突の行は `None`。刈り込みの確認で LP 解が証明を破ったとき、使ったカットが全部 LP に残っていれば証明の誤りと断定できる。
+    proof_cuts: std::collections::VecDeque<Option<Vec<u64>>>,
+    /// 診断用: 次に `push_pool_row` で入れる自前の証明が使ったカットの行の番号 (`add_proof_from` が置く)。
+    proof_pending_cuts: Option<Vec<u64>>,
     /// 証明ごとの状態 (`dual_proofs` と同じ並び、[`ProofState`])。
     proof_state: std::collections::VecDeque<ProofState>,
     /// 生きている証明の通し番号を古い順に、[自前, 取り込み] ごとに (上限を分けて古いものから捨てるため)。
@@ -568,7 +573,7 @@ pub(super) struct Solver<'a, L: MipLp> {
     proof_prune_after_tighten: bool,
     /// 診断用 (`ENOMOTO_MIP_PROOF_VERIFY`): 証明で刈ったノードの LP を解き直して確かめた数 [LP が打ち切り値以上か実行不能 (正しい),
     /// LP が打ち切り値未満 (証明が誤り)、確かめられなかった]。
-    proof_verify_stats: [u64; 3],
+    proof_verify_stats: [u64; 4],
     pub(super) proof_tightenings: u64,
     /// カットプールの重複判定用のハッシュと、プールの非零数。
     pub(super) cut_pool_keys: std::collections::HashMap<u64, usize>,
@@ -1589,6 +1594,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         proof_first_id: 0,
         proof_base: std::collections::VecDeque::new(),
         proof_keys: std::collections::VecDeque::new(),
+        proof_cuts: std::collections::VecDeque::new(),
+        proof_pending_cuts: None,
         proof_state: std::collections::VecDeque::new(),
         proof_fifo: [std::collections::VecDeque::new(), std::collections::VecDeque::new()],
         proof_dead: 0,
@@ -1627,7 +1634,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         proof_prunes: 0,
         proof_last_prune: None,
         proof_prune_after_tighten: false,
-        proof_verify_stats: [0; 3],
+        proof_verify_stats: [0; 4],
         proof_tightenings: 0,
         cut_pool_keys: std::collections::HashMap::new(),
         pool_hash: Vec::new(),
@@ -6196,12 +6203,30 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             return false;
         }
+        if proof_verify() {
+            let m0 = p.m;
+            let ids: Vec<u64> = y
+                .iter()
+                .enumerate()
+                .take(self.lp.num_rows())
+                .filter(|&(i, &yi)| {
+                    if i < m0 || yi.abs() <= 1e-12 {
+                        return false;
+                    }
+                    let (lo, up) = self.lp.row_bounds(i);
+                    (if yi > 0.0 { lo } else { up }).is_finite()
+                })
+                .filter_map(|(i, _)| self.cut_ids.get(i - m0).copied())
+                .collect();
+            self.proof_pending_cuts = Some(ids);
+        }
         if obj {
             self.push_pool_row(coefs, konst, true);
         } else {
             self.farkas_added += 1;
             self.push_pool_row(coefs, -konst, false);
         }
+        self.proof_pending_cuts = None;
         true
     }
 
@@ -6233,6 +6258,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.dual_proofs[k].2 = false;
         self.proof_state[k] = ProofState::Dead;
         self.proof_keys[k] = Vec::new();
+        self.proof_cuts[k] = None;
         self.proof_dead += 1;
     }
 
@@ -6244,8 +6270,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut map = std::collections::HashMap::new();
         let (mut dp, mut base, mut st, mut keys) = (std::collections::VecDeque::new(), std::collections::VecDeque::new(), std::collections::VecDeque::new(), std::collections::VecDeque::new());
         let mut refs = std::collections::VecDeque::new();
-        let it = std::mem::take(&mut self.dual_proofs).into_iter().zip(std::mem::take(&mut self.proof_base)).zip(std::mem::take(&mut self.proof_state)).zip(std::mem::take(&mut self.proof_keys)).zip(std::mem::take(&mut self.proof_ref));
-        for (k, ((((row, b), s), ky), rf)) in it.enumerate() {
+        let mut cuts = std::collections::VecDeque::new();
+        let it = std::mem::take(&mut self.dual_proofs).into_iter().zip(std::mem::take(&mut self.proof_base)).zip(std::mem::take(&mut self.proof_state)).zip(std::mem::take(&mut self.proof_keys)).zip(std::mem::take(&mut self.proof_ref)).zip(std::mem::take(&mut self.proof_cuts));
+        for (k, (((((row, b), s), ky), rf), pc)) in it.enumerate() {
             if s != ProofState::Dead {
                 map.insert(old_first + k as u64, new_first + dp.len() as u64);
                 dp.push_back(row);
@@ -6253,8 +6280,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 st.push_back(s);
                 keys.push_back(ky);
                 refs.push_back(rf);
+                cuts.push_back(pc);
             }
         }
+        self.proof_cuts = cuts;
         self.proof_ref = refs;
         self.dual_proofs = dp;
         self.proof_base = base;
@@ -6407,6 +6436,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.proof_dirty = true;
         }
         self.proof_keys.push_back(keys);
+        self.proof_cuts.push_back(if state == ProofState::Imported { None } else { self.proof_pending_cuts.take() });
         self.proof_ref.push_back(false);
         self.dual_proofs.push_back((coefs, konst, obj));
         let k = self.dual_proofs.len() - 1;
@@ -7415,8 +7445,27 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.proof_verify_stats[1] += 1;
                     let x = self.lp.col_values();
                     let act = k.map(|k| self.dual_proofs[k].0.iter().map(|&(j, a)| a * x[j]).sum::<f64>());
+                    // LP 解が証明を破るとき: 証明が使ったカットが全部まだ LP にあれば、証明は今の LP の行から導けるはずなので誤りと断定できる
+                    let verdict = match (k, act) {
+                        (Some(k), Some(a)) if a > self.proof_rhs(k) + 1e-6 * (1.0 + self.proof_rhs(k).abs()) => match &self.proof_cuts[k] {
+                            Some(ids) => {
+                                let present: std::collections::HashSet<u64> = self.cut_ids.iter().copied().collect();
+                                let missing = ids.iter().filter(|id| !present.contains(id)).count();
+                                if missing == 0 {
+                                    format!("DEFINITE (the LP solution violates the proof and all {} cut rows the proof used are still in the LP)", ids.len())
+                                } else {
+                                    format!("undecided ({missing} of {} cut rows the proof used were removed from the LP)", ids.len())
+                                }
+                            }
+                            None => "undecided (the LP solution violates the proof; imported or conflict row, used cuts unknown)".to_string(),
+                        },
+                        _ => "undecided (the LP solution satisfies the proof: pruned through integer tightening)".to_string(),
+                    };
+                    if verdict.starts_with("DEFINITE") {
+                        self.proof_verify_stats[3] += 1;
+                    }
                     eprintln!(
-                        "PROOF_VERIFY: WRONG: node {} thread {}: {} pruned a node whose LP objective is {obj:.10e} < prune limit {lim:.10e} (node lower bound {node_lb:.10e}, proof activity at the LP solution {act:?}, after tightening {}, debug solution in node {dn}, lp rows {})",
+                        "PROOF_VERIFY: WRONG: node {} thread {}: {} pruned a node whose LP objective is {obj:.10e} < prune limit {lim:.10e} (node lower bound {node_lb:.10e}, proof activity at the LP solution {act:?}, after tightening {}, debug solution in node {dn}, lp rows {}): {verdict}",
                         self.nodes, self.pool_tid, desc(self), self.proof_prune_after_tighten, self.lp.num_rows()
                     );
                 } else {
@@ -8675,7 +8724,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.params.verbose {
             eprintln!("MIP: dual proofs and conflicts {} (conflicts added {} (from proofs {}), Farkas {}, pruned {} nodes, tightened {} bounds)", self.dual_proofs.len(), self.conflicts_added, self.proof_conflicts, self.farkas_added, self.proof_prunes, self.proof_tightenings);
             if proof_verify() {
-                eprintln!("MIP: proof prunes verified by re-solving the node LP: correct {}, WRONG {}, not verified {}", self.proof_verify_stats[0], self.proof_verify_stats[1], self.proof_verify_stats[2]);
+                eprintln!("MIP: proof prunes verified by re-solving the node LP: correct {}, WRONG {} (DEFINITE {}), not verified {}", self.proof_verify_stats[0], self.proof_verify_stats[1], self.proof_verify_stats[3], self.proof_verify_stats[2]);
             }
             eprintln!("MIP: propagation conflicts: analysed {}, no 1-UIP {}, 1-UIP not a row {}, no decision set {}, decision set not a row {}; not a row because continuous {}, general integer {}, both sides {}", self.conf_stats[0], self.conf_stats[1], self.conf_stats[2], self.conf_stats[3], self.conf_stats[4], self.conf_stats[5], self.conf_stats[6], self.conf_stats[7]);
             if cutpool_prop() {
