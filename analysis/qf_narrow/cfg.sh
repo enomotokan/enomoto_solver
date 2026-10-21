@@ -13,3 +13,6 @@ cfg() {
     *) echo "${!1}";;
   esac
 }
+# 絞った試作 (inv/qfnarrow-20261021)
+P1="ENOMOTO_MIP_GR_AUTO=2 ENOMOTO_MIP_FACE_SEP_FC=off"
+P2="$P1 ENOMOTO_T_MIP_FACE_SEP_FC_MAXCOLS=5000"
