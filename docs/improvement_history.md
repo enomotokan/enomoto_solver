@@ -9642,6 +9642,14 @@ neos-950242 の 2 回目の調査 (`analysis/neos950242_r2_20261020.md`)。
 - 計測 (8c6fe91 = develop f576181 + 修正、40 + 16 問、2 組): 40 問 (解けた・SGM) DFa 修正 25・21.32 / 修正なし 25・21.40、DFb 25・20.75 / 26・20.93。16 問 DFa 11・34.60 / 10・37.58、DFb 10・33.99 / 9・36.00。SGM は 4 つとも良く、解けた数は計 71 対 70 (DFb の 40 問で揺れる noswot を落とす)。不一致 0、"MIP: WARNING" 0。不具合の修正なので既定にした。
 - 修正 + `ENOMOTO_MIP_LP_RESUME=1` (時間切れの LP を続きから解く) は DFa 25・21.25 / 10・33.81、DFb 24・21.16 / 11・34.94 で修正だけと差がなく既定にしない。選んだ行の重みの検査 (`ENOMOTO_DSE_WEIGHT_CHECK`、HiGHS の選び直し相当) は計測 DC で判断する。
 
+## 2026-10-21: 選んだ行の DSE 重みの検査 (DSE_WEIGHT_CHECK) は不採用
+
+- ユーザーの案 (通常の LP と同じく DSE 重みのずれを検出する)。HiGHS は選んだ行の重みを ‖row_ep‖² で上書きし、保持値が 0.25 倍未満なら行を選び直すだけで、全行の計算し直しはしない (analysis/lp_hang_20261021.md §6.3)。試作 `ENOMOTO_DSE_WEIGHT_CHECK=1` (HiGHS と同じ選び直し + ずれが多ければ全行を厳密に計算し直す、`ENOMOTO_T_DSE_RECOMPUTE=0` で選び直しだけ)。
+- b19b60a (DSE 重みの修正 + 試作) で 40 + 16 問、newdef (修正だけ) / chk0 (選び直しだけ) / chkrows (検査 + 計算し直し + `ENOMOTO_MIP_ROWS_DSE_EXACT=1`) を 2 組。
+- 40 問 (解けた・SGM): DCa newdef 26・22.19 / chk0 25・22.24 / chkrows 24・23.21、DCb newdef 25・20.71 / chk0 25・21.01 / chkrows 24・21.60。
+- 16 問: DCa newdef 10・36.77 / chk0 8・39.45 / chkrows 7・44.11、DCb newdef 10・34.99 / chk0 9・36.27 / chkrows 7・41.79。不一致 0。
+- 根本の修正の後は検査の出番がほとんどなく (ノードで 0〜7 回)、どちらも修正だけより悪いので不採用。DCb の newdef で roll3000 に "MIP: WARNING" が 1 件 (時間切れ、本文なし)。h80x6320d の警告と合わせて Fable の調査に回した。
+
 ## 改名一覧 (整理時)
 
 本メモ中は旧名で書かれている。
