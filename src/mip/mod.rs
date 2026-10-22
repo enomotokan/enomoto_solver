@@ -1231,13 +1231,14 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
     let n = p.n;
     // 幅が許容誤差以下の列を 1 点に固定する ([`fix_tiny_width_columns`]。再スタートの問題の大域的な境界、プロービングで締めた境界を含む)
     let (mut col_lo, mut col_up) = (p.col_lo.clone(), p.col_up.clone());
-    let tiny0 = fix_tiny_width_columns(&p.rows, &mut col_lo, &mut col_up, &p.cost, &p.is_int);
+    let (mut p_row_lo, mut p_row_up) = (p.row_lo.clone(), p.row_up.clone());
+    let tiny0 = fix_tiny_width_columns(&p.rows, &mut p_row_lo, &mut p_row_up, &mut col_lo, &mut col_up, &p.is_int);
     // 元の制約 (境界は丸め済みの MipProblem の値を使う)
     let vars: Vec<VariableData> = (0..n).map(|j| VariableData { vtype: if p.is_int[j] { VarType::Integer } else { VarType::Continuous }, lb: col_lo[j], ub: col_up[j] }).collect();
     let mut cons: Vec<ConstraintRow> = Vec::with_capacity(p.m);
     for i in 0..p.m {
         let expr = crate::types::LinearExpr { coeffs: p.rows[i].iter().cloned().collect(), constant: 0.0 };
-        let (lo, up) = (p.row_lo[i], p.row_up[i]);
+        let (lo, up) = (p_row_lo[i], p_row_up[i]);
         if lo == up {
             cons.push(ConstraintRow { expr, sense: crate::types::RowSense::Eq, rhs: lo });
         } else {
@@ -1277,7 +1278,7 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
         row_up.push(rhs);
     }
     // 前処理 (伝播・行シングルトンなど) が締めた境界でも、幅が許容誤差以下になった列を固定する (係数の強化の前)
-    let tiny1 = fix_tiny_width_columns(&rows, &mut pre.lb, &mut pre.ub, &pre.c, &p.is_int);
+    let tiny1 = fix_tiny_width_columns(&rows, &mut row_lo, &mut row_up, &mut pre.lb, &mut pre.ub, &p.is_int);
     if verbose && tiny0 + tiny1 > 0 {
         eprintln!("MIP: presolve: fixed {} columns of width within tolerance ({tiny0} before, {tiny1} after the reductions)", tiny0 + tiny1);
     }
@@ -2007,7 +2008,7 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
         }
     }
     // 緩めた分で幅が許容誤差以下になった列 (値 0 のはずの連続列が `[0, 1e-9]` など) は 1 点に固定する ([`fix_tiny_width_columns`])
-    let tiny = fix_tiny_width_columns(&prob.rows, &mut prob.col_lo, &mut prob.col_up, &prob.cost, &prob.is_int);
+    let tiny = fix_tiny_width_columns(&prob.rows, &mut prob.row_lo, &mut prob.row_up, &mut prob.col_lo, &mut prob.col_up, &prob.is_int);
     if verbose && tiny > 0 {
         eprintln!("MIP: probing: fixed {tiny} columns of width within tolerance");
     }
@@ -2022,21 +2023,23 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
 /// `[0, 1e-9]` で残り、許容誤差の範囲で冗長な行 (`x + y <= 1 - 1e-9`) を係数の強化が縮めて最適解を厳密に切っていた
 /// (uccase12 の再スタート後、analysis/equiv2_bug_20261022.md)。固定してしまえば幅の小さな列はどの手順からも見えない。
 ///
-/// - 固定する点: 区間に整数 (0 を含む) があればそれ (緩める前の値。右辺を 1 - 1e-9 のようにずらさない)。なければ
-///   目的の係数 (最小化形) が正なら下限、負なら上限、0 なら下限 (HiGHS と同じ)。`ENOMOTO_MIP_TINY_WIDTH_FIX_POINT=obj` なら
-///   整数を優先せず目的の係数の側の端 (0 なら下限)。整数列は丸め済みなので、交差か幅の小さな区間が 1 つの整数を囲むときだけ当たる。
-/// - 行の破れ: 固定で列の値は固定する点から最大 `s_j` (遠い方の端までの距離) 動くので、各行の `Σ |a_ij| s_j` が
-///   許容誤差を越えないものだけ固定する (係数の大きな行を持つ列は固定しない。HiGHS は幅 1e-9 以下なら係数を見ないが、ここでは見る)。
+/// - 固定する点: 区間に整数 (0 を含む) があればそれ (伝播が緩める前の値)、なければ下限 (HiGHS と同じ)。目的の係数の側の端は
+///   使わない: 緩めた側の端 (元の問題では値を取れない) に固定すると、連続列の等式の連鎖が 1e-8 の大きさで破れ、前処理
+///   (許容誤差 1e-9) が実行不能と判定する (benchmarks/tinywidth_20261022 の fuzz_mixtiny、seed 68 など)。
+///   整数列は丸め済みなので、交差か幅の小さな区間が 1 つの整数を囲むときだけ当たる。
+/// - 行の扱い: 固定で列の値は固定する点から最大 `s_j` (遠い方の端までの距離) 動く。不等式の行は失う余裕 `|a_ij| s_j` だけ
+///   右辺を緩める (元の問題で厳密に実行可能な点は 1 つも切らない。緩めないと `x + y <= 1 - 2e-9` が整数だけの行
+///   `x <= 1 - 2e-9` になり、整数の行の丸め (許容誤差 1e-9) が x = 1 を切る)。各行の緩めの和 `Σ |a_ij| s_j` は許容誤差まで
+///   (越える列は固定しない。緩めには丸めの余裕 1e-9 (1 + |b|) を足す)。等式の行は緩められないので、破れの和が `1e-9 (1 + |b|)` (前処理の許容誤差) までの列だけ固定する。
 ///
 /// 固定した列の数を返す。
-pub(crate) fn fix_tiny_width_columns(rows: &[Vec<(usize, f64)>], lo: &mut [f64], up: &mut [f64], cost: &[f64], is_int: &[bool]) -> usize {
+pub(crate) fn fix_tiny_width_columns(rows: &[Vec<(usize, f64)>], row_lo: &mut [f64], row_up: &mut [f64], lo: &mut [f64], up: &mut [f64], is_int: &[bool]) -> usize {
     if env_str!("ENOMOTO_MIP_NO_TINY_WIDTH_FIX").is_some() {
         return 0;
     }
     let tol = tunable!("ENOMOTO_T_MIP_TINY_WIDTH_TOL", domain::FEASTOL, f64);
     let n = lo.len();
     // 固定する候補 (列, 点, 遠い方の端までの距離)
-    let obj_side = env_str!("ENOMOTO_MIP_TINY_WIDTH_FIX_POINT").is_some_and(|v| v == "obj");
     let mut cand: Vec<(usize, f64, f64)> = Vec::new();
     for j in 0..n {
         let (l, u) = (lo[j], up[j]);
@@ -2045,12 +2048,10 @@ pub(crate) fn fix_tiny_width_columns(rows: &[Vec<(usize, f64)>], lo: &mut [f64],
         }
         let (a, b) = (l.min(u), l.max(u));
         let k = (0.5 * (a + b)).round();
-        let v = if is_int[j] || (!obj_side && a <= k && k <= b) {
+        let v = if is_int[j] || (a <= k && k <= b) {
             k
         } else if l > u {
             0.5 * (l + u)
-        } else if cost[j] < 0.0 {
-            u
         } else {
             l
         };
@@ -2076,9 +2077,10 @@ pub(crate) fn fix_tiny_width_columns(rows: &[Vec<(usize, f64)>], lo: &mut [f64],
         }
     }
     let mut used = vec![0.0f64; rows.len()];
+    let budget = |i: usize, row_lo: &[f64], row_up: &[f64]| if row_lo[i] == row_up[i] { 1e-9 * (1.0 + row_up[i].abs()) } else { tol };
     let mut fixed = 0;
     for (c, &(j, v, s)) in cand.iter().enumerate() {
-        if cols[c].iter().any(|&(i, a)| used[i] + a.abs() * s > tol) {
+        if cols[c].iter().any(|&(i, a)| used[i] + a.abs() * s > budget(i, row_lo, row_up)) {
             continue;
         }
         for &(i, a) in &cols[c] {
@@ -2087,6 +2089,14 @@ pub(crate) fn fix_tiny_width_columns(rows: &[Vec<(usize, f64)>], lo: &mut [f64],
         lo[j] = v;
         up[j] = v;
         fixed += 1;
+    }
+    // 緩める量には前処理の丸めの余裕 1e-9 (1 + |b|) を足す: 右辺 1 - 2e-9 を 1e-9 だけ緩めた 0.9999999989999999 は、整数の行の
+    // 正規化 ([`normalize_integer_rows`] の `floor(b + 1e-9)`) の境目のわずかに下で 0 に丸められる (fuzz_tiny の seed 21)
+    for (i, &w) in used.iter().enumerate() {
+        if w > 0.0 && row_lo[i] < row_up[i] {
+            row_lo[i] -= w + 1e-9 * (1.0 + row_lo[i].abs());
+            row_up[i] += w + 1e-9 * (1.0 + row_up[i].abs());
+        }
     }
     fixed
 }
@@ -3266,27 +3276,36 @@ mod tests {
         assert!(z <= -10.9 + 1e-6, "objective {z} (expected -10.9)");
     }
 
-    /// 幅が許容誤差以下の列の固定 ([`fix_tiny_width_columns`]): 区間の整数 (0) に固定し、整数がなければ目的の係数の側の端、
-    /// 幅が許容誤差を越える列と、行の破れ `Σ |a| s` が許容誤差を越える列は固定しない
+    /// 幅が許容誤差以下の列の固定 ([`fix_tiny_width_columns`]): 区間の整数 (0) に固定し、整数がなければ下限。幅が許容誤差を
+    /// 越える列、不等式の行の緩めの和 `Σ |a| s` が許容誤差を越える列、等式の行の破れが 1e-9 (1 + |b|) を越える列は固定しない。
+    /// 不等式の行は失う余裕の分だけ緩める
     #[test]
     fn fix_tiny_width_columns_fixes_within_tolerance() {
-        // 列: 0 [0, 1e-9] (費用 -1)、1 [0.5, 0.5 + 1e-9] (費用 -1)、2 [0.5, 0.5 + 1e-9] (費用 +1)、3 [0, 2e-6] (幅が許容誤差を越える)、
-        // 4 [0, 1e-9] で係数 1e4 (破れ 1e-5)、5・6 [0, 6e-7] が同じ行 (2 本目は行の破れが 1.2e-6 になる)、7 整数 [1, 1 - 1e-9] (交差)
-        let rows = vec![vec![(0, 1.0), (1, 1.0), (2, 1.0), (3, 1.0)], vec![(4, 1e4)], vec![(5, 1.0), (6, 1.0)], vec![(7, 1.0)]];
-        let mut lo = vec![0.0, 0.5, 0.5, 0.0, 0.0, 0.0, 0.0, 1.0];
-        let mut up = vec![1e-9, 0.5 + 1e-9, 0.5 + 1e-9, 2e-6, 1e-9, 6e-7, 6e-7, 1.0 - 1e-9];
-        let cost = vec![-1.0, -1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0];
-        let is_int = vec![false, false, false, false, false, false, false, true];
-        let k = fix_tiny_width_columns(&rows, &mut lo, &mut up, &cost, &is_int);
+        // 列: 0 [0, 1e-9]、1 [0.5, 0.5 + 1e-9] (整数を含まない: 下限)、2 [-1e-9, 1e-9] (0 に固定、s = 1e-9)、3 [0, 2e-6] (幅が許容誤差を越える)、
+        // 4 [0, 1e-9] で係数 1e4 (緩め 1e-5)、5・6 [0, 6e-7] が同じ行 (2 本目は緩めの和が 1.2e-6 になる)、7 整数 [1, 1 - 1e-9] (交差、等式)、
+        // 8 [0, 1e-8] が等式の行 (破れ 1e-8 > 1e-9)
+        let inf = f64::INFINITY;
+        let rows = vec![vec![(0, 1.0), (1, 1.0), (2, 1.0), (3, 1.0)], vec![(4, 1e4)], vec![(5, 1.0), (6, 1.0)], vec![(7, 1.0)], vec![(8, 1.0), (0, 1.0)]];
+        let (mut rlo, mut rup) = (vec![-inf, -inf, 0.0, 1.0, 0.0], vec![2.0, 1.0, 1.0, 1.0, 0.0]);
+        let mut lo = vec![0.0, 0.5, -1e-9, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        let mut up = vec![1e-9, 0.5 + 1e-9, 1e-9, 2e-6, 1e-9, 6e-7, 6e-7, 1.0 - 1e-9, 1e-8];
+        let is_int = vec![false, false, false, false, false, false, false, true, false];
+        let k = fix_tiny_width_columns(&rows, &mut rlo, &mut rup, &mut lo, &mut up, &is_int);
         assert_eq!(k, 5);
         assert_eq!((lo[0], up[0]), (0.0, 0.0));
-        assert_eq!((lo[1], up[1]), (0.5 + 1e-9, 0.5 + 1e-9));
-        assert_eq!((lo[2], up[2]), (0.5, 0.5));
+        assert_eq!((lo[1], up[1]), (0.5, 0.5));
+        assert_eq!((lo[2], up[2]), (0.0, 0.0));
         assert_eq!((lo[3], up[3]), (0.0, 2e-6));
         assert_eq!((lo[4], up[4]), (0.0, 1e-9));
         assert_eq!((lo[5], up[5]), (0.0, 0.0));
         assert_eq!((lo[6], up[6]), (0.0, 6e-7));
         assert_eq!((lo[7], up[7]), (1.0, 1.0));
+        assert_eq!((lo[8], up[8]), (0.0, 1e-8));
+        // 不等式の行は失う余裕の分だけ緩め、等式の行はそのまま
+        assert!((rup[0] - (2.0 + 3e-9 + 3e-9)).abs() < 1e-15 && rlo[0] == -inf);
+        assert!((rup[2] - (1.0 + 6e-7 + 2e-9)).abs() < 1e-15 && (rlo[2] + 6e-7 + 1e-9).abs() < 1e-15);
+        assert_eq!((rlo[3], rup[3]), (1.0, 1.0));
+        assert_eq!((rlo[4], rup[4]), (0.0, 0.0));
     }
 
     /// 幅 1e-9 の連続列は MIP の前処理の入口で 0 に固定され、右辺 1 - 1e-9 の行の 0-1 列の係数に 1e-9 の大きさの値が
