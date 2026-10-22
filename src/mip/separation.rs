@@ -473,6 +473,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut fb_rel = fb_base;
         // `ENOMOTO_MIP_CUTSEL_DCD` の方向 (暫定解の有無) をループごとに 1 回だけ書く
         let mut dbg_dcd_first = !self.params.submip;
+        let mut dbg_dcd_bg = true;
         // 診断 (`ENOMOTO_MIP_INJECT_CUTS`、[`load_injected_cuts`]): HiGHS の根のカットを、最初の求解の根のループで使う。
         // `ENOMOTO_MIP_INJECT_MODE=lp` (既定): ループの前に全部 LP に入れて解く (その後は既定のループ)。`cand`: 毎ラウンド、
         // 今の LP 解を切るものを候補に混ぜて既定の選択に通す (`ENOMOTO_MIP_INJECT_ONLY` ならこちらの分離の候補は捨てる)
@@ -691,6 +692,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let max_cuts = tunable!("ENOMOTO_T_MIP_ROOT_MAX_CUTS", 50usize, usize).min(p.m.max(50));
             let max_cuts = if adapt_max_cuts > 0 { adapt_max_cuts } else { max_cuts };
             let (forced, cands): (Vec<Candidate>, Vec<Candidate>) = cands.into_iter().partition(|c| c.forced);
+            // カットを強める求解では主の暫定解 (`ENOMOTO_MIP_BG_CUTS_SHARE_INC`) を DCD の向き先に使う
+            let job_inc: Option<Vec<f64>> = job.as_ref().and_then(|j| j.incumbent.lock().unwrap().clone());
+            if job_inc.is_some() && dbg_dcd_bg && self.incumbent.is_none() {
+                eprintln!("CUTSEL_DCD: background round {round}: using the main incumbent");
+                dbg_dcd_bg = false;
+            }
             let chosen = if phase2 {
                 let maxpar = tunable!("ENOMOTO_T_MIP_CUT_PHASE2_MAXPAR", 0.3, f64);
                 self.select_cuts_highs(cands, max_cuts, &x, maxpar)
@@ -699,7 +706,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 self.select_cuts_highs(cands, max_cuts, &x, maxpar)
             } else if fc_relax {
                 select_cuts_hybrid_with(cands, max_cuts, p, tunable!("ENOMOTO_T_CUTSEL_FC_MIN_REL", 0.0, f64), tunable!("ENOMOTO_T_CUTSEL_FC_MAXPAR", 0.9, f64))
-            } else if let Some(ctx) = DcdCtx::from_env(&x, self.incumbent.as_ref().map(|(_, v)| v.as_slice())) {
+            } else if let Some(ctx) = DcdCtx::from_env(&x, self.incumbent.as_ref().map(|(_, v)| v.as_slice()).or(job_inc.as_deref())) {
                 // 試作 (`ENOMOTO_MIP_CUTSEL_DCD`・`ENOMOTO_MIP_CUTSEL_NORM`、[`DcdCtx`]): スコアに directed cutoff distance を入れる
                 if dbg_dcd_first {
                     eprintln!("CUTSEL_DCD: round {round} direction {}", if ctx.dir.is_some() { "incumbent" } else { "none (efficacy only)" });

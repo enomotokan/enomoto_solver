@@ -173,6 +173,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) queue: NodeQueue,
     pub(super) pc: Pseudocost,
     pub(super) incumbent: Option<(f64, Vec<f64>)>,
+    /// 暫定解を渡すカットを強める求解 (`ENOMOTO_MIP_BG_CUTS_SHARE_INC`、根のヒューリスティクスの間だけ)
+    pub(super) bg_inc_share: Option<std::sync::Arc<CutJob>>,
     pub(super) obj_step: Option<f64>,
     pub(super) start: Instant,
     /// 求解の開始時の [`super::cap_clock`] (根のカットのループの上限に使う)。
@@ -1374,6 +1376,8 @@ pub(super) struct CutJob {
     pub(super) latest_x: std::sync::Mutex<Option<Vec<f64>>>,
     /// 結果の LP の最後の基底 (既定で返す。`ENOMOTO_MIP_NO_BG_CUTS_BASIS` で返さない。主がカットの行を置き換えた後の LP に入れる)
     pub(super) basis: std::sync::Mutex<Option<super::lp::Basis>>,
+    /// 主の暫定解 (`ENOMOTO_MIP_BG_CUTS_SHARE_INC`、試作: 主が見つけるたびに置き、カットを強める求解の選択の DCD に使う)
+    pub(super) incumbent: std::sync::Mutex<Option<Vec<f64>>>,
 }
 
 /// カットを強める求解のスレッド。落とすと止めの合図を出して終わりを待つ (主が途中で戻っても残らないように)。
@@ -1442,6 +1446,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         queue: NodeQueue::new(),
         pc: snap.as_ref().map_or_else(|| Pseudocost::new(p.n), |sn| sn.pc.clone()),
         incumbent: None,
+        bg_inc_share: None,
         obj_step: p.objective_step(),
         start,
         cpu0: super::cap_clock(),
@@ -2352,6 +2357,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if !self.proof_first_z.is_finite() {
                 self.proof_first_z = z;
             }
+            if let Some(j) = &self.bg_inc_share {
+                *j.incumbent.lock().unwrap() = Some(x.clone());
+            }
             self.incumbent = Some((z, x));
             self.root_redcost_fixing();
             let lim = self.prune_limit();
@@ -2925,7 +2933,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.snap.is_none() && !self.params.submip && self.params.threads > 1 && env_str!("ENOMOTO_MIP_NO_CUTS").is_none() && !self.fractional(&self.lp.col_values()).is_empty() {
             let bg_mode = env_str!("ENOMOTO_MIP_BG_CUTS").or(if env_str!("ENOMOTO_MIP_NO_BG_CUTS").is_none() { Some("1") } else { None });
             if let Some(mode) = bg_mode {
-                let job = std::sync::Arc::new(CutJob { stop: std::sync::atomic::AtomicBool::new(false), heavy: mode == "heavy", out: std::sync::Mutex::new(None), latest_x: std::sync::Mutex::new(None), basis: std::sync::Mutex::new(None) });
+                let job = std::sync::Arc::new(CutJob { stop: std::sync::atomic::AtomicBool::new(false), heavy: mode == "heavy", out: std::sync::Mutex::new(None), latest_x: std::sync::Mutex::new(None), basis: std::sync::Mutex::new(None), incumbent: std::sync::Mutex::new(None) });
                 let snap = self.make_snapshot(&Portfolio::new(), &mut None, false);
                 let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());
                 let mut threads = tunable!("ENOMOTO_T_MIP_BG_CUTS_THREADS", (self.params.threads - 1).max(1), usize);
@@ -2956,6 +2964,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         let _ = solve_worker(snap, None, params);
                     })
                     .expect("failed to spawn the cut thread");
+                // `ENOMOTO_MIP_BG_CUTS_SHARE_INC` (試作): 主の暫定解をカットを強める求解に渡す ([`CutJob::incumbent`])
+                if env_str!("ENOMOTO_MIP_BG_CUTS_SHARE_INC").is_some() {
+                    *job.incumbent.lock().unwrap() = self.incumbent.as_ref().map(|(_, x)| x.clone());
+                    self.bg_inc_share = Some(job.clone());
+                }
                 bg_cuts = Some(BgCuts { job, handle: Some(handle) });
             }
         }
@@ -3303,6 +3316,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.parallel_submips = false;
         self.join_submips(0);
         // カットを強める求解を止め、その LP のカットで根の LP のカットを置き換える
+        self.bg_inc_share = None;
         if let Some(mut bg) = bg_cuts.take() {
             let t0 = Instant::now();
             let res = bg.finish();
