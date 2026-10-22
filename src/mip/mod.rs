@@ -1229,8 +1229,11 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
     PROBE_EQUIV.with(|e| e.borrow_mut().clear());
     PROBE_EQUIV_FORCE.with(|f| f.set(false));
     let n = p.n;
+    // 幅が許容誤差以下の列を 1 点に固定する ([`fix_tiny_width_columns`]。再スタートの問題の大域的な境界、プロービングで締めた境界を含む)
+    let (mut col_lo, mut col_up) = (p.col_lo.clone(), p.col_up.clone());
+    let tiny0 = fix_tiny_width_columns(&p.rows, &mut col_lo, &mut col_up, &p.cost, &p.is_int);
     // 元の制約 (境界は丸め済みの MipProblem の値を使う)
-    let vars: Vec<VariableData> = (0..n).map(|j| VariableData { vtype: if p.is_int[j] { VarType::Integer } else { VarType::Continuous }, lb: p.col_lo[j], ub: p.col_up[j] }).collect();
+    let vars: Vec<VariableData> = (0..n).map(|j| VariableData { vtype: if p.is_int[j] { VarType::Integer } else { VarType::Continuous }, lb: col_lo[j], ub: col_up[j] }).collect();
     let mut cons: Vec<ConstraintRow> = Vec::with_capacity(p.m);
     for i in 0..p.m {
         let expr = crate::types::LinearExpr { coeffs: p.rows[i].iter().cloned().collect(), constant: 0.0 };
@@ -1247,7 +1250,7 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
         }
     }
     let (a, b, g, h) = crate::presolve::build_a_g(&vars, &cons);
-    let pre = crate::presolve::run_extended_mip(n, &a, &b, &g, &h, &p.cost, &p.is_int, PROPAGATION_PASSES, PRESOLVE_ROUNDS, ROWSINGLETON_COLSINGLETON_INNER_ROUNDS);
+    let mut pre = crate::presolve::run_extended_mip(n, &a, &b, &g, &h, &p.cost, &p.is_int, PROPAGATION_PASSES, PRESOLVE_ROUNDS, ROWSINGLETON_COLSINGLETON_INNER_ROUNDS);
     if pre.infeasible {
         return Some(Presolved::Infeasible);
     }
@@ -1272,6 +1275,11 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
         rows.push(r.clone());
         row_lo.push(f64::NEG_INFINITY);
         row_up.push(rhs);
+    }
+    // 前処理 (伝播・行シングルトンなど) が締めた境界でも、幅が許容誤差以下になった列を固定する (係数の強化の前)
+    let tiny1 = fix_tiny_width_columns(&rows, &mut pre.lb, &mut pre.ub, &pre.c, &p.is_int);
+    if verbose && tiny0 + tiny1 > 0 {
+        eprintln!("MIP: presolve: fixed {} columns of width within tolerance ({tiny0} before, {tiny1} after the reductions)", tiny0 + tiny1);
     }
     // 係数の強化 (片側の行の 0-1 列の係数を、整数解を変えずに LP の緩和が締まる値に縮める)
     if env_str!("ENOMOTO_MIP_NO_COEF_TIGHTEN").is_none() {
@@ -1998,7 +2006,89 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
             prob.col_up[k] = dom.up[k];
         }
     }
+    // 緩めた分で幅が許容誤差以下になった列 (値 0 のはずの連続列が `[0, 1e-9]` など) は 1 点に固定する ([`fix_tiny_width_columns`])
+    let tiny = fix_tiny_width_columns(&prob.rows, &mut prob.col_lo, &mut prob.col_up, &prob.cost, &prob.is_int);
+    if verbose && tiny > 0 {
+        eprintln!("MIP: probing: fixed {tiny} columns of width within tolerance");
+    }
     Some(true)
+}
+
+/// 幅の極めて小さな列の固定 (既定で使う。`ENOMOTO_MIP_NO_TINY_WIDTH_FIX` で使わない): 幅 `up - lo` が許容誤差
+/// (`ENOMOTO_T_MIP_TINY_WIDTH_TOL`、既定は MIP の実行可能性の許容誤差 [`domain::FEASTOL`] = 1e-6) 以下の列を 1 点に固定する
+/// (許容誤差の内の交差 `lo > up` も同じ)。HiGHS 1.15.1 の前処理 (`HPresolve::checkColBounds`) は幅が
+/// `mip_feasibility_tolerance` 以下で、幅が `small_matrix_value` (1e-9) 以下か列の最大の |係数| × 幅が許容誤差以下の列を
+/// 下限で固定する。プロービング・伝播は連続列の境界を伝播の誤差の分 (1e-9) だけ緩めて入れるので、値 0 のはずの列が
+/// `[0, 1e-9]` で残り、許容誤差の範囲で冗長な行 (`x + y <= 1 - 1e-9`) を係数の強化が縮めて最適解を厳密に切っていた
+/// (uccase12 の再スタート後、analysis/equiv2_bug_20261022.md)。固定してしまえば幅の小さな列はどの手順からも見えない。
+///
+/// - 固定する点: 区間に整数 (0 を含む) があればそれ (緩める前の値。右辺を 1 - 1e-9 のようにずらさない)。なければ
+///   目的の係数 (最小化形) が正なら下限、負なら上限、0 なら下限 (HiGHS と同じ)。`ENOMOTO_MIP_TINY_WIDTH_FIX_POINT=obj` なら
+///   整数を優先せず目的の係数の側の端 (0 なら下限)。整数列は丸め済みなので、交差か幅の小さな区間が 1 つの整数を囲むときだけ当たる。
+/// - 行の破れ: 固定で列の値は固定する点から最大 `s_j` (遠い方の端までの距離) 動くので、各行の `Σ |a_ij| s_j` が
+///   許容誤差を越えないものだけ固定する (係数の大きな行を持つ列は固定しない。HiGHS は幅 1e-9 以下なら係数を見ないが、ここでは見る)。
+///
+/// 固定した列の数を返す。
+pub(crate) fn fix_tiny_width_columns(rows: &[Vec<(usize, f64)>], lo: &mut [f64], up: &mut [f64], cost: &[f64], is_int: &[bool]) -> usize {
+    if env_str!("ENOMOTO_MIP_NO_TINY_WIDTH_FIX").is_some() {
+        return 0;
+    }
+    let tol = tunable!("ENOMOTO_T_MIP_TINY_WIDTH_TOL", domain::FEASTOL, f64);
+    let n = lo.len();
+    // 固定する候補 (列, 点, 遠い方の端までの距離)
+    let obj_side = env_str!("ENOMOTO_MIP_TINY_WIDTH_FIX_POINT").is_some_and(|v| v == "obj");
+    let mut cand: Vec<(usize, f64, f64)> = Vec::new();
+    for j in 0..n {
+        let (l, u) = (lo[j], up[j]);
+        if !(l.is_finite() && u.is_finite()) || l == u || u - l > tol || l - u > tol {
+            continue;
+        }
+        let (a, b) = (l.min(u), l.max(u));
+        let k = (0.5 * (a + b)).round();
+        let v = if is_int[j] || (!obj_side && a <= k && k <= b) {
+            k
+        } else if l > u {
+            0.5 * (l + u)
+        } else if cost[j] < 0.0 {
+            u
+        } else {
+            l
+        };
+        let s = (v - a).abs().max((b - v).abs());
+        if s > tol {
+            continue;
+        }
+        cand.push((j, v, s));
+    }
+    if cand.is_empty() {
+        return 0;
+    }
+    let mut is_cand = vec![usize::MAX; n];
+    for (c, &(j, _, _)) in cand.iter().enumerate() {
+        is_cand[j] = c;
+    }
+    let mut cols: Vec<Vec<(usize, f64)>> = vec![Vec::new(); cand.len()];
+    for (i, r) in rows.iter().enumerate() {
+        for &(j, a) in r {
+            if is_cand[j] != usize::MAX {
+                cols[is_cand[j]].push((i, a));
+            }
+        }
+    }
+    let mut used = vec![0.0f64; rows.len()];
+    let mut fixed = 0;
+    for (c, &(j, v, s)) in cand.iter().enumerate() {
+        if cols[c].iter().any(|&(i, a)| used[i] + a.abs() * s > tol) {
+            continue;
+        }
+        for &(i, a) in &cols[c] {
+            used[i] += a.abs() * s;
+        }
+        lo[j] = v;
+        up[j] = v;
+        fixed += 1;
+    }
+    fixed
 }
 
 /// 係数の強化 (coefficient tightening、SCIP・HiGHS の前処理と同じ): 片側の行 `sum a_j x_j <= b` (`>=` の行は符号を
@@ -3174,6 +3264,50 @@ mod tests {
         assert_eq!(r.status, MipStatus::Optimal);
         let z = r.objective.unwrap();
         assert!(z <= -10.9 + 1e-6, "objective {z} (expected -10.9)");
+    }
+
+    /// 幅が許容誤差以下の列の固定 ([`fix_tiny_width_columns`]): 区間の整数 (0) に固定し、整数がなければ目的の係数の側の端、
+    /// 幅が許容誤差を越える列と、行の破れ `Σ |a| s` が許容誤差を越える列は固定しない
+    #[test]
+    fn fix_tiny_width_columns_fixes_within_tolerance() {
+        // 列: 0 [0, 1e-9] (費用 -1)、1 [0.5, 0.5 + 1e-9] (費用 -1)、2 [0.5, 0.5 + 1e-9] (費用 +1)、3 [0, 2e-6] (幅が許容誤差を越える)、
+        // 4 [0, 1e-9] で係数 1e4 (破れ 1e-5)、5・6 [0, 6e-7] が同じ行 (2 本目は行の破れが 1.2e-6 になる)、7 整数 [1, 1 - 1e-9] (交差)
+        let rows = vec![vec![(0, 1.0), (1, 1.0), (2, 1.0), (3, 1.0)], vec![(4, 1e4)], vec![(5, 1.0), (6, 1.0)], vec![(7, 1.0)]];
+        let mut lo = vec![0.0, 0.5, 0.5, 0.0, 0.0, 0.0, 0.0, 1.0];
+        let mut up = vec![1e-9, 0.5 + 1e-9, 0.5 + 1e-9, 2e-6, 1e-9, 6e-7, 6e-7, 1.0 - 1e-9];
+        let cost = vec![-1.0, -1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let is_int = vec![false, false, false, false, false, false, false, true];
+        let k = fix_tiny_width_columns(&rows, &mut lo, &mut up, &cost, &is_int);
+        assert_eq!(k, 5);
+        assert_eq!((lo[0], up[0]), (0.0, 0.0));
+        assert_eq!((lo[1], up[1]), (0.5 + 1e-9, 0.5 + 1e-9));
+        assert_eq!((lo[2], up[2]), (0.5, 0.5));
+        assert_eq!((lo[3], up[3]), (0.0, 2e-6));
+        assert_eq!((lo[4], up[4]), (0.0, 1e-9));
+        assert_eq!((lo[5], up[5]), (0.0, 0.0));
+        assert_eq!((lo[6], up[6]), (0.0, 6e-7));
+        assert_eq!((lo[7], up[7]), (1.0, 1.0));
+    }
+
+    /// 幅 1e-9 の連続列は MIP の前処理の入口で 0 に固定され、右辺 1 - 1e-9 の行の 0-1 列の係数に 1e-9 の大きさの値が
+    /// 残らない (係数の強化が `2e-9 x + y <= 1e-9` を作らない)
+    #[test]
+    fn presolve_fixes_tiny_width_columns() {
+        let inf = f64::INFINITY;
+        // max x0 + x1 + 100 y0 + 100 y1、x0 + y0 <= 1 - 1e-9、x1 + y1 + y0 <= 1 - 1e-9、x0 + x1 <= 1.5 (x は 0-1、y は [0, 1e-9])
+        let rows = vec![vec![(0, 1.0), (2, 1.0)], vec![(1, 1.0), (2, 1.0), (3, 1.0)], vec![(0, 1.0), (1, 1.0)]];
+        let p = MipProblem::from_rows(vec![0.0; 4], vec![1.0, 1.0, 1e-9, 1e-9], vec![-1.0, -1.0, -100.0, -100.0], 0.0, 1.0, vec![true, true, false, false], rows, vec![-inf; 3], vec![1.0 - 1e-9, 1.0 - 1e-9, 1.5]);
+        if let Some(Presolved::Reduced { prob, .. }) = presolve_mip(&p, false, false, None) {
+            for j in [2, 3] {
+                assert_eq!(prob.col_lo[j], prob.col_up[j], "column {j} is not fixed");
+            }
+            for r in &prob.rows {
+                assert!(r.iter().all(|&(_, a)| a.abs() > 1e-6), "tiny coefficient left: {r:?}");
+            }
+        }
+        let r = solve_problem(&p, MipParams { rel_gap: 1e-9, ..MipParams::default() }, true);
+        assert_eq!(r.status, MipStatus::Optimal);
+        assert!(r.objective.unwrap() <= -1.0 + 1e-6, "objective {:?} (expected -1)", r.objective);
     }
 
     /// 代入消去で生じる目的関数の定数が縮約後の offset に入ること (binkar10_1 の誤答の回帰テスト:

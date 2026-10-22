@@ -7975,6 +7975,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 gup[j] = v;
             }
         }
+        // 幅が許容誤差以下になった列 (伝播は連続列の境界を誤差の分だけ緩めて締める) も 1 点に固定する ([`super::fix_tiny_width_columns`])
+        let tiny = super::fix_tiny_width_columns(&rows, &mut glo, &mut gup, &p.cost, &p.is_int);
+        if self.params.verbose && tiny > 0 {
+            eprintln!("MIP: restart: fixed {tiny} columns of width within tolerance");
+        }
         let newp = MipProblem::from_rows(glo, gup, p.cost.clone(), p.offset, p.sense_sign, p.is_int.clone(), rows, row_lo, row_up);
         // 診断用 (`ENOMOTO_MIP_DEBUG_DUMP_RESTART=接頭辞`): 再スタートで渡す問題を `接頭辞_r回数.mps` に書く
         if let Some(f) = env_str!("ENOMOTO_MIP_DEBUG_DUMP_RESTART").filter(|_| !self.params.submip) {
