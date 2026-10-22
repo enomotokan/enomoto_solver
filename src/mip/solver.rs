@@ -2099,11 +2099,27 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 根の LP が打ち切り値に届いたら根で終える (既定で使う。`ENOMOTO_MIP_NO_ROOT_GAP_EXIT` で使わない): 根 (写しから解く求解でない) で、根の LP の値 (`cur_lb`、カット前の値で常に正しい下界) が暫定解の打ち切り値 ([`Self::prune_limit`]) に
     /// 届いたか。届いていれば根のカット・ヒューリスティクスを続けずに最適で終える。ns1116954 (目的関数が全部 0) では FJ が
     /// 14.5 秒に 0 を見つけても、カットのループ・根のヒューリスティクス (内点法の丸め 17 秒)・裏のカットを回して 52 秒で終わっていた
+    /// カットの後の根の LP の値 (`root_lb`) も下界に使う (既定。`ENOMOTO_MIP_NO_ROOT_CUT_GAP_EXIT` ならカット前の `cur_lb` だけ)。
+    /// カット前の値だけを見ていたので、カットで根の下界が暫定解に届いても根で止まらず、根のヒューリスティクスが期限を
+    /// 越えると木の最初の時間切れの判定 (根のノードを刈る前) で時間切れになっていた (physiciansched6-2: 暫定解・根の下界が
+    /// どちらも 49324 で 60 秒の時間切れ。analysis/term_check_20261022.md)
     pub(super) fn root_gap_closed(&self) -> bool {
+        let lb = if env_str!("ENOMOTO_MIP_NO_ROOT_CUT_GAP_EXIT").is_some() { self.cur_lb } else { self.cur_lb.max(self.root_lb) };
+        self.root_gap_closed_at(lb)
+    }
+
+    /// 根で、下界 `lb` (根の LP の値。カットは大域的に成り立つので、カットの後の値も問題全体の下界) が暫定解の打ち切り値に
+    /// 届いたか。打ち切り値がほかのスレッドの解 (ポートフォリオ並列) から来ているときは除く (自分の暫定解を最適とは言えない)
+    pub(super) fn root_gap_closed_at(&self, lb: f64) -> bool {
         env_str!("ENOMOTO_MIP_NO_ROOT_GAP_EXIT").is_none()
             && self.snap.is_none()
-            && self.incumbent.is_some()
-            && self.cur_lb >= self.prune_limit()
+            && self.incumbent.as_ref().is_some_and(|(z, _)| self.shared.as_ref().is_none_or(|s| !(s.best() < *z)))
+            && lb >= self.prune_limit()
+    }
+
+    /// カットの後の根の LP の値 `root_obj` で根を閉じるか ([`Self::root_gap_closed_at`]。`ENOMOTO_MIP_NO_ROOT_CUT_GAP_EXIT` なら使わない)
+    fn root_cut_gap_closed(&self, root_obj: f64) -> bool {
+        env_str!("ENOMOTO_MIP_NO_ROOT_CUT_GAP_EXIT").is_none() && self.root_gap_closed_at(root_obj.max(self.cur_lb))
     }
 
     pub(super) fn prune_limit(&self) -> f64 {
@@ -2956,6 +2972,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             // 証明だけのスレッド: 根のヒューリスティクスは走らせない
                         } else if self.time_up() {
                             // 期限を過ぎた: 残りのヒューリスティクスは走らせない (局所探索などは期限を見ずに数秒使う)
+                        } else if self.root_cut_gap_closed(root_obj) {
+                            // 暫定解がカットの後の根の下界に届いた: 残りのヒューリスティクスは走らせない (下で最適で終える)
                         } else if rh_over(self) {
                             if self.params.verbose {
                                 eprintln!("MIP: root heuristic {}: skipped (root heuristic time budget)", $name);
@@ -3385,6 +3403,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 s.set_cuts(out, self.prune_limit());
             }
+        }
+        // 根のヒューリスティクス・裏のカットの後: 暫定解がカットの後の根の下界に届いていれば最適で終える (木に入ると、
+        // 根のノードを刈る前に時間切れの判定があるので、ヒューリスティクスが期限を越えると時間切れで返していた)
+        if self.root_cut_gap_closed(root_obj) {
+            let z = self.incumbent.as_ref().map(|(z, _)| *z).unwrap();
+            if self.params.verbose {
+                eprintln!("MIP: the root LP bound after cuts {root_obj:.10e} closed the gap to the incumbent {z:.10e} ({:.2}s)", self.start.elapsed().as_secs_f64());
+            }
+            return self.finish(MipStatus::Optimal, z);
         }
         self.store_root_redcost(root_obj);
         self.root_redcost_fixing();
