@@ -9857,6 +9857,13 @@ neos-950242 の 2 回目の調査 (`analysis/neos950242_r2_20261020.md`)。
 - 16 問: MKa 12・35.38 / 10・37.05、MKb 10・35.19 / 13・32.11、MKc 11・36.12 / 12・30.64、MKd 6・47.46 / 9・44.61。合計 39 / 44。neos-2978193-inde は mink で 2/4 解ける (46.2・42.0 秒、既定 0/4)。mink だけ解けた回が多いのは beasleyC3 (3 回)・mc11・uccase12・10teams・hypothyroid-k1・neos-911970。
 - 不一致 0、"MIP: WARNING" 0。16 問で +5、40 問は同数、SGM は 8 つの比較のうち 5 つで良いので既定にする。戻すとき `ENOMOTO_MIP_NO_PROOF_KEEP_INT` / `ENOMOTO_MIP_NO_PROOF_CMIR` / `ENOMOTO_MIP_PROOF_CMIR_POOL=off` (上限を見て入れるのは `=cap`)。tree-replay の残りの試作 (BRANCH_REPLAY・LP_INT_BOUNDS・CUTPOOL_PROP・PROP_FIXPOINT など) は既定では使わない。
 
+## 2026-10-22: 根のカット選択の閾値の自動調整 (CUTSEL_FEEDBACK=main) は不採用
+
+- 19f9a94 (develop e11e2ec + cutloop-hl) で 40 + 16 問、newdef / cfb (`ENOMOTO_MIP_CUTSEL_FEEDBACK=main`) を順番を入れ替えて 2 組。
+- 40 問 (解けた・SGM): CFa newdef 26・22.13 / cfb 26・21.75、CFb cfb 26・23.21 / newdef 26・21.78 (10teams 16.3 → 48.6 秒)。
+- 16 問: CFa 8・41.67 / 10・42.11 (cfb で beasleyC3・mc11・neos-960392 を解き hypothyroid-k1 を落とす)、CFb 10・40.74 / 11・38.38 (hypothyroid-k1 を落とす)。mzzv42z の暫定解が 2 組とも悪い (-20470 → -18472、-19540 → -18824)。roll3000・physiciansched6-2 (既定の設定) の根の下界は伸びない。
+- 不一致 0、"MIP: WARNING" 0。16 問の SGM が 2 組とも悪く、40 問の SGM も 1 組で大きく悪いので既定にしない。試作は inv/cutloop-hl-20261022 04685bb。
+
 ## 改名一覧 (整理時)
 
 本メモ中は旧名で書かれている。
