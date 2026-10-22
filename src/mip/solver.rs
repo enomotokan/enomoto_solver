@@ -7976,7 +7976,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         // 幅が許容誤差以下になった列 (伝播は連続列の境界を誤差の分だけ緩めて締める) も 1 点に固定する ([`super::fix_tiny_width_columns`])
-        let tiny = super::fix_tiny_width_columns(&rows, &mut glo, &mut gup, &p.cost, &p.is_int);
+        let tiny = super::fix_tiny_width_columns(&rows, &mut row_lo, &mut row_up, &mut glo, &mut gup, &p.is_int);
         if self.params.verbose && tiny > 0 {
             eprintln!("MIP: restart: fixed {tiny} columns of width within tolerance");
         }
