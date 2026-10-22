@@ -1,0 +1,22 @@
+diff --git a/highs/mip/HighsPrimalHeuristics.cpp b/highs/mip/HighsPrimalHeuristics.cpp
+index cb6efd3..87bf0b8 100644
+--- a/highs/mip/HighsPrimalHeuristics.cpp
++++ b/highs/mip/HighsPrimalHeuristics.cpp
+@@ -167,7 +167,17 @@ bool HighsPrimalHeuristics::solveSubMip(
+   if (!mipsolver.submip) mipsolver.profiling_->start(kSubSolverSubMip);
+   // Ensure that sub-solver call time data accumulate in the sub-MIP record
+   mipsolver.profiling_->setSubMip(true);
++  double __t0 = mipsolver.timer_.read();
++  {
++    HighsInt nfree = 0, nfreeint = 0;
++    for (HighsInt j = 0; j < submip.num_col_; ++j)
++      if (submip.col_lower_[j] < submip.col_upper_[j]) { ++nfree; if (submip.integrality_[j] != HighsVarType::kContinuous) ++nfreeint; }
++    if (!mipsolver.submip)
++      fprintf(stderr, "SUBMIPDIAG start t=%.2f level=%d fixrate=%.3f cols=%d rows=%d free=%d freeint=%d intcols=%d ub=%.6g lb=%.6g\n", __t0, int(mipsolver.submip_level), fixingRate, int(submip.num_col_), int(submip.num_row_), int(nfree), int(nfreeint), int(mipsolver.mipdata_->integral_cols.size()), worker.upper_limit, mipsolver.mipdata_->lower_bound);
++  }
+   submipsolver.run();
++  if (!mipsolver.submip)
++    fprintf(stderr, "SUBMIPDIAG end t=%.2f dt=%.2f status=%d nodes=%lld lpiters=%lld presolved=%dx%d obj=%.6g\n", mipsolver.timer_.read(), mipsolver.timer_.read()-__t0, int(submipsolver.modelstatus_), (long long)submipsolver.node_count_, submipsolver.mipdata_ ? (long long)submipsolver.mipdata_->total_lp_iterations : -1LL, submipsolver.mipdata_ ? int(submipsolver.mipdata_->presolvedModel.num_row_) : -1, submipsolver.mipdata_ ? int(submipsolver.mipdata_->presolvedModel.num_col_) : -1, submipsolver.solution_objective_);
+   if (mipsolver.profiling_->sub_solver_)
+     printf(
+         "HighsPrimalHeuristics::solveSubMip After  run() for %sMIP at depth "
