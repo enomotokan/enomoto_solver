@@ -9864,6 +9864,13 @@ neos-950242 の 2 回目の調査 (`analysis/neos950242_r2_20261020.md`)。
 - 16 問: CFa 8・41.67 / 10・42.11 (cfb で beasleyC3・mc11・neos-960392 を解き hypothyroid-k1 を落とす)、CFb 10・40.74 / 11・38.38 (hypothyroid-k1 を落とす)。mzzv42z の暫定解が 2 組とも悪い (-20470 → -18472、-19540 → -18824)。roll3000・physiciansched6-2 (既定の設定) の根の下界は伸びない。
 - 不一致 0、"MIP: WARNING" 0。16 問の SGM が 2 組とも悪く、40 問の SGM も 1 組で大きく悪いので既定にしない。試作は inv/cutloop-hl-20261022 04685bb。
 
+## 2026-10-22: 根のサブ MIP の設定 (SUBMIP_HL2) は保留
+
+- 61b65d7 (develop 93bb16c + submip-hl) で 40 + 16 問、newdef / sh2 (`ENOMOTO_MIP_SUBMIP_HL2=1`) を順番を入れ替えて 2 組。
+- 40 問 (解けた・SGM): SHa newdef 27・19.21 / sh2 26・18.48 (timtab1 を落とす)、SHb sh2 25・23.26 / newdef 25・22.08 (10teams を落とし noswot を解く)。
+- 16 問: SHa 12・32.62 / 12・31.54、SHb 8・40.76 / 8・40.84。physiciansched6-2 は sh2 で 49524 (SHa)・51029 (SHb)、解けない。neos-960392 は SHb で -232 (newdef -237)。
+- 不一致 0、"MIP: WARNING" 0。40 問で解けた数が合わせて 1 減り、SGM も 1 組で悪いので既定にしない。サブ MIP の時間・根のカット・入れ子の RENS の差は残っているので、試作 (inv/submip-hl-20261022) は保留。
+
 ## 改名一覧 (整理時)
 
 本メモ中は旧名で書かれている。
