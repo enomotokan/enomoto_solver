@@ -318,6 +318,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// [`Self::add_proof_cmir`] の作業領域 (丸めの基準の点) と、試した数・足した数。
     proof_cmir_x: Option<Vec<f64>>,
     pub(super) proof_cmir_stats: [u64; 3],
+    /// `PROOF_KEEP_INT` で整数列を残した証明の数と、長さの上限 (`ENOMOTO_T_MIP_PROOF_KEEP_INT_MAX`) で作り直した数
+    pub(super) proof_keep_stats: [u64; 2],
     /// 次に出すサブ MIP の固定率 (RENS・RINS の固定率の記録 `rens_succ`・`rens_infeas` に結果を反映するため)。
     pub(super) submip_fix_rate: Option<f64>,
     /// いま走らせているヒューリスティクスの名前 (ログで暫定解の出どころを示すため)
@@ -1518,6 +1520,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         pending_submips: std::collections::VecDeque::new(),
         proof_cmir_x: None,
         proof_cmir_stats: [0; 3],
+        proof_keep_stats: [0; 2],
         heur_label: "",
         heur_stop: None,
         root_lp_iters: 0,
@@ -6596,6 +6599,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let konst_rows = konst;
         let dense_len = tunable!("ENOMOTO_T_MIP_PROOF_DENSITY", 0.5, f64).mul_add(p.n as f64, 20.0) as usize;
         let mut side = side_mode == 1;
+        // `ENOMOTO_T_MIP_PROOF_KEEP_INT_MAX` = L (> 0、既定 0 = 制限なし): `PROOF_KEEP_INT` で整数列を残した証明が L 列を超えたら、
+        // 整数列も従来どおり右辺に移して作り直す (整数列の多い問題で証明が長く密になるのを防ぐ)
+        let keep_max = tunable!("ENOMOTO_T_MIP_PROOF_KEEP_INT_MAX", 0usize, usize);
+        let mut keep_int = proof_keep_int();
         let mut coefs: Vec<(usize, f64)>;
         loop {
         konst = konst_rows;
@@ -6617,7 +6624,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 同じでも残し、連続列だけを (最小活動量を決める側の境界が大域と同じなら) 右辺に移す。整数列を移すと、証明が
             // 「このノードで固定した列」だけの局所的なものになり、CMIR で強めても弱いカットにしかならない
             // (neos-2978193-inde の最初の葉: HiGHS は y 8 本の「5 本以上開く」、移すと固定した 4 本の「2 本以上」)
-            let (unchanged, keep) = if proof_keep_int() {
+            let (unchanged, keep) = if keep_int {
                 if p.is_int[j] {
                     (false, !fixed && dj.abs() > 1e-9 * dmax)
                 } else {
@@ -6655,6 +6662,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
         } {
             side = true;
             continue;
+        }
+        if keep_int && keep_max > 0 && coefs.len() > keep_max {
+            keep_int = false;
+            self.proof_keep_stats[1] += 1;
+            continue;
+        }
+        if keep_int {
+            self.proof_keep_stats[0] += 1;
         }
         break;
         }
@@ -9551,7 +9566,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             eprintln!("MIP: objective propagation: pruned {} nodes, tightened {} bounds; strong branching children infeasible by propagation {}, propagated bounds passed to child LPs {}", self.obj_prop_stats[0], self.obj_prop_stats[1], self.sb_prop_stats[0], self.sb_prop_stats[1]);
             eprintln!("MIP: literal conflicts: added {}, in pool {} (aged out {}), pruned {} nodes, tightened {} bounds", self.lit_stats[0], self.lit_conflicts.len(), self.lit_conflicts.removed, self.lit_stats[1], self.lit_stats[2]);
             if proof_cmir() {
-                eprintln!("MIP: proof CMIR cuts: tried {}, added {}, entered the cut pool {}", self.proof_cmir_stats[0], self.proof_cmir_stats[1], self.proof_cmir_stats[2]);
+                eprintln!("MIP: proof CMIR cuts: tried {}, added {}, entered the cut pool {}; proofs keeping integer columns {}, rebuilt over the length limit {}", self.proof_cmir_stats[0], self.proof_cmir_stats[1], self.proof_cmir_stats[2], self.proof_keep_stats[0], self.proof_keep_stats[1]);
             }
             if self.obj_cut_stats[0] > 0 {
                 eprintln!("MIP: objective bound cuts: tried {}, added {}", self.obj_cut_stats[0], self.obj_cut_stats[1]);
