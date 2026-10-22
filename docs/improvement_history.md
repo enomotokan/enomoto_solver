@@ -9850,6 +9850,13 @@ neos-950242 の 2 回目の調査 (`analysis/neos950242_r2_20261020.md`)。
 - 効いているのは (a) 時間上限 (残りの 7%・最大 6 秒)、(b) サブ MIP の根のカット (5 ラウンド・時間の 1 割 → 0 本)、(c) サブ MIP の中で RENS を回さない (HiGHS は入れ子の RENS が 0.08 秒で当てる)。
 - 試作 `ENOMOTO_MIP_SUBMIP_HL2=1`: 暫定解が FJ だけのとき、根の RENS・RINS のサブ MIP に時間 残りの 0.25・最大 15 秒、根のカット 25 ラウンド (3 ラウンド停滞で止める)、サブ MIP の根でダイビング式 RENS。physiciansched6-2 既定 50826〜51029 → 49324 が 2/4、neos-960392 最適 2/2、mzzv42z 平均 -19542 → -20085。physiciansched6-2 (e2) には効かない (外側の根のカットが長い)。40 + 16 問の対を 2 組測る (inv/sh2-a・sh2-b-20261022、61b65d7)。
 
+## 2026-10-22: 双対証明に整数列を残す・証明から CMIR・プールの上限を見ずに入れる (mink) を既定に
+
+- ffbdfd3 (develop + tree-replay) で 40 + 16 問、newdef / mink (`ENOMOTO_MIP_PROOF_KEEP_INT=1 ENOMOTO_MIP_PROOF_CMIR=1 ENOMOTO_MIP_PROOF_CMIR_POOL=nocap`) を 4 組 (2 組で逆向きだったため 3・4 組目を足した)。
+- 40 問 (解けた・SGM、newdef / mink): MKa 25・21.19 / 25・21.39、MKb 26・20.35 / 26・20.02、MKc 25・20.95 / 25・20.13、MKd 24・24.44 / 24・24.48。合計 100 / 100。
+- 16 問: MKa 12・35.38 / 10・37.05、MKb 10・35.19 / 13・32.11、MKc 11・36.12 / 12・30.64、MKd 6・47.46 / 9・44.61。合計 39 / 44。neos-2978193-inde は mink で 2/4 解ける (46.2・42.0 秒、既定 0/4)。mink だけ解けた回が多いのは beasleyC3 (3 回)・mc11・uccase12・10teams・hypothyroid-k1・neos-911970。
+- 不一致 0、"MIP: WARNING" 0。16 問で +5、40 問は同数、SGM は 8 つの比較のうち 5 つで良いので既定にする。戻すとき `ENOMOTO_MIP_NO_PROOF_KEEP_INT` / `ENOMOTO_MIP_NO_PROOF_CMIR` / `ENOMOTO_MIP_PROOF_CMIR_POOL=off` (上限を見て入れるのは `=cap`)。tree-replay の残りの試作 (BRANCH_REPLAY・LP_INT_BOUNDS・CUTPOOL_PROP・PROP_FIXPOINT など) は既定では使わない。
+
 ## 改名一覧 (整理時)
 
 本メモ中は旧名で書かれている。
