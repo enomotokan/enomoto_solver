@@ -686,6 +686,31 @@ impl Domain {
         self.cur_reason = -2 - tag;
     }
 
+    /// 診断用 (`ENOMOTO_MIP_REPLAY_LOG`): 変更の記録にある整数列の境界の変更を理由ごとに数える
+    /// (B 決定 (分枝・含意を含む -1)、R 行の伝播、L 被約費用の局所的な固定、S 強分岐、O オービトープ、P 双対証明、
+    /// F リテラルの衝突、J 目的関数の伝播、E その他の外からの変更)。
+    pub fn reason_counts_int(&self, p: &MipProblem) -> String {
+        let mut c = [0u32; 9];
+        for ch in &self.stack {
+            if !p.is_int[ch.col] {
+                continue;
+            }
+            let k = match ch.reason {
+                -1 => 0,
+                r if r >= 0 => 1,
+                -3 => 2,
+                -4 => 3,
+                -5 => 4,
+                -6 => 5,
+                -7 => 6,
+                -8 => 7,
+                _ => 8,
+            };
+            c[k] += 1;
+        }
+        format!("#B{},R{},L{},S{},O{},P{},F{},J{},E{}", c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8])
+    }
+
     /// HiGHS 式の衝突解析 (`HighsDomain::ConflictSet::conflictAnalysis`)。矛盾 (`start`) を、
     /// (1) 必要な分だけの境界の変更で説明し (`resolveLinearLeq`: 大域的な境界からの寄与の大きい変更から、矛盾を示すのに
     /// 足りるまで選ぶ)、(2) 分枝の深さの段ごとに、その段の変更が 1 つ (UIP) になるまで理由で置き換えて衝突を作り

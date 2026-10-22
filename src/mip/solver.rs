@@ -3429,6 +3429,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut plunge: Option<OpenNode> = None;
         let mut plunge_depth = 0usize;
         let mut plunge_start = 0u64;
+        // 診断用 (`ENOMOTO_MIP_BRANCH_REPLAY`): HiGHS の木の分枝をなぞる ([`super::replay`])
+        let replay = super::replay::get().filter(|_| !self.params.submip && !parallel_tree && self.snap.is_none());
+        if replay.is_some() {
+            self.queue.prio_only = true;
+        }
+        // [なぞったノード, ファイルにないノード, 指定の列で分枝, 自前で分枝, 指定の列が固定済み]
+        let mut rp_stats = [0u64; 5];
         loop {
             // ポートフォリオ並列: 下界を知らせる (二分探索のスレッドが目標値を決めるのに使う)
             // 二分探索のスレッドの求解の下界は打ち切り値で絞った問題のものなので、木の写しを使う形では知らせない
@@ -3586,7 +3593,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 潜りが枝刈りで終わったら、潜った道の兄弟ノード (新しいものから) に戻る (HiGHS の backtrackPlunge)。
             // 潜りの打ち切りの条件 (下界が 全体の下界 + q (打ち切り値 - 全体の下界) 以下) を満たすものだけ
             let mut sib_lu = None;
-            let sibling = if plunge.is_none()
+            let sibling = if replay.is_some() && plunge.is_none() && !first {
+                // なぞる: 兄弟が HiGHS の次のノードのときだけ戻る
+                let mut got = None;
+                if let (Some(top), Some((fid, fgen, _))) = (self.dive_stack.last(), self.queue.first_prio()) {
+                    if top.0 == fid && top.1 == fgen {
+                        let (id, gen, lu) = self.dive_stack.pop().unwrap();
+                        got = self.queue.take(id, gen, f64::INFINITY);
+                        sib_lu = lu;
+                    }
+                }
+                got
+            } else if plunge.is_none()
                 && !first
                 && env_str!("ENOMOTO_MIP_NO_SIBLING_BACKTRACK").is_none()
                 && !(self.params.submip && env_str!("ENOMOTO_MIP_NO_SIBLING_BACKTRACK_SUB").is_some())
@@ -3633,6 +3651,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                     if !ok {
                         self.nodes += 1;
+                        if replay.is_some() {
+                            self.rp_log(&n, "tight", f64::NAN, f64::NAN, -1, &mut rp_stats);
+                        }
                         continue;
                     }
                     if let Some(b) = &n.basis {
@@ -3713,6 +3734,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         if !ok {
                             self.dbg_lost("propagation while replaying branches", self.dbg_changes(&n.changes));
                             self.nodes += 1;
+                            if replay.is_some() {
+                                self.rp_log(&n, "tight", f64::NAN, f64::NAN, -1, &mut rp_stats);
+                            }
                             continue;
                         }
                     }
@@ -3749,11 +3773,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.note_current_lb(node.lower_bound);
             self.log(false);
             let dn = self.dbg_changes(&node.changes);
+            let rp_entry = replay.and_then(|_| super::replay::lookup(&node.changes));
+            let mut rp_stage = "";
+            let (mut rp_obj0, mut rp_obj) = (f64::NAN, f64::NAN);
             if node.lower_bound >= self.prune_limit() {
                 if self.dbg_on {
                     self.dbg_lost(&format!("node lower bound {}", node.lower_bound), dn);
                 }
                 self.pc.objlim_leaves += 1;
+                if replay.is_some() {
+                    self.rp_log(&node, "lb", f64::NAN, f64::NAN, -1, &mut rp_stats);
+                }
                 continue;
             }
             self.dbg_trace("after replaying the branches");
@@ -3763,6 +3793,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 self.dbg_explain_exclusion(&node.changes);
             }
             let prop_ok = self.dom.propagate(self.p);
+            if !prop_ok {
+                rp_stage = "p_dom";
+            }
             self.dbg_trace("after propagation");
             if !prop_ok {
                 self.add_conflict();
@@ -3773,6 +3806,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             xp("m_prop");
             // 目的関数の伝播 (目的値 <= 打ち切り値)
             let prop_ok = prop_ok && self.propagate_objective();
+            if !prop_ok && rp_stage.is_empty() {
+                rp_stage = "p_obj";
+            }
             self.dbg_trace("after objective propagation");
             // 双対証明による枝刈りと境界の締め付け
             let prop_ok = prop_ok && {
@@ -3792,6 +3828,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 ok
             };
+            if !prop_ok && rp_stage.is_empty() {
+                rp_stage = "p_proof";
+            }
             // 境界リテラルの衝突による伝播
             let prop_ok = prop_ok && {
                 // 前回調べた後の変更だけを調べる (巻き戻しでそれより短くなっていればそこから、衝突が増えていれば最初から)
@@ -3818,7 +3857,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             };
             // カットプールの伝播 (`ENOMOTO_MIP_CUTPOOL_PROP`、[`Self::propagate_cut_pool`])
+            if !prop_ok && rp_stage.is_empty() {
+                rp_stage = "p_lit";
+            }
             let prop_ok = prop_ok && (!cutpool_prop() || self.propagate_cut_pool());
+            if !prop_ok && rp_stage.is_empty() {
+                rp_stage = "p_cpool";
+            }
             xp("m_proof");
             self.dbg_trace("after dual proofs and literal conflicts");
             // 完全オービトープの固定 (列を辞書式で減少に並べた解だけを残す)
@@ -3833,7 +3878,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 ok
             };
             self.dbg_trace("after orbitopal fixing");
+            if !prop_ok && rp_stage.is_empty() {
+                rp_stage = "p_orb";
+            }
             if !prop_ok {
+                if replay.is_some() {
+                    self.rp_log(&node, rp_stage, f64::NAN, f64::NAN, -1, &mut rp_stats);
+                }
                 self.pc.infeasible_leaves += 1;
                 self.dbg_lost("node propagation", dn);
                 if let Some((j, up, _, _)) = node.branch {
@@ -3957,6 +4008,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         if self.dbg_on {
                             self.dbg_trace(&format!("LP {st:?} (resolve {resolves}, LP rows {})", self.lp.num_rows()));
                         }
+                        rp_obj = f64::INFINITY;
+                        if resolves == 0 {
+                            rp_obj0 = f64::INFINITY;
+                        }
                         if st == LpStatus::Infeasible {
                             self.pc.infeasible_leaves += 1;
                             self.add_farkas_proof();
@@ -3980,6 +4035,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 xp("m_lpstat");
                 node_obj = self.lp.objective() + self.p.offset;
+                rp_obj = node_obj;
+                if resolves == 0 {
+                    rp_obj0 = node_obj;
+                }
                 if let Some(o) = fc_obj0.take() {
                     self.fc_record(o, node_obj);
                 }
@@ -4499,7 +4558,23 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 xp("m_pool");
                 let before_sb = dn && self.dbg_contains();
-                let sel = self.select_branch(&frac, node_obj, node.depth);
+                let rp_force = rp_entry.filter(|e| e.col >= 0 && (e.col as usize) < self.p.n).map(|e| {
+                    let c = e.col as usize;
+                    let v = frac.iter().find(|&&(j, _)| j == c).map_or(self.dom.lo[c].floor() + 0.5, |&(_, v)| v);
+                    (c, v)
+                });
+                let sel = if let Some((col, value)) = rp_force {
+                    rp_stats[2] += 1;
+                    if self.dom.lo[col] >= self.dom.up[col] {
+                        rp_stats[4] += 1;
+                    }
+                    BranchAction::Branch { col, value }
+                } else {
+                    if replay.is_some() {
+                        rp_stats[3] += 1;
+                    }
+                    self.select_branch(&frac, node_obj, node.depth)
+                };
                 if before_sb && !self.dbg_contains() {
                     self.dbg_lost("strong branching tightened bounds", true);
                 }
@@ -4519,13 +4594,21 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                     BranchAction::Prune => break None,
                     BranchAction::Branch { col, value } => {
-                        let (col, value) = self.orbitope_branching_column(col, value);
+                        let (col, value) = if rp_force.is_some() { (col, value) } else { self.orbitope_branching_column(col, value) };
                         break Some(Some((col, value, node_obj, frac)));
                     }
                 }
             };
             xp("m_endlp");
-            let Some(branch) = action else { continue };
+            let Some(branch) = action else {
+                if replay.is_some() {
+                    self.rp_log(&node, "lp", rp_obj0, rp_obj, -1, &mut rp_stats);
+                }
+                continue;
+            };
+            if replay.is_some() {
+                self.rp_log(&node, "br", rp_obj0, rp_obj, branch.as_ref().map_or(-1, |b| b.0 as i64), &mut rp_stats);
+            }
             let Some((col, value, node_obj, frac)) = branch else {
                 // LP なしの分枝 (branch_without_lp が子ノードを積んだ)
                 continue;
@@ -4545,6 +4628,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if (cu - cd).abs() <= 1e-12 * (1.0 + cu.abs()) { f >= 0.5 } else { cu < cd }
             };
             let prefer_up = prefer_up ^ (self.race_div & 1 == 1 && !self.race_done);
+            // なぞる: 子の優先度は HiGHS の処理順 (ファイルにない子は親の直後)
+            let rp_parent = rp_entry.map_or(node.estimate, |e| e.seq as f64);
+            let rp_prio = |c: BoundChange| -> f64 {
+                let mut ch = node.changes.clone();
+                ch.push(c);
+                super::replay::lookup(&ch).map_or(rp_parent + 1e-4, |e| e.seq as f64)
+            };
+            let prefer_up = if replay.is_some() { rp_prio(up) < rp_prio(down) } else { prefer_up };
             let (first_c, second_c) = if prefer_up { (up, down) } else { (down, up) };
             let basis = Rc::new(self.lp.basis());
             let basis_epoch = self.row_log.len();
@@ -4573,15 +4664,24 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     tags: node.tags.clone(),
                 }
             };
-            let sib = self.queue.push(mk(second_c));
+            let mut sec = mk(second_c);
+            if replay.is_some() {
+                sec.estimate = rp_prio(second_c);
+            }
+            let sib = self.queue.push(sec);
             // 兄弟へ戻ったときのために親の LP の LU を一緒に持つ (共有なので写さない)
             let sib_lu = if env_str!("ENOMOTO_MIP_NO_SIBLING_LU").is_none() { self.lp.lu_snapshot() } else { None };
             self.dive_stack.push((sib.0, sib.1, sib_lu));
-            let child = mk(first_c);
+            let mut child = mk(first_c);
+            if replay.is_some() {
+                child.estimate = rp_prio(first_c);
+            }
             plunge_depth += 1;
             // 潜りの打ち切り (SCIP の maxplungequot): 子の下界が 全体の下界 + q (打ち切り値 - 全体の下界) を超えたら
             // 潜らずに待ち行列から選び直す
-            let plunge_ok = {
+            let plunge_ok = if replay.is_some() {
+                child.estimate <= self.queue.first_prio().map_or(f64::INFINITY, |f| f.2)
+            } else {
                 let cutoff = self.prune_limit();
                 if cutoff.is_finite() && env_str!("ENOMOTO_MIP_NO_PLUNGE_ABORT").is_none() {
                     let glb = self.queue.best_lower_bound().min(node_obj);
@@ -4607,6 +4707,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         // 待ち行列が空: 探索終了
+        if replay.is_some() {
+            eprintln!("MIP: branch replay: nodes in the file {}, not in the file {}; branched on the file's column {} (already fixed {}), own choice {}", rp_stats[0], rp_stats[1], rp_stats[2], rp_stats[4], rp_stats[3]);
+        }
         if self.snap.is_some() {
             self.snap_report(None);
         }
@@ -5411,6 +5514,35 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let deg = if nb == 0 { 0.0 } else { zero as f64 / nb as f64 };
         let ratio = (basic + zero) as f64 / self.lp.num_rows().max(1) as f64;
         (deg, ratio)
+    }
+
+    /// 診断用 (`ENOMOTO_MIP_BRANCH_REPLAY`): なぞったノードの終わり方を数え、`ENOMOTO_MIP_REPLAY_LOG` なら
+    /// `ER 通し番号 HiGHSのseq(なければ-1) 深さ 終わり方 最初のLP値 最後のLP値 分枝した列 固定された整数列の数 LPの行数 HiGHSの結果 HiGHSのLP値 HiGHSの固定数 経路` を出す。
+    fn rp_log(&self, node: &OpenNode, out: &str, obj0: f64, obj: f64, col: i64, st: &mut [u64; 5]) {
+        let e = super::replay::lookup(&node.changes);
+        st[if e.is_some() { 0 } else { 1 }] += 1;
+        if !super::replay::log_on() {
+            return;
+        }
+        let nfix = (0..self.p.n).filter(|&j| self.p.is_int[j] && self.dom.lo[j] >= self.dom.up[j]).count();
+        let path: Vec<String> = node.changes.iter().map(|c| format!("{}{}{}", c.col, if c.upper { 'd' } else { 'u' }, c.value)).collect();
+        eprintln!(
+            "ER {} {} {} {} {:.10} {:.10} {} {} {} {} {:.10} {} {} {}",
+            self.nodes,
+            e.map_or(-1, |e| e.seq as i64),
+            node.depth,
+            out,
+            obj0,
+            obj,
+            col,
+            nfix,
+            self.lp.num_rows(),
+            e.map_or(-1, |e| e.res),
+            e.map_or(f64::NAN, |e| e.lp),
+            e.map_or(-1, |e| e.nfix),
+            path.join(" "),
+            self.dom.reason_counts_int(self.p)
+        );
     }
 
     fn select_branch(&mut self, frac: &[(usize, f64)], node_obj: f64, depth: usize) -> BranchAction {
@@ -7924,6 +8056,24 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 glo[j] = v;
                 gup[j] = v;
             }
+        }
+        // 診断用 (`ENOMOTO_MIP_DEBUG_RESTART_CUTS`): 残したカットの行を、整数列だけのものとそうでないものに分けて数え、整数列だけの行を出す
+        if env_str!("ENOMOTO_MIP_DEBUG_RESTART_CUTS").is_some() {
+            let (mut ni, mut nm) = (0, 0);
+            for i in p.m..rows.len() {
+                let nc = rows[i].iter().filter(|&&(j, _)| !p.is_int[j]).count();
+                if nc == 0 {
+                    ni += 1;
+                    let t: Vec<String> = rows[i].iter().map(|&(j, v)| format!("{j}:{v:.6}")).collect();
+                    eprintln!("RCUT int-only len {} lo {:.6} up {:.6} : {}", rows[i].len(), row_lo[i], row_up[i], t.join(" "));
+                } else {
+                    nm += 1;
+                }
+            }
+            let carry_int = carry.iter().filter(|(r, _)| r.iter().all(|&(j, _)| j < p.n && p.is_int[j])).count();
+            eprintln!("RCUT summary: kept cut rows {} (integer-only {ni}, with continuous {nm}); carried to the pool {} (integer-only {carry_int}); cut pool {}", rows.len() - p.m, carry.len(), self.cut_pool.len());
+            let pool_int = self.cut_pool.iter().filter(|(r, _, _)| r.iter().all(|&(j, _)| j < p.n && p.is_int[j])).count();
+            eprintln!("RCUT cut pool integer-only {pool_int}");
         }
         let newp = MipProblem::from_rows(glo, gup, p.cost.clone(), p.offset, p.sense_sign, p.is_int.clone(), rows, row_lo, row_up);
         let remaining = match self.deadline {

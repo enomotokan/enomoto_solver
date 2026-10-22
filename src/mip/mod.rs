@@ -14,6 +14,7 @@ pub(crate) mod problem;
 pub(crate) mod domain;
 pub(crate) mod conflict_pool;
 pub(crate) mod queue;
+pub(crate) mod replay;
 pub(crate) mod pseudocost;
 pub(crate) mod solver;
 pub(crate) mod fj;
