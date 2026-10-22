@@ -556,7 +556,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             // in-out 分離: x(α) で分離した候補 (別枠で選ぶ)
             let mut io_cands: Vec<Candidate> = Vec::new();
-            if inout_recenter > 0 && round > 0 && round % inout_recenter == 0 && inout_ipm_left > 0.01 {
+            if inout_recenter > 0 && round > 0 && round % inout_recenter == 0 && inout_ipm_left > 0.01 && inout_xc.is_some() {
                 let t_io = std::time::Instant::now();
                 let t_ipm0 = super::cap_clock();
                 if let Some(v) = self.inout_center("recenter", &mut inout_ipm_left) {
@@ -565,6 +565,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 time_cap += super::cap_clock() - t_ipm0;
                 io_secs += t_io.elapsed().as_secs_f64();
             }
+            // 次のラウンドの中心 (Some(None) なら in-out を止める)
+            let mut io_next: Option<Option<Vec<f64>>> = None;
             if let Some(xc) = &inout_xc {
                 let t_io = std::time::Instant::now();
                 let xa: Vec<f64> = (0..n).map(|j| x[j] + inout_alpha0 * (xc[j] - x[j])).collect();
@@ -579,6 +581,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 io_rounds += 1;
                 io_cands_tot += io_cands.len();
+                // `ENOMOTO_T_MIP_INOUT_GATE` = r (> 0): 最初のラウンドで、x(α) の分数の整数列が x_lp の r 倍に満たなければ
+                // (最適面が狭い) このループでは in-out を止める (このラウンドの候補も捨てる)
+                let gate = tunable!("ENOMOTO_T_MIP_INOUT_GATE", 0.0, f64);
+                if gate > 0.0 && io_rounds == 1 {
+                    let (f0, f1) = (self.fractional(&x).len(), self.fractional(&xa).len());
+                    if (f1 as f64) < gate * (f0 as f64) {
+                        if self.params.verbose {
+                            eprintln!("MIP: in-out separation: fractional {f0} at x_lp / {f1} at x(a) < {gate} x; off for this loop");
+                        }
+                        io_cands.clear();
+                        io_next = Some(None);
+                    }
+                }
                 if self.params.verbose {
                     // 最適面の広さの目安: x_c と x_lp で値の違う列の数、分数の整数列の数 (x_lp と x(α))
                     let ndiff = (0..n).filter(|&j| (xc[j] - x[j]).abs() > 1e-6 * (1.0 + x[j].abs())).count();
@@ -592,12 +607,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         zl + p.offset
                     );
                 }
-                if io_cands.is_empty() {
+                if io_cands.is_empty() && io_next.is_none() {
                     // x(α) は分離できない: 中心を x(α) に寄せる
                     io_moves += 1;
-                    inout_xc = Some(xa);
+                    io_next = Some(Some(xa));
                 }
                 io_secs += t_io.elapsed().as_secs_f64();
+            }
+            if let Some(v) = io_next {
+                inout_xc = v;
             }
             let ncands = cands.len() + face_cands.len();
             if ncands == 0 && io_cands.is_empty() {
