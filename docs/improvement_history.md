@@ -9793,6 +9793,13 @@ neos-950242 の 2 回目の調査 (`analysis/neos950242_r2_20261020.md`)。
 - in-out で落ちる問題: neos-911970 (両組)、10teams・timtab1、16 問の beasleyC3・mc11・neos-960392 など。physiciansched6-2 は e2iohl でも 2 組とも時間切れ (IHa は暫定解 49324・下界 49191、IHb は 50124・49191。10 回の計測では 4/10)。
 - 不一致 0、"MIP: WARNING" 0。全問に掛けると明らかに悪いので既定にしない。代入 (EQUIV2_USED) のある求解だけに限るゲートなどは in-out の調査 (inv/inout-sep-20261022) で続ける。
 
+## 2026-10-22: 根のカットの in-out 分離 (INOUT_SEP) の調査
+
+- 調査 (analysis/inout_sep_20261022.md、inv/inout-sep-20261022 86070e8): 最適面の中心付近の点 x_c (内点法) と x_lp の中点 x(α) で分離し、別枠 50 本を足す。`=face` は毎ラウンド中心を取り直す。補助: `ENOMOTO_MIP_INOUT_NO_BG`、`ENOMOTO_T_MIP_INOUT_GATE`、`ENOMOTO_MIP_INOUT_EQ2_ONLY` (同値の代入がある求解だけ)。
+- 根の下界が伸びるのは最適面が広い問題: neos-911970 47.26 → 52.0 (HiGHS 52.1、本数を 100 本にしても 47.26)、physiciansched6-2 (代入あり) 49199 → 49324 (9 回中 4 回)、roll3000・misc07 も伸びる。最適面が狭い問題 (mc11・qnet1・mik・h80x6320d・timtab1) では x_lp のカットを増やすだけになる。
+- 60 秒では 1 ラウンドが 2〜3 倍重くなり悪い問題が多い (mc11 2/3 → 0/3、h80x6320d 3/3 → 0/3、qnet1 3.6 → 9.5 秒など。良くなるのは beasleyC3・noswot)。NO_BG・GATE=2 でも戻りきらない。40 + 16 問の IH 計測でも全問の io は不採用。
+- 調査側の推奨: 使うなら `ENOMOTO_MIP_INOUT_SEP=1 ENOMOTO_MIP_INOUT_EQ2_ONLY=1` (代入のある求解だけ)。主側 (根の RINS の HiGHS 流) と組んで physiciansched6-2 で測る (inv/psched-ioeq-20261022)。
+
 ## 改名一覧 (整理時)
 
 本メモ中は旧名で書かれている。
