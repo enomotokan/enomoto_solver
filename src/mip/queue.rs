@@ -70,11 +70,13 @@ pub struct NodeQueue {
     /// カットの番号ごとの、そのカットが効いている基底を持つ待ち行列のノードの数 (カットの番号は 0 からの連番なので
     /// 番号で引く。足りなければ伸ばす)。
     protect: Vec<u32>,
+    /// 診断用 (`ENOMOTO_MIP_BRANCH_REPLAY`): `estimate` をそのまま優先度にし、常にその最小を取り出す
+    pub prio_only: bool,
 }
 
 impl NodeQueue {
     pub fn new() -> Self {
-        NodeQueue { nodes: Vec::new(), free: Vec::new(), by_lb: BTreeSet::new(), by_est: BTreeSet::new(), pops: 0, gen: Vec::new(), protect: Vec::new() }
+        NodeQueue { nodes: Vec::new(), free: Vec::new(), by_lb: BTreeSet::new(), by_est: BTreeSet::new(), pops: 0, gen: Vec::new(), protect: Vec::new(), prio_only: false }
     }
 
     pub fn len(&self) -> usize {
@@ -88,7 +90,7 @@ impl NodeQueue {
     /// ノードを入れ、その (枠, 世代) を返す ([`Self::take`] で取り出すのに使う)。
     pub fn push(&mut self, node: OpenNode) -> (usize, u64) {
         let lb = node.lower_bound;
-        let est = 0.5 * node.lower_bound + 0.5 * node.estimate;
+        let est = self.est_of(&node);
         let depth = node.depth as f64;
         if let Some(pr) = &node.prot {
             for &c in pr.iter() {
@@ -130,11 +132,24 @@ impl NodeQueue {
         if let Some(pr) = node.prot.take() {
             self.unprotect(&pr);
         }
-        let est = 0.5 * node.lower_bound + 0.5 * node.estimate;
+        let est = self.est_of(&node);
         self.by_lb.remove(&(Key(node.lower_bound), id));
         self.by_est.remove(&(Key(est), Key(-(node.depth as f64)), id));
         self.free.push(id);
         node
+    }
+
+    fn est_of(&self, n: &OpenNode) -> f64 {
+        if self.prio_only {
+            n.estimate
+        } else {
+            0.5 * n.lower_bound + 0.5 * n.estimate
+        }
+    }
+
+    /// `prio_only` の優先度が最小のノードの (枠, 世代, 優先度)。
+    pub fn first_prio(&self) -> Option<(usize, u64, f64)> {
+        self.by_est.iter().next().map(|&(k, _, id)| (id, self.gen[id], k.0))
     }
 
     /// 最小の下界 (空なら +inf)。
@@ -145,7 +160,7 @@ impl NodeQueue {
     /// 次のノードを取り出す。`bb_every` 回に 1 回は下界最小、それ以外は hybrid estimate 最小。
     pub fn pop(&mut self, bb_every: u64) -> Option<OpenNode> {
         self.pops += 1;
-        let id = if self.pops % bb_every.max(1) == 0 {
+        let id = if self.pops % bb_every.max(1) == 0 && !self.prio_only {
             self.by_lb.iter().next().map(|&(_, id)| id)
         } else {
             self.by_est.iter().next().map(|&(_, _, id)| id)
