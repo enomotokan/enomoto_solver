@@ -18,6 +18,8 @@ pub trait MipLp: Clone + Send {
     fn row(&self, i: usize) -> Vec<(usize, f64)>;
     fn set_col_bounds(&mut self, j: usize, lo: f64, up: f64);
     fn set_costs(&mut self, c: &[f64]);
+    /// 行の境界をまとめて変える ([`TwoStageLp::set_row_bounds_many`])。
+    fn set_row_bounds_many(&mut self, b: &[(usize, f64, f64)]);
     fn costs(&self) -> Vec<f64>;
     fn add_rows(&mut self, rows: &[(Vec<(usize, f64)>, f64, f64)]);
     fn delete_rows(&mut self, remove: &[bool]);
@@ -108,6 +110,7 @@ macro_rules! forward_impl {
             fn row(&self, i: usize) -> Vec<(usize, f64)> { <$t>::row(self, i) }
             fn set_col_bounds(&mut self, j: usize, lo: f64, up: f64) { <$t>::set_col_bounds(self, j, lo, up) }
             fn set_costs(&mut self, c: &[f64]) { <$t>::set_costs(self, c) }
+            fn set_row_bounds_many(&mut self, b: &[(usize, f64, f64)]) { <$t>::set_row_bounds_many(self, b) }
             fn costs(&self) -> Vec<f64> { <$t>::costs(self) }
             fn add_rows(&mut self, rows: &[(Vec<(usize, f64)>, f64, f64)]) { <$t>::add_rows(self, rows) }
             fn delete_rows(&mut self, remove: &[bool]) { <$t>::delete_rows(self, remove) }
