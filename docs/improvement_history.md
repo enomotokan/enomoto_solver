@@ -9745,6 +9745,14 @@ neos-950242 の 2 回目の調査 (`analysis/neos950242_r2_20261020.md`)。
 - physiciansched6-2: HSa では根の下界が 49324 (最適値) に届いたが暫定解 50124、HSb は下界 49081・暫定解 50626。60 秒では解けない。
 - 他の問題は同じ形を解くのに 40 問で -1・-2 と揺れる (計測の揺れの大きさの目安)。基準を満たさないので保留。暫定解を出す側 (根の RINS のサブ MIP、計測 RH) と組み合わせて physiciansched6-2 で確かめる。
 
+## 2026-10-22: 根の RINS のサブ MIP を HiGHS 流に解く (ROOT_SUBMIP_HL) は physiciansched6-2 の組み合わせで判断
+
+- 根の RINS の調査 (analysis/rins_fix_20261022.md): 固定率は HiGHS と同程度で足りていて、差はサブ MIP の解き方 (時間・カット・外側のカットの行・Pump・強分枝)。試作 `ENOMOTO_MIP_ROOT_SUBMIP_HL=1` は暫定解が FJ のものだけのときに働く (55 問中 physiciansched6-2 だけの見込み)。b4cf2b6 で 40 + 16 問、newdef / hl / e2hl (hl + 代入まわり) を 2 組。
+- 40 問 (解けた・SGM): RHa newdef 26・19.22 / hl 25・19.44 / e2hl 25・19.67、RHb newdef 25・20.20 / hl 26・20.43 / e2hl 26・19.91。
+- 16 問: RHa newdef 9・36.02 / hl 11・32.62 / e2hl 10・34.85、RHb newdef 11・35.40 / hl 11・35.07 / e2hl 10・33.67。不一致 0、"MIP: WARNING" 0。
+- physiciansched6-2: e2hl は 2 組とも暫定解 49324 (最適値) を見つけ、下界 49291・49266 (差 33〜58)。hl は 49624・49524。既定は 50826。60 秒では解けない。
+- 他の問題は同じ形を解くので 40 + 16 問の差は揺れ。カット選択の HiGHS 合わせ (e2hsel、下界が 49324 に届く回がある) と組んで、physiciansched6-2 を 10 回ずつ解く計測で判断する (inv/psched-combo-20261022)。
+
 ## 改名一覧 (整理時)
 
 本メモ中は旧名で書かれている。
