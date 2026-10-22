@@ -471,6 +471,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let fb_on = !self.params.submip && fb_env.is_some() && !(fb_env.as_deref() == Some("main") && job.is_some());
         let fb_base = tunable!("ENOMOTO_T_CUTSEL_MIN_REL", 0.5, f64);
         let mut fb_rel = fb_base;
+        // `ENOMOTO_MIP_CUTSEL_DCD` の方向 (暫定解の有無) をループごとに 1 回だけ書く
+        let mut dbg_dcd_first = !self.params.submip;
         // 診断 (`ENOMOTO_MIP_INJECT_CUTS`、[`load_injected_cuts`]): HiGHS の根のカットを、最初の求解の根のループで使う。
         // `ENOMOTO_MIP_INJECT_MODE=lp` (既定): ループの前に全部 LP に入れて解く (その後は既定のループ)。`cand`: 毎ラウンド、
         // 今の LP 解を切るものを候補に混ぜて既定の選択に通す (`ENOMOTO_MIP_INJECT_ONLY` ならこちらの分離の候補は捨てる)
@@ -697,6 +699,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 self.select_cuts_highs(cands, max_cuts, &x, maxpar)
             } else if fc_relax {
                 select_cuts_hybrid_with(cands, max_cuts, p, tunable!("ENOMOTO_T_CUTSEL_FC_MIN_REL", 0.0, f64), tunable!("ENOMOTO_T_CUTSEL_FC_MAXPAR", 0.9, f64))
+            } else if let Some(ctx) = DcdCtx::from_env(&x, self.incumbent.as_ref().map(|(_, v)| v.as_slice())) {
+                // 試作 (`ENOMOTO_MIP_CUTSEL_DCD`・`ENOMOTO_MIP_CUTSEL_NORM`、[`DcdCtx`]): スコアに directed cutoff distance を入れる
+                if dbg_dcd_first {
+                    eprintln!("CUTSEL_DCD: round {round} direction {}", if ctx.dir.is_some() { "incumbent" } else { "none (efficacy only)" });
+                    dbg_dcd_first = false;
+                }
+                let rel = if fb_on { fb_rel } else { tunable!("ENOMOTO_T_CUTSEL_MIN_REL", 0.5, f64) };
+                select_cuts_hybrid_dcd(cands, max_cuts, p, rel, tunable!("ENOMOTO_T_CUTSEL_MAXPAR", 0.3, f64), anchor, Some(&ctx))
             } else if fb_on {
                 select_cuts_hybrid_anchor(cands, max_cuts, p, fb_rel, tunable!("ENOMOTO_T_CUTSEL_MAXPAR", 0.3, f64), anchor)
             } else if face_anchor >= 1 && env_str!("ENOMOTO_MIP_CUTSEL_OLD").is_none() {
@@ -3308,14 +3318,94 @@ fn cut_score(c: &Candidate, p: &MipProblem, cnorm: f64) -> f64 {
     cut_quality(c, p, cnorm) / (c.coefs.len().max(1) as f64).powf(tunable!("ENOMOTO_T_CUTSEL_DENSITY_EXP", 0.0, f64))
 }
 
+/// 選択のスコアに directed cutoff distance を入れる試作の設定 (`ENOMOTO_MIP_CUTSEL_DCD`・`ENOMOTO_MIP_CUTSEL_NORM`、[`DcdCtx::from_env`])。
+pub(super) struct DcdCtx<'x> {
+    /// 今の LP 解 (構造変数)
+    x: &'x [f64],
+    /// 今の LP 解から暫定解へ向かう単位方向 (暫定解がない・同じ点なら `None`)
+    dir: Option<Vec<f64>>,
+    w_eff: f64,
+    w_dcd: f64,
+    norm: bool,
+}
+
+impl<'x> DcdCtx<'x> {
+    /// 既定 (どちらの環境変数もない) なら `None`。`ENOMOTO_MIP_CUTSEL_DCD=<重み>` (directed cutoff distance の重み、SCIP の
+    /// `cutselection/hybrid/dircutoffdistweight`)、`ENOMOTO_T_CUTSEL_EFFW` (効き目の重み、1)、`ENOMOTO_MIP_CUTSEL_NORM=1`
+    /// (効き目と directed cutoff distance をそのラウンドの候補の最良で割って 0〜1 にそろえる)。暫定解 `inc` (今の問題の列) の
+    /// 代わりに `ENOMOTO_MIP_CUTSEL_DCD_SOL=ファイル` (1 行 1 値、列の数が合うときだけ。前処理なしの診断用) の点へ向かう方向を使える
+    pub(super) fn from_env(x: &'x [f64], inc: Option<&[f64]>) -> Option<Self> {
+        let w_dcd = env_str!("ENOMOTO_MIP_CUTSEL_DCD").and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
+        let norm = env_str!("ENOMOTO_MIP_CUTSEL_NORM").is_some_and(|v| v != "0");
+        if w_dcd <= 0.0 && !norm {
+            return None;
+        }
+        let file_sol: Option<Vec<f64>> = env_str!("ENOMOTO_MIP_CUTSEL_DCD_SOL")
+            .and_then(|f| std::fs::read_to_string(f).ok())
+            .map(|s| s.lines().filter_map(|l| l.trim().parse().ok()).collect::<Vec<f64>>())
+            .filter(|v| v.len() == x.len());
+        let target = file_sol.as_deref().or(inc.filter(|v| v.len() == x.len()));
+        let dir = target.and_then(|t| {
+            let mut d: Vec<f64> = t.iter().zip(x).map(|(a, b)| a - b).collect();
+            let nd = d.iter().map(|v| v * v).sum::<f64>().sqrt();
+            if nd > 0.0 {
+                d.iter_mut().for_each(|v| *v /= nd);
+                Some(d)
+            } else {
+                None
+            }
+        });
+        Some(DcdCtx { x, dir, w_eff: tunable!("ENOMOTO_T_CUTSEL_EFFW", 1.0, f64), w_dcd, norm })
+    }
+
+    /// SCIP の `SCIProwGetLPSolCutoffDistance`: 今の LP 解 x から暫定解 x* へ向かう単位方向 d = (x* - x) / |x* - x| に沿った、
+    /// x からカット a·y <= b の超平面までの距離 (a·x - b) / |a·d| (|a·d| < 1e-6 なら 1e-6 で割る)。|a·d| <= |a| なので効き目以上
+    fn distance(&self, c: &Candidate) -> Option<f64> {
+        let d = self.dir.as_ref()?;
+        let act: f64 = c.coefs.iter().map(|&(j, v)| v * self.x[j]).sum();
+        let s: f64 = c.coefs.iter().map(|&(j, v)| v * d[j]).sum();
+        Some((act - c.rhs) / s.abs().max(1e-6))
+    }
+}
+
 /// [`select_cuts_hybrid_with`] の、質の閾値の基準のスコアを `anchor` で与えられる版 (`None` なら候補の最良のスコア)。
 fn select_cuts_hybrid_anchor(cands: Vec<Candidate>, max_cuts: usize, p: &MipProblem, min_rel: f64, maxpar: f64, anchor: Option<f64>) -> Vec<Candidate> {
+    select_cuts_hybrid_dcd(cands, max_cuts, p, min_rel, maxpar, anchor, None)
+}
+
+/// [`select_cuts_hybrid_anchor`] のスコアの効き目の項を、`dcd` があれば SCIP の `cutsel_hybrid` と同じく
+/// 効き目の重み × 効き目 + DCD の重み × max(directed cutoff distance, 効き目) に替える版 (暫定解がなければ
+/// (効き目の重み + DCD の重み) × 効き目、SCIP と同じ)。`norm` なら効き目・距離をそれぞれそのラウンドの候補の最良で割ってから使う
+/// (このとき `anchor` は使わない)。目的との平行度・整数の割合の項 (0.1 ずつ)、密度の割り算、足切り (最良の `min_rel` 倍) はそのまま
+fn select_cuts_hybrid_dcd(cands: Vec<Candidate>, max_cuts: usize, p: &MipProblem, min_rel: f64, maxpar: f64, anchor: Option<f64>, dcd: Option<&DcdCtx>) -> Vec<Candidate> {
     let cnorm = p.cost.iter().map(|c| c * c).sum::<f64>().sqrt();
+    let dists: Vec<Option<f64>> = match dcd {
+        Some(ctx) => cands.iter().map(|c| ctx.distance(c).map(|d| d.max(c.efficacy))).collect(),
+        None => vec![None; cands.len()],
+    };
+    let (max_eff, max_dist) = (
+        cands.iter().map(|c| c.efficacy).fold(0.0, f64::max),
+        dists.iter().flatten().copied().fold(0.0, f64::max),
+    );
+    let anchor = if dcd.is_some_and(|c| c.norm) { None } else { anchor };
     let mut scored: Vec<(f64, f64, Candidate)> = cands
         .into_iter()
-        .map(|c| {
+        .zip(dists)
+        .map(|(c, dist)| {
             let nc = c.coefs.iter().map(|&(_, v)| v * v).sum::<f64>().sqrt();
-            (cut_score(&c, p, cnorm), nc, c)
+            let score = match dcd {
+                None => cut_score(&c, p, cnorm),
+                Some(ctx) => {
+                    let sc = |v: f64, m: f64| if ctx.norm { if m > 0.0 { v / m } else { 0.0 } } else { v };
+                    let e = sc(c.efficacy, max_eff);
+                    let term = match dist {
+                        Some(d) => ctx.w_eff * e + ctx.w_dcd * sc(d, max_dist),
+                        None => (ctx.w_eff + ctx.w_dcd) * e,
+                    };
+                    (cut_quality(&c, p, cnorm) - c.efficacy + term) / (c.coefs.len().max(1) as f64).powf(tunable!("ENOMOTO_T_CUTSEL_DENSITY_EXP", 0.0, f64))
+                }
+            };
+            (score, nc, c)
         })
         .collect();
     scored.sort_by(|a, b| b.0.total_cmp(&a.0));
