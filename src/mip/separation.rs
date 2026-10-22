@@ -466,7 +466,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 動かさず、それが質の基準になって、効き目は 0.1 程度でも目的値を大きく動かす密なカットが閾値で落ちる
         // (analysis/cutloop_hl_20261022.md: HiGHS のラウンド 3 の LP で、HiGHS が入れた 22 本のうち閾値で落ちる 13 本に、単独で +193・+100・+30 の
         // カットがある。閾値なしなら HiGHS と同じ 11648、既定の閾値では 11349)
-        let fb_on = !self.params.submip && env_str!("ENOMOTO_MIP_CUTSEL_FEEDBACK").is_some();
+        // 値が `main` なら、根のヒューリスティクスの間にカットを強める求解 (裏のカットのループ) では使わない
+        let fb_env = env_str!("ENOMOTO_MIP_CUTSEL_FEEDBACK");
+        let fb_on = !self.params.submip && fb_env.is_some() && !(fb_env.as_deref() == Some("main") && job.is_some());
         let fb_base = tunable!("ENOMOTO_T_CUTSEL_MIN_REL", 0.5, f64);
         let mut fb_rel = fb_base;
         // 診断 (`ENOMOTO_MIP_INJECT_CUTS`、[`load_injected_cuts`]): HiGHS の根のカットを、最初の求解の根のループで使う。
