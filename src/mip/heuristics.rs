@@ -2098,19 +2098,24 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // (2) サブ MIP の根のカットのループを通常の求解並みにする (分離の [`root_submip_hl_active`]。既定のサブ MIP は時間上限の 1 割で
         // 止めるので、時間の短いサブ MIP では根の LP だけでカットの時間を使い切り 1 本も入らない)、(3) サブ MIP の根でも旧来の RENS を
         // 回し ([`Self::rens`])、Feasibility Pump・ダイビング・強分岐はしない (サブ MIP の中のサブ MIP も同じ。HiGHS のサブ MIP と同じ)、
-        // (4) 暫定解が Feasibility Jump のものだけ (または根の LP との差が `ENOMOTO_T_MIP_ROOT_SUBMIP_HL_GAP` 超) なら、時間の上限を残りの
+        // (4) 時間の上限を残りの
         // `ENOMOTO_T_MIP_ROOT_SUBMIP_HL_FRAC` (0.5)、最大 `ENOMOTO_T_MIP_ROOT_SUBMIP_HL_MAX` (20 秒) にする (0.25・15 秒では
-        // physiciansched6-2 で 0 / 8 回、0.5・20 秒で 4 / 4 回)。
+        // physiciansched6-2 で 0 / 8 回、0.5・20 秒で 6 / 10 回 49324〜49424 を出す)。使うのは暫定解が Feasibility Jump のものだけの
+        // とき (または根の LP との差が `ENOMOTO_T_MIP_ROOT_SUBMIP_HL_GAP` (既定 ∞) 超のとき) だけ。
         // physiciansched6-2 (同値の代入の後) の根の RINS のサブ MIP (自由な整数列 1793、固定率 0.59 で HiGHS の RENS の 0.60 と同じ) は
         // 最適値 49324 を含み、HiGHS なら 1 スレッド 3.3 秒で解けるが、既定 (残りの 7%・約 2 秒) ではカット 0 本・根の LP 48924 のまま
         // Feasibility Pump で時間切れになる (analysis/rins_fix_20261022.md)
-        if env_str!("ENOMOTO_MIP_ROOT_SUBMIP_HL").is_some() && !self.params.submip && self.nodes <= 1 {
+        // (1)〜(4) はどれも (4) の条件を満たすときだけ使う (満たさなければ既定と同じ): 条件なしで (1)〜(3) を使うと、timtab1 の根の RINS が
+        // 解を出さなくなり (2 回とも。既定は 2 回とも出す)、uccase12 の根の RINS が 0.8 -> 2.9 秒になった
+        let gap = self.incumbent.as_ref().map_or(0.0, |(z, _)| (z - (self.lp.objective() + self.p.offset)) / z.abs().max(1.0));
+        if env_str!("ENOMOTO_MIP_ROOT_SUBMIP_HL").is_some()
+            && !self.params.submip
+            && self.nodes <= 1
+            && (self.inc_only_fj || gap > tunable!("ENOMOTO_T_MIP_ROOT_SUBMIP_HL_GAP", f64::INFINITY, f64))
+        {
             let keep = (self.submip_time_frac, self.submip_time_max);
-            let gap = self.incumbent.as_ref().map_or(0.0, |(z, _)| (z - (self.lp.objective() + self.p.offset)) / z.abs().max(1.0));
-            if self.inc_only_fj || gap > tunable!("ENOMOTO_T_MIP_ROOT_SUBMIP_HL_GAP", f64::INFINITY, f64) {
-                self.submip_time_frac = tunable!("ENOMOTO_T_MIP_ROOT_SUBMIP_HL_FRAC", 0.5, f64);
-                self.submip_time_max = tunable!("ENOMOTO_T_MIP_ROOT_SUBMIP_HL_MAX", 20.0, f64);
-            }
+            self.submip_time_frac = tunable!("ENOMOTO_T_MIP_ROOT_SUBMIP_HL_FRAC", 0.5, f64);
+            self.submip_time_max = tunable!("ENOMOTO_T_MIP_ROOT_SUBMIP_HL_MAX", 20.0, f64);
             if self.params.verbose {
                 eprintln!("MIP:   RINS (HL): gap {gap:.4}, incumbent only from FJ {}, sub-MIP time fraction {:.2}, max {:.1}s", self.inc_only_fj, self.submip_time_frac, self.submip_time_max);
             }
