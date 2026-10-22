@@ -662,7 +662,7 @@ impl AggOptions {
 /// `a_k / coeff` と `rhs / coeff` がすべて整数なら、x_j は他の列の整数値から整数に決まるので、x_j の整数性の制約を失わない。
 /// 整数最適化の前処理は列の尺度をかけない (d = 1) ので、行の尺度は比に効かない。
 pub(crate) fn mip_agg_int() -> bool {
-    env_str!("ENOMOTO_MIP_AGG_INT").is_some()
+    env_str!("ENOMOTO_MIP_AGG_INT").is_some() || crate::mip::presolve_gi()
 }
 
 /// 等式行 `row` (`row` に列 `j` の係数 `coeff`、右辺 `rhs`) で整数列 `j` を代入すると整数性が保たれるか ([`mip_agg_int`])。
