@@ -369,6 +369,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     user_log_header: bool,
     /// 処理中 (最後に取り出した) のノードの下界 (根では根の LP の値)。待ち行列にないので全体の下界に足す。
     cur_lb: f64,
+    /// 根の LP (カット前) の求解にかかった秒数 (写しに基底を持たせるかの判定 [`Self::make_snapshot`] に使う)。
+    root_lp_secs: f64,
     /// 根の LP の値 (カットのループの後はその値)。この求解の問題全体の下界として常に正しいので、時間切れなどで終わるときに
     /// 返す下界はこれより下げない (従のスレッドの失敗・再スタート後の求解の結果などで下界が失われても、根の下界は返す)。
     root_lb: f64,
@@ -1539,6 +1541,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         user_log_header: false,
         cur_lb: f64::NEG_INFINITY,
         root_lb: f64::NEG_INFINITY,
+        root_lp_secs: 0.0,
         final_lb: None,
         vbounds: None,
         failed_heurs: 0,
@@ -2671,24 +2674,28 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 木の写しから解く: 写しを作ったときの基底と DSE 重みから根の LP を warm start する (カットの行は写しと同じなので
         // 行の状態もそのまま使える)
         let mut snap_basis_used = false;
+        let mut snap_dse_used = false;
         if let Some(sn) = self.snap.clone().filter(|_| !bg_basis_used) {
             if let Some(b) = sn.basis.as_ref().filter(|b| b.col.len() == self.p.n && b.row.len() == self.lp.num_rows()) {
                 self.lp.set_basis(b);
-                if let Some(w) = &sn.dse {
+                // `ENOMOTO_MIP_TREE_SNAP_NO_DSE`: 基底だけ使い、DSE 重みは引き継がない (切り分け用)
+                if let Some(w) = sn.dse.as_ref().filter(|_| env_str!("ENOMOTO_MIP_TREE_SNAP_NO_DSE").is_none()) {
                     self.lp.set_dse_vars(w);
                     crate::simplex::slope_intercept_dual::WARM_DSE_ONCE.store(true, std::sync::atomic::Ordering::Relaxed);
+                    snap_dse_used = true;
                 }
                 snap_basis_used = true;
             }
         }
         let t_root_lp = Instant::now();
         let mut root_st = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
+        self.root_lp_secs = t_root_lp.elapsed().as_secs_f64();
         crate::simplex::slope_intercept_dual::WARM_DSE_ONCE.store(false, std::sync::atomic::Ordering::Relaxed);
         if self.params.verbose && self.snap.is_some() {
             eprintln!("MIP: [snapshot] root LP {root_st:?} ({} iters, {:.2}s)", self.lp.total_iterations(), self.start.elapsed().as_secs_f64());
         }
         if tree_diag() && self.snap.is_some() && self.pool.is_some() {
-            eprintln!("MIP_TREE_DIAG: tid {} root LP {root_st:?} from the snapshot basis {snap_basis_used}: {} iters, {:.2}s ({:.2}s since the thread started)", self.pool_tid, self.lp.total_iterations(), t_root_lp.elapsed().as_secs_f64(), self.start.elapsed().as_secs_f64());
+            eprintln!("MIP_TREE_DIAG: tid {} root LP {root_st:?} from the snapshot basis {snap_basis_used} (dse {snap_dse_used}): {} iters, {:.2}s ({:.2}s since the thread started), objective {:.10e}, {} rows", self.pool_tid, self.lp.total_iterations(), t_root_lp.elapsed().as_secs_f64(), self.start.elapsed().as_secs_f64(), self.lp.objective() + self.p.offset, self.lp.num_rows());
         }
         if matches!(root_st, LpStatus::Error | LpStatus::IterationLimit) && !self.time_up() {
             // 結論を出せなかった (数値的な破綻など): 内点法 + クロスオーバーだけで解き直す
@@ -8336,8 +8343,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let pool: Vec<(Vec<(usize, f64)>, f64)> = self.cut_pool.iter().map(|(c, r, _)| (c.clone(), *r)).collect();
         let orig = self.orig.as_ref().map(|o| std::sync::Arc::new((**o).clone()));
         // 今の LP の基底 (行は `rows` と同じ) と DSE 重み。木の中なら最後に解いたノードの最適基底で、根の LP (大域的な境界) に
-        // 対しては双対実行可能なので、双対単体法の warm start になる
-        let (basis, dse) = if env_str!("ENOMOTO_MIP_TREE_NO_SNAP_BASIS").is_none() { (Some(self.lp.basis()), self.lp.dse_snapshot()) } else { (None, None) };
+        // 対しては双対実行可能なので、双対単体法の warm start になる。
+        // 持たせるのは根の LP (カット前) が `ENOMOTO_T_MIP_SNAP_BASIS_MIN_ROOT_SECS` 秒 (既定 1) 以上かかった問題だけ: 根の LP が
+        // 軽い問題では従が基底なしで解き直しても 0.1〜0.3 秒で済み、そのうえ従は主と違う頂点 (双対解) に着くので、根の被約費用に
+        // よる固定が主と従で違い (主が従から大域的な境界を受け取る)、木のヒューリスティクスの近傍も違う。全スレッドが主の
+        // 頂点から始めると、この多様性がなくなって 40 + 16 問で 2 組とも解ける数が減った (10teams・noswot・beasleyC3・
+        // neos-911970・uccase12。analysis/bound_inf_20261021.md §7)。`ENOMOTO_MIP_TREE_SNAP_BASIS_ALWAYS` なら常に持たせる
+        let heavy_root = self.root_lp_secs >= tunable!("ENOMOTO_T_MIP_SNAP_BASIS_MIN_ROOT_SECS", 1.0, f64) || env_str!("ENOMOTO_MIP_TREE_SNAP_BASIS_ALWAYS").is_some();
+        let (basis, dse) = if env_str!("ENOMOTO_MIP_TREE_NO_SNAP_BASIS").is_none() && heavy_root { (Some(self.lp.basis()), self.lp.dse_snapshot()) } else { (None, None) };
         let snap = TreeSnapshot { serial, p, lo: self.dom.global_lo.clone(), up: self.dom.global_up.clone(), rows, pool, pc: self.pc.clone(), nodes: snodes, valid_below: self.prune_limit(), basis, dse, hcm_auto: self.hcm_auto, orbitopes: (*self.orbitopes).clone(), orig, lex_gens: (*self.lex_gens).clone() };
         if self.params.verbose && env_str!("ENOMOTO_MIP_BISECT_VERBOSE").is_some() {
             eprintln!("MIP: tree snapshot {serial}: {} nodes, {} cut rows, valid below {:.10e} ({:.1}s)", snap.nodes.len(), snap.rows.len(), snap.valid_below, self.start.elapsed().as_secs_f64());
