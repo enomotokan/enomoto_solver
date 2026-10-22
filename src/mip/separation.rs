@@ -1026,13 +1026,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.lp.debug_dse_check(&format!("round {round} after removing {removed} old cuts"));
                 }
             } else if (round + 1) % tunable!("ENOMOTO_T_MIP_CUT_REMOVE_EVERY", 1usize, usize).max(1) == 0 {
-                self.remove_inactive_cuts();
+                self.remove_inactive_cuts_root();
             }
             if dbg_sep {
                 eprintln!("SEP round {round}: removed {} inactive cuts in {:.3}s", rows_before - self.lp.num_rows(), t_rm0.elapsed().as_secs_f64());
             }
         }
-        self.remove_inactive_cuts();
+        self.remove_inactive_cuts_root();
         if env_str!("ENOMOTO_MIP_DEBUG_FACETIME").is_some() && !self.params.submip {
             eprintln!(
                 "FACETIME {}restarts {} rounds {nrounds}: sep {sep_tot:.2}s (face {:.2}s, {} vertices), LP {lp_tot:.2}s, loop {:.2}s, obj {:.10e}",
@@ -1669,6 +1669,70 @@ impl<'a, L: MipLp> Solver<'a, L> {
             eprintln!("MIP: merged {used} active cuts into one row ({nnz} nonzeros), LP {st:?} obj {:.10e}", self.lp.objective() + self.p.offset);
         }
         true
+    }
+
+    /// 根のカットのループの [`Self::remove_inactive_cuts`]。`ENOMOTO_MIP_CUT_KEEP_DCD=θ` (試作、既定ではなし) なら、暫定解が
+    /// あるとき、外す候補 (緩んでいるカット a·y <= b) のうち、今の LP 解 x から暫定解 x* へ向かう線分の上で超平面に当たる割合
+    /// t = (b - a·x) / (a·d) / |x* - x| (d は単位方向、a·d <= 0 なら当たらない) が θ 以下のものを、t の小さい順に
+    /// `ENOMOTO_T_MIP_CUT_KEEP_DCD_MAX` (50) 本まで残す (LP 解が暫定解の方へ動けば効くカット)
+    fn remove_inactive_cuts_root(&mut self) {
+        let theta = env_str!("ENOMOTO_MIP_CUT_KEEP_DCD").and_then(|v| v.parse::<f64>().ok());
+        let dir = match theta {
+            Some(_) if !self.params.submip => {
+                let x = self.lp.col_values();
+                dcd_direction(&x, self.incumbent.as_ref().map(|(_, v)| v.as_slice())).map(|(d, nd)| (x, d, nd))
+            }
+            _ => None,
+        };
+        let Some((x, d, nd)) = dir else { return self.remove_inactive_cuts() };
+        let theta = theta.unwrap_or(1.0);
+        let m0 = self.p.m;
+        let mr = self.lp.num_rows();
+        if mr <= m0 {
+            return;
+        }
+        self.sync_cut_age();
+        let mut cand: Vec<usize> = Vec::new();
+        {
+            let b = self.lp.basis_ref();
+            let act = self.lp.row_activities_ref();
+            for i in m0..mr {
+                if b.row[i] == VarStatus::Basic {
+                    let (_, up) = self.lp.row_bounds(i);
+                    if act[i] < up - 1e-6 * (1.0 + up.abs()) && !self.merged_cuts.contains(&self.cut_ids[i - m0]) {
+                        cand.push(i);
+                    }
+                }
+            }
+        }
+        let mut keep: Vec<(f64, usize)> = Vec::new();
+        for &i in &cand {
+            let row = self.lp.row(i);
+            let (_, up) = self.lp.row_bounds(i);
+            let ad: f64 = row.iter().map(|&(j, v)| v * d[j]).sum();
+            if ad > 1e-9 {
+                let ax: f64 = row.iter().map(|&(j, v)| v * x[j]).sum();
+                let t = (up - ax) / ad / nd;
+                if t <= theta {
+                    keep.push((t, i));
+                }
+            }
+        }
+        keep.sort_by(|a, b| a.0.total_cmp(&b.0));
+        keep.truncate(tunable!("ENOMOTO_T_MIP_CUT_KEEP_DCD_MAX", 50usize, usize));
+        let mut remove = vec![false; mr];
+        for &i in &cand {
+            remove[i] = true;
+        }
+        for &(_, i) in &keep {
+            remove[i] = false;
+        }
+        if env_str!("ENOMOTO_MIP_DEBUG_CUTSEL").is_some() {
+            eprintln!("CUT_KEEP_DCD: {} slack cuts, kept {} (t <= {theta})", cand.len(), keep.len());
+        }
+        if cand.len() > keep.len() {
+            self.delete_lp_rows(&remove);
+        }
     }
 
     /// LP の行のうち、元の行より後ろ (カット) で論理変数が基底にあるものを外す。
@@ -3343,21 +3407,7 @@ impl<'x> DcdCtx<'x> {
         if w_dcd <= 0.0 && !norm && !prod {
             return None;
         }
-        let file_sol: Option<Vec<f64>> = env_str!("ENOMOTO_MIP_CUTSEL_DCD_SOL")
-            .and_then(|f| std::fs::read_to_string(f).ok())
-            .map(|s| s.lines().filter_map(|l| l.trim().parse().ok()).collect::<Vec<f64>>())
-            .filter(|v| v.len() == x.len());
-        let target = file_sol.as_deref().or(inc.filter(|v| v.len() == x.len()));
-        let dir = target.and_then(|t| {
-            let mut d: Vec<f64> = t.iter().zip(x).map(|(a, b)| a - b).collect();
-            let nd = d.iter().map(|v| v * v).sum::<f64>().sqrt();
-            if nd > 0.0 {
-                d.iter_mut().for_each(|v| *v /= nd);
-                Some(d)
-            } else {
-                None
-            }
-        });
+        let dir = dcd_direction(x, inc).map(|(d, _)| d);
         Some(DcdCtx { x, dir, w_eff: tunable!("ENOMOTO_T_CUTSEL_EFFW", 1.0, f64), w_dcd, norm, prod })
     }
 
@@ -3368,6 +3418,24 @@ impl<'x> DcdCtx<'x> {
         let act: f64 = c.coefs.iter().map(|&(j, v)| v * self.x[j]).sum();
         let s: f64 = c.coefs.iter().map(|&(j, v)| v * d[j]).sum();
         Some((act - c.rhs) / s.abs().max(1e-6))
+    }
+}
+
+/// 今の LP 解 `x` から暫定解 `inc` (`ENOMOTO_MIP_CUTSEL_DCD_SOL=ファイル` があればその点) へ向かう単位方向と、その長さ |x* - x|
+/// (暫定解がない・同じ点なら `None`)
+fn dcd_direction(x: &[f64], inc: Option<&[f64]>) -> Option<(Vec<f64>, f64)> {
+    let file_sol: Option<Vec<f64>> = env_str!("ENOMOTO_MIP_CUTSEL_DCD_SOL")
+        .and_then(|f| std::fs::read_to_string(f).ok())
+        .map(|s| s.lines().filter_map(|l| l.trim().parse().ok()).collect::<Vec<f64>>())
+        .filter(|v| v.len() == x.len());
+    let t = file_sol.as_deref().or(inc.filter(|v| v.len() == x.len()))?;
+    let mut d: Vec<f64> = t.iter().zip(x).map(|(a, b)| a - b).collect();
+    let nd = d.iter().map(|v| v * v).sum::<f64>().sqrt();
+    if nd > 0.0 {
+        d.iter_mut().for_each(|v| *v /= nd);
+        Some((d, nd))
+    } else {
+        None
     }
 }
 
