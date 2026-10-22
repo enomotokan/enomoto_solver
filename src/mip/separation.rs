@@ -391,7 +391,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 別枠 (`ENOMOTO_T_MIP_INOUT_MAX_CUTS`、既定 50) で選んだカットを x_lp を切るカットと合わせて LP に入れる。
         // x(α) で破れるカットがなければ x_c を x(α) に移す (Ben-Ameur & Neto の更新)。値: `1` / `ipm` = 費用つきの内点法
         // (最適面の中心付近)、`ac` = 費用 0 の内点法 (実行可能領域の中心付近)、`inc` = 暫定解があればそれ (なければ `ipm`)
-        let inout_mode = if self.params.submip { None } else { env_str!("ENOMOTO_MIP_INOUT_SEP") };
+        // `ENOMOTO_MIP_INOUT_NO_BG`: カットを強める求解 (根のヒューリスティクスの間の別スレッド) では使わない
+        let inout_mode = if self.params.submip || (job.is_some() && env_str!("ENOMOTO_MIP_INOUT_NO_BG").is_some()) { None } else { env_str!("ENOMOTO_MIP_INOUT_SEP") };
         let inout_alpha0 = tunable!("ENOMOTO_T_MIP_INOUT_ALPHA", 0.5, f64);
         let inout_quota = tunable!("ENOMOTO_T_MIP_INOUT_MAX_CUTS", 50usize, usize);
         let inout_light = env_str!("ENOMOTO_MIP_INOUT_LIGHT").is_some();
