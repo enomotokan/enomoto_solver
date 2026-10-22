@@ -578,6 +578,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 io_rounds += 1;
                 io_cands_tot += io_cands.len();
+                if self.params.verbose {
+                    // 最適面の広さの目安: x_c と x_lp で値の違う列の数、分数の整数列の数 (x_lp と x(α))
+                    let ndiff = (0..n).filter(|&j| (xc[j] - x[j]).abs() > 1e-6 * (1.0 + x[j].abs())).count();
+                    let zc: f64 = (0..n).map(|j| p.cost[j] * xc[j]).sum();
+                    let zl: f64 = (0..n).map(|j| p.cost[j] * x[j]).sum();
+                    eprintln!(
+                        "MIP: cut round {round}: in-out point: {ndiff} of {n} columns differ, fractional {} at x_lp / {} at x(a), obj x_c {:.6e} x_lp {:.6e}",
+                        self.fractional(&x).len(),
+                        self.fractional(&xa).len(),
+                        zc + p.offset,
+                        zl + p.offset
+                    );
+                }
                 if io_cands.is_empty() {
                     // x(α) は分離できない: 中心を x(α) に寄せる
                     io_moves += 1;
