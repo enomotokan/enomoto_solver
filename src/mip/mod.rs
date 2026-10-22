@@ -639,7 +639,13 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
     // 前処理の LP による固定 ([`lp_probe`]) は最初の求解だけ (サブ MIP・再スタートの後は使わない)
     let lp_probe_secs = (env_str!("ENOMOTO_MIP_NO_LP_PROBE").is_none() && !params.submip && params.restarts == 0)
         .then(|| if params.time_limit.is_finite() { tunable!("ENOMOTO_T_MIP_LP_PROBE_TIME_FRAC", 0.05, f64) * params.time_limit } else { 10.0 });
+    let gi = env_str!("ENOMOTO_MIP_PRESOLVE_GI").is_some() && !params.submip && implbd_genint_for(&p.is_int, &p.col_lo, &p.col_up);
+    if gi && params.verbose {
+        eprintln!("MIP: presolve: ENOMOTO_MIP_PRESOLVE_GI (probing with implications, presolve again after probing, integer aggregation)");
+    }
+    PRESOLVE_GI.with(|f| f.set(gi));
     let presolved = if use_presolve { presolve_mip(p, params.verbose, params.submip, lp_probe_secs) } else { None };
+    PRESOLVE_GI.with(|f| f.set(false));
     // `ENOMOTO_MIP_SPARSIFY_LATE`: HiGHS と同じく前処理 (プロービング・同値の代入の後) の最後に 1 回だけ疎化し
     // ([`sparsify_rows_highs`]、`=old` なら [`sparsify_rows`])、書き換えたら前処理をもう一度かける (その中では疎化しない)
     let presolved = match presolved {
@@ -816,6 +822,20 @@ thread_local! {
     static PROBE_EQUIV_FORCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// この求解の前処理で `ENOMOTO_MIP_PROBE_EQUIV2` の代入を使った (根のカットの `ENOMOTO_MIP_EQUIV2_CUTS` の判定用。最初の求解の始めに戻す)
     pub(crate) static EQUIV2_USED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// 今の [`presolve_mip`] で [`presolve_gi`] の縮小を使う ([`solve_problem_inner`] が前処理の間だけ立てる)
+    static PRESOLVE_GI: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// `ENOMOTO_MIP_PRESOLVE_GI` (試作、既定では使わない): 一般整数のある問題 ([`implbd_genint_for`] が真、既定の P3 と同じ条件) の
+/// サブ MIP 以外の前処理で、HiGHS の前処理との差のうち大きい 3 つを使う (`analysis/presolve_gap_20261022.md`)。
+/// - `ENOMOTO_MIP_PROBE_CLIQUE`: プロービングで見つけた含意を後の列の伝播に使う (HiGHS の probing は clique 表を伝播に使う)
+/// - `ENOMOTO_MIP_PROBE_REPRESOLVE`: プロービングが境界を締めたら前処理をかけ直す (`ENOMOTO_T_MIP_PRESOLVE_GI_REPRESOLVE_MAX` 回まで、
+///   既定 6。HiGHS は前処理のループの中で probing を繰り返す)
+/// - `ENOMOTO_MIP_AGG_INT`: 整数列も整数性が保たれるときは implied free の代入で消す
+/// mzzv42z は 10460 x 10693 -> 7484 x 7655 (HiGHS 6139 x 6980)。一般整数のない drayage-25-23・h80x6320d・neos-960392 は
+/// 同じ縮小で遅くなる (同じメモの副作用の節) ので一般整数のある問題に絞る
+pub(crate) fn presolve_gi() -> bool {
+    PRESOLVE_GI.with(|f| f.get())
 }
 
 thread_local! {
@@ -1435,6 +1455,7 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
 /// `ENOMOTO_MIP_PROBE_EQUIV2` の 2 巡目が多くの組を見つけたとき ([`PROBE_EQUIV_FORCE`]) も同じ。
 fn probe_equiv_fix() -> bool {
     env_str!("ENOMOTO_MIP_PROBE_REPRESOLVE").is_none()
+        && !presolve_gi()
         && PROBE_EQUIV.with(|e| !e.borrow().is_empty())
         && (env_str!("ENOMOTO_MIP_PROBE_EQUIV_FIX").is_some() || PROBE_EQUIV_FORCE.with(|f| f.get()))
 }
@@ -1478,8 +1499,8 @@ fn substitute_probe_equiv(prob: &MipProblem, mut postsolve: Vec<crate::presolve:
 /// (HiGHS は前処理の中で 732 行まで減らす)。かけ直した前処理は新しい問題でプロービングをやり直す (含意はそちらで集め直す)。
 /// 前処理は列の番号を保ち、整数最適化では列の尺度をかけない (d = 1) ので、後処理は内側の手順の後に外側の手順を並べればよい
 fn represolve_after_probe(prob: MipProblem, mut postsolve: Vec<crate::presolve::PostsolveStep>, scaling: crate::presolve::scaling::Scaling, verbose: bool, submip: bool, depth: u32) -> Option<Presolved> {
-    let max = tunable!("ENOMOTO_T_MIP_PROBE_REPRESOLVE_MAX", 2u32, u32);
-    if env_str!("ENOMOTO_MIP_PROBE_REPRESOLVE").is_none() || depth >= max || (submip && env_str!("ENOMOTO_MIP_PROBE_REPRESOLVE_SUBMIP").is_none()) {
+    let max = if presolve_gi() { tunable!("ENOMOTO_T_MIP_PRESOLVE_GI_REPRESOLVE_MAX", 6u32, u32) } else { tunable!("ENOMOTO_T_MIP_PROBE_REPRESOLVE_MAX", 2u32, u32) };
+    if (env_str!("ENOMOTO_MIP_PROBE_REPRESOLVE").is_none() && !presolve_gi()) || depth >= max || (submip && env_str!("ENOMOTO_MIP_PROBE_REPRESOLVE_SUBMIP").is_none()) {
         return Some(Presolved::Reduced { prob, postsolve, scaling });
     }
     if verbose {
@@ -1760,7 +1781,7 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
     // そのときは境界を締めていても代入まで進む ([`probe_equiv_fix`])。少なければ捨てる (既定と同じ問題になる)
     let equiv2 = env_str!("ENOMOTO_MIP_PROBE_EQUIV2").is_some() && !submip;
     let pclique_equiv = (equiv2 || env_str!("ENOMOTO_MIP_PROBE_CLIQUE").is_some_and(|v| v == "equiv")) && !submip;
-    let want_pclique = env_str!("ENOMOTO_MIP_PROBE_CLIQUE").is_some() && !pclique_equiv && !submip;
+    let want_pclique = (env_str!("ENOMOTO_MIP_PROBE_CLIQUE").is_some() || presolve_gi()) && !pclique_equiv && !submip;
     let mut equiv: Vec<(usize, usize, bool)> = Vec::new();
     let mut passes = 0usize;
     'passes: for _pass in 0..max_pass {

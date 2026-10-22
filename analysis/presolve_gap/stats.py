@@ -1,0 +1,17 @@
+# MPS の構造の簡単な集計 (列の種類・行の種類・係数)
+import sys, highspy, numpy as np, collections
+h = highspy.Highs(); h.setOptionValue("output_flag", False)
+h.readModel(sys.argv[1]); lp = h.getLp()
+integ = np.array(lp.integrality_) if len(lp.integrality_) else np.zeros(lp.num_col_)
+integ = np.array([int(x) for x in lp.integrality_]) if len(lp.integrality_) else np.zeros(lp.num_col_, int)
+lo, up = np.array(lp.col_lower_), np.array(lp.col_upper_)
+binm = (integ == 1) & (lo == 0) & (up == 1)
+print("cols", lp.num_col_, "int", (integ == 1).sum(), "bin", binm.sum(), "genint", ((integ == 1) & ~binm).sum(), "cont", (integ == 0).sum())
+rl, ru = np.array(lp.row_lower_), np.array(lp.row_upper_)
+print("rows", lp.num_row_, "eq", (rl == ru).sum(), "nnz", len(lp.a_matrix_.index_))
+gi = (integ == 1) & ~binm
+print("genint bounds", collections.Counter(zip(lo[gi], up[gi])).most_common(8))
+start = np.array(lp.a_matrix_.start_); idx = np.array(lp.a_matrix_.index_); val = np.array(lp.a_matrix_.value_)
+collen = np.diff(start)
+print("col len hist", collections.Counter(collen).most_common(8))
+print("coef", collections.Counter(np.round(val, 3)).most_common(10))
