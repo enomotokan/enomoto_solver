@@ -1,0 +1,10 @@
+#!/bin/bash
+# 試作 ENOMOTO_MIP_ROOT_HSEL の形の比較 (physiciansched6-2、e2all の上)
+cd "$(dirname "$0")"
+E2ALL="ENOMOTO_MIP_PROBE_EQUIV2=1 ENOMOTO_MIP_EQUIV2_CUTS=1 ENOMOTO_MIP_EQUIV2_FJ=1 ENOMOTO_MIP_EQUIV2_TAB=1"
+for i in 1 2; do
+  ./run_cfg.sh physiciansched6-2 60 e2hs ENOMOTO_MIP_DEBUG_SEP=1 $E2ALL ENOMOTO_MIP_ROOT_HSEL=1
+  ./run_cfg.sh physiciansched6-2 60 e2hs_age0 ENOMOTO_MIP_DEBUG_SEP=1 $E2ALL ENOMOTO_MIP_ROOT_HSEL=1 ENOMOTO_T_MIP_HSEL_AGE=0
+  ./run_cfg.sh physiciansched6-2 60 e2hs_pool0 ENOMOTO_MIP_DEBUG_SEP=1 $E2ALL ENOMOTO_MIP_ROOT_HSEL=1 ENOMOTO_T_MIP_HSEL_POOL=0
+done
+./run_cfg.sh physiciansched6-2 60 defhs ENOMOTO_MIP_DEBUG_SEP=1 ENOMOTO_MIP_ROOT_HSEL=1

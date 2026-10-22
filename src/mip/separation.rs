@@ -294,7 +294,26 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 伸びの 0.1% 以下なら停滞。3 回続けて停滞したら止める (目的値が動かなくても LP 解が動いている間は続ける)。
         // 40 問では 19 問 27.87 -> 17 問 28.49 (最大 100 ラウンドにすると 16 問 29.77): 根の下界は上がる (neos-1456979
         // 154 -> 163) が、こちらの 1 ラウンドは HiGHS の数倍重く、根に時間がかかる問題 (qnet1・10teams・misc07) が遅くなる
-        let highs_stall = env_str!("ENOMOTO_MIP_CUT_STALL_HIGHS").is_some() && !self.params.submip;
+        // `ENOMOTO_MIP_ROOT_HSEL` (試作、既定では使わない): 根のカットのループの選択と削除を HiGHS 1.15.1 に合わせる
+        // (`HighsSeparation::separationRound` → `HighsCutPool::separate` → `HighsLpRelaxation::performAging`)。
+        // - 候補は今のラウンドで作ったカットと、プールで今の LP 解に違反しているカット (`ENOMOTO_T_MIP_HSEL_POOL`、既定 1)。
+        //   HiGHS は分離したカットをいったんプールに入れ、プール全体から選ぶ
+        // - 選択は HiGHS のスコア (違反量 / (効いている非零の数 × そのノルム)) で、ラウンドをまたいだ最良スコアの係数倍以上
+        //   ([`Self::select_cuts_highs`])、平行度の上限 `ENOMOTO_T_MIP_HSEL_MAXPAR` (既定 0.1)。1 ラウンドの本数の上限は
+        //   `ENOMOTO_T_MIP_HSEL_MAX_CUTS` (既定 0 = なし。HiGHS にはない)。上限を行の数まで広げる仕組み (CUT_WIDEN) は使わない
+        // - LP からの削除: 効いていないカットを毎ラウンド外すのをやめ、年齢 (論理変数が基底のラウンドで 1 増え、双対値が 0 で
+        //   ないラウンドで 0 に戻る) が min(ラウンド数, `ENOMOTO_T_MIP_HSEL_AGE` (既定 10)) を超えたものを
+        //   max(上限 / 2, 2) ラウンドごとに外す (`ENOMOTO_T_MIP_HSEL_AGE` = 0 なら既定の毎ラウンドの削除)
+        // - 停滞判定は HiGHS のもの (`ENOMOTO_MIP_CUT_STALL_HIGHS` と同じ。`ENOMOTO_T_MIP_HSEL_STALL` = 0 で既定の判定)、
+        //   ラウンドの上限は `ENOMOTO_T_MIP_HSEL_ROUNDS` (既定 100。HiGHS は上限なし)
+        // `ENOMOTO_MIP_EQUIV2_HSEL` (試作): 前処理が `ENOMOTO_MIP_PROBE_EQUIV2` の代入を使った求解 (サブ MIP でない) だけで使う
+        // (全問に使うと beasleyC3・neos-911970 の根の下界が下がる、analysis/cutsel_highs_20261022.md)
+        let hsel = (env_str!("ENOMOTO_MIP_ROOT_HSEL").is_some()
+            || (env_str!("ENOMOTO_MIP_EQUIV2_HSEL").is_some() && super::EQUIV2_USED.with(|f| f.get())))
+            && !self.params.submip;
+        let hsel_age = if hsel { tunable!("ENOMOTO_T_MIP_HSEL_AGE", 10u32, u32) } else { 0 };
+        let mut hsel_epoch = 0usize;
+        let highs_stall = (env_str!("ENOMOTO_MIP_CUT_STALL_HIGHS").is_some() || (hsel && tunable!("ENOMOTO_T_MIP_HSEL_STALL", 1usize, usize) > 0)) && !self.params.submip;
         let first_x = self.lp.col_values();
         let mut avgdir = vec![0.0f64; n];
         let mut smooth = 0.0f64;
@@ -306,7 +325,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 解けるが、5 ラウンドのサブ MIP は 500 ノードで止まり 773〜779 だった。HiGHS のサブ MIP は通常のカットのループを回し、
         // 同じ形の近傍を 1 ノードで解く (analysis/beasleyC3_r3_20261020.md)
         let fc_sub = self.params.submip && self.params.fc_submip;
-        let mut max_rounds = if fc_sub { tunable!("ENOMOTO_T_MIP_FC_SUBMIP_CUT_ROUNDS", 25usize, usize) } else if self.params.submip { tunable!("ENOMOTO_T_MIP_SUBMIP_CUT_ROUNDS", 5usize, usize) } else { tunable!("ENOMOTO_T_MIP_CUT_ROUNDS", 25usize, usize) };
+        let mut max_rounds = if fc_sub { tunable!("ENOMOTO_T_MIP_FC_SUBMIP_CUT_ROUNDS", 25usize, usize) } else if self.params.submip { tunable!("ENOMOTO_T_MIP_SUBMIP_CUT_ROUNDS", 5usize, usize) } else if hsel { tunable!("ENOMOTO_T_MIP_HSEL_ROUNDS", 100usize, usize) } else { tunable!("ENOMOTO_T_MIP_CUT_ROUNDS", 25usize, usize) };
         let eq2c = self.equiv2_cuts();
         let cut_frac = if eq2c { tunable!("ENOMOTO_T_MIP_EQUIV2_CUT_TIME_FRAC", 0.3, f64) } else { tunable!("ENOMOTO_T_MIP_CUT_TIME_FRAC", 0.1, f64) };
         let mut time_cap = if self.params.time_limit.is_finite() { cut_frac * self.params.time_limit } else { f64::INFINITY };
@@ -367,7 +386,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 毎ラウンド候補が数千本あり、50 本ずつ切っても LP が切られていない別の箱に移るだけで下界が 415.24 から動かず、
         // 停滞判定で 5 ラウンドで止まっていた。下界が上がっている問題では起きないので、上限を一律に広げる
         // (40 問で悪化した) のと違い他の問題は変わらない
-        let widen_on = env_str!("ENOMOTO_MIP_NO_CUT_WIDEN").is_none() && !self.params.submip;
+        let widen_on = env_str!("ENOMOTO_MIP_NO_CUT_WIDEN").is_none() && !self.params.submip && !hsel;
         let mut widened = false;
         // `ENOMOTO_MIP_CUT_ADAPT_ROUNDS` (実験的): ラウンドの上限に達したとき、直近 5 ラウンドの目的値の伸びがそれまでの伸びの
         // `ENOMOTO_T_MIP_CUT_ADAPT_ROUNDS_FRAC` 以上なら上限を 25 ラウンド延ばす (`ENOMOTO_T_MIP_CUT_ADAPT_ROUNDS_CAP` まで)
@@ -547,8 +566,21 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 効き目の大きい順に、平行なものを除いて選ぶ
             let max_cuts = tunable!("ENOMOTO_T_MIP_ROOT_MAX_CUTS", 50usize, usize).min(p.m.max(50));
             let max_cuts = if adapt_max_cuts > 0 { adapt_max_cuts } else { max_cuts };
-            let (forced, cands): (Vec<Candidate>, Vec<Candidate>) = cands.into_iter().partition(|c| c.forced);
-            let chosen = if phase2 {
+            let (forced, mut cands): (Vec<Candidate>, Vec<Candidate>) = cands.into_iter().partition(|c| c.forced);
+            if hsel && tunable!("ENOMOTO_T_MIP_HSEL_POOL", 1usize, usize) > 0 {
+                // 今のラウンドの候補はプールに入れてあるので、プールで違反しているカットを候補にする (重複はプールが除く)
+                let viol = self.pool_violated(&x);
+                if !viol.is_empty() {
+                    cands = viol.into_iter().map(|(eff, k)| {
+                        let (c, r, _) = &self.cut_pool[k];
+                        Candidate { coefs: c.clone(), rhs: *r, efficacy: eff, forced: false }
+                    }).collect();
+                }
+            }
+            let chosen = if hsel {
+                let cap = tunable!("ENOMOTO_T_MIP_HSEL_MAX_CUTS", 0usize, usize);
+                self.select_cuts_highs(cands, if cap == 0 { usize::MAX } else { cap }, &x, tunable!("ENOMOTO_T_MIP_HSEL_MAXPAR", 0.1, f64))
+            } else if phase2 {
                 let maxpar = tunable!("ENOMOTO_T_MIP_CUT_PHASE2_MAXPAR", 0.3, f64);
                 self.select_cuts_highs(cands, max_cuts, &x, maxpar)
             } else if env_str!("ENOMOTO_MIP_CUTSEL_HIGHS").is_some() {
@@ -851,7 +883,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let root_age = tunable!("ENOMOTO_T_MIP_ROOT_CUT_AGE", 0u32, u32);
             let t_rm0 = std::time::Instant::now();
             let rows_before = self.lp.num_rows();
-            if root_age > 0 {
+            if hsel_age > 0 {
+                hsel_epoch += 1;
+                self.hsel_age_remove(hsel_epoch, hsel_age);
+            } else if root_age > 0 {
                 self.age_cuts();
                 let removed = self.remove_cuts_older_than(root_age);
                 if env_str!("ENOMOTO_MIP_DEBUG_DSE_CHECK").is_some() && !self.params.submip && removed > 0 {
@@ -1405,6 +1440,48 @@ impl<'a, L: MipLp> Solver<'a, L> {
         for k in r0.max(m0) - m0..self.cut_ids.len() {
             self.ts_cut_ids.insert(self.cut_ids[k]);
         }
+    }
+
+    /// `ENOMOTO_MIP_ROOT_HSEL` の LP のカットの年齢と削除 (HiGHS の `HighsLpRelaxation::performAging(true)`): 論理変数が基底の
+    /// カットは年齢を 1 増やし、双対値が 0 でないカットは 0 に戻す。`epoch` が max(`limit` / 2, 2) の倍数のときだけ、年齢が
+    /// min(`epoch`, `limit`) を超え、今も論理変数が基底のカットを外す。外した数を返す。
+    fn hsel_age_remove(&mut self, epoch: usize, limit: u32) -> usize {
+        self.sync_cut_age();
+        if self.cut_age.is_empty() {
+            return 0;
+        }
+        let m0 = self.p.m;
+        let y = self.lp.row_duals();
+        {
+            let b = self.lp.basis_ref();
+            for (k, age) in self.cut_age.iter_mut().enumerate() {
+                let i = m0 + k;
+                if b.row[i] == VarStatus::Basic {
+                    *age = age.saturating_add(1);
+                } else if y[i].abs() > 1e-7 {
+                    *age = 0;
+                }
+            }
+        }
+        if epoch % ((limit / 2).max(2) as usize) != 0 {
+            return 0;
+        }
+        let lim = (epoch as u32).min(limit);
+        let mut remove = vec![false; self.lp.num_rows()];
+        let mut cnt = 0;
+        // 外すのは論理変数が基底のものだけ (HiGHS と同じ。非基底で双対値が 0 の行は年齢が戻らないが、外すと基底が崩れる)
+        let b = self.lp.basis_ref();
+        for (k, &age) in self.cut_age.iter().enumerate() {
+            if age > lim && b.row[m0 + k] == VarStatus::Basic && !self.merged_cuts.contains(&self.cut_ids[k]) {
+                remove[m0 + k] = true;
+                cnt += 1;
+            }
+        }
+        drop(b);
+        if cnt > 0 {
+            self.delete_lp_rows(&remove);
+        }
+        cnt
     }
 
     /// 年齢が `limit` を超えたカットを LP から外す。外した数を返す。
