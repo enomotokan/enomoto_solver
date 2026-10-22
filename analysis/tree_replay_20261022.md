@@ -181,6 +181,31 @@ misc07・neos-860300・eil33-2・mas76 は kpnf で悪くなった問題を先�
 solved {'base': 25, 'kpnf': 23, 'mink': 26}
 
 
+### HiGHS だけが解く 16 問 (benchmarks/highsonly16_*、4 スレッド・60 秒、既定と mink を 1 回ずつ)
+
+解けた数: 既定 10 / mink 11 (HiGHS 15)。mink で新たに解けたのは neos-2978193-inde (50.4 秒) と beasleyC3 (35.9 秒、既定は時間切れ)、
+落としたのは mc11 (既定 47.7 秒 -> 時間切れ、暫定解は最適値 11689 で下界 11679.7)。最適値の食い違いは 0 件。`side_table_h16.txt`・`logs/h16/`。
+
+| 問題 | 既定 | mink |
+|---|---|---|
+| app1-1 | 21.4 (1535) | 15.2 (1742) |
+| beasleyC3 | time_limit obj 754.0 lb 751.305 (2413) | 35.9 (1810) |
+| drayage-100-23 | 16.9 (None) | 17.2 (2918) |
+| drayage-25-23 | 21.9 (None) | 25.0 (None) |
+| hypothyroid-k1 | 23.7 (None) | 24.1 (None) |
+| mc11 | 47.7 (3355) | time_limit obj 11689.0 lb 11679.7 (2324) |
+| mzzv42z | time_limit obj -18614.0 lb -20805.8 (36) | time_limit obj -20360.0 lb -20763.5 (None) |
+| neos-2978193-inde | time_limit obj -2.388061686 lb -2.41852 (4724) | 50.4 (2613) |
+| neos-911970 | 38.9 (12953) | 41.6 (19489) |
+| neos-950242 | 17.1 (None) | 16.1 (None) |
+| neos-960392 | 30.7 (None) | 29.8 (None) |
+| ns1116954 | 28.8 (None) | 32.7 (None) |
+| nursesched-sprint02 | 26.6 (None) | 35.3 (None) |
+| physiciansched6-2 | time_limit obj 51029.00000000002 lb 48587.4 (81) | time_limit obj 51029.00000000002 lb 48587.4 (71) |
+| roll3000 | time_limit obj 12890.000000000002 lb 12568.3 (1863) | time_limit obj 12890.000000000002 lb 12563.5 (1547) |
+| uccase12 | time_limit obj 11507.408968884274 lb 11507.4 (None) | time_limit obj 11507.902848309343 lb 11507.4 (None) |
+solved {'base': 10, 'kpnf': 0, 'mink': 11}
+
 ## 7. 試作・診断の一覧 (どれも既定では無効)
 
 - `ENOMOTO_MIP_BRANCH_REPLAY=ファイル` (src/mip/replay.rs、solver.rs の木のループ、queue.rs `prio_only`): HiGHS の分枝をなぞる。診断用。
