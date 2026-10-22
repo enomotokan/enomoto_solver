@@ -2533,6 +2533,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.params.submip && self.params.cutoff.is_infinite() && env_str!("ENOMOTO_MIP_SUBMIP_NO_SB").is_some() {
             self.pc.min_reliable = 0;
         }
+        // `ENOMOTO_MIP_ROOT_SUBMIP_HL` の根の RINS のサブ MIP とその中のサブ MIP も強分岐をしない (`ENOMOTO_MIP_ROOT_SUBMIP_HL_SB` ならする。
+        // [`Self::select_branch_inner`] でも止める)。physiciansched6-2 の根の RINS の近傍 (約 1500 列) では最初のノードの強分岐に 1.4 秒かかった
+        if self.params.submip && super::heuristics::root_submip_hl_any() && env_str!("ENOMOTO_MIP_ROOT_SUBMIP_HL_SB").is_none() {
+            self.pc.min_reliable = 0;
+        }
         // 木の写しから解く: 写しを作ったときの LP のカットの行とカットプールを入れる
         if let Some(snap) = self.snap.clone() {
             for (c, r) in &snap.pool {
@@ -2616,9 +2621,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let cap = if super::heuristics::fj_feas_extend(&pc) && self.params.time_limit.is_finite() { tunable!("ENOMOTO_T_MIP_FJ_FEAS_FRAC", 0.5, f64) * self.params.time_limit } else { cap };
                 // `ENOMOTO_MIP_FJ_P3` (既定、`ENOMOTO_MIP_NO_FJ_P3` で止める): FJ だけ、p5s の前処理の変更をかけ直した問題で探す ([`super::fj_p3_problem`])
                 let fj_p3 = super::fj_p3_on();
+                // `ENOMOTO_MIP_EQUIV2_FJ` (試作): 前処理が `ENOMOTO_MIP_PROBE_EQUIV2` の代入を使った求解では、FJ 用の問題で大きさに依らず
+                // INEQ_SINGLETON を使う ([`super::fj_p3_problem`])
+                let fj_ineq = env_str!("ENOMOTO_MIP_EQUIV2_FJ").is_some() && super::EQUIV2_USED.with(|f| f.get());
                 let h = std::thread::spawn(move || {
                     if fj_p3 {
-                        if let Some((q, post, sc)) = super::fj_p3_problem(&pc) {
+                        if let Some((q, post, sc)) = super::fj_p3_problem(&pc, fj_ineq) {
                             crate::set_fj_p3_force(true);
                             let r = super::heuristics::fj_search(&q, &q.col_lo, &q.col_up, effort, cap, seed, Some(&stop2));
                             crate::set_fj_p3_force(false);
@@ -3038,7 +3046,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // サブ MIP (942 列) では、この 4 つで 2.4 秒使って何も見つけず、入れ子の RENS のサブ MIP でも毎回同じだけかかる
                 // (HiGHS のサブ MIP は根のヒューリスティクスのほとんどを入れ子の RENS に使い、1 回 0.1-1.6 秒で終わる)
                 // (暫定解がない、つまり打ち切り値が無限のサブ MIP だけ。`ENOMOTO_MIP_SUBMIP_NO_SB` と同じ理由)
-                let light = self.params.submip && self.params.cutoff.is_infinite() && env_str!("ENOMOTO_MIP_SUBMIP_LIGHT_HEUR").is_some();
+                // `ENOMOTO_MIP_ROOT_SUBMIP_HL` の根の RINS のサブ MIP とその中のサブ MIP でも同じく使わない (`ENOMOTO_MIP_ROOT_SUBMIP_HL_PUMP` なら
+                // 使う)。HiGHS には Feasibility Pump がなく、サブ MIP の根では RENS の後すぐ木に進む。physiciansched6-2 の根の RINS の近傍では、
+                // 根の LP が最適値 49324 の入れ子の RENS のサブ MIP も、Feasibility Pump で時間を使い切って 0 ノードで止まった
+                let hl_light = self.params.submip && super::heuristics::root_submip_hl_any() && env_str!("ENOMOTO_MIP_ROOT_SUBMIP_HL_PUMP").is_none();
+                let light = hl_light || (self.params.submip && self.params.cutoff.is_infinite() && env_str!("ENOMOTO_MIP_SUBMIP_LIGHT_HEUR").is_some());
                 // ダイビングの予算: 最初の根の LP の 2 倍に、カットのループを含めた根全体の反復数の一定割合を足す
                 let dive_budget = 2 * root_iters + 1000 + (tunable!("ENOMOTO_T_MIP_ROOT_DIVE_FRAC", 0.0, f64) * self.lp.total_iterations() as f64) as u64;
                 // `ENOMOTO_MIP_PAR_DIVES`: 並列モードで暫定解がなければ、Feasibility Pump と 3 つのダイビングを、今の根の写しから
@@ -5452,7 +5464,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         };
         self.sb_degen_stats[0] += 1;
         self.sb_degen_stats[1] += degenerate as u64;
-        let allow_sb = sb <= maxsb && !degenerate;
+        // `ENOMOTO_MIP_ROOT_SUBMIP_HL` の根の RINS のサブ MIP とその中のサブ MIP では強分岐をしない (`ENOMOTO_MIP_ROOT_SUBMIP_HL_SB` ならする。
+        // HiGHS のサブ MIP の `mip_pscost_minreliable = 0`。ここの信頼度のしきい値は `min_reliable` を見ないので別に止める)
+        let hl_no_sb = self.params.submip && super::heuristics::root_submip_hl_any() && env_str!("ENOMOTO_MIP_ROOT_SUBMIP_HL_SB").is_none();
+        let allow_sb = sb <= maxsb && !degenerate && !hl_no_sb;
         // 信頼度のしきい値: 予算の残りに応じて 1..5
         let mut prio = ((maxsb - sb) / (sb + 1.0)).min(1.0);
         prio = prio.max((quot - sb) / (sb + 1.0)).max(0.0);
