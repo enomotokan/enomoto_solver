@@ -1567,7 +1567,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// ([`SUBMIP_DEPTH`]) が `ENOMOTO_T_MIP_SUBMIP_RENS_DEPTH` (既定 2。深さ 3 のサブ MIP まで作る) 以下のときだけ
     pub(super) fn nested_rens_ok(&self) -> bool {
         let d = SUBMIP_DEPTH.with(|d| d.get());
-        env_str!("ENOMOTO_MIP_SUBMIP_RENS").is_some() && d >= 1 && d as usize <= tunable!("ENOMOTO_T_MIP_SUBMIP_RENS_DEPTH", 2usize, usize)
+        (env_str!("ENOMOTO_MIP_SUBMIP_RENS").is_some() && d >= 1 && d as usize <= tunable!("ENOMOTO_T_MIP_SUBMIP_RENS_DEPTH", 2usize, usize)) || self.submip_root_rens_on()
+    }
+
+    /// `ENOMOTO_MIP_SUBMIP_ROOT_RENS` (試作、既定では使わない): 外側の根のサブ MIP (深さ 1) の根で、打ち切り値があっても
+    /// (外側の暫定解の値) HiGHS と同じダイビング式の RENS (固定率の目標 0.6、失敗したら半分にしてやり直す) を回す。
+    /// HiGHS のサブ MIP は根のカットの後に `RENS(rootlpsol)` を回し、physiciansched6-2 の根の RINS の近傍 (外側の打ち切り値 50626)
+    /// ではそれ (入れ子のサブ MIP、1 ノード) が 49324 を当てる。ENOMOTO のサブ MIP は RENS を回さず、下界が 49324 に届いても
+    /// 500 ノードで解が見つからない (analysis/submip_hl_20261022.md)
+    pub(super) fn submip_root_rens_on(&self) -> bool {
+        self.params.submip && self.nodes <= 1 && SUBMIP_DEPTH.with(|d| d.get()) == 1 && env_str!("ENOMOTO_MIP_SUBMIP_ROOT_RENS").is_some()
     }
 
     /// RENS (HiGHS の `HighsPrimalHeuristics::RENS` に倣う): LP 解で整数値の整数列を、残りの自由な列の 1 割ずつ
@@ -1592,7 +1601,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // (再スタート後の根は暫定解を打ち切り値としてだけ持つので、打ち切り値が有限なら対象外)。
         // 40 問: 動くのは 30n20b8・flugpl・neos-1456979・timtab1 の 4 問。19 問 27.69 (無効なら 18 問 28.06)、
         // neos-1456979 は解なし -> 285、timtab1 は 1257510 -> 862380
-        if ((self.incumbent.is_none() && self.prune_limit().is_infinite()) || self.fj_poor()) && self.nodes <= 1 && !self.noinc_rens_done && env_str!("ENOMOTO_MIP_NO_NOINC_RENS").is_none() {
+        let sub_root = nested && self.incumbent.is_none() && self.submip_root_rens_on();
+        if (sub_root || (self.incumbent.is_none() && self.prune_limit().is_infinite()) || self.fj_poor()) && self.nodes <= 1 && !self.noinc_rens_done && env_str!("ENOMOTO_MIP_NO_NOINC_RENS").is_none() {
             // 根の 2 回目の呼び出し (カット前の LP 解) はダイビング式では同じ LP から始めるので、この形は 1 回だけ
             self.noinc_rens_done = true;
             let keep = (self.submip_time_frac, self.submip_time_max, self.submip_node_mult);
@@ -1620,6 +1630,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 self.submip_node_mult *= tunable!("ENOMOTO_T_MIP_SUBMIP_RENS_NODES_MULT", 0.1, f64);
                 self.submip_time_frac = tunable!("ENOMOTO_T_MIP_SUBMIP_RENS_TIME_FRAC", 0.15, f64);
                 self.submip_time_max = tunable!("ENOMOTO_T_MIP_SUBMIP_RENS_TIME_MAX", 3.0, f64);
+                if sub_root {
+                    // `ENOMOTO_MIP_SUBMIP_ROOT_RENS`: やり直し `ENOMOTO_T_MIP_SUBMIP_ROOT_RENS_TRIES` (4) 回、1 回の時間は
+                    // 残りの `..._TIME_FRAC` (0.3)・最大 `..._TIME_MAX` (5 秒)、ノード上限 500 の `..._NODES_MULT` (0.2) 倍
+                    tries = tunable!("ENOMOTO_T_MIP_SUBMIP_ROOT_RENS_TRIES", 4usize, usize).max(1);
+                    self.submip_node_mult = keep.2 * tunable!("ENOMOTO_T_MIP_SUBMIP_ROOT_RENS_NODES_MULT", 0.2, f64);
+                    self.submip_time_frac = tunable!("ENOMOTO_T_MIP_SUBMIP_ROOT_RENS_TIME_FRAC", 0.3, f64);
+                    self.submip_time_max = tunable!("ENOMOTO_T_MIP_SUBMIP_ROOT_RENS_TIME_MAX", 5.0, f64);
+                }
             }
             let mut found = false;
             for t in 0..tries {

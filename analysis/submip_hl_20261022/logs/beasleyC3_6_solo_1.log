@@ -1,0 +1,55 @@
+MIP: presolve: tightened 42 coefficients (skipped 0 in rows redundant within tolerance), normalized 0 integer rows
+MIP: presolve: rows 1461 -> 119, free columns 1007 -> 146, nonzeros 4024 -> 317, postsolve steps 76
+MIP: LP probing pass 1: 35 candidates, 6 fixings (70 LPs, 329 iters, 0.02s)
+MIP: LP probing pass 2: 3 candidates, 0 fixings (76 LPs, 382 iters, 0.03s)
+MIP: LP probing: tried 38 columns, fixed 6, LP 6.5039117679e2 -> 6.7915963622e2 (76 LPs, 382 iters, 0.03s)
+MIP: presolve: tightened 18 coefficients (skipped 0 in rows redundant within tolerance), normalized 0 integer rows
+MIP: presolve: rows 119 -> 112, free columns 140 -> 140, nonzeros 317 -> 296, postsolve steps 0
+MIP: probing: 76 of 76 binaries probed (1 passes), 0 fixed, 0 bounds tightened, 55 implications (0.00s)
+MIP: probing: 0 equivalent binary pairs
+Presolve: 1461 rows, 1007 columns -> 112 rows, 140 columns (0.03s)
+MIP: clique extension: 0 rows extended, 0 nonzeros added, 0 columns fixed, 0 duplicate and 0 dominated rows removed (31 edges, 0.00s)
+MIP: symmetry: 1 full orbitopes (1x106)
+MIP: symmetry: 1284 generators, 4 orbits on 1288 columns, 1179 lex-leader rows (0.34s)
+MIP: fixed-charge check: vb rows 72 of 1291, continuous with vb 57 of 64
+MIP: oneopt improved 8.9300000000e2 -> 8.5500000000e2
+MIP: fixed-integer LP dual check: c x 8.5500000000e2, dual bound 8.5500000000e2 -> skip
+MIP:   global fixed integers 1174 of 1250 (newly 1174 since the root LP)
+MIP: new incumbent 8.5500000000e2 at node 0 (0.01s) [tree]
+MIP: feasibility jump found a solution (0.01s)
+Root LP: objective 6.7958736349e2 (0.01s)
+MIP: root LP 6.7958736349e2 (81 iters, 0.01s)
+MIP: fixed-integer LP dual check: c x 8.0100000000e2, dual bound 6.7958736349e2 -> solve
+MIP:   global fixed integers 1174 of 1250 (newly 0 since the root LP)
+MIP: new incumbent 8.0100000000e2 at node 0 (0.01s) [tree]
+MIP: fixed-charge check: vb rows 72 of 1291, continuous with vb 57 of 64
+MIP: cut round 0: 25 cuts (of 246, sep 0.00s, LP 45 iters), LP rows 1316 (cut rows mean nnz 2), obj 7.1942994312e2 (0.01s)
+MIP: cut round 1: 18 cuts (of 219, sep 0.00s, LP 28 iters), LP rows 1329 (cut rows mean nnz 2), obj 7.3949649278e2 (0.02s)
+MIP: cut round 2: 24 cuts (of 448, sep 0.01s, LP 25 iters), LP rows 1348 (cut rows mean nnz 2), obj 7.6817682868e2 (0.03s)
+MIP: cut round 3: 8 cuts (of 769, sep 0.01s, LP 15 iters), LP rows 1345 (cut rows mean nnz 2), obj 7.7591520626e2 (0.04s)
+MIP: cut round 4: 10 cuts (of 561, sep 0.01s, LP 6 iters), LP rows 1346 (cut rows mean nnz 2), obj 7.7630218982e2 (0.05s)
+MIP: cut round 5: 6 cuts (of 371, sep 0.01s, LP 9 iters), LP rows 1344 (cut rows mean nnz 2), obj 7.8263845576e2 (0.06s)
+MIP: cut round 6: 1 cuts (of 121, sep 0.01s, LP 3 iters), LP rows 1344 (cut rows mean nnz 2), obj 7.8272485473e2 (0.07s)
+MIP: cut round 7: 5 cuts (of 103, sep 0.00s, LP 7 iters), LP rows 1349 (cut rows mean nnz 2), obj 7.8400000000e2 (0.07s)
+MIP: clique graph: 31 edges (0 from rows, probing implications 55)
+MIP: clique fallback: no violated clique cuts; not used (0.00s)
+Root cuts: objective 6.7958736349e2 -> 7.8400000000e2, 56 cuts in the LP (0.07s)
+MIP: cut loop done: 97 cuts added, 56 in LP, pool 977 cuts (7445 nonzeros), obj 6.7958736349e2 -> 7.8400000000e2
+MIP: the root LP bound 7.8400000000e2 closed the gap to the prune limit 7.8300000000e2 (incumbent Some(801.0), 0.07s)
+     time      nodes      open        best bound         incumbent       gap
+     0.1s          0         0     8.010000000e2     8.010000000e2     0.00%
+MIP:     0.07s nodes        0 open       0 lb inf ub 8.01000000e2 lp_iters 220 sb_iters 0 sb_lps 0 sb_secs 0.00 node_iters 0 (first 0, lps 0) heur_iters 0 dive_iters 0 lp_rows 1347 node_cut_secs 0.00
+MIP: dual proofs and conflicts 0 (conflicts added 0 (from proofs 0), Farkas 0, pruned 0 nodes, tightened 0 bounds, rejected as numerically unreliable 0)
+MIP: propagation conflicts: analysed 0, no 1-UIP 0, 1-UIP not a row 0, no decision set 0, decision set not a row 0; not a row because continuous 0, general integer 0, both sides 0
+MIP: objective propagation: pruned 0 nodes, tightened 0 bounds; strong branching children infeasible by propagation 0, propagated bounds passed to child LPs 0
+MIP: literal conflicts: added 0, in pool 0 (aged out 0), pruned 0 nodes, tightened 0 bounds
+MIP: conflict analysis (HiGHS style): calls 0, conflicts 0, added 0, mean length 0.0, max length 475, 0.00s
+MIP: conflict analysis failures (all calls): no decision 0, too long midway 0, reason row lacks column 0, empty 0, too long at the end 0 (total length 0), max length 50
+MIP: branching: 0 selections, 0 without strong branching for dual degeneracy; sb LPs 0 iters 0
+MIP: sibling backtracks 0; basis restores 0 (basic count mismatch 0), first LP iterations after a restore 0
+MIP: node diag: nodes 0 node LPs 0 mean rows 0.0 iters 0 (0.0/LP) LP secs 0.00 sep rounds 0 added 0 node cut secs 0.00 final rows 1347
+MIP: adaptive node cuts: rounds 0 effective 0 skipped 0 (rate 1.000), node cut secs 0.00, outcomes cutoff/<0.02/<0.1/<0.3/>=0.3 [0, 0, 0, 0, 0], cut nnz None (rows mean 2.1)
+MIP: orbitopes 1: fixed 0 bounds, pruned 0 nodes
+Presolve: 1461 rows, 2500 columns -> 0 rows, 0 columns (0.00s)
+Solving with the slope-intercept dual two-phase method
+{"status": "optimal", "objective": 801.0, "best_bound": 801.0, "nodes": 0, "root_bound": 783.9999999969583, "first_solution_time": 0.373406547, "first_solution_objective": 855.0, "time": 0.45682387099998323}

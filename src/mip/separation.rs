@@ -317,6 +317,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             tunable!("ENOMOTO_T_MIP_ROOT_SUBMIP_HL_CUT_FRAC", 0.5, f64)
         } else if eq2c {
             tunable!("ENOMOTO_T_MIP_EQUIV2_CUT_TIME_FRAC", 0.3, f64)
+        } else if self.params.submip {
+            // `ENOMOTO_T_MIP_SUBMIP_CUT_FRAC` (試作、既定 0.1 = 通常と同じ): サブ MIP の根のカットの時間上限 (サブ MIP の時間上限に対する割合)。
+            // 時間上限 2 秒のサブ MIP では 0.2 秒になり、根の LP (0.3 秒) だけで使い切って 1 本も入らない (physiciansched6-2)
+            tunable!("ENOMOTO_T_MIP_SUBMIP_CUT_FRAC", 0.1, f64)
         } else {
             tunable!("ENOMOTO_T_MIP_CUT_TIME_FRAC", 0.1, f64)
         };
