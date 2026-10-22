@@ -1,0 +1,410 @@
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+Command line parsed using CLI11 2.5.0: Copyright (c) 2017-2025 University of Cincinnati
+Set option threads to 4
+Set option time_limit to 60
+Set option mip_rel_gap to 0
+Number of BV entries in BOUNDS section is 109346
+MIP physiciansched6-2 has 168336 rows; 111827 cols; 480259 nonzeros; 109346 integer variables (109346 binary)
+Coefficient ranges:
+  Matrix  [2e-01, 1e+03]
+  Cost    [1e+00, 1e+00]
+  Bound   [1e+00, 1e+00]
+  RHS     [1e+00, 3e+02]
+Presolving model
+61799 rows, 10875 cols, 100259 nonzeros 0s
+13040 rows, 6143 cols, 53335 nonzeros 0s
+10083 rows, 5765 cols, 41171 nonzeros 0s
+8861 rows, 4608 cols, 40149 nonzeros 1s
+8861 rows, 4608 cols, 40149 nonzeros 1s
+Presolve reductions: rows 8861(-159475); columns 4608(-107219); nonzeros 40149(-440110) 
+
+Solving MIP model with:
+   8861 rows
+   4608 cols (4185 binary, 0 integer, 414 implied int., 9 continuous, 0 domain fixed)
+   40149 nonzeros
+   Thread count 4 (of 4 threads). Using 1 max workers. Parallel search off
+
+Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+     I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+     S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+     Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+         0       0         0   0.00%   35707.5         inf                  inf        0      0      0         0     1.5s
+HCA prop len 10 limit 1479
+HCONF c 12 12 0 0
+HCONF r 57 56 0 0
+HCONF r 2 1 0 0
+HCONF r 47 46 0 0
+HCONF r 2 1 0 0
+         0       0         0   0.00%   47410.756313    inf                  inf        0      0      5      6633     3.4s
+HPROP 0 obj 11301.256313
+HSEP round 1 obj 11301.256313 sep0=256 sep1=230 sep2=1
+HADD 0 obj 11997.500000 lprows 9018 added 157 rows0 8861 iters 1778 lpsec 0.659 submip 0 t 4.44
+HCA prop len 100 limit 1479
+HCONF c 99 99 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HPROP 0 obj 11997.500000
+HSEP round 2 obj 11997.500000 sep0=314 sep1=59 sep2=3
+HADD 0 obj 12568.833333 lprows 9074 added 56 rows0 9018 iters 1172 lpsec 0.473 submip 0 t 5.28
+HCA prop len 99 limit 1479
+HCONF c 97 97 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HPROP 0 obj 12568.833333
+HSEP round 3 obj 12568.833333 sep0=288 sep1=30 sep2=2
+HADD 0 obj 12923.738095 lprows 9116 added 42 rows0 9074 iters 748 lpsec 0.341 submip 0 t 5.97
+HCA prop len 10 limit 1479
+HCONF c 17 17 0 0
+HCONF r 16 15 0 0
+HCONF c 32 32 0 0
+HCONF r 9 8 0 0
+HCONF r 11 10 0 0
+HCONF c 35 35 0 0
+HCONF r 5 4 0 0
+HPROP 0 obj 12923.738095
+HSEP round 4 obj 12923.738095 sep0=322 sep1=23 sep2=8
+HADD 0 obj 13014.250000 lprows 9191 added 75 rows0 9116 iters 1234 lpsec 0.622 submip 0 t 6.82
+HCA prop len 100 limit 1479
+HCONF c 98 98 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF c 98 98 0 0
+HCONF r 2 1 0 0
+HPROP 0 obj 13014.250000
+HSEP round 5 obj 13014.250000 sep0=463 sep1=36 sep2=5
+HADD 0 obj 13214.500000 lprows 9236 added 45 rows0 9191 iters 764 lpsec 0.398 submip 0 t 7.59
+HCA prop len 100 limit 1479
+HCONF c 98 98 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCA prop len 6 limit 1479
+HCONF c 10 10 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF c 9 9 0 0
+HCONF r 47 46 0 0
+HCONF c 9 9 0 0
+HCONF r 2 1 0 0
+HCA prop len 7 limit 1479
+HCONF c 16 16 0 0
+HCONF r 13 12 0 0
+HCONF r 46 45 0 0
+HCONF r 2 1 0 0
+HCONF c 15 15 0 0
+HCONF r 47 46 0 0
+HCA prop len 11 limit 1479
+HCONF c 22 22 0 0
+HCONF r 13 12 0 0
+HCONF r 46 45 0 0
+HCONF c 22 22 0 0
+HCONF r 2 1 0 0
+HCA prop len 11 limit 1479
+HCONF c 22 22 0 0
+HCONF r 22 21 0 0
+HCONF r 46 45 0 0
+HCONF c 22 22 0 0
+HCONF r 2 1 0 0
+HCA prop len 11 limit 1479
+HCONF c 22 22 0 0
+HCONF r 22 21 0 0
+HCONF r 46 45 0 0
+HCONF c 22 22 0 0
+HCONF r 2 1 0 0
+HCA prop len 11 limit 1479
+HCONF c 22 22 0 0
+HCONF r 13 12 0 0
+HCONF r 46 45 0 0
+HCONF c 22 22 0 0
+HCONF r 2 1 0 0
+HCA prop len 11 limit 1479
+HCONF c 22 22 0 0
+HCONF r 13 12 0 0
+HCONF r 46 45 0 0
+HCONF c 22 22 0 0
+HCONF r 2 1 0 0
+HCA prop len 47 limit 1479
+HCONF c 47 47 0 0
+HCONF r 47 46 0 0
+HCA prop len 47 limit 1479
+HCONF c 47 47 0 0
+HCONF r 47 46 0 0
+HCA prop len 47 limit 1479
+HCONF c 47 47 0 0
+HCONF r 47 46 0 0
+HCA prop len 47 limit 1479
+HCONF c 47 47 0 0
+HCONF r 47 46 0 0
+HCA prop len 47 limit 1479
+HCONF c 47 47 0 0
+HCONF r 47 46 0 0
+HCA prop len 47 limit 1479
+HCONF c 47 47 0 0
+HCONF r 47 46 0 0
+HCA prop len 47 limit 1479
+HCONF c 47 47 0 0
+HCONF r 47 46 0 0
+HCA prop len 47 limit 1479
+HCONF c 47 47 0 0
+HCONF r 47 46 0 0
+HCA prop len 47 limit 1479
+HCONF c 47 47 0 0
+HCONF r 47 46 0 0
+HCA prop len 47 limit 1479
+HCONF c 47 47 0 0
+HCONF r 47 46 0 0
+HCA prop len 67 limit 1479
+HCONF c 67 67 0 0
+HCONF r 67 66 0 0
+HCA prop len 67 limit 1479
+HCONF c 67 67 0 0
+HCONF r 67 66 0 0
+HCA prop len 67 limit 1479
+HCONF c 67 67 0 0
+HCONF r 67 66 0 0
+HCA prop len 67 limit 1479
+HCONF c 67 67 0 0
+HCONF r 67 66 0 0
+HCA prop len 67 limit 1479
+HCONF c 67 67 0 0
+HCONF r 67 66 0 0
+HCA prop len 67 limit 1479
+HCONF c 67 67 0 0
+HCONF r 67 66 0 0
+HCA prop len 67 limit 1479
+HCONF c 67 67 0 0
+HCONF r 67 66 0 0
+HCA prop len 67 limit 1479
+HCONF c 67 67 0 0
+HCONF r 67 66 0 0
+HCA prop len 67 limit 1479
+HCONF c 67 67 0 0
+HCONF r 67 66 0 0
+HCA prop len 67 limit 1479
+HCONF c 67 67 0 0
+HCONF r 67 66 0 0
+HCA prop len 67 limit 1479
+HCONF c 67 67 0 0
+HCONF r 67 66 0 0
+HCA prop len 67 limit 1479
+HCONF c 67 67 0 0
+HCONF r 67 66 0 0
+HCA prop len 67 limit 1479
+HCONF c 67 67 0 0
+HCONF r 67 66 0 0
+HCA prop len 67 limit 1479
+HCONF c 67 67 0 0
+HCONF r 67 66 0 0
+HCA prop len 67 limit 1479
+HCONF c 67 67 0 0
+HCONF r 67 66 0 0
+HCA prop len 67 limit 1479
+HCONF c 67 67 0 0
+HCONF r 67 66 0 0
+HCA prop len 67 limit 1479
+HCONF c 67 67 0 0
+HCONF r 67 66 0 0
+HCA prop len 67 limit 1479
+HCONF c 67 67 0 0
+HCONF r 67 66 0 0
+HCA prop len 67 limit 1479
+HCONF c 67 67 0 0
+HCONF r 67 66 0 0
+HCA prop len 67 limit 1479
+HCONF c 67 67 0 0
+HCONF r 67 66 0 0
+HCA prop len 67 limit 1479
+HCONF c 67 67 0 0
+HCONF r 67 66 0 0
+HCA prop len 67 limit 1479
+HCONF c 67 67 0 0
+HCONF r 67 66 0 0
+HCA prop len 67 limit 1479
+HCONF c 67 67 0 0
+HCONF r 67 66 0 0
+HCA prop len 67 limit 1479
+HCONF c 67 67 0 0
+HCONF r 67 66 0 0
+HCA prop len 67 limit 1479
+HCONF c 67 67 0 0
+HCONF r 67 66 0 0
+HCA prop len 10 limit 1479
+HCONF c 10 10 0 0
+HCONF r 10 9 0 0
+HCA prop len 10 limit 1479
+HCONF c 10 10 0 0
+HCONF r 10 9 0 0
+HCA prop len 10 limit 1479
+HCONF c 10 10 0 0
+HCONF r 10 9 0 0
+HCA prop len 10 limit 1479
+HCONF c 10 10 0 0
+HCONF r 10 9 0 0
+HCA prop len 10 limit 1479
+HCONF c 10 10 0 0
+HCONF r 10 9 0 0
+HCA prop len 10 limit 1479
+HCONF c 10 10 0 0
+HCONF r 10 9 0 0
+HCA prop len 10 limit 1479
+HCONF c 10 10 0 0
+HCONF r 10 9 0 0
+HCA prop len 10 limit 1479
+HCONF c 10 10 0 0
+HCONF r 10 9 0 0
+HCA prop len 10 limit 1479
+HCONF c 10 10 0 0
+HCONF r 10 9 0 0
+HCA prop len 10 limit 1479
+HCONF c 10 10 0 0
+HCONF r 10 9 0 0
+HCA prop len 10 limit 1479
+HCONF c 10 10 0 0
+HCONF r 10 9 0 0
+HCA prop len 10 limit 1479
+HCONF c 10 10 0 0
+HCONF r 10 9 0 0
+HCA prop len 10 limit 1479
+HCONF c 10 10 0 0
+HCONF r 10 9 0 0
+HCA prop len 10 limit 1479
+HCONF c 10 10 0 0
+HCONF r 10 9 0 0
+HCA prop len 10 limit 1479
+HCONF c 10 10 0 0
+HCONF r 10 9 0 0
+HCA prop len 10 limit 1479
+HCONF c 10 10 0 0
+HCONF r 10 9 0 0
+HCA prop len 10 limit 1479
+HCONF c 10 10 0 0
+HCONF r 10 9 0 0
+HPROP 0 obj 13214.500000
+HSEP round 6 obj 13214.500000 sep0=121 sep1=19 sep2=0
+HADD 0 obj 13214.500000 lprows 9261 added 25 rows0 9236 iters 838 lpsec 0.412 submip 0 t 8.33
+HCA prop len 7 limit 1460
+HCONF c 10 10 0 0
+HCONF r 45 44 0 0
+HCONF c 10 10 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF c 10 10 0 0
+HCONF r 2 1 0 0
+HPROP 0 obj 13214.500000
+HSEP round 7 obj 13214.500000 sep0=239 sep1=4 sep2=1
+HADD 0 obj 13214.500000 lprows 9278 added 17 rows0 9261 iters 473 lpsec 0.244 submip 0 t 8.69
+HCA prop len 8 limit 1460
+HCONF c 10 10 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF c 10 10 0 0
+HCONF r 2 1 0 0
+         0       0         0   0.00%   49324           inf                  inf     2422    417    185     13831     8.7s
+HPROP 0 obj 13214.500000
+HSEP round 8 obj 13214.500000 sep0=115 sep1=6 sep2=1
+HADD 0 obj 13214.500000 lprows 9291 added 13 rows0 9278 iters 388 lpsec 0.243 submip 0 t 9.03
+HCA prop len 8 limit 1460
+HCONF c 10 10 0 0
+HCONF r 8 7 0 0
+HCONF r 2 1 0 0
+HCONF r 5 4 0 0
+HPROP 0 obj 13214.500000
+HSEP round 9 obj 13214.500000 sep0=224 sep1=5 sep2=1
+HADD 0 obj 13214.500000 lprows 9302 added 11 rows0 9291 iters 634 lpsec 0.316 submip 0 t 9.45
+HCA prop len 11 limit 1460
+HCONF c 13 13 0 0
+HCONF r 2 1 0 0
+HCONF c 62 62 0 0
+HCONF r 51 50 0 0
+HCONF c 59 59 0 0
+HCONF r 2 1 0 0
+HPROP 0 obj 13214.500000
+HSEP round 10 obj 13214.500000 sep0=156 sep1=6 sep2=0
+HADD 0 obj 13214.500000 lprows 9317 added 15 rows0 9302 iters 783 lpsec 0.350 submip 0 t 9.99
+HCA prop len 17 limit 1460
+HCONF c 44 44 0 0
+HCONF r 11 10 0 0
+HPROP 0 obj 13214.500000
+HSEP round 11 obj 13214.500000 sep0=50 sep1=2 sep2=4
+HADD 0 obj 13214.500000 lprows 9328 added 11 rows0 9317 iters 427 lpsec 0.226 submip 0 t 10.32
+HCA prop len 12 limit 1460
+HCONF c 60 60 0 0
+HCONF r 2 1 0 0
+HCONF r 2 1 0 0
+HCONF c 59 59 0 0
+HCONF r 12 11 0 0
+HCONF c 113 113 0 0
+HCONF r 2 1 0 0
+HPROP 0 obj 13214.500000
+HSEP round 12 obj 13214.500000 sep0=96 sep1=9 sep2=6
+HADD 0 obj 13214.500000 lprows 9340 added 12 rows0 9328 iters 501 lpsec 0.216 submip 0 t 10.59
+HCA prop len 5 limit 1460
+HCONF c 47 47 0 0
+HCONF r 16 15 0 0
+HCONF r 5 4 0 0
+HCONF r 14 13 0 0
+HPROP 0 obj 13214.500000
+HSEP round 13 obj 13214.500000 sep0=46 sep1=0 sep2=20
+HADD 0 obj 13214.500000 lprows 9351 added 11 rows0 9340 iters 516 lpsec 0.264 submip 0 t 10.91
+HCA prop len 9 limit 1460
+HCONF c 8 8 0 0
+HCONF r 2 1 0 0
+HCONF r 47 46 0 0
+HCONF c 8 8 0 0
+HCONF r 2 1 0 0
+HCA prop len 9 limit 470
+HCONF c 8 8 0 0
+HCONF r 4 3 0 0
+HCONF r 3 2 0 0
+HCONF r 2 1 0 0
+HCONF c 7 7 0 0
+HCONF r 2 1 0 0
+HPROP 0 obj 498.500000
+HSEP round 14 obj 498.500000 sep0=190 sep1=3 sep2=2
+HADD 0 obj 498.500000 lprows 1169 added 7 rows0 1162 iters 11 lpsec 0.003 submip 1 t 0.15
+HPROP 0 obj 498.500000
+HSEP round 15 obj 498.500000 sep0=18 sep1=1 sep2=0
+HADD 0 obj 498.500000 lprows 1173 added 4 rows0 1169 iters 9 lpsec 0.003 submip 1 t 0.17
+ L       0       0         0   0.00%   49324           49324              0.00%     3170    490    213     17080    11.3s
+         1       0         1 100.00%   49324           49324              0.00%     3170    490    213     17460    11.3s
+
+Solving report
+  Model             physiciansched6-2
+  Status            Optimal
+  Primal bound      49324
+  Dual bound        49324
+  Gap               0%
+  P-D integral      0
+  Solution status   feasible
+                    49324 (objective)
+                    0 (bound viol.)
+                    0 (int. viol.)
+                    0 (row viol.)
+  Timing            11.35
+                    1.35 (Presolve)
+                        MIP    time [calls] = 1.26 [1]
+                        subMIP time [calls] = 0.09 [1]
+                    9.99 (Solve)
+                        MIP    time [calls] = 9.90 [1]
+                        subMIP time [calls] = 0.09 [1]
+                    0.00 (Postsolve)
+                        MIP    time [calls] = 0.00 [1]
+                        subMIP time [calls] = 0.00 [1]
+  Max sub-MIP depth 2
+  Nodes             1
+  Repair LPs        0
+  LP iterations     17460
+                    0 (strong br.)
+                    10447 (separation)
+                    380 (heuristics)
+HCHG branching=178730 unknown=72004 modelrow=20885 clique=144242 conflictingbounds=0 objective=1 cutpool=460 conflictpool=0
+HINF branching=0 unknown=0 modelrow=74 clique=0 conflictingbounds=0 objective=0 cutpool=0 conflictpool=0
