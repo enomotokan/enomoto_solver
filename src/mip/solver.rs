@@ -1917,6 +1917,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
         (env_str!("ENOMOTO_MIP_HIGHS_CUTMGMT").is_some() || self.hcm_auto) && !self.params.submip
     }
 
+    /// `ENOMOTO_MIP_SUBMIP_NO_SB2` (試作、既定では使わない): すべてのサブ MIP で強分岐をしない (`min_reliable = 0` に加えて
+    /// [`Self::select_branch_inner`] の強分岐も止める。既存の `ENOMOTO_MIP_SUBMIP_NO_SB` は前者だけで強分岐は止まらない)。
+    /// HiGHS のサブ MIP は `mip_pscost_minreliable = 0`。physiciansched6-2 の根の RINS の近傍では、サブ MIP の最初の 3 ノードの
+    /// 強分岐に 10 秒、その中の RENS のサブ MIP (480 列) の最初のノードに 4 秒かかった (analysis/submip_hl_20261022.md)
+    pub(super) fn submip_no_sb2(&self) -> bool {
+        self.params.submip && env_str!("ENOMOTO_MIP_SUBMIP_NO_SB2").is_some()
+    }
+
     pub(super) fn time_up(&self) -> bool {
         self.deadline.is_some_and(|d| Instant::now() >= d)
             || self.heur_stop.is_some_and(|d| Instant::now() >= d)
@@ -2580,7 +2588,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // `ENOMOTO_MIP_ROOT_SUBMIP_HL` の根の RINS のサブ MIP とその中のサブ MIP も強分岐をしない (`ENOMOTO_MIP_ROOT_SUBMIP_HL_SB` ならする。
         // [`Self::select_branch_inner`] でも止める)。physiciansched6-2 の根の RINS の近傍 (約 1500 列) では最初のノードの強分岐に 1.4 秒かかった
-        if self.params.submip && super::heuristics::root_submip_hl_any() && env_str!("ENOMOTO_MIP_ROOT_SUBMIP_HL_SB").is_none() {
+        if (self.params.submip && super::heuristics::root_submip_hl_any() && env_str!("ENOMOTO_MIP_ROOT_SUBMIP_HL_SB").is_none()) || self.submip_no_sb2() {
             self.pc.min_reliable = 0;
         }
         // 木の写しから解く: 写しを作ったときの LP のカットの行とカットプールを入れる
@@ -5516,7 +5524,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.sb_degen_stats[1] += degenerate as u64;
         // `ENOMOTO_MIP_ROOT_SUBMIP_HL` の根の RINS のサブ MIP とその中のサブ MIP では強分岐をしない (`ENOMOTO_MIP_ROOT_SUBMIP_HL_SB` ならする。
         // HiGHS のサブ MIP の `mip_pscost_minreliable = 0`。ここの信頼度のしきい値は `min_reliable` を見ないので別に止める)
-        let hl_no_sb = self.params.submip && super::heuristics::root_submip_hl_any() && env_str!("ENOMOTO_MIP_ROOT_SUBMIP_HL_SB").is_none();
+        let hl_no_sb = (self.params.submip && super::heuristics::root_submip_hl_any() && env_str!("ENOMOTO_MIP_ROOT_SUBMIP_HL_SB").is_none()) || self.submip_no_sb2();
         let allow_sb = sb <= maxsb && !degenerate && !hl_no_sb;
         // 信頼度のしきい値: 予算の残りに応じて 1..5
         let mut prio = ((maxsb - sb) / (sb + 1.0)).min(1.0);

@@ -57,3 +57,25 @@ MIP: root heuristic vbounds (tight): none (0.00s)
 MIP: root heuristic local search: none (0.00s)
 MIP: root heuristic repair: none (0.00s)
 MIP: after root heuristics: incumbent None (1.16s)
+MIP:     2.08s nodes        5 open       4 lb 1.28118691e4 ub inf lp_iters 19044 sb_iters 13266 sb_lps 520 sb_secs 0.90 node_iters 251 (first 109, lps 12) heur_iters 4532 dive_iters 144 lp_rows 785 node_cut_secs 0.00
+MIP:   global fixed integers 599 of 738 (newly 0 since the root LP)
+MIP: new incumbent 1.3807000000e4 at node 75 (3.50s) [tree rounding]
+MIP:   ALNS arm 0 reward 0.000 (counts [1, 0, 0, 0, 0, 0])
+MIP:   global fixed integers 599 of 738 (newly 0 since the root LP)
+MIP: new incumbent 1.3639000000e4 at node 80 (3.55s) [tree randomized rounding]
+MIP: fixed-integer LP: TimeLimit (1 iters)
+MIP:   global fixed integers 599 of 738 (newly 0 since the root LP)
+MIP: new incumbent 1.3638000000e4 at node 88 (3.66s) [tree randomized rounding]
+MIP:     3.66s nodes       88 open      49 lb 1.31561788e4 ub 1.36380000e4 lp_iters 35774 sb_iters 25102 sb_lps 1312 sb_secs 2.03 node_iters 4199 (first 2819, lps 171) heur_iters 6380 dive_iters 1046 lp_rows 789 node_cut_secs 0.01
+MIP: dual proofs and conflicts 0 (conflicts added 0 (from proofs 0), Farkas 0, pruned 0 nodes, tightened 0 bounds, rejected as numerically unreliable 0)
+MIP: propagation conflicts: analysed 0, no 1-UIP 0, 1-UIP not a row 0, no decision set 0, decision set not a row 0; not a row because continuous 0, general integer 0, both sides 0
+MIP: objective propagation: pruned 0 nodes, tightened 0 bounds; strong branching children infeasible by propagation 0, propagated bounds passed to child LPs 0
+MIP: literal conflicts: added 0, in pool 0 (aged out 0), pruned 0 nodes, tightened 0 bounds
+MIP: conflict analysis (HiGHS style): calls 0, conflicts 0, added 0, mean length 0.0, max length 321, 0.00s
+MIP: conflict analysis failures (all calls): no decision 0, too long midway 0, reason row lacks column 0, empty 0, too long at the end 0 (total length 0), max length 50
+MIP: branching: 157 selections, 0 without strong branching for dual degeneracy; sb LPs 1312 iters 25102
+MIP: sibling backtracks 8; basis restores 49 (basic count mismatch 0), first LP iterations after a restore 2127
+MIP: node diag: nodes 88 node LPs 171 mean rows 787.2 iters 4199 (24.6/LP) LP secs 0.33 sep rounds 1 added 1 node cut secs 0.01 final rows 789
+Presolve: 1750 rows, 1166 columns -> 0 rows, 0 columns (0.00s)
+Solving with the slope-intercept dual two-phase method
+{"status": "time_limit", "objective": 13638.000000000011, "best_bound": 13156.178798316592, "nodes": 88, "root_bound": null, "first_solution_time": null, "first_solution_objective": null, "time": 3.687932197000009}
