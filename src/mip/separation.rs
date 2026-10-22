@@ -385,6 +385,32 @@ impl<'a, L: MipLp> Solver<'a, L> {
         CUT_EXTENDED.with(|c| c.set(false));
         // ラウンドごとの目的値 (`ENOMOTO_MIP_CUT_EXTEND` の判定用。最初は根の LP の値)
         let mut ext_hist: Vec<f64> = vec![first_obj];
+        // `ENOMOTO_MIP_INOUT_SEP` (試作、既定では使わない): in-out 分離 (Ben-Ameur & Neto、Fischetti & Salvagnin 2010)。
+        // 最適面の中心付近の点 x_c (ループの始めに 1 回だけ内点法で求める) と今の LP 解 x_lp を結ぶ線分上の点
+        // x(α) = x_lp + α (x_c - x_lp) を、点から行を集約する分離 ([`Self::separate`] を x(α) で呼ぶ) にかけ、
+        // 別枠 (`ENOMOTO_T_MIP_INOUT_MAX_CUTS`、既定 50) で選んだカットを x_lp を切るカットと合わせて LP に入れる。
+        // x(α) で破れるカットがなければ x_c を x(α) に移す (Ben-Ameur & Neto の更新)。値: `1` / `ipm` = 費用つきの内点法
+        // (最適面の中心付近)、`ac` = 費用 0 の内点法 (実行可能領域の中心付近)、`inc` = 暫定解があればそれ (なければ `ipm`)
+        let inout_mode = if self.params.submip { None } else { env_str!("ENOMOTO_MIP_INOUT_SEP") };
+        let inout_alpha0 = tunable!("ENOMOTO_T_MIP_INOUT_ALPHA", 0.5, f64);
+        let inout_quota = tunable!("ENOMOTO_T_MIP_INOUT_MAX_CUTS", 50usize, usize);
+        let inout_light = env_str!("ENOMOTO_MIP_INOUT_LIGHT").is_some();
+        // `ENOMOTO_T_MIP_INOUT_RECENTER` = k (> 0): k ラウンドごとに、今の LP (カット込み) を内点法で解き直して中心を
+        // 今の最適面の中心付近に取り直す (`face` なら既定 1、ほかは既定 0 = 最初の点を使い続ける)。内点法の時間の合計は
+        // `ENOMOTO_T_MIP_INOUT_IPM_FRAC` (既定 0.05) × 時間の上限まで (使い切ったら最後の点を使い続ける)
+        let inout_recenter = tunable!("ENOMOTO_T_MIP_INOUT_RECENTER", if inout_mode.as_deref() == Some("face") { 1usize } else { 0usize }, usize);
+        let mut inout_ipm_left = {
+            let frac = tunable!("ENOMOTO_T_MIP_INOUT_IPM_FRAC", 0.05, f64);
+            if self.params.time_limit.is_finite() { frac * self.params.time_limit } else { 10.0 }
+        };
+        // 内点法の時間は根のカットの時間の上限に数えない (上限をその分延ばす)
+        let t_ipm0 = super::cap_clock();
+        let mut inout_xc: Option<Vec<f64>> = match inout_mode.as_deref() {
+            Some(m) => self.inout_center(m, &mut inout_ipm_left),
+            None => None,
+        };
+        time_cap += super::cap_clock() - t_ipm0;
+        let (mut io_rounds, mut io_cands_tot, mut io_added_tot, mut io_cut_lp_tot, mut io_moves, mut io_secs) = (0usize, 0usize, 0usize, 0usize, 0usize, 0.0f64);
         loop {
             self.poll_fj_thread();
             if self.root_gap_closed() {
@@ -527,8 +553,40 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     cands.push(Candidate { coefs: c.clone(), rhs: *r, efficacy: eff, forced: false });
                 }
             }
+            // in-out 分離: x(α) で分離した候補 (別枠で選ぶ)
+            let mut io_cands: Vec<Candidate> = Vec::new();
+            if inout_recenter > 0 && round > 0 && round % inout_recenter == 0 && inout_ipm_left > 0.01 {
+                let t_io = std::time::Instant::now();
+                let t_ipm0 = super::cap_clock();
+                if let Some(v) = self.inout_center("recenter", &mut inout_ipm_left) {
+                    inout_xc = Some(v);
+                }
+                time_cap += super::cap_clock() - t_ipm0;
+                io_secs += t_io.elapsed().as_secs_f64();
+            }
+            if let Some(xc) = &inout_xc {
+                let t_io = std::time::Instant::now();
+                let xa: Vec<f64> = (0..n).map(|j| x[j] + inout_alpha0 * (xc[j] - x[j])).collect();
+                let memo = self.tab_memo_mode;
+                self.tab_memo_mode = 0;
+                self.sep_point_act = true;
+                io_cands = self.separate(&xa, inout_light);
+                self.sep_point_act = false;
+                self.tab_memo_mode = memo;
+                for c in io_cands.iter_mut() {
+                    c.forced = false;
+                }
+                io_rounds += 1;
+                io_cands_tot += io_cands.len();
+                if io_cands.is_empty() {
+                    // x(α) は分離できない: 中心を x(α) に寄せる
+                    io_moves += 1;
+                    inout_xc = Some(xa);
+                }
+                io_secs += t_io.elapsed().as_secs_f64();
+            }
             let ncands = cands.len() + face_cands.len();
-            if ncands == 0 {
+            if ncands == 0 && io_cands.is_empty() {
                 break;
             }
             let dbg_sep = env_str!("ENOMOTO_MIP_DEBUG_SEP").is_some() && !self.params.submip;
@@ -538,7 +596,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             // 候補はすべてカットプールに入れる (選択で落ちたものも、ノードで違反すれば使う)
             if !self.params.submip && env_str!("ENOMOTO_MIP_POOL_SELECTED_ONLY").is_none() {
-                for c in cands.iter().chain(face_cands.iter()) {
+                for c in cands.iter().chain(face_cands.iter()).chain(io_cands.iter()) {
                     self.add_to_pool(&c.coefs, c.rhs);
                 }
             }
@@ -585,6 +643,29 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             // 選択の上限まで採ったか (選択を通さないカットは数えない)
             let quota_full = chosen.len() >= max_cuts && ncands >= 2 * max_cuts;
+            if !io_cands.is_empty() {
+                let mut io_cands = io_cands;
+                let nio = io_cands.len();
+                // x_lp で選んだカットとほぼ平行なものは先に除く (同じカットが x(α) でも破れていることが多い)
+                io_cands.retain(|c| !chosen.iter().chain(forced.iter()).any(|d| cut_parallelism(&c.coefs, &d.coefs) > 0.99));
+                let extra = select_cuts(io_cands, inout_quota, p);
+                let (mut added, mut cut_lp) = (0usize, 0usize);
+                for c in extra {
+                    {
+                        let act: f64 = c.coefs.iter().map(|&(j, v)| v * x[j]).sum();
+                        if act > c.rhs + 1e-6 * (1.0 + c.rhs.abs()) {
+                            cut_lp += 1;
+                        }
+                        chosen.push(c);
+                        added += 1;
+                    }
+                }
+                io_added_tot += added;
+                io_cut_lp_tot += cut_lp;
+                if self.params.verbose {
+                    eprintln!("MIP: cut round {round}: in-out alpha {inout_alpha0}: {added} cuts (of {nio}; {cut_lp} also cut x_lp)");
+                }
+            }
             chosen.extend(forced);
             let sep_secs = t_sep.elapsed().as_secs_f64();
             sep_tot += sep_secs;
@@ -865,6 +946,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         self.remove_inactive_cuts();
+        if inout_mode.is_some() && self.params.verbose {
+            eprintln!(
+                "MIP: in-out separation{}: {io_rounds} rounds, {io_cands_tot} candidates, {io_added_tot} cuts added ({io_cut_lp_tot} also cut x_lp), center moved {io_moves} times, {io_secs:.2}s",
+                if job.is_some() { " (bg)" } else { "" }
+            );
+        }
         if env_str!("ENOMOTO_MIP_DEBUG_FACETIME").is_some() && !self.params.submip {
             eprintln!(
                 "FACETIME {}restarts {} rounds {nrounds}: sep {sep_tot:.2}s (face {:.2}s, {} vertices), LP {lp_tot:.2}s, loop {:.2}s, obj {:.10e}",
@@ -1995,6 +2082,45 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.path_offset = last + 1;
     }
 
+    /// in-out 分離 (`ENOMOTO_MIP_INOUT_SEP`) の中心の点。根の求解で求めた点はカットを強める求解 (別スレッド) でも使い回す
+    /// (列の数が同じとき)。
+    fn inout_center(&mut self, mode: &str, budget_left: &mut f64) -> Option<Vec<f64>> {
+        static CACHE: std::sync::Mutex<Option<Vec<f64>>> = std::sync::Mutex::new(None);
+        let n = self.p.n;
+        if mode == "inc" {
+            if let Some((_, v)) = &self.incumbent {
+                return Some(v.clone());
+            }
+        }
+        let in_bg = self.snap.is_some() && super::solver::CUT_JOB.with(|j| j.borrow().is_some());
+        if in_bg && mode != "recenter" {
+            if let Some(v) = CACHE.lock().unwrap().as_ref().filter(|v| v.len() == n) {
+                return Some(v.clone());
+            }
+        }
+        let mut budget = *budget_left;
+        if let Some(d) = self.deadline {
+            budget = budget.min(0.5 * d.saturating_duration_since(std::time::Instant::now()).as_secs_f64());
+        }
+        if budget <= 0.01 {
+            return None;
+        }
+        let t0 = std::time::Instant::now();
+        let ip = self.lp.interior_point(mode == "ac", false, t0 + std::time::Duration::from_secs_f64(budget));
+        *budget_left -= t0.elapsed().as_secs_f64();
+        if self.params.verbose {
+            eprintln!("MIP: in-out separation: interior point ({mode}) {} ({:.2}s)", if ip.is_some() { "found" } else { "failed" }, t0.elapsed().as_secs_f64());
+        }
+        let x = ip.map(|ip| ip.x).filter(|x| x.len() >= n).map(|mut x| {
+            x.truncate(n);
+            x
+        });
+        if let Some(v) = &x {
+            *CACHE.lock().unwrap() = Some(v.clone());
+        }
+        x
+    }
+
     /// 根の分離 (退化に強い形、`ENOMOTO_MIP_FACE_SEP`)。LP が双対退化している (非基底で被約費用が 0 の列がある) と
     /// 最適解の集合 (最適面) に頂点が多く、どの頂点に着くかは DSE 重みなど解き方の履歴で変わる。カットは着いた頂点から
     /// 作るので、頂点が変わるとカットも根の下界も変わり、また 1 つの頂点だけを切っても LP は同じ目的値の別の頂点へ移るだけで
@@ -2184,7 +2310,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mr = self.lp.num_rows();
         // 変数: 構造変数 0..n と、LP 行の活動量 n..n+mr
         let lp_rows: Vec<Vec<(usize, f64)>> = (0..mr).map(|i| self.lp.row(i)).collect();
-        let act = self.lp.row_activities();
+        let act = if self.sep_point_act { lp_rows.iter().map(|r| r.iter().map(|&(j, a)| a * x[j]).sum()).collect() } else { self.lp.row_activities() };
         // カットは木全体で有効にするため、大域的な境界から作る
         let mut lo = self.dom.global_lo.clone();
         let mut up = self.dom.global_up.clone();
