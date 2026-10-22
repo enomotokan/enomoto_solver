@@ -9753,6 +9753,14 @@ neos-950242 の 2 回目の調査 (`analysis/neos950242_r2_20261020.md`)。
 - physiciansched6-2: e2hl は 2 組とも暫定解 49324 (最適値) を見つけ、下界 49291・49266 (差 33〜58)。hl は 49624・49524。既定は 50826。60 秒では解けない。
 - 他の問題は同じ形を解くので 40 + 16 問の差は揺れ。カット選択の HiGHS 合わせ (e2hsel、下界が 49324 に届く回がある) と組んで、physiciansched6-2 を 10 回ずつ解く計測で判断する (inv/psched-combo-20261022)。
 
+## 2026-10-22: physiciansched6-2 の組み合わせ (代入 + 根の RINS の HiGHS 流 + カット選択の HiGHS 合わせ) は保留
+
+- 2dceb52 (develop + rins-fix + cutsel-highs) で physiciansched6-2 を 4 スレッド・60 秒、newdef / e2hl / e2hsel / combo (e2hsel + `ENOMOTO_MIP_ROOT_SUBMIP_HL=1`) を交互に 10 回ずつ (benchmarks/psched_combo_20261022/)。
+- 4 設定とも 0/10。newdef: 暫定解 51029、下界 48587〜48688。e2hl: 暫定解 49324 (最適値) が 4 回 (他は 50626)、下界 49065〜49299。e2hsel: 暫定解 50626、下界 48844 (7 回)・49291 (3 回)。combo: 暫定解 50626 (8 回)・49424・49524、下界 49324 に届いたのは 2 回 (そのときの暫定解は 49424/49524)。最適値の解と最適値の下界が同じ回にそろわない。
+- 全 40 回で解は元の問題で実行可能、目的値の不一致・"MIP: WARNING" なし。
+- 55 問 (combo あり/なし、10 秒): 主問題の前処理後の大きさは全問一致。代入 (EQUIV2) は graph20-20-1rand (370 組)・timtab1 (44 組)・physiciansched6-2 (2168 組) の主問題で働く。ROOT_SUBMIP_HL は暫定解が FJ のものだけなら代入がなくても働き、8 問 (10teams, app1-1, graph20-20-1rand, misc07, mzzv42z, neos-950242, nw04, supportcase26) で動いた (nw04 良化・supportcase26 悪化、各 1 回)。physiciansched6-2 だけの試作ではないので、採るなら 40 + 16 問での判断が要る (RH の 2 組は逆向きで差なし)。
+- 60 秒で解けるようにならないので既定にしない。コードは rins-fix・cutsel-highs・physiciansched-r5 のブランチに残す。
+
 ## 改名一覧 (整理時)
 
 本メモ中は旧名で書かれている。
