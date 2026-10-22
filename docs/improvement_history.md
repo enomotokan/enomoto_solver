@@ -9761,6 +9761,16 @@ neos-950242 の 2 回目の調査 (`analysis/neos950242_r2_20261020.md`)。
 - 55 問 (combo あり/なし、10 秒): 主問題の前処理後の大きさは全問一致。代入 (EQUIV2) は graph20-20-1rand (370 組)・timtab1 (44 組)・physiciansched6-2 (2168 組) の主問題で働く。ROOT_SUBMIP_HL は暫定解が FJ のものだけなら代入がなくても働き、8 問 (10teams, app1-1, graph20-20-1rand, misc07, mzzv42z, neos-950242, nw04, supportcase26) で動いた (nw04 良化・supportcase26 悪化、各 1 回)。physiciansched6-2 だけの試作ではないので、採るなら 40 + 16 問での判断が要る (RH の 2 組は逆向きで差なし)。
 - 60 秒で解けるようにならないので既定にしない。コードは rins-fix・cutsel-highs・physiciansched-r5 のブランチに残す。
 
+## 2026-10-22: physiciansched6-2 が 60 秒で初めて解けた (代入 + 根の RINS の HiGHS 流 + in-out 分離、4/10)
+
+- 内点解からの in-out 分離の調査 (inv/inout-sep-20261022、途中): 代入あり (e2) で physiciansched6-2 の根の下界が 3/3 で 49324 (最適値) に届く (in-out なしは 49199) が暫定解が出ない。
+- d00d9b7 (develop a7a7f55 + rins-fix + inout-sep) で physiciansched6-2 を 4 スレッド・60 秒、交互に 10 回ずつ (benchmarks/psched_iohl_20261022/)。E = PROBE_EQUIV2・EQUIV2_CUTS・EQUIV2_FJ・EQUIV2_TAB。
+- e2hl (E + ROOT_SUBMIP_HL): 0/10、暫定解 49324 は 2 回、根の下界 49324 は 0 回。
+- e2io (E + `ENOMOTO_MIP_INOUT_SEP=1`): 1/10 (32.1 秒)、根の下界 49324 は 7 回だが暫定解 49324 は 1 回。
+- e2iohl (E + HL + INOUT_SEP): 4/10 (31.9〜32.6 秒、根で終わる)、暫定解 49324 は 5 回、根の下界 49324 は 8 回。両方がそろった回だけ解ける。
+- 全 30 回で解は実行可能、目的値の不一致・"MIP: WARNING" なし。
+- in-out 分離と ROOT_SUBMIP_HL は physiciansched6-2 以外でも働くので、既定にするかは 40 + 16 問の対の計測で判断する。
+
 ## 改名一覧 (整理時)
 
 本メモ中は旧名で書かれている。
