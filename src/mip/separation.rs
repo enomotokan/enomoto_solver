@@ -3400,6 +3400,13 @@ pub(super) struct DcdCtx<'x> {
     norm: bool,
     /// `ENOMOTO_MIP_CUTSEL_DCD_PROD`: 暫定解があれば積の形のスコア ([`select_cuts_dcd_prod`])
     prod: bool,
+    /// 暫定解がなければ既定の選択のまま (`ENOMOTO_MIP_CUTSEL_DCD_NOINC_DEF`、`ENOMOTO_MIP_CUTSEL_DCD_T` でも)
+    noinc_def: bool,
+    /// `ENOMOTO_MIP_CUTSEL_DCD_T`: DCD の代わりに t = DCD / |x* - x| (線分のうち切り落とす割合、<= 1) を使う。`1` なら
+    /// t × そのラウンドの最良の効き目 (効き目と同じ尺度)、`raw` なら t そのもの
+    t_mode: Option<bool>,
+    /// |x* - x|
+    dnorm: f64,
 }
 
 impl<'x> DcdCtx<'x> {
@@ -3411,11 +3418,20 @@ impl<'x> DcdCtx<'x> {
         let w_dcd = env_str!("ENOMOTO_MIP_CUTSEL_DCD").and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
         let norm = env_str!("ENOMOTO_MIP_CUTSEL_NORM").is_some_and(|v| v != "0");
         let prod = env_str!("ENOMOTO_MIP_CUTSEL_DCD_PROD").is_some_and(|v| v != "0");
+        let t_mode = match env_str!("ENOMOTO_MIP_CUTSEL_DCD_T") {
+            Some("raw") => Some(false),
+            Some(v) if v != "0" => Some(true),
+            _ => None,
+        };
+        let noinc_def = t_mode.is_some() || env_str!("ENOMOTO_MIP_CUTSEL_DCD_NOINC_DEF").is_some_and(|v| v != "0");
         if w_dcd <= 0.0 && !norm && !prod {
             return None;
         }
-        let dir = dcd_direction(x, inc).map(|(d, _)| d);
-        Some(DcdCtx { x, dir, w_eff: tunable!("ENOMOTO_T_CUTSEL_EFFW", 1.0, f64), w_dcd, norm, prod })
+        let (dir, dnorm) = match dcd_direction(x, inc) {
+            Some((d, nd)) => (Some(d), nd),
+            None => (None, 0.0),
+        };
+        Some(DcdCtx { x, dir, w_eff: tunable!("ENOMOTO_T_CUTSEL_EFFW", 1.0, f64), w_dcd, norm, prod, noinc_def, t_mode, dnorm })
     }
 
     /// SCIP の `SCIProwGetLPSolCutoffDistance`: 今の LP 解 x から暫定解 x* へ向かう単位方向 d = (x* - x) / |x* - x| に沿った、
@@ -3456,13 +3472,19 @@ fn select_cuts_hybrid_anchor(cands: Vec<Candidate>, max_cuts: usize, p: &MipProb
 /// (効き目の重み + DCD の重み) × 効き目、SCIP と同じ)。`norm` なら効き目・距離をそれぞれそのラウンドの候補の最良で割ってから使う
 /// (このとき `anchor` は使わない)。目的との平行度・整数の割合の項 (0.1 ずつ)、密度の割り算、足切り (最良の `min_rel` 倍) はそのまま
 fn select_cuts_hybrid_dcd(cands: Vec<Candidate>, max_cuts: usize, p: &MipProblem, min_rel: f64, maxpar: f64, anchor: Option<f64>, dcd: Option<&DcdCtx>) -> Vec<Candidate> {
+    if dcd.is_some_and(|c| c.dir.is_none() && c.noinc_def && !c.prod) {
+        return select_cuts_hybrid_dcd(cands, max_cuts, p, min_rel, maxpar, anchor, None);
+    }
     if let Some(ctx) = dcd.filter(|c| c.prod) {
         // 積の形: 暫定解があれば [`select_cuts_dcd_prod`]、なければ既定と同じ選択
         return if ctx.dir.is_some() { select_cuts_dcd_prod(cands, max_cuts, min_rel, ctx) } else { select_cuts_hybrid_dcd(cands, max_cuts, p, min_rel, maxpar, anchor, None) };
     }
     let cnorm = p.cost.iter().map(|c| c * c).sum::<f64>().sqrt();
     let dists: Vec<Option<f64>> = match dcd {
-        Some(ctx) => cands.iter().map(|c| ctx.distance(c).map(|d| d.max(c.efficacy))).collect(),
+        Some(ctx) => cands
+            .iter()
+            .map(|c| ctx.distance(c).map(|d| if ctx.t_mode.is_some() { (d / ctx.dnorm).min(1.0) } else { d.max(c.efficacy) }))
+            .collect(),
         None => vec![None; cands.len()],
     };
     let (max_eff, max_dist) = (
@@ -3487,6 +3509,7 @@ fn select_cuts_hybrid_dcd(cands: Vec<Candidate>, max_cuts: usize, p: &MipProblem
                     let sc = |v: f64, m: f64| if ctx.norm { if m > 0.0 { v / m } else { 0.0 } } else { v };
                     let e = sc(c.efficacy, max_eff);
                     let term = match dist {
+                        Some(t) if ctx.t_mode.is_some() => ctx.w_eff * e + ctx.w_dcd * t * if ctx.t_mode == Some(true) { max_eff } else { 1.0 },
                         Some(d) => ctx.w_eff * e + ctx.w_dcd * sc(d, max_dist),
                         None => (ctx.w_eff + ctx.w_dcd) * e,
                     };
