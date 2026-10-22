@@ -575,10 +575,27 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if let Some(xc) = &inout_xc {
                 let t_io = std::time::Instant::now();
                 let xa: Vec<f64> = (0..n).map(|j| x[j] + inout_alpha0 * (xc[j] - x[j])).collect();
+                // `ENOMOTO_T_MIP_INOUT_GATE` = r (> 0): 最初のラウンドで、x(α) の分数の整数列が x_lp の r 倍に満たなければ
+                // (最適面が狭い) このループでは in-out を止める。分離の前に判定する (分離は経路集約の始点などの状態を進めるので、
+                // 止めた求解の経過を既定と同じにするため)
+                let gate = tunable!("ENOMOTO_T_MIP_INOUT_GATE", 0.0, f64);
+                let gate_off = gate > 0.0 && io_rounds == 0 && {
+                    let (f0, f1) = (self.fractional(&x).len(), self.fractional(&xa).len());
+                    let off = (f1 as f64) < gate * (f0 as f64);
+                    if self.params.verbose {
+                        eprintln!("MIP: in-out separation: fractional {f0} at x_lp / {f1} at x(a); gate {gate}: {}", if off { "off for this loop" } else { "on" });
+                    }
+                    off
+                };
                 let memo = self.tab_memo_mode;
                 self.tab_memo_mode = 0;
                 self.sep_point_act = true;
-                io_cands = self.separate(&xa, inout_light);
+                io_cands = if gate_off {
+                    io_next = Some(None);
+                    Vec::new()
+                } else {
+                    self.separate(&xa, inout_light)
+                };
                 self.sep_point_act = false;
                 self.tab_memo_mode = memo;
                 for c in io_cands.iter_mut() {
@@ -586,19 +603,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 io_rounds += 1;
                 io_cands_tot += io_cands.len();
-                // `ENOMOTO_T_MIP_INOUT_GATE` = r (> 0): 最初のラウンドで、x(α) の分数の整数列が x_lp の r 倍に満たなければ
-                // (最適面が狭い) このループでは in-out を止める (このラウンドの候補も捨てる)
-                let gate = tunable!("ENOMOTO_T_MIP_INOUT_GATE", 0.0, f64);
-                if gate > 0.0 && io_rounds == 1 {
-                    let (f0, f1) = (self.fractional(&x).len(), self.fractional(&xa).len());
-                    if (f1 as f64) < gate * (f0 as f64) {
-                        if self.params.verbose {
-                            eprintln!("MIP: in-out separation: fractional {f0} at x_lp / {f1} at x(a) < {gate} x; off for this loop");
-                        }
-                        io_cands.clear();
-                        io_next = Some(None);
-                    }
-                }
                 if self.params.verbose {
                     // 最適面の広さの目安: x_c と x_lp で値の違う列の数、分数の整数列の数 (x_lp と x(α))
                     let ndiff = (0..n).filter(|&j| (xc[j] - x[j]).abs() > 1e-6 * (1.0 + x[j].abs())).count();
