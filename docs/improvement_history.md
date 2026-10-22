@@ -9737,6 +9737,14 @@ neos-950242 の 2 回目の調査 (`analysis/neos950242_r2_20261020.md`)。
 - mzzv42z は PGb で 60 秒以内に -20540 (最適値) の暫定解が出たが、PGa では既定と同じ -20510。どちらも最適の証明まで行かない。最初の解は 8.5〜9.0 → 12.6〜12.8 秒と遅くなる (前処理が重い)。
 - 解けた数は変わらず、SGM が 4 つ中 3 つ悪いので保留。前処理の時間を抑えれば候補になりうる。
 
+## 2026-10-22: physiciansched6-2 の代入 + 根のカットの選択と削除の HiGHS 合わせ (e2hsel) は保留
+
+- カット選択の HiGHS 合わせの調査 (analysis/cutsel_highs_20261022.md) の試作 `ENOMOTO_MIP_EQUIV2_HSEL=1 ENOMOTO_T_MIP_HSEL_AGE=0` を e2all (`PROBE_EQUIV2`・`EQUIV2_CUTS`・`EQUIV2_FJ`・`EQUIV2_TAB`) に足したもの (働くのは 55 問中 physiciansched6-2 だけ)。全問に使う `ENOMOTO_MIP_ROOT_HSEL` は beasleyC3・mc11・neos-911970 などを崩すので候補にしない。f87edd9 で 40 + 16 問を 2 組。
+- 40 問 (解けた・SGM): HSa newdef 26・19.47 / e2hsel 25・20.19、HSb newdef 24・20.60 / e2hsel 22・23.21。
+- 16 問: HSa newdef 10・36.07 / e2hsel 10・39.14、HSb newdef 11・34.80 / e2hsel 10・33.14。不一致 0、"MIP: WARNING" 0。
+- physiciansched6-2: HSa では根の下界が 49324 (最適値) に届いたが暫定解 50124、HSb は下界 49081・暫定解 50626。60 秒では解けない。
+- 他の問題は同じ形を解くのに 40 問で -1・-2 と揺れる (計測の揺れの大きさの目安)。基準を満たさないので保留。暫定解を出す側 (根の RINS のサブ MIP、計測 RH) と組み合わせて physiciansched6-2 で確かめる。
+
 ## 改名一覧 (整理時)
 
 本メモ中は旧名で書かれている。
