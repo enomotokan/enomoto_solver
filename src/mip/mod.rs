@@ -818,6 +818,8 @@ thread_local! {
     static PROBE_EQUIV_FORCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// この求解の前処理で `ENOMOTO_MIP_PROBE_EQUIV2` の代入を使った (根のカットの `ENOMOTO_MIP_EQUIV2_CUTS` の判定用。最初の求解の始めに戻す)
     pub(crate) static EQUIV2_USED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// [`tighten_coefficients`] が許容誤差の範囲で冗長として縮めなかった係数の数 (ログ用)
+    static COEF_TIGHTEN_SKIPPED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// 再スタート後の求解の前処理の間か ([`probe`] の `ENOMOTO_MIP_PROBE_EQUIV2` を使わない判定)
     static RESTART_PRESOLVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
@@ -974,7 +976,7 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool) -> MipProblem {
 
 /// 診断用 (`ENOMOTO_MIP_DEBUG_DUMP_PRESOLVED=ファイル`): 前処理後の問題 (最小化形、offset は目的の定数列 `OBJCONST` に入れない) を
 /// 固定形式でない MPS に書き出す。列は `C<番号>`、行は `R<番号>`。
-fn dump_mps(p: &MipProblem, f: &str) {
+pub(crate) fn dump_mps(p: &MipProblem, f: &str) {
     use std::fmt::Write as _;
     let mut s = String::new();
     let _ = writeln!(s, "NAME presolved\nROWS\n N OBJ");
@@ -1274,10 +1276,12 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
     // 係数の強化 (片側の行の 0-1 列の係数を、整数解を変えずに LP の緩和が締まる値に縮める)
     if env_str!("ENOMOTO_MIP_NO_COEF_TIGHTEN").is_none() {
         let is_int_now: Vec<bool> = p.is_int.clone();
+        COEF_TIGHTEN_SKIPPED.with(|c| c.set(0));
         let tightened = tighten_coefficients(&mut rows, &mut row_lo, &mut row_up, &pre.lb, &pre.ub, &is_int_now, env_str!("ENOMOTO_MIP_COEF_TIGHTEN_GENERAL").is_some());
+        let skipped = COEF_TIGHTEN_SKIPPED.with(|c| c.get());
         let normalized = normalize_integer_rows(&mut rows, &mut row_lo, &mut row_up, &is_int_now);
-        if verbose && (tightened > 0 || normalized > 0) {
-            eprintln!("MIP: presolve: tightened {tightened} coefficients, normalized {normalized} integer rows");
+        if verbose && (tightened > 0 || normalized > 0 || skipped > 0) {
+            eprintln!("MIP: presolve: tightened {tightened} coefficients (skipped {skipped} in rows redundant within tolerance), normalized {normalized} integer rows");
         }
     }
     // 係数が定数倍の関係にある行をまとめる (上限側と下限側の組は範囲制約 1 本に、同じ向きはきつい方に)。
@@ -1460,6 +1464,13 @@ fn substitute_probe_equiv(prob: &MipProblem, mut postsolve: Vec<crate::presolve:
             row_up.push(r);
         }
         let q = MipProblem::from_rows(col_lo, col_up, cost, offset, sense_sign, is_int, rows, row_lo, row_up);
+        // 診断用 (`ENOMOTO_MIP_DEBUG_DUMP_PROBE=接頭辞`): 組の等式を足した問題を `接頭辞_q番号.mps` に書く
+        if let Some(f) = env_str!("ENOMOTO_MIP_DEBUG_DUMP_PROBE").filter(|_| !submip) {
+            static CNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let f = format!("{f}_q{}.mps", CNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+            dump_mps(&q, &f);
+            eprintln!("MIP: probing: dumped the problem with {} equivalence rows to {f} (offset {})", equiv.len(), q.offset);
+        }
         PROBE_EQUIV_DEPTH.with(|d| d.set(depth + 1));
         let r = presolve_mip(&q, verbose, submip, None);
         PROBE_EQUIV_DEPTH.with(|d| d.set(depth));
@@ -1660,6 +1671,14 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
     let c0 = cap_clock();
     let n = prob.n;
     let nnz = prob.nnz;
+    // 診断用 (`ENOMOTO_MIP_DEBUG_DUMP_PROBE=接頭辞`): プロービングに渡された問題を `接頭辞_番号.mps`、見つけた同値な組を `接頭辞_番号.pairs` に書く
+    let dump_id = env_str!("ENOMOTO_MIP_DEBUG_DUMP_PROBE").filter(|_| !submip).map(|f| {
+        static CNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let id = format!("{f}_{}", CNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+        dump_mps(prob, &format!("{id}.mps"));
+        eprintln!("MIP: probing: dumped the problem to {id}.mps (offset {}, restart {})", prob.offset, RESTART_PRESOLVE.with(|f| f.get()));
+        id
+    });
     // 旧来の上限 (サブ MIP と `ENOMOTO_MIP_NO_PROBE_ADAPTIVE`): 手間は非零数の 20 倍、時間は 0.5 秒 (固定・締め付けが出ていれば
     // `ENOMOTO_T_MIP_PROBE_TIME_FOUND` 秒)。
     // 大きくすると (2000 倍・1 秒・3 秒) 30n20b8 は 7971 列を全部試して 3241 列を固定し根の LP が 43.3 -> 122.8
@@ -1958,6 +1977,10 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
         if verbose {
             eprintln!("MIP: probing: {} equivalent binary pairs", equiv.len());
         }
+        if let Some(id) = &dump_id {
+            let txt: String = equiv.iter().map(|&(j, k, neg)| format!("{j} {k} {}\n", neg as u8)).collect();
+            let _ = std::fs::write(format!("{id}.pairs"), txt);
+        }
         PROBE_EQUIV.with(|e| *e.borrow_mut() = std::mem::take(&mut equiv));
     }
     // 固定した列を含む含意は捨てる
@@ -2034,6 +2057,13 @@ fn tighten_coefficients(rows: &mut [Vec<(usize, f64)>], row_lo: &mut [f64], row_
             continue;
         }
         let tol = 1e-9 * (1.0 + b.abs()).max(maxact.abs());
+        // 縮めた後の係数の大きさは `M - b` (残りの最大活動量が右辺を越える分)。これが許容誤差 (`1e-6 (1 + |b|)`) 以下の行は
+        // 許容誤差の範囲で冗長なので縮めない (`ENOMOTO_MIP_COEF_TIGHTEN_TINY` で以前どおり縮める)。縮めると、許容誤差の範囲でしか
+        // 成り立たない点を厳密に切る行になる: uccase12 の再スタート後の問題では、伝播の誤差の分だけ緩めた幅 1e-9 の連続列 y と
+        // 0-1 列 x の行 `x + y <= 1 - 1e-9` (M - b = 2e-9) が `2e-9 x + y <= 1e-9` になり、x = 1 (最適解の値) を切っていた
+        // (行の尺度をかけた LP では違反が 1e-9 でなく 0.5 になる)。根の LP が 11507.36 -> 12043.6 と最適値 11507.405 を越え、
+        // 誤った最適値を返した (analysis/equiv2_bug_20261022.md)
+        let red_tol = if env_str!("ENOMOTO_MIP_COEF_TIGHTEN_TINY").is_some() { 0.0 } else { 1e-6 * (1.0 + b.abs()) };
         let mut changed = false;
         for e in rows[i].iter_mut() {
             let j = e.0;
@@ -2043,7 +2073,10 @@ fn tighten_coefficients(rows: &mut [Vec<(usize, f64)>], row_lo: &mut [f64], row_
             let a = sg * e.1;
             if a > 0.0 {
                 let d = b - (maxact - a);
-                if d > tol && d < a {
+                if d > tol && d < a && d >= a - red_tol {
+                    COEF_TIGHTEN_SKIPPED.with(|c| c.set(c.get() + 1));
+                }
+                if d > tol && d < a - red_tol {
                     e.1 = sg * (a - d);
                     // 右辺は d u_j 減る (0-1 型なら u_j = l_j + 1)。最大活動量も x_j の上限での寄与の分 d u_j 減る
                     b -= d * up[j];
@@ -2053,7 +2086,10 @@ fn tighten_coefficients(rows: &mut [Vec<(usize, f64)>], row_lo: &mut [f64], row_
                 }
             } else if a < 0.0 {
                 let d = b - (maxact + a);
-                if d > tol && d < -a {
+                if d > tol && d < -a && d >= -a - red_tol {
+                    COEF_TIGHTEN_SKIPPED.with(|c| c.set(c.get() + 1));
+                }
+                if d > tol && d < -a - red_tol {
                     e.1 = sg * (a + d);
                     // 最大活動量は x_j の下限での寄与 a l_j が (a + d) l_j になる
                     maxact += d * lo[j];
@@ -2829,6 +2865,28 @@ mod tests {
         assert_eq!(normalize_integer_rows(&mut r2, &mut l2, &mut u2, &[true; 2]), 1);
         assert_eq!(r2[0], vec![(0, 1.0), (1, 2.0)]);
         assert_eq!(u2[0], 2.0);
+    }
+
+    /// 許容誤差の範囲で冗長な行 (縮めた後の係数 `M - b` が許容誤差以下) は縮めない。uccase12 の再スタート後の問題の
+    /// `x + y <= 1 - 1e-9` (x は 0-1、y は幅 1e-9 の連続列) を `2e-9 x + y <= 1e-9` にすると、x = 1 を厳密に切る
+    #[test]
+    fn tighten_coefficients_skips_rows_redundant_within_tolerance() {
+        let mut rows = vec![vec![(0, 1.0), (1, 1.0)]];
+        let (mut lo, mut up) = (vec![f64::NEG_INFINITY], vec![1.0 - 1e-9]);
+        let n = tighten_coefficients(&mut rows, &mut lo, &mut up, &[0.0, 0.0], &[1.0, 1e-9], &[true, false], false);
+        assert_eq!(n, 0);
+        assert_eq!(rows[0], vec![(0, 1.0), (1, 1.0)]);
+        assert_eq!(up[0], 1.0 - 1e-9);
+        // `>=` の向き (符号を反転した行) も同じ
+        let mut rows = vec![vec![(0, -1.0), (1, -1.0)]];
+        let (mut lo, mut up) = (vec![-1.0 + 1e-9], vec![f64::INFINITY]);
+        assert_eq!(tighten_coefficients(&mut rows, &mut lo, &mut up, &[0.0, 0.0], &[1.0, 1e-9], &[true, false], false), 0);
+        // 越える分が許容誤差より大きければ以前どおり縮める: x + 0.25 y <= 1 (M - b = 0.25) -> 0.25 x + 0.25 y <= 0.25
+        let mut rows = vec![vec![(0, 1.0), (1, 0.25)]];
+        let (mut lo, mut up) = (vec![f64::NEG_INFINITY], vec![1.0]);
+        assert_eq!(tighten_coefficients(&mut rows, &mut lo, &mut up, &[0.0, 0.0], &[1.0, 1.0], &[true, false], false), 1);
+        assert_eq!(rows[0], vec![(0, 0.25), (1, 0.25)]);
+        assert_eq!(up[0], 0.25);
     }
 
     /// 乱数の片側の行 (幅 1 の整数列と有界な連続列 1 本) で、係数の強化の前後で整数列の値の組ごとの
