@@ -9831,6 +9831,13 @@ neos-950242 の 2 回目の調査 (`analysis/neos950242_r2_20261020.md`)。
 - 試作 mink = `ENOMOTO_MIP_PROOF_KEEP_INT=1 ENOMOTO_MIP_PROOF_CMIR=1 ENOMOTO_MIP_PROOF_CMIR_POOL=nocap`: neos-2978193-inde 4 スレッド・60 秒 0/3 → 3/3 (34.7〜58.6 秒)、1 スレッド・打ち切り値つき 1153・1181 ノード。40 問 1 回で 25 → 26 (noswot)。LP_INT_BOUNDS・CUTPOOL_PROP も足した版は 40 問で 23 なので採らない。
 - 40 + 16 問の対を 2 組測る (inv/mink-a・mink-b-20261022、ffbdfd3)。
 
+## 2026-10-22: 幅が許容誤差以下の列を 1 点に固定する (既定)
+
+- 実装 (analysis/tinywidth_20261022.md): `fix_tiny_width_columns` (src/mip/mod.rs)。幅 ≤ 1e-6 の列を、区間の整数 (なければ下限) に固定する。前処理の入口・LP の前処理の後・プロービングの書き戻し・再スタートで呼ぶ。不等式の行は失う余裕だけ緩め、余裕が 1e-6 を越える列は固定しない。等式の行は破れ 1e-9 (1+|b|) までの列だけ。戻すとき `ENOMOTO_MIP_NO_TINY_WIDTH_FIX`。最初の版 (目的の側の端に固定・行を緩めない) は乱数の MIP で 11/300 の誤りを出したので直した。
+- 53d41e1 の防御を外しても uccase12・seed 41 で正しい値。乱数の MIP × HiGHS で厳密に実行可能な点より悪い値を最適と返したもの 0。55 問 (10 秒) で働くのは beavma・uccase12 だけ。
+- 76b8e25 で 40 + 16 問、newdef / oldtw を順番を入れ替えて 2 組。40 問 (解けた・SGM): TWa oldtw 25・20.70 / newdef 26・20.01、TWb newdef 26・20.41 / oldtw 25・20.39。16 問: TWa 10・35.91 / 9・37.68 (beasleyC3・mc11 を落とし noswot・neos-960392 を解く)、TWb 11・35.82 / 10・37.90 (mc11 を解く)。不一致 0、"MIP: WARNING" 0。
+- 40 問は 2 組とも +1、16 問は合わせて同数、誤りの予防なので既定にする (25f1605・e7a6437)。53d41e1 の防御は残す。
+
 ## 改名一覧 (整理時)
 
 本メモ中は旧名で書かれている。
