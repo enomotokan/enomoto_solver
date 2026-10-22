@@ -934,7 +934,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.pool_age[k] = 0;
             return;
         }
-        if self.cut_pool_nnz + coefs.len() > nnz_cap {
+        if self.cut_pool_nnz + coefs.len() > nnz_cap && !self.pool_nocap {
             if env_str!("ENOMOTO_MIP_POOL_EVICT").is_none() {
                 return;
             }

@@ -688,9 +688,10 @@ impl Domain {
 
     /// 診断用 (`ENOMOTO_MIP_REPLAY_LOG`): 変更の記録にある整数列の境界の変更を理由ごとに数える
     /// (B 決定 (分枝・含意を含む -1)、R 行の伝播、L 被約費用の局所的な固定、S 強分岐、O オービトープ、P 双対証明、
-    /// F リテラルの衝突、J 目的関数の伝播、E その他の外からの変更)。
+    /// F リテラルの衝突、J 目的関数の伝播、E その他の外からの変更、C カットプールの伝播 (`ENOMOTO_MIP_CUTPOOL_PROP`)、
+    /// ただし C は `ENOMOTO_MIP_DEBUG_IMPL_TAG` の含意 (-9) と同じ値)。
     pub fn reason_counts_int(&self, p: &MipProblem) -> String {
-        let mut c = [0u32; 9];
+        let mut c = [0u32; 10];
         for ch in &self.stack {
             if !p.is_int[ch.col] {
                 continue;
@@ -704,11 +705,38 @@ impl Domain {
                 -6 => 5,
                 -7 => 6,
                 -8 => 7,
+                -9 => 9,
                 _ => 8,
             };
             c[k] += 1;
         }
-        format!("#B{},R{},L{},S{},O{},P{},F{},J{},E{}", c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8])
+        format!("#B{},R{},L{},S{},O{},P{},F{},J{},E{},C{}", c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8], c[9])
+    }
+
+    /// 診断用 (`ENOMOTO_MIP_REPLAY_DETAIL`): 変更の記録にある整数列の境界の変更 `列{u|d}値{理由}` (理由の文字は
+    /// [`Self::reason_counts_int`] と同じ)。
+    pub fn int_changes_str(&self, p: &MipProblem) -> String {
+        let nm = ['B', 'R', 'L', 'S', 'O', 'P', 'F', 'J', 'E', 'C'];
+        let mut out = String::new();
+        for ch in &self.stack {
+            if !p.is_int[ch.col] {
+                continue;
+            }
+            let k = match ch.reason {
+                -1 => 0,
+                r if r >= 0 => 1,
+                -3 => 2,
+                -4 => 3,
+                -5 => 4,
+                -6 => 5,
+                -7 => 6,
+                -8 => 7,
+                -9 => 9,
+                _ => 8,
+            };
+            out.push_str(&format!(" {}{}{}{}", ch.col, if ch.upper { 'd' } else { 'u' }, ch.new, nm[k]));
+        }
+        out
     }
 
     /// HiGHS 式の衝突解析 (`HighsDomain::ConflictSet::conflictAnalysis`)。矛盾 (`start`) を、
@@ -718,6 +746,13 @@ impl Domain {
     /// 置き換えた組と UIP の否定から「再収束」の衝突も作る。各衝突は同時には成り立たない境界のリテラルの組
     /// (列, 上限か, 値)。長さ `max_len` を超える衝突は作らない。
     pub fn analyze_multi(&self, p: &MipProblem, start: ConflictStart, max_len: usize, reconv: bool) -> Vec<Vec<(usize, bool, f64)>> {
+        self.analyze_multi_bumps(p, start, max_len, reconv, None)
+    }
+
+    /// [`Self::analyze_multi`] と同じだが、`bumps` があれば HiGHS が衝突スコアを上げる境界の変更 (列, 上限か) を足す:
+    /// 矛盾の最初の説明に使った変更全部 (長さの上限を調べる前) と、段ごとの置き換えで新しく加わった変更
+    /// (HiGHS `conflictAnalysis` と `resolveDepth(.., increaseConflictScore = true)`。再収束の衝突の分は数えない)。
+    pub fn analyze_multi_bumps(&self, p: &MipProblem, start: ConflictStart, max_len: usize, reconv: bool, mut bumps: Option<&mut Vec<(usize, bool)>>) -> Vec<Vec<(usize, bool, f64)>> {
         let end = self.stack.len();
         let dec: Vec<usize> = (0..end).filter(|&k| self.stack[k].reason == -1).collect();
         if dec.is_empty() {
@@ -847,6 +882,9 @@ impl Domain {
                 }
             }
         };
+        if let Some(b) = bumps.as_deref_mut() {
+            b.extend(init.iter().map(|&k| (self.stack[k].col, self.stack[k].upper)));
+        }
         if init.is_empty() || init.len() > max_len {
             return Vec::new();
         }
@@ -882,7 +920,13 @@ impl Domain {
                 set.remove(&k);
                 cnt -= 1;
                 for e in ex {
-                    if set.insert(e) && e >= lo && e < hi {
+                    let new = set.insert(e);
+                    if new {
+                        if let Some(b) = bumps.as_deref_mut() {
+                            b.push((self.stack[e].col, self.stack[e].upper));
+                        }
+                    }
+                    if new && e >= lo && e < hi {
                         cnt += 1;
                     }
                 }

@@ -309,7 +309,7 @@ index 4013925..f4a8904 100644
      // we restore the old complementation vector, right hand side, and values
      rhs = tmpRhs;
 diff --git a/highs/mip/HighsCutPool.cpp b/highs/mip/HighsCutPool.cpp
-index b9011e8..56a6b9a 100644
+index b9011e8..9602933 100644
 --- a/highs/mip/HighsCutPool.cpp
 +++ b/highs/mip/HighsCutPool.cpp
 @@ -1,3 +1,6 @@
@@ -319,7 +319,7 @@ index b9011e8..56a6b9a 100644
  /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
  /*                                                                       */
  /*    This file is part of the HiGHS linear optimization suite           */
-@@ -634,6 +637,12 @@ HighsInt HighsCutPool::addCut(const HighsMipSolver& mipsolver, HighsInt* Rindex,
+@@ -634,6 +637,18 @@ HighsInt HighsCutPool::addCut(const HighsMipSolver& mipsolver, HighsInt* Rindex,
                                                              Rvalue, Rlen, rhs);
    }
  
@@ -328,6 +328,12 @@ index b9011e8..56a6b9a 100644
 +    for (HighsInt i = 0; i != Rlen; ++i)
 +      if (mipsolver.variableType(Rindex[i]) != HighsVarType::kContinuous) ++ni;
 +    fprintf(stderr, "HADDC %d src %d len %d int %d conf %d prop %d rhs %.6g\n", (int)rowindex, g_cutSrc, (int)Rlen, ni, (int)isConflict, (int)propagate, rhs);
++  }
++  if (!mipsolver.submip && getenv("HIGHS_CONFCUT_DUMP") && g_cutSrc == 2) {
++    fprintf(stderr, "HCC %.17g %d", rhs, (int)Rlen);
++    for (HighsInt i = 0; i != Rlen; ++i)
++      fprintf(stderr, " %d:%.17g", (int)mipsolver.mipdata_->postSolveStack.getOrigColIndex(Rindex[i]), Rvalue[i]);
++    fprintf(stderr, "\n");
 +  }
    return rowindex;
  }
@@ -633,7 +639,7 @@ index 6f3e627..f1f0b78 100644
        }
  
 diff --git a/highs/mip/HighsSearch.cpp b/highs/mip/HighsSearch.cpp
-index 5db0ca0..51a4b3d 100644
+index 5db0ca0..f43ec96 100644
 --- a/highs/mip/HighsSearch.cpp
 +++ b/highs/mip/HighsSearch.cpp
 @@ -1,3 +1,4 @@
@@ -665,7 +671,7 @@ index 5db0ca0..51a4b3d 100644
  
      // if (cutpool.getNumCuts() > oldnumcuts) {
      //  printf(
-@@ -1082,6 +1085,68 @@ HighsSearch::NodeResult HighsSearch::evaluateNode() {
+@@ -1082,6 +1085,84 @@ HighsSearch::NodeResult HighsSearch::evaluateNode() {
      }
    }
  
@@ -728,13 +734,29 @@ index 5db0ca0..51a4b3d 100644
 +        }
 +      }
 +      fprintf(stderr, " #B%ld,R%ld,Q%ld,X%ld,O%ld,U%ld,C%ld,F%ld,Z%ld,L%ld,Y%ld", cnt[0], cnt[1], cnt[2], cnt[3], cnt[4], cnt[5], cnt[6], cnt[7], cnt[8], cnt[9], cnt[10]);
++      if (getenv("HIGHS_PATH_DETAIL") && hpSeq - 1 < atol(getenv("HIGHS_PATH_DETAIL"))) {
++        static const char* nm = "BRQXOUCFZLY";
++        fprintf(stderr, "\nHPD %ld", hpSeq - 1);
++        for (size_t k = 0; k < stk.size(); ++k) {
++          if (mipsolver.variableType(stk[k].column) == HighsVarType::kContinuous) continue;
++          HighsInt t = rs[k].type;
++          int c = t == HighsDomain::Reason::kBranching ? 0
++                : (t == HighsDomain::Reason::kModelRowUpper || t == HighsDomain::Reason::kModelRowLower) ? 1
++                : t == HighsDomain::Reason::kCliqueTable ? 2
++                : t == HighsDomain::Reason::kConflictingBounds ? 3
++                : t == HighsDomain::Reason::kObjective ? 4
++                : t == HighsDomain::Reason::kUnknown ? (rs[k].index == 1 ? 9 : rs[k].index == 2 ? 10 : 5)
++                : t >= 0 && t < ncp ? 6 : t >= ncp ? 7 : 8;
++          fprintf(stderr, " %d%c%g%c", (int)ps.getOrigColIndex(stk[k].column), stk[k].boundtype == HighsBoundType::kLower ? 'u' : 'd', stk[k].boundval, nm[c]);
++        }
++      }
 +    }
 +    fprintf(stderr, "\n");
 +  }
    if (result != NodeResult::kOpen) {
      mipsolver.mipdata_->debugSolution.nodePruned(localdom);
      treeweight += std::ldexp(1.0, 1 - getCurrentDepth());
-@@ -1328,6 +1393,18 @@ HighsSearch::NodeResult HighsSearch::branch() {
+@@ -1328,6 +1409,18 @@ HighsSearch::NodeResult HighsSearch::branch() {
          }
        }
        result = NodeResult::kBranched;

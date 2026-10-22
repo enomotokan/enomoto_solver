@@ -315,6 +315,9 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 別スレッドで解いているサブ MIP (出した順)。
     /// 並列モードで別スレッドに出したサブ MIP と、それが根の RENS のものか ([`Self::submip_is_rens`] を出すときに写す)。
     pub(super) pending_submips: std::collections::VecDeque<(std::thread::JoinHandle<MipResult>, bool, &'static str, std::time::Instant, Option<f64>)>,
+    /// [`Self::add_proof_cmir`] の作業領域 (丸めの基準の点) と、試した数・足した数。
+    proof_cmir_x: Option<Vec<f64>>,
+    pub(super) proof_cmir_stats: [u64; 3],
     /// 次に出すサブ MIP の固定率 (RENS・RINS の固定率の記録 `rens_succ`・`rens_infeas` に結果を反映するため)。
     pub(super) submip_fix_rate: Option<f64>,
     /// いま走らせているヒューリスティクスの名前 (ログで暫定解の出どころを示すため)
@@ -604,6 +607,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) pool_idx: Vec<u32>,
     pub(super) pool_val: Vec<f64>,
     pub(super) pool_start: Vec<u32>,
+    /// 診断用: [`Self::add_to_pool`] で非零数の上限を見ない (`ENOMOTO_MIP_ORACLE_CUTS` を入れる間だけ真)
+    pub(super) pool_nocap: bool,
     /// 求解の開始時 (根の伝播の後) に固定されていた整数列の数 (再スタートの判定用)。
     root_fixed0: usize,
     /// ノードでのダイビングの LP 反復数・呼び出し回数・解を見つけた回数。
@@ -1077,6 +1082,14 @@ fn pool_release(pool: &WorkPool) {
 }
 
 /// ノードでカットプールを伝播するか (`ENOMOTO_MIP_CUTPOOL_PROP`、試作。サブ MIP でも使う)。
+fn proof_keep_int() -> bool {
+    env_str!("ENOMOTO_MIP_PROOF_KEEP_INT").is_some()
+}
+
+fn prop_fixpoint() -> bool {
+    env_str!("ENOMOTO_MIP_PROP_FIXPOINT").is_some()
+}
+
 fn cutpool_prop() -> bool {
     env_str!("ENOMOTO_MIP_CUTPOOL_PROP").is_some()
 }
@@ -1503,6 +1516,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         force_fix_cap: false,
         parallel_submips: false,
         pending_submips: std::collections::VecDeque::new(),
+        proof_cmir_x: None,
+        proof_cmir_stats: [0; 3],
         heur_label: "",
         heur_stop: None,
         root_lp_iters: 0,
@@ -1674,6 +1689,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         pool_idx: Vec::new(),
         pool_val: Vec::new(),
         pool_start: vec![0],
+        pool_nocap: false,
         root_fixed0: 0,
         dive_iters: 0,
         dive_calls: 0,
@@ -1736,6 +1752,42 @@ fn noinc_root_arm(name: &str) -> Option<usize> {
 /// 二分探索のスレッド `ENOMOTO_MIP_BISECT_ROOT_HEUR`)。
 fn tree_heur_off() -> bool {
     matches!(crate::simplex::slope_intercept_dual::mip_profile(), 2 | 3)
+}
+
+/// `ENOMOTO_MIP_HIGHS_CONFLICT_SCORE`: 衝突スコアを HiGHS と同じ変更で上げるか ([`Solver::add_conflicts_multi`])。
+fn highs_conflict_score() -> bool {
+    env_str!("ENOMOTO_MIP_HIGHS_CONFLICT_SCORE").is_some()
+}
+
+/// `ENOMOTO_MIP_PROOF_SIDE_REDUCE` ([`Solver::add_proof_from`]): 0 使わない、1 常に (`=1` など)、2 密すぎる証明だけ (`=dense`)。
+fn proof_side_reduce_mode() -> u8 {
+    match env_str!("ENOMOTO_MIP_PROOF_SIDE_REDUCE") {
+        None => 0,
+        Some("dense") => 2,
+        Some(_) => 1,
+    }
+}
+
+/// `ENOMOTO_MIP_LP_INT_BOUNDS` ([`Solver::sync_lp`])。
+pub(super) fn lp_int_bounds() -> bool {
+    env_str!("ENOMOTO_MIP_LP_INT_BOUNDS").is_some()
+}
+
+/// `ENOMOTO_MIP_PROOF_CMIR` ([`Solver::add_proof_cmir`])。
+fn proof_cmir() -> bool {
+    env_str!("ENOMOTO_MIP_PROOF_CMIR").is_some()
+}
+
+/// `ENOMOTO_MIP_PROOF_FIXPOINT` (ノードの伝播で証明を不動点まで調べ直す)。
+fn proof_fixpoint() -> bool {
+    env_str!("ENOMOTO_MIP_PROOF_FIXPOINT").is_some()
+}
+
+/// 診断用 (`ENOMOTO_MIP_TREE_LOG`): 木のノードの終わり方と分枝を 1 行ずつ標準エラーに出すか (サブ MIP では出さない)。
+/// `ENODE d=深さ r=終わり方 lp=LP 値 rows=LP の行数` と `EBR d=深さ col=列 val=値 rows=行数`。HiGHS の計測用パッチの
+/// `HNODE`・`HBR` と並べる (scripts/tree_log_compare.py)
+fn tree_log() -> bool {
+    env_str!("ENOMOTO_MIP_TREE_LOG").is_some()
 }
 
 /// DSE 重みを全ての LP で引き継ぎ、待ち行列のノードに保存するか (既定で真、`ENOMOTO_MIP_NO_DSE_ALL` で偽)。
@@ -2135,8 +2187,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     pub(super) fn sync_lp(&mut self) {
+        // `ENOMOTO_MIP_LP_INT_BOUNDS`: HiGHS (`HighsLpRelaxation::flushDomain` が局所的な定義域では
+        // `removeContinuousChangedCols` する) と同じく、連続列は LP に大域的な境界だけを渡す。伝播で締まった連続列の境界は
+        // 行と整数列の境界から導かれるものが多く LP の値は (ほぼ) 変わらないが、LP に置くと双対証明・Farkas 証明が
+        // その列の被約費用に乗って密で局所的なものになる (neos-2978193-inde: 閉じた施設の x を 0 に固定した 324 列)。
+        // 置かなければ証明は行 (容量制約) を通して整数列に乗り、短い大域的な証明になる
+        let int_only = lp_int_bounds();
         for j in self.dom.take_changed() {
-            self.lp.set_col_bounds(j, self.dom.lo[j], self.dom.up[j]);
+            if int_only && !self.p.is_int[j] {
+                self.lp.set_col_bounds(j, self.dom.global_lo[j], self.dom.global_up[j]);
+            } else {
+                self.lp.set_col_bounds(j, self.dom.lo[j], self.dom.up[j]);
+            }
         }
     }
 
@@ -3434,6 +3496,30 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if replay.is_some() {
             self.queue.prio_only = true;
         }
+        // 診断用 (`ENOMOTO_MIP_ORACLE_CUTS=ファイル`): 他のソルバーが作ったカット (HiGHS の計装の `HCC 右辺 長さ 列:係数 ...` 行、
+        // 列は元の問題の番号) を木の前にカットのプールに入れる (`ENOMOTO_MIP_CUTPOOL_PROP` と合わせてノードで伝播する)
+        if let Some(f) = env_str!("ENOMOTO_MIP_ORACLE_CUTS").filter(|_| !self.params.submip && self.snap.is_none()) {
+            let s = std::fs::read_to_string(f).unwrap_or_default();
+            let mut k = 0;
+            self.pool_nocap = true;
+            for l in s.lines().filter(|l| l.starts_with("HCC ")) {
+                let t: Vec<&str> = l.split_whitespace().collect();
+                let rhs: f64 = t[1].parse().unwrap();
+                let coefs: Vec<(usize, f64)> = t[3..].iter().map(|x| {
+                    let (a, b) = x.split_once(':').unwrap();
+                    (a.parse().unwrap(), b.parse().unwrap())
+                }).collect();
+                if coefs.iter().all(|&(j, _)| j < self.p.n) {
+                    self.add_to_pool(&coefs, rhs);
+                    k += 1;
+                }
+            }
+            self.pool_nocap = false;
+            if let Some((c, r, _)) = self.cut_pool.get(self.cut_pool.len().saturating_sub(k)) {
+                eprintln!("MIP: oracle cuts: first in the pool {:?} <= {r}, is_int {:?}", c, c.iter().map(|&(j, _)| self.p.is_int[j]).collect::<Vec<_>>());
+            }
+            eprintln!("MIP: oracle cuts: {k} added to the cut pool from {f} (pool {})", self.cut_pool.len());
+        }
         // [なぞったノード, ファイルにないノード, 指定の列で分枝, 自前で分枝, 指定の列が固定済み]
         let mut rp_stats = [0u64; 5];
         loop {
@@ -3784,6 +3870,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if replay.is_some() {
                     self.rp_log(&node, "lb", f64::NAN, f64::NAN, -1, &mut rp_stats);
                 }
+                if tree_log() && !self.params.submip {
+                    eprintln!("ENODE d={} r=pop_lb lp={} rows={}", node.depth, node.lower_bound, self.lp.num_rows());
+                }
                 continue;
             }
             self.dbg_trace("after replaying the branches");
@@ -3815,7 +3904,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let pos_pf = self.dom.stack_len();
                 self.proof_last_prune = None;
                 self.proof_prune_after_tighten = false;
-                let ok = self.apply_dual_proofs();
+                let mut ok = self.apply_dual_proofs();
+                if ok && proof_fixpoint() {
+                    for _ in 0..20 {
+                        let before = self.dom.stack_len();
+                        ok = self.apply_dual_proofs();
+                        if !ok || self.dom.stack_len() == before {
+                            break;
+                        }
+                    }
+                }
                 if !ok {
                     if self.dom.conflict.is_some() && env_str!("ENOMOTO_MIP_NO_EXTRA_CONFLICTS").is_none() {
                         self.add_conflict();
@@ -3881,11 +3979,25 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if !prop_ok && rp_stage.is_empty() {
                 rp_stage = "p_orb";
             }
+            // `ENOMOTO_MIP_PROP_FIXPOINT` (試作): オービトープの固定などで境界が変わったら、行・目的関数・双対証明・リテラルの衝突・
+            // カットプール・オービトープの伝播を、境界が変わらなくなるまで (最大 `ENOMOTO_T_MIP_PROP_FIXPOINT_PASSES` 回) 回し直す
+            // (HiGHS は対称性の固定・行・カットプール・衝突プールを 1 つの伝播の不動点まで回す。こちらは各段を 1 回ずつ順に回すので、
+            // 後の段 (オービトープ) で締まった境界が前の段 (カットプール・証明) に戻らない)
+            let prop_ok = prop_ok && (!prop_fixpoint() || {
+                let ok = self.node_prop_fixpoint(&node.changes);
+                if !ok && rp_stage.is_empty() {
+                    rp_stage = "p_fix";
+                }
+                ok
+            });
             if !prop_ok {
                 if replay.is_some() {
                     self.rp_log(&node, rp_stage, f64::NAN, f64::NAN, -1, &mut rp_stats);
                 }
                 self.pc.infeasible_leaves += 1;
+                if tree_log() && !self.params.submip {
+                    eprintln!("ENODE d={} r=prop lp={} rows={}", node.depth, node.lower_bound, self.lp.num_rows());
+                }
                 self.dbg_lost("node propagation", dn);
                 if let Some((j, up, _, _)) = node.branch {
                     self.pc.add_cutoff(j, up);
@@ -4012,6 +4124,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         if resolves == 0 {
                             rp_obj0 = f64::INFINITY;
                         }
+                        if tree_log() && !self.params.submip {
+                            eprintln!("ENODE d={} r={} lp={} rows={}", node.depth, if st == LpStatus::Infeasible { "lpinf" } else { "lpobj" }, self.lp.objective() + self.p.offset, self.lp.num_rows());
+                        }
                         if st == LpStatus::Infeasible {
                             self.pc.infeasible_leaves += 1;
                             self.add_farkas_proof();
@@ -4057,6 +4172,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                 }
                 if node_obj >= self.prune_limit() {
+                    if tree_log() && !self.params.submip {
+                        eprintln!("ENODE d={} r=lpobj lp={node_obj} rows={}", node.depth, self.lp.num_rows());
+                    }
                     self.add_dual_proof();
                     self.pc.objlim_leaves += 1;
                     if self.dbg_on {
@@ -4067,6 +4185,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let x = self.lp.col_values();
                 let frac = self.fractional(&x);
                 if frac.is_empty() {
+                    if tree_log() && !self.params.submip {
+                        eprintln!("ENODE d={} r=int lp={node_obj} rows={}", node.depth, self.lp.num_rows());
+                    }
                     if self.try_lp_solution() {
                         break None;
                     }
@@ -4097,6 +4218,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                     xp("r_fix");
                     if !self.dom.propagate(self.p) {
+                        if tree_log() && !self.params.submip {
+                            eprintln!("ENODE d={} r=redcost lp={node_obj} rows={}", node.depth, self.lp.num_rows());
+                        }
                         self.add_conflict();
                         self.dbg_lost("propagation after local redcost fixing", dn && self.dbg_contains());
                         break None;
@@ -4105,7 +4229,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.sync_lp();
                     xp("r_sync");
                     let x2 = self.lp.col_values();
-                    let moved = (0..self.p.n).any(|j| x2[j] < self.dom.lo[j] - FEASTOL || x2[j] > self.dom.up[j] + FEASTOL);
+                    let moved = (0..self.p.n).any(|j| (self.p.is_int[j] || !lp_int_bounds()) && (x2[j] < self.dom.lo[j] - FEASTOL || x2[j] > self.dom.up[j] + FEASTOL));
                     if moved {
                         resolves += 1;
                         continue;
@@ -4429,7 +4553,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 40 問 (同時測定) 1 回目: 既定 10 本 18 問 27.75 に対し 100 本 18 問 26.86、2 回目: 19 問 27.19 に対し 18 問 27.63
                 // (neos-860300 が 58.7 秒 -> 時間切れ、nw04 17.7 -> 36.1 秒 (経路の揺れ)、misc07 11.3 -> 14.5 秒。mik-250・binkar10_1 は
                 // 2 回とも速い)。2 回の合計で解けた数が 37 -> 36 と減るので既定は 10 本のまま
-                } else if resolves < 2 && node.depth > 0 && plunge_depth == 0 && env_str!("ENOMOTO_MIP_NO_POOL_CUTS").is_none() && self.pool_cut_round(&x, tunable!("ENOMOTO_T_MIP_POOL_CUTS_PER_NODE", 10usize, usize)) {
+                } else if resolves < 2 && node.depth > 0 && plunge_depth == 0 && env_str!("ENOMOTO_MIP_NO_POOL_CUTS").is_none() && {
+                    let r0 = self.lp.num_rows();
+                    let added = self.pool_cut_round(&x, tunable!("ENOMOTO_T_MIP_POOL_CUTS_PER_NODE", 10usize, usize));
+                    if added && tree_log() && !self.params.submip {
+                        eprintln!("EPOOL d={} rows {} -> {} lp={node_obj}", node.depth, r0, self.lp.num_rows());
+                    }
+                    added
+                } {
                     resolves += 1;
                     continue;
                 }
@@ -4586,15 +4717,26 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     BranchAction::Resolve => {
                         resolves += 1;
                         if !self.dom.propagate(self.p) {
+                            if tree_log() && !self.params.submip {
+                                eprintln!("ENODE d={} r=sbprop lp={node_obj} rows={}", node.depth, self.lp.num_rows());
+                            }
                             self.add_conflict();
                             break None;
                         }
                         self.sync_lp();
                         continue;
                     }
-                    BranchAction::Prune => break None,
+                    BranchAction::Prune => {
+                        if tree_log() && !self.params.submip {
+                            eprintln!("ENODE d={} r=sb lp={node_obj} rows={}", node.depth, self.lp.num_rows());
+                        }
+                        break None;
+                    }
                     BranchAction::Branch { col, value } => {
                         let (col, value) = if rp_force.is_some() { (col, value) } else { self.orbitope_branching_column(col, value) };
+                        if tree_log() && !self.params.submip {
+                            eprintln!("EBR d={} col={col} val={value} lp={node_obj} rows={} resolves={resolves}", node.depth, self.lp.num_rows());
+                        }
                         break Some(Some((col, value, node_obj, frac)));
                     }
                 }
@@ -4626,6 +4768,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let cu = self.pc.cost_up(col) * (1.0 - f);
                 let cd = self.pc.cost_down(col) * f;
                 if (cu - cd).abs() <= 1e-12 * (1.0 + cu.abs()) { f >= 0.5 } else { cu < cd }
+            };
+            // `ENOMOTO_MIP_CHILD_HIGHS`: HiGHS の子の選び方 (`ChildSelectionRule::kHybridInferenceCost`): (1 + 推論の平均) /
+            // 擬似費用の大きい側。`=up` なら常に上の子
+            let prefer_up = match env_str!("ENOMOTO_MIP_CHILD_HIGHS") {
+                Some("up") => true,
+                Some(_) => {
+                    let eps = 1e-6 * (1.0 + node_obj.abs());
+                    let us = (1.0 + self.pc.inference(col, true)) / (self.pc.cost_up(col) * (1.0 - f) + eps);
+                    let ds = (1.0 + self.pc.inference(col, false)) / (self.pc.cost_down(col) * f + eps);
+                    us >= ds
+                }
+                None => prefer_up,
             };
             let prefer_up = prefer_up ^ (self.race_div & 1 == 1 && !self.race_done);
             // なぞる: 子の優先度は HiGHS の処理順 (ファイルにない子は親の直後)
@@ -5523,6 +5677,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         st[if e.is_some() { 0 } else { 1 }] += 1;
         if !super::replay::log_on() {
             return;
+        }
+        if let (Some(e), Some(lim)) = (e, env_str!("ENOMOTO_MIP_REPLAY_DETAIL").and_then(|v| v.parse::<u64>().ok())) {
+            if e.seq < lim {
+                eprintln!("ERD {}{}", e.seq, self.dom.int_changes_str(self.p));
+            }
         }
         let nfix = (0..self.p.n).filter(|&j| self.p.is_int[j] && self.dom.lo[j] >= self.dom.up[j]).count();
         let path: Vec<String> = node.changes.iter().map(|c| format!("{}{}{}", c.col, if c.upper { 'd' } else { 'u' }, c.value)).collect();
@@ -6430,7 +6589,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if dmax <= 1e-9 {
             return false;
         }
-        let mut coefs: Vec<(usize, f64)> = Vec::new();
+        // `ENOMOTO_MIP_PROOF_SIDE_REDUCE=dense`: 側別に移すのは、移さないと密すぎて捨てる証明か、移すと大きく縮む証明だけ (作り直す)。
+        // 常に移すと (=1) 証明が大域的に弱くなる: 移した列は、他のノードでその列の境界が締まっても証明に効かない
+        // (mas76 で 11 秒 -> 35 秒)
+        let side_mode = proof_side_reduce_mode();
+        let konst_rows = konst;
+        let dense_len = tunable!("ENOMOTO_T_MIP_PROOF_DENSITY", 0.5, f64).mul_add(p.n as f64, 20.0) as usize;
+        let mut side = side_mode == 1;
+        let mut coefs: Vec<(usize, f64)>;
+        loop {
+        konst = konst_rows;
+        coefs = Vec::new();
         for (j, &dj) in d.iter().enumerate() {
             if dj == 0.0 {
                 continue;
@@ -6440,6 +6609,27 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // ノードでの境界が大域的な境界と同じ列は、どのノードでも最小値が同じなので右辺に移しても
             // このノードで破れたまま (分枝・伝播で締まった列だけが残る短い証明になる)
             let unchanged = self.dom.lo[j] == gl && self.dom.up[j] == gu && env_str!("ENOMOTO_MIP_PROOF_NO_REDUCE").is_none();
+            // `ENOMOTO_MIP_PROOF_SIDE_REDUCE`: 最小活動量を決める側の境界 (d_j > 0 なら下限、d_j < 0 なら上限) だけが大域と
+            // 同じ列も移す (反対側の境界が締まっていても、このノードの最小活動量は変わらないので破れの幅は同じ)。
+            // 容量制約の施設型 (x_ij <= U y_j の集約) で、閉じた施設の x を 0 に固定した列が証明に残って密になるのを防ぐ
+            let unchanged = unchanged || (side && if dj > 0.0 { self.dom.lo[j] == gl } else { self.dom.up[j] == gu });
+            // `ENOMOTO_MIP_PROOF_KEEP_INT` (試作): HiGHS の双対証明と同じく、大域的に固定されていない整数列は境界が大域と
+            // 同じでも残し、連続列だけを (最小活動量を決める側の境界が大域と同じなら) 右辺に移す。整数列を移すと、証明が
+            // 「このノードで固定した列」だけの局所的なものになり、CMIR で強めても弱いカットにしかならない
+            // (neos-2978193-inde の最初の葉: HiGHS は y 8 本の「5 本以上開く」、移すと固定した 4 本の「2 本以上」)
+            let (unchanged, keep) = if proof_keep_int() {
+                if p.is_int[j] {
+                    (false, !fixed && dj.abs() > 1e-9 * dmax)
+                } else {
+                    (if dj > 0.0 { self.dom.lo[j] == gl } else { self.dom.up[j] == gu }, false)
+                }
+            } else {
+                (unchanged, false)
+            };
+            if keep {
+                coefs.push((j, dj));
+                continue;
+            }
             if fixed || unchanged || dj.abs() <= 1e-9 * dmax {
                 // d_j x_j >= d_j * (下の側の大域的な境界) で右辺に移す: sum_{他} <= U - konst - d_j x_j <= U - (konst + min)
                 let m = if dj > 0.0 { dj * gl } else { dj * gu };
@@ -6456,6 +6646,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 continue;
             }
             coefs.push((j, dj));
+        }
+        // 密すぎる証明か、側別に移すと 1/10 未満に縮む証明 (このノードで締まった列のほとんどが最小活動量に効かない側だけ
+        // 締まっている。neos-2978193-inde: 約 5000 列 -> 約 9 列) は作り直す
+        if side_mode == 2 && !side && coefs.len() > 1 && {
+            let rest = coefs.iter().filter(|&&(j, a)| !(if a > 0.0 { self.dom.lo[j] == self.dom.global_lo[j] } else { self.dom.up[j] == self.dom.global_up[j] })).count();
+            coefs.len() > dense_len || 10 * rest < coefs.len()
+        } {
+            side = true;
+            continue;
+        }
+        break;
         }
         // `ENOMOTO_MIP_PROOF_SHORTEN`: 分枝・伝播で締まった列も、このノードで破れている範囲で右辺に移して短くする。列 j を
         // 大域的な境界で移すと、このノードの最小活動量は d_j (l_j - L_j) (d_j < 0 なら d_j (u_j - U_j)) だけ下がる (損)。
@@ -6625,6 +6826,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 .collect();
             self.proof_pending_cuts = Some(ids);
         }
+        if dbg {
+            eprintln!("PROOF ok len {} int {} obj {obj}", coefs.len(), coefs.iter().filter(|&&(j, _)| p.is_int[j]).count());
+        }
+        if proof_cmir() {
+            self.add_proof_cmir(&coefs, rhs);
+        }
         if obj {
             self.push_pool_row(coefs, konst, true);
         } else {
@@ -6633,6 +6840,79 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         self.proof_pending_cuts = None;
         true
+    }
+
+    /// `ENOMOTO_MIP_PROOF_CMIR`: 破れている証明 `coefs x <= rhs` を HiGHS の `HighsCutGeneration::generateConflict` と同じく
+    /// CMIR で強めたカットを、右辺を固定した行として証明のプールに足す (証明そのものも残す)。境界は大域的なものを使い、
+    /// 丸めの基準の点はこのノードの最小活動量の点 (大域の境界からの距離) を証明の超平面まで縮めたもの (HiGHS と同じ)。
+    /// 目的の証明から作ったカットは今の打ち切り値で正しく、打ち切り値は下がるだけなので以後も正しい
+    fn add_proof_cmir(&mut self, coefs: &[(usize, f64)], rhs: f64) {
+        let p = self.p;
+        let (gl, gu) = (&self.dom.global_lo, &self.dom.global_up);
+        let mut x = self.proof_cmir_x.take().unwrap_or_default();
+        x.resize(p.n, 0.0);
+        let mut act = 0.0;
+        let mut r = rhs;
+        for &(j, a) in coefs {
+            if a > 0.0 {
+                if !gl[j].is_finite() {
+                    self.proof_cmir_x = Some(x);
+                    return;
+                }
+                r -= a * gl[j];
+                act += a * (self.dom.lo[j].max(gl[j]) - gl[j]);
+            } else {
+                if !gu[j].is_finite() {
+                    self.proof_cmir_x = Some(x);
+                    return;
+                }
+                r -= a * gu[j];
+                act += -a * (gu[j] - self.dom.up[j].min(gu[j]));
+            }
+        }
+        let sc = if act > r && act > 0.0 && r > 0.0 { r / act } else { 1.0 };
+        for &(j, a) in coefs {
+            x[j] = if a > 0.0 { gl[j] + sc * (self.dom.lo[j].max(gl[j]) - gl[j]) } else { gu[j] - sc * (gu[j] - self.dom.up[j].min(gu[j])) };
+        }
+        let vars = super::cuts::CutVars { lo: gl, up: gu, is_int: &p.is_int, x: &x, vb: None };
+        let cut = super::cuts::cmir(&vars, coefs, rhs);
+        self.proof_cmir_x = Some(x);
+        self.proof_cmir_stats[0] += 1;
+        let Some(c) = cut else { return };
+        if c.coefs.is_empty() || !c.rhs.is_finite() {
+            return;
+        }
+        // 診断用: デバッグ解を切っていないか
+        DEBUG_SOL.with(|dd| {
+            if let Some(xd) = dd.borrow().as_ref() {
+                if self.p.objective(xd) < self.prune_limit() - 1e-6 {
+                    let a: f64 = c.coefs.iter().map(|&(j, v)| v * xd[j]).sum();
+                    if a > c.rhs + 1e-6 * (1.0 + c.rhs.abs()) {
+                        eprintln!("MIP_DEBUG_SOL: proof CMIR cuts off the debug solution ({a} > {})", c.rhs);
+                    }
+                }
+            }
+        });
+        if env_str!("ENOMOTO_MIP_DEBUG_PROOF").is_some() {
+            eprintln!("PROOF cmir len {} -> {}", coefs.len(), c.coefs.len());
+            if env_str!("ENOMOTO_MIP_DEBUG_PROOF") == Some("2") {
+                eprintln!("PROOF src {:?} <= {rhs}", coefs);
+                eprintln!("PROOF cut {:?} <= {}", c.coefs, c.rhs);
+            }
+        }
+        self.proof_cmir_stats[1] += 1;
+        // `ENOMOTO_MIP_PROOF_CMIR_POOL`: カットのプールにも入れ、待ち行列から取り出したノードで破れていれば LP に戻す
+        // (HiGHS は衝突カットをカットプールに入れ、ノードの分離のラウンドで LP に加える)
+        if env_str!("ENOMOTO_MIP_PROOF_CMIR_POOL").is_some() && !self.params.submip {
+            // `ENOMOTO_MIP_PROOF_CMIR_POOL=nocap`: プールの非零数の上限を見ずに入れる (根の密なカットで上限に達していると、
+            // 短い衝突カットが 1 本も入らない。neos-2978193-inde)
+            self.pool_nocap = env_str!("ENOMOTO_MIP_PROOF_CMIR_POOL") == Some("nocap");
+            let n0 = self.cut_pool.len();
+            self.add_to_pool(&c.coefs, c.rhs);
+            self.pool_nocap = false;
+            self.proof_cmir_stats[2] += (self.cut_pool.len() > n0) as u64;
+        }
+        self.push_pool_row(c.coefs, c.rhs, false);
     }
 
     /// 分類 `cat` の証明を 1 本捨てる: 古いものから。木を分け合うとき (`ENOMOTO_MIP_PROOF_NO_AGING` でなければ)、前回から使われた印のあるものは印を
@@ -6911,7 +7191,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let max_len = self.conflict_max_len_multi();
         let reconv = env_str!("ENOMOTO_MIP_NO_RECONV_CONFLICTS").is_none();
         let t0 = Instant::now();
-        let confs = self.dom.analyze_multi(self.p, start, max_len, reconv);
+        // `ENOMOTO_MIP_HIGHS_CONFLICT_SCORE`: 分枝の衝突スコアを HiGHS と同じく、解析で説明に使った境界の変更全部の列で
+        // 上げる (作れた衝突のリテラルでは上げない)
+        let hcs = highs_conflict_score();
+        let mut bumps: Vec<(usize, bool)> = Vec::new();
+        let confs = self.dom.analyze_multi_bumps(self.p, start, max_len, reconv, hcs.then_some(&mut bumps));
+        if hcs && !bumps.is_empty() {
+            self.pc.bump_conflict(&bumps);
+        }
         self.multi_secs += t0.elapsed().as_secs_f64();
         let mut n = 0;
         // 既定ではリテラルの衝突プールに入れる (行にして証明のプールに入れると、数が多いので双対証明を追い出す)
@@ -6920,7 +7207,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let ok = if rows {
                 self.add_conflict_lits(c)
             } else {
-                self.pc.add_conflict(c);
+                if !hcs {
+                    self.pc.add_conflict(c);
+                }
                 self.add_lit_conflict(c)
             };
             if ok {
@@ -7272,15 +7561,82 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.propagate_le_row(&obj, u, conflicts)
     }
 
+    /// [`prop_fixpoint`] の本体: ノードの伝播の各段を、境界の変更の記録が伸びなくなるまで回し直す。矛盾なら偽。
+    fn node_prop_fixpoint(&mut self, changes: &[BoundChange]) -> bool {
+        let passes = tunable!("ENOMOTO_T_MIP_PROP_FIXPOINT_PASSES", 10usize, usize);
+        let mut last = usize::MAX;
+        for _ in 0..passes {
+            let s0 = self.dom.stack_len();
+            if s0 == last {
+                break;
+            }
+            last = s0;
+            if !self.dom.propagate(self.p) {
+                self.add_conflict();
+                return false;
+            }
+            if !self.propagate_objective() {
+                return false;
+            }
+            if !self.apply_dual_proofs() {
+                if self.dom.conflict.is_some() {
+                    self.add_conflict();
+                }
+                self.proof_prunes += 1;
+                return false;
+            }
+            let lw = self.dom.take_low_water();
+            let start = if self.lit_conflicts.dirty { 0 } else { self.lit_pos.min(lw) };
+            self.lit_conflicts.dirty = false;
+            let r = self.lit_conflicts.propagate(self.p, &mut self.dom, start);
+            self.share_used_lits();
+            self.lit_pos = self.dom.stack_len();
+            self.dom.take_low_water();
+            if r.is_err() {
+                if self.dom.conflict.is_some() {
+                    self.add_conflict();
+                }
+                self.lit_stats[1] += 1;
+                return false;
+            }
+            if cutpool_prop() && !self.propagate_cut_pool() {
+                return false;
+            }
+            if !self.orbitope_propagate(changes) {
+                if self.dom.conflict.is_some() {
+                    self.add_conflict();
+                }
+                self.orbitope_prunes += 1;
+                return false;
+            }
+            if self.dom.stack_len() == s0 {
+                break;
+            }
+        }
+        true
+    }
+
     /// カットプールの伝播 (`ENOMOTO_MIP_CUTPOOL_PROP`、試作): プールのカット (大域的に成り立つ `sum a x <= rhs`) を
     /// ノードの定義域で伝播する (HiGHS は `HighsDomain::CutpoolPropagation` で全ノードでプールを伝播する)。整数列は丸めて
     /// 締め、連続列は幅の `ENOMOTO_T_MIP_CUTPOOL_PROP_CONT` (既定 0.1) 倍以上縮むときだけ締める。境界が変わったら行の伝播を
     /// 挟んで最大 `ENOMOTO_T_MIP_CUTPOOL_PROP_PASSES` (既定 2) 回まで繰り返す。矛盾ならそのカットから衝突を作って偽。
     /// timtab1 はカットが短く (非零 2-4) 一般整数 (0-5) を含み、HiGHS は 7k ノードで証明するがこちらは 5 万ノードでも閉じない
     fn propagate_cut_pool(&mut self) -> bool {
+        self.dom.set_external_tag(7);
+        let r = self.propagate_cut_pool_inner();
+        self.dom.set_external(false);
+        r
+    }
+
+    fn propagate_cut_pool_inner(&mut self) -> bool {
         let p = self.p;
         let t0 = Instant::now();
         self.cutpool_prop_stats[0] += 1;
+        if env_str!("ENOMOTO_MIP_DEBUG_CPP").is_some() && !self.params.submip && self.cutpool_prop_stats[0] < 20 {
+            let nint = self.cut_pool.iter().filter(|(c, _, _)| c.iter().all(|&(j, _)| self.p.is_int[j])).count();
+            let first = self.cut_pool.iter().position(|(c, _, _)| c.iter().all(|&(j, _)| self.p.is_int[j]));
+            eprintln!("CPP enter submip {} nodes {} pool {} start {} int-only {nint} first {first:?} {:?}", self.params.submip, self.nodes, self.cut_pool.len(), self.pool_start.len(), first.map(|k| (&self.cut_pool[k].0, self.cut_pool[k].1, self.pool_start[k], self.pool_start[k + 1])));
+        }
         let passes = tunable!("ENOMOTO_T_MIP_CUTPOOL_PROP_PASSES", 2usize, usize);
         let cont_frac = tunable!("ENOMOTO_T_MIP_CUTPOOL_PROP_CONT", 0.1, f64);
         let mut bad: Option<usize> = None;
@@ -7301,6 +7657,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         ninf += 1;
                         infj = j;
                     }
+                }
+                if env_str!("ENOMOTO_MIP_DEBUG_CPP").is_some() && !self.params.submip && self.cutpool_prop_stats[0] < 12 && k + 738 == self.cut_pool.len() {
+                    eprintln!("CPP call {} cut {k} minact {minact} rhs {rhs} ninf {ninf} vals {:?}", self.cutpool_prop_stats[0], (s0..e0).map(|t| (self.pool_idx[t], self.pool_val[t], self.dom.lo[self.pool_idx[t] as usize], self.dom.up[self.pool_idx[t] as usize])).collect::<Vec<_>>());
                 }
                 if ninf >= 2 {
                     continue;
@@ -7341,7 +7700,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if !changed {
                 break;
             }
-            if !self.dom.propagate(p) {
+            let ok = self.dom.propagate(p);
+            self.dom.set_external_tag(7);
+            if !ok {
                 self.cutpool_prop_stats[1] += 1;
                 self.cutpool_prop_stats[3] += t0.elapsed().as_nanos() as u64;
                 if env_str!("ENOMOTO_MIP_NO_EXTRA_CONFLICTS").is_none() {
@@ -9189,6 +9550,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             eprintln!("MIP: objective propagation: pruned {} nodes, tightened {} bounds; strong branching children infeasible by propagation {}, propagated bounds passed to child LPs {}", self.obj_prop_stats[0], self.obj_prop_stats[1], self.sb_prop_stats[0], self.sb_prop_stats[1]);
             eprintln!("MIP: literal conflicts: added {}, in pool {} (aged out {}), pruned {} nodes, tightened {} bounds", self.lit_stats[0], self.lit_conflicts.len(), self.lit_conflicts.removed, self.lit_stats[1], self.lit_stats[2]);
+            if proof_cmir() {
+                eprintln!("MIP: proof CMIR cuts: tried {}, added {}, entered the cut pool {}", self.proof_cmir_stats[0], self.proof_cmir_stats[1], self.proof_cmir_stats[2]);
+            }
             if self.obj_cut_stats[0] > 0 {
                 eprintln!("MIP: objective bound cuts: tried {}, added {}", self.obj_cut_stats[0], self.obj_cut_stats[1]);
             }
