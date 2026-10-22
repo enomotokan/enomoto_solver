@@ -3141,6 +3141,41 @@ mod tests {
         assert_eq!((p.col_lo[1], p.col_up[1]), (0.0, 2.5));
     }
 
+    /// 幅 1e-9 の連続列とクリーク型の行 (右辺 1 - 1e-9) を持つ小さな MIP (benchmarks/equiv2_bug_20261022/fuzz_tiny.py の seed 41)。
+    /// 最適値 -10.9 の解 (x4 = x5 = x8 = 1、ほかは 0) は厳密に実行可能だが、許容誤差の範囲で冗長な行の係数を縮めていた
+    /// ときは前処理がこれを切り、-9.81 を最適と返していた
+    #[test]
+    fn tiny_range_columns_keep_exactly_feasible_optimum() {
+        let inf = f64::INFINITY;
+        let mut up = vec![1.0; 9];
+        up.extend([1e-9, 1e-9, 1e-9, 2e-9]);
+        let cost = vec![-9.96, -3.83, -3.77, -9.52, -8.63, -1.09, -3.49, -10.98, -1.18, -284.64, -296.0, -293.99, -95.67];
+        let mut is_int = vec![true; 9];
+        is_int.extend([false; 4]);
+        let rows = vec![
+            vec![(0, 1.0), (1, 1.0), (6, 1.0), (12, 1.0)],
+            vec![(3, 1.0), (1, 1.0), (5, 1.0), (12, 1.0), (9, 1.0), (11, 1.0)],
+            vec![(2, 1.0), (9, 1.0), (10, 1.0)],
+            vec![(0, 1.0), (12, 1.0), (9, 1.0)],
+            vec![(2, -1.0), (1, 1.0), (9, 1.0)],
+            vec![(6, -1.0), (0, 1.0), (12, 1.0)],
+            vec![(6, -1.0), (3, 1.0), (9, 1.0)],
+            vec![(1, 7.0), (7, 9.0), (5, 5.0), (3, 9.0)],
+        ];
+        let row_lo = vec![-inf, -inf, -inf, -inf, 0.0, 0.0, 0.0, -inf];
+        let row_up = vec![1.0 - 1e-9, 1.0, 1.0 - 1e-9, 1.0 - 1e-9, 0.0, 0.0, 0.0, 5.0];
+        let p = MipProblem::from_rows(vec![0.0; 13], up, cost, 0.0, 1.0, is_int, rows, row_lo, row_up);
+        let mut x = vec![0.0; 13];
+        for j in [4, 5, 8] {
+            x[j] = 1.0;
+        }
+        assert!(p.is_feasible(&x, 0.0));
+        let r = solve_problem(&p, MipParams { rel_gap: 1e-9, ..MipParams::default() }, true);
+        assert_eq!(r.status, MipStatus::Optimal);
+        let z = r.objective.unwrap();
+        assert!(z <= -10.9 + 1e-6, "objective {z} (expected -10.9)");
+    }
+
     /// 代入消去で生じる目的関数の定数が縮約後の offset に入ること (binkar10_1 の誤答の回帰テスト:
     /// 定数が抜けると相対ギャップの判定が誤ったスケールで働き、最適でない解で終了していた)。
     #[test]
