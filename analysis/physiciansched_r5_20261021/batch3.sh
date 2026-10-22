@@ -1,0 +1,10 @@
+#!/bin/bash
+# E2CF + TAB_HIGHS_RULES に LP の続き・新しい行の厳密な DSE 重みを足す (60 秒)
+cd "$(dirname "$0")"
+P=physiciansched6-2
+T="ENOMOTO_MIP_PROBE_EQUIV2=1 ENOMOTO_MIP_EQUIV2_CUTS=1 ENOMOTO_MIP_EQUIV2_FJ=1 ENOMOTO_MIP_TAB_HIGHS_RULES=1"
+./run_cfg.sh $P 60 tab_res $T ENOMOTO_MIP_LP_RESUME=1
+./run_cfg.sh $P 60 tab_res_rows $T ENOMOTO_MIP_LP_RESUME=1 ENOMOTO_MIP_ROWS_DSE_EXACT=1
+./run_cfg.sh $P 60 tab_res_rows_r40 $T ENOMOTO_MIP_LP_RESUME=1 ENOMOTO_MIP_ROWS_DSE_EXACT=1 ENOMOTO_T_MIP_CUT_ROUNDS=40
+./run_cfg.sh $P 60 tab $T
+./run_cfg.sh $P 60 def_tab ENOMOTO_MIP_TAB_HIGHS_RULES=1

@@ -33,6 +33,19 @@ pub fn compute_locks(p: &MipProblem) -> Vec<(u32, u32)> {
 thread_local! {
     /// このスレッドで解いているサブ MIP の入れ子の深さ (元の問題は 0。[`Solver::solve_submip_problem`] で 1 つ増やす)。
     pub(super) static SUBMIP_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// `ENOMOTO_MIP_ROOT_SUBMIP_HL` の根の RINS のサブ MIP を解いている間だけ真 ([`Solver::rins`] で立てる)。
+    /// サブ MIP (深さ 1) の分離はこれを見て根のカットのループを通常の求解並みに回す ([`root_submip_hl_active`])
+    pub(super) static ROOT_SUBMIP_HL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// 今のスレッドで `ENOMOTO_MIP_ROOT_SUBMIP_HL` の根の RINS のサブ MIP か、その中のサブ MIP (深さ 1 以上) を解いているか。
+pub(super) fn root_submip_hl_any() -> bool {
+    ROOT_SUBMIP_HL.with(|c| c.get()) && SUBMIP_DEPTH.with(|d| d.get()) >= 1
+}
+
+/// 今のスレッドで `ENOMOTO_MIP_ROOT_SUBMIP_HL` の根の RINS のサブ MIP (深さ 1) を解いているか。
+pub(super) fn root_submip_hl_active() -> bool {
+    ROOT_SUBMIP_HL.with(|c| c.get()) && SUBMIP_DEPTH.with(|d| d.get()) == 1
 }
 
 impl<'a, L: MipLp> Solver<'a, L> {
@@ -1349,8 +1362,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // (HiGHS はサブ MIP に今の LP (カットを含み、効いていない行を除いたもの) を渡す。元の行だけのサブ MIP は根の LP が弱く、
         // neos-3381206-awhea では 500 ノードで解が見つからない)。カットはプールで大域的に使うもので、打ち切り値で成り立つ
         // ものもサブ MIP の打ち切り値 (同じかより厳しい) では成り立つ
-        if (env_str!("ENOMOTO_MIP_SUBMIP_CUTS").is_some() || self.fc_submip) && sub.n == p.n {
+        // `ENOMOTO_MIP_ROOT_SUBMIP_HL` の根の RINS ([`Self::rins`]) でも同じくカットの行を加える
+        // (そのサブ MIP の中の RENS も、サブ MIP の根のカットの行を加える)
+        let hl_cuts = (!self.params.submip && ROOT_SUBMIP_HL.with(|c| c.get())) || (self.params.submip && root_submip_hl_active() && self.nodes <= 1);
+        if (env_str!("ENOMOTO_MIP_SUBMIP_CUTS").is_some() || self.fc_submip || hl_cuts) && sub.n == p.n {
             let cuts = self.lp_tight_cut_rows();
+            if self.params.verbose && hl_cuts {
+                eprintln!("MIP:   root sub-MIP (HL): {} tight LP cut rows added", cuts.len());
+            }
             if !cuts.is_empty() {
                 let mut rows = std::mem::take(&mut sub.rows);
                 let mut row_lo = std::mem::take(&mut sub.row_lo);
@@ -1557,7 +1576,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
     pub(super) fn rens(&mut self, _x: &[f64]) -> bool {
         let p = self.p;
         let nested = self.params.submip;
-        if nested && !self.nested_rens_ok() {
+        // `ENOMOTO_MIP_ROOT_SUBMIP_HL` の根の RINS のサブ MIP (深さ 1) の中では、元の問題と同じく旧来の RENS を回す
+        // (`ENOMOTO_MIP_ROOT_SUBMIP_HL_NO_RENS` で回さない)。HiGHS のサブ MIP も根で RENS を回し、physiciansched6-2 の根の RINS の
+        // 近傍は、カットで下界が 49324 に届いた後の RENS で最適値が見つかる
+        let hl_rens = nested && root_submip_hl_active() && env_str!("ENOMOTO_MIP_ROOT_SUBMIP_HL_NO_RENS").is_none();
+        if nested && !self.nested_rens_ok() && !hl_rens {
             return false;
         }
         // 既定は旧来の全部固定 (ダイビング式は簡単な問題でサブ MIP に時間を取られ、40 問の幾何平均が
@@ -1619,8 +1642,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
             (self.submip_time_frac, self.submip_time_max, self.submip_node_mult) = keep;
             return found;
         }
-        if nested {
+        if nested && !hl_rens {
             return false;
+        }
+        if hl_rens {
+            // サブ MIP の中のサブ MIP は残り時間の 7% (約 0.3 秒) だと根の LP を解いただけで終わるので、残りの
+            // `ENOMOTO_T_MIP_ROOT_SUBMIP_HL_RENS_FRAC` (0.5)、最大 `ENOMOTO_T_MIP_ROOT_SUBMIP_HL_RENS_MAX` (10 秒) を与える
+            let keep = (self.submip_time_frac, self.submip_time_max);
+            self.submip_time_frac = tunable!("ENOMOTO_T_MIP_ROOT_SUBMIP_HL_RENS_FRAC", 0.5, f64);
+            self.submip_time_max = tunable!("ENOMOTO_T_MIP_ROOT_SUBMIP_HL_RENS_MAX", 10.0, f64);
+            let r = self.rens_old(_x);
+            (self.submip_time_frac, self.submip_time_max) = keep;
+            return r;
         }
         if env_str!("ENOMOTO_MIP_RENS_DIVE").is_none() {
             return self.rens_old(_x);
@@ -2057,6 +2090,38 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 eprintln!("MIP:   RINS: incumbent only from feasibility jump, sub-MIP time fraction {:.2}, max {:.1}s", self.submip_time_frac, self.submip_time_max);
             }
             let r = self.rins_inner(x);
+            (self.submip_time_frac, self.submip_time_max) = keep;
+            return r;
+        }
+        // `ENOMOTO_MIP_ROOT_SUBMIP_HL` (試作、既定では使わない): 根の RINS のサブ MIP を HiGHS のサブ MIP に近い形で解く。
+        // (1) 根の LP のカットの行 (LP 解で効いているもの) をサブ MIP に加える (HiGHS はカットを含む LP `heurlp.getLp()` から作る)、
+        // (2) サブ MIP の根のカットのループを通常の求解並みにする (分離の [`root_submip_hl_active`]。既定のサブ MIP は時間上限の 1 割で
+        // 止めるので、時間の短いサブ MIP では根の LP だけでカットの時間を使い切り 1 本も入らない)、(3) サブ MIP の根でも旧来の RENS を
+        // 回し ([`Self::rens`])、Feasibility Pump・ダイビング・強分岐はしない (サブ MIP の中のサブ MIP も同じ。HiGHS のサブ MIP と同じ)、
+        // (4) 時間の上限を残りの
+        // `ENOMOTO_T_MIP_ROOT_SUBMIP_HL_FRAC` (0.5)、最大 `ENOMOTO_T_MIP_ROOT_SUBMIP_HL_MAX` (20 秒) にする (0.25・15 秒では
+        // physiciansched6-2 で 0 / 8 回、0.5・20 秒で 6 / 10 回 49324〜49424 を出す)。使うのは暫定解が Feasibility Jump のものだけの
+        // とき (または根の LP との差が `ENOMOTO_T_MIP_ROOT_SUBMIP_HL_GAP` (既定 ∞) 超のとき) だけ。
+        // physiciansched6-2 (同値の代入の後) の根の RINS のサブ MIP (自由な整数列 1793、固定率 0.59 で HiGHS の RENS の 0.60 と同じ) は
+        // 最適値 49324 を含み、HiGHS なら 1 スレッド 3.3 秒で解けるが、既定 (残りの 7%・約 2 秒) ではカット 0 本・根の LP 48924 のまま
+        // Feasibility Pump で時間切れになる (analysis/rins_fix_20261022.md)
+        // (1)〜(4) はどれも (4) の条件を満たすときだけ使う (満たさなければ既定と同じ): 条件なしで (1)〜(3) を使うと、timtab1 の根の RINS が
+        // 解を出さなくなり (2 回とも。既定は 2 回とも出す)、uccase12 の根の RINS が 0.8 -> 2.9 秒になった
+        let gap = self.incumbent.as_ref().map_or(0.0, |(z, _)| (z - (self.lp.objective() + self.p.offset)) / z.abs().max(1.0));
+        if env_str!("ENOMOTO_MIP_ROOT_SUBMIP_HL").is_some()
+            && !self.params.submip
+            && self.nodes <= 1
+            && (self.inc_only_fj || gap > tunable!("ENOMOTO_T_MIP_ROOT_SUBMIP_HL_GAP", f64::INFINITY, f64))
+        {
+            let keep = (self.submip_time_frac, self.submip_time_max);
+            self.submip_time_frac = tunable!("ENOMOTO_T_MIP_ROOT_SUBMIP_HL_FRAC", 0.5, f64);
+            self.submip_time_max = tunable!("ENOMOTO_T_MIP_ROOT_SUBMIP_HL_MAX", 20.0, f64);
+            if self.params.verbose {
+                eprintln!("MIP:   RINS (HL): gap {gap:.4}, incumbent only from FJ {}, sub-MIP time fraction {:.2}, max {:.1}s", self.inc_only_fj, self.submip_time_frac, self.submip_time_max);
+            }
+            ROOT_SUBMIP_HL.with(|c| c.set(true));
+            let r = self.rins_inner(x);
+            ROOT_SUBMIP_HL.with(|c| c.set(false));
             (self.submip_time_frac, self.submip_time_max) = keep;
             return r;
         }
