@@ -6,3 +6,10 @@ for k in 1 2 3; do
     for c in facenb ionb; do $D/erun.sh $p $c $k; done
   done
 done
+# 対照: 1 ラウンドの上限を 100 本に (in-out の別枠 50 本の分だけ多く入れるのと比べる)
+for k in 1 2; do
+  for p in neos-911970 mc11 beasleyC3 roll3000; do $D/erun.sh $p mc100 $k; done
+  $D/erun.sh physiciansched6-2 e2mc100 $k
+done
+# 副作用の重い 2 問を NO_BG で
+for k in 1 2; do for p in h80x6320d qnet1 beasleyC3; do $D/erun.sh $p facenb $k; done; done
