@@ -715,6 +715,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 continue;
             }
             let obj = self.lp.objective();
+            // 最適に解けたカットの LP の値は問題全体の下界 (根を閉じる判定 [`Solver::root_gap_closed`] に使う)
+            if job.is_none() && self.snap.is_none() {
+                self.root_cut_lb = self.root_cut_lb.max(obj + p.offset);
+            }
             let widen_now = widen_on && !widened && quota_full && (obj - prev_obj) / obj.abs().max(prev_obj.abs()).max(1.0) <= 1e-4;
             if widen_now {
                 widened = true;

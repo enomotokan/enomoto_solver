@@ -372,6 +372,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 根の LP の値 (カットのループの後はその値)。この求解の問題全体の下界として常に正しいので、時間切れなどで終わるときに
     /// 返す下界はこれより下げない (従のスレッドの失敗・再スタート後の求解の結果などで下界が失われても、根の下界は返す)。
     root_lb: f64,
+    /// 根のカットのループで最適に解けた LP の値の最大 (カットは大域的に成り立つので問題全体の下界。後でカットを外しても正しい)
+    pub(super) root_cut_lb: f64,
     /// 終わるときの下界 ([`Self::finish`] が決めたもの)。あれば最後の経過の行はこれを使う。
     final_lb: Option<f64>,
     /// カット生成に使う変数上下限 (最初の分離で作る)。
@@ -1534,6 +1536,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         user_log_header: false,
         cur_lb: f64::NEG_INFINITY,
         root_lb: f64::NEG_INFINITY,
+        root_cut_lb: f64::NEG_INFINITY,
         final_lb: None,
         vbounds: None,
         failed_heurs: 0,
@@ -2100,23 +2103,49 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// カット前の値だけを見ていたので、カットで根の下界が暫定解に届いても根で止まらず、根のヒューリスティクスが期限を
     /// 越えると木の最初の時間切れの判定 (根のノードを刈る前) で時間切れになっていた (physiciansched6-2: 暫定解・根の下界が
     /// どちらも 49324 で 60 秒の時間切れ。analysis/term_check_20261022.md)
+    /// 暫定解がなくても、打ち切り値 (サブ MIP・再スタート後の求解に渡された値) があれば、下界がそれに届いたら閉じる
+    /// (それより良い解はない。木で根のノードを刈ったときと同じく実行不能で終え、呼び出し側が自分の暫定解を最適とする)。
+    /// physiciansched6-2 では再スタート前の暫定解 49324 が再スタート後の問題の前処理で捨てられ、再スタート後の根のカットで
+    /// 下界が 49324 に届いても止まらず時間切れになっていた
     pub(super) fn root_gap_closed(&self) -> bool {
-        let lb = if env_str!("ENOMOTO_MIP_NO_ROOT_CUT_GAP_EXIT").is_some() { self.cur_lb } else { self.cur_lb.max(self.root_lb) };
+        let lb = if env_str!("ENOMOTO_MIP_NO_ROOT_CUT_GAP_EXIT").is_some() { self.cur_lb } else { self.cur_lb.max(self.root_lb).max(self.root_cut_lb) };
         self.root_gap_closed_at(lb)
     }
 
-    /// 根で、下界 `lb` (根の LP の値。カットは大域的に成り立つので、カットの後の値も問題全体の下界) が暫定解の打ち切り値に
-    /// 届いたか。打ち切り値がほかのスレッドの解 (ポートフォリオ並列) から来ているときは除く (自分の暫定解を最適とは言えない)
+    /// 根で、下界 `lb` (根の LP の値。カットは大域的に成り立つので、カットの後の値も問題全体の下界) が打ち切り値に届いたか。
+    /// 暫定解があれば、打ち切り値がほかのスレッドの解 (ポートフォリオ並列) から来ているときは除く (自分の暫定解を最適とは
+    /// 言えない)。暫定解がなければ (`ENOMOTO_MIP_NO_ROOT_CUT_GAP_EXIT` でないとき) 打ち切り値が有限なら。閉じたら
+    /// [`Self::finish_root_gap`] で終える
     pub(super) fn root_gap_closed_at(&self, lb: f64) -> bool {
-        env_str!("ENOMOTO_MIP_NO_ROOT_GAP_EXIT").is_none()
-            && self.snap.is_none()
-            && self.incumbent.as_ref().is_some_and(|(z, _)| self.shared.as_ref().is_none_or(|s| !(s.best() < *z)))
-            && lb >= self.prune_limit()
+        if env_str!("ENOMOTO_MIP_NO_ROOT_GAP_EXIT").is_some() || self.snap.is_some() {
+            return false;
+        }
+        let ok = match self.incumbent.as_ref() {
+            Some((z, _)) => self.shared.as_ref().is_none_or(|s| !(s.best() < *z)),
+            None => env_str!("ENOMOTO_MIP_NO_ROOT_CUT_GAP_EXIT").is_none() && self.prune_limit().is_finite(),
+        };
+        ok && lb >= self.prune_limit()
     }
 
-    /// カットの後の根の LP の値 `root_obj` で根を閉じるか ([`Self::root_gap_closed_at`]。`ENOMOTO_MIP_NO_ROOT_CUT_GAP_EXIT` なら使わない)
+    /// 根の下界が打ち切り値に届いた ([`Self::root_gap_closed_at`]) ので終える: 暫定解があれば最適、なければ打ち切り値より良い解はない
+    fn finish_root_gap(&mut self, what: &str, lb: f64) -> MipResult {
+        if self.params.verbose {
+            eprintln!("MIP: the {what} {lb:.10e} closed the gap to the prune limit {:.10e} (incumbent {:?}, {:.2}s)", self.prune_limit(), self.incumbent.as_ref().map(|(z, _)| *z), self.start.elapsed().as_secs_f64());
+        }
+        match self.incumbent.as_ref().map(|(z, _)| *z) {
+            Some(z) => self.finish(MipStatus::Optimal, z),
+            None => self.finish(MipStatus::Infeasible, f64::INFINITY),
+        }
+    }
+
+    /// カットの後の根の LP の値 `root_obj` も使って根を閉じるか ([`Self::root_gap_closed_at`]。`ENOMOTO_MIP_NO_ROOT_CUT_GAP_EXIT` なら使わない)
     fn root_cut_gap_closed(&self, root_obj: f64) -> bool {
-        env_str!("ENOMOTO_MIP_NO_ROOT_CUT_GAP_EXIT").is_none() && self.root_gap_closed_at(root_obj.max(self.cur_lb))
+        env_str!("ENOMOTO_MIP_NO_ROOT_CUT_GAP_EXIT").is_none() && self.root_gap_closed_at(self.root_bound_now(root_obj))
+    }
+
+    /// 根で分かっている下界: カット前の LP、カットのループの LP の値の最大、カットの後の根の LP の値 `root_obj`
+    fn root_bound_now(&self, root_obj: f64) -> f64 {
+        root_obj.max(self.cur_lb).max(self.root_lb).max(self.root_cut_lb)
     }
 
     pub(super) fn prune_limit(&self) -> f64 {
@@ -2788,11 +2817,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         self.join_fj_thread();
         if self.root_gap_closed() {
-            let z = self.incumbent.as_ref().map(|(z, _)| *z).unwrap();
-            if self.params.verbose {
-                eprintln!("MIP: the root LP bound {:.10e} closed the gap to the incumbent {z:.10e} ({:.2}s)", self.cur_lb, self.start.elapsed().as_secs_f64());
-            }
-            return self.finish(MipStatus::Optimal, z);
+            let lb = if env_str!("ENOMOTO_MIP_NO_ROOT_CUT_GAP_EXIT").is_some() { self.cur_lb } else { self.root_bound_now(root_obj) };
+            return self.finish_root_gap("root LP bound", lb);
         }
         // 並列モードで、根のヒューリスティクスの間に、今の根の写しから作った求解でカットのループを続ける (分離は残りの
         // スレッドで並列)。ヒューリスティクスが終わったら止め、その LP に残ったカット (効いているもの) で根の LP のカットを
@@ -3392,11 +3418,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 根のヒューリスティクス・裏のカットの後: 暫定解がカットの後の根の下界に届いていれば最適で終える (木に入ると、
         // 根のノードを刈る前に時間切れの判定があるので、ヒューリスティクスが期限を越えると時間切れで返していた)
         if self.root_cut_gap_closed(root_obj) {
-            let z = self.incumbent.as_ref().map(|(z, _)| *z).unwrap();
-            if self.params.verbose {
-                eprintln!("MIP: the root LP bound after cuts {root_obj:.10e} closed the gap to the incumbent {z:.10e} ({:.2}s)", self.start.elapsed().as_secs_f64());
-            }
-            return self.finish(MipStatus::Optimal, z);
+            let lb = self.root_bound_now(root_obj);
+            return self.finish_root_gap("root LP bound after cuts and heuristics", lb);
         }
         self.store_root_redcost(root_obj);
         self.root_redcost_fixing();
@@ -9008,6 +9031,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 従のスレッドが写しの根の LP で時間切れになって -inf を返す・再スタート後の求解が暫定解なしで終わるなどで
         // 下界を失い、根の下界が分かっているのに -inf を返していた (mzzv42z・physiciansched6-2 の 4 スレッド・60 秒。
         // analysis/bound_inf_20261021.md)。暫定解があればその値で上から抑える (根の下界が暫定解の値をわずかに越えうる)
+        // 上限で終わるときの下界 (暫定解で抑える前。下の上限で終わるときの判定に使う)
+        let raw_bound = best_bound.min(wlb).max(self.root_lb).max(self.root_cut_lb);
         let best_bound = if matches!(status, MipStatus::Optimal | MipStatus::Infeasible) {
             best_bound
         } else {
@@ -9095,6 +9120,28 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let (x, objective) = match &self.incumbent {
             Some((z, x)) => (Some(x.clone()), Some(*z)),
             None => (None, None),
+        };
+        // 時間・ノードの上限で終わるが、下界 (待ち行列・従・根の LP) が打ち切り値に届いている: 探索し残したものはない
+        // (木の時間切れの判定は根のノードを刈るより前にあり、根で下界が打ち切り値に届いたまま時間切れになると、暫定解 = 下界の
+        // 時間切れを返していた。physiciansched6-2)。暫定解があれば最適、なければ打ち切り値より良い解はない (実行不能)。
+        // 木の写しから解く求解・取りこぼしたノードがあるときは使わない。`ENOMOTO_MIP_NO_LIMIT_GAP_EXIT` で使わない
+        let (status, best_bound) = if matches!(status, MipStatus::TimeLimit | MipStatus::NodeLimit)
+            && self.snap.is_none()
+            && !self.unresolved
+            && raw_bound.is_finite()
+            && env_str!("ENOMOTO_MIP_NO_LIMIT_GAP_EXIT").is_none()
+            && self.incumbent.as_ref().map_or(self.prune_limit().is_finite(), |(z, _)| self.shared.as_ref().is_none_or(|s| !(s.best() < *z)))
+            && raw_bound >= self.prune_limit()
+        {
+            if self.params.verbose {
+                eprintln!("MIP: stopped by {status:?} with the lower bound {raw_bound:.10e} at the prune limit {:.10e}; reporting the search as complete", self.prune_limit());
+            }
+            match &self.incumbent {
+                Some((z, _)) => (MipStatus::Optimal, *z),
+                None => (MipStatus::Infeasible, f64::INFINITY),
+            }
+        } else {
+            (status, best_bound)
         };
         // 実行不能と報告する前に暫定解があればそれは最適
         let status = match (status, &self.incumbent) {
