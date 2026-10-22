@@ -3387,6 +3387,12 @@ fn select_cuts_hybrid_dcd(cands: Vec<Candidate>, max_cuts: usize, p: &MipProblem
         cands.iter().map(|c| c.efficacy).fold(0.0, f64::max),
         dists.iter().flatten().copied().fold(0.0, f64::max),
     );
+    if dcd.is_some() && env_str!("ENOMOTO_MIP_DEBUG_CUTSEL").is_some() {
+        let mut r: Vec<f64> = cands.iter().zip(&dists).filter_map(|(c, d)| d.map(|d| d / c.efficacy.max(1e-300))).collect();
+        r.sort_by(|a, b| a.total_cmp(b));
+        let q = |f: f64| r.get(((r.len() as f64 - 1.0) * f).round() as usize).copied().unwrap_or(f64::NAN);
+        eprintln!("CUTSEL_DCD: {} cands, max eff {max_eff:.4}, max dist {max_dist:.4}, dist/eff quantiles 0/50/90/100% {:.2} {:.2} {:.2} {:.2}", cands.len(), q(0.0), q(0.5), q(0.9), q(1.0));
+    }
     let anchor = if dcd.is_some_and(|c| c.norm) { None } else { anchor };
     let mut scored: Vec<(f64, f64, Candidate)> = cands
         .into_iter()
