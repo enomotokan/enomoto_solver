@@ -9785,6 +9785,14 @@ neos-950242 の 2 回目の調査 (`analysis/neos950242_r2_20261020.md`)。
 - 16 問: DVa 10・36.25 / 10・36.47、DVb 10・34.41 / 11・33.41 (mc11 が解けた)。
 - 不一致 0、"MIP: WARNING" 0。40 問で基準を満たさないので既定にしない。試作は 7e0cccc (inv/diverse-vertex-20261022)。
 
+## 2026-10-22: in-out 分離を全問に掛ける (INOUT_SEP) と e2iohl は不採用
+
+- d00d9b7 (develop + rins-fix + inout-sep) で 40 + 16 問、newdef / io (`ENOMOTO_MIP_INOUT_SEP=1`) / e2iohl (代入まわり + ROOT_SUBMIP_HL + INOUT_SEP) を順番を入れ替えて 2 組。
+- 40 問 (解けた・SGM): IHa newdef 25・20.20 / io 23・23.03 / e2iohl 25・22.69、IHb newdef 27・19.94 / io 25・22.24 / e2iohl 24・22.92。
+- 16 問: IHa newdef 11・33.89 / io 7・40.13 / e2iohl 7・40.55、IHb newdef 9・38.19 / io 7・40.51 / e2iohl 9・38.86。
+- in-out で落ちる問題: neos-911970 (両組)、10teams・timtab1、16 問の beasleyC3・mc11・neos-960392 など。physiciansched6-2 は e2iohl でも 2 組とも時間切れ (IHa は暫定解 49324・下界 49191、IHb は 50124・49191。10 回の計測では 4/10)。
+- 不一致 0、"MIP: WARNING" 0。全問に掛けると明らかに悪いので既定にしない。代入 (EQUIV2_USED) のある求解だけに限るゲートなどは in-out の調査 (inv/inout-sep-20261022) で続ける。
+
 ## 改名一覧 (整理時)
 
 本メモ中は旧名で書かれている。
