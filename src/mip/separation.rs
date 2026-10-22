@@ -3327,6 +3327,8 @@ pub(super) struct DcdCtx<'x> {
     w_eff: f64,
     w_dcd: f64,
     norm: bool,
+    /// `ENOMOTO_MIP_CUTSEL_DCD_PROD`: 暫定解があれば積の形のスコア ([`select_cuts_dcd_prod`])
+    prod: bool,
 }
 
 impl<'x> DcdCtx<'x> {
@@ -3337,7 +3339,8 @@ impl<'x> DcdCtx<'x> {
     pub(super) fn from_env(x: &'x [f64], inc: Option<&[f64]>) -> Option<Self> {
         let w_dcd = env_str!("ENOMOTO_MIP_CUTSEL_DCD").and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
         let norm = env_str!("ENOMOTO_MIP_CUTSEL_NORM").is_some_and(|v| v != "0");
-        if w_dcd <= 0.0 && !norm {
+        let prod = env_str!("ENOMOTO_MIP_CUTSEL_DCD_PROD").is_some_and(|v| v != "0");
+        if w_dcd <= 0.0 && !norm && !prod {
             return None;
         }
         let file_sol: Option<Vec<f64>> = env_str!("ENOMOTO_MIP_CUTSEL_DCD_SOL")
@@ -3355,7 +3358,7 @@ impl<'x> DcdCtx<'x> {
                 None
             }
         });
-        Some(DcdCtx { x, dir, w_eff: tunable!("ENOMOTO_T_CUTSEL_EFFW", 1.0, f64), w_dcd, norm })
+        Some(DcdCtx { x, dir, w_eff: tunable!("ENOMOTO_T_CUTSEL_EFFW", 1.0, f64), w_dcd, norm, prod })
     }
 
     /// SCIP の `SCIProwGetLPSolCutoffDistance`: 今の LP 解 x から暫定解 x* へ向かう単位方向 d = (x* - x) / |x* - x| に沿った、
@@ -3378,6 +3381,10 @@ fn select_cuts_hybrid_anchor(cands: Vec<Candidate>, max_cuts: usize, p: &MipProb
 /// (効き目の重み + DCD の重み) × 効き目、SCIP と同じ)。`norm` なら効き目・距離をそれぞれそのラウンドの候補の最良で割ってから使う
 /// (このとき `anchor` は使わない)。目的との平行度・整数の割合の項 (0.1 ずつ)、密度の割り算、足切り (最良の `min_rel` 倍) はそのまま
 fn select_cuts_hybrid_dcd(cands: Vec<Candidate>, max_cuts: usize, p: &MipProblem, min_rel: f64, maxpar: f64, anchor: Option<f64>, dcd: Option<&DcdCtx>) -> Vec<Candidate> {
+    if let Some(ctx) = dcd.filter(|c| c.prod) {
+        // 積の形: 暫定解があれば [`select_cuts_dcd_prod`]、なければ既定と同じ選択
+        return if ctx.dir.is_some() { select_cuts_dcd_prod(cands, max_cuts, min_rel, ctx) } else { select_cuts_hybrid_dcd(cands, max_cuts, p, min_rel, maxpar, anchor, None) };
+    }
     let cnorm = p.cost.iter().map(|c| c * c).sum::<f64>().sqrt();
     let dists: Vec<Option<f64>> = match dcd {
         Some(ctx) => cands.iter().map(|c| ctx.distance(c).map(|d| d.max(c.efficacy))).collect(),
@@ -3481,6 +3488,64 @@ fn select_cuts_hybrid_dcd(cands: Vec<Candidate>, max_cuts: usize, p: &MipProblem
         }
     }
     chosen.into_iter().map(|(_, c)| c).collect()
+}
+
+/// `ENOMOTO_MIP_CUTSEL_DCD_PROD` (試作、暫定解があるときだけ): 基のスコア b = max(directed cutoff distance, 効き目) / 非零の数^α
+/// (α = `ENOMOTO_T_CUTSEL_DCD_DENS_EXP`、0.5) とし、b が最良の `min_rel` 倍未満は捨てる (足切りは平行度の因子をかける前の b で)。
+/// 残りから、b × (1 - 採ったカットとの |cos| の最大) の最も大きいものを 1 本ずつ採る (採るたびに因子を更新する)。
+/// |cos| が `ENOMOTO_T_CUTSEL_DCD_PROD_MAXPAR` (0.7) を超えるものは捨てる。DCD は 1 ラウンドの中では t × |x* - x|
+/// (t = 線分のうち切り落とす割合) で、和の形 ([`select_cuts_hybrid_dcd`]) では効き目・平行度などの項がほとんど効かないため
+fn select_cuts_dcd_prod(cands: Vec<Candidate>, max_cuts: usize, min_rel: f64, ctx: &DcdCtx) -> Vec<Candidate> {
+    let alpha = tunable!("ENOMOTO_T_CUTSEL_DCD_DENS_EXP", 0.5, f64);
+    let hardpar = tunable!("ENOMOTO_T_CUTSEL_DCD_PROD_MAXPAR", 0.7, f64);
+    let mut items: Vec<(f64, f64, Candidate)> = cands
+        .into_iter()
+        .map(|c| {
+            let d = ctx.distance(&c).unwrap_or(c.efficacy).max(c.efficacy);
+            let b = d / (c.coefs.len().max(1) as f64).powf(alpha);
+            let nc = c.coefs.iter().map(|&(_, v)| v * v).sum::<f64>().sqrt();
+            (b, nc, c)
+        })
+        .collect();
+    let best = items.iter().map(|t| t.0).fold(0.0, f64::max);
+    items.retain(|t| t.0 >= min_rel * best && t.0 > 0.0);
+    // 残りの候補ごとの、採ったカットとの |cos| の最大
+    let mut par = vec![0.0f64; items.len()];
+    let mut alive = vec![true; items.len()];
+    let mut chosen_idx: Vec<usize> = Vec::new();
+    while chosen_idx.len() < max_cuts {
+        let mut bi = usize::MAX;
+        let mut bv = 0.0;
+        for i in 0..items.len() {
+            if alive[i] {
+                let v = items[i].0 * (1.0 - par[i]);
+                if v > bv {
+                    bv = v;
+                    bi = i;
+                }
+            }
+        }
+        if bi == usize::MAX {
+            break;
+        }
+        alive[bi] = false;
+        chosen_idx.push(bi);
+        let (nb, cb) = (items[bi].1, &items[bi].2.coefs);
+        for i in 0..items.len() {
+            if alive[i] {
+                let cs = sparse_dot(&items[i].2.coefs, cb).abs() / (items[i].1 * nb).max(1e-300);
+                par[i] = par[i].max(cs);
+                if par[i] > hardpar {
+                    alive[i] = false;
+                }
+            }
+        }
+    }
+    if env_str!("ENOMOTO_MIP_DEBUG_CUTSEL").is_some() {
+        eprintln!("CUTSEL_DCD_PROD: {} above {min_rel} x best {best:.4}, chosen {}", items.len(), chosen_idx.len());
+    }
+    let mut slots: Vec<Option<Candidate>> = items.into_iter().map(|t| Some(t.2)).collect();
+    chosen_idx.into_iter().filter_map(|i| slots[i].take()).collect()
 }
 
 fn select_cuts_old(mut cands: Vec<Candidate>, max_cuts: usize) -> Vec<Candidate> {
