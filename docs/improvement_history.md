@@ -9800,6 +9800,14 @@ neos-950242 の 2 回目の調査 (`analysis/neos950242_r2_20261020.md`)。
 - 60 秒では 1 ラウンドが 2〜3 倍重くなり悪い問題が多い (mc11 2/3 → 0/3、h80x6320d 3/3 → 0/3、qnet1 3.6 → 9.5 秒など。良くなるのは beasleyC3・noswot)。NO_BG・GATE=2 でも戻りきらない。40 + 16 問の IH 計測でも全問の io は不採用。
 - 調査側の推奨: 使うなら `ENOMOTO_MIP_INOUT_SEP=1 ENOMOTO_MIP_INOUT_EQ2_ONLY=1` (代入のある求解だけ)。主側 (根の RINS の HiGHS 流) と組んで physiciansched6-2 で測る (inv/psched-ioeq-20261022)。
 
+## 2026-10-22: in-out 分離を代入のある求解だけに限る (INOUT_EQ2_ONLY) + 根の RINS は physiciansched6-2 で 0/10、保留
+
+- bcb6a07 (develop 7dc7e98 + rins-fix + inout-sep 86070e8) で physiciansched6-2 を 60 秒 10 回ずつ (benchmarks/psched_ioeq_20261022/)。
+- e2hl: 0/10 (暫定解 49324 は 2 回、根の下界 49324 は 0 回)。e2iohleq (e2hl + `ENOMOTO_MIP_INOUT_SEP=1 ENOMOTO_MIP_INOUT_EQ2_ONLY=1`): 0/10 (根の下界 49324 は 6 回、暫定解 49324 は 3 回)。全問の in-out の 4/10 は再現しなかった。
+- e2iohleq の 1 回 (rep 0) は暫定解 49324・下界 49324 (どちらも 49323.99999999999) なのに time_limit で返った。終了判定を調べる (バグ調査)。
+- 55 問 (10 秒): 代入が主問題で働くのは beavma・graph20-20-1rand・physiciansched6-2・timtab1、in-out が働くのも同じ 4 問 (timtab1 は悪化)。ROOT_SUBMIP_HL は 7 問で働く (nw04 16976 → 36512 など悪化もある)。
+- 不一致 0、"MIP: WARNING" 0。既定にしない (保留)。
+
 ## 改名一覧 (整理時)
 
 本メモ中は旧名で書かれている。
